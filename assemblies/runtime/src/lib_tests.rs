@@ -2,13 +2,12 @@ use std::sync::Arc;
 
 use super::{
     CONFIGS_READY_PROBE_NAME, EnvSecret, FEDERATED_ACCESS_TOKEN_JWKS_READY_PROBE_NAME,
-    KEYPROVIDER_READY_PROBE_NAME, KeyedEs256StaticKey, MacKey, OTEL_ENDPOINT_ENV,
-    REDIS_READY_PROBE_NAME, RSS_ACCESS_TOKEN_JWKS_READY_PROBE_NAME, RssAccessStaticProviderConfig,
-    RuntimeLifecycleOwner, RuntimePhase, RustCryptoMacVerifier, S3RuntimeConfig,
-    S3RuntimeConfigParts, ServingRuntimeInputs, after_required_preflight, build_trace_export,
-    build_trace_export_from_value, domains, event_transport, plan, prepare_local_before_external,
-    prepare_operator_local, prepare_serving_local, routes, rss_access_provider_from_static_config,
-    run, validate_domain_listener_evidence,
+    KEYPROVIDER_READY_PROBE_NAME, MacKey, OTEL_ENDPOINT_ENV, REDIS_READY_PROBE_NAME,
+    RSS_ACCESS_TOKEN_JWKS_READY_PROBE_NAME, RuntimeLifecycleOwner, RuntimePhase,
+    RustCryptoMacVerifier, S3RuntimeConfig, S3RuntimeConfigParts, ServingRuntimeInputs,
+    after_required_preflight, build_trace_export, build_trace_export_from_value, domains,
+    event_transport, plan, prepare_local_before_external, prepare_operator_local,
+    prepare_serving_local, routes, run, validate_domain_listener_evidence,
 };
 use crate::config::DOMAIN_TRANSPORT_SHARED_URL_ENV;
 use crate::infra::s3::S3DlxArchiveConfig;
@@ -785,9 +784,9 @@ impl identity::ports::AuthGrantLifecycle for UnusedAuthGrantProvider {
     async fn find_active(
         &self,
         _scope: IdentityTenantRepoScope,
-        _grant_id: identity::ports::AuthGrantId,
+        _grant_id: authn::AuthGrantId,
         _observed_at: SystemTime,
-    ) -> Result<Option<identity::ports::AuthGrant>, identity::ports::IdentityError> {
+    ) -> Result<Option<authn::AuthGrant>, identity::ports::IdentityError> {
         Ok(None)
     }
 
@@ -1060,26 +1059,27 @@ impl diport::Clock for RuntimeTestClock {
 
 // Static P-256 scalar and closed verifier inputs are compile-time test fixtures.
 #[allow(clippy::expect_used)]
-fn runtime_test_provider() -> Arc<OidcProvider<diport::RssAccessProfile>> {
+fn runtime_test_provider() -> Arc<OidcProvider<diport::FederatedAccessProfile>> {
     use p256::ecdsa::SigningKey;
 
     let key = SigningKey::from_slice(&[7u8; 32]).expect("signing key");
-    let public_key_b64 = B64.encode(key.verifying_key().to_encoded_point(false).as_bytes());
-    let keys = [KeyedEs256StaticKey {
-        key_id: "runtime-test-rss",
-        sec1_b64url: &public_key_b64,
-    }];
-    Arc::new(
-        rss_access_provider_from_static_config(RssAccessStaticProviderConfig {
-            issuer: "https://issuer.test",
-            audience: "rss-test",
-            trusted_kinds: &["admin", "superAdmin"],
-            keys: &keys,
-            retirement_schedule: None,
-            clock: Box::new(RuntimeTestClock),
-        })
-        .expect("provider"),
+    let keys = oidc::AccessStaticKeySource::builder()
+        .add_es256_sec1(
+            "runtime-test-federated",
+            key.verifying_key().to_encoded_point(false).as_bytes(),
+        )
+        .expect("federated keyed ES256 public key")
+        .build();
+    let config = oidc::VerifierConfigBuilder::<diport::FederatedAccessProfile>::new(
+        "https://issuer.test",
+        "rss-test",
     )
+    .keys_static(keys)
+    .trust_kind("admin")
+    .trust_kind("superAdmin")
+    .build()
+    .expect("federated verifier config");
+    Arc::new(OidcProvider::new(config, Box::new(RuntimeTestClock)))
 }
 
 #[allow(clippy::expect_used)]
@@ -1087,7 +1087,7 @@ fn runtime_test_jwt(kind: &str, tenant: Option<vocab::TenantId>) -> String {
     use p256::ecdsa::{Signature, SigningKey, signature::Signer as _};
 
     let key = SigningKey::from_slice(&[7u8; 32]).expect("signing key");
-    let header = B64.encode(br#"{"alg":"ES256","typ":"at+jwt","kid":"runtime-test-rss"}"#);
+    let header = B64.encode(br#"{"alg":"ES256","typ":"at+jwt","kid":"runtime-test-federated"}"#);
     let tenant_claim = tenant
         .map(|tenant| format!(r#","tenant_id":"{tenant}""#))
         .unwrap_or_default();
@@ -1129,10 +1129,11 @@ async fn assembled_admin_audit_read_uses_identity_authorizer_and_masks_sensitive
     );
     let domains: [&dyn bootstrap::Domain; 2] = [&identity_domain, &audit_domain];
     let mut registry = bootstrap::compose(&domains)?;
-    let providers = routes::TokenProviderBindings::new(Some(runtime_test_provider()), None, None);
+    let providers =
+        routes::TokenProviderBindings::new(None, None, Some(runtime_test_provider()), None);
     let snapshot = crate::config::test_snapshot(&[
-        ("RSS_PRIMARY_TOKEN_PROFILE", "rss-access"),
-        ("RSS_ADMIN_TOKEN_PROFILE", "rss-access"),
+        ("RSS_PRIMARY_TOKEN_PROFILE", "federated-access"),
+        ("RSS_ADMIN_TOKEN_PROFILE", "federated-access"),
         ("RSS_INTERNAL_AUTH_SCHEME", "mtls"),
         (
             routes::INTERNAL_MTLS_SPIFFE_ALLOW_SET_ENV,

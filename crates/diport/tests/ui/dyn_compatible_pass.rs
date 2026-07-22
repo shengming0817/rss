@@ -115,7 +115,9 @@ struct OkPdp;
 
 impl Pdp for OkPdp {
     async fn verify(&self, _raw: &RawCredential) -> Result<VerifiedClaims, PdpError> {
-        Ok(VerifiedClaims::new("sub", None, None))
+        Ok(VerifiedClaims::service_token(
+            vocab::ServiceCallerDomain::MaintenanceOperator,
+        ))
     }
 }
 

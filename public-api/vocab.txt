@@ -396,6 +396,7 @@ pub vocab::error::CoreErrorKind::NotFound
 pub vocab::error::CoreErrorKind::NotImplemented
 pub vocab::error::CoreErrorKind::OutboxFactConflict
 pub vocab::error::CoreErrorKind::PayloadTooLarge
+pub vocab::error::CoreErrorKind::ProviderUnavailable
 pub vocab::error::CoreErrorKind::TooManyRequests
 pub vocab::error::CoreErrorKind::Unauthenticated
 pub vocab::error::CoreErrorKind::Unavailable
@@ -1226,6 +1227,7 @@ pub vocab::CoreErrorKind::NotFound
 pub vocab::CoreErrorKind::NotImplemented
 pub vocab::CoreErrorKind::OutboxFactConflict
 pub vocab::CoreErrorKind::PayloadTooLarge
+pub vocab::CoreErrorKind::ProviderUnavailable
 pub vocab::CoreErrorKind::TooManyRequests
 pub vocab::CoreErrorKind::Unauthenticated
 pub vocab::CoreErrorKind::Unavailable

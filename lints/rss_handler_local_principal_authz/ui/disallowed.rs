@@ -21,8 +21,8 @@ impl LocalContext {
 }
 
 fn main() {
-    let auth = Authenticated::new(
-        RequiredScheme::RssAccessToken,
+    let auth = Authenticated::new_federated(
+        // RSS construction now requires sealed current-grant evidence; this fixture tests getters.
         PrincipalKind::User,
         "user-1",
         None,

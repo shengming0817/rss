@@ -1,5 +1,5 @@
 // rss_authenticated_callsite UI fixture（disallowed caller，crate 名 `authenticated_callsite_ui` ∉ allowlist）。
-// golden 见 disallowed.stderr：调 Authenticated::new 触发；Vec::new / httpserve 非-new fn 不触发。
+// golden 见 disallowed.stderr：证据与 grant issue funnel 的 direct / alias / re-export 均触发。
 // 须用真 httpserve / vocab（dev-dep）：lint 按 callee crate 名（httpserve）匹配，本地 stub 无法触发。
 // UI 测试只编译查诊断、不运行；body 不会执行。
 // allow(unknown_lints)：普通 cargo build 本 example 时不认 rss_authenticated_callsite（仅 dylint driver 认），
@@ -7,26 +7,25 @@
 #![allow(unused, unknown_lints)]
 
 use httpserve::Authenticated;
-use primitives::RequiredScheme;
 use vocab::PrincipalKind;
 
 fn main() {
-    // R1：非组合根 crate 调 Authenticated::new → 触发。
-    let _ev = Authenticated::new(
-        RequiredScheme::RssAccessToken,
-        PrincipalKind::User,
-        "subject-1",
-        None,
-    );
+    // R1：非组合根 crate 调 profile-specific evidence constructor → 触发。
+    let _ev = Authenticated::new_federated(PrincipalKind::User, "subject-1", None);
 
     // R2（别名绕过闭合）：函数项别名引用即触发（path 解析到同一 DefId）；后续 `mint(...)` 调本地绑定不再触发。
-    let mint = Authenticated::new;
-    let _ev2 = mint(
-        RequiredScheme::ServiceToken,
-        PrincipalKind::Service,
-        "service-1",
-        None,
+    let mint = Authenticated::new_mtls;
+    let _ev2 = mint("service-1");
+
+    // R2a：RSS evidence 同时锁住 opaque current-grant marker 与最终 evidence mint。
+    let current = httpserve::CurrentAuthGrant::new();
+    let current_mint = httpserve::CurrentAuthGrant::new;
+    let _rss = Authenticated::new_rss_user(
+        current,
+        "subject-1",
+        vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").unwrap(),
     );
+    let _ = current_mint;
 
     // R2b：service-token typed mint 的直接引用、别名和 fn-pointer 同样触发。
     let _service = Authenticated::new_service(
@@ -42,7 +41,7 @@ fn main() {
     let _v: Vec<u8> = Vec::new();
 
     // G2（specificity anti-vacuity）：引用别的 httpserve fn 不触发——证明 lint 非「任意 httpserve 调用」，
-    // 只针对 Authenticated::new（item 名 != "new"）。
+    // 只针对 Authenticated 的 profile-specific constructor 闭集。
     let _f = httpserve::finalize_auth;
 
     // R3：非组合根 crate 引用 Principal 审计 subject accessor → 触发。
@@ -50,15 +49,11 @@ fn main() {
     let _caller = authn::Principal::service_caller_domain;
     inspect_principal;
 
-    // R4：typed caller 本身不是验签证明；settings maintenance capability 的 direct / alias /
-    // fn-pointer mint 也必须由同一 runtime-only gate 阻断。
-    let _config = postgres::ConfigValueMaintenanceCapability::from_verified_service_caller(
-        vocab::ServiceCallerDomain::MaintenanceOperator,
-    );
-    let config_mint = postgres::ConfigValueMaintenanceCapability::from_verified_service_caller;
-    let _config_fn: fn(vocab::ServiceCallerDomain) -> postgres::ConfigValueMaintenanceCapability =
-        postgres::ConfigValueMaintenanceCapability::from_verified_service_caller;
-    let _ = config_mint;
+    // R4：AuthGrant 生产与 RSS issue funnel 的直接、alias 与 re-export 均按 DefId 拦截。
+    let _new_grant = authn::AuthGrant::new_active;
+    let hydrate = authn::AuthGrant::hydrate;
+    let _issue_input = grant_alias::Grant::access_issue_input;
+    let _ = hydrate;
 
     // G3（逃生门）：item-level #[allow] 抑制。
     allowed_by_attr();
@@ -68,13 +63,16 @@ fn inspect_principal(principal: &authn::Principal) {
     let _ = principal.service_caller_domain();
 }
 
+mod grant_alias {
+    pub use authn::AuthGrant as Grant;
+}
+
+fn forbidden_issue_access<S: diport::Signer + Send + Sync + 'static>() {
+    let _issue = authn::JwtIssuer::<diport::RssAccessProfile, S>::issue_access;
+}
+
 #[allow(rss_authenticated_callsite)] // reason: UI fixture 验证逃生门
 fn allowed_by_attr() {
-    let _ev = Authenticated::new(
-        RequiredScheme::RssAccessToken,
-        PrincipalKind::Admin,
-        "admin-1",
-        None,
-    );
+    let _ev = Authenticated::new_federated(PrincipalKind::Admin, "admin-1", None);
     let _subject = authn::Principal::audit_subject;
 }

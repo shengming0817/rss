@@ -15,6 +15,10 @@
 > `ServerRequestBudget` 在唯一 bindable HTTP funnel 统一拥有，不由 bridge 局部 timeout；以 #1828 与
 > ADR-003 / ADR-006 async-serving addendum 为准。
 
+> **Supersession（#1835 / ADR-021）**：RSS Access 现固定为 grant-bound User，必须携完整
+> `sid/jti/auth_time/authn_epoch`；`VerifiedClaims` 是 RSS User / Federated Access / Service Token 三种
+> 闭合 shape，不再存在通用 claims constructor。下文早期可选字段描述仅作历史规划背景。
+
 ---
 
 ## 背景与读者
@@ -22,7 +26,8 @@
 #1109 的**类型层部分已落地并合并到 develop**，不在本 feature 范围：
 
 - **PR 208**（`f93ed35`）：`VerifiedJwt` / `VerifiedServiceToken` newtype（私有字段 + `pub(crate) seal`）+ `Principal::from_verified_jwt(&VerifiedJwt)` 入参收紧（INVARIANT: AUTHN-VERIFIEDJWT-SEAL-01）—— ADR-006 §8 验收门槛 ①② 已满足。
-- **PR 211**（`3f7ab6b`，#1158）：`authn::verify_jwt(raw, &DynPdp)` / `verify_service_token` verify→mint bridge + `diport::Pdp` trait 接缝 + `RawCredential` / `VerifiedClaims` / `PdpError`。
+- **PR 211**（`3f7ab6b`，#1158）：历史上交付了通用 `verify_jwt` 接缝；ADR-017 / ADR-021
+  已将其替换为 `verify_rss_access` / `verify_federated_access` / `verify_service_token`。
 
 #1109 **仍 open** 的是 ADR-006 §8 列出的 **W 接线**：真实 crypto verifier adapter（`adapters/oidc` 当前是 `todo!()` stub，只 impl `ManagedResource`，**未 impl `Pdp`**）、httpserve 认证中间件接线（`crates/httpserve/src/auth.rs` `require_response` 当前恒 fail-closed 401，无凭据验证能力）、可观测埋点、组合根注入、e2e 集成测试（验收门槛 ③）。
 
@@ -49,7 +54,7 @@
 
 **Acceptance Scenarios**:
 
-1. **Given** 一个签名正确、未过期、profile policy 与 iss/aud 匹配的 ES256 access token，**When** typed authn funnel 将其交给对应 `OidcProvider<P>`，**Then** 返回可信 principal，subject/tenant/kind 与 verified claims 一致。
+1. **Given** 一个签名正确、未过期、profile policy 与 iss/aud 匹配的 ES256 access token，**When** typed authn funnel 将其交给对应 `OidcProvider<P>`，**Then** 返回与 profile shape 一致的可信 principal；RSS 必须是 User 且带完整 grant quartet，Federated 保持自身闭值主体语义。
 2. **Given** payload 被篡改（签名不匹配），**When** verify，**Then** `Err(PdpError::InvalidSignature)`，错误不携带 token / key 字节。
 3. **Given** `exp` 早于注入 Clock 的 now（超 leeway），**When** verify，**Then** `Err(PdpError::Expired)`。
 4. **Given** header `alg` 为 `RS256` / `none` / 未知值，**When** verify，**Then** `Err(PdpError::InvalidSignature)`（不在白名单 {ES256, HS256}，`jws::parse` 拒），绝不接受不在白名单的 alg。
@@ -76,7 +81,12 @@ httpserve 在自身可依赖的层（基础级，零 authn 依赖）定义 `Auth
 
 ### User Story 3 - 生产认证接线 + 验签桥 + e2e（启用生产认证·安全同批）(Priority: P1)
 
-组合根（`bins/server`、`bins/rss`）从配置构造 `OidcProvider` → `Arc<OidcProvider>`，经泛型 `apply_verify_bridge<P>` 注入（`P: Pdp + Send + Sync + 'static`），在 `httpserve::finalize_auth` 产出的 router **外层**挂 verify-bridge 中间件：提取 Authorization 凭据 → `authn::verify_jwt(raw, &pdp)` → 成功则 `Authenticated::new(verified_scheme, principal.kind())`（`verified_scheme` = 验签桥实际验证的 `RequiredScheme`）注入 request → enforce exact-match `Require(required)` 放行；失败 / 方案不匹配 fail-closed 401。中间件埋 tracing span（verify ok→`authz.decision=allow`+`principal.kind`；fail→`deny`+区分 `PdpError` 变体），无 PII。
+组合根从配置构造 profile-specific `OidcProvider` 与精确 `ProfileBinding`，在
+`httpserve::finalize_auth` 产出的 router **外层**挂 verify bridge：提取 Authorization 凭据 → 按绑定 profile
+调用 `authn::verify_rss_access` / `verify_federated_access` / `verify_service_token` → 成功后使用对应
+`Authenticated::{new_rss_user,new_federated,new_service}` 注入 request → enforce exact-match
+`Require(required)` 放行。RSS 分支在铸证据前还必须完成 durable grant/account 校验并消费
+`CurrentAuthGrant`；失败或 profile 不匹配 fail-closed。中间件只记录闭值 deny reason，无 PII。
 
 **Why this priority**: 这是**唯一启用生产认证**的环节，也是 ADR-006 §8 ③「httpserve↔authn 验签接线有集成测试覆盖（含拒绝路径）」的验收点。必须 blocked-by 真 verifier（US1）+ 放行接缝（US2），三者同批生效 → 零验签空窗。
 
@@ -113,7 +123,8 @@ typed `OidcProvider<P>` 支持从 profile-specific JWKS 文档拉取公钥（按
 - **验签空窗（最高风险）**：#1109 W 未落地期，httpserve 认证路径**不得**接到生产可达端点；本 feature 用「仅 PR-C 启用生产认证 + PR-C blocked-by 真 verifier + stub 无法进生产 bin + fail-closed 缺省」四闸坐实（见 plan.md §安全同批门）。
 - **alg=none / alg confusion**：alg=none 直接 InvalidSignature；alg 必须 ∈ {ES256, HS256} 白名单且与 key 类型一致（防 EC 公钥被当 HMAC secret）。
 - **service-token 路径隔离**：service_token 走 HS256-only key set（禁 ES256），与外部 IdP JWT 验签器隔离，避免 token 混淆。
-- **空 subject**：adapter 早拒 InvalidSignature；authn `derive_from_claims` 亦对空 subject fail-closed（双闸）。
+- **空 subject**：adapter 的 profile-specific checked factory 早拒 InvalidSignature；authn 对
+  `VerifiedClaimsView` 穷尽派生 `Principal` 时再 fail-closed（双闸）。
 - **PdpError 泄漏**：`PdpError` 为纯 taxonomy（不携 source），adapter 内部 crypto 错误只归类不透传；tracing 只记变体名 + `principal.kind`，绝不 `{:?}` 整体 Principal/VerifiedClaims/token。
 - **verify-bridge 层序错位**：bridge 必须挂在 `finalize_auth` 产出 router 的**外层**（外层先注入 extension，enforce 在 MethodRouter 内层才读到）；e2e「有效 JWT→200」覆盖此回归。
 - **JWKS 不可达 / 缓存过期**：fail-closed Untrusted，不回落「跳过验签」；刷新失败经对应 profile readiness probe 反映 health（probe 名 + 注册点 + 失败测试见 FR-005 / tasks T003）。
@@ -129,25 +140,34 @@ typed `OidcProvider<P>` 支持从 profile-specific JWKS 文档拉取公钥（按
 - **FR-004**: key 源 MUST 经 `KeySource` 抽象（构造期解析 + 校验，解析失败在构造期 `Result`，不入验签热路径）；首批静态配置 key set（按 kid 索引）；service_token MUST 走独立 HS256-only key set（路径隔离）。
 - **FR-005**: `OidcProvider<P>` MUST 支持 profile-specific JWKS fetch + 缓存 + 轮转。**key-source 完整性（安全）**：JWKS MUST 经可机器验证的传输完整性（TLS 证书校验 / mTLS / 签名 JWKS / key pinning / **本地受信文件源**）——**裸 plain-HTTP-over-network JWKS MUST NOT 作为可上线选项**（内网 MITM 可替换公钥伪造 token）；若 license-clean TLS 栈暂不可用，则 MUST NOT 上线 in-app HTTPS。in-app HTTP/TLS 栈（若引入）MUST 经 license 甄别（规避 ring/aws-lc/openssl）。JWKS 源不可读 / kid 缺失 MUST fail-closed（`Untrusted`），MUST NOT 跳过验签。**readiness（运维）**：JWKS 刷新失败 MUST 经 `rss_access_token_jwks_ready` / `federated_access_token_jwks_ready` 反映 health，verbose readyz MUST 裁剪敏感字段（无 endpoint 凭据 / key 材料）；带刷新句柄 MUST 另 impl `ManagedResource` 真实关闭。
   - **实现（#1197，#1831 收紧，见 research.md R3 决断）**：采纳「本地文件源」分支——每个 access profile 的 `JwksKeySource` 从独占、受文件权限 / Secret RBAC 保护的本地路径读 JWKS 文档（外部 agent 经各自 TLS 拉取 + 轮转后写入），**in-app 零 HTTP/TLS provider**；后台 poll 重载 + `RwLock<Arc<KeySet>>` 快照原子换出 + kid 索引 + fail-closed（源不可读/畸形/空 → 构造期拒 / 刷新期保留 last-good + 对应 readiness=false，绝不 swap 空集）。readiness probe 注册经组合根 = T004。
-- **FR-006**: httpserve MUST 定义 own `Authenticated` 证据 extension（基础级类型，脱敏标量：已验证的 `scheme: RequiredScheme` + `principal_kind`，**零 authn 依赖**，私有字段 + `Authenticated::new` 构造 funnel）；enforce 层 `Require(required)` 路由 MUST 仅在请求携 `Authenticated`、其 `principal_kind` 非 `Anonymous`、**且 `scheme()` exact-match `required`** 时放行，缺证据 / 方案不匹配 MUST fail-closed 401（杜绝 scheme 混淆，如 Jwt 证据撞 `Require(Mtls)`）。既有 opt-out（Public/PasswordResetExempt）与 AUTH-FAILCLOSED-01（无 plan→403）MUST 不回归。
+- **FR-006**: httpserve MUST 定义 own `Authenticated` 证据 extension（**零 authn 依赖**，私有字段 +
+  profile-specific constructor funnel）；RSS constructor MUST 额外消费 opaque `CurrentAuthGrant`。enforce 层
+  `Require(required)` 路由 MUST 仅在请求携精确 scheme 的非 Anonymous `Authenticated` 时放行，
+  RSS 证据还 MUST 携 current marker；缺证据 / 方案不匹配 MUST fail-closed 401。
 - **FR-007**: httpserve crate MUST NOT 新增任何 path 依赖（不引 authn/oidc/crypto）；`finalize_auth(router, plan)` 签名 MUST 保持冻结（验签桥由组合根外层 `.layer()` 装配，非穿入 finalize_auth）。
-- **FR-008**: 组合根（`bins/server`、`bins/rss`）MUST 从配置构造 `OidcProvider` → `Arc<OidcProvider>`，并经泛型 `apply_verify_bridge<P>` 的 `Arc<P>` 构造器必填位置参注入（`P: Pdp + Send + Sync + 'static`）；MUST 在 `finalize_auth` 产出 router 的**外层**挂 verify-bridge 中间件；**仅组合根**启用生产认证（注入 + 挂载）。
-- **FR-009**: verify-bridge MUST 提取凭据 → `authn::verify_jwt`/`verify_service_token`（注入 `&DynPdp`）→ 成功 MUST 经 `Authenticated::new(verified_scheme, principal.kind())`（`verified_scheme` = 验签桥实际验证的 `RequiredScheme`）注入、失败 fail-closed 401；MUST 埋 tracing span（verify ok→`authz.decision=allow`+`principal.kind`；fail→`deny`+区分 `PdpError` 变体），span 字段 MUST NOT 含 PII（subject/token/email）。
+- **FR-008**: 唯一组合根 `assemblies/runtime` MUST 从配置构造 profile-specific
+  `OidcProvider` 与 typed binding；RSS binding MUST 同时携必填 `AuthGrantValidationService`。MUST 在
+  `finalize_auth` 产出 router 的**外层**挂 verify bridge；**仅组合根**启用生产认证。
+- **FR-009**: verify-bridge MUST 提取凭据 → 调用 profile-specific authn verify funnel → 使用对应
+  `Authenticated` constructor 注入；RSS MUST 在 crypto 成功后、handler 前完成 durable current-grant
+  validation，无效返回 401，provider 故障返回 503 且不回退。tracing span MUST 只使用闭值、无 PII 标签。
 - **FR-010**: 安全同批门 MUST 由结构闸坐实：(a) 仅启用生产认证的 PR blocked-by 真 verifier PR（DAG）；(b) **测试 stub adapter crate** MUST NOT 进生产 bin 依赖图（`deny.toml` adapter wrapper + dev-dependency 隔离，Medium）；(c) `Arc<P>` 注入为构造器必填参，且 `P: Pdp + Send + Sync + 'static`（缺失或不可共享 provider 即编译错，Hard）；(d) fail-closed 为缺省态（Hard）；(e) **生产 Pdp 信任根守卫（Medium，本 feature 内 PR-C 交付，不 defer）**：生产 `impl Pdp` 仅允许 provider adapter，测试替身仅允许测试构建；`rss_pdp_impl_adapter_only` dylint 与 `pdpallow` 守卫 MUST 拒绝其他生产内联 always-allow impl（synthetic red case + anti-vacuity）——**不接受 Soft、不 defer**（AI-robust：新增治理 ≥ Medium）。
 - **FR-011**: 系统 MUST 有 e2e 集成测试覆盖 httpserve↔authn 验签接线（ADR-006 §8 ③）：有效凭据 → 200 + `Authenticated`（`scheme` + principal_kind facet）、scheme exact-match 注入放行；无/坏/过期/错 aud 凭据 / 方案不匹配 → 401/403（拒绝路径全覆盖）。本批不承诺 handler 读完整 `Principal`（属 W）。
-- **FR-012**: 既有类型层不变式 MUST 不回归：`VerifiedClaims` 仅 `diport::pdp` 定义、仅 Pdp 验签后 mint（ADR-006 ①）；`Principal::from_verified_*` 仅收 newtype（②）；dynosaur 宏白名单无新增越界（④，本 feature 不新增 port，天然满足）。
+- **FR-012**: 既有类型层不变式 MUST 不回归：`VerifiedClaims` 仅 `diport::pdp` 定义并保持闭合 profile shape、无通用 constructor；authn 仅在 Pdp 成功后 seal verified newtype（ADR-006 ①）；`Principal::from_verified_*` 仅收 newtype（②）；dynosaur 宏白名单无新增越界（④，本 feature 不新增 port，天然满足）。
 - **FR-013**: 每个 PR MUST ≤ 2000 行净增删（特殊情况例外须在 PR 说明理由）；MUST 只在 G0 冻结接缝（`diport::Pdp` / `authn` bridge / `finalize_auth`）内兑现 body，不改公共签名（finalize_auth 保留、Pdp trait 保留）；feature MUST 拆为 4 PR / 2 wave，形成 blocked-by DAG + `[P]` 并行标记，全部挂 Azure Boards #1109。
 - **FR-014**: 新增治理机制 MUST ≥ Medium（严禁 Soft）：安全同批门 = 构造器必填参（Hard）+ deny.toml wrapper（Medium）+ fail-closed 缺省；放行接缝 = typed extension + 默认拒（编译期/机器守）。
 
 ### Key Entities *(include if feature involves data)*
 
 - **RawCredential**（冻结，`diport::pdp`）：入站凭据——scheme tag（jwt / service_token）+ token bytes；本 feature 不改，仅消费。
-- **VerifiedClaims**（冻结，`diport::pdp`）：验签产物——subject + tenant(Option) + kind(Option，透传不校验)；adapter 验签成功后唯一构造入口，Debug 脱敏。
+- **VerifiedClaims**（`diport::pdp`）：私有 tagged profile shape——`RssUser { UserId, TenantId, VerifiedAccessGrantFacts }` / `FederatedAccess { subject, tenant, PrincipalKind }` / `ServiceToken { ServiceCallerDomain }`；只有 profile-specific checked factory，无通用可选字段 bag，Debug 脱敏。
 - **PdpError**（冻结，`#[non_exhaustive]`）：fail-closed 三变体 InvalidSignature / Expired / Untrusted，纯 taxonomy（不携 source）。
 - **SupportedAlg**（新，adapter 内部 `#[non_exhaustive]`）：ES256 / HS256；EdDSA 接缝预留（follow-up）。
 - **KeyEntry / KeySet / KeySource**（adapter 内部，#1197）：`KeyEntry{ kid: Option<String>, key }`；`KeySet` = ES256/HS256 两集 kid 索引快照；**闭合 `enum KeySource { Static(Arc<KeySet>), Jwks(JwksKeySource) }`**（非新 trait——规避 trait_variant 白名单例外，闭集类型层 Hard）= 静态 set（首批）/ JWKS 本地文件源（US4/#1197）；`OidcProvider::new` 构造器签名稳定，JWKS 作为新 enum 变体不改签名。
-- **Authenticated**（新，httpserve own）：放行证据 extension——脱敏标量 `scheme: RequiredScheme`（验签桥实际验证的方案）+ `principal_kind`，零 authn 依赖；私有字段 + `Authenticated::new` funnel；enforce 按 `Require(required)` 对 `scheme()` exact-match 放行。
-- **VerifyBridge 中间件**（新，组合根 bins）：extract→verify→`Authenticated::new(verified_scheme, principal.kind())` inject + tracing 的 axum 中间件；唯一启用生产认证处。
+- **Authenticated**（httpserve own）：私有字段的放行证据 extension；constructor 按 RSS /
+  Federated / Service / mTLS 闭合，RSS 额外携 `CurrentAuthGrant`。
+- **VerifyBridge 中间件**（组合根）：extract→profile-specific verify→可选 durable grant validation→
+  profile-specific evidence inject + tracing 的 axum 中间件；唯一启用生产认证处。
 
 ## Success Criteria *(mandatory)*
 
@@ -166,7 +186,7 @@ typed `OidcProvider<P>` 支持从 profile-specific JWKS 文档拉取公钥（按
 
 | 门槛 | 内容 | 覆盖 |
 |------|------|------|
-| ① | `VerifiedClaims` 仅 `diport::pdp` 定义、无旁路 mint | 已由 PR 211 满足；FR-012 + T004.5 不回归断言守 |
+| ① | `VerifiedClaims` 仅 `diport::pdp` 定义并保持闭合 profile shape；verified newtype 仅由 authn 验签 funnel seal | FR-012 + T004.5 不回归断言守；#1835 claim matrix 覆盖 RSS quartet |
 | ② | `from_verified_*` 入参必须 newtype | 已由 PR 208 满足；FR-012 + T004.5 守 |
 | ③ | httpserve↔authn 验签接线有集成测试（含拒绝路径） | FR-011 + SC-003 + T004.1（e2e 拒绝路径全覆盖） |
 | ④ | dynosaur 宏白名单无新增越界 | FR-012 末条 + SC-007（dylint 绿）；本 feature 不新增 port，天然满足 |

@@ -15,7 +15,7 @@
 | 接缝 | 位置 | 本 feature 关系 |
 |------|------|----------------|
 | `diport::Pdp::verify` | `crates/diport/src/pdp.rs` | PR-A1 impl（adapter 实现侧），签名不改 |
-| `authn::verify_jwt` / `verify_service_token` | `crates/authn` 模块函数（按函数名引用，避免行号漂移） | PR-C 调用，签名不改 |
+| `authn::verify_rss_access` / `verify_federated_access` / `verify_service_token` | `crates/authn` profile-specific 验证 funnel | runtime 按 typed binding 调用 |
 | `httpserve::finalize_auth(router, plan)` | `crates/httpserve/src/lib.rs:122` | 签名**保持冻结**（验签桥走组合根外层 layer，不穿入） |
 
 `finalize_auth` / `diport::Pdp` 属库 crate 公开 API 面（轴 A SemVer），由 `cargo public-api` golden 守；本 feature 不改其签名 → 无 public-api diff。

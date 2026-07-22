@@ -14,6 +14,9 @@ workspace = true
 [dependencies]
 consistency = { path = "../../crates/consistency" }
 diport = { path = "../../crates/diport" }
+# AuthGrant aggregate/value types are canonically owned by authn; the memory adapter implements
+# identity lifecycle ports over those values.
+authn = { path = "../../crates/authn" }
 # MemLeaderElector/MemFencedWriter 的 LeaseToken.epoch / FencedWriteRequest.epoch（单调 fencing token）。
 # 单测亦构造 AuditEvent.tenant_id（canonical UUID，TenantId::parse 已写实）。
 vocab = { path = "../../crates/vocab" }

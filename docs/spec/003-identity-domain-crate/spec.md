@@ -16,6 +16,10 @@
 > refresh 通过 tenant/grant/user/epoch/status 绑定根。权威记录见
 > [ADR-019](../../architecture/202607191202-019-auth-grant-root.md)。本 spec 下文 Session 接口仅为历史快照。
 
+> **[#1835 / ADR-021 所有权修订]** `AuthGrant` 聚合、`AuthGrantId`、`AuthnEpoch` 与完整
+> `CredentialSecurityEventKind` 已下沉 `authn`，供 typed issuer 直接消费；identity 仍拥有凭据/账户状态、
+> lifecycle port、安全 command/transaction 与 wire 编排。RSS access claims 已在 #1835 交付。
+
 **Input**: User description: "identity 域 crate（身份/会话/RBAC/ABAC/密码变更 CAS）：在 #997 冻结签名内兑现 domain L0（RBAC/ABAC deny-overrides）+ application（真实登录/会话/密码 CAS/账户锁定/角色管理）+ ports（CredentialRepo/SessionRepo）+ 新事件契约 + handler + contract test。拆成 5 个 ≤2000 行可执行 PR，挂 Azure Boards #1012。"
 
 **Tracking**: Azure Boards Feature #1012（容器，跨 5 PR；子 PBI #1186–#1190）（`[RW-W-identity]`）· Epic #991（GoCell→Rust 迁移 · W 宽扇出阶段）· Blocked-by #999（G1 追踪弹，已闭环）
@@ -31,8 +35,8 @@
   `persist_login_grant`；根、refresh、outbox all-or-none，提交未知不返回 bearer。
 - `AuthGrantLifecycle::close` 在同一事务先撤销 refresh family，再关闭根；同一 memory store 同时实现
   lifecycle 与 refresh port。
-- 本 PR 只保持 HTTP/event 现有的 `sessionId` 与 `identity.session-created` event wire；access JWT 的
-  `sid`、`authn_epoch` 等 grant claims 尚未交付，由 #1840 完成。外部 wire 不构成内部旧 Session 抽象的
+- HTTP/event 继续保持现有的 `sessionId` 与 `identity.session-created` event wire；access JWT 的
+  `sid/jti/auth_time/authn_epoch` grant claims 已由 #1835 / ADR-021 交付。外部 wire 不构成内部旧 Session 抽象的
   兼容 shim。
 
 ---

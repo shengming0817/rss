@@ -1,0 +1,13 @@
+error[E0308]: mismatched types
+  --> tests/ui/rss_access_legacy_principal_removed_fail.rs:14:33
+   |
+14 |     let _ = issuer.issue_access(principal);
+   |                    ------------ ^^^^^^^^^ expected `RssAccessIssueInput<'_>`, found `JwtAccessPrincipal<'_>`
+   |                    |
+   |                    arguments to this method are incorrect
+   |
+note: method defined here
+  --> src/mint.rs
+   |
+   |     pub async fn issue_access(
+   |                  ^^^^^^^^^^^^

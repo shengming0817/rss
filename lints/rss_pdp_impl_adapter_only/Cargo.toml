@@ -26,6 +26,7 @@ dylint_linting = "6.0.1"
 dylint_testing = "6.0.1"
 # ui fixture impl 真 diport::Pdp：lint 按被 impl trait 的 crate 名（diport）+ trait 名（Pdp）匹配，本地 stub 无法触发。
 diport = { path = "../../crates/diport" }
+vocab = { path = "../../crates/vocab" }
 
 [package.metadata.rust-analyzer]
 rustc_private = true

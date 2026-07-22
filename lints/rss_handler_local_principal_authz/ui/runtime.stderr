@@ -1,5 +1,5 @@
 warning: handler/domain 不得用 PrincipalKind 或 role-name 字面量做本地授权分支
-  --> $DIR/runtime.rs:26:5
+  --> $DIR/runtime.rs:30:5
    |
 LL |     matches!(kind, PrincipalKind::Admin)
    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

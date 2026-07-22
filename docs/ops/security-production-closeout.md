@@ -7,7 +7,8 @@ The current `assemblies/runtime/assembly.toml` remains `profile = "demo"` until 
 
 | Area | Blocker | Production gate |
 |------|---------|-----------------|
-| Token profiles / JWKS | Each listener is fixed to one typed token profile. RSS Access and Federated Access have separate issuer, audience, ES256 JWKS source and readiness; Service Token has separate issuer, audience, HS256 key and cluster-global replay. No generic/mixed provider is deployable. | `cargo xtask assembly validate` requires profile-specific typed providers plus `run()`-reachable JWKS load/watch, `rss_access_token_jwks_ready` / `federated_access_token_jwks_ready`, managed-resource, binding and anti-bait evidence. |
+| Token profiles / JWKS | Each listener is fixed to one typed token profile. RSS Access is User-only and requires the complete grant quartet; its kind is not configurable. Federated Access owns the non-User allowlist. The profiles have separate issuer, audience, ES256 JWKS source and readiness; Service Token has separate issuer, audience, HS256 key and cluster-global replay. No generic/mixed provider is deployable. | `cargo xtask assembly validate` requires profile-specific typed providers plus `run()`-reachable JWKS load/watch, `rss_access_token_jwks_ready` / `federated_access_token_jwks_ready`, managed-resource, binding and anti-bait evidence. |
+| RSS User grant currency | Every protected RSS request verifies the JWT first, then checks the exact signed grant/User/tenant/auth-time/epoch against one tenant-scoped durable grant/account snapshot. | Missing, terminal, expired or mismatched state returns 401 before the handler; store failure returns 503 and never falls back to JWT-only evidence. |
 | Vault | Access-token signing and settings ConfigValue encryption must use active persistent Vault providers. | `cargo xtask assembly validate` requires active/persistent/backend `vault::VaultSigner` and `vault::VaultKeyProvider`. |
 | SPIFFE / mTLS | Internal non-loopback traffic must use SPIFFE/mTLS. `service-token` is loopback local-test only. | `cargo xtask assembly validate` requires `run()`-reachable AST evidence for `MtlsServerConfig::from_spire`, `DomainHttpTransport::from_spire`, and `domain_transport_ready`; legacy Internal service-token migration env constants are rejected. |
 
@@ -19,6 +20,7 @@ The current `assemblies/runtime/assembly.toml` remains `profile = "demo"` until 
   Next)** public keys into `RSS_ACCESS_TOKEN_JWKS_PATH` before starting server. When Retiring is configured,
   do not single-key or Active-only whole-file overwrite.
 - Reject deployment if active RSS/Federated issuer, audience or canonical JWKS path overlaps, if Service issuer/audience overlaps either access profile, or if an unselected profile namespace is present.
+- Remove `RSS_ACCESS_TOKEN_TRUSTED_KINDS` from every release bundle. It is no longer a supported RSS key; configure non-User kinds only through `RSS_FEDERATED_ACCESS_TOKEN_TRUSTED_KINDS` on a Federated listener.
 - Remove any deployment use of `RSS_INTERNAL_SERVICE_TOKEN_MIGRATION_TICKET` or `RSS_INTERNAL_SERVICE_TOKEN_MIGRATION_EXPIRES_AT_UNIX`; they are no longer supported.
 
 ## RSS Access Signing Key Rotation
@@ -117,33 +119,50 @@ pool would make authentication depend on which replica receives the request.
    an unselected namespace is present, or if issuer/audience/JWKS isolation validation fails.
 2. Quiesce login, refresh and authenticated API ingress, then scale the old serving pool to zero.
    Record the time at which the final old replica stopped; no old process may mint or accept a token
-   after this point.
+   after this point. From issuance evidence, record `last_issue_exp` as the greatest `exp` of any
+   token the old generation could have issued. If that evidence is unavailable, conservatively set
+   it to the final old replica stop time plus the greatest configured old-profile token lifetime
+   (currently 900 seconds).
 3. In one audited DBA maintenance transaction, revoke every active durable refresh token and every
-   non-revoked session. The runtime role is intentionally not a bulk-revocation authority; use the
+   active AuthGrant. The runtime role is intentionally not a bulk-revocation authority; use the
    approved database-owner maintenance path and record affected row counts:
 
    ```sql
    BEGIN;
    UPDATE refresh_tokens SET status = 'revoked' WHERE status = 'active';
-   UPDATE sessions SET revoked = true WHERE revoked = false;
+   UPDATE auth_grants
+      SET status = 'revoked', closed_at = clock_timestamp(), close_reason = 'logout_all'
+    WHERE status = 'active';
    COMMIT;
    ```
 
-4. Keep ingress closed for **900 seconds from the final old replica stop**. This is the longest
-   profile lifetime (RSS/Federated Access 900s; Service Token 300s) and prevents an in-flight old
-   credential from straddling the trust-chain switch. Do not shorten this window based on the
-   Service Token lifetime.
+4. Calculate and record one absolute drain deadline using the deployed values and an explicit,
+   positive operational safety margin:
+
+   ```text
+   drain_until = last_issue_exp
+               + verifier_leeway
+               + issuer_clock_skew
+               + safety_margin
+   ```
+
+   Use the greatest verifier expiry leeway and issuer clock-skew bound across every old/new profile
+   involved in the cutover. Keep ingress closed until a trusted clock is **strictly later** than
+   `drain_until`. Waiting only 900 seconds is insufficient: 900 seconds is only the conservative
+   lifetime used to derive `last_issue_exp`, before leeway, clock skew and the safety margin are
+   added. Record every input, its source and the resulting deadline in the change evidence.
 5. Start only the new binary with the sealed new configuration. Keep it out of the serving pool
    until `rss_access_token_jwks_ready` and/or `federated_access_token_jwks_ready` (as selected) and
    all other required readiness probes are healthy. Then open ingress and require every user,
-   device and operator to authenticate again; no refresh/session state survives the cutover.
+   device and operator to authenticate again; no refresh/AuthGrant state survives the cutover.
 6. Verify the correct profile succeeds only on its fixed listener. Verify an archived old token,
    every active cross-profile token/listener pairing, duplicate `Authorization`, and duplicate
    Service `X-Tenant-ID` all return 401. Confirm `/readyz` names only selected profile probes and
-   logs/metrics/error bodies contain no token, subject, tenant, `kid`, or `jti`.
+   logs/metrics/error bodies contain no token, subject, tenant, `kid`, `sid`, `jti`, `auth_time`, or
+   `authn_epoch`.
 
 Rollback is also whole-generation only: close ingress, scale the new pool to zero, revoke any
-refresh/session records minted by the new generation using the same audited transaction, restore
+refresh/AuthGrant records minted by the new generation using the same audited transaction, restore
 the exact previous binary **and** its exact previous configuration/key bundle, wait for its complete
 readiness set, then reopen ingress and require authentication again. Never roll back only the
 binary, only configuration, only one listener, or one key source; never add aliases, dual reads or a

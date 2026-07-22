@@ -1,4 +1,4 @@
-//! Server-side authentication grant root.
+//! Server-side authentication grant root and authentication-security vocabulary.
 //!
 //! An [`AuthGrant`] binds one authenticated user, tenant and authentication epoch to the refresh
 //! family created by the same login. State and terminal metadata are validated at construction,
@@ -6,40 +6,178 @@
 //!
 //! INVARIANT: AUTH-GRANT-STATE-01 { level = "Hard", exec = "native-compile", source = "code", native = "private fields plus validated constructors" }.
 //! INVARIANT: AUTH-GRANT-CLOSE-MUTATION-01 { level = "Hard", exec = "native-compile", source = "code", native = "private fields plus transition-only constructor" }.
+//! INVARIANT: AUTH-GRANT-ACCESS-ISSUE-01 { level = "Hard", exec = "native-compile", source = "code", native = "private grant-borrowing issue input with a sole AuthGrant producer" }.
 
 use std::time::SystemTime;
 
 use ids::UserId;
 use vocab::TenantId;
 
-use super::{AuthnEpoch, CredentialSecurityEventKind, GrantSecurityEventKind};
+const MAX_PERSISTED_COUNTER: u64 = i64::MAX as u64;
+
+/// Monotonic authentication epoch shared by account security and issued grants.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct AuthnEpoch(u64);
+
+impl AuthnEpoch {
+    /// Initial account epoch.
+    pub const ZERO: Self = Self(0);
+
+    /// Rebuild a persisted epoch while preserving the PostgreSQL `BIGINT` boundary.
+    pub fn hydrate(value: u64) -> Result<Self, AuthnEpochError> {
+        if value > MAX_PERSISTED_COUNTER {
+            return Err(AuthnEpochError::OutOfRange);
+        }
+        Ok(Self(value))
+    }
+
+    pub(crate) const fn from_verified(value: u64) -> Self {
+        Self(value)
+    }
+
+    /// Numeric value for persistence and verified JWT evidence.
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+
+    /// Advance the epoch without crossing the persistence boundary.
+    pub fn checked_next(self) -> Result<Self, AuthnEpochError> {
+        let next = self.0.checked_add(1).ok_or(AuthnEpochError::Overflow)?;
+        if next > MAX_PERSISTED_COUNTER {
+            return Err(AuthnEpochError::Overflow);
+        }
+        Ok(Self(next))
+    }
+}
+
+impl std::fmt::Debug for AuthnEpoch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AuthnEpoch(<redacted>)")
+    }
+}
+
+/// Invalid authentication epoch.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum AuthnEpochError {
+    /// A persisted value cannot be represented by the shared signed/SQL boundary.
+    #[error("authentication epoch is out of range")]
+    OutOfRange,
+    /// Advancing the epoch exceeded the shared signed/SQL boundary.
+    #[error("authentication epoch overflowed")]
+    Overflow,
+}
+
+/// Account-wide credential-security causes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AccountSecurityEventKind {
+    PasswordChanged,
+    PasswordReset,
+    AccountLocked,
+    AccountSuspended,
+    AccountDeactivated,
+    LogoutAll,
+    CredentialDeleted,
+}
+
+/// Grant-local credential-security causes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GrantSecurityEventKind {
+    LogoutCurrent,
+    RefreshReuseDetected,
+}
+
+impl GrantSecurityEventKind {
+    const fn terminal_status(self) -> AuthGrantStatus {
+        match self {
+            Self::LogoutCurrent => AuthGrantStatus::Revoked,
+            Self::RefreshReuseDetected => AuthGrantStatus::Compromised,
+        }
+    }
+}
+
+/// The only credential-security cause model used by domain state and persistence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CredentialSecurityEventKind {
+    Account(AccountSecurityEventKind),
+    Grant(GrantSecurityEventKind),
+}
+
+impl CredentialSecurityEventKind {
+    /// Stable persistence representation retained by the existing database constraint.
+    pub const fn as_db_str(self) -> &'static str {
+        match self {
+            Self::Account(AccountSecurityEventKind::PasswordChanged) => "password_changed",
+            Self::Account(AccountSecurityEventKind::PasswordReset) => "password_reset",
+            Self::Account(AccountSecurityEventKind::AccountLocked) => "account_locked",
+            Self::Account(AccountSecurityEventKind::AccountSuspended) => "account_suspended",
+            Self::Account(AccountSecurityEventKind::AccountDeactivated) => "account_deactivated",
+            Self::Account(AccountSecurityEventKind::LogoutAll) => "logout_all",
+            Self::Account(AccountSecurityEventKind::CredentialDeleted) => "credential_deleted",
+            Self::Grant(GrantSecurityEventKind::LogoutCurrent) => "logout_current",
+            Self::Grant(GrantSecurityEventKind::RefreshReuseDetected) => "refresh_reuse_detected",
+        }
+    }
+
+    /// Parse the stable persistence representation, rejecting values outside the closed set.
+    pub fn from_db_str(raw: &str) -> Option<Self> {
+        match raw {
+            "password_changed" => Some(Self::Account(AccountSecurityEventKind::PasswordChanged)),
+            "password_reset" => Some(Self::Account(AccountSecurityEventKind::PasswordReset)),
+            "account_locked" => Some(Self::Account(AccountSecurityEventKind::AccountLocked)),
+            "account_suspended" => Some(Self::Account(AccountSecurityEventKind::AccountSuspended)),
+            "account_deactivated" => {
+                Some(Self::Account(AccountSecurityEventKind::AccountDeactivated))
+            }
+            "logout_all" => Some(Self::Account(AccountSecurityEventKind::LogoutAll)),
+            "credential_deleted" => {
+                Some(Self::Account(AccountSecurityEventKind::CredentialDeleted))
+            }
+            "logout_current" => Some(Self::Grant(GrantSecurityEventKind::LogoutCurrent)),
+            "refresh_reuse_detected" => {
+                Some(Self::Grant(GrantSecurityEventKind::RefreshReuseDetected))
+            }
+            _ => None,
+        }
+    }
+}
 
 /// Stable server-side authentication-grant identifier.
 #[derive(Clone, PartialEq, Eq, Hash, secure::Redact)]
 pub struct AuthGrantId(#[redact(sensitivity = secret)] String);
 
 impl AuthGrantId {
-    pub(crate) fn new(raw: impl Into<String>) -> Self {
-        Self(raw.into())
+    fn new(raw: String) -> Result<Self, AuthGrantIdError> {
+        ids::CanonicalUuidV4::parse(&raw).map_err(|_| AuthGrantIdError::Invalid)?;
+        Ok(Self(raw))
     }
 
     /// Generate the unique identifier for a newly authenticated grant.
-    pub(crate) fn generate() -> Self {
-        Self::new(uuid::Uuid::new_v4().to_string())
+    fn generate() -> Self {
+        Self(ids::CanonicalUuidV4::generate().to_string())
     }
 
-    /// Rebuild an opaque identifier obtained from a trusted persistence or authenticated wire edge.
-    pub fn hydrate(raw: impl Into<String>) -> Self {
-        Self::new(raw)
+    pub(crate) fn from_verified(value: ids::CanonicalUuidV4) -> Self {
+        Self(value.to_string())
+    }
+
+    /// Parse a canonical UUIDv4 obtained from persistence or an authenticated wire edge.
+    pub fn hydrate(raw: impl Into<String>) -> Result<Self, AuthGrantIdError> {
+        Self::new(raw.into())
     }
 
     /// Opaque identifier used by persistence and the existing `sessionId` HTTP/event wire.
     ///
-    /// Binding this identifier into the JWT `sid` claim belongs to #1840 and is not part of the
-    /// current token contract.
+    /// The same value is bound into the RSS access JWT `sid` claim (#1835).
     pub fn as_str(&self) -> &str {
         &self.0
     }
+}
+
+/// Invalid authentication-grant identifier.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum AuthGrantIdError {
+    #[error("authentication grant id must be a canonical UUIDv4")]
+    Invalid,
 }
 
 /// Authentication-grant lifecycle status.
@@ -120,25 +258,13 @@ pub struct AuthGrantSnapshot {
 
 impl std::fmt::Debug for AuthGrant {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AuthGrant")
-            .field("id", &self.id)
-            .field("tenant", &self.tenant)
-            .field("user_id", &"<redacted>")
-            .field("auth_time", &self.auth_time)
-            .field("authn_epoch_at_issue", &"<redacted>")
-            .field("status", &self.status)
-            .field("expires_at", &self.expires_at)
-            .field("created_at", &self.created_at)
-            .field("closed_at", &self.closed_at)
-            .field("close_reason", &self.close_reason)
-            .finish()
+        f.write_str("AuthGrant(<redacted>)")
     }
 }
 
 impl AuthGrant {
     /// Create a new active grant from authenticated identity evidence.
-    pub(crate) fn new_active(
-        id: AuthGrantId,
+    pub fn new_active(
         tenant: TenantId,
         user_id: UserId,
         auth_time: SystemTime,
@@ -147,7 +273,7 @@ impl AuthGrant {
         created_at: SystemTime,
     ) -> Result<Self, AuthGrantStateError> {
         Self::hydrate(AuthGrantSnapshot {
-            id,
+            id: AuthGrantId::generate(),
             tenant,
             user_id,
             auth_time,
@@ -183,16 +309,14 @@ impl AuthGrant {
                 AuthGrantStatus::Revoked,
                 Some(_),
                 Some(CredentialSecurityEventKind::Grant(
-                    super::GrantSecurityEventKind::RefreshReuseDetected,
+                    GrantSecurityEventKind::RefreshReuseDetected,
                 )),
             )
             | (
                 AuthGrantStatus::Compromised,
                 Some(_),
                 Some(
-                    CredentialSecurityEventKind::Grant(
-                        super::GrantSecurityEventKind::LogoutCurrent,
-                    )
+                    CredentialSecurityEventKind::Grant(GrantSecurityEventKind::LogoutCurrent)
                     | CredentialSecurityEventKind::Account(_),
                 ),
             ) => return Err(AuthGrantStateError::StatusReasonMismatch),
@@ -282,6 +406,17 @@ impl AuthGrant {
         self.close_reason
     }
 
+    /// Derive the sole RSS access-token issue input from this grant.
+    ///
+    /// The returned value borrows the complete grant and has private fields, so callers cannot
+    /// substitute a subject, tenant, session id, authentication time, or epoch independently.
+    pub fn access_issue_input(&self) -> Result<RssAccessIssueInput<'_>, AuthGrantIssueError> {
+        if self.status != AuthGrantStatus::Active {
+            return Err(AuthGrantIssueError::NotActive);
+        }
+        Ok(RssAccessIssueInput { grant: self })
+    }
+
     /// Compare the complete optimistic-concurrency snapshot carried by a sealed mutation.
     ///
     /// Providers use this method before applying `next`; centralizing the comparison prevents
@@ -300,7 +435,26 @@ impl AuthGrant {
     }
 }
 
-/// Sealed terminal transition consumed by an [`AuthGrantLifecycle`](crate::ports::AuthGrantLifecycle).
+/// Grant-derived RSS access issuance capability.
+#[must_use]
+pub struct RssAccessIssueInput<'a> {
+    pub(crate) grant: &'a AuthGrant,
+}
+
+impl std::fmt::Debug for RssAccessIssueInput<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RssAccessIssueInput(<redacted>)")
+    }
+}
+
+/// An authentication grant cannot currently authorize access-token issuance.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum AuthGrantIssueError {
+    #[error("authentication grant is not active")]
+    NotActive,
+}
+
+/// Sealed terminal transition consumed by the identity lifecycle port.
 #[derive(Debug)]
 pub struct AuthGrantCloseMutation {
     expected: AuthGrant,
@@ -323,9 +477,9 @@ impl AuthGrantCloseMutation {
 
 #[cfg(test)]
 mod tests {
-    use super::{AuthGrant, AuthGrantId, AuthGrantSnapshot, AuthGrantStateError, AuthGrantStatus};
-    use crate::domain::{
-        AccountSecurityEventKind, AuthnEpoch, CredentialSecurityEventKind, GrantSecurityEventKind,
+    use super::{
+        AccountSecurityEventKind, AuthGrant, AuthGrantId, AuthGrantSnapshot, AuthGrantStateError,
+        AuthGrantStatus, AuthnEpoch, CredentialSecurityEventKind, GrantSecurityEventKind,
     };
     use std::time::{Duration, SystemTime};
 
@@ -343,7 +497,6 @@ mod tests {
     fn active() -> AuthGrant {
         let created = SystemTime::UNIX_EPOCH + Duration::from_secs(10);
         AuthGrant::new_active(
-            AuthGrantId::new("grant-secret"),
             tenant(),
             user(),
             created,
@@ -352,6 +505,11 @@ mod tests {
             created,
         )
         .expect("valid active grant")
+    }
+
+    #[allow(clippy::expect_used)]
+    fn grant_id() -> AuthGrantId {
+        AuthGrantId::hydrate("7d65e5f2-e716-4c4e-8e4c-6f7ab1754ef8").expect("grant id")
     }
 
     fn logout_current() -> CredentialSecurityEventKind {
@@ -370,6 +528,24 @@ mod tests {
         assert_ne!(first, second);
         assert!(uuid::Uuid::parse_str(first.as_str()).is_ok());
         assert!(uuid::Uuid::parse_str(second.as_str()).is_ok());
+    }
+
+    #[test]
+    fn hydration_accepts_only_lowercase_hyphenated_uuid_v4() {
+        let canonical = "7d65e5f2-e716-4c4e-8e4c-6f7ab1754ef8";
+        assert!(AuthGrantId::hydrate(canonical).is_ok());
+        for rejected in [
+            "7D65E5F2-E716-4C4E-8E4C-6F7AB1754EF8",
+            "7d65e5f2e7164c4e8e4c6f7ab1754ef8",
+            "7d65e5f2-e716-1c4e-8e4c-6f7ab1754ef8",
+            "grant-id",
+            "",
+        ] {
+            assert_eq!(
+                AuthGrantId::hydrate(rejected),
+                Err(super::AuthGrantIdError::Invalid)
+            );
+        }
     }
 
     #[test]
@@ -406,7 +582,7 @@ mod tests {
         for (label, auth_time, expires_at, status, closed_at, close_reason) in cases {
             assert_eq!(
                 AuthGrant::hydrate(AuthGrantSnapshot {
-                    id: AuthGrantId::new("grant-1"),
+                    id: grant_id(),
                     tenant: tenant(),
                     user_id: user(),
                     auth_time,
@@ -437,7 +613,7 @@ mod tests {
         for (closed_at, close_reason) in active_cases {
             assert_eq!(
                 AuthGrant::hydrate(AuthGrantSnapshot {
-                    id: AuthGrantId::new("grant-active-invalid"),
+                    id: grant_id(),
                     tenant: tenant(),
                     user_id: user(),
                     auth_time: created,
@@ -464,7 +640,7 @@ mod tests {
         for (status, closed_at, close_reason) in terminal_metadata_missing_cases {
             assert_eq!(
                 AuthGrant::hydrate(AuthGrantSnapshot {
-                    id: AuthGrantId::new("grant-terminal-incomplete"),
+                    id: grant_id(),
                     tenant: tenant(),
                     user_id: user(),
                     auth_time: created,
@@ -482,7 +658,7 @@ mod tests {
 
         assert_eq!(
             AuthGrant::hydrate(AuthGrantSnapshot {
-                id: AuthGrantId::new("grant-1"),
+                id: grant_id(),
                 tenant: tenant(),
                 user_id: user(),
                 auth_time: created,
@@ -509,7 +685,7 @@ mod tests {
         ] {
             assert_eq!(
                 AuthGrant::hydrate(AuthGrantSnapshot {
-                    id: AuthGrantId::new("grant-compromised-invalid"),
+                    id: grant_id(),
                     tenant: tenant(),
                     user_id: user(),
                     auth_time: created,
@@ -585,9 +761,19 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::expect_used)]
     fn debug_redacts_grant_and_user_ids() {
-        let debug = format!("{:?}", active());
-        assert!(!debug.contains("grant-secret"));
-        assert!(!debug.contains("550e8400-e29b-41d4-a716-446655440000"));
+        let grant = active();
+        let id = grant.id().as_str().to_owned();
+        let debug = format!("{grant:?}");
+        assert_eq!(debug, "AuthGrant(<redacted>)");
+        assert!(!debug.contains(&id));
+        assert!(!format!("{:?}", grant.id()).contains(&id));
+        assert_eq!(
+            format!("{:?}", grant.authn_epoch_at_issue()),
+            "AuthnEpoch(<redacted>)"
+        );
+        let input = grant.access_issue_input().expect("active grant");
+        assert_eq!(format!("{input:?}"), "RssAccessIssueInput(<redacted>)");
     }
 }

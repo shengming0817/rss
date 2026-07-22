@@ -16,6 +16,8 @@ test-support = []
 
 [dependencies]
 vocab = { path = "../vocab" }
+ids = { path = "../ids" }
+secure = { path = "../secure" }
 runctx = { path = "../runctx" }
 primitives = { path = "../primitives" }
 # verify→mint bridge：经 diport::Pdp 验签后 seal VerifiedJwt / VerifiedServiceToken（#1158, ADR-006）。

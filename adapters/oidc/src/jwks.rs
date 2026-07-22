@@ -857,7 +857,7 @@ mod tests {
     fn payload(exp: i64) -> String {
         let iat = exp.saturating_sub(600);
         format!(
-            r#"{{"sub":"alice","iat":{iat},"exp":{exp},"token_use":"access","iss":"{ISS}","aud":"{AUD}","kind":"user","tenant_id":"f47ac10b-58cc-4372-a567-0e02b2c3d479"}}"#
+            r#"{{"sub":"550e8400-e29b-41d4-a716-446655440000","iat":{iat},"exp":{exp},"token_use":"access","iss":"{ISS}","aud":"{AUD}","kind":"user","tenant_id":"f47ac10b-58cc-4372-a567-0e02b2c3d479","sid":"7d65e5f2-e716-4c4e-8e4c-6f7ab1754ef8","jti":"d8dbe849-1d7e-49aa-b68a-a7b41ed252df","auth_time":{iat},"authn_epoch":7}}"#
         )
     }
 
@@ -1344,7 +1344,6 @@ mod tests {
         .expect("initial load");
         let config = VerifierConfigBuilder::<diport::RssAccessProfile>::new(ISS, AUD)
             .keys_jwks(src)
-            .trust_kind("user")
             .build()
             .expect("config");
 
@@ -1391,7 +1390,6 @@ mod tests {
         assert!(src.reload(), "reload 成功");
         let config = VerifierConfigBuilder::<diport::RssAccessProfile>::new(ISS, AUD)
             .keys_jwks(src)
-            .trust_kind("user")
             .build()
             .expect("config");
 
@@ -1526,7 +1524,6 @@ mod tests {
         .expect("initial load");
         let config = VerifierConfigBuilder::<diport::RssAccessProfile>::new(ISS, AUD)
             .keys_jwks(src)
-            .trust_kind("user")
             .build()
             .expect("config");
         // 缺 `kid` 在 protected-header 结构边界直接拒绝。
@@ -1592,7 +1589,6 @@ mod tests {
         assert!(handle.is_ready());
         let _config = VerifierConfigBuilder::<diport::RssAccessProfile>::new(ISS, AUD)
             .keys_jwks(src)
-            .trust_kind("user")
             .build()
             .expect("config");
         // src 已 move 进 config，句柄仍读共享 ready（组合根据此注册 profile-specific probe）。

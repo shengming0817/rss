@@ -540,6 +540,167 @@ pub const generated::event::identity_v1::role_revoked::CONTRACT_ID: &str
 pub const generated::event::identity_v1::role_revoked::FACT: vocab::contract::binding::EventFactBinding
 pub const generated::event::identity_v1::role_revoked::SPEC: generated::event::EventSpec
 pub const generated::event::identity_v1::role_revoked::TOPIC: &str
+pub mod generated::event::identity_v1::security_event
+pub mod generated::event::identity_v1::security_event::error
+pub struct generated::event::identity_v1::security_event::error::ConversionError(_)
+impl core::convert::From<&'static str> for generated::event::identity_v1::security_event::error::ConversionError
+pub fn generated::event::identity_v1::security_event::error::ConversionError::from(&'static str) -> Self
+impl core::convert::From<alloc::string::String> for generated::event::identity_v1::security_event::error::ConversionError
+pub fn generated::event::identity_v1::security_event::error::ConversionError::from(alloc::string::String) -> Self
+impl core::error::Error for generated::event::identity_v1::security_event::error::ConversionError
+impl core::fmt::Debug for generated::event::identity_v1::security_event::error::ConversionError
+pub fn generated::event::identity_v1::security_event::error::ConversionError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::result::Result<(), core::fmt::Error>
+impl core::fmt::Display for generated::event::identity_v1::security_event::error::ConversionError
+pub fn generated::event::identity_v1::security_event::error::ConversionError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::result::Result<(), core::fmt::Error>
+impl core::marker::Freeze for generated::event::identity_v1::security_event::error::ConversionError
+impl core::marker::Send for generated::event::identity_v1::security_event::error::ConversionError
+impl core::marker::Sync for generated::event::identity_v1::security_event::error::ConversionError
+impl core::marker::Unpin for generated::event::identity_v1::security_event::error::ConversionError
+impl core::marker::UnsafeUnpin for generated::event::identity_v1::security_event::error::ConversionError
+impl core::panic::unwind_safe::RefUnwindSafe for generated::event::identity_v1::security_event::error::ConversionError
+impl core::panic::unwind_safe::UnwindSafe for generated::event::identity_v1::security_event::error::ConversionError
+pub enum generated::event::identity_v1::security_event::IdentitySecurityEventPayloadKind
+pub generated::event::identity_v1::security_event::IdentitySecurityEventPayloadKind::AccountDeactivated
+pub generated::event::identity_v1::security_event::IdentitySecurityEventPayloadKind::AccountLocked
+pub generated::event::identity_v1::security_event::IdentitySecurityEventPayloadKind::AccountSuspended
+pub generated::event::identity_v1::security_event::IdentitySecurityEventPayloadKind::CredentialDeleted
+pub generated::event::identity_v1::security_event::IdentitySecurityEventPayloadKind::LogoutAll
+pub generated::event::identity_v1::security_event::IdentitySecurityEventPayloadKind::LogoutCurrent
+pub generated::event::identity_v1::security_event::IdentitySecurityEventPayloadKind::PasswordChanged
+pub generated::event::identity_v1::security_event::IdentitySecurityEventPayloadKind::PasswordReset
+pub generated::event::identity_v1::security_event::IdentitySecurityEventPayloadKind::RefreshReuseDetected
+impl core::clone::Clone for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadKind
+pub fn generated::event::identity_v1::security_event::IdentitySecurityEventPayloadKind::clone(&self) -> generated::event::identity_v1::security_event::IdentitySecurityEventPayloadKind
+impl core::cmp::Eq for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadKind
+impl core::cmp::Ord for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadKind
+pub fn generated::event::identity_v1::security_event::IdentitySecurityEventPayloadKind::cmp(&self, &generated::event::identity_v1::security_event::IdentitySecurityEventPayloadKind) -> core::cmp::Ordering
+impl core::cmp::PartialEq for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadKind
+pub fn generated::event::identity_v1::security_event::IdentitySecurityEventPayloadKind::eq(&self, &generated::event::identity_v1::security_event::IdentitySecurityEventPayloadKind) -> bool
+impl core::cmp::PartialOrd for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadKind
+pub fn generated::event::identity_v1::security_event::IdentitySecurityEventPayloadKind::partial_cmp(&self, &generated::event::identity_v1::security_event::IdentitySecurityEventPayloadKind) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::TryFrom<&alloc::string::String> for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadKind
+pub type generated::event::identity_v1::security_event::IdentitySecurityEventPayloadKind::Error = generated::event::identity_v1::security_event::error::ConversionError
+pub fn generated::event::identity_v1::security_event::IdentitySecurityEventPayloadKind::try_from(&alloc::string::String) -> core::result::Result<Self, generated::event::identity_v1::security_event::error::ConversionError>
+impl core::convert::TryFrom<&str> for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadKind
+pub type generated::event::identity_v1::security_event::IdentitySecurityEventPayloadKind::Error = generated::event::identity_v1::security_event::error::ConversionError
+pub fn generated::event::identity_v1::security_event::IdentitySecurityEventPayloadKind::try_from(&str) -> core::result::Result<Self, generated::event::identity_v1::security_event::error::ConversionError>
+impl core::convert::TryFrom<alloc::string::String> for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadKind
+pub type generated::event::identity_v1::security_event::IdentitySecurityEventPayloadKind::Error = generated::event::identity_v1::security_event::error::ConversionError
+pub fn generated::event::identity_v1::security_event::IdentitySecurityEventPayloadKind::try_from(alloc::string::String) -> core::result::Result<Self, generated::event::identity_v1::security_event::error::ConversionError>
+impl core::fmt::Debug for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadKind
+pub fn generated::event::identity_v1::security_event::IdentitySecurityEventPayloadKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadKind
+pub fn generated::event::identity_v1::security_event::IdentitySecurityEventPayloadKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadKind
+pub fn generated::event::identity_v1::security_event::IdentitySecurityEventPayloadKind::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadKind
+impl core::marker::StructuralPartialEq for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadKind
+impl core::str::traits::FromStr for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadKind
+pub type generated::event::identity_v1::security_event::IdentitySecurityEventPayloadKind::Err = generated::event::identity_v1::security_event::error::ConversionError
+pub fn generated::event::identity_v1::security_event::IdentitySecurityEventPayloadKind::from_str(&str) -> core::result::Result<Self, generated::event::identity_v1::security_event::error::ConversionError>
+impl serde_core::ser::Serialize for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadKind
+pub fn generated::event::identity_v1::security_event::IdentitySecurityEventPayloadKind::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadKind
+pub fn generated::event::identity_v1::security_event::IdentitySecurityEventPayloadKind::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadKind
+impl core::marker::Send for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadKind
+impl core::marker::Sync for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadKind
+impl core::marker::Unpin for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadKind
+impl core::marker::UnsafeUnpin for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadKind
+impl core::panic::unwind_safe::RefUnwindSafe for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadKind
+impl core::panic::unwind_safe::UnwindSafe for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadKind
+pub enum generated::event::identity_v1::security_event::IdentitySecurityEventPayloadTargetKind
+pub generated::event::identity_v1::security_event::IdentitySecurityEventPayloadTargetKind::Grant
+pub generated::event::identity_v1::security_event::IdentitySecurityEventPayloadTargetKind::Subject
+impl core::clone::Clone for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadTargetKind
+pub fn generated::event::identity_v1::security_event::IdentitySecurityEventPayloadTargetKind::clone(&self) -> generated::event::identity_v1::security_event::IdentitySecurityEventPayloadTargetKind
+impl core::cmp::Eq for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadTargetKind
+impl core::cmp::Ord for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadTargetKind
+pub fn generated::event::identity_v1::security_event::IdentitySecurityEventPayloadTargetKind::cmp(&self, &generated::event::identity_v1::security_event::IdentitySecurityEventPayloadTargetKind) -> core::cmp::Ordering
+impl core::cmp::PartialEq for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadTargetKind
+pub fn generated::event::identity_v1::security_event::IdentitySecurityEventPayloadTargetKind::eq(&self, &generated::event::identity_v1::security_event::IdentitySecurityEventPayloadTargetKind) -> bool
+impl core::cmp::PartialOrd for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadTargetKind
+pub fn generated::event::identity_v1::security_event::IdentitySecurityEventPayloadTargetKind::partial_cmp(&self, &generated::event::identity_v1::security_event::IdentitySecurityEventPayloadTargetKind) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::TryFrom<&alloc::string::String> for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadTargetKind
+pub type generated::event::identity_v1::security_event::IdentitySecurityEventPayloadTargetKind::Error = generated::event::identity_v1::security_event::error::ConversionError
+pub fn generated::event::identity_v1::security_event::IdentitySecurityEventPayloadTargetKind::try_from(&alloc::string::String) -> core::result::Result<Self, generated::event::identity_v1::security_event::error::ConversionError>
+impl core::convert::TryFrom<&str> for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadTargetKind
+pub type generated::event::identity_v1::security_event::IdentitySecurityEventPayloadTargetKind::Error = generated::event::identity_v1::security_event::error::ConversionError
+pub fn generated::event::identity_v1::security_event::IdentitySecurityEventPayloadTargetKind::try_from(&str) -> core::result::Result<Self, generated::event::identity_v1::security_event::error::ConversionError>
+impl core::convert::TryFrom<alloc::string::String> for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadTargetKind
+pub type generated::event::identity_v1::security_event::IdentitySecurityEventPayloadTargetKind::Error = generated::event::identity_v1::security_event::error::ConversionError
+pub fn generated::event::identity_v1::security_event::IdentitySecurityEventPayloadTargetKind::try_from(alloc::string::String) -> core::result::Result<Self, generated::event::identity_v1::security_event::error::ConversionError>
+impl core::fmt::Debug for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadTargetKind
+pub fn generated::event::identity_v1::security_event::IdentitySecurityEventPayloadTargetKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadTargetKind
+pub fn generated::event::identity_v1::security_event::IdentitySecurityEventPayloadTargetKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadTargetKind
+pub fn generated::event::identity_v1::security_event::IdentitySecurityEventPayloadTargetKind::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadTargetKind
+impl core::marker::StructuralPartialEq for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadTargetKind
+impl core::str::traits::FromStr for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadTargetKind
+pub type generated::event::identity_v1::security_event::IdentitySecurityEventPayloadTargetKind::Err = generated::event::identity_v1::security_event::error::ConversionError
+pub fn generated::event::identity_v1::security_event::IdentitySecurityEventPayloadTargetKind::from_str(&str) -> core::result::Result<Self, generated::event::identity_v1::security_event::error::ConversionError>
+impl serde_core::ser::Serialize for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadTargetKind
+pub fn generated::event::identity_v1::security_event::IdentitySecurityEventPayloadTargetKind::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadTargetKind
+pub fn generated::event::identity_v1::security_event::IdentitySecurityEventPayloadTargetKind::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadTargetKind
+impl core::marker::Send for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadTargetKind
+impl core::marker::Sync for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadTargetKind
+impl core::marker::Unpin for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadTargetKind
+impl core::marker::UnsafeUnpin for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadTargetKind
+impl core::panic::unwind_safe::RefUnwindSafe for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadTargetKind
+impl core::panic::unwind_safe::UnwindSafe for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadTargetKind
+pub struct generated::event::identity_v1::security_event::IdentitySecurityEventPayload
+pub generated::event::identity_v1::security_event::IdentitySecurityEventPayload::kind: generated::event::identity_v1::security_event::IdentitySecurityEventPayloadKind
+pub generated::event::identity_v1::security_event::IdentitySecurityEventPayload::occurred_at: i64
+pub generated::event::identity_v1::security_event::IdentitySecurityEventPayload::target: generated::event::identity_v1::security_event::IdentitySecurityEventPayloadTarget
+pub generated::event::identity_v1::security_event::IdentitySecurityEventPayload::tenant_id: alloc::string::String
+impl core::clone::Clone for generated::event::identity_v1::security_event::IdentitySecurityEventPayload
+pub fn generated::event::identity_v1::security_event::IdentitySecurityEventPayload::clone(&self) -> generated::event::identity_v1::security_event::IdentitySecurityEventPayload
+impl core::fmt::Debug for generated::event::identity_v1::security_event::IdentitySecurityEventPayload
+pub fn generated::event::identity_v1::security_event::IdentitySecurityEventPayload::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl secure::redaction::Redact for generated::event::identity_v1::security_event::IdentitySecurityEventPayload
+pub fn generated::event::identity_v1::security_event::IdentitySecurityEventPayload::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
+impl serde_core::ser::Serialize for generated::event::identity_v1::security_event::IdentitySecurityEventPayload
+pub fn generated::event::identity_v1::security_event::IdentitySecurityEventPayload::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl vocab::contract::binding::GeneratedEventPayload for generated::event::identity_v1::security_event::IdentitySecurityEventPayload
+pub const generated::event::identity_v1::security_event::IdentitySecurityEventPayload::FACT: vocab::contract::binding::EventFactBinding
+impl<'de> serde_core::de::Deserialize<'de> for generated::event::identity_v1::security_event::IdentitySecurityEventPayload
+pub fn generated::event::identity_v1::security_event::IdentitySecurityEventPayload::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::event::identity_v1::security_event::IdentitySecurityEventPayload
+impl core::marker::Send for generated::event::identity_v1::security_event::IdentitySecurityEventPayload
+impl core::marker::Sync for generated::event::identity_v1::security_event::IdentitySecurityEventPayload
+impl core::marker::Unpin for generated::event::identity_v1::security_event::IdentitySecurityEventPayload
+impl core::marker::UnsafeUnpin for generated::event::identity_v1::security_event::IdentitySecurityEventPayload
+impl core::panic::unwind_safe::RefUnwindSafe for generated::event::identity_v1::security_event::IdentitySecurityEventPayload
+impl core::panic::unwind_safe::UnwindSafe for generated::event::identity_v1::security_event::IdentitySecurityEventPayload
+pub struct generated::event::identity_v1::security_event::IdentitySecurityEventPayloadTarget
+pub generated::event::identity_v1::security_event::IdentitySecurityEventPayloadTarget::kind: generated::event::identity_v1::security_event::IdentitySecurityEventPayloadTargetKind
+pub generated::event::identity_v1::security_event::IdentitySecurityEventPayloadTarget::ref_: uuid::Uuid
+impl core::clone::Clone for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadTarget
+pub fn generated::event::identity_v1::security_event::IdentitySecurityEventPayloadTarget::clone(&self) -> generated::event::identity_v1::security_event::IdentitySecurityEventPayloadTarget
+impl core::fmt::Debug for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadTarget
+pub fn generated::event::identity_v1::security_event::IdentitySecurityEventPayloadTarget::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl secure::redaction::Redact for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadTarget
+pub fn generated::event::identity_v1::security_event::IdentitySecurityEventPayloadTarget::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
+impl serde_core::ser::Serialize for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadTarget
+pub fn generated::event::identity_v1::security_event::IdentitySecurityEventPayloadTarget::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadTarget
+pub fn generated::event::identity_v1::security_event::IdentitySecurityEventPayloadTarget::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadTarget
+impl core::marker::Send for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadTarget
+impl core::marker::Sync for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadTarget
+impl core::marker::Unpin for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadTarget
+impl core::marker::UnsafeUnpin for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadTarget
+impl core::panic::unwind_safe::RefUnwindSafe for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadTarget
+impl core::panic::unwind_safe::UnwindSafe for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadTarget
+pub const generated::event::identity_v1::security_event::CONTRACT: vocab::contract::binding::ContractBinding
+pub const generated::event::identity_v1::security_event::CONTRACT_ID: &str
+pub const generated::event::identity_v1::security_event::FACT: vocab::contract::binding::EventFactBinding
+pub const generated::event::identity_v1::security_event::SPEC: generated::event::EventSpec
+pub const generated::event::identity_v1::security_event::TOPIC: &str
 pub mod generated::event::identity_v1::session_created
 pub mod generated::event::identity_v1::session_created::error
 pub struct generated::event::identity_v1::session_created::error::ConversionError(_)

@@ -16,14 +16,13 @@ use crate::ports::{
     AccountSecurityLifecycle, AccountSecurityMutation, AccountSecurityReadRepo, CredentialRepo,
     PasswordChangeMutation, TenantRepoScope,
 };
+#[cfg(test)]
+use authn::{AuthGrant, AuthGrantId, AuthGrantStatus};
 use vocab::TenantId;
 
 // 认证授权根 in-mem 替身在 test / seed-login 构建启用；单一 Mutex 是原子 login/close/rotate 的事务边界。
 #[cfg(test)]
-use crate::domain::{
-    AuthGrant, AuthGrantId, AuthGrantStatus, RefreshStatus, RefreshTokenHash, RefreshTokenId,
-    RefreshTokenRecord,
-};
+use crate::domain::{RefreshStatus, RefreshTokenHash, RefreshTokenId, RefreshTokenRecord};
 #[cfg(test)]
 use crate::ports::{
     AuthGrantCloseCommand, AuthGrantLifecycle, LoginGrantMutation, RefreshRotationMutation,
@@ -368,6 +367,22 @@ impl InMemAuthGrantStore {
     #[cfg(test)]
     pub(crate) fn refresh_len(&self) -> usize {
         recover(&self.inner).refresh.len()
+    }
+
+    pub(crate) fn grant_snapshot(&self, grant_id: &AuthGrantId) -> Option<AuthGrant> {
+        recover(&self.inner).grants.get(grant_id).cloned()
+    }
+
+    pub(crate) fn refresh_family_snapshot(
+        &self,
+        grant_id: &AuthGrantId,
+    ) -> Vec<RefreshTokenRecord> {
+        recover(&self.inner)
+            .refresh
+            .values()
+            .filter(|record| record.auth_grant_id() == grant_id)
+            .cloned()
+            .collect()
     }
 
     /// Seed an already-prepared login pair for refresh-service unit tests. This is intentionally
@@ -1387,18 +1402,21 @@ mod tests {
         InMemResourceAttributeRepo, InMemRoleBindingLifecycle, TenantId, recover,
     };
     use crate::domain::{
-        AccountSecurityState, AccountStatus, AttributeValue, AuthGrant, AuthGrantId,
-        AuthGrantStatus, AuthOutcome, GrantSecurityEventKind, IdentityError, LoginIdentifier,
-        Policy, PolicyId, PolicyRouteScope, PolicyVersion, RefreshStatus, RefreshTokenHash,
-        RefreshTokenId, RefreshTokenRecord, ResourceAttribute, ResourceAttributeKey,
-        ResourceAttributeResolution, ResourceAttributeResourceId, ResourceAttributeVersion,
-        RoleBinding, RoleId,
+        AccountSecurityState, AccountStatus, AttributeValue, AuthOutcome, IdentityError,
+        LoginIdentifier, Policy, PolicyId, PolicyRouteScope, PolicyVersion, RefreshStatus,
+        RefreshTokenHash, RefreshTokenId, RefreshTokenRecord, ResourceAttribute,
+        ResourceAttributeKey, ResourceAttributeResolution, ResourceAttributeResourceId,
+        ResourceAttributeVersion, RoleBinding, RoleId,
     };
     use crate::ports::{
         AccountSecurityLifecycle, AccountSecurityReadRepo, AuthGrantCloseCommand,
         AuthGrantLifecycle, CredentialRepo, LoginGrantMutation, PasswordChangeMutation,
         PolicyLifecycle, PolicyRepo, RefreshTokenStore, ResourceAttributeReadRepo,
         ResourceAttributeWriteRepo, RoleBindingLifecycle, TenantRepoScope,
+    };
+    use authn::{
+        AuthGrant, AuthGrantId, AuthGrantSnapshot, AuthGrantStatus, AuthnEpoch,
+        GrantSecurityEventKind,
     };
     use consistency::{EventEntry, EventTopic, IdemKey, OutboxPayload};
     use diport::{EnvelopeSubjectId, OpaqueActorId, OutboxActor, OutboxEnvelopeParts};
@@ -1425,6 +1443,16 @@ mod tests {
 
     fn scope(tenant: TenantId) -> TenantRepoScope {
         TenantRepoScope::for_test(tenant)
+    }
+
+    fn grant_id(raw: impl AsRef<str>) -> AuthGrantId {
+        let digest = secure::digest(raw.as_ref());
+        let mut bytes = [0_u8; 16];
+        bytes.copy_from_slice(&digest[..16]);
+        bytes[6] = (bytes[6] & 0x0f) | 0x40;
+        bytes[8] = (bytes[8] & 0x3f) | 0x80;
+        AuthGrantId::hydrate(uuid::Uuid::from_bytes(bytes).hyphenated().to_string())
+            .expect("test UUIDv4")
     }
 
     #[allow(clippy::panic)]
@@ -1493,15 +1521,18 @@ mod tests {
 
     fn make_grant(id: &str, tenant: TenantId) -> AuthGrant {
         let now = epoch(1_000);
-        AuthGrant::new_active(
-            AuthGrantId::new(id),
+        AuthGrant::hydrate(AuthGrantSnapshot {
+            id: grant_id(id),
             tenant,
-            uid(USER_ALICE),
-            now,
-            crate::AuthnEpoch::ZERO,
-            now + Duration::from_secs(3_600),
-            now,
-        )
+            user_id: uid(USER_ALICE),
+            auth_time: now,
+            authn_epoch_at_issue: AuthnEpoch::ZERO,
+            status: AuthGrantStatus::Active,
+            expires_at: now + Duration::from_secs(3_600),
+            created_at: now,
+            closed_at: None,
+            close_reason: None,
+        })
         .expect("active grant")
     }
 
@@ -2452,8 +2483,8 @@ mod tests {
             ("wrong", wrong_fact_entry()),
         ] {
             let repo = InMemAuthGrantStore::new();
-            let grant_id = format!("grant-{suffix}-fact");
-            let grant = make_grant(&grant_id, tenant);
+            let grant_label = format!("grant-{suffix}-fact");
+            let grant = make_grant(&grant_label, tenant);
             let refresh = make_initial(
                 &grant,
                 &format!("refresh-{suffix}"),
@@ -2474,7 +2505,7 @@ mod tests {
             assert!(
                 repo.find_active(
                     scope(tenant),
-                    AuthGrantId::new(&grant_id),
+                    grant_id(&grant_label),
                     SystemTime::UNIX_EPOCH,
                 )
                 .await
@@ -2566,15 +2597,11 @@ mod tests {
             .await
             .expect("persist ok");
         let found = repo
-            .find_active(
-                scope(ta),
-                AuthGrantId::new("grant-001"),
-                SystemTime::UNIX_EPOCH,
-            )
+            .find_active(scope(ta), grant_id("grant-001"), SystemTime::UNIX_EPOCH)
             .await
             .expect("find ok");
         assert!(found.is_some(), "persist 后应能找到 grant");
-        assert_eq!(found.expect("some").id().as_str(), "grant-001");
+        assert_eq!(found.expect("some").id(), &grant_id("grant-001"));
         assert!(
             repo.find_by_hash(scope(ta), RefreshTokenHash::new([1; 32]))
                 .await
@@ -2625,11 +2652,7 @@ mod tests {
             .await
             .expect("current revoked snapshot must promote to compromised");
         let found = repo
-            .find_active(
-                scope(ta),
-                AuthGrantId::new("grant-002"),
-                SystemTime::UNIX_EPOCH,
-            )
+            .find_active(scope(ta), grant_id("grant-002"), SystemTime::UNIX_EPOCH)
             .await
             .expect("find ok");
         assert!(found.is_none(), "closed grant must not be active");
@@ -2660,11 +2683,7 @@ mod tests {
             .await
             .expect("persist ok");
         let found = repo
-            .find_active(
-                scope(tb),
-                AuthGrantId::new("grant-004"),
-                SystemTime::UNIX_EPOCH,
-            )
+            .find_active(scope(tb), grant_id("grant-004"), SystemTime::UNIX_EPOCH)
             .await
             .expect("find ok");
         assert!(found.is_none(), "跨租查找应返回 None");

@@ -13,6 +13,31 @@ impl core::marker::Unpin for ids::IdParseError
 impl core::marker::UnsafeUnpin for ids::IdParseError
 impl core::panic::unwind_safe::RefUnwindSafe for ids::IdParseError
 impl core::panic::unwind_safe::UnwindSafe for ids::IdParseError
+pub struct ids::CanonicalUuidV4(_)
+impl ids::CanonicalUuidV4
+pub const fn ids::CanonicalUuidV4::as_uuid(self) -> uuid::Uuid
+pub fn ids::CanonicalUuidV4::generate() -> Self
+pub fn ids::CanonicalUuidV4::parse(&str) -> core::result::Result<Self, ids::IdParseError>
+impl core::clone::Clone for ids::CanonicalUuidV4
+pub fn ids::CanonicalUuidV4::clone(&self) -> ids::CanonicalUuidV4
+impl core::cmp::Eq for ids::CanonicalUuidV4
+impl core::cmp::PartialEq for ids::CanonicalUuidV4
+pub fn ids::CanonicalUuidV4::eq(&self, &ids::CanonicalUuidV4) -> bool
+impl core::fmt::Debug for ids::CanonicalUuidV4
+pub fn ids::CanonicalUuidV4::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for ids::CanonicalUuidV4
+pub fn ids::CanonicalUuidV4::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for ids::CanonicalUuidV4
+pub fn ids::CanonicalUuidV4::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for ids::CanonicalUuidV4
+impl core::marker::StructuralPartialEq for ids::CanonicalUuidV4
+impl core::marker::Freeze for ids::CanonicalUuidV4
+impl core::marker::Send for ids::CanonicalUuidV4
+impl core::marker::Sync for ids::CanonicalUuidV4
+impl core::marker::Unpin for ids::CanonicalUuidV4
+impl core::marker::UnsafeUnpin for ids::CanonicalUuidV4
+impl core::panic::unwind_safe::RefUnwindSafe for ids::CanonicalUuidV4
+impl core::panic::unwind_safe::UnwindSafe for ids::CanonicalUuidV4
 pub struct ids::DeviceId(_)
 impl ids::DeviceId
 pub fn ids::DeviceId::as_uuid(&self) -> uuid::Uuid

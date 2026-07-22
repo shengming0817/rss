@@ -1,4 +1,4 @@
-use authn::{JwtAccessPrincipal, JwtIssuer};
+use authn::{JwtIssuer, RssAccessIssueInput};
 use diport::{RssAccessProfile, ServiceTokenProfile};
 
 fn rss_cannot_sign_service<S>(
@@ -12,11 +12,11 @@ fn rss_cannot_sign_service<S>(
 
 fn service_cannot_sign_access<S>(
     issuer: &JwtIssuer<ServiceTokenProfile, S>,
-    principal: JwtAccessPrincipal<'_>,
+    input: RssAccessIssueInput<'_>,
 ) where
     S: diport::Signer + Send + Sync + 'static,
 {
-    let _ = issuer.issue_access(principal);
+    let _ = issuer.issue_access(input);
 }
 
 fn main() {}

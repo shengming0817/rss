@@ -1,0 +1,27 @@
+warning: AuthGrant/RSS access-token 生产 funnel 出现在未授权调用点
+  --> $DIR/identity.rs:33:21
+   |
+LL |             let _ = authn::AuthGrant::new_active;
+   |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: AuthGrant::new_active 仅允许 identity::LoginService::login
+   = note: `#[warn(rss_authenticated_callsite)]` on by default
+
+warning: AuthGrant/RSS access-token 生产 funnel 出现在未授权调用点
+  --> $DIR/identity.rs:41:21
+   |
+LL |             let _ = authn::AuthGrant::access_issue_input;
+   |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: RSS access issue input 与 issuer 仅允许 identity refresh 的 prepare_initial/rotate
+
+warning: AuthGrant/RSS access-token 生产 funnel 出现在未授权调用点
+  --> $DIR/identity.rs:42:21
+   |
+LL |             let _ = authn::JwtIssuer::<diport::RssAccessProfile, S>::issue_access;
+   |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: RSS access issue input 与 issuer 仅允许 identity refresh 的 prepare_initial/rotate
+
+warning: 3 warnings emitted
+

@@ -1,15 +1,15 @@
 use std::time::Duration;
 
-use authn::{JwtAccessPrincipal, JwtIssuer, JwtIssuerConfig};
+use authn::{JwtIssuer, JwtIssuerConfig, RssAccessIssueInput};
 use diport::{KeyId, RssAccessProfile, ServiceTokenProfile, SigningPurpose};
 
 fn rss_can_only_sign_access<S>(
     issuer: &JwtIssuer<RssAccessProfile, S>,
-    principal: JwtAccessPrincipal<'_>,
+    input: RssAccessIssueInput<'_>,
 ) where
     S: diport::Signer + Send + Sync + 'static,
 {
-    let _ = issuer.issue_access(principal);
+    let _ = issuer.issue_access(input);
 }
 
 fn service_can_only_sign_service<S>(

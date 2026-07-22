@@ -49,6 +49,9 @@ const RSS_ACCESS_TOKEN_ROTATION_JWKS_PROPAGATION_SLO_SECS_ENV: &str =
     "RSS_ACCESS_TOKEN_ROTATION_JWKS_PROPAGATION_SLO_SECS";
 const RSS_ACCESS_TOKEN_ROTATION_MARGIN_SECS_ENV: &str = "RSS_ACCESS_TOKEN_ROTATION_MARGIN_SECS";
 
+/// Removed serving keys that must fail closed instead of disappearing from the closed catalog.
+const FORBIDDEN_SERVING_KEYS: &[&str] = &["RSS_ACCESS_TOKEN_TRUSTED_KINDS"];
+
 /// Closed set of non-domain-specific process keys used by the serving runtime.
 ///
 /// Maintenance grants, CI/Forge credentials, AWS dynamic credentials, and SPIFFE rotation
@@ -88,7 +91,6 @@ const FIXED_SERVING_KEYS: &[&str] = &[
     RSS_ACCESS_TOKEN_SIGNING_NEXT_KEY_ID_ENV,
     RSS_ACCESS_TOKEN_SIGNING_RETIRING_ENV,
     RSS_ACCESS_TOKEN_SIGNING_ROTATED_AT_ENV,
-    "RSS_ACCESS_TOKEN_TRUSTED_KINDS",
     "RSS_ACCESS_TOKEN_TTL_SECS",
     "RSS_FEDERATED_ACCESS_TOKEN_AUDIENCE",
     "RSS_FEDERATED_ACCESS_TOKEN_ISSUER",
@@ -239,7 +241,7 @@ impl RuntimeConfigSource for TestConfigSource {
 pub(crate) fn test_snapshot(
     entries: &[(&str, &str)],
 ) -> Result<RuntimeConfigSnapshot, RuntimeConfigCaptureError> {
-    RuntimeConfigSnapshot::capture(TestConfigSource(
+    RuntimeConfigSnapshot::capture_with_forbidden_check(TestConfigSource(
         entries
             .iter()
             .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
@@ -252,6 +254,8 @@ pub(crate) fn test_snapshot(
 pub(crate) enum RuntimeConfigCaptureError {
     #[error("runtime serving configuration catalog contains a duplicate fixed key")]
     DuplicateFixedKey,
+    #[error("removed runtime serving configuration key must not be set: {0}")]
+    ForbiddenServingKey(&'static str),
 }
 
 /// Immutable process-lifetime configuration generation.
@@ -295,7 +299,7 @@ const PRIMARY_TOKEN_PROFILE_ENV: &str = "RSS_PRIMARY_TOKEN_PROFILE";
 const ADMIN_TOKEN_PROFILE_ENV: &str = "RSS_ADMIN_TOKEN_PROFILE";
 const INTERNAL_AUTH_SCHEME_ENV: &str = "RSS_INTERNAL_AUTH_SCHEME";
 
-const RSS_ACCESS_TOKEN_ENV: [&str; 14] = [
+const RSS_ACCESS_TOKEN_ENV: [&str; 13] = [
     "RSS_ACCESS_TOKEN_ISSUER",
     "RSS_ACCESS_TOKEN_AUDIENCE",
     RSS_ACCESS_TOKEN_SIGNING_ACTIVE_KEY_ID_ENV,
@@ -303,7 +307,6 @@ const RSS_ACCESS_TOKEN_ENV: [&str; 14] = [
     RSS_ACCESS_TOKEN_SIGNING_RETIRING_ENV,
     RSS_ACCESS_TOKEN_SIGNING_ROTATED_AT_ENV,
     "RSS_ACCESS_TOKEN_TTL_SECS",
-    "RSS_ACCESS_TOKEN_TRUSTED_KINDS",
     "RSS_ACCESS_TOKEN_JWKS_PATH",
     "RSS_ACCESS_TOKEN_JWKS_REFRESH_INTERVAL_SECS",
     RSS_ACCESS_TOKEN_ROTATION_CLOCK_SKEW_SECS_ENV,
@@ -428,7 +431,6 @@ impl AccessJwksLocation {
 struct AccessVerifierConfigCore {
     issuer: String,
     audience: String,
-    trusted_kinds: Vec<AccessPrincipalKind>,
     jwks_location: AccessJwksLocation,
     jwks_refresh_interval: Duration,
 }
@@ -438,14 +440,12 @@ impl AccessVerifierConfigCore {
         config: SnapshotConfig<'_>,
         issuer_env: &'static str,
         audience_env: &'static str,
-        trusted_kinds_env: &'static str,
         jwks_path_env: &'static str,
         refresh_interval_env: &'static str,
     ) -> anyhow::Result<Self> {
         Ok(Self {
             issuer: required_scalar(config, issuer_env)?.to_owned(),
             audience: required_scalar(config, audience_env)?.to_owned(),
-            trusted_kinds: trusted_access_kinds(config, trusted_kinds_env)?,
             jwks_location: AccessJwksLocation::parse(config, jwks_path_env)?,
             jwks_refresh_interval: required_duration_secs(
                 config,
@@ -476,7 +476,6 @@ impl RssAccessTokenConfig {
             config,
             "RSS_ACCESS_TOKEN_ISSUER",
             "RSS_ACCESS_TOKEN_AUDIENCE",
-            "RSS_ACCESS_TOKEN_TRUSTED_KINDS",
             "RSS_ACCESS_TOKEN_JWKS_PATH",
             "RSS_ACCESS_TOKEN_JWKS_REFRESH_INTERVAL_SECS",
         )?;
@@ -504,10 +503,6 @@ impl RssAccessTokenConfig {
 
     pub(crate) fn audience(&self) -> &str {
         &self.verifier.audience
-    }
-
-    pub(crate) fn trusted_kinds(&self) -> &[AccessPrincipalKind] {
-        &self.verifier.trusted_kinds
     }
 
     pub(crate) fn jwks_path(&self) -> &Path {
@@ -702,6 +697,7 @@ fn map_rotation_overlap_error(
 /// Closed federated access-token configuration.
 pub(crate) struct FederatedAccessTokenConfig {
     verifier: AccessVerifierConfigCore,
+    trusted_kinds: Vec<AccessPrincipalKind>,
 }
 
 impl FederatedAccessTokenConfig {
@@ -711,9 +707,12 @@ impl FederatedAccessTokenConfig {
                 config,
                 "RSS_FEDERATED_ACCESS_TOKEN_ISSUER",
                 "RSS_FEDERATED_ACCESS_TOKEN_AUDIENCE",
-                "RSS_FEDERATED_ACCESS_TOKEN_TRUSTED_KINDS",
                 "RSS_FEDERATED_ACCESS_TOKEN_JWKS_PATH",
                 "RSS_FEDERATED_ACCESS_TOKEN_JWKS_REFRESH_INTERVAL_SECS",
+            )?,
+            trusted_kinds: trusted_access_kinds(
+                config,
+                "RSS_FEDERATED_ACCESS_TOKEN_TRUSTED_KINDS",
             )?,
         })
     }
@@ -727,7 +726,7 @@ impl FederatedAccessTokenConfig {
     }
 
     pub(crate) fn trusted_kinds(&self) -> &[AccessPrincipalKind] {
-        &self.verifier.trusted_kinds
+        &self.trusted_kinds
     }
 
     pub(crate) fn jwks_path(&self) -> &Path {
@@ -1239,7 +1238,7 @@ impl RuntimeConfigSnapshot {
     /// concrete environment source stay private to this module so sibling modules cannot express a
     /// second or alternate production capture.
     pub(crate) fn capture_process_snapshot() -> Result<Self, RuntimeConfigCaptureError> {
-        Self::capture(EnvConfigSource)
+        Self::capture_with_forbidden_check(EnvConfigSource)
     }
 
     /// Test-only generic capture surface for purpose-built source fakes.
@@ -1247,6 +1246,13 @@ impl RuntimeConfigSnapshot {
     pub(crate) fn capture_test(
         source: impl RuntimeConfigSource,
     ) -> Result<Self, RuntimeConfigCaptureError> {
+        Self::capture(source)
+    }
+
+    fn capture_with_forbidden_check(
+        mut source: impl RuntimeConfigSource,
+    ) -> Result<Self, RuntimeConfigCaptureError> {
+        reject_forbidden_serving_keys(&mut source)?;
         Self::capture(source)
     }
 
@@ -1303,6 +1309,18 @@ fn present_text(value: &CapturedConfigValue) -> Option<&SecretText> {
     }
 }
 
+fn reject_forbidden_serving_keys(
+    source: &mut impl RuntimeConfigSource,
+) -> Result<(), RuntimeConfigCaptureError> {
+    for name in FORBIDDEN_SERVING_KEYS {
+        let key = RuntimeConfigKey::from_static(name);
+        if !matches!(source.read(&key), CapturedConfigValue::Missing) {
+            return Err(RuntimeConfigCaptureError::ForbiddenServingKey(name));
+        }
+    }
+    Ok(())
+}
+
 fn fixed_catalog() -> Result<BTreeSet<RuntimeConfigKey>, RuntimeConfigCaptureError> {
     let mut catalog = BTreeSet::new();
     for key in FIXED_SERVING_KEYS {
@@ -1336,4 +1354,61 @@ pub(crate) fn domain_transport_mtls_allow_set_env(domain: &str) -> String {
         domain.to_ascii_uppercase(),
         DOMAIN_TRANSPORT_MTLS_SPIFFE_ALLOW_SET_ENV_SUFFIX
     )
+}
+
+#[cfg(test)]
+mod forbidden_serving_key_tests {
+    use super::*;
+
+    const REMOVED_VALUE_BAIT: &str = "removed-kind-config-secret-bait";
+
+    fn complete_rss_profile_values() -> BTreeMap<String, String> {
+        [
+            (PRIMARY_TOKEN_PROFILE_ENV, "rss-access"),
+            (ADMIN_TOKEN_PROFILE_ENV, "rss-access"),
+            (INTERNAL_AUTH_SCHEME_ENV, "mtls"),
+            ("RSS_ACCESS_TOKEN_ISSUER", "https://issuer.test"),
+            ("RSS_ACCESS_TOKEN_AUDIENCE", "rss"),
+            (RSS_ACCESS_TOKEN_SIGNING_ACTIVE_KEY_ID_ENV, "active-es256"),
+            ("RSS_ACCESS_TOKEN_TTL_SECS", "900"),
+            (
+                "RSS_ACCESS_TOKEN_JWKS_PATH",
+                concat!(env!("CARGO_MANIFEST_DIR"), "/src/config.rs"),
+            ),
+            ("RSS_ACCESS_TOKEN_JWKS_REFRESH_INTERVAL_SECS", "60"),
+        ]
+        .into_iter()
+        .map(|(name, value)| (name.to_owned(), value.to_owned()))
+        .collect()
+    }
+
+    #[test]
+    fn complete_new_rss_config_with_removed_trusted_kinds_fails_without_value_leak() {
+        let values = complete_rss_profile_values();
+        let snapshot =
+            RuntimeConfigSnapshot::capture_with_forbidden_check(TestConfigSource(values.clone()))
+                .expect("complete new RSS profile configuration must capture");
+        TokenProfilesConfig::from_snapshot(snapshot.view())
+            .expect("complete new RSS profile configuration must parse");
+
+        let mut values_with_removed_key = values;
+        values_with_removed_key.insert(
+            FORBIDDEN_SERVING_KEYS[0].to_owned(),
+            REMOVED_VALUE_BAIT.to_owned(),
+        );
+        let error = match RuntimeConfigSnapshot::capture_with_forbidden_check(TestConfigSource(
+            values_with_removed_key,
+        )) {
+            Ok(_) => panic!("removed RSS trusted-kinds key must fail snapshot capture"),
+            Err(error) => error,
+        };
+
+        assert_eq!(
+            error,
+            RuntimeConfigCaptureError::ForbiddenServingKey(FORBIDDEN_SERVING_KEYS[0])
+        );
+        let rendered = format!("{error:?}: {error}");
+        assert!(rendered.contains(FORBIDDEN_SERVING_KEYS[0]), "{rendered}");
+        assert!(!rendered.contains(REMOVED_VALUE_BAIT), "{rendered}");
+    }
 }

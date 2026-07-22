@@ -92,7 +92,7 @@ use crate::{
 use crate::{PgAuditAdminRepo, PgAuditRepo, PgAuthAuditSink};
 #[cfg(feature = "domain-identity")]
 use crate::{
-    PgAuthGrantLifecycle, PgAuthGrantProvider, PgCredentialRepo,
+    PgAuthGrantLifecycle, PgAuthGrantProvider, PgAuthGrantValidator, PgCredentialRepo,
     PgCredentialSecurityTargetResolver, PgIdentitySecurityLifecycle, PgPolicyLifecycle,
     PgPolicyRepo, PgRefreshTokenStore, PgResourceAttributeRepo, PgRoleBindingLifecycle,
     PgRoleBindingReadRepo, PgRoleRepo,
@@ -1255,6 +1255,12 @@ impl PgSettingsBundle {
 
 #[cfg(feature = "domain-identity")]
 impl PgDomainDeps<caps::Identity> {
+    /// Request-time durable fence for verified RSS access-token grant bindings.
+    #[must_use]
+    pub fn auth_grant_validator(&self) -> PgAuthGrantValidator {
+        PgAuthGrantValidator::new(self.stores.reader_capability())
+    }
+
     /// Single-owner AuthGrant/refresh provider used by login composition.
     #[must_use]
     pub fn auth_grant_provider(&self, clock: Box<dyn Clock>) -> PgAuthGrantProvider {

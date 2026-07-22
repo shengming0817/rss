@@ -14,8 +14,9 @@
 **4xx 下发 `public_details`、5xx 强制 strip**；`internal_attrs` 永不进 wire。`details` 为单键对象数组，
 typed 值形固定（golden 锁）：`Duration`→毫秒 `u64`、`Time`→epoch 秒 `i64`。kind→status 单源
 `status_for`（与 `code` 同出 `kind`，杜绝 code/status 错配；未知 `#[non_exhaustive]` kind fail-closed 映射 5xx）。
-`retryable` 同样只由 kind 单源派生：仅明确可安全重试的 `VersionConflict` 与 `TooManyRequests` 为 `true`；
-`OutboxFactConflict` 使用 `ERR_CORE_OUTBOX_FACT_CONFLICT` 且固定为 `false`。
+`retryable` 同样只由 kind 单源派生：仅明确可安全重试的 `VersionConflict`、`TooManyRequests` 与
+`ProviderUnavailable` 为 `true`；请求 outcome 未知的 budget `Unavailable` 与事实冲突
+`OutboxFactConflict` 固定为 `false`。
 
 ## errcode
 

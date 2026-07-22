@@ -2951,10 +2951,8 @@ fn stub_pdp(
 #[tokio::test]
 async fn settings_config_value_maintenance_operator_subject_comes_from_verified_service_token()
 -> anyhow::Result<()> {
-    let pdp = stub_pdp(Ok(diport::VerifiedClaims::new(
-        vocab::ServiceCallerDomain::MaintenanceOperator.as_str(),
-        None,
-        Some("ignored".to_owned()),
+    let pdp = stub_pdp(Ok(diport::VerifiedClaims::service_token(
+        vocab::ServiceCallerDomain::MaintenanceOperator,
     )));
     let subject = verified_config_value_maintenance_operator_subject(
         "opaque-token",

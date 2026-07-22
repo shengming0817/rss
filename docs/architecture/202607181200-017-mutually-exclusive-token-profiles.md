@@ -2,7 +2,7 @@
 
 - **状态**：Accepted
 - **日期**：2026-07-18
-- **关联**：issue #1831
+- **关联**：issue #1831；由 ADR-021 / #1835 收紧 RSS 为 User-only grant profile
 - **依赖**：ADR-006（typed auth plan / PDP）、ADR-007（service identity）、ADR-009（typed route finalize）
 - **兼容性**：intentional breaking；不保留旧 token、旧环境变量、旧 Rust API 或双读路径
 
@@ -27,13 +27,17 @@ protected header 的 `crit` 按 [RFC 7515 §4.1.11](https://www.rfc-editor.org/r
 
 | Profile | `typ` | `token_use` | 算法 | 最大 `exp-iat` | 签发 |
 |---|---|---|---|---:|---|
-| RSS Access | `at+jwt` | `access` | ES256 | 900s | RSS typed issuer |
+| RSS Access | `at+jwt` | `access` | ES256 | 900s | RSS typed issuer，仅从 User AuthGrant |
 | Federated Access | `at+jwt` | `access` | ES256 | 900s | 无 |
 | Service Token | `rss-service+jwt` | `service` | HS256 | 300s | Service typed issuer |
 
 RSS/Federated 即使 `typ`、`token_use`、算法相同，也必须分别锁定 listener binding、issuer、audience 与
 ES256 key source。Service Token 使用独立 issuer、audience、HS256 `kid`/secret 与 cluster-global replay；
 不得从 access JWKS 取 key。
+
+ADR-021 后 RSS identity shape 也与 Federated 互斥：RSS 固定 `kind=user` 且必须携带完整
+`sid/jti/auth_time/authn_epoch`；没有运行时 trusted-kinds。Device/Admin/SuperAdmin 只由 Federated profile
+按其独立 allowlist 接受，Federated 的同名 extension claims 不产生本地 grant evidence。
 
 每个现有 listener 在启动期固定一个 profile：Primary/Admin 必须显式选择 `rss-access` 或
 `federated-access`，Internal 必须显式选择 `mtls` 或 `service-token`，Health 永远 NoAuth。profile 不从
@@ -60,7 +64,7 @@ UTF-8、复制与解析之前检查。错误响应、日志与 metric label 不�
 部署只接受下列 namespace，不双读旧名：
 
 - selectors：`RSS_PRIMARY_TOKEN_PROFILE`、`RSS_ADMIN_TOKEN_PROFILE`、`RSS_INTERNAL_AUTH_SCHEME`；
-- RSS Access：`RSS_ACCESS_TOKEN_{ISSUER,AUDIENCE,SIGNING_ACTIVE_KEY_ID,SIGNING_NEXT_KEY_ID,SIGNING_RETIRING,SIGNING_ROTATED_AT,ROTATION_MODE,ROTATION_CLOCK_SKEW_SECS,ROTATION_JWKS_PROPAGATION_SLO_SECS,ROTATION_MARGIN_SECS,TTL_SECS,TRUSTED_KINDS,JWKS_PATH,JWKS_REFRESH_INTERVAL_SECS}`；
+- RSS Access：`RSS_ACCESS_TOKEN_{ISSUER,AUDIENCE,SIGNING_ACTIVE_KEY_ID,SIGNING_NEXT_KEY_ID,SIGNING_RETIRING,SIGNING_ROTATED_AT,ROTATION_MODE,ROTATION_CLOCK_SKEW_SECS,ROTATION_JWKS_PROPAGATION_SLO_SECS,ROTATION_MARGIN_SECS,TTL_SECS,JWKS_PATH,JWKS_REFRESH_INTERVAL_SECS}`；
 - Federated：`RSS_FEDERATED_ACCESS_TOKEN_{ISSUER,AUDIENCE,TRUSTED_KINDS,JWKS_PATH,JWKS_REFRESH_INTERVAL_SECS}`；
 - Service：`RSS_SERVICE_TOKEN_{ISSUER,AUDIENCE,HS256_KID,HS256_SECRET_B64URL}`。
 
@@ -84,5 +88,6 @@ anti-vacuity evidence 同批存在时才登记。
 部署必须清空在途 token并要求重新认证；mint、verify、runtime config 与 listener binding 不允许拆分发布。
 回滚只能整体回滚 binary 与配置，不得在新 binary 中恢复 alias、deprecated shim 或双读。
 
-具体停流、refresh/session 全量失效、900 秒最长寿命排空、readiness/canary 验证和整体回滚步骤以
+具体停流、refresh/session 全量失效、基于最后签发 token 的 `exp` 与验签/时钟余量排空、readiness/canary
+验证和整体回滚步骤以
 [Security Production Closeout](../ops/security-production-closeout.md#atomic-token-profile-cutover) 为运维单源。

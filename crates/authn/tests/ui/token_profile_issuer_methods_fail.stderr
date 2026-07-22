@@ -7,5 +7,5 @@ error[E0599]: no method named `issue_service_token` found for reference `&JwtIss
 error[E0599]: no method named `issue_access` found for reference `&JwtIssuer<ServiceTokenProfile, S>` in the current scope
   --> tests/ui/token_profile_issuer_methods_fail.rs:19:20
    |
-19 |     let _ = issuer.issue_access(principal);
+19 |     let _ = issuer.issue_access(input);
    |                    ^^^^^^^^^^^^ method not found in `&JwtIssuer<ServiceTokenProfile, S>`

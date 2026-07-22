@@ -21,9 +21,9 @@
 ### T001 [P] [US1] PR-A1 · oidc adapter impl `diport::Pdp`（ES256+HS256 + 静态 KeySource）
 **触及**: `adapters/oidc/src/{lib,verify,claims}.rs` · `adapters/oidc/Cargo.toml` · 根 `Cargo.toml`（p256/hmac/sha2 入 `[workspace.dependencies]`）· `docs/references/framework-comparison.md`（新增 authn/jwt 对标行）· **等级**: 无（adapter 内部，不动 wire contract）· **blocked-by**: 无（diport::Pdp 已合并，立即可开工）· **并行**: 与 T002 并行（adapters/oidc vs crates/httpserve 零交叉）。
 
-- [ ] T001.1 [US1] 先写表驱动测试（rstest + 注入 FixedClock）：合法 ES256/HS256→Ok(VerifiedClaims) 断言 subject/tenant/kind；坏签名/坏 MAC/段数≠3/`alg=none`/RS256/未知/空 subject→InvalidSignature；exp 过期/nbf 未到→Expired；kid 无匹配/iss-aud 不符/alg-key 混淆→Untrusted；RFC7515 known-answer 向量；anti-vacuity（先证正确签名通过）；Debug 脱敏（无 token/key 字节）—— 全 FAIL
+- [ ] T001.1 [US1] 先写表驱动测试（rstest + 注入 FixedClock）：合法 RSS ES256→User + 完整 grant quartet、合法 Federated ES256→Federated shape、合法 HS256→Service shape；跨 profile substitution 拒绝；坏签名/坏 MAC/段数≠3/`alg=none`/RS256/未知/空 subject→InvalidSignature；exp 过期/nbf 未到→Expired；kid 无匹配/iss-aud 不符/alg-key 混淆→Untrusted；RFC7515 known-answer 向量；anti-vacuity（先证正确签名通过）；Debug 脱敏（无 token/key 字节）—— 全 FAIL
 - [ ] T001.2 [US1] 根 `Cargo.toml` 加 `p256`(feature ecdsa)/`hmac`/`sha2` 到 `[workspace.dependencies]`；`adapters/oidc/Cargo.toml` opt-in（+ base64/serde/serde_json）；`cargo deny check` 绿（无 ring/rsa）
-- [ ] T001.3 [US1] `claims.rs`：claims DTO（exp/nbf/iat/iss/aud/sub/tenant/kind）+ `PdpError` fail-closed 映射表（data-model §映射）
+- [ ] T001.3 [US1] `claims.rs`：profile-specific claims DTO；RSS 固定 `kind=user` 且要求 `sid/jti/auth_time/authn_epoch`，Federated 与 Service 使用各自闭合 shape；附 `PdpError` fail-closed 映射表（data-model §映射）
 - [ ] T001.4 [US1] `verify.rs`：三段解析 → `SupportedAlg` 白名单选验签器（alg=none/RS256/未知拒）→ 签名校验（ES256 p256 / HS256 常数时间，复用 `primitives::crypto`）→ exp/nbf（注入 Clock + leeway）→ iss/aud → 映射 `VerifiedClaims`；alg-key 一致性闸
 - [ ] T001.5 [US1] `lib.rs`：`OidcProvider`（key_set/service_key_set HS256-only/clock 必填位参/issuers/audience/leeway）+ `StaticKeySource`（构造期解析，签名跨 T003 稳定）+ `impl Pdp`（native AFIT，service_token 路径隔离）+ 保留 `impl ManagedResource`（去 todo!()）
 - [ ] T001.6 [US1] oidc smoke test 追加 `assert_pdp(PhantomData::<OidcProvider>)`（维持 ADAPTER-PORT-FREEZE-04：去掉 impl Pdp 即编译失败，anti-vacuity）；framework-comparison.md 新增 authn/jwt 验签行（WebFetch 实拉 RustCrypto/JWT + rust-spiffe 校准 `ref:`）；覆盖率 ≥80%；`nextest`/`clippy -D warnings`/`fmt`/`layer-deps`/`dylint`（impl Pdp 合法）绿
@@ -57,11 +57,13 @@
 **触及**: `bins/{server,rss}/src/{main,auth_bridge}.rs` · `bins/{server,rss}/Cargo.toml`（首次加 httpserve/authn/oidc/diport/primitives/axum/tower/tokio/config）· `bins/{server,rss}/tests/auth_e2e.rs` · **等级**: L1 · **blocked-by**: **T001（真 verifier OidcProvider:Pdp）+ T002（httpserve::Authenticated 放行接缝）** · **并行**: 与 T003 并行（bins vs adapters/oidc 零交叉）。
 
 - [ ] T004.1 [US3] 先写 e2e 集成测试（dev-dep/feature 门控）：有效 JWT（真 OidcProvider 静态 key 验签）→200+`Authenticated`(`scheme`=Jwt + principal_kind facet) `scheme()` exact-match 注入放行（**本批不断言 handler 读完整 Principal——属 W**，评审 F3）；无 token/坏签名/过期/错 aud→401/403（拒绝路径全覆盖）；**T001/T002 单独 merge 态 Require 仍 401 回归用例**；tracing span 断言 `authz.decision`+`principal.kind`、无 subject/token 泄漏；stub Pdp 仅 `[dev-dependencies]` —— FAIL
-- [ ] T004.2 [US3] `auth_bridge.rs`（**各 bin 各一份**——bins/server 与 bins/rss 是独立 crate 不共享 src；逻辑小，漂移再提取 `assemblies/authwire`）：axum 中间件 extract Authorization→`authn::verify_jwt`/`verify_service_token`(注入 `&DynPdp`)→ok **内联** `httpserve::Authenticated::new(verified_scheme, principal.kind())`（`verified_scheme: RequiredScheme` = 验签桥实际验证的方案，须与入站 `RawCredential` scheme 一致；非 `From<&Principal>` trait）注入 request、err fail-closed 401；tracing span（ok→allow+principal.kind；err→deny+PdpError 变体；无 PII）—— 落地 authn lib.rs:280 `NOTE(#1109)` 承诺
+- [x] T004.2 [US3] `assemblies/runtime/src/auth_bridge.rs`：axum 中间件 extract Authorization →
+  profile-specific authn verify → RSS durable grant validation → profile-specific `Authenticated` 注入；凭据/
+  grant 无效 fail-closed 401，provider 故障 503，tracing 仅闭值无 PII。
 - [ ] T004.3 [US3] `main.rs`（server+rss）：从配置构造 `OidcProvider`→`Box<DynPdp>`（必填位参）；`Registry::finalize_routes`→每 listener router→`httpserve::finalize_auth(router,plan)`→**外层** `.layer(verify_bridge(pdp))`；JWKS/issuer/audience/key 配置注入
 - [ ] T004.4 [US3] 安全同批门核对：`cargo build --release` 依赖图无 stub Pdp + 无禁用 crypto crate；仅 T004 启用生产认证（T001/T002/T003 单独 merge 后 Require 端点仍 401）；`Box<DynPdp>` 必填编译期守
 - [ ] T004.6 [US3] **信任根 Medium 守卫（评审 F1，本 PR 必交付，不 defer）**：`cargo xtask` governance（或 dylint）扫 bins 生产 `src/` 的 `impl diport::Pdp`，仅放行 `#[cfg(test)]`/dev-dep，生产内联 always-allow impl → fail；synthetic red case + anti-vacuity（守卫非恒真）；INVARIANT 记守卫 rustdoc
-- [ ] T004.5 [US3] 不回归断言（ADR-006 ①②）：VerifiedClaims 仅 Pdp mint、from_verified_* 仅收 newtype；覆盖率 ≥80%；`nextest`/`clippy -D warnings`/`fmt`/`layer-deps`（bins=组合根可依赖全部）绿
+- [ ] T004.5 [US3] 不回归断言（ADR-006 ①②）：VerifiedClaims 保持闭合 profile shape、verified newtype 仅由 authn 验签 funnel seal、from_verified_* 仅收 newtype；覆盖率 ≥80%；`nextest`/`clippy -D warnings`/`fmt`/`layer-deps`（bins=组合根可依赖全部）绿
 
 ---
 

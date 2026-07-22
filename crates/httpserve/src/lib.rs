@@ -17,7 +17,7 @@ pub mod routes;
 
 pub use auth::{
     AuditSinkHandle, Authenticated, AuthenticatedAuditEvent, AuthorizedSubject,
-    BearerCredentialError, ExtractedBearerCredential, FieldMask, PendingScopeCtx,
+    BearerCredentialError, CurrentAuthGrant, ExtractedBearerCredential, FieldMask, PendingScopeCtx,
     ResourceProjection, RouteAuthorizationDecision, RouteAuthorizationRequest, RouteAuthorizer,
     RouteMeta, RouteResource, ServiceTokenTenantBindingError, TenantHeaderError,
     authorize_subject_for_permission, exact_tenant_header, extract_bearer_credential,

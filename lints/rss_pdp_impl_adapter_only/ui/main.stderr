@@ -3,8 +3,9 @@ warning: 验签端口 `diport::Pdp` 仅 provider adapter 可 impl：组合根 / 
    |
 LL | / impl Pdp for AllowAll {
 LL | |     async fn verify(&self, _raw: &RawCredential) -> Result<VerifiedClaims, PdpError> {
-LL | |         Ok(VerifiedClaims::new("spoofed-subject", None, None))
-LL | |     }
+LL | |         Ok(VerifiedClaims::service_token(
+LL | |             vocab::ServiceCallerDomain::MaintenanceOperator,
+...  |
 LL | | }
    | |_^
    |

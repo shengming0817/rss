@@ -28,6 +28,8 @@ sha2 = { workspace = true, optional = true }
 primitives = { path = "../../crates/primitives", optional = true }
 # Canonical tenant validation is part of the access-profile verification boundary.
 vocab = { path = "../../crates/vocab", optional = true }
+# RSS access subjects are canonical typed UserIds at the verifier boundary.
+ids = { path = "../../crates/ids", optional = true }
 # 三段 JWS base64url 解码（仅 backend）：URL_SAFE_NO_PAD 解 header/payload/signature。
 base64 = { workspace = true, optional = true }
 # 验签后 claims 反序列化 + JWKS 文档解析（仅 backend）：claims DTO 取 sub/exp/nbf/iss/aud + flatten extra；
@@ -50,7 +52,7 @@ metrics = { workspace = true, optional = true }
 
 [features]
 default = []
-backend = ["dep:p256", "dep:hmac", "dep:sha2", "dep:primitives", "dep:vocab", "dep:base64", "dep:serde", "dep:serde_json", "dep:tracing", "dep:thiserror", "dep:tokio", "dep:tokio-util", "dep:metrics"]
+backend = ["dep:p256", "dep:hmac", "dep:sha2", "dep:primitives", "dep:vocab", "dep:ids", "dep:base64", "dep:serde", "dep:serde_json", "dep:tracing", "dep:thiserror", "dep:tokio", "dep:tokio-util", "dep:metrics"]
 
 [dev-dependencies]
 # 验签器 async path + dyn 注入冒烟（multi_thread 真验 Send future 可跨 worker 调度）；
@@ -62,3 +64,5 @@ rstest = { workspace = true }
 tracing-subscriber = { workspace = true }
 # Local recorder assertions for kid-rejection / retiring-key metrics (with_local_recorder + render).
 metrics-exporter-prometheus = { workspace = true }
+# Type-level proof that RSS verifier configuration has no principal-kind allowlist API.
+trybuild = { workspace = true }

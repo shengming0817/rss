@@ -5,13 +5,16 @@
 //! [`diport::Clock`] 校验 `iat <= exp`、未来 `iat`、profile 最大寿命、过期和 `nbf`。时间校验不读取
 //! 系统时钟。失败仅记录闭值 reason 标签，不记录 token 或 claim 值。
 //!
-//! RSS 与 federated access 的 `user`/`device`/`admin` 必须携带 canonical tenant，
-//! `superAdmin` 必须不带 tenant。Service token 必须是 `kind=service`、带非空 `jti`，且 tenant
-//! claim 被禁止；其 tenant 只能来自 verifier 已纳入 MAC 的 canonical header binding。
+//! RSS access 只接受 canonical User/tenant 和完整 session-bound grant quartet。Federated access
+//! 独立接受 allowlisted `user`/`device`/`admin`/`superAdmin` shape，即使出现同名 RSS extension
+//! claims 也不会生成本地 grant evidence。Service token 必须是 `kind=service`、带非空 `jti`，且
+//! tenant claim 被禁止；其 tenant 只能来自 verifier 已纳入 MAC 的 canonical header binding。
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use diport::{Clock, PdpError, TokenProfile, TokenProfileMarker, VerifiedClaims};
+use diport::{
+    Clock, PdpError, TokenProfile, TokenProfileMarker, VerifiedAccessGrantFacts, VerifiedClaims,
+};
 use serde::Deserialize;
 
 use crate::config::VerifierConfig;
@@ -127,52 +130,50 @@ fn validate_claims<P: TokenProfileMarker>(
         log_claim_fail(TelemetryReason::InvalidExpiryBoundary);
         PdpError::InvalidSignature
     })?;
-    let (tenant, kind) = validate_profile_claims::<P>(config, &claims.extra)?;
-    Ok((
-        VerifiedClaims::new(claims.sub, tenant, kind),
-        claims.jti,
-        expires_at,
-    ))
+    let verified = validate_profile_claims::<P>(config, &claims)?;
+    Ok((verified, claims.jti, expires_at))
 }
 
 fn validate_profile_claims<P: TokenProfileMarker>(
     config: &VerifierConfig<P>,
-    extra: &serde_json::Map<String, serde_json::Value>,
-) -> Result<(Option<String>, Option<String>), PdpError> {
-    let tenant_present = extra.contains_key(config.tenant_claim());
-    let tenant = string_claim(extra, config.tenant_claim());
-    let kind = string_claim(extra, config.kind_claim());
+    claims: &Claims,
+) -> Result<VerifiedClaims, PdpError> {
+    let tenant_present = claims.extra.contains_key(config.tenant_claim());
+    let tenant = string_claim(&claims.extra, config.tenant_claim());
+    let kind = string_claim(&claims.extra, config.kind_claim());
 
     match P::PROFILE {
-        TokenProfile::RssAccess | TokenProfile::FederatedAccess => {
+        TokenProfile::RssAccess => validate_rss_profile_claims(claims, tenant, kind),
+        TokenProfile::FederatedAccess => {
             let Some(kind) = kind.filter(|kind| config.is_kind_trusted(kind)) else {
                 log_claim_fail(TelemetryReason::KindMissingOrUntrusted);
                 return Err(PdpError::InvalidSignature);
             };
-            match kind.as_str() {
+            let (tenant, kind) = match kind.as_str() {
                 "user" | "device" | "admin" => {
-                    let Some(raw_tenant) = tenant else {
-                        log_claim_fail(TelemetryReason::ScopedPrincipalMissingTenant);
-                        return Err(PdpError::InvalidSignature);
+                    let tenant = canonical_tenant(tenant)?;
+                    let kind = match kind.as_str() {
+                        "user" => vocab::PrincipalKind::User,
+                        "device" => vocab::PrincipalKind::Device,
+                        "admin" => vocab::PrincipalKind::Admin,
+                        _ => unreachable!(),
                     };
-                    let canonical = vocab::tenant::TenantId::parse(&raw_tenant)
-                        .map_err(|_| {
-                            log_claim_fail(TelemetryReason::TenantNotCanonical);
-                            PdpError::InvalidSignature
-                        })?
-                        .to_string();
-                    Ok((Some(canonical), Some(kind)))
+                    (Some(tenant), kind)
                 }
-                "superAdmin" if !tenant_present => Ok((None, Some(kind))),
+                "superAdmin" if !tenant_present => (None, vocab::PrincipalKind::SuperAdmin),
                 "superAdmin" => {
                     log_claim_fail(TelemetryReason::SuperAdminHasTenant);
-                    Err(PdpError::InvalidSignature)
+                    return Err(PdpError::InvalidSignature);
                 }
                 _ => {
                     log_claim_fail(TelemetryReason::UnsupportedPrincipalKind);
-                    Err(PdpError::InvalidSignature)
+                    return Err(PdpError::InvalidSignature);
                 }
-            }
+            };
+            VerifiedClaims::federated_access(claims.sub.clone(), tenant, kind).map_err(|_| {
+                log_claim_fail(TelemetryReason::UnsupportedPrincipalKind);
+                PdpError::InvalidSignature
+            })
         }
         TokenProfile::ServiceToken => {
             if kind.as_deref() != Some("service") {
@@ -183,9 +184,91 @@ fn validate_profile_claims<P: TokenProfileMarker>(
                 log_claim_fail(TelemetryReason::ServiceTenantClaimForbidden);
                 return Err(PdpError::InvalidSignature);
             }
-            Ok((None, Some("service".to_string())))
+            let caller =
+                vocab::ServiceCallerDomain::from_subject(&claims.sub).ok_or_else(|| {
+                    log_claim_fail(TelemetryReason::EmptySubject);
+                    PdpError::InvalidSignature
+                })?;
+            Ok(VerifiedClaims::service_token(caller))
         }
     }
+}
+
+fn validate_rss_profile_claims(
+    claims: &Claims,
+    tenant: Option<String>,
+    kind: Option<String>,
+) -> Result<VerifiedClaims, PdpError> {
+    validate_rss_time_window(claims)?;
+    if kind.as_deref() != Some("user") {
+        log_claim_fail(TelemetryReason::RssKindInvalid);
+        return Err(PdpError::InvalidSignature);
+    }
+    let user_id = ids::UserId::parse(&claims.sub).map_err(|_| {
+        log_claim_fail(TelemetryReason::RssSubjectNotCanonical);
+        PdpError::InvalidSignature
+    })?;
+    if user_id.as_uuid().hyphenated().to_string() != claims.sub {
+        log_claim_fail(TelemetryReason::RssSubjectNotCanonical);
+        return Err(PdpError::InvalidSignature);
+    }
+    let tenant = canonical_tenant(tenant)?;
+    let Some(session_id) = string_claim(&claims.extra, "sid") else {
+        log_claim_fail(TelemetryReason::RssGrantFactsInvalid);
+        return Err(PdpError::InvalidSignature);
+    };
+    let Some(token_id) = claims.jti.clone().filter(|value| !value.is_empty()) else {
+        log_claim_fail(TelemetryReason::RssGrantFactsInvalid);
+        return Err(PdpError::InvalidSignature);
+    };
+    let Some(auth_time) = integer_claim(&claims.extra, "auth_time") else {
+        log_claim_fail(TelemetryReason::RssGrantFactsInvalid);
+        return Err(PdpError::InvalidSignature);
+    };
+    let Some(authn_epoch) = integer_claim(&claims.extra, "authn_epoch") else {
+        log_claim_fail(TelemetryReason::RssGrantFactsInvalid);
+        return Err(PdpError::InvalidSignature);
+    };
+    if auth_time > claims.iat {
+        log_claim_fail(TelemetryReason::AuthTimeAfterIat);
+        return Err(PdpError::InvalidSignature);
+    }
+    let grant = VerifiedAccessGrantFacts::try_new(session_id, token_id, auth_time, authn_epoch)
+        .map_err(|_| {
+            log_claim_fail(TelemetryReason::RssGrantFactsInvalid);
+            PdpError::InvalidSignature
+        })?;
+    Ok(VerifiedClaims::rss_user(user_id, tenant, grant))
+}
+
+/// RSS grant evidence represents a usable access window, so unlike the shared
+/// federated/service boundary it requires the strict RFC 9068 shape `iat < exp`.
+fn validate_rss_time_window(claims: &Claims) -> Result<(), PdpError> {
+    if claims.iat >= claims.exp {
+        log_claim_fail(TelemetryReason::IatAfterExp);
+        return Err(PdpError::InvalidSignature);
+    }
+    Ok(())
+}
+
+fn canonical_tenant(raw: Option<String>) -> Result<vocab::TenantId, PdpError> {
+    let Some(raw) = raw else {
+        log_claim_fail(TelemetryReason::ScopedPrincipalMissingTenant);
+        return Err(PdpError::InvalidSignature);
+    };
+    let tenant = vocab::TenantId::parse(&raw).map_err(|_| {
+        log_claim_fail(TelemetryReason::TenantNotCanonical);
+        PdpError::InvalidSignature
+    })?;
+    if tenant.to_string() != raw {
+        log_claim_fail(TelemetryReason::TenantNotCanonical);
+        return Err(PdpError::InvalidSignature);
+    }
+    Ok(tenant)
+}
+
+fn integer_claim(extra: &serde_json::Map<String, serde_json::Value>, name: &str) -> Option<i64> {
+    extra.get(name).and_then(serde_json::Value::as_i64)
 }
 
 /// iat/exp/nbf 越界判定（注入时钟 + leeway）。过期 / 未生效均 → [`PdpError::Expired`]。
@@ -253,6 +336,13 @@ mod tests {
 
     use super::*;
     use crate::config::{AccessStaticKeySource, VerifierConfigBuilder};
+    use diport::VerifiedClaimsView;
+
+    const NOW: i64 = 1_700_000_000;
+    const CANON_TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
+    const CANON_USER: &str = "550e8400-e29b-41d4-a716-446655440000";
+    const CANON_SID: &str = "7d65e5f2-e716-4c4e-8e4c-6f7ab1754ef8";
+    const CANON_JTI: &str = "d8dbe849-1d7e-49aa-b68a-a7b41ed252df";
 
     /// FixedClock 替身：返回固定 UNIX 秒（非系统时钟，确定性时间边界）。
     struct FixedClock(i64);
@@ -280,19 +370,96 @@ mod tests {
 
     /// 构造一个 claims.rs 可用的最小 VerifierConfig（仅需 issuer/aud/keys 字段）。
     #[allow(clippy::expect_used)]
-    fn minimal_config(trust_kinds: &[&str]) -> VerifierConfig<diport::RssAccessProfile> {
+    fn minimal_config() -> VerifierConfig<diport::RssAccessProfile> {
+        VerifierConfigBuilder::<diport::RssAccessProfile>::new("https://iss", "aud")
+            .keys_static(
+                AccessStaticKeySource::builder()
+                    .add_es256_sec1("test-es256", &valid_es256_sec1())
+                    .expect("key")
+                    .build(),
+            )
+            .build()
+            .expect("valid config")
+    }
+
+    #[allow(clippy::expect_used)]
+    fn minimal_federated_config() -> VerifierConfig<diport::FederatedAccessProfile> {
         let mut builder =
-            VerifierConfigBuilder::<diport::RssAccessProfile>::new("https://iss", "aud")
+            VerifierConfigBuilder::<diport::FederatedAccessProfile>::new("https://iss", "aud")
                 .keys_static(
                     AccessStaticKeySource::builder()
                         .add_es256_sec1("test-es256", &valid_es256_sec1())
                         .expect("key")
                         .build(),
                 );
-        for k in trust_kinds {
-            builder = builder.trust_kind(*k);
+        for kind in ["user", "device", "admin", "superAdmin"] {
+            builder = builder.trust_kind(kind);
         }
-        builder.build().expect("valid config")
+        builder.build().expect("valid federated config")
+    }
+
+    fn valid_rss_payload() -> serde_json::Value {
+        serde_json::json!({
+            "sub": CANON_USER,
+            "iss": "https://iss",
+            "aud": "aud",
+            "iat": NOW,
+            "exp": NOW + 600,
+            "token_use": "access",
+            "kind": "user",
+            "tenant_id": CANON_TENANT,
+            "sid": CANON_SID,
+            "jti": CANON_JTI,
+            "auth_time": NOW - 30,
+            "authn_epoch": 7,
+        })
+    }
+
+    #[allow(clippy::expect_used)]
+    fn validate_json<P: diport::TokenProfileMarker>(
+        config: &VerifierConfig<P>,
+        payload: &serde_json::Value,
+    ) -> Result<VerifiedClaims, PdpError> {
+        let encoded = serde_json::to_vec(payload).expect("encode claim fixture");
+        validate_and_map(config, &FixedClock(NOW), &encoded)
+    }
+
+    #[allow(clippy::panic)]
+    fn expect_rss_user(
+        claims: &VerifiedClaims,
+    ) -> (ids::UserId, vocab::TenantId, &VerifiedAccessGrantFacts) {
+        match claims.view() {
+            VerifiedClaimsView::RssUser {
+                user_id,
+                tenant,
+                grant,
+            } => (user_id, tenant, grant),
+            VerifiedClaimsView::FederatedAccess { .. } => {
+                panic!("expected RSS user claims, got federated access")
+            }
+            VerifiedClaimsView::ServiceToken { .. } => {
+                panic!("expected RSS user claims, got service token")
+            }
+        }
+    }
+
+    #[allow(clippy::panic)]
+    fn expect_federated(
+        claims: &VerifiedClaims,
+    ) -> (&str, Option<vocab::TenantId>, vocab::PrincipalKind) {
+        match claims.view() {
+            VerifiedClaimsView::FederatedAccess {
+                subject,
+                tenant,
+                kind,
+            } => (subject, tenant, kind),
+            VerifiedClaimsView::RssUser { .. } => {
+                panic!("expected federated access claims, got RSS user")
+            }
+            VerifiedClaimsView::ServiceToken { .. } => {
+                panic!("expected federated access claims, got service token")
+            }
+        }
     }
 
     // ── now_unix_secs ──────────────────────────────────────────────────────────
@@ -378,21 +545,235 @@ mod tests {
 
     #[test]
     fn access_claims_reject_lifetime_over_900_seconds() {
-        let config = minimal_config(&["user"]);
+        let config = minimal_config();
         let payload = br#"{
-            "sub":"alice",
+            "sub":"550e8400-e29b-41d4-a716-446655440000",
             "iss":"https://iss",
             "aud":"aud",
             "iat":1000,
             "exp":1901,
             "token_use":"access",
             "kind":"user",
-            "tenant_id":"f47ac10b-58cc-4372-a567-0e02b2c3d479"
+            "tenant_id":"f47ac10b-58cc-4372-a567-0e02b2c3d479",
+            "sid":"7d65e5f2-e716-4c4e-8e4c-6f7ab1754ef8",
+            "jti":"d8dbe849-1d7e-49aa-b68a-a7b41ed252df",
+            "auth_time":1000,
+            "authn_epoch":7
         }"#;
 
         assert!(
             validate_and_map(&config, &FixedClock(1000), payload).is_err(),
             "access token 的 exp-iat 超过 900 秒必须 fail-closed"
         );
+    }
+
+    enum QuartetMutation {
+        Remove(&'static str),
+        Replace(&'static str, serde_json::Value),
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn rss_grant_quartet_rejects_missing_null_type_empty_non_v4_negative_overflow_and_inversion() {
+        use QuartetMutation::{Remove, Replace};
+
+        let cases = vec![
+            ("missing sid", Remove("sid")),
+            ("missing jti", Remove("jti")),
+            ("missing auth_time", Remove("auth_time")),
+            ("missing authn_epoch", Remove("authn_epoch")),
+            ("null sid", Replace("sid", serde_json::Value::Null)),
+            ("null jti", Replace("jti", serde_json::Value::Null)),
+            (
+                "null auth_time",
+                Replace("auth_time", serde_json::Value::Null),
+            ),
+            (
+                "null authn_epoch",
+                Replace("authn_epoch", serde_json::Value::Null),
+            ),
+            ("typed sid", Replace("sid", serde_json::json!(17))),
+            ("typed jti", Replace("jti", serde_json::json!(true))),
+            (
+                "typed auth_time",
+                Replace("auth_time", serde_json::json!([NOW])),
+            ),
+            (
+                "typed authn_epoch",
+                Replace("authn_epoch", serde_json::json!({"epoch": 7})),
+            ),
+            ("empty sid", Replace("sid", serde_json::json!(""))),
+            ("empty jti", Replace("jti", serde_json::json!(""))),
+            (
+                "empty auth_time",
+                Replace("auth_time", serde_json::json!("")),
+            ),
+            (
+                "empty authn_epoch",
+                Replace("authn_epoch", serde_json::json!("")),
+            ),
+            (
+                "non-v4 sid",
+                Replace(
+                    "sid",
+                    serde_json::json!("00000000-0000-1000-8000-000000000000"),
+                ),
+            ),
+            (
+                "non-v4 jti",
+                Replace(
+                    "jti",
+                    serde_json::json!("00000000-0000-5000-8000-000000000000"),
+                ),
+            ),
+            (
+                "negative auth_time",
+                Replace("auth_time", serde_json::json!(-1)),
+            ),
+            (
+                "negative authn_epoch",
+                Replace("authn_epoch", serde_json::json!(-1)),
+            ),
+            (
+                "overflow auth_time",
+                Replace("auth_time", serde_json::json!(u64::MAX)),
+            ),
+            (
+                "overflow authn_epoch",
+                Replace("authn_epoch", serde_json::json!(u64::MAX)),
+            ),
+            (
+                "auth_time after iat",
+                Replace("auth_time", serde_json::json!(NOW + 1)),
+            ),
+        ];
+        let config = minimal_config();
+
+        for (label, mutation) in cases {
+            let mut payload = valid_rss_payload();
+            let claims = payload.as_object_mut().expect("object fixture");
+            match mutation {
+                Remove(name) => {
+                    claims.remove(name);
+                }
+                Replace(name, value) => {
+                    claims.insert(name.to_owned(), value);
+                }
+            }
+            let result = validate_json(&config, &payload);
+            assert!(
+                matches!(result, Err(PdpError::InvalidSignature)),
+                "{label} must fail closed: {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn rss_subject_accepts_only_canonical_lowercase_hyphenated_uuid() {
+        let config = minimal_config();
+        let cases = [
+            ("canonical", CANON_USER, true),
+            ("invalid UUID", "not-a-uuid", false),
+            (
+                "uppercase UUID",
+                "550E8400-E29B-41D4-A716-446655440000",
+                false,
+            ),
+            ("compact UUID", "550e8400e29b41d4a716446655440000", false),
+        ];
+
+        for (label, subject, accepted) in cases {
+            let mut payload = valid_rss_payload();
+            payload["sub"] = serde_json::json!(subject);
+            let result = validate_json(&config, &payload);
+
+            if accepted {
+                let claims = result.expect("canonical RSS subject must be accepted");
+                let (user, _, _) = expect_rss_user(&claims);
+                assert_eq!(user.as_uuid().hyphenated().to_string(), CANON_USER);
+            } else {
+                assert!(
+                    matches!(result, Err(PdpError::InvalidSignature)),
+                    "{label} must fail closed: {result:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn valid_rss_quartet_maps_as_one_typed_grant_shape() {
+        let claims = validate_json(&minimal_config(), &valid_rss_payload()).expect("valid RSS");
+        let (user, tenant, grant) = expect_rss_user(&claims);
+        assert_eq!(user.as_uuid().hyphenated().to_string(), CANON_USER);
+        assert_eq!(tenant.to_string(), CANON_TENANT);
+        assert_eq!(grant.session_id().to_string(), CANON_SID);
+        assert_eq!(grant.token_id().to_string(), CANON_JTI);
+        assert_eq!(grant.auth_time_unix_secs(), (NOW - 30) as u64);
+        assert_eq!(grant.authn_epoch(), 7);
+    }
+
+    #[test]
+    fn rss_access_rejects_zero_lifetime_window() {
+        let mut payload = valid_rss_payload();
+        payload["exp"] = serde_json::json!(NOW);
+
+        assert!(matches!(
+            validate_json(&minimal_config(), &payload),
+            Err(PdpError::InvalidSignature)
+        ));
+    }
+
+    #[test]
+    fn rss_access_rejects_every_non_user_principal_kind() {
+        let config = minimal_config();
+        for kind in ["device", "admin", "superAdmin", "service"] {
+            let mut payload = valid_rss_payload();
+            payload["kind"] = serde_json::json!(kind);
+            let result = validate_json(&config, &payload);
+            assert!(
+                matches!(result, Err(PdpError::InvalidSignature)),
+                "RSS kind {kind} must fail closed: {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn federated_kinds_accept_native_and_rss_extension_shapes_without_local_grant_evidence() {
+        let config = minimal_federated_config();
+        let cases = [
+            ("user", vocab::PrincipalKind::User, true),
+            ("device", vocab::PrincipalKind::Device, true),
+            ("admin", vocab::PrincipalKind::Admin, true),
+            ("superAdmin", vocab::PrincipalKind::SuperAdmin, false),
+        ];
+
+        for (kind_claim, expected_kind, scoped) in cases {
+            for rss_extensions in [false, true] {
+                let mut payload = valid_rss_payload();
+                payload["sub"] = serde_json::json!(format!("external-{kind_claim}"));
+                payload["kind"] = serde_json::json!(kind_claim);
+                let fixture = payload.as_object_mut().expect("object fixture");
+                if !scoped {
+                    fixture.remove("tenant_id");
+                }
+                if !rss_extensions {
+                    for name in ["sid", "jti", "auth_time", "authn_epoch"] {
+                        fixture.remove(name);
+                    }
+                }
+
+                let claims = validate_json(&config, &payload).expect("valid federated shape");
+                let (subject, tenant, kind) = expect_federated(&claims);
+                assert_eq!(subject, format!("external-{kind_claim}"));
+                assert_eq!(kind, expected_kind);
+                assert_eq!(tenant.is_some(), scoped);
+                if let Some(tenant) = tenant {
+                    assert_eq!(tenant.to_string(), CANON_TENANT);
+                }
+            }
+        }
     }
 }

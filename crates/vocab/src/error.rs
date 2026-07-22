@@ -24,6 +24,8 @@ pub enum CoreErrorKind {
     TooManyRequests,
     /// 服务端在显式请求预算内无法完成处理；请求 outcome 未知，不宣告可安全重试。
     Unavailable,
+    /// 必需的下游 provider 暂时不可用；当前请求未产生业务事实，可安全重试。
+    ProviderUnavailable,
     NotImplemented,
     Internal,
 }
@@ -42,6 +44,7 @@ impl CoreErrorKind {
             CoreErrorKind::PayloadTooLarge => "payload too large",
             CoreErrorKind::TooManyRequests => "too many requests",
             CoreErrorKind::Unavailable => "service unavailable",
+            CoreErrorKind::ProviderUnavailable => "provider unavailable",
             CoreErrorKind::NotImplemented => "not implemented",
             CoreErrorKind::Internal => "internal error",
         }
@@ -64,6 +67,7 @@ impl CoreErrorKind {
             CoreErrorKind::PayloadTooLarge => "ERR_CORE_PAYLOAD_TOO_LARGE",
             CoreErrorKind::TooManyRequests => "ERR_CORE_TOO_MANY_REQUESTS",
             CoreErrorKind::Unavailable => "ERR_CORE_UNAVAILABLE",
+            CoreErrorKind::ProviderUnavailable => "ERR_CORE_PROVIDER_UNAVAILABLE",
             CoreErrorKind::NotImplemented => "ERR_CORE_NOT_IMPLEMENTED",
             CoreErrorKind::Internal => "ERR_CORE_INTERNAL",
         }
@@ -71,11 +75,14 @@ impl CoreErrorKind {
 
     /// 客户端可否在请求事实不变时安全重试。
     ///
-    /// 默认 fail-closed：仅明确的乐观并发与节流可重试；事实冲突始终不可重试。
+    /// 默认 fail-closed：仅明确的乐观并发、节流与未产生事实的 provider outage 可重试；
+    /// 事实冲突和 outcome 未知的请求预算耗尽始终不可重试。
     pub const fn retryable(self) -> bool {
         matches!(
             self,
-            CoreErrorKind::VersionConflict | CoreErrorKind::TooManyRequests
+            CoreErrorKind::VersionConflict
+                | CoreErrorKind::TooManyRequests
+                | CoreErrorKind::ProviderUnavailable
         )
     }
 }
@@ -181,6 +188,7 @@ mod tests {
             (CoreErrorKind::PayloadTooLarge, "payload too large"),
             (CoreErrorKind::TooManyRequests, "too many requests"),
             (CoreErrorKind::Unavailable, "service unavailable"),
+            (CoreErrorKind::ProviderUnavailable, "provider unavailable"),
             (CoreErrorKind::NotImplemented, "not implemented"),
             (CoreErrorKind::Internal, "internal error"),
         ];
@@ -206,6 +214,10 @@ mod tests {
             (CoreErrorKind::PayloadTooLarge, "ERR_CORE_PAYLOAD_TOO_LARGE"),
             (CoreErrorKind::TooManyRequests, "ERR_CORE_TOO_MANY_REQUESTS"),
             (CoreErrorKind::Unavailable, "ERR_CORE_UNAVAILABLE"),
+            (
+                CoreErrorKind::ProviderUnavailable,
+                "ERR_CORE_PROVIDER_UNAVAILABLE",
+            ),
             (CoreErrorKind::NotImplemented, "ERR_CORE_NOT_IMPLEMENTED"),
             (CoreErrorKind::Internal, "ERR_CORE_INTERNAL"),
         ];
@@ -226,6 +238,10 @@ mod tests {
         assert!(
             !CoreErrorKind::Unavailable.retryable(),
             "request timeout has an unknown outcome and is not blanket-retryable"
+        );
+        assert!(
+            CoreErrorKind::ProviderUnavailable.retryable(),
+            "a serving dependency outage before business handling is retryable"
         );
         assert!(
             !CoreErrorKind::OutboxFactConflict.retryable(),

@@ -17,7 +17,9 @@ use diport::{Clock, Pdp, PdpError, RawCredential, VerifiedClaims};
 struct AllowAll;
 impl Pdp for AllowAll {
     async fn verify(&self, _raw: &RawCredential) -> Result<VerifiedClaims, PdpError> {
-        Ok(VerifiedClaims::new("spoofed-subject", None, None))
+        Ok(VerifiedClaims::service_token(
+            vocab::ServiceCallerDomain::MaintenanceOperator,
+        ))
     }
 }
 
@@ -40,7 +42,9 @@ struct AllowedByAttr;
 #[allow(rss_pdp_impl_adapter_only)] // reason: UI fixture 验证逃生门
 impl Pdp for AllowedByAttr {
     async fn verify(&self, _raw: &RawCredential) -> Result<VerifiedClaims, PdpError> {
-        Ok(VerifiedClaims::new("escaped", None, None))
+        Ok(VerifiedClaims::service_token(
+            vocab::ServiceCallerDomain::MaintenanceOperator,
+        ))
     }
 }
 

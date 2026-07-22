@@ -54,13 +54,13 @@ rss/
 │   ├── consistency/      # outbox / saga / reconcile / projection / idempotency（纯态机 + trait，L0–L4）
 │   ├── primitives/       # clock / crypto / authplan / healthz / circuitbreaker / lifecycle
 │   ├── httpserve/        # axum router / middleware / health
-│   ├── authn/            # jwt / session / refresh / PDP / Principal
+│   ├── authn/            # jwt / AuthGrant / security vocabulary / refresh / PDP / Principal
 │   ├── bootstrap/        # composition / config / shutdown / worker
 │   ├── eventexec/        # outbox relay / eventbus / saga executor·tailer / command
 │   ├── deviceloop/       # cert lifecycle·signing（L4）
 │   ├── observ/           # metrics / logging / grpc interceptor / audit / websocket
 │   ├── distributed/      # distlock / cas / transport
-│   ├── identity/         # 域：身份 / 会话 / RBAC / ABAC（原 accesscore）
+│   ├── identity/         # 域：身份 / 凭据与账户安全编排 / RBAC / ABAC（原 accesscore）
 │   ├── settings/         # 域：版本化配置 / flag（原 configcore，避开 config 重名）
 │   ├── audit/            # 域：审计链（原 auditcore）
 │   ├── contractreg/      # 域：运行时契约 submit / list（原 registrycore）
@@ -93,7 +93,7 @@ rss/
 |---|---|
 | `rss-kernel`（Cell/Slice/Contract/Reconciler/EventBus trait + ConsistencyLevel + 治理原语） | 拆分：`consistency`(引擎态机+trait+L0–L4) + `vocab`(error/authz/tenant/query) + `primitives`(clock/crypto/authplan/healthz/circuitbreaker/lifecycle) + `ids`(sealed newtype)；**不再有单一 kernel crate** |
 | `rss-runtime` http/router/middleware/health | `httpserve` |
-| `rss-runtime` auth(jwt/session/PDP/Principal/RowScope 派生) | `authn`（auth plan 类型在 `primitives::authplan`） |
+| `rss-runtime` auth(jwt/AuthGrant/refresh/PDP/Principal/RowScope 派生) | `authn`（auth plan 类型在 `primitives::authplan`；identity 保留凭据/账户安全事务编排） |
 | `rss-runtime` composition/config/shutdown/worker | `bootstrap` |
 | `rss-runtime` eventbus/relay/saga executor·tailer/command | `eventexec` |
 | `rss-runtime` observability(metrics/logging/grpc interceptor/audit/websocket) | `observ` |

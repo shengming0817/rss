@@ -13,102 +13,34 @@ use std::time::SystemTime;
 use ids::UserId;
 use vocab::TenantId;
 
-use super::{
-    AccountSecurityMutation, AccountSecurityState, AccountSecurityTransitionError, AccountStatus,
-    AuthGrant, AuthGrantCloseMutation, AuthGrantStateError,
+use authn::{
+    AccountSecurityEventKind, AuthGrant, AuthGrantCloseMutation, AuthGrantId, AuthGrantStateError,
+    CredentialSecurityEventKind, GrantSecurityEventKind,
 };
 
-/// Account-wide credential-security causes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AccountSecurityEventKind {
-    PasswordChanged,
-    PasswordReset,
-    AccountLocked,
-    AccountSuspended,
-    AccountDeactivated,
-    LogoutAll,
-    CredentialDeleted,
-}
+use super::{
+    AccountSecurityMutation, AccountSecurityState, AccountSecurityTransitionError, AccountStatus,
+};
 
-/// Grant-local credential-security causes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum GrantSecurityEventKind {
-    LogoutCurrent,
-    RefreshReuseDetected,
-}
-
-impl AccountSecurityEventKind {
-    /// Apply the sole executable account transition owned by this event kind.
-    pub(crate) fn transition(
-        self,
-        state: AccountSecurityState,
-        occurred_at: SystemTime,
-    ) -> Result<AccountSecurityMutation, AccountSecurityTransitionError> {
-        match self {
-            Self::AccountLocked => state.transition(AccountStatus::Locked, occurred_at),
-            Self::AccountSuspended => state.transition(AccountStatus::Suspended, occurred_at),
-            Self::AccountDeactivated => state.transition(AccountStatus::Deactivated, occurred_at),
-            Self::PasswordChanged
-            | Self::PasswordReset
-            | Self::LogoutAll
-            | Self::CredentialDeleted => state.invalidate(occurred_at),
+fn transition_account_security(
+    kind: AccountSecurityEventKind,
+    state: AccountSecurityState,
+    occurred_at: SystemTime,
+) -> Result<AccountSecurityMutation, AccountSecurityTransitionError> {
+    match kind {
+        AccountSecurityEventKind::AccountLocked => {
+            state.transition(AccountStatus::Locked, occurred_at)
         }
-    }
-}
-
-impl GrantSecurityEventKind {
-    /// Terminal grant state owned by the closed grant-local event kind.
-    pub(crate) const fn terminal_status(self) -> super::AuthGrantStatus {
-        match self {
-            Self::LogoutCurrent => super::AuthGrantStatus::Revoked,
-            Self::RefreshReuseDetected => super::AuthGrantStatus::Compromised,
+        AccountSecurityEventKind::AccountSuspended => {
+            state.transition(AccountStatus::Suspended, occurred_at)
         }
-    }
-}
-
-/// The only credential-security cause model used by domain state and persistence.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CredentialSecurityEventKind {
-    Account(AccountSecurityEventKind),
-    Grant(GrantSecurityEventKind),
-}
-
-impl CredentialSecurityEventKind {
-    /// Stable persistence representation retained by the existing nine-value database constraint.
-    pub const fn as_db_str(self) -> &'static str {
-        match self {
-            Self::Account(AccountSecurityEventKind::PasswordChanged) => "password_changed",
-            Self::Account(AccountSecurityEventKind::PasswordReset) => "password_reset",
-            Self::Account(AccountSecurityEventKind::AccountLocked) => "account_locked",
-            Self::Account(AccountSecurityEventKind::AccountSuspended) => "account_suspended",
-            Self::Account(AccountSecurityEventKind::AccountDeactivated) => "account_deactivated",
-            Self::Account(AccountSecurityEventKind::LogoutAll) => "logout_all",
-            Self::Account(AccountSecurityEventKind::CredentialDeleted) => "credential_deleted",
-            Self::Grant(GrantSecurityEventKind::LogoutCurrent) => "logout_current",
-            Self::Grant(GrantSecurityEventKind::RefreshReuseDetected) => "refresh_reuse_detected",
+        AccountSecurityEventKind::AccountDeactivated => {
+            state.transition(AccountStatus::Deactivated, occurred_at)
         }
-    }
-
-    /// Parse the stable persistence representation, rejecting all values outside the closed set.
-    pub fn from_db_str(raw: &str) -> Option<Self> {
-        match raw {
-            "password_changed" => Some(Self::Account(AccountSecurityEventKind::PasswordChanged)),
-            "password_reset" => Some(Self::Account(AccountSecurityEventKind::PasswordReset)),
-            "account_locked" => Some(Self::Account(AccountSecurityEventKind::AccountLocked)),
-            "account_suspended" => Some(Self::Account(AccountSecurityEventKind::AccountSuspended)),
-            "account_deactivated" => {
-                Some(Self::Account(AccountSecurityEventKind::AccountDeactivated))
-            }
-            "logout_all" => Some(Self::Account(AccountSecurityEventKind::LogoutAll)),
-            "credential_deleted" => {
-                Some(Self::Account(AccountSecurityEventKind::CredentialDeleted))
-            }
-            "logout_current" => Some(Self::Grant(GrantSecurityEventKind::LogoutCurrent)),
-            "refresh_reuse_detected" => {
-                Some(Self::Grant(GrantSecurityEventKind::RefreshReuseDetected))
-            }
-            _ => None,
-        }
+        AccountSecurityEventKind::PasswordChanged
+        | AccountSecurityEventKind::PasswordReset
+        | AccountSecurityEventKind::LogoutAll
+        | AccountSecurityEventKind::CredentialDeleted => state.invalidate(occurred_at),
     }
 }
 
@@ -154,7 +86,7 @@ enum CredentialSecurityTarget {
     },
     Grant {
         user_id: UserId,
-        grant_id: super::AuthGrantId,
+        grant_id: AuthGrantId,
     },
 }
 
@@ -172,7 +104,7 @@ impl CredentialSecurityTarget {
         }
     }
 
-    fn grant_id(&self) -> Option<&super::AuthGrantId> {
+    fn grant_id(&self) -> Option<&AuthGrantId> {
         match self {
             Self::Subject { .. } => None,
             Self::Grant { grant_id, .. } => Some(grant_id),
@@ -235,7 +167,7 @@ impl ResolvedCredentialSecurityTarget {
         target_ref: CredentialSecurityTargetRef,
         kind: CredentialSecurityTargetKind,
         user_id: UserId,
-        grant_id: Option<super::AuthGrantId>,
+        grant_id: Option<AuthGrantId>,
     ) -> Result<Self, CredentialSecurityTargetHydrationError> {
         let target = match (kind, grant_id) {
             (CredentialSecurityTargetKind::Subject, None) => {
@@ -274,7 +206,7 @@ impl ResolvedCredentialSecurityTarget {
         self.target.user_id()
     }
 
-    pub fn grant_id(&self) -> Option<&super::AuthGrantId> {
+    pub fn grant_id(&self) -> Option<&AuthGrantId> {
         self.target.grant_id()
     }
 }
@@ -346,7 +278,7 @@ impl CredentialSecurityEvent {
         self.target.user_id()
     }
 
-    pub fn grant_id(&self) -> Option<&super::AuthGrantId> {
+    pub fn grant_id(&self) -> Option<&AuthGrantId> {
         self.target.grant_id()
     }
 
@@ -393,7 +325,7 @@ impl AccountCredentialSecurityCommand {
         occurred_at: SystemTime,
     ) -> Result<Self, AccountSecurityTransitionError> {
         let event = CredentialSecurityEvent::from_account(&state, kind, occurred_at);
-        let mutation = kind.transition(state, occurred_at)?;
+        let mutation = transition_account_security(kind, state, occurred_at)?;
         Ok(Self {
             mutation,
             event,
@@ -535,10 +467,8 @@ pub struct CredentialSecurityReceipt(());
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::domain::{
-        AccountSecuritySnapshot, AccountSecurityVersion, AuthGrantId, AuthGrantSnapshot,
-        AuthGrantStatus, AuthnEpoch,
-    };
+    use crate::domain::{AccountSecuritySnapshot, AccountSecurityVersion};
+    use authn::{AuthGrantId, AuthGrantSnapshot, AuthGrantStatus, AuthnEpoch};
     use std::time::Duration;
 
     fn at(seconds: u64) -> SystemTime {
@@ -680,7 +610,7 @@ mod tests {
 
     fn active_grant() -> AuthGrant {
         AuthGrant::hydrate(AuthGrantSnapshot {
-            id: AuthGrantId::hydrate("grant-sensitive-id"),
+            id: AuthGrantId::hydrate("7d65e5f2-e716-4c4e-8e4c-6f7ab1754ef8").expect("grant id"),
             tenant: tenant(),
             user_id: user(),
             auth_time: at(1),
@@ -722,7 +652,7 @@ mod tests {
             assert_eq!(command.event().user_id(), user());
             assert_eq!(
                 command.event().grant_id().map(AuthGrantId::as_str),
-                Some("grant-sensitive-id")
+                Some("7d65e5f2-e716-4c4e-8e4c-6f7ab1754ef8")
             );
             assert_eq!(command.mutation().next().status(), expected_status);
             assert_eq!(command.mutation().next().closed_at(), Some(at(20)));
@@ -759,7 +689,7 @@ mod tests {
             grant_ref.clone(),
             CredentialSecurityTargetKind::Grant,
             user(),
-            Some(AuthGrantId::hydrate("grant-sensitive-id")),
+            Some(AuthGrantId::hydrate("7d65e5f2-e716-4c4e-8e4c-6f7ab1754ef8").expect("grant id")),
         )
         .expect("grant row");
         assert_eq!(grant.kind(), CredentialSecurityTargetKind::Grant);
@@ -770,7 +700,9 @@ mod tests {
                 subject_ref,
                 CredentialSecurityTargetKind::Subject,
                 user(),
-                Some(AuthGrantId::hydrate("unexpected")),
+                Some(
+                    AuthGrantId::hydrate("d8dbe849-1d7e-49aa-b68a-a7b41ed252df").expect("grant id"),
+                ),
             )
             .err(),
             Some(CredentialSecurityTargetHydrationError::UnexpectedGrantId)

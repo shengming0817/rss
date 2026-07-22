@@ -13,7 +13,9 @@ impl Pdp for NonSyncPdp {
         &self,
         _raw: &RawCredential,
     ) -> impl Future<Output = Result<VerifiedClaims, PdpError>> + Send {
-        ready(Ok(VerifiedClaims::new("subject", None, None)))
+        ready(Ok(VerifiedClaims::service_token(
+            vocab::ServiceCallerDomain::MaintenanceOperator,
+        )))
     }
 }
 

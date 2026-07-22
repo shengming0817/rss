@@ -40,6 +40,7 @@ use wiremock::{Mock, MockServer, Request as MockRequest, Respond, ResponseTempla
 
 /// 合法测试租户（`user` kind 需 tenant；canonical UUID，与 oidc 验签侧默认 `tenant_id` claim 对齐）。
 const TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
+const USER_ID: &str = "550e8400-e29b-41d4-a716-446655440000";
 const ISS: &str = "https://issuer.test";
 const AUD: &str = "rss-test";
 const NOW: i64 = 1_700_000_000;
@@ -151,19 +152,17 @@ fn vault_jwt_issuer(vault_uri: &str) -> authn::JwtIssuer<diport::RssAccessProfil
     .expect("jwt issuer config")
 }
 
-/// 真 `OidcProvider`（经静态 profile 装配），信任指定 kind + mock 私钥对应的 ES256 公钥。
+/// 真 `OidcProvider`（经静态 RSS User-only profile 装配）。
 #[allow(clippy::expect_used)]
-fn oidc_provider(trusted_kinds: &str) -> OidcProvider<diport::RssAccessProfile> {
+fn oidc_provider() -> OidcProvider<diport::RssAccessProfile> {
     let es256_b64 = B64_URL.encode(sec1(&sk_jwt()));
     let keys = [KeyedEs256StaticKey {
         key_id: KEY_ID,
         sec1_b64url: &es256_b64,
     }];
-    let trusted_kinds = trusted_kinds.split(',').collect::<Vec<_>>();
     rss_access_provider_from_static_config(RssAccessStaticProviderConfig {
         issuer: ISS,
         audience: AUD,
-        trusted_kinds: &trusted_kinds,
         keys: &keys,
         retirement_schedule: None,
         clock: Box::new(FixedClock(NOW)),
@@ -173,7 +172,7 @@ fn oidc_provider(trusted_kinds: &str) -> OidcProvider<diport::RssAccessProfile> 
 
 /// 经生产 `apply_verify_bridge` 验 `token`：返回 `/protected`（Require Jwt）的状态码。
 #[allow(clippy::unwrap_used, clippy::expect_used)]
-async fn verify_status(token: &str, trusted_kinds: &str) -> StatusCode {
+async fn verify_status(token: &str) -> StatusCode {
     let routes = test_routes(|rb| {
         rb.mount_primary_raw_for_test(
             PrimaryRoute::permission(
@@ -191,8 +190,11 @@ async fn verify_status(token: &str, trusted_kinds: &str) -> StatusCode {
     let plan = AuthPlan::new(ListenerKind::Primary, AuthScheme::RssAccessToken).expect("plan");
     let authed =
         httpserve::finalize_primary_auth(routes, plan, allow_authorizer()).expect("finalize_auth");
-    let app =
-        apply_rss_access_verify_bridge_for_test(authed, Arc::new(oidc_provider(trusted_kinds)));
+    let app = apply_rss_access_verify_bridge_for_test(
+        authed,
+        Arc::new(oidc_provider()),
+        runtime::test_support::always_current_access_grants(),
+    );
     let req = axum::http::Request::builder()
         .method(Method::GET)
         .uri("/protected")
@@ -221,27 +223,26 @@ async fn vault_signed_access_jwt_verifies_via_oidc_bridge() {
         .mount(&server)
         .await;
 
-    // 2. 经 vault Signer（mock）铸 user/device/superAdmin access JWT。
+    // 2. 经 vault Signer（mock）从完整 AuthGrant 铸 RSS User access JWT。
     let issuer = vault_jwt_issuer(&server.uri());
     let tenant = vocab::TenantId::parse(TENANT).expect("canonical tenant");
+    let grant = authn::AuthGrant::new_active(
+        tenant,
+        ids::UserId::parse(USER_ID).expect("canonical user id"),
+        UNIX_EPOCH + Duration::from_secs((NOW - 60) as u64),
+        authn::AuthnEpoch::hydrate(5).expect("valid epoch"),
+        UNIX_EPOCH + Duration::from_secs((NOW + 3_600) as u64),
+        UNIX_EPOCH + Duration::from_secs((NOW - 30) as u64),
+    )
+    .expect("active grant");
     let user = issuer
-        .issue_access(authn::JwtAccessPrincipal::User {
-            subject: "alice",
-            tenant,
-        })
+        .issue_access(
+            grant
+                .access_issue_input()
+                .expect("active grant issue input"),
+        )
         .await
         .expect("vault-signed user mint ok");
-    let device = issuer
-        .issue_access(authn::JwtAccessPrincipal::Device {
-            subject: "device-a",
-            tenant,
-        })
-        .await
-        .expect("vault-signed device mint ok");
-    let super_admin = issuer
-        .issue_access(authn::JwtAccessPrincipal::SuperAdmin { subject: "root" })
-        .await
-        .expect("vault-signed super-admin mint ok");
 
     // 3. 权威 exp = NOW + ttl（与紧凑串内 exp claim 同源同次计算）。
     assert_eq!(
@@ -251,34 +252,16 @@ async fn vault_signed_access_jwt_verifies_via_oidc_bridge() {
     );
 
     // 4. vault-签的 access JWT 经真 oidc 桥验签 → 200（sign→verify 闭环成立）。
-    for (token, label) in [
-        (user.as_str(), "user"),
-        (device.as_str(), "device"),
-        (super_admin.as_str(), "superAdmin"),
-    ] {
-        assert_eq!(
-            verify_status(token, "user,device,superAdmin").await,
-            StatusCode::OK,
-            "vault Transit 签的 {label} access JWT 须经 oidc 验签放行"
-        );
-    }
-
-    // 5. trusted kind 缺失须 fail-closed。
     assert_eq!(
-        verify_status(device.as_str(), "user,superAdmin").await,
-        StatusCode::UNAUTHORIZED,
-        "device kind 未被 trust 时须拒绝"
-    );
-    assert_eq!(
-        verify_status(super_admin.as_str(), "user,device").await,
-        StatusCode::UNAUTHORIZED,
-        "superAdmin kind 未被 trust 时须拒绝"
+        verify_status(user.as_str()).await,
+        StatusCode::OK,
+        "vault Transit 签的 grant-bound User access JWT 须经 oidc 验签放行"
     );
 
-    // 6. anti-vacuity：篡改签名段 → 验签失败 → 401（证验签真实生效、非恒放行）。
+    // 5. anti-vacuity：篡改签名段 → 验签失败 → 401（证验签真实生效、非恒放行）。
     let tampered = format!("{}x", user.as_str());
     assert_eq!(
-        verify_status(&tampered, "user,device,superAdmin").await,
+        verify_status(&tampered).await,
         StatusCode::UNAUTHORIZED,
         "篡改签名的 JWT 须 401（验签非恒真）"
     );

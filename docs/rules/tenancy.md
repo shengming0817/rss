@@ -79,13 +79,14 @@ service-token tenant MAC 仍按上一节治理。
 
 ## Principal claim source
 
-生产 RSS Access token 只能经 `JwtIssuer<RssAccessProfile>` typed issuer 签发；Federated Access 只有 typed
-verifier，没有 issuer。User / Device / Admin variant
-必须携带 `TenantId` 并写入 `tenant_id` claim；SuperAdmin variant 不暴露 tenant 字段，签出的
-`superAdmin` access token 没有 ambient tenant，也不会直接产生 `RowScope::All`。service-token 不进入
-access issuer，单独走 tenant-bound HS256 Service Token profile，并把 canonical `X-Tenant-ID` 纳入 MAC
-输入。RSS/Federated Access 的 User/Device/Admin 缺 `tenant_id` 必须拒绝，SuperAdmin 携 tenant claim 也必须
-拒绝；listener profile、issuer、audience 与 ES256 key source 共同决定 trust domain。
+生产 RSS Access token 只能经 `JwtIssuer<RssAccessProfile>` typed issuer 签发，并且只接受 User：必须携带
+`TenantId` 与完整 `sid` / `jti` / `auth_time` / `authn_epoch` grant quartet。Federated Access 只有 typed
+verifier，没有 issuer；其 User / Device / Admin variant 必须携带 `TenantId` 并写入 `tenant_id` claim，
+SuperAdmin variant 不暴露 tenant 字段。Federated `superAdmin` access token 没有 ambient tenant，也不会直接
+产生 `RowScope::All`。service-token 不进入 access issuer，单独走 tenant-bound HS256 Service Token profile，
+并把 canonical `X-Tenant-ID` 纳入 MAC 输入。Federated Access 的 User/Device/Admin 缺 `tenant_id` 必须拒绝，
+SuperAdmin 携 tenant claim 也必须拒绝；listener profile、issuer、audience 与 ES256 key source 共同决定
+trust domain。
 
 JWT tenant claim 在 auth 边界解析并写入 context。service principal 无 tenant。
 service-token principal 自身同样无 tenant；只有验签通过的 service-token MAC-bound canonical

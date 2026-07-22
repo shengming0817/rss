@@ -30,7 +30,7 @@
 //!   `ServerRequestBudget` / request cancellation drop 包含 verifier 的整条请求 future；bridge 不拥有局部
 //!   timeout，无成功产物即不注证据，保持 fail-closed。
 //! - **无 PII 埋点**：成功记 `authz.decision=allow` + `principal.kind`（[`vocab::PrincipalKind`] 脱敏枚举）；
-//!   失败记 `authz.decision=deny` + 七个固定 `authz.deny_reason` 标签（见 [`deny_reason`]）+ `AuthnError`
+//!   失败记 `authz.decision=deny` + 九个固定 `authz.deny_reason` 标签（见 [`deny_reason`]）+ `AuthnError`
 //!   变体；**绝不**记 token / subject / claims。
 //!
 //! `Authenticated::new` callsite 由 `rss_authenticated_callsite` dylint 限组合根
@@ -55,7 +55,10 @@ use vocab::{PrincipalKind, TenantId};
 /// The variant is the only runtime source of the required scheme, trusted credential profile, and
 /// authn funnel. A caller cannot pass a provider and scheme as independently varying values.
 pub(crate) enum ProfileBinding {
-    RssAccess(Arc<oidc::OidcProvider<diport::RssAccessProfile>>),
+    RssAccess {
+        provider: Arc<oidc::OidcProvider<diport::RssAccessProfile>>,
+        grants: Arc<identity::AuthGrantValidationService>,
+    },
     FederatedAccess(Arc<oidc::OidcProvider<diport::FederatedAccessProfile>>),
     ServiceToken(Arc<oidc::OidcProvider<diport::ServiceTokenProfile>>),
 }
@@ -63,7 +66,10 @@ pub(crate) enum ProfileBinding {
 impl Clone for ProfileBinding {
     fn clone(&self) -> Self {
         match self {
-            Self::RssAccess(provider) => Self::RssAccess(Arc::clone(provider)),
+            Self::RssAccess { provider, grants } => Self::RssAccess {
+                provider: Arc::clone(provider),
+                grants: Arc::clone(grants),
+            },
             Self::FederatedAccess(provider) => Self::FederatedAccess(Arc::clone(provider)),
             Self::ServiceToken(provider) => Self::ServiceToken(Arc::clone(provider)),
         }
@@ -73,7 +79,7 @@ impl Clone for ProfileBinding {
 impl ProfileBinding {
     pub(crate) const fn auth_scheme(&self) -> primitives::AuthScheme {
         match self {
-            Self::RssAccess(_) => primitives::AuthScheme::RssAccessToken,
+            Self::RssAccess { .. } => primitives::AuthScheme::RssAccessToken,
             Self::FederatedAccess(_) => primitives::AuthScheme::FederatedAccessToken,
             Self::ServiceToken(_) => primitives::AuthScheme::ServiceToken,
         }
@@ -81,7 +87,7 @@ impl ProfileBinding {
 
     pub(crate) const fn required_scheme(&self) -> RequiredScheme {
         match self {
-            Self::RssAccess(_) => RequiredScheme::RssAccessToken,
+            Self::RssAccess { .. } => RequiredScheme::RssAccessToken,
             Self::FederatedAccess(_) => RequiredScheme::FederatedAccessToken,
             Self::ServiceToken(_) => RequiredScheme::ServiceToken,
         }
@@ -89,7 +95,7 @@ impl ProfileBinding {
 
     const fn profile(&self) -> diport::TokenProfile {
         match self {
-            Self::RssAccess(_) => diport::TokenProfile::RssAccess,
+            Self::RssAccess { .. } => diport::TokenProfile::RssAccess,
             Self::FederatedAccess(_) => diport::TokenProfile::FederatedAccess,
             Self::ServiceToken(_) => diport::TokenProfile::ServiceToken,
         }
@@ -99,6 +105,7 @@ impl ProfileBinding {
 struct VerifiedPrincipal {
     principal: authn::Principal,
     ambient_tenant: Option<TenantId>,
+    verified_jwt: Option<Arc<authn::VerifiedJwt>>,
 }
 
 enum VerifyFailure {
@@ -125,8 +132,9 @@ pub(crate) fn apply_mtls_verify_bridge(routes: AuthenticatedRoutes) -> Authentic
 pub fn apply_rss_access_verify_bridge_for_test(
     routes: AuthenticatedRoutes,
     provider: Arc<oidc::OidcProvider<diport::RssAccessProfile>>,
+    grants: Arc<identity::AuthGrantValidationService>,
 ) -> AuthenticatedRoutes {
-    apply_verify_bridge(routes, ProfileBinding::RssAccess(provider))
+    apply_verify_bridge(routes, ProfileBinding::RssAccess { provider, grants })
 }
 
 /// Integration seam that preserves the production federated profile/provider coupling.
@@ -155,7 +163,10 @@ pub fn apply_mtls_verify_bridge_for_test(routes: AuthenticatedRoutes) -> Authent
 
 #[cfg(feature = "integration")]
 enum TestProfileBinding {
-    RssAccess(Arc<diport::DynPdp<'static>>),
+    RssAccess {
+        provider: Arc<diport::DynPdp<'static>>,
+        grants: Arc<identity::AuthGrantValidationService>,
+    },
     ServiceToken(Arc<diport::DynPdp<'static>>),
 }
 
@@ -163,7 +174,10 @@ enum TestProfileBinding {
 impl Clone for TestProfileBinding {
     fn clone(&self) -> Self {
         match self {
-            Self::RssAccess(provider) => Self::RssAccess(Arc::clone(provider)),
+            Self::RssAccess { provider, grants } => Self::RssAccess {
+                provider: Arc::clone(provider),
+                grants: Arc::clone(grants),
+            },
             Self::ServiceToken(provider) => Self::ServiceToken(Arc::clone(provider)),
         }
     }
@@ -173,14 +187,14 @@ impl Clone for TestProfileBinding {
 impl TestProfileBinding {
     const fn profile(&self) -> diport::TokenProfile {
         match self {
-            Self::RssAccess(_) => diport::TokenProfile::RssAccess,
+            Self::RssAccess { .. } => diport::TokenProfile::RssAccess,
             Self::ServiceToken(_) => diport::TokenProfile::ServiceToken,
         }
     }
 
     const fn required_scheme(&self) -> RequiredScheme {
         match self {
-            Self::RssAccess(_) => RequiredScheme::RssAccessToken,
+            Self::RssAccess { .. } => RequiredScheme::RssAccessToken,
             Self::ServiceToken(_) => RequiredScheme::ServiceToken,
         }
     }
@@ -191,13 +205,17 @@ impl TestProfileBinding {
 pub fn apply_rss_access_pdp_bridge_for_test<P>(
     routes: AuthenticatedRoutes,
     provider: P,
+    grants: Arc<identity::AuthGrantValidationService>,
 ) -> AuthenticatedRoutes
 where
     P: diport::Pdp + Send + Sync + 'static,
 {
     apply_test_profile_bridge(
         routes,
-        TestProfileBinding::RssAccess(diport::DynPdp::new_arc(provider)),
+        TestProfileBinding::RssAccess {
+            provider: diport::DynPdp::new_arc(provider),
+            grants,
+        },
     )
 }
 
@@ -237,15 +255,16 @@ async fn verify_principal(
     }
 
     match binding {
-        ProfileBinding::RssAccess(provider) => {
+        ProfileBinding::RssAccess { provider, .. } => {
             let pdp = diport::DynPdp::from_ref(provider.as_ref());
             authn::verify_rss_access(&token, pdp)
                 .await
-                .map(|(_, principal)| {
+                .map(|(verified, principal)| {
                     let ambient_tenant = principal.tenant();
                     VerifiedPrincipal {
                         principal,
                         ambient_tenant,
+                        verified_jwt: Some(Arc::new(verified)),
                     }
                 })
                 .map_err(VerifyFailure::Authn)
@@ -254,11 +273,12 @@ async fn verify_principal(
             let pdp = diport::DynPdp::from_ref(provider.as_ref());
             authn::verify_federated_access(&token, pdp)
                 .await
-                .map(|(_, principal)| {
+                .map(|(verified, principal)| {
                     let ambient_tenant = principal.tenant();
                     VerifiedPrincipal {
                         principal,
                         ambient_tenant,
+                        verified_jwt: Some(Arc::new(verified)),
                     }
                 })
                 .map_err(VerifyFailure::Authn)
@@ -273,6 +293,7 @@ async fn verify_principal(
                 .map(|(_, principal)| VerifiedPrincipal {
                     principal,
                     ambient_tenant: Some(tenant),
+                    verified_jwt: None,
                 })
                 .map_err(VerifyFailure::Authn)
         }
@@ -284,9 +305,17 @@ enum MintEvidenceOutcome {
         evidence: Authenticated,
         ctx: Option<runctx::AppCtx>,
         principal: Arc<authn::Principal>,
+        verified_jwt: Option<Arc<authn::VerifiedJwt>>,
     },
     Rejected,
     ProviderUnavailable,
+}
+
+struct AllowedEvidence {
+    evidence: Authenticated,
+    ctx: Option<runctx::AppCtx>,
+    principal: Arc<authn::Principal>,
+    verified_jwt: Option<Arc<authn::VerifiedJwt>>,
 }
 
 /// 验签 + 埋点 → 铸 [`Authenticated`] 证据，或返回拒绝/安全关键 provider 故障。
@@ -303,15 +332,26 @@ async fn mint_evidence(
 ) -> MintEvidenceOutcome {
     match verify_principal(binding, credential).await {
         Ok(verified) => {
-            let Some((evidence, ctx, principal)) =
-                allow_evidence(binding.required_scheme(), verified)
+            let current_grant = match validate_current_grant(binding, &verified).await {
+                Ok(current) => current,
+                Err(identity::AccessGrantValidationError::Invalid) => {
+                    log_deny_grant_invalid();
+                    return MintEvidenceOutcome::Rejected;
+                }
+                Err(identity::AccessGrantValidationError::Provider(_)) => {
+                    log_deny_grant_provider_unavailable();
+                    return MintEvidenceOutcome::ProviderUnavailable;
+                }
+            };
+            let Some(allowed) = allow_evidence(binding.required_scheme(), verified, current_grant)
             else {
                 return MintEvidenceOutcome::Rejected;
             };
             MintEvidenceOutcome::Allowed {
-                evidence,
-                ctx,
-                principal,
+                evidence: allowed.evidence,
+                ctx: allowed.ctx,
+                principal: allowed.principal,
+                verified_jwt: allowed.verified_jwt,
             }
         }
         // err = AuthnError 变体（PdpError 经 verify_* 一一保真），脱敏；不产证据 ⇒ enforce fail-closed。
@@ -330,6 +370,24 @@ async fn mint_evidence(
     }
 }
 
+async fn validate_current_grant(
+    binding: &ProfileBinding,
+    verified: &VerifiedPrincipal,
+) -> Result<Option<identity::ValidatedAuthGrant>, identity::AccessGrantValidationError> {
+    let ProfileBinding::RssAccess { grants, .. } = binding else {
+        return Ok(None);
+    };
+    let jwt = verified
+        .verified_jwt
+        .as_ref()
+        .ok_or(identity::AccessGrantValidationError::Invalid)?;
+    let input = jwt
+        .grant_receipt()
+        .ok_or(identity::AccessGrantValidationError::Invalid)?
+        .into_validation_input();
+    grants.validate(input).await.map(Some)
+}
+
 /// allow 分支：埋点（脱敏：仅 decision + principal.kind 枚举，无 subject/token）+ 铸 [`Authenticated`] 证据
 /// + （scoped 主体）经 [`authn::app_ctx`] 派生 ambient [`runctx::AppCtx`]（#1105，ADR-002 §D5）。
 ///
@@ -342,28 +400,58 @@ async fn mint_evidence(
 fn allow_evidence(
     scheme: RequiredScheme,
     verified: VerifiedPrincipal,
-) -> Option<(Authenticated, Option<runctx::AppCtx>, Arc<authn::Principal>)> {
+    current_grant: Option<identity::ValidatedAuthGrant>,
+) -> Option<AllowedEvidence> {
     let principal = Arc::new(verified.principal);
+    let verified_jwt = verified.verified_jwt;
     let kind = principal.kind();
     let tenant = verified.ambient_tenant;
+    let evidence = match (
+        scheme,
+        principal.service_caller_domain(),
+        tenant,
+        current_grant,
+    ) {
+        (RequiredScheme::ServiceToken, Some(caller), Some(tenant), None) => {
+            Authenticated::new_service(tenant, caller)
+        }
+        (RequiredScheme::RssAccessToken, None, Some(tenant), Some(current))
+            if kind == PrincipalKind::User =>
+        {
+            Authenticated::new_rss_user(
+                current_auth_grant(current),
+                principal.audit_subject(),
+                tenant,
+            )
+        }
+        (RequiredScheme::FederatedAccessToken, None, tenant, None) => {
+            Authenticated::new_federated(kind, principal.audit_subject(), tenant)
+        }
+        _ => return None,
+    };
     // `scoped_principal`（闭值 bool，非 PII）：有已认证 tenant source（JWT claim 或 service-token MAC header）
     // ⇒ 桥附 PendingScopeCtx、enforce 在 Require-Allow 后可建 ambient scope；无 tenant source ⇒ false。
+    // 仅在 profile shape 与 durable grant 证据都封印成功后记 allow，避免不可达的 shape 错误污染成功指标。
     tracing::debug!(
         authz.decision = "allow",
         principal.kind = ?kind,
         scoped_principal = tenant.is_some(),
         "verify-bridge"
     );
-    let evidence = match (principal.service_caller_domain(), tenant) {
-        (Some(caller), Some(tenant)) => Authenticated::new_service(tenant, caller),
-        (None, tenant) => Authenticated::new(scheme, kind, principal.audit_subject(), tenant),
-        _ => return None,
-    };
     let ctx = tenant.map(|tenant| {
         let facet: Arc<dyn runctx::PrincipalFacet> = principal.clone();
         runctx::RequestCtx::new(tenant, facet)
     });
-    Some((evidence, ctx, principal))
+    Some(AllowedEvidence {
+        evidence,
+        ctx,
+        principal,
+        verified_jwt,
+    })
+}
+
+fn current_auth_grant(_validated: identity::ValidatedAuthGrant) -> httpserve::CurrentAuthGrant {
+    httpserve::CurrentAuthGrant::new()
 }
 
 /// mTLS allow 分支：只消费 httpd mTLS listener 在 TLS handshake 后注入的 [`authn::VerifiedMtlsPeer`]。
@@ -375,12 +463,7 @@ fn mtls_evidence(req: &Request) -> Option<Authenticated> {
         scoped_principal = false,
         "verify-bridge-mtls"
     );
-    Some(Authenticated::new(
-        RequiredScheme::Mtls,
-        PrincipalKind::Service,
-        peer.spiffe_id().as_str(),
-        None,
-    ))
+    Some(Authenticated::new_mtls(peer.spiffe_id().as_str()))
 }
 
 /// 验签失败 deny 埋点（`AuthnError` 变体 + 闭值 `authz.deny_reason`，脱敏）。
@@ -394,7 +477,7 @@ fn log_deny_verify(err: &authn::AuthnError) {
 }
 
 // deny 告警分级闭值集（observability.md「告警 / metrics label 闭值集」：低基数、无 PII）——bridge deny 路
-// `authz.deny_reason` 仅取此 8 值（#1275，spec SC-006/FR-009）：
+// `authz.deny_reason` 仅取此 9 值（#1275，spec SC-006/FR-009）：
 //   `SIGNATURE_INVALID` ← `TokenInvalid` = verifier 报告的**凭据签名/MAC/结构失败**（疑似攻击）；
 //   `UNTRUSTED`         ← `TokenUntrusted` = iss/aud/key-path 不受信（疑似配置错）；
 //   `EXPIRED`           ← `TokenExpired` = 时间窗越界；
@@ -403,6 +486,7 @@ fn log_deny_verify(err: &authn::AuthnError) {
 //   `PROVIDER_UNAVAILABLE` ← replay store 等安全关键 provider 暂不可用（503，可重试）；
 //   `TENANT_BINDING_INVALID` ← service-token tenant binding 缺失 / 非法；
 //   `MTLS_PEER_MISSING`      ← mTLS listener 缺 transport 层已验证 peer evidence；
+//   `GRANT_INVALID`          ← RSS grant/account durable binding 已失效；
 //   `INVALID`           ← `#[non_exhaustive]` 未来 / 本桥不可达变体（`Forbidden`）fail-safe 兜底。
 pub(crate) const DENY_REASON_SIGNATURE_INVALID: &str = "signature_invalid";
 pub(crate) const DENY_REASON_UNTRUSTED: &str = "untrusted";
@@ -411,6 +495,7 @@ pub(crate) const DENY_REASON_PRINCIPAL_INVALID: &str = "principal_invalid";
 pub(crate) const DENY_REASON_PROVIDER_UNAVAILABLE: &str = "provider_unavailable";
 pub(crate) const DENY_REASON_TENANT_BINDING_INVALID: &str = "tenant_binding_invalid";
 pub(crate) const DENY_REASON_MTLS_PEER_MISSING: &str = "mtls_peer_missing";
+pub(crate) const DENY_REASON_GRANT_INVALID: &str = "grant_invalid";
 pub(crate) const DENY_REASON_INVALID: &str = "invalid";
 
 /// `AuthnError` 变体 → deny 告警分级闭值标签（无 PII；闭值集见上 `DENY_REASON_*`）。
@@ -430,6 +515,22 @@ fn log_deny_tenant_binding_invalid() {
     tracing::warn!(
         authz.decision = "deny",
         authz.deny_reason = DENY_REASON_TENANT_BINDING_INVALID,
+        "verify-bridge"
+    );
+}
+
+fn log_deny_grant_invalid() {
+    tracing::warn!(
+        authz.decision = "deny",
+        authz.deny_reason = DENY_REASON_GRANT_INVALID,
+        "verify-bridge"
+    );
+}
+
+fn log_deny_grant_provider_unavailable() {
+    tracing::warn!(
+        authz.decision = "deny",
+        authz.deny_reason = DENY_REASON_PROVIDER_UNAVAILABLE,
         "verify-bridge"
     );
 }
@@ -471,9 +572,13 @@ async fn verify(State(binding): State<ProfileBinding>, mut req: Request, next: N
                     evidence,
                     ctx,
                     principal,
+                    verified_jwt,
                 } => {
                     req.extensions_mut().insert(evidence);
                     req.extensions_mut().insert(principal);
+                    if let Some(verified_jwt) = verified_jwt {
+                        req.extensions_mut().insert(verified_jwt);
+                    }
                     // **scope 不在桥建立**：把 scoped 主体的 AppCtx 经 `PendingScopeCtx` extension 传给内层 enforce，
                     // 由其在 `Require`-Allow（认证路由放行，非 Public opt-out）后建 `runctx::scope`——使 ambient scope
                     // 与 route auth 决策对齐（#1105 F2，验签桥在 enforce 外层、运行期读不到 opt_out）。跨租户主体
@@ -485,7 +590,7 @@ async fn verify(State(binding): State<ProfileBinding>, mut req: Request, next: N
                 }
                 MintEvidenceOutcome::Rejected => {}
                 MintEvidenceOutcome::ProviderUnavailable => {
-                    return httpserve::error::service_unavailable(&request_id);
+                    return httpserve::error::provider_unavailable(&request_id);
                 }
             }
         }
@@ -512,12 +617,15 @@ async fn mint_test_evidence(
         return MintEvidenceOutcome::Rejected;
     }
     let verified = match binding {
-        TestProfileBinding::RssAccess(provider) => authn::verify_rss_access(&token, provider)
-            .await
-            .map(|(_, principal)| VerifiedPrincipal {
-                ambient_tenant: principal.tenant(),
-                principal,
-            }),
+        TestProfileBinding::RssAccess { provider, .. } => {
+            authn::verify_rss_access(&token, provider)
+                .await
+                .map(|(verified, principal)| VerifiedPrincipal {
+                    ambient_tenant: principal.tenant(),
+                    principal,
+                    verified_jwt: Some(Arc::new(verified)),
+                })
+        }
         TestProfileBinding::ServiceToken(provider) => {
             let Some((tenant_binding, tenant)) = service_tenant else {
                 return MintEvidenceOutcome::Rejected;
@@ -527,20 +635,32 @@ async fn mint_test_evidence(
                 .map(|(_, principal)| VerifiedPrincipal {
                     principal,
                     ambient_tenant: Some(tenant),
+                    verified_jwt: None,
                 })
         }
     };
     match verified {
         Ok(verified) => {
-            let Some((evidence, ctx, principal)) =
-                allow_evidence(binding.required_scheme(), verified)
+            let current_grant = match validate_current_test_grant(binding, &verified).await {
+                Ok(current) => current,
+                Err(identity::AccessGrantValidationError::Invalid) => {
+                    log_deny_grant_invalid();
+                    return MintEvidenceOutcome::Rejected;
+                }
+                Err(identity::AccessGrantValidationError::Provider(_)) => {
+                    log_deny_grant_provider_unavailable();
+                    return MintEvidenceOutcome::ProviderUnavailable;
+                }
+            };
+            let Some(allowed) = allow_evidence(binding.required_scheme(), verified, current_grant)
             else {
                 return MintEvidenceOutcome::Rejected;
             };
             MintEvidenceOutcome::Allowed {
-                evidence,
-                ctx,
-                principal,
+                evidence: allowed.evidence,
+                ctx: allowed.ctx,
+                principal: allowed.principal,
+                verified_jwt: allowed.verified_jwt,
             }
         }
         Err(err) => {
@@ -552,6 +672,25 @@ async fn mint_test_evidence(
             }
         }
     }
+}
+
+#[cfg(feature = "integration")]
+async fn validate_current_test_grant(
+    binding: &TestProfileBinding,
+    verified: &VerifiedPrincipal,
+) -> Result<Option<identity::ValidatedAuthGrant>, identity::AccessGrantValidationError> {
+    let TestProfileBinding::RssAccess { grants, .. } = binding else {
+        return Ok(None);
+    };
+    let jwt = verified
+        .verified_jwt
+        .as_ref()
+        .ok_or(identity::AccessGrantValidationError::Invalid)?;
+    let input = jwt
+        .grant_receipt()
+        .ok_or(identity::AccessGrantValidationError::Invalid)?
+        .into_validation_input();
+    grants.validate(input).await.map(Some)
 }
 
 #[cfg(feature = "integration")]
@@ -575,9 +714,13 @@ async fn verify_test_profile(
                     evidence,
                     ctx,
                     principal,
+                    verified_jwt,
                 } => {
                     req.extensions_mut().insert(evidence);
                     req.extensions_mut().insert(principal);
+                    if let Some(verified_jwt) = verified_jwt {
+                        req.extensions_mut().insert(verified_jwt);
+                    }
                     if let Some(ctx) = ctx {
                         req.extensions_mut()
                             .insert(httpserve::PendingScopeCtx::new(ctx));
@@ -585,7 +728,7 @@ async fn verify_test_profile(
                 }
                 MintEvidenceOutcome::Rejected => {}
                 MintEvidenceOutcome::ProviderUnavailable => {
-                    return httpserve::error::service_unavailable(&request_id);
+                    return httpserve::error::provider_unavailable(&request_id);
                 }
             }
         }

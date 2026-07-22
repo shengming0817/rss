@@ -11,7 +11,7 @@
 //!   `evaluate_abac`（deny-overrides，fail-closed）。【PR2 实现】
 //! - `account`：`Credential` + `AccountLockout`（凭据 / 临时暴破锁 / CAS）。【PR3 实现】
 //! - `account_security`：durable account lifecycle + authentication epoch。【#1833】
-//! - `auth_grant`：认证授权根、状态机与关闭转换。【#1834】
+//! - `authn::grant`：认证授权根、状态机与关闭转换。【#1835】
 //! - `refresh`：与 AuthGrant 强绑定的刷新族及轮换转换。
 //!
 //! # newtype funnel 校验（严格白名单，fail-closed）
@@ -32,7 +32,6 @@
 mod abac;
 mod account;
 mod account_security;
-mod auth_grant;
 mod rbac;
 mod refresh;
 mod resource_attr;
@@ -40,18 +39,14 @@ mod security_event;
 
 // 子模块类型经本枢纽 re-export，保持 `crate::domain::*` 路径（lib.rs `smoke` / `ports.rs` 消费方不破）。
 // Role / RoleBinding 是 pub（ports::{RoleReadRepo, RoleBindingLifecycle} 签名实体，跨 crate 命名）。
-pub use auth_grant::{
-    AuthGrant, AuthGrantCloseMutation, AuthGrantId, AuthGrantSnapshot, AuthGrantStateError,
-    AuthGrantStatus,
-};
 pub use rbac::{Role, RoleBinding};
 pub use security_event::{
-    AccountCredentialSecurityCommand, AccountSecurityEventKind, CredentialSecurityCommand,
-    CredentialSecurityEvent, CredentialSecurityEventKind, CredentialSecurityFactAuthorization,
-    CredentialSecurityReceipt, CredentialSecurityTargetHydrationError,
-    CredentialSecurityTargetKind, CredentialSecurityTargetMapping, CredentialSecurityTargetRef,
-    CredentialSecurityTargetRefError, GrantCredentialSecurityCommand, GrantSecurityEventKind,
-    PendingCredentialSecurityCommit, ResolvedCredentialSecurityTarget,
+    AccountCredentialSecurityCommand, CredentialSecurityCommand, CredentialSecurityEvent,
+    CredentialSecurityFactAuthorization, CredentialSecurityReceipt,
+    CredentialSecurityTargetHydrationError, CredentialSecurityTargetKind,
+    CredentialSecurityTargetMapping, CredentialSecurityTargetRef, CredentialSecurityTargetRefError,
+    GrantCredentialSecurityCommand, PendingCredentialSecurityCommit,
+    ResolvedCredentialSecurityTarget,
 };
 // RefreshTokenRecord / RefreshTokenId / RefreshTokenHash / RefreshStatus 是 pub（ports::RefreshTokenStore
 // 签名实体，跨 crate 命名）；kind_to_db / kind_from_db 是 PrincipalKind↔text 单源映射（postgres adapter 消费）。
@@ -84,7 +79,6 @@ pub use account::{AccountLockout, AuthOutcome, BruteForceDecision, Credential, L
 pub use account_security::{
     AccountSecurityHydrationError, AccountSecurityMutation, AccountSecuritySnapshot,
     AccountSecurityState, AccountSecurityTransitionError, AccountSecurityVersion, AccountStatus,
-    AuthnEpoch,
 };
 // reason: 同上（facade re-export，生产消费方待 W；ADR-004 C8 遗留期）。
 #[allow(unused_imports)]

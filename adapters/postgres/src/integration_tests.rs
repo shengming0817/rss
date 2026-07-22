@@ -11,6 +11,10 @@
 //! 连接配置由 [`crate::test_pg::connect_pg`] 统一管理，不在各测试内分散。
 
 use audit::ports::AuditListTenantAppender as _;
+use authn::{
+    AccountSecurityEventKind, AuthGrant, AuthGrantId, AuthGrantStatus, AuthnEpoch,
+    GrantSecurityEventKind,
+};
 use consistency::{
     CommandErrorSummary, CommandJournalOutcome, CommandJournalTerminalSummary,
     CommandResultSummary, ConsumerGroup, ConvergeAction, IdemKey, InboxBacklog, InboxBacklogScope,
@@ -3430,7 +3434,7 @@ async fn localtx_audit_backend_profile_unsafe_settlements() -> TestResult {
 struct RefreshLocalTxCase {
     tenant: vocab::TenantId,
     user_id: ids::UserId,
-    grant: identity::ports::AuthGrant,
+    grant: AuthGrant,
     event_id: String,
     old: identity::ports::RefreshTokenRecord,
     next: identity::ports::RefreshTokenRecord,
@@ -3447,11 +3451,11 @@ impl RefreshLocalTxCase {
         hash[16..].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
         let user_id = ids::UserId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
         let grant = identity::test_support::auth_grant(
-            &format!("grant-{}", uuid::Uuid::new_v4()),
+            &uuid::Uuid::new_v4().to_string(),
             user_id,
             tenant,
             issued,
-            identity::ports::AuthnEpoch::ZERO,
+            AuthnEpoch::ZERO,
             std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(4_000_000_000),
             issued,
         );
@@ -13820,7 +13824,7 @@ async fn auth_grant_sweeper_server_timeout_bounds_child_cascade_lock() -> TestRe
     let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let user = ids::UserId::parse(&uuid::Uuid::new_v4().to_string())?;
     seed_auth_grant_account(&owner, tenant, user).await?;
-    let grant_id = format!("deadline-{}", uuid::Uuid::new_v4());
+    let grant_id = uuid::Uuid::new_v4().to_string();
     let refresh_id = uuid::Uuid::new_v4().to_string();
     sqlx::query(
         "INSERT INTO auth_grants \
@@ -17387,11 +17391,10 @@ use std::time::{Duration, SystemTime};
 
 use diport::OutboxEnvelopeParts;
 use identity::ports::{
-    AccountSecurityEventKind, AccountSecuritySnapshot, AuthGrantCloseCommand, AuthGrantLifecycle,
-    AuthGrantStatus, CredentialSecurityTargetKind, CredentialSecurityTargetRef,
-    CredentialSecurityTargetResolutionRequest, CredentialSecurityTargetResolver,
-    GrantSecurityEventKind, IdentityError, IdentitySecurityLifecycle, LoginGrantMutation,
-    RefreshTokenStore, TenantId,
+    AccountSecuritySnapshot, AuthGrantCloseCommand, AuthGrantLifecycle, AuthGrantValidator,
+    CredentialSecurityTargetKind, CredentialSecurityTargetRef,
+    CredentialSecurityTargetResolutionRequest, CredentialSecurityTargetResolver, IdentityError,
+    IdentitySecurityLifecycle, LoginGrantMutation, RefreshTokenStore, TenantId,
 };
 
 fn classified_identity_error(
@@ -17439,17 +17442,14 @@ fn auth_grant_fixture(
     grant_id: &str,
     refresh_id: &str,
     hash: [u8; 32],
-) -> (
-    identity::ports::AuthGrant,
-    identity::ports::RefreshTokenRecord,
-) {
+) -> (AuthGrant, identity::ports::RefreshTokenRecord) {
     let created = SystemTime::UNIX_EPOCH + Duration::from_secs(TEST_OCCURRED_SECS);
     let grant = identity::test_support::auth_grant(
         grant_id,
         user_id,
         tenant,
         created,
-        identity::ports::AuthnEpoch::ZERO,
+        AuthnEpoch::ZERO,
         created + Duration::from_secs(3_600),
         created,
     );
@@ -17463,9 +17463,43 @@ fn auth_grant_fixture(
     (grant, refresh)
 }
 
+struct AuthGrantValidationPdp(diport::VerifiedClaims);
+
+impl diport::Pdp for AuthGrantValidationPdp {
+    async fn verify(
+        &self,
+        _raw: &diport::RawCredential,
+    ) -> Result<diport::VerifiedClaims, diport::PdpError> {
+        Ok(self.0.clone())
+    }
+}
+
+async fn auth_grant_validation_input(
+    tenant: vocab::TenantId,
+    user_id: ids::UserId,
+    grant_id: &str,
+    auth_time: i64,
+    authn_epoch: i64,
+) -> Result<authn::AccessGrantValidationInput, TestError> {
+    let grant = diport::VerifiedAccessGrantFacts::try_new(
+        grant_id,
+        uuid::Uuid::new_v4().to_string(),
+        auth_time,
+        authn_epoch,
+    )?;
+    let claims = diport::VerifiedClaims::rss_user(user_id, tenant, grant);
+    let pdp = diport::DynPdp::new_box(AuthGrantValidationPdp(claims));
+    let (verified, _principal) =
+        authn::verify_rss_access("e30.eyJzdWIiOiJhdXRoLWdyYW50LXZhbGlkYXRvciJ9.c2ln", &pdp).await?;
+    let receipt = verified
+        .grant_receipt()
+        .ok_or("RSS access fixture must carry an authentication grant")?;
+    Ok(receipt.into_validation_input())
+}
+
 fn auth_grant_login_parts(
     event_id: &str,
-    grant: identity::ports::AuthGrant,
+    grant: AuthGrant,
     refresh: identity::ports::RefreshTokenRecord,
 ) -> (
     LoginGrantMutation,
@@ -17529,7 +17563,7 @@ async fn credential_security_payload(
 struct AuthGrantCloseLocalTxCase {
     tenant: vocab::TenantId,
     user_id: ids::UserId,
-    grant: identity::ports::AuthGrant,
+    grant: AuthGrant,
     refresh: identity::ports::RefreshTokenRecord,
     event_id: String,
 }
@@ -17642,8 +17676,7 @@ async fn localtx_identity_logout_backend_profile_commit_and_rollback() -> TestRe
     let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let seed_lifecycle = crate::PgAuthGrantLifecycle::new(&app, fixed_clock());
 
-    let commit =
-        AuthGrantCloseLocalTxCase::new(tenant, &format!("grant-{}", uuid::Uuid::new_v4()))?;
+    let commit = AuthGrantCloseLocalTxCase::new(tenant, &uuid::Uuid::new_v4().to_string())?;
     commit.seed(&seed_lifecycle, &owner).await?;
     let commit_lifecycle = crate::PgAuthGrantLifecycle::new(&app, fixed_clock());
     let commit_writes = AtomicUsize::new(0);
@@ -17671,8 +17704,7 @@ async fn localtx_identity_logout_backend_profile_commit_and_rollback() -> TestRe
     ))
     .await?;
 
-    let rollback =
-        AuthGrantCloseLocalTxCase::new(tenant, &format!("grant-{}", uuid::Uuid::new_v4()))?;
+    let rollback = AuthGrantCloseLocalTxCase::new(tenant, &uuid::Uuid::new_v4().to_string())?;
     rollback.seed(&seed_lifecycle, &owner).await?;
     let rollback_lifecycle = crate::PgAuthGrantLifecycle::new(&app, fixed_clock())
         .with_close_fault(
@@ -17717,8 +17749,7 @@ async fn localtx_identity_logout_backend_profile_transient_retry_policy() -> Tes
     let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
     let metrics_handle = recorder.handle();
 
-    let before =
-        AuthGrantCloseLocalTxCase::new(tenant, &format!("grant-{}", uuid::Uuid::new_v4()))?;
+    let before = AuthGrantCloseLocalTxCase::new(tenant, &uuid::Uuid::new_v4().to_string())?;
     before.seed(&seed_lifecycle, &owner).await?;
     let before_lifecycle = crate::PgAuthGrantLifecycle::new(&app, fixed_clock()).with_close_fault(
         before.grant_id(),
@@ -17727,7 +17758,7 @@ async fn localtx_identity_logout_backend_profile_transient_retry_policy() -> Tes
     );
     let before_probe = before_lifecycle.close_attempt_probe();
 
-    let after = AuthGrantCloseLocalTxCase::new(tenant, &format!("grant-{}", uuid::Uuid::new_v4()))?;
+    let after = AuthGrantCloseLocalTxCase::new(tenant, &uuid::Uuid::new_v4().to_string())?;
     after.seed(&seed_lifecycle, &owner).await?;
     let after_lifecycle = crate::PgAuthGrantLifecycle::new(&app, fixed_clock()).with_close_fault(
         after.grant_id(),
@@ -17736,8 +17767,7 @@ async fn localtx_identity_logout_backend_profile_transient_retry_policy() -> Tes
     );
     let after_probe = after_lifecycle.close_attempt_probe();
 
-    let exhausted =
-        AuthGrantCloseLocalTxCase::new(tenant, &format!("grant-{}", uuid::Uuid::new_v4()))?;
+    let exhausted = AuthGrantCloseLocalTxCase::new(tenant, &uuid::Uuid::new_v4().to_string())?;
     exhausted.seed(&seed_lifecycle, &owner).await?;
     let exhausted_lifecycle = crate::PgAuthGrantLifecycle::new(&app, fixed_clock())
         .with_close_fault(
@@ -17832,7 +17862,7 @@ async fn localtx_identity_logout_backend_profile_tenant_isolation() -> TestResul
     let app = connect_pg_rss_app_role(&pg, &owner).await?;
     let tenant_a = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let tenant_b = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
-    let shared_grant_id = format!("grant-{}", uuid::Uuid::new_v4());
+    let shared_grant_id = uuid::Uuid::new_v4().to_string();
     let case_a = AuthGrantCloseLocalTxCase::new(tenant_a, &shared_grant_id)?;
     let case_b = AuthGrantCloseLocalTxCase::new(tenant_b, &shared_grant_id)?;
     let seed_lifecycle = crate::PgAuthGrantLifecycle::new(&app, fixed_clock());
@@ -17888,8 +17918,7 @@ async fn localtx_identity_logout_backend_profile_unsafe_settlements() -> TestRes
     let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let seed_lifecycle = crate::PgAuthGrantLifecycle::new(&app, fixed_clock());
 
-    let unknown =
-        AuthGrantCloseLocalTxCase::new(tenant, &format!("grant-{}", uuid::Uuid::new_v4()))?;
+    let unknown = AuthGrantCloseLocalTxCase::new(tenant, &uuid::Uuid::new_v4().to_string())?;
     unknown.seed(&seed_lifecycle, &owner).await?;
     let unknown_lifecycle = crate::PgAuthGrantLifecycle::new(&app, fixed_clock()).with_close_fault(
         unknown.grant_id(),
@@ -17923,7 +17952,7 @@ async fn localtx_identity_logout_backend_profile_unsafe_settlements() -> TestRes
     );
 
     let rollback_failed =
-        AuthGrantCloseLocalTxCase::new(tenant, &format!("grant-{}", uuid::Uuid::new_v4()))?;
+        AuthGrantCloseLocalTxCase::new(tenant, &uuid::Uuid::new_v4().to_string())?;
     rollback_failed.seed(&seed_lifecycle, &owner).await?;
     let rollback_failed_lifecycle = crate::PgAuthGrantLifecycle::new(&app, fixed_clock())
         .with_close_fault(
@@ -18001,7 +18030,7 @@ async fn auth_grant_login_commits_root_refresh_and_outbox_together() -> TestResu
     let tenant = test_tenant();
     let user_id = ids::UserId::parse(&uuid::Uuid::new_v4().to_string())?;
     seed_auth_grant_account(&store, tenant, user_id).await?;
-    let grant_id = format!("grant-{}", uuid::Uuid::new_v4());
+    let grant_id = uuid::Uuid::new_v4().to_string();
     let refresh_id = uuid::Uuid::new_v4().to_string();
     let event_id = unique_event_id("auth-grant-login");
     let (grant, refresh) = auth_grant_fixture(tenant, user_id, &grant_id, &refresh_id, [0xA1; 32]);
@@ -18026,6 +18055,225 @@ async fn auth_grant_login_commits_root_refresh_and_outbox_together() -> TestResu
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn auth_grant_validator_fences_every_durable_binding_in_one_port_call() -> TestResult {
+    let (pg, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    let reader = connect_pg_rss_app_read_role(&pg, &owner).await?;
+    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let other_tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let user_id = ids::UserId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let other_user = ids::UserId::parse(&uuid::Uuid::new_v4().to_string())?;
+    seed_auth_grant_account(&owner, tenant, user_id).await?;
+
+    let grant_id = uuid::Uuid::new_v4().to_string();
+    let refresh_id = uuid::Uuid::new_v4().to_string();
+    let event_id = unique_event_id("auth-grant-validator");
+    let (grant, refresh) = auth_grant_fixture(tenant, user_id, &grant_id, &refresh_id, [0xA7; 32]);
+    let (mutation, entry, envelope) = auth_grant_login_parts(&event_id, grant.clone(), refresh);
+    let lifecycle = crate::PgAuthGrantLifecycle::new(&owner, fixed_clock());
+    let _persisted = lifecycle
+        .persist_login_grant(
+            login_producer_receipt(),
+            identity_scope(tenant),
+            mutation,
+            entry,
+            envelope,
+        )
+        .await?;
+
+    let validator = crate::PgAuthGrantValidator::from_unverified_for_test(&reader);
+    let valid_observation = grant.created_at() + Duration::from_secs(1);
+    let input = auth_grant_validation_input(
+        tenant,
+        user_id,
+        &grant_id,
+        i64::try_from(TEST_OCCURRED_SECS)?,
+        0,
+    )
+    .await?;
+    assert!(
+        validator
+            .is_current(identity_scope(input.tenant()), &input, valid_observation)
+            .await?
+    );
+    assert!(
+        !validator
+            .is_current(identity_scope(other_tenant), &input, valid_observation)
+            .await?,
+        "repo scope and verified receipt tenant must be inseparable"
+    );
+
+    let missing = auth_grant_validation_input(
+        tenant,
+        user_id,
+        &uuid::Uuid::new_v4().to_string(),
+        i64::try_from(TEST_OCCURRED_SECS)?,
+        0,
+    )
+    .await?;
+    assert!(
+        !validator
+            .is_current(
+                identity_scope(missing.tenant()),
+                &missing,
+                valid_observation,
+            )
+            .await?
+    );
+
+    let wrong_subject = auth_grant_validation_input(
+        tenant,
+        other_user,
+        &grant_id,
+        i64::try_from(TEST_OCCURRED_SECS)?,
+        0,
+    )
+    .await?;
+    assert!(
+        !validator
+            .is_current(
+                identity_scope(wrong_subject.tenant()),
+                &wrong_subject,
+                valid_observation,
+            )
+            .await?
+    );
+
+    let wrong_tenant = auth_grant_validation_input(
+        other_tenant,
+        user_id,
+        &grant_id,
+        i64::try_from(TEST_OCCURRED_SECS)?,
+        0,
+    )
+    .await?;
+    assert!(
+        !validator
+            .is_current(
+                identity_scope(wrong_tenant.tenant()),
+                &wrong_tenant,
+                valid_observation,
+            )
+            .await?
+    );
+
+    let wrong_auth_time = auth_grant_validation_input(
+        tenant,
+        user_id,
+        &grant_id,
+        i64::try_from(TEST_OCCURRED_SECS + 1)?,
+        0,
+    )
+    .await?;
+    assert!(
+        !validator
+            .is_current(
+                identity_scope(wrong_auth_time.tenant()),
+                &wrong_auth_time,
+                valid_observation,
+            )
+            .await?
+    );
+
+    let wrong_grant_epoch = auth_grant_validation_input(
+        tenant,
+        user_id,
+        &grant_id,
+        i64::try_from(TEST_OCCURRED_SECS)?,
+        1,
+    )
+    .await?;
+    assert!(
+        !validator
+            .is_current(
+                identity_scope(wrong_grant_epoch.tenant()),
+                &wrong_grant_epoch,
+                valid_observation,
+            )
+            .await?
+    );
+
+    assert!(
+        !validator
+            .is_current(identity_scope(input.tenant()), &input, grant.expires_at())
+            .await?,
+        "expiry must be strictly later than the provider observation"
+    );
+
+    sqlx::query(
+        "UPDATE account_security_states SET authn_epoch = 1, version = version + 1, \
+         updated_at = now() WHERE tenant_id = $1::uuid AND user_id = $2::uuid",
+    )
+    .bind(tenant.as_uuid().to_string())
+    .bind(user_id.as_uuid().to_string())
+    .execute(&owner.pool)
+    .await?;
+    assert!(
+        !validator
+            .is_current(identity_scope(input.tenant()), &input, valid_observation)
+            .await?
+    );
+    sqlx::query(
+        "UPDATE account_security_states SET authn_epoch = 0, version = version + 1, \
+         updated_at = now() WHERE tenant_id = $1::uuid AND user_id = $2::uuid",
+    )
+    .bind(tenant.as_uuid().to_string())
+    .bind(user_id.as_uuid().to_string())
+    .execute(&owner.pool)
+    .await?;
+
+    sqlx::query(
+        "UPDATE account_security_states SET status = 'suspended', version = version + 1, \
+         status_changed_at = now(), updated_at = now() \
+         WHERE tenant_id = $1::uuid AND user_id = $2::uuid",
+    )
+    .bind(tenant.as_uuid().to_string())
+    .bind(user_id.as_uuid().to_string())
+    .execute(&owner.pool)
+    .await?;
+    assert!(
+        !validator
+            .is_current(identity_scope(input.tenant()), &input, valid_observation)
+            .await?
+    );
+    sqlx::query(
+        "UPDATE account_security_states SET status = 'active', version = version + 1, \
+         status_changed_at = now(), updated_at = now() \
+         WHERE tenant_id = $1::uuid AND user_id = $2::uuid",
+    )
+    .bind(tenant.as_uuid().to_string())
+    .bind(user_id.as_uuid().to_string())
+    .execute(&owner.pool)
+    .await?;
+
+    let close = grant.clone().close(
+        GrantSecurityEventKind::LogoutCurrent,
+        grant.created_at() + Duration::from_secs(2),
+    )?;
+    lifecycle
+        .close(
+            identity_scope(tenant),
+            AuthGrantCloseCommand::for_test(close),
+        )
+        .await?;
+    assert!(
+        !validator
+            .is_current(identity_scope(input.tenant()), &input, valid_observation)
+            .await?
+    );
+
+    reader.shutdown().await?;
+    assert!(matches!(
+        validator
+            .is_current(identity_scope(input.tenant()), &input, valid_observation)
+            .await,
+        Err(IdentityError::Storage(_))
+    ));
+    owner.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn auth_grant_login_each_business_write_failure_rolls_back_everything() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
@@ -18042,7 +18290,7 @@ async fn auth_grant_login_each_business_write_failure_rolls_back_everything() ->
     ] {
         let user_id = ids::UserId::parse(&uuid::Uuid::new_v4().to_string())?;
         seed_auth_grant_account(&store, tenant, user_id).await?;
-        let grant_id = format!("grant-{}", uuid::Uuid::new_v4());
+        let grant_id = uuid::Uuid::new_v4().to_string();
         let refresh_id = uuid::Uuid::new_v4().to_string();
         let event_id = unique_event_id("auth-grant-login-fault");
         let (grant, refresh) =
@@ -18076,7 +18324,7 @@ async fn auth_grant_login_outbox_conflict_rolls_back_root_and_refresh() -> TestR
     let tenant = test_tenant();
     let user_id = ids::UserId::parse(&uuid::Uuid::new_v4().to_string())?;
     seed_auth_grant_account(&store, tenant, user_id).await?;
-    let grant_id = format!("grant-{}", uuid::Uuid::new_v4());
+    let grant_id = uuid::Uuid::new_v4().to_string();
     let refresh_id = uuid::Uuid::new_v4().to_string();
     let event_id = unique_event_id("auth-grant-outbox-conflict");
     let seed = seed_conflicting_outbox_fact(&store, tenant, &event_id).await?;
@@ -18111,7 +18359,7 @@ async fn auth_grant_login_commit_unknown_returns_error_without_partial_state() -
     let tenant = test_tenant();
     let user_id = ids::UserId::parse(&uuid::Uuid::new_v4().to_string())?;
     seed_auth_grant_account(&store, tenant, user_id).await?;
-    let grant_id = format!("grant-{}", uuid::Uuid::new_v4());
+    let grant_id = uuid::Uuid::new_v4().to_string();
     let refresh_id = uuid::Uuid::new_v4().to_string();
     let event_id = unique_event_id("auth-grant-commit-unknown");
     let (grant, refresh) = auth_grant_fixture(tenant, user_id, &grant_id, &refresh_id, [0xD1; 32]);
@@ -18165,7 +18413,7 @@ async fn auth_grant_login_plain_producer_lock_wait_is_bounded_and_rolls_back() -
     .fetch_one(&mut *lock_holder)
     .await?;
 
-    let grant_id = format!("grant-{}", uuid::Uuid::new_v4());
+    let grant_id = uuid::Uuid::new_v4().to_string();
     let refresh_id = uuid::Uuid::new_v4().to_string();
     let event_id = unique_event_id("auth-grant-lock-timeout");
     let (grant, refresh) = auth_grant_fixture(tenant, user_id, &grant_id, &refresh_id, [0xD4; 32]);
@@ -18234,7 +18482,7 @@ async fn auth_grant_login_rejects_stale_epoch_after_security_event_commits() -> 
         .execute(identity_scope(tenant), security)
         .await?;
 
-    let grant_id = format!("grant-{}", uuid::Uuid::new_v4());
+    let grant_id = uuid::Uuid::new_v4().to_string();
     let refresh_id = uuid::Uuid::new_v4().to_string();
     let event_id = unique_event_id("auth-grant-stale-security-epoch");
     let (grant, refresh) = auth_grant_fixture(tenant, user, &grant_id, &refresh_id, [0xD2; 32]);
@@ -18282,7 +18530,7 @@ async fn auth_grant_login_account_lock_serializes_security_event_without_deadloc
         .await?;
     assert_ne!(login_backend, security_backend);
 
-    let grant_id = format!("grant-{}", uuid::Uuid::new_v4());
+    let grant_id = uuid::Uuid::new_v4().to_string();
     let refresh_id = uuid::Uuid::new_v4().to_string();
     let event_id = unique_event_id("auth-grant-security-interleave");
     let (grant, refresh) = auth_grant_fixture(tenant, user, &grant_id, &refresh_id, [0xD3; 32]);
@@ -18374,7 +18622,7 @@ async fn auth_grant_serving_role_has_exact_mutation_acl() -> TestResult {
     let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let user_id = ids::UserId::parse(&uuid::Uuid::new_v4().to_string())?;
     seed_auth_grant_account(&owner, tenant, user_id).await?;
-    let grant_id = format!("grant-{}", uuid::Uuid::new_v4());
+    let grant_id = uuid::Uuid::new_v4().to_string();
     let refresh_id = uuid::Uuid::new_v4().to_string();
     let event_id = unique_event_id("auth-grant-exact-acl");
     let (grant, refresh) = auth_grant_fixture(tenant, user_id, &grant_id, &refresh_id, [0xE0; 32]);
@@ -18560,7 +18808,7 @@ async fn auth_grant_close_revokes_refresh_family_before_closing_root() -> TestRe
     let tenant = test_tenant();
     let user_id = ids::UserId::parse(&uuid::Uuid::new_v4().to_string())?;
     seed_auth_grant_account(&store, tenant, user_id).await?;
-    let grant_id = format!("grant-{}", uuid::Uuid::new_v4());
+    let grant_id = uuid::Uuid::new_v4().to_string();
     let refresh_id = uuid::Uuid::new_v4().to_string();
     let event_id = unique_event_id("auth-grant-close");
     let (grant, refresh) = auth_grant_fixture(tenant, user_id, &grant_id, &refresh_id, [0xE1; 32]);
@@ -18730,8 +18978,8 @@ async fn identity_security_lifecycle_applies_account_cas_and_grant_promotion_ato
     let account_tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let account_user = ids::UserId::parse(&uuid::Uuid::new_v4().to_string())?;
     seed_auth_grant_account(&store, account_tenant, account_user).await?;
-    let account_grant_a_id = format!("grant-{}", uuid::Uuid::new_v4());
-    let account_grant_b_id = format!("grant-{}", uuid::Uuid::new_v4());
+    let account_grant_a_id = uuid::Uuid::new_v4().to_string();
+    let account_grant_b_id = uuid::Uuid::new_v4().to_string();
     let account_refresh_a_id = uuid::Uuid::new_v4().to_string();
     let account_refresh_b_id = uuid::Uuid::new_v4().to_string();
     let (account_grant_a, account_refresh_a) = auth_grant_fixture(
@@ -18866,8 +19114,8 @@ async fn identity_security_lifecycle_applies_account_cas_and_grant_promotion_ato
     let grant_tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let grant_user = ids::UserId::parse(&uuid::Uuid::new_v4().to_string())?;
     seed_auth_grant_account(&store, grant_tenant, grant_user).await?;
-    let root_id = format!("grant-{}", uuid::Uuid::new_v4());
-    let sibling_id = format!("grant-{}", uuid::Uuid::new_v4());
+    let root_id = uuid::Uuid::new_v4().to_string();
+    let sibling_id = uuid::Uuid::new_v4().to_string();
     let refresh_id = uuid::Uuid::new_v4().to_string();
     let sibling_refresh_id = uuid::Uuid::new_v4().to_string();
     let (root, root_refresh) =
@@ -19067,7 +19315,7 @@ async fn credential_security_target_mapping_resolves_typed_subject_and_grant_fai
     let grant_tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let grant_user = ids::UserId::parse(&uuid::Uuid::new_v4().to_string())?;
     seed_auth_grant_account(&store, grant_tenant, grant_user).await?;
-    let grant_id = format!("grant-{}", uuid::Uuid::new_v4());
+    let grant_id = uuid::Uuid::new_v4().to_string();
     let refresh_id = uuid::Uuid::new_v4().to_string();
     let (grant, refresh) =
         auth_grant_fixture(grant_tenant, grant_user, &grant_id, &refresh_id, [0x98; 32]);
@@ -19109,9 +19357,7 @@ async fn credential_security_target_mapping_resolves_typed_subject_and_grant_fai
     assert_eq!(resolved_grant.kind(), CredentialSecurityTargetKind::Grant);
     assert_eq!(resolved_grant.user_id(), grant_user);
     assert_eq!(
-        resolved_grant
-            .grant_id()
-            .map(identity::ports::AuthGrantId::as_str),
+        resolved_grant.grant_id().map(AuthGrantId::as_str),
         Some(grant_id.as_str())
     );
     assert!(
@@ -19169,7 +19415,7 @@ async fn identity_security_lifecycle_rolls_back_before_outbox_and_never_receipts
     let other_tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let user = ids::UserId::parse(&uuid::Uuid::new_v4().to_string())?;
     seed_auth_grant_account(&store, tenant, user).await?;
-    let grant_id = format!("grant-{}", uuid::Uuid::new_v4());
+    let grant_id = uuid::Uuid::new_v4().to_string();
     let refresh_id = uuid::Uuid::new_v4().to_string();
     let (grant, refresh) = auth_grant_fixture(tenant, user, &grant_id, &refresh_id, [0x95; 32]);
     let (mutation, entry, envelope) =
@@ -19307,7 +19553,7 @@ async fn identity_security_lifecycle_real_append_and_precommit_failures_roll_bac
         let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
         let user = ids::UserId::parse(&uuid::Uuid::new_v4().to_string())?;
         seed_auth_grant_account(&store, tenant, user).await?;
-        let grant_id = format!("grant-{}", uuid::Uuid::new_v4());
+        let grant_id = uuid::Uuid::new_v4().to_string();
         let refresh_id = uuid::Uuid::new_v4().to_string();
         let (grant, refresh) =
             auth_grant_fixture(tenant, user, &grant_id, &refresh_id, [suffix; 32]);
@@ -19390,7 +19636,7 @@ async fn auth_grant_composite_fk_rejects_every_mismatched_refresh_binding() -> T
     seed_auth_grant_account(&store, tenant_a, user_b).await?;
     seed_auth_grant_account(&store, tenant_b, user_a).await?;
 
-    let grant_id = format!("grant-{}", uuid::Uuid::new_v4());
+    let grant_id = uuid::Uuid::new_v4().to_string();
     let initial_id = uuid::Uuid::new_v4().to_string();
     let event_id = unique_event_id("auth-grant-binding-root");
     let (grant, initial) = auth_grant_fixture(tenant_a, user_a, &grant_id, &initial_id, [0x71; 32]);
@@ -29262,7 +29508,7 @@ async fn t20_rls_auth_grants_enforces_tenant_isolation_and_acl() -> TestResult {
     let user_b = ids::UserId::parse(&uuid::Uuid::new_v4().to_string())?;
     seed_auth_grant_account(&store, tenant_a_id, user_a).await?;
     seed_auth_grant_account(&store, tenant_b_id, user_b).await?;
-    let grant_a = format!("grant-{}", uuid::Uuid::new_v4());
+    let grant_a = uuid::Uuid::new_v4().to_string();
 
     // Tx1：同租户 Active root 可以写入。
     {
@@ -29347,7 +29593,7 @@ async fn t20_rls_auth_grants_enforces_tenant_isolation_and_acl() -> TestResult {
                      now() + interval '1 hour', now(), NULL, NULL)",
         )
         .bind(&tenant_b)
-        .bind(format!("grant-{}", uuid::Uuid::new_v4()))
+        .bind(uuid::Uuid::new_v4().to_string())
         .bind(user_b.as_uuid().to_string())
         .execute(&mut *tx)
         .await;

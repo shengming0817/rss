@@ -32,6 +32,8 @@ mod auth_grant_lifecycle;
 #[cfg(feature = "domain-identity")]
 mod auth_grant_provider;
 mod auth_grant_sweeper;
+#[cfg(feature = "domain-identity")]
+mod auth_grant_validator;
 mod bundle;
 mod cas_store;
 mod checkpoint;
@@ -144,6 +146,8 @@ pub use auth_grant_lifecycle::PgAuthGrantLifecycle;
 #[cfg(feature = "domain-identity")]
 pub use auth_grant_provider::PgAuthGrantProvider;
 pub use auth_grant_sweeper::{AuthGrantSweepDeadline, PgAuthGrantSweeper};
+#[cfg(feature = "domain-identity")]
+pub use auth_grant_validator::PgAuthGrantValidator;
 pub use projection_events::{PgProjectionEvents, ProjectionEventsError};
 pub use reconcile::{
     PgReconcileStore, ReconcileActionErrorKind, ReconcileAttemptInsert,

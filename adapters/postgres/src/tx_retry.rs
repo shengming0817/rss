@@ -393,6 +393,62 @@ pub(crate) trait PgLocalTxOperation {
     const BOUNDARY: PgTxRetryBoundary;
 }
 
+/// Closed observation carrier accepted by the Postgres LocalTx retry runner.
+///
+/// Most operations carry one generated route marker. Auth-grant close additionally admits the
+/// refresh route because replay compromise executes the same aggregate transaction while retaining
+/// the initiating route's telemetry identity.
+pub(crate) trait PgLocalTxObservation {
+    fn boundary(&self) -> PgTxRetryBoundary;
+
+    fn record_failed_attempt(
+        &self,
+        attempt: u32,
+        retry_class: TxRetryClass,
+        settlement: Option<LocalTxFinalStatus>,
+    );
+
+    fn record_deadline_exceeded(&self, stage: LocalTxDeadlineStage);
+
+    fn finish(
+        self,
+        attempts: u32,
+        retry_status: TxRetryFinalStatus,
+        settlement: Option<LocalTxFinalStatus>,
+    );
+}
+
+impl<M> PgLocalTxObservation for LocalTxObservation<M>
+where
+    M: PgLocalTxOperation,
+{
+    fn boundary(&self) -> PgTxRetryBoundary {
+        M::BOUNDARY
+    }
+
+    fn record_failed_attempt(
+        &self,
+        attempt: u32,
+        retry_class: TxRetryClass,
+        settlement: Option<LocalTxFinalStatus>,
+    ) {
+        self.record_failed_attempt(attempt, retry_class, settlement);
+    }
+
+    fn record_deadline_exceeded(&self, stage: LocalTxDeadlineStage) {
+        self.record_deadline_exceeded(stage);
+    }
+
+    fn finish(
+        self,
+        attempts: u32,
+        retry_status: TxRetryFinalStatus,
+        settlement: Option<LocalTxFinalStatus>,
+    ) {
+        self.finish(attempts, retry_status, settlement);
+    }
+}
+
 #[cfg(feature = "domain-settings")]
 impl PgLocalTxOperation for settings::ports::SecretPublishRouteMarker {
     const BOUNDARY: PgTxRetryBoundary = SETTINGS_SECRET_BOUNDARY;
@@ -411,6 +467,57 @@ impl PgLocalTxOperation for identity::ports::AuthGrantCloseRouteMarker {
 #[cfg(feature = "domain-identity")]
 impl PgLocalTxOperation for identity::ports::RefreshRotationRouteMarker {
     const BOUNDARY: PgTxRetryBoundary = IDENTITY_REFRESH_BOUNDARY;
+}
+
+#[cfg(feature = "domain-identity")]
+impl PgLocalTxObservation for identity::ports::AuthGrantCloseObservation {
+    fn boundary(&self) -> PgTxRetryBoundary {
+        match self {
+            Self::Logout(_) => {
+                <identity::ports::AuthGrantCloseRouteMarker as PgLocalTxOperation>::BOUNDARY
+            }
+            Self::RefreshReplay(_) => {
+                <identity::ports::RefreshRotationRouteMarker as PgLocalTxOperation>::BOUNDARY
+            }
+        }
+    }
+
+    fn record_failed_attempt(
+        &self,
+        attempt: u32,
+        retry_class: TxRetryClass,
+        settlement: Option<LocalTxFinalStatus>,
+    ) {
+        match self {
+            Self::Logout(observation) => {
+                observation.record_failed_attempt(attempt, retry_class, settlement);
+            }
+            Self::RefreshReplay(observation) => {
+                observation.record_failed_attempt(attempt, retry_class, settlement);
+            }
+        }
+    }
+
+    fn record_deadline_exceeded(&self, stage: LocalTxDeadlineStage) {
+        match self {
+            Self::Logout(observation) => observation.record_deadline_exceeded(stage),
+            Self::RefreshReplay(observation) => observation.record_deadline_exceeded(stage),
+        }
+    }
+
+    fn finish(
+        self,
+        attempts: u32,
+        retry_status: TxRetryFinalStatus,
+        settlement: Option<LocalTxFinalStatus>,
+    ) {
+        match self {
+            Self::Logout(observation) => observation.finish(attempts, retry_status, settlement),
+            Self::RefreshReplay(observation) => {
+                observation.finish(attempts, retry_status, settlement);
+            }
+        }
+    }
 }
 
 #[cfg(feature = "domain-audit")]
@@ -525,20 +632,21 @@ where
     feature = "domain-identity",
     feature = "domain-audit"
 ))]
-pub(crate) async fn run_pg_localtx_retry<M, T, E, Op, OpFut, Classify>(
-    observation: LocalTxObservation<M>,
+pub(crate) async fn run_pg_localtx_retry<O, T, E, Op, OpFut, Classify>(
+    observation: O,
     op: Op,
     classify: Classify,
 ) -> Result<T, E>
 where
-    M: PgLocalTxOperation,
+    O: PgLocalTxObservation,
     Op: FnMut(u32, LocalTxDeadline) -> OpFut,
     OpFut: Future<Output = LocalTxAttempt<T, E>>,
     Classify: Fn(&E) -> TxRetryClass,
     E: Error + Send + Sync + 'static,
 {
+    let boundary = observation.boundary();
     let (result, report, settlement) = run_pg_tx_retry_core(
-        M::BOUNDARY,
+        boundary,
         op,
         classify,
         |attempt, retry_class, settlement, stages| {

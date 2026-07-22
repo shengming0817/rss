@@ -7,7 +7,7 @@ publish = false
 
 [dependencies]
 thiserror = { workspace = true }
-uuid = { workspace = true }
+uuid = { workspace = true, features = ["v4"] }
 
 [lints]
 workspace = true

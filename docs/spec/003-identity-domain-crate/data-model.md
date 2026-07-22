@@ -2,6 +2,9 @@
 
 > 实体均为 `identity::domain` 域类型——字段 `pub(crate)`、经 funnel 构造器创建、**不 derive `Serialize`**（wire 经 contract/generated）。下表「当前」列标注 #997 冻结状态（来自 `crates/identity/src/domain/mod.rs`）。
 
+> **[#1835 / ADR-021 所有权修订]** `AuthGrant`、`AuthGrantId`、`AuthnEpoch` 和完整
+> `CredentialSecurityEventKind` 当前由 `authn` 拥有；identity 仍拥有账户/凭据聚合、lifecycle ports 与安全事务编排。
+
 ## RBAC 子域（`domain/rbac.rs` + 共享 newtype 在 `domain/mod.rs`）
 
 | 实体 | 字段 | 不变式 / 校验 | 当前 |
@@ -37,7 +40,7 @@
 | `Credential` | `subject + tenant + password_hash + version` | argon2/bcrypt 哈希；version pin；Debug 脱敏；明文永不存 | 新增域类型 |
 | `AccountSecurityState` | `tenant_id + user_id + status + authn_epoch + version + status_changed_at + updated_at` | status 为四值闭集；epoch/version checked increment；hydrate 拒绝非法持久值 | #1833 持久真源 |
 | `AccountStatus` | enum `Active|Suspended|Locked|Deactivated` | `Active→Suspended|Locked|Deactivated`；`Suspended|Locked→Active|Deactivated`；Deactivated 终态；同态拒绝 | `account_security` 聚合闭值 |
-| `AuthnEpoch` | PostgreSQL-safe unsigned newtype | 进入任一非 Active 状态递增；恢复 Active 保留；溢出拒绝 | #1833 |
+| `AuthnEpoch`（authn-owned） | PostgreSQL-safe unsigned newtype | identity 账户状态消费；进入任一非 Active 状态递增；恢复 Active 保留；溢出拒绝 | #1833；#1835 下沉 authn |
 | `AccountSecurityVersion` | PostgreSQL-safe unsigned newtype | 每个成功 transition 递增；CAS expected version 不匹配拒绝 | #1833 |
 | `AccountSecurityMutation` | `expected_version + next_state` | 字段私有；只能从当前 state 的合法 transition 构造 | #1833 sealed command |
 | `ActiveAccountSecurity` | `tenant + user + authn_epoch` | 只能由 Active state 铸造；crate-private；Debug 不泄漏 subject/epoch | #1833 sealed receipt |
@@ -53,11 +56,11 @@
   writer 在同一事务锁定 account-security、校验 Active + epoch，再 CAS consume old + insert child，返回
   `Applied|Replay|AccountStale`。
 
-## AuthGrant 子域（`domain/auth_grant.rs` + `ports.rs`）
+## AuthGrant 聚合与 identity lifecycle port（`authn::grant` + `identity::ports`）
 
 | 实体 | 字段 | 不变式 | 当前 |
 |------|------|--------|------|
-| `AuthGrant` | `grant_id + tenant + user_id + auth_time + authn_epoch_at_issue + expires_at + status + terminal metadata` | 强类型 user/epoch；Active/Revoked/Compromised 闭值；关闭原因/时间与状态一致 | #1834 / ADR-019 已交付 |
+| `authn::AuthGrant` | `grant_id + tenant + user_id + auth_time + authn_epoch_at_issue + expires_at + status + terminal metadata` | 强类型 user/epoch；Active/Revoked/Compromised 闭值；关闭原因/时间与状态一致；唯一借出 RSS issue input | #1834；#1835 下沉 authn |
 
 **port `AuthGrantLifecycle`**（`identity::ports`）：`persist_login_grant` 原子写 AuthGrant、初始 refresh 与
 `identity.session-created` outbox；`find_active` 按当前观察时间过滤；`close` 先撤销 refresh family 再关闭根。
@@ -70,8 +73,9 @@
   `identity.session-created`。任一门控失败均零 mint、零 AuthGrant、零 outbox。
 - `RefreshService`：构造时必填 `AccountSecurityReadRepo`；initial issuance 只接受 crate-private active receipt，
   rotate 只接受 canonical User record，并在 mint 前重读 Active 状态与 family issuance epoch。PostgreSQL
-  rotation writer 再做最终 Active + epoch + AuthGrant fence；JWT grant claims 与账户安全事件批量撤销由后续
-  #1840 完成。
+  rotation writer 再做最终 Active + epoch + AuthGrant fence；JWT grant claims 已由 #1835 / ADR-021 完成，
+  #1839 的 request-time fence 亦已以密封 receipt input + 单次 tenant-scoped grant/account 读取接入，
+  只有当前状态匹配才产生 `CurrentAuthGrant`。
 - `RbacAdminService`（PR5）：注入 `RoleRepo` + `DynPublisher`。`assign_role` / `revoke_role`：落绑定 + 发 `identity.role-{assigned,revoked}`（L2）。
 - `IdentityDomain`（bootstrap `Domain`）：`init` 声明路由组（Primary listener，`/api/v1/identity`，login opt-out Public）+ 注册 handler；fail-fast，无 panic。
 

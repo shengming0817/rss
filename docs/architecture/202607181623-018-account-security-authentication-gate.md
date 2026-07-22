@@ -96,16 +96,19 @@ epoch：旧 binary 先通过正常流程撤销全部 active family，迁移锁�
 
 - **PR-07（已由 #1834 / ADR-019 交付）**：Session 已升级为 AuthGrant；根持久化
   `authn_epoch_at_issue`，refresh family 通过 tenant/grant/user/epoch/status 复合外键绑定根。
-- **PR-08（#1840，尚未交付）**：为 RSS access JWT 增加 `sid/jti/auth_time/authn_epoch`，并保留
-  verified grant facts。
+- **PR-08（#1835 / #1839 / ADR-021）**：为 User-only RSS access JWT 增加
+  `sid/jti/auth_time/authn_epoch`，以闭合 profile shape 保留 verified grant facts，并在每个受保护请求上
+  以单次 tenant-scoped 读取校验当前 grant/account 后铸 `CurrentAuthGrant`。
 - **PR-13（#1841 / ADR-020）**：交付统一的凭据安全事件模型、原子 lifecycle 与 draft outbox fact；不挂载
   production producer/subscriber。
 - **PR-14（#1842 / #1843）**：挂载生产 operation 与 producer，完成审计消费、runtime dispatch、refresh reuse
   自动标记 Compromised 及 L2 assurance，再将 draft 激活。
 
 ADR-018 已通过 refresh record epoch 与最终 account writer fence 消除账号状态的 read-to-CAS TOCTOU；
-ADR-019 进一步把 epoch 写入 AuthGrant 并建立 grant final fence。epoch 尚未进入 JWT，也不声称已有全部账户
-安全事件生产接线或 reuse compromise 跨边界闭环。
+ADR-019 进一步把 epoch 写入 AuthGrant 并建立 grant final fence；ADR-021 / #1835 / #1839 已把
+issuance epoch 与 grant 定位证据写入 User-only RSS JWT，并在每请求进入 handler 前核对当前
+grant/account 状态后铸 `CurrentAuthGrant`。本文不声称已有全部账户安全事件生产接线或
+reuse compromise 跨边界闭环。
 
 ## AI-HARD 载体
 

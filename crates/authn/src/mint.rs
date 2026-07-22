@@ -16,9 +16,8 @@ use std::time::{Duration, UNIX_EPOCH};
 use base64::Engine as _;
 use diport::{RssAccessProfile, ServiceTokenProfile, TokenProfileMarker as _};
 use vocab::ServiceCallerDomain;
-use vocab::tenant::TenantId;
 
-use super::{KIND_ADMIN, KIND_DEVICE, KIND_SERVICE, KIND_SUPER_ADMIN, KIND_USER, SigningKeyRing};
+use super::{KIND_SERVICE, KIND_USER, RssAccessIssueInput, SigningKeyRing};
 
 const B64_URL: base64::engine::GeneralPurpose = base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
@@ -82,79 +81,6 @@ impl<P: diport::TokenProfileMarker> JwtIssuerConfig<P> {
     }
 }
 
-/// A tenant-aware principal that may be minted as an RSS access token.
-///
-/// User, device, and admin variants require a tenant at construction. Super-admin deliberately
-/// has no tenant field, so an ambient tenant claim cannot be attached to it.
-///
-/// INVARIANT: JWT-ACCESS-PRINCIPAL-TYPED-01 { level = "Hard", exec = "native-compile", source = "code", native = "typed function choice / input field exclusion" }
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum JwtAccessPrincipal<'a> {
-    /// Tenant-scoped user.
-    User { subject: &'a str, tenant: TenantId },
-    /// Tenant-scoped device.
-    Device { subject: &'a str, tenant: TenantId },
-    /// Tenant-scoped administrator.
-    Admin { subject: &'a str, tenant: TenantId },
-    /// Cross-tenant super-administrator.
-    SuperAdmin { subject: &'a str },
-}
-
-impl std::fmt::Debug for JwtAccessPrincipal<'_> {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::User { tenant, .. } => formatter
-                .debug_struct("User")
-                .field("subject", &"<redacted>")
-                .field("tenant", tenant)
-                .finish(),
-            Self::Device { tenant, .. } => formatter
-                .debug_struct("Device")
-                .field("subject", &"<redacted>")
-                .field("tenant", tenant)
-                .finish(),
-            Self::Admin { tenant, .. } => formatter
-                .debug_struct("Admin")
-                .field("subject", &"<redacted>")
-                .field("tenant", tenant)
-                .finish(),
-            Self::SuperAdmin { .. } => formatter
-                .debug_struct("SuperAdmin")
-                .field("subject", &"<redacted>")
-                .finish(),
-        }
-    }
-}
-
-impl<'a> JwtAccessPrincipal<'a> {
-    fn subject(self) -> &'a str {
-        match self {
-            Self::User { subject, .. }
-            | Self::Device { subject, .. }
-            | Self::Admin { subject, .. }
-            | Self::SuperAdmin { subject } => subject,
-        }
-    }
-
-    fn tenant(self) -> Option<TenantId> {
-        match self {
-            Self::User { tenant, .. }
-            | Self::Device { tenant, .. }
-            | Self::Admin { tenant, .. } => Some(tenant),
-            Self::SuperAdmin { .. } => None,
-        }
-    }
-
-    fn kind_claim(self) -> &'static str {
-        match self {
-            Self::User { .. } => KIND_USER,
-            Self::Device { .. } => KIND_DEVICE,
-            Self::Admin { .. } => KIND_ADMIN,
-            Self::SuperAdmin { .. } => KIND_SUPER_ADMIN,
-        }
-    }
-}
-
 /// A signed compact JWS with its authoritative `exp` value.
 pub struct MintedJwt {
     raw: String,
@@ -190,12 +116,9 @@ pub enum JwtIssueError {
     /// Issuer, audience, key id, purpose, or TTL violates the selected profile.
     #[error("jwt issuer config is invalid")]
     InvalidConfig,
-    /// An empty subject cannot be signed.
-    #[error("jwt subject must not be empty")]
-    EmptySubject,
-    /// A dynamically loaded principal kind cannot be represented by [`JwtAccessPrincipal`].
-    #[error("principal kind is not issuable as an access token")]
-    KindNotIssuable,
+    /// The grant is expired or its authentication time is later than issuance.
+    #[error("authentication grant has no valid access-token window")]
+    InvalidGrantWindow,
     /// The injected clock is before the UNIX epoch.
     #[error("clock is before unix epoch")]
     ClockBeforeEpoch,
@@ -217,13 +140,16 @@ struct JoseHeader<'a> {
     typ: &'static str,
 }
 
-/// Access claims include a tenant only for the three tenant-scoped variants.
+/// RSS access claims are always bound to one durable User authentication grant.
 #[derive(serde::Serialize)]
 struct AccessClaims<'a> {
-    sub: &'a str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tenant_id: Option<String>,
+    sub: String,
+    tenant_id: String,
     kind: &'static str,
+    sid: &'a str,
+    jti: String,
+    auth_time: i64,
+    authn_epoch: u64,
     token_use: &'static str,
     iat: i64,
     exp: i64,
@@ -271,17 +197,24 @@ impl<S: diport::Signer + Send + Sync + 'static> JwtIssuer<RssAccessProfile, S> {
     /// Sign an RSS access token with exact `typ=at+jwt`, `token_use=access`, and ES256.
     pub async fn issue_access(
         &self,
-        principal: JwtAccessPrincipal<'_>,
+        input: RssAccessIssueInput<'_>,
     ) -> Result<MintedJwt, JwtIssueError> {
-        let subject = principal.subject();
-        if subject.is_empty() {
-            return Err(JwtIssueError::EmptySubject);
+        let grant = input.grant;
+        let (iat, configured_exp) = self.time_claims()?;
+        let auth_time = unix_time(grant.auth_time())?;
+        let grant_exp = unix_time(grant.expires_at())?;
+        let exp = configured_exp.min(grant_exp);
+        if auth_time > iat || iat >= exp {
+            return Err(JwtIssueError::InvalidGrantWindow);
         }
-        let (iat, exp) = self.time_claims()?;
         let claims = AccessClaims {
-            sub: subject,
-            tenant_id: principal.tenant().map(|tenant| tenant.to_string()),
-            kind: principal.kind_claim(),
+            sub: grant.user_id().as_uuid().hyphenated().to_string(),
+            tenant_id: grant.tenant().to_string(),
+            kind: KIND_USER,
+            sid: grant.id().as_str(),
+            jti: uuid::Uuid::new_v4().to_string(),
+            auth_time,
+            authn_epoch: grant.authn_epoch_at_issue().get(),
             token_use: RssAccessProfile::policy().token_use(),
             iat,
             exp,
@@ -290,6 +223,14 @@ impl<S: diport::Signer + Send + Sync + 'static> JwtIssuer<RssAccessProfile, S> {
         };
         self.sign_claims(&claims, exp, MessageBinding::Access).await
     }
+}
+
+fn unix_time(value: std::time::SystemTime) -> Result<i64, JwtIssueError> {
+    let seconds = value
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| JwtIssueError::InvalidGrantWindow)?
+        .as_secs();
+    i64::try_from(seconds).map_err(|_| JwtIssueError::ExpiryOverflow)
 }
 
 impl<S: diport::Signer + Send + Sync + 'static> JwtIssuer<ServiceTokenProfile, S> {
@@ -412,9 +353,12 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{AuthGrant, AuthnEpoch, GrantSecurityEventKind};
     use diport::{KeyId, SignRequest, Signature, Signer, SignerError, SigningPurpose};
+    use ids::UserId;
     use std::sync::{Arc, Mutex};
     use std::time::SystemTime;
+    use vocab::TenantId;
 
     const CANON_TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
     const NOW_SECS: u64 = 1_700_000_000;
@@ -487,6 +431,25 @@ mod tests {
         diport::ServiceTokenTenantBinding::new(tenant())
     }
 
+    #[allow(clippy::expect_used)]
+    fn user() -> UserId {
+        UserId::parse("550e8400-e29b-41d4-a716-446655440000").expect("canonical user")
+    }
+
+    #[allow(clippy::expect_used)]
+    fn grant(expires_at: SystemTime) -> AuthGrant {
+        AuthGrant::new_active(
+            tenant(),
+            user(),
+            now_time() - Duration::from_secs(30),
+            AuthnEpoch::hydrate(7).expect("epoch"),
+            expires_at,
+            now_time() - Duration::from_secs(30),
+        )
+        .expect("grant")
+    }
+
+    #[allow(clippy::expect_used)]
     fn rss_config(ttl: Duration) -> JwtIssuerConfig<RssAccessProfile> {
         JwtIssuerConfig::rss_access(
             SigningKeyRing::single(KeyId::new("rss-kid")).expect("non-empty kid"),
@@ -497,6 +460,7 @@ mod tests {
         )
     }
 
+    #[allow(clippy::expect_used)]
     fn service_config(ttl: Duration) -> JwtIssuerConfig<ServiceTokenProfile> {
         JwtIssuerConfig::service_token(
             SigningKeyRing::single(KeyId::new("service-kid")).expect("non-empty kid"),
@@ -547,11 +511,9 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn rss_access_emits_exact_profile_markers_and_tenant() {
+        let grant = grant(now_time() + Duration::from_secs(3_600));
         let jwt = rss_issuer(RecordingSigner::ok(), now_time(), Duration::from_secs(900))
-            .issue_access(JwtAccessPrincipal::User {
-                subject: "user-123",
-                tenant: tenant(),
-            })
+            .issue_access(grant.access_issue_input().expect("active grant"))
             .await
             .expect("issue access");
         let parts = segments(&jwt);
@@ -568,7 +530,16 @@ mod tests {
         );
         assert_eq!(claims["token_use"], "access");
         assert_eq!(claims["kind"], "user");
+        assert_eq!(claims["sub"], "550e8400-e29b-41d4-a716-446655440000");
         assert_eq!(claims["tenant_id"], CANON_TENANT);
+        assert_eq!(claims["sid"], grant.id().as_str());
+        assert_eq!(claims["auth_time"].as_u64(), Some(NOW_SECS - 30));
+        assert_eq!(claims["authn_epoch"].as_u64(), Some(7));
+        let jti = claims["jti"].as_str().expect("jti");
+        assert_eq!(
+            uuid::Uuid::parse_str(jti).expect("uuid").get_version_num(),
+            4
+        );
         assert_eq!(claims["iat"].as_u64(), Some(NOW_SECS));
         assert_eq!(claims["exp"].as_u64(), Some(NOW_SECS + 900));
         assert_eq!(jwt.expires_at(), (NOW_SECS + 900) as i64);
@@ -577,46 +548,23 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::expect_used)]
-    async fn scoped_access_kinds_require_tenant_and_super_admin_omits_it() {
-        for (principal, expected_kind, expects_tenant) in [
-            (
-                JwtAccessPrincipal::User {
-                    subject: "u",
-                    tenant: tenant(),
-                },
-                "user",
-                true,
-            ),
-            (
-                JwtAccessPrincipal::Device {
-                    subject: "d",
-                    tenant: tenant(),
-                },
-                "device",
-                true,
-            ),
-            (
-                JwtAccessPrincipal::Admin {
-                    subject: "a",
-                    tenant: tenant(),
-                },
-                "admin",
-                true,
-            ),
-            (
-                JwtAccessPrincipal::SuperAdmin { subject: "root" },
-                "superAdmin",
-                false,
-            ),
-        ] {
-            let jwt = rss_issuer(RecordingSigner::ok(), now_time(), Duration::from_secs(1))
-                .issue_access(principal)
-                .await
-                .expect("issue access");
-            let claims = decode_segment(segments(&jwt)[1]);
-            assert_eq!(claims["kind"], expected_kind);
-            assert_eq!(claims.get("tenant_id").is_some(), expects_tenant);
+    async fn same_grant_keeps_sid_auth_time_epoch_but_rotates_jti() {
+        let grant = grant(now_time() + Duration::from_secs(3_600));
+        let issuer = rss_issuer(RecordingSigner::ok(), now_time(), Duration::from_secs(60));
+        let first = issuer
+            .issue_access(grant.access_issue_input().expect("active grant"))
+            .await
+            .expect("first");
+        let second = issuer
+            .issue_access(grant.access_issue_input().expect("active grant"))
+            .await
+            .expect("second");
+        let first = decode_segment(segments(&first)[1]);
+        let second = decode_segment(segments(&second)[1]);
+        for claim in ["sid", "auth_time", "authn_epoch"] {
+            assert_eq!(first[claim], second[claim]);
         }
+        assert_ne!(first["jti"], second["jti"]);
     }
 
     #[tokio::test]
@@ -698,6 +646,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::expect_used)]
     fn empty_profile_config_values_are_rejected() {
         let rss_cases = [
             JwtIssuerConfig::rss_access(
@@ -756,8 +705,9 @@ mod tests {
             ),
         )
         .expect("valid issuer");
+        let grant = grant(now_time() + Duration::from_secs(3_600));
         let jwt = issuer
-            .issue_access(JwtAccessPrincipal::SuperAdmin { subject: "root" })
+            .issue_access(grant.access_issue_input().expect("active grant"))
             .await
             .expect("issue");
         let header = decode_segment(segments(&jwt)[0]);
@@ -767,48 +717,88 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failures_short_circuit_or_propagate_without_token_output() {
+    #[allow(clippy::expect_used)]
+    async fn invalid_grant_windows_short_circuit_before_signer() {
         let signer = RecordingSigner::ok();
-        let empty_subject = rss_issuer(signer.clone(), now_time(), Duration::from_secs(1))
-            .issue_access(JwtAccessPrincipal::SuperAdmin { subject: "" })
+        let expired = grant(now_time());
+        let expired_result = rss_issuer(signer.clone(), now_time(), Duration::from_secs(1))
+            .issue_access(expired.access_issue_input().expect("active grant"))
             .await;
-        assert!(matches!(empty_subject, Err(JwtIssueError::EmptySubject)));
+        assert!(matches!(
+            expired_result,
+            Err(JwtIssueError::InvalidGrantWindow)
+        ));
         assert!(signer.captured().is_none());
 
-        let before_epoch = SystemTime::UNIX_EPOCH - Duration::from_secs(1);
-        let clock_error = rss_issuer(signer.clone(), before_epoch, Duration::from_secs(1))
-            .issue_access(JwtAccessPrincipal::SuperAdmin { subject: "root" })
+        let future_auth = AuthGrant::new_active(
+            tenant(),
+            user(),
+            now_time() + Duration::from_secs(1),
+            AuthnEpoch::ZERO,
+            now_time() + Duration::from_secs(60),
+            now_time() + Duration::from_secs(1),
+        )
+        .expect("future grant");
+        let future_result = rss_issuer(signer.clone(), now_time(), Duration::from_secs(1))
+            .issue_access(future_auth.access_issue_input().expect("active grant"))
             .await;
-        assert!(matches!(clock_error, Err(JwtIssueError::ClockBeforeEpoch)));
+        assert!(matches!(
+            future_result,
+            Err(JwtIssueError::InvalidGrantWindow)
+        ));
         assert!(signer.captured().is_none());
+    }
 
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn signer_failures_propagate_without_token_output() {
+        let grant = grant(now_time() + Duration::from_secs(60));
         let sign_error = rss_issuer(
             RecordingSigner::failing(),
             now_time(),
             Duration::from_secs(1),
         )
-        .issue_access(JwtAccessPrincipal::SuperAdmin { subject: "root" })
+        .issue_access(grant.access_issue_input().expect("active grant"))
         .await;
         assert!(matches!(sign_error, Err(JwtIssueError::Sign(_))));
     }
 
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn expiry_is_capped_by_grant_and_terminal_grant_cannot_form_input() {
+        let grant = grant(now_time() + Duration::from_secs(10));
+        let jwt = rss_issuer(RecordingSigner::ok(), now_time(), Duration::from_secs(900))
+            .issue_access(grant.access_issue_input().expect("active grant"))
+            .await
+            .expect("issue");
+        assert_eq!(jwt.expires_at(), (NOW_SECS + 10) as i64);
+
+        let closed = grant
+            .close(GrantSecurityEventKind::LogoutCurrent, now_time())
+            .expect("close")
+            .next()
+            .clone();
+        assert!(closed.access_issue_input().is_err());
+    }
+
     #[test]
+    #[allow(clippy::expect_used)]
     fn typed_issuer_and_issue_future_are_send_sync() {
         fn assert_send<T: Send>(_: T) {}
         fn assert_send_sync<T: Send + Sync>(_: &T) {}
 
         let issuer = rss_issuer(RecordingSigner::ok(), now_time(), Duration::from_secs(1));
         assert_send_sync(&issuer);
-        assert_send(issuer.issue_access(JwtAccessPrincipal::SuperAdmin { subject: "root" }));
+        let grant = grant(now_time() + Duration::from_secs(60));
+        assert_send(issuer.issue_access(grant.access_issue_input().expect("active grant")));
     }
 
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn debug_and_errors_do_not_expose_secrets() {
+        let grant = grant(now_time() + Duration::from_secs(60));
         let jwt = rss_issuer(RecordingSigner::ok(), now_time(), Duration::from_secs(1))
-            .issue_access(JwtAccessPrincipal::SuperAdmin {
-                subject: "secret-subject",
-            })
+            .issue_access(grant.access_issue_input().expect("active grant"))
             .await
             .expect("issue access");
         assert_eq!(format!("{jwt:?}"), "MintedJwt(<redacted>)");
@@ -818,12 +808,8 @@ mod tests {
             "jwt issuer config is invalid"
         );
         assert_eq!(
-            JwtIssueError::EmptySubject.to_string(),
-            "jwt subject must not be empty"
-        );
-        assert_eq!(
-            JwtIssueError::KindNotIssuable.to_string(),
-            "principal kind is not issuable as an access token"
+            JwtIssueError::InvalidGrantWindow.to_string(),
+            "authentication grant has no valid access-token window"
         );
     }
 }

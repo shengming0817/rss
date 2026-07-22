@@ -10,7 +10,7 @@ cargo nextest run -p oidc --features backend
 ```
 
 预期覆盖：
-- 合法 ES256 JWT（exp 未来、iss/aud 匹配，FixedClock 设在 exp 之前）→ `Ok(VerifiedClaims)`，subject/tenant/kind 与 payload 一致。
+- 合法 RSS ES256 JWT（exp 未来、iss/aud 匹配，FixedClock 设在 exp 之前）→ grant-bound User `VerifiedClaims`，完整 `sid/jti/auth_time/authn_epoch` 与 payload 一致；合法 Federated JWT 只产 Federated shape。
 - 合法 HS256 service_token → `Ok`。
 - 篡改 payload → `Err(InvalidSignature)`；`alg=none` → `InvalidSignature`。
 - exp 过期（FixedClock 设在 exp+leeway 之后）→ `Expired`；exp 边界内（exp<now<exp+leeway）→ `Ok`。
@@ -62,5 +62,5 @@ cargo dylint --all               # rss_diport_impl_allowlist：oidc impl Pdp 合
 
 ## 安全门人工核对（不可机器全覆盖处）
 
-- `cargo build --release`（bins/server、bins/rss）依赖图**不含** stub Pdp（stub 仅 `[dev-dependencies]`）与禁用 crypto crate。
+- `cargo build --release -p runtime` 依赖图**不含** stub Pdp（stub 仅 `[dev-dependencies]`）与禁用 crypto crate。
 - 仅 PR-C 启用生产认证（注入 Box<DynPdp> + 挂 verify-bridge）；PR-A1/A2/B 单独 merge 后 `Require` 端点仍 401。

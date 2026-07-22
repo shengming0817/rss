@@ -1,0 +1,24 @@
+error[E0599]: no associated function or constant named `new` found for struct `VerifiedClaims` in the current scope
+ --> tests/ui/verified_claims_legacy_constructor_removed_fail.rs:2:37
+  |
+2 |     let _ = diport::VerifiedClaims::new("subject", None, None);
+  |                                     ^^^ associated function or constant not found in `VerifiedClaims`
+  |
+note: if you're trying to build a new `VerifiedClaims` consider using one of the following associated functions:
+      VerifiedClaims::rss_user
+      VerifiedClaims::federated_access
+      VerifiedClaims::service_token
+ --> $WORKSPACE/crates/diport/src/pdp.rs
+  |
+  |       pub fn rss_user(user_id: UserId, tenant: TenantId, grant: VerifiedAccessGrantFacts) -> Self {
+  |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+  | /     pub fn federated_access(
+  | |         subject: impl Into<String>,
+  | |         tenant: Option<TenantId>,
+  | |         kind: PrincipalKind,
+  | |     ) -> Result<Self, VerifiedClaimShapeError> {
+  | |______________________________________________^
+...
+  |       pub fn service_token(caller: ServiceCallerDomain) -> Self {
+  |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

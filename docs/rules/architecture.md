@@ -70,14 +70,14 @@ rss/
 │   ├── tracewire/        # W3C traceparent capture/restore 单源（outbox→consumer trace 续传，唯一 otel 桥落点，#1224）
 │   ├── diport/           # DI-infra：可替换 provider 的 port 单源；dynosaur 默认非 Sync，Pdp/KeyProvider 是共享例外（ADR-003 #1095/#1828）
 │   ├── httpserve/        # axum router / middleware / health
-│   ├── authn/            # jwt / session / refresh / PDP / Principal
+│   ├── authn/            # jwt / AuthGrant / security vocabulary / refresh / PDP / Principal
 │   ├── bootstrap/        # composition / config / shutdown / worker
 │   ├── eventexec/        # outbox relay / eventbus / saga executor·tailer / command
 │   ├── deviceloop/       # cert lifecycle·signing（L4）
 │   ├── observ/           # metrics / logging / grpc interceptor / websocket（audit sink 迁 diport，#1075）
 │   ├── distributed/      # distlock / cas / transport
 │   ├── testkit/          # 服务层 test-support：HTTP 契约测试 oneshot harness（经 [dev-dependencies] 被域/组合根消费，零 adapter 依赖，不进生产 shipped 图）
-│   ├── identity/         # 域：身份 / 会话 / RBAC / ABAC
+│   ├── identity/         # 域：身份 / 凭据与账户安全编排 / RBAC / ABAC
 │   ├── settings/         # 域：版本化配置 / flag（避开 config 重名）
 │   ├── audit/            # 域：审计链
 │   ├── contractreg/      # 域：运行时契约 submit / list

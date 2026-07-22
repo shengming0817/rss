@@ -2,10 +2,10 @@
 
 use std::time::SystemTime;
 
-use identity::ports::{
+use authn::{
     AuthGrant, AuthGrantStatus, AuthnEpoch, CredentialSecurityEventKind, GrantSecurityEventKind,
-    RefreshStatus, RefreshTokenRecord,
 };
+use identity::ports::{RefreshStatus, RefreshTokenRecord};
 
 fn positional_hydration_is_not_available(
     tenant: vocab::TenantId,

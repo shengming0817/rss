@@ -181,7 +181,8 @@ pub use pdp::{
     ServiceTokenReplayDisposition, ServiceTokenReplayKey, ServiceTokenReplayKeyError,
     ServiceTokenReplayScope, ServiceTokenReplayStore, ServiceTokenReplayStoreError,
     ServiceTokenTenantBinding, TokenAlgorithm, TokenPolicy, TokenProfile, TokenProfileMarker,
-    VerifiedClaims, service_token_mac_input,
+    VerifiedAccessGrantFacts, VerifiedClaimShapeError, VerifiedClaims, VerifiedClaimsView,
+    service_token_mac_input,
 };
 pub use publisher::{
     DynPublisher, PublishErrorKind, PublishRequest, Publisher, PublisherError, Topic,

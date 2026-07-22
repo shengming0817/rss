@@ -87,7 +87,7 @@
 
 ## R6. 已有接缝（消费，不改）
 
-- `crates/diport/src/pdp.rs`：`Pdp` trait（`async fn verify(&self, raw: &RawCredential) -> Result<VerifiedClaims, PdpError>`）+ `RawCredential::{jwt, service_token}` + `VerifiedClaims::new(subject, tenant, kind)` + `PdpError` + `DynPdp`（dynosaur）。
+- `crates/diport/src/pdp.rs`：`Pdp` trait（`async fn verify(&self, raw: &RawCredential) -> Result<VerifiedClaims, PdpError>`）+ profile-specific `RawCredential` + closed `VerifiedClaims::{rss_user,federated_access,service_token}` factories + `PdpError` + `DynPdp`（dynosaur）。#1835 / ADR-021 已删除旧通用 claims constructor。
 - `crates/authn/src/lib.rs:285-322`：`verify_jwt(raw, &DynPdp)` / `verify_service_token` —— 内部调 `pdp.verify` → `Jwt::parse` 结构闸 → `VerifiedJwt::seal` → `Principal::from_verified_jwt`。本 feature 调它，不改它。
 - `lints/rss_diport_impl_allowlist`：adapter（`adapters/oidc`）impl diport port **已在 allowlist**，无需改 lint。
 - `deny.toml`：`oidc` package wrapper 已登记（server/rss/xtask/journeys）；新增 crypto deps 后须 `cargo deny check` 复绿。

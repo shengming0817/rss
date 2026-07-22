@@ -1,7 +1,7 @@
 #![feature(rustc_private)]
 //! `rss_authenticated_callsite` — RSS 治理 dylint lint：限定认证证据、审计 subject 与 verified
 //! maintenance capability funnel 仅组合根可调用。
-//! `httpserve::Authenticated::{new,new_service}` 与
+//! `httpserve::Authenticated` profile-specific constructors、`httpserve::CurrentAuthGrant::new` 与
 //! `authn::Principal::{audit_subject,service_caller_domain}` 与
 //! `postgres::ConfigValueMaintenanceCapability::from_verified_service_caller` 仅 assembly / bin crate
 //! （组合根）可调用。DLQ verified subject 由专用 `rss_dlq_operator_callsite` 守护。
@@ -14,14 +14,16 @@
 //!
 //! 与 `rss_authplan_callsite`（AUTH-PLAN-MINT-01）同治理姿态：`AuthPlan` 是 listener 级认证计划、
 //! `Authenticated` 是 per-request 认证证据，二者均为安全敏感 mint，均限组合根构造。`Authenticated` 字段私有
-//! （外部无法 struct-literal 伪造），构造入口闭集为 `new` / `new_service`；二者 callsite 同闸闭合 funnel。
+//! （外部无法 struct-literal 伪造），构造入口闭集为 profile-specific constructors；
+//! `CurrentAuthGrant` 与 AuthGrant/RSS issue 生产链亦按 callee DefId + caller impl ADT 的完整
+//! DefPath 同闸闭合 funnel；caller 的 crate/type/method 短名不足以证明它是 canonical service。
 //!
 //! 上下游强度（ai-robust.md §审查要求「Funnel 类约束分别说明上游 / 下游」）：
 //! - 上游（构造守卫）：`Authenticated` 字段私有，外部 crate 仅能经构造入口闭集合法构造——类型层私有字段已封
-//!   struct literal，但 runtime 验签桥跨 crate，故 `new` / `new_service` 经同一 callsite lint 约束。
+//!   struct literal，但 runtime 验签桥跨 crate，故 profile-specific constructors 经同一 callsite lint 约束。
 //! - 下游（使用守卫）：`Authenticated` 可 Clone 传递，使用侧无需 mint——mint 点即唯一约束面。
 //!
-//! 判定四步：① callee crate 名 == "httpserve"；② item 名属于 `new | new_service`；③ parent 是 Impl；
+//! 判定四步：① callee crate 名；② item 名属于对应闭集；③ parent 是 Impl；
 //! ④ impl self 类型的 adt 名 == "Authenticated"（self-ty 检查，杜绝 `Vec::new` 等同名 fn 误报）。
 //!
 //! 检测面：捕获 funnel assoc fn 的 path 引用与 method-call——直接 call、函数项别名、fn-pointer
@@ -53,6 +55,8 @@ const ALLOWED_AUTHENTICATED_MINT_FUNCTIONS: &[(&str, &str)] = &[
     ("allow_evidence", "auth_bridge::allow_evidence"),
     ("mtls_evidence", "auth_bridge::mtls_evidence"),
 ];
+const ALLOWED_CURRENT_GRANT_MINT_FUNCTION: (&str, &str) =
+    ("current_auth_grant", "auth_bridge::current_auth_grant");
 const ALLOWED_PRINCIPAL_ACCESSOR_FUNCTIONS: &[(&str, &str)] = &[
     ("allow_evidence", "auth_bridge::allow_evidence"),
     (
@@ -83,7 +87,7 @@ const ALLOWED_CONFIG_VALUE_CAPABILITY_FUNCTION: (&str, &str) = (
 
 dylint_linting::declare_late_lint! {
     /// ### What it does
-    /// 标记非组合根 crate 对 `httpserve::Authenticated::{new,new_service}` 的**任意 path 引用**（直接
+    /// 标记未授权 caller 对 evidence / AuthGrant / RSS issue funnel 的**任意 path 引用**（直接
     /// call、函数项别名、fn-pointer 强转——凡解析到对应 assoc fn DefId）。
     ///
     /// ### Why is this bad?
@@ -99,8 +103,7 @@ dylint_linting::declare_late_lint! {
     /// ### Example
     /// ```ignore
     /// // 域 crate（非组合根）：
-    /// let ev = httpserve::Authenticated::new(
-    ///     primitives::RequiredScheme::RssAccessToken,
+    /// let ev = httpserve::Authenticated::new_federated(
     ///     vocab::PrincipalKind::User,
     ///     "subject-1",
     ///     None,
@@ -139,8 +142,30 @@ impl<'tcx> LateLintPass<'tcx> for RssAuthenticatedCallsite {
                 cx,
                 expr.hir_id,
                 expr.span,
-                "Authenticated 证据仅组合根（assembly / bin crate）可构造：`Authenticated::new` / `new_service` 不得在此 crate 调用",
+                "Authenticated 证据仅组合根（assembly / bin crate）可构造：profile-specific constructor 不得在此 crate 调用",
                 "仅在 runtime `auth_bridge::{allow_evidence,mtls_evidence}` 的精确验签桥函数中构造 Authenticated；其它 runtime 代码同样不得 mint evidence",
+            );
+        }
+        if is_current_grant_mint_did(cx, did)
+            && !current_grant_mint_caller_is_allowed(cx, expr.hir_id)
+        {
+            emit(
+                cx,
+                expr.hir_id,
+                expr.span,
+                "CurrentAuthGrant 仅可在 runtime 消费 durable validator proof 后构造",
+                "仅在 runtime `auth_bridge::current_auth_grant` 精确 wrapper 中消费 `ValidatedAuthGrant` 并 mint marker",
+            );
+        }
+        if let Some(funnel) = authn_grant_issue_funnel(cx, did)
+            && !authn_grant_issue_caller_is_allowed(cx, expr.hir_id, funnel)
+        {
+            emit(
+                cx,
+                expr.hir_id,
+                expr.span,
+                "AuthGrant/RSS access-token 生产 funnel 出现在未授权调用点",
+                funnel.help(),
             );
         }
         if is_principal_audit_subject_did(cx, did)
@@ -193,6 +218,134 @@ fn authenticated_mint_caller_is_allowed(cx: &LateContext<'_>, hir_id: HirId) -> 
         })
 }
 
+fn current_grant_mint_caller_is_allowed(cx: &LateContext<'_>, hir_id: HirId) -> bool {
+    if cx.tcx.crate_name(LOCAL_CRATE).as_str() != "runtime" {
+        return false;
+    }
+    let parent = cx.tcx.hir_get_parent_item(hir_id).to_def_id();
+    let item_name = cx.tcx.item_name(parent);
+    let def_path = cx.tcx.def_path_str(parent);
+    item_name.as_str() == ALLOWED_CURRENT_GRANT_MINT_FUNCTION.0
+        && is_exact_runtime_path(&def_path, ALLOWED_CURRENT_GRANT_MINT_FUNCTION.1)
+}
+
+#[derive(Clone, Copy)]
+enum AuthnGrantIssueFunnel {
+    NewActive,
+    Hydrate,
+    IssueInput,
+    IssueAccess,
+}
+
+impl AuthnGrantIssueFunnel {
+    const fn help(self) -> &'static str {
+        match self {
+            Self::NewActive => "AuthGrant::new_active 仅允许 identity::LoginService::login",
+            Self::Hydrate => {
+                "AuthGrant::hydrate 仅允许 AuthGrant 内部状态转换与 postgres::auth_grant_lifecycle::find_active"
+            }
+            Self::IssueInput | Self::IssueAccess => {
+                "RSS access issue input 与 issuer 仅允许 identity refresh 的 prepare_initial/rotate"
+            }
+        }
+    }
+}
+
+fn authn_grant_issue_funnel(cx: &LateContext<'_>, did: DefId) -> Option<AuthnGrantIssueFunnel> {
+    if cx.tcx.crate_name(did.krate).as_str() != "authn" {
+        return None;
+    }
+    let parent_did = cx.tcx.parent(did);
+    if !matches!(cx.tcx.def_kind(parent_did), DefKind::Impl { .. }) {
+        return None;
+    }
+    let self_ty = cx.tcx.type_of(parent_did).skip_binder();
+    let self_name = self_ty
+        .ty_adt_def()
+        .map(|adt| cx.tcx.item_name(adt.did()))?;
+    match (self_name.as_str(), cx.tcx.item_name(did).as_str()) {
+        ("AuthGrant", "new_active") => Some(AuthnGrantIssueFunnel::NewActive),
+        ("AuthGrant", "hydrate") => Some(AuthnGrantIssueFunnel::Hydrate),
+        ("AuthGrant", "access_issue_input") => Some(AuthnGrantIssueFunnel::IssueInput),
+        ("JwtIssuer", "issue_access") => Some(AuthnGrantIssueFunnel::IssueAccess),
+        _ => None,
+    }
+}
+
+fn authn_grant_issue_caller_is_allowed(
+    cx: &LateContext<'_>,
+    hir_id: HirId,
+    funnel: AuthnGrantIssueFunnel,
+) -> bool {
+    let caller = cx.tcx.hir_get_parent_item(hir_id).to_def_id();
+    match funnel {
+        AuthnGrantIssueFunnel::NewActive => exact_inherent_caller_is(
+            cx,
+            caller,
+            "identity",
+            "application::LoginService",
+            &["login"],
+        ),
+        AuthnGrantIssueFunnel::Hydrate => {
+            exact_inherent_caller_is(
+                cx,
+                caller,
+                "authn",
+                "grant::AuthGrant",
+                &["new_active", "close"],
+            ) || exact_inherent_caller_is(
+                cx,
+                caller,
+                "postgres",
+                "auth_grant_lifecycle::PgAuthGrantLifecycle",
+                &["find_active"],
+            )
+        }
+        AuthnGrantIssueFunnel::IssueInput | AuthnGrantIssueFunnel::IssueAccess => {
+            exact_inherent_caller_is(
+                cx,
+                caller,
+                "identity",
+                "application::RefreshService",
+                &["prepare_initial", "rotate"],
+            )
+        }
+    }
+}
+
+/// Match a caller by its resolved method `DefId` and the full DefPath of the inherent impl ADT.
+/// The ADT path is the stable identity here: impl-block indices in a method's printed DefPath are
+/// intentionally unstable, while a short type name permits `fake::LoginService` impersonation.
+fn exact_inherent_caller_is(
+    cx: &LateContext<'_>,
+    method: DefId,
+    expected_crate: &str,
+    expected_self_path: &str,
+    expected_methods: &[&str],
+) -> bool {
+    if method.krate != LOCAL_CRATE
+        || cx.tcx.crate_name(LOCAL_CRATE).as_str() != expected_crate
+        || !expected_methods.contains(&cx.tcx.item_name(method).as_str())
+    {
+        return false;
+    }
+    let impl_did = cx.tcx.parent(method);
+    if !matches!(cx.tcx.def_kind(impl_did), DefKind::Impl { .. }) {
+        return false;
+    }
+    cx.tcx
+        .type_of(impl_did)
+        .instantiate_identity()
+        .ty_adt_def()
+        .is_some_and(|adt| {
+            is_exact_crate_path(
+                &cx.tcx.def_path_str(adt.did()),
+                expected_crate,
+                expected_self_path,
+            )
+        })
+}
+
 struct RestrictedFunnel {
     help: &'static str,
 }
@@ -224,10 +377,10 @@ fn restricted_service_capability_funnel(
     }
 }
 
-/// `did` 是 `httpserve::Authenticated` 的关联构造 fn `new` 或 `new_service`。
+/// `did` 是 `httpserve::Authenticated` 的 profile-specific 关联构造 fn。
 /// 四步判定——缺第 4 步会误命中所有 `X::new`：
 /// 1. callee crate 名 == "httpserve"
-/// 2. item 名 == "new"
+/// 2. item 名属于 profile-specific constructor 闭集
 /// 3. parent def_kind 是 Impl（assoc fn）
 /// 4. impl self 类型的 adt 名 == "Authenticated"（关键：区分 Vec::new 等同名 fn）
 fn is_authenticated_mint_did(cx: &LateContext<'_>, did: DefId) -> bool {
@@ -236,7 +389,10 @@ fn is_authenticated_mint_did(cx: &LateContext<'_>, did: DefId) -> bool {
         return false;
     }
     // 步骤 2：item 名是 "new"
-    if !matches!(cx.tcx.item_name(did).as_str(), "new" | "new_service") {
+    if !matches!(
+        cx.tcx.item_name(did).as_str(),
+        "new_federated" | "new_rss_user" | "new_mtls" | "new_service"
+    ) {
         return false;
     }
     // 步骤 3：parent 是 Impl（assoc fn，非自由 fn）
@@ -251,6 +407,23 @@ fn is_authenticated_mint_did(cx: &LateContext<'_>, did: DefId) -> bool {
     } else {
         false
     }
+}
+
+fn is_current_grant_mint_did(cx: &LateContext<'_>, did: DefId) -> bool {
+    if cx.tcx.crate_name(did.krate).as_str() != "httpserve"
+        || cx.tcx.item_name(did).as_str() != "new"
+    {
+        return false;
+    }
+    let parent_did = cx.tcx.parent(did);
+    if !matches!(cx.tcx.def_kind(parent_did), DefKind::Impl { .. }) {
+        return false;
+    }
+    cx.tcx
+        .type_of(parent_did)
+        .skip_binder()
+        .ty_adt_def()
+        .is_some_and(|adt| cx.tcx.item_name(adt.did()).as_str() == "CurrentAuthGrant")
 }
 
 /// `did` 是 `authn::Principal` 的审计 subject accessor。
@@ -293,9 +466,14 @@ fn principal_accessor_caller_is_allowed(cx: &LateContext<'_>, hir_id: HirId) -> 
 }
 
 fn is_exact_runtime_path(actual: &str, expected_without_crate: &str) -> bool {
+    is_exact_crate_path(actual, "runtime", expected_without_crate)
+}
+
+fn is_exact_crate_path(actual: &str, crate_name: &str, expected_without_crate: &str) -> bool {
     actual == expected_without_crate
         || actual
-            .strip_prefix("runtime::")
+            .strip_prefix(crate_name)
+            .and_then(|path| path.strip_prefix("::"))
             .is_some_and(|path| path == expected_without_crate)
 }
 
@@ -322,15 +500,30 @@ fn emit(
 
 #[test]
 fn ui_disallowed() {
-    // example target 名 `authenticated_callsite_ui`（非 allowlist）→ 调 Authenticated::new 触发；
+    // example target 名 `authenticated_callsite_ui`（非 allowlist）→ evidence/grant funnel 触发；
     // 含 anti-vacuity（Vec::new / httpserve 非-new fn 不触发，证明 lint 非「任意 ::new / 任意 httpserve 调用」）。
     dylint_testing::ui_test_example(env!("CARGO_PKG_NAME"), "authenticated_callsite_ui");
 }
 
 #[test]
-fn ui_runtime_exact_settings_wrapper() {
+fn ui_runtime_exact_wrappers() {
     // example target 名 `runtime`（= 唯一合法组合根 crate）验证 Authenticated/Principal 的 crate
-    // allowlist，同时用 settings exact nested wrapper 绿与 direct/nested 红锁住 capability 分支。
+    // allowlist，同时用 exact nested wrapper 绿与 direct/nested 红锁住 verification 分支。
     // "runtime" 不与 rss_authplan_callsite 的 "primitives" 在共享 lints workspace 撞 target 名。
     dylint_testing::ui_test_example(env!("CARGO_PKG_NAME"), "runtime");
+}
+
+#[test]
+fn ui_identity_exact_grant_issue_wrappers() {
+    dylint_testing::ui_test_example(env!("CARGO_PKG_NAME"), "identity");
+}
+
+#[test]
+fn ui_postgres_exact_grant_hydrate_wrapper() {
+    dylint_testing::ui_test_example(env!("CARGO_PKG_NAME"), "postgres");
+}
+
+#[test]
+fn ui_authn_internal_hydrate_only_allowed() {
+    dylint_testing::ui_test_example(env!("CARGO_PKG_NAME"), "authn");
 }

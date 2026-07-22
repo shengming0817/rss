@@ -9,9 +9,9 @@ use identity::{
     AuthGrantServices, FederatedIdentityDomain, FederatedIdentityDomainDeps, IdentityDomain,
     IdentityDomainDeps, LoginService, PolicyManageService, RbacAdminService,
     ports::{
-        DynAccountSecurityReadRepo, DynCredentialRepo, DynPolicyLifecycle, DynPolicyRepo,
-        DynResourceAttributeReadRepo, DynRoleBindingLifecycle, DynRoleBindingReadRepo,
-        DynRoleReadRepo,
+        DynAccountSecurityReadRepo, DynAuthGrantValidator, DynCredentialRepo, DynPolicyLifecycle,
+        DynPolicyRepo, DynResourceAttributeReadRepo, DynRoleBindingLifecycle,
+        DynRoleBindingReadRepo, DynRoleReadRepo,
     },
 };
 use postgres::{PgDomainDeps, caps};
@@ -77,6 +77,19 @@ impl Clock for SharedClock {
 
 fn boxed_clock(clock: &Arc<dyn Clock>) -> Box<dyn Clock> {
     Box::new(SharedClock(Arc::clone(clock)))
+}
+
+/// Build the mandatory request-time RSS grant fence from the same identity capability bundle as
+/// login and refresh. The returned service exposes only the read-only validation port.
+#[must_use]
+pub fn access_grant_validation_service(
+    pg: &PgDomainDeps<caps::Identity>,
+    clock: &Arc<dyn Clock>,
+) -> Arc<identity::AuthGrantValidationService> {
+    Arc::new(identity::AuthGrantValidationService::new(
+        DynAuthGrantValidator::new_arc(pg.auth_grant_validator()),
+        boxed_clock(clock),
+    ))
 }
 
 struct CommonIdentityServices {

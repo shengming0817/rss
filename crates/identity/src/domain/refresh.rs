@@ -11,7 +11,7 @@ use std::time::SystemTime;
 use ids::UserId;
 use vocab::TenantId;
 
-use super::{AuthGrant, AuthGrantId, AuthGrantStatus, AuthnEpoch};
+use authn::{AuthGrant, AuthGrantId, AuthGrantStatus, AuthnEpoch};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct RefreshTokenId(String);
@@ -326,7 +326,6 @@ impl RefreshRotation {
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::domain::{AuthGrant, AuthGrantId};
     use std::time::Duration;
 
     fn tenant() -> TenantId {
@@ -339,7 +338,6 @@ mod tests {
 
     fn grant() -> AuthGrant {
         AuthGrant::new_active(
-            AuthGrantId::new("grant-secret"),
             tenant(),
             user(),
             SystemTime::UNIX_EPOCH,
@@ -365,7 +363,8 @@ mod tests {
     fn initial_record_derives_exact_grant_binding() {
         let record = initial();
         assert_eq!(record.tenant(), tenant());
-        assert_eq!(record.auth_grant_id().as_str(), "grant-secret");
+        let parsed = uuid::Uuid::parse_str(record.auth_grant_id().as_str()).expect("grant UUID");
+        assert_eq!(parsed.get_version(), Some(uuid::Version::Random));
         assert_eq!(record.user_id(), user());
         assert_eq!(record.issuance_epoch(), AuthnEpoch::ZERO);
         assert_eq!(record.auth_grant_status(), AuthGrantStatus::Active);

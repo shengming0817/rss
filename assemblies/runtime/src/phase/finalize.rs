@@ -28,10 +28,18 @@ impl<'a> DomainsWired<'a> {
                 deps.pg.for_domain::<caps::Audit>().auth_audit_sink(),
             );
             let auth_audit_clock: Arc<dyn diport::Clock> = Arc::new(SystemClock);
+            let grant_validation_clock: Arc<dyn diport::Clock> = Arc::new(SystemClock);
+            let rss_access_grants = runtime_rss_access.as_ref().map(|_| {
+                identity_composition::access_grant_validation_service(
+                    &deps.pg.for_domain::<caps::Identity>(),
+                    &grant_validation_clock,
+                )
+            });
             let token_provider_bindings = crate::routes::TokenProviderBindings::new(
                 runtime_rss_access
                     .as_ref()
                     .map(|provider| provider.provider()),
+                rss_access_grants,
                 runtime_federated_access
                     .as_ref()
                     .map(|provider| provider.provider()),

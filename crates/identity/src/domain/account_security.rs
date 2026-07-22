@@ -8,6 +8,8 @@
 
 use std::time::SystemTime;
 
+use authn::AuthnEpoch;
+
 const MAX_PERSISTED_COUNTER: u64 = i64::MAX as u64;
 
 /// Durable account lifecycle status.
@@ -36,45 +38,6 @@ impl AccountStatus {
                 | (Locked, Active)
                 | (Locked, Deactivated)
         )
-    }
-}
-
-/// Monotonic authentication epoch.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct AuthnEpoch(u64);
-
-impl AuthnEpoch {
-    /// Initial account epoch.
-    pub const ZERO: Self = Self(0);
-
-    /// Validated persisted value.
-    pub fn hydrate(value: u64) -> Result<Self, AccountSecurityHydrationError> {
-        if value > MAX_PERSISTED_COUNTER {
-            return Err(AccountSecurityHydrationError::CounterOutOfRange);
-        }
-        Ok(Self(value))
-    }
-
-    /// Numeric value for persistence.
-    pub fn get(self) -> u64 {
-        self.0
-    }
-
-    fn checked_next(self) -> Result<Self, AccountSecurityTransitionError> {
-        let next = self
-            .0
-            .checked_add(1)
-            .ok_or(AccountSecurityTransitionError::EpochOverflow)?;
-        if next > MAX_PERSISTED_COUNTER {
-            return Err(AccountSecurityTransitionError::EpochOverflow);
-        }
-        Ok(Self(next))
-    }
-}
-
-impl std::fmt::Debug for AuthnEpoch {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("AuthnEpoch(<redacted>)")
     }
 }
 
@@ -223,7 +186,9 @@ impl AccountSecurityState {
         let authn_epoch = if next_status == AccountStatus::Active {
             self.authn_epoch
         } else {
-            self.authn_epoch.checked_next()?
+            self.authn_epoch
+                .checked_next()
+                .map_err(|_| AccountSecurityTransitionError::EpochOverflow)?
         };
         let next = Self {
             tenant: self.tenant,
@@ -256,7 +221,10 @@ impl AccountSecurityState {
             tenant: self.tenant,
             user_id: self.user_id,
             status: self.status,
-            authn_epoch: self.authn_epoch.checked_next()?,
+            authn_epoch: self
+                .authn_epoch
+                .checked_next()
+                .map_err(|_| AccountSecurityTransitionError::EpochOverflow)?,
             version: self.version.checked_next()?,
             status_changed_at: self.status_changed_at,
             updated_at: now,
@@ -290,7 +258,8 @@ impl TryFrom<AccountSecuritySnapshot> for AccountSecurityState {
             tenant: snapshot.tenant,
             user_id: snapshot.user_id,
             status: snapshot.status,
-            authn_epoch: AuthnEpoch::hydrate(snapshot.authn_epoch)?,
+            authn_epoch: AuthnEpoch::hydrate(snapshot.authn_epoch)
+                .map_err(|_| AccountSecurityHydrationError::CounterOutOfRange)?,
             version: AccountSecurityVersion::hydrate(snapshot.version)?,
             status_changed_at: snapshot.status_changed_at,
             updated_at: snapshot.updated_at,

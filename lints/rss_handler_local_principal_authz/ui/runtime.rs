@@ -10,6 +10,10 @@ impl MtlsRouteAuthorizer {
     }
 }
 
+fn allow_evidence(kind: PrincipalKind) -> bool {
+    kind == PrincipalKind::User
+}
+
 fn verify_maintenance_operator_subject(kind: PrincipalKind) -> bool {
     kind == PrincipalKind::Service
 }
@@ -29,6 +33,7 @@ fn handler_local_role_check(kind: PrincipalKind) -> bool {
 fn main() {
     let authorizer = MtlsRouteAuthorizer;
     let _ = authorizer.authorize(PrincipalKind::Service);
+    let _ = allow_evidence(PrincipalKind::User);
     let _ = verify_maintenance_operator_subject(PrincipalKind::Service);
     let _ = verified_service_maintenance_operator_subject(PrincipalKind::Service);
     let _ = verified_projection_maintenance_operator_subject(PrincipalKind::Service);

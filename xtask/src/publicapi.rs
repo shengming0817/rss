@@ -340,6 +340,10 @@ mod tests {
             "pub async fn authn::verify_rss_access",
             "pub async fn authn::verify_federated_access",
             "pub async fn authn::verify_service_token",
+            "pub struct authn::RssAccessIssueInput",
+            "pub struct authn::VerifiedGrantReceipt",
+            "pub fn authn::VerifiedJwt::grant_receipt(&self)",
+            "pub fn authn::AuthGrant::access_issue_input(&self)",
         ] {
             assert!(
                 baseline.contains(required),
@@ -351,6 +355,7 @@ mod tests {
             "pub fn authn::VerifiedServiceToken::seal",
             "VerifiedJwt::seal",
             "VerifiedServiceToken::seal",
+            "JwtAccessPrincipal",
         ] {
             assert!(
                 !baseline.contains(forbidden),
@@ -371,6 +376,10 @@ mod tests {
             "pub struct diport::EncryptOutput",
             // 方法列在定义路径（cargo-public-api 惯例），非 re-export 路径；parse ⇄ to_token 对称 token 存储面单源。
             "pub fn diport::key_provider::KeyRef::to_token",
+            "pub struct diport::VerifiedAccessGrantFacts",
+            "pub fn diport::pdp::VerifiedClaims::rss_user",
+            "pub enum diport::pdp::VerifiedClaimsView<'a>",
+            "pub fn diport::pdp::VerifiedClaims::view(&self) -> diport::pdp::VerifiedClaimsView<'_>",
         ] {
             assert!(
                 baseline.contains(required),
@@ -382,6 +391,10 @@ mod tests {
         assert!(
             !baseline.contains("pub trait diport::KeyProviderLocal"),
             "diport public-api golden 不得在 crate 根 re-export 基 trait KeyProviderLocal"
+        );
+        assert!(
+            !baseline.contains("VerifiedClaims::new"),
+            "diport public-api golden 不得恢复开放的 VerifiedClaims 构造器"
         );
         // 安全负向不变式（ADR-011 §D3 防 timing oracle）：key 标识 `KeyName`/`KeyVersion`/`KeyRef` **禁** derive
         // `PartialEq`/`Eq`——只能经 `ct_eq` 等值-only 匹配。golden 锁住「无 `==` 能力」，杜绝后续 PR 重生 baseline

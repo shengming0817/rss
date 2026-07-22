@@ -47,6 +47,7 @@ use wiremock::matchers::{body_partial_json, method as match_method};
 use wiremock::{Mock, MockServer, Request as MockRequest, Respond, ResponseTemplate};
 
 const TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
+const USER_ID: &str = "550e8400-e29b-41d4-a716-446655440000";
 const ISS: &str = "https://issuer.test";
 const AUD: &str = "rss-test";
 const NOW: i64 = 1_700_000_000;
@@ -248,7 +249,6 @@ fn oidc_provider(
     runtime::rss_access_provider_from_static_config(runtime::RssAccessStaticProviderConfig {
         issuer: ISS,
         audience: AUD,
-        trusted_kinds: &["user"],
         keys: &keyed,
         retirement_schedule: schedule,
         clock: Box::new(FixedClock(clock)),
@@ -278,7 +278,11 @@ async fn verify_response(
     let plan = AuthPlan::new(ListenerKind::Primary, AuthScheme::RssAccessToken).expect("plan");
     let authed =
         httpserve::finalize_primary_auth(routes, plan, allow_authorizer()).expect("finalize_auth");
-    let app = apply_rss_access_verify_bridge_for_test(authed, Arc::new(provider));
+    let app = apply_rss_access_verify_bridge_for_test(
+        authed,
+        Arc::new(provider),
+        runtime::test_support::always_current_access_grants(),
+    );
     let req = axum::http::Request::builder()
         .method(Method::GET)
         .uri("/protected")
@@ -337,11 +341,21 @@ fn jwt_kid(token: &str) -> String {
 #[allow(clippy::expect_used)]
 async fn mint_user(issuer: &authn::JwtIssuer<diport::RssAccessProfile, VaultSigner>) -> String {
     let tenant = vocab::TenantId::parse(TENANT).expect("canonical tenant");
+    let grant = authn::AuthGrant::new_active(
+        tenant,
+        ids::UserId::parse(USER_ID).expect("canonical user id"),
+        UNIX_EPOCH + Duration::from_secs((NOW - 60) as u64),
+        authn::AuthnEpoch::hydrate(3).expect("valid epoch"),
+        UNIX_EPOCH + Duration::from_secs((NOW + 10_000) as u64),
+        UNIX_EPOCH + Duration::from_secs((NOW - 30) as u64),
+    )
+    .expect("active grant");
     issuer
-        .issue_access(authn::JwtAccessPrincipal::User {
-            subject: "alice",
-            tenant,
-        })
+        .issue_access(
+            grant
+                .access_issue_input()
+                .expect("active grant issue input"),
+        )
         .await
         .expect("mint ok")
         .as_str()

@@ -7,8 +7,9 @@
 //! Active、未过期且 issuance epoch 一致，再执行 `UPDATE status='consumed' ...`（CAS）+ 条件 INSERT。
 //! `Applied|Replay|AccountStale|Expired` 区分成功、refresh CAS miss、账号 fence 与最终 writer 过期 fence。
 //!
-//! **谱系级联撤销**（`revoke_lineage`）：`UPDATE status='revoked' WHERE lineage_id=$2`（幂等，0 行也 Ok）；
-//! logout / reuse-detection 共用此路径（整条 rotation 链一次撤销）。
+//! **显式 refresh 撤销 primitive**（`revoke_lineage`）：`UPDATE status='revoked' WHERE lineage_id=$2`
+//! （幂等，0 行也 Ok）。logout / reuse-detection 经 `PgAuthGrantLifecycle::close` 在同一事务关闭
+//! AuthGrant root 与其 grant-bound family，不走此独立写。
 //!
 //! **租户隔离**：写路径先 `set_local_tenant`（RLS SET LOCAL 锚点，tenancy.md §RLS 与 PG scope）；
 //! 读路径显式 `WHERE tenant_id=$1::uuid`（与 `PgAuthGrantLifecycle::find_active` /
@@ -23,10 +24,11 @@
 
 use std::time::{Duration, SystemTime};
 
+use authn::{AuthGrantId, AuthGrantStatus, AuthnEpoch};
 use identity::ports::{
-    AuthGrantStatus, AuthnEpoch, IdentityError, RefreshRotationMutation, RefreshRotationOutcome,
-    RefreshStatus, RefreshTokenHash, RefreshTokenId, RefreshTokenRecord, RefreshTokenSnapshot,
-    RefreshTokenStore, TenantRepoScope,
+    IdentityError, RefreshRotationMutation, RefreshRotationOutcome, RefreshStatus,
+    RefreshTokenHash, RefreshTokenId, RefreshTokenRecord, RefreshTokenSnapshot, RefreshTokenStore,
+    TenantRepoScope,
 };
 use sqlx::Row;
 
@@ -466,10 +468,12 @@ impl RefreshTokenStore for PgRefreshTokenStore {
                         AuthnEpoch::hydrate(epoch)
                             .map_err(|error| IdentityError::Storage(Box::new(error)))
                     })?;
+                let auth_grant_id = AuthGrantId::hydrate(auth_grant_id)
+                    .map_err(|error| IdentityError::Storage(Box::new(error)))?;
                 RefreshTokenRecord::hydrate(RefreshTokenSnapshot {
                     id: RefreshTokenId::hydrate(id),
                     tenant,
-                    auth_grant_id: identity::ports::AuthGrantId::hydrate(auth_grant_id),
+                    auth_grant_id,
                     user_id,
                     authn_epoch_at_issue: issuance_epoch,
                     auth_grant_status,
@@ -625,8 +629,9 @@ impl RefreshTokenStore for PgRefreshTokenStore {
         .await
     }
 
-    /// **级联撤销整条谱系**（幂等；0 行也 Ok）：tenant-scoped 事务内批量 `UPDATE status='revoked'
-    /// WHERE lineage_id=$2`（logout / reuse-detection 共用）。
+    /// **显式 refresh 撤销 primitive**（幂等；0 行也 Ok）：tenant-scoped 事务内批量
+    /// `UPDATE status='revoked' WHERE lineage_id=$2`。logout / reuse-detection 由
+    /// `PgAuthGrantLifecycle::close` 原子关闭 root/family，不走此独立写。
     async fn revoke_lineage(
         &self,
         scope: TenantRepoScope,

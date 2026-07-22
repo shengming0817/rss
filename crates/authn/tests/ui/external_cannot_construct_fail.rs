@@ -3,11 +3,15 @@
 fn main() {
     let _ = authn::VerifiedJwt {
         raw: "h.e.s".to_string(),
-        claims: diport::VerifiedClaims::new("sub", None, None),
+        claims: diport::VerifiedClaims::service_token(
+            vocab::ServiceCallerDomain::MaintenanceOperator,
+        ),
     }; // E0451: 私有字段不可达
 
     let _ = authn::VerifiedServiceToken {
         token: authn::AccessToken::new("svc"),
-        claims: diport::VerifiedClaims::new("sub", None, None),
+        claims: diport::VerifiedClaims::service_token(
+            vocab::ServiceCallerDomain::MaintenanceOperator,
+        ),
     }; // E0451: 私有字段不可达
 }

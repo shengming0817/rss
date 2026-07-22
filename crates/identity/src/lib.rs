@@ -38,33 +38,31 @@ mod internal;
 pub mod ports;
 
 pub use application::{
-    AuthGrantServices, ChangePasswordError, FederatedIdentityDomain, FederatedIdentityDomainDeps,
-    IdentityDomain, IdentityDomainDeps, LoginError, LoginService, PolicyManageError,
-    PolicyManageService, RbacAdminError, RbacAdminService, RefreshBundle, RefreshError,
-    RefreshService,
+    AccessGrantValidationError, AuthGrantServices, AuthGrantValidationService, ChangePasswordError,
+    FederatedIdentityDomain, FederatedIdentityDomainDeps, IdentityDomain, IdentityDomainDeps,
+    LoginError, LoginService, PolicyManageError, PolicyManageService, RbacAdminError,
+    RbacAdminService, RefreshBundle, RefreshError, RefreshService, ValidatedAuthGrant,
 };
 /// Demo/journey 首发 token 装配（seed-login/test 门控；生产经组合根注入 vault `Signer`，#1252）。
 #[cfg(any(test, feature = "seed-login"))]
-pub use application::{SeedSigner, seed_auth_grant_services, seed_refresh_service};
+pub use application::{SeedSigner, seed_auth_grant_services};
 pub use domain::{
-    AccountCredentialSecurityCommand, AccountSecurityEventKind, AccountSecurityHydrationError,
-    AccountSecurityMutation, AccountSecuritySnapshot, AccountSecurityState,
-    AccountSecurityTransitionError, AccountSecurityVersion, AccountStatus, AuthnEpoch,
-    CredentialSecurityCommand, CredentialSecurityEvent, CredentialSecurityEventKind,
+    AccountCredentialSecurityCommand, AccountSecurityHydrationError, AccountSecurityMutation,
+    AccountSecuritySnapshot, AccountSecurityState, AccountSecurityTransitionError,
+    AccountSecurityVersion, AccountStatus, CredentialSecurityCommand, CredentialSecurityEvent,
     CredentialSecurityFactAuthorization, CredentialSecurityReceipt,
     CredentialSecurityTargetHydrationError, CredentialSecurityTargetKind,
     CredentialSecurityTargetMapping, CredentialSecurityTargetRef, CredentialSecurityTargetRefError,
-    GrantCredentialSecurityCommand, GrantSecurityEventKind, RefreshRotationOutcome,
-    ResolvedCredentialSecurityTarget,
+    GrantCredentialSecurityCommand, RefreshRotationOutcome, ResolvedCredentialSecurityTarget,
 };
 pub use ports::AuthGrantProvider;
 
 /// 测试支撑——仅 `test-support` feature（test/dev 构建）启用，生产不编译（funnel seal 不变）。
 ///
-/// 下游 adapter crate（postgres）集成测试需构造 [`ports::AuthGrant`](crate::ports::AuthGrant) 驱动
+/// 下游 adapter crate（postgres）集成测试需构造 [`authn::AuthGrant`] 驱动
 /// `ports::AuthGrantLifecycle`，及 [`ports::LoginIdentifier`](crate::ports::LoginIdentifier) 驱动
-/// `ports::CredentialRepo::authenticate`（#1316），但 `AuthGrant::new` / `AuthGrantId::new` /
-/// `LoginIdentifier::new` 均为 `pub(crate)` funnel（生产不可伪造）。本模块经 feature 门控暴露受控构造器——与
+/// `ports::CredentialRepo::authenticate`（#1316）。AuthGrant 自身由 canonical `authn` 类型的验证构造器
+/// 建立；`LoginIdentifier::new` 仍为 `pub(crate)` funnel。本模块经 feature 门控暴露其余受控构造器——与
 /// `authn::test_support` 同信任模型（生产构建不编译 ⇒ funnel seal 不变）。
 #[cfg(feature = "test-support")]
 pub mod test_support {
@@ -86,9 +84,12 @@ pub mod test_support {
     }
 
     use crate::domain::{
-        AccountSecurityEventKind, AccountSecuritySnapshot, AccountSecurityState, AuthGrant,
-        AuthGrantId, AuthnEpoch, CredentialSecurityCommand, GrantSecurityEventKind,
-        LoginIdentifier, RefreshTokenHash, RefreshTokenId, RefreshTokenRecord,
+        AccountSecuritySnapshot, AccountSecurityState, CredentialSecurityCommand, LoginIdentifier,
+        RefreshTokenHash, RefreshTokenId, RefreshTokenRecord,
+    };
+    use authn::{
+        AccountSecurityEventKind, AuthGrant, AuthGrantId, AuthGrantSnapshot, AuthGrantStatus,
+        AuthnEpoch, GrantSecurityEventKind,
     };
 
     /// Mount the production logout handler for downstream adapter integration tests.
@@ -111,15 +112,18 @@ pub mod test_support {
         expires_at: SystemTime,
         created_at: SystemTime,
     ) -> AuthGrant {
-        AuthGrant::new_active(
-            AuthGrantId::new(grant_id),
+        AuthGrant::hydrate(AuthGrantSnapshot {
+            id: AuthGrantId::hydrate(grant_id).expect("test auth grant id must be UUIDv4"),
             tenant,
             user_id,
             auth_time,
             authn_epoch_at_issue,
+            status: AuthGrantStatus::Active,
             expires_at,
             created_at,
-        )
+            closed_at: None,
+            close_reason: None,
+        })
         .expect("test auth grant must satisfy state invariants")
     }
 
@@ -229,13 +233,14 @@ mod smoke {
     //! 行为正确性由各子模块（`domain::{rbac,abac}`）的表驱动单测覆盖。
 
     use crate::domain::{
-        AbacAttribute, AccountLockout, AccountStatus, AttributeKey, AttributeValue, AuthGrant,
-        AuthGrantId, Credential, IdentityError, Operator, Permission, PermissionId, Policy,
-        PolicyCondition, PolicyEffect, PolicyId, PolicyObligations, PolicyRouteScope, PolicyRule,
-        PolicyVersion, ResourceAttribute, ResourceAttributeKey, ResourceAttributeResourceId,
+        AbacAttribute, AccountLockout, AccountStatus, AttributeKey, AttributeValue, Credential,
+        IdentityError, Operator, Permission, PermissionId, Policy, PolicyCondition, PolicyEffect,
+        PolicyId, PolicyObligations, PolicyRouteScope, PolicyRule, PolicyVersion,
+        ResourceAttribute, ResourceAttributeKey, ResourceAttributeResourceId,
         ResourceAttributeVersion, ResourcePattern, Role, RoleBinding, RoleId, authorize_rbac,
         evaluate_abac,
     };
+    use authn::{AuthGrant, AuthGrantId};
 
     // 证明主要类型是 Send（跨 await 点传播）。
     fn _assert_send<T: Send>() {}

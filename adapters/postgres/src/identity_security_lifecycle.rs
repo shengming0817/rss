@@ -12,13 +12,14 @@
 //! ref: launchbadge/sqlx sqlx-core/src/transaction.rs@main
 //! ref: ory/fosite handler/oauth2/flow_refresh.go@master
 
+use authn::{AuthGrant, AuthGrantCloseMutation, AuthGrantId, AuthGrantStatus};
 use identity::ports::{
-    AccountSecurityMutation, AuthGrant, AuthGrantCloseMutation, AuthGrantId, AuthGrantStatus,
-    CredentialSecurityCommand, CredentialSecurityEvent, CredentialSecurityFactAuthorization,
-    CredentialSecurityReceipt, CredentialSecurityTargetKind, CredentialSecurityTargetMapping,
-    CredentialSecurityTargetRef, CredentialSecurityTargetResolutionRequest,
-    CredentialSecurityTargetResolver, IdentityError, IdentitySecurityLifecycle,
-    PendingCredentialSecurityCommit, ResolvedCredentialSecurityTarget, TenantRepoScope,
+    AccountSecurityMutation, CredentialSecurityCommand, CredentialSecurityEvent,
+    CredentialSecurityFactAuthorization, CredentialSecurityReceipt, CredentialSecurityTargetKind,
+    CredentialSecurityTargetMapping, CredentialSecurityTargetRef,
+    CredentialSecurityTargetResolutionRequest, CredentialSecurityTargetResolver, IdentityError,
+    IdentitySecurityLifecycle, PendingCredentialSecurityCommit, ResolvedCredentialSecurityTarget,
+    TenantRepoScope,
 };
 
 use crate::account_security_repo::status_to_db;
@@ -318,7 +319,10 @@ impl CredentialSecurityTargetResolver for PgCredentialSecurityTargetResolver {
             Some(grant_id) if grant_id.is_empty() => {
                 return Err(corrupt("corrupt credential security target grant"));
             }
-            Some(grant_id) => Some(AuthGrantId::hydrate(grant_id)),
+            Some(grant_id) => Some(
+                AuthGrantId::hydrate(grant_id)
+                    .map_err(|_| corrupt("corrupt credential security target grant"))?,
+            ),
             None => None,
         };
         request

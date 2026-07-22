@@ -1,6 +1,6 @@
 use std::time::SystemTime;
 
-use identity::ports::{
+use authn::{
     AccountSecurityEventKind, AuthGrant, CredentialSecurityEventKind,
 };
 

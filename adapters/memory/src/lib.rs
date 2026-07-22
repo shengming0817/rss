@@ -28,6 +28,7 @@ use consistency::{
     SagaLeaseOutcome, SeenState,
 };
 
+use authn::{AuthGrant, AuthGrantId, AuthGrantStatus};
 use diport::{
     AuditEvent, AuditSink, AuditSinkError, CasStore, CasStoreError, CasStoreKey, CasStoreOutcome,
     CasStoreRequest, Checkpoint, CheckpointId, CheckpointOwner, CheckpointStoreError,
@@ -44,10 +45,9 @@ use diport::{
 use futures::StreamExt;
 use futures::channel::mpsc::{self, UnboundedSender};
 use identity::ports::{
-    AuthGrant, AuthGrantCloseCommand, AuthGrantId, AuthGrantLifecycle, AuthGrantStatus,
-    IdentityError, LoginGrantMutation, RefreshRotationMutation, RefreshRotationOutcome,
-    RefreshStatus, RefreshTokenHash, RefreshTokenId, RefreshTokenRecord, RefreshTokenSnapshot,
-    RefreshTokenStore, TenantRepoScope,
+    AuthGrantCloseCommand, AuthGrantLifecycle, IdentityError, LoginGrantMutation,
+    RefreshRotationMutation, RefreshRotationOutcome, RefreshStatus, RefreshTokenHash,
+    RefreshTokenId, RefreshTokenRecord, RefreshTokenSnapshot, RefreshTokenStore, TenantRepoScope,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -1785,8 +1785,8 @@ impl SecretResolver for MemSecretResolver {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use authn::{AuthnEpoch, GrantSecurityEventKind};
     use diport::AuditOutcome;
-    use identity::GrantSecurityEventKind;
     use vocab::TenantId;
 
     const CANON_TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
@@ -1805,7 +1805,7 @@ mod tests {
             identity::test_support::user_id("11111111-2222-4333-8444-555555555555"),
             tenant,
             now,
-            identity::AuthnEpoch::ZERO,
+            AuthnEpoch::ZERO,
             now + Duration::from_secs(3_600),
             now,
         )
@@ -2098,7 +2098,7 @@ mod tests {
             .await
             .expect("subscribe");
         let tenant = vocab::TenantId::parse(CANON_TENANT).expect("tenant");
-        let grant = test_grant("grant-mem-tenant", tenant);
+        let grant = test_grant("7d65e5f2-e716-4c4e-8e4c-6f7ab1754ef8", tenant);
         let refresh = initial_refresh(&grant, "refresh-mem-tenant", [7; 32]);
         let refresh_hash = refresh.token_hash().clone();
         let entry = session_created_entry("evt-session-mem-tenant", &grant);
@@ -2177,7 +2177,7 @@ mod tests {
             .expect("subscribe");
         let tenant = vocab::TenantId::parse(CANON_TENANT).expect("tenant");
         let scope = identity::ports::TenantRepoScope::for_test(tenant);
-        let grant = test_grant("grant-mem-publish-order", tenant);
+        let grant = test_grant("d8dbe849-1d7e-49aa-b68a-a7b41ed252df", tenant);
         let grant_id = grant.id().clone();
         let refresh = initial_refresh(&grant, "refresh-mem-publish-order", [17; 32]);
         let refresh_hash = refresh.token_hash().clone();
@@ -2246,7 +2246,7 @@ mod tests {
     #[allow(clippy::expect_used)]
     async fn mem_auth_grant_store_close_uses_full_expected_snapshot_and_promotes_compromise() {
         let tenant = vocab::TenantId::parse(CANON_TENANT).expect("tenant");
-        let grant = test_grant("grant-mem-close", tenant);
+        let grant = test_grant("60c10db2-2015-4b27-b881-1151e6b51c5f", tenant);
         let refresh = initial_refresh(&grant, "refresh-mem-close", [10; 32]);
         let refresh_hash = refresh.token_hash().clone();
         let store =
@@ -2354,7 +2354,7 @@ mod tests {
     #[allow(clippy::expect_used)]
     async fn mem_auth_grant_store_rechecks_expiry_with_its_writer_clock() {
         let tenant = vocab::TenantId::parse(CANON_TENANT).expect("tenant");
-        let grant = test_grant("grant-mem-writer-expiry", tenant);
+        let grant = test_grant("e8b668e4-12de-4bdc-a675-1a315078f0cd", tenant);
         let old = initial_refresh(&grant, "refresh-mem-writer-expiry", [11; 32]);
         let old_hash = old.token_hash().clone();
         let new_hash = [12; 32];
@@ -2424,7 +2424,7 @@ mod tests {
     async fn mem_auth_grant_store_rejects_grant_tenant_mismatch_without_write_or_emit() {
         let tenant_a = vocab::TenantId::parse(CANON_TENANT).expect("tenant a");
         let tenant_b = vocab::TenantId::parse(OTHER_TENANT).expect("tenant b");
-        let grant = test_grant("grant-mem-mismatch", tenant_b);
+        let grant = test_grant("6e3b6c98-2d14-4862-83d7-35f5333a76e3", tenant_b);
         let grant_id = grant.id().clone();
         let refresh = initial_refresh(&grant, "refresh-mem-mismatch", [8; 32]);
         let entry = EventEntry::new(
@@ -2480,7 +2480,7 @@ mod tests {
     async fn mem_auth_grant_store_rejects_envelope_tenant_mismatch_without_write_or_emit() {
         let tenant_a = vocab::TenantId::parse(CANON_TENANT).expect("tenant a");
         let tenant_b = vocab::TenantId::parse(OTHER_TENANT).expect("tenant b");
-        let grant = test_grant("grant-mem-envelope-mismatch", tenant_a);
+        let grant = test_grant("315ba1e6-5831-4683-b8ec-fdf535c90cd6", tenant_a);
         let grant_id = grant.id().clone();
         let refresh = initial_refresh(&grant, "refresh-mem-envelope-mismatch", [9; 32]);
         let entry = EventEntry::new(

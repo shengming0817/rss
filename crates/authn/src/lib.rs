@@ -47,19 +47,22 @@ const _: fn(AuthPlan, Option<RouteAuthOptOut>) -> AuthRequirement = resolve_requ
 // 本 crate 顶部 verify→mint bridge；mint 子模块复用下方 `KIND_*` claim 串单源（杜绝 round-trip 漂移）。
 mod keyring;
 pub use keyring::{KeyRingError, RotationMode, RotationOverlapPolicy, SigningKeyRing};
+mod grant;
+pub use grant::{
+    AccountSecurityEventKind, AuthGrant, AuthGrantCloseMutation, AuthGrantId, AuthGrantIdError,
+    AuthGrantIssueError, AuthGrantSnapshot, AuthGrantStateError, AuthGrantStatus, AuthnEpoch,
+    AuthnEpochError, CredentialSecurityEventKind, GrantSecurityEventKind, RssAccessIssueInput,
+};
 mod mint;
-pub use mint::{JwtAccessPrincipal, JwtIssueError, JwtIssuer, JwtIssuerConfig, MintedJwt};
+pub use mint::{JwtIssueError, JwtIssuer, JwtIssuerConfig, MintedJwt};
 mod mtls;
 pub use mtls::{
     MtlsAllowSet, MtlsIdentityError, MtlsTrustDomain, MtlsTrustDomainAllowSet, OutboundMtlsPolicy,
     SpiffeId, VerifiedMtlsPeer, verify_mtls_peer,
 };
 
-// kind claim 字符串常量（单源：验签侧 `derive_from_claims` 读、mint 侧 `kind_claim` 写，同一组常量防漂移）。
+// Locally minted profile claim strings. Federated claim parsing is owned by the verifier.
 const KIND_USER: &str = "user";
-const KIND_DEVICE: &str = "device";
-const KIND_ADMIN: &str = "admin";
-const KIND_SUPER_ADMIN: &str = "superAdmin";
 // reason: service 主体（HS256 service-token）的 kind 串——本轮仅 mint 侧 `kind_claim` 用；与上列同址，
 // 保 kind claim 名单源（验签 service-token 路径经 `from_verified_service_token` 固定 Service、不读本串）。
 const KIND_SERVICE: &str = "service";
@@ -284,58 +287,35 @@ impl Principal {
     /// `VerifiedClaims`（F1）：一个 verified 载体只导出一个 principal——本函数与 verify→mint bridge
     /// access verification funnels read the **same** `VerifiedClaims`, with no second raw identity source.
     pub fn from_verified_jwt(verified: &VerifiedJwt) -> Result<Self, AuthnError> {
-        // VerifiedJwt.claims = 验签产物 = 单一身份源（载体的 raw 仅供下游转发，不派生身份）。
-        let c = &verified.claims;
-        Self::derive_from_claims(c.subject(), c.tenant(), c.kind())
-    }
-
-    /// 由已验证 claims 三元组（subject / tenant / kind）派生 scoped / super-admin [`Principal`]。
-    ///
-    /// `kind`→[`PrincipalKind`] 策略 + subject 非空不变式**单源**：消费侧两条已验证入口共用本函数，杜绝
-    /// 双份映射 / 双份校验漂移——[`Self::from_verified_jwt`] 与 access verify→mint bridge 均读载体
-    /// 内 [`diport::VerifiedClaims`]。service / anonymous 不经本 funnel；未知 / 缺失 kind、空 subject、
-    /// scoped 主体缺 tenant / tenant 非 canonical UUID → 一律 [`AuthnError::PrincipalInvalid`]（验签**通过后**的
-    /// principal 派生失败，fail-closed；**非** `TokenInvalid`——后者专指签名失败，#1275 review F1）。
-    fn derive_from_claims(
-        subject: &str,
-        tenant: Option<&str>,
-        kind: Option<&str>,
-    ) -> Result<Self, AuthnError> {
-        // 空 subject fail-closed（F2）：verifier 产物即便绕过旧 decode_claims 的非空检查，也不得 mint
-        // 空主体 Principal。此为 Principal 派生单一漏斗，覆盖 from_verified_jwt + bridge 两路。
-        if subject.is_empty() {
-            return Err(AuthnError::PrincipalInvalid);
+        match verified.claims.view() {
+            diport::VerifiedClaimsView::RssUser {
+                user_id, tenant, ..
+            } => Ok(Self {
+                kind: PrincipalKind::User,
+                subject: user_id.as_uuid().hyphenated().to_string(),
+                tenant: Some(tenant),
+                service_caller: None,
+            }),
+            diport::VerifiedClaimsView::FederatedAccess {
+                subject,
+                tenant,
+                kind,
+            } => Ok(Self {
+                kind,
+                subject: subject.to_owned(),
+                tenant,
+                service_caller: None,
+            }),
+            diport::VerifiedClaimsView::ServiceToken { .. } => Err(AuthnError::PrincipalInvalid),
         }
-        // 单点决策 kind + 是否需 tenant，避免二级 match-on-PrincipalKind 的不可达 `_` 臂
-        // （新增 PrincipalKind 时须在此加 KIND_* 串臂并定其 tenant 要求，无静默兜底）。
-        let (kind, needs_tenant) = match kind {
-            Some(KIND_USER) => (PrincipalKind::User, true),
-            Some(KIND_DEVICE) => (PrincipalKind::Device, true),
-            Some(KIND_ADMIN) => (PrincipalKind::Admin, true),
-            // 跨租户超管：无 tenant（忽略任何 tenant claim）。
-            Some(KIND_SUPER_ADMIN) => (PrincipalKind::SuperAdmin, false),
-            // service/anonymous 不经 jwt funnel；未知/缺失 kind → PrincipalInvalid（验签后派生失败）。
-            _ => return Err(AuthnError::PrincipalInvalid),
-        };
-        let tenant = if needs_tenant {
-            let raw = tenant.ok_or(AuthnError::PrincipalInvalid)?;
-            Some(TenantId::parse(raw).map_err(|_| AuthnError::PrincipalInvalid)?)
-        } else {
-            None
-        };
-        Ok(Self {
-            kind,
-            subject: subject.to_string(),
-            tenant,
-            service_caller: None,
-        })
     }
 
     /// 由已验证 service-token subject 派生（funnel 固定 `kind=Service`，跨租户 `tenant=None`）。
     ///
     /// fail-closed：空 subject → [`AuthnError::PrincipalInvalid`]（验签后派生失败，F2 / #1275 review F1，与
-    /// [`Self::derive_from_claims`] 同款非空不变式）。信任原点 = verifier：subject 取自验签产物
-    /// [`diport::VerifiedClaims::subject`]，service token 的 kind / tenant claim 不参与（service 主体恒跨租户）。
+    /// verified profile factory 同款非空不变式）。信任原点 = verifier：subject 取自验签产物
+    /// [`diport::VerifiedClaimsView::ServiceToken`]，service token 的 kind / tenant claim 不参与
+    /// （service 主体恒跨租户）。
     fn service_from_subject(subject: &str) -> Result<Self, AuthnError> {
         let service_caller = vocab::ServiceCallerDomain::from_subject(subject)
             .ok_or(AuthnError::PrincipalInvalid)?;
@@ -351,10 +331,18 @@ impl Principal {
     ///
     /// 入参收紧为 [`VerifiedServiceToken`]（私有内层 + `pub(crate)` [`VerifiedServiceToken::seal`]，外部
     /// 不可 mint）——与 [`Self::from_verified_jwt`] 同款类型层强制（INVARIANT: AUTHN-VERIFIEDJWT-SEAL-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }）。
-    /// subject 取自载体内**单一 canonical 身份源** [`diport::VerifiedClaims`]（verifier = 信任原点，与
-    /// verify→mint bridge [`verify_service_token`] 同源，无分歧）；忽略 kind / tenant（service 恒跨租户）。
+    /// caller 取自载体内**单一 canonical 身份源** [`diport::VerifiedClaims`]（verifier = 信任原点，与
+    /// verify→mint bridge [`verify_service_token`] 同源，无分歧）；service shape 恒跨租户。
     pub fn from_verified_service_token(token: &VerifiedServiceToken) -> Result<Self, AuthnError> {
-        Self::service_from_subject(token.claims.subject())
+        match token.claims.view() {
+            diport::VerifiedClaimsView::ServiceToken { caller } => {
+                Self::service_from_subject(caller.as_str())
+            }
+            diport::VerifiedClaimsView::RssUser { .. }
+            | diport::VerifiedClaimsView::FederatedAccess { .. } => {
+                Err(AuthnError::PrincipalInvalid)
+            }
+        }
     }
 
     /// 测试专用构造（不进生产/wire 路径）。
@@ -731,6 +719,19 @@ async fn verify_access(
 ) -> Result<(VerifiedJwt, Principal), AuthnError> {
     // ① 验签（信任原点）：失败即 fail-closed，下方 seal / 派生均不可达。
     let claims = pdp.verify(&credential).await?;
+    let profile_matches = matches!(
+        (claims.view(), credential.profile()),
+        (
+            diport::VerifiedClaimsView::RssUser { .. },
+            diport::TokenProfile::RssAccess
+        ) | (
+            diport::VerifiedClaimsView::FederatedAccess { .. },
+            diport::TokenProfile::FederatedAccess
+        )
+    );
+    if !profile_matches {
+        return Err(AuthnError::PrincipalInvalid);
+    }
     // ② 结构防御闸（defense-in-depth）：raw 须 well-formed JWT（3 段 + base64url），否则 TokenInvalid——
     //    防 lenient adapter 对畸形 token 误判 ok。解析产物丢弃，仅校验结构（身份在 ④ 取自 VerifiedClaims）。
     Jwt::parse(raw)?;
@@ -753,6 +754,12 @@ pub async fn verify_service_token(
     let claims = pdp
         .verify(&diport::RawCredential::service_token(raw, binding))
         .await?;
+    if !matches!(
+        claims.view(),
+        diport::VerifiedClaimsView::ServiceToken { .. }
+    ) {
+        return Err(AuthnError::PrincipalInvalid);
+    }
     let verified = VerifiedServiceToken::seal(AccessToken::new(raw), claims);
     let principal = Principal::from_verified_service_token(&verified)?;
     Ok((verified, principal))
@@ -832,6 +839,106 @@ impl VerifiedJwt {
     /// 原始已验证 token 串（供下游 token relay；不派生身份）。
     pub fn raw(&self) -> &str {
         &self.raw
+    }
+
+    /// Borrow the durable grant facts carried only by an RSS User access token.
+    pub fn grant_receipt(&self) -> Option<VerifiedGrantReceipt<'_>> {
+        match self.claims.view() {
+            diport::VerifiedClaimsView::RssUser {
+                user_id,
+                tenant,
+                grant,
+            } => Some(VerifiedGrantReceipt {
+                user_id,
+                tenant,
+                grant,
+            }),
+            diport::VerifiedClaimsView::FederatedAccess { .. }
+            | diport::VerifiedClaimsView::ServiceToken { .. } => None,
+        }
+    }
+}
+
+/// Read-only borrowed receipt for one verified local access-token grant binding.
+pub struct VerifiedGrantReceipt<'a> {
+    user_id: ids::UserId,
+    tenant: TenantId,
+    grant: &'a diport::VerifiedAccessGrantFacts,
+}
+
+impl std::fmt::Debug for VerifiedGrantReceipt<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("VerifiedGrantReceipt(<redacted>)")
+    }
+}
+
+impl VerifiedGrantReceipt<'_> {
+    pub fn grant_id(&self) -> AuthGrantId {
+        AuthGrantId::from_verified(self.grant.session_id())
+    }
+
+    pub fn token_id(&self) -> ids::CanonicalUuidV4 {
+        self.grant.token_id()
+    }
+
+    pub fn auth_time_unix_secs(&self) -> u64 {
+        self.grant.auth_time_unix_secs()
+    }
+
+    pub fn authn_epoch(&self) -> u64 {
+        self.grant.authn_epoch()
+    }
+
+    /// Consume the borrowed receipt into the only owned request accepted by the durable grant
+    /// validator. Callers cannot select or replace any binding field.
+    pub fn into_validation_input(self) -> AccessGrantValidationInput {
+        AccessGrantValidationInput {
+            grant_id: AuthGrantId::from_verified(self.grant.session_id()),
+            user_id: self.user_id,
+            tenant: self.tenant,
+            auth_time_unix_secs: self.grant.auth_time_unix_secs(),
+            authn_epoch: AuthnEpoch::from_verified(self.grant.authn_epoch()),
+        }
+    }
+}
+
+/// Owned, source-bound input for one durable access-request grant validation.
+///
+/// Fields are private and the only constructor consumes [`VerifiedGrantReceipt`], so tenant,
+/// subject, grant id, authentication time and epoch cannot be supplied independently.
+pub struct AccessGrantValidationInput {
+    grant_id: AuthGrantId,
+    user_id: ids::UserId,
+    tenant: TenantId,
+    auth_time_unix_secs: u64,
+    authn_epoch: AuthnEpoch,
+}
+
+impl std::fmt::Debug for AccessGrantValidationInput {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("AccessGrantValidationInput(<redacted>)")
+    }
+}
+
+impl AccessGrantValidationInput {
+    pub fn grant_id(&self) -> &AuthGrantId {
+        &self.grant_id
+    }
+
+    pub fn user_id(&self) -> ids::UserId {
+        self.user_id
+    }
+
+    pub fn tenant(&self) -> TenantId {
+        self.tenant
+    }
+
+    pub fn auth_time_unix_secs(&self) -> u64 {
+        self.auth_time_unix_secs
+    }
+
+    pub fn authn_epoch(&self) -> AuthnEpoch {
+        self.authn_epoch
     }
 }
 
@@ -1401,10 +1508,20 @@ mod principal_derive_tests {
     /// 已验签 JWT 测试装箱：载体携 raw + verifier-canonical [`VerifiedClaims`]（单一身份源，直接构造，
     /// 模拟 verifier 验签产物）。
     fn vjwt(sub: &str, tenant: Option<&str>, kind: Option<&str>) -> VerifiedJwt {
-        VerifiedJwt::seal(
-            "h.e.s".to_string(),
-            VerifiedClaims::new(sub, tenant.map(str::to_string), kind.map(str::to_string)),
-        )
+        let parsed_tenant = tenant.and_then(|raw| TenantId::parse(raw).ok());
+        let parsed_kind = match kind {
+            Some("user") => Some(PrincipalKind::User),
+            Some("device") => Some(PrincipalKind::Device),
+            Some("admin") => Some(PrincipalKind::Admin),
+            Some("superAdmin") => Some(PrincipalKind::SuperAdmin),
+            _ => None,
+        };
+        let claims = parsed_kind
+            .and_then(|kind| VerifiedClaims::federated_access(sub, parsed_tenant, kind).ok())
+            .unwrap_or_else(|| {
+                VerifiedClaims::service_token(vocab::ServiceCallerDomain::MaintenanceOperator)
+            });
+        VerifiedJwt::seal("h.e.s".to_string(), claims)
     }
 
     #[test]
@@ -1471,11 +1588,7 @@ mod principal_derive_tests {
         // funnel 固定 kind=Service：即便验签产物携 kind=admin / tenant，也忽略，恒 Service + 跨租户 None。
         let vs = VerifiedServiceToken::seal(
             AccessToken::new("opaque"),
-            VerifiedClaims::new(
-                vocab::ServiceCallerDomain::MaintenanceOperator.as_str(),
-                Some(CANON.to_string()),
-                Some("admin".to_string()),
-            ),
+            VerifiedClaims::service_token(vocab::ServiceCallerDomain::MaintenanceOperator),
         );
         let p = Principal::from_verified_service_token(&vs).expect("service derive ok");
         assert_eq!(p.kind(), PrincipalKind::Service);
@@ -1487,10 +1600,16 @@ mod principal_derive_tests {
     }
 
     #[test]
+    #[allow(clippy::expect_used)]
     fn service_token_funnel_rejects_subject_outside_closed_caller_domains() {
         let token = VerifiedServiceToken::seal(
             AccessToken::new("opaque"),
-            VerifiedClaims::new("arbitrary-service", None, Some("service".to_owned())),
+            VerifiedClaims::federated_access(
+                "arbitrary-service",
+                Some(TenantId::parse(CANON).expect("tenant")),
+                PrincipalKind::User,
+            )
+            .expect("federated claims"),
         );
         assert!(matches!(
             Principal::from_verified_service_token(&token),
@@ -1499,19 +1618,14 @@ mod principal_derive_tests {
     }
 
     #[test]
+    #[allow(clippy::expect_used)]
     fn rejects_empty_subject_both_funnels() {
         // F2：验签产物即便 subject 为空（adapter 绕过旧 decode_claims 非空检查），也绝不 mint 空主体。
-        let empty_jwt = VerifiedJwt::seal(
-            "raw.tok.en".to_string(),
-            VerifiedClaims::new("", None, Some("user".to_string())),
-        );
-        assert!(matches!(
-            Principal::from_verified_jwt(&empty_jwt),
-            Err(AuthnError::PrincipalInvalid)
-        ));
+        assert!(VerifiedClaims::federated_access("", None, PrincipalKind::SuperAdmin).is_err());
         let empty_svc = VerifiedServiceToken::seal(
             AccessToken::new("opaque"),
-            VerifiedClaims::new("", None, None),
+            VerifiedClaims::federated_access("not-service", None, PrincipalKind::SuperAdmin)
+                .expect("federated"),
         );
         assert!(matches!(
             Principal::from_verified_service_token(&empty_svc),
@@ -1528,8 +1642,21 @@ mod verified_token_seal {
     //! 故收紧后的 `from_verified_jwt(&VerifiedJwt)` / `from_verified_service_token(&VerifiedServiceToken)`
     //! 只能消费已验证 newtype（编译期 Hard，绕过不可表达）。
     //! anti-vacuity：受控入口 + funnel 签名绑为函数指针——去掉任一即编译失败（守卫非恒真）。
-    use super::{AccessToken, AuthnError, Principal, VerifiedJwt, VerifiedServiceToken};
+    use super::{
+        AccessToken, AuthnError, Principal, PrincipalKind, VerifiedJwt, VerifiedServiceToken,
+    };
     use diport::VerifiedClaims;
+    use vocab::TenantId;
+
+    #[allow(clippy::expect_used)]
+    fn federated_claims(subject: &str) -> VerifiedClaims {
+        VerifiedClaims::federated_access(
+            subject,
+            Some(TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").expect("tenant")),
+            PrincipalKind::Admin,
+        )
+        .expect("federated claims")
+    }
 
     #[test]
     fn seal_entries_and_funnels_carry_verified_newtype_signatures() {
@@ -1549,7 +1676,7 @@ mod verified_token_seal {
         // 载体携 raw token + canonical claims（subject）——Debug 二者均不得泄露。
         let vj = VerifiedJwt::seal(
             "secret-raw-token".to_string(),
-            VerifiedClaims::new("alice-secret", Some("tenant-secret".to_string()), None),
+            federated_claims("alice-secret"),
         );
         let dbg = format!("{vj:?}");
         assert!(
@@ -1570,17 +1697,14 @@ mod verified_token_seal {
     fn verified_service_token_redacts_debug() {
         let vs = VerifiedServiceToken::seal(
             AccessToken::new("svc-secret-xyz"),
-            VerifiedClaims::new("svc-subject-secret", None, None),
+            VerifiedClaims::service_token(vocab::ServiceCallerDomain::MaintenanceOperator),
         );
         let dbg = format!("{vs:?}");
         assert!(
             !dbg.contains("svc-secret-xyz"),
             "VerifiedServiceToken Debug 不得泄露原始 token"
         );
-        assert!(
-            !dbg.contains("svc-subject-secret"),
-            "VerifiedServiceToken Debug 不得泄露 subject"
-        );
+        assert!(!dbg.contains("rss-maintenance-operator"));
         assert!(
             dbg.contains("redacted"),
             "VerifiedServiceToken Debug 应标记 redacted"
@@ -1597,10 +1721,44 @@ mod verify_bridge_tests {
         AuthnError, PrincipalKind, test_jwt, verify_federated_access, verify_rss_access,
         verify_service_token,
     };
-    use diport::{DynPdp, Pdp, PdpError, RawCredential, TokenProfile, VerifiedClaims};
+    use diport::{
+        DynPdp, Pdp, PdpError, RawCredential, TokenProfile, VerifiedAccessGrantFacts,
+        VerifiedClaims,
+    };
+    use ids::UserId;
     use vocab::tenant::TenantId;
 
     const CANON: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
+    const USER: &str = "550e8400-e29b-41d4-a716-446655440000";
+
+    #[allow(clippy::expect_used)]
+    fn tenant() -> TenantId {
+        TenantId::parse(CANON).expect("tenant")
+    }
+
+    #[allow(clippy::expect_used)]
+    fn rss_claims() -> VerifiedClaims {
+        VerifiedClaims::rss_user(
+            UserId::parse(USER).expect("user"),
+            tenant(),
+            VerifiedAccessGrantFacts::try_new(
+                "7d65e5f2-e716-4c4e-8e4c-6f7ab1754ef8",
+                "d8dbe849-1d7e-49aa-b68a-a7b41ed252df",
+                1_700_000_000,
+                7,
+            )
+            .expect("grant facts"),
+        )
+    }
+
+    #[allow(clippy::expect_used)]
+    fn federated_claims(subject: &str, kind: PrincipalKind) -> VerifiedClaims {
+        let tenant = match kind {
+            PrincipalKind::SuperAdmin => None,
+            _ => Some(tenant()),
+        };
+        VerifiedClaims::federated_access(subject, tenant, kind).expect("federated claims")
+    }
 
     /// 桩 `Pdp`：先主动 yield，再按预置结果应答（native-AFIT impl → 经 `DynPdp` 注入）。
     struct StubPdp {
@@ -1623,19 +1781,13 @@ mod verify_bridge_tests {
     impl Pdp for ProfilePdp {
         async fn verify(&self, raw: &RawCredential) -> Result<VerifiedClaims, PdpError> {
             assert_eq!(raw.profile(), self.expected);
-            let (tenant, kind) = match self.expected {
-                TokenProfile::RssAccess | TokenProfile::FederatedAccess => {
-                    (Some(CANON.to_string()), Some("user".to_string()))
-                }
-                TokenProfile::ServiceToken => (None, Some("service".to_string())),
-            };
-            let subject = match self.expected {
+            Ok(match self.expected {
+                TokenProfile::RssAccess => rss_claims(),
+                TokenProfile::FederatedAccess => federated_claims("subject", PrincipalKind::User),
                 TokenProfile::ServiceToken => {
-                    vocab::ServiceCallerDomain::MaintenanceOperator.as_str()
+                    VerifiedClaims::service_token(vocab::ServiceCallerDomain::MaintenanceOperator)
                 }
-                TokenProfile::RssAccess | TokenProfile::FederatedAccess => "subject",
-            };
-            Ok(VerifiedClaims::new(subject, tenant, kind))
+            })
         }
     }
 
@@ -1687,16 +1839,12 @@ mod verify_bridge_tests {
     /// raw payload 故意 `kind=user`，`VerifiedClaims.kind=admin` → `Principal=Admin`，证明信任原点是 verifier。
     #[tokio::test]
     #[allow(clippy::expect_used)]
-    async fn verify_rss_access_ok_derives_principal_from_verified_claims_not_raw() {
+    async fn verify_federated_access_derives_principal_from_verified_claims_not_raw() {
         let raw = test_jwt(
             r#"{"sub":"raw-ignored","tenant":"f47ac10b-58cc-4372-a567-0e02b2c3d479","kind":"user"}"#,
         );
-        let pdp = boxed(Ok(VerifiedClaims::new(
-            "admin-subj",
-            Some(CANON.to_string()),
-            Some("admin".to_string()),
-        )));
-        let (vj, principal) = verify_rss_access(&raw, &pdp)
+        let pdp = boxed(Ok(federated_claims("admin-subj", PrincipalKind::Admin)));
+        let (vj, principal) = verify_federated_access(&raw, &pdp)
             .await
             .expect("verify ok mints");
         assert_eq!(
@@ -1704,6 +1852,7 @@ mod verify_bridge_tests {
             PrincipalKind::Admin,
             "身份须源自 VerifiedClaims（admin），非 raw（user）"
         );
+        assert!(vj.grant_receipt().is_none());
         assert!(
             format!("{vj:?}").contains("redacted"),
             "VerifiedJwt Debug 脱敏"
@@ -1712,18 +1861,68 @@ mod verify_bridge_tests {
 
     #[tokio::test]
     #[allow(clippy::expect_used)]
-    async fn verify_rss_access_super_admin_is_cross_tenant_none() {
+    async fn rss_principal_and_grant_receipt_come_only_from_verified_evidence() {
+        let raw = test_jwt(
+            r#"{"sub":"raw-ignored","tenant_id":"00000000-0000-4000-8000-000000000abc","kind":"admin","sid":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","jti":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","auth_time":1,"authn_epoch":999}"#,
+        );
+        let pdp = boxed(Ok(rss_claims()));
+        let (verified, principal) = verify_rss_access(&raw, &pdp)
+            .await
+            .expect("verified RSS evidence");
+
+        assert_eq!(principal.kind(), PrincipalKind::User);
+        assert_eq!(principal.audit_subject(), USER);
+        assert_eq!(principal.tenant(), Some(tenant()));
+        let receipt = verified.grant_receipt().expect("RSS grant receipt");
+        assert_eq!(
+            receipt.grant_id().as_str(),
+            "7d65e5f2-e716-4c4e-8e4c-6f7ab1754ef8"
+        );
+        assert_eq!(
+            receipt.token_id().to_string(),
+            "d8dbe849-1d7e-49aa-b68a-a7b41ed252df"
+        );
+        assert_eq!(receipt.auth_time_unix_secs(), 1_700_000_000);
+        assert_eq!(receipt.authn_epoch(), 7);
+        assert_eq!(format!("{receipt:?}"), "VerifiedGrantReceipt(<redacted>)");
+        let input = receipt.into_validation_input();
+        assert_eq!(
+            format!("{input:?}"),
+            "AccessGrantValidationInput(<redacted>)"
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn verify_federated_access_super_admin_is_cross_tenant_none() {
         let raw = test_jwt(
             r#"{"sub":"x","tenant":"f47ac10b-58cc-4372-a567-0e02b2c3d479","kind":"user"}"#,
         );
-        let pdp = boxed(Ok(VerifiedClaims::new(
-            "root",
-            None,
-            Some("superAdmin".to_string()),
-        )));
-        let (_vj, principal) = verify_rss_access(&raw, &pdp).await.expect("super-admin ok");
+        let pdp = boxed(Ok(federated_claims("root", PrincipalKind::SuperAdmin)));
+        let (_vj, principal) = verify_federated_access(&raw, &pdp)
+            .await
+            .expect("super-admin ok");
         assert_eq!(principal.kind(), PrincipalKind::SuperAdmin);
         assert_eq!(principal.tenant(), None, "super-admin 跨租户 tenant=None");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn every_federated_principal_kind_has_no_local_grant_receipt() {
+        let raw = test_jwt(r#"{"sub":"federated"}"#);
+        for kind in [
+            PrincipalKind::User,
+            PrincipalKind::Device,
+            PrincipalKind::Admin,
+            PrincipalKind::SuperAdmin,
+        ] {
+            let pdp = boxed(Ok(federated_claims("federated", kind)));
+            let (verified, principal) = verify_federated_access(&raw, &pdp)
+                .await
+                .expect("federated access");
+            assert_eq!(principal.kind(), kind);
+            assert!(verified.grant_receipt().is_none(), "kind={kind:?}");
+        }
     }
 
     /// fail-closed：四个 `PdpError` 变体均 never `Ok` / seal；三种凭据失败保持 401 taxonomy，
@@ -1757,11 +1956,7 @@ mod verify_bridge_tests {
     /// 签名失败、非 seal），无产物。#1275 review F1：此路不得记 `signature_invalid`。
     #[tokio::test]
     async fn verify_rss_access_ok_but_malformed_raw_fails_at_parse() {
-        let pdp = boxed(Ok(VerifiedClaims::new(
-            "u",
-            Some(CANON.to_string()),
-            Some("user".to_string()),
-        )));
+        let pdp = boxed(Ok(rss_claims()));
         assert!(matches!(
             verify_rss_access("only.two", &pdp).await,
             Err(AuthnError::PrincipalInvalid)
@@ -1772,10 +1967,8 @@ mod verify_bridge_tests {
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn verify_service_token_ok_fixes_service_kind() {
-        let pdp = boxed(Ok(VerifiedClaims::new(
-            vocab::ServiceCallerDomain::MaintenanceOperator.as_str(),
-            None,
-            Some("ignored".to_string()),
+        let pdp = boxed(Ok(VerifiedClaims::service_token(
+            vocab::ServiceCallerDomain::MaintenanceOperator,
         )));
         let (vs, principal) = verify_service_token("opaque-service-token", service_binding(), &pdp)
             .await
@@ -1809,20 +2002,16 @@ mod verify_bridge_tests {
     /// F2（bridge 端到端）：verifier 验签 ok 但返回**空 subject** → fail-closed `PrincipalInvalid`（验签后派生
     /// 失败，非签名失败），绝不 mint。#1275 review F1：此路不得记 `signature_invalid`。
     #[tokio::test]
-    async fn verify_rejects_empty_subject_from_verifier() {
+    async fn verify_rejects_wrong_profile_shape_from_verifier() {
         let raw = test_jwt(
             r#"{"sub":"x","tenant":"f47ac10b-58cc-4372-a567-0e02b2c3d479","kind":"user"}"#,
         );
-        let pdp = boxed(Ok(VerifiedClaims::new(
-            "",
-            Some(CANON.to_string()),
-            Some("user".to_string()),
-        )));
+        let pdp = boxed(Ok(federated_claims("user", PrincipalKind::User)));
         assert!(matches!(
             verify_rss_access(&raw, &pdp).await,
             Err(AuthnError::PrincipalInvalid)
         ));
-        let pdp_svc = boxed(Ok(VerifiedClaims::new("", None, None)));
+        let pdp_svc = boxed(Ok(rss_claims()));
         assert!(matches!(
             verify_service_token("opaque", service_binding(), &pdp_svc).await,
             Err(AuthnError::PrincipalInvalid)

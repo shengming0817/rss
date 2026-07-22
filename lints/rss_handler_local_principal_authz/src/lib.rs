@@ -62,7 +62,9 @@ const AUTHN_PRINCIPAL_BRANCH_ALLOWED_ITEMS: &[&str] = &[
     "row_visibility",
     "cross_tenant_audit_grant",
 ];
+const DIPORT_PRINCIPAL_BRANCH_ALLOWED_ITEMS: &[&str] = &["federated_access"];
 const RUNTIME_PRINCIPAL_BRANCH_ALLOWED_ITEMS: &[&str] = &[
+    "allow_evidence",
     "verify_maintenance_operator_subject",
     "verified_service_maintenance_operator_subject",
     "verified_projection_maintenance_operator_subject",
@@ -319,6 +321,7 @@ fn principal_branch_caller_is_allowed(cx: &LateContext<'_>, hir_id: HirId) -> bo
     match crate_name {
         "vocab" => enclosing_item_is_any(cx, hir_id, VOCAB_PRINCIPAL_KIND_REPR_ITEMS),
         "authn" => enclosing_item_is_any(cx, hir_id, AUTHN_PRINCIPAL_BRANCH_ALLOWED_ITEMS),
+        "diport" => enclosing_item_is_any(cx, hir_id, DIPORT_PRINCIPAL_BRANCH_ALLOWED_ITEMS),
         "runtime" => {
             enclosing_item_is_any(cx, hir_id, RUNTIME_PRINCIPAL_BRANCH_ALLOWED_ITEMS)
                 || enclosing_method_on_allowed_type_is(
@@ -465,4 +468,11 @@ fn ui_runtime_bridge_only_allowed() {
     // example target 名 `runtime`：runtime bridge / mTLS authorizer 放行，同 crate 其它 handler-local
     // role literal 分支仍触发，避免整 crate allowlist 误放。
     dylint_testing::ui_test_example(env!("CARGO_PKG_NAME"), "runtime");
+}
+
+#[test]
+fn ui_diport_profile_shape_only_allowed() {
+    // example target 名 `diport`：闭合 verified profile 构造器可校验 PrincipalKind shape；
+    // 同 crate 其它 principal 分支仍触发，证明不是 crate 级白名单。
+    dylint_testing::ui_test_example(env!("CARGO_PKG_NAME"), "diport");
 }

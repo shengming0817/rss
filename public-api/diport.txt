@@ -2581,6 +2581,45 @@ impl core::marker::Unpin for diport::pdp::TokenProfile
 impl core::marker::UnsafeUnpin for diport::pdp::TokenProfile
 impl core::panic::unwind_safe::RefUnwindSafe for diport::pdp::TokenProfile
 impl core::panic::unwind_safe::UnwindSafe for diport::pdp::TokenProfile
+pub enum diport::pdp::VerifiedClaimShapeError
+pub diport::pdp::VerifiedClaimShapeError::Invalid
+impl core::clone::Clone for diport::pdp::VerifiedClaimShapeError
+pub fn diport::pdp::VerifiedClaimShapeError::clone(&self) -> diport::pdp::VerifiedClaimShapeError
+impl core::cmp::Eq for diport::pdp::VerifiedClaimShapeError
+impl core::cmp::PartialEq for diport::pdp::VerifiedClaimShapeError
+pub fn diport::pdp::VerifiedClaimShapeError::eq(&self, &diport::pdp::VerifiedClaimShapeError) -> bool
+impl core::error::Error for diport::pdp::VerifiedClaimShapeError
+impl core::fmt::Debug for diport::pdp::VerifiedClaimShapeError
+pub fn diport::pdp::VerifiedClaimShapeError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for diport::pdp::VerifiedClaimShapeError
+pub fn diport::pdp::VerifiedClaimShapeError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for diport::pdp::VerifiedClaimShapeError
+impl core::marker::StructuralPartialEq for diport::pdp::VerifiedClaimShapeError
+impl core::marker::Freeze for diport::pdp::VerifiedClaimShapeError
+impl core::marker::Send for diport::pdp::VerifiedClaimShapeError
+impl core::marker::Sync for diport::pdp::VerifiedClaimShapeError
+impl core::marker::Unpin for diport::pdp::VerifiedClaimShapeError
+impl core::marker::UnsafeUnpin for diport::pdp::VerifiedClaimShapeError
+impl core::panic::unwind_safe::RefUnwindSafe for diport::pdp::VerifiedClaimShapeError
+impl core::panic::unwind_safe::UnwindSafe for diport::pdp::VerifiedClaimShapeError
+pub enum diport::pdp::VerifiedClaimsView<'a>
+pub diport::pdp::VerifiedClaimsView::FederatedAccess
+pub diport::pdp::VerifiedClaimsView::FederatedAccess::kind: vocab::principal::PrincipalKind
+pub diport::pdp::VerifiedClaimsView::FederatedAccess::subject: &'a str
+pub diport::pdp::VerifiedClaimsView::FederatedAccess::tenant: core::option::Option<vocab::tenant::TenantId>
+pub diport::pdp::VerifiedClaimsView::RssUser
+pub diport::pdp::VerifiedClaimsView::RssUser::grant: &'a diport::pdp::VerifiedAccessGrantFacts
+pub diport::pdp::VerifiedClaimsView::RssUser::tenant: vocab::tenant::TenantId
+pub diport::pdp::VerifiedClaimsView::RssUser::user_id: ids::UserId
+pub diport::pdp::VerifiedClaimsView::ServiceToken
+pub diport::pdp::VerifiedClaimsView::ServiceToken::caller: vocab::service::ServiceCallerDomain
+impl<'a> core::marker::Freeze for diport::pdp::VerifiedClaimsView<'a>
+impl<'a> core::marker::Send for diport::pdp::VerifiedClaimsView<'a>
+impl<'a> core::marker::Sync for diport::pdp::VerifiedClaimsView<'a>
+impl<'a> core::marker::Unpin for diport::pdp::VerifiedClaimsView<'a>
+impl<'a> core::marker::UnsafeUnpin for diport::pdp::VerifiedClaimsView<'a>
+impl<'a> core::panic::unwind_safe::RefUnwindSafe for diport::pdp::VerifiedClaimsView<'a>
+impl<'a> core::panic::unwind_safe::UnwindSafe for diport::pdp::VerifiedClaimsView<'a>
 #[repr(transparent)] pub struct diport::pdp::DynPdp<'dynosaur_struct>
 impl<'dynosaur_struct> diport::DynPdp<'dynosaur_struct>
 pub const fn diport::DynPdp<'dynosaur_struct>::from_box(alloc::boxed::Box<impl diport::pdp::Pdp + 'dynosaur_struct>) -> alloc::boxed::Box<diport::DynPdp<'dynosaur_struct>>
@@ -2747,12 +2786,32 @@ impl core::marker::Unpin for diport::pdp::TokenPolicy
 impl core::marker::UnsafeUnpin for diport::pdp::TokenPolicy
 impl core::panic::unwind_safe::RefUnwindSafe for diport::pdp::TokenPolicy
 impl core::panic::unwind_safe::UnwindSafe for diport::pdp::TokenPolicy
+pub struct diport::pdp::VerifiedAccessGrantFacts
+impl diport::pdp::VerifiedAccessGrantFacts
+pub fn diport::pdp::VerifiedAccessGrantFacts::auth_time_unix_secs(&self) -> u64
+pub fn diport::pdp::VerifiedAccessGrantFacts::authn_epoch(&self) -> u64
+pub fn diport::pdp::VerifiedAccessGrantFacts::session_id(&self) -> ids::CanonicalUuidV4
+pub fn diport::pdp::VerifiedAccessGrantFacts::token_id(&self) -> ids::CanonicalUuidV4
+pub fn diport::pdp::VerifiedAccessGrantFacts::try_new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, i64, i64) -> core::result::Result<Self, diport::pdp::VerifiedClaimShapeError>
+impl core::clone::Clone for diport::pdp::VerifiedAccessGrantFacts
+pub fn diport::pdp::VerifiedAccessGrantFacts::clone(&self) -> diport::pdp::VerifiedAccessGrantFacts
+impl core::fmt::Debug for diport::pdp::VerifiedAccessGrantFacts
+pub fn diport::pdp::VerifiedAccessGrantFacts::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl secure::redaction::Redact for diport::pdp::VerifiedAccessGrantFacts
+pub fn diport::pdp::VerifiedAccessGrantFacts::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
+impl core::marker::Freeze for diport::pdp::VerifiedAccessGrantFacts
+impl core::marker::Send for diport::pdp::VerifiedAccessGrantFacts
+impl core::marker::Sync for diport::pdp::VerifiedAccessGrantFacts
+impl core::marker::Unpin for diport::pdp::VerifiedAccessGrantFacts
+impl core::marker::UnsafeUnpin for diport::pdp::VerifiedAccessGrantFacts
+impl core::panic::unwind_safe::RefUnwindSafe for diport::pdp::VerifiedAccessGrantFacts
+impl core::panic::unwind_safe::UnwindSafe for diport::pdp::VerifiedAccessGrantFacts
 pub struct diport::pdp::VerifiedClaims
 impl diport::pdp::VerifiedClaims
-pub fn diport::pdp::VerifiedClaims::kind(&self) -> core::option::Option<&str>
-pub fn diport::pdp::VerifiedClaims::new(impl core::convert::Into<alloc::string::String>, core::option::Option<alloc::string::String>, core::option::Option<alloc::string::String>) -> Self
-pub fn diport::pdp::VerifiedClaims::subject(&self) -> &str
-pub fn diport::pdp::VerifiedClaims::tenant(&self) -> core::option::Option<&str>
+pub fn diport::pdp::VerifiedClaims::federated_access(impl core::convert::Into<alloc::string::String>, core::option::Option<vocab::tenant::TenantId>, vocab::principal::PrincipalKind) -> core::result::Result<Self, diport::pdp::VerifiedClaimShapeError>
+pub fn diport::pdp::VerifiedClaims::rss_user(ids::UserId, vocab::tenant::TenantId, diport::pdp::VerifiedAccessGrantFacts) -> Self
+pub fn diport::pdp::VerifiedClaims::service_token(vocab::service::ServiceCallerDomain) -> Self
+pub fn diport::pdp::VerifiedClaims::view(&self) -> diport::pdp::VerifiedClaimsView<'_>
 impl core::clone::Clone for diport::pdp::VerifiedClaims
 pub fn diport::pdp::VerifiedClaims::clone(&self) -> diport::pdp::VerifiedClaims
 impl core::fmt::Debug for diport::pdp::VerifiedClaims
@@ -4830,6 +4889,45 @@ impl core::marker::Unpin for diport::pdp::TokenProfile
 impl core::marker::UnsafeUnpin for diport::pdp::TokenProfile
 impl core::panic::unwind_safe::RefUnwindSafe for diport::pdp::TokenProfile
 impl core::panic::unwind_safe::UnwindSafe for diport::pdp::TokenProfile
+pub enum diport::VerifiedClaimShapeError
+pub diport::VerifiedClaimShapeError::Invalid
+impl core::clone::Clone for diport::pdp::VerifiedClaimShapeError
+pub fn diport::pdp::VerifiedClaimShapeError::clone(&self) -> diport::pdp::VerifiedClaimShapeError
+impl core::cmp::Eq for diport::pdp::VerifiedClaimShapeError
+impl core::cmp::PartialEq for diport::pdp::VerifiedClaimShapeError
+pub fn diport::pdp::VerifiedClaimShapeError::eq(&self, &diport::pdp::VerifiedClaimShapeError) -> bool
+impl core::error::Error for diport::pdp::VerifiedClaimShapeError
+impl core::fmt::Debug for diport::pdp::VerifiedClaimShapeError
+pub fn diport::pdp::VerifiedClaimShapeError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for diport::pdp::VerifiedClaimShapeError
+pub fn diport::pdp::VerifiedClaimShapeError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for diport::pdp::VerifiedClaimShapeError
+impl core::marker::StructuralPartialEq for diport::pdp::VerifiedClaimShapeError
+impl core::marker::Freeze for diport::pdp::VerifiedClaimShapeError
+impl core::marker::Send for diport::pdp::VerifiedClaimShapeError
+impl core::marker::Sync for diport::pdp::VerifiedClaimShapeError
+impl core::marker::Unpin for diport::pdp::VerifiedClaimShapeError
+impl core::marker::UnsafeUnpin for diport::pdp::VerifiedClaimShapeError
+impl core::panic::unwind_safe::RefUnwindSafe for diport::pdp::VerifiedClaimShapeError
+impl core::panic::unwind_safe::UnwindSafe for diport::pdp::VerifiedClaimShapeError
+pub enum diport::VerifiedClaimsView<'a>
+pub diport::VerifiedClaimsView::FederatedAccess
+pub diport::VerifiedClaimsView::FederatedAccess::kind: vocab::principal::PrincipalKind
+pub diport::VerifiedClaimsView::FederatedAccess::subject: &'a str
+pub diport::VerifiedClaimsView::FederatedAccess::tenant: core::option::Option<vocab::tenant::TenantId>
+pub diport::VerifiedClaimsView::RssUser
+pub diport::VerifiedClaimsView::RssUser::grant: &'a diport::pdp::VerifiedAccessGrantFacts
+pub diport::VerifiedClaimsView::RssUser::tenant: vocab::tenant::TenantId
+pub diport::VerifiedClaimsView::RssUser::user_id: ids::UserId
+pub diport::VerifiedClaimsView::ServiceToken
+pub diport::VerifiedClaimsView::ServiceToken::caller: vocab::service::ServiceCallerDomain
+impl<'a> core::marker::Freeze for diport::pdp::VerifiedClaimsView<'a>
+impl<'a> core::marker::Send for diport::pdp::VerifiedClaimsView<'a>
+impl<'a> core::marker::Sync for diport::pdp::VerifiedClaimsView<'a>
+impl<'a> core::marker::Unpin for diport::pdp::VerifiedClaimsView<'a>
+impl<'a> core::marker::UnsafeUnpin for diport::pdp::VerifiedClaimsView<'a>
+impl<'a> core::panic::unwind_safe::RefUnwindSafe for diport::pdp::VerifiedClaimsView<'a>
+impl<'a> core::panic::unwind_safe::UnwindSafe for diport::pdp::VerifiedClaimsView<'a>
 #[non_exhaustive] pub enum diport::WriteOutcome
 pub diport::WriteOutcome::Committed
 pub diport::WriteOutcome::Fenced
@@ -7311,12 +7409,32 @@ impl core::marker::Unpin for diport::publisher::Topic
 impl core::marker::UnsafeUnpin for diport::publisher::Topic
 impl core::panic::unwind_safe::RefUnwindSafe for diport::publisher::Topic
 impl core::panic::unwind_safe::UnwindSafe for diport::publisher::Topic
+pub struct diport::VerifiedAccessGrantFacts
+impl diport::pdp::VerifiedAccessGrantFacts
+pub fn diport::pdp::VerifiedAccessGrantFacts::auth_time_unix_secs(&self) -> u64
+pub fn diport::pdp::VerifiedAccessGrantFacts::authn_epoch(&self) -> u64
+pub fn diport::pdp::VerifiedAccessGrantFacts::session_id(&self) -> ids::CanonicalUuidV4
+pub fn diport::pdp::VerifiedAccessGrantFacts::token_id(&self) -> ids::CanonicalUuidV4
+pub fn diport::pdp::VerifiedAccessGrantFacts::try_new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, i64, i64) -> core::result::Result<Self, diport::pdp::VerifiedClaimShapeError>
+impl core::clone::Clone for diport::pdp::VerifiedAccessGrantFacts
+pub fn diport::pdp::VerifiedAccessGrantFacts::clone(&self) -> diport::pdp::VerifiedAccessGrantFacts
+impl core::fmt::Debug for diport::pdp::VerifiedAccessGrantFacts
+pub fn diport::pdp::VerifiedAccessGrantFacts::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl secure::redaction::Redact for diport::pdp::VerifiedAccessGrantFacts
+pub fn diport::pdp::VerifiedAccessGrantFacts::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
+impl core::marker::Freeze for diport::pdp::VerifiedAccessGrantFacts
+impl core::marker::Send for diport::pdp::VerifiedAccessGrantFacts
+impl core::marker::Sync for diport::pdp::VerifiedAccessGrantFacts
+impl core::marker::Unpin for diport::pdp::VerifiedAccessGrantFacts
+impl core::marker::UnsafeUnpin for diport::pdp::VerifiedAccessGrantFacts
+impl core::panic::unwind_safe::RefUnwindSafe for diport::pdp::VerifiedAccessGrantFacts
+impl core::panic::unwind_safe::UnwindSafe for diport::pdp::VerifiedAccessGrantFacts
 pub struct diport::VerifiedClaims
 impl diport::pdp::VerifiedClaims
-pub fn diport::pdp::VerifiedClaims::kind(&self) -> core::option::Option<&str>
-pub fn diport::pdp::VerifiedClaims::new(impl core::convert::Into<alloc::string::String>, core::option::Option<alloc::string::String>, core::option::Option<alloc::string::String>) -> Self
-pub fn diport::pdp::VerifiedClaims::subject(&self) -> &str
-pub fn diport::pdp::VerifiedClaims::tenant(&self) -> core::option::Option<&str>
+pub fn diport::pdp::VerifiedClaims::federated_access(impl core::convert::Into<alloc::string::String>, core::option::Option<vocab::tenant::TenantId>, vocab::principal::PrincipalKind) -> core::result::Result<Self, diport::pdp::VerifiedClaimShapeError>
+pub fn diport::pdp::VerifiedClaims::rss_user(ids::UserId, vocab::tenant::TenantId, diport::pdp::VerifiedAccessGrantFacts) -> Self
+pub fn diport::pdp::VerifiedClaims::service_token(vocab::service::ServiceCallerDomain) -> Self
+pub fn diport::pdp::VerifiedClaims::view(&self) -> diport::pdp::VerifiedClaimsView<'_>
 impl core::clone::Clone for diport::pdp::VerifiedClaims
 pub fn diport::pdp::VerifiedClaims::clone(&self) -> diport::pdp::VerifiedClaims
 impl core::fmt::Debug for diport::pdp::VerifiedClaims

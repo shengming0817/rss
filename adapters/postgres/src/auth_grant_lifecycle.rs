@@ -11,12 +11,15 @@
 
 use std::time::SystemTime;
 
+use authn::{
+    AuthGrant, AuthGrantId, AuthGrantSnapshot, AuthGrantStatus, AuthnEpoch,
+    CredentialSecurityEventKind,
+};
 use consistency::EventEntry;
 use diport::{Clock, OutboxEmitError, OutboxEnvelopeParts};
 use identity::ports::{
-    AuthGrant, AuthGrantCloseCommand, AuthGrantId, AuthGrantLifecycle, AuthGrantSnapshot,
-    AuthGrantStatus, AuthnEpoch, CredentialSecurityEventKind, IdentityError, LoginGrantMutation,
-    RefreshStatus, RefreshTokenRecord, SESSION_CREATED_CONTRACT, TenantRepoScope,
+    AuthGrantCloseCommand, AuthGrantLifecycle, IdentityError, LoginGrantMutation, RefreshStatus,
+    RefreshTokenRecord, SESSION_CREATED_CONTRACT, TenantRepoScope,
 };
 use sqlx::Row;
 
@@ -385,8 +388,10 @@ impl AuthGrantLifecycle for PgAuthGrantLifecycle {
                     .ok_or_else(|| corrupt("corrupt auth_grants.close_reason"))?,
             ),
         };
+        let grant_id = AuthGrantId::hydrate(grant_id_raw)
+            .map_err(|_| corrupt("corrupt auth_grants.grant_id"))?;
         AuthGrant::hydrate(AuthGrantSnapshot {
-            id: AuthGrantId::hydrate(grant_id_raw),
+            id: grant_id,
             tenant,
             user_id,
             auth_time: epoch_secs_to_time(auth_time),

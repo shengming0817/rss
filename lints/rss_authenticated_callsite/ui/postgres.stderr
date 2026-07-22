@@ -1,0 +1,35 @@
+warning: verified maintenance capability 仅组合根可 mint
+  --> $DIR/postgres.rs:14:13
+   |
+LL |     let _ = ConfigValueMaintenanceCapability::from_verified_service_caller(
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: 仅在 runtime 完成 maintenance service-token 验证后 mint `ConfigValueMaintenanceCapability`；其它 crate 不得把 typed caller 伪装成 verified capability
+   = note: `#[warn(rss_authenticated_callsite)]` on by default
+
+warning: verified maintenance capability 仅组合根可 mint
+  --> $DIR/postgres.rs:17:16
+   |
+LL |     let mint = ConfigValueMaintenanceCapability::from_verified_service_caller;
+   |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: 仅在 runtime 完成 maintenance service-token 验证后 mint `ConfigValueMaintenanceCapability`；其它 crate 不得把 typed caller 伪装成 verified capability
+
+warning: verified maintenance capability 仅组合根可 mint
+  --> $DIR/postgres.rs:19:9
+   |
+LL |         ConfigValueMaintenanceCapability::from_verified_service_caller;
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: 仅在 runtime 完成 maintenance service-token 验证后 mint `ConfigValueMaintenanceCapability`；其它 crate 不得把 typed caller 伪装成 verified capability
+
+warning: AuthGrant/RSS access-token 生产 funnel 出现在未授权调用点
+  --> $DIR/postgres.rs:38:21
+   |
+LL |             let _ = authn::AuthGrant::hydrate;
+   |                     ^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: AuthGrant::hydrate 仅允许 AuthGrant 内部状态转换与 postgres::auth_grant_lifecycle::find_active
+
+warning: 4 warnings emitted
+

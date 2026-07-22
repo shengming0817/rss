@@ -70,6 +70,21 @@ impl ListenerExecutionSpec {
         &self.domains
     }
 
+    /// Project a fingerprint-verified access-listener fixture onto the closed Federated profile.
+    ///
+    /// This exists only for integration tests that exercise non-User principals. It accepts no
+    /// raw scheme and preserves the fixture's listener identity and domain membership.
+    #[cfg(feature = "integration")]
+    pub(crate) fn into_federated_access_fixture(mut self) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            matches!(self.kind, ListenerKind::Primary | ListenerKind::Admin)
+                && self.auth_scheme == AuthScheme::RssAccessToken,
+            "Federated integration fixture requires a plan-declared access listener"
+        );
+        self.auth_scheme = AuthScheme::FederatedAccessToken;
+        Ok(self)
+    }
+
     #[cfg(test)]
     pub(crate) fn health_for_test() -> Self {
         Self {

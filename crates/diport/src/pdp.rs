@@ -7,10 +7,11 @@
 //! claims 全部校验成功后才构造 [`VerifiedClaims`]。authn 随后才能 seal 已验证 token 并派生主体。
 
 use dynosaur::dynosaur;
+use ids::UserId;
 use sha2::{Digest as _, Sha256};
 use std::future::Future;
 use std::time::Duration;
-use vocab::tenant::TenantId;
+use vocab::{PrincipalKind, ServiceCallerDomain, tenant::TenantId};
 
 /// service-token MAC 绑定的 HTTP header 名（wire 原始大小写）。
 pub const SERVICE_TOKEN_TENANT_HEADER: &str = "X-Tenant-ID";
@@ -346,7 +347,7 @@ mod replay_key_tests {
 /// must handle all profiles explicitly when a new profile is introduced.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TokenProfile {
-    /// RSS-issued user/device/admin access token.
+    /// RSS-issued, durable-grant-bound User access token.
     RssAccess,
     /// Access token issued by an independently trusted federation.
     FederatedAccess,
@@ -621,47 +622,183 @@ impl RawCredential {
     }
 }
 
-/// 验签成功后的可信 claims（port-own DTO；newtype funnel：私有字段 + 构造 / 访问 funnel）。
+/// Validated RSS access-token grant facts.
 ///
-/// 信任语义：本值仅由验签 provider 在校验签名 / exp / MAC **成功后**构造，故其字段是「已验证」身份——
-/// authn 据此 mint `Principal`（验签 = 信任原点，非 authn 旁路 re-parse）。
+/// Both identifiers must be lowercase canonical UUIDv4 strings. Time and epoch inputs use signed
+/// integers at the JSON boundary so negative and overflowing values can be rejected before this
+/// value exists.
+#[derive(Clone, secure::Redact)]
+pub struct VerifiedAccessGrantFacts {
+    #[redact(sensitivity = secret)]
+    session_id: ids::CanonicalUuidV4,
+    #[redact(sensitivity = secret)]
+    token_id: ids::CanonicalUuidV4,
+    #[redact(sensitivity = secret)]
+    auth_time_unix_secs: u64,
+    #[redact(sensitivity = secret)]
+    authn_epoch: u64,
+}
+
+impl VerifiedAccessGrantFacts {
+    /// Validate the complete RSS grant-fact quartet as one indivisible shape.
+    pub fn try_new(
+        session_id: impl Into<String>,
+        token_id: impl Into<String>,
+        auth_time_unix_secs: i64,
+        authn_epoch: i64,
+    ) -> Result<Self, VerifiedClaimShapeError> {
+        let session_id = ids::CanonicalUuidV4::parse(&session_id.into())
+            .map_err(|_| VerifiedClaimShapeError::Invalid)?;
+        let token_id = ids::CanonicalUuidV4::parse(&token_id.into())
+            .map_err(|_| VerifiedClaimShapeError::Invalid)?;
+        if auth_time_unix_secs < 0 || authn_epoch < 0 {
+            return Err(VerifiedClaimShapeError::Invalid);
+        }
+        Ok(Self {
+            session_id,
+            token_id,
+            auth_time_unix_secs: auth_time_unix_secs as u64,
+            authn_epoch: authn_epoch as u64,
+        })
+    }
+
+    pub fn session_id(&self) -> ids::CanonicalUuidV4 {
+        self.session_id
+    }
+
+    pub fn token_id(&self) -> ids::CanonicalUuidV4 {
+        self.token_id
+    }
+
+    pub fn auth_time_unix_secs(&self) -> u64 {
+        self.auth_time_unix_secs
+    }
+
+    pub fn authn_epoch(&self) -> u64 {
+        self.authn_epoch
+    }
+}
+
+/// A profile shape failed validation. It carries no rejected runtime data.
+#[derive(Debug, Clone, Copy, thiserror::Error, PartialEq, Eq)]
+pub enum VerifiedClaimShapeError {
+    #[error("verified claim shape is invalid")]
+    Invalid,
+}
+
+#[derive(Clone)]
+enum VerifiedClaimsProfile {
+    RssUser {
+        user_id: UserId,
+        tenant: TenantId,
+        grant: VerifiedAccessGrantFacts,
+    },
+    FederatedAccess {
+        subject: String,
+        tenant: Option<TenantId>,
+        kind: PrincipalKind,
+    },
+    ServiceToken {
+        caller: ServiceCallerDomain,
+    },
+}
+
+/// Borrowed exhaustive view of one verified profile shape.
 ///
-/// PII 边界：`subject` / `tenant` / `kind` 全部经 `#[derive(secure::Redact)]` 脱敏
-/// （DIPORT-DTO-PII-DEBUG-REDACT-01）。Production verifier construction follows full
-/// profile-specific validation: access `kind` is trusted and tenant semantics are enforced;
-/// service `kind=service`, non-empty `jti`, forbidden tenant claim, and tenant-bound MAC are
-/// enforced before this DTO is returned. `kind` remains an untyped string at this port boundary;
-/// authn owns its closed mapping to `PrincipalKind`.
+/// The enum is public so consumers must handle every profile when the closed set evolves, while
+/// all constructors and owned fields remain private to [`VerifiedClaims`].
+pub enum VerifiedClaimsView<'a> {
+    RssUser {
+        user_id: UserId,
+        tenant: TenantId,
+        grant: &'a VerifiedAccessGrantFacts,
+    },
+    FederatedAccess {
+        subject: &'a str,
+        tenant: Option<TenantId>,
+        kind: PrincipalKind,
+    },
+    ServiceToken {
+        caller: ServiceCallerDomain,
+    },
+}
+
+/// 验签成功后的可信 claims（port-own DTO；private closed profile shape）。
+///
+/// RSS evidence cannot exist without typed User/tenant identity and the complete grant quartet.
+/// Federated and service evidence are disjoint variants and therefore cannot be upgraded to a
+/// local grant receipt by filling similarly named extension claims.
 #[derive(Clone, secure::Redact)]
 pub struct VerifiedClaims {
-    #[redact(sensitivity = pii)]
-    subject: String,
-    #[redact(sensitivity = pii)]
-    tenant: Option<String>,
-    #[redact(sensitivity = pii)]
-    kind: Option<String>,
+    #[redact(sensitivity = secret)]
+    profile: VerifiedClaimsProfile,
 }
 
 impl VerifiedClaims {
-    /// 由验签产物构造可信 claims（adapter 唯一构造入口）。
-    pub fn new(subject: impl Into<String>, tenant: Option<String>, kind: Option<String>) -> Self {
+    pub fn rss_user(user_id: UserId, tenant: TenantId, grant: VerifiedAccessGrantFacts) -> Self {
         Self {
-            subject: subject.into(),
-            tenant,
-            kind,
+            profile: VerifiedClaimsProfile::RssUser {
+                user_id,
+                tenant,
+                grant,
+            },
         }
     }
-    /// 已验证 subject。
-    pub fn subject(&self) -> &str {
-        &self.subject
+
+    pub fn federated_access(
+        subject: impl Into<String>,
+        tenant: Option<TenantId>,
+        kind: PrincipalKind,
+    ) -> Result<Self, VerifiedClaimShapeError> {
+        let subject = subject.into();
+        let tenant_shape_valid = match kind {
+            PrincipalKind::User | PrincipalKind::Device | PrincipalKind::Admin => tenant.is_some(),
+            PrincipalKind::SuperAdmin => tenant.is_none(),
+            PrincipalKind::Service | PrincipalKind::Anonymous => false,
+            _ => false,
+        };
+        if subject.is_empty() || !tenant_shape_valid {
+            return Err(VerifiedClaimShapeError::Invalid);
+        }
+        Ok(Self {
+            profile: VerifiedClaimsProfile::FederatedAccess {
+                subject,
+                tenant,
+                kind,
+            },
+        })
     }
-    /// 已验证租户（跨租户主体为 `None`）。
-    pub fn tenant(&self) -> Option<&str> {
-        self.tenant.as_deref()
+
+    pub fn service_token(caller: ServiceCallerDomain) -> Self {
+        Self {
+            profile: VerifiedClaimsProfile::ServiceToken { caller },
+        }
     }
-    /// 已验证 `kind` claim（authn 据此映射 `PrincipalKind`）。
-    pub fn kind(&self) -> Option<&str> {
-        self.kind.as_deref()
+
+    pub fn view(&self) -> VerifiedClaimsView<'_> {
+        match &self.profile {
+            VerifiedClaimsProfile::RssUser {
+                user_id,
+                tenant,
+                grant,
+            } => VerifiedClaimsView::RssUser {
+                user_id: *user_id,
+                tenant: *tenant,
+                grant,
+            },
+            VerifiedClaimsProfile::FederatedAccess {
+                subject,
+                tenant,
+                kind,
+            } => VerifiedClaimsView::FederatedAccess {
+                subject,
+                tenant: *tenant,
+                kind: *kind,
+            },
+            VerifiedClaimsProfile::ServiceToken { caller } => {
+                VerifiedClaimsView::ServiceToken { caller: *caller }
+            }
+        }
     }
 }
 
@@ -699,7 +836,9 @@ mod smoke {
     struct NoopPdp;
     impl Pdp for NoopPdp {
         async fn verify(&self, _raw: &RawCredential) -> Result<VerifiedClaims, PdpError> {
-            Ok(VerifiedClaims::new("sub", None, None))
+            Ok(VerifiedClaims::service_token(
+                vocab::ServiceCallerDomain::MaintenanceOperator,
+            ))
         }
     }
 
@@ -788,7 +927,10 @@ mod token_profile_tests {
 mod pii_debug {
     //! `RawCredential.token` / `VerifiedClaims.subject·tenant` Debug 脱敏回归。
     //! INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }（同 `signer.rs` 的 `pii_debug`）。
-    use super::{RawCredential, ServiceTokenTenantBinding, TokenProfile, VerifiedClaims};
+    use super::{
+        RawCredential, ServiceTokenTenantBinding, TokenProfile, VerifiedAccessGrantFacts,
+        VerifiedClaims,
+    };
     use vocab::tenant::TenantId;
 
     fn _assert_redact<T: secure::Redact>() {}
@@ -797,6 +939,7 @@ mod pii_debug {
     fn pii_dtos_use_redact_derive_model() {
         _assert_redact::<RawCredential>();
         _assert_redact::<ServiceTokenTenantBinding>();
+        _assert_redact::<VerifiedAccessGrantFacts>();
         _assert_redact::<VerifiedClaims>();
     }
 
@@ -848,17 +991,45 @@ mod pii_debug {
     }
 
     #[test]
+    #[allow(clippy::expect_used)]
     fn verified_claims_debug_redacts_all_identity_fields() {
-        let vc = VerifiedClaims::new(
+        let vc = VerifiedClaims::federated_access(
             "alice-secret",
-            Some("tenant-secret".to_string()),
-            Some("kind-secret".to_string()),
-        );
+            Some(
+                TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").expect("canonical tenant"),
+            ),
+            vocab::PrincipalKind::Admin,
+        )
+        .expect("federated claims");
         let dbg = format!("{vc:?}");
         assert!(!dbg.contains("alice-secret"), "subject 泄漏: {dbg}");
-        assert!(!dbg.contains("tenant-secret"), "tenant 泄漏: {dbg}");
-        // kind 亦脱敏：未类型化 adapter 输入不信任进观测面（防误塞 PII）。
-        assert!(!dbg.contains("kind-secret"), "kind 泄漏: {dbg}");
+        assert!(!dbg.contains("f47ac10b"), "tenant 泄漏: {dbg}");
         assert!(dbg.contains("<redacted>"), "缺 <redacted>: {dbg}");
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn rss_grant_facts_and_claims_debug_redact_the_complete_shape() {
+        let session_id = "7d65e5f2-e716-4c4e-8e4c-6f7ab1754ef8";
+        let token_id = "d8dbe849-1d7e-49aa-b68a-a7b41ed252df";
+        let facts = VerifiedAccessGrantFacts::try_new(session_id, token_id, 1_700_000_000, 73)
+            .expect("grant facts");
+        let facts_debug = format!("{facts:?}");
+        for secret in [session_id, token_id, "1700000000", "73"] {
+            assert!(!facts_debug.contains(secret), "grant fact leaked: {secret}");
+        }
+
+        let claims = VerifiedClaims::rss_user(
+            ids::UserId::parse("550e8400-e29b-41d4-a716-446655440000").expect("user"),
+            TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").expect("tenant"),
+            facts,
+        );
+        let claims_debug = format!("{claims:?}");
+        for secret in [session_id, token_id, "550e8400", "f47ac10b"] {
+            assert!(
+                !claims_debug.contains(secret),
+                "verified claim leaked: {secret}"
+            );
+        }
     }
 }

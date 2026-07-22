@@ -46,6 +46,7 @@ use tower::ServiceExt as _;
 /// 合法测试租户（`user` kind 需 tenant；canonical UUID）。
 const TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
 const OTHER_TENANT: &str = "11111111-2222-4333-8444-555555555555";
+const USER_ID: &str = "550e8400-e29b-41d4-a716-446655440000";
 
 const ISS: &str = "https://issuer.test";
 const AUD: &str = "rss-test";
@@ -72,6 +73,62 @@ impl diport::Clock for FixedClock {
     fn now(&self) -> SystemTime {
         UNIX_EPOCH + Duration::from_secs(self.0 as u64)
     }
+}
+
+fn current_grants() -> Arc<identity::AuthGrantValidationService> {
+    runtime::test_support::always_current_access_grants()
+}
+
+#[derive(Clone, Copy)]
+enum GrantDecision {
+    Current,
+    Invalid,
+    StoreUnavailable,
+}
+
+struct RecordingGrantValidator {
+    decision: GrantDecision,
+    calls: Arc<AtomicUsize>,
+    binding_matched: Arc<AtomicBool>,
+}
+
+impl identity::ports::AuthGrantValidator for RecordingGrantValidator {
+    async fn is_current(
+        &self,
+        scope: identity::ports::TenantRepoScope,
+        input: &authn::AccessGrantValidationInput,
+        _observed_at: SystemTime,
+    ) -> Result<bool, identity::ports::IdentityError> {
+        self.calls.fetch_add(1, Ordering::AcqRel);
+        self.binding_matched.store(
+            input.grant_id().as_str().len() == 36
+                && input.user_id().as_uuid().hyphenated().to_string() == USER_ID
+                && input.tenant().to_string() == TENANT
+                && scope.tenant() == input.tenant()
+                && input.auth_time_unix_secs() == (NOW - 30) as u64
+                && input.authn_epoch().get() == 7,
+            Ordering::Release,
+        );
+        match self.decision {
+            GrantDecision::Current => Ok(true),
+            GrantDecision::Invalid => Ok(false),
+            GrantDecision::StoreUnavailable => Err(identity::ports::IdentityError::Storage(
+                Box::new(std::io::Error::other("injected grant store outage")),
+            )),
+        }
+    }
+}
+
+fn recording_grants(
+    decision: GrantDecision,
+    calls: Arc<AtomicUsize>,
+    binding_matched: Arc<AtomicBool>,
+) -> Arc<identity::AuthGrantValidationService> {
+    runtime::test_support::access_grant_validation_service(RecordingGrantValidator {
+        decision,
+        calls,
+        binding_matched,
+    })
 }
 
 #[derive(Default)]
@@ -211,7 +268,7 @@ impl diport::Signer for HmacJwtSigner {
 }
 
 #[allow(clippy::expect_used)]
-fn production_access_jwt(principal: authn::JwtAccessPrincipal<'_>) -> String {
+fn production_access_jwt() -> String {
     let issuer = authn::JwtIssuer::<diport::RssAccessProfile, _>::new(
         Arc::new(P256JwtSigner),
         Box::new(FixedClock(NOW)),
@@ -225,10 +282,25 @@ fn production_access_jwt(principal: authn::JwtAccessPrincipal<'_>) -> String {
         ),
     )
     .expect("runtime e2e jwt issuer config");
-    futures::executor::block_on(issuer.issue_access(principal))
-        .expect("runtime e2e production jwt")
-        .as_str()
-        .to_string()
+    let grant = authn::AuthGrant::new_active(
+        production_tenant(),
+        ids::UserId::parse(USER_ID).expect("canonical user id"),
+        UNIX_EPOCH + Duration::from_secs((NOW - 30) as u64),
+        authn::AuthnEpoch::hydrate(7).expect("valid epoch"),
+        UNIX_EPOCH + Duration::from_secs((NOW + 3_600) as u64),
+        UNIX_EPOCH + Duration::from_secs((NOW - 20) as u64),
+    )
+    .expect("active grant");
+    futures::executor::block_on(
+        issuer.issue_access(
+            grant
+                .access_issue_input()
+                .expect("active grant issue input"),
+        ),
+    )
+    .expect("runtime e2e production jwt")
+    .as_str()
+    .to_string()
 }
 
 #[allow(clippy::expect_used)]
@@ -262,29 +334,16 @@ fn production_service_token(secret: &[u8]) -> String {
     .to_owned()
 }
 
-fn production_super_admin_jwt() -> String {
-    production_access_jwt(authn::JwtAccessPrincipal::SuperAdmin { subject: "alice" })
-}
-
 fn production_user_jwt() -> String {
-    production_access_jwt(authn::JwtAccessPrincipal::User {
-        subject: "alice",
-        tenant: production_tenant(),
-    })
+    production_access_jwt()
 }
 
 fn production_device_jwt() -> String {
-    production_access_jwt(authn::JwtAccessPrincipal::Device {
-        subject: "alice",
-        tenant: production_tenant(),
-    })
+    federated_scoped_jwt("device")
 }
 
 fn production_admin_jwt() -> String {
-    production_access_jwt(authn::JwtAccessPrincipal::Admin {
-        subject: "alice",
-        tenant: production_tenant(),
-    })
+    federated_scoped_jwt("admin")
 }
 
 fn mint_es256(sk: &SigningKey, payload: &str) -> String {
@@ -340,7 +399,7 @@ fn mint_alg_none(payload: &str) -> String {
         B64.encode(payload.as_bytes())
     )
 }
-/// superAdmin JWT payload（无需 tenant claim；trust_kind("superAdmin") 时 kind 透传）。
+/// Federated superAdmin JWT payload（无需 tenant claim；由 Federated kind allowlist 放行）。
 fn super_admin_payload(exp: i64, iss: &str, aud: &str) -> String {
     format!(
         r#"{{"sub":"alice","iat":{},"exp":{exp},"iss":"{iss}","aud":"{aud}","token_use":"access","kind":"superAdmin"}}"#,
@@ -361,6 +420,21 @@ fn federated_super_admin_jwt() -> String {
     format!("{signing_input}.{}", B64.encode(signature.to_bytes()))
 }
 
+fn federated_scoped_jwt(kind: &str) -> String {
+    let header = B64.encode(format!(
+        r#"{{"alg":"ES256","typ":"at+jwt","kid":"{FEDERATED_KID}"}}"#
+    ));
+    let payload = format!(
+        r#"{{"sub":"alice","tenant_id":"{TENANT}","kind":"{kind}","iat":{},"exp":{},"iss":"{FEDERATED_ISS}","aud":"{FEDERATED_AUD}","token_use":"access"}}"#,
+        NOW,
+        NOW + 900,
+    );
+    let body = B64.encode(payload.as_bytes());
+    let signing_input = format!("{header}.{body}");
+    let signature: Signature = sk_federated().sign(signing_input.as_bytes());
+    format!("{signing_input}.{}", B64.encode(signature.to_bytes()))
+}
+
 fn service_token_payload(exp: i64, sub: &str) -> String {
     format!(
         r#"{{"sub":"{sub}","iat":{},"exp":{exp},"iss":"{ISS}","aud":"{AUD}","token_use":"service","kind":"service","jti":"mtls-exact-match-{sub}-{exp}"}}"#,
@@ -376,11 +450,9 @@ fn es256_provider() -> OidcProvider<diport::RssAccessProfile> {
         key_id: RSS_KID,
         sec1_b64url: &es256_b64,
     }];
-    // trust superAdmin（无 tenant 路径）+ user/device/admin（带 tenant 路径），覆盖跨租户 + 全 scoped kind。
     rss_access_provider_from_static_config(RssAccessStaticProviderConfig {
         issuer: ISS,
         audience: AUD,
-        trusted_kinds: &["superAdmin", "user", "device", "admin"],
         keys: &keys,
         retirement_schedule: None,
         clock: Box::new(FixedClock(NOW)),
@@ -400,6 +472,8 @@ fn federated_es256_provider() -> OidcProvider<diport::FederatedAccessProfile> {
     )
     .keys_static(keys)
     .trust_kind("superAdmin")
+    .trust_kind("device")
+    .trust_kind("admin")
     .build()
     .expect("federated verifier config");
     OidcProvider::new(config, Box::new(FixedClock(NOW)))
@@ -424,6 +498,32 @@ fn hs256_provider() -> (OidcProvider<diport::ServiceTokenProfile>, Vec<u8>) {
 /// `with_bridge = false` ⇒ 不挂验签桥（回归用例）；`true` ⇒ 挂 RSS access typed bridge。
 #[allow(clippy::expect_used)]
 fn jwt_router(with_bridge: bool) -> httpserve::AuthenticatedRoutes {
+    jwt_router_with_grants(with_bridge, current_grants())
+}
+
+async fn rss_verified_evidence_handler(
+    axum::extract::Extension(verified): axum::extract::Extension<Arc<authn::VerifiedJwt>>,
+    axum::extract::Extension(authenticated): axum::extract::Extension<httpserve::Authenticated>,
+) -> Result<&'static str, StatusCode> {
+    let Some(receipt) = verified.grant_receipt() else {
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    };
+    if receipt.grant_id().as_str().len() != 36
+        || receipt.token_id().to_string().len() != 36
+        || receipt.auth_time_unix_secs() != (NOW - 30) as u64
+        || receipt.authn_epoch() != 7
+        || authenticated.current_auth_grant().is_none()
+    {
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+    Ok("ok")
+}
+
+#[allow(clippy::expect_used)]
+fn jwt_router_with_grants(
+    with_bridge: bool,
+    grants: Arc<identity::AuthGrantValidationService>,
+) -> httpserve::AuthenticatedRoutes {
     // typed Primary builder（`ListenerRouter::new` 是 pub(crate)，外部测试经 `unfinalized_for_test` 构造 funnel 输入）。
     let routes = test_routes::<httpserve::Primary>(|rb| {
         let rb = rb.mount_primary_raw_for_test(
@@ -436,7 +536,7 @@ fn jwt_router(with_bridge: bool) -> httpserve::AuthenticatedRoutes {
                     scope: RouteResourceScope::None,
                 },
             ),
-            get(|| async { "ok" }),
+            get(rss_verified_evidence_handler),
         )?;
         rb.mount_primary_raw_for_test(
             PrimaryRoute::opt_out(
@@ -452,7 +552,7 @@ fn jwt_router(with_bridge: bool) -> httpserve::AuthenticatedRoutes {
     let authed =
         httpserve::finalize_primary_auth(routes, plan, allow_authorizer()).expect("finalize_auth");
     if with_bridge {
-        apply_rss_access_verify_bridge_for_test(authed, Arc::new(es256_provider()))
+        apply_rss_access_verify_bridge_for_test(authed, Arc::new(es256_provider()), grants)
     } else {
         authed
     }
@@ -471,13 +571,20 @@ fn federated_router_with_calls(handler_calls: Arc<AtomicUsize>) -> httpserve::Au
                     scope: RouteResourceScope::None,
                 },
             ),
-            get(move || {
-                let handler_calls = Arc::clone(&handler_calls);
-                async move {
-                    handler_calls.fetch_add(1, Ordering::AcqRel);
-                    "federated"
-                }
-            }),
+            get(
+                move |axum::extract::Extension(verified): axum::extract::Extension<
+                    Arc<authn::VerifiedJwt>,
+                >| {
+                    let handler_calls = Arc::clone(&handler_calls);
+                    async move {
+                        if verified.grant_receipt().is_some() {
+                            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+                        }
+                        handler_calls.fetch_add(1, Ordering::AcqRel);
+                        Ok("federated")
+                    }
+                },
+            ),
         )
     });
     let plan =
@@ -488,15 +595,34 @@ fn federated_router_with_calls(handler_calls: Arc<AtomicUsize>) -> httpserve::Au
 }
 
 #[derive(Clone)]
-struct YieldingPdp;
+struct YieldingRssPdp;
 
-impl Pdp for YieldingPdp {
+impl Pdp for YieldingRssPdp {
     async fn verify(&self, _raw: &RawCredential) -> Result<VerifiedClaims, PdpError> {
         tokio::task::yield_now().await;
-        Ok(VerifiedClaims::new(
-            SERVICE_CALLER_ALLOWED,
-            None,
-            Some("superAdmin".to_string()),
+        let facts = diport::VerifiedAccessGrantFacts::try_new(
+            "6ba7b810-9dad-41d1-80b4-00c04fd430c8",
+            "6ba7b811-9dad-41d1-80b4-00c04fd430c8",
+            NOW - 30,
+            7,
+        )
+        .expect("valid grant facts");
+        Ok(VerifiedClaims::rss_user(
+            ids::UserId::parse(USER_ID).expect("canonical user id"),
+            production_tenant(),
+            facts,
+        ))
+    }
+}
+
+#[derive(Clone)]
+struct YieldingServicePdp;
+
+impl Pdp for YieldingServicePdp {
+    async fn verify(&self, _raw: &RawCredential) -> Result<VerifiedClaims, PdpError> {
+        tokio::task::yield_now().await;
+        Ok(VerifiedClaims::service_token(
+            vocab::ServiceCallerDomain::MaintenanceOperator,
         ))
     }
 }
@@ -595,7 +721,7 @@ where
     let plan = AuthPlan::new(ListenerKind::Primary, AuthScheme::RssAccessToken).expect("plan");
     let authed =
         httpserve::finalize_primary_auth(routes, plan, allow_authorizer()).expect("finalize_auth");
-    apply_rss_access_pdp_bridge_for_test(authed, provider)
+    apply_rss_access_pdp_bridge_for_test(authed, provider, current_grants())
 }
 
 #[allow(clippy::expect_used)]
@@ -623,7 +749,7 @@ fn public_router_with_counters(
     let plan = AuthPlan::new(ListenerKind::Primary, AuthScheme::RssAccessToken).expect("plan");
     let authed =
         httpserve::finalize_primary_auth(routes, plan, allow_authorizer()).expect("finalize_auth");
-    apply_rss_access_pdp_bridge_for_test(authed, CountingPdp { calls: pdp_calls })
+    apply_rss_access_pdp_bridge_for_test(authed, CountingPdp { calls: pdp_calls }, current_grants())
 }
 
 #[allow(clippy::expect_used)]
@@ -821,7 +947,7 @@ fn jwt_router_with_audit(sink: RecordingAuditSink) -> httpserve::AuthenticatedRo
         allow_authorizer(),
     )
     .expect("finalize_auth_with_audit");
-    apply_rss_access_verify_bridge_for_test(authed, Arc::new(es256_provider()))
+    apply_rss_access_verify_bridge_for_test(authed, Arc::new(es256_provider()), current_grants())
 }
 
 #[allow(clippy::unwrap_used)]
@@ -1004,7 +1130,7 @@ async fn rate_limit_blocks_before_jwt_auth_tripwire() {
 // ── 验收：成功路径 ────────────────────────────────────────────────────────────────
 #[tokio::test]
 async fn valid_jwt_is_200() {
-    let token = production_super_admin_jwt();
+    let token = production_user_jwt();
     assert_eq!(
         status(
             jwt_router(true),
@@ -1015,6 +1141,102 @@ async fn valid_jwt_is_200() {
         StatusCode::OK,
         "有效 JWT → 证据注入放行 200"
     );
+}
+
+#[tokio::test]
+async fn rss_request_requires_current_durable_grant_and_exact_verified_binding() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let binding_matched = Arc::new(AtomicBool::new(false));
+    let grants = recording_grants(
+        GrantDecision::Current,
+        Arc::clone(&calls),
+        Arc::clone(&binding_matched),
+    );
+    let token = production_user_jwt();
+    let response = status(
+        jwt_router_with_grants(true, grants),
+        "/protected",
+        Some(&format!("Bearer {token}")),
+    )
+    .await;
+    assert_eq!(response, StatusCode::OK);
+    assert_eq!(calls.load(Ordering::Acquire), 1);
+    assert!(binding_matched.load(Ordering::Acquire));
+}
+
+#[tokio::test]
+async fn missing_revoked_expired_or_mismatched_grant_is_401() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let binding_matched = Arc::new(AtomicBool::new(false));
+    let grants = recording_grants(
+        GrantDecision::Invalid,
+        Arc::clone(&calls),
+        Arc::clone(&binding_matched),
+    );
+    let token = production_user_jwt();
+    let response = status(
+        jwt_router_with_grants(true, grants),
+        "/protected",
+        Some(&format!("Bearer {token}")),
+    )
+    .await;
+    assert_eq!(response, StatusCode::UNAUTHORIZED);
+    assert_eq!(calls.load(Ordering::Acquire), 1);
+    assert!(binding_matched.load(Ordering::Acquire));
+}
+
+#[tokio::test]
+async fn grant_store_outage_is_503_without_jwt_only_fallback() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let grants = recording_grants(
+        GrantDecision::StoreUnavailable,
+        Arc::clone(&calls),
+        Arc::new(AtomicBool::new(false)),
+    );
+    let token = production_user_jwt();
+    let response = jwt_router_with_grants(true, grants)
+        .into_router_for_test()
+        .oneshot(
+            axum::http::Request::builder()
+                .method(Method::GET)
+                .uri("/protected")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header("x-request-id", "grant-store-outage")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("infallible router");
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let bytes = axum::body::to_bytes(response.into_body(), 4096)
+        .await
+        .expect("bounded provider-unavailable envelope");
+    let body: serde_json::Value =
+        serde_json::from_slice(&bytes).expect("provider-unavailable envelope json");
+    assert_eq!(body["error"]["code"], "ERR_CORE_PROVIDER_UNAVAILABLE");
+    assert_eq!(body["error"]["requestId"], "grant-store-outage");
+    assert_eq!(body["error"]["retryable"], true);
+    assert_eq!(body["error"]["details"], serde_json::json!([]));
+    assert_eq!(calls.load(Ordering::Acquire), 1);
+}
+
+#[tokio::test]
+async fn crypto_rejection_happens_before_durable_grant_lookup() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let grants = recording_grants(
+        GrantDecision::Current,
+        Arc::clone(&calls),
+        Arc::new(AtomicBool::new(false)),
+    );
+    let invalid = super_admin_jwt(&sk_other(), NOW + 900, ISS, AUD);
+    let response = status(
+        jwt_router_with_grants(true, grants),
+        "/protected",
+        Some(&format!("Bearer {invalid}")),
+    )
+    .await;
+    assert_eq!(response, StatusCode::UNAUTHORIZED);
+    assert_eq!(calls.load(Ordering::Acquire), 0);
 }
 
 #[tokio::test]
@@ -1036,7 +1258,7 @@ async fn valid_federated_access_token_is_200_on_federated_listener() {
 #[tokio::test]
 async fn rss_access_token_is_rejected_by_federated_listener_before_handler() {
     let handler_calls = Arc::new(AtomicUsize::new(0));
-    let token = production_super_admin_jwt();
+    let token = production_user_jwt();
     let status = status(
         federated_router_with_calls(Arc::clone(&handler_calls)),
         "/federated",
@@ -1097,7 +1319,7 @@ async fn user_jwt_records_auth_audit_principal_kind() {
     let events = sink.events();
     assert_eq!(events.len(), 1);
     let event = &events[0];
-    assert_eq!(event.principal_id, "alice");
+    assert_eq!(event.principal_id, USER_ID);
     assert_eq!(format!("{:?}", event.principal_kind), "User");
     assert_eq!(
         event.tenant_id.expect("user auth audit tenant").to_string(),
@@ -1121,10 +1343,10 @@ const SCOPE_MISSING: &str = "scope=missing";
 async fn scope_probe() -> String {
     match runctx::try_current() {
         Ok(ctx) => format!(
-            "tenant={};kind={:?};alice={}",
+            "tenant={};kind={:?};subject={}",
             ctx.tenant(),
             ctx.principal().kind(),
-            ctx.principal().matches_subject("alice"),
+            ctx.principal().matches_subject(USER_ID) || ctx.principal().matches_subject("alice"),
         ),
         Err(_) => SCOPE_MISSING.to_string(),
     }
@@ -1159,7 +1381,30 @@ fn jwt_router_with_scope_probe() -> httpserve::AuthenticatedRoutes {
     let plan = AuthPlan::new(ListenerKind::Primary, AuthScheme::RssAccessToken).expect("plan");
     let authed =
         httpserve::finalize_primary_auth(routes, plan, allow_authorizer()).expect("finalize_auth");
-    apply_rss_access_verify_bridge_for_test(authed, Arc::new(es256_provider()))
+    apply_rss_access_verify_bridge_for_test(authed, Arc::new(es256_provider()), current_grants())
+}
+
+#[allow(clippy::expect_used)]
+fn federated_router_with_scope_probe() -> httpserve::AuthenticatedRoutes {
+    let routes = test_routes::<httpserve::Primary>(|router| {
+        router.mount_primary_raw_for_test(
+            PrimaryRoute::permission(
+                Method::GET,
+                "/scope",
+                "test.scope.federated",
+                RoutePermission {
+                    permission: vocab::RoutePermissionId::IdentityPolicyRead,
+                    scope: RouteResourceScope::None,
+                },
+            ),
+            get(scope_probe),
+        )
+    });
+    let plan =
+        AuthPlan::new(ListenerKind::Primary, AuthScheme::FederatedAccessToken).expect("plan");
+    let authed =
+        httpserve::finalize_primary_auth(routes, plan, allow_authorizer()).expect("finalize_auth");
+    apply_federated_access_verify_bridge_for_test(authed, Arc::new(federated_es256_provider()))
 }
 
 /// oneshot 取回 (status, body)（scope 探针断言响应体）。
@@ -1211,7 +1456,7 @@ async fn user_jwt_establishes_runctx_scope_for_downstream() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         body,
-        format!("tenant={TENANT};kind=User;alice=true"),
+        format!("tenant={TENANT};kind=User;subject=true"),
         "下游须经 ambient runctx 取到已认证 tenant + facet（scope 已建立）"
     );
 }
@@ -1220,9 +1465,9 @@ async fn user_jwt_establishes_runctx_scope_for_downstream() {
 async fn super_admin_jwt_without_tenant_leaves_scope_missing() {
     // 跨租户主体（superAdmin，tenant=None）→ 不建 scope → 下游 try_current() = MissingCtx（fail-closed）；
     // 仍放行（有证据）证明「不建 scope」≠「拒绝」。
-    let token = production_super_admin_jwt();
+    let token = federated_super_admin_jwt();
     let (status, body) = body_of(
-        jwt_router_with_scope_probe(),
+        federated_router_with_scope_probe(),
         "/scope",
         Some(&format!("Bearer {token}")),
     )
@@ -1239,7 +1484,7 @@ async fn device_jwt_establishes_runctx_scope_for_downstream() {
     // Device kind（scoped，带 tenant）走与 User 同一 allow_evidence 路径 → 建 scope（防 kind 差异化回归）。
     let token = production_device_jwt();
     let (status, body) = body_of(
-        jwt_router_with_scope_probe(),
+        federated_router_with_scope_probe(),
         "/scope",
         Some(&format!("Bearer {token}")),
     )
@@ -1247,7 +1492,7 @@ async fn device_jwt_establishes_runctx_scope_for_downstream() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         body,
-        format!("tenant={TENANT};kind=Device;alice=true"),
+        format!("tenant={TENANT};kind=Device;subject=true"),
         "Device scoped 主体须建 ambient scope"
     );
 }
@@ -1257,7 +1502,7 @@ async fn admin_jwt_establishes_runctx_scope_for_downstream() {
     // Admin kind（scoped，带 tenant）同样建 scope——ABAC 最相关的 scoped 角色，确保非 User 的 scoped 路径也覆盖。
     let token = production_admin_jwt();
     let (status, body) = body_of(
-        jwt_router_with_scope_probe(),
+        federated_router_with_scope_probe(),
         "/scope",
         Some(&format!("Bearer {token}")),
     )
@@ -1265,7 +1510,7 @@ async fn admin_jwt_establishes_runctx_scope_for_downstream() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         body,
-        format!("tenant={TENANT};kind=Admin;alice=true"),
+        format!("tenant={TENANT};kind=Admin;subject=true"),
         "Admin scoped 主体须建 ambient scope"
     );
 }
@@ -1300,7 +1545,7 @@ async fn public_route_with_valid_bearer_has_no_scope() {
 #[tokio::test]
 async fn lowercase_bearer_scheme_is_200() {
     // RFC 6750 §2.1：scheme 名大小写不敏感；bridge 接受 "bearer " 小写前缀。
-    let token = production_super_admin_jwt();
+    let token = production_user_jwt();
     assert_eq!(
         status(
             jwt_router(true),
@@ -1316,7 +1561,7 @@ async fn lowercase_bearer_scheme_is_200() {
 #[tokio::test]
 async fn uppercase_bearer_scheme_is_200() {
     // 评审 F7：scheme 大小写不敏感——大写 BEARER 仍放行。
-    let token = production_super_admin_jwt();
+    let token = production_user_jwt();
     assert_eq!(
         status(
             jwt_router(true),
@@ -1331,10 +1576,10 @@ async fn uppercase_bearer_scheme_is_200() {
 
 #[tokio::test]
 async fn yielding_pdp_valid_jwt_is_200() {
-    let token = production_super_admin_jwt();
+    let token = production_user_jwt();
     assert_eq!(
         status(
-            jwt_router_with_pdp(YieldingPdp),
+            jwt_router_with_pdp(YieldingRssPdp),
             "/protected",
             Some(&format!("Bearer {token}")),
         )
@@ -1348,7 +1593,7 @@ async fn yielding_pdp_valid_jwt_is_200() {
 async fn yielding_pdp_valid_service_token_is_200() {
     assert_eq!(
         status_with_tenant(
-            service_token_router_with_pdp(YieldingPdp),
+            service_token_router_with_pdp(YieldingServicePdp),
             "/svc",
             Some("Bearer yielding-service-token"),
             Some(TENANT),
@@ -1361,7 +1606,7 @@ async fn yielding_pdp_valid_service_token_is_200() {
 
 #[tokio::test]
 async fn yielding_pdp_error_is_401_and_never_runs_handler() {
-    let token = production_super_admin_jwt();
+    let token = production_user_jwt();
     let handler_calls = Arc::new(AtomicUsize::new(0));
     let app = jwt_router_with_pdp_and_calls(YieldingErrorPdp, Arc::clone(&handler_calls));
 
@@ -1378,7 +1623,7 @@ async fn yielding_pdp_error_is_401_and_never_runs_handler() {
 async fn server_budget_times_out_pending_pdp_as_503_and_drops_verifier() {
     fn assert_send<T: Send>(_: &T) {}
 
-    let token = production_super_admin_jwt();
+    let token = production_user_jwt();
     let entered = Arc::new(Notify::new());
     let dropped = Arc::new(AtomicBool::new(false));
     let handler_calls = Arc::new(AtomicUsize::new(0));
@@ -1422,7 +1667,7 @@ async fn server_budget_times_out_pending_pdp_as_503_and_drops_verifier() {
 
 #[tokio::test]
 async fn cancelling_request_drops_inflight_verifier_without_authorizing() {
-    let token = production_super_admin_jwt();
+    let token = production_user_jwt();
     let entered = Arc::new(Notify::new());
     let entered_wait = entered.notified();
     let dropped = Arc::new(AtomicBool::new(false));
@@ -1470,8 +1715,8 @@ async fn no_token_require_is_401() {
 #[tokio::test]
 async fn duplicate_authorization_with_same_value_is_401_and_never_runs_handler() {
     let handler_calls = Arc::new(AtomicUsize::new(0));
-    let app = jwt_router_with_pdp_and_calls(YieldingPdp, Arc::clone(&handler_calls));
-    let authorization = format!("Bearer {}", production_super_admin_jwt());
+    let app = jwt_router_with_pdp_and_calls(YieldingRssPdp, Arc::clone(&handler_calls));
+    let authorization = format!("Bearer {}", production_user_jwt());
 
     let status = status_with_authorization_values(
         app,
@@ -1488,8 +1733,8 @@ async fn duplicate_authorization_with_same_value_is_401_and_never_runs_handler()
 #[tokio::test]
 async fn duplicate_authorization_with_different_values_is_401_and_never_runs_handler() {
     let handler_calls = Arc::new(AtomicUsize::new(0));
-    let app = jwt_router_with_pdp_and_calls(YieldingPdp, Arc::clone(&handler_calls));
-    let accepted_first = format!("Bearer {}", production_super_admin_jwt());
+    let app = jwt_router_with_pdp_and_calls(YieldingRssPdp, Arc::clone(&handler_calls));
+    let accepted_first = format!("Bearer {}", production_user_jwt());
 
     let status = status_with_authorization_values(
         app,
@@ -1590,11 +1835,12 @@ async fn hs256_token_on_jwt_listener_is_401() {
 #[tokio::test]
 async fn jwt_evidence_cannot_satisfy_require_mtls() {
     // A valid RSS token is verified and mints RSS evidence, which cannot satisfy Require(Mtls).
-    let token = production_super_admin_jwt();
+    let token = production_user_jwt();
     let handler_calls = Arc::new(AtomicUsize::new(0));
     let app = apply_rss_access_verify_bridge_for_test(
         mtls_authed_routes_with_calls(Arc::clone(&handler_calls)),
         Arc::new(es256_provider()),
+        current_grants(),
     );
     assert_eq!(
         status(app, "/protected", Some(&format!("Bearer {token}"))).await,
@@ -1727,7 +1973,7 @@ async fn internal_mtls_verified_peer_remains_tenantless_scope() {
 // ── 安全同批门回归（ADR-006 §5 / tasks.md:14）：无注入方 ⇒ 即便有效 JWT，Require 仍 401 ──
 #[tokio::test]
 async fn no_bridge_require_still_401_even_with_valid_jwt() {
-    let token = production_super_admin_jwt();
+    let token = production_user_jwt();
     assert_eq!(
         status(
             jwt_router(false),
@@ -2059,7 +2305,7 @@ async fn service_token_establishes_scope_from_mac_bound_tenant() {
     assert_eq!(status, StatusCode::OK, "service-token 仍放行（证据在场）");
     assert_eq!(
         body,
-        format!("tenant={TENANT};kind=Service;alice=false"),
+        format!("tenant={TENANT};kind=Service;subject=false"),
         "service-token MAC 绑定 tenant 须进入 ambient scope"
     );
 }
@@ -2144,8 +2390,8 @@ fn tracing_allow_logs_decision_and_kind_no_pii() {
     let _capture_guard = tracing_capture_lock().lock().unwrap();
     ensure_global_trace_capture();
 
-    let token = production_super_admin_jwt();
-    let request_id = "trace-allow-super-admin";
+    let token = production_user_jwt();
+    let request_id = "trace-allow-rss-user";
     let start = trace_len();
     let st = block_on_current_thread(status_with_request_id(
         jwt_router(true),
@@ -2162,15 +2408,12 @@ fn tracing_allow_logs_decision_and_kind_no_pii() {
         "须记结构化字段键 authz.decision: {logs}"
     );
     assert!(logs.contains("allow"), "allow 决策: {logs}");
-    assert!(
-        logs.contains("SuperAdmin"),
-        "须记脱敏 principal.kind: {logs}"
-    );
+    assert!(logs.contains("User"), "须记脱敏 principal.kind: {logs}");
     assert!(
         logs.contains("verify_bridge"),
         "须有 verify_bridge span: {logs}"
     );
-    assert!(!logs.contains("alice"), "禁泄漏 subject: {logs}");
+    assert!(!logs.contains(USER_ID), "禁泄漏 subject: {logs}");
     assert!(!logs.contains(&token), "禁泄漏原始 token: {logs}");
 }
 
@@ -2208,7 +2451,7 @@ fn tracing_yielding_provider_error_keeps_span_and_redacts_pii() {
 
 #[test]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
-fn provider_outage_returns_existing_503_envelope_and_redacts_pii() {
+fn provider_outage_returns_retryable_503_envelope_and_redacts_pii() {
     let _capture_guard = tracing_capture_lock().lock().unwrap();
     ensure_global_trace_capture();
 
@@ -2240,9 +2483,10 @@ fn provider_outage_returns_existing_503_envelope_and_redacts_pii() {
     });
     let body = String::from_utf8(body.to_vec()).expect("utf8 error envelope");
     assert!(
-        body.contains("ERR_CORE_UNAVAILABLE"),
-        "existing 503 envelope: {body}"
+        body.contains("ERR_CORE_PROVIDER_UNAVAILABLE"),
+        "503 envelope: {body}"
     );
+    assert!(body.contains("\"retryable\":true"), "retryable 503: {body}");
     assert!(body.contains(request_id), "request id correlation: {body}");
 
     let captured = captured_since(start);

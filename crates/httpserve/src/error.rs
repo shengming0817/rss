@@ -95,7 +95,9 @@ fn status_for(kind: CoreErrorKind) -> StatusCode {
         CoreErrorKind::Internal => StatusCode::INTERNAL_SERVER_ERROR,
         CoreErrorKind::PayloadTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
         CoreErrorKind::TooManyRequests => StatusCode::TOO_MANY_REQUESTS,
-        CoreErrorKind::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+        CoreErrorKind::Unavailable | CoreErrorKind::ProviderUnavailable => {
+            StatusCode::SERVICE_UNAVAILABLE
+        }
         CoreErrorKind::NotImplemented => StatusCode::NOT_IMPLEMENTED,
         // `CoreErrorKind` 是 `#[non_exhaustive]`：未知未来 kind fail-closed 映射 5xx
         // （→ details strip，绝不把未知 kind 当 4xx 误下发明细）。
@@ -183,6 +185,14 @@ pub fn service_unavailable(request_id: &str) -> axum::response::Response {
     core_error_response(&CoreError::new(CoreErrorKind::Unavailable), request_id)
 }
 
+/// 503 Provider Unavailable 信封：必需 serving dependency 暂时不可用，且请求可安全重试。
+pub fn provider_unavailable(request_id: &str) -> axum::response::Response {
+    core_error_response(
+        &CoreError::new(CoreErrorKind::ProviderUnavailable),
+        request_id,
+    )
+}
+
 /// 501 Not Implemented 信封：`ERR_CORE_NOT_IMPLEMENTED` + `NOT_IMPLEMENTED` 固定配对。
 pub fn not_implemented(request_id: &str) -> axum::response::Response {
     core_error_response(&CoreError::new(CoreErrorKind::NotImplemented), request_id)
@@ -268,6 +278,11 @@ mod tests {
                 service_unavailable("rid"),
                 StatusCode::SERVICE_UNAVAILABLE,
                 "ERR_CORE_UNAVAILABLE",
+            ),
+            (
+                provider_unavailable("rid"),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "ERR_CORE_PROVIDER_UNAVAILABLE",
             ),
             (
                 payload_too_large("rid"),
@@ -413,6 +428,10 @@ mod tests {
             (CoreErrorKind::Validation, StatusCode::BAD_REQUEST),
             (CoreErrorKind::Internal, StatusCode::INTERNAL_SERVER_ERROR),
             (CoreErrorKind::Unavailable, StatusCode::SERVICE_UNAVAILABLE),
+            (
+                CoreErrorKind::ProviderUnavailable,
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
             (CoreErrorKind::NotImplemented, StatusCode::NOT_IMPLEMENTED),
             (
                 CoreErrorKind::PayloadTooLarge,
@@ -484,5 +503,16 @@ mod tests {
         .await;
         assert_eq!(json["error"]["code"], "ERR_CORE_VERSION_CONFLICT");
         assert_eq!(json["error"]["retryable"], true);
+    }
+
+    #[tokio::test]
+    async fn provider_unavailable_is_retryable_but_budget_unavailable_is_not() {
+        let provider = body_json(provider_unavailable("rid")).await;
+        assert_eq!(provider["error"]["code"], "ERR_CORE_PROVIDER_UNAVAILABLE");
+        assert_eq!(provider["error"]["retryable"], true);
+
+        let budget = body_json(service_unavailable("rid")).await;
+        assert_eq!(budget["error"]["code"], "ERR_CORE_UNAVAILABLE");
+        assert_eq!(budget["error"]["retryable"], false);
     }
 }

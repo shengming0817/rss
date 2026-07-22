@@ -22,6 +22,7 @@ pub(crate) const INTERNAL_MTLS_SPIFFE_ALLOW_SET_ENV: &str = "RSS_INTERNAL_MTLS_S
 /// selected listeners before constructing any `AuthPlan`.
 pub(crate) struct TokenProviderBindings {
     rss_access: Option<Arc<oidc::OidcProvider<diport::RssAccessProfile>>>,
+    rss_access_grants: Option<Arc<identity::AuthGrantValidationService>>,
     federated_access: Option<Arc<oidc::OidcProvider<diport::FederatedAccessProfile>>>,
     service_token: Option<Arc<oidc::OidcProvider<diport::ServiceTokenProfile>>>,
 }
@@ -29,11 +30,13 @@ pub(crate) struct TokenProviderBindings {
 impl TokenProviderBindings {
     pub(crate) const fn new(
         rss_access: Option<Arc<oidc::OidcProvider<diport::RssAccessProfile>>>,
+        rss_access_grants: Option<Arc<identity::AuthGrantValidationService>>,
         federated_access: Option<Arc<oidc::OidcProvider<diport::FederatedAccessProfile>>>,
         service_token: Option<Arc<oidc::OidcProvider<diport::ServiceTokenProfile>>>,
     ) -> Self {
         Self {
             rss_access,
+            rss_access_grants,
             federated_access,
             service_token,
         }
@@ -48,6 +51,10 @@ impl TokenProviderBindings {
         anyhow::ensure!(
             self.rss_access.is_some() == requires(AuthScheme::RssAccessToken),
             "RSS access provider presence does not match RuntimePlan"
+        );
+        anyhow::ensure!(
+            self.rss_access_grants.is_some() == requires(AuthScheme::RssAccessToken),
+            "RSS access grant validator presence does not match RuntimePlan"
         );
         anyhow::ensure!(
             self.federated_access.is_some() == requires(AuthScheme::FederatedAccessToken),
@@ -65,8 +72,12 @@ impl TokenProviderBindings {
             AuthScheme::RssAccessToken => self
                 .rss_access
                 .as_ref()
-                .map(|provider| ProfileBinding::RssAccess(Arc::clone(provider)))
-                .context("RSS access listener selected without RSS access provider"),
+                .zip(self.rss_access_grants.as_ref())
+                .map(|(provider, grants)| ProfileBinding::RssAccess {
+                    provider: Arc::clone(provider),
+                    grants: Arc::clone(grants),
+                })
+                .context("RSS access listener selected without its verifier and grant validator"),
             AuthScheme::FederatedAccessToken => self
                 .federated_access
                 .as_ref()
@@ -636,6 +647,7 @@ fn mtls_spiffe_endpoint_from_value(raw: Option<&str>) -> anyhow::Result<String> 
 pub(crate) fn finalize_rss_fixture_listener(
     registry: &mut bootstrap::Registry,
     provider: Arc<oidc::OidcProvider<diport::RssAccessProfile>>,
+    grants: Arc<identity::AuthGrantValidationService>,
     audit_sink: httpserve::AuditSinkHandle,
     audit_clock: Arc<dyn diport::Clock>,
     kind: assembly_schema::AssemblyListenerKind,
@@ -646,6 +658,41 @@ pub(crate) fn finalize_rss_fixture_listener(
             && spec.auth_scheme() == AuthScheme::RssAccessToken,
         "RSS integration fixture requires a plan-declared RSS access listener"
     );
+    finalize_access_fixture_listener(
+        registry,
+        spec,
+        TokenProviderBindings::new(Some(provider), Some(grants), None, None),
+        audit_sink,
+        audit_clock,
+    )
+}
+
+#[cfg(feature = "integration")]
+pub(crate) fn finalize_federated_fixture_listener(
+    registry: &mut bootstrap::Registry,
+    provider: Arc<oidc::OidcProvider<diport::FederatedAccessProfile>>,
+    audit_sink: httpserve::AuditSinkHandle,
+    audit_clock: Arc<dyn diport::Clock>,
+    kind: assembly_schema::AssemblyListenerKind,
+) -> anyhow::Result<httpserve::AuthenticatedRoutes> {
+    let spec = crate::plan::fixture_listener_spec(kind)?.into_federated_access_fixture()?;
+    finalize_access_fixture_listener(
+        registry,
+        spec,
+        TokenProviderBindings::new(None, None, Some(provider), None),
+        audit_sink,
+        audit_clock,
+    )
+}
+
+#[cfg(feature = "integration")]
+fn finalize_access_fixture_listener(
+    registry: &mut bootstrap::Registry,
+    spec: crate::plan::ListenerExecutionSpec,
+    providers: TokenProviderBindings,
+    audit_sink: httpserve::AuditSinkHandle,
+    audit_clock: Arc<dyn diport::Clock>,
+) -> anyhow::Result<httpserve::AuthenticatedRoutes> {
     crate::modules_gen::register_framework_routes(registry).context("register framework routes")?;
     let primary_authorizer = registry
         .take_primary_authorizer()
@@ -662,7 +709,6 @@ pub(crate) fn finalize_rss_fixture_listener(
         live_routes.is_empty(),
         "integration fixture contains live routes for an unselected listener"
     );
-    let providers = TokenProviderBindings::new(Some(provider), None, None);
     let rate_limiter = build_runtime_rate_limiter();
     finalize_non_health_spec(
         spec,
@@ -734,6 +780,26 @@ mod tests {
         Arc::new(AllowAuthorizer)
     }
 
+    struct CurrentGrantValidator;
+
+    impl identity::ports::AuthGrantValidator for CurrentGrantValidator {
+        async fn is_current(
+            &self,
+            _scope: identity::ports::TenantRepoScope,
+            _input: &authn::AccessGrantValidationInput,
+            _observed_at: std::time::SystemTime,
+        ) -> Result<bool, identity::ports::IdentityError> {
+            Ok(true)
+        }
+    }
+
+    fn runtime_test_grants() -> Arc<identity::AuthGrantValidationService> {
+        Arc::new(identity::AuthGrantValidationService::new(
+            identity::ports::DynAuthGrantValidator::new_arc(CurrentGrantValidator),
+            Box::new(SystemClock),
+        ))
+    }
+
     #[derive(Clone, Default)]
     struct RouteMetaCapture(Arc<Mutex<Option<(vocab::HttpRouteEvidence, Method)>>>);
 
@@ -782,7 +848,6 @@ mod tests {
             rss_access_provider_from_static_config(RssAccessStaticProviderConfig {
                 issuer: "https://issuer.test",
                 audience: "rss-test",
-                trusted_kinds: &["admin", "superAdmin"],
                 keys: &keys,
                 retirement_schedule: None,
                 clock: Box::new(SystemClock),
@@ -850,6 +915,7 @@ mod tests {
     fn primary_and_admin_selections_derive_the_exact_typed_profile_bindings() {
         let providers = TokenProviderBindings::new(
             Some(runtime_test_provider()),
+            Some(runtime_test_grants()),
             Some(runtime_test_federated_provider()),
             None,
         );
@@ -860,7 +926,7 @@ mod tests {
             assert_eq!(binding.auth_scheme(), expected_scheme);
             assert!(matches!(
                 binding,
-                ProfileBinding::RssAccess(_) | ProfileBinding::FederatedAccess(_)
+                ProfileBinding::RssAccess { .. } | ProfileBinding::FederatedAccess(_)
             ));
         }
     }
@@ -914,7 +980,12 @@ mod tests {
         if let Some(endpoint) = spiffe_endpoint {
             values.push((SPIFFE_ENDPOINT_SOCKET_ENV, endpoint));
         }
-        let providers = TokenProviderBindings::new(Some(runtime_test_provider()), None, None);
+        let providers = TokenProviderBindings::new(
+            Some(runtime_test_provider()),
+            Some(runtime_test_grants()),
+            None,
+            None,
+        );
         assemble_test_plan(registry, &values, &providers)
     }
 
@@ -970,7 +1041,12 @@ mod tests {
             .expect("listener snapshot")
         }
 
-        let providers = TokenProviderBindings::new(Some(runtime_test_provider()), None, None);
+        let providers = TokenProviderBindings::new(
+            Some(runtime_test_provider()),
+            Some(runtime_test_grants()),
+            None,
+            None,
+        );
         let mut missing = bootstrap::Registry::new();
         missing
             .route_group::<httpserve::Primary>("/primary", Ok)
@@ -1039,13 +1115,19 @@ mod tests {
             .expect("RSS RuntimePlan")
             .listener_execution_plan();
         assert!(
-            TokenProviderBindings::new(Some(runtime_test_provider()), None, None)
-                .validate_exact_presence(&rss_plan)
-                .is_ok()
+            TokenProviderBindings::new(
+                Some(runtime_test_provider()),
+                Some(runtime_test_grants()),
+                None,
+                None,
+            )
+            .validate_exact_presence(&rss_plan)
+            .is_ok()
         );
         assert!(
             TokenProviderBindings::new(
                 Some(runtime_test_provider()),
+                Some(runtime_test_grants()),
                 Some(runtime_test_federated_provider()),
                 None,
             )
@@ -1063,9 +1145,14 @@ mod tests {
             .expect("service-token RuntimePlan")
             .listener_execution_plan();
         assert!(
-            TokenProviderBindings::new(Some(runtime_test_provider()), None, None)
-                .validate_exact_presence(&service_plan)
-                .is_err()
+            TokenProviderBindings::new(
+                Some(runtime_test_provider()),
+                Some(runtime_test_grants()),
+                None,
+                None,
+            )
+            .validate_exact_presence(&service_plan)
+            .is_err()
         );
     }
 
@@ -1077,7 +1164,7 @@ mod tests {
             .register_primary_authorizer(allow_authorizer())
             .expect("Federated Primary authorizer");
         let federated_providers =
-            TokenProviderBindings::new(None, Some(runtime_test_federated_provider()), None);
+            TokenProviderBindings::new(None, None, Some(runtime_test_federated_provider()), None);
         let federated = assemble_test_plan(
             &mut federated_registry,
             &[
@@ -1111,6 +1198,7 @@ mod tests {
             .expect("ServiceToken Primary authorizer");
         let service_providers = TokenProviderBindings::new(
             Some(runtime_test_provider()),
+            Some(runtime_test_grants()),
             None,
             Some(runtime_test_service_provider()),
         );

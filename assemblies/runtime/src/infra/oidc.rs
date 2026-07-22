@@ -241,11 +241,6 @@ pub(crate) fn build_rss_access_provider(
     build_rss_access_provider_from_values(
         config.issuer(),
         config.audience(),
-        config
-            .trusted_kinds()
-            .iter()
-            .copied()
-            .map(crate::config::AccessPrincipalKind::as_str),
         config.jwks_path(),
         config.jwks_refresh_interval(),
         config.retirement_schedule(),
@@ -341,10 +336,9 @@ pub(crate) fn build_service_token_provider_from_values_for_test(
     .map(|runtime| runtime.provider())
 }
 
-fn build_rss_access_provider_from_values<'a>(
+fn build_rss_access_provider_from_values(
     issuer: &str,
     audience: &str,
-    trusted_kinds: impl IntoIterator<Item = &'a str>,
     jwks_path: &std::path::Path,
     refresh_interval: Duration,
     retirement_schedule: oidc::RetirementSchedule,
@@ -385,9 +379,6 @@ fn build_rss_access_provider_from_values<'a>(
         }
     };
     let jwks_readiness = ProfileJwksReadiness::<RssAccessProfile>::new(readiness);
-    let builder = trusted_kinds
-        .into_iter()
-        .fold(builder, |builder, kind| builder.trust_kind(kind));
     let builder = builder.retirement_schedule(retirement_schedule);
     let provider = finish_provider(builder.build(), clock)?;
     Ok(RuntimeAccessProvider {
@@ -531,7 +522,6 @@ pub struct KeyedEs256StaticKey<'a> {
 pub struct RssAccessStaticProviderConfig<'a> {
     pub issuer: &'a str,
     pub audience: &'a str,
-    pub trusted_kinds: &'a [&'a str],
     pub keys: &'a [KeyedEs256StaticKey<'a>],
     /// Optional Retiring deadlines; `None` keeps the legacy weak verify path (no schedule).
     pub retirement_schedule: Option<oidc::RetirementSchedule>,
@@ -542,10 +532,6 @@ pub struct RssAccessStaticProviderConfig<'a> {
 pub fn rss_access_provider_from_static_config(
     config: RssAccessStaticProviderConfig<'_>,
 ) -> anyhow::Result<OidcProvider<RssAccessProfile>> {
-    anyhow::ensure!(
-        !config.trusted_kinds.is_empty(),
-        "RSS access static verifier must trust at least one principal kind"
-    );
     let mut keys = oidc::AccessStaticKeySource::builder();
     for key in config.keys {
         let sec1 = base64::engine::general_purpose::URL_SAFE_NO_PAD
@@ -558,11 +544,6 @@ pub fn rss_access_provider_from_static_config(
     let builder =
         oidc::VerifierConfigBuilder::<RssAccessProfile>::new(config.issuer, config.audience)
             .keys_static(keys.build());
-    let builder = config
-        .trusted_kinds
-        .iter()
-        .copied()
-        .fold(builder, |builder, kind| builder.trust_kind(kind));
     let builder = match config.retirement_schedule {
         Some(schedule) => builder.retirement_schedule(schedule),
         None => builder,
@@ -646,7 +627,6 @@ mod tests {
         let rss = build_rss_access_provider_from_values(
             "https://rss.issuer.test",
             "rss-audience",
-            ["user", "device", "admin", "superAdmin"],
             &rss_path,
             Duration::from_secs(5),
             oidc::RetirementSchedule::default(),
@@ -712,7 +692,6 @@ mod tests {
         let rss = build_rss_access_provider_from_values(
             "https://rss.issuer.test",
             "rss-audience",
-            ["user"],
             &rss_path,
             Duration::from_secs(5),
             oidc::RetirementSchedule::default(),
@@ -759,7 +738,6 @@ mod tests {
         let error = build_rss_access_provider_from_values(
             "https://rss.issuer.test",
             "rss-audience",
-            ["user"],
             &path,
             Duration::from_secs(5),
             oidc::RetirementSchedule::default(),
@@ -814,7 +792,6 @@ mod tests {
         let rss = build_rss_access_provider_from_values(
             "https://rss.issuer.test",
             "rss-audience",
-            ["user"],
             &rss_path,
             Duration::from_secs(5),
             oidc::RetirementSchedule::default(),
@@ -878,7 +855,6 @@ mod tests {
         let provider = rss_access_provider_from_static_config(RssAccessStaticProviderConfig {
             issuer: "https://rss.issuer.test",
             audience: "rss-audience",
-            trusted_kinds: &["user"],
             keys: &keys,
             retirement_schedule: None,
             clock: Box::new(SystemClock),
@@ -936,7 +912,6 @@ mod tests {
         let runtime = build_rss_access_provider_from_values(
             ISS,
             AUD,
-            ["user"],
             &path,
             StdDuration::from_secs(5),
             schedule,

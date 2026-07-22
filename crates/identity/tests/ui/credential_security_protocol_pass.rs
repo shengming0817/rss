@@ -1,4 +1,4 @@
-use identity::ports::{
+use authn::{
     AccountSecurityEventKind, CredentialSecurityEventKind, GrantSecurityEventKind,
 };
 

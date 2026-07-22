@@ -13,11 +13,69 @@ pub use crate::event_transport::{EventTransportTestValues, EventWorkerTestValues
 pub fn finalize_rss_listener(
     registry: &mut bootstrap::Registry,
     provider: Arc<oidc::OidcProvider<diport::RssAccessProfile>>,
+    grants: Arc<identity::AuthGrantValidationService>,
     audit_sink: httpserve::AuditSinkHandle,
     audit_clock: Arc<dyn diport::Clock>,
     kind: assembly_schema::AssemblyListenerKind,
 ) -> anyhow::Result<httpserve::AuthenticatedRoutes> {
-    crate::routes::finalize_rss_fixture_listener(registry, provider, audit_sink, audit_clock, kind)
+    crate::routes::finalize_rss_fixture_listener(
+        registry,
+        provider,
+        grants,
+        audit_sink,
+        audit_clock,
+        kind,
+    )
+}
+
+/// Wrap an explicit integration validator in the same request-time service used by production.
+pub fn access_grant_validation_service<V>(validator: V) -> Arc<identity::AuthGrantValidationService>
+where
+    V: identity::ports::AuthGrantValidator + 'static,
+{
+    Arc::new(identity::AuthGrantValidationService::new(
+        identity::ports::DynAuthGrantValidator::new_arc(validator),
+        Box::new(crate::support::SystemClock),
+    ))
+}
+
+/// Hermetic current-state validator for tests whose target is token mint/crypto rather than the
+/// durable request fence. Grant-fence behavior tests inject their own provider instead.
+pub struct AlwaysCurrentAccessGrant;
+
+impl identity::ports::AuthGrantValidator for AlwaysCurrentAccessGrant {
+    async fn is_current(
+        &self,
+        _scope: identity::ports::TenantRepoScope,
+        _input: &authn::AccessGrantValidationInput,
+        _observed_at: std::time::SystemTime,
+    ) -> Result<bool, identity::ports::IdentityError> {
+        Ok(true)
+    }
+}
+
+pub fn always_current_access_grants() -> Arc<identity::AuthGrantValidationService> {
+    access_grant_validation_service(AlwaysCurrentAccessGrant)
+}
+
+/// Finalize one access-listener fixture through the production Federated auth core.
+///
+/// The closed function selects Federated Access without accepting a raw profile value. It is for
+/// integration tests of Device/Admin/SuperAdmin principals, which local RSS no longer represents.
+pub fn finalize_federated_listener(
+    registry: &mut bootstrap::Registry,
+    provider: Arc<oidc::OidcProvider<diport::FederatedAccessProfile>>,
+    audit_sink: httpserve::AuditSinkHandle,
+    audit_clock: Arc<dyn diport::Clock>,
+    kind: assembly_schema::AssemblyListenerKind,
+) -> anyhow::Result<httpserve::AuthenticatedRoutes> {
+    crate::routes::finalize_federated_fixture_listener(
+        registry,
+        provider,
+        audit_sink,
+        audit_clock,
+        kind,
+    )
 }
 
 /// Finalize the plan-declared `Health + NoAuth` fixture through the production Health core.

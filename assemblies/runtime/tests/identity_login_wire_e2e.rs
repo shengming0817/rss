@@ -8,8 +8,8 @@
 //! ④ 持久 Suspended/Locked 状态经 production account-security reader 拒绝 refresh，且零 rotation。
 //!
 //! hermetic：wiremock 模拟 vault Transit（无 live vault），postgres testcontainer 或 env pg。
-//! 不做 JWT oidc 验签（login/refresh 是 Public 端点，verify bridge 不拦截）；仅证生产 wire 通路
-//! 可铸出 token bundle 且 rotation 与 reuse-detect 经 postgres store 正确联动。
+//! login/refresh 是 Public 端点，verify bridge 不拦截；响应 access token 仍经生产 OIDC
+//! provider 验签，并对照 raw payload 检查闭合 RSS quartet。
 
 #![cfg(feature = "integration")]
 
@@ -21,6 +21,7 @@ use axum::http::{Method, Request, StatusCode, header};
 use base64::Engine as _;
 use base64::engine::general_purpose::{STANDARD as B64_STD, URL_SAFE_NO_PAD as B64_URL};
 use diport::Clock as _;
+use diport::Pdp as _;
 use generated::event::settings_v1::TOPIC as SETTINGS_VERSION_CHANGED_TOPIC;
 use generated::http::identity_v1::login::SPEC as LOGIN_SPEC;
 use generated::http::identity_v1::refresh::SPEC as REFRESH_SPEC;
@@ -41,8 +42,8 @@ use postgres::{PgConfig, PgPassword, PgRuntimeDeps, PgSslMode, PgTenantReadConfi
 use runtime::SharedRuntimeDeps;
 use runtime::support::{SystemClock, TracingAuthAuditSink};
 use runtime::test_support::{
-    IdentityTestValues, build_s3_runtime_deps_from_values, finalize_rss_listener,
-    wire_identity_with, wire_settings,
+    IdentityTestValues, build_s3_runtime_deps_from_values, finalize_federated_listener,
+    finalize_rss_listener, wire_identity_with, wire_settings,
 };
 use sqlx::PgPool;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode as SqlxPgSslMode};
@@ -153,14 +154,14 @@ fn sec1(sk: &SigningKey) -> Vec<u8> {
 }
 
 fn mint_es256(sk: &SigningKey, payload: &str) -> String {
-    let header = B64_URL.encode(br#"{"alg":"ES256","typ":"at+jwt","kid":"rss-jwt-es256"}"#);
+    let header = B64_URL.encode(br#"{"alg":"ES256","typ":"at+jwt","kid":"federated-jwt-es256"}"#);
     let body = B64_URL.encode(payload.as_bytes());
     let signing_input = format!("{header}.{body}");
     let sig: Signature = sk.sign(signing_input.as_bytes());
     format!("{signing_input}.{}", B64_URL.encode(sig.to_bytes()))
 }
 
-fn access_jwt(kind: &str) -> String {
+fn federated_access_jwt(kind: &str) -> String {
     let iat = SystemClock
         .now()
         .duration_since(UNIX_EPOCH)
@@ -180,11 +181,11 @@ fn access_jwt(kind: &str) -> String {
 }
 
 fn admin_jwt() -> String {
-    access_jwt("admin")
+    federated_access_jwt("admin")
 }
 
 fn operator_jwt() -> String {
-    access_jwt("user")
+    federated_access_jwt("user")
 }
 
 /// wiremock Transit `/sign` 响应器：解 `{"input": base64std(signing_input)}` → 用 `sk` 对 signing-input
@@ -327,12 +328,79 @@ fn test_provider() -> oidc::OidcProvider<diport::RssAccessProfile> {
     runtime::rss_access_provider_from_static_config(runtime::RssAccessStaticProviderConfig {
         issuer: "https://issuer.test",
         audience: "rss",
-        trusted_kinds: &["user", "admin"],
         keys: &keys,
         retirement_schedule: None,
         clock: Box::new(SystemClock),
     })
     .expect("test provider")
+}
+
+fn decode_access_claims(token: &str) -> TestResult<serde_json::Value> {
+    let payload = token
+        .split('.')
+        .nth(1)
+        .ok_or("access token is missing its payload segment")?;
+    let decoded = B64_URL.decode(payload)?;
+    Ok(serde_json::from_slice(&decoded)?)
+}
+
+fn assert_canonical_uuid_v4(raw: &str, field: &str) -> TestResult {
+    let parsed = uuid::Uuid::parse_str(raw)?;
+    assert_eq!(
+        parsed.get_version(),
+        Some(uuid::Version::Random),
+        "{field} must be UUIDv4"
+    );
+    assert_eq!(
+        parsed.hyphenated().to_string(),
+        raw,
+        "{field} must be lowercase canonical UUIDv4"
+    );
+    Ok(())
+}
+
+async fn verified_access_claims(token: &str) -> TestResult<serde_json::Value> {
+    let decoded = decode_access_claims(token)?;
+    let verified = test_provider()
+        .verify(&diport::RawCredential::rss_access(token))
+        .await?;
+    let grant = match verified.view() {
+        diport::VerifiedClaimsView::RssUser { grant, .. } => grant,
+        diport::VerifiedClaimsView::FederatedAccess { .. }
+        | diport::VerifiedClaimsView::ServiceToken { .. } => {
+            return Err("production verifier did not return RSS user grant evidence".into());
+        }
+    };
+
+    assert_eq!(
+        decoded["sid"].as_str().map(str::to_owned),
+        Some(grant.session_id().to_string())
+    );
+    assert_eq!(
+        decoded["jti"].as_str().map(str::to_owned),
+        Some(grant.token_id().to_string())
+    );
+    assert_eq!(
+        decoded["auth_time"].as_u64(),
+        Some(grant.auth_time_unix_secs())
+    );
+    assert_eq!(decoded["authn_epoch"].as_u64(), Some(grant.authn_epoch()));
+    Ok(decoded)
+}
+
+fn federated_test_provider() -> TestResult<oidc::OidcProvider<diport::FederatedAccessProfile>> {
+    let keys = oidc::AccessStaticKeySource::builder()
+        .add_es256_sec1("federated-jwt-es256", &sec1(&sk_jwt()))?
+        .build();
+    let config = oidc::VerifierConfigBuilder::<diport::FederatedAccessProfile>::new(
+        "https://issuer.test",
+        "rss",
+    )
+    .keys_static(keys)
+    .trust_kind("user")
+    .trust_kind("admin")
+    .build()?;
+    Ok(oidc::OidcProvider::new(config, Box::new(SystemClock)))
 }
 
 fn identity_test_values() -> IdentityTestValues {
@@ -591,6 +659,9 @@ async fn wire_identity_login_refresh_and_rotation_e2e() -> TestResult {
     let primary = finalize_rss_listener(
         &mut registry,
         Arc::new(test_provider()),
+        runtime::test_support::access_grant_validation_service(
+            pg.for_domain::<caps::Identity>().auth_grant_validator(),
+        ),
         httpserve::AuditSinkHandle::new(TracingAuthAuditSink),
         Arc::new(SystemClock),
         assembly_schema::AssemblyListenerKind::Primary,
@@ -667,6 +738,22 @@ async fn wire_identity_login_refresh_and_rotation_e2e() -> TestResult {
 
     // 提取 refreshToken 供后续断言（rotation + reuse-detect）。
     let login_json: serde_json::Value = serde_json::from_str(&login_text)?;
+    let login_access_token = login_json["data"]["accessToken"]
+        .as_str()
+        .ok_or("login response missing data.accessToken")?;
+    let login_session_id = login_json["data"]["sessionId"]
+        .as_str()
+        .ok_or("login response missing data.sessionId")?;
+    let login_claims = verified_access_claims(login_access_token).await?;
+    let login_sid = login_claims["sid"]
+        .as_str()
+        .ok_or("login access token missing sid")?;
+    let login_jti = login_claims["jti"]
+        .as_str()
+        .ok_or("login access token missing jti")?;
+    assert_eq!(login_sid, login_session_id);
+    assert_canonical_uuid_v4(login_sid, "login sid")?;
+    assert_canonical_uuid_v4(login_jti, "login jti")?;
     let refresh_token_orig = login_json["data"]["refreshToken"]
         .as_str()
         .ok_or("login response missing data.refreshToken")?
@@ -700,9 +787,53 @@ async fn wire_identity_login_refresh_and_rotation_e2e() -> TestResult {
         refresh_text.contains(r#""refreshToken":"#),
         "refresh response must contain refreshToken; body: {refresh_text}"
     );
+    let refresh_json: serde_json::Value = serde_json::from_str(&refresh_text)?;
+    let refresh_access_token = refresh_json["data"]["accessToken"]
+        .as_str()
+        .ok_or("refresh response missing data.accessToken")?
+        .to_owned();
+    let refresh_claims = verified_access_claims(&refresh_access_token).await?;
+    let refresh_jti = refresh_claims["jti"]
+        .as_str()
+        .ok_or("refreshed access token missing jti")?;
+    assert_canonical_uuid_v4(
+        refresh_claims["sid"]
+            .as_str()
+            .ok_or("refreshed access token missing sid")?,
+        "refreshed sid",
+    )?;
+    assert_canonical_uuid_v4(refresh_jti, "refreshed jti")?;
+    for stable_claim in ["sid", "auth_time", "authn_epoch"] {
+        assert_eq!(
+            login_claims[stable_claim], refresh_claims[stable_claim],
+            "{stable_claim} must remain stable across refresh"
+        );
+    }
+    assert_ne!(login_jti, refresh_jti, "jti must rotate on refresh");
+
+    let protected_uri = format!("{}?limit=20", ROLES_LIST_SPEC.route.path());
+    let current_access_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(&protected_uri)
+                .header(
+                    header::AUTHORIZATION,
+                    format!("Bearer {refresh_access_token}"),
+                )
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_ne!(
+        current_access_resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "the real PostgreSQL grant validator must accept the access token before replay"
+    );
 
     // ── 断言 c: 同 refreshToken 再用 → 401（one-shot rotation reuse detection）──────────────────
     let reuse_resp = app
+        .clone()
         .oneshot(
             Request::builder()
                 .method(Method::POST)
@@ -716,6 +847,24 @@ async fn wire_identity_login_refresh_and_rotation_e2e() -> TestResult {
         reuse_resp.status(),
         StatusCode::UNAUTHORIZED,
         "reused refresh token should return 401 (one-shot rotation reuse detection)"
+    );
+
+    let compromised_access_resp = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(&protected_uri)
+                .header(
+                    header::AUTHORIZATION,
+                    format!("Bearer {refresh_access_token}"),
+                )
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(
+        compromised_access_resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "refresh replay must immediately fence previously issued access through the real validator"
     );
 
     Ok(())
@@ -839,9 +988,9 @@ async fn wire_identity_roles_binding_http_persists_and_emits_outbox_e2e() -> Tes
     let settings_binding = wire_settings(&deps).await?;
     let mut bindings = vec![identity_binding, settings_binding];
     let (mut registry, _) = bootstrap::compose_bindings(&mut bindings)?;
-    let primary = finalize_rss_listener(
+    let primary = finalize_federated_listener(
         &mut registry,
-        Arc::new(test_provider()),
+        Arc::new(federated_test_provider()?),
         httpserve::AuditSinkHandle::new(TracingAuthAuditSink),
         Arc::new(SystemClock),
         assembly_schema::AssemblyListenerKind::Primary,

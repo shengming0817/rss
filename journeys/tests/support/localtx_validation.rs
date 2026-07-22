@@ -21,6 +21,7 @@ use audit::ports::{
     AuditOutcome, AuditPage, AuditRecord, AuditWriteRepo, CrossTenantReadScope, DynAuditAdminRepo,
     DynAuditReadRepo, ResourceRef, TenantRepoScope as AuditScope,
 };
+use authn::{AuthGrant, AuthGrantId};
 use axum::body::{Body, to_bytes};
 use axum::http::{Method, Request, StatusCode, header};
 use diport::{
@@ -36,13 +37,13 @@ use generated::http::identity_v1::{
 };
 use generated::http::settings_v2::{SettingsSecretPublishRequest, SettingsSecretPublishResponse};
 use identity::ports::{
-    AuthGrant, AuthGrantCloseCommand, AuthGrantId, AuthGrantLifecycle, AuthOutcome, Credential,
-    CredentialRepo, DynAccountSecurityReadRepo, DynCredentialRepo, DynRefreshTokenStore,
-    IdentityError, LoginGrantMutation, LoginIdentifier, PasswordChangeMutation,
-    RefreshRotationMutation, RefreshRotationOutcome, RefreshTokenHash, RefreshTokenId,
-    RefreshTokenRecord, RefreshTokenStore, TenantRepoScope as IdentityScope,
+    AuthGrantCloseCommand, AuthGrantLifecycle, AuthOutcome, Credential, CredentialRepo,
+    DynAccountSecurityReadRepo, DynCredentialRepo, DynRefreshTokenStore, IdentityError,
+    LoginGrantMutation, LoginIdentifier, PasswordChangeMutation, RefreshRotationMutation,
+    RefreshRotationOutcome, RefreshTokenHash, RefreshTokenId, RefreshTokenRecord,
+    RefreshTokenStore, TenantRepoScope as IdentityScope,
 };
-use identity::{AuthGrantProvider, AuthGrantServices, LoginService, RefreshService, SeedSigner};
+use identity::{AuthGrantProvider, AuthGrantServices, LoginService, SeedSigner};
 use memory::{FixedClock, MemBus, MemEmitter};
 use postgres::{
     ConfigValueProtections, PgAuditAdminRepo, PgAuthGrantLifecycle, PgAuthGrantProvider, PgConfig,
@@ -2196,6 +2197,22 @@ struct BarrierRefreshStore {
     barrier: Arc<Barrier>,
 }
 
+/// Test-only owner that keeps the lifecycle and an instrumented refresh view from the same
+/// PostgreSQL runtime dependency bundle consumable through the production composition funnel.
+struct RefreshHarnessProvider {
+    lifecycle: PgAuthGrantLifecycle,
+    refresh: Box<DynRefreshTokenStore<'static>>,
+}
+
+impl AuthGrantProvider for RefreshHarnessProvider {
+    type Lifecycle = PgAuthGrantLifecycle;
+    type RefreshStore = Box<DynRefreshTokenStore<'static>>;
+
+    fn into_auth_grant_parts(self) -> (Self::Lifecycle, Self::RefreshStore) {
+        (self.lifecycle, self.refresh)
+    }
+}
+
 impl RefreshTokenStore for BarrierRefreshStore {
     async fn find_by_hash(
         &self,
@@ -2242,45 +2259,17 @@ where
     )
 }
 
-fn refresh_service(
-    store: Box<DynRefreshTokenStore<'static>>,
-    accounts: Box<DynAccountSecurityReadRepo<'static>>,
-    observed_at: SystemTime,
-) -> Result<Arc<RefreshService<SeedSigner>>> {
-    let issuer = authn::JwtIssuer::<diport::RssAccessProfile, _>::new(
-        Arc::new(SeedSigner),
-        Box::new(FixedClock::new(observed_at)),
-        authn::JwtIssuerConfig::rss_access(
-            authn::SigningKeyRing::single(diport::KeyId::new("journey-refresh-key"))
-                .expect("non-empty signing key id"),
-            diport::SigningPurpose::new("journey-refresh-signing"),
-            "https://journey.local",
-            "rss-journey",
-            Duration::from_secs(900),
-        ),
-    )?;
-    Ok(Arc::new(RefreshService::new(
-        store,
-        accounts,
-        Arc::new(issuer),
-        Box::new(FixedClock::new(observed_at)),
-        Duration::from_secs(TTL_SECS),
-    )))
-}
-
-fn refresh_router(
+fn refresh_router<P>(
     deps: &PgRuntimeDeps,
-    store: Box<DynRefreshTokenStore<'static>>,
+    provider: P,
     observed_at: SystemTime,
-) -> Result<axum::Router> {
+) -> Result<axum::Router>
+where
+    P: AuthGrantProvider,
+{
     let identity_deps = deps.handle().for_domain::<caps::Identity>();
-    let refresh = refresh_service(
-        store,
-        DynAccountSecurityReadRepo::new_box(identity_deps.account_security_repo()),
-        observed_at,
-    )?;
     let auth_grants = AuthGrantServices::from_provider(
-        identity_deps.auth_grant_provider(Box::new(FixedClock::new(observed_at))),
+        provider,
         DynAccountSecurityReadRepo::new_box(identity_deps.account_security_repo()),
         Arc::new(authn::JwtIssuer::<diport::RssAccessProfile, _>::new(
             Arc::new(SeedSigner),
@@ -2297,6 +2286,7 @@ fn refresh_router(
         Box::new(FixedClock::new(observed_at)),
         Duration::from_secs(TTL_SECS),
     );
+    let refresh = auth_grants.refresh_service();
     let login = Arc::new(LoginService::new(
         Arc::from(DynCredentialRepo::new_box(identity_deps.credential_repo())),
         auth_grants,
@@ -2466,13 +2456,12 @@ async fn drive_refresh_happy(
 ) -> Result<()> {
     let seed = RefreshSeed::unique("refresh-happy-secret-sentinel");
     let observed_at = database_now(observation_pool).await?;
-    let (_, store) = deps
+    let provider = deps
         .handle()
         .for_domain::<caps::Identity>()
-        .auth_grant_provider(Box::new(FixedClock::new(observed_at)))
-        .into_auth_grant_parts();
+        .auth_grant_provider(Box::new(FixedClock::new(observed_at)));
     seed_refresh(observation_pool, tenant, &seed, observed_at).await?;
-    let router = refresh_router(deps, DynRefreshTokenStore::new_box(store), observed_at)?;
+    let router = refresh_router(deps, provider, observed_at)?;
     let response = send_refresh_recorded(
         &router,
         refresh_body(&seed.secret)?,
@@ -2507,17 +2496,11 @@ async fn drive_refresh_rejections(
 ) -> Result<()> {
     let before = refresh_row_count(observation_pool, tenant).await?;
     let observed_at = database_now(observation_pool).await?;
-    let router = refresh_router(
-        deps,
-        DynRefreshTokenStore::new_box(
-            deps.handle()
-                .for_domain::<caps::Identity>()
-                .auth_grant_provider(Box::new(FixedClock::new(observed_at)))
-                .into_auth_grant_parts()
-                .1,
-        ),
-        observed_at,
-    )?;
+    let provider = deps
+        .handle()
+        .for_domain::<caps::Identity>()
+        .auth_grant_provider(Box::new(FixedClock::new(observed_at)));
+    let router = refresh_router(deps, provider, observed_at)?;
     let unknown_secret = format!("refresh-unknown-secret-sentinel-{}", Uuid::new_v4());
     let unknown_response = send_refresh_recorded(
         &router,
@@ -2564,19 +2547,22 @@ async fn drive_refresh_contention(
     let success_status = StatusCode::from_u16(winner_case.http_status)?;
     let seed = RefreshSeed::unique("refresh-contention-secret-sentinel");
     let observed_at = database_now(observation_pool).await?;
-    let (_, store) = deps
+    let provider = deps
         .handle()
         .for_domain::<caps::Identity>()
-        .auth_grant_provider(Box::new(FixedClock::new(observed_at)))
-        .into_auth_grant_parts();
+        .auth_grant_provider(Box::new(FixedClock::new(observed_at)));
+    let (lifecycle, store) = provider.into_auth_grant_parts();
     seed_refresh(observation_pool, tenant, &seed, observed_at).await?;
     let router = refresh_router(
         deps,
-        DynRefreshTokenStore::new_box(BarrierRefreshStore {
-            inner: DynRefreshTokenStore::new_box(store),
-            gated_hash: seed.hash(),
-            barrier: Arc::new(Barrier::new(2)),
-        }),
+        RefreshHarnessProvider {
+            lifecycle,
+            refresh: DynRefreshTokenStore::new_box(BarrierRefreshStore {
+                inner: DynRefreshTokenStore::new_box(store),
+                gated_hash: seed.hash(),
+                barrier: Arc::new(Barrier::new(2)),
+            }),
+        },
         observed_at,
     )?;
     let body = refresh_body(&seed.secret)?;
@@ -2639,12 +2625,19 @@ async fn drive_refresh_commit_unknown(
 ) -> Result<()> {
     let seed = RefreshSeed::unique("refresh-commit-unknown-secret-sentinel");
     let observed_at = database_now(observation_pool).await?;
-    let store = deps
-        .handle()
-        .for_domain::<caps::Identity>()
-        .refresh_token_store_with_commit_unknown_once(&seed.id);
+    let identity_deps = deps.handle().for_domain::<caps::Identity>();
+    let provider = identity_deps.auth_grant_provider(Box::new(FixedClock::new(observed_at)));
+    let (lifecycle, _) = provider.into_auth_grant_parts();
+    let store = identity_deps.refresh_token_store_with_commit_unknown_once(&seed.id);
     seed_refresh(observation_pool, tenant, &seed, observed_at).await?;
-    let router = refresh_router(deps, DynRefreshTokenStore::new_box(store), observed_at)?;
+    let router = refresh_router(
+        deps,
+        RefreshHarnessProvider {
+            lifecycle,
+            refresh: DynRefreshTokenStore::new_box(store),
+        },
+        observed_at,
+    )?;
     let response = send_refresh_recorded(
         &router,
         refresh_body(&seed.secret)?,

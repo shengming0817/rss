@@ -70,6 +70,10 @@ pub(crate) enum TelemetryReason {
     UnsupportedPrincipalKind,
     ServiceKindInvalid,
     ServiceTenantClaimForbidden,
+    RssKindInvalid,
+    RssSubjectNotCanonical,
+    RssGrantFactsInvalid,
+    AuthTimeAfterIat,
     IatAfterExp,
     IatInFuture,
     MaximumLifetimeExceeded,
@@ -110,6 +114,10 @@ impl TelemetryReason {
             Self::UnsupportedPrincipalKind => "unsupported_principal_kind",
             Self::ServiceKindInvalid => "service_kind_invalid",
             Self::ServiceTenantClaimForbidden => "service_tenant_claim_forbidden",
+            Self::RssKindInvalid => "rss_kind_invalid",
+            Self::RssSubjectNotCanonical => "rss_subject_not_canonical",
+            Self::RssGrantFactsInvalid => "rss_grant_facts_invalid",
+            Self::AuthTimeAfterIat => "auth_time_after_iat",
             Self::IatAfterExp => "iat_after_exp",
             Self::IatInFuture => "iat_in_future",
             Self::MaximumLifetimeExceeded => "maximum_lifetime_exceeded",
@@ -452,6 +460,9 @@ mod tests {
     const HS_KID: &str = "cell-a.svc-a";
     const HS_KID2: &str = "cell-a.svc-b";
     const CANON_TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
+    const CANON_USER: &str = "550e8400-e29b-41d4-a716-446655440000";
+    const CANON_SID: &str = "7d65e5f2-e716-4c4e-8e4c-6f7ab1754ef8";
+    const CANON_JTI: &str = "d8dbe849-1d7e-49aa-b68a-a7b41ed252df";
     const OTHER_TENANT: &str = "11111111-2222-4333-8444-555555555555";
 
     #[derive(Default)]
@@ -616,7 +627,6 @@ mod tests {
     fn es256_config_with(keys: AccessStaticKeySource) -> VerifierConfig<diport::RssAccessProfile> {
         VerifierConfigBuilder::<diport::RssAccessProfile>::new(ISS, AUD)
             .keys_static(keys)
-            .trust_kind("user")
             .build()
             .expect("valid es256 config")
     }
@@ -634,11 +644,15 @@ mod tests {
             .add_es256_sec1("test-es256", &sec1_of(&test_sk2()))
             .expect("federated es256 key")
             .build();
-        VerifierConfigBuilder::<diport::FederatedAccessProfile>::new(FEDERATED_ISS, FEDERATED_AUD)
-            .keys_static(keys)
-            .trust_kind("user")
-            .build()
-            .expect("valid federated es256 config")
+        let mut builder = VerifierConfigBuilder::<diport::FederatedAccessProfile>::new(
+            FEDERATED_ISS,
+            FEDERATED_AUD,
+        )
+        .keys_static(keys);
+        for kind in ["user", "device", "admin", "superAdmin"] {
+            builder = builder.trust_kind(kind);
+        }
+        builder.build().expect("valid federated es256 config")
     }
     #[allow(clippy::expect_used)]
     fn hs256_config() -> VerifierConfig<diport::ServiceTokenProfile> {
@@ -665,7 +679,8 @@ mod tests {
             .expect("valid matrix hs256 config")
     }
 
-    /// 拼 JWT payload JSON（sub=alice + exp/iss/aud + 任意 extra 片段，如 `,"tenant_id":"t1"`）。
+    /// 拼 JWT payload JSON；RSS/federated ES256 fixture 默认携带完整 RSS-named extension，service
+    /// fixture 保持独立。Federated tests must assert those extensions never become local grant evidence.
     fn payload(exp: i64, iss: &str, aud: &str, extra: &str) -> String {
         let service = extra.contains(r#""kind":"service""#);
         let exp = if service { exp.min(NOW + 300) } else { exp };
@@ -684,8 +699,18 @@ mod tests {
             r#","tenant_id":"f47ac10b-58cc-4372-a567-0e02b2c3d479""#
         };
         let iat = exp.saturating_sub(if service { 300 } else { 600 });
+        let subject = if service {
+            vocab::ServiceCallerDomain::MaintenanceOperator.as_str()
+        } else {
+            CANON_USER
+        };
+        let grant_facts = if service {
+            String::new()
+        } else {
+            format!(r#","sid":"{CANON_SID}","jti":"{CANON_JTI}","auth_time":{iat},"authn_epoch":7"#)
+        };
         format!(
-            r#"{{"sub":"alice","iat":{iat},"exp":{exp},"token_use":"{token_use}","iss":"{iss}","aud":"{aud}"{kind}{tenant}{extra}}}"#
+            r#"{{"sub":"{subject}","iat":{iat},"exp":{exp},"token_use":"{token_use}","iss":"{iss}","aud":"{aud}"{kind}{tenant}{grant_facts}{extra}}}"#
         )
     }
 
@@ -777,17 +802,72 @@ mod tests {
         }
     }
 
+    #[allow(clippy::panic)]
+    fn expect_rss_user(
+        claims: &diport::VerifiedClaims,
+    ) -> (
+        ids::UserId,
+        vocab::TenantId,
+        &diport::VerifiedAccessGrantFacts,
+    ) {
+        match claims.view() {
+            diport::VerifiedClaimsView::RssUser {
+                user_id,
+                tenant,
+                grant,
+            } => (user_id, tenant, grant),
+            diport::VerifiedClaimsView::FederatedAccess { .. } => {
+                panic!("expected RSS user claims, got federated access")
+            }
+            diport::VerifiedClaimsView::ServiceToken { .. } => {
+                panic!("expected RSS user claims, got service token")
+            }
+        }
+    }
+
+    #[allow(clippy::panic)]
+    fn expect_federated(
+        claims: &diport::VerifiedClaims,
+    ) -> (&str, Option<vocab::TenantId>, vocab::PrincipalKind) {
+        match claims.view() {
+            diport::VerifiedClaimsView::FederatedAccess {
+                subject,
+                tenant,
+                kind,
+            } => (subject, tenant, kind),
+            diport::VerifiedClaimsView::RssUser { .. } => {
+                panic!("expected federated access claims, got RSS user")
+            }
+            diport::VerifiedClaimsView::ServiceToken { .. } => {
+                panic!("expected federated access claims, got service token")
+            }
+        }
+    }
+
+    #[allow(clippy::panic)]
+    fn expect_service(claims: &diport::VerifiedClaims) -> vocab::ServiceCallerDomain {
+        match claims.view() {
+            diport::VerifiedClaimsView::ServiceToken { caller } => caller,
+            diport::VerifiedClaimsView::RssUser { .. } => {
+                panic!("expected service token claims, got RSS user")
+            }
+            diport::VerifiedClaimsView::FederatedAccess { .. } => {
+                panic!("expected service token claims, got federated access")
+            }
+        }
+    }
+
     fn access_lifetime_payload(issuer: &str, audience: &str, lifetime: i64) -> String {
         let exp = NOW.saturating_add(lifetime);
         format!(
-            r#"{{"sub":"alice","iat":{NOW},"exp":{exp},"token_use":"access","iss":"{issuer}","aud":"{audience}","kind":"user","tenant_id":"{CANON_TENANT}"}}"#
+            r#"{{"sub":"{CANON_USER}","iat":{NOW},"exp":{exp},"token_use":"access","iss":"{issuer}","aud":"{audience}","kind":"user","tenant_id":"{CANON_TENANT}","sid":"{CANON_SID}","jti":"{CANON_JTI}","auth_time":{NOW},"authn_epoch":7}}"#
         )
     }
 
     fn service_lifetime_payload(lifetime: i64) -> String {
         let exp = NOW.saturating_add(lifetime);
         format!(
-            r#"{{"sub":"service-a","iat":{NOW},"exp":{exp},"token_use":"service","iss":"{SERVICE_ISS}","aud":"{SERVICE_AUD}","kind":"service","jti":"lifetime-{lifetime}"}}"#
+            r#"{{"sub":"rss-maintenance-operator","iat":{NOW},"exp":{exp},"token_use":"service","iss":"{SERVICE_ISS}","aud":"{SERVICE_AUD}","kind":"service","jti":"lifetime-{lifetime}"}}"#
         )
     }
 
@@ -952,6 +1032,49 @@ mod tests {
         );
     }
 
+    #[test]
+    fn federated_kinds_accept_native_and_rss_extension_shapes_without_local_grant_evidence() {
+        let cases = [
+            ("user", vocab::PrincipalKind::User, true),
+            ("device", vocab::PrincipalKind::Device, true),
+            ("admin", vocab::PrincipalKind::Admin, true),
+            ("superAdmin", vocab::PrincipalKind::SuperAdmin, false),
+        ];
+
+        for (kind_claim, expected_kind, scoped) in cases {
+            for rss_extensions in [false, true] {
+                let subject = format!("external-{kind_claim}");
+                let tenant = if scoped {
+                    format!(r#","tenant_id":"{CANON_TENANT}""#)
+                } else {
+                    String::new()
+                };
+                let extensions = if rss_extensions {
+                    format!(
+                        r#","sid":"{CANON_SID}","jti":"{CANON_JTI}","auth_time":{NOW},"authn_epoch":7"#
+                    )
+                } else {
+                    String::new()
+                };
+                let body = format!(
+                    r#"{{"sub":"{subject}","iat":{NOW},"exp":{},"token_use":"access","iss":"{FEDERATED_ISS}","aud":"{FEDERATED_AUD}","kind":"{kind_claim}"{tenant}{extensions}}}"#,
+                    NOW + 600
+                );
+                let token = mint_es256(&test_sk2(), &body);
+                let claims = ok_claims(verify_credential(
+                    &federated_es256_config(),
+                    &FixedClock(NOW),
+                    &RawCredential::federated_access(token),
+                ));
+
+                let (actual_subject, tenant, kind) = expect_federated(&claims);
+                assert_eq!(actual_subject, subject);
+                assert_eq!(kind, expected_kind);
+                assert_eq!(tenant.is_some(), scoped);
+            }
+        }
+    }
+
     // ── 验收场景 ① 有效 ES256 JWT → 映射 subject/tenant/kind ──────────────────────
     #[test]
     fn valid_es256_jwt_maps_claims() {
@@ -964,15 +1087,83 @@ mod tests {
             &FixedClock(NOW),
             &RawCredential::rss_access(token),
         ));
-        assert_eq!(claims.subject(), "alice");
-        assert_eq!(claims.tenant(), Some(CANON_TENANT));
-        assert_eq!(claims.kind(), Some("user"));
+        let (user, tenant, grant) = expect_rss_user(&claims);
+        assert_eq!(user.as_uuid().hyphenated().to_string(), CANON_USER);
+        assert_eq!(tenant.to_string(), CANON_TENANT);
+        assert_eq!(grant.session_id().to_string(), CANON_SID);
+        assert_eq!(grant.token_id().to_string(), CANON_JTI);
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn rss_claim_rejections_emit_distinct_closed_reason_labels() {
+        const REASONS: [&str; 4] = [
+            "rss_kind_invalid",
+            "rss_subject_not_canonical",
+            "rss_grant_facts_invalid",
+            "auth_time_after_iat",
+        ];
+
+        capture::install();
+        let base: serde_json::Value =
+            serde_json::from_str(&payload(NOW + 600, ISS, AUD, "")).expect("valid RSS fixture");
+        let cases = [
+            {
+                let mut claims = base.clone();
+                claims["kind"] = serde_json::json!("admin");
+                ("kind", claims, "rss_kind_invalid")
+            },
+            {
+                let mut claims = base.clone();
+                claims["sub"] = serde_json::json!("550E8400-E29B-41D4-A716-446655440000");
+                ("subject canonical", claims, "rss_subject_not_canonical")
+            },
+            {
+                let mut claims = base.clone();
+                claims["sid"] = serde_json::Value::Null;
+                ("grant quartet malformed", claims, "rss_grant_facts_invalid")
+            },
+            {
+                let mut claims = base;
+                claims["auth_time"] = serde_json::json!(NOW + 1);
+                ("auth_time after iat", claims, "auth_time_after_iat")
+            },
+        ];
+
+        for (label, claims, expected_reason) in cases {
+            capture::reset();
+            let body = serde_json::to_string(&claims).expect("encode RSS fixture");
+            let token = mint_es256(&test_sk(), &body);
+            let result = verify_credential(
+                &es256_config(),
+                &FixedClock(NOW),
+                &RawCredential::rss_access(token),
+            );
+            assert!(
+                matches!(result, Err(PdpError::InvalidSignature)),
+                "{label} must fail closed: {result:?}"
+            );
+
+            let logs = capture::captured();
+            assert!(
+                logs.contains(expected_reason),
+                "{label} must emit {expected_reason}: {logs}"
+            );
+            for other_reason in REASONS {
+                if other_reason != expected_reason {
+                    assert!(
+                        !logs.contains(other_reason),
+                        "{label} emitted unexpected reason {other_reason}: {logs}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
     fn es256_scoped_kind_without_tenant_is_rejected() {
         let body = format!(
-            r#"{{"sub":"alice","iat":{NOW},"exp":{},"token_use":"access","iss":"{ISS}","aud":"{AUD}","kind":"user"}}"#,
+            r#"{{"sub":"{CANON_USER}","iat":{NOW},"exp":{},"token_use":"access","iss":"{ISS}","aud":"{AUD}","kind":"user","sid":"{CANON_SID}","jti":"{CANON_JTI}","auth_time":{NOW},"authn_epoch":7}}"#,
             NOW + 600
         );
         let token = mint_es256(&test_sk(), &body);
@@ -988,7 +1179,7 @@ mod tests {
     fn es256_aud_array_containing_audience_accepted() {
         let extra = "";
         let body = format!(
-            r#"{{"sub":"alice","iat":{NOW},"exp":{},"token_use":"access","iss":"{ISS}","aud":["other","{AUD}"],"kind":"user","tenant_id":"{CANON_TENANT}"{extra}}}"#,
+            r#"{{"sub":"{CANON_USER}","iat":{NOW},"exp":{},"token_use":"access","iss":"{ISS}","aud":["other","{AUD}"],"kind":"user","tenant_id":"{CANON_TENANT}","sid":"{CANON_SID}","jti":"{CANON_JTI}","auth_time":{NOW},"authn_epoch":7{extra}}}"#,
             NOW + 600
         );
         let token = mint_es256(&test_sk(), &body);
@@ -997,7 +1188,7 @@ mod tests {
             &FixedClock(NOW),
             &RawCredential::rss_access(token),
         ));
-        assert_eq!(claims.subject(), "alice");
+        let _ = expect_rss_user(&claims);
     }
 
     // ── 验收场景 ② 篡改 payload → InvalidSignature（error 无 token/key 字节，PdpError 变体不携数据）─────
@@ -1056,14 +1247,14 @@ mod tests {
             &FixedClock(NOW),
             &RawCredential::rss_access(token),
         ));
-        assert_eq!(claims.subject(), "alice");
+        let _ = expect_rss_user(&claims);
     }
 
     // ── 验收场景 ⑧ nbf 未来 → Expired ──────────────────────────────────────────
     #[test]
     fn es256_nbf_future_maps_expired() {
         let body = format!(
-            r#"{{"sub":"alice","iat":{NOW},"exp":{},"nbf":{},"token_use":"access","iss":"{ISS}","aud":"{AUD}","kind":"user","tenant_id":"{CANON_TENANT}"}}"#,
+            r#"{{"sub":"{CANON_USER}","iat":{NOW},"exp":{},"nbf":{},"token_use":"access","iss":"{ISS}","aud":"{AUD}","kind":"user","tenant_id":"{CANON_TENANT}","sid":"{CANON_SID}","jti":"{CANON_JTI}","auth_time":{NOW},"authn_epoch":7}}"#,
             NOW + 600,
             NOW + 600
         );
@@ -1161,8 +1352,36 @@ mod tests {
             &FixedClock(NOW),
             &RawCredential::service_token(token, tenant_binding(CANON_TENANT)),
         ));
-        assert_eq!(claims.subject(), "alice");
-        assert_eq!(claims.kind(), Some("service"));
+        assert_eq!(
+            expect_service(&claims),
+            vocab::ServiceCallerDomain::MaintenanceOperator
+        );
+    }
+
+    #[test]
+    fn service_token_ignores_rss_extensions_and_stays_in_its_closed_profile() {
+        let token = mint_hs256_bound(
+            HS_SECRET,
+            &payload(
+                NOW + 300,
+                ISS,
+                AUD,
+                &format!(
+                    r#","kind":"service","jti":"service-independent","sid":"{CANON_SID}","auth_time":{NOW},"authn_epoch":7"#
+                ),
+            ),
+            CANON_TENANT,
+        );
+        let claims = ok_claims(verify_credential(
+            &hs256_config(),
+            &FixedClock(NOW),
+            &RawCredential::service_token(token, tenant_binding(CANON_TENANT)),
+        ));
+
+        assert_eq!(
+            expect_service(&claims),
+            vocab::ServiceCallerDomain::MaintenanceOperator
+        );
     }
 
     #[test]
@@ -1489,7 +1708,7 @@ mod tests {
             &FixedClock(NOW),
             &RawCredential::rss_access(token),
         ));
-        assert_eq!(claims.subject(), "alice");
+        let _ = expect_rss_user(&claims);
     }
 
     // ── Unknown `kid` never blind-scans static keys ────────────────────────────
@@ -1523,7 +1742,6 @@ mod tests {
         let config = VerifierConfigBuilder::<diport::RssAccessProfile>::new(ISS, AUD)
             .keys_static(keys)
             .retirement_schedule(schedule)
-            .trust_kind("user")
             .build()
             .expect("config");
         let token = mint_es256_with_kid(&test_sk(), "k1", &payload(NOW + 600, ISS, AUD, ""));
@@ -1599,7 +1817,6 @@ mod tests {
         let config = VerifierConfigBuilder::<diport::RssAccessProfile>::new(ISS, AUD)
             .keys_static(keys)
             .retirement_schedule(schedule)
-            .trust_kind("user")
             .build()
             .expect("config");
         let token = mint_es256_with_kid(&test_sk(), "k1", &payload(NOW + 600, ISS, AUD, ""));
@@ -1674,7 +1891,6 @@ mod tests {
         let config = VerifierConfigBuilder::<diport::RssAccessProfile>::new(ISS, AUD)
             .keys_static(keys)
             .retirement_schedule(schedule)
-            .trust_kind("user")
             .build()
             .expect("config");
         let token = mint_es256_with_kid(&test_sk(), RETIRED_KID, &payload(NOW + 600, ISS, AUD, ""));
@@ -1720,7 +1936,6 @@ mod tests {
         let config = VerifierConfigBuilder::<diport::RssAccessProfile>::new(ISS, AUD)
             .keys_static(keys)
             .retirement_schedule(schedule)
-            .trust_kind("user")
             .build()
             .expect("config");
         let token = mint_es256_with_kid(&test_sk(), "k1", &payload(NOW + 600, ISS, AUD, ""));
@@ -1889,7 +2104,6 @@ mod tests {
                     .expect("key")
                     .build()
             })
-            .trust_kind("user")
             .leeway_secs(60)
             .build()
             .expect("config");
@@ -1910,7 +2124,6 @@ mod tests {
                     .expect("key")
                     .build()
             })
-            .trust_kind("user")
             .leeway_secs(60)
             .build()
             .expect("config");
@@ -1931,13 +2144,12 @@ mod tests {
                     .expect("key")
                     .build()
             })
-            .trust_kind("user")
             .leeway_secs(60)
             .build()
             .expect("config");
         // nbf=NOW+30, leeway=60 → nbf-leeway=NOW-30 → now(NOW) >= NOW-30 → 接受。
         let body = format!(
-            r#"{{"sub":"alice","iat":{NOW},"exp":{},"nbf":{},"token_use":"access","iss":"{ISS}","aud":"{AUD}","kind":"user","tenant_id":"{CANON_TENANT}"}}"#,
+            r#"{{"sub":"{CANON_USER}","iat":{NOW},"exp":{},"nbf":{},"token_use":"access","iss":"{ISS}","aud":"{AUD}","kind":"user","tenant_id":"{CANON_TENANT}","sid":"{CANON_SID}","jti":"{CANON_JTI}","auth_time":{NOW},"authn_epoch":7}}"#,
             NOW + 600,
             NOW + 30
         );

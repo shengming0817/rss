@@ -1,16 +1,49 @@
-error[E0308]: mismatched types
-  --> tests/ui/account_security_refresh_reader_required_fail.rs:13:9
+error[E0624]: associated function `new` is private
+  --> tests/ui/account_security_refresh_reader_required_fail.rs:11:51
+   |
+11 |       let _service = identity::RefreshService::<S>::new(
+   |                                                     ^^^ private associated function
+   |
+  ::: src/application/mod.rs
+   |
+   | /     fn new(
+   | |         store: Box<crate::ports::DynRefreshTokenStore<'static>>,
+   | |         lifecycle: Arc<DynAuthGrantLifecycle<'static>>,
+   | |         accounts: Box<DynAccountSecurityReadRepo<'static>>,
+...  |
+   | |         refresh_ttl: Duration,
+   | |     ) -> Self {
+   | |_____________- private associated function defined here
+
+error[E0061]: this function takes 6 arguments but 5 arguments were supplied
+  --> tests/ui/account_security_refresh_reader_required_fail.rs:11:20
    |
 11 |     let _service = identity::RefreshService::<S>::new(
-   |                    ---------------------------------- arguments to this function are incorrect
-12 |         store,
-13 |         None,
-   |         ^^^^ expected `Box<DynAccountSecurityReadRepo<'_>>`, found `Option<_>`
+   |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+14 |         issuer,
+   |         ------ argument #3 of type `Box<DynAccountSecurityReadRepo<'static>>` is missing
    |
-   = note: expected struct `Box<DynAccountSecurityReadRepo<'static>>`
+note: expected `Arc<DynAuthGrantLifecycle<'_>>`, found `Option<_>`
+  --> tests/ui/account_security_refresh_reader_required_fail.rs:13:9
+   |
+13 |         None,
+   |         ^^^^
+   = note: expected struct `Arc<DynAuthGrantLifecycle<'static>>`
                 found enum `Option<_>`
 note: associated function defined here
   --> src/application/mod.rs
    |
-   |     pub fn new(
-   |            ^^^
+   |     fn new(
+   |        ^^^
+help: provide the argument
+   |
+11 ~     let _service = identity::RefreshService::<S>::new(
+12 +         store,
+13 +         /* Arc<DynAuthGrantLifecycle<'static>> */,
+14 +         /* Box<DynAccountSecurityReadRepo<'static>> */,
+15 +         issuer,
+16 +         clock,
+17 +         Duration::from_secs(3_600),
+18 ~     );
+   |

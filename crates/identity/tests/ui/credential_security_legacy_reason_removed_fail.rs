@@ -1,4 +1,4 @@
-use identity::ports::AuthGrantCloseReason;
+use authn::AuthGrantCloseReason;
 
 fn main() {
     let _ = AuthGrantCloseReason::LogoutCurrent;

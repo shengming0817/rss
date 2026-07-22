@@ -181,7 +181,6 @@ fn complete_shared_serving_values() -> Vec<(String, String)> {
         ("RSS_ACCESS_TOKEN_AUDIENCE", "rss"),
         ("RSS_ACCESS_TOKEN_SIGNING_ACTIVE_KEY_ID", "runtime-es256"),
         ("RSS_ACCESS_TOKEN_TTL_SECS", "900"),
-        ("RSS_ACCESS_TOKEN_TRUSTED_KINDS", "user,admin"),
         ("RSS_ACCESS_TOKEN_JWKS_REFRESH_INTERVAL_SECS", "60"),
         ("RSS_IDENTITY_DOMAIN_PLACEMENT_WORKLOAD", "runtime"),
         ("RSS_DOMAIN_TRANSPORT_URL", "https://gateway.internal/rpc"),
@@ -856,10 +855,6 @@ fn rss_token_profile_values() -> Vec<(String, String)> {
         ),
         ("RSS_ACCESS_TOKEN_TTL_SECS".to_owned(), "900".to_owned()),
         (
-            "RSS_ACCESS_TOKEN_TRUSTED_KINDS".to_owned(),
-            "user,device,admin,superAdmin".to_owned(),
-        ),
-        (
             "RSS_ACCESS_TOKEN_JWKS_PATH".to_owned(),
             format!("{}/src/config.rs", env!("CARGO_MANIFEST_DIR")),
         ),
@@ -1020,7 +1015,8 @@ fn mint_es256_access_token(
     let header = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .encode(format!(r#"{{"alg":"ES256","typ":"at+jwt","kid":"{kid}"}}"#));
     let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(format!(
-        r#"{{"sub":"config-test","iat":{now},"exp":{},"token_use":"access","iss":"{issuer}","aud":"{audience}","kind":"superAdmin"}}"#,
+        r#"{{"sub":"550e8400-e29b-41d4-a716-446655440000","tenant_id":"f47ac10b-58cc-4372-a567-0e02b2c3d479","kind":"user","sid":"6ba7b810-9dad-41d1-80b4-00c04fd430c8","jti":"6ba7b811-9dad-41d1-80b4-00c04fd430c8","auth_time":{},"authn_epoch":7,"iat":{now},"exp":{},"token_use":"access","iss":"{issuer}","aud":"{audience}"}}"#,
+        now - 1,
         now + 600
     ));
     let signing_input = format!("{header}.{payload}");
@@ -1114,7 +1110,6 @@ async fn access_jwks_watches_the_lexical_operator_path_across_atomic_symlink_swa
     let now = 1_700_000_000_i64;
     let verifier = oidc::VerifierConfigBuilder::<diport::RssAccessProfile>::new(ISSUER, AUDIENCE)
         .keys_jwks(source)
-        .trust_kind("superAdmin")
         .build()
         .expect("build swapped verifier");
     let provider = oidc::OidcProvider::new(
@@ -1206,14 +1201,6 @@ fn token_profile_config_builds_only_the_selected_provider_material() {
     assert_eq!(
         rss.jwks_refresh_interval(),
         std::time::Duration::from_secs(60)
-    );
-    assert_eq!(
-        rss.trusted_kinds()
-            .iter()
-            .copied()
-            .map(AccessPrincipalKind::as_str)
-            .collect::<Vec<_>>(),
-        ["user", "device", "admin", "superAdmin"]
     );
     assert!(config.federated_access().is_none());
     assert!(config.service_token().is_none());
@@ -1776,15 +1763,17 @@ fn token_profile_config_rejects_legacy_env_instead_of_dual_reading_it() {
 #[test]
 fn token_profile_config_rejects_invalid_kind_and_service_secret() {
     let mut values = rss_token_profile_values();
+    replace_serving_value(&mut values, "RSS_ADMIN_TOKEN_PROFILE", "federated-access");
+    add_federated_access_profile(&mut values);
     replace_serving_value(
         &mut values,
-        "RSS_ACCESS_TOKEN_TRUSTED_KINDS",
+        "RSS_FEDERATED_ACCESS_TOKEN_TRUSTED_KINDS",
         "user,service",
     );
-    let error = token_profiles_from(values).expect_err("service kind in access profile");
+    let error = token_profiles_from(values).expect_err("service kind in federated profile");
     assert!(
         error.to_string().contains(
-            "RSS_ACCESS_TOKEN_TRUSTED_KINDS entries must be exactly user, device, admin, or superAdmin"
+            "RSS_FEDERATED_ACCESS_TOKEN_TRUSTED_KINDS entries must be exactly user, device, admin, or superAdmin"
         ),
         "{error}"
     );

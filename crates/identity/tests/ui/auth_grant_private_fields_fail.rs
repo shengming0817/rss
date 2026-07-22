@@ -1,6 +1,6 @@
 //! INVARIANT: AUTH-GRANT-STATE-01 { level = "Hard", exec = "verify", source = "trybuild" }
 
-use identity::ports::AuthGrant;
+use authn::AuthGrant;
 
 fn value<T>() -> T {
     panic!("compile-fail fixture")

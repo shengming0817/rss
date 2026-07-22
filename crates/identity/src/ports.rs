@@ -16,6 +16,12 @@
 
 use std::time::SystemTime;
 
+use authn::{
+    AccessGrantValidationInput, AccountSecurityEventKind, AuthGrant, AuthGrantCloseMutation,
+    AuthGrantId, AuthGrantStatus, CredentialSecurityEventKind, GrantSecurityEventKind,
+};
+#[cfg(test)]
+use authn::{AuthGrantSnapshot, AuthnEpoch};
 use consistency::EventEntry;
 use diport::{EnvelopeSubjectId, OpaqueActorId, OutboxActor, OutboxEmitError, OutboxEnvelopeParts};
 use dynosaur::dynosaur;
@@ -53,17 +59,15 @@ pub type FaultMatrixSessionCreatedPayload =
 // authentication and refresh gate. AccountLockout is not a port method entity, but PgCredentialRepo
 // rebuilds and advances it inside the authentication transaction; its fields remain private.
 pub use crate::domain::{
-    AbacAttribute, AccountCredentialSecurityCommand, AccountLockout, AccountSecurityEventKind,
-    AccountSecurityHydrationError, AccountSecurityMutation, AccountSecuritySnapshot,
-    AccountSecurityState, AccountSecurityTransitionError, AccountSecurityVersion, AccountStatus,
-    AttributeKey, AttributeValue, AuthGrant, AuthGrantCloseMutation, AuthGrantId,
-    AuthGrantSnapshot, AuthGrantStateError, AuthGrantStatus, AuthOutcome, AuthnEpoch,
-    BruteForceDecision, Credential, CredentialSecurityCommand, CredentialSecurityEvent,
-    CredentialSecurityEventKind, CredentialSecurityFactAuthorization, CredentialSecurityReceipt,
+    AbacAttribute, AccountCredentialSecurityCommand, AccountLockout, AccountSecurityHydrationError,
+    AccountSecurityMutation, AccountSecuritySnapshot, AccountSecurityState,
+    AccountSecurityTransitionError, AccountSecurityVersion, AccountStatus, AttributeKey,
+    AttributeValue, AuthOutcome, BruteForceDecision, Credential, CredentialSecurityCommand,
+    CredentialSecurityEvent, CredentialSecurityFactAuthorization, CredentialSecurityReceipt,
     CredentialSecurityTargetHydrationError, CredentialSecurityTargetKind,
     CredentialSecurityTargetMapping, CredentialSecurityTargetRef, GlobPattern,
-    GrantCredentialSecurityCommand, GrantSecurityEventKind, IdentityError, LoginIdentifier,
-    Operator, POLICY_ATTR_CONTRACT_ID, POLICY_ATTR_PERMISSION, POLICY_ATTR_PRINCIPAL_ID,
+    GrantCredentialSecurityCommand, IdentityError, LoginIdentifier, Operator,
+    POLICY_ATTR_CONTRACT_ID, POLICY_ATTR_PERMISSION, POLICY_ATTR_PRINCIPAL_ID,
     POLICY_ATTR_PRINCIPAL_KIND, POLICY_ATTR_RESOURCE_ID, POLICY_ATTR_TENANT_ID,
     PendingCredentialSecurityCommit, Policy, PolicyCondition, PolicyEffect, PolicyId,
     PolicyObligations, PolicyRouteScope, PolicyRule, PolicyVersion, RefreshRotation,
@@ -261,7 +265,8 @@ mod credential_security_fact_tests {
             .expect("account command"),
             CredentialSecurityEventKind::Grant(kind) => CredentialSecurityCommand::grant(
                 AuthGrant::hydrate(AuthGrantSnapshot {
-                    id: AuthGrantId::hydrate("grant-sensitive-id"),
+                    id: AuthGrantId::hydrate("7d65e5f2-e716-4c4e-8e4c-6f7ab1754ef8")
+                        .expect("grant id"),
                     tenant,
                     user_id: user,
                     auth_time: SystemTime::UNIX_EPOCH + Duration::from_secs(1),
@@ -352,7 +357,7 @@ mod credential_security_fact_tests {
                     assert_eq!(resolved.kind(), CredentialSecurityTargetKind::Grant);
                     assert_eq!(
                         resolved.grant_id().map(AuthGrantId::as_str),
-                        Some("grant-sensitive-id")
+                        Some("7d65e5f2-e716-4c4e-8e4c-6f7ab1754ef8")
                     );
                 }
             }
@@ -459,24 +464,60 @@ pub struct PersistedLoginGrantReceipt(());
 
 pub struct AuthGrantCloseCommand {
     mutation: AuthGrantCloseMutation,
-    observation: observ::LocalTxObservation<AuthGrantCloseRouteMarker>,
+    observation: AuthGrantCloseObservation,
+}
+
+/// Exact generated route evidence carried by an authentication-grant terminal transition.
+///
+/// Logout and refresh replay close the same aggregate through the same provider-owned atomic SQL,
+/// but they remain distinct LocalTx operations for retry telemetry and route governance.
+pub enum AuthGrantCloseObservation {
+    Logout(observ::LocalTxObservation<AuthGrantCloseRouteMarker>),
+    RefreshReplay(observ::LocalTxObservation<RefreshRotationRouteMarker>),
 }
 
 impl AuthGrantCloseCommand {
     pub(crate) fn new(mutation: AuthGrantCloseMutation) -> Self {
         Self {
             mutation,
-            observation: observ::LocalTxObservation::new(LOGOUT_ROUTE, LOGOUT_LOCAL_TX.boundary),
+            observation: AuthGrantCloseObservation::Logout(observ::LocalTxObservation::new(
+                LOGOUT_ROUTE,
+                LOGOUT_LOCAL_TX.boundary,
+            )),
         }
     }
 
+    /// Seal a refresh-replay transition from one persisted refresh record and its exact grant.
+    ///
+    /// The record supplies the tenant/user/grant/epoch binding. Callers cannot substitute any of
+    /// those fields independently, and adapters only receive the resulting aggregate mutation.
+    pub(crate) fn from_refresh_replay(
+        record: &RefreshTokenRecord,
+        grant: AuthGrant,
+        occurred_at: SystemTime,
+    ) -> Option<Self> {
+        if record.tenant() != grant.tenant()
+            || record.auth_grant_id() != grant.id()
+            || record.user_id() != grant.user_id()
+            || record.issuance_epoch() != grant.authn_epoch_at_issue()
+            || record.auth_grant_status() != AuthGrantStatus::Active
+        {
+            return None;
+        }
+        let mutation = grant
+            .close(GrantSecurityEventKind::RefreshReuseDetected, occurred_at)
+            .ok()?;
+        Some(Self {
+            mutation,
+            observation: AuthGrantCloseObservation::RefreshReplay(observ::LocalTxObservation::new(
+                REFRESH_ROUTE,
+                REFRESH_LOCAL_TX.boundary,
+            )),
+        })
+    }
+
     /// Adapter 消费命令并取得 session key 与精确 route marker evidence。
-    pub fn into_parts(
-        self,
-    ) -> (
-        AuthGrantCloseMutation,
-        observ::LocalTxObservation<AuthGrantCloseRouteMarker>,
-    ) {
+    pub fn into_parts(self) -> (AuthGrantCloseMutation, AuthGrantCloseObservation) {
         (self.mutation, self.observation)
     }
 
@@ -767,7 +808,9 @@ mod credential_security_target_resolution_tests {
                 reference_a,
                 CredentialSecurityTargetKind::Grant,
                 user(),
-                Some(AuthGrantId::hydrate("grant-sensitive-id")),
+                Some(
+                    AuthGrantId::hydrate("7d65e5f2-e716-4c4e-8e4c-6f7ab1754ef8").expect("grant id"),
+                ),
             )
             .expect("mismatched expected kind is absence")
             .is_none()
@@ -790,7 +833,7 @@ mod credential_security_target_resolution_tests {
             reference.clone(),
             CredentialSecurityTargetKind::Subject,
             user(),
-            Some(AuthGrantId::hydrate("unexpected")),
+            Some(AuthGrantId::hydrate("d8dbe849-1d7e-49aa-b68a-a7b41ed252df").expect("grant id")),
         );
         assert_eq!(
             subject_with_grant.err(),
@@ -1284,6 +1327,24 @@ pub trait AuthGrantLifecycleLocal: Send + Sync {
     ) -> Result<(), IdentityError>;
 }
 
+/// Read-only, single-query durable fence for an already cryptographically verified RSS access
+/// token. The input can only be derived from [`authn::VerifiedGrantReceipt`]; there is no separate
+/// tenant, subject or epoch parameter that a caller can substitute.
+#[trait_variant::make(AuthGrantValidator: Send)]
+#[dynosaur(pub DynAuthGrantValidator = dyn(box) AuthGrantValidator, bridge(dyn))]
+#[allow(async_fn_in_trait)]
+pub trait AuthGrantValidatorLocal: Send + Sync {
+    /// Return `true` only when the grant and account are current in one provider observation.
+    /// Missing, terminal, expired or mismatched rows are all `Ok(false)`; storage failures remain
+    /// errors so the request path can fail closed without falling back to JWT-only evidence.
+    async fn is_current(
+        &self,
+        scope: TenantRepoScope,
+        input: &AccessGrantValidationInput,
+        observed_at: SystemTime,
+    ) -> Result<bool, IdentityError>;
+}
+
 /// Credential-security projection and OutboxFact lifecycle.
 ///
 /// The sealed command binds a validated account/grant CAS mutation to its exact event and a
@@ -1335,7 +1396,8 @@ pub trait CredentialSecurityTargetResolverLocal: Send + Sync {
 ///
 /// **reuse-detection（旧 refresh 一次性 + 失窃检测）**：rotation 经 [`rotate`](RefreshTokenStoreLocal::rotate)
 /// 的**原子 CAS** 保证旧 token 一次性消费；命中已消费 / 已撤销 token（重放）由 application 经
-/// [`revoke_lineage`](RefreshTokenStoreLocal::revoke_lineage) 级联撤销整条谱系（OAuth refresh rotation 标准）。
+/// [`AuthGrantLifecycle::close`] 让 provider 在一个事务中 Compromised grant root 并撤销所有
+/// grant-bound refresh records（OAuth refresh rotation 标准）。
 ///
 /// ref: ory/fosite handler/oauth2/flow_refresh.go@master（refresh rotation + graceful reuse-detection，概念谱系）
 /// ref: Cockburn Hexagonal Ports&Adapters（repo 归域核心，adapter DIP 实现）
@@ -1363,7 +1425,8 @@ pub trait RefreshTokenStoreLocal: Send + Sync {
     ///
     /// 返回 [`RefreshRotationOutcome::Applied`] = CAS 命中（old 当时仍 Active，已消费 + 写入 new）；
     /// [`RefreshRotationOutcome::Replay`] = old 已非 Active（并发轮换 / 重放胜出者已消费它）——
-    /// **不写 new**，由 application 据此触发 reuse-detection 级联撤销；
+    /// **不写 new**，由 application 据此经 [`AuthGrantLifecycle::close`] 触发原子 grant/family
+    /// reuse-detection；
     /// [`RefreshRotationOutcome::AccountStale`] = 最终 writer 事务观察到账号非 Active 或签发 epoch 已过期；
     /// [`RefreshRotationOutcome::Expired`] = 最终 writer 事务观察到 old refresh 或其 AuthGrant 已过期。
     /// 两种 fence 结果都让 old 保持未消费且不写 new。
@@ -1374,11 +1437,11 @@ pub trait RefreshTokenStoreLocal: Send + Sync {
         mutation: RefreshRotationMutation,
     ) -> Result<RefreshRotationOutcome, IdentityError>;
 
-    /// **级联撤销整条谱系**（reuse-detection + logout）：把 `lineage_id` 家族全部记录置 `Revoked`。幂等
-    /// （未知 / 跨租 / 已撤销均 `Ok` 且 no-op）。
+    /// **显式 refresh 撤销 primitive**：把 `lineage_id` 家族全部记录置 `Revoked`。幂等（未知 / 跨租 /
+    /// 已撤销均 `Ok` 且 no-op）。
     ///
-    /// logout 与 reuse-detection 共用谱系级撤销——logout 须使活跃 token 及其整条轮换链失效（否则已轮换出的
-    /// 子 token 仍可用），故无独立单条 `revoke(id)`（YAGNI：单条撤销无消费方）。
+    /// 当前消费方是 [`crate::application::RefreshService::revoke`]；logout/reuse-detection 不走此独立写，
+    /// 而经 [`AuthGrantLifecycle::close`] 由 provider 原子关闭 root 与 grant-bound family。
     async fn revoke_lineage(
         &self,
         scope: TenantRepoScope,
@@ -1537,6 +1600,7 @@ classify_identity_ports! {
     DynRoleReadRepo => diport::ReadEffect,
     DynRoleWriteRepo => diport::BusinessWriteEffect,
     DynAccountSecurityReadRepo => diport::AuthEffect,
+    DynAuthGrantValidator => diport::AuthEffect,
     DynAccountSecurityLifecycle => diport::BusinessWriteEffect,
     DynCredentialRepo => diport::BusinessWriteEffect,
     DynRefreshTokenStore => diport::BusinessWriteEffect,

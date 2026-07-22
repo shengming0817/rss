@@ -15,7 +15,9 @@
 **Language/Version**: Rust（`rust-toolchain.toml` 固定 stable 1.96；lints 自成 nightly workspace，不参与根构建）
 
 **Primary Dependencies**:
-- 验签接缝（冻结，消费）：`diport::Pdp`（dynosaur dyn + Send 变体）+ `RawCredential` / `VerifiedClaims` / `PdpError`；`authn::verify_jwt` / `verify_service_token` bridge。
+- 验签接缝（修订后冻结）：`diport::Pdp`（dynosaur dyn + Send 变体）+ profile-shaped
+  `RawCredential` / `VerifiedClaimsView` / `PdpError`；`authn::verify_rss_access` /
+  `verify_federated_access` / `verify_service_token` bridge。
 - crypto（新增，RustCrypto 纯 Rust）：`p256`（ecdsa，ES256）、`hmac` + `sha2`（HS256，已在 Cargo.lock）；`base64` / `serde` / `serde_json`（已在 workspace deps）。常数时间比较复用 `primitives::crypto`（subtle）。
 - JWKS HTTP/TLS（US4/PR-A2，license-clean 待甄别）：候选 rustls + license-clean crypto provider / 本地受信 sidecar + key pinning / 签名 JWKS；**裸 plain-HTTP 否决**（评审 F2，key-source 完整性）；license-clean TLS 不可得则退静态 key、不上线远程 JWKS。详见 research.md R3。
 - HTTP runtime：`axum` + `tower`（httpserve 既有；verify-bridge 为 axum 中间件层）。
@@ -44,10 +46,12 @@
 - **跨域只经 contract**：✅ 本 feature 不新增 wire contract；消费冻结的 diport port-own 类型 + httpserve own 标量，无手写共享 wire crate。
 - **AI-robust 三档**（每条新约束标级）：
   - 安全同批门：`Box<DynPdp>` 注入构造器必填参（**Hard**，缺失即编译错）+ 测试 stub adapter crate 不入生产依赖图（`deny.toml` adapter wrapper，**Medium**）+ fail-closed 缺省（**Hard**）+ **bins 生产 `impl Pdp` governance 守卫（Medium，PR-C/T004.6 交付，评审 F1 升级，不 defer）**——见 §决策 3.3。
-  - 放行接缝（#1196 落地，评审 F1 纠级）：httpserve own `Authenticated` typed extension——私有字段 = **Hard/类型层**（外部无法 struct-literal 伪造）；enforce 默认拒（无证据 / 无 plan → fail-closed，**Medium**，单测 + 集成测试守，AUTH-EVIDENCE-REQUIRE-01）；`Authenticated::new` 仅组合根可调（`rss_authenticated_callsite` callsite dylint，**Medium**，AUTH-EVIDENCE-MINT-01，与 `AuthPlan` 同治理姿态）。原标『Hard/编译期』纠为实际三档载体（验签桥在组合根、`new` 无法 `pub(crate)` 收口，故 callsite dylint 而非类型 seal）。
+  - 放行接缝：httpserve own `Authenticated` typed extension——私有字段与 profile-specific shape =
+    **Hard/类型层**；enforce 默认拒 = **Medium**；profile-specific constructors 及 `CurrentAuthGrant`
+    mint 仅精确组合根 wrapper 可调（`rss_authenticated_callsite` DefId dylint，**Medium**）。
   - alg 白名单 + alg-key 一致：adapter 内 `#[non_exhaustive]` enum-match（类型穷尽）+ 表驱动负用例（**Medium**）。
   - JWKS key-source 完整性：远程 JWKS 经 TLS/pinning/签名 JWKS，禁裸 plain-HTTP（评审 F2）；不可得则退静态 key（**Medium**：构造期拒明文 + deny 甄别）。
-  - 类型层不变式不回归（VerifiedClaims 仅 Pdp mint、from_verified_* 收 newtype）：既有 **Hard**（`pub(crate) seal` + 入参类型），本 feature 加回归断言守。
+  - 类型层不变式不回归（VerifiedClaims 闭合 profile shape、verified newtype 仅由验签 funnel seal、from_verified_* 收 newtype）：既有 **Hard**（private tagged storage + `pub(crate) seal` + 入参类型），本 feature 加回归断言守。
   - **无 Soft 新增**（信任根锁经评审 F1 由 Soft 升 Medium）。
 - **错误/PII**：✅ `PdpError` 纯 taxonomy（不携 source）；tracing 只记 `principal.kind` + decision + PdpError 变体名，无 subject/token；`VerifiedClaims`/`RawCredential` Debug 已脱敏（DIPORT-DTO-PII-DEBUG-REDACT-01）。
 - **Rust 规范**：✅ Clock 构造器位置参（非 Option/Config，禁系统时钟）；`Box<DynPdp>` 必填非 Option；常数时间 MAC 比较（禁 `==`）；认知复杂度 ≤15（verify 按 alg-dispatch 拆子函数）；覆盖率 ≥80%。
@@ -64,7 +68,8 @@
 **A 否决（硬约束）**：`xtask/src/layers.rs:122` `Service => matches!(to, Basis|Engine|DiPort)` —— httpserve 依赖兄弟服务 authn 被 `cargo xtask layer-deps` + deny.toml 编译期拒。无商量余地。
 
 - **B（httpserve own 放行接缝）**：httpserve 在基础级定义 `Authenticated` 证据 extension（脱敏标量 `scheme: RequiredScheme` + `principal_kind`，**零 authn 依赖**）；enforce 层 `reject_if_needed` 改为读 `Authenticated` → 携证据、非 `Anonymous`、`scheme()` exact-match `Require(required)` 则放行，否则 fail-closed 401（替代当前恒 401；杜绝 scheme 混淆）。承载「放行机制」。
-- **C（验签桥落组合根 bins）**：「extract 凭据 → `authn::verify_jwt(raw, &DynPdp)` → `Authenticated::new(verified_scheme, principal.kind())`（`verified_scheme` = 实际验证的方案，enforce 据此 exact-match）→ 注入 request extension + 埋点」落 `bins/`（唯一能同时 `use httpserve + authn + oidc` 的 Root 层）。承载「authn 接线」。
+- **C（验签桥落唯一组合根）**：「extract 凭据 → profile-specific authn verify → RSS durable
+  grant validation → profile-specific `Authenticated` 注入 + 埋点」落 `assemblies/runtime`。
 
 ### 决策 2：finalize_auth 签名不破（验签桥走组合根外层 layer）
 
@@ -109,18 +114,21 @@ crates/httpserve/
 ├── src/auth.rs                 # PR-B：Authenticated(scheme+principal_kind) 证据类型 + reject_if_needed 改读 Authenticated、scheme exact-match 放行
 ├── src/lib.rs                  # PR-B：导出 Authenticated；finalize_auth 文档（层序，签名不变）
 └── tests/runtime.rs            # PR-B：注入 Authenticated→200 / 缺失→401 / opt-out 不回归
-bins/server/ + bins/rss/          # ⚠ 两者是独立 crate，不能共享 src/ 模块
-├── Cargo.toml                  # PR-C：首次加 httpserve/authn/oidc/diport/primitives/axum/tower/tokio/config
-├── src/main.rs                 # PR-C：构造 OidcProvider→Box<DynPdp>；finalize_auth→外层 .layer(verify_bridge)
-├── src/auth_bridge.rs          # PR-C：extract→verify_jwt→Authenticated::new(verified_scheme,kind) inject + tracing span（见下「共享决策」）
-└── tests/auth_e2e.rs           # PR-C：有效→200+Principal / 无·坏·过期·错aud→401/403（拒绝路径）
+assemblies/runtime/
+├── src/auth_bridge.rs          # profile verify→RSS durable fence→profile evidence inject + closed telemetry
+├── src/phase/finalize.rs       # 构造 typed providers 与必填 grant validation service
+└── tests/auth_e2e.rs           # 有效→200；凭据/grant 无效→401；provider outage→503；handler 反空
 Cargo.toml（根）                # PR-A1：p256/hmac/sha2 入 [workspace.dependencies]；PR-A2：HTTP/TLS 栈
 docs/references/framework-comparison.md  # PR-A1：新增 authn/jwt 验签对标行
 ```
 
-**Structure Decision**：扁平 workspace 既定；本 feature **不新增库 crate**（verifier 入既有 `adapters/oidc`、放行接缝入既有 `httpserve`、验签桥入既有 `bins`），只新增模块文件 + 加 workspace crypto deps + e2e 测试。
+**Structure Decision（修订）**：verifier 位于 `adapters/oidc`、放行接缝位于 `httpserve`、
+验签桥只位于唯一组合根 `assemblies/runtime`；durable grant port 位于 identity，PostgreSQL adapter 以
+一次 tenant-scoped query 实现。
 
-**auth_bridge 共享决策（F4）**：`bins/server` 与 `bins/rss` 是**独立 crate**，无法直接共享 `src/auth_bridge.rs`。PR-C 默认**各 bin 各实现一份**（验签桥逻辑小：extract→verify→inject+span，~80 行）；若后续出现漂移，再提取 `assemblies/authwire`（组合根层共享 crate，可依赖 httpserve+authn+oidc）供两 bin 依赖（行数估算届时 ×~1.4）。降维 `Principal → Authenticated` 是 `auth_bridge.rs` 内的**内联 mapping**（`Authenticated::new(verified_scheme, principal.kind())`——`verified_scheme: RequiredScheme` = 验签桥实际验证的凭据方案、`principal.kind(): vocab::PrincipalKind`；经私有字段 + constructor funnel 构造，**非** struct literal——字段在 #1196 已私有），**非** `From<&Principal>` trait impl（避免 httpserve↔authn 隐式层序联想，F11）。enforce 按路由 `Require(required)` exact-match `verified_scheme`，故验签桥须传其真实验证的方案（AUTH-EVIDENCE-REQUIRE-01，#1196 评审 F1）。
+**auth_bridge 共享决策（修订）**：验签桥已收口于唯一 `assemblies/runtime/src/auth_bridge.rs`。
+降维 `Principal → Authenticated` 仍是验签桥内的内联 mapping，但 constructor 已按 profile 闭合；RSS mapping
+额外消费 durable validator 返回的 move-only proof。
 
 ## 4-PR 分层（2 wave）
 

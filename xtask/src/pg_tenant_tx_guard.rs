@@ -2894,6 +2894,8 @@ fn test_deadline_mints_are_explicit(scan: &DeadlineAuthorityScan) -> bool {
 #[derive(Debug)]
 struct LocalTxDeadlineObservationSite {
     file: String,
+    impl_trait: Option<String>,
+    impl_type: Option<String>,
     function: Option<String>,
     receiver: String,
     argument: String,
@@ -2902,6 +2904,8 @@ struct LocalTxDeadlineObservationSite {
 
 #[derive(Default)]
 struct LocalTxDeadlineObservationScan {
+    impl_trait: Option<String>,
+    impl_type: Option<String>,
     function: Option<String>,
     emissions: Vec<LocalTxDeadlineObservationSite>,
     stage_sources: Vec<LocalTxDeadlineObservationSite>,
@@ -2932,6 +2936,19 @@ impl<'ast> syn::visit::Visit<'ast> for LocalTxDeadlineObservationScan {
         self.function = previous;
     }
 
+    fn visit_item_impl(&mut self, node: &'ast syn::ItemImpl) {
+        let previous_trait = std::mem::replace(
+            &mut self.impl_trait,
+            node.trait_
+                .as_ref()
+                .map(|(_, path, _)| compact_tokens(path)),
+        );
+        let previous_type = self.impl_type.replace(compact_tokens(&node.self_ty));
+        syn::visit::visit_item_impl(self, node);
+        self.impl_trait = previous_trait;
+        self.impl_type = previous_type;
+    }
+
     fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
         let method = node.method.to_string();
         if matches!(
@@ -2940,6 +2957,8 @@ impl<'ast> syn::visit::Visit<'ast> for LocalTxDeadlineObservationScan {
         ) {
             let site = LocalTxDeadlineObservationSite {
                 file: String::new(),
+                impl_trait: self.impl_trait.clone(),
+                impl_type: self.impl_type.clone(),
                 function: self.function.clone(),
                 receiver: compact_tokens(&node.receiver),
                 argument: node.args.first().map_or_else(String::new, compact_tokens),
@@ -2999,16 +3018,33 @@ fn localtx_deadline_observation_findings(files: &[(String, String)]) -> Vec<Find
         }
     }
 
+    let is_runner_emission = |site: &LocalTxDeadlineObservationSite| {
+        is_runner_file(&site.file)
+            && site.function.as_deref() == Some("run_pg_localtx_retry")
+            && site.receiver == "observation"
+            && site.argument == "stage"
+    };
+    let is_closed_forwarder = |site: &LocalTxDeadlineObservationSite| {
+        is_runner_file(&site.file)
+            && site.impl_trait.as_deref() == Some("PgLocalTxObservation")
+            && site.function.as_deref() == Some("record_deadline_exceeded")
+            && site.argument == "stage"
+            && matches!(
+                (site.impl_type.as_deref(), site.receiver.as_str()),
+                (Some("LocalTxObservation<M>"), "self")
+                    | (
+                        Some("identity::ports::AuthGrantCloseObservation"),
+                        "observation"
+                    )
+            )
+    };
+
     for site in &emissions {
-        if !is_runner_file(&site.file)
-            || site.function.as_deref() != Some("run_pg_localtx_retry")
-            || site.receiver != "observation"
-            || site.argument != "stage"
-        {
+        if !is_runner_emission(site) && !is_closed_forwarder(site) {
             findings.push(finding(
                 Rule::RetryPlacement,
                 site_subject(&site.file, site.line),
-                "LocalTx deadline observations may only emit the runner-provided stage inside run_pg_localtx_retry",
+                "LocalTx deadline observations may only emit the runner-provided stage inside run_pg_localtx_retry or its exact sealed observation forwarders",
             ));
         }
     }
@@ -3037,13 +3073,29 @@ fn localtx_deadline_observation_findings(files: &[(String, String)]) -> Vec<Find
         };
         let runner = compact_tokens(&runner.block);
         let core_tokens = compact_tokens(&core.block);
-        emissions.len() == 2
-            && emissions.iter().all(|site| {
-                is_runner_file(&site.file)
-                    && site.function.as_deref() == Some("run_pg_localtx_retry")
-                    && site.receiver == "observation"
-                    && site.argument == "stage"
+        let runner_emissions = emissions
+            .iter()
+            .filter(|site| is_runner_emission(site))
+            .count();
+        let generic_forwarders = emissions
+            .iter()
+            .filter(|site| {
+                is_closed_forwarder(site)
+                    && site.impl_type.as_deref() == Some("LocalTxObservation<M>")
             })
+            .count();
+        let auth_grant_forwarders = emissions
+            .iter()
+            .filter(|site| {
+                is_closed_forwarder(site)
+                    && site.impl_type.as_deref()
+                        == Some("identity::ports::AuthGrantCloseObservation")
+            })
+            .count();
+        runner_emissions == 2
+            && generic_forwarders == 1
+            && auth_grant_forwarders == 2
+            && emissions.len() == 5
             && runner.contains(
                 "|attempt,retry_class,settlement,stages|{observation.record_failed_attempt(attempt,retry_class,settlement);forstageinstages.into_iter().flatten(){observation.record_deadline_exceeded(stage);}}",
             )

@@ -1,5 +1,5 @@
 //! 验签器构造期配置：[`AccessStaticKeySource`]（静态验签 key 源）+ [`VerifierConfig`]（issuer/audience/claim 名/
-//! leeway/kind allowlist）。全部经 builder fail-fast 校验——误配在组合根接线 / 测试 setup 期暴露，不在每次
+//! leeway/federated kind allowlist）。全部经 builder fail-fast 校验——误配在组合根接线 / 测试 setup 期暴露，不在每次
 //! 验签静默失败（Option 范式：累加可忽略空输入，最终 `build` 必校验）。
 //!
 //! **key 格式（SEC1 点/bytes）跨 JWKS PR（#1109/T003）稳定**：T003 增 live JWKS 时复用同形 key 注入——
@@ -562,11 +562,6 @@ macro_rules! impl_access_builder {
             }
 
             #[must_use]
-            pub fn trust_kind(self, kind: impl Into<String>) -> Self {
-                self.with_trusted_kind(kind)
-            }
-
-            #[must_use]
             pub fn leeway_secs(self, secs: u64) -> Self {
                 self.with_leeway_secs(secs)
             }
@@ -580,6 +575,14 @@ macro_rules! impl_access_builder {
 
 impl_access_builder!(RssAccessProfile);
 impl_access_builder!(FederatedAccessProfile);
+
+impl VerifierConfigBuilder<FederatedAccessProfile> {
+    /// Admit one closed federated principal kind asserted by this IdP.
+    #[must_use]
+    pub fn trust_kind(self, kind: impl Into<String>) -> Self {
+        self.with_trusted_kind(kind)
+    }
+}
 
 impl VerifierConfigBuilder<ServiceTokenProfile> {
     #[must_use]
@@ -797,14 +800,13 @@ mod tests {
             "rss-api",
         )
         .keys_static(es256_key_source())
-        .trust_kind("user")
         .leeway_secs(30)
         .build()
         .expect("valid config");
         assert_eq!(config.issuer(), "https://issuer.example");
         assert_eq!(config.audience(), "rss-api");
         assert_eq!(config.leeway_secs(), 30);
-        assert!(config.is_kind_trusted("user"));
+        assert!(!config.is_kind_trusted("user"));
         assert!(!config.is_kind_trusted("admin"));
     }
 

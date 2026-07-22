@@ -1,4 +1,128 @@
 pub mod authn
+pub enum authn::AccountSecurityEventKind
+pub authn::AccountSecurityEventKind::AccountDeactivated
+pub authn::AccountSecurityEventKind::AccountLocked
+pub authn::AccountSecurityEventKind::AccountSuspended
+pub authn::AccountSecurityEventKind::CredentialDeleted
+pub authn::AccountSecurityEventKind::LogoutAll
+pub authn::AccountSecurityEventKind::PasswordChanged
+pub authn::AccountSecurityEventKind::PasswordReset
+impl core::clone::Clone for authn::AccountSecurityEventKind
+pub fn authn::AccountSecurityEventKind::clone(&self) -> authn::AccountSecurityEventKind
+impl core::cmp::Eq for authn::AccountSecurityEventKind
+impl core::cmp::PartialEq for authn::AccountSecurityEventKind
+pub fn authn::AccountSecurityEventKind::eq(&self, &authn::AccountSecurityEventKind) -> bool
+impl core::fmt::Debug for authn::AccountSecurityEventKind
+pub fn authn::AccountSecurityEventKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for authn::AccountSecurityEventKind
+impl core::marker::StructuralPartialEq for authn::AccountSecurityEventKind
+impl core::marker::Freeze for authn::AccountSecurityEventKind
+impl core::marker::Send for authn::AccountSecurityEventKind
+impl core::marker::Sync for authn::AccountSecurityEventKind
+impl core::marker::Unpin for authn::AccountSecurityEventKind
+impl core::marker::UnsafeUnpin for authn::AccountSecurityEventKind
+impl core::panic::unwind_safe::RefUnwindSafe for authn::AccountSecurityEventKind
+impl core::panic::unwind_safe::UnwindSafe for authn::AccountSecurityEventKind
+pub enum authn::AuthGrantIdError
+pub authn::AuthGrantIdError::Invalid
+impl core::cmp::Eq for authn::AuthGrantIdError
+impl core::cmp::PartialEq for authn::AuthGrantIdError
+pub fn authn::AuthGrantIdError::eq(&self, &authn::AuthGrantIdError) -> bool
+impl core::error::Error for authn::AuthGrantIdError
+impl core::fmt::Debug for authn::AuthGrantIdError
+pub fn authn::AuthGrantIdError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for authn::AuthGrantIdError
+pub fn authn::AuthGrantIdError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for authn::AuthGrantIdError
+impl core::marker::Freeze for authn::AuthGrantIdError
+impl core::marker::Send for authn::AuthGrantIdError
+impl core::marker::Sync for authn::AuthGrantIdError
+impl core::marker::Unpin for authn::AuthGrantIdError
+impl core::marker::UnsafeUnpin for authn::AuthGrantIdError
+impl core::panic::unwind_safe::RefUnwindSafe for authn::AuthGrantIdError
+impl core::panic::unwind_safe::UnwindSafe for authn::AuthGrantIdError
+pub enum authn::AuthGrantIssueError
+pub authn::AuthGrantIssueError::NotActive
+impl core::cmp::Eq for authn::AuthGrantIssueError
+impl core::cmp::PartialEq for authn::AuthGrantIssueError
+pub fn authn::AuthGrantIssueError::eq(&self, &authn::AuthGrantIssueError) -> bool
+impl core::error::Error for authn::AuthGrantIssueError
+impl core::fmt::Debug for authn::AuthGrantIssueError
+pub fn authn::AuthGrantIssueError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for authn::AuthGrantIssueError
+pub fn authn::AuthGrantIssueError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for authn::AuthGrantIssueError
+impl core::marker::Freeze for authn::AuthGrantIssueError
+impl core::marker::Send for authn::AuthGrantIssueError
+impl core::marker::Sync for authn::AuthGrantIssueError
+impl core::marker::Unpin for authn::AuthGrantIssueError
+impl core::marker::UnsafeUnpin for authn::AuthGrantIssueError
+impl core::panic::unwind_safe::RefUnwindSafe for authn::AuthGrantIssueError
+impl core::panic::unwind_safe::UnwindSafe for authn::AuthGrantIssueError
+pub enum authn::AuthGrantStateError
+pub authn::AuthGrantStateError::ActiveHasTerminalMetadata
+pub authn::AuthGrantStateError::AlreadyClosed
+pub authn::AuthGrantStateError::InvalidTimeOrder
+pub authn::AuthGrantStateError::StatusReasonMismatch
+pub authn::AuthGrantStateError::TerminalMetadataMissing
+impl core::cmp::Eq for authn::AuthGrantStateError
+impl core::cmp::PartialEq for authn::AuthGrantStateError
+pub fn authn::AuthGrantStateError::eq(&self, &authn::AuthGrantStateError) -> bool
+impl core::error::Error for authn::AuthGrantStateError
+impl core::fmt::Debug for authn::AuthGrantStateError
+pub fn authn::AuthGrantStateError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for authn::AuthGrantStateError
+pub fn authn::AuthGrantStateError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for authn::AuthGrantStateError
+impl core::marker::Freeze for authn::AuthGrantStateError
+impl core::marker::Send for authn::AuthGrantStateError
+impl core::marker::Sync for authn::AuthGrantStateError
+impl core::marker::Unpin for authn::AuthGrantStateError
+impl core::marker::UnsafeUnpin for authn::AuthGrantStateError
+impl core::panic::unwind_safe::RefUnwindSafe for authn::AuthGrantStateError
+impl core::panic::unwind_safe::UnwindSafe for authn::AuthGrantStateError
+pub enum authn::AuthGrantStatus
+pub authn::AuthGrantStatus::Active
+pub authn::AuthGrantStatus::Compromised
+pub authn::AuthGrantStatus::Revoked
+impl authn::AuthGrantStatus
+pub fn authn::AuthGrantStatus::as_db_str(self) -> &'static str
+pub fn authn::AuthGrantStatus::from_db_str(&str) -> core::option::Option<Self>
+impl core::clone::Clone for authn::AuthGrantStatus
+pub fn authn::AuthGrantStatus::clone(&self) -> authn::AuthGrantStatus
+impl core::cmp::Eq for authn::AuthGrantStatus
+impl core::cmp::PartialEq for authn::AuthGrantStatus
+pub fn authn::AuthGrantStatus::eq(&self, &authn::AuthGrantStatus) -> bool
+impl core::fmt::Debug for authn::AuthGrantStatus
+pub fn authn::AuthGrantStatus::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for authn::AuthGrantStatus
+impl core::marker::StructuralPartialEq for authn::AuthGrantStatus
+impl core::marker::Freeze for authn::AuthGrantStatus
+impl core::marker::Send for authn::AuthGrantStatus
+impl core::marker::Sync for authn::AuthGrantStatus
+impl core::marker::Unpin for authn::AuthGrantStatus
+impl core::marker::UnsafeUnpin for authn::AuthGrantStatus
+impl core::panic::unwind_safe::RefUnwindSafe for authn::AuthGrantStatus
+impl core::panic::unwind_safe::UnwindSafe for authn::AuthGrantStatus
+pub enum authn::AuthnEpochError
+pub authn::AuthnEpochError::OutOfRange
+pub authn::AuthnEpochError::Overflow
+impl core::cmp::Eq for authn::AuthnEpochError
+impl core::cmp::PartialEq for authn::AuthnEpochError
+pub fn authn::AuthnEpochError::eq(&self, &authn::AuthnEpochError) -> bool
+impl core::error::Error for authn::AuthnEpochError
+impl core::fmt::Debug for authn::AuthnEpochError
+pub fn authn::AuthnEpochError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for authn::AuthnEpochError
+pub fn authn::AuthnEpochError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for authn::AuthnEpochError
+impl core::marker::Freeze for authn::AuthnEpochError
+impl core::marker::Send for authn::AuthnEpochError
+impl core::marker::Sync for authn::AuthnEpochError
+impl core::marker::Unpin for authn::AuthnEpochError
+impl core::marker::UnsafeUnpin for authn::AuthnEpochError
+impl core::panic::unwind_safe::RefUnwindSafe for authn::AuthnEpochError
+impl core::panic::unwind_safe::UnwindSafe for authn::AuthnEpochError
 #[non_exhaustive] pub enum authn::AuthnError
 pub authn::AuthnError::Forbidden
 pub authn::AuthnError::PrincipalInvalid
@@ -20,6 +144,28 @@ impl core::marker::Unpin for authn::AuthnError
 impl core::marker::UnsafeUnpin for authn::AuthnError
 impl core::panic::unwind_safe::RefUnwindSafe for authn::AuthnError
 impl core::panic::unwind_safe::UnwindSafe for authn::AuthnError
+pub enum authn::CredentialSecurityEventKind
+pub authn::CredentialSecurityEventKind::Account(authn::AccountSecurityEventKind)
+pub authn::CredentialSecurityEventKind::Grant(authn::GrantSecurityEventKind)
+impl authn::CredentialSecurityEventKind
+pub const fn authn::CredentialSecurityEventKind::as_db_str(self) -> &'static str
+pub fn authn::CredentialSecurityEventKind::from_db_str(&str) -> core::option::Option<Self>
+impl core::clone::Clone for authn::CredentialSecurityEventKind
+pub fn authn::CredentialSecurityEventKind::clone(&self) -> authn::CredentialSecurityEventKind
+impl core::cmp::Eq for authn::CredentialSecurityEventKind
+impl core::cmp::PartialEq for authn::CredentialSecurityEventKind
+pub fn authn::CredentialSecurityEventKind::eq(&self, &authn::CredentialSecurityEventKind) -> bool
+impl core::fmt::Debug for authn::CredentialSecurityEventKind
+pub fn authn::CredentialSecurityEventKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for authn::CredentialSecurityEventKind
+impl core::marker::StructuralPartialEq for authn::CredentialSecurityEventKind
+impl core::marker::Freeze for authn::CredentialSecurityEventKind
+impl core::marker::Send for authn::CredentialSecurityEventKind
+impl core::marker::Sync for authn::CredentialSecurityEventKind
+impl core::marker::Unpin for authn::CredentialSecurityEventKind
+impl core::marker::UnsafeUnpin for authn::CredentialSecurityEventKind
+impl core::panic::unwind_safe::RefUnwindSafe for authn::CredentialSecurityEventKind
+impl core::panic::unwind_safe::UnwindSafe for authn::CredentialSecurityEventKind
 #[non_exhaustive] pub enum authn::CrossTenantAuditError
 pub authn::CrossTenantAuditError::EmptyField
 impl core::error::Error for authn::CrossTenantAuditError
@@ -48,41 +194,31 @@ impl core::marker::Unpin for authn::CrossTenantGrantError
 impl core::marker::UnsafeUnpin for authn::CrossTenantGrantError
 impl core::panic::unwind_safe::RefUnwindSafe for authn::CrossTenantGrantError
 impl core::panic::unwind_safe::UnwindSafe for authn::CrossTenantGrantError
-pub enum authn::JwtAccessPrincipal<'a>
-pub authn::JwtAccessPrincipal::Admin
-pub authn::JwtAccessPrincipal::Admin::subject: &'a str
-pub authn::JwtAccessPrincipal::Admin::tenant: vocab::tenant::TenantId
-pub authn::JwtAccessPrincipal::Device
-pub authn::JwtAccessPrincipal::Device::subject: &'a str
-pub authn::JwtAccessPrincipal::Device::tenant: vocab::tenant::TenantId
-pub authn::JwtAccessPrincipal::SuperAdmin
-pub authn::JwtAccessPrincipal::SuperAdmin::subject: &'a str
-pub authn::JwtAccessPrincipal::User
-pub authn::JwtAccessPrincipal::User::subject: &'a str
-pub authn::JwtAccessPrincipal::User::tenant: vocab::tenant::TenantId
-impl core::fmt::Debug for authn::JwtAccessPrincipal<'_>
-pub fn authn::JwtAccessPrincipal<'_>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl<'a> core::clone::Clone for authn::JwtAccessPrincipal<'a>
-pub fn authn::JwtAccessPrincipal<'a>::clone(&self) -> authn::JwtAccessPrincipal<'a>
-impl<'a> core::cmp::Eq for authn::JwtAccessPrincipal<'a>
-impl<'a> core::cmp::PartialEq for authn::JwtAccessPrincipal<'a>
-pub fn authn::JwtAccessPrincipal<'a>::eq(&self, &authn::JwtAccessPrincipal<'a>) -> bool
-impl<'a> core::marker::Copy for authn::JwtAccessPrincipal<'a>
-impl<'a> core::marker::StructuralPartialEq for authn::JwtAccessPrincipal<'a>
-impl<'a> core::marker::Freeze for authn::JwtAccessPrincipal<'a>
-impl<'a> core::marker::Send for authn::JwtAccessPrincipal<'a>
-impl<'a> core::marker::Sync for authn::JwtAccessPrincipal<'a>
-impl<'a> core::marker::Unpin for authn::JwtAccessPrincipal<'a>
-impl<'a> core::marker::UnsafeUnpin for authn::JwtAccessPrincipal<'a>
-impl<'a> core::panic::unwind_safe::RefUnwindSafe for authn::JwtAccessPrincipal<'a>
-impl<'a> core::panic::unwind_safe::UnwindSafe for authn::JwtAccessPrincipal<'a>
+pub enum authn::GrantSecurityEventKind
+pub authn::GrantSecurityEventKind::LogoutCurrent
+pub authn::GrantSecurityEventKind::RefreshReuseDetected
+impl core::clone::Clone for authn::GrantSecurityEventKind
+pub fn authn::GrantSecurityEventKind::clone(&self) -> authn::GrantSecurityEventKind
+impl core::cmp::Eq for authn::GrantSecurityEventKind
+impl core::cmp::PartialEq for authn::GrantSecurityEventKind
+pub fn authn::GrantSecurityEventKind::eq(&self, &authn::GrantSecurityEventKind) -> bool
+impl core::fmt::Debug for authn::GrantSecurityEventKind
+pub fn authn::GrantSecurityEventKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for authn::GrantSecurityEventKind
+impl core::marker::StructuralPartialEq for authn::GrantSecurityEventKind
+impl core::marker::Freeze for authn::GrantSecurityEventKind
+impl core::marker::Send for authn::GrantSecurityEventKind
+impl core::marker::Sync for authn::GrantSecurityEventKind
+impl core::marker::Unpin for authn::GrantSecurityEventKind
+impl core::marker::UnsafeUnpin for authn::GrantSecurityEventKind
+impl core::panic::unwind_safe::RefUnwindSafe for authn::GrantSecurityEventKind
+impl core::panic::unwind_safe::UnwindSafe for authn::GrantSecurityEventKind
 #[non_exhaustive] pub enum authn::JwtIssueError
 pub authn::JwtIssueError::ClaimsEncode(serde_json::error::Error)
 pub authn::JwtIssueError::ClockBeforeEpoch
-pub authn::JwtIssueError::EmptySubject
 pub authn::JwtIssueError::ExpiryOverflow
 pub authn::JwtIssueError::InvalidConfig
-pub authn::JwtIssueError::KindNotIssuable
+pub authn::JwtIssueError::InvalidGrantWindow
 pub authn::JwtIssueError::Sign(diport::signer::SignerError)
 impl core::error::Error for authn::JwtIssueError
 pub fn authn::JwtIssueError::source(&self) -> core::option::Option<&(dyn core::error::Error + 'static)>
@@ -198,6 +334,22 @@ impl core::marker::Unpin for authn::RotationMode
 impl core::marker::UnsafeUnpin for authn::RotationMode
 impl core::panic::unwind_safe::RefUnwindSafe for authn::RotationMode
 impl core::panic::unwind_safe::UnwindSafe for authn::RotationMode
+pub struct authn::AccessGrantValidationInput
+impl authn::AccessGrantValidationInput
+pub fn authn::AccessGrantValidationInput::auth_time_unix_secs(&self) -> u64
+pub fn authn::AccessGrantValidationInput::authn_epoch(&self) -> authn::AuthnEpoch
+pub fn authn::AccessGrantValidationInput::grant_id(&self) -> &authn::AuthGrantId
+pub fn authn::AccessGrantValidationInput::tenant(&self) -> vocab::tenant::TenantId
+pub fn authn::AccessGrantValidationInput::user_id(&self) -> ids::UserId
+impl core::fmt::Debug for authn::AccessGrantValidationInput
+pub fn authn::AccessGrantValidationInput::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for authn::AccessGrantValidationInput
+impl core::marker::Send for authn::AccessGrantValidationInput
+impl core::marker::Sync for authn::AccessGrantValidationInput
+impl core::marker::Unpin for authn::AccessGrantValidationInput
+impl core::marker::UnsafeUnpin for authn::AccessGrantValidationInput
+impl core::panic::unwind_safe::RefUnwindSafe for authn::AccessGrantValidationInput
+impl core::panic::unwind_safe::UnwindSafe for authn::AccessGrantValidationInput
 pub struct authn::AccessToken(_)
 impl authn::AccessToken
 pub fn authn::AccessToken::as_str(&self) -> &str
@@ -211,6 +363,117 @@ impl core::marker::Unpin for authn::AccessToken
 impl core::marker::UnsafeUnpin for authn::AccessToken
 impl core::panic::unwind_safe::RefUnwindSafe for authn::AccessToken
 impl core::panic::unwind_safe::UnwindSafe for authn::AccessToken
+pub struct authn::AuthGrant
+impl authn::AuthGrant
+pub fn authn::AuthGrant::access_issue_input(&self) -> core::result::Result<authn::RssAccessIssueInput<'_>, authn::AuthGrantIssueError>
+pub fn authn::AuthGrant::auth_time(&self) -> std::time::SystemTime
+pub fn authn::AuthGrant::authn_epoch_at_issue(&self) -> authn::AuthnEpoch
+pub fn authn::AuthGrant::close(self, authn::GrantSecurityEventKind, std::time::SystemTime) -> core::result::Result<authn::AuthGrantCloseMutation, authn::AuthGrantStateError>
+pub fn authn::AuthGrant::close_reason(&self) -> core::option::Option<authn::CredentialSecurityEventKind>
+pub fn authn::AuthGrant::closed_at(&self) -> core::option::Option<std::time::SystemTime>
+pub fn authn::AuthGrant::created_at(&self) -> std::time::SystemTime
+pub fn authn::AuthGrant::expires_at(&self) -> std::time::SystemTime
+pub fn authn::AuthGrant::hydrate(authn::AuthGrantSnapshot) -> core::result::Result<Self, authn::AuthGrantStateError>
+pub fn authn::AuthGrant::id(&self) -> &authn::AuthGrantId
+pub fn authn::AuthGrant::matches_snapshot(&self, &Self) -> bool
+pub fn authn::AuthGrant::new_active(vocab::tenant::TenantId, ids::UserId, std::time::SystemTime, authn::AuthnEpoch, std::time::SystemTime, std::time::SystemTime) -> core::result::Result<Self, authn::AuthGrantStateError>
+pub fn authn::AuthGrant::status(&self) -> authn::AuthGrantStatus
+pub fn authn::AuthGrant::tenant(&self) -> vocab::tenant::TenantId
+pub fn authn::AuthGrant::user_id(&self) -> ids::UserId
+impl core::clone::Clone for authn::AuthGrant
+pub fn authn::AuthGrant::clone(&self) -> authn::AuthGrant
+impl core::fmt::Debug for authn::AuthGrant
+pub fn authn::AuthGrant::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for authn::AuthGrant
+impl core::marker::Send for authn::AuthGrant
+impl core::marker::Sync for authn::AuthGrant
+impl core::marker::Unpin for authn::AuthGrant
+impl core::marker::UnsafeUnpin for authn::AuthGrant
+impl core::panic::unwind_safe::RefUnwindSafe for authn::AuthGrant
+impl core::panic::unwind_safe::UnwindSafe for authn::AuthGrant
+pub struct authn::AuthGrantCloseMutation
+impl authn::AuthGrantCloseMutation
+pub fn authn::AuthGrantCloseMutation::expected(&self) -> &authn::AuthGrant
+pub fn authn::AuthGrantCloseMutation::into_parts(self) -> (authn::AuthGrant, authn::AuthGrant)
+pub fn authn::AuthGrantCloseMutation::next(&self) -> &authn::AuthGrant
+impl core::fmt::Debug for authn::AuthGrantCloseMutation
+pub fn authn::AuthGrantCloseMutation::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for authn::AuthGrantCloseMutation
+impl core::marker::Send for authn::AuthGrantCloseMutation
+impl core::marker::Sync for authn::AuthGrantCloseMutation
+impl core::marker::Unpin for authn::AuthGrantCloseMutation
+impl core::marker::UnsafeUnpin for authn::AuthGrantCloseMutation
+impl core::panic::unwind_safe::RefUnwindSafe for authn::AuthGrantCloseMutation
+impl core::panic::unwind_safe::UnwindSafe for authn::AuthGrantCloseMutation
+pub struct authn::AuthGrantId(_)
+impl authn::AuthGrantId
+pub fn authn::AuthGrantId::as_str(&self) -> &str
+pub fn authn::AuthGrantId::hydrate(impl core::convert::Into<alloc::string::String>) -> core::result::Result<Self, authn::AuthGrantIdError>
+impl core::clone::Clone for authn::AuthGrantId
+pub fn authn::AuthGrantId::clone(&self) -> authn::AuthGrantId
+impl core::cmp::Eq for authn::AuthGrantId
+impl core::cmp::PartialEq for authn::AuthGrantId
+pub fn authn::AuthGrantId::eq(&self, &authn::AuthGrantId) -> bool
+impl core::fmt::Debug for authn::AuthGrantId
+pub fn authn::AuthGrantId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for authn::AuthGrantId
+pub fn authn::AuthGrantId::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for authn::AuthGrantId
+impl secure::redaction::Redact for authn::AuthGrantId
+pub fn authn::AuthGrantId::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
+impl core::marker::Freeze for authn::AuthGrantId
+impl core::marker::Send for authn::AuthGrantId
+impl core::marker::Sync for authn::AuthGrantId
+impl core::marker::Unpin for authn::AuthGrantId
+impl core::marker::UnsafeUnpin for authn::AuthGrantId
+impl core::panic::unwind_safe::RefUnwindSafe for authn::AuthGrantId
+impl core::panic::unwind_safe::UnwindSafe for authn::AuthGrantId
+pub struct authn::AuthGrantSnapshot
+pub authn::AuthGrantSnapshot::auth_time: std::time::SystemTime
+pub authn::AuthGrantSnapshot::authn_epoch_at_issue: authn::AuthnEpoch
+pub authn::AuthGrantSnapshot::close_reason: core::option::Option<authn::CredentialSecurityEventKind>
+pub authn::AuthGrantSnapshot::closed_at: core::option::Option<std::time::SystemTime>
+pub authn::AuthGrantSnapshot::created_at: std::time::SystemTime
+pub authn::AuthGrantSnapshot::expires_at: std::time::SystemTime
+pub authn::AuthGrantSnapshot::id: authn::AuthGrantId
+pub authn::AuthGrantSnapshot::status: authn::AuthGrantStatus
+pub authn::AuthGrantSnapshot::tenant: vocab::tenant::TenantId
+pub authn::AuthGrantSnapshot::user_id: ids::UserId
+impl core::clone::Clone for authn::AuthGrantSnapshot
+pub fn authn::AuthGrantSnapshot::clone(&self) -> authn::AuthGrantSnapshot
+impl core::marker::Freeze for authn::AuthGrantSnapshot
+impl core::marker::Send for authn::AuthGrantSnapshot
+impl core::marker::Sync for authn::AuthGrantSnapshot
+impl core::marker::Unpin for authn::AuthGrantSnapshot
+impl core::marker::UnsafeUnpin for authn::AuthGrantSnapshot
+impl core::panic::unwind_safe::RefUnwindSafe for authn::AuthGrantSnapshot
+impl core::panic::unwind_safe::UnwindSafe for authn::AuthGrantSnapshot
+pub struct authn::AuthnEpoch(_)
+impl authn::AuthnEpoch
+pub const authn::AuthnEpoch::ZERO: Self
+pub fn authn::AuthnEpoch::checked_next(self) -> core::result::Result<Self, authn::AuthnEpochError>
+pub const fn authn::AuthnEpoch::get(self) -> u64
+pub fn authn::AuthnEpoch::hydrate(u64) -> core::result::Result<Self, authn::AuthnEpochError>
+impl core::clone::Clone for authn::AuthnEpoch
+pub fn authn::AuthnEpoch::clone(&self) -> authn::AuthnEpoch
+impl core::cmp::Eq for authn::AuthnEpoch
+impl core::cmp::Ord for authn::AuthnEpoch
+pub fn authn::AuthnEpoch::cmp(&self, &authn::AuthnEpoch) -> core::cmp::Ordering
+impl core::cmp::PartialEq for authn::AuthnEpoch
+pub fn authn::AuthnEpoch::eq(&self, &authn::AuthnEpoch) -> bool
+impl core::cmp::PartialOrd for authn::AuthnEpoch
+pub fn authn::AuthnEpoch::partial_cmp(&self, &authn::AuthnEpoch) -> core::option::Option<core::cmp::Ordering>
+impl core::fmt::Debug for authn::AuthnEpoch
+pub fn authn::AuthnEpoch::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for authn::AuthnEpoch
+impl core::marker::StructuralPartialEq for authn::AuthnEpoch
+impl core::marker::Freeze for authn::AuthnEpoch
+impl core::marker::Send for authn::AuthnEpoch
+impl core::marker::Sync for authn::AuthnEpoch
+impl core::marker::Unpin for authn::AuthnEpoch
+impl core::marker::UnsafeUnpin for authn::AuthnEpoch
+impl core::panic::unwind_safe::RefUnwindSafe for authn::AuthnEpoch
+impl core::panic::unwind_safe::UnwindSafe for authn::AuthnEpoch
 pub struct authn::CrossTenantAuditContext
 impl authn::CrossTenantAuditContext
 pub fn authn::CrossTenantAuditContext::new(&'static str, impl core::convert::Into<alloc::string::String>, &'static str, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> core::result::Result<Self, authn::CrossTenantAuditError>
@@ -249,7 +512,7 @@ impl core::panic::unwind_safe::RefUnwindSafe for authn::Jwt
 impl core::panic::unwind_safe::UnwindSafe for authn::Jwt
 pub struct authn::JwtIssuer<P: diport::pdp::TokenProfileMarker, S>
 impl<S: diport::signer::Signer + core::marker::Send + core::marker::Sync + 'static> authn::JwtIssuer<diport::pdp::RssAccessProfile, S>
-pub async fn authn::JwtIssuer<diport::pdp::RssAccessProfile, S>::issue_access(&self, authn::JwtAccessPrincipal<'_>) -> core::result::Result<authn::MintedJwt, authn::JwtIssueError>
+pub async fn authn::JwtIssuer<diport::pdp::RssAccessProfile, S>::issue_access(&self, authn::RssAccessIssueInput<'_>) -> core::result::Result<authn::MintedJwt, authn::JwtIssueError>
 pub fn authn::JwtIssuer<diport::pdp::RssAccessProfile, S>::new(alloc::sync::Arc<S>, alloc::boxed::Box<dyn diport::clock::Clock>, authn::JwtIssuerConfig<diport::pdp::RssAccessProfile>) -> core::result::Result<Self, authn::JwtIssueError>
 impl<S: diport::signer::Signer + core::marker::Send + core::marker::Sync + 'static> authn::JwtIssuer<diport::pdp::ServiceTokenProfile, S>
 pub async fn authn::JwtIssuer<diport::pdp::ServiceTokenProfile, S>::issue_service_token(&self, vocab::service::ServiceCallerDomain, diport::pdp::ServiceTokenTenantBinding) -> core::result::Result<authn::MintedJwt, authn::JwtIssueError>
@@ -467,6 +730,16 @@ impl core::marker::Unpin for authn::RotationOverlapPolicy
 impl core::marker::UnsafeUnpin for authn::RotationOverlapPolicy
 impl core::panic::unwind_safe::RefUnwindSafe for authn::RotationOverlapPolicy
 impl core::panic::unwind_safe::UnwindSafe for authn::RotationOverlapPolicy
+pub struct authn::RssAccessIssueInput<'a>
+impl core::fmt::Debug for authn::RssAccessIssueInput<'_>
+pub fn authn::RssAccessIssueInput<'_>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl<'a> core::marker::Freeze for authn::RssAccessIssueInput<'a>
+impl<'a> core::marker::Send for authn::RssAccessIssueInput<'a>
+impl<'a> core::marker::Sync for authn::RssAccessIssueInput<'a>
+impl<'a> core::marker::Unpin for authn::RssAccessIssueInput<'a>
+impl<'a> core::marker::UnsafeUnpin for authn::RssAccessIssueInput<'a>
+impl<'a> core::panic::unwind_safe::RefUnwindSafe for authn::RssAccessIssueInput<'a>
+impl<'a> core::panic::unwind_safe::UnwindSafe for authn::RssAccessIssueInput<'a>
 pub struct authn::SigningKeyRing
 impl authn::SigningKeyRing
 pub fn authn::SigningKeyRing::active(&self) -> &diport::signer::KeyId
@@ -523,8 +796,25 @@ impl core::marker::Unpin for authn::SpiffeId
 impl core::marker::UnsafeUnpin for authn::SpiffeId
 impl core::panic::unwind_safe::RefUnwindSafe for authn::SpiffeId
 impl core::panic::unwind_safe::UnwindSafe for authn::SpiffeId
+pub struct authn::VerifiedGrantReceipt<'a>
+impl authn::VerifiedGrantReceipt<'_>
+pub fn authn::VerifiedGrantReceipt<'_>::auth_time_unix_secs(&self) -> u64
+pub fn authn::VerifiedGrantReceipt<'_>::authn_epoch(&self) -> u64
+pub fn authn::VerifiedGrantReceipt<'_>::grant_id(&self) -> authn::AuthGrantId
+pub fn authn::VerifiedGrantReceipt<'_>::into_validation_input(self) -> authn::AccessGrantValidationInput
+pub fn authn::VerifiedGrantReceipt<'_>::token_id(&self) -> ids::CanonicalUuidV4
+impl core::fmt::Debug for authn::VerifiedGrantReceipt<'_>
+pub fn authn::VerifiedGrantReceipt<'_>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl<'a> core::marker::Freeze for authn::VerifiedGrantReceipt<'a>
+impl<'a> core::marker::Send for authn::VerifiedGrantReceipt<'a>
+impl<'a> core::marker::Sync for authn::VerifiedGrantReceipt<'a>
+impl<'a> core::marker::Unpin for authn::VerifiedGrantReceipt<'a>
+impl<'a> core::marker::UnsafeUnpin for authn::VerifiedGrantReceipt<'a>
+impl<'a> core::panic::unwind_safe::RefUnwindSafe for authn::VerifiedGrantReceipt<'a>
+impl<'a> core::panic::unwind_safe::UnwindSafe for authn::VerifiedGrantReceipt<'a>
 pub struct authn::VerifiedJwt
 impl authn::VerifiedJwt
+pub fn authn::VerifiedJwt::grant_receipt(&self) -> core::option::Option<authn::VerifiedGrantReceipt<'_>>
 pub fn authn::VerifiedJwt::raw(&self) -> &str
 impl core::fmt::Debug for authn::VerifiedJwt
 pub fn authn::VerifiedJwt::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result

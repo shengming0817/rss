@@ -79,6 +79,9 @@ use ::httpserve::{
     ProducerMarker, ResourceProjection, RouteAuthorizationDecision, RouteAuthorizationRequest,
     RouteAuthorizer,
 };
+#[cfg(test)]
+use authn::AuthGrantSnapshot;
+use authn::{AuthGrant, AuthGrantId, AuthGrantStatus, GrantSecurityEventKind};
 use axum::Json;
 use axum::body::{Body, Bytes, to_bytes};
 use axum::extract::{Path, Query, Request, State};
@@ -110,13 +113,13 @@ use vocab::{
 #[cfg(test)]
 use crate::domain::RefreshTokenSnapshot;
 use crate::domain::{
-    AbacAttribute, AttributeKey, AttributeValue, AuthGrant, AuthGrantId, AuthGrantStatus,
-    AuthOutcome, GrantSecurityEventKind, IdentityError, LoginIdentifier, POLICY_ATTR_CONTRACT_ID,
-    POLICY_ATTR_PERMISSION, POLICY_ATTR_PRINCIPAL_ID, POLICY_ATTR_PRINCIPAL_KIND,
-    POLICY_ATTR_RESOURCE_ID, POLICY_ATTR_TENANT_ID, Policy, PolicyEvaluation, PolicyId,
-    PolicyObligations, PolicyRouteScope, RefreshRotationOutcome, RefreshStatus, RefreshTokenHash,
-    RefreshTokenId, RefreshTokenRecord, ResourceAttributeKey, ResourceAttributeResolution,
-    ResourceAttributeResourceId, ResourcePolicyAttributeKey, RoleId, evaluate_policies_for_tenant,
+    AbacAttribute, AttributeKey, AttributeValue, AuthOutcome, IdentityError, LoginIdentifier,
+    POLICY_ATTR_CONTRACT_ID, POLICY_ATTR_PERMISSION, POLICY_ATTR_PRINCIPAL_ID,
+    POLICY_ATTR_PRINCIPAL_KIND, POLICY_ATTR_RESOURCE_ID, POLICY_ATTR_TENANT_ID, Policy,
+    PolicyEvaluation, PolicyId, PolicyObligations, PolicyRouteScope, RefreshRotationOutcome,
+    RefreshStatus, RefreshTokenHash, RefreshTokenId, RefreshTokenRecord, ResourceAttributeKey,
+    ResourceAttributeResolution, ResourceAttributeResourceId, ResourcePolicyAttributeKey, RoleId,
+    evaluate_policies_for_tenant,
 };
 use crate::ports::{
     AccountSecurityReadRepo, AuthGrantCloseCommand, AuthGrantLifecycle, AuthGrantProvider,
@@ -132,6 +135,10 @@ use crate::ports::{DynRoleBindingLifecycle, RoleWriteRepo};
 /// RBAC 角色管理子域（角色分配 / 撤销 + L2 角色事件发布，#1190 US5）。私有——只经 facade re-export 暴露。
 mod rbac_admin;
 pub use rbac_admin::{RbacAdminError, RbacAdminService};
+mod grant_validation;
+pub use grant_validation::{
+    AccessGrantValidationError, AuthGrantValidationService, ValidatedAuthGrant,
+};
 mod policy_manage;
 use policy_manage::PolicyQueryService;
 pub use policy_manage::{PolicyManageError, PolicyManageService};
@@ -261,6 +268,7 @@ impl<S: diport::Signer + Send + Sync + 'static> AuthGrantServices<S> {
         let lifecycle = Arc::from(DynAuthGrantLifecycle::new_box(lifecycle));
         let refresh = Arc::new(RefreshService::new(
             crate::ports::DynRefreshTokenStore::new_box(refresh_store),
+            Arc::clone(&lifecycle),
             accounts,
             issuer,
             clock,
@@ -394,17 +402,10 @@ impl<S: diport::Signer + Send + Sync + 'static> LoginService<S> {
         let expires_at = now
             .checked_add(self.auth_grant_ttl)
             .ok_or(LoginError::AuthGrantTimeOverflow)?;
-        let grant_id = AuthGrantId::generate();
-        let grant = AuthGrant::new_active(
-            grant_id.clone(),
-            tenant,
-            user_id,
-            now,
-            active.authn_epoch(),
-            expires_at,
-            now,
-        )
-        .map_err(|error| LoginError::Credential(IdentityError::Storage(Box::new(error))))?;
+        let grant =
+            AuthGrant::new_active(tenant, user_id, now, active.authn_epoch(), expires_at, now)
+                .map_err(|error| LoginError::Credential(IdentityError::Storage(Box::new(error))))?;
+        let grant_id = grant.id().clone();
 
         let payload = IdentitySessionCreatedPayload {
             session_id: grant_id.as_str().to_string(),
@@ -583,7 +584,7 @@ pub enum RefreshError {
     /// 呈递的 refresh token 未找到（未知 / 跨租）。
     #[error("refresh token is invalid")]
     Invalid,
-    /// refresh token 已被消费过（重放检测触发级联撤销）。
+    /// refresh token 已被消费过（重放检测原子 compromise grant root 并撤销其 refresh family）。
     #[error("refresh token was replayed")]
     Replayed,
     /// refresh token 已过期。
@@ -636,10 +637,12 @@ impl PendingLoginSecrets {
 /// 若先提交 CAS 再 mint，mint 失败时旧 refresh 已被消费、而新 refresh secret 在错误路径被丢弃——客户端
 /// 既无可用旧 token 也拿不到新 token，被瞬时 mint 故障**永久锁死**。先 mint：mint 失败 ⇒ 旧 refresh 未消费、
 /// 仍 Active，客户端原样重试即可（无锁死、无重放窗口——失败的 mint 未签发任何 access token）。
-/// CAS 在 mint 之后，故「旧 refresh 一次性」仍由 CAS 原子性 + 重放级联撤销保证。
+/// CAS 在 mint 之后，故「旧 refresh 一次性」仍由 CAS 原子性 + replay 时原子关闭 AuthGrant 并撤销其
+/// grant-bound refresh family 保证。
 /// ref: ory/fosite handler/oauth2/flow_refresh.go@master（先生成 token 再事务内 Rotate/Create）。
 pub struct RefreshService<S> {
     store: Box<crate::ports::DynRefreshTokenStore<'static>>,
+    lifecycle: Arc<DynAuthGrantLifecycle<'static>>,
     accounts: Box<DynAccountSecurityReadRepo<'static>>,
     issuer: std::sync::Arc<authn::JwtIssuer<diport::RssAccessProfile, S>>,
     clock: Box<dyn diport::Clock>,
@@ -647,9 +650,41 @@ pub struct RefreshService<S> {
 }
 
 impl<S: diport::Signer + Send + Sync + 'static> RefreshService<S> {
+    async fn compromise_replayed_grant(
+        &self,
+        scope: TenantRepoScope,
+        record: &RefreshTokenRecord,
+        known_grant: Option<AuthGrant>,
+        occurred_at: SystemTime,
+    ) -> Result<(), RefreshError> {
+        let grant = match known_grant {
+            Some(grant) => grant,
+            None => {
+                let Some(grant) = self
+                    .lifecycle
+                    .find_active(scope, record.auth_grant_id().clone(), occurred_at)
+                    .await
+                    .map_err(RefreshError::Store)?
+                else {
+                    // Another replay/logout winner already terminalized the root. The security
+                    // objective is satisfied and replay remains an indistinguishable rejection.
+                    return Ok(());
+                };
+                grant
+            }
+        };
+        let command = AuthGrantCloseCommand::from_refresh_replay(record, grant, occurred_at)
+            .ok_or(RefreshError::Invalid)?;
+        self.lifecycle
+            .close(scope, command)
+            .await
+            .map_err(RefreshError::Store)
+    }
+
     /// 组合根构造：account-security reader is mandatory and has no fallback.
-    pub fn new(
+    fn new(
         store: Box<crate::ports::DynRefreshTokenStore<'static>>,
+        lifecycle: Arc<DynAuthGrantLifecycle<'static>>,
         accounts: Box<DynAccountSecurityReadRepo<'static>>,
         issuer: std::sync::Arc<authn::JwtIssuer<diport::RssAccessProfile, S>>,
         clock: Box<dyn diport::Clock>,
@@ -657,6 +692,7 @@ impl<S: diport::Signer + Send + Sync + 'static> RefreshService<S> {
     ) -> Self {
         Self {
             store,
+            lifecycle,
             accounts,
             issuer,
             clock,
@@ -697,14 +733,14 @@ impl<S: diport::Signer + Send + Sync + 'static> RefreshService<S> {
         {
             return Err(RefreshError::Invalid);
         }
-        let subject = current.user_id().as_uuid().hyphenated().to_string();
         // mint 先于落库：access mint 失败 ⇒ 未写任何 refresh 记录、客户端重登即可（无悬挂 token）。
         let access = self
             .issuer
-            .issue_access(authn::JwtAccessPrincipal::User {
-                subject: &subject,
-                tenant: current.tenant(),
-            })
+            .issue_access(
+                grant
+                    .access_issue_input()
+                    .map_err(|_| RefreshError::Invalid)?,
+            )
             .await
             .map_err(RefreshError::Mint)?;
         let secret = secure::OpaqueToken::generate();
@@ -737,11 +773,13 @@ impl<S: diport::Signer + Send + Sync + 'static> RefreshService<S> {
     /// ## 步骤顺序（参见 struct 级 rustdoc 关于「mint 先于 CAS」的说明）
     ///
     /// 1. 重算呈递串摘要 → `find_by_hash`（查无 → Invalid）
-    /// 2. 若 status != Active → 重放检测：级联撤销整条谱系 → Replayed
+    /// 2. 若 status != Active → 重放检测：经 [`AuthGrantLifecycle::close`] 原子 Compromised root +
+    ///    revoke grant-bound refresh family → Replayed
     /// 3. 若 is_expired → Expired
     /// 4. 由源 record `begin_rotation` 派生 sealed [`RefreshRotation`]（tenant/parent/lineage 类型层 Hard 派生）
     /// 5. mint access JWT（先于 CAS——失败则旧 refresh 未消费、客户端可重试，#284 F1）
-    /// 6. 原子 CAS（store.rotate(rotation)）：若未命中 → 并发双换 / 重放：级联撤销 → Replayed
+    /// 6. 原子 CAS（store.rotate(rotation)）：若未命中 → 同一 replay close funnel 原子终结 root/family
+    ///    → Replayed
     /// 7. 返回 RefreshBundle
     ///
     /// `skip_all`：presented bearer secret 不入 span（PII，observability.md §redaction）。
@@ -765,30 +803,45 @@ impl<S: diport::Signer + Send + Sync + 'static> RefreshService<S> {
             .map_err(RefreshError::Store)?
             .ok_or(RefreshError::Invalid)?;
 
-        if rec.tenant() != tenant || rec.auth_grant_status() != AuthGrantStatus::Active {
+        if rec.tenant() != tenant {
             return Err(RefreshError::Invalid);
         }
         let user_id = rec.user_id();
 
-        // 2. User-record 重放检测：status != Active ⇒ 级联撤销 + Replayed
+        // 2. User-record 重放检测：status != Active ⇒ 原子 compromise 根 + 撤销全 family。
         if rec.status() != RefreshStatus::Active {
-            self.store
-                .revoke_lineage(tenant_scope, rec.lineage_id().clone())
-                .await
-                .map_err(RefreshError::Store)?;
+            let now = self.clock.now();
+            self.compromise_replayed_grant(tenant_scope, &rec, None, now)
+                .await?;
             tracing::warn!(
                 tenant_id = %tenant,
-                lineage_id = %rec.lineage_id().as_str(),
                 operation = "refresh_replay_detected",
-                "refresh token replay detected; lineage revoked"
+                "refresh token replay detected; authentication grant compromised"
             );
             return Err(RefreshError::Replayed);
+        }
+        if rec.auth_grant_status() != AuthGrantStatus::Active {
+            return Err(RefreshError::Invalid);
         }
 
         // 3. 过期检测
         let now = self.clock.now();
         if rec.is_expired(now) {
             return Err(RefreshError::Expired);
+        }
+
+        let grant = self
+            .lifecycle
+            .find_active(tenant_scope, rec.auth_grant_id().clone(), now)
+            .await
+            .map_err(RefreshError::Store)?
+            .ok_or(RefreshError::Invalid)?;
+        if grant.id() != rec.auth_grant_id()
+            || grant.tenant() != tenant
+            || grant.user_id() != user_id
+            || grant.authn_epoch_at_issue() != rec.issuance_epoch()
+        {
+            return Err(RefreshError::Invalid);
         }
 
         let active = self
@@ -805,8 +858,6 @@ impl<S: diport::Signer + Send + Sync + 'static> RefreshService<S> {
         {
             return Err(RefreshError::Invalid);
         }
-        let subject = active.user_id().as_uuid().hyphenated().to_string();
-
         // 4. 由源 record 派生 sealed 轮换命令（tenant/parent/lineage 从源派生，错位类型层不可表达，#284 F2）
         let new_secret = secure::OpaqueToken::generate();
         let new_hash = RefreshTokenHash::new(secure::digest(new_secret.expose()));
@@ -818,10 +869,11 @@ impl<S: diport::Signer + Send + Sync + 'static> RefreshService<S> {
         //    claim source is the current Active account receipt, not caller-selected input.
         let access = self
             .issuer
-            .issue_access(authn::JwtAccessPrincipal::User {
-                subject: &subject,
-                tenant: active.tenant(),
-            })
+            .issue_access(
+                grant
+                    .access_issue_input()
+                    .map_err(|_| RefreshError::Invalid)?,
+            )
             .await
             .map_err(RefreshError::Mint)?;
 
@@ -836,16 +888,14 @@ impl<S: diport::Signer + Send + Sync + 'static> RefreshService<S> {
             RefreshRotationOutcome::AccountStale => return Err(RefreshError::Invalid),
             RefreshRotationOutcome::Expired => return Err(RefreshError::Expired),
             RefreshRotationOutcome::Replay => {
-                // 并发双换 / CAS miss ⇒ 重放处理：级联撤销 + Replayed（已 mint 的 access 丢弃，无害——未交付客户端）
-                self.store
-                    .revoke_lineage(tenant_scope, rec.lineage_id().clone())
-                    .await
-                    .map_err(RefreshError::Store)?;
+                // 并发双换 / CAS miss ⇒ 同一 replay funnel 原子 compromise 根 + 撤销 family。
+                // 已 mint 的 access 未交付客户端；根关闭也使此前交付的 access 立即过 durable fence。
+                self.compromise_replayed_grant(tenant_scope, &rec, Some(grant), now)
+                    .await?;
                 tracing::warn!(
                     tenant_id = %tenant,
-                    lineage_id = %rec.lineage_id().as_str(),
                     operation = "refresh_replay_detected",
-                    "refresh token replay detected; lineage revoked"
+                    "refresh token replay detected; authentication grant compromised"
                 );
                 return Err(RefreshError::Replayed);
             }
@@ -939,22 +989,6 @@ fn seed_issuer(
         // reason: const config（非空 iss/aud/key、ttl>0）⇒ JwtIssuer::new 不可能失败。
         .expect("seed jwt issuer config is valid"),
     )
-}
-
-#[cfg(any(test, feature = "seed-login"))]
-pub fn seed_refresh_service(
-    store: Box<crate::ports::DynRefreshTokenStore<'static>>,
-    accounts: Box<DynAccountSecurityReadRepo<'static>>,
-    mk_clock: impl Fn() -> Box<dyn diport::Clock>,
-    refresh_ttl: Duration,
-) -> Arc<RefreshService<SeedSigner>> {
-    Arc::new(RefreshService::new(
-        store,
-        accounts,
-        seed_issuer(mk_clock()),
-        mk_clock(),
-        refresh_ttl,
-    ))
 }
 
 /// Assemble login and refresh from one test/demo provider owner.
@@ -1141,7 +1175,8 @@ async fn refresh_handler_bytes<S: diport::Signer + Send + Sync + 'static>(
             };
             (StatusCode::CREATED, Json(response)).into_response()
         }
-        // refresh token 是凭据：未知/重放/过期一律 401（不区分以免 token 探测），重放已触发级联撤销。
+        // refresh token 是凭据：未知/重放/过期一律 401（不区分以免 token 探测）；重放已原子
+        // Compromised grant root 并撤销其 grant-bound refresh family。
         Err(RefreshError::Invalid | RefreshError::Replayed | RefreshError::Expired) => {
             httpserve::error::unauthenticated(request_id)
         }
@@ -2563,13 +2598,13 @@ async fn logout_handler<S: diport::Signer + Send + Sync + 'static>(
         Ok(request) => request,
         Err(_) => return httpserve::error::validation_bad_request(&request_id),
     };
+    let session_id = match AuthGrantId::hydrate(request.session_id) {
+        Ok(session_id) => session_id,
+        Err(_) => return httpserve::error::validation_bad_request(&request_id),
+    };
     match state
         .service
-        .logout(
-            auth.tenant,
-            auth.user_id,
-            AuthGrantId::new(request.session_id),
-        )
+        .logout(auth.tenant, auth.user_id, session_id)
         .await
     {
         Ok(()) => (
@@ -2989,6 +3024,7 @@ mod tests {
         DynPolicyLifecycle, Operator, Policy, PolicyCondition, PolicyEffect, PolicyObligations,
         PolicyRule, Role,
     };
+    use authn::CredentialSecurityEventKind;
     use diport::OutboxEmitError;
     use testkit::ContractRequest;
 
@@ -3369,6 +3405,21 @@ mod tests {
     fn uid(raw: &str) -> ids::UserId {
         #[allow(clippy::expect_used)]
         ids::UserId::parse(raw).expect("canonical user id")
+    }
+
+    #[allow(clippy::expect_used)]
+    fn grant_id(raw: impl AsRef<str>) -> AuthGrantId {
+        let raw = raw.as_ref();
+        if let Ok(id) = AuthGrantId::hydrate(raw) {
+            return id;
+        }
+        let digest = secure::digest(raw);
+        let mut bytes = [0_u8; 16];
+        bytes.copy_from_slice(&digest[..16]);
+        bytes[6] = (bytes[6] & 0x0f) | 0x40;
+        bytes[8] = (bytes[8] & 0x3f) | 0x80;
+        AuthGrantId::hydrate(uuid::Uuid::from_bytes(bytes).hyphenated().to_string())
+            .expect("derived test grant id is canonical UUIDv4")
     }
 
     fn credential_matches(credential: &Credential, password: &str) -> bool {
@@ -5422,7 +5473,7 @@ mod tests {
             )
             .await
             .expect("login ok");
-        let sid = AuthGrantId::new(&resp.data.session_id);
+        let sid = grant_id(&resp.data.session_id);
         assert_eq!(capture.count(), 1, "co-tx 写应恰一次");
 
         // login 写入的会话经同一 lifecycle 可查回（anti-vacuity：非空 store、非两独立面）。
@@ -5479,7 +5530,7 @@ mod tests {
             )
             .await
             .expect("login ok");
-        let sid = AuthGrantId::new(&resp.data.session_id);
+        let sid = grant_id(&resp.data.session_id);
 
         // 跨租 logout（tenant B）：no-op，tenant A 会话仍在。
         svc.logout(tb, uid(CANON_USER), sid.clone())
@@ -5536,7 +5587,7 @@ mod tests {
             )
             .await
             .expect("login ok");
-        let sid = AuthGrantId::new(&resp.data.session_id);
+        let sid = grant_id(&resp.data.session_id);
 
         let err = svc
             .logout(ta, uid(GHOST_USER), sid.clone())
@@ -8692,7 +8743,7 @@ mod tests {
                 )
                 .await
                 .expect("login ok");
-            let session_id = AuthGrantId::new(login_resp.data.session_id.clone());
+            let session_id = grant_id(login_resp.data.session_id.clone());
             assert!(
                 capture
                     .is_active(tid(CANON_TENANT), session_id.clone())
@@ -8759,10 +8810,7 @@ mod tests {
         assert_eq!(capture.close_count(), 0);
         assert!(
             capture
-                .is_active(
-                    tid(CANON_TENANT),
-                    AuthGrantId::new(login_resp.data.session_id)
-                )
+                .is_active(tid(CANON_TENANT), grant_id(login_resp.data.session_id))
                 .await,
             "other actor logout 不应撤销 session"
         );
@@ -8770,7 +8818,7 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::expect_used)]
-    async fn logout_handler_rejects_missing_auth_malformed_json_and_bad_subject() {
+    async fn logout_handler_rejects_missing_auth_malformed_json_invalid_session_and_bad_subject() {
         let capture = CapturingAuthGrantLifecycle::default();
         let svc = Arc::new(seed_service(&capture, 1_000, 3_600));
         let login_resp = svc
@@ -8784,7 +8832,7 @@ mod tests {
             )
             .await
             .expect("seed active session");
-        let session_id = AuthGrantId::new(login_resp.data.session_id.clone());
+        let session_id = grant_id(login_resp.data.session_id.clone());
         assert!(
             capture
                 .is_active(tid(CANON_TENANT), session_id.clone())
@@ -8817,6 +8865,26 @@ mod tests {
         malformed
             .ensure_status(StatusCode::BAD_REQUEST)
             .expect("logout malformed json -> 400");
+
+        for invalid_session_id in [
+            "not-a-uuid".to_string(),
+            login_resp.data.session_id.to_uppercase(),
+            login_resp.data.session_id.replace('-', ""),
+        ] {
+            let invalid_session = testkit::call(
+                with_auth(router.clone(), user_evidence(CANON_USER)),
+                ContractRequest::post(LOGOUT_HTTP_SPEC.route.path()).json(&IdentityLogoutRequest {
+                    session_id: invalid_session_id.clone(),
+                }),
+            )
+            .await
+            .expect("call invalid session id");
+            invalid_session
+                .ensure_status(StatusCode::BAD_REQUEST)
+                .expect("logout invalid session id -> 400");
+            assert_eq!(capture.find_count(), 0, "sessionId={invalid_session_id}");
+            assert_eq!(capture.close_count(), 0, "sessionId={invalid_session_id}");
+        }
 
         let bad_subject = testkit::call(
             with_auth(router, user_evidence("not-a-user-uuid")),
@@ -8890,14 +8958,50 @@ mod tests {
         clock: Box<dyn diport::Clock>,
         refresh_ttl: Duration,
     ) -> RefreshService<TestSigner> {
-        let issuer = make_jwt_issuer(make_clock(1_700_000_000));
+        let issuer = make_jwt_issuer(Box::new(FixedClock(clock.now())));
         RefreshService::new(
-            crate::ports::DynRefreshTokenStore::new_box(store),
+            crate::ports::DynRefreshTokenStore::new_box(store.clone()),
+            test_lifecycle(store),
             accounts,
             std::sync::Arc::new(issuer),
             clock,
             refresh_ttl,
         )
+    }
+
+    fn test_lifecycle(
+        store: crate::internal::mem::InMemAuthGrantStore,
+    ) -> Arc<DynAuthGrantLifecycle<'static>> {
+        Arc::from(DynAuthGrantLifecycle::new_box(store))
+    }
+
+    #[allow(clippy::expect_used)]
+    fn lifecycle_for_record(record: &RefreshTokenRecord) -> Arc<DynAuthGrantLifecycle<'static>> {
+        test_lifecycle(lifecycle_store_for_record(record))
+    }
+
+    #[allow(clippy::expect_used)]
+    fn lifecycle_store_for_record(
+        record: &RefreshTokenRecord,
+    ) -> crate::internal::mem::InMemAuthGrantStore {
+        let store = crate::internal::mem::InMemAuthGrantStore::new();
+        let grant = AuthGrant::hydrate(AuthGrantSnapshot {
+            id: record.auth_grant_id().clone(),
+            tenant: record.tenant(),
+            user_id: record.user_id(),
+            auth_time: record.issued_at(),
+            authn_epoch_at_issue: record.issuance_epoch(),
+            status: AuthGrantStatus::Active,
+            expires_at: record.expires_at(),
+            created_at: record.issued_at(),
+            closed_at: None,
+            close_reason: None,
+        })
+        .expect("refresh fixture grant");
+        store
+            .seed_login_pair(grant, record.clone())
+            .expect("seed grant and refresh fixture");
+        store
     }
 
     fn make_auth_grant_services<P>(
@@ -8909,10 +9013,11 @@ mod tests {
     where
         P: AuthGrantProvider,
     {
+        let issuer_clock: Box<dyn diport::Clock> = Box::new(FixedClock(clock.now()));
         AuthGrantServices::from_provider(
             provider,
             accounts,
-            Arc::new(make_jwt_issuer(make_clock(1_700_000_000))),
+            Arc::new(make_jwt_issuer(issuer_clock)),
             clock,
             refresh_ttl,
         )
@@ -8935,6 +9040,14 @@ mod tests {
         svc: &RefreshService<S>,
         store: &crate::internal::mem::InMemAuthGrantStore,
     ) -> authn::RefreshToken {
+        issue_test_user_bundle(svc, store).await.refresh
+    }
+
+    #[allow(clippy::expect_used)]
+    async fn issue_test_user_bundle<S: diport::Signer + Send + Sync + 'static>(
+        svc: &RefreshService<S>,
+        store: &crate::internal::mem::InMemAuthGrantStore,
+    ) -> RefreshBundle {
         let tenant = tid(CANON_TENANT);
         let state = svc
             .accounts
@@ -8945,7 +9058,6 @@ mod tests {
         let active = state.try_into_active().expect("active account");
         let now = svc.clock.now();
         let grant = AuthGrant::new_active(
-            AuthGrantId::new(uuid::Uuid::new_v4().to_string()),
             active.tenant(),
             active.user_id(),
             now,
@@ -8965,7 +9077,22 @@ mod tests {
         store
             .seed_login_pair(grant, record)
             .expect("persist test login pair");
-        pending.release(persistence.confirm()).refresh
+        pending.release(persistence.confirm())
+    }
+
+    #[allow(clippy::expect_used)]
+    fn decode_access_claims(token: &authn::MintedJwt) -> serde_json::Value {
+        use base64::Engine as _;
+
+        let encoded = token
+            .as_str()
+            .split('.')
+            .nth(1)
+            .expect("access token payload segment");
+        let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(encoded)
+            .expect("base64url payload");
+        serde_json::from_slice(&bytes).expect("access claims json")
     }
 
     #[tokio::test]
@@ -9048,6 +9175,7 @@ mod tests {
         .expect("issuer");
         let service = RefreshService::new(
             crate::ports::DynRefreshTokenStore::new_box(store.clone()),
+            test_lifecycle(store.clone()),
             DynAccountSecurityReadRepo::new_box(accounts),
             Arc::new(issuer),
             make_clock(1_700_000_000),
@@ -9055,7 +9183,6 @@ mod tests {
         );
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
         let stale_grant = AuthGrant::new_active(
-            AuthGrantId::new("stale-epoch-grant"),
             receipt.tenant(),
             receipt.user_id(),
             now,
@@ -9167,6 +9294,7 @@ mod tests {
             .expect("issuer");
             let service = RefreshService::new(
                 crate::ports::DynRefreshTokenStore::new_box(store.clone()),
+                test_lifecycle(store.clone()),
                 DynAccountSecurityReadRepo::new_box(accounts),
                 Arc::new(issuer),
                 make_clock(1_700_000_000),
@@ -9254,6 +9382,7 @@ mod tests {
             .expect("issuer");
             let service = RefreshService::new(
                 crate::ports::DynRefreshTokenStore::new_box(store.clone()),
+                test_lifecycle(store.clone()),
                 DynAccountSecurityReadRepo::new_box(ScriptedReader(scripted)),
                 Arc::new(issuer),
                 make_clock(1_700_000_000),
@@ -9262,7 +9391,6 @@ mod tests {
 
             let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
             let grant = AuthGrant::new_active(
-                AuthGrantId::new(uuid::Uuid::new_v4().to_string()),
                 receipt.tenant(),
                 receipt.user_id(),
                 now,
@@ -9356,9 +9484,9 @@ mod tests {
             let record = RefreshTokenRecord::hydrate(RefreshTokenSnapshot {
                 id: RefreshTokenId::new("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"),
                 tenant,
-                auth_grant_id: AuthGrantId::new("grant-non-active-account"),
+                auth_grant_id: grant_id("grant-non-active-account"),
                 user_id: user,
-                authn_epoch_at_issue: crate::AuthnEpoch::ZERO,
+                authn_epoch_at_issue: authn::AuthnEpoch::ZERO,
                 auth_grant_status: AuthGrantStatus::Active,
                 token_hash: RefreshTokenHash::new([0xAA; 32]),
                 parent_id: None,
@@ -9368,6 +9496,7 @@ mod tests {
                 expires_at: issued + Duration::from_secs(3_600),
             })
             .expect("valid refresh fixture");
+            let lifecycle = lifecycle_for_record(&record);
             let mut store = MockGateStore::new();
             store
                 .expect_find_by_hash()
@@ -9390,6 +9519,7 @@ mod tests {
             .expect("issuer");
             let service = RefreshService::new(
                 crate::ports::DynRefreshTokenStore::new_box(store),
+                lifecycle,
                 DynAccountSecurityReadRepo::new_box(accounts),
                 Arc::new(issuer),
                 make_clock(1_700_000_000),
@@ -9500,9 +9630,9 @@ mod tests {
             let record = RefreshTokenRecord::hydrate(RefreshTokenSnapshot {
                 id: RefreshTokenId::new("eeeeeeee-bbbb-4ccc-8ddd-eeeeeeeeeeee"),
                 tenant,
-                auth_grant_id: AuthGrantId::new("grant-account-mismatch"),
+                auth_grant_id: grant_id("grant-account-mismatch"),
                 user_id: user,
-                authn_epoch_at_issue: crate::AuthnEpoch::ZERO,
+                authn_epoch_at_issue: authn::AuthnEpoch::ZERO,
                 auth_grant_status: AuthGrantStatus::Active,
                 token_hash: RefreshTokenHash::new([0xEE; 32]),
                 parent_id: None,
@@ -9512,6 +9642,7 @@ mod tests {
                 expires_at: now + Duration::from_secs(3_600),
             })
             .expect("valid refresh fixture");
+            let lifecycle = lifecycle_for_record(&record);
             let mut store = MockAccountGateStore::new();
             store
                 .expect_find_by_hash()
@@ -9535,6 +9666,7 @@ mod tests {
             .expect("issuer");
             let service = RefreshService::new(
                 crate::ports::DynRefreshTokenStore::new_box(store),
+                lifecycle,
                 DynAccountSecurityReadRepo::new_box(ScriptedReader(scripted.clone())),
                 Arc::new(issuer),
                 make_clock(1_700_000_000),
@@ -9549,6 +9681,197 @@ mod tests {
             } else {
                 assert!(matches!(result, Err(RefreshError::Invalid)));
             }
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn refresh_rotate_rejects_invalid_grant_before_sign_or_cas() {
+        #[derive(Clone)]
+        enum GrantRead {
+            Missing,
+            Failed,
+            Grant(AuthGrant),
+        }
+
+        struct ScriptedLifecycle(GrantRead);
+        impl AuthGrantLifecycle for ScriptedLifecycle {
+            async fn persist_login_grant(
+                &self,
+                _receipt: LoginProducerReceipt,
+                _scope: TenantRepoScope,
+                _mutation: LoginGrantMutation,
+                _entry: EventEntry,
+                _envelope: OutboxEnvelopeParts,
+            ) -> Result<PersistedLoginGrantReceipt, OutboxEmitError> {
+                unreachable!("grant read fixture never persists")
+            }
+
+            async fn find_active(
+                &self,
+                _scope: TenantRepoScope,
+                _grant_id: AuthGrantId,
+                _observed_at: SystemTime,
+            ) -> Result<Option<AuthGrant>, IdentityError> {
+                match &self.0 {
+                    GrantRead::Missing => Ok(None),
+                    GrantRead::Failed => Err(IdentityError::Storage(Box::new(
+                        std::io::Error::other("scripted grant store outage"),
+                    ))),
+                    GrantRead::Grant(grant) => Ok(Some(grant.clone())),
+                }
+            }
+
+            async fn close(
+                &self,
+                _scope: TenantRepoScope,
+                _command: AuthGrantCloseCommand,
+            ) -> Result<(), IdentityError> {
+                unreachable!("grant read fixture never closes")
+            }
+        }
+
+        struct GateStore {
+            record: RefreshTokenRecord,
+            rotate_calls: Arc<AtomicUsize>,
+        }
+        impl RefreshTokenStore for GateStore {
+            async fn find_by_hash(
+                &self,
+                _scope: TenantRepoScope,
+                _hash: RefreshTokenHash,
+            ) -> Result<Option<RefreshTokenRecord>, IdentityError> {
+                Ok(Some(self.record.clone()))
+            }
+
+            async fn rotate(
+                &self,
+                _scope: TenantRepoScope,
+                _mutation: RefreshRotationMutation,
+            ) -> Result<RefreshRotationOutcome, IdentityError> {
+                self.rotate_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(RefreshRotationOutcome::Applied)
+            }
+
+            async fn revoke_lineage(
+                &self,
+                _scope: TenantRepoScope,
+                _lineage_id: RefreshTokenId,
+            ) -> Result<(), IdentityError> {
+                Ok(())
+            }
+        }
+
+        #[derive(Clone)]
+        struct CountingSigner(Arc<AtomicUsize>);
+        impl diport::Signer for CountingSigner {
+            async fn sign(
+                &self,
+                _request: diport::SignRequest,
+            ) -> Result<diport::Signature, diport::SignerError> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(diport::Signature::new(b"must-not-be-used".to_vec()))
+            }
+
+            async fn shutdown(&self) -> Result<(), diport::SignerError> {
+                Ok(())
+            }
+        }
+
+        let tenant = tid(CANON_TENANT);
+        let user = uid(CANON_USER);
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let active = AuthGrant::new_active(
+            tenant,
+            user,
+            now,
+            authn::AuthnEpoch::ZERO,
+            now + Duration::from_secs(3_600),
+            now,
+        )
+        .expect("active grant");
+        let revoked = active
+            .clone()
+            .close(GrantSecurityEventKind::LogoutCurrent, now)
+            .expect("revoke grant")
+            .next()
+            .clone();
+        let expired = AuthGrant::new_active(
+            tenant,
+            user,
+            now - Duration::from_secs(3_600),
+            authn::AuthnEpoch::ZERO,
+            now,
+            now - Duration::from_secs(3_600),
+        )
+        .expect("expired active snapshot");
+        let mismatched = AuthGrant::new_active(
+            tenant,
+            uid(GHOST_USER),
+            now,
+            authn::AuthnEpoch::ZERO,
+            now + Duration::from_secs(3_600),
+            now,
+        )
+        .expect("mismatched grant");
+
+        for (case, read) in [
+            ("missing", GrantRead::Missing),
+            ("provider failure", GrantRead::Failed),
+            ("revoked", GrantRead::Grant(revoked.clone())),
+            ("expired", GrantRead::Grant(expired.clone())),
+            ("binding mismatch", GrantRead::Grant(mismatched.clone())),
+        ] {
+            let record = RefreshTokenRecord::hydrate(RefreshTokenSnapshot {
+                id: RefreshTokenId::new(format!("refresh-{case}")),
+                tenant,
+                auth_grant_id: active.id().clone(),
+                user_id: user,
+                authn_epoch_at_issue: authn::AuthnEpoch::ZERO,
+                auth_grant_status: AuthGrantStatus::Active,
+                token_hash: RefreshTokenHash::new([0xA5; 32]),
+                parent_id: None,
+                lineage_id: RefreshTokenId::new(format!("refresh-{case}")),
+                status: RefreshStatus::Active,
+                issued_at: now,
+                expires_at: now + Duration::from_secs(3_600),
+            })
+            .expect("valid refresh fixture");
+            let sign_calls = Arc::new(AtomicUsize::new(0));
+            let rotate_calls = Arc::new(AtomicUsize::new(0));
+            let issuer = authn::JwtIssuer::<diport::RssAccessProfile, _>::new(
+                Arc::new(CountingSigner(Arc::clone(&sign_calls))),
+                make_clock(1_700_000_000),
+                authn::JwtIssuerConfig::rss_access(
+                    authn::SigningKeyRing::single(diport::KeyId::new("test-key")).expect("key id"),
+                    diport::SigningPurpose::new(SEED_JWT_PURPOSE),
+                    "https://test.example",
+                    "test-audience",
+                    Duration::from_secs(900),
+                ),
+            )
+            .expect("issuer");
+            let service = RefreshService::new(
+                crate::ports::DynRefreshTokenStore::new_box(GateStore {
+                    record,
+                    rotate_calls: Arc::clone(&rotate_calls),
+                }),
+                Arc::from(DynAuthGrantLifecycle::new_box(ScriptedLifecycle(read))),
+                seeded_account_reader(),
+                Arc::new(issuer),
+                make_clock(1_700_000_000),
+                Duration::from_secs(3_600),
+            );
+
+            assert!(
+                service
+                    .rotate(tenant, &authn::RefreshToken::new("presented"))
+                    .await
+                    .is_err(),
+                "case={case}"
+            );
+            assert_eq!(sign_calls.load(Ordering::SeqCst), 0, "case={case}");
+            assert_eq!(rotate_calls.load(Ordering::SeqCst), 0, "case={case}");
         }
     }
 
@@ -9567,8 +9890,11 @@ mod tests {
         let ta = tid(CANON_TENANT);
 
         // issue → rotate 成功
-        let old_rf = issue_test_user(&svc, &store).await;
+        let initial = issue_test_user_bundle(&svc, &store).await;
+        let initial_claims = decode_access_claims(&initial.access);
+        let old_rf = initial.refresh;
         let bundle = svc.rotate(ta, &old_rf).await.expect("rotate ok");
+        let rotated_claims = decode_access_claims(&bundle.access);
         assert!(
             !bundle.access.as_str().is_empty(),
             "access JWT must be non-empty"
@@ -9578,6 +9904,10 @@ mod tests {
             old_rf.as_str(),
             "新 refresh ≠ 旧 refresh"
         );
+        for stable in ["sid", "auth_time", "authn_epoch"] {
+            assert_eq!(initial_claims[stable], rotated_claims[stable], "{stable}");
+        }
+        assert_ne!(initial_claims["jti"], rotated_claims["jti"]);
 
         // 旧 refresh 再 rotate ⇒ Replayed（重放检测）
         let err = svc
@@ -9586,22 +9916,60 @@ mod tests {
             .expect_err("旧 refresh 已消费，应 Replayed");
         assert!(matches!(err, RefreshError::Replayed), "old rotate: {err:?}");
 
-        // 级联撤销后新 refresh 也不可用
+        let session_id = grant_id(
+            initial_claims["sid"]
+                .as_str()
+                .expect("access token sid claim is a string"),
+        );
+        assert!(
+            store
+                .find_active(
+                    tenant_repo_scope(ta),
+                    session_id.clone(),
+                    SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000),
+                )
+                .await
+                .expect("grant lookup succeeds")
+                .is_none(),
+            "replay must terminalize the access-token grant root"
+        );
+        let root = store
+            .grant_snapshot(&session_id)
+            .expect("grant root remains durably inspectable");
+        assert_eq!(root.status(), AuthGrantStatus::Compromised);
+        assert_eq!(
+            root.close_reason(),
+            Some(CredentialSecurityEventKind::Grant(
+                GrantSecurityEventKind::RefreshReuseDetected
+            ))
+        );
+        let family = store.refresh_family_snapshot(&session_id);
+        assert_eq!(
+            family.len(),
+            2,
+            "both refresh generations remain observable"
+        );
+        assert!(family.iter().all(|record| {
+            record.status() == RefreshStatus::Revoked
+                && record.auth_grant_status() == AuthGrantStatus::Compromised
+        }));
+
+        // grant-bound family 原子撤销后，新 refresh 也不可用。
         let err2 = svc
             .rotate(ta, &bundle.refresh)
             .await
-            .expect_err("级联撤销后新 refresh 也应 Replayed");
+            .expect_err("grant-bound family 撤销后新 refresh 也应 Replayed");
         assert!(
             matches!(err2, RefreshError::Replayed),
             "cascaded new: {err2:?}"
         );
     }
 
-    // ── 测试 R2：重放拒绝 + 级联撤销 — A→B rotate，再用 A ⇒ Replayed，且 B 也 ⇒ Replayed ──
+    // ── 测试 R2：重放关闭 grant + family — A→B，再用 A ⇒ Replayed，且 B 也 ⇒ Replayed ──
 
     #[tokio::test]
     #[allow(clippy::expect_used)]
-    async fn refresh_replay_triggers_cascade_revoke() {
+    async fn refresh_replay_compromises_grant_and_revokes_family() {
         let store = crate::internal::mem::InMemAuthGrantStore::new();
         let svc = make_refresh_svc(
             store.clone(),
@@ -9613,7 +9981,7 @@ mod tests {
         let token_a = issue_test_user(&svc, &store).await;
         let bundle_b = svc.rotate(ta, &token_a).await.expect("A→B ok");
 
-        // 用 A 重放 ⇒ Replayed（A 已 Consumed）+ 级联 Revoke 整条 lineage
+        // 用 A 重放 ⇒ Replayed（A 已 Consumed）+ 原子 Compromised root/revoke family。
         let err = svc.rotate(ta, &token_a).await.expect_err("replayed A");
         assert!(matches!(err, RefreshError::Replayed));
 
@@ -9743,16 +10111,16 @@ mod tests {
             .expect("revoke unknown is idempotent");
     }
 
-    // ── 测试 R9：CAS-miss 分支 — store.rotate 返回 Replay → revoke_lineage 被调用一次 + Replayed ──
+    // ── 测试 R9：CAS-miss 分支 — store.rotate 返回 Replay → 原子 close grant + Replayed ──
     //
     // 验证 `rotate` 的步骤 5 if !applied 分支：
-    // ①  `revoke_lineage` 以正确 lineage_id 被调用恰一次；
+    // ①  provider-owned grant close 终结 root，且不再走独立 `revoke_lineage` 写；
     // ②  rotate 返回 `Err(RefreshError::Replayed)`。
     // 用 mockall 控制 store 行为（`find_by_hash` 返回 Active 记录，`rotate` 返回 Replay）。
 
     #[tokio::test]
     #[allow(clippy::expect_used)]
-    async fn refresh_rotate_cas_miss_revokes_lineage_and_returns_replayed() {
+    async fn refresh_rotate_cas_miss_closes_grant_and_returns_replayed() {
         use crate::ports::DynRefreshTokenStore;
 
         mockall::mock! {
@@ -9784,9 +10152,9 @@ mod tests {
         let active_rec = RefreshTokenRecord::hydrate(RefreshTokenSnapshot {
             id: RefreshTokenId::new(lineage_str),
             tenant: ta,
-            auth_grant_id: AuthGrantId::new("grant-cas-miss"),
+            auth_grant_id: grant_id("grant-cas-miss"),
             user_id: uid(CANON_USER),
-            authn_epoch_at_issue: crate::AuthnEpoch::ZERO,
+            authn_epoch_at_issue: authn::AuthnEpoch::ZERO,
             auth_grant_status: AuthGrantStatus::Active,
             token_hash: RefreshTokenHash::new([0xAA; 32]),
             parent_id: None,
@@ -9796,6 +10164,8 @@ mod tests {
             expires_at: issued + Duration::from_secs(3_600),
         })
         .expect("valid refresh fixture");
+        let lifecycle_store = lifecycle_store_for_record(&active_rec);
+        let lifecycle = test_lifecycle(lifecycle_store.clone());
 
         let mut mock = MockCasMissStore::new();
 
@@ -9807,14 +10177,12 @@ mod tests {
         mock.expect_rotate()
             .returning(|_scope, _rotation| Ok(RefreshRotationOutcome::Replay));
 
-        // revoke_lineage 须以正确 lineage_id 被调用恰一次（步骤 5 if !applied 分支）
-        mock.expect_revoke_lineage()
-            .withf(move |_t, lid| lid.as_str() == lineage_str)
-            .times(1)
-            .returning(|_t, _lid| Ok(()));
+        // replay 必须只走 lifecycle.close 的 provider-owned atomic 写，不得双写 lineage。
+        mock.expect_revoke_lineage().times(0);
 
         let svc = RefreshService::new(
             DynRefreshTokenStore::new_box(mock),
+            lifecycle,
             seeded_account_reader(),
             std::sync::Arc::new(make_jwt_issuer(make_clock(1_700_000_000))),
             make_clock(1_700_000_000),
@@ -9827,6 +10195,31 @@ mod tests {
             .await
             .expect_err("CAS miss 应返回 Replayed");
         assert!(matches!(err, RefreshError::Replayed), "CAS miss: {err:?}");
+        assert!(
+            lifecycle_store
+                .find_active(tenant_repo_scope(ta), grant_id("grant-cas-miss"), issued)
+                .await
+                .expect("grant lookup succeeds")
+                .is_none(),
+            "CAS-miss replay must terminalize the grant root"
+        );
+        let grant_id = grant_id("grant-cas-miss");
+        let root = lifecycle_store
+            .grant_snapshot(&grant_id)
+            .expect("grant root remains durably inspectable");
+        assert_eq!(root.status(), AuthGrantStatus::Compromised);
+        assert_eq!(
+            root.close_reason(),
+            Some(CredentialSecurityEventKind::Grant(
+                GrantSecurityEventKind::RefreshReuseDetected
+            ))
+        );
+        let family = lifecycle_store.refresh_family_snapshot(&grant_id);
+        assert_eq!(family.len(), 1);
+        assert!(family.iter().all(|record| {
+            record.status() == RefreshStatus::Revoked
+                && record.auth_grant_status() == AuthGrantStatus::Compromised
+        }));
     }
 
     #[tokio::test]
@@ -9862,9 +10255,9 @@ mod tests {
         let active_rec = RefreshTokenRecord::hydrate(RefreshTokenSnapshot {
             id: RefreshTokenId::new(lineage_str),
             tenant: record_tenant,
-            auth_grant_id: AuthGrantId::new("grant-tenant-mismatch"),
+            auth_grant_id: grant_id("grant-tenant-mismatch"),
             user_id: uid(CANON_USER),
-            authn_epoch_at_issue: crate::AuthnEpoch::ZERO,
+            authn_epoch_at_issue: authn::AuthnEpoch::ZERO,
             auth_grant_status: AuthGrantStatus::Active,
             token_hash: RefreshTokenHash::new([0xBB; 32]),
             parent_id: None,
@@ -9882,6 +10275,7 @@ mod tests {
 
         let svc = RefreshService::new(
             DynRefreshTokenStore::new_box(mock),
+            test_lifecycle(crate::internal::mem::InMemAuthGrantStore::new()),
             seeded_account_reader(),
             std::sync::Arc::new(make_jwt_issuer(make_clock(1_700_000_000))),
             make_clock(1_700_000_000),
@@ -9949,6 +10343,7 @@ mod tests {
         .expect("valid jwt issuer config");
         let svc = RefreshService::new(
             crate::ports::DynRefreshTokenStore::new_box(store.clone()),
+            test_lifecycle(store.clone()),
             seeded_account_reader(),
             std::sync::Arc::new(issuer),
             make_clock(1_700_000_000),
@@ -10258,6 +10653,7 @@ mod tests {
         store.expect_revoke_lineage().times(0);
         let svc = Arc::new(RefreshService::new(
             DynRefreshTokenStore::new_box(store),
+            test_lifecycle(crate::internal::mem::InMemAuthGrantStore::new()),
             seeded_account_reader(),
             Arc::new(make_jwt_issuer(make_clock(1_700_000_000))),
             make_clock(1_700_000_000),

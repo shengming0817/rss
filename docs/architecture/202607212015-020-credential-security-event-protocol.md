@@ -5,6 +5,11 @@
 - **关联**：issue #1841；承接 ADR-018 / ADR-019；生产激活依赖 #1842 / #1843
 - **对标**：Ory Fosite refresh rotation、Keycloak user-session management
 
+> **ADR-021 ownership amendment（#1835）**：`CredentialSecurityEventKind` 及其 Account/Grant 子枚举与
+> AuthGrant 一起下沉 `authn`，identity 直接消费该 exact type。本文的 sealed command、事件 target、
+> authorization/receipt、resolver、`producer_tx` 与 draft wire 所有权仍在 identity；不增加 alias、translation
+> enum 或第二套 close reason。
+
 ## 背景
 
 账户状态、密码操作、logout 与 refresh reuse 都会使既有认证授权失效。若每个入口各自选择 target、关闭原因和
@@ -17,7 +22,7 @@ schema 而没有生产 producer、subscriber、审计和运行时证据时，不
 
 ### 唯一封闭模型
 
-`CredentialSecurityEventKind` 是凭据安全事件的唯一领域分类，层级固定为：
+`authn::CredentialSecurityEventKind` 是凭据安全事件的唯一闭合分类，层级固定为：
 
 - `Account(AccountSecurityEventKind)`：PasswordChanged、PasswordReset、AccountLocked、
   AccountSuspended、AccountDeactivated、LogoutAll、CredentialDeleted；
@@ -29,7 +34,7 @@ schema 而没有生产 producer、subscriber、审计和运行时证据时，不
 Compromised 优先级最高，允许 Revoked 提升为 Compromised，禁止降级。公开的描述性 policy/scope API 已删除，
 避免声明策略与真实 mutation 平行漂移。
 
-账户级和 grant 级命令分别封闭私有字段，再由 `CredentialSecurityCommand` 包装。构造命令时固定完整 expected
+identity 的账户级和 grant 级命令分别封闭私有字段，再由 `CredentialSecurityCommand` 包装。构造命令时固定完整 expected
 snapshot、closed target 与 move-only fact authorization；执行只接受 CAS，冲突要求调用方读取新状态并重建命令，
 不能把旧命令重放成成功。memory 与 PostgreSQL provider 都必须比较完整 expected snapshot，不能把 stale command
 改写为终态幂等成功。
