@@ -32,7 +32,7 @@
 //!   `[dev-dependencies]` 消费，禁进生产 shipped 依赖图。本 lint 只扫 shipped 依赖表，故**任一**指向
 //!   test-support 成员的内部边即 shipped 误用（dev-dep 边压根不入 `edges`）；补 `allows` 矩阵盲区
 //!   （`allows(Domain,Service)=true` 不阻止域 crate 误把 testkit 放进 `[dependencies]`）。
-//! INVARIANT: LAYER-DEPS-09 { level = "Medium", exec = "verify", source = "code" }—— scoped construction 的
+//! INVARIANT: LAYER-DEPS-09 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::red_runctx_testsupport_in_dependencies|tests::red_testsupport_features_follow_direct_and_workspace_package_aliases", anti_vacuity = "tests::green_runctx_without_testsupport|tests::real_workspace_green" }—— scoped construction 的
 //!   `test-support` **feature** 只准经 `[dev-dependencies]` 启用，禁在任一 shipped 依赖表
 //!   （`[dependencies]`/`[build-dependencies]`/`[target.*]`）启用。覆盖 `runctx/test-support`
 //!   （构造 `AppCtx`）以及 `identity`/`settings`/`audit` 的 `TenantRepoScope::for_test`；生产构建启用即可伪造
@@ -40,6 +40,12 @@
 //! INVARIANT: LAYER-DEPS-10 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::test_support_internal_dependencies_red_shipped_edges", anti_vacuity = "tests::test_support_internal_dependencies_green_no_shipped_edge" }—— test-support 库（`layers::TEST_SUPPORT_CRATES`）的 shipped
 //!   出边只能指向外部 crate；任一指向 workspace 内部成员的出边均失败，保持 testkit 为零 production-adapter、
 //!   零 workspace 依赖的独立测试工具。与 LAYER-DEPS-08 的 shipped 入边约束正交，不改变其语义。
+//! INVARIANT: RUNTIMEEXEC-LAYER-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtimeexec_wrapper_widened_to_bin_red|tests::runtimeexec_wrapper_missing_assembly_red", anti_vacuity = "tests::runtimeexec_wrapper_exact_green" }——
+//!   `runtimeexec` target wrapper 必须恰为 runtime/settingsonly/identityaudit 三个 assembly，禁止 bins、composition、
+//!   journeys 与 xtask 直接依赖；该特殊 wrapper 不得被一般 Domain/Adapter/Generated stale 逻辑误判。
+//! INVARIANT: RUNTIMEEXEC-DEPS-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtimeexec_direct_dependencies_extra_internal_and_external_red|tests::runtimeexec_direct_dependencies_package_alias_red", anti_vacuity = "tests::runtimeexec_direct_dependencies_allowlist_green|tests::real_workspace_green" }——
+//!   `runtimeexec` shipped direct dependency 只准内部 bootstrap/diport/secure 与外部 anyhow/tokio/tokio-util/tracing；
+//!   `[dev-dependencies]` 不入扫描。
 //! `LAYER-DEPS-PROVIDER-BOOTSTRAP-01` 的精确 deny 与元数据单源见 `layers.rs`；本 lint 在通用允许矩阵
 //! 之前应用它，并以 Redis/S3/Vault synthetic red + postgres/diport anti-vacuity green 承载。
 
@@ -77,6 +83,8 @@ pub(crate) enum Rule {
     TestSupportFeatureShipped,
     /// LAYER-DEPS-10：test-support 库 shipped 依赖 workspace 内部成员（只准依赖外部 crate）。
     TestSupportInternalShipped,
+    /// RUNTIMEEXEC-DEPS-01：runtimeexec 出现 allowlist 外的 shipped direct dependency。
+    RuntimeExecDependencyScope,
 }
 
 /// workspace 成员（名 + 相对 root 路径 + 分层；`layer = None` = 未分类）。
@@ -138,17 +146,21 @@ impl GovernanceCheck for LayerDeps {
         let scan = load_edges(&root, &members, &workspace.dependencies)?;
         let bans = load_bans(&root)?;
 
+        let shipped_deps = collect_shipped_deps(&root, &members, &workspace.dependencies)?;
         let mut findings = check_layers(&members, &scan.edges);
         findings.extend(scan.findings);
         findings.extend(check_wrappers(&members, &bans, &scan.edges));
         findings.extend(check_external_confinement(&members, &bans));
         findings.extend(check_test_support_confinement(&scan.edges));
         findings.extend(check_test_support_internal_dependencies(&scan.edges));
-        let shipped_deps = collect_shipped_deps(&root, &members)?;
         findings.extend(scan_shipped_testsupport_features(&shipped_deps));
+        findings.extend(check_runtimeexec_direct_dependencies(
+            &scan.edges,
+            &shipped_deps,
+        ));
 
         let summary = format!(
-            "{} 成员 / {} 内部边 / {} wrappers / {} shipped 依赖（test-support feature 扫描）全部通过",
+            "{} 成员 / {} 内部边 / {} wrappers / {} shipped 依赖（feature + RuntimeExec allowlist 扫描）全部通过",
             members.len(),
             scan.edges.len(),
             bans.len(),
@@ -238,11 +250,16 @@ const EXTERNAL_CONFINEMENT_WRAPPERS: &[(&str, &[&str])] = &[
     ),
 ];
 
+const RUNTIMEEXEC_CRATE: &str = "runtimeexec";
+const RUNTIMEEXEC_ALLOWED_WRAPPERS: &[&str] = &["runtime", "settingsonly", "identityaudit"];
+const RUNTIMEEXEC_INTERNAL_SHIPPED_DEPS: &[&str] = &["bootstrap", "diport", "secure"];
+const RUNTIMEEXEC_EXTERNAL_SHIPPED_DEPS: &[&str] = &["anyhow", "tokio", "tokio-util", "tracing"];
+
 /// LAYER-DEPS-06：deny.toml 分层 wrappers ⟷ 源分类一致性（守 LAYER-WRAP-01 漂移）。
 /// 正向：每个 Domain/Adapter/Generated 成员须有 ban entry 且 wrappers ⊇ 所需消费者
 /// （Domain/Adapter ⊇ 全部组合根；Generated ⊇ 全部域 + 组合根）。
 /// 反向：① 每条带 wrappers 的 ban 须对应现存 Domain/Adapter/Generated 成员（无 stale），
-/// **例外** [`EXTERNAL_CONFINEMENT_WRAPPERS`]（外部 crate 收敛，单独校验）；
+/// **例外** [`EXTERNAL_CONFINEMENT_WRAPPERS`]（外部 crate 收敛）与 RuntimeExec 精确 target wrapper，均单独校验；
 /// ② wrappers 中每个消费者须是 `layers::allows` 允许依赖被 ban crate 的层（防过宽 wrapper 开洞,
 /// 如把某服务塞进域的 wrappers）；**②补强（ADR-005）**：`adapter→域` wrapper 须有**真实 source edge**
 /// （adapter 实际依赖该域 crate）——否则「层级允许 adapter→域」会被误当「任意 adapter 可进任意域 wrapper」
@@ -251,7 +268,7 @@ const EXTERNAL_CONFINEMENT_WRAPPERS: &[(&str, &[&str])] = &[
 /// `pub(crate)` 不外泄）；「仅 adapter 可 impl」的完整 implementer-allowlist 仍待 #1060。与 `check_layers`
 /// 的 AdapterScope/SiblingDomain 互为两条 Medium 防线，须同绿。
 /// 成员所需的 wrapper 消费者集（正向覆盖）：Domain/Adapter ⊇ 全组合根、Generated ⊇ 全域 + 组合根；
-/// 非这三层返回 `None`（跳过）。dev/test adapter（[`layers::is_dev_adapter`]）正向只要 dev 组合根
+/// 非这三层返回 `None`（跳过；RuntimeExec 由 [`check_runtimeexec_wrapper_coverage`] 单独精确校验）。dev/test adapter（[`layers::is_dev_adapter`]）正向只要 dev 组合根
 /// （[`layers::DEV_ADAPTER_ROOTS`]，LAYER-DEPS-07）——生产 bin 不在 required。
 fn required_consumers<'a>(
     layer: Option<Layer>,
@@ -332,7 +349,7 @@ pub(crate) fn check_wrappers(
         .map(|b| (b.crate_name.as_str(), b.wrappers.as_slice()))
         .collect();
 
-    let mut findings = Vec::new();
+    let mut findings = check_runtimeexec_wrapper_coverage(members, bans);
     for m in members {
         let Some(required) = required_consumers(m.layer, &m.name, &roots, &domains, &services)
         else {
@@ -371,6 +388,7 @@ pub(crate) fn check_wrappers(
         if EXTERNAL_CONFINEMENT_WRAPPERS
             .iter()
             .any(|(ext, _)| *ext == b.crate_name.as_str())
+            || b.crate_name == RUNTIMEEXEC_CRATE
         {
             continue;
         }
@@ -428,6 +446,74 @@ pub(crate) fn check_wrappers(
                     b.crate_name.clone(),
                     format!("deny.toml wrapper `{w}` 不是工作区成员（typo / 已删除）"),
                 )),
+            }
+        }
+    }
+    findings
+}
+
+/// `runtimeexec` 是内部 target crate，但 wrapper 比普通分层 leaf 更窄：只准三个 assembly 直接消费。
+/// 集合相等同时拒绝过宽和漏项；批准项自身必须是对应 `assemblies/*` 成员，防 const 漂移到其它 Root。
+pub(crate) fn check_runtimeexec_wrapper_coverage(
+    members: &[Member],
+    bans: &[BanEntry],
+) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    let target = members.iter().find(|m| m.name == RUNTIMEEXEC_CRATE);
+    let ban = bans.iter().find(|b| b.crate_name == RUNTIMEEXEC_CRATE);
+    // 纯函数的其它分层 fixture 可不携带 RuntimeExec；真实工作区至少含 target 或 ban，缺一侧仍会红。
+    if target.is_none() && ban.is_none() {
+        return findings;
+    }
+    if !matches!(target.map(|m| m.layer), Some(Some(Layer::RuntimeExec))) {
+        findings.push(finding(
+            Rule::WrapperCoverage,
+            RUNTIMEEXEC_CRATE,
+            "runtimeexec wrapper target 不是已分类的 RuntimeExec workspace 成员",
+        ));
+        return findings;
+    }
+
+    for allowed in RUNTIMEEXEC_ALLOWED_WRAPPERS {
+        match members.iter().find(|m| m.name == *allowed) {
+            Some(m)
+                if m.layer == Some(Layer::Root)
+                    && m.path == format!("assemblies/{allowed}") => {}
+            Some(m) => findings.push(finding(
+                Rule::WrapperCoverage,
+                RUNTIMEEXEC_CRATE,
+                format!(
+                    "runtimeexec 批准消费者 `{allowed}` 必须是 `assemblies/{allowed}` Root，实际为 `{}` / {:?}",
+                    m.path, m.layer
+                ),
+            )),
+            None => findings.push(finding(
+                Rule::WrapperCoverage,
+                RUNTIMEEXEC_CRATE,
+                format!("runtimeexec 批准消费者 `{allowed}` 不是 workspace 成员"),
+            )),
+        }
+    }
+
+    match ban {
+        None => findings.push(finding(
+            Rule::WrapperCoverage,
+            RUNTIMEEXEC_CRATE,
+            "deny.toml 缺 runtimeexec target wrapper",
+        )),
+        Some(ban) => {
+            let have: BTreeSet<&str> = ban.wrappers.iter().map(String::as_str).collect();
+            let want: BTreeSet<&str> = RUNTIMEEXEC_ALLOWED_WRAPPERS.iter().copied().collect();
+            if have != want {
+                let extra: Vec<&str> = have.difference(&want).copied().collect();
+                let missing: Vec<&str> = want.difference(&have).copied().collect();
+                findings.push(finding(
+                    Rule::WrapperCoverage,
+                    RUNTIMEEXEC_CRATE,
+                    format!(
+                        "runtimeexec wrapper 必须与批准 assembly 集合相等：多列 {extra:?} / 欠列 {missing:?}"
+                    ),
+                ));
             }
         }
     }
@@ -520,8 +606,13 @@ pub(crate) struct ShippedDep {
     pub(crate) section: String,
     /// manifest 中书写的依赖 key。
     pub(crate) key: String,
+    /// Cargo 解析后的真实 package identity；`package` rename 与根 `[workspace.dependencies]`
+    /// 继承均已展开。外部闭包必须看该字段，不能信任可任意命名的 manifest key。
+    pub(crate) package_name: String,
     /// 该依赖启用的 feature 列表。
     pub(crate) features: Vec<String>,
+    /// 是否解析为 workspace 内部 path dependency。`false` 表示外部依赖。
+    pub(crate) is_workspace_internal: bool,
 }
 
 /// LAYER-DEPS-09 纯扫描：flag 任一 shipped 依赖表里 scoped-construction crate 启用 `test-support` feature 的条目。
@@ -534,7 +625,8 @@ pub(crate) fn scan_shipped_testsupport_features(deps: &[ShippedDep]) -> Vec<Find
             SHIPPED_TEST_SUPPORT_FEATURE_BANS
                 .iter()
                 .find(|(crate_name, _)| {
-                    d.key == *crate_name && d.features.iter().any(|f| f == TEST_SUPPORT_FEATURE)
+                    d.package_name == *crate_name
+                        && d.features.iter().any(|f| f == TEST_SUPPORT_FEATURE)
                 })
                 .map(|(crate_name, reason)| (d, *crate_name, *reason))
         })
@@ -543,7 +635,7 @@ pub(crate) fn scan_shipped_testsupport_features(deps: &[ShippedDep]) -> Vec<Find
                 Rule::TestSupportFeatureShipped,
                 d.from.clone(),
                 format!(
-                    "{} {}.{} 启用 `{crate_name}/{TEST_SUPPORT_FEATURE}` ⇒ {reason}；只准 [dev-dependencies] 启用该 feature（INVARIANT LAYER-DEPS-09；改放 [dev-dependencies]）",
+                    "{} {}.{}（package `{crate_name}`）启用 `{crate_name}/{TEST_SUPPORT_FEATURE}` ⇒ {reason}；只准 [dev-dependencies] 启用该 feature（INVARIANT LAYER-DEPS-09；改放 [dev-dependencies]）",
                     d.manifest_file, d.section, d.key,
                 ),
             )
@@ -551,26 +643,88 @@ pub(crate) fn scan_shipped_testsupport_features(deps: &[ShippedDep]) -> Vec<Find
         .collect()
 }
 
-/// 读各成员全部 shipped 依赖表（`dep_entries`），收集每条 detailed 依赖的 feature 视图（[`ShippedDep`]）。
+/// 读各成员全部 shipped 依赖表（`dep_entries`），收集每条依赖的 feature 与内/外部视图（[`ShippedDep`]）。
 /// dev-dependencies 不入（[`MemberManifest`] 不解析 dev 表），故天然只覆盖 shipped 表。
-fn collect_shipped_deps(root: &Path, members: &[Member]) -> Result<Vec<ShippedDep>> {
+fn collect_shipped_deps(
+    root: &Path,
+    members: &[Member],
+    ws_deps: &BTreeMap<String, DepSpec>,
+) -> Result<Vec<ShippedDep>> {
     let mut out = Vec::new();
     for m in members {
         let manifest = read_member_manifest(root, &m.path)?;
         let manifest_file = format!("{}/Cargo.toml", m.path);
         for (section, key, spec) in manifest.dep_entries() {
-            if let DepSpec::Detailed(d) = spec {
-                out.push(ShippedDep {
-                    from: m.name.clone(),
-                    manifest_file: manifest_file.clone(),
-                    section,
-                    key: key.to_string(),
-                    features: d.features.clone(),
-                });
-            }
+            let features = dependency_features(key, spec, ws_deps);
+            out.push(ShippedDep {
+                from: m.name.clone(),
+                manifest_file: manifest_file.clone(),
+                section,
+                key: key.to_string(),
+                package_name: dependency_package_name(key, spec, ws_deps).to_string(),
+                features,
+                is_workspace_internal: !matches!(
+                    classify_dep(&m.path, key, spec, ws_deps),
+                    DepTarget::External
+                ),
+            });
         }
     }
     Ok(out)
+}
+
+/// RuntimeExec direct shipped dependency 闭包：内部看解析后的 package edge，外部看 Cargo 展开
+/// `package` rename / workspace dependency 继承后的真实 package identity。
+/// dev-dependency 不进入 `Edge` / `ShippedDep`，因此测试依赖不受本规则约束。
+pub(crate) fn check_runtimeexec_direct_dependencies(
+    edges: &[Edge],
+    deps: &[ShippedDep],
+) -> Vec<Finding> {
+    let mut findings: Vec<Finding> = edges
+        .iter()
+        .filter(|edge| {
+            edge.from == RUNTIMEEXEC_CRATE
+                && !RUNTIMEEXEC_INTERNAL_SHIPPED_DEPS.contains(&edge.to.as_str())
+        })
+        .map(|edge| {
+            finding(
+                Rule::RuntimeExecDependencyScope,
+                RUNTIMEEXEC_CRATE,
+                format!(
+                    "{} {}.{} → `{}`：runtimeexec 内部 shipped direct dependency 只准 {:?}",
+                    edge.from_manifest,
+                    edge.section,
+                    edge.key,
+                    edge.to,
+                    RUNTIMEEXEC_INTERNAL_SHIPPED_DEPS
+                ),
+            )
+        })
+        .collect();
+
+    findings.extend(
+        deps.iter()
+            .filter(|dep| {
+                dep.from == RUNTIMEEXEC_CRATE
+                    && !dep.is_workspace_internal
+                    && !RUNTIMEEXEC_EXTERNAL_SHIPPED_DEPS.contains(&dep.package_name.as_str())
+            })
+            .map(|dep| {
+                finding(
+                    Rule::RuntimeExecDependencyScope,
+                    RUNTIMEEXEC_CRATE,
+                    format!(
+                        "{} {}.{} → `{}`：runtimeexec 外部 shipped direct dependency 只准 {:?}",
+                        dep.manifest_file,
+                        dep.section,
+                        dep.key,
+                        dep.package_name,
+                        RUNTIMEEXEC_EXTERNAL_SHIPPED_DEPS
+                    ),
+                )
+            }),
+    );
+    findings
 }
 
 /// 对给定白名单逐 entry 委托 [`check_confinement_entry`]。allowlist 作参数（非直读 const）使**完整路径**
@@ -743,6 +897,9 @@ enum DepSpec {
 
 #[derive(Deserialize)]
 struct DetailedDep {
+    /// Cargo dependency rename 的真实 package 名（`alias = { package = "real", ... }`）。
+    #[serde(default)]
+    package: Option<String>,
     #[serde(default)]
     path: Option<String>,
     #[serde(default)]
@@ -750,6 +907,50 @@ struct DetailedDep {
     /// 该依赖启用的 feature 列表（LAYER-DEPS-09：守 scoped construction `test-support` 不进 shipped 依赖表）。
     #[serde(default)]
     features: Vec<String>,
+}
+
+/// 返回 Cargo 使用的真实 package identity，而不是 manifest 中可任意选择的 dependency key。
+/// `workspace = true` 时 package rename 归根 `[workspace.dependencies]` 所有，必须继续展开；
+/// 缺少 rename 时 package 名才等于当前 key。
+fn dependency_package_name<'a>(
+    key: &'a str,
+    spec: &'a DepSpec,
+    ws_deps: &'a BTreeMap<String, DepSpec>,
+) -> &'a str {
+    let DepSpec::Detailed(dep) = spec else {
+        return key;
+    };
+    if let Some(package) = dep.package.as_deref() {
+        return package;
+    }
+    if dep.workspace
+        && let Some(DepSpec::Detailed(workspace_dep)) = ws_deps.get(key)
+        && let Some(package) = workspace_dep.package.as_deref()
+    {
+        return package;
+    }
+    key
+}
+
+/// Resolve the effective feature set using Cargo's workspace-inheritance merge semantics.
+/// A member may add features beside `workspace = true`; inherited and local features are both
+/// shipped and therefore both participate in LAYER-DEPS-09.
+fn dependency_features(
+    key: &str,
+    spec: &DepSpec,
+    ws_deps: &BTreeMap<String, DepSpec>,
+) -> Vec<String> {
+    let DepSpec::Detailed(dep) = spec else {
+        return Vec::new();
+    };
+    let mut features = BTreeSet::new();
+    if dep.workspace
+        && let Some(DepSpec::Detailed(workspace_dep)) = ws_deps.get(key)
+    {
+        features.extend(workspace_dep.features.iter().cloned());
+    }
+    features.extend(dep.features.iter().cloned());
+    features.into_iter().collect()
 }
 
 #[derive(Deserialize)]
@@ -995,6 +1196,65 @@ mod tests {
         assert!(check_layers(&members, &edges).is_empty());
     }
 
+    /// RUNTIMEEXEC-LAYER-01 anti-vacuity：assembly Root 可消费 runtimeexec，runtimeexec 可向批准下层出边。
+    #[test]
+    fn check_layers_green_runtimeexec_allowed_inbound_and_outbound() {
+        let members = vec![
+            m("runtime", "assemblies/runtime", Some(Layer::Root)),
+            m(
+                "runtimeexec",
+                "crates/runtimeexec",
+                Some(Layer::RuntimeExec),
+            ),
+            m("bootstrap", "crates/bootstrap", Some(Layer::Service)),
+            m("diport", "crates/diport", Some(Layer::DiPort)),
+        ];
+        let edges = vec![
+            e("runtime", "runtimeexec"),
+            e("runtimeexec", "bootstrap"),
+            e("runtimeexec", "diport"),
+        ];
+        assert!(check_layers(&members, &edges).is_empty());
+    }
+
+    /// RUNTIMEEXEC-LAYER-01 synthetic red：RuntimeExec 不得取得域/adapter，非 Root 也不得消费 RuntimeExec。
+    #[test]
+    fn check_layers_red_runtimeexec_illegal_inbound_and_outbound() {
+        let members = vec![
+            m(
+                "runtimeexec",
+                "crates/runtimeexec",
+                Some(Layer::RuntimeExec),
+            ),
+            m("identity", "crates/identity", Some(Layer::Domain)),
+            m("httpd", "adapters/httpd", Some(Layer::Adapter)),
+            m("bootstrap", "crates/bootstrap", Some(Layer::Service)),
+        ];
+        let findings = check_layers(
+            &members,
+            &[
+                e("runtimeexec", "identity"),
+                e("runtimeexec", "httpd"),
+                e("bootstrap", "runtimeexec"),
+            ],
+        );
+        assert_eq!(findings.len(), 3, "{findings:?}");
+        assert_eq!(
+            findings
+                .iter()
+                .filter(|finding| finding.rule == Rule::BackPath)
+                .count(),
+            2
+        );
+        assert_eq!(
+            findings
+                .iter()
+                .filter(|finding| finding.rule == Rule::AdapterScope)
+                .count(),
+            1
+        );
+    }
+
     /// LAYER-DEPS-08 anti-vacuity（绿）：testkit 仅经 dev-dep 消费 ⇒ shipped `edges` 无指向它的边 ⇒ 0 finding。
     #[test]
     fn check_test_support_confinement_green_no_shipped_edge() {
@@ -1051,7 +1311,9 @@ mod tests {
             manifest_file: format!("crates/{from}/Cargo.toml"),
             section: section.to_string(),
             key: key.to_string(),
+            package_name: key.to_string(),
             features: features.iter().map(|f| (*f).to_string()).collect(),
+            is_workspace_internal: false,
         }
     }
 
@@ -1067,6 +1329,51 @@ mod tests {
         assert_eq!(findings.len(), 1, "{findings:?}");
         assert_eq!(findings[0].rule, Rule::TestSupportFeatureShipped);
         assert_eq!(findings[0].subject, "badcrate");
+    }
+
+    #[test]
+    fn red_testsupport_features_follow_direct_and_workspace_package_aliases() -> Result<()> {
+        let root = crate::testutil::unique_tmp("testsupport-feature-package-alias-red");
+        let manifest_path = root.join("crates/badcrate/Cargo.toml");
+        std::fs::create_dir_all(manifest_path.parent().context("badcrate manifest parent")?)?;
+        std::fs::write(
+            &manifest_path,
+            r#"
+[package]
+name = "badcrate"
+
+[dependencies]
+ctx_alias = { package = "runctx", version = "1", features = ["test-support"] }
+identity_alias = { workspace = true }
+"#,
+        )?;
+        let members = [m("badcrate", "crates/badcrate", Some(Layer::Root))];
+        let workspace_dependencies: BTreeMap<String, DepSpec> = toml::from_str::<RootManifest>(
+            r#"
+[workspace]
+members = []
+
+[workspace.dependencies]
+identity_alias = { package = "identity", version = "1", features = ["test-support"] }
+"#,
+        )?
+        .workspace
+        .dependencies;
+
+        let deps = collect_shipped_deps(&root, &members, &workspace_dependencies)?;
+        let findings = scan_shipped_testsupport_features(&deps);
+        assert_eq!(findings.len(), 2, "{findings:?}");
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.detail.contains("ctx_alias"))
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.detail.contains("identity_alias"))
+        );
+        Ok(())
     }
 
     /// 红：domain scope constructors 的 `test-support` 也不得经 shipped 依赖启用。
@@ -1387,6 +1694,164 @@ mod tests {
         ]
     }
 
+    fn runtimeexec_fixture_members() -> Vec<Member> {
+        vec![
+            m(
+                "runtimeexec",
+                "crates/runtimeexec",
+                Some(Layer::RuntimeExec),
+            ),
+            m("runtime", "assemblies/runtime", Some(Layer::Root)),
+            m("settingsonly", "assemblies/settingsonly", Some(Layer::Root)),
+            m(
+                "identityaudit",
+                "assemblies/identityaudit",
+                Some(Layer::Root),
+            ),
+            m("server", "bins/server", Some(Layer::Root)),
+        ]
+    }
+
+    #[test]
+    fn runtimeexec_wrapper_exact_green() {
+        let bans = vec![ban(
+            "runtimeexec",
+            &["runtime", "settingsonly", "identityaudit"],
+        )];
+        assert!(
+            check_runtimeexec_wrapper_coverage(&runtimeexec_fixture_members(), &bans).is_empty()
+        );
+    }
+
+    #[test]
+    fn runtimeexec_wrapper_widened_to_bin_red() {
+        let bans = vec![ban(
+            "runtimeexec",
+            &["runtime", "settingsonly", "identityaudit", "server"],
+        )];
+        let findings = check_runtimeexec_wrapper_coverage(&runtimeexec_fixture_members(), &bans);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].rule, Rule::WrapperCoverage);
+        assert_eq!(findings[0].subject, "runtimeexec");
+    }
+
+    #[test]
+    fn runtimeexec_wrapper_missing_assembly_red() {
+        let bans = vec![ban("runtimeexec", &["runtime", "settingsonly"])];
+        let findings = check_runtimeexec_wrapper_coverage(&runtimeexec_fixture_members(), &bans);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].rule, Rule::WrapperCoverage);
+        assert_eq!(findings[0].subject, "runtimeexec");
+    }
+
+    fn runtime_dep(key: &str, is_workspace_internal: bool) -> ShippedDep {
+        ShippedDep {
+            from: "runtimeexec".to_string(),
+            manifest_file: "crates/runtimeexec/Cargo.toml".to_string(),
+            section: "[dependencies]".to_string(),
+            key: key.to_string(),
+            package_name: key.to_string(),
+            features: Vec::new(),
+            is_workspace_internal,
+        }
+    }
+
+    #[test]
+    fn runtimeexec_direct_dependencies_allowlist_green() {
+        let edges = [
+            e("runtimeexec", "bootstrap"),
+            e("runtimeexec", "diport"),
+            e("runtimeexec", "secure"),
+        ];
+        let deps = [
+            runtime_dep("bootstrap", true),
+            runtime_dep("diport", true),
+            runtime_dep("secure", true),
+            runtime_dep("anyhow", false),
+            runtime_dep("tokio", false),
+            runtime_dep("tokio-util", false),
+            runtime_dep("tracing", false),
+        ];
+        assert!(check_runtimeexec_direct_dependencies(&edges, &deps).is_empty());
+    }
+
+    #[test]
+    fn runtimeexec_direct_dependencies_extra_internal_and_external_red() {
+        let edges = [e("runtimeexec", "bootstrap"), e("runtimeexec", "httpserve")];
+        let deps = [
+            runtime_dep("bootstrap", true),
+            runtime_dep("httpserve", true),
+            runtime_dep("axum", false),
+        ];
+        let findings = check_runtimeexec_direct_dependencies(&edges, &deps);
+        assert_eq!(findings.len(), 2, "{findings:?}");
+        assert!(
+            findings
+                .iter()
+                .all(|finding| finding.rule == Rule::RuntimeExecDependencyScope)
+        );
+    }
+
+    /// RUNTIMEEXEC-DEPS-01 synthetic-red：直接 rename 与根 workspace dependency rename 都必须
+    /// 按真实 package identity 拒绝，不能借用 `tokio`/`tracing` 等 allowlisted 本地 key 绕过。
+    #[test]
+    fn runtimeexec_direct_dependencies_package_alias_red() -> Result<()> {
+        let root = crate::testutil::unique_tmp("runtimeexec-dependency-package-alias-red");
+        let manifest_path = root.join("crates/runtimeexec/Cargo.toml");
+        std::fs::create_dir_all(
+            manifest_path
+                .parent()
+                .context("runtimeexec manifest parent")?,
+        )?;
+        std::fs::write(
+            &manifest_path,
+            r#"
+[package]
+name = "runtimeexec"
+
+[dependencies]
+tokio = { package = "axum", version = "1" }
+tracing = { workspace = true }
+"#,
+        )?;
+        let members = [m(
+            "runtimeexec",
+            "crates/runtimeexec",
+            Some(Layer::RuntimeExec),
+        )];
+        let workspace_dependencies: BTreeMap<String, DepSpec> = toml::from_str::<RootManifest>(
+            r#"
+[workspace]
+members = []
+
+[workspace.dependencies]
+tracing = { package = "tower", version = "1" }
+"#,
+        )?
+        .workspace
+        .dependencies;
+
+        let deps = collect_shipped_deps(&root, &members, &workspace_dependencies)?;
+        let findings = check_runtimeexec_direct_dependencies(&[], &deps);
+        assert_eq!(findings.len(), 2, "{findings:?}");
+        assert!(
+            findings
+                .iter()
+                .all(|finding| finding.rule == Rule::RuntimeExecDependencyScope)
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.detail.contains("`axum`"))
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.detail.contains("`tower`"))
+        );
+        Ok(())
+    }
+
     /// 外部收敛专用 fixture：在 [`wrapper_fixture_members`] 上加 `settings`（Domain，定义自身 repo port），
     /// 使 `EXTERNAL_CONFINEMENT_WRAPPERS` 白名单的 `settings` 条目能解析到 Domain 成员（DIPORT-MACRO-CONFINE-02）。
     /// 不复用 `wrapper_fixture_members`（加 settings 会令 `check_wrappers_*` fixtures 需补 settings ban，cascade）。
@@ -1683,6 +2148,7 @@ mod tests {
         let members = load_members(&root, &workspace.members)?;
         let scan = load_edges(&root, &members, &workspace.dependencies)?;
         let bans = load_bans(&root)?;
+        let shipped_deps = collect_shipped_deps(&root, &members, &workspace.dependencies)?;
 
         assert!(members.len() > 20, "成员数异常少: {}", members.len());
         assert!(scan.edges.len() > 20, "内部边异常少: {}", scan.edges.len());
@@ -1709,6 +2175,11 @@ mod tests {
         findings.extend(check_external_confinement(&members, &bans));
         findings.extend(check_test_support_confinement(&scan.edges));
         findings.extend(check_test_support_internal_dependencies(&scan.edges));
+        findings.extend(scan_shipped_testsupport_features(&shipped_deps));
+        findings.extend(check_runtimeexec_direct_dependencies(
+            &scan.edges,
+            &shipped_deps,
+        ));
         assert!(findings.is_empty(), "真实工作区应无违规: {findings:?}");
         Ok(())
     }
@@ -1742,6 +2213,7 @@ d = { path = "../d" }
 
     fn detailed(path: Option<&str>, workspace: bool) -> DepSpec {
         DepSpec::Detailed(DetailedDep {
+            package: None,
             path: path.map(str::to_string),
             workspace,
             features: Vec::new(),

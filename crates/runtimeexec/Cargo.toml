@@ -1,0 +1,25 @@
+[package]
+name = "runtimeexec"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+bootstrap = { path = "../bootstrap" }
+diport = { path = "../diport" }
+secure = { path = "../secure" }
+tokio = { workspace = true, features = ["signal"] }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+primitives = { path = "../primitives" }
+static_assertions = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "sync"] }
+tracing-subscriber = { workspace = true }
+trybuild = { workspace = true }

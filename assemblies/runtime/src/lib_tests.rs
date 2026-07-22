@@ -1150,18 +1150,17 @@ async fn assembled_admin_audit_read_uses_identity_authorizer_and_masks_sensitive
         }
     }
     let metrics: Arc<dyn diport::MetricsExporter> = Arc::new(NoopMetrics);
-    let app = extract_admin_router(routes::finalize_listener_plan(
-        routes::FinalizeListenerPlanInputs {
-            execution_plan,
-            config: snapshot.view(),
-            registry: &mut registry,
-            providers: &providers,
-            audit_sink: httpserve::AuditSinkHandle::new(TracingAuthAuditSink),
-            audit_clock: Arc::new(SystemClock),
-            rate_limiter: routes::build_runtime_rate_limiter(),
-            metrics,
-        },
-    )?)?;
+    let finalized = routes::finalize_listener_plan(routes::FinalizeListenerPlanInputs {
+        execution_plan,
+        config: snapshot.view(),
+        registry: &mut registry,
+        providers: &providers,
+        audit_sink: httpserve::AuditSinkHandle::new(TracingAuthAuditSink),
+        audit_clock: Arc::new(SystemClock),
+        rate_limiter: routes::build_runtime_rate_limiter(),
+        metrics,
+    })?;
+    let app = extract_admin_router(finalized.into_parts().0)?;
 
     let scoped_response = app
         .clone()

@@ -211,24 +211,6 @@ impl OperatorRuntimeInputs {
     }
 }
 
-/// Marker returned when runtime launch exits cleanly.
-#[derive(Debug, PartialEq, Eq)]
-pub struct RuntimeOutputs {
-    _completed: LaunchCompleted,
-}
-
-#[derive(Debug, PartialEq, Eq)]
-struct LaunchCompleted;
-
-impl RuntimeOutputs {
-    /// Mint the completion capability for the launch phase.
-    const fn completed() -> Self {
-        Self {
-            _completed: LaunchCompleted,
-        }
-    }
-}
-
 struct PhaseContext<'a> {
     runtime_inputs: &'a mut ServingRuntimeInputs,
     runtime_plan: crate::plan::RuntimePlan,
@@ -282,7 +264,7 @@ impl PhaseContext<'_> {
     }
 }
 
-/// INVARIANT: RUNTIME-PHASE-TRANSITION-01 { level = "Hard", exec = "native-compile", source = "code", native = "private state fields, exact associated Next chain, consuming transition receivers, and non-Clone lifecycle owners" } -- production startup is representable only as the closed `Planned -> ProvidersBuilt -> InfraBuilt -> DomainsWired -> Finalized -> RuntimeOutputs` chain; every transition consumes its predecessor and selects its phase label through this trait.
+/// INVARIANT: RUNTIME-PHASE-TRANSITION-01 { level = "Hard", exec = "native-compile", source = "code", native = "private state fields, exact associated Next chain, consuming transition receivers, and non-Clone lifecycle owners" } -- production startup is representable only as the closed `Planned -> ProvidersBuilt -> InfraBuilt -> DomainsWired -> Finalized -> runtimeexec::RuntimeOutputs` chain; every transition consumes its predecessor and selects its phase label through this trait.
 mod sealed {
     pub(super) trait Sealed {}
 }
@@ -362,6 +344,7 @@ pub(crate) struct Finalized<'a> {
     domain_transport: DomainTransportRuntime,
     command_idempotency_keyring: Arc<eventexec::command::CommandIdempotencyKeyring>,
     listeners: crate::routes::FinalizedListenerSet,
+    probe_receipt: crate::routes::FinalizedProbeReceipt,
 }
 
 impl sealed::Sealed for Planned<'_> {}
@@ -391,14 +374,14 @@ impl<'a> RuntimePhaseState for DomainsWired<'a> {
 }
 
 impl RuntimePhaseState for Finalized<'_> {
-    type Next = RuntimeOutputs;
+    type Next = runtimeexec::RuntimeOutputs;
     const PHASE: RuntimePhase = RuntimePhase::Launch;
 }
 
 /// Execute the only production serving phase sequence.
 pub(crate) async fn execute(
     runtime_inputs: &mut ServingRuntimeInputs,
-) -> anyhow::Result<RuntimeOutputs> {
+) -> anyhow::Result<runtimeexec::RuntimeOutputs> {
     let planned = Planned { runtime_inputs };
     let providers = planned.build_providers().await?;
     let infra = providers.build_infra().await?;
@@ -580,9 +563,8 @@ mod tests {
 
     #[test]
     fn runtime_phase_outputs_is_completion_marker() {
-        static_assertions::assert_not_impl_any!(RuntimeOutputs: Clone, Copy);
-        let output = RuntimeOutputs::completed();
-        assert_eq!(output, RuntimeOutputs::completed());
+        static_assertions::assert_not_impl_any!(runtimeexec::RuntimeOutputs: Clone, Copy);
+        static_assertions::assert_not_impl_any!(crate::routes::FinalizedProbeReceipt: Clone, Copy);
     }
 
     #[test]
@@ -713,7 +695,8 @@ mod tests {
             assert_type_eq::<<ProvidersBuilt<'a> as RuntimePhaseState>::Next, InfraBuilt<'a>>();
             assert_type_eq::<<InfraBuilt<'a> as RuntimePhaseState>::Next, DomainsWired<'a>>();
             assert_type_eq::<<DomainsWired<'a> as RuntimePhaseState>::Next, Finalized<'a>>();
-            assert_type_eq::<<Finalized<'a> as RuntimePhaseState>::Next, RuntimeOutputs>();
+            assert_type_eq::<<Finalized<'a> as RuntimePhaseState>::Next, runtimeexec::RuntimeOutputs>(
+            );
         }
         assert_lifetime_bound_chain(&());
 
@@ -735,7 +718,7 @@ mod tests {
         );
         assert_type_eq_all!(
             <Finalized<'static> as RuntimePhaseState>::Next,
-            RuntimeOutputs
+            runtimeexec::RuntimeOutputs
         );
 
         assert_type_ne_all!(
@@ -744,7 +727,7 @@ mod tests {
             InfraBuilt<'static>,
             DomainsWired<'static>,
             Finalized<'static>,
-            RuntimeOutputs
+            runtimeexec::RuntimeOutputs
         );
 
         assert_not_impl_any!(Planned<'static>: Clone, Copy, std::fmt::Debug, Default);

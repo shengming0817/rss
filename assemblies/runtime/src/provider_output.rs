@@ -693,8 +693,11 @@ impl CompletedProviderBuild {
         Ok(())
     }
 
-    pub(crate) fn into_modules(self) -> (DomainModuleResult, DomainModuleResult) {
-        (self.provider_module, self.domain_module)
+    pub(crate) fn into_launch_batches(self) -> runtimeexec::LaunchLifecycleBatches {
+        runtimeexec::LaunchLifecycleBatches::new(
+            runtimeexec::ProviderLifecycleBatch::from_provider_output(self.provider_module),
+            runtimeexec::DomainLifecycleBatch::from_domain_output(self.domain_module),
+        )
     }
 
     pub(crate) async fn abort(self, primary: anyhow::Error) -> anyhow::Error {
@@ -777,18 +780,17 @@ mod tests {
     fn provider_plan_active_catalog_claims_all_factories_exactly_once() {
         let (mut build, mut dispatch) = provider_build_and_dispatch();
         record_all_batches(&mut build, &mut dispatch, true, true);
-        let (provider_module, domain_module) = build
+        let completed = build
             .finish()
-            .expect("all active factories produced exact receipts")
-            .into_modules();
+            .expect("all active factories produced exact receipts");
         // finish() already required one receipt per active catalog factory; pin occupancy shape.
         assert!(!PROVIDER_CATALOG.is_empty());
-        assert_eq!(provider_module.probes.len(), 3);
-        assert_eq!(provider_module.resources.len(), 7);
-        assert_eq!(provider_module.workers.len(), 3);
-        assert!(domain_module.probes.is_empty());
-        assert!(domain_module.resources.is_empty());
-        assert!(domain_module.workers.is_empty());
+        assert_eq!(completed.provider_module.probes.len(), 3);
+        assert_eq!(completed.provider_module.resources.len(), 7);
+        assert_eq!(completed.provider_module.workers.len(), 3);
+        assert!(completed.domain_module.probes.is_empty());
+        assert!(completed.domain_module.resources.is_empty());
+        assert!(completed.domain_module.workers.is_empty());
     }
 
     #[test]

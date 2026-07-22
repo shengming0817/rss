@@ -92,6 +92,9 @@ deny = [
   #   `journeys` 是验收 journey 组合根（RW-G1，#999）——故出现在每条域/adapter/generated wrappers。
   #   `examples/*` 是收窄示例层，只能依赖基础/引擎/DI-infra/服务；不进这些全权限 wrappers。
   #   adapter wrapper 经 LAYER-DEPS-06 反向②补强：必须有真实 adapter→domain source edge。
+  # RuntimeExec 启动内核只准三个 assembly 直接消费；不是一般 Root wrapper。集合相等由
+  # RUNTIMEEXEC-LAYER-01 守，禁止 bins/composition/journeys/xtask 绕过 assembly phase funnel。
+  { crate = "runtimeexec", wrappers = ["runtime", "settingsonly", "identityaudit"] },
   # postgres impl RoleRepo + AuthGrantLifecycle（合并 co-tx 创建 + find/revoke，#1083/#1192/#1278）；memory impl
   #   AuthGrantLifecycle（demo provider，#1192/#1278）——均 adapter→域 DIP 内向边（Option 2/ADR-005），故加入 identity wrapper。
   { crate = "identity", wrappers = ["server", "rss", "runtime", "settings-composition", "identity-composition", "audit-composition", "settingsonly", "identityaudit", "xtask", "journeys", "journeys-fault-matrix", "postgres", "memory"] },

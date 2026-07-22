@@ -36,7 +36,9 @@ use std::process::Command;
 // `diport`（DI-infra 层，非 basis/engine）：持全部安全敏感 DI port（Signer/SecretResolver/Pdp/Revocation/
 // KeyProvider…），公开 trait/类型面是轴 A SemVer 边界，列入 curated extras 定点冻结（#1470）。
 // `generated` 暴露 contract-derived metadata，作为 PR review 审查材料定点冻结（#1472/#1688）。
-const CURATED_EXTRA_CRATES: &[&str] = &["authn", "diport", "generated"];
+// `runtimeexec` 的 launch/probe/inventory hook 是三个 assembly 的稳定内部接缝（#1795）；冻结其窄公开面，
+// 防止 ShutdownStack、HTTP/provider 类型或第二 executor 意外外泄。
+const CURATED_EXTRA_CRATES: &[&str] = &["authn", "diport", "generated", "runtimeexec"];
 
 /// public-api baseline（rustdoc-json）用的**钉版 nightly**。cargo-public-api 在 stable 上探测到 stable
 /// 编译器即强制回退 rolling `nightly`（其 rustdoc-json 格式随日期漂移 ⇒ baseline 误报）；本 const 经
@@ -289,15 +291,15 @@ mod tests {
         assert_eq!(target_crates(Some(Layer::Basis)).len(), 7);
         // engine = consistency/primitives/tracewire（#1224 新增 traceparent capture/restore 单源，轴 A SemVer 面）。
         assert_eq!(target_crates(Some(Layer::Engine)).len(), 3);
-        // None = basis(7) + engine(3) + curated extras(authn/diport/generated=3) 全集。
-        assert_eq!(target_crates(None).len(), 13);
+        // None = basis(7) + engine(3) + curated extras(authn/diport/generated/runtimeexec=4) 全集。
+        assert_eq!(target_crates(None).len(), 14);
         assert!(target_crates(Some(Layer::Basis)).contains(&"assembly-schema"));
         assert!(target_crates(Some(Layer::Basis)).contains(&"vocab"));
         assert!(target_crates(Some(Layer::Engine)).contains(&"primitives"));
         assert!(target_crates(Some(Layer::Engine)).contains(&"tracewire"));
         assert_eq!(
             target_crates(Some(Layer::Curated)),
-            vec!["authn", "diport", "generated"]
+            vec!["authn", "diport", "generated", "runtimeexec"]
         );
     }
 
@@ -306,6 +308,7 @@ mod tests {
         assert!(target_crates(None).contains(&"authn"));
         assert!(target_crates(None).contains(&"diport"));
         assert!(target_crates(None).contains(&"generated"));
+        assert!(target_crates(None).contains(&"runtimeexec"));
         assert!(target_crates(Some(Layer::Basis)).contains(&"vocab"));
         assert!(target_crates(Some(Layer::Engine)).contains(&"primitives"));
         assert!(target_crates(Some(Layer::Engine)).contains(&"tracewire"));
@@ -316,6 +319,8 @@ mod tests {
         assert!(!target_crates(Some(Layer::Engine)).contains(&"diport"));
         assert!(!target_crates(Some(Layer::Basis)).contains(&"generated"));
         assert!(!target_crates(Some(Layer::Engine)).contains(&"generated"));
+        assert!(!target_crates(Some(Layer::Basis)).contains(&"runtimeexec"));
+        assert!(!target_crates(Some(Layer::Engine)).contains(&"runtimeexec"));
         // proc-macro 工具 crate 不入 public-api baseline（契约由 codegen golden 守）。
         assert!(!target_crates(Some(Layer::Basis)).contains(&"securederive"));
     }
@@ -325,6 +330,49 @@ mod tests {
         let crates = target_crates(None);
         let set: std::collections::BTreeSet<_> = crates.iter().copied().collect();
         assert_eq!(set.len(), crates.len(), "public-api 目标 crate 不得重复");
+    }
+
+    #[test]
+    fn runtimeexec_public_api_golden_keeps_launch_kernel_narrow() -> anyhow::Result<()> {
+        let baseline = std::fs::read_to_string(baseline_dir()?.join("runtimeexec.txt"))?;
+        for required in [
+            "pub trait runtimeexec::LaunchAdapter",
+            "pub struct runtimeexec::LaunchPlan",
+            "pub fn runtimeexec::LaunchPlan<Adapter, ProbeReceipt, ReadyHook>::new",
+            "pub struct runtimeexec::LaunchTransaction",
+            "pub fn runtimeexec::LaunchTransaction<'stack>::stage_resource",
+            "pub struct runtimeexec::LaunchRegistrar",
+            "pub fn runtimeexec::LaunchRegistrar<'_>::register_listener_with_token",
+            "pub fn runtimeexec::LaunchRegistrar<'_>::complete",
+            "pub struct runtimeexec::Activated",
+            "pub struct runtimeexec::ProviderLifecycleBatch",
+            "pub struct runtimeexec::DomainLifecycleBatch",
+            "pub struct runtimeexec::LaunchLifecycleBatches",
+            "pub struct runtimeexec::RuntimeOutputs",
+            "pub async fn runtimeexec::launch",
+        ] {
+            assert!(
+                baseline.contains(required),
+                "runtimeexec public-api golden 缺必要启动内核项: {required}"
+            );
+        }
+        for forbidden in [
+            "ShutdownStack",
+            "wait_for_shutdown_signal",
+            "register_detached",
+            "listener_count",
+            "launch_until",
+            "httpd::",
+            "httpserve::",
+            "authn::",
+            "RuntimeInventory",
+        ] {
+            assert!(
+                !baseline.contains(forbidden),
+                "runtimeexec public-api golden 不得泄露内部/transport/provider 项: {forbidden}"
+            );
+        }
+        Ok(())
     }
 
     #[test]

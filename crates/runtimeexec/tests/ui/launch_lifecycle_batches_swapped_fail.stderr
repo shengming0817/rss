@@ -1,0 +1,18 @@
+error[E0308]: arguments to this function are incorrect
+ --> tests/ui/launch_lifecycle_batches_swapped_fail.rs:9:20
+  |
+9 |     let _swapped = runtimeexec::LaunchLifecycleBatches::new(domain, provider);
+  |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ ------  -------- expected `DomainLifecycleBatch`, found `ProviderLifecycleBatch`
+  |                                                             |
+  |                                                             expected `ProviderLifecycleBatch`, found `DomainLifecycleBatch`
+  |
+note: associated function defined here
+ --> src/lib.rs
+  |
+  |     pub fn new(provider: ProviderLifecycleBatch, domain: DomainLifecycleBatch) -> Self {
+  |            ^^^
+help: swap these arguments
+  |
+9 -     let _swapped = runtimeexec::LaunchLifecycleBatches::new(domain, provider);
+9 +     let _swapped = runtimeexec::LaunchLifecycleBatches::new(provider, domain);
+  |

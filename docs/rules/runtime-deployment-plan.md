@@ -5,7 +5,7 @@ This rule governs how runtime-deployment target constraints select enforcement c
 ## 当前事实
 
 - Assembly manifest validation, generated domain ordering, generated typed provider constructor catalogs, and committed v1 AssemblyLock drift are governed by typed repository gates. The assembly-crate-internal provider catalog drives live construction through one-shot typed permits and sealed lifecycle-output batches.
-- Both binaries capture one closed process-level configuration generation through a typed preparation profile before tracing and provider construction. Serving enters through `runtime::prepare_runtime()`; RSS operators enter through `runtime::operator::prepare_runtime()` and cannot carry the serving-only password-policy capability. Tracing/serving-OIDC, the operator OIDC static provider, provider material, listener addresses and mTLS material, every PostgreSQL/Redis/Vault/S3/event/domain/DLX/worker consumer, composition settings, and settings maintenance are capability-only and snapshot-backed. The crate-wide ambient-reader closure is landed under #1787. RuntimePlan v1 is typed, fingerprinted, retained by the unique consuming runtime phase chain, and is now the sole source of listener membership, ordered domain placement, and auth selection. Subset assemblies are non-runnable, and no DeploymentPlan/Helm/inventory evidence chain exists.
+- Both binaries capture one closed process-level configuration generation through a typed preparation profile before tracing and provider construction. Serving enters through `runtime::prepare_runtime()`; RSS operators enter through `runtime::operator::prepare_runtime()` and cannot carry the serving-only password-policy capability. Tracing/serving-OIDC, the operator OIDC static provider, provider material, listener addresses and mTLS material, every PostgreSQL/Redis/Vault/S3/event/domain/DLX/worker consumer, composition settings, and settings maintenance are capability-only and snapshot-backed. The crate-wide ambient-reader closure is landed under #1787. RuntimePlan v1 is typed, fingerprinted, retained by the unique consuming runtime phase chain, and is now the sole source of listener membership, ordered domain placement, and auth selection. `runtimeexec` owns the provider-independent launch/signal/drain kernel and stable opaque probe/inventory hooks; subset assemblies remain non-runnable until #1796/#1797, and no DeploymentPlan/Helm/inventory evidence chain exists.
 - RSS Access has no trusted-kind setting: it accepts only grant-bound User claims with a complete `sid/jti/auth_time/authn_epoch` quartet. The configurable allowlist belongs only to Federated Access; `RSS_ACCESS_TOKEN_TRUSTED_KINDS` is a startup tombstone and causes fail-fast rejection instead of being ignored or carried as inert configuration.
 - `cargo xtask archrules list` and its generated matrix derive implemented rules from real carrier anchors. Planning documents are not a second index.
 - The active forge does not make the existing `ci-gate` a required check.
@@ -24,7 +24,9 @@ runtime lifecycle owner retains the optional trace exporter until it is transfer
 launch plan; every pre-handoff startup result then crosses one terminal funnel that explicitly
 shuts down any exporter still owned. Launch registers every owned lifecycle output before it can
 return a validation, bind, or shutdown-trigger error, and every launch result drains the one
-`ShutdownStack` exactly once. The RSS binary classifies its closed command family before acquiring
+`runtimeexec`-owned `ShutdownStack` exactly once. Assemblies can only register prepared listeners
+through `LaunchRegistrar`; they cannot construct the stack or obtain its root cancellation token.
+The RSS binary classifies its closed command family before acquiring
 profile input; serving transfers ownership to `run()`, while all operator arms converge on one
 explicit `runtime::operator::shutdown_runtime()` call.
 
@@ -174,7 +176,8 @@ identity from partial RuntimePlan fields.
 The landed #1789 Hard carrier is `RUNTIME-PHASE-TRANSITION-01`: private phase-state fields,
 non-Clone/non-Copy/non-Debug/non-Default lifecycle ownership, consuming transition receivers, and
 transition return signatures bound directly to exact associated `Next` types make only
-`Planned → ProvidersBuilt → InfraBuilt → DomainsWired → Finalized → RuntimeOutputs`
+`Planned → ProvidersBuilt → InfraBuilt → DomainsWired → Finalized →
+runtimeexec::RuntimeOutputs`
 representable. The private `PhaseContext` retains the serving input and owned `RuntimePlan`;
 callers cannot supply a phase label, extract a lifecycle owner, skip a state, or reuse a consumed
 state. `phase::execute` is the sole production chain and `run_startup` has one call into it.
@@ -195,8 +198,8 @@ exist.
 The landed #1790 Hard carrier is `RUNTIME-LISTENER-PLAN-EXECUTION-01`.
 `RuntimePlan` is the sole mint for private `ListenerExecutionPlan` and
 `ListenerExecutionSpec` values; the single finalizer consumes that capability and alone produces
-the private-field `FinalizedListenerSet`, which is the mandatory listener field in both
-`Finalized` and `LaunchPlan`. Assembly listener/auth conversion is exhaustive. No public
+the private-field finalized launch input, which carries both `FinalizedListenerSet` and the
+assembly-private `FinalizedProbeReceipt` into `Finalized`. Assembly listener/auth conversion is exhaustive. No public
 listener constructor, raw-value assembler, manual Health append, compatibility wrapper, or plain
 listener vector can re-enter the chain. Compile-fail tests lock all three construction boundaries.
 
@@ -241,10 +244,10 @@ crate-wide production AST inventory verifies the unique entry, five-step order, 
 receivers, associated closed phase labels, common redaction funnel, closed state trait impls, and
 sole `Finalized` launch-plan handoff. Request-budget validation must succeed before trace/PG/domain
 handoff. Synthetic reds reject missing or reordered transitions, early plan drop, the old tuple
-path, direct or aliased `LaunchPlan`/`ShutdownStack` construction, cross-file state impls, macros,
+path, assembly-owned or aliased launch executors, direct `ShutdownStack` construction, cross-file state impls, macros,
 dead branches, and compliant comment/test bait. The lifecycle contract remains unchanged:
 pre-launch trace cleanup stays in `RuntimeLifecycleOwner`, while the top-level launch executor
-creates and consumes the only `ShutdownStack`.
+in `runtimeexec` creates and consumes the only `ShutdownStack`.
 
 Medium `RUNTIME-PLAN-LIVE-CLOSURE-01` joins the four RuntimePlan declaration families to the one
 production phase chain and freezes the aggregate declaration/projection/live inventories for
@@ -255,7 +258,16 @@ responsibility, and public-surface metric to be component-wise non-increasing. A
 raised, unknown-field, or unparsable policy/root fails closed through the sole
 `cargo xtask runtime-root guard` command.
 
-#1794 changes no RuntimePlan schema, fingerprint, AssemblyLock, generated module/provider catalog,
+#1795 adds `RUNTIMEEXEC-LAUNCH-OWNERSHIP-01`: private `LaunchPlan` fields, a mandatory opaque probe
+receipt, a single `LaunchAdapter`, assembly-private prepared/inventory states, restricted
+`LaunchRegistrar`, and a private `RuntimeOutputs` constructor make plan reuse, preflight bypass,
+completion forgery, and raw stack access unavailable at production call sites. The full runtime
+keeps HTTP/mTLS/address preparation in its private adapter; `runtimeexec` depends only on
+provider-independent lifecycle layers. Medium layer-deps, public-api, and runtime-baseline gates
+pin the exact dependency closure and single-owner production handoff with synthetic-red and
+anti-vacuity tests. There is no old executor, alias, re-export, facade, or compatibility path.
+
+#1794/#1795 change no RuntimePlan schema, fingerprint, AssemblyLock, generated module/provider catalog,
 wire contract, database, configuration, or deployment artifact. Rollback is one whole-change
 revert; it must not add an old reader, dual path, alias, fallback, or compatibility feature.
 

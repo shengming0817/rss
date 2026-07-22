@@ -661,6 +661,8 @@ struct TaskRecord {
     carrier: String,
 }
 
+const RUNTIME_LAUNCH_COMPOSITION_VERIFICATION: &str = "cargo nextest run -p runtime --lib --no-tests=fail -E 'test(/^launch::tests::canonical_launch_composes_runtime_adapter_ready_and_single_drain$/)'";
+
 fn parse_task_table(text: &str) -> Result<Vec<TaskRecord>> {
     text.lines()
         .filter(|line| line.starts_with("| RTD-"))
@@ -720,7 +722,31 @@ fn validate_tasks(actual: &[TaskRecord], baseline: &TaskBaseline) -> Result<()> 
         actual == baseline.tasks,
         "tasks.md differs from exact task baseline"
     );
+    validate_task_verification(actual)?;
     validate_graph(&baseline.tasks, &baseline.edges)
+}
+
+fn validate_task_verification(tasks: &[TaskRecord]) -> Result<()> {
+    for owner in [1789, 1795] {
+        let task = tasks
+            .iter()
+            .find(|task| task.owner == owner)
+            .with_context(|| format!("task verification missing owner #{owner}"))?;
+        ensure!(
+            task.verification
+                .contains(RUNTIME_LAUNCH_COMPOSITION_VERIFICATION),
+            "{} verification must use the non-empty runtime launch composition target",
+            task.task
+        );
+        ensure!(
+            !task
+                .verification
+                .contains("cargo test -p runtime launch_plan"),
+            "{} verification retains the zero-test-success launch_plan filter",
+            task.task
+        );
+    }
+    Ok(())
 }
 
 fn validate_graph(tasks: &[TaskRecord], edges: &[[u64; 2]]) -> Result<()> {
@@ -1160,6 +1186,28 @@ mod tests {
         let root = crate::workspace_root()?;
         let loaded = validate_repository(&root)?;
         run_selftest(&loaded)
+    }
+
+    #[test]
+    fn runtimeexec_task_verification_rejects_empty_legacy_launch_filter() -> Result<()> {
+        let root = crate::workspace_root()?;
+        let loaded = validate_repository(&root)?;
+        let mut actual = loaded.actual_tasks.clone();
+        let mut baseline = loaded.tasks.clone();
+        for tasks in [&mut actual, &mut baseline.tasks] {
+            tasks
+                .iter_mut()
+                .find(|task| task.owner == 1795)
+                .context("RTD-016 task")?
+                .verification =
+                "cargo test -p runtimeexec && cargo test -p runtime launch_plan".to_owned();
+        }
+
+        assert!(
+            validate_tasks(&actual, &baseline).is_err(),
+            "RTD-016 must reject Cargo's zero-test-success launch_plan filter"
+        );
+        Ok(())
     }
 
     #[test]

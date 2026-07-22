@@ -1,0 +1,5 @@
+error[E0599]: no method named `root_token` found for reference `&LaunchRegistrar<'_>` in the current scope
+ --> tests/ui/launch_registrar_no_root_token_fail.rs:2:27
+  |
+2 |     let _root = registrar.root_token();
+  |                           ^^^^^^^^^^ method not found in `&LaunchRegistrar<'_>`

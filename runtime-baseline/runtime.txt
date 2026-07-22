@@ -9,6 +9,7 @@ sharedRuntimeDeps = assemblies/runtime/src/module.rs
 domainModuleResult = crates/bootstrap/src/module.rs
 run = assemblies/runtime/src/lib.rs
 launch = assemblies/runtime/src/launch.rs
+runtimeexec = crates/runtimeexec/src/lib.rs
 
 [runtime.dependencies]
 amqp = path=../../adapters/amqp; features=[backend]
@@ -47,6 +48,7 @@ ratelimit = path=../../adapters/ratelimit
 redis = package=redis-adapter; path=../../adapters/redis; features=[backend]
 reqwest = workspace=true; features=[rustls-tls-webpki-roots]
 runctx = path=../../crates/runctx
+runtimeexec = path=../../crates/runtimeexec
 s3 = path=../../adapters/s3; features=[backend]
 secure = path=../../crates/secure
 serde = workspace=true; features=[derive]
@@ -157,15 +159,21 @@ mergeExtends = probes,resources,workers
 41 | run.event.transport | assemblies/runtime/src/phase/domains.rs | event_transport::wire_event_transport( | status=ok
 42 | run.provider-output.module | assemblies/runtime/src/phase/domains.rs | provider_build.finish() | status=ok
 43 | run.probe.transaction-drain | assemblies/runtime/src/phase/domains.rs | completed.register_probes(&mut wired.registry) | status=ok
-44 | run.listener.finalizer | assemblies/runtime/src/phase/finalize.rs | let listeners = finalize_listener_plan( | status=ok
-45 | run.launch-capability | assemblies/runtime/src/phase/launch.rs | crate::launch::launch(context.config(), request_budget, launch_plan) | status=ok
-46 | launch.shutdown.trace | assemblies/runtime/src/launch.rs | if let Some(exporter) = trace_exporter | status=ok
-47 | launch.shutdown.provider-output | assemblies/runtime/src/launch.rs | let provider_result = Self::register_module_output(stack, provider_module); | status=ok
-48 | launch.shutdown.domain-output | assemblies/runtime/src/launch.rs | let domain_result = Self::register_module_output(stack, domain_module); | status=ok
-49 | launch.shutdown.provider-result | assemblies/runtime/src/launch.rs | provider_result?; | status=ok
-50 | launch.shutdown.domain-result | assemblies/runtime/src/launch.rs | domain_result?; | status=ok
-51 | launch.shutdown.resources | assemblies/runtime/src/launch.rs | for resource in resources | status=ok
-52 | launch.shutdown.workers | assemblies/runtime/src/launch.rs | for worker in workers | status=ok
-53 | launch.register-plan | assemblies/runtime/src/launch.rs | let listeners = plan.register(&mut stack)?; | status=ok
-54 | launch.listener-prepare | assemblies/runtime/src/launch.rs | let bound = BoundListenerSet::prepare(listeners, budget, &addr_resolver).await?; | status=ok
-55 | launch.listener-activate | assemblies/runtime/src/launch.rs | bound.activate(&mut stack)?; | status=ok
+44 | run.listener.finalizer | assemblies/runtime/src/phase/finalize.rs | let finalized_listeners = finalize_listener_plan( | status=ok
+45 | run.launch-capability | assemblies/runtime/src/phase/launch.rs | runtimeexec::launch(launch_plan).await | status=ok
+46 | launch.shutdown.trace | crates/runtimeexec/src/lib.rs | if let Some(exporter) = trace_exporter | status=ok
+47 | launch.shutdown.provider-output | crates/runtimeexec/src/lib.rs | let provider_result = register_module_output(stack, provider.0); | status=ok
+48 | launch.shutdown.domain-output | crates/runtimeexec/src/lib.rs | let domain_result = register_module_output(stack, domain.0); | status=ok
+49 | launch.shutdown.provider-result | crates/runtimeexec/src/lib.rs | provider_result?; | status=ok
+50 | launch.shutdown.domain-result | crates/runtimeexec/src/lib.rs |     domain_result | status=ok
+51 | launch.shutdown.resources | crates/runtimeexec/src/lib.rs | for resource in resources | status=ok
+52 | launch.shutdown.workers | crates/runtimeexec/src/lib.rs | for worker in workers | status=ok
+53 | launch.register-lifecycle | crates/runtimeexec/src/lib.rs | register_lifecycle_outputs(stack, trace_exporter, lifecycle_batches)?; | status=ok
+54 | launch.listener-prepare | crates/runtimeexec/src/lib.rs | let prepared = adapter.prepare(probe_receipt, &mut transaction).await?; | status=ok
+55 | launch.listener-activate | crates/runtimeexec/src/lib.rs | Adapter::activate(prepared, transaction.commit()) | status=ok
+56 | launch.ready-hook | crates/runtimeexec/src/lib.rs | on_ready(activated.into_inventory())?; | status=ok
+57 | launch.signal-wait | crates/runtimeexec/src/lib.rs | launch_until(plan, wait_for_shutdown_signal()).await | status=ok
+58 | launch.shutdown.drain | crates/runtimeexec/src/lib.rs | stack.shutdown().await | status=ok
+59 | adapter.listener-prepare | assemblies/runtime/src/launch.rs | BoundListenerSet::prepare( | status=ok
+60 | adapter.listener-preflight | assemblies/runtime/src/launch.rs | listeners.preflight_activation()?; | status=ok
+61 | adapter.listener-activate | assemblies/runtime/src/launch.rs | prepared.listeners.activate(&mut registrar) | status=ok

@@ -5,8 +5,8 @@
 //! 运行时入口（[`run`]，#1320 Join）：从 fingerprint-verified `RuntimePlan` 投影 listener execution plan
 //! → 构造 plan 要求的 provider bundle → generated domains → `compose_bindings`
 //! → 聚合 `DomainModuleResult` → 按 plan 唯一 finalizer 产出 `FinalizedListenerSet`
-//! → `LaunchPlan` 逐 listener bind socket + serve（经 `httpd::HttpServer`
-//! + `bootstrap::ShutdownStack`）→ SIGTERM/SIGINT 优雅 drain。Health 也只由 plan 中的
+//! + `FinalizedProbeReceipt` → runtime adapter 完成 bind-all/preflight-all，再交由
+//!   `runtimeexec::LaunchPlan` 唯一编排 serve、SIGTERM/SIGINT 和 LIFO drain。Health 只由 plan 中的
 //!   `Health + NoAuth` 项创建，没有手写 append 旁路。各域 typed handle 经 Registry 的 route/subscriber
 //!   funnel 一次性交接，不进入共享依赖或生命周期输出。JWT 验签 key 经本地
 //!   JWKS 文件源 + 外部 agent 轮转注入；Internal listener 默认走 SPIFFE/mTLS，service-token 仅保留 loopback
@@ -70,7 +70,7 @@ pub use settings_composition::KEYPROVIDER_READY_PROBE_NAME;
 #[cfg(feature = "integration")]
 pub mod test_support;
 pub use module::SharedRuntimeDeps;
-pub use phase::{RuntimeOutputs, ServingRuntimeInputs};
+pub use phase::ServingRuntimeInputs;
 
 #[cfg(test)]
 use infra::oidc::{
@@ -107,7 +107,7 @@ fn build_trace_export(config: SnapshotConfig<'_>) -> anyhow::Result<Option<otel:
 /// **按需开启**：[`OTEL_ENDPOINT_ENV`] 未设 → `Ok(None)`（仅 fmt 日志，不导出 trace）。设了则按 scheme 派发
 /// typed [`otel::OtelEndpoint`]——`https://` → TLS（生产默认）；`http://` → 仅 loopback host 显式明文 opt-in
 /// （非 loopback 即 `Err`，零信任 fail-closed）；其它 scheme → `Err`。**fail-fast**：误配在组合根接线期即暴露，
-/// 不静默退回 fmt（值非法 ≠ 未配）。返回的 exporter 由 [`run`] 接管生命周期（注册进 `ShutdownStack` 关停时 flush）。
+/// 不静默退回 fmt（值非法 ≠ 未配）。Exporter 由 [`run`] 交给 `runtimeexec` 的唯一 shutdown owner 并在关停时 flush。
 fn build_trace_export_from_value(raw: Option<&str>) -> anyhow::Result<Option<otel::OtelExporter>> {
     let Some(raw) = raw else {
         return Ok(None);

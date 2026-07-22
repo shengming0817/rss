@@ -1,0 +1,15 @@
+error[E0451]: fields `adapter`, `probe_receipt`, `on_ready`, `trace_exporter` and `lifecycle_batches` of struct `LaunchPlan` are private
+  --> tests/ui/launch_plan_fields_private_fail.rs:8:13
+   |
+ 7 |         runtimeexec::LaunchPlan {
+   |         ----------------------- in this type
+ 8 |             adapter: (),
+   |             ^^^^^^^ private field
+ 9 |             probe_receipt: (),
+   |             ^^^^^^^^^^^^^ private field
+10 |             on_ready: ready,
+   |             ^^^^^^^^ private field
+11 |             trace_exporter: None,
+   |             ^^^^^^^^^^^^^^ private field
+12 |             lifecycle_batches: runtimeexec::LaunchLifecycleBatches::new(
+   |             ^^^^^^^^^^^^^^^^^ private field

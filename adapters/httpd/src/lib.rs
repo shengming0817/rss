@@ -43,7 +43,7 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use axum::serve::{IncomingStream, Listener, ListenerExt};
-use diport::{ManagedResource, ShutdownError};
+use diport::{DynManagedResource, ManagedResource, ShutdownError};
 use distributed::{
     DomainMethod, DomainRequest, DomainResponse, DomainTransport, DomainTransportError,
     DomainTransportErrorKind,
@@ -72,7 +72,6 @@ pub struct HttpServer {
     /// `shutdown()` `cancel()` 它触发 graceful 退出（幂等：阶段 1 广播已 cancel 则 no-op）。
     token: CancellationToken,
     handle: Mutex<Option<JoinHandle<std::io::Result<()>>>>,
-    mtls_source: Option<spiffe::X509Source>,
 }
 
 /// HTTP server 启动失败（构造期 fail-fast，不静默 noop）。
@@ -589,6 +588,43 @@ pub struct MtlsServerConfig {
     allow_set: authn::MtlsAllowSet,
 }
 
+/// Prepared mTLS configuration plus the background SPIFFE source lifecycle it started.
+///
+/// The lifecycle must be staged in the launch transaction before the caller reaches another await.
+#[must_use = "mTLS preparation owns a live SPIFFE source and must be staged"]
+pub struct MtlsServerPreparation {
+    config: MtlsServerConfig,
+    lifecycle: Box<DynManagedResource<'static>>,
+}
+
+impl MtlsServerPreparation {
+    /// Stage the background lifecycle synchronously before releasing the serving configuration.
+    pub fn stage_with(
+        self,
+        stage: impl FnOnce(Box<DynManagedResource<'static>>),
+    ) -> MtlsServerConfig {
+        stage(self.lifecycle);
+        self.config
+    }
+}
+
+struct MtlsSpiffeSource {
+    source: spiffe::X509Source,
+}
+
+impl ManagedResource for MtlsSpiffeSource {
+    fn name(&self) -> &str {
+        "http-mtls-spiffe-source"
+    }
+
+    async fn shutdown(&self) -> Result<(), ShutdownError> {
+        self.source
+            .shutdown_configured()
+            .await
+            .map_err(ShutdownError::new)
+    }
+}
+
 /// Failure to construct hermetic TLS material for an assembly test.
 #[cfg(any(test, feature = "test-support"))]
 #[derive(Debug, thiserror::Error)]
@@ -604,7 +640,7 @@ impl MtlsServerConfig {
     pub async fn from_spire(
         allow_set: authn::MtlsAllowSet,
         endpoint: Option<&str>,
-    ) -> Result<Self, HttpServeError> {
+    ) -> Result<MtlsServerPreparation, HttpServeError> {
         Self::from_spire_with_initial_sync_timeout(allow_set, endpoint, Duration::from_secs(5))
             .await
     }
@@ -613,7 +649,7 @@ impl MtlsServerConfig {
         allow_set: authn::MtlsAllowSet,
         endpoint: Option<&str>,
         initial_sync_timeout: Duration,
-    ) -> Result<Self, HttpServeError> {
+    ) -> Result<MtlsServerPreparation, HttpServeError> {
         let source = match endpoint {
             Some(endpoint) => {
                 spiffe::X509Source::builder()
@@ -636,11 +672,19 @@ impl MtlsServerConfig {
             .with_alpn_protocols([b"http/1.1"])
             .build()
             .map_err(HttpServeError::Rustls)?;
-        Ok(Self {
+        let config = Self {
             source: Some(source),
             acceptor: spiffe_rustls_tokio::TlsAcceptor::new(std::sync::Arc::new(server_config)),
             allow_set,
-        })
+        };
+        let lifecycle = DynManagedResource::new_box(MtlsSpiffeSource {
+            source: config
+                .source
+                .as_ref()
+                .unwrap_or_else(|| unreachable!("SPIFFE config always retains its source"))
+                .clone(),
+        });
+        Ok(MtlsServerPreparation { config, lifecycle })
     }
 
     /// Runtime readiness signal for readyz wiring.
@@ -925,7 +969,6 @@ impl BoundHttpServer {
             local_addr: self.local_addr,
             token,
             handle: Mutex::new(Some(handle)),
-            mtls_source: None,
         }
     }
 
@@ -941,7 +984,7 @@ impl BoundHttpServer {
         let listener = MtlsListener {
             listener: self.listener,
             local_addr: self.local_addr,
-            config: mtls.clone(),
+            config: mtls,
         };
         let handle = tokio::spawn(async move {
             let svc = svc.into_axum();
@@ -959,7 +1002,6 @@ impl BoundHttpServer {
             local_addr: self.local_addr,
             token,
             handle: Mutex::new(Some(handle)),
-            mtls_source: mtls.source,
         }
     }
 }
@@ -1049,12 +1091,6 @@ impl ManagedResource for HttpServer {
                     return Err(ShutdownError::new(e));
                 }
             }
-        }
-        if let Some(source) = &self.mtls_source {
-            source
-                .shutdown_configured()
-                .await
-                .map_err(ShutdownError::new)?;
         }
         Ok(())
     }

@@ -3,12 +3,13 @@
 //! 规则单源 = `docs/rules/architecture.md §分层`。被 `layerdeps`（source-centric 分层依赖 lint）
 //! 与 `publicapi`（baseline 目标层）共用，消除分层成员重复（DRY）。
 //!
-//! 分类策略：`crates/*` 按 crate 名查五层 const 表（basis/engine/diport/service/domain）；
+//! 分类策略：`crates/*` 按 crate 名查五层 const 表（basis/engine/diport/service/domain），另将精确路径
+//! `crates/runtimeexec` 分类为 RuntimeExec；
 //! `adapters/*` / `bins/*` / `xtask` / `assemblies/*` / `composition/*` / `examples/*` / `journeys*` / `generated` 按成员**路径**判（不靠名，
 //! 免疫 crates.io 同名碰撞）。`crates/` 下未登记 → `None`，由 `layerdeps` 覆盖检查
 //! （LAYER-DEPS-05）fail——新增 crate 必须在此登记层。
 //!
-//! INVARIANT: LAYER-DEPS-00 { level = "Medium", exec = "verify", source = "code" }—— 五层 const 表与 architecture.md §分层 同源；矩阵 `allows`
+//! INVARIANT: LAYER-DEPS-00 { level = "Medium", exec = "verify", source = "code" }—— 五层 const 表、RuntimeExec 精确路径与 architecture.md §分层 同源；矩阵 `allows`
 //!   编码该节「允许 / 禁止依赖」。漂移由 `layerdeps` 真实工作区绿用例（anti-vacuity）暴露。
 
 /// 基础层（依赖 std + 外部 crate，不依赖上层）。**声明顺序即 intra-base DAG 低→高**
@@ -107,6 +108,8 @@ pub(crate) enum Layer {
     /// DI-infra（diport）：基础 / 引擎 之上、服务 / 域 / adapter 之下。
     DiPort,
     Service,
+    /// provider-independent runtime 启动内核；只向基础/引擎/DI-infra/服务出边，只允许组合根消费。
+    RuntimeExec,
     Domain,
     Adapter,
     Generated,
@@ -120,6 +123,9 @@ pub(crate) enum Layer {
 /// `bins/server` / `xtask` / `generated`）判定分层。`crates/*` 经 const 表查五层；其余按路径前缀。
 /// 未识别（含 `crates/` 下未登记）→ `None`。
 pub(crate) fn classify(crate_name: &str, member_path: &str) -> Option<Layer> {
+    if member_path == "crates/runtimeexec" {
+        return (crate_name == "runtimeexec").then_some(Layer::RuntimeExec);
+    }
     if member_path == "generated" {
         return Some(Layer::Generated);
     }
@@ -167,14 +173,19 @@ pub(crate) fn classify(crate_name: &str, member_path: &str) -> Option<Layer> {
 /// 未授予任一分组同层依赖；基础"仅 std+外部"直接排除基础互依赖）——fail-closed：只放行 §分层
 /// 显式授予的下行边。generated 仅需基础；root 依赖一切。
 pub(crate) fn allows(from: Layer, to: Layer) -> bool {
-    use Layer::{Adapter, Basis, DiPort, Domain, Engine, Example, Generated, Root, Service};
+    use Layer::{
+        Adapter, Basis, DiPort, Domain, Engine, Example, Generated, Root, RuntimeExec, Service,
+    };
     match from {
-        // 组合根可依赖所有库 crate。
+        // 分层矩阵允许组合根消费所有库 crate；RuntimeExec 再由 deny.toml 精确 target wrapper 收窄。
         Root => true,
         // 示例包可演示 provider-agnostic 服务模型；禁止直接装配域/adapters/generated。
         Example => matches!(to, Basis | Engine | DiPort | Service),
         // contract 派生 wire 类型只需基础（serde derive 在外部 crate）。
         Generated => to == Basis,
+        // provider-independent runtime 启动内核：只消费基础/引擎/DI-infra/服务；禁具体域、adapter、
+        // generated、组合根及兄弟 RuntimeExec。入边由其它各行保持关闭，仅 Root 行放行。
+        RuntimeExec => matches!(to, Basis | Engine | DiPort | Service),
         // adapter：基础 + 引擎 + DI-infra（impl 其 port trait）+ 服务 + 域（impl 域 repo/service port，
         // DIP 内向边，Option 2/ADR-005）；禁兄弟 adapter / generated（反向 域→adapter 由下方 Domain 行禁）。
         Adapter => matches!(to, Basis | Engine | DiPort | Service | Domain),
@@ -268,6 +279,7 @@ mod tests {
     #[case("diport", "crates/diport", Some(Layer::DiPort))]
     #[case("httpserve", "crates/httpserve", Some(Layer::Service))]
     #[case("bootstrap", "crates/bootstrap", Some(Layer::Service))]
+    #[case("runtimeexec", "crates/runtimeexec", Some(Layer::RuntimeExec))]
     #[case("testkit", "crates/testkit", Some(Layer::Service))]
     #[case("identity", "crates/identity", Some(Layer::Domain))]
     #[case("syshealth", "crates/syshealth", Some(Layer::Domain))]
@@ -293,6 +305,12 @@ mod tests {
     #[test]
     fn classify_unregistered_crate_is_none() {
         assert_eq!(classify("brandnew", "crates/brandnew"), None);
+    }
+
+    #[test]
+    fn classify_runtimeexec_requires_exact_name_and_path() {
+        assert_eq!(classify("runtimeexec", "crates/runtimeexec2"), None);
+        assert_eq!(classify("runtimeexec2", "crates/runtimeexec"), None);
     }
 
     /// 四 const 表与 classify 一致：每个登记 crate 名归对应层（防 const 表内漂移 + 覆盖全集非代表性子集）。
@@ -448,6 +466,22 @@ mod tests {
     #[case(Layer::Root, Layer::Adapter, true)]
     #[case(Layer::Root, Layer::Generated, true)]
     #[case(Layer::Root, Layer::DiPort, true)]
+    // RuntimeExec 只向 provider-independent 下层出边，且只能由 Root 消费。
+    #[case(Layer::RuntimeExec, Layer::Basis, true)]
+    #[case(Layer::RuntimeExec, Layer::Engine, true)]
+    #[case(Layer::RuntimeExec, Layer::DiPort, true)]
+    #[case(Layer::RuntimeExec, Layer::Service, true)]
+    #[case(Layer::RuntimeExec, Layer::Domain, false)]
+    #[case(Layer::RuntimeExec, Layer::Adapter, false)]
+    #[case(Layer::RuntimeExec, Layer::Generated, false)]
+    #[case(Layer::RuntimeExec, Layer::Root, false)]
+    #[case(Layer::RuntimeExec, Layer::RuntimeExec, false)]
+    #[case(Layer::Service, Layer::RuntimeExec, false)]
+    #[case(Layer::Domain, Layer::RuntimeExec, false)]
+    #[case(Layer::Adapter, Layer::RuntimeExec, false)]
+    #[case(Layer::Generated, Layer::RuntimeExec, false)]
+    #[case(Layer::Example, Layer::RuntimeExec, false)]
+    #[case(Layer::Root, Layer::RuntimeExec, true)]
     // Example 收窄：可依赖 provider-agnostic 服务模型，不可直接依赖域 / adapter / generated。
     #[case(Layer::Example, Layer::Basis, true)]
     #[case(Layer::Example, Layer::Engine, true)]

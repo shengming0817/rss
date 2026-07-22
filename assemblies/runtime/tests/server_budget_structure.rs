@@ -26,10 +26,16 @@ fn complete_budget_boundary(routes: &str, phase_launch: &str, launch: &str, http
     ) && phase_launch.contains(
         "Ok(request_budget)=>{",
     ) && phase_launch.contains(
-        "let(provider_module,domain_module)=provider_build.into_modules();",
+        "letlifecycle_batches=provider_build.into_launch_batches();",
     ) && phase_launch.contains(
-        "crate::launch::launch(context.config(),request_budget,launch_plan).await",
+        "letadapter=crate::launch::RuntimeLaunchAdapter::new(listeners,request_budget,",
+    ) && phase_launch.contains(
+        "letlaunch_plan=runtimeexec::LaunchPlan::new(adapter,probe_receipt,crate::launch::log_ready,trace_exporter,lifecycle_batches,);",
+    ) && phase_launch.contains(
+        "runtimeexec::launch(launch_plan).await",
     )
+        && launch.contains("budget:httpserve::ServerRequestBudget")
+        && launch.contains("Self{listeners,budget,addr_resolver,}")
         && launch.contains("routes.into_make_service(budget)")
         && httpd.matches("svc:httpserve::ServerMakeService").count() >= 5
         && !httpd.contains("svc:IntoMakeServiceWithConnectInfo")
@@ -48,7 +54,9 @@ fn guard_rejects_partial_or_transport_specific_budget() {
     "#;
     let phase_launch = r#"
         let request_budget = crate::launch::server_request_budget(context.config())?;
-        crate::launch::launch(context.config(), request_budget, launch_plan);
+        let adapter = crate::launch::RuntimeLaunchAdapter::new(listeners, request_budget, resolver);
+        let launch_plan = runtimeexec::LaunchPlan::new(adapter, probe_receipt, on_ready);
+        runtimeexec::launch(launch_plan).await;
     "#;
     let httpd = r#"
         pub fn serve(self, svc: IntoMakeServiceWithConnectInfo<Router, SocketAddr>) {}

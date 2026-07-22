@@ -1,20 +1,14 @@
-//! Runtime launch phase: listener serving plus LIFO shutdown registration.
+//! Runtime-specific listener preparation and activation for the shared launch kernel.
 
 use crate::{config::SnapshotConfig, listeners, routes};
 
-use std::future::Future;
 use std::net::SocketAddr;
 use std::num::NonZeroU64;
 
 use anyhow::Context as _;
-use bootstrap::DomainModuleResult;
-#[cfg(test)]
-use bootstrap::WorkerSpec;
-use bootstrap::shutdown::ShutdownStack;
 use diport::DynManagedResource;
 use httpd::HttpServer;
 use primitives::{AuthScheme, ListenerKind};
-use tokio_util::sync::CancellationToken;
 
 pub(crate) const HTTP_SERVER_REQUEST_BUDGET_ENV: &str = "RSS_HTTP_SERVER_REQUEST_BUDGET_MS";
 
@@ -35,169 +29,78 @@ pub(crate) fn server_request_budget(
     Ok(httpserve::ServerRequestBudget::from_millis(millis))
 }
 
-/// Resources owned by the launch phase, grouped by lifecycle dependency.
-pub(crate) struct LaunchPlanParts {
-    pub(crate) listeners: routes::FinalizedListenerSet,
-    pub(crate) trace_exporter: Option<Box<DynManagedResource<'static>>>,
-    pub(crate) provider_module: DomainModuleResult,
-    pub(crate) domain_module: DomainModuleResult,
-}
-
-/// Launch plan consumed by [`launch`] to register shutdown resources and serve listeners.
-pub(crate) struct LaunchPlan {
+pub(crate) struct RuntimeLaunchAdapter<R> {
     listeners: routes::FinalizedListenerSet,
-    trace_exporter: Option<Box<DynManagedResource<'static>>>,
-    provider_module: DomainModuleResult,
-    domain_module: DomainModuleResult,
+    budget: httpserve::ServerRequestBudget,
+    addr_resolver: R,
 }
 
-impl LaunchPlan {
-    pub(crate) fn new(parts: LaunchPlanParts) -> Self {
+impl<R> RuntimeLaunchAdapter<R> {
+    pub(crate) fn new(
+        listeners: routes::FinalizedListenerSet,
+        budget: httpserve::ServerRequestBudget,
+        addr_resolver: R,
+    ) -> Self {
         Self {
-            listeners: parts.listeners,
-            trace_exporter: parts.trace_exporter,
-            provider_module: parts.provider_module,
-            domain_module: parts.domain_module,
+            listeners,
+            budget,
+            addr_resolver,
         }
     }
+}
 
-    fn listener_count(&self) -> usize {
-        self.listeners.len()
-    }
+pub(crate) struct PreparedRuntimeListeners {
+    listeners: BoundListenerSet,
+}
 
-    fn register(self, stack: &mut ShutdownStack) -> anyhow::Result<Vec<routes::AssembledListener>> {
+pub(crate) struct RuntimeListenerInventory {
+    listener_count: usize,
+}
+
+impl<R> runtimeexec::LaunchAdapter<routes::FinalizedProbeReceipt> for RuntimeLaunchAdapter<R>
+where
+    R: Fn(ListenerKind, AuthScheme) -> anyhow::Result<SocketAddr> + Send + Sync,
+{
+    type Prepared = PreparedRuntimeListeners;
+    type Inventory = RuntimeListenerInventory;
+
+    async fn prepare(
+        self,
+        probe_receipt: routes::FinalizedProbeReceipt,
+        transaction: &mut runtimeexec::LaunchTransaction<'_>,
+    ) -> anyhow::Result<Self::Prepared> {
         let Self {
             listeners,
-            trace_exporter,
-            provider_module,
-            domain_module,
+            budget,
+            addr_resolver,
         } = self;
-
-        // Trace exporter registers first so LIFO drains it last, after shutdown-period spans stop.
-        if let Some(exporter) = trace_exporter {
-            stack.register_detached(exporter);
-        }
-        // Provider resources outlive their workers and every downstream domain worker.
-        let provider_result = Self::register_module_output(stack, provider_module);
-        // Event infra is recorded into provider_module (ProviderOutput::event) and therefore
-        // registers with provider resources before domain workers.
-        let domain_result = Self::register_module_output(stack, domain_module);
-        // Both owned output batches must cross into the async shutdown stack before validation can
-        // return an error; otherwise a later batch would be synchronously dropped on an earlier
-        // validation failure.
-        provider_result?;
-        domain_result?;
-
-        Ok(listeners.into_listeners())
+        let _probe_receipt = probe_receipt;
+        let listeners = BoundListenerSet::prepare(
+            listeners.into_listeners(),
+            budget,
+            &addr_resolver,
+            transaction,
+        )
+        .await?;
+        listeners.preflight_activation()?;
+        Ok(PreparedRuntimeListeners { listeners })
     }
 
-    /// Registers one lifecycle output batch through the common resources-then-workers funnel.
-    fn register_module_output(
-        stack: &mut ShutdownStack,
-        output: DomainModuleResult,
-    ) -> anyhow::Result<()> {
-        let DomainModuleResult {
-            probes,
-            resources,
-            workers,
-        } = output;
-        for resource in resources {
-            stack.register_detached(resource);
-        }
-        for worker in workers {
-            stack.register_with_token(worker);
-        }
-        anyhow::ensure!(
-            probes.is_empty(),
-            "launch lifecycle output still contains undrained probes"
-        );
-        Ok(())
+    fn activate(
+        prepared: Self::Prepared,
+        mut registrar: runtimeexec::LaunchRegistrar<'_>,
+    ) -> anyhow::Result<runtimeexec::Activated<Self::Inventory>> {
+        let inventory = prepared.listeners.activate(&mut registrar);
+        registrar.complete(inventory)
     }
 }
 
-/// Production launch entry: bind listeners, wait for SIGTERM/SIGINT, then drain resources.
-pub(crate) async fn launch(
-    config: SnapshotConfig<'_>,
-    budget: httpserve::ServerRequestBudget,
-    plan: LaunchPlan,
-) -> anyhow::Result<()> {
-    launch_until(
-        plan,
-        budget,
-        move |listener, scheme| listeners::listener_addr_for_scheme(config, listener, scheme),
-        wait_for_shutdown_signal(),
-    )
-    .await
-}
-
-/// Testable launch core with injected address resolver and shutdown trigger.
-pub(crate) async fn launch_until<R, S>(
-    plan: LaunchPlan,
-    budget: httpserve::ServerRequestBudget,
-    addr_resolver: R,
-    shutdown: S,
-) -> anyhow::Result<()>
-where
-    R: Fn(ListenerKind, AuthScheme) -> anyhow::Result<SocketAddr>,
-    S: Future<Output = anyhow::Result<()>>,
-{
-    launch_until_observed(plan, budget, addr_resolver, shutdown, |_| {}).await
-}
-
-// reason: bind loop + registration + drain logging is one launch phase; splitting would hide the startup/drain order.
-#[allow(clippy::cognitive_complexity)]
-async fn launch_until_observed<R, S, O>(
-    plan: LaunchPlan,
-    budget: httpserve::ServerRequestBudget,
-    addr_resolver: R,
-    shutdown: S,
-    observe_ready_stack: O,
-) -> anyhow::Result<()>
-where
-    R: Fn(ListenerKind, AuthScheme) -> anyhow::Result<SocketAddr>,
-    S: Future<Output = anyhow::Result<()>>,
-    O: FnOnce(&ShutdownStack),
-{
-    let listener_count = plan.listener_count();
-    let mut stack = ShutdownStack::new(CancellationToken::new());
-    let launch_result = async {
-        let listeners = plan.register(&mut stack)?;
-        anyhow::ensure!(
-            listener_count > 0,
-            "no listener has routes to serve (refusing to start with zero bound sockets)"
-        );
-        let bound = BoundListenerSet::prepare(listeners, budget, &addr_resolver).await?;
-        bound.activate(&mut stack)?;
-        observe_ready_stack(&stack);
-        tracing::info!(listener_count, "all listeners bound; server ready");
-        shutdown.await
-    }
-    .await;
-
-    if launch_result.is_ok() {
-        tracing::info!("draining listeners (graceful)");
-    } else {
-        tracing::warn!("launch lifecycle failed; draining registered resources");
-    }
-    let drain_result = report_shutdown_failures(stack.shutdown().await);
-    preserve_launch_error(launch_result, drain_result)
-}
-
-fn preserve_launch_error(
-    launch_result: anyhow::Result<()>,
-    drain_result: anyhow::Result<()>,
-) -> anyhow::Result<()> {
-    match (launch_result, drain_result) {
-        (Ok(()), drain_result) => drain_result,
-        (Err(launch_error), Ok(())) => Err(launch_error),
-        (Err(launch_error), Err(drain_error)) => {
-            tracing::error!(
-                cleanup_error = %drain_error,
-                "launch failed and cleanup also failed; preserving primary launch error"
-            );
-            Err(launch_error)
-        }
-    }
+pub(crate) fn log_ready(inventory: RuntimeListenerInventory) -> anyhow::Result<()> {
+    tracing::info!(
+        listener_count = inventory.listener_count,
+        "all listeners bound; server ready"
+    );
+    Ok(())
 }
 
 /// Fully prepared listener set. Private fields make partial activation unrepresentable outside this
@@ -224,18 +127,21 @@ enum PreparedListenerTransport {
 }
 
 impl BoundListenerSet {
-    async fn prepare<R>(
+    async fn prepare<R, P>(
         listeners: Vec<routes::AssembledListener>,
         budget: httpserve::ServerRequestBudget,
         addr_resolver: &R,
+        transaction: &mut P,
     ) -> anyhow::Result<Self>
     where
         R: Fn(ListenerKind, AuthScheme) -> anyhow::Result<SocketAddr>,
+        P: PreparationRegistrar,
     {
         let mut non_health = Vec::with_capacity(listeners.len());
         let mut health = Vec::new();
         for listener in listeners {
-            let listener = BoundListener::prepare(listener, budget, addr_resolver).await?;
+            let listener =
+                BoundListener::prepare(listener, budget, addr_resolver, transaction).await?;
             if listener.listener == ListenerKind::Health {
                 health.push(listener);
             } else {
@@ -245,26 +151,67 @@ impl BoundListenerSet {
         Ok(Self { non_health, health })
     }
 
-    fn activate(self, stack: &mut ShutdownStack) -> anyhow::Result<()> {
+    fn preflight_activation(&self) -> anyhow::Result<()> {
+        let mut commits = Vec::new();
         for listener in self.non_health.iter().chain(&self.health) {
-            listener.preflight_activation()?;
+            if let Some(commit) = listener.prepare_readiness_commit()? {
+                commits.push(commit);
+            }
         }
-        for listener in self.non_health.into_iter().chain(self.health) {
-            listener.activate(stack);
+        for commit in commits {
+            commit.commit();
         }
         Ok(())
+    }
+
+    fn activate<R>(self, registrar: &mut R) -> RuntimeListenerInventory
+    where
+        R: ListenerRegistrar,
+    {
+        let listener_count = self.non_health.len() + self.health.len();
+        for listener in self.non_health.into_iter().chain(self.health) {
+            listener.activate(registrar);
+        }
+        RuntimeListenerInventory { listener_count }
+    }
+}
+
+trait ListenerRegistrar {
+    fn register_with_token<F>(&mut self, make: F)
+    where
+        F: FnOnce(tokio_util::sync::CancellationToken) -> Box<DynManagedResource<'static>>;
+}
+
+trait PreparationRegistrar {
+    fn stage_resource(&mut self, resource: Box<DynManagedResource<'static>>);
+}
+
+impl PreparationRegistrar for runtimeexec::LaunchTransaction<'_> {
+    fn stage_resource(&mut self, resource: Box<DynManagedResource<'static>>) {
+        runtimeexec::LaunchTransaction::stage_resource(self, resource);
+    }
+}
+
+impl ListenerRegistrar for runtimeexec::LaunchRegistrar<'_> {
+    fn register_with_token<F>(&mut self, make: F)
+    where
+        F: FnOnce(tokio_util::sync::CancellationToken) -> Box<DynManagedResource<'static>>,
+    {
+        runtimeexec::LaunchRegistrar::register_listener_with_token(self, make);
     }
 }
 
 impl BoundListener {
     #[allow(clippy::cognitive_complexity)]
-    async fn prepare<R>(
+    async fn prepare<R, P>(
         listener: routes::AssembledListener,
         budget: httpserve::ServerRequestBudget,
         addr_resolver: &R,
+        transaction: &mut P,
     ) -> anyhow::Result<Self>
     where
         R: Fn(ListenerKind, AuthScheme) -> anyhow::Result<SocketAddr>,
+        P: PreparationRegistrar,
     {
         let (listener, scheme, routes, transport) = listener.into_launch_parts();
         let transport = resolve_listener_transport(listener, scheme, transport)?;
@@ -276,9 +223,12 @@ impl BoundListener {
         tracing::info!(listener = ?listener, name, addr = %bound.local_addr(), "listener bound");
         let transport = match transport {
             ResolvedListenerTransport::Mtls(material) => {
-                let mtls = mtls_config(listener, material.allow_set, &material.spiffe_endpoint)
+                let prepared = mtls_config(listener, material.allow_set, &material.spiffe_endpoint)
                     .await
                     .with_context(|| format!("build {name} mTLS config"))?;
+                let mtls = prepared.stage_with(|lifecycle| {
+                    transaction.stage_resource(lifecycle);
+                });
                 PreparedListenerTransport::Mtls {
                     config: mtls,
                     health: material.health,
@@ -295,14 +245,19 @@ impl BoundListener {
         })
     }
 
-    fn preflight_activation(&self) -> anyhow::Result<()> {
+    fn prepare_readiness_commit(&self) -> anyhow::Result<Option<routes::MtlsHealthCommit<'_>>> {
         match &self.transport {
-            PreparedListenerTransport::Plaintext => Ok(()),
-            PreparedListenerTransport::Mtls { config, health } => health.set(config.clone()),
+            PreparedListenerTransport::Plaintext => Ok(None),
+            PreparedListenerTransport::Mtls { config, health } => {
+                health.prepare_commit(config.clone()).map(Some)
+            }
         }
     }
 
-    fn activate(self, stack: &mut ShutdownStack) {
+    fn activate<R>(self, registrar: &mut R)
+    where
+        R: ListenerRegistrar,
+    {
         let Self {
             listener,
             scheme,
@@ -312,7 +267,7 @@ impl BoundListener {
         } = self;
         match transport {
             PreparedListenerTransport::Mtls { config, health: _ } => {
-                stack.register_with_token(move |token| {
+                registrar.register_with_token(move |token| {
                     DynManagedResource::new_box(bound.serve_mtls(svc, config, token))
                 });
             }
@@ -323,7 +278,7 @@ impl BoundListener {
                         "binding local-test Internal service-token listener; mTLS is the production default"
                     );
                 }
-                stack.register_with_token(move |token| {
+                registrar.register_with_token(move |token| {
                     DynManagedResource::new_box(bound.serve(svc, token))
                 });
             }
@@ -381,7 +336,7 @@ async fn mtls_config(
     listener: ListenerKind,
     allow_set: authn::MtlsAllowSet,
     spiffe_endpoint: &str,
-) -> anyhow::Result<httpd::MtlsServerConfig> {
+) -> anyhow::Result<httpd::MtlsServerPreparation> {
     anyhow::ensure!(
         listener == ListenerKind::Internal,
         "mTLS listener config is only wired for Internal"
@@ -391,144 +346,15 @@ async fn mtls_config(
         .context("build Internal listener mTLS config from captured SPIFFE endpoint")
 }
 
-fn report_shutdown_failures(
-    failures: Vec<bootstrap::shutdown::ResourceShutdownError>,
-) -> anyhow::Result<()> {
-    if failures.is_empty() {
-        tracing::info!("all runtime resources drained; exiting");
-        return Ok(());
-    }
-    for f in &failures {
-        tracing::error!(error = %f, "runtime resource shutdown failure");
-    }
-    anyhow::bail!(
-        "graceful shutdown completed with {} runtime resource failure(s)",
-        failures.len()
-    )
-}
-
-// reason: cfg(unix) branch installs two signal streams and selects one; this is a tight OS-signal boundary.
-#[allow(clippy::cognitive_complexity)]
-async fn wait_for_shutdown_signal() -> anyhow::Result<()> {
-    #[cfg(unix)]
-    {
-        use tokio::signal::unix::{SignalKind, signal};
-        let mut term = signal(SignalKind::terminate()).context("install SIGTERM handler")?;
-        let mut int = signal(SignalKind::interrupt()).context("install SIGINT handler")?;
-        tokio::select! {
-            _ = term.recv() => tracing::info!(signal = "SIGTERM", "shutdown signal received"),
-            _ = int.recv() => tracing::info!(signal = "SIGINT", "shutdown signal received"),
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        tokio::signal::ctrl_c()
-            .await
-            .context("install ctrl-c handler")?;
-        tracing::info!(signal = "ctrl-c", "shutdown signal received");
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::test_snapshot;
 
-    use diport::{ManagedResource, ShutdownError};
     use primitives::{HealthCheck, HealthStatus, ProbeName};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Condvar, Mutex};
     use std::time::Duration;
-    use tracing_subscriber::prelude::*;
-
-    #[derive(Clone)]
-    struct ErrorEventCounter(Arc<AtomicUsize>);
-
-    impl<S> tracing_subscriber::Layer<S> for ErrorEventCounter
-    where
-        S: tracing::Subscriber,
-    {
-        fn on_event(
-            &self,
-            event: &tracing::Event<'_>,
-            _ctx: tracing_subscriber::layer::Context<'_, S>,
-        ) {
-            if *event.metadata().level() == tracing::Level::ERROR {
-                self.0.fetch_add(1, Ordering::SeqCst);
-            }
-        }
-    }
-
-    struct NamedResource {
-        name: &'static str,
-    }
-
-    impl ManagedResource for NamedResource {
-        fn name(&self) -> &str {
-            self.name
-        }
-
-        fn shutdown_timeout(&self) -> Duration {
-            Duration::from_secs(5)
-        }
-
-        async fn shutdown(&self) -> Result<(), ShutdownError> {
-            Ok(())
-        }
-    }
-
-    fn resource(name: &'static str) -> Box<DynManagedResource<'static>> {
-        DynManagedResource::new_box(NamedResource { name })
-    }
-
-    struct RecordingResource {
-        name: &'static str,
-        shutdowns: Arc<AtomicUsize>,
-        fail_shutdown: bool,
-    }
-
-    impl ManagedResource for RecordingResource {
-        fn name(&self) -> &str {
-            self.name
-        }
-
-        fn shutdown_timeout(&self) -> Duration {
-            Duration::from_secs(5)
-        }
-
-        async fn shutdown(&self) -> Result<(), ShutdownError> {
-            self.shutdowns.fetch_add(1, Ordering::SeqCst);
-            if self.fail_shutdown {
-                return Err(ShutdownError::new(std::io::Error::other(
-                    "recorded cleanup failure",
-                )));
-            }
-            Ok(())
-        }
-    }
-
-    fn recording_resource(
-        name: &'static str,
-        shutdowns: Arc<AtomicUsize>,
-    ) -> Box<DynManagedResource<'static>> {
-        DynManagedResource::new_box(RecordingResource {
-            name,
-            shutdowns,
-            fail_shutdown: false,
-        })
-    }
-
-    fn failing_recording_resource(
-        name: &'static str,
-        shutdowns: Arc<AtomicUsize>,
-    ) -> Box<DynManagedResource<'static>> {
-        DynManagedResource::new_box(RecordingResource {
-            name,
-            shutdowns,
-            fail_shutdown: true,
-        })
-    }
 
     struct NoopProbe;
 
@@ -539,22 +365,6 @@ mod tests {
                 HealthStatus::Healthy,
                 "ok",
             )
-        }
-    }
-
-    fn worker(name: &'static str) -> WorkerSpec {
-        Box::new(move |_token| resource(name))
-    }
-
-    fn provider_module(audit_guard: bool) -> DomainModuleResult {
-        let mut resources = vec![resource("pg-store")];
-        if audit_guard {
-            resources.push(resource("pg-audit"));
-        }
-        DomainModuleResult {
-            resources,
-            workers: vec![worker("pg-sampler")],
-            ..DomainModuleResult::default()
         }
     }
 
@@ -606,6 +416,104 @@ mod tests {
         httpserve::ServerRequestBudget::for_test()
     }
 
+    struct TestRegistrar {
+        stack: bootstrap::shutdown::ShutdownStack,
+    }
+
+    impl TestRegistrar {
+        fn new() -> Self {
+            Self {
+                stack: bootstrap::shutdown::ShutdownStack::new(
+                    tokio_util::sync::CancellationToken::new(),
+                ),
+            }
+        }
+
+        fn registered_names(&self) -> Vec<&str> {
+            self.stack.registered_names().collect()
+        }
+
+        async fn shutdown(self) -> anyhow::Result<()> {
+            let failures = self.stack.shutdown().await;
+            anyhow::ensure!(
+                failures.is_empty(),
+                "listener test cleanup reported {} failure(s)",
+                failures.len()
+            );
+            Ok(())
+        }
+    }
+
+    impl ListenerRegistrar for TestRegistrar {
+        fn register_with_token<F>(&mut self, make: F)
+        where
+            F: FnOnce(tokio_util::sync::CancellationToken) -> Box<DynManagedResource<'static>>,
+        {
+            self.stack.register_with_token(make);
+        }
+    }
+
+    impl PreparationRegistrar for TestRegistrar {
+        fn stage_resource(&mut self, resource: Box<DynManagedResource<'static>>) {
+            self.stack.register_detached(resource);
+        }
+    }
+
+    struct CountingResource {
+        name: &'static str,
+        shutdowns: Arc<AtomicUsize>,
+    }
+
+    impl diport::ManagedResource for CountingResource {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        async fn shutdown(&self) -> Result<(), diport::ShutdownError> {
+            self.shutdowns.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    fn counting_resource(
+        name: &'static str,
+        shutdowns: &Arc<AtomicUsize>,
+    ) -> Box<DynManagedResource<'static>> {
+        DynManagedResource::new_box(CountingResource {
+            name,
+            shutdowns: Arc::clone(shutdowns),
+        })
+    }
+
+    fn lifecycle_batches(
+        provider: bootstrap::DomainModuleResult,
+        domain: bootstrap::DomainModuleResult,
+    ) -> runtimeexec::LaunchLifecycleBatches {
+        runtimeexec::LaunchLifecycleBatches::new(
+            runtimeexec::ProviderLifecycleBatch::from_provider_output(provider),
+            runtimeexec::DomainLifecycleBatch::from_domain_output(domain),
+        )
+    }
+
+    #[allow(clippy::expect_used)]
+    async fn bound_listener_for_test(
+        listener: ListenerKind,
+        transport: PreparedListenerTransport,
+    ) -> BoundListener {
+        let (_, routes) = test_health_assembled().into_parts();
+        let name = listeners::listener_name(listener);
+        let bound = HttpServer::bind(name, "127.0.0.1:0".parse().expect("ephemeral address"))
+            .await
+            .expect("bind listener fixture");
+        BoundListener {
+            listener,
+            scheme: AuthScheme::NoAuth,
+            bound,
+            svc: routes.into_make_service(test_budget()),
+            transport,
+        }
+    }
+
     #[test]
     #[allow(clippy::expect_used)]
     fn server_request_budget_is_required_non_zero_and_snapshot_backed() {
@@ -631,200 +539,84 @@ mod tests {
         );
     }
 
-    fn minimal_plan(listeners: Vec<routes::AssembledListener>) -> LaunchPlan {
-        LaunchPlan::new(LaunchPlanParts {
-            listeners: routes::FinalizedListenerSet::for_test(listeners),
-            trace_exporter: None,
-            provider_module: provider_module(false),
-            domain_module: DomainModuleResult::default(),
-        })
-    }
-
-    fn full_plan(trace: bool, audit_guard: bool) -> LaunchPlan {
-        LaunchPlan::new(LaunchPlanParts {
-            listeners: routes::FinalizedListenerSet::for_test(vec![test_health_assembled()]),
-            trace_exporter: trace.then(|| resource("trace-exporter")),
-            provider_module: provider_module(audit_guard),
-            domain_module: DomainModuleResult {
-                resources: vec![
-                    resource("domain-resource-a"),
-                    resource("domain-resource-b"),
-                    resource("event-infra-a"),
-                    resource("event-infra-b"),
-                ],
-                workers: vec![worker("domain-worker-a"), worker("domain-worker-b")],
-                ..DomainModuleResult::default()
-            },
-        })
-    }
-
-    #[allow(clippy::expect_used)] // reason: direct test assertion path for clean launch and poisoned test mutexes.
-    async fn registered_names(plan: LaunchPlan) -> Vec<String> {
-        let names = Arc::new(Mutex::new(Vec::new()));
-        let captured = Arc::clone(&names);
-        launch_until_observed(
-            plan,
-            test_budget(),
-            ephemeral_addr,
-            std::future::ready(anyhow::Ok(())),
-            move |stack| {
-                *captured.lock().expect("registered names lock") =
-                    stack.registered_names().map(str::to_owned).collect();
-            },
-        )
-        .await
-        .expect("launch drains clean");
-        Arc::try_unwrap(names)
-            .expect("only observer holds names")
-            .into_inner()
-            .expect("registered names lock")
-    }
-
-    #[tokio::test]
-    async fn launch_plan_registers_shutdown_resources_in_lifo_dependency_order() {
-        let names = registered_names(full_plan(true, true)).await;
-        assert_eq!(
-            names,
-            [
-                "trace-exporter",
-                "pg-store",
-                "pg-audit",
-                "pg-sampler",
-                "domain-resource-a",
-                "domain-resource-b",
-                "event-infra-a",
-                "event-infra-b",
-                "domain-worker-a",
-                "domain-worker-b",
-                "http-health",
-            ]
-        );
-        let drain = names.iter().rev().map(String::as_str).collect::<Vec<_>>();
-        assert_eq!(
-            drain,
-            [
-                "http-health",
-                "domain-worker-b",
-                "domain-worker-a",
-                "event-infra-b",
-                "event-infra-a",
-                "domain-resource-b",
-                "domain-resource-a",
-                "pg-sampler",
-                "pg-audit",
-                "pg-store",
-                "trace-exporter",
-            ]
-        );
-    }
-
-    #[tokio::test]
-    async fn launch_plan_omits_optional_trace_and_audit_without_placeholders() {
-        let names = registered_names(full_plan(false, false)).await;
-        assert_eq!(
-            names,
-            [
-                "pg-store",
-                "pg-sampler",
-                "domain-resource-a",
-                "domain-resource-b",
-                "event-infra-a",
-                "event-infra-b",
-                "domain-worker-a",
-                "domain-worker-b",
-                "http-health",
-            ]
-        );
-        assert!(!names.iter().any(|name| name.contains("trace")));
-        assert!(!names.iter().any(|name| name.contains("audit")));
-    }
-
-    #[test]
-    #[allow(clippy::expect_used)] // reason: direct test assertion for expected error branch.
-    fn report_shutdown_failures_ok_when_empty_err_when_failures() {
-        use bootstrap::shutdown::{ResourceShutdownError, ShutdownFailureKind};
-
-        assert!(report_shutdown_failures(Vec::new()).is_ok());
-
-        let failures = vec![
-            ResourceShutdownError {
-                name: "vault-signer".to_owned(),
-                kind: ShutdownFailureKind::Panicked,
-            },
-            ResourceShutdownError {
-                name: "http-health".to_owned(),
-                kind: ShutdownFailureKind::BudgetExhausted,
-            },
-        ];
-        let err = report_shutdown_failures(failures).expect_err("non-empty failures -> Err");
-        assert!(err.to_string().contains("2 runtime resource failure"));
+    async fn activate_listeners<R>(
+        listeners: Vec<routes::AssembledListener>,
+        addr_resolver: R,
+    ) -> anyhow::Result<(RuntimeListenerInventory, TestRegistrar)>
+    where
+        R: Fn(ListenerKind, AuthScheme) -> anyhow::Result<SocketAddr> + Send + Sync,
+    {
+        let mut registrar = TestRegistrar::new();
+        let prepared =
+            BoundListenerSet::prepare(listeners, test_budget(), &addr_resolver, &mut registrar)
+                .await?;
+        prepared.preflight_activation()?;
+        let inventory = prepared.activate(&mut registrar);
+        Ok((inventory, registrar))
     }
 
     #[tokio::test]
     #[allow(clippy::expect_used)] // reason: direct async test assertion for clean listener launch.
-    async fn launch_plan_binds_all_listeners_and_drains_clean() {
-        let plan = minimal_plan(vec![test_health_assembled(), test_health_assembled()]);
-        launch_until(
-            plan,
-            test_budget(),
+    async fn adapter_binds_all_listeners_and_drains_clean() {
+        let (inventory, registrar) = activate_listeners(
+            vec![test_health_assembled(), test_health_assembled()],
             ephemeral_addr,
-            std::future::ready(anyhow::Ok(())),
         )
         .await
-        .expect("launch_until binds 2 listeners + drains clean");
+        .expect("adapter binds 2 listeners");
+
+        assert_eq!(inventory.listener_count, 2);
+        assert_eq!(registrar.registered_names(), ["http-health", "http-health"]);
+        registrar.shutdown().await.expect("drain listeners cleanly");
     }
 
     #[tokio::test]
     #[allow(clippy::expect_used)]
-    async fn default_launch_serves_request_id_then_drains_and_releases_socket() {
+    async fn activated_health_listener_serves_request_id_then_drains_and_releases_socket() {
         let reservation = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("reserve Health address");
         let addr = reservation.local_addr().expect("reserved Health address");
         drop(reservation);
 
-        let request = async move {
-            let client = reqwest::Client::new();
-            let response = tokio::time::timeout(Duration::from_secs(2), async {
-                loop {
-                    match client
-                        .get(format!("http://{addr}/health/v1/readyz"))
-                        .send()
-                        .await
-                    {
-                        Ok(response) => break response,
-                        Err(_) => tokio::task::yield_now().await,
-                    }
-                }
-            })
-            .await
-            .expect("Health listener must accept a request before timeout");
-            assert_eq!(response.status(), reqwest::StatusCode::OK);
-            assert!(
-                response.headers().get("x-request-id").is_some(),
-                "production launch path must preserve request-id middleware"
-            );
-            let liveness = client
-                .get(format!("http://{addr}/health/v1/healthz"))
-                .send()
-                .await
-                .context("Health liveness request")?;
-            assert_eq!(liveness.status(), reqwest::StatusCode::OK);
-            anyhow::Ok(())
-        };
-
-        launch_until(
-            minimal_plan(vec![healthy_test_health_assembled()]),
-            test_budget(),
+        let (_, registrar) = activate_listeners(
+            vec![healthy_test_health_assembled()],
             move |listener, scheme| {
                 assert_eq!(listener, ListenerKind::Health);
                 assert_eq!(scheme, AuthScheme::NoAuth);
                 Ok(addr)
             },
-            request,
         )
         .await
-        .expect("real Health request then graceful drain");
+        .expect("activate real Health listener");
+
+        let client = reqwest::Client::new();
+        let response = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match client
+                    .get(format!("http://{addr}/health/v1/readyz"))
+                    .send()
+                    .await
+                {
+                    Ok(response) => break response,
+                    Err(_) => tokio::task::yield_now().await,
+                }
+            }
+        })
+        .await
+        .expect("Health listener must accept a request before timeout");
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        assert!(
+            response.headers().get("x-request-id").is_some(),
+            "production launch path must preserve request-id middleware"
+        );
+        let liveness = client
+            .get(format!("http://{addr}/health/v1/healthz"))
+            .send()
+            .await
+            .expect("Health liveness request");
+        assert_eq!(liveness.status(), reqwest::StatusCode::OK);
+        registrar.shutdown().await.expect("drain Health listener");
 
         let after = reqwest::Client::new()
             .get(format!("http://{addr}/health/v1/healthz"))
@@ -839,7 +631,7 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::expect_used)]
-    async fn default_launch_serves_metrics_exposition_over_real_socket() {
+    async fn activated_health_listener_serves_metrics_exposition_over_real_socket() {
         let reservation = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("reserve Health address");
@@ -850,156 +642,260 @@ mod tests {
         let listener = routes::AssembledListener::health_for_test(test_reporter(), metrics)
             .expect("metrics Health listener");
 
-        launch_until(
-            minimal_plan(vec![listener]),
-            test_budget(),
-            move |_, _| Ok(addr),
-            async move {
-                let response = reqwest::Client::new()
-                    .get(format!("http://{addr}/health/v1/metrics"))
-                    .send()
-                    .await
-                    .context("metrics request over real socket")?;
-                assert_eq!(response.status(), reqwest::StatusCode::OK);
-                assert_eq!(
-                    response
-                        .headers()
-                        .get("content-type")
-                        .and_then(|value| value.to_str().ok()),
-                    Some("text/plain; version=0.0.4; charset=utf-8")
-                );
-                let body = response.text().await.context("metrics response body")?;
-                assert!(body.contains("rss_launch_e2e_total"));
-                anyhow::Ok(())
-            },
-        )
-        .await
-        .expect("metrics request then graceful drain");
+        let (_, registrar) = activate_listeners(vec![listener], move |_, _| Ok(addr))
+            .await
+            .expect("activate metrics listener");
+        let response = reqwest::Client::new()
+            .get(format!("http://{addr}/health/v1/metrics"))
+            .send()
+            .await
+            .expect("metrics request over real socket");
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get("content-type")
+                .and_then(|value| value.to_str().ok()),
+            Some("text/plain; version=0.0.4; charset=utf-8")
+        );
+        let body = response.text().await.expect("metrics response body");
+        assert!(body.contains("rss_launch_e2e_total"));
+        registrar.shutdown().await.expect("drain metrics listener");
     }
 
     #[tokio::test]
     #[allow(clippy::expect_used)]
-    async fn default_launch_empty_probe_readyz_fails_closed_over_real_socket() {
+    async fn activated_health_listener_empty_probe_readyz_fails_closed_over_real_socket() {
         let reservation = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("reserve Health address");
         let addr = reservation.local_addr().expect("reserved Health address");
         drop(reservation);
 
-        launch_until(
-            minimal_plan(vec![test_health_assembled()]),
-            test_budget(),
-            move |_, _| Ok(addr),
-            async move {
-                let response = reqwest::Client::new()
-                    .get(format!("http://{addr}/health/v1/readyz"))
-                    .send()
-                    .await
-                    .context("empty-probe readyz request")?;
-                assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
-                anyhow::Ok(())
-            },
-        )
-        .await
-        .expect("empty-probe request then graceful drain");
+        let (_, registrar) =
+            activate_listeners(vec![test_health_assembled()], move |_, _| Ok(addr))
+                .await
+                .expect("activate empty-probe Health listener");
+        let response = reqwest::Client::new()
+            .get(format!("http://{addr}/health/v1/readyz"))
+            .send()
+            .await
+            .expect("empty-probe readyz request");
+        assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+        registrar
+            .shutdown()
+            .await
+            .expect("drain empty-probe Health listener");
     }
 
     #[tokio::test]
     #[allow(clippy::expect_used)]
-    async fn bound_listener_set_activates_through_shutdown_stack_funnel() {
+    async fn bound_listener_set_activates_through_test_registrar() {
         let bound = BoundListenerSet::prepare(
             vec![healthy_test_health_assembled()],
             test_budget(),
             &ephemeral_addr,
+            &mut TestRegistrar::new(),
         )
         .await
         .expect("prepare Health listener set");
         let addr = bound.health[0].bound.local_addr();
-        let mut stack = ShutdownStack::new(CancellationToken::new());
+        let mut registrar = TestRegistrar::new();
 
         bound
-            .activate(&mut stack)
-            .expect("activate fully prepared Health set");
-        assert_eq!(
-            stack.registered_names().collect::<Vec<_>>(),
-            ["http-health"]
-        );
+            .preflight_activation()
+            .expect("preflight fully prepared Health set");
+        let _inventory = bound.activate(&mut registrar);
+        assert_eq!(registrar.registered_names(), ["http-health"]);
         let response = reqwest::Client::new()
             .get(format!("http://{addr}/health/v1/readyz"))
             .send()
             .await
             .expect("readyz over funnel-served socket");
         assert_eq!(response.status(), reqwest::StatusCode::OK);
-        assert!(
-            stack.shutdown().await.is_empty(),
-            "ShutdownStack funnel must drain the listener cleanly"
-        );
+        registrar
+            .shutdown()
+            .await
+            .expect("test registrar must drain the listener cleanly");
     }
 
     #[tokio::test]
-    #[allow(clippy::expect_used)] // reason: direct async test assertion for fail-fast listener validation.
-    async fn launch_plan_empty_listeners_errs() {
-        let shutdowns = Arc::new(AtomicUsize::new(0));
-        let mut plan = minimal_plan(Vec::new());
-        plan.domain_module.resources.push(recording_resource(
-            "recorded-domain",
-            Arc::clone(&shutdowns),
-        ));
-        let err = launch_until(
-            plan,
-            test_budget(),
-            ephemeral_addr,
-            std::future::ready(anyhow::Ok(())),
+    #[allow(clippy::expect_used)]
+    async fn activation_registers_non_health_before_health() {
+        let non_health =
+            bound_listener_for_test(ListenerKind::Internal, PreparedListenerTransport::Plaintext)
+                .await;
+        let health =
+            bound_listener_for_test(ListenerKind::Health, PreparedListenerTransport::Plaintext)
+                .await;
+        let prepared = BoundListenerSet {
+            non_health: vec![non_health],
+            health: vec![health],
+        };
+        let mut registrar = TestRegistrar::new();
+
+        let inventory = prepared.activate(&mut registrar);
+
+        assert_eq!(inventory.listener_count, 2);
+        assert_eq!(
+            registrar.registered_names(),
+            ["http-internal", "http-health"]
+        );
+        registrar.shutdown().await.expect("drain ordered listeners");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn preflight_failure_releases_every_prepared_socket_without_activation() {
+        let allow_set = authn::MtlsAllowSet::new(["spiffe://example.org/ns/rss/sa/internal"])
+            .expect("allow-set");
+        let config = httpd::MtlsServerConfig::for_test(allow_set).expect("hermetic mTLS config");
+        let first_health = Arc::new(routes::MtlsHealthSlot::new());
+        let failed_health = Arc::new(routes::MtlsHealthSlot::new());
+        failed_health.poison_for_test();
+
+        let first = bound_listener_for_test(
+            ListenerKind::Internal,
+            PreparedListenerTransport::Mtls {
+                config: config.clone(),
+                health: Arc::clone(&first_health),
+            },
         )
-        .await
-        .expect_err("empty listeners must fail fast");
-        assert!(err.to_string().contains("zero bound sockets"));
-        assert_eq!(shutdowns.load(Ordering::SeqCst), 1);
+        .await;
+        let second = bound_listener_for_test(
+            ListenerKind::Internal,
+            PreparedListenerTransport::Mtls {
+                config,
+                health: Arc::clone(&failed_health),
+            },
+        )
+        .await;
+        let addresses = [first.bound.local_addr(), second.bound.local_addr()];
+        let prepared = BoundListenerSet {
+            non_health: vec![first, second],
+            health: Vec::new(),
+        };
+
+        let error = prepared
+            .preflight_activation()
+            .expect_err("poisoned second readiness slot must fail preflight");
+        assert!(error.to_string().contains("slot lock poisoned"));
+        assert_eq!(
+            first_health.check().1,
+            "not-bound",
+            "validation failure must not partially publish an earlier readiness slot"
+        );
+        assert_eq!(failed_health.check().1, "slot-poisoned");
+        drop(prepared);
+
+        for address in addresses {
+            let rebound = tokio::net::TcpListener::bind(address)
+                .await
+                .expect("failed preflight must release every prepared socket");
+            drop(rebound);
+        }
     }
 
     #[tokio::test]
     #[allow(clippy::expect_used)] // reason: direct async test assertion and poisoned test mutex handling.
-    async fn launch_until_passes_assembled_scheme_to_addr_resolver() {
+    async fn adapter_prepare_passes_assembled_scheme_to_addr_resolver() {
         let listener = test_health_assembled();
         let resolved = Arc::new(Mutex::new(None));
         let seen = Arc::clone(&resolved);
 
-        launch_until(
-            minimal_plan(vec![listener]),
-            test_budget(),
-            move |listener, scheme| {
-                assert_eq!(listener, ListenerKind::Health);
-                *seen.lock().expect("scheme lock") = Some(scheme);
-                "127.0.0.1:0".parse::<SocketAddr>().map_err(Into::into)
-            },
-            std::future::ready(anyhow::Ok(())),
-        )
+        let (_, registrar) = activate_listeners(vec![listener], move |listener, scheme| {
+            assert_eq!(listener, ListenerKind::Health);
+            *seen.lock().expect("scheme lock") = Some(scheme);
+            "127.0.0.1:0".parse::<SocketAddr>().map_err(Into::into)
+        })
         .await
-        .expect("launch_until binds listener");
+        .expect("adapter binds listener");
 
         assert_eq!(
             *resolved.lock().expect("scheme lock"),
             Some(AuthScheme::NoAuth)
         );
+        registrar.shutdown().await.expect("drain listener");
     }
 
     #[tokio::test]
     #[allow(clippy::expect_used)] // reason: direct async test assertion for resolver error propagation.
-    async fn launch_until_addr_resolver_failure_propagates() {
-        let err = launch_until(
-            minimal_plan(vec![test_health_assembled()]),
-            test_budget(),
-            |_, _| anyhow::bail!("no addr configured for listener"),
-            std::future::ready(anyhow::Ok(())),
-        )
+    async fn adapter_prepare_addr_resolver_failure_propagates() {
+        let err = activate_listeners(vec![test_health_assembled()], |_, _| {
+            anyhow::bail!("no addr configured for listener")
+        })
         .await
-        .expect_err("addr resolver failure must propagate");
+        .err()
+        .expect("addr resolver failure must propagate");
         assert!(err.to_string().contains("no addr configured"));
     }
 
     #[tokio::test]
     #[allow(clippy::expect_used)]
-    async fn launch_plan_partial_bind_failure_drains_resources_once_and_releases_port() {
+    async fn canonical_launch_composes_runtime_adapter_ready_and_single_drain() {
+        let reservation = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("reserve canonical Health address");
+        let addr = reservation.local_addr().expect("canonical local address");
+        drop(reservation);
+
+        let ready_calls = Arc::new(AtomicUsize::new(0));
+        let ready_calls_for_hook = Arc::clone(&ready_calls);
+        let trace_shutdowns = Arc::new(AtomicUsize::new(0));
+        let provider_shutdowns = Arc::new(AtomicUsize::new(0));
+        let domain_shutdowns = Arc::new(AtomicUsize::new(0));
+        let adapter = RuntimeLaunchAdapter::new(
+            routes::FinalizedListenerSet::for_test(vec![healthy_test_health_assembled()]),
+            test_budget(),
+            move |listener, scheme| {
+                assert_eq!(listener, ListenerKind::Health);
+                assert_eq!(scheme, AuthScheme::NoAuth);
+                Ok(addr)
+            },
+        );
+        let launch_plan = runtimeexec::LaunchPlan::new(
+            adapter,
+            routes::FinalizedProbeReceipt::for_test(),
+            move |inventory: RuntimeListenerInventory| {
+                assert_eq!(inventory.listener_count, 1);
+                ready_calls_for_hook.fetch_add(1, Ordering::SeqCst);
+                anyhow::bail!("stop after deterministic ready observation")
+            },
+            Some(counting_resource("trace", &trace_shutdowns)),
+            lifecycle_batches(
+                bootstrap::DomainModuleResult {
+                    resources: vec![counting_resource("provider", &provider_shutdowns)],
+                    ..bootstrap::DomainModuleResult::default()
+                },
+                bootstrap::DomainModuleResult {
+                    resources: vec![counting_resource("domain", &domain_shutdowns)],
+                    ..bootstrap::DomainModuleResult::default()
+                },
+            ),
+        );
+
+        let error = runtimeexec::launch(launch_plan)
+            .await
+            .err()
+            .expect("ready hook ends canonical launch before signal polling");
+
+        assert_eq!(
+            error.to_string(),
+            "stop after deterministic ready observation"
+        );
+        assert_eq!(ready_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(trace_shutdowns.load(Ordering::SeqCst), 1);
+        assert_eq!(provider_shutdowns.load(Ordering::SeqCst), 1);
+        assert_eq!(domain_shutdowns.load(Ordering::SeqCst), 1);
+        let rebound = tokio::net::TcpListener::bind(addr)
+            .await
+            .expect("canonical drain must release Health socket");
+        drop(rebound);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn canonical_launch_partial_bind_failure_drains_modules_once_and_releases_port() {
         let first_reservation = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("reserve first listener address");
@@ -1012,15 +908,16 @@ mod tests {
         let addresses = [first_addr, occupied_addr];
         let next_addr = Arc::new(AtomicUsize::new(0));
         let resolver_index = Arc::clone(&next_addr);
-        let shutdowns = Arc::new(AtomicUsize::new(0));
-        let mut plan = minimal_plan(vec![test_health_assembled(), test_health_assembled()]);
-        plan.domain_module.resources.push(recording_resource(
-            "recorded-domain",
-            Arc::clone(&shutdowns),
-        ));
-
-        let err = launch_until(
-            plan,
+        let ready_calls = Arc::new(AtomicUsize::new(0));
+        let ready_calls_for_hook = Arc::clone(&ready_calls);
+        let trace_shutdowns = Arc::new(AtomicUsize::new(0));
+        let provider_shutdowns = Arc::new(AtomicUsize::new(0));
+        let domain_shutdowns = Arc::new(AtomicUsize::new(0));
+        let adapter = RuntimeLaunchAdapter::new(
+            routes::FinalizedListenerSet::for_test(vec![
+                test_health_assembled(),
+                test_health_assembled(),
+            ]),
             test_budget(),
             move |_, _| {
                 let index = resolver_index.fetch_add(1, Ordering::SeqCst);
@@ -1029,17 +926,40 @@ mod tests {
                     .copied()
                     .context("unexpected listener address request")
             },
-            std::future::pending::<anyhow::Result<()>>(),
-        )
-        .await
-        .expect_err("second bind must fail");
+        );
+        let launch_plan = runtimeexec::LaunchPlan::new(
+            adapter,
+            routes::FinalizedProbeReceipt::for_test(),
+            move |_: RuntimeListenerInventory| {
+                ready_calls_for_hook.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+            Some(counting_resource("trace", &trace_shutdowns)),
+            lifecycle_batches(
+                bootstrap::DomainModuleResult {
+                    resources: vec![counting_resource("provider", &provider_shutdowns)],
+                    ..bootstrap::DomainModuleResult::default()
+                },
+                bootstrap::DomainModuleResult {
+                    resources: vec![counting_resource("domain", &domain_shutdowns)],
+                    ..bootstrap::DomainModuleResult::default()
+                },
+            ),
+        );
+        let err = runtimeexec::launch(launch_plan)
+            .await
+            .err()
+            .expect("second bind must fail");
 
         assert!(format!("{err:#}").contains("bind http-health listener"));
         assert_eq!(next_addr.load(Ordering::SeqCst), 2);
-        assert_eq!(shutdowns.load(Ordering::SeqCst), 1);
+        assert_eq!(ready_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(trace_shutdowns.load(Ordering::SeqCst), 1);
+        assert_eq!(provider_shutdowns.load(Ordering::SeqCst), 1);
+        assert_eq!(domain_shutdowns.load(Ordering::SeqCst), 1);
         let rebound = tokio::net::TcpListener::bind(first_addr)
             .await
-            .expect("partial-start listener port must be released by drain");
+            .expect("partial-bind listener port must be released by canonical drain");
         drop(rebound);
         drop(occupied);
     }
@@ -1066,12 +986,8 @@ mod tests {
             let resolver_index = Arc::clone(&resolver_index);
             let second_resolver_reached = Arc::clone(&second_resolver_reached);
             let release_second_resolver = Arc::clone(&release_second_resolver);
-            tokio::spawn(launch_until(
-                minimal_plan(vec![
-                    healthy_test_health_assembled(),
-                    test_health_assembled(),
-                ]),
-                test_budget(),
+            tokio::spawn(activate_listeners(
+                vec![healthy_test_health_assembled(), test_health_assembled()],
                 move |_, _| {
                     let index = resolver_index.fetch_add(1, Ordering::SeqCst);
                     if index == 1 {
@@ -1089,7 +1005,6 @@ mod tests {
                         .copied()
                         .context("unexpected listener address request")
                 },
-                std::future::pending::<anyhow::Result<()>>(),
             ))
         };
 
@@ -1110,7 +1025,8 @@ mod tests {
         let error = launch
             .await
             .expect("launch task must not panic")
-            .expect_err("later listener bind must fail");
+            .err()
+            .expect("later listener bind must fail");
         assert!(format!("{error:#}").contains("bind http-health listener"));
         assert!(
             !matches!(premature_response, Ok(Ok(_))),
@@ -1118,107 +1034,6 @@ mod tests {
              {premature_response:?}"
         );
         drop(occupied);
-    }
-
-    #[tokio::test]
-    #[allow(clippy::expect_used)]
-    async fn launch_plan_shutdown_trigger_error_preserves_error_and_drains_once() {
-        let shutdowns = Arc::new(AtomicUsize::new(0));
-        let mut plan = minimal_plan(vec![test_health_assembled()]);
-        plan.domain_module.resources.push(recording_resource(
-            "recorded-domain",
-            Arc::clone(&shutdowns),
-        ));
-
-        let err = launch_until(
-            plan,
-            test_budget(),
-            ephemeral_addr,
-            std::future::ready(Err(anyhow::anyhow!("shutdown trigger failed"))),
-        )
-        .await
-        .expect_err("shutdown trigger failure must remain primary");
-
-        assert!(format!("{err:#}").contains("shutdown trigger failed"));
-        assert_eq!(shutdowns.load(Ordering::SeqCst), 1);
-    }
-
-    #[tokio::test]
-    #[allow(clippy::expect_used)]
-    async fn launch_plan_preserves_primary_error_when_cleanup_also_fails() {
-        let shutdowns = Arc::new(AtomicUsize::new(0));
-        let cleanup_error_events = Arc::new(AtomicUsize::new(0));
-        let subscriber = tracing_subscriber::registry()
-            .with(ErrorEventCounter(Arc::clone(&cleanup_error_events)));
-        let _subscriber_guard = tracing::subscriber::set_default(subscriber);
-        let mut plan = minimal_plan(vec![test_health_assembled()]);
-        plan.domain_module
-            .resources
-            .push(failing_recording_resource(
-                "failing-domain",
-                Arc::clone(&shutdowns),
-            ));
-
-        let err = launch_until(
-            plan,
-            test_budget(),
-            ephemeral_addr,
-            std::future::ready(Err(anyhow::anyhow!("primary shutdown trigger failure"))),
-        )
-        .await
-        .expect_err("primary launch error must be preserved");
-
-        assert_eq!(err.to_string(), "primary shutdown trigger failure");
-        assert_eq!(shutdowns.load(Ordering::SeqCst), 1);
-        assert!(
-            cleanup_error_events.load(Ordering::SeqCst) > 0,
-            "cleanup failure must be reported while the primary error is preserved"
-        );
-    }
-
-    #[tokio::test]
-    #[allow(clippy::expect_used)]
-    async fn launch_plan_partial_registration_failure_drains_registered_resources_once() {
-        let trace_shutdowns = Arc::new(AtomicUsize::new(0));
-        let pg_shutdowns = Arc::new(AtomicUsize::new(0));
-        let domain_shutdowns = Arc::new(AtomicUsize::new(0));
-        let probe_name = ProbeName::parse("leftover-probe").expect("valid probe name");
-        let plan = LaunchPlan::new(LaunchPlanParts {
-            listeners: routes::FinalizedListenerSet::for_test(vec![test_health_assembled()]),
-            trace_exporter: Some(recording_resource(
-                "trace-exporter",
-                Arc::clone(&trace_shutdowns),
-            )),
-            provider_module: DomainModuleResult {
-                probes: vec![(probe_name, Box::new(NoopProbe))],
-                resources: vec![recording_resource(
-                    "pg-owned-resource",
-                    Arc::clone(&pg_shutdowns),
-                )],
-                ..DomainModuleResult::default()
-            },
-            domain_module: DomainModuleResult {
-                resources: vec![recording_resource(
-                    "domain-owned-resource",
-                    Arc::clone(&domain_shutdowns),
-                )],
-                ..DomainModuleResult::default()
-            },
-        });
-
-        let err = launch_until(
-            plan,
-            test_budget(),
-            ephemeral_addr,
-            std::future::ready(anyhow::Ok(())),
-        )
-        .await
-        .expect_err("leftover probe must fail registration");
-
-        assert!(format!("{err:#}").contains("undrained probes"));
-        assert_eq!(trace_shutdowns.load(Ordering::SeqCst), 1);
-        assert_eq!(pg_shutdowns.load(Ordering::SeqCst), 1);
-        assert_eq!(domain_shutdowns.load(Ordering::SeqCst), 1);
     }
 
     #[test]
@@ -1312,14 +1127,14 @@ mod tests {
         )
         .await
         .expect("bind hermetic mTLS listener");
-        let mut stack = ShutdownStack::new(CancellationToken::new());
+        let mut registrar = TestRegistrar::new();
 
         assert_eq!(
             health.check().1,
             "not-bound",
             "socket and transport preparation must not publish readiness"
         );
-        BoundListenerSet {
+        let bound = BoundListenerSet {
             non_health: vec![BoundListener {
                 listener: ListenerKind::Internal,
                 scheme: AuthScheme::Mtls,
@@ -1331,18 +1146,15 @@ mod tests {
                 },
             }],
             health: Vec::new(),
-        }
-        .activate(&mut stack)
-        .expect("preflight and activate mTLS set");
+        };
+        bound.preflight_activation().expect("preflight mTLS set");
+        let _inventory = bound.activate(&mut registrar);
 
         assert_ne!(health.check().1, "not-bound", "readiness slot must be set");
-        assert_eq!(
-            stack.registered_names().collect::<Vec<_>>(),
-            ["http-internal"]
-        );
-        assert!(
-            stack.shutdown().await.is_empty(),
-            "mTLS resource must drain"
-        );
+        assert_eq!(registrar.registered_names(), ["http-internal"]);
+        registrar
+            .shutdown()
+            .await
+            .expect("mTLS resource must drain");
     }
 }

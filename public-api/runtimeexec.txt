@@ -1,0 +1,84 @@
+pub mod runtimeexec
+pub struct runtimeexec::Activated<Inventory>
+impl<Inventory> core::marker::Freeze for runtimeexec::Activated<Inventory> where Inventory: core::marker::Freeze
+impl<Inventory> core::marker::Send for runtimeexec::Activated<Inventory> where Inventory: core::marker::Send
+impl<Inventory> core::marker::Sync for runtimeexec::Activated<Inventory> where Inventory: core::marker::Sync
+impl<Inventory> core::marker::Unpin for runtimeexec::Activated<Inventory> where Inventory: core::marker::Unpin
+impl<Inventory> core::marker::UnsafeUnpin for runtimeexec::Activated<Inventory> where Inventory: core::marker::UnsafeUnpin
+impl<Inventory> core::panic::unwind_safe::RefUnwindSafe for runtimeexec::Activated<Inventory> where Inventory: core::panic::unwind_safe::RefUnwindSafe
+impl<Inventory> core::panic::unwind_safe::UnwindSafe for runtimeexec::Activated<Inventory> where Inventory: core::panic::unwind_safe::UnwindSafe
+pub struct runtimeexec::DomainLifecycleBatch(_)
+impl runtimeexec::DomainLifecycleBatch
+pub fn runtimeexec::DomainLifecycleBatch::from_domain_output(bootstrap::module::DomainModuleResult) -> Self
+impl core::marker::Freeze for runtimeexec::DomainLifecycleBatch
+impl core::marker::Send for runtimeexec::DomainLifecycleBatch
+impl !core::marker::Sync for runtimeexec::DomainLifecycleBatch
+impl core::marker::Unpin for runtimeexec::DomainLifecycleBatch
+impl core::marker::UnsafeUnpin for runtimeexec::DomainLifecycleBatch
+impl !core::panic::unwind_safe::RefUnwindSafe for runtimeexec::DomainLifecycleBatch
+impl !core::panic::unwind_safe::UnwindSafe for runtimeexec::DomainLifecycleBatch
+pub struct runtimeexec::LaunchLifecycleBatches
+impl runtimeexec::LaunchLifecycleBatches
+pub fn runtimeexec::LaunchLifecycleBatches::new(runtimeexec::ProviderLifecycleBatch, runtimeexec::DomainLifecycleBatch) -> Self
+impl core::marker::Freeze for runtimeexec::LaunchLifecycleBatches
+impl core::marker::Send for runtimeexec::LaunchLifecycleBatches
+impl !core::marker::Sync for runtimeexec::LaunchLifecycleBatches
+impl core::marker::Unpin for runtimeexec::LaunchLifecycleBatches
+impl core::marker::UnsafeUnpin for runtimeexec::LaunchLifecycleBatches
+impl !core::panic::unwind_safe::RefUnwindSafe for runtimeexec::LaunchLifecycleBatches
+impl !core::panic::unwind_safe::UnwindSafe for runtimeexec::LaunchLifecycleBatches
+pub struct runtimeexec::LaunchPlan<Adapter, ProbeReceipt, ReadyHook>
+impl<Adapter, ProbeReceipt, ReadyHook> runtimeexec::LaunchPlan<Adapter, ProbeReceipt, ReadyHook>
+pub fn runtimeexec::LaunchPlan<Adapter, ProbeReceipt, ReadyHook>::new(Adapter, ProbeReceipt, ReadyHook, core::option::Option<alloc::boxed::Box<diport::managed_resource::__dynosaur_macro_dynmanagedresource::DynManagedResource<'static>>>, runtimeexec::LaunchLifecycleBatches) -> Self
+impl<Adapter, ProbeReceipt, ReadyHook> core::marker::Freeze for runtimeexec::LaunchPlan<Adapter, ProbeReceipt, ReadyHook> where Adapter: core::marker::Freeze, ProbeReceipt: core::marker::Freeze, ReadyHook: core::marker::Freeze
+impl<Adapter, ProbeReceipt, ReadyHook> core::marker::Send for runtimeexec::LaunchPlan<Adapter, ProbeReceipt, ReadyHook> where Adapter: core::marker::Send, ProbeReceipt: core::marker::Send, ReadyHook: core::marker::Send
+impl<Adapter, ProbeReceipt, ReadyHook> !core::marker::Sync for runtimeexec::LaunchPlan<Adapter, ProbeReceipt, ReadyHook>
+impl<Adapter, ProbeReceipt, ReadyHook> core::marker::Unpin for runtimeexec::LaunchPlan<Adapter, ProbeReceipt, ReadyHook> where Adapter: core::marker::Unpin, ProbeReceipt: core::marker::Unpin, ReadyHook: core::marker::Unpin
+impl<Adapter, ProbeReceipt, ReadyHook> core::marker::UnsafeUnpin for runtimeexec::LaunchPlan<Adapter, ProbeReceipt, ReadyHook> where Adapter: core::marker::UnsafeUnpin, ProbeReceipt: core::marker::UnsafeUnpin, ReadyHook: core::marker::UnsafeUnpin
+impl<Adapter, ProbeReceipt, ReadyHook> !core::panic::unwind_safe::RefUnwindSafe for runtimeexec::LaunchPlan<Adapter, ProbeReceipt, ReadyHook>
+impl<Adapter, ProbeReceipt, ReadyHook> !core::panic::unwind_safe::UnwindSafe for runtimeexec::LaunchPlan<Adapter, ProbeReceipt, ReadyHook>
+pub struct runtimeexec::LaunchRegistrar<'stack>
+impl runtimeexec::LaunchRegistrar<'_>
+pub fn runtimeexec::LaunchRegistrar<'_>::complete<Inventory>(self, Inventory) -> anyhow::Result<runtimeexec::Activated<Inventory>>
+pub fn runtimeexec::LaunchRegistrar<'_>::register_listener_with_token<F>(&mut self, F) where F: core::ops::function::FnOnce(tokio_util::sync::cancellation_token::CancellationToken) -> alloc::boxed::Box<diport::managed_resource::__dynosaur_macro_dynmanagedresource::DynManagedResource<'static>>
+impl<'stack> core::marker::Freeze for runtimeexec::LaunchRegistrar<'stack>
+impl<'stack> core::marker::Send for runtimeexec::LaunchRegistrar<'stack>
+impl<'stack> !core::marker::Sync for runtimeexec::LaunchRegistrar<'stack>
+impl<'stack> core::marker::Unpin for runtimeexec::LaunchRegistrar<'stack>
+impl<'stack> core::marker::UnsafeUnpin for runtimeexec::LaunchRegistrar<'stack>
+impl<'stack> !core::panic::unwind_safe::RefUnwindSafe for runtimeexec::LaunchRegistrar<'stack>
+impl<'stack> !core::panic::unwind_safe::UnwindSafe for runtimeexec::LaunchRegistrar<'stack>
+pub struct runtimeexec::LaunchTransaction<'stack>
+impl<'stack> runtimeexec::LaunchTransaction<'stack>
+pub fn runtimeexec::LaunchTransaction<'stack>::stage_resource(&mut self, alloc::boxed::Box<diport::managed_resource::__dynosaur_macro_dynmanagedresource::DynManagedResource<'static>>)
+impl<'stack> core::marker::Freeze for runtimeexec::LaunchTransaction<'stack>
+impl<'stack> core::marker::Send for runtimeexec::LaunchTransaction<'stack>
+impl<'stack> !core::marker::Sync for runtimeexec::LaunchTransaction<'stack>
+impl<'stack> core::marker::Unpin for runtimeexec::LaunchTransaction<'stack>
+impl<'stack> core::marker::UnsafeUnpin for runtimeexec::LaunchTransaction<'stack>
+impl<'stack> !core::panic::unwind_safe::RefUnwindSafe for runtimeexec::LaunchTransaction<'stack>
+impl<'stack> !core::panic::unwind_safe::UnwindSafe for runtimeexec::LaunchTransaction<'stack>
+pub struct runtimeexec::ProviderLifecycleBatch(_)
+impl runtimeexec::ProviderLifecycleBatch
+pub fn runtimeexec::ProviderLifecycleBatch::from_provider_output(bootstrap::module::DomainModuleResult) -> Self
+impl core::marker::Freeze for runtimeexec::ProviderLifecycleBatch
+impl core::marker::Send for runtimeexec::ProviderLifecycleBatch
+impl !core::marker::Sync for runtimeexec::ProviderLifecycleBatch
+impl core::marker::Unpin for runtimeexec::ProviderLifecycleBatch
+impl core::marker::UnsafeUnpin for runtimeexec::ProviderLifecycleBatch
+impl !core::panic::unwind_safe::RefUnwindSafe for runtimeexec::ProviderLifecycleBatch
+impl !core::panic::unwind_safe::UnwindSafe for runtimeexec::ProviderLifecycleBatch
+pub struct runtimeexec::RuntimeOutputs
+impl core::marker::Freeze for runtimeexec::RuntimeOutputs
+impl core::marker::Send for runtimeexec::RuntimeOutputs
+impl core::marker::Sync for runtimeexec::RuntimeOutputs
+impl core::marker::Unpin for runtimeexec::RuntimeOutputs
+impl core::marker::UnsafeUnpin for runtimeexec::RuntimeOutputs
+impl core::panic::unwind_safe::RefUnwindSafe for runtimeexec::RuntimeOutputs
+impl core::panic::unwind_safe::UnwindSafe for runtimeexec::RuntimeOutputs
+pub trait runtimeexec::LaunchAdapter<ProbeReceipt>: core::marker::Sized
+pub type runtimeexec::LaunchAdapter::Inventory
+pub type runtimeexec::LaunchAdapter::Prepared
+pub fn runtimeexec::LaunchAdapter::activate(Self::Prepared, runtimeexec::LaunchRegistrar<'_>) -> anyhow::Result<runtimeexec::Activated<Self::Inventory>>
+pub fn runtimeexec::LaunchAdapter::prepare(self, ProbeReceipt, &mut runtimeexec::LaunchTransaction<'_>) -> impl core::future::future::Future<Output = anyhow::Result<Self::Prepared>> + core::marker::Send
+pub async fn runtimeexec::launch<Adapter, ProbeReceipt, ReadyHook>(runtimeexec::LaunchPlan<Adapter, ProbeReceipt, ReadyHook>) -> anyhow::Result<runtimeexec::RuntimeOutputs> where Adapter: runtimeexec::LaunchAdapter<ProbeReceipt>, ReadyHook: core::ops::function::FnOnce(<Adapter as runtimeexec::LaunchAdapter>::Inventory) -> anyhow::Result<()>

@@ -4,7 +4,7 @@ error[E0423]: expected value, found struct `RuntimeOutputs`
 4 |     let _forged = RuntimeOutputs;
   |                   ^^^^^^^^^^^^^^
   |
- ::: src/phase.rs
+ ::: $WORKSPACE/crates/runtimeexec/src/lib.rs
   |
   | pub struct RuntimeOutputs {
   | ------------------------- `RuntimeOutputs` defined here

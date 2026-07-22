@@ -124,6 +124,21 @@ pub(crate) struct FinalizedListenerSet {
     listeners: Vec<AssembledListener>,
 }
 
+/// Linear proof that route finalization drained the registry's health probes exactly once.
+///
+/// The private field prevents construction outside this module. Deliberately omitting `Clone` and
+/// `Copy` keeps the proof coupled to the finalized listener set until the launch executor consumes
+/// it.
+pub(crate) struct FinalizedProbeReceipt {
+    _private: (),
+}
+
+/// Route finalization output kept indivisible until the `Finalized` phase state is constructed.
+pub(crate) struct FinalizedListenerPlan {
+    listeners: FinalizedListenerSet,
+    probe_receipt: FinalizedProbeReceipt,
+}
+
 /// Transport material resolved during route assembly from the same captured generation.
 ///
 /// The mTLS variant makes the allow-set, SPIFFE endpoint, and readiness slot indivisible, so the
@@ -179,10 +194,6 @@ impl AssembledListener {
 }
 
 impl FinalizedListenerSet {
-    pub(crate) fn len(&self) -> usize {
-        self.listeners.len()
-    }
-
     pub(crate) fn into_listeners(self) -> Vec<AssembledListener> {
         self.listeners
     }
@@ -193,8 +204,32 @@ impl FinalizedListenerSet {
     }
 }
 
+impl FinalizedListenerPlan {
+    pub(crate) fn into_parts(self) -> (FinalizedListenerSet, FinalizedProbeReceipt) {
+        (self.listeners, self.probe_receipt)
+    }
+}
+
+impl FinalizedProbeReceipt {
+    #[cfg(test)]
+    pub(crate) const fn for_test() -> Self {
+        Self { _private: () }
+    }
+}
+
 pub(crate) struct MtlsHealthSlot {
     config: Mutex<Option<httpd::MtlsServerConfig>>,
+}
+
+pub(crate) struct MtlsHealthCommit<'slot> {
+    guard: std::sync::MutexGuard<'slot, Option<httpd::MtlsServerConfig>>,
+    config: Option<httpd::MtlsServerConfig>,
+}
+
+impl MtlsHealthCommit<'_> {
+    pub(crate) fn commit(mut self) {
+        *self.guard = self.config.take();
+    }
 }
 
 impl MtlsHealthSlot {
@@ -204,13 +239,27 @@ impl MtlsHealthSlot {
         }
     }
 
-    pub(crate) fn set(&self, config: httpd::MtlsServerConfig) -> anyhow::Result<()> {
-        let mut guard = self
+    pub(crate) fn prepare_commit(
+        &self,
+        config: httpd::MtlsServerConfig,
+    ) -> anyhow::Result<MtlsHealthCommit<'_>> {
+        let guard = self
             .config
             .lock()
             .map_err(|_| anyhow::anyhow!("mtls health slot lock poisoned"))?;
-        *guard = Some(config);
-        Ok(())
+        Ok(MtlsHealthCommit {
+            guard,
+            config: Some(config),
+        })
+    }
+
+    #[cfg(test)]
+    #[allow(clippy::panic)] // reason: deliberately poison the mutex to exercise fail-closed preflight.
+    pub(crate) fn poison_for_test(&self) {
+        let _poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = self.config.lock().unwrap_or_else(|_| unreachable!());
+            panic!("poison mTLS health slot for preflight test");
+        }));
     }
 
     pub(crate) fn check(&self) -> (HealthStatus, &'static str) {
@@ -335,7 +384,7 @@ pub(crate) struct FinalizeListenerPlanInputs<'config, 'borrow> {
 
 pub(crate) fn finalize_listener_plan(
     inputs: FinalizeListenerPlanInputs<'_, '_>,
-) -> anyhow::Result<FinalizedListenerSet> {
+) -> anyhow::Result<FinalizedListenerPlan> {
     let FinalizeListenerPlanInputs {
         execution_plan,
         config,
@@ -426,14 +475,18 @@ pub(crate) fn finalize_listener_plan(
     let (health_index, health_spec) =
         health.context("RuntimePlan does not declare the required Health listener")?;
     let reporter = Arc::new(registry.take_health_reporter());
+    let probe_receipt = FinalizedProbeReceipt { _private: () };
     let health = finalize_health_spec(health_spec, reporter, metrics)?;
     finalized.push((health_index, health));
     finalized.sort_by_key(|(plan_index, _)| *plan_index);
-    Ok(FinalizedListenerSet {
-        listeners: finalized
-            .into_iter()
-            .map(|(_, listener)| listener)
-            .collect(),
+    Ok(FinalizedListenerPlan {
+        listeners: FinalizedListenerSet {
+            listeners: finalized
+                .into_iter()
+                .map(|(_, listener)| listener)
+                .collect(),
+        },
+        probe_receipt,
     })
 }
 
@@ -962,6 +1015,7 @@ mod tests {
             rate_limiter: build_runtime_rate_limiter(),
             metrics: noop_metrics(),
         })
+        .map(|plan| plan.into_parts().0)
     }
 
     fn assemble_rss_mtls_test(

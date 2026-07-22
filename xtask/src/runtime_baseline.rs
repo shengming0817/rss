@@ -24,6 +24,8 @@
 //!
 //! INVARIANT: RUNTIME-PHASE-TRANSITION-LIVE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_phase_transition_rejects_missing_reordered_drop_plan_and_bait", anti_vacuity = "tests::runtime_phase_transition_accepts_canonical_live_path" } -- the unique production `run_startup()` delegates only to `phase::execute`; that executor consumes the exact five associated-`Next` transitions in order, every transition uses its associated `RuntimePhaseState::PHASE` through the directly redacting private `phase_result` funnel, the runtime plan stays owned by `PhaseContext` while its single listener execution projection is carried as a mandatory phase-state field into Finalize, state trait impls are closed across the complete production module graph, and launch inputs validate before the sole launch phase constructs `LaunchPlan`. Tuple/drop/skip/reorder paths, direct or aliased `LaunchPlan`/`ShutdownStack` access, legacy root phase bodies, cross-file impls, macros, dead branches, comments, strings, and test-only bait fail closed.
 //!
+//! INVARIANT: RUNTIMEEXEC-LAUNCH-OWNERSHIP-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_launch_kernel_owner_rejects_assembly_executor_and_bait + tests::runtime_launch_kernel_owner_rejects_lifecycle_mutations + tests::runtime_launch_kernel_owner_rejects_semantic_carrier_mutations", anti_vacuity = "tests::runtime_launch_kernel_owner_accepts_workspace" } -- `crates/runtimeexec/src/lib.rs` is the sole launch/signal/drain owner. Its private-field transaction, registrar, activated-inventory, typed provider/domain batch, and launch-plan carriers keep prepare-created resources inside the shutdown owner, require non-empty listener registration before readiness, and preserve provider-before-domain transfer. The runtime launch phase must consume the finalized probe receipt and typed lifecycle batches into exactly one `runtimeexec::LaunchPlan::new` and call exactly one `runtimeexec::launch`; assembly launch owns only adapter prepare/preflight/activation and non-health-before-health ordering. Old assembly LaunchPlan/LaunchPlanParts/RuntimeOutputs aliases, executor wrappers, production ShutdownStack access, parallel calls, macros, dead helpers, comments, and strings fail closed.
+//!
 //! INVARIANT: RUNTIME-LISTENER-PLAN-EXECUTION-LIVE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_listener_plan_execution_rejects_legacy_and_structural_bypasses + tests::runtime_placement_plan_execution_rejects_missing_anchors", anti_vacuity = "tests::runtime_listener_plan_execution_accepts_workspace" } -- across the complete production module graph, AST must expose exactly one RuntimePlan listener projection call, one consuming finalizer and phase call, and one `FinalizedListenerSet` construction expression in their canonical owners with no constructor/trait seam; `ListenerExecutionPlan`, `ListenerExecutionSpec`, `AssembledListener`, and `FinalizedListenerSet` remain exact `pub(crate)` types with inherited-private fields and no public re-export; launch accepts only that set, while raw-value auth assemblers, manual Health append, legacy config auth accessors, public listener/routes modules, and ordinary `Vec<AssembledListener>` launch inputs remain forbidden. PlacementExecutionPlan must mint once and reach outbound transport only through `reject_remote_on_local_listeners` + `from_placement`.
 //!
 //! INVARIANT: RUNTIME-PLAN-LIVE-CLOSURE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_plan_live_closure_rejects_missing_consumption_and_bait + tests::runtime_plan_live_inventory_artifact_and_test_membership_fail_closed", anti_vacuity = "tests::runtime_plan_live_closure_accepts_workspace + tests::runtime_plan_live_inventory_artifact_and_test_membership_fail_closed" } -- the sole production BuildProvider phase must mint the private, consuming DomainExecutionPlan from RuntimePlan plus PlacementExecutionPlan and carry it linearly through ProvidersBuilt/InfraBuilt. Across the complete production module graph, bootstrap::compose_bindings may appear only as the exact call owned by ValidatedDomainBindings::compose, and crate::modules_gen::wire_domains only as the exact call owned by InfraBuilt::wire_domains; imports, aliases, function-item references, dead helpers, and macro bait fail closed. WireDomains must consume generated bindings through exact validation and the private wrapper, and each generated/validation/composition failure arm must structurally execute failure.into_parts -> drain_binding_outputs -> ProviderBuild::record_domain -> return Err. The aggregate runtime golden freezes complete provider declaration/catalog/output, listener declaration/generated/live, domain declaration/local/live, and placement declaration/local/remote inventories, while AST membership pins its unique renderer and exact live test. Summary `.len()`, comments/strings, dead helpers, macro bait, and test-only decoys cannot satisfy this evidence.
@@ -62,6 +64,7 @@ const SERVER_MAIN_PATH: &str = "bins/server/src/main.rs";
 const RSS_MAIN_PATH: &str = "bins/rss/src/main.rs";
 const GENERATED_MODULES_PATH: &str = "assemblies/runtime/src/generated/modules_gen.rs";
 const RUNTIME_LAUNCH_PATH: &str = "assemblies/runtime/src/launch.rs";
+const RUNTIMEEXEC_PATH: &str = "crates/runtimeexec/src/lib.rs";
 const RUNTIME_EVENT_PATH: &str = "assemblies/runtime/src/event_transport.rs";
 const RUNTIME_S3_PATH: &str = "assemblies/runtime/src/infra/s3.rs";
 const RUNTIME_VAULT_PATH: &str = "assemblies/runtime/src/infra/vault.rs";
@@ -260,6 +263,7 @@ fn collect_report(root: &Path) -> Result<Report> {
     findings.extend(runtime_binary_config_findings(root)?);
     findings.extend(runtime_secret_transfer_live_findings(root)?);
     findings.extend(runtime_phase_transition_findings(root)?);
+    findings.extend(runtime_launch_kernel_owner_findings(root)?);
     findings.extend(runtime_service_token_replay_live_findings(root)?);
     findings.extend(postgres_setup_transaction_live_findings(root)?);
     findings.extend(generated_domains_live_findings(root)?);
@@ -1100,7 +1104,10 @@ fn listener_plan_execution_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
         ),
         (
             finalize.contains("listener_execution_plan,")
-                && finalize.contains("let listeners = finalize_listener_plan("),
+                && finalize.contains("let finalized_listeners = finalize_listener_plan(")
+                && finalize.contains("Ok(finalized_listeners.into_parts())")
+                && finalize.contains("listeners,")
+                && finalize.contains("probe_receipt,"),
             RUNTIME_PHASE_FINALIZE_PATH,
             "Finalize phase 必须消费 plan capability 后调用唯一 listener finalizer",
         ),
@@ -1114,10 +1121,10 @@ fn listener_plan_execution_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
             launch
                 .matches("listeners: routes::FinalizedListenerSet")
                 .count()
-                >= 2
+                == 2
                 && !launch.contains("\n    listeners: Vec<routes::AssembledListener>"),
             RUNTIME_LAUNCH_PATH,
-            "LaunchPlanParts 与 LaunchPlan 必须只接受 FinalizedListenerSet",
+            "RuntimeLaunchAdapter 必须唯一持有并消费 FinalizedListenerSet",
         ),
         (
             lib.contains("\nmod listeners;")
@@ -1208,6 +1215,8 @@ const LISTENER_CAPABILITY_TYPES: &[(&str, &str)] = &[
     ("ListenerExecutionSpec", RUNTIME_PLAN_PATH),
     ("AssembledListener", RUNTIME_ROUTES_PATH),
     ("FinalizedListenerSet", RUNTIME_ROUTES_PATH),
+    ("FinalizedListenerPlan", RUNTIME_ROUTES_PATH),
+    ("FinalizedProbeReceipt", RUNTIME_ROUTES_PATH),
 ];
 
 #[derive(Default)]
@@ -1406,6 +1415,7 @@ fn finalizer_signature_is_canonical(signature: &syn::Signature) -> bool {
                     && binding.by_ref.is_none()
                     && binding.mutability.is_none())
             && compact_tokens(&argument.ty) == "FinalizeListenerPlanInputs<'_,'_>")
+        && return_type_mentions(&signature.output, "FinalizedListenerPlan")
 }
 
 fn finalizer_call_is_canonical(call: &syn::ExprCall) -> bool {
@@ -1447,7 +1457,7 @@ impl<'ast> Visit<'ast> for ListenerPlanExecutionInventory {
         if !attrs_may_be_production(&item.attrs) {
             return;
         }
-        if return_type_mentions(&item.sig.output, "FinalizedListenerSet") {
+        if return_type_mentions(&item.sig.output, "FinalizedListenerPlan") {
             self.set_returning_functions += 1;
             if item.sig.ident == "finalize_listener_plan"
                 && finalizer_signature_is_canonical(&item.sig)
@@ -9055,15 +9065,23 @@ fn runtime_lifecycle_ownership_findings(
         let is_canonical = if path == RUNTIME_PHASE_LAUNCH_PATH {
             uses.phase_execute == 0
                 && uses.launch_plan == 1
-                && uses.launch_plan_parts == 1
+                && uses.launch_plan_parts == 0
+                && uses.runtime_outputs == 0
+                && uses.shutdown_stack == 0
+        } else if path == RUNTIME_PHASE_PATH {
+            uses.phase_execute == 0
+                && uses.launch_plan == 0
+                && uses.launch_plan_parts == 0
+                && uses.runtime_outputs == 2
                 && uses.shutdown_stack == 0
         } else if path == PROVIDER_OUTPUT_PATH {
             uses.phase_execute == 0
                 && uses.launch_plan == 0
                 && uses.launch_plan_parts == 0
+                && uses.runtime_outputs == 0
                 && uses.shutdown_stack == 1
         } else if path == RUNTIME_LAUNCH_PATH {
-            uses.phase_execute == 0
+            uses.phase_execute == 0 && uses.lifecycle_is_empty()
         } else if path == RUNTIME_LIB_PATH {
             uses.phase_execute == 1 && uses.lifecycle_is_empty()
         } else {
@@ -9084,22 +9102,372 @@ fn runtime_lifecycle_ownership_findings(
         .map(|file| production_lifecycle_primitive_uses(file, &[]))
         .unwrap_or_default();
     if launch_primitive_uses.launch_plan != 1
-        || launch_primitive_uses.launch_plan_parts != 1
+        || launch_primitive_uses.launch_plan_parts != 0
         || launch_primitive_uses.shutdown_stack != 0
         || production_exact_path_call_count_in_file(
             &files[RUNTIME_PHASE_LAUNCH_PATH],
-            &["crate", "launch", "LaunchPlan", "new"],
+            &["runtimeexec", "LaunchPlan", "new"],
+        ) != 1
+        || production_exact_path_call_count_in_file(
+            &files[RUNTIME_PHASE_LAUNCH_PATH],
+            &["runtimeexec", "launch"],
         ) != 1
     {
         findings.push(finding(
             Rule::ForbiddenWiring,
             RUNTIME_PHASE_LAUNCH_PATH,
             format!(
-                "predicate=launch_plan_ownership expected=one exact crate::launch::LaunchPlan::new and one LaunchPlan/LaunchPlanParts use in launch phase actual={launch_primitive_uses:?}"
+                "predicate=launch_plan_ownership expected=one exact runtimeexec::LaunchPlan::new + runtimeexec::launch and no legacy LaunchPlanParts in launch phase actual={launch_primitive_uses:?}"
             ),
         ));
     }
     findings
+}
+
+fn runtime_launch_kernel_owner_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
+    if !root.join("Cargo.toml").exists() {
+        return Ok(Vec::new());
+    }
+    let production_files = runtime_production_source_files(root)?;
+    let kernel = match parse_rust_file(&root.join(RUNTIMEEXEC_PATH)) {
+        Ok(file) => file,
+        Err(error) => {
+            return Ok(vec![finding(
+                Rule::MissingAnchor,
+                RUNTIMEEXEC_PATH,
+                format!("runtimeexec launch kernel owner missing or invalid: {error:#}"),
+            )]);
+        }
+    };
+    let phase_launch = parse_rust_file(&root.join(RUNTIME_PHASE_LAUNCH_PATH))?;
+    let adapter = parse_rust_file(&root.join(RUNTIME_LAUNCH_PATH))?;
+    let mut findings = Vec::new();
+
+    let structs = |name: &str| {
+        kernel
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                syn::Item::Struct(item)
+                    if item.ident == name && attrs_may_be_production(&item.attrs) =>
+                {
+                    Some(item)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let exact_named_carrier = |name: &str, expected: &[&str]| {
+        matches!(structs(name).as_slice(), [item]
+            if matches!(item.vis, syn::Visibility::Public(_))
+                && matches!(&item.fields, syn::Fields::Named(_))
+                && item.fields.iter().all(|field| matches!(field.vis, syn::Visibility::Inherited))
+                && item.fields.iter()
+                    .filter_map(|field| field.ident.as_ref().map(ToString::to_string))
+                    .collect::<BTreeSet<_>>()
+                    == expected.iter().map(|field| (*field).to_owned()).collect())
+    };
+    let exact_tuple_carrier = |name: &str, field_type: &str| {
+        matches!(structs(name).as_slice(), [item]
+            if matches!(item.vis, syn::Visibility::Public(_))
+                && matches!(&item.fields, syn::Fields::Unnamed(fields)
+                    if fields.unnamed.len() == 1
+                        && matches!(fields.unnamed[0].vis, syn::Visibility::Inherited)
+                        && compact_tokens(&fields.unnamed[0].ty) == field_type))
+    };
+    let owner_shape = exact_named_carrier(
+        "LaunchPlan",
+        &[
+            "adapter",
+            "probe_receipt",
+            "on_ready",
+            "trace_exporter",
+            "lifecycle_batches",
+        ],
+    ) && exact_named_carrier("LaunchTransaction", &["stack"])
+        && exact_named_carrier("LaunchRegistrar", &["stack", "listener_count"])
+        && exact_named_carrier("Activated", &["inventory"])
+        && exact_tuple_carrier("ProviderLifecycleBatch", "DomainModuleResult")
+        && exact_tuple_carrier("DomainLifecycleBatch", "DomainModuleResult")
+        && exact_named_carrier("LaunchLifecycleBatches", &["provider", "domain"])
+        && exact_named_carrier("RuntimeOutputs", &["_completed"])
+        && structs("LaunchPlanParts").is_empty()
+        && unique_production_async_function(&kernel, "launch").is_some()
+        && unique_production_async_function(&kernel, "launch_until").is_some()
+        && unique_production_async_function(&kernel, "execute_launch").is_some()
+        && unique_production_async_function(&kernel, "finish_launch").is_some()
+        && unique_production_inherent_method(
+            &kernel,
+            "ProviderLifecycleBatch",
+            "from_provider_output",
+        )
+        .is_some_and(|method| compact_tokens(&method.block) == "{Self(output)}")
+        && unique_production_inherent_method(&kernel, "DomainLifecycleBatch", "from_domain_output")
+            .is_some_and(|method| compact_tokens(&method.block) == "{Self(output)}")
+        && unique_production_inherent_method(&kernel, "LaunchLifecycleBatches", "new")
+            .is_some_and(|method| compact_tokens(&method.block) == "{Self{provider,domain}}");
+    if !owner_shape {
+        findings.push(finding(
+            Rule::ForbiddenWiring,
+            RUNTIMEEXEC_PATH,
+            "predicate=runtimeexec_owner_shape expected=private-field transaction/registrar/activated/typed-batch/plan carriers plus launch/launch_until/execute_launch/finish_launch; no LaunchPlanParts actual=non-canonical",
+        ));
+    }
+
+    let kernel_tokens = compact_tokens(&kernel);
+    let preserves_primary_launch_error = preserve_launch_error_is_canonical(&kernel);
+    let lifecycle_checks = [
+        (
+            "stack-owner",
+            production_exact_path_call_count_in_file(&kernel, &["ShutdownStack", "new"]) == 1,
+        ),
+        (
+            "batch-transfer-call",
+            production_exact_path_call_count_in_file(&kernel, &["register_lifecycle_outputs"]) == 1,
+        ),
+        (
+            "module-transfer-calls",
+            production_exact_path_call_count_in_file(&kernel, &["register_module_output"]) == 2,
+        ),
+        (
+            "signal-call",
+            production_exact_path_call_count_in_file(&kernel, &["wait_for_shutdown_signal"]) == 1,
+        ),
+        (
+            "batch-transfer",
+            kernel_tokens
+                .contains("register_lifecycle_outputs(stack,trace_exporter,lifecycle_batches)?"),
+        ),
+        (
+            "transaction-mint",
+            kernel_tokens.contains("letmuttransaction=LaunchTransaction{stack}"),
+        ),
+        (
+            "receipt-prepare",
+            kernel_tokens.contains("adapter.prepare(probe_receipt,&muttransaction).await?"),
+        ),
+        (
+            "registrar-activation",
+            kernel_tokens.contains("Adapter::activate(prepared,transaction.commit())?"),
+        ),
+        (
+            "activated-ready",
+            kernel_tokens.contains("on_ready(activated.into_inventory())?"),
+        ),
+        ("drain", kernel_tokens.contains("stack.shutdown().await")),
+        (
+            "staged-resource",
+            kernel_tokens.contains("self.stack.register_detached(resource)"),
+        ),
+        (
+            "empty-registrar",
+            kernel_tokens.contains("listener_count:0"),
+        ),
+        (
+            "registered-listener",
+            kernel_tokens.contains("self.stack.register_with_token(make)"),
+        ),
+        (
+            "listener-count",
+            kernel_tokens.contains("self.listener_count+=1"),
+        ),
+        (
+            "nonempty-activation",
+            kernel_tokens.contains("self.listener_count>0"),
+        ),
+        (
+            "activated-capability",
+            kernel_tokens.contains("Ok(Activated{inventory})"),
+        ),
+        (
+            "typed-batch-destructure",
+            kernel_tokens.contains("letLaunchLifecycleBatches{provider,domain}=lifecycle_batches"),
+        ),
+        (
+            "provider-role",
+            kernel_tokens.contains("register_module_output(stack,provider.0)"),
+        ),
+        (
+            "domain-role",
+            kernel_tokens.contains("register_module_output(stack,domain.0)"),
+        ),
+        (
+            "batch-error-order",
+            kernel_tokens.contains("provider_result?;domain_result"),
+        ),
+        (
+            "dual-error-arm",
+            kernel_tokens.contains("(Err(launch_error),Err(drain_error))"),
+        ),
+        ("primary-error", preserves_primary_launch_error),
+    ];
+    let missing_lifecycle = lifecycle_checks
+        .iter()
+        .filter_map(|(label, accepted)| (!accepted).then_some(*label))
+        .collect::<Vec<_>>();
+    if !missing_lifecycle.is_empty() {
+        findings.push(finding(
+            Rule::ForbiddenWiring,
+            RUNTIMEEXEC_PATH,
+            format!(
+                "predicate=runtimeexec_lifecycle expected=unique stack, staged prepare ownership, typed provider/domain transfer, non-empty registered activation, ready hook, signal and drain with primary-error preservation actual=missing {}",
+                missing_lifecycle.join(",")
+            ),
+        ));
+    }
+
+    let phase_calls = production_exact_path_call_count_in_file(
+        &phase_launch,
+        &["runtimeexec", "LaunchPlan", "new"],
+    ) == 1
+        && production_exact_path_call_count_in_file(&phase_launch, &["runtimeexec", "launch"]) == 1;
+    let global_launch_calls = production_files
+        .values()
+        .map(|file| production_exact_path_call_count_in_file(file, &["runtimeexec", "launch"]))
+        .sum::<usize>();
+    let phase_tokens = compact_tokens(&phase_launch);
+    let phase_batches =
+        phase_tokens.contains("letlifecycle_batches=provider_build.into_launch_batches()");
+    let phase_plan = phase_tokens.contains(
+        "runtimeexec::LaunchPlan::new(adapter,probe_receipt,crate::launch::log_ready,trace_exporter,lifecycle_batches,)",
+    );
+    if !phase_calls || global_launch_calls != 1 || !phase_batches || !phase_plan {
+        findings.push(finding(
+            Rule::ForbiddenWiring,
+            RUNTIME_PHASE_LAUNCH_PATH,
+            format!(
+                "predicate=runtimeexec_handoff expected=phase owns sole typed-batch LaunchPlan::new + runtimeexec::launch and consumes receipt actual=phase_calls={phase_calls},global_launch_calls={global_launch_calls},phase_batches={phase_batches},phase_plan={phase_plan}"
+            ),
+        ));
+    }
+
+    let adapter_tokens = compact_tokens(&adapter);
+    let adapter_is_closed =
+        production_exact_path_call_count_in_file(&adapter, &["BoundListenerSet", "prepare"]) == 1
+            && adapter_tokens.contains("listeners.preflight_activation()?")
+            && adapter_tokens.contains("prepared.listeners.activate(&mutregistrar)")
+            && adapter_tokens.contains("registrar.complete(inventory)")
+            && adapter_tokens.contains("transaction.stage_resource(lifecycle)")
+            && adapter_tokens.contains("self.non_health.into_iter().chain(self.health)");
+    if !adapter_is_closed {
+        findings.push(finding(
+            Rule::ForbiddenWiring,
+            RUNTIME_LAUNCH_PATH,
+            "predicate=runtime_adapter expected=stage prepare resources, prepare-all then preflight-all, register non-health before health, and complete a non-empty activation actual=non-canonical",
+        ));
+    }
+
+    for (path, file) in &production_files {
+        let lifecycle_uses = production_lifecycle_primitive_uses(file, &[]);
+        let owns_forbidden_shutdown_stack =
+            path != PROVIDER_OUTPUT_PATH && lifecycle_uses.shutdown_stack != 0;
+        if assembly_defines_legacy_lifecycle_item(file)
+            || production_macro_mentions_runtimeexec_launch(file)
+            || owns_forbidden_shutdown_stack
+        {
+            findings.push(finding(
+                Rule::ForbiddenWiring,
+                path,
+                "predicate=no_assembly_launch_compat expected=no legacy lifecycle owner/alias/re-export, wrapper macro, parallel executor or direct ShutdownStack outside provider transactional abort actual=forbidden production item",
+            ));
+        }
+    }
+    Ok(findings)
+}
+
+fn preserve_launch_error_is_canonical(kernel: &syn::File) -> bool {
+    let Some(function) = unique_production_function(kernel, "preserve_launch_error") else {
+        return false;
+    };
+    let Some(syn::Stmt::Expr(syn::Expr::Match(outcome), None)) = function.block.stmts.last() else {
+        return false;
+    };
+    if outcome.arms.len() != 4 {
+        return false;
+    }
+
+    let err_binding = |pattern: &syn::Pat| -> Option<String> {
+        let syn::Pat::TupleStruct(result) = pattern else {
+            return None;
+        };
+        if !is_exact_syn_path(&result.path, &["Err"]) || result.elems.len() != 1 {
+            return None;
+        }
+        let syn::Pat::Ident(binding) = result.elems.first()? else {
+            return None;
+        };
+        Some(binding.ident.to_string())
+    };
+
+    let matching = outcome
+        .arms
+        .iter()
+        .filter(|arm| {
+            let syn::Pat::Tuple(pair) = &arm.pat else {
+                return false;
+            };
+            let Some(primary) = pair.elems.first().and_then(err_binding) else {
+                return false;
+            };
+            let Some(cleanup) = pair.elems.iter().nth(1).and_then(err_binding) else {
+                return false;
+            };
+            let syn::Expr::Block(body) = transparent_expr(&arm.body) else {
+                return false;
+            };
+            let Some(syn::Stmt::Expr(tail, None)) = body.block.stmts.last() else {
+                return false;
+            };
+            let body_tokens = compact_tokens(&body.block);
+            let reports_cleanup = body_tokens.contains("preservingprimarylauncherror")
+                && body_tokens.contains(&cleanup);
+            reports_cleanup && compact_tokens(tail) == format!("Err({primary})")
+        })
+        .count();
+    matching == 1
+}
+
+fn assembly_defines_legacy_lifecycle_item(file: &syn::File) -> bool {
+    const PROTECTED: &[&str] = &["LaunchPlan", "LaunchPlanParts", "RuntimeOutputs"];
+    const EXECUTORS: &[&str] = &[
+        "execute_launch",
+        "finish_launch",
+        "launch_until",
+        "launch_until_observed",
+        "wait_for_shutdown_signal",
+    ];
+    file.items.iter().any(|item| match item {
+        syn::Item::Struct(item) => PROTECTED.contains(&item.ident.to_string().as_str()),
+        syn::Item::Enum(item) => PROTECTED.contains(&item.ident.to_string().as_str()),
+        syn::Item::Type(item) => PROTECTED.contains(&item.ident.to_string().as_str()),
+        syn::Item::Fn(item) => EXECUTORS.contains(&item.sig.ident.to_string().as_str()),
+        syn::Item::Use(item) if matches!(item.vis, syn::Visibility::Public(_)) => {
+            let tokens = compact_tokens(&item.tree);
+            PROTECTED.iter().any(|name| tokens.contains(name))
+        }
+        _ => false,
+    })
+}
+
+fn production_macro_mentions_runtimeexec_launch(file: &syn::File) -> bool {
+    struct Visitor {
+        found: bool,
+    }
+    impl<'ast> Visit<'ast> for Visitor {
+        fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
+            if attrs_may_be_production(&item.attrs) {
+                syn::visit::visit_item_mod(self, item);
+            }
+        }
+        fn visit_macro(&mut self, item: &'ast syn::Macro) {
+            let tokens = compact_tokens(&item.tokens);
+            self.found |= tokens.contains("runtimeexec")
+                && (tokens.contains("launch") || tokens.contains("LaunchPlan"));
+        }
+    }
+    let mut visitor = Visitor { found: false };
+    visitor.visit_file(file);
+    visitor.found
 }
 
 fn operator_module_ownership_is_closed(file: &syn::File) -> bool {
@@ -9333,7 +9701,12 @@ fn phase_state_definitions_are_canonical(file: &syn::File) -> bool {
             "Finalized<'a>",
             "Finalize",
         ),
-        ("Finalized", "Finalized<'_>", "RuntimeOutputs", "Launch"),
+        (
+            "Finalized",
+            "Finalized<'_>",
+            "runtimeexec::RuntimeOutputs",
+            "Launch",
+        ),
     ];
     let contexts = file
         .items
@@ -9692,18 +10065,20 @@ fn launch_pre_handoff_is_canonical(method: &syn::ImplItemFn) -> bool {
     let block = transition_body(&method.block);
     let tokens = compact_tokens(block);
     let budget = tokens.find("crate::launch::server_request_budget(");
-    let plan = tokens.find("crate::launch::LaunchPlan::new(");
-    let launch = tokens.find("crate::launch::launch(");
+    let plan = tokens.find("runtimeexec::LaunchPlan::new(");
+    let launch = tokens.find("runtimeexec::launch(");
     exact_named_path_call_count(block, &["crate", "launch", "server_request_budget"]) == 1
-        && exact_named_path_call_count(block, &["crate", "launch", "LaunchPlan", "new"]) == 1
-        && exact_named_path_call_count(block, &["crate", "launch", "launch"]) == 1
+        && exact_named_path_call_count(block, &["runtimeexec", "LaunchPlan", "new"]) == 1
+        && exact_named_path_call_count(block, &["runtimeexec", "launch"]) == 1
         && method_call_count_in_block(block, "abort") == 1
-        && method_call_count_in_block(block, "into_modules") == 1
+        && method_call_count_in_block(block, "into_launch_batches") == 1
         && matches!((budget, plan, launch), (Some(budget), Some(plan), Some(launch))
             if budget < plan && plan < launch)
         && tokens.contains("Err(error)=>Err(provider_build.abort(error).await)")
-        && tokens.contains("let(provider_module,domain_module)=provider_build.into_modules();")
-        && tokens.contains("provider_module,domain_module,")
+        && tokens.contains("letlifecycle_batches=provider_build.into_launch_batches();")
+        && tokens.contains(
+            "adapter,probe_receipt,crate::launch::log_ready,trace_exporter,lifecycle_batches,",
+        )
 }
 
 fn phase_context_shape_is_canonical(phase: &syn::File) -> bool {
@@ -10071,13 +10446,17 @@ fn token_stream_mentions_ident_or_alias(
 struct LifecyclePrimitiveUses {
     launch_plan: usize,
     launch_plan_parts: usize,
+    runtime_outputs: usize,
     shutdown_stack: usize,
     phase_execute: usize,
 }
 
 impl LifecyclePrimitiveUses {
     fn lifecycle_is_empty(&self) -> bool {
-        self.launch_plan == 0 && self.launch_plan_parts == 0 && self.shutdown_stack == 0
+        self.launch_plan == 0
+            && self.launch_plan_parts == 0
+            && self.runtime_outputs == 0
+            && self.shutdown_stack == 0
     }
 }
 
@@ -10095,6 +10474,7 @@ fn production_lifecycle_primitive_uses(
                 match segment.ident.to_string().as_str() {
                     "LaunchPlan" => self.uses.launch_plan += 1,
                     "LaunchPlanParts" => self.uses.launch_plan_parts += 1,
+                    "RuntimeOutputs" => self.uses.runtime_outputs += 1,
                     "ShutdownStack" => self.uses.shutdown_stack += 1,
                     _ => {}
                 }
@@ -10159,6 +10539,7 @@ fn production_lifecycle_primitive_uses(
                 match segment.as_str() {
                     "LaunchPlan" => self.uses.launch_plan += 1,
                     "LaunchPlanParts" => self.uses.launch_plan_parts += 1,
+                    "RuntimeOutputs" => self.uses.runtime_outputs += 1,
                     "ShutdownStack" => self.uses.shutdown_stack += 1,
                     _ => {}
                 }
@@ -10178,6 +10559,7 @@ fn production_lifecycle_primitive_uses(
                     proc_macro2::TokenTree::Ident(ident) => match ident.to_string().as_str() {
                         "LaunchPlan" => self.uses.launch_plan += 1,
                         "LaunchPlanParts" => self.uses.launch_plan_parts += 1,
+                        "RuntimeOutputs" => self.uses.runtime_outputs += 1,
                         "ShutdownStack" => self.uses.shutdown_stack += 1,
                         _ => {}
                     },
@@ -11077,7 +11459,7 @@ fn event_transport_output_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
     }
     let event = parse_rust_file(&root.join("assemblies/runtime/src/event_transport.rs"))?;
     let domains = parse_rust_file(&root.join(RUNTIME_PHASE_DOMAINS_PATH))?;
-    let launch = parse_rust_file(&root.join(RUNTIME_LAUNCH_PATH))?;
+    let launch = parse_rust_file(&root.join(RUNTIMEEXEC_PATH))?;
     let mut findings = Vec::new();
 
     let wire = event
@@ -11129,53 +11511,52 @@ fn event_transport_output_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
     }
 
     let launch_tokens = compact_tokens(&launch);
-    let provider = launch_tokens
-        .find("letprovider_result=Self::register_module_output(stack,provider_module);");
-    let domain =
-        launch_tokens.find("letdomain_result=Self::register_module_output(stack,domain_module);");
-    let register = unique_production_inherent_method(&launch, "LaunchPlan", "register");
-    let register_output =
-        unique_production_inherent_method(&launch, "LaunchPlan", "register_module_output");
-    let expected_fields = BTreeSet::from([
-        "listeners".to_owned(),
-        "trace_exporter".to_owned(),
-        "provider_module".to_owned(),
-        "domain_module".to_owned(),
-    ]);
-    let launch_plan_fields_are_closed = ["LaunchPlanParts", "LaunchPlan"].into_iter().all(|name| {
-        let owners = launch
-            .items
+    let provider =
+        launch_tokens.find("letprovider_result=register_module_output(stack,provider.0);");
+    let domain = launch_tokens.find("letdomain_result=register_module_output(stack,domain.0);");
+    let owners = launch
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Struct(item) if item.ident == "LaunchPlan" => Some(item),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let launch_plan_fields_are_closed = owners.len() == 1
+        && owners[0]
+            .fields
             .iter()
-            .filter_map(|item| match item {
-                syn::Item::Struct(item) if item.ident == name => Some(item),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        owners.len() == 1
-            && owners[0]
-                .fields
-                .iter()
-                .filter_map(|field| field.ident.as_ref().map(ToString::to_string))
-                .collect::<BTreeSet<_>>()
-                == expected_fields
-    });
+            .filter_map(|field| field.ident.as_ref().map(ToString::to_string))
+            .collect::<BTreeSet<_>>()
+            == BTreeSet::from([
+                "adapter".to_owned(),
+                "probe_receipt".to_owned(),
+                "on_ready".to_owned(),
+                "trace_exporter".to_owned(),
+                "lifecycle_batches".to_owned(),
+            ]);
+    let module_registration_is_closed =
+        unique_production_function(&launch, "register_module_output").is_some_and(|function| {
+            method_call_count_in_block(&function.block, "register_detached") == 1
+                && method_call_count_in_block(&function.block, "register_with_token") == 1
+        });
+    let lifecycle_registration_is_closed =
+        unique_production_function(&launch, "register_lifecycle_outputs").is_some_and(|function| {
+            method_call_count_in_block(&function.block, "register_detached") == 1
+                && method_call_count_in_block(&function.block, "register_with_token") == 0
+        });
     if launch_tokens.contains("event_infra_guards")
         || !launch_plan_fields_are_closed
         || !matches!((provider, domain), (Some(provider), Some(domain)) if provider < domain)
-        || !launch_tokens.contains("provider_result?;domain_result?;")
-        || register.is_none_or(|method| {
-            method_call_count_in_block(&method.block, "register_detached") != 1
-                || method_call_count_in_block(&method.block, "register_with_token") != 0
-        })
-        || register_output.is_none_or(|method| {
-            method_call_count_in_block(&method.block, "register_detached") != 1
-                || method_call_count_in_block(&method.block, "register_with_token") != 1
-        })
+        || !launch_tokens.contains("provider_result?;domain_result")
+        || production_exact_path_call_count_in_file(&launch, &["register_module_output"]) != 2
+        || !module_registration_is_closed
+        || !lifecycle_registration_is_closed
     {
         findings.push(finding(
             Rule::ForbiddenWiring,
-            RUNTIME_LAUNCH_PATH,
-            "LaunchPlan 必须按 provider module → domain module 两批调用公共 register_module_output，禁止 event 专用字段或生命周期旁路",
+            RUNTIMEEXEC_PATH,
+            "LaunchPlan 必须以 typed lifecycle batches 按 provider → domain 调用公共 register_module_output，禁止角色反转、event 专用字段或生命周期旁路",
         ));
     }
     Ok(findings)
@@ -11673,6 +12054,22 @@ fn unique_production_async_function<'a>(
     (functions.len() == 1).then_some(functions[0])
 }
 
+fn unique_production_function<'a>(file: &'a syn::File, name: &str) -> Option<&'a syn::ItemFn> {
+    let functions = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Fn(item)
+                if item.sig.ident == name && attrs_may_be_production(&item.attrs) =>
+            {
+                Some(item)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    (functions.len() == 1).then_some(functions[0])
+}
+
 fn compact_tokens(tokens: &impl quote::ToTokens) -> String {
     tokens
         .to_token_stream()
@@ -11738,6 +12135,7 @@ fn provider_plan_output_bijection_findings(root: &Path) -> Result<Vec<Finding<Ru
         RUNTIME_PHASE_FINALIZE_PATH,
         RUNTIME_PHASE_LAUNCH_PATH,
         RUNTIME_LAUNCH_PATH,
+        RUNTIMEEXEC_PATH,
     ];
 
     let missing = REQUIRED_PATHS
@@ -11769,7 +12167,7 @@ fn provider_plan_output_bijection_findings(root: &Path) -> Result<Vec<Finding<Ru
     let domains_phase = &parsed[RUNTIME_PHASE_DOMAINS_PATH];
     let finalize_phase = &parsed[RUNTIME_PHASE_FINALIZE_PATH];
     let phase_launch = &parsed[RUNTIME_PHASE_LAUNCH_PATH];
-    let launch = &parsed[RUNTIME_LAUNCH_PATH];
+    let launch = &parsed[RUNTIMEEXEC_PATH];
     let mut findings = Vec::new();
 
     let struct_count = |file: &syn::File, name: &str| {
@@ -11924,7 +12322,8 @@ fn provider_plan_output_bijection_findings(root: &Path) -> Result<Vec<Finding<Ru
         && domains_tokens.contains("completed.abort(error).await")
         && finalize_tokens.contains("provider_build.abort(error).await")
         && phase_launch_tokens.contains("provider_build.abort(error).await")
-        && phase_launch_tokens.contains("provider_build.into_modules()");
+        && phase_method_calls(phase_launch, "into_launch_batches") == 1
+        && phase_launch_tokens.contains("provider_build.into_launch_batches()");
     if !transaction_is_closed {
         findings.push(finding(
             Rule::ForbiddenWiring,
@@ -11944,19 +12343,19 @@ fn provider_plan_output_bijection_findings(root: &Path) -> Result<Vec<Finding<Ru
             phase_launch,
             &["crate", "provider_output", "build_pg_runtime_module"],
         ) == 0;
-    let provider_registration = launch_tokens
-        .find("letprovider_result=Self::register_module_output(stack,provider_module);");
+    let provider_registration =
+        launch_tokens.find("letprovider_result=register_module_output(stack,provider.0);");
     let domain_registration =
-        launch_tokens.find("letdomain_result=Self::register_module_output(stack,domain_module);");
+        launch_tokens.find("letdomain_result=register_module_output(stack,domain.0);");
     if !pg_build_is_unique
         || !matches!((provider_registration, domain_registration),
             (Some(provider), Some(domain)) if provider < domain)
-        || !launch_tokens.contains("provider_result?;domain_result?;")
+        || !launch_tokens.contains("provider_result?;domain_result")
     {
         findings.push(finding(
             Rule::ForbiddenWiring,
-            RUNTIME_LAUNCH_PATH,
-            "PG owner 必须在 BuildInfra 立即进入 ProviderOutput；Launch 只接受 completed provider module，并在 domain module 前注册",
+            RUNTIMEEXEC_PATH,
+            "PG owner 必须在 BuildInfra 立即进入 ProviderOutput；Launch 只接受 completed typed lifecycle batches，并在 domain batch 前注册 provider batch",
         ));
     }
 
@@ -12788,7 +13187,6 @@ struct AnchorEntry {
 struct AnchorSearchScope<'a> {
     body: &'a str,
     start: usize,
-    end: usize,
 }
 
 const RUNTIME_ANCHORS: &[AnchorSpec] = &[
@@ -13010,62 +13408,92 @@ const RUNTIME_ANCHORS: &[AnchorSpec] = &[
     AnchorSpec {
         id: "run.listener.finalizer",
         path: RUNTIME_PHASE_FINALIZE_PATH,
-        pattern: "let listeners = finalize_listener_plan(",
+        pattern: "let finalized_listeners = finalize_listener_plan(",
     },
     AnchorSpec {
         id: "run.launch-capability",
         path: RUNTIME_PHASE_LAUNCH_PATH,
-        pattern: "crate::launch::launch(context.config(), request_budget, launch_plan)",
+        pattern: "runtimeexec::launch(launch_plan).await",
     },
     AnchorSpec {
         id: "launch.shutdown.trace",
-        path: RUNTIME_LAUNCH_PATH,
+        path: RUNTIMEEXEC_PATH,
         pattern: "if let Some(exporter) = trace_exporter",
     },
     AnchorSpec {
         id: "launch.shutdown.provider-output",
-        path: RUNTIME_LAUNCH_PATH,
-        pattern: "let provider_result = Self::register_module_output(stack, provider_module);",
+        path: RUNTIMEEXEC_PATH,
+        pattern: "let provider_result = register_module_output(stack, provider.0);",
     },
     AnchorSpec {
         id: "launch.shutdown.domain-output",
-        path: RUNTIME_LAUNCH_PATH,
-        pattern: "let domain_result = Self::register_module_output(stack, domain_module);",
+        path: RUNTIMEEXEC_PATH,
+        pattern: "let domain_result = register_module_output(stack, domain.0);",
     },
     AnchorSpec {
         id: "launch.shutdown.provider-result",
-        path: RUNTIME_LAUNCH_PATH,
+        path: RUNTIMEEXEC_PATH,
         pattern: "provider_result?;",
     },
     AnchorSpec {
         id: "launch.shutdown.domain-result",
-        path: RUNTIME_LAUNCH_PATH,
-        pattern: "domain_result?;",
+        path: RUNTIMEEXEC_PATH,
+        pattern: "    domain_result",
     },
     AnchorSpec {
         id: "launch.shutdown.resources",
-        path: RUNTIME_LAUNCH_PATH,
+        path: RUNTIMEEXEC_PATH,
         pattern: "for resource in resources",
     },
     AnchorSpec {
         id: "launch.shutdown.workers",
-        path: RUNTIME_LAUNCH_PATH,
+        path: RUNTIMEEXEC_PATH,
         pattern: "for worker in workers",
     },
     AnchorSpec {
-        id: "launch.register-plan",
-        path: RUNTIME_LAUNCH_PATH,
-        pattern: "let listeners = plan.register(&mut stack)?;",
+        id: "launch.register-lifecycle",
+        path: RUNTIMEEXEC_PATH,
+        pattern: "register_lifecycle_outputs(stack, trace_exporter, lifecycle_batches)?;",
     },
     AnchorSpec {
         id: "launch.listener-prepare",
-        path: RUNTIME_LAUNCH_PATH,
-        pattern: "let bound = BoundListenerSet::prepare(listeners, budget, &addr_resolver).await?;",
+        path: RUNTIMEEXEC_PATH,
+        pattern: "let prepared = adapter.prepare(probe_receipt, &mut transaction).await?;",
     },
     AnchorSpec {
         id: "launch.listener-activate",
+        path: RUNTIMEEXEC_PATH,
+        pattern: "Adapter::activate(prepared, transaction.commit())",
+    },
+    AnchorSpec {
+        id: "launch.ready-hook",
+        path: RUNTIMEEXEC_PATH,
+        pattern: "on_ready(activated.into_inventory())?;",
+    },
+    AnchorSpec {
+        id: "launch.signal-wait",
+        path: RUNTIMEEXEC_PATH,
+        pattern: "launch_until(plan, wait_for_shutdown_signal()).await",
+    },
+    AnchorSpec {
+        id: "launch.shutdown.drain",
+        path: RUNTIMEEXEC_PATH,
+        pattern: "stack.shutdown().await",
+    },
+    AnchorSpec {
+        id: "adapter.listener-prepare",
         path: RUNTIME_LAUNCH_PATH,
-        pattern: "bound.activate(&mut stack)?;",
+        pattern: "BoundListenerSet::prepare(",
+    },
+    AnchorSpec {
+        id: "adapter.listener-preflight",
+        path: RUNTIME_LAUNCH_PATH,
+        pattern: "listeners.preflight_activation()?;",
+    },
+    AnchorSpec {
+        id: "adapter.listener-activate",
+        path: RUNTIME_LAUNCH_PATH,
+        pattern: "prepared.listeners.activate(&mut registrar)",
     },
 ];
 
@@ -13179,29 +13607,48 @@ fn anchor_search_scope<'a>(spec: &AnchorSpec, text: &'a str) -> AnchorSearchScop
         }
         return production_async_function_scope(text, "run_startup", "async fn run_startup(");
     }
-    if spec.path == RUNTIME_LAUNCH_PATH {
+    if spec.path == RUNTIMEEXEC_PATH {
         if matches!(
             spec.id,
             "launch.shutdown.resources" | "launch.shutdown.workers"
         ) {
-            return launch_plan_method_scope(text, "fn register_module_output(")
-                .unwrap_or_else(|| empty_scope(text));
+            return production_function_scope(
+                text,
+                "register_module_output",
+                "fn register_module_output(",
+            )
+            .unwrap_or_else(|| empty_scope(text));
         }
         if spec.id.starts_with("launch.shutdown.") {
-            return launch_plan_register_scope(text).unwrap_or_else(|| empty_scope(text));
+            return if spec.id == "launch.shutdown.drain" {
+                production_function_scope(text, "spawn_drain", "fn spawn_drain(")
+            } else {
+                production_function_scope(
+                    text,
+                    "register_lifecycle_outputs",
+                    "fn register_lifecycle_outputs(",
+                )
+            }
+            .unwrap_or_else(|| empty_scope(text));
         }
         if matches!(
             spec.id,
-            "launch.register-plan" | "launch.listener-prepare" | "launch.listener-activate"
+            "launch.register-lifecycle"
+                | "launch.listener-prepare"
+                | "launch.listener-activate"
+                | "launch.ready-hook"
         ) {
-            return extract_braced_body_at(text, 0, "async fn launch_until_observed")
+            return production_function_scope(text, "execute_launch", "async fn execute_launch<")
+                .unwrap_or_else(|| empty_scope(text));
+        }
+        if spec.id == "launch.signal-wait" {
+            return production_function_scope(text, "launch", "pub async fn launch<")
                 .unwrap_or_else(|| empty_scope(text));
         }
     }
     AnchorSearchScope {
         body: text,
         start: 0,
-        end: text.len(),
     }
 }
 
@@ -13231,7 +13678,7 @@ fn anchor_order_key(spec: &AnchorSpec) -> (&'static str, &'static str) {
     if spec.path == RUNTIME_PHASE_LAUNCH_PATH {
         return (spec.path, "phase_launch");
     }
-    if spec.path == RUNTIME_LAUNCH_PATH
+    if spec.path == RUNTIMEEXEC_PATH
         && matches!(
             spec.id,
             "launch.shutdown.resources" | "launch.shutdown.workers"
@@ -13239,16 +13686,26 @@ fn anchor_order_key(spec: &AnchorSpec) -> (&'static str, &'static str) {
     {
         return (spec.path, "register_module_output");
     }
-    if spec.path == RUNTIME_LAUNCH_PATH && spec.id.starts_with("launch.shutdown.") {
-        return (spec.path, "register");
+    if spec.path == RUNTIMEEXEC_PATH && spec.id.starts_with("launch.shutdown.") {
+        return if spec.id == "launch.shutdown.drain" {
+            (spec.path, "spawn_drain")
+        } else {
+            (spec.path, "register_lifecycle_outputs")
+        };
     }
-    if spec.path == RUNTIME_LAUNCH_PATH
+    if spec.path == RUNTIMEEXEC_PATH
         && matches!(
             spec.id,
-            "launch.register-plan" | "launch.listener-prepare" | "launch.listener-activate"
+            "launch.register-lifecycle"
+                | "launch.listener-prepare"
+                | "launch.listener-activate"
+                | "launch.ready-hook"
         )
     {
-        return (spec.path, "launch_until_observed");
+        return (spec.path, "execute_launch");
+    }
+    if spec.path == RUNTIMEEXEC_PATH && spec.id == "launch.signal-wait" {
+        return (spec.path, "launch");
     }
     (spec.path, "file")
 }
@@ -13275,7 +13732,6 @@ fn extract_braced_body_at<'a>(
                     return Some(AnchorSearchScope {
                         body: &src[open + 1..open + offset],
                         start: open + 1,
-                        end: open + offset,
                     });
                 }
             }
@@ -13321,35 +13777,40 @@ fn production_async_function_scope<'a>(
     extract_braced_body_at(text, search_from, needle).unwrap_or_else(|| empty_scope(text))
 }
 
-fn launch_plan_register_scope(text: &str) -> Option<AnchorSearchScope<'_>> {
-    launch_plan_method_scope(text, "fn register(")
-}
-
-fn launch_plan_method_scope<'a>(
+fn production_function_scope<'a>(
     text: &'a str,
-    method_needle: &str,
+    name: &str,
+    needle: &str,
 ) -> Option<AnchorSearchScope<'a>> {
-    let mut cursor = 0usize;
-    while cursor < text.len() {
-        let impl_scope = extract_braced_body_at(text, cursor, "impl LaunchPlan")?;
-        if let Some(method_offset) = impl_scope.body.find(method_needle) {
-            let method_start = impl_scope.start + method_offset;
-            if let Some(method_scope) = extract_braced_body_at(text, method_start, method_needle)
-                && method_scope.end <= impl_scope.end
+    let file = syn::parse_file(text).ok()?;
+    let functions = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Fn(item)
+                if item.sig.ident == name && attrs_may_be_production(&item.attrs) =>
             {
-                return Some(method_scope);
+                Some(item)
             }
-        }
-        cursor = impl_scope.end.saturating_add(1);
-    }
-    None
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let function = (functions.len() == 1).then_some(functions[0])?;
+    let line = function.sig.ident.span().start().line;
+    let search_from = if line <= 1 {
+        0
+    } else {
+        text.match_indices('\n')
+            .nth(line - 2)
+            .map_or(0, |(offset, _)| offset + 1)
+    };
+    extract_braced_body_at(text, search_from, needle)
 }
 
 fn empty_scope(text: &str) -> AnchorSearchScope<'_> {
     AnchorSearchScope {
         body: &text[..0],
         start: 0,
-        end: 0,
     }
 }
 
@@ -13382,6 +13843,7 @@ fn render_baseline(
     );
     push_line(&mut out, format_args!("run = {RUNTIME_LIB_PATH}"));
     push_line(&mut out, format_args!("launch = {RUNTIME_LAUNCH_PATH}"));
+    push_line(&mut out, format_args!("runtimeexec = {RUNTIMEEXEC_PATH}"));
     out.push('\n');
 
     out.push_str("[runtime.dependencies]\n");
@@ -14385,6 +14847,9 @@ impl DomainModuleResult {
             PROVIDER_OUTPUT_PATH,
             GENERATED_PROVIDERS_PATH,
             RUNTIME_LAUNCH_PATH,
+            RUNTIMEEXEC_PATH,
+            RUNTIME_DOMAIN_EXEC_PATH,
+            RUNTIME_PLAN_LIVE_INVENTORY_PATH,
             POSTGRES_BUNDLE_PATH,
         ] {
             write(&root.join(path), &fs::read_to_string(workspace.join(path))?)?;
@@ -14463,65 +14928,6 @@ impl DomainModuleResult {
         lines.join("\n")
     }
 
-    fn runtime_launch_fixture(omit: Option<&str>) -> String {
-        format!(
-            "impl LaunchPlan {{ fn register() {{\n{}\n}}\nfn register_module_output() {{\n{}\n}}\n}}\nasync fn launch_until_observed() {{\n{}\n}}\n",
-            launch_register_anchor_lines(omit),
-            launch_module_registration_anchor_lines(omit),
-            launch_until_anchor_lines(omit)
-        )
-    }
-
-    fn launch_register_anchor_lines(omit: Option<&str>) -> String {
-        RUNTIME_ANCHORS
-            .iter()
-            .filter(|anchor| {
-                anchor.path == RUNTIME_LAUNCH_PATH
-                    && anchor.id.starts_with("launch.shutdown.")
-                    && !matches!(
-                        anchor.id,
-                        "launch.shutdown.resources" | "launch.shutdown.workers"
-                    )
-            })
-            .filter(|anchor| omit != Some(anchor.id))
-            .map(|anchor| anchor.pattern)
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-
-    fn launch_module_registration_anchor_lines(omit: Option<&str>) -> String {
-        RUNTIME_ANCHORS
-            .iter()
-            .filter(|anchor| {
-                anchor.path == RUNTIME_LAUNCH_PATH
-                    && matches!(
-                        anchor.id,
-                        "launch.shutdown.resources" | "launch.shutdown.workers"
-                    )
-            })
-            .filter(|anchor| omit != Some(anchor.id))
-            .map(|anchor| anchor.pattern)
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-
-    fn launch_until_anchor_lines(omit: Option<&str>) -> String {
-        RUNTIME_ANCHORS
-            .iter()
-            .filter(|anchor| {
-                anchor.path == RUNTIME_LAUNCH_PATH
-                    && matches!(
-                        anchor.id,
-                        "launch.register-plan"
-                            | "launch.listener-prepare"
-                            | "launch.listener-activate"
-                    )
-            })
-            .filter(|anchor| omit != Some(anchor.id))
-            .map(|anchor| anchor.pattern)
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
     #[test]
     fn runtime_baseline_accepts_fixture() -> Result<()> {
         let root = fixture_root("runtime-baseline-green")?;
@@ -14532,6 +14938,228 @@ impl DomainModuleResult {
         assert_eq!(report.shared_fields, 3);
         assert_eq!(report.domain_fields, 3);
         assert_eq!(report.anchors, RUNTIME_ANCHORS.len());
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_launch_kernel_owner_accepts_workspace() -> Result<()> {
+        let root = workspace_root()?;
+        assert_eq!(
+            runtime_launch_kernel_owner_findings(&root)?,
+            Vec::<Finding<Rule>>::new(),
+            "the real runtimeexec kernel and assembly adapter are the anti-vacuity green"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_launch_kernel_owner_rejects_assembly_executor_and_bait() -> Result<()> {
+        let cases = [
+            (
+                "runtime-launch-owner-legacy-alias-red",
+                r#"
+pub type RuntimeOutputs = runtimeexec::RuntimeOutputs;
+"#,
+                RUNTIME_PHASE_LAUNCH_PATH,
+                "predicate=no_assembly_launch_compat",
+            ),
+            (
+                "runtime-launch-owner-legacy-executor-red",
+                r#"
+async fn execute_launch() {}
+"#,
+                RUNTIME_PHASE_LAUNCH_PATH,
+                "predicate=no_assembly_launch_compat",
+            ),
+            (
+                "runtime-launch-owner-macro-bait-red",
+                r#"
+macro_rules! parallel_launch {
+    ($plan:expr) => { runtimeexec::launch($plan) };
+}
+"#,
+                RUNTIME_PHASE_LAUNCH_PATH,
+                "predicate=no_assembly_launch_compat",
+            ),
+            (
+                "runtime-launch-owner-dead-bait-red",
+                r#"
+#[allow(dead_code)]
+async fn dead_launch_bait(plan: Plan) {
+    let _ = runtimeexec::launch(plan).await;
+}
+"#,
+                RUNTIME_PHASE_LAUNCH_PATH,
+                "predicate=runtimeexec_handoff",
+            ),
+            (
+                "runtime-launch-owner-second-launch-red",
+                r#"
+async fn bypass_runtimeexec_owner(plan: Plan) {
+    let _ = runtimeexec::launch(plan).await;
+}
+"#,
+                RUNTIME_PHASE_LAUNCH_PATH,
+                "predicate=runtimeexec_handoff",
+            ),
+            (
+                "runtime-launch-owner-direct-stack-red",
+                r#"
+fn bypass_runtimeexec_stack(token: tokio_util::sync::CancellationToken) {
+    let _ = bootstrap::shutdown::ShutdownStack::new(token);
+}
+"#,
+                RUNTIME_PHASE_LAUNCH_PATH,
+                "predicate=no_assembly_launch_compat",
+            ),
+        ];
+
+        let workspace = workspace_root()?;
+        for (name, mutation, expected_subject, expected_predicate) in cases {
+            let root = replay_fixture(name)?;
+            write(
+                &root.join(RUNTIMEEXEC_PATH),
+                &fs::read_to_string(workspace.join(RUNTIMEEXEC_PATH))?,
+            )?;
+            let path = root.join(RUNTIME_PHASE_LAUNCH_PATH);
+            let mut source = fs::read_to_string(&path)?;
+            source.push_str(mutation);
+            write(&path, &source)?;
+
+            let findings = runtime_launch_kernel_owner_findings(&root)?;
+            assert!(
+                findings.iter().any(|finding| {
+                    finding.subject == expected_subject
+                        && finding.detail.contains(expected_predicate)
+                }),
+                "{name} must be rejected by the real runtime launch owner gate: {findings:?}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_launch_kernel_owner_rejects_lifecycle_mutations() -> Result<()> {
+        let cases = [
+            (
+                "runtime-launch-lifecycle-module-transfer-red",
+                "register_lifecycle_outputs(stack, trace_exporter, lifecycle_batches)?;",
+                "register_lifecycle_outputs_bypass(stack, trace_exporter, lifecycle_batches)?;",
+            ),
+            (
+                "runtime-launch-lifecycle-module-order-red",
+                "provider_result?;\n    domain_result",
+                "domain_result?;\n    provider_result",
+            ),
+            (
+                "runtime-launch-lifecycle-prepare-red",
+                "adapter.prepare(probe_receipt, &mut transaction).await?",
+                "adapter.prepare_without_receipt(&mut transaction).await?",
+            ),
+            (
+                "runtime-launch-lifecycle-activate-red",
+                "Adapter::activate(prepared, transaction.commit())",
+                "Adapter::activate_bypass(prepared, transaction.commit())",
+            ),
+            (
+                "runtime-launch-lifecycle-ready-red",
+                "on_ready(activated.into_inventory())?;",
+                "drop(activated);",
+            ),
+            (
+                "runtime-launch-lifecycle-stage-owner-red",
+                "self.stack.register_detached(resource);",
+                "drop(resource);",
+            ),
+            (
+                "runtime-launch-lifecycle-empty-activation-red",
+                "self.listener_count > 0,",
+                "true,",
+            ),
+            (
+                "runtime-launch-lifecycle-provider-role-red",
+                "register_module_output(stack, provider.0);",
+                "register_module_output(stack, domain.0);",
+            ),
+            (
+                "runtime-launch-lifecycle-signal-red",
+                "launch_until(plan, wait_for_shutdown_signal()).await",
+                "launch_until(plan, wait_for_shutdown_signal_bypass()).await",
+            ),
+            (
+                "runtime-launch-lifecycle-drain-red",
+                "report_shutdown_failures(stack.shutdown().await)",
+                "report_shutdown_failures(Vec::new())",
+            ),
+            (
+                "runtime-launch-lifecycle-primary-error-red",
+                "            Err(launch_error)\n        }\n    }\n}\n\nasync fn wait_for_shutdown_signal",
+                "            Err(drain_error)\n        }\n    }\n}\n\nasync fn wait_for_shutdown_signal",
+            ),
+        ];
+
+        let workspace = workspace_root()?;
+        let source = fs::read_to_string(workspace.join(RUNTIMEEXEC_PATH))?;
+        for (name, before, after) in cases {
+            let root = replay_fixture(name)?;
+            let mutated = source.replacen(before, after, 1);
+            assert_ne!(mutated, source, "{name} mutation must change runtimeexec");
+            write(&root.join(RUNTIMEEXEC_PATH), &mutated)?;
+
+            let findings = runtime_launch_kernel_owner_findings(&root)?;
+            assert!(
+                findings.iter().any(|finding| {
+                    finding.subject == RUNTIMEEXEC_PATH
+                        && finding.detail.contains("predicate=runtimeexec_lifecycle")
+                }),
+                "{name} must be rejected by the lifecycle predicate: {findings:?}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_launch_kernel_owner_rejects_semantic_carrier_mutations() -> Result<()> {
+        let cases = [
+            (
+                "runtime-launch-carrier-transaction-red",
+                "pub struct LaunchTransaction<'stack> {\n    stack: &'stack mut ShutdownStack,\n}",
+                "pub struct LaunchTransaction<'stack> {\n    pub stack: &'stack mut ShutdownStack,\n}",
+            ),
+            (
+                "runtime-launch-carrier-activated-red",
+                "pub struct Activated<Inventory> {\n    inventory: Inventory,\n}",
+                "pub struct Activated<Inventory> {\n    pub inventory: Inventory,\n}",
+            ),
+            (
+                "runtime-launch-carrier-provider-batch-red",
+                "pub struct ProviderLifecycleBatch(DomainModuleResult);",
+                "pub struct ProviderLifecycleBatch(pub DomainModuleResult);",
+            ),
+            (
+                "runtime-launch-carrier-role-constructor-red",
+                "Self { provider, domain }",
+                "Self {\n            provider: ProviderLifecycleBatch(domain.0),\n            domain: DomainLifecycleBatch(provider.0),\n        }",
+            ),
+        ];
+
+        let workspace = workspace_root()?;
+        let source = fs::read_to_string(workspace.join(RUNTIMEEXEC_PATH))?;
+        for (name, before, after) in cases {
+            let root = replay_fixture(name)?;
+            let mutated = source.replacen(before, after, 1);
+            assert_ne!(mutated, source, "{name} mutation must change runtimeexec");
+            write(&root.join(RUNTIMEEXEC_PATH), &mutated)?;
+
+            let findings = runtime_launch_kernel_owner_findings(&root)?;
+            assert!(
+                findings.iter().any(|finding| {
+                    finding.subject == RUNTIMEEXEC_PATH
+                        && finding.detail.contains("predicate=runtimeexec_owner_shape")
+                }),
+                "{name} must be rejected by the semantic carrier predicate: {findings:?}"
+            );
+        }
         Ok(())
     }
 
@@ -14594,6 +15222,7 @@ sharedRuntimeDeps = assemblies/runtime/src/module.rs
 domainModuleResult = crates/bootstrap/src/module.rs
 run = assemblies/runtime/src/lib.rs
 launch = assemblies/runtime/src/launch.rs
+runtimeexec = crates/runtimeexec/src/lib.rs
 
 [runtime.dependencies]
 bootstrap = path=../../crates/bootstrap
@@ -14630,7 +15259,7 @@ serde = workspace=true; features=[derive]
         assert!(report.rendered.contains(
             "01 | prepare.config.snapshot | assemblies/runtime/src/lib.rs | RuntimeConfigSnapshot::capture_process_snapshot()"
         ));
-        assert!(report.rendered.contains("| launch.register-plan |"));
+        assert!(report.rendered.contains("| launch.register-lifecycle |"));
         assert!(report.rendered.contains("| launch.listener-prepare |"));
         assert!(report.rendered.contains("| launch.listener-activate |"));
         Ok(())
@@ -14876,7 +15505,7 @@ domains = []
         for path in [
             RUNTIME_EVENT_PATH,
             RUNTIME_PHASE_DOMAINS_PATH,
-            RUNTIME_LAUNCH_PATH,
+            RUNTIMEEXEC_PATH,
         ] {
             write(&root.join(path), &fs::read_to_string(workspace.join(path))?)?;
         }
@@ -14917,15 +15546,15 @@ domains = []
             ),
             (
                 "direct lifecycle bypass",
-                RUNTIME_LAUNCH_PATH,
-                "let domain_result = Self::register_module_output(stack, domain_module);",
-                "let domain_result = Self::register_module_output(stack, domain_module);\n        stack.register_detached(event_guard);",
+                RUNTIMEEXEC_PATH,
+                "let domain_result = register_module_output(stack, domain.0);",
+                "let domain_result = register_module_output(stack, domain.0);\n    stack.register_detached(event_guard);",
             ),
             (
                 "event-specific launch field",
-                RUNTIME_LAUNCH_PATH,
-                "pub(crate) struct LaunchPlanParts {",
-                "pub(crate) struct LaunchPlanParts {\n    event_infra_guards: Vec<Resource>,",
+                RUNTIMEEXEC_PATH,
+                "pub struct LaunchPlan<Adapter, ProbeReceipt, ReadyHook> {",
+                "pub struct LaunchPlan<Adapter, ProbeReceipt, ReadyHook> {\n    event_infra_guards: Vec<Resource>,",
             ),
         ] {
             let target = root.join(path);
@@ -14955,6 +15584,7 @@ domains = []
             RUNTIME_PHASE_FINALIZE_PATH,
             RUNTIME_PHASE_LAUNCH_PATH,
             RUNTIME_LAUNCH_PATH,
+            RUNTIMEEXEC_PATH,
         ] {
             write(&root.join(path), &fs::read_to_string(workspace.join(path))?)?;
         }
@@ -16745,7 +17375,19 @@ async fn main() -> anyhow::Result<()> {
                 .with_context(|| format!("read operator baseline source {path}"))
         })
         .collect::<Result<Vec<_>>>()
-        .map(|sources| sources.join("\n"))
+        .map(|sources| {
+            sources
+                .into_iter()
+                .map(|source| {
+                    source
+                        .lines()
+                        .filter(|line| !line.trim_start().starts_with("#!["))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
     }
 
     #[test]
@@ -17605,145 +18247,6 @@ fn unreachable_bait() { let _ = std::env::var("UNREACHABLE"); }
     }
 
     #[test]
-    fn runtime_baseline_missing_launch_anchor_fails() -> Result<()> {
-        let root = fixture_root("runtime-baseline-missing-launch-anchor")?;
-        write(
-            &root.join(RUNTIME_LAUNCH_PATH),
-            &runtime_launch_fixture(Some("launch.shutdown.workers")),
-        )?;
-        let report = collect_report(&root)?;
-        assert!(
-            report.findings.iter().any(|f| {
-                f.rule == Rule::MissingAnchor && f.detail.contains("launch.shutdown.workers")
-            }),
-            "missing launch register anchor must fail: {:?}",
-            report.findings
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn runtime_baseline_launch_anchor_order_is_checked() -> Result<()> {
-        let root = fixture_root("runtime-baseline-launch-out-of-order")?;
-        write(
-            &root.join(RUNTIME_LAUNCH_PATH),
-            r#"
-impl LaunchPlan { fn register() {
-if let Some(exporter) = trace_exporter
-let pg_result = Self::register_module_output(stack, pg_runtime_module);
-let domain_result = Self::register_module_output(stack, domain_module);
-pg_result?;
-domain_result?;
-}
-fn register_module_output() {
-for worker in workers
-for resource in resources
-}}
-async fn launch_until_observed() {
-let listeners = plan.register(&mut stack)?;
-let bound = BoundListenerSet::prepare(listeners, budget, &addr_resolver).await?;
-bound.activate(&mut stack)?;
-}
-"#,
-        )?;
-        let report = collect_report(&root)?;
-        assert!(
-            report.findings.iter().any(|f| {
-                f.rule == Rule::MissingAnchor && f.detail.contains("launch.shutdown.workers")
-            }),
-            "out-of-order launch anchor must fail: {:?}",
-            report.findings
-        );
-        assert!(
-            report
-                .rendered
-                .contains("launch.shutdown.workers | assemblies/runtime/src/launch.rs | for worker in workers | status=out-of-order"),
-            "out-of-order launch anchor must be rendered explicitly: {}",
-            report.rendered
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn runtime_baseline_ignores_launch_anchor_bait() -> Result<()> {
-        let root = fixture_root("runtime-baseline-launch-bait")?;
-        write(
-            &root.join(RUNTIME_LAUNCH_PATH),
-            &format!(
-                "impl LaunchPlan {{ fn register() {{\n{}\n// {}\nlet _ = {:?};\n}}\n}}\nfn dead_helper() {{ {} }}\nasync fn launch_until_observed() {{\n{}\n}}\n",
-                launch_register_anchor_lines(Some("launch.shutdown.resources")),
-                "for resource in domain_resources",
-                "for resource in domain_resources",
-                "for resource in domain_resources",
-                launch_until_anchor_lines(None)
-            ),
-        )?;
-        let report = collect_report(&root)?;
-        assert!(
-            report.findings.iter().any(|f| {
-                f.rule == Rule::MissingAnchor && f.detail.contains("launch.shutdown.resources")
-            }),
-            "comment/string/dead helper launch bait must fail: {:?}",
-            report.findings
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn runtime_baseline_ignores_same_name_register_bait_before_launch_plan_impl() -> Result<()> {
-        let root = fixture_root("runtime-baseline-launch-register-bait")?;
-        write(
-            &root.join(RUNTIME_LAUNCH_PATH),
-            &format!(
-                "fn register() {{\n{}\n}}\n#[cfg(test)] mod tests {{ fn register() {{\n{}\n}} }}\nimpl LaunchPlan {{ fn register() {{\n{}\n}}\nfn register_module_output() {{\n{}\n}}\n}}\nasync fn launch_until_observed() {{\n{}\n}}\n",
-                launch_register_anchor_lines(None),
-                launch_register_anchor_lines(None),
-                launch_register_anchor_lines(None),
-                launch_module_registration_anchor_lines(Some("launch.shutdown.resources")),
-                launch_until_anchor_lines(None)
-            ),
-        )?;
-        let report = collect_report(&root)?;
-        assert!(
-            report.findings.iter().any(|f| {
-                f.rule == Rule::MissingAnchor && f.detail.contains("launch.shutdown.resources")
-            }),
-            "same-name register bait before LaunchPlan impl must not satisfy launch shutdown anchors: {:?}",
-            report.findings
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn runtime_baseline_requires_plan_register_before_listener_prepare() -> Result<()> {
-        let root = fixture_root("runtime-baseline-launch-plan-before-prepare")?;
-        write(
-            &root.join(RUNTIME_LAUNCH_PATH),
-            &format!(
-                "impl LaunchPlan {{ fn register() {{\n{}\n}}\nfn register_module_output() {{\n{}\n}}\n}}\nasync fn launch_until_observed() {{\nlet bound = BoundListenerSet::prepare(listeners, budget, &addr_resolver).await?;\nlet listeners = plan.register(&mut stack)?;\nbound.activate(&mut stack)?;\n}}\n",
-                launch_register_anchor_lines(None),
-                launch_module_registration_anchor_lines(None)
-            ),
-        )?;
-        let report = collect_report(&root)?;
-        assert!(
-            report.findings.iter().any(|f| {
-                f.rule == Rule::MissingAnchor && f.detail.contains("launch.listener-prepare")
-            }),
-            "listener prepare before plan.register must be out-of-order: {:?}",
-            report.findings
-        );
-        assert!(
-            report
-                .rendered
-                .contains("launch.listener-prepare | assemblies/runtime/src/launch.rs | let bound = BoundListenerSet::prepare(listeners, budget, &addr_resolver).await?; | status=out-of-order"),
-            "out-of-order listener prepare must be rendered explicitly: {}",
-            report.rendered
-        );
-        Ok(())
-    }
-
-    #[test]
     fn runtime_baseline_ignores_anchor_outside_run_body() -> Result<()> {
         let root = fixture_root("runtime-baseline-anchor-outside-run")?;
         let anchor = RUNTIME_ANCHORS
@@ -18210,7 +18713,7 @@ impl DomainModuleResult {
             (
                 "alternate-finalizer",
                 RUNTIME_ROUTES_PATH,
-                "\nfn alternate_finalizer(plan: ListenerExecutionPlan) -> anyhow::Result<FinalizedListenerSet> { let _ = plan; unreachable!() }\n",
+                "\nfn alternate_finalizer(plan: ListenerExecutionPlan) -> anyhow::Result<FinalizedListenerPlan> { let _ = plan; unreachable!() }\n",
             ),
             (
                 "alternate-set-constructor",

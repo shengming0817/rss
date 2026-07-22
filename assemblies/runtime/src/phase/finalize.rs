@@ -47,7 +47,7 @@ impl<'a> DomainsWired<'a> {
                     .as_ref()
                     .map(|provider| provider.provider()),
             );
-            let listeners = finalize_listener_plan(FinalizeListenerPlanInputs {
+            let finalized_listeners = finalize_listener_plan(FinalizeListenerPlanInputs {
                 execution_plan: listener_execution_plan,
                 config: context.config(),
                 registry: &mut registry,
@@ -59,10 +59,10 @@ impl<'a> DomainsWired<'a> {
             })
             .context("finalize RuntimePlan listeners")?;
 
-            Ok(listeners)
+            Ok(finalized_listeners.into_parts())
         })();
         let result = match result {
-            Ok(listeners) => Ok(Finalized {
+            Ok((listeners, probe_receipt)) => Ok(Finalized {
                 context,
                 provider_build,
                 deps,
@@ -72,6 +72,7 @@ impl<'a> DomainsWired<'a> {
                 domain_transport,
                 command_idempotency_keyring,
                 listeners,
+                probe_receipt,
             }),
             Err(error) => Err(provider_build.abort(error).await),
         };

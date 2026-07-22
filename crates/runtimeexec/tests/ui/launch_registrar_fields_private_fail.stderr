@@ -1,0 +1,9 @@
+error[E0451]: fields `stack` and `listener_count` of struct `LaunchRegistrar` are private
+ --> tests/ui/launch_registrar_fields_private_fail.rs:5:9
+  |
+4 |     let _forged = runtimeexec::LaunchRegistrar {
+  |                   ---------------------------- in this type
+5 |         stack: &mut stack,
+  |         ^^^^^ private field
+6 |         listener_count: 0,
+  |         ^^^^^^^^^^^^^^ private field

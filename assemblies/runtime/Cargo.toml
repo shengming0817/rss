@@ -35,6 +35,7 @@ identity-composition = { path = "../../composition/identity" }
 audit-composition = { path = "../../composition/audit" }
 assembly-schema = { path = "../../crates/assembly-schema" }
 bootstrap = { path = "../../crates/bootstrap" }
+runtimeexec = { path = "../../crates/runtimeexec" }
 httpserve = { path = "../../crates/httpserve" }
 authn = { path = "../../crates/authn" }
 # 验签桥建 runctx::AppCtx + runctx::scope 绑定 ambient（tenant/principal），下游（enforce + handler +

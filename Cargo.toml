@@ -25,6 +25,8 @@ members = [
   "crates/httpserve",
   "crates/authn",
   "crates/bootstrap",
+  # provider-independent runtime launch/shutdown kernel shared by assembly roots (#1795).
+  "crates/runtimeexec",
   "crates/eventexec",
   "crates/observ",
   "crates/distributed",

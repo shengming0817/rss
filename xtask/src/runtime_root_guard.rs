@@ -17,6 +17,7 @@ const POLICY_PATH: &str = "xtask/runtime-root-ratchet.toml";
 const ROOT_PATH: &str = "assemblies/runtime/src/lib.rs";
 const PRE_1794_REVISION: &str = "pre-1794";
 const ISSUE_1794_REVISION: &str = "issue-1794";
+const ISSUE_1795_REVISION: &str = "issue-1795";
 const DEFAULT_BASE: &str = "origin/develop";
 pub(crate) const BASE_ENV: &str = "RSS_RUNTIME_ROOT_BASE";
 
@@ -72,6 +73,17 @@ const ISSUE_1794_METRICS: Metrics = Metrics {
     inline_production_modules: 0,
 };
 
+const ISSUE_1795_METRICS: Metrics = Metrics {
+    raw_lines: 260,
+    top_level_functions: 11,
+    top_level_types: 1,
+    top_level_const_static: 2,
+    impl_methods: 3,
+    public_modules: 8,
+    public_reexports: 9,
+    inline_production_modules: 0,
+};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct LandedRevision {
     revision: &'static str,
@@ -93,6 +105,11 @@ const LANDED_HISTORY: &[LandedRevision] = &[
         revision: ISSUE_1794_REVISION,
         previous_revision: Some(PRE_1794_REVISION),
         metrics: ISSUE_1794_METRICS,
+    },
+    LandedRevision {
+        revision: ISSUE_1795_REVISION,
+        previous_revision: Some(ISSUE_1794_REVISION),
+        metrics: ISSUE_1795_METRICS,
     },
 ];
 
@@ -1058,7 +1075,8 @@ mod tests {
         assert_eq!(policy.history.len(), LANDED_HISTORY.len());
         assert_eq!(policy.history[0].metrics(), PRE_1794_METRICS);
         assert_eq!(policy.history[1].metrics(), ISSUE_1794_METRICS);
-        assert_eq!(policy.current_revision, ISSUE_1794_REVISION);
+        assert_eq!(policy.history[2].metrics(), ISSUE_1795_METRICS);
+        assert_eq!(policy.current_revision, ISSUE_1795_REVISION);
         Ok(())
     }
 
@@ -1101,13 +1119,13 @@ mod tests {
 
         let rewritten_checkpoint = replace_history_metric(
             VALID_POLICY,
-            ISSUE_1794_REVISION,
-            "rawLines",
-            ISSUE_1794_METRICS.raw_lines - 1,
+            ISSUE_1795_REVISION,
+            "publicReexports",
+            ISSUE_1795_METRICS.public_reexports - 1,
         )?;
         assert!(
             format!("{:#}", policy_error(&rewritten_checkpoint)?)
-                .contains("landed history revision 2 drift"),
+                .contains("landed history revision 3 drift"),
             "landed issue checkpoint tampering must fail closed"
         );
         Ok(())
@@ -1128,63 +1146,68 @@ mod tests {
         );
         assert!(policy_error(&deleted_first).is_ok());
 
-        let third = format!(
+        let fourth = format!(
             "{}\n{}",
             VALID_POLICY.replace(
-                "currentRevision = \"issue-1794\"",
-                "currentRevision = \"post-1794\""
+                "currentRevision = \"issue-1795\"",
+                "currentRevision = \"post-1795\""
             ),
-            render_history_revision("post-1794", ISSUE_1794_REVISION, ISSUE_1794_METRICS),
+            render_history_revision("post-1795", ISSUE_1795_REVISION, ISSUE_1795_METRICS),
         );
-        const POST_1794: LandedRevision = LandedRevision {
-            revision: "post-1794",
-            previous_revision: Some(ISSUE_1794_REVISION),
-            metrics: ISSUE_1794_METRICS,
+        const POST_1795: LandedRevision = LandedRevision {
+            revision: "post-1795",
+            previous_revision: Some(ISSUE_1795_REVISION),
+            metrics: ISSUE_1795_METRICS,
         };
-        let three_landed = [LANDED_HISTORY[0], LANDED_HISTORY[1], POST_1794];
-        RuntimeRootPolicy::from_toml_str_with_landed_history(&third, &three_landed)?;
+        let four_landed = [
+            LANDED_HISTORY[0],
+            LANDED_HISTORY[1],
+            LANDED_HISTORY[2],
+            POST_1795,
+        ];
+        RuntimeRootPolicy::from_toml_str_with_landed_history(&fourth, &four_landed)?;
 
-        let rolled_back_tail = third
+        let rolled_back_tail = fourth
             .replace(
-                "currentRevision = \"post-1794\"",
-                "currentRevision = \"issue-1794\"",
+                "currentRevision = \"post-1795\"",
+                "currentRevision = \"issue-1795\"",
             )
-            .split_once("[[history]]\nrevision = \"post-1794\"")
-            .context("post-1794 entry")?
+            .split_once("[[history]]\nrevision = \"post-1795\"")
+            .context("post-1795 entry")?
             .0
             .to_owned();
         assert!(
             format!(
                 "{:#}",
-                policy_error_with_landed_history(&rolled_back_tail, &three_landed)?
+                policy_error_with_landed_history(&rolled_back_tail, &four_landed)?
             )
             .contains("history length"),
             "deleting a landed tail and rolling currentRevision back must fail closed"
         );
 
         let rewritten_tail = replace_history_metric(
-            &third,
-            "post-1794",
-            "rawLines",
-            ISSUE_1794_METRICS.raw_lines - 1,
+            &fourth,
+            "post-1795",
+            "publicReexports",
+            ISSUE_1795_METRICS.public_reexports - 1,
         )?;
         assert!(
             format!(
                 "{:#}",
-                policy_error_with_landed_history(&rewritten_tail, &three_landed)?
+                policy_error_with_landed_history(&rewritten_tail, &four_landed)?
             )
-            .contains("landed history revision 3 drift"),
+            .contains("landed history revision 4 drift"),
             "rewriting a future landed tail must fail closed"
         );
-        let middle_start = third
+        let middle_start = fourth
             .find("[[history]]\nrevision = \"issue-1794\"")
             .context("middle entry start")?;
-        let middle_end = third[middle_start + 1..]
-            .find("[[history]]\nrevision = \"post-1794\"")
+        let middle_end = fourth[middle_start + 1..]
+            .find("[[history]]\nrevision = \"issue-1795\"")
             .map(|offset| middle_start + 1 + offset)
             .context("middle entry end")?;
-        let deleted_middle = format!("{}{}", &third[..middle_start], &third[middle_end..]);
-        assert!(policy_error_with_landed_history(&deleted_middle, &three_landed).is_ok());
+        let deleted_middle = format!("{}{}", &fourth[..middle_start], &fourth[middle_end..]);
+        assert!(policy_error_with_landed_history(&deleted_middle, &four_landed).is_ok());
         Ok(())
     }
 
@@ -1195,7 +1218,7 @@ mod tests {
             VALID_POLICY.replacen("revision = \"issue-1794\"", "revision = \"pre-1794\"", 1);
         assert!(format!("{:#}", policy_error(&duplicate)?).contains("duplicate"));
         let stale = VALID_POLICY.replacen(
-            "currentRevision = \"issue-1794\"",
+            "currentRevision = \"issue-1795\"",
             "currentRevision = \"pre-1794\"",
             1,
         );
@@ -1408,12 +1431,26 @@ fn docs() { let _ = "RuntimePlan::compile compose_bindings"; }"#,
             "rawLines",
             grown_metrics.raw_lines,
         )?;
+        let grown = replace_history_metric(
+            &grown,
+            ISSUE_1795_REVISION,
+            "rawLines",
+            grown_metrics.raw_lines,
+        )?;
         let landed = [
             LANDED_HISTORY[0],
             LandedRevision {
                 revision: ISSUE_1794_REVISION,
                 previous_revision: Some(PRE_1794_REVISION),
                 metrics: grown_metrics,
+            },
+            LandedRevision {
+                revision: ISSUE_1795_REVISION,
+                previous_revision: Some(ISSUE_1794_REVISION),
+                metrics: Metrics {
+                    public_reexports: ISSUE_1795_METRICS.public_reexports,
+                    ..grown_metrics
+                },
             },
         ];
         let current = RuntimeRootPolicy::from_toml_str_with_landed_history(&grown, &landed)?;

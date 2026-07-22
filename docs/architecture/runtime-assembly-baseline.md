@@ -1,9 +1,9 @@
 # Runtime Assembly Baseline
 
 This document records the current runtime assembly shape after the `runtime::run()` decomposition,
-#1677 PG lifecycle-ownership hardening, the startup owner funnel, and #1794 full RuntimePlan live
-closure. The machine-readable inventory lives in `runtime-baseline/runtime.txt` and is
-regenerated with:
+#1677 PG lifecycle-ownership hardening, the startup owner funnel, #1794 full RuntimePlan live
+closure, and #1795 provider-independent `runtimeexec` launch ownership. The machine-readable
+inventory lives in `runtime-baseline/runtime.txt` and is regenerated with:
 
 ```bash
 cargo xtask runtime-baseline list > runtime-baseline/runtime.txt
@@ -18,7 +18,9 @@ The complete static inventory is machine-owned by
 `[domainModuleResult.fields]`, and `[runtime.run.orderedAnchors]` sections are the source of truth;
 this document only explains the architectural meaning of those facts.
 
-Dynamic state is not asserted by this gate: environment variables, live provider health, generated event subscriptions, topology-specific routing, socket bind results, and OS signal behavior remain runtime facts.
+Dynamic state is not asserted by this gate: environment variables, live provider health,
+generated event subscriptions, topology-specific routing, socket bind results, and OS signal
+behavior remain runtime facts.
 
 ## Current Typed Phase Inventory
 
@@ -28,21 +30,22 @@ password-policy capability and cannot enter serving. The owner always finishes t
 `run_startup(&mut ServingRuntimeInputs)` result through pending-exporter
 cleanup. `run_startup()` contains no assembly body or compatibility path: it enters
 `phase::execute`, whose exact consuming chain is
-`Planned → ProvidersBuilt → InfraBuilt → DomainsWired → Finalized → RuntimeOutputs`.
+`Planned → ProvidersBuilt → InfraBuilt → DomainsWired → Finalized → runtimeexec::RuntimeOutputs`.
 The private `PhaseContext` retains the same mutable serving input and owned `RuntimePlan` through
 launch. The provider transition projects the sole private `ListenerExecutionPlan`; the mandatory
 carrier then moves through `ProvidersBuilt → InfraBuilt → DomainsWired` and is consumed by the
 single listener finalizer. It also mints the private `DomainExecutionPlan`, which crosses
 `InfraBuilt` and consumes generated domain bindings into a private validated wrapper before the
 canonical composition helper. Exact declaration order and local placement are mandatory; rejected
-bindings remain owned for transactional rollback. Each phase file owns one transition: plan-selected RSS/Federated
-access-token provider preflight, infrastructure construction plus Service Token replay-store
-completion, domain wiring, listener finalization, then launch. The selected profiles retain distinct typed providers,
-resources, and readiness signals throughout that chain. Infrastructure capabilities are complete
+bindings remain owned for transactional rollback. Each phase file owns one transition:
+plan-selected RSS/Federated access-token provider preflight, infrastructure construction plus
+Service Token replay-store completion, domain wiring, listener finalization, then launch. The
+selected profiles retain distinct typed providers, resources, and readiness signals throughout
+that chain. Infrastructure capabilities are complete
 before domain composition begins; module probes enter the registry before listener finalization;
 and only the launch phase may consume `Finalized` and transfer lifecycle ownership to the sole
-`ShutdownStack` owner. The exact production calls and ordering are intentionally not repeated
-here; see `[runtime.run.orderedAnchors]` in the machine baseline.
+`runtimeexec` `ShutdownStack` owner. The exact production calls and ordering are intentionally not
+repeated here; see `[runtime.run.orderedAnchors]` in the machine baseline.
 
 ## Provider Inventory
 
@@ -87,13 +90,15 @@ unproduced or produced-but-undeclared channel before creating `CompletedProvider
 Every fallible phase keeps the transaction owner. Failure performs async LIFO cleanup of already
 constructed resources while preserving the primary startup error; worker closures are never
 started during rollback. Only the completed owner can release the provider `DomainModuleResult` to
-`LaunchPlan`. Launch registers provider output before domain output, so LIFO drains listeners and
-domain workers before provider workers/resources and flushes tracing last.
+the canonical `runtimeexec::LaunchPlan`. The kernel registers provider output before domain
+output, so LIFO drains listeners and domain workers before provider workers/resources and flushes
+tracing last.
 
 ## Listener, Health, And Shutdown Order
 
-`RuntimePlan → ListenerExecutionPlan → FinalizedListenerSet → LaunchPlan` is the only listener
-execution path. The execution projection carries private listener id, kind, auth, and ordered
+`RuntimePlan → ListenerExecutionPlan → FinalizedListenerSet + FinalizedProbeReceipt →
+runtimeexec::LaunchPlan` is the only listener execution path. The execution projection carries
+private listener id, kind, auth, and ordered
 domains. Domain wiring compares the plan, generated bindings, and live registry exactly; the
 finalizer drains live groups, consumes every plan spec in canonical order, derives provider,
 auth bridge, and transport selection from plan auth, and rejects leftovers or drift before address
@@ -101,13 +106,21 @@ resolution or bind. A domain-free Internal spec still produces an empty router a
 
 Health has no separate constructor or append path. Only a plan-declared domain-free
 `Health + NoAuth` spec can produce it, and the finalizer does so after non-Health listener
-finalization and mTLS probe registration. `FinalizedListenerSet` and the launch input have private
-fields, so `phase/launch.rs` can only hand the consumed finalized set to `launch::launch`; a plain
-`Vec<AssembledListener>` cannot enter launch.
+finalization and mTLS probe registration. Taking the finalized health reporter also mints the
+assembly-private, non-Clone `FinalizedProbeReceipt`; both values move together into `Finalized`.
+`phase/launch.rs` must consume that receipt when it constructs the canonical runtimeexec plan; a
+plain `Vec<AssembledListener>` or an unfinalized probe registry cannot enter launch.
 
-`LaunchPlan::register` transfers the completed provider and domain lifecycle batches into
-`ShutdownStack` before propagating
-either batch's validation result, so an earlier invalid batch cannot synchronously drop the later
+The full-runtime `LaunchAdapter` owns address resolution, socket binding, mTLS preparation and the
+private activation-ready listener state. Its `prepare` performs bind-all plus preflight-all before
+the state can exist; its infallible `activate` registers non-Health listeners before Health only
+through `LaunchRegistrar`. The associated private inventory is consumed exactly once by the
+required ready hook. `runtimeexec` contains none of the HTTP, auth, route, provider, DTO, or
+inventory-wire types.
+
+`runtimeexec::LaunchPlan` transfers the completed provider and domain lifecycle batches into its
+private `ShutdownStack` before propagating either batch's validation result, so an earlier invalid
+batch cannot synchronously drop the later
 batch. Registration remains LIFO: externally visible listeners drain before background work and
 provider resources, with tracing flushed last. Exact registration anchors and their order live in
 `[runtime.run.orderedAnchors]`.
@@ -120,7 +133,8 @@ provider resources, with tracing flushed last. Exact registration anchors and th
 - regenerated baseline text differs from the committed file
 - runtime dependencies or assembly providers are empty
 - the exact outer `runtime::run()` owner, sole `run_startup() → phase::execute` entry, typed
-  transition chain, phase-owner anchors, or `launch.rs` anchors are missing or out of order
+  transition chain, phase-owner anchors, runtimeexec handoff, or full-adapter anchors are missing
+  or out of order
   (phase-method anchors expand same-impl private `Self::helper` calls in call order before
   ordering; `launch.rs` keeps its separate multi-lane order keys)
 - the generated 14-factory exact set drifts, the plan/catalog join is not unique, a typed permit is
@@ -133,16 +147,18 @@ provider resources, with tracing flushed last. Exact registration anchors and th
   common helper
 
 - `DomainModuleResult::merge` is absent or stops merging a field
-- listener execution gains a second projection/finalizer, loses its mandatory private carrier,
-  accepts a plain listener vector at launch, restores raw-value/config auth decisions or manual
-  Health construction, or stops enforcing exact plan/generated/live domain evidence
+- listener execution gains a second projection/finalizer, loses its mandatory private carrier or
+  finalized probe receipt, accepts a plain listener vector at launch, restores an assembly-owned
+  executor/raw-value/config auth decision/manual Health construction, or stops enforcing exact
+  plan/generated/live domain evidence
 
 `cargo xtask runtime-root guard` is the independent root-responsibility ratchet. Its closed,
 append-only policy records the pre-#1794 baseline and every accepted revision. #1794 moves raw root
 LOC from 9,428 to 260; its frozen responsibility vector is
 `11 functions / 1 type / 2 const-static / 3 impl methods / 8 public modules / 10 public re-export leaves / 0 inline production modules`.
-Every later revision must be component-wise non-increasing. Policy deletion, truncation, metric
-increases, unknown fields, Rust or TOML parse failures, and comment/string/dead-helper bait fail
-closed.
+#1795 keeps every structural count fixed while removing the old `RuntimeOutputs` re-export, so the
+current public re-export count is 9. Every later revision must be component-wise non-increasing.
+Policy deletion, truncation, metric increases, unknown fields, Rust or TOML parse failures, and
+comment/string/dead-helper bait fail closed.
 
 `cargo xtask verify --fast` and `cargo xtask ci full` run this gate before `archrules`, so `RUNTIME-BASELINE-DRIFT-01` is indexed by `cargo xtask archrules verify`.
