@@ -3,8 +3,8 @@
 use std::time::SystemTime;
 
 use identity::ports::{
-    AuthGrant, AuthGrantCloseReason, AuthGrantStatus, AuthnEpoch, RefreshStatus,
-    RefreshTokenRecord,
+    AuthGrant, AuthGrantStatus, AuthnEpoch, CredentialSecurityEventKind, GrantSecurityEventKind,
+    RefreshStatus, RefreshTokenRecord,
 };
 
 fn positional_hydration_is_not_available(
@@ -22,7 +22,9 @@ fn positional_hydration_is_not_available(
         SystemTime::UNIX_EPOCH,
         SystemTime::UNIX_EPOCH,
         Some(SystemTime::UNIX_EPOCH),
-        Some(AuthGrantCloseReason::LogoutCurrent),
+        Some(CredentialSecurityEventKind::Grant(
+            GrantSecurityEventKind::LogoutCurrent,
+        )),
     );
     let _refresh = RefreshTokenRecord::hydrate(
         "refresh",

@@ -242,10 +242,29 @@ async fn do_rotate_tx(
     let expected_epoch = i64::try_from(new.issuance_epoch().get()).map_err(|_| {
         sqlx::Error::Protocol("refresh issuance epoch exceeds PostgreSQL bigint".to_owned())
     })?;
-    // Lock the consumed edge first. AuthGrant close uses refresh-family -> root lock order too, so
-    // rotation and close cannot invert the two locks. The database clock is intentionally read
-    // inside this final writer transaction: the application-layer expiry check is only an early
-    // rejection and cannot authorize a later commit.
+    // Every authentication writer takes account -> refresh -> grant. The account row is both the
+    // revocation fence and the first canonical lock, so a credential-security event cannot invert
+    // this rotation path while it closes every grant belonging to the same subject.
+    let account = sqlx::query(
+        "SELECT status, authn_epoch FROM account_security_states \
+         WHERE tenant_id = $1::uuid AND user_id = $2::uuid FOR UPDATE",
+    )
+    .bind(tenant_uuid)
+    .bind(new.user_id().as_uuid().to_string())
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some(account) = account else {
+        return Ok(RefreshRotationOutcome::AccountStale);
+    };
+    let status: String = account.try_get("status")?;
+    let current_epoch: i64 = account.try_get("authn_epoch")?;
+    if status != "active" || current_epoch != expected_epoch {
+        return Ok(RefreshRotationOutcome::AccountStale);
+    }
+
+    // The database clock is intentionally read inside this final writer transaction: the
+    // application-layer expiry check is only an early rejection and cannot authorize a later
+    // commit.
     let old = sqlx::query(
         r#"
         SELECT status,
@@ -281,23 +300,6 @@ async fn do_rotate_tx(
     let old_unexpired: bool = old.try_get("unexpired")?;
     if !old_unexpired {
         return Ok(RefreshRotationOutcome::Expired);
-    }
-
-    let account = sqlx::query(
-        "SELECT status, authn_epoch FROM account_security_states \
-         WHERE tenant_id = $1::uuid AND user_id = $2::uuid FOR UPDATE",
-    )
-    .bind(tenant_uuid)
-    .bind(new.user_id().as_uuid().to_string())
-    .fetch_optional(&mut *tx)
-    .await?;
-    let Some(account) = account else {
-        return Ok(RefreshRotationOutcome::AccountStale);
-    };
-    let status: String = account.try_get("status")?;
-    let current_epoch: i64 = account.try_get("authn_epoch")?;
-    if status != "active" || current_epoch != expected_epoch {
-        return Ok(RefreshRotationOutcome::AccountStale);
     }
 
     let grant = sqlx::query(

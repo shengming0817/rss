@@ -14,8 +14,8 @@ use std::time::SystemTime;
 use consistency::EventEntry;
 use diport::{Clock, OutboxEmitError, OutboxEnvelopeParts};
 use identity::ports::{
-    AuthGrant, AuthGrantCloseCommand, AuthGrantCloseReason, AuthGrantId, AuthGrantLifecycle,
-    AuthGrantSnapshot, AuthGrantStatus, AuthnEpoch, IdentityError, LoginGrantMutation,
+    AuthGrant, AuthGrantCloseCommand, AuthGrantId, AuthGrantLifecycle, AuthGrantSnapshot,
+    AuthGrantStatus, AuthnEpoch, CredentialSecurityEventKind, IdentityError, LoginGrantMutation,
     RefreshStatus, RefreshTokenRecord, SESSION_CREATED_CONTRACT, TenantRepoScope,
 };
 use sqlx::Row;
@@ -41,6 +41,8 @@ pub struct PgAuthGrantLifecycle {
     #[cfg(all(test, feature = "integration"))]
     login_fault: Option<(String, AuthGrantLoginFault)>,
     #[cfg(all(test, feature = "integration"))]
+    login_lock_gate: Option<AuthGrantLoginLockGate>,
+    #[cfg(all(test, feature = "integration"))]
     close_faults: Arc<Mutex<AuthGrantCloseFaultState>>,
 }
 
@@ -50,6 +52,33 @@ pub(crate) enum AuthGrantLoginFault {
     AfterGrantWrite,
     AfterRefreshWrite,
     CommitUnknown,
+}
+
+#[cfg(all(test, feature = "integration"))]
+#[derive(Clone, Default)]
+pub(crate) struct AuthGrantLoginLockGate {
+    locked: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+#[cfg(all(test, feature = "integration"))]
+impl AuthGrantLoginLockGate {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    pub(crate) async fn wait_until_locked(&self) {
+        self.locked.notified().await;
+    }
+
+    pub(crate) fn release(&self) {
+        self.release.notify_one();
+    }
+
+    async fn pause_after_lock(&self) {
+        self.locked.notify_one();
+        self.release.notified().await;
+    }
 }
 
 #[cfg(all(test, feature = "integration"))]
@@ -102,6 +131,7 @@ impl PgAuthGrantLifecycle {
             write_pool: PgTenantWritePool::from_unverified_for_test(store),
             clock,
             login_fault: None,
+            login_lock_gate: None,
             close_faults: Arc::new(Mutex::new(AuthGrantCloseFaultState::default())),
         }
     }
@@ -119,6 +149,8 @@ impl PgAuthGrantLifecycle {
             #[cfg(all(test, feature = "integration"))]
             login_fault: None,
             #[cfg(all(test, feature = "integration"))]
+            login_lock_gate: None,
+            #[cfg(all(test, feature = "integration"))]
             close_faults: Arc::new(Mutex::new(AuthGrantCloseFaultState::default())),
         }
     }
@@ -126,6 +158,12 @@ impl PgAuthGrantLifecycle {
     #[cfg(all(test, feature = "integration"))]
     pub(crate) fn with_login_fault(mut self, grant_id: &str, fault: AuthGrantLoginFault) -> Self {
         self.login_fault = Some((grant_id.to_owned(), fault));
+        self
+    }
+
+    #[cfg(all(test, feature = "integration"))]
+    pub(crate) fn with_login_lock_gate(mut self, gate: AuthGrantLoginLockGate) -> Self {
+        self.login_lock_gate = Some(gate);
         self
     }
 
@@ -216,6 +254,8 @@ impl AuthGrantLifecycle for PgAuthGrantLifecycle {
             .as_ref()
             .filter(|(grant_id, _)| grant_id == grant.id().as_str())
             .map(|(_, fault)| *fault);
+        #[cfg(all(test, feature = "integration"))]
+        let login_lock_gate = self.login_lock_gate.clone();
 
         self.write_pool
             .producer_tx(
@@ -224,6 +264,18 @@ impl AuthGrantLifecycle for PgAuthGrantLifecycle {
                 &env,
                 move |tx| {
                     Box::pin(async move {
+                        let account_matches = lock_active_login_account(tx.conn(), &grant)
+                            .await
+                            .map_err(OutboxEmitError::new)?;
+                        if !account_matches {
+                            return Err(OutboxEmitError::new(std::io::Error::other(
+                                "login account is inactive or its authentication epoch is stale",
+                            )));
+                        }
+                        #[cfg(all(test, feature = "integration"))]
+                        if let Some(gate) = login_lock_gate {
+                            gate.pause_after_lock().await;
+                        }
                         write_auth_grant(tx.conn(), &grant)
                             .await
                             .map_err(OutboxEmitError::new)?;
@@ -329,7 +381,7 @@ impl AuthGrantLifecycle for PgAuthGrantLifecycle {
         let close_reason = match close_reason_raw {
             None => None,
             Some(raw) => Some(
-                AuthGrantCloseReason::from_db_str(&raw)
+                CredentialSecurityEventKind::from_db_str(&raw)
                     .ok_or_else(|| corrupt("corrupt auth_grants.close_reason"))?,
             ),
         };
@@ -355,11 +407,11 @@ impl AuthGrantLifecycle for PgAuthGrantLifecycle {
         command: AuthGrantCloseCommand,
     ) -> Result<(), IdentityError> {
         let (mutation, observation) = command.into_parts();
-        let next = mutation.into_next();
+        let (expected, next) = mutation.into_parts();
         if next.tenant() != scope.tenant() || next.status() == AuthGrantStatus::Active {
             return Err(corrupt("auth grant close scope or status mismatch"));
         }
-        let close_row = AuthGrantCloseRow::try_from(&next)?;
+        let close_row = GrantCloseCas::try_from((&expected, &next))?;
         #[cfg(all(test, feature = "integration"))]
         let grant_id = close_row.grant_id.clone();
         #[cfg(all(test, feature = "integration"))]
@@ -390,9 +442,12 @@ impl AuthGrantLifecycle for PgAuthGrantLifecycle {
                                     ) {
                                         return Err(storage(sqlx::Error::PoolTimedOut));
                                     }
-                                    close_auth_grant_tx(tx.conn(), &close_row)
+                                    let applied = apply_grant_close_cas(tx.conn(), &close_row)
                                         .await
                                         .map_err(storage)?;
+                                    if !applied {
+                                        return Err(IdentityError::VersionConflict);
+                                    }
                                     #[cfg(all(test, feature = "integration"))]
                                     if let Some(fault) = fault {
                                         match fault {
@@ -457,6 +512,28 @@ fn validate_login_binding(
         ));
     }
     Ok(())
+}
+
+async fn lock_active_login_account(
+    conn: &mut sqlx::PgConnection,
+    grant: &AuthGrant,
+) -> Result<bool, sqlx::Error> {
+    let expected_epoch = i64::try_from(grant.authn_epoch_at_issue().get())
+        .map_err(|_| sqlx::Error::Protocol("auth grant epoch exceeds bigint".to_owned()))?;
+    let state: Option<(String, i64)> = sqlx::query_as(
+        r#"
+        SELECT status, authn_epoch
+        FROM account_security_states
+        WHERE tenant_id = $1::uuid
+          AND user_id = $2::uuid
+        FOR UPDATE
+        "#,
+    )
+    .bind(grant.tenant().as_uuid().to_string())
+    .bind(grant.user_id().as_uuid().to_string())
+    .fetch_optional(&mut *conn)
+    .await?;
+    Ok(matches!(state, Some((status, epoch)) if status == "active" && epoch == expected_epoch))
 }
 
 async fn write_auth_grant(
@@ -527,33 +604,45 @@ async fn write_initial_refresh(
 }
 
 #[derive(Clone)]
-struct AuthGrantCloseRow {
+pub(crate) struct GrantCloseCas {
     tenant_uuid: String,
     grant_id: String,
     user_id: String,
     epoch: i64,
-    status: &'static str,
+    expected_status: &'static str,
+    expected_closed_at: Option<i64>,
+    expected_reason: Option<&'static str>,
+    next_status: &'static str,
     closed_at: i64,
     reason: &'static str,
 }
 
-impl TryFrom<&AuthGrant> for AuthGrantCloseRow {
+impl TryFrom<(&AuthGrant, &AuthGrant)> for GrantCloseCas {
     type Error = IdentityError;
 
-    fn try_from(grant: &AuthGrant) -> Result<Self, Self::Error> {
+    fn try_from((expected, next): (&AuthGrant, &AuthGrant)) -> Result<Self, Self::Error> {
+        if expected.id() != next.id()
+            || expected.tenant() != next.tenant()
+            || expected.user_id() != next.user_id()
+            || expected.authn_epoch_at_issue() != next.authn_epoch_at_issue()
+        {
+            return Err(corrupt("auth grant close mutation identity mismatch"));
+        }
         Ok(Self {
-            tenant_uuid: grant.tenant().as_uuid().to_string(),
-            grant_id: grant.id().as_str().to_owned(),
-            user_id: grant.user_id().as_uuid().to_string(),
-            epoch: i64::try_from(grant.authn_epoch_at_issue().get())
+            tenant_uuid: next.tenant().as_uuid().to_string(),
+            grant_id: next.id().as_str().to_owned(),
+            user_id: next.user_id().as_uuid().to_string(),
+            epoch: i64::try_from(next.authn_epoch_at_issue().get())
                 .map_err(|_| corrupt("auth grant epoch exceeds PostgreSQL bigint"))?,
-            status: grant.status().as_db_str(),
+            expected_status: expected.status().as_db_str(),
+            expected_closed_at: expected.closed_at().map(unix_secs),
+            expected_reason: expected.close_reason().map(|reason| reason.as_db_str()),
+            next_status: next.status().as_db_str(),
             closed_at: unix_secs(
-                grant
-                    .closed_at()
+                next.closed_at()
                     .ok_or_else(|| corrupt("closed auth grant lacks closed_at"))?,
             ),
-            reason: grant
+            reason: next
                 .close_reason()
                 .ok_or_else(|| corrupt("closed auth grant lacks close_reason"))?
                 .as_db_str(),
@@ -561,10 +650,27 @@ impl TryFrom<&AuthGrant> for AuthGrantCloseRow {
     }
 }
 
-async fn close_auth_grant_tx(
+pub(crate) async fn apply_grant_close_cas(
     conn: &mut sqlx::PgConnection,
-    close: &AuthGrantCloseRow,
-) -> Result<(), sqlx::Error> {
+    close: &GrantCloseCas,
+) -> Result<bool, sqlx::Error> {
+    let account_locked: Option<i32> = sqlx::query_scalar(
+        r#"
+        SELECT 1
+        FROM account_security_states
+        WHERE tenant_id = $1::uuid
+          AND user_id = $2::uuid
+        FOR UPDATE
+        "#,
+    )
+    .bind(&close.tenant_uuid)
+    .bind(&close.user_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    if account_locked.is_none() {
+        return Ok(false);
+    }
+
     let closed: Option<String> = sqlx::query_scalar(
         r#"
         WITH revoked AS (
@@ -574,6 +680,7 @@ async fn close_auth_grant_tx(
               AND auth_grant_id = $2
               AND user_id = $3::uuid
               AND authn_epoch_at_issue = $4
+              AND auth_grant_status = $8
               AND status <> 'revoked'
             RETURNING 1
         )
@@ -585,7 +692,9 @@ async fn close_auth_grant_tx(
           AND grant_id = $2
           AND user_id = $3::uuid
           AND authn_epoch_at_issue = $4
-          AND status = 'active'
+          AND status = $8
+          AND closed_at IS NOT DISTINCT FROM to_timestamp($9)
+          AND close_reason IS NOT DISTINCT FROM $10
           AND (SELECT count(*) FROM revoked) >= 0
         RETURNING grant_id
         "#,
@@ -594,44 +703,19 @@ async fn close_auth_grant_tx(
     .bind(&close.grant_id)
     .bind(&close.user_id)
     .bind(close.epoch)
-    .bind(close.status)
+    .bind(close.next_status)
     .bind(close.closed_at)
     .bind(close.reason)
+    .bind(close.expected_status)
+    .bind(close.expected_closed_at)
+    .bind(close.expected_reason)
     .fetch_optional(&mut *conn)
     .await?;
     if closed.as_deref() == Some(close.grant_id.as_str()) {
-        return Ok(());
+        return Ok(true);
     }
 
-    let already_closed: bool = sqlx::query_scalar(
-        r#"
-        SELECT EXISTS (
-            SELECT 1
-            FROM auth_grants
-            WHERE tenant_id = $1::uuid
-              AND grant_id = $2
-              AND user_id = $3::uuid
-              AND authn_epoch_at_issue = $4
-              AND status = $5
-              AND close_reason = $6
-        )
-        "#,
-    )
-    .bind(&close.tenant_uuid)
-    .bind(&close.grant_id)
-    .bind(&close.user_id)
-    .bind(close.epoch)
-    .bind(close.status)
-    .bind(close.reason)
-    .fetch_one(&mut *conn)
-    .await?;
-    if already_closed {
-        Ok(())
-    } else {
-        Err(sqlx::Error::Protocol(
-            "auth grant close lost active root".to_owned(),
-        ))
-    }
+    Ok(false)
 }
 
 fn storage(error: sqlx::Error) -> IdentityError {

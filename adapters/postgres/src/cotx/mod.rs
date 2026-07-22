@@ -1,10 +1,12 @@
-//! `producer_tx` —— active HTTP producer 的唯一事务骨架：begin → SET LOCAL tenant → 业务写闭包返回
-//! typed outcome → 授权校验 → canonical append → 单 commit；任一步 Err ⇒ rollback + warn。
+//! `producer_tx` —— authorized generated-fact producer 的唯一事务骨架：begin → SET LOCAL tenant →
+//! 业务写闭包返回 typed outcome → 授权校验 → canonical append → 单 commit；任一步 Err ⇒ rollback +
+//! warn。授权来自 HTTP mounted-producer receipt，或 credential-security sealed command 派生的
+//! move-only authorization；调用方均不能选择、覆盖或独立铸造 fact proof。
 //!
 //! 抽取自 session co-tx 范式（`auth_grant_lifecycle.rs`），供 session 创建与配置写
 //! `PgConfigUnitOfWork` 复用。
 //!
-//! 错误泛型 `E`：业务写闭包返回 `Result<ProducerTxOutcome<M, T>, E>`（如 CAS 0 行 → 域
+//! 错误泛型 `E`：业务写闭包返回 `Result<ProducerTxOutcome<A, T>, E>`（如 CAS 0 行 → 域
 //! `VersionConflict`）；骨架自身产生的 sqlx
 //! 错误（begin / SET LOCAL / `append_outbox` / commit）经调用方传入的 `map_storage: Fn(sqlx::Error)->E` 收敛进
 //! 同一 `E`——**不**要求 `E: From<sqlx::Error>`（域错误 `ConfigRepoError` 不依赖 sqlx，无法 impl `From`）。
@@ -137,13 +139,52 @@ struct ProducerTxWrite<'a> {
     env: &'a OutboxEnvelope,
 }
 
-/// Field-closed result of an active HTTP producer business mutation.
+mod producer_fact_authorization_seal {
+    pub(crate) trait Sealed {}
+}
+
+/// Crate-closed authorization for the exact generated fact appended by [`producer_tx`](PgTenantWritePool::producer_tx).
+///
+/// HTTP routes obtain this capability from their mounted producer receipt. Credential-security
+/// obtains its move-only authorization together with the sealed domain command; neither path
+/// accepts a caller-selected fact or exposes an independent mint.
+#[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
+pub(crate) trait ProducerFactAuthorization:
+    producer_fact_authorization_seal::Sealed + Send + 'static
+{
+    fn fact(&self) -> vocab::EventFactBinding;
+}
+
+#[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
+impl<M> producer_fact_authorization_seal::Sealed for ProducerAuthorization<M> {}
+
+#[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
+impl<M: Send + 'static> ProducerFactAuthorization for ProducerAuthorization<M> {
+    fn fact(&self) -> vocab::EventFactBinding {
+        ProducerAuthorization::fact(self)
+    }
+}
+
+#[cfg(feature = "domain-identity")]
+impl producer_fact_authorization_seal::Sealed
+    for identity::ports::CredentialSecurityFactAuthorization
+{
+}
+
+#[cfg(feature = "domain-identity")]
+impl ProducerFactAuthorization for identity::ports::CredentialSecurityFactAuthorization {
+    fn fact(&self) -> vocab::EventFactBinding {
+        identity::ports::SECURITY_EVENT_FACT
+    }
+}
+
+/// Field-closed result of an authorized producer business mutation.
 ///
 /// The emitted branch can only carry an unforgeable authorization derived from the exact mounted
 /// producer marker. `NoMutation` is the only branch that reaches settlement without an append.
 #[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
-pub(crate) enum ProducerTxOutcome<M, T> {
-    Emitted(T, ProducerAuthorization<M>),
+pub(crate) enum ProducerTxOutcome<A, T> {
+    Emitted(T, A),
     NoMutation(T),
 }
 
@@ -203,6 +244,19 @@ impl<'tx> TxCapability<'tx> {
     #[cfg(any(all(test, feature = "integration"), feature = "journey-fault-support"))]
     pub(crate) async fn inject_commit_unknown_after_commit(&mut self) -> Result<(), sqlx::Error> {
         sqlx::query("SELECT set_config('rss.test_commit_unknown_after_commit', '1', true)")
+            .execute(&mut *self.conn)
+            .await
+            .map(|_| ())
+    }
+
+    /// Integration-only seam consumed after the sole producer funnel has successfully appended
+    /// its OutboxFact but before the transaction can commit. The transaction-local marker cannot
+    /// be set by the production feature graph.
+    #[cfg(all(test, feature = "integration"))]
+    pub(crate) async fn inject_failure_after_outbox_append_before_commit(
+        &mut self,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query("SELECT set_config('rss.test_fail_after_outbox_append', '1', true)")
             .execute(&mut *self.conn)
             .await
             .map(|_| ())
@@ -413,7 +467,7 @@ impl<L> PgWritePool<L> {
         T: Send,
     {
         let tenant = scope.tenant();
-        tenant_scoped_write_inner(&self.pool, tenant, write, map_storage, false)
+        tenant_scoped_write_inner(&self.pool, tenant, write, map_storage)
             .await
             .into_result()
     }
@@ -446,29 +500,6 @@ impl<L> PgWritePool<L> {
         .await
     }
 
-    /// Run a tenant-scoped write with a lock wait bound but without replaying the operation.
-    ///
-    /// This is for mutation paths such as an idempotent tombstone append that have no generated
-    /// LocalTx retry contract but still acquire a blocking PostgreSQL advisory lock.
-    #[cfg(feature = "domain-settings")]
-    pub(crate) async fn lock_bounded_write<S, T, F, E>(
-        &self,
-        scope: S,
-        write: F,
-        map_storage: impl Fn(sqlx::Error) -> E + Send,
-    ) -> Result<T, E>
-    where
-        S: TenantScopeHandle,
-        F: for<'c, 'tx> FnOnce(&'c mut TxCapability<'tx>) -> BoxFuture<'c, Result<T, E>> + Send,
-        E: std::error::Error + Send + Sync + 'static,
-        T: Send,
-    {
-        let tenant = scope.tenant();
-        tenant_scoped_write_inner(&self.pool, tenant, write, map_storage, true)
-            .await
-            .into_result()
-    }
-
     /// Run a tenant-scoped write transaction with a per-attempt lock wait bound.
     #[cfg(any(
         feature = "domain-settings",
@@ -492,9 +523,12 @@ impl<L> PgWritePool<L> {
         tenant_scoped_retry_write_inner(&self.pool, tenant, deadline, write, map_storage).await
     }
 
-    /// Run one active producer mutation through the only authorization + append transaction funnel.
+    /// Run one authorized generated-fact mutation through the only transaction funnel.
+    ///
+    /// Authorization is supplied by either an HTTP mounted-producer receipt or a
+    /// credential-security sealed command's move-only proof.
     #[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
-    pub(crate) async fn producer_tx<S, M, T, F, E>(
+    pub(crate) async fn producer_tx<S, A, T, F, E>(
         &self,
         scope: S,
         entry: &EventEntry,
@@ -506,10 +540,10 @@ impl<L> PgWritePool<L> {
         S: TenantScopeHandle,
         F: for<'c, 'tx> FnOnce(
                 &'c mut TxCapability<'tx>,
-            ) -> BoxFuture<'c, Result<ProducerTxOutcome<M, T>, E>>
+            ) -> BoxFuture<'c, Result<ProducerTxOutcome<A, T>, E>>
             + Send,
         E: MapOutboxAppendError + std::error::Error + Send + Sync + 'static,
-        M: Send + 'static,
+        A: ProducerFactAuthorization,
         T: Send + 'static,
     {
         let tenant = scope.tenant();
@@ -518,9 +552,7 @@ impl<L> PgWritePool<L> {
                 &self.pool,
                 self.projection_registry,
                 ProducerTxWrite { tenant, entry, env },
-                LocalTxExecutionPolicy::Plain {
-                    bound_lock_wait: false,
-                },
+                LocalTxExecutionPolicy::Plain,
                 business_write,
                 map_storage,
             )
@@ -528,9 +560,12 @@ impl<L> PgWritePool<L> {
         )
     }
 
-    /// Run one retry attempt through the same active producer transaction funnel.
+    /// Run one retry attempt through the same authorized generated-fact transaction funnel.
+    ///
+    /// Authorization is supplied by an HTTP mounted-producer receipt; credential-security uses
+    /// the non-retrying [`Self::producer_tx`] path with its command-derived move-only proof.
     #[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
-    pub(crate) async fn retry_producer_tx<S, M, T, F, E>(
+    pub(crate) async fn retry_producer_tx<S, A, T, F, E>(
         &self,
         scope: S,
         deadline: LocalTxDeadline,
@@ -543,10 +578,10 @@ impl<L> PgWritePool<L> {
         S: TenantScopeHandle,
         F: for<'c, 'tx> FnOnce(
                 &'c mut TxCapability<'tx>,
-            ) -> BoxFuture<'c, Result<ProducerTxOutcome<M, T>, E>>
+            ) -> BoxFuture<'c, Result<ProducerTxOutcome<A, T>, E>>
             + Send,
         E: MapOutboxAppendError + std::error::Error + Send + Sync + 'static,
-        M: Send + 'static,
+        A: ProducerFactAuthorization,
         T: Send + 'static,
     {
         let tenant = scope.tenant();
@@ -796,12 +831,18 @@ async fn set_local_retry_deadlines(
     .map(|_| ())
 }
 
+async fn set_local_plain_lock_timeout(conn: &mut PgConnection) -> Result<(), sqlx::Error> {
+    sqlx::query("SELECT set_config('lock_timeout', '5s', true)")
+        .execute(conn)
+        .await
+        .map(|_| ())
+}
+
 async fn tenant_scoped_write_inner<T, F, E>(
     pool: &PgPool,
     tenant: TenantId,
     write: F,
     map_storage: impl Fn(sqlx::Error) -> E + Send,
-    bound_lock_wait: bool,
 ) -> LocalTxAttempt<T, E>
 where
     F: for<'c, 'tx> FnOnce(&'c mut TxCapability<'tx>) -> BoxFuture<'c, Result<T, E>> + Send,
@@ -811,7 +852,7 @@ where
     execute_local_tx(
         pool,
         tenant,
-        LocalTxExecutionPolicy::Plain { bound_lock_wait },
+        LocalTxExecutionPolicy::Plain,
         PlainLocalTxOperation(write),
         map_storage,
         "tenant-scoped-write",
@@ -845,7 +886,7 @@ where
 /// 在单事务内：注入 tenant scope（SET LOCAL）→ 业务写闭包 → `append_outbox` → 单 commit。
 ///
 #[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
-async fn producer_tx_inner<M, T, F, E>(
+async fn producer_tx_inner<A, T, F, E>(
     pool: &PgPool,
     projection_registry: ProjectionWriteRegistry,
     write: ProducerTxWrite<'_>,
@@ -856,10 +897,10 @@ async fn producer_tx_inner<M, T, F, E>(
 where
     F: for<'c, 'tx> FnOnce(
             &'c mut TxCapability<'tx>,
-        ) -> BoxFuture<'c, Result<ProducerTxOutcome<M, T>, E>>
+        ) -> BoxFuture<'c, Result<ProducerTxOutcome<A, T>, E>>
         + Send,
     E: MapOutboxAppendError + std::error::Error + Send + Sync + 'static,
-    M: Send + 'static,
+    A: ProducerFactAuthorization,
     T: Send + 'static,
 {
     execute_producer_local_tx(
@@ -875,7 +916,7 @@ where
 
 #[derive(Clone, Copy)]
 enum LocalTxExecutionPolicy {
-    Plain { bound_lock_wait: bool },
+    Plain,
     Deadline(LocalTxDeadline),
 }
 
@@ -885,7 +926,7 @@ impl LocalTxExecutionPolicy {
         pool: &PgPool,
     ) -> LocalTxStageResult<LocalTxConnectionLease, sqlx::Error, LocalTxAcquireDeadline> {
         match self {
-            Self::Plain { .. } => match LocalTxConnectionLease::acquire(pool).await {
+            Self::Plain => match LocalTxConnectionLease::acquire(pool).await {
                 Ok(lease) => LocalTxStageResult::Complete(lease),
                 Err(error) => LocalTxStageResult::Failed(error),
             },
@@ -902,7 +943,7 @@ impl LocalTxExecutionPolicy {
         lease: &'lease mut LocalTxConnectionLease,
     ) -> LocalTxStageResult<LocalTxTransaction<'lease>, sqlx::Error, LocalTxBeginDeadline> {
         match self {
-            Self::Plain { .. } => match lease.begin().await {
+            Self::Plain => match lease.begin().await {
                 Ok(tx) => LocalTxStageResult::Complete(tx),
                 Err(error) => LocalTxStageResult::Failed(error),
             },
@@ -920,26 +961,17 @@ impl LocalTxExecutionPolicy {
             pause_localtx_stage_for_test(LocalTxTestPauseStage::Setup).await;
             set_local_tenant(tx.conn(), tenant).await?;
             match self {
-                Self::Plain {
-                    bound_lock_wait: true,
-                } => {
-                    sqlx::query("SELECT set_config('lock_timeout', '5s', true)")
-                        .execute(tx.conn())
-                        .await?;
-                }
+                Self::Plain => set_local_plain_lock_timeout(tx.conn()).await?,
                 Self::Deadline(deadline) => {
                     // Compute immediately before this single round-trip; the following statement in
                     // `execute_local_tx` is the mutation itself.
                     set_local_retry_deadlines(tx.conn(), deadline).await?;
                 }
-                Self::Plain {
-                    bound_lock_wait: false,
-                } => {}
             }
             Ok(())
         };
         match self {
-            Self::Plain { .. } => match setup.await {
+            Self::Plain => match setup.await {
                 Ok(()) => LocalTxStageResult::Complete(()),
                 Err(error) => LocalTxStageResult::Failed(error),
             },
@@ -956,7 +988,7 @@ impl LocalTxExecutionPolicy {
         E: std::error::Error + 'static,
     {
         match self {
-            Self::Plain { .. } => match future.await {
+            Self::Plain => match future.await {
                 Ok(value) => LocalTxStageResult::Complete(value),
                 Err(error) => LocalTxStageResult::Failed(error),
             },
@@ -969,7 +1001,7 @@ impl LocalTxExecutionPolicy {
         future: impl std::future::Future<Output = Result<(), sqlx::Error>>,
     ) -> LocalTxStageResult<(), sqlx::Error, LocalTxCommitDeadline> {
         match self {
-            Self::Plain { .. } => match future.await {
+            Self::Plain => match future.await {
                 Ok(()) => LocalTxStageResult::Complete(()),
                 Err(error) => LocalTxStageResult::Failed(error),
             },
@@ -982,7 +1014,7 @@ impl LocalTxExecutionPolicy {
         future: impl std::future::Future<Output = Result<(), sqlx::Error>>,
     ) -> LocalTxStageResult<(), sqlx::Error, LocalTxRollbackDeadline> {
         match self {
-            Self::Plain { .. } => match future.await {
+            Self::Plain => match future.await {
                 Ok(()) => LocalTxStageResult::Complete(()),
                 Err(error) => LocalTxStageResult::Failed(error),
             },
@@ -1026,15 +1058,15 @@ struct ProducerLocalTxOperation<'a, F> {
 }
 
 #[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
-impl<'a, M, T, F, E> LocalTxOperation<T, ProducerTxWriteError<E>>
+impl<'a, A, T, F, E> LocalTxOperation<T, ProducerTxWriteError<E>>
     for ProducerLocalTxOperation<'a, F>
 where
     F: for<'c, 'tx> FnOnce(
             &'c mut TxCapability<'tx>,
-        ) -> BoxFuture<'c, Result<ProducerTxOutcome<M, T>, E>>
+        ) -> BoxFuture<'c, Result<ProducerTxOutcome<A, T>, E>>
         + Send,
     E: std::error::Error + Send + Sync + 'static,
-    M: Send + 'static,
+    A: ProducerFactAuthorization,
     T: Send + 'static,
 {
     fn execute<'c, 'tx>(
@@ -1128,7 +1160,7 @@ where
 }
 
 #[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
-async fn execute_producer_local_tx<M, T, F, E>(
+async fn execute_producer_local_tx<A, T, F, E>(
     pool: &PgPool,
     projection_registry: ProjectionWriteRegistry,
     write: ProducerTxWrite<'_>,
@@ -1139,10 +1171,10 @@ async fn execute_producer_local_tx<M, T, F, E>(
 where
     F: for<'c, 'tx> FnOnce(
             &'c mut TxCapability<'tx>,
-        ) -> BoxFuture<'c, Result<ProducerTxOutcome<M, T>, E>>
+        ) -> BoxFuture<'c, Result<ProducerTxOutcome<A, T>, E>>
         + Send,
     E: MapOutboxAppendError + std::error::Error + Send + Sync + 'static,
-    M: Send + 'static,
+    A: ProducerFactAuthorization,
     T: Send + 'static,
 {
     let attempt = execute_local_tx(
@@ -1405,6 +1437,18 @@ async fn test_commit_unknown_after_commit_requested(tx: &mut TxCapability<'_>) -
 }
 
 #[cfg(all(test, feature = "integration"))]
+async fn test_failure_after_outbox_append_requested(tx: &mut TxCapability<'_>) -> bool {
+    sqlx::query_scalar::<_, Option<String>>(
+        "SELECT current_setting('rss.test_fail_after_outbox_append', true)",
+    )
+    .fetch_one(tx.conn())
+    .await
+    .ok()
+    .flatten()
+    .is_some_and(|value| value == "1")
+}
+
+#[cfg(all(test, feature = "integration"))]
 async fn test_rollback_failed_after_rollback_requested(tx: &mut TxCapability<'_>) -> bool {
     sqlx::query_scalar::<_, Option<String>>(
         "SELECT current_setting('rss.test_rollback_failed_after_rollback', true)",
@@ -1482,7 +1526,7 @@ where
 }
 
 #[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
-async fn complete_producer_write<M, T, F, E>(
+async fn complete_producer_write<A, T, F, E>(
     tx: &mut TxCapability<'_>,
     projection_registry: ProjectionWriteRegistry,
     tenant: TenantId,
@@ -1493,9 +1537,10 @@ async fn complete_producer_write<M, T, F, E>(
 where
     F: for<'c, 'tx> FnOnce(
             &'c mut TxCapability<'tx>,
-        ) -> BoxFuture<'c, Result<ProducerTxOutcome<M, T>, E>>
+        ) -> BoxFuture<'c, Result<ProducerTxOutcome<A, T>, E>>
         + Send,
     E: std::error::Error + 'static,
+    A: ProducerFactAuthorization,
 {
     if env.tenant() != tenant {
         return Err(ProducerTxWriteError::TenantMismatch(
@@ -1518,6 +1563,14 @@ where
             let _outcome = append_outbox_with_projection(tx, entry, env, &projection_registry)
                 .await
                 .map_err(ProducerTxWriteError::AppendOutbox)?;
+            #[cfg(all(test, feature = "integration"))]
+            if test_failure_after_outbox_append_requested(tx).await {
+                return Err(ProducerTxWriteError::AppendOutbox(
+                    OutboxAppendError::Storage(sqlx::Error::Protocol(
+                        "injected failure after outbox append before commit".to_owned(),
+                    )),
+                ));
+            }
             Ok(value)
         }
         ProducerTxOutcome::NoMutation(value) => Ok(value),
@@ -1926,7 +1979,9 @@ mod retry_settlement_tests {
     #[cfg(feature = "domain-settings")]
     use tracing::{Event, Id, Metadata, Subscriber, field::Visit};
 
-    use super::{LocalTxAttempt, ProducerTxAttempt};
+    use super::LocalTxAttempt;
+    #[cfg(feature = "domain-settings")]
+    use super::ProducerTxAttempt;
     use crate::tx_retry::run_pg_localtx_retry;
     #[cfg(feature = "domain-settings")]
     use crate::tx_retry::{SETTINGS_CONFIG_BOUNDARY, SETTINGS_SECRET_BOUNDARY, run_pg_tx_retry};

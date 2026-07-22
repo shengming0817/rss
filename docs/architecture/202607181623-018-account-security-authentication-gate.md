@@ -2,7 +2,8 @@
 
 - **状态**：Accepted
 - **日期**：2026-07-18
-- **关联**：issue #1833，AuthN hardening PR-06；由 ADR-019 / #1834 扩展 AuthGrant 根绑定
+- **关联**：issue #1833，AuthN hardening PR-06；由 ADR-019 / #1834 扩展 AuthGrant 根绑定，ADR-020 / #1841
+  冻结统一凭据安全事件协议
 - **对标**：Keycloak `services/src/main/java/org/keycloak/services/managers/DefaultBruteForceProtector.java`
 
 ## 背景
@@ -37,10 +38,15 @@ Deactivated 是终态；同态和图外迁移拒绝。每个成功迁移递增 v
 snapshot；存储 CAS 必须同时匹配 tenant、user、status、epoch 和 version，不能把公开 hydration 得到的
 伪造源状态当作 durable 真源。
 
+ADR-020 的密码变更/重置、全部退出和凭据删除不是“同态 transition”：它们使用独立的 sealed invalidation
+mutation，保持当前 status、递增 epoch/version，并在同一事务撤销全部 grant/family。账户锁定、暂停和停用仍只能
+走上述 transition 图；两类 mutation 都携带完整 expected snapshot，不能借 invalidation 绕过状态机。
+
 `AccountSecurityLifecycle` 当前只保留为 identity 内部的 sealed persistence capability，不在 production
-composition 中构造或挂载，也没有 HTTP、command 或 event 的跨边界 operation。因此本 PR 不为一个不存在的
-管理入口伪造 `contract.toml` consistency 声明。统一安全事件撤销协议落地时，管理 operation、明确的
-consistency level、真实 composition consumer 和权限边界必须在同一变更中加入。
+composition 中构造或挂载，也没有 HTTP、command 或 event 的跨边界 operation。ADR-020 / #1841 只冻结统一的
+内部 command、原子撤销能力和 draft `identity.security-event` fact；draft 不进入 production registry，也没有
+subscriber。生产 operation、权限边界、producer/subscriber 接线、审计消费与运行时 assurance 必须在 #1842 / #1843
+中闭合后才能把契约激活，不能以 draft 冒充已接生产。
 
 持久化 CAS 必须消费 mutation 携带的完整 expected/next snapshots，以 tenant、user、expected status、
 expected epoch 与 expected version 作为更新条件，并原子写入完整 next snapshot；不得由 adapter 根据局部字段
@@ -92,13 +98,14 @@ epoch：旧 binary 先通过正常流程撤销全部 active family，迁移锁�
   `authn_epoch_at_issue`，refresh family 通过 tenant/grant/user/epoch/status 复合外键绑定根。
 - **PR-08（#1840，尚未交付）**：为 RSS access JWT 增加 `sid/jti/auth_time/authn_epoch`，并保留
   verified grant facts。
-- **PR-13**：把密码和账户状态变更接入统一安全事件事务，原子递增 epoch、撤销 grant/family 并写 outbox。
-- **PR-14**：AuthGrant Active fence 与关闭顺序已由 #1834 交付；refresh reuse 自动标记
-  Compromised 的完整事件闭环仍由 #1843 完成。
+- **PR-13（#1841 / ADR-020）**：交付统一的凭据安全事件模型、原子 lifecycle 与 draft outbox fact；不挂载
+  production producer/subscriber。
+- **PR-14（#1842 / #1843）**：挂载生产 operation 与 producer，完成审计消费、runtime dispatch、refresh reuse
+  自动标记 Compromised 及 L2 assurance，再将 draft 激活。
 
 ADR-018 已通过 refresh record epoch 与最终 account writer fence 消除账号状态的 read-to-CAS TOCTOU；
 ADR-019 进一步把 epoch 写入 AuthGrant 并建立 grant final fence。epoch 尚未进入 JWT，也不声称已有全部账户
-安全事件原子撤销或 reuse compromise 事件闭环。
+安全事件生产接线或 reuse compromise 跨边界闭环。
 
 ## AI-HARD 载体
 
@@ -115,5 +122,7 @@ ADR-019 进一步把 epoch 写入 AuthGrant 并建立 grant final fence。epoch 
 | final writer 必须在 refresh CAS 前锁内校验 Active + epoch | 单事务 SQL 锁序 + typed outcome + PostgreSQL 集成测试 | Medium |
 | PostgreSQL 共事务和 credential→security 锁序 | 并发、故障注入、missing-row 反空测试 | Medium |
 | production provider 与 refresh gate 确实接线 | composition anti-vacuity 与真实 PostgreSQL 测试 | Medium |
+| 安全事件 kind 不能与 closed target/可执行 transition 分离 | ADR-020 封闭层级 enum + 私有派生 API | Hard |
+| 账户级安全事件必须原子递增 epoch、撤销 grant/family 并写 outbox | 唯一 producer transaction + PostgreSQL 故障/并发测试 | Medium |
 
 本决策不建立 Soft-only 约束。subject、epoch、password、token 不进入 Debug、错误正文或 metric label。

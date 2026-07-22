@@ -717,6 +717,23 @@ session 行级 DELETE，也不回填、不保留 nullable 绑定、view、trigge
    binary 的启动配置后只启动 0070-compatible 版本。需要 schema 修正时提交新的 forward migration，不修改
    0070，也不从备份恢复 `sessions` 或已失效 refresh。
 
+### 0071 credential-security opaque target mapping
+
+`0071` 新增 `credential_security_target_mappings`，把 wire 中的随机 UUID `target.ref` 映射为
+provider-owned typed raw target：`subject` 只携 `user_id`，`grant` 必须同时携 `user_id + grant_id`。
+闭合 CHECK 禁止两种形态混淆；表以 `target_ref` 为全局主键并启用 `FORCE RLS`，resolver 仍必须同时校验
+请求 tenant 与 expected target kind，跨租户或类型不匹配统一 fail closed。
+
+mapping 是 credential-security mutation 的提交证据之一：runtime 必须在同一 `producer_tx` 内依次持久化
+业务 mutation、mapping 与 outbox fact，任一失败全部回滚；不得异步补写或从 payload 反推 raw target。
+表对 `rss_app` 只授 `SELECT + INSERT`、对 `rss_app_read` 只授 `SELECT`，两者均显式撤销
+`UPDATE + DELETE`，因此已经发布的 opaque reference 不可重绑定。
+
+迁移是纯新增、可先于新 binary 应用；发布后探针须确认 ledger 为 `71`、表的 FORCE RLS/policy 与 closed
+CHECK 存在、`rss_app`/`rss_app_read` 无 UPDATE/DELETE，并用真实 lifecycle 验证 success 时
+mutation/mapping/outbox 三者同在，pre-commit failure 时三者同无。回滚只允许新的 forward migration，
+不得修改 `0071` 或删除已发布 mapping。
+
 ## Append-only 表（REVOKE 强制）
 
 append-only 表（如 `projection_events`）在前向迁移内用 `REVOKE UPDATE, DELETE ON <table> FROM <role>` 强制 DB

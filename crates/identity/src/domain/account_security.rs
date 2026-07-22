@@ -240,6 +240,33 @@ impl AccountSecurityState {
         })
     }
 
+    /// Invalidate every credential-derived session without changing the durable account status.
+    ///
+    /// This is intentionally crate-private: only a sealed account credential-security command may
+    /// create this mutation. Both monotonic counters advance while `status_changed_at` remains the
+    /// time of the last real lifecycle transition.
+    pub(crate) fn invalidate(
+        &self,
+        now: SystemTime,
+    ) -> Result<AccountSecurityMutation, AccountSecurityTransitionError> {
+        if now < self.updated_at {
+            return Err(AccountSecurityTransitionError::TimeRegression);
+        }
+        let next = Self {
+            tenant: self.tenant,
+            user_id: self.user_id,
+            status: self.status,
+            authn_epoch: self.authn_epoch.checked_next()?,
+            version: self.version.checked_next()?,
+            status_changed_at: self.status_changed_at,
+            updated_at: now,
+        };
+        Ok(AccountSecurityMutation {
+            expected: self.clone(),
+            next,
+        })
+    }
+
     pub(crate) fn try_into_active(self) -> Option<ActiveAccountSecurity> {
         if self.status != AccountStatus::Active {
             return None;

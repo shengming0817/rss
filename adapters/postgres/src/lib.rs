@@ -51,6 +51,8 @@ mod dlx_lifecycle;
 mod emitter;
 #[cfg(feature = "fault-matrix-test-support")]
 pub mod fault_matrix;
+#[cfg(feature = "domain-identity")]
+mod identity_security_lifecycle;
 mod inbox;
 mod migrator;
 mod outbox;
@@ -122,6 +124,10 @@ pub use dead_letter_payload::DlxPayloadProtector;
 pub use dlq::PgDlqStore;
 pub use dlx_lifecycle::{PgDlxArchiveClaim, PgDlxLifecycleRepository, PgDlxLifecycleRuntime};
 pub use emitter::PgEmitter;
+#[cfg(feature = "domain-identity")]
+pub use identity_security_lifecycle::{
+    PgCredentialSecurityTargetResolver, PgIdentitySecurityLifecycle,
+};
 pub use outbox::{PgOutbox, PgOutboxMaintenance};
 pub use outbox_cdc::PgOutboxCdcEmitter;
 #[cfg(feature = "domain-identity")]
@@ -281,6 +287,16 @@ mod smoke {
     fn assert_policy_repo<T: identity::ports::PolicyRepo>(_: PhantomData<T>) {}
     fn assert_credential_repo<T: identity::ports::CredentialRepo>(_: PhantomData<T>) {}
     fn assert_auth_grant_lifecycle<T: identity::ports::AuthGrantLifecycle>(_: PhantomData<T>) {}
+    fn assert_identity_security_lifecycle<T: identity::ports::IdentitySecurityLifecycle>(
+        _: PhantomData<T>,
+    ) {
+    }
+    fn assert_credential_security_target_resolver<
+        T: identity::ports::CredentialSecurityTargetResolver,
+    >(
+        _: PhantomData<T>,
+    ) {
+    }
     fn assert_inbox_store<T: consistency::InboxStore>(_: PhantomData<T>) {}
     fn assert_inbox_backlog<T: consistency::InboxBacklog>(_: PhantomData<T>) {}
     fn assert_outbox_backlog<T: consistency::OutboxBacklog>(_: PhantomData<T>) {}
@@ -316,6 +332,10 @@ mod smoke {
         // `PgAuthGrantLifecycle: AuthGrantLifecycle` 完整 durable impl；类型级 anti-vacuity
         // 只检查 trait 满足、不执行 body。
         assert_auth_grant_lifecycle(PhantomData::<super::PgAuthGrantLifecycle>);
+        assert_identity_security_lifecycle(PhantomData::<super::PgIdentitySecurityLifecycle>);
+        assert_credential_security_target_resolver(
+            PhantomData::<super::PgCredentialSecurityTargetResolver>,
+        );
         // `PgInboxStore: InboxStore + InboxBacklog` 类型级 anti-vacuity edge proof（不构造、不执行 body）。
         assert_inbox_store(PhantomData::<super::PgInboxStore>);
         assert_inbox_backlog(PhantomData::<super::PgInboxStore>);

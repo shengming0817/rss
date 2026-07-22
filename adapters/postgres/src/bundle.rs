@@ -92,9 +92,10 @@ use crate::{
 use crate::{PgAuditAdminRepo, PgAuditRepo, PgAuthAuditSink};
 #[cfg(feature = "domain-identity")]
 use crate::{
-    PgAuthGrantLifecycle, PgAuthGrantProvider, PgCredentialRepo, PgPolicyLifecycle, PgPolicyRepo,
-    PgRefreshTokenStore, PgResourceAttributeRepo, PgRoleBindingLifecycle, PgRoleBindingReadRepo,
-    PgRoleRepo,
+    PgAuthGrantLifecycle, PgAuthGrantProvider, PgCredentialRepo,
+    PgCredentialSecurityTargetResolver, PgIdentitySecurityLifecycle, PgPolicyLifecycle,
+    PgPolicyRepo, PgRefreshTokenStore, PgResourceAttributeRepo, PgRoleBindingLifecycle,
+    PgRoleBindingReadRepo, PgRoleRepo,
 };
 
 /// per-domain 能力 marker 的 sealed 封闭——外部 crate 无法新增域 marker（无法 impl `Sealed`）。
@@ -1306,6 +1307,21 @@ impl PgDomainDeps<caps::Identity> {
             self.stores.reader_capability(),
             self.stores.writer_capability(),
         )
+    }
+
+    /// Draft credential-security projection + OutboxFact lifecycle.
+    ///
+    /// This constructor does not wire a production producer; callers must already hold the
+    /// domain's sealed command.
+    #[must_use]
+    pub fn identity_security_lifecycle(&self) -> PgIdentitySecurityLifecycle {
+        PgIdentitySecurityLifecycle::new(self.stores.writer_capability(), self.projection_registry)
+    }
+
+    /// Read-only resolver for the opaque target reference carried by credential-security facts.
+    #[must_use]
+    pub fn credential_security_target_resolver(&self) -> PgCredentialSecurityTargetResolver {
+        PgCredentialSecurityTargetResolver::new(self.stores.reader_capability())
     }
 
     /// 角色仓储（roles 表 + tenant scope）。

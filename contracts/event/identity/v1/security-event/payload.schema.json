@@ -1,0 +1,42 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "IdentitySecurityEventPayload",
+  "type": "object",
+  "required": ["kind", "target", "tenantId", "occurredAt"],
+  "properties": {
+    "kind": {
+      "type": "string",
+      "enum": [
+        "passwordChanged",
+        "passwordReset",
+        "accountLocked",
+        "accountSuspended",
+        "accountDeactivated",
+        "logoutCurrent",
+        "logoutAll",
+        "refreshReuseDetected",
+        "credentialDeleted"
+      ]
+    },
+    "target": {
+      "title": "IdentitySecurityEventPayloadTarget",
+      "type": "object",
+      "required": ["kind", "ref"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["subject", "grant"]
+        },
+        "ref": {
+          "type": "string",
+          "format": "uuid",
+          "x-redaction": "secret"
+        }
+      },
+      "additionalProperties": false
+    },
+    "tenantId": { "type": "string" },
+    "occurredAt": { "type": "integer", "format": "int64" }
+  },
+  "additionalProperties": false
+}

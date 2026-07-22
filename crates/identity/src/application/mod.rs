@@ -110,8 +110,8 @@ use vocab::{
 #[cfg(test)]
 use crate::domain::RefreshTokenSnapshot;
 use crate::domain::{
-    AbacAttribute, AttributeKey, AttributeValue, AuthGrant, AuthGrantCloseReason, AuthGrantId,
-    AuthGrantStatus, AuthOutcome, IdentityError, LoginIdentifier, POLICY_ATTR_CONTRACT_ID,
+    AbacAttribute, AttributeKey, AttributeValue, AuthGrant, AuthGrantId, AuthGrantStatus,
+    AuthOutcome, GrantSecurityEventKind, IdentityError, LoginIdentifier, POLICY_ATTR_CONTRACT_ID,
     POLICY_ATTR_PERMISSION, POLICY_ATTR_PRINCIPAL_ID, POLICY_ATTR_PRINCIPAL_KIND,
     POLICY_ATTR_RESOURCE_ID, POLICY_ATTR_TENANT_ID, Policy, PolicyEvaluation, PolicyId,
     PolicyObligations, PolicyRouteScope, RefreshRotationOutcome, RefreshStatus, RefreshTokenHash,
@@ -564,7 +564,7 @@ impl<S: diport::Signer + Send + Sync + 'static> LoginService<S> {
             return Err(IdentityError::PermissionDenied);
         }
         let transition = grant
-            .close(AuthGrantCloseReason::LogoutCurrent, now)
+            .close(GrantSecurityEventKind::LogoutCurrent, now)
             .map_err(|error| IdentityError::Storage(Box::new(error)))?;
         self.lifecycle
             .close(tenant_scope, AuthGrantCloseCommand::new(transition))

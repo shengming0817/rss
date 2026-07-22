@@ -47,9 +47,15 @@ pub use application::{
 #[cfg(any(test, feature = "seed-login"))]
 pub use application::{SeedSigner, seed_auth_grant_services, seed_refresh_service};
 pub use domain::{
-    AccountSecurityHydrationError, AccountSecurityMutation, AccountSecuritySnapshot,
-    AccountSecurityState, AccountSecurityTransitionError, AccountSecurityVersion, AccountStatus,
-    AuthnEpoch, RefreshRotationOutcome,
+    AccountCredentialSecurityCommand, AccountSecurityEventKind, AccountSecurityHydrationError,
+    AccountSecurityMutation, AccountSecuritySnapshot, AccountSecurityState,
+    AccountSecurityTransitionError, AccountSecurityVersion, AccountStatus, AuthnEpoch,
+    CredentialSecurityCommand, CredentialSecurityEvent, CredentialSecurityEventKind,
+    CredentialSecurityFactAuthorization, CredentialSecurityReceipt,
+    CredentialSecurityTargetHydrationError, CredentialSecurityTargetKind,
+    CredentialSecurityTargetMapping, CredentialSecurityTargetRef, CredentialSecurityTargetRefError,
+    GrantCredentialSecurityCommand, GrantSecurityEventKind, RefreshRotationOutcome,
+    ResolvedCredentialSecurityTarget,
 };
 pub use ports::AuthGrantProvider;
 
@@ -80,8 +86,9 @@ pub mod test_support {
     }
 
     use crate::domain::{
-        AuthGrant, AuthGrantId, AuthnEpoch, LoginIdentifier, RefreshTokenHash, RefreshTokenId,
-        RefreshTokenRecord,
+        AccountSecurityEventKind, AccountSecuritySnapshot, AccountSecurityState, AuthGrant,
+        AuthGrantId, AuthnEpoch, CredentialSecurityCommand, GrantSecurityEventKind,
+        LoginIdentifier, RefreshTokenHash, RefreshTokenId, RefreshTokenRecord,
     };
 
     /// Mount the production logout handler for downstream adapter integration tests.
@@ -114,6 +121,35 @@ pub mod test_support {
             created_at,
         )
         .expect("test auth grant must satisfy state invariants")
+    }
+
+    /// Hydrate a validated account-security state for downstream adapter integration tests.
+    #[allow(clippy::expect_used)]
+    pub fn account_security_state(snapshot: AccountSecuritySnapshot) -> AccountSecurityState {
+        AccountSecurityState::try_from(snapshot)
+            .expect("test account-security snapshot must satisfy state invariants")
+    }
+
+    /// Build an account-wide credential-security command through the sealed domain constructor.
+    #[allow(clippy::expect_used)]
+    pub fn account_credential_security_command(
+        state: AccountSecurityState,
+        kind: AccountSecurityEventKind,
+        occurred_at: SystemTime,
+    ) -> CredentialSecurityCommand {
+        CredentialSecurityCommand::account(state, kind, occurred_at)
+            .expect("test account credential-security command must satisfy state invariants")
+    }
+
+    /// Build a grant-local credential-security command through the sealed domain constructor.
+    #[allow(clippy::expect_used)]
+    pub fn grant_credential_security_command(
+        grant: AuthGrant,
+        kind: GrantSecurityEventKind,
+        occurred_at: SystemTime,
+    ) -> CredentialSecurityCommand {
+        CredentialSecurityCommand::grant(grant, kind, occurred_at)
+            .expect("test grant credential-security command must satisfy state invariants")
     }
 
     /// Construct an initial refresh record derived from the exact test AuthGrant binding.
@@ -258,6 +294,8 @@ mod smoke {
             IdentityError::CredentialNotFound => {}
             IdentityError::VersionConflict => {}
             IdentityError::OutboxFactConflict(_) => {}
+            IdentityError::SecurityFactBuild(_) => {}
+            IdentityError::SecurityPayloadEncode(_) => {}
             IdentityError::Storage(_) => {}
         }
     }

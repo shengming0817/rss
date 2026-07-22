@@ -12,7 +12,7 @@ use std::time::SystemTime;
 use ids::UserId;
 use vocab::TenantId;
 
-use super::AuthnEpoch;
+use super::{AuthnEpoch, CredentialSecurityEventKind, GrantSecurityEventKind};
 
 /// Stable server-side authentication-grant identifier.
 #[derive(Clone, PartialEq, Eq, Hash, secure::Redact)]
@@ -69,59 +69,6 @@ impl AuthGrantStatus {
     }
 }
 
-/// Closed set of reasons that terminate an authentication grant.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AuthGrantCloseReason {
-    LogoutCurrent,
-    LogoutAll,
-    PasswordChanged,
-    PasswordReset,
-    AccountLocked,
-    AccountSuspended,
-    AccountDeactivated,
-    RefreshReuseDetected,
-    CredentialDeleted,
-}
-
-impl AuthGrantCloseReason {
-    pub fn as_db_str(self) -> &'static str {
-        match self {
-            Self::LogoutCurrent => "logout_current",
-            Self::LogoutAll => "logout_all",
-            Self::PasswordChanged => "password_changed",
-            Self::PasswordReset => "password_reset",
-            Self::AccountLocked => "account_locked",
-            Self::AccountSuspended => "account_suspended",
-            Self::AccountDeactivated => "account_deactivated",
-            Self::RefreshReuseDetected => "refresh_reuse_detected",
-            Self::CredentialDeleted => "credential_deleted",
-        }
-    }
-
-    pub fn from_db_str(raw: &str) -> Option<Self> {
-        match raw {
-            "logout_current" => Some(Self::LogoutCurrent),
-            "logout_all" => Some(Self::LogoutAll),
-            "password_changed" => Some(Self::PasswordChanged),
-            "password_reset" => Some(Self::PasswordReset),
-            "account_locked" => Some(Self::AccountLocked),
-            "account_suspended" => Some(Self::AccountSuspended),
-            "account_deactivated" => Some(Self::AccountDeactivated),
-            "refresh_reuse_detected" => Some(Self::RefreshReuseDetected),
-            "credential_deleted" => Some(Self::CredentialDeleted),
-            _ => None,
-        }
-    }
-
-    fn terminal_status(self) -> AuthGrantStatus {
-        if self == Self::RefreshReuseDetected {
-            AuthGrantStatus::Compromised
-        } else {
-            AuthGrantStatus::Revoked
-        }
-    }
-}
-
 /// Invalid persisted or requested authentication-grant state.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum AuthGrantStateError {
@@ -149,7 +96,7 @@ pub struct AuthGrant {
     expires_at: SystemTime,
     created_at: SystemTime,
     closed_at: Option<SystemTime>,
-    close_reason: Option<AuthGrantCloseReason>,
+    close_reason: Option<CredentialSecurityEventKind>,
 }
 
 /// Named persistence boundary for rebuilding an [`AuthGrant`].
@@ -168,7 +115,7 @@ pub struct AuthGrantSnapshot {
     pub expires_at: SystemTime,
     pub created_at: SystemTime,
     pub closed_at: Option<SystemTime>,
-    pub close_reason: Option<AuthGrantCloseReason>,
+    pub close_reason: Option<CredentialSecurityEventKind>,
 }
 
 impl std::fmt::Debug for AuthGrant {
@@ -235,20 +182,18 @@ impl AuthGrant {
             (
                 AuthGrantStatus::Revoked,
                 Some(_),
-                Some(AuthGrantCloseReason::RefreshReuseDetected),
+                Some(CredentialSecurityEventKind::Grant(
+                    super::GrantSecurityEventKind::RefreshReuseDetected,
+                )),
             )
             | (
                 AuthGrantStatus::Compromised,
                 Some(_),
                 Some(
-                    AuthGrantCloseReason::LogoutCurrent
-                    | AuthGrantCloseReason::LogoutAll
-                    | AuthGrantCloseReason::PasswordChanged
-                    | AuthGrantCloseReason::PasswordReset
-                    | AuthGrantCloseReason::AccountLocked
-                    | AuthGrantCloseReason::AccountSuspended
-                    | AuthGrantCloseReason::AccountDeactivated
-                    | AuthGrantCloseReason::CredentialDeleted,
+                    CredentialSecurityEventKind::Grant(
+                        super::GrantSecurityEventKind::LogoutCurrent,
+                    )
+                    | CredentialSecurityEventKind::Account(_),
                 ),
             ) => return Err(AuthGrantStateError::StatusReasonMismatch),
             _ => {}
@@ -270,25 +215,31 @@ impl AuthGrant {
     /// Close an active grant and return the only mutation accepted by the lifecycle port.
     pub fn close(
         self,
-        reason: AuthGrantCloseReason,
+        reason: GrantSecurityEventKind,
         closed_at: SystemTime,
     ) -> Result<AuthGrantCloseMutation, AuthGrantStateError> {
-        if self.status != AuthGrantStatus::Active {
+        let next_status = reason.terminal_status();
+        let reason = CredentialSecurityEventKind::Grant(reason);
+        let may_close = self.status == AuthGrantStatus::Active
+            || (self.status == AuthGrantStatus::Revoked
+                && next_status == AuthGrantStatus::Compromised);
+        if !may_close {
             return Err(AuthGrantStateError::AlreadyClosed);
         }
+        let expected = self.clone();
         let next = Self::hydrate(AuthGrantSnapshot {
             id: self.id,
             tenant: self.tenant,
             user_id: self.user_id,
             auth_time: self.auth_time,
             authn_epoch_at_issue: self.authn_epoch_at_issue,
-            status: reason.terminal_status(),
+            status: next_status,
             expires_at: self.expires_at,
             created_at: self.created_at,
             closed_at: Some(closed_at),
             close_reason: Some(reason),
         })?;
-        Ok(AuthGrantCloseMutation { next })
+        Ok(AuthGrantCloseMutation { expected, next })
     }
 
     pub fn id(&self) -> &AuthGrantId {
@@ -327,34 +278,55 @@ impl AuthGrant {
         self.closed_at
     }
 
-    pub fn close_reason(&self) -> Option<AuthGrantCloseReason> {
+    pub fn close_reason(&self) -> Option<CredentialSecurityEventKind> {
         self.close_reason
+    }
+
+    /// Compare the complete optimistic-concurrency snapshot carried by a sealed mutation.
+    ///
+    /// Providers use this method before applying `next`; centralizing the comparison prevents
+    /// in-memory substitutes from weakening the PostgreSQL CAS predicate when the aggregate grows.
+    pub fn matches_snapshot(&self, current: &Self) -> bool {
+        self.id == current.id
+            && self.tenant == current.tenant
+            && self.user_id == current.user_id
+            && self.auth_time == current.auth_time
+            && self.authn_epoch_at_issue == current.authn_epoch_at_issue
+            && self.status == current.status
+            && self.expires_at == current.expires_at
+            && self.created_at == current.created_at
+            && self.closed_at == current.closed_at
+            && self.close_reason == current.close_reason
     }
 }
 
 /// Sealed terminal transition consumed by an [`AuthGrantLifecycle`](crate::ports::AuthGrantLifecycle).
 #[derive(Debug)]
 pub struct AuthGrantCloseMutation {
+    expected: AuthGrant,
     next: AuthGrant,
 }
 
 impl AuthGrantCloseMutation {
+    pub fn expected(&self) -> &AuthGrant {
+        &self.expected
+    }
+
     pub fn next(&self) -> &AuthGrant {
         &self.next
     }
 
-    pub fn into_next(self) -> AuthGrant {
-        self.next
+    pub fn into_parts(self) -> (AuthGrant, AuthGrant) {
+        (self.expected, self.next)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        AuthGrant, AuthGrantCloseReason, AuthGrantId, AuthGrantSnapshot, AuthGrantStateError,
-        AuthGrantStatus,
+    use super::{AuthGrant, AuthGrantId, AuthGrantSnapshot, AuthGrantStateError, AuthGrantStatus};
+    use crate::domain::{
+        AccountSecurityEventKind, AuthnEpoch, CredentialSecurityEventKind, GrantSecurityEventKind,
     };
-    use crate::domain::AuthnEpoch;
     use std::time::{Duration, SystemTime};
 
     #[allow(clippy::expect_used)]
@@ -380,6 +352,14 @@ mod tests {
             created,
         )
         .expect("valid active grant")
+    }
+
+    fn logout_current() -> CredentialSecurityEventKind {
+        CredentialSecurityEventKind::Grant(GrantSecurityEventKind::LogoutCurrent)
+    }
+
+    fn refresh_reuse() -> CredentialSecurityEventKind {
+        CredentialSecurityEventKind::Grant(GrantSecurityEventKind::RefreshReuseDetected)
     }
 
     #[test]
@@ -419,7 +399,7 @@ mod tests {
                 created + Duration::from_secs(60),
                 AuthGrantStatus::Revoked,
                 Some(created - Duration::from_secs(1)),
-                Some(AuthGrantCloseReason::LogoutCurrent),
+                Some(logout_current()),
             ),
         ];
 
@@ -451,8 +431,8 @@ mod tests {
         let closed = created + Duration::from_secs(1);
         let active_cases = [
             (Some(closed), None),
-            (None, Some(AuthGrantCloseReason::LogoutCurrent)),
-            (Some(closed), Some(AuthGrantCloseReason::LogoutCurrent)),
+            (None, Some(logout_current())),
+            (Some(closed), Some(logout_current())),
         ];
         for (closed_at, close_reason) in active_cases {
             assert_eq!(
@@ -476,18 +456,10 @@ mod tests {
         let terminal_metadata_missing_cases = [
             (AuthGrantStatus::Revoked, None, None),
             (AuthGrantStatus::Revoked, Some(closed), None),
-            (
-                AuthGrantStatus::Revoked,
-                None,
-                Some(AuthGrantCloseReason::LogoutCurrent),
-            ),
+            (AuthGrantStatus::Revoked, None, Some(logout_current())),
             (AuthGrantStatus::Compromised, None, None),
             (AuthGrantStatus::Compromised, Some(closed), None),
-            (
-                AuthGrantStatus::Compromised,
-                None,
-                Some(AuthGrantCloseReason::RefreshReuseDetected),
-            ),
+            (AuthGrantStatus::Compromised, None, Some(refresh_reuse())),
         ];
         for (status, closed_at, close_reason) in terminal_metadata_missing_cases {
             assert_eq!(
@@ -519,21 +491,21 @@ mod tests {
                 expires_at: created + Duration::from_secs(60),
                 created_at: created,
                 closed_at: Some(closed),
-                close_reason: Some(AuthGrantCloseReason::RefreshReuseDetected),
+                close_reason: Some(refresh_reuse()),
             })
             .expect_err("revoked grant cannot use the refresh-reuse reason"),
             AuthGrantStateError::StatusReasonMismatch
         );
 
         for reason in [
-            AuthGrantCloseReason::LogoutCurrent,
-            AuthGrantCloseReason::LogoutAll,
-            AuthGrantCloseReason::PasswordChanged,
-            AuthGrantCloseReason::PasswordReset,
-            AuthGrantCloseReason::AccountLocked,
-            AuthGrantCloseReason::AccountSuspended,
-            AuthGrantCloseReason::AccountDeactivated,
-            AuthGrantCloseReason::CredentialDeleted,
+            logout_current(),
+            CredentialSecurityEventKind::Account(AccountSecurityEventKind::LogoutAll),
+            CredentialSecurityEventKind::Account(AccountSecurityEventKind::PasswordChanged),
+            CredentialSecurityEventKind::Account(AccountSecurityEventKind::PasswordReset),
+            CredentialSecurityEventKind::Account(AccountSecurityEventKind::AccountLocked),
+            CredentialSecurityEventKind::Account(AccountSecurityEventKind::AccountSuspended),
+            CredentialSecurityEventKind::Account(AccountSecurityEventKind::AccountDeactivated),
+            CredentialSecurityEventKind::Account(AccountSecurityEventKind::CredentialDeleted),
         ] {
             assert_eq!(
                 AuthGrant::hydrate(AuthGrantSnapshot {
@@ -560,23 +532,54 @@ mod tests {
     fn close_derives_status_and_seals_second_close() {
         let closed = active()
             .close(
-                AuthGrantCloseReason::RefreshReuseDetected,
+                GrantSecurityEventKind::RefreshReuseDetected,
                 SystemTime::UNIX_EPOCH + Duration::from_secs(11),
             )
             .expect("close")
-            .into_next();
+            .into_parts()
+            .1;
         assert_eq!(closed.status(), AuthGrantStatus::Compromised);
-        assert_eq!(
-            closed.close_reason(),
-            Some(AuthGrantCloseReason::RefreshReuseDetected)
-        );
+        assert_eq!(closed.close_reason(), Some(refresh_reuse()));
         assert_eq!(
             closed
                 .close(
-                    AuthGrantCloseReason::LogoutCurrent,
+                    GrantSecurityEventKind::LogoutCurrent,
                     SystemTime::UNIX_EPOCH + Duration::from_secs(12),
                 )
                 .expect_err("closed grant cannot close twice"),
+            AuthGrantStateError::AlreadyClosed
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn refresh_reuse_promotes_revoked_but_never_downgrades_compromised() {
+        let revoked = active()
+            .close(
+                GrantSecurityEventKind::LogoutCurrent,
+                SystemTime::UNIX_EPOCH + Duration::from_secs(11),
+            )
+            .expect("revoke")
+            .into_parts()
+            .1;
+        let compromised = revoked
+            .close(
+                GrantSecurityEventKind::RefreshReuseDetected,
+                SystemTime::UNIX_EPOCH + Duration::from_secs(12),
+            )
+            .expect("reuse promotes revoked")
+            .into_parts()
+            .1;
+
+        assert_eq!(compromised.status(), AuthGrantStatus::Compromised);
+        assert_eq!(compromised.close_reason(), Some(refresh_reuse()));
+        assert_eq!(
+            compromised
+                .close(
+                    GrantSecurityEventKind::LogoutCurrent,
+                    SystemTime::UNIX_EPOCH + Duration::from_secs(13),
+                )
+                .expect_err("compromised state cannot be downgraded"),
             AuthGrantStateError::AlreadyClosed
         );
     }

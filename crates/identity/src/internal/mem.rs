@@ -493,7 +493,7 @@ impl AuthGrantLifecycle for InMemAuthGrantStore {
         command: AuthGrantCloseCommand,
     ) -> Result<(), IdentityError> {
         let (mutation, _observation) = command.into_parts();
-        let next = mutation.into_next();
+        let (expected, next) = mutation.into_parts();
         let mut state = recover(&self.inner);
         let Some(current) = state.grants.get(next.id()) else {
             return Ok(());
@@ -501,22 +501,16 @@ impl AuthGrantLifecycle for InMemAuthGrantStore {
         if current.tenant() != scope.tenant() {
             return Ok(());
         }
-        let binding_mismatch = next.tenant() != current.tenant()
-            || next.user_id() != current.user_id()
-            || next.authn_epoch_at_issue() != current.authn_epoch_at_issue()
-            || next.auth_time() != current.auth_time()
-            || next.created_at() != current.created_at()
-            || next.expires_at() != current.expires_at();
-        if current.status() != AuthGrantStatus::Active {
-            return if !binding_mismatch
-                && current.status() == next.status()
-                && current.close_reason() == next.close_reason()
-            {
-                Ok(())
-            } else {
-                Err(storage_error("authentication grant close binding mismatch"))
-            };
+        if !expected.matches_snapshot(current) {
+            return Err(IdentityError::VersionConflict);
         }
+        let binding_mismatch = expected.id() != next.id()
+            || expected.tenant() != next.tenant()
+            || expected.user_id() != next.user_id()
+            || expected.authn_epoch_at_issue() != next.authn_epoch_at_issue()
+            || expected.auth_time() != next.auth_time()
+            || expected.created_at() != next.created_at()
+            || expected.expires_at() != next.expires_at();
         if binding_mismatch || next.status() == AuthGrantStatus::Active {
             return Err(storage_error("authentication grant close binding mismatch"));
         }
@@ -1393,11 +1387,12 @@ mod tests {
         InMemResourceAttributeRepo, InMemRoleBindingLifecycle, TenantId, recover,
     };
     use crate::domain::{
-        AccountSecurityState, AccountStatus, AttributeValue, AuthGrant, AuthGrantCloseReason,
-        AuthGrantId, AuthGrantStatus, AuthOutcome, IdentityError, LoginIdentifier, Policy,
-        PolicyId, PolicyRouteScope, PolicyVersion, RefreshStatus, RefreshTokenHash, RefreshTokenId,
-        RefreshTokenRecord, ResourceAttribute, ResourceAttributeKey, ResourceAttributeResolution,
-        ResourceAttributeResourceId, ResourceAttributeVersion, RoleBinding, RoleId,
+        AccountSecurityState, AccountStatus, AttributeValue, AuthGrant, AuthGrantId,
+        AuthGrantStatus, AuthOutcome, GrantSecurityEventKind, IdentityError, LoginIdentifier,
+        Policy, PolicyId, PolicyRouteScope, PolicyVersion, RefreshStatus, RefreshTokenHash,
+        RefreshTokenId, RefreshTokenRecord, ResourceAttribute, ResourceAttributeKey,
+        ResourceAttributeResolution, ResourceAttributeResourceId, ResourceAttributeVersion,
+        RoleBinding, RoleId,
     };
     use crate::ports::{
         AccountSecurityLifecycle, AccountSecurityReadRepo, AuthGrantCloseCommand,
@@ -2589,7 +2584,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lifecycle_close_revokes_family_and_hides_grant() {
+    async fn lifecycle_close_uses_full_expected_snapshot_and_promotes_compromise() {
         let repo = InMemAuthGrantStore::new();
         let ta = tid(TENANT_A);
         let grant = make_grant("grant-002", ta);
@@ -2606,20 +2601,29 @@ mod tests {
             .expect("persist ok");
         let transition = grant
             .clone()
-            .close(AuthGrantCloseReason::LogoutCurrent, epoch(2_000))
+            .close(GrantSecurityEventKind::LogoutCurrent, epoch(2_000))
             .expect("close transition");
+        let revoked = transition.next().clone();
         let concurrent_stale_transition = grant
-            .close(AuthGrantCloseReason::LogoutCurrent, epoch(2_001))
+            .close(GrantSecurityEventKind::LogoutCurrent, epoch(2_001))
             .expect("stale close transition");
         repo.close(scope(ta), AuthGrantCloseCommand::for_test(transition))
             .await
             .expect("close ok");
-        repo.close(
-            scope(ta),
-            AuthGrantCloseCommand::for_test(concurrent_stale_transition),
-        )
-        .await
-        .expect("same terminal close must be idempotent");
+        let stale = repo
+            .close(
+                scope(ta),
+                AuthGrantCloseCommand::for_test(concurrent_stale_transition),
+            )
+            .await;
+        assert!(matches!(stale, Err(IdentityError::VersionConflict)));
+
+        let promotion = revoked
+            .close(GrantSecurityEventKind::RefreshReuseDetected, epoch(2_002))
+            .expect("revoked grant may be promoted after refresh reuse");
+        repo.close(scope(ta), AuthGrantCloseCommand::for_test(promotion))
+            .await
+            .expect("current revoked snapshot must promote to compromised");
         let found = repo
             .find_active(
                 scope(ta),
@@ -2635,7 +2639,7 @@ mod tests {
             .expect("refresh find")
             .expect("refresh retained for replay detection");
         assert_eq!(refresh.status(), RefreshStatus::Revoked);
-        assert_eq!(refresh.auth_grant_status(), AuthGrantStatus::Revoked);
+        assert_eq!(refresh.auth_grant_status(), AuthGrantStatus::Compromised);
     }
 
     #[tokio::test]

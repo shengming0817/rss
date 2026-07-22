@@ -36,14 +36,23 @@ mod auth_grant;
 mod rbac;
 mod refresh;
 mod resource_attr;
+mod security_event;
 
 // 子模块类型经本枢纽 re-export，保持 `crate::domain::*` 路径（lib.rs `smoke` / `ports.rs` 消费方不破）。
 // Role / RoleBinding 是 pub（ports::{RoleReadRepo, RoleBindingLifecycle} 签名实体，跨 crate 命名）。
 pub use auth_grant::{
-    AuthGrant, AuthGrantCloseMutation, AuthGrantCloseReason, AuthGrantId, AuthGrantSnapshot,
-    AuthGrantStateError, AuthGrantStatus,
+    AuthGrant, AuthGrantCloseMutation, AuthGrantId, AuthGrantSnapshot, AuthGrantStateError,
+    AuthGrantStatus,
 };
 pub use rbac::{Role, RoleBinding};
+pub use security_event::{
+    AccountCredentialSecurityCommand, AccountSecurityEventKind, CredentialSecurityCommand,
+    CredentialSecurityEvent, CredentialSecurityEventKind, CredentialSecurityFactAuthorization,
+    CredentialSecurityReceipt, CredentialSecurityTargetHydrationError,
+    CredentialSecurityTargetKind, CredentialSecurityTargetMapping, CredentialSecurityTargetRef,
+    CredentialSecurityTargetRefError, GrantCredentialSecurityCommand, GrantSecurityEventKind,
+    PendingCredentialSecurityCommit, ResolvedCredentialSecurityTarget,
+};
 // RefreshTokenRecord / RefreshTokenId / RefreshTokenHash / RefreshStatus 是 pub（ports::RefreshTokenStore
 // 签名实体，跨 crate 命名）；kind_to_db / kind_from_db 是 PrincipalKind↔text 单源映射（postgres adapter 消费）。
 // 字段私有 + 构造经 pub(crate) funnel / pub hydrate，外部不可伪造（ADR-005 Option 2）。
@@ -393,6 +402,8 @@ impl PolicyId {
 /// - `PermissionDenied`：handler / 服务层把 `Decision::Deny` 落为域错误时使用（生产接线待 W 阶段 PR5）。
 /// - `CredentialNotFound`：`CredentialRepo` 查无凭据（PR3）。
 /// - `VersionConflict`：`CredentialRepo::apply_password_change` CAS 期望版本不匹配（并发密码变更，PR3）。
+/// - `SecurityFactBuild`：事务开始前构造 generated fact identity/envelope 失败。
+/// - `SecurityPayloadEncode`：事务开始前编码 generated security-event payload 失败。
 /// - `Storage`：持久化层错误（`RoleReadRepo` postgres adapter 边界把 sqlx 等存储错误收口于此；#1250）。
 ///   原始错误进 `#[source]`，不进 Display / wire——message 是 `&'static str` const literal，
 ///   runtime 细节仅进服务端日志（error-handling.md §Message 与 PII）。
@@ -420,6 +431,12 @@ pub enum IdentityError {
     /// 同一 event id 已持久化为不同稳定事实；与仓储 CAS 冲突分轨。
     #[error("identity outbox fact conflict")]
     OutboxFactConflict(#[source] consistency::OutboxFactConflict),
+    /// Generated security-fact identity/envelope construction failed before persistence starts.
+    #[error("identity security fact build failed")]
+    SecurityFactBuild(#[source] Box<dyn std::error::Error + Send + Sync>),
+    /// Generated security-event payload encoding failed before persistence starts.
+    #[error("identity security payload encode failed")]
+    SecurityPayloadEncode(#[source] serde_json::Error),
     /// 底层存储错误（持久化失败；原始错误进 `#[source]`，不进 Display / wire）。
     #[error("identity storage error")]
     Storage(#[source] Box<dyn std::error::Error + Send + Sync>),

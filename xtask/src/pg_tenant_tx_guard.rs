@@ -28,7 +28,9 @@
 //! INVARIANT: PG-LOCALTX-QUARANTINE-FUNNEL-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::localtx_quarantine_guard_rejects_bypass_and_escape_classes", anti_vacuity = "tests::localtx_quarantine_guard_real_workspace_closes_exact_sites" } —
 //! all four LocalTx entries must flow through one typed execution core that acquires and begins
 //! through the private armed lease, then tail-settles the exact branded transaction once. The core
-//! carries one runner-minted deadline policy through every bounded stage. The wrapper borrow-binds that transaction
+//! carries one runner-minted deadline policy through every bounded stage; every non-retrying plain
+//! transaction installs the same five-second PostgreSQL lock timeout without a caller-selectable
+//! bypass. The wrapper borrow-binds that transaction
 //! to its lease's closed quarantine stage; only a top-level consuming commit/rollback ACK may clear
 //! it. The lease, wrapper, settlement dataflow, observability, and `close_on_drop` fallback are
 //! closed against conditional, helper, raw, macro, and disarm escapes.
@@ -91,9 +93,9 @@ pub(crate) enum Rule {
     DlxLifecycleBypass,
     /// Exact DLX lifecycle repository/function sites are missing (anti-vacuity).
     DlxLifecycleSitesAbsent,
-    /// An active HTTP producer bypassed the single typed producer transaction funnel.
+    /// An authorized generated-fact producer bypassed the single typed transaction funnel.
     ProducerFunnelBypass,
-    /// The single producer transaction funnel or one of its exact provider call sites disappeared.
+    /// An exact authorized generated-fact provider call site disappeared.
     ProducerFunnelSitesAbsent,
     /// The feature-gated fault harness attempted to author a production terminal state directly.
     FaultMatrixTerminalBypass,
@@ -206,6 +208,14 @@ fn load_fault_matrix_governance_findings(
 fn producer_funnel_findings(files: &[(String, String)]) -> Vec<Finding> {
     use syn::visit::Visit as _;
 
+    const EXPECTED_PRODUCER_CALLS: &[(&str, &str, usize)] = &[
+        ("auth_grant_lifecycle.rs", "producer_tx", 1),
+        ("identity_security_lifecycle.rs", "producer_tx", 1),
+        ("policy_repo.rs", "producer_tx", 3),
+        ("role_binding_lifecycle.rs", "producer_tx", 2),
+        ("config_repo.rs", "retry_producer_tx", 1),
+    ];
+
     #[derive(Default)]
     struct CallScan {
         producer_tx: usize,
@@ -214,6 +224,12 @@ fn producer_funnel_findings(files: &[(String, String)]) -> Vec<Finding> {
     }
 
     impl<'ast> syn::visit::Visit<'ast> for CallScan {
+        fn visit_item_mod(&mut self, node: &'ast syn::ItemMod) {
+            if !attributes_are_test_only(&node.attrs) {
+                syn::visit::visit_item_mod(self, node);
+            }
+        }
+
         fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
             if !attributes_are_test_only(&node.attrs) {
                 syn::visit::visit_item_fn(self, node);
@@ -273,143 +289,68 @@ fn producer_funnel_findings(files: &[(String, String)]) -> Vec<Finding> {
     }
 
     let mut findings = Vec::new();
-    let by_path = files
+    let expected = EXPECTED_PRODUCER_CALLS
         .iter()
-        .map(|(path, source)| (path.as_str(), source.as_str()))
+        .map(|(path, method, count)| ((*path, *method), *count))
         .collect::<BTreeMap<_, _>>();
-    let Some(cotx) = by_path.get("cotx/mod.rs").copied() else {
-        findings.push(finding(
-            Rule::ProducerFunnelSitesAbsent,
-            "cotx/mod.rs",
-            "producer transaction owner is missing",
-        ));
-        return findings;
-    };
-    let cotx = strip_rust_comment_lines(&strip_cfg_test_modules(cotx));
-    let parsed_cotx = syn::parse_file(&cotx).ok();
-    if parsed_cotx.as_ref().is_none_or(|file| {
-        let outcomes = file
-            .items
-            .iter()
-            .filter_map(|item| match item {
-                syn::Item::Enum(item) if item.ident == "ProducerTxOutcome" => Some(item),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        outcomes.len() != 1 || !canonical_producer_tx_outcome(outcomes[0])
-    }) {
-        findings.push(finding(
-            Rule::ProducerFunnelSitesAbsent,
-            "cotx/mod.rs",
-            "ProducerTxOutcome must be crate-private with exact Emitted(T, ProducerAuthorization<M>) / NoMutation(T) variants",
-        ));
-    }
-    for required in ["fn producer_tx", "fn retry_producer_tx"] {
-        if !cotx.contains(required) {
-            findings.push(finding(
-                Rule::ProducerFunnelSitesAbsent,
-                "cotx/mod.rs",
-                format!("single producer transaction funnel is missing `{required}`"),
-            ));
-        }
-    }
-    for removed in ["co_tx_with_outbox", "retry_co_tx_with_outbox"] {
-        if cotx.contains(removed) {
-            findings.push(finding(
-                Rule::ProducerFunnelBypass,
-                "cotx/mod.rs",
-                format!("removed producer compatibility API `{removed}` still exists"),
-            ));
-        }
-    }
-
-    for (path, producer_tx, retry_producer_tx) in [
-        ("auth_grant_lifecycle.rs", 1, 0),
-        ("policy_repo.rs", 3, 0),
-        ("role_binding_lifecycle.rs", 2, 0),
-        ("config_repo.rs", 0, 1),
-    ] {
-        let Some(source) = by_path.get(path).copied() else {
-            findings.push(finding(
-                Rule::ProducerFunnelSitesAbsent,
-                path,
-                "active producer provider is missing",
-            ));
-            continue;
-        };
-        let source = strip_cfg_test_modules(source);
-        let Ok(parsed) = syn::parse_file(&source) else {
+    let mut observed = BTreeMap::<(&str, &str), usize>::new();
+    for (path, source) in files {
+        let Ok(parsed) = syn::parse_file(source) else {
             findings.push(finding(
                 Rule::ProducerFunnelBypass,
                 path,
-                "active producer provider cannot be parsed fail-closed",
+                "production provider cannot be parsed while closing producer callsites fail-closed",
             ));
             continue;
         };
         let mut scan = CallScan::default();
         scan.visit_file(&parsed);
-        if scan.producer_tx != producer_tx || scan.retry_producer_tx != retry_producer_tx {
+        for (method, count) in [
+            ("producer_tx", scan.producer_tx),
+            ("retry_producer_tx", scan.retry_producer_tx),
+        ] {
+            if count != 0 {
+                observed.insert((path.as_str(), method), count);
+            }
+        }
+        if EXPECTED_PRODUCER_CALLS
+            .iter()
+            .any(|(expected_path, _, _)| expected_path == path)
+        {
+            for forbidden in scan.forbidden {
+                findings.push(finding(
+                    Rule::ProducerFunnelBypass,
+                    path,
+                    format!(
+                        "authorized generated-fact producer provider calls forbidden `{forbidden}` path"
+                    ),
+                ));
+            }
+        }
+    }
+
+    for ((path, method), expected_count) in &expected {
+        let observed_count = observed.get(&(*path, *method)).copied().unwrap_or_default();
+        if observed_count != *expected_count {
             findings.push(finding(
                 Rule::ProducerFunnelSitesAbsent,
-                path,
+                *path,
                 format!(
-                    "expected exact producer funnel calls producer_tx={producer_tx}, retry_producer_tx={retry_producer_tx}; found producer_tx={}, retry_producer_tx={}",
-                    scan.producer_tx, scan.retry_producer_tx
+                    "expected exact producer funnel call ({path}, {method}, {expected_count}); found count={observed_count}",
                 ),
             ));
         }
-        for forbidden in scan.forbidden {
+    }
+    for ((path, method), count) in &observed {
+        if !expected.contains_key(&(*path, *method)) {
             findings.push(finding(
                 Rule::ProducerFunnelBypass,
-                path,
-                format!("active producer provider calls forbidden `{forbidden}` path"),
+                *path,
+                format!("unexpected production producer funnel call ({path}, {method}, {count})"),
             ));
         }
     }
     findings
-}
-
-fn canonical_producer_tx_outcome(item: &syn::ItemEnum) -> bool {
-    let visibility = matches!(
-        &item.vis,
-        syn::Visibility::Restricted(restricted)
-            if restricted.path.is_ident("crate")
-    );
-    let generics = item
-        .generics
-        .params
-        .iter()
-        .map(compact_tokens)
-        .collect::<Vec<_>>();
-    if !visibility || generics != ["M", "T"] || item.variants.len() != 2 {
-        return false;
-    }
-    let emitted = &item.variants[0];
-    let no_mutation = &item.variants[1];
-    let syn::Fields::Unnamed(emitted_fields) = &emitted.fields else {
-        return false;
-    };
-    let syn::Fields::Unnamed(no_mutation_fields) = &no_mutation.fields else {
-        return false;
-    };
-    emitted.ident == "Emitted"
-        && emitted.discriminant.is_none()
-        && emitted_fields.unnamed.len() == 2
-        && emitted_fields
-            .unnamed
-            .first()
-            .is_some_and(|field| compact_tokens(&field.ty) == "T")
-        && emitted_fields
-            .unnamed
-            .get(1)
-            .is_some_and(|field| compact_tokens(&field.ty) == "ProducerAuthorization<M>")
-        && no_mutation.ident == "NoMutation"
-        && no_mutation.discriminant.is_none()
-        && no_mutation_fields.unnamed.len() == 1
-        && no_mutation_fields
-            .unnamed
-            .first()
-            .is_some_and(|field| compact_tokens(&field.ty) == "T")
 }
 
 fn dlx_lifecycle_funnel_findings(source: &str) -> Vec<Finding> {
@@ -870,7 +811,7 @@ fn localtx_transaction_core_findings(path: &str, syntax: &syn::File) -> Vec<Find
         findings.push(finding(
             Rule::LocalTxQuarantineBypass,
             format!("{path}::LocalTxExecutionPolicy"),
-            "LocalTxExecutionPolicy must privately carry the single deadline token through closed acquire/begin/setup/operation/commit/rollback stage arms and dynamic setup GUC",
+            "LocalTxExecutionPolicy must use one fixed lock-bounded Plain variant or privately carry the single deadline token through closed acquire/begin/setup/operation/commit/rollback stage arms and setup GUCs",
         ));
     }
     if !localtx_ingress_graph_is_closed(syntax) {
@@ -966,24 +907,12 @@ fn localtx_execution_policy_is_closed(syntax: &syn::File) -> bool {
     }) && methods
         .iter()
         .find(|method| method.sig.ident == "setup")
-        .is_some_and(|method| canonical_dynamic_deadline_setup(method))
+        .is_some_and(|method| canonical_policy_timeout_setup(method))
+        && canonical_plain_lock_timeout_helper(syntax)
 }
 
 fn canonical_plain_policy_variant(variant: &syn::Variant) -> bool {
-    if variant.ident != "Plain" {
-        return false;
-    }
-    let syn::Fields::Named(fields) = &variant.fields else {
-        return false;
-    };
-    fields.named.len() == 1
-        && fields.named.first().is_some_and(|field| {
-            field
-                .ident
-                .as_ref()
-                .is_some_and(|ident| ident == "bound_lock_wait")
-                && type_last_ident(&field.ty).as_deref() == Some("bool")
-        })
+    variant.ident == "Plain" && matches!(variant.fields, syn::Fields::Unit)
 }
 
 fn canonical_deadline_policy_variant(variant: &syn::Variant) -> bool {
@@ -1048,24 +977,77 @@ fn expression_shadows_or_assigns(expression: &syn::Expr, binding: &str) -> bool 
     statements_shadow_or_assign(std::slice::from_ref(&statement), binding)
 }
 
-fn canonical_dynamic_deadline_setup(method: &syn::ImplItemFn) -> bool {
+fn canonical_policy_timeout_setup(method: &syn::ImplItemFn) -> bool {
     struct SetupScan {
-        calls: usize,
+        plain_calls: usize,
+        deadline_calls: usize,
     }
     impl<'ast> syn::visit::Visit<'ast> for SetupScan {
         fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
-            if exact_expr_path(&node.func).as_deref() == Some("set_local_retry_deadlines")
-                && node.args.len() == 2
-                && node.args.get(1).and_then(exact_expr_path).as_deref() == Some("deadline")
-            {
-                self.calls += 1;
+            match exact_expr_path(&node.func).as_deref() {
+                Some("set_local_plain_lock_timeout")
+                    if node.args.len() == 1
+                        && node
+                            .args
+                            .first()
+                            .is_some_and(|arg| compact_tokens(arg) == "tx.conn()") =>
+                {
+                    self.plain_calls += 1;
+                }
+                Some("set_local_retry_deadlines")
+                    if node.args.len() == 2
+                        && node.args.get(1).and_then(exact_expr_path).as_deref()
+                            == Some("deadline") =>
+                {
+                    self.deadline_calls += 1;
+                }
+                _ => {}
             }
             syn::visit::visit_expr_call(self, node);
         }
     }
-    let mut scan = SetupScan { calls: 0 };
+    let mut scan = SetupScan {
+        plain_calls: 0,
+        deadline_calls: 0,
+    };
     syn::visit::Visit::visit_block(&mut scan, &method.block);
-    scan.calls == 1
+    scan.plain_calls == 1 && scan.deadline_calls == 1
+}
+
+fn canonical_plain_lock_timeout_helper(syntax: &syn::File) -> bool {
+    let helpers = free_functions(syntax, "set_local_plain_lock_timeout");
+    let Some(helper) = helpers.first().filter(|_| helpers.len() == 1) else {
+        return false;
+    };
+    let Some(syn::Expr::MethodCall(map)) = block_tail(&helper.block).map(transparent_expr) else {
+        return false;
+    };
+    if map.method != "map" || map.args.len() != 1 {
+        return false;
+    }
+    let syn::Expr::Await(awaited) = transparent_expr(&map.receiver) else {
+        return false;
+    };
+    let syn::Expr::MethodCall(execute) = transparent_expr(&awaited.base) else {
+        return false;
+    };
+    if execute.method != "execute"
+        || execute.args.len() != 1
+        || execute
+            .args
+            .first()
+            .is_none_or(|argument| compact_tokens(argument) != "conn")
+    {
+        return false;
+    }
+    let syn::Expr::Call(query) = transparent_expr(&execute.receiver) else {
+        return false;
+    };
+    exact_expr_path(&query.func).as_deref() == Some("sqlx::query")
+        && query.args.len() == 1
+        && matches!(query.args.first().map(transparent_expr), Some(syn::Expr::Lit(literal))
+            if matches!(&literal.lit, syn::Lit::Str(sql)
+                if sql.value() == "SELECT set_config('lock_timeout', '5s', true)"))
 }
 
 fn localtx_ingress_graph_is_closed(syntax: &syn::File) -> bool {
@@ -1097,7 +1079,16 @@ fn localtx_ingress_graph_is_closed(syntax: &syn::File) -> bool {
             "tenant_scoped_retry_write_inner".to_owned(),
             "tenant_scoped_write_inner".to_owned(),
         ]);
-    plain_entries_closed && producer_entry_closed && bridge_closed && owners_closed
+    let removed_compat_api_absent = !syntax.items.iter().any(|item| {
+        matches!(item, syn::Item::Impl(item_impl)
+            if item_impl.items.iter().any(|item| matches!(item,
+                syn::ImplItem::Fn(method) if method.sig.ident == "lock_bounded_write")))
+    });
+    plain_entries_closed
+        && producer_entry_closed
+        && bridge_closed
+        && owners_closed
+        && removed_compat_api_absent
 }
 
 fn canonical_policy_forward_entry(
@@ -1231,9 +1222,7 @@ fn deadline_policy_expr(expression: &syn::Expr, deadline: &str) -> bool {
 }
 
 fn plain_policy_expr(expression: &syn::Expr) -> bool {
-    matches!(transparent_expr(expression), syn::Expr::Struct(policy)
-        if compact_tokens(&policy.path) == "LocalTxExecutionPolicy::Plain"
-            && policy.rest.is_none())
+    exact_expr_path(expression).as_deref() == Some("LocalTxExecutionPolicy::Plain")
 }
 
 fn awaited_call_tail(block: &syn::Block) -> Option<&syn::ExprCall> {
@@ -5005,12 +4994,7 @@ fn tenant_lane_scan(
         let is_read = matches!(call.method.as_str(), "read" | "read_map");
         let is_write = matches!(
             call.method.as_str(),
-            "write"
-                | "deadline_write"
-                | "lock_bounded_write"
-                | "retry_write"
-                | "producer_tx"
-                | "retry_producer_tx"
+            "write" | "deadline_write" | "retry_write" | "producer_tx" | "retry_producer_tx"
         );
         scan.read_sites += usize::from(call.lane == TenantLane::Read && is_read);
         scan.write_sites += usize::from(call.lane == TenantLane::Write && is_write);
@@ -7826,16 +7810,13 @@ mod tests {
     }
 
     #[test]
-    fn producer_funnel_guard_rejects_direct_write_and_missing_typed_outcome() {
+    fn producer_funnel_guard_rejects_direct_append_bypass_and_missing_callsite() {
         let findings = producer_funnel_findings(&files(&[
             (
-                "cotx/mod.rs",
-                "impl<L> PgWritePool<L> { fn producer_tx() {} fn retry_producer_tx() {} }",
-            ),
-            (
                 "auth_grant_lifecycle.rs",
-                "async fn persist(pool: P) { pool.write(scope, operation, storage).await; }",
+                "async fn persist(pool: P) { append_outbox_with_projection(); }",
             ),
+            ("identity_security_lifecycle.rs", ""),
             ("policy_repo.rs", ""),
             ("role_binding_lifecycle.rs", ""),
             ("config_repo.rs", ""),
@@ -7851,6 +7832,75 @@ mod tests {
                 .iter()
                 .any(|finding| finding.rule == Rule::ProducerFunnelSitesAbsent),
             "{findings:#?}"
+        );
+    }
+
+    #[test]
+    fn producer_funnel_guard_accepts_exact_cross_file_callsite_set() {
+        let findings = producer_funnel_findings(&files(&[
+            (
+                "cotx/mod.rs",
+                "struct ProducerInternalsAreTypeCheckedByRust;",
+            ),
+            (
+                "auth_grant_lifecycle.rs",
+                "async fn persist(pool: P) { pool.producer_tx().await; }",
+            ),
+            (
+                "identity_security_lifecycle.rs",
+                "async fn execute(pool: P) { pool.producer_tx().await; }",
+            ),
+            (
+                "policy_repo.rs",
+                "async fn a(pool: P) { pool.producer_tx().await; } async fn b(pool: P) { pool.producer_tx().await; } async fn c(pool: P) { pool.producer_tx().await; }",
+            ),
+            (
+                "role_binding_lifecycle.rs",
+                "async fn a(pool: P) { pool.producer_tx().await; } async fn b(pool: P) { pool.producer_tx().await; }",
+            ),
+            (
+                "config_repo.rs",
+                "async fn persist(pool: P) { pool.retry_producer_tx().await; }",
+            ),
+        ]));
+        assert!(findings.is_empty(), "{findings:#?}");
+    }
+
+    #[test]
+    fn producer_funnel_guard_rejects_unexpected_production_file_callsite() {
+        let mut sources = files(&[
+            (
+                "auth_grant_lifecycle.rs",
+                "async fn persist(pool: P) { pool.producer_tx().await; }",
+            ),
+            (
+                "identity_security_lifecycle.rs",
+                "async fn execute(pool: P) { pool.producer_tx().await; }",
+            ),
+            (
+                "policy_repo.rs",
+                "async fn a(pool: P) { pool.producer_tx().await; } async fn b(pool: P) { pool.producer_tx().await; } async fn c(pool: P) { pool.producer_tx().await; }",
+            ),
+            (
+                "role_binding_lifecycle.rs",
+                "async fn a(pool: P) { pool.producer_tx().await; } async fn b(pool: P) { pool.producer_tx().await; }",
+            ),
+            (
+                "config_repo.rs",
+                "async fn persist(pool: P) { pool.retry_producer_tx().await; }",
+            ),
+        ]);
+        sources.push((
+            "unexpected.rs".to_owned(),
+            "async fn escape(pool: P) { pool.producer_tx().await; }".to_owned(),
+        ));
+
+        let findings = producer_funnel_findings(&sources);
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == Rule::ProducerFunnelBypass),
+            "unexpected production producer callsite must fail closed: {findings:#?}"
         );
     }
 
@@ -8016,58 +8066,68 @@ mod key_lock {
             (
                 "cotx/mod.rs",
                 r#"
+async fn set_local_plain_lock_timeout(conn: &mut PgConnection) -> Result<(), sqlx::Error> {
+    sqlx::query("SELECT set_config('lock_timeout', '5s', true)")
+        .execute(conn)
+        .await
+        .map(|_| ())
+}
+
 enum LocalTxExecutionPolicy {
-    Plain { bound_lock_wait: bool },
+    Plain,
     Deadline(LocalTxDeadline),
 }
 
 impl LocalTxExecutionPolicy {
     async fn acquire(self, pool: &PgPool) {
         match self {
-            Self::Plain { .. } => LocalTxConnectionLease::acquire(pool).await,
+            Self::Plain => LocalTxConnectionLease::acquire(pool).await,
             Self::Deadline(deadline) => deadline.acquire(LocalTxConnectionLease::acquire(pool)).await,
         }
     }
     async fn begin(self, lease: &mut LocalTxConnectionLease) {
         match self {
-            Self::Plain { .. } => lease.begin().await,
+            Self::Plain => lease.begin().await,
             Self::Deadline(deadline) => deadline.begin(lease.begin()).await,
         }
     }
     async fn setup(self, tx: &mut TxCapability<'_>, tenant: TenantId) {
         let setup = async {
             match self {
-                Self::Plain { .. } => plain_setup(tx, tenant).await,
+                Self::Plain => {
+                    plain_setup(tx, tenant).await;
+                    set_local_plain_lock_timeout(tx.conn()).await
+                }
                 Self::Deadline(deadline) => set_local_retry_deadlines(tx.conn(), deadline).await,
             }
         };
         match self {
-            Self::Plain { .. } => setup.await,
+            Self::Plain => setup.await,
             Self::Deadline(deadline) => deadline.setup(setup).await,
         }
     }
     async fn operation(self, future: Future) {
         match self {
-            Self::Plain { .. } => future.await,
+            Self::Plain => future.await,
             Self::Deadline(deadline) => deadline.operation(future).await,
         }
     }
     async fn commit(self, future: Future) {
         match self {
-            Self::Plain { .. } => future.await,
+            Self::Plain => future.await,
             Self::Deadline(deadline) => deadline.commit(future).await,
         }
     }
     async fn rollback(self, future: Future) {
         match self {
-            Self::Plain { .. } => future.await,
+            Self::Plain => future.await,
             Self::Deadline(deadline) => deadline.rollback(future).await,
         }
     }
 }
 
 async fn tenant_scoped_write_inner(pool: &PgPool, tenant: TenantId, write: F) {
-    execute_local_tx(pool, tenant, LocalTxExecutionPolicy::Plain { bound_lock_wait: false }, PlainLocalTxOperation(write)).await
+    execute_local_tx(pool, tenant, LocalTxExecutionPolicy::Plain, PlainLocalTxOperation(write)).await
 }
 
 async fn tenant_scoped_retry_write_inner(pool: &PgPool, tenant: TenantId, deadline: LocalTxDeadline, write: F) {
@@ -8548,6 +8608,55 @@ impl Drop for LocalTxConnectionLease {
                 .iter()
                 .any(|finding| finding.rule == Rule::LocalTxQuarantineSitesAbsent),
             "missing both carriers must fail the production gate: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn localtx_quarantine_guard_rejects_plain_lock_wait_bypasses() {
+        let cases = [
+            (
+                "unbounded-plain-lock-wait",
+                "                    set_local_plain_lock_timeout(tx.conn()).await",
+                "                    Ok(())",
+            ),
+            (
+                "weakened-plain-lock-timeout",
+                "SELECT set_config('lock_timeout', '5s', true)",
+                "SELECT set_config('lock_timeout', '0', true)",
+            ),
+        ];
+
+        for (name, before, after) in cases {
+            let mut sources = localtx_quarantine_semantic_fixture();
+            let source = &mut sources[0].1;
+            let mutated = source.replacen(before, after, 1);
+            assert_ne!(
+                *source, mutated,
+                "{name} fixture mutation must be non-vacuous"
+            );
+            *source = mutated;
+            let findings = localtx_quarantine_findings(&sources);
+            assert!(
+                findings.iter().any(|finding| {
+                    matches!(
+                        finding.rule,
+                        Rule::LocalTxQuarantineBypass | Rule::LocalTxQuarantineSitesAbsent
+                    )
+                }),
+                "{name} must fail closed: {findings:?}"
+            );
+        }
+
+        let mut removed_api_reintroduced = localtx_quarantine_semantic_fixture();
+        removed_api_reintroduced[0]
+            .1
+            .push_str("\nimpl PgWritePool { async fn lock_bounded_write(&self) {} }\n");
+        let findings = localtx_quarantine_findings(&removed_api_reintroduced);
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == Rule::LocalTxQuarantineSitesAbsent),
+            "removed caller-selectable lock policy API must fail closed: {findings:?}"
         );
     }
 

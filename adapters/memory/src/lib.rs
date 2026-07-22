@@ -532,7 +532,7 @@ impl AuthGrantLifecycle for MemAuthGrantStore {
         command: AuthGrantCloseCommand,
     ) -> Result<(), IdentityError> {
         let (mutation, _observation) = command.into_parts();
-        let next = mutation.into_next();
+        let (expected, next) = mutation.into_parts();
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let Some(current) = state.grants.get(next.id()) else {
             return Ok(());
@@ -540,25 +540,18 @@ impl AuthGrantLifecycle for MemAuthGrantStore {
         if current.tenant() != scope.tenant() {
             return Ok(());
         }
-        let binding_mismatch = next.tenant() != current.tenant()
-            || next.user_id() != current.user_id()
-            || next.authn_epoch_at_issue() != current.authn_epoch_at_issue()
-            || next.auth_time() != current.auth_time()
-            || next.created_at() != current.created_at()
-            || next.expires_at() != current.expires_at();
-        if current.status() != AuthGrantStatus::Active {
-            return if !binding_mismatch
-                && current.status() == next.status()
-                && current.close_reason() == next.close_reason()
-            {
-                Ok(())
-            } else {
-                Err(identity_storage_error(
-                    "authentication grant close binding mismatch",
-                ))
-            };
+        if !expected.matches_snapshot(current) {
+            return Err(IdentityError::VersionConflict);
         }
-        if binding_mismatch || next.status() == AuthGrantStatus::Active {
+        if expected.id() != next.id()
+            || expected.tenant() != next.tenant()
+            || expected.user_id() != next.user_id()
+            || expected.authn_epoch_at_issue() != next.authn_epoch_at_issue()
+            || expected.auth_time() != next.auth_time()
+            || expected.created_at() != next.created_at()
+            || expected.expires_at() != next.expires_at()
+            || next.status() == AuthGrantStatus::Active
+        {
             return Err(identity_storage_error(
                 "authentication grant close binding mismatch",
             ));
@@ -1793,7 +1786,7 @@ impl SecretResolver for MemSecretResolver {
 mod tests {
     use super::*;
     use diport::AuditOutcome;
-    use identity::ports::AuthGrantCloseReason;
+    use identity::GrantSecurityEventKind;
     use vocab::TenantId;
 
     const CANON_TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
@@ -2251,7 +2244,7 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::expect_used)]
-    async fn mem_auth_grant_store_close_revokes_family_and_is_terminally_idempotent() {
+    async fn mem_auth_grant_store_close_uses_full_expected_snapshot_and_promotes_compromise() {
         let tenant = vocab::TenantId::parse(CANON_TENANT).expect("tenant");
         let grant = test_grant("grant-mem-close", tenant);
         let refresh = initial_refresh(&grant, "refresh-mem-close", [10; 32]);
@@ -2283,26 +2276,20 @@ mod tests {
         let close_at = grant.created_at() + Duration::from_secs(1);
         let close = grant
             .clone()
-            .close(AuthGrantCloseReason::LogoutCurrent, close_at)
+            .close(GrantSecurityEventKind::LogoutCurrent, close_at)
             .expect("valid close");
+        let revoked = close.next().clone();
         let same_terminal = grant
             .clone()
             .close(
-                AuthGrantCloseReason::LogoutCurrent,
+                GrantSecurityEventKind::LogoutCurrent,
                 close_at + Duration::from_secs(1),
             )
             .expect("valid stale close");
-        let conflicting_reason = grant
-            .clone()
-            .close(
-                AuthGrantCloseReason::LogoutAll,
-                close_at + Duration::from_secs(2),
-            )
-            .expect("valid conflicting reason");
         let conflicting_status = grant
             .clone()
             .close(
-                AuthGrantCloseReason::RefreshReuseDetected,
+                GrantSecurityEventKind::RefreshReuseDetected,
                 close_at + Duration::from_secs(3),
             )
             .expect("valid conflicting status");
@@ -2321,7 +2308,7 @@ mod tests {
             "closed grant must be hidden from active lookup"
         );
         let closed_refresh = store
-            .find_by_hash(scope, refresh_hash)
+            .find_by_hash(scope, refresh_hash.clone())
             .await
             .expect("find refresh")
             .expect("closed refresh family remains available for replay detection");
@@ -2331,18 +2318,36 @@ mod tests {
         store
             .close(scope, AuthGrantCloseCommand::for_test(same_terminal))
             .await
-            .expect("same status and reason must be idempotent");
-        for conflict in [conflicting_reason, conflicting_status] {
-            assert!(
-                matches!(
-                    store
-                        .close(scope, AuthGrantCloseCommand::for_test(conflict))
-                        .await,
-                    Err(IdentityError::Storage(_))
-                ),
-                "different terminal status or reason must fail"
-            );
-        }
+            .expect_err("stale expected snapshot must conflict");
+        assert!(
+            matches!(
+                store
+                    .close(scope, AuthGrantCloseCommand::for_test(conflicting_status))
+                    .await,
+                Err(IdentityError::VersionConflict)
+            ),
+            "a second command derived from the stale active snapshot must conflict"
+        );
+
+        let promotion = revoked
+            .close(
+                GrantSecurityEventKind::RefreshReuseDetected,
+                close_at + Duration::from_secs(4),
+            )
+            .expect("revoked grant may be promoted after refresh reuse");
+        store
+            .close(scope, AuthGrantCloseCommand::for_test(promotion))
+            .await
+            .expect("current revoked snapshot must promote to compromised");
+        let compromised_refresh = store
+            .find_by_hash(scope, refresh_hash)
+            .await
+            .expect("find promoted refresh")
+            .expect("refresh family remains available for replay detection");
+        assert_eq!(
+            compromised_refresh.auth_grant_status(),
+            AuthGrantStatus::Compromised
+        );
     }
 
     #[tokio::test]

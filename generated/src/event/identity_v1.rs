@@ -814,6 +814,366 @@ pub mod role_revoked {
     );
 }
 
+/// 端点 `security-event` 派生契约（源 `security-event/contract.toml`）。由 `cargo xtask codegen` 派生；勿手改。
+pub mod security_event {
+    /// Error types.
+    pub mod error {
+        /// Error from a `TryFrom` or `FromStr` implementation.
+        pub struct ConversionError(::std::borrow::Cow<'static, str>);
+        impl ::std::error::Error for ConversionError {}
+        impl ::std::fmt::Display for ConversionError {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                ::std::fmt::Display::fmt(&self.0, f)
+            }
+        }
+        impl ::std::fmt::Debug for ConversionError {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                ::std::fmt::Debug::fmt(&self.0, f)
+            }
+        }
+        impl From<&'static str> for ConversionError {
+            fn from(value: &'static str) -> Self {
+                Self(value.into())
+            }
+        }
+        impl From<String> for ConversionError {
+            fn from(value: String) -> Self {
+                Self(value.into())
+            }
+        }
+    }
+    ///`IdentitySecurityEventPayload`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentitySecurityEventPayload",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "kind",
+    ///    "occurredAt",
+    ///    "target",
+    ///    "tenantId"
+    ///  ],
+    ///  "properties": {
+    ///    "kind": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "passwordChanged",
+    ///        "passwordReset",
+    ///        "accountLocked",
+    ///        "accountSuspended",
+    ///        "accountDeactivated",
+    ///        "logoutCurrent",
+    ///        "logoutAll",
+    ///        "refreshReuseDetected",
+    ///        "credentialDeleted"
+    ///      ]
+    ///    },
+    ///    "occurredAt": {
+    ///      "type": "integer",
+    ///      "format": "int64"
+    ///    },
+    ///    "target": {
+    ///      "title": "IdentitySecurityEventPayloadTarget",
+    ///      "type": "object",
+    ///      "required": [
+    ///        "kind",
+    ///        "ref"
+    ///      ],
+    ///      "properties": {
+    ///        "kind": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "subject",
+    ///            "grant"
+    ///          ]
+    ///        },
+    ///        "ref": {
+    ///          "type": "string",
+    ///          "format": "uuid",
+    ///          "x-redaction": "secret"
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    },
+    ///    "tenantId": {
+    ///      "type": "string"
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct IdentitySecurityEventPayload {
+        #[redact(sensitivity = public)]
+        pub kind: IdentitySecurityEventPayloadKind,
+        #[serde(rename = "occurredAt")]
+        #[redact(sensitivity = public)]
+        pub occurred_at: i64,
+        #[redact(sensitivity = public)]
+        pub target: IdentitySecurityEventPayloadTarget,
+        #[serde(rename = "tenantId")]
+        #[redact(sensitivity = public)]
+        pub tenant_id: ::std::string::String,
+    }
+    ///`IdentitySecurityEventPayloadKind`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "passwordChanged",
+    ///    "passwordReset",
+    ///    "accountLocked",
+    ///    "accountSuspended",
+    ///    "accountDeactivated",
+    ///    "logoutCurrent",
+    ///    "logoutAll",
+    ///    "refreshReuseDetected",
+    ///    "credentialDeleted"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentitySecurityEventPayloadKind {
+        #[serde(rename = "passwordChanged")]
+        PasswordChanged,
+        #[serde(rename = "passwordReset")]
+        PasswordReset,
+        #[serde(rename = "accountLocked")]
+        AccountLocked,
+        #[serde(rename = "accountSuspended")]
+        AccountSuspended,
+        #[serde(rename = "accountDeactivated")]
+        AccountDeactivated,
+        #[serde(rename = "logoutCurrent")]
+        LogoutCurrent,
+        #[serde(rename = "logoutAll")]
+        LogoutAll,
+        #[serde(rename = "refreshReuseDetected")]
+        RefreshReuseDetected,
+        #[serde(rename = "credentialDeleted")]
+        CredentialDeleted,
+    }
+    impl ::std::fmt::Display for IdentitySecurityEventPayloadKind {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::PasswordChanged => f.write_str("passwordChanged"),
+                Self::PasswordReset => f.write_str("passwordReset"),
+                Self::AccountLocked => f.write_str("accountLocked"),
+                Self::AccountSuspended => f.write_str("accountSuspended"),
+                Self::AccountDeactivated => f.write_str("accountDeactivated"),
+                Self::LogoutCurrent => f.write_str("logoutCurrent"),
+                Self::LogoutAll => f.write_str("logoutAll"),
+                Self::RefreshReuseDetected => f.write_str("refreshReuseDetected"),
+                Self::CredentialDeleted => f.write_str("credentialDeleted"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentitySecurityEventPayloadKind {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "passwordChanged" => Ok(Self::PasswordChanged),
+                "passwordReset" => Ok(Self::PasswordReset),
+                "accountLocked" => Ok(Self::AccountLocked),
+                "accountSuspended" => Ok(Self::AccountSuspended),
+                "accountDeactivated" => Ok(Self::AccountDeactivated),
+                "logoutCurrent" => Ok(Self::LogoutCurrent),
+                "logoutAll" => Ok(Self::LogoutAll),
+                "refreshReuseDetected" => Ok(Self::RefreshReuseDetected),
+                "credentialDeleted" => Ok(Self::CredentialDeleted),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentitySecurityEventPayloadKind {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String> for IdentitySecurityEventPayloadKind {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String> for IdentitySecurityEventPayloadKind {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentitySecurityEventPayloadTarget`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentitySecurityEventPayloadTarget",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "kind",
+    ///    "ref"
+    ///  ],
+    ///  "properties": {
+    ///    "kind": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "subject",
+    ///        "grant"
+    ///      ]
+    ///    },
+    ///    "ref": {
+    ///      "type": "string",
+    ///      "format": "uuid",
+    ///      "x-redaction": "secret"
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct IdentitySecurityEventPayloadTarget {
+        #[redact(sensitivity = public)]
+        pub kind: IdentitySecurityEventPayloadTargetKind,
+        #[serde(rename = "ref")]
+        #[redact(sensitivity = secret)]
+        pub ref_: ::uuid::Uuid,
+    }
+    ///`IdentitySecurityEventPayloadTargetKind`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "subject",
+    ///    "grant"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentitySecurityEventPayloadTargetKind {
+        #[serde(rename = "subject")]
+        Subject,
+        #[serde(rename = "grant")]
+        Grant,
+    }
+    impl ::std::fmt::Display for IdentitySecurityEventPayloadTargetKind {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Subject => f.write_str("subject"),
+                Self::Grant => f.write_str("grant"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentitySecurityEventPayloadTargetKind {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "subject" => Ok(Self::Subject),
+                "grant" => Ok(Self::Grant),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentitySecurityEventPayloadTargetKind {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String> for IdentitySecurityEventPayloadTargetKind {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String> for IdentitySecurityEventPayloadTargetKind {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+
+    /// 契约 ID（`contract.toml` `id` 字段，单一事实源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+    pub const CONTRACT_ID: &str = "identity.security-event";
+
+    /// 稳定事件 topic（broker routing key；active event 来自 `contract.toml` `topic` 字段，draft 回退用 id）。
+    /// 由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+    pub const TOPIC: &str = "identity.security-event";
+
+    /// 契约绑定（`domain` + `id` + `version` + `schema_hash` 同源类型化常量，#1193/#1618）。outbox envelope / 事件 producer 以
+    /// `OutboxEnvelopeParts::new(CONTRACT, ..)` 传入契约归属，杜绝裸 string 分别 author domain / contract_id。
+    /// 由 `cargo xtask codegen` 从 manifest `domain` + `id` + `version` + declared schema 派生；勿手改（golden 字节锁，INVARIANT
+    /// CONTRACT-BINDING-FUNNEL-01）。
+    pub const CONTRACT: ::vocab::ContractBinding = ::vocab::ContractBinding::from_static(
+        "identity",
+        "identity.security-event",
+        "v1",
+        "sha256:241ea0c46d1b77a94d547d39be86d32e4910c60bdaf6648d2320b87301e62996",
+    );
+
+    /// Generated contract + topic identity carried by this event payload.
+    pub const FACT: ::vocab::EventFactBinding =
+        ::vocab::EventFactBinding::from_static(CONTRACT, TOPIC);
+
+    impl ::vocab::GeneratedEventPayload for IdentitySecurityEventPayload {
+        const FACT: ::vocab::EventFactBinding = FACT;
+    }
+
+    /// 单一事件 topology spec；producer 与 subscriptions 不存在平行 registry。
+    pub const SPEC: super::super::EventSpec = super::super::EventSpec::new(
+        CONTRACT,
+        TOPIC,
+        super::super::PartitionKeyStrategy::None,
+        &[],
+    );
+}
+
 /// 端点 `session-created` 派生契约（源 `session-created/contract.toml`）。由 `cargo xtask codegen` 派生；勿手改。
 pub mod session_created {
     /// Error types.

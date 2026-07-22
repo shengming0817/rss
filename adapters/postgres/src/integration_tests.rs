@@ -11288,7 +11288,7 @@ async fn localtx_deadline_real_postgres_fault_matrix() -> TestResult {
         LocalTxExecutionBudget::new(Duration::from_millis(300), Duration::from_millis(100))?;
     let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
     let handle = recorder.handle();
-    let started = std::time::Instant::now();
+    let started = tokio::time::Instant::now();
 
     metrics::with_local_recorder(&recorder, || {
         tokio::task::block_in_place(|| {
@@ -17387,8 +17387,11 @@ use std::time::{Duration, SystemTime};
 
 use diport::OutboxEnvelopeParts;
 use identity::ports::{
-    AuthGrantCloseCommand, AuthGrantCloseReason, AuthGrantLifecycle, AuthGrantStatus,
-    IdentityError, LoginGrantMutation, RefreshTokenStore, TenantId,
+    AccountSecurityEventKind, AccountSecuritySnapshot, AuthGrantCloseCommand, AuthGrantLifecycle,
+    AuthGrantStatus, CredentialSecurityTargetKind, CredentialSecurityTargetRef,
+    CredentialSecurityTargetResolutionRequest, CredentialSecurityTargetResolver,
+    GrantSecurityEventKind, IdentityError, IdentitySecurityLifecycle, LoginGrantMutation,
+    RefreshTokenStore, TenantId,
 };
 
 fn classified_identity_error(
@@ -17502,6 +17505,26 @@ async fn auth_grant_login_counts(
     .await
 }
 
+async fn credential_security_payload(
+    store: &PgStore,
+    tenant: vocab::TenantId,
+) -> Result<(CredentialSecurityTargetRef, serde_json::Value), TestError> {
+    let payload: Vec<u8> = sqlx::query_scalar(
+        "SELECT payload FROM outbox \
+         WHERE tenant_id = $1::uuid AND contract_id = $2 \
+         ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(tenant.as_uuid().to_string())
+    .bind(identity::ports::SECURITY_EVENT_CONTRACT.contract_id())
+    .fetch_one(&store.pool)
+    .await?;
+    let payload: serde_json::Value = serde_json::from_slice(&payload)?;
+    let target_ref = payload["target"]["ref"]
+        .as_str()
+        .ok_or("credential security target ref missing")?;
+    Ok((CredentialSecurityTargetRef::parse(target_ref)?, payload))
+}
+
 #[derive(Clone)]
 struct AuthGrantCloseLocalTxCase {
     tenant: vocab::TenantId,
@@ -17564,7 +17587,7 @@ impl AuthGrantCloseLocalTxCase {
             .grant
             .clone()
             .close(
-                AuthGrantCloseReason::LogoutCurrent,
+                GrantSecurityEventKind::LogoutCurrent,
                 self.grant.created_at() + Duration::from_secs(1),
             )
             .map_err(|error| {
@@ -18121,6 +18144,229 @@ async fn auth_grant_login_commit_unknown_returns_error_without_partial_state() -
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn auth_grant_login_plain_producer_lock_wait_is_bounded_and_rolls_back() -> TestResult {
+    let (pg, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    let app = connect_pg_rss_app_role_with_limits(&pg, &owner, 1, Duration::from_secs(8)).await?;
+    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let user_id = ids::UserId::parse(&uuid::Uuid::new_v4().to_string())?;
+    seed_auth_grant_account(&owner, tenant, user_id).await?;
+
+    let app_backend: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&app.pool)
+        .await?;
+    let mut lock_holder = owner.pool.begin().await?;
+    sqlx::query(
+        "SELECT user_id FROM account_security_states \
+         WHERE tenant_id = $1::uuid AND user_id = $2::uuid FOR UPDATE",
+    )
+    .bind(tenant.as_uuid().to_string())
+    .bind(user_id.as_uuid().to_string())
+    .fetch_one(&mut *lock_holder)
+    .await?;
+
+    let grant_id = format!("grant-{}", uuid::Uuid::new_v4());
+    let refresh_id = uuid::Uuid::new_v4().to_string();
+    let event_id = unique_event_id("auth-grant-lock-timeout");
+    let (grant, refresh) = auth_grant_fixture(tenant, user_id, &grant_id, &refresh_id, [0xD4; 32]);
+    let (mutation, entry, envelope) = auth_grant_login_parts(&event_id, grant, refresh);
+    let started = tokio::time::Instant::now();
+    let result = tokio::time::timeout(
+        Duration::from_secs(7),
+        crate::PgAuthGrantLifecycle::new(&app, fixed_clock()).persist_login_grant(
+            login_producer_receipt(),
+            identity_scope(tenant),
+            mutation,
+            entry,
+            envelope,
+        ),
+    )
+    .await
+    .map_err(|_| "plain producer lock wait exceeded its PostgreSQL timeout")?;
+    let elapsed = started.elapsed();
+    assert!(result.is_err(), "held row lock must reject login");
+    assert!(
+        (Duration::from_secs(4)..Duration::from_secs(7)).contains(&elapsed),
+        "plain producer lock timeout must fail at approximately five seconds: {elapsed:?}"
+    );
+    assert_eq!(
+        auth_grant_login_counts(&owner, &grant_id, &refresh_id, &event_id).await?,
+        (0, 0, 0),
+        "lock timeout must roll back grant, refresh and outbox writes"
+    );
+    localtx_assert_backend_reused(
+        &app.pool,
+        app_backend,
+        "plain producer lock timeout rollback",
+    )
+    .await?;
+
+    lock_holder.rollback().await?;
+    app.shutdown().await?;
+    owner.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn auth_grant_login_rejects_stale_epoch_after_security_event_commits() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let user = ids::UserId::parse(&uuid::Uuid::new_v4().to_string())?;
+    seed_auth_grant_account(&store, tenant, user).await?;
+
+    let state_at = SystemTime::UNIX_EPOCH + Duration::from_secs(TEST_OCCURRED_SECS);
+    let state = identity::test_support::account_security_state(AccountSecuritySnapshot {
+        tenant,
+        user_id: user,
+        status: AccountStatus::Active,
+        authn_epoch: 0,
+        version: 1,
+        status_changed_at: state_at,
+        updated_at: state_at,
+    });
+    let security = identity::test_support::account_credential_security_command(
+        state,
+        AccountSecurityEventKind::LogoutAll,
+        state_at + Duration::from_secs(1),
+    );
+    let _security_receipt = crate::PgIdentitySecurityLifecycle::from_unverified_for_test(&store)
+        .execute(identity_scope(tenant), security)
+        .await?;
+
+    let grant_id = format!("grant-{}", uuid::Uuid::new_v4());
+    let refresh_id = uuid::Uuid::new_v4().to_string();
+    let event_id = unique_event_id("auth-grant-stale-security-epoch");
+    let (grant, refresh) = auth_grant_fixture(tenant, user, &grant_id, &refresh_id, [0xD2; 32]);
+    let (mutation, entry, envelope) = auth_grant_login_parts(&event_id, grant, refresh);
+    let stale_login = crate::PgAuthGrantLifecycle::new(&store, fixed_clock())
+        .persist_login_grant(
+            login_producer_receipt(),
+            identity_scope(tenant),
+            mutation,
+            entry,
+            envelope,
+        )
+        .await;
+    assert!(
+        stale_login.is_err(),
+        "stale issuance epoch must fail closed"
+    );
+    assert_eq!(
+        auth_grant_login_counts(&store, &grant_id, &refresh_id, &event_id).await?,
+        (0, 0, 0),
+        "stale login must not persist a grant, refresh record, or session fact"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn auth_grant_login_account_lock_serializes_security_event_without_deadlock() -> TestResult {
+    let (pg, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    let login_store =
+        connect_pg_rss_app_role_with_limits(&pg, &owner, 1, Duration::from_secs(5)).await?;
+    let security_store =
+        connect_pg_rss_app_role_with_limits(&pg, &owner, 1, Duration::from_secs(5)).await?;
+    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let user = ids::UserId::parse(&uuid::Uuid::new_v4().to_string())?;
+    seed_auth_grant_account(&owner, tenant, user).await?;
+
+    let login_backend: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&login_store.pool)
+        .await?;
+    let security_backend: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&security_store.pool)
+        .await?;
+    assert_ne!(login_backend, security_backend);
+
+    let grant_id = format!("grant-{}", uuid::Uuid::new_v4());
+    let refresh_id = uuid::Uuid::new_v4().to_string();
+    let event_id = unique_event_id("auth-grant-security-interleave");
+    let (grant, refresh) = auth_grant_fixture(tenant, user, &grant_id, &refresh_id, [0xD3; 32]);
+    let (mutation, entry, envelope) = auth_grant_login_parts(&event_id, grant, refresh);
+    let gate = crate::auth_grant_lifecycle::AuthGrantLoginLockGate::new();
+    let login_gate = gate.clone();
+    let login = tokio::spawn(async move {
+        crate::PgAuthGrantLifecycle::new(&login_store, fixed_clock())
+            .with_login_lock_gate(login_gate)
+            .persist_login_grant(
+                login_producer_receipt(),
+                identity_scope(tenant),
+                mutation,
+                entry,
+                envelope,
+            )
+            .await
+    });
+    gate.wait_until_locked().await;
+
+    let state_at = SystemTime::UNIX_EPOCH + Duration::from_secs(TEST_OCCURRED_SECS);
+    let state = identity::test_support::account_security_state(AccountSecuritySnapshot {
+        tenant,
+        user_id: user,
+        status: AccountStatus::Active,
+        authn_epoch: 0,
+        version: 1,
+        status_changed_at: state_at,
+        updated_at: state_at,
+    });
+    let security = identity::test_support::account_credential_security_command(
+        state,
+        AccountSecurityEventKind::LogoutAll,
+        state_at + Duration::from_secs(1),
+    );
+    let security_task = tokio::spawn(async move {
+        crate::PgIdentitySecurityLifecycle::from_unverified_for_test(&security_store)
+            .execute(identity_scope(tenant), security)
+            .await
+    });
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let blockers: Vec<i32> = sqlx::query_scalar("SELECT unnest(pg_blocking_pids($1))")
+                .bind(security_backend)
+                .fetch_all(&owner.pool)
+                .await?;
+            if blockers.contains(&login_backend) {
+                return Ok::<(), sqlx::Error>(());
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .map_err(|_| "security event did not wait for the login account lock")??;
+
+    gate.release();
+    let _login_receipt = login.await??;
+    let _security_receipt = security_task.await??;
+    let persisted: (i64, i64, String, String, i64) = sqlx::query_as(
+        "SELECT s.authn_epoch, s.version, g.status, r.status, \
+         (SELECT count(*) FROM outbox o WHERE o.tenant_id = s.tenant_id \
+          AND o.contract_id IN ($3, $4)) \
+         FROM account_security_states s \
+         JOIN auth_grants g ON g.tenant_id = s.tenant_id AND g.user_id = s.user_id \
+         JOIN refresh_tokens r ON r.tenant_id = g.tenant_id AND r.auth_grant_id = g.grant_id \
+         WHERE s.tenant_id = $1::uuid AND s.user_id = $2::uuid",
+    )
+    .bind(tenant.as_uuid().to_string())
+    .bind(user.as_uuid().to_string())
+    .bind(identity::ports::SESSION_CREATED_CONTRACT.contract_id())
+    .bind(identity::ports::SECURITY_EVENT_CONTRACT.contract_id())
+    .fetch_one(&owner.pool)
+    .await?;
+    assert_eq!(
+        persisted,
+        (1, 2, "revoked".to_owned(), "revoked".to_owned(), 2)
+    );
+
+    owner.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn auth_grant_serving_role_has_exact_mutation_acl() -> TestResult {
     let (pg, owner) = connect_pg().await?;
     owner.run_migrations().await?;
@@ -18267,7 +18513,7 @@ async fn auth_grant_serving_role_has_exact_mutation_acl() -> TestResult {
 
     let close = grant
         .close(
-            AuthGrantCloseReason::LogoutCurrent,
+            GrantSecurityEventKind::LogoutCurrent,
             SystemTime::UNIX_EPOCH + Duration::from_secs(TEST_OCCURRED_SECS + 1),
         )
         .expect("valid provider close");
@@ -18346,13 +18592,13 @@ async fn auth_grant_close_revokes_refresh_family_before_closing_root() -> TestRe
     let close = grant
         .clone()
         .close(
-            AuthGrantCloseReason::LogoutCurrent,
+            GrantSecurityEventKind::LogoutCurrent,
             SystemTime::UNIX_EPOCH + Duration::from_secs(TEST_OCCURRED_SECS + 1),
         )
         .expect("valid close");
     let concurrent_stale_close = grant
         .close(
-            AuthGrantCloseReason::LogoutCurrent,
+            GrantSecurityEventKind::LogoutCurrent,
             SystemTime::UNIX_EPOCH + Duration::from_secs(TEST_OCCURRED_SECS + 2),
         )
         .expect("valid stale close");
@@ -18375,15 +18621,15 @@ async fn auth_grant_close_revokes_refresh_family_before_closing_root() -> TestRe
     );
 
     let mut blocker = store.pool.begin().await?;
-    let locked_refresh: String = sqlx::query_scalar(
-        "SELECT id::text FROM refresh_tokens \
-         WHERE tenant_id = $1::uuid AND id = $2::uuid FOR UPDATE",
+    let locked_account: String = sqlx::query_scalar(
+        "SELECT user_id::text FROM account_security_states \
+         WHERE tenant_id = $1::uuid AND user_id = $2::uuid FOR UPDATE",
     )
     .bind(tenant.as_uuid().to_string())
-    .bind(&refresh_id)
+    .bind(user_id.as_uuid().to_string())
     .fetch_one(&mut *blocker)
     .await?;
-    assert_eq!(locked_refresh, refresh_id);
+    assert_eq!(locked_account, user_id.as_uuid().to_string());
 
     let start = std::sync::Arc::new(tokio::sync::Barrier::new(3));
     let lifecycle_a = crate::PgAuthGrantLifecycle::new(&close_app_a, fixed_clock());
@@ -18434,8 +18680,20 @@ async fn auth_grant_close_revokes_refresh_family_before_closing_root() -> TestRe
         return Err("both AuthGrant close sessions must wait concurrently on the row lock".into());
     }
     blocker.commit().await?;
-    first.await??;
-    second.await??;
+    let close_results = [first.await?, second.await?];
+    assert_eq!(
+        close_results.iter().filter(|result| result.is_ok()).count(),
+        1,
+        "exactly one expected snapshot may close the root"
+    );
+    assert_eq!(
+        close_results
+            .iter()
+            .filter(|result| matches!(result, Err(IdentityError::VersionConflict)))
+            .count(),
+        1,
+        "the stale concurrent command must observe a version conflict"
+    );
 
     let row: (String, Option<String>, String, String) = sqlx::query_as(
         "SELECT g.status, g.close_reason, r.status, r.auth_grant_status \
@@ -18458,6 +18716,664 @@ async fn auth_grant_close_revokes_refresh_family_before_closing_root() -> TestRe
     );
     close_app_a.shutdown().await?;
     close_app_b.shutdown().await?;
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn identity_security_lifecycle_applies_account_cas_and_grant_promotion_atomically()
+-> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let lifecycle = crate::PgIdentitySecurityLifecycle::from_unverified_for_test(&store);
+
+    let account_tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let account_user = ids::UserId::parse(&uuid::Uuid::new_v4().to_string())?;
+    seed_auth_grant_account(&store, account_tenant, account_user).await?;
+    let account_grant_a_id = format!("grant-{}", uuid::Uuid::new_v4());
+    let account_grant_b_id = format!("grant-{}", uuid::Uuid::new_v4());
+    let account_refresh_a_id = uuid::Uuid::new_v4().to_string();
+    let account_refresh_b_id = uuid::Uuid::new_v4().to_string();
+    let (account_grant_a, account_refresh_a) = auth_grant_fixture(
+        account_tenant,
+        account_user,
+        &account_grant_a_id,
+        &account_refresh_a_id,
+        [0x91; 32],
+    );
+    let (account_grant_b, account_refresh_b) = auth_grant_fixture(
+        account_tenant,
+        account_user,
+        &account_grant_b_id,
+        &account_refresh_b_id,
+        [0x92; 32],
+    );
+    let grant_lifecycle = crate::PgAuthGrantLifecycle::new(&store, fixed_clock());
+    for (event_id, grant, refresh) in [
+        (
+            unique_event_id("security-account-grant-a"),
+            account_grant_a,
+            account_refresh_a,
+        ),
+        (
+            unique_event_id("security-account-grant-b"),
+            account_grant_b,
+            account_refresh_b,
+        ),
+    ] {
+        let (mutation, entry, envelope) = auth_grant_login_parts(&event_id, grant, refresh);
+        let _persisted = grant_lifecycle
+            .persist_login_grant(
+                login_producer_receipt(),
+                identity_scope(account_tenant),
+                mutation,
+                entry,
+                envelope,
+            )
+            .await?;
+    }
+    sqlx::query(
+        "UPDATE refresh_tokens SET status = 'consumed' \
+         WHERE tenant_id = $1::uuid AND id = $2::uuid",
+    )
+    .bind(account_tenant.as_uuid().to_string())
+    .bind(&account_refresh_b_id)
+    .execute(&store.pool)
+    .await?;
+
+    let state_at = SystemTime::UNIX_EPOCH + Duration::from_secs(TEST_OCCURRED_SECS);
+    let account_state = identity::test_support::account_security_state(AccountSecuritySnapshot {
+        tenant: account_tenant,
+        user_id: account_user,
+        status: AccountStatus::Active,
+        authn_epoch: 0,
+        version: 1,
+        status_changed_at: state_at,
+        updated_at: state_at,
+    });
+    let account_event_at = state_at + Duration::from_secs(10);
+    let account_command = identity::test_support::account_credential_security_command(
+        account_state.clone(),
+        AccountSecurityEventKind::LogoutAll,
+        account_event_at,
+    );
+    let stale_account_command = identity::test_support::account_credential_security_command(
+        account_state,
+        AccountSecurityEventKind::LogoutAll,
+        account_event_at + Duration::from_secs(1),
+    );
+    let _receipt = lifecycle
+        .execute(identity_scope(account_tenant), account_command)
+        .await?;
+    assert!(matches!(
+        lifecycle
+            .execute(identity_scope(account_tenant), stale_account_command)
+            .await,
+        Err(IdentityError::VersionConflict)
+    ));
+
+    let account_projection: (String, i64, i64) = sqlx::query_as(
+        "SELECT status, authn_epoch, version FROM account_security_states \
+         WHERE tenant_id = $1::uuid AND user_id = $2::uuid",
+    )
+    .bind(account_tenant.as_uuid().to_string())
+    .bind(account_user.as_uuid().to_string())
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(account_projection, ("active".to_owned(), 1, 2));
+    let account_roots: Vec<(String, String, Option<String>)> = sqlx::query_as(
+        "SELECT grant_id, status, close_reason FROM auth_grants \
+         WHERE tenant_id = $1::uuid AND user_id = $2::uuid ORDER BY grant_id",
+    )
+    .bind(account_tenant.as_uuid().to_string())
+    .bind(account_user.as_uuid().to_string())
+    .fetch_all(&store.pool)
+    .await?;
+    assert_eq!(account_roots.len(), 2);
+    assert!(account_roots.iter().all(|(_, status, reason)| {
+        status == "revoked" && reason.as_deref() == Some("logout_all")
+    }));
+    let account_refreshes: Vec<(String, String)> = sqlx::query_as(
+        "SELECT status, auth_grant_status FROM refresh_tokens \
+         WHERE tenant_id = $1::uuid AND user_id = $2::uuid ORDER BY id",
+    )
+    .bind(account_tenant.as_uuid().to_string())
+    .bind(account_user.as_uuid().to_string())
+    .fetch_all(&store.pool)
+    .await?;
+    assert_eq!(
+        account_refreshes,
+        vec![
+            ("revoked".to_owned(), "revoked".to_owned()),
+            ("revoked".to_owned(), "revoked".to_owned()),
+        ]
+    );
+    let account_security_facts: Vec<Vec<u8>> = sqlx::query_scalar(
+        "SELECT payload FROM outbox WHERE tenant_id = $1::uuid AND contract_id = $2",
+    )
+    .bind(account_tenant.as_uuid().to_string())
+    .bind(identity::ports::SECURITY_EVENT_CONTRACT.contract_id())
+    .fetch_all(&store.pool)
+    .await?;
+    assert_eq!(account_security_facts.len(), 1, "stale CAS must not append");
+    let payload: serde_json::Value = serde_json::from_slice(&account_security_facts[0])?;
+    assert_eq!(payload.as_object().map(serde_json::Map::len), Some(4));
+    assert!(
+        !String::from_utf8_lossy(&account_security_facts[0])
+            .contains(&account_user.as_uuid().to_string())
+    );
+
+    let grant_tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let grant_user = ids::UserId::parse(&uuid::Uuid::new_v4().to_string())?;
+    seed_auth_grant_account(&store, grant_tenant, grant_user).await?;
+    let root_id = format!("grant-{}", uuid::Uuid::new_v4());
+    let sibling_id = format!("grant-{}", uuid::Uuid::new_v4());
+    let refresh_id = uuid::Uuid::new_v4().to_string();
+    let sibling_refresh_id = uuid::Uuid::new_v4().to_string();
+    let (root, root_refresh) =
+        auth_grant_fixture(grant_tenant, grant_user, &root_id, &refresh_id, [0x93; 32]);
+    let (sibling, sibling_refresh) = auth_grant_fixture(
+        grant_tenant,
+        grant_user,
+        &sibling_id,
+        &sibling_refresh_id,
+        [0x94; 32],
+    );
+    for (event_id, grant, refresh) in [
+        (
+            unique_event_id("security-grant-root"),
+            root.clone(),
+            root_refresh,
+        ),
+        (
+            unique_event_id("security-grant-sibling"),
+            sibling,
+            sibling_refresh,
+        ),
+    ] {
+        let (mutation, entry, envelope) = auth_grant_login_parts(&event_id, grant, refresh);
+        let _persisted = grant_lifecycle
+            .persist_login_grant(
+                login_producer_receipt(),
+                identity_scope(grant_tenant),
+                mutation,
+                entry,
+                envelope,
+            )
+            .await?;
+    }
+    let logout_at = root.created_at() + Duration::from_secs(1);
+    let stale_logout = identity::test_support::grant_credential_security_command(
+        root.clone(),
+        GrantSecurityEventKind::LogoutCurrent,
+        logout_at + Duration::from_secs(2),
+    );
+    let (_, revoked) = root
+        .clone()
+        .close(GrantSecurityEventKind::LogoutCurrent, logout_at)?
+        .into_parts();
+    let logout = identity::test_support::grant_credential_security_command(
+        root,
+        GrantSecurityEventKind::LogoutCurrent,
+        logout_at,
+    );
+    let reuse = identity::test_support::grant_credential_security_command(
+        revoked,
+        GrantSecurityEventKind::RefreshReuseDetected,
+        logout_at + Duration::from_secs(1),
+    );
+    let _logout_receipt = lifecycle
+        .execute(identity_scope(grant_tenant), logout)
+        .await?;
+    let _reuse_receipt = lifecycle
+        .execute(identity_scope(grant_tenant), reuse)
+        .await?;
+    assert!(matches!(
+        lifecycle
+            .execute(identity_scope(grant_tenant), stale_logout)
+            .await,
+        Err(IdentityError::VersionConflict)
+    ));
+    let grant_rows: Vec<(String, String, Option<String>)> = sqlx::query_as(
+        "SELECT grant_id, status, close_reason FROM auth_grants \
+         WHERE tenant_id = $1::uuid AND user_id = $2::uuid ORDER BY grant_id",
+    )
+    .bind(grant_tenant.as_uuid().to_string())
+    .bind(grant_user.as_uuid().to_string())
+    .fetch_all(&store.pool)
+    .await?;
+    let promoted = grant_rows
+        .iter()
+        .find(|(id, _, _)| id == &root_id)
+        .ok_or("promoted root missing")?;
+    assert_eq!(
+        promoted,
+        &(
+            root_id.clone(),
+            "compromised".to_owned(),
+            Some("refresh_reuse_detected".to_owned()),
+        )
+    );
+    let sibling = grant_rows
+        .iter()
+        .find(|(id, _, _)| id == &sibling_id)
+        .ok_or("sibling root missing")?;
+    assert_eq!(sibling.1, "active");
+    assert_eq!(sibling.2, None);
+    let grant_refreshes: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT auth_grant_id, status, auth_grant_status FROM refresh_tokens \
+         WHERE tenant_id = $1::uuid AND user_id = $2::uuid ORDER BY auth_grant_id",
+    )
+    .bind(grant_tenant.as_uuid().to_string())
+    .bind(grant_user.as_uuid().to_string())
+    .fetch_all(&store.pool)
+    .await?;
+    assert!(grant_refreshes.iter().any(|(id, status, root_status)| {
+        id == &root_id && status == "revoked" && root_status == "compromised"
+    }));
+    assert!(grant_refreshes.iter().any(|(id, status, root_status)| {
+        id == &sibling_id && status == "active" && root_status == "active"
+    }));
+    let grant_security_fact_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM outbox WHERE tenant_id = $1::uuid AND contract_id = $2",
+    )
+    .bind(grant_tenant.as_uuid().to_string())
+    .bind(identity::ports::SECURITY_EVENT_CONTRACT.contract_id())
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(
+        grant_security_fact_count, 2,
+        "stale downgrade must not append"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn credential_security_target_mapping_resolves_typed_subject_and_grant_fail_closed()
+-> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let lifecycle = crate::PgIdentitySecurityLifecycle::from_unverified_for_test(&store);
+    let resolver = crate::PgCredentialSecurityTargetResolver::from_unverified_for_test(&store);
+
+    let subject_tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let subject_user = ids::UserId::parse(&uuid::Uuid::new_v4().to_string())?;
+    seed_auth_grant_account(&store, subject_tenant, subject_user).await?;
+    let state_at = SystemTime::UNIX_EPOCH + Duration::from_secs(TEST_OCCURRED_SECS);
+    let subject_state = identity::test_support::account_security_state(AccountSecuritySnapshot {
+        tenant: subject_tenant,
+        user_id: subject_user,
+        status: AccountStatus::Active,
+        authn_epoch: 0,
+        version: 1,
+        status_changed_at: state_at,
+        updated_at: state_at,
+    });
+    let subject_command = identity::test_support::account_credential_security_command(
+        subject_state,
+        AccountSecurityEventKind::LogoutAll,
+        state_at + Duration::from_secs(1),
+    );
+    let _subject_receipt = lifecycle
+        .execute(identity_scope(subject_tenant), subject_command)
+        .await?;
+    let (subject_ref, subject_payload) =
+        credential_security_payload(&store, subject_tenant).await?;
+    assert!(
+        !subject_payload
+            .to_string()
+            .contains(&subject_user.as_uuid().to_string()),
+        "raw subject must remain only in the provider mapping"
+    );
+    let subject = resolver
+        .resolve(CredentialSecurityTargetResolutionRequest::for_test(
+            identity_scope(subject_tenant),
+            subject_ref.clone(),
+            CredentialSecurityTargetKind::Subject,
+        ))
+        .await?
+        .ok_or("subject target mapping missing")?;
+    assert_eq!(subject.tenant(), subject_tenant);
+    assert_eq!(subject.target_ref().as_uuid(), subject_ref.as_uuid());
+    assert_eq!(subject.kind(), CredentialSecurityTargetKind::Subject);
+    assert_eq!(subject.user_id(), subject_user);
+    assert!(subject.grant_id().is_none());
+    assert!(
+        resolver
+            .resolve(CredentialSecurityTargetResolutionRequest::for_test(
+                identity_scope(subject_tenant),
+                subject_ref.clone(),
+                CredentialSecurityTargetKind::Grant,
+            ))
+            .await?
+            .is_none(),
+        "subject reference must not resolve as a grant"
+    );
+    let other_tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    assert!(
+        resolver
+            .resolve(CredentialSecurityTargetResolutionRequest::for_test(
+                identity_scope(other_tenant),
+                subject_ref,
+                CredentialSecurityTargetKind::Subject,
+            ))
+            .await?
+            .is_none(),
+        "opaque target reference must not cross tenant scope"
+    );
+
+    let grant_tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let grant_user = ids::UserId::parse(&uuid::Uuid::new_v4().to_string())?;
+    seed_auth_grant_account(&store, grant_tenant, grant_user).await?;
+    let grant_id = format!("grant-{}", uuid::Uuid::new_v4());
+    let refresh_id = uuid::Uuid::new_v4().to_string();
+    let (grant, refresh) =
+        auth_grant_fixture(grant_tenant, grant_user, &grant_id, &refresh_id, [0x98; 32]);
+    let (mutation, entry, envelope) = auth_grant_login_parts(
+        &unique_event_id("security-target-grant-root"),
+        grant.clone(),
+        refresh,
+    );
+    let _persisted = crate::PgAuthGrantLifecycle::new(&store, fixed_clock())
+        .persist_login_grant(
+            login_producer_receipt(),
+            identity_scope(grant_tenant),
+            mutation,
+            entry,
+            envelope,
+        )
+        .await?;
+    let grant_command = identity::test_support::grant_credential_security_command(
+        grant,
+        GrantSecurityEventKind::LogoutCurrent,
+        state_at + Duration::from_secs(2),
+    );
+    let _grant_receipt = lifecycle
+        .execute(identity_scope(grant_tenant), grant_command)
+        .await?;
+    let (grant_ref, grant_payload) = credential_security_payload(&store, grant_tenant).await?;
+    assert!(
+        !grant_payload.to_string().contains(&grant_id),
+        "raw grant must remain only in the provider mapping"
+    );
+    let resolved_grant = resolver
+        .resolve(CredentialSecurityTargetResolutionRequest::for_test(
+            identity_scope(grant_tenant),
+            grant_ref.clone(),
+            CredentialSecurityTargetKind::Grant,
+        ))
+        .await?
+        .ok_or("grant target mapping missing")?;
+    assert_eq!(resolved_grant.kind(), CredentialSecurityTargetKind::Grant);
+    assert_eq!(resolved_grant.user_id(), grant_user);
+    assert_eq!(
+        resolved_grant
+            .grant_id()
+            .map(identity::ports::AuthGrantId::as_str),
+        Some(grant_id.as_str())
+    );
+    assert!(
+        resolver
+            .resolve(CredentialSecurityTargetResolutionRequest::for_test(
+                identity_scope(grant_tenant),
+                grant_ref,
+                CredentialSecurityTargetKind::Subject,
+            ))
+            .await?
+            .is_none(),
+        "grant reference must not resolve as a subject"
+    );
+
+    let mapping_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM credential_security_target_mappings \
+         WHERE tenant_id IN ($1::uuid, $2::uuid)",
+    )
+    .bind(subject_tenant.as_uuid().to_string())
+    .bind(grant_tenant.as_uuid().to_string())
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(mapping_count, 2);
+    let mapping_acl: (bool, bool, bool, bool, bool, bool, bool, bool, bool) = sqlx::query_as(
+        "SELECT c.relforcerowsecurity, \
+                has_table_privilege('rss_app', c.oid, 'SELECT'), \
+                has_table_privilege('rss_app', c.oid, 'INSERT'), \
+                has_table_privilege('rss_app', c.oid, 'UPDATE'), \
+                has_table_privilege('rss_app', c.oid, 'DELETE'), \
+                has_table_privilege('rss_app_read', c.oid, 'SELECT'), \
+                has_table_privilege('rss_app_read', c.oid, 'INSERT'), \
+                has_table_privilege('rss_app_read', c.oid, 'UPDATE'), \
+                has_table_privilege('rss_app_read', c.oid, 'DELETE') \
+         FROM pg_class c \
+         WHERE c.oid = 'public.credential_security_target_mappings'::regclass",
+    )
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(
+        mapping_acl,
+        (true, true, true, false, false, true, false, false, false),
+        "opaque target mapping must remain FORCE RLS and append-only for serving roles"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn identity_security_lifecycle_rolls_back_before_outbox_and_never_receipts_commit_unknown()
+-> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let other_tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let user = ids::UserId::parse(&uuid::Uuid::new_v4().to_string())?;
+    seed_auth_grant_account(&store, tenant, user).await?;
+    let grant_id = format!("grant-{}", uuid::Uuid::new_v4());
+    let refresh_id = uuid::Uuid::new_v4().to_string();
+    let (grant, refresh) = auth_grant_fixture(tenant, user, &grant_id, &refresh_id, [0x95; 32]);
+    let (mutation, entry, envelope) =
+        auth_grant_login_parts(&unique_event_id("security-fault-root"), grant, refresh);
+    let _persisted = crate::PgAuthGrantLifecycle::new(&store, fixed_clock())
+        .persist_login_grant(
+            login_producer_receipt(),
+            identity_scope(tenant),
+            mutation,
+            entry,
+            envelope,
+        )
+        .await?;
+    let state_at = SystemTime::UNIX_EPOCH + Duration::from_secs(TEST_OCCURRED_SECS);
+    let state = identity::test_support::account_security_state(AccountSecuritySnapshot {
+        tenant,
+        user_id: user,
+        status: AccountStatus::Active,
+        authn_epoch: 0,
+        version: 1,
+        status_changed_at: state_at,
+        updated_at: state_at,
+    });
+    let failed = identity::test_support::account_credential_security_command(
+        state.clone(),
+        AccountSecurityEventKind::LogoutAll,
+        state_at + Duration::from_secs(1),
+    );
+    let failed_result = crate::PgIdentitySecurityLifecycle::from_unverified_for_test(&store)
+        .with_fault(crate::identity_security_lifecycle::IdentitySecurityFault::AfterProjection)
+        .execute(identity_scope(tenant), failed)
+        .await;
+    assert!(failed_result.is_err());
+    let after_rollback: (i64, i64, String, String) = sqlx::query_as(
+        "SELECT s.authn_epoch, s.version, g.status, r.status \
+         FROM account_security_states s \
+         JOIN auth_grants g ON g.tenant_id = s.tenant_id AND g.user_id = s.user_id \
+         JOIN refresh_tokens r ON r.tenant_id = g.tenant_id AND r.auth_grant_id = g.grant_id \
+         WHERE s.tenant_id = $1::uuid AND s.user_id = $2::uuid",
+    )
+    .bind(tenant.as_uuid().to_string())
+    .bind(user.as_uuid().to_string())
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(
+        after_rollback,
+        (0, 1, "active".to_owned(), "active".to_owned())
+    );
+    let after_rollback_facts: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM outbox WHERE tenant_id = $1::uuid AND contract_id = $2",
+    )
+    .bind(tenant.as_uuid().to_string())
+    .bind(identity::ports::SECURITY_EVENT_CONTRACT.contract_id())
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(after_rollback_facts, 0);
+    let after_rollback_mappings: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM credential_security_target_mappings WHERE tenant_id = $1::uuid",
+    )
+    .bind(tenant.as_uuid().to_string())
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(
+        after_rollback_mappings, 0,
+        "projection failure must roll back the opaque target mapping"
+    );
+
+    let mismatch = identity::test_support::account_credential_security_command(
+        state.clone(),
+        AccountSecurityEventKind::LogoutAll,
+        state_at + Duration::from_secs(2),
+    );
+    assert!(
+        crate::PgIdentitySecurityLifecycle::from_unverified_for_test(&store)
+            .execute(identity_scope(other_tenant), mismatch)
+            .await
+            .is_err()
+    );
+
+    let commit_unknown = identity::test_support::account_credential_security_command(
+        state,
+        AccountSecurityEventKind::LogoutAll,
+        state_at + Duration::from_secs(3),
+    );
+    let unknown_result = crate::PgIdentitySecurityLifecycle::from_unverified_for_test(&store)
+        .with_fault(crate::identity_security_lifecycle::IdentitySecurityFault::CommitUnknown)
+        .execute(identity_scope(tenant), commit_unknown)
+        .await;
+    assert!(
+        unknown_result.is_err(),
+        "unknown commit must not return a receipt"
+    );
+    let after_unknown: (i64, i64, String, String, i64, i64) = sqlx::query_as(
+        "SELECT s.authn_epoch, s.version, g.status, r.status, \
+            (SELECT count(*) FROM outbox o \
+             WHERE o.tenant_id = s.tenant_id AND o.contract_id = $3), \
+            (SELECT count(*) FROM credential_security_target_mappings target \
+             WHERE target.tenant_id = s.tenant_id) \
+         FROM account_security_states s \
+         JOIN auth_grants g ON g.tenant_id = s.tenant_id AND g.user_id = s.user_id \
+         JOIN refresh_tokens r ON r.tenant_id = g.tenant_id AND r.auth_grant_id = g.grant_id \
+         WHERE s.tenant_id = $1::uuid AND s.user_id = $2::uuid",
+    )
+    .bind(tenant.as_uuid().to_string())
+    .bind(user.as_uuid().to_string())
+    .bind(identity::ports::SECURITY_EVENT_CONTRACT.contract_id())
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(
+        after_unknown,
+        (1, 2, "revoked".to_owned(), "revoked".to_owned(), 1, 1),
+        "PostgreSQL accepted the commit, but the adapter returned no replayable receipt"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn identity_security_lifecycle_real_append_and_precommit_failures_roll_back_everything()
+-> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+
+    for (suffix, fault) in [
+        (
+            0x96,
+            crate::identity_security_lifecycle::IdentitySecurityFault::OutboxAppend,
+        ),
+        (
+            0x97,
+            crate::identity_security_lifecycle::IdentitySecurityFault::AfterOutboxBeforeCommit,
+        ),
+    ] {
+        let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+        let user = ids::UserId::parse(&uuid::Uuid::new_v4().to_string())?;
+        seed_auth_grant_account(&store, tenant, user).await?;
+        let grant_id = format!("grant-{}", uuid::Uuid::new_v4());
+        let refresh_id = uuid::Uuid::new_v4().to_string();
+        let (grant, refresh) =
+            auth_grant_fixture(tenant, user, &grant_id, &refresh_id, [suffix; 32]);
+        let (mutation, entry, envelope) = auth_grant_login_parts(
+            &unique_event_id("security-real-outbox-fault-root"),
+            grant,
+            refresh,
+        );
+        let _persisted = crate::PgAuthGrantLifecycle::new(&store, fixed_clock())
+            .persist_login_grant(
+                login_producer_receipt(),
+                identity_scope(tenant),
+                mutation,
+                entry,
+                envelope,
+            )
+            .await?;
+
+        let state_at = SystemTime::UNIX_EPOCH + Duration::from_secs(TEST_OCCURRED_SECS);
+        let state = identity::test_support::account_security_state(AccountSecuritySnapshot {
+            tenant,
+            user_id: user,
+            status: AccountStatus::Active,
+            authn_epoch: 0,
+            version: 1,
+            status_changed_at: state_at,
+            updated_at: state_at,
+        });
+        let command = identity::test_support::account_credential_security_command(
+            state,
+            AccountSecurityEventKind::LogoutAll,
+            state_at + Duration::from_secs(1),
+        );
+        let result = crate::PgIdentitySecurityLifecycle::from_unverified_for_test(&store)
+            .with_fault(fault)
+            .execute(identity_scope(tenant), command)
+            .await;
+        assert!(
+            result.is_err(),
+            "append-boundary fault must not return a security receipt"
+        );
+
+        let after_failure: (i64, i64, String, String, i64, i64) = sqlx::query_as(
+            "SELECT s.authn_epoch, s.version, g.status, r.status, \
+                (SELECT count(*) FROM outbox o \
+                 WHERE o.tenant_id = s.tenant_id AND o.contract_id = $3), \
+                (SELECT count(*) FROM credential_security_target_mappings target \
+                 WHERE target.tenant_id = s.tenant_id) \
+             FROM account_security_states s \
+             JOIN auth_grants g ON g.tenant_id = s.tenant_id AND g.user_id = s.user_id \
+             JOIN refresh_tokens r ON r.tenant_id = g.tenant_id \
+                 AND r.auth_grant_id = g.grant_id \
+             WHERE s.tenant_id = $1::uuid AND s.user_id = $2::uuid",
+        )
+        .bind(tenant.as_uuid().to_string())
+        .bind(user.as_uuid().to_string())
+        .bind(identity::ports::SECURITY_EVENT_CONTRACT.contract_id())
+        .fetch_one(&store.pool)
+        .await?;
+        assert_eq!(
+            after_failure,
+            (0, 1, "active".to_owned(), "active".to_owned(), 0, 0),
+            "projection, grant, refresh, target mapping and appended fact must roll back together"
+        );
+    }
+
     store.shutdown().await?;
     Ok(())
 }
@@ -18684,7 +19600,7 @@ async fn refresh_rotation_inherits_auth_grant_binding_and_closed_root_fences_rot
     let close = case
         .grant
         .clone()
-        .close(AuthGrantCloseReason::LogoutCurrent, closed_at)
+        .close(GrantSecurityEventKind::LogoutCurrent, closed_at)
         .expect("fixture close is valid");
     crate::PgAuthGrantLifecycle::new(&app, fixed_clock())
         .close(
@@ -24186,7 +25102,9 @@ async fn tc6_config_cotx_business_failure_rolls_back_both() -> TestResult {
                     .map_err(|e| ConfigRepoError::Storage(Box::new(e)))?;
                     Err::<
                         crate::cotx::ProducerTxOutcome<
-                            generated::http::settings_v1::RouteMarker,
+                            httpserve::ProducerAuthorization<
+                                generated::http::settings_v1::RouteMarker,
+                            >,
                             (),
                         >,
                         ConfigRepoError,
@@ -24467,7 +25385,9 @@ async fn tc7b_config_cotx_conformance() -> TestResult {
                                 .map_err(|e| ConfigRepoError::Storage(Box::new(e)))?;
                                 Err::<
                                     crate::cotx::ProducerTxOutcome<
-                                        generated::http::settings_v1::RouteMarker,
+                                        httpserve::ProducerAuthorization<
+                                            generated::http::settings_v1::RouteMarker,
+                                        >,
                                         (),
                                     >,
                                     ConfigRepoError,
@@ -27032,7 +27952,9 @@ async fn policy_repo_cotx_rolls_back_policy_and_outbox() -> TestResult {
                     .map_err(|e| IdentityError::Storage(Box::new(e)))?;
                     Err::<
                         crate::cotx::ProducerTxOutcome<
-                            generated::http::identity_v1::policies_create::RouteMarker,
+                            httpserve::ProducerAuthorization<
+                                generated::http::identity_v1::policies_create::RouteMarker,
+                            >,
                             (),
                         >,
                         IdentityError,

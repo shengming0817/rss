@@ -22,16 +22,18 @@ help: remove the extra arguments
 22 -         SystemTime::UNIX_EPOCH,
 23 -         SystemTime::UNIX_EPOCH,
 24 -         Some(SystemTime::UNIX_EPOCH),
-25 -         Some(AuthGrantCloseReason::LogoutCurrent),
+25 -         Some(CredentialSecurityEventKind::Grant(
+26 -             GrantSecurityEventKind::LogoutCurrent,
+27 -         )),
 16 +         /* AuthGrantSnapshot */,
    |
 
 error[E0061]: this function takes 1 argument but 12 arguments were supplied
-  --> tests/ui/auth_grant_positional_hydration_removed_fail.rs:27:20
+  --> tests/ui/auth_grant_positional_hydration_removed_fail.rs:29:20
    |
-27 |     let _refresh = RefreshTokenRecord::hydrate(
+29 |     let _refresh = RefreshTokenRecord::hydrate(
    |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^
-28 |         "refresh",
+30 |         "refresh",
    |         --------- expected `RefreshTokenSnapshot`, found `&str`
    |
 note: associated function defined here
@@ -41,17 +43,17 @@ note: associated function defined here
    |            ^^^^^^^
 help: remove the extra arguments
    |
-28 -         "refresh",
-29 -         tenant,
-30 -         "grant",
-31 -         user_id,
-32 -         epoch,
-33 -         AuthGrantStatus::Active,
-34 -         [0_u8; 32],
-35 -         None,
-36 -         "refresh",
-37 -         RefreshStatus::Active,
-38 -         SystemTime::UNIX_EPOCH,
-39 -         SystemTime::UNIX_EPOCH,
-28 +         /* RefreshTokenSnapshot */,
+30 -         "refresh",
+31 -         tenant,
+32 -         "grant",
+33 -         user_id,
+34 -         epoch,
+35 -         AuthGrantStatus::Active,
+36 -         [0_u8; 32],
+37 -         None,
+38 -         "refresh",
+39 -         RefreshStatus::Active,
+40 -         SystemTime::UNIX_EPOCH,
+41 -         SystemTime::UNIX_EPOCH,
+30 +         /* RefreshTokenSnapshot */,
    |

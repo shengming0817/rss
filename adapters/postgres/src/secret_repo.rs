@@ -654,7 +654,7 @@ impl SecretUnitOfWork for PgSecretUnitOfWork {
         let tenant = scope.tenant();
         let key = key.clone();
         self.pool
-            .lock_bounded_write(
+            .write(
                 scope,
                 move |tx| {
                     Box::pin(async move {
