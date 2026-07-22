@@ -1,0 +1,17 @@
+# Runtime composition-root monotonic responsibility ratchet seed.
+#
+# This prerequisite freezes the protected pre-#1794 baseline outside the
+# refactor subject. #1794 appends the landed revision and installs the guard.
+schemaVersion = 1
+currentRevision = "pre-1794"
+
+[[history]]
+revision = "pre-1794"
+rawLines = 9428
+topLevelFunctions = 123
+topLevelTypes = 43
+topLevelConstStatic = 28
+implMethods = 59
+publicModules = 8
+publicReexports = 12
+inlineProductionModules = 0
