@@ -23,6 +23,7 @@ settings-composition = { path = "../../composition/settings" }
 vault = { path = "../../adapters/vault", features = ["backend"] }
 
 [dev-dependencies]
+vault = { path = "../../adapters/vault", features = ["backend", "test-support"] }
 base64 = { workspace = true }
 postgres = { path = "../../adapters/postgres", features = ["domain-settings", "test-support"] }
 reqwest = { workspace = true }

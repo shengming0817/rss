@@ -9,8 +9,8 @@
 //!
 //! 签名冻结（G0）已补真实行为：`domain` newtype 校验 / `diff` / `evaluate_flag`（全 11 operator + 百分比
 //! 分桶）；`application` 经 in-mem `Publisher`（L2 OutboxFact）打通配置发布/回滚接缝。真实持久化（postgres
-//! adapter impl [`ports::ConfigRepo`]）+ axum 挂载（config publish/get/delete/rollback / secret-publish
-//! 认证路由）已落（#1430
+//! adapter impl [`ports::ConfigRepo`]）+ axum 挂载（config publish/get/delete/rollback / secret
+//! publish/resolve 认证路由）已落（#1430
 //! PERSIST-009 settings 首条 durable module 闭环）。`smoke` 保留为签名冻结回归（绑函数指针锁签名）。
 //!
 //! # 对标
@@ -32,7 +32,7 @@ pub use application::{
     SettingsServiceError, config_version_changed_event_from_message,
 };
 pub use ports::ConfigEntry;
-pub use secret_application::{SecretService, SecretServiceError};
+pub use secret_application::{SecretResolveService, SecretService, SecretServiceError};
 
 /// Mint a route-typed config-publish receipt for tests that bypass the HTTP router.
 #[cfg(any(test, feature = "test-support"))]
@@ -67,7 +67,8 @@ pub fn empty_flag_store() -> FlagStoreBox {
 }
 
 /// 返回共享同一 in-mem store 的 secret read repo + mutation UoW，供 seed / journey 注入
-/// [`SettingsDomain::new`] 的 secret-publish 路由 State（#1430）。
+/// [`SettingsDomain::new`] 的 secret-publish 路由 State（#1430）；secret-resolve 另经
+/// [`SecretResolveService`] 只读能力注入。
 ///
 /// 与 [`empty_flag_store`] 同治理姿态：`InMemSecretRepo` 保持 `pub(crate)` 封装，此工厂是唯一对外构造路径
 /// 两个 dyn port 类型互不可换，且写入后 read slot 可立即观察同一 store。仅 `test` / `seed-data` 可用。

@@ -439,6 +439,7 @@ impl<'a> ProvidersBuilt<'a> {
 
         let identity_signer_permit = provider_factories.identity_signer()?;
         let settings_key_provider_permit = provider_factories.settings_key_provider()?;
+        let settings_secret_resolver_permit = provider_factories.settings_secret_resolver()?;
         let (vault, identity_signer, settings_config_value_key_name) =
             vault_config.into_runtime().context("setup vault deps")?;
         let mut vault_module = DomainModuleResult {
@@ -455,6 +456,7 @@ impl<'a> ProvidersBuilt<'a> {
                 vault_module,
                 identity_signer_permit,
                 settings_key_provider_permit,
+                settings_secret_resolver_permit,
             ))
             .context("record vault provider output")?;
 

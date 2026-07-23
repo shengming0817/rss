@@ -135,6 +135,7 @@ pub fn build_vault_runtime_from_values(
     token: String,
     transit_mount: String,
     settings_key_name: String,
+    tenant_store_allowlist_json: String,
 ) -> anyhow::Result<(
     vault::VaultRuntimeDeps,
     Arc<vault::VaultSigner>,
@@ -145,6 +146,7 @@ pub fn build_vault_runtime_from_values(
         token,
         transit_mount,
         settings_key_name,
+        tenant_store_allowlist_json,
     )
 }
 

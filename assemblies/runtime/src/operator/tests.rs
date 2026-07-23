@@ -2909,7 +2909,7 @@ fn settings_config_value_maintenance_args_fail_closed() {
 
 #[test]
 fn settings_config_value_maintenance_config_failures_keep_exact_audit_and_context() {
-    let key_name_error = crate::infra::vault::VaultRuntimeConfigError::SettingsKeyNameConfig(
+    let key_name_error = crate::infra::vault::VaultKeyProviderConfigError::SettingsKeyName(
         anyhow::anyhow!("invalid key name"),
     );
     assert_eq!(
@@ -2917,7 +2917,7 @@ fn settings_config_value_maintenance_config_failures_keep_exact_audit_and_contex
         ("key_name_config", "settings config value key name")
     );
 
-    let client_error = crate::infra::vault::VaultRuntimeConfigError::VaultClientConfig(
+    let client_error = crate::infra::vault::VaultKeyProviderConfigError::VaultClient(
         anyhow::anyhow!("invalid Vault client"),
     );
     assert_eq!(

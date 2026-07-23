@@ -786,6 +786,7 @@ const fn provider_role_variant(role: ProviderRole) -> &'static str {
         ProviderRole::EventSubscriber => "EventSubscriber",
         ProviderRole::IdentitySigner => "IdentitySigner",
         ProviderRole::SettingsKeyProvider => "SettingsKeyProvider",
+        ProviderRole::SettingsSecretResolver => "SettingsSecretResolver",
         ProviderRole::ListenerPdp => "ListenerPdp",
         ProviderRole::ServiceTokenReplayStore => "ServiceTokenReplayStore",
         ProviderRole::AuthAuditSink => "AuthAuditSink",
@@ -807,6 +808,7 @@ const fn port_variant(port: DiportPort) -> &'static str {
         DiportPort::AckableSubscriber => "AckableSubscriber",
         DiportPort::Signer => "Signer",
         DiportPort::KeyProvider => "KeyProvider",
+        DiportPort::SecretResolver => "SecretResolver",
         DiportPort::Pdp => "Pdp",
         DiportPort::ServiceTokenReplayStore => "ServiceTokenReplayStore",
         DiportPort::AuditSink => "AuditSink",
@@ -833,6 +835,7 @@ const fn constructor_variant(constructor: ProviderConstructor) -> &'static str {
         ProviderConstructor::PostgresDlxLifecycleRepository => "PostgresDlxLifecycleRepository",
         ProviderConstructor::VaultSigner => "VaultSigner",
         ProviderConstructor::VaultKeyProvider => "VaultKeyProvider",
+        ProviderConstructor::VaultSecretResolver => "VaultSecretResolver",
         ProviderConstructor::OidcProvider => "OidcProvider",
         ProviderConstructor::S3Store => "S3Store",
         ProviderConstructor::S3VerifiedDlxArchiveStore => "S3VerifiedDlxArchiveStore",
@@ -848,6 +851,7 @@ const fn factory_variant(factory: ProviderFactorySymbol) -> &'static str {
         ProviderFactorySymbol::EventexecAmqpSubscriber => "EventexecAmqpSubscriber",
         ProviderFactorySymbol::IdentityVaultSigner => "IdentityVaultSigner",
         ProviderFactorySymbol::SettingsVaultKeyProvider => "SettingsVaultKeyProvider",
+        ProviderFactorySymbol::SettingsVaultSecretResolver => "SettingsVaultSecretResolver",
         ProviderFactorySymbol::HttpserveOidcPdp => "HttpserveOidcPdp",
         ProviderFactorySymbol::OidcPostgresServiceTokenReplayStore => {
             "OidcPostgresServiceTokenReplayStore"

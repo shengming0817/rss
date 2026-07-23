@@ -26,6 +26,7 @@ use crate::phase::test_support::{
 };
 use crate::support::{SystemClock, TracingAuthAuditSink};
 use anyhow::Context as _;
+use settings_composition::SECRET_RESOLVER_READY_PROBE_NAME;
 
 use audit::ports::TenantRepoScope as AuditTenantRepoScope;
 use axum::http::Method;
@@ -234,11 +235,11 @@ fn runtime_module_output_harness_captures_merge_and_probe_drain_order() {
         runtime_module_harness_transcript(),
         [
             "phase-order: build_provider -> build_infra -> wire_domains -> finalize -> launch",
-            "module-probes: configs_ready, keyprovider_ready, auth_grant_sweeper, service_token_replay_sweeper, certificate_revocation_sweeper, s3_object_store_ready, domain_transport_ready, outbox_relay_identity, outbox_relay_settings, outbox_sampler, outbox_sweeper, event_consumer:settings_config-version-changed__settings__settings_config-version-changed, event_consumer:identity_session-created__audit__audit_session-created, event_consumer:identity_role-assigned__audit__audit_role-assigned, event_consumer:identity_role-revoked__audit__audit_role-revoked, event_consumer:identity_policy-updated__audit__audit_policy-updated, inbox_sweeper, dlx_lifecycle, dlx_archive_ready",
+            "module-probes: configs_ready, keyprovider_ready, vault_secret_resolver_ready, auth_grant_sweeper, service_token_replay_sweeper, certificate_revocation_sweeper, s3_object_store_ready, domain_transport_ready, outbox_relay_identity, outbox_relay_settings, outbox_sampler, outbox_sweeper, event_consumer:settings_config-version-changed__settings__settings_config-version-changed, event_consumer:identity_session-created__audit__audit_session-created, event_consumer:identity_role-assigned__audit__audit_role-assigned, event_consumer:identity_role-revoked__audit__audit_role-revoked, event_consumer:identity_policy-updated__audit__audit_policy-updated, inbox_sweeper, dlx_lifecycle, dlx_archive_ready",
             "module-resources: redis, s3, vault-secret-resolver, vault-key-provider, rss_access_token_verifier, federated_access_token_verifier, service_token_verifier, domain-http-transport, identity-pub, identity-sub, settings-pub, settings-sub, postgres-dlx-lifecycle",
-            "module-workers: keyprovider-readiness-sampler, auth-grant-sweeper, service-token-replay-sweeper, certificate-revocation-sweeper, s3-canary-sampler, outbox-relay-identity, outbox-relay-settings, outbox-sampler, outbox-sweeper, event-consumer:settings:settings.config-version-changed, event-consumer:audit:identity.session-created, event-consumer:audit:identity.role-assigned, event-consumer:audit:identity.role-revoked, event-consumer:audit:identity.policy-updated, inbox-sweeper, dlx-lifecycle, dlx-archive-readiness, redis-readiness-sampler",
-            "readyz-probes-before-reporter: rls_ready, redis_ready, rss_access_token_jwks_ready, federated_access_token_jwks_ready, configs_ready, keyprovider_ready, auth_grant_sweeper, service_token_replay_sweeper, certificate_revocation_sweeper, s3_object_store_ready, domain_transport_ready, outbox_relay_identity, outbox_relay_settings, outbox_sampler, outbox_sweeper, event_consumer:settings_config-version-changed__settings__settings_config-version-changed, event_consumer:identity_session-created__audit__audit_session-created, event_consumer:identity_role-assigned__audit__audit_role-assigned, event_consumer:identity_role-revoked__audit__audit_role-revoked, event_consumer:identity_policy-updated__audit__audit_policy-updated, inbox_sweeper, dlx_lifecycle, dlx_archive_ready",
-            "reporter-probe-count: 23",
+            "module-workers: keyprovider-readiness-sampler, vault-secret-resolver-readiness-sampler, auth-grant-sweeper, service-token-replay-sweeper, certificate-revocation-sweeper, s3-canary-sampler, outbox-relay-identity, outbox-relay-settings, outbox-sampler, outbox-sweeper, event-consumer:settings:settings.config-version-changed, event-consumer:audit:identity.session-created, event-consumer:audit:identity.role-assigned, event-consumer:audit:identity.role-revoked, event-consumer:audit:identity.policy-updated, inbox-sweeper, dlx-lifecycle, dlx-archive-readiness, redis-readiness-sampler",
+            "readyz-probes-before-reporter: rls_ready, redis_ready, rss_access_token_jwks_ready, federated_access_token_jwks_ready, configs_ready, keyprovider_ready, vault_secret_resolver_ready, auth_grant_sweeper, service_token_replay_sweeper, certificate_revocation_sweeper, s3_object_store_ready, domain_transport_ready, outbox_relay_identity, outbox_relay_settings, outbox_sampler, outbox_sweeper, event_consumer:settings_config-version-changed__settings__settings_config-version-changed, event_consumer:identity_session-created__audit__audit_session-created, event_consumer:identity_role-assigned__audit__audit_role-assigned, event_consumer:identity_role-revoked__audit__audit_role-revoked, event_consumer:identity_policy-updated__audit__audit_policy-updated, inbox_sweeper, dlx_lifecycle, dlx_archive_ready",
+            "reporter-probe-count: 24",
             "registry-probe-count-after-take: 0",
         ]
         .join("\n")
@@ -293,9 +294,16 @@ fn runtime_module_harness_transcript() -> String {
 fn runtime_module_output_harness() -> DomainModuleResult {
     let mut module = DomainModuleResult::default();
     module.merge(harness_module(
-        &[CONFIGS_READY_PROBE_NAME, KEYPROVIDER_READY_PROBE_NAME],
+        &[
+            CONFIGS_READY_PROBE_NAME,
+            KEYPROVIDER_READY_PROBE_NAME,
+            SECRET_RESOLVER_READY_PROBE_NAME,
+        ],
         &[],
-        &["keyprovider-readiness-sampler"],
+        &[
+            "keyprovider-readiness-sampler",
+            "vault-secret-resolver-readiness-sampler",
+        ],
     ));
     module.merge(harness_module(
         &[AUTH_GRANT_SWEEPER_PROBE_NAME],

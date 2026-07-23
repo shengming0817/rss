@@ -48,7 +48,7 @@ use sqlx::PgPool;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode as SqlxPgSslMode};
 use tower::ServiceExt as _;
 use vault::{
-    SignatureMarshaling, TenantStoreAllowlist, VaultKeyProvider, VaultRuntimeDeps,
+    SignatureMarshaling, StoreBinding, TenantStoreAllowlist, VaultKeyProvider, VaultRuntimeDeps,
     VaultSecretResolver, VaultSigner,
 };
 use wiremock::matchers::{body_partial_json, method as match_method, path};
@@ -84,6 +84,19 @@ const OPERATOR_ROLE: &str = "operator";
 const TARGET_SUBJECT: &str = "bob@example.test";
 const KEYPROVIDER_CONFIG_FIELD: &str = "settings.config.value";
 const KEYPROVIDER_CONFIG_SCHEME: u32 = 1;
+
+fn unused_tenant_store_allowlist() -> TestResult<TenantStoreAllowlist> {
+    Ok(TenantStoreAllowlist::new([(
+        (
+            TenantId::parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")?,
+            "vault".to_owned(),
+        ),
+        StoreBinding {
+            mount: "secret".to_owned(),
+            kv_path_prefix: "tenants/a".to_owned(),
+        },
+    )])?)
+}
 
 struct NoopDomainTransport;
 
@@ -604,9 +617,9 @@ async fn wire_identity_login_refresh_and_rotation_e2e() -> TestResult {
             .await?;
     }
 
-    // 3. vault bundle（#1498）：pre-GA 空 allowlist，secret resolver 不触 vault；仅构造器结构满足
-    //    SharedRuntimeDeps.vault 字段。mock http URL 可用（resolver 仅构造期校验 URL，无连接）。
-    let stores = TenantStoreAllowlist::new(std::iter::empty())?;
+    // 3. vault bundle（#1498）：合法但未使用的单条 allowlist binding；secret resolver 不触 vault，
+    //    仅构造器结构满足 SharedRuntimeDeps.vault 字段。mock URL 仅在构造期校验，不建立连接。
+    let stores = unused_tenant_store_allowlist()?;
     let vault = VaultRuntimeDeps::new(
         VaultSecretResolver::new_allow_http(
             reqwest::Client::new(),
@@ -942,7 +955,7 @@ async fn wire_identity_roles_binding_http_persists_and_emits_outbox_e2e() -> Tes
         outbox_topic_count(&assertion_pool, "settings", SETTINGS_VERSION_CHANGED_TOPIC).await?;
 
     // 3. production runtime deps + Primary router/auth middleware.
-    let stores = TenantStoreAllowlist::new(std::iter::empty())?;
+    let stores = unused_tenant_store_allowlist()?;
     let vault = VaultRuntimeDeps::new(
         VaultSecretResolver::new_allow_http(
             reqwest::Client::new(),

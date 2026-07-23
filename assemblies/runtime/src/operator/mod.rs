@@ -7,6 +7,7 @@ mod postgres;
 mod projection;
 mod reconcile;
 mod settings;
+mod vault_allowlist;
 
 pub use audit_ledger::{is_audit_ledger_verify_command, run_audit_ledger_verify_command};
 pub use dlq::{is_dlq_command, run_dlq_control_command};
@@ -16,6 +17,9 @@ pub use projection::{is_projection_command, run_projection_control_command};
 pub use reconcile::{is_reconcile_target_command, run_reconcile_target_command};
 pub use settings::{
     is_settings_config_value_maintenance_command, run_settings_config_value_maintenance,
+};
+pub use vault_allowlist::{
+    is_vault_allowlist_validation_command, run_vault_allowlist_validation_command,
 };
 
 pub use crate::phase::OperatorRuntimeInputs;

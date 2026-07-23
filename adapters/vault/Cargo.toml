@@ -40,6 +40,9 @@ default = []
 backend = ["dep:reqwest", "dep:tracing", "dep:thiserror", "dep:serde", "dep:serde_json", "dep:base64", "dep:zeroize", "dep:secure"]
 # live Vault round-trip 集成测试门（在 backend 之上）：#[ignore] + env fail-closed，默认不跑。
 integration = ["backend"]
+# Plain-HTTP SecretResolver construction is unavailable to production dependency graphs. Test
+# assemblies opt in explicitly so loopback Vault fixtures remain possible without weakening `new`.
+test-support = []
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

@@ -8,8 +8,9 @@
 //! domain 同源），非单段 leaf。
 //!
 //! **租户隔离（TenantStoreAllowlist，网络前 fail-closed）**：`resolve` 先查 allowlist；
-//! 未命中直接返 `Forbidden`，不发任何 HTTP 请求。租户 A 引用租户 B 的 store 与真实 ACL 拒绝
-//! 不可区分——不给租户提供拓扑 oracle。
+//! 未命中直接返 `Forbidden`，不发任何 HTTP 请求；wrong-tenant 与 unknown-store 不可区分，
+//! 不给租户提供拓扑 oracle。命中后的 Vault 401/403 是 provider credential/policy 故障，归类为
+//! `StoreUnreachable`，不会伪装成本地 allowlist 拒绝。
 //!
 //! **KV v2 envelope**：成功 200 响应形如 `{"data":{"data":{"value":"..."}}}` 。adapter
 //! 取内层 `data.data.value` 字段的 UTF-8 字节作为 secret 材料（约定 key = `"value"`，单一
@@ -67,12 +68,44 @@ struct NonSuccessStatus(u16);
 #[error("vault kv v2 response missing expected payload field")]
 struct MissingPayloadField;
 
+/// Reserved relative key resolved by the active Vault capability readiness sampler.
+pub const SECRET_RESOLVER_READINESS_KEY: &str = ".rss-readiness";
+
+/// One canonical, allowlisted readiness target derived from the authorization map itself.
+#[derive(Clone, secure::Redact)]
+pub struct SecretResolverReadinessTarget {
+    #[redact(sensitivity = internal)]
+    tenant: TenantId,
+    #[redact(sensitivity = internal)]
+    coordinate: SecretCoordinate,
+}
+
+impl SecretResolverReadinessTarget {
+    /// Tenant whose explicit binding owns this canary target.
+    #[must_use]
+    pub const fn tenant(&self) -> TenantId {
+        self.tenant
+    }
+
+    /// Coordinate under the exact store alias/prefix authorized for the tenant.
+    #[must_use]
+    pub const fn coordinate(&self) -> &SecretCoordinate {
+        &self.coordinate
+    }
+}
+
 // ── TenantStoreAllowlist ───────────────────────────────────────────────────────────────────
 
 /// 把 `(TenantId, store_id)` 解析成 KV 挂载点 + 前缀路径的静态映射。
 ///
 /// **安全语义**：未命中 = 该租户无权访问该 store（`Forbidden`，网络前 fail-closed）。
 /// 组合根构造时注入，运行期只读——线程安全无需锁。
+///
+/// # Invariant
+///
+/// 只能由 [`TenantStoreAllowlist::new`] 构造，且始终非空、没有重复 `(tenant, store)` 授权，
+/// 不同 tenant 的规范化 Vault 物理命名空间互不重叠。同 tenant 可用多个显式 store alias
+/// 指向同一命名空间。
 #[derive(Debug)]
 pub struct TenantStoreAllowlist {
     entries: HashMap<(TenantId, String), StoreBinding>,
@@ -93,21 +126,73 @@ pub struct StoreBinding {
     pub kv_path_prefix: String,
 }
 
+/// Construction errors owned exclusively by [`TenantStoreAllowlist`].
+///
+/// Keeping authorization-map invariants separate from resolver transport configuration lets
+/// offline validation depend only on errors it can actually produce.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum TenantStoreAllowlistError {
+    /// allowlist 必须至少包含一个显式 binding。
+    #[error("vault tenant store allowlist must not be empty")]
+    EmptyStoreAllowlist,
+    /// 同一 `(tenant, store)` 不得重复授权。
+    #[error("vault tenant store allowlist contains a duplicate binding")]
+    DuplicateStoreBinding,
+    /// 不同 tenant 的 Vault 物理命名空间不得重叠。
+    #[error("vault tenant store allowlist contains an overlapping cross-tenant namespace")]
+    OverlappingTenantNamespace,
+    /// KV v2 mount 为空。
+    #[error("vault kv mount must not be empty (e.g. secret or team/secrets)")]
+    EmptyMount,
+    /// KV v2 mount 含非法 path 段（空段 / `.` / `..`）。
+    #[error("vault kv mount has an invalid path segment (empty, '.', or '..')")]
+    InvalidMountSegment,
+    /// `StoreBinding.kv_path_prefix` 含非法 path 段（空段 / `.` / `..`，路径穿越风险）。
+    #[error("store binding kv_path_prefix has an invalid path segment (empty, '.', or '..')")]
+    InvalidPrefixSegment,
+}
+
 impl TenantStoreAllowlist {
     /// 由 `(tenant_id, store_id) -> StoreBinding` 条目构造 allowlist。
     ///
-    /// **安全验证**：每条 `StoreBinding` 的 `mount`（经 [`parse_kv_mount_segments`]：非空 + 各段非
-    /// `.` / `..`）与 `kv_path_prefix`（经 [`parse_kv_prefix_segments`]：可空 + 各段非 `.` / `..` / 空）
-    /// 在构造期校验——mount 是 load-bearing 坐标（F1），穿越段在此 fail-closed，杜绝运行期路径穿越。
+    /// **唯一不变式入口**：拒绝空集合、重复 `(tenant, store)`，并拒绝不同 tenant 在同一
+    /// 规范化 mount 下拥有相同或互为祖先/后代的 prefix（空 prefix 覆盖整个 mount）。每条
+    /// `StoreBinding` 的 `mount`（经 [`parse_kv_mount_segments`]：非空 + 各段非 `.` / `..`）与
+    /// `kv_path_prefix`（经 [`parse_kv_prefix_segments`]：可空 + 各段非 `.` / `..` / 空）也在此
+    /// 校验。运行期因此只消费已证明隔离的只读映射。
     pub fn new(
         entries: impl IntoIterator<Item = ((TenantId, String), StoreBinding)>,
-    ) -> Result<Self, VaultSecretResolverConfigError> {
+    ) -> Result<Self, TenantStoreAllowlistError> {
         let mut map = HashMap::new();
-        for ((tid, sid), binding) in entries {
-            // 构造期校验 mount（load-bearing）+ kv_path_prefix 各段，拒绝穿越段（路径穿越防御）。
-            parse_kv_mount_segments(&binding.mount)?;
-            parse_kv_prefix_segments(&binding.kv_path_prefix)?;
+        let mut namespaces: Vec<(TenantId, Vec<String>, Vec<String>)> = Vec::new();
+        for ((tid, sid), mut binding) in entries {
+            if map.contains_key(&(tid, sid.clone())) {
+                return Err(TenantStoreAllowlistError::DuplicateStoreBinding);
+            }
+
+            let mount = parse_kv_mount_segments(&binding.mount)?;
+            let prefix = parse_kv_prefix_segments(&binding.kv_path_prefix)?
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            if namespaces
+                .iter()
+                .any(|(other_tenant, other_mount, other_prefix)| {
+                    *other_tenant != tid
+                        && *other_mount == mount
+                        && (prefix.starts_with(other_prefix) || other_prefix.starts_with(&prefix))
+                })
+            {
+                return Err(TenantStoreAllowlistError::OverlappingTenantNamespace);
+            }
+
+            binding.mount = mount.join("/");
+            binding.kv_path_prefix = prefix.join("/");
+            namespaces.push((tid, mount, prefix));
             map.insert((tid, sid), binding);
+        }
+        if map.is_empty() {
+            return Err(TenantStoreAllowlistError::EmptyStoreAllowlist);
         }
         Ok(Self { entries: map })
     }
@@ -117,12 +202,26 @@ impl TenantStoreAllowlist {
         self.entries.get(&(tenant, store_id.to_string()))
     }
 
-    /// allowlist 是否为空（无任何已配置 store binding）。
-    ///
-    /// 空 allowlist 意味着所有 `resolve` 调用在网络发起前即 fail-closed（`Forbidden`）。
-    /// 生产环境中空 allowlist 通常是配置漏项，调用方应在启动时打 warn 日志。
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+    fn readiness_targets(&self) -> Vec<SecretResolverReadinessTarget> {
+        let mut targets = self
+            .entries
+            .keys()
+            .map(|(tenant, store_id)| SecretResolverReadinessTarget {
+                tenant: *tenant,
+                coordinate: SecretCoordinate::new(
+                    store_id.clone(),
+                    SECRET_RESOLVER_READINESS_KEY,
+                    None,
+                ),
+            })
+            .collect::<Vec<_>>();
+        targets.sort_by(|left, right| {
+            left.tenant
+                .to_string()
+                .cmp(&right.tenant.to_string())
+                .then_with(|| left.coordinate.store_id().cmp(right.coordinate.store_id()))
+        });
+        targets
     }
 }
 
@@ -132,7 +231,7 @@ impl TenantStoreAllowlist {
 ///
 /// **构造器**：
 /// - [`new`](Self::new)——https-only（fail-fast）。
-/// - [`new_allow_http`](Self::new_allow_http)——显式放行 http（本地 dev / 测试专用，greppable）。
+/// - `new_allow_http`——仅在 `test-support` / 本 crate 测试编译图中存在的 HTTP opt-in。
 ///
 /// **必填位置参**（构造器缺失即编译错误）：`client` / `addr` / `token` / `timeout` / `stores`
 /// 均为必填——符合 `rss` 构造器必填参数规范（non-Option 位置参，Hard）。**无全局 mount**——
@@ -157,25 +256,20 @@ pub enum VaultSecretResolverConfigError {
     /// Vault 地址使用非 https scheme 且未经 `new_allow_http` 显式放行。
     #[error("vault address must use https; use new_allow_http for local dev http opt-in")]
     InsecureScheme,
-    /// KV v2 mount 为空。
-    #[error("vault kv mount must not be empty (e.g. secret or team/secrets)")]
-    EmptyMount,
-    /// KV v2 mount 含非法 path 段（空段 / `.` / `..`）。
-    #[error("vault kv mount has an invalid path segment (empty, '.', or '..')")]
-    InvalidMountSegment,
     /// Vault token 为空。
     #[error(
         "vault token must not be empty (provide via composition root / Vault Agent, not hardcoded)"
     )]
     EmptyToken,
-    /// `StoreBinding.kv_path_prefix` 含非法 path 段（空段 / `.` / `..`，路径穿越风险）。
-    #[error(
-        "store binding kv_path_prefix has an invalid path segment (empty, '.', or '..'): {0:?}"
-    )]
-    InvalidPrefixSegment(String),
 }
 
 impl VaultSecretResolver {
+    /// Derive every live capability canary from the same validated authorization map.
+    #[must_use]
+    pub fn readiness_targets(&self) -> Vec<SecretResolverReadinessTarget> {
+        self.stores.readiness_targets()
+    }
+
     /// 构造 KV v2 secret 解析 adapter（**https-only**）。`client` 由组合根预配置 TLS 后注入；
     /// `addr` 是 base URL；`timeout` 是请求级超时（必填）；`stores` 是租户 store allowlist（必填，
     /// 构造期注入）。mount 是 per-store 坐标（随 [`StoreBinding`]），不在此传全局 mount（F1）。
@@ -192,6 +286,7 @@ impl VaultSecretResolver {
 
     /// 同 [`new`](Self::new)，但**显式放行 http**——仅用于本地 dev / 集成测试（具名 typed opt-in，
     /// greppable；不降级 [`new`](Self::new) 的 https-only 强制）。
+    #[cfg(any(test, feature = "test-support"))]
     pub fn new_allow_http(
         client: reqwest::Client,
         addr: impl Into<String>,
@@ -230,15 +325,15 @@ impl VaultSecretResolver {
 }
 
 /// 把 KV mount 规范化为 path 段集（去首尾 `/` 后按 `/` 拆分），拒绝空段 / `.` / `..`。
-fn parse_kv_mount_segments(mount: &str) -> Result<Vec<String>, VaultSecretResolverConfigError> {
+fn parse_kv_mount_segments(mount: &str) -> Result<Vec<String>, TenantStoreAllowlistError> {
     let trimmed = mount.trim().trim_matches('/');
     if trimmed.is_empty() {
-        return Err(VaultSecretResolverConfigError::EmptyMount);
+        return Err(TenantStoreAllowlistError::EmptyMount);
     }
     let mut segments = Vec::new();
     for segment in trimmed.split('/') {
         if segment.is_empty() || segment == "." || segment == ".." {
-            return Err(VaultSecretResolverConfigError::InvalidMountSegment);
+            return Err(TenantStoreAllowlistError::InvalidMountSegment);
         }
         segments.push(segment.to_string());
     }
@@ -249,7 +344,7 @@ fn parse_kv_mount_segments(mount: &str) -> Result<Vec<String>, VaultSecretResolv
 ///
 /// 允许空前缀（空字符串 → 返回空 Vec，表示无前缀直挂 key）；
 /// 非空前缀每段经同等校验（对齐 [`parse_kv_mount_segments`]）。
-fn parse_kv_prefix_segments(prefix: &str) -> Result<Vec<&str>, VaultSecretResolverConfigError> {
+fn parse_kv_prefix_segments(prefix: &str) -> Result<Vec<&str>, TenantStoreAllowlistError> {
     let trimmed = prefix.trim_matches('/');
     if trimmed.is_empty() {
         return Ok(Vec::new());
@@ -257,9 +352,7 @@ fn parse_kv_prefix_segments(prefix: &str) -> Result<Vec<&str>, VaultSecretResolv
     let mut segments = Vec::new();
     for segment in trimmed.split('/') {
         if segment.is_empty() || segment == "." || segment == ".." {
-            return Err(VaultSecretResolverConfigError::InvalidPrefixSegment(
-                prefix.to_string(),
-            ));
+            return Err(TenantStoreAllowlistError::InvalidPrefixSegment);
         }
         segments.push(segment);
     }
@@ -386,10 +479,12 @@ async fn kv_resolve_impl(
 
         // 状态码语义映射（与任务规格对齐）：
         //   404 无 ?version → NotFound；404 有 version → VersionNotFound。
-        //   401/403 → Forbidden。
+        //   401/403 → StoreUnreachable（provider credential / policy failure）。
         //   429/5xx → StoreUnreachable（fail-closed）。
         return match code {
-            401 | 403 => Err(SecretResolverError::Forbidden),
+            401 | 403 => Err(SecretResolverError::store_unreachable(NonSuccessStatus(
+                code,
+            ))),
             404 => {
                 if coord.version().is_some() {
                     Err(SecretResolverError::VersionNotFound)
@@ -621,7 +716,8 @@ mod backend_tests {
     use std::time::Duration;
 
     use super::{
-        StoreBinding, TenantStoreAllowlist, VaultSecretResolver, VaultSecretResolverConfigError,
+        StoreBinding, TenantStoreAllowlist, TenantStoreAllowlistError, VaultSecretResolver,
+        VaultSecretResolverConfigError,
     };
     use diport::{ManagedResource, SecretCoordinate, SecretResolver, SecretResolverError};
     use vocab::TenantId;
@@ -787,7 +883,7 @@ mod backend_tests {
                     kv_path_prefix: String::new(),
                 },
             )]),
-            Err(VaultSecretResolverConfigError::EmptyMount)
+            Err(TenantStoreAllowlistError::EmptyMount)
         ));
     }
 
@@ -802,8 +898,98 @@ mod backend_tests {
                     kv_path_prefix: String::new(),
                 },
             )]),
-            Err(VaultSecretResolverConfigError::InvalidMountSegment)
+            Err(TenantStoreAllowlistError::InvalidMountSegment)
         ));
+    }
+
+    #[test]
+    fn allowlist_rejects_empty_entries() {
+        let result: Result<TenantStoreAllowlist, TenantStoreAllowlistError> =
+            TenantStoreAllowlist::new(std::iter::empty());
+        assert!(matches!(
+            result,
+            Err(TenantStoreAllowlistError::EmptyStoreAllowlist)
+        ));
+    }
+
+    #[test]
+    fn allowlist_rejects_duplicate_tenant_store_binding() {
+        let binding = StoreBinding {
+            mount: "secret".to_string(),
+            kv_path_prefix: "tenants/a".to_string(),
+        };
+        assert!(matches!(
+            TenantStoreAllowlist::new([
+                ((tenant_a(), store_x().to_string()), binding.clone()),
+                ((tenant_a(), store_x().to_string()), binding),
+            ]),
+            Err(TenantStoreAllowlistError::DuplicateStoreBinding)
+        ));
+    }
+
+    #[test]
+    fn allowlist_rejects_cross_tenant_namespace_overlap() {
+        for (prefix_a, prefix_b) in [
+            ("tenants/shared", "tenants/shared"),
+            ("tenants/shared", "tenants/shared/nested"),
+            ("tenants/shared/nested", "tenants/shared"),
+            ("", "tenants/shared"),
+        ] {
+            let result = TenantStoreAllowlist::new([
+                (
+                    (tenant_a(), "store-a".to_string()),
+                    StoreBinding {
+                        mount: "/secret/".to_string(),
+                        kv_path_prefix: prefix_a.to_string(),
+                    },
+                ),
+                (
+                    (tenant_b(), "store-b".to_string()),
+                    StoreBinding {
+                        mount: "secret".to_string(),
+                        kv_path_prefix: prefix_b.to_string(),
+                    },
+                ),
+            ]);
+            assert!(
+                matches!(
+                    result,
+                    Err(TenantStoreAllowlistError::OverlappingTenantNamespace)
+                ),
+                "cross-tenant overlap must fail for {prefix_a:?} and {prefix_b:?}: {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn allowlist_accepts_same_tenant_alias_overlap_and_cross_tenant_disjoint_namespaces() {
+        let allowlist = TenantStoreAllowlist::new([
+            (
+                (tenant_a(), "store-a".to_string()),
+                StoreBinding {
+                    mount: "secret".to_string(),
+                    kv_path_prefix: "tenants/a".to_string(),
+                },
+            ),
+            (
+                (tenant_a(), "store-a-alias".to_string()),
+                StoreBinding {
+                    mount: "/secret/".to_string(),
+                    kv_path_prefix: "tenants/a/nested".to_string(),
+                },
+            ),
+            (
+                (tenant_b(), "store-b".to_string()),
+                StoreBinding {
+                    mount: "secret".to_string(),
+                    kv_path_prefix: "tenants/b".to_string(),
+                },
+            ),
+        ]);
+        assert!(
+            allowlist.is_ok(),
+            "disjoint namespaces must pass: {allowlist:?}"
+        );
     }
 
     #[test]
@@ -1116,31 +1302,33 @@ mod backend_tests {
     }
 
     #[tokio::test]
-    async fn resolve_403_is_forbidden() {
+    async fn resolve_provider_auth_failure_is_store_unreachable() {
         use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
 
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .respond_with(ResponseTemplate::new(403))
-            .mount(&server)
-            .await;
+        for status in [401, 403] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .respond_with(ResponseTemplate::new(status))
+                .mount(&server)
+                .await;
 
-        #[allow(clippy::expect_used)]
-        let resolver = VaultSecretResolver::new_allow_http(
-            reqwest::Client::new(),
-            server.uri(),
-            TOKEN,
-            Duration::from_secs(5),
-            simple_allowlist(),
-        )
-        .expect("valid config");
+            #[allow(clippy::expect_used)]
+            let resolver = VaultSecretResolver::new_allow_http(
+                reqwest::Client::new(),
+                server.uri(),
+                TOKEN,
+                Duration::from_secs(5),
+                simple_allowlist(),
+            )
+            .expect("valid config");
 
-        let coord = SecretCoordinate::new(store_x(), "mykey", None);
-        let result = resolver.resolve(tenant_a(), &coord).await;
-        assert!(
-            matches!(result, Err(SecretResolverError::Forbidden)),
-            "expected Forbidden, got {result:?}"
-        );
+            let coord = SecretCoordinate::new(store_x(), "mykey", None);
+            let result = resolver.resolve(tenant_a(), &coord).await;
+            assert!(
+                matches!(result, Err(SecretResolverError::StoreUnreachable { .. })),
+                "provider status {status} must be StoreUnreachable, got {result:?}"
+            );
+        }
     }
 
     /// 带 ?version 参数的 404 → VersionNotFound。
@@ -1338,35 +1526,5 @@ mod backend_tests {
             },
         )]);
         assert!(ok.is_ok(), "合法 kv_path_prefix 应被接受，实际: {ok:?}");
-    }
-
-    // ── Finding 6 空 allowlist fail-closed 验证 ───────────────────────────────────────
-
-    /// 空 allowlist + 任意 store_id → resolve 立即返 `Forbidden`（网络前 fail-closed，无 HTTP 请求）。
-    ///
-    /// Anti-vacuity：同一 coord 在命中 allowlist 后（`simple_allowlist`）能正常发出请求
-    /// （此处通过验证 `Forbidden != StoreUnreachable` 间接确认路径差异）。
-    #[tokio::test]
-    async fn empty_allowlist_all_resolves_forbidden() {
-        // 空 allowlist 无条目——TenantStoreAllowlist::new 空迭代 → Ok（无条目无需校验）。
-        #[allow(clippy::expect_used)]
-        let empty_stores =
-            TenantStoreAllowlist::new(std::iter::empty()).expect("empty allowlist always ok");
-        assert!(
-            empty_stores.is_empty(),
-            "empty allowlist is_empty() 应为 true"
-        );
-
-        #[allow(clippy::expect_used)]
-        let resolver =
-            VaultSecretResolver::new(reqwest::Client::new(), ADDR, TOKEN, TIMEOUT, empty_stores)
-                .expect("valid config");
-
-        let coord = SecretCoordinate::new(store_x(), "mykey", None);
-        let result = resolver.resolve(tenant_a(), &coord).await;
-        assert!(
-            matches!(result, Err(SecretResolverError::Forbidden)),
-            "空 allowlist 应 fail-closed Forbidden，实际: {result:?}"
-        );
     }
 }

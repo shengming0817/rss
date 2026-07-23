@@ -2440,8 +2440,12 @@ fn canonical_receipt_operation(expression: &Expr) -> Option<(String, Vec<String>
         Some(PathReplacement::IdentityPolicy) if module != ["identity_v1", "policies_get"] => {
             return None;
         }
-        Some(PathReplacement::SettingsKey) if module != ["settings_v4"] => return None,
-        None if module == ["settings_v4"] => return None,
+        Some(PathReplacement::SettingsKey)
+            if module != ["settings_v4"] && module != ["settings_v7"] =>
+        {
+            return None;
+        }
+        None if module == ["settings_v4"] || module == ["settings_v7"] => return None,
         _ => {}
     }
     Some((router, module))
@@ -2626,10 +2630,13 @@ fn canonical_identity_router_layer(local: &syn::Local, router: &str) -> bool {
             .is_some_and(canonical_identity_tenant);
     let settings = authenticated.args.iter().nth(1).is_some_and(|principal| {
         expression_path_is(Some(principal), &["vocab", "PrincipalKind", "Admin"])
-    }) && string_literal_is(
+    }) && (string_literal_is(
         authenticated.args.iter().nth(2),
         "settings-config-get-subject",
-    ) && authenticated
+    ) || string_literal_is(
+        authenticated.args.iter().nth(2),
+        "settings-secret-resolve-subject",
+    )) && authenticated
         .args
         .iter()
         .nth(3)
@@ -4102,7 +4109,7 @@ fn certify_settings_production_composition(items: &[Item]) -> SettingsCompositio
     };
     let Expr::Call(domain_call) = peel_expr(domain) else {
         return SettingsCompositionCertification::invalid(
-            "SettingsDomain::new(Arc::new(config_svc), secret_repo, secret_uow)",
+            "SettingsDomain::new(Arc::new(config_svc), secret_repo, secret_uow, secret_svc)",
             "domain initializer is not a direct call",
         );
     };
@@ -4113,12 +4120,19 @@ fn certify_settings_production_composition(items: &[Item]) -> SettingsCompositio
                 && call.args.first().and_then(simple_ident).as_deref() == Some("config_svc"))
     });
     if !relative_call_path_is(&domain_call.func, &["SettingsDomain", "new"])
-        || domain_call.args.len() != 3
+        || domain_call.args.len() != 4
         || !service_is_wrapped_once
         || domain_call.args.get(1).and_then(simple_ident).as_deref() != Some("secret_repo")
         || domain_call.args.get(2).and_then(simple_ident).as_deref() != Some("secret_uow")
-        || block_has_mutable_binding(&wire.block, &["configs", "writer", "config_svc", "domain"])
-        || block_reassigns_any(&wire.block, &["configs", "writer", "config_svc", "domain"])
+        || domain_call.args.get(3).and_then(simple_ident).as_deref() != Some("secret_svc")
+        || block_has_mutable_binding(
+            &wire.block,
+            &["configs", "writer", "config_svc", "secret_svc", "domain"],
+        )
+        || block_reassigns_any(
+            &wire.block,
+            &["configs", "writer", "config_svc", "secret_svc", "domain"],
+        )
     {
         return SettingsCompositionCertification::invalid(
             "immutable bundle ports → with_postgres → SettingsDomain::new lineage",
@@ -8246,7 +8260,7 @@ impl bootstrap::Domain for SettingsDomain {
             )
             .replace(
                 "let domain = DemoDomain::new(repo.read);",
-                "let config = Arc::new(super::SettingsService::with_postgres(repo.configs, writer(), flags(), clock()));\n    let domain = super::SettingsDomain::new(config);",
+                "let config = Arc::new(super::SettingsService::with_postgres(repo.configs, writer(), flags(), clock()));\n    let domain = super::SettingsDomain::new(config, secret_repo(), secret_uow(), secret_svc());",
             )
             .replace("ReadState", "ConfigQueryService");
         format!("{production}{receipt}")
@@ -8267,7 +8281,8 @@ pub async fn wire(deps: SettingsModuleDeps) {
     );
     let secret_repo = Arc::from(secrets);
     let secret_uow = Arc::from(secret_writer);
-    let domain = SettingsDomain::new(Arc::new(config_svc), secret_repo, secret_uow);
+    let secret_svc = build_secret_service();
+    let domain = SettingsDomain::new(Arc::new(config_svc), secret_repo, secret_uow, secret_svc);
     consume(domain);
 }
 "#;

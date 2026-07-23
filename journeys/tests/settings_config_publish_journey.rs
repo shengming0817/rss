@@ -19,7 +19,10 @@ use anyhow::{Result, anyhow};
 use axum::body::{Body, to_bytes};
 use axum::http::{Method, Request, StatusCode, header};
 use common::memory_tenant_signer;
-use diport::{KEY_TENANT_AUTHORITY, OpaqueActorId, OutboxActor, Subscriber, Topic};
+use diport::{
+    DynSecretResolver, KEY_TENANT_AUTHORITY, OpaqueActorId, OutboxActor, SecretCoordinate,
+    SecretMaterial, SecretResolver, SecretResolverError, Subscriber, Topic,
+};
 use futures::StreamExt;
 use generated::event::settings_v1::{
     SettingsConfigChangeKind, SettingsConfigVersionChangedPayload,
@@ -27,7 +30,7 @@ use generated::event::settings_v1::{
 use generated::http::settings_v1::SettingsConfigPublishRequest;
 use memory::{FixedClock, MemBus, MemEmitter};
 use primitives::{AuthPlan, AuthScheme, ListenerKind, RequiredScheme};
-use settings::{SettingsDomain, SettingsService, empty_secret_ports};
+use settings::{SecretResolveService, SettingsDomain, SettingsService, empty_secret_ports};
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 use vocab::{PrincipalKind, TenantId};
@@ -52,6 +55,18 @@ fn actor(tenant: TenantId) -> Result<OutboxActor> {
 
 #[derive(Clone)]
 struct AllowAuthorizer;
+
+struct MissingSecretResolver;
+
+impl SecretResolver for MissingSecretResolver {
+    async fn resolve(
+        &self,
+        _tenant: TenantId,
+        _coordinate: &SecretCoordinate,
+    ) -> Result<SecretMaterial, SecretResolverError> {
+        Err(SecretResolverError::NotFound)
+    }
+}
 
 impl httpserve::RouteAuthorizer for AllowAuthorizer {
     fn authorize<'a>(
@@ -93,6 +108,10 @@ async fn publish_config_emits_version_changed_end_to_end() -> Result<()> {
     // 2. bootstrap 组装：settings durable module 经 Domain::init 挂 config publish/get/delete/rollback /
     //    secret-publish 业务路由组（config 服务 + secret read/write typed 端口构造器注入）。
     let (secret_repo, secret_uow) = empty_secret_ports();
+    let secret_resolve = Arc::new(SecretResolveService::new(
+        Arc::clone(&secret_repo),
+        DynSecretResolver::new_box(MissingSecretResolver),
+    ));
     let domain = SettingsDomain::new(
         Arc::new(SettingsService::with_seed(
             MemEmitter::with_tenant_metadata_signer(bus.clone(), memory_tenant_signer()),
@@ -100,6 +119,7 @@ async fn publish_config_emits_version_changed_end_to_end() -> Result<()> {
         )),
         secret_repo,
         secret_uow,
+        secret_resolve,
     );
     let mut registry = bootstrap::compose(&[&domain])?;
     let route_groups = registry.route_groups();

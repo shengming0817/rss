@@ -77,7 +77,17 @@ require_spiffe_fixture_or_skip
 # reason: 唯一临时文件——同机并行跑（CI 多 job / 多终端）不互相覆盖 readyz 响应。
 READYZ_TMP="$(mktemp)"
 vault_paused=0
+vault_kv_disabled=0
 minio_stopped=0
+
+reset_demo_vault_kv() {
+    $COMPOSE exec -T vault sh -ec '
+        export VAULT_ADDR=https://127.0.0.1:8200
+        export VAULT_CACERT=/vault/tls/vault-ca.pem
+        vault secrets enable -path=secret -version=2 kv 2>/dev/null || true
+        vault kv put -mount=secret tenants/a/.rss-readiness value=ready >/dev/null
+    '
+}
 
 cleanup() {
     if [[ $vault_paused -eq 1 ]]; then
@@ -85,6 +95,9 @@ cleanup() {
         if [[ -n "$vault_cid" ]]; then
             docker unpause "$vault_cid" >/dev/null 2>&1 || true
         fi
+    fi
+    if [[ $vault_kv_disabled -eq 1 && "${KEEP_UP:-0}" = "1" ]]; then
+        reset_demo_vault_kv >/dev/null 2>&1 || true
     fi
     if [[ $minio_stopped -eq 1 && "${KEEP_UP:-0}" = "1" ]]; then
         $COMPOSE start minio >/dev/null 2>&1 || true
@@ -99,8 +112,28 @@ cleanup() {
 }
 trap cleanup EXIT
 
-log "构建并拉起演示栈（postgres + redis + minio + rabbitmq + vault + server；host health port=${RSS_HEALTH_HOST_PORT}）…"
-$COMPOSE up --build -d
+log "构建演示栈同版本镜像…"
+$COMPOSE build
+
+# ── 离线 preflight：同一 strict parser，且不注入 Vault/provider env、不发网络请求 ──────────────
+demo_allowlist="$(read_env_file_value RSS_VAULT_TENANT_STORE_ALLOWLIST_JSON)"
+validator_output="$(printf '%s\n' "$demo_allowlist" | docker run --rm -i \
+    --entrypoint /usr/local/bin/rss rss-server:dev vault-allowlist validate --stdin)" \
+    || fail "合法 Vault allowlist 离线校验失败"
+[[ "$validator_output" = "vault allowlist validation succeeded" ]] \
+    || fail "合法 Vault allowlist 离线校验输出不是闭合成功分类"
+invalid_marker="smoke-secret-allowlist-marker"
+if invalid_output="$(printf '%s\n' "{\"bindings\":[],\"$invalid_marker\":true}" | docker run --rm -i \
+    --entrypoint /usr/local/bin/rss rss-server:dev vault-allowlist validate --stdin 2>&1)"; then
+    fail "非法 Vault allowlist 被离线校验接受"
+fi
+[[ "$invalid_output" = "Error: vault allowlist validation failed: invalid-json" ]] \
+    || fail "非法 Vault allowlist 未返回闭合静态分类"
+[[ "$invalid_output" != *"$invalid_marker"* ]] || fail "Vault allowlist 离线校验泄漏输入"
+log "Vault allowlist 离线合法/非法校验 ✓"
+
+log "拉起演示栈（postgres + redis + minio + rabbitmq + vault + server；host health port=${RSS_HEALTH_HOST_PORT}）…"
+$COMPOSE up -d
 
 # ── 闭环 1：/readyz 轮询至 200（PG healthy + 迁移完 + 池就绪）────────────────────────────────────
 log "轮询 ${HEALTH_URL}/readyz 至 200（超时 ${READY_TIMEOUT}s）…"
@@ -123,6 +156,9 @@ grep -q '"name":"redis_ready"' "$READYZ_TMP" || fail "readyz body 缺 redis_read
 log "redis_ready probe 暴露 ✓"
 grep -q '"name":"keyprovider_ready"' "$READYZ_TMP" || fail "readyz body 缺 keyprovider_ready probe"
 log "keyprovider_ready probe 暴露 ✓"
+grep -q '"name":"vault_secret_resolver_ready","status":"healthy"' "$READYZ_TMP" \
+    || fail "readyz body 缺 healthy vault_secret_resolver_ready probe"
+log "vault_secret_resolver_ready probe 暴露 ✓"
 grep -q '"name":"s3_object_store_ready"' "$READYZ_TMP" || fail "readyz body 缺 s3_object_store_ready probe"
 log "s3_object_store_ready probe 暴露 ✓"
 grep -q '"name":"domain_transport_ready"' "$READYZ_TMP" || fail "readyz body 缺 domain_transport_ready probe"
@@ -182,7 +218,46 @@ done
 [[ $vault_restored -eq 1 ]] || fail "Vault 恢复后 /readyz 未回到 200（last=$(cat "$READYZ_TMP")）"
 log "Vault 恢复 → readyz 200 ✓"
 
-# ── 闭环 6：MinIO down → readyz 503 → 恢复 200 ─────────────────────────────────────────────────
+# ── 闭环 6：仅 Vault KV down → resolver readyz 503，Transit 保持 healthy → 恢复 200 ─────────────
+log "禁用 Vault KV mount，验证独立 resolver readiness（Transit 仍健康）…"
+$COMPOSE exec -T vault sh -ec '
+    export VAULT_ADDR=https://127.0.0.1:8200
+    export VAULT_CACERT=/vault/tls/vault-ca.pem
+    vault secrets disable secret >/dev/null
+'
+vault_kv_disabled=1
+deadline=$((SECONDS + 40))
+vault_kv_down=0
+while [[ $SECONDS -lt $deadline ]]; do
+    code="$(curl -sS -o "$READYZ_TMP" -w '%{http_code}' "${HEALTH_URL}/readyz" || true)"
+    if [[ "$code" = "503" ]] \
+        && grep -q '"name":"vault_secret_resolver_ready","status":"unhealthy"' "$READYZ_TMP" \
+        && grep -q '"name":"keyprovider_ready","status":"healthy"' "$READYZ_TMP"; then
+        vault_kv_down=1
+        break
+    fi
+    sleep 1
+done
+[[ $vault_kv_down -eq 1 ]] \
+    || fail "Vault KV down 后未出现 resolver unhealthy / keyprovider healthy（last=$(cat "$READYZ_TMP")）"
+log "Vault KV-only down → vault_secret_resolver_ready 503、keyprovider_ready healthy ✓"
+reset_demo_vault_kv
+vault_kv_disabled=0
+deadline=$((SECONDS + READY_TIMEOUT))
+vault_kv_restored=0
+while [[ $SECONDS -lt $deadline ]]; do
+    if curl -fsS "${HEALTH_URL}/readyz" >"$READYZ_TMP" 2>/dev/null \
+        && grep -q '"name":"vault_secret_resolver_ready","status":"healthy"' "$READYZ_TMP"; then
+        vault_kv_restored=1
+        break
+    fi
+    sleep 2
+done
+[[ $vault_kv_restored -eq 1 ]] \
+    || fail "Vault KV 恢复后 resolver readiness 未回到 healthy（last=$(cat "$READYZ_TMP")）"
+log "Vault KV 恢复 → readyz 200 ✓"
+
+# ── 闭环 7：MinIO down → readyz 503 → 恢复 200 ─────────────────────────────────────────────────
 log "停止 minio，验证 s3_object_store_ready 触发 readyz 503…"
 $COMPOSE stop minio >/dev/null
 minio_stopped=1

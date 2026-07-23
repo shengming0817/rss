@@ -12,8 +12,8 @@ use anyhow::Context as _;
 use bootstrap::{DomainBinding, DomainModuleResult, WorkerSpec};
 use diport::key_provider::KeyProviderErrorKind;
 use diport::{
-    Clock, DynKeyProvider, DynManagedResource, KeyName, KeyProvider as _, ManagedResource,
-    ShutdownError,
+    Clock, DynKeyProvider, DynManagedResource, DynSecretResolver, KeyName, KeyProvider as _,
+    ManagedResource, SecretResolver as _, SecretResolverError, ShutdownError,
 };
 use postgres::{ConfigValueProtections, PgDbReadiness, PgDomainDeps, PoolReadiness, caps};
 use primitives::{HealthCheck, HealthStatus, ProbeName};
@@ -21,7 +21,7 @@ use secure::{Plaintext, ProtectionContext};
 use settings::ports::{DynSecretRepo, DynSecretUnitOfWork};
 use settings::{SettingsDomain, SettingsService, empty_flag_store};
 use tokio_util::sync::CancellationToken;
-use vault::{VaultDomainDeps, caps as vault_caps};
+use vault::{SecretResolverReadinessTarget, VaultDomainDeps, caps as vault_caps};
 
 const DOMAIN_NAME: &str = "settings";
 const KEYPROVIDER_READINESS_TENANT: &str = "00000000-0000-4000-8000-000000000147";
@@ -34,6 +34,8 @@ const KEYPROVIDER_READINESS_VALUE: &[u8] = b"rss-keyprovider-ready";
 pub const CONFIGS_READY_PROBE_NAME: &str = "configs_ready";
 /// Stable readiness probe name for the settings key-provider dependency.
 pub const KEYPROVIDER_READY_PROBE_NAME: &str = "keyprovider_ready";
+/// Stable readiness probe name for the live Vault KV capability.
+pub const SECRET_RESOLVER_READY_PROBE_NAME: &str = "vault_secret_resolver_ready";
 
 /// Validated key-provider readiness sampling period.
 ///
@@ -82,12 +84,15 @@ pub struct SettingsModuleDeps {
     pg: PgDomainDeps<caps::Settings>,
     pg_readiness: Arc<PgDbReadiness>,
     readiness_key_provider: Box<DynKeyProvider<'static>>,
+    secret_resolver: Box<DynSecretResolver<'static>>,
     read_key_provider: Box<DynKeyProvider<'static>>,
     write_key_provider: Box<DynKeyProvider<'static>>,
     key_name: KeyName,
     clock: Arc<dyn Clock>,
     keyprovider_ready: Arc<AtomicBool>,
+    resolver_ready: Arc<AtomicBool>,
     readiness_worker: WorkerSpec,
+    resolver_readiness_worker: WorkerSpec,
 }
 
 impl SettingsModuleDeps {
@@ -102,22 +107,33 @@ impl SettingsModuleDeps {
         keyprovider_readiness_interval: KeyProviderReadinessInterval,
     ) -> Self {
         let keyprovider_ready = Arc::new(AtomicBool::new(true));
+        let resolver_ready = Arc::new(AtomicBool::new(false));
         let readiness_worker = keyprovider_readiness_worker(
             vault.key_provider(),
             key_name.clone(),
             keyprovider_readiness_interval.get(),
             Arc::clone(&keyprovider_ready),
         );
+        let resolver_readiness_targets = vault.secret_resolver_readiness_targets();
+        let resolver_readiness_worker = secret_resolver_readiness_worker(
+            vault.secret_resolver(),
+            resolver_readiness_targets.clone(),
+            keyprovider_readiness_interval.get(),
+            Arc::clone(&resolver_ready),
+        );
         Self {
             pg,
             pg_readiness,
             readiness_key_provider: vault.key_provider(),
+            secret_resolver: vault.secret_resolver(),
             read_key_provider: vault.key_provider(),
             write_key_provider: vault.key_provider(),
             key_name,
             clock,
             keyprovider_ready,
+            resolver_ready,
             readiness_worker,
+            resolver_readiness_worker,
         }
     }
 
@@ -127,23 +143,29 @@ impl SettingsModuleDeps {
         pg: PgDomainDeps<caps::Settings>,
         pg_readiness: Arc<PgDbReadiness>,
         readiness_key_provider: Box<DynKeyProvider<'static>>,
+        secret_resolver: Box<DynSecretResolver<'static>>,
         read_key_provider: Box<DynKeyProvider<'static>>,
         write_key_provider: Box<DynKeyProvider<'static>>,
         key_name: KeyName,
         clock: Arc<dyn Clock>,
         keyprovider_ready: Arc<AtomicBool>,
+        resolver_ready: Arc<AtomicBool>,
         readiness_worker: WorkerSpec,
+        resolver_readiness_worker: WorkerSpec,
     ) -> Self {
         Self {
             pg,
             pg_readiness,
             readiness_key_provider,
+            secret_resolver,
             read_key_provider,
             write_key_provider,
             key_name,
             clock,
             keyprovider_ready,
+            resolver_ready,
             readiness_worker,
+            resolver_readiness_worker,
         }
     }
 }
@@ -160,7 +182,8 @@ impl Clock for SharedClock {
 ///
 /// Startup performs a real encrypt/decrypt/AAD-mismatch self-check before constructing durable
 /// repositories. Probe/resource/worker ordering is stable: `configs_ready`,
-/// `keyprovider_ready`, no detached resources, then the single readiness worker.
+/// `keyprovider_ready`, `vault_secret_resolver_ready`, no detached resources, then the key-provider
+/// and secret-resolver readiness workers.
 ///
 /// # Errors
 ///
@@ -170,12 +193,15 @@ pub async fn wire(deps: SettingsModuleDeps) -> anyhow::Result<DomainBinding> {
         pg,
         pg_readiness,
         readiness_key_provider,
+        secret_resolver,
         read_key_provider,
         write_key_provider,
         key_name,
         clock,
         keyprovider_ready,
+        resolver_ready,
         readiness_worker,
+        resolver_readiness_worker,
     } = deps;
 
     verify_keyprovider_ready(&readiness_key_provider, key_name.clone())
@@ -193,12 +219,22 @@ pub async fn wire(deps: SettingsModuleDeps) -> anyhow::Result<DomainBinding> {
         configs,
         writer,
         empty_flag_store(),
-        Box::new(SharedClock(service_clock)),
+        Box::new(SharedClock(Arc::clone(&service_clock))),
     );
     let secret_repo: Arc<DynSecretRepo<'static>> = Arc::from(secrets);
     let secret_uow: Arc<DynSecretUnitOfWork<'static>> = Arc::from(secret_writer);
-    let domain = SettingsDomain::new(Arc::new(config_svc), secret_repo, secret_uow);
-    let output = module_result(pg_readiness, keyprovider_ready, readiness_worker)?;
+    let secret_svc = Arc::new(settings::SecretResolveService::new(
+        Arc::clone(&secret_repo),
+        secret_resolver,
+    ));
+    let domain = SettingsDomain::new(Arc::new(config_svc), secret_repo, secret_uow, secret_svc);
+    let output = module_result(
+        pg_readiness,
+        keyprovider_ready,
+        resolver_ready,
+        readiness_worker,
+        resolver_readiness_worker,
+    )?;
 
     Ok(DomainBinding::new(DOMAIN_NAME, Box::new(domain), output))
 }
@@ -214,6 +250,56 @@ fn keyprovider_readiness_worker(
     Box::new(move |token| {
         DynManagedResource::new_box(spawn_keyprovider_readiness_sampler(
             provider, key_name, period, token, ready,
+        ))
+    })
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ResolverReadinessSample {
+    Ready,
+    Down,
+    Preserve,
+}
+
+async fn sample_secret_resolver_readiness(
+    resolver: &DynSecretResolver<'static>,
+    targets: &[SecretResolverReadinessTarget],
+) -> ResolverReadinessSample {
+    for target in targets {
+        match resolver.resolve(target.tenant(), target.coordinate()).await {
+            Ok(_) => {}
+            Err(SecretResolverError::Forbidden) => return ResolverReadinessSample::Preserve,
+            Err(
+                SecretResolverError::StoreUnreachable { .. }
+                | SecretResolverError::Timeout
+                | SecretResolverError::NotFound
+                | SecretResolverError::VersionNotFound,
+            ) => return ResolverReadinessSample::Down,
+            Err(_) => return ResolverReadinessSample::Down,
+        }
+    }
+    ResolverReadinessSample::Ready
+}
+
+fn apply_secret_resolver_readiness_sample(ready: &AtomicBool, sample: ResolverReadinessSample) {
+    match sample {
+        ResolverReadinessSample::Ready => ready.store(true, Ordering::Release),
+        ResolverReadinessSample::Down => ready.store(false, Ordering::Release),
+        ResolverReadinessSample::Preserve => {
+            tracing::warn!("vault resolver readiness target was locally forbidden")
+        }
+    }
+}
+
+fn secret_resolver_readiness_worker(
+    resolver: Box<DynSecretResolver<'static>>,
+    targets: Vec<SecretResolverReadinessTarget>,
+    period: Duration,
+    ready: Arc<AtomicBool>,
+) -> WorkerSpec {
+    Box::new(move |token| {
+        DynManagedResource::new_box(spawn_secret_resolver_readiness_sampler(
+            resolver, targets, period, token, ready,
         ))
     })
 }
@@ -245,6 +331,33 @@ impl bootstrap::HealthProbe for ConfigsReadyProbe {
 pub struct KeyProviderReadyProbe {
     ready: Arc<AtomicBool>,
     name: ProbeName,
+}
+
+/// Vault KV capability probe backed by the resolver canary sampler.
+pub struct SecretResolverReadyProbe {
+    ready: Arc<AtomicBool>,
+    name: ProbeName,
+}
+
+impl SecretResolverReadyProbe {
+    #[allow(clippy::expect_used)]
+    #[must_use]
+    pub fn new(ready: Arc<AtomicBool>) -> Self {
+        let name =
+            ProbeName::parse(SECRET_RESOLVER_READY_PROBE_NAME).expect("valid probe name const");
+        Self { ready, name }
+    }
+}
+
+impl bootstrap::HealthProbe for SecretResolverReadyProbe {
+    fn check(&self) -> HealthCheck {
+        let (status, detail) = if self.ready.load(Ordering::Acquire) {
+            (HealthStatus::Healthy, "ready")
+        } else {
+            (HealthStatus::Unhealthy, "down")
+        };
+        HealthCheck::new(self.name.clone(), status, detail)
+    }
 }
 
 impl KeyProviderReadyProbe {
@@ -280,12 +393,16 @@ fn readiness_to_health(readiness: PoolReadiness) -> (HealthStatus, &'static str)
 fn module_result(
     pg_readiness: Arc<PgDbReadiness>,
     keyprovider_ready: Arc<AtomicBool>,
+    resolver_ready: Arc<AtomicBool>,
     readiness_worker: WorkerSpec,
+    resolver_readiness_worker: WorkerSpec,
 ) -> anyhow::Result<DomainModuleResult> {
     let configs_name = ProbeName::parse(CONFIGS_READY_PROBE_NAME)
         .context("configs_ready probe name is invalid")?;
     let keyprovider_name = ProbeName::parse(KEYPROVIDER_READY_PROBE_NAME)
         .context("keyprovider_ready probe name is invalid")?;
+    let resolver_name = ProbeName::parse(SECRET_RESOLVER_READY_PROBE_NAME)
+        .context("vault secret resolver probe name is invalid")?;
     Ok(DomainModuleResult {
         probes: vec![
             (configs_name, Box::new(ConfigsReadyProbe::new(pg_readiness))),
@@ -293,9 +410,13 @@ fn module_result(
                 keyprovider_name,
                 Box::new(KeyProviderReadyProbe::new(keyprovider_ready)),
             ),
+            (
+                resolver_name,
+                Box::new(SecretResolverReadyProbe::new(resolver_ready)),
+            ),
         ],
         resources: Vec::new(),
-        workers: vec![readiness_worker],
+        workers: vec![readiness_worker, resolver_readiness_worker],
     })
 }
 
@@ -402,11 +523,62 @@ fn spawn_keyprovider_readiness_sampler(
     }
 }
 
+struct SecretResolverReadinessSampler {
+    handle: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    token: CancellationToken,
+}
+
+impl ManagedResource for SecretResolverReadinessSampler {
+    fn name(&self) -> &str {
+        "vault-secret-resolver-readiness-sampler"
+    }
+
+    async fn shutdown(&self) -> Result<(), ShutdownError> {
+        self.token.cancel();
+        let mut handle = self.handle.lock().await;
+        if let Some(handle) = handle.take()
+            && let Err(error) = handle.await
+        {
+            tracing::warn!(error = %error, "vault secret resolver readiness sampler join failed");
+        }
+        Ok(())
+    }
+}
+
+fn spawn_secret_resolver_readiness_sampler(
+    resolver: Box<DynSecretResolver<'static>>,
+    targets: Vec<SecretResolverReadinessTarget>,
+    period: Duration,
+    token: CancellationToken,
+    ready: Arc<AtomicBool>,
+) -> SecretResolverReadinessSampler {
+    let child = token.child_token();
+    let worker_token = child.clone();
+    let handle = tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                () = worker_token.cancelled() => break,
+                () = tokio::time::sleep(period) => {
+                    let sample = sample_secret_resolver_readiness(&resolver, &targets).await;
+                    apply_secret_resolver_readiness_sample(&ready, sample);
+                }
+            }
+        }
+    });
+    SecretResolverReadinessSampler {
+        handle: tokio::sync::Mutex::new(Some(handle)),
+        token: child,
+    }
+}
+
 /// Hermetic settings binding for generated assembly tests.
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support {
     use super::*;
-    use diport::{EncryptOutput, KeyProvider, KeyProviderError, KeyRef, KeyVersion, RedactedBytes};
+    use diport::{
+        EncryptOutput, KeyProvider, KeyProviderError, KeyRef, KeyVersion, RedactedBytes,
+        SecretCoordinate, SecretMaterial, SecretResolver,
+    };
     use secure::{DerivedAad, Plaintext};
 
     struct NoopResource;
@@ -481,6 +653,18 @@ pub mod test_support {
         DynKeyProvider::new_box(TestKeyProvider::default())
     }
 
+    struct TestSecretResolver;
+
+    impl SecretResolver for TestSecretResolver {
+        async fn resolve(
+            &self,
+            _tenant: vocab::TenantId,
+            _coordinate: &SecretCoordinate,
+        ) -> Result<SecretMaterial, SecretResolverError> {
+            Err(SecretResolverError::NotFound)
+        }
+    }
+
     /// Build a deterministic settings binding without network or database I/O.
     ///
     /// # Errors
@@ -491,16 +675,20 @@ pub mod test_support {
         let key_name = KeyName::try_new("settings-config")?;
         let ready = Arc::new(AtomicBool::new(true));
         let worker: WorkerSpec = Box::new(|_| DynManagedResource::new_box(NoopResource));
+        let resolver_worker: WorkerSpec = Box::new(|_| DynManagedResource::new_box(NoopResource));
         wire(SettingsModuleDeps::for_test(
             pg.for_domain(),
             pg.readiness_handle(),
             provider(),
+            DynSecretResolver::new_box(TestSecretResolver),
             provider(),
             provider(),
             key_name,
             Arc::new(EpochClock),
             ready,
+            Arc::new(AtomicBool::new(false)),
             worker,
+            resolver_worker,
         ))
         .await
     }
@@ -510,10 +698,17 @@ pub mod test_support {
 mod tests {
     use super::*;
 
+    use std::sync::atomic::AtomicU8;
+
     use bootstrap::{HealthProbe as _, compose_bindings};
-    use diport::{EncryptOutput, KeyProvider, KeyProviderError, KeyRef, KeyVersion, RedactedBytes};
+    use diport::{
+        EncryptOutput, KeyProvider, KeyProviderError, KeyRef, KeyVersion, RedactedBytes,
+        SecretCoordinate, SecretMaterial, SecretResolver,
+    };
     use secure::DerivedAad;
-    use vault::{TenantStoreAllowlist, VaultKeyProvider, VaultRuntimeDeps, VaultSecretResolver};
+    use vault::{
+        StoreBinding, TenantStoreAllowlist, VaultKeyProvider, VaultRuntimeDeps, VaultSecretResolver,
+    };
 
     struct TestClock;
 
@@ -603,6 +798,51 @@ mod tests {
         )
     }
 
+    struct ScriptedSecretResolver {
+        mode: Arc<AtomicU8>,
+    }
+
+    impl SecretResolver for ScriptedSecretResolver {
+        async fn resolve(
+            &self,
+            _tenant: vocab::TenantId,
+            _coordinate: &SecretCoordinate,
+        ) -> Result<SecretMaterial, SecretResolverError> {
+            match self.mode.load(Ordering::Acquire) {
+                0 => Ok(SecretMaterial::new(b"ready".to_vec())),
+                1 => Err(SecretResolverError::Forbidden),
+                2 => Err(SecretResolverError::store_unreachable(
+                    std::io::Error::other("scripted provider failure"),
+                )),
+                3 => Err(SecretResolverError::Timeout),
+                _ => Err(SecretResolverError::NotFound),
+            }
+        }
+    }
+
+    #[allow(clippy::expect_used)]
+    fn resolver_readiness_targets() -> Vec<SecretResolverReadinessTarget> {
+        let tenant = vocab::TenantId::parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+            .expect("canonical readiness fixture tenant");
+        let stores = TenantStoreAllowlist::new([(
+            (tenant, "vault".to_owned()),
+            StoreBinding {
+                mount: "secret".to_owned(),
+                kv_path_prefix: "tenants/a".to_owned(),
+            },
+        )])
+        .expect("valid readiness fixture allowlist");
+        VaultSecretResolver::new(
+            reqwest::Client::new(),
+            "https://vault.example:8200",
+            "s.testtoken",
+            Duration::from_secs(5),
+            stores,
+        )
+        .expect("valid readiness fixture resolver")
+        .readiness_targets()
+    }
+
     #[test]
     fn readiness_mapping_is_fail_closed() {
         assert_eq!(
@@ -623,7 +863,16 @@ mod tests {
     #[allow(clippy::expect_used)]
     async fn production_constructor_derives_all_roles_from_one_sealed_vault_capability() {
         let pg = postgres::PgRuntimeHandle::for_module_test();
-        let stores = TenantStoreAllowlist::new(std::iter::empty()).expect("empty allowlist");
+        let tenant = vocab::TenantId::parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+            .expect("canonical unused fixture tenant");
+        let stores = TenantStoreAllowlist::new([(
+            (tenant, "vault".to_owned()),
+            StoreBinding {
+                mount: "secret".to_owned(),
+                kv_path_prefix: "tenants/a".to_owned(),
+            },
+        )])
+        .expect("valid unused fixture allowlist");
         let vault = VaultRuntimeDeps::new(
             VaultSecretResolver::new(
                 reqwest::Client::new(),
@@ -674,6 +923,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn secret_resolver_readiness_samples_ready_down_and_preserve_without_state_confusion() {
+        let mode = Arc::new(AtomicU8::new(0));
+        let resolver = DynSecretResolver::new_box(ScriptedSecretResolver {
+            mode: Arc::clone(&mode),
+        });
+        let targets = resolver_readiness_targets();
+        let ready = AtomicBool::new(false);
+
+        let sample = sample_secret_resolver_readiness(&resolver, &targets).await;
+        assert_eq!(sample, ResolverReadinessSample::Ready);
+        apply_secret_resolver_readiness_sample(&ready, sample);
+        assert!(ready.load(Ordering::Acquire), "success recovers readiness");
+
+        mode.store(2, Ordering::Release);
+        let sample = sample_secret_resolver_readiness(&resolver, &targets).await;
+        assert_eq!(sample, ResolverReadinessSample::Down);
+        apply_secret_resolver_readiness_sample(&ready, sample);
+        assert!(
+            !ready.load(Ordering::Acquire),
+            "provider failure marks down"
+        );
+
+        mode.store(0, Ordering::Release);
+        let sample = sample_secret_resolver_readiness(&resolver, &targets).await;
+        apply_secret_resolver_readiness_sample(&ready, sample);
+        assert!(
+            ready.load(Ordering::Acquire),
+            "later success recovers readiness"
+        );
+
+        mode.store(1, Ordering::Release);
+        let sample = sample_secret_resolver_readiness(&resolver, &targets).await;
+        assert_eq!(sample, ResolverReadinessSample::Preserve);
+        apply_secret_resolver_readiness_sample(&ready, sample);
+        assert!(
+            ready.load(Ordering::Acquire),
+            "local Forbidden preserves the previous provider state"
+        );
+
+        mode.store(3, Ordering::Release);
+        let sample = sample_secret_resolver_readiness(&resolver, &targets).await;
+        assert_eq!(sample, ResolverReadinessSample::Down);
+        apply_secret_resolver_readiness_sample(&ready, sample);
+        assert!(!ready.load(Ordering::Acquire), "timeout marks down");
+    }
+
+    #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn hermetic_binding_composes_with_stable_output_order() {
         let mut bindings = vec![
@@ -684,11 +980,12 @@ mod tests {
         assert_eq!(bindings[0].name(), DOMAIN_NAME);
         let (_, output) = compose_bindings(&mut bindings).expect("settings binding composes");
         assert!(bindings.is_empty());
-        assert_eq!(output.probes.len(), 2);
+        assert_eq!(output.probes.len(), 3, "resolver readiness must be active");
         assert_eq!(output.probes[0].0.as_str(), CONFIGS_READY_PROBE_NAME);
         assert_eq!(output.probes[1].0.as_str(), KEYPROVIDER_READY_PROBE_NAME);
+        assert_eq!(output.probes[2].0.as_str(), "vault_secret_resolver_ready");
         assert!(output.resources.is_empty());
-        assert_eq!(output.workers.len(), 1);
+        assert_eq!(output.workers.len(), 2, "resolver sampler must be active");
     }
 
     #[tokio::test]

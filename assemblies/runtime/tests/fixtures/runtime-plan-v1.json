@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "assemblyFingerprint": "sha256:122cf409e7f463584e0f1b577e6f779d5d8e5f179dc0e6e91746de0977201220",
-  "runtimePlanFingerprint": "sha256:7547b240b279a71c6bc4bef25dc04a2234e62d6906140923e36b189928e00b48",
+  "assemblyFingerprint": "sha256:86f3d876a97c76abc64fcb625e6be68b3ee4897f8e9b1126dec36c3cd47821cd",
+  "runtimePlanFingerprint": "sha256:de63908026bf3fac2082ef0a184f6ef211859dcbb6d42db366b072a2c57ea7ca",
   "providerPlans": [
     {
       "id": "auth-audit-sink",
@@ -121,6 +121,13 @@
     {
       "id": "settings-key-provider",
       "constructor": "vault::VaultKeyProvider",
+      "outputs": [
+        "resources"
+      ]
+    },
+    {
+      "id": "settings-secret-resolver",
+      "constructor": "vault::VaultSecretResolver",
       "outputs": [
         "resources"
       ]

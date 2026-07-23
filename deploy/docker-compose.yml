@@ -138,6 +138,8 @@ services:
         export VAULT_CACERT="$${RSS_VAULT_CA_CERT_PEM_PATH}"
         export VAULT_TOKEN="$${RSS_VAULT_TOKEN}"
         vault secrets enable -path="$${RSS_VAULT_TRANSIT_MOUNT}" transit 2>/dev/null || true
+        vault secrets enable -path=secret -version=2 kv 2>/dev/null || true
+        vault kv put -mount=secret tenants/a/.rss-readiness value=ready >/dev/null
         vault write "$${RSS_VAULT_TRANSIT_MOUNT}/keys/$${RSS_SETTINGS_CONFIG_VALUE_KEY_NAME}" derived=true
         vault write "$${RSS_VAULT_TRANSIT_MOUNT}/keys/$${RSS_DLX_PAYLOAD_KEY_NAME}" derived=true
         vault write "$${RSS_VAULT_TRANSIT_MOUNT}/keys/$${RSS_DLX_ARCHIVE_KEY_NAME}" derived=true

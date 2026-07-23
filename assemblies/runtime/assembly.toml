@@ -85,6 +85,18 @@ purpose = "settings-configvalue-at-rest-encryption"
 outputs = ["resources"]
 
 [[diportProviders]]
+id = "settings-secret-resolver"
+port = "diport::SecretResolver"
+provider = "vault::VaultSecretResolver"
+providerCrate = "vault"
+requiredFeatures = ["backend"]
+consumer = "settings"
+lifecycle = "active"
+durability = "persistent"
+purpose = "settings-secret-material-resolution"
+outputs = ["resources"]
+
+[[diportProviders]]
 id = "listener-pdp"
 port = "diport::Pdp"
 provider = "oidc::OidcProvider"

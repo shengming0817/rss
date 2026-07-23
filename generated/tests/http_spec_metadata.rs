@@ -34,6 +34,7 @@ const EXPECTED_ACTIVE_SPECS: &[(&str, HttpConsistencyLevel)] = &[
     ("settings.config-publish", HttpConsistencyLevel::OutboxFact),
     ("settings.config-rollback", HttpConsistencyLevel::OutboxFact),
     ("settings.secret-publish", HttpConsistencyLevel::LocalTx),
+    ("settings.secret-resolve", HttpConsistencyLevel::LocalOnly),
 ];
 
 const EXPECTED_LOCAL_TX_SPECS: &[(&str, LocalTxModel)] = &[
@@ -51,6 +52,7 @@ const EXPECTED_LOCAL_ONLY_SPECS: &[&str] = &[
     "identity.profile",
     "identity.roles-list",
     "settings.config-get",
+    "settings.secret-resolve",
 ];
 
 fn active_spec(contract_id: &str) -> Option<&'static http::HttpSpec> {
@@ -302,7 +304,7 @@ fn active_http_registry_keeps_current_consistency_distribution() {
     assert_eq!(
         registry_distribution(),
         [
-            (HttpConsistencyLevel::LocalOnly, 6),
+            (HttpConsistencyLevel::LocalOnly, 7),
             (HttpConsistencyLevel::LocalTx, 5),
             (HttpConsistencyLevel::OutboxFact, 9),
             (HttpConsistencyLevel::WorkflowEventual, 0),

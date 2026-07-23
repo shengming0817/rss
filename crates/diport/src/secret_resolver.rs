@@ -129,7 +129,7 @@ impl SecretMaterial {
 
 /// secret 解析 provider DI port（async）。
 ///
-/// 公开 [`SecretResolver`] 是 **Send 变体**（adapters `impl SecretResolver for ...`），
+/// 公开 [`SecretResolver`] 是 **Send + Sync 变体**（adapters `impl SecretResolver for ...`），
 /// [`DynSecretResolver`] 是其 dyn-compatible wrapper（组合根经 `Box<DynSecretResolver>` 注入）。
 /// 非 Send 基 trait `SecretResolverLocal` 仅供静态分发窄场景，不在 crate 根 re-export。
 ///
@@ -139,12 +139,13 @@ impl SecretMaterial {
 /// **tenant 显式参**：每次解析须带 [`vocab::TenantId`] 做 store allowlist / RLS 校验——多租环境下
 /// 同一 provider 实例服务多租，tenant 分隔在 port 签名层 Hard 约束（不经 ambient ctx 隐式传播）。
 ///
-/// dyn-safe 约束（ADR-003 §4.6）：方法 `&self`、参数 / 返回为具体类型（owned / ref）、supertrait 仅 Send。
-#[trait_variant::make(SecretResolver: Send)]
+/// dyn-safe 约束（ADR-003 §4.6）：方法 `&self`、参数 / 返回为具体类型（owned / ref）、provider
+/// 必须 `Send + Sync`，使唯一 resolver capability 可由 HTTP dispatch 与 readiness sampler 共享。
+#[trait_variant::make(SecretResolver: Send + Sync)]
 #[dynosaur(pub DynSecretResolver = dyn(box) SecretResolver, bridge(dyn))]
 #[allow(async_fn_in_trait)]
-// reason: base trait 为非 Send native AFIT；Send 由 trait_variant 生成的 `SecretResolver` 变体 +
-// dynosaur `DynSecretResolver` 承载（DI 注入走 Send wrapper）。这是 ADR-003 既定 dyn-port 范式。
+// reason: base trait 为 native AFIT；Send + Sync 由 trait_variant 生成的 `SecretResolver` 变体 +
+// dynosaur `DynSecretResolver` 承载（DI 注入走共享 provider wrapper）。
 pub trait SecretResolverLocal {
     /// 按坐标解析 secret 材料（fail-closed：store 不可达 / 超时返 `Err`，绝不返 stale/空；
     /// `tenant` 做 store allowlist / RLS 分隔）。

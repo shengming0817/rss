@@ -9,7 +9,7 @@ The current `assemblies/runtime/assembly.toml` remains `profile = "demo"` until 
 |------|---------|-----------------|
 | Token profiles / JWKS | Each listener is fixed to one typed token profile. RSS Access is User-only and requires the complete grant quartet; its kind is not configurable. Federated Access owns the non-User allowlist. The profiles have separate issuer, audience, ES256 JWKS source and readiness; Service Token has separate issuer, audience, HS256 key and cluster-global replay. No generic/mixed provider is deployable. | `cargo xtask assembly validate` requires profile-specific typed providers plus `run()`-reachable JWKS load/watch, `rss_access_token_jwks_ready` / `federated_access_token_jwks_ready`, managed-resource, binding and anti-bait evidence. |
 | RSS User grant currency | Every protected RSS request verifies the JWT first, then checks the exact signed grant/User/tenant/auth-time/epoch against one tenant-scoped durable grant/account snapshot. | Missing, terminal, expired or mismatched state returns 401 before the handler; store failure returns 503 and never falls back to JWT-only evidence. |
-| Vault | Access-token signing and settings ConfigValue encryption must use active persistent Vault providers. | `cargo xtask assembly validate` requires active/persistent/backend `vault::VaultSigner` and `vault::VaultKeyProvider`. |
+| Vault | Access-token signing, settings ConfigValue encryption, and settings secret resolution must use active persistent Vault providers. Secret resolution additionally requires one strict, non-empty tenant/store allowlist. | `cargo xtask assembly validate` requires active/persistent/backend `vault::VaultSigner`, `vault::VaultKeyProvider`, and `vault::VaultSecretResolver`; startup rejects a missing, malformed, empty, duplicate or cross-tenant-overlapping `RSS_VAULT_TENANT_STORE_ALLOWLIST_JSON`, while a KV-only failure lowers `vault_secret_resolver_ready`. |
 | SPIFFE / mTLS | Internal non-loopback traffic must use SPIFFE/mTLS. `service-token` is loopback local-test only. | `cargo xtask assembly validate` requires `run()`-reachable AST evidence for `MtlsServerConfig::from_spire`, `DomainHttpTransport::from_spire`, and `domain_transport_ready`; legacy Internal service-token migration env constants are rejected. |
 | Device certificate revocation | Runtime assembly uses the persistent PostgreSQL provider with exact tenant/device/serial scope, logical expiry, fail-closed reads and fixed bounded retention. No SoftCA fallback is deployable. | Startup must mint the private revocation capability receipt only after table/RLS/ACL/maintenance-role/function verification; `device-revocation-store` is active/persistent and produces its real probe + worker. |
 
@@ -23,6 +23,8 @@ The current `assemblies/runtime/assembly.toml` remains `profile = "demo"` until 
 - Reject deployment if active RSS/Federated issuer, audience or canonical JWKS path overlaps, if Service issuer/audience overlaps either access profile, or if an unselected profile namespace is present.
 - Remove `RSS_ACCESS_TOKEN_TRUSTED_KINDS` from every release bundle. It is no longer a supported RSS key; configure non-User kinds only through `RSS_FEDERATED_ACCESS_TOKEN_TRUSTED_KINDS` on a Federated listener.
 - Remove any deployment use of `RSS_INTERNAL_SERVICE_TOKEN_MIGRATION_TICKET` or `RSS_INTERNAL_SERVICE_TOKEN_MIGRATION_EXPIRES_AT_UNIX`; they are no longer supported.
+- Publish the Vault tenant/store allowlist only as the strict `{"bindings":[{"tenantId":"<uuid>","storeId":"<id>","mount":"<kv-v2-mount>","kvPathPrefix":"<prefix>"}]}` shape. Root/binding unknown fields, empty bindings, duplicate `(tenantId, storeId)`, invalid paths and cross-tenant physical namespace overlap are fatal; no alias or fallback is supported.
+- Provision `<kvPathPrefix>/.rss-readiness` for every binding and grant the runtime token read access to the binding namespace. The canary key is reserved for capability health and must not contain business material.
 - Treat migration `0072` as a non-rolling, forward-only cutover. Apply the additive migration with
   revocation traffic disabled, quiesce the revocation entry points, disable every old
   workload/controller/job restart path, and prove the old generation process inventory is zero.
@@ -33,6 +35,30 @@ The current `assemblies/runtime/assembly.toml` remains `profile = "demo"` until 
   After the new binary accepts its first certificate revocation, never roll back to a binary that
   reads an in-memory ledger; keep traffic stopped and roll forward with a corrected migration/runtime
   instead.
+
+## Atomic Vault Allowlist Cutover
+
+Treat the serving binary and `RSS_VAULT_TENANT_STORE_ALLOWLIST_JSON` as one sealed generation.
+Validate the strict JSON with the same binary before any provider/runtime preparation:
+
+```bash
+rss vault-allowlist validate --file /run/rss-config/vault-allowlist.json
+```
+
+The validator accepts only `--file <path>` or `--stdin`, needs no Vault provider configuration or
+network, and emits only a static success/error category. After validation, stop routing to the old
+generation, and atomically publish the new binary plus its exact config bundle. Invalid allowlist
+state is a startup failure before listeners;
+an unmapped tenant/store is a request-level `Forbidden` rejected before Vault I/O and cannot write
+readiness. Vault Transit failure is represented by `keyprovider_ready`; KV mount/ACL/canary failure is
+represented independently by `vault_secret_resolver_ready`. Either provider-down state yields 503,
+and neither may be collapsed into `Forbidden`.
+
+Rollback restores the exact previous binary and previous allowlist/config bundle together, waits for
+the complete readiness set, and only then restores traffic. This cutover changes neither database
+schema nor persisted data/ciphertext format, so it requires no database or persistence rollback.
+Never deploy only one half of the pair, and never add a legacy variable alias, dual reader, default
+allowlist or compatibility fallback.
 
 ## RSS Access Signing Key Rotation
 

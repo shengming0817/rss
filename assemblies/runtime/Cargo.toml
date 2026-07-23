@@ -128,6 +128,7 @@ integration = [
 ]
 
 [dev-dependencies]
+vault = { path = "../../adapters/vault", features = ["backend", "test-support"] }
 aws-smithy-http-client = { workspace = true, features = ["test-util"] }
 http = "1"
 metrics-exporter-prometheus = { workspace = true }

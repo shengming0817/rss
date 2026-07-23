@@ -107,8 +107,12 @@ mod tests {
     use base64::Engine as _;
     use bootstrap::compose_bindings;
     use postgres::PgRuntimeHandle;
-    use settings_composition::{CONFIGS_READY_PROBE_NAME, KEYPROVIDER_READY_PROBE_NAME};
-    use vault::{TenantStoreAllowlist, VaultKeyProvider, VaultRuntimeDeps, VaultSecretResolver};
+    use settings_composition::{
+        CONFIGS_READY_PROBE_NAME, KEYPROVIDER_READY_PROBE_NAME, SECRET_RESOLVER_READY_PROBE_NAME,
+    };
+    use vault::{
+        StoreBinding, TenantStoreAllowlist, VaultKeyProvider, VaultRuntimeDeps, VaultSecretResolver,
+    };
     use wiremock::matchers::{body_partial_json, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -116,6 +120,19 @@ mod tests {
 
     const KEYPROVIDER_CONFIG_FIELD: &str = "settings.config.value";
     const KEYPROVIDER_CONFIG_SCHEME: u32 = 1;
+
+    fn unused_tenant_store_allowlist() -> anyhow::Result<TenantStoreAllowlist> {
+        Ok(TenantStoreAllowlist::new([(
+            (
+                vocab::TenantId::parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")?,
+                "vault".to_owned(),
+            ),
+            StoreBinding {
+                mount: "secret".to_owned(),
+                kv_path_prefix: "tenants/a".to_owned(),
+            },
+        )])?)
+    }
 
     #[tokio::test]
     #[allow(clippy::expect_used)]
@@ -132,9 +149,9 @@ mod tests {
         );
         let (_, output) = compose_bindings(&mut bindings).expect("settings binding composes");
         assert!(bindings.is_empty());
-        assert_eq!(output.probes.len(), 2);
+        assert_eq!(output.probes.len(), 3);
         assert!(output.resources.is_empty());
-        assert_eq!(output.workers.len(), 1);
+        assert_eq!(output.workers.len(), 2);
     }
 
     #[allow(clippy::expect_used)]
@@ -190,7 +207,7 @@ mod tests {
             .mount(server)
             .await;
 
-        let stores = TenantStoreAllowlist::new(std::iter::empty())?;
+        let stores = unused_tenant_store_allowlist()?;
         Ok(VaultRuntimeDeps::new(
             VaultSecretResolver::new_allow_http(
                 reqwest::Client::new(),
@@ -234,11 +251,15 @@ mod tests {
         );
         let (_, output) = compose_bindings(&mut bindings).expect("settings binding composes");
         assert!(bindings.is_empty());
-        assert_eq!(output.probes.len(), 2);
+        assert_eq!(output.probes.len(), 3);
         assert_eq!(output.probes[0].0.as_str(), CONFIGS_READY_PROBE_NAME);
         assert_eq!(output.probes[1].0.as_str(), KEYPROVIDER_READY_PROBE_NAME);
+        assert_eq!(
+            output.probes[2].0.as_str(),
+            SECRET_RESOLVER_READY_PROBE_NAME
+        );
         assert!(output.resources.is_empty());
-        assert_eq!(output.workers.len(), 1);
+        assert_eq!(output.workers.len(), 2);
     }
 
     #[tokio::test]
@@ -246,7 +267,7 @@ mod tests {
     async fn public_wire_domains_propagates_keyprovider_self_check_failure() {
         let vault_server = MockServer::start().await;
         // No Transit mocks: encrypt self-check must fail closed through the public entry.
-        let stores = TenantStoreAllowlist::new(std::iter::empty()).expect("empty allowlist");
+        let stores = unused_tenant_store_allowlist().expect("valid unused fixture allowlist");
         let vault = VaultRuntimeDeps::new(
             VaultSecretResolver::new_allow_http(
                 reqwest::Client::new(),

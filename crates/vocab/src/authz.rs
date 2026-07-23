@@ -76,6 +76,7 @@ pub enum RoutePermissionId {
     SettingsConfigDelete,
     SettingsConfigRollback,
     SettingsSecretPublish,
+    SettingsSecretResolve,
     MtlsInvoke,
 }
 
@@ -103,6 +104,7 @@ impl RoutePermissionId {
         Self::SettingsConfigDelete,
         Self::SettingsConfigRollback,
         Self::SettingsSecretPublish,
+        Self::SettingsSecretResolve,
         Self::MtlsInvoke,
     ];
 
@@ -130,6 +132,7 @@ impl RoutePermissionId {
             "settings.config-delete" => Ok(Self::SettingsConfigDelete),
             "settings.config-rollback" => Ok(Self::SettingsConfigRollback),
             "settings.secret-publish" => Ok(Self::SettingsSecretPublish),
+            "settings.secret-resolve" => Ok(Self::SettingsSecretResolve),
             "mtls:invoke" => Ok(Self::MtlsInvoke),
             _ => Err(PermissionParseError::Unknown),
         }
@@ -159,6 +162,7 @@ impl RoutePermissionId {
             Self::SettingsConfigDelete => "settings.config-delete",
             Self::SettingsConfigRollback => "settings.config-rollback",
             Self::SettingsSecretPublish => "settings.secret-publish",
+            Self::SettingsSecretResolve => "settings.secret-resolve",
             Self::MtlsInvoke => "mtls:invoke",
         }
     }
@@ -187,6 +191,7 @@ impl RoutePermissionId {
             Self::SettingsConfigDelete => "SettingsConfigDelete",
             Self::SettingsConfigRollback => "SettingsConfigRollback",
             Self::SettingsSecretPublish => "SettingsSecretPublish",
+            Self::SettingsSecretResolve => "SettingsSecretResolve",
             Self::MtlsInvoke => "MtlsInvoke",
         }
     }
@@ -405,6 +410,10 @@ mod tests {
             (
                 "settings.secret-publish",
                 RoutePermissionId::SettingsSecretPublish,
+            ),
+            (
+                "settings.secret-resolve",
+                RoutePermissionId::SettingsSecretResolve,
             ),
             ("mtls:invoke", RoutePermissionId::MtlsInvoke),
         ];

@@ -50,7 +50,7 @@ use diport::{
 use secure::{DerivedAad, Plaintext};
 use vocab::TenantId;
 
-use crate::{VaultKeyProvider, VaultSecretResolver};
+use crate::{SecretResolverReadinessTarget, VaultKeyProvider, VaultSecretResolver};
 
 /// per-domain 能力 marker 的 sealed 封闭——外部 crate 无法新增域 marker（无法 impl `Sealed`）。
 mod sealed {
@@ -169,6 +169,12 @@ impl VaultDomainDeps<caps::Settings> {
         DynSecretResolver::new_box(SharedVaultResolver(Arc::clone(&self.resolver)))
     }
 
+    /// Closed readiness target set derived from the same resolver allowlist used for dispatch.
+    #[must_use]
+    pub fn secret_resolver_readiness_targets(&self) -> Vec<SecretResolverReadinessTarget> {
+        self.resolver.readiness_targets()
+    }
+
     /// settings 域字段保护 KeyProvider 句柄。经 delegating handle 共享 bundle 的 `Arc<VaultKeyProvider>`，
     /// 不泄漏 Arc 本身；可多次调用以给 read/write repo 各一份 owned dyn box。
     #[must_use]
@@ -267,7 +273,7 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
-    use crate::{TenantStoreAllowlist, VaultKeyProvider};
+    use crate::{StoreBinding, TenantStoreAllowlist, VaultKeyProvider};
 
     const ADDR: &str = "https://vault.example:8200";
     const TOKEN: &str = "s.testtoken";
@@ -275,7 +281,16 @@ mod tests {
 
     #[allow(clippy::expect_used)] // reason: 合法配置 resolver 必成功；item-level carve-out。
     fn resolver() -> VaultSecretResolver {
-        let stores = TenantStoreAllowlist::new(std::iter::empty()).expect("empty allowlist ok");
+        let tenant = TenantId::parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+            .expect("canonical unused fixture tenant");
+        let stores = TenantStoreAllowlist::new([(
+            (tenant, "vault".to_owned()),
+            StoreBinding {
+                mount: "secret".to_owned(),
+                kv_path_prefix: "tenants/a".to_owned(),
+            },
+        )])
+        .expect("valid unused fixture allowlist");
         VaultSecretResolver::new(reqwest::Client::new(), ADDR, TOKEN, TIMEOUT, stores)
             .expect("valid config")
     }

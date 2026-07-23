@@ -186,12 +186,14 @@ impl ProviderOutput {
         module: DomainModuleResult,
         identity_signer: IdentitySignerPermit,
         settings_key_provider: SettingsKeyProviderPermit,
+        settings_secret_resolver: SettingsSecretResolverPermit,
     ) -> Self {
         Self::new(
             module,
             vec![
                 ProviderReceipt::IdentitySigner(identity_signer.0),
                 ProviderReceipt::SettingsKeyProvider(settings_key_provider.0),
+                ProviderReceipt::SettingsSecretResolver(settings_secret_resolver.0),
             ],
             "vault",
             CHANNELS_RESOURCES,
@@ -481,6 +483,12 @@ provider_permits! {
         field: settings_key_provider,
         factory: SettingsVaultKeyProvider,
         receipt: SettingsKeyProvider,
+        channels: CHANNELS_RESOURCES,
+    },
+    SettingsSecretResolverPermit {
+        field: settings_secret_resolver,
+        factory: SettingsVaultSecretResolver,
+        receipt: SettingsSecretResolver,
         channels: CHANNELS_RESOURCES,
     },
 }
@@ -1242,6 +1250,10 @@ mod tests {
             ("RSS_VAULT_ADDR", "https://vault.example:8200"),
             ("RSS_VAULT_TOKEN", "s.testtoken"),
             ("RSS_VAULT_TRANSIT_MOUNT", "transit"),
+            (
+                "RSS_VAULT_TENANT_STORE_ALLOWLIST_JSON",
+                r#"{"bindings":[{"tenantId":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","storeId":"vault","mount":"secret","kvPathPrefix":"tenants/a"}]}"#,
+            ),
             ("RSS_SETTINGS_CONFIG_VALUE_KEY_NAME", "settings-config"),
         ])
         .expect("snapshot");
@@ -1346,6 +1358,9 @@ mod tests {
                 dispatch
                     .settings_key_provider()
                     .expect("settings key-provider permit"),
+                dispatch
+                    .settings_secret_resolver()
+                    .expect("settings secret-resolver permit"),
             ))
             .expect("vault output");
         let pg = postgres::PgRuntimeHandle::for_module_test();

@@ -2397,6 +2397,7 @@ mod tests {
                     Arc::new({domain_config}),
                     secret_repo,
                     secret_uow,
+                    secret_svc,
                 );
             }}
         "#

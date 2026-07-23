@@ -2,11 +2,13 @@
 
 //! rss — RSS 组合根 binary（薄 entry）。serving 运行时编排在 `runtime::run`（#1309 抽 assemblies/runtime 去 bins 双写）。
 //!
-//! `rss` 先 dispatch 显式 operator CLI（0067 reader-lane migration、audit ledger verify、settings
-//! ConfigValue maintenance、projection replay/shadow-swap、reconcile target inspect/resume），未知参数 fail-closed；未命中 CLI 时才委托同一份 `runtime::run()` serving
-//! 组合根。`server` 保持 serving-only entry。
+//! `rss` 先 dispatch 不需要 runtime 配置的 Vault allowlist 离线校验，再 dispatch 显式 operator CLI
+//!（0067 reader-lane migration、audit ledger verify、settings ConfigValue maintenance、projection
+//! replay/shadow-swap、reconcile target inspect/resume）；未知参数 fail-closed，未命中 CLI 时才委托
+//! 同一份 `runtime::run()` serving 组合根。`server` 保持 serving-only entry。
 enum CommandFamily {
     Serving,
+    VaultAllowlistValidation,
     Operator(OperatorCommand),
 }
 
@@ -21,6 +23,9 @@ enum OperatorCommand {
 }
 
 fn classify_command(args: &[String]) -> anyhow::Result<CommandFamily> {
+    if runtime::operator::is_vault_allowlist_validation_command(args) {
+        return Ok(CommandFamily::VaultAllowlistValidation);
+    }
     if runtime::operator::is_postgres_command(args) {
         return Ok(CommandFamily::Operator(OperatorCommand::Postgres));
     }
@@ -54,6 +59,9 @@ fn classify_command(args: &[String]) -> anyhow::Result<CommandFamily> {
 async fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let command = classify_command(&args)?;
+    if let CommandFamily::VaultAllowlistValidation = command {
+        return runtime::operator::run_vault_allowlist_validation_command(&args);
+    }
     let CommandFamily::Operator(command) = command else {
         return runtime::run(runtime::prepare_runtime()?).await;
     };

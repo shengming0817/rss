@@ -7,6 +7,8 @@ This rule governs how runtime-deployment target constraints select enforcement c
 - Assembly manifest validation, generated domain ordering, generated typed provider constructor catalogs, and committed v1 AssemblyLock drift are governed by typed repository gates. The assembly-crate-internal provider catalog drives live construction through one-shot typed permits and sealed lifecycle-output batches.
 - Both binaries capture one closed process-level configuration generation through a typed preparation profile before tracing and provider construction. Serving enters through `runtime::prepare_runtime()`; RSS operators enter through `runtime::operator::prepare_runtime()` and cannot carry the serving-only password-policy capability. Tracing/serving-OIDC, the operator OIDC static provider, provider material, listener addresses and mTLS material, every PostgreSQL/Redis/Vault/S3/event/domain/DLX/worker consumer, composition settings, and settings maintenance are capability-only and snapshot-backed. The crate-wide ambient-reader closure is landed under #1787. RuntimePlan v1 is typed, fingerprinted, retained by the unique consuming runtime phase chain, and is now the sole source of listener membership, ordered domain placement, and auth selection. `runtimeexec` owns the provider-independent launch/signal/drain kernel and stable opaque probe/inventory hooks; subset assemblies remain non-runnable until #1796/#1797, and no DeploymentPlan/Helm/inventory evidence chain exists.
 - RSS Access has no trusted-kind setting: it accepts only grant-bound User claims with a complete `sid/jti/auth_time/authn_epoch` quartet. The configurable allowlist belongs only to Federated Access; `RSS_ACCESS_TOKEN_TRUSTED_KINDS` is a startup tombstone and causes fail-fast rejection instead of being ignored or carried as inert configuration.
+- Serving Vault secret resolution requires `RSS_VAULT_TENANT_STORE_ALLOWLIST_JSON` in the one process snapshot. Its only accepted schema is a strict root `{"bindings":[...]}` whose strict entries contain exactly `tenantId`, `storeId`, `mount`, and `kvPathPrefix`; the set must be non-empty and unique by `(tenantId, storeId)`, and physical namespaces may not overlap across tenants. There is no alias, default or compatibility reader. The validated map is also the sole source of the closed KV readiness target set: every binding resolves the reserved `.rss-readiness` key through the same resolver.
+- `rss vault-allowlist validate --file <path>|--stdin` is the sole offline preflight. The RSS binary dispatches it before `operator::prepare_runtime`; it reuses the serving typed parser, reads no ambient configuration, constructs no provider, performs no network I/O, and emits only closed static categories. Runtime-baseline exact AST locks this exception without admitting a serving or maintenance alternate source.
 - `cargo xtask archrules list` and its generated matrix derive implemented rules from real carrier anchors. Planning documents are not a second index.
 - The active forge does not make the existing `ci-gate` a required check.
 
@@ -53,7 +55,8 @@ accepts neither raw auth values nor a handwritten scheme and is absent from the 
 library API.
 
 The catalog is an explicit runtime configuration universe: fixed listener/auth/OIDC/tracing,
-PG/Redis, Vault/S3, identity/audit, event/DLX/worker keys; generated event-domain AMQP keys; the
+PG/Redis, Vault/S3, identity/audit, event/DLX/worker keys; the required Vault tenant/store allowlist
+JSON; generated event-domain AMQP keys; the
 fixed domain-transport URL/mTLS allow-set family (`RSS_<DOMAIN>_DOMAIN_TRANSPORT_URL`, optional
 shared `RSS_DOMAIN_TRANSPORT_URL` under `durable-shared`, per-domain SPIFFE allow-sets, and local
 client SPIFFE id); placement workload funnel facts
@@ -73,6 +76,15 @@ fingerprints, or written to deployment evidence. Only closed non-secret listener
 RuntimePlan: Primary/Admin carry `rssAccessToken` or `federatedAccessToken`, Internal carries
 `mtls` or `serviceToken`, and Health is fixed to `noAuth`. Secret-only snapshot changes leave its
 fingerprint unchanged.
+
+The Vault allowlist is validated while mapping the serving snapshot, before provider construction or
+listener bind. Missing, non-Unicode, empty, malformed, unknown-field, invalid UUID/path, duplicate
+`(tenantId, storeId)`, and cross-tenant overlapping physical namespace inputs are startup errors.
+After startup, a missing mapping is request-level `Forbidden` before network I/O and cannot mutate
+readiness. Transit failure is represented by `keyprovider_ready`; KV mount, ACL, canary, timeout, or
+reachability failure is represented independently by `vault_secret_resolver_ready`. Either unhealthy
+probe makes `/readyz` return 503, while a request-level Forbidden leaves the last sampler state intact.
+These states must not be collapsed.
 
 `SecretText::expose` and `into_string` are explicit disclosure/ownership boundaries, not a claim
 that callers cannot copy. Runtime allocation handoff uses named move/copy funnels; Medium
@@ -296,6 +308,16 @@ Provider catalog rollout and rollback are pure code/identity operations: no data
 configuration, or external contract migration is introduced. A rollback reverts the generated
 catalogs, consuming binaries, locks, and rotated fingerprints together; it cannot introduce an old
 reader, alias, dual write, free-form factory path, or runtime fallback.
+
+Vault allowlist rollout is a separate atomic binary/config operation: publish the consuming binary
+and its exact `RSS_VAULT_TENANT_STORE_ALLOWLIST_JSON` bundle plus every binding's reserved
+`<kvPathPrefix>/.rss-readiness` key/ACL as one generation, never a partial set. Rollback restores the
+exact previous binary, config, canary, and ACL bundle together and waits for
+their readiness before traffic returns. The mapping changes no database schema, persisted value, or
+ciphertext format, so rollback performs no database/persistence mutation. An old variable alias,
+dual reader, implicit empty/default mapping, or compatibility fallback is forbidden. Because the
+allowlist is runtime configuration material, it is not serialized into AssemblyLock or RuntimePlan
+and does not change their fingerprints.
 
 The catalog approach keeps
 [Typify's programmatic codegen](https://github.com/oxidecomputer/typify/blob/aec3da53c4319164542b393a86d552424be24384/typify/src/lib.rs)

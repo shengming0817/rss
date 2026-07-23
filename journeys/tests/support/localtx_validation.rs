@@ -25,8 +25,9 @@ use authn::{AuthGrant, AuthGrantId};
 use axum::body::{Body, to_bytes};
 use axum::http::{Method, Request, StatusCode, header};
 use diport::{
-    DynKeyProvider, EncryptOutput, KeyName, KeyProvider, KeyProviderError, KeyRef, KeyVersion,
-    ManagedResource, OutboxEmitError, RedactedBytes,
+    DynKeyProvider, DynSecretResolver, EncryptOutput, KeyName, KeyProvider, KeyProviderError,
+    KeyRef, KeyVersion, ManagedResource, OutboxEmitError, RedactedBytes, SecretCoordinate,
+    SecretMaterial, SecretResolver, SecretResolverError,
 };
 use generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesResponse;
 use generated::http::identity_v1::{
@@ -57,7 +58,7 @@ use settings::ports::{
     DynSecretRepo, SecretEntry, SecretKey, SecretRepo, SecretRepoError,
     TenantRepoScope as SettingsScope,
 };
-use settings::{SettingsDomain, SettingsService};
+use settings::{SecretResolveService, SettingsDomain, SettingsService};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode as SqlxPgSslMode};
 use tokio::sync::Barrier;
 use tower::ServiceExt;
@@ -73,6 +74,18 @@ const OTHER_USER: &str = "11111111-2222-4333-8444-555555555554";
 const TENANT_B_USER: &str = "11111111-2222-4333-8444-555555555555";
 const NOW_SECS: u64 = 1_000;
 const TTL_SECS: u64 = 3_600;
+
+struct MissingSecretResolver;
+
+impl SecretResolver for MissingSecretResolver {
+    async fn resolve(
+        &self,
+        _tenant: TenantId,
+        _coordinate: &SecretCoordinate,
+    ) -> Result<SecretMaterial, SecretResolverError> {
+        Err(SecretResolverError::NotFound)
+    }
+}
 static RSS_APP_LOGIN: TestPgCredential = TestPgCredential::new("rss_app", "rss_app_test_pw");
 static RSS_APP_READ_LOGIN: TestPgCredential =
     TestPgCredential::new("rss_app_read", "rss_app_read_test_pw");
@@ -1297,6 +1310,10 @@ async fn drive_settings(
             conflict_key: conflict_secret.to_owned(),
             barrier: Arc::new(Barrier::new(2)),
         }));
+    let secret_resolve = Arc::new(SecretResolveService::new(
+        Arc::clone(&secret_route_repo),
+        DynSecretResolver::new_box(MissingSecretResolver),
+    ));
     let settings_domain = SettingsDomain::new(
         Arc::new(SettingsService::with_seed(
             MemEmitter::with_tenant_metadata_signer(MemBus::new(), common::memory_tenant_signer()),
@@ -1304,6 +1321,7 @@ async fn drive_settings(
         )),
         secret_route_repo,
         Arc::from(secret_uow),
+        secret_resolve,
     );
     let settings_authed = finalized_router(
         &settings_domain,

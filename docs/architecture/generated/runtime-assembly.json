@@ -11,14 +11,14 @@
       "path": "assemblies/runtime/assembly.toml",
       "digest": {
         "algorithm": "sha256",
-        "value": "c5365666ddf52ca3cb2e92de3dbc09c1d5101ad6730b12ca27abc61f7b2c707c"
+        "value": "9f34169a0860f5425b3628aaeaf773581aab2239f129ed93c4aacbacd77562eb"
       }
     },
     {
       "path": "assemblies/runtime/src/generated/modules_gen.rs",
       "digest": {
         "algorithm": "sha256",
-        "value": "b031439d4722be496f6a340f2301b852ecb5b93611be96d4901aa263b604c2f6"
+        "value": "06d762ea6f3c71937ef26d26ffc8634fb0f6d93b1d8b83a0afb71fa771528393"
       }
     },
     {
@@ -190,6 +190,18 @@
       "lifecycle": "active",
       "durability": "persistent",
       "purpose": "settings-configvalue-at-rest-encryption",
+      "requiredFeatures": [
+        "backend"
+      ]
+    },
+    {
+      "id": "n_6675fe85c062a3bcb7a3bb64",
+      "kind": "provider",
+      "label": "vault::VaultSecretResolver (vault)",
+      "port": "diport::SecretResolver",
+      "lifecycle": "active",
+      "durability": "persistent",
+      "purpose": "settings-secret-material-resolution",
       "requiredFeatures": [
         "backend"
       ]
@@ -540,6 +552,21 @@
     },
     {
       "from": "n_9c6899a1908cf425a8116055",
+      "to": "n_2cccb5238d48d945bddd07c4",
+      "kind": "contributes-output"
+    },
+    {
+      "from": "n_c0dd9c5f658d1d6da9113e7c",
+      "to": "n_6675fe85c062a3bcb7a3bb64",
+      "kind": "requires-capability"
+    },
+    {
+      "from": "n_d954278a62814c4c97d6a2ee",
+      "to": "n_6675fe85c062a3bcb7a3bb64",
+      "kind": "declares-provider"
+    },
+    {
+      "from": "n_6675fe85c062a3bcb7a3bb64",
       "to": "n_2cccb5238d48d945bddd07c4",
       "kind": "contributes-output"
     },

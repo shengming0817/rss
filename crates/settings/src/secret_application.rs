@@ -2,7 +2,8 @@
 //!
 //! [`SecretService`] 持只读 [`crate::ports::SecretRepo`] + typed
 //! [`crate::ports::SecretUnitOfWork`]（坐标存储）+
-//! [`diport::SecretResolver`]（材料解析，fail-closed）+ [`diport::Clock`]（保留供未来扩展，当前未使用）。
+//! [`diport::SecretResolver`]（材料解析，fail-closed）+ [`diport::Clock`]（保留供未来扩展，当前未使用）；
+//! 生产 secret-resolve 路由只持 [`SecretResolveService`]，从类型上排除 mutation UoW。
 //! 版本 CAS 逻辑镜像 [`crate::application::SettingsService`]，差异：L1 无 outbox。
 //!
 //! # 安全语义
@@ -22,10 +23,14 @@ use ::generated::http::settings_v2::{
 use ::httpserve::ContractMarker;
 use axum::Json;
 use axum::body::{Body, Bytes, to_bytes};
-use axum::extract::{Request, State};
+use axum::extract::{Path, Request, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
+use base64::Engine as _;
 use diport::{Clock, DynSecretResolver, SecretMaterial, SecretResolver};
+use generated::http::settings_v7::{
+    SPEC as SECRET_RESOLVE_HTTP_SPEC, SettingsSecretResolveData, SettingsSecretResolveResponse,
+};
 use vocab::{CoreError, CoreErrorKind, TenantId};
 
 use crate::application::{authenticated_tenant_scope, request_id_from, wire_version};
@@ -121,24 +126,51 @@ fn secret_ref_to_coordinate(r: &SecretRef) -> diport::SecretCoordinate {
     )
 }
 
-/// settings secret 应用服务（L1 本地事务，无 outbox）。
+/// 生产 secret-resolve 路由的窄化只读服务。
+///
+/// 字段私有，构造器只接收坐标仓储与 resolver；mutation UoW 无法进入 LocalOnly 路由 State。
+pub struct SecretResolveService {
+    secrets: Arc<DynSecretRepo<'static>>,
+    resolver: Box<DynSecretResolver<'static>>,
+}
+
+impl SecretResolveService {
+    /// 从两个必填端口构造生产只读能力。
+    #[must_use]
+    pub fn new(
+        secrets: Arc<DynSecretRepo<'static>>,
+        resolver: Box<DynSecretResolver<'static>>,
+    ) -> Self {
+        Self { secrets, resolver }
+    }
+
+    /// 经当前已存坐标 fresh 解析材料，不缓存。
+    #[tracing::instrument(skip_all, err, fields(tenant = %tenant))]
+    pub async fn resolve_secret(
+        &self,
+        tenant: TenantId,
+        key: &SecretKey,
+    ) -> Result<SecretMaterial, SecretServiceError> {
+        resolve_secret_from_ports(&self.secrets, &self.resolver, tenant, key).await
+    }
+}
+
+/// settings secret 读写应用服务（L1 本地事务，无 outbox）。
 ///
 /// 必填依赖走构造器位置参（缺失即编译错误）：`secrets`（只读坐标仓储）、`secret_uow`（typed mutation）、
 /// `resolver`（材料解析 provider）、`clock`（保留位置参，未来扩展审计时间戳用，当前未使用）。
 ///
 /// # 生产构造约束（#1430）
 ///
-/// **生产组合根不构造 `SecretService`**：secret-publish 路由经 read repo + mutation UoW State 与
-/// [`secret_publish_handler`] 直挂（不需 resolver）。`SecretService` 持 `Box<DynSecretResolver>`
-/// （ADR-003 Amendment #1095：diport infra 端口 `Send` 非 `Sync`）⇒ 整体非 `Sync`、不可作 axum State。本类型
-/// 承载 secret **resolve** 路径（解析材料；对应 HTTP 路由待落）+ 测试，仍是 secret 域服务的完整 API 表面。
+/// 生产 HTTP dispatch 不把此宽服务存入路由 State：publish 直接接收 typed repo/UoW，resolve 仅接收
+/// 无法携带 mutation capability 的 [`SecretResolveService`]。
 ///
 /// # fail-closed 契约
 ///
 /// `resolve_secret` 每次均发起 fresh resolver 调用，绝不缓存材料——零信任边界要求 secret 读取须 fresh。
 pub struct SecretService {
-    secrets: Box<DynSecretRepo<'static>>,
-    secret_uow: Box<DynSecretUnitOfWork<'static>>,
+    secrets: Arc<DynSecretRepo<'static>>,
+    secret_uow: Arc<DynSecretUnitOfWork<'static>>,
     resolver: Box<DynSecretResolver<'static>>,
     // reason: Clock 是构造器必填位置参（rust-standards §Clock 构造器位置参）；当前未使用字段，
     // 保留为未来 publish_secret 审计时间戳扩展点，不删除——删除需改构造器签名（breaking change）。
@@ -151,8 +183,8 @@ impl SecretService {
     ///
     /// `clock` 是构造器位置参（rust-standards §Clock 构造器位置参），生产传 `SystemClock`。
     pub fn with_postgres(
-        secrets: Box<DynSecretRepo<'static>>,
-        secret_uow: Box<DynSecretUnitOfWork<'static>>,
+        secrets: Arc<DynSecretRepo<'static>>,
+        secret_uow: Arc<DynSecretUnitOfWork<'static>>,
         resolver: Box<DynSecretResolver<'static>>,
         clock: Box<dyn Clock>,
     ) -> Self {
@@ -175,8 +207,8 @@ impl SecretService {
         clock: Box<dyn Clock>,
     ) -> Self {
         Self {
-            secrets,
-            secret_uow,
+            secrets: Arc::from(secrets),
+            secret_uow: Arc::from(secret_uow),
             resolver,
             clock,
         }
@@ -185,9 +217,7 @@ impl SecretService {
     /// 写入新 secret 引用版本（CAS，L1 本地事务）。返回新版本号。并发冲突冒泡 `VersionConflict`。
     ///
     /// 逻辑收口进 internal typed publish helper（仅依赖 repo/UoW，无 resolver / clock）。handler 的 axum
-    /// State 只持 typed ports 而非整个 `SecretService`：`SecretService`
-    /// 持 `Box<DynSecretResolver>`（diport infra 端口，ADR-003 Amendment #1095 故意 `Send` 非 `Sync`）⇒ 整体非
-    /// `Sync`、不可作 axum State；publish 路径不需 resolver，故经 typed ports 直挂。
+    /// State 只持 publish 所需 typed ports，而非携带 resolver/clock 的整个 `SecretService`。
     #[tracing::instrument(skip_all, err, fields(tenant = %tenant))]
     pub async fn publish_secret(
         &self,
@@ -281,15 +311,28 @@ impl SecretService {
         tenant: TenantId,
         key: &SecretKey,
     ) -> Result<SecretMaterial, SecretServiceError> {
-        let secret_ref = self
-            .find_secret_ref(tenant, key)
-            .await?
-            .ok_or(SecretServiceError::NotFound)?;
-        let coord = secret_ref_to_coordinate(&secret_ref);
-        // fail-closed：resolver 报错直接冒泡，绝不降级返空材料。
-        let material = self.resolver.resolve(tenant, &coord).await?;
-        Ok(material)
+        resolve_secret_from_ports(&self.secrets, &self.resolver, tenant, key).await
     }
+}
+
+async fn resolve_secret_from_ports(
+    secrets: &DynSecretRepo<'static>,
+    resolver: &DynSecretResolver<'static>,
+    tenant: TenantId,
+    key: &SecretKey,
+) -> Result<SecretMaterial, SecretServiceError> {
+    let scope = TenantRepoScope::from_authenticated_tenant(tenant);
+    let secret_ref = secrets
+        .find(scope, key)
+        .await?
+        .ok_or(SecretServiceError::NotFound)?
+        .secret_ref()
+        .clone();
+    let coordinate = secret_ref_to_coordinate(&secret_ref);
+    resolver
+        .resolve(tenant, &coordinate)
+        .await
+        .map_err(Into::into)
 }
 
 // ---------------------------------------------------------------------------
@@ -401,6 +444,61 @@ pub(crate) async fn secret_publish_handler(
     secret_publish_handler_bytes(&state.secrets, &state.secret_uow, scope, body, &request_id).await
 }
 
+/// `settings.secret-resolve` handler. The tenant is taken only from authenticated route evidence;
+/// the stored reference and active Vault resolver are consulted on every request.
+pub(crate) async fn secret_resolve_handler(
+    _: ContractMarker<::generated::http::settings_v7::RouteMarker>,
+    Path(key): Path<String>,
+    State(state): State<SecretResolveState>,
+    req: Request<Body>,
+) -> Response {
+    let request_id = request_id_from(&req);
+    let scope = match authenticated_tenant_scope(&req) {
+        Ok(scope) => scope,
+        Err(reject) => return reject.into_response(&request_id),
+    };
+    let key = match SecretKey::parse(&key) {
+        Ok(key) => key,
+        Err(_) => return httpserve::error::validation_bad_request(&request_id),
+    };
+    match state.service.resolve_secret(scope.tenant(), &key).await {
+        Ok(material) => (
+            StatusCode::OK,
+            Json(SettingsSecretResolveResponse {
+                data: SettingsSecretResolveData {
+                    material_base64: base64::engine::general_purpose::STANDARD
+                        .encode(material.expose()),
+                },
+            }),
+        )
+            .into_response(),
+        Err(error) => secret_error_response(
+            &error,
+            scope.tenant(),
+            &request_id,
+            &SECRET_RESOLVE_HTTP_SPEC,
+            "secret_resolve",
+        ),
+    }
+}
+
+/// Narrow classified state for the LocalOnly resolve route.
+#[derive(Clone)]
+pub(crate) struct SecretResolveState {
+    service: Arc<SecretResolveService>,
+}
+
+impl SecretResolveState {
+    pub(crate) fn new(service: Arc<SecretResolveService>) -> Self {
+        Self { service }
+    }
+}
+
+impl httpserve::ClassifiedRouteState for SecretResolveState {
+    type Effect = diport::ReadEffect;
+    type Privilege = diport::LocalPrivilege;
+}
+
 /// secret-publish 核心（tenant 已解析）：parse + domain funnel + 仓储发布。供单测直接驱动。
 pub(crate) async fn secret_publish_handler_bytes(
     secrets: &DynSecretRepo<'static>,
@@ -428,7 +526,13 @@ pub(crate) async fn secret_publish_handler_bytes(
             };
             (StatusCode::CREATED, Json(response)).into_response()
         }
-        Err(err) => secret_error_response(&err, scope.tenant(), request_id),
+        Err(err) => secret_error_response(
+            &err,
+            scope.tenant(),
+            request_id,
+            &SECRET_HTTP_SPEC,
+            "secret_publish",
+        ),
     }
 }
 
@@ -445,7 +549,13 @@ fn parse_secret_publish(
 /// `SecretServiceError` → wire 响应：generic [`CoreErrorKind`] 派生状态码（4xx 客户端 / 5xx 内部），
 /// **不**铸 `ERR_SETTINGS_` 命名空间（复用 vocab 通用 kind）。5xx 记结构化 error（const message，无 PII；
 /// `tenant_id` 是合法低基数可观测字段、非凭据，透传供跨租定位——对标 identity handler 错误日志）。
-fn secret_error_response(err: &SecretServiceError, tenant: TenantId, request_id: &str) -> Response {
+fn secret_error_response(
+    err: &SecretServiceError,
+    tenant: TenantId,
+    request_id: &str,
+    spec: &::generated::http::HttpSpec,
+    operation: &'static str,
+) -> Response {
     let kind = match err {
         SecretServiceError::InvalidKey => CoreErrorKind::Validation,
         SecretServiceError::VersionConflict => CoreErrorKind::VersionConflict,
@@ -462,9 +572,9 @@ fn secret_error_response(err: &SecretServiceError, tenant: TenantId, request_id:
             error = %err,
             request_id,
             tenant_id = %tenant,
-            contract_id = SECRET_HTTP_SPEC.route.contract_id(),
-            operation = "secret_publish",
-            "settings secret publish failed"
+            contract_id = spec.route.contract_id(),
+            operation,
+            "settings secret operation failed"
         );
     }
     httpserve::error::core_error_response(&CoreError::new(kind), request_id)
@@ -1173,7 +1283,8 @@ mod tests {
         ];
         for (err, want) in cases {
             assert_eq!(
-                secret_error_response(&err, tenant(), "rid").status(),
+                secret_error_response(&err, tenant(), "rid", &SECRET_HTTP_SPEC, "secret_publish",)
+                    .status(),
                 want,
                 "{err:?}"
             );
@@ -1448,8 +1559,8 @@ mod tests {
     fn secret_service_ctor_required_params() {
         // 绑定函数指针断言签名——缺参 / 类型不符即编译失败（ADR-004 C5）。
         let _ctor: fn(
-            Box<DynSecretRepo<'static>>,
-            Box<DynSecretUnitOfWork<'static>>,
+            Arc<DynSecretRepo<'static>>,
+            Arc<DynSecretUnitOfWork<'static>>,
             Box<DynSecretResolver<'static>>,
             Box<dyn Clock>,
         ) -> SecretService = SecretService::with_postgres;

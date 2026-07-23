@@ -9,8 +9,9 @@
 //!
 //! HTTP 接缝（#1430 PERSIST-009 settings 首条 durable module 闭环）：[`SettingsDomain`] 持 config + secret
 //! 应用服务，`init` 经 typed `route_group::<Primary>` + `GeneratedPrimaryEndpoint`（#1690
-//! atomic evidence/handler funnel）从 generated SPEC 挂 config publish/get/delete/rollback 与 secret-publish
-//! 五条认证路由（鉴权 = permission，租户来自 route gate 注入的 [`httpserve::AuthorizedSubject`]、非 pre-auth header）。
+//! atomic evidence/handler funnel）从 generated SPEC 挂 config publish/get/delete/rollback、secret-publish
+//! 与 secret-resolve 六条认证路由（鉴权 = permission，租户来自 route gate 注入的
+//! [`httpserve::AuthorizedSubject`]、非 pre-auth header）。
 //! 域错误经 `vocab::CoreErrorKind` 映射状态码；CAS 与 outbox 事实冲突分别具有可重试/终止 wire 分类。
 //!
 //! ref: Unleash/unleash-types-rs src/client_features.rs@main（flag 求值语义）
@@ -39,6 +40,9 @@ use ::generated::http::settings_v6::{
     PRODUCER as CONFIG_ROLLBACK_PRODUCER, SPEC as CONFIG_ROLLBACK_HTTP_SPEC,
     SettingsConfigRollbackData, SettingsConfigRollbackRequest, SettingsConfigRollbackResponse,
 };
+use ::generated::http::settings_v7::ROUTE as SECRET_RESOLVE_HTTP_ROUTE;
+#[cfg(test)]
+use ::generated::http::settings_v7::SPEC as SECRET_RESOLVE_HTTP_SPEC;
 use ::httpserve::{
     AuthorizedSubject, ContractMarker, GeneratedPrimaryEndpoint, Primary, ProducerMarker,
 };
@@ -64,7 +68,9 @@ use generated::event::{SubscriptionEffect, SubscriptionExecution};
 use primitives::ListenerKind;
 use vocab::{CoreError, CoreErrorKind, TenantId};
 
-use crate::secret_application::{SecretPublishState, secret_publish_handler};
+use crate::secret_application::{
+    SecretPublishState, SecretResolveState, secret_publish_handler, secret_resolve_handler,
+};
 
 use crate::domain::{
     ConfigEntry, ConfigHead, ConfigMutation, ConfigRepoError, ConfigTombstone, ConfigValue,
@@ -987,15 +993,14 @@ fn config_error_response(
     httpserve::error::core_error_response(&CoreError::new(kind), request_id)
 }
 
-/// settings 域 bootstrap 生命周期：挂载 config publish/get/delete/rollback 与 secret-publish 业务路由。
+/// settings 域 bootstrap 生命周期：挂载 config 与 secret publish/resolve 业务路由。
 ///
 /// 持有 config 应用服务 + secret read repo / mutation UoW（构造器必填位置参注入，缺失即编译错误）；
-/// `init` 经 typed `route_group::<Primary>` + `GeneratedPrimaryEndpoint` 从 generated SPEC 单源挂五条认证路由
+/// `init` 经 typed `route_group::<Primary>` + `GeneratedPrimaryEndpoint` 从 generated SPEC 单源挂六条认证路由
 /// （对标 identity `IdentityDomain`）。
 ///
-/// secret 路由 State 持 read repo + mutation UoW（而非 `SecretService`）：后者含 `Box<DynSecretResolver>`
-/// （diport infra 端口，ADR-003 Amendment #1095 故意 `Send` 非 `Sync`）⇒ 非 `Sync`、不可作 axum State；
-/// publish 路径不需 resolver，故经 typed ports 直挂。
+/// secret-publish State 持 read repo + mutation UoW；secret-resolve State 只持
+/// [`crate::SecretResolveService`]（read repo + resolver），因此 LocalOnly read dispatch 无法携带写端口。
 ///
 /// `configs_ready` 探针由组合根（`assemblies/runtime::wire_settings`）经 `DomainModuleResult` 注册——探针包
 /// `PgDbReadiness`（adapter 类型，域 crate 不可依赖 adapter），故不在此声明（层序约束）。
@@ -1004,6 +1009,7 @@ pub struct SettingsDomain {
     config_query: ConfigQueryService,
     secret_repo: Arc<DynSecretRepo<'static>>,
     secret_uow: Arc<DynSecretUnitOfWork<'static>>,
+    secret_service: Arc<crate::SecretResolveService>,
 }
 
 impl SettingsDomain {
@@ -1012,6 +1018,7 @@ impl SettingsDomain {
         config: Arc<SettingsService>,
         secret_repo: Arc<DynSecretRepo<'static>>,
         secret_uow: Arc<DynSecretUnitOfWork<'static>>,
+        secret_service: Arc<crate::SecretResolveService>,
     ) -> Self {
         let config_query = config.config_query_service();
         Self {
@@ -1019,6 +1026,7 @@ impl SettingsDomain {
             config_query,
             secret_repo,
             secret_uow,
+            secret_service,
         }
     }
 }
@@ -1158,6 +1166,7 @@ impl ::bootstrap::Domain for SettingsDomain {
         let config_query = self.config_query.clone();
         let secret_state =
             SecretPublishState::new(Arc::clone(&self.secret_repo), Arc::clone(&self.secret_uow));
+        let secret_service = SecretResolveState::new(Arc::clone(&self.secret_service));
         reg.route_group::<Primary>(SETTINGS_ROUTE_PREFIX, move |rb| {
             let rb = rb.mount(
                 GeneratedPrimaryEndpoint::new_producer(
@@ -1188,6 +1197,10 @@ impl ::bootstrap::Domain for SettingsDomain {
                 GeneratedPrimaryEndpoint::new(SECRET_HTTP_ROUTE, secret_publish_handler)?
                     .with_state(secret_state),
             )?;
+            let rb = rb.mount(
+                GeneratedPrimaryEndpoint::new(SECRET_RESOLVE_HTTP_ROUTE, secret_resolve_handler)?
+                    .with_classified_state(secret_service),
+            )?;
             Ok(rb)
         })?;
         Ok(())
@@ -1202,7 +1215,10 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
-    use diport::{OutboxEmitError, OutboxEmitter};
+    use diport::{
+        DynSecretResolver, OutboxEmitError, OutboxEmitter, SecretCoordinate, SecretMaterial,
+        SecretResolver, SecretResolverError,
+    };
 
     use crate::domain::{FlagState, RolloutPercentage, RolloutRule};
 
@@ -1218,6 +1234,11 @@ mod tests {
     #[test]
     fn config_query_service_is_local_read_state() {
         assert_local_read_state::<ConfigQueryService>();
+    }
+
+    #[test]
+    fn secret_resolve_state_is_local_read_state() {
+        assert_local_read_state::<SecretResolveState>();
     }
 
     const TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
@@ -1578,6 +1599,27 @@ mod tests {
         )
     }
 
+    struct TestSecretResolver;
+
+    impl SecretResolver for TestSecretResolver {
+        async fn resolve(
+            &self,
+            _tenant: TenantId,
+            _coordinate: &SecretCoordinate,
+        ) -> Result<SecretMaterial, SecretResolverError> {
+            Err(SecretResolverError::NotFound)
+        }
+    }
+
+    fn secret_resolve_service_for(
+        repo: Arc<DynSecretRepo<'static>>,
+    ) -> Arc<crate::SecretResolveService> {
+        Arc::new(crate::SecretResolveService::new(
+            repo,
+            DynSecretResolver::new_box(TestSecretResolver),
+        ))
+    }
+
     #[derive(Clone)]
     struct ConfigGetProbeResponse {
         head: Option<ConfigHead>,
@@ -1816,6 +1858,8 @@ mod tests {
     #[derive(Clone)]
     struct SettingsConfigGetAuthorizer {
         allow: bool,
+        contract_id: &'static str,
+        permission: vocab::RoutePermissionId,
         requests: Arc<Mutex<Vec<httpserve::RouteAuthorizationRequest>>>,
     }
 
@@ -1823,6 +1867,17 @@ mod tests {
         fn allowing() -> Self {
             Self {
                 allow: true,
+                contract_id: ::generated::http::settings_v4::CONTRACT_ID,
+                permission: vocab::RoutePermissionId::SettingsConfigGet,
+                requests: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
+        fn allowing_secret_resolve() -> Self {
+            Self {
+                allow: true,
+                contract_id: ::generated::http::settings_v7::CONTRACT_ID,
+                permission: vocab::RoutePermissionId::SettingsSecretResolve,
                 requests: Arc::new(Mutex::new(Vec::new())),
             }
         }
@@ -1830,7 +1885,7 @@ mod tests {
         fn denying() -> Self {
             Self {
                 allow: false,
-                requests: Arc::new(Mutex::new(Vec::new())),
+                ..Self::allowing()
             }
         }
 
@@ -1849,8 +1904,8 @@ mod tests {
         ) -> Pin<Box<dyn Future<Output = httpserve::RouteAuthorizationDecision> + Send + 'a>>
         {
             let allow = self.allow
-                && request.contract_id == ::generated::http::settings_v4::SPEC.route.contract_id()
-                && request.permission == vocab::RoutePermissionId::SettingsConfigGet
+                && request.contract_id == self.contract_id
+                && request.permission == self.permission
                 && request.tenant_id.is_some()
                 && !matches!(request.principal_kind, PrincipalKind::Device);
             self.requests
@@ -1938,7 +1993,8 @@ mod tests {
             FlagStoreBox(Box::new(InMemFlagStore::new())),
             Box::new(FixedClock(SystemTime::UNIX_EPOCH)),
         ));
-        let domain = super::SettingsDomain::new(service, secret_repo, secret_uow);
+        let secret_service = secret_resolve_service_for(Arc::clone(&secret_repo));
+        let domain = super::SettingsDomain::new(service, secret_repo, secret_uow, secret_service);
         let mut registry = bootstrap::compose(&[&domain]).expect("compose settings domain");
         let mut finalized = registry
             .finalize_routes()
@@ -1951,6 +2007,46 @@ mod tests {
             &::generated::http::settings_v4::ROUTE,
         )
         .expect("settings config-get is mounted with classified read state");
+        let plan = primitives::AuthPlan::new(
+            ListenerKind::Primary,
+            primitives::AuthScheme::RssAccessToken,
+        )
+        .expect("Primary JWT auth plan");
+        let router = ::httpserve::finalize_primary_auth_with_audit(
+            routes,
+            plan,
+            httpserve::AuditSinkHandle::new(auth_sink),
+            Arc::new(FixedClock(SystemTime::UNIX_EPOCH)),
+            authorizer,
+        )
+        .expect("finalize Primary auth")
+        .into_router_for_test();
+        (router, proof)
+    }
+
+    #[allow(clippy::expect_used)]
+    fn finalized_secret_resolve_router(
+        auth_sink: RecordingAuthAuditSink,
+        authorizer: Arc<dyn httpserve::RouteAuthorizer>,
+    ) -> (
+        axum::Router,
+        ::httpserve::LocalOnlyMountedRouteProof<
+            ::generated::http::settings_v7::RouteMarker,
+            SecretResolveState,
+        >,
+    ) {
+        let domain = settings_domain_for_test();
+        let mut registry = bootstrap::compose(&[&domain]).expect("compose settings domain");
+        let mut finalized = registry
+            .finalize_routes()
+            .expect("finalize settings routes");
+        let (listener, routes) = finalized.pop().expect("settings Primary routes");
+        assert_eq!(listener, ListenerKind::Primary);
+        let proof = ::httpserve::prove_local_only_mounted_route_state::<SecretResolveState, _>(
+            &routes,
+            &::generated::http::settings_v7::ROUTE,
+        )
+        .expect("settings secret-resolve is mounted with classified read state");
         let plan = primitives::AuthPlan::new(
             ListenerKind::Primary,
             primitives::AuthScheme::RssAccessToken,
@@ -2252,6 +2348,64 @@ mod tests {
         ::core::assert_eq!(
             receipt.contract_id(),
             ::generated::http::settings_v4::SPEC.route.contract_id()
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn secret_resolve_local_only_finalized_route_has_canonical_receipt() {
+        let authorizer = SettingsConfigGetAuthorizer::allowing_secret_resolve();
+        let (router, proof) = self::finalized_secret_resolve_router(
+            RecordingAuthAuditSink::ok(),
+            Arc::new(authorizer.clone()),
+        );
+        let router = router.layer(::axum::Extension(httpserve::Authenticated::new(
+            primitives::RequiredScheme::RssAccessToken,
+            vocab::PrincipalKind::Admin,
+            "settings-secret-resolve-subject",
+            Some(tenant()),
+        )));
+        let observers = ::testkit::local_only::LocalOnlyObservers::new(
+            ::testkit::local_only::StaticExclusion::<
+                ::testkit::local_only::BusinessWrite,
+            >::from_governed(&proof),
+            ::testkit::local_only::StaticExclusion::<::testkit::local_only::Outbox>::from_governed(
+                &proof,
+            ),
+            ::testkit::local_only::StaticExclusion::<::testkit::local_only::Publish>::from_governed(
+                &proof,
+            ),
+        );
+        let (response, receipt) = ::testkit::local_only::assert_local_only_with_receipt::<
+            ::generated::http::settings_v7::LocalOnlyConformanceMarker,
+            _,
+            _,
+            _,
+        >(
+            ::generated::http::settings_v7::SPEC.route.contract_id(),
+            observers,
+            move || {
+                ::testkit::call(
+                    router,
+                    ::testkit::ContractRequest::get(
+                        ::generated::http::settings_v7::SPEC
+                            .route
+                            .path()
+                            .replace("{key}", "app.k"),
+                    ),
+                )
+            },
+        )
+        .await
+        .expect("settings secret-resolve remains LocalOnly");
+        response
+            .expect("call finalized settings secret-resolve route")
+            .ensure_status(StatusCode::NOT_FOUND)
+            .expect("missing coordinate is 404");
+        assert_eq!(authorizer.requests().len(), 1);
+        ::core::assert_eq!(
+            receipt.contract_id(),
+            ::generated::http::settings_v7::SPEC.route.contract_id()
         );
     }
 
@@ -2797,17 +2951,20 @@ mod tests {
     fn settings_domain_for_test() -> SettingsDomain {
         let capture = CapturingEmitter::default();
         let (secret_repo, secret_uow) = secret_ports_arc();
+        let secret_service = secret_resolve_service_for(Arc::clone(&secret_repo));
         SettingsDomain::new(
             Arc::new(service_with(&capture, InMemFlagStore::new())),
             secret_repo,
             secret_uow,
+            secret_service,
         )
     }
 
     #[allow(clippy::expect_used, clippy::panic)]
     fn subscriber_effect_for(service: Arc<SettingsService>) -> Arc<ConfigVersionReconciler> {
         let (secret_repo, secret_uow) = secret_ports_arc();
-        let domain = SettingsDomain::new(service, secret_repo, secret_uow);
+        let secret_service = secret_resolve_service_for(Arc::clone(&secret_repo));
+        let domain = SettingsDomain::new(service, secret_repo, secret_uow, secret_service);
         let mut registry = bootstrap::compose(&[&domain]).expect("settings domain composes");
         let binding = registry
             .drain_subscribers()
@@ -2840,8 +2997,11 @@ mod tests {
         service: Arc<SettingsService>,
         auth: Option<AuthorizedSubject>,
     ) -> axum::Router {
-        let router =
-            axum::Router::new().route("/configs", post(config_publish_handler).with_state(service));
+        let publish = httpserve::with_producer_witness_for_test(
+            post(config_publish_handler).with_state(service),
+            CONFIG_HTTP_PRODUCER,
+        );
+        let router = axum::Router::new().route("/configs", publish);
         match auth {
             Some(a) => router.layer(axum::Extension(a)),
             None => router,
@@ -2852,19 +3012,22 @@ mod tests {
         service: Arc<SettingsService>,
         auth: Option<AuthorizedSubject>,
     ) -> axum::Router {
+        let config_query = service.config_query_service();
+        let delete = httpserve::with_producer_witness_for_test(
+            delete(config_delete_handler).with_state(Arc::clone(&service)),
+            CONFIG_DELETE_PRODUCER,
+        );
+        let rollback = httpserve::with_producer_witness_for_test(
+            post(config_rollback_handler).with_state(service),
+            CONFIG_ROLLBACK_PRODUCER,
+        );
         let router = axum::Router::new()
             .route(
                 "/configs/{key}",
-                get(config_get_handler).with_state(service.config_query_service()),
+                get(config_get_handler).with_state(config_query),
             )
-            .route(
-                "/configs/{key}",
-                delete(config_delete_handler).with_state(Arc::clone(&service)),
-            )
-            .route(
-                "/configs/{key}/rollbacks",
-                post(config_rollback_handler).with_state(service),
-            );
+            .route("/configs/{key}", delete)
+            .route("/configs/{key}/rollbacks", rollback);
         match auth {
             Some(evidence) => router.layer(axum::Extension(evidence)),
             None => router,
@@ -2885,7 +3048,7 @@ mod tests {
         assert_eq!(groups[0].0, ListenerKind::Primary);
         assert_eq!(groups[0].1, SETTINGS_ROUTE_PREFIX);
         let finalized = reg.finalize_routes().expect("active routes finalize");
-        assert_eq!(finalized.len(), 1, "five routes share one Primary listener");
+        assert_eq!(finalized.len(), 1, "six routes share one Primary listener");
     }
 
     #[test]
@@ -3330,6 +3493,15 @@ mod tests {
                 ][..],
             ),
             (
+                SECRET_RESOLVE_HTTP_SPEC.route,
+                "/api/v1/settings/secrets/{key}/material",
+                "GET",
+                "settings.secret-resolve",
+                vocab::RoutePermissionId::SettingsSecretResolve,
+                vocab::HttpConsistencyLevel::LocalOnly,
+                &[vocab::HttpEffectKind::Auth, vocab::HttpEffectKind::Read][..],
+            ),
+            (
                 CONFIG_GET_HTTP_SPEC.route,
                 "/api/v1/settings/configs/{key}",
                 "GET",
@@ -3386,7 +3558,7 @@ mod tests {
 
     #[test]
     #[allow(clippy::expect_used)]
-    fn generated_primary_endpoints_preserve_all_five_route_proofs() {
+    fn generated_primary_endpoints_preserve_all_six_route_proofs() {
         {
             const _: ::vocab::HttpRouteBinding<
                 ::generated::http::settings_v2::RouteMarker,
@@ -3406,6 +3578,11 @@ mod tests {
                 GeneratedPrimaryEndpoint::new(SECRET_HTTP_ROUTE, secret_publish_handler)
                     .expect("secret publish endpoint");
             assert_eq!(secret_publish.evidence(), &SECRET_HTTP_SPEC.route);
+
+            let secret_resolve =
+                GeneratedPrimaryEndpoint::new(SECRET_RESOLVE_HTTP_ROUTE, secret_resolve_handler)
+                    .expect("secret resolve endpoint");
+            assert_eq!(secret_resolve.evidence(), &SECRET_RESOLVE_HTTP_SPEC.route);
 
             let config_get =
                 GeneratedPrimaryEndpoint::new(CONFIG_GET_HTTP_ROUTE, config_get_handler)
@@ -3438,7 +3615,7 @@ mod tests {
 
         assert_eq!(
             production.matches("GeneratedPrimaryEndpoint::new(").count(),
-            2
+            3
         );
         assert_eq!(
             production
@@ -3446,7 +3623,7 @@ mod tests {
                 .count(),
             3
         );
-        assert_eq!(production.matches("rb.mount(").count(), 5);
+        assert_eq!(production.matches("rb.mount(").count(), 6);
         assert!(!production.contains("mount_primary("));
         assert!(!production.contains("PrimaryRoute"));
         assert!(!production.contains("RoutePermission"));

@@ -13,7 +13,7 @@ use super::projection::verified_service_maintenance_operator_subject;
 use super::{build_operator_service_token_provider, parse_positive_usize};
 use crate::config::SnapshotConfig;
 use crate::infra::pg::build_pg_migrator_config;
-use crate::infra::vault::VaultRuntimeConfigError;
+use crate::infra::vault::VaultKeyProviderConfigError;
 use crate::phase::{OperatorRuntimeCapability, OperatorRuntimeInputs};
 
 /// `rss` binary 是否请求 settings ConfigValue 维护命令。
@@ -228,13 +228,13 @@ pub(super) async fn settings_config_value_maintenance_operator_subject(
 }
 
 pub(super) fn settings_config_value_maintenance_vault_failure(
-    error: &VaultRuntimeConfigError,
+    error: &VaultKeyProviderConfigError,
 ) -> (&'static str, &'static str) {
     match error {
-        VaultRuntimeConfigError::SettingsKeyNameConfig(_) => {
+        VaultKeyProviderConfigError::SettingsKeyName(_) => {
             ("key_name_config", "settings config value key name")
         }
-        VaultRuntimeConfigError::VaultClientConfig(_) => (
+        VaultKeyProviderConfigError::VaultClient(_) => (
             "key_provider_config",
             "settings config value maintenance key provider",
         ),
@@ -247,7 +247,7 @@ pub(super) async fn settings_config_value_maintenance_protection(
     resource_id: &str,
     config: SnapshotConfig<'_>,
 ) -> anyhow::Result<ConfigValueProtection> {
-    let vault_config = match crate::infra::vault::VaultRuntimeConfig::from_snapshot(config) {
+    let vault_config = match crate::infra::vault::VaultKeyProviderConfig::from_snapshot(config) {
         Ok(config) => config,
         Err(err) => {
             let (reason, context) = settings_config_value_maintenance_vault_failure(&err);
@@ -261,7 +261,7 @@ pub(super) async fn settings_config_value_maintenance_protection(
             return Err(err).context(context);
         }
     };
-    let (key_provider, key_name) = match vault_config.into_settings_key_provider() {
+    let (key_provider, key_name) = match vault_config.into_key_provider() {
         Ok(parts) => parts,
         Err(err) => {
             let (reason, context) = settings_config_value_maintenance_vault_failure(&err);

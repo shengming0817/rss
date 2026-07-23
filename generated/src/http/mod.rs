@@ -62,6 +62,7 @@ pub mod settings_v3;
 pub mod settings_v4;
 pub mod settings_v5;
 pub mod settings_v6;
+pub mod settings_v7;
 
 /// Root registry for active HTTP specs generated from every HTTP contract.
 pub const SPECS: &[HttpSpec] = &[
@@ -85,6 +86,7 @@ pub const SPECS: &[HttpSpec] = &[
     settings_v4::SPEC,
     settings_v5::SPEC,
     settings_v6::SPEC,
+    settings_v7::SPEC,
 ];
 
 /// Root registry for active LocalOnly HTTP specs generated from `consistencyLevel = "LocalOnly"`.
@@ -95,6 +97,7 @@ pub const LOCAL_ONLY_SPECS: &[HttpSpec] = &[
     identity_v1::profile::SPEC,
     identity_v1::roles_list::SPEC,
     settings_v4::SPEC,
+    settings_v7::SPEC,
 ];
 
 /// Root registry for active LocalTx HTTP specs generated from `consistencyLevel = "LocalTx"`.

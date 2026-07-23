@@ -202,6 +202,7 @@ provider_roles! {
     EventSubscriber => "event-subscriber",
     IdentitySigner => "identity-signer",
     SettingsKeyProvider => "settings-key-provider",
+    SettingsSecretResolver => "settings-secret-resolver",
     ListenerPdp => "listener-pdp",
     ServiceTokenReplayStore => "service-token-replay-store",
     AuthAuditSink => "auth-audit-sink",
@@ -292,6 +293,7 @@ provider_factory_symbols! {
     EventexecAmqpSubscriber => "eventexec::amqp-subscriber",
     IdentityVaultSigner => "identity::vault-signer",
     SettingsVaultKeyProvider => "settings::vault-key-provider",
+    SettingsVaultSecretResolver => "settings::vault-secret-resolver",
     HttpserveOidcPdp => "httpserve::oidc-pdp",
     OidcPostgresServiceTokenReplayStore => "oidc::postgres-service-token-replay-store",
     HttpservePostgresAuthAuditSink => "httpserve::postgres-auth-audit-sink",
@@ -334,6 +336,8 @@ pub enum ProviderConstructor {
     VaultSigner,
     #[serde(rename = "vault::VaultKeyProvider")]
     VaultKeyProvider,
+    #[serde(rename = "vault::VaultSecretResolver")]
+    VaultSecretResolver,
     #[serde(rename = "oidc::OidcProvider")]
     OidcProvider,
     #[serde(rename = "s3::S3Store")]
@@ -357,6 +361,7 @@ impl ProviderConstructor {
             Self::PostgresDlxLifecycleRepository => "postgres::PgDlxLifecycleRepository",
             Self::VaultSigner => "vault::VaultSigner",
             Self::VaultKeyProvider => "vault::VaultKeyProvider",
+            Self::VaultSecretResolver => "vault::VaultSecretResolver",
             Self::OidcProvider => "oidc::OidcProvider",
             Self::S3Store => "s3::S3Store",
             Self::S3VerifiedDlxArchiveStore => "s3::VerifiedS3DlxArchiveStore",
@@ -378,6 +383,7 @@ impl ProviderConstructor {
             Self::PostgresDlxLifecycleRepository => DiportPort::DlxLifecycleRepository,
             Self::VaultSigner => DiportPort::Signer,
             Self::VaultKeyProvider => DiportPort::KeyProvider,
+            Self::VaultSecretResolver => DiportPort::SecretResolver,
             Self::OidcProvider => DiportPort::Pdp,
             Self::S3Store => DiportPort::ObjectStore,
             Self::S3VerifiedDlxArchiveStore => DiportPort::DlxArchiveStore,
@@ -393,6 +399,7 @@ impl ProviderConstructor {
             | Self::RedisCasStore
             | Self::VaultSigner
             | Self::VaultKeyProvider
+            | Self::VaultSecretResolver
             | Self::OidcProvider
             | Self::S3Store
             | Self::S3VerifiedDlxArchiveStore => &["backend"],
@@ -422,7 +429,7 @@ impl ProviderConstructor {
             | Self::PostgresAuthAuditSink
             | Self::PostgresServiceTokenReplayStore
             | Self::PostgresDlxLifecycleRepository => "postgres",
-            Self::VaultSigner | Self::VaultKeyProvider => "vault",
+            Self::VaultSigner | Self::VaultKeyProvider | Self::VaultSecretResolver => "vault",
             Self::OidcProvider => "oidc",
             Self::S3Store | Self::S3VerifiedDlxArchiveStore => "s3",
         }
@@ -465,6 +472,8 @@ pub enum DiportPort {
     Signer,
     #[serde(rename = "diport::KeyProvider")]
     KeyProvider,
+    #[serde(rename = "diport::SecretResolver")]
+    SecretResolver,
     #[serde(rename = "diport::Pdp")]
     Pdp,
     #[serde(rename = "diport::ServiceTokenReplayStore")]
@@ -493,6 +502,7 @@ impl DiportPort {
             Self::AckableSubscriber => "diport::AckableSubscriber",
             Self::Signer => "diport::Signer",
             Self::KeyProvider => "diport::KeyProvider",
+            Self::SecretResolver => "diport::SecretResolver",
             Self::Pdp => "diport::Pdp",
             Self::ServiceTokenReplayStore => "diport::ServiceTokenReplayStore",
             Self::AuditSink => "diport::AuditSink",
@@ -699,6 +709,20 @@ const PROVIDER_ROLE_SPECS: [ProviderRoleSpec; ProviderRole::COUNT] = [
         failure_posture: None,
         outputs: &[R],
         factory: Some(ProviderFactorySymbol::SettingsVaultKeyProvider),
+    },
+    ProviderRoleSpec {
+        role: ProviderRole::SettingsSecretResolver,
+        lifecycle: ProviderLifecycle::Active,
+        port: DiportPort::SecretResolver,
+        constructor: ProviderConstructor::VaultSecretResolver,
+        provider_crate: "vault",
+        required_features: &["backend"],
+        consumer: ProviderConsumer::Settings,
+        durability: ProviderDurability::Persistent,
+        scope: None,
+        failure_posture: None,
+        outputs: &[R],
+        factory: Some(ProviderFactorySymbol::SettingsVaultSecretResolver),
     },
     ProviderRoleSpec {
         role: ProviderRole::ListenerPdp,
@@ -1134,7 +1158,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn registry_has_fifteen_unique_active_factories_and_one_draft() {
+    fn registry_has_sixteen_unique_active_factories_and_one_draft() {
         assert_eq!(PROVIDER_ROLE_SPECS.len(), ProviderRole::COUNT);
         assert_eq!(
             PROVIDER_ROLE_SPECS
@@ -1151,7 +1175,7 @@ mod tests {
             .iter()
             .filter(|spec| spec.lifecycle == ProviderLifecycle::Draft)
             .count();
-        assert_eq!(active, 15);
+        assert_eq!(active, 16);
         assert_eq!(drafts, 1);
         assert_registry_invariants(&PROVIDER_ROLE_SPECS);
     }

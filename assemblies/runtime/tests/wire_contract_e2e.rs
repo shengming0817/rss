@@ -31,19 +31,32 @@ use runtime::test_support::{
 };
 use settings_composition::KEYPROVIDER_READY_PROBE_NAME;
 use vault::{
-    SignatureMarshaling, TenantStoreAllowlist, VaultKeyProvider, VaultRuntimeDeps,
+    SignatureMarshaling, StoreBinding, TenantStoreAllowlist, VaultKeyProvider, VaultRuntimeDeps,
     VaultSecretResolver, VaultSigner,
 };
 use wiremock::matchers::{body_partial_json, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
+type TestResult<T = ()> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 const TEST_APP_ROLE: &str = "rss_app";
 const TEST_APP_PASSWORD: &str = "rss_app_test_pw";
 const TEST_READ_ROLE: &str = "rss_app_read";
 const TEST_READ_PASSWORD: &str = "rss_app_read_test_pw";
 const KEYPROVIDER_CONFIG_FIELD: &str = "settings.config.value";
 const KEYPROVIDER_CONFIG_SCHEME: u32 = 1;
+
+fn unused_tenant_store_allowlist() -> TestResult<TenantStoreAllowlist> {
+    Ok(TenantStoreAllowlist::new([(
+        (
+            vocab::TenantId::parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")?,
+            "vault".to_owned(),
+        ),
+        StoreBinding {
+            mount: "secret".to_owned(),
+            kv_path_prefix: "tenants/a".to_owned(),
+        },
+    )])?)
+}
 
 struct NoopDomainTransport;
 
@@ -171,7 +184,7 @@ async fn wire_settings_integrates_pg_and_vault_bundle_single_source_resolver() -
         })))
         .mount(&vault_server)
         .await;
-    let stores = TenantStoreAllowlist::new(std::iter::empty())?;
+    let stores = unused_tenant_store_allowlist()?;
     let vault = VaultRuntimeDeps::new(
         VaultSecretResolver::new_allow_http(
             reqwest::Client::new(),

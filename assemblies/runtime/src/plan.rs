@@ -485,6 +485,7 @@ mod tests {
                 "runtime-object-store",
                 "service-token-replay-store",
                 "settings-key-provider",
+                "settings-secret-resolver",
             ]
         );
         assert_eq!(

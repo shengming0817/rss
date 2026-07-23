@@ -171,6 +171,10 @@ fn complete_shared_serving_values() -> Vec<(String, String)> {
         ("RSS_DLX_ARCHIVE_VAULT_TOKEN", "archive-token"),
         ("RSS_VAULT_TRANSIT_MOUNT", "transit"),
         (
+            "RSS_VAULT_TENANT_STORE_ALLOWLIST_JSON",
+            r#"{"bindings":[{"tenantId":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","storeId":"vault","mount":"secret","kvPathPrefix":"tenants/a"}]}"#,
+        ),
+        (
             "RSS_AUDIT_CHAIN_KEY_B64URL",
             "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI",
         ),
@@ -404,11 +408,12 @@ fn runtime_infra_pg_redis_snapshot_reads_each_key_once_across_repeated_typed_map
 
 #[test]
 fn runtime_infra_vault_s3_snapshot_reads_each_key_once_across_repeated_typed_mapping() {
-    const VAULT_S3_KEYS: [&str; 17] = [
+    const VAULT_S3_KEYS: [&str; 18] = [
         "RSS_VAULT_ADDR",
         "RSS_VAULT_TOKEN",
         "RSS_VAULT_TRANSIT_MOUNT",
         "RSS_VAULT_CA_CERT_PEM_PATH",
+        "RSS_VAULT_TENANT_STORE_ALLOWLIST_JSON",
         "RSS_SETTINGS_CONFIG_VALUE_KEY_NAME",
         "RSS_S3_ENDPOINT_URL",
         "RSS_S3_BUCKET",
@@ -430,6 +435,9 @@ fn runtime_infra_vault_s3_snapshot_reads_each_key_once_across_repeated_typed_map
             "RSS_VAULT_TOKEN" => "vault-generation-one-token",
             "RSS_VAULT_TRANSIT_MOUNT" => "transit",
             "RSS_VAULT_CA_CERT_PEM_PATH" => return None,
+            "RSS_VAULT_TENANT_STORE_ALLOWLIST_JSON" => {
+                r#"{"bindings":[{"tenantId":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","storeId":"vault","mount":"secret","kvPathPrefix":"tenants/a"}]}"#
+            }
             "RSS_SETTINGS_CONFIG_VALUE_KEY_NAME" => "settings-generation-one",
             "RSS_S3_ENDPOINT_URL" => "https://s3.generation-one.test",
             "RSS_S3_BUCKET" => "rss-generation-one",
@@ -473,6 +481,10 @@ fn runtime_infra_vault_s3_snapshot_debug_is_opaque() {
         ("RSS_VAULT_ADDR", "https://vault.snapshot.test"),
         ("RSS_VAULT_TOKEN", "vault-debug-bait"),
         ("RSS_VAULT_TRANSIT_MOUNT", "transit"),
+        (
+            "RSS_VAULT_TENANT_STORE_ALLOWLIST_JSON",
+            r#"{"bindings":[{"tenantId":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","storeId":"vault","mount":"secret","kvPathPrefix":"tenants/a"}]}"#,
+        ),
         (
             "RSS_SETTINGS_CONFIG_VALUE_KEY_NAME",
             "settings-key-debug-bait",

@@ -28,7 +28,8 @@ use consistency::{EventEntry, IdemKey};
 use diport::{
     DynKeyProvider, EncryptOutput, EnvelopeMetadata, EnvelopeSubjectId, KeyName, KeyProvider,
     KeyProviderError, KeyRef, KeyVersion, MessageId, OpaqueActorId, OutboxActor, PublishRequest,
-    Publisher, RedactedBytes, Topic,
+    Publisher, RedactedBytes, SecretCoordinate, SecretMaterial, SecretResolver,
+    SecretResolverError, Topic,
 };
 use eventexec::TenantAuthorityBinding;
 use generated::event::identity_v1::{
@@ -63,7 +64,7 @@ use runtime::test_support::{
     build_shared_runtime_deps, build_vault_runtime_from_values, wire_distributed,
     wire_event_transport,
 };
-use settings::{SettingsDomain, SettingsService, empty_flag_store};
+use settings::{SecretResolveService, SettingsDomain, SettingsService, empty_flag_store};
 
 const TEST_PUBLISH_TIMEOUT: Duration = Duration::from_secs(40);
 
@@ -97,6 +98,18 @@ const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 
 struct NoopDomainTransport;
+
+struct UnusedSecretResolver;
+
+impl SecretResolver for UnusedSecretResolver {
+    async fn resolve(
+        &self,
+        _tenant: vocab::TenantId,
+        _coordinate: &SecretCoordinate,
+    ) -> Result<SecretMaterial, SecretResolverError> {
+        Err(SecretResolverError::NotFound)
+    }
+}
 
 impl distributed::DomainTransport for NoopDomainTransport {
     fn dispatch(
@@ -608,10 +621,17 @@ async fn event_transport_durable_e2e() -> Result<()> {
         empty_flag_store(),
         Box::new(FixedClock::at_unix_secs(NOW_SECS)),
     ));
+    let settings_secrets = Arc::from(settings_secrets);
+    let settings_secret_writer = Arc::from(settings_secret_writer);
+    let secret_service = Arc::new(SecretResolveService::new(
+        Arc::clone(&settings_secrets),
+        diport::DynSecretResolver::new_box(UnusedSecretResolver),
+    ));
     let settings_domain = SettingsDomain::new(
         Arc::clone(&subscriber_settings_service),
-        Arc::from(settings_secrets),
-        Arc::from(settings_secret_writer),
+        settings_secrets,
+        settings_secret_writer,
+        secret_service,
     );
     let (
         publisher_settings_configs,
@@ -726,6 +746,7 @@ async fn event_transport_durable_e2e() -> Result<()> {
         "s.testtoken".to_string(),
         "transit".to_string(),
         "settings-config".to_string(),
+        r#"{"bindings":[{"tenantId":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","storeId":"vault","mount":"secret","kvPathPrefix":"tenants/a"}]}"#.to_string(),
     )?;
     let deps = build_shared_runtime_deps(
         test_password_blocklist()?,

@@ -6,9 +6,12 @@ use std::time::Duration;
 use anyhow::Context as _;
 use base64::Engine as _;
 use diport::KeyName;
+use serde::Deserialize;
 use vault::{
-    TenantStoreAllowlist, VaultKeyProvider, VaultRuntimeDeps, VaultSecretResolver, VaultSigner,
+    StoreBinding, TenantStoreAllowlist, TenantStoreAllowlistError, VaultKeyProvider,
+    VaultRuntimeDeps, VaultSecretResolver, VaultSigner,
 };
+use vocab::TenantId;
 
 use crate::EnvSecret;
 use crate::config::SnapshotConfig;
@@ -19,11 +22,20 @@ use crate::phase::OperatorRuntimeCapability;
 /// 固定 Vault 请求超时；当前 runtime 配置目录不提供该值的动态覆盖。
 pub(crate) const DEFAULT_VAULT_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// One captured Vault generation. Private fields, a snapshot-only production constructor, and
-/// consuming exits keep the endpoint, token, Transit mount, TLS roots, and settings key name from
-/// being mixed across captures. Each consuming exit validates its Vault adapter before parsing the
-/// settings key name so the actual failing provider boundary owns error classification.
+/// Serving-only Vault generation. The private, non-optional allowlist field makes resolver
+/// authorization impossible to omit after the single snapshot-backed fallible constructor.
 pub(crate) struct VaultRuntimeConfig {
+    provider: VaultProviderConfig,
+    stores: TenantStoreAllowlist,
+}
+
+/// Maintenance-only Vault generation. This type deliberately has no resolver allowlist field and
+/// its constructor never reads the serving-only allowlist key.
+pub(crate) struct VaultKeyProviderConfig {
+    provider: VaultProviderConfig,
+}
+
+struct VaultProviderConfig {
     client: reqwest::Client,
     addr: String,
     token: EnvSecret,
@@ -33,10 +45,36 @@ pub(crate) struct VaultRuntimeConfig {
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum VaultRuntimeConfigError {
-    #[error("vault client configuration is invalid: {0}")]
-    VaultClientConfig(#[source] anyhow::Error),
-    #[error("settings config value key name is invalid: {0}")]
-    SettingsKeyNameConfig(#[source] anyhow::Error),
+    #[error("vault client configuration is invalid")]
+    VaultClient(#[source] anyhow::Error),
+    #[error("vault tenant store allowlist configuration is invalid: {0}")]
+    TenantStoreAllowlist(#[source] VaultTenantStoreAllowlistConfigError),
+    #[error("settings config value key name is invalid")]
+    SettingsKeyName(#[source] anyhow::Error),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum VaultKeyProviderConfigError {
+    #[error("vault key provider configuration is invalid")]
+    VaultClient(#[source] anyhow::Error),
+    #[error("settings config value key name is invalid")]
+    SettingsKeyName(#[source] anyhow::Error),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum VaultTenantStoreAllowlistConfigError {
+    #[error("vault tenant store allowlist is missing")]
+    Missing,
+    #[error("vault tenant store allowlist is blank")]
+    Blank,
+    #[error("vault tenant store allowlist json shape is invalid")]
+    InvalidJson,
+    #[error("vault tenant store allowlist tenant id is invalid")]
+    InvalidTenantId,
+    #[error("vault tenant store allowlist store id is invalid")]
+    InvalidStoreId,
+    #[error("vault tenant store allowlist binding invariant is invalid: {0}")]
+    InvalidBinding(#[source] TenantStoreAllowlistError),
 }
 
 struct VaultConfigValues<'a> {
@@ -45,11 +83,41 @@ struct VaultConfigValues<'a> {
     transit_mount: Option<String>,
     ca_cert_pem_path: Option<&'a str>,
     settings_key_name: Option<&'a str>,
+    tenant_store_allowlist_json: Option<&'a str>,
+}
+
+struct VaultProviderValues<'a> {
+    addr: Option<String>,
+    token: Option<&'a str>,
+    transit_mount: Option<String>,
+    ca_cert_pem_path: Option<&'a str>,
+    settings_key_name: Option<&'a str>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct VaultTenantStoreAllowlistWire {
+    bindings: Vec<VaultTenantStoreBindingWire>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct VaultTenantStoreBindingWire {
+    tenant_id: String,
+    store_id: String,
+    mount: String,
+    kv_path_prefix: String,
 }
 
 impl std::fmt::Debug for VaultRuntimeConfig {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str("VaultRuntimeConfig(<redacted>)")
+    }
+}
+
+impl std::fmt::Debug for VaultKeyProviderConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("VaultKeyProviderConfig(<redacted>)")
     }
 }
 
@@ -66,25 +134,22 @@ impl VaultRuntimeConfig {
             transit_mount: config.value(VAULT_TRANSIT_MOUNT_ENV).map(str::to_owned),
             ca_cert_pem_path: config.value(VAULT_CA_CERT_PEM_PATH_ENV),
             settings_key_name: config.value(SETTINGS_CONFIG_VALUE_KEY_NAME_ENV),
+            tenant_store_allowlist_json: config.value(VAULT_TENANT_STORE_ALLOWLIST_JSON_ENV),
         })
     }
 
     fn from_values(values: VaultConfigValues<'_>) -> Result<Self, VaultRuntimeConfigError> {
-        let addr = required_value(values.addr, VAULT_ADDR_ENV)
-            .map_err(VaultRuntimeConfigError::VaultClientConfig)?;
-        let token = EnvSecret::required_value(values.token, VAULT_TOKEN_ENV)
-            .map_err(VaultRuntimeConfigError::VaultClientConfig)?;
-        let transit_mount = required_value(values.transit_mount, VAULT_TRANSIT_MOUNT_ENV)
-            .map_err(VaultRuntimeConfigError::VaultClientConfig)?;
-        let client = build_vault_tls_client_from_value(values.ca_cert_pem_path)
-            .map_err(VaultRuntimeConfigError::VaultClientConfig)?;
-        Ok(Self {
-            client,
-            addr,
-            token,
-            transit_mount,
-            settings_key_name: values.settings_key_name.map(str::to_owned),
+        let provider = VaultProviderConfig::from_values(VaultProviderValues {
+            addr: values.addr,
+            token: values.token,
+            transit_mount: values.transit_mount,
+            ca_cert_pem_path: values.ca_cert_pem_path,
+            settings_key_name: values.settings_key_name,
         })
+        .map_err(VaultRuntimeConfigError::VaultClient)?;
+        let stores = tenant_store_allowlist_from_value(values.tenant_store_allowlist_json)
+            .map_err(VaultRuntimeConfigError::TenantStoreAllowlist)?;
+        Ok(Self { provider, stores })
     }
 
     /// Consume this generation into the serving Vault capability bundle and its bound settings
@@ -94,16 +159,14 @@ impl VaultRuntimeConfig {
         self,
     ) -> Result<(VaultRuntimeDeps, std::sync::Arc<VaultSigner>, KeyName), VaultRuntimeConfigError>
     {
-        let Self {
+        let Self { provider, stores } = self;
+        let VaultProviderConfig {
             client,
             addr,
             token,
             transit_mount,
             settings_key_name,
-        } = self;
-        let stores =
-            empty_vault_store_allowlist().map_err(VaultRuntimeConfigError::VaultClientConfig)?;
-        warn_vault_startup_security(&stores);
+        } = provider;
         let signer = VaultSigner::new(
             client.clone(),
             addr.clone(),
@@ -113,9 +176,7 @@ impl VaultRuntimeConfig {
             vault::SignatureMarshaling::Jws,
         )
         .map_err(|e| {
-            VaultRuntimeConfigError::VaultClientConfig(anyhow::anyhow!(
-                "vault signer config error: {e}"
-            ))
+            VaultRuntimeConfigError::VaultClient(anyhow::anyhow!("vault signer config error: {e}"))
         })?;
         let resolver = VaultSecretResolver::new(
             client.clone(),
@@ -125,7 +186,7 @@ impl VaultRuntimeConfig {
             stores,
         )
         .map_err(|e| {
-            VaultRuntimeConfigError::VaultClientConfig(anyhow::anyhow!(
+            VaultRuntimeConfigError::VaultClient(anyhow::anyhow!(
                 "vault resolver config error: {e}"
             ))
         })?;
@@ -137,31 +198,47 @@ impl VaultRuntimeConfig {
             DEFAULT_VAULT_TIMEOUT,
         )
         .map_err(|e| {
-            VaultRuntimeConfigError::VaultClientConfig(anyhow::anyhow!(
+            VaultRuntimeConfigError::VaultClient(anyhow::anyhow!(
                 "vault key provider config error: {e}"
             ))
         })?;
         let settings_key_name =
             settings_config_value_key_name_from_value(settings_key_name.as_deref())
-                .map_err(VaultRuntimeConfigError::SettingsKeyNameConfig)?;
+                .map_err(VaultRuntimeConfigError::SettingsKeyName)?;
         Ok((
             VaultRuntimeDeps::new(resolver, key_provider),
             std::sync::Arc::new(signer),
             settings_key_name,
         ))
     }
+}
 
-    /// Consume this generation for settings maintenance without consulting ambient process state.
-    pub(crate) fn into_settings_key_provider(
+impl VaultKeyProviderConfig {
+    pub(crate) fn from_snapshot(
+        config: SnapshotConfig<'_>,
+    ) -> Result<Self, VaultKeyProviderConfigError> {
+        let provider = VaultProviderConfig::from_values(VaultProviderValues {
+            addr: config.value(VAULT_ADDR_ENV).map(str::to_owned),
+            token: config.value(VAULT_TOKEN_ENV),
+            transit_mount: config.value(VAULT_TRANSIT_MOUNT_ENV).map(str::to_owned),
+            ca_cert_pem_path: config.value(VAULT_CA_CERT_PEM_PATH_ENV),
+            settings_key_name: config.value(SETTINGS_CONFIG_VALUE_KEY_NAME_ENV),
+        })
+        .map_err(VaultKeyProviderConfigError::VaultClient)?;
+        Ok(Self { provider })
+    }
+
+    /// Consume this generation for settings maintenance without consulting resolver authorization.
+    pub(crate) fn into_key_provider(
         self,
-    ) -> Result<(VaultKeyProvider, KeyName), VaultRuntimeConfigError> {
-        let Self {
+    ) -> Result<(VaultKeyProvider, KeyName), VaultKeyProviderConfigError> {
+        let VaultProviderConfig {
             client,
             addr,
             token,
             transit_mount,
             settings_key_name,
-        } = self;
+        } = self.provider;
         let key_provider = VaultKeyProvider::new(
             client,
             addr,
@@ -170,15 +247,61 @@ impl VaultRuntimeConfig {
             DEFAULT_VAULT_TIMEOUT,
         )
         .map_err(|e| {
-            VaultRuntimeConfigError::VaultClientConfig(anyhow::anyhow!(
+            VaultKeyProviderConfigError::VaultClient(anyhow::anyhow!(
                 "vault key provider config error: {e}"
             ))
         })?;
         let settings_key_name =
             settings_config_value_key_name_from_value(settings_key_name.as_deref())
-                .map_err(VaultRuntimeConfigError::SettingsKeyNameConfig)?;
+                .map_err(VaultKeyProviderConfigError::SettingsKeyName)?;
         Ok((key_provider, settings_key_name))
     }
+}
+
+impl VaultProviderConfig {
+    fn from_values(values: VaultProviderValues<'_>) -> anyhow::Result<Self> {
+        let addr = required_value(values.addr, VAULT_ADDR_ENV)?;
+        let token = EnvSecret::required_value(values.token, VAULT_TOKEN_ENV)?;
+        let transit_mount = required_value(values.transit_mount, VAULT_TRANSIT_MOUNT_ENV)?;
+        let client = build_vault_tls_client_from_value(values.ca_cert_pem_path)?;
+        Ok(Self {
+            client,
+            addr,
+            token,
+            transit_mount,
+            settings_key_name: values.settings_key_name.map(str::to_owned),
+        })
+    }
+}
+
+pub(crate) fn tenant_store_allowlist_from_value(
+    raw: Option<&str>,
+) -> Result<TenantStoreAllowlist, VaultTenantStoreAllowlistConfigError> {
+    let raw = raw.ok_or(VaultTenantStoreAllowlistConfigError::Missing)?;
+    if raw.trim().is_empty() {
+        return Err(VaultTenantStoreAllowlistConfigError::Blank);
+    }
+    let wire: VaultTenantStoreAllowlistWire =
+        serde_json::from_str(raw).map_err(|_| VaultTenantStoreAllowlistConfigError::InvalidJson)?;
+    let bindings = wire
+        .bindings
+        .into_iter()
+        .map(|binding| {
+            let tenant = TenantId::parse(&binding.tenant_id)
+                .map_err(|_| VaultTenantStoreAllowlistConfigError::InvalidTenantId)?;
+            let store = settings::ports::StoreId::parse(&binding.store_id)
+                .map_err(|_| VaultTenantStoreAllowlistConfigError::InvalidStoreId)?;
+            Ok((
+                (tenant, store.as_str().to_owned()),
+                StoreBinding {
+                    mount: binding.mount,
+                    kv_path_prefix: binding.kv_path_prefix,
+                },
+            ))
+        })
+        .collect::<Result<Vec<_>, VaultTenantStoreAllowlistConfigError>>()?;
+    TenantStoreAllowlist::new(bindings)
+        .map_err(VaultTenantStoreAllowlistConfigError::InvalidBinding)
 }
 
 fn required_value(value: Option<String>, name: &'static str) -> anyhow::Result<String> {
@@ -201,6 +324,7 @@ pub(crate) fn build_vault_runtime_from_values(
     token: String,
     transit_mount: String,
     settings_key_name: String,
+    tenant_store_allowlist_json: String,
 ) -> anyhow::Result<(VaultRuntimeDeps, std::sync::Arc<VaultSigner>, KeyName)> {
     let config = VaultRuntimeConfig::from_values(VaultConfigValues {
         addr: Some(addr),
@@ -208,19 +332,9 @@ pub(crate) fn build_vault_runtime_from_values(
         transit_mount: Some(transit_mount),
         ca_cert_pem_path: None,
         settings_key_name: Some(settings_key_name.as_str()),
+        tenant_store_allowlist_json: Some(tenant_store_allowlist_json.as_str()),
     })?;
     Ok(config.into_runtime()?)
-}
-
-/// 启动时安全警告（pre-GA）：vault `TenantStoreAllowlist` 为空 ⇒ 所有 secret resolve fail-closed Forbidden。
-/// （TLS 已由 [`build_vault_tls_client`] rustls 接线，#1252，不再警告 no-TLS-backend。）
-fn warn_vault_startup_security(stores: &TenantStoreAllowlist) {
-    if stores.is_empty() {
-        tracing::warn!(
-            reason = "empty-allowlist",
-            "vault TenantStoreAllowlist is empty: all secret resolve calls will return Forbidden (fail-closed); populate allowlist for production (#1272)"
-        );
-    }
 }
 
 /// 构造 vault HTTP client（rustls + ring + webpki-roots，#1252）：reqwest `rustls-tls-webpki-roots` feature
@@ -258,18 +372,13 @@ fn build_vault_tls_client_from_value(ca_path: Option<&str>) -> anyhow::Result<re
     builder.build().context("build vault rustls TLS client")
 }
 
-fn empty_vault_store_allowlist() -> anyhow::Result<TenantStoreAllowlist> {
-    // #1272 owns per-store mount/prefix population; that authorization allowlist is independent
-    // from this process-configuration snapshot migration.
-    TenantStoreAllowlist::new(std::iter::empty())
-        .map_err(|e| anyhow::anyhow!("vault store allowlist config error: {e}"))
-}
-
 /// vault base URL env（resolver + signer 复用，fail-fast 必填）。
 pub(crate) const VAULT_ADDR_ENV: &str = "RSS_VAULT_ADDR";
 /// vault token env（同上）。
 pub(crate) const VAULT_TOKEN_ENV: &str = "RSS_VAULT_TOKEN";
 pub(crate) const VAULT_TRANSIT_MOUNT_ENV: &str = "RSS_VAULT_TRANSIT_MOUNT";
+pub(crate) const VAULT_TENANT_STORE_ALLOWLIST_JSON_ENV: &str =
+    "RSS_VAULT_TENANT_STORE_ALLOWLIST_JSON";
 pub(crate) const SETTINGS_CONFIG_VALUE_KEY_NAME_ENV: &str = "RSS_SETTINGS_CONFIG_VALUE_KEY_NAME";
 /// Optional PEM CA cert path for private/dev Vault HTTPS endpoints.
 pub(crate) const VAULT_CA_CERT_PEM_PATH_ENV: &str = "RSS_VAULT_CA_CERT_PEM_PATH";
@@ -640,9 +749,138 @@ mod tests {
             VAULT_ADDR_ENV => Some("https://vault.snapshot.test:8200".to_owned()),
             VAULT_TOKEN_ENV => Some("vault-snapshot-token".to_owned()),
             VAULT_TRANSIT_MOUNT_ENV => Some("team/transit".to_owned()),
+            VAULT_TENANT_STORE_ALLOWLIST_JSON_ENV => Some(
+                r#"{"bindings":[{"tenantId":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","storeId":"vault","mount":"secret","kvPathPrefix":"tenants/a"}]}"#
+                    .to_owned(),
+            ),
             SETTINGS_CONFIG_VALUE_KEY_NAME_ENV => Some("settings-snapshot-key".to_owned()),
             _ => None,
         }
+    }
+
+    #[test]
+    fn runtime_infra_vault_snapshot_rejects_invalid_allowlist_wire_and_invariants() {
+        for raw in [
+            None,
+            Some(""),
+            Some(" "),
+            Some("not-json"),
+            Some("[]"),
+            Some("{}"),
+            Some(r#"{"bindings":[],"unknown":true}"#),
+            Some(r#"{"bindings":[]}"#),
+            Some(
+                r#"{"bindings":[{"tenantId":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","storeId":"vault","mount":"secret"}]}"#,
+            ),
+            Some(
+                r#"{"bindings":[{"tenantId":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","storeId":"vault","mount":"secret","kvPathPrefix":"tenants/a","unknown":true}]}"#,
+            ),
+            Some(
+                r#"{"bindings":[{"tenantId":"AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA","storeId":"vault","mount":"secret","kvPathPrefix":"tenants/a"}]}"#,
+            ),
+            Some(
+                r#"{"bindings":[{"tenantId":"00000000-0000-0000-0000-000000000000","storeId":"vault","mount":"secret","kvPathPrefix":"tenants/a"}]}"#,
+            ),
+            Some(
+                r#"{"bindings":[{"tenantId":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","storeId":"bad/store","mount":"secret","kvPathPrefix":"tenants/a"}]}"#,
+            ),
+            Some(
+                r#"{"bindings":[{"tenantId":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","storeId":"vault","mount":"secret/..","kvPathPrefix":"tenants/a"}]}"#,
+            ),
+            Some(
+                r#"{"bindings":[{"tenantId":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","storeId":"vault","mount":"secret","kvPathPrefix":"tenants/../a"}]}"#,
+            ),
+            Some(
+                r#"{"bindings":[{"tenantId":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","storeId":"vault","mount":"secret","kvPathPrefix":"tenants/a"},{"tenantId":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","storeId":"vault","mount":"secret","kvPathPrefix":"tenants/a"}]}"#,
+            ),
+            Some(
+                r#"{"bindings":[{"tenantId":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","storeId":"vault-a","mount":"secret","kvPathPrefix":"tenants/shared"},{"tenantId":"bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb","storeId":"vault-b","mount":"/secret/","kvPathPrefix":"tenants/shared/nested"}]}"#,
+            ),
+        ] {
+            let snapshot = snapshot_from_get(|name| {
+                if name == VAULT_TENANT_STORE_ALLOWLIST_JSON_ENV {
+                    raw.map(str::to_owned)
+                } else {
+                    valid_vault_value(name)
+                }
+            });
+            assert!(matches!(
+                VaultRuntimeConfig::from_snapshot(snapshot.view()),
+                Err(VaultRuntimeConfigError::TenantStoreAllowlist(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn runtime_infra_vault_allowlist_accepts_explicit_empty_prefix() {
+        let snapshot = snapshot_from_get(|name| {
+            if name == VAULT_TENANT_STORE_ALLOWLIST_JSON_ENV {
+                Some(
+                    r#"{"bindings":[{"tenantId":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","storeId":"vault","mount":"secret","kvPathPrefix":""}]}"#
+                        .to_owned(),
+                )
+            } else {
+                valid_vault_value(name)
+            }
+        });
+        assert!(VaultRuntimeConfig::from_snapshot(snapshot.view()).is_ok());
+    }
+
+    #[test]
+    fn runtime_infra_vault_allowlist_errors_are_static_and_redacted() {
+        const MARKER: &str = "sensitive-allowlist-marker";
+        let snapshot = snapshot_from_get(|name| {
+            if name == VAULT_TENANT_STORE_ALLOWLIST_JSON_ENV {
+                Some(format!(
+                    r#"{{"bindings":[{{"tenantId":"{MARKER}","storeId":"{MARKER}","mount":"{MARKER}","kvPathPrefix":"{MARKER}"}}]}}"#
+                ))
+            } else {
+                valid_vault_value(name)
+            }
+        });
+        let error = VaultRuntimeConfig::from_snapshot(snapshot.view())
+            .expect_err("invalid allowlist must fail during typed mapping");
+        let rendered = format!("{error:?} {error}");
+        assert!(!rendered.contains(MARKER), "allowlist error leaked input");
+    }
+
+    #[test]
+    fn runtime_infra_vault_allowlist_error_retains_static_invariant_category() {
+        let duplicate = r#"{"bindings":[{"tenantId":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","storeId":"vault","mount":"secret","kvPathPrefix":"tenants/a"},{"tenantId":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","storeId":"vault","mount":"secret","kvPathPrefix":"tenants/a"}]}"#;
+        let snapshot = snapshot_from_get(|name| {
+            if name == VAULT_TENANT_STORE_ALLOWLIST_JSON_ENV {
+                Some(duplicate.to_owned())
+            } else {
+                valid_vault_value(name)
+            }
+        });
+        let error = VaultRuntimeConfig::from_snapshot(snapshot.view())
+            .expect_err("duplicate binding must fail during typed mapping");
+        let rendered = format!("{error:#}");
+        assert!(
+            rendered.contains("duplicate binding"),
+            "static invariant category must survive runtime mapping: {rendered}"
+        );
+        assert!(!rendered.contains("aaaaaaaa-aaaa"));
+        assert!(!rendered.contains("tenants/a"));
+    }
+
+    #[test]
+    fn maintenance_vault_config_does_not_require_allowlist() {
+        let snapshot = snapshot_from_get(|name| {
+            if name == VAULT_TENANT_STORE_ALLOWLIST_JSON_ENV {
+                None
+            } else {
+                valid_vault_value(name)
+            }
+        });
+        let config = VaultKeyProviderConfig::from_snapshot(snapshot.view())
+            .expect("maintenance config must not parse resolver allowlist");
+        assert_eq!(format!("{config:?}"), "VaultKeyProviderConfig(<redacted>)");
+        let (_provider, key_name) = config
+            .into_key_provider()
+            .expect("valid maintenance key provider");
+        assert_eq!(key_name.as_str(), "settings-snapshot-key");
     }
 
     fn unique_temp_path(name: &str) -> std::path::PathBuf {
@@ -669,10 +907,10 @@ mod tests {
         assert_eq!(diport::ManagedResource::name(signer.as_ref()), "vault");
         assert_eq!(key_name.as_str(), "settings-snapshot-key");
 
-        let maintenance =
-            VaultRuntimeConfig::from_snapshot(snapshot.view()).expect("valid maintenance config");
+        let maintenance = VaultKeyProviderConfig::from_snapshot(snapshot.view())
+            .expect("valid maintenance config");
         let (_provider, key_name) = maintenance
-            .into_settings_key_provider()
+            .into_key_provider()
             .expect("valid settings key provider");
         assert_eq!(key_name.as_str(), "settings-snapshot-key");
 
@@ -681,6 +919,8 @@ mod tests {
             "vault-explicit-token".to_owned(),
             "transit".to_owned(),
             "settings-explicit-key".to_owned(),
+            valid_vault_value(VAULT_TENANT_STORE_ALLOWLIST_JSON_ENV)
+                .expect("valid allowlist fixture"),
         )
         .expect("valid explicit integration values");
         assert_eq!(runtime.runtime_resources().len(), 2);
@@ -691,11 +931,7 @@ mod tests {
     #[test]
     #[allow(clippy::expect_used)]
     fn runtime_infra_vault_snapshot_missing_values_fail_in_mapping_order() {
-        for (missing, expected) in [
-            (VAULT_ADDR_ENV, VAULT_ADDR_ENV),
-            (VAULT_TOKEN_ENV, VAULT_TOKEN_ENV),
-            (VAULT_TRANSIT_MOUNT_ENV, VAULT_TRANSIT_MOUNT_ENV),
-        ] {
+        for missing in [VAULT_ADDR_ENV, VAULT_TOKEN_ENV, VAULT_TRANSIT_MOUNT_ENV] {
             let snapshot = snapshot_from_get(|name| {
                 if name == missing {
                     None
@@ -705,10 +941,7 @@ mod tests {
             });
             let error = VaultRuntimeConfig::from_snapshot(snapshot.view())
                 .expect_err("missing required snapshot value must fail");
-            assert!(
-                format!("{error:#}").contains(expected),
-                "error must identify {expected}: {error:#}"
-            );
+            assert!(matches!(error, VaultRuntimeConfigError::VaultClient(_)));
         }
 
         let missing_key_name = snapshot_from_get(|name| {
@@ -718,11 +951,11 @@ mod tests {
                 valid_vault_value(name)
             }
         });
-        let config = VaultRuntimeConfig::from_snapshot(missing_key_name.view())
+        let config = VaultKeyProviderConfig::from_snapshot(missing_key_name.view())
             .expect("provider configuration is validated before settings key name");
         assert!(matches!(
-            config.into_settings_key_provider(),
-            Err(VaultRuntimeConfigError::SettingsKeyNameConfig(_))
+            config.into_key_provider(),
+            Err(VaultKeyProviderConfigError::SettingsKeyName(_))
         ));
     }
 
@@ -736,10 +969,10 @@ mod tests {
                 valid_vault_value(name)
             }
         });
-        let config = VaultRuntimeConfig::from_snapshot(missing_key_name.view())?;
+        let config = VaultKeyProviderConfig::from_snapshot(missing_key_name.view())?;
         assert!(matches!(
-            config.into_settings_key_provider(),
-            Err(VaultRuntimeConfigError::SettingsKeyNameConfig(_))
+            config.into_key_provider(),
+            Err(VaultKeyProviderConfigError::SettingsKeyName(_))
         ));
 
         let missing_addr = snapshot_from_get(|name| {
@@ -751,7 +984,7 @@ mod tests {
         });
         assert!(matches!(
             VaultRuntimeConfig::from_snapshot(missing_addr.view()),
-            Err(VaultRuntimeConfigError::VaultClientConfig(_))
+            Err(VaultRuntimeConfigError::VaultClient(_))
         ));
         Ok(())
     }
@@ -773,13 +1006,13 @@ mod tests {
                     valid_vault_value(name)
                 }
             });
-            let config = VaultRuntimeConfig::from_snapshot(snapshot.view())
+            let config = VaultKeyProviderConfig::from_snapshot(snapshot.view())
                 .expect("snapshot capture must defer provider and key-name validation");
-            let Err(error) = config.into_settings_key_provider() else {
+            let Err(error) = config.into_key_provider() else {
                 anyhow::bail!("invalid provider configuration must fail");
             };
             assert!(
-                matches!(error, VaultRuntimeConfigError::VaultClientConfig(_)),
+                matches!(error, VaultKeyProviderConfigError::VaultClient(_)),
                 "maintenance {field} must be classified as provider configuration: {error:#}"
             );
 
@@ -788,7 +1021,7 @@ mod tests {
                 anyhow::bail!("invalid serving provider configuration must fail");
             };
             assert!(
-                matches!(error, VaultRuntimeConfigError::VaultClientConfig(_)),
+                matches!(error, VaultRuntimeConfigError::VaultClient(_)),
                 "serving {field} must be classified as provider configuration: {error:#}"
             );
         }
@@ -809,7 +1042,7 @@ mod tests {
         let error = VaultRuntimeConfig::from_snapshot(snapshot.view())
             .expect_err("whitespace-bearing token must fail");
         let chain = format!("{error:#}");
-        assert!(chain.contains(VAULT_TOKEN_ENV));
+        assert_eq!(chain, "vault client configuration is invalid");
         assert!(!chain.contains(secret));
     }
 
@@ -828,7 +1061,7 @@ mod tests {
         let error = VaultRuntimeConfig::from_snapshot(snapshot.view())
             .expect_err("missing CA file must fail");
         let chain = format!("{error:#}");
-        assert!(chain.contains(VAULT_CA_CERT_PEM_PATH_ENV));
+        assert_eq!(chain, "vault client configuration is invalid");
         assert!(!chain.contains(&rendered_path));
         assert!(!chain.contains("secret-vault-ca-path-marker"));
     }
@@ -849,7 +1082,7 @@ mod tests {
         let error = VaultRuntimeConfig::from_snapshot(snapshot.view())
             .expect_err("invalid CA PEM must fail");
         let chain = format!("{error:#}");
-        assert!(chain.contains(VAULT_CA_CERT_PEM_PATH_ENV));
+        assert_eq!(chain, "vault client configuration is invalid");
         assert!(!chain.contains(&rendered_path));
         assert!(!chain.contains("secret-invalid-vault-pem-marker"));
     }
@@ -868,12 +1101,9 @@ mod tests {
         let Err(error) = config.into_runtime() else {
             anyhow::bail!("invalid adapter endpoint must fail");
         };
-        assert!(matches!(
-            error,
-            VaultRuntimeConfigError::VaultClientConfig(_)
-        ));
+        assert!(matches!(error, VaultRuntimeConfigError::VaultClient(_)));
         let chain = format!("{error:#}");
-        assert!(chain.contains("vault signer config error"));
+        assert_eq!(chain, "vault client configuration is invalid");
         assert!(!chain.contains(endpoint));
         assert!(!chain.contains(token));
         Ok(())
@@ -1194,6 +1424,7 @@ mod tests {
         let snapshot = snapshot_from_get(valid_vault_value);
         let default_client = VaultRuntimeConfig::from_snapshot(snapshot.view())
             .expect("default vault config")
+            .provider
             .client;
         let untrusted = tokio::time::timeout(
             Duration::from_secs(5),
@@ -1217,6 +1448,7 @@ mod tests {
         });
         let trusted_client = VaultRuntimeConfig::from_snapshot(snapshot.view())
             .expect("vault config with private CA")
+            .provider
             .client;
         let response = tokio::time::timeout(
             Duration::from_secs(5),

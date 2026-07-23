@@ -12,9 +12,9 @@
 //!
 //! INVARIANT: RUNTIME-GENERATED-DOMAINS-LIVE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_generated_domains_rejects_handwritten_wiring_and_missing_merge", anti_vacuity = "tests::runtime_baseline_accepts_fixture" } -- the runtime phase must consume the committed generated domain list through the plan-owned validator and private `ValidatedDomainBindings` handoff into `compose_bindings`, retain partial bindings on constructor/validation/compose failure, record every output in `ProviderBuild`'s startup transaction, and must not restore per-domain handwritten wiring.
 //!
-//! INVARIANT: RUNTIME-CONFIG-SNAPSHOT-LIVE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_vault_s3_snapshot_wiring + tests::runtime_jwks_export_requires_snapshot_and_operator_capability", anti_vacuity = "tests::runtime_vault_s3_snapshot_wiring + tests::runtime_jwks_export_requires_snapshot_and_operator_capability" } -- the unique serving `prepare_runtime()` calls exactly one closed process snapshot factory and seals the password blocklist into `ServingRuntimeInputs`, while `runtime::operator::prepare_runtime()` produces an exact `OperatorRuntimeInputs` that cannot carry that serving capability. `run_startup()` delegates once to the typed phase executor; `ProvidersBuilt::build_infra` maps the serving snapshot view into the exact serving, PG, Redis, Vault, and S3 generations, and `InfraBuilt::wire_domains` consumes the serving aggregate by value as event transport, domain transport, worker, and exact domain-module inputs. Redis and Vault are consumed by value, named S3 parts are destructured once, exact general and DLX parts reach their builders, and canonical PG setup is preserved. Settings ConfigValue maintenance receives one exact `SnapshotConfig` view and consumes one typed Vault generation. The JWKS operator has one direct production call into a crate-private Vault exporter that requires both the snapshot view and `OperatorRuntimeCapability`, with no getter, HTTP boolean, alias, wrapper, or legacy raw seam. Discarded/wrong generations, ambient getter revival, duplicate mapping or consumption, aliases, wrappers, macros, compliant bait, and serving/operator type mixing all fail closed. Ordered phase-method anchors and the phase snapshot visitor share one syn expander (`expand_inherent_phase_method`) that recursively inlines same-impl private `Self::helper` / `self.helper` calls in call order into a virtual buffer (monotonic virtual offsets): anchors rewrite helper body text with param→arg idents from call remaps, while the visitor remaps tracked bindings arg→param; helper-definition absolute file offsets are never compared in a phase lane, and helper cycles fail closed on both expand and visitor paths. `SnapshotConfig` plus private typed constructors form the native Hard boundary; exact production flow and ambient-reader exclusivity across the conservatively reachable consumer graph remain this explicit Medium AST gate.
+//! INVARIANT: RUNTIME-CONFIG-SNAPSHOT-LIVE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_vault_s3_snapshot_wiring + tests::runtime_vault_allowlist_typed_funnel_rejects_bypasses + tests::runtime_jwks_export_requires_snapshot_and_operator_capability", anti_vacuity = "tests::runtime_vault_s3_snapshot_wiring + tests::runtime_vault_allowlist_typed_funnel_rejects_bypasses + tests::runtime_jwks_export_requires_snapshot_and_operator_capability" } -- the unique serving `prepare_runtime()` calls exactly one closed process snapshot factory and seals the password blocklist into `ServingRuntimeInputs`, while `runtime::operator::prepare_runtime()` produces an exact `OperatorRuntimeInputs` that cannot carry that serving capability. `run_startup()` delegates once to the typed phase executor; `ProvidersBuilt::build_infra` maps the serving snapshot view into the exact serving, PG, Redis, Vault, and S3 generations, and `InfraBuilt::wire_domains` consumes the serving aggregate by value as event transport, domain transport, worker, and exact domain-module inputs. Redis and Vault are consumed by value, named S3 parts are destructured once, exact general and DLX parts reach their builders, and canonical PG setup is preserved. The Vault tenant/store allowlist key occurs exactly once in the closed snapshot catalog and flows through the sole typed JSON parser into the private, non-optional `VaultRuntimeConfig::stores` field, then by-value into the sole resolver constructor; the one closed file/stdin validator calls that same parser before operator runtime preparation and cannot read ambient configuration, construct providers, or emit input-derived output. Empty reconstruction, alternate parsers/sources, output leaks, and maintenance reads fail closed. Settings ConfigValue maintenance receives one exact `SnapshotConfig` view and consumes the distinct allowlist-free `VaultKeyProviderConfig` generation. The JWKS operator has one direct production call into a crate-private Vault exporter that requires both the snapshot view and `OperatorRuntimeCapability`, with no getter, HTTP boolean, alias, wrapper, or legacy raw seam. Discarded/wrong generations, ambient getter revival, duplicate mapping or consumption, aliases, wrappers, macros, compliant bait, and serving/operator type mixing all fail closed. Ordered phase-method anchors and the phase snapshot visitor share one syn expander (`expand_inherent_phase_method`) that recursively inlines same-impl private `Self::helper` / `self.helper` calls in call order into a virtual buffer (monotonic virtual offsets): anchors rewrite helper body text with param→arg idents from call remaps, while the visitor remaps tracked bindings arg→param; helper-definition absolute file offsets are never compared in a phase lane, and helper cycles fail closed on both expand and visitor paths. `SnapshotConfig` plus private typed constructors form the native Hard boundary; exact production flow and ambient-reader exclusivity across the conservatively reachable consumer graph remain this explicit Medium AST gate.
 //!
-//! INVARIANT: RUNTIME-BINARY-SNAPSHOT-LIFECYCLE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_binary_operator_lifecycle_is_proof_aware", anti_vacuity = "tests::runtime_binary_snapshot_wiring_rejects_duplicate_discarded_and_wrong_bindings" } -- `rss` must classify the closed command family from real process arguments before preparation; serving uniquely prepares and transfers `ServingRuntimeInputs` to `run`, while operator commands prepare only `OperatorRuntimeInputs`, every operator arm receives that exact binding, and the sole operator shutdown consumes it. No shared input type, pre-consumption early return, alias, macro, shadow path, or unreachable bait is accepted.
+//! INVARIANT: RUNTIME-BINARY-SNAPSHOT-LIFECYCLE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_binary_operator_lifecycle_is_proof_aware", anti_vacuity = "tests::runtime_binary_snapshot_wiring_rejects_duplicate_discarded_and_wrong_bindings" } -- `rss` must classify the closed command family from real process arguments before preparation; the Vault allowlist validator returns through its sole file/stdin runner before any runtime preparation, serving uniquely prepares and transfers `ServingRuntimeInputs` to `run`, while stateful operator commands prepare only `OperatorRuntimeInputs`, every stateful operator arm receives that exact binding, and the sole operator shutdown consumes it. No shared input type, pre-consumption early return, validator preparation, alias, macro, shadow path, or unreachable bait is accepted.
 //!
 //! INVARIANT: SECRET-TEXT-TRANSFER-LIVE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_secret_transfer_allowlist_rejects_extra_handoff", anti_vacuity = "tests::runtime_secret_transfer_allowlist_rejects_extra_handoff" } -- runtime raw secret allocation transfer/copy uses two uniquely named funnels whose seven moves plus two required copies into zeroizing Vault signer/resolver and S3 owners are exact, closed, and bait-resistant; both funnel definitions are independently pinned by the same allowlist.
 //!
@@ -83,6 +83,8 @@ const RUNTIME_DOMAIN_EXEC_PATH: &str = "assemblies/runtime/src/plan/domain_exec.
 const RUNTIME_PLACEMENT_EXEC_PATH: &str = "assemblies/runtime/src/plan/placement_exec.rs";
 const RUNTIME_OPERATOR_PATH: &str = "assemblies/runtime/src/operator/mod.rs";
 const RUNTIME_OPERATOR_JWKS_PATH: &str = "assemblies/runtime/src/operator/jwks.rs";
+const RUNTIME_OPERATOR_VAULT_ALLOWLIST_PATH: &str =
+    "assemblies/runtime/src/operator/vault_allowlist.rs";
 const RUNTIME_PLAN_LIVE_INVENTORY_PATH: &str =
     "assemblies/runtime/tests/fixtures/runtime-plan-live-inventory-v1.txt";
 const RUNTIME_OPERATOR_POSTGRES_PATH: &str = "assemblies/runtime/src/operator/postgres.rs";
@@ -96,7 +98,6 @@ const RUNTIME_PHASE_DLX_PATH: &str = "assemblies/runtime/src/phase/infra/dlx.rs"
 const RUNTIME_ROUTES_PATH: &str = "assemblies/runtime/src/routes.rs";
 #[cfg(test)]
 const RUNTIME_LISTENERS_PATH: &str = "assemblies/runtime/src/listeners.rs";
-#[cfg(test)]
 const RUNTIME_CONFIG_PATH: &str = "assemblies/runtime/src/config.rs";
 const POSTGRES_BUNDLE_PATH: &str = "adapters/postgres/src/bundle.rs";
 
@@ -2903,6 +2904,7 @@ const PROTECTED_CONFIG_SYMBOLS: &[&str] = &[
     "PgRuntimeConfigParts",
     "RedisRuntimeConfig",
     "VaultRuntimeConfig",
+    "VaultKeyProviderConfig",
     "S3RuntimeConfig",
     "S3RuntimeConfigParts",
     "S3GeneralConfig",
@@ -2922,6 +2924,7 @@ impl ProductionRuntimeConfigInventory {
             "PgRuntimeConfig" => Some("infra::pg::PgRuntimeConfig"),
             "RedisRuntimeConfig" => Some("infra::redis::RedisRuntimeConfig"),
             "VaultRuntimeConfig" => Some("infra::vault::VaultRuntimeConfig"),
+            "VaultKeyProviderConfig" => Some("infra::vault::VaultKeyProviderConfig"),
             "S3RuntimeConfig" => Some("infra::s3::S3RuntimeConfig"),
             "build_redis_runtime_deps" => Some("infra::redis::build_redis_runtime_deps"),
             "build_s3_runtime_deps" => Some("infra::s3::build_s3_runtime_deps"),
@@ -3205,6 +3208,7 @@ const VAULT_VALUES_INPUTS: &[(&str, &str)] = &[
     ("token", "String"),
     ("transit_mount", "String"),
     ("settings_key_name", "String"),
+    ("tenant_store_allowlist_json", "String"),
 ];
 const S3_VALUES_INPUTS: &[(&str, &str)] = &[
     ("endpoint_url", "String"),
@@ -3298,6 +3302,10 @@ fn values_mapping_call_is_exact(call: &syn::ExprCall, spec: &ValuesSeamSpec) -> 
                         ("transit_mount", "Some(transit_mount)"),
                         ("ca_cert_pem_path", "None"),
                         ("settings_key_name", "Some(settings_key_name.as_str())"),
+                        (
+                            "tenant_store_allowlist_json",
+                            "Some(tenant_store_allowlist_json.as_str())",
+                        ),
                     ],
                 )
         }
@@ -3603,6 +3611,11 @@ impl<'ast> Visit<'ast> for ProductionRuntimeConfigInventory {
             });
             if mapping.is_some_and(|call| {
                 self.associated_call_is_canonical(call, "from_snapshot", "VaultRuntimeConfig")
+                    || self.associated_call_is_canonical(
+                        call,
+                        "from_snapshot",
+                        "VaultKeyProviderConfig",
+                    )
             }) {
                 self.vault_config_bindings.insert(binding.to_string());
             }
@@ -3625,7 +3638,12 @@ impl<'ast> Visit<'ast> for ProductionRuntimeConfigInventory {
         let redis_mapping =
             self.associated_call_is_canonical(call, "from_snapshot", "RedisRuntimeConfig");
         let vault_mapping =
-            self.associated_call_is_canonical(call, "from_snapshot", "VaultRuntimeConfig");
+            self.associated_call_is_canonical(call, "from_snapshot", "VaultRuntimeConfig")
+                || self.associated_call_is_canonical(
+                    call,
+                    "from_snapshot",
+                    "VaultKeyProviderConfig",
+                );
         let s3_mapping =
             self.associated_call_is_canonical(call, "from_snapshot", "S3RuntimeConfig");
         if snapshot {
@@ -3684,7 +3702,7 @@ impl<'ast> Visit<'ast> for ProductionRuntimeConfigInventory {
         if canonical_vault_receiver {
             match call.method.to_string().as_str() {
                 "into_runtime" => self.vault_runtime_consumes += 1,
-                "into_settings_key_provider" => self.vault_settings_consumes += 1,
+                "into_key_provider" => self.vault_settings_consumes += 1,
                 _ => {}
             }
         }
@@ -3861,6 +3879,11 @@ const RSS_COMMAND_FAMILIES: &[(&str, Option<&str>, Option<&str>)] = &[
         Some("run_rss_access_jwks_export_command"),
     ),
 ];
+const RSS_OFFLINE_COMMAND_FAMILY: (&str, &str, &str) = (
+    "VaultAllowlistValidation",
+    "is_vault_allowlist_validation_command",
+    "run_vault_allowlist_validation_command",
+);
 
 fn exact_command_variant(expr: &syn::Expr, expected: &str) -> bool {
     is_exact_path(expr, &["CommandFamily", expected])
@@ -3987,6 +4010,39 @@ fn classifier_if_is_canonical(
     condition_is_canonical && return_is_canonical && branch.else_branch.is_none()
 }
 
+fn classifier_offline_if_is_canonical(statement: &syn::Stmt, args: &syn::Ident) -> bool {
+    let syn::Stmt::Expr(expr, None) = statement else {
+        return false;
+    };
+    let syn::Expr::If(branch) = transparent_expr(expr) else {
+        return false;
+    };
+    let Some(condition) = direct_call_behind_runtime_context(&branch.cond) else {
+        return false;
+    };
+    let condition_is_canonical = is_exact_path(
+        &condition.func,
+        &["runtime", "operator", RSS_OFFLINE_COMMAND_FAMILY.1],
+    ) && condition.args.len() == 1
+        && condition
+            .args
+            .first()
+            .is_some_and(|arg| is_exact_ident_path(arg, args));
+    let return_is_canonical = match branch.then_branch.stmts.as_slice() {
+        [syn::Stmt::Expr(expr, Some(_))] | [syn::Stmt::Expr(expr, None)] => {
+            let syn::Expr::Return(returned) = transparent_expr(expr) else {
+                return false;
+            };
+            returned
+                .expr
+                .as_deref()
+                .is_some_and(|expr| ok_command_variant(expr, RSS_OFFLINE_COMMAND_FAMILY.0))
+        }
+        _ => false,
+    };
+    condition_is_canonical && return_is_canonical && branch.else_branch.is_none()
+}
+
 fn classifier_is_canonical(file: &syn::File) -> bool {
     let family_enums = file
         .items
@@ -4028,9 +4084,13 @@ fn classifier_is_canonical(file: &syn::File) -> bool {
         return false;
     }
     let family = family_enums[0];
-    let family_is_exact = family.variants.len() == 2
+    let family_is_exact = family.variants.len() == 3
         && family.variants.iter().any(|variant| {
             variant.ident == "Serving" && matches!(variant.fields, syn::Fields::Unit)
+        })
+        && family.variants.iter().any(|variant| {
+            variant.ident == RSS_OFFLINE_COMMAND_FAMILY.0
+                && matches!(variant.fields, syn::Fields::Unit)
         })
         && family.variants.iter().any(|variant| {
             variant.ident == "Operator"
@@ -4070,17 +4130,20 @@ fn classifier_is_canonical(file: &syn::File) -> bool {
         .iter()
         .filter_map(|(variant, predicate, _)| predicate.map(|predicate| (*variant, predicate)))
         .collect::<Vec<_>>();
-    if classifier.block.stmts.len() != operator_families.len() + 2 {
+    if classifier.block.stmts.len() != operator_families.len() + 3 {
         return false;
     }
-    if !operator_families.iter().zip(&classifier.block.stmts).all(
-        |((variant, predicate), statement)| {
-            classifier_if_is_canonical(statement, args, predicate, variant)
-        },
-    ) {
+    if !classifier_offline_if_is_canonical(&classifier.block.stmts[0], args)
+        || !operator_families
+            .iter()
+            .zip(&classifier.block.stmts[1..])
+            .all(|((variant, predicate), statement)| {
+                classifier_if_is_canonical(statement, args, predicate, variant)
+            })
+    {
         return false;
     }
-    let ensure_statement = &classifier.block.stmts[operator_families.len()];
+    let ensure_statement = &classifier.block.stmts[operator_families.len() + 1];
     let ensure_is_canonical = match ensure_statement {
         syn::Stmt::Macro(statement) => {
             let parser = syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated;
@@ -4108,17 +4171,63 @@ fn classifier_is_canonical(file: &syn::File) -> bool {
     ensure_is_canonical && serving_is_canonical
 }
 
+fn offline_dispatch_is_canonical(
+    statement: &syn::Stmt,
+    args: &syn::Ident,
+    command: &syn::Ident,
+) -> bool {
+    let syn::Stmt::Expr(expr, None) = statement else {
+        return false;
+    };
+    let syn::Expr::If(branch) = transparent_expr(expr) else {
+        return false;
+    };
+    let syn::Expr::Let(condition) = transparent_expr(&branch.cond) else {
+        return false;
+    };
+    let pattern_is_canonical = matches!(&*condition.pat, syn::Pat::Path(path)
+        if is_exact_syn_path(&path.path, &["CommandFamily", RSS_OFFLINE_COMMAND_FAMILY.0]));
+    let return_is_canonical = match branch.then_branch.stmts.as_slice() {
+        [syn::Stmt::Expr(expr, Some(_))] | [syn::Stmt::Expr(expr, None)] => {
+            let syn::Expr::Return(returned) = transparent_expr(expr) else {
+                return false;
+            };
+            let Some(call) = returned
+                .expr
+                .as_deref()
+                .and_then(direct_call_behind_runtime_context)
+            else {
+                return false;
+            };
+            is_exact_path(
+                &call.func,
+                &["runtime", "operator", RSS_OFFLINE_COMMAND_FAMILY.2],
+            ) && call.args.len() == 1
+                && call
+                    .args
+                    .first()
+                    .is_some_and(|arg| reference_to_binding(arg, args))
+        }
+        _ => false,
+    };
+    pattern_is_canonical
+        && is_exact_ident_path(&condition.expr, command)
+        && return_is_canonical
+        && branch.else_branch.is_none()
+}
+
 fn rss_main_is_canonical(main: &syn::ItemFn) -> bool {
     if main.sig.asyncness.is_none()
         || !matches!(&main.sig.output, syn::ReturnType::Type(_, ty)
             if compact_type_tokens(ty.as_ref()) == "anyhow::Result<()>")
-        || main.block.stmts.len() != 7
+        || main.block.stmts.len() != 8
     {
         return false;
     }
     let [
         args_statement,
         command_statement,
+        offline_statement,
         serving_statement,
         prepare_statement,
         result_statement,
@@ -4161,6 +4270,9 @@ fn rss_main_is_canonical(main: &syn::ItemFn) -> bool {
             .first()
             .is_some_and(|arg| reference_to_binding(arg, args))
     {
+        return false;
+    }
+    if !offline_dispatch_is_canonical(offline_statement, args, command) {
         return false;
     }
     let syn::Stmt::Local(serving_local) = serving_statement else {
@@ -4409,6 +4521,7 @@ fn runtime_config_snapshot_live_findings(root: &Path) -> Result<Vec<Finding<Rule
     findings.extend(runtime_config_global_capture_findings(root)?);
     findings.extend(runtime_snapshot_consumer_ambient_findings(root)?);
     findings.extend(redis_snapshot_boundary_findings(root, &file)?);
+    findings.extend(vault_allowlist_typed_funnel_findings(root)?);
     findings.extend(vault_s3_values_boundary_findings(root, &file)?);
     Ok(findings)
 }
@@ -5046,6 +5159,1759 @@ fn redis_snapshot_boundary_findings(
         Rule::ForbiddenWiring,
         "assemblies/runtime/src/infra/redis.rs",
         "Redis explicit-values seam must remain cfg(any(test, feature = \"integration\")) + pub(crate) with its exact signature, the public wrapper must remain cfg(feature = \"integration\"), and the sole production create_pool binding must flow to both verify_redis_pool and RedisRuntimeDeps::setup",
+    )])
+}
+
+const VAULT_TENANT_STORE_ALLOWLIST_JSON_KEY: &str = "RSS_VAULT_TENANT_STORE_ALLOWLIST_JSON";
+
+fn production_owner_methods_named<'a>(
+    file: &'a syn::File,
+    owner: &str,
+    method: &str,
+) -> Vec<&'a syn::ImplItemFn> {
+    file.items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Impl(item)
+                if item.trait_.is_none()
+                    && attrs_may_be_production(&item.attrs)
+                    && type_last_ident(&item.self_ty).is_some_and(|ident| ident == owner) =>
+            {
+                Some(item)
+            }
+            _ => None,
+        })
+        .flat_map(|item| item.items.iter())
+        .filter_map(|item| match item {
+            syn::ImplItem::Fn(item)
+                if item.sig.ident == method && attrs_may_be_production(&item.attrs) =>
+            {
+                Some(item)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn production_struct_is_exact(
+    file: &syn::File,
+    name: &str,
+    expected_fields: &[(&str, &str)],
+) -> bool {
+    let structs = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Struct(item)
+                if item.ident == name && attrs_may_be_production(&item.attrs) =>
+            {
+                Some(item)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let [item] = structs.as_slice() else {
+        return false;
+    };
+    let syn::Fields::Named(fields) = &item.fields else {
+        return false;
+    };
+    fields.named.len() == expected_fields.len()
+        && fields
+            .named
+            .iter()
+            .all(|field| matches!(field.vis, syn::Visibility::Inherited))
+        && expected_fields.iter().all(|(name, ty)| {
+            fields.named.iter().any(|field| {
+                field.ident.as_ref().is_some_and(|ident| ident == name)
+                    && compact_type_tokens(&field.ty) == *ty
+            })
+        })
+}
+
+fn production_type_has_default(file: &syn::File, name: &str) -> bool {
+    let derives_default = file.items.iter().any(|item| match item {
+        syn::Item::Struct(item) if item.ident == name && attrs_may_be_production(&item.attrs) => {
+            item.attrs.iter().any(|attribute| {
+                attribute.path().is_ident("derive") && compact_tokens(attribute).contains("Default")
+            })
+        }
+        _ => false,
+    });
+    let implements_default = file.items.iter().any(|item| match item {
+        syn::Item::Impl(item)
+            if attrs_may_be_production(&item.attrs)
+                && type_last_ident(&item.self_ty).is_some_and(|ident| ident == name) =>
+        {
+            item.trait_
+                .as_ref()
+                .and_then(|(_, path, _)| path.segments.last())
+                .is_some_and(|segment| segment.ident == "Default")
+        }
+        _ => false,
+    });
+    derives_default || implements_default
+}
+
+fn production_enum_excludes_ident(file: &syn::File, name: &str, forbidden: &str) -> bool {
+    let enums = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Enum(item) if item.ident == name && attrs_may_be_production(&item.attrs) => {
+                Some(item)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    matches!(enums.as_slice(), [item] if !compact_tokens(*item).contains(forbidden))
+}
+
+#[derive(Default)]
+struct ExactStringLiteralCount {
+    expected: &'static str,
+    count: usize,
+}
+
+impl<'ast> Visit<'ast> for ExactStringLiteralCount {
+    fn visit_lit_str(&mut self, literal: &'ast syn::LitStr) {
+        self.count += usize::from(literal.value() == self.expected);
+    }
+}
+
+fn fixed_serving_allowlist_key_is_exact(config: &syn::File) -> bool {
+    let catalogs = config
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Const(item)
+                if item.ident == "FIXED_SERVING_KEYS" && attrs_may_be_production(&item.attrs) =>
+            {
+                Some(item)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let [catalog] = catalogs.as_slice() else {
+        return false;
+    };
+    let mut count = ExactStringLiteralCount {
+        expected: VAULT_TENANT_STORE_ALLOWLIST_JSON_KEY,
+        ..ExactStringLiteralCount::default()
+    };
+    count.visit_expr(&catalog.expr);
+    count.count == 1
+}
+
+fn vault_allowlist_key_constant_is_exact(vault: &syn::File) -> bool {
+    let constants = vault
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Const(item)
+                if item.ident == "VAULT_TENANT_STORE_ALLOWLIST_JSON_ENV"
+                    && attrs_may_be_production(&item.attrs) =>
+            {
+                Some(item)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let [constant] = constants.as_slice() else {
+        return false;
+    };
+    compact_type_tokens(&constant.ty) == "&str"
+        && matches!(transparent_expr(&constant.expr), syn::Expr::Lit(literal)
+            if matches!(&literal.lit, syn::Lit::Str(value)
+                if value.value() == VAULT_TENANT_STORE_ALLOWLIST_JSON_KEY))
+}
+
+fn is_allowlist_key_expr(expr: &syn::Expr) -> bool {
+    match transparent_expr(expr) {
+        syn::Expr::Path(path) => path
+            .path
+            .segments
+            .last()
+            .is_some_and(|segment| segment.ident == "VAULT_TENANT_STORE_ALLOWLIST_JSON_ENV"),
+        syn::Expr::Lit(literal) => matches!(&literal.lit, syn::Lit::Str(value)
+            if value.value() == VAULT_TENANT_STORE_ALLOWLIST_JSON_KEY),
+        _ => false,
+    }
+}
+
+fn snapshot_allowlist_read_is_exact(expr: &syn::Expr, config: &syn::Ident) -> bool {
+    matches!(transparent_expr(expr), syn::Expr::MethodCall(call)
+        if call.method == "value"
+            && call.args.len() == 1
+            && is_exact_ident_path(&call.receiver, config)
+            && call.args.first().is_some_and(is_allowlist_key_expr))
+}
+
+#[derive(Default)]
+struct VaultAllowlistProductionInventory {
+    key_references: usize,
+    allowlist_parser_calls: usize,
+    allowlist_constructor_calls: usize,
+    resolver_constructor_calls: usize,
+}
+
+fn path_is_vault_secret_resolver_constructor(path: &syn::Path) -> bool {
+    let segments = path
+        .segments
+        .iter()
+        .map(|segment| segment.ident.to_string())
+        .collect::<Vec<_>>();
+    segments.len() >= 2
+        && segments[segments.len() - 2] == "VaultSecretResolver"
+        && matches!(
+            segments.last().map(String::as_str),
+            Some("new" | "new_allow_http")
+        )
+}
+
+impl<'ast> Visit<'ast> for VaultAllowlistProductionInventory {
+    fn visit_expr_path(&mut self, path: &'ast syn::ExprPath) {
+        self.key_references += usize::from(
+            path.path
+                .segments
+                .last()
+                .is_some_and(|segment| segment.ident == "VAULT_TENANT_STORE_ALLOWLIST_JSON_ENV"),
+        );
+        let segments = path
+            .path
+            .segments
+            .iter()
+            .map(|segment| segment.ident.to_string())
+            .collect::<Vec<_>>();
+        self.allowlist_parser_calls += usize::from(
+            segments
+                .last()
+                .is_some_and(|segment| segment == "tenant_store_allowlist_from_value"),
+        );
+        self.allowlist_constructor_calls +=
+            usize::from(segments.ends_with(&["TenantStoreAllowlist".to_owned(), "new".to_owned()]));
+        self.resolver_constructor_calls +=
+            usize::from(path_is_vault_secret_resolver_constructor(&path.path));
+        syn::visit::visit_expr_path(self, path);
+    }
+
+    fn visit_expr_lit(&mut self, literal: &'ast syn::ExprLit) {
+        self.key_references += usize::from(matches!(&literal.lit, syn::Lit::Str(value)
+            if value.value() == VAULT_TENANT_STORE_ALLOWLIST_JSON_KEY));
+        syn::visit::visit_expr_lit(self, literal);
+    }
+}
+
+fn vault_allowlist_production_inventory(vault: &syn::File) -> VaultAllowlistProductionInventory {
+    let mut inventory = VaultAllowlistProductionInventory::default();
+    for item in &vault.items {
+        match item {
+            syn::Item::Fn(item) if attrs_may_be_production(&item.attrs) => {
+                inventory.visit_block(&item.block);
+            }
+            syn::Item::Impl(item) if attrs_may_be_production(&item.attrs) => {
+                for member in &item.items {
+                    if let syn::ImplItem::Fn(method) = member
+                        && attrs_may_be_production(&method.attrs)
+                    {
+                        inventory.visit_block(&method.block);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    inventory
+}
+
+fn use_tree_contains_ident(tree: &syn::UseTree, expected: &str) -> bool {
+    match tree {
+        syn::UseTree::Path(path) => {
+            path.ident == expected || use_tree_contains_ident(&path.tree, expected)
+        }
+        syn::UseTree::Name(name) => name.ident == expected,
+        syn::UseTree::Rename(rename) => rename.ident == expected,
+        syn::UseTree::Group(group) => group
+            .items
+            .iter()
+            .any(|tree| use_tree_contains_ident(tree, expected)),
+        syn::UseTree::Glob(_) => false,
+    }
+}
+
+fn macro_contains_vault_allowlist_symbol(mac: &syn::Macro) -> bool {
+    fn contains_protected_ident(tokens: proc_macro2::TokenStream) -> bool {
+        tokens.into_iter().any(|token| match token {
+            proc_macro2::TokenTree::Ident(ident) => matches!(
+                ident.to_string().as_str(),
+                "tenant_store_allowlist_from_value"
+                    | "TenantStoreAllowlist"
+                    | "VaultSecretResolver"
+            ),
+            proc_macro2::TokenTree::Group(group) => contains_protected_ident(group.stream()),
+            proc_macro2::TokenTree::Punct(_) | proc_macro2::TokenTree::Literal(_) => false,
+        })
+    }
+
+    contains_protected_ident(mac.tokens.clone())
+}
+
+#[derive(Default)]
+struct VaultAllowlistMacroInventory {
+    protected_symbols: usize,
+}
+
+impl<'ast> Visit<'ast> for VaultAllowlistMacroInventory {
+    fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+        self.protected_symbols += usize::from(macro_contains_vault_allowlist_symbol(mac));
+        syn::visit::visit_macro(self, mac);
+    }
+}
+
+fn vault_allowlist_production_macro_inventory(file: &syn::File) -> VaultAllowlistMacroInventory {
+    let mut inventory = VaultAllowlistMacroInventory::default();
+    for item in &file.items {
+        match item {
+            syn::Item::Fn(item) if attrs_may_be_production(&item.attrs) => {
+                inventory.visit_block(&item.block);
+            }
+            syn::Item::Impl(item) if attrs_may_be_production(&item.attrs) => {
+                for member in &item.items {
+                    if let syn::ImplItem::Fn(method) = member
+                        && attrs_may_be_production(&method.attrs)
+                    {
+                        inventory.visit_block(&method.block);
+                    }
+                }
+            }
+            syn::Item::Macro(item) if attrs_may_be_production(&item.attrs) => {
+                inventory.visit_macro(&item.mac);
+            }
+            _ => {}
+        }
+    }
+    inventory
+}
+
+fn vault_allowlist_production_graph_violations(root: &Path) -> Result<Vec<String>> {
+    let mut sources = Vec::new();
+    collect_rust_sources(&root.join(RUNTIME_SRC_PATH), &mut sources)?;
+    let production = production_module_sources(&sources)?;
+    let mut observed = BTreeMap::new();
+    let mut violations = Vec::new();
+    for path in sources {
+        if !production.contains(&normalize_path(&path)) {
+            continue;
+        }
+        let file = parse_rust_file(&path)?;
+        let relative = path
+            .strip_prefix(root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .into_owned();
+        let inventory = vault_allowlist_production_inventory(&file);
+        if inventory.key_references != 0
+            || inventory.allowlist_parser_calls != 0
+            || inventory.allowlist_constructor_calls != 0
+            || inventory.resolver_constructor_calls != 0
+        {
+            observed.insert(relative.clone(), inventory);
+        }
+
+        for item in &file.items {
+            if let syn::Item::Use(use_) = item
+                && attrs_may_be_production(&use_.attrs)
+                && relative != RUNTIME_VAULT_PATH
+                && [
+                    "tenant_store_allowlist_from_value",
+                    "TenantStoreAllowlist",
+                    "VaultSecretResolver",
+                ]
+                .iter()
+                .any(|symbol| use_tree_contains_ident(&use_.tree, symbol))
+            {
+                violations.push(format!("protected-symbol-import:{relative}"));
+            }
+        }
+        let macros = vault_allowlist_production_macro_inventory(&file);
+        if macros.protected_symbols != 0 {
+            violations.push(format!(
+                "protected-symbol-in-macro:{relative}:{}",
+                macros.protected_symbols
+            ));
+        }
+    }
+
+    let expected = BTreeMap::from([
+        (
+            RUNTIME_VAULT_PATH.to_owned(),
+            VaultAllowlistProductionInventory {
+                key_references: 1,
+                allowlist_parser_calls: 1,
+                allowlist_constructor_calls: 1,
+                resolver_constructor_calls: 1,
+            },
+        ),
+        (
+            RUNTIME_OPERATOR_VAULT_ALLOWLIST_PATH.to_owned(),
+            VaultAllowlistProductionInventory {
+                allowlist_parser_calls: 1,
+                ..VaultAllowlistProductionInventory::default()
+            },
+        ),
+    ]);
+    if observed.len() != expected.len()
+        || expected.iter().any(|(path, expected)| {
+            observed.get(path).is_none_or(|actual| {
+                actual.key_references != expected.key_references
+                    || actual.allowlist_parser_calls != expected.allowlist_parser_calls
+                    || actual.allowlist_constructor_calls != expected.allowlist_constructor_calls
+                    || actual.resolver_constructor_calls != expected.resolver_constructor_calls
+            })
+        })
+    {
+        let summary = observed
+            .iter()
+            .map(|(path, inventory)| {
+                format!(
+                    "{path}=key:{}/parser:{}/allowlist-new:{}/resolver-new:{}",
+                    inventory.key_references,
+                    inventory.allowlist_parser_calls,
+                    inventory.allowlist_constructor_calls,
+                    inventory.resolver_constructor_calls,
+                )
+            })
+            .collect::<Vec<_>>();
+        violations.push(format!("production-graph-exact-set:{summary:?}"));
+    }
+    Ok(violations)
+}
+
+#[derive(Default)]
+struct VaultSnapshotAllowlistFlow<'a> {
+    config: Option<&'a syn::Ident>,
+    key_references: usize,
+    key_reads: usize,
+    canonical_key_reads: usize,
+    values_structs: usize,
+    canonical_values_structs: usize,
+    from_values_calls: usize,
+    canonical_from_values_calls: usize,
+}
+
+impl VaultSnapshotAllowlistFlow<'_> {
+    fn values_struct_is_canonical(&self, value: &syn::ExprStruct) -> bool {
+        path_last_ident(&value.path).is_some_and(|ident| ident == "VaultConfigValues")
+            && value.rest.is_none()
+            && value
+                .fields
+                .iter()
+                .filter(|field| {
+                    matches!(&field.member, syn::Member::Named(member)
+                    if member == "tenant_store_allowlist_json")
+                })
+                .count()
+                == 1
+            && value.fields.iter().any(|field| {
+                matches!(&field.member, syn::Member::Named(member)
+                    if member == "tenant_store_allowlist_json")
+                    && self
+                        .config
+                        .is_some_and(|config| snapshot_allowlist_read_is_exact(&field.expr, config))
+            })
+    }
+}
+
+impl<'ast> Visit<'ast> for VaultSnapshotAllowlistFlow<'_> {
+    fn visit_expr_path(&mut self, path: &'ast syn::ExprPath) {
+        self.key_references += usize::from(
+            path.path
+                .segments
+                .last()
+                .is_some_and(|segment| segment.ident == "VAULT_TENANT_STORE_ALLOWLIST_JSON_ENV"),
+        );
+        syn::visit::visit_expr_path(self, path);
+    }
+
+    fn visit_expr_lit(&mut self, literal: &'ast syn::ExprLit) {
+        self.key_references += usize::from(matches!(&literal.lit, syn::Lit::Str(value)
+            if value.value() == VAULT_TENANT_STORE_ALLOWLIST_JSON_KEY));
+        syn::visit::visit_expr_lit(self, literal);
+    }
+
+    fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+        if call.method == "value"
+            && call.args.len() == 1
+            && call.args.first().is_some_and(is_allowlist_key_expr)
+        {
+            self.key_reads += 1;
+            self.canonical_key_reads += usize::from(
+                self.config
+                    .is_some_and(|config| is_exact_ident_path(&call.receiver, config)),
+            );
+        }
+        syn::visit::visit_expr_method_call(self, call);
+    }
+
+    fn visit_expr_struct(&mut self, value: &'ast syn::ExprStruct) {
+        if path_last_ident(&value.path).is_some_and(|ident| ident == "VaultConfigValues") {
+            self.values_structs += 1;
+            self.canonical_values_structs += usize::from(self.values_struct_is_canonical(value));
+        }
+        syn::visit::visit_expr_struct(self, value);
+    }
+
+    fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+        if path_ends_with(&call.func, &["Self", "from_values"]) {
+            self.from_values_calls += 1;
+            self.canonical_from_values_calls += usize::from(
+                call.args.len() == 1
+                    && matches!(call.args.first().map(transparent_expr),
+                        Some(syn::Expr::Struct(value)) if self.values_struct_is_canonical(value)),
+            );
+        }
+        syn::visit::visit_expr_call(self, call);
+    }
+}
+
+fn vault_runtime_snapshot_allowlist_flow_is_exact(vault: &syn::File) -> bool {
+    let methods = production_owner_methods_named(vault, "VaultRuntimeConfig", "from_snapshot");
+    let [method] = methods.as_slice() else {
+        return false;
+    };
+    let inputs = method.sig.inputs.iter().collect::<Vec<_>>();
+    let Some(config) = inputs.first().and_then(|input| match input {
+        syn::FnArg::Typed(input) if compact_type_tokens(&input.ty) == "SnapshotConfig<'_>" => {
+            immutable_pat_ident(&input.pat)
+        }
+        _ => None,
+    }) else {
+        return false;
+    };
+    if inputs.len() != 1
+        || !matches!(&method.sig.output, syn::ReturnType::Type(_, ty)
+            if compact_type_tokens(ty) == "Result<Self,VaultRuntimeConfigError>")
+    {
+        return false;
+    }
+    let mut flow = VaultSnapshotAllowlistFlow {
+        config: Some(config),
+        ..VaultSnapshotAllowlistFlow::default()
+    };
+    flow.visit_block(&method.block);
+    flow.key_references == 1
+        && flow.key_reads == 1
+        && flow.canonical_key_reads == 1
+        && flow.values_structs == 1
+        && flow.canonical_values_structs == 1
+        && flow.from_values_calls == 1
+        && flow.canonical_from_values_calls == 1
+}
+
+fn values_allowlist_argument_is_exact(expr: &syn::Expr, values: &syn::Ident) -> bool {
+    matches!(transparent_expr(expr), syn::Expr::Field(field)
+        if matches!(&field.member, syn::Member::Named(member)
+            if member == "tenant_store_allowlist_json")
+            && is_exact_ident_path(&field.base, values))
+}
+
+#[derive(Default)]
+struct VaultFromValuesAllowlistFlow {
+    values: Option<syn::Ident>,
+    parser_calls: usize,
+    canonical_parser_calls: usize,
+    allowlist_bindings: BTreeSet<String>,
+    provider_bindings: BTreeSet<String>,
+}
+
+impl<'ast> Visit<'ast> for VaultFromValuesAllowlistFlow {
+    fn visit_local(&mut self, local: &'ast syn::Local) {
+        let Some(binding) = immutable_pat_ident(&local.pat) else {
+            syn::visit::visit_local(self, local);
+            return;
+        };
+        if let Some(init) = &local.init {
+            let mut calls = VaultFromValuesAllowlistFlow {
+                values: self.values.clone(),
+                ..VaultFromValuesAllowlistFlow::default()
+            };
+            calls.visit_expr(&init.expr);
+            if calls.parser_calls == 1 && calls.canonical_parser_calls == 1 {
+                self.allowlist_bindings.insert(binding.to_string());
+            }
+            struct ProviderCalls(usize);
+            impl<'ast> Visit<'ast> for ProviderCalls {
+                fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+                    self.0 += usize::from(path_ends_with(
+                        &call.func,
+                        &["VaultProviderConfig", "from_values"],
+                    ));
+                    syn::visit::visit_expr_call(self, call);
+                }
+            }
+            let mut providers = ProviderCalls(0);
+            providers.visit_expr(&init.expr);
+            if providers.0 == 1 {
+                self.provider_bindings.insert(binding.to_string());
+            }
+        }
+        syn::visit::visit_local(self, local);
+    }
+
+    fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+        if path_ends_with(&call.func, &["tenant_store_allowlist_from_value"]) {
+            self.parser_calls += 1;
+            self.canonical_parser_calls += usize::from(
+                call.args.len() == 1
+                    && call.args.first().is_some_and(|argument| {
+                        self.values.as_ref().is_some_and(|values| {
+                            values_allowlist_argument_is_exact(argument, values)
+                        })
+                    }),
+            );
+        }
+        syn::visit::visit_expr_call(self, call);
+    }
+}
+
+fn tail_returns_canonical_vault_runtime_config(
+    block: &syn::Block,
+    providers: &BTreeSet<String>,
+    allowlists: &BTreeSet<String>,
+) -> bool {
+    let Some(syn::Stmt::Expr(tail, None)) = block.stmts.last() else {
+        return false;
+    };
+    matches!(transparent_expr(tail), syn::Expr::Call(call)
+    if path_ends_with(&call.func, &["Ok"])
+        && call.args.len() == 1
+        && matches!(call.args.first().map(transparent_expr), Some(syn::Expr::Struct(value))
+            if path_last_ident(&value.path).is_some_and(|ident| ident == "Self")
+                && value.rest.is_none()
+                && value.fields.len() == 2
+                && value.fields.iter().all(|field| {
+                    let syn::Member::Named(member) = &field.member else { return false; };
+                    let syn::Expr::Path(path) = transparent_expr(&field.expr) else { return false; };
+                    let Some(binding) = path.path.get_ident().map(ToString::to_string) else { return false; };
+                    (member == "provider" && providers.contains(&binding))
+                        || (member == "stores" && allowlists.contains(&binding))
+                })))
+}
+
+fn vault_runtime_from_values_allowlist_flow_is_exact(vault: &syn::File) -> bool {
+    let methods = production_owner_methods_named(vault, "VaultRuntimeConfig", "from_values");
+    let [method] = methods.as_slice() else {
+        return false;
+    };
+    let inputs = method.sig.inputs.iter().collect::<Vec<_>>();
+    let Some(values) = inputs.first().and_then(|input| match input {
+        syn::FnArg::Typed(input) if compact_type_tokens(&input.ty) == "VaultConfigValues<'_>" => {
+            immutable_pat_ident(&input.pat).cloned()
+        }
+        _ => None,
+    }) else {
+        return false;
+    };
+    if inputs.len() != 1
+        || !matches!(&method.sig.output, syn::ReturnType::Type(_, ty)
+            if compact_type_tokens(ty) == "Result<Self,VaultRuntimeConfigError>")
+    {
+        return false;
+    }
+    let mut flow = VaultFromValuesAllowlistFlow {
+        values: Some(values),
+        ..VaultFromValuesAllowlistFlow::default()
+    };
+    flow.visit_block(&method.block);
+    flow.parser_calls == 1
+        && flow.canonical_parser_calls == 1
+        && flow.allowlist_bindings.len() == 1
+        && flow.provider_bindings.len() == 1
+        && tail_returns_canonical_vault_runtime_config(
+            &method.block,
+            &flow.provider_bindings,
+            &flow.allowlist_bindings,
+        )
+}
+
+fn expression_is_field_of(expr: &syn::Expr, binding: &syn::Ident, field_name: &str) -> bool {
+    matches!(transparent_expr(expr), syn::Expr::Field(field)
+        if matches!(&field.member, syn::Member::Named(member) if member == field_name)
+            && is_exact_ident_path(&field.base, binding))
+}
+
+fn reference_is_field_of(expr: &syn::Expr, binding: &syn::Ident, field_name: &str) -> bool {
+    matches!(transparent_expr(expr), syn::Expr::Reference(reference)
+        if reference.mutability.is_none()
+            && expression_is_field_of(&reference.expr, binding, field_name))
+}
+
+fn error_mapper_is(expr: &syn::Expr, variant: &str) -> bool {
+    let syn::Expr::Closure(mapper) = transparent_expr(expr) else {
+        return false;
+    };
+    mapper.inputs.len() == 1
+        && matches!(transparent_expr(&mapper.body), syn::Expr::Path(path)
+            if path.path.segments.last().is_some_and(|segment| segment.ident == variant))
+}
+
+fn parsed_field_local_is(
+    local: &syn::Local,
+    parser: &[&str],
+    source: &syn::Ident,
+    field_name: &str,
+    error_variant: &str,
+) -> Option<syn::Ident> {
+    let binding = immutable_pat_ident(&local.pat)?.clone();
+    let init = local.init.as_ref()?;
+    let syn::Expr::Try(try_) = transparent_expr(&init.expr) else {
+        return None;
+    };
+    let syn::Expr::MethodCall(map_err) = transparent_expr(&try_.expr) else {
+        return None;
+    };
+    let syn::Expr::Call(parse) = transparent_expr(&map_err.receiver) else {
+        return None;
+    };
+    (map_err.method == "map_err"
+        && map_err.args.len() == 1
+        && map_err
+            .args
+            .first()
+            .is_some_and(|mapper| error_mapper_is(mapper, error_variant))
+        && path_ends_with(&parse.func, parser)
+        && parse.args.len() == 1
+        && parse
+            .args
+            .first()
+            .is_some_and(|argument| reference_is_field_of(argument, source, field_name)))
+    .then_some(binding)
+}
+
+fn store_id_owned_expression_is(expr: &syn::Expr, store: &syn::Ident) -> bool {
+    let syn::Expr::MethodCall(to_owned) = transparent_expr(expr) else {
+        return false;
+    };
+    let syn::Expr::MethodCall(as_str) = transparent_expr(&to_owned.receiver) else {
+        return false;
+    };
+    to_owned.method == "to_owned"
+        && to_owned.args.is_empty()
+        && as_str.method == "as_str"
+        && as_str.args.is_empty()
+        && is_exact_ident_path(&as_str.receiver, store)
+}
+
+fn mapped_binding_tail_is(
+    statement: &syn::Stmt,
+    source: &syn::Ident,
+    tenant: &syn::Ident,
+    store: &syn::Ident,
+) -> bool {
+    let syn::Stmt::Expr(expression, None) = statement else {
+        return false;
+    };
+    let syn::Expr::Call(ok) = transparent_expr(expression) else {
+        return false;
+    };
+    let Some(syn::Expr::Tuple(pair)) = ok.args.first().map(transparent_expr) else {
+        return false;
+    };
+    let Some(syn::Expr::Tuple(key)) = pair.elems.first().map(transparent_expr) else {
+        return false;
+    };
+    let Some(syn::Expr::Struct(binding)) = pair.elems.iter().nth(1).map(transparent_expr) else {
+        return false;
+    };
+    path_ends_with(&ok.func, &["Ok"])
+        && ok.args.len() == 1
+        && pair.elems.len() == 2
+        && key.elems.len() == 2
+        && key
+            .elems
+            .first()
+            .is_some_and(|expr| is_exact_ident_path(expr, tenant))
+        && key
+            .elems
+            .iter()
+            .nth(1)
+            .is_some_and(|expr| store_id_owned_expression_is(expr, store))
+        && path_last_ident(&binding.path).is_some_and(|ident| ident == "StoreBinding")
+        && binding.rest.is_none()
+        && binding.fields.len() == 2
+        && binding.fields.iter().all(|field| {
+            matches!(&field.member, syn::Member::Named(member)
+                if (member == "mount" || member == "kv_path_prefix")
+                    && expression_is_field_of(&field.expr, source, &member.to_string()))
+        })
+}
+
+fn binding_mapper_block_is_exact(block: &syn::Block, source: &syn::Ident) -> bool {
+    let tenants = block
+        .stmts
+        .iter()
+        .filter_map(|statement| match statement {
+            syn::Stmt::Local(local) => parsed_field_local_is(
+                local,
+                &["TenantId", "parse"],
+                source,
+                "tenant_id",
+                "InvalidTenantId",
+            ),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let stores = block
+        .stmts
+        .iter()
+        .filter_map(|statement| match statement {
+            syn::Stmt::Local(local) => parsed_field_local_is(
+                local,
+                &["settings", "ports", "StoreId", "parse"],
+                source,
+                "store_id",
+                "InvalidStoreId",
+            ),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let ([tenant], [store], Some(tail)) =
+        (tenants.as_slice(), stores.as_slice(), block.stmts.last())
+    else {
+        return false;
+    };
+    mapped_binding_tail_is(tail, source, tenant, store)
+}
+
+fn binding_map_is_exact(call: &syn::ExprMethodCall, wire: &syn::Ident, vault: &syn::File) -> bool {
+    let syn::Expr::MethodCall(into_iter) = transparent_expr(&call.receiver) else {
+        return false;
+    };
+    let syn::Expr::Field(bindings) = transparent_expr(&into_iter.receiver) else {
+        return false;
+    };
+    let mapper_is_exact = match call.args.first().map(transparent_expr) {
+        Some(syn::Expr::Closure(mapper)) => {
+            let Some(source) = mapper.inputs.first().and_then(immutable_pat_ident) else {
+                return false;
+            };
+            matches!(transparent_expr(&mapper.body), syn::Expr::Block(body)
+                if mapper.inputs.len() == 1
+                    && binding_mapper_block_is_exact(&body.block, source))
+        }
+        Some(syn::Expr::Path(path)) => {
+            let Some(name) = path
+                .path
+                .segments
+                .last()
+                .map(|segment| segment.ident.to_string())
+            else {
+                return false;
+            };
+            let Some(function) = production_function_named(vault, &name) else {
+                return false;
+            };
+            let inputs = function.sig.inputs.iter().collect::<Vec<_>>();
+            let Some(source) = function_typed_input_ident(function, 0) else {
+                return false;
+            };
+            inputs.len() == 1
+                && matches!(inputs[0], syn::FnArg::Typed(input)
+                    if compact_type_tokens(&input.ty) == "VaultTenantStoreBindingWire")
+                && matches!(&function.sig.output, syn::ReturnType::Type(_, output)
+                    if compact_type_tokens(output)
+                        == "Result<((TenantId,String),StoreBinding),VaultTenantStoreAllowlistConfigError>")
+                && binding_mapper_block_is_exact(&function.block, source)
+        }
+        _ => false,
+    };
+    call.method == "map"
+        && call.args.len() == 1
+        && into_iter.method == "into_iter"
+        && into_iter.args.is_empty()
+        && matches!(&bindings.member, syn::Member::Named(member) if member == "bindings")
+        && is_exact_ident_path(&bindings.base, wire)
+        && mapper_is_exact
+}
+
+fn binding_collection_is_exact(expr: &syn::Expr, wire: &syn::Ident, vault: &syn::File) -> bool {
+    let syn::Expr::Try(result) = transparent_expr(expr) else {
+        return false;
+    };
+    let syn::Expr::MethodCall(collect) = transparent_expr(&result.expr) else {
+        return false;
+    };
+    let syn::Expr::MethodCall(map) = transparent_expr(&collect.receiver) else {
+        return false;
+    };
+    collect.method == "collect" && collect.args.is_empty() && binding_map_is_exact(map, wire, vault)
+}
+
+fn expression_has_single_call_with_argument(
+    expr: &syn::Expr,
+    callee: &[&str],
+    argument: &syn::Ident,
+) -> bool {
+    struct Calls<'a> {
+        callee: &'a [&'a str],
+        argument: &'a syn::Ident,
+        total: usize,
+        canonical: usize,
+    }
+    impl<'ast> Visit<'ast> for Calls<'_> {
+        fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+            if path_ends_with(&call.func, self.callee) {
+                self.total += 1;
+                self.canonical += usize::from(
+                    call.args.len() == 1
+                        && call
+                            .args
+                            .first()
+                            .is_some_and(|arg| is_exact_ident_path(arg, self.argument)),
+                );
+            }
+            syn::visit::visit_expr_call(self, call);
+        }
+    }
+    let mut calls = Calls {
+        callee,
+        argument,
+        total: 0,
+        canonical: 0,
+    };
+    calls.visit_expr(expr);
+    calls.total == 1 && calls.canonical == 1
+}
+
+fn required_option_local_is(local: &syn::Local, input: &syn::Ident) -> Option<syn::Ident> {
+    let binding = immutable_pat_ident(&local.pat)?.clone();
+    let init = local.init.as_ref()?;
+    let syn::Expr::Try(try_) = transparent_expr(&init.expr) else {
+        return None;
+    };
+    let syn::Expr::MethodCall(ok_or) = transparent_expr(&try_.expr) else {
+        return None;
+    };
+    (ok_or.method == "ok_or"
+        && ok_or.args.len() == 1
+        && is_exact_ident_path(&ok_or.receiver, input)
+        && ok_or.args.first().is_some_and(|error| {
+            matches!(transparent_expr(error), syn::Expr::Path(path)
+                if path.path.segments.last().is_some_and(|segment| segment.ident == "Missing"))
+        }))
+    .then_some(binding)
+}
+
+fn tenant_store_allowlist_parser_is_exact(vault: &syn::File) -> bool {
+    let functions = production_functions_named(vault, "tenant_store_allowlist_from_value");
+    let [function] = functions.as_slice() else {
+        return false;
+    };
+    let inputs = function.sig.inputs.iter().collect::<Vec<_>>();
+    let Some(input) = inputs.first().and_then(|argument| match argument {
+        syn::FnArg::Typed(input) if compact_type_tokens(&input.ty) == "Option<&str>" => {
+            immutable_pat_ident(&input.pat)
+        }
+        syn::FnArg::Receiver(_) => None,
+        _ => None,
+    }) else {
+        return false;
+    };
+    if !is_pub_crate(&function.vis)
+        || inputs.len() != 1
+        || !matches!(&function.sig.output, syn::ReturnType::Type(_, ty)
+            if compact_type_tokens(ty)
+                == "Result<TenantStoreAllowlist,VaultTenantStoreAllowlistConfigError>")
+    {
+        return false;
+    }
+    let required_inputs = function
+        .block
+        .stmts
+        .iter()
+        .filter_map(|statement| match statement {
+            syn::Stmt::Local(local) => required_option_local_is(local, input),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let [document] = required_inputs.as_slice() else {
+        return false;
+    };
+    let wire_locals = function
+        .block
+        .stmts
+        .iter()
+        .filter_map(|statement| match statement {
+            syn::Stmt::Local(local) => match &local.pat {
+                syn::Pat::Type(typed)
+                    if compact_type_tokens(&typed.ty) == "VaultTenantStoreAllowlistWire" =>
+                {
+                    Some((immutable_pat_ident(&typed.pat)?, local.init.as_ref()?))
+                }
+                _ => None,
+            },
+            _ => None,
+        })
+        .filter(|(_, init)| {
+            expression_has_single_call_with_argument(
+                &init.expr,
+                &["serde_json", "from_str"],
+                document,
+            )
+        })
+        .collect::<Vec<_>>();
+    let [(wire, _)] = wire_locals.as_slice() else {
+        return false;
+    };
+    let binding_locals = function
+        .block
+        .stmts
+        .iter()
+        .filter_map(|statement| match statement {
+            syn::Stmt::Local(local) => {
+                Some((immutable_pat_ident(&local.pat)?, local.init.as_ref()?))
+            }
+            _ => None,
+        })
+        .filter(|(_, init)| binding_collection_is_exact(&init.expr, wire, vault))
+        .collect::<Vec<_>>();
+    let [(bindings, _)] = binding_locals.as_slice() else {
+        return false;
+    };
+    function.block.stmts.last().is_some_and(|statement| {
+        let syn::Stmt::Expr(expr, None) = statement else {
+            return false;
+        };
+        expression_has_single_call_with_argument(expr, &["TenantStoreAllowlist", "new"], bindings)
+    })
+}
+
+fn production_function_named<'a>(file: &'a syn::File, name: &str) -> Option<&'a syn::ItemFn> {
+    let functions = production_functions_named(file, name);
+    matches!(functions.as_slice(), [_]).then_some(functions[0])
+}
+
+fn production_string_const(file: &syn::File, name: &str) -> Option<String> {
+    let constants = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Const(item)
+                if item.ident == name && attrs_may_be_production(&item.attrs) =>
+            {
+                Some(item)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let [constant] = constants.as_slice() else {
+        return None;
+    };
+    if compact_type_tokens(&constant.ty) != "&str" {
+        return None;
+    }
+    match transparent_expr(&constant.expr) {
+        syn::Expr::Lit(literal) => match &literal.lit {
+            syn::Lit::Str(value) => Some(value.value()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn validator_input_enum_is_closed(file: &syn::File) -> bool {
+    let enums = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Enum(item)
+                if item.ident == "VaultAllowlistInput" && attrs_may_be_production(&item.attrs) =>
+            {
+                Some(item)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let [input] = enums.as_slice() else {
+        return false;
+    };
+    input.variants.len() == 2
+        && input.variants.iter().any(|variant| {
+            variant.ident == "File"
+                && matches!(&variant.fields, syn::Fields::Unnamed(fields)
+                    if fields.unnamed.len() == 1
+                        && compact_type_tokens(&fields.unnamed[0].ty) == "&'astr")
+        })
+        && input
+            .variants
+            .iter()
+            .any(|variant| variant.ident == "Stdin" && matches!(variant.fields, syn::Fields::Unit))
+}
+
+fn validator_error_categories_are_static(file: &syn::File) -> bool {
+    let errors = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Enum(item)
+                if item.ident == "VaultAllowlistValidationCommandError"
+                    && attrs_may_be_production(&item.attrs) =>
+            {
+                Some(item)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let [error] = errors.as_slice() else {
+        return false;
+    };
+    !error.variants.is_empty()
+        && error.variants.iter().all(|variant| {
+            matches!(variant.fields, syn::Fields::Unit)
+                && variant
+                    .attrs
+                    .iter()
+                    .filter(|attr| attr.path().is_ident("error"))
+                    .count()
+                    == 1
+                && variant
+                    .attrs
+                    .iter()
+                    .find(|attr| attr.path().is_ident("error"))
+                    .is_some_and(|attr| {
+                        attr.parse_args::<syn::LitStr>().is_ok_and(|message| {
+                            let message = message.value();
+                            !message.is_empty() && !message.contains(['{', '}'])
+                        })
+                    })
+        })
+}
+
+fn validator_function_signature_is(file: &syn::File, name: &str, expected: syn::Signature) -> bool {
+    production_function_named(file, name).is_some_and(|function| {
+        let actual = &function.sig;
+        actual.ident == expected.ident
+            && actual.constness.is_none() == expected.constness.is_none()
+            && actual.asyncness.is_none() == expected.asyncness.is_none()
+            && actual.unsafety.is_none() == expected.unsafety.is_none()
+            && actual.abi.is_none() == expected.abi.is_none()
+            && actual.variadic.is_none() == expected.variadic.is_none()
+            && compact_tokens(&actual.generics) == compact_tokens(&expected.generics)
+            && actual.inputs.len() == expected.inputs.len()
+            && actual
+                .inputs
+                .iter()
+                .zip(&expected.inputs)
+                .all(|(actual, expected)| match (actual, expected) {
+                    (syn::FnArg::Receiver(actual), syn::FnArg::Receiver(expected)) => {
+                        compact_tokens(actual) == compact_tokens(expected)
+                    }
+                    (syn::FnArg::Typed(actual), syn::FnArg::Typed(expected)) => {
+                        compact_type_tokens(&actual.ty) == compact_type_tokens(&expected.ty)
+                    }
+                    _ => false,
+                })
+            && compact_tokens(&actual.output) == compact_tokens(&expected.output)
+    })
+}
+
+fn function_typed_input_ident(function: &syn::ItemFn, index: usize) -> Option<&syn::Ident> {
+    function
+        .sig
+        .inputs
+        .iter()
+        .nth(index)
+        .and_then(|input| match input {
+            syn::FnArg::Typed(input) => immutable_pat_ident(&input.pat),
+            syn::FnArg::Receiver(_) => None,
+        })
+}
+
+fn validator_match_body<'a>(
+    function: &'a syn::ItemFn,
+    input: &syn::Ident,
+) -> Option<&'a syn::ExprMatch> {
+    let Some(syn::Stmt::Expr(expression, None)) = function.block.stmts.last() else {
+        return None;
+    };
+    match transparent_expr(expression) {
+        syn::Expr::Match(expression) if is_exact_ident_path(&expression.expr, input) => {
+            Some(expression)
+        }
+        _ => None,
+    }
+}
+
+#[derive(Default)]
+struct ValidatorArmInventory {
+    file_outputs: usize,
+    stdin_outputs: usize,
+    input_selection_errors: usize,
+    input_read_errors: usize,
+    file_reads: usize,
+    stdin_reads: usize,
+    flags: BTreeSet<String>,
+}
+
+impl<'ast> Visit<'ast> for ValidatorArmInventory {
+    fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+        self.file_outputs +=
+            usize::from(path_ends_with(&call.func, &["VaultAllowlistInput", "File"]));
+        self.file_reads +=
+            usize::from(path_ends_with(&call.func, &["std", "fs", "read_to_string"]));
+        syn::visit::visit_expr_call(self, call);
+    }
+
+    fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+        self.stdin_reads += usize::from(call.method == "read_to_string");
+        syn::visit::visit_expr_method_call(self, call);
+    }
+
+    fn visit_expr_path(&mut self, path: &'ast syn::ExprPath) {
+        self.stdin_outputs += usize::from(path_ends_with(
+            &syn::Expr::Path(path.clone()),
+            &["VaultAllowlistInput", "Stdin"],
+        ));
+        self.input_selection_errors += usize::from(
+            path.path
+                .segments
+                .last()
+                .is_some_and(|segment| segment.ident == "InputSelection"),
+        );
+        self.input_read_errors += usize::from(
+            path.path
+                .segments
+                .last()
+                .is_some_and(|segment| segment.ident == "InputRead"),
+        );
+        syn::visit::visit_expr_path(self, path);
+    }
+
+    fn visit_lit_str(&mut self, value: &'ast syn::LitStr) {
+        if value.value().starts_with("--") {
+            self.flags.insert(value.value());
+        }
+    }
+}
+
+fn validator_arm_inventory(arm: &syn::Arm) -> ValidatorArmInventory {
+    let mut inventory = ValidatorArmInventory::default();
+    inventory.visit_arm(arm);
+    inventory
+}
+
+fn validator_input_selection_is_closed(file: &syn::File) -> bool {
+    let Some(function) = production_function_named(file, "parse_input") else {
+        return false;
+    };
+    let Some(args) = function_typed_input_ident(function, 0) else {
+        return false;
+    };
+    let Some(selection) = validator_match_body(function, args) else {
+        return false;
+    };
+    let arms = selection
+        .arms
+        .iter()
+        .map(validator_arm_inventory)
+        .collect::<Vec<_>>();
+    let combined = arms
+        .iter()
+        .fold(ValidatorArmInventory::default(), |mut all, arm| {
+            all.file_outputs += arm.file_outputs;
+            all.stdin_outputs += arm.stdin_outputs;
+            all.input_selection_errors += arm.input_selection_errors;
+            all.input_read_errors += arm.input_read_errors;
+            all.file_reads += arm.file_reads;
+            all.stdin_reads += arm.stdin_reads;
+            all.flags.extend(arm.flags.iter().cloned());
+            all
+        });
+    combined.file_outputs == 1
+        && combined.stdin_outputs == 1
+        && combined.input_selection_errors == 1
+        && combined.flags == BTreeSet::from(["--file".to_owned(), "--stdin".to_owned()])
+        && arms
+            .iter()
+            .all(|arm| arm.file_outputs + arm.stdin_outputs + arm.input_selection_errors == 1)
+}
+
+fn validator_input_reader_is_closed(file: &syn::File) -> bool {
+    let Some(function) = production_function_named(file, "read_input") else {
+        return false;
+    };
+    let Some(input) = function_typed_input_ident(function, 0) else {
+        return false;
+    };
+    let Some(reader) = validator_match_body(function, input) else {
+        return false;
+    };
+    let arms = reader
+        .arms
+        .iter()
+        .map(validator_arm_inventory)
+        .collect::<Vec<_>>();
+    let file_arms = arms
+        .iter()
+        .filter(|arm| arm.file_reads == 1 && arm.input_read_errors == 1)
+        .count();
+    let stdin_arms = arms
+        .iter()
+        .filter(|arm| arm.stdin_reads == 1 && arm.input_read_errors == 1)
+        .count();
+    file_arms == 1
+        && stdin_arms == 1
+        && arms
+            .iter()
+            .all(|arm| arm.input_read_errors == 1 && arm.file_reads + arm.stdin_reads == 1)
+}
+
+fn reachable_validator_functions<'a>(
+    file: &'a syn::File,
+    root: &str,
+) -> Option<Vec<&'a syn::ItemFn>> {
+    let functions = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Fn(function) if attrs_may_be_production(&function.attrs) => {
+                Some((function.sig.ident.to_string(), function))
+            }
+            _ => None,
+        })
+        .collect::<BTreeMap<_, _>>();
+    functions.get(root)?;
+    let known = functions.keys().cloned().collect::<BTreeSet<_>>();
+    let mut reachable = BTreeSet::from([root.to_owned()]);
+    let mut queue = VecDeque::from([root.to_owned()]);
+    while let Some(name) = queue.pop_front() {
+        struct Calls<'a> {
+            known: &'a BTreeSet<String>,
+            calls: BTreeSet<String>,
+        }
+        impl<'ast> Visit<'ast> for Calls<'_> {
+            fn visit_expr_path(&mut self, path: &'ast syn::ExprPath) {
+                if let Some(name) = path
+                    .path
+                    .segments
+                    .last()
+                    .map(|segment| segment.ident.to_string())
+                    && self.known.contains(&name)
+                {
+                    self.calls.insert(name);
+                }
+                syn::visit::visit_expr_path(self, path);
+            }
+        }
+        let mut calls = Calls {
+            known: &known,
+            calls: BTreeSet::new(),
+        };
+        calls.visit_block(&functions[&name].block);
+        for call in calls.calls {
+            if reachable.insert(call.clone()) {
+                queue.push_back(call);
+            }
+        }
+    }
+    Some(
+        reachable
+            .into_iter()
+            .filter_map(|name| functions.get(&name).copied())
+            .collect(),
+    )
+}
+
+#[derive(Default)]
+struct ValidatorSemanticInventory {
+    parse_input: usize,
+    read_input: usize,
+    typed_parser: usize,
+    process_runner: usize,
+    stdin: usize,
+    stdout: usize,
+    static_writes: usize,
+    other_writes: usize,
+    output_write_errors: usize,
+}
+
+impl<'ast> Visit<'ast> for ValidatorSemanticInventory {
+    fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+        self.parse_input += usize::from(path_ends_with(&call.func, &["parse_input"]));
+        self.read_input += usize::from(path_ends_with(&call.func, &["read_input"]));
+        self.typed_parser += usize::from(path_ends_with(
+            &call.func,
+            &["tenant_store_allowlist_from_value"],
+        ));
+        self.process_runner += usize::from(path_ends_with(
+            &call.func,
+            &["run_vault_allowlist_validation_with_io"],
+        ));
+        self.stdin += usize::from(path_ends_with(&call.func, &["std", "io", "stdin"]));
+        self.stdout += usize::from(path_ends_with(&call.func, &["std", "io", "stdout"]));
+        syn::visit::visit_expr_call(self, call);
+    }
+
+    fn visit_expr_path(&mut self, path: &'ast syn::ExprPath) {
+        self.output_write_errors += usize::from(
+            path.path
+                .segments
+                .last()
+                .is_some_and(|segment| segment.ident == "OutputWrite"),
+        );
+        syn::visit::visit_expr_path(self, path);
+    }
+
+    fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+        if mac
+            .path
+            .segments
+            .last()
+            .is_some_and(|segment| segment.ident == "writeln")
+        {
+            let parser = syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated;
+            let is_static = parser.parse2(mac.tokens.clone()).is_ok_and(|arguments| {
+                arguments.len() == 2
+                    && matches!(arguments.iter().nth(1).map(transparent_expr),
+                        Some(syn::Expr::Lit(literal))
+                            if matches!(&literal.lit, syn::Lit::Str(value)
+                                if value.value() == "{VALIDATION_SUCCEEDED}"))
+            });
+            self.static_writes += usize::from(is_static);
+            self.other_writes += usize::from(!is_static);
+        }
+        syn::visit::visit_macro(self, mac);
+    }
+}
+
+fn validator_semantic_inventory(
+    file: &syn::File,
+    root: &str,
+) -> Option<ValidatorSemanticInventory> {
+    let functions = reachable_validator_functions(file, root)?;
+    let mut inventory = ValidatorSemanticInventory::default();
+    for function in functions {
+        inventory.visit_block(&function.block);
+    }
+    Some(inventory)
+}
+
+fn validator_typed_flow_is_closed(file: &syn::File) -> bool {
+    validator_semantic_inventory(file, "run_vault_allowlist_validation_with_io").is_some_and(
+        |inventory| {
+            inventory.parse_input == 1
+                && inventory.read_input == 1
+                && inventory.typed_parser == 1
+                && inventory.static_writes == 1
+                && inventory.other_writes == 0
+                && inventory.output_write_errors == 1
+        },
+    )
+}
+
+fn validator_process_runner_is_closed(file: &syn::File) -> bool {
+    validator_semantic_inventory(file, "run_vault_allowlist_validation_command").is_some_and(
+        |inventory| inventory.process_runner == 1 && inventory.stdin == 1 && inventory.stdout == 1,
+    )
+}
+
+fn validator_production_surface_has_no_forbidden_capability(file: &syn::File) -> bool {
+    let tokens = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Const(item) if attrs_may_be_production(&item.attrs) => {
+                Some(compact_tokens(item))
+            }
+            syn::Item::Enum(item) if attrs_may_be_production(&item.attrs) => {
+                Some(compact_tokens(item))
+            }
+            syn::Item::Fn(item) if attrs_may_be_production(&item.attrs) => {
+                Some(compact_tokens(item))
+            }
+            syn::Item::Impl(item) if attrs_may_be_production(&item.attrs) => {
+                Some(compact_tokens(item))
+            }
+            syn::Item::Use(item) if attrs_may_be_production(&item.attrs) => {
+                Some(compact_tokens(item))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    [
+        "std::env",
+        "SnapshotConfig",
+        "VaultRuntimeConfig",
+        "VaultKeyProviderConfig",
+        "VaultSecretResolver::new",
+        "reqwest",
+        "tokio",
+        "RSS_VAULT",
+        "println!",
+        "eprintln!",
+        "dbg!",
+    ]
+    .iter()
+    .all(|forbidden| !tokens.contains(forbidden))
+}
+
+fn vault_allowlist_offline_validator_violations(
+    vault: &syn::File,
+    validator: &syn::File,
+) -> Vec<&'static str> {
+    let mut violations = Vec::new();
+    if !tenant_store_allowlist_parser_is_exact(vault) {
+        violations.push("shared-parser-definition");
+    }
+    if !validator_input_enum_is_closed(validator) {
+        violations.push("input-enum-file-stdin-only");
+    }
+    if !validator_error_categories_are_static(validator) {
+        violations.push("static-unit-error-categories");
+    }
+    for (name, expected, violation) in [
+        (
+            "is_vault_allowlist_validation_command",
+            syn::parse_quote!(fn is_vault_allowlist_validation_command(args: &[String]) -> bool),
+            "command-signature",
+        ),
+        (
+            "parse_input",
+            syn::parse_quote!(fn parse_input(args: &[String]) -> Result<VaultAllowlistInput<'_>, VaultAllowlistValidationCommandError>),
+            "parse-input-signature",
+        ),
+        (
+            "read_input",
+            syn::parse_quote!(fn read_input(input: VaultAllowlistInput<'_>, stdin: &mut impl std::io::Read) -> Result<String, VaultAllowlistValidationCommandError>),
+            "read-input-signature",
+        ),
+        (
+            "run_vault_allowlist_validation_with_io",
+            syn::parse_quote!(fn run_vault_allowlist_validation_with_io(args: &[String], stdin: &mut impl std::io::Read, stdout: &mut impl std::io::Write) -> Result<(), VaultAllowlistValidationCommandError>),
+            "typed-flow-signature",
+        ),
+        (
+            "run_vault_allowlist_validation_command",
+            syn::parse_quote!(fn run_vault_allowlist_validation_command(args: &[String]) -> anyhow::Result<()>),
+            "process-runner-signature",
+        ),
+    ] {
+        if !validator_function_signature_is(validator, name, expected) {
+            violations.push(violation);
+            break;
+        }
+    }
+    if production_function_named(validator, "is_vault_allowlist_validation_command").is_none_or(
+        |function| !compact_tokens(&function.block).contains("command==VAULT_ALLOWLIST_CLI"),
+    ) {
+        violations.push("command-namespace");
+    }
+    if !validator_input_selection_is_closed(validator) {
+        violations.push("input-selection");
+    }
+    if !validator_input_reader_is_closed(validator) {
+        violations.push("input-reader");
+    }
+    if !validator_typed_flow_is_closed(validator) {
+        violations.push("raw-parser-static-output-flow");
+    }
+    if !validator_process_runner_is_closed(validator) {
+        violations.push("process-io-runner");
+    }
+    if production_string_const(validator, "VAULT_ALLOWLIST_CLI").as_deref()
+        != Some("vault-allowlist")
+        || production_string_const(validator, "VAULT_ALLOWLIST_VALIDATE_CLI").as_deref()
+            != Some("validate")
+        || production_string_const(validator, "VALIDATION_SUCCEEDED").as_deref()
+            != Some("vault allowlist validation succeeded")
+    {
+        violations.push("closed-command-and-success-literals");
+    }
+    if !validator_production_surface_has_no_forbidden_capability(validator) {
+        violations.push("forbidden-ambient-provider-network-output-capability");
+    }
+    violations
+}
+
+#[derive(Default)]
+struct VaultIntoRuntimeAllowlistFlow {
+    canonical_destructures: usize,
+    stores_binding: Option<syn::Ident>,
+    resolver_calls: usize,
+    canonical_resolver_calls: usize,
+    constructor_calls: usize,
+}
+
+impl<'ast> Visit<'ast> for VaultIntoRuntimeAllowlistFlow {
+    fn visit_local(&mut self, local: &'ast syn::Local) {
+        if let (syn::Pat::Struct(pattern), Some(initializer)) = (
+            &local.pat,
+            local.init.as_ref().map(|init| transparent_expr(&init.expr)),
+        ) && path_last_ident(&pattern.path).is_some_and(|ident| ident == "Self")
+            && pattern.rest.is_none()
+            && pattern.fields.len() == 2
+            && is_exact_path(initializer, &["self"])
+        {
+            let mut fields = BTreeMap::new();
+            for field in &pattern.fields {
+                let (syn::Member::Named(member), syn::Pat::Ident(binding)) =
+                    (&field.member, &*field.pat)
+                else {
+                    continue;
+                };
+                if binding.by_ref.is_none()
+                    && binding.mutability.is_none()
+                    && binding.subpat.is_none()
+                {
+                    fields.insert(member.to_string(), binding.ident.clone());
+                }
+            }
+            if fields.len() == 2 && fields.contains_key("provider") && fields.contains_key("stores")
+            {
+                self.canonical_destructures += 1;
+                self.stores_binding = fields.get("stores").cloned();
+            }
+        }
+        syn::visit::visit_local(self, local);
+    }
+
+    fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+        let is_resolver_constructor = matches!(transparent_expr(&call.func), syn::Expr::Path(path)
+            if path_is_vault_secret_resolver_constructor(&path.path));
+        if is_resolver_constructor {
+            self.resolver_calls += 1;
+            self.canonical_resolver_calls += usize::from(
+                path_ends_with(&call.func, &["VaultSecretResolver", "new"])
+                    && call.args.len() == 5
+                    && call.args.last().is_some_and(|arg| {
+                        self.stores_binding
+                            .as_ref()
+                            .is_some_and(|stores| is_exact_ident_path(arg, stores))
+                    }),
+            );
+        }
+        self.constructor_calls +=
+            usize::from(path_ends_with(&call.func, &["TenantStoreAllowlist", "new"]));
+        syn::visit::visit_expr_call(self, call);
+    }
+}
+
+fn vault_into_runtime_allowlist_flow_is_exact(vault: &syn::File) -> bool {
+    let methods = production_owner_methods_named(vault, "VaultRuntimeConfig", "into_runtime");
+    let [method] = methods.as_slice() else {
+        return false;
+    };
+    if !matches!(method.sig.inputs.first(), Some(syn::FnArg::Receiver(receiver))
+        if receiver.reference.is_none() && receiver.mutability.is_none())
+        || method.sig.inputs.len() != 1
+    {
+        return false;
+    }
+    let mut flow = VaultIntoRuntimeAllowlistFlow::default();
+    flow.visit_block(&method.block);
+    flow.canonical_destructures == 1
+        && flow.resolver_calls == 1
+        && flow.canonical_resolver_calls == 1
+        && flow.constructor_calls == 0
+}
+
+fn vault_maintenance_config_excludes_allowlist(vault: &syn::File) -> bool {
+    if !production_struct_is_exact(
+        vault,
+        "VaultKeyProviderConfig",
+        &[("provider", "VaultProviderConfig")],
+    ) || !production_struct_is_exact(
+        vault,
+        "VaultProviderValues",
+        &[
+            ("addr", "Option<String>"),
+            ("token", "Option<&'astr>"),
+            ("transit_mount", "Option<String>"),
+            ("ca_cert_pem_path", "Option<&'astr>"),
+            ("settings_key_name", "Option<&'astr>"),
+        ],
+    ) || production_type_has_default(vault, "VaultKeyProviderConfig")
+        || !production_enum_excludes_ident(vault, "VaultKeyProviderConfigError", "Allowlist")
+    {
+        return false;
+    }
+    let methods = production_owner_methods_named(vault, "VaultKeyProviderConfig", "from_snapshot");
+    let [method] = methods.as_slice() else {
+        return false;
+    };
+    let mut inventory = VaultAllowlistProductionInventory::default();
+    inventory.visit_block(&method.block);
+    inventory.key_references == 0
+        && inventory.allowlist_parser_calls == 0
+        && inventory.allowlist_constructor_calls == 0
+        && inventory.resolver_constructor_calls == 0
+}
+
+fn vault_allowlist_typed_funnel_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
+    let config_path = root.join(RUNTIME_CONFIG_PATH);
+    let vault_path = root.join(RUNTIME_VAULT_PATH);
+    let validator_path = root.join(RUNTIME_OPERATOR_VAULT_ALLOWLIST_PATH);
+    let missing = [
+        (RUNTIME_CONFIG_PATH, &config_path),
+        (RUNTIME_VAULT_PATH, &vault_path),
+        (RUNTIME_OPERATOR_VAULT_ALLOWLIST_PATH, &validator_path),
+    ]
+    .into_iter()
+    .filter_map(|(relative, path)| (!path.exists()).then_some(relative))
+    .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        return Ok(vec![finding(
+            Rule::ForbiddenWiring,
+            RUNTIME_SRC_PATH,
+            format!("Vault tenant/store allowlist required carriers are missing: {missing:?}"),
+        )]);
+    }
+    let config = parse_rust_file(&config_path)?;
+    let vault = parse_rust_file(&vault_path)?;
+    let validator = parse_rust_file(&validator_path)?;
+    let validator_violations = vault_allowlist_offline_validator_violations(&vault, &validator);
+    let production_graph_violations = vault_allowlist_production_graph_violations(root)?;
+    let runtime_type_is_exact = production_struct_is_exact(
+        &vault,
+        "VaultRuntimeConfig",
+        &[
+            ("provider", "VaultProviderConfig"),
+            ("stores", "TenantStoreAllowlist"),
+        ],
+    ) && !production_type_has_default(&vault, "VaultRuntimeConfig");
+    let values_type_is_exact = production_struct_is_exact(
+        &vault,
+        "VaultConfigValues",
+        &[
+            ("addr", "Option<String>"),
+            ("token", "Option<&'astr>"),
+            ("transit_mount", "Option<String>"),
+            ("ca_cert_pem_path", "Option<&'astr>"),
+            ("settings_key_name", "Option<&'astr>"),
+            ("tenant_store_allowlist_json", "Option<&'astr>"),
+        ],
+    );
+    let canonical = fixed_serving_allowlist_key_is_exact(&config)
+        && vault_allowlist_key_constant_is_exact(&vault)
+        && runtime_type_is_exact
+        && values_type_is_exact
+        && vault_runtime_snapshot_allowlist_flow_is_exact(&vault)
+        && vault_runtime_from_values_allowlist_flow_is_exact(&vault)
+        && tenant_store_allowlist_parser_is_exact(&vault)
+        && validator_violations.is_empty()
+        && production_graph_violations.is_empty()
+        && vault_into_runtime_allowlist_flow_is_exact(&vault)
+        && vault_maintenance_config_excludes_allowlist(&vault);
+    if canonical {
+        return Ok(Vec::new());
+    }
+    Ok(vec![finding(
+        Rule::ForbiddenWiring,
+        RUNTIME_VAULT_PATH,
+        format!(
+            "Vault tenant/store allowlist must flow exactly once from the closed snapshot key through the typed JSON parser and private non-Optional VaultRuntimeConfig field into the sole resolver constructor; the closed file/stdin validator must reuse that parser before runtime preparation with static output; maintenance must use the allowlist-free VaultKeyProviderConfig; validator violations={validator_violations:?}, production graph violations={production_graph_violations:?}",
+        ),
     )])
 }
 
@@ -5709,7 +7575,7 @@ impl<'ast> Visit<'ast> for SettingsVaultFlow<'_> {
             (binding, local.init.as_ref(), self.config)
             && let syn::Expr::Match(mapped) = transparent_expr(&initializer.expr)
             && let syn::Expr::Call(call) = transparent_expr(&mapped.expr)
-            && path_ends_with(&call.func, &["VaultRuntimeConfig", "from_snapshot"])
+            && path_ends_with(&call.func, &["VaultKeyProviderConfig", "from_snapshot"])
             && call.args.len() == 1
             && call
                 .args
@@ -5724,7 +7590,7 @@ impl<'ast> Visit<'ast> for SettingsVaultFlow<'_> {
     }
 
     fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
-        if path_ends_with(&call.func, &["VaultRuntimeConfig", "from_snapshot"]) {
+        if path_ends_with(&call.func, &["VaultKeyProviderConfig", "from_snapshot"]) {
             self.mapping_calls += 1;
             self.canonical_mapping_calls += usize::from(self.config.is_some_and(|config| {
                 call.args.len() == 1
@@ -5753,7 +7619,7 @@ impl<'ast> Visit<'ast> for SettingsVaultFlow<'_> {
     }
 
     fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
-        if call.method == "into_settings_key_provider" {
+        if call.method == "into_key_provider" {
             self.consume_calls += 1;
             self.canonical_consume_calls += usize::from(
                 call.args.is_empty()
@@ -8066,7 +9932,7 @@ impl SecretFlowInventory {
                             || Self::method_arg(arg, "archive_token", "transfer_secret_allocation")
                     })
                 }
-                (Some("into_runtime" | "into_settings_key_provider"), sink)
+                (Some("into_runtime" | "into_key_provider"), sink)
                     if sink.ends_with("VaultKeyProvider::new") =>
                 {
                     let approved = call.args.iter().nth(2).is_some_and(|arg| {
@@ -8225,7 +10091,9 @@ impl<'ast> Visit<'ast> for SecretFlowInventory {
             .map(ToString::to_string)
             .as_deref()
         {
-            Some("VaultConfigValues") => &[("token", "VAULT_TOKEN_ENV")][..],
+            Some("VaultConfigValues" | "VaultProviderValues") => {
+                &[("token", "VAULT_TOKEN_ENV")][..]
+            }
             Some("S3GeneralConfigValues") => &[
                 ("access_key_id", "S3_ACCESS_KEY_ID_ENV"),
                 ("secret_access_key", "S3_SECRET_ACCESS_KEY_ENV"),
@@ -8469,12 +10337,18 @@ fn runtime_secret_transfer_live_findings(root: &Path) -> Result<Vec<Finding<Rule
             .get(label)
             .copied()
             .unwrap_or(0);
-        if (reads, mappings, conversions) != (1, 1, 1) {
+        let expected = if label == "VAULT_TOKEN_ENV" {
+            (2, 2, 1)
+        } else {
+            (1, 1, 1)
+        };
+        if (reads, mappings, conversions) != expected {
             findings.push(finding(
                 Rule::ForbiddenWiring,
                 path,
                 format!(
-                    "source {label} in {function} has missing/extra stages; expected read=1, mapping=1, conversion=1, observed read={reads}, mapping={mappings}, conversion={conversions}"
+                    "source {label} in {function} has missing/extra stages; expected read={}, mapping={}, conversion={}, observed read={reads}, mapping={mappings}, conversion={conversions}",
+                    expected.0, expected.1, expected.2,
                 ),
             ));
         }
@@ -8514,7 +10388,7 @@ fn runtime_secret_transfer_live_findings(root: &Path) -> Result<Vec<Finding<Rule
         (
             "vault.settings",
             RUNTIME_VAULT_PATH,
-            "VaultRuntimeConfig::into_settings_key_provider",
+            "VaultKeyProviderConfig::into_key_provider",
         ),
         (
             "vault.copy",
@@ -9501,6 +11375,7 @@ fn operator_module_ownership_is_closed(file: &syn::File) -> bool {
             "projection",
             "reconcile",
             "settings",
+            "vault_allowlist",
         ]
         && modules.iter().all(|module| {
             matches!(module.vis, syn::Visibility::Inherited) && module.content.is_none()
@@ -12149,6 +14024,7 @@ fn provider_plan_output_bijection_findings(root: &Path) -> Result<Vec<Finding<Ru
             "service_token_replay_store",
         ),
         ("SettingsVaultKeyProvider", "settings_key_provider"),
+        ("SettingsVaultSecretResolver", "settings_secret_resolver"),
     ];
     const REQUIRED_PATHS: &[&str] = &[
         PROVIDER_OUTPUT_PATH,
@@ -15887,7 +17763,7 @@ use infra::s3::{
     build_s3_dlx_archive_store, build_s3_runtime_deps, S3DlxArchiveConfig,
     S3RuntimeConfig, S3RuntimeConfigParts,
 };
-use infra::vault::VaultRuntimeConfig;
+use infra::vault::{VaultKeyProviderConfig, VaultRuntimeConfig};
 
 pub fn prepare_runtime() -> anyhow::Result<RuntimeInputs> {
     let runtime_config = RuntimeConfigSnapshot::capture_process_snapshot();
@@ -15920,11 +17796,11 @@ async fn settings_config_value_maintenance_protection(
     resource_id: &str,
     config: SnapshotConfig<'_>,
 ) {
-    let vault_config = match VaultRuntimeConfig::from_snapshot(config) {
+    let vault_config = match VaultKeyProviderConfig::from_snapshot(config) {
         Ok(config) => config,
         Err(error) => return,
     };
-    let _parts = vault_config.into_settings_key_provider();
+    let _parts = vault_config.into_key_provider();
 }
 
 pub async fn run_settings_config_value_maintenance(
@@ -16232,29 +18108,29 @@ pub async fn run(mut runtime_inputs: RuntimeInputs) {
             (
                 "maintenance ambient snapshot wrapper",
                 canonical.replace(
-                    "let vault_config = match VaultRuntimeConfig::from_snapshot(config) {",
-                    "let vault_config = match VaultRuntimeConfig::from_snapshot(snapshot_from_ambient(|| std::env::var(\"RSS_VAULT_TOKEN\"))) {",
+                    "let vault_config = match VaultKeyProviderConfig::from_snapshot(config) {",
+                    "let vault_config = match VaultKeyProviderConfig::from_snapshot(snapshot_from_ambient(|| std::env::var(\"RSS_VAULT_TOKEN\"))) {",
                 ),
             ),
             (
                 "maintenance Vault consume alias",
                 canonical.replace(
-                    "let _parts = vault_config.into_settings_key_provider();",
-                    "let provider_config = vault_config;\n    let _parts = provider_config.into_settings_key_provider();",
+                    "let _parts = vault_config.into_key_provider();",
+                    "let provider_config = vault_config;\n    let _parts = provider_config.into_key_provider();",
                 ),
             ),
             (
                 "maintenance Vault binding shadow",
                 canonical.replace(
-                    "let _parts = vault_config.into_settings_key_provider();",
-                    "let vault_config = other_vault_config;\n    let _parts = vault_config.into_settings_key_provider();",
+                    "let _parts = vault_config.into_key_provider();",
+                    "let vault_config = other_vault_config;\n    let _parts = vault_config.into_key_provider();",
                 ),
             ),
             (
                 "maintenance unrelated consume bait",
                 canonical.replace(
-                    "let _parts = vault_config.into_settings_key_provider();",
-                    "let _bait = other_vault_config.into_settings_key_provider();\n    let _parts = vault_config.into_settings_key_provider();",
+                    "let _parts = vault_config.into_key_provider();",
+                    "let _bait = other_vault_config.into_key_provider();\n    let _parts = vault_config.into_key_provider();",
                 ),
             ),
             (
@@ -16308,6 +18184,7 @@ pub(crate) fn build_vault_runtime_from_values(
     token: String,
     transit_mount: String,
     settings_key_name: String,
+    tenant_store_allowlist_json: String,
 ) -> anyhow::Result<(VaultRuntimeDeps, std::sync::Arc<VaultSigner>, KeyName)> {
     let config = VaultRuntimeConfig::from_values(VaultConfigValues {
         addr: Some(addr),
@@ -16315,6 +18192,7 @@ pub(crate) fn build_vault_runtime_from_values(
         transit_mount: Some(transit_mount),
         ca_cert_pem_path: None,
         settings_key_name: Some(settings_key_name.as_str()),
+        tenant_store_allowlist_json: Some(tenant_store_allowlist_json.as_str()),
     })?;
     config.into_runtime()
 }
@@ -16350,13 +18228,14 @@ pub mod test_support {
         token: String,
         transit_mount: String,
         settings_key_name: String,
+        tenant_store_allowlist_json: String,
     ) -> anyhow::Result<(
         vault::VaultRuntimeDeps,
         Arc<vault::VaultSigner>,
         diport::KeyName,
     )> {
         crate::infra::vault::build_vault_runtime_from_values(
-            addr, token, transit_mount, settings_key_name,
+            addr, token, transit_mount, settings_key_name, tenant_store_allowlist_json,
         )
     }
 
@@ -16424,7 +18303,7 @@ pub mod test_support {
             (
                 "Vault zero args",
                 vault_internal.replace(
-                    "    addr: String,\n    token: String,\n    transit_mount: String,\n    settings_key_name: String,\n",
+                    "    addr: String,\n    token: String,\n    transit_mount: String,\n    settings_key_name: String,\n    tenant_store_allowlist_json: String,\n",
                     "",
                 ),
                 "build_vault_runtime_from_values",
@@ -16503,7 +18382,7 @@ pub mod test_support {
             (
                 "wrapper zero args",
                 wrappers.replace(
-                    "            addr, token, transit_mount, settings_key_name,",
+                    "            addr, token, transit_mount, settings_key_name, tenant_store_allowlist_json,",
                     "",
                 ),
             ),
@@ -16517,8 +18396,8 @@ pub mod test_support {
             (
                 "wrapper ambient getter",
                 wrappers.replace(
-                    "            addr, token, transit_mount, settings_key_name,",
-                    "            std::env::var(\"RSS_VAULT_ADDR\")?, token, transit_mount, settings_key_name,",
+                    "            addr, token, transit_mount, settings_key_name, tenant_store_allowlist_json,",
+                    "            std::env::var(\"RSS_VAULT_ADDR\")?, token, transit_mount, settings_key_name, tenant_store_allowlist_json,",
                 ),
             ),
             (
@@ -16544,6 +18423,516 @@ pub mod test_support {
         Ok(())
     }
 
+    fn vault_allowlist_typed_funnel_fixture(name: &str) -> Result<PathBuf> {
+        let root = unique_tmp(name);
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .context("xtask workspace root")?;
+        write(&root.join(RUNTIME_CONFIG_FIXTURE_MARKER), "enabled\n")?;
+        for relative in [
+            RUNTIME_CONFIG_PATH,
+            RUNTIME_VAULT_PATH,
+            RUNTIME_OPERATOR_VAULT_ALLOWLIST_PATH,
+        ] {
+            write(
+                &root.join(relative),
+                &fs::read_to_string(workspace.join(relative))?,
+            )?;
+        }
+        Ok(root)
+    }
+
+    #[test]
+    fn runtime_vault_allowlist_typed_funnel_rejects_bypasses() -> Result<()> {
+        let root = vault_allowlist_typed_funnel_fixture("vault-allowlist-typed-funnel")?;
+        let canonical_findings = vault_allowlist_typed_funnel_findings(&root)?;
+        assert!(
+            canonical_findings.is_empty(),
+            "canonical snapshot -> typed allowlist -> resolver funnel must pass: {canonical_findings:?}"
+        );
+
+        let config_path = root.join(RUNTIME_CONFIG_PATH);
+        let canonical_config = fs::read_to_string(&config_path)?;
+        let vault_path = root.join(RUNTIME_VAULT_PATH);
+        let canonical_vault = fs::read_to_string(&vault_path)?;
+        let validator_path = root.join(RUNTIME_OPERATOR_VAULT_ALLOWLIST_PATH);
+        let canonical_validator = fs::read_to_string(&validator_path)?;
+        for (label, relative, source) in [
+            (
+                "missing catalog key",
+                RUNTIME_CONFIG_PATH,
+                canonical_config.replacen(
+                    "    \"RSS_VAULT_TENANT_STORE_ALLOWLIST_JSON\",\n",
+                    "",
+                    1,
+                ),
+            ),
+            (
+                "missing snapshot read",
+                RUNTIME_VAULT_PATH,
+                canonical_vault.replacen(
+                    "tenant_store_allowlist_json: config.value(VAULT_TENANT_STORE_ALLOWLIST_JSON_ENV),",
+                    "tenant_store_allowlist_json: None,",
+                    1,
+                ),
+            ),
+            (
+                "optional serving field",
+                RUNTIME_VAULT_PATH,
+                canonical_vault.replacen(
+                    "stores: TenantStoreAllowlist,",
+                    "stores: Option<TenantStoreAllowlist>,",
+                    1,
+                ),
+            ),
+            (
+                "runtime empty reconstruction",
+                RUNTIME_VAULT_PATH,
+                canonical_vault.replacen(
+                    "let Self { provider, stores } = self;",
+                    "let Self { provider, stores: _ } = self;\n        let stores = TenantStoreAllowlist::new(std::iter::empty())?;",
+                    1,
+                ),
+            ),
+            (
+                "alternate ambient source",
+                RUNTIME_VAULT_PATH,
+                canonical_vault.replacen(
+                    "tenant_store_allowlist_json: config.value(VAULT_TENANT_STORE_ALLOWLIST_JSON_ENV),",
+                    "tenant_store_allowlist_json: std::env::var(VAULT_TENANT_STORE_ALLOWLIST_JSON_ENV).ok().as_deref(),",
+                    1,
+                ),
+            ),
+            (
+                "tenant field substitution",
+                RUNTIME_VAULT_PATH,
+                canonical_vault.replacen(
+                    "TenantId::parse(&binding.tenant_id)",
+                    "TenantId::parse(&binding.store_id)",
+                    1,
+                ),
+            ),
+            (
+                "store field substitution",
+                RUNTIME_VAULT_PATH,
+                canonical_vault.replacen(
+                    "settings::ports::StoreId::parse(&binding.store_id)",
+                    "settings::ports::StoreId::parse(&binding.tenant_id)",
+                    1,
+                ),
+            ),
+            (
+                "mount field rewrite",
+                RUNTIME_VAULT_PATH,
+                canonical_vault.replacen(
+                    "mount: binding.mount,",
+                    "mount: binding.kv_path_prefix.clone(),",
+                    1,
+                ),
+            ),
+            (
+                "prefix field rewrite",
+                RUNTIME_VAULT_PATH,
+                canonical_vault.replacen(
+                    "kv_path_prefix: binding.kv_path_prefix,",
+                    "kv_path_prefix: format!(\"shadow/{}\", binding.kv_path_prefix),",
+                    1,
+                ),
+            ),
+            (
+                "disconnected canonical mapper proof",
+                RUNTIME_VAULT_PATH,
+                canonical_vault
+                    .replacen("let bindings = wire", "let _proof = wire", 1)
+                    .replacen(
+                        "TenantStoreAllowlist::new(bindings)",
+                        "let bindings = Vec::new();\n    TenantStoreAllowlist::new(bindings)",
+                        1,
+                    ),
+            ),
+            (
+                "maintenance allowlist read",
+                RUNTIME_VAULT_PATH,
+                canonical_vault.replacen(
+                    "impl VaultKeyProviderConfig {\n    pub(crate) fn from_snapshot(\n        config: SnapshotConfig<'_>,\n    ) -> Result<Self, VaultKeyProviderConfigError> {\n        let provider = VaultProviderConfig::from_values(VaultProviderValues {",
+                    "impl VaultKeyProviderConfig {\n    pub(crate) fn from_snapshot(\n        config: SnapshotConfig<'_>,\n    ) -> Result<Self, VaultKeyProviderConfigError> {\n        let _allowlist = config.value(VAULT_TENANT_STORE_ALLOWLIST_JSON_ENV);\n        let provider = VaultProviderConfig::from_values(VaultProviderValues {",
+                    1,
+                ),
+            ),
+            (
+                "maintenance allowlist error branch",
+                RUNTIME_VAULT_PATH,
+                canonical_vault.replacen(
+                    "pub(crate) enum VaultKeyProviderConfigError {\n",
+                    "pub(crate) enum VaultKeyProviderConfigError {\n    #[error(\"unreachable allowlist error\")]\n    TenantStoreAllowlist(#[source] VaultTenantStoreAllowlistConfigError),\n",
+                    1,
+                ),
+            ),
+            (
+                "offline validator missing typed parser",
+                RUNTIME_OPERATOR_VAULT_ALLOWLIST_PATH,
+                canonical_validator.replacen(
+                    "crate::infra::vault::tenant_store_allowlist_from_value(Some(&raw))?;",
+                    "let _ = raw;",
+                    1,
+                ),
+            ),
+            (
+                "offline validator alternate JSON parser",
+                RUNTIME_OPERATOR_VAULT_ALLOWLIST_PATH,
+                canonical_validator.replacen(
+                    "crate::infra::vault::tenant_store_allowlist_from_value(Some(&raw))?;",
+                    "let _: serde_json::Value = serde_json::from_str(&raw).map_err(|_| VaultAllowlistValidationCommandError::InvalidJson)?;",
+                    1,
+                ),
+            ),
+            (
+                "offline validator ambient allowlist reader",
+                RUNTIME_OPERATOR_VAULT_ALLOWLIST_PATH,
+                canonical_validator.replacen(
+                    "let raw = read_input(parse_input(args)?, stdin)?;",
+                    "let raw = std::env::var(\"RSS_VAULT_TENANT_STORE_ALLOWLIST_JSON\").map_err(|_| VaultAllowlistValidationCommandError::InputRead)?;",
+                    1,
+                ),
+            ),
+            (
+                "offline validator output leak",
+                RUNTIME_OPERATOR_VAULT_ALLOWLIST_PATH,
+                canonical_validator.replacen(
+                    "writeln!(stdout, \"{VALIDATION_SUCCEEDED}\")",
+                    "writeln!(stdout, \"{raw}\")",
+                    1,
+                ),
+            ),
+        ] {
+            let target = root.join(relative);
+            let canonical = if relative == RUNTIME_CONFIG_PATH {
+                &canonical_config
+            } else if relative == RUNTIME_OPERATOR_VAULT_ALLOWLIST_PATH {
+                &canonical_validator
+            } else {
+                &canonical_vault
+            };
+            anyhow::ensure!(source != *canonical, "{label} mutation must be live");
+            write(&target, &source)?;
+            assert!(
+                !vault_allowlist_typed_funnel_findings(&root)?.is_empty(),
+                "Vault allowlist typed funnel must reject {label}"
+            );
+            write(&target, canonical)?;
+        }
+
+        let unexpected_owner_path = root.join(RUNTIME_OPERATOR_SETTINGS_PATH);
+        for (label, source) in [
+            (
+                "third-owner direct parser call",
+                r#"fn extra_allowlist_parse(raw: &str) {
+    let _ = crate::infra::vault::tenant_store_allowlist_from_value(Some(raw));
+}
+"#,
+            ),
+            (
+                "third-owner parser import alias",
+                r#"use crate::infra::vault::tenant_store_allowlist_from_value as parse_allowlist;
+fn extra_allowlist_parse(raw: &str) { let _ = parse_allowlist(Some(raw)); }
+"#,
+            ),
+            (
+                "third-owner parser helper",
+                r#"fn hidden_allowlist_helper(raw: &str) {
+    let _ = crate::infra::vault::tenant_store_allowlist_from_value(Some(raw));
+}
+fn extra_allowlist_parse(raw: &str) { hidden_allowlist_helper(raw); }
+"#,
+            ),
+            (
+                "third-owner parser re-export",
+                r#"pub(crate) use crate::infra::vault::tenant_store_allowlist_from_value;
+"#,
+            ),
+        ] {
+            write(&unexpected_owner_path, source)?;
+            assert!(
+                !vault_allowlist_typed_funnel_findings(&root)?.is_empty(),
+                "Vault allowlist parser callsite exact-set must reject {label}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_vault_allowlist_typed_funnel_fails_closed_without_carriers() -> Result<()> {
+        for relative in [
+            RUNTIME_CONFIG_PATH,
+            RUNTIME_VAULT_PATH,
+            RUNTIME_OPERATOR_VAULT_ALLOWLIST_PATH,
+        ] {
+            let root = vault_allowlist_typed_funnel_fixture("vault-allowlist-missing-carrier")?;
+            fs::remove_file(root.join(relative))?;
+            assert!(
+                !vault_allowlist_typed_funnel_findings(&root)?.is_empty(),
+                "missing Vault allowlist carrier must fail closed: {relative}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_vault_allowlist_typed_funnel_rejects_constructor_bypass_without_parser_token()
+    -> Result<()> {
+        let root = vault_allowlist_typed_funnel_fixture("vault-allowlist-constructor-bypass")?;
+        write(
+            &root.join(RUNTIME_SRC_PATH).join("bypass.rs"),
+            r#"
+fn bypass(
+    raw: &str,
+    entries: Vec<((vocab::tenant::TenantId, String), vault::StoreBinding)>,
+    client: reqwest::Client,
+    addr: String,
+    token: String,
+) {
+    let _: serde_json::Value = serde_json::from_str(raw).unwrap();
+    let allowlist = vault::TenantStoreAllowlist::new(entries).unwrap();
+    let _ = vault::VaultSecretResolver::new(
+        client,
+        addr,
+        token,
+        std::time::Duration::from_secs(1),
+        allowlist,
+    );
+}
+"#,
+        )?;
+        assert!(
+            !vault_allowlist_typed_funnel_findings(&root)?.is_empty(),
+            "alternate parse -> allowlist constructor -> resolver constructor must fail closed"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_vault_allowlist_typed_funnel_rejects_semantic_constructor_aliases() -> Result<()> {
+        for (label, source) in [
+            (
+                "function item",
+                r#"fn bypass() {
+    let make_allowlist = vault::TenantStoreAllowlist::new;
+    let make_resolver = vault::VaultSecretResolver::new;
+    let _ = (make_allowlist, make_resolver);
+}
+"#,
+            ),
+            (
+                "import alias",
+                r#"use vault::{TenantStoreAllowlist as Allowlist, VaultSecretResolver as Resolver};
+fn bypass() { let _ = (Allowlist::new, Resolver::new); }
+"#,
+            ),
+            (
+                "re-export",
+                r#"pub(crate) use vault::{TenantStoreAllowlist, VaultSecretResolver};
+"#,
+            ),
+            (
+                "macro generated bypass",
+                r#"macro_rules! bypass {
+    () => {{
+        let make_allowlist = vault::TenantStoreAllowlist::new;
+        let make_resolver = vault::VaultSecretResolver::new;
+        (make_allowlist, make_resolver)
+    }};
+}
+"#,
+            ),
+        ] {
+            let root = vault_allowlist_typed_funnel_fixture("vault-allowlist-semantic-alias")?;
+            write(&root.join(RUNTIME_SRC_PATH).join("bypass.rs"), source)?;
+            assert!(
+                !vault_allowlist_typed_funnel_findings(&root)?.is_empty(),
+                "Vault allowlist constructor inventory must reject {label}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_vault_allowlist_typed_funnel_closes_http_opt_in_constructor_sink() -> Result<()> {
+        for (label, source) in [
+            (
+                "direct call",
+                r#"fn bypass(
+    client: reqwest::Client,
+    allowlist: vault::TenantStoreAllowlist,
+) {
+    let _ = vault::VaultSecretResolver::new_allow_http(
+        client,
+        "http://vault.invalid",
+        "token",
+        std::time::Duration::from_secs(1),
+        allowlist,
+    );
+}
+"#,
+            ),
+            (
+                "function item",
+                r#"fn bypass() {
+    let make_resolver = vault::VaultSecretResolver::new_allow_http;
+    let _ = make_resolver;
+}
+"#,
+            ),
+            (
+                "import alias",
+                r#"use vault::VaultSecretResolver as Resolver;
+fn bypass() { let _ = Resolver::new_allow_http; }
+"#,
+            ),
+            (
+                "re-export",
+                r#"pub(crate) use vault::VaultSecretResolver;
+fn bypass() { let _ = VaultSecretResolver::new_allow_http; }
+"#,
+            ),
+            (
+                "macro generated",
+                r#"macro_rules! bypass {
+    () => { vault::VaultSecretResolver::new_allow_http };
+}
+"#,
+            ),
+        ] {
+            let root = vault_allowlist_typed_funnel_fixture("vault-http-constructor-sink")?;
+            write(&root.join(RUNTIME_SRC_PATH).join("bypass.rs"), source)?;
+            assert!(
+                !vault_allowlist_typed_funnel_findings(&root)?.is_empty(),
+                "all resolver construction capabilities must be closed: {label}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_vault_allowlist_typed_funnel_accepts_equivalent_refactors() -> Result<()> {
+        let root = vault_allowlist_typed_funnel_fixture("vault-allowlist-equivalent-refactors")?;
+        let vault_path = root.join(RUNTIME_VAULT_PATH);
+        let vault = fs::read_to_string(&vault_path)?
+            .replacen("raw: Option<&str>", "input: Option<&str>", 1)
+            .replacen(
+                "let raw = raw.ok_or(VaultTenantStoreAllowlistConfigError::Missing)?;",
+                "let document = input.ok_or(VaultTenantStoreAllowlistConfigError::Missing)?;",
+                1,
+            )
+            .replacen("raw.trim().is_empty()", "document.trim().is_empty()", 1)
+            .replacen(
+                "serde_json::from_str(raw)",
+                "serde_json::from_str(document)",
+                1,
+            )
+            .replacen(
+                "fn from_values(values: VaultConfigValues<'_>) -> Result<Self, VaultRuntimeConfigError> {",
+                "fn from_values(input_values: VaultConfigValues<'_>) -> Result<Self, VaultRuntimeConfigError> {",
+                1,
+            )
+            .replacen("addr: values.addr,", "addr: input_values.addr,", 1)
+            .replacen("token: values.token,", "token: input_values.token,", 1)
+            .replacen(
+                "transit_mount: values.transit_mount,",
+                "transit_mount: input_values.transit_mount,",
+                1,
+            )
+            .replacen(
+                "ca_cert_pem_path: values.ca_cert_pem_path,",
+                "ca_cert_pem_path: input_values.ca_cert_pem_path,",
+                1,
+            )
+            .replacen(
+                "settings_key_name: values.settings_key_name,",
+                "settings_key_name: input_values.settings_key_name,",
+                1,
+            )
+            .replacen(
+                "let stores = tenant_store_allowlist_from_value(values.tenant_store_allowlist_json)",
+                "let allowlist = tenant_store_allowlist_from_value(input_values.tenant_store_allowlist_json)",
+                1,
+            )
+            .replacen(
+                "Ok(Self { provider, stores })",
+                "let _benign = ();\n        Ok(Self { provider, stores: allowlist })",
+                1,
+            )
+            .replacen(
+                "let Self { provider, stores } = self;",
+                "let Self { provider, stores: allowlist } = self;",
+                1,
+            )
+            .replacen(
+                "            stores,\n        )\n        .map_err(|e| {\n            VaultRuntimeConfigError::VaultClient(anyhow::anyhow!(\n                \"vault resolver config error: {e}\"",
+                "            allowlist,\n        )\n        .map_err(|e| {\n            VaultRuntimeConfigError::VaultClient(anyhow::anyhow!(\n                \"vault resolver config error: {e}\"",
+                1,
+            )
+            .replacen(
+                "pub(crate) fn tenant_store_allowlist_from_value(",
+                "fn parse_allowlist_binding(\n    input_binding: VaultTenantStoreBindingWire,\n) -> Result<((TenantId, String), StoreBinding), VaultTenantStoreAllowlistConfigError> {\n    let parsed_tenant = TenantId::parse(&input_binding.tenant_id)\n        .map_err(|_| VaultTenantStoreAllowlistConfigError::InvalidTenantId)?;\n    let parsed_store = settings::ports::StoreId::parse(&input_binding.store_id)\n        .map_err(|_| VaultTenantStoreAllowlistConfigError::InvalidStoreId)?;\n    Ok((\n        (parsed_tenant, parsed_store.as_str().to_owned()),\n        StoreBinding {\n            mount: input_binding.mount,\n            kv_path_prefix: input_binding.kv_path_prefix,\n        },\n    ))\n}\n\npub(crate) fn tenant_store_allowlist_from_value(",
+                1,
+            )
+            .replacen(
+                ".map(|binding| {\n            let tenant = TenantId::parse(&binding.tenant_id)\n                .map_err(|_| VaultTenantStoreAllowlistConfigError::InvalidTenantId)?;\n            let store = settings::ports::StoreId::parse(&binding.store_id)\n                .map_err(|_| VaultTenantStoreAllowlistConfigError::InvalidStoreId)?;\n            Ok((\n                (tenant, store.as_str().to_owned()),\n                StoreBinding {\n                    mount: binding.mount,\n                    kv_path_prefix: binding.kv_path_prefix,\n                },\n            ))\n        })",
+                ".map(parse_allowlist_binding)",
+                1,
+            );
+        write(&vault_path, &vault)?;
+
+        let validator_path = root.join(RUNTIME_OPERATOR_VAULT_ALLOWLIST_PATH);
+        let validator = fs::read_to_string(&validator_path)?
+            .replacen(
+                "fn parse_input(\n    args: &[String],\n) -> Result<VaultAllowlistInput<'_>, VaultAllowlistValidationCommandError> {\n    match args {",
+                "fn parse_input(\n    command_args: &[String],\n) -> Result<VaultAllowlistInput<'_>, VaultAllowlistValidationCommandError> {\n    let _benign = ();\n    match command_args {",
+                1,
+            )
+            .replacen(
+                "fn read_input(\n    input: VaultAllowlistInput<'_>,\n    stdin: &mut impl std::io::Read,\n) -> Result<String, VaultAllowlistValidationCommandError> {\n    match input {",
+                "fn read_input(\n    selected_input: VaultAllowlistInput<'_>,\n    stdin: &mut impl std::io::Read,\n) -> Result<String, VaultAllowlistValidationCommandError> {\n    let _benign = ();\n    match selected_input {",
+                1,
+            )
+            .replacen(
+            r#"fn run_vault_allowlist_validation_with_io(
+    args: &[String],
+    stdin: &mut impl std::io::Read,
+    stdout: &mut impl std::io::Write,
+) -> Result<(), VaultAllowlistValidationCommandError> {
+    let raw = read_input(parse_input(args)?, stdin)?;
+    crate::infra::vault::tenant_store_allowlist_from_value(Some(&raw))?;
+    writeln!(stdout, "{VALIDATION_SUCCEEDED}")
+        .map_err(|_| VaultAllowlistValidationCommandError::OutputWrite)
+}"#,
+            r#"fn validate_document(raw: &str) -> Result<(), VaultAllowlistValidationCommandError> {
+    crate::infra::vault::tenant_store_allowlist_from_value(Some(raw))?;
+    Ok(())
+}
+
+fn run_vault_allowlist_validation_with_io(
+    args: &[String],
+    stdin: &mut impl std::io::Read,
+    stdout: &mut impl std::io::Write,
+) -> Result<(), VaultAllowlistValidationCommandError> {
+    let document = read_input(parse_input(args)?, stdin)?;
+    validate_document(&document)?;
+    writeln!(stdout, "{VALIDATION_SUCCEEDED}")
+        .map_err(|_| VaultAllowlistValidationCommandError::OutputWrite)
+}"#,
+            1,
+        );
+        write(&validator_path, &validator)?;
+
+        let findings = vault_allowlist_typed_funnel_findings(&root)?;
+        assert!(
+            findings.is_empty(),
+            "alpha-renaming and helper extraction must preserve the semantic proof: {findings:?}"
+        );
+        Ok(())
+    }
+
     #[test]
     fn runtime_config_inventory_rejects_aliases_and_reserves_protected_type_names() -> Result<()> {
         let root = fixture_root("runtime-config-snapshot-alias-resistant")?;
@@ -16558,7 +18947,7 @@ use config::{
 };
 use phase::{OperatorRuntimeInputs, PreparedRuntimeInputs, ServingRuntimeInputs};
 use infra::pg::{PgRuntimeConfig, PgRuntimeConfigParts};
-use infra::vault::VaultRuntimeConfig;
+use infra::vault::{VaultKeyProviderConfig, VaultRuntimeConfig};
 use infra::redis::{build_redis_runtime_deps, RedisRuntimeConfig};
 use infra::s3::{
     build_s3_dlx_archive_store, build_s3_runtime_deps, S3DlxArchiveConfig,
@@ -16590,11 +18979,11 @@ async fn settings_config_value_maintenance_protection(
     resource_id: &str,
     config: SnapshotConfig<'_>,
 ) {
-    let vault_config = match VaultRuntimeConfig::from_snapshot(config) {
+    let vault_config = match VaultKeyProviderConfig::from_snapshot(config) {
         Ok(config) => config,
         Err(error) => return,
     };
-    let _parts = vault_config.into_settings_key_provider();
+    let _parts = vault_config.into_key_provider();
 }
 
 pub async fn run_settings_config_value_maintenance(
@@ -16781,7 +19170,7 @@ use config::{
 };
 use phase::{OperatorRuntimeInputs, PreparedRuntimeInputs, RuntimeInputs, ServingRuntimeInputs};
 use infra::pg::{PgRuntimeConfig, PgRuntimeConfigParts};
-use infra::vault::VaultRuntimeConfig;
+use infra::vault::{VaultKeyProviderConfig, VaultRuntimeConfig};
 use infra::redis::{build_redis_runtime_deps, RedisRuntimeConfig};
 use infra::s3::{
     build_s3_dlx_archive_store, build_s3_runtime_deps, S3DlxArchiveConfig,
@@ -16816,11 +19205,11 @@ async fn settings_config_value_maintenance_protection(
     resource_id: &str,
     config: SnapshotConfig<'_>,
 ) {
-    let vault_config = match VaultRuntimeConfig::from_snapshot(config) {
+    let vault_config = match VaultKeyProviderConfig::from_snapshot(config) {
         Ok(config) => config,
         Err(error) => return,
     };
-    let _parts = vault_config.into_settings_key_provider();
+    let _parts = vault_config.into_key_provider();
 }
 
 pub async fn run_settings_config_value_maintenance(
@@ -17066,6 +19455,7 @@ async fn run_startup(runtime_inputs: &mut ServingRuntimeInputs) -> anyhow::Resul
         r#"
 enum CommandFamily {
     Serving,
+    VaultAllowlistValidation,
     Operator(OperatorCommand),
 }
 
@@ -17080,6 +19470,9 @@ enum OperatorCommand {
 }
 
 fn classify_command(args: &[String]) -> anyhow::Result<CommandFamily> {
+    if runtime::operator::is_vault_allowlist_validation_command(args) {
+        return Ok(CommandFamily::VaultAllowlistValidation);
+    }
     if runtime::operator::is_postgres_command(args) {
         return Ok(CommandFamily::Operator(OperatorCommand::Postgres));
     }
@@ -17109,6 +19502,9 @@ fn classify_command(args: &[String]) -> anyhow::Result<CommandFamily> {
 async fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let command = classify_command(&args)?;
+    if let CommandFamily::VaultAllowlistValidation = command {
+        return runtime::operator::run_vault_allowlist_validation_command(&args);
+    }
     let CommandFamily::Operator(command) = command else {
         return runtime::run(runtime::prepare_runtime()?).await;
     };
@@ -17770,6 +20166,13 @@ pub(crate) async fn build_redis_runtime_deps(config: RedisRuntimeConfig) -> anyh
         );
 
         for (label, mutated) in [
+            (
+                "offline validator prepares operator runtime",
+                canonical.replace(
+                    "return runtime::operator::run_vault_allowlist_validation_command(&args);",
+                    "let _runtime_inputs = runtime::operator::prepare_runtime()?;\n        return runtime::operator::run_vault_allowlist_validation_command(&args);",
+                ),
+            ),
             (
                 "unknown command check after acquisition",
                 canonical.replace(

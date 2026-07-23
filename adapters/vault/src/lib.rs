@@ -51,7 +51,9 @@ mod bundle;
 pub use bundle::{VaultDomain, VaultDomainDeps, VaultRuntimeDeps, caps};
 #[cfg(feature = "backend")]
 pub use secret_resolver::{
-    StoreBinding, TenantStoreAllowlist, VaultSecretResolver, VaultSecretResolverConfigError,
+    SECRET_RESOLVER_READINESS_KEY, SecretResolverReadinessTarget, StoreBinding,
+    TenantStoreAllowlist, TenantStoreAllowlistError, VaultSecretResolver,
+    VaultSecretResolverConfigError,
 };
 
 #[cfg(feature = "backend")]
