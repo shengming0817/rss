@@ -12,6 +12,7 @@
 //! alive for asynchronous cleanup to finish.
 
 use std::future::Future;
+use std::time::Duration;
 
 use anyhow::Context as _;
 use bootstrap::DomainModuleResult;
@@ -71,6 +72,98 @@ impl<'stack> LaunchTransaction<'stack> {
             listener_count: 0,
         }
     }
+}
+
+/// Cancellation-safe owner for provider/domain outputs created during startup.
+///
+/// Startup code must merge each completed stage before its next cancellation point. If the
+/// startup future is dropped, this transaction discards probes that were never registered and
+/// transfers every staged resource/worker into the executor's shutdown stack before the outer
+/// [`ShutdownOwner`] begins its bounded asynchronous drain.
+pub struct StartupTransaction<'stack> {
+    stack: &'stack mut ShutdownStack,
+    provider: DomainModuleResult,
+    domain: DomainModuleResult,
+    armed: bool,
+}
+
+impl<'stack> StartupTransaction<'stack> {
+    fn new(stack: &'stack mut ShutdownStack) -> Self {
+        Self {
+            stack,
+            provider: DomainModuleResult::default(),
+            domain: DomainModuleResult::default(),
+            armed: true,
+        }
+    }
+
+    /// Merge a completed provider stage by value, preserving probe/resource/worker order.
+    pub fn stage_provider_output(&mut self, output: DomainModuleResult) {
+        merge_module_output(&mut self.provider, output);
+    }
+
+    /// Merge a completed domain stage by value, preserving probe/resource/worker order.
+    pub fn stage_domain_output(&mut self, output: DomainModuleResult) {
+        merge_module_output(&mut self.domain, output);
+    }
+
+    /// Borrow the transaction-owned provider output for builders that stage outputs incrementally.
+    ///
+    /// Builders must append every already-created resource/worker before their next cancellable
+    /// await; resources retained only in builder-local state cannot be recovered after cancellation.
+    pub fn provider_output_mut(&mut self) -> &mut DomainModuleResult {
+        &mut self.provider
+    }
+
+    /// Borrow both transaction-owned outputs to consume registered probes before launch sealing.
+    pub fn outputs_mut(&mut self) -> (&mut DomainModuleResult, &mut DomainModuleResult) {
+        (&mut self.provider, &mut self.domain)
+    }
+
+    fn discard_unregistered_probes(&mut self) {
+        self.provider.probes.clear();
+        self.domain.probes.clear();
+    }
+
+    fn take_lifecycle_batches(&mut self) -> LaunchLifecycleBatches {
+        self.armed = false;
+        LaunchLifecycleBatches::new(
+            ProviderLifecycleBatch::from_provider_output(std::mem::take(&mut self.provider)),
+            DomainLifecycleBatch::from_domain_output(std::mem::take(&mut self.domain)),
+        )
+    }
+
+    fn into_lifecycle_batches(
+        mut self,
+        discard_unregistered_probes: bool,
+    ) -> LaunchLifecycleBatches {
+        if discard_unregistered_probes {
+            self.discard_unregistered_probes();
+        }
+        self.take_lifecycle_batches()
+    }
+}
+
+impl Drop for StartupTransaction<'_> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        self.discard_unregistered_probes();
+        let batches = self.take_lifecycle_batches();
+        if let Err(error) = register_lifecycle_outputs(self.stack, None, batches) {
+            tracing::error!(
+                error = %secure::redact_error(error.as_ref()),
+                "cancelled startup failed to transfer lifecycle outputs"
+            );
+        }
+    }
+}
+
+fn merge_module_output(target: &mut DomainModuleResult, output: DomainModuleResult) {
+    target.probes.extend(output.probes);
+    target.resources.extend(output.resources);
+    target.workers.extend(output.workers);
 }
 
 /// The only listener activation capability exposed to launch adapters.
@@ -144,6 +237,46 @@ pub struct LaunchLifecycleBatches {
     domain: DomainLifecycleBatch,
 }
 
+/// Validated total budget for the complete LIFO drain.
+///
+/// The budget must be positive and end strictly before the deployment grace period's reserved
+/// exit buffer. This keeps cleanup bounded without relying on an outer timeout that could cancel
+/// the shutdown driver between resources.
+#[derive(Clone, Copy)]
+pub struct TotalDrainBudget(Duration);
+
+impl TotalDrainBudget {
+    /// Validate the total drain deadline against the deployment termination contract.
+    pub fn new(
+        total: Duration,
+        deployment_grace: Duration,
+        exit_buffer: Duration,
+    ) -> anyhow::Result<Self> {
+        anyhow::ensure!(!total.is_zero(), "total drain budget must be positive");
+        anyhow::ensure!(
+            !exit_buffer.is_zero(),
+            "deployment exit buffer must be positive"
+        );
+        let available = deployment_grace
+            .checked_sub(exit_buffer)
+            .context("deployment grace must exceed the exit buffer")?;
+        anyhow::ensure!(
+            total < available,
+            "total drain budget must end before the deployment exit buffer"
+        );
+        Ok(Self(total))
+    }
+
+    const fn duration(self) -> Duration {
+        self.0
+    }
+}
+
+struct LaunchLifecycle {
+    batches: LaunchLifecycleBatches,
+    total_drain_budget: TotalDrainBudget,
+}
+
 impl LaunchLifecycleBatches {
     /// Preserve provider-before-domain registration order with non-interchangeable role types.
     pub fn new(provider: ProviderLifecycleBatch, domain: DomainLifecycleBatch) -> Self {
@@ -172,7 +305,7 @@ impl LaunchLifecycleBatches {
 /// let plan = LaunchPlan::new(
 ///     (),
 ///     (),
-///     |_: ()| Ok(()),
+///     |_: ()| std::future::ready(Ok(())),
 ///     None,
 ///     runtimeexec::LaunchLifecycleBatches::new(
 ///         runtimeexec::ProviderLifecycleBatch::from_provider_output(
@@ -182,8 +315,14 @@ impl LaunchLifecycleBatches {
 ///             bootstrap::DomainModuleResult::default(),
 ///         ),
 ///     ),
+///     runtimeexec::TotalDrainBudget::new(
+///         std::time::Duration::from_secs(20),
+///         std::time::Duration::from_secs(30),
+///         std::time::Duration::from_secs(5),
+///     )?,
 /// );
 /// let _second_owner = plan.clone();
+/// # Ok::<(), anyhow::Error>(())
 /// ```
 #[must_use = "a launch plan owns lifecycle resources and must be executed"]
 pub struct LaunchPlan<Adapter, ProbeReceipt, ReadyHook> {
@@ -191,7 +330,7 @@ pub struct LaunchPlan<Adapter, ProbeReceipt, ReadyHook> {
     probe_receipt: ProbeReceipt,
     on_ready: ReadyHook,
     trace_exporter: Option<Box<DynManagedResource<'static>>>,
-    lifecycle_batches: LaunchLifecycleBatches,
+    lifecycle_batches: LaunchLifecycle,
 }
 
 impl<Adapter, ProbeReceipt, ReadyHook> LaunchPlan<Adapter, ProbeReceipt, ReadyHook> {
@@ -202,13 +341,80 @@ impl<Adapter, ProbeReceipt, ReadyHook> LaunchPlan<Adapter, ProbeReceipt, ReadyHo
         on_ready: ReadyHook,
         trace_exporter: Option<Box<DynManagedResource<'static>>>,
         lifecycle_batches: LaunchLifecycleBatches,
+        total_drain_budget: TotalDrainBudget,
     ) -> Self {
         Self {
             adapter,
             probe_receipt,
             on_ready,
             trace_exporter,
-            lifecycle_batches,
+            lifecycle_batches: LaunchLifecycle {
+                batches: lifecycle_batches,
+                total_drain_budget,
+            },
+        }
+    }
+}
+
+/// Launch material produced only after every startup phase completes successfully.
+pub struct PreparedLaunch<Adapter, ProbeReceipt, ReadyHook> {
+    adapter: Adapter,
+    probe_receipt: ProbeReceipt,
+    on_ready: ReadyHook,
+    trace_exporter: Option<Box<DynManagedResource<'static>>>,
+}
+
+impl<Adapter, ProbeReceipt, ReadyHook> PreparedLaunch<Adapter, ProbeReceipt, ReadyHook> {
+    /// Seal the successful startup output before listener preparation begins.
+    pub fn new(
+        adapter: Adapter,
+        probe_receipt: ProbeReceipt,
+        on_ready: ReadyHook,
+        trace_exporter: Option<Box<DynManagedResource<'static>>>,
+    ) -> Self {
+        Self {
+            adapter,
+            probe_receipt,
+            on_ready,
+            trace_exporter,
+        }
+    }
+}
+
+/// Assembly-owned startup behavior driven under the executor's signal and drain owner.
+pub trait StartupAdapter: Sized {
+    /// Listener adapter produced after startup succeeds.
+    type Adapter: LaunchAdapter<Self::ProbeReceipt>;
+    /// Finalized probe receipt consumed by listener preparation.
+    type ProbeReceipt;
+    /// Async readiness hook run after listeners activate.
+    type ReadyHook: FnOnce(
+        <Self::Adapter as LaunchAdapter<Self::ProbeReceipt>>::Inventory,
+    ) -> Self::Ready;
+    /// Readiness future raced against the already-installed shutdown signal.
+    type Ready: Future<Output = anyhow::Result<()>>;
+
+    /// Run startup while staging every completed lifecycle output in `transaction`.
+    fn prepare(
+        self,
+        transaction: &mut StartupTransaction<'_>,
+    ) -> impl Future<
+        Output = anyhow::Result<PreparedLaunch<Self::Adapter, Self::ProbeReceipt, Self::ReadyHook>>,
+    > + Send;
+}
+
+/// Single-use startup state machine input with a mandatory bounded drain contract.
+pub struct StartupPlan<Startup> {
+    startup: Startup,
+    total_drain_budget: TotalDrainBudget,
+}
+
+impl<Startup> StartupPlan<Startup> {
+    /// Construct the sole startup-to-launch handoff.
+    pub fn new(startup: Startup, total_drain_budget: TotalDrainBudget) -> Self {
+        Self {
+            startup,
+            total_drain_budget,
         }
     }
 }
@@ -239,23 +445,132 @@ impl RuntimeOutputs {
 /// Once polled into the executor, caller cancellation transfers cleanup to the originating Tokio
 /// runtime; cancelling the waiter does not cancel the LIFO drain. A never-polled future has not
 /// accepted lifecycle ownership and therefore cannot perform asynchronous cleanup.
-pub async fn launch<Adapter, ProbeReceipt, ReadyHook>(
+pub async fn launch<Adapter, ProbeReceipt, ReadyHook, Ready>(
     plan: LaunchPlan<Adapter, ProbeReceipt, ReadyHook>,
 ) -> anyhow::Result<RuntimeOutputs>
 where
     Adapter: LaunchAdapter<ProbeReceipt>,
-    ReadyHook: FnOnce(Adapter::Inventory) -> anyhow::Result<()>,
+    ReadyHook: FnOnce(Adapter::Inventory) -> Ready,
+    Ready: Future<Output = anyhow::Result<()>>,
 {
-    launch_until(plan, wait_for_shutdown_signal()).await
+    launch_until(plan, install_shutdown_signal).await
 }
 
-async fn launch_until<Adapter, ProbeReceipt, ReadyHook, Shutdown>(
+/// Run assembly startup and listener launch under one signal owner and total drain deadline.
+pub async fn launch_startup<Startup>(plan: StartupPlan<Startup>) -> anyhow::Result<RuntimeOutputs>
+where
+    Startup: StartupAdapter,
+{
+    launch_startup_until(plan, install_shutdown_signal).await
+}
+
+enum StartupRace<Prepared> {
+    Shutdown(anyhow::Result<()>),
+    Startup(anyhow::Result<Prepared>),
+}
+
+async fn launch_startup_until<Startup, InstallShutdown, Shutdown>(
+    plan: StartupPlan<Startup>,
+    install_shutdown: InstallShutdown,
+) -> anyhow::Result<RuntimeOutputs>
+where
+    Startup: StartupAdapter,
+    InstallShutdown: FnOnce() -> anyhow::Result<Shutdown>,
+    Shutdown: Future<Output = anyhow::Result<()>>,
+{
+    let StartupPlan {
+        startup,
+        total_drain_budget,
+    } = plan;
+    let mut owner = ShutdownOwner::new(total_drain_budget);
+    let shutdown = match install_shutdown() {
+        Ok(shutdown) => shutdown,
+        Err(error) => {
+            let (runtime, stack) = owner.into_parts();
+            return finish_launch(runtime, stack, total_drain_budget, Err(error)).await;
+        }
+    };
+    let mut shutdown = Box::pin(shutdown);
+    let mut transaction = StartupTransaction::new(owner.stack_mut());
+    let race = {
+        // Signal sources are installed before the startup future is constructed or polled.
+        let startup = startup.prepare(&mut transaction);
+        tokio::pin!(startup);
+        tokio::select! {
+            biased;
+            result = &mut shutdown => StartupRace::Shutdown(result),
+            result = &mut startup => StartupRace::Startup(result),
+        }
+    };
+
+    let launch_result = match race {
+        StartupRace::Shutdown(signal_result) => {
+            let batches = transaction.into_lifecycle_batches(true);
+            let transfer = register_lifecycle_outputs(owner.stack_mut(), None, batches);
+            preserve_startup_result(signal_result, transfer)
+        }
+        StartupRace::Startup(Err(startup_error)) => {
+            let batches = transaction.into_lifecycle_batches(true);
+            let transfer = register_lifecycle_outputs(owner.stack_mut(), None, batches);
+            preserve_startup_result(Err(startup_error), transfer)
+        }
+        StartupRace::Startup(Ok(prepared)) => {
+            let batches = transaction.into_lifecycle_batches(false);
+            let PreparedLaunch {
+                adapter,
+                probe_receipt,
+                on_ready,
+                trace_exporter,
+            } = prepared;
+            execute_launch(
+                owner.stack_mut(),
+                adapter,
+                probe_receipt,
+                on_ready,
+                trace_exporter,
+                batches,
+                || Ok(shutdown),
+            )
+            .await
+        }
+    };
+
+    let (runtime, stack) = owner.into_parts();
+    finish_launch(runtime, stack, total_drain_budget, launch_result).await
+}
+
+fn preserve_startup_result(
+    primary: anyhow::Result<()>,
+    transfer: anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    match (primary, transfer) {
+        (Ok(()), result) | (result @ Err(_), Ok(())) => result,
+        (Err(primary), Err(transfer)) => {
+            tracing::error!(
+                cleanup_error = %secure::redact_error(transfer.as_ref()),
+                "startup failed and lifecycle transfer also failed; preserving primary error"
+            );
+            Err(primary)
+        }
+    }
+}
+
+fn install_shutdown_signal() -> anyhow::Result<impl Future<Output = anyhow::Result<()>>> {
+    // Tokio's signal constructor installs the handler synchronously. Keeping that constructor
+    // outside the returned future closes both startup -> signal and ready -> signal races.
+    let shutdown = wait_for_shutdown_signal()?;
+    Ok(shutdown)
+}
+
+async fn launch_until<Adapter, ProbeReceipt, ReadyHook, Ready, InstallShutdown, Shutdown>(
     plan: LaunchPlan<Adapter, ProbeReceipt, ReadyHook>,
-    shutdown: Shutdown,
+    install_shutdown: InstallShutdown,
 ) -> anyhow::Result<RuntimeOutputs>
 where
     Adapter: LaunchAdapter<ProbeReceipt>,
-    ReadyHook: FnOnce(Adapter::Inventory) -> anyhow::Result<()>,
+    ReadyHook: FnOnce(Adapter::Inventory) -> Ready,
+    Ready: Future<Output = anyhow::Result<()>>,
+    InstallShutdown: FnOnce() -> anyhow::Result<Shutdown>,
     Shutdown: Future<Output = anyhow::Result<()>>,
 {
     let LaunchPlan {
@@ -265,7 +580,11 @@ where
         trace_exporter,
         lifecycle_batches,
     } = plan;
-    let mut owner = ShutdownOwner::new();
+    let LaunchLifecycle {
+        batches: lifecycle_batches,
+        total_drain_budget,
+    } = lifecycle_batches;
+    let mut owner = ShutdownOwner::new(total_drain_budget);
     let launch_result = execute_launch(
         owner.stack_mut(),
         adapter,
@@ -273,12 +592,12 @@ where
         on_ready,
         trace_exporter,
         lifecycle_batches,
-        shutdown,
+        install_shutdown,
     )
     .await;
 
     let (runtime, stack) = owner.into_parts();
-    finish_launch(runtime, stack, launch_result).await
+    finish_launch(runtime, stack, total_drain_budget, launch_result).await
 }
 
 /// Cancellation-safe owner for the execute phase.
@@ -290,13 +609,15 @@ where
 struct ShutdownOwner {
     runtime: Handle,
     stack: Option<ShutdownStack>,
+    total_drain_budget: TotalDrainBudget,
 }
 
 impl ShutdownOwner {
-    fn new() -> Self {
+    fn new(total_drain_budget: TotalDrainBudget) -> Self {
         Self {
             runtime: Handle::current(),
             stack: Some(ShutdownStack::new(CancellationToken::new())),
+            total_drain_budget,
         }
     }
 
@@ -321,20 +642,21 @@ impl Drop for ShutdownOwner {
             return;
         };
         tracing::warn!("launch future dropped; continuing runtime resource drain in background");
-        let _drain = spawn_drain(&self.runtime, stack);
+        let _drain = spawn_drain(&self.runtime, stack, self.total_drain_budget);
     }
 }
 
 async fn finish_launch(
     runtime: Handle,
     stack: ShutdownStack,
+    total_drain_budget: TotalDrainBudget,
     launch_result: anyhow::Result<()>,
 ) -> anyhow::Result<RuntimeOutputs> {
     log_drain_start(&launch_result);
     // The drain task owns the stack before this function reaches its first await. Dropping the
     // outer launch future therefore detaches only this JoinHandle; Tokio keeps the drain task
     // running to complete the full LIFO sequence.
-    let drain = spawn_drain(&runtime, stack);
+    let drain = spawn_drain(&runtime, stack, total_drain_budget);
     let drain_result = match drain.await {
         Ok(result) => result,
         Err(error) => Err(anyhow::anyhow!(
@@ -345,8 +667,14 @@ async fn finish_launch(
     preserve_launch_error(launch_result, drain_result)
 }
 
-fn spawn_drain(runtime: &Handle, stack: ShutdownStack) -> JoinHandle<anyhow::Result<()>> {
-    runtime.spawn(async move { report_shutdown_failures(stack.shutdown().await) })
+fn spawn_drain(
+    runtime: &Handle,
+    stack: ShutdownStack,
+    total_drain_budget: TotalDrainBudget,
+) -> JoinHandle<anyhow::Result<()>> {
+    runtime.spawn(async move {
+        report_shutdown_failures(stack.shutdown_within(total_drain_budget.duration()).await)
+    })
 }
 
 // reason: the two closed log outcomes intentionally preserve the existing success/failure wording;
@@ -363,25 +691,38 @@ fn log_drain_start(launch_result: &anyhow::Result<()>) {
 // reason: this private boundary consumes the complete sealed launch plan without introducing a
 // generic service-bag type or a second lifecycle owner.
 #[allow(clippy::too_many_arguments)]
-async fn execute_launch<Adapter, ProbeReceipt, ReadyHook, Shutdown>(
+async fn execute_launch<Adapter, ProbeReceipt, ReadyHook, Ready, InstallShutdown, Shutdown>(
     stack: &mut ShutdownStack,
     adapter: Adapter,
     probe_receipt: ProbeReceipt,
     on_ready: ReadyHook,
     trace_exporter: Option<Box<DynManagedResource<'static>>>,
     lifecycle_batches: LaunchLifecycleBatches,
-    shutdown: Shutdown,
+    install_shutdown: InstallShutdown,
 ) -> anyhow::Result<()>
 where
     Adapter: LaunchAdapter<ProbeReceipt>,
-    ReadyHook: FnOnce(Adapter::Inventory) -> anyhow::Result<()>,
+    ReadyHook: FnOnce(Adapter::Inventory) -> Ready,
+    Ready: Future<Output = anyhow::Result<()>>,
+    InstallShutdown: FnOnce() -> anyhow::Result<Shutdown>,
     Shutdown: Future<Output = anyhow::Result<()>>,
 {
     register_lifecycle_outputs(stack, trace_exporter, lifecycle_batches)?;
+    // The complete provider/domain lifecycle is accepted by the cancellation-safe owner before a
+    // platform signal constructor can fail. Installation still precedes listener preparation and
+    // readiness publication, so no ready -> signal race is reintroduced.
+    let shutdown = install_shutdown()?;
     let mut transaction = LaunchTransaction { stack };
     let prepared = adapter.prepare(probe_receipt, &mut transaction).await?;
     let activated = Adapter::activate(prepared, transaction.commit())?;
-    on_ready(activated.into_inventory())?;
+    let readiness = on_ready(activated.into_inventory());
+    tokio::pin!(readiness);
+    tokio::pin!(shutdown);
+    tokio::select! {
+        biased;
+        result = &mut shutdown => return result,
+        result = &mut readiness => result?,
+    }
     shutdown.await
 }
 
@@ -463,32 +804,46 @@ fn preserve_launch_error(
     }
 }
 
-async fn wait_for_shutdown_signal() -> anyhow::Result<()> {
-    wait_for_platform_shutdown_signal().await
-}
-
 #[cfg(unix)]
 // reason: the platform boundary must install both closed Unix signal streams and select the first
 // one without moving signal ownership or shutdown policy into an assembly.
 #[allow(clippy::cognitive_complexity)]
-async fn wait_for_platform_shutdown_signal() -> anyhow::Result<()> {
+fn wait_for_shutdown_signal() -> anyhow::Result<impl Future<Output = anyhow::Result<()>>> {
     use tokio::signal::unix::{SignalKind, signal};
     let mut term = signal(SignalKind::terminate()).context("install SIGTERM handler")?;
     let mut int = signal(SignalKind::interrupt()).context("install SIGINT handler")?;
-    tokio::select! {
-        _ = term.recv() => tracing::info!(signal = "SIGTERM", "shutdown signal received"),
-        _ = int.recv() => tracing::info!(signal = "SIGINT", "shutdown signal received"),
-    }
-    Ok(())
+    Ok(async move {
+        tokio::select! {
+            _ = term.recv() => tracing::info!(signal = "SIGTERM", "shutdown signal received"),
+            _ = int.recv() => tracing::info!(signal = "SIGINT", "shutdown signal received"),
+        }
+        Ok(())
+    })
 }
 
-#[cfg(not(unix))]
-async fn wait_for_platform_shutdown_signal() -> anyhow::Result<()> {
-    tokio::signal::ctrl_c()
-        .await
-        .context("install ctrl-c handler")?;
-    tracing::info!(signal = "ctrl-c", "shutdown signal received");
-    Ok(())
+#[cfg(windows)]
+fn wait_for_shutdown_signal() -> anyhow::Result<impl Future<Output = anyhow::Result<()>>> {
+    use tokio::signal::windows::{ctrl_break, ctrl_c};
+    let mut ctrl_c = ctrl_c().context("install ctrl-c handler")?;
+    let mut ctrl_break = ctrl_break().context("install ctrl-break handler")?;
+    Ok(async move {
+        tokio::select! {
+            _ = ctrl_c.recv() => tracing::info!(signal = "ctrl-c", "shutdown signal received"),
+            _ = ctrl_break.recv() => tracing::info!(signal = "ctrl-break", "shutdown signal received"),
+        }
+        Ok(())
+    })
+}
+
+#[cfg(not(any(unix, windows)))]
+fn wait_for_shutdown_signal() -> anyhow::Result<impl Future<Output = anyhow::Result<()>>> {
+    Ok(async {
+        tokio::signal::ctrl_c()
+            .await
+            .context("install ctrl-c handler")?;
+        tracing::info!(signal = "ctrl-c", "shutdown signal received");
+        Ok(())
+    })
 }
 
 #[cfg(test)]

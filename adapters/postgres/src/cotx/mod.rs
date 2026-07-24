@@ -42,7 +42,7 @@ use crate::tx_retry::{
     LocalTxAcquireDeadline, LocalTxBeginDeadline, LocalTxCommitDeadline, LocalTxDeadline,
     LocalTxOperationDeadline, LocalTxRollbackDeadline, LocalTxSetupDeadline, LocalTxStageResult,
 };
-#[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
+#[cfg(feature = "domain-identity")]
 use crate::tx_retry::{OUTBOX_PRODUCER_BOUNDARY, record_settlement};
 
 mod settlement;
@@ -191,17 +191,18 @@ impl ProducerFactAuthorization for identity::ports::CredentialSecurityFactAuthor
 #[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
 pub(crate) enum ProducerTxOutcome<A, T> {
     Emitted(T, A),
+    #[cfg(feature = "domain-identity")]
     NoMutation(T),
 }
 
 /// One non-retrying producer attempt whose only result projection records its typed settlement.
-#[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
+#[cfg(feature = "domain-identity")]
 #[must_use = "producer settlement must be observed through ProducerTxAttempt::into_result"]
 pub(crate) struct ProducerTxAttempt<T, E> {
     attempt: LocalTxAttempt<T, E>,
 }
 
-#[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
+#[cfg(feature = "domain-identity")]
 impl<T, E> ProducerTxAttempt<T, E> {
     fn new(attempt: LocalTxAttempt<T, E>) -> Self {
         Self { attempt }
@@ -554,7 +555,7 @@ impl<L> PgWritePool<L> {
     ///
     /// Authorization is supplied by either an HTTP mounted-producer receipt or a
     /// credential-security sealed command's move-only proof.
-    #[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
+    #[cfg(feature = "domain-identity")]
     pub(crate) async fn producer_tx<S, A, T, F, E>(
         &self,
         scope: S,
@@ -1600,6 +1601,7 @@ where
             }
             Ok(value)
         }
+        #[cfg(feature = "domain-identity")]
         ProducerTxOutcome::NoMutation(value) => Ok(value),
     }
 }

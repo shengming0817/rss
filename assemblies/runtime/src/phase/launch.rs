@@ -39,9 +39,10 @@ impl Finalized<'_> {
                 let launch_plan = runtimeexec::LaunchPlan::new(
                     adapter,
                     probe_receipt,
-                    crate::launch::log_ready,
+                    |inventory| async move { crate::launch::log_ready(inventory) },
                     trace_exporter,
                     lifecycle_batches,
+                    crate::launch::total_drain_budget()?,
                 );
                 runtimeexec::launch(launch_plan).await
             }

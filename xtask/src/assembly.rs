@@ -36,6 +36,10 @@ pub(crate) enum Rule {
     InactiveDomainDependencyClosure,
     /// identityaudit 必须保持 lib-only，且 normal closure 不得引入 runtime/settings/transport。
     IdentityAuditBoundary,
+    /// settingsonly 必须保持 #1796 的独立 binary/schema/精确 journey/image/default-closure 闭包。
+    ///
+    /// INVARIANT: SETTINGSONLY-EXECUTABLE-BOUNDARY-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::settingsonly_executable_boundary_rejects_each_incomplete_artifact_fact", anti_vacuity = "tests::settingsonly_real_executable_boundary_is_complete" } -- this target-specific gate closes only the settingsonly artifacts introduced by #1796; the cross-assembly artifact matrix and bijection remain owned by #1798.
+    SettingsOnlyExecutableBoundary,
     /// assembly manifest 必须声明至少一个 listener。
     EmptyListeners,
     /// assembly manifest 中 `listeners` 不得重复。
@@ -379,6 +383,36 @@ fn validate_target_domain_closure(
             &assembly.cargo_label,
             &package.targets,
             &workspace_closure,
+        ));
+    }
+    if assembly.manifest.name == "settingsonly" {
+        let (closure_packages, test_support_enabled) =
+            cargo_tree_default_normal_evidence(root, assembly, metadata)?;
+        let schema_is_regular_file =
+            is_regular_file_without_symlink(&assembly.dir.join("config.schema.json"))?;
+        let sample_is_regular_file =
+            is_regular_file_without_symlink(&assembly.dir.join("settingsonly.example.toml"))?;
+        let runbook_is_regular_file = is_regular_file_without_symlink(
+            &root.join("docs/ops/202607230700-1796-settingsonly-runtime.md"),
+        )?;
+        let artifact_acceptance = settingsonly_artifact_acceptance_evidence(root)?;
+        let (journey_target_declared, required_journey_test_declared) =
+            settingsonly_journey_evidence(root)?;
+        let dockerfile = std::fs::read_to_string(root.join("Dockerfile"))
+            .context("读取 settingsonly image source Dockerfile 失败")?;
+        findings.extend(validate_settingsonly_executable_evidence(
+            SettingsOnlyExecutableEvidence {
+                targets: &package.targets,
+                closure_packages: &closure_packages,
+                test_support_enabled,
+                schema_is_regular_file,
+                sample_is_regular_file,
+                runbook_is_regular_file,
+                artifact_acceptance,
+                journey_target_declared,
+                required_journey_test_declared,
+                dockerfile: &dockerfile,
+            },
         ));
     }
     Ok(findings)
@@ -1009,6 +1043,8 @@ struct MetadataPackage {
 #[derive(Debug, Deserialize)]
 struct MetadataTarget {
     #[serde(default)]
+    name: String,
+    #[serde(default)]
     kind: Vec<String>,
 }
 
@@ -1067,6 +1103,7 @@ fn cargo_tree_stdout(
     root: &Path,
     assembly: &DiscoveredAssembly,
     depth: Option<usize>,
+    all_features: bool,
 ) -> Result<String> {
     let manifest = assembly.cargo_path.display().to_string();
     let depth_value = depth.map(|value| value.to_string());
@@ -1076,12 +1113,14 @@ fn cargo_tree_stdout(
         manifest.as_str(),
         "--edges",
         "normal",
-        "--all-features",
         "--prefix",
         "none",
         "--format",
-        "{p}",
+        "{p}|{f}",
     ];
+    if all_features {
+        args.insert(5, "--all-features");
+    }
     if let Some(value) = depth_value.as_deref() {
         args.extend(["--depth", value]);
     }
@@ -1113,7 +1152,7 @@ fn cargo_tree_domains(
     metadata: &CargoMetadata,
     depth: Option<usize>,
 ) -> Result<BTreeSet<String>> {
-    let stdout = cargo_tree_stdout(root, assembly, depth)?;
+    let stdout = cargo_tree_stdout(root, assembly, depth, true)?;
     let mut domains = BTreeSet::new();
     for package in metadata
         .packages
@@ -1124,9 +1163,13 @@ fn cargo_tree_domains(
             continue;
         };
         let path_marker = format!("({})", package_dir.display());
-        if stdout.lines().any(|line| {
-            line.starts_with(&format!("{} ", package.name)) && line.ends_with(&path_marker)
-        }) {
+        if stdout
+            .lines()
+            .filter_map(|line| line.split_once('|'))
+            .any(|(line, _)| {
+                line.starts_with(&format!("{} ", package.name)) && line.ends_with(&path_marker)
+            })
+        {
             domains.insert(package.name.clone());
         }
     }
@@ -1137,11 +1180,39 @@ fn cargo_tree_package_names(
     root: &Path,
     assembly: &DiscoveredAssembly,
 ) -> Result<BTreeSet<String>> {
-    Ok(cargo_tree_stdout(root, assembly, None)?
+    Ok(cargo_tree_stdout(root, assembly, None, true)?
         .lines()
-        .filter_map(|line| line.split_whitespace().next())
+        .filter_map(|line| line.split_once('|'))
+        .filter_map(|(package, _)| package.split_whitespace().next())
         .map(str::to_owned)
         .collect())
+}
+
+fn cargo_tree_default_normal_evidence(
+    root: &Path,
+    assembly: &DiscoveredAssembly,
+    metadata: &CargoMetadata,
+) -> Result<(BTreeSet<String>, bool)> {
+    let stdout = cargo_tree_stdout(root, assembly, None, false)?;
+    let mut packages = BTreeSet::new();
+    let mut test_support_enabled = false;
+    for (package, features) in stdout.lines().filter_map(|line| line.split_once('|')) {
+        if let Some(name) = package.split_whitespace().next() {
+            packages.insert(name.to_owned());
+        }
+        test_support_enabled |= features
+            .split(',')
+            .map(str::trim)
+            .any(|feature| feature == "test-support");
+    }
+    let workspace_packages = metadata
+        .packages
+        .iter()
+        .filter(|package| metadata.workspace_members.contains(&package.id))
+        .filter(|package| packages.contains(&package.name))
+        .map(|package| package.name.clone())
+        .collect();
+    Ok((workspace_packages, test_support_enabled))
 }
 
 fn package_by_manifest<'a>(
@@ -1272,6 +1343,517 @@ fn identityaudit_package_allowed(package: &str, layer: crate::layers::Layer) -> 
         ),
         _ => true,
     }
+}
+
+const SETTINGSONLY_ALLOWED_NORMAL_WORKSPACE_PACKAGES: &[&str] = &[
+    "assembly-schema",
+    "authn",
+    "bootstrap",
+    "consistency",
+    "diagctx",
+    "diport",
+    "distributed",
+    "eventexec",
+    "generated",
+    "httpd",
+    "httpserve",
+    "ids",
+    "observ",
+    "oidc",
+    "postgres",
+    "primitives",
+    "prometheus-adapter",
+    "ratelimit",
+    "runctx",
+    "runtimeexec",
+    "secure",
+    "securederive",
+    "settings",
+    "settings-composition",
+    "settingsonly",
+    "support",
+    "tracewire",
+    "vault",
+    "vocab",
+];
+
+#[derive(Clone, Copy)]
+struct SettingsOnlyExecutableEvidence<'a> {
+    targets: &'a [MetadataTarget],
+    closure_packages: &'a BTreeSet<String>,
+    test_support_enabled: bool,
+    schema_is_regular_file: bool,
+    sample_is_regular_file: bool,
+    runbook_is_regular_file: bool,
+    artifact_acceptance: bool,
+    journey_target_declared: bool,
+    required_journey_test_declared: bool,
+    dockerfile: &'a str,
+}
+
+fn validate_settingsonly_executable_evidence(
+    evidence: SettingsOnlyExecutableEvidence<'_>,
+) -> Vec<Finding> {
+    let subject = "assemblies/settingsonly";
+    let mut findings = Vec::new();
+    let exact_targets = evidence.targets.len() == 3
+        && evidence
+            .targets
+            .iter()
+            .any(|target| target.name == "settingsonly" && target.kind.as_slice() == ["lib"])
+        && evidence.targets.iter().any(|target| {
+            target.name == "settingsonly-server" && target.kind.as_slice() == ["bin"]
+        })
+        && evidence.targets.iter().any(|target| {
+            target.name == "settingsonly_artifact_acceptance" && target.kind.as_slice() == ["test"]
+        });
+    if !exact_targets {
+        findings.push(finding(
+            Rule::SettingsOnlyExecutableBoundary,
+            subject,
+            "field=package.targets expected exactly lib `settingsonly`, bin `settingsonly-server`, and binary+image test `settingsonly_artifact_acceptance`",
+        ));
+    }
+
+    let allowed = SETTINGSONLY_ALLOWED_NORMAL_WORKSPACE_PACKAGES
+        .iter()
+        .map(|package| (*package).to_owned())
+        .collect::<BTreeSet<_>>();
+    let missing = allowed
+        .difference(evidence.closure_packages)
+        .cloned()
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        findings.push(finding(
+            Rule::SettingsOnlyExecutableBoundary,
+            subject,
+            format!(
+                "field=default-normal-workspace-closure missing allowed settingsonly packages: {}",
+                missing.join(", ")
+            ),
+        ));
+    }
+    let unexpected = evidence
+        .closure_packages
+        .difference(&allowed)
+        .cloned()
+        .collect::<Vec<_>>();
+    if !unexpected.is_empty() {
+        findings.push(finding(
+            Rule::SettingsOnlyExecutableBoundary,
+            subject,
+            format!(
+                "field=default-normal-workspace-closure unexpected packages entered settingsonly: {}",
+                unexpected.join(", ")
+            ),
+        ));
+    }
+    if evidence.test_support_enabled {
+        findings.push(finding(
+            Rule::SettingsOnlyExecutableBoundary,
+            subject,
+            "field=default-normal-features `test-support` must stay disabled in the production closure",
+        ));
+    }
+    if !evidence.schema_is_regular_file {
+        findings.push(finding(
+            Rule::SettingsOnlyExecutableBoundary,
+            subject,
+            "field=config-schema expected a non-symlink regular file at assemblies/settingsonly/config.schema.json",
+        ));
+    }
+    if !evidence.sample_is_regular_file {
+        findings.push(finding(
+            Rule::SettingsOnlyExecutableBoundary,
+            subject,
+            "field=config-sample expected a non-symlink regular file at assemblies/settingsonly/settingsonly.example.toml",
+        ));
+    }
+    if !evidence.runbook_is_regular_file {
+        findings.push(finding(
+            Rule::SettingsOnlyExecutableBoundary,
+            subject,
+            "field=operator-runbook expected docs/ops/202607230700-1796-settingsonly-runtime.md",
+        ));
+    }
+    if !evidence.artifact_acceptance {
+        findings.push(finding(
+            Rule::SettingsOnlyExecutableBoundary,
+            subject,
+            "field=artifact-acceptance expected exact binary+image --help tests plus the closed Docker build/include-ignored harness",
+        ));
+    }
+    if !evidence.journey_target_declared || !evidence.required_journey_test_declared {
+        findings.push(finding(
+            Rule::SettingsOnlyExecutableBoundary,
+            subject,
+            "field=journey expected explicit `settingsonly_runtime` target with non-ignored `settingsonly_lifecycle_fixture_ready_request_sigterm_drain`",
+        ));
+    }
+    if !settingsonly_docker_target_is_closed(evidence.dockerfile) {
+        findings.push(finding(
+            Rule::SettingsOnlyExecutableBoundary,
+            subject,
+            "field=Dockerfile expected exact two-COPY + ENTRYPOINT settingsonly-runtime on the distroless nonroot base, with no EXPOSE/ENV/CMD/USER override, while runtime remains the default final stage",
+        ));
+    }
+    findings
+}
+
+fn is_regular_file_without_symlink(path: &Path) -> Result<bool> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => Ok(metadata.is_file() && !metadata.file_type().is_symlink()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error).with_context(|| format!("检查 {} 失败", path.display())),
+    }
+}
+
+fn settingsonly_journey_evidence(root: &Path) -> Result<(bool, bool)> {
+    let manifest_path = root.join("journeys/Cargo.toml");
+    let manifest: toml::Value = std::fs::read_to_string(&manifest_path)
+        .with_context(|| format!("读取 {} 失败", manifest_path.display()))?
+        .parse()
+        .with_context(|| format!("解析 {} 失败", manifest_path.display()))?;
+    let target_declared = manifest
+        .get("test")
+        .and_then(toml::Value::as_array)
+        .is_some_and(|targets| {
+            targets.iter().any(|target| {
+                target.get("name").and_then(toml::Value::as_str) == Some("settingsonly_runtime")
+                    && target.get("path").and_then(toml::Value::as_str)
+                        == Some("tests/settingsonly_runtime.rs")
+            })
+        });
+    let source_path = root.join("journeys/tests/settingsonly_runtime.rs");
+    let required_test_declared = match std::fs::read_to_string(&source_path) {
+        Ok(source) => settingsonly_journey_has_required_test(&source)
+            .with_context(|| format!("解析 {} 失败", source_path.display()))?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => {
+            return Err(error).with_context(|| format!("读取 {} 失败", source_path.display()));
+        }
+    };
+    Ok((target_declared, required_test_declared))
+}
+
+fn settingsonly_journey_has_required_test(source: &str) -> Result<bool> {
+    const REQUIRED_TEST: &str = "settingsonly_lifecycle_fixture_ready_request_sigterm_drain";
+    Ok(syn::parse_file(source)?.items.into_iter().any(|item| {
+        matches!(item, syn::Item::Fn(function)
+            if function.sig.ident == REQUIRED_TEST
+                && function.attrs.iter().any(is_test_attribute)
+                && !function.attrs.iter().any(is_ignore_attribute)
+                && !function.attrs.iter().any(is_conditional_attribute)
+                && !function.block.stmts.is_empty())
+    }))
+}
+
+fn settingsonly_artifact_acceptance_evidence(root: &Path) -> Result<bool> {
+    let source_path = root.join("assemblies/settingsonly/tests/artifact_acceptance.rs");
+    let source = match std::fs::read_to_string(&source_path) {
+        Ok(source) => source,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(error).with_context(|| format!("读取 {} 失败", source_path.display()));
+        }
+    };
+    let source_closed = settingsonly_artifact_source_is_closed(&source)
+        .with_context(|| format!("解析 {} 失败", source_path.display()))?;
+    let script_path = root.join("hack/settingsonly-artifact-acceptance.sh");
+    let script = match std::fs::read_to_string(&script_path) {
+        Ok(script) => script,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(error).with_context(|| format!("读取 {} 失败", script_path.display()));
+        }
+    };
+    Ok(source_closed && settingsonly_artifact_script_is_closed(&script))
+}
+
+fn settingsonly_artifact_source_is_closed(source: &str) -> Result<bool> {
+    let syntax = syn::parse_file(source)?;
+    let mut binary = false;
+    let mut image = false;
+    let mut live = false;
+    for item in syntax.items {
+        let syn::Item::Fn(function) = item else {
+            continue;
+        };
+        if !function.attrs.iter().any(is_test_attribute)
+            || function.attrs.iter().any(is_conditional_attribute)
+        {
+            continue;
+        }
+        if function.sig.ident == "settingsonly_server_binary_is_an_executable_artifact"
+            && !function.attrs.iter().any(is_ignore_attribute)
+            && artifact_contract_tail(&function, ArtifactContractKind::Binary)
+        {
+            binary = true;
+        }
+        if function.sig.ident == "settingsonly_runtime_image_is_an_executable_artifact"
+            && function.attrs.iter().any(is_ignore_attribute)
+            && artifact_contract_tail(&function, ArtifactContractKind::Image)
+            && image_environment_is_loaded(&function)
+        {
+            image = true;
+        }
+        if function.sig.ident == "settingsonly_binary_and_image_are_live_deployments"
+            && function.attrs.iter().any(is_ignore_attribute)
+            && live_artifact_contract_tail(&function)
+            && image_environment_is_loaded(&function)
+        {
+            live = true;
+        }
+    }
+    Ok(binary && image && live)
+}
+
+#[derive(Clone, Copy)]
+enum ArtifactContractKind {
+    Binary,
+    Image,
+}
+
+fn artifact_contract_tail(function: &syn::ItemFn, kind: ArtifactContractKind) -> bool {
+    let Some(syn::Stmt::Expr(syn::Expr::Call(assertion), None)) = function.block.stmts.last()
+    else {
+        return false;
+    };
+    if !expression_path_ends_with(assertion.func.as_ref(), &["assert_executable_contract"])
+        || assertion.args.len() != 1
+    {
+        return false;
+    }
+    artifact_constructor_matches(assertion.args.first(), kind)
+}
+
+fn live_artifact_contract_tail(function: &syn::ItemFn) -> bool {
+    let Some(syn::Stmt::Expr(syn::Expr::Call(assertion), None)) = function.block.stmts.last()
+    else {
+        return false;
+    };
+    expression_path_ends_with(
+        assertion.func.as_ref(),
+        &["assert_live_deployment_contract"],
+    ) && assertion.args.len() == 2
+        && artifact_constructor_matches(assertion.args.first(), ArtifactContractKind::Binary)
+        && artifact_constructor_matches(assertion.args.iter().nth(1), ArtifactContractKind::Image)
+}
+
+fn artifact_constructor_matches(
+    expression: Option<&syn::Expr>,
+    kind: ArtifactContractKind,
+) -> bool {
+    let Some(syn::Expr::Call(artifact)) = expression else {
+        return false;
+    };
+    let expected = match kind {
+        ArtifactContractKind::Binary => "Binary",
+        ArtifactContractKind::Image => "Image",
+    };
+    if !expression_path_ends_with(artifact.func.as_ref(), &["Artifact", expected])
+        || artifact.args.len() != 1
+    {
+        return false;
+    }
+    match (kind, artifact.args.first()) {
+        (ArtifactContractKind::Binary, Some(syn::Expr::Macro(expression))) => {
+            expression.mac.path.is_ident("env")
+                && syn::parse2::<syn::LitStr>(expression.mac.tokens.clone())
+                    .is_ok_and(|literal| literal.value() == "CARGO_BIN_EXE_settingsonly-server")
+        }
+        (ArtifactContractKind::Image, Some(syn::Expr::Reference(reference))) => {
+            matches!(reference.expr.as_ref(), syn::Expr::Path(path) if path.path.is_ident("image"))
+        }
+        _ => false,
+    }
+}
+
+fn image_environment_is_loaded(function: &syn::ItemFn) -> bool {
+    let mut visitor = SettingsOnlyImageEnvironmentVisitor::default();
+    syn::visit::Visit::visit_block(&mut visitor, &function.block);
+    visitor.image_environment
+}
+
+#[derive(Default)]
+struct SettingsOnlyImageEnvironmentVisitor {
+    image_environment: bool,
+}
+
+impl<'ast> syn::visit::Visit<'ast> for SettingsOnlyImageEnvironmentVisitor {
+    fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+        if expression_path_ends_with(node.func.as_ref(), &["env", "var"])
+            && node.args.len() == 1
+            && matches!(node.args.first(), Some(syn::Expr::Path(path)) if path.path.is_ident("IMAGE_ENV"))
+        {
+            self.image_environment = true;
+        }
+        syn::visit::visit_expr_call(self, node);
+    }
+}
+
+fn expression_path_ends_with(expression: &syn::Expr, expected: &[&str]) -> bool {
+    let syn::Expr::Path(path) = expression else {
+        return false;
+    };
+    let segments = path.path.segments.iter().collect::<Vec<_>>();
+    segments.len() >= expected.len()
+        && segments[segments.len() - expected.len()..]
+            .iter()
+            .zip(expected)
+            .all(|(segment, expected)| segment.ident == *expected)
+}
+
+fn settingsonly_artifact_script_is_closed(source: &str) -> bool {
+    const EXPECTED: &[&str] = &[
+        "#!/usr/bin/env bash",
+        "set -euo pipefail",
+        "script_dir=\"$(cd \"$(dirname \"${BASH_SOURCE[0]}\")\" && pwd)\"",
+        "repo_root=\"$(cd \"$script_dir/..\" && pwd)\"",
+        "image=\"${RSS_SETTINGSONLY_ACCEPTANCE_IMAGE:-rss-settingsonly:artifact-acceptance}\"",
+        "unset RSS_SETTINGSONLY_PG_WRITER_PASSWORD",
+        "unset RSS_SETTINGSONLY_PG_READER_PASSWORD",
+        "unset RSS_SETTINGSONLY_PG_MIGRATOR_PASSWORD",
+        "unset RSS_SETTINGSONLY_VAULT_TOKEN",
+        "cd \"$repo_root\"",
+        "docker build --target settingsonly-runtime --tag \"$image\" .",
+        "RSS_SETTINGSONLY_ACCEPTANCE_IMAGE=\"$image\" ./hack/cargo.sh test -p settingsonly --test settingsonly_artifact_acceptance -- --include-ignored --test-threads=1",
+    ];
+    logical_shell_statements(source) == EXPECTED
+}
+
+fn logical_shell_statements(source: &str) -> Vec<String> {
+    let mut statements = Vec::new();
+    let mut current = String::new();
+    for line in source.lines().map(str::trim) {
+        if line.is_empty() || (line.starts_with('#') && !line.starts_with("#!")) {
+            continue;
+        }
+        let continued = line.strip_suffix('\\');
+        let fragment = continued.unwrap_or(line).trim_end();
+        if !current.is_empty() {
+            current.push(' ');
+        }
+        current.push_str(fragment);
+        if continued.is_none() {
+            statements.push(std::mem::take(&mut current));
+        }
+    }
+    if !current.is_empty() {
+        statements.push(current);
+    }
+    statements
+}
+
+fn is_test_attribute(attribute: &syn::Attribute) -> bool {
+    let segments = attribute
+        .path()
+        .segments
+        .iter()
+        .map(|segment| segment.ident.to_string())
+        .collect::<Vec<_>>();
+    matches!(segments.as_slice(), [test] if test == "test")
+        || matches!(segments.as_slice(), [runtime, test] if runtime == "tokio" && test == "test")
+}
+
+fn is_ignore_attribute(attribute: &syn::Attribute) -> bool {
+    attribute.path().is_ident("ignore")
+}
+
+fn is_conditional_attribute(attribute: &syn::Attribute) -> bool {
+    attribute.path().is_ident("cfg") || attribute.path().is_ident("cfg_attr")
+}
+
+struct DockerStage<'a> {
+    base: &'a str,
+    name: &'a str,
+    instructions: Vec<&'a str>,
+}
+
+fn settingsonly_docker_target_is_closed(source: &str) -> bool {
+    let stages = docker_stages(source);
+    let builders = stages
+        .iter()
+        .filter(|stage| stage.name == "settingsonly-builder")
+        .collect::<Vec<_>>();
+    let runtimes = stages
+        .iter()
+        .filter(|stage| stage.name == "settingsonly-runtime")
+        .collect::<Vec<_>>();
+    let ([builder], [runtime]) = (builders.as_slice(), runtimes.as_slice()) else {
+        return false;
+    };
+    let builder_ok = builder.base == "chef"
+        && builder.instructions.iter().any(|instruction| {
+            docker_instruction_arguments(instruction, "RUN").is_some_and(|arguments| {
+                arguments.starts_with("cargo chef cook ")
+                    && arguments.contains("--bin settingsonly-server")
+            })
+        })
+        && builder.instructions.iter().any(|instruction| {
+            docker_instruction_arguments(instruction, "RUN").is_some_and(|arguments| {
+                arguments.starts_with("cargo build ")
+                    && arguments.contains("--bin settingsonly-server")
+            })
+        });
+    const RUNTIME_INSTRUCTIONS: &[(&str, &str)] = &[
+        (
+            "COPY",
+            "--from=settingsonly-builder /app/target/release/settingsonly-server /usr/local/bin/settingsonly-server",
+        ),
+        (
+            "COPY",
+            "--from=settingsonly-builder /app/assemblies/settingsonly/config.schema.json /usr/share/rss/settingsonly/config.schema.json",
+        ),
+        ("ENTRYPOINT", "[\"/usr/local/bin/settingsonly-server\"]"),
+    ];
+    let runtime_ok = runtime.base == "gcr.io/distroless/cc-debian12:nonroot"
+        && runtime.instructions.len() == RUNTIME_INSTRUCTIONS.len()
+        && runtime.instructions.iter().zip(RUNTIME_INSTRUCTIONS).all(
+            |(instruction, (keyword, arguments))| {
+                docker_instruction_arguments(instruction, keyword) == Some(*arguments)
+            },
+        );
+    let default_runtime_unchanged = stages.last().is_some_and(|stage| stage.name == "runtime");
+    builder_ok && runtime_ok && default_runtime_unchanged
+}
+
+fn docker_stages(source: &str) -> Vec<DockerStage<'_>> {
+    let mut stages = Vec::new();
+    for line in source.lines().map(str::trim) {
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some(from) = docker_instruction_arguments(line, "FROM") {
+            let mut parts = from.split_whitespace();
+            let (Some(base), Some(as_keyword), Some(name), None) =
+                (parts.next(), parts.next(), parts.next(), parts.next())
+            else {
+                continue;
+            };
+            if !as_keyword.eq_ignore_ascii_case("AS") {
+                continue;
+            }
+            stages.push(DockerStage {
+                base,
+                name,
+                instructions: Vec::new(),
+            });
+        } else if let Some(stage) = stages.last_mut() {
+            stage.instructions.push(line);
+        }
+    }
+    stages
+}
+
+fn docker_instruction_arguments<'a>(instruction: &'a str, expected: &str) -> Option<&'a str> {
+    let keyword_end = instruction
+        .find(char::is_whitespace)
+        .unwrap_or(instruction.len());
+    let (keyword, arguments) = instruction.split_at(keyword_end);
+    keyword
+        .eq_ignore_ascii_case(expected)
+        .then(|| arguments.trim_start())
 }
 
 fn package_is_workspace_domain(
@@ -4715,6 +5297,7 @@ audit = { path = "../../crates/audit" }
         use crate::layers::Layer::{Adapter, Domain, Root};
 
         let targets = ["lib", "bin"].map(|kind| MetadataTarget {
+            name: kind.to_owned(),
             kind: vec![kind.to_owned()],
         });
         let forbidden = [
@@ -4745,6 +5328,303 @@ audit = { path = "../../crates/audit" }
                     && finding.detail.contains(&format!("`{forbidden}`"))
             }));
         }
+    }
+
+    const SETTINGSONLY_DOCKER_FIXTURE: &str = r#"
+FROM chef AS settingsonly-builder
+COPY --from=planner /app/recipe.json recipe.json
+RUN cargo chef cook --release --locked --recipe-path recipe.json --bin settingsonly-server
+COPY . .
+RUN cargo build --release --locked --bin settingsonly-server && strip target/release/settingsonly-server
+FROM gcr.io/distroless/cc-debian12:nonroot AS settingsonly-runtime
+COPY --from=settingsonly-builder /app/target/release/settingsonly-server /usr/local/bin/settingsonly-server
+COPY --from=settingsonly-builder /app/assemblies/settingsonly/config.schema.json /usr/share/rss/settingsonly/config.schema.json
+ENTRYPOINT ["/usr/local/bin/settingsonly-server"]
+FROM gcr.io/distroless/cc-debian12:nonroot AS runtime
+ENTRYPOINT ["/usr/local/bin/server"]
+"#;
+
+    fn settingsonly_boundary_evidence<'a>(
+        targets: &'a [MetadataTarget],
+        closure_packages: &'a BTreeSet<String>,
+        dockerfile: &'a str,
+    ) -> SettingsOnlyExecutableEvidence<'a> {
+        SettingsOnlyExecutableEvidence {
+            targets,
+            closure_packages,
+            test_support_enabled: false,
+            schema_is_regular_file: true,
+            sample_is_regular_file: true,
+            runbook_is_regular_file: true,
+            artifact_acceptance: true,
+            journey_target_declared: true,
+            required_journey_test_declared: true,
+            dockerfile,
+        }
+    }
+
+    /// INVARIANT: SETTINGSONLY-EXECUTABLE-BOUNDARY-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::settingsonly_executable_boundary_rejects_each_incomplete_artifact_fact", anti_vacuity = "tests::settingsonly_real_executable_boundary_is_complete" } -- the #1796 target is one lib+bin+artifact-acceptance package whose default normal closure, committed config schema, exact non-ignored lifecycle fixture, and closed named distroless image target are checked without introducing the cross-assembly artifact matrix owned by #1798.
+    #[test]
+    fn settingsonly_executable_boundary_rejects_each_incomplete_artifact_fact() {
+        let targets = [
+            MetadataTarget {
+                name: "settingsonly".to_owned(),
+                kind: vec!["lib".to_owned()],
+            },
+            MetadataTarget {
+                name: "settingsonly-server".to_owned(),
+                kind: vec!["bin".to_owned()],
+            },
+            MetadataTarget {
+                name: "settingsonly_artifact_acceptance".to_owned(),
+                kind: vec!["test".to_owned()],
+            },
+        ];
+        let required = SETTINGSONLY_ALLOWED_NORMAL_WORKSPACE_PACKAGES
+            .iter()
+            .map(|package| (*package).to_owned())
+            .collect::<BTreeSet<_>>();
+        assert!(
+            validate_settingsonly_executable_evidence(settingsonly_boundary_evidence(
+                &targets,
+                &required,
+                SETTINGSONLY_DOCKER_FIXTURE,
+            ))
+            .is_empty()
+        );
+
+        let mut unexpected_closure = required.clone();
+        unexpected_closure.insert("mqtt".to_owned());
+        assert!(
+            validate_settingsonly_executable_evidence(settingsonly_boundary_evidence(
+                &targets,
+                &unexpected_closure,
+                SETTINGSONLY_DOCKER_FIXTURE,
+            ))
+            .iter()
+            .any(|finding| finding.detail.contains("unexpected packages")),
+            "positive dependency closure accepted an unlisted package"
+        );
+
+        let mut incomplete_closure = required
+            .iter()
+            .filter(|package| package.as_str() != "runtimeexec")
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        incomplete_closure.insert("identity".to_owned());
+        let broken_docker = SETTINGSONLY_DOCKER_FIXTURE
+            .replace(
+                "COPY --from=settingsonly-builder /app/assemblies/settingsonly/config.schema.json /usr/share/rss/settingsonly/config.schema.json",
+                "",
+            )
+            .replace(
+                "ENTRYPOINT [\"/usr/local/bin/settingsonly-server\"]",
+                "ENTRYPOINT [\"/usr/local/bin/server\"]",
+            );
+        let mut incomplete =
+            settingsonly_boundary_evidence(&targets[..1], &incomplete_closure, &broken_docker);
+        incomplete.test_support_enabled = true;
+        incomplete.schema_is_regular_file = false;
+        incomplete.sample_is_regular_file = false;
+        incomplete.runbook_is_regular_file = false;
+        incomplete.artifact_acceptance = false;
+        incomplete.journey_target_declared = false;
+        incomplete.required_journey_test_declared = false;
+        let details = validate_settingsonly_executable_evidence(incomplete)
+            .into_iter()
+            .map(|finding| finding.detail)
+            .collect::<Vec<_>>()
+            .join("\n");
+        for field in [
+            "package.targets",
+            "missing allowed",
+            "unexpected packages",
+            "default-normal-features",
+            "config-schema",
+            "config-sample",
+            "operator-runbook",
+            "artifact-acceptance",
+            "journey",
+            "Dockerfile",
+        ] {
+            assert!(details.contains(field), "missing red evidence for {field}");
+        }
+    }
+
+    #[test]
+    fn settingsonly_docker_boundary_rejects_runtime_copy_and_add_bypasses() {
+        let lowercase_allowed_copy = SETTINGSONLY_DOCKER_FIXTURE.replace(
+            "COPY --from=settingsonly-builder /app/target/release/settingsonly-server /usr/local/bin/settingsonly-server",
+            "copy --from=settingsonly-builder /app/target/release/settingsonly-server /usr/local/bin/settingsonly-server",
+        );
+        assert!(
+            settingsonly_docker_target_is_closed(&lowercase_allowed_copy),
+            "Docker instruction parsing must be case-insensitive"
+        );
+
+        let runtime_marker = "ENTRYPOINT [\"/usr/local/bin/settingsonly-server\"]";
+        let cases = [
+            ("ADD", "ADD /tmp/unexpected /usr/local/share/unexpected"),
+            (
+                "lowercase COPY",
+                "copy --from=settingsonly-builder /app/target/release/settingsonly-server /usr/local/bin/unexpected",
+            ),
+            (
+                "third COPY",
+                "COPY --from=settingsonly-builder /app/target/release/settingsonly-server /usr/local/bin/unexpected",
+            ),
+            ("root user override", "USER 0"),
+            (
+                "entrypoint override",
+                "ENTRYPOINT [\"/usr/local/bin/unexpected\"]",
+            ),
+            ("unexpected environment", "ENV UNEXPECTED=true"),
+            ("false port publication", "EXPOSE 8080 8083"),
+            ("command override", "CMD [\"--help\"]"),
+        ];
+        for (case, extra_instruction) in cases {
+            let dockerfile = SETTINGSONLY_DOCKER_FIXTURE.replace(
+                runtime_marker,
+                &format!("{extra_instruction}\n{runtime_marker}"),
+            );
+            assert!(
+                !settingsonly_docker_target_is_closed(&dockerfile),
+                "settingsonly runtime accepted {case} bypass"
+            );
+        }
+    }
+
+    #[test]
+    fn settingsonly_journey_gate_requires_exact_non_ignored_parent() -> anyhow::Result<()> {
+        let cases = [
+            ("missing parent", "#[test]\nfn unrelated_journey() {}"),
+            (
+                "only ignored child",
+                "#[tokio::test]\n#[ignore]\nasync fn settingsonly_lifecycle_fixture_child() {}",
+            ),
+            (
+                "name bait",
+                "#[test]\nfn settingsonly_lifecycle_fixture_ready_request_sigterm_drain_decoy() {}",
+            ),
+            (
+                "ignored parent",
+                "#[tokio::test]\n#[ignore]\nasync fn settingsonly_lifecycle_fixture_ready_request_sigterm_drain() {}",
+            ),
+            (
+                "conditionally compiled parent",
+                "#[test]\n#[cfg(any())]\nfn settingsonly_lifecycle_fixture_ready_request_sigterm_drain() { run(); }",
+            ),
+            (
+                "conditionally ignored parent",
+                "#[test]\n#[cfg_attr(all(), ignore)]\nfn settingsonly_lifecycle_fixture_ready_request_sigterm_drain() { run(); }",
+            ),
+            (
+                "empty parent",
+                "#[test]\nfn settingsonly_lifecycle_fixture_ready_request_sigterm_drain() {}",
+            ),
+        ];
+        for (case, source) in cases {
+            assert!(
+                !settingsonly_journey_has_required_test(source)?,
+                "settingsonly journey gate accepted {case}"
+            );
+        }
+
+        assert!(settingsonly_journey_has_required_test(
+            "#[tokio::test]\nasync fn settingsonly_lifecycle_fixture_ready_request_sigterm_drain() { run().await; }"
+        )?);
+        Ok(())
+    }
+
+    #[test]
+    fn settingsonly_artifact_gate_requires_binary_image_and_closed_harness() -> anyhow::Result<()> {
+        let source = include_str!("../../assemblies/settingsonly/tests/artifact_acceptance.rs");
+        assert!(settingsonly_artifact_source_is_closed(source)?);
+        for (case, broken) in [
+            (
+                "wrong binary",
+                source.replace("CARGO_BIN_EXE_settingsonly-server", "CARGO_BIN_EXE_server"),
+            ),
+            (
+                "non-ignored image",
+                source.replace("#[ignore =", "#[allow(dead_code)]\n#[doc ="),
+            ),
+            (
+                "conditional binary",
+                source.replacen("#[test]", "#[test]\n#[cfg(any())]", 1),
+            ),
+            (
+                "wrong image environment",
+                source.replace("std::env::var(IMAGE_ENV)", "std::env::var(WRONG_ENV)"),
+            ),
+            (
+                "binary artifact constructed without assertion",
+                source.replace(
+                    "assert_executable_contract(Artifact::Binary(env!(\"CARGO_BIN_EXE_settingsonly-server\")))",
+                    "{ let _artifact = Artifact::Binary(env!(\"CARGO_BIN_EXE_settingsonly-server\")); Ok(()) }",
+                ),
+            ),
+            (
+                "image artifact constructed without assertion",
+                source.replace(
+                    "assert_executable_contract(Artifact::Image(&image))",
+                    "{ let _artifact = Artifact::Image(&image); Ok(()) }",
+                ),
+            ),
+            (
+                "live artifact behavior omitted",
+                source.replace(
+                    "assert_live_deployment_contract(\n        Artifact::Binary(env!(\"CARGO_BIN_EXE_settingsonly-server\")),\n        Artifact::Image(&image),\n    )",
+                    "{\n        let _binary = Artifact::Binary(env!(\"CARGO_BIN_EXE_settingsonly-server\"));\n        let _image = Artifact::Image(&image);\n        Ok(())\n    }",
+                ),
+            ),
+        ] {
+            assert!(
+                !settingsonly_artifact_source_is_closed(&broken)?,
+                "settingsonly artifact source gate accepted {case}"
+            );
+        }
+
+        let script = include_str!("../../hack/settingsonly-artifact-acceptance.sh");
+        assert!(
+            settingsonly_artifact_script_is_closed(script),
+            "logical statements: {:?}",
+            logical_shell_statements(script)
+        );
+        for (case, broken) in [
+            (
+                "wrong Docker target",
+                script.replace("--target settingsonly-runtime", "--target runtime"),
+            ),
+            (
+                "ignored image omitted",
+                script.replace("--include-ignored", ""),
+            ),
+            (
+                "wrong test target",
+                script.replace("--test settingsonly_artifact_acceptance", "--test other"),
+            ),
+            ("extra command", format!("{script}\ntrue\n")),
+        ] {
+            assert!(
+                !settingsonly_artifact_script_is_closed(&broken),
+                "settingsonly artifact script gate accepted {case}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn settingsonly_real_executable_boundary_is_complete() -> anyhow::Result<()> {
+        let root = crate::workspace_root()?;
+        let findings = validate_target(&root, "settingsonly")?;
+        assert!(
+            findings
+                .iter()
+                .all(|finding| finding.rule != Rule::SettingsOnlyExecutableBoundary),
+            "real settingsonly artifact closure must be complete: {findings:?}"
+        );
+        Ok(())
     }
 
     #[test]

@@ -12,24 +12,68 @@ workspace = true
 name = "settingsonly"
 path = "src/lib.rs"
 
+[[bin]]
+name = "settingsonly-server"
+path = "src/main.rs"
+
+[[test]]
+name = "settingsonly_artifact_acceptance"
+path = "tests/artifact_acceptance.rs"
+
+[features]
+default = []
+test-support = ["settings-composition/test-support"]
+
 [dependencies]
 anyhow = { workspace = true }
+authn = { path = "../../crates/authn" }
+axum = { workspace = true }
 assembly-schema = { path = "../../crates/assembly-schema" }
 bootstrap = { path = "../../crates/bootstrap" }
+consistency = { path = "../../crates/consistency" }
 diport = { path = "../../crates/diport" }
+generated = { path = "../../generated" }
+httpd = { path = "../../adapters/httpd" }
+httpserve = { path = "../../crates/httpserve" }
+oidc = { path = "../../adapters/oidc", features = ["backend"] }
 postgres = { path = "../../adapters/postgres", features = ["domain-settings"] }
+prometheus_adapter = { package = "prometheus-adapter", path = "../../adapters/prometheus", features = [
+    "backend",
+] }
+primitives = { path = "../../crates/primitives" }
+ratelimit = { path = "../../adapters/ratelimit" }
+reqwest = { workspace = true, features = ["rustls-tls-webpki-roots"] }
+runtimeexec = { path = "../../crates/runtimeexec" }
+runctx = { path = "../../crates/runctx" }
+schemars = { workspace = true }
+secure = { path = "../../crates/secure" }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
 settings = { path = "../../crates/settings", features = ["seed-data"] }
 settings-composition = { path = "../../composition/settings" }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-util = { workspace = true }
+toml = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
 vault = { path = "../../adapters/vault", features = ["backend"] }
+vocab = { path = "../../crates/vocab" }
+zeroize = { workspace = true }
 
 [dev-dependencies]
 vault = { path = "../../adapters/vault", features = ["backend", "test-support"] }
 base64 = { workspace = true }
+p256 = { workspace = true, features = ["ecdsa"] }
 postgres = { path = "../../adapters/postgres", features = ["domain-settings", "test-support"] }
+rcgen = { workspace = true }
 reqwest = { workspace = true }
+rustls = { workspace = true }
 secure = { path = "../../crates/secure" }
+jsonschema = { workspace = true }
 serde_json = { workspace = true }
 settings-composition = { path = "../../composition/settings", features = ["test-support"] }
+testkit = { path = "../../crates/testkit", features = ["containers"] }
 tokio = { workspace = true, features = ["macros", "rt"] }
+tokio-rustls = { workspace = true }
 vocab = { path = "../../crates/vocab" }
 wiremock = { workspace = true }

@@ -321,7 +321,7 @@ fn localtx_execution_budget() -> LocalTxExecutionBudget {
 /// Closed Postgres retry-routing boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum PgTxRetryBoundary {
-    #[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
+    #[cfg(feature = "domain-identity")]
     OutboxProducer,
     #[cfg(feature = "domain-settings")]
     SettingsConfig,
@@ -342,7 +342,7 @@ pub(crate) enum PgTxRetryBoundary {
 impl PgTxRetryBoundary {
     pub(crate) const fn as_label(self) -> &'static str {
         match self {
-            #[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
+            #[cfg(feature = "domain-identity")]
             Self::OutboxProducer => "outbox.producer",
             #[cfg(feature = "domain-settings")]
             Self::SettingsConfig => "settings.config",
@@ -363,7 +363,7 @@ impl PgTxRetryBoundary {
 }
 
 /// Non-retrying HTTP producer transaction boundary.
-#[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
+#[cfg(feature = "domain-identity")]
 pub(crate) const OUTBOX_PRODUCER_BOUNDARY: PgTxRetryBoundary = PgTxRetryBoundary::OutboxProducer;
 /// Retry boundary for settings config UoW writes.
 #[cfg(feature = "domain-settings")]

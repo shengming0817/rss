@@ -8,5 +8,6 @@ exactExceptions = [
   "Arc<dyn distributed::DomainTransport>",
   "Arc<oidc::OidcProvider>",
   "postgres::PgRevocationStore",
+  "settings_composition::KeyProviderReadinessInterval",
   "Arc<vault::VaultSigner>",
 ]

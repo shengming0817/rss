@@ -51,31 +51,46 @@ use rustc_span::Span;
 /// `auth_bridge` 与 `operator::{projection,dlq,settings}` 的 nested def-path。
 /// assemblies/runtime → package name "runtime"（#1309 单一组合根；薄 bin bins/server、bins/rss 已移出）。
 /// 定义 crate `httpserve` 不入 allowlist：其生产代码不构造 `Authenticated`（仅 `#[cfg(test)]` 调，不被扫）。
-const ALLOWED_AUTHENTICATED_MINT_FUNCTIONS: &[(&str, &str)] = &[
-    ("allow_evidence", "auth_bridge::allow_evidence"),
-    ("mtls_evidence", "auth_bridge::mtls_evidence"),
+const ALLOWED_AUTHENTICATED_MINT_FUNCTIONS: &[(&str, &str, &str)] = &[
+    ("runtime", "allow_evidence", "auth_bridge::allow_evidence"),
+    ("runtime", "mtls_evidence", "auth_bridge::mtls_evidence"),
+    (
+        "settingsonly",
+        "federated_evidence",
+        "auth_bridge::federated_evidence",
+    ),
 ];
 const ALLOWED_CURRENT_GRANT_MINT_FUNCTION: (&str, &str) =
     ("current_auth_grant", "auth_bridge::current_auth_grant");
-const ALLOWED_PRINCIPAL_ACCESSOR_FUNCTIONS: &[(&str, &str)] = &[
-    ("allow_evidence", "auth_bridge::allow_evidence"),
+const ALLOWED_PRINCIPAL_ACCESSOR_FUNCTIONS: &[(&str, &str, &str)] = &[
+    ("runtime", "allow_evidence", "auth_bridge::allow_evidence"),
     (
+        "settingsonly",
+        "federated_evidence",
+        "auth_bridge::federated_evidence",
+    ),
+    (
+        "runtime",
         "verified_service_maintenance_operator_subject",
         "operator::projection::verified_service_maintenance_operator_subject",
     ),
     (
+        "runtime",
         "verified_projection_maintenance_operator_subject",
         "operator::projection::verified_projection_maintenance_operator_subject",
     ),
     (
+        "runtime",
         "projection_maintenance_operator_receipt",
         "operator::projection::projection_maintenance_operator_receipt",
     ),
     (
+        "runtime",
         "authenticate_dlq_operator_principal",
         "operator::dlq::authenticate_dlq_operator_principal",
     ),
     (
+        "runtime",
         "dlq_operator_receipt",
         "operator::dlq::dlq_operator_receipt",
     ),
@@ -205,16 +220,16 @@ fn config_value_capability_caller_is_allowed(cx: &LateContext<'_>, hir_id: HirId
 }
 
 fn authenticated_mint_caller_is_allowed(cx: &LateContext<'_>, hir_id: HirId) -> bool {
-    if cx.tcx.crate_name(LOCAL_CRATE).as_str() != "runtime" {
-        return false;
-    }
+    let crate_name = cx.tcx.crate_name(LOCAL_CRATE);
     let parent = cx.tcx.hir_get_parent_item(hir_id).to_def_id();
     let item_name = cx.tcx.item_name(parent);
     let def_path = cx.tcx.def_path_str(parent);
     ALLOWED_AUTHENTICATED_MINT_FUNCTIONS
         .iter()
-        .any(|(expected_name, expected_path)| {
-            item_name.as_str() == *expected_name && is_exact_runtime_path(&def_path, expected_path)
+        .any(|(expected_crate, expected_name, expected_path)| {
+            crate_name.as_str() == *expected_crate
+                && item_name.as_str() == *expected_name
+                && is_exact_crate_path(&def_path, expected_crate, expected_path)
         })
 }
 
@@ -452,16 +467,16 @@ fn is_principal_audit_subject_did(cx: &LateContext<'_>, did: DefId) -> bool {
 /// 当前被编译 crate（caller）在 allowlist 内。`LOCAL_CRATE` 是 caller，区别于 callee 的 `did.krate`；
 /// 按 crate 名判定不可被「在别的 crate 里 `mod server`」伪造。
 fn principal_accessor_caller_is_allowed(cx: &LateContext<'_>, hir_id: HirId) -> bool {
-    if cx.tcx.crate_name(LOCAL_CRATE).as_str() != "runtime" {
-        return false;
-    }
+    let crate_name = cx.tcx.crate_name(LOCAL_CRATE);
     let parent = cx.tcx.hir_get_parent_item(hir_id).to_def_id();
     let item_name = cx.tcx.item_name(parent);
     let def_path = cx.tcx.def_path_str(parent);
     ALLOWED_PRINCIPAL_ACCESSOR_FUNCTIONS
         .iter()
-        .any(|(expected_name, expected_path)| {
-            item_name.as_str() == *expected_name && is_exact_runtime_path(&def_path, expected_path)
+        .any(|(expected_crate, expected_name, expected_path)| {
+            crate_name.as_str() == *expected_crate
+                && item_name.as_str() == *expected_name
+                && is_exact_crate_path(&def_path, expected_crate, expected_path)
         })
 }
 
@@ -511,6 +526,11 @@ fn ui_runtime_exact_wrappers() {
     // allowlist，同时用 exact nested wrapper 绿与 direct/nested 红锁住 verification 分支。
     // "runtime" 不与 rss_authplan_callsite 的 "primitives" 在共享 lints workspace 撞 target 名。
     dylint_testing::ui_test_example(env!("CARGO_PKG_NAME"), "runtime");
+}
+
+#[test]
+fn ui_settingsonly_exact_federated_wrapper() {
+    dylint_testing::ui_test_example(env!("CARGO_PKG_NAME"), "settingsonly");
 }
 
 #[test]

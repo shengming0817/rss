@@ -1,0 +1,19 @@
+warning: Authenticated 证据仅组合根（assembly / bin crate）可构造：profile-specific constructor 不得在此 crate 调用
+  --> $DIR/settingsonly.rs:16:9
+   |
+LL |         Authenticated::new_federated(
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: 仅在 runtime `auth_bridge::{allow_evidence,mtls_evidence}` 的精确验签桥函数中构造 Authenticated；其它 runtime 代码同样不得 mint evidence
+   = note: `#[warn(rss_authenticated_callsite)]` on by default
+
+warning: Principal 身份降维 accessor（`audit_subject` / `service_caller_domain`）仅组合根可调用
+  --> $DIR/settingsonly.rs:18:13
+   |
+LL |             principal.audit_subject(),
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: 仅在列明的 runtime verification wrapper 中读取 Principal 身份；其它 runtime 代码同样不得把 verified Principal 降维为可转传值
+
+warning: 2 warnings emitted
+

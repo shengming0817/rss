@@ -21,6 +21,8 @@ FROM rust:1.96.0-bookworm AS chef
 # 须 ≥0.1.71（edition 2024 支持；workspace = edition 2024 / 工具链 1.96）。
 RUN cargo install cargo-chef --locked --version 0.1.77
 WORKDIR /app
+# 仓库级 Cargo 配置把本地构建放入 `.cache/`；镜像构建固定回 cargo-chef 预期的共享层路径。
+ENV CARGO_TARGET_DIR=/app/target
 
 # ── planner：从完整源码算依赖配方（recipe.json 只含依赖图，不含业务源 → 改代码不失效）──────────────
 FROM chef AS planner
@@ -37,7 +39,23 @@ RUN cargo build --release --locked --bin server --bin rss \
     # reason: strip 符号缩体积（不改全局 [profile.release]，避免影响整个 workspace 的开发构建）。
     && strip target/release/server target/release/rss
 
+# ── settingsonly-builder：独立 cook/build settingsonly-server，不污染 full runtime artifact ──────────
+FROM chef AS settingsonly-builder
+COPY --from=planner /app/recipe.json recipe.json
+RUN cargo chef cook --release --locked --recipe-path recipe.json --package settingsonly --bin settingsonly-server
+COPY . .
+RUN cargo build --release --locked --package settingsonly --bin settingsonly-server \
+    && strip target/release/settingsonly-server
+
+# ── settingsonly-runtime：仅含 settingsonly binary + 外部 config schema ──────────────────────────────
+FROM gcr.io/distroless/cc-debian12:nonroot AS settingsonly-runtime
+# settingsonly 只允许 loopback plaintext；不声明 EXPOSE，外部流量/探针由同 Pod TLS sidecar 转发。
+COPY --from=settingsonly-builder /app/target/release/settingsonly-server /usr/local/bin/settingsonly-server
+COPY --from=settingsonly-builder /app/assemblies/settingsonly/config.schema.json /usr/share/rss/settingsonly/config.schema.json
+ENTRYPOINT ["/usr/local/bin/settingsonly-server"]
+
 # ── runtime：distroless/cc 非 root，server 为入口，rss 供离线维护命令使用 ─────────────────────────────
+# 保持最后 stage，确保普通 `docker build .` 的默认镜像语义不变。
 FROM gcr.io/distroless/cc-debian12:nonroot AS runtime
 # 4 个 listener（Primary/Internal/Admin/Health）默认演示端口；实际 bind 地址由 RSS_*_LISTEN_ADDR 决定。
 EXPOSE 8080 8081 8082 8083

@@ -46,6 +46,10 @@ use rustc_span::Span;
 /// assemblies/runtime → package name "runtime"（#1309 单一组合根；薄 bin bins/server、bins/rss 已移出）。
 /// `primitives` 本身定义 `AuthPlan`，在 `none()` 内调 `Self::new()` 是内部实现，合法豁免。
 const ALLOWED_CALLER_CRATES: &[&str] = &["primitives", "runtime"];
+const ALLOWED_SETTINGSONLY_FUNCTIONS: &[(&str, &str)] = &[
+    ("primary_auth_plan", "listeners::primary_auth_plan"),
+    ("health_auth_plan", "listeners::health_auth_plan"),
+];
 
 dylint_linting::declare_late_lint! {
     /// ### What it does
@@ -85,7 +89,7 @@ impl<'tcx> LateLintPass<'tcx> for RssAuthplanCallsite {
         let Res::Def(DefKind::AssocFn | DefKind::Fn, did) = cx.qpath_res(qpath, expr.hir_id) else {
             return;
         };
-        if is_authplan_mint_did(cx, did) && !caller_is_allowed(cx) {
+        if is_authplan_mint_did(cx, did) && !caller_is_allowed(cx, expr.hir_id) {
             emit(cx, expr.hir_id, expr.span);
         }
     }
@@ -123,8 +127,26 @@ fn is_authplan_mint_did(cx: &LateContext<'_>, did: DefId) -> bool {
 
 /// 当前被编译 crate（caller）在 allowlist 内。`LOCAL_CRATE` 是 caller，区别于 callee 的 `did.krate`；
 /// 按 crate 名判定不可被「在别的 crate 里 `mod server`」伪造。
-fn caller_is_allowed(cx: &LateContext<'_>) -> bool {
-    ALLOWED_CALLER_CRATES.contains(&cx.tcx.crate_name(LOCAL_CRATE).as_str())
+fn caller_is_allowed(cx: &LateContext<'_>, hir_id: HirId) -> bool {
+    let crate_name = cx.tcx.crate_name(LOCAL_CRATE);
+    if ALLOWED_CALLER_CRATES.contains(&crate_name.as_str()) {
+        return true;
+    }
+    if crate_name.as_str() != "settingsonly" {
+        return false;
+    }
+    let parent = cx.tcx.hir_get_parent_item(hir_id).to_def_id();
+    let item_name = cx.tcx.item_name(parent);
+    let def_path = cx.tcx.def_path_str(parent);
+    ALLOWED_SETTINGSONLY_FUNCTIONS
+        .iter()
+        .any(|(expected_name, expected_path)| {
+            item_name.as_str() == *expected_name
+                && (def_path == *expected_path
+                    || def_path
+                        .strip_prefix("settingsonly::")
+                        .is_some_and(|path| path == *expected_path))
+        })
 }
 
 /// 在调用处报告；用调用 expr 的 `HirId` 解析 lint 级别，使 item/expr 级
@@ -156,4 +178,9 @@ fn ui_primitives_allowed() {
     // example target 名 `primitives`（= allowlist 项，定义 crate 内部豁免）⇒ crate_name(LOCAL_CRATE)=="primitives"
     // ⇒ 调 funnel 不触发，验证 allowlist 分支（anti-vacuity：lint 非恒报）。golden ui/primitives.stderr 为空。
     dylint_testing::ui_test_example(env!("CARGO_PKG_NAME"), "primitives");
+}
+
+#[test]
+fn ui_settingsonly_exact_wrappers() {
+    dylint_testing::ui_test_example(env!("CARGO_PKG_NAME"), "settingsonly");
 }

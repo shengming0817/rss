@@ -1,10 +1,10 @@
 error[E0308]: mismatched types
-  --> tests/ui/launch_plan_missing_probe_receipt_fail.rs:11:55
+  --> tests/ui/launch_plan_missing_probe_receipt_fail.rs:12:55
    |
-11 |     let _missing_receipt: ConstructorWithoutReceipt = runtimeexec::LaunchPlan::new;
+12 |     let _missing_receipt: ConstructorWithoutReceipt = runtimeexec::LaunchPlan::new;
    |                           -------------------------   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ incorrect number of function parameters
    |                           |
    |                           expected due to this
    |
-   = note: expected fn pointer `fn((), fn(()) -> Result<(), anyhow::Error>, Option<Box<DynManagedResource<'static>>>, LaunchLifecycleBatches) -> LaunchPlan<(), (), fn(()) -> Result<(), anyhow::Error>>`
-                 found fn item `fn(_, _, _, Option<Box<DynManagedResource<'static>>>, LaunchLifecycleBatches) -> LaunchPlan<_, _, _> {LaunchPlan::<_, _, _>::new}`
+   = note: expected fn pointer `fn((), fn(()) -> std::future::Ready<Result<(), anyhow::Error>>, Option<Box<DynManagedResource<'static>>>, LaunchLifecycleBatches, TotalDrainBudget) -> LaunchPlan<(), (), fn(()) -> std::future::Ready<Result<(), anyhow::Error>>>`
+                 found fn item `fn(_, _, _, Option<Box<DynManagedResource<'static>>>, LaunchLifecycleBatches, TotalDrainBudget) -> LaunchPlan<_, _, _> {LaunchPlan::<_, _, _>::new}`

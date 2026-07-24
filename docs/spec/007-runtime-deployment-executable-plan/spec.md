@@ -13,7 +13,13 @@
   chain; #1789–#1794 now close live provider, listener, domain, and placement execution without a
   handwritten compatibility path.
 - serving and operator paths capture one immutable process-wide RuntimeConfigSnapshot; the runtime environment funnel rejects serving ambient reads outside named maintenance boundaries.
-- `settingsonly` and `identityaudit` are build closures without launch, probe, config-schema, image, or journey closure.
+- `settingsonly` is an executable, deliberately fail-closed Settings closure. It owns a standalone
+  binary, closed configuration parser and Draft-07 schema, Primary and Health listeners, real
+  Postgres/Vault/JWKS/Settings readiness, the shared `runtimeexec` lifecycle, a SIGTERM journey,
+  and a dedicated distroless image target. Identity and Audit are absent by design: missing or
+  invalid credentials receive 401, while every successfully verified credential receives 403.
+- `identityaudit` remains a build closure without launch, probe, config-schema, image, or journey
+  closure; its executable boundary remains owned by the later assembly work.
 - deployment is Compose-oriented and not derived from assembly identity; protected inventory and same-head deployment/release receipts do not exist.
 - 001 is superseded, immutable audit lineage. 007 is the active planning entry and provides no compatibility path back to 001.
 

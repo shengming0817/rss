@@ -4,6 +4,7 @@ use crate::{config::SnapshotConfig, listeners, routes};
 
 use std::net::SocketAddr;
 use std::num::NonZeroU64;
+use std::time::Duration;
 
 use anyhow::Context as _;
 use diport::DynManagedResource;
@@ -11,6 +12,13 @@ use httpd::HttpServer;
 use primitives::{AuthScheme, ListenerKind};
 
 pub(crate) const HTTP_SERVER_REQUEST_BUDGET_ENV: &str = "RSS_HTTP_SERVER_REQUEST_BUDGET_MS";
+const TOTAL_DRAIN_BUDGET: Duration = Duration::from_secs(20);
+const DEPLOYMENT_GRACE_PERIOD: Duration = Duration::from_secs(30);
+const EXIT_BUFFER: Duration = Duration::from_secs(5);
+
+pub(crate) fn total_drain_budget() -> anyhow::Result<runtimeexec::TotalDrainBudget> {
+    runtimeexec::TotalDrainBudget::new(TOTAL_DRAIN_BUDGET, DEPLOYMENT_GRACE_PERIOD, EXIT_BUFFER)
+}
 
 pub(crate) fn server_request_budget(
     config: SnapshotConfig<'_>,
@@ -856,7 +864,7 @@ mod tests {
         let launch_plan = runtimeexec::LaunchPlan::new(
             adapter,
             routes::FinalizedProbeReceipt::for_test(),
-            move |inventory: RuntimeListenerInventory| {
+            move |inventory: RuntimeListenerInventory| async move {
                 assert_eq!(inventory.listener_count, 1);
                 ready_calls_for_hook.fetch_add(1, Ordering::SeqCst);
                 anyhow::bail!("stop after deterministic ready observation")
@@ -872,6 +880,7 @@ mod tests {
                     ..bootstrap::DomainModuleResult::default()
                 },
             ),
+            total_drain_budget().expect("valid runtime drain budget"),
         );
 
         let error = runtimeexec::launch(launch_plan)
@@ -930,7 +939,7 @@ mod tests {
         let launch_plan = runtimeexec::LaunchPlan::new(
             adapter,
             routes::FinalizedProbeReceipt::for_test(),
-            move |_: RuntimeListenerInventory| {
+            move |_: RuntimeListenerInventory| async move {
                 ready_calls_for_hook.fetch_add(1, Ordering::SeqCst);
                 Ok(())
             },
@@ -945,6 +954,7 @@ mod tests {
                     ..bootstrap::DomainModuleResult::default()
                 },
             ),
+            total_drain_budget().expect("valid runtime drain budget"),
         );
         let err = runtimeexec::launch(launch_plan)
             .await

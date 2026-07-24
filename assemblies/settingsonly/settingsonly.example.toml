@@ -1,0 +1,55 @@
+# settingsonly schemaVersion=1 sample. Secret values are never stored in this document; export the
+# four fixed RSS_SETTINGSONLY_* environment variables before launch.
+schemaVersion = 1
+
+[listeners]
+requestBudgetMs = 30000
+
+[listeners.primary]
+bind = "127.0.0.1:8080"
+
+[listeners.health]
+bind = "127.0.0.1:8083"
+
+[federated]
+issuer = "https://issuer.example.com"
+audience = "rss-settingsonly"
+jwksPath = "/run/rss/federated.jwks.json"
+refreshSeconds = 30
+trustedKinds = ["user", "device", "admin", "superAdmin"]
+
+[postgres]
+host = "postgres.example.com"
+port = 5432
+database = "rss"
+sslMode = "verifyFull"
+sslRootCertPath = "/run/rss/postgres-ca.pem"
+readinessSeconds = 15
+
+[postgres.writer]
+username = "rss_settings_writer"
+maxConnections = 10
+password = { kind = "environmentRef", name = "RSS_SETTINGSONLY_PG_WRITER_PASSWORD" }
+
+[postgres.reader]
+username = "rss_settings_reader"
+maxConnections = 10
+password = { kind = "environmentRef", name = "RSS_SETTINGSONLY_PG_READER_PASSWORD" }
+
+[postgres.migrator]
+username = "rss_settings_migrator"
+password = { kind = "environmentRef", name = "RSS_SETTINGSONLY_PG_MIGRATOR_PASSWORD" }
+
+[vault]
+addr = "https://vault.example.com:8200"
+caCertPemPath = "/run/rss/vault-ca.pem"
+transitMount = "transit"
+settingsKeyName = "settings-config-value"
+token = { kind = "environmentRef", name = "RSS_SETTINGSONLY_VAULT_TOKEN" }
+readinessSeconds = 10
+
+[[vault.tenantStoreAllowlist]]
+tenantId = "00000000-0000-4000-8000-000000000147"
+storeId = "vault"
+mount = "secret"
+kvPathPrefix = "tenants/settings"

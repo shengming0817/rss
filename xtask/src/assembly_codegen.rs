@@ -517,7 +517,7 @@ fn render_providers(manifest: &CanonicalAssemblyManifestV1, source_label: &str) 
         "{GENERATED_PROVIDER_OWNERSHIP_MARKER}\n// Source: {source_label}\n// Source-Manifest-Digest: {}\n\nuse assembly_schema::{{\n    DiportPort, LifecycleChannel, ProviderCatalogEntry, ProviderConstructor, ProviderConsumer,\n    ProviderDurability, ProviderFactorySymbol, ProviderRole,\n}};\n\npub(crate) const PROVIDER_CATALOG: &[ProviderCatalogEntry] = &[\n",
         manifest.manifest_digest()
     );
-    for provider in providers {
+    for provider in &providers {
         let factory = provider.id.factory_symbol().with_context(|| {
             format!(
                 "active provider role `{}` has no factory symbol",
@@ -577,15 +577,173 @@ fn render_providers(manifest: &CanonicalAssemblyManifestV1, source_label: &str) 
         code.push_str("    ),\n");
     }
     code.push_str("];\n");
+    if manifest.name() == "settingsonly" {
+        render_settingsonly_provider_role_batches(&mut code, &providers)?;
+    }
     let formatted = crate::codegen::format_rust(&code)?;
     validate_provider_catalog_syntax(&formatted)?;
     Ok(formatted)
 }
 
+fn render_settingsonly_provider_role_batches(
+    code: &mut String,
+    providers: &[&assembly_schema::DiportProvider],
+) -> Result<()> {
+    ensure!(
+        !providers.is_empty(),
+        "settingsonly provider role batches require a non-empty active catalog"
+    );
+
+    code.push_str("\npub(crate) struct ProviderRoleBatches {\n");
+    for provider in providers {
+        let field = provider.id.as_str().replace('-', "_");
+        let constructor = format!("{}Constructor", provider_role_variant(provider.id));
+        code.push_str(&format!("    {field}: Option<{constructor}>,\n"));
+    }
+    code.push_str(
+        "}\n\
+         \npub(crate) struct CompletedProviderRoles {\n\
+             _sealed: (),\n\
+         }\n\
+         \nimpl ProviderRoleBatches {\n",
+    );
+    code.push_str(
+        "    pub(crate) fn exact_join(plans: &[assembly_schema::ProviderPlan]) -> anyhow::Result<Self> {\n\
+                 anyhow::ensure!(plans.len() == PROVIDER_CATALOG.len(), \"settingsonly RuntimePlan/generated provider catalog count drift\");\n\
+                 let mut batches = Self {\n",
+    );
+    for provider in providers {
+        let field = provider.id.as_str().replace('-', "_");
+        code.push_str(&format!("            {field}: None,\n"));
+    }
+    code.push_str(
+        "        };\n\
+                 for entry in PROVIDER_CATALOG {\n\
+                     let mut matching = plans.iter().filter(|plan| plan.id() == entry.role().as_str());\n\
+                     let plan = matching.next().ok_or_else(|| anyhow::anyhow!(\"settingsonly RuntimePlan omits generated provider role '{}'\", entry.role().as_str()))?;\n\
+                     anyhow::ensure!(matching.next().is_none(), \"settingsonly RuntimePlan duplicates generated provider role '{}'\", entry.role().as_str());\n\
+                     anyhow::ensure!(plan.constructor() == entry.evidence().constructor() && plan.outputs() == entry.evidence().outputs(), \"settingsonly RuntimePlan disagrees with generated provider role '{}'\", entry.role().as_str());\n\
+                     match entry.role() {\n",
+    );
+    for provider in providers {
+        let role = provider_role_variant(provider.id);
+        let field = provider.id.as_str().replace('-', "_");
+        let constructor = format!("{role}Constructor");
+        code.push_str(&format!(
+            "                ProviderRole::{role} => anyhow::ensure!(batches.{field}.replace({constructor} {{ entry }}).is_none(), \"settingsonly generated provider role '{{}}' is duplicated\", entry.role().as_str()),\n"
+        ));
+    }
+    code.push_str(
+        "                _ => anyhow::bail!(\"settingsonly generated provider catalog contains unsupported role '{}'\", entry.role().as_str()),\n\
+                     }\n\
+                 }\n\
+                 batches.require_complete()?;\n\
+                 Ok(batches)\n\
+             }\n\
+             fn require_complete(&self) -> anyhow::Result<()> {\n",
+    );
+    for provider in providers {
+        let field = provider.id.as_str().replace('-', "_");
+        code.push_str(&format!(
+            "        anyhow::ensure!(self.{field}.is_some(), \"settingsonly generated provider role '{}' is missing\");\n",
+            provider.id.as_str()
+        ));
+    }
+    code.push_str("        Ok(())\n    }\n");
+    for provider in providers {
+        let field = provider.id.as_str().replace('-', "_");
+        let constructor = format!("{}Constructor", provider_role_variant(provider.id));
+        code.push_str(&format!(
+            "    pub(crate) fn {field}(&mut self) -> anyhow::Result<{constructor}> {{\n        self.{field}.take().ok_or_else(|| anyhow::anyhow!(\"settingsonly provider constructor '{role}' was consumed more than once\"))\n    }}\n",
+            role = provider.id.as_str()
+        ));
+    }
+    code.push_str(
+        "    pub(crate) fn finish(\n        self,\n        inventory: &bootstrap::DomainModuleResult,\n",
+    );
+    for provider in providers {
+        let field = provider.id.as_str().replace('-', "_");
+        let receipt = format!("{}Receipt", provider_role_variant(provider.id));
+        code.push_str(&format!("        {field}: {receipt},\n"));
+    }
+    code.push_str("    ) -> anyhow::Result<CompletedProviderRoles> {\n");
+    code.push_str("        let mut staged = [0_usize; 3];\n");
+    for provider in providers {
+        let field = provider.id.as_str().replace('-', "_");
+        let receipt = format!("{}Receipt", provider_role_variant(provider.id));
+        code.push_str(&format!(
+            "        let {receipt} {{ probes, resources, workers }} = {field};\n        staged[0] += probes;\n        staged[1] += resources;\n        staged[2] += workers;\n"
+        ));
+    }
+    code.push_str("        if ");
+    for (index, provider) in providers.iter().enumerate() {
+        if index != 0 {
+            code.push_str(" || ");
+        }
+        code.push_str(&format!(
+            "self.{}.is_some()",
+            provider.id.as_str().replace('-', "_")
+        ));
+    }
+    code.push_str(
+        " {\n\
+                     anyhow::bail!(\"settingsonly provider role receipt came from a different exact-join generation\");\n\
+                 }\n\
+                 anyhow::ensure!(inventory.probes.len() >= staged[0] && inventory.resources.len() >= staged[1] && inventory.workers.len() >= staged[2], \"settingsonly transaction omits transferred provider lifecycle output\");\n\
+                 Ok(CompletedProviderRoles { _sealed: () })\n\
+             }\n\
+         }\n",
+    );
+
+    code.push_str(
+        "\nfn lifecycle_channels(output: &bootstrap::DomainModuleResult) -> Vec<LifecycleChannel> {\n\
+             let mut channels = Vec::new();\n\
+             if !output.probes.is_empty() { channels.push(LifecycleChannel::Probes); }\n\
+             if !output.resources.is_empty() { channels.push(LifecycleChannel::Resources); }\n\
+             if !output.workers.is_empty() { channels.push(LifecycleChannel::Workers); }\n\
+             channels\n\
+         }\n\
+         \nfn validate_lifecycle_output(entry: &ProviderCatalogEntry, output: &bootstrap::DomainModuleResult) -> anyhow::Result<()> {\n\
+             let actual = lifecycle_channels(output);\n\
+             anyhow::ensure!(actual == entry.evidence().outputs(), \"settingsonly provider role '{}' lifecycle mismatch: expected {:?}, actual {:?}\", entry.role().as_str(), entry.evidence().outputs(), actual);\n\
+             Ok(())\n\
+         }\n",
+    );
+
+    for provider in providers {
+        let role = provider_role_variant(provider.id);
+        let constructor = format!("{role}Constructor");
+        let batch = format!("{role}Batch");
+        let receipt = format!("{role}Receipt");
+        code.push_str(&format!(
+            "\npub(crate) struct {constructor} {{\n    entry: &'static ProviderCatalogEntry,\n}}\n\
+             pub(crate) struct {batch}(bootstrap::DomainModuleResult);\n\
+             pub(crate) struct {receipt} {{\n    probes: usize,\n    resources: usize,\n    workers: usize,\n}}\n\
+             impl {constructor} {{\n\
+                 pub(crate) fn finish(self, output: bootstrap::DomainModuleResult) -> anyhow::Result<{batch}> {{\n\
+                     validate_lifecycle_output(self.entry, &output)?;\n\
+                     Ok({batch}(output))\n\
+                 }}\n\
+             }}\n\
+             impl {batch} {{\n\
+                 pub(crate) fn transfer(self, inventory: &mut bootstrap::DomainModuleResult) -> {receipt} {{\n\
+                     let receipt = {receipt} {{ probes: self.0.probes.len(), resources: self.0.resources.len(), workers: self.0.workers.len() }};\n\
+                     inventory.merge(self.0);\n\
+                     receipt\n\
+                 }}\n\
+             }}\n"
+        ));
+    }
+    Ok(())
+}
+
 fn validate_provider_catalog_syntax(source: &str) -> Result<()> {
     let syntax = syn::parse_file(source).context("解析 provider catalog Rust AST 失败")?;
-    let [syn::Item::Use(import), syn::Item::Const(catalog)] = syntax.items.as_slice() else {
-        bail!("provider catalog 只允许一个固定 import 与一个 const catalog");
+    let Some((syn::Item::Use(import), remaining)) = syntax.items.split_first() else {
+        bail!("provider catalog 缺少固定 import");
+    };
+    let Some((syn::Item::Const(catalog), role_batch_items)) = remaining.split_first() else {
+        bail!("provider catalog 缺少唯一 const catalog");
     };
     let import_tokens = compact_tokens(&import.tree);
     ensure!(
@@ -619,10 +777,146 @@ fn validate_provider_catalog_syntax(source: &str) -> Result<()> {
     let syn::Expr::Array(entries) = reference.expr.as_ref() else {
         bail!("provider catalog 必须是 checked entry array");
     };
+    let mut roles = Vec::new();
     for entry in &entries.elems {
         validate_provider_catalog_entry(entry)?;
+        roles.push(provider_catalog_entry_role_variant(entry)?);
     }
+    if role_batch_items.is_empty() {
+        return Ok(());
+    }
+    validate_provider_role_batch_syntax(role_batch_items, &roles)
+}
+
+fn provider_catalog_entry_role_variant(expression: &syn::Expr) -> Result<String> {
+    let syn::Expr::Call(call) = expression else {
+        bail!("provider catalog array 只允许 checked call");
+    };
+    let Some(syn::Expr::Path(role)) = call.args.first() else {
+        bail!("provider catalog role 必须是闭合 enum variant");
+    };
+    role.path
+        .segments
+        .last()
+        .map(|segment| segment.ident.to_string())
+        .context("provider catalog role 缺少 variant")
+}
+
+fn validate_provider_role_batch_syntax(items: &[syn::Item], roles: &[String]) -> Result<()> {
+    let mut expected_structs = vec![
+        "CompletedProviderRoles".to_owned(),
+        "ProviderRoleBatches".to_owned(),
+    ];
+    let mut expected_impls = vec![(
+        "ProviderRoleBatches".to_owned(),
+        std::iter::once("exact_join".to_owned())
+            .chain(std::iter::once("require_complete".to_owned()))
+            .chain(roles.iter().map(|role| pascal_to_snake(role)))
+            .chain(std::iter::once("finish".to_owned()))
+            .collect::<Vec<_>>(),
+    )];
+    for role in roles {
+        expected_structs.extend([
+            format!("{role}Constructor"),
+            format!("{role}Batch"),
+            format!("{role}Receipt"),
+        ]);
+        expected_impls.extend([
+            (format!("{role}Constructor"), vec!["finish".to_owned()]),
+            (format!("{role}Batch"), vec!["transfer".to_owned()]),
+        ]);
+    }
+    expected_structs.sort();
+    expected_impls.sort_by(|left, right| left.0.cmp(&right.0));
+    for (_, methods) in &mut expected_impls {
+        methods.sort();
+    }
+
+    let mut structs = Vec::new();
+    let mut impls = Vec::new();
+    let mut functions = Vec::new();
+    for item in items {
+        match item {
+            syn::Item::Struct(item) => {
+                ensure!(
+                    item.attrs.is_empty(),
+                    "generated provider role struct 禁止属性"
+                );
+                ensure!(
+                    compact_tokens(&item.vis) == "pub(crate)",
+                    "generated provider role struct 必须 crate-private"
+                );
+                ensure!(
+                    item.fields
+                        .iter()
+                        .all(|field| matches!(field.vis, syn::Visibility::Inherited)),
+                    "generated provider role fields 必须 private"
+                );
+                structs.push(item.ident.to_string());
+            }
+            syn::Item::Impl(item) => {
+                ensure!(
+                    item.attrs.is_empty() && item.trait_.is_none(),
+                    "generated provider role 只允许无属性 inherent impl"
+                );
+                let syn::Type::Path(target) = item.self_ty.as_ref() else {
+                    bail!("generated provider role impl target 必须是闭合类型");
+                };
+                let target = target
+                    .path
+                    .get_ident()
+                    .map(ToString::to_string)
+                    .context("generated provider role impl target 必须是单段类型")?;
+                let mut methods = item
+                    .items
+                    .iter()
+                    .map(|member| match member {
+                        syn::ImplItem::Fn(method) if method.attrs.is_empty() => {
+                            Ok(method.sig.ident.to_string())
+                        }
+                        _ => bail!("generated provider role impl 只允许无属性 method"),
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                methods.sort();
+                impls.push((target, methods));
+            }
+            syn::Item::Fn(item) => {
+                ensure!(
+                    item.attrs.is_empty() && matches!(item.vis, syn::Visibility::Inherited),
+                    "generated provider role helper 必须 private 且无属性"
+                );
+                functions.push(item.sig.ident.to_string());
+            }
+            _ => bail!("provider catalog generated role batches 含额外 item"),
+        }
+    }
+    structs.sort();
+    impls.sort_by(|left, right| left.0.cmp(&right.0));
+    functions.sort();
+    ensure!(
+        structs == expected_structs,
+        "generated provider role struct 集合漂移"
+    );
+    ensure!(
+        impls == expected_impls,
+        "generated provider role impl 集合漂移"
+    );
+    ensure!(
+        functions == ["lifecycle_channels", "validate_lifecycle_output"],
+        "generated provider role helper 集合漂移"
+    );
     Ok(())
+}
+
+fn pascal_to_snake(value: &str) -> String {
+    let mut snake = String::new();
+    for (index, character) in value.chars().enumerate() {
+        if character.is_ascii_uppercase() && index != 0 {
+            snake.push('_');
+        }
+        snake.push(character.to_ascii_lowercase());
+    }
+    snake
 }
 
 fn validate_provider_catalog_entry(expression: &syn::Expr) -> Result<()> {
@@ -1667,6 +1961,33 @@ const _: () = assert!(!providers_gen::PROVIDER_CATALOG.is_empty());
             .context("missing settings key provider")?;
         assert!(dlx < limiter && limiter < settings);
         fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn settingsonly_provider_codegen_emits_sealed_role_batches() -> Result<()> {
+        let root = crate::workspace_root()?;
+        let source = fs::read_to_string(root.join("assemblies/settingsonly/assembly.toml"))?;
+        let manifest = AssemblyManifest::from_toml_str(&source)?.canonicalize_v1()?;
+        let rendered = render_providers(&manifest, "assemblies/settingsonly/assembly.toml")?;
+
+        for required in [
+            "pub(crate) struct ProviderRoleBatches",
+            "pub(crate) struct ListenerPdpConstructor",
+            "pub(crate) struct ListenerPdpBatch",
+            "pub(crate) struct ListenerPdpReceipt",
+            "pub(crate) fn exact_join(",
+            "pub(crate) fn finish(",
+        ] {
+            assert!(
+                rendered.contains(required),
+                "settingsonly generated provider output omitted `{required}`"
+            );
+        }
+        assert!(rendered.contains("ProviderRole::ListenerPdp"));
+        assert!(rendered.contains("ProviderRole::ListenerRateLimiter"));
+        assert!(rendered.contains("ProviderRole::SettingsKeyProvider"));
+        assert!(rendered.contains("ProviderRole::SettingsSecretResolver"));
         Ok(())
     }
 

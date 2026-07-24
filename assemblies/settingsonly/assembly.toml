@@ -8,6 +8,10 @@ frameworkContracts = []
 kind = "primary"
 domains = ["settings"]
 
+[[listeners]]
+kind = "health"
+domains = []
+
 [[diportProviders]]
 id = "settings-key-provider"
 port = "diport::KeyProvider"
@@ -19,6 +23,29 @@ lifecycle = "active"
 durability = "persistent"
 purpose = "settings-configvalue-at-rest-encryption"
 outputs = ["resources"]
+
+[[diportProviders]]
+id = "listener-pdp"
+port = "diport::Pdp"
+provider = "oidc::OidcProvider"
+providerCrate = "oidc"
+requiredFeatures = ["backend"]
+consumer = "httpserve"
+lifecycle = "active"
+durability = "persistent"
+purpose = "jwt-credential-verification"
+outputs = ["resources"]
+
+[[diportProviders]]
+id = "listener-rate-limiter"
+port = "diport::RateLimiter"
+provider = "ratelimit::GovernorLimiter"
+providerCrate = "ratelimit"
+consumer = "httpserve"
+lifecycle = "active"
+durability = "ephemeral-memory"
+purpose = "per-peer-IP request rate limiting (pre-auth, DoS/brute-force protection)"
+outputs = []
 
 [[diportProviders]]
 id = "settings-secret-resolver"

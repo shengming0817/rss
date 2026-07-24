@@ -774,6 +774,19 @@ impl PgRuntimeHandle {
             rls_ready: Arc::new(AtomicBool::new(true)),
         }
     }
+
+    /// Construct the hermetic module-test handle with an explicitly healthy readiness receipt.
+    ///
+    /// Runtime journeys use this as their provider-factory replacement; production construction
+    /// cannot call it because it remains behind the default-off `test-support` feature.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn for_ready_module_test() -> Self {
+        let handle = Self::for_module_test();
+        handle.readiness.mark(crate::pool::PoolReadiness::Ready);
+        handle
+    }
 }
 
 #[cfg(all(

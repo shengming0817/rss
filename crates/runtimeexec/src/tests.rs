@@ -14,7 +14,6 @@ use primitives::{HealthCheck, HealthStatus, ProbeName};
 use static_assertions::assert_not_impl_any;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
-use tracing_subscriber::prelude::*;
 
 #[derive(Clone)]
 struct Transcript(Arc<Mutex<Vec<&'static str>>>);
@@ -37,6 +36,36 @@ struct RecordingResource {
     name: &'static str,
     transcript: Transcript,
     fail: bool,
+}
+
+struct HangingResource {
+    name: &'static str,
+    entered: Arc<AtomicUsize>,
+}
+
+impl ManagedResource for HangingResource {
+    fn name(&self) -> &str {
+        self.name
+    }
+
+    async fn shutdown(&self) -> Result<(), ShutdownError> {
+        self.entered.fetch_add(1, Ordering::SeqCst);
+        std::future::pending().await
+    }
+
+    fn shutdown_timeout(&self) -> Duration {
+        Duration::from_secs(5)
+    }
+}
+
+fn hanging_resource(
+    name: &'static str,
+    entered: &Arc<AtomicUsize>,
+) -> Box<DynManagedResource<'static>> {
+    DynManagedResource::new_box(HangingResource {
+        name,
+        entered: Arc::clone(entered),
+    })
 }
 
 impl ManagedResource for RecordingResource {
@@ -86,6 +115,15 @@ fn worker(name: &'static str, transcript: &Transcript) -> bootstrap::WorkerSpec 
 }
 
 struct ProbeReceipt;
+
+fn test_drain_budget() -> TotalDrainBudget {
+    TotalDrainBudget::new(
+        Duration::from_secs(2),
+        Duration::from_secs(5),
+        Duration::from_secs(1),
+    )
+    .expect("valid test drain budget")
+}
 
 struct FakeAdapter {
     listener_names: Vec<&'static str>,
@@ -376,7 +414,11 @@ fn plan<H>(
     provider_module: DomainModuleResult,
     domain_module: DomainModuleResult,
     on_ready: H,
-) -> LaunchPlan<FakeAdapter, ProbeReceipt, H>
+) -> LaunchPlan<
+    FakeAdapter,
+    ProbeReceipt,
+    impl FnOnce(ReadyInventory) -> std::future::Ready<anyhow::Result<()>>,
+>
 where
     H: FnOnce(ReadyInventory) -> anyhow::Result<()>,
 {
@@ -387,9 +429,10 @@ where
             fail_prepare,
         },
         ProbeReceipt,
-        on_ready,
+        move |inventory| ready(on_ready(inventory)),
         Some(resource("trace", transcript)),
         lifecycle_batches(provider_module, domain_module),
+        test_drain_budget(),
     )
 }
 
@@ -416,7 +459,7 @@ async fn executor_drains_in_exact_dependency_lifo_order() {
         },
     );
 
-    let _outputs = launch_until(launch, async { Ok(()) })
+    let _outputs = launch_until(launch, || Ok(async { Ok(()) }))
         .await
         .expect("launch and drain cleanly");
 
@@ -436,6 +479,52 @@ async fn executor_drains_in_exact_dependency_lifo_order() {
 }
 
 #[tokio::test]
+async fn signal_installer_failure_drains_lifecycle_batches_once_in_lifo_order() {
+    let transcript = Transcript::new();
+    let ready_transcript = transcript.clone();
+    let launch = plan(
+        &transcript,
+        vec!["listener"],
+        false,
+        module(
+            vec![failing_resource("provider-resource", &transcript)],
+            vec![worker("provider-worker", &transcript)],
+        ),
+        module(
+            vec![resource("domain-resource", &transcript)],
+            vec![worker("domain-worker", &transcript)],
+        ),
+        move |_| {
+            ready_transcript.record("ready");
+            Ok(())
+        },
+    );
+
+    let error = launch_until(
+        launch,
+        || -> anyhow::Result<std::future::Ready<anyhow::Result<()>>> {
+            Err(anyhow::anyhow!("install signal source failed"))
+        },
+    )
+    .await
+    .err()
+    .expect("signal installer failure must propagate after drain");
+
+    assert_eq!(error.to_string(), "install signal source failed");
+    assert_eq!(
+        transcript.snapshot(),
+        vec![
+            "domain-worker",
+            "domain-resource",
+            "provider-worker",
+            "provider-resource",
+            "trace",
+        ],
+        "installer failure must drain every accepted lifecycle exactly once in LIFO order"
+    );
+}
+
+#[tokio::test]
 async fn executor_rejects_zero_listeners_after_registering_and_drains_owned_resources() {
     let transcript = Transcript::new();
     let ready_transcript = transcript.clone();
@@ -451,7 +540,7 @@ async fn executor_rejects_zero_listeners_after_registering_and_drains_owned_reso
         },
     );
 
-    let error = launch_until(launch, async { Ok(()) })
+    let error = launch_until(launch, || Ok(async { Ok(()) }))
         .await
         .err()
         .expect("zero listeners must fail");
@@ -472,14 +561,17 @@ async fn executor_rejects_adapter_that_claims_listener_without_activating_one() 
         },
         ProbeReceipt,
         move |_| {
-            ready_transcript.record("ready");
-            Ok(())
+            ready({
+                ready_transcript.record("ready");
+                Ok(())
+            })
         },
         None,
         lifecycle_batches(DomainModuleResult::default(), DomainModuleResult::default()),
+        test_drain_budget(),
     );
 
-    let error = launch_until(launch, async { Ok(()) })
+    let error = launch_until(launch, || Ok(async { Ok(()) }))
         .await
         .err()
         .expect("an adapter cannot self-attest a non-empty activation");
@@ -496,12 +588,13 @@ async fn staged_prepare_resource_does_not_count_as_an_activated_listener() {
             transcript: transcript.clone(),
         },
         ProbeReceipt,
-        |()| Ok(()),
+        |()| ready(Ok(())),
         None,
         lifecycle_batches(DomainModuleResult::default(), DomainModuleResult::default()),
+        test_drain_budget(),
     );
 
-    let error = launch_until(launch, async { Ok(()) })
+    let error = launch_until(launch, || Ok(async { Ok(()) }))
         .await
         .err()
         .expect("staged resources cannot mint listener activation proof");
@@ -518,12 +611,13 @@ async fn staged_shutdown_failure_preserves_prepare_primary_error() {
             transcript: transcript.clone(),
         },
         ProbeReceipt,
-        |()| Ok(()),
+        |()| ready(Ok(())),
         None,
         lifecycle_batches(DomainModuleResult::default(), DomainModuleResult::default()),
+        test_drain_budget(),
     );
 
-    let error = launch_until(launch, async { Ok(()) })
+    let error = launch_until(launch, || Ok(async { Ok(()) }))
         .await
         .err()
         .expect("prepare and staged cleanup both fail");
@@ -561,7 +655,7 @@ async fn leftover_probe_still_transfers_and_drains_later_module_resources() {
         |_| Ok(()),
     );
 
-    let error = launch_until(launch, async { Ok(()) })
+    let error = launch_until(launch, || Ok(async { Ok(()) }))
         .await
         .err()
         .expect("leftover probe must fail");
@@ -586,7 +680,7 @@ async fn prepare_failure_skips_activation_and_ready_hook_then_drains() {
         },
     );
 
-    let error = launch_until(launch, async { Ok(()) })
+    let error = launch_until(launch, || Ok(async { Ok(()) }))
         .await
         .err()
         .expect("prepare must fail");
@@ -607,12 +701,48 @@ async fn ready_hook_failure_drains_activated_listener_and_preserves_error() {
         |_| Err(anyhow::anyhow!("ready publication failed")),
     );
 
-    let error = launch_until(launch, async { Ok(()) })
+    let error = launch_until(launch, || Ok(std::future::pending::<anyhow::Result<()>>()))
         .await
         .err()
         .expect("ready hook must fail");
 
     assert_eq!(error.to_string(), "ready publication failed");
+    assert_eq!(transcript.snapshot(), vec!["listener", "provider", "trace"]);
+}
+
+#[tokio::test]
+async fn shutdown_signal_interrupts_pending_readiness_then_drains() {
+    let transcript = Transcript::new();
+    let readiness_started = Arc::new(Notify::new());
+    let shutdown_after_readiness = Arc::clone(&readiness_started);
+    let launch = LaunchPlan::new(
+        FakeAdapter {
+            listener_names: vec!["listener"],
+            transcript: transcript.clone(),
+            fail_prepare: false,
+        },
+        ProbeReceipt,
+        move |_| async move {
+            readiness_started.notify_one();
+            std::future::pending::<anyhow::Result<()>>().await
+        },
+        Some(resource("trace", &transcript)),
+        lifecycle_batches(
+            module(vec![resource("provider", &transcript)], Vec::new()),
+            DomainModuleResult::default(),
+        ),
+        test_drain_budget(),
+    );
+
+    let _outputs = launch_until(launch, || {
+        Ok(async move {
+            shutdown_after_readiness.notified().await;
+            Ok(())
+        })
+    })
+    .await
+    .expect("signal must interrupt readiness and complete a clean drain");
+
     assert_eq!(transcript.snapshot(), vec!["listener", "provider", "trace"]);
 }
 
@@ -628,10 +758,12 @@ async fn shutdown_trigger_failure_drains_and_preserves_error() {
         |_| Ok(()),
     );
 
-    let error = launch_until(launch, async { Err(anyhow::anyhow!("signal failed")) })
-        .await
-        .err()
-        .expect("signal failure must propagate");
+    let error = launch_until(launch, || {
+        Ok(async { Err(anyhow::anyhow!("signal failed")) })
+    })
+    .await
+    .err()
+    .expect("signal failure must propagate");
 
     assert_eq!(error.to_string(), "signal failed");
     assert_eq!(transcript.snapshot(), vec!["listener", "provider", "trace"]);
@@ -652,7 +784,7 @@ async fn launch_error_remains_primary_when_cleanup_also_fails() {
         |_| Err(anyhow::anyhow!("primary launch failure")),
     );
 
-    let error = launch_until(launch, async { Ok(()) })
+    let error = launch_until(launch, || Ok(std::future::pending::<anyhow::Result<()>>()))
         .await
         .err()
         .expect("launch and cleanup fail");
@@ -685,7 +817,7 @@ async fn cleanup_failure_is_returned_after_successful_shutdown_trigger() {
         |_| Ok(()),
     );
 
-    let error = launch_until(launch, async { Ok(()) })
+    let error = launch_until(launch, || Ok(async { Ok(()) }))
         .await
         .err()
         .expect("cleanup failure must propagate");
@@ -705,6 +837,54 @@ async fn cleanup_failure_is_returned_after_successful_shutdown_trigger() {
 }
 
 #[tokio::test]
+async fn total_drain_budget_bounds_multiple_hanging_resources() {
+    let transcript = Transcript::new();
+    let entered = Arc::new(AtomicUsize::new(0));
+    let launch = LaunchPlan::new(
+        FakeAdapter {
+            listener_names: vec!["listener"],
+            transcript,
+            fail_prepare: false,
+        },
+        ProbeReceipt,
+        |_| ready(Ok(())),
+        None,
+        lifecycle_batches(
+            module(
+                vec![
+                    hanging_resource("hang-a", &entered),
+                    hanging_resource("hang-b", &entered),
+                ],
+                Vec::new(),
+            ),
+            DomainModuleResult::default(),
+        ),
+        TotalDrainBudget::new(
+            Duration::from_millis(40),
+            Duration::from_millis(100),
+            Duration::from_millis(20),
+        )
+        .expect("valid bounded drain budget"),
+    );
+
+    let error = tokio::time::timeout(
+        Duration::from_millis(500),
+        launch_until(launch, || Ok(async { Ok(()) })),
+    )
+    .await
+    .expect("one total deadline must bound every hanging resource")
+    .err()
+    .expect("budget exhaustion must fail shutdown");
+
+    assert!(error.to_string().contains("2 runtime resource failure"));
+    assert_eq!(
+        entered.load(Ordering::SeqCst),
+        1,
+        "the shared deadline aborts the in-flight resource and skips the remainder"
+    );
+}
+
+#[tokio::test]
 async fn abort_during_execute_transfers_stack_and_drains_exactly_once() {
     let activated = Arc::new(Notify::new());
     let shutdowns = Arc::new(AtomicUsize::new(0));
@@ -718,15 +898,15 @@ async fn abort_during_execute_transfers_stack_and_drains_exactly_once() {
             shutdown_done: Arc::clone(&shutdown_done),
         },
         ProbeReceipt,
-        |()| Ok(()),
+        |()| ready(Ok(())),
         None,
         lifecycle_batches(DomainModuleResult::default(), DomainModuleResult::default()),
+        test_drain_budget(),
     );
 
-    let task = tokio::spawn(launch_until(
-        launch,
-        std::future::pending::<anyhow::Result<()>>(),
-    ));
+    let task = tokio::spawn(launch_until(launch, || {
+        Ok(std::future::pending::<anyhow::Result<()>>())
+    }));
     activated.notified().await;
     task.abort();
     let join_error = task.await.err().expect("launch task must be aborted");
@@ -760,15 +940,15 @@ async fn abort_during_prepare_awaits_resources_created_by_prepare() {
             shutdown_done: Arc::clone(&shutdown_done),
         },
         ProbeReceipt,
-        |()| Ok(()),
+        |()| ready(Ok(())),
         None,
         lifecycle_batches(DomainModuleResult::default(), DomainModuleResult::default()),
+        test_drain_budget(),
     );
 
-    let task = tokio::spawn(launch_until(
-        launch,
-        std::future::pending::<anyhow::Result<()>>(),
-    ));
+    let task = tokio::spawn(launch_until(launch, || {
+        Ok(std::future::pending::<anyhow::Result<()>>())
+    }));
     prepare_started.notified().await;
     task.abort();
     let join_error = task.await.err().expect("launch must be aborted");
@@ -821,12 +1001,13 @@ async fn abort_while_finish_waits_does_not_interrupt_remaining_lifo_drain() {
             fail_prepare: false,
         },
         ProbeReceipt,
-        |_| Ok(()),
+        |_| ready(Ok(())),
         None,
         lifecycle_batches(provider_module, DomainModuleResult::default()),
+        test_drain_budget(),
     );
 
-    let task = tokio::spawn(launch_until(launch, ready(Ok(()))));
+    let task = tokio::spawn(launch_until(launch, || Ok(ready(Ok(())))));
     gate_started.notified().await;
     task.abort();
     let join_error = task.await.err().expect("finish waiter must be aborted");
@@ -839,72 +1020,207 @@ async fn abort_while_finish_waits_does_not_interrupt_remaining_lifo_drain() {
     assert_eq!(transcript.snapshot(), vec!["listener", "gate", "earlier"]);
 }
 
-#[derive(Clone, Default)]
-struct ErrorFieldRecorder(Arc<Mutex<Vec<String>>>);
-
-impl<S> tracing_subscriber::Layer<S> for ErrorFieldRecorder
-where
-    S: tracing::Subscriber,
-{
-    fn on_event(
-        &self,
-        event: &tracing::Event<'_>,
-        _ctx: tracing_subscriber::layer::Context<'_, S>,
-    ) {
-        struct Visitor<'a>(&'a mut Vec<String>);
-
-        impl tracing::field::Visit for Visitor<'_> {
-            fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
-                if matches!(field.name(), "error" | "cleanup_error") {
-                    self.0.push(value.to_owned());
-                }
-            }
-
-            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-                if matches!(field.name(), "error" | "cleanup_error") {
-                    self.0.push(format!("{value:?}"));
-                }
-            }
-        }
-
-        let mut fields = self.0.lock().expect("error field recorder lock");
-        event.record(&mut Visitor(&mut fields));
-    }
-}
-
 #[test]
-fn shutdown_error_logs_strip_url_credentials() {
+fn shutdown_error_sinks_strip_url_credentials() {
     const LEAK_MARKER: &str = "launch-log-leak-marker";
-    let recorder = ErrorFieldRecorder::default();
-    let subscriber = tracing_subscriber::registry().with(recorder.clone());
     let failure = bootstrap::shutdown::ResourceShutdownError {
         name: format!("postgres://runtime:{LEAK_MARKER}@db.internal/app"),
         kind: bootstrap::shutdown::ShutdownFailureKind::Failed(ShutdownError::new(
             std::io::Error::other("redacted source"),
         )),
     };
+    let cleanup = anyhow::anyhow!("cleanup postgres://runtime:{LEAK_MARKER}@db.internal/app");
 
-    tracing::subscriber::with_default(subscriber, || {
-        let _ = report_shutdown_failures(vec![failure]);
-        let result = preserve_launch_error(
-            Err(anyhow::anyhow!("primary launch failure")),
-            Err(anyhow::anyhow!(
-                "cleanup postgres://runtime:{LEAK_MARKER}@db.internal/app"
-            )),
-        );
-        assert_eq!(
-            result
-                .err()
-                .expect("primary failure must remain primary")
-                .to_string(),
-            "primary launch failure"
-        );
-    });
-
-    let fields = recorder.0.lock().expect("error field recorder lock");
-    assert_eq!(fields.len(), 2);
+    let fields = [
+        secure::redact_error(&failure).to_string(),
+        secure::redact_error(cleanup.as_ref()).to_string(),
+    ];
     assert!(fields.iter().all(|field| !field.contains(LEAK_MARKER)));
     assert!(fields.iter().all(|field| field.contains("<redacted>")));
+
+    let _ = report_shutdown_failures(vec![failure]);
+    let result =
+        preserve_launch_error(Err(anyhow::anyhow!("primary launch failure")), Err(cleanup));
+    assert_eq!(
+        result
+            .err()
+            .expect("primary failure must remain primary")
+            .to_string(),
+        "primary launch failure"
+    );
 }
 
 assert_not_impl_any!(RuntimeOutputs: Clone, Copy);
+
+struct BlockingStartup {
+    transcript: Transcript,
+    started: Arc<Notify>,
+    ready_calls: Arc<AtomicUsize>,
+}
+
+impl StartupAdapter for BlockingStartup {
+    type Adapter = FakeAdapter;
+    type ProbeReceipt = ProbeReceipt;
+    type ReadyHook = fn(ReadyInventory) -> std::future::Ready<anyhow::Result<()>>;
+    type Ready = std::future::Ready<anyhow::Result<()>>;
+
+    async fn prepare(
+        self,
+        transaction: &mut StartupTransaction<'_>,
+    ) -> anyhow::Result<PreparedLaunch<Self::Adapter, Self::ProbeReceipt, Self::ReadyHook>> {
+        let mut output = module(
+            vec![resource("startup-provider", &self.transcript)],
+            Vec::new(),
+        );
+        output.probes.push((
+            ProbeName::parse("startup-blocked").expect("valid probe name"),
+            Box::new(LeftoverProbe),
+        ));
+        transaction.stage_provider_output(output);
+        self.started.notify_one();
+        let _ready_calls = self.ready_calls;
+        std::future::pending().await
+    }
+}
+
+struct FailingStartup {
+    transcript: Transcript,
+}
+
+impl StartupAdapter for FailingStartup {
+    type Adapter = FakeAdapter;
+    type ProbeReceipt = ProbeReceipt;
+    type ReadyHook = fn(ReadyInventory) -> std::future::Ready<anyhow::Result<()>>;
+    type Ready = std::future::Ready<anyhow::Result<()>>;
+
+    async fn prepare(
+        self,
+        transaction: &mut StartupTransaction<'_>,
+    ) -> anyhow::Result<PreparedLaunch<Self::Adapter, Self::ProbeReceipt, Self::ReadyHook>> {
+        let mut output = module(
+            vec![resource("startup-provider", &self.transcript)],
+            Vec::new(),
+        );
+        output.probes.push((
+            ProbeName::parse("startup-failed").expect("valid probe name"),
+            Box::new(LeftoverProbe),
+        ));
+        transaction.stage_provider_output(output);
+        Err(anyhow::anyhow!("original startup failure"))
+    }
+}
+
+#[tokio::test]
+async fn startup_signal_discards_unregistered_probes_and_drains_staged_resources_once() {
+    let transcript = Transcript::new();
+    let started = Arc::new(Notify::new());
+    let signal_after_stage = Arc::clone(&started);
+    let ready_calls = Arc::new(AtomicUsize::new(0));
+    let plan = StartupPlan::new(
+        BlockingStartup {
+            transcript: transcript.clone(),
+            started,
+            ready_calls: Arc::clone(&ready_calls),
+        },
+        test_drain_budget(),
+    );
+
+    let _outputs = launch_startup_until(plan, || {
+        Ok(async move {
+            signal_after_stage.notified().await;
+            Ok(())
+        })
+    })
+    .await
+    .expect("startup signal must produce a clean bounded drain");
+
+    assert_eq!(ready_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(transcript.snapshot(), ["startup-provider"]);
+}
+
+#[tokio::test]
+async fn abort_during_startup_transfers_transaction_and_drains_staged_resources_once() {
+    let transcript = Transcript::new();
+    let started = Arc::new(Notify::new());
+    let ready_calls = Arc::new(AtomicUsize::new(0));
+    let plan = StartupPlan::new(
+        BlockingStartup {
+            transcript: transcript.clone(),
+            started: Arc::clone(&started),
+            ready_calls,
+        },
+        test_drain_budget(),
+    );
+
+    let task = tokio::spawn(launch_startup_until(plan, || {
+        Ok(std::future::pending::<anyhow::Result<()>>())
+    }));
+    started.notified().await;
+    task.abort();
+    let _cancelled = task.await;
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while transcript.snapshot() != ["startup-provider"] {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("cancelled startup must finish its detached bounded drain");
+    assert_eq!(transcript.snapshot(), ["startup-provider"]);
+}
+
+#[tokio::test]
+async fn startup_error_with_unregistered_probe_preserves_primary_and_drains() {
+    let transcript = Transcript::new();
+    let plan = StartupPlan::new(
+        FailingStartup {
+            transcript: transcript.clone(),
+        },
+        test_drain_budget(),
+    );
+
+    let error = launch_startup_until(plan, || Ok(std::future::pending::<anyhow::Result<()>>()))
+        .await
+        .err()
+        .expect("startup failure must propagate after drain");
+
+    assert_eq!(error.to_string(), "original startup failure");
+    assert_eq!(transcript.snapshot(), ["startup-provider"]);
+}
+
+#[test]
+fn total_drain_budget_is_strictly_inside_deployment_grace_buffer() {
+    assert!(
+        TotalDrainBudget::new(
+            Duration::from_secs(20),
+            Duration::from_secs(30),
+            Duration::from_secs(5),
+        )
+        .is_ok()
+    );
+    assert!(
+        TotalDrainBudget::new(
+            Duration::ZERO,
+            Duration::from_secs(30),
+            Duration::from_secs(5),
+        )
+        .is_err()
+    );
+    assert!(
+        TotalDrainBudget::new(
+            Duration::from_secs(25),
+            Duration::from_secs(30),
+            Duration::from_secs(5),
+        )
+        .is_err(),
+        "drain must finish strictly before the reserved exit buffer"
+    );
+    assert!(
+        TotalDrainBudget::new(
+            Duration::from_secs(1),
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+        )
+        .is_err()
+    );
+}

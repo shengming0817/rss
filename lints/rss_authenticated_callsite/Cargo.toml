@@ -25,6 +25,10 @@ name = "runtime"
 path = "ui/runtime.rs"
 
 [[example]]
+name = "settingsonly"
+path = "ui/settingsonly.rs"
+
+[[example]]
 name = "identity"
 path = "ui/identity.rs"
 

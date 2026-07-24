@@ -1,16 +1,27 @@
-//! Minimal settings-only assembly.
+//! Executable settings-only assembly.
 //!
-//! The crate deliberately has no launch entrypoint. It proves that the generated domain list and
-//! the normal Cargo dependency graph can compose settings with its real Postgres and Vault
-//! capabilities without pulling identity or audit into the deployable artifact.
+//! This is a deliberately fail-closed deployment closure: it starts Settings with its real
+//! Postgres, Vault and federated-verification providers, but it does not pretend that Identity or
+//! Audit RBAC is present. Every authenticated Settings request is therefore rejected by the
+//! assembly-owned authorizer after successful authentication.
 //!
 //! ref: oxidecomputer/omicron nexus/src/lib.rs@3298185e6cb3f6934a581122101e52988dc81895
 
+use std::path::Path;
 use std::time::SystemTime;
 
 use diport::KeyName;
 use postgres::PgRuntimeHandle;
 use vault::VaultRuntimeDeps;
+
+mod auth_bridge;
+mod config;
+mod listeners;
+mod plan;
+mod providers;
+mod runtime;
+#[cfg(feature = "test-support")]
+pub mod test_support;
 
 #[path = "generated/modules_gen.rs"]
 mod modules_gen;
@@ -18,12 +29,29 @@ mod modules_gen;
 mod providers_gen;
 const _: () = assert!(!providers_gen::PROVIDER_CATALOG.is_empty());
 pub use modules_gen::DOMAIN_LISTENER_BINDINGS;
+/// The sole tracing profile admitted by the closed settingsonly deployment contract.
+pub const TRACING_FILTER: &str = "info";
+
+/// Start the executable settings-only assembly from one closed configuration document.
+///
+/// # Errors
+///
+/// Returns a redacted configuration, provider, composition, listener, or lifecycle error. All
+/// resources accepted by the runtime are drained exactly once before the error is returned.
+pub fn run(path: &Path) -> anyhow::Result<()> {
+    let captured = config::capture(path)?;
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|_| anyhow::anyhow!("build settingsonly Tokio runtime"))?;
+    runtime.block_on(runtime::launch_captured(captured))
+}
 
 /// Production system clock for the settings-only composition root.
 ///
 /// The assembly root is the sanctioned direct clock read site (`diport::Clock` rustdoc: prod
 /// `SystemClock` may call `SystemTime::now` under the clippy `disallowed_methods` allow).
-pub struct SystemClock;
+pub(crate) struct SystemClock;
 
 impl diport::Clock for SystemClock {
     fn now(&self) -> SystemTime {
@@ -34,24 +62,37 @@ impl diport::Clock for SystemClock {
 }
 
 /// Mandatory infrastructure inputs for the settings-only composition root.
-pub struct SharedRuntimeDeps {
+pub(crate) struct SharedRuntimeDeps {
     pg: PgRuntimeHandle,
     vault: VaultRuntimeDeps,
     config_value_key_name: KeyName,
+    keyprovider_readiness: settings_composition::KeyProviderReadinessInterval,
 }
 
 impl SharedRuntimeDeps {
     /// Construct the complete settings-only dependency set.
     #[must_use]
-    pub fn new(
+    #[cfg(test)]
+    fn new(pg: PgRuntimeHandle, vault: VaultRuntimeDeps, config_value_key_name: KeyName) -> Self {
+        Self {
+            pg,
+            vault,
+            config_value_key_name,
+            keyprovider_readiness: settings_composition::KeyProviderReadinessInterval::default(),
+        }
+    }
+
+    fn production(
         pg: PgRuntimeHandle,
         vault: VaultRuntimeDeps,
         config_value_key_name: KeyName,
+        keyprovider_readiness: settings_composition::KeyProviderReadinessInterval,
     ) -> Self {
         Self {
             pg,
             vault,
             config_value_key_name,
+            keyprovider_readiness,
         }
     }
 }
@@ -61,10 +102,62 @@ impl SharedRuntimeDeps {
 /// # Errors
 ///
 /// Returns an error when the settings KeyProvider startup self-check or domain construction fails.
-pub async fn wire_domains(
-    deps: &SharedRuntimeDeps,
-) -> anyhow::Result<Vec<bootstrap::DomainBinding>> {
+async fn wire_domains(deps: &SharedRuntimeDeps) -> anyhow::Result<Vec<bootstrap::DomainBinding>> {
     modules_gen::wire_domains(deps).await
+}
+
+fn validate_nonactivated_settings_subscriber(
+    registry: &mut bootstrap::Registry,
+) -> anyhow::Result<()> {
+    let expected_event = generated::event::settings_v1::SPEC;
+    anyhow::ensure!(
+        expected_event.subscriptions().len() == 1,
+        "settings event topology must contain exactly one declaration"
+    );
+    let mut declarations = registry.drain_subscribers().into_iter();
+    let declaration = declarations
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("settings subscriber declaration is missing"))?;
+    anyhow::ensure!(
+        declarations.next().is_none(),
+        "settingsonly refuses extra subscriber declarations"
+    );
+    let (contract, topic, consumer, group, capability) = declaration.into_parts();
+    validate_settings_subscriber_parts(contract, topic, consumer, group.as_str(), capability)
+}
+
+fn validate_settings_subscriber_parts(
+    contract: &'static str,
+    topic: &'static str,
+    consumer: &'static str,
+    group: &str,
+    capability: bootstrap::SubscriberCapability,
+) -> anyhow::Result<()> {
+    let expected_event = generated::event::settings_v1::SPEC;
+    let expected = expected_event
+        .subscriptions()
+        .first()
+        .copied()
+        .ok_or_else(|| anyhow::anyhow!("settings event topology has no declaration"))?;
+    anyhow::ensure!(
+        contract == expected_event.contract_id()
+            && topic == expected_event.topic()
+            && consumer == expected.consumer()
+            && group == expected.group(),
+        "settings subscriber declaration does not match generated topology"
+    );
+    let bootstrap::SubscriberCapability::DomainReconcile(owner) = capability else {
+        anyhow::bail!("settings subscriber declaration has the wrong capability");
+    };
+    anyhow::ensure!(
+        owner
+            .into_owner::<settings::ConfigVersionReconciler>()
+            .is_ok(),
+        "settings subscriber declaration has the wrong reconcile owner"
+    );
+    // Deliberately consume and drop the capability. settingsonly validates the active topology
+    // declaration but never activates a consumer or relay transport.
+    Ok(())
 }
 
 mod domains {
@@ -84,7 +177,7 @@ mod domains {
                 deps.vault.for_domain::<vault_caps::Settings>(),
                 deps.config_value_key_name.clone(),
                 Arc::new(SystemClock),
-                settings_composition::KeyProviderReadinessInterval::default(),
+                deps.keyprovider_readiness,
             ))
             .await
         }
@@ -102,6 +195,9 @@ mod domains {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::expect_used)]
+    // reason: closed assembly fixtures should stop at the first broken generated invariant.
+
     use std::time::Duration;
 
     use base64::Engine as _;
@@ -120,6 +216,80 @@ mod tests {
 
     const KEYPROVIDER_CONFIG_FIELD: &str = "settings.config.value";
     const KEYPROVIDER_CONFIG_SCHEME: u32 = 1;
+
+    #[tokio::test]
+    async fn subscriber_declaration_accepts_only_the_exact_settings_owner() {
+        let mut bindings = vec![
+            crate::domains::settings::tests::test_binding()
+                .await
+                .expect("settings test binding"),
+        ];
+        let (mut registry, _output) = compose_bindings(&mut bindings).expect("compose settings");
+        crate::validate_nonactivated_settings_subscriber(&mut registry)
+            .expect("generated declaration and concrete owner match");
+    }
+
+    #[test]
+    fn subscriber_declaration_rejects_missing_extra_identity_and_capability() {
+        let mut empty = bootstrap::Registry::new();
+        assert!(crate::validate_nonactivated_settings_subscriber(&mut empty).is_err());
+
+        let event = generated::event::settings_v1::SPEC;
+        let subscription = event.subscriptions()[0];
+        let group = subscription.group();
+        assert!(
+            crate::validate_settings_subscriber_parts(
+                "wrong.contract",
+                event.topic(),
+                subscription.consumer(),
+                group,
+                bootstrap::SubscriberCapability::AdapterNativeTransactional,
+            )
+            .is_err()
+        );
+        assert!(
+            crate::validate_settings_subscriber_parts(
+                event.contract_id(),
+                event.topic(),
+                subscription.consumer(),
+                group,
+                bootstrap::SubscriberCapability::AdapterNativeTransactional,
+            )
+            .is_err()
+        );
+        assert!(
+            crate::validate_settings_subscriber_parts(
+                event.contract_id(),
+                event.topic(),
+                subscription.consumer(),
+                group,
+                bootstrap::SubscriberCapability::DomainReconcile(
+                    bootstrap::ReconcileSubscriberOwner::from_owner("wrapper owner"),
+                ),
+            )
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn subscriber_declaration_rejects_an_extra_registration() {
+        let mut bindings = vec![
+            crate::domains::settings::tests::test_binding()
+                .await
+                .expect("settings test binding"),
+        ];
+        let (mut registry, _output) = compose_bindings(&mut bindings).expect("compose settings");
+        registry
+            .subscriber(
+                "extra.contract",
+                "extra.topic",
+                "settings",
+                consistency::ConsumerGroup::parse("settings.extra").expect("fixed group"),
+                bootstrap::SubscriberCapability::AdapterNativeTransactional,
+            )
+            .expect("register synthetic extra declaration");
+        assert!(crate::validate_nonactivated_settings_subscriber(&mut registry).is_err());
+    }
 
     fn unused_tenant_store_allowlist() -> anyhow::Result<TenantStoreAllowlist> {
         Ok(TenantStoreAllowlist::new([(

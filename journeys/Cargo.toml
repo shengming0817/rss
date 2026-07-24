@@ -42,6 +42,10 @@ required-features = ["integration"]
 name = "security_provider_closeout"
 path = "tests/security_provider_closeout.rs"
 
+[[test]]
+name = "settingsonly_runtime"
+path = "tests/settingsonly_runtime.rs"
+
 # journey 集成测试组装根：组合根可依赖所有库 crate（deny.toml wrappers 已含 journeys）。
 [dev-dependencies]
 # seed-login：启用 identity 的明文种子登录构造器（仅 journeys/demo；生产组合根不启用，PR #186 F1）。
@@ -53,6 +57,7 @@ httpserve = { path = "../crates/httpserve", features = ["test-util"] }
 # #1800：通过 production explicit-values seam 验证 typed Vault allowlist closeout；仅启测试接缝，
 # Journey 自身不启动 runtime、容器或真实 provider。
 runtime = { path = "../assemblies/runtime", features = ["integration"] }
+settingsonly = { path = "../assemblies/settingsonly", features = ["test-support"] }
 # seed-data：启用 settings 的 in-mem 配置 / flag 仓储构造器（仅 journeys/demo；生产组合根不启用）。
 # test-support：journey 测试显式构造 TenantRepoScope，证明外部测试只能走测试入口而非裸 TenantId。
 settings = { path = "../crates/settings", features = ["seed-data", "test-support"] }
@@ -74,7 +79,7 @@ ids = { path = "../crates/ids" }
 generated = { path = "../generated" }
 memory = { path = "../adapters/memory" }
 vault = { path = "../adapters/vault", features = ["backend"] }
-tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "time"] }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "time"] }
 tokio-util = { workspace = true }
 futures = { workspace = true }
 axum = { workspace = true }
@@ -95,6 +100,7 @@ serde = { workspace = true, features = ["derive"] }
 toml = { workspace = true }
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
+reqwest = { workspace = true }
 # F9：从 canonical UUID 字符串算 16B 原始字节，断言 tenant/actor 贯穿审计链 canonical 输入。
 uuid = { workspace = true, features = ["v4"] }
 # 集成测试容器 fixture（#1137）：durable journey 经 testkit self-provision postgres（无需手工 libpq env），

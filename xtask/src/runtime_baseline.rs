@@ -11097,7 +11097,7 @@ fn runtime_launch_kernel_owner_findings(root: &Path) -> Result<Vec<Finding<Rule>
         ),
         (
             "batch-transfer-call",
-            production_exact_path_call_count_in_file(&kernel, &["register_lifecycle_outputs"]) == 1,
+            production_exact_path_call_count_in_file(&kernel, &["register_lifecycle_outputs"]) == 4,
         ),
         (
             "module-transfer-calls",
@@ -11126,9 +11126,16 @@ fn runtime_launch_kernel_owner_findings(root: &Path) -> Result<Vec<Finding<Rule>
         ),
         (
             "activated-ready",
-            kernel_tokens.contains("on_ready(activated.into_inventory())?"),
+            kernel_tokens.contains("letreadiness=on_ready(activated.into_inventory())"),
         ),
-        ("drain", kernel_tokens.contains("stack.shutdown().await")),
+        (
+            "ready-signal-race",
+            kernel_tokens.contains("result=&mutshutdown=>returnresult"),
+        ),
+        (
+            "drain",
+            kernel_tokens.contains("stack.shutdown_within(total_drain_budget.duration()).await"),
+        ),
         (
             "staged-resource",
             kernel_tokens.contains("self.stack.register_detached(resource)"),
@@ -11203,7 +11210,7 @@ fn runtime_launch_kernel_owner_findings(root: &Path) -> Result<Vec<Finding<Rule>
     let phase_batches =
         phase_tokens.contains("letlifecycle_batches=provider_build.into_launch_batches()");
     let phase_plan = phase_tokens.contains(
-        "runtimeexec::LaunchPlan::new(adapter,probe_receipt,crate::launch::log_ready,trace_exporter,lifecycle_batches,)",
+        "runtimeexec::LaunchPlan::new(adapter,probe_receipt,|inventory|asyncmove{crate::launch::log_ready(inventory)},trace_exporter,lifecycle_batches,crate::launch::total_drain_budget()?,)",
     );
     if !phase_calls || global_launch_calls != 1 || !phase_batches || !phase_plan {
         findings.push(finding(
@@ -11952,7 +11959,7 @@ fn launch_pre_handoff_is_canonical(method: &syn::ImplItemFn) -> bool {
         && tokens.contains("Err(error)=>Err(provider_build.abort(error).await)")
         && tokens.contains("letlifecycle_batches=provider_build.into_launch_batches();")
         && tokens.contains(
-            "adapter,probe_receipt,crate::launch::log_ready,trace_exporter,lifecycle_batches,",
+            "adapter,probe_receipt,|inventory|asyncmove{crate::launch::log_ready(inventory)},trace_exporter,lifecycle_batches,crate::launch::total_drain_budget()?,",
         )
 }
 
@@ -15368,17 +15375,17 @@ const RUNTIME_ANCHORS: &[AnchorSpec] = &[
     AnchorSpec {
         id: "launch.ready-hook",
         path: RUNTIMEEXEC_PATH,
-        pattern: "on_ready(activated.into_inventory())?;",
+        pattern: "let readiness = on_ready(activated.into_inventory());",
     },
     AnchorSpec {
         id: "launch.signal-wait",
         path: RUNTIMEEXEC_PATH,
-        pattern: "launch_until(plan, wait_for_shutdown_signal()).await",
+        pattern: "let shutdown = wait_for_shutdown_signal()?;",
     },
     AnchorSpec {
         id: "launch.shutdown.drain",
         path: RUNTIMEEXEC_PATH,
-        pattern: "stack.shutdown().await",
+        pattern: "shutdown_within(total_drain_budget.duration())",
     },
     AnchorSpec {
         id: "adapter.listener-prepare",
@@ -15542,8 +15549,12 @@ fn anchor_search_scope<'a>(spec: &AnchorSpec, text: &'a str) -> AnchorSearchScop
                 .unwrap_or_else(|| empty_scope(text));
         }
         if spec.id == "launch.signal-wait" {
-            return production_function_scope(text, "launch", "pub async fn launch<")
-                .unwrap_or_else(|| empty_scope(text));
+            return production_function_scope(
+                text,
+                "install_shutdown_signal",
+                "fn install_shutdown_signal(",
+            )
+            .unwrap_or_else(|| empty_scope(text));
         }
     }
     AnchorSearchScope {
@@ -15605,7 +15616,7 @@ fn anchor_order_key(spec: &AnchorSpec) -> (&'static str, &'static str) {
         return (spec.path, "execute_launch");
     }
     if spec.path == RUNTIMEEXEC_PATH && spec.id == "launch.signal-wait" {
-        return (spec.path, "launch");
+        return (spec.path, "install_shutdown_signal");
     }
     (spec.path, "file")
 }
@@ -16970,7 +16981,7 @@ fn bypass_runtimeexec_stack(token: tokio_util::sync::CancellationToken) {
             ),
             (
                 "runtime-launch-lifecycle-ready-red",
-                "on_ready(activated.into_inventory())?;",
+                "let readiness = on_ready(activated.into_inventory());",
                 "drop(activated);",
             ),
             (
@@ -16990,18 +17001,18 @@ fn bypass_runtimeexec_stack(token: tokio_util::sync::CancellationToken) {
             ),
             (
                 "runtime-launch-lifecycle-signal-red",
-                "launch_until(plan, wait_for_shutdown_signal()).await",
-                "launch_until(plan, wait_for_shutdown_signal_bypass()).await",
+                "let shutdown = wait_for_shutdown_signal()?;",
+                "let shutdown = wait_for_shutdown_signal_bypass()?;",
             ),
             (
                 "runtime-launch-lifecycle-drain-red",
-                "report_shutdown_failures(stack.shutdown().await)",
+                "report_shutdown_failures(stack.shutdown_within(total_drain_budget.duration()).await)",
                 "report_shutdown_failures(Vec::new())",
             ),
             (
                 "runtime-launch-lifecycle-primary-error-red",
-                "            Err(launch_error)\n        }\n    }\n}\n\nasync fn wait_for_shutdown_signal",
-                "            Err(drain_error)\n        }\n    }\n}\n\nasync fn wait_for_shutdown_signal",
+                "            Err(launch_error)\n        }\n    }\n}\n\n#[cfg(unix)]",
+                "            Err(drain_error)\n        }\n    }\n}\n\n#[cfg(unix)]",
             ),
         ];
 

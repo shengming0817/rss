@@ -30,7 +30,7 @@ fn complete_budget_boundary(routes: &str, phase_launch: &str, launch: &str, http
     ) && phase_launch.contains(
         "letadapter=crate::launch::RuntimeLaunchAdapter::new(listeners,request_budget,",
     ) && phase_launch.contains(
-        "letlaunch_plan=runtimeexec::LaunchPlan::new(adapter,probe_receipt,crate::launch::log_ready,trace_exporter,lifecycle_batches,);",
+        "letlaunch_plan=runtimeexec::LaunchPlan::new(adapter,probe_receipt,|inventory|asyncmove{crate::launch::log_ready(inventory)},trace_exporter,lifecycle_batches,crate::launch::total_drain_budget()?,);",
     ) && phase_launch.contains(
         "runtimeexec::launch(launch_plan).await",
     )

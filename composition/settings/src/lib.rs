@@ -671,7 +671,7 @@ pub mod test_support {
     ///
     /// Returns an error if the fixed test key or settings composition cannot be constructed.
     pub async fn binding() -> anyhow::Result<DomainBinding> {
-        let pg = postgres::PgRuntimeHandle::for_module_test();
+        let pg = postgres::PgRuntimeHandle::for_ready_module_test();
         let key_name = KeyName::try_new("settings-config")?;
         let ready = Arc::new(AtomicBool::new(true));
         let worker: WorkerSpec = Box::new(|_| DynManagedResource::new_box(NoopResource));
@@ -686,7 +686,7 @@ pub mod test_support {
             key_name,
             Arc::new(EpochClock),
             ready,
-            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(true)),
             worker,
             resolver_worker,
         ))

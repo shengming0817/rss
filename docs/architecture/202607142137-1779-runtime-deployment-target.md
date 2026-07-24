@@ -12,7 +12,8 @@
 |---|---|---|
 | Runtime plan has typed identity but does not yet drive live wiring | `assembly-schema` owns the closed v1 protocol/strict reader and provider registry; each assembly compiles a generated typed provider constructor catalog, while `assemblies/runtime/src/plan/**` compiles the bundled manifest, lock, and snapshot-backed listener auth before startup continues through handwritten wiring | plan/catalog identity and diagnostics are stable; #1792–#1794 still close live topology |
 | Serving configuration is one captured generation | `RuntimeConfigSnapshot` and the runtime environment funnel cover serving/operator consumers; RuntimePlan receives only the borrowed snapshot capability | raw configuration and secrets cannot enter the plan artifact |
-| Subset assemblies are compile-time closures | `assemblies/settingsonly` and `assemblies/identityaudit` have manifests and generated module/provider catalogs but no launch binary | build closure is not runtime or deployment closure |
+| Settings-only assembly is an executable fail-closed closure | `assemblies/settingsonly` owns `settingsonly-server`, a closed config parser and Draft-07 schema, Primary and domain-free Health listeners, Postgres/Vault/JWKS/Settings probes, the `runtimeexec` launch path, a SIGTERM journey, and the `settingsonly-runtime` image target | Settings can be deployed as an independently runnable closure; Identity and Audit are intentionally absent, so invalid credentials receive 401 and every verified credential receives 403 |
+| Identity-audit assembly remains a compile-time closure | `assemblies/identityaudit` has its manifest and generated module/provider catalogs but no launch binary, probes, config schema, image target, or journey | its executable closure remains a later assembly boundary |
 | Deployment is demo-oriented | `deploy/docker-compose.yml` is the supported demo stack (`docs/ops/202606271438-003-container-image.md`); no `deploy/helm/rss` tree exists | assembly identity cannot be checked against Kubernetes output |
 | CI evidence is local/shadow | `README.md` records the typed `ci-gate` and Azure active forge, while the gate is not a required forge check | future evidence must extend the local gate without claiming branch protection |
 
@@ -37,7 +38,9 @@ assembly.toml + generated modules/providers + contracts
 - **AssemblyLock** identifies the assembly and digests manifest, generated, and contract inputs (#1780–#1781).
 - **RuntimeConfigSnapshot** is constructed once and passed as a required typed input; serving ambient reads are closed (#1782–#1787).
 - **RuntimePlan** closes and fingerprints provider, listener, domain, lifecycle, and placement decisions (#1788). The closed generated provider constructor catalog (#1791) enters assembly identity without constructing instances; #1792–#1794 make the plan/catalog drive the live root.
-- **runtimeexec** will own provider-independent startup and typed lifecycle transitions used by all runnable assemblies (#1795–#1798).
+- **runtimeexec** owns provider-independent startup and typed lifecycle transitions for the full
+  runtime and settingsonly. The identityaudit executable closure and the existing cross-assembly
+  artifact-matrix boundary remain with #1797–#1798.
 - Production security posture will close persistent revocation, Vault allowlists, and production manifest requirements (#1799–#1801).
 - **DeploymentPlan** will derive renderable deployment facts from assembly identity; Helm, policy, and kind acceptance will detect drift (#1802–#1805).
 - **RuntimeInventory** will expose authorized typed runtime evidence. Its design schema here is not the HTTP wire source; #1806 must add the formal `contracts/http/**` contract with auth mode `permission|serviceOwned` and explicit resource sharing `tenantScoped|global`; `public|bootstrap|clientsOnly` are rejected.
@@ -76,7 +79,8 @@ their renderers, endpoints, or gates already exist.
 | one configuration read and no serving ambient reads | #1782–#1787 | Hard snapshot and required inputs; Medium AST guard |
 | fingerprinted typed plan identity | #1788 | Hard private protocol/compiler/reader/schema/golden |
 | plan-driven live cutover | #1792–#1794 | Landed: Hard typed dispatch/domain capability; Medium bijection, aggregate closure, and root ratchet |
-| reusable launch and runnable subset closure | #1795–#1798 | Hard runtimeexec graph; Medium artifact closure |
+| reusable launch and settingsonly runnable closure | #1795–#1796 | Landed: Hard runtimeexec graph and closed Settings launch types; Medium schema, journey, and image closure |
+| identityaudit runnable closure and cross-assembly artifact matrix | #1797–#1798 | Planned: Hard assembly launch path; Medium artifact closure |
 | production security posture | #1799–#1801 | Hard types, database constraints, and manifest validation |
 | Kubernetes deployment fact chain | #1802–#1805 | Hard plan schema-to-golden; Medium Helm drift/policy/kind acceptance |
 | protected inventory wire surface | #1806 | Hard DTO/codegen plus Medium authorization verification |

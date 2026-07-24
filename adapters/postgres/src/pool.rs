@@ -225,12 +225,12 @@ pub enum LegacyConfigPlaintextPolicy {
 /// **故意不实现 `Display`**：任何需要明文的路径只能经 [`PgPassword::expose`]（`pub(crate)`，仅 crate 内喂
 /// 给 sqlx），杜绝下游 `format!("{pw}")` 意外泄漏。
 #[derive(Clone)]
-pub struct PgPassword(String);
+pub struct PgPassword(zeroize::Zeroizing<String>);
 
 impl PgPassword {
     /// 由密文构造。
     pub fn new(secret: impl Into<String>) -> Self {
-        Self(secret.into())
+        Self(zeroize::Zeroizing::new(secret.into()))
     }
 
     /// crate 内借出明文，仅用于喂给 sqlx `PgConnectOptions`（外部不可见）。

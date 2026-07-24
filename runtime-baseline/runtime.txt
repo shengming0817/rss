@@ -172,9 +172,9 @@ mergeExtends = probes,resources,workers
 53 | launch.register-lifecycle | crates/runtimeexec/src/lib.rs | register_lifecycle_outputs(stack, trace_exporter, lifecycle_batches)?; | status=ok
 54 | launch.listener-prepare | crates/runtimeexec/src/lib.rs | let prepared = adapter.prepare(probe_receipt, &mut transaction).await?; | status=ok
 55 | launch.listener-activate | crates/runtimeexec/src/lib.rs | Adapter::activate(prepared, transaction.commit()) | status=ok
-56 | launch.ready-hook | crates/runtimeexec/src/lib.rs | on_ready(activated.into_inventory())?; | status=ok
-57 | launch.signal-wait | crates/runtimeexec/src/lib.rs | launch_until(plan, wait_for_shutdown_signal()).await | status=ok
-58 | launch.shutdown.drain | crates/runtimeexec/src/lib.rs | stack.shutdown().await | status=ok
+56 | launch.ready-hook | crates/runtimeexec/src/lib.rs | let readiness = on_ready(activated.into_inventory()); | status=ok
+57 | launch.signal-wait | crates/runtimeexec/src/lib.rs | let shutdown = wait_for_shutdown_signal()?; | status=ok
+58 | launch.shutdown.drain | crates/runtimeexec/src/lib.rs | shutdown_within(total_drain_budget.duration()) | status=ok
 59 | adapter.listener-prepare | assemblies/runtime/src/launch.rs | BoundListenerSet::prepare( | status=ok
 60 | adapter.listener-preflight | assemblies/runtime/src/launch.rs | listeners.preflight_activation()?; | status=ok
 61 | adapter.listener-activate | assemblies/runtime/src/launch.rs | prepared.listeners.activate(&mut registrar) | status=ok
