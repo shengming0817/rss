@@ -11,6 +11,40 @@
 信息卡片不接收回答。工具执行权限和沙箱批准仍使用 Codex 原生审批；需要可靠双向回答时，
 使用 MCP `ask_via_feishu` 创建带按钮的交互卡片，由 Codex 弹窗与飞书 first-wins。
 
+### `ask_via_feishu` 参数约束
+
+模型侧常见翻车点（对应服务端硬校验 / serde）：
+
+| 字段 | 约束 | 错误症状 |
+|------|------|----------|
+| `purpose` | 短标签，UTF-8 **≤128 字节**；长 rationale 放 `message` / `title` | `purpose 非法或超过 128 字节上限` |
+| `questions` | 1–3 项；每项含 `id` / `question` | `questions 必须包含 1-3 个问题` |
+| `questions[].options` | **`string[]` 纯文案**；禁止 `{label, description}` 对象 | `failed to deserialize parameters: invalid type: map, expected a string` |
+| `context` | 任意 JSON（object/array/string/null）；序列化 ≤16KiB | `context 超过 … 字节上限` |
+| `timeoutSecs` | 1..=3600（默认 3600） | `timeoutSecs 必须在 1-3600 秒之间` |
+
+正确示例：
+
+```json
+{
+  "purpose": "确认是否激活跨域事件传输",
+  "title": "#1797 登录审计边界",
+  "message": "详细背景与推荐项说明……",
+  "timeoutSecs": 120,
+  "questions": [
+    {
+      "id": "audit_path",
+      "question": "应交付哪种闭环？",
+      "options": [
+        "真实事件闭环（推荐）：……",
+        "两条独立路径：……"
+      ]
+    }
+  ]
+}
+```
+
+
 原生 `request_user_input` 尚无独立稳定 hook 事件，因此当前 watcher 只是 best-effort
 兼容层：它通过有版本边界的 parser 读取新增 transcript 记录，未知格式与投递失败只写
 有限、低敏的本地静态诊断，不阻塞 Codex。MCP `ask_via_feishu` 是需要可靠双向回答时的
