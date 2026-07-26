@@ -140,6 +140,10 @@ jobs:
           writer-mode: false
           evidence-enabled: false
 
+      - name: Scan prose for stale governance claims (advisory)
+        continue-on-error: true
+        run: bash hack/automation/prose-advisory-scan.sh scan
+
       - name: Run scheduled audit fallback
         run: |
           set -euo pipefail

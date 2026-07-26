@@ -11,10 +11,10 @@ canonical mapping and repository-evidence snapshot for that audit only. The live
 board are the sole source of current work-item status; consumers must query them rather than infer
 live state from this snapshot, historical checkboxes, or prose.
 
-Coverage is derived by `cargo xtask doc-contracts`: SpecKit T001–T012 = 12/12 parents and 65/65
+Frozen snapshot coverage: SpecKit T001–T012 = 12/12 parents and 65/65
 checkboxes; rewrite P0–P8 = 9/9; capability gaps = 30/30; schedule 607 = every parseable explicit,
 range, and slash-shorthand RSS work item; crate mapping = every row in its primary mapping table;
-code follow-up = every frozen/current anchor enumerated by the gate. A split source uses a suffix
+code follow-up = every frozen/current anchor captured in this snapshot. A split source uses a suffix
 such as `.a`; coverage is still charged to its unsuffixed source item.
 
 Resolution is closed to `done-evidence`, `absorbed-by`, `needs-issue`, and `out-of-scope`.

@@ -54,7 +54,7 @@ Repository precedents are `xtask/src/codegen.rs::schema_hash`, which frames a ve
 5. Treat subset config schemas as #1796/#1797 artifacts, closing the binary/image/config/probe/journey matrix.
 6. Extend the existing local `ci-gate` in #1809. Do not add forge workflow activation or branch-protection scope.
 7. Require #1806 to add an authorized HTTP contract with only `permission|serviceOwned` auth and explicit `tenantScoped|global` resource sharing; reject `public|bootstrap|clientsOnly` and never imply the design schema is the wire source.
-8. Expose #1779's fail-closed checks through `cargo xtask runtime-deployment-spec`, and register its selftest as a typed Meta/NoCompile member of `cargo xtask verify --fast`. The focused `--against` check remains explicit; automatic active-PR scheduling and same-head receipt closure remain #1809 and are not claimed here.
+8. Expose #1779's fail-closed repository machine-input checks through `cargo xtask runtime-deployment-spec`, and register its selftest as a typed Meta/NoCompile member of `cargo xtask verify --fast`. Automatic active-PR scheduling and same-head receipt closure remain #1809 and are not claimed here.
 
 ## Rejected alternatives
 

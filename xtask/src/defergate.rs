@@ -1,30 +1,18 @@
 //! `defer-gate` —— governed 高风险路径内**结构化 defer 完整性 + 经典注解**治理门（#1432）。
 //!
-//! INVARIANT: DEFER-GATE-01 { level = "Medium", exec = "verify", source = "code" }—— 在 governed scope（`docs/rules` / `docs/architecture`
-//! 及根 `deny.toml` / `clippy.toml` / `CLAUDE.md`）内强制两条：(1) 任一 `DEFER(#<issue>)` 标签须四字段齐全
+//! INVARIANT: DEFER-GATE-01 { level = "Medium", exec = "verify", source = "code" }—— 在 governed config（根 `deny.toml` / `clippy.toml`）内强制两条：(1) 任一 `DEFER(#<issue>)` 标签须四字段齐全
 //! 非空——`owner=<..>`、`blocked-by=<#NNNN|trigger:..>`、`closes-when=<..>`（折行式可落在 DEFER 行 + 后续
 //! ≤[`FIELD_WINDOW`] 行注释续行窗口内），ID 须 `#<digits>`，缺即 fail；(2) governed scope 禁用经典注解
 //! `TODO` / `FIXME` / `XXX` / `HACK`（`[:(]` 注解位），须升级为完整 `DEFER(...)` 或删除（DEFER 行本身豁免）。
 //!
-//! 背景：仓内 follow-up/defer/后续/todo 标记约 6700 处散乱分布，缺机器门区分「可接受 defer」与「未追踪未完成工作」
-//! （#1432）。v1 守治理高风险 docs + 根 config，强制结构化 `DEFER(...)` 完整性。
-//!
-//! 标记集精度（实测 governed scope 定稿）：自由词 `defer`/`follow-up`/`后续` 在 governed docs 中**绝大多数是描述性
-//! 散文**（ADR `§8 Follow-up` 标题 / `后续 issue` 引用 / `deferred` 状态），触发即对约 59 处散文 + 本门自身文档误报；
-//! 故 v1 **不**触发自由词散文，只锁结构化 `DEFER(` 标签 + 经典注解。自由词散文 + 代码注释（`crates/*`、`xtask/*`）
-//! 扩域 + 历史约 6700 baseline 冻结 = ratchet follow-up #1447（届时引入 baseline allowlist 轨道）。
-//!
-//! 盲区（AI-robust 写明）：① markdown 扫描前剥 fenced（N≥3 同字符 run 配对，4-backtick 外层 fence 不被内层 3-backtick
-//! 误闭）+ inline（N-backtick span 配对）代码（格式示例不误报，代码示例非真 defer）；`.toml` 按 raw 扫。② `DEFER(`
-//! 大写字面触发；散文小写 "defer gate" / 无括号 "DEFER 格式" 不触发。③ 折行窗口 join 后做字段判定，理论上窗口内紧邻
-//! 文本若巧含 `owner=`/`closes-when=` 可让缺字段 DEFER 误判合规——实测零命中，governed 多为 .md/.toml。④ 本门自身源
-//! `xtask/src/**` 不在 governed scope（避免扫到测试夹具串）。
+//! Markdown prose and `CLAUDE.md` are intentionally outside the governed scope. The gate only
+//! checks machine-owned TOML carriers where the annotations can affect repository policy.
 //!
 //! 评级 Medium（CI 门，接入 `cargo xtask verify` no-compile meta 步 + 独立 `cargo xtask defer-gate`）；synthetic red +
 //! anti-vacuity green 见 `#[cfg(test)]`。
 
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{Result, bail};
 
@@ -35,11 +23,8 @@ pub(crate) type Finding = diagnostic::Finding<Rule>;
 /// DEFER 行 + 后续至多 N 行续行视为同一逻辑 defer 块（折行式字段窗口）。
 const FIELD_WINDOW: usize = 6;
 
-/// governed 扫描目录根（递归取 `.md`）。
-const GOVERNED_DIRS: &[&str] = &["docs/rules", "docs/architecture"];
-
 /// governed 扫描根级文件（显式）。
-const GOVERNED_FILES: &[&str] = &["deny.toml", "clippy.toml", "CLAUDE.md"];
+const GOVERNED_FILES: &[&str] = &["deny.toml", "clippy.toml"];
 
 /// 经典 debt 注解词（注解位 `[:(]` 才触发）。
 const CLASSIC: &[&str] = &["TODO", "FIXME", "XXX", "HACK"];
@@ -63,29 +48,15 @@ impl GovernanceCheck for DeferGate {
     fn check(&self) -> Result<(String, Vec<Finding>)> {
         let root = crate::workspace_root()?;
         let (scanned, findings) = scan_governed(&root)?;
-        // canary 次级下界：每目录 / 每根文件已由 scan_governed fail-closed 守（路径漂移 / 目录被移走即 bail）；此处
-        // 再兜「所有目录同时缩到极小」的灾难（显著低于实际，不误伤正常增减）。
-        if scanned < 10 {
-            bail!(
-                "defer-gate: 仅扫到 {scanned} 个 governed 文件，疑似 docs/rules·docs/architecture 结构异常"
-            );
-        }
         let summary =
             format!("{scanned} governed 文件扫描，DEFER 标签完整 + 无裸 TODO/FIXME/XXX/HACK 注解");
         Ok((summary, findings))
     }
 }
 
-/// 扫 governed scope，返回 `(扫描文件数, findings)`。任一 governed 目录无 `.md` / 任一根文件缺失即 fail-closed。
+/// 扫 governed config，返回 `(扫描文件数, findings)`。任一根文件缺失即 fail-closed。
 fn scan_governed(root: &Path) -> Result<(usize, Vec<Finding>)> {
-    let mut files: Vec<PathBuf> = Vec::new();
-    let mut dir_counts: Vec<(&str, usize)> = Vec::new();
-    for dir in GOVERNED_DIRS {
-        let df = md_files(&root.join(dir))?;
-        dir_counts.push((dir, df.len()));
-        files.extend(df);
-    }
-    ensure_governed_coverage(&dir_counts)?;
+    let mut files = Vec::with_capacity(GOVERNED_FILES.len());
     for f in GOVERNED_FILES {
         let p = root.join(f);
         if !p.is_file() {
@@ -98,13 +69,7 @@ fn scan_governed(root: &Path) -> Result<(usize, Vec<Finding>)> {
     for path in &files {
         let content = std::fs::read_to_string(path)
             .map_err(|e| anyhow::anyhow!("defer-gate: 读 {} 失败: {e}", path.display()))?;
-        let is_md = path.extension().is_some_and(|x| x == "md");
-        let prepared = if is_md {
-            strip_md_code(&content)
-        } else {
-            content
-        };
-        let lines: Vec<&str> = prepared.lines().collect();
+        let lines: Vec<&str> = content.lines().collect();
         let rel = path.strip_prefix(root).unwrap_or(path);
         for (line, rule) in scan_lines(&lines) {
             let detail = hit_detail(rule, &lines, line - 1);
@@ -112,18 +77,6 @@ fn scan_governed(root: &Path) -> Result<(usize, Vec<Finding>)> {
         }
     }
     Ok((files.len(), findings))
-}
-
-/// 任一 governed 目录无 `.md` → fail-closed（目录被改名/清空时门静默放水不可接受）。纯函数，便于 anti-vacuity 测试。
-fn ensure_governed_coverage(dir_counts: &[(&str, usize)]) -> Result<()> {
-    for (dir, n) in dir_counts {
-        if *n == 0 {
-            bail!(
-                "defer-gate: governed 目录 {dir} 无 .md 文件——疑似路径漂移 / 目录被移走，fail-closed"
-            );
-        }
-    }
-    Ok(())
 }
 
 /// 富化 finding detail：指明 DEFER 缺的具体字段 / 命中的经典词，开发者可直接照改。
@@ -142,28 +95,6 @@ fn hit_detail(rule: Rule, lines: &[&str], idx: usize) -> String {
             first_classic_keyword(lines[idx])
         ),
     }
-}
-
-/// 递归收集 `dir` 下全部 `.md` 文件（目录不存在 → 空，由 [`ensure_governed_coverage`] / canary 兜底）。
-fn md_files(dir: &Path) -> Result<Vec<PathBuf>> {
-    let mut out = Vec::new();
-    if !dir.is_dir() {
-        return Ok(out);
-    }
-    let entries = std::fs::read_dir(dir)
-        .map_err(|e| anyhow::anyhow!("defer-gate: 读目录 {} 失败: {e}", dir.display()))?;
-    for entry in entries {
-        let path = entry
-            .map_err(|e| anyhow::anyhow!("defer-gate: 遍历 {} 失败: {e}", dir.display()))?
-            .path();
-        if path.is_dir() {
-            out.extend(md_files(&path)?);
-        } else if path.extension().is_some_and(|x| x == "md") {
-            out.push(path);
-        }
-    }
-    out.sort();
-    Ok(out)
 }
 
 /// 已 prepare（md 剥码后）的行集扫描核心：返回 `(1-based 行号, 违反规则)`（排序去重）。
@@ -202,16 +133,10 @@ fn scan_lines(lines: &[&str]) -> Vec<(usize, Rule)> {
     findings
 }
 
-/// 单文件内容扫描（纯函数，**测试入口**——生产路径走 [`scan_governed`] 内联 strip + [`scan_lines`]）：
-/// `is_md` → 先剥 markdown 代码块（格式示例 / 代码不误报）。
+/// 单文件内容扫描（纯函数，测试入口）。
 #[cfg(test)]
-fn scan_content(content: &str, is_md: bool) -> Vec<(usize, Rule)> {
-    let prepared = if is_md {
-        strip_md_code(content)
-    } else {
-        content.to_string()
-    };
-    let lines: Vec<&str> = prepared.lines().collect();
+fn scan_content(content: &str) -> Vec<(usize, Rule)> {
+    let lines: Vec<&str> = content.lines().collect();
     scan_lines(&lines)
 }
 
@@ -364,90 +289,6 @@ fn is_word_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
 }
 
-/// 剥 markdown fenced + inline 代码，保留行数（每源行 → 一输出行；代码内容→空）。fenced 按 run 长度 + 字符配对
-/// （`````` ```` `````` 外层 fence 不被内层 ```` ``` ```` 误闭）。
-fn strip_md_code(src: &str) -> String {
-    let mut out = String::with_capacity(src.len());
-    let mut fence: Option<(char, usize)> = None;
-    for line in src.lines() {
-        let (fc, fl) = fence_marker(line.trim_start());
-        match fence {
-            None => {
-                if fl >= 3 {
-                    fence = Some((fc, fl)); // 开 fence
-                    out.push('\n');
-                } else {
-                    out.push_str(&strip_inline_code(line));
-                    out.push('\n');
-                }
-            }
-            Some((open_c, open_n)) => {
-                // 闭合：同字符且 run 长度 ≥ 开 fence。
-                if fc == open_c && fl >= open_n {
-                    fence = None;
-                }
-                out.push('\n'); // fenced 内容 + 闭 fence 行清空
-            }
-        }
-    }
-    out
-}
-
-/// 行首（已 trim）的 fence marker run：`(字符, 连续长度)`；非 ```` ``` ````/`~~~` 起始 → `(' ', 0)`。
-fn fence_marker(t: &str) -> (char, usize) {
-    match t.chars().next() {
-        Some(c) if c == '`' || c == '~' => (c, t.chars().take_while(|&x| x == c).count()),
-        _ => (' ', 0),
-    }
-}
-
-/// 剥行内 backtick code span（N-backtick 开 run 配等长闭 run，含两端 run 与内容）；未闭合 run 当字面量保留。
-fn strip_inline_code(line: &str) -> String {
-    let b: Vec<char> = line.chars().collect();
-    let mut out = String::with_capacity(line.len());
-    let mut i = 0;
-    while i < b.len() {
-        if b[i] != '`' {
-            out.push(b[i]);
-            i += 1;
-            continue;
-        }
-        // 开 backtick run 长度 n。
-        let mut n = 0;
-        while i + n < b.len() && b[i + n] == '`' {
-            n += 1;
-        }
-        // 从 run 之后找等长闭 run。
-        let mut k = i + n;
-        let mut close: Option<usize> = None;
-        while k < b.len() {
-            if b[k] == '`' {
-                let mut m = 0;
-                while k + m < b.len() && b[k + m] == '`' {
-                    m += 1;
-                }
-                if m == n {
-                    close = Some(k);
-                    break;
-                }
-                k += m;
-            } else {
-                k += 1;
-            }
-        }
-        match close {
-            Some(c) => i = c + n, // 丢弃整个 span（两端 run + 内容）
-            None => {
-                for _ in 0..n {
-                    out.push('`'); // 未闭合：开 run 当字面量
-                }
-                i += n;
-            }
-        }
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -458,14 +299,14 @@ mod tests {
     #[test]
     fn defer_single_line_complete_passes() {
         let src = "// DEFER(#1432): 路由未接线; owner=settings; blocked-by=#1421; closes-when=runtime 挂载\n";
-        assert_eq!(scan_content(src, false), vec![]);
+        assert_eq!(scan_content(src), vec![]);
     }
 
     /// 绿：折行式完整 DEFER（字段散落在窗口内续行）→ 0 finding。
     #[test]
     fn defer_folded_complete_passes() {
         let src = "// DEFER(#1432): 路由未接线;\n//   owner=settings; blocked-by=#1421;\n//   closes-when=runtime 挂载 settings RouteGroup\n";
-        assert_eq!(scan_content(src, false), vec![]);
+        assert_eq!(scan_content(src), vec![]);
     }
 
     /// 绿：blocked-by 用 trigger: 形态亦合规。
@@ -473,98 +314,95 @@ mod tests {
     fn defer_blocked_by_trigger_passes() {
         let src =
             "// DEFER(#9): x; owner=a; blocked-by=trigger:Topology=Distributed; closes-when=done\n";
-        assert_eq!(scan_content(src, false), vec![]);
+        assert_eq!(scan_content(src), vec![]);
     }
 
     /// 红：空 `trigger:`（冒号后无内容 / 仅空白）须拒——trigger value 是必填阻塞条件（F1 修复回归）。
     #[test]
     fn defer_empty_trigger_flags() {
         let empty = "// DEFER(#1): x; owner=a; blocked-by=trigger:; closes-when=done\n";
-        assert_eq!(scan_content(empty, false), vec![(1, Rule::DeferIncomplete)]);
+        assert_eq!(scan_content(empty), vec![(1, Rule::DeferIncomplete)]);
         let ws = "// DEFER(#1): x; owner=a; blocked-by=trigger:   ; closes-when=done\n";
-        assert_eq!(scan_content(ws, false), vec![(1, Rule::DeferIncomplete)]);
+        assert_eq!(scan_content(ws), vec![(1, Rule::DeferIncomplete)]);
     }
 
     /// 红：同一行多个 `DEFER(`——首个完整、第二个缺字段，第二个须独立判 DeferIncomplete（F2 修复回归）。
     #[test]
     fn defer_same_line_second_incomplete_flags() {
         let src = "// DEFER(#1): a; owner=x; blocked-by=#2; closes-when=d; DEFER(#3): b\n";
-        assert_eq!(scan_content(src, false), vec![(1, Rule::DeferIncomplete)]);
+        assert_eq!(scan_content(src), vec![(1, Rule::DeferIncomplete)]);
     }
 
     /// 绿：同一行两个**均完整** DEFER 标签 → 0 finding（F2：occurrence 级校验不误伤）。
     #[test]
     fn defer_same_line_both_complete_passes() {
         let src = "// DEFER(#1): a; owner=x; blocked-by=#2; closes-when=d; DEFER(#3): b; owner=y; blocked-by=#4; closes-when=e\n";
-        assert_eq!(scan_content(src, false), vec![]);
+        assert_eq!(scan_content(src), vec![]);
     }
 
     /// 边界：closes-when 落在第 FIELD_WINDOW(6) 续行（窗口内）→ 完整；落在第 7 续行（越窗）→ 缺字段（F3 修复回归）。
     #[test]
     fn defer_window_boundary() {
         let within = "// DEFER(#1): a;\n//  owner=x;\n//  blocked-by=#2;\n//  c1;\n//  c2;\n//  c3;\n//  closes-when=d\n";
-        assert_eq!(scan_content(within, false), vec![]);
+        assert_eq!(scan_content(within), vec![]);
         let beyond = "// DEFER(#1): a;\n//  owner=x;\n//  blocked-by=#2;\n//  c1;\n//  c2;\n//  c3;\n//  c4;\n//  closes-when=d\n";
-        assert_eq!(
-            scan_content(beyond, false),
-            vec![(1, Rule::DeferIncomplete)]
-        );
+        assert_eq!(scan_content(beyond), vec![(1, Rule::DeferIncomplete)]);
     }
 
     /// 红：缺 owner → DeferIncomplete（行 1）。
     #[test]
     fn defer_missing_owner_flags() {
         let src = "// DEFER(#1): x; blocked-by=#2; closes-when=done\n";
-        assert_eq!(scan_content(src, false), vec![(1, Rule::DeferIncomplete)]);
+        assert_eq!(scan_content(src), vec![(1, Rule::DeferIncomplete)]);
     }
 
     /// 红：缺 blocked-by → DeferIncomplete。
     #[test]
     fn defer_missing_blocked_by_flags() {
         let src = "// DEFER(#1): x; owner=a; closes-when=done\n";
-        assert_eq!(scan_content(src, false), vec![(1, Rule::DeferIncomplete)]);
+        assert_eq!(scan_content(src), vec![(1, Rule::DeferIncomplete)]);
     }
 
     /// 红：缺 closes-when → DeferIncomplete。
     #[test]
     fn defer_missing_closes_when_flags() {
         let src = "// DEFER(#1): x; owner=a; blocked-by=#2\n";
-        assert_eq!(scan_content(src, false), vec![(1, Rule::DeferIncomplete)]);
+        assert_eq!(scan_content(src), vec![(1, Rule::DeferIncomplete)]);
     }
 
     /// 红：owner= 空值 → DeferIncomplete。
     #[test]
     fn defer_empty_owner_flags() {
         let src = "// DEFER(#1): x; owner=; blocked-by=#2; closes-when=done\n";
-        assert_eq!(scan_content(src, false), vec![(1, Rule::DeferIncomplete)]);
+        assert_eq!(scan_content(src), vec![(1, Rule::DeferIncomplete)]);
     }
 
     /// 红：blocked-by 既非 #digits 也非 trigger: → DeferIncomplete。
     #[test]
     fn defer_bad_blocked_by_flags() {
         let src = "// DEFER(#1): x; owner=a; blocked-by=soon; closes-when=done\n";
-        assert_eq!(scan_content(src, false), vec![(1, Rule::DeferIncomplete)]);
+        assert_eq!(scan_content(src), vec![(1, Rule::DeferIncomplete)]);
     }
 
     /// 红：blocked-by=#<digit><alpha>（如 `#1todo`）须拒——首位数字不代表合法 issue ref（B1/A2 修复回归）。
     #[test]
     fn defer_blocked_by_digit_then_alpha_flags() {
         let src = "// DEFER(#1): x; owner=a; blocked-by=#1abc; closes-when=done\n";
-        assert_eq!(scan_content(src, false), vec![(1, Rule::DeferIncomplete)]);
+        assert_eq!(scan_content(src), vec![(1, Rule::DeferIncomplete)]);
     }
 
     /// 红：ID 非 #digits（占位 `#NNNN`）→ DeferIncomplete。
     #[test]
     fn defer_bad_id_placeholder_flags() {
         let src = "// DEFER(#NNNN): x; owner=a; blocked-by=#2; closes-when=done\n";
-        assert_eq!(scan_content(src, false), vec![(1, Rule::DeferIncomplete)]);
+        assert_eq!(scan_content(src), vec![(1, Rule::DeferIncomplete)]);
     }
 
     /// 红：ID 缺 `#` → DeferIncomplete。
     #[test]
     fn defer_missing_hash_flags() {
         let src = "// DEFER(123): x; owner=a; blocked-by=#2; closes-when=done\n";
-        assert_eq!(scan_content(src, false), vec![(1, Rule::DeferIncomplete)]);
+        assert_eq!(scan_content(src), vec![(1, Rule::DeferIncomplete)]);
     }
 
     // —— ② 经典注解（红 / 绿 / 行内豁免） ——
@@ -573,7 +411,7 @@ mod tests {
     #[test]
     fn classic_todo_colon_flags() {
         assert_eq!(
-            scan_content("行首\n// TODO: 之后修\n", false),
+            scan_content("行首\n// TODO: 之后修\n"),
             vec![(2, Rule::ClassicAnnotation)]
         );
     }
@@ -582,7 +420,7 @@ mod tests {
     #[test]
     fn classic_fixme_paren_flags() {
         assert_eq!(
-            scan_content("# FIXME(owner): 修\n", false),
+            scan_content("# FIXME(owner): 修\n"),
             vec![(1, Rule::ClassicAnnotation)]
         );
     }
@@ -591,70 +429,37 @@ mod tests {
     #[test]
     fn classic_inside_defer_line_exempt() {
         let src = "// DEFER(#1): 见 TODO: 迁移; owner=a; blocked-by=#2; closes-when=done\n";
-        assert_eq!(scan_content(src, false), vec![]);
+        assert_eq!(scan_content(src), vec![]);
     }
 
     /// 红：DEFER 块**之后紧邻**的无关经典注解仍须报（仅 DEFER 行豁免，续行不整体豁免——B3 修复回归）。
     #[test]
     fn classic_after_defer_block_not_exempt() {
         let src = "// DEFER(#1): x; owner=a; blocked-by=#2; closes-when=done\n// TODO: 无关债\n";
-        assert_eq!(scan_content(src, false), vec![(2, Rule::ClassicAnnotation)]);
+        assert_eq!(scan_content(src), vec![(2, Rule::ClassicAnnotation)]);
     }
 
     /// 绿：词非注解位（`TODOS` / 散文 `todo` / `TODO` 后无 `:`/`(`）不触发。
     #[test]
     fn classic_non_annotation_position_passes() {
-        assert_eq!(
-            scan_content("the TODOS list and a todo item\n", false),
-            vec![]
-        );
-        assert_eq!(scan_content("讨论 TODO 项的处理方式\n", false), vec![]);
+        assert_eq!(scan_content("the TODOS list and a todo item\n"), vec![]);
+        assert_eq!(scan_content("讨论 TODO 项的处理方式\n"), vec![]);
     }
 
-    // —— ③ 自由词散文不触发（dogfood 安全） ——
+    // —— ③ TOML 注释中的普通词语不触发 ——
 
-    /// 绿：描述性散文 `defer gate` / `follow-up issue` / `后续` / 无括号 `DEFER 格式` 不触发。
+    /// 绿：配置注释里的 `defer gate` / `follow-up issue` / `后续` / 无括号 `DEFER 格式` 不触发。
     #[test]
-    fn prose_words_not_flagged() {
+    fn non_annotation_config_words_not_flagged() {
         let src = "本节描述 defer gate 与 follow-up issue；后续 issue 待建。DEFER 格式见下。deferred 状态。\n";
-        assert_eq!(scan_content(src, true), vec![]);
+        assert_eq!(scan_content(src), vec![]);
     }
 
-    // —— ④ markdown 代码块剥离 ——
-
-    /// 绿：fenced 代码块内的不完整 DEFER 示例（is_md）被剥离 → 不误报。
+    /// 红 anti-vacuity：配置中的不完整 DEFER 触发。
     #[test]
-    fn md_fenced_code_stripped() {
-        let src = "正文\n```\n// DEFER(#1): 缺字段示例\n```\n更多正文\n";
-        assert_eq!(scan_content(src, true), vec![]);
-    }
-
-    /// 绿：4-backtick 外层 fence 嵌套 3-backtick 内层（is_md）——外层不被内层误闭，整段剥离 → 不误报（B4 修复回归）。
-    #[test]
-    fn md_nested_4backtick_fence_stripped() {
-        let src = "正文\n````md\n```\n// DEFER(#1): 缺字段\n```\n````\n尾\n";
-        assert_eq!(scan_content(src, true), vec![]);
-    }
-
-    /// 绿：inline single-backtick 内的 `DEFER(#NNNN)` 模板（is_md）被剥离 → 不误报。
-    #[test]
-    fn md_inline_code_stripped() {
-        let src = "格式 `DEFER(#NNNN): ...` 见正文。\n";
-        assert_eq!(scan_content(src, true), vec![]);
-    }
-
-    /// 绿：inline double-backtick span（含单反引号内容）内的不完整 DEFER（is_md）被剥离 → 不误报（A3/B5 修复回归）。
-    #[test]
-    fn md_inline_double_backtick_stripped() {
-        let src = "见 ``DEFER(#1): 缺字段`` 示例\n";
-        assert_eq!(scan_content(src, true), vec![]);
-    }
-
-    /// 红 anti-vacuity：非 md（raw .toml/.rs）不剥代码——同样的不完整 DEFER 在 raw 模式触发（证明剥离仅限 md）。
-    #[test]
-    fn raw_mode_does_not_strip_flags() {
+    fn incomplete_defer_in_config_is_flagged() {
         let src = "# DEFER(#1): 缺字段\n";
-        assert_eq!(scan_content(src, false), vec![(1, Rule::DeferIncomplete)]);
+        assert_eq!(scan_content(src), vec![(1, Rule::DeferIncomplete)]);
     }
 
     // —— ⑤ 富化 detail / fail-closed canary（纯函数） ——
@@ -687,13 +492,6 @@ mod tests {
         assert_eq!(first_classic_keyword("// TODO: y"), "TODO");
     }
 
-    /// fail-closed canary：任一 governed 目录 0 .md → Err（路径漂移不放水）；全非空 → Ok。anti-vacuity。
-    #[test]
-    fn governed_coverage_fail_closed() {
-        assert!(ensure_governed_coverage(&[("docs/rules", 7), ("docs/architecture", 9)]).is_ok());
-        assert!(ensure_governed_coverage(&[("docs/rules", 7), ("docs/architecture", 0)]).is_err());
-    }
-
     // —— ⑥ 真 workspace governed scope 绿门（接 verify 机器门） ——
 
     /// 绿向工作区门：真 governed scope 0 finding + canary。anti-vacuity 由上方 synthetic red 守（非恒真）。
@@ -702,10 +500,7 @@ mod tests {
     fn real_governed_scope_is_clean() {
         let root = crate::workspace_root().expect("workspace root");
         let (scanned, findings) = scan_governed(&root).expect("scan governed");
-        assert!(
-            scanned >= 10,
-            "至少扫到 ~28 个 governed 文件，实际 {scanned}"
-        );
+        assert_eq!(scanned, GOVERNED_FILES.len());
         assert!(
             findings.is_empty(),
             "governed scope 应 0 defer-gate finding: {findings:?}"

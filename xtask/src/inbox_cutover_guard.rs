@@ -2,7 +2,7 @@
 //!
 //! INVARIANT: INBOX-RECEIPTS-CUTOVER-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::scan_rejects_legacy_table_and_const_tokens", anti_vacuity = "tests::scan_accepts_current_receipt_name" }——
 //! production sources must use the tenant-scoped receipt table after the cutover; legacy receipt storage names may
-//! remain only in historical migrations/docs and the retirement migration.
+//! remain only in historical migrations and the retirement migration.
 
 use std::path::{Path, PathBuf};
 
@@ -29,7 +29,7 @@ impl GovernanceCheck for InboxCutoverGuard {
         let root = workspace_root()?;
         let findings = scan_workspace(&root)?;
         Ok((
-            "生产源已切到 inbox_receipts；旧 receipt storage token 仅保留在历史迁移/ADR 白名单"
+            "生产源已切到 inbox_receipts；旧 receipt storage token 仅保留在历史迁移白名单"
                 .to_string(),
             findings,
         ))
@@ -103,7 +103,7 @@ fn should_skip_dir(root: &Path, path: &Path) -> bool {
 fn is_scannable_file(path: &Path) -> bool {
     matches!(
         path.extension().and_then(|ext| ext.to_str()),
-        Some("rs" | "sql" | "md" | "toml" | "yaml" | "yml")
+        Some("rs" | "sql" | "toml" | "yaml" | "yml")
     )
 }
 
@@ -117,7 +117,7 @@ fn scan_content(path: &Path, content: &str) -> Vec<Finding<Rule>> {
                     Rule::LegacyReceiptReference,
                     format!("{}:{}", path.display(), idx + 1),
                     format!(
-                        "旧 receipt storage token `{token}` 已退役；生产/现行文档应使用 `inbox_receipts`"
+                        "旧 receipt storage token `{token}` 已退役；生产载体应使用 `inbox_receipts`"
                     ),
                 ));
             }
@@ -136,9 +136,6 @@ fn allowed_paths() -> Vec<String> {
         "adapters/postgres/migrations/0030_grant_runtime_serving.sql".to_string(),
         "adapters/postgres/migrations/0038_create_inbox_receipts.sql".to_string(),
         format!("adapters/postgres/migrations/0039_retire_{legacy}.sql"),
-        "adapters/postgres/migrations/README.md".to_string(),
-        "docs/architecture/202606271400-011-durable-tenant-scope-unblocker.md".to_string(),
-        "docs/architecture/202606271500-011-migration-serial-renumber.md".to_string(),
     ]
 }
 
@@ -183,6 +180,16 @@ mod tests {
             "SELECT * FROM inbox_receipts",
         );
         assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn markdown_is_not_a_scannable_carrier() {
+        assert!(!is_scannable_file(Path::new(
+            "docs/architecture/cutover.md"
+        )));
+        assert!(is_scannable_file(Path::new(
+            "adapters/postgres/migrations/0039.sql"
+        )));
     }
 
     #[test]

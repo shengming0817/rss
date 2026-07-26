@@ -48,7 +48,7 @@ RSS 的治理机制默认面向 AI co-author。新增约束必须让错误尽量
 4. **运行期 governance 测试（`cargo xtask` / `consistency` 等 crate 内 `#[test]`）**：仅用于类型系统与 crate 图
    管不到的边界——active subscriber 存在性、contract 扇出完整性、migration 只增不改、覆盖率阈值、
    no-op 业务理由（均为 **Medium** CI 门，严禁 Soft）。
-5. **metadata / YAML / Markdown 规则**：遍历内容文件校验，并配 synthetic red case。
+5. **机器 metadata / YAML 与 Rust source/Rustdoc 规则**：只对机器输入或代码载体遍历校验，并配 synthetic red case；人类 Markdown 内容不得作为 PR/CI 阻塞门，只做周期、非阻塞 advisory grep。
 6. **runtime guard**：只用于上述都不可表达的边界，错误必须 fail-fast。
 
 禁止直接在规则文件中维护落地实例清单。实例、符号、盲区和评级证明写在对应静态守卫

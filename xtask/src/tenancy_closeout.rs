@@ -2,7 +2,7 @@
 //!
 //! INVARIANT: TENANCY-CLOSEOUT-REVERSE-01 { level = "Medium", exec = "verify", source = "code" } -- final
 //! tenancy governance facts must stay machine-visible in verify/ci membership, dylint registration,
-//! projection wiring, and governed closeout docs.
+//! projection wiring, and code/config carriers.
 //! INVARIANT: TENANCY-SERVICE-IDENTITY-SCOPE-01 { level = "Medium", exec = "verify", source = "code" } -- service-token
 //! MAC-bound canonical tenant headers and mTLS/SPIFFE tenantless service identity must remain locked by reverse
 //! closeout anchors.
@@ -41,35 +41,7 @@ const TENANCY_DYLINTS: &[&str] = &[
     "rss_projection_append_only",
 ];
 
-const REGISTRY_FILES: &[&str] = &["Cargo.toml", "lints/Cargo.toml", "lints/README.md"];
-
-const AUTHZ_PARITY_ADR_PATH: &str =
-    "docs/architecture/202607021958-014-authz-open-source-parity-boundary.md";
-
-const PDP_BOUNDARY_ADR_PATH: &str =
-    "docs/architecture/202606232318-006-pdp-internal-authplan-vs-external-opa.md";
-
-const AUTHZ_PARITY_DOCS: &[&str] = &[
-    AUTHZ_PARITY_ADR_PATH,
-    "docs/rules/tenancy.md",
-    PDP_BOUNDARY_ADR_PATH,
-    TENANCY_CONSUMER_GUIDE_PATH,
-    "docs/spec/005-tenancy-abac-dataperm-closeout/research.md",
-    "docs/spec/005-tenancy-abac-dataperm-closeout/tasks.md",
-    "docs/spec/005-tenancy-abac-dataperm-closeout/quickstart.md",
-];
-
-const AUTHZ_PARITY_FORBIDDEN_CLAIMS: &[&str] = &[
-    "full parity",
-    "drop-in replacement",
-    "OPA/Rego compatible",
-    "tenant isolation is ABAC policy",
-    "RLS alone solves tenancy",
-    "FieldMask equals encryption",
-];
-
-const TENANCY_CONSUMER_GUIDE_PATH: &str =
-    "docs/guides/202607090202-1596-tenancy-consumer-migration.md";
+const REGISTRY_FILES: &[&str] = &["Cargo.toml", "lints/Cargo.toml"];
 const TENANCY_CONSUMER_EXAMPLE_PATH: &str = "examples/tenancy-consumer/src/main.rs";
 const TENANCY_CONSUMER_GENERATED_SPEC_TEST_PATH: &str =
     "xtask/tests/tenancy_closeout_generated_specs.rs";
@@ -77,10 +49,9 @@ const AUTH_E2E_TEST_PATH: &str = "assemblies/runtime/tests/auth_e2e.rs";
 
 /// Code carriers bind governance facts to **code/config** only.
 ///
-/// Positive Markdown must-contain checks are not enforcement: they duplicate a constraint that
-/// some real gate already owns, and they force rule/ADR prose to restate implementation detail.
-/// Negative scans (forbidden stale wording / misleading claims) on docs remain. Constraints that
-/// earlier positive doc anchors named are carried by their own gates (`schema-rls`,
+/// Markdown checks are not enforcement: they duplicate constraints that real gates already own
+/// and force prose to restate implementation detail. Constraints that earlier doc anchors named
+/// are carried by their own gates (`schema-rls`,
 /// `setlocal-funnel`, `pg-tenant-tx-guard`, `PgStore::verify_rls_capability`, the tenancy dylints,
 /// and the projection chain checks below).
 const REQUIRED_CODE_CARRIERS: &[RequiredCodeCarrier] = &[
@@ -184,93 +155,17 @@ const PROJECTION_ENDPOINTS: &[ProjectionEndpoint] = &[
     },
 ];
 
-const STALE_CLOSEOUT_PATTERNS: &[ForbiddenPattern] = &[
-    ForbiddenPattern {
-        path: "docs/architecture/202606271400-011-durable-tenant-scope-unblocker.md",
-        needle: "dual-pool bootstrap 接线",
-        detail: "tenant dual-pool bootstrap closeout is complete; ADR must not keep it as follow-up",
-    },
-    ForbiddenPattern {
-        path: "docs/architecture/202606271400-011-durable-tenant-scope-unblocker.md",
-        needle: "full-path ledger + CI 门随后续 RLS PR 落地",
-        detail: "RLS full-path ledger and CI gates are complete; ADR must state final status",
-    },
-    ForbiddenPattern {
-        path: "docs/rules/architecture.md",
-        needle: "tenant/AuthZ/projection lint 待补",
-        detail: "tenant/AuthZ/projection dylints are registered; architecture rules must not describe them as pending",
-    },
-    ForbiddenPattern {
-        path: "lints/README.md",
-        needle: "tenant/AuthZ/projection lint 待补",
-        detail: "tenant/AuthZ/projection dylints are registered; lint README must not describe them as pending",
-    },
-    ForbiddenPattern {
-        path: "docs/architecture/202606232319-007-service-identity-service-token-vs-spiffe-mtls.md",
-        needle: "内部 svc-to-svc 现阶段用 service-token",
-        detail: "ADR 007 is superseded: Internal svc-to-svc production default is mTLS/SPIFFE",
-    },
-    ForbiddenPattern {
-        path: "docs/architecture/202606232319-007-service-identity-service-token-vs-spiffe-mtls.md",
-        needle: "`AuthScheme::Mtls` 仅作类型层接缝预留",
-        detail: "ADR 007 must not describe mTLS as only a reserved seam after #1500/#1597",
-    },
-    ForbiddenPattern {
-        path: "docs/architecture/202606232319-007-service-identity-service-token-vs-spiffe-mtls.md",
-        needle: "无 verifier 实现",
-        detail: "ADR 007 must not describe mTLS verifier implementation as absent after #1500/#1597",
-    },
-    ForbiddenPattern {
-        path: "docs/architecture/202606232318-006-pdp-internal-authplan-vs-external-opa.md",
-        needle: "#1109 未落地",
-        detail: "ADR 006 must not keep historical #1109-unlanded future wording after closeout",
-    },
-    ForbiddenPattern {
-        path: "docs/architecture/202606232318-006-pdp-internal-authplan-vs-external-opa.md",
-        needle: "验签空窗",
-        detail: "ADR 006 must not keep historical verifier-gap wording after closeout",
-    },
-    ForbiddenPattern {
-        path: "docs/architecture/202606232318-006-pdp-internal-authplan-vs-external-opa.md",
-        needle: "未来 `diport::Pdp`",
-        detail: "ADR 006 must not keep historical future-Pdp wording after closeout",
-    },
-    ForbiddenPattern {
-        path: "docs/architecture/202606232319-007-service-identity-service-token-vs-spiffe-mtls.md",
-        needle: "MAC verifier 随 #1109",
-        detail: "ADR 007 must not keep historical MAC-verifier-future wording after closeout",
-    },
-    ForbiddenPattern {
-        path: "docs/architecture/202606232319-007-service-identity-service-token-vs-spiffe-mtls.md",
-        needle: "service-token 验签空窗",
-        detail: "ADR 007 must not keep historical service-token verifier-gap wording after closeout",
-    },
-    ForbiddenPattern {
-        path: "docs/architecture/202606232319-007-service-identity-service-token-vs-spiffe-mtls.md",
-        needle: "MAC binding 尚未实装",
-        detail: "ADR 007 must not keep historical MAC-binding-unimplemented wording after closeout",
-    },
-];
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Rule {
     VerifyGate,
     DylintRegistry,
     ProjectionAnchor,
     CodeCarrier,
-    StaleCloseoutWording,
 }
 
 #[derive(Debug, Clone, Copy)]
 struct RequiredCodeCarrier {
     rule: Rule,
-    path: &'static str,
-    needle: &'static str,
-    detail: &'static str,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct ForbiddenPattern {
     path: &'static str,
     needle: &'static str,
     detail: &'static str,
@@ -307,16 +202,12 @@ impl GovernanceCheck for TenancyCloseout {
         findings.extend(check_required_lint_registry(&root)?);
         findings.extend(check_projection_wiring(&root)?);
         findings.extend(check_required_code_carriers(&root)?);
-        findings.extend(check_authz_parity_boundary(&root)?);
-        findings.extend(check_stale_closeout_wording(&root)?);
-
         Ok((
             format!(
-                "{} verify/ci gates, {} dylints, {} code carriers, {} forbidden-claim docs, {} projection fields checked",
+                "{} verify/ci gates, {} dylints, {} code carriers, {} projection fields checked",
                 VERIFY_CI_REQUIRED_GATES.len(),
                 TENANCY_DYLINTS.len(),
                 REQUIRED_CODE_CARRIERS.len(),
-                AUTHZ_PARITY_DOCS.len(),
                 projection_field_count()
             ),
             findings,
@@ -374,22 +265,8 @@ fn scan_lint_registry(path: &str, content: &str) -> Vec<Finding> {
     match path {
         "Cargo.toml" => scan_root_dylint_registry(path, content),
         "lints/Cargo.toml" => scan_lints_workspace_registry(path, content),
-        _ => scan_text_lint_registry(path, content),
+        _ => Vec::new(),
     }
-}
-
-fn scan_text_lint_registry(path: &str, content: &str) -> Vec<Finding> {
-    TENANCY_DYLINTS
-        .iter()
-        .filter(|lint| !content.contains(**lint))
-        .map(|lint| {
-            finding(
-                Rule::DylintRegistry,
-                format!("{path}:{lint}"),
-                "tenant/AuthZ/projection dylint must be registered and documented consistently",
-            )
-        })
-        .collect()
 }
 
 fn scan_root_dylint_registry(path: &str, content: &str) -> Vec<Finding> {
@@ -795,79 +672,6 @@ fn scan_required_code_carrier(carrier: &RequiredCodeCarrier, content: &str) -> V
     }
 }
 
-fn check_authz_parity_boundary(root: &Path) -> Result<Vec<Finding>> {
-    let mut findings = Vec::new();
-    for path in AUTHZ_PARITY_DOCS {
-        let content = read_required(root, path)?;
-        findings.extend(scan_authz_forbidden_claims(path, &content));
-    }
-    Ok(findings)
-}
-
-fn scan_authz_forbidden_claims(path: &str, content: &str) -> Vec<Finding> {
-    AUTHZ_PARITY_FORBIDDEN_CLAIMS
-        .iter()
-        .map(|claim| (*claim, normalize_claim_text(claim)))
-        .flat_map(|claim| {
-            content
-                .lines()
-                .enumerate()
-                .filter(move |(_, line)| normalize_claim_text(line).contains(&claim.1))
-                .map(move |(idx, _)| {
-                    finding(
-                        Rule::StaleCloseoutWording,
-                        format!("{path}:{}", idx + 1),
-                        format!(
-                            "authz parity docs must avoid misleading product/API compatibility claim: {}",
-                            claim.0
-                        ),
-                    )
-                })
-        })
-        .collect()
-}
-
-fn normalize_claim_text(content: &str) -> String {
-    let mut normalized = String::new();
-    let mut previous_space = true;
-    for ch in content.chars() {
-        if ch.is_alphanumeric() {
-            for lower in ch.to_lowercase() {
-                normalized.push(lower);
-            }
-            previous_space = false;
-        } else if !previous_space {
-            normalized.push(' ');
-            previous_space = true;
-        }
-    }
-    normalized.trim().to_string()
-}
-
-fn check_stale_closeout_wording(root: &Path) -> Result<Vec<Finding>> {
-    let mut findings = Vec::new();
-    for pattern in STALE_CLOSEOUT_PATTERNS {
-        let content = read_required(root, pattern.path)?;
-        findings.extend(scan_forbidden_pattern(pattern, &content));
-    }
-    Ok(findings)
-}
-
-fn scan_forbidden_pattern(pattern: &ForbiddenPattern, content: &str) -> Vec<Finding> {
-    content
-        .lines()
-        .enumerate()
-        .filter(|(_, line)| line.contains(pattern.needle))
-        .map(|(idx, _)| {
-            finding(
-                Rule::StaleCloseoutWording,
-                format!("{}:{}", pattern.path, idx + 1),
-                pattern.detail,
-            )
-        })
-        .collect()
-}
-
 fn strip_rust_line_comments(content: &str) -> String {
     content
         .lines()
@@ -924,13 +728,16 @@ mod tests {
 
     #[test]
     fn missing_lint_registration_is_reported() {
-        let content = TENANCY_DYLINTS
-            .iter()
-            .copied()
-            .filter(|lint| *lint != "rss_projection_append_only")
-            .collect::<Vec<_>>()
-            .join("\n");
-        let findings = scan_lint_registry("lints/README.md", &content);
+        let content = format!(
+            "[workspace]\nmembers = [{}]\n",
+            TENANCY_DYLINTS
+                .iter()
+                .filter(|lint| **lint != "rss_projection_append_only")
+                .map(|lint| format!("\"{lint}\""))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        let findings = scan_lint_registry("lints/Cargo.toml", &content);
         assert_eq!(findings.len(), 1, "{findings:?}");
         assert_eq!(findings[0].rule, Rule::DylintRegistry);
         assert!(
@@ -1129,19 +936,6 @@ async fn password_change_handler() {}
     }
 
     #[test]
-    fn stale_service_identity_mtls_reserved_wording_is_reported() {
-        let pattern = ForbiddenPattern {
-            path: "docs/architecture/202606232319-007-service-identity-service-token-vs-spiffe-mtls.md",
-            needle: "`AuthScheme::Mtls` 仅作类型层接缝预留",
-            detail: "stale service identity wording",
-        };
-        let findings =
-            scan_forbidden_pattern(&pattern, "当前 `AuthScheme::Mtls` 仅作类型层接缝预留");
-        assert_eq!(findings.len(), 1, "{findings:?}");
-        assert_eq!(findings[0].rule, Rule::StaleCloseoutWording);
-    }
-
-    #[test]
     fn response_path_last_segment_maps_to_rust_field_name() {
         assert_eq!(
             rust_field_from_response_path("data[].tenantId"),
@@ -1246,60 +1040,6 @@ pub mod unrelated {
     }
 
     #[test]
-    fn stale_closeout_wording_is_reported() {
-        let pattern = ForbiddenPattern {
-            path: "docs/architecture/adr.md",
-            needle: "dual-pool bootstrap 接线",
-            detail: "stale",
-        };
-        let findings = scan_forbidden_pattern(&pattern, "后续 dual-pool bootstrap 接线 另行处理");
-        assert_eq!(findings.len(), 1, "{findings:?}");
-        assert_eq!(findings[0].rule, Rule::StaleCloseoutWording);
-    }
-
-    #[test]
-    fn adr_historical_future_wording_is_forbidden() {
-        let pattern = ForbiddenPattern {
-            path: "docs/architecture/202606232318-006-pdp-internal-authplan-vs-external-opa.md",
-            needle: "#1109 未落地",
-            detail: "ADR historical future wording must not remain",
-        };
-        let findings = scan_forbidden_pattern(&pattern, "#1109 未落地期间存在验签空窗。");
-        assert_eq!(findings.len(), 1, "{findings:?}");
-        assert_eq!(findings[0].rule, Rule::StaleCloseoutWording);
-    }
-
-    #[test]
-    fn authz_parity_forbidden_claims_are_reported() {
-        let findings = scan_authz_forbidden_claims(
-            "docs/architecture/adr.md",
-            "This is an OPA/Rego compatible drop-in replacement.",
-        );
-        assert_eq!(findings.len(), 2, "{findings:?}");
-        assert!(
-            findings
-                .iter()
-                .all(|finding| finding.rule == Rule::StaleCloseoutWording),
-            "{findings:?}"
-        );
-    }
-
-    #[test]
-    fn authz_parity_forbidden_claim_variants_are_reported() {
-        let findings = scan_authz_forbidden_claims(
-            "docs/architecture/adr.md",
-            "Full parity. OPA Rego compatible. RLS-alone solves Tenancy.",
-        );
-        assert_eq!(findings.len(), 3, "{findings:?}");
-        assert!(
-            findings
-                .iter()
-                .all(|finding| finding.rule == Rule::StaleCloseoutWording),
-            "{findings:?}"
-        );
-    }
-
-    #[test]
     fn green_fixture_has_no_findings() {
         assert!(scan_plan_membership("ci", VERIFY_CI_REQUIRED_GATES).is_empty());
         assert!(
@@ -1327,9 +1067,6 @@ pub mod unrelated {
         );
         assert!(scan_lint_registry("lints/Cargo.toml", &lints_workspace_fixture).is_empty());
 
-        let lint_doc_fixture = TENANCY_DYLINTS.join("\n");
-        assert!(scan_lint_registry("lints/README.md", &lint_doc_fixture).is_empty());
-
         let carrier = RequiredCodeCarrier {
             rule: Rule::CodeCarrier,
             path: AUTH_E2E_TEST_PATH,
@@ -1337,17 +1074,5 @@ pub mod unrelated {
             detail: "must exist",
         };
         assert!(scan_required_code_carrier(&carrier, "VerifiedMtlsPeer").is_empty());
-
-        let pattern = ForbiddenPattern {
-            path: "docs/architecture/adr.md",
-            needle: "future work",
-            detail: "stale",
-        };
-        assert!(scan_forbidden_pattern(&pattern, "final status").is_empty());
-
-        assert!(
-            scan_authz_forbidden_claims("docs/architecture/adr.md", "explicit deviation")
-                .is_empty()
-        );
     }
 }

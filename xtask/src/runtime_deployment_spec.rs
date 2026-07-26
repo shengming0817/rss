@@ -1,8 +1,5 @@
-//! Runtime Deployment SpecKit v2 的单一机器 carrier。
-//!
-//! 该命令只验证 #1779 已冻结的文档、schema、任务图与指纹协议；未来运行时能力仍由各 RTD owner 落地。
+//! Runtime deployment schemas, semantic fixtures, and fingerprint protocol validator.
 
-use crate::cmd::{ExternalProgram, external_cmd};
 use anyhow::{Context, Result, bail, ensure};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -10,72 +7,31 @@ use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 const FEATURE_REL: &str = "docs/spec/007-runtime-deployment-executable-plan";
-const ARCH_REL: &str = "docs/architecture/202607142137-1779-runtime-deployment-target.md";
-const RULE_REL: &str = "docs/spec/007-runtime-deployment-executable-plan/carrier-rules.md";
-const DIFF_ALLOWED_EXACT: [&str; 10] = [
-    ".specify/feature.json",
-    ARCH_REL,
-    "docs/rules/architecture.md",
-    "Cargo.toml",
-    "Cargo.lock",
-    "xtask/Cargo.toml",
-    "xtask/src/ci_lanes.rs",
-    "xtask/src/main.rs",
-    "xtask/src/runtime_deployment_spec.rs",
-    "xtask/src/verify.rs",
-];
-const CORE_DOCS: [&str; 6] = [
-    "spec.md",
-    "plan.md",
-    "research.md",
-    "data-model.md",
-    "quickstart.md",
-    "tasks.md",
-];
 const SCHEMA_NAMES: [&str; 4] = [
     "assembly-lock.schema.json",
     "deployment-plan.schema.json",
     "runtime-inventory.schema.json",
     "runtime-plan.schema.json",
 ];
-const FIXTURE_NAMES: [&str; 3] = [
-    "task-baseline.json",
-    "schema-cases.json",
-    "fingerprint-v1-vectors.json",
-];
+const FIXTURE_NAMES: [&str; 2] = ["schema-cases.json", "fingerprint-v1-vectors.json"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Options {
     pub(crate) selftest: bool,
-    pub(crate) against: Option<String>,
 }
 
 pub(crate) fn parse_options(args: &[&str]) -> Result<Options> {
     let mut selftest = false;
-    let mut against = None;
-    let mut index = 0;
-    while index < args.len() {
-        match args[index] {
+    for arg in args {
+        match *arg {
             "--selftest" if !selftest => selftest = true,
-            "--against" if against.is_none() => {
-                index += 1;
-                let reference = args
-                    .get(index)
-                    .context("runtime-deployment-spec --against 缺少值")?;
-                ensure!(
-                    !reference.is_empty(),
-                    "runtime-deployment-spec --against 不得为空"
-                );
-                against = Some((*reference).to_string());
-            }
             other => bail!("runtime-deployment-spec 未知或重复参数: {other}"),
         }
-        index += 1;
     }
-    Ok(Options { selftest, against })
+    Ok(Options { selftest })
 }
 
 pub(crate) fn run(options: &Options) -> Result<()> {
@@ -85,67 +41,50 @@ pub(crate) fn run(options: &Options) -> Result<()> {
         run_selftest(&loaded)?;
         println!("runtime-deployment-spec selftest: all synthetic reds rejected");
     }
-    if let Some(reference) = &options.against {
-        validate_diff(&root, reference)?;
-    }
     println!(
-        "runtime-deployment-spec: {} schemas, {} tasks, {} edges, {} fingerprint vectors",
+        "runtime-deployment-spec: {} schemas, {} fingerprint vectors",
         loaded.schemas.len(),
-        loaded.tasks.tasks.len(),
-        loaded.tasks.edges.len(),
         loaded.fingerprints.vectors.len()
     );
     Ok(())
 }
 
-/// Aggregate-gate entrypoint: validate committed artifacts and exercise every synthetic red,
-/// without assuming a PR base ref. Focused diff validation remains an explicit CLI concern.
+/// Aggregate-gate entrypoint: validate committed machine artifacts and exercise every synthetic red.
 pub(crate) fn run_selftest_gate() -> Result<()> {
-    run(&Options {
-        selftest: true,
-        against: None,
-    })
+    run(&Options { selftest: true })
 }
 
 struct Loaded {
     schemas: BTreeMap<String, Value>,
     schema_cases: SchemaCases,
-    tasks: TaskBaseline,
-    actual_tasks: Vec<TaskRecord>,
     fingerprints: FingerprintFixtures,
 }
 
 fn validate_repository(root: &Path) -> Result<Loaded> {
     let feature = root.join(FEATURE_REL);
-    validate_documents(root, &feature)?;
+    validate_machine_inputs(root, &feature)?;
     let schemas = load_schemas(&feature)?;
     let fingerprints: FingerprintFixtures =
         read_json(&feature.join("fixtures/fingerprint-v1-vectors.json"))?;
     validate_fingerprints(&fingerprints)?;
     let schema_cases: SchemaCases = read_json(&feature.join("fixtures/schema-cases.json"))?;
     validate_schema_set(&schemas, &schema_cases, &fingerprints)?;
-    let tasks: TaskBaseline = read_json(&feature.join("fixtures/task-baseline.json"))?;
-    let actual_tasks = parse_task_table(&fs::read_to_string(feature.join("tasks.md"))?)?;
-    validate_tasks(&actual_tasks, &tasks)?;
     Ok(Loaded {
         schemas,
         schema_cases,
-        tasks,
-        actual_tasks,
         fingerprints,
     })
 }
 
-fn validate_documents(root: &Path, feature: &Path) -> Result<()> {
+fn validate_machine_inputs(root: &Path, feature: &Path) -> Result<()> {
     let pointer: Value = read_json(&root.join(".specify/feature.json"))?;
     ensure!(
         pointer == serde_json::json!({"feature_directory": FEATURE_REL}),
         "active feature pointer drift"
     );
-    let mut required = CORE_DOCS.map(|name| feature.join(name)).to_vec();
+    let mut required = Vec::new();
     required.extend(SCHEMA_NAMES.map(|name| feature.join("contracts").join(name)));
     required.extend(FIXTURE_NAMES.map(|name| feature.join("fixtures").join(name)));
-    required.extend([root.join(ARCH_REL), root.join(RULE_REL)]);
     for path in &required {
         ensure!(
             path.is_file() && path.metadata()?.len() > 0,
@@ -157,44 +96,7 @@ fn validate_documents(root: &Path, feature: &Path) -> Result<()> {
         !feature.join("validate.py").exists(),
         "legacy Python validator remains"
     );
-    let markers = [
-        "NEEDS CLARIFICATION",
-        "ACTION REQUIRED",
-        "REMOVE IF UNUSED",
-        "TXXX",
-        "TODO",
-        "TBD",
-        "FIXME",
-        "$ARGUMENTS",
-        "[FEATURE NAME]",
-        "[DATE]",
-    ];
-    let mut scanned = collect_files(feature)?;
-    scanned.extend([root.join(ARCH_REL), root.join(RULE_REL)]);
-    for path in scanned {
-        let text = fs::read_to_string(&path)?;
-        for marker in markers {
-            ensure!(
-                !text.contains(marker),
-                "{}: unresolved marker {marker}",
-                path.display()
-            );
-        }
-    }
     Ok(())
-}
-
-fn collect_files(root: &Path) -> Result<Vec<PathBuf>> {
-    let mut files = Vec::new();
-    for entry in fs::read_dir(root)? {
-        let path = entry?.path();
-        if path.is_dir() {
-            files.extend(collect_files(&path)?);
-        } else if path.is_file() {
-            files.push(path);
-        }
-    }
-    Ok(files)
 }
 
 fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T> {
@@ -627,173 +529,6 @@ fn parse_quantity(raw: &str, kind: &str) -> Result<u128> {
     bail!("invalid {kind} quantity {raw}")
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct TaskBaseline {
-    schema_version: u64,
-    tasks: Vec<TaskRecord>,
-    edges: Vec<[u64; 2]>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct TaskRecord {
-    task: String,
-    owner: u64,
-    blocked_by: Vec<u64>,
-    budget: String,
-    verification: String,
-    carrier: String,
-}
-
-const RUNTIME_LAUNCH_COMPOSITION_VERIFICATION: &str = "cargo nextest run -p runtime --lib --no-tests=fail -E 'test(/^launch::tests::canonical_launch_composes_runtime_adapter_ready_and_single_drain$/)'";
-
-fn parse_task_table(text: &str) -> Result<Vec<TaskRecord>> {
-    text.lines()
-        .filter(|line| line.starts_with("| RTD-"))
-        .map(|line| {
-            let columns = line
-                .trim_matches('|')
-                .split('|')
-                .map(str::trim)
-                .collect::<Vec<_>>();
-            ensure!(
-                columns.len() == 6,
-                "task row has {} columns: {line}",
-                columns.len()
-            );
-            let owner = columns[1]
-                .strip_prefix('#')
-                .context("task owner lacks #")?
-                .parse()?;
-            let blocked_by = if columns[2] == "—" {
-                Vec::new()
-            } else {
-                columns[2]
-                    .split(',')
-                    .map(|value| {
-                        value
-                            .trim()
-                            .strip_prefix('#')
-                            .context("blocked-by lacks #")?
-                            .parse()
-                            .context("invalid blocked-by")
-                    })
-                    .collect::<Result<Vec<_>>>()?
-            };
-            let verification = columns[4]
-                .strip_prefix('`')
-                .and_then(|value| value.strip_suffix('`'))
-                .context("verification must be one exact code span")?;
-            ensure!(
-                !verification.contains('`'),
-                "verification contains multiple code spans"
-            );
-            Ok(TaskRecord {
-                task: columns[0].to_string(),
-                owner,
-                blocked_by,
-                budget: columns[3].to_string(),
-                verification: verification.to_string(),
-                carrier: columns[5].to_string(),
-            })
-        })
-        .collect()
-}
-
-fn validate_tasks(actual: &[TaskRecord], baseline: &TaskBaseline) -> Result<()> {
-    ensure!(baseline.schema_version == 1, "task baseline version drift");
-    ensure!(
-        actual == baseline.tasks,
-        "tasks.md differs from exact task baseline"
-    );
-    validate_task_verification(actual)?;
-    validate_graph(&baseline.tasks, &baseline.edges)
-}
-
-fn validate_task_verification(tasks: &[TaskRecord]) -> Result<()> {
-    for owner in [1789, 1795] {
-        let task = tasks
-            .iter()
-            .find(|task| task.owner == owner)
-            .with_context(|| format!("task verification missing owner #{owner}"))?;
-        ensure!(
-            task.verification
-                .contains(RUNTIME_LAUNCH_COMPOSITION_VERIFICATION),
-            "{} verification must use the non-empty runtime launch composition target",
-            task.task
-        );
-        ensure!(
-            !task
-                .verification
-                .contains("cargo test -p runtime launch_plan"),
-            "{} verification retains the zero-test-success launch_plan filter",
-            task.task
-        );
-    }
-    Ok(())
-}
-
-fn validate_graph(tasks: &[TaskRecord], edges: &[[u64; 2]]) -> Result<()> {
-    ensure!(tasks.len() == 31, "task count is not 31");
-    ensure!(edges.len() == 52, "edge count is not 52");
-    let nodes = tasks.iter().map(|task| task.owner).collect::<BTreeSet<_>>();
-    ensure!(
-        nodes == (1779..=1809).collect(),
-        "task owner universe drift"
-    );
-    let derived = tasks
-        .iter()
-        .flat_map(|task| {
-            task.blocked_by
-                .iter()
-                .map(move |dependency| [*dependency, task.owner])
-        })
-        .collect::<BTreeSet<_>>();
-    let expected = edges.iter().copied().collect::<BTreeSet<_>>();
-    ensure!(expected.len() == edges.len(), "duplicate edge in fixture");
-    ensure!(
-        derived == expected,
-        "blocked-by rows differ from exact edge golden"
-    );
-    ensure!(
-        expected
-            .iter()
-            .all(|[from, to]| nodes.contains(from) && nodes.contains(to) && from != to),
-        "dangling or self edge"
-    );
-    let by_owner = tasks
-        .iter()
-        .map(|task| (task.owner, task))
-        .collect::<BTreeMap<_, _>>();
-    let mut memo = BTreeMap::new();
-    fn depth(
-        owner: u64,
-        by_owner: &BTreeMap<u64, &TaskRecord>,
-        memo: &mut BTreeMap<u64, usize>,
-        trail: &mut BTreeSet<u64>,
-    ) -> Result<usize> {
-        if let Some(value) = memo.get(&owner) {
-            return Ok(*value);
-        }
-        ensure!(trail.insert(owner), "task graph cycle at #{owner}");
-        let task = by_owner.get(&owner).context("missing task owner")?;
-        let mut value = 1;
-        for dependency in &task.blocked_by {
-            value = value.max(1 + depth(*dependency, by_owner, memo, trail)?);
-        }
-        trail.remove(&owner);
-        memo.insert(owner, value);
-        Ok(value)
-    }
-    let mut maximum = 0;
-    for owner in &nodes {
-        maximum = maximum.max(depth(*owner, &by_owner, &mut memo, &mut BTreeSet::new())?);
-    }
-    ensure!(maximum == 20, "task graph depth is {maximum}, expected 20");
-    Ok(())
-}
-
 fn validate_instance_fingerprint(
     instance: &Value,
     result_field: &str,
@@ -938,31 +673,6 @@ fn run_selftest(loaded: &Loaded) -> Result<()> {
             "schema mutation {mutation:?} was accepted"
         );
     }
-    let mut rewired = loaded.actual_tasks.clone();
-    let task = rewired
-        .iter_mut()
-        .find(|task| task.owner == 1783)
-        .context("selftest missing #1783")?;
-    let dependency = task
-        .blocked_by
-        .iter_mut()
-        .find(|dependency| **dependency == 1782)
-        .context("selftest missing #1782 -> #1783")?;
-    *dependency = 1779;
-    let rewired_edges = rewired
-        .iter()
-        .flat_map(|task| {
-            task.blocked_by
-                .iter()
-                .map(move |dependency| [*dependency, task.owner])
-        })
-        .collect::<Vec<_>>();
-    validate_graph(&rewired, &rewired_edges).context("rewire mutant must retain graph shape")?;
-    ensure!(
-        validate_tasks(&rewired, &loaded.tasks).is_err(),
-        "equal-cardinality rewire was accepted"
-    );
-
     let deployment = loaded.schema_cases.schemas["deployment-plan.schema.json"]
         .valid
         .first()
@@ -1087,80 +797,14 @@ fn mutate_schema(schemas: &mut BTreeMap<String, Value>, mutation: SchemaMutation
     Ok(())
 }
 
-fn validate_diff(root: &Path, reference: &str) -> Result<()> {
-    let merge_base_output = git(root, ["merge-base", reference, "HEAD"])?;
-    let merge_base = merge_base_output.trim();
-    ensure!(
-        !merge_base.is_empty(),
-        "git merge-base returned no commit for {reference} and HEAD"
-    );
-    let files = git(root, ["diff", "--name-only", merge_base, "--"])?;
-    let status = git(
-        root,
-        ["status", "--porcelain=v1", "--untracked-files=all", "--"],
-    )?;
-    let paths = files.lines().chain(status.lines().filter_map(|line| {
-        line.get(3..).and_then(|path| {
-            path.rsplit_once(" -> ")
-                .map_or(Some(path), |(_, to)| Some(to))
-        })
-    }));
-    for path in paths {
-        ensure!(
-            diff_path_allowed(path),
-            "diff escapes #1779 allowlist: {path}"
-        );
-        ensure!(
-            !path.starts_with("docs/spec/001-runtime-assembly-plan/"),
-            "001 lineage changed"
-        );
-        ensure!(
-            !path.starts_with("generated/") && !path.contains("/generated/"),
-            "generated churn is non-zero: {path}"
-        );
-    }
-    let status = external_cmd(
-        ExternalProgram::SystemGit,
-        &["diff", "--check", merge_base, "--"],
-        &[],
-        Some(root),
-    )
-    .status()
-    .context("run git diff --check")?;
-    ensure!(status.success(), "git diff --check failed");
-    Ok(())
-}
-
-fn diff_path_allowed(path: &str) -> bool {
-    DIFF_ALLOWED_EXACT.contains(&path) || path.starts_with(&format!("{FEATURE_REL}/"))
-}
-
-fn git<const N: usize>(root: &Path, args: [&str; N]) -> Result<String> {
-    let output = external_cmd(ExternalProgram::SystemGit, &args, &[], Some(root))
-        .output()
-        .context("run git")?;
-    ensure!(
-        output.status.success(),
-        "git failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8(output.stdout).context("git output is not UTF-8")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn options_are_closed() -> Result<()> {
-        assert_eq!(
-            parse_options(&["--against", "origin/develop", "--selftest"])?,
-            Options {
-                selftest: true,
-                against: Some("origin/develop".to_string())
-            }
-        );
-        assert!(parse_options(&["--against"]).is_err());
+        assert_eq!(parse_options(&["--selftest"])?, Options { selftest: true });
+        assert_eq!(parse_options(&[])?, Options { selftest: false });
         assert!(parse_options(&["--selftest", "--selftest"]).is_err());
         assert!(parse_options(&["--bogus"]).is_err());
         Ok(())
@@ -1171,48 +815,6 @@ mod tests {
         let root = crate::workspace_root()?;
         let loaded = validate_repository(&root)?;
         run_selftest(&loaded)
-    }
-
-    #[test]
-    fn runtimeexec_task_verification_rejects_empty_legacy_launch_filter() -> Result<()> {
-        let root = crate::workspace_root()?;
-        let loaded = validate_repository(&root)?;
-        let mut actual = loaded.actual_tasks.clone();
-        let mut baseline = loaded.tasks.clone();
-        for tasks in [&mut actual, &mut baseline.tasks] {
-            tasks
-                .iter_mut()
-                .find(|task| task.owner == 1795)
-                .context("RTD-016 task")?
-                .verification =
-                "cargo test -p runtimeexec && cargo test -p runtime launch_plan".to_owned();
-        }
-
-        assert!(
-            validate_tasks(&actual, &baseline).is_err(),
-            "RTD-016 must reject Cargo's zero-test-success launch_plan filter"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn diff_scope_is_an_exact_allowlist() {
-        for path in [
-            "docs/rules/architecture.md",
-            "xtask/src/ci_lanes.rs",
-            "xtask/src/verify.rs",
-            "docs/spec/007-runtime-deployment-executable-plan/spec.md",
-        ] {
-            assert!(diff_path_allowed(path), "expected allowlist member: {path}");
-        }
-        for path in [
-            "docs/rules/another-rule.md",
-            "xtask/src/another_gate.rs",
-            "docs/spec/001-runtime-assembly-plan/spec.md",
-            "generated/runtime.rs",
-        ] {
-            assert!(!diff_path_allowed(path), "scope widened to {path}");
-        }
     }
 
     #[test]

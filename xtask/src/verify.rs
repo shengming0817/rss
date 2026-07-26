@@ -61,9 +61,8 @@ use crate::integration_shards::{self, IntegrationShard, Scheduling};
 use crate::workspace_root;
 use crate::{
     archrules, assembly, assembly_lock, codegen, consistency_effects, consistency_fixtures,
-    contract, doc_contracts, layerdeps, reconcile_outbox_command_guard, repo_scope_guard,
-    runtime_baseline, runtime_deps_guard, runtime_env_guard, runtime_root_guard,
-    shipped_feature_guard, wsdeps,
+    contract, layerdeps, reconcile_outbox_command_guard, repo_scope_guard, runtime_baseline,
+    runtime_deps_guard, runtime_env_guard, runtime_root_guard, shipped_feature_guard, wsdeps,
 };
 use anyhow::{Context, Result, bail};
 use std::path::Path;
@@ -108,8 +107,8 @@ enum InternalCheck {
     /// server/rss 实际 Cargo feature graph 禁止通过 feature unification 启用 httpserve/test-util。
     ShippedFeatureGuard,
     WsDepsDrift,
-    /// docs/rules + docs/spec 中 command/outbox tenant-aware 签名漂移门（DOC-CONTRACTS-01）。
-    DocContracts,
+    /// Production Rustdoc semantic and token-profile trust-chain source guard.
+    SourceSemanticGuard,
     /// digest-pinned promtool rules + consuming tests（PROMTOOL-RULES-01）。
     PromtoolRules,
     /// same-ID SQL/Rust/ops cross-carrier closure（OUTBOX-SAME-ID-WINDOW-01）。
@@ -162,12 +161,12 @@ enum InternalCheck {
     MigrationsSerial,
     /// generated command policy 与生产 provider impl/callsite 集合守卫（COMMAND-IMPL-ALLOWLIST-01）。
     CommandSymmetry,
-    /// skill/template 的最终本地验证只能走 canonical `make ci`（CI-LOCAL-ENTRY-01）。
+    /// Makefile 的 canonical `ci` / `ci-full` executable 入口守卫（CI-LOCAL-ENTRY-01）。
     CiEntryGuard,
     /// reconcile scheduler transactional command outbox seam guard（RECONCILE-COMMAND-OUTBOX-SEAM-01）。
     ReconcileOutboxCommandGuard,
-    /// governed scope（docs/rules + docs/architecture + 根 config）结构化 defer 完整性 + 经典注解门
-    /// （DEFER-GATE-01；内容扫描 .md/.toml，no-compile）。
+    /// 根 `deny.toml` / `clippy.toml` 结构化 defer 完整性 + 经典注解门
+    /// （DEFER-GATE-01；只扫描机器拥有的 TOML，no-compile）。
     DeferGate,
     /// Postgres 无默认、三个单域及 all-features 编译矩阵；由 xtask 自管 cargo 子进程。
     PostgresFeatureMatrix,
@@ -326,11 +325,11 @@ fn step_wsdeps_drift() -> Step {
         env: &[],
     }
 }
-fn step_doc_contracts() -> Step {
+fn step_source_semantic_guard() -> Step {
     Step {
-        id: GateId::DocContracts,
+        id: GateId::SourceSemanticGuard,
         args: &[],
-        kind: StepKind::Internal(InternalCheck::DocContracts),
+        kind: StepKind::Internal(InternalCheck::SourceSemanticGuard),
         env: &[],
     }
 }
@@ -1334,7 +1333,6 @@ fn run_internal(check: InternalCheck, opts: &VerifyOpts, root: &Path) -> Result<
             run_check(&shipped_feature_guard::ShippedFeatureGuard)
         }
         InternalCheck::WsDepsDrift => run_check(&wsdeps::WsDepsDrift),
-        InternalCheck::DocContracts => run_check(&doc_contracts::DocContracts),
         InternalCheck::PromtoolRules => crate::promtool::run(),
         InternalCheck::OutboxSameIdGuard => {
             run_check(&crate::outbox_same_id_guard::OutboxSameIdGuard)
@@ -1354,6 +1352,9 @@ fn run_internal(check: InternalCheck, opts: &VerifyOpts, root: &Path) -> Result<
         InternalCheck::RuntimeEnvGuard => run_check(&runtime_env_guard::RuntimeEnvGuard),
         InternalCheck::RuntimeDeploymentSpec => crate::runtime_deployment_spec::run_selftest_gate(),
         InternalCheck::RuntimeDepsGuard => run_check(&runtime_deps_guard::RuntimeDepsGuard),
+        InternalCheck::SourceSemanticGuard => {
+            run_check(&crate::source_semantic_guard::SourceSemanticGuard)
+        }
         InternalCheck::ArchRules => run_check(&archrules::ArchRules),
         InternalCheck::CodegenCheck => codegen::run(true),
         InternalCheck::L2AssuranceCheck => crate::l2_assurance::run(true),
@@ -2257,6 +2258,19 @@ mod tests {
     }
 
     #[test]
+    fn aggregate_plans_exclude_human_document_content_enforcement() {
+        for plan in [
+            verify_plan(&opts(false, false)),
+            verify_plan(&opts(true, false)),
+            plan_for(PlanTarget::CompatibilityCi),
+            plan_for(PlanTarget::Lane(CiLane::Meta)),
+        ] {
+            assert!(!labels(&plan).contains(&"doc-contracts"));
+            assert!(labels(&plan).contains(&"source-semantic-guard"));
+        }
+    }
+
+    #[test]
     fn verify_plan_order_and_count() {
         let plan = verify_plan(&opts(false, false));
         assert_eq!(
@@ -2274,7 +2288,7 @@ mod tests {
                 "layer-deps",
                 "shipped-feature-guard",
                 "wsdeps-drift",
-                "doc-contracts",
+                "source-semantic-guard",
                 "promtool-rules",
                 "outbox-same-id-guard",
                 "consistency-fixtures",
@@ -2654,7 +2668,7 @@ mod tests {
                 "layer-deps",
                 "shipped-feature-guard",
                 "wsdeps-drift",
-                "doc-contracts",
+                "source-semantic-guard",
                 "outbox-same-id-guard",
                 "consistency-fixtures",
                 "event-transport-guard",
@@ -2699,7 +2713,7 @@ mod tests {
     }
 
     /// 两种模式共享的轻量 repository meta checks（contract validate / assembly validate / assembly artifacts / contract breaking / layer-deps / wsdeps-drift /
-    /// doc-contracts / consistency-fixtures / event-transport-guard / inbox-cutover-guard /
+    /// consistency-fixtures / event-transport-guard / inbox-cutover-guard /
     /// runtime-baseline / runtime-root-guard / runtime-env-guard / runtime-deployment-spec / runtime-deps-guard / archrules / codegen / L2 assurance / pdp-allow-guard / contract-binding-guard /
     /// schema-rls / setlocal-funnel / pg-tenant-tx-guard / repo-scope-guard / tenancy-closeout / migrations-serial / command-symmetry /
     /// reconcile-outbox-command-guard / defer-gate）在两种模式恒在。
@@ -2730,7 +2744,7 @@ mod tests {
                     "layer-deps",
                     "shipped-feature-guard",
                     "wsdeps-drift",
-                    "doc-contracts",
+                    "source-semantic-guard",
                     "outbox-same-id-guard",
                     "consistency-fixtures",
                     "event-transport-guard",
@@ -3684,7 +3698,7 @@ mod tests {
                 "layer-deps",
                 "shipped-feature-guard",
                 "wsdeps-drift",
-                "doc-contracts",
+                "source-semantic-guard",
                 "promtool-rules",
                 "outbox-same-id-guard",
                 "consistency-fixtures",
@@ -3813,7 +3827,7 @@ mod tests {
             "layer-deps",
             "shipped-feature-guard",
             "wsdeps-drift",
-            "doc-contracts",
+            "source-semantic-guard",
             "promtool-rules",
             "outbox-same-id-guard",
             "consistency-fixtures",
@@ -4782,6 +4796,7 @@ mod tests {
                 Some("Upload assembly artifact matrix"),
                 Some("Checkout scheduled audit revision"),
                 Some("Setup scheduled audit tools"),
+                Some("Scan prose for stale governance claims (advisory)"),
                 Some("Run scheduled audit fallback"),
                 Some("Checkout gate implementation"),
                 Some("Download typed plan"),
@@ -4799,11 +4814,11 @@ mod tests {
         let proof_upload = &steps[4];
         let artifact_generator = &steps[5];
         let artifact_upload = &steps[6];
-        let gate_checkout = &steps[10];
-        let plan_download = &steps[11];
-        let receipt_download = &steps[12];
-        let gate = &steps[13];
-        let metrics_upload = &steps[14];
+        let gate_checkout = &steps[11];
+        let plan_download = &steps[12];
+        let receipt_download = &steps[13];
+        let gate = &steps[14];
+        let metrics_upload = &steps[15];
 
         let checkout = |step: &TypedStep, depth: &str| {
             step.uses.as_deref() == Some("actions/checkout@v4")
@@ -5082,6 +5097,7 @@ mod tests {
             != [
                 Some("Checkout scheduled audit revision"),
                 Some("Setup scheduled audit tools"),
+                Some("Scan prose for stale governance claims (advisory)"),
                 Some("Run scheduled audit fallback"),
             ]
         {
@@ -5089,7 +5105,8 @@ mod tests {
         }
         let checkout = &steps[0];
         let setup = &steps[1];
-        let audit = &steps[2];
+        let advisory = &steps[2];
+        let audit = &steps[3];
         checkout.uses.as_deref() == Some("actions/checkout@v4")
             && checkout.with.len() == 3
             && checkout.with_exact("persist-credentials", &["false"])
@@ -5104,10 +5121,29 @@ mod tests {
             && setup.with_exact("tool-cache-epoch", &["v4"])
             && setup.with_exact("writer-mode", &["false"])
             && setup.with_exact("evidence-enabled", &["false"])
+            && advisory.fields_exact(&["name", "continue-on-error", "run"])
+            && advisory.continue_on_error.as_deref() == Some("true")
+            && advisory.run_exact(&["bash hack/automation/prose-advisory-scan.sh scan"])
             && audit.run_exact(&[
                 "set -euo pipefail",
                 "cargo run --locked -p xtask -- ci run --job audit",
             ])
+    }
+
+    fn scheduled_prose_advisory_is_closed(caller_yaml: &str, reusable_yaml: &str) -> bool {
+        let reusable_matches = yaml_typed_steps(reusable_yaml)
+            .into_iter()
+            .filter(|step| {
+                step.name.as_deref() == Some("Scan prose for stale governance claims (advisory)")
+            })
+            .collect::<Vec<_>>();
+        scheduled_audit_fallback_is_closed(caller_yaml)
+            && reusable_matches.len() == 1
+            && reusable_matches[0].fields_exact(&["name", "if", "continue-on-error", "run"])
+            && reusable_matches[0].if_expr.as_deref()
+                == Some("${{ github.event_name == 'schedule' && inputs.lane == 'audit' }}")
+            && reusable_matches[0].continue_on_error.as_deref() == Some("true")
+            && reusable_matches[0].run_exact(&["bash hack/automation/prose-advisory-scan.sh scan"])
     }
 
     /// CI caller 的结构化闭集谓词：唯一 planner → typed dynamic matrix → always aggregate gate。
@@ -5627,6 +5663,9 @@ mod tests {
             ("audit-fallback-epoch", green.replacen("          tool-cache-epoch: v4", "          tool-cache-epoch: v3", 1)),
             ("audit-fallback-writer", green.replacen("          writer-mode: false", "          writer-mode: true", 1)),
             ("audit-fallback-evidence", green.replacen("          evidence-enabled: false", "          evidence-enabled: true", 1)),
+            ("audit-fallback-missing-advisory", green.replacen("      - name: Scan prose for stale governance claims (advisory)\n        continue-on-error: true\n        run: bash hack/automation/prose-advisory-scan.sh scan\n\n", "", 1)),
+            ("audit-fallback-blocking-advisory", green.replacen("      - name: Scan prose for stale governance claims (advisory)\n        continue-on-error: true\n        run: bash hack/automation/prose-advisory-scan.sh scan", "      - name: Scan prose for stale governance claims (advisory)\n        continue-on-error: false\n        run: bash hack/automation/prose-advisory-scan.sh scan", 1)),
+            ("audit-fallback-advisory-command", green.replacen("run: bash hack/automation/prose-advisory-scan.sh scan", "run: bash hack/automation/prose-advisory-scan.sh selftest", 1)),
             ("audit-fallback-command", green.replacen("          cargo run --locked -p xtask -- ci run --job audit", "          cargo audit", 1)),
             ("audit-fallback-step-moved-to-gate", setup_moved_to_gate),
             ("audit-fallback-extra-step", green.replacen("    steps:\n      - name: Checkout scheduled audit revision", "    steps:\n      - name: Bypass scheduled audit\n        run: true\n\n      - name: Checkout scheduled audit revision", 1)),
@@ -5958,6 +5997,36 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
         assert!(!github_audit_workflow_has_scheduled_lane(
             &green.replace("- cron: \"0 6 * * *\"", "- cron: \"0 7 * * *\"")
         ));
+    }
+
+    #[test]
+    fn scheduled_prose_advisory_is_non_blocking_and_schedule_only() {
+        let caller = include_str!("../../.github/workflows/ci.yml");
+        let reusable = include_str!("../../.github/workflows/rss-rust-lane.yml");
+        assert!(scheduled_prose_advisory_is_closed(caller, reusable));
+
+        for red in [
+            reusable.replacen(
+                "if: ${{ github.event_name == 'schedule' && inputs.lane == 'audit' }}",
+                "if: ${{ github.event_name == 'pull_request' && inputs.lane == 'audit' }}",
+                1,
+            ),
+            reusable.replacen(
+                "if: ${{ github.event_name == 'schedule' && inputs.lane == 'audit' }}",
+                "if: ${{ github.event_name == 'schedule' && inputs.lane == 'ci-meta' }}",
+                1,
+            ),
+            reusable.replacen(
+                "      - name: Scan prose for stale governance claims (advisory)\n        if: ${{ github.event_name == 'schedule' && inputs.lane == 'audit' }}\n        continue-on-error: true",
+                "      - name: Scan prose for stale governance claims (advisory)\n        if: ${{ github.event_name == 'schedule' && inputs.lane == 'audit' }}\n        continue-on-error: false",
+                1,
+            ),
+        ] {
+            assert!(
+                !scheduled_prose_advisory_is_closed(caller, &red),
+                "scheduled prose advisory weakening must fail closed"
+            );
+        }
     }
 
     /// 真实 committed 文件：GitHub audit workflow 含每日定时刷新 lane，经 typed audit job 委托
@@ -8019,15 +8088,6 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
                 "{label} must fail closed"
             );
         }
-        Ok(())
-    }
-
-    #[test]
-    fn localtx_required_evidence_docs_forbid_stale_job_count() -> anyhow::Result<()> {
-        let root = workspace_root()?;
-        let slo = std::fs::read_to_string(root.join("docs/ops/202607120327-1733-ci-slo.md"))
-            .with_context(|| "read LocalTx evidence SLO documentation")?;
-        assert!(!slo.contains("15 个 typed job"));
         Ok(())
     }
 

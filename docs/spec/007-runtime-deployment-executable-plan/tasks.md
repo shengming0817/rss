@@ -10,7 +10,7 @@ All #1779–#1809 PBIs are open. The tracker bodies own scope, acceptance, budge
 
 | Task | Owner | Blocked by | Budget | Focused V&V | Planned carrier |
 |---|---:|---|---:|---|---|
-| RTD-001 | #1779 | — | No cap | `cargo xtask runtime-deployment-spec --selftest --against origin/develop && cargo xtask verify --fast` | Medium — typed fast-aggregate artifact validator |
+| RTD-001 | #1779 | — | No cap | `cargo xtask runtime-deployment-spec --selftest && cargo xtask verify --fast` | Medium — typed fast-aggregate artifact validator |
 | RTD-002 | #1780 | #1779 | 1300–1800 | `cargo test -p assembly-schema && cargo xtask verify --fast` | Hard — closed lock type/RFC-8785 schema/codegen/golden |
 | RTD-003 | #1781 | #1780 | 1200–1800 | `cargo test -p xtask assembly_lock && cargo xtask assembly lock check && cargo xtask verify --fast` | Medium — deterministic generate/check drift |
 | RTD-004 | #1782 | #1781 | 1200–1700 | `cargo test -p runtime runtime_config && cargo xtask runtime-baseline verify && cargo xtask verify --fast` | Hard — one snapshot and required typed input |
@@ -50,4 +50,4 @@ File mutexes remain unchanged: S05 serializes the shared runtime config/root; S0
 
 The strict project Wave 1–4 window contains #1779, #1780, #1781, and #1782 respectively; #1783–#1809 remain beyond that bounded window. Source program increments do not override dependency order.
 
-Each owner must land its listed carrier and red/green evidence before its target can be described as current production closure. `fixtures/task-baseline.json` is the exact machine mirror of all rows and 52 edges; tracker sequence drift fails #1779. RTD-006A and RTD-006B remain separate implementation rows and budgets.
+Each owner must land its listed carrier and red/green evidence before its target can be described as current production closure. This table is planning guidance rather than a CI enforcement carrier; tracker order is maintained by the latest epic wave comment. RTD-006A and RTD-006B remain separate implementation rows and budgets.

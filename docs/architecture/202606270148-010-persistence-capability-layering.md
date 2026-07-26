@@ -100,17 +100,16 @@ closure；只有 completed owner 能把统一 provider module 交给 Launch。
 
 ### 2.5 defer gate — 散装 defer 受机器门约束
 
-为防「自底向上长能力」退化回无追踪 defer 补洞，本批新增 defer gate（#1432）：**governed 高风险路径**（`docs/rules` +
-`docs/architecture` + 根 config）内，**结构化 defer 标签必须四字段齐全**。canonical 格式（示例）：
+为防「自底向上长能力」退化回无追踪 defer 补洞，本批新增 defer gate（#1432）：仅在机器拥有的根 config
+（`deny.toml` / `clippy.toml`）内，**结构化 defer 标签必须四字段齐全**。canonical 格式（示例）：
 
 ```text
 // DEFER(#<issue>): <描述>; owner=<name>; blocked-by=<#NNNN | trigger:...>; closes-when=<关闭条件>
 ```
 
 载体 = `cargo xtask defer-gate`（接 verify / ci no-compile meta 步），评级 **Medium**，INVARIANT `DEFER-GATE-01`，实现 / 盲区
-单源见 `xtask/src/defergate.rs` + `docs/rules/architecture.md` §二档。v1 锁**结构化标签完整性 + 经典注解**（`TODO`/`FIXME`/`XXX`/`HACK`
-注解位）；自由词散文（`defer`/`follow-up`/`后续`，governed docs 中绝大多数是描述性散文）+ 代码注释扩域 + 历史约 6700 baseline
-冻结轨道 = ratchet follow-up（§8）。
+单源见 `xtask/src/defergate.rs` + `docs/rules/architecture.md` §二档。该门只锁 config 中的**结构化标签完整性 + 经典注解**
+（`TODO`/`FIXME`/`XXX`/`HACK` 注解位）；Markdown、`CLAUDE.md` 与自由词散文不进入阻塞门，只由周期、非阻塞 advisory grep 提示。
 
 ### 2.6 实施顺序（自底向上）
 
@@ -190,7 +189,7 @@ impl PgRuntimeHandle {
 
 | 约束 | 评级 | 载体 |
 |------|------|------|
-| defer / follow-up 结构化完整性（governed scope） | **Medium（xtask + CI 门）** | `cargo xtask defer-gate`（DEFER-GATE-01）；synthetic red + anti-vacuity green，`xtask/src/defergate.rs` |
+| defer / follow-up 结构化完整性（根 config） | **Medium（xtask + CI 门）** | `cargo xtask defer-gate` 仅扫描 `deny.toml` / `clippy.toml`（DEFER-GATE-01）；Markdown 只做周期非阻塞 advisory；synthetic red + anti-vacuity green，`xtask/src/defergate.rs` |
 | `DomainBinding` 形状 / domain ownership | **Hard（类型 + 所有权）** | 私有字段 + `DomainBinding::new` 必填位置参 + `Box<dyn Domain>` + owned `DomainModuleResult`；`Domain: Send + Sync + 'static` supertrait；错误 domain 类型或重复 move 均编译失败 |
 | compose-before-drain 生命周期顺序 | **Hard（封闭 API）** | 私有 `domain/output` + 唯一公开 `compose_bindings` output 出口；成功后才 drain，失败在 drain 前返回；compile-fail rustdoc 锁定外部直接取 output 不可编译 |
 | 具体域依赖完整性 | **Hard（已有 typed 构造器处）** | settings/identity/audit 已有统一 async `module(&impl XModuleSource)` 参数 funnel；source trait 按域 sealed、生产实现仅 `SharedRuntimeDeps`，具体依赖完整性仍由各 domain typed 构造器的必填位置参承载，`DomainBinding` 本身不内省或验证这些依赖 |

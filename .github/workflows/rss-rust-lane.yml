@@ -161,6 +161,11 @@ jobs:
           writer-mode: ${{ env.RSS_CACHE_WRITER }}
           evidence-enabled: true
 
+      - name: Scan prose for stale governance claims (advisory)
+        if: ${{ github.event_name == 'schedule' && inputs.lane == 'audit' }}
+        continue-on-error: true
+        run: bash hack/automation/prose-advisory-scan.sh scan
+
       - name: Measure tool cache candidate
         id: measure-tools
         timeout-minutes: 2

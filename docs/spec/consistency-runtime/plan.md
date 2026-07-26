@@ -26,7 +26,7 @@ Create the SpecKit single entry for RSS consistency runtime planning. The entry 
 
 **Performance Goals**: N/A; no runtime code is changed
 
-**Constraints**: Docs-only scope; no `docs/rules/**` body changes; no Soft-only governance claims; avoid old command/outbox snippets blocked by `doc-contracts`
+**Constraints**: Docs-only scope; no `docs/rules/**` body changes; no Soft-only governance claims; avoid old tenantless or actorless command/outbox snippets
 
 **Scale/Scope**: One SpecKit feature directory, one `.specify/feature.json` pointer update, and no optional runtime design artifacts
 

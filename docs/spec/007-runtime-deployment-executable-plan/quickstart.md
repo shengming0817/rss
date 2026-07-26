@@ -6,18 +6,17 @@ These commands validate a target baseline, not implemented runtime/deployment be
 
 ## 目标能力
 
-Run the focused PR-scope check. Its selftest exercises invalid Draft-07 schemas/instances, exact-edge rewiring, fingerprint byte/domain/input drift, task-baseline drift, and non-vacuity:
+Run the repository machine-input check. Its selftest exercises invalid Draft-07 schemas/instances, fingerprint byte/domain/input drift, and non-vacuity:
 
 ```bash
-cargo xtask runtime-deployment-spec --selftest --against origin/develop
+cargo xtask runtime-deployment-spec --selftest
 ```
 
-This checks the active pointer and artifacts, Draft-07 meta-schemas plus valid/invalid instances, recursive closure, secret/version boundaries, RFC-8785 fingerprint vectors, exact task/tracker parity, the 31-node/52-edge/depth-20 graph, immutable 001 lineage, diff scope, and zero generated churn. The approved Cx3 revision has no LOC cap.
+This checks the active pointer, Draft-07 schemas plus valid/invalid instances, recursive closure, secret/version boundaries, and RFC-8785 fingerprint vectors. It does not parse or freeze planning Markdown.
 
-Run the repository gates. `verify --fast` is the Medium aggregate; its typed Meta registry invokes the same selftest in-process without assuming a base ref:
+Run the repository gates. `verify --fast` is the Medium aggregate; its typed Meta registry invokes the same selftest in-process:
 
 ```bash
-./hack/cargo.sh xtask doc-contracts
 ./hack/cargo.sh xtask archrules verify
 ./hack/cargo.sh xtask verify --fast
 make verify-fast

@@ -585,10 +585,10 @@ macro_rules! gate_catalog {
                         BOTH_INCLUDED,
                     )
             ),
-            DocContracts => (step_doc_contracts, Some("xtask/src/doc_contracts.rs"),
+            SourceSemanticGuard => (step_source_semantic_guard, Some("xtask/src/source_semantic_guard.rs"),
                 gate(
-                        GateId::DocContracts,
-                        "doc-contracts",
+                        GateId::SourceSemanticGuard,
+                        "source-semantic-guard",
                         META,
                         CompileKind::NoCompile,
                         INTERNAL,

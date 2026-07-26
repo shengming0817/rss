@@ -69,10 +69,7 @@ The owner groups are #1780–#1781 identity, #1782–#1787 configuration, #1788�
 
 ## Success criteria
 
-- The active SpecKit resolver returns spec, plan, research, data-model, quickstart, tasks, and four contracts.
-- The task graph contains exactly #1779–#1809, 52 unique edges, no dangling/self/duplicate edge, no cycle, and depth 20.
 - All four schemas are valid Draft-07 version-1 closed objects; stage fingerprints use the frozen RFC-8785/domain-tag protocol, and stable artifacts represent typed secret references only.
-- #1779 changes only the tracker-declared exact diff allowlist and new feature tree; 001 has zero diff.
 - The repository specification carrier, its mutation selftests, typed fast-aggregate membership, repository fast/all-target checks, and zero-generated-churn check pass. This approved Cx3 correction has no LOC cap.
 
 ## Out of scope

@@ -409,13 +409,6 @@ fn validate_target_domain_closure(
             identityaudit_schema_is_closed(&assembly.dir.join("config.schema.json"))?;
         let sample_is_regular_file =
             is_regular_file_without_symlink(&assembly.dir.join("identityaudit.example.toml"))?;
-        let runbook_is_regular_file = is_regular_file_without_symlink(
-            &root.join("docs/ops/202607251200-1797-identityaudit-runtime.md"),
-        )?;
-        let migration_runbook =
-            std::fs::read_to_string(root.join("adapters/postgres/migrations/README.md"))
-                .context("读取 identityaudit audit-chain migration runbook 失败")?;
-        let key_pin_cutover_is_closed = identityaudit_key_pin_cutover_is_closed(&migration_runbook);
         let artifact_acceptance = identityaudit_artifact_acceptance_evidence(root)?;
         let (journey_target_declared, required_journey_test_declared) =
             identityaudit_journey_evidence(root)?;
@@ -427,8 +420,6 @@ fn validate_target_domain_closure(
                 test_support_enabled,
                 schema_is_closed,
                 sample_is_regular_file,
-                runbook_is_regular_file,
-                key_pin_cutover_is_closed,
                 artifact_acceptance,
                 journey_target_declared,
                 required_journey_test_declared,
@@ -444,9 +435,6 @@ fn validate_target_domain_closure(
             is_regular_file_without_symlink(&assembly.dir.join("config.schema.json"))?;
         let sample_is_regular_file =
             is_regular_file_without_symlink(&assembly.dir.join("settingsonly.example.toml"))?;
-        let runbook_is_regular_file = is_regular_file_without_symlink(
-            &root.join("docs/ops/202607230700-1796-settingsonly-runtime.md"),
-        )?;
         let artifact_acceptance = settingsonly_artifact_acceptance_evidence(root)?;
         let (journey_target_declared, required_journey_test_declared) =
             settingsonly_journey_evidence(root)?;
@@ -460,7 +448,6 @@ fn validate_target_domain_closure(
                 test_support_enabled,
                 schema_is_regular_file,
                 sample_is_regular_file,
-                runbook_is_regular_file,
                 artifact_acceptance,
                 journey_target_declared,
                 required_journey_test_declared,
@@ -1608,8 +1595,6 @@ struct IdentityAuditExecutableEvidence<'a> {
     test_support_enabled: bool,
     schema_is_closed: bool,
     sample_is_regular_file: bool,
-    runbook_is_regular_file: bool,
-    key_pin_cutover_is_closed: bool,
     artifact_acceptance: bool,
     journey_target_declared: bool,
     required_journey_test_declared: bool,
@@ -1643,20 +1628,6 @@ fn validate_identityaudit_executable_evidence(
             "field=config-sample expected a non-symlink regular file at assemblies/identityaudit/identityaudit.example.toml",
         ));
     }
-    if !evidence.runbook_is_regular_file {
-        findings.push(finding(
-            Rule::IdentityAuditBoundary,
-            subject,
-            "field=operator-runbook expected docs/ops/202607251200-1797-identityaudit-runtime.md",
-        ));
-    }
-    if !evidence.key_pin_cutover_is_closed {
-        findings.push(finding(
-            Rule::IdentityAuditBoundary,
-            subject,
-            "field=audit-chain-key-cutover expected a forward-only ledger 72→73 hard-cutover and failure-recovery fence in adapters/postgres/migrations/README.md",
-        ));
-    }
     if !evidence.artifact_acceptance {
         findings.push(finding(
             Rule::IdentityAuditBoundary,
@@ -1686,20 +1657,6 @@ fn validate_identityaudit_executable_evidence(
         ));
     }
     findings
-}
-
-// INVARIANT: IDENTITYAUDIT-AUDIT-KEY-CUTOVER-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::identityaudit_key_pin_cutover_requires_forward_only_recovery_fence", anti_vacuity = "tests::identityaudit_real_executable_boundary_is_complete" } -- migration 0073 is a non-rolling forward-only cutover: old audit writers stop at ledger 72, only the new binary starts after ledger 73, and committed failures roll forward without compatibility defaults or down migrations.
-fn identityaudit_key_pin_cutover_is_closed(migration_runbook: &str) -> bool {
-    [
-        "### 0073 audit-chain key pin",
-        "ledger=72",
-        "ledger=73",
-        "停止全部旧 audit writer",
-        "不得启动旧 binary",
-        "新的前向修复 migration",
-    ]
-    .iter()
-    .all(|required| migration_runbook.contains(required))
 }
 
 const SETTINGSONLY_ALLOWED_NORMAL_WORKSPACE_PACKAGES: &[&str] = &[
@@ -1741,7 +1698,6 @@ struct SettingsOnlyExecutableEvidence<'a> {
     test_support_enabled: bool,
     schema_is_regular_file: bool,
     sample_is_regular_file: bool,
-    runbook_is_regular_file: bool,
     artifact_acceptance: bool,
     journey_target_declared: bool,
     required_journey_test_declared: bool,
@@ -1825,13 +1781,6 @@ fn validate_settingsonly_executable_evidence(
             Rule::SettingsOnlyExecutableBoundary,
             subject,
             "field=config-sample expected a non-symlink regular file at assemblies/settingsonly/settingsonly.example.toml",
-        ));
-    }
-    if !evidence.runbook_is_regular_file {
-        findings.push(finding(
-            Rule::SettingsOnlyExecutableBoundary,
-            subject,
-            "field=operator-runbook expected docs/ops/202607230700-1796-settingsonly-runtime.md",
         ));
     }
     if !evidence.artifact_acceptance {
@@ -6407,7 +6356,6 @@ audit = { path = "../../crates/audit" }
         for path in [
             schema_path,
             root.join("assemblies/identityaudit/identityaudit.example.toml"),
-            root.join("docs/ops/202607251200-1797-identityaudit-runtime.md"),
         ] {
             assert!(
                 is_regular_file_without_symlink(&path)?,
@@ -6486,26 +6434,6 @@ audit = { path = "../../crates/audit" }
     }
 
     #[test]
-    fn identityaudit_key_pin_cutover_requires_forward_only_recovery_fence() {
-        let migration_runbook = include_str!("../../adapters/postgres/migrations/README.md");
-        assert!(identityaudit_key_pin_cutover_is_closed(migration_runbook));
-        for required in [
-            "ledger=72",
-            "ledger=73",
-            "停止全部旧 audit writer",
-            "不得启动旧 binary",
-            "新的前向修复 migration",
-        ] {
-            assert!(
-                !identityaudit_key_pin_cutover_is_closed(
-                    &migration_runbook.replace(required, "missing-cutover-proof")
-                ),
-                "cutover guard accepted missing proof: {required}"
-            );
-        }
-    }
-
-    #[test]
     fn identityaudit_journey_gate_requires_runtime_witness_chain() -> anyhow::Result<()> {
         let source = include_str!("../../journeys/tests/identityaudit_runtime.rs");
         assert!(identityaudit_journey_has_required_test(source)?);
@@ -6561,7 +6489,6 @@ ENTRYPOINT ["/usr/local/bin/server"]
             test_support_enabled: false,
             schema_is_regular_file: true,
             sample_is_regular_file: true,
-            runbook_is_regular_file: true,
             artifact_acceptance: true,
             journey_target_declared: true,
             required_journey_test_declared: true,
@@ -6636,7 +6563,6 @@ ENTRYPOINT ["/usr/local/bin/server"]
         incomplete.test_support_enabled = true;
         incomplete.schema_is_regular_file = false;
         incomplete.sample_is_regular_file = false;
-        incomplete.runbook_is_regular_file = false;
         incomplete.artifact_acceptance = false;
         incomplete.journey_target_declared = false;
         incomplete.required_journey_test_declared = false;
@@ -6652,7 +6578,6 @@ ENTRYPOINT ["/usr/local/bin/server"]
             "default-normal-features",
             "config-schema",
             "config-sample",
-            "operator-runbook",
             "artifact-acceptance",
             "journey",
             "Dockerfile",

@@ -23,7 +23,6 @@
 //!                                      破坏退出码 1，deprecated 仅告警，draft 跳过。详见 `contract::breaking`。
 //!   `cargo xtask layer-deps`            source-centric 分层依赖 lint（成员 Cargo.toml [dependencies] → §分层 矩阵，CI 门）
 //!   `cargo xtask wsdeps-drift`          workspace.dependencies pin↔lock 漂移门（#1185，CI 门）
-//!   `cargo xtask doc-contracts`         文档契约片段漂移门（command/outbox tenant-aware 签名，CI 门）
 //!   `cargo xtask promtool-rules`         固定摘要 promtool 规则 + consumer test 门（CI 门）
 //!   `cargo xtask outbox-same-id-guard`   same-ID SQL/Rust/ops 完整闭包门（CI 门）
 //!   `cargo xtask consistency-fixtures`  consistency crash matrix fixture/DSL 治理门（#1616，CI 门）
@@ -43,8 +42,8 @@
 //!   `cargo xtask runtime-root guard`    runtime composition-root 单调职责 ratchet（RUNTIME-ROOT-RATCHET-01）
 //!   `cargo xtask runtime-deps guard`    SharedRuntimeDeps infra-only 字段类型守卫（WIRING-DEPS-INFRA-ONLY-01）
 //!   `cargo xtask runtime-env guard`     runtime ambient environment single-funnel guard（RUNTIME-ENV-FUNNEL-01）
-//!   `cargo xtask runtime-deployment-spec [--selftest] [--against <git-ref>]`
-//!                                      #1779 Runtime Deployment SpecKit v2 schema/DAG/fingerprint 机器门
+//!   `cargo xtask runtime-deployment-spec [--selftest]`
+//!                                      #1779 Runtime Deployment SpecKit v2 schema/cases/fingerprint 机器门
 //!   `cargo xtask migrations`            migration 文件序号唯一性 + 连续性守卫（INVARIANT MIGRATION-SERIAL-UNIQUE-01，CI 门）
 //!   `cargo xtask inbox-cutover-guard`    inbox receipt cutover 旧 token 回流守卫（CI 门）
 //!   `cargo xtask dlx-lifecycle-funnel`   DLX verified WORM archive-before-purge 单漏斗守卫（CI 门）
@@ -104,7 +103,6 @@ mod defergate;
 mod diagnostic;
 mod diffcov;
 mod dlx_lifecycle_funnel;
-mod doc_contracts;
 mod event_transport_guard;
 mod generated_file;
 mod graph;
@@ -139,6 +137,7 @@ mod runtime_root_guard;
 mod schema_rls;
 mod setlocal_funnel;
 mod shipped_feature_guard;
+mod source_semantic_guard;
 mod src_scan;
 mod tenancy_closeout;
 #[cfg(test)]
@@ -187,7 +186,7 @@ enum Command {
     },
     LayerDeps,
     WsDepsDrift,
-    DocContracts,
+    SourceSemanticGuard,
     PromtoolRules,
     OutboxSameIdGuard,
     ConsistencyFixtures,
@@ -288,7 +287,7 @@ fn parse_command(args: &[String]) -> Result<Command> {
         ["graph", rest @ ..] => graph::parse(rest).map(Command::GraphAssembly),
         ["layer-deps"] => Ok(Command::LayerDeps),
         ["wsdeps-drift"] => Ok(Command::WsDepsDrift),
-        ["doc-contracts"] => Ok(Command::DocContracts),
+        ["source-semantic-guard"] => Ok(Command::SourceSemanticGuard),
         ["promtool-rules"] => Ok(Command::PromtoolRules),
         ["outbox-same-id-guard"] => Ok(Command::OutboxSameIdGuard),
         ["consistency-fixtures"] => Ok(Command::ConsistencyFixtures),
@@ -705,7 +704,9 @@ fn dispatch(args: &[String]) -> Result<()> {
         }
         Command::LayerDeps => diagnostic::run_check(&layerdeps::LayerDeps),
         Command::WsDepsDrift => diagnostic::run_check(&wsdeps::WsDepsDrift),
-        Command::DocContracts => diagnostic::run_check(&doc_contracts::DocContracts),
+        Command::SourceSemanticGuard => {
+            diagnostic::run_check(&source_semantic_guard::SourceSemanticGuard)
+        }
         Command::PromtoolRules => promtool::run(),
         Command::OutboxSameIdGuard => {
             diagnostic::run_check(&outbox_same_id_guard::OutboxSameIdGuard)
@@ -1104,33 +1105,14 @@ mod tests {
     fn parse_command_runtime_deployment_spec_is_exact() -> anyhow::Result<()> {
         assert_eq!(
             parse_command(&s(&["runtime-deployment-spec"]))?,
-            Command::RuntimeDeploymentSpec(runtime_deployment_spec::Options {
-                selftest: false,
-                against: None,
-            })
+            Command::RuntimeDeploymentSpec(runtime_deployment_spec::Options { selftest: false })
         );
         assert_eq!(
-            parse_command(&s(&[
-                "runtime-deployment-spec",
-                "--selftest",
-                "--against",
-                "origin/develop",
-            ]))?,
-            Command::RuntimeDeploymentSpec(runtime_deployment_spec::Options {
-                selftest: true,
-                against: Some("origin/develop".to_string()),
-            })
+            parse_command(&s(&["runtime-deployment-spec", "--selftest"]))?,
+            Command::RuntimeDeploymentSpec(runtime_deployment_spec::Options { selftest: true })
         );
         for bad in [
-            s(&["runtime-deployment-spec", "--against"]),
             s(&["runtime-deployment-spec", "--selftest", "--selftest"]),
-            s(&[
-                "runtime-deployment-spec",
-                "--against",
-                "HEAD",
-                "--against",
-                "HEAD",
-            ]),
             s(&["runtime-deployment-spec", "--bogus"]),
         ] {
             assert!(
@@ -1250,11 +1232,17 @@ mod tests {
     }
 
     #[test]
-    fn parse_command_doc_contracts() -> anyhow::Result<()> {
+    fn removed_doc_contracts_command_is_rejected() {
+        assert!(parse_command(&s(&["doc-contracts"])).is_err());
+    }
+
+    #[test]
+    fn parse_command_source_semantic_guard() -> anyhow::Result<()> {
         assert_eq!(
-            parse_command(&s(&["doc-contracts"]))?,
-            Command::DocContracts
+            parse_command(&s(&["source-semantic-guard"]))?,
+            Command::SourceSemanticGuard
         );
+        assert!(parse_command(&s(&["source-semantic-guard", "extra"])).is_err());
         Ok(())
     }
 
@@ -1272,12 +1260,6 @@ mod tests {
     fn parse_command_wsdeps_drift_rejects_trailing_args() {
         assert!(parse_command(&s(&["wsdeps-drift", "--bogus"])).is_err());
         assert!(parse_command(&s(&["wsdeps-drift", "extra"])).is_err());
-    }
-
-    #[test]
-    fn parse_command_doc_contracts_rejects_trailing_args() {
-        assert!(parse_command(&s(&["doc-contracts", "--bogus"])).is_err());
-        assert!(parse_command(&s(&["doc-contracts", "extra"])).is_err());
     }
 
     #[test]

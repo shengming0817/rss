@@ -13,7 +13,7 @@ The brownfield repository has static assembly intent and generated domain closur
 ## Delivery batches
 
 1. Identity protocol: research/data model, four Draft-07 schemas, RFC-8785 fingerprint vectors/schema cases, target architecture, and rule.
-2. Machine closure: spec/plan/quickstart/tasks, exact task baseline, focused xtask command, typed fast-aggregate membership, mutation selftests, and feature pointer.
+2. Machine closure: spec/plan/quickstart/tasks, exact task baseline, repository xtask machine-input command, typed fast-aggregate membership, mutation selftests, and feature pointer.
 
 The old 001 tree is read-only. 007 replaces it as the active pointer without reader negotiation, aliases, shims, fallback, or dual write.
 
@@ -37,15 +37,13 @@ The old 001 tree is read-only. 007 replaces it as the active pointer without rea
 
 ## Verification plan
 
-1. Resolve the active feature and require the core documents, four schemas, schema cases, fingerprint vectors, and task baseline.
-2. Run `cargo xtask runtime-deployment-spec --selftest --against origin/develop`, then `cargo xtask verify --fast`; require Draft-07 meta-schema/instance checks, exact 31-node/52-edge adjacency, carrier parity, RFC-8785 vectors, registry-membership mutants, and content synthetic mutations.
-3. Check 001 immutability, diff scope, template markers, and zero generated churn; this approved Cx3 revision has no LOC cap.
-4. Run doc contracts, archrules, fast verification, Make fast verification, and workspace all-targets check.
-5. Confirm future owner commands in `tasks.md` exactly match tracker validation sequences.
+1. Resolve the active feature and validate the four schemas, schema cases, and fingerprint vectors.
+2. Run `cargo xtask runtime-deployment-spec --selftest`, then `cargo xtask verify --fast`; require Draft-07 schema/instance checks, RFC-8785 vectors, and semantic mutations.
+3. Run archrules, fast verification, Make fast verification, and workspace all-targets check.
 
 ## 缺口与 owner
 
-The implementation matrix is in `tasks.md` and its machine mirror is `fixtures/task-baseline.json`. Dynamic ordering comes only from the latest #1778 `pm:epic-wave`; this document does not duplicate a mutable scheduler. #1779 supplies the specification carrier and registers its selftest in the typed fast aggregate. Same-head receipt aggregation and active-PR scheduling remain #1809, so this PR claims neither receipt closure nor forge activation.
+The implementation matrix in `tasks.md` is planning prose, not a CI enforcement carrier. Dynamic ordering comes only from the latest #1778 `pm:epic-wave`. #1779 supplies the machine schema/fingerprint validator and registers its selftest in the typed fast aggregate. Same-head receipt aggregation and active-PR scheduling remain #1809, so this PR claims neither receipt closure nor forge activation.
 
 ## Rollback
 

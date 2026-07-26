@@ -76,7 +76,7 @@ AI 实施者、reviewer 和维护者可以从 `docs/spec/consistency-runtime/` �
 
 - Existing specs already describe parts of eventing and runtime; this entry must cite those as context but not duplicate stale implementation claims as current rule.
 - `specs` is a symlink to `docs/spec`; generated paths must be valid through both `docs/spec/consistency-runtime/**` and `specs/consistency-runtime/**`.
-- `doc-contracts` scans `docs/spec`; this feature must not include old tenantless or actorless command/outbox snippets.
+- This feature must not include old tenantless or actorless command/outbox snippets.
 - L3 includes saga and projection/CQRS; wording must not imply saga is the only L3 mechanism.
 - Reconcile is L4 desired-state convergence; wording must not model it as saga compensation or projection replay.
 - Global event tables without `tenant_id` must be described with their existing tenant-aware safeguards and known follow-up boundaries, not as fully tenant-scoped storage.

@@ -16,7 +16,6 @@ cargo test -p xtask tenancy_closeout
 cargo check -p tenancyconsumer
 cargo run -p tenancyconsumer
 cargo xtask tenancy-closeout
-cargo xtask doc-contracts
 cargo xtask archrules verify
 cargo xtask defer-gate
 cargo xtask schema-rls
@@ -36,7 +35,6 @@ cargo test -p xtask tenancy_closeout
 cargo check -p tenancyconsumer
 cargo run -p tenancyconsumer
 cargo xtask tenancy-closeout
-cargo xtask doc-contracts
 cargo xtask archrules verify
 cargo xtask defer-gate
 cargo xtask verify --fast

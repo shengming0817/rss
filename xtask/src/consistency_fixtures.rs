@@ -36,7 +36,6 @@ const MAX_JOURNEY_MANIFEST_BYTES: u64 = 256 * 1024;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Rule {
     MissingDirectory,
-    MissingReadme,
     NoFixtures,
     Parse,
     InvalidFixture,
@@ -453,14 +452,6 @@ fn validate_root_with_contracts(
             ..RootValidation::default()
         };
     }
-    if !is_real_file(&dir.join("README.md")) {
-        findings.push(finding(
-            Rule::MissingReadme,
-            "fixtures/consistency/README.md",
-            "README must be a real regular file describing how to add consistency crash cases",
-        ));
-    }
-
     let mut files = Vec::new();
     if let Err(e) = collect_fixture_files(&dir, &mut files) {
         findings.push(finding(Rule::InvalidFixture, rel(root, &dir), e));
@@ -902,11 +893,6 @@ fn require_real_directory(path: &Path) -> Result<(), String> {
         return Err(format!("{} must be a real directory", path.display()));
     }
     Ok(())
-}
-
-fn is_real_file(path: &Path) -> bool {
-    std::fs::symlink_metadata(path)
-        .is_ok_and(|metadata| !metadata.file_type().is_symlink() && metadata.is_file())
 }
 
 fn is_fixture_toml(path: &Path) -> bool {
@@ -1777,7 +1763,6 @@ const READY_CASE_RUNNERS: &[ReadyCaseRunner] = &[
             fs::remove_dir_all(&root)?;
         }
         fs::create_dir_all(root.join("fixtures/consistency/outbox"))?;
-        fs::write(root.join("fixtures/consistency/README.md"), "fixture docs")?;
         fs::create_dir_all(root.join("contracts/event/identity/v1/session-created"))?;
         fs::write(
             root.join("contracts/event/identity/v1/session-created/contract.toml"),

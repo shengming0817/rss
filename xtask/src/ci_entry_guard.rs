@@ -1,8 +1,7 @@
-//! Canonical local-CI entry guard for agent skills and project templates.
+//! Canonical local-CI executable entry guard.
 //!
-//! INVARIANT: CI-LOCAL-ENTRY-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::missing_canonical_entry_is_rejected|tests::unbounded_or_local_full_semantics_are_rejected|tests::legacy_workspace_closeout_is_rejected|tests::makefile_canonical_targets_are_closed|tests::empty_carrier_set_is_rejected", anti_vacuity = "tests::canonical_carrier_set_is_accepted|tests::workspace_controlled_carriers_use_canonical_entry" } -- the six controlled agent/template carriers must funnel final local validation through a 10-minute bounded `make ci CI_BASE=<ref>` and defer heavy gates to nightly; the Make targets must be unique exact recipes and flattened or bare CI executors must not return.
+//! INVARIANT: CI-LOCAL-ENTRY-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::makefile_canonical_targets_are_closed", anti_vacuity = "tests::workspace_makefile_contract_is_closed" } -- the Make targets must remain unique exact recipes backed by the bounded local-CI supervisor. Human-facing Markdown is intentionally not an enforcement carrier.
 
-use std::collections::BTreeMap;
 use std::fs;
 
 use anyhow::{Context as _, Result};
@@ -10,48 +9,10 @@ use anyhow::{Context as _, Result};
 use crate::diagnostic::{Finding, GovernanceCheck, finding, run_check};
 use crate::workspace_root;
 
-pub(crate) const CONTROLLED_PATHS: &[&str] = &[
-    "CLAUDE.md",
-    ".claude/skills/ship/SKILL.md",
-    ".claude/skills/fix/SKILL.md",
-    ".github/project-template/PROJECT.md",
-    ".github/project-template/pr-comment.md",
-    ".github/project-template/pull_request_template.md",
-];
-
-const CLOSEOUT_MARKERS: &[(&str, &[&str])] = &[
-    ("CLAUDE.md", &["收尾统一运行"]),
-    (
-        ".claude/skills/ship/SKILL.md",
-        &["**本地验证（label 后执行）**"],
-    ),
-    (
-        ".claude/skills/fix/SKILL.md",
-        &["**本地验证（label 后执行）**"],
-    ),
-    (
-        ".github/project-template/PROJECT.md",
-        &["pr-status/needs-review-again", "pr-status/needs-check-fix"],
-    ),
-    (
-        ".github/project-template/pr-comment.md",
-        &["ship/fix 默认执行 10 分钟有界本地 canonical"],
-    ),
-    (
-        ".github/project-template/pull_request_template.md",
-        &["10 分钟有界本地通过"],
-    ),
-];
+pub(crate) const CONTROLLED_PATHS: &[&str] = &["Makefile"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Rule {
-    MissingCarrier,
-    EmptyCarrier,
-    DuplicateCarrier,
-    MissingCanonicalEntry,
-    MissingBoundedSemantics,
-    LegacyWorkspaceCloseout,
-    LegacyFlatCommand,
     MakefileContract,
 }
 
@@ -66,270 +27,16 @@ impl GovernanceCheck for CiEntryGuard {
 
     fn check(&self) -> Result<(String, Vec<Finding<Self::Rule>>)> {
         let root = workspace_root()?;
-        let mut carriers = Vec::with_capacity(CONTROLLED_PATHS.len());
-        for relative in CONTROLLED_PATHS {
-            let path = root.join(relative);
-            match fs::read_to_string(&path) {
-                Ok(content) => carriers.push((*relative, content)),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => {
-                    return Err(error)
-                        .with_context(|| format!("读取 CI 入口受控载体 `{relative}` 失败"));
-                }
-            }
-        }
-        let borrowed = carriers
-            .iter()
-            .map(|(path, content)| (*path, content.as_str()))
-            .collect::<Vec<_>>();
         let makefile = fs::read_to_string(root.join("Makefile")).context("读取 Makefile 失败")?;
-        let mut findings = findings_for_contents(&borrowed);
-        findings.extend(findings_for_makefile(&makefile));
         Ok((
-            format!(
-                "{} 个 CI 入口载体均使用 canonical `make ci`",
-                CONTROLLED_PATHS.len()
-            ),
-            findings,
+            "Makefile canonical CI targets checked".to_string(),
+            findings_for_makefile(&makefile),
         ))
     }
 }
 
 pub(crate) fn run() -> Result<()> {
     run_check(&CiEntryGuard)
-}
-
-fn findings_for_contents(files: &[(&str, &str)]) -> Vec<Finding<Rule>> {
-    let mut by_path = BTreeMap::<&str, Vec<&str>>::new();
-    for (path, content) in files {
-        if CONTROLLED_PATHS.contains(path) {
-            by_path.entry(path).or_default().push(content);
-        }
-    }
-
-    let mut findings = Vec::new();
-    for path in CONTROLLED_PATHS {
-        let Some(contents) = by_path.get(path) else {
-            findings.push(finding(
-                Rule::MissingCarrier,
-                *path,
-                "受控 CI 入口载体缺失，无法证明 canonical 本地验证漏斗",
-            ));
-            continue;
-        };
-        if contents.len() != 1 {
-            findings.push(finding(
-                Rule::DuplicateCarrier,
-                *path,
-                format!("受控载体必须恰好出现一次，实际 {} 次", contents.len()),
-            ));
-        }
-
-        let content = contents[0];
-        if content.trim().is_empty() {
-            findings.push(finding(
-                Rule::EmptyCarrier,
-                *path,
-                "受控载体为空，拒绝 vacuous pass",
-            ));
-            continue;
-        }
-        if !has_bound_canonical_make_ci(path, content) {
-            findings.push(finding(
-                Rule::MissingCanonicalEntry,
-                *path,
-                "必须包含 `make ci CI_BASE=<ref>`；worktree 形式仅允许在 make 与 ci 之间增加 `-C worktrees/...`",
-            ));
-        }
-        if !content.contains("10 分钟")
-            || !content.contains("nightly")
-            || content.contains("make ci-full` 必须")
-        {
-            findings.push(finding(
-                Rule::MissingBoundedSemantics,
-                *path,
-                "本地 canonical CI 必须声明 10 分钟预算、重型门交 nightly，且不得把 make ci-full 设为必跑",
-            ));
-        }
-        if has_legacy_workspace_closeout(content) {
-            findings.push(finding(
-                Rule::LegacyWorkspaceCloseout,
-                *path,
-                "禁止直接恢复 verify/verify-fast/workspace-check 收尾；统一调用 canonical `make ci`",
-            ));
-        }
-        if has_legacy_flat_command(content) {
-            findings.push(finding(
-                Rule::LegacyFlatCommand,
-                *path,
-                "禁止调用旧平铺、bare ci 或 top-level audit 入口；CI 内部仅使用 typed `ci <subcommand>`",
-            ));
-        }
-    }
-    findings
-}
-
-fn tokens(text: &str) -> Vec<&str> {
-    text.split_whitespace()
-        .map(|token| {
-            token.trim_matches(|ch: char| {
-                matches!(
-                    ch,
-                    '`' | '\''
-                        | '"'
-                        | '('
-                        | ')'
-                        | '['
-                        | ']'
-                        | '{'
-                        | '}'
-                        | ','
-                        | '.'
-                        | ':'
-                        | ';'
-                        | '\\'
-                )
-            })
-        })
-        .filter(|token| !token.is_empty())
-        .collect()
-}
-
-fn has_canonical_make_ci(content: &str) -> bool {
-    content.lines().any(|line| {
-        let words = tokens(line);
-        words.iter().enumerate().any(|(index, word)| {
-            if *word != "make" {
-                return false;
-            }
-            let ci_index = match words.get(index + 1).copied() {
-                Some("ci") => index + 1,
-                Some("-C") => {
-                    let Some(directory) = words.get(index + 2).copied() else {
-                        return false;
-                    };
-                    let worktree_directory =
-                        directory.starts_with("worktrees/") || directory.contains("/worktrees/");
-                    if !worktree_directory || words.get(index + 3).copied() != Some("ci") {
-                        return false;
-                    }
-                    index + 3
-                }
-                _ => return false,
-            };
-            words[ci_index + 1..].iter().any(|argument| {
-                argument
-                    .strip_prefix("CI_BASE=")
-                    .is_some_and(|value| !value.is_empty())
-            })
-        })
-    })
-}
-
-fn has_bound_canonical_make_ci(path: &str, content: &str) -> bool {
-    let markers = CLOSEOUT_MARKERS
-        .iter()
-        .find_map(|(candidate, markers)| (*candidate == path).then_some(*markers));
-    let Some(markers) = markers else {
-        return false;
-    };
-    markers.iter().all(|marker| {
-        content
-            .lines()
-            .any(|line| line.contains(marker) && has_canonical_make_ci(line))
-    })
-}
-
-fn has_legacy_workspace_closeout(content: &str) -> bool {
-    content.lines().any(|line| {
-        let words = tokens(line);
-        words
-            .windows(2)
-            .any(|window| window == ["make", "verify"] || window == ["make", "verify-fast"])
-            || cargo_like_invocations(&words).any(|(_, command_index)| {
-                words.get(command_index).copied() == Some("check")
-                    && words[command_index + 1..].contains(&"--workspace")
-            })
-            || xtask_command_indices(&words).into_iter().any(|index| {
-                matches!(
-                    words.get(index).copied(),
-                    Some("verify") | Some("verify-fast")
-                )
-            })
-    })
-}
-
-fn has_legacy_flat_command(content: &str) -> bool {
-    content.lines().any(|line| {
-        let words = tokens(line);
-        xtask_command_indices(&words).into_iter().any(|index| {
-            let Some(command) = words.get(index).copied() else {
-                return false;
-            };
-            matches!(
-                command,
-                "ci-plan"
-                    | "ci-gate"
-                    | "ci-meta"
-                    | "ci-core"
-                    | "ci-security"
-                    | "ci-coverage"
-                    | "ci-integration"
-                    | "audit"
-            ) || command.starts_with("ci-core-")
-                || (command == "ci"
-                    && !matches!(
-                        words.get(index + 1).copied(),
-                        Some("local" | "full" | "plan" | "run" | "gate")
-                    ))
-        })
-    })
-}
-
-fn xtask_command_indices(words: &[&str]) -> Vec<usize> {
-    let mut commands = Vec::new();
-    for (launcher_index, launcher) in words.iter().enumerate() {
-        if *launcher != "cargo" && !launcher.ends_with("hack/cargo.sh") {
-            continue;
-        }
-        if words.get(launcher_index + 1).copied() == Some("xtask") {
-            commands.push(launcher_index + 2);
-            continue;
-        }
-        let tail = &words[launcher_index + 1..];
-        if tail.first().copied() != Some("run") {
-            continue;
-        }
-        if let Some(separator) = tail.iter().position(|word| *word == "--")
-            && cargo_run_targets_xtask(&tail[..separator])
-        {
-            commands.push(launcher_index + separator + 2);
-        }
-    }
-    commands
-}
-
-fn cargo_run_targets_xtask(arguments: &[&str]) -> bool {
-    arguments.windows(2).any(|window| {
-        window == ["-p", "xtask"]
-            || window == ["--package", "xtask"]
-            || (window[0] == "--manifest-path" && xtask_manifest(window[1]))
-    }) || arguments.iter().any(|argument| {
-        matches!(*argument, "-pxtask" | "--package=xtask")
-            || argument
-                .strip_prefix("--manifest-path=")
-                .is_some_and(xtask_manifest)
-    })
-}
-
-fn xtask_manifest(path: &str) -> bool {
-    path == "xtask/Cargo.toml" || path.ends_with("/xtask/Cargo.toml")
-}
-
-fn cargo_like_invocations<'a>(words: &'a [&'a str]) -> impl Iterator<Item = (usize, usize)> + 'a {
-    words.iter().enumerate().filter_map(|(index, launcher)| {
-        (*launcher == "cargo" || launcher.ends_with("hack/cargo.sh")).then_some((index, index + 1))
-    })
 }
 
 fn findings_for_makefile(content: &str) -> Vec<Finding<Rule>> {
@@ -421,167 +128,19 @@ fn make_target_recipes<'a>(content: &'a str, target: &str) -> Vec<Vec<&'a str>> 
 mod tests {
     use super::*;
 
-    fn canonical_fixture() -> Vec<(&'static str, &'static str)> {
-        vec![
-            (
-                "CLAUDE.md",
-                "收尾统一运行 10 分钟 `make ci CI_BASE=<remote>/develop`，重型门交 nightly",
-            ),
-            (
-                ".claude/skills/ship/SKILL.md",
-                "**本地验证（label 后执行）**：运行 10 分钟 `make ci CI_BASE=<remote>/develop`，重型门交 nightly",
-            ),
-            (
-                ".claude/skills/fix/SKILL.md",
-                "**本地验证（label 后执行）**：10 分钟 run make ci CI_BASE=origin/develop，重型门交 nightly",
-            ),
-            (
-                ".github/project-template/PROJECT.md",
-                "10 分钟；重型门交 nightly\npr-status/needs-review-again → make ci CI_BASE=upstream/develop\npr-status/needs-check-fix → make ci CI_BASE=upstream/develop",
-            ),
-            (
-                ".github/project-template/pr-comment.md",
-                "ship/fix 默认执行 10 分钟有界本地 canonical `make ci CI_BASE=<remote>/develop`，重型门交 nightly",
-            ),
-            (
-                ".github/project-template/pull_request_template.md",
-                "- [ ] `make ci CI_BASE=origin/develop` 10 分钟有界本地通过；重型门交 nightly",
-            ),
-        ]
-    }
-
     fn has_rule(findings: &[Finding<Rule>], rule: Rule) -> bool {
         findings.iter().any(|finding| finding.rule == rule)
     }
 
     #[test]
-    fn canonical_carrier_set_is_accepted() {
-        let findings = findings_for_contents(&canonical_fixture());
-        assert!(
-            findings.is_empty(),
-            "canonical fixture must pass: {findings:?}"
-        );
-    }
-
-    #[test]
-    fn unbounded_or_local_full_semantics_are_rejected() {
-        let mut fixture = canonical_fixture();
-        fixture[0].1 = "收尾统一运行 `make ci CI_BASE=origin/develop`";
-        let findings = findings_for_contents(&fixture);
-        assert!(
-            has_rule(&findings, Rule::MissingBoundedSemantics),
-            "{findings:?}"
-        );
-    }
-
-    #[test]
-    fn workspace_controlled_carriers_use_canonical_entry() -> anyhow::Result<()> {
+    fn workspace_makefile_contract_is_closed() -> anyhow::Result<()> {
         let (summary, findings) = CiEntryGuard.check()?;
-        assert!(summary.contains("6 个 CI 入口载体"), "{summary}");
+        assert!(summary.contains("Makefile"), "{summary}");
         assert!(
             findings.is_empty(),
-            "committed controlled carriers must pass: {findings:?}"
+            "committed Makefile contract must pass: {findings:?}"
         );
         Ok(())
-    }
-
-    #[test]
-    fn missing_canonical_entry_is_rejected() {
-        let mut fixture = canonical_fixture();
-        fixture[0].1 = "final validation described only in prose";
-        let findings = findings_for_contents(&fixture);
-        assert!(
-            has_rule(&findings, Rule::MissingCanonicalEntry),
-            "{findings:?}"
-        );
-        fixture = canonical_fixture();
-        fixture[1].1 =
-            "**本地验证（label 后执行）**：make ci-full\n最终收尾前 make ci CI_BASE=origin/develop";
-        let findings = findings_for_contents(&fixture);
-        assert!(
-            has_rule(&findings, Rule::MissingCanonicalEntry),
-            "unbound summary text must not satisfy the real closeout: {findings:?}"
-        );
-    }
-
-    #[test]
-    fn legacy_workspace_closeout_is_rejected() {
-        let mut fixture = canonical_fixture();
-        for red in [
-            "make ci CI_BASE=origin/develop; make verify",
-            "make ci CI_BASE=origin/develop; make verify-fast && cargo check --workspace",
-            "make ci CI_BASE=origin/develop; ./hack/cargo.sh xtask verify --fast",
-            "make ci CI_BASE=origin/develop; ./hack/cargo.sh check --workspace",
-        ] {
-            fixture[1].1 = red;
-            let findings = findings_for_contents(&fixture);
-            assert!(
-                has_rule(&findings, Rule::LegacyWorkspaceCloseout),
-                "must reject direct internal closeout `{red}`: {findings:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn flattened_ci_commands_are_rejected_but_typed_subcommands_are_allowed() {
-        let mut fixture = canonical_fixture();
-        fixture[3].1 = "pr-status/needs-review-again → make ci CI_BASE=origin/develop\npr-status/needs-check-fix → make ci CI_BASE=origin/develop\ncargo xtask ci-plan --event-path event.json";
-        let findings = findings_for_contents(&fixture);
-        assert!(has_rule(&findings, Rule::LegacyFlatCommand), "{findings:?}");
-
-        fixture[3].1 = "pr-status/needs-review-again → make ci CI_BASE=origin/develop\npr-status/needs-check-fix → make ci CI_BASE=origin/develop\n./hack/cargo.sh xtask ci-plan --event-path event.json";
-        let findings = findings_for_contents(&fixture);
-        assert!(has_rule(&findings, Rule::LegacyFlatCommand), "{findings:?}");
-
-        for red in [
-            "make ci CI_BASE=origin/develop; cargo run --locked -p xtask -- ci-plan --event-path event.json",
-            "make ci CI_BASE=origin/develop; cargo run --package=xtask -- ci-plan --event-path event.json",
-            "make ci CI_BASE=origin/develop; cargo run --manifest-path xtask/Cargo.toml -- audit",
-            "make ci CI_BASE=origin/develop; cargo xtask audit",
-            "make ci CI_BASE=origin/develop; cargo xtask ci",
-        ] {
-            let project_red = Box::leak(
-                format!("pr-status/needs-review-again → make ci CI_BASE=origin/develop\npr-status/needs-check-fix → make ci CI_BASE=origin/develop\n{red}")
-                    .into_boxed_str(),
-            );
-            fixture[3].1 = project_red;
-            let findings = findings_for_contents(&fixture);
-            assert!(
-                has_rule(&findings, Rule::LegacyFlatCommand),
-                "must reject removed entry `{red}`: {findings:?}"
-            );
-        }
-
-        fixture[3].1 = "10 分钟；重型门交 nightly\npr-status/needs-review-again → make ci CI_BASE=origin/develop\npr-status/needs-check-fix → make ci CI_BASE=origin/develop\ncargo xtask ci plan --event-path event.json";
-        let findings = findings_for_contents(&fixture);
-        assert!(
-            findings.is_empty(),
-            "typed subcommand must pass: {findings:?}"
-        );
-    }
-
-    #[test]
-    fn empty_carrier_set_is_rejected() {
-        let findings = findings_for_contents(&[]);
-        assert!(has_rule(&findings, Rule::MissingCarrier), "{findings:?}");
-        assert_eq!(
-            findings
-                .iter()
-                .filter(|finding| finding.rule == Rule::MissingCarrier)
-                .count(),
-            CONTROLLED_PATHS.len(),
-            "every controlled carrier must be proven present"
-        );
-    }
-
-    #[test]
-    fn empty_and_duplicate_carriers_fail_closed() {
-        let mut fixture = canonical_fixture();
-        fixture[0].1 = " \n\t";
-        fixture.push(("CLAUDE.md", "make ci CI_BASE=origin/develop"));
-        let findings = findings_for_contents(&fixture);
-        assert!(has_rule(&findings, Rule::EmptyCarrier), "{findings:?}");
-        assert!(has_rule(&findings, Rule::DuplicateCarrier), "{findings:?}");
     }
 
     #[test]

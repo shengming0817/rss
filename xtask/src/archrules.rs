@@ -18,7 +18,6 @@ use syn::visit::Visit;
 pub(crate) enum Rule {
     EmptyIndex,
     InvalidInvariantId,
-    DocsOnlyInvariant,
     DylintRegistryDrift,
     MissingCarrier,
     MissingInvariant,
@@ -738,7 +737,6 @@ fn build_index(root: &Path) -> Result<Index> {
     scan_source_invariants(root, &mut index)?;
     scan_trybuild_and_native(root, &mut index)?;
     reject_conflicting_facets(&mut index);
-    check_docs_only(root, &mut index)?;
     require_anti_vacuity(&mut index);
     if index.records.is_empty() {
         index.findings.push(finding(
@@ -1575,15 +1573,9 @@ fn scan_dylint(root: &Path, index: &mut Index) -> Result<()> {
     let members = dylint_members(root)?;
     let root_inventory = machine_dylint_inventory("Cargo.toml", &registered);
     let member_inventory = machine_dylint_inventory("lints/Cargo.toml", &members);
-    let readme = fs::read_to_string(root.join("lints/README.md"))
-        .context("读取 dylint human inventory `lints/README.md`")?;
-    // Inventory reconciliation is machine carriers + optional human README only.
-    // Do not require `docs/rules/architecture.md` to restate the closed lint set.
     let inventories = [
         ("root metadata", root_inventory),
         ("lints members", member_inventory),
-        ("README inventory", readme_dylint_inventory(&readme)),
-        ("README table", readme_dylint_table(&readme)),
     ];
     let canonical = inventories[0].1.names.clone();
     for (label, inventory) in &inventories {
@@ -1618,7 +1610,7 @@ fn scan_dylint(root: &Path, index: &mut Index) -> Result<()> {
         index.findings.push(finding(
             Rule::DylintRegistryDrift,
             "lints",
-            "four dylint inventories are not exact",
+            "machine dylint inventories are not exact",
         ));
     }
 
@@ -1721,94 +1713,6 @@ fn machine_dylint_inventory(path: &'static str, paths: &[PathBuf]) -> DylintInve
     }
 }
 
-fn readme_dylint_inventory(content: &str) -> DylintInventory {
-    let lines = content.lines().collect::<Vec<_>>();
-    let start = lines
-        .iter()
-        .position(|line| line.contains("当前注册清单"))
-        .map(|index| index + 1);
-    let end = start.and_then(|start| {
-        lines[start..]
-            .iter()
-            .position(|line| line.trim_start().starts_with("| lint id |"))
-            .map(|offset| start + offset)
-    });
-    let entries = match (start, end) {
-        (Some(start), Some(end)) if start < end => {
-            markdown_dylint_spans(&lines[start..end].join("\n"))
-        }
-        _ => Vec::new(),
-    };
-    human_dylint_inventory("lints/README.md", start.is_some() && end.is_some(), entries)
-}
-
-fn readme_dylint_table(content: &str) -> DylintInventory {
-    let mut anchor_found = false;
-    let mut entries = Vec::new();
-    for line in content.lines() {
-        if line.trim_start().starts_with("| lint id |") {
-            anchor_found = true;
-            continue;
-        }
-        if !anchor_found {
-            continue;
-        }
-        let trimmed = line.trim();
-        if !trimmed.starts_with('|') {
-            if !entries.is_empty() {
-                break;
-            }
-            continue;
-        }
-        let Some(first_column) = trimmed.split('|').nth(1).map(str::trim) else {
-            continue;
-        };
-        if first_column.chars().all(|character| character == '-') {
-            continue;
-        }
-        entries.push(
-            first_column
-                .strip_prefix('`')
-                .and_then(|value| value.strip_suffix('`'))
-                .unwrap_or(first_column)
-                .to_owned(),
-        );
-    }
-    human_dylint_inventory("lints/README.md", anchor_found, entries)
-}
-
-fn markdown_dylint_spans(content: &str) -> Vec<String> {
-    content
-        .split('`')
-        .enumerate()
-        .filter_map(|(index, span)| (index % 2 == 1).then_some(span))
-        .map(ToOwned::to_owned)
-        .collect()
-}
-
-fn human_dylint_inventory(
-    path: &'static str,
-    anchor_found: bool,
-    entries: Vec<String>,
-) -> DylintInventory {
-    let entry_count = entries.len();
-    let invalid_entries = entries
-        .iter()
-        .filter(|entry| !valid_dylint_name(entry))
-        .count();
-    let names = entries
-        .into_iter()
-        .filter(|entry| valid_dylint_name(entry))
-        .collect();
-    DylintInventory {
-        path,
-        anchor_found,
-        entry_count,
-        invalid_entries,
-        names,
-    }
-}
-
 fn valid_dylint_name(name: &str) -> bool {
     name.starts_with("rss_")
         && name.len() > "rss_".len()
@@ -1864,30 +1768,6 @@ fn scan_trybuild_and_native(root: &Path, index: &mut Index) -> Result<()> {
             rel(root, &stderr),
             "trybuild orphan .stderr 缺同名 compile_fail fixture",
         ));
-    }
-    Ok(())
-}
-
-fn check_docs_only(root: &Path, index: &mut Index) -> Result<()> {
-    let primary_ids: BTreeSet<String> = index.records.iter().map(|r| r.id.clone()).collect();
-    for dir in [root.join("docs/rules"), root.join("docs/architecture")] {
-        if !dir.exists() {
-            continue;
-        }
-        for path in markdown_files_under(&dir)? {
-            for found in extract_invariants(root, &path)? {
-                for rule in found.rules {
-                    let id = rule.id;
-                    if !primary_ids.contains(&id) {
-                        index.findings.push(finding(
-                            Rule::DocsOnlyInvariant,
-                            found.source.clone(),
-                            format!("文档 INVARIANT `{id}` 缺真实 carrier 锚点"),
-                        ));
-                    }
-                }
-            }
-        }
     }
     Ok(())
 }
@@ -2876,11 +2756,6 @@ const XTASK_GATE_DECLARATIONS: &[GateDeclaration] = &[
         role: GateDeclarationRole::PlanStep,
     },
     GateDeclaration {
-        path: "xtask/src/doc_contracts.rs",
-        tokens: META_TOKENS,
-        role: GateDeclarationRole::PlanStep,
-    },
-    GateDeclaration {
         path: "xtask/src/promtool.rs",
         tokens: META_TOKENS,
         role: GateDeclarationRole::PlanStep,
@@ -2977,6 +2852,11 @@ const XTASK_GATE_DECLARATIONS: &[GateDeclaration] = &[
     },
     GateDeclaration {
         path: "xtask/src/wsdeps.rs",
+        tokens: META_TOKENS,
+        role: GateDeclarationRole::PlanStep,
+    },
+    GateDeclaration {
+        path: "xtask/src/source_semantic_guard.rs",
         tokens: META_TOKENS,
         role: GateDeclarationRole::PlanStep,
     },
@@ -3285,10 +3165,6 @@ fn rust_files_under(dir: &Path) -> Result<Vec<PathBuf>> {
     files_under(dir, "rs")
 }
 
-fn markdown_files_under(dir: &Path) -> Result<Vec<PathBuf>> {
-    files_under(dir, "md")
-}
-
 fn files_under(dir: &Path, ext: &str) -> Result<Vec<PathBuf>> {
     let mut out = Vec::new();
     collect_files(dir, ext, &mut out)?;
@@ -3344,27 +3220,6 @@ mod tests {
 
     fn rule_ids(found: &FoundInvariant) -> Vec<String> {
         found.rules.iter().map(|rule| rule.id.clone()).collect()
-    }
-
-    fn write_exact_dylint_human_inventories(root: &Path, names: &[&str]) -> Result<()> {
-        let inventory = names
-            .iter()
-            .map(|name| format!("`{name}`"))
-            .collect::<Vec<_>>()
-            .join("、");
-        let rows = names
-            .iter()
-            .map(|name| format!("| `{name}` | DEMO-01 | demo |"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        write(
-            &root.join("lints/README.md"),
-            &format!(
-                "当前注册清单（与机器清单同步）：\n{inventory}\n\n\
-                 | lint id | INVARIANT | 守的约束 |\n\
-                 |---------|-----------|---------|\n{rows}\n"
-            ),
-        )
     }
 
     #[test]
@@ -3679,7 +3534,6 @@ members = ["rss_demo", "rss_orphan"]
             "//! INVARIANT: DEMO-LINT-01 { level = \"Medium\", exec = \"verify\", source = \"dylint\" }\n",
         )?;
         write(&root.join("lints/rss_demo/ui/main.rs"), "fn main() {}\n")?;
-        write_exact_dylint_human_inventories(&root, &["rss_demo"])?;
         let mut index = Index::default();
         scan_dylint(&root, &mut index)?;
         assert!(
@@ -3704,155 +3558,6 @@ members = ["rss_demo", "rss_orphan"]
                 .iter()
                 .any(|f| f.rule == Rule::OrphanUiGolden)
         );
-        fs::remove_dir_all(root)?;
-        Ok(())
-    }
-
-    fn write_dylint_inventory_fixture(
-        root: &Path,
-        readme_inventory: &str,
-        readme_rows: &str,
-        prose_bait: &str,
-    ) -> Result<()> {
-        write(
-            &root.join("Cargo.toml"),
-            r#"
-[workspace.metadata.dylint]
-libraries = [
-  { path = "lints/rss_demo" },
-  { path = "lints/rss_other" },
-]
-"#,
-        )?;
-        write(
-            &root.join("lints/Cargo.toml"),
-            r#"
-[workspace]
-members = ["rss_demo", "rss_other"]
-"#,
-        )?;
-        for lint in ["rss_demo", "rss_other"] {
-            let invariant = lint
-                .trim_start_matches("rss_")
-                .replace('_', "-")
-                .to_ascii_uppercase();
-            write(
-                &root.join(format!("lints/{lint}/Cargo.toml")),
-                &format!("[package]\nname = \"{lint}\"\n"),
-            )?;
-            write(
-                &root.join(format!("lints/{lint}/src/lib.rs")),
-                &format!(
-                    "//! INVARIANT: {invariant}-01 {{ level = \"Medium\", exec = \"verify\", source = \"dylint\" }}\n",
-                ),
-            )?;
-            write(
-                &root.join(format!("lints/{lint}/ui/main.rs")),
-                "fn main() {}\n",
-            )?;
-            write(
-                &root.join(format!("lints/{lint}/ui/main.stderr")),
-                "error\n",
-            )?;
-        }
-        write(
-            &root.join("lints/README.md"),
-            &format!(
-                r#"# lint inventory
-{prose_bait}
-当前注册清单（与机器清单同步）：
-{readme_inventory}
-
-| lint id | INVARIANT | 守的约束 |
-|---------|-----------|---------|
-{readme_rows}
-"#
-            ),
-        )
-    }
-
-    fn dylint_inventory_findings(
-        case: &str,
-        readme_inventory: &str,
-        readme_rows: &str,
-        prose_bait: &str,
-    ) -> Result<Vec<Finding<Rule>>> {
-        let root = unique_tmp(&format!("archrules-dylint-inventory-{case}"));
-        write_dylint_inventory_fixture(&root, readme_inventory, readme_rows, prose_bait)?;
-        let mut index = Index::default();
-        scan_dylint(&root, &mut index)?;
-        Ok(index.findings)
-    }
-
-    #[test]
-    fn dylint_human_inventories_are_exact_non_vacuous_and_bait_resistant() -> Result<()> {
-        let inventory = "`rss_demo`、`rss_other`";
-        let rows = "| `rss_demo` | DEMO-01 | demo |\n| `rss_other` | OTHER-01 | other |";
-        assert!(
-            dylint_inventory_findings("green", inventory, rows, "")?.is_empty(),
-            "machine + README inventories must pass"
-        );
-
-        for (case, readme_inventory, readme_rows, bait) in [
-            ("missing", "`rss_demo`", rows, ""),
-            (
-                "orphan",
-                inventory,
-                "| `rss_demo` | DEMO-01 | demo |\n| `rss_other` | OTHER-01 | other |\n| `rss_orphan` | ORPHAN-01 | orphan |",
-                "",
-            ),
-            (
-                "duplicate",
-                "`rss_demo`、`rss_other`、`rss_other`",
-                rows,
-                "",
-            ),
-            (
-                "prose-bait",
-                "`rss_demo`",
-                rows,
-                "普通说明提到 `rss_other`，不得满足 inventory。",
-            ),
-        ] {
-            let findings = dylint_inventory_findings(case, readme_inventory, readme_rows, bait)?;
-            assert!(
-                findings
-                    .iter()
-                    .any(|finding| finding.rule == Rule::DylintRegistryDrift),
-                "{case} must fail the exact four-inventory gate: {findings:?}"
-            );
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn docs_only_invariant_is_finding() -> Result<()> {
-        let root = unique_tmp("archrules-docs-only");
-        write(
-            &root.join("docs/rules/demo.md"),
-            "INVARIANT: DOCS-ONLY-01\n",
-        )?;
-        let mut index = Index::default();
-        check_docs_only(&root, &mut index)?;
-        assert_eq!(index.findings[0].rule, Rule::DocsOnlyInvariant);
-        fs::remove_dir_all(root)?;
-        Ok(())
-    }
-
-    #[test]
-    fn ordinary_source_invariant_does_not_satisfy_doc_reference() -> Result<()> {
-        let root = unique_tmp("archrules-docs-primary-only");
-        write(
-            &root.join("crates/demo/src/lib.rs"),
-            "//! INVARIANT: ORDINARY-SOURCE-01\n",
-        )?;
-        write(
-            &root.join("docs/rules/demo.md"),
-            "INVARIANT: ORDINARY-SOURCE-01\n",
-        )?;
-        let mut index = Index::default();
-        check_docs_only(&root, &mut index)?;
-        assert_eq!(index.findings[0].rule, Rule::DocsOnlyInvariant);
         fs::remove_dir_all(root)?;
         Ok(())
     }
@@ -4346,7 +4051,6 @@ members = ["rss_demo"]
         )?;
         write(&root.join("lints/rss_demo/ui/main.rs"), "fn main() {}\n")?;
         write(&root.join("lints/rss_demo/ui/main.stderr"), "error\n")?;
-        write_exact_dylint_human_inventories(&root, &["rss_demo"])?;
         let index = build_index(&root)?;
         assert!(index.findings.is_empty(), "{:?}", index.findings);
         for id in [
