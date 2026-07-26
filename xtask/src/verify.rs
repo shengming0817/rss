@@ -5,7 +5,8 @@
 //! 聚合按 fail-fast 执行：no-compile Meta 证明优先，随后是 workspace/feature 编译、lint、默认与
 //! feature-gated 行为测试、供应链检查和注册 lint。
 //!
-//! `--fast` 的 inner typed plan 只跑标记为 `CompileKind::NoCompile` 的 gate（fmt + meta + deny），
+//! `--fast` 的 inner typed plan 只跑不依赖 Docker、额外 Cargo 工具或 crate 编译的轻量
+//! `CompileKind::NoCompile` gate（fmt + repository meta），
 //! 供快速迭代；冷缓存或 xtask 变更时，外层 Cargo 仍会构建 xtask 启动器。`--allow-missing-tools`
 //! 在缺外部工具时显式宽限（默认 fail-closed）。
 //!
@@ -27,7 +28,6 @@
 //!
 //! INVARIANT: VERIFY-AGGREGATE-01 { level = "Medium", exec = "verify", source = "code" }—— 任一门步失败 ⇒ verify/ci/audit 非零退出（聚合 fail-fast，不吞错）。
 //! INVARIANT: VERIFY-TOOL-GATE-01 { level = "Medium", exec = "verify", source = "code" }—— 缺外部工具默认 fail-closed；豁免仅经显式 `--allow-missing-tools`。
-//! INVARIANT: ASSEMBLY-LOCK-FAST-GATE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "assembly_lock_fast_gate_is_typed_and_fail_closed", anti_vacuity = "lock::tests::shared_child_vectors_freeze_bytes_universes_and_final_fingerprint" }—— `verify --fast` executes the complete AssemblyLock protocol crate test carrier.
 //! INVARIANT: ASSEMBLY-PROVIDERS-VERIFY-GATE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "assembly_provider_codegen_gate_is_typed_once_and_ordered_in_all_aggregate_plans", anti_vacuity = "assembly_codegen::tests::assembly_provider_codegen_generated_provider_catalogs_are_non_empty_and_check_clean" }—— provider catalog drift is an independent typed no-compile gate exactly once between modules drift and AssemblyLock in every aggregate plan.
 //! INVARIANT: RUNTIME-DYLINT-UI-GATE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "runtime_dylint_ui_gate_is_typed_closed_and_in_aggregate_plans", anti_vacuity = "runtime_dylint_ui_gate_is_typed_closed_and_in_aggregate_plans" }—— the three runtime Dylint UI carriers run as one typed `cargo test --locked` gate from the fixed `lints` workspace in full verify, compatibility CI, and core prerequisites, while fast remains no-compile.
 //! INVARIANT: L2-ASSURANCE-VERIFY-GATE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "l2_assurance_gate_is_typed_once_and_ordered_in_all_aggregate_plans", anti_vacuity = "l2_assurance::tests::workspace_inventory_is_exact_and_deterministic" }—— L2 assurance drift check is a typed, in-process, no-compile gate present exactly once immediately after codegen in every aggregate plan.
@@ -72,8 +72,8 @@ use std::process::Stdio;
 /// verify 选项。
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct VerifyOpts {
-    /// Inner typed plan 只跑 `CompileKind::NoCompile` gate（fmt + meta + deny），跳过
-    /// build/clippy/nextest/dylint；外层 Cargo 仍可能构建 xtask 启动器。
+    /// Inner typed plan 只跑不依赖 Docker、额外 Cargo 工具或 crate 编译的轻量
+    /// `CompileKind::NoCompile` gate；外层 Cargo 仍可能构建 xtask 启动器。
     fast: bool,
     /// 缺外部工具时显式宽限（默认 fail-closed，唯一门不建议）。
     allow_missing_tools: bool,
@@ -1090,12 +1090,18 @@ pub(crate) fn run_nextest_replay(
         .run(&root, INTEGRATION_ENV)
 }
 
-/// 纯函数：`--fast` 仅为 AssemblyLock 协议保留一个有界 compile 例外。
+/// 纯函数：`--fast` 只保留轻量的 repository meta / Cargo builtin metadata gate。
 fn verify_plan(opts: &VerifyOpts) -> Vec<Step> {
     let plan = plan_for(PlanTarget::Verify);
     if opts.fast {
         plan.into_iter()
-            .filter(|step| !step.needs_compile() || step.id == GateId::AssemblyLockProtocolTests)
+            .filter(|step| {
+                !step.needs_compile()
+                    && !matches!(
+                        step.id,
+                        GateId::PromtoolRules | GateId::Deny | GateId::AssemblyLockProtocolTests
+                    )
+            })
             .collect()
     } else {
         plan
@@ -2591,44 +2597,35 @@ mod tests {
         Ok(())
     }
 
-    fn validate_assembly_lock_fast_gate(plan: &[Step]) -> anyhow::Result<()> {
-        let gates = plan
+    #[test]
+    fn assembly_lock_protocol_tests_remain_full_verify_only() {
+        let fast = verify_plan(&opts(true, false));
+        assert!(
+            !fast
+                .iter()
+                .any(|step| step.id == GateId::AssemblyLockProtocolTests)
+        );
+
+        let full = verify_plan(&opts(false, false));
+        let gates = full
             .iter()
             .filter(|step| step.id == GateId::AssemblyLockProtocolTests)
             .collect::<Vec<_>>();
-        anyhow::ensure!(gates.len() == 1, "expected exactly one AssemblyLock gate");
+        assert_eq!(gates.len(), 1);
         let gate = gates[0];
-        anyhow::ensure!(gate.needs_compile(), "gate must retain compile semantics");
-        anyhow::ensure!(matches!(gate.kind, StepKind::Cargo));
-        anyhow::ensure!(gate.args == ["test", "-p", "assembly-schema"]);
-        anyhow::ensure!(gate.id.spec().compile_kind() == CompileKind::Workspace);
-        anyhow::ensure!(matches!(
+        assert!(gate.needs_compile());
+        assert!(matches!(gate.kind, StepKind::Cargo));
+        assert_eq!(gate.args, ["test", "-p", "assembly-schema"]);
+        assert_eq!(gate.id.spec().compile_kind(), CompileKind::Workspace);
+        assert!(matches!(
             gate.id.spec().tool(),
             ToolRequirement::CargoBuiltin(crate::cmd::CargoSubcommand::Test)
         ));
-        Ok(())
     }
 
+    /// `--fast` 只保留轻量 no-compile 步，不接 Docker、额外 Cargo 工具或 crate 测试。
     #[test]
-    fn assembly_lock_fast_gate_is_typed_and_fail_closed() -> anyhow::Result<()> {
-        let plan = verify_plan(&opts(true, false));
-        validate_assembly_lock_fast_gate(&plan)?;
-        let mut omitted = plan.clone();
-        omitted.retain(|step| step.id != GateId::AssemblyLockProtocolTests);
-        assert!(validate_assembly_lock_fast_gate(&omitted).is_err());
-        let mut weakened = plan;
-        weakened
-            .iter_mut()
-            .find(|step| step.id == GateId::AssemblyLockProtocolTests)
-            .context("AssemblyLock gate")?
-            .args = &["check", "-p", "assembly-schema"];
-        assert!(validate_assembly_lock_fast_gate(&weakened).is_err());
-        Ok(())
-    }
-
-    /// `--fast` 保留 no-compile 步与唯一 AssemblyLock 协议测试例外。
-    #[test]
-    fn fast_plan_keeps_fmt_meta_deny_drops_compile() {
+    fn fast_plan_keeps_lightweight_meta_and_drops_external_or_compile_gates() {
         let plan = verify_plan(&opts(true, false));
         assert_eq!(
             labels(&plan),
@@ -2645,7 +2642,6 @@ mod tests {
                 "shipped-feature-guard",
                 "wsdeps-drift",
                 "doc-contracts",
-                "promtool-rules",
                 "outbox-same-id-guard",
                 "consistency-fixtures",
                 "event-transport-guard",
@@ -2673,17 +2669,23 @@ mod tests {
                 "command-symmetry",
                 "ci-entry-guard",
                 "reconcile-outbox-command-guard",
-                "defer-gate",
-                "assembly-lock-protocol-tests",
-                "deny"
+                "defer-gate"
             ]
         );
-        for dropped in ["build", "clippy", "default-test-runner", "dylint"] {
+        for dropped in [
+            "build",
+            "clippy",
+            "default-test-runner",
+            "dylint",
+            "promtool-rules",
+            "assembly-lock-protocol-tests",
+            "deny",
+        ] {
             assert!(!labels(&plan).contains(&dropped), "fast 不应含 {dropped}");
         }
     }
 
-    /// meta checks（contract validate / assembly validate / contract breaking / layer-deps / wsdeps-drift /
+    /// 两种模式共享的轻量 repository meta checks（contract validate / assembly validate / contract breaking / layer-deps / wsdeps-drift /
     /// doc-contracts / consistency-fixtures / event-transport-guard / inbox-cutover-guard /
     /// runtime-baseline / runtime-root-guard / runtime-env-guard / runtime-deployment-spec / runtime-deps-guard / archrules / codegen / L2 assurance / pdp-allow-guard / contract-binding-guard /
     /// schema-rls / setlocal-funnel / pg-tenant-tx-guard / repo-scope-guard / tenancy-closeout / migrations-serial / command-symmetry /
@@ -2694,7 +2696,11 @@ mod tests {
             let plan = verify_plan(&opts(fast, false));
             let internals: Vec<_> = plan
                 .iter()
-                .filter(|s| matches!(s.kind, StepKind::Internal(_)) && !s.needs_compile())
+                .filter(|s| {
+                    matches!(s.kind, StepKind::Internal(_))
+                        && !s.needs_compile()
+                        && s.id != GateId::PromtoolRules
+                })
                 .map(|s| s.label())
                 .collect();
             assert_eq!(
@@ -2711,7 +2717,6 @@ mod tests {
                     "shipped-feature-guard",
                     "wsdeps-drift",
                     "doc-contracts",
-                    "promtool-rules",
                     "outbox-same-id-guard",
                     "consistency-fixtures",
                     "event-transport-guard",

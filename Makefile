@@ -5,7 +5,7 @@
 # `cargo xtask` 使用同一 gate plan 与 target-dir 默认值，但不具备等价的外层 Cargo bootstrap。
 #
 #   make verify       本地 stable-only 快门：fmt + meta + build + clippy + nextest + deny + dylint。
-#   make verify-fast  inner typed plan 的 NoCompile 子集（仅 fmt + meta + deny）；冷缓存或 xtask
+#   make verify-fast  inner typed plan 的轻量 NoCompile 子集（fmt + repository meta）；冷缓存或 xtask
 #                     变更时，外层 Cargo 仍会构建 xtask 启动器。
 #   make ci           按 CI_BASE...HEAD 的已提交差异执行 10 分钟有界 typed preflight；默认
 #                     CI_BASE=origin/develop。未知路径本地忽略并留痕，重型门延后到 nightly/develop；
