@@ -4604,6 +4604,107 @@ pub const generated::http::settings_v6::PRODUCER: vocab::http::HttpProducerBindi
 pub const generated::http::settings_v6::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
 pub const generated::http::settings_v6::ROUTE: vocab::http::HttpRouteBinding<generated::http::settings_v6::RouteMarker, vocab::http::OutboxFact>
 pub const generated::http::settings_v6::SPEC: generated::http::HttpSpec
+pub mod generated::http::settings_v7
+pub mod generated::http::settings_v7::error
+pub struct generated::http::settings_v7::error::ConversionError(_)
+impl core::convert::From<&'static str> for generated::http::settings_v7::error::ConversionError
+pub fn generated::http::settings_v7::error::ConversionError::from(&'static str) -> Self
+impl core::convert::From<alloc::string::String> for generated::http::settings_v7::error::ConversionError
+pub fn generated::http::settings_v7::error::ConversionError::from(alloc::string::String) -> Self
+impl core::error::Error for generated::http::settings_v7::error::ConversionError
+impl core::fmt::Debug for generated::http::settings_v7::error::ConversionError
+pub fn generated::http::settings_v7::error::ConversionError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::result::Result<(), core::fmt::Error>
+impl core::fmt::Display for generated::http::settings_v7::error::ConversionError
+pub fn generated::http::settings_v7::error::ConversionError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::result::Result<(), core::fmt::Error>
+impl core::marker::Freeze for generated::http::settings_v7::error::ConversionError
+impl core::marker::Send for generated::http::settings_v7::error::ConversionError
+impl core::marker::Sync for generated::http::settings_v7::error::ConversionError
+impl core::marker::Unpin for generated::http::settings_v7::error::ConversionError
+impl core::marker::UnsafeUnpin for generated::http::settings_v7::error::ConversionError
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::settings_v7::error::ConversionError
+impl core::panic::unwind_safe::UnwindSafe for generated::http::settings_v7::error::ConversionError
+pub enum generated::http::settings_v7::LocalOnlyConformanceMarker
+impl core::marker::Freeze for generated::http::settings_v7::LocalOnlyConformanceMarker
+impl core::marker::Send for generated::http::settings_v7::LocalOnlyConformanceMarker
+impl core::marker::Sync for generated::http::settings_v7::LocalOnlyConformanceMarker
+impl core::marker::Unpin for generated::http::settings_v7::LocalOnlyConformanceMarker
+impl core::marker::UnsafeUnpin for generated::http::settings_v7::LocalOnlyConformanceMarker
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::settings_v7::LocalOnlyConformanceMarker
+impl core::panic::unwind_safe::UnwindSafe for generated::http::settings_v7::LocalOnlyConformanceMarker
+pub enum generated::http::settings_v7::RouteMarker
+impl core::marker::Freeze for generated::http::settings_v7::RouteMarker
+impl core::marker::Send for generated::http::settings_v7::RouteMarker
+impl core::marker::Sync for generated::http::settings_v7::RouteMarker
+impl core::marker::Unpin for generated::http::settings_v7::RouteMarker
+impl core::marker::UnsafeUnpin for generated::http::settings_v7::RouteMarker
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::settings_v7::RouteMarker
+impl core::panic::unwind_safe::UnwindSafe for generated::http::settings_v7::RouteMarker
+pub struct generated::http::settings_v7::SettingsSecretResolveData
+pub generated::http::settings_v7::SettingsSecretResolveData::material_base64: alloc::string::String
+impl core::clone::Clone for generated::http::settings_v7::SettingsSecretResolveData
+pub fn generated::http::settings_v7::SettingsSecretResolveData::clone(&self) -> generated::http::settings_v7::SettingsSecretResolveData
+impl core::fmt::Debug for generated::http::settings_v7::SettingsSecretResolveData
+pub fn generated::http::settings_v7::SettingsSecretResolveData::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl secure::redaction::Redact for generated::http::settings_v7::SettingsSecretResolveData
+pub fn generated::http::settings_v7::SettingsSecretResolveData::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
+impl serde_core::ser::Serialize for generated::http::settings_v7::SettingsSecretResolveData
+pub fn generated::http::settings_v7::SettingsSecretResolveData::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::http::settings_v7::SettingsSecretResolveData
+pub fn generated::http::settings_v7::SettingsSecretResolveData::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::http::settings_v7::SettingsSecretResolveData
+impl core::marker::Send for generated::http::settings_v7::SettingsSecretResolveData
+impl core::marker::Sync for generated::http::settings_v7::SettingsSecretResolveData
+impl core::marker::Unpin for generated::http::settings_v7::SettingsSecretResolveData
+impl core::marker::UnsafeUnpin for generated::http::settings_v7::SettingsSecretResolveData
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::settings_v7::SettingsSecretResolveData
+impl core::panic::unwind_safe::UnwindSafe for generated::http::settings_v7::SettingsSecretResolveData
+pub struct generated::http::settings_v7::SettingsSecretResolveRequest
+impl core::clone::Clone for generated::http::settings_v7::SettingsSecretResolveRequest
+pub fn generated::http::settings_v7::SettingsSecretResolveRequest::clone(&self) -> generated::http::settings_v7::SettingsSecretResolveRequest
+impl core::default::Default for generated::http::settings_v7::SettingsSecretResolveRequest
+pub fn generated::http::settings_v7::SettingsSecretResolveRequest::default() -> Self
+impl core::fmt::Debug for generated::http::settings_v7::SettingsSecretResolveRequest
+pub fn generated::http::settings_v7::SettingsSecretResolveRequest::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl secure::redaction::Redact for generated::http::settings_v7::SettingsSecretResolveRequest
+pub fn generated::http::settings_v7::SettingsSecretResolveRequest::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
+impl serde_core::ser::Serialize for generated::http::settings_v7::SettingsSecretResolveRequest
+pub fn generated::http::settings_v7::SettingsSecretResolveRequest::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::http::settings_v7::SettingsSecretResolveRequest
+pub fn generated::http::settings_v7::SettingsSecretResolveRequest::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::http::settings_v7::SettingsSecretResolveRequest
+impl core::marker::Send for generated::http::settings_v7::SettingsSecretResolveRequest
+impl core::marker::Sync for generated::http::settings_v7::SettingsSecretResolveRequest
+impl core::marker::Unpin for generated::http::settings_v7::SettingsSecretResolveRequest
+impl core::marker::UnsafeUnpin for generated::http::settings_v7::SettingsSecretResolveRequest
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::settings_v7::SettingsSecretResolveRequest
+impl core::panic::unwind_safe::UnwindSafe for generated::http::settings_v7::SettingsSecretResolveRequest
+pub struct generated::http::settings_v7::SettingsSecretResolveResponse
+pub generated::http::settings_v7::SettingsSecretResolveResponse::data: generated::http::settings_v7::SettingsSecretResolveData
+impl core::clone::Clone for generated::http::settings_v7::SettingsSecretResolveResponse
+pub fn generated::http::settings_v7::SettingsSecretResolveResponse::clone(&self) -> generated::http::settings_v7::SettingsSecretResolveResponse
+impl core::fmt::Debug for generated::http::settings_v7::SettingsSecretResolveResponse
+pub fn generated::http::settings_v7::SettingsSecretResolveResponse::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl secure::redaction::Redact for generated::http::settings_v7::SettingsSecretResolveResponse
+pub fn generated::http::settings_v7::SettingsSecretResolveResponse::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
+impl serde_core::ser::Serialize for generated::http::settings_v7::SettingsSecretResolveResponse
+pub fn generated::http::settings_v7::SettingsSecretResolveResponse::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::http::settings_v7::SettingsSecretResolveResponse
+pub fn generated::http::settings_v7::SettingsSecretResolveResponse::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::http::settings_v7::SettingsSecretResolveResponse
+impl core::marker::Send for generated::http::settings_v7::SettingsSecretResolveResponse
+impl core::marker::Sync for generated::http::settings_v7::SettingsSecretResolveResponse
+impl core::marker::Unpin for generated::http::settings_v7::SettingsSecretResolveResponse
+impl core::marker::UnsafeUnpin for generated::http::settings_v7::SettingsSecretResolveResponse
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::settings_v7::SettingsSecretResolveResponse
+impl core::panic::unwind_safe::UnwindSafe for generated::http::settings_v7::SettingsSecretResolveResponse
+pub const generated::http::settings_v7::CONTRACT: vocab::contract::binding::ContractBinding
+pub const generated::http::settings_v7::CONTRACT_ID: &str
+pub const generated::http::settings_v7::EFFECTS: &[vocab::http::HttpEffectKind]
+pub const generated::http::settings_v7::EFFECT_PROFILE: vocab::http::HttpEffectProfile
+pub const generated::http::settings_v7::PATH: &str
+pub const generated::http::settings_v7::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
+pub const generated::http::settings_v7::ROUTE: vocab::http::HttpRouteBinding<generated::http::settings_v7::RouteMarker, vocab::http::LocalOnly>
+pub const generated::http::settings_v7::SPEC: generated::http::HttpSpec
 pub enum generated::http::HttpHeaderMode
 pub generated::http::HttpHeaderMode::PopulateOnly
 pub generated::http::HttpHeaderMode::ServiceTokenTenantBound

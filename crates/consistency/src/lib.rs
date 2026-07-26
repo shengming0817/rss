@@ -56,12 +56,12 @@ pub use localtx::{
     LocalTxExecutionBudgetError, LocalTxFinalStatus, LocalTxModel, LocalTxRetry,
 };
 pub use outbox::{
-    BacklogMetricSample, BacklogSample, Disposition, EventEntry, EventTopic, EventTopicError,
-    HandleResult, OutboxAppendOutcome, OutboxBacklog, OutboxContractId, OutboxContractIdError,
-    OutboxFactConflict, OutboxFactFingerprint, OutboxFactIdentity, OutboxMetricSubject,
-    OutboxPayload, OutboxRelay, PartitionKey, PartitionKeyError, PermanentError,
-    PermanentErrorKind, RetentionSweeper, StoredOutboxEntry, StoredOutboxEntryError,
-    StoredOutboxTopic, is_canonical_topic_name,
+    BacklogMetricSample, BacklogObservation, BacklogSample, Disposition, EventEntry, EventTopic,
+    EventTopicError, HandleResult, OutboxAppendOutcome, OutboxBacklog, OutboxContractId,
+    OutboxContractIdError, OutboxFactConflict, OutboxFactFingerprint, OutboxFactIdentity,
+    OutboxMetricSubject, OutboxPayload, OutboxRelay, PartitionKey, PartitionKeyError,
+    PermanentError, PermanentErrorKind, RetentionSweeper, StoredOutboxEntry,
+    StoredOutboxEntryError, StoredOutboxTopic, is_canonical_topic_name,
 };
 pub use projection::{
     Lsn, PartitionSerialDelivery, ProjectionApplyOutcome, ProjectionBatchLimit,

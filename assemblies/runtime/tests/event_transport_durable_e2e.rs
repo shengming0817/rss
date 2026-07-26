@@ -356,6 +356,33 @@ fn pg_owner_connect_options(p: &testkit::PgConnParams) -> PgConnectOptions {
         .password(&p.password)
 }
 
+async fn seed_durable_login_account(pool: &sqlx::PgPool) -> Result<()> {
+    let password = secure::PasswordHash::for_test(secure::RawPassword::new(PASSWORD.to_owned()))?;
+    let mut tx = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO credentials \
+         (tenant_id, user_id, login, password_hash, version) \
+         VALUES ($1::uuid, $2::uuid, $3, $4, 1)",
+    )
+    .bind(CANON_TENANT)
+    .bind(CANON_USER)
+    .bind(LOGIN_USERNAME)
+    .bind(password.as_str())
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "INSERT INTO account_security_states \
+         (tenant_id, user_id, status, authn_epoch, version, status_changed_at, updated_at) \
+         VALUES ($1::uuid, $2::uuid, 'active', 0, 1, now(), now())",
+    )
+    .bind(CANON_TENANT)
+    .bind(CANON_USER)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
 async fn inbox_done_count(pool: &sqlx::PgPool, event_id: &str, group: &str) -> Result<i64> {
     let (count,): (i64,) = sqlx::query_as(
         "SELECT count(*) FROM inbox_receipts WHERE event_id = $1 AND consumer_group = $2 AND status = 'done'",
@@ -544,6 +571,7 @@ async fn event_transport_durable_e2e() -> Result<()> {
         .max_connections(1)
         .connect_with(pg_owner_connect_options(pgfix.params()))
         .await?;
+    seed_durable_login_account(&assertion_pool).await?;
     let id = pg.for_domain::<caps::Identity>();
     let settings_pg = pg.for_domain::<caps::Settings>();
 

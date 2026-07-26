@@ -221,8 +221,8 @@ fn make_service(deps: &PgRuntimeDeps, resolver: InlineMemResolver) -> SecretServ
         .settings_bundle(Arc::new(FixedClock), unused_config_protections())
         .into_parts();
     SecretService::with_postgres(
-        secrets,
-        secret_writer,
+        secrets.into(),
+        secret_writer.into(),
         DynSecretResolver::new_box(resolver),
         Box::new(FixedClock),
     )

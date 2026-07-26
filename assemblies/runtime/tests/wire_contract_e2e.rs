@@ -242,8 +242,8 @@ async fn wire_settings_integrates_pg_and_vault_bundle_single_source_resolver() -
     assert!(bindings.is_empty(), "compose 后 binding 必须排空");
     assert_eq!(
         result.probes.len(),
-        2,
-        "settings 暴露 configs_ready + keyprovider_ready"
+        3,
+        "settings 暴露 configs_ready + keyprovider_ready + vault_secret_resolver_ready"
     );
     assert_eq!(
         result.probes[0].0.as_str(),
@@ -255,6 +255,11 @@ async fn wire_settings_integrates_pg_and_vault_bundle_single_source_resolver() -
         KEYPROVIDER_READY_PROBE_NAME,
         "探针名 = keyprovider_ready"
     );
+    assert_eq!(
+        result.probes[2].0.as_str(),
+        settings_composition::SECRET_RESOLVER_READY_PROBE_NAME,
+        "探针名 = vault_secret_resolver_ready"
+    );
     // settings wire_X 产物本身无 detached 资源；vault guard 由 runtime-local ProviderOutput 汇入
     // provider_module，再经 assembly 的 DomainModuleResult::merge 单源排入。
     assert!(
@@ -263,8 +268,8 @@ async fn wire_settings_integrates_pg_and_vault_bundle_single_source_resolver() -
     );
     assert_eq!(
         result.workers.len(),
-        1,
-        "settings 产出 keyprovider readiness worker"
+        2,
+        "settings 产出 keyprovider 与 secret resolver readiness workers"
     );
 
     // #1676 单源装配：vault bundle 的 diport-only runtime_resources 由 runtime-local

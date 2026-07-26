@@ -47,23 +47,43 @@ use rustc_span::Span;
 
 /// 仅这些 crate 可调用认证证据 / 审计 subject funnel——单一 greppable 真源，扩项须治理评审。
 /// 组合根（assembly / bin）的验签桥在凭据校验通过后构造 `Authenticated` 并经外层 `.layer()` 注入，是唯一合法构造点。
-/// 当前生产 runtime 验签桥构造 access/mTLS 与 service-token evidence；allowlist 精确覆盖
-/// `auth_bridge` 与 `operator::{projection,dlq,settings}` 的 nested def-path。
+/// 当前生产 runtime 与 identityaudit 验签桥构造 access/mTLS 与 service-token evidence；
+/// allowlist 精确覆盖列明 `auth_bridge` 与 `operator::{projection,dlq,settings}` nested def-path。
 /// assemblies/runtime → package name "runtime"（#1309 单一组合根；薄 bin bins/server、bins/rss 已移出）。
 /// 定义 crate `httpserve` 不入 allowlist：其生产代码不构造 `Authenticated`（仅 `#[cfg(test)]` 调，不被扫）。
 const ALLOWED_AUTHENTICATED_MINT_FUNCTIONS: &[(&str, &str, &str)] = &[
     ("runtime", "allow_evidence", "auth_bridge::allow_evidence"),
     ("runtime", "mtls_evidence", "auth_bridge::mtls_evidence"),
     (
+        "identityaudit",
+        "allow_evidence",
+        "auth_bridge::allow_evidence",
+    ),
+    (
         "settingsonly",
         "federated_evidence",
         "auth_bridge::federated_evidence",
     ),
 ];
-const ALLOWED_CURRENT_GRANT_MINT_FUNCTION: (&str, &str) =
-    ("current_auth_grant", "auth_bridge::current_auth_grant");
+const ALLOWED_CURRENT_GRANT_MINT_FUNCTIONS: &[(&str, &str, &str)] = &[
+    (
+        "runtime",
+        "current_auth_grant",
+        "auth_bridge::current_auth_grant",
+    ),
+    (
+        "identityaudit",
+        "current_auth_grant",
+        "auth_bridge::current_auth_grant",
+    ),
+];
 const ALLOWED_PRINCIPAL_ACCESSOR_FUNCTIONS: &[(&str, &str, &str)] = &[
     ("runtime", "allow_evidence", "auth_bridge::allow_evidence"),
+    (
+        "identityaudit",
+        "allow_evidence",
+        "auth_bridge::allow_evidence",
+    ),
     (
         "settingsonly",
         "federated_evidence",
@@ -158,7 +178,7 @@ impl<'tcx> LateLintPass<'tcx> for RssAuthenticatedCallsite {
                 expr.hir_id,
                 expr.span,
                 "Authenticated 证据仅组合根（assembly / bin crate）可构造：profile-specific constructor 不得在此 crate 调用",
-                "仅在 runtime `auth_bridge::{allow_evidence,mtls_evidence}` 的精确验签桥函数中构造 Authenticated；其它 runtime 代码同样不得 mint evidence",
+                authenticated_mint_help(cx),
             );
         }
         if is_current_grant_mint_did(cx, did)
@@ -169,7 +189,7 @@ impl<'tcx> LateLintPass<'tcx> for RssAuthenticatedCallsite {
                 expr.hir_id,
                 expr.span,
                 "CurrentAuthGrant 仅可在 runtime 消费 durable validator proof 后构造",
-                "仅在 runtime `auth_bridge::current_auth_grant` 精确 wrapper 中消费 `ValidatedAuthGrant` 并 mint marker",
+                current_grant_mint_help(cx),
             );
         }
         if let Some(funnel) = authn_grant_issue_funnel(cx, did)
@@ -191,7 +211,7 @@ impl<'tcx> LateLintPass<'tcx> for RssAuthenticatedCallsite {
                 expr.hir_id,
                 expr.span,
                 "Principal 身份降维 accessor（`audit_subject` / `service_caller_domain`）仅组合根可调用",
-                "仅在列明的 runtime verification wrapper 中读取 Principal 身份；其它 runtime 代码同样不得把 verified Principal 降维为可转传值",
+                principal_accessor_help(cx),
             );
         }
         if let Some(funnel) = restricted_service_capability_funnel(cx, did)
@@ -205,6 +225,30 @@ impl<'tcx> LateLintPass<'tcx> for RssAuthenticatedCallsite {
                 funnel.help,
             );
         }
+    }
+}
+
+fn authenticated_mint_help(cx: &LateContext<'_>) -> &'static str {
+    if cx.tcx.crate_name(LOCAL_CRATE).as_str() == "identityaudit" {
+        "仅在 identityaudit `auth_bridge::allow_evidence` 精确 proof-consuming 验签桥中构造 RSS Authenticated evidence；其它位置不得 mint evidence"
+    } else {
+        "仅在 runtime `auth_bridge::{allow_evidence,mtls_evidence}` 的精确验签桥函数中构造 Authenticated；其它 runtime 代码同样不得 mint evidence"
+    }
+}
+
+fn current_grant_mint_help(cx: &LateContext<'_>) -> &'static str {
+    if cx.tcx.crate_name(LOCAL_CRATE).as_str() == "identityaudit" {
+        "仅在 identityaudit `auth_bridge::current_auth_grant` 精确 wrapper 中按值消费 `ValidatedAuthGrant` 并 mint marker"
+    } else {
+        "仅在 runtime `auth_bridge::current_auth_grant` 精确 wrapper 中消费 `ValidatedAuthGrant` 并 mint marker"
+    }
+}
+
+fn principal_accessor_help(cx: &LateContext<'_>) -> &'static str {
+    if cx.tcx.crate_name(LOCAL_CRATE).as_str() == "identityaudit" {
+        "仅在 identityaudit `auth_bridge::allow_evidence` proof-consuming wrapper 中读取 Principal 身份；其它位置不得降维 verified Principal"
+    } else {
+        "仅在列明的 runtime verification wrapper 中读取 Principal 身份；其它 runtime 代码同样不得把 verified Principal 降维为可转传值"
     }
 }
 
@@ -224,24 +268,53 @@ fn authenticated_mint_caller_is_allowed(cx: &LateContext<'_>, hir_id: HirId) -> 
     let parent = cx.tcx.hir_get_parent_item(hir_id).to_def_id();
     let item_name = cx.tcx.item_name(parent);
     let def_path = cx.tcx.def_path_str(parent);
-    ALLOWED_AUTHENTICATED_MINT_FUNCTIONS
-        .iter()
-        .any(|(expected_crate, expected_name, expected_path)| {
-            crate_name.as_str() == *expected_crate
+    ALLOWED_AUTHENTICATED_MINT_FUNCTIONS.iter().any(
+        |(expected_crate, expected_name, expected_path)| {
+            let exact_caller = crate_name.as_str() == *expected_crate
                 && item_name.as_str() == *expected_name
-                && is_exact_crate_path(&def_path, expected_crate, expected_path)
-        })
+                && is_exact_crate_path(&def_path, expected_crate, expected_path);
+            exact_caller
+                && (*expected_crate != "identityaudit"
+                    || caller_consumes_validated_auth_grant(cx, parent, false))
+        },
+    )
 }
 
 fn current_grant_mint_caller_is_allowed(cx: &LateContext<'_>, hir_id: HirId) -> bool {
-    if cx.tcx.crate_name(LOCAL_CRATE).as_str() != "runtime" {
-        return false;
-    }
+    let crate_name = cx.tcx.crate_name(LOCAL_CRATE);
     let parent = cx.tcx.hir_get_parent_item(hir_id).to_def_id();
     let item_name = cx.tcx.item_name(parent);
     let def_path = cx.tcx.def_path_str(parent);
-    item_name.as_str() == ALLOWED_CURRENT_GRANT_MINT_FUNCTION.0
-        && is_exact_runtime_path(&def_path, ALLOWED_CURRENT_GRANT_MINT_FUNCTION.1)
+    ALLOWED_CURRENT_GRANT_MINT_FUNCTIONS.iter().any(
+        |(expected_crate, expected_name, expected_path)| {
+            crate_name.as_str() == *expected_crate
+                && item_name.as_str() == *expected_name
+                && is_exact_crate_path(&def_path, expected_crate, expected_path)
+                && caller_consumes_validated_auth_grant(cx, parent, true)
+        },
+    )
+}
+
+/// The durable proof is deliberately move-only. The only mint wrappers must take the concrete
+/// proof by value, so deleting validation or weakening the wrapper to an optional/borrowed marker
+/// stops compiling or trips this lint instead of silently minting current-grant evidence.
+fn caller_consumes_validated_auth_grant(
+    cx: &LateContext<'_>,
+    caller: DefId,
+    require_single_input: bool,
+) -> bool {
+    if !matches!(cx.tcx.def_kind(caller), DefKind::Fn | DefKind::AssocFn) {
+        return false;
+    }
+    let signature = cx.tcx.fn_sig(caller).instantiate_identity().skip_binder();
+    let inputs = signature.inputs();
+    (!require_single_input || inputs.len() == 1)
+        && inputs.iter().any(|input| {
+            input.ty_adt_def().is_some_and(|adt| {
+                cx.tcx.crate_name(adt.did().krate).as_str() == "identity"
+                    && cx.tcx.item_name(adt.did()).as_str() == "ValidatedAuthGrant"
+            })
+        })
 }
 
 #[derive(Clone, Copy)]
@@ -471,13 +544,16 @@ fn principal_accessor_caller_is_allowed(cx: &LateContext<'_>, hir_id: HirId) -> 
     let parent = cx.tcx.hir_get_parent_item(hir_id).to_def_id();
     let item_name = cx.tcx.item_name(parent);
     let def_path = cx.tcx.def_path_str(parent);
-    ALLOWED_PRINCIPAL_ACCESSOR_FUNCTIONS
-        .iter()
-        .any(|(expected_crate, expected_name, expected_path)| {
-            crate_name.as_str() == *expected_crate
+    ALLOWED_PRINCIPAL_ACCESSOR_FUNCTIONS.iter().any(
+        |(expected_crate, expected_name, expected_path)| {
+            let exact_caller = crate_name.as_str() == *expected_crate
                 && item_name.as_str() == *expected_name
-                && is_exact_crate_path(&def_path, expected_crate, expected_path)
-        })
+                && is_exact_crate_path(&def_path, expected_crate, expected_path);
+            exact_caller
+                && (*expected_crate != "identityaudit"
+                    || caller_consumes_validated_auth_grant(cx, parent, false))
+        },
+    )
 }
 
 fn is_exact_runtime_path(actual: &str, expected_without_crate: &str) -> bool {
@@ -531,6 +607,11 @@ fn ui_runtime_exact_wrappers() {
 #[test]
 fn ui_settingsonly_exact_federated_wrapper() {
     dylint_testing::ui_test_example(env!("CARGO_PKG_NAME"), "settingsonly");
+}
+
+#[test]
+fn ui_identityaudit_exact_proof_consuming_wrapper() {
+    dylint_testing::ui_test_example(env!("CARGO_PKG_NAME"), "identityaudit");
 }
 
 #[test]

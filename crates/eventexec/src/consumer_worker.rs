@@ -30,8 +30,10 @@
 //! `ShutdownStack::register_detached` 注册（worker 自持 token、在 `shutdown` 中自取消，不依赖 stack 阶段 1
 //! 广播）。
 //!
-//! 关闭：[`ConsumerWorker::shutdown`] 经 `spawn_blocking` join 专用线程，线程 panic / `JoinError` 包成
-//! [`diport::ShutdownError`] 上抛（对齐 `relay.rs` F6，**不**静默吞 panic 误报关闭成功）。健康粒度（v1）：
+//! 关闭：[`ConsumerWorker::shutdown`] 取消 worker token 后等待专用线程发回的 completion；不在
+//! Tokio blocking pool 执行 `JoinHandle::join`，因此整体 shutdown 预算取消 future 后 runtime drop 仍然
+//! 有界。线程 panic 由 `catch_unwind` 收口成 [`diport::ShutdownError`]，**不**静默吞 panic 误报
+//! 关闭成功。健康粒度（v1）：
 //! 运行中 `Healthy`（[`WorkerHealth`] 初始态），loop 退出 → `mark_stopped`（Unhealthy，readyz 翻）；per-message
 //! settle/dlx 失败降级需 loop 内钩子 = 改 #1142 接缝，留 follow-up（现 `consumer_settle_total{outcome}` metric 已覆盖告警）。
 //!
@@ -81,11 +83,13 @@ const CONSUMER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(45);
 /// 受监督的事件消费后台 worker（adopt 专用 OS 线程的 [`std::thread::JoinHandle`]）。
 ///
 /// 与 [`crate::RelayWorker`]（adopt `tokio::task::JoinHandle`）对偶但**不共用** `adopt_worker!` 宏——
-/// 消费驱动 future `!Send`、跑在专用线程而非 `tokio::spawn`（见模块 rustdoc），关闭需跨线程 join。
+/// 消费驱动 future `!Send`、跑在专用线程而非 `tokio::spawn`（见模块 rustdoc），关闭等待跨线程
+/// completion channel。
 pub struct ConsumerWorker {
     name: String,
-    // shutdown 时 take 出 join（Mutex<Option<_>>：`shutdown(&self)` 需消费内部句柄；同 relay AdoptedWorker 范式）。
-    inner: Mutex<Option<std::thread::JoinHandle<()>>>,
+    // shutdown 时 take 出 completion；取消 shutdown future 只 drop receiver，不会遗留阻塞 runtime drop 的
+    // Tokio blocking task。
+    inner: Mutex<Option<tokio::sync::oneshot::Receiver<Result<(), ConsumerThreadPanicked>>>>,
     health: Arc<WorkerHealth>,
     token: CancellationToken,
 }
@@ -94,13 +98,13 @@ impl ConsumerWorker {
     /// adopt 已 spawn 的消费线程 + 同一 health + 同一 token（由 `spawn_*` 内部构造）。
     fn adopt(
         name: String,
-        handle: std::thread::JoinHandle<()>,
+        completion: tokio::sync::oneshot::Receiver<Result<(), ConsumerThreadPanicked>>,
         health: Arc<WorkerHealth>,
         token: CancellationToken,
     ) -> Self {
         Self {
             name,
-            inner: Mutex::new(Some(handle)),
+            inner: Mutex::new(Some(completion)),
             health,
             token,
         }
@@ -112,8 +116,8 @@ impl ConsumerWorker {
     }
 }
 
-/// worker 线程 panic：join 返回 `Err(Box<dyn Any>)` 时的 typed 错误（`Box<dyn Any>` 非 `Error`，无法直接
-/// 包进 [`diport::ShutdownError`]；用本 typed 占位，原始 panic payload 不经 wire/日志泄漏，PII-safe）。
+/// worker 线程 panic：`catch_unwind` 将 `Box<dyn Any>` 收口到本 typed 错误（原始 panic
+/// payload 不经 wire/日志泄漏，PII-safe）。
 #[derive(Debug, thiserror::Error)]
 #[error("consumer worker thread panicked")]
 struct ConsumerThreadPanicked;
@@ -136,17 +140,14 @@ impl diport::ManagedResource for ConsumerWorker {
     async fn shutdown(&self) -> Result<(), diport::ShutdownError> {
         // 取消本 worker token（subscriber 流据此终止）；幂等，二次 shutdown 安全。
         self.token.cancel();
-        // take 出线程句柄（释放 std Mutex guard 后再 await——不跨 await 持锁）。二次 shutdown → None → Ok。
-        let handle = self.inner.lock().unwrap_or_else(|e| e.into_inner()).take();
-        let Some(handle) = handle else {
+        // take 出 completion（释放 std Mutex guard 后再 await——不跨 await 持锁）。二次 shutdown → None → Ok。
+        let completion = self.inner.lock().unwrap_or_else(|e| e.into_inner()).take();
+        let Some(completion) = completion else {
             return Ok(());
         };
-        // !Send future 跑在专用线程，join 是阻塞调用——放 spawn_blocking 避免阻塞组合根 runtime。
-        match tokio::task::spawn_blocking(move || handle.join()).await {
-            // spawn_blocking 自身 JoinError（极罕见：blocking 任务被 abort）。
-            Err(join_err) => Err(diport::ShutdownError::new(join_err)),
-            // worker 线程 panic（thread::Result Err）→ typed 上抛（对齐 relay F6，不静默吞 panic 误报成功）。
-            Ok(Err(_panic)) => Err(diport::ShutdownError::new(ConsumerThreadPanicked)),
+        match completion.await {
+            Err(closed) => Err(diport::ShutdownError::new(closed)),
+            Ok(Err(panic)) => Err(diport::ShutdownError::new(panic)),
             Ok(Ok(())) => Ok(()),
         }
     }
@@ -215,31 +216,37 @@ fn spawn_consumer_thread<Fut, M>(
     worker_name: &str,
     health: Arc<WorkerHealth>,
     make_body: M,
-) -> std::thread::JoinHandle<()>
+) -> tokio::sync::oneshot::Receiver<Result<(), ConsumerThreadPanicked>>
 where
     M: FnOnce() -> Fut + Send + 'static,
     Fut: std::future::Future<Output = ()>,
 {
     let worker_name = worker_name.to_string();
+    let (completed, completion) = tokio::sync::oneshot::channel();
     std::thread::spawn(move || {
-        // 退出守卫：正常返回 / runtime 构建失败 / future panic 三条路径均经 Drop 统一 mark_stopped（F3）。
-        let _stopped = health.stopped_on_exit();
-        let rt = match tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-        {
-            Ok(rt) => rt,
-            Err(e) => {
-                tracing::error!(
-                    worker = worker_name,
-                    error = %e,
-                    "consumer: worker runtime build failed; worker unhealthy"
-                );
-                return;
-            }
-        };
-        rt.block_on(make_body());
-    })
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // 退出守卫：正常返回 / runtime 构建失败 / future panic 三条路径均经 Drop 统一 mark_stopped（F3）。
+            let _stopped = health.stopped_on_exit();
+            let rt = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(e) => {
+                    tracing::error!(
+                        worker = worker_name,
+                        error = %e,
+                        "consumer: worker runtime build failed; worker unhealthy"
+                    );
+                    return;
+                }
+            };
+            rt.block_on(make_body());
+        }))
+        .map_err(|_| ConsumerThreadPanicked);
+        let _ = completed.send(result);
+    });
+    completion
 }
 
 /// spawn at-most-once 消费 worker（Demo / MemBus 路径，acker=None、不触 broker settle）。
@@ -284,7 +291,7 @@ where
 /// `relay_loop` 自身在取消后亦调 `mark_stopped`（幂等：两次 store 同值，正常路径无害）。
 ///
 /// 返回的 [`ConsumerWorker`] 持同一 `health` + `token`，shutdown 取消 token → relay_loop break →
-/// 线程退出 → join → Ok（健康态翻 Unhealthy）。
+/// 线程退出 → completion → Ok（健康态翻 Unhealthy）。
 #[allow(clippy::too_many_arguments)]
 // reason: relay spawn 7 参数是最小必要集（name/store/config/clock/token/health/metrics 各自语义独立），
 // 同 spawn_consumer_ackable item-level carve-out（error-handling.md §Carve-out）。
@@ -428,7 +435,7 @@ mod tests {
 
     // ── fakes / stream factories ───────────────────────────────────────────────
 
-    /// 有限消息流（处理完即终止，确定性 join）。
+    /// 有限消息流（处理完即终止，确定性 completion）。
     fn finite_stream(msgs: &[(&str, &[u8])]) -> MessageStream {
         let msgs: Vec<Message> = msgs.iter().map(|(id, p)| message(id, p)).collect();
         Box::pin(futures::stream::iter(msgs))
@@ -656,7 +663,7 @@ mod tests {
     }
 
     #[allow(clippy::panic)]
-    // reason: 故意 panic，验证 worker 线程 panic 经 join 包成 ShutdownError 上抛（不静默吞，对齐 relay F6）。
+    // reason: 故意 panic，验证 worker 线程 panic 经 completion 包成 ShutdownError 上抛。
     fn handler_panic()
     -> impl Fn(Message) -> BoxFuture<'static, HandleResult> + Send + Sync + 'static {
         move |_msg| Box::pin(async move { panic!("consumer-worker-test-panic") })
@@ -787,7 +794,7 @@ mod tests {
         );
     }
 
-    /// 运行中 Healthy；shutdown 取消 token → take_until 终止流 → loop 退出 → join → Unhealthy。
+    /// 运行中 Healthy；shutdown 取消 token → take_until 终止流 → loop 退出 → completion → Unhealthy。
     #[tokio::test]
     async fn worker_healthy_while_running_unhealthy_after_cancel() {
         let token = CancellationToken::new();
@@ -830,7 +837,77 @@ mod tests {
         assert!(worker.shutdown().await.is_ok(), "二次 shutdown 幂等");
     }
 
-    /// worker 线程 panic（handler panic）→ shutdown join 返 Err（ShutdownError），不静默吞（relay F6 同款）；
+    /// Cancelling an in-flight shutdown must not leave a Tokio blocking join behind: otherwise
+    /// dropping the runtime waits forever for a handler that ignored cancellation.
+    #[test]
+    #[allow(clippy::panic)]
+    // reason: thread/runtime harness failures must fail this lifecycle regression test.
+    fn stalled_consumer_shutdown_does_not_block_runtime_drop() {
+        let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let release = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let thread_started = Arc::clone(&started);
+        let thread_release = Arc::clone(&release);
+        let (dropped_tx, dropped_rx) = std::sync::mpsc::channel();
+        let harness = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap_or_else(|error| panic!("test runtime: {error}"));
+            runtime.block_on(async move {
+                let handler = move |_message: Message| {
+                    let started = Arc::clone(&thread_started);
+                    let release = Arc::clone(&thread_release);
+                    Box::pin(async move {
+                        started.store(true, Ordering::Release);
+                        while !release.load(Ordering::Acquire) {
+                            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                        }
+                        HandleResult::ack()
+                    }) as BoxFuture<'static, HandleResult>
+                };
+                let worker = spawn_consumer(
+                    "event_consumer:audit:stalled".to_string(),
+                    finite_stream(&[("evt-stalled", b"a")]),
+                    FreshStore::new(),
+                    noop_dlx(),
+                    meta(),
+                    handler,
+                    lease_cfg(),
+                    CancellationToken::new(),
+                    health(),
+                );
+                tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                    while !started.load(Ordering::Acquire) {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .unwrap_or_else(|error| panic!("handler did not start: {error}"));
+                assert!(
+                    tokio::time::timeout(std::time::Duration::from_millis(20), worker.shutdown(),)
+                        .await
+                        .is_err(),
+                    "stalled handler must exercise cancelled shutdown"
+                );
+            });
+            drop(runtime);
+            let _ = dropped_tx.send(());
+        });
+
+        let dropped_without_release = dropped_rx
+            .recv_timeout(std::time::Duration::from_millis(200))
+            .is_ok();
+        release.store(true, Ordering::Release);
+        harness
+            .join()
+            .unwrap_or_else(|_| panic!("runtime-drop harness panicked"));
+        assert!(
+            dropped_without_release,
+            "runtime drop waited for spawn_blocking(thread.join()) after shutdown cancellation"
+        );
+    }
+
+    /// worker 线程 panic（handler panic）→ shutdown completion 返 Err（ShutdownError），不静默吞；
     /// 且 panic unwind 仍经 [`crate::WorkerStoppedGuard`] 守卫标 Unhealthy（F3：原 `mark_stopped` 在 `block_on`
     /// 后，被 panic 跳过 → readyz 误报 Healthy；守卫修复后此断言成立）。
     #[tokio::test]
@@ -848,7 +925,7 @@ mod tests {
         );
         assert!(
             worker.shutdown().await.is_err(),
-            "worker 线程 panic 须经 join 上抛 ShutdownError"
+            "worker 线程 panic 须经 completion 上抛 ShutdownError"
         );
         assert_eq!(
             worker.health().status(),
@@ -957,6 +1034,14 @@ mod tests {
         subject: consistency::OutboxMetricSubject,
     }
 
+    struct StalledRelayStore {
+        domain: vocab::DomainName,
+        claimed: std::sync::atomic::AtomicBool,
+        started: Arc<std::sync::atomic::AtomicBool>,
+        release: Arc<std::sync::atomic::AtomicBool>,
+        subject: consistency::OutboxMetricSubject,
+    }
+
     impl consistency::OutboxRelay for NoopRelayStore {
         type Claim = NoopRelayClaim;
 
@@ -979,6 +1064,41 @@ mod tests {
             _entry: Self::Claim,
         ) -> Result<consistency::outbox::Disposition, consistency::error::EngineError> {
             Ok(consistency::outbox::Disposition::Ack)
+        }
+    }
+
+    impl consistency::OutboxRelay for StalledRelayStore {
+        type Claim = NoopRelayClaim;
+
+        fn claim_subject(claim: &Self::Claim) -> &consistency::OutboxMetricSubject {
+            &claim.subject
+        }
+
+        fn claim_domain(&self) -> &vocab::DomainName {
+            &self.domain
+        }
+
+        async fn claim_batch(
+            &self,
+            _limit: usize,
+        ) -> Result<Vec<Self::Claim>, consistency::error::EngineError> {
+            if self.claimed.swap(true, Ordering::AcqRel) {
+                return Ok(Vec::new());
+            }
+            Ok(vec![NoopRelayClaim {
+                subject: self.subject.clone(),
+            }])
+        }
+
+        async fn relay(
+            &self,
+            _entry: Self::Claim,
+        ) -> Result<consistency::Disposition, consistency::error::EngineError> {
+            self.started.store(true, Ordering::Release);
+            while !self.release.load(Ordering::Acquire) {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+            Ok(consistency::Disposition::Ack)
         }
     }
 
@@ -1047,7 +1167,7 @@ mod tests {
             "spawn_relay worker must be Healthy while running"
         );
 
-        // shutdown → Ok（cancel → relay_loop break → 线程退出 → join）。
+        // shutdown → Ok（cancel → relay_loop break → 线程退出 → completion）。
         token.cancel();
         assert!(
             worker.shutdown().await.is_ok(),
@@ -1059,6 +1179,74 @@ mod tests {
             worker.health().status(),
             primitives::healthz::HealthStatus::Unhealthy,
             "relay worker must be Unhealthy after shutdown (WorkerStoppedGuard guard)"
+        );
+    }
+
+    /// A publish that ignores cancellation must be bounded by the outer shutdown budget without
+    /// leaving a blocking join owned by the Tokio runtime.
+    #[test]
+    #[allow(clippy::panic)]
+    // reason: thread/runtime harness failures must fail this lifecycle regression test.
+    fn stalled_publish_shutdown_does_not_block_runtime_drop() {
+        let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let release = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let thread_started = Arc::clone(&started);
+        let thread_release = Arc::clone(&release);
+        let (dropped_tx, dropped_rx) = std::sync::mpsc::channel();
+        let harness = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap_or_else(|error| panic!("test runtime: {error}"));
+            runtime.block_on(async move {
+                let worker = spawn_relay(
+                    "outbox-relay-stalled-publish".to_owned(),
+                    StalledRelayStore {
+                        domain: vocab::DomainName::parse("identity")
+                            .unwrap_or_else(|error| panic!("test domain: {error}")),
+                        claimed: std::sync::atomic::AtomicBool::new(false),
+                        started: thread_started,
+                        release: thread_release,
+                        subject: consistency::OutboxMetricSubject::new(
+                            tenant(),
+                            consistency::OutboxContractId::parse("identity.session-created")
+                                .unwrap_or_else(|error| panic!("test contract: {error}")),
+                        ),
+                    },
+                    relay_cfg_for_test(),
+                    Arc::new(FixedClockRelay),
+                    CancellationToken::new(),
+                    health(),
+                    Arc::new(NoopRelayMetrics),
+                );
+                tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                    while !started.load(Ordering::Acquire) {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .unwrap_or_else(|error| panic!("publish did not start: {error}"));
+                assert!(
+                    tokio::time::timeout(std::time::Duration::from_millis(20), worker.shutdown(),)
+                        .await
+                        .is_err(),
+                    "stalled publish must exercise cancelled shutdown"
+                );
+            });
+            drop(runtime);
+            let _ = dropped_tx.send(());
+        });
+
+        let dropped_without_release = dropped_rx
+            .recv_timeout(std::time::Duration::from_millis(200))
+            .is_ok();
+        release.store(true, Ordering::Release);
+        harness
+            .join()
+            .unwrap_or_else(|_| panic!("runtime-drop harness panicked"));
+        assert!(
+            dropped_without_release,
+            "runtime drop waited for stalled outbox publish after shutdown cancellation"
         );
     }
 

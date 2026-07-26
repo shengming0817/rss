@@ -2019,6 +2019,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "eventing-composition"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "audit",
+ "bootstrap",
+ "consistency",
+ "crypto-adapter",
+ "diport",
+ "eventexec",
+ "futures",
+ "generated",
+ "metrics",
+ "postgres",
+ "primitives",
+ "settings",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+ "trybuild",
+ "vocab",
+]
+
+[[package]]
 name = "evmap"
 version = "11.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3071,21 +3097,50 @@ dependencies = [
 name = "identityaudit"
 version = "0.0.0"
 dependencies = [
+ "amqp",
  "anyhow",
  "assembly-schema",
  "audit",
  "audit-composition",
  "authn",
+ "axum",
+ "base64",
  "bootstrap",
  "crypto-adapter",
+ "deadpool-redis",
  "diport",
+ "distributed",
+ "eventexec",
+ "eventing-composition",
+ "generated",
+ "httpd",
+ "httpserve",
  "identity",
  "identity-composition",
+ "jsonschema",
  "oidc",
  "postgres",
  "primitives",
+ "prometheus-adapter",
+ "ratelimit",
+ "redis-adapter",
+ "reqwest",
+ "runctx",
+ "runtimeexec",
+ "schemars 0.8.22",
+ "secure",
+ "serde",
+ "serde_json",
  "tokio",
+ "tokio-util",
+ "toml 0.8.23",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+ "url",
  "vault",
+ "vocab",
+ "zeroize",
 ]
 
 [[package]]
@@ -3264,8 +3319,10 @@ dependencies = [
  "audit",
  "authn",
  "axum",
+ "base64",
  "bootstrap",
  "consistency",
+ "crypto-adapter",
  "deviceloop",
  "diagctx",
  "diport",
@@ -3274,6 +3331,7 @@ dependencies = [
  "generated",
  "httpserve",
  "identity",
+ "identityaudit",
  "ids",
  "memory",
  "metrics",
@@ -3295,6 +3353,7 @@ dependencies = [
  "toml 0.8.23",
  "tower",
  "tracing",
+ "url",
  "uuid",
  "vault",
  "vocab",
@@ -4981,6 +5040,7 @@ dependencies = [
  "diport",
  "distributed",
  "eventexec",
+ "eventing-composition",
  "futures",
  "generated",
  "hmac 0.12.1",

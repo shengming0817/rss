@@ -1,7 +1,7 @@
 name = "identityaudit"
-profile = "demo"
+profile = "production"
 domains = ["identity", "audit"]
-topology = "demo"
+topology = "durable-isolated"
 frameworkContracts = []
 
 [[listeners]]
@@ -11,6 +11,34 @@ domains = ["identity"]
 [[listeners]]
 kind = "admin"
 domains = ["audit"]
+
+[[listeners]]
+kind = "health"
+domains = []
+
+[[diportProviders]]
+id = "event-publisher"
+port = "diport::Publisher"
+provider = "amqp::AmqpPublisher"
+providerCrate = "amqp"
+requiredFeatures = ["backend"]
+consumer = "eventexec"
+lifecycle = "active"
+durability = "persistent"
+purpose = "identity-outbox-relay-amqp-publish"
+outputs = ["probes", "resources", "workers"]
+
+[[diportProviders]]
+id = "event-subscriber"
+port = "diport::AckableSubscriber"
+provider = "amqp::AmqpSubscriber"
+providerCrate = "amqp"
+requiredFeatures = ["backend"]
+consumer = "eventexec"
+lifecycle = "active"
+durability = "persistent"
+purpose = "identity-audit-event-consume-at-least-once"
+outputs = ["probes", "resources", "workers"]
 
 [[diportProviders]]
 id = "identity-signer"
@@ -23,6 +51,18 @@ lifecycle = "active"
 durability = "persistent"
 purpose = "jwt-access-token-signing"
 outputs = ["resources"]
+
+[[diportProviders]]
+id = "dlx-archive-key-provider"
+port = "diport::KeyProvider"
+provider = "vault::VaultKeyProvider"
+providerCrate = "vault"
+requiredFeatures = ["backend"]
+consumer = "eventexec"
+lifecycle = "active"
+durability = "persistent"
+purpose = "identityaudit-dead-letter-hot-payload-protection"
+outputs = ["workers"]
 
 [[diportProviders]]
 id = "listener-pdp"
@@ -45,4 +85,38 @@ consumer = "httpserve"
 lifecycle = "active"
 durability = "persistent"
 purpose = "http-auth-decision-audit"
+outputs = ["resources", "workers"]
+
+[[diportProviders]]
+id = "listener-rate-limiter"
+port = "diport::RateLimiter"
+provider = "ratelimit::GovernorLimiter"
+providerCrate = "ratelimit"
+consumer = "httpserve"
+lifecycle = "active"
+durability = "ephemeral-memory"
+purpose = "per-peer-IP request rate limiting before authentication"
+outputs = []
+
+[[diportProviders]]
+id = "distributed-lock-store"
+port = "diport::LockStore"
+provider = "redis::RedisLockStore"
+providerCrate = "redis"
+requiredFeatures = ["backend"]
+consumer = "distributed"
+lifecycle = "active"
+durability = "persistent"
+purpose = "outbox-maintenance-distributed-lock-fencing"
+outputs = ["resources"]
+
+[[diportProviders]]
+id = "distributed-cas-store"
+port = "diport::CasStore"
+provider = "postgres::PgCasStore"
+providerCrate = "postgres"
+consumer = "distributed"
+lifecycle = "active"
+durability = "persistent"
+purpose = "outbox-maintenance-distributed-state-cas"
 outputs = ["resources", "workers"]

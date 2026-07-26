@@ -48,7 +48,7 @@ LL |     let _direct_service = Authenticated::new_service(
    = help: 仅在 runtime `auth_bridge::{allow_evidence,mtls_evidence}` 的精确验签桥函数中构造 Authenticated；其它 runtime 代码同样不得 mint evidence
 
 warning: Principal 身份降维 accessor（`audit_subject` / `service_caller_domain`）仅组合根可调用
-  --> $DIR/runtime.rs:93:17
+  --> $DIR/runtime.rs:95:17
    |
 LL |         let _ = authn::Principal::audit_subject;
    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -56,7 +56,7 @@ LL |         let _ = authn::Principal::audit_subject;
    = help: 仅在列明的 runtime verification wrapper 中读取 Principal 身份；其它 runtime 代码同样不得把 verified Principal 降维为可转传值
 
 warning: Authenticated 证据仅组合根（assembly / bin crate）可构造：profile-specific constructor 不得在此 crate 调用
-  --> $DIR/runtime.rs:94:9
+  --> $DIR/runtime.rs:96:9
    |
 LL |         Authenticated::new_federated(PrincipalKind::User, "subject-1", None)
    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -64,7 +64,7 @@ LL |         Authenticated::new_federated(PrincipalKind::User, "subject-1", None
    = help: 仅在 runtime `auth_bridge::{allow_evidence,mtls_evidence}` 的精确验签桥函数中构造 Authenticated；其它 runtime 代码同样不得 mint evidence
 
 warning: Principal 身份降维 accessor（`audit_subject` / `service_caller_domain`）仅组合根可调用
-  --> $DIR/runtime.rs:98:17
+  --> $DIR/runtime.rs:100:17
    |
 LL |         let _ = authn::Principal::service_caller_domain;
    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

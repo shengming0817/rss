@@ -27,7 +27,6 @@ pub mod auth_bridge;
 mod config;
 #[cfg(test)]
 mod config_tests;
-mod consumer_tx;
 pub mod distributed_runtime;
 #[cfg(test)]
 mod domain_placement_tests;

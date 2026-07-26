@@ -166,6 +166,7 @@ pub assembly_schema::DiportPort::Pdp
 pub assembly_schema::DiportPort::Publisher
 pub assembly_schema::DiportPort::RateLimiter
 pub assembly_schema::DiportPort::RevocationStore
+pub assembly_schema::DiportPort::SecretResolver
 pub assembly_schema::DiportPort::ServiceTokenReplayStore
 pub assembly_schema::DiportPort::Signer
 impl assembly_schema::DiportPort
@@ -368,6 +369,7 @@ pub assembly_schema::ProviderConstructor::RedisLockStore
 pub assembly_schema::ProviderConstructor::S3Store
 pub assembly_schema::ProviderConstructor::S3VerifiedDlxArchiveStore
 pub assembly_schema::ProviderConstructor::VaultKeyProvider
+pub assembly_schema::ProviderConstructor::VaultSecretResolver
 pub assembly_schema::ProviderConstructor::VaultSigner
 impl assembly_schema::ProviderConstructor
 pub const fn assembly_schema::ProviderConstructor::as_str(self) -> &'static str
@@ -497,6 +499,7 @@ pub assembly_schema::ProviderFactorySymbol::IdentityVaultSigner
 pub assembly_schema::ProviderFactorySymbol::OidcPostgresServiceTokenReplayStore
 pub assembly_schema::ProviderFactorySymbol::RuntimeS3ObjectStore
 pub assembly_schema::ProviderFactorySymbol::SettingsVaultKeyProvider
+pub assembly_schema::ProviderFactorySymbol::SettingsVaultSecretResolver
 impl assembly_schema::ProviderFactorySymbol
 pub const fn assembly_schema::ProviderFactorySymbol::as_str(self) -> &'static str
 impl core::clone::Clone for assembly_schema::ProviderFactorySymbol
@@ -617,6 +620,7 @@ pub assembly_schema::ProviderRole::ListenerRateLimiter
 pub assembly_schema::ProviderRole::RuntimeObjectStore
 pub assembly_schema::ProviderRole::ServiceTokenReplayStore
 pub assembly_schema::ProviderRole::SettingsKeyProvider
+pub assembly_schema::ProviderRole::SettingsSecretResolver
 impl assembly_schema::ProviderRole
 pub const fn assembly_schema::ProviderRole::as_str(self) -> &'static str
 impl assembly_schema::ProviderRole

@@ -1,4 +1,4 @@
-//! ConsumerTx —— durable consumer transaction driver.
+//! ConsumerTx —— shared durable consumer transaction driver.
 //!
 //! This module keeps the existing ConsumerBase preflight/claim/lease/broker-settle contract, but
 //! changes the Fresh success path: the assembly-private tx handler is implemented only for the
@@ -31,8 +31,10 @@ pub(crate) mod policy {
     }
 
     /// Effects are confined to the durable database transaction.
+    #[allow(dead_code)]
     pub(crate) struct TransactionalOnly;
     /// External state is rebuilt from an authoritative source.
+    #[allow(dead_code)]
     pub(crate) struct Reconcile;
 
     impl private::Sealed for TransactionalOnly {}
@@ -64,6 +66,7 @@ pub(crate) trait ConsumerTxHandler<P: policy::Policy>: Send + Sync + 'static {
     ) -> BoxFuture<'static, ConsumerTxOutcome<Self::CommitProof>>;
 }
 
+#[cfg(any(feature = "audit-consumers", feature = "settings-consumers"))]
 fn map_postgres_outcome(outcome: postgres::PgConsumerTxOutcome) -> ConsumerTxOutcome<()> {
     match outcome {
         postgres::PgConsumerTxOutcome::Committed(_provider_proof) => {
@@ -82,6 +85,7 @@ fn map_postgres_outcome(outcome: postgres::PgConsumerTxOutcome) -> ConsumerTxOut
     }
 }
 
+#[cfg(feature = "audit-consumers")]
 impl<M> ConsumerTxHandler<policy::TransactionalOnly> for postgres::PgAuditConsumerTx<M>
 where
     M: primitives::MacVerifier + Send + Sync + 'static,
@@ -103,6 +107,7 @@ where
     }
 }
 
+#[cfg(feature = "settings-consumers")]
 impl ConsumerTxHandler<policy::Reconcile> for postgres::PgSettingsConsumerTx {
     type CommitProof = ();
 

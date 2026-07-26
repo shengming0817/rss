@@ -9,9 +9,13 @@
 
 mod cas;
 mod locker;
+mod maintenance;
 mod transport;
 pub use cas::StateCas;
 pub use locker::Locker;
+pub use maintenance::{
+    CoordinatedOutboxBacklog, CoordinatedRetentionSweeper, OutboxMaintenanceCoordinator,
+};
 pub use transport::{
     DomainMethod, DomainRequest, DomainResponse, DomainTransport, DomainTransportError,
     DomainTransportErrorKind, InstrumentedDomainTransport, TransportHeaderError, TransportHeaders,

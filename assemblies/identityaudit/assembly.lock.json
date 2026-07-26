@@ -2,12 +2,12 @@
   "schemaVersion": 1,
   "identity": {
     "name": "identityaudit",
-    "profile": "demo"
+    "profile": "production"
   },
   "digests": {
-    "manifest": "sha256:572bb925249bafcb49104e448c1909f7d32d35d7388e813fd7fb561e8de5d9af",
-    "generated": "sha256:c9811619ca46d96396d8755296cce8ae4f3006efa3728aba428ca237a3d4e6f0",
+    "manifest": "sha256:a47149f65e573a1a011845170e4de573061de0b192a62b774cea719714e7502f",
+    "generated": "sha256:d15e115d103aa7300eb87f60de33129b967610cfffb44ceab649a899379dc7ae",
     "contracts": "sha256:55266459c172826e410e5487e1f6120aa994ab56030bbc18d9be07b08a67df49"
   },
-  "fingerprint": "sha256:220183d97514c3ab7e31fb036cf8eb9eff3664296e1d9d2ec5d984922d438eee"
+  "fingerprint": "sha256:ca1634772109f74bd3c66f079f8c5775f82a30a3ae805bf5e23894a952feedb8"
 }

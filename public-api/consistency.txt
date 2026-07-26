@@ -686,6 +686,24 @@ impl core::marker::UnsafeUnpin for consistency::localtx::LocalTxExecutionBudget
 impl core::panic::unwind_safe::RefUnwindSafe for consistency::localtx::LocalTxExecutionBudget
 impl core::panic::unwind_safe::UnwindSafe for consistency::localtx::LocalTxExecutionBudget
 pub mod consistency::outbox
+pub enum consistency::outbox::BacklogObservation
+pub consistency::outbox::BacklogObservation::Active(alloc::vec::Vec<consistency::outbox::BacklogMetricSample>)
+pub consistency::outbox::BacklogObservation::Standby
+impl core::clone::Clone for consistency::outbox::BacklogObservation
+pub fn consistency::outbox::BacklogObservation::clone(&self) -> consistency::outbox::BacklogObservation
+impl core::cmp::Eq for consistency::outbox::BacklogObservation
+impl core::cmp::PartialEq for consistency::outbox::BacklogObservation
+pub fn consistency::outbox::BacklogObservation::eq(&self, &consistency::outbox::BacklogObservation) -> bool
+impl core::fmt::Debug for consistency::outbox::BacklogObservation
+pub fn consistency::outbox::BacklogObservation::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for consistency::outbox::BacklogObservation
+impl core::marker::Freeze for consistency::outbox::BacklogObservation
+impl core::marker::Send for consistency::outbox::BacklogObservation
+impl core::marker::Sync for consistency::outbox::BacklogObservation
+impl core::marker::Unpin for consistency::outbox::BacklogObservation
+impl core::marker::UnsafeUnpin for consistency::outbox::BacklogObservation
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::outbox::BacklogObservation
+impl core::panic::unwind_safe::UnwindSafe for consistency::outbox::BacklogObservation
 #[non_exhaustive] pub enum consistency::outbox::Disposition
 pub consistency::outbox::Disposition::Ack
 pub consistency::outbox::Disposition::Reject
@@ -1112,7 +1130,7 @@ impl core::marker::UnsafeUnpin for consistency::outbox::StoredOutboxTopic
 impl core::panic::unwind_safe::RefUnwindSafe for consistency::outbox::StoredOutboxTopic
 impl core::panic::unwind_safe::UnwindSafe for consistency::outbox::StoredOutboxTopic
 pub trait consistency::outbox::OutboxBacklog
-pub async fn consistency::outbox::OutboxBacklog::sample_backlog(&self, &str) -> core::result::Result<alloc::vec::Vec<consistency::outbox::BacklogMetricSample>, consistency::error::EngineError>
+pub async fn consistency::outbox::OutboxBacklog::sample_backlog(&self, &str) -> core::result::Result<consistency::outbox::BacklogObservation, consistency::error::EngineError>
 pub trait consistency::outbox::OutboxRelay
 pub type consistency::outbox::OutboxRelay::Claim
 pub async fn consistency::outbox::OutboxRelay::claim_batch(&self, usize) -> core::result::Result<alloc::vec::Vec<Self::Claim>, consistency::error::EngineError>
@@ -2290,6 +2308,24 @@ impl core::marker::UnsafeUnpin for consistency::tx_retry::TxRetryReport
 impl core::panic::unwind_safe::RefUnwindSafe for consistency::tx_retry::TxRetryReport
 impl core::panic::unwind_safe::UnwindSafe for consistency::tx_retry::TxRetryReport
 pub async fn consistency::tx_retry::run_tx_retry<T, E, Op, OpFut, Classify, Sleep, SleepFut>(consistency::tx_retry::TxRetryPolicy, Op, Classify, Sleep) -> (core::result::Result<T, E>, consistency::tx_retry::TxRetryReport) where Op: core::ops::function::FnMut(u32) -> OpFut, OpFut: core::future::future::Future<Output = core::result::Result<T, E>>, Classify: core::ops::function::Fn(&E) -> consistency::tx_retry::TxRetryClass, Sleep: core::ops::function::FnMut(core::time::Duration) -> SleepFut, SleepFut: core::future::future::Future<Output = consistency::tx_retry::TxRetryBackoff>
+pub enum consistency::BacklogObservation
+pub consistency::BacklogObservation::Active(alloc::vec::Vec<consistency::outbox::BacklogMetricSample>)
+pub consistency::BacklogObservation::Standby
+impl core::clone::Clone for consistency::outbox::BacklogObservation
+pub fn consistency::outbox::BacklogObservation::clone(&self) -> consistency::outbox::BacklogObservation
+impl core::cmp::Eq for consistency::outbox::BacklogObservation
+impl core::cmp::PartialEq for consistency::outbox::BacklogObservation
+pub fn consistency::outbox::BacklogObservation::eq(&self, &consistency::outbox::BacklogObservation) -> bool
+impl core::fmt::Debug for consistency::outbox::BacklogObservation
+pub fn consistency::outbox::BacklogObservation::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for consistency::outbox::BacklogObservation
+impl core::marker::Freeze for consistency::outbox::BacklogObservation
+impl core::marker::Send for consistency::outbox::BacklogObservation
+impl core::marker::Sync for consistency::outbox::BacklogObservation
+impl core::marker::Unpin for consistency::outbox::BacklogObservation
+impl core::marker::UnsafeUnpin for consistency::outbox::BacklogObservation
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::outbox::BacklogObservation
+impl core::panic::unwind_safe::UnwindSafe for consistency::outbox::BacklogObservation
 #[non_exhaustive] pub enum consistency::CommandAttemptError
 pub consistency::CommandAttemptError::Zero
 impl core::clone::Clone for consistency::command_journal::CommandAttemptError
@@ -4528,7 +4564,7 @@ pub async fn consistency::InboxStore::extend(&self, &consistency::inbox::InboxRe
 pub async fn consistency::InboxStore::release(&self, &consistency::inbox::InboxReceiptContext, &consistency::idempotency::IdemKey, &consistency::idempotency::LeaseToken) -> core::result::Result<(), consistency::error::EngineError>
 pub async fn consistency::InboxStore::try_claim(&self, &consistency::inbox::InboxReceiptContext, &consistency::idempotency::IdemKey, &consistency::idempotency::LeaseToken) -> core::result::Result<consistency::idempotency::SeenState, consistency::error::EngineError>
 pub trait consistency::OutboxBacklog
-pub async fn consistency::OutboxBacklog::sample_backlog(&self, &str) -> core::result::Result<alloc::vec::Vec<consistency::outbox::BacklogMetricSample>, consistency::error::EngineError>
+pub async fn consistency::OutboxBacklog::sample_backlog(&self, &str) -> core::result::Result<consistency::outbox::BacklogObservation, consistency::error::EngineError>
 pub trait consistency::OutboxRelay
 pub type consistency::OutboxRelay::Claim
 pub async fn consistency::OutboxRelay::claim_batch(&self, usize) -> core::result::Result<alloc::vec::Vec<Self::Claim>, consistency::error::EngineError>

@@ -3,7 +3,7 @@
 //! INVARIANT: EVENT-TRANSPORT-PG-INBOX-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::scan_content_rejects_missing_pg_bundle_fragment", anti_vacuity = "tests::scan_content_accepts_pg_inbox_bundle" }——
 //! `assemblies/runtime/src/event_transport.rs` 的 consumer idempotency must come from PG inbox, not Redis,
 //! and production consumer workers must go through the generated-topology bridge.
-//! INVARIANT: EVENT-CONSUMER-EXTERNAL-EFFECT-POLICY-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::scan_content_rejects_consumer_tx_plan_without_external_effect_policy", anti_vacuity = "tests::workspace_runtime_closes_consumer_tx_external_effect_policy" }——
+//! INVARIANT: EVENT-CONSUMER-EXTERNAL-EFFECT-POLICY-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::scan_content_rejects_consumer_tx_plan_without_external_effect_policy", anti_vacuity = "tests::workspace_eventing_composition_shape_is_closed" }——
 //! ConsumerTx plan 必须把 generated external-effect policy 纳入闭合 matcher；audit 仅接受
 //! transactional-only，settings refresh 仅接受 reconcile，任何漂移都在启动前 fail-closed。
 //! INVARIANT: EVENT-CONSUMER-RAW-EFFECT-CAPABILITY-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::consumer_policy_guard_rejects_raw_effect_bypass_matrix", anti_vacuity = "tests::consumer_policy_guard_accepts_closed_capability_without_raw_effect" }——
@@ -47,6 +47,10 @@ use crate::src_scan::{is_excluded, member_dirs, rs_files};
 use crate::workspace_root;
 
 const TARGET: &str = "assemblies/runtime/src/event_transport.rs";
+const RUNTIME_LIB_TARGET: &str = "assemblies/runtime/src/lib.rs";
+const RUNTIME_CONSUMER_TX_COMPAT_TARGET: &str = "assemblies/runtime/src/consumer_tx.rs";
+const EVENTING_COMPOSITION_TARGET: &str = "composition/eventing/src/lib.rs";
+const IDENTITYAUDIT_EVENTING_TARGET: &str = "assemblies/identityaudit/src/eventing.rs";
 const RUNTIME_FORBIDDEN: &[&str] = &[
     "RedisInboxStore",
     "RSS_REDIS_CLAIM_TTL_MS",
@@ -126,6 +130,38 @@ pub(crate) fn check_root(root: &Path) -> Result<(String, Vec<Finding<Rule>>)> {
     let content = std::fs::read_to_string(&path)
         .with_context(|| format!("event-transport-guard: read {}", path.display()))?;
     let mut findings = scan_runtime_content(Path::new(TARGET), &content);
+    let runtime_lib =
+        std::fs::read_to_string(root.join(RUNTIME_LIB_TARGET)).with_context(|| {
+            format!(
+                "event-transport-guard: read {}",
+                root.join(RUNTIME_LIB_TARGET).display()
+            )
+        })?;
+    findings.extend(runtime_consumer_tx_compat_findings(
+        &runtime_lib,
+        root.join(RUNTIME_CONSUMER_TX_COMPAT_TARGET).exists(),
+    ));
+    let composition_path = root.join(EVENTING_COMPOSITION_TARGET);
+    let composition_content = std::fs::read_to_string(&composition_path)
+        .with_context(|| format!("event-transport-guard: read {}", composition_path.display()))?;
+    findings.extend(scan_composition_content(
+        Path::new(EVENTING_COMPOSITION_TARGET),
+        &composition_content,
+    ));
+    let identityaudit_path = root.join(IDENTITYAUDIT_EVENTING_TARGET);
+    if identityaudit_path.exists() {
+        let identityaudit_content =
+            std::fs::read_to_string(&identityaudit_path).with_context(|| {
+                format!(
+                    "event-transport-guard: read {}",
+                    identityaudit_path.display()
+                )
+            })?;
+        findings.extend(identityaudit_closure_findings(
+            Path::new(IDENTITYAUDIT_EVENTING_TARGET),
+            &identityaudit_content,
+        ));
+    }
     findings.extend(scan_domain_crates(root)?);
     findings.extend(scan_production_bypasses(root)?);
     findings.extend(scan_event_producers(root)?);
@@ -140,10 +176,30 @@ pub(crate) fn check_root(root: &Path) -> Result<(String, Vec<Finding<Rule>>)> {
     findings.extend(scan_consumer_external_effect_capabilities(root)?);
     Ok((
         format!(
-            "{TARGET} 经 generated topology bridge + ConsumerTx PG inbox bundle 接线；ConsumerTx active handlers=5，unauthorized external effect callsites=0"
+            "{EVENTING_COMPOSITION_TARGET} 是 generated topology bridge + ConsumerTx 唯一真源；runtime/identityaudit durable closures 已接共享 factory；active handlers=5，unauthorized external effect callsites=0"
         ),
         findings,
     ))
+}
+
+fn runtime_consumer_tx_compat_findings(
+    runtime_lib: &str,
+    compatibility_file_exists: bool,
+) -> Vec<Finding<Rule>> {
+    let legacy_module_declared = syn::parse_file(runtime_lib).is_ok_and(|file| {
+        file.items
+            .iter()
+            .any(|item| matches!(item, syn::Item::Mod(module) if module.ident == "consumer_tx"))
+    });
+    if !legacy_module_declared && !compatibility_file_exists {
+        return Vec::new();
+    }
+    vec![finding(
+        Rule::MissingBundleFragment,
+        RUNTIME_LIB_TARGET.to_string(),
+        "runtime 不得保留 consumer_tx compatibility carrier；调用方必须直接引用 eventing-composition"
+            .to_string(),
+    )]
 }
 
 #[derive(Debug)]
@@ -1374,15 +1430,10 @@ fn scan_runtime_content(path: &Path, content: &str) -> Vec<Finding<Rule>> {
 
 #[derive(Default)]
 struct RuntimeShape {
-    bridged_private_shape: bool,
-    generated_events_bridge: bool,
+    delegated_events_bridge: bool,
     bridged_input: bool,
     required_worker_probe_bundle: bool,
     policy_bound_worker_activation: bool,
-    resolver_passes_generated_policy: bool,
-    handler_mapping: bool,
-    adapter_native_external_effect_policy: bool,
-    settings_refresh_external_effect_policy: bool,
 }
 
 fn runtime_shape_findings(path: &Path, content: &str) -> Vec<Finding<Rule>> {
@@ -1396,28 +1447,11 @@ fn runtime_shape_findings(path: &Path, content: &str) -> Vec<Finding<Rule>> {
     let mut shape = RuntimeShape::default();
     for item in &file.items {
         match item {
-            syn::Item::Struct(item) if item.ident == "BridgedSubscription" => {
-                let fields: BTreeMap<_, _> = item
-                    .fields
-                    .iter()
-                    .filter_map(|field| {
-                        field.ident.as_ref().map(|ident| (ident.to_string(), field))
-                    })
-                    .collect();
-                shape.bridged_private_shape = ["event", "subscription", "group", "consumer_tx"]
-                    .iter()
-                    .all(|name| {
-                        fields
-                            .get(*name)
-                            .is_some_and(|field| matches!(field.vis, syn::Visibility::Inherited))
-                    })
-                    && !fields.contains_key("handler");
-            }
             syn::Item::Fn(item) if item.sig.ident == "bridge_generated_subscriptions" => {
                 let body = normalized_tokens(&item.block);
-                shape.generated_events_bridge = body.contains(
-                    "bridge_subscriptions_with_events(bindings,generated::event::EVENTS)",
-                );
+                shape.delegated_events_bridge = body
+                    .contains("eventing_composition::bridge_generated_subscriptions(bindings)")
+                    && !body.contains("generated::event::EVENTS");
             }
             syn::Item::Fn(item) if item.sig.ident == "wire_event_transport" => {
                 shape.bridged_input = item.sig.inputs.iter().any(|input| {
@@ -1440,35 +1474,16 @@ fn runtime_shape_findings(path: &Path, content: &str) -> Vec<Finding<Rule>> {
                 .iter()
                 .all(|required| body.contains(required));
             }
-            syn::Item::Fn(item) if item.sig.ident == "consumer_tx_worker_spec" => {
-                let signature = normalized_tokens(&item.sig);
+            syn::Item::Fn(item) if item.sig.ident == "consumer_tx_worker_for_subscription" => {
                 let body = normalized_tokens(&item.block);
-                shape.policy_bound_worker_activation = signature.contains("ConsumerTxHandler<P>")
-                    && body.contains("spawn_consumer_ackable_tx_subscriber(");
-            }
-            syn::Item::Fn(item) if item.sig.ident == "resolve_consumer_tx_plan" => {
-                let body = normalized_tokens(&item.block);
-                shape.resolver_passes_generated_policy = [
-                    "resolve_consumer_tx_plan_parts(",
-                    "spec.dispatch()",
-                    "spec.execution()",
-                    "spec.effect()",
-                    "spec.external_effect_policy()",
-                    "capability",
+                shape.policy_bound_worker_activation = [
+                    "matchtoken.dispatch()",
+                    "AuditConsumerFactory::new(pg,audit_key).worker(token,inputs)",
+                    "SettingsConsumerFactory::new(pg).worker(token,inputs)",
                 ]
                 .iter()
-                .all(|required| body.contains(required));
-            }
-            syn::Item::Fn(item) if item.sig.ident == "resolve_consumer_tx_plan_parts" => {
-                shape.handler_mapping = consumer_tx_plan_resolver_is_closed(item);
-            }
-            syn::Item::Fn(item) if item.sig.ident == "adapter_native_plan" => {
-                shape.adapter_native_external_effect_policy =
-                    consumer_tx_plan_matcher_is_closed(item, false);
-            }
-            syn::Item::Fn(item) if item.sig.ident == "settings_config_refresh_plan" => {
-                shape.settings_refresh_external_effect_policy =
-                    consumer_tx_plan_matcher_is_closed(item, true);
+                .all(|required| body.contains(required))
+                    && match_is_exhaustive_for_dispatch(item, "token.dispatch()");
             }
             _ => {}
         }
@@ -1476,12 +1491,8 @@ fn runtime_shape_findings(path: &Path, content: &str) -> Vec<Finding<Rule>> {
 
     [
         (
-            shape.bridged_private_shape,
-            "BridgedSubscription 必须以私有 event/subscription/group/consumer_tx 字段封装 generated topology 与已解析闭执行计划，不得恢复 legacy handler",
-        ),
-        (
-            shape.generated_events_bridge,
-            "bridge_generated_subscriptions 必须从 generated::event::EVENTS 单一 registry 桥接",
+            shape.delegated_events_bridge,
+            "runtime bridge carrier 必须薄委托 eventing-composition，不得复制 generated registry 解析",
         ),
         (
             shape.bridged_input,
@@ -1489,23 +1500,7 @@ fn runtime_shape_findings(path: &Path, content: &str) -> Vec<Finding<Rule>> {
         ),
         (
             shape.required_worker_probe_bundle && shape.policy_bound_worker_activation,
-            "consumer bundle 必须以 Required 穷尽分支成对注册 PG ConsumerTx worker 与 readyz probe",
-        ),
-        (
-            shape.handler_mapping,
-            "runtime 必须以单一 resolver 穷尽匹配 generated typed dispatch key → ConsumerTx plan，且不得使用 wildcard/guard",
-        ),
-        (
-            shape.resolver_passes_generated_policy,
-            "ConsumerTx resolver 必须把 generated externalEffectPolicy 传入唯一 plan matcher",
-        ),
-        (
-            shape.adapter_native_external_effect_policy,
-            "ConsumerTx plan 必须闭合匹配 adapter-native + transactional-only capability",
-        ),
-        (
-            shape.settings_refresh_external_effect_policy,
-            "ConsumerTx plan 必须闭合匹配 settings refresh + reconcile capability",
+            "runtime consumer bundle 必须以 Required 穷尽分支成对注册共享 factory worker 与 readyz probe",
         ),
     ]
     .into_iter()
@@ -1515,6 +1510,426 @@ fn runtime_shape_findings(path: &Path, content: &str) -> Vec<Finding<Rule>> {
             Rule::MissingBundleFragment,
             path.display().to_string(),
             message.to_string(),
+        )
+    })
+    .collect()
+}
+
+#[derive(Default)]
+struct CompositionShape {
+    bridged_private_shape: bool,
+    generated_events_bridge: bool,
+    feature_admission_closed: bool,
+    audit_events_bridge: bool,
+    audit_admission_closed: bool,
+    resolver_passes_generated_policy: bool,
+    handler_mapping: bool,
+    adapter_native_external_effect_policy: bool,
+    settings_refresh_external_effect_policy: bool,
+    policy_bound_worker_activation: bool,
+    audit_factory_mapping: bool,
+    settings_factory_mapping: bool,
+}
+
+fn scan_composition_content(path: &Path, content: &str) -> Vec<Finding<Rule>> {
+    let Ok(file) = syn::parse_file(content) else {
+        return vec![finding(
+            Rule::MissingBundleFragment,
+            path.display().to_string(),
+            "eventing composition Rust AST 无法解析".to_string(),
+        )];
+    };
+    let mut shape = CompositionShape::default();
+    for item in &file.items {
+        match item {
+            syn::Item::Struct(item) if item.ident == "BridgedSubscription" => {
+                let fields = item
+                    .fields
+                    .iter()
+                    .filter_map(|field| {
+                        field.ident.as_ref().map(|ident| (ident.to_string(), field))
+                    })
+                    .collect::<BTreeMap<_, _>>();
+                shape.bridged_private_shape = ["event", "subscription", "group", "consumer_tx"]
+                    .iter()
+                    .all(|name| {
+                        fields
+                            .get(*name)
+                            .is_some_and(|field| matches!(field.vis, syn::Visibility::Inherited))
+                    })
+                    && !fields.contains_key("handler");
+            }
+            syn::Item::Fn(item) if item.sig.ident == "bridge_generated_subscriptions" => {
+                shape.generated_events_bridge =
+                    generated_events_bridge_calls_selector(item, "admitted_dispatch");
+            }
+            syn::Item::Fn(item) if item.sig.ident == "bridge_generated_audit_subscriptions" => {
+                shape.audit_events_bridge =
+                    generated_events_bridge_calls_selector(item, "admitted_audit_dispatch");
+            }
+            syn::Item::Fn(item) if item.sig.ident == "admitted_dispatch" => {
+                shape.feature_admission_closed = dispatch_match_is_closed(
+                    &item.block,
+                    "dispatch",
+                    &[
+                        "SubscriptionDispatchKey::IdentityPolicyUpdatedV1Audit",
+                        "SubscriptionDispatchKey::IdentityRoleAssignedV1Audit",
+                        "SubscriptionDispatchKey::IdentityRoleRevokedV1Audit",
+                        "SubscriptionDispatchKey::IdentitySessionCreatedV1Audit",
+                        "SubscriptionDispatchKey::SettingsConfigVersionChangedV1Settings",
+                    ],
+                ) && normalized_tokens(&item.block)
+                    .contains("cfg!(feature=\"audit-consumers\")")
+                    && normalized_tokens(&item.block)
+                        .contains("cfg!(feature=\"settings-consumers\")");
+            }
+            syn::Item::Fn(item) if item.sig.ident == "admitted_audit_dispatch" => {
+                let body = normalized_tokens(&item.block);
+                shape.audit_admission_closed = dispatch_match_is_closed(
+                    &item.block,
+                    "dispatch",
+                    &[
+                        "SubscriptionDispatchKey::IdentityPolicyUpdatedV1Audit",
+                        "SubscriptionDispatchKey::IdentityRoleAssignedV1Audit",
+                        "SubscriptionDispatchKey::IdentityRoleRevokedV1Audit",
+                        "SubscriptionDispatchKey::IdentitySessionCreatedV1Audit",
+                        "SubscriptionDispatchKey::SettingsConfigVersionChangedV1Settings",
+                    ],
+                ) && body.contains(
+                    "SubscriptionDispatchKey::SettingsConfigVersionChangedV1Settings=>false",
+                );
+            }
+            syn::Item::Fn(item) if item.sig.ident == "resolve_parts" => {
+                shape.resolver_passes_generated_policy = normalized_tokens(&item.sig)
+                    .contains("policy:ExternalEffectPolicy")
+                    && normalized_tokens(&item.sig).contains("capability:SubscriberCapability");
+                shape.handler_mapping = consumer_tx_plan_resolver_is_closed(item);
+            }
+            syn::Item::Fn(item) if item.sig.ident == "require_adapter_native" => {
+                shape.adapter_native_external_effect_policy =
+                    consumer_tx_plan_matcher_is_closed(item, false);
+            }
+            syn::Item::Fn(item) if item.sig.ident == "require_settings_reconcile" => {
+                shape.settings_refresh_external_effect_policy =
+                    consumer_tx_plan_matcher_is_closed(item, true);
+            }
+            syn::Item::Fn(item) if item.sig.ident == "worker_spec" => {
+                let signature = normalized_tokens(&item.sig);
+                let body = normalized_tokens(&item.block);
+                shape.policy_bound_worker_activation = signature.contains("ConsumerTxHandler<P>")
+                    && body.contains("spawn_consumer_ackable_tx_subscriber(");
+            }
+            syn::Item::Impl(item) => {
+                let owner = normalized_tokens(&item.self_ty);
+                for method in &item.items {
+                    let syn::ImplItem::Fn(method) = method else {
+                        continue;
+                    };
+                    if method.sig.ident != "worker" {
+                        continue;
+                    }
+                    let body = normalized_tokens(&method.block);
+                    if owner.contains("AuditConsumerFactory") {
+                        shape.audit_factory_mapping = audit_factory_mapping_is_closed(method);
+                    }
+                    if owner.contains("SettingsConsumerFactory") {
+                        shape.settings_factory_mapping = [
+                            "DispatchPlan::ConfigVersionChanged(effect)",
+                            ".config_version_changed_consumer_tx(effect)",
+                            "worker_spec::<policy::Reconcile,_>(inputs,handler)",
+                        ]
+                        .iter()
+                        .all(|required| body.contains(required));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    [
+        (
+            shape.bridged_private_shape,
+            "共享 BridgedSubscription 必须以私有 event/subscription/group/consumer_tx 字段封装，且不得暴露 handler",
+        ),
+        (
+            shape.generated_events_bridge
+                && shape.feature_admission_closed
+                && shape.audit_events_bridge
+                && shape.audit_admission_closed,
+            "共享 bridge 必须从 generated::event::EVENTS 单源，穷尽 audit/settings feature admission，并提供不受 feature union 扩张的精确 audit bridge",
+        ),
+        (
+            shape.handler_mapping && shape.resolver_passes_generated_policy,
+            "共享 ConsumerTx resolver 必须穷尽 generated dispatch 并携带 externalEffectPolicy/capability",
+        ),
+        (
+            shape.adapter_native_external_effect_policy,
+            "共享 ConsumerTx plan 必须闭合匹配 adapter-native + transactional-only capability",
+        ),
+        (
+            shape.settings_refresh_external_effect_policy,
+            "共享 ConsumerTx plan 必须闭合匹配 settings refresh + reconcile capability",
+        ),
+        (
+            shape.policy_bound_worker_activation
+                && shape.audit_factory_mapping
+                && shape.settings_factory_mapping,
+            "共享 factory 必须闭合选择五个 Postgres handler 并进入唯一 sealed worker driver",
+        ),
+    ]
+    .into_iter()
+    .filter(|(present, _)| !present)
+    .map(|(_, detail)| {
+        finding(
+            Rule::MissingBundleFragment,
+            path.display().to_string(),
+            detail.to_string(),
+        )
+    })
+    .collect()
+}
+
+fn generated_events_bridge_calls_selector(item: &syn::ItemFn, selector: &str) -> bool {
+    let Some(syn::Stmt::Expr(syn::Expr::Call(call), _)) = item.block.stmts.last() else {
+        return false;
+    };
+    normalized_tokens(&call.func) == "bridge_subscriptions_with_events_selected"
+        && call.args.len() == 3
+        && normalized_tokens(&call.args[0]) == "bindings"
+        && normalized_tokens(&call.args[1]) == "generated::event::EVENTS"
+        && normalized_tokens(&call.args[2]) == selector
+}
+
+fn audit_factory_mapping_is_closed(method: &syn::ImplItemFn) -> bool {
+    const EXPECTED: [(&str, &str); 4] = [
+        (
+            "DispatchPlan::SessionCreated",
+            "session_created_consumer_tx",
+        ),
+        ("DispatchPlan::RoleAssigned", "role_assigned_consumer_tx"),
+        ("DispatchPlan::RoleRevoked", "role_revoked_consumer_tx"),
+        ("DispatchPlan::PolicyUpdated", "policy_updated_consumer_tx"),
+    ];
+
+    struct MatchVisitor {
+        mappings: BTreeMap<String, Vec<String>>,
+        match_count: usize,
+        malformed: bool,
+    }
+
+    struct HandlerCallVisitor {
+        calls: Vec<String>,
+        transactional_worker_calls: usize,
+    }
+
+    impl<'ast> Visit<'ast> for HandlerCallVisitor {
+        fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+            if normalized_tokens(&node.func) == "worker_spec::<policy::TransactionalOnly,_>"
+                && node.args.len() == 2
+                && normalized_tokens(&node.args[0]) == "inputs"
+                && normalized_tokens(&node.args[1]) == "handler"
+            {
+                self.transactional_worker_calls += 1;
+            }
+            syn::visit::visit_expr_call(self, node);
+        }
+
+        fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+            let method = node.method.to_string();
+            if EXPECTED.iter().any(|(_, expected)| method == *expected) {
+                self.calls.push(method);
+            }
+            syn::visit::visit_expr_method_call(self, node);
+        }
+    }
+
+    impl<'ast> Visit<'ast> for MatchVisitor {
+        fn visit_expr_match(&mut self, node: &'ast syn::ExprMatch) {
+            if normalized_tokens(&node.expr) != "token.plan" {
+                syn::visit::visit_expr_match(self, node);
+                return;
+            }
+            self.match_count += 1;
+            for arm in &node.arms {
+                let pattern = normalized_tokens(&arm.pat);
+                let mut calls = HandlerCallVisitor {
+                    calls: Vec::new(),
+                    transactional_worker_calls: 0,
+                };
+                calls.visit_expr(&arm.body);
+                let Some((_, expected_handler)) =
+                    EXPECTED.iter().find(|(expected, _)| pattern == *expected)
+                else {
+                    if !calls.calls.is_empty() {
+                        self.malformed = true;
+                    }
+                    continue;
+                };
+                if arm.guard.is_some()
+                    || !matches!(arm.pat, syn::Pat::Path(_))
+                    || calls.transactional_worker_calls != 1
+                    || calls.calls.as_slice() != [*expected_handler]
+                {
+                    self.malformed = true;
+                }
+                if self.mappings.insert(pattern, calls.calls).is_some() {
+                    self.malformed = true;
+                }
+            }
+        }
+    }
+
+    let mut visitor = MatchVisitor {
+        mappings: BTreeMap::new(),
+        match_count: 0,
+        malformed: false,
+    };
+    visitor.visit_block(&method.block);
+    visitor.match_count == 1
+        && !visitor.malformed
+        && EXPECTED.iter().all(|(dispatch, handler)| {
+            visitor
+                .mappings
+                .get(*dispatch)
+                .is_some_and(|calls| calls.as_slice() == [*handler])
+        })
+}
+
+fn match_is_exhaustive_for_dispatch(item: &syn::ItemFn, input: &str) -> bool {
+    dispatch_match_is_closed(
+        &item.block,
+        input,
+        &[
+            "SubscriptionDispatchKey::IdentityPolicyUpdatedV1Audit",
+            "SubscriptionDispatchKey::IdentityRoleAssignedV1Audit",
+            "SubscriptionDispatchKey::IdentityRoleRevokedV1Audit",
+            "SubscriptionDispatchKey::IdentitySessionCreatedV1Audit",
+            "SubscriptionDispatchKey::SettingsConfigVersionChangedV1Settings",
+        ],
+    )
+}
+
+fn dispatch_match_is_closed(block: &syn::Block, input: &str, variants: &[&str]) -> bool {
+    struct Visitor<'a> {
+        input: &'a str,
+        variants: &'a [&'a str],
+        closed: bool,
+    }
+
+    impl<'ast> Visit<'ast> for Visitor<'_> {
+        fn visit_expr_match(&mut self, node: &'ast syn::ExprMatch) {
+            if normalized_tokens(&node.expr) == self.input {
+                let patterns = node
+                    .arms
+                    .iter()
+                    .map(|arm| normalized_tokens(&arm.pat))
+                    .collect::<String>();
+                self.closed = node
+                    .arms
+                    .iter()
+                    .all(|arm| arm.guard.is_none() && !matches!(arm.pat, syn::Pat::Wild(_)))
+                    && self
+                        .variants
+                        .iter()
+                        .all(|variant| patterns.contains(variant));
+            }
+            syn::visit::visit_expr_match(self, node);
+        }
+    }
+
+    let mut visitor = Visitor {
+        input,
+        variants,
+        closed: false,
+    };
+    visitor.visit_block(block);
+    visitor.closed
+}
+
+fn identityaudit_closure_findings(path: &Path, content: &str) -> Vec<Finding<Rule>> {
+    let Ok(file) = syn::parse_file(content) else {
+        return vec![finding(
+            Rule::MissingBundleFragment,
+            path.display().to_string(),
+            "identityaudit eventing Rust AST 无法解析".to_string(),
+        )];
+    };
+    let mut bridge_and_budget = false;
+    let mut consumer_bundle = false;
+    let mut audit_dispatch_closure = false;
+    for item in &file.items {
+        let syn::Item::Fn(item) = item else {
+            continue;
+        };
+        let body = normalized_tokens(&item.block);
+        if item.sig.ident == "wire" {
+            let bridge =
+                body.find("eventing_composition::bridge_generated_audit_subscriptions(bindings)");
+            let validate = body.find("validate_audit_closure(&subscriptions)");
+            let budget_gate = body.find("pg.validate_relay_budget(budget)");
+            let connect = body.find("amqp::AmqpRuntimeDeps::connect(");
+            bridge_and_budget = matches!(
+                (bridge, validate, budget_gate, connect),
+                (Some(bridge), Some(validate), Some(budget_gate), Some(connect))
+                    if bridge < validate && validate < budget_gate && budget_gate < connect
+            );
+        }
+        if item.sig.ident == "wire_subscribers" {
+            consumer_bundle = [
+                "subscriptions:Vec<eventing_composition::BridgedSubscription>",
+                "pg.infra().inbox()",
+                "LeaseConfig::from_ttl(inbox.lease_ttl())",
+                "eventing_composition::AuditConsumerFactory::new(pg,audit_key).worker(",
+                "subscription.dispatch_token().clone()",
+                "eventing_composition::WorkerInputs::new(",
+                "matchsubscription.readiness()",
+                "SubscriberReadiness::Required=>",
+                "output.workers.push(worker)",
+                "output.probes.push(",
+                "wire_inbox_sweeper(pg,&mutoutput)?",
+            ]
+            .iter()
+            .all(|required| {
+                normalized_tokens(&item.sig).contains(required) || body.contains(required)
+            });
+        }
+        if item.sig.ident == "validate_audit_closure" {
+            audit_dispatch_closure = body.contains("subscriptions.len()==4")
+                && [
+                    "SubscriptionDispatchKey::IdentitySessionCreatedV1Audit",
+                    "SubscriptionDispatchKey::IdentityRoleAssignedV1Audit",
+                    "SubscriptionDispatchKey::IdentityRoleRevokedV1Audit",
+                    "SubscriptionDispatchKey::IdentityPolicyUpdatedV1Audit",
+                ]
+                .iter()
+                .all(|dispatch| body.contains(dispatch))
+                && !body
+                    .contains("SubscriptionDispatchKey::SettingsConfigVersionChangedV1Settings");
+        }
+    }
+
+    [
+        (
+            bridge_and_budget,
+            "identityaudit 必须先桥接并验证四条 audit closure，再校验 DB relay budget，最后连接 AMQP",
+        ),
+        (
+            consumer_bundle,
+            "identityaudit durable consumer 必须经共享 AuditConsumerFactory/WorkerInputs 并成对注册 Required worker/probe",
+        ),
+        (
+            audit_dispatch_closure,
+            "identityaudit 必须精确封闭四条 Identity-to-Audit generated dispatch",
+        ),
+    ]
+    .into_iter()
+    .filter(|(present, _)| !present)
+    .map(|(_, detail)| {
+        finding(
+            Rule::MissingBundleFragment,
+            path.display().to_string(),
+            detail.to_string(),
         )
     })
     .collect()
@@ -1530,8 +1945,8 @@ fn consumer_tx_plan_resolver_is_closed(item: &syn::ItemFn) -> bool {
         && signature.contains("capability:SubscriberCapability")
         && visitor.dispatch_is_closed
         && visitor.policy_is_closed
-        && body.contains("adapter_native_plan(")
-        && body.contains("settings_config_refresh_plan(")
+        && body.contains("require_adapter_native(")
+        && body.contains("require_settings_reconcile(")
 }
 
 #[derive(Default)]
@@ -1581,29 +1996,30 @@ impl<'ast> Visit<'ast> for ConsumerPolicyMatchVisitor {
 }
 
 fn consumer_tx_plan_matcher_is_closed(item: &syn::ItemFn, reconcile: bool) -> bool {
+    let signature = normalized_tokens(&item.sig);
     let body = normalized_tokens(&item.block);
     let mut visitor = ConsumerPolicyMatchVisitor::default();
     visitor.visit_block(&item.block);
     let common = [
-        "match execution",
-        "match effect",
-        "match policy",
-        "SubscriberCapability::AdapterNativeTransactional",
-        "SubscriberCapability::DomainReconcile",
-        "ExternalEffectPolicy::TransactionalOnly",
-        "ExternalEffectPolicy::IdempotencyKey",
-        "ExternalEffectPolicy::Reconcile",
-        "ExternalEffectPolicy::Compensated",
+        "execution:SubscriptionExecution",
+        "effect:Option<SubscriptionEffect>",
+        "policy:ExternalEffectPolicy",
+        "capability:SubscriberCapability",
     ]
     .iter()
-    .all(|required| body.contains(&required.replace(' ', "")));
+    .all(|required| signature.contains(required));
     let policy_specific = if reconcile {
-        body.contains("SubscriberCapability::DomainReconcile(effect)ifgenerated_matches")
+        body.contains("SubscriptionExecution::DomainEffect")
+            && body.contains("Some(SubscriptionEffect::SettingsConfigVersionRefresh)")
+            && body.contains("ExternalEffectPolicy::Reconcile")
+            && body.contains("SubscriberCapability::DomainReconcile(effect)ifgenerated_matches")
             && body.contains("into_owner::<settings::ConfigVersionReconciler>()")
-            && body.contains(".map(ConsumerTxPlan::SettingsConfigVersionChanged)")
     } else {
-        body.contains("SubscriberCapability::AdapterNativeTransactionalifgenerated_matches")
-            && body.contains("Ok(plan)")
+        body.contains("SubscriptionExecution::AdapterNative")
+            && body.contains("None")
+            && body.contains("ExternalEffectPolicy::TransactionalOnly")
+            && body.contains("SubscriberCapability::AdapterNativeTransactionalifgenerated_matches")
+            && body.contains("=>Ok(())")
     };
     common && policy_specific && !visitor.has_wildcard
 }
@@ -1784,10 +2200,13 @@ fn scan_bypass_content(path: &Path, content: &str) -> Vec<Finding<Rule>> {
 }
 
 fn allowed_bypass_exception(path: &Path, content: &str, fragment: &str) -> bool {
-    path == Path::new("adapters/postgres/src/fault_matrix.rs")
+    (path == Path::new("adapters/postgres/src/fault_matrix.rs")
         && fragment == "pg.infra().inbox("
         && content.contains("CONSISTENCY-FAULT-MATRIX-SEAM-01")
-        && content.matches("self.deps.infra().inbox()").count() == 3
+        && content.matches("self.deps.infra().inbox()").count() == 3)
+        || (path == Path::new(IDENTITYAUDIT_EVENTING_TARGET)
+            && fragment == "pg.infra().inbox("
+            && identityaudit_closure_findings(path, content).is_empty())
 }
 
 fn text_bypass_fragments(content: &str) -> BTreeSet<&'static str> {
@@ -4105,8 +4524,13 @@ impl RelayConstructorVisitor<'_> {
         let callee = normalized_tokens(call.func.as_ref());
         let owner = self.owner.as_deref().unwrap_or("<module>");
         let allowed = if callee.ends_with("amqp::AmqpRuntimeDeps::connect") {
-            self.path == Path::new("assemblies/runtime/src/event_transport.rs")
-                && owner == "wire_durable"
+            (self.path == Path::new("assemblies/runtime/src/event_transport.rs")
+                && owner == "wire_durable")
+                || (self.path == Path::new(IDENTITYAUDIT_EVENTING_TARGET)
+                    && owner == "wire"
+                    && call.args.get(2).is_some_and(|argument| {
+                        normalized_tokens(argument) == "budget.publish_timeout()"
+                    }))
         } else if callee.ends_with("AmqpPublisher::connect") {
             self.path == Path::new("adapters/amqp/src/bundle.rs")
                 && owner == "AmqpRuntimeDeps::connect"
@@ -6949,6 +7373,22 @@ mod tests {
     }
 
     #[test]
+    fn runtime_consumer_tx_compatibility_carrier_is_fail_closed() {
+        assert!(runtime_consumer_tx_compat_findings("pub mod event_transport;", false).is_empty());
+        for (runtime_lib, compatibility_file_exists) in [
+            ("mod consumer_tx; pub mod event_transport;", false),
+            ("pub mod event_transport;", true),
+        ] {
+            let findings =
+                runtime_consumer_tx_compat_findings(runtime_lib, compatibility_file_exists);
+            assert!(findings.iter().any(|finding| {
+                finding.rule == Rule::MissingBundleFragment
+                    && finding.detail.contains("compatibility carrier")
+            }));
+        }
+    }
+
+    #[test]
     fn scan_content_rejects_runtime_redis_inbox_direct_wire() {
         let findings = scan_runtime_content(
             Path::new(TARGET),
@@ -6990,14 +7430,8 @@ mod tests {
         let findings = scan_runtime_content(
             Path::new(TARGET),
             r#"
-            pub struct BridgedSubscription {
-                event: EventSpec,
-                subscription: SubscriptionSpec,
-                group: ConsumerGroup,
-                consumer_tx: ConsumerTxPlan,
-            }
             pub fn bridge_generated_subscriptions(bindings: Vec<SubscriberBinding>) {
-                bridge_subscriptions_with_events(bindings, generated::event::EVENTS)
+                eventing_composition::bridge_generated_subscriptions(bindings)
             }
             fn wire_event_transport(subscribers: Vec<BridgedSubscription>) {}
             fn wire_consumer_resource_bundle(pg: Pg, module: &mut Module) {
@@ -7019,20 +7453,15 @@ mod tests {
                 }
                 wire_inbox_sweeper(pg, timing, module)?;
             }
-            fn consumer_tx_worker_spec<P>(
-                handler: ConsumerTxHandler<P>,
-            ) {
-                spawn_consumer_ackable_tx_subscriber(handler);
-            }
-            fn resolve_consumer_tx_plan(
-                spec: SubscriptionSpec,
-                execution: SubscriberExecution,
-            ) -> anyhow::Result<ConsumerTxPlan> {
-                match spec.dispatch() {
-                    SubscriptionDispatchKey::SeedHappenedV1Audit =>
-                        adapter_native_plan(spec, execution),
-                    SubscriptionDispatchKey::FutureEventV1Audit =>
-                        adapter_native_plan(spec, execution),
+            fn consumer_tx_worker_for_subscription(token: Token, pg: Pg, audit_key: Key, inputs: Inputs) {
+                match token.dispatch() {
+                    SubscriptionDispatchKey::IdentityPolicyUpdatedV1Audit
+                    | SubscriptionDispatchKey::IdentityRoleAssignedV1Audit
+                    | SubscriptionDispatchKey::IdentityRoleRevokedV1Audit
+                    | SubscriptionDispatchKey::IdentitySessionCreatedV1Audit =>
+                        AuditConsumerFactory::new(pg, audit_key).worker(token, inputs),
+                    SubscriptionDispatchKey::SettingsConfigVersionChangedV1Settings =>
+                        SettingsConsumerFactory::new(pg).worker(token, inputs),
                 }
             }
             "#,
@@ -7051,10 +7480,10 @@ mod tests {
 
     #[test]
     fn scan_content_rejects_consumer_tx_plan_without_external_effect_policy() {
-        let canonical = include_str!("../../assemblies/runtime/src/event_transport.rs");
-        let red = canonical.replace("        spec.external_effect_policy(),\n", "");
+        let canonical = include_str!("../../composition/eventing/src/lib.rs");
+        let red = canonical.replace("    policy: ExternalEffectPolicy,\n", "");
         assert_ne!(red, canonical);
-        let findings = scan_runtime_content(Path::new(TARGET), &red);
+        let findings = scan_composition_content(Path::new(EVENTING_COMPOSITION_TARGET), &red);
         assert!(findings.iter().any(|finding| {
             finding.rule == Rule::MissingBundleFragment
                 && finding.detail.contains("externalEffectPolicy")
@@ -7062,10 +7491,10 @@ mod tests {
     }
 
     #[test]
-    fn workspace_runtime_closes_consumer_tx_external_effect_policy() {
-        let findings = scan_runtime_content(
-            Path::new(TARGET),
-            include_str!("../../assemblies/runtime/src/event_transport.rs"),
+    fn workspace_composition_closes_consumer_tx_external_effect_policy() {
+        let findings = scan_composition_content(
+            Path::new(EVENTING_COMPOSITION_TARGET),
+            include_str!("../../composition/eventing/src/lib.rs"),
         );
         assert!(
             !findings.iter().any(|finding| {
@@ -7077,9 +7506,133 @@ mod tests {
     }
 
     #[test]
+    fn workspace_eventing_composition_shape_is_closed() {
+        let findings = scan_composition_content(
+            Path::new(EVENTING_COMPOSITION_TARGET),
+            include_str!("../../composition/eventing/src/lib.rs"),
+        );
+        assert!(findings.is_empty(), "{findings:#?}");
+    }
+
+    #[test]
+    fn eventing_composition_guard_rejects_shared_source_drift() {
+        let canonical = include_str!("../../composition/eventing/src/lib.rs");
+        for (needle, replacement) in [
+            (
+                "bridge_subscriptions_with_events_selected(bindings, generated::event::EVENTS, admitted_dispatch)",
+                "bridge_subscriptions_with_events_selected(bindings, &[], admitted_dispatch)",
+            ),
+            (
+                "        admitted_audit_dispatch,\n",
+                "        admitted_dispatch,\n",
+            ),
+            ("cfg!(feature = \"audit-consumers\")", "true"),
+            (
+                ".policy_updated_consumer_tx(",
+                ".role_assigned_consumer_tx(",
+            ),
+        ] {
+            let red = canonical.replace(needle, replacement);
+            assert_ne!(red, canonical, "missing fixture needle: {needle}");
+            let findings = scan_composition_content(Path::new(EVENTING_COMPOSITION_TARGET), &red);
+            assert!(
+                findings
+                    .iter()
+                    .any(|finding| finding.rule == Rule::MissingBundleFragment),
+                "mutation `{needle}` must fail closed: {findings:#?}"
+            );
+        }
+    }
+
+    #[test]
+    fn eventing_composition_guard_rejects_audit_handler_permutation() {
+        let canonical = include_str!("../../composition/eventing/src/lib.rs");
+        let red = canonical
+            .replace(".role_assigned_consumer_tx(", ".permuted_role_consumer_tx(")
+            .replace(".role_revoked_consumer_tx(", ".role_assigned_consumer_tx(")
+            .replace(".permuted_role_consumer_tx(", ".role_revoked_consumer_tx(");
+        assert_ne!(red, canonical, "permutation fixture must mutate source");
+        let findings = scan_composition_content(Path::new(EVENTING_COMPOSITION_TARGET), &red);
+        assert!(
+            findings.iter().any(|finding| {
+                finding.rule == Rule::MissingBundleFragment
+                    && finding.detail.contains("Postgres handler")
+            }),
+            "role-assigned / role-revoked permutation must fail closed: {findings:#?}"
+        );
+    }
+
+    #[test]
+    fn identityaudit_durable_closure_guard_has_green_and_red_witnesses() {
+        let canonical = include_str!("../../assemblies/identityaudit/src/eventing.rs");
+        let path = Path::new(IDENTITYAUDIT_EVENTING_TARGET);
+        assert!(
+            identityaudit_closure_findings(path, canonical).is_empty(),
+            "canonical identityaudit closure must remain admitted"
+        );
+
+        for (needle, replacement) in [
+            (
+                "validate_audit_closure(&subscriptions)?;",
+                "let _ = &subscriptions;",
+            ),
+            (
+                "eventing_composition::AuditConsumerFactory::new",
+                "eventing_composition::SettingsConsumerFactory::new",
+            ),
+        ] {
+            let red = canonical.replace(needle, replacement);
+            assert_ne!(red, canonical, "missing fixture needle: {needle}");
+            assert!(
+                identityaudit_closure_findings(path, &red)
+                    .iter()
+                    .any(|finding| finding.rule == Rule::MissingBundleFragment),
+                "mutation `{needle}` must fail closed"
+            );
+        }
+    }
+
+    #[test]
+    fn identityaudit_bypass_and_relay_budget_exceptions_are_fail_closed() {
+        let canonical = include_str!("../../assemblies/identityaudit/src/eventing.rs");
+        let path = Path::new(IDENTITYAUDIT_EVENTING_TARGET);
+        assert!(scan_bypass_content(path, canonical).is_empty());
+
+        let bypass_red = canonical.replace(
+            "eventing_composition::AuditConsumerFactory::new",
+            "eventing_composition::SettingsConsumerFactory::new",
+        );
+        assert!(
+            scan_bypass_content(path, &bypass_red)
+                .iter()
+                .any(|finding| {
+                    finding.rule == Rule::ProductionConsumerBundleBypass
+                        && finding.detail.contains("pg.infra().inbox(")
+                })
+        );
+
+        let green = vec![(
+            PathBuf::from(IDENTITYAUDIT_EVENTING_TARGET),
+            "fn wire() { amqp::AmqpRuntimeDeps::connect(url, name, budget.publish_timeout()); }"
+                .to_string(),
+        )];
+        assert!(scan_relay_budget_constructor_callsites(&green).is_empty());
+        let red = vec![(
+            PathBuf::from(IDENTITYAUDIT_EVENTING_TARGET),
+            "fn wire() { amqp::AmqpRuntimeDeps::connect(url, name, Duration::from_secs(40)); }"
+                .to_string(),
+        )];
+        assert!(
+            scan_relay_budget_constructor_callsites(&red)
+                .iter()
+                .any(|finding| finding.rule == Rule::OutboxRelayBudget)
+        );
+    }
+
+    #[test]
     fn scan_content_rejects_symbol_only_consumer_tx_plan_resolver() {
-        let findings = scan_runtime_content(
-            Path::new(TARGET),
+        let findings = scan_composition_content(
+            Path::new(EVENTING_COMPOSITION_TARGET),
             r#"
             pub struct BridgedSubscription {
                 event: EventSpec,
@@ -7090,27 +7643,7 @@ mod tests {
             pub fn bridge_generated_subscriptions(bindings: Vec<SubscriberBinding>) {
                 bridge_subscriptions_with_events(bindings, generated::event::EVENTS)
             }
-            fn wire_event_transport(subscribers: Vec<BridgedSubscription>) {}
-            fn wire_consumer_resource_bundle(pg: Pg, module: &mut Module) {
-                let group = subscription.group().clone();
-                let inbox = pg.infra().inbox();
-                let lease_cfg = LeaseConfig::from_ttl(inbox.lease_ttl());
-                let dlx = DynDeadLetterStore::new_box(
-                    pg.infra().dead_letter(security.dlx_payload_protector.clone()),
-                );
-                let handler =
-                    consumer_tx_handler_for_subscription(pg, &subscription, audit_key)?;
-                let worker = spawn_consumer_ackable_tx_subscriber();
-                let consumer_probe = probe();
-                match subscription.readiness() {
-                    SubscriberReadiness::Required => {
-                        module.workers.push(worker);
-                        module.probes.push(consumer_probe);
-                    }
-                }
-                wire_inbox_sweeper(pg, timing, module)?;
-            }
-            fn resolve_consumer_tx_plan() {
+            fn resolve_parts() {
                 if false {
                     SubscriberExecution::AdapterNative;
                     SubscriberExecution::DomainEffect;
@@ -7124,32 +7657,41 @@ mod tests {
             "#,
         );
         assert!(findings.iter().any(|finding| {
-            finding.rule == Rule::MissingBundleFragment && finding.detail.contains("单一 resolver")
+            finding.rule == Rule::MissingBundleFragment && finding.detail.contains("resolver")
         }));
     }
 
     #[allow(clippy::expect_used)]
     fn workspace_consumer_tx_plan_resolver() -> syn::ItemFn {
-        syn::parse_file(include_str!(
-            "../../assemblies/runtime/src/event_transport.rs"
-        ))
-        .expect("runtime event transport parses")
-        .items
-        .into_iter()
-        .find_map(|item| match item {
-            syn::Item::Fn(item) if item.sig.ident == "resolve_consumer_tx_plan_parts" => Some(item),
-            _ => None,
+        syn::parse_file(include_str!("../../composition/eventing/src/lib.rs"))
+            .expect("eventing composition parses")
+            .items
+            .into_iter()
+            .find_map(|item| match item {
+                syn::Item::Fn(item) if item.sig.ident == "resolve_parts" => Some(item),
+                _ => None,
+            })
+            .expect("composition resolver exists")
+    }
+
+    fn resolver_dispatch_match_mut(resolver: &mut syn::ItemFn) -> Option<&mut syn::ExprMatch> {
+        resolver.block.stmts.iter_mut().find_map(|statement| {
+            let syn::Stmt::Local(local) = statement else {
+                return None;
+            };
+            let initializer = local.init.as_mut()?;
+            let syn::Expr::Match(mapping) = initializer.expr.as_mut() else {
+                return None;
+            };
+            (normalized_tokens(&mapping.expr) == "dispatch").then_some(mapping)
         })
-        .expect("runtime resolver exists")
     }
 
     #[test]
     #[allow(clippy::expect_used, clippy::panic)]
     fn consumer_tx_plan_resolver_rejects_fail_open_wildcard() {
         let mut resolver = workspace_consumer_tx_plan_resolver();
-        let Some(syn::Stmt::Expr(syn::Expr::Match(mapping), None)) =
-            resolver.block.stmts.last_mut()
-        else {
+        let Some(mapping) = resolver_dispatch_match_mut(&mut resolver) else {
             panic!("resolver must end in match");
         };
         mapping.arms.last_mut().expect("dispatch arm").pat = syn::parse_quote!(_);
@@ -7160,9 +7702,7 @@ mod tests {
     #[allow(clippy::expect_used, clippy::panic)]
     fn consumer_tx_plan_resolver_accepts_new_typed_dispatch_without_shadow_registry() {
         let mut resolver = workspace_consumer_tx_plan_resolver();
-        let Some(syn::Stmt::Expr(syn::Expr::Match(mapping), None)) =
-            resolver.block.stmts.last_mut()
-        else {
+        let Some(mapping) = resolver_dispatch_match_mut(&mut resolver) else {
             panic!("resolver must end in match");
         };
         let mut arm = mapping.arms.last().expect("dispatch arm").clone();

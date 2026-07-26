@@ -32,7 +32,7 @@
   "localtxActiveCount": 5,
   "localtxJourneyCount": 5,
   "localtxBackendProfileCount": 5,
-  "localonlyContractCount": 6,
+  "localonlyContractCount": 7,
   "successMetrics": {
     "schemaVersion": 1,
     "planDigest": "1210c09d825e3089ceb4f537ed544f2fabaf95a02f547c5129216d9233bbc8ef",

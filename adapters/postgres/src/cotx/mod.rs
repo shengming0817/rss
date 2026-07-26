@@ -592,7 +592,7 @@ impl<L> PgWritePool<L> {
     ///
     /// Authorization is supplied by an HTTP mounted-producer receipt; credential-security uses
     /// the non-retrying [`Self::producer_tx`] path with its command-derived move-only proof.
-    #[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
+    #[cfg(feature = "domain-settings")]
     pub(crate) async fn retry_producer_tx<S, A, T, F, E>(
         &self,
         scope: S,

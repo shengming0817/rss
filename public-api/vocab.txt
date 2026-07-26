@@ -110,6 +110,7 @@ pub vocab::authz::RoutePermissionId::SettingsConfigGet
 pub vocab::authz::RoutePermissionId::SettingsConfigPublish
 pub vocab::authz::RoutePermissionId::SettingsConfigRollback
 pub vocab::authz::RoutePermissionId::SettingsSecretPublish
+pub vocab::authz::RoutePermissionId::SettingsSecretResolve
 impl vocab::authz::RoutePermissionId
 pub const vocab::authz::RoutePermissionId::ALL: &'static [Self]
 pub const fn vocab::authz::RoutePermissionId::as_str(self) -> &'static str
@@ -1678,6 +1679,7 @@ pub vocab::RoutePermissionId::SettingsConfigGet
 pub vocab::RoutePermissionId::SettingsConfigPublish
 pub vocab::RoutePermissionId::SettingsConfigRollback
 pub vocab::RoutePermissionId::SettingsSecretPublish
+pub vocab::RoutePermissionId::SettingsSecretResolve
 impl vocab::authz::RoutePermissionId
 pub const vocab::authz::RoutePermissionId::ALL: &'static [Self]
 pub const fn vocab::authz::RoutePermissionId::as_str(self) -> &'static str

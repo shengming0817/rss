@@ -206,6 +206,12 @@ pub enum PgError {
     /// Each DLX workload role must have exactly its fixed function executions.
     #[error("postgres DLX lifecycle capability: privileges are not exact")]
     DlxLifecyclePrivileges,
+    /// Audit-chain key pin function could not be executed on the serving writer lane.
+    #[error("postgres audit chain key identity probe failed")]
+    AuditChainKeyProbe(#[source] sqlx::Error),
+    /// Configured key identity or key verification tag disagrees with the durable singleton.
+    #[error("postgres audit chain key identity mismatch")]
+    AuditChainKeyMismatch,
 }
 
 /// 启动期 legacy plaintext `ConfigValue` 行策略。

@@ -189,6 +189,8 @@ impl ProviderRoleBatches {
     ) -> anyhow::Result<SettingsSecretResolverConstructor> {
         self.settings_secret_resolver.take().ok_or_else(|| anyhow::anyhow!("settingsonly provider constructor 'settings-secret-resolver' was consumed more than once"))
     }
+    #[allow(clippy::too_many_arguments)]
+    // reason: generated exact-join closure has one move-only receipt per declared provider role.
     pub(crate) fn finish(
         self,
         inventory: &bootstrap::DomainModuleResult,

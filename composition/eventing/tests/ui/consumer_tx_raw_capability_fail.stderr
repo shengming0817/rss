@@ -1,0 +1,11 @@
+error[E0603]: function `spawn_consumer_ackable_tx_subscriber` is private
+ --> tests/ui/consumer_tx_raw_capability_fail.rs:1:27
+  |
+1 | use eventing_composition::spawn_consumer_ackable_tx_subscriber;
+  |                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ private function
+  |
+note: the function `spawn_consumer_ackable_tx_subscriber` is defined here
+ --> src/lib.rs
+  |
+  | use consumer_tx::{ConsumerTxHandler, policy, spawn_consumer_ackable_tx_subscriber};
+  |                                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

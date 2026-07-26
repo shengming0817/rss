@@ -893,12 +893,12 @@ mod tests {
     fn real_workspace_execution_inventory_is_exact_and_non_empty() -> Result<()> {
         let inventory =
             crate::consistency_effects::local_only_execution_inventory(&crate::workspace_root()?)?;
-        assert_eq!(inventory.active_contract_ids.len(), 6);
+        assert_eq!(inventory.active_contract_ids.len(), 7);
         assert_eq!(
             inventory.active_contract_ids,
             inventory.source_receipt_contract_ids
         );
-        assert_eq!(inventory.tests.len(), 6);
+        assert_eq!(inventory.tests.len(), 7);
         assert!(inventory.tests.iter().all(|test| test.test_target == "lib"));
         assert_eq!(
             inventory
@@ -939,7 +939,7 @@ mod tests {
             .active_contract_ids
             .into_iter()
             .collect::<Vec<_>>();
-        assert_eq!(canonical.len(), 6);
+        assert_eq!(canonical.len(), 7);
 
         let report_root = crate::testutil::unique_tmp("localonly-nextest-failure");
         fs::create_dir_all(&report_root)?;
@@ -952,7 +952,7 @@ mod tests {
         let result =
             execute_with_suite_runner(&workspace, request, |_root, packages, tests, raw_dir| {
                 assert!(!packages.is_empty());
-                assert_eq!(tests.len(), 6);
+                assert_eq!(tests.len(), 7);
                 for contract_id in &canonical {
                     fs::write(
                         raw_dir.join(format!("{contract_id}.json")),

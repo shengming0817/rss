@@ -17,6 +17,16 @@ final-status-level = "slow"
 [profile.ci-core.junit]
 path = "junit.xml"
 
+# IdentityAudit diff-coverage supplement: run the one real executable journey while retaining a
+# workspace-wide llvm-cov report. The filter is profile-owned because cargo-llvm-cov's nextest
+# bridge does not forward `-E`; callers cannot silently expand this lane to other integration tests.
+[profile.coverage-identityaudit]
+inherits = "ci-core"
+default-filter = "binary(identityaudit_runtime)"
+
+[profile.coverage-identityaudit.junit]
+path = "junit.xml"
+
 # 真集成 lane profile（#1137，`cargo xtask ci-integration --shard <name>`）：
 # testcontainers self-provision 容器冷启动（尤其 rabbitmq-management ~250MB 首拉）可超默认 60s slow-timeout，
 # 故放宽到 300s；fail-fast=false 让当前 shard 的其它测试继续产出故障证据。

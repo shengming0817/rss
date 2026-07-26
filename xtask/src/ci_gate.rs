@@ -1958,7 +1958,8 @@ mod tests {
                         "identity.policies-list",
                         "identity.profile",
                         "identity.roles-list",
-                        "settings.config-list"
+                        "settings.config-list",
+                        "settings.secret-resolve"
                     ]),
                 ),
             ),
@@ -1981,9 +1982,9 @@ mod tests {
             fs::write(&path, serde_json::to_vec_pretty(&report)?)?;
             if label == "equal-count-wrong-set" {
                 let parsed = ValidatedLocalOnlyReport::load(&path)?;
-                assert_eq!(parsed.active_contract_ids().len(), 6);
-                assert_eq!(parsed.source_receipt_contract_ids().len(), 6);
-                assert_eq!(parsed.executed_contract_ids().len(), 6);
+                assert_eq!(parsed.active_contract_ids().len(), 7);
+                assert_eq!(parsed.source_receipt_contract_ids().len(), 7);
+                assert_eq!(parsed.executed_contract_ids().len(), 7);
             }
             let result = evaluate_disk_fixture(&root, &fixture);
             if label == "equal-count-wrong-set" {
@@ -2314,7 +2315,7 @@ mod tests {
         assert_eq!(envelope["localtxActiveCount"], 5);
         assert_eq!(envelope["localtxJourneyCount"], 5);
         assert_eq!(envelope["localtxBackendProfileCount"], 5);
-        assert_eq!(envelope["localonlyContractCount"], 6);
+        assert_eq!(envelope["localonlyContractCount"], 7);
         assert_eq!(envelope["successMetrics"]["executedJobs"], CiJobKey::COUNT);
         assert_eq!(
             envelope["successMetrics"]["recommendedJobs"],
@@ -2334,7 +2335,7 @@ mod tests {
         assert!(summary.contains("Result: `success`"));
         assert!(summary.contains("LocalTx required evidence: `5/5/5`"));
         assert!(summary.contains(&format!(
-            "LocalOnly required evidence: exact-set active/source/executed = `6/6/6` @ `{}`",
+            "LocalOnly required evidence: exact-set active/source/executed = `7/7/7` @ `{}`",
             "e".repeat(40)
         )));
         fs::remove_dir_all(root)?;

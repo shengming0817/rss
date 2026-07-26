@@ -1430,6 +1430,29 @@ impl PgDomainDeps<caps::Identity> {
 
 #[cfg(feature = "domain-audit")]
 impl PgDomainDeps<caps::Audit> {
+    /// Pin and verify the closed audit-chain HMAC key before event consumers become reachable.
+    ///
+    /// The database function initializes only on an empty ledger. Once pinned, both the typed key
+    /// generation and the keyed verification tag must match on every restart; rotation requires a
+    /// dedicated migration and cannot happen by replacing an environment secret.
+    pub async fn verify_audit_chain_key(
+        &self,
+        identity: crate::AuditChainKeyIdentity,
+        verification_tag: &[u8],
+    ) -> Result<(), crate::PgError> {
+        let matched: bool =
+            sqlx::query_scalar("SELECT rss_verify_audit_chain_key_v1($1::smallint, $2::bytea)")
+                .bind(identity.as_i16())
+                .bind(verification_tag)
+                .fetch_one(self.stores.writer_capability().pool())
+                .await
+                .map_err(crate::PgError::AuditChainKeyProbe)?;
+        if !matched {
+            return Err(crate::PgError::AuditChainKeyMismatch);
+        }
+        Ok(())
+    }
+
     /// audit 审计链仓储（append-only per-tenant keyed-HMAC chain + RLS）。
     ///
     /// `hasher` 持 keyed-HMAC verifier + key（构造器必填，无 key 不可造 hasher）。

@@ -1,0 +1,47 @@
+[package]
+name = "eventing-composition"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[features]
+default = []
+audit-consumers = [
+  "dep:audit",
+  "dep:crypto-adapter",
+  "postgres/domain-audit",
+]
+settings-consumers = [
+  "dep:settings",
+  "postgres/domain-settings",
+]
+test-support = []
+
+[dependencies]
+anyhow = { workspace = true }
+audit = { path = "../../crates/audit", optional = true }
+bootstrap = { path = "../../crates/bootstrap" }
+consistency = { path = "../../crates/consistency" }
+crypto-adapter = { path = "../../adapters/crypto", optional = true }
+diport = { path = "../../crates/diport" }
+eventexec = { path = "../../crates/eventexec" }
+futures = { workspace = true }
+generated = { path = "../../generated" }
+metrics = { workspace = true }
+postgres = { path = "../../adapters/postgres" }
+primitives = { path = "../../crates/primitives" }
+settings = { path = "../../crates/settings", optional = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt", "sync"] }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+vocab = { path = "../../crates/vocab" }
+
+[dev-dependencies]
+settings = { path = "../../crates/settings", features = ["test-support"] }
+tracing-subscriber = { workspace = true }
+trybuild = { workspace = true }

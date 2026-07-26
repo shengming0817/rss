@@ -792,13 +792,13 @@ fn complete_fact_evidence(
     let manifest_path = repo_label(root, &contract.dir.join("contract.toml"))?;
     let generated = crate::codegen::GeneratedCarrier::from_contract(contract)?;
     let spec = generated.item(crate::codegen::GeneratedItem::Spec)?;
-    let runtime = ["bridge_generated_subscriptions", "resolve_consumer_tx_plan"]
+    let runtime = ["bridge_generated_subscriptions", "resolve_parts"]
         .iter()
         .map(|symbol| {
             Carrier::new(
                 root,
                 CarrierKind::RustSymbol,
-                "assemblies/runtime/src/event_transport.rs",
+                "composition/eventing/src/lib.rs",
                 symbol,
             )
         })
@@ -826,10 +826,11 @@ fn fact_effect_policy_carriers(
     root: &Path,
     subscriptions: &[SubscriptionIdentity],
 ) -> Result<Vec<Carrier>> {
-    verify_runtime_policy_edge(
+    verify_policy_edge(
         root,
         "policy executor",
-        "consumer_tx_worker_spec",
+        "composition/eventing/src/lib.rs",
+        "worker_spec",
         PolicyCallRequirement::exact("spawn_consumer_ackable_tx_subscriber", ["", ""]),
     )?;
     let mut carriers = Vec::new();
@@ -849,13 +850,13 @@ fn fact_effect_policy_carriers(
     carriers.push(Carrier::new(
         root,
         CarrierKind::RustSymbol,
-        "assemblies/runtime/src/event_transport.rs",
-        "resolve_consumer_tx_plan",
+        "composition/eventing/src/lib.rs",
+        "resolve_parts",
     )?);
     carriers.push(Carrier::new(
         root,
         CarrierKind::RustSymbol,
-        "assemblies/runtime/src/consumer_tx.rs",
+        "composition/eventing/src/consumer_tx.rs",
         "spawn_consumer_ackable_tx_subscriber",
     )?);
     carriers.sort_by(|left, right| left.sort_key().cmp(&right.sort_key()));
@@ -937,6 +938,7 @@ struct SubscriptionPolicyChain {
 struct PolicyRouteSpec {
     dispatch_pattern: &'static str,
     plan_pattern: &'static str,
+    worker_symbol: &'static str,
     resolver_call: PolicyCallRequirement,
     handler_call: PolicyCallRequirement,
     worker_call: PolicyCallRequirement,
@@ -951,23 +953,21 @@ impl PolicyRouteSpec {
         Self {
             dispatch_pattern,
             plan_pattern,
-            resolver_call: PolicyCallRequirement::exact("adapter_native_plan", [plan_pattern, ""]),
+            worker_symbol: "AuditConsumerFactory::worker",
+            resolver_call: PolicyCallRequirement::exact("require_adapter_native", ["", ""]),
             handler_call: PolicyCallRequirement::suffix(handler_constructor),
-            worker_call: PolicyCallRequirement::prefix(
-                "consumer_tx_worker_spec::<policy::TransactionalOnly,",
-            ),
+            worker_call: PolicyCallRequirement::prefix("worker_spec::<policy::TransactionalOnly,"),
         }
     }
 
     const fn settings() -> Self {
         Self {
             dispatch_pattern: "SubscriptionDispatchKey::SettingsConfigVersionChangedV1Settings",
-            plan_pattern: "ConsumerTxPlan::SettingsConfigVersionChanged(effect)",
-            resolver_call: PolicyCallRequirement::exact("settings_config_refresh_plan", ["", ""]),
+            plan_pattern: "DispatchPlan::ConfigVersionChanged(effect)",
+            worker_symbol: "SettingsConsumerFactory::worker",
+            resolver_call: PolicyCallRequirement::exact("require_settings_reconcile", ["", ""]),
             handler_call: PolicyCallRequirement::suffix(".config_version_changed_consumer_tx"),
-            worker_call: PolicyCallRequirement::prefix(
-                "consumer_tx_worker_spec::<policy::Reconcile,",
-            ),
+            worker_call: PolicyCallRequirement::prefix("worker_spec::<policy::Reconcile,"),
         }
     }
 }
@@ -985,7 +985,7 @@ fn subscription_policy_chain(
                 "SESSION_CREATED_SPEC",
                 PolicyRouteSpec::audit(
                     "SubscriptionDispatchKey::IdentitySessionCreatedV1Audit",
-                    "ConsumerTxPlan::AuditSessionCreated",
+                    "DispatchPlan::SessionCreated",
                     ".session_created_consumer_tx",
                 ),
             )
@@ -995,7 +995,7 @@ fn subscription_policy_chain(
                 "ROLE_ASSIGNED_SPEC",
                 PolicyRouteSpec::audit(
                     "SubscriptionDispatchKey::IdentityRoleAssignedV1Audit",
-                    "ConsumerTxPlan::AuditRoleAssigned",
+                    "DispatchPlan::RoleAssigned",
                     ".role_assigned_consumer_tx",
                 ),
             )
@@ -1005,7 +1005,7 @@ fn subscription_policy_chain(
                 "ROLE_REVOKED_SPEC",
                 PolicyRouteSpec::audit(
                     "SubscriptionDispatchKey::IdentityRoleRevokedV1Audit",
-                    "ConsumerTxPlan::AuditRoleRevoked",
+                    "DispatchPlan::RoleRevoked",
                     ".role_revoked_consumer_tx",
                 ),
             )
@@ -1015,7 +1015,7 @@ fn subscription_policy_chain(
                 "POLICY_UPDATED_SPEC",
                 PolicyRouteSpec::audit(
                     "SubscriptionDispatchKey::IdentityPolicyUpdatedV1Audit",
-                    "ConsumerTxPlan::AuditPolicyUpdated",
+                    "DispatchPlan::PolicyUpdated",
                     ".policy_updated_consumer_tx",
                 ),
             )
@@ -1062,7 +1062,7 @@ const fn audit_policy_chain(
         },
         route,
         handler: PolicySymbolSpec {
-            repo_path: "assemblies/runtime/src/consumer_tx.rs",
+            repo_path: "composition/eventing/src/consumer_tx.rs",
             symbol: "PgAuditConsumerTx::handle",
             required_trait: Some("ConsumerTxHandler<policy::TransactionalOnly>"),
             required_call: Some(PolicyCallRequirement::exact(
@@ -1090,7 +1090,7 @@ const fn settings_policy_chain() -> SubscriptionPolicyChain {
         },
         route: PolicyRouteSpec::settings(),
         handler: PolicySymbolSpec {
-            repo_path: "assemblies/runtime/src/consumer_tx.rs",
+            repo_path: "composition/eventing/src/consumer_tx.rs",
             symbol: "PgSettingsConsumerTx::handle",
             required_trait: Some("ConsumerTxHandler<policy::Reconcile>"),
             required_call: Some(PolicyCallRequirement::exact(
@@ -1105,7 +1105,8 @@ fn verify_runtime_policy_route(root: &Path, route: PolicyRouteSpec) -> Result<()
     verify_policy_match_arm(
         root,
         "policy plan dispatch",
-        "resolve_consumer_tx_plan_parts",
+        "composition/eventing/src/lib.rs",
+        "resolve_parts",
         "dispatch",
         route.dispatch_pattern,
         &[route.resolver_call],
@@ -1113,8 +1114,9 @@ fn verify_runtime_policy_route(root: &Path, route: PolicyRouteSpec) -> Result<()
     verify_policy_match_arm(
         root,
         "policy worker selection",
-        "consumer_tx_worker_for_subscription",
-        "&subscription.consumer_tx",
+        "composition/eventing/src/lib.rs",
+        route.worker_symbol,
+        "token.plan",
         route.plan_pattern,
         &[route.handler_call, route.worker_call],
     )?;
@@ -1124,49 +1126,47 @@ fn verify_runtime_policy_route(root: &Path, route: PolicyRouteSpec) -> Result<()
 fn verify_policy_match_arm(
     root: &Path,
     stage: &str,
-    function_name: &str,
+    repo_path: &str,
+    symbol: &str,
     match_input: &str,
     arm_pattern: &str,
     required_calls: &[PolicyCallRequirement],
 ) -> Result<()> {
-    const RUNTIME_PATH: &str = "assemblies/runtime/src/event_transport.rs";
     let source = generated_file::read_stable_utf8_file(
-        &root.join(RUNTIME_PATH),
+        &root.join(repo_path),
         MAX_RUST_CARRIER_BYTES,
         "ConsumerTx policy carrier",
     )?;
     let syntax = syn::parse_file(&source)
-        .with_context(|| format!("cannot parse ConsumerTx policy carrier {RUNTIME_PATH}"))?;
-    let functions = syntax
-        .items
-        .iter()
-        .filter_map(|item| {
-            let syn::Item::Fn(function) = item else {
-                return None;
-            };
-            (function.sig.ident == function_name && !attrs_are_conditional(&function.attrs))
-                .then_some(function)
-        })
-        .collect::<Vec<_>>();
+        .with_context(|| format!("cannot parse ConsumerTx policy carrier {repo_path}"))?;
+    let blocks = exact_policy_symbol_blocks(&syntax.items, symbol);
     ensure!(
-        functions.len() == 1,
-        "ConsumerTx {stage} must resolve exact production carrier {RUNTIME_PATH}::{function_name} once, got {}",
-        functions.len()
+        blocks.len() == 1,
+        "ConsumerTx {stage} must resolve exact production carrier {repo_path}::{symbol} once, got {}",
+        blocks.len()
     );
-    let matches = functions[0]
+    let matches = blocks[0]
         .block
         .stmts
         .iter()
         .filter_map(|statement| {
-            let syn::Stmt::Expr(syn::Expr::Match(expression), _) = statement else {
-                return None;
+            let expression = match statement {
+                syn::Stmt::Expr(syn::Expr::Match(expression), _) => expression,
+                syn::Stmt::Local(local) => {
+                    let initializer = local.init.as_ref()?;
+                    let syn::Expr::Match(expression) = initializer.expr.as_ref() else {
+                        return None;
+                    };
+                    expression
+                }
+                _ => return None,
             };
             (policy_tokens(&expression.expr) == match_input).then_some(expression)
         })
         .collect::<Vec<_>>();
     ensure!(
         matches.len() == 1,
-        "ConsumerTx {stage} carrier {RUNTIME_PATH}::{function_name} must match exact input `{match_input}` once, got {}",
+        "ConsumerTx {stage} carrier {repo_path}::{symbol} must match exact input `{match_input}` once, got {}",
         matches.len()
     );
     let arms = matches[0]
@@ -1176,7 +1176,7 @@ fn verify_policy_match_arm(
         .collect::<Vec<_>>();
     ensure!(
         arms.len() == 1 && arms[0].guard.is_none(),
-        "ConsumerTx {stage} carrier {RUNTIME_PATH}::{function_name} must contain one unguarded `{arm_pattern}` arm"
+        "ConsumerTx {stage} carrier {repo_path}::{symbol} must contain one unguarded `{arm_pattern}` arm"
     );
     let calls = reachable_calls_in_expr(&arms[0].body);
     for required in required_calls {
@@ -1189,21 +1189,21 @@ fn verify_policy_match_arm(
     Ok(())
 }
 
-fn verify_runtime_policy_edge(
+fn verify_policy_edge(
     root: &Path,
     stage: &str,
+    repo_path: &str,
     function_name: &str,
     required_call: PolicyCallRequirement,
 ) -> Result<()> {
-    const RUNTIME_PATH: &str = "assemblies/runtime/src/event_transport.rs";
     let source = generated_file::read_stable_utf8_file(
-        &root.join(RUNTIME_PATH),
+        &root.join(repo_path),
         MAX_RUST_CARRIER_BYTES,
         "ConsumerTx policy carrier",
     )?;
     let syntax = syn::parse_file(&source)
-        .with_context(|| format!("cannot parse ConsumerTx policy carrier {RUNTIME_PATH}"))?;
-    verify_policy_call_edge_in_syntax(&syntax, stage, RUNTIME_PATH, function_name, required_call)
+        .with_context(|| format!("cannot parse ConsumerTx policy carrier {repo_path}"))?;
+    verify_policy_call_edge_in_syntax(&syntax, stage, repo_path, function_name, required_call)
 }
 
 fn verify_policy_call_edge_in_syntax(
@@ -1295,6 +1295,44 @@ fn verify_policy_symbol_in_syntax(
 struct PolicySymbolEvidence {
     trait_path: Option<String>,
     calls: Vec<ReachableCall>,
+}
+
+struct PolicySymbolBlock<'a> {
+    block: &'a syn::Block,
+}
+
+fn exact_policy_symbol_blocks<'a>(
+    items: &'a [syn::Item],
+    symbol: &str,
+) -> Vec<PolicySymbolBlock<'a>> {
+    let segments = symbol.split("::").collect::<Vec<_>>();
+    let mut matches = Vec::new();
+    for item in items {
+        match (segments.as_slice(), item) {
+            ([function], syn::Item::Fn(item))
+                if item.sig.ident == *function && !attrs_are_conditional(&item.attrs) =>
+            {
+                matches.push(PolicySymbolBlock { block: &item.block });
+            }
+            ([owner, method], syn::Item::Impl(item))
+                if !attrs_are_conditional(&item.attrs)
+                    && type_last_ident(&item.self_ty).as_deref() == Some(*owner) =>
+            {
+                for impl_item in &item.items {
+                    let syn::ImplItem::Fn(function) = impl_item else {
+                        continue;
+                    };
+                    if function.sig.ident == *method && !attrs_are_conditional(&function.attrs) {
+                        matches.push(PolicySymbolBlock {
+                            block: &function.block,
+                        });
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    matches
 }
 
 fn exact_policy_symbol_evidence(items: &[syn::Item], symbol: &str) -> Vec<PolicySymbolEvidence> {
@@ -2812,13 +2850,10 @@ impl DemoProvider {
                     }
                 };
                 for expected in [
+                    ("composition/eventing/src/lib.rs", "resolve_parts"),
+                    ("composition/eventing/src/consumer_tx.rs", handler),
                     (
-                        "assemblies/runtime/src/event_transport.rs",
-                        "resolve_consumer_tx_plan",
-                    ),
-                    ("assemblies/runtime/src/consumer_tx.rs", handler),
-                    (
-                        "assemblies/runtime/src/consumer_tx.rs",
+                        "composition/eventing/src/consumer_tx.rs",
                         "spawn_consumer_ackable_tx_subscriber",
                     ),
                 ] {

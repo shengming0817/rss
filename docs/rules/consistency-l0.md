@@ -190,7 +190,7 @@ finalizer，并把同一个 router/proof 作为 tuple 返回。三维直属 obse
 `receipt.contract_id()`。decoy/bait、错 route/path/method/provider、空或 wrong-but-finalized routes、
 cfg/sibling bait、async/closure/spawn、控制流、macro、wrapper/alias 与忽略 Result 的形状均
 fail-closed，并与 manifest / generated active registry exact-set 对账；缺少 receipt 同样阻断。当前基线为
-6/6 registered、missing none，详见 `docs/runbooks/202607141556-1771-local-only-proof.md`。
+7/7 registered、missing none，详见 `docs/runbooks/202607141556-1771-local-only-proof.md`。
 
 源码登记与本次执行证据严格分离。`verify --fast` 只运行上述静态 source receipt 门，不产生运行证据；完整
 `verify` 与始终计划、无分片的 `ci-local-only` 复用同一个 runner。runner 从静态 typed inventory 单源派生

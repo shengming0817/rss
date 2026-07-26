@@ -33,6 +33,7 @@ required-features = ["integration"]
 settings-composition = { path = "../../composition/settings" }
 identity-composition = { path = "../../composition/identity" }
 audit-composition = { path = "../../composition/audit" }
+eventing-composition = { path = "../../composition/eventing", features = ["audit-consumers", "settings-consumers"] }
 assembly-schema = { path = "../../crates/assembly-schema" }
 bootstrap = { path = "../../crates/bootstrap" }
 runtimeexec = { path = "../../crates/runtimeexec" }
@@ -128,6 +129,7 @@ integration = [
 ]
 
 [dev-dependencies]
+eventing-composition = { path = "../../composition/eventing", features = ["test-support"] }
 vault = { path = "../../adapters/vault", features = ["backend", "test-support"] }
 aws-smithy-http-client = { workspace = true, features = ["test-util"] }
 http = "1"

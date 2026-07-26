@@ -147,6 +147,7 @@ fn local_only_args(packages: &[String], tests: &[String]) -> Result<Vec<String>>
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum NextestProfile {
     CiCore,
+    CoverageIdentityaudit,
     Integration,
     FaultMatrix,
 }
@@ -155,6 +156,7 @@ impl NextestProfile {
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::CiCore => "ci-core",
+            Self::CoverageIdentityaudit => "coverage-identityaudit",
             Self::Integration => "integration",
             Self::FaultMatrix => "fault-matrix",
         }
@@ -163,6 +165,7 @@ impl NextestProfile {
     const fn junit_path(self) -> &'static str {
         match self {
             Self::CiCore => "target/nextest/ci-core/junit.xml",
+            Self::CoverageIdentityaudit => "target/nextest/coverage-identityaudit/junit.xml",
             Self::Integration => "target/nextest/integration/junit.xml",
             Self::FaultMatrix => "target/nextest/fault-matrix/junit.xml",
         }
@@ -269,18 +272,21 @@ pub(crate) enum CoreTestScope {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PackageFeature {
     TestkitContainers,
+    JourneysIntegration,
 }
 
 impl PackageFeature {
     const fn package(self) -> &'static str {
         match self {
             Self::TestkitContainers => "testkit",
+            Self::JourneysIntegration => "journeys",
         }
     }
 
     const fn feature(self) -> &'static str {
         match self {
             Self::TestkitContainers => "containers",
+            Self::JourneysIntegration => "integration",
         }
     }
 
@@ -291,6 +297,13 @@ impl PackageFeature {
 
 /// Single source for feature-gated code that the workspace llvm-cov run must instrument.
 const COVERAGE_FEATURES: [PackageFeature; 1] = [PackageFeature::TestkitContainers];
+
+/// Feature closure for the one real IdentityAudit executable journey appended to the same
+/// llvm-cov profdata. The nextest profile owns the exact binary selector.
+const IDENTITYAUDIT_COVERAGE_FEATURES: [PackageFeature; 2] = [
+    PackageFeature::TestkitContainers,
+    PackageFeature::JourneysIntegration,
+];
 
 impl CoreTestScope {
     pub(crate) const ALL: [Self; 11] = [
@@ -500,12 +513,7 @@ impl NextestInvocation {
     }
 
     pub(crate) fn for_coverage(output_path: &str) -> Result<Self> {
-        if output_path.is_empty()
-            || Path::new(output_path).is_absolute()
-            || output_path.contains("..")
-        {
-            bail!("coverage output path 必须是 workspace 内安全相对路径");
-        }
+        validate_coverage_output_path(output_path)?;
         let mut args = ["--workspace", "--locked"].map(str::to_owned).to_vec();
         args.extend([
             "--features".to_owned(),
@@ -519,6 +527,31 @@ impl NextestInvocation {
         args.extend(["--json", "--output-path", output_path].map(str::to_owned));
         Ok(Self::new(
             NextestProfile::CiCore,
+            NextestLane::Coverage,
+            None,
+            None,
+            NextestRunner::LlvmCov,
+            args,
+        ))
+    }
+
+    pub(crate) fn for_identityaudit_coverage(output_path: &str) -> Result<Self> {
+        validate_coverage_output_path(output_path)?;
+        let mut args = ["--no-clean", "--workspace", "--locked"]
+            .map(str::to_owned)
+            .to_vec();
+        args.extend([
+            "--features".to_owned(),
+            IDENTITYAUDIT_COVERAGE_FEATURES
+                .iter()
+                .copied()
+                .map(PackageFeature::as_namespaced)
+                .collect::<Vec<_>>()
+                .join(","),
+        ]);
+        args.extend(["--lcov", "--output-path", output_path].map(str::to_owned));
+        Ok(Self::new(
+            NextestProfile::CoverageIdentityaudit,
             NextestLane::Coverage,
             None,
             None,
@@ -715,6 +748,14 @@ impl NextestInvocation {
             &hash[..12]
         )
     }
+}
+
+fn validate_coverage_output_path(output_path: &str) -> Result<()> {
+    if output_path.is_empty() || Path::new(output_path).is_absolute() || output_path.contains("..")
+    {
+        bail!("coverage output path 必须是 workspace 内安全相对路径");
+    }
+    Ok(())
 }
 
 const MAX_EVIDENCE_FILES: usize = 256;
@@ -1228,8 +1269,37 @@ pub(crate) fn validate_config(source: &str) -> Result<()> {
         .context("缺少 [profile]")?;
     let mut profile_names = profiles.keys().map(String::as_str).collect::<Vec<_>>();
     profile_names.sort_unstable();
-    if profile_names != ["ci-core", "default", "fault-matrix", "integration"] {
-        bail!("nextest profiles 必须是 default/ci-core/integration/fault-matrix 精确闭集");
+    if profile_names
+        != [
+            "ci-core",
+            "coverage-identityaudit",
+            "default",
+            "fault-matrix",
+            "integration",
+        ]
+    {
+        bail!(
+            "nextest profiles 必须是 default/ci-core/coverage-identityaudit/integration/fault-matrix 精确闭集"
+        );
+    }
+    let coverage = profiles
+        .get(NextestProfile::CoverageIdentityaudit.as_str())
+        .and_then(toml::Value::as_table)
+        .context("缺少 profile.coverage-identityaudit")?;
+    if coverage.len() != 3
+        || coverage.get("inherits").and_then(toml::Value::as_str) != Some("ci-core")
+        || coverage.get("default-filter").and_then(toml::Value::as_str)
+            != Some("binary(identityaudit_runtime)")
+        || coverage
+            .get("junit")
+            .and_then(toml::Value::as_table)
+            .and_then(|report| report.get("path"))
+            .and_then(toml::Value::as_str)
+            != Some(NextestProfile::CoverageIdentityaudit.junit_config_path())
+    {
+        bail!(
+            "profile.coverage-identityaudit 必须继承 ci-core、精确选择 identityaudit_runtime 并保留 canonical JUnit"
+        );
     }
     for profile in [
         NextestProfile::CiCore,
@@ -1770,7 +1840,7 @@ mod tests {
         .map(|(name, period, path, terminate)| format!("[profile.{name}]\nretries = 0\nflaky-result = \"fail\"\nslow-timeout = {{ period = \"{period}\", terminate-after = {terminate} }}\n[profile.{name}.junit]\npath = \"{path}\"\n"))
         .collect();
         format!(
-            "[profile.default]\nretries=0\n{profiles}\n[test-groups.trybuild]\nmax-threads=1\n[[profile.default.overrides]]\nfilter='{TRYBUILD_FILTER}'\ntest-group='trybuild'\n[[profile.ci-core.overrides]]\nfilter='{TRYBUILD_FILTER}'\ntest-group='trybuild'\n"
+            "[profile.default]\nretries=0\n{profiles}\n[profile.coverage-identityaudit]\ninherits='ci-core'\ndefault-filter='binary(identityaudit_runtime)'\n[profile.coverage-identityaudit.junit]\npath='junit.xml'\n[test-groups.trybuild]\nmax-threads=1\n[[profile.default.overrides]]\nfilter='{TRYBUILD_FILTER}'\ntest-group='trybuild'\n[[profile.ci-core.overrides]]\nfilter='{TRYBUILD_FILTER}'\ntest-group='trybuild'\n"
         )
     }
 
@@ -1791,6 +1861,12 @@ mod tests {
             green.replacen("test-group='trybuild'", "test-group='other'", 1),
             green.replacen("terminate-after = 2", "terminate-after = 1", 1),
             green.replacen("retries = 0", "global-timeout = \"60s\"\nretries = 0", 1),
+            green.replacen("inherits='ci-core'", "inherits='integration'", 1),
+            green.replacen(
+                "binary(identityaudit_runtime)",
+                "binary(settingsonly_runtime)",
+                1,
+            ),
         ] {
             assert!(validate_config(&red).is_err());
         }
@@ -2066,6 +2142,32 @@ mod tests {
             ]
             .map(str::to_owned)
         );
+        assert_eq!(invocation.replay_spec(), &ReplaySpec::Coverage);
+        Ok(())
+    }
+
+    #[test]
+    fn identityaudit_coverage_supplement_is_workspace_scoped_and_exact() -> Result<()> {
+        let invocation =
+            NextestInvocation::for_identityaudit_coverage("target/identityaudit.lcov")?;
+        assert_eq!(
+            invocation.execution_argv(),
+            [
+                "cargo",
+                "llvm-cov",
+                "nextest",
+                "--no-clean",
+                "--workspace",
+                "--locked",
+                "--features",
+                "testkit/containers,journeys/integration",
+                "--lcov",
+                "--output-path",
+                "target/identityaudit.lcov"
+            ]
+            .map(str::to_owned)
+        );
+        assert_eq!(invocation.profile, NextestProfile::CoverageIdentityaudit);
         assert_eq!(invocation.replay_spec(), &ReplaySpec::Coverage);
         Ok(())
     }

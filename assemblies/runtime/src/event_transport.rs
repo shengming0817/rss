@@ -26,12 +26,11 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use anyhow::Context as _;
-use audit::ports::AuditChainHasher;
 use base64::Engine as _;
+use bootstrap::{DomainModuleResult, SubscriberBinding, WorkerSpec};
 #[cfg(test)]
-use bootstrap::ReconcileSubscriberOwner;
-use bootstrap::{DomainModuleResult, SubscriberBinding, SubscriberCapability, WorkerSpec};
-use consistency::{ConsumerGroup, RetentionSweeper};
+use bootstrap::{ReconcileSubscriberOwner, SubscriberCapability};
+use consistency::RetentionSweeper;
 use crypto::RustCryptoMacVerifier;
 use diport::{
     Clock, DlxArchiveBacklog, DlxLifecycleError, DlxLifecycleRepository, DynDeadLetterStore,
@@ -45,26 +44,25 @@ use eventexec::{
     SWEEPER_WORKER_NAME, SamplerConfig, SweeperConfig, SweeperWorker, TenantAuthority,
     WorkerHealth, apply_dlx_lifecycle_health, backlog_sampler_loop, spawn_relay, sweeper_loop,
 };
-use generated::event::{
-    EventSpec, SubscriberReadiness, SubscriptionDispatchKey, SubscriptionEffect,
-    SubscriptionExecution, SubscriptionSpec,
-};
+#[cfg(test)]
+use generated::event::{EventSpec, SubscriptionSpec};
+use generated::event::{SubscriberReadiness, SubscriptionDispatchKey};
 use postgres::{
     DlxPayloadProtector, PgDlxLifecycleRepository, PgDlxLifecycleRuntime, PgRuntimeHandle, caps,
 };
 use primitives::{HealthCheck, MacKey, ProbeName};
 use vault::VaultKeyProvider;
-use vocab::ExternalEffectPolicy;
 
 use crate::EnvSecret;
 use crate::config::{ServingConfigMapper, SnapshotConfig};
-use crate::consumer_tx::{ConsumerTxHandler, policy, spawn_consumer_ackable_tx_subscriber};
 use crate::distributed_runtime::{
     CoordinatedOutboxBacklog, CoordinatedRetentionSweeper, DistributedRuntimeDeps,
 };
 use crate::infra::plaintext_endpoint_policy_from;
 use crate::infra::vault::{DEFAULT_VAULT_TIMEOUT, build_vault_tls_client_from};
 use crate::support::SystemClock;
+pub use eventing_composition::BridgedSubscription;
+use eventing_composition::{AuditConsumerFactory, SettingsConsumerFactory, WorkerInputs};
 
 // ── 对外类型 ──────────────────────────────────────────────────────────────────
 
@@ -596,56 +594,6 @@ struct EventSecurity {
     dlx_payload_protector: DlxPayloadProtector,
 }
 
-pub struct BridgedSubscription {
-    event: EventSpec,
-    subscription: SubscriptionSpec,
-    group: ConsumerGroup,
-    consumer_tx: ConsumerTxPlan,
-}
-
-impl BridgedSubscription {
-    fn contract_id(&self) -> &'static str {
-        self.event.contract_id()
-    }
-
-    fn topic(&self) -> &'static str {
-        self.event.topic()
-    }
-
-    fn schema_version(&self) -> &'static str {
-        self.event.schema_version()
-    }
-
-    fn schema_hash(&self) -> &'static str {
-        self.event.schema_hash()
-    }
-
-    fn consumer(&self) -> &'static str {
-        self.subscription.consumer()
-    }
-
-    fn group(&self) -> &ConsumerGroup {
-        &self.group
-    }
-
-    fn readiness(&self) -> SubscriberReadiness {
-        self.subscription.readiness()
-    }
-
-    fn topic_owner(&self) -> String {
-        topic_owner(self.topic())
-    }
-
-    fn identity_slug(&self) -> String {
-        format!(
-            "{}__{}__{}",
-            self.topic().replace('.', "_"),
-            self.consumer().replace('.', "_"),
-            self.group().as_str().replace('.', "_")
-        )
-    }
-}
-
 // ── 公开函数 ──────────────────────────────────────────────────────────────────
 
 /// 需要 per-domain AMQP vhost 连接的域集 = **generated producer domain ∪ consumer 订阅 topic owner**
@@ -687,6 +635,7 @@ fn topic_owner(topic: &str) -> String {
         .to_ascii_lowercase()
 }
 
+#[cfg(test)]
 fn consumer_meta_parts_for_subscription(
     subscription: &BridgedSubscription,
 ) -> (&'static str, &'static str, &'static str) {
@@ -701,109 +650,21 @@ fn consumer_meta_for_subscription(
     subscription: &BridgedSubscription,
     tenant_authority: Arc<TenantAuthority>,
 ) -> ConsumerMeta {
-    let (consumer, contract_id, topic) = consumer_meta_parts_for_subscription(subscription);
-    ConsumerMeta::new(
-        consumer,
-        subscription.topic_owner(),
-        contract_id,
-        topic,
-        subscription.group().as_str(),
-        tenant_authority,
-    )
-    .with_expected_schema(subscription.schema_version(), subscription.schema_hash())
+    subscription.consumer_meta(tenant_authority)
 }
 
 pub fn bridge_generated_subscriptions(
     bindings: Vec<SubscriberBinding>,
 ) -> anyhow::Result<Vec<BridgedSubscription>> {
-    bridge_subscriptions_with_events(bindings, generated::event::EVENTS)
+    eventing_composition::bridge_generated_subscriptions(bindings)
 }
 
+#[cfg(test)]
 fn bridge_subscriptions_with_events(
     bindings: Vec<SubscriberBinding>,
     events: &[EventSpec],
 ) -> anyhow::Result<Vec<BridgedSubscription>> {
-    let specs: Vec<(EventSpec, SubscriptionSpec)> = events
-        .iter()
-        .flat_map(|event| {
-            event
-                .subscriptions()
-                .iter()
-                .map(move |subscription| (*event, *subscription))
-        })
-        .collect();
-    let mut bridged = Vec::with_capacity(bindings.len());
-    let mut matched_specs = vec![false; specs.len()];
-    for binding in bindings {
-        let (contract_id, topic, consumer, binding_group, capability) = binding.into_parts();
-        let mut matches = specs.iter().enumerate().filter(|(_, (event, spec))| {
-            event.contract_id() == contract_id
-                && event.topic() == topic
-                && spec.consumer() == consumer
-        });
-        let Some((matched_index, (event, spec))) = matches.next() else {
-            anyhow::bail!(
-                "subscriber binding has no generated topology spec: contract={} topic={} consumer={} group={}",
-                contract_id,
-                topic,
-                consumer,
-                binding_group.as_str()
-            );
-        };
-        if matches.next().is_some() {
-            anyhow::bail!(
-                "subscriber binding matches duplicate generated topology specs: contract={} topic={} consumer={} group={}",
-                contract_id,
-                topic,
-                consumer,
-                binding_group.as_str()
-            );
-        }
-        let event = *event;
-        let spec = *spec;
-        let group = ConsumerGroup::parse(spec.group()).map_err(|_| {
-            anyhow::anyhow!(
-                "generated subscription group is invalid: contract={} consumer={} group={}",
-                event.contract_id(),
-                spec.consumer(),
-                spec.group()
-            )
-        })?;
-        anyhow::ensure!(
-            group == binding_group,
-            "subscriber group drift after generated topology parse: contract={} consumer={} group={}",
-            event.contract_id(),
-            spec.consumer(),
-            spec.group()
-        );
-        anyhow::ensure!(
-            !matched_specs[matched_index],
-            "subscriber binding duplicates generated topology spec: contract={} topic={} consumer={} group={}",
-            event.contract_id(),
-            event.topic(),
-            spec.consumer(),
-            spec.group()
-        );
-        let consumer_tx = resolve_consumer_tx_plan(spec, capability)?;
-        matched_specs[matched_index] = true;
-        bridged.push(BridgedSubscription {
-            event,
-            subscription: spec,
-            group,
-            consumer_tx,
-        });
-    }
-    for ((event, spec), matched) in specs.iter().zip(matched_specs) {
-        anyhow::ensure!(
-            matched,
-            "generated topology spec has no subscriber binding: contract={} topic={} consumer={} group={}",
-            event.contract_id(),
-            event.topic(),
-            spec.consumer(),
-            spec.group()
-        );
-    }
-    Ok(bridged)
+    eventing_composition::bridge_subscriptions_with_events_for_test(bindings, events)
 }
 
 /// topology 接线决策（纯函数，不依赖 PG/infra；可脱离容器单测）。
@@ -1738,7 +1599,7 @@ fn wire_consumer_resource_bundle(
             pg,
             &subscription,
             audit_key,
-            ConsumerTxWorkerInputs {
+            WorkerInputs::new(
                 worker_name,
                 subscriber,
                 topic,
@@ -1746,14 +1607,14 @@ fn wire_consumer_resource_bundle(
                 dlx,
                 meta,
                 lease_cfg,
-                health: Arc::clone(&consumer_health),
-            },
+                Arc::clone(&consumer_health),
+            ),
         )?;
         tracing::info!(
             consumer,
             contract_id,
             topic = topic_name,
-            external_effect_policy = ?subscription.consumer_tx.policy(),
+            external_effect_policy = ?subscription.dispatch_token().policy(),
             "durable event transport: pg consumer-tx worker registered"
         );
         match subscription.readiness() {
@@ -1769,311 +1630,50 @@ fn wire_consumer_resource_bundle(
     Ok(())
 }
 
-enum ConsumerTxPlan {
-    AuditSessionCreated,
-    AuditRoleAssigned,
-    AuditRoleRevoked,
-    AuditPolicyUpdated,
-    SettingsConfigVersionChanged(Arc<settings::ConfigVersionReconciler>),
-}
-
-impl ConsumerTxPlan {
-    const fn policy(&self) -> ExternalEffectPolicy {
-        match self {
-            Self::AuditSessionCreated
-            | Self::AuditRoleAssigned
-            | Self::AuditRoleRevoked
-            | Self::AuditPolicyUpdated => ExternalEffectPolicy::TransactionalOnly,
-            Self::SettingsConfigVersionChanged(_) => ExternalEffectPolicy::Reconcile,
-        }
-    }
-}
-
 #[cfg(test)]
 fn test_capability_for_spec(spec: SubscriptionSpec) -> anyhow::Result<SubscriberCapability> {
-    let invalid = || {
-        anyhow::anyhow!(
-            "generated subscription capability is inactive or invalid: consumer={} execution={:?} effect={:?} policy={:?}",
-            spec.consumer(),
-            spec.execution(),
-            spec.effect(),
-            spec.external_effect_policy()
-        )
-    };
-    let capability = match spec.external_effect_policy() {
-        ExternalEffectPolicy::TransactionalOnly => match (spec.execution(), spec.effect()) {
-            (SubscriptionExecution::AdapterNative, None) => {
-                SubscriberCapability::AdapterNativeTransactional
-            }
-            (
-                SubscriptionExecution::AdapterNative,
-                Some(SubscriptionEffect::SettingsConfigVersionRefresh),
-            )
-            | (SubscriptionExecution::DomainEffect, None)
-            | (
-                SubscriptionExecution::DomainEffect,
-                Some(SubscriptionEffect::SettingsConfigVersionRefresh),
-            ) => return Err(invalid()),
-        },
-        ExternalEffectPolicy::Reconcile => match (spec.execution(), spec.effect()) {
-            (
-                SubscriptionExecution::DomainEffect,
-                Some(SubscriptionEffect::SettingsConfigVersionRefresh),
-            ) => SubscriberCapability::DomainReconcile(ReconcileSubscriberOwner::from_owner(
+    let capability = match spec.dispatch() {
+        SubscriptionDispatchKey::IdentityPolicyUpdatedV1Audit
+        | SubscriptionDispatchKey::IdentityRoleAssignedV1Audit
+        | SubscriptionDispatchKey::IdentityRoleRevokedV1Audit
+        | SubscriptionDispatchKey::IdentitySessionCreatedV1Audit => {
+            SubscriberCapability::AdapterNativeTransactional
+        }
+        SubscriptionDispatchKey::SettingsConfigVersionChangedV1Settings => {
+            SubscriberCapability::DomainReconcile(ReconcileSubscriberOwner::from_owner(
                 settings::ConfigVersionReconciler::test_ack(),
-            )),
-            (SubscriptionExecution::AdapterNative, None)
-            | (
-                SubscriptionExecution::AdapterNative,
-                Some(SubscriptionEffect::SettingsConfigVersionRefresh),
-            )
-            | (SubscriptionExecution::DomainEffect, None) => return Err(invalid()),
-        },
-        ExternalEffectPolicy::IdempotencyKey | ExternalEffectPolicy::Compensated => {
-            return Err(invalid());
+            ))
         }
     };
     Ok(capability)
 }
 
 #[cfg(test)]
-fn consumer_tx_plan_for_spec(spec: SubscriptionSpec) -> anyhow::Result<ConsumerTxPlan> {
-    let capability = test_capability_for_spec(spec)?;
-    resolve_consumer_tx_plan(spec, capability)
-}
-
-fn resolve_consumer_tx_plan(
+fn consumer_tx_plan_for_spec(
     spec: SubscriptionSpec,
-    capability: SubscriberCapability,
-) -> anyhow::Result<ConsumerTxPlan> {
-    resolve_consumer_tx_plan_parts(
-        spec.dispatch(),
-        spec.execution(),
-        spec.effect(),
-        spec.external_effect_policy(),
-        capability,
-    )
-}
-
-fn resolve_consumer_tx_plan_parts(
-    dispatch: SubscriptionDispatchKey,
-    execution: SubscriptionExecution,
-    effect: Option<SubscriptionEffect>,
-    policy: ExternalEffectPolicy,
-    capability: SubscriberCapability,
-) -> anyhow::Result<ConsumerTxPlan> {
-    match policy {
-        ExternalEffectPolicy::TransactionalOnly | ExternalEffectPolicy::Reconcile => {}
-        ExternalEffectPolicy::IdempotencyKey | ExternalEffectPolicy::Compensated => {
-            anyhow::bail!(
-                "unsupported active ConsumerTx external-effect policy: dispatch={dispatch:?} policy={policy:?}"
-            );
-        }
-    }
-    match dispatch {
-        SubscriptionDispatchKey::IdentitySessionCreatedV1Audit => adapter_native_plan(
-            dispatch,
-            execution,
-            effect,
-            policy,
-            capability,
-            ConsumerTxPlan::AuditSessionCreated,
-        ),
-        SubscriptionDispatchKey::IdentityRoleAssignedV1Audit => adapter_native_plan(
-            dispatch,
-            execution,
-            effect,
-            policy,
-            capability,
-            ConsumerTxPlan::AuditRoleAssigned,
-        ),
-        SubscriptionDispatchKey::IdentityRoleRevokedV1Audit => adapter_native_plan(
-            dispatch,
-            execution,
-            effect,
-            policy,
-            capability,
-            ConsumerTxPlan::AuditRoleRevoked,
-        ),
-        SubscriptionDispatchKey::IdentityPolicyUpdatedV1Audit => adapter_native_plan(
-            dispatch,
-            execution,
-            effect,
-            policy,
-            capability,
-            ConsumerTxPlan::AuditPolicyUpdated,
-        ),
-        SubscriptionDispatchKey::SettingsConfigVersionChangedV1Settings => {
-            settings_config_refresh_plan(dispatch, execution, effect, policy, capability)
-        }
-    }
-}
-
-fn adapter_native_plan(
-    dispatch: SubscriptionDispatchKey,
-    execution: SubscriptionExecution,
-    effect: Option<SubscriptionEffect>,
-    policy: ExternalEffectPolicy,
-    capability: SubscriberCapability,
-    plan: ConsumerTxPlan,
-) -> anyhow::Result<ConsumerTxPlan> {
-    let generated_matches = match execution {
-        SubscriptionExecution::AdapterNative => match effect {
-            None => match policy {
-                ExternalEffectPolicy::TransactionalOnly => true,
-                ExternalEffectPolicy::IdempotencyKey
-                | ExternalEffectPolicy::Reconcile
-                | ExternalEffectPolicy::Compensated => false,
-            },
-            Some(SubscriptionEffect::SettingsConfigVersionRefresh) => false,
-        },
-        SubscriptionExecution::DomainEffect => false,
-    };
-    match capability {
-        SubscriberCapability::AdapterNativeTransactional if generated_matches => Ok(plan),
-        SubscriberCapability::AdapterNativeTransactional
-        | SubscriberCapability::DomainReconcile(_) => anyhow::bail!(
-            "adapter-native subscription dispatch or runtime capability mismatch: dispatch={dispatch:?} execution={execution:?} effect={effect:?} policy={policy:?}"
-        ),
-    }
-}
-
-fn settings_config_refresh_plan(
-    dispatch: SubscriptionDispatchKey,
-    execution: SubscriptionExecution,
-    effect: Option<SubscriptionEffect>,
-    policy: ExternalEffectPolicy,
-    capability: SubscriberCapability,
-) -> anyhow::Result<ConsumerTxPlan> {
-    let generated_matches = match execution {
-        SubscriptionExecution::AdapterNative => false,
-        SubscriptionExecution::DomainEffect => match effect {
-            None => false,
-            Some(SubscriptionEffect::SettingsConfigVersionRefresh) => match policy {
-                ExternalEffectPolicy::Reconcile => true,
-                ExternalEffectPolicy::TransactionalOnly
-                | ExternalEffectPolicy::IdempotencyKey
-                | ExternalEffectPolicy::Compensated => false,
-            },
-        },
-    };
-    match capability {
-        SubscriberCapability::DomainReconcile(effect) if generated_matches => effect
-            .into_owner::<settings::ConfigVersionReconciler>()
-            .map(ConsumerTxPlan::SettingsConfigVersionChanged)
-            .map_err(|_| {
-                anyhow::anyhow!(
-                    "settings config-version refresh owner capability mismatch: dispatch={dispatch:?}"
-                )
-            }),
-        SubscriberCapability::AdapterNativeTransactional
-        | SubscriberCapability::DomainReconcile(_) => anyhow::bail!(
-            "settings config-version refresh subscription dispatch or runtime capability mismatch: dispatch={dispatch:?} execution={execution:?} effect={effect:?} policy={policy:?}"
-        ),
-    }
-}
-
-struct ConsumerTxWorkerInputs {
-    worker_name: String,
-    subscriber: Box<diport::DynAckableSubscriber<'static>>,
-    topic: Topic,
-    idempotency: Arc<postgres::PgInboxStore>,
-    dlx: Box<DynDeadLetterStore<'static>>,
-    meta: ConsumerMeta,
-    lease_cfg: LeaseConfig,
-    health: Arc<WorkerHealth>,
+) -> anyhow::Result<eventing_composition::GeneratedDispatchToken> {
+    let capability = test_capability_for_spec(spec)?;
+    eventing_composition::GeneratedDispatchToken::resolve(spec, capability)
 }
 
 fn consumer_tx_worker_for_subscription(
     pg: &PgRuntimeHandle,
     subscription: &BridgedSubscription,
     audit_key: &MacKey,
-    inputs: ConsumerTxWorkerInputs,
+    inputs: WorkerInputs,
 ) -> anyhow::Result<WorkerSpec> {
-    let audit_hasher = || {
-        AuditChainHasher::new(RustCryptoMacVerifier, audit_key.clone()).ok_or_else(|| {
-            anyhow::anyhow!(
-                "audit chain key must be at least 32 bytes (weak key, see audit-ledger.md)"
-            )
-        })
-    };
-    match &subscription.consumer_tx {
-        ConsumerTxPlan::AuditSessionCreated => {
-            let hasher = audit_hasher().context("audit session-created consumer tx chain key")?;
-            let handler = pg
-                .for_domain::<caps::Audit>()
-                .session_created_consumer_tx(hasher);
-            Ok(consumer_tx_worker_spec::<policy::TransactionalOnly, _>(
-                inputs, handler,
-            ))
+    let token = subscription.dispatch_token().clone();
+    match token.dispatch() {
+        SubscriptionDispatchKey::IdentityPolicyUpdatedV1Audit
+        | SubscriptionDispatchKey::IdentityRoleAssignedV1Audit
+        | SubscriptionDispatchKey::IdentityRoleRevokedV1Audit
+        | SubscriptionDispatchKey::IdentitySessionCreatedV1Audit => {
+            AuditConsumerFactory::new(pg, audit_key).worker(token, inputs)
         }
-        ConsumerTxPlan::AuditRoleAssigned => {
-            let hasher = audit_hasher().context("audit role-assigned consumer tx chain key")?;
-            let handler = pg
-                .for_domain::<caps::Audit>()
-                .role_assigned_consumer_tx(hasher);
-            Ok(consumer_tx_worker_spec::<policy::TransactionalOnly, _>(
-                inputs, handler,
-            ))
-        }
-        ConsumerTxPlan::AuditRoleRevoked => {
-            let hasher = audit_hasher().context("audit role-revoked consumer tx chain key")?;
-            let handler = pg
-                .for_domain::<caps::Audit>()
-                .role_revoked_consumer_tx(hasher);
-            Ok(consumer_tx_worker_spec::<policy::TransactionalOnly, _>(
-                inputs, handler,
-            ))
-        }
-        ConsumerTxPlan::AuditPolicyUpdated => {
-            let hasher = audit_hasher().context("audit policy-updated consumer tx chain key")?;
-            let handler = pg
-                .for_domain::<caps::Audit>()
-                .policy_updated_consumer_tx(hasher);
-            Ok(consumer_tx_worker_spec::<policy::TransactionalOnly, _>(
-                inputs, handler,
-            ))
-        }
-        ConsumerTxPlan::SettingsConfigVersionChanged(effect) => {
-            let handler = pg
-                .for_domain::<caps::Settings>()
-                .config_version_changed_consumer_tx(effect.clone());
-            Ok(consumer_tx_worker_spec::<policy::Reconcile, _>(
-                inputs, handler,
-            ))
+        SubscriptionDispatchKey::SettingsConfigVersionChangedV1Settings => {
+            SettingsConsumerFactory::new(pg).worker(token, inputs)
         }
     }
-}
-
-fn consumer_tx_worker_spec<P, H>(inputs: ConsumerTxWorkerInputs, handler: H) -> WorkerSpec
-where
-    P: policy::Policy,
-    H: ConsumerTxHandler<P>,
-{
-    let ConsumerTxWorkerInputs {
-        worker_name,
-        subscriber,
-        topic,
-        idempotency,
-        dlx,
-        meta,
-        lease_cfg,
-        health,
-    } = inputs;
-    Box::new(move |token| {
-        DynManagedResource::new_box(spawn_consumer_ackable_tx_subscriber(
-            worker_name,
-            subscriber,
-            topic,
-            idempotency,
-            dlx,
-            meta,
-            handler,
-            lease_cfg,
-            token,
-            health,
-        ))
-    })
 }
 
 fn wire_inbox_sweeper(
@@ -2412,7 +2012,8 @@ mod tests {
             ReconcileSubscriberOwner::from_owner(WideSettingsWrapper { _service: None }),
         );
 
-        let Err(error) = resolve_consumer_tx_plan(spec, capability) else {
+        let Err(error) = eventing_composition::GeneratedDispatchToken::resolve(spec, capability)
+        else {
             anyhow::bail!("wide settings wrapper must fail exact owner activation");
         };
 
@@ -2625,11 +2226,8 @@ mod tests {
     #[test]
     fn consumer_tx_plan_preserves_generated_policy_through_capability_resolution() {
         let audit = generated::event::identity_v1::session_created::SPEC.subscriptions()[0];
-        let audit_plan = resolve_consumer_tx_plan_parts(
-            audit.dispatch(),
-            audit.execution(),
-            audit.effect(),
-            vocab::ExternalEffectPolicy::TransactionalOnly,
+        let audit_plan = eventing_composition::GeneratedDispatchToken::resolve(
+            audit,
             SubscriberCapability::AdapterNativeTransactional,
         )
         .unwrap_or_else(|_| unreachable!());
@@ -2637,79 +2235,43 @@ mod tests {
             audit_plan.policy(),
             vocab::ExternalEffectPolicy::TransactionalOnly
         );
-        assert!(matches!(audit_plan, ConsumerTxPlan::AuditSessionCreated));
+        assert_eq!(
+            audit_plan.dispatch(),
+            SubscriptionDispatchKey::IdentitySessionCreatedV1Audit
+        );
 
         let settings = generated::event::settings_v1::SPEC.subscriptions()[0];
-        let settings_plan = resolve_consumer_tx_plan_parts(
-            settings.dispatch(),
-            settings.execution(),
-            settings.effect(),
-            vocab::ExternalEffectPolicy::Reconcile,
-            reconcile_capability(),
-        )
-        .unwrap_or_else(|_| unreachable!());
+        let settings_plan =
+            eventing_composition::GeneratedDispatchToken::resolve(settings, reconcile_capability())
+                .unwrap_or_else(|_| unreachable!());
         assert_eq!(
             settings_plan.policy(),
             vocab::ExternalEffectPolicy::Reconcile
         );
-        assert!(matches!(
-            settings_plan,
-            ConsumerTxPlan::SettingsConfigVersionChanged(_)
-        ));
+        assert_eq!(
+            settings_plan.dispatch(),
+            SubscriptionDispatchKey::SettingsConfigVersionChangedV1Settings
+        );
     }
 
     #[test]
     fn consumer_tx_plan_rejects_generated_execution_capability_mismatch() {
         let audit = generated::event::identity_v1::session_created::SPEC.subscriptions()[0];
         assert!(
-            resolve_consumer_tx_plan_parts(
-                audit.dispatch(),
-                audit.execution(),
-                audit.effect(),
-                vocab::ExternalEffectPolicy::TransactionalOnly,
-                reconcile_capability(),
-            )
-            .is_err(),
+            eventing_composition::GeneratedDispatchToken::resolve(audit, reconcile_capability())
+                .is_err(),
             "adapter-native generated execution must reject a reconcile capability"
         );
 
         let settings = generated::event::settings_v1::SPEC.subscriptions()[0];
         assert!(
-            resolve_consumer_tx_plan_parts(
-                settings.dispatch(),
-                settings.execution(),
-                settings.effect(),
-                vocab::ExternalEffectPolicy::Reconcile,
+            eventing_composition::GeneratedDispatchToken::resolve(
+                settings,
                 SubscriberCapability::AdapterNativeTransactional,
             )
             .is_err(),
             "domain-reconcile generated execution must reject a transactional capability"
         );
-    }
-
-    #[test]
-    fn inactive_external_effect_policies_fail_closed_before_worker_activation() -> anyhow::Result<()>
-    {
-        let audit = generated::event::identity_v1::session_created::SPEC.subscriptions()[0];
-        for policy in [
-            vocab::ExternalEffectPolicy::IdempotencyKey,
-            vocab::ExternalEffectPolicy::Compensated,
-        ] {
-            let Err(error) = resolve_consumer_tx_plan_parts(
-                audit.dispatch(),
-                audit.execution(),
-                audit.effect(),
-                policy,
-                SubscriberCapability::AdapterNativeTransactional,
-            ) else {
-                anyhow::bail!("{policy:?} must not produce an active ConsumerTx plan");
-            };
-            assert!(
-                error.to_string().contains("unsupported") || error.to_string().contains("mismatch"),
-                "inactive policy must fail closed with an actionable error: {error:#}"
-            );
-        }
-        Ok(())
     }
 
     #[test]
@@ -2731,7 +2293,7 @@ mod tests {
                     anyhow::bail!("inactive policy unexpectedly appears in generated topology");
                 }
             };
-            let plan = resolve_consumer_tx_plan(*spec, capability)
+            let plan = eventing_composition::GeneratedDispatchToken::resolve(*spec, capability)
                 .context("active generated handler must resolve")?;
             match plan.policy() {
                 vocab::ExternalEffectPolicy::TransactionalOnly => transactional += 1,

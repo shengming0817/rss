@@ -54,6 +54,21 @@ COPY --from=settingsonly-builder /app/target/release/settingsonly-server /usr/lo
 COPY --from=settingsonly-builder /app/assemblies/settingsonly/config.schema.json /usr/share/rss/settingsonly/config.schema.json
 ENTRYPOINT ["/usr/local/bin/settingsonly-server"]
 
+# ── identityaudit-builder：独立 cook/build identityaudit-server ─────────────────────────────────
+FROM chef AS identityaudit-builder
+COPY --from=planner /app/recipe.json recipe.json
+RUN cargo chef cook --release --locked --recipe-path recipe.json --package identityaudit --bin identityaudit-server
+COPY . .
+RUN cargo build --release --locked --package identityaudit --bin identityaudit-server \
+    && strip target/release/identityaudit-server
+
+# ── identityaudit-runtime：仅含 identityaudit binary + 外部 config schema ────────────────────────
+FROM gcr.io/distroless/cc-debian12:nonroot AS identityaudit-runtime
+# listener 只允许 loopback plaintext；外部流量与探针由同 Pod TLS sidecar 转发。
+COPY --from=identityaudit-builder /app/target/release/identityaudit-server /usr/local/bin/identityaudit-server
+COPY --from=identityaudit-builder /app/assemblies/identityaudit/config.schema.json /usr/share/rss/identityaudit/config.schema.json
+ENTRYPOINT ["/usr/local/bin/identityaudit-server"]
+
 # ── runtime：distroless/cc 非 root，server 为入口，rss 供离线维护命令使用 ─────────────────────────────
 # 保持最后 stage，确保普通 `docker build .` 的默认镜像语义不变。
 FROM gcr.io/distroless/cc-debian12:nonroot AS runtime

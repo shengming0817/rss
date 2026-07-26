@@ -787,6 +787,26 @@ age。两者由独立 NOLOGIN/BYPASSRLS owner 固定 search path；删除单批�
    或函数探针失败，保持流量停止并提交新的前向修复 migration；不得修改 `0072`、增加双读/双写或恢复
    SoftCA assembly fallback。
 
+### 0073 audit-chain key pin
+
+`0073` 把 Audit 链唯一支持的 HMAC key generation 固定为 `key_id=1`，并以数据库持久 sentinel tag
+拒绝错误 key。该 migration 会删除 `audit_entries.key_id` 的数据库默认值；旧 binary 不显式写入该列，
+因此 rollout 必须是 forward-only、non-rolling hard cutover，禁止旧/新 writer 混跑：
+
+1. **迁移前停止全部旧 audit writer。** 先关闭 Primary/Admin 入站并禁用旧 workload、job、controller 的
+   自动重启；保存旧 generation inventory 并证明副本数为 0。随后用 migrator 凭据确认 migration
+   `ledger=72`，且全部 writer/audit-admin/migrator 静态连接 lane 已退出。
+2. **只由唯一 migration runner 应用 0073。** 保留 SQLx advisory lock、checksum 与 transaction；不得手工
+   执行部分 DDL、修改已提交 migration 或添加临时默认值。迁移提交后确认 `ledger=73`、
+   `audit_entries_key_id_v1`、`audit_chain_key_guard` 与 `rss_verify_audit_chain_key_v1` 的 owner/ACL 均精确。
+3. **只启动新 binary，并在开放流量前完成 key probe。** 空 Audit ledger 可首次 pin 当前 key；非空 ledger
+   且 guard 缺失必须 fail-closed，交由显式、已验证的前向迁移处理，禁止自动 adoption。相同 key 重启必须
+   成功，错误 key 必须在 listener 接流量前失败。
+4. **按 ledger 执行失败恢复。** 若 runner 失败且 ledger 仍为 72，确认 transaction 已完整回滚后可修复
+   前置条件并重跑；确需恢复服务时只允许恢复旧 generation。若 ledger 已为 73，这是已提交的新世界，
+   不得启动旧 binary；保持流量关闭，修复新 binary 的 secret/config 或提交新的前向修复 migration，
+   不得写 down migration、兼容默认值、双写或跳过 durable key probe。
+
 ## Append-only 表（REVOKE 强制）
 
 append-only 表（如 `projection_events`）在前向迁移内用 `REVOKE UPDATE, DELETE ON <table> FROM <role>` 强制 DB

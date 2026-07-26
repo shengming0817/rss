@@ -577,8 +577,11 @@ fn render_providers(manifest: &CanonicalAssemblyManifestV1, source_label: &str) 
         code.push_str("    ),\n");
     }
     code.push_str("];\n");
-    if manifest.name() == "settingsonly" {
+    if matches!(manifest.name(), "settingsonly" | "identityaudit") {
         render_settingsonly_provider_role_batches(&mut code, &providers)?;
+        if manifest.name() == "identityaudit" {
+            code = code.replace("settingsonly", "identityaudit");
+        }
     }
     let formatted = crate::codegen::format_rust(&code)?;
     validate_provider_catalog_syntax(&formatted)?;
@@ -659,7 +662,7 @@ fn render_settingsonly_provider_role_batches(
         ));
     }
     code.push_str(
-        "    pub(crate) fn finish(\n        self,\n        inventory: &bootstrap::DomainModuleResult,\n",
+        "    #[allow(clippy::too_many_arguments)]\n    // reason: generated exact-join closure has one move-only receipt per declared provider role.\n    pub(crate) fn finish(\n        self,\n        inventory: &bootstrap::DomainModuleResult,\n",
     );
     for provider in providers {
         let field = provider.id.as_str().replace('-', "_");
@@ -871,7 +874,14 @@ fn validate_provider_role_batch_syntax(items: &[syn::Item], roles: &[String]) ->
                     .items
                     .iter()
                     .map(|member| match member {
-                        syn::ImplItem::Fn(method) if method.attrs.is_empty() => {
+                        syn::ImplItem::Fn(method)
+                            if method.attrs.is_empty()
+                                || (target == "ProviderRoleBatches"
+                                    && method.sig.ident == "finish"
+                                    && method.attrs.len() == 1
+                                    && compact_tokens(&method.attrs[0])
+                                        == "#[allow(clippy::too_many_arguments)]") =>
+                        {
                             Ok(method.sig.ident.to_string())
                         }
                         _ => bail!("generated provider role impl 只允许无属性 method"),

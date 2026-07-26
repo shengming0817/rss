@@ -74,7 +74,7 @@ mod tests {
 
         let (_, output) = compose_bindings(&mut bindings).expect("domain modules compose");
         assert!(bindings.is_empty());
-        assert_eq!(output.probes.len(), 2);
+        assert_eq!(output.probes.len(), 3);
         assert_eq!(
             output.probes[0].0.as_str(),
             settings::CONFIGS_READY_PROBE_NAME
@@ -82,6 +82,10 @@ mod tests {
         assert_eq!(
             output.probes[1].0.as_str(),
             settings_composition::KEYPROVIDER_READY_PROBE_NAME
+        );
+        assert_eq!(
+            output.probes[2].0.as_str(),
+            settings_composition::SECRET_RESOLVER_READY_PROBE_NAME
         );
         let resource_names = output
             .resources
@@ -94,6 +98,9 @@ mod tests {
             .into_iter()
             .map(|worker| worker(CancellationToken::new()).name().to_owned())
             .collect::<Vec<_>>();
-        assert_eq!(worker_names, ["settings-test-worker"]);
+        assert_eq!(
+            worker_names,
+            ["settings-test-worker", "settings-test-worker"]
+        );
     }
 }

@@ -92,7 +92,7 @@ fn committed_l2_assurance_is_closed_and_matches_compiled_registries() {
             AssuranceRecord::Fact { evidence, .. } => {
                 assert_fact_runtime_symbols(
                     evidence,
-                    &["bridge_generated_subscriptions", "resolve_consumer_tx_plan"],
+                    &["bridge_generated_subscriptions", "resolve_parts"],
                     contract_id,
                 );
                 assert_fact(record, &compiled_facts);
@@ -132,9 +132,9 @@ fn assert_fact_runtime_symbols(evidence: &FactEvidence, expected: &[&str], contr
     assert!(
         evidence.runtime.carriers.iter().all(|carrier| {
             carrier.kind == CarrierKind::RustSymbol
-                && carrier.path == "assemblies/runtime/src/event_transport.rs"
+                && carrier.path == "composition/eventing/src/lib.rs"
         }),
-        "{contract_id} runtime carriers must be production event-transport symbols"
+        "{contract_id} runtime carriers must be shared eventing-composition symbols"
     );
 }
 

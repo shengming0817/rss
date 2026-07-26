@@ -57,11 +57,13 @@ pub struct PgConsumerTxRequeue {
 }
 
 enum PgConsumerTxRequeueCategory {
+    #[cfg(feature = "domain-settings")]
     HandlerTransient,
     CommitUnknown,
 }
 
 impl PgConsumerTxOutcome {
+    #[cfg(feature = "domain-settings")]
     fn handler_transient(summary: &'static str) -> Self {
         Self::Requeue(PgConsumerTxRequeue {
             category: PgConsumerTxRequeueCategory::HandlerTransient,

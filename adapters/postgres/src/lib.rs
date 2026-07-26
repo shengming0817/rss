@@ -154,6 +154,8 @@ pub use projection_control::{
 // Projection writer 不 re-export raw append DTO：写入口经 outbox writer funnel + generated registry +
 // DB SECURITY DEFINER function 收口（eventbus.md §Projection sealed 写入）。读路径返回 consistency
 // engine-owned ProjectionEventRecord，不公开 adapter DTO。
+#[cfg(feature = "domain-audit")]
+pub use audit_repo::AuditChainKeyIdentity;
 #[cfg(feature = "domain-identity")]
 pub use auth_grant_lifecycle::PgAuthGrantLifecycle;
 #[cfg(feature = "domain-identity")]

@@ -11,7 +11,7 @@ use vocab::PrincipalKind;
 fn main() {
     let _ev = auth_bridge::allow_evidence();
     let _mtls = auth_bridge::mtls_evidence();
-    let _current = auth_bridge::current_auth_grant();
+    let _current = auth_bridge::current_auth_grant;
     operator::projection::verified_service_maintenance_operator_subject();
     operator::projection::verified_projection_maintenance_operator_subject();
     operator::projection::projection_maintenance_operator_receipt();
@@ -48,7 +48,9 @@ mod auth_bridge {
         Authenticated::new_mtls("mtls-peer")
     }
 
-    pub fn current_auth_grant() -> httpserve::CurrentAuthGrant {
+    pub fn current_auth_grant(
+        _validated: identity::ValidatedAuthGrant,
+    ) -> httpserve::CurrentAuthGrant {
         httpserve::CurrentAuthGrant::new()
     }
 }

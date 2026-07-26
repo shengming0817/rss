@@ -29,6 +29,10 @@ name = "settingsonly"
 path = "ui/settingsonly.rs"
 
 [[example]]
+name = "identityaudit"
+path = "ui/identityaudit.rs"
+
+[[example]]
 name = "identity"
 path = "ui/identity.rs"
 
@@ -52,6 +56,7 @@ dylint_testing = "6.0.1"
 # vocab 供 PrincipalKind、primitives 供 RequiredScheme 实参。
 httpserve = { path = "../../crates/httpserve" }
 authn = { path = "../../crates/authn" }
+identity = { path = "../../crates/identity" }
 diport = { path = "../../crates/diport" }
 vocab = { path = "../../crates/vocab" }
 primitives = { path = "../../crates/primitives" }

@@ -10227,9 +10227,9 @@ impl ConfigRepo for SettingsConfigGetRepoProbe {
     fn real_workspace_local_only_receipt_coverage_is_non_vacuous() -> Result<()> {
         let root = crate::workspace_root()?;
         let report = collect_report(&root)?;
-        assert_eq!(generated::http::LOCAL_ONLY_SPECS.len(), 6);
-        assert_eq!(report.local_only_receipt_coverage.active_count, 6);
-        assert_eq!(report.local_only_receipt_coverage.registered_count, 6);
+        assert_eq!(generated::http::LOCAL_ONLY_SPECS.len(), 7);
+        assert_eq!(report.local_only_receipt_coverage.active_count, 7);
+        assert_eq!(report.local_only_receipt_coverage.registered_count, 7);
         assert_eq!(report.local_only_receipt_coverage.missing_count, 0);
         assert!(
             report
@@ -10255,13 +10255,14 @@ impl ConfigRepo for SettingsConfigGetRepoProbe {
                 "identity.profile",
                 "identity.roles-list",
                 "settings.config-get",
+                "settings.secret-resolve",
             ]
         );
         let (summary, findings) = check_root(&root)?;
         assert!(findings.is_empty(), "{findings:#?}");
         assert_eq!(
             summary,
-            "6 active LocalOnly HTTP contract(s) checked; source receipts registered 6/6; missing: none"
+            "7 active LocalOnly HTTP contract(s) checked; source receipts registered 7/7; missing: none"
         );
         Ok(())
     }

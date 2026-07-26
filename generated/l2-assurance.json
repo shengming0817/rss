@@ -664,13 +664,13 @@
           "carriers": [
             {
               "kind": "rust-symbol",
-              "path": "assemblies/runtime/src/event_transport.rs",
+              "path": "composition/eventing/src/lib.rs",
               "symbol": "bridge_generated_subscriptions"
             },
             {
               "kind": "rust-symbol",
-              "path": "assemblies/runtime/src/event_transport.rs",
-              "symbol": "resolve_consumer_tx_plan"
+              "path": "composition/eventing/src/lib.rs",
+              "symbol": "resolve_parts"
             }
           ]
         },
@@ -679,18 +679,18 @@
           "carriers": [
             {
               "kind": "rust-symbol",
-              "path": "assemblies/runtime/src/consumer_tx.rs",
+              "path": "composition/eventing/src/consumer_tx.rs",
               "symbol": "PgAuditConsumerTx::handle"
             },
             {
               "kind": "rust-symbol",
-              "path": "assemblies/runtime/src/consumer_tx.rs",
+              "path": "composition/eventing/src/consumer_tx.rs",
               "symbol": "spawn_consumer_ackable_tx_subscriber"
             },
             {
               "kind": "rust-symbol",
-              "path": "assemblies/runtime/src/event_transport.rs",
-              "symbol": "resolve_consumer_tx_plan"
+              "path": "composition/eventing/src/lib.rs",
+              "symbol": "resolve_parts"
             },
             {
               "kind": "rust-symbol",
@@ -756,13 +756,13 @@
           "carriers": [
             {
               "kind": "rust-symbol",
-              "path": "assemblies/runtime/src/event_transport.rs",
+              "path": "composition/eventing/src/lib.rs",
               "symbol": "bridge_generated_subscriptions"
             },
             {
               "kind": "rust-symbol",
-              "path": "assemblies/runtime/src/event_transport.rs",
-              "symbol": "resolve_consumer_tx_plan"
+              "path": "composition/eventing/src/lib.rs",
+              "symbol": "resolve_parts"
             }
           ]
         },
@@ -771,18 +771,18 @@
           "carriers": [
             {
               "kind": "rust-symbol",
-              "path": "assemblies/runtime/src/consumer_tx.rs",
+              "path": "composition/eventing/src/consumer_tx.rs",
               "symbol": "PgAuditConsumerTx::handle"
             },
             {
               "kind": "rust-symbol",
-              "path": "assemblies/runtime/src/consumer_tx.rs",
+              "path": "composition/eventing/src/consumer_tx.rs",
               "symbol": "spawn_consumer_ackable_tx_subscriber"
             },
             {
               "kind": "rust-symbol",
-              "path": "assemblies/runtime/src/event_transport.rs",
-              "symbol": "resolve_consumer_tx_plan"
+              "path": "composition/eventing/src/lib.rs",
+              "symbol": "resolve_parts"
             },
             {
               "kind": "rust-symbol",
@@ -848,13 +848,13 @@
           "carriers": [
             {
               "kind": "rust-symbol",
-              "path": "assemblies/runtime/src/event_transport.rs",
+              "path": "composition/eventing/src/lib.rs",
               "symbol": "bridge_generated_subscriptions"
             },
             {
               "kind": "rust-symbol",
-              "path": "assemblies/runtime/src/event_transport.rs",
-              "symbol": "resolve_consumer_tx_plan"
+              "path": "composition/eventing/src/lib.rs",
+              "symbol": "resolve_parts"
             }
           ]
         },
@@ -863,18 +863,18 @@
           "carriers": [
             {
               "kind": "rust-symbol",
-              "path": "assemblies/runtime/src/consumer_tx.rs",
+              "path": "composition/eventing/src/consumer_tx.rs",
               "symbol": "PgAuditConsumerTx::handle"
             },
             {
               "kind": "rust-symbol",
-              "path": "assemblies/runtime/src/consumer_tx.rs",
+              "path": "composition/eventing/src/consumer_tx.rs",
               "symbol": "spawn_consumer_ackable_tx_subscriber"
             },
             {
               "kind": "rust-symbol",
-              "path": "assemblies/runtime/src/event_transport.rs",
-              "symbol": "resolve_consumer_tx_plan"
+              "path": "composition/eventing/src/lib.rs",
+              "symbol": "resolve_parts"
             },
             {
               "kind": "rust-symbol",
@@ -1248,13 +1248,13 @@
           "carriers": [
             {
               "kind": "rust-symbol",
-              "path": "assemblies/runtime/src/event_transport.rs",
+              "path": "composition/eventing/src/lib.rs",
               "symbol": "bridge_generated_subscriptions"
             },
             {
               "kind": "rust-symbol",
-              "path": "assemblies/runtime/src/event_transport.rs",
-              "symbol": "resolve_consumer_tx_plan"
+              "path": "composition/eventing/src/lib.rs",
+              "symbol": "resolve_parts"
             }
           ]
         },
@@ -1263,18 +1263,18 @@
           "carriers": [
             {
               "kind": "rust-symbol",
-              "path": "assemblies/runtime/src/consumer_tx.rs",
+              "path": "composition/eventing/src/consumer_tx.rs",
               "symbol": "PgAuditConsumerTx::handle"
             },
             {
               "kind": "rust-symbol",
-              "path": "assemblies/runtime/src/consumer_tx.rs",
+              "path": "composition/eventing/src/consumer_tx.rs",
               "symbol": "spawn_consumer_ackable_tx_subscriber"
             },
             {
               "kind": "rust-symbol",
-              "path": "assemblies/runtime/src/event_transport.rs",
-              "symbol": "resolve_consumer_tx_plan"
+              "path": "composition/eventing/src/lib.rs",
+              "symbol": "resolve_parts"
             },
             {
               "kind": "rust-symbol",
@@ -1867,13 +1867,13 @@
           "carriers": [
             {
               "kind": "rust-symbol",
-              "path": "assemblies/runtime/src/event_transport.rs",
+              "path": "composition/eventing/src/lib.rs",
               "symbol": "bridge_generated_subscriptions"
             },
             {
               "kind": "rust-symbol",
-              "path": "assemblies/runtime/src/event_transport.rs",
-              "symbol": "resolve_consumer_tx_plan"
+              "path": "composition/eventing/src/lib.rs",
+              "symbol": "resolve_parts"
             }
           ]
         },
@@ -1882,18 +1882,18 @@
           "carriers": [
             {
               "kind": "rust-symbol",
-              "path": "assemblies/runtime/src/consumer_tx.rs",
+              "path": "composition/eventing/src/consumer_tx.rs",
               "symbol": "PgSettingsConsumerTx::handle"
             },
             {
               "kind": "rust-symbol",
-              "path": "assemblies/runtime/src/consumer_tx.rs",
+              "path": "composition/eventing/src/consumer_tx.rs",
               "symbol": "spawn_consumer_ackable_tx_subscriber"
             },
             {
               "kind": "rust-symbol",
-              "path": "assemblies/runtime/src/event_transport.rs",
-              "symbol": "resolve_consumer_tx_plan"
+              "path": "composition/eventing/src/lib.rs",
+              "symbol": "resolve_parts"
             },
             {
               "kind": "rust-symbol",

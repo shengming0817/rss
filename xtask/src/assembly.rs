@@ -34,7 +34,9 @@ pub(crate) enum Rule {
     ActiveDomainDependency,
     /// 未声明 domain 不得进入 assembly normal dependency closure。
     InactiveDomainDependencyClosure,
-    /// identityaudit 必须保持 lib-only，且 normal closure 不得引入 runtime/settings/transport。
+    /// identityaudit 必须保持 #1797 的独立双域 binary/schema/journey/image/production closure。
+    ///
+    /// INVARIANT: IDENTITYAUDIT-EXECUTABLE-BOUNDARY-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::identityaudit_executable_boundary_rejects_lib_only_shape", anti_vacuity = "tests::identityaudit_real_executable_artifact_closure_is_complete" } -- #1797 replaces the demo composition proof with one exact executable package and its closed production transport/artifact closure.
     IdentityAuditBoundary,
     /// settingsonly 必须保持 #1796 的独立 binary/schema/精确 journey/image/default-closure 闭包。
     ///
@@ -368,21 +370,42 @@ fn validate_target_domain_closure(
     let closure_domains = cargo_tree_domains(root, assembly, metadata, None)?;
     let mut findings = validate_domain_sets(assembly, direct_domains, closure_domains)?;
     if assembly.manifest.name == "identityaudit" {
-        let closure_packages = cargo_tree_package_names(root, assembly)?;
-        let workspace_closure = metadata
-            .packages
-            .iter()
-            .filter(|package| closure_packages.contains(&package.name))
-            .filter_map(|package| {
-                workspace_package_layer(root, metadata, package)
-                    .map(|layer| (package.name.clone(), layer))
-            })
-            .collect::<Vec<_>>();
+        let (closure_packages, test_support_enabled) =
+            cargo_tree_default_normal_evidence(root, assembly, metadata)?;
         findings.extend(validate_identityaudit_boundary(
             &assembly.manifest_label,
             &assembly.cargo_label,
             &package.targets,
-            &workspace_closure,
+            &closure_packages,
+        ));
+        let schema_is_closed =
+            identityaudit_schema_is_closed(&assembly.dir.join("config.schema.json"))?;
+        let sample_is_regular_file =
+            is_regular_file_without_symlink(&assembly.dir.join("identityaudit.example.toml"))?;
+        let runbook_is_regular_file = is_regular_file_without_symlink(
+            &root.join("docs/ops/202607251200-1797-identityaudit-runtime.md"),
+        )?;
+        let migration_runbook =
+            std::fs::read_to_string(root.join("adapters/postgres/migrations/README.md"))
+                .context("读取 identityaudit audit-chain migration runbook 失败")?;
+        let key_pin_cutover_is_closed = identityaudit_key_pin_cutover_is_closed(&migration_runbook);
+        let artifact_acceptance = identityaudit_artifact_acceptance_evidence(root)?;
+        let (journey_target_declared, required_journey_test_declared) =
+            identityaudit_journey_evidence(root)?;
+        let dockerfile = std::fs::read_to_string(root.join("Dockerfile"))
+            .context("读取 identityaudit image source Dockerfile 失败")?;
+        findings.extend(validate_identityaudit_executable_evidence(
+            IdentityAuditExecutableEvidence {
+                test_support_enabled,
+                schema_is_closed,
+                sample_is_regular_file,
+                runbook_is_regular_file,
+                key_pin_cutover_is_closed,
+                artifact_acceptance,
+                journey_target_declared,
+                required_journey_test_declared,
+                dockerfile: &dockerfile,
+            },
         ));
     }
     if assembly.manifest.name == "settingsonly" {
@@ -451,6 +474,7 @@ fn discover(root: &Path) -> Result<(Vec<DiscoveredAssembly>, Vec<Finding>)> {
 fn validate_assembly(a: &DiscoveredAssembly) -> Vec<Finding> {
     let mut findings = Vec::new();
     validate_manifest_intent(a, &mut findings);
+    validate_identityaudit_manifest_boundary(a, &mut findings);
 
     for (index, provider) in a.manifest.diport_providers.iter().enumerate() {
         let source = format!(
@@ -548,7 +572,10 @@ fn validate_assembly(a: &DiscoveredAssembly) -> Vec<Finding> {
                 }
             }
 
-            if is_active_distributed_provider(provider) && !has_distributed_consumer_evidence(a) {
+            if a.manifest.name == "runtime"
+                && is_active_distributed_provider(provider)
+                && !has_distributed_consumer_evidence(a)
+            {
                 findings.push(finding(
                     Rule::ActiveDistributedProviderConsumer,
                     &subject,
@@ -559,6 +586,9 @@ fn validate_assembly(a: &DiscoveredAssembly) -> Vec<Finding> {
     }
     validate_required_capabilities(a, &mut findings);
     validate_pdp_replay_store_capability(a, &mut findings);
+    // Production provider/JWKS closeout is semantic and applies independent of assembly name.
+    // Internal mTLS and the three-profile trust chain are required only when the manifest actually
+    // declares an Internal listener; subset production assemblies must not inherit that topology.
     if a.manifest.profile == AssemblyProfile::Production {
         validate_production_security_closeout(a, &mut findings);
     }
@@ -1176,18 +1206,6 @@ fn cargo_tree_domains(
     Ok(domains)
 }
 
-fn cargo_tree_package_names(
-    root: &Path,
-    assembly: &DiscoveredAssembly,
-) -> Result<BTreeSet<String>> {
-    Ok(cargo_tree_stdout(root, assembly, None, true)?
-        .lines()
-        .filter_map(|line| line.split_once('|'))
-        .filter_map(|(package, _)| package.split_whitespace().next())
-        .map(str::to_owned)
-        .collect())
-}
-
 fn cargo_tree_default_normal_evidence(
     root: &Path,
     assembly: &DiscoveredAssembly,
@@ -1302,47 +1320,232 @@ fn validate_identityaudit_boundary(
     manifest_label: &str,
     cargo_label: &str,
     targets: &[MetadataTarget],
-    closure_packages: &[(String, crate::layers::Layer)],
+    closure_packages: &BTreeSet<String>,
 ) -> Vec<Finding> {
-    // identityaudit is a compile-time composition proof, not a launch assembly. Keep this boundary
-    // executable: Cargo target drift and transport/runtime dependencies must fail assembly validate.
     let mut findings = Vec::new();
-    let lib_only = targets.len() == 1 && targets[0].kind.as_slice() == ["lib"];
-    if !lib_only {
+    let exact_targets = targets.len() == 3
+        && targets
+            .iter()
+            .any(|target| target.name == "identityaudit" && target.kind.as_slice() == ["lib"])
+        && targets.iter().any(|target| {
+            target.name == "identityaudit-server" && target.kind.as_slice() == ["bin"]
+        })
+        && targets.iter().any(|target| {
+            target.name == "identityaudit_artifact_acceptance" && target.kind.as_slice() == ["test"]
+        });
+    if !exact_targets {
         findings.push(finding(
             Rule::IdentityAuditBoundary,
             manifest_label,
             format!(
-                "field=package.targets {cargo_label} 必须保持唯一 lib target；identityaudit 不得新增 bin/example/launch target"
+                "field=package.targets {cargo_label} expected exactly lib `identityaudit`, bin `identityaudit-server`, and binary+image test `identityaudit_artifact_acceptance`"
             ),
         ));
     }
 
-    for (package, layer) in closure_packages {
-        if !identityaudit_package_allowed(package, *layer) {
-            findings.push(finding(
-                Rule::IdentityAuditBoundary,
-                manifest_label,
-                format!(
-                    "field=normal-dependency-closure {cargo_label} 禁止 {layer:?} package `{package}`；identityaudit 只允许 identity+audit composition proof 所需 domain/adapter/root"
-                ),
-            ));
-        }
+    let expected = IDENTITYAUDIT_ALLOWED_NORMAL_WORKSPACE_PACKAGES
+        .iter()
+        .map(|package| (*package).to_owned())
+        .collect::<BTreeSet<_>>();
+    let missing = expected
+        .difference(closure_packages)
+        .cloned()
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        findings.push(finding(
+            Rule::IdentityAuditBoundary,
+            manifest_label,
+            format!(
+                "field=default-normal-workspace-closure {cargo_label} missing required identityaudit packages: {}",
+                missing.join(", ")
+            ),
+        ));
+    }
+    let unexpected = closure_packages
+        .difference(&expected)
+        .cloned()
+        .collect::<Vec<_>>();
+    if !unexpected.is_empty() {
+        findings.push(finding(
+            Rule::IdentityAuditBoundary,
+            manifest_label,
+            format!(
+                "field=default-normal-workspace-closure {cargo_label} unexpected packages entered identityaudit: {}",
+                unexpected.join(", ")
+            ),
+        ));
     }
     findings
 }
 
-fn identityaudit_package_allowed(package: &str, layer: crate::layers::Layer) -> bool {
-    use crate::layers::Layer::{Adapter, Domain, Root};
-    match layer {
-        Domain => matches!(package, "identity" | "audit"),
-        Adapter => matches!(package, "postgres" | "vault" | "oidc" | "crypto-adapter"),
-        Root => matches!(
-            package,
-            "identityaudit" | "identity-composition" | "audit-composition"
-        ),
-        _ => true,
+fn validate_identityaudit_manifest_boundary(a: &DiscoveredAssembly, findings: &mut Vec<Finding>) {
+    if a.manifest.name != "identityaudit" {
+        return;
     }
+    let listeners = a
+        .manifest
+        .listeners
+        .iter()
+        .map(|listener| {
+            (
+                listener.kind.as_str(),
+                listener
+                    .domains
+                    .iter()
+                    .map(AssemblyDomain::as_str)
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let expected_listeners = vec![
+        ("primary", vec!["identity"]),
+        ("admin", vec!["audit"]),
+        ("health", Vec::new()),
+    ];
+    if a.manifest.profile != AssemblyProfile::Production
+        || a.manifest.topology != AssemblyTopology::DurableIsolated
+        || listeners != expected_listeners
+    {
+        findings.push(finding(
+            Rule::IdentityAuditBoundary,
+            &a.manifest_label,
+            format!(
+                "field=profile/topology/listeners identityaudit requires profile=production, topology=durable-isolated, and exact Primary(identity)+Admin(audit)+Health(empty); actual profile={} topology={} listeners={listeners:?}",
+                a.manifest.profile.as_str(),
+                a.manifest.topology.as_str(),
+            ),
+        ));
+    }
+}
+
+const IDENTITYAUDIT_ALLOWED_NORMAL_WORKSPACE_PACKAGES: &[&str] = &[
+    "amqp",
+    "assembly-schema",
+    "audit",
+    "audit-composition",
+    "authn",
+    "bootstrap",
+    "consistency",
+    "crypto-adapter",
+    "deviceloop",
+    "diagctx",
+    "diport",
+    "distributed",
+    "eventexec",
+    "eventing-composition",
+    "generated",
+    "httpd",
+    "httpserve",
+    "identity",
+    "identity-composition",
+    "identityaudit",
+    "ids",
+    "observ",
+    "oidc",
+    "postgres",
+    "primitives",
+    "prometheus-adapter",
+    "ratelimit",
+    "redis-adapter",
+    "runctx",
+    "runtimeexec",
+    "secure",
+    "securederive",
+    "support",
+    "tracewire",
+    "vault",
+    "vocab",
+];
+
+#[derive(Clone, Copy)]
+struct IdentityAuditExecutableEvidence<'a> {
+    test_support_enabled: bool,
+    schema_is_closed: bool,
+    sample_is_regular_file: bool,
+    runbook_is_regular_file: bool,
+    key_pin_cutover_is_closed: bool,
+    artifact_acceptance: bool,
+    journey_target_declared: bool,
+    required_journey_test_declared: bool,
+    dockerfile: &'a str,
+}
+
+fn validate_identityaudit_executable_evidence(
+    evidence: IdentityAuditExecutableEvidence<'_>,
+) -> Vec<Finding> {
+    let subject = "assemblies/identityaudit";
+    let mut findings = Vec::new();
+    if evidence.test_support_enabled {
+        findings.push(finding(
+            Rule::IdentityAuditBoundary,
+            subject,
+            "field=default-normal-features `test-support` must stay disabled in the production closure",
+        ));
+    }
+    if !evidence.schema_is_closed {
+        findings.push(finding(
+            Rule::IdentityAuditBoundary,
+            subject,
+            "field=config-schema expected a non-symlink closed object schema at assemblies/identityaudit/config.schema.json",
+        ));
+    }
+    if !evidence.sample_is_regular_file {
+        findings.push(finding(
+            Rule::IdentityAuditBoundary,
+            subject,
+            "field=config-sample expected a non-symlink regular file at assemblies/identityaudit/identityaudit.example.toml",
+        ));
+    }
+    if !evidence.runbook_is_regular_file {
+        findings.push(finding(
+            Rule::IdentityAuditBoundary,
+            subject,
+            "field=operator-runbook expected docs/ops/202607251200-1797-identityaudit-runtime.md",
+        ));
+    }
+    if !evidence.key_pin_cutover_is_closed {
+        findings.push(finding(
+            Rule::IdentityAuditBoundary,
+            subject,
+            "field=audit-chain-key-cutover expected a forward-only ledger 72→73 hard-cutover and failure-recovery fence in adapters/postgres/migrations/README.md",
+        ));
+    }
+    if !evidence.artifact_acceptance {
+        findings.push(finding(
+            Rule::IdentityAuditBoundary,
+            subject,
+            "field=artifact-acceptance expected exact binary+image executable assertions in assemblies/identityaudit/tests/artifact_acceptance.rs",
+        ));
+    }
+    if !evidence.journey_target_declared || !evidence.required_journey_test_declared {
+        findings.push(finding(
+            Rule::IdentityAuditBoundary,
+            subject,
+            "field=journey expected explicit `identityaudit_runtime` target with non-ignored `identityaudit_login_audit_ready_sigterm_drain`",
+        ));
+    }
+    if !identityaudit_docker_target_is_closed(evidence.dockerfile) {
+        findings.push(finding(
+            Rule::IdentityAuditBoundary,
+            subject,
+            "field=Dockerfile expected exact two-COPY + ENTRYPOINT identityaudit-runtime on the distroless nonroot base, with no EXPOSE/ENV/CMD/USER override, while runtime remains the default final stage",
+        ));
+    }
+    findings
+}
+
+// INVARIANT: IDENTITYAUDIT-AUDIT-KEY-CUTOVER-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::identityaudit_key_pin_cutover_requires_forward_only_recovery_fence", anti_vacuity = "tests::identityaudit_real_executable_boundary_is_complete" } -- migration 0073 is a non-rolling forward-only cutover: old audit writers stop at ledger 72, only the new binary starts after ledger 73, and committed failures roll forward without compatibility defaults or down migrations.
+fn identityaudit_key_pin_cutover_is_closed(migration_runbook: &str) -> bool {
+    [
+        "### 0073 audit-chain key pin",
+        "ledger=72",
+        "ledger=73",
+        "停止全部旧 audit writer",
+        "不得启动旧 binary",
+        "新的前向修复 migration",
+    ]
+    .iter()
+    .all(|required| migration_runbook.contains(required))
 }
 
 const SETTINGSONLY_ALLOWED_NORMAL_WORKSPACE_PACKAGES: &[&str] = &[
@@ -1506,6 +1709,311 @@ fn is_regular_file_without_symlink(path: &Path) -> Result<bool> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(error).with_context(|| format!("检查 {} 失败", path.display())),
     }
+}
+
+fn identityaudit_schema_is_closed(path: &Path) -> Result<bool> {
+    if !is_regular_file_without_symlink(path)? {
+        return Ok(false);
+    }
+    let source =
+        std::fs::read_to_string(path).with_context(|| format!("读取 {} 失败", path.display()))?;
+    let Ok(schema) = serde_json::from_str::<serde_json::Value>(&source) else {
+        return Ok(false);
+    };
+    Ok(schema_objects_are_closed(&schema))
+}
+
+fn schema_objects_are_closed(value: &serde_json::Value) -> bool {
+    let object_schema = value.get("type").is_some_and(|kind| {
+        kind == "object"
+            || kind
+                .as_array()
+                .is_some_and(|kinds| kinds.iter().any(|kind| kind == "object"))
+    });
+    (!object_schema || value.get("additionalProperties") == Some(&serde_json::json!(false)))
+        && match value {
+            serde_json::Value::Array(values) => values.iter().all(schema_objects_are_closed),
+            serde_json::Value::Object(fields) => fields.values().all(schema_objects_are_closed),
+            _ => true,
+        }
+}
+
+fn identityaudit_journey_evidence(root: &Path) -> Result<(bool, bool)> {
+    let manifest_path = root.join("journeys/Cargo.toml");
+    let manifest: toml::Value = std::fs::read_to_string(&manifest_path)
+        .with_context(|| format!("读取 {} 失败", manifest_path.display()))?
+        .parse()
+        .with_context(|| format!("解析 {} 失败", manifest_path.display()))?;
+    let target_declared = manifest
+        .get("test")
+        .and_then(toml::Value::as_array)
+        .is_some_and(|targets| {
+            targets.iter().any(|target| {
+                target.get("name").and_then(toml::Value::as_str) == Some("identityaudit_runtime")
+                    && target.get("path").and_then(toml::Value::as_str)
+                        == Some("tests/identityaudit_runtime.rs")
+            })
+        });
+    let source_path = root.join("journeys/tests/identityaudit_runtime.rs");
+    let required_test_declared = match std::fs::read_to_string(&source_path) {
+        Ok(source) => identityaudit_journey_has_required_test(&source)
+            .with_context(|| format!("解析 {} 失败", source_path.display()))?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => {
+            return Err(error).with_context(|| format!("读取 {} 失败", source_path.display()));
+        }
+    };
+    Ok((target_declared, required_test_declared))
+}
+
+fn identityaudit_journey_has_required_test(source: &str) -> Result<bool> {
+    const REQUIRED_TEST: &str = "identityaudit_login_audit_ready_sigterm_drain";
+    for item in syn::parse_file(source)?.items {
+        let syn::Item::Fn(function) = item else {
+            continue;
+        };
+        if function.sig.ident != REQUIRED_TEST
+            || !function.attrs.iter().any(is_test_attribute)
+            || function.attrs.iter().any(is_ignore_attribute)
+            || function.attrs.iter().any(is_conditional_attribute)
+        {
+            continue;
+        }
+        let mut visitor = IdentityAuditJourneyVisitor::default();
+        syn::visit::Visit::visit_block(&mut visitor, &function.block);
+        return Ok(visitor.is_complete());
+    }
+    Ok(false)
+}
+
+#[derive(Default)]
+struct IdentityAuditJourneyVisitor {
+    runtime_start: bool,
+    wait_until_ready: bool,
+    login: bool,
+    wait_for_auth_audit: bool,
+    wait_for_session_created_hash_chain: bool,
+    send_sigterm: bool,
+    wait_for_drain: bool,
+}
+
+impl IdentityAuditJourneyVisitor {
+    fn is_complete(&self) -> bool {
+        self.runtime_start
+            && self.wait_until_ready
+            && self.login
+            && self.wait_for_auth_audit
+            && self.wait_for_session_created_hash_chain
+            && self.send_sigterm
+            && self.wait_for_drain
+    }
+}
+
+impl<'ast> syn::visit::Visit<'ast> for IdentityAuditJourneyVisitor {
+    fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+        self.runtime_start |= expression_path_ends_with(
+            node.func.as_ref(),
+            &["RuntimeFixture", "start"],
+        ) && matches!(node.args.first(), Some(syn::Expr::Path(path)) if path.path.is_ident("providers"));
+        self.wait_for_auth_audit |= expression_path_ends_with(
+            node.func.as_ref(),
+            &["wait_for_auth_audit"],
+        ) && matches!(node.args.first(), Some(syn::Expr::Reference(pool)) if matches!(pool.expr.as_ref(), syn::Expr::Path(path) if path.path.is_ident("pool")));
+        self.wait_for_session_created_hash_chain |= expression_path_ends_with(
+            node.func.as_ref(),
+            &["wait_for_session_created_hash_chain"],
+        ) && matches!(node.args.first(), Some(syn::Expr::Reference(pool)) if matches!(pool.expr.as_ref(), syn::Expr::Path(path) if path.path.is_ident("pool")))
+            && matches!(node.args.iter().nth(1), Some(syn::Expr::Reference(login)) if matches!(login.expr.as_ref(), syn::Expr::Path(path) if path.path.is_ident("login")));
+        syn::visit::visit_expr_call(self, node);
+    }
+
+    fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+        let runtime = matches!(node.receiver.as_ref(), syn::Expr::Path(path) if path.path.is_ident("runtime"));
+        self.wait_until_ready |= runtime && node.method == "wait_until_ready";
+        self.login |= runtime && node.method == "login";
+        self.send_sigterm |= runtime && node.method == "send_sigterm";
+        self.wait_for_drain |= runtime && node.method == "wait_for_drain";
+        syn::visit::visit_expr_method_call(self, node);
+    }
+}
+
+fn identityaudit_artifact_acceptance_evidence(root: &Path) -> Result<bool> {
+    let source_path = root.join("assemblies/identityaudit/tests/artifact_acceptance.rs");
+    if !is_regular_file_without_symlink(&source_path)? {
+        return Ok(false);
+    }
+    let source = std::fs::read_to_string(&source_path)
+        .with_context(|| format!("读取 {} 失败", source_path.display()))?;
+    identityaudit_artifact_source_is_closed(&source)
+        .with_context(|| format!("解析 {} 失败", source_path.display()))
+}
+
+fn identityaudit_artifact_source_is_closed(source: &str) -> Result<bool> {
+    let syntax = syn::parse_file(source)?;
+    let mut binary = false;
+    let mut image = false;
+    let mut executable_contract = false;
+    for item in syntax.items {
+        let syn::Item::Fn(function) = item else {
+            continue;
+        };
+        if function.sig.ident == "assert_executable_contract"
+            && !function.attrs.iter().any(is_conditional_attribute)
+        {
+            let mut visitor = IdentityAuditExecutableContractVisitor::default();
+            syn::visit::Visit::visit_block(&mut visitor, &function.block);
+            executable_contract = visitor.is_complete();
+        }
+        if !function.attrs.iter().any(is_test_attribute)
+            || function.attrs.iter().any(is_conditional_attribute)
+        {
+            continue;
+        }
+        if function.sig.ident == "identityaudit_server_binary_is_an_executable_artifact"
+            && !function.attrs.iter().any(is_ignore_attribute)
+            && identityaudit_artifact_contract_tail(&function, ArtifactContractKind::Binary)
+        {
+            binary = true;
+        }
+        if function.sig.ident == "identityaudit_runtime_image_is_an_executable_artifact"
+            && function.attrs.iter().any(is_ignore_attribute)
+            && identityaudit_artifact_contract_tail(&function, ArtifactContractKind::Image)
+            && image_environment_is_loaded(&function)
+        {
+            image = true;
+        }
+    }
+    Ok(binary && image && executable_contract)
+}
+
+#[derive(Default)]
+struct IdentityAuditExecutableContractVisitor {
+    help_execution: bool,
+    missing_config_execution: bool,
+    assertions: usize,
+}
+
+impl IdentityAuditExecutableContractVisitor {
+    fn is_complete(&self) -> bool {
+        self.help_execution && self.missing_config_execution && self.assertions >= 4
+    }
+}
+
+impl<'ast> syn::visit::Visit<'ast> for IdentityAuditExecutableContractVisitor {
+    fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+        if node.method == "execute"
+            && matches!(node.receiver.as_ref(), syn::Expr::Path(path) if path.path.is_ident("artifact"))
+            && let Some(syn::Expr::Reference(arguments)) = node.args.first()
+            && let syn::Expr::Array(arguments) = arguments.expr.as_ref()
+        {
+            match arguments.elems.first() {
+                Some(syn::Expr::Lit(syn::ExprLit {
+                    lit: syn::Lit::Str(argument),
+                    ..
+                })) if arguments.elems.len() == 1 && argument.value() == "--help" => {
+                    self.help_execution = true;
+                }
+                None => self.missing_config_execution = true,
+                _ => {}
+            }
+        }
+        syn::visit::visit_expr_method_call(self, node);
+    }
+
+    fn visit_macro(&mut self, node: &'ast syn::Macro) {
+        if node.path.is_ident("assert") {
+            self.assertions = self.assertions.saturating_add(1);
+        }
+        syn::visit::visit_macro(self, node);
+    }
+}
+
+fn identityaudit_artifact_contract_tail(
+    function: &syn::ItemFn,
+    kind: ArtifactContractKind,
+) -> bool {
+    let Some(syn::Stmt::Expr(syn::Expr::Call(assertion), None)) = function.block.stmts.last()
+    else {
+        return false;
+    };
+    if !expression_path_ends_with(assertion.func.as_ref(), &["assert_executable_contract"])
+        || assertion.args.len() != 1
+    {
+        return false;
+    }
+    let Some(syn::Expr::Call(artifact)) = assertion.args.first() else {
+        return false;
+    };
+    let expected = match kind {
+        ArtifactContractKind::Binary => "Binary",
+        ArtifactContractKind::Image => "Image",
+    };
+    if !expression_path_ends_with(artifact.func.as_ref(), &["Artifact", expected])
+        || artifact.args.len() != 1
+    {
+        return false;
+    }
+    match (kind, artifact.args.first()) {
+        (ArtifactContractKind::Binary, Some(syn::Expr::Macro(expression))) => {
+            expression.mac.path.is_ident("env")
+                && syn::parse2::<syn::LitStr>(expression.mac.tokens.clone())
+                    .is_ok_and(|literal| literal.value() == "CARGO_BIN_EXE_identityaudit-server")
+        }
+        (ArtifactContractKind::Image, Some(syn::Expr::Reference(reference))) => {
+            matches!(reference.expr.as_ref(), syn::Expr::Path(path) if path.path.is_ident("image"))
+        }
+        _ => false,
+    }
+}
+
+fn identityaudit_docker_target_is_closed(source: &str) -> bool {
+    let stages = docker_stages(source);
+    let builders = stages
+        .iter()
+        .filter(|stage| stage.name == "identityaudit-builder")
+        .collect::<Vec<_>>();
+    let runtimes = stages
+        .iter()
+        .filter(|stage| stage.name == "identityaudit-runtime")
+        .collect::<Vec<_>>();
+    let ([builder], [runtime]) = (builders.as_slice(), runtimes.as_slice()) else {
+        return false;
+    };
+    let builder_ok = builder.base == "chef"
+        && builder.instructions.iter().any(|instruction| {
+            docker_instruction_arguments(instruction, "RUN").is_some_and(|arguments| {
+                arguments.starts_with("cargo chef cook ")
+                    && arguments.contains("--package identityaudit")
+                    && arguments.contains("--bin identityaudit-server")
+            })
+        })
+        && builder.instructions.iter().any(|instruction| {
+            docker_instruction_arguments(instruction, "RUN").is_some_and(|arguments| {
+                arguments.starts_with("cargo build ")
+                    && arguments.contains("--package identityaudit")
+                    && arguments.contains("--bin identityaudit-server")
+            })
+        });
+    const RUNTIME_INSTRUCTIONS: &[(&str, &str)] = &[
+        (
+            "COPY",
+            "--from=identityaudit-builder /app/target/release/identityaudit-server /usr/local/bin/identityaudit-server",
+        ),
+        (
+            "COPY",
+            "--from=identityaudit-builder /app/assemblies/identityaudit/config.schema.json /usr/share/rss/identityaudit/config.schema.json",
+        ),
+        ("ENTRYPOINT", "[\"/usr/local/bin/identityaudit-server\"]"),
+    ];
+    let runtime_ok = runtime.base == "gcr.io/distroless/cc-debian12:nonroot"
+        && runtime.instructions.len() == RUNTIME_INSTRUCTIONS.len()
+        && runtime.instructions.iter().zip(RUNTIME_INSTRUCTIONS).all(
+            |(instruction, (keyword, arguments))| {
+                docker_instruction_arguments(instruction, keyword) == Some(*arguments)
+            },
+        );
+    let default_runtime_unchanged = stages.last().is_some_and(|stage| stage.name == "runtime");
+    builder_ok && runtime_ok && default_runtime_unchanged
 }
 
 fn settingsonly_journey_evidence(root: &Path) -> Result<(bool, bool)> {
@@ -1923,17 +2431,24 @@ fn validate_production_security_closeout(a: &DiscoveredAssembly, findings: &mut 
         findings.push(finding(
             Rule::ProductionSecurityJwksCloseout,
             &a.manifest_label,
-            "source=rust-ast-run-reachable profile=production gate=jwks 必须在 run() 可达路径有 profile-specific JwksKeySource::load_and_watch + typed VerifierConfigBuilder::keys_jwks + verifier managed resource + profile-specific JWKS readiness probe 注册证据",
+            "source=rust-ast-run-reachable profile=production gate=jwks 必须在 run() 或 typed StartupAdapter::prepare 可达路径有 profile-specific JwksKeySource::load_and_watch + typed VerifierConfigBuilder::keys_jwks + verifier managed resource + profile-specific JWKS readiness probe 注册证据",
         ));
     }
-    if !evidence.has_spiffe_closeout() {
+    let owns_internal_listener = a
+        .manifest
+        .listeners
+        .iter()
+        .any(|listener| listener.kind == assembly_schema::AssemblyListenerKind::Internal);
+    if owns_internal_listener && !evidence.has_spiffe_closeout() {
         findings.push(finding(
             Rule::ProductionSecuritySpiffeCloseout,
             &a.manifest_label,
             "source=rust-ast-run-reachable profile=production gate=spiffe-mtls 必须在 run() 可达路径有 MtlsServerConfig::from_spire + DomainHttpTransport::from_spire + domain_transport_ready probe 证据，且不得保留 Internal service-token migration env 常量",
         ));
     }
-    validate_token_profile_trust_chain(a, &evidence, findings);
+    if owns_internal_listener {
+        validate_token_profile_trust_chain(a, &evidence, findings);
+    }
 }
 
 fn validate_token_profile_trust_chain(
@@ -2448,6 +2963,7 @@ fn is_rust_identifier_continue(ch: char) -> bool {
 #[derive(Default)]
 struct SecurityCloseoutProgram {
     functions: BTreeMap<String, SecurityFunctionEvidence>,
+    startup_adapter_roots: BTreeSet<String>,
     profile_binding_definitions: usize,
     exact_profile_binding_definitions: usize,
     legacy_service_token_migration: bool,
@@ -2468,6 +2984,8 @@ impl SecurityCloseoutProgram {
         self.legacy_token_surface |= other.legacy_token_surface;
         self.mixed_key_provider |= other.mixed_key_provider;
         self.split_scheme_provider_binding |= other.split_scheme_provider_binding;
+        self.startup_adapter_roots
+            .extend(other.startup_adapter_roots);
         for (name, info) in other.functions {
             self.functions.entry(name).or_default().merge(info);
         }
@@ -2483,6 +3001,7 @@ impl SecurityCloseoutProgram {
         };
         let mut seen = BTreeSet::new();
         let mut stack = vec!["free::run".to_string()];
+        stack.extend(self.startup_adapter_roots.iter().cloned());
         while let Some(name) = stack.pop() {
             if !seen.insert(name.clone()) {
                 continue;
@@ -2585,6 +3104,20 @@ impl<'ast> syn::visit::Visit<'ast> for SecurityCloseoutVisitor {
             _ => None,
         };
         if let Some(owner) = owner {
+            let is_startup_adapter = node.trait_.as_ref().is_some_and(|(_, path, _)| {
+                path.segments
+                    .last()
+                    .is_some_and(|segment| segment.ident == "StartupAdapter")
+            });
+            if is_startup_adapter
+                && node.items.iter().any(|item| {
+                    matches!(item, syn::ImplItem::Fn(function) if function.sig.ident == "prepare")
+                })
+            {
+                self.program
+                    .startup_adapter_roots
+                    .insert(format!("{owner}::prepare"));
+            }
             self.impl_stack.push(owner);
             syn::visit::visit_item_impl(self, node);
             self.impl_stack.pop();
@@ -5292,42 +5825,279 @@ audit = { path = "../../crates/audit" }
         Ok(())
     }
 
-    #[test]
-    fn identityaudit_boundary_rejects_launch_and_transport_closure() {
-        use crate::layers::Layer::{Adapter, Domain, Root};
+    fn identityaudit_executable_targets() -> [MetadataTarget; 3] {
+        [
+            MetadataTarget {
+                name: "identityaudit".to_owned(),
+                kind: vec!["lib".to_owned()],
+            },
+            MetadataTarget {
+                name: "identityaudit-server".to_owned(),
+                kind: vec!["bin".to_owned()],
+            },
+            MetadataTarget {
+                name: "identityaudit_artifact_acceptance".to_owned(),
+                kind: vec!["test".to_owned()],
+            },
+        ]
+    }
 
-        let targets = ["lib", "bin"].map(|kind| MetadataTarget {
-            name: kind.to_owned(),
-            kind: vec![kind.to_owned()],
-        });
-        let forbidden = [
-            ("settings", Domain),
-            ("runtime", Root),
-            ("amqp", Adapter),
-            ("redis-adapter", Adapter),
-            ("mqtt", Adapter),
-            ("grpc", Adapter),
-            ("httpd", Adapter),
-        ];
-        let packages = forbidden
-            .map(|(package, layer)| (package.to_owned(), layer))
-            .to_vec();
+    fn identityaudit_production_closure() -> BTreeSet<String> {
+        IDENTITYAUDIT_ALLOWED_NORMAL_WORKSPACE_PACKAGES
+            .iter()
+            .map(|package| (*package).to_owned())
+            .collect()
+    }
+
+    /// INVARIANT: IDENTITYAUDIT-EXECUTABLE-BOUNDARY-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::identityaudit_executable_boundary_rejects_lib_only_shape", anti_vacuity = "tests::identityaudit_real_executable_artifact_closure_is_complete" } -- #1797 replaces the demo composition proof with one exact executable package and its closed production transport/artifact closure.
+    #[test]
+    fn identityaudit_executable_boundary_accepts_exact_targets_and_production_closure() {
         let findings = validate_identityaudit_boundary(
             "assemblies/identityaudit/assembly.toml",
             "assemblies/identityaudit/Cargo.toml",
-            &targets,
-            &packages,
+            &identityaudit_executable_targets(),
+            &identityaudit_production_closure(),
         );
-        assert!(findings.iter().any(|finding| {
-            finding.rule == Rule::IdentityAuditBoundary
-                && finding.detail.contains("唯一 lib target")
-        }));
-        for (forbidden, _) in forbidden {
-            assert!(findings.iter().any(|finding| {
+        assert!(
+            findings.is_empty(),
+            "identityaudit executable + production transport closure must pass: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn identityaudit_executable_boundary_rejects_lib_only_shape() {
+        let lib_only = [MetadataTarget {
+            name: "identityaudit".to_owned(),
+            kind: vec!["lib".to_owned()],
+        }];
+        let findings = validate_identityaudit_boundary(
+            "assemblies/identityaudit/assembly.toml",
+            "assemblies/identityaudit/Cargo.toml",
+            &lib_only,
+            &identityaudit_production_closure(),
+        );
+        assert!(
+            findings.iter().any(|finding| {
                 finding.rule == Rule::IdentityAuditBoundary
-                    && finding.detail.contains(&format!("`{forbidden}`"))
-            }));
+                    && finding.detail.contains("package.targets")
+            }),
+            "lib-only identityaudit must fail the executable boundary: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn identityaudit_manifest_boundary_rejects_demo_profile_and_topology() -> anyhow::Result<()> {
+        let demo_manifest = IDENTITYAUDIT_MANIFEST
+            .replace("profile = \"production\"", "profile = \"demo\"")
+            .replace("topology = \"durable-isolated\"", "topology = \"demo\"");
+        let manifest = AssemblyManifest::from_toml_str(&demo_manifest)?;
+        let assembly = DiscoveredAssembly {
+            dir: PathBuf::from("assemblies/identityaudit"),
+            cargo_path: PathBuf::from("assemblies/identityaudit/Cargo.toml"),
+            manifest_label: "assemblies/identityaudit/assembly.toml".to_owned(),
+            cargo_label: "assemblies/identityaudit/Cargo.toml".to_owned(),
+            manifest_src: demo_manifest,
+            manifest,
+            cargo_toml: toml::from_str(IDENTITYAUDIT_CARGO)?,
+        };
+        let findings = validate_assembly(&assembly);
+        assert!(
+            findings.iter().any(|finding| {
+                finding.rule == Rule::IdentityAuditBoundary
+                    && finding.detail.contains("profile")
+                    && finding.detail.contains("topology")
+            }),
+            "demo identityaudit must fail the production executable boundary: {findings:?}"
+        );
+        Ok(())
+    }
+
+    /// identityaudit participates in production provider/JWKS closeout, but has no Internal mTLS
+    /// listener or federated/service token profiles and therefore must not inherit those gates.
+    #[test]
+    fn identityaudit_production_boundary_does_not_inherit_full_runtime_only_gates()
+    -> anyhow::Result<()> {
+        let production_manifest = IDENTITYAUDIT_MANIFEST
+            .replace("profile = \"demo\"", "profile = \"production\"")
+            .replace("topology = \"demo\"", "topology = \"durable-isolated\"");
+        let assembly = DiscoveredAssembly {
+            dir: PathBuf::from("assemblies/identityaudit"),
+            cargo_path: PathBuf::from("assemblies/identityaudit/Cargo.toml"),
+            manifest_label: "assemblies/identityaudit/assembly.toml".to_owned(),
+            cargo_label: "assemblies/identityaudit/Cargo.toml".to_owned(),
+            manifest_src: production_manifest.clone(),
+            manifest: AssemblyManifest::from_toml_str(&production_manifest)?,
+            cargo_toml: toml::from_str(IDENTITYAUDIT_CARGO)?,
+        };
+        let findings = validate_assembly(&assembly);
+        assert!(
+            findings.iter().all(|finding| !matches!(
+                finding.rule,
+                Rule::ProductionSecuritySpiffeCloseout
+                    | Rule::TokenProfileTrustChain
+                    | Rule::ActiveDistributedProviderConsumer
+            )),
+            "identityaudit must use semantic production gates without full-runtime closeout: {findings:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn identityaudit_real_executable_artifact_closure_is_complete() -> anyhow::Result<()> {
+        let root = crate::workspace_root()?;
+        let manifest = AssemblyManifest::from_toml_str(IDENTITYAUDIT_MANIFEST)?;
+        assert_eq!(manifest.profile, AssemblyProfile::Production);
+        assert_eq!(manifest.topology, AssemblyTopology::DurableIsolated);
+
+        let metadata = load_workspace_metadata(&root)?.context("real workspace has Cargo.toml")?;
+        let package = metadata
+            .packages
+            .iter()
+            .find(|package| package.name == "identityaudit")
+            .context("identityaudit package missing from cargo metadata")?;
+        assert_eq!(
+            package
+                .targets
+                .iter()
+                .map(|target| (target.name.as_str(), target.kind.as_slice()))
+                .collect::<BTreeSet<_>>(),
+            identityaudit_executable_targets()
+                .iter()
+                .map(|target| (target.name.as_str(), target.kind.as_slice()))
+                .collect::<BTreeSet<_>>()
+        );
+
+        let schema_path = root.join("assemblies/identityaudit/config.schema.json");
+        let schema: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&schema_path)?)?;
+        assert_eq!(
+            schema.get("additionalProperties"),
+            Some(&serde_json::json!(false))
+        );
+        for path in [
+            schema_path,
+            root.join("assemblies/identityaudit/identityaudit.example.toml"),
+            root.join("docs/ops/202607251200-1797-identityaudit-runtime.md"),
+        ] {
+            assert!(
+                is_regular_file_without_symlink(&path)?,
+                "required identityaudit artifact is missing or symlinked: {}",
+                path.display()
+            );
         }
+
+        let journeys_manifest: toml::Value =
+            std::fs::read_to_string(root.join("journeys/Cargo.toml"))?.parse()?;
+        assert!(
+            journeys_manifest
+                .get("test")
+                .and_then(toml::Value::as_array)
+                .is_some_and(|tests| tests.iter().any(|test| {
+                    test.get("name").and_then(toml::Value::as_str) == Some("identityaudit_runtime")
+                        && test.get("path").and_then(toml::Value::as_str)
+                            == Some("tests/identityaudit_runtime.rs")
+                }))
+        );
+        let journey =
+            std::fs::read_to_string(root.join("journeys/tests/identityaudit_runtime.rs"))?;
+        assert!(identityaudit_journey_has_required_test(&journey)?);
+
+        let dockerfile = std::fs::read_to_string(root.join("Dockerfile"))?;
+        assert!(
+            identityaudit_docker_target_is_closed(&dockerfile),
+            "identityaudit-runtime must be one closed distroless target while runtime remains default"
+        );
+
+        let findings = validate_target(&root, "identityaudit")?;
+        assert!(
+            findings
+                .iter()
+                .all(|finding| finding.rule != Rule::IdentityAuditBoundary),
+            "real identityaudit executable closure must be complete: {findings:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn identityaudit_artifact_gate_rejects_noop_contracts() -> anyhow::Result<()> {
+        let source = include_str!("../../assemblies/identityaudit/tests/artifact_acceptance.rs");
+        assert!(identityaudit_artifact_source_is_closed(source)?);
+        for broken in [
+            source.replace(
+                "assert_executable_contract(Artifact::Binary(env!(\"CARGO_BIN_EXE_identityaudit-server\")))",
+                "Ok(())",
+            ),
+            source.replace(
+                "assert_executable_contract(Artifact::Image(&image))",
+                "Ok(())",
+            ),
+        ] {
+            assert!(
+                !identityaudit_artifact_source_is_closed(&broken)?,
+                "identityaudit artifact gate accepted a no-op contract"
+            );
+        }
+        assert!(!identityaudit_artifact_source_is_closed(
+            r#"
+            fn assert_executable_contract(_artifact: Artifact<'_>) -> anyhow::Result<()> { Ok(()) }
+            #[test]
+            fn identityaudit_server_binary_is_an_executable_artifact() -> anyhow::Result<()> {
+                assert_executable_contract(Artifact::Binary(env!("CARGO_BIN_EXE_identityaudit-server")))
+            }
+            #[test]
+            #[ignore]
+            fn identityaudit_runtime_image_is_an_executable_artifact() -> anyhow::Result<()> {
+                let image = std::env::var(IMAGE_ENV)?;
+                assert_executable_contract(Artifact::Image(&image))
+            }
+            "#
+        )?);
+        Ok(())
+    }
+
+    #[test]
+    fn identityaudit_key_pin_cutover_requires_forward_only_recovery_fence() {
+        let migration_runbook = include_str!("../../adapters/postgres/migrations/README.md");
+        assert!(identityaudit_key_pin_cutover_is_closed(migration_runbook));
+        for required in [
+            "ledger=72",
+            "ledger=73",
+            "停止全部旧 audit writer",
+            "不得启动旧 binary",
+            "新的前向修复 migration",
+        ] {
+            assert!(
+                !identityaudit_key_pin_cutover_is_closed(
+                    &migration_runbook.replace(required, "missing-cutover-proof")
+                ),
+                "cutover guard accepted missing proof: {required}"
+            );
+        }
+    }
+
+    #[test]
+    fn identityaudit_journey_gate_requires_runtime_witness_chain() -> anyhow::Result<()> {
+        let source = include_str!("../../journeys/tests/identityaudit_runtime.rs");
+        assert!(identityaudit_journey_has_required_test(source)?);
+        for required_call in [
+            "RuntimeFixture::start",
+            "wait_until_ready",
+            "login",
+            "wait_for_auth_audit",
+            "wait_for_session_created_hash_chain",
+            "send_sigterm",
+            "wait_for_drain",
+        ] {
+            let broken = source.replace(required_call, "noop_witness");
+            assert!(
+                !identityaudit_journey_has_required_test(&broken)?,
+                "identityaudit journey gate accepted missing witness {required_call}"
+            );
+        }
+        assert!(!identityaudit_journey_has_required_test(
+            "#[tokio::test]\nasync fn identityaudit_login_audit_ready_sigterm_drain() -> anyhow::Result<()> { Ok(()) }"
+        )?);
+        Ok(())
     }
 
     const SETTINGSONLY_DOCKER_FIXTURE: &str = r#"
@@ -7301,8 +8071,8 @@ ratelimit = { path = "../../adapters/ratelimit" }
     }
 
     #[test]
-    fn demo_draft_ephemeral_revocation_provider_is_allowed_without_dependency() -> anyhow::Result<()>
-    {
+    fn demo_draft_ephemeral_revocation_provider_is_rejected_by_canonical_registry()
+    -> anyhow::Result<()> {
         let root = unique_tmp("assembly-draft-ephemeral");
         write_assembly(
             &root,
@@ -7317,7 +8087,30 @@ name = "runtime"
         )?;
 
         let (_count, findings) = validate_root(&root)?;
-        assert!(findings.is_empty(), "{findings:?}");
+        assert_eq!(
+            findings
+                .iter()
+                .filter(|finding| finding.rule == Rule::InvalidDiportProvider)
+                .count(),
+            2,
+            "canonical lifecycle and durability must both fail closed: {findings:?}"
+        );
+        assert!(
+            findings.iter().any(|finding| {
+                finding.detail.contains("field=diportProviders.lifecycle")
+                    && finding.detail.contains("expected=active actual=draft")
+            }),
+            "canonical lifecycle mismatch missing: {findings:?}"
+        );
+        assert!(
+            findings.iter().any(|finding| {
+                finding.detail.contains("field=diportProviders.durability")
+                    && finding
+                        .detail
+                        .contains("expected=persistent actual=ephemeral-memory")
+            }),
+            "canonical durability mismatch missing: {findings:?}"
+        );
         Ok(())
     }
 

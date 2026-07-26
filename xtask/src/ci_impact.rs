@@ -60,6 +60,7 @@ const MACHINE_INPUT_PATHS: &[&str] = &[
     "docs/runbooks/202607081921-1633-cdc-outbox.md",
     "docs/runbooks/202607082104-1642-consistency-ops-runbook-index.md",
     "docs/ops/localtx-proof-report.md",
+    "docs/ops/security-production-closeout.md",
     "docs/rules/localtx.md",
     "docs/spec/007-runtime-deployment-executable-plan/contracts/assembly-lock.schema.json",
     "docs/spec/007-runtime-deployment-executable-plan/contracts/runtime-plan.schema.json",

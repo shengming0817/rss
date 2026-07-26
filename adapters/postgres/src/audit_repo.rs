@@ -43,12 +43,29 @@ use crate::tx_retry::{AUDIT_APPEND_BOUNDARY, classify_audit_error, run_pg_tx_ret
 // ---------------------------------------------------------------------------
 
 /// SELECT 列清单（list / verify_tail / 前驱行共用；actor::text 转换 UUID→String，无需 uuid feature）。
-const SELECT_COLS: &str = "tenant_id::text AS tenant_id, seq, prev_hash, entry_hash, actor::text AS actor, actor_kind, \
+const SELECT_COLS: &str = "tenant_id::text AS tenant_id, seq, prev_hash, entry_hash, key_id, actor::text AS actor, actor_kind, \
                            action, resource_kind, resource_id, outcome, \
                            recorded_at_secs, recorded_at_nanos";
 
 /// audit 数据表名（const 单源，消除 5 处 SQL 字面量漂移，同义字符串 ≥3 次须抽 const）。
 const TABLE: &str = "audit_entries";
+
+/// Closed identity of the only audit-chain HMAC key generation accepted by this release.
+///
+/// Rotation is intentionally not implicit: a future key requires a new typed variant, migration,
+/// and row-level verification policy. A different secret under `V1` is rejected by the durable
+/// startup pin before any listener or event consumer is activated.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AuditChainKeyIdentity(i16);
+
+impl AuditChainKeyIdentity {
+    /// Current and only supported chain key generation.
+    pub const V1: Self = Self(1);
+
+    pub(crate) const fn as_i16(self) -> i16 {
+        self.0
+    }
+}
 
 // ---------------------------------------------------------------------------
 // PgAuditRepo
@@ -182,6 +199,10 @@ fn hydrate_row(row: &sqlx::postgres::PgRow, tenant: TenantId) -> Result<AuditEnt
     if row_tenant != tenant {
         return Err(AuditError::ChainBroken);
     }
+    let key_id: i16 = row.try_get("key_id").map_err(storage)?;
+    if key_id != AuditChainKeyIdentity::V1.as_i16() {
+        return Err(AuditError::ChainBroken);
+    }
 
     let seq_i64: i64 = row.try_get("seq").map_err(storage)?;
     let seq = u64::try_from(seq_i64).map_err(AuditError::storage)?;
@@ -311,9 +332,9 @@ async fn insert_entry(
     sqlx::query(&format!(
         "INSERT INTO {TABLE} \
          (tenant_id, seq, prev_hash, entry_hash, actor, actor_kind, action, \
-          resource_kind, resource_id, outcome, recorded_at_secs, recorded_at_nanos) \
+          resource_kind, resource_id, outcome, recorded_at_secs, recorded_at_nanos, key_id) \
          VALUES \
-         ($1::uuid, $2, $3, $4, $5::uuid, $6, $7, $8, $9, $10, $11, $12)",
+         ($1::uuid, $2, $3, $4, $5::uuid, $6, $7, $8, $9, $10, $11, $12, $13)",
     ))
     .bind(tenant_uuid)
     .bind(seq_i64)
@@ -327,6 +348,7 @@ async fn insert_entry(
     .bind(record.outcome.to_db())
     .bind(at_secs)
     .bind(at_nanos)
+    .bind(AuditChainKeyIdentity::V1.as_i16())
     .execute(&mut *tx)
     .await
     .map_err(storage)?;

@@ -29,7 +29,7 @@ impl !core::panic::unwind_safe::RefUnwindSafe for runtimeexec::LaunchLifecycleBa
 impl !core::panic::unwind_safe::UnwindSafe for runtimeexec::LaunchLifecycleBatches
 pub struct runtimeexec::LaunchPlan<Adapter, ProbeReceipt, ReadyHook>
 impl<Adapter, ProbeReceipt, ReadyHook> runtimeexec::LaunchPlan<Adapter, ProbeReceipt, ReadyHook>
-pub fn runtimeexec::LaunchPlan<Adapter, ProbeReceipt, ReadyHook>::new(Adapter, ProbeReceipt, ReadyHook, core::option::Option<alloc::boxed::Box<diport::managed_resource::__dynosaur_macro_dynmanagedresource::DynManagedResource<'static>>>, runtimeexec::LaunchLifecycleBatches) -> Self
+pub fn runtimeexec::LaunchPlan<Adapter, ProbeReceipt, ReadyHook>::new(Adapter, ProbeReceipt, ReadyHook, core::option::Option<alloc::boxed::Box<diport::managed_resource::__dynosaur_macro_dynmanagedresource::DynManagedResource<'static>>>, runtimeexec::LaunchLifecycleBatches, runtimeexec::TotalDrainBudget) -> Self
 impl<Adapter, ProbeReceipt, ReadyHook> core::marker::Freeze for runtimeexec::LaunchPlan<Adapter, ProbeReceipt, ReadyHook> where Adapter: core::marker::Freeze, ProbeReceipt: core::marker::Freeze, ReadyHook: core::marker::Freeze
 impl<Adapter, ProbeReceipt, ReadyHook> core::marker::Send for runtimeexec::LaunchPlan<Adapter, ProbeReceipt, ReadyHook> where Adapter: core::marker::Send, ProbeReceipt: core::marker::Send, ReadyHook: core::marker::Send
 impl<Adapter, ProbeReceipt, ReadyHook> !core::marker::Sync for runtimeexec::LaunchPlan<Adapter, ProbeReceipt, ReadyHook>
@@ -58,6 +58,16 @@ impl<'stack> core::marker::Unpin for runtimeexec::LaunchTransaction<'stack>
 impl<'stack> core::marker::UnsafeUnpin for runtimeexec::LaunchTransaction<'stack>
 impl<'stack> !core::panic::unwind_safe::RefUnwindSafe for runtimeexec::LaunchTransaction<'stack>
 impl<'stack> !core::panic::unwind_safe::UnwindSafe for runtimeexec::LaunchTransaction<'stack>
+pub struct runtimeexec::PreparedLaunch<Adapter, ProbeReceipt, ReadyHook>
+impl<Adapter, ProbeReceipt, ReadyHook> runtimeexec::PreparedLaunch<Adapter, ProbeReceipt, ReadyHook>
+pub fn runtimeexec::PreparedLaunch<Adapter, ProbeReceipt, ReadyHook>::new(Adapter, ProbeReceipt, ReadyHook, core::option::Option<alloc::boxed::Box<diport::managed_resource::__dynosaur_macro_dynmanagedresource::DynManagedResource<'static>>>) -> Self
+impl<Adapter, ProbeReceipt, ReadyHook> core::marker::Freeze for runtimeexec::PreparedLaunch<Adapter, ProbeReceipt, ReadyHook> where Adapter: core::marker::Freeze, ProbeReceipt: core::marker::Freeze, ReadyHook: core::marker::Freeze
+impl<Adapter, ProbeReceipt, ReadyHook> core::marker::Send for runtimeexec::PreparedLaunch<Adapter, ProbeReceipt, ReadyHook> where Adapter: core::marker::Send, ProbeReceipt: core::marker::Send, ReadyHook: core::marker::Send
+impl<Adapter, ProbeReceipt, ReadyHook> !core::marker::Sync for runtimeexec::PreparedLaunch<Adapter, ProbeReceipt, ReadyHook>
+impl<Adapter, ProbeReceipt, ReadyHook> core::marker::Unpin for runtimeexec::PreparedLaunch<Adapter, ProbeReceipt, ReadyHook> where Adapter: core::marker::Unpin, ProbeReceipt: core::marker::Unpin, ReadyHook: core::marker::Unpin
+impl<Adapter, ProbeReceipt, ReadyHook> core::marker::UnsafeUnpin for runtimeexec::PreparedLaunch<Adapter, ProbeReceipt, ReadyHook> where Adapter: core::marker::UnsafeUnpin, ProbeReceipt: core::marker::UnsafeUnpin, ReadyHook: core::marker::UnsafeUnpin
+impl<Adapter, ProbeReceipt, ReadyHook> !core::panic::unwind_safe::RefUnwindSafe for runtimeexec::PreparedLaunch<Adapter, ProbeReceipt, ReadyHook>
+impl<Adapter, ProbeReceipt, ReadyHook> !core::panic::unwind_safe::UnwindSafe for runtimeexec::PreparedLaunch<Adapter, ProbeReceipt, ReadyHook>
 pub struct runtimeexec::ProviderLifecycleBatch(_)
 impl runtimeexec::ProviderLifecycleBatch
 pub fn runtimeexec::ProviderLifecycleBatch::from_provider_output(bootstrap::module::DomainModuleResult) -> Self
@@ -76,9 +86,54 @@ impl core::marker::Unpin for runtimeexec::RuntimeOutputs
 impl core::marker::UnsafeUnpin for runtimeexec::RuntimeOutputs
 impl core::panic::unwind_safe::RefUnwindSafe for runtimeexec::RuntimeOutputs
 impl core::panic::unwind_safe::UnwindSafe for runtimeexec::RuntimeOutputs
+pub struct runtimeexec::StartupPlan<Startup>
+impl<Startup> runtimeexec::StartupPlan<Startup>
+pub fn runtimeexec::StartupPlan<Startup>::new(Startup, runtimeexec::TotalDrainBudget) -> Self
+impl<Startup> core::marker::Freeze for runtimeexec::StartupPlan<Startup> where Startup: core::marker::Freeze
+impl<Startup> core::marker::Send for runtimeexec::StartupPlan<Startup> where Startup: core::marker::Send
+impl<Startup> core::marker::Sync for runtimeexec::StartupPlan<Startup> where Startup: core::marker::Sync
+impl<Startup> core::marker::Unpin for runtimeexec::StartupPlan<Startup> where Startup: core::marker::Unpin
+impl<Startup> core::marker::UnsafeUnpin for runtimeexec::StartupPlan<Startup> where Startup: core::marker::UnsafeUnpin
+impl<Startup> core::panic::unwind_safe::RefUnwindSafe for runtimeexec::StartupPlan<Startup> where Startup: core::panic::unwind_safe::RefUnwindSafe
+impl<Startup> core::panic::unwind_safe::UnwindSafe for runtimeexec::StartupPlan<Startup> where Startup: core::panic::unwind_safe::UnwindSafe
+pub struct runtimeexec::StartupTransaction<'stack>
+impl<'stack> runtimeexec::StartupTransaction<'stack>
+pub fn runtimeexec::StartupTransaction<'stack>::outputs_mut(&mut self) -> (&mut bootstrap::module::DomainModuleResult, &mut bootstrap::module::DomainModuleResult)
+pub fn runtimeexec::StartupTransaction<'stack>::provider_output_mut(&mut self) -> &mut bootstrap::module::DomainModuleResult
+pub fn runtimeexec::StartupTransaction<'stack>::stage_domain_output(&mut self, bootstrap::module::DomainModuleResult)
+pub fn runtimeexec::StartupTransaction<'stack>::stage_provider_output(&mut self, bootstrap::module::DomainModuleResult)
+impl core::ops::drop::Drop for runtimeexec::StartupTransaction<'_>
+pub fn runtimeexec::StartupTransaction<'_>::drop(&mut self)
+impl<'stack> core::marker::Freeze for runtimeexec::StartupTransaction<'stack>
+impl<'stack> core::marker::Send for runtimeexec::StartupTransaction<'stack>
+impl<'stack> !core::marker::Sync for runtimeexec::StartupTransaction<'stack>
+impl<'stack> core::marker::Unpin for runtimeexec::StartupTransaction<'stack>
+impl<'stack> core::marker::UnsafeUnpin for runtimeexec::StartupTransaction<'stack>
+impl<'stack> !core::panic::unwind_safe::RefUnwindSafe for runtimeexec::StartupTransaction<'stack>
+impl<'stack> !core::panic::unwind_safe::UnwindSafe for runtimeexec::StartupTransaction<'stack>
+pub struct runtimeexec::TotalDrainBudget(_)
+impl runtimeexec::TotalDrainBudget
+pub fn runtimeexec::TotalDrainBudget::new(core::time::Duration, core::time::Duration, core::time::Duration) -> anyhow::Result<Self>
+impl core::clone::Clone for runtimeexec::TotalDrainBudget
+pub fn runtimeexec::TotalDrainBudget::clone(&self) -> runtimeexec::TotalDrainBudget
+impl core::marker::Copy for runtimeexec::TotalDrainBudget
+impl core::marker::Freeze for runtimeexec::TotalDrainBudget
+impl core::marker::Send for runtimeexec::TotalDrainBudget
+impl core::marker::Sync for runtimeexec::TotalDrainBudget
+impl core::marker::Unpin for runtimeexec::TotalDrainBudget
+impl core::marker::UnsafeUnpin for runtimeexec::TotalDrainBudget
+impl core::panic::unwind_safe::RefUnwindSafe for runtimeexec::TotalDrainBudget
+impl core::panic::unwind_safe::UnwindSafe for runtimeexec::TotalDrainBudget
 pub trait runtimeexec::LaunchAdapter<ProbeReceipt>: core::marker::Sized
 pub type runtimeexec::LaunchAdapter::Inventory
 pub type runtimeexec::LaunchAdapter::Prepared
 pub fn runtimeexec::LaunchAdapter::activate(Self::Prepared, runtimeexec::LaunchRegistrar<'_>) -> anyhow::Result<runtimeexec::Activated<Self::Inventory>>
 pub fn runtimeexec::LaunchAdapter::prepare(self, ProbeReceipt, &mut runtimeexec::LaunchTransaction<'_>) -> impl core::future::future::Future<Output = anyhow::Result<Self::Prepared>> + core::marker::Send
-pub async fn runtimeexec::launch<Adapter, ProbeReceipt, ReadyHook>(runtimeexec::LaunchPlan<Adapter, ProbeReceipt, ReadyHook>) -> anyhow::Result<runtimeexec::RuntimeOutputs> where Adapter: runtimeexec::LaunchAdapter<ProbeReceipt>, ReadyHook: core::ops::function::FnOnce(<Adapter as runtimeexec::LaunchAdapter>::Inventory) -> anyhow::Result<()>
+pub trait runtimeexec::StartupAdapter: core::marker::Sized
+pub type runtimeexec::StartupAdapter::Adapter: runtimeexec::LaunchAdapter<Self::ProbeReceipt>
+pub type runtimeexec::StartupAdapter::ProbeReceipt
+pub type runtimeexec::StartupAdapter::Ready: core::future::future::Future<Output = anyhow::Result<()>>
+pub type runtimeexec::StartupAdapter::ReadyHook: core::ops::function::FnOnce(<Self::Adapter as runtimeexec::LaunchAdapter<Self::ProbeReceipt>>::Inventory) -> Self::Ready
+pub fn runtimeexec::StartupAdapter::prepare(self, &mut runtimeexec::StartupTransaction<'_>) -> impl core::future::future::Future<Output = anyhow::Result<runtimeexec::PreparedLaunch<Self::Adapter, Self::ProbeReceipt, Self::ReadyHook>>> + core::marker::Send
+pub async fn runtimeexec::launch<Adapter, ProbeReceipt, ReadyHook, Ready>(runtimeexec::LaunchPlan<Adapter, ProbeReceipt, ReadyHook>) -> anyhow::Result<runtimeexec::RuntimeOutputs> where Adapter: runtimeexec::LaunchAdapter<ProbeReceipt>, ReadyHook: core::ops::function::FnOnce(<Adapter as runtimeexec::LaunchAdapter>::Inventory) -> Ready, Ready: core::future::future::Future<Output = anyhow::Result<()>>
+pub async fn runtimeexec::launch_startup<Startup>(runtimeexec::StartupPlan<Startup>) -> anyhow::Result<runtimeexec::RuntimeOutputs> where Startup: runtimeexec::StartupAdapter

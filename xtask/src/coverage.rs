@@ -1,6 +1,7 @@
-//! `cargo xtask ci full` / `cargo xtask ci run --job ci-coverage` 覆盖率门 —— 跑**一次**
+//! `cargo xtask ci full` / `cargo xtask ci run --job ci-coverage` 覆盖率门 —— 先跑一次
 //! `cargo llvm-cov nextest --workspace --features testkit/containers`（出 export JSON，**兼作 nextest
-//! 门**：测试必须全绿，并留下 profdata）后评**两子门**（不重复跑测试）。feature 参数由
+//! 门**：测试必须全绿并留下 profdata），再向同一 profdata 追加唯一的 IdentityAudit 真实可执行 Journey，
+//! 最后评**两子门**。feature 参数与 Journey binary filter 均由
 //! [`crate::nextest::NextestInvocation::for_coverage`] 的 typed registry 单源构造，确保 feature-gated
 //! conformance 代码也被插桩：
 //!
@@ -14,8 +15,8 @@
 //! **不入 `cargo xtask verify`**（verify 是 stable-only 本地快门；覆盖率门慢、需 `cargo-llvm-cov` 工具 +
 //! 全 workspace 跑），只在完整本地 CI 或 typed 远端 coverage job 内调用。issue #1132 验收
 //! 「cargo nextest run --workspace + cargo llvm-cov 阈值门（引擎/基础 ≥90%）」由本**一步**同时兑现——
-//! 单跑一次测试既是 nextest 门又出覆盖率（不重复跑）。`testkit/containers` 只显式闭合 testkit 的
-//! feature-gated conformance/fixture 代码；workspace 的 `integration` features 仍不启用 ⇒ 无需 DB/broker。
+//! core 测试兼作 nextest 门与基础覆盖采集；IdentityAudit supplement 只运行精确 binary，并用
+//! testcontainers 自供 Postgres/RabbitMQ/Redis，覆盖生产 provider/eventing/listener/drain 路径。
 //!
 //! 无 ratchet 例外：所有 STRICT crate 均守默认 90% 行覆盖率下限。历史 `consistency` 85% 例外已随
 //! inbox 行为模型与覆盖率补强移除。
@@ -181,10 +182,24 @@ pub(crate) fn run() -> Result<()> {
         "coverage: STRICT basis/engine crate 均达行覆盖率下限（{}；{ratchet}）",
         STRICT_CRATES.join(", ")
     );
+    run_identityaudit_supplement(&root)?;
     // ② per-diff 增量门：复用 nextest 跑测试留下的 profdata 出 lcov（不重跑测试），本 PR 新增/修改可执行行
     //    ≥80%（COVERAGE-DIFF-FLOOR-01，见 crate::diffcov）。
     let lcov = lcov_report(&root)?;
     crate::diffcov::check(&root, &lcov)
+}
+
+fn run_identityaudit_supplement(root: &Path) -> Result<()> {
+    let out = coverage_output_path(
+        &coverage_report_dir(root),
+        "xtask-ci-coverage-identityaudit-supplement.lcov",
+    )?;
+    let out_str = out
+        .strip_prefix(root)
+        .context("IdentityAudit supplement 输出必须位于 workspace 内")?
+        .to_str()
+        .context("IdentityAudit supplement 输出路径非法 UTF-8")?;
+    crate::nextest::NextestInvocation::for_identityaudit_coverage(out_str)?.run(root, &[])
 }
 
 /// 跑 `cargo llvm-cov nextest --workspace --features testkit/containers --json --output-path <file>`；

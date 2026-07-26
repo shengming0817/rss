@@ -61,6 +61,7 @@ members = [
   "composition/settings",
   "composition/identity",
   "composition/audit",
+  "composition/eventing",
   "assemblies/runtime",
   "assemblies/settingsonly",
   "assemblies/identityaudit",

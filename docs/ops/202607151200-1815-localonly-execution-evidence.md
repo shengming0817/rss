@@ -54,7 +54,7 @@ Acceptance Incomplete，不得手工忽略。
    `RSS LocalOnly Execution` 阻断，并记录 Azure run ID、失败原因与 policy ID。
 3. GREEN commit 仅撤销 RED 改动。等待同一个 policy context 通过，下载
    `localonly-execution` artifact，确认报告为 schema v1，且
-   active/source/executed 三个排序集合均为当前 canonical 6/6。
+   active/source/executed 三个排序集合均为当前 canonical 7/7。
 4. GREEN 后保持验证 PR 的 source revision 不变，让 `develop` 前移；确认同一个
    policy 自动产生不同 run ID，且该 run 针对新的 target tip 重新通过 6/6。
    记录前后 target revision 与 freshness run ID。若只改变 source 才重跑，则

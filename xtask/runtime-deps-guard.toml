@@ -10,4 +10,5 @@ exactExceptions = [
   "postgres::PgRevocationStore",
   "settings_composition::KeyProviderReadinessInterval",
   "Arc<vault::VaultSigner>",
+  "identity_composition::IdentityRuntimeConfig",
 ]

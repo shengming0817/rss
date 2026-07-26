@@ -269,6 +269,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "bootstrap"
+version = "0.0.0"
+dependencies = [
+ "consistency",
+ "diport",
+ "httpserve",
+ "ids",
+ "primitives",
+ "runctx",
+ "secure",
+ "support",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "vocab",
+]
+
+[[package]]
 name = "bumpalo"
 version = "3.20.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -479,6 +498,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7cd812cc2bc1d69d4764bd80df88b4317eaef9e773c75226407d9bc0876b211c"
 
 [[package]]
+name = "deviceloop"
+version = "0.0.0"
+dependencies = [
+ "consistency",
+ "diport",
+ "ids",
+ "metrics",
+ "primitives",
+ "runctx",
+ "secure",
+ "support",
+ "thiserror 2.0.18",
+ "vocab",
+]
+
+[[package]]
 name = "diagctx"
 version = "0.0.0"
 dependencies = [
@@ -553,6 +588,27 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "distributed"
+version = "0.0.0"
+dependencies = [
+ "consistency",
+ "diport",
+ "futures",
+ "ids",
+ "metrics",
+ "primitives",
+ "runctx",
+ "secure",
+ "serde",
+ "serde_json",
+ "support",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "vocab",
 ]
 
 [[package]]
@@ -1173,6 +1229,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "identity"
+version = "0.0.0"
+dependencies = [
+ "authn",
+ "axum",
+ "base64",
+ "bootstrap",
+ "consistency",
+ "deviceloop",
+ "diport",
+ "distributed",
+ "dynosaur",
+ "eventexec",
+ "generated",
+ "httpserve",
+ "ids",
+ "observ",
+ "primitives",
+ "runctx",
+ "secure",
+ "serde",
+ "serde_json",
+ "support",
+ "thiserror 2.0.18",
+ "tracing",
+ "trait-variant",
+ "uuid",
+ "vocab",
+]
+
+[[package]]
 name = "idna"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1463,6 +1550,21 @@ checksum = "91df4bbde75afed763b708b7eee1e8e7651e02d97f6d5dd763e89367e957b23b"
 dependencies = [
  "hermit-abi",
  "libc",
+]
+
+[[package]]
+name = "observ"
+version = "0.0.0"
+dependencies = [
+ "consistency",
+ "ids",
+ "metrics",
+ "primitives",
+ "runctx",
+ "secure",
+ "support",
+ "tracing",
+ "vocab",
 ]
 
 [[package]]
@@ -1827,6 +1929,7 @@ dependencies = [
  "dylint_linting",
  "dylint_testing",
  "httpserve",
+ "identity",
  "primitives",
  "vocab",
 ]

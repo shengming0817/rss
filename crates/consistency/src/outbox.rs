@@ -915,6 +915,19 @@ pub struct BacklogMetricSample {
     partition_blocked_depth: u64,
 }
 
+/// Ownership-aware result of one outbox backlog observation.
+///
+/// `Standby` is deliberately distinct from an active empty sample: only the active maintenance
+/// lease holder may replace or clear the process-local gauge set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[must_use = "standby must not be interpreted as an active empty backlog sample"]
+pub enum BacklogObservation {
+    /// This process held the maintenance lease and completed a real provider sample.
+    Active(Vec<BacklogMetricSample>),
+    /// This process did not hold (or lost) the maintenance lease; no sample was observed.
+    Standby,
+}
+
 impl BacklogMetricSample {
     /// 由 metric subject + backlog 标量构造 scoped backlog sample。
     pub fn new(subject: OutboxMetricSubject, sample: BacklogSample) -> Self {
@@ -967,15 +980,17 @@ pub trait OutboxBacklog {
     /// 采样某 `domain` 的**可投递 backlog**（depth + 最老积压龄）。统计集合与 [`OutboxRelay::claim_batch`]
     /// 的可重捞集合**同源**：`(pending 且到期) OR (stale publishing，lease 过期可被 relay 重捞)`——stale
     /// publishing 会被重投，属可恢复积压必须计入；只排除 lease 仍有效的正常 in-flight，避免把正常中继中的行
-    /// 误计入。已观测 `(tenant_id, contract_id)` scope 无可投递行 ⇒ 带 [`BacklogSample::empty`] 的样本；
-    /// 从未出现或已被清理到无历史行的 scope 不返回样本。`Transient` 错误 ⇒ 本轮跳过采样。
+    /// 误计入。已观测 `(tenant_id, contract_id)` scope 无可投递行 ⇒ [`BacklogObservation::Active`]
+    /// 内带 [`BacklogSample::empty`] 的样本；从未出现或已被清理到无历史行的 scope 不返回样本。
+    /// 未持有协调 lease 的 wrapper 返回 [`BacklogObservation::Standby`]，不得压成 active 空样本；
+    /// `Transient` 错误 ⇒ 本轮跳过采样。
     ///
     /// head-of-partition gate 是 **claim-only by design**——被 gate 的后继仍计入 backlog depth（否则 stalled
     /// partition 对 SLO 失明），故 backlog 谓词刻意不含 head-of-partition gate（#1211）。
     async fn sample_backlog(
         &self,
         domain: &str,
-    ) -> Result<Vec<BacklogMetricSample>, crate::error::EngineError>;
+    ) -> Result<BacklogObservation, crate::error::EngineError>;
 }
 
 #[cfg(test)]

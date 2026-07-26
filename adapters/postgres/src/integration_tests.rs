@@ -16,7 +16,7 @@ use authn::{
     GrantSecurityEventKind,
 };
 use consistency::{
-    CommandErrorSummary, CommandJournalOutcome, CommandJournalTerminalSummary,
+    BacklogObservation, CommandErrorSummary, CommandJournalOutcome, CommandJournalTerminalSummary,
     CommandResultSummary, ConsumerGroup, ConvergeAction, IdemKey, InboxBacklog, InboxBacklogScope,
     InboxReceiptContext, InboxStore, LeaseToken, OutboxPayload, Outcome, SeenState,
 };
@@ -8712,6 +8712,15 @@ fn summarize_backlog(samples: &[BacklogMetricSample]) -> BacklogSample {
     BacklogSample::new(depth, oldest_age_seconds)
 }
 
+fn active_backlog(observation: BacklogObservation) -> Result<Vec<BacklogMetricSample>, TestError> {
+    match observation {
+        BacklogObservation::Active(samples) => Ok(samples),
+        BacklogObservation::Standby => {
+            Err(std::io::Error::other("postgres backlog provider cannot be standby").into())
+        }
+    }
+}
+
 /// 测试用简化 envelope（占位 `occurred_at=0`）：仅供原子性 / relay 路径验证（T1–T2 等直调 `append_outbox`
 /// 的用例，不断言 occurred_at 值）。`occurred_at` 构造期必填（#262 F1），此处取占位 0；envelope occurred_at 的
 /// 生产注入路径（从注入 Clock）由 t10（`PgEmitter`）/ t11（`PgAuthGrantLifecycle`）/ config co-tx 专门覆盖（#1129）。
@@ -10415,6 +10424,12 @@ async fn conf_sample_backlog(
     outbox
         .sample_backlog(&domain)
         .await
+        .and_then(|observation| match observation {
+            BacklogObservation::Active(samples) => Ok(samples),
+            BacklogObservation::Standby => Err(consistency::EngineError::new(
+                consistency::EngineErrorKind::Invariant,
+            )),
+        })
         .map(|samples| {
             let summary = summarize_backlog(&samples);
             eventconf::BacklogSample {
@@ -21342,7 +21357,7 @@ async fn t15_sample_backlog_empty_domain_returns_empty() -> TestResult {
         },
     );
     // 用 t15 专属 domain（无任何其它用例写入）→ domain-scoped 采样恒空，断言不依赖全表净起点（#1194）。
-    let samples = outbox.sample_backlog("t15-domain").await?;
+    let samples = active_backlog(outbox.sample_backlog("t15-domain").await?)?;
     let sample = summarize_backlog(&samples);
 
     assert!(
@@ -21391,7 +21406,7 @@ async fn t15b_sample_backlog_observed_scope_without_backlog_returns_zero() -> Te
             calls: Arc::new(Mutex::new(0)),
         },
     );
-    let samples = outbox.sample_backlog(&domain).await?;
+    let samples = active_backlog(outbox.sample_backlog(&domain).await?)?;
 
     assert_eq!(
         samples.len(),
@@ -21439,20 +21454,19 @@ async fn t15b_backlog_returns_exact_multi_tenant_contract_map() -> TestResult {
     }
 
     let outbox = make_pg_outbox(&store, || Ok(()));
-    let actual: BTreeMap<(String, String), (u64, u64)> = outbox
-        .sample_backlog(&domain)
-        .await?
-        .into_iter()
-        .map(|sample| {
-            (
+    let actual: BTreeMap<(String, String), (u64, u64)> =
+        active_backlog(outbox.sample_backlog(&domain).await?)?
+            .into_iter()
+            .map(|sample| {
                 (
-                    sample.subject().tenant_id().to_string(),
-                    sample.subject().contract_id().as_str().to_string(),
-                ),
-                (sample.sample().depth(), sample.partition_blocked_depth()),
-            )
-        })
-        .collect();
+                    (
+                        sample.subject().tenant_id().to_string(),
+                        sample.subject().contract_id().as_str().to_string(),
+                    ),
+                    (sample.sample().depth(), sample.partition_blocked_depth()),
+                )
+            })
+            .collect();
     assert_eq!(
         actual,
         BTreeMap::from([
@@ -21594,7 +21608,7 @@ async fn t16_sample_backlog_counts_only_pending_rows() -> TestResult {
     }
 
     let outbox = make_pg_outbox(&store, || Ok(()));
-    let samples = outbox.sample_backlog(domain).await?;
+    let samples = active_backlog(outbox.sample_backlog(domain).await?)?;
     let sample = summarize_backlog(&samples);
 
     assert_eq!(sample.depth(), 1, "仅 pending 行计入 depth，应为 1");
@@ -21652,7 +21666,7 @@ async fn t17_sample_backlog_age_tracks_oldest_pending() -> TestResult {
     .await?;
 
     let outbox = make_pg_outbox(&store, || Ok(()));
-    let samples = outbox.sample_backlog(domain).await?;
+    let samples = active_backlog(outbox.sample_backlog(domain).await?)?;
     let sample = summarize_backlog(&samples);
 
     assert_eq!(sample.depth(), 2, "两条 pending 行");
@@ -21720,7 +21734,7 @@ async fn t18_sample_backlog_excludes_future_retry_after() -> TestResult {
     .await?;
 
     let outbox = make_pg_outbox(&store, || Ok(()));
-    let samples = outbox.sample_backlog(domain).await?;
+    let samples = active_backlog(outbox.sample_backlog(domain).await?)?;
     let sample = summarize_backlog(&samples);
 
     // 仅 due_id（retry_after IS NULL）计入；future_id（retry_after > now()）排除。
@@ -21786,7 +21800,7 @@ async fn t19_sample_backlog_counts_stale_publishing() -> TestResult {
     }
 
     let outbox = make_pg_outbox(&store, || Ok(()));
-    let samples = outbox.sample_backlog(domain).await?;
+    let samples = active_backlog(outbox.sample_backlog(domain).await?)?;
     let sample = summarize_backlog(&samples);
 
     // 仅 stale publishing 计入（fresh 行 lease 有效、属正常 in-flight 排除）。
@@ -24783,7 +24797,7 @@ async fn t29_sample_backlog_counts_gated_successors() -> TestResult {
     );
 
     // sample_backlog depth = 4（全部计入，gate 不减少 backlog 深度）。
-    let samples = outbox.sample_backlog(&domain).await?;
+    let samples = active_backlog(outbox.sample_backlog(&domain).await?)?;
     assert_eq!(
         samples.len(),
         1,
@@ -24852,7 +24866,7 @@ async fn t29_sample_backlog_counts_gated_successors() -> TestResult {
         },
     );
 
-    let dlx_samples = outbox.sample_backlog(&dlx_domain).await?;
+    let dlx_samples = active_backlog(outbox.sample_backlog(&dlx_domain).await?)?;
     assert_eq!(
         dlx_samples[0].partition_blocked_depth(),
         2,
@@ -34630,6 +34644,7 @@ async fn credential_repo_concurrent_failures_no_lost_update() -> TestResult {
 // TA10: append-only——rss_app DELETE/UPDATE 被 DB 权限拒绝
 // TA11: RLS NULL tenant fail-closed——未设 rss.tenant_id → 0 行
 // TA12: 空租户链 list + verify_tail 均 Ok
+// TA13: audit-chain key singleton pins K1 and rejects a valid-length K2 on restart
 
 // read/write/admin traits 须在 scope 才能调用 append / list / verify_tail / verify_tenant 方法。
 use audit::ports::{AuditAdminRepo as _, AuditReadRepo as _, AuditWriteRepo as _};
@@ -34680,6 +34695,35 @@ fn audit_page(limit: u16, cursor: Option<vocab::Cursor>) -> audit::ports::AuditP
         limit: vocab::Limit::new(limit).unwrap(),
         cursor,
     }
+}
+
+/// TA13: a different 32-byte verification tag under the same typed key generation is rejected.
+#[cfg(feature = "integration")]
+#[tokio::test(flavor = "multi_thread")]
+async fn ta13_audit_chain_key_restart_rejects_wrong_secret() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let k1 = [0x11_u8; 32];
+    let k2 = [0x22_u8; 32];
+    let first: bool =
+        sqlx::query_scalar("SELECT rss_verify_audit_chain_key_v1(1::smallint, $1::bytea)")
+            .bind(k1.as_slice())
+            .fetch_one(&store.pool)
+            .await?;
+    let restart_same: bool =
+        sqlx::query_scalar("SELECT rss_verify_audit_chain_key_v1(1::smallint, $1::bytea)")
+            .bind(k1.as_slice())
+            .fetch_one(&store.pool)
+            .await?;
+    let restart_wrong: bool =
+        sqlx::query_scalar("SELECT rss_verify_audit_chain_key_v1(1::smallint, $1::bytea)")
+            .bind(k2.as_slice())
+            .fetch_one(&store.pool)
+            .await?;
+    assert!(first && restart_same);
+    assert!(!restart_wrong, "K2 must not continue a ledger pinned to K1");
+    store.shutdown().await?;
+    Ok(())
 }
 
 /// 独立 read/write dyn capability 从同一个 provider 派生后必须观察同一 durable 链状态。

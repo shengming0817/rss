@@ -25,8 +25,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::SystemTime;
 
 use consistency::{
-    BacklogMetricSample, BacklogSample, EngineError, EngineErrorKind, EventEntry, IdemKey,
-    OutboxAppendOutcome, OutboxBacklog, OutboxContractId, OutboxFactConflict,
+    BacklogMetricSample, BacklogObservation, BacklogSample, EngineError, EngineErrorKind,
+    EventEntry, IdemKey, OutboxAppendOutcome, OutboxBacklog, OutboxContractId, OutboxFactConflict,
     OutboxFactFingerprint, OutboxFactIdentity, OutboxMetricSubject, OutboxPayload, OutboxRelay,
     RetentionSweeper, StoredOutboxEntry,
 };
@@ -2164,15 +2164,19 @@ impl OutboxBacklog for PgOutbox {
     /// **head-of-partition gate 是 claim-only by design**——被 gate 的后继仍计入 backlog depth（否则 stalled
     /// partition 对 SLO 失明）。backlog 谓词刻意不含 head-of-partition gate（见 `claim_batch` INVARIANT:
     /// OUTBOX-PARTITION-ORDER-01）。
-    async fn sample_backlog(&self, domain: &str) -> Result<Vec<BacklogMetricSample>, EngineError> {
-        sample_outbox_backlog(&self.pool, domain).await
+    async fn sample_backlog(&self, domain: &str) -> Result<BacklogObservation, EngineError> {
+        sample_outbox_backlog(&self.pool, domain)
+            .await
+            .map(BacklogObservation::Active)
     }
 }
 
 impl OutboxBacklog for PgOutboxMaintenance {
     /// 采样 `domain` 的**可投递积压**（深度 + 最老积压龄）。
-    async fn sample_backlog(&self, domain: &str) -> Result<Vec<BacklogMetricSample>, EngineError> {
-        sample_outbox_backlog(&self.pool, domain).await
+    async fn sample_backlog(&self, domain: &str) -> Result<BacklogObservation, EngineError> {
+        sample_outbox_backlog(&self.pool, domain)
+            .await
+            .map(BacklogObservation::Active)
     }
 }
 

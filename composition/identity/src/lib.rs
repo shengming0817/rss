@@ -18,6 +18,68 @@ use postgres::{PgDomainDeps, caps};
 
 const DOMAIN_NAME: &str = "identity";
 
+/// Closed RSS-local token and grant lifetimes captured once by an assembly root.
+///
+/// Keeping these values together prevents composition roots from passing loose strings and
+/// durations through their shared infrastructure bag.
+pub struct IdentityRuntimeConfig {
+    jwt_key_id: diport::KeyId,
+    jwt_issuer: String,
+    jwt_audience: String,
+    jwt_access_ttl: Duration,
+    auth_grant_ttl: Duration,
+    refresh_ttl: Duration,
+}
+
+impl IdentityRuntimeConfig {
+    #[must_use]
+    pub fn new(
+        jwt_key_id: diport::KeyId,
+        jwt_issuer: impl Into<String>,
+        jwt_audience: impl Into<String>,
+        jwt_access_ttl: Duration,
+        auth_grant_ttl: Duration,
+        refresh_ttl: Duration,
+    ) -> Self {
+        Self {
+            jwt_key_id,
+            jwt_issuer: jwt_issuer.into(),
+            jwt_audience: jwt_audience.into(),
+            jwt_access_ttl,
+            auth_grant_ttl,
+            refresh_ttl,
+        }
+    }
+
+    /// Rebuild the sealed RSS access-token issuer input for one domain wiring pass.
+    pub fn jwt_issuer_config(
+        &self,
+    ) -> Result<authn::JwtIssuerConfig<diport::RssAccessProfile>, authn::KeyRingError> {
+        Ok(authn::JwtIssuerConfig::rss_access(
+            authn::SigningKeyRing::single(self.jwt_key_id.clone())?,
+            diport::SigningPurpose::new("auth.jwt.access"),
+            &self.jwt_issuer,
+            &self.jwt_audience,
+            self.jwt_access_ttl,
+        ))
+    }
+
+    #[must_use]
+    pub fn jwt_key_id(&self) -> &str {
+        self.jwt_key_id.as_str()
+    }
+
+    #[must_use]
+    pub const fn auth_grant_ttl(&self) -> Duration {
+        self.auth_grant_ttl
+    }
+
+    #[must_use]
+    pub const fn refresh_ttl(&self) -> Duration {
+        self.refresh_ttl
+    }
+}
+
 pub struct IdentityModuleDeps<S> {
     pg: PgDomainDeps<caps::Identity>,
     signer: Arc<S>,

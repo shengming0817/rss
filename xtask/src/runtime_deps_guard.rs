@@ -18,6 +18,7 @@ use crate::diagnostic::{Finding, GovernanceCheck, finding};
 const CONFIG_PATH: &str = "xtask/runtime-deps-guard.toml";
 const STRUCT_NAME: &str = "SharedRuntimeDeps";
 const EXACT_DOMAIN_TRANSPORT_ARC: &str = "Arc<dyn distributed::DomainTransport>";
+const EXACT_IDENTITY_RUNTIME_CONFIG: &str = "identity_composition::IdentityRuntimeConfig";
 const EXACT_PASSWORD_BLOCKLIST_ARC: &str = "Arc<secure::DigestPasswordBlocklist>";
 const EXACT_OIDC_PROVIDER_ARC: &str = "Arc<oidc::OidcProvider>";
 const EXACT_POSTGRES_REVOCATION_STORE: &str = "postgres::PgRevocationStore";
@@ -26,6 +27,7 @@ const EXACT_SETTINGS_READINESS_INTERVAL: &str =
 const EXACT_VAULT_SIGNER_ARC: &str = "Arc<vault::VaultSigner>";
 const SUPPORTED_EXACT_EXCEPTIONS: &[&str] = &[
     EXACT_DOMAIN_TRANSPORT_ARC,
+    EXACT_IDENTITY_RUNTIME_CONFIG,
     EXACT_PASSWORD_BLOCKLIST_ARC,
     EXACT_OIDC_PROVIDER_ARC,
     EXACT_POSTGRES_REVOCATION_STORE,
@@ -429,6 +431,11 @@ fn is_allowed_field_type(ty: &Type, resolver: &TypeResolver, policy: &RuntimeDep
     {
         return policy.allows_exact_exception(EXACT_SETTINGS_READINESS_INTERVAL);
     }
+    if let Some(segments) = resolved_type_path_segments(ty, resolver, &mut Vec::new())
+        && segments == ["identity_composition", "IdentityRuntimeConfig"]
+    {
+        return policy.allows_exact_exception(EXACT_IDENTITY_RUNTIME_CONFIG);
+    }
     if contains_forbidden_runtime_dep_type(ty, resolver, &mut Vec::new()) {
         return false;
     }
@@ -808,6 +815,7 @@ mod tests {
                 "Arc<oidc::OidcProvider>",
                 "Arc<secure::DigestPasswordBlocklist>",
                 "Arc<vault::VaultSigner>",
+                "identity_composition::IdentityRuntimeConfig",
                 "postgres::PgRevocationStore",
                 "settings_composition::KeyProviderReadinessInterval"
             ]

@@ -20,8 +20,8 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use consistency::{
-    BacklogSample, Disposition, OutboxBacklog, OutboxContractId, OutboxMetricSubject, OutboxRelay,
-    RetentionSweeper,
+    BacklogObservation, BacklogSample, Disposition, OutboxBacklog, OutboxContractId,
+    OutboxMetricSubject, OutboxRelay, RetentionSweeper,
 };
 use primitives::healthz::HealthStatus;
 use vocab::DomainName;
@@ -500,6 +500,8 @@ impl ObservedBacklogScope {
 /// set `outbox_pending_depth{domain,contract_id,tenant_id}` /
 /// `outbox_oldest_pending_age_seconds{domain,contract_id,tenant_id}` gauge；同一进程内已观测 scope
 /// 后续从成功采样结果消失时显式置 0，避免保留陈旧非零 series（#1209/#1625）。
+/// [`BacklogObservation::Standby`] 不是成功空采样：不写 gauge、不清理已观测 scope，也不把 worker
+/// health 恢复为 Healthy；只有 active observation 能变更这三类状态。
 /// 独立于 relay/sweeper 的专用 worker（独立 [`WorkerHealth`]）：gauge 新鲜度由 `config.sample_interval()`
 /// 解耦 relay 吞吐与 retention 周期（默认数十秒，远密于 5min oldest-age SLO 窗口），采样失败只降级
 /// `outbox_sampler` probe、不污染 relay readyz。取消/错误骨架同 `sweeper_loop`。
@@ -536,7 +538,7 @@ pub async fn backlog_sampler_loop<B>(
 
 /// sampler 单轮 tick：逐 domain 采样 + 发 gauge；成功采样时补齐“上一轮有、本轮无”的 scope 零值。
 /// 任一 domain 采样 Err → 整轮 Degraded 且不清理该 domain 的上一轮状态（其余 domain 仍尝试，不早退）。
-/// 全干净 → Healthy（F5 自愈）。
+/// 存在 standby → 保持 health；全 active 且干净 → Healthy（F5 自愈）。
 async fn sampler_tick<B>(
     store: &Arc<B>,
     domains: &[DomainName],
@@ -547,9 +549,10 @@ async fn sampler_tick<B>(
     B: OutboxBacklog,
 {
     let mut degraded = false;
+    let mut standby = false;
     for domain in domains {
         match store.sample_backlog(domain.as_str()).await {
-            Ok(samples) => {
+            Ok(BacklogObservation::Active(samples)) => {
                 let mut current_scopes = HashSet::with_capacity(samples.len());
                 for sample in samples {
                     current_scopes.insert(ObservedBacklogScope::from_subject(sample.subject()));
@@ -578,6 +581,7 @@ async fn sampler_tick<B>(
                     observed_scopes.insert(domain.as_str().to_owned(), current_scopes);
                 }
             }
+            Ok(BacklogObservation::Standby) => standby = true,
             Err(e) => {
                 log_sample_failed(domain.as_str(), &e);
                 degraded = true;
@@ -586,7 +590,7 @@ async fn sampler_tick<B>(
     }
     if degraded {
         health.mark_degraded();
-    } else {
+    } else if !standby {
         health.mark_healthy();
     }
 }
@@ -955,11 +959,24 @@ mod tests {
         async fn sample_backlog(
             &self,
             _domain: &str,
-        ) -> Result<Vec<BacklogMetricSample>, consistency::error::EngineError> {
+        ) -> Result<consistency::BacklogObservation, consistency::error::EngineError> {
             if let Some(kind) = self.err {
                 return Err(consistency::error::EngineError::new(kind));
             }
-            Ok(self.samples.clone())
+            Ok(consistency::BacklogObservation::Active(
+                self.samples.clone(),
+            ))
+        }
+    }
+
+    struct StandbyBacklog;
+
+    impl OutboxBacklog for StandbyBacklog {
+        async fn sample_backlog(
+            &self,
+            _domain: &str,
+        ) -> Result<consistency::BacklogObservation, consistency::error::EngineError> {
+            Ok(consistency::BacklogObservation::Standby)
         }
     }
 
@@ -1842,6 +1859,53 @@ mod tests {
             ]
         );
         assert_eq!(health.status(), HealthStatus::Healthy);
+    }
+
+    /// Active -> standby is not a real empty sample: preserve the last gauges and do not report a
+    /// successful sampling recovery while this replica does not own the maintenance lease.
+    #[tokio::test]
+    async fn sampler_standby_preserves_observation_and_health() {
+        let health = Arc::new(WorkerHealth::healthy());
+        let metrics = CountingMetrics::new();
+        let mut observed_scopes = super::BacklogScopeState::default();
+        let active = FakeBacklog::with_samples(vec![backlog_sample(
+            "identity.session-created",
+            BacklogSample::new(42, 305),
+        )]);
+        super::sampler_tick(
+            &active,
+            &[dn("identity")],
+            &mut observed_scopes,
+            &health,
+            metrics.as_ref(),
+        )
+        .await;
+        health.mark_degraded();
+
+        super::sampler_tick(
+            &Arc::new(StandbyBacklog),
+            &[dn("identity")],
+            &mut observed_scopes,
+            &health,
+            metrics.as_ref(),
+        )
+        .await;
+
+        assert_eq!(
+            metrics.backlogs(),
+            vec![(
+                "identity".to_string(),
+                "identity.session-created".to_string(),
+                "f47ac10b-58cc-4372-a567-0e02b2c3d479".to_string(),
+                BacklogSample::new(42, 305),
+            )],
+            "standby must not zero the active replica's last observation"
+        );
+        assert_eq!(
+            health.status(),
+            HealthStatus::Degraded,
+            "standby must not masquerade as a successful sampling tick"
+        );
     }
 
     /// sampler 采样 Err → 整轮 Degraded（不发 gauge），干净下一轮自愈（F5）。

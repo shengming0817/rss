@@ -151,8 +151,10 @@ fn generic_unsafe_warn_uses_the_metric_routing_scope_without_localtx_duplication
         "generic WARN routing fields are exactly",
         "`boundary` and",
         "`final_status`; both values come from the same closed settlement routing",
-        "The generic runner is the only generic unsafe-settlement WARN emitter",
-        "HTTP LocalTx keeps its contract-attributed WARN path",
+        "The shared private settlement router is the only generic",
+        "unsafe-settlement WARN emitter",
+        "HTTP LocalTx keeps its contract-attributed WARN",
+        "path and does not emit the generic WARN",
     ] {
         assert!(
             RUNBOOK.contains(token),

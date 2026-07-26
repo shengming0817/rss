@@ -1,25 +1,38 @@
-//! Identity + audit demo/test assembly: no launch/transport; generated wiring and capabilities agree.
-//! ref: oxidecomputer/omicron nexus/src/lib.rs@3298185e6cb3f6934a581122101e52988dc81895
+//! Executable Identity + Audit production assembly.
+//! ref: oxidecomputer/omicron nexus/src/lib.rs@cc4e95c57bdf029086c30d0e4c6cc930d75fa947
 
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 use postgres::PgRuntimeHandle;
 use primitives::MacKey;
 
+mod auth_bridge;
+mod config;
+mod eventing;
+mod listeners;
 #[path = "generated/modules_gen.rs"]
 mod modules_gen;
+mod plan;
+mod providers;
 #[path = "generated/providers_gen.rs"]
 mod providers_gen;
+mod runtime;
 const _: () = assert!(!providers_gen::PROVIDER_CATALOG.is_empty());
 pub use modules_gen::DOMAIN_LISTENER_BINDINGS;
 
-const DEMO_JWT_ISSUER: &str = "https://identityaudit.demo.invalid";
-const DEMO_JWT_AUDIENCE: &str = "rss-identityaudit-demo";
-const DEMO_JWT_KEY_ID: &str = "identityaudit-demo-es256";
-const DEMO_JWT_ACCESS_TTL: Duration = Duration::from_secs(15 * 60);
-const DEMO_AUTH_GRANT_TTL: Duration = Duration::from_secs(30 * 24 * 60 * 60);
-const DEMO_REFRESH_TTL: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+/// Fixed tracing profile admitted by the closed deployment contract.
+pub const TRACING_FILTER: &str = "info";
+
+/// Capture a single closed configuration generation and launch until SIGINT/SIGTERM.
+pub fn run(path: &std::path::Path) -> anyhow::Result<()> {
+    let captured = config::capture(path)?;
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|_| anyhow::anyhow!("build identityaudit Tokio runtime"))?;
+    runtime.block_on(runtime::launch_captured(captured))
+}
 
 pub struct SystemClock;
 
@@ -34,25 +47,27 @@ impl diport::Clock for SystemClock {
 pub struct SharedRuntimeDeps {
     pg: PgRuntimeHandle,
     signer: Arc<vault::VaultSigner>,
-    _pdp: Arc<oidc::OidcProvider<diport::RssAccessProfile>>,
     audit_chain_key: MacKey,
+    identity_config: identity_composition::IdentityRuntimeConfig,
+    blocklist: Arc<secure::DigestPasswordBlocklist>,
 }
 
 impl SharedRuntimeDeps {
-    #[must_use]
-    pub fn new(
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn production(
         pg: PgRuntimeHandle,
         signer: Arc<vault::VaultSigner>,
-        pdp: Arc<oidc::OidcProvider<diport::RssAccessProfile>>,
         audit_chain_key: MacKey,
+        identity_config: identity_composition::IdentityRuntimeConfig,
+        blocklist: Arc<secure::DigestPasswordBlocklist>,
     ) -> Self {
-        require_pdp(pdp.as_ref());
         require_active_domains();
         Self {
             pg,
             signer,
-            _pdp: pdp,
             audit_chain_key,
+            identity_config,
+            blocklist,
         }
     }
 }
@@ -64,8 +79,6 @@ async fn wire_domains(deps: &SharedRuntimeDeps) -> anyhow::Result<Vec<bootstrap:
 const _: () = {
     let _ = wire_domains;
 };
-
-fn require_pdp<P: diport::Pdp + ?Sized>(_provider: &P) {}
 
 fn require_active_domains() {
     fn require_domain<D: bootstrap::Domain>() {}
@@ -79,29 +92,17 @@ mod domains {
 
         use bootstrap::DomainBinding;
 
-        use crate::{
-            DEMO_AUTH_GRANT_TTL, DEMO_JWT_ACCESS_TTL, DEMO_JWT_AUDIENCE, DEMO_JWT_ISSUER,
-            DEMO_JWT_KEY_ID, DEMO_REFRESH_TTL, SharedRuntimeDeps, SystemClock,
-        };
+        use crate::{SharedRuntimeDeps, SystemClock};
 
         pub(crate) async fn module(deps: &SharedRuntimeDeps) -> anyhow::Result<DomainBinding> {
-            let blocklist = crypto::load_password_blocklist_from_reader(std::io::Cursor::new(
-                include_bytes!("../../../deploy/password-blocklist.demo.sha256"),
-            ))?;
             identity_composition::wire(identity_composition::IdentityModuleDeps::new(
                 deps.pg.for_domain(),
                 Arc::clone(&deps.signer),
                 Arc::new(SystemClock),
-                authn::JwtIssuerConfig::rss_access(
-                    authn::SigningKeyRing::single(diport::KeyId::new(DEMO_JWT_KEY_ID))?,
-                    diport::SigningPurpose::new("auth.jwt.access"),
-                    DEMO_JWT_ISSUER,
-                    DEMO_JWT_AUDIENCE,
-                    DEMO_JWT_ACCESS_TTL,
-                ),
-                DEMO_AUTH_GRANT_TTL,
-                DEMO_REFRESH_TTL,
-                Arc::new(blocklist),
+                deps.identity_config.jwt_issuer_config()?,
+                deps.identity_config.auth_grant_ttl(),
+                deps.identity_config.refresh_ttl(),
+                Arc::clone(&deps.blocklist),
             ))
         }
 

@@ -924,6 +924,16 @@ mod tests {
                 )?;
                 fs::copy(source_dir.join("Cargo.toml"), target_dir.join("Cargo.toml"))?;
                 fs::copy(source_dir.join("src/lib.rs"), target_dir.join("src/lib.rs"))?;
+                if assembly == "identityaudit" {
+                    fs::copy(
+                        source_dir.join("src/runtime.rs"),
+                        target_dir.join("src/runtime.rs"),
+                    )?;
+                    fs::copy(
+                        source_dir.join("src/providers.rs"),
+                        target_dir.join("src/providers.rs"),
+                    )?;
+                }
                 fs::copy(
                     source_dir.join("src/generated/modules_gen.rs"),
                     target_dir.join("src/generated/modules_gen.rs"),

@@ -3747,18 +3747,18 @@ pub fn diport::DynSecretResolver<'dynosaur_struct>::new_rc(impl diport::secret_r
 impl diport::DiPortEffect for diport::DynSecretResolver<'_>
 pub type diport::DynSecretResolver<'_>::Effect = diport::AuthEffect
 pub type diport::DynSecretResolver<'_>::Privilege = diport::LocalPrivilege
-impl<'dynosaur_struct> diport::secret_resolver::SecretResolver for &diport::DynSecretResolver<'dynosaur_struct> where Self: core::marker::Send
-pub fn &diport::DynSecretResolver<'dynosaur_struct>::resolve(&self, vocab::tenant::TenantId, &diport::secret_resolver::SecretCoordinate) -> impl core::future::future::Future<Output = core::result::Result<diport::secret_resolver::SecretMaterial, diport::secret_resolver::SecretResolverError>> + core::marker::Send
-impl<'dynosaur_struct> diport::secret_resolver::SecretResolver for &mut diport::DynSecretResolver<'dynosaur_struct> where Self: core::marker::Send
-pub fn &mut diport::DynSecretResolver<'dynosaur_struct>::resolve(&self, vocab::tenant::TenantId, &diport::secret_resolver::SecretCoordinate) -> impl core::future::future::Future<Output = core::result::Result<diport::secret_resolver::SecretMaterial, diport::secret_resolver::SecretResolverError>> + core::marker::Send
-impl<'dynosaur_struct> diport::secret_resolver::SecretResolver for alloc::boxed::Box<diport::DynSecretResolver<'dynosaur_struct>> where Self: core::marker::Send
-pub fn alloc::boxed::Box<diport::DynSecretResolver<'dynosaur_struct>>::resolve(&self, vocab::tenant::TenantId, &diport::secret_resolver::SecretCoordinate) -> impl core::future::future::Future<Output = core::result::Result<diport::secret_resolver::SecretMaterial, diport::secret_resolver::SecretResolverError>> + core::marker::Send
+impl<'dynosaur_struct> diport::secret_resolver::SecretResolver for &diport::DynSecretResolver<'dynosaur_struct> where Self: core::marker::Send + core::marker::Sync
+pub fn &diport::DynSecretResolver<'dynosaur_struct>::resolve(&self, vocab::tenant::TenantId, &diport::secret_resolver::SecretCoordinate) -> impl core::future::future::Future<Output = core::result::Result<diport::secret_resolver::SecretMaterial, diport::secret_resolver::SecretResolverError>> + core::marker::Send + core::marker::Sync
+impl<'dynosaur_struct> diport::secret_resolver::SecretResolver for &mut diport::DynSecretResolver<'dynosaur_struct> where Self: core::marker::Send + core::marker::Sync
+pub fn &mut diport::DynSecretResolver<'dynosaur_struct>::resolve(&self, vocab::tenant::TenantId, &diport::secret_resolver::SecretCoordinate) -> impl core::future::future::Future<Output = core::result::Result<diport::secret_resolver::SecretMaterial, diport::secret_resolver::SecretResolverError>> + core::marker::Send + core::marker::Sync
+impl<'dynosaur_struct> diport::secret_resolver::SecretResolver for alloc::boxed::Box<diport::DynSecretResolver<'dynosaur_struct>> where Self: core::marker::Send + core::marker::Sync
+pub fn alloc::boxed::Box<diport::DynSecretResolver<'dynosaur_struct>>::resolve(&self, vocab::tenant::TenantId, &diport::secret_resolver::SecretCoordinate) -> impl core::future::future::Future<Output = core::result::Result<diport::secret_resolver::SecretMaterial, diport::secret_resolver::SecretResolverError>> + core::marker::Send + core::marker::Sync
 impl<'dynosaur_struct> diport::secret_resolver::SecretResolver for diport::DynSecretResolver<'dynosaur_struct>
-pub fn diport::DynSecretResolver<'dynosaur_struct>::resolve(&self, vocab::tenant::TenantId, &diport::secret_resolver::SecretCoordinate) -> impl core::future::future::Future<Output = core::result::Result<diport::secret_resolver::SecretMaterial, diport::secret_resolver::SecretResolverError>> + core::marker::Send
+pub fn diport::DynSecretResolver<'dynosaur_struct>::resolve(&self, vocab::tenant::TenantId, &diport::secret_resolver::SecretCoordinate) -> impl core::future::future::Future<Output = core::result::Result<diport::secret_resolver::SecretMaterial, diport::secret_resolver::SecretResolverError>> + core::marker::Send + core::marker::Sync
 impl<'dynosaur_struct> !core::marker::Freeze for diport::DynSecretResolver<'dynosaur_struct>
 impl<'dynosaur_struct> core::marker::Send for diport::DynSecretResolver<'dynosaur_struct>
 impl<'dynosaur_struct> !core::marker::Sized for diport::DynSecretResolver<'dynosaur_struct>
-impl<'dynosaur_struct> !core::marker::Sync for diport::DynSecretResolver<'dynosaur_struct>
+impl<'dynosaur_struct> core::marker::Sync for diport::DynSecretResolver<'dynosaur_struct>
 impl<'dynosaur_struct> !core::marker::Unpin for diport::DynSecretResolver<'dynosaur_struct>
 impl<'dynosaur_struct> !core::marker::UnsafeUnpin for diport::DynSecretResolver<'dynosaur_struct>
 impl<'dynosaur_struct> !core::panic::unwind_safe::RefUnwindSafe for diport::DynSecretResolver<'dynosaur_struct>
@@ -3803,16 +3803,16 @@ impl core::marker::Unpin for diport::secret_resolver::SecretMaterial
 impl core::marker::UnsafeUnpin for diport::secret_resolver::SecretMaterial
 impl core::panic::unwind_safe::RefUnwindSafe for diport::secret_resolver::SecretMaterial
 impl core::panic::unwind_safe::UnwindSafe for diport::secret_resolver::SecretMaterial
-pub trait diport::secret_resolver::SecretResolver: core::marker::Send
-pub fn diport::secret_resolver::SecretResolver::resolve(&self, vocab::tenant::TenantId, &diport::secret_resolver::SecretCoordinate) -> impl core::future::future::Future<Output = core::result::Result<diport::secret_resolver::SecretMaterial, diport::secret_resolver::SecretResolverError>> + core::marker::Send
-impl<'dynosaur_struct> diport::secret_resolver::SecretResolver for &diport::DynSecretResolver<'dynosaur_struct> where Self: core::marker::Send
-pub fn &diport::DynSecretResolver<'dynosaur_struct>::resolve(&self, vocab::tenant::TenantId, &diport::secret_resolver::SecretCoordinate) -> impl core::future::future::Future<Output = core::result::Result<diport::secret_resolver::SecretMaterial, diport::secret_resolver::SecretResolverError>> + core::marker::Send
-impl<'dynosaur_struct> diport::secret_resolver::SecretResolver for &mut diport::DynSecretResolver<'dynosaur_struct> where Self: core::marker::Send
-pub fn &mut diport::DynSecretResolver<'dynosaur_struct>::resolve(&self, vocab::tenant::TenantId, &diport::secret_resolver::SecretCoordinate) -> impl core::future::future::Future<Output = core::result::Result<diport::secret_resolver::SecretMaterial, diport::secret_resolver::SecretResolverError>> + core::marker::Send
-impl<'dynosaur_struct> diport::secret_resolver::SecretResolver for alloc::boxed::Box<diport::DynSecretResolver<'dynosaur_struct>> where Self: core::marker::Send
-pub fn alloc::boxed::Box<diport::DynSecretResolver<'dynosaur_struct>>::resolve(&self, vocab::tenant::TenantId, &diport::secret_resolver::SecretCoordinate) -> impl core::future::future::Future<Output = core::result::Result<diport::secret_resolver::SecretMaterial, diport::secret_resolver::SecretResolverError>> + core::marker::Send
+pub trait diport::secret_resolver::SecretResolver: core::marker::Send + core::marker::Sync
+pub fn diport::secret_resolver::SecretResolver::resolve(&self, vocab::tenant::TenantId, &diport::secret_resolver::SecretCoordinate) -> impl core::future::future::Future<Output = core::result::Result<diport::secret_resolver::SecretMaterial, diport::secret_resolver::SecretResolverError>> + core::marker::Send + core::marker::Sync
+impl<'dynosaur_struct> diport::secret_resolver::SecretResolver for &diport::DynSecretResolver<'dynosaur_struct> where Self: core::marker::Send + core::marker::Sync
+pub fn &diport::DynSecretResolver<'dynosaur_struct>::resolve(&self, vocab::tenant::TenantId, &diport::secret_resolver::SecretCoordinate) -> impl core::future::future::Future<Output = core::result::Result<diport::secret_resolver::SecretMaterial, diport::secret_resolver::SecretResolverError>> + core::marker::Send + core::marker::Sync
+impl<'dynosaur_struct> diport::secret_resolver::SecretResolver for &mut diport::DynSecretResolver<'dynosaur_struct> where Self: core::marker::Send + core::marker::Sync
+pub fn &mut diport::DynSecretResolver<'dynosaur_struct>::resolve(&self, vocab::tenant::TenantId, &diport::secret_resolver::SecretCoordinate) -> impl core::future::future::Future<Output = core::result::Result<diport::secret_resolver::SecretMaterial, diport::secret_resolver::SecretResolverError>> + core::marker::Send + core::marker::Sync
+impl<'dynosaur_struct> diport::secret_resolver::SecretResolver for alloc::boxed::Box<diport::DynSecretResolver<'dynosaur_struct>> where Self: core::marker::Send + core::marker::Sync
+pub fn alloc::boxed::Box<diport::DynSecretResolver<'dynosaur_struct>>::resolve(&self, vocab::tenant::TenantId, &diport::secret_resolver::SecretCoordinate) -> impl core::future::future::Future<Output = core::result::Result<diport::secret_resolver::SecretMaterial, diport::secret_resolver::SecretResolverError>> + core::marker::Send + core::marker::Sync
 impl<'dynosaur_struct> diport::secret_resolver::SecretResolver for diport::DynSecretResolver<'dynosaur_struct>
-pub fn diport::DynSecretResolver<'dynosaur_struct>::resolve(&self, vocab::tenant::TenantId, &diport::secret_resolver::SecretCoordinate) -> impl core::future::future::Future<Output = core::result::Result<diport::secret_resolver::SecretMaterial, diport::secret_resolver::SecretResolverError>> + core::marker::Send
+pub fn diport::DynSecretResolver<'dynosaur_struct>::resolve(&self, vocab::tenant::TenantId, &diport::secret_resolver::SecretCoordinate) -> impl core::future::future::Future<Output = core::result::Result<diport::secret_resolver::SecretMaterial, diport::secret_resolver::SecretResolverError>> + core::marker::Send + core::marker::Sync
 pub trait diport::secret_resolver::SecretResolverLocal
 pub async fn diport::secret_resolver::SecretResolverLocal::resolve(&self, vocab::tenant::TenantId, &diport::secret_resolver::SecretCoordinate) -> core::result::Result<diport::secret_resolver::SecretMaterial, diport::secret_resolver::SecretResolverError>
 impl<TraitVariantBlanketType: diport::secret_resolver::SecretResolver> diport::secret_resolver::SecretResolverLocal for TraitVariantBlanketType
@@ -6252,18 +6252,18 @@ pub fn diport::DynSecretResolver<'dynosaur_struct>::new_rc(impl diport::secret_r
 impl diport::DiPortEffect for diport::DynSecretResolver<'_>
 pub type diport::DynSecretResolver<'_>::Effect = diport::AuthEffect
 pub type diport::DynSecretResolver<'_>::Privilege = diport::LocalPrivilege
-impl<'dynosaur_struct> diport::secret_resolver::SecretResolver for &diport::DynSecretResolver<'dynosaur_struct> where Self: core::marker::Send
-pub fn &diport::DynSecretResolver<'dynosaur_struct>::resolve(&self, vocab::tenant::TenantId, &diport::secret_resolver::SecretCoordinate) -> impl core::future::future::Future<Output = core::result::Result<diport::secret_resolver::SecretMaterial, diport::secret_resolver::SecretResolverError>> + core::marker::Send
-impl<'dynosaur_struct> diport::secret_resolver::SecretResolver for &mut diport::DynSecretResolver<'dynosaur_struct> where Self: core::marker::Send
-pub fn &mut diport::DynSecretResolver<'dynosaur_struct>::resolve(&self, vocab::tenant::TenantId, &diport::secret_resolver::SecretCoordinate) -> impl core::future::future::Future<Output = core::result::Result<diport::secret_resolver::SecretMaterial, diport::secret_resolver::SecretResolverError>> + core::marker::Send
-impl<'dynosaur_struct> diport::secret_resolver::SecretResolver for alloc::boxed::Box<diport::DynSecretResolver<'dynosaur_struct>> where Self: core::marker::Send
-pub fn alloc::boxed::Box<diport::DynSecretResolver<'dynosaur_struct>>::resolve(&self, vocab::tenant::TenantId, &diport::secret_resolver::SecretCoordinate) -> impl core::future::future::Future<Output = core::result::Result<diport::secret_resolver::SecretMaterial, diport::secret_resolver::SecretResolverError>> + core::marker::Send
+impl<'dynosaur_struct> diport::secret_resolver::SecretResolver for &diport::DynSecretResolver<'dynosaur_struct> where Self: core::marker::Send + core::marker::Sync
+pub fn &diport::DynSecretResolver<'dynosaur_struct>::resolve(&self, vocab::tenant::TenantId, &diport::secret_resolver::SecretCoordinate) -> impl core::future::future::Future<Output = core::result::Result<diport::secret_resolver::SecretMaterial, diport::secret_resolver::SecretResolverError>> + core::marker::Send + core::marker::Sync
+impl<'dynosaur_struct> diport::secret_resolver::SecretResolver for &mut diport::DynSecretResolver<'dynosaur_struct> where Self: core::marker::Send + core::marker::Sync
+pub fn &mut diport::DynSecretResolver<'dynosaur_struct>::resolve(&self, vocab::tenant::TenantId, &diport::secret_resolver::SecretCoordinate) -> impl core::future::future::Future<Output = core::result::Result<diport::secret_resolver::SecretMaterial, diport::secret_resolver::SecretResolverError>> + core::marker::Send + core::marker::Sync
+impl<'dynosaur_struct> diport::secret_resolver::SecretResolver for alloc::boxed::Box<diport::DynSecretResolver<'dynosaur_struct>> where Self: core::marker::Send + core::marker::Sync
+pub fn alloc::boxed::Box<diport::DynSecretResolver<'dynosaur_struct>>::resolve(&self, vocab::tenant::TenantId, &diport::secret_resolver::SecretCoordinate) -> impl core::future::future::Future<Output = core::result::Result<diport::secret_resolver::SecretMaterial, diport::secret_resolver::SecretResolverError>> + core::marker::Send + core::marker::Sync
 impl<'dynosaur_struct> diport::secret_resolver::SecretResolver for diport::DynSecretResolver<'dynosaur_struct>
-pub fn diport::DynSecretResolver<'dynosaur_struct>::resolve(&self, vocab::tenant::TenantId, &diport::secret_resolver::SecretCoordinate) -> impl core::future::future::Future<Output = core::result::Result<diport::secret_resolver::SecretMaterial, diport::secret_resolver::SecretResolverError>> + core::marker::Send
+pub fn diport::DynSecretResolver<'dynosaur_struct>::resolve(&self, vocab::tenant::TenantId, &diport::secret_resolver::SecretCoordinate) -> impl core::future::future::Future<Output = core::result::Result<diport::secret_resolver::SecretMaterial, diport::secret_resolver::SecretResolverError>> + core::marker::Send + core::marker::Sync
 impl<'dynosaur_struct> !core::marker::Freeze for diport::DynSecretResolver<'dynosaur_struct>
 impl<'dynosaur_struct> core::marker::Send for diport::DynSecretResolver<'dynosaur_struct>
 impl<'dynosaur_struct> !core::marker::Sized for diport::DynSecretResolver<'dynosaur_struct>
-impl<'dynosaur_struct> !core::marker::Sync for diport::DynSecretResolver<'dynosaur_struct>
+impl<'dynosaur_struct> core::marker::Sync for diport::DynSecretResolver<'dynosaur_struct>
 impl<'dynosaur_struct> !core::marker::Unpin for diport::DynSecretResolver<'dynosaur_struct>
 impl<'dynosaur_struct> !core::marker::UnsafeUnpin for diport::DynSecretResolver<'dynosaur_struct>
 impl<'dynosaur_struct> !core::panic::unwind_safe::RefUnwindSafe for diport::DynSecretResolver<'dynosaur_struct>
@@ -8059,16 +8059,16 @@ impl<'dynosaur_struct> diport::saga_instance_store::SagaTenantSource for alloc::
 pub fn alloc::boxed::Box<diport::DynSagaTenantSource<'dynosaur_struct>>::list_candidate_tenants(&self, &diport::saga_instance_store::SagaWorkerIdentity, core::num::nonzero::NonZeroUsize) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<vocab::tenant::TenantId>, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
 impl<'dynosaur_struct> diport::saga_instance_store::SagaTenantSource for diport::DynSagaTenantSource<'dynosaur_struct>
 pub fn diport::DynSagaTenantSource<'dynosaur_struct>::list_candidate_tenants(&self, &diport::saga_instance_store::SagaWorkerIdentity, core::num::nonzero::NonZeroUsize) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<vocab::tenant::TenantId>, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
-pub trait diport::SecretResolver: core::marker::Send
-pub fn diport::SecretResolver::resolve(&self, vocab::tenant::TenantId, &diport::secret_resolver::SecretCoordinate) -> impl core::future::future::Future<Output = core::result::Result<diport::secret_resolver::SecretMaterial, diport::secret_resolver::SecretResolverError>> + core::marker::Send
-impl<'dynosaur_struct> diport::secret_resolver::SecretResolver for &diport::DynSecretResolver<'dynosaur_struct> where Self: core::marker::Send
-pub fn &diport::DynSecretResolver<'dynosaur_struct>::resolve(&self, vocab::tenant::TenantId, &diport::secret_resolver::SecretCoordinate) -> impl core::future::future::Future<Output = core::result::Result<diport::secret_resolver::SecretMaterial, diport::secret_resolver::SecretResolverError>> + core::marker::Send
-impl<'dynosaur_struct> diport::secret_resolver::SecretResolver for &mut diport::DynSecretResolver<'dynosaur_struct> where Self: core::marker::Send
-pub fn &mut diport::DynSecretResolver<'dynosaur_struct>::resolve(&self, vocab::tenant::TenantId, &diport::secret_resolver::SecretCoordinate) -> impl core::future::future::Future<Output = core::result::Result<diport::secret_resolver::SecretMaterial, diport::secret_resolver::SecretResolverError>> + core::marker::Send
-impl<'dynosaur_struct> diport::secret_resolver::SecretResolver for alloc::boxed::Box<diport::DynSecretResolver<'dynosaur_struct>> where Self: core::marker::Send
-pub fn alloc::boxed::Box<diport::DynSecretResolver<'dynosaur_struct>>::resolve(&self, vocab::tenant::TenantId, &diport::secret_resolver::SecretCoordinate) -> impl core::future::future::Future<Output = core::result::Result<diport::secret_resolver::SecretMaterial, diport::secret_resolver::SecretResolverError>> + core::marker::Send
+pub trait diport::SecretResolver: core::marker::Send + core::marker::Sync
+pub fn diport::SecretResolver::resolve(&self, vocab::tenant::TenantId, &diport::secret_resolver::SecretCoordinate) -> impl core::future::future::Future<Output = core::result::Result<diport::secret_resolver::SecretMaterial, diport::secret_resolver::SecretResolverError>> + core::marker::Send + core::marker::Sync
+impl<'dynosaur_struct> diport::secret_resolver::SecretResolver for &diport::DynSecretResolver<'dynosaur_struct> where Self: core::marker::Send + core::marker::Sync
+pub fn &diport::DynSecretResolver<'dynosaur_struct>::resolve(&self, vocab::tenant::TenantId, &diport::secret_resolver::SecretCoordinate) -> impl core::future::future::Future<Output = core::result::Result<diport::secret_resolver::SecretMaterial, diport::secret_resolver::SecretResolverError>> + core::marker::Send + core::marker::Sync
+impl<'dynosaur_struct> diport::secret_resolver::SecretResolver for &mut diport::DynSecretResolver<'dynosaur_struct> where Self: core::marker::Send + core::marker::Sync
+pub fn &mut diport::DynSecretResolver<'dynosaur_struct>::resolve(&self, vocab::tenant::TenantId, &diport::secret_resolver::SecretCoordinate) -> impl core::future::future::Future<Output = core::result::Result<diport::secret_resolver::SecretMaterial, diport::secret_resolver::SecretResolverError>> + core::marker::Send + core::marker::Sync
+impl<'dynosaur_struct> diport::secret_resolver::SecretResolver for alloc::boxed::Box<diport::DynSecretResolver<'dynosaur_struct>> where Self: core::marker::Send + core::marker::Sync
+pub fn alloc::boxed::Box<diport::DynSecretResolver<'dynosaur_struct>>::resolve(&self, vocab::tenant::TenantId, &diport::secret_resolver::SecretCoordinate) -> impl core::future::future::Future<Output = core::result::Result<diport::secret_resolver::SecretMaterial, diport::secret_resolver::SecretResolverError>> + core::marker::Send + core::marker::Sync
 impl<'dynosaur_struct> diport::secret_resolver::SecretResolver for diport::DynSecretResolver<'dynosaur_struct>
-pub fn diport::DynSecretResolver<'dynosaur_struct>::resolve(&self, vocab::tenant::TenantId, &diport::secret_resolver::SecretCoordinate) -> impl core::future::future::Future<Output = core::result::Result<diport::secret_resolver::SecretMaterial, diport::secret_resolver::SecretResolverError>> + core::marker::Send
+pub fn diport::DynSecretResolver<'dynosaur_struct>::resolve(&self, vocab::tenant::TenantId, &diport::secret_resolver::SecretCoordinate) -> impl core::future::future::Future<Output = core::result::Result<diport::secret_resolver::SecretMaterial, diport::secret_resolver::SecretResolverError>> + core::marker::Send + core::marker::Sync
 pub trait diport::ServiceTokenReplayStore: core::marker::Send + core::marker::Sync + core::marker::Send
 pub fn diport::ServiceTokenReplayStore::check_and_record(&self, &diport::pdp::ServiceTokenReplayKey, std::time::SystemTime, diport::pdp::ServiceTokenReplayDeadline) -> impl core::future::future::Future<Output = core::result::Result<diport::pdp::ServiceTokenReplayDisposition, diport::pdp::ServiceTokenReplayStoreError>> + core::marker::Send
 impl<'dynosaur_struct> diport::pdp::ServiceTokenReplayStore for &diport::DynServiceTokenReplayStore<'dynosaur_struct> where Self: core::marker::Send + core::marker::Sync
