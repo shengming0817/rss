@@ -1065,20 +1065,23 @@ pub(crate) fn run_ci_integration(
     let root = workspace_root()?;
     integration_shards::validate_workspace(&root)?;
     let missing = integration_shards::missing_external_resources(shard);
-    if !missing.is_empty() && !docker_available() {
+    if (shard.requires_docker() || !missing.is_empty()) && !docker_available() {
         let labels = missing
             .iter()
             .map(|resource| resource.label())
             .collect::<Vec<_>>()
             .join(", ");
+        let requirement = if labels.is_empty() {
+            "shard 声明的 Docker capability".to_owned()
+        } else {
+            format!("缺少外部资源: {labels}")
+        };
         if allow_missing_tools {
-            eprintln!(
-                "ci-integration/{shard}: [跳过] docker daemon 不可达，且缺少外部资源: {labels}"
-            );
+            eprintln!("ci-integration/{shard}: [跳过] docker daemon 不可达，且{requirement}");
             return Ok(());
         }
         bail!(
-            "ci-integration/{shard}: docker daemon 不可达，且缺少 shard 所需外部资源: {labels}; \
+            "ci-integration/{shard}: docker daemon 不可达，且{requirement}; \
              启动 Docker、提供该 shard 的外部测试资源，或本地显式使用 --allow-missing-tools"
         );
     }
@@ -1599,6 +1602,10 @@ fn execution_for_job(job: CiJobKey) -> Result<JobExecution> {
         },
         CiJobKey::IntegrationObjectStorage => JobExecution::Integration {
             shard: IntegrationShard::ObjectStorage,
+            partition: None,
+        },
+        CiJobKey::IntegrationProductionRuntime => JobExecution::Integration {
+            shard: IntegrationShard::ProductionRuntime,
             partition: None,
         },
         CiJobKey::Audit => JobExecution::Audit,
@@ -6868,6 +6875,99 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
                     .is_some_and(|argument| expr_is_path(argument, "service"))
         }
 
+        fn ownership_helper_signature_is_exact(helper: &syn::ItemFn) -> bool {
+            use quote::ToTokens as _;
+
+            let mut inputs = helper.sig.inputs.iter();
+            let Some(syn::FnArg::Typed(service)) = inputs.next() else {
+                return false;
+            };
+            let normalize = |tokens: proc_macro2::TokenStream| {
+                tokens
+                    .to_string()
+                    .chars()
+                    .filter(|char| !char.is_whitespace())
+                    .collect::<String>()
+            };
+            matches!(helper.vis, syn::Visibility::Public(_))
+                && helper.sig.constness.is_none()
+                && helper.sig.asyncness.is_none()
+                && helper.sig.unsafety.is_none()
+                && helper.sig.abi.is_none()
+                && helper.sig.generics.params.is_empty()
+                && helper.sig.generics.where_clause.is_none()
+                && helper.sig.variadic.is_none()
+                && inputs.next().is_none()
+                && pat_is_ident(&service.pat, "service")
+                && normalize(service.ty.to_token_stream()) == "ContainerService"
+                && normalize(helper.sig.output.to_token_stream())
+                    == "->Result<Option<BTreeMap<String,String>>>"
+        }
+
+        fn ownership_helper_body_is_exact(block: &syn::Block) -> bool {
+            let [syn::Stmt::Expr(syn::Expr::Call(ok), None)] = block.stmts.as_slice() else {
+                return false;
+            };
+            if !expr_is_path(&ok.func, "Ok") || ok.args.len() != 1 {
+                return false;
+            }
+            let Some(syn::Expr::MethodCall(map)) = ok.args.first() else {
+                return false;
+            };
+            let syn::Expr::Try(context) = map.receiver.as_ref() else {
+                return false;
+            };
+            let syn::Expr::Call(from_env) = context.expr.as_ref() else {
+                return false;
+            };
+            let from_env_is_exact = matches!(from_env.func.as_ref(), syn::Expr::Path(path)
+            if path.qself.is_none()
+                && path.path.segments.len() == 2
+                && path.path.segments[0].ident == "CiContainerContext"
+                && path.path.segments[1].ident == "from_env"
+                && path.path.segments.iter().all(|segment| {
+                    matches!(segment.arguments, syn::PathArguments::None)
+                }));
+            let Some(syn::Expr::Closure(closure)) = map.args.first() else {
+                return false;
+            };
+            from_env_is_exact
+                && from_env.args.is_empty()
+                && map.method == "map"
+                && map.args.len() == 1
+                && closure.capture.is_none()
+                && closure.inputs.len() == 1
+                && closure
+                    .inputs
+                    .first()
+                    .is_some_and(|pattern| pat_is_ident(pattern, "context"))
+                && matches!(closure.body.as_ref(), syn::Expr::MethodCall(labels)
+                if labels.method == "labels"
+                    && expr_is_path(&labels.receiver, "service")
+                    && labels.args.len() == 1
+                    && labels.args.first().is_some_and(|argument| {
+                        expr_is_shared_ref_to(argument, "context")
+                    }))
+        }
+
+        fn ownership_helper_is_exact(file: &syn::File) -> bool {
+            let helpers = file
+                .items
+                .iter()
+                .filter_map(|item| match item {
+                    syn::Item::Fn(item) if item.sig.ident == "integration_container_labels" => {
+                        Some(item)
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            let [helper] = helpers.as_slice() else {
+                return false;
+            };
+            ownership_helper_signature_is_exact(helper)
+                && ownership_helper_body_is_exact(&helper.block)
+        }
+
         impl<'ast> Visit<'ast> for OwnedStartVisitor {
             fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
                 if node.method == "start" {
@@ -6897,6 +6997,9 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
                 return false;
             };
             if async_runner_import_count(&file) != 1 {
+                return false;
+            }
+            if !ownership_helper_is_exact(&file) {
                 return false;
             }
             let owned = file
@@ -7012,12 +7115,32 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
                     && (!path.starts_with("crates/testkit/") || start_method_count(&file) == 0)
             }
         });
+        let compose_fixture_uses_shared_ownership = workspace_rust_sources
+            .iter()
+            .find(|(path, _)| *path == "journeys/tests/support/runtime_compose_fixture.rs")
+            .is_some_and(|(_, source)| {
+                source.contains("use testkit::{")
+                    && source.contains("ContainerService")
+                    && source.contains("integration_container_labels")
+                    && source.matches("integration_container_labels").count() == 3
+                    && [
+                        "ContainerService::Postgres",
+                        "ContainerService::Redis",
+                        "ContainerService::RabbitMq",
+                        "ContainerService::Minio",
+                        "ContainerService::Vault",
+                        "ContainerService::Server",
+                    ]
+                    .iter()
+                    .all(|service| source.contains(service))
+            });
 
         integration_container_source_contract_is_hardened(rust, shell, workflow)
             && primary_count == 1
             && primary_ast_is_closed(rust)
             && imports_are_confined
             && manifests_are_confined(workspace_manifests)
+            && compose_fixture_uses_shared_ownership
     }
 
     fn integration_container_source_contract_is_hardened(
@@ -7038,7 +7161,7 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
         };
         let Some(service_enum) = block(
             rust,
-            "enum ContainerService {",
+            "pub enum ContainerService {",
             "\n}\n\nimpl ContainerService",
         ) else {
             return false;
@@ -7077,6 +7200,8 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
             ("RabbitMq,", "Self::RabbitMq => \"rabbitmq\""),
             ("Mosquitto,", "Self::Mosquitto => \"mosquitto\""),
             ("Minio,", "Self::Minio => \"minio\""),
+            ("Vault,", "Self::Vault => \"vault\""),
+            ("Server,", "Self::Server => \"server\""),
         ]
         .iter()
         .all(|(variant, arm)| {
@@ -7085,7 +7210,7 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
             .lines()
             .filter(|line| line.trim().ends_with(','))
             .count()
-            == 5;
+            == 7;
         let context_env_is_closed = [
             ("CI_SCOPE_ENV", "RSS_CI_CONTAINER_SCOPE"),
             ("CI_SHARD_ENV", "RSS_CI_INTEGRATION_SHARD"),
@@ -7104,19 +7229,27 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
             ("io.rss.integration.scope", 1),
             ("io.rss.integration.shard", 1),
             ("io.rss.integration.partition", 1),
-            ("io.rss.integration.service", 5),
+            ("io.rss.integration.service", 7),
         ]
         .iter()
         .all(|(label, shell_count)| {
             exactly_once(service_impl, label)
                 && label_matcher.matches(label).count() == *shell_count
-        }) && ["postgres", "redis", "rabbitmq", "mosquitto", "minio"]
-            .iter()
-            .all(|service| {
-                label_matcher.contains(&format!(
-                    ".[\"io.rss.integration.service\"] == \"{service}\""
-                ))
-            });
+        }) && [
+            "postgres",
+            "redis",
+            "rabbitmq",
+            "mosquitto",
+            "minio",
+            "vault",
+            "server",
+        ]
+        .iter()
+        .all(|service| {
+            label_matcher.contains(&format!(
+                ".[\"io.rss.integration.service\"] == \"{service}\""
+            ))
+        });
         let partition_contract_is_closed = rust.contains(
             "matches!(value, \"unpartitioned\" | \"1/2\" | \"2/2\")",
         ) && shell.contains(
@@ -8821,6 +8954,14 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
             (
                 "empty ownership labels",
                 rust.replacen("service.labels(&context)", "BTreeMap::new()", 1),
+            ),
+            (
+                "ownership context bypass",
+                rust.replacen("CiContainerContext::from_env()?", "None", 1),
+            ),
+            (
+                "ownership service bypass",
+                rust.replacen("service.labels(&context)", "context.labels()", 1),
             ),
             (
                 "no-op log consumer",

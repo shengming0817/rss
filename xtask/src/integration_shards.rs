@@ -154,6 +154,12 @@ pub(crate) struct ShardSpec {
     pub(crate) resources: &'static [Resource],
     pub(crate) units: &'static [ExecutionUnit],
     pub(crate) local_feature_scopes: &'static [LocalFeatureScope],
+    capabilities: &'static [Capability],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Capability {
+    Docker,
 }
 
 macro_rules! integration_shard_catalog {
@@ -161,6 +167,7 @@ macro_rules! integration_shard_catalog {
         $variant:ident => {
             name: $name:literal,
             resources: [$($resource:ident),* $(,)?],
+            capabilities: [$($capability:ident),* $(,)?],
             local_feature_scopes: [$($scope:ident),+ $(,)?],
             units: [$(($package:literal, $target:literal, $kind:ident, $scheduling:ident)),+ $(,)?],
         },
@@ -173,6 +180,7 @@ macro_rules! integration_shard_catalog {
         const SHARD_SPECS: &[ShardSpec] = &[$(ShardSpec {
             shard: IntegrationShard::$variant,
             resources: &[$(Resource::$resource),*],
+            capabilities: &[$(Capability::$capability),*],
             local_feature_scopes: &[$(LocalFeatureScope::$scope),+],
             units: &[$(ExecutionUnit::new(
                 $package,
@@ -191,6 +199,10 @@ macro_rules! integration_shard_catalog {
 
             pub(crate) const fn spec(self) -> &'static ShardSpec {
                 &SHARD_SPECS[self as usize]
+            }
+
+            pub(crate) fn requires_docker(self) -> bool {
+                self.spec().capabilities.contains(&Capability::Docker)
             }
         }
 
@@ -214,6 +226,7 @@ integration_shard_catalog! {
     PostgresDomain => {
         name: "postgres-domain",
         resources: [Postgres],
+        capabilities: [],
         local_feature_scopes: [Postgres, Journeys, Runtime],
         units: [
             ("postgres", "postgres", Lib, Serial),
@@ -231,6 +244,7 @@ integration_shard_catalog! {
     EventTransport => {
         name: "event-transport",
         resources: [Postgres, Redis, Amqp, Mqtt],
+        capabilities: [],
         local_feature_scopes: [Amqp, Mqtt, Journeys, Runtime],
         units: [
             ("amqp", "amqp", Lib, Parallel),
@@ -248,6 +262,7 @@ integration_shard_catalog! {
     RuntimeHttpAuth => {
         name: "runtime-http-auth",
         resources: [Postgres, Redis],
+        capabilities: [],
         local_feature_scopes: [Journeys, Runtime],
         units: [
             ("journeys", "security_provider_closeout", Test, Parallel),
@@ -273,6 +288,7 @@ integration_shard_catalog! {
     ConsistencyFault => {
         name: "consistency-fault",
         resources: [Postgres, Redis, Amqp],
+        capabilities: [],
         local_feature_scopes: [Testkit, RedisAdapter, Journeys, JourneysFaultMatrix],
         units: [
             ("testkit", "testkit", Lib, Serial),
@@ -290,6 +306,7 @@ integration_shard_catalog! {
     CdcProjectionSaga => {
         name: "cdc-projection-saga",
         resources: [Postgres],
+        capabilities: [],
         local_feature_scopes: [Journeys, Runtime],
         units: [
             ("journeys", "saga_projection_deps_journey", Test, Parallel),
@@ -300,11 +317,22 @@ integration_shard_catalog! {
     ObjectStorage => {
         name: "object-storage",
         resources: [ObjectStorage],
+        capabilities: [],
         local_feature_scopes: [S3],
         units: [
             ("s3", "s3", Lib, Parallel),
             ("s3", "dlx_archive_store", Test, Parallel),
             ("s3", "integration_object_store", Test, Serial),
+        ],
+    },
+    ProductionRuntime => {
+        name: "production-runtime",
+        resources: [],
+        capabilities: [Docker],
+        local_feature_scopes: [Journeys],
+        units: [
+            ("journeys", "two_replica_runtime", Test, Serial),
+            ("journeys", "production_runtime", Test, Parallel),
         ],
     },
 }
@@ -328,7 +356,8 @@ impl IntegrationShard {
             Self::PostgresDomain
             | Self::ConsistencyFault
             | Self::CdcProjectionSaga
-            | Self::ObjectStorage => PartitionPolicy::Unpartitioned,
+            | Self::ObjectStorage
+            | Self::ProductionRuntime => PartitionPolicy::Unpartitioned,
         }
     }
 
@@ -700,6 +729,7 @@ mod tests {
                 "consistency-fault",
                 "cdc-projection-saga",
                 "object-storage",
+                "production-runtime",
             ]
         );
         for shard in IntegrationShard::ALL {
@@ -765,6 +795,7 @@ mod tests {
             ("journeys-fault-matrix", "consistency_fault_matrix_journey"),
             ("runtime", "settings_config_publish_durable_e2e"),
             ("s3", "integration_object_store"),
+            ("journeys", "two_replica_runtime"),
         ]);
         let actual_serial: BTreeSet<_> = all_units()
             .into_iter()
@@ -883,12 +914,15 @@ mod tests {
                 IntegrationShard::ObjectStorage,
                 &[Resource::ObjectStorage][..],
             ),
+            (IntegrationShard::ProductionRuntime, &[][..]),
         ];
         assert_eq!(IntegrationShard::ALL.len(), expected.len());
         for (shard, resources) in expected {
             assert_eq!(shard.spec().resources, resources);
             assert!(!shard.spec().units.is_empty());
         }
+        assert!(IntegrationShard::ProductionRuntime.requires_docker());
+        assert!(!IntegrationShard::CdcProjectionSaga.requires_docker());
     }
 
     #[test]
@@ -969,5 +1003,29 @@ mod tests {
         assert_eq!(live.package, "s3");
         assert_eq!(live.kind, TargetKind::Test);
         assert_eq!(live.scheduling, Scheduling::Serial);
+    }
+
+    #[test]
+    fn production_runtime_shard_owns_one_serial_two_replica_target() {
+        let spec = IntegrationShard::ProductionRuntime.spec();
+        assert!(
+            spec.resources.is_empty(),
+            "journey self-provisions Docker resources"
+        );
+        let matches = spec
+            .units
+            .iter()
+            .filter(|unit| {
+                unit.package == "journeys"
+                    && unit.target == "two_replica_runtime"
+                    && unit.kind == TargetKind::Test
+                    && unit.scheduling == Scheduling::Serial
+            })
+            .count();
+        assert_eq!(matches, 1);
+        assert_eq!(
+            IntegrationShard::ProductionRuntime.partition_policy(),
+            PartitionPolicy::Unpartitioned
+        );
     }
 }

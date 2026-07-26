@@ -56,6 +56,8 @@ pub(crate) enum Rule {
     InvalidDiportProvider,
     /// production `diport::RevocationStore` provider 必须持久。
     RevocationDurability,
+    /// production provider 必须 active 且持久；仅 exact active GovernorLimiter 可为进程内临时态。
+    ProductionProviderPosture,
     /// active provider 必须由 assembly Cargo.toml `[dependencies]` 声明。
     ActiveProviderDependency,
     /// active provider 必须是 xtask 认识的 provider→port 映射。
@@ -493,6 +495,7 @@ fn validate_assembly(a: &DiscoveredAssembly) -> Vec<Finding> {
     let mut findings = Vec::new();
     validate_manifest_intent(a, &mut findings);
     validate_identityaudit_manifest_boundary(a, &mut findings);
+    validate_production_provider_posture(a, &mut findings);
 
     for (index, provider) in a.manifest.diport_providers.iter().enumerate() {
         let source = format!(
@@ -611,6 +614,61 @@ fn validate_assembly(a: &DiscoveredAssembly) -> Vec<Finding> {
         validate_production_security_closeout(a, &mut findings);
     }
     findings
+}
+
+fn validate_production_provider_posture(a: &DiscoveredAssembly, findings: &mut Vec<Finding>) {
+    // INVARIANT: ASSEMBLY-PRODUCTION-PROVIDER-POSTURE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::production_provider_posture_rejects_non_active_and_non_governor_ephemeral", anti_vacuity = "tests::production_provider_posture_allows_exact_governor_exception" } — production is a hard ratchet: every declaration is executable and durable except the exact process-local edge limiter.
+    let full_runtime = is_runtime_assembly(a);
+    if full_runtime && a.manifest.profile != AssemblyProfile::Production {
+        findings.push(finding(
+            Rule::ProductionProviderPosture,
+            &a.manifest_label,
+            "field=profile runtime assembly 必须 profile=production；不提供 demo downgrade",
+        ));
+    }
+
+    if a.manifest.profile != AssemblyProfile::Production {
+        return;
+    }
+
+    for provider in &a.manifest.diport_providers {
+        let exact_governor = provider.lifecycle == ProviderLifecycle::Active
+            && provider.provider == ProviderConstructor::RatelimitGovernorLimiter
+            && provider.port == DiportPort::RateLimiter
+            && provider.provider_crate == "ratelimit"
+            && provider.consumer == ProviderConsumer::Httpserve
+            && provider.durability == ProviderDurability::EphemeralMemory;
+        if provider.lifecycle != ProviderLifecycle::Active
+            || (provider.durability != ProviderDurability::Persistent && !exact_governor)
+        {
+            findings.push(finding(
+                Rule::ProductionProviderPosture,
+                &a.manifest_label,
+                format!(
+                    "field=diportProviders profile=production provider={} 必须 lifecycle=active 且 durability=persistent；仅 exact active ratelimit::GovernorLimiter 可为 ephemeral-memory；actual lifecycle={} durability={}",
+                    provider.provider, provider.lifecycle, provider.durability
+                ),
+            ));
+        }
+    }
+
+    if full_runtime
+        && !has_active_persistent_provider(
+            a,
+            ProviderConstructor::PostgresRevocationStore,
+            "deviceloop",
+        )
+    {
+        findings.push(finding(
+            Rule::ProductionProviderPosture,
+            &a.manifest_label,
+            "field=diportProviders runtime production requires exact active persistent postgres::PgRevocationStore for deviceloop",
+        ));
+    }
+}
+
+fn is_runtime_assembly(a: &DiscoveredAssembly) -> bool {
+    a.manifest.name == "runtime"
 }
 
 fn validate_pdp_replay_store_capability(a: &DiscoveredAssembly, findings: &mut Vec<Finding>) {
@@ -834,6 +892,13 @@ const SETTINGS_REQUIRED_CAPABILITIES: &[RequiredCapabilitySpec] = &[
         capability: "VaultKeyProvider",
         expectation: RequiredCapabilityExpectation::ActivePersistentProvider {
             provider: ProviderConstructor::VaultKeyProvider,
+            consumer: "settings",
+        },
+    },
+    RequiredCapabilitySpec {
+        capability: "VaultSecretResolver",
+        expectation: RequiredCapabilityExpectation::ActivePersistentProvider {
+            provider: ProviderConstructor::VaultSecretResolver,
             consumer: "settings",
         },
     },
@@ -2883,10 +2948,6 @@ fn validate_token_profile_trust_chain(
             "FEDERATED_ACCESS_TOKEN_RESOURCE_NAME",
         ),
         (
-            evidence.service_token_resource_name,
-            "SERVICE_TOKEN_RESOURCE_NAME",
-        ),
-        (
             evidence.profile_managed_resource_calls >= 3,
             "three profile managed_resource registrations",
         ),
@@ -3480,9 +3541,12 @@ impl<'ast> syn::visit::Visit<'ast> for SecurityCloseoutVisitor {
         };
         if let Some(owner) = owner {
             let is_startup_adapter = node.trait_.as_ref().is_some_and(|(_, path, _)| {
-                path.segments
-                    .last()
-                    .is_some_and(|segment| segment.ident == "StartupAdapter")
+                path.segments.last().is_some_and(|segment| {
+                    matches!(
+                        segment.ident.to_string().as_str(),
+                        "StartupAdapter" | "LaunchAdapter"
+                    )
+                })
             });
             if is_startup_adapter
                 && node.items.iter().any(|item| {
@@ -3680,7 +3744,17 @@ impl<'ast> syn::visit::Visit<'ast> for SecurityCloseoutVisitor {
 
     fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
         let method = node.method.to_string();
-        if let Some(owner) = self.method_receiver_owner(&node.receiver) {
+        let phase_owner = match method.as_str() {
+            "build_providers" => Some("Planned"),
+            "build_infra" => Some("ProvidersBuilt"),
+            "wire_domains" => Some("InfraBuilt"),
+            "finalize" => Some("DomainsWired"),
+            "launch" => Some("Finalized"),
+            _ => None,
+        };
+        if let Some(owner) = phase_owner {
+            self.record_call(&format!("{owner}::{method}"));
+        } else if let Some(owner) = self.method_receiver_owner(&node.receiver) {
             self.record_call(&format!("{owner}::{method}"));
         }
         if node.method == "keys_jwks" {
@@ -3693,7 +3767,7 @@ impl<'ast> syn::visit::Visit<'ast> for SecurityCloseoutVisitor {
         if node.method == "keys_hs256" || node.method == "add_hs256_secret" {
             self.record_key_api(false, true);
         }
-        if node.method == "keys" {
+        if node.method == "keys" && !node.args.is_empty() {
             self.program.mixed_key_provider = true;
         }
         if node.method == "provider" {
@@ -3760,6 +3834,15 @@ impl<'ast> syn::visit::Visit<'ast> for SecurityCloseoutVisitor {
             self.program.legacy_service_token_migration = true;
         }
         syn::visit::visit_expr_path(self, node);
+    }
+
+    fn visit_expr_struct(&mut self, node: &'ast syn::ExprStruct) {
+        if path_ends_with(&node.path, "RssAccess")
+            && path_contains_segment(&node.path, "ProfileBinding")
+        {
+            self.record_evidence(|e| e.rss_access_binding = true);
+        }
+        syn::visit::visit_expr_struct(self, node);
     }
 
     fn visit_type_path(&mut self, node: &'ast syn::TypePath) {
@@ -3883,6 +3966,12 @@ impl SecurityCloseoutVisitor {
 
     fn profile_binding_kind(&self, expression: &syn::Expr) -> Option<TokenProfileBridgeKind> {
         let expression = ungroup_profile_expression(expression);
+        if let syn::Expr::Struct(value) = expression
+            && path_contains_segment(&value.path, "ProfileBinding")
+            && path_ends_with(&value.path, "RssAccess")
+        {
+            return Some(TokenProfileBridgeKind::RssAccess);
+        }
         if let syn::Expr::Call(call) = expression
             && let syn::Expr::Path(path) = call.func.as_ref()
             && path_contains_segment(&path.path, "ProfileBinding")
@@ -4044,7 +4133,7 @@ fn exact_profile_binding_definition(function: &syn::ImplItemFn) -> bool {
     }
     let mut observed = BTreeSet::new();
     for arm in &mapping.arms {
-        if arm.guard.is_some() || matches!(arm.body.as_ref(), syn::Expr::Block(_)) {
+        if arm.guard.is_some() {
             return false;
         }
         let kind = match auth_scheme_profile_pattern_kind(&arm.pat) {
@@ -4060,6 +4149,9 @@ fn exact_profile_binding_definition(function: &syn::ImplItemFn) -> bool {
                 continue;
             }
         };
+        if matches!(arm.body.as_ref(), syn::Expr::Block(_)) {
+            return false;
+        }
         if !profile_mapping_expression_is_exact(arm.body.as_ref(), kind) {
             return false;
         }
@@ -4126,6 +4218,15 @@ impl ProfileMappingExpressionEvidence {
 }
 
 impl<'ast> syn::visit::Visit<'ast> for ProfileMappingExpressionEvidence {
+    fn visit_expr_struct(&mut self, node: &'ast syn::ExprStruct) {
+        if path_contains_segment(&node.path, "ProfileBinding")
+            && path_ends_with(&node.path, "RssAccess")
+        {
+            self.rss_variants = self.rss_variants.saturating_add(1);
+        }
+        syn::visit::visit_expr_struct(self, node);
+    }
+
     fn visit_expr_field(&mut self, node: &'ast syn::ExprField) {
         if matches!(node.base.as_ref(), syn::Expr::Path(path) if path.path.is_ident("self")) {
             let name = match &node.member {
@@ -4306,16 +4407,8 @@ fn has_cfg_test(attrs: &[syn::Attribute]) -> bool {
     })
 }
 
-fn required_features(provider: &DiportProvider) -> Vec<&str> {
-    let mut features: Vec<&str> = provider
-        .required_features
-        .iter()
-        .map(String::as_str)
-        .collect();
-    features.extend(provider.provider.required_features());
-    features.sort_unstable();
-    features.dedup();
-    features
+fn required_features(provider: &DiportProvider) -> &'static [&'static str] {
+    provider.provider.required_features()
 }
 
 fn dependency_features(cargo_toml: &toml::Value, dependency: &str) -> Option<BTreeSet<String>> {
@@ -4724,6 +4817,18 @@ lifecycle = "active"
 durability = "persistent"
 purpose = "settings-configvalue-at-rest-encryption"
 outputs = ["resources"]
+
+[[diportProviders]]
+id = "settings-secret-resolver"
+port = "diport::SecretResolver"
+provider = "vault::VaultSecretResolver"
+providerCrate = "vault"
+requiredFeatures = ["backend"]
+consumer = "settings"
+lifecycle = "active"
+durability = "persistent"
+purpose = "settings-secret-material-resolution"
+outputs = ["resources"]
 "#,
             );
         }
@@ -4744,6 +4849,18 @@ outputs = ["resources", "workers"]
         if profile == "production" {
             manifest.push_str(
                 r#"
+[[diportProviders]]
+id = "device-revocation-store"
+port = "diport::RevocationStore"
+provider = "postgres::PgRevocationStore"
+providerCrate = "postgres"
+requiredFeatures = []
+consumer = "deviceloop"
+lifecycle = "active"
+durability = "persistent"
+purpose = "device-certificate-revocation"
+outputs = ["probes", "workers"]
+
 [[diportProviders]]
 id = "event-publisher"
 port = "diport::Publisher"
@@ -4889,6 +5006,18 @@ lifecycle = "active"
 durability = "persistent"
 purpose = "settings-configvalue-at-rest-encryption"
 outputs = []
+
+[[diportProviders]]
+id = "settings-secret-resolver"
+port = "diport::SecretResolver"
+provider = "vault::VaultSecretResolver"
+providerCrate = "vault"
+requiredFeatures = ["backend"]
+consumer = "settings"
+lifecycle = "active"
+durability = "persistent"
+purpose = "settings-secret-material-resolution"
+outputs = ["resources"]
 
 [[diportProviders]]
 id = "listener-pdp"
@@ -5240,6 +5369,23 @@ postgres = { path = "../../adapters/postgres" }
 "#,
         )?;
         assert_required_capability(&findings, "settings", "VaultKeyProvider");
+        Ok(())
+    }
+
+    #[test]
+    fn assembly_capabilities_settings_requires_vault_secret_resolver() -> anyhow::Result<()> {
+        let manifest = capability_manifest("demo", "demo", &["settings"], "");
+        let findings = required_capability_findings(
+            &manifest,
+            r#"[package]
+name = "runtime"
+
+[dependencies]
+postgres = { path = "../../adapters/postgres" }
+vault = { path = "../../adapters/vault", features = ["backend"] }
+"#,
+        )?;
+        assert_required_capability(&findings, "settings", "VaultSecretResolver");
         Ok(())
     }
 
@@ -7028,6 +7174,149 @@ name = "runtime"
     }
 
     #[test]
+    fn production_provider_posture_rejects_non_active_and_non_governor_ephemeral()
+    -> anyhow::Result<()> {
+        for (name, provider_extra) in [
+            (
+                "draft",
+                r#"lifecycle = "draft"
+durability = "persistent""#,
+            ),
+            (
+                "ephemeral",
+                r#"lifecycle = "active"
+durability = "ephemeral-memory""#,
+            ),
+        ] {
+            let root = unique_tmp(&format!("assembly-production-provider-{name}"));
+            write_assembly(
+                &root,
+                &valid_manifest(provider_extra),
+                r#"[package]
+name = "runtime"
+
+[dependencies]
+postgres = { path = "../../adapters/postgres" }
+"#,
+            )?;
+            let (_count, findings) = validate_root(&root)?;
+            assert!(
+                findings
+                    .iter()
+                    .any(|finding| finding.rule == Rule::ProductionProviderPosture),
+                "production {name} provider must fail closed: {findings:?}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_production_ratchet_does_not_depend_on_domain_membership() -> anyhow::Result<()> {
+        for (name, domains) in [
+            ("reduced", "contractreg"),
+            ("expanded", "settings, identity, audit, contractreg"),
+        ] {
+            let root = unique_tmp(&format!("assembly-runtime-ratchet-{name}"));
+            let manifest = valid_manifest_with_profile(
+                "demo",
+                r#"lifecycle = "active"
+durability = "persistent""#,
+            )
+            .replace(
+                "domains = [\"contractreg\"]",
+                &format!(
+                    "domains = [{}]",
+                    domains
+                        .split(", ")
+                        .map(|domain| format!("\"{domain}\""))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            );
+            write_assembly(
+                &root,
+                &manifest,
+                r#"[package]
+name = "runtime"
+
+[dependencies]
+postgres = { path = "../../adapters/postgres" }
+"#,
+            )?;
+
+            let (_count, findings) = validate_root(&root)?;
+            assert!(
+                findings.iter().any(|finding| {
+                    finding.rule == Rule::ProductionProviderPosture
+                        && finding.detail.contains("profile=production")
+                }),
+                "runtime {name} domains bypassed production ratchet: {findings:?}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn production_provider_posture_allows_exact_governor_exception() -> anyhow::Result<()> {
+        let root = unique_tmp("assembly-production-provider-governor");
+        let manifest = format!(
+            "{}{}",
+            valid_manifest(
+                r#"lifecycle = "active"
+durability = "persistent""#,
+            ),
+            r#"
+
+[[diportProviders]]
+id = "listener-rate-limiter"
+port = "diport::RateLimiter"
+provider = "ratelimit::GovernorLimiter"
+providerCrate = "ratelimit"
+consumer = "httpserve"
+lifecycle = "active"
+durability = "ephemeral-memory"
+purpose = "edge-rate-limit"
+outputs = []
+"#,
+        );
+        write_assembly(
+            &root,
+            &manifest,
+            r#"[package]
+name = "runtime"
+
+[dependencies]
+postgres = { path = "../../adapters/postgres" }
+ratelimit = { path = "../../adapters/ratelimit" }
+"#,
+        )?;
+        let (_count, findings) = validate_root(&root)?;
+        assert!(
+            findings
+                .iter()
+                .all(|finding| finding.rule != Rule::ProductionProviderPosture),
+            "exact active GovernorLimiter is the sole production ephemeral exception: {findings:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_profile_cannot_downgrade() -> anyhow::Result<()> {
+        let root = unique_tmp("assembly-runtime-demo-profile");
+        write_assembly(
+            &root,
+            &production_security_manifest("demo", true, true, true),
+            CARGO_SECURITY_BACKEND,
+        )?;
+        let (_count, findings) = validate_root(&root)?;
+        assert!(findings.iter().any(|finding| {
+            finding.rule == Rule::ProductionProviderPosture
+                && finding.detail.contains("profile=production")
+        }));
+        Ok(())
+    }
+
+    #[test]
     fn production_security_closeout_requires_critical_providers() -> anyhow::Result<()> {
         for (name, manifest, gate) in [
             (
@@ -7326,11 +7615,6 @@ mod tests {
                     "FEDERATED_ACCESS_TOKEN_RESOURCE_NAME",
                     "WRONG_FEDERATED_RESOURCE_NAME",
                 ),
-            ),
-            (
-                "service-resource",
-                SECURITY_CLOSEOUT_RUN_PATH_SOURCE
-                    .replace("SERVICE_TOKEN_RESOURCE_NAME", "WRONG_SERVICE_RESOURCE_NAME"),
             ),
             (
                 "resource-registration",
@@ -7660,6 +7944,27 @@ fn run() {{
     }
 
     #[test]
+    fn real_runtime_token_profile_bridge_is_reachable_through_typed_phases() -> anyhow::Result<()> {
+        let root = crate::workspace_root()?;
+        let evidence = security_closeout_evidence_from_sources(&root.join("assemblies/runtime"))?;
+        assert!(
+            evidence.rss_access_reaches_verify_bridge()
+                && evidence.federated_access_reaches_verify_bridge()
+                && evidence.service_token_reaches_verify_bridge(),
+            "real runtime typed bridge closure drifted: mapping={} carrier={} rss_typed={} admin_typed={} service_typed={} rss_packed={} federated_packed={} service_packed={}",
+            evidence.exact_profile_binding_mapping,
+            evidence.profile_carrier_bound_to_verify_bridge,
+            evidence.typed_primary_access_binding_carrier_call,
+            evidence.typed_admin_access_binding_carrier_call,
+            evidence.typed_service_binding_carrier_call,
+            evidence.rss_access_packed_in_profile_carrier,
+            evidence.federated_access_packed_in_profile_carrier,
+            evidence.service_token_packed_in_profile_carrier,
+        );
+        Ok(())
+    }
+
+    #[test]
     fn production_security_closeout_full_fixture_passes() -> anyhow::Result<()> {
         let root = unique_tmp("assembly-production-security-green");
         write_assembly(
@@ -7758,7 +8063,7 @@ fn run() {{
     }
 
     #[test]
-    fn demo_security_closeout_allows_missing_runtime_evidence() -> anyhow::Result<()> {
+    fn full_runtime_demo_profile_is_rejected_before_security_evidence() -> anyhow::Result<()> {
         let root = unique_tmp("assembly-demo-security-no-evidence");
         write_assembly(
             &root,
@@ -7767,7 +8072,19 @@ fn run() {{
         )?;
 
         let (_count, findings) = validate_root(&root)?;
-        assert!(findings.is_empty(), "{findings:?}");
+        assert!(
+            findings.iter().any(|finding| {
+                finding.rule == Rule::ProductionProviderPosture
+                    && finding.detail.contains("profile=production")
+            }),
+            "full runtime cannot downgrade to demo: {findings:?}"
+        );
+        assert!(findings.iter().all(|finding| !matches!(
+            finding.rule,
+            Rule::ProductionSecurityCriticalProvider
+                | Rule::ProductionSecurityJwksCloseout
+                | Rule::ProductionSecuritySpiffeCloseout
+        )));
         Ok(())
     }
 

@@ -2,10 +2,15 @@
 # RSS 容器镜像冒烟验收（#1134）：build → up → /readyz 200 → /healthz 200 → /metrics 200 → 加固断言 → teardown。
 # 机器可判定的 acceptance harness（make docker-smoke 调用本脚本）。
 #
-# 用法:  deploy/smoke.sh           # 全流程，结尾 down -v
-#        KEEP_UP=1 deploy/smoke.sh # 保留栈（手动排查），不 teardown
+# 用法:  RSS_SMOKE_MODE=release deploy/smoke.sh           # release image/demo infra 证据；结尾 down -v
+#        RSS_SMOKE_MODE=developer deploy/smoke.sh         # 本地全流程，仍默认禁止 skip
+#        RSS_SMOKE_MODE=developer RSS_SMOKE_ALLOW_SKIP=1 deploy/smoke.sh
+#                                                        # 仅缺 fixture 时显式非生产跳过
+#        RSS_SMOKE_MODE=developer KEEP_UP=1 deploy/smoke.sh # 保留栈（手动排查）
 set -euo pipefail
 
+RSS_SMOKE_MODE="${RSS_SMOKE_MODE-}"
+RSS_SMOKE_ALLOW_SKIP="${RSS_SMOKE_ALLOW_SKIP-0}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 COMPOSE="docker compose -f ${SCRIPT_DIR}/docker-compose.yml"
 ENV_FILE="${SCRIPT_DIR}/.env.example"
@@ -20,6 +25,24 @@ fail() {
     printf '\033[1;31m[smoke] FAIL:\033[0m %s\n' "$*" >&2
     exit 1
 }
+validate_smoke_policy() {
+    case "$RSS_SMOKE_MODE" in
+        developer|release) ;;
+        "") fail "RSS_SMOKE_MODE 必填（developer|release）" ;;
+        *) fail "RSS_SMOKE_MODE 非法：仅允许 developer|release" ;;
+    esac
+    case "$RSS_SMOKE_ALLOW_SKIP" in
+        0|1) ;;
+        *) fail "RSS_SMOKE_ALLOW_SKIP 非法：仅允许 0|1" ;;
+    esac
+    if [[ "$RSS_SMOKE_MODE" = "release" && "$RSS_SMOKE_ALLOW_SKIP" = "1" ]]; then
+        fail "release smoke 禁止 RSS_SMOKE_ALLOW_SKIP=1"
+    fi
+    if [[ "$RSS_SMOKE_MODE" = "release" && "${KEEP_UP:-0}" = "1" ]]; then
+        fail "release smoke 禁止 KEEP_UP=1"
+    fi
+}
+validate_smoke_policy
 read_env_file_value() {
     awk -F= -v key="$1" '$1 == key { print $2; exit }' "$ENV_FILE"
 }
@@ -32,7 +55,16 @@ assembly_identity_name() {
     [[ -n "$name" ]] || fail "assembly lock identity.name 为空：$lock"
     printf '%s\n' "$name"
 }
-require_spiffe_fixture_or_skip() {
+missing_spiffe_fixture() {
+    local missing="$1"
+    if [[ "$RSS_SMOKE_MODE" = "developer" && "$RSS_SMOKE_ALLOW_SKIP" = "1" ]]; then
+        printf '%s\n' 'NOT PRODUCTION EVIDENCE'
+        log "developer smoke 显式跳过：Remote/SPIFFE fixture 不完整（缺少 ${missing}）"
+        exit 0
+    fi
+    fail "Remote/SPIFFE fixture 不完整（缺少 ${missing}）"
+}
+require_spiffe_fixture() {
     # Optional placement workloads are not a SPIFFE gate by themselves. Only when a Remote
     # placement is configured (workload set and differs from assembly.lock.json identity.name)
     # do we require outbound SPIFFE fixture completeness; otherwise continue all-Local.
@@ -62,10 +94,7 @@ require_spiffe_fixture_or_skip() {
         [[ -n "$(read_env_file_value "$key")" ]] || missing+=("$key")
     done
     if [[ ${#missing[@]} -gt 0 ]]; then
-        log "SKIP：已配置 Remote domain placement，但 SPIFFE outbound fixture 不完整（backlog #1649）"
-        log "缺少 ${ENV_FILE} 配置：${missing[*]}"
-        log "跳过 compose readyz 200 验收，避免把不完整的 Remote/SPIFFE 栈误判为可运行生产闭环"
-        exit 0
+        missing_spiffe_fixture "${missing[*]}"
     fi
 }
 s3_canary_interval="$(read_env_file_value RSS_S3_CANARY_INTERVAL_SECS)"
@@ -73,12 +102,13 @@ s3_canary_timeout="$(read_env_file_value RSS_S3_CANARY_TIMEOUT_SECS)"
 [[ "$s3_canary_interval" =~ ^[0-9]+$ ]] || s3_canary_interval=60
 [[ "$s3_canary_timeout" =~ ^[0-9]+$ ]] || s3_canary_timeout=5
 S3_DOWN_TIMEOUT="${S3_DOWN_TIMEOUT:-$((s3_canary_interval + s3_canary_timeout + 15))}"
-require_spiffe_fixture_or_skip
+require_spiffe_fixture
 # reason: 唯一临时文件——同机并行跑（CI 多 job / 多终端）不互相覆盖 readyz 响应。
 READYZ_TMP="$(mktemp)"
 vault_paused=0
 vault_kv_disabled=0
 minio_stopped=0
+redis_stopped=0
 
 reset_demo_vault_kv() {
     $COMPOSE exec -T vault sh -ec '
@@ -102,6 +132,9 @@ cleanup() {
     if [[ $minio_stopped -eq 1 && "${KEEP_UP:-0}" = "1" ]]; then
         $COMPOSE start minio >/dev/null 2>&1 || true
     fi
+    if [[ $redis_stopped -eq 1 && "${KEEP_UP:-0}" = "1" ]]; then
+        $COMPOSE start redis >/dev/null 2>&1 || true
+    fi
     rm -f "$READYZ_TMP"
     if [[ "${KEEP_UP:-0}" = "1" ]]; then
         log "KEEP_UP=1：保留栈，跳过 teardown（手动 'docker compose -f ${SCRIPT_DIR}/docker-compose.yml down -v' 清理）"
@@ -111,6 +144,16 @@ cleanup() {
     $COMPOSE down -v >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
+
+teardown() {
+    rm -f "$READYZ_TMP"
+    if [[ "${KEEP_UP:-0}" = "1" ]]; then
+        log "KEEP_UP=1：保留栈，跳过 teardown（手动 'docker compose -f ${SCRIPT_DIR}/docker-compose.yml down -v' 清理）"
+    else
+        log "teardown：down -v"
+        $COMPOSE down -v >/dev/null 2>&1
+    fi
+}
 
 log "构建演示栈同版本镜像…"
 $COMPOSE build
@@ -152,7 +195,8 @@ done
     fail "/readyz 未就绪"
 }
 log "readyz 200 ✓ → $(cat "$READYZ_TMP")"
-grep -q '"name":"redis_ready"' "$READYZ_TMP" || fail "readyz body 缺 redis_ready probe"
+grep -q '"name":"redis_ready","status":"healthy"' "$READYZ_TMP" \
+    || fail "readyz body 缺 healthy redis_ready probe"
 log "redis_ready probe 暴露 ✓"
 grep -q '"name":"keyprovider_ready"' "$READYZ_TMP" || fail "readyz body 缺 keyprovider_ready probe"
 log "keyprovider_ready probe 暴露 ✓"
@@ -196,7 +240,8 @@ deadline=$((SECONDS + 40))
 vault_down=0
 while [[ $SECONDS -lt $deadline ]]; do
     code="$(curl -sS -o "$READYZ_TMP" -w '%{http_code}' "${HEALTH_URL}/readyz" || true)"
-    if [[ "$code" = "503" ]] && grep -q '"name":"keyprovider_ready"' "$READYZ_TMP"; then
+    if [[ "$code" = "503" ]] \
+        && grep -q '"name":"keyprovider_ready","status":"unhealthy"' "$READYZ_TMP"; then
         vault_down=1
         break
     fi
@@ -209,7 +254,8 @@ vault_paused=0
 deadline=$((SECONDS + READY_TIMEOUT))
 vault_restored=0
 while [[ $SECONDS -lt $deadline ]]; do
-    if curl -fsS "${HEALTH_URL}/readyz" >"$READYZ_TMP" 2>/dev/null; then
+    if curl -fsS "${HEALTH_URL}/readyz" >"$READYZ_TMP" 2>/dev/null \
+        && grep -q '"name":"keyprovider_ready","status":"healthy"' "$READYZ_TMP"; then
         vault_restored=1
         break
     fi
@@ -265,7 +311,8 @@ deadline=$((SECONDS + S3_DOWN_TIMEOUT))
 s3_down=0
 while [[ $SECONDS -lt $deadline ]]; do
     code="$(curl -sS -o "$READYZ_TMP" -w '%{http_code}' "${HEALTH_URL}/readyz" || true)"
-    if [[ "$code" = "503" ]] && grep -q '"name":"s3_object_store_ready"' "$READYZ_TMP"; then
+    if [[ "$code" = "503" ]] \
+        && grep -q '"name":"s3_object_store_ready","status":"unhealthy"' "$READYZ_TMP"; then
         s3_down=1
         break
     fi
@@ -278,7 +325,8 @@ minio_stopped=0
 deadline=$((SECONDS + READY_TIMEOUT))
 s3_restored=0
 while [[ $SECONDS -lt $deadline ]]; do
-    if curl -fsS "${HEALTH_URL}/readyz" >"$READYZ_TMP" 2>/dev/null; then
+    if curl -fsS "${HEALTH_URL}/readyz" >"$READYZ_TMP" 2>/dev/null \
+        && grep -q '"name":"s3_object_store_ready","status":"healthy"' "$READYZ_TMP"; then
         s3_restored=1
         break
     fi
@@ -290,33 +338,41 @@ log "MinIO 恢复 → readyz 200 ✓"
 # ── 闭环 7：Redis down → readyz 503 ────────────────────────────────────────────────────────────
 log "停止 redis，验证 readyz 降为 503…"
 $COMPOSE stop redis >/dev/null
+redis_stopped=1
 deadline=$((SECONDS + 20))
 redis_down=0
 while [[ $SECONDS -lt $deadline ]]; do
     code="$(curl -sS -o "$READYZ_TMP" -w '%{http_code}' "${HEALTH_URL}/readyz" || true)"
-    if [[ "$code" = "503" ]] && grep -q '"name":"redis_ready"' "$READYZ_TMP"; then
+    if [[ "$code" = "503" ]] \
+        && grep -q '"name":"redis_ready","status":"unhealthy"' "$READYZ_TMP"; then
         redis_down=1
         break
     fi
     sleep 1
 done
 [[ $redis_down -eq 1 ]] || fail "Redis down 后 /readyz 未返回 503（last=$(cat "$READYZ_TMP")）"
-log "Redis down → readyz 503 ✓"
+log "Redis down → redis_ready unhealthy、readyz 503 ✓"
 
-if [[ "${KEEP_UP:-0}" = "1" ]]; then
-    log "KEEP_UP=1：恢复 redis 并等待 readyz 回到 200…"
-    $COMPOSE start redis >/dev/null
-    deadline=$((SECONDS + READY_TIMEOUT))
-    restored=0
-    while [[ $SECONDS -lt $deadline ]]; do
-        if curl -fsS "${HEALTH_URL}/readyz" >"$READYZ_TMP" 2>/dev/null; then
-            restored=1
-            break
-        fi
-        sleep 2
-    done
-    [[ $restored -eq 1 ]] || fail "KEEP_UP=1 恢复 redis 后 /readyz 未回到 200（last=$(cat "$READYZ_TMP")）"
-    log "KEEP_UP=1：redis 已恢复，readyz 200 ✓"
-fi
+log "恢复 redis 并等待 redis_ready healthy、readyz 200…"
+$COMPOSE start redis >/dev/null
+redis_stopped=0
+deadline=$((SECONDS + READY_TIMEOUT))
+redis_restored=0
+while [[ $SECONDS -lt $deadline ]]; do
+    if curl -fsS "${HEALTH_URL}/readyz" >"$READYZ_TMP" 2>/dev/null \
+        && grep -q '"name":"redis_ready","status":"healthy"' "$READYZ_TMP"; then
+        redis_restored=1
+        break
+    fi
+    sleep 2
+done
+[[ $redis_restored -eq 1 ]] \
+    || fail "Redis 恢复后未出现 redis_ready healthy / readyz 200（last=$(cat "$READYZ_TMP")）"
+log "Redis 恢复 → redis_ready healthy、readyz 200 ✓"
 
+teardown
+trap - EXIT
 log "全部冒烟通过 ✅"
+if [[ "$RSS_SMOKE_MODE" = "release" ]]; then
+    printf '%s\n' 'RELEASE IMAGE ON DEMO INFRA EVIDENCE'
+fi

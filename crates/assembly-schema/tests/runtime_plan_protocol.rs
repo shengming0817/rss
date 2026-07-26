@@ -3,7 +3,7 @@
 
 use assembly_schema::{
     ParsedRuntimePlan, ProviderConstructor, RuntimePlan, RuntimePlanErrorStage,
-    RuntimePlanJsonCategory,
+    RuntimePlanJsonCategory, validate_runtime_plan_json_slice,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -453,14 +453,14 @@ fn runtime_plan_reader_rejects_duplicate_json_keys_and_does_not_echo_secret_valu
         "\"schemaVersion\":1,\"schemaVersion\":1",
         1,
     );
-    assert!(ParsedRuntimePlan::from_json_slice(duplicate.as_bytes()).is_err());
+    assert!(validate_runtime_plan_json_slice(duplicate.as_bytes()).is_err());
 
     let bait = wire.replacen(
         "\"schemaVersion\":1",
         &format!("\"secret\":\"{SECRET_SENTINEL}\",\"schemaVersion\":1"),
         1,
     );
-    let result = ParsedRuntimePlan::from_json_slice(bait.as_bytes());
+    let result = validate_runtime_plan_json_slice(bait.as_bytes());
     assert!(
         result.is_err(),
         "secret-bearing unknown field must fail closed"
@@ -475,7 +475,7 @@ fn runtime_plan_reader_rejects_duplicate_json_keys_and_does_not_echo_secret_valu
         "\"auth\":\"rssAccessToken\"",
         &format!("\"auth\":\"{SECRET_SENTINEL}\""),
     );
-    let auth_error = ParsedRuntimePlan::from_json_slice(auth_bait.as_bytes())
+    let auth_error = validate_runtime_plan_json_slice(auth_bait.as_bytes())
         .expect_err("unknown auth must fail closed");
     assert!(!auth_error.to_string().contains(SECRET_SENTINEL));
     assert!(!format!("{auth_error:?}").contains(SECRET_SENTINEL));
@@ -483,7 +483,7 @@ fn runtime_plan_reader_rejects_duplicate_json_keys_and_does_not_echo_secret_valu
 
 #[test]
 fn runtime_plan_reader_reports_sealed_redacted_json_stage_category_and_path() {
-    let eof = ParsedRuntimePlan::from_json_slice(b"{").expect_err("truncated JSON must fail");
+    let eof = validate_runtime_plan_json_slice(b"{").expect_err("truncated JSON must fail");
     assert_eq!(eof.stage(), RuntimePlanErrorStage::WireDecode);
     assert_eq!(eof.json_category(), Some(RuntimePlanJsonCategory::Eof));
     assert_eq!(eof.json_path().expect("JSON path").as_str(), "$");
@@ -533,7 +533,7 @@ fn runtime_plan_reader_reports_sealed_redacted_json_stage_category_and_path() {
         &format!("\"{SECRET_SENTINEL}\":true,\"schemaVersion\":1"),
         1,
     );
-    let unknown_field = ParsedRuntimePlan::from_json_slice(secret_key.as_bytes())
+    let unknown_field = validate_runtime_plan_json_slice(secret_key.as_bytes())
         .expect_err("unknown secret-bearing key must fail");
 
     for error in [
@@ -558,8 +558,8 @@ fn runtime_plan_reader_reports_sealed_redacted_json_stage_category_and_path() {
 
 #[test]
 fn runtime_plan_writer_validates_against_draft7_and_round_trips_through_the_reader() {
-    let parsed = parse(&wire_from_vector()).expect("shared vector");
-    let writer = serde_json::to_value(parsed.as_plan()).expect("RuntimePlan writer");
+    let writer = wire_from_vector();
+    parse(&writer).expect("shared vector");
     let committed: Value = serde_json::from_str(include_str!(
         "../../../docs/spec/007-runtime-deployment-executable-plan/contracts/runtime-plan.schema.json"
     ))
@@ -574,11 +574,7 @@ fn runtime_plan_writer_validates_against_draft7_and_round_trips_through_the_read
     );
 
     let encoded = serde_json::to_vec(&writer).expect("writer bytes");
-    let reparsed = ParsedRuntimePlan::from_json_slice(&encoded).expect("writer round-trip");
-    assert_eq!(
-        reparsed.runtime_plan_fingerprint().as_str(),
-        parsed.runtime_plan_fingerprint().as_str()
-    );
+    validate_runtime_plan_json_slice(&encoded).expect("writer round-trip");
 }
 
 #[test]

@@ -106,7 +106,7 @@ path = "deploy/smoke.sh"
 
 [assemblies.deployment.runtimePlan]
 path = "assemblies/runtime/runtime-plan.json"
-profile = "demo"
+profile = "production"
 
 [[assemblies.deployment.workloads]]
 name = "runtime"

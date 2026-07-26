@@ -403,8 +403,7 @@ fn sorted_unique_secret_refs(values: &[Value]) -> Result<()> {
 }
 
 fn validate_runtime_plan_wire(bytes: &[u8]) -> Result<()> {
-    assembly_schema::ParsedRuntimePlan::from_json_slice(bytes)
-        .map(|_| ())
+    assembly_schema::validate_runtime_plan_json_slice(bytes)
         .context("typed RuntimePlan semantics rejected wire")
 }
 

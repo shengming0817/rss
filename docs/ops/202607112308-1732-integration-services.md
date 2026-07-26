@@ -14,7 +14,8 @@ scope 和权限为 `0700` 的日志目录。日志目录名包含完整 scope，
 shard 与 filesystem-safe partition label 组成；partition 的 canonical 值只允许 `unpartitioned`、`1/2`
 或 `2/2`。
 
-四类 fixture 仍由每个测试独立启动。CI context 完整存在时，testkit 的唯一启动 funnel 为容器附加：
+各 fixture 仍由每个测试独立启动。CI context 完整存在时，testkit 的唯一 ownership helper 为
+testcontainers 与 production-runtime Compose 容器附加：
 
 - `io.rss.integration.managed=true`
 - `io.rss.integration.scope`
@@ -32,6 +33,8 @@ xtask 结束后的顺序固定为：`collect` 先把 xtask 的四值终态写入
 再生成通用 after-build CI evidence。失败归档在两次磁盘测量前已经存在，因此其保留占用同时计入 before/after，
 不会被误判为 cleanup 泄漏；after 测量失败时保留 `null` 和 `failure` status，不复制 before 值。正常 Rust
 Drop 是快速路径，job-finally cleanup 是进程 abort、slow-timeout 或信号导致 Drop 未执行时的补偿路径。
+服务闭集包含 postgres、redis、rabbitmq、mosquitto、minio、vault 与 server；双副本 Compose journey
+同样消费该 helper，因此异常退出时 server 与 Vault 也进入统一日志取证和兜底清理。
 
 ## 失败日志与证据
 

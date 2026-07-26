@@ -52,7 +52,7 @@ docker-build:
 	docker build -t rss-server:dev .
 
 docker-smoke:
-	./deploy/smoke.sh
+	RSS_SMOKE_MODE=developer ./deploy/smoke.sh
 
 postgres-reader-upgrade-smoke:
 	./deploy/postgres-upgrade/smoke-retained-volume.sh

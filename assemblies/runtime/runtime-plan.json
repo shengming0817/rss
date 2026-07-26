@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "assemblyFingerprint": "sha256:86f3d876a97c76abc64fcb625e6be68b3ee4897f8e9b1126dec36c3cd47821cd",
-  "runtimePlanFingerprint": "sha256:de63908026bf3fac2082ef0a184f6ef211859dcbb6d42db366b072a2c57ea7ca",
+  "assemblyFingerprint": "sha256:d351aa60214f224295b471fced7b91be88d9008fb8950ae69b3d5e3dc6a3b7af",
+  "runtimePlanFingerprint": "sha256:64c527bac08cffa336decaa1099769c0b8822ab8d69dd15d7de69e1359b36064",
   "providerPlans": [
     {
       "id": "auth-audit-sink",
@@ -25,13 +25,6 @@
       "outputs": [
         "resources",
         "workers"
-      ]
-    },
-    {
-      "id": "distributed-cas-store-alternative",
-      "constructor": "redis::RedisCasStore",
-      "outputs": [
-        "resources"
       ]
     },
     {

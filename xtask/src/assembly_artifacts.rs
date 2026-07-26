@@ -1,6 +1,7 @@
 //! Closed deployment-artifact inventory for every discovered assembly.
 //!
 //! INVARIANT: ASSEMBLY-ARTIFACT-MATRIX-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::synthetic_red_rejects_incomplete_or_unsafe_rows", anti_vacuity = "tests::real_workspace_matrix_is_exact_and_complete" } -- the schema-v1 lifecycle declaration is an exact bijection with `assemblies/*`; only rows whose Cargo, image, config, health/inventory and journey evidence all validate can become `VerifiedArtifactMatrix` values.
+//! INVARIANT: PRODUCTION-SMOKE-POLICY-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::strict_compose_smoke_policy_rejects_synthetic_mutations_and_binds_the_real_file", anti_vacuity = "tests::strict_compose_smoke_policy_rejects_synthetic_mutations_and_binds_the_real_file" } -- the executable compose journey requires an explicit closed mode, release never permits skip, and only an explicit developer opt-in can emit the unique non-production receipt before Docker execution.
 
 use anyhow::{Context, Result, bail};
 use assembly_schema::{
@@ -1216,12 +1217,24 @@ fn validate_journey(
             }
             let source = read_artifact_utf8(&path, &format!("{assembly} compose journey"))
                 .with_context(|| format!("读取 {} 失败", path.display()))?;
-            if !compose_smoke_is_closed(&source) {
+            if let Err(rule) = validate_compose_smoke(&source) {
                 reject!(
                     findings,
                     Journey,
                     assembly,
-                    "compose-smoke-v1 缺 strict mode、build/up、readyz、healthz 或 cleanup 锚点"
+                    "compose-smoke-v1 违反精确规则 {}",
+                    rule.as_str()
+                );
+            }
+            let env_path = root.join("deploy/.env.example");
+            let env_source = std::fs::read_to_string(&env_path)
+                .with_context(|| format!("读取 {} 失败", env_path.display()))?;
+            if !compose_smoke_env_has_required_keyring(&env_source) {
+                reject!(
+                    findings,
+                    Journey,
+                    assembly,
+                    "compose-smoke-v1 的 deploy/.env.example 缺唯一有效 command idempotency keyring"
                 );
             }
         }
@@ -1292,35 +1305,350 @@ fn expression_is_trivial_success(expression: &syn::Expr) -> bool {
         && matches!(call.args.first(), Some(syn::Expr::Tuple(tuple)) if call.args.len() == 1 && tuple.elems.is_empty())
 }
 
-fn compose_smoke_is_closed(source: &str) -> bool {
-    let Some(commands) = shell_semantic_lines(source) else {
-        return false;
-    };
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ComposeSmokeRule {
+    ShellGrammar,
+    StrictShell,
+    ModeDeclaration,
+    ModeClosure,
+    AllowSkipDeclaration,
+    AllowSkipClosure,
+    ReleaseSkip,
+    ReleaseKeepUp,
+    DeveloperSkip,
+    FixtureDispatch,
+    SuccessTermination,
+    PolicyOrder,
+    ReleaseTeardown,
+    ReleaseReceipt,
+    OutageClosure,
+    ComposeLifecycle,
+    Cleanup,
+    Readiness,
+}
+
+impl ComposeSmokeRule {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::ShellGrammar => "SMOKE-SHELL-GRAMMAR-01",
+            Self::StrictShell => "SMOKE-STRICT-SHELL-01",
+            Self::ModeDeclaration => "SMOKE-MODE-DECLARATION-01",
+            Self::ModeClosure => "SMOKE-MODE-CLOSURE-01",
+            Self::AllowSkipDeclaration => "SMOKE-ALLOW-SKIP-DECLARATION-01",
+            Self::AllowSkipClosure => "SMOKE-ALLOW-SKIP-CLOSURE-01",
+            Self::ReleaseSkip => "SMOKE-RELEASE-SKIP-01",
+            Self::ReleaseKeepUp => "SMOKE-RELEASE-KEEP-UP-01",
+            Self::DeveloperSkip => "SMOKE-DEVELOPER-SKIP-01",
+            Self::FixtureDispatch => "SMOKE-FIXTURE-DISPATCH-01",
+            Self::SuccessTermination => "SMOKE-SUCCESS-TERMINATION-01",
+            Self::PolicyOrder => "SMOKE-POLICY-ORDER-01",
+            Self::ReleaseTeardown => "SMOKE-RELEASE-TEARDOWN-01",
+            Self::ReleaseReceipt => "SMOKE-RELEASE-RECEIPT-01",
+            Self::OutageClosure => "SMOKE-OUTAGE-CLOSURE-01",
+            Self::ComposeLifecycle => "SMOKE-COMPOSE-LIFECYCLE-01",
+            Self::Cleanup => "SMOKE-CLEANUP-01",
+            Self::Readiness => "SMOKE-READINESS-01",
+        }
+    }
+}
+
+fn validate_compose_smoke(source: &str) -> std::result::Result<(), ComposeSmokeRule> {
+    let commands = shell_semantic_lines(source).ok_or(ComposeSmokeRule::ShellGrammar)?;
     let top_level = commands
         .iter()
         .filter(|command| command.function.is_none() && command.scopes.is_empty())
         .map(|command| command.text)
         .collect::<Vec<_>>();
-    top_level.contains(&"set -euo pipefail")
-        && top_level.contains(&"COMPOSE=\"docker compose -f ${SCRIPT_DIR}/docker-compose.yml\"")
-        && top_level.contains(&"$COMPOSE build")
-        && top_level.contains(&"$COMPOSE up -d")
-        && top_level.contains(&"trap cleanup EXIT")
-        && commands.iter().any(|command| {
-            command.function == Some("cleanup")
-                && command.scopes.is_empty()
-                && command.text.starts_with("$COMPOSE down -v ")
+    if !top_level.contains(&"set -euo pipefail") {
+        return Err(ComposeSmokeRule::StrictShell);
+    }
+    validate_compose_smoke_policy(&commands)?;
+    validate_compose_smoke_outage_closure(&commands)?;
+    if !top_level.contains(&"COMPOSE=\"docker compose -f ${SCRIPT_DIR}/docker-compose.yml\"")
+        || !top_level.contains(&"$COMPOSE build")
+        || !top_level.contains(&"$COMPOSE up -d")
+        || !top_level.contains(&"trap cleanup EXIT")
+    {
+        return Err(ComposeSmokeRule::ComposeLifecycle);
+    }
+    if !commands.iter().any(|command| {
+        command.function == Some("cleanup")
+            && command.scopes.is_empty()
+            && command.text.starts_with("$COMPOSE down -v ")
+    }) {
+        return Err(ComposeSmokeRule::Cleanup);
+    }
+    validate_compose_smoke_release_teardown(&commands)?;
+    let ready = commands.iter().any(|command| {
+        command.function.is_none()
+            && command.scopes == [ShellScope::Loop]
+            && command
+                .text
+                .starts_with("if curl -fsS \"${HEALTH_URL}/readyz\"")
+    });
+    let health = top_level
+        .iter()
+        .any(|line| line.starts_with("curl -fsS \"${HEALTH_URL}/healthz\" >/dev/null || fail"));
+    if !ready || !health {
+        return Err(ComposeSmokeRule::Readiness);
+    }
+    Ok(())
+}
+
+fn validate_compose_smoke_release_teardown(
+    commands: &[ShellSemanticLine<'_>],
+) -> std::result::Result<(), ComposeSmokeRule> {
+    let exact = |function, scopes: &[ShellScope], text| {
+        commands.iter().any(|command| {
+            command.function == function && command.scopes == scopes && command.text == text
         })
-        && commands.iter().any(|command| {
-            command.function.is_none()
-                && command.scopes == [ShellScope::Loop]
-                && command
-                    .text
-                    .starts_with("if curl -fsS \"${HEALTH_URL}/readyz\"")
+    };
+    if !exact(
+        Some("teardown"),
+        &[ShellScope::Conditional],
+        "$COMPOSE down -v >/dev/null 2>&1",
+    ) || commands
+        .iter()
+        .any(|command| command.function == Some("teardown") && command.text.contains("|| true"))
+    {
+        return Err(ComposeSmokeRule::ReleaseTeardown);
+    }
+    let top_position = |text| {
+        commands.iter().position(|command| {
+            command.function.is_none() && command.scopes.is_empty() && command.text == text
         })
-        && top_level
+    };
+    let teardown = top_position("teardown");
+    let disarm = top_position("trap - EXIT");
+    let success = top_position("log \"全部冒烟通过 ✅\"");
+    if teardown.is_none()
+        || disarm.is_none()
+        || success.is_none()
+        || teardown >= disarm
+        || disarm >= success
+    {
+        return Err(ComposeSmokeRule::ReleaseTeardown);
+    }
+    Ok(())
+}
+
+fn validate_compose_smoke_outage_closure(
+    commands: &[ShellSemanticLine<'_>],
+) -> std::result::Result<(), ComposeSmokeRule> {
+    let has_text = |text: &str| commands.iter().any(|command| command.text.contains(text));
+    for witness in [
+        "\"name\":\"keyprovider_ready\",\"status\":\"unhealthy\"",
+        "\"name\":\"keyprovider_ready\",\"status\":\"healthy\"",
+        "\"name\":\"vault_secret_resolver_ready\",\"status\":\"unhealthy\"",
+        "\"name\":\"vault_secret_resolver_ready\",\"status\":\"healthy\"",
+        "\"name\":\"s3_object_store_ready\",\"status\":\"unhealthy\"",
+        "\"name\":\"s3_object_store_ready\",\"status\":\"healthy\"",
+        "\"name\":\"redis_ready\",\"status\":\"unhealthy\"",
+        "\"name\":\"redis_ready\",\"status\":\"healthy\"",
+    ] {
+        if !has_text(witness) {
+            return Err(ComposeSmokeRule::OutageClosure);
+        }
+    }
+    let top_position = |text| {
+        commands.iter().position(|command| {
+            command.function.is_none() && command.scopes.is_empty() && command.text == text
+        })
+    };
+    let redis_stop = top_position("$COMPOSE stop redis >/dev/null");
+    let redis_start = top_position("$COMPOSE start redis >/dev/null");
+    let redis_unhealthy_between = commands.iter().enumerate().any(|(index, command)| {
+        Some(index) > redis_stop
+            && Some(index) < redis_start
+            && command
+                .text
+                .contains("\"name\":\"redis_ready\",\"status\":\"unhealthy\"")
+    });
+    let redis_healthy_after_start = commands.iter().enumerate().any(|(index, command)| {
+        Some(index) > redis_start
+            && command.scopes == [ShellScope::Loop]
+            && command
+                .text
+                .contains("\"name\":\"redis_ready\",\"status\":\"healthy\"")
+    });
+    if redis_stop.is_none()
+        || redis_start.is_none()
+        || redis_stop >= redis_start
+        || !redis_unhealthy_between
+        || !redis_healthy_after_start
+    {
+        return Err(ComposeSmokeRule::OutageClosure);
+    }
+    Ok(())
+}
+
+fn compose_smoke_env_has_required_keyring(source: &str) -> bool {
+    const PREFIX: &str = "RSS_COMMAND_IDEMPOTENCY_KEYS_JSON=";
+    let mut values = source.lines().filter_map(|line| line.strip_prefix(PREFIX));
+    let Some(raw) = values.next() else {
+        return false;
+    };
+    if values.next().is_some() {
+        return false;
+    }
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return false;
+    };
+    value
+        .get("current")
+        .and_then(serde_json::Value::as_object)
+        .is_some_and(|current| {
+            current.len() == 2
+                && current
+                    .get("id")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|id| !id.is_empty())
+                && current
+                    .get("key")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|key| !key.is_empty())
+        })
+}
+
+fn validate_compose_smoke_policy(
+    commands: &[ShellSemanticLine<'_>],
+) -> std::result::Result<(), ComposeSmokeRule> {
+    let has = |function: Option<&str>, scopes: &[ShellScope], text: &str| {
+        commands.iter().any(|command| {
+            command.function == function && command.scopes == scopes && command.text == text
+        })
+    };
+    let top = |text| has(None, &[], text);
+    let policy = |scopes: &[ShellScope], text| has(Some("validate_smoke_policy"), scopes, text);
+    let missing = |scopes: &[ShellScope], text| has(Some("missing_spiffe_fixture"), scopes, text);
+    let top_position = |text| {
+        commands.iter().position(|command| {
+            command.function.is_none() && command.scopes.is_empty() && command.text == text
+        })
+    };
+
+    if !top("RSS_SMOKE_MODE=\"${RSS_SMOKE_MODE-}\"") {
+        return Err(ComposeSmokeRule::ModeDeclaration);
+    }
+    if !policy(&[], "case \"$RSS_SMOKE_MODE\" in")
+        || !policy(&[ShellScope::Case], "developer|release) ;;")
+        || !policy(
+            &[ShellScope::Case],
+            "\"\") fail \"RSS_SMOKE_MODE 必填（developer|release）\" ;;",
+        )
+        || !policy(
+            &[ShellScope::Case],
+            "*) fail \"RSS_SMOKE_MODE 非法：仅允许 developer|release\" ;;",
+        )
+    {
+        return Err(ComposeSmokeRule::ModeClosure);
+    }
+    if !top("RSS_SMOKE_ALLOW_SKIP=\"${RSS_SMOKE_ALLOW_SKIP-0}\"") {
+        return Err(ComposeSmokeRule::AllowSkipDeclaration);
+    }
+    if !policy(&[], "case \"$RSS_SMOKE_ALLOW_SKIP\" in")
+        || !policy(&[ShellScope::Case], "0|1) ;;")
+        || !policy(
+            &[ShellScope::Case],
+            "*) fail \"RSS_SMOKE_ALLOW_SKIP 非法：仅允许 0|1\" ;;",
+        )
+    {
+        return Err(ComposeSmokeRule::AllowSkipClosure);
+    }
+    if !policy(
+        &[],
+        "if [[ \"$RSS_SMOKE_MODE\" = \"release\" && \"$RSS_SMOKE_ALLOW_SKIP\" = \"1\" ]]; then",
+    ) || !policy(
+        &[ShellScope::Conditional],
+        "fail \"release smoke 禁止 RSS_SMOKE_ALLOW_SKIP=1\"",
+    ) {
+        return Err(ComposeSmokeRule::ReleaseSkip);
+    }
+    if !policy(
+        &[],
+        "if [[ \"$RSS_SMOKE_MODE\" = \"release\" && \"${KEEP_UP:-0}\" = \"1\" ]]; then",
+    ) || !policy(
+        &[ShellScope::Conditional],
+        "fail \"release smoke 禁止 KEEP_UP=1\"",
+    ) {
+        return Err(ComposeSmokeRule::ReleaseKeepUp);
+    }
+    if !missing(
+        &[],
+        "if [[ \"$RSS_SMOKE_MODE\" = \"developer\" && \"$RSS_SMOKE_ALLOW_SKIP\" = \"1\" ]]; then",
+    ) || !missing(
+        &[ShellScope::Conditional],
+        "printf '%s\\n' 'NOT PRODUCTION EVIDENCE'",
+    ) || !missing(&[ShellScope::Conditional], "exit 0")
+        || !missing(
+            &[],
+            "fail \"Remote/SPIFFE fixture 不完整（缺少 ${missing}）\"",
+        )
+        || commands
             .iter()
-            .any(|line| line.starts_with("curl -fsS \"${HEALTH_URL}/healthz\" >/dev/null || fail"))
+            .filter(|command| command.text == "printf '%s\\n' 'NOT PRODUCTION EVIDENCE'")
+            .count()
+            != 1
+    {
+        return Err(ComposeSmokeRule::DeveloperSkip);
+    }
+    if !has(
+        Some("require_spiffe_fixture"),
+        &[ShellScope::Conditional],
+        "missing_spiffe_fixture \"${missing[*]}\"",
+    ) {
+        return Err(ComposeSmokeRule::FixtureDispatch);
+    }
+    let allowed_success = |command: &ShellSemanticLine<'_>| {
+        command.function == Some("missing_spiffe_fixture")
+            && command.scopes == [ShellScope::Conditional]
+            && command.text == "exit 0"
+    };
+    let mut success_terminations = commands.iter().filter(|command| {
+        matches!(command.text, "exit" | "exit 0")
+            || (command.function.is_none() && matches!(command.text, "return" | "return 0"))
+    });
+    if success_terminations.clone().count() != 1 || !success_terminations.all(allowed_success) {
+        return Err(ComposeSmokeRule::SuccessTermination);
+    }
+    if !top("validate_smoke_policy")
+        || !top("require_spiffe_fixture")
+        || top_position("validate_smoke_policy") >= top_position("require_spiffe_fixture")
+        || top_position("require_spiffe_fixture") >= top_position("$COMPOSE build")
+    {
+        return Err(ComposeSmokeRule::PolicyOrder);
+    }
+    let release_condition = commands.iter().position(|command| {
+        command.function.is_none()
+            && command.scopes.is_empty()
+            && command.text == "if [[ \"$RSS_SMOKE_MODE\" = \"release\" ]]; then"
+    });
+    let release_receipt = commands.iter().position(|command| {
+        command.function.is_none()
+            && command.scopes == [ShellScope::Conditional]
+            && command.text == "printf '%s\\n' 'RELEASE IMAGE ON DEMO INFRA EVIDENCE'"
+    });
+    let success_log = commands.iter().position(|command| {
+        command.function.is_none()
+            && command.scopes.is_empty()
+            && command.text == "log \"全部冒烟通过 ✅\""
+    });
+    if release_condition.is_none()
+        || release_receipt.is_none()
+        || success_log.is_none()
+        || success_log >= release_condition
+        || release_receipt <= release_condition
+        || commands
+            .iter()
+            .filter(|command| {
+                command.text == "printf '%s\\n' 'RELEASE IMAGE ON DEMO INFRA EVIDENCE'"
+            })
+            .count()
+            != 1
+    {
+        return Err(ComposeSmokeRule::ReleaseReceipt);
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2127,32 +2455,38 @@ mod tests {
                 .iter()
                 .all(|stage| stage.name != "demo")
         );
-        assert!(!compose_smoke_is_closed(
+        assert!(validate_compose_smoke(
             "# docker compose; $COMPOSE build; $COMPOSE up -d; /readyz /healthz; trap cleanup EXIT; $COMPOSE down -v"
-        ));
-        assert!(!compose_smoke_is_closed(
+        ).is_err());
+        assert!(validate_compose_smoke(
             "BAIT='docker compose $COMPOSE build $COMPOSE up -d /readyz /healthz trap cleanup EXIT $COMPOSE down -v'"
-        ));
-        assert!(!compose_smoke_is_closed(concat!(
-            "cat <<'BAIT'\n",
-            "COMPOSE=\"docker compose -f ${SCRIPT_DIR}/docker-compose.yml\"\n",
-            "$COMPOSE build\n",
-            "$COMPOSE up -d\n",
-            "trap cleanup EXIT\n",
-            "$COMPOSE down -v --remove-orphans\n",
-            "if curl -fsS \"${HEALTH_URL}/readyz\"; then\n",
-            "curl -fsS \"${HEALTH_URL}/healthz\" >/dev/null || fail\n",
-            "BAIT\n",
-        )));
-        assert!(!compose_smoke_is_closed(concat!(
-            "COMPOSE=\"docker compose -f ${SCRIPT_DIR}/docker-compose.yml\"\n",
-            "$COMPOSE build\n",
-            "$COMPOSE up -d\n",
-            "trap cleanup EXIT\n",
-            "$COMPOSE down -v --remove-orphans\n",
-            "if curl -fsS \"${HEALTH_URL}/readyz\"; then\n",
-            "curl -fsS \"${HEALTH_URL}/healthz\" >/dev/null || fail\n",
-        )));
+        ).is_err());
+        assert!(
+            validate_compose_smoke(concat!(
+                "cat <<'BAIT'\n",
+                "COMPOSE=\"docker compose -f ${SCRIPT_DIR}/docker-compose.yml\"\n",
+                "$COMPOSE build\n",
+                "$COMPOSE up -d\n",
+                "trap cleanup EXIT\n",
+                "$COMPOSE down -v --remove-orphans\n",
+                "if curl -fsS \"${HEALTH_URL}/readyz\"; then\n",
+                "curl -fsS \"${HEALTH_URL}/healthz\" >/dev/null || fail\n",
+                "BAIT\n",
+            ))
+            .is_err()
+        );
+        assert!(
+            validate_compose_smoke(concat!(
+                "COMPOSE=\"docker compose -f ${SCRIPT_DIR}/docker-compose.yml\"\n",
+                "$COMPOSE build\n",
+                "$COMPOSE up -d\n",
+                "trap cleanup EXIT\n",
+                "$COMPOSE down -v --remove-orphans\n",
+                "if curl -fsS \"${HEALTH_URL}/readyz\"; then\n",
+                "curl -fsS \"${HEALTH_URL}/healthz\" >/dev/null || fail\n",
+            ))
+            .is_err()
+        );
         assert!(!cargo_journey_has_exact_test(
             "const BAIT: &str = \"#[test] fn exact() {}\";",
             "exact"
@@ -2253,6 +2587,152 @@ mod tests {
     }
 
     #[test]
+    fn strict_compose_smoke_policy_rejects_synthetic_mutations_and_binds_the_real_file()
+    -> Result<()> {
+        let workspace = crate::workspace_root()?;
+        let source = std::fs::read_to_string(workspace.join("deploy/smoke.sh"))?;
+        assert!(
+            validate_compose_smoke(&source).is_ok(),
+            "real deploy/smoke.sh is not strict production evidence"
+        );
+        let env_source = std::fs::read_to_string(workspace.join("deploy/.env.example"))?;
+        assert!(
+            compose_smoke_env_has_required_keyring(&env_source),
+            "real deploy/.env.example cannot start the strict smoke runtime"
+        );
+        for (label, mutated) in [
+            (
+                "missing-command-keyring",
+                env_source.replace("RSS_COMMAND_IDEMPOTENCY_KEYS_JSON=", "REMOVED_KEYRING="),
+            ),
+            (
+                "malformed-command-keyring",
+                env_source.replace(
+                    "{\"current\":{\"id\":\"demo-v1\",\"key\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"}}",
+                    "not-json",
+                ),
+            ),
+        ] {
+            assert_ne!(mutated, env_source, "{label} mutation was vacuous");
+            assert!(
+                !compose_smoke_env_has_required_keyring(&mutated),
+                "{label} mutation escaped"
+            );
+        }
+
+        for (label, expected, needle, replacement) in [
+            (
+                "required-mode",
+                ComposeSmokeRule::ModeDeclaration,
+                "RSS_SMOKE_MODE=\"${RSS_SMOKE_MODE-}\"",
+                "RSS_SMOKE_MODE=\"${RSS_SMOKE_MODE-developer}\"",
+            ),
+            (
+                "closed-allow-skip",
+                ComposeSmokeRule::AllowSkipDeclaration,
+                "RSS_SMOKE_ALLOW_SKIP=\"${RSS_SMOKE_ALLOW_SKIP-0}\"",
+                "RSS_SMOKE_ALLOW_SKIP=\"${RSS_SMOKE_ALLOW_SKIP:-0}\"",
+            ),
+            (
+                "closed-mode-values",
+                ComposeSmokeRule::ModeClosure,
+                "developer|release) ;;",
+                "developer|release|compat) ;;",
+            ),
+            (
+                "closed-allow-values",
+                ComposeSmokeRule::AllowSkipClosure,
+                "0|1) ;;",
+                "0|1|true) ;;",
+            ),
+            (
+                "release-rejects-skip",
+                ComposeSmokeRule::ReleaseSkip,
+                "[[ \"$RSS_SMOKE_MODE\" = \"release\" && \"$RSS_SMOKE_ALLOW_SKIP\" = \"1\" ]]",
+                "[[ \"$RSS_SMOKE_MODE\" = \"release\" && \"$RSS_SMOKE_ALLOW_SKIP\" = \"2\" ]]",
+            ),
+            (
+                "release-rejects-keep-up",
+                ComposeSmokeRule::ReleaseKeepUp,
+                "[[ \"$RSS_SMOKE_MODE\" = \"release\" && \"${KEEP_UP:-0}\" = \"1\" ]]",
+                "[[ \"$RSS_SMOKE_MODE\" = \"release\" && \"${KEEP_UP:-0}\" = \"2\" ]]",
+            ),
+            (
+                "developer-only-skip",
+                ComposeSmokeRule::DeveloperSkip,
+                "[[ \"$RSS_SMOKE_MODE\" = \"developer\" && \"$RSS_SMOKE_ALLOW_SKIP\" = \"1\" ]]",
+                "[[ \"$RSS_SMOKE_ALLOW_SKIP\" = \"1\" ]]",
+            ),
+            (
+                "evidence-classification",
+                ComposeSmokeRule::DeveloperSkip,
+                "printf '%s\\n' 'NOT PRODUCTION EVIDENCE'",
+                "printf '%s\\n' 'SKIPPED'",
+            ),
+            (
+                "missing-fixture-call",
+                ComposeSmokeRule::FixtureDispatch,
+                "missing_spiffe_fixture \"${missing[*]}\"",
+                "log \"missing fixture\"",
+            ),
+            (
+                "release-receipt",
+                ComposeSmokeRule::ReleaseReceipt,
+                "printf '%s\\n' 'RELEASE IMAGE ON DEMO INFRA EVIDENCE'",
+                "printf '%s\\n' 'RELEASE EVIDENCE'",
+            ),
+        ] {
+            let mutated = source.replacen(needle, replacement, 1);
+            assert_ne!(mutated, source, "{label} mutation was vacuous");
+            assert_eq!(validate_compose_smoke(&mutated), Err(expected), "{label}");
+        }
+
+        let early_success = source.replacen("$COMPOSE build", "exit 0\n$COMPOSE build", 1);
+        assert_ne!(early_success, source, "early-exit mutation was vacuous");
+        assert_eq!(
+            validate_compose_smoke(&early_success),
+            Err(ComposeSmokeRule::SuccessTermination),
+            "top-level exit 0 bypass escaped"
+        );
+        for (label, mutated) in [
+            (
+                "teardown-failure-swallowed",
+                source.replacen(
+                    "$COMPOSE down -v >/dev/null 2>&1\n",
+                    "$COMPOSE down -v >/dev/null 2>&1 || true\n",
+                    1,
+                ),
+            ),
+            (
+                "receipt-before-teardown",
+                source.replacen(
+                    "teardown\ntrap - EXIT\nlog \"全部冒烟通过 ✅\"",
+                    "trap - EXIT\nlog \"全部冒烟通过 ✅\"\nteardown",
+                    1,
+                ),
+            ),
+        ] {
+            assert_ne!(mutated, source, "{label} mutation was vacuous");
+            assert_eq!(
+                validate_compose_smoke(&mutated),
+                Err(ComposeSmokeRule::ReleaseTeardown),
+                "{label}"
+            );
+        }
+        for probe in ["keyprovider_ready", "s3_object_store_ready", "redis_ready"] {
+            let unhealthy = format!("\"name\":\"{probe}\",\"status\":\"unhealthy\"");
+            let mutated = source.replacen(&unhealthy, &format!("\"name\":\"{probe}\""), 1);
+            assert_ne!(mutated, source, "{probe} outage mutation was vacuous");
+            assert_eq!(
+                validate_compose_smoke(&mutated),
+                Err(ComposeSmokeRule::OutageClosure),
+                "{probe} exact unhealthy mutation escaped"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn closed_source_grammar_rejects_non_executed_witnesses() -> Result<()> {
         assert!(!cargo_journey_has_exact_test(
             "#[test]\nfn exact() { let dead = || panic!(\"not executed\"); }",
@@ -2275,7 +2755,7 @@ mod tests {
             "curl -fsS \"${HEALTH_URL}/healthz\" >/dev/null || fail\n",
             "}\n",
         );
-        assert!(!compose_smoke_is_closed(uncalled_smoke));
+        assert!(validate_compose_smoke(uncalled_smoke).is_err());
 
         for (scope, open, close) in [
             ("conditional", "if false; then", "fi"),
@@ -2288,7 +2768,7 @@ mod tests {
                 "set -euo pipefail\nCOMPOSE=\"docker compose -f ${{SCRIPT_DIR}}/docker-compose.yml\"\ncleanup() {{\n$COMPOSE down -v --remove-orphans\n}}\ntrap cleanup EXIT\n{open}\n$COMPOSE build\n$COMPOSE up -d\nif curl -fsS \"${{HEALTH_URL}}/readyz\"; then\ntrue\nfi\ncurl -fsS \"${{HEALTH_URL}}/healthz\" >/dev/null || fail\n{close}\n"
             );
             assert!(
-                !compose_smoke_is_closed(&scoped_smoke),
+                validate_compose_smoke(&scoped_smoke).is_err(),
                 "compose gate accepted {scope} witness scope"
             );
         }

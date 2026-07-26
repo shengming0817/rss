@@ -68,7 +68,7 @@ vocab = path=../../crates/vocab
 
 [assembly.intent]
 name = runtime
-profile = demo
+profile = production
 topology = durable-shared
 domains = [settings,identity,audit]
 listeners = [primary,internal,admin,health]
@@ -86,11 +86,10 @@ listeners = [primary,internal,admin,health]
 10 | id=listener-rate-limiter | port=diport::RateLimiter | provider=ratelimit::GovernorLimiter | providerCrate=ratelimit | requiredFeatures=[] | consumer=httpserve | lifecycle=active | durability=ephemeral-memory | scope=unset | failurePosture=unset | purpose=per-peer-IP request rate limiting (pre-auth, DoS/brute-force 防护)
 11 | id=distributed-lock-store | port=diport::LockStore | provider=redis::RedisLockStore | providerCrate=redis | requiredFeatures=[backend] | consumer=distributed | lifecycle=active | durability=persistent | scope=unset | failurePosture=unset | purpose=distributed-lock-fencing
 12 | id=distributed-cas-store | port=diport::CasStore | provider=postgres::PgCasStore | providerCrate=postgres | requiredFeatures=[] | consumer=distributed | lifecycle=active | durability=persistent | scope=unset | failurePosture=unset | purpose=distributed-state-cas
-13 | id=distributed-cas-store-alternative | port=diport::CasStore | provider=redis::RedisCasStore | providerCrate=redis | requiredFeatures=[backend] | consumer=distributed | lifecycle=draft | durability=persistent | scope=unset | failurePosture=unset | purpose=distributed-state-cas-redis-alternative
-14 | id=runtime-object-store | port=diport::ObjectStore | provider=s3::S3Store | providerCrate=s3 | requiredFeatures=[backend] | consumer=runtime | lifecycle=active | durability=persistent | scope=unset | failurePosture=unset | purpose=runtime-s3-readiness-canary
-15 | id=dlx-lifecycle-repository | port=diport::DlxLifecycleRepository | provider=postgres::PgDlxLifecycleRepository | providerCrate=postgres | requiredFeatures=[] | consumer=eventexec | lifecycle=active | durability=persistent | scope=unset | failurePosture=unset | purpose=dead-letter-archive-receipt-purge-reconcile
-16 | id=dlx-archive-store | port=diport::DlxArchiveStore | provider=s3::VerifiedS3DlxArchiveStore | providerCrate=s3 | requiredFeatures=[backend] | consumer=eventexec | lifecycle=active | durability=persistent | scope=unset | failurePosture=unset | purpose=dead-letter-compliance-worm-archive
-17 | id=dlx-archive-key-provider | port=diport::KeyProvider | provider=vault::VaultKeyProvider | providerCrate=vault | requiredFeatures=[backend] | consumer=eventexec | lifecycle=active | durability=persistent | scope=unset | failurePosture=unset | purpose=dead-letter-independent-archive-key-provider
+13 | id=runtime-object-store | port=diport::ObjectStore | provider=s3::S3Store | providerCrate=s3 | requiredFeatures=[backend] | consumer=runtime | lifecycle=active | durability=persistent | scope=unset | failurePosture=unset | purpose=runtime-s3-readiness-canary
+14 | id=dlx-lifecycle-repository | port=diport::DlxLifecycleRepository | provider=postgres::PgDlxLifecycleRepository | providerCrate=postgres | requiredFeatures=[] | consumer=eventexec | lifecycle=active | durability=persistent | scope=unset | failurePosture=unset | purpose=dead-letter-archive-receipt-purge-reconcile
+15 | id=dlx-archive-store | port=diport::DlxArchiveStore | provider=s3::VerifiedS3DlxArchiveStore | providerCrate=s3 | requiredFeatures=[backend] | consumer=eventexec | lifecycle=active | durability=persistent | scope=unset | failurePosture=unset | purpose=dead-letter-compliance-worm-archive
+16 | id=dlx-archive-key-provider | port=diport::KeyProvider | provider=vault::VaultKeyProvider | providerCrate=vault | requiredFeatures=[backend] | consumer=eventexec | lifecycle=active | durability=persistent | scope=unset | failurePosture=unset | purpose=dead-letter-independent-archive-key-provider
 
 [sharedRuntimeDeps.fields]
 password_blocklist = Arc<secure::DigestPasswordBlocklist>

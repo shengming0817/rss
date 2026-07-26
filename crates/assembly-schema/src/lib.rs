@@ -30,6 +30,7 @@ pub use runtime_plan::{
     DomainLifecyclePhase, DomainPlan, ListenerAuth, ListenerPlan, ParsedRuntimePlan, PlacementPlan,
     ProviderPlan, RuntimePlan, RuntimePlanError, RuntimePlanErrorStage, RuntimePlanFingerprint,
     RuntimePlanJsonCategory, RuntimePlanJsonPath, RuntimePlanV1Input,
+    validate_runtime_plan_json_slice,
 };
 
 use schemars::JsonSchema;

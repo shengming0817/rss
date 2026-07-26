@@ -3,7 +3,7 @@
   "generatedBy": "cargo xtask graph assembly",
   "assembly": {
     "name": "runtime",
-    "profile": "demo",
+    "profile": "production",
     "topology": "durable-shared"
   },
   "sources": [
@@ -11,14 +11,14 @@
       "path": "assemblies/runtime/assembly.toml",
       "digest": {
         "algorithm": "sha256",
-        "value": "9f34169a0860f5425b3628aaeaf773581aab2239f129ed93c4aacbacd77562eb"
+        "value": "3e8420416a82011ebc810d13b3f3c810389252cfd97ebabb6dc36229190ac431"
       }
     },
     {
       "path": "assemblies/runtime/src/generated/modules_gen.rs",
       "digest": {
         "algorithm": "sha256",
-        "value": "06d762ea6f3c71937ef26d26ffc8634fb0f6d93b1d8b83a0afb71fa771528393"
+        "value": "381d24063c6a59176684e9e84218ea6aa193a5dc6e4ba570b84a27c1557ba661"
       }
     },
     {
@@ -285,18 +285,6 @@
       "lifecycle": "active",
       "durability": "persistent",
       "purpose": "distributed-state-cas"
-    },
-    {
-      "id": "n_b277a61c44859cde99f276bf",
-      "kind": "provider",
-      "label": "redis::RedisCasStore (redis)",
-      "port": "diport::CasStore",
-      "lifecycle": "draft",
-      "durability": "persistent",
-      "purpose": "distributed-state-cas-redis-alternative",
-      "requiredFeatures": [
-        "backend"
-      ]
     },
     {
       "id": "n_6df5db0fdf560b20204cbbd8",
@@ -673,21 +661,6 @@
     {
       "from": "n_f1d77e993c69992a1b2a567b",
       "to": "n_b07dcd04ac2a96bb91f67966",
-      "kind": "contributes-output"
-    },
-    {
-      "from": "n_51af174d851d072ffc196829",
-      "to": "n_b277a61c44859cde99f276bf",
-      "kind": "requires-capability"
-    },
-    {
-      "from": "n_d954278a62814c4c97d6a2ee",
-      "to": "n_b277a61c44859cde99f276bf",
-      "kind": "declares-provider"
-    },
-    {
-      "from": "n_b277a61c44859cde99f276bf",
-      "to": "n_2cccb5238d48d945bddd07c4",
       "kind": "contributes-output"
     },
     {

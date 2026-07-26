@@ -168,23 +168,27 @@ fn is_canonical_partition(value: &str) -> bool {
     matches!(value, "unpartitioned" | "1/2" | "2/2")
 }
 
-#[derive(Clone, Copy, Debug)]
-enum ContainerService {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ContainerService {
     Postgres,
     Redis,
     RabbitMq,
     Mosquitto,
     Minio,
+    Vault,
+    Server,
 }
 
 impl ContainerService {
-    fn name(self) -> &'static str {
+    pub const fn name(self) -> &'static str {
         match self {
             Self::Postgres => "postgres",
             Self::Redis => "redis",
             Self::RabbitMq => "rabbitmq",
             Self::Mosquitto => "mosquitto",
             Self::Minio => "minio",
+            Self::Vault => "vault",
+            Self::Server => "server",
         }
     }
 
@@ -209,6 +213,14 @@ impl ContainerService {
             ),
         ])
     }
+}
+
+/// Returns the exact repository integration ownership labels for a self-provisioned container.
+/// Local runs without CI lifecycle context remain unmanaged; partial context fails closed.
+pub fn integration_container_labels(
+    service: ContainerService,
+) -> Result<Option<BTreeMap<String, String>>> {
+    Ok(CiContainerContext::from_env()?.map(|context| service.labels(&context)))
 }
 
 #[derive(Clone)]
@@ -1349,6 +1361,8 @@ mod tests {
             (ContainerService::RabbitMq, "rabbitmq"),
             (ContainerService::Mosquitto, "mosquitto"),
             (ContainerService::Minio, "minio"),
+            (ContainerService::Vault, "vault"),
+            (ContainerService::Server, "server"),
         ] {
             let expected = BTreeMap::from([
                 ("io.rss.integration.managed".to_string(), "true".to_string()),

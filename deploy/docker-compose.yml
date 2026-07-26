@@ -2,8 +2,10 @@
 #
 # 用途：本地证明镜像「能起进程 + 连 PG + 跑迁移 + readyz 就绪 + 非 root + 只读 rootfs 兼容」。
 # 非生产编排（Vault 使用 dev TLS + in-memory storage；生产用 k8s + 私有 CA TLS + 真 OIDC/Vault，见 docs/ops/202606271438-003-container-image.md）。
-# deploy/smoke.sh：默认 all-Local 直接跑 readyz 七闭环；仅 Remote placement + SPIFFE fixture
-# 不全时 SKIP（#1649）。stock compose 保持全 Local，不依赖 SPIRE。
+# deploy/smoke.sh：必须显式选择 developer|release。stock compose 保持全 Local、不依赖 SPIRE；
+# Remote placement + SPIFFE fixture 不全时默认失败，仅 developer + RSS_SMOKE_ALLOW_SKIP=1 可输出
+# `NOT PRODUCTION EVIDENCE` 后跳过。release 全流程成功只输出 `RELEASE IMAGE ON DEMO INFRA EVIDENCE`：
+# 它证明 release image 跑通本演示栈，不证明生产 TLS、secret manager 或正式基础设施配置。
 #
 # 跑：  docker compose -f deploy/docker-compose.yml up --build -d
 # 验：  curl -fsS http://localhost:${RSS_HEALTH_HOST_PORT:-8083}/health/v1/readyz   # all-Local → 必经 smoke

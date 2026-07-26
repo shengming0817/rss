@@ -5,7 +5,6 @@ mod domain_exec;
 mod listener;
 mod placement;
 mod placement_exec;
-mod provider;
 
 use crate::config::SnapshotConfig;
 use assembly_schema::{
@@ -114,8 +113,7 @@ impl RuntimePlan {
         let lock = ParsedAssemblyLock::from_json_slice(assembly_lock_json)
             .map_err(RuntimePlanError::AssemblyLock)?;
 
-        let mut input = RuntimePlanV1Input::new();
-        provider::append(&manifest, &mut input);
+        let mut input = RuntimePlanV1Input::from_manifest(&manifest);
         listener::append(&manifest, config, &mut input)?;
         domain::append(&manifest, &mut input);
         placement::append(&manifest, &lock, config, &mut input)?;
@@ -199,11 +197,18 @@ pub(crate) fn is_kebab_case_workload(value: &str) -> bool {
 pub(crate) fn fixture_listener_spec(
     kind: AssemblyListenerKind,
 ) -> anyhow::Result<ListenerExecutionSpec> {
-    let parsed =
-        assembly_schema::ParsedRuntimePlan::from_json_slice(include_bytes!("../runtime-plan.json"))
-            .map_err(|error| {
-                anyhow::anyhow!("parse fingerprint-verified RuntimePlan fixture: {error}")
-            })?;
+    let manifest = AssemblyManifest::from_toml_str(BUNDLED_ASSEMBLY_TOML)
+        .map_err(|error| anyhow::anyhow!("parse bundled fixture manifest: {error}"))?
+        .canonicalize_v1()
+        .map_err(|error| anyhow::anyhow!("canonicalize bundled fixture manifest: {error}"))?;
+    let lock = ParsedAssemblyLock::from_json_slice(BUNDLED_ASSEMBLY_LOCK)
+        .map_err(|error| anyhow::anyhow!("parse bundled fixture lock: {error}"))?;
+    let parsed = assembly_schema::ParsedRuntimePlan::from_json_slice_bound(
+        include_bytes!("../runtime-plan.json"),
+        &manifest,
+        &lock,
+    )
+    .map_err(|error| anyhow::anyhow!("parse fingerprint-verified RuntimePlan fixture: {error}"))?;
     listener_execution_plan_from_typed(parsed.as_plan())
         .into_listeners()
         .into_iter()
@@ -266,7 +271,7 @@ mod tests {
     use crate::config::test_snapshot;
     use assembly_schema::{
         AssemblyDomain, AssemblyListenerKind, CanonicalAssemblyManifestV1, DomainLifecyclePhase,
-        ListenerAuth, RuntimePlanErrorStage,
+        ListenerAuth, ProviderLifecycle, RuntimePlanErrorStage,
     };
     use std::collections::BTreeMap;
     use std::error::Error as _;
@@ -351,6 +356,7 @@ mod tests {
         input: &mut RuntimePlanV1Input,
     ) {
         let mut providers = manifest.diport_providers().iter().collect::<Vec<_>>();
+        providers.retain(|provider| provider.lifecycle == ProviderLifecycle::Active);
         providers.sort_by_key(|provider| provider.id.as_str());
         for (index, provider) in providers.iter().enumerate() {
             if index == 0 && mutation == Some(Mutation::MissingProvider) {
@@ -473,7 +479,6 @@ mod tests {
                 "auth-audit-sink",
                 "device-revocation-store",
                 "distributed-cas-store",
-                "distributed-cas-store-alternative",
                 "distributed-lock-store",
                 "dlx-archive-key-provider",
                 "dlx-archive-store",
@@ -608,7 +613,7 @@ mod tests {
     #[test]
     fn runtime_plan_compiler_rejects_manifest_lock_profile_mismatch() {
         let source =
-            BUNDLED_ASSEMBLY_TOML.replacen("profile = \"demo\"", "profile = \"production\"", 1);
+            BUNDLED_ASSEMBLY_TOML.replacen("profile = \"production\"", "profile = \"demo\"", 1);
         let manifest = canonical_manifest(&source);
         let lock = parsed_lock(BUNDLED_ASSEMBLY_LOCK);
 

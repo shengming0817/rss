@@ -105,17 +105,7 @@ fn validate_manifest_listeners(manifest: &CanonicalAssemblyManifestV1) -> anyhow
 }
 
 fn compiler_input(manifest: &CanonicalAssemblyManifestV1) -> anyhow::Result<RuntimePlanV1Input> {
-    let mut input = RuntimePlanV1Input::new();
-
-    let mut providers = manifest.diport_providers().iter().collect::<Vec<_>>();
-    providers.sort_by_key(|provider| provider.id.as_str());
-    for provider in providers {
-        input.provider(
-            provider.id.as_str(),
-            provider.provider,
-            provider.outputs.clone(),
-        );
-    }
+    let mut input = RuntimePlanV1Input::from_manifest(manifest);
 
     let mut listeners = manifest.listeners().iter().collect::<Vec<_>>();
     listeners.sort_by_key(|listener| listener.kind.as_str());

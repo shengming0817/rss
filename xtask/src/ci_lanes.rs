@@ -59,7 +59,7 @@ macro_rules! ci_job_catalog {
             $( $variant, )+
         }
 
-        const CI_JOB_DESCRIPTORS: [CiJobDescriptor; 16] = [
+        const CI_JOB_DESCRIPTORS: [CiJobDescriptor; 17] = [
             $(CiJobDescriptor {
                 key: CiJobKey::$variant,
                 name: $name,
@@ -71,7 +71,7 @@ macro_rules! ci_job_catalog {
         ];
 
         impl CiJobKey {
-            pub(crate) const ALL: [Self; 16] = [$(Self::$variant),+];
+            pub(crate) const ALL: [Self; 17] = [$(Self::$variant),+];
 
             const fn descriptor(self) -> &'static CiJobDescriptor {
                 match self {
@@ -164,6 +164,13 @@ ci_job_catalog! {
         "integration/object-storage",
         Integration,
         Some("object-storage"),
+        None,
+        None
+    ),
+    IntegrationProductionRuntime => (
+        "integration/production-runtime",
+        Integration,
+        Some("production-runtime"),
         None,
         None
     ),
@@ -270,6 +277,7 @@ impl CiJobKey {
             IntegrationShard::ConsistencyFault => &[Self::IntegrationConsistencyFault],
             IntegrationShard::CdcProjectionSaga => &[Self::IntegrationCdcProjectionSaga],
             IntegrationShard::ObjectStorage => &[Self::IntegrationObjectStorage],
+            IntegrationShard::ProductionRuntime => &[Self::IntegrationProductionRuntime],
         }
     }
 

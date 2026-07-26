@@ -1,5 +1,5 @@
 name = "runtime"
-profile = "demo"
+profile = "production"
 domains = ["settings", "identity", "audit"]
 topology = "durable-shared"
 frameworkContracts = []
@@ -35,7 +35,7 @@ outputs = ["probes", "workers"]
 # eventbus 真传输 topology-gated 接线（#1251）：durable 拓扑下注入真 amqp publisher/subscriber（lapin，
 # backend feature）。consistency-engine port（OutboxRelay、InboxStore）经 topology resolver
 # 在代码中接线 + 编译期 feature 门控（type-system Hard），非 diport-infra port，不在此声明。
-# profile 仍为 demo；production profile 切换由 #1801 单独收口。
+# production profile 下 publisher/subscriber 均为 active persistent 真后端。
 [[diportProviders]]
 id = "event-publisher"
 port = "diport::Publisher"
@@ -147,7 +147,7 @@ outputs = []
 
 # distributed lock/CAS providers（#1571 go-live）：runtime 经 `wire_distributed(&SharedRuntimeDeps)` 从
 # `deps.redis.infra().lock_store()` + `deps.pg.infra().cas_store()` 构造 `DistributedRuntimeDeps`，并作为
-# event transport outbox maintenance coordinator 的必填参数注入。Redis CAS 仍是 draft alternative。
+# event transport outbox maintenance coordinator 的必填参数注入。production 不保留 draft CAS 旁路。
 [[diportProviders]]
 id = "distributed-lock-store"
 port = "diport::LockStore"
@@ -170,18 +170,6 @@ lifecycle = "active"
 durability = "persistent"
 purpose = "distributed-state-cas"
 outputs = ["resources", "workers"]
-
-[[diportProviders]]
-id = "distributed-cas-store-alternative"
-port = "diport::CasStore"
-provider = "redis::RedisCasStore"
-providerCrate = "redis"
-requiredFeatures = ["backend"]
-consumer = "distributed"
-lifecycle = "draft"
-durability = "persistent"
-purpose = "distributed-state-cas-redis-alternative"
-outputs = ["resources"]
 
 # S3 object-store provider（#1164）：runtime canary 对真实 bucket 执行 put/get/delete/get-miss，
 # readiness 失败即摘流；adapter 经 backend feature 启 AWS SDK 真身。

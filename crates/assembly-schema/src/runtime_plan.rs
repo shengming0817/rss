@@ -4,7 +4,7 @@
 
 use crate::{
     AssemblyDomain, AssemblyFingerprint, AssemblyListenerKind, CanonicalAssemblyManifestV1,
-    LifecycleChannel, ParsedAssemblyLock, ProviderConstructor,
+    LifecycleChannel, ParsedAssemblyLock, ProviderConstructor, ProviderLifecycle,
 };
 use schemars::JsonSchema;
 use schemars::schema::{RootSchema, Schema};
@@ -177,31 +177,42 @@ pub struct ParsedRuntimePlan(RuntimePlan);
 
 impl ParsedRuntimePlan {
     pub fn from_json_slice(bytes: &[u8]) -> Result<Self, RuntimePlanError> {
-        let mut deserializer = serde_json::Deserializer::from_slice(bytes);
-        let wire: WireRuntimePlan =
-            serde_path_to_error::deserialize(&mut deserializer).map_err(strict_json_error)?;
-        deserializer
-            .end()
-            .map_err(|source| strict_json_root_error(&source))?;
-        if wire.schema_version != SCHEMA_VERSION {
+        parse_unbound_runtime_plan(bytes).map(Self)
+    }
+
+    /// Parse an executable RuntimePlan and bind it to its canonical manifest and AssemblyLock.
+    pub fn from_json_slice_bound(
+        bytes: &[u8],
+        manifest: &CanonicalAssemblyManifestV1,
+        lock: &ParsedAssemblyLock,
+    ) -> Result<Self, RuntimePlanError> {
+        let candidate = parse_unbound_runtime_plan(bytes)?;
+        validate_manifest_lock(manifest, lock)?;
+        if candidate.assembly_fingerprint().as_str() != lock.fingerprint().as_str() {
             return Err(RuntimePlanError::new(
-                RuntimePlanErrorKind::UnsupportedVersion,
+                RuntimePlanErrorKind::AssemblyIdentityMismatch,
             ));
         }
-        validate_sha256("assemblyFingerprint", wire.assembly_fingerprint.as_str())?;
-        validate_sha256(
-            "runtimePlanFingerprint",
-            wire.runtime_plan_fingerprint.as_str(),
+
+        let RuntimePlan {
+            runtime_plan_fingerprint: expected_fingerprint,
+            provider_plans,
+            listener_plans,
+            domain_plans,
+            placement_plans,
+            ..
+        } = candidate;
+        let plan = RuntimePlan::compile_v1(
+            manifest,
+            lock,
+            RuntimePlanV1Input {
+                provider_plans,
+                listener_plans,
+                domain_plans,
+                placement_plans,
+            },
         )?;
-        let assembly_fingerprint = AssemblyFingerprint::from_validated(wire.assembly_fingerprint);
-        let plan = RuntimePlan::from_parts(
-            assembly_fingerprint,
-            wire.provider_plans.into_iter().map(Into::into).collect(),
-            wire.listener_plans.into_iter().map(Into::into).collect(),
-            wire.domain_plans.into_iter().map(Into::into).collect(),
-            wire.placement_plans.into_iter().map(Into::into).collect(),
-        )?;
-        if plan.runtime_plan_fingerprint.as_str() != wire.runtime_plan_fingerprint {
+        if plan.runtime_plan_fingerprint() != &expected_fingerprint {
             return Err(RuntimePlanError::new(
                 RuntimePlanErrorKind::FingerprintMismatch,
             ));
@@ -248,6 +259,48 @@ impl fmt::Debug for ParsedRuntimePlan {
     }
 }
 
+/// Validate only the closed RuntimePlan JSON wire and its self-excluding fingerprint.
+///
+/// This function deliberately returns no executable plan. Callers that execute a [`RuntimePlan`]
+/// must use [`ParsedRuntimePlan::from_json_slice_bound`] with the canonical manifest and
+/// AssemblyLock.
+pub fn validate_runtime_plan_json_slice(bytes: &[u8]) -> Result<(), RuntimePlanError> {
+    parse_unbound_runtime_plan(bytes).map(drop)
+}
+
+fn parse_unbound_runtime_plan(bytes: &[u8]) -> Result<RuntimePlan, RuntimePlanError> {
+    let mut deserializer = serde_json::Deserializer::from_slice(bytes);
+    let wire: WireRuntimePlan =
+        serde_path_to_error::deserialize(&mut deserializer).map_err(strict_json_error)?;
+    deserializer
+        .end()
+        .map_err(|source| strict_json_root_error(&source))?;
+    if wire.schema_version != SCHEMA_VERSION {
+        return Err(RuntimePlanError::new(
+            RuntimePlanErrorKind::UnsupportedVersion,
+        ));
+    }
+    validate_sha256("assemblyFingerprint", wire.assembly_fingerprint.as_str())?;
+    validate_sha256(
+        "runtimePlanFingerprint",
+        wire.runtime_plan_fingerprint.as_str(),
+    )?;
+    let expected_fingerprint = wire.runtime_plan_fingerprint;
+    let plan = RuntimePlan::from_parts(
+        AssemblyFingerprint::from_validated(wire.assembly_fingerprint),
+        wire.provider_plans.into_iter().map(Into::into).collect(),
+        wire.listener_plans.into_iter().map(Into::into).collect(),
+        wire.domain_plans.into_iter().map(Into::into).collect(),
+        wire.placement_plans.into_iter().map(Into::into).collect(),
+    )?;
+    if plan.runtime_plan_fingerprint.as_str() != expected_fingerprint {
+        return Err(RuntimePlanError::new(
+            RuntimePlanErrorKind::FingerprintMismatch,
+        ));
+    }
+    Ok(plan)
+}
+
 /// Candidate carrier consumed by [`RuntimePlan::compile_v1`].
 ///
 /// Its methods deliberately accept duplicate or incomplete declarations so the compiler can
@@ -263,6 +316,25 @@ pub struct RuntimePlanV1Input {
 impl RuntimePlanV1Input {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Seed the only executable provider candidate set from active canonical declarations.
+    pub fn from_manifest(manifest: &CanonicalAssemblyManifestV1) -> Self {
+        let mut input = Self::new();
+        let mut providers = manifest
+            .diport_providers()
+            .iter()
+            .filter(|provider| provider.lifecycle == ProviderLifecycle::Active)
+            .collect::<Vec<_>>();
+        providers.sort_by_key(|provider| provider.id.as_str());
+        for provider in providers {
+            input.provider(
+                provider.id.as_str(),
+                provider.provider,
+                provider.outputs.clone(),
+            );
+        }
+        input
     }
 
     pub fn provider(
@@ -725,17 +797,7 @@ fn validate_candidates(
     _lock: &ParsedAssemblyLock,
     input: &RuntimePlanV1Input,
 ) -> Result<(), RuntimePlanError> {
-    let expected_providers = manifest
-        .diport_providers()
-        .iter()
-        .map(|provider| {
-            (
-                provider.id.as_str(),
-                provider.provider,
-                provider.outputs.as_slice(),
-            )
-        })
-        .collect::<BTreeSet<_>>();
+    let expected_providers = executable_provider_declarations(manifest);
     let actual_providers = input
         .provider_plans
         .iter()
@@ -797,6 +859,23 @@ fn validate_candidates(
         ));
     }
     Ok(())
+}
+
+fn executable_provider_declarations(
+    manifest: &CanonicalAssemblyManifestV1,
+) -> BTreeSet<(&str, ProviderConstructor, &[LifecycleChannel])> {
+    manifest
+        .diport_providers()
+        .iter()
+        .filter(|provider| provider.lifecycle == ProviderLifecycle::Active)
+        .map(|provider| {
+            (
+                provider.id.as_str(),
+                provider.provider,
+                provider.outputs.as_slice(),
+            )
+        })
+        .collect()
 }
 
 fn validate_plan_facts(
@@ -1024,4 +1103,111 @@ fn validate_sha256(field: &'static str, value: &str) -> Result<(), RuntimePlanEr
         )));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::AssemblyManifest;
+
+    #[test]
+    fn executable_provider_declarations_exclude_draft_roles() -> anyhow::Result<()> {
+        let manifest = AssemblyManifest::from_toml_str(
+            r#"
+name = "runtime-plan-fixture"
+profile = "demo"
+domains = ["contractreg"]
+topology = "demo"
+frameworkContracts = []
+
+[[listeners]]
+kind = "primary"
+domains = ["contractreg"]
+
+[[diportProviders]]
+id = "device-revocation-store"
+port = "diport::RevocationStore"
+provider = "postgres::PgRevocationStore"
+providerCrate = "postgres"
+requiredFeatures = []
+consumer = "deviceloop"
+lifecycle = "active"
+durability = "persistent"
+purpose = "active-fixture"
+outputs = ["probes", "workers"]
+
+[[diportProviders]]
+id = "distributed-cas-store-alternative"
+port = "diport::CasStore"
+provider = "redis::RedisCasStore"
+providerCrate = "redis"
+requiredFeatures = ["backend"]
+consumer = "distributed"
+lifecycle = "draft"
+durability = "persistent"
+purpose = "draft-fixture"
+outputs = ["resources"]
+"#,
+        )?
+        .canonicalize_v1()?;
+
+        let declarations = executable_provider_declarations(&manifest);
+        assert_eq!(declarations.len(), 1);
+        assert!(
+            declarations
+                .iter()
+                .all(|(id, _, _)| *id != "distributed-cas-store-alternative")
+        );
+        let input = RuntimePlanV1Input::from_manifest(&manifest);
+        let actual = input
+            .provider_plans
+            .iter()
+            .map(|plan| (plan.id(), plan.constructor(), plan.outputs()))
+            .collect::<BTreeSet<_>>();
+        assert_eq!(actual, declarations);
+        Ok(())
+    }
+
+    #[test]
+    fn manifest_bound_reader_rejects_self_consistent_extra_provider() -> anyhow::Result<()> {
+        let manifest = AssemblyManifest::from_toml_str(include_str!(
+            "../../../assemblies/runtime/assembly.toml"
+        ))?
+        .canonicalize_v1()?;
+        let lock = ParsedAssemblyLock::from_json_slice(include_bytes!(
+            "../../../assemblies/runtime/assembly.lock.json"
+        ))?;
+        let candidate = parse_unbound_runtime_plan(include_bytes!(
+            "../../../assemblies/runtime/runtime-plan.json"
+        ))?;
+        let RuntimePlan {
+            mut provider_plans,
+            listener_plans,
+            domain_plans,
+            placement_plans,
+            ..
+        } = candidate;
+        provider_plans.push(ProviderPlan {
+            id: "distributed-cas-store-alternative".to_owned(),
+            constructor: ProviderConstructor::RedisCasStore,
+            outputs: vec![LifecycleChannel::Resources],
+        });
+        provider_plans.sort_by(|left, right| left.id.cmp(&right.id));
+        let forged = RuntimePlan::from_parts(
+            lock.fingerprint().clone(),
+            provider_plans,
+            listener_plans,
+            domain_plans,
+            placement_plans,
+        )?;
+        let bytes = serde_json::to_vec(&forged)?;
+
+        validate_runtime_plan_json_slice(&bytes)?;
+        let error = match ParsedRuntimePlan::from_json_slice_bound(&bytes, &manifest, &lock) {
+            Ok(_) => anyhow::bail!("manifest-bound reader accepted an extra provider"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("providerPlans"));
+        Ok(())
+    }
 }

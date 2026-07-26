@@ -1,7 +1,8 @@
 # Security Production Closeout
 
-This runbook tracks the remaining gates before any runtime assembly may switch to `profile = "production"`.
-The current `assemblies/runtime/assembly.toml` remains `profile = "demo"` until every blocker below is closed.
+This runbook records the gates that the full runtime must continue satisfying after switching to
+`profile = "production"`. The switch is a ratchet: validation rejects a downgrade and the governed
+manifest, RuntimePlan, generated artifacts and lock rotate together.
 
 ## Blockers
 
@@ -16,6 +17,9 @@ The current `assemblies/runtime/assembly.toml` remains `profile = "demo"` until 
 ## Triggers
 
 - Flip an assembly to `profile = "production"` only in the same PR that proves the above gates.
+- Production provider posture is closed: declarations are active and persistent except the exact
+  replica-local `GovernorLimiter`; the executable RuntimePlan contains active declarations only.
+  Draft, noop, memory and fail-open alternatives are not outage recovery mechanisms.
 - Rotate each access profile's JWKS independently and atomically; failed refresh must keep last-good keys and lower only that profile's readyz signal.
 - For Vault Transit RSS Access signing, `export-vault-transit` must merge **Active + Retiring (and optional
   Next)** public keys into `RSS_ACCESS_TOKEN_JWKS_PATH` before starting server. When Retiring is configured,

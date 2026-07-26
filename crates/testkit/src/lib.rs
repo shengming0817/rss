@@ -114,9 +114,10 @@ mod conformance_error_category_tests {
 mod containers;
 #[cfg(feature = "containers")]
 pub use containers::{
-    FixtureError, MinioConnParams, MinioFixture, MqttFixture, PgConnParams, PgFixture,
-    PostgresTestLogin, RabbitFixture, RedisFixture, env_or_minio, env_or_mosquitto,
-    env_or_postgres, env_or_rabbitmq, env_or_redis, provision_postgres_test_logins,
+    ContainerService, FixtureError, MinioConnParams, MinioFixture, MqttFixture, PgConnParams,
+    PgFixture, PostgresTestLogin, RabbitFixture, RedisFixture, env_or_minio, env_or_mosquitto,
+    env_or_postgres, env_or_rabbitmq, env_or_redis, integration_container_labels,
+    provision_postgres_test_logins,
 };
 
 // Provider-neutral eventing taxonomy/assertions are dependency-free and intentionally available
