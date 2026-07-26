@@ -958,7 +958,7 @@ const CI_IMPACT_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
         id: "CI-IMPACT-PROJECTION-01",
         facet: None,
         carrier: "native-hard",
-        evidence: "private ImpactSet and exhaustive local/remote projection matches",
+        evidence: "private ImpactSet and exhaustive local/remote/coverage projection matches",
         gates: "native-compile",
     },
     InvariantCarrierBinding {
@@ -968,6 +968,14 @@ const CI_IMPACT_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
         carrier: "xtask",
         evidence: "adaptive-plan owner synthetic reds with required-owner anti-vacuity",
         gates: "verify,ci,ci-meta,ci-core,ci-security,ci-coverage,audit,integration",
+    },
+    InvariantCarrierBinding {
+        path: "xtask/src/ci_impact.rs",
+        id: "COVERAGE-SCOPE-PROJECTION-01",
+        facet: None,
+        carrier: "native-hard",
+        evidence: "CoverageDecision Skip|Scope exhaustively projected from private ImpactSet",
+        gates: "native-compile",
     },
 ];
 
@@ -1197,6 +1205,30 @@ const NEXTEST_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
         carrier: "xtask",
         evidence: "AST plus Cargo metadata exact-set synthetic red and workspace anti-vacuity",
         gates: "verify,ci-core,integration",
+    },
+    InvariantCarrierBinding {
+        path: "xtask/src/nextest.rs",
+        id: "COVERAGE-SCOPE-NONEMPTY-01",
+        facet: None,
+        carrier: "native-hard",
+        evidence: "CoverageScope::packages returns None for empty lists; execution accepts only CoverageScope",
+        gates: "native-compile",
+    },
+    InvariantCarrierBinding {
+        path: "xtask/src/nextest.rs",
+        id: "COVERAGE-ARGV-SCOPE-01",
+        facet: None,
+        carrier: "native-hard",
+        evidence: "Packages argv uses -p exclusively; Workspace uses --workspace exclusively",
+        gates: "native-compile",
+    },
+    InvariantCarrierBinding {
+        path: "xtask/src/nextest.rs",
+        id: "COVERAGE-REPLAY-SCOPE-01",
+        facet: None,
+        carrier: "xtask",
+        evidence: "coverage argv scope synthetic red with workspace replay anti-vacuity",
+        gates: "verify,ci,ci-coverage",
     },
 ];
 

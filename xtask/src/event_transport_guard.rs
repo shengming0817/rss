@@ -1531,6 +1531,7 @@ struct CompositionShape {
     settings_factory_mapping: bool,
 }
 
+#[allow(clippy::cognitive_complexity)] // develop IdentityAudit composition scanner; split tracked separately
 fn scan_composition_content(path: &Path, content: &str) -> Vec<Finding<Rule>> {
     let Ok(file) = syn::parse_file(content) else {
         return vec![finding(

@@ -304,7 +304,7 @@ mod tests {
     }
 
     #[test]
-    fn target_crates_membership_keeps_curated_out_of_layers() {
+    fn target_crates_membership_keeps_curated_in_baseline() {
         assert!(target_crates(None).contains(&"authn"));
         assert!(target_crates(None).contains(&"diport"));
         assert!(target_crates(None).contains(&"generated"));
@@ -312,6 +312,10 @@ mod tests {
         assert!(target_crates(Some(Layer::Basis)).contains(&"vocab"));
         assert!(target_crates(Some(Layer::Engine)).contains(&"primitives"));
         assert!(target_crates(Some(Layer::Engine)).contains(&"tracewire"));
+    }
+
+    #[test]
+    fn target_crates_membership_keeps_curated_out_of_layers() {
         assert!(!target_crates(Some(Layer::Basis)).contains(&"authn"));
         assert!(!target_crates(Some(Layer::Engine)).contains(&"authn"));
         // diport 是 DI-infra 层，既非 basis 也非 engine——只经 curated extras 入 baseline。

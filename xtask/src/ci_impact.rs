@@ -2,7 +2,8 @@
 //!
 //! INVARIANT: CI-IMPACT-PLAN-01 { level = "Hard", exec = "native-compile", source = "code", native = "validated plan construction owns the closed typed job array and matrix derivation" }.
 //! INVARIANT: CI-IMPACT-POLICY-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "policy_rejects_unknown_and_rename_red", anti_vacuity = "workspace_policy_catalog_is_non_vacuous" }.
-//! INVARIANT: CI-IMPACT-PROJECTION-01 { level = "Hard", exec = "native-compile", source = "code", native = "private ImpactSet construction and exhaustive local/remote projections prevent divergent path maps" }.
+//! INVARIANT: CI-IMPACT-PROJECTION-01 { level = "Hard", exec = "native-compile", source = "code", native = "private ImpactSet construction and exhaustive local/remote/coverage projections prevent divergent path maps" }.
+//! INVARIANT: COVERAGE-SCOPE-PROJECTION-01 { level = "Hard", exec = "native-compile", source = "code", native = "CoverageDecision Skip|Scope exhaustively projected from private ImpactSet" }.
 //! INVARIANT: CI-IMPACT-REQUIRED-EVIDENCE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "adaptive_plan_json_cannot_disable_required_evidence_owners_red", anti_vacuity = "adaptive_plan_requires_every_required_evidence_owner" } —— serialized plans cannot bypass any catalog-owned required-evidence executor.
 
 use crate::ci_identity::CiIdentityKey;
@@ -776,6 +777,10 @@ struct SelectiveImpact {
     documentation: bool,
     packages: BTreeMap<String, BTreeSet<PackageImpact>>,
     reverse_closure: BTreeSet<String>,
+    /// Reverse dependency closure of coverage seeds only (Source/Generated/Contract*).
+    coverage_closure: BTreeSet<String>,
+    /// Workspace members with runnable targets (`lib`/`bin`/`test`/`bench`/`proc-macro`).
+    packages_with_tests: BTreeSet<String>,
     integration_shards: BTreeSet<IntegrationShard>,
     governance: BTreeSet<GovernanceImpact>,
     unknown_paths: BTreeSet<String>,
@@ -813,6 +818,14 @@ impl PackageImpact {
             | Self::ContractOwner
             | Self::ContractSubscriber
             | Self::Generated => LocalPackageProjection::DirectTestClippy,
+        }
+    }
+
+    /// Coverage seed categories. Manifest/Test are intentionally excluded (COVERAGE-SCOPE-PROJECTION-01).
+    const fn is_coverage_seed(self) -> bool {
+        match self {
+            Self::Source | Self::Generated | Self::ContractOwner | Self::ContractSubscriber => true,
+            Self::Test | Self::Manifest => false,
         }
     }
 }
@@ -862,6 +875,15 @@ impl From<&ImpactSet> for RemoteProjection {
                     recommendation.add_shard(*shard);
                 }
             }
+        }
+        // Plan-side guard: do not schedule ci-coverage when CoverageProjection is Skip
+        // (empty seeds / filtered-empty packages). Full recommendations stay untouched.
+        if matches!(
+            CoverageProjection::from(impact).decision(),
+            CoverageDecision::Skip
+        ) && let Recommendation::Selective(selected) = &mut recommendation
+        {
+            selected.remove(&CiJobKey::CiCoverage);
         }
         Self(recommendation)
     }
@@ -1047,6 +1069,207 @@ fn local_deferred(impact: &ImpactSet) -> Vec<String> {
 
 fn local_steps(impact: &ImpactSet) -> Vec<LocalStep> {
     LocalProjection::from(impact).steps()
+}
+
+/// Workspace-wide coverage cause mapped from [`FullCause`] (exhaustive).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum CoverageWorkspaceCause {
+    MandatoryCatalog,
+    GlobalImpact,
+    RenameOrCopy,
+    UnknownPath,
+    FallbackUncertainty,
+}
+
+impl From<FullCause> for CoverageWorkspaceCause {
+    fn from(cause: FullCause) -> Self {
+        match cause {
+            FullCause::MandatoryCatalog => Self::MandatoryCatalog,
+            FullCause::GlobalImpact => Self::GlobalImpact,
+            FullCause::RenameOrCopy => Self::RenameOrCopy,
+            FullCause::UnknownPath => Self::UnknownPath,
+            FullCause::FallbackUncertainty => Self::FallbackUncertainty,
+        }
+    }
+}
+
+/// Closed coverage execution scope. `Packages.packages` is non-empty by construction
+/// ([`CoverageScope::packages`]); empty seeds are [`CoverageDecision::Skip`], never this enum.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+pub(crate) enum CoverageScope {
+    Packages {
+        packages: Vec<String>,
+        strict_touched: Vec<String>,
+    },
+    Workspace {
+        cause: CoverageWorkspaceCause,
+    },
+}
+
+impl CoverageScope {
+    /// Non-empty Packages constructor (COVERAGE-SCOPE-NONEMPTY-01). Empty → `None` (= Skip).
+    pub(crate) fn packages(packages: Vec<String>, strict_touched: Vec<String>) -> Option<Self> {
+        if packages.is_empty() {
+            None
+        } else {
+            Some(Self::Packages {
+                packages,
+                strict_touched,
+            })
+        }
+    }
+
+    pub(crate) fn summary(&self) -> String {
+        match self {
+            Self::Packages {
+                packages,
+                strict_touched,
+            } => format!(
+                "kind=packages packages=[{}] strict_touched=[{}]",
+                packages.join(","),
+                strict_touched.join(",")
+            ),
+            Self::Workspace { cause } => format!("kind=workspace cause={cause:?}"),
+        }
+    }
+}
+
+/// Plan/execute decision from [`ImpactSet`]: skip scheduling, or run a concrete [`CoverageScope`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CoverageDecision {
+    Skip,
+    Scope(CoverageScope),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CoverageProjection(CoverageDecision);
+
+impl From<&ImpactSet> for CoverageProjection {
+    fn from(impact: &ImpactSet) -> Self {
+        match impact {
+            ImpactSet::Empty => Self(CoverageDecision::Skip),
+            ImpactSet::Full(cause) => Self(CoverageDecision::Scope(CoverageScope::Workspace {
+                cause: CoverageWorkspaceCause::from(*cause),
+            })),
+            ImpactSet::Selective(selective) => {
+                if !selective.unknown_paths.is_empty() {
+                    return Self(CoverageDecision::Scope(CoverageScope::Workspace {
+                        cause: CoverageWorkspaceCause::UnknownPath,
+                    }));
+                }
+                let packages = selective
+                    .coverage_closure
+                    .iter()
+                    .filter(|name| selective.packages_with_tests.contains(*name))
+                    .cloned()
+                    .collect::<BTreeSet<_>>();
+                let strict_touched = crate::coverage::STRICT_CRATES
+                    .iter()
+                    .filter(|name| packages.contains(**name))
+                    .map(|name| (*name).to_owned())
+                    .collect::<Vec<_>>();
+                match CoverageScope::packages(packages.into_iter().collect(), strict_touched) {
+                    Some(scope) => Self(CoverageDecision::Scope(scope)),
+                    None => Self(CoverageDecision::Skip),
+                }
+            }
+        }
+    }
+}
+
+impl CoverageProjection {
+    fn decision(self) -> CoverageDecision {
+        self.0
+    }
+
+    fn into_scope_or_fallback(self) -> CoverageScope {
+        match self.0 {
+            CoverageDecision::Scope(scope) => scope,
+            // Forced execution (Shadow / full catalog) with no seeds: fail-safe Workspace.
+            CoverageDecision::Skip => CoverageScope::Workspace {
+                cause: CoverageWorkspaceCause::FallbackUncertainty,
+            },
+        }
+    }
+}
+
+fn coverage_fallback_uncertainty() -> CoverageScope {
+    CoverageScope::Workspace {
+        cause: CoverageWorkspaceCause::FallbackUncertainty,
+    }
+}
+
+/// True when `path` is under `RUNNER_TEMP` (if set) or `root` after canonicalize (F13).
+fn event_path_is_trusted(root: &Path, path: &Path) -> bool {
+    let Ok(canonical) = fs::canonicalize(path) else {
+        return false;
+    };
+    if let Some(runner_temp) = std::env::var_os("RUNNER_TEMP")
+        && let Ok(temp) = fs::canonicalize(runner_temp)
+        && canonical.starts_with(&temp)
+    {
+        return true;
+    }
+    let Ok(workspace) = fs::canonicalize(root) else {
+        return false;
+    };
+    canonical.starts_with(&workspace)
+}
+
+/// Resolve coverage scope for the typed `ci-coverage` job using the same base as `ci plan`.
+/// Non-PR → Workspace (full catalog). PR parse/diff/metadata failures → Workspace
+/// FallbackUncertainty (aligns with plan FallbackFull); never hard-red on planner uncertainty.
+pub(crate) fn coverage_scope_for_typed_job(root: &Path) -> Result<CoverageScope> {
+    let event_name = std::env::var(CiIdentityKey::EventName.env_name()).unwrap_or_default();
+    if event_name != "pull_request" {
+        return Ok(CoverageScope::Workspace {
+            cause: CoverageWorkspaceCause::MandatoryCatalog,
+        });
+    }
+    Ok(coverage_scope_for_pull_request(root).unwrap_or_else(coverage_fallback_uncertainty))
+}
+
+fn coverage_scope_for_pull_request(root: &Path) -> Option<CoverageScope> {
+    let event_path = PathBuf::from(std::env::var_os("GITHUB_EVENT_PATH")?);
+    if !event_path_is_trusted(root, &event_path) {
+        return None;
+    }
+    let event_source = fs::read_to_string(&event_path).ok()?;
+    let event: GithubEvent = serde_json::from_str(&event_source).ok()?;
+    let pull_request = event.pull_request?;
+    validate_revision(&pull_request.base.sha, "base revision").ok()?;
+    validate_revision(&pull_request.head.sha, "head revision").ok()?;
+    let shallow = git_stdout(root, ["rev-parse", "--is-shallow-repository"]).ok()?;
+    if shallow.trim() != "false" {
+        return None;
+    }
+    let merge_base = git_stdout(
+        root,
+        [
+            "merge-base",
+            pull_request.base.sha.as_str(),
+            pull_request.head.sha.as_str(),
+        ],
+    )
+    .ok()?;
+    let merge_base = merge_base.trim();
+    validate_revision(merge_base, "merge-base revision").ok()?;
+    let entries = read_diff(root, &pull_request.base.sha, &pull_request.head.sha).ok()?;
+    if let Some(cause) = immediate_full_cause(&entries, None) {
+        return Some(CoverageProjection::from(&ImpactSet::Full(cause)).into_scope_or_fallback());
+    }
+    let graph = WorkspaceGraph::load(root).ok()?;
+    let impact = impact_with_graph(root, &entries, &graph, merge_base).ok()?;
+    Some(CoverageProjection::from(&impact).into_scope_or_fallback())
+}
+
+/// Full local CI / CompatibilityCi always evaluates workspace coverage.
+pub(crate) fn coverage_scope_for_full_ci() -> CoverageScope {
+    CoverageScope::Workspace {
+        cause: CoverageWorkspaceCause::MandatoryCatalog,
+    }
 }
 
 impl FullCause {
@@ -2333,14 +2556,48 @@ fn impact_entries(
             selected_shards.insert(*shard);
         }
     }
+    let packages_with_tests = match graph {
+        Some(graph) => graph.test_capable_packages(),
+        None => packages
+            .keys()
+            .cloned()
+            .chain(closure.iter().cloned())
+            .collect(),
+    };
+    let coverage_closure = coverage_closure_for(graph, &packages, closure);
     ImpactSet::Selective(SelectiveImpact {
         documentation: documentation_only,
         packages,
         reverse_closure: closure.clone(),
+        coverage_closure,
+        packages_with_tests,
         integration_shards: selected_shards,
         governance,
         unknown_paths,
     })
+}
+
+fn coverage_closure_for(
+    graph: Option<&WorkspaceGraph>,
+    packages: &BTreeMap<String, BTreeSet<PackageImpact>>,
+    closure: &BTreeSet<String>,
+) -> BTreeSet<String> {
+    let seeds = packages
+        .iter()
+        .filter(|(_, impacts)| impacts.iter().any(|impact| impact.is_coverage_seed()))
+        .map(|(name, _)| name.clone())
+        .collect::<BTreeSet<_>>();
+    if seeds.is_empty() {
+        return BTreeSet::new();
+    }
+    match graph {
+        Some(graph) => graph.reverse_closure(&seeds),
+        None => {
+            let mut coverage_closure = closure.clone();
+            coverage_closure.extend(seeds);
+            coverage_closure
+        }
+    }
 }
 
 fn governance_impact(path: &str) -> Option<GovernanceImpact> {
@@ -2549,6 +2806,13 @@ struct MetadataPackage {
     name: String,
     id: String,
     manifest_path: String,
+    #[serde(default)]
+    targets: Vec<MetadataTarget>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MetadataTarget {
+    kind: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2571,6 +2835,7 @@ struct WorkspaceGraph {
     package_paths: Vec<(String, String)>,
     id_to_name: BTreeMap<String, String>,
     reverse: BTreeMap<String, BTreeSet<String>>,
+    test_capable: BTreeSet<String>,
 }
 
 impl WorkspaceGraph {
@@ -2630,11 +2895,37 @@ impl WorkspaceGraph {
                     .insert(node.id.clone());
             }
         }
+        let test_capable = wire
+            .packages
+            .iter()
+            .filter(|package| wire.workspace_members.contains(&package.id))
+            .filter(|package| {
+                package.targets.iter().any(|target| {
+                    target.kind.iter().any(|kind| {
+                        matches!(
+                            kind.as_str(),
+                            "lib" | "bin" | "test" | "bench" | "proc-macro"
+                        )
+                    })
+                })
+            })
+            .map(|package| package.name.clone())
+            .collect();
         Ok(Self {
             package_paths,
             id_to_name,
             reverse,
+            test_capable,
         })
+    }
+
+    fn test_capable_packages(&self) -> BTreeSet<String> {
+        self.test_capable.clone()
+    }
+
+    #[cfg(test)]
+    fn has_test_targets(&self, package: &str) -> bool {
+        self.test_capable.contains(package)
     }
 
     fn contains(&self, package: &str) -> bool {
@@ -3199,6 +3490,247 @@ mod tests {
             RemoteProjection::from(&full).selected_names().len(),
             CiJobKey::COUNT
         );
+    }
+
+    #[test]
+    fn coverage_projection_table_covers_seeds_consumers_and_exclusions() {
+        // label, package impacts, coverage_closure, packages_with_tests, expected packages, expected strict
+        // Empty expected_packages ⇒ CoverageDecision::Skip.
+        type CoverageCase<'a> = (
+            &'a str,
+            &'a [(&'a str, &'a [PackageImpact])],
+            &'a [&'a str],
+            &'a [&'a str],
+            &'a [&'a str],
+            &'a [&'a str],
+        );
+        let cases: &[CoverageCase<'_>] = &[
+            (
+                "source-seed-with-consumer",
+                &[("leaf", &[PackageImpact::Source])],
+                &["leaf", "consumer"],
+                &["leaf", "consumer"],
+                &["consumer", "leaf"],
+                &[],
+            ),
+            (
+                "test-only-not-seed",
+                &[("leaf", &[PackageImpact::Test])],
+                &[],
+                &["leaf", "consumer"],
+                &[],
+                &[],
+            ),
+            (
+                "manifest-only-not-seed",
+                &[("leaf", &[PackageImpact::Manifest])],
+                &[],
+                &["leaf"],
+                &[],
+                &[],
+            ),
+            (
+                "consumer-without-tests-filtered",
+                &[("leaf", &[PackageImpact::Source])],
+                &["leaf", "consumer"],
+                &["leaf"],
+                &["leaf"],
+                &[],
+            ),
+            (
+                "strict-touched",
+                &[("vocab", &[PackageImpact::Source])],
+                &["vocab"],
+                &["vocab"],
+                &["vocab"],
+                &["vocab"],
+            ),
+            (
+                "contract-owner-seed",
+                &[("owner", &[PackageImpact::ContractOwner])],
+                &["owner", "runtime"],
+                &["owner", "runtime"],
+                &["owner", "runtime"],
+                &[],
+            ),
+        ];
+        for (
+            label,
+            package_impacts,
+            coverage_closure,
+            with_tests,
+            expected_packages,
+            expected_strict,
+        ) in cases
+        {
+            let mut packages = BTreeMap::new();
+            for (name, impacts) in *package_impacts {
+                packages.insert(
+                    (*name).to_owned(),
+                    impacts.iter().copied().collect::<BTreeSet<_>>(),
+                );
+            }
+            let impact = ImpactSet::Selective(SelectiveImpact {
+                documentation: false,
+                packages,
+                reverse_closure: coverage_closure.iter().map(|s| (*s).to_owned()).collect(),
+                coverage_closure: coverage_closure.iter().map(|s| (*s).to_owned()).collect(),
+                packages_with_tests: with_tests.iter().map(|s| (*s).to_owned()).collect(),
+                integration_shards: BTreeSet::new(),
+                governance: BTreeSet::new(),
+                unknown_paths: BTreeSet::new(),
+            });
+            match CoverageProjection::from(&impact).decision() {
+                CoverageDecision::Skip => {
+                    assert!(
+                        expected_packages.is_empty(),
+                        "{label}: unexpected Skip when packages expected"
+                    );
+                }
+                CoverageDecision::Scope(CoverageScope::Packages {
+                    packages,
+                    strict_touched,
+                }) => {
+                    assert_eq!(
+                        packages,
+                        expected_packages
+                            .iter()
+                            .map(|s| (*s).to_owned())
+                            .collect::<Vec<_>>(),
+                        "{label} packages"
+                    );
+                    assert_eq!(
+                        strict_touched,
+                        expected_strict
+                            .iter()
+                            .map(|s| (*s).to_owned())
+                            .collect::<Vec<_>>(),
+                        "{label} strict_touched"
+                    );
+                }
+                CoverageDecision::Scope(CoverageScope::Workspace { cause }) => {
+                    assert_eq!(
+                        "Packages/Skip",
+                        format!("Workspace({cause:?})"),
+                        "{label}: expected Packages/Skip"
+                    );
+                }
+            }
+        }
+
+        let full = CoverageProjection::from(&ImpactSet::Full(FullCause::GlobalImpact)).decision();
+        assert_eq!(
+            full,
+            CoverageDecision::Scope(CoverageScope::Workspace {
+                cause: CoverageWorkspaceCause::GlobalImpact
+            })
+        );
+        assert_eq!(
+            CoverageProjection::from(&ImpactSet::Empty).decision(),
+            CoverageDecision::Skip
+        );
+
+        let mut unknown = BTreeMap::new();
+        unknown.insert("leaf".to_owned(), BTreeSet::from([PackageImpact::Source]));
+        let unknown_impact = ImpactSet::Selective(SelectiveImpact {
+            documentation: false,
+            packages: unknown,
+            reverse_closure: BTreeSet::from(["leaf".to_owned()]),
+            coverage_closure: BTreeSet::from(["leaf".to_owned()]),
+            packages_with_tests: BTreeSet::from(["leaf".to_owned()]),
+            integration_shards: BTreeSet::new(),
+            governance: BTreeSet::new(),
+            unknown_paths: BTreeSet::from(["mystery/path.rs".to_owned()]),
+        });
+        assert_eq!(
+            CoverageProjection::from(&unknown_impact).decision(),
+            CoverageDecision::Scope(CoverageScope::Workspace {
+                cause: CoverageWorkspaceCause::UnknownPath
+            })
+        );
+        assert!(CoverageScope::packages(Vec::new(), Vec::new()).is_none());
+    }
+
+    #[test]
+    fn remote_skips_coverage_when_projection_is_skip() {
+        // Source seed whose coverage_closure members all lack tests → Skip → no CiCoverage.
+        let mut packages = BTreeMap::new();
+        packages.insert("leaf".to_owned(), BTreeSet::from([PackageImpact::Source]));
+        let impact = ImpactSet::Selective(SelectiveImpact {
+            documentation: false,
+            packages,
+            reverse_closure: BTreeSet::from(["leaf".to_owned()]),
+            coverage_closure: BTreeSet::from(["leaf".to_owned()]),
+            packages_with_tests: BTreeSet::new(),
+            integration_shards: BTreeSet::new(),
+            governance: BTreeSet::new(),
+            unknown_paths: BTreeSet::new(),
+        });
+        assert_eq!(
+            CoverageProjection::from(&impact).decision(),
+            CoverageDecision::Skip
+        );
+        let names = RemoteProjection::from(&impact).selected_names();
+        assert!(
+            !names.contains(&"ci-coverage"),
+            "Skip projection must not schedule ci-coverage: {names:?}"
+        );
+        assert!(
+            names.iter().any(|name| name.starts_with("ci-core-tests")),
+            "core tests still scheduled from Source: {names:?}"
+        );
+    }
+
+    #[test]
+    fn coverage_decision_skip_falls_back_to_workspace_for_forced_execution() {
+        assert_eq!(
+            CoverageProjection::from(&ImpactSet::Empty).into_scope_or_fallback(),
+            CoverageScope::Workspace {
+                cause: CoverageWorkspaceCause::FallbackUncertainty
+            }
+        );
+        assert_eq!(
+            coverage_fallback_uncertainty(),
+            CoverageScope::Workspace {
+                cause: CoverageWorkspaceCause::FallbackUncertainty
+            }
+        );
+    }
+
+    #[test]
+    fn coverage_scope_for_typed_job_non_pr_defaults_to_mandatory_catalog() -> Result<()> {
+        // Process-isolated: do not mutate env. Skip when already in PR event context.
+        if std::env::var(CiIdentityKey::EventName.env_name()).as_deref() == Ok("pull_request") {
+            return Ok(());
+        }
+        let Ok(scope) = coverage_scope_for_typed_job(Path::new(".")) else {
+            bail!("non-PR scope must resolve");
+        };
+        assert_eq!(
+            scope,
+            CoverageScope::Workspace {
+                cause: CoverageWorkspaceCause::MandatoryCatalog
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn event_path_trust_requires_runner_temp_or_workspace_prefix() {
+        let root = Path::new(".");
+        // Absolute path outside workspace / without RUNNER_TEMP prefix is untrusted.
+        assert!(!event_path_is_trusted(root, Path::new("/etc/passwd")));
+        // Missing path cannot canonicalize → untrusted.
+        assert!(!event_path_is_trusted(
+            root,
+            Path::new("/tmp/rss-coverage-event-missing.json")
+        ));
+    }
+
+    #[test]
+    fn coverage_scope_packages_constructor_rejects_empty() {
+        assert!(CoverageScope::packages(Vec::new(), Vec::new()).is_none());
+        assert!(CoverageScope::packages(vec!["leaf".to_owned()], Vec::new()).is_some());
     }
 
     #[test]
@@ -4032,6 +4564,7 @@ mod tests {
     fn workspace_graph_ignores_registry_packages_and_closes_reverse_dependencies() -> Result<()> {
         let leaf = "leaf 0.0.0 (path+file:///workspace/crates/leaf)";
         let consumer = "consumer 0.0.0 (path+file:///workspace/crates/consumer)";
+        let derive = "securederive 0.0.0 (path+file:///workspace/crates/securederive)";
         let registry = "serde 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)";
         let graph = WorkspaceGraph::from_wire(
             Path::new("/workspace"),
@@ -4041,19 +4574,45 @@ mod tests {
                         name: "leaf".to_owned(),
                         id: leaf.to_owned(),
                         manifest_path: "/workspace/crates/leaf/Cargo.toml".to_owned(),
+                        targets: vec![MetadataTarget {
+                            kind: vec!["lib".to_owned()],
+                        }],
                     },
                     MetadataPackage {
                         name: "consumer".to_owned(),
                         id: consumer.to_owned(),
                         manifest_path: "/workspace/crates/consumer/Cargo.toml".to_owned(),
+                        targets: vec![
+                            MetadataTarget {
+                                kind: vec!["lib".to_owned()],
+                            },
+                            MetadataTarget {
+                                kind: vec!["test".to_owned()],
+                            },
+                        ],
+                    },
+                    MetadataPackage {
+                        name: "securederive".to_owned(),
+                        id: derive.to_owned(),
+                        manifest_path: "/workspace/crates/securederive/Cargo.toml".to_owned(),
+                        targets: vec![MetadataTarget {
+                            kind: vec!["proc-macro".to_owned()],
+                        }],
                     },
                     MetadataPackage {
                         name: "serde".to_owned(),
                         id: registry.to_owned(),
                         manifest_path: "/registry/serde/Cargo.toml".to_owned(),
+                        targets: vec![MetadataTarget {
+                            kind: vec!["lib".to_owned()],
+                        }],
                     },
                 ],
-                workspace_members: BTreeSet::from([leaf.to_owned(), consumer.to_owned()]),
+                workspace_members: BTreeSet::from([
+                    leaf.to_owned(),
+                    consumer.to_owned(),
+                    derive.to_owned(),
+                ]),
                 resolve: Some(MetadataResolve {
                     nodes: vec![
                         MetadataNode {
@@ -4065,6 +4624,10 @@ mod tests {
                             deps: vec![MetadataDependency {
                                 pkg: leaf.to_owned(),
                             }],
+                        },
+                        MetadataNode {
+                            id: derive.to_owned(),
+                            deps: Vec::new(),
                         },
                         MetadataNode {
                             id: registry.to_owned(),
@@ -4083,6 +4646,12 @@ mod tests {
             BTreeSet::from(["consumer".to_owned(), "leaf".to_owned()])
         );
         assert!(!graph.contains("serde"));
+        assert!(graph.has_test_targets("leaf"));
+        assert!(graph.has_test_targets("consumer"));
+        assert!(
+            graph.has_test_targets("securederive"),
+            "proc-macro kind must count as test-capable"
+        );
         Ok(())
     }
 
@@ -4096,13 +4665,17 @@ mod tests {
             ("adapter".to_owned(), "synthetic-adapter".to_owned()),
             ("runtime".to_owned(), "runtime".to_owned()),
         ]);
+        let mut test_capable =
+            BTreeSet::from(["synthetic-adapter".to_owned(), "runtime".to_owned()]);
         for (_, name) in leaves {
             id_to_name.insert((*name).to_owned(), (*name).to_owned());
+            test_capable.insert((*name).to_owned());
         }
         WorkspaceGraph {
             package_paths,
             id_to_name,
             reverse: BTreeMap::new(),
+            test_capable,
         }
     }
 

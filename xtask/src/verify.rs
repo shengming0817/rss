@@ -80,6 +80,9 @@ struct VerifyOpts {
     partition: Option<crate::nextest::HashPartition>,
     nextest_lane: crate::nextest::NextestLane,
     contract_against: String,
+    /// `ci run --job ci-coverage`：用与 plan 同 base 的 CoverageProjection。
+    /// `ci full` / CompatibilityCi：恒 Workspace。
+    coverage_typed_job: bool,
 }
 
 /// in-process Rust 门（无外部进程 / 自管子进程）。
@@ -1148,7 +1151,7 @@ fn run_one(
     tool_available: impl Fn(crate::cmd::CargoSubcommand) -> bool,
 ) -> Result<()> {
     let execute = || match step.kind {
-        StepKind::Internal(check) => run_internal(check, &opts.contract_against),
+        StepKind::Internal(check) => run_internal(check, opts, root),
         StepKind::LocalOnlyExecution => {
             let request = crate::localonly_evidence::prepare_request(
                 crate::localonly_evidence::OWNER,
@@ -1295,7 +1298,7 @@ fn run_tool_gated(
     }
 }
 
-fn run_internal(check: InternalCheck, contract_against: &str) -> Result<()> {
+fn run_internal(check: InternalCheck, opts: &VerifyOpts, root: &Path) -> Result<()> {
     match check {
         InternalCheck::ContractValidate => run_check(&contract::validate::ContractValidate),
         InternalCheck::AssemblyValidate => run_check(&assembly::AssemblyValidate),
@@ -1308,7 +1311,7 @@ fn run_internal(check: InternalCheck, contract_against: &str) -> Result<()> {
             crate::graph::run(&crate::graph::Options::check_runtime())
         }
         // active 默认 deny；固定 review rules 为 warn，但未确认 fail-closed。
-        InternalCheck::ContractBreaking => contract::breaking::run(contract_against),
+        InternalCheck::ContractBreaking => contract::breaking::run(&opts.contract_against),
         InternalCheck::LayerDeps => run_check(&layerdeps::LayerDeps),
         InternalCheck::ShippedFeatureGuard => {
             run_check(&shipped_feature_guard::ShippedFeatureGuard)
@@ -1357,7 +1360,14 @@ fn run_internal(check: InternalCheck, contract_against: &str) -> Result<()> {
         }
         InternalCheck::DeferGate => run_check(&crate::defergate::DeferGate),
         InternalCheck::PostgresFeatureMatrix => crate::postgres_feature_matrix::run(),
-        InternalCheck::Coverage => crate::coverage::run(),
+        InternalCheck::Coverage => {
+            let scope = if opts.coverage_typed_job {
+                crate::ci_impact::coverage_scope_for_typed_job(root)?
+            } else {
+                crate::ci_impact::coverage_scope_for_full_ci()
+            };
+            crate::coverage::run(scope)
+        }
         // 轴 A 封装面：basis+engine+curated extras 全集（layer=None）；check=true 漂移门 fail-closed（PUBLICAPI-DRIFT-GATE-01）。
         InternalCheck::PublicApiCheck => crate::publicapi::run(true, false, None),
     }
@@ -1386,6 +1396,7 @@ pub(crate) fn run(
         contract_against: contract_against
             .unwrap_or(contract::breaking::DEFAULT_AGAINST)
             .to_owned(),
+        coverage_typed_job: false,
     };
     let root = workspace_root()?;
     let plan = verify_plan(&opts);
@@ -1408,6 +1419,7 @@ pub(crate) fn run_ci(allow_missing_tools: bool) -> Result<()> {
         partition: None,
         nextest_lane: crate::nextest::NextestLane::CiCore,
         contract_against: contract::breaking::DEFAULT_AGAINST.to_owned(),
+        coverage_typed_job: false,
     };
     let root = workspace_root()?;
     let plan = plan_for(PlanTarget::CompatibilityCi);
@@ -1431,6 +1443,7 @@ pub(crate) fn run_lane(
         partition,
         nextest_lane: crate::nextest::NextestLane::CiCore,
         contract_against: contract::breaking::DEFAULT_AGAINST.to_owned(),
+        coverage_typed_job: lane == CiLane::Coverage,
     };
     let root = workspace_root()?;
     let plan = if lane == CiLane::Core {
@@ -1461,6 +1474,7 @@ pub(crate) fn run_core_execution(
         partition,
         nextest_lane: crate::nextest::NextestLane::CiCore,
         contract_against: contract::breaking::DEFAULT_AGAINST.to_owned(),
+        coverage_typed_job: false,
     };
     let root = workspace_root()?;
     let plan = plan_for(PlanTarget::Core(execution));
@@ -1625,6 +1639,7 @@ pub(crate) fn run_audit(allow_missing_tools: bool) -> Result<()> {
         partition: None,
         nextest_lane: crate::nextest::NextestLane::Verify,
         contract_against: contract::breaking::DEFAULT_AGAINST.to_owned(),
+        coverage_typed_job: false,
     };
     let root = workspace_root()?;
     let plan = audit_plan();
@@ -2036,6 +2051,7 @@ mod tests {
             partition: None,
             nextest_lane: crate::nextest::NextestLane::Verify,
             contract_against: contract::breaking::DEFAULT_AGAINST.to_owned(),
+            coverage_typed_job: false,
         }
     }
 

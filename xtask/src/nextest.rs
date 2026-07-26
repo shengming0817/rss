@@ -7,6 +7,9 @@
 //! INVARIANT: NEXTEST-CONFIG-POLICY-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "config_policy_rejects_retry_override_and_missing_timeout", anti_vacuity = "committed_nextest_config_obeys_policy" }——CI profiles 零重试、JUnit 与 timeout fail-closed。
 //! INVARIANT: NEXTEST-EXECUTION-FUNNEL-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "execution_funnel_rejects_private_capability_api_bypass|local_only_command_rejects_real_nonzero_exit_status", anti_vacuity = "real_nextest_call_sites_use_funnel|localtx_journey_serial_batch_fails_when_compiled_inventory_is_empty" }——xtask 的 nextest 子进程只能经 typed cargo capability 构造，且非零退出码不能生成成功能力。
 //! INVARIANT: NEXTEST-TRYBUILD-SCHEDULING-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "trybuild_inventory_is_bidirectionally_closed|trybuild_inventory_rejects_non_dedicated_sources", anti_vacuity = "workspace_trybuild_inventory_is_non_vacuous_and_closed" }——任何 trybuild 语义引用只能位于专用 integration test target 入口，且与 nextest 单线程 selector 双向闭合；lib/bin/module/macro 间接 carrier 均 fail-closed。
+//! INVARIANT: COVERAGE-SCOPE-NONEMPTY-01 { level = "Hard", exec = "native-compile", source = "code", native = "CoverageScope::packages returns None for empty package lists; execution paths only accept CoverageScope" }.
+//! INVARIANT: COVERAGE-ARGV-SCOPE-01 { level = "Hard", exec = "native-compile", source = "code", native = "Packages argv uses -p exclusively; Workspace uses --workspace exclusively" }.
+//! INVARIANT: COVERAGE-REPLAY-SCOPE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "coverage_argv_scope_mutex_packages_vs_workspace", anti_vacuity = "llvm_cov_replay_spec_closes_profile_without_raw_args" }——ReplaySpec::Coverage 必须携带 CoverageScope.
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -104,6 +107,14 @@ fn execute_local_only_command(mut command: Command) -> Result<()> {
     Ok(())
 }
 
+/// Cargo package identity charset shared by LocalOnly and coverage `-p` argv (defense-in-depth).
+fn valid_cargo_package_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')
+        })
+}
+
 fn local_only_args(packages: &[String], tests: &[String]) -> Result<Vec<String>> {
     if packages.is_empty() || tests.is_empty() {
         bail!("LocalOnly exact conformance inventory must be non-empty");
@@ -113,18 +124,17 @@ fn local_only_args(packages: &[String], tests: &[String]) -> Result<Vec<String>>
     {
         bail!("LocalOnly packages and tests must be uniquely sorted");
     }
-    if packages.iter().any(|package| {
-        package.is_empty()
-            || !package.bytes().all(|byte| {
-                byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')
-            })
-    }) || tests.iter().any(|test| {
-        test.is_empty()
-            || !test
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b':'))
-            || test.contains(":::")
-    }) {
+    if packages
+        .iter()
+        .any(|package| !valid_cargo_package_name(package))
+        || tests.iter().any(|test| {
+            test.is_empty()
+                || !test
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b':'))
+                || test.contains(":::")
+        })
+    {
         bail!("LocalOnly package or test identity is invalid");
     }
     let mut args = vec![
@@ -432,7 +442,9 @@ pub(crate) enum ReplaySpec {
         scope: CoreTestScope,
         partition: Option<HashPartition>,
     },
-    Coverage,
+    Coverage {
+        scope: crate::ci_impact::CoverageScope,
+    },
     Integration {
         shard: crate::integration_shards::IntegrationShard,
         batch: usize,
@@ -485,7 +497,9 @@ impl NextestInvocation {
             runner,
             args,
             replay_spec: if runner == NextestRunner::LlvmCov {
-                ReplaySpec::Coverage
+                ReplaySpec::Coverage {
+                    scope: crate::ci_impact::coverage_scope_for_full_ci(),
+                }
             } else {
                 ReplaySpec::Core {
                     scope: CoreTestScope::Workspace,
@@ -512,9 +526,34 @@ impl NextestInvocation {
         invocation
     }
 
-    pub(crate) fn for_coverage(output_path: &str) -> Result<Self> {
+    pub(crate) fn for_coverage(
+        output_path: &str,
+        scope: crate::ci_impact::CoverageScope,
+    ) -> Result<Self> {
         validate_coverage_output_path(output_path)?;
-        let mut args = ["--workspace", "--locked"].map(str::to_owned).to_vec();
+        let mut args = Vec::new();
+        match &scope {
+            crate::ci_impact::CoverageScope::Workspace { .. } => {
+                args.push("--workspace".to_owned());
+            }
+            crate::ci_impact::CoverageScope::Packages { packages, .. } => {
+                if packages.is_empty() {
+                    bail!(
+                        "coverage: empty Packages scope is forbidden (COVERAGE-SCOPE-NONEMPTY-01); \
+                         expected CoverageScope::packages non-empty or Workspace — check plan/execute \
+                         CoverageProjection (no seeds / filtered-empty) and GITHUB_EVENT_*"
+                    );
+                }
+                for package in packages {
+                    if !valid_cargo_package_name(package) {
+                        bail!("coverage: invalid package name for -p: {package:?}");
+                    }
+                    args.push("-p".to_owned());
+                    args.push(package.clone());
+                }
+            }
+        }
+        args.push("--locked".to_owned());
         args.extend([
             "--features".to_owned(),
             COVERAGE_FEATURES
@@ -525,14 +564,16 @@ impl NextestInvocation {
                 .join(","),
         ]);
         args.extend(["--json", "--output-path", output_path].map(str::to_owned));
-        Ok(Self::new(
+        let mut invocation = Self::new(
             NextestProfile::CiCore,
             NextestLane::Coverage,
             None,
             None,
             NextestRunner::LlvmCov,
             args,
-        ))
+        );
+        invocation.replay_spec = ReplaySpec::Coverage { scope };
+        Ok(invocation)
     }
 
     pub(crate) fn for_identityaudit_coverage(output_path: &str) -> Result<Self> {
@@ -725,7 +766,7 @@ impl NextestInvocation {
             ReplaySpec::Core { scope, .. } => {
                 (format!("core-{scope:?}").to_ascii_lowercase(), None)
             }
-            ReplaySpec::Coverage => ("coverage".to_owned(), None),
+            ReplaySpec::Coverage { .. } => ("coverage".to_owned(), None),
             ReplaySpec::Integration { shard, batch, .. } => (
                 format!("integration-{shard}"),
                 Some(format!("batch-{batch}")),
@@ -996,32 +1037,32 @@ fn validate_evidence_record(record: &Evidence, stem: &str) -> Result<()> {
 
 impl Evidence {
     fn partition_for_validation(&self) -> Option<HashPartition> {
-        match self.replay {
+        match &self.replay {
             ReplaySpec::Core { partition, .. } | ReplaySpec::Integration { partition, .. } => {
-                partition
+                *partition
             }
-            ReplaySpec::Coverage => None,
+            ReplaySpec::Coverage { .. } => None,
         }
     }
 }
 
 fn invocation_for_replay(replay: &ReplaySpec, lane: NextestLane) -> Result<NextestInvocation> {
-    match *replay {
+    match replay {
         ReplaySpec::Core { scope, partition }
             if matches!(lane, NextestLane::Verify | NextestLane::CiCore) =>
         {
-            Ok(NextestInvocation::for_core(scope, lane, partition))
+            Ok(NextestInvocation::for_core(*scope, lane, *partition))
         }
-        ReplaySpec::Coverage if lane == NextestLane::Coverage => {
-            NextestInvocation::for_coverage("target/coverage/nextest.json")
+        ReplaySpec::Coverage { scope } if lane == NextestLane::Coverage => {
+            NextestInvocation::for_coverage("target/coverage/nextest.json", scope.clone())
         }
         ReplaySpec::Integration {
             shard,
             batch,
             partition,
         } if lane == NextestLane::Integration => NextestInvocation::for_integration_batch(
-            IntegrationBatchId::new(shard, batch)?,
-            partition,
+            IntegrationBatchId::new(*shard, *batch)?,
+            *partition,
         ),
         _ => bail!("replay kind 与 lane 矛盾"),
     }
@@ -1149,7 +1190,7 @@ pub(crate) fn replay(sidecar: &Path, root: &Path) -> Result<()> {
         ReplaySpec::Core { scope, partition } => {
             NextestInvocation::for_core(scope, NextestLane::CiCore, partition).run(root, &[])
         }
-        ReplaySpec::Coverage => crate::coverage::run(),
+        ReplaySpec::Coverage { scope } => crate::coverage::run(scope),
         ReplaySpec::Integration {
             shard,
             batch,
@@ -2125,7 +2166,9 @@ mod tests {
 
     #[test]
     fn llvm_cov_replay_spec_closes_profile_without_raw_args() -> Result<()> {
-        let invocation = NextestInvocation::for_coverage("target/coverage.json")?;
+        let workspace = crate::ci_impact::coverage_scope_for_full_ci();
+        let invocation =
+            NextestInvocation::for_coverage("target/coverage.json", workspace.clone())?;
         assert_eq!(
             invocation.execution_argv(),
             [
@@ -2142,7 +2185,60 @@ mod tests {
             ]
             .map(str::to_owned)
         );
-        assert_eq!(invocation.replay_spec(), &ReplaySpec::Coverage);
+        assert_eq!(
+            invocation.replay_spec(),
+            &ReplaySpec::Coverage { scope: workspace }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn coverage_argv_scope_mutex_packages_vs_workspace() -> Result<()> {
+        let packages = crate::ci_impact::CoverageScope::Packages {
+            packages: vec!["leaf".to_owned(), "consumer".to_owned()],
+            strict_touched: Vec::new(),
+        };
+        let argv =
+            NextestInvocation::for_coverage("target/coverage.json", packages)?.execution_argv();
+        assert!(
+            argv.iter().any(|a| a == "-p"),
+            "Packages scope must use -p: {argv:?}"
+        );
+        assert!(
+            !argv.iter().any(|a| a == "--workspace"),
+            "Packages scope must not use --workspace: {argv:?}"
+        );
+        assert_eq!(
+            argv.windows(2)
+                .filter(|w| w[0] == "-p")
+                .map(|w| w[1].as_str())
+                .collect::<Vec<_>>(),
+            vec!["leaf", "consumer"]
+        );
+
+        let workspace = crate::ci_impact::coverage_scope_for_full_ci();
+        let argv =
+            NextestInvocation::for_coverage("target/coverage.json", workspace)?.execution_argv();
+        assert!(argv.iter().any(|a| a == "--workspace"));
+        assert!(!argv.iter().any(|a| a == "-p"));
+
+        assert!(
+            crate::ci_impact::CoverageScope::packages(Vec::new(), Vec::new()).is_none(),
+            "empty packages must be unconstructible"
+        );
+        let invalid = crate::ci_impact::CoverageScope::Packages {
+            packages: vec!["Bad/Name".to_owned()],
+            strict_touched: Vec::new(),
+        };
+        match NextestInvocation::for_coverage("target/coverage.json", invalid) {
+            Ok(_invocation) => {
+                bail!("invalid package identity must bail");
+            }
+            Err(err) => assert!(
+                err.to_string().contains("invalid package name"),
+                "invalid package identity must bail: {err}"
+            ),
+        }
         Ok(())
     }
 
@@ -2168,7 +2264,12 @@ mod tests {
             .map(str::to_owned)
         );
         assert_eq!(invocation.profile, NextestProfile::CoverageIdentityaudit);
-        assert_eq!(invocation.replay_spec(), &ReplaySpec::Coverage);
+        assert_eq!(
+            invocation.replay_spec(),
+            &ReplaySpec::Coverage {
+                scope: crate::ci_impact::coverage_scope_for_full_ci()
+            }
+        );
         Ok(())
     }
 

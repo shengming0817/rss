@@ -1,11 +1,12 @@
-//! `cargo xtask ci full` / `cargo xtask ci run --job ci-coverage` 覆盖率门 —— 先跑一次
-//! `cargo llvm-cov nextest --workspace --features testkit/containers`（出 export JSON，**兼作 nextest
-//! 门**：测试必须全绿并留下 profdata），再向同一 profdata 追加唯一的 IdentityAudit 真实可执行 Journey，
-//! 最后评**两子门**。feature 参数与 Journey binary filter 均由
-//! [`crate::nextest::NextestInvocation::for_coverage`] 的 typed registry 单源构造，确保 feature-gated
-//! conformance 代码也被插桩：
+//! `cargo xtask ci full` / `cargo xtask ci run --job ci-coverage` 覆盖率门 —— 跑**一次**
+//! `cargo llvm-cov nextest`（Packages：`-p`；Workspace：`--workspace`）+ `--features testkit/containers`
+//! （出 export JSON，**兼作 nextest 门**：测试必须全绿，并留下 profdata）；Workspace 路径再向同一
+//! profdata 追加 IdentityAudit Journey supplement，最后评**两子门**。feature 参数由
+//! [`crate::nextest::NextestInvocation::for_coverage`] 的 typed registry 单源构造，确保
+//! feature-gated conformance 代码也被插桩：
 //!
-//! 1. **绝对地板门**（本模块）：export JSON → basis/engine 严格 crate（`vocab`/`ids`/`consistency`/
+//! 1. **绝对地板门**（本模块）：Workspace 始终评 STRICT；Packages 仅评 `StrictTouched`（空则
+//!    `floor=skipped`）。export JSON → basis/engine 严格 crate（`vocab`/`ids`/`consistency`/
 //!    `primitives`，CLAUDE.md / rust-standards.md「引擎与基础 crate ≥90%」逐字集）per-crate 行覆盖率下限。
 //! 2. **per-diff 增量门**（[`crate::diffcov`]）：复用同一 profdata 经 `cargo llvm-cov report --lcov` 出 lcov
 //!    （[`lcov_report`]，不重跑测试）→ 本 PR diff（相对 base，默认 `origin/develop`）新增/修改可执行行聚合
@@ -13,18 +14,22 @@
 //!    adapters/域 crate 的大改动可零新测试照样过地板门。
 //!
 //! **不入 `cargo xtask verify`**（verify 是 stable-only 本地快门；覆盖率门慢、需 `cargo-llvm-cov` 工具 +
-//! 全 workspace 跑），只在完整本地 CI 或 typed 远端 coverage job 内调用。issue #1132 验收
+//! 插桩跑），只在完整本地 CI 或 typed 远端 coverage job 内调用。issue #1132 验收
 //! 「cargo nextest run --workspace + cargo llvm-cov 阈值门（引擎/基础 ≥90%）」由本**一步**同时兑现——
-//! core 测试兼作 nextest 门与基础覆盖采集；IdentityAudit supplement 只运行精确 binary，并用
+//! core 测试兼作 nextest 门与基础覆盖采集；Workspace 下 IdentityAudit supplement 只运行精确 binary，并用
 //! testcontainers 自供 Postgres/RabbitMQ/Redis，覆盖生产 provider/eventing/listener/drain 路径。
 //!
 //! 无 ratchet 例外：所有 STRICT crate 均守默认 90% 行覆盖率下限。历史 `consistency` 85% 例外已随
 //! inbox 行为模型与覆盖率补强移除。
 //!
-//! INVARIANT: COVERAGE-STRICT-FLOOR-01 { level = "Medium", exec = "ci-only", source = "code" }—— [`STRICT_CRATES`] 任一 crate 行覆盖率 < 其 [`floor_for`] 下限
-//!   **或未被测量**（JSON 无其数据 / 0 行）⇒ ci 非零退出。缺测量也 fail：杜绝「没跑到 = 静默绿」的 vacuity。
+//! INVARIANT: COVERAGE-STRICT-FLOOR-01 { level = "Medium", exec = "ci-only", source = "code" }—— Workspace 路径下
+//!   [`STRICT_CRATES`] 任一 crate 行覆盖率 < 其 [`floor_for`] 下限 **或未被测量**（JSON 无其数据 / 0 行）⇒ ci 非零退出。
+//! INVARIANT: COVERAGE-STRICT-CONDITIONAL-01 { level = "Medium", exec = "ci-only", source = "code", synthetic_red = "packages_with_strict_touched_still_evaluates_floor", anti_vacuity = "packages_without_strict_touched_skips_absolute_floor" }—— Packages 路径仅评
+//!   StrictTouched；空交集显式 skip 绝对地板（`floor=skipped`），diffcov 仍强制。
 //!   per-diff 增量门的不变式（COVERAGE-DIFF-FLOOR-01）见 [`crate::diffcov`]。
+//!   空 Packages 不可构造 Hard 证明见 `CoverageScope::packages` / nextest `COVERAGE-SCOPE-NONEMPTY-01`。
 
+use crate::ci_impact::CoverageScope;
 use crate::workspace_root;
 use anyhow::{Context, Result, bail};
 use std::collections::BTreeMap;
@@ -158,17 +163,40 @@ fn render_failures(failing: &[Shortfall]) -> String {
 }
 
 /// ci 覆盖率门：跑 llvm-cov nextest（= nextest 门，留 profdata）→ 评**两子门**（任一红即 ci 非零退出）：
-/// ① 绝对地板（export JSON）；② per-diff 增量（复用同一 profdata 出 lcov，不重跑测试，见 [`crate::diffcov`]）。
-pub(crate) fn run() -> Result<()> {
+/// ① 绝对地板（export JSON；Packages 下条件评 StrictTouched）；② per-diff 增量（复用同一 profdata 出 lcov）。
+/// Workspace 路径额外追加 IdentityAudit Journey supplement（`--no-clean`）。
+pub(crate) fn run(scope: CoverageScope) -> Result<()> {
+    eprintln!("coverage: scope {}", scope.summary());
     let root = workspace_root()?;
-    let json = run_llvm_cov(&root)?;
-    // ① 绝对地板门：basis/engine STRICT crate per-crate 行覆盖率下限（COVERAGE-STRICT-FLOOR-01）。
-    let per_crate = aggregate(&json, STRICT_CRATES)?;
-    let failing = evaluate(&per_crate, STRICT_CRATES);
+    let json = run_llvm_cov(&root, &scope)?;
+    evaluate_strict_floor(&json, &scope)?;
+    if matches!(scope, CoverageScope::Workspace { .. }) {
+        run_identityaudit_supplement(&root)?;
+    }
+    // ② per-diff 增量门：复用 nextest 跑测试留下的 profdata 出 lcov（不重跑测试），本 PR 新增/修改可执行行
+    //    ≥80%（COVERAGE-DIFF-FLOOR-01，见 crate::diffcov）。
+    let lcov = lcov_report(&root)?;
+    crate::diffcov::check(&root, &lcov)
+}
+
+fn evaluate_strict_floor(json: &str, scope: &CoverageScope) -> Result<()> {
+    let strict: Vec<&str> = match scope {
+        CoverageScope::Workspace { .. } => STRICT_CRATES.to_vec(),
+        CoverageScope::Packages { strict_touched, .. } => {
+            if strict_touched.is_empty() {
+                eprintln!(
+                    "coverage: floor=skipped（Packages 未触及 STRICT crate；diffcov 仍强制）"
+                );
+                return Ok(());
+            }
+            strict_touched.iter().map(String::as_str).collect()
+        }
+    };
+    let per_crate = aggregate(json, &strict)?;
+    let failing = evaluate(&per_crate, &strict);
     if !failing.is_empty() {
         bail!("coverage: {}", render_failures(&failing));
     }
-    // ratchet 提示从 RATCHET_FLOORS 派生（单源，避免门行为与诊断漂移）。
     let ratchet = if RATCHET_FLOORS.is_empty() {
         "无 ratchet".to_string()
     } else {
@@ -180,13 +208,9 @@ pub(crate) fn run() -> Result<()> {
     };
     eprintln!(
         "coverage: STRICT basis/engine crate 均达行覆盖率下限（{}；{ratchet}）",
-        STRICT_CRATES.join(", ")
+        strict.join(", ")
     );
-    run_identityaudit_supplement(&root)?;
-    // ② per-diff 增量门：复用 nextest 跑测试留下的 profdata 出 lcov（不重跑测试），本 PR 新增/修改可执行行
-    //    ≥80%（COVERAGE-DIFF-FLOOR-01，见 crate::diffcov）。
-    let lcov = lcov_report(&root)?;
-    crate::diffcov::check(&root, &lcov)
+    Ok(())
 }
 
 fn run_identityaudit_supplement(root: &Path) -> Result<()> {
@@ -202,13 +226,10 @@ fn run_identityaudit_supplement(root: &Path) -> Result<()> {
     crate::nextest::NextestInvocation::for_identityaudit_coverage(out_str)?.run(root, &[])
 }
 
-/// 跑 `cargo llvm-cov nextest --workspace --features testkit/containers --json --output-path <file>`；
+/// 跑 `cargo llvm-cov nextest`（Packages：`-p`；Workspace：`--workspace`）+ features；
 /// workspace 的 `integration` features 不启用，因此无需 DB/broker。stdio 继承（实时看测试输出）。
 /// 非零退出 = 测试失败（nextest 门）⇒ `Err`。
-/// profile 由 [`crate::nextest::NextestInvocation`] 闭合选择为 `ci-core`，避免与 llvm-cov 自身
-/// `--profile`（cargo build profile）的 flag 撞名。本步留下的 profdata 由
-/// [`lcov_report`] 复用出 lcov（per-diff 增量门），不重跑测试。
-fn run_llvm_cov(root: &Path) -> Result<String> {
+fn run_llvm_cov(root: &Path, scope: &CoverageScope) -> Result<String> {
     // 跟随 CARGO_TARGET_DIR（clean_cmd 不清它——见 cmd.rs STRIPPED_ENV charter），否则默认 root/target；
     // 与 llvm-cov 实际写 JSON 的 target 目录一致（review #206 C6）。
     let out = coverage_output_path(&coverage_report_dir(root), "xtask-ci-coverage.json")?;
@@ -217,15 +238,15 @@ fn run_llvm_cov(root: &Path) -> Result<String> {
         .context("coverage output 必须位于 workspace 内，避免证据泄露绝对路径")?
         .to_str()
         .context("覆盖率 JSON 输出路径非法 UTF-8")?;
-    crate::nextest::NextestInvocation::for_coverage(out_str)?.run(root, &[])?;
+    crate::nextest::NextestInvocation::for_coverage(out_str, scope.clone())?.run(root, &[])?;
     std::fs::read_to_string(&out).with_context(|| format!("读覆盖率 JSON 失败: {}", out.display()))
 }
 
 /// 复用 [`run_llvm_cov`] 跑测试留下的 profdata 出 lcov（`cargo llvm-cov report --lcov`，**不重跑测试**），
 /// 供 per-diff 增量门（[`crate::diffcov`]）。落盘同 [`run_llvm_cov`] 跟随 `CARGO_TARGET_DIR`。
 ///
-/// **不传 `--workspace`**（与 [`run_llvm_cov`] 不同）：`report` 无编译阶段，覆盖范围由上一步 `--workspace`
-/// instrumented 编译的 profdata 决定，已含全 workspace（实测 `report` 输出全 workspace crate 的 lcov）；
+/// **不传 `--workspace` / `-p`**（与 [`run_llvm_cov`] 不同）：`report` 无编译阶段，覆盖范围 = 上一步
+/// [`CoverageScope`] 实际插桩集合（Packages 的 `-p` 或 Workspace 的 `--workspace`）写入的 profdata；
 /// 且 `cargo llvm-cov report` **不接受** `--workspace`（传入即报错）——勿误加。
 fn lcov_report(root: &Path) -> Result<String> {
     let out = coverage_output_path(&coverage_report_dir(root), "xtask-ci-coverage.lcov")?;
@@ -328,6 +349,41 @@ mod tests {
         assert_eq!(
             normalize_target_dir(root, Some(std::ffi::OsStr::new("/tmp/external-target"))),
             PathBuf::from("/tmp/external-target")
+        );
+    }
+
+    #[test]
+    fn packages_without_strict_touched_skips_absolute_floor() -> anyhow::Result<()> {
+        let scope = CoverageScope::Packages {
+            packages: vec!["leaf".to_owned()],
+            strict_touched: Vec::new(),
+        };
+        // Empty JSON would fail Workspace; skip path must Ok without reading crates.
+        evaluate_strict_floor(r#"{"data":[]}"#, &scope)?;
+        Ok(())
+    }
+
+    #[test]
+    fn packages_with_strict_touched_still_evaluates_floor() -> anyhow::Result<()> {
+        let scope = CoverageScope::Packages {
+            packages: vec!["vocab".to_owned()],
+            strict_touched: vec!["vocab".to_owned()],
+        };
+        match evaluate_strict_floor(r#"{"data":[]}"#, &scope) {
+            Ok(()) => bail!("touched STRICT must fail closed when unmeasured"),
+            Err(err) => assert!(
+                err.to_string().contains("vocab"),
+                "touched STRICT must still fail closed when unmeasured: {err}"
+            ),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn empty_packages_constructor_is_none() {
+        assert!(
+            CoverageScope::packages(Vec::new(), Vec::new()).is_none(),
+            "COVERAGE-SCOPE-NONEMPTY-01: empty Packages must be unconstructible"
         );
     }
 

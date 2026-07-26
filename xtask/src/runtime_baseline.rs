@@ -10259,6 +10259,25 @@ fn runtime_secret_transfer_live_findings(root: &Path) -> Result<Vec<Finding<Rule
     }
     let secret_file = syn::parse_file(&fs::read_to_string(&secret_path)?)?;
     let runtime_file = syn::parse_file(&fs::read_to_string(&runtime_path)?)?;
+    let (inventory, env_secret_structs) =
+        collect_runtime_secret_flow_inventory(root, require_complete)?;
+    let mut findings = Vec::new();
+    push_env_secret_shape_findings(
+        &mut findings,
+        &secret_file,
+        &runtime_file,
+        env_secret_structs,
+    );
+    push_sensitive_stage_count_findings(&mut findings, &inventory);
+    push_exact_sink_count_findings(&mut findings, &inventory);
+    push_secret_transfer_total_findings(&mut findings, &inventory);
+    Ok(findings)
+}
+
+fn collect_runtime_secret_flow_inventory(
+    root: &Path,
+    require_complete: bool,
+) -> Result<(SecretFlowInventory, usize)> {
     let mut paths = Vec::new();
     collect_rust_sources(&root.join(RUNTIME_SRC_PATH), &mut paths)?;
     let production_sources = production_module_sources(&paths)?;
@@ -10289,8 +10308,16 @@ fn runtime_secret_transfer_live_findings(root: &Path) -> Result<Vec<Finding<Rule
             .replace('\\', "/");
         inventory.visit_file(&file);
     }
-    let mut findings = Vec::new();
-    if !exact_env_secret_shape(&secret_file, &runtime_file) || env_secret_structs != 1 {
+    Ok((inventory, env_secret_structs))
+}
+
+fn push_env_secret_shape_findings(
+    findings: &mut Vec<Finding<Rule>>,
+    secret_file: &syn::File,
+    runtime_file: &syn::File,
+    env_secret_structs: usize,
+) {
+    if !exact_env_secret_shape(secret_file, runtime_file) || env_secret_structs != 1 {
         findings.push(finding(
             Rule::ForbiddenWiring,
             RUNTIME_SECRET_CONFIG_PATH,
@@ -10299,7 +10326,12 @@ fn runtime_secret_transfer_live_findings(root: &Path) -> Result<Vec<Finding<Rule
             ),
         ));
     }
+}
 
+fn push_sensitive_stage_count_findings(
+    findings: &mut Vec<Finding<Rule>>,
+    inventory: &SecretFlowInventory,
+) {
     for (label, path, function) in [
         (
             "VAULT_TOKEN_ENV",
@@ -10353,7 +10385,12 @@ fn runtime_secret_transfer_live_findings(root: &Path) -> Result<Vec<Finding<Rule
             ));
         }
     }
+}
 
+fn push_exact_sink_count_findings(
+    findings: &mut Vec<Finding<Rule>>,
+    inventory: &SecretFlowInventory,
+) {
     for (label, path, function) in [
         (
             "event.hot",
@@ -10429,7 +10466,12 @@ fn runtime_secret_transfer_live_findings(root: &Path) -> Result<Vec<Finding<Rule
             ));
         }
     }
+}
 
+fn push_secret_transfer_total_findings(
+    findings: &mut Vec<Finding<Rule>>,
+    inventory: &SecretFlowInventory,
+) {
     if inventory.transfer_total != inventory.transfer_sinks {
         findings.push(finding(
             Rule::ForbiddenWiring,
@@ -10470,7 +10512,6 @@ fn runtime_secret_transfer_live_findings(root: &Path) -> Result<Vec<Finding<Rule
             ),
         ));
     }
-    Ok(findings)
 }
 
 fn path_ends_with(expr: &syn::Expr, expected: &[&str]) -> bool {
