@@ -486,6 +486,17 @@ macro_rules! gate_catalog {
                         BOTH_INCLUDED,
                     )
             ),
+            AssemblyArtifactsCheck => (step_assembly_artifacts_check, Some("xtask/src/assembly_artifacts.rs"),
+                gate(
+                        GateId::AssemblyArtifactsCheck,
+                        "assembly-artifacts-check",
+                        META,
+                        CompileKind::NoCompile,
+                        INTERNAL,
+                        SOURCE,
+                        BOTH_INCLUDED,
+                    )
+            ),
             AssemblyModulesCheck => (step_assembly_modules_check, Some("xtask/src/assembly_codegen.rs"),
                 gate(
                         GateId::AssemblyModulesCheck,

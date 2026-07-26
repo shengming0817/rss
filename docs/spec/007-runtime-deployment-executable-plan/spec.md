@@ -18,8 +18,15 @@
   Postgres/Vault/JWKS/Settings readiness, the shared `runtimeexec` lifecycle, a SIGTERM journey,
   and a dedicated distroless image target. Identity and Audit are absent by design: missing or
   invalid credentials receive 401, while every successfully verified credential receives 403.
-- `identityaudit` remains a build closure without launch, probe, config-schema, image, or journey
-  closure; its executable boundary remains owned by the later assembly work.
+- `identityaudit` is an executable Identity/Audit subset closure with a standalone binary, closed
+  Draft-07 configuration schema, authenticated Primary and unauthenticated Health listeners,
+  real readiness, the shared `runtimeexec` lifecycle, a SIGTERM journey, and a dedicated nonroot
+  distroless image target. #1796 and #1797 are landed facts rather than future assembly work.
+- `assemblies/artifacts.toml` classifies the exact discovered assembly universe. #1798 validates
+  the binary, image, configuration carrier, Health inventory, and journey closure for all three
+  currently supported assemblies through one typed xtask gate. This repository artifact inventory
+  is not the authorized public RuntimeInventory owned by #1806 and does not establish #1801's
+  production posture.
 - deployment is Compose-oriented and not derived from assembly identity; protected inventory and same-head deployment/release receipts do not exist.
 - 001 is superseded, immutable audit lineage. 007 is the active planning entry and provides no compatibility path back to 001.
 
@@ -47,7 +54,7 @@ As an operator, I can render drift-checked Helm from a DeploymentPlan bound to t
 - **FR-002**: Serving configuration MUST be read once into a required typed snapshot; ambient reads MUST be rejected outside named maintenance boundaries.
 - **FR-003**: RuntimePlan MUST close provider, listener, domain, lifecycle, and placement facts before launch and produce a `runtimePlanFingerprint` over those stable facts.
 - **FR-004**: The live root MUST consume RuntimePlan with no handwritten compatibility path after #1794.
-- **FR-005**: All three assemblies MUST close binary, immutable image, config schema, probes, and journey artifacts.
+- **FR-005**: All three assemblies MUST close binary, exact image build target, configuration carrier, probes, and journey artifacts through an exact, lifecycle-classified artifact matrix. Digest-bound immutable OCI evidence remains owned by #1802.
 - **FR-006**: Production posture MUST require persistent revocation, typed Vault allowlists, and production manifest constraints.
 - **FR-007**: DeploymentPlan MUST carry assembly/runtime-plan/deployment fingerprints and complete workload/service/probe/identity/secret-reference/resource facts; its fingerprint MUST bind `runtimePlanFingerprint`.
 - **FR-008**: Stable artifacts MUST reject unknown versions/fields and MUST NOT represent secret material.

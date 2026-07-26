@@ -80,12 +80,16 @@ impl GovernanceCheck for RuntimeEnvGuard {
         let root = crate::workspace_root()?;
         let sources = load_runtime_sources(&root)?;
         let count = sources.len() - test_only_source_paths(&sources)?.len();
-        let findings = scan_sources(&sources)?;
+        let findings = validate_root(&root)?;
         Ok((
             format!("{count} runtime production source files satisfy RUNTIME-ENV-FUNNEL-01"),
             findings,
         ))
     }
+}
+
+pub(crate) fn validate_root(root: &Path) -> Result<Vec<Finding>> {
+    scan_sources(&load_runtime_sources(root)?)
 }
 
 pub(crate) fn scan_sources(sources: &[(String, String)]) -> Result<Vec<Finding>> {

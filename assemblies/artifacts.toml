@@ -1,0 +1,77 @@
+schemaVersion = 1
+
+[[assemblies]]
+name = "identityaudit"
+lifecycle = "supported"
+
+[assemblies.binary]
+package = "identityaudit"
+target = "identityaudit-server"
+
+[assemblies.image]
+dockerfile = "Dockerfile"
+target = "identityaudit-runtime"
+
+[assemblies.configSchema]
+kind = "json-schema"
+path = "assemblies/identityaudit/config.schema.json"
+
+[assemblies.healthInventory]
+owner = "runtimeexec"
+listener = "health"
+
+[assemblies.journey]
+kind = "cargo-test"
+package = "journeys"
+target = "identityaudit_runtime"
+test = "identityaudit_login_audit_ready_sigterm_drain"
+
+[[assemblies]]
+name = "runtime"
+lifecycle = "supported"
+
+[assemblies.binary]
+package = "server"
+target = "server"
+
+[assemblies.image]
+dockerfile = "Dockerfile"
+target = "runtime"
+
+[assemblies.configSchema]
+kind = "typed-env-catalog"
+path = "assemblies/runtime/src/config.rs"
+
+[assemblies.healthInventory]
+owner = "runtimeexec"
+listener = "health"
+
+[assemblies.journey]
+kind = "compose-smoke-v1"
+path = "deploy/smoke.sh"
+
+[[assemblies]]
+name = "settingsonly"
+lifecycle = "supported"
+
+[assemblies.binary]
+package = "settingsonly"
+target = "settingsonly-server"
+
+[assemblies.image]
+dockerfile = "Dockerfile"
+target = "settingsonly-runtime"
+
+[assemblies.configSchema]
+kind = "json-schema"
+path = "assemblies/settingsonly/config.schema.json"
+
+[assemblies.healthInventory]
+owner = "runtimeexec"
+listener = "health"
+
+[assemblies.journey]
+kind = "cargo-test"
+package = "journeys"
+target = "settingsonly_runtime"
+test = "settingsonly_lifecycle_fixture_ready_request_sigterm_drain"

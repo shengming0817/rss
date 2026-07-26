@@ -1,0 +1,8 @@
+schemaVersion = 1
+[[assemblies]]
+name = "demo"
+lifecycle = "compile-only"
+reason = "not deployed"
+[assemblies.binary]
+package = "demo"
+target = "demo-server"

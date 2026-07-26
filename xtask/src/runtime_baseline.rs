@@ -1018,6 +1018,13 @@ impl<'ast> Visit<'ast> for RuntimePlanClosureCalls {
     }
 }
 
+/// Focused live launch/listener evidence shared with the assembly artifact inventory.
+pub(crate) fn artifact_launch_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
+    let mut findings = runtime_launch_kernel_owner_findings(root)?;
+    findings.extend(listener_plan_execution_findings(root)?);
+    Ok(findings)
+}
+
 fn listener_plan_execution_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
     // Historical unit fixtures exercise unrelated baseline rules and intentionally do not model
     // the listener-plan source graph. A real runtime tree always contains plan.rs.

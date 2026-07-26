@@ -91,6 +91,8 @@ enum InternalCheck {
     ContractValidate,
     /// assembly-level DI provider 声明校验（RevocationStore active provider 必须持久）。
     AssemblyValidate,
+    /// assembly lifecycle 与部署 artifact exact closure 门（#1798）。
+    AssemblyArtifactsCheck,
     /// assembly.toml domains → committed modules_gen.rs 漂移门（ASSEMBLY-MODULES-CODEGEN-01）。
     AssemblyModulesCheck,
     /// assembly.toml providers → committed providers_gen.rs 漂移门（ASSEMBLY-PROVIDERS-CODEGEN-01）。
@@ -249,6 +251,14 @@ fn step_assembly_validate() -> Step {
         id: GateId::AssemblyValidate,
         args: &[],
         kind: StepKind::Internal(InternalCheck::AssemblyValidate),
+        env: &[],
+    }
+}
+fn step_assembly_artifacts_check() -> Step {
+    Step {
+        id: GateId::AssemblyArtifactsCheck,
+        args: &[],
+        kind: StepKind::Internal(InternalCheck::AssemblyArtifactsCheck),
         env: &[],
     }
 }
@@ -1308,6 +1318,7 @@ fn run_internal(check: InternalCheck, opts: &VerifyOpts, root: &Path) -> Result<
     match check {
         InternalCheck::ContractValidate => run_check(&contract::validate::ContractValidate),
         InternalCheck::AssemblyValidate => run_check(&assembly::AssemblyValidate),
+        InternalCheck::AssemblyArtifactsCheck => crate::assembly_artifacts::run(),
         InternalCheck::AssemblyModulesCheck => crate::assembly_codegen::run(true),
         InternalCheck::AssemblyProvidersCheck => crate::assembly_codegen::run_providers(true),
         InternalCheck::AssemblyLockCheck => {
@@ -2067,7 +2078,7 @@ mod tests {
 
     #[test]
     fn ci_lane_plans_are_registry_derived_and_partitioned() {
-        assert_eq!(labels(&plan_for(PlanTarget::Lane(CiLane::Meta))).len(), 41);
+        assert_eq!(labels(&plan_for(PlanTarget::Lane(CiLane::Meta))).len(), 42);
         assert_eq!(
             labels(&plan_for(PlanTarget::Lane(CiLane::Security))),
             vec!["deny", "audit"]
@@ -2226,14 +2237,14 @@ mod tests {
     }
 
     #[test]
-    fn ci_lane_compatibility_plan_keeps_61_unique_gates_and_supersedes_nextest() {
+    fn ci_lane_compatibility_plan_keeps_62_unique_gates_and_supersedes_nextest() {
         let plan = plan_for(PlanTarget::CompatibilityCi);
-        assert_eq!(plan.len(), 61);
+        assert_eq!(plan.len(), 62);
         assert!(!labels(&plan).contains(&"default-test-runner"));
         let mut ids: Vec<_> = plan.iter().map(|step| step.id as usize).collect();
         ids.sort_unstable();
         ids.dedup();
-        assert_eq!(ids.len(), 61);
+        assert_eq!(ids.len(), 62);
     }
 
     #[test]
@@ -2254,6 +2265,7 @@ mod tests {
                 "fmt",
                 "contract-validate",
                 "assembly-validate",
+                "assembly-artifacts-check",
                 "assembly-modules-check",
                 "assembly-providers-check",
                 "assembly-lock-check",
@@ -2633,6 +2645,7 @@ mod tests {
                 "fmt",
                 "contract-validate",
                 "assembly-validate",
+                "assembly-artifacts-check",
                 "assembly-modules-check",
                 "assembly-providers-check",
                 "assembly-lock-check",
@@ -2685,7 +2698,7 @@ mod tests {
         }
     }
 
-    /// 两种模式共享的轻量 repository meta checks（contract validate / assembly validate / contract breaking / layer-deps / wsdeps-drift /
+    /// 两种模式共享的轻量 repository meta checks（contract validate / assembly validate / assembly artifacts / contract breaking / layer-deps / wsdeps-drift /
     /// doc-contracts / consistency-fixtures / event-transport-guard / inbox-cutover-guard /
     /// runtime-baseline / runtime-root-guard / runtime-env-guard / runtime-deployment-spec / runtime-deps-guard / archrules / codegen / L2 assurance / pdp-allow-guard / contract-binding-guard /
     /// schema-rls / setlocal-funnel / pg-tenant-tx-guard / repo-scope-guard / tenancy-closeout / migrations-serial / command-symmetry /
@@ -2708,6 +2721,7 @@ mod tests {
                 vec![
                     "contract-validate",
                     "assembly-validate",
+                    "assembly-artifacts-check",
                     "assembly-modules-check",
                     "assembly-providers-check",
                     "assembly-lock-check",
@@ -2844,7 +2858,7 @@ mod tests {
     }
 
     #[test]
-    fn assembly_modules_codegen_is_no_compile_internal_gate_after_validation_in_all_lanes()
+    fn assembly_modules_codegen_is_no_compile_internal_gate_after_artifacts_in_all_lanes()
     -> anyhow::Result<()> {
         for (name, plan) in [
             ("full", plan_for(PlanTarget::Verify)),
@@ -2856,11 +2870,16 @@ mod tests {
                 .iter()
                 .position(|label| *label == "assembly-validate")
                 .ok_or_else(|| anyhow::anyhow!("{name} plan 缺 assembly-validate"))?;
+            let artifacts = labels
+                .iter()
+                .position(|label| *label == "assembly-artifacts-check")
+                .ok_or_else(|| anyhow::anyhow!("{name} plan 缺 assembly-artifacts-check"))?;
             let codegen = labels
                 .iter()
                 .position(|label| *label == "assembly-modules-check")
                 .ok_or_else(|| anyhow::anyhow!("{name} plan 缺 assembly-modules-check"))?;
-            assert_eq!(codegen, validate + 1, "{name} lane order drift");
+            assert_eq!(artifacts, validate + 1, "{name} artifact order drift");
+            assert_eq!(codegen, artifacts + 1, "{name} lane order drift");
             assert!(
                 !plan[codegen].needs_compile(),
                 "{name} gate must be no-compile"
@@ -2874,6 +2893,92 @@ mod tests {
                 StepKind::Internal(InternalCheck::AssemblyModulesCheck)
             ));
         }
+        Ok(())
+    }
+
+    fn validate_assembly_artifacts_gate(plan: &[Step]) -> anyhow::Result<()> {
+        let positions = [
+            GateId::AssemblyValidate,
+            GateId::AssemblyArtifactsCheck,
+            GateId::AssemblyModulesCheck,
+            GateId::AssemblyProvidersCheck,
+            GateId::AssemblyLockCheck,
+            GateId::AssemblyGraphCheck,
+        ]
+        .map(|id| {
+            let members = plan
+                .iter()
+                .enumerate()
+                .filter_map(|(index, step)| (step.id == id).then_some(index))
+                .collect::<Vec<_>>();
+            anyhow::ensure!(
+                members.len() == 1,
+                "expected exactly one {id:?}, got {members:?}"
+            );
+            Ok::<usize, anyhow::Error>(members[0])
+        })
+        .into_iter()
+        .collect::<anyhow::Result<Vec<_>>>()?;
+        anyhow::ensure!(
+            positions.windows(2).all(|pair| pair[1] == pair[0] + 1),
+            "assembly closure order drift: {positions:?}"
+        );
+        let artifact = &plan[positions[1]];
+        anyhow::ensure!(!artifact.needs_compile(), "artifact gate compiled");
+        anyhow::ensure!(
+            artifact.carrier_file() == Some("xtask/src/assembly_artifacts.rs"),
+            "artifact carrier drift"
+        );
+        anyhow::ensure!(
+            matches!(
+                artifact.kind,
+                StepKind::Internal(InternalCheck::AssemblyArtifactsCheck)
+            ),
+            "artifact executor drift"
+        );
+        anyhow::ensure!(
+            artifact.id.spec().lanes() == [Some(CiLane::Meta), None]
+                && artifact.id.spec().verify_membership() == VerifyMembership::Included
+                && artifact.id.spec().compat() == CompatMembership::Included
+                && artifact.id.spec().tool() == ToolRequirement::InProcess,
+            "artifact typed membership drift"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn assembly_artifacts_gate_is_typed_once_and_orders_the_assembly_closure() -> anyhow::Result<()>
+    {
+        for (name, plan) in [
+            ("full", plan_for(PlanTarget::Verify)),
+            ("fast", verify_plan(&opts(true, false))),
+            ("ci-meta", plan_for(PlanTarget::Lane(CiLane::Meta))),
+            ("compatibility", plan_for(PlanTarget::CompatibilityCi)),
+        ] {
+            validate_assembly_artifacts_gate(&plan).with_context(|| format!("{name} plan"))?;
+        }
+
+        let real = verify_plan(&opts(true, false));
+        let mut omitted = real.clone();
+        omitted.retain(|step| step.id != GateId::AssemblyArtifactsCheck);
+        assert!(validate_assembly_artifacts_gate(&omitted).is_err());
+
+        let mut duplicated = real.clone();
+        let duplicate = real
+            .iter()
+            .find(|step| step.id == GateId::AssemblyArtifactsCheck)
+            .context("committed fast plan lacks artifact check")?
+            .clone();
+        duplicated.push(duplicate);
+        assert!(validate_assembly_artifacts_gate(&duplicated).is_err());
+
+        let mut wrong_executor = real;
+        wrong_executor
+            .iter_mut()
+            .find(|step| step.id == GateId::AssemblyArtifactsCheck)
+            .context("committed fast plan lacks artifact check")?
+            .kind = StepKind::Internal(InternalCheck::AssemblyValidate);
+        assert!(validate_assembly_artifacts_gate(&wrong_executor).is_err());
         Ok(())
     }
 
@@ -3570,6 +3675,7 @@ mod tests {
                 "fmt",
                 "contract-validate",
                 "assembly-validate",
+                "assembly-artifacts-check",
                 "assembly-modules-check",
                 "assembly-providers-check",
                 "assembly-lock-check",
@@ -3698,6 +3804,7 @@ mod tests {
             "fmt",
             "contract-validate",
             "assembly-validate",
+            "assembly-artifacts-check",
             "assembly-modules-check",
             "assembly-providers-check",
             "assembly-lock-check",
@@ -4671,6 +4778,8 @@ mod tests {
                 Some("Generate LocalTx proof report"),
                 Some("Upload typed plan"),
                 Some("Upload LocalTx proof report"),
+                Some("Generate assembly artifact matrix"),
+                Some("Upload assembly artifact matrix"),
                 Some("Checkout scheduled audit revision"),
                 Some("Setup scheduled audit tools"),
                 Some("Run scheduled audit fallback"),
@@ -4688,11 +4797,13 @@ mod tests {
         let proof_generator = &steps[2];
         let plan_upload = &steps[3];
         let proof_upload = &steps[4];
-        let gate_checkout = &steps[8];
-        let plan_download = &steps[9];
-        let receipt_download = &steps[10];
-        let gate = &steps[11];
-        let metrics_upload = &steps[12];
+        let artifact_generator = &steps[5];
+        let artifact_upload = &steps[6];
+        let gate_checkout = &steps[10];
+        let plan_download = &steps[11];
+        let receipt_download = &steps[12];
+        let gate = &steps[13];
+        let metrics_upload = &steps[14];
 
         let checkout = |step: &TypedStep, depth: &str| {
             step.uses.as_deref() == Some("actions/checkout@v4")
@@ -4712,6 +4823,24 @@ mod tests {
                 "--policy .config/ci-impact.toml \\",
                 "--output target/ci-impact/ci-plan.json \\",
                 "--github-output \"$GITHUB_OUTPUT\"",
+            ])
+            && artifact_generator.id.is_none()
+            && artifact_generator.uses.is_none()
+            && artifact_generator.if_expr.is_none()
+            && artifact_generator.continue_on_error.is_none()
+            && artifact_generator.timeout_minutes.is_none()
+            && artifact_generator.with.is_empty()
+            && artifact_generator.env.is_empty()
+            && artifact_generator.run_exact(&[
+                "set -euo pipefail",
+                "rm -rf target/assembly-artifacts target/assembly-artifacts.tmp",
+                "mkdir -p target/assembly-artifacts.tmp",
+                "set +e",
+                "cargo run --locked -p xtask -- assembly artifacts check > target/assembly-artifacts.tmp/assembly-artifacts.md",
+                "status=$?",
+                "set -e",
+                "mv target/assembly-artifacts.tmp target/assembly-artifacts",
+                "exit \"$status\"",
             ])
             && proof_generator.id.is_none()
             && proof_generator.uses.is_none()
@@ -4737,6 +4866,24 @@ mod tests {
             && plan_upload.with_exact("path", &["target/ci-impact/ci-plan.json"])
             && plan_upload.with_exact("if-no-files-found", &["warn"])
             && plan_upload.with_exact("retention-days", &["30"])
+            && artifact_upload.id.is_none()
+            && artifact_upload.if_expr.as_deref() == Some("${{ always() }}")
+            && artifact_upload.uses.as_deref() == Some("actions/upload-artifact@v4")
+            && artifact_upload.continue_on_error.is_none()
+            && artifact_upload.timeout_minutes.is_none()
+            && artifact_upload.env.is_empty()
+            && artifact_upload.run.is_empty()
+            && artifact_upload.with.len() == 4
+            && artifact_upload.with_exact(
+                "name",
+                &["assembly-artifacts-${{ github.run_id }}-${{ github.run_attempt }}"],
+            )
+            && artifact_upload.with_exact(
+                "path",
+                &["target/assembly-artifacts/assembly-artifacts.md"],
+            )
+            && artifact_upload.with_exact("if-no-files-found", &["error"])
+            && artifact_upload.with_exact("retention-days", &["30"])
             && proof_upload.id.is_none()
             && proof_upload.if_expr.as_deref() == Some("${{ always() }}")
             && proof_upload.uses.as_deref() == Some("actions/upload-artifact@v4")
@@ -5414,6 +5561,17 @@ mod tests {
             ("missing-plan", green.replacen("  ci-plan:\n", "  plan-missing:\n", 1)),
             ("extra-job", format!("{green}\n  bypass:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n")),
             ("missing-proof-generator", green.replacen("      - name: Generate LocalTx proof report", "      - name: Missing LocalTx proof report", 1)),
+            ("missing-assembly-artifact-generator", green.replacen("      - name: Generate assembly artifact matrix", "      - name: Missing assembly artifact matrix", 1)),
+            ("artifact-command-alias", green.replacen("-- assembly artifacts check >", "-- assembly artifact check >", 1)),
+            ("artifact-wrong-temp-path", green.replacen("mkdir -p target/assembly-artifacts.tmp", "mkdir -p target/assembly-artifacts.stage", 1)),
+            ("artifact-direct-final-write", green.replacen("target/assembly-artifacts.tmp/assembly-artifacts.md", "target/assembly-artifacts/assembly-artifacts.md", 1)),
+            ("artifact-missing-status-capture", green.replacen("          status=$?\n", "", 1)),
+            ("artifact-missing-atomic-publish", green.replacen("          mv target/assembly-artifacts.tmp target/assembly-artifacts\n", "", 1)),
+            ("artifact-upload-not-always", green.replacen("      - name: Upload assembly artifact matrix\n        if: ${{ always() }}", "      - name: Upload assembly artifact matrix\n        if: ${{ success() }}", 1)),
+            ("artifact-upload-name", green.replacen("name: assembly-artifacts-${{ github.run_id }}-${{ github.run_attempt }}", "name: assembly-artifacts-latest", 1)),
+            ("artifact-upload-path", green.replacen("path: target/assembly-artifacts/assembly-artifacts.md", "path: target/assembly-artifacts.tmp/assembly-artifacts.md", 1)),
+            ("artifact-upload-missing-files-policy", green.replacen("          path: target/assembly-artifacts/assembly-artifacts.md\n          if-no-files-found: error", "          path: target/assembly-artifacts/assembly-artifacts.md\n          if-no-files-found: warn", 1)),
+            ("artifact-upload-retention", green.replacen("          name: assembly-artifacts-${{ github.run_id }}-${{ github.run_attempt }}\n          path: target/assembly-artifacts/assembly-artifacts.md\n          if-no-files-found: error\n          retention-days: 30", "          name: assembly-artifacts-${{ github.run_id }}-${{ github.run_attempt }}\n          path: target/assembly-artifacts/assembly-artifacts.md\n          if-no-files-found: error\n          retention-days: 7", 1)),
             ("proof-json-format", green.replacen("-- localtx report --format json > target/localtx-proof.tmp/localtx-proof.json", "-- localtx report --format markdown > target/localtx-proof.tmp/localtx-proof.json", 1)),
             ("proof-markdown-format", green.replacen("-- localtx report --format markdown > target/localtx-proof.tmp/localtx-proof.md", "-- localtx report --format md > target/localtx-proof.tmp/localtx-proof.md", 1)),
             ("proof-wrong-temp-path", green.replacen("mkdir -p target/localtx-proof.tmp", "mkdir -p target/localtx-proof.stage", 1)),

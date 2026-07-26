@@ -5,6 +5,8 @@
 //!   `cargo xtask cdc-config debezium`   输出 Debezium PostgreSQL outbox_log CDC connector JSON skeleton（只读）
 //!   `cargo xtask contract validate`     契约元数据校验（多规则，编号见 `contract::validate` 的 `Rule`，CI 门）
 //!   `cargo xtask assembly validate`     assembly-level DI provider 声明校验（RevocationStore 持久 provider 门）
+//!   `cargo xtask assembly artifacts check`
+//!                                      assembly lifecycle 与部署 artifact exact closure 门
 //!   `cargo xtask assembly generate-modules [--check]`
 //!                                      assembly.toml domains → committed modules_gen.rs（--check 为漂移门）
 //!   `cargo xtask assembly generate-providers [--check]`
@@ -78,6 +80,7 @@
 //!                                      写 stdout、Markdown 写 runner 的 Job Summary 文件。
 mod archrules;
 mod assembly;
+mod assembly_artifacts;
 mod assembly_codegen;
 mod assembly_lock;
 mod cdc_config;
@@ -160,6 +163,7 @@ enum Command {
     CdcConfigDebezium,
     ContractValidate,
     AssemblyValidate,
+    AssemblyArtifactsCheck,
     AssemblyGenerateModules {
         check: bool,
     },
@@ -503,6 +507,7 @@ fn parse_contract(args: &[&str]) -> Result<Command> {
 fn parse_assembly(args: &[&str]) -> Result<Command> {
     match args {
         ["validate"] => Ok(Command::AssemblyValidate),
+        ["artifacts", "check"] => Ok(Command::AssemblyArtifactsCheck),
         ["generate-modules"] => Ok(Command::AssemblyGenerateModules { check: false }),
         ["generate-modules", "--check"] => Ok(Command::AssemblyGenerateModules { check: true }),
         ["generate-providers"] => Ok(Command::AssemblyGenerateProviders { check: false }),
@@ -514,7 +519,7 @@ fn parse_assembly(args: &[&str]) -> Result<Command> {
             assembly_lock::AssemblyLockAction::Check,
         )),
         _ => bail!(
-            "未知 assembly 子命令；用法: cargo xtask assembly <validate | generate-modules [--check] | generate-providers [--check] | lock <generate|check>>"
+            "未知 assembly 子命令；用法: cargo xtask assembly <validate | artifacts check | generate-modules [--check] | generate-providers [--check] | lock <generate|check>>"
         ),
     }
 }
@@ -679,6 +684,7 @@ fn dispatch(args: &[String]) -> Result<()> {
         Command::CdcConfigDebezium => cdc_config::run_debezium(),
         Command::ContractValidate => diagnostic::run_check(&contract::validate::ContractValidate),
         Command::AssemblyValidate => diagnostic::run_check(&assembly::AssemblyValidate),
+        Command::AssemblyArtifactsCheck => assembly_artifacts::run(),
         Command::AssemblyGenerateModules { check } => assembly_codegen::run(check),
         Command::AssemblyGenerateProviders { check } => assembly_codegen::run_providers(check),
         Command::AssemblyLock(action) => assembly_lock::run(action),
@@ -933,6 +939,27 @@ mod tests {
             parse_command(&s(&["assembly", "validate"]))?,
             Command::AssemblyValidate
         );
+        Ok(())
+    }
+
+    #[test]
+    fn assembly_artifacts_cli_is_exact_and_fail_closed() -> anyhow::Result<()> {
+        assert_eq!(
+            parse_command(&s(&["assembly", "artifacts", "check"]))?,
+            Command::AssemblyArtifactsCheck
+        );
+        for invalid in [
+            vec!["assembly", "artifacts"],
+            vec!["assembly", "artifacts", "check", "--format", "json"],
+            vec!["assembly", "artifacts", "check", "extra"],
+            vec!["assembly", "artifact", "check"],
+            vec!["assembly-artifacts", "check"],
+        ] {
+            assert!(
+                parse_command(&s(&invalid)).is_err(),
+                "unexpected compatibility surface accepted: {invalid:?}"
+            );
+        }
         Ok(())
     }
 

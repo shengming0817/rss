@@ -35,17 +35,17 @@ FROM chef AS builder
 COPY --from=planner /app/recipe.json recipe.json
 RUN cargo chef cook --release --locked --recipe-path recipe.json --bin server --bin rss
 COPY . .
-RUN cargo build --release --locked --bin server --bin rss \
-    # reason: strip 符号缩体积（不改全局 [profile.release]，避免影响整个 workspace 的开发构建）。
-    && strip target/release/server target/release/rss
+RUN cargo build --release --locked --bin server --bin rss
+# reason: strip 符号缩体积（不改全局 [profile.release]，避免影响整个 workspace 的开发构建）。
+RUN strip target/release/server target/release/rss
 
 # ── settingsonly-builder：独立 cook/build settingsonly-server，不污染 full runtime artifact ──────────
 FROM chef AS settingsonly-builder
 COPY --from=planner /app/recipe.json recipe.json
 RUN cargo chef cook --release --locked --recipe-path recipe.json --package settingsonly --bin settingsonly-server
 COPY . .
-RUN cargo build --release --locked --package settingsonly --bin settingsonly-server \
-    && strip target/release/settingsonly-server
+RUN cargo build --release --locked --package settingsonly --bin settingsonly-server
+RUN strip target/release/settingsonly-server
 
 # ── settingsonly-runtime：仅含 settingsonly binary + 外部 config schema ──────────────────────────────
 FROM gcr.io/distroless/cc-debian12:nonroot AS settingsonly-runtime
@@ -59,8 +59,8 @@ FROM chef AS identityaudit-builder
 COPY --from=planner /app/recipe.json recipe.json
 RUN cargo chef cook --release --locked --recipe-path recipe.json --package identityaudit --bin identityaudit-server
 COPY . .
-RUN cargo build --release --locked --package identityaudit --bin identityaudit-server \
-    && strip target/release/identityaudit-server
+RUN cargo build --release --locked --package identityaudit --bin identityaudit-server
+RUN strip target/release/identityaudit-server
 
 # ── identityaudit-runtime：仅含 identityaudit binary + 外部 config schema ────────────────────────
 FROM gcr.io/distroless/cc-debian12:nonroot AS identityaudit-runtime

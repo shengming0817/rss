@@ -7,7 +7,7 @@ It supplements `docs/rules/architecture.md`, `docs/rules/runtime-assembly-plan.m
 ## 当前事实
 
 - Assembly manifest validation, generated domain ordering, generated typed provider constructor catalogs, and committed v1 AssemblyLock drift are governed by typed repository gates. The assembly-crate-internal provider catalog drives live construction through one-shot typed permits and sealed lifecycle-output batches.
-- Both binaries capture one closed process-level configuration generation through a typed preparation profile before tracing and provider construction. Serving enters through `runtime::prepare_runtime()`; RSS operators enter through `runtime::operator::prepare_runtime()` and cannot carry the serving-only password-policy capability. Tracing/serving-OIDC, the operator OIDC static provider, provider material, listener addresses and mTLS material, every PostgreSQL/Redis/Vault/S3/event/domain/DLX/worker consumer, composition settings, and settings maintenance are capability-only and snapshot-backed. The crate-wide ambient-reader closure is landed under #1787. RuntimePlan v1 is typed, fingerprinted, retained by the unique consuming runtime phase chain, and is now the sole source of listener membership, ordered domain placement, and auth selection. `runtimeexec` owns the provider-independent launch/signal/drain kernel and stable opaque probe/inventory hooks; subset assemblies remain non-runnable until #1796/#1797, and no DeploymentPlan/Helm/inventory evidence chain exists.
+- Both binaries capture one closed process-level configuration generation through a typed preparation profile before tracing and provider construction. Serving enters through `runtime::prepare_runtime()`; RSS operators enter through `runtime::operator::prepare_runtime()` and cannot carry the serving-only password-policy capability. Tracing/serving-OIDC, the operator OIDC static provider, provider material, listener addresses and mTLS material, every PostgreSQL/Redis/Vault/S3/event/domain/DLX/worker consumer, composition settings, and settings maintenance are capability-only and snapshot-backed. The crate-wide ambient-reader closure is landed under #1787. RuntimePlan v1 is typed, fingerprinted, retained by the unique consuming runtime phase chain, and is now the sole source of listener membership, ordered domain placement, and auth selection. `runtimeexec` owns the provider-independent launch/signal/drain kernel and stable opaque probe/inventory hooks. #1796 and #1797 landed the executable `settingsonly` and `identityaudit` subset closures; #1798 adds their repository artifact closure alongside `runtime`. No DeploymentPlan, Helm, public RuntimeInventory, or same-head deployment/release evidence chain exists yet.
 - RSS Access has no trusted-kind setting: it accepts only grant-bound User claims with a complete `sid/jti/auth_time/authn_epoch` quartet. The configurable allowlist belongs only to Federated Access; `RSS_ACCESS_TOKEN_TRUSTED_KINDS` is a startup tombstone and causes fail-fast rejection instead of being ignored or carried as inert configuration.
 - Serving Vault secret resolution requires `RSS_VAULT_TENANT_STORE_ALLOWLIST_JSON` in the one process snapshot. Its only accepted schema is a strict root `{"bindings":[...]}` whose strict entries contain exactly `tenantId`, `storeId`, `mount`, and `kvPathPrefix`; the set must be non-empty and unique by `(tenantId, storeId)`, and physical namespaces may not overlap across tenants. There is no alias, default or compatibility reader. The validated map is also the sole source of the closed KV readiness target set: every binding resolves the reserved `.rss-readiness` key through the same resolver.
 - `rss vault-allowlist validate --file <path>|--stdin` is the sole offline preflight. The RSS binary dispatches it before `operator::prepare_runtime`; it reuses the serving typed parser, reads no ambient configuration, constructs no provider, performs no network I/O, and emits only closed static categories. Runtime-baseline exact AST locks this exception without admitting a serving or maintenance alternate source.
@@ -175,7 +175,7 @@ Schema ownership is exclusive:
 - #1788 owns RuntimePlan implementation and `runtimePlanFingerprint` golden parity.
 - #1802 owns DeploymentPlan implementation, consumes `runtimePlanFingerprint`, and produces `deploymentFingerprint`.
 - #1806 owns RuntimeInventory, carries assembly/runtime-plan/deployment fingerprints, and adds a separate authorized HTTP contract: auth mode is `permission|serviceOwned`, resource sharing is explicit `tenantScoped|global`, and `public|bootstrap|clientsOnly` are invalid.
-- #1796 and #1797 each own their subset assembly config schema and artifact closure.
+- #1796 and #1797 own the landed subset launch paths and closed JSON configuration schemas. #1798 owns the cross-assembly artifact classification and exact closure gate.
 
 The landed #1788 Hard carrier is `RUNTIME-PLAN-CONSTRUCTION-01`: protocol fields are private,
 `RuntimePlan::compile_v1` validates canonical manifest/lock identity and declaration bijections,
@@ -281,9 +281,48 @@ provider-independent lifecycle layers. Medium layer-deps, public-api, and runtim
 pin the exact dependency closure and single-owner production handoff with synthetic-red and
 anti-vacuity tests. There is no old executor, alias, re-export, facade, or compatibility path.
 
-#1794/#1795 change no RuntimePlan schema, fingerprint, AssemblyLock, generated module/provider catalog,
-wire contract, database, configuration, or deployment artifact. Rollback is one whole-change
-revert; it must not add an old reader, dual path, alias, fallback, or compatibility feature.
+#1796 and #1797 consume that kernel in the `settingsonly` and `identityaudit` binaries. Each subset
+has a closed Draft-07 configuration schema, a dedicated nonroot distroless Docker stage, exact
+Health listener/inventory ownership, and a non-ignored lifecycle journey. Their domain-specific
+provider, authentication, readiness, and behavior guards remain the semantic owners for those
+assemblies rather than being replaced by a generic artifact presence check.
+
+#1798 adds Medium `ASSEMBLY-ARTIFACT-MATRIX-01`. `assemblies/artifacts.toml` is the sole schema-v1
+classification of the dynamically discovered `assemblies/*` universe. A `supported` row must close
+binary, image, configuration carrier, Health inventory, and journey identities; a `compile-only`
+row must instead carry a non-empty reason and cannot carry deployable artifacts. The validator in
+`xtask/src/assembly_artifacts.rs` rejects unknown fields and versions, missing/extra/duplicate
+assemblies, reused artifact identities, unsafe paths, and semantic bait, then exposes only a
+fully checked `VerifiedArtifactMatrix`. `runtime` binds its typed environment catalog and Compose
+smoke journey; the two subset assemblies bind their closed JSON schemas and Cargo journeys.
+The production ratchet requires `identityaudit`, `runtime`, and `settingsonly` to remain
+`supported`; a future discovered assembly may enter as an explicit `compile-only` row, but none of
+these three can use that lifecycle as a rollback or review bypass. Image validation also rejects
+runtime-stage `USER` overrides and requires an unswallowed `cargo build --release --locked`.
+The accepted build instruction is a closed token sequence for the declared package/binary (plus
+the runtime image's required `rss` operator binary), so help/version, feature, or other extra Cargo
+options cannot masquerade as a build. Rust journey and launch witnesses never descend into
+closures, async/const blocks, or nested items. Compose build/up/health witnesses must be top-level
+commands; readiness is accepted only in the exact outer polling loop, and nested
+if/case/loop/group/subshell scopes cannot contribute it. Only teardown may live in the exact
+`cleanup()` function reached by `trap cleanup EXIT`.
+`cargo xtask assembly artifacts check` is the only CLI and emits one stably sorted observed matrix
+before returning its static-carrier verdict. That verdict explicitly excludes same-head test,
+image-build, and deployment execution receipts.
+
+This matrix is a `Planned → Deployed` repository carrier. It is deliberately outside canonical
+`AssemblyManifest`, generated module/provider inputs, AssemblyLock, and RuntimePlan, so adding or
+checking artifact evidence does not rotate their identities. Its health/inventory column is
+internal launch evidence, not the authorized public RuntimeInventory owned by #1806, and the
+presence of a supported `runtime` row does not claim the production posture owned by #1801.
+Likewise, the journey column proves an exact non-vacuous test or smoke carrier, not a same-head
+execution receipt; release-time immutable image and execution evidence remain owned by #1802.
+
+#1798 changes no RuntimePlan schema or fingerprint, AssemblyLock, generated module/provider catalog,
+public wire contract, database, secret, or configuration identity. Rollback removes the matrix,
+scanner, CLI, typed gate, CI report, and these documentation changes as one whole-change revert; it
+must not downgrade `supported` to `compile-only` or add an old reader, dual format, alias, fallback,
+or compatibility feature.
 
 ## AssemblyLock committed workflow
 
@@ -296,10 +335,10 @@ cargo xtask assembly lock generate
 ```
 
 Review the raw inputs and generated layers in the same diff, then run the focused sequence
-`assembly validate` → `assembly generate-modules --check` →
+`assembly validate` → `assembly artifacts check` → `assembly generate-modules --check` →
 `assembly generate-providers --check` → `assembly lock check` →
 `graph assembly --check`. The aggregate typed plans preserve the same
-validate → modules → providers → lock → graph order. Do not edit `assembly.lock.json` by hand;
+validate → artifacts → modules → providers → lock → graph order. Do not edit `assembly.lock.json` by hand;
 regenerate it from verified inputs.
 
 A reserved `assembly.lock.json` below a direct `assemblies/*/` directory without its `assembly.toml` ownership marker is an orphan. Both lock actions fail and leave it untouched. Recovery is explicit: restore the matching manifest if removal was accidental, or inspect and manually delete the orphan before regenerating.

@@ -248,6 +248,33 @@ pub(crate) fn validate_root(root: &Path) -> Result<(usize, Vec<Finding>)> {
     Ok((assemblies.len(), findings))
 }
 
+/// Target-specific artifact semantics shared with `assembly artifacts check`.
+/// The matrix owns inventory identity; these existing rules remain the single source for the
+/// settingsonly/identityaudit behavior witnesses.
+pub(crate) fn artifact_boundary_findings(root: &Path) -> Result<Vec<Finding>> {
+    let (assemblies, mut findings) = discover(root)?;
+    let metadata = load_workspace_metadata(root)?;
+    for assembly in assemblies.iter().filter(|assembly| {
+        matches!(
+            assembly.manifest.name.as_str(),
+            "identityaudit" | "settingsonly"
+        )
+    }) {
+        if let Some(metadata) = &metadata {
+            findings.extend(validate_target_domain_closure(root, assembly, metadata)?);
+        }
+    }
+    Ok(findings
+        .into_iter()
+        .filter(|finding| {
+            matches!(
+                finding.rule,
+                Rule::IdentityAuditBoundary | Rule::SettingsOnlyExecutableBoundary
+            )
+        })
+        .collect())
+}
+
 fn validate_framework_contracts(
     root: &Path,
     assemblies: &[DiscoveredAssembly],
@@ -394,6 +421,7 @@ fn validate_target_domain_closure(
             identityaudit_journey_evidence(root)?;
         let dockerfile = std::fs::read_to_string(root.join("Dockerfile"))
             .context("读取 identityaudit image source Dockerfile 失败")?;
+        let runtimeexec_launch_is_live = subset_runtimeexec_launch_is_live(root, "identityaudit")?;
         findings.extend(validate_identityaudit_executable_evidence(
             IdentityAuditExecutableEvidence {
                 test_support_enabled,
@@ -404,6 +432,7 @@ fn validate_target_domain_closure(
                 artifact_acceptance,
                 journey_target_declared,
                 required_journey_test_declared,
+                runtimeexec_launch_is_live,
                 dockerfile: &dockerfile,
             },
         ));
@@ -423,6 +452,7 @@ fn validate_target_domain_closure(
             settingsonly_journey_evidence(root)?;
         let dockerfile = std::fs::read_to_string(root.join("Dockerfile"))
             .context("读取 settingsonly image source Dockerfile 失败")?;
+        let runtimeexec_launch_is_live = subset_runtimeexec_launch_is_live(root, "settingsonly")?;
         findings.extend(validate_settingsonly_executable_evidence(
             SettingsOnlyExecutableEvidence {
                 targets: &package.targets,
@@ -434,6 +464,7 @@ fn validate_target_domain_closure(
                 artifact_acceptance,
                 journey_target_declared,
                 required_journey_test_declared,
+                runtimeexec_launch_is_live,
                 dockerfile: &dockerfile,
             },
         ));
@@ -1076,6 +1107,8 @@ struct MetadataTarget {
     name: String,
     #[serde(default)]
     kind: Vec<String>,
+    #[serde(default)]
+    src_path: PathBuf,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1084,6 +1117,7 @@ struct MetadataDependency {
     kind: Option<String>,
     rename: Option<String>,
     path: Option<PathBuf>,
+    target: Option<String>,
 }
 
 fn load_workspace_metadata(root: &Path) -> Result<Option<CargoMetadata>> {
@@ -1116,6 +1150,118 @@ fn load_workspace_metadata(root: &Path) -> Result<Option<CargoMetadata>> {
     let metadata = serde_json::from_slice(&output.stdout)
         .with_context(|| format!("解析 cargo metadata JSON 失败：{}", manifest.display()))?;
     Ok(Some(metadata))
+}
+
+/// One private Cargo metadata snapshot shared by artifact checks. Raw metadata DTOs never cross
+/// this façade, and every identity query is restricted to workspace packages.
+pub(crate) struct CargoTargetCatalog {
+    root: PathBuf,
+    metadata: Option<CargoMetadata>,
+}
+
+impl CargoTargetCatalog {
+    pub(crate) fn load(root: &Path) -> Result<Self> {
+        Ok(Self {
+            root: root.to_path_buf(),
+            metadata: load_workspace_metadata(root)?,
+        })
+    }
+
+    pub(crate) fn target_exists(
+        &self,
+        package_name: &str,
+        target_name: &str,
+        target_kind: &str,
+    ) -> bool {
+        self.package(package_name).is_some_and(|package| {
+            package.targets.iter().any(|target| {
+                target.name == target_name && target.kind.iter().any(|kind| kind == target_kind)
+            })
+        })
+    }
+
+    pub(crate) fn target_path(
+        &self,
+        package_name: &str,
+        target_name: &str,
+        target_kind: &str,
+    ) -> Option<PathBuf> {
+        self.package(package_name).and_then(|package| {
+            package.targets.iter().find_map(|target| {
+                (target.name == target_name && target.kind.iter().any(|kind| kind == target_kind))
+                    .then(|| target.src_path.clone())
+            })
+        })
+    }
+
+    pub(crate) fn binary_belongs_to_assembly(
+        &self,
+        assembly: &str,
+        package_name: &str,
+        target_name: &str,
+    ) -> bool {
+        let assembly_manifest = self
+            .root
+            .join("assemblies")
+            .join(assembly)
+            .join("Cargo.toml");
+        let Some(assembly_package) = self.package_by_manifest(&assembly_manifest) else {
+            return false;
+        };
+        let Some(binary_package) = self.package(package_name) else {
+            return false;
+        };
+        if !binary_package.targets.iter().any(|target| {
+            target.name == target_name && target.kind.iter().any(|kind| kind == "bin")
+        }) {
+            return false;
+        }
+        binary_package.id == assembly_package.id
+            || exact_normal_dependency(binary_package, assembly_package)
+    }
+
+    pub(crate) fn has_exact_normal_dependency(
+        &self,
+        package_name: &str,
+        dependency_name: &str,
+        dependency_manifest: &str,
+    ) -> bool {
+        let Some(package) = self.package(package_name) else {
+            return false;
+        };
+        let expected_manifest = self.root.join(dependency_manifest);
+        let Some(dependency) = self.package_by_manifest(&expected_manifest) else {
+            return false;
+        };
+        dependency.name == dependency_name && exact_normal_dependency(package, dependency)
+    }
+
+    fn package(&self, name: &str) -> Option<&MetadataPackage> {
+        let metadata = self.metadata.as_ref()?;
+        metadata.packages.iter().find(|package| {
+            package.name == name && metadata.workspace_members.contains(&package.id)
+        })
+    }
+
+    fn package_by_manifest(&self, manifest: &Path) -> Option<&MetadataPackage> {
+        let metadata = self.metadata.as_ref()?;
+        metadata.packages.iter().find(|package| {
+            package.manifest_path == manifest && metadata.workspace_members.contains(&package.id)
+        })
+    }
+}
+
+fn exact_normal_dependency(package: &MetadataPackage, dependency: &MetadataPackage) -> bool {
+    let Some(dependency_dir) = dependency.manifest_path.parent() else {
+        return false;
+    };
+    package.dependencies.iter().any(|candidate| {
+        candidate.kind.is_none()
+            && candidate.rename.is_none()
+            && candidate.target.is_none()
+            && candidate.name == dependency.name
+            && candidate.path.as_deref() == Some(dependency_dir)
+    })
 }
 
 fn cargo_metadata_args(manifest_arg: &str) -> [&str; 6] {
@@ -1467,6 +1613,7 @@ struct IdentityAuditExecutableEvidence<'a> {
     artifact_acceptance: bool,
     journey_target_declared: bool,
     required_journey_test_declared: bool,
+    runtimeexec_launch_is_live: bool,
     dockerfile: &'a str,
 }
 
@@ -1522,6 +1669,13 @@ fn validate_identityaudit_executable_evidence(
             Rule::IdentityAuditBoundary,
             subject,
             "field=journey expected explicit `identityaudit_runtime` target with non-ignored `identityaudit_login_audit_ready_sigterm_drain`",
+        ));
+    }
+    if !evidence.runtimeexec_launch_is_live {
+        findings.push(finding(
+            Rule::IdentityAuditBoundary,
+            subject,
+            "field=health-runtime-wiring run must reach launch_captured, which must construct StartupPlan and call runtimeexec::launch_startup",
         ));
     }
     if !identityaudit_docker_target_is_closed(evidence.dockerfile) {
@@ -1591,6 +1745,7 @@ struct SettingsOnlyExecutableEvidence<'a> {
     artifact_acceptance: bool,
     journey_target_declared: bool,
     required_journey_test_declared: bool,
+    runtimeexec_launch_is_live: bool,
     dockerfile: &'a str,
 }
 
@@ -1693,6 +1848,13 @@ fn validate_settingsonly_executable_evidence(
             "field=journey expected explicit `settingsonly_runtime` target with non-ignored `settingsonly_lifecycle_fixture_ready_request_sigterm_drain`",
         ));
     }
+    if !evidence.runtimeexec_launch_is_live {
+        findings.push(finding(
+            Rule::SettingsOnlyExecutableBoundary,
+            subject,
+            "field=health-runtime-wiring run must reach launch_captured, which must construct StartupPlan and call runtimeexec::launch_startup",
+        ));
+    }
     if !settingsonly_docker_target_is_closed(evidence.dockerfile) {
         findings.push(finding(
             Rule::SettingsOnlyExecutableBoundary,
@@ -1723,19 +1885,92 @@ fn identityaudit_schema_is_closed(path: &Path) -> Result<bool> {
     Ok(schema_objects_are_closed(&schema))
 }
 
-fn schema_objects_are_closed(value: &serde_json::Value) -> bool {
-    let object_schema = value.get("type").is_some_and(|kind| {
-        kind == "object"
-            || kind
-                .as_array()
-                .is_some_and(|kinds| kinds.iter().any(|kind| kind == "object"))
-    });
-    (!object_schema || value.get("additionalProperties") == Some(&serde_json::json!(false)))
-        && match value {
-            serde_json::Value::Array(values) => values.iter().all(schema_objects_are_closed),
-            serde_json::Value::Object(fields) => fields.values().all(schema_objects_are_closed),
-            _ => true,
+pub(crate) fn schema_objects_are_closed(value: &serde_json::Value) -> bool {
+    let Some(schema) = value.as_object() else {
+        return value == &serde_json::Value::Bool(false);
+    };
+    if schema.len() == 1
+        && schema
+            .get("$ref")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|reference| reference.starts_with("#/definitions/"))
+    {
+        return true;
+    }
+    let can_accept_object = match schema.get("type") {
+        Some(serde_json::Value::String(kind)) => kind == "object",
+        Some(serde_json::Value::Array(kinds)) => kinds.iter().any(|kind| kind == "object"),
+        Some(_) => true,
+        None => true,
+    };
+    if can_accept_object
+        && schema.get("additionalProperties") != Some(&serde_json::Value::Bool(false))
+    {
+        return false;
+    }
+
+    // `not` cannot widen the instance set, so it cannot introduce an open object carrier.
+    for keyword in [
+        "if",
+        "then",
+        "else",
+        "contains",
+        "propertyNames",
+        "additionalItems",
+    ] {
+        if schema
+            .get(keyword)
+            .is_some_and(|child| !schema_objects_are_closed(child))
+        {
+            return false;
         }
+    }
+    if let Some(items) = schema.get("items") {
+        let closed = items.as_array().map_or_else(
+            || schema_objects_are_closed(items),
+            |items| items.iter().all(schema_objects_are_closed),
+        );
+        if !closed {
+            return false;
+        }
+    }
+    for keyword in ["allOf", "anyOf", "oneOf"] {
+        if schema.get(keyword).is_some_and(|children| {
+            children
+                .as_array()
+                .is_none_or(|children| !children.iter().all(schema_objects_are_closed))
+        }) {
+            return false;
+        }
+    }
+    for keyword in [
+        "properties",
+        "patternProperties",
+        "definitions",
+        "$defs",
+        "dependentSchemas",
+    ] {
+        if schema.get(keyword).is_some_and(|children| {
+            children
+                .as_object()
+                .is_none_or(|children| !children.values().all(schema_objects_are_closed))
+        }) {
+            return false;
+        }
+    }
+    if let Some(dependencies) = schema.get("dependencies") {
+        let Some(dependencies) = dependencies.as_object() else {
+            return false;
+        };
+        if !dependencies
+            .values()
+            .filter(|dependency| !dependency.is_array())
+            .all(schema_objects_are_closed)
+        {
+            return false;
+        }
+    }
+    true
 }
 
 fn identityaudit_journey_evidence(root: &Path) -> Result<(bool, bool)> {
@@ -1779,11 +2014,114 @@ fn identityaudit_journey_has_required_test(source: &str) -> Result<bool> {
         {
             continue;
         }
+        if function.block.stmts.iter().any(stmt_is_control_flow) {
+            return Ok(false);
+        }
         let mut visitor = IdentityAuditJourneyVisitor::default();
         syn::visit::Visit::visit_block(&mut visitor, &function.block);
         return Ok(visitor.is_complete());
     }
     Ok(false)
+}
+
+fn stmt_is_control_flow(statement: &syn::Stmt) -> bool {
+    matches!(
+        statement,
+        syn::Stmt::Expr(
+            syn::Expr::If(_)
+                | syn::Expr::Match(_)
+                | syn::Expr::Loop(_)
+                | syn::Expr::While(_)
+                | syn::Expr::ForLoop(_),
+            _,
+        )
+    )
+}
+
+macro_rules! skip_opaque_witness_scopes {
+    () => {
+        fn visit_expr_closure(&mut self, _node: &'ast syn::ExprClosure) {}
+
+        fn visit_expr_async(&mut self, _node: &'ast syn::ExprAsync) {}
+
+        fn visit_expr_const(&mut self, _node: &'ast syn::ExprConst) {}
+
+        fn visit_item_fn(&mut self, _node: &'ast syn::ItemFn) {}
+
+        fn visit_item_const(&mut self, _node: &'ast syn::ItemConst) {}
+
+        fn visit_item_static(&mut self, _node: &'ast syn::ItemStatic) {}
+    };
+}
+
+fn subset_runtimeexec_launch_is_live(root: &Path, assembly: &str) -> Result<bool> {
+    let base = root.join("assemblies").join(assembly).join("src");
+    let lib = std::fs::read_to_string(base.join("lib.rs"))
+        .with_context(|| format!("读取 {assembly} lib runtime wiring 失败"))?;
+    let runtime = std::fs::read_to_string(base.join("runtime.rs"))
+        .with_context(|| format!("读取 {assembly} runtimeexec wiring 失败"))?;
+    subset_runtimeexec_launch_sources_are_live(&lib, &runtime)
+}
+
+fn subset_runtimeexec_launch_sources_are_live(lib: &str, runtime: &str) -> Result<bool> {
+    fn function_calls(source: &str, owner: &str) -> Result<Option<RuntimeLaunchCallVisitor>> {
+        let file = syn::parse_file(source)?;
+        let Some(function) = file.items.iter().find_map(|item| match item {
+            syn::Item::Fn(function)
+                if function.sig.ident == owner
+                    && !function.attrs.iter().any(is_conditional_attribute) =>
+            {
+                Some(function)
+            }
+            _ => None,
+        }) else {
+            return Ok(None);
+        };
+        if function.block.stmts.iter().any(stmt_is_control_flow) {
+            return Ok(None);
+        }
+        let mut visitor = RuntimeLaunchCallVisitor::default();
+        syn::visit::Visit::visit_block(&mut visitor, &function.block);
+        Ok(Some(visitor))
+    }
+
+    let Some(run) = function_calls(lib, "run")? else {
+        return Ok(false);
+    };
+    let Some(launch) = function_calls(runtime, "launch_captured")? else {
+        return Ok(false);
+    };
+    let direct = launch.startup_plan && launch.launch_startup;
+    let delegated = if launch.launch_helper {
+        function_calls(runtime, "launch")?
+            .is_some_and(|helper| helper.startup_plan && helper.launch_startup)
+    } else {
+        false
+    };
+    Ok(run.launch_captured && (direct || delegated))
+}
+
+#[derive(Default)]
+struct RuntimeLaunchCallVisitor {
+    launch_captured: bool,
+    startup_plan: bool,
+    launch_startup: bool,
+    launch_helper: bool,
+}
+
+impl<'ast> syn::visit::Visit<'ast> for RuntimeLaunchCallVisitor {
+    skip_opaque_witness_scopes!();
+
+    fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+        self.launch_captured |=
+            expression_path_ends_with(node.func.as_ref(), &["runtime", "launch_captured"]);
+        self.startup_plan |=
+            expression_path_ends_with(node.func.as_ref(), &["runtimeexec", "StartupPlan", "new"]);
+        self.launch_startup |=
+            expression_path_ends_with(node.func.as_ref(), &["runtimeexec", "launch_startup"]);
+        self.launch_helper |= expression_path_ends_with(node.func.as_ref(), &["launch"]);
+        syn::visit::visit_expr_call(self, node);
+    }
 }
 
 #[derive(Default)]
@@ -1810,6 +2148,8 @@ impl IdentityAuditJourneyVisitor {
 }
 
 impl<'ast> syn::visit::Visit<'ast> for IdentityAuditJourneyVisitor {
+    skip_opaque_witness_scopes!();
+
     fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
         self.runtime_start |= expression_path_ends_with(
             node.func.as_ref(),
@@ -2046,14 +2386,97 @@ fn settingsonly_journey_evidence(root: &Path) -> Result<(bool, bool)> {
 
 fn settingsonly_journey_has_required_test(source: &str) -> Result<bool> {
     const REQUIRED_TEST: &str = "settingsonly_lifecycle_fixture_ready_request_sigterm_drain";
-    Ok(syn::parse_file(source)?.items.into_iter().any(|item| {
+    let syntax = syn::parse_file(source)?;
+    let parent = syntax.items.iter().find(|item| {
         matches!(item, syn::Item::Fn(function)
             if function.sig.ident == REQUIRED_TEST
                 && function.attrs.iter().any(is_test_attribute)
                 && !function.attrs.iter().any(is_ignore_attribute)
-                && !function.attrs.iter().any(is_conditional_attribute)
-                && !function.block.stmts.is_empty())
-    }))
+                && !function.attrs.iter().any(is_conditional_attribute))
+    });
+    let Some(syn::Item::Fn(parent)) = parent else {
+        return Ok(false);
+    };
+    let mut parent_witness = SettingsJourneyVisitor::default();
+    for statement in &parent.block.stmts {
+        if !stmt_is_control_flow(statement) {
+            syn::visit::Visit::visit_stmt(&mut parent_witness, statement);
+        }
+    }
+    let exercise = syntax.items.iter().find(
+        |item| matches!(item, syn::Item::Fn(function) if function.sig.ident == "exercise_child"),
+    );
+    let Some(syn::Item::Fn(exercise)) = exercise else {
+        return Ok(false);
+    };
+    let mut exercise_witness = SettingsJourneyVisitor::default();
+    syn::visit::Visit::visit_block(&mut exercise_witness, &exercise.block);
+    Ok(parent_witness.parent_is_complete() && exercise_witness.exercise_is_complete())
+}
+
+#[derive(Default)]
+struct SettingsJourneyVisitor {
+    reserve_addresses: bool,
+    child_logs: bool,
+    spawn_child: bool,
+    exercise_child: bool,
+    remove_logs: bool,
+    activation_accept: bool,
+    health_contract: bool,
+    primary_contract: bool,
+    send_sigterm: bool,
+    wait_for_child: bool,
+    released_ports: usize,
+}
+
+impl SettingsJourneyVisitor {
+    fn parent_is_complete(&self) -> bool {
+        self.reserve_addresses
+            && self.child_logs
+            && self.spawn_child
+            && self.exercise_child
+            && self.remove_logs
+    }
+
+    fn exercise_is_complete(&self) -> bool {
+        self.activation_accept
+            && self.health_contract
+            && self.primary_contract
+            && self.send_sigterm
+            && self.wait_for_child
+            && self.released_ports >= 2
+    }
+}
+
+impl<'ast> syn::visit::Visit<'ast> for SettingsJourneyVisitor {
+    skip_opaque_witness_scopes!();
+
+    fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+        for (name, seen) in [
+            ("reserve_listener_addresses", &mut self.reserve_addresses),
+            ("spawn_child", &mut self.spawn_child),
+            ("exercise_child", &mut self.exercise_child),
+            ("assert_health_contract", &mut self.health_contract),
+            ("assert_primary_fails_closed", &mut self.primary_contract),
+            ("send_sigterm", &mut self.send_sigterm),
+            ("wait_for_child", &mut self.wait_for_child),
+        ] {
+            *seen |= expression_path_ends_with(node.func.as_ref(), &[name]);
+        }
+        self.child_logs |= expression_path_ends_with(node.func.as_ref(), &["ChildLogs", "create"]);
+        if expression_path_ends_with(node.func.as_ref(), &["assert_port_released"]) {
+            self.released_ports += 1;
+        }
+        syn::visit::visit_expr_call(self, node);
+    }
+
+    fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+        self.remove_logs |= node.method == "remove"
+            && matches!(node.receiver.as_ref(), syn::Expr::Path(path) if path.path.is_ident("logs"));
+        self.activation_accept |= node.method == "accept"
+            && matches!(node.receiver.as_ref(), syn::Expr::Path(path) if path.path.is_ident("activation_gate"));
+        syn::visit::visit_expr_method_call(self, node);
+    }
 }
 
 fn settingsonly_artifact_acceptance_evidence(root: &Path) -> Result<bool> {
@@ -2272,10 +2695,10 @@ fn is_conditional_attribute(attribute: &syn::Attribute) -> bool {
     attribute.path().is_ident("cfg") || attribute.path().is_ident("cfg_attr")
 }
 
-struct DockerStage<'a> {
-    base: &'a str,
-    name: &'a str,
-    instructions: Vec<&'a str>,
+pub(crate) struct DockerStage<'a> {
+    pub(crate) base: &'a str,
+    pub(crate) name: &'a str,
+    pub(crate) instructions: Vec<&'a str>,
 }
 
 fn settingsonly_docker_target_is_closed(source: &str) -> bool {
@@ -2326,7 +2749,7 @@ fn settingsonly_docker_target_is_closed(source: &str) -> bool {
     builder_ok && runtime_ok && default_runtime_unchanged
 }
 
-fn docker_stages(source: &str) -> Vec<DockerStage<'_>> {
+pub(crate) fn docker_stages(source: &str) -> Vec<DockerStage<'_>> {
     let mut stages = Vec::new();
     for line in source.lines().map(str::trim) {
         if line.is_empty() || line.starts_with('#') {
@@ -2354,7 +2777,10 @@ fn docker_stages(source: &str) -> Vec<DockerStage<'_>> {
     stages
 }
 
-fn docker_instruction_arguments<'a>(instruction: &'a str, expected: &str) -> Option<&'a str> {
+pub(crate) fn docker_instruction_arguments<'a>(
+    instruction: &'a str,
+    expected: &str,
+) -> Option<&'a str> {
     let keyword_end = instruction
         .find(char::is_whitespace)
         .unwrap_or(instruction.len());
@@ -5830,14 +6256,17 @@ audit = { path = "../../crates/audit" }
             MetadataTarget {
                 name: "identityaudit".to_owned(),
                 kind: vec!["lib".to_owned()],
+                src_path: PathBuf::new(),
             },
             MetadataTarget {
                 name: "identityaudit-server".to_owned(),
                 kind: vec!["bin".to_owned()],
+                src_path: PathBuf::new(),
             },
             MetadataTarget {
                 name: "identityaudit_artifact_acceptance".to_owned(),
                 kind: vec!["test".to_owned()],
+                src_path: PathBuf::new(),
             },
         ]
     }
@@ -5869,6 +6298,7 @@ audit = { path = "../../crates/audit" }
         let lib_only = [MetadataTarget {
             name: "identityaudit".to_owned(),
             kind: vec!["lib".to_owned()],
+            src_path: PathBuf::new(),
         }];
         let findings = validate_identityaudit_boundary(
             "assemblies/identityaudit/assembly.toml",
@@ -6097,6 +6527,12 @@ audit = { path = "../../crates/audit" }
         assert!(!identityaudit_journey_has_required_test(
             "#[tokio::test]\nasync fn identityaudit_login_audit_ready_sigterm_drain() -> anyhow::Result<()> { Ok(()) }"
         )?);
+        assert!(!identityaudit_journey_has_required_test(
+            "#[tokio::test]\nasync fn identityaudit_login_audit_ready_sigterm_drain() -> anyhow::Result<()> { if false { let mut runtime = RuntimeFixture::start(providers).await?; runtime.wait_until_ready().await?; let login = runtime.login().await?; wait_for_auth_audit(&pool).await?; wait_for_session_created_hash_chain(&pool, &login).await?; runtime.send_sigterm()?; runtime.wait_for_drain().await?; } Ok(()) }"
+        )?);
+        assert!(!identityaudit_journey_has_required_test(
+            "#[tokio::test]\nasync fn identityaudit_login_audit_ready_sigterm_drain() -> anyhow::Result<()> { let dead = || { let mut runtime = RuntimeFixture::start(providers); runtime.wait_until_ready(); let login = runtime.login(); wait_for_auth_audit(&pool); wait_for_session_created_hash_chain(&pool, &login); runtime.send_sigterm(); runtime.wait_for_drain(); }; Ok(()) }"
+        )?);
         Ok(())
     }
 
@@ -6129,6 +6565,7 @@ ENTRYPOINT ["/usr/local/bin/server"]
             artifact_acceptance: true,
             journey_target_declared: true,
             required_journey_test_declared: true,
+            runtimeexec_launch_is_live: true,
             dockerfile,
         }
     }
@@ -6140,14 +6577,17 @@ ENTRYPOINT ["/usr/local/bin/server"]
             MetadataTarget {
                 name: "settingsonly".to_owned(),
                 kind: vec!["lib".to_owned()],
+                src_path: PathBuf::new(),
             },
             MetadataTarget {
                 name: "settingsonly-server".to_owned(),
                 kind: vec!["bin".to_owned()],
+                src_path: PathBuf::new(),
             },
             MetadataTarget {
                 name: "settingsonly_artifact_acceptance".to_owned(),
                 kind: vec!["test".to_owned()],
+                src_path: PathBuf::new(),
             },
         ];
         let required = SETTINGSONLY_ALLOWED_NORMAL_WORKSPACE_PACKAGES
@@ -6300,9 +6740,40 @@ ENTRYPOINT ["/usr/local/bin/server"]
             );
         }
 
-        assert!(settingsonly_journey_has_required_test(
-            "#[tokio::test]\nasync fn settingsonly_lifecycle_fixture_ready_request_sigterm_drain() { run().await; }"
+        assert!(!settingsonly_journey_has_required_test(
+            "#[tokio::test]\nasync fn settingsonly_lifecycle_fixture_ready_request_sigterm_drain() { return; }"
         )?);
+        assert!(settingsonly_journey_has_required_test(include_str!(
+            "../../journeys/tests/settingsonly_runtime.rs"
+        ))?);
+        Ok(())
+    }
+
+    #[test]
+    fn subset_health_inventory_requires_live_runtimeexec_launch_chain() -> anyhow::Result<()> {
+        let lib = "fn run() { runtime.block_on(runtime::launch_captured(captured)); }";
+        let direct = "async fn launch_captured() { let plan = runtimeexec::StartupPlan::new(startup, budget); runtimeexec::launch_startup(plan).await; }";
+        assert!(subset_runtimeexec_launch_sources_are_live(lib, direct)?);
+
+        let delegated = "async fn launch(startup: S) { let plan = runtimeexec::StartupPlan::new(startup, budget); runtimeexec::launch_startup(plan).await; } async fn launch_captured() { launch(startup).await; }";
+        assert!(subset_runtimeexec_launch_sources_are_live(lib, delegated)?);
+
+        let dead = "async fn launch_captured() { if false { let plan = runtimeexec::StartupPlan::new(startup, budget); runtimeexec::launch_startup(plan).await; } }";
+        assert!(!subset_runtimeexec_launch_sources_are_live(lib, dead)?);
+        assert!(!subset_runtimeexec_launch_sources_are_live(
+            "fn run() {}",
+            direct
+        )?);
+        for opaque in [
+            "async fn launch_captured() { let dead = || { let plan = runtimeexec::StartupPlan::new(startup, budget); runtimeexec::launch_startup(plan); }; }",
+            "async fn launch_captured() { let dead = async { let plan = runtimeexec::StartupPlan::new(startup, budget); runtimeexec::launch_startup(plan).await; }; }",
+            "async fn launch_captured() { const _: () = { runtimeexec::StartupPlan::new(startup, budget); runtimeexec::launch_startup(plan); }; }",
+        ] {
+            assert!(
+                !subset_runtimeexec_launch_sources_are_live(lib, opaque)?,
+                "opaque scope satisfied live launch chain: {opaque}"
+            );
+        }
         Ok(())
     }
 

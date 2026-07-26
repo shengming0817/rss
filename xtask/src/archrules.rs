@@ -2796,6 +2796,11 @@ const XTASK_GATE_DECLARATIONS: &[GateDeclaration] = &[
         role: GateDeclarationRole::PlanStep,
     },
     GateDeclaration {
+        path: "xtask/src/assembly_artifacts.rs",
+        tokens: META_TOKENS,
+        role: GateDeclarationRole::PlanStep,
+    },
+    GateDeclaration {
         path: "xtask/src/assembly_codegen.rs",
         tokens: META_TOKENS,
         role: GateDeclarationRole::PlanStep,
