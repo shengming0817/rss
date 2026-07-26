@@ -1,5 +1,40 @@
 {
   "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "spawn_agent|Agent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ROOT=$(/usr/bin/git rev-parse --show-toplevel 2>/dev/null) || exit 0; PY=\"$ROOT/.venv/bin/python\"; [ -x \"$PY\" ] || PY=/usr/bin/python3; [ -x \"$PY\" ] || exit 0; exec \"$PY\" \"$ROOT/.codex/hooks/token_guard.py\"",
+            "timeout": 5,
+            "statusMessage": "token_guard: rewrite spawn fork_turns"
+          }
+        ]
+      },
+      {
+        "matcher": "wait_agent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ROOT=$(/usr/bin/git rev-parse --show-toplevel 2>/dev/null) || exit 0; PY=\"$ROOT/.venv/bin/python\"; [ -x \"$PY\" ] || PY=/usr/bin/python3; [ -x \"$PY\" ] || exit 0; exec \"$PY\" \"$ROOT/.codex/hooks/token_guard.py\"",
+            "timeout": 5,
+            "statusMessage": "token_guard: rewrite short wait_agent timeouts"
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ROOT=$(/usr/bin/git rev-parse --show-toplevel 2>/dev/null) || exit 0; PY=\"$ROOT/.venv/bin/python\"; [ -x \"$PY\" ] || PY=/usr/bin/python3; [ -x \"$PY\" ] || exit 0; exec \"$PY\" \"$ROOT/.codex/hooks/token_guard.py\"",
+            "timeout": 5,
+            "statusMessage": "token_guard: rewrite empty write_stdin polls"
+          }
+        ]
+      }
+    ],
     "UserPromptSubmit": [
       {
         "hooks": [

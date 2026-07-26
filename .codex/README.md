@@ -1,12 +1,18 @@
-# prmonitor 通知与人工问答
+# Codex hooks 与 prmonitor
 
-本目录为 RSS 项目启用两条互补路径：
+本目录为 RSS 项目启用三类能力：
 
-- `hooks.json` 在 Codex 等待原生人工输入、等待权限批准、等待计划批准和任务停止时，
+- `hooks.json` → `token_guard.py`：`PreToolUse` **改写**（不 deny）高耗默认参数，避免模型整轮重试。
+  - `spawn_agent` / `Agent`：缺省 / `all` / `>3` 的 `fork_turns` → `none`（Codex 源码省略时默认 `all`）。
+  - `wait_agent`：缺省 / `<300s` 的 `timeout_ms` → `600s`（硬顶 `3600s`）。保留多 agent 后台并行，但减少父会话满上下文密轮询；子 agent 有 mailbox 活动时仍可能提前返回（V2）。
+  - `Bash`：命令字符串里对空 `write_stdin` 密 poll 抬高 `yield_time_ms`（原生 `write_stdin` 工具故意不走 PreToolUse，只能拦嵌在 Bash/exec 里的写法）。code-mode `wait` 上游禁用 PreToolUse，无法改写。
+- `hooks.json` → `prmonitor_hook.py`：等待原生人工输入、权限批准、计划批准和任务停止时，
   通过 prmonitor 消息基础通道发送无按钮信息卡片；等待类使用橙色，普通 Stop 使用灰色。
 - `config.toml` 启用全局定义的 `prmonitor_human` MCP。Codex 需要用户回答问题、
   选择方案或批准计划时，优先调用 `ask_via_feishu`；Codex 弹窗和飞书卡片中
   首个有效回答获胜。
+
+可选调试：设置环境变量 `CODEX_TOKEN_GUARD_LOG=/tmp/token_guard.jsonl` 记录改写事件。
 
 信息卡片不接收回答。工具执行权限和沙箱批准仍使用 Codex 原生审批；需要可靠双向回答时，
 使用 MCP `ask_via_feishu` 创建带按钮的交互卡片，由 Codex 弹窗与飞书 first-wins。
@@ -43,7 +49,6 @@
   ]
 }
 ```
-
 
 原生 `request_user_input` 尚无独立稳定 hook 事件，因此当前 watcher 只是 best-effort
 兼容层：它通过有版本边界的 parser 读取新增 transcript 记录，未知格式与投递失败只写
@@ -134,5 +139,6 @@ Hook 依赖 prmonitor CLI 的 `message send-card` 子命令。卡片只有 heade
 1. 普通任务停止只收到一张灰色“任务已停止”信息卡片，无按钮。
 2. 原生 `request_user_input` 收到一张橙色“等待人工输入”信息卡片，无按钮。
 3. `ask_via_feishu` 同时显示 Codex 弹窗和飞书卡片；任一端回答后另一端关闭或失效。
+   Codex 弹窗若返回 Decline/Cancel（含 Desktop 无弹窗自动 Decline），飞书卡片继续等待至超时或作答。
 4. 计划批准只发送一张交互卡片，不再由 Stop hook 重复发送计划消息。
 5. 工具权限请求仍由 Codex 原生权限弹窗处理，hook 仅发送橙色无按钮信息卡片。

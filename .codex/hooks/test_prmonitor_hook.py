@@ -104,7 +104,10 @@ class PrmonitorHookTest(unittest.TestCase):
 
     def test_config_uses_supported_events_and_prefers_venv(self):
         config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-        self.assertEqual(set(config["hooks"]), {"UserPromptSubmit", "PermissionRequest", "Stop"})
+        self.assertEqual(
+            set(config["hooks"]),
+            {"PreToolUse", "UserPromptSubmit", "PermissionRequest", "Stop"},
+        )
         for groups in config["hooks"].values():
             command = groups[0]["hooks"][0]["command"]
             self.assertIn(".venv/bin/python", command)

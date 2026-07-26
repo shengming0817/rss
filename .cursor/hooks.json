@@ -19,6 +19,20 @@
         "matcher": "Task",
         "failClosed": true
       }
+    ],
+    "beforeSubmitPrompt": [
+      {
+        "command": "ROOT=$(/usr/bin/git rev-parse --show-toplevel 2>/dev/null) || exit 0; PY=\"$ROOT/.venv/bin/python\"; [ -x \"$PY\" ] || PY=/usr/bin/python3; [ -x \"$PY\" ] || { printf '%s\\n' '{\"continue\":true}'; exit 0; }; export CODEX_PRMONITOR_STATE_DIR=\"${TMPDIR:-/tmp}/cursor-prmonitor\"; INPUT=$(cat); NORM=$(printf '%s' \"$INPUT\" | \"$PY\" -c 'import json,sys; e=json.load(sys.stdin); e[\"hook_event_name\"]=\"UserPromptSubmit\"; e.setdefault(\"session_id\", str(e.get(\"conversation_id\") or \"\")); e.setdefault(\"turn_id\", str(e.get(\"generation_id\") or e.get(\"session_id\") or \"\")); roots=e.get(\"workspace_roots\") or []; e.setdefault(\"cwd\", roots[0] if roots else \"\"); json.dump(e, sys.stdout)'); printf '%s' \"$NORM\" | \"$PY\" \"$ROOT/.codex/hooks/prmonitor_hook.py\" >/dev/null 2>&1 || true; printf '%s\\n' '{\"continue\":true}'",
+        "failClosed": false,
+        "timeout": 10
+      }
+    ],
+    "stop": [
+      {
+        "command": "ROOT=$(/usr/bin/git rev-parse --show-toplevel 2>/dev/null) || exit 0; PY=\"$ROOT/.venv/bin/python\"; [ -x \"$PY\" ] || PY=/usr/bin/python3; [ -x \"$PY\" ] || exit 0; export CODEX_PRMONITOR_STATE_DIR=\"${TMPDIR:-/tmp}/cursor-prmonitor\"; INPUT=$(cat); NORM=$(printf '%s' \"$INPUT\" | \"$PY\" -c 'import json,sys; e=json.load(sys.stdin); e[\"hook_event_name\"]=\"Stop\"; e.setdefault(\"stop_reason\", str(e.get(\"status\") or \"Cursor agent stopped\")); e.setdefault(\"session_id\", str(e.get(\"conversation_id\") or \"\")); e.setdefault(\"turn_id\", str(e.get(\"generation_id\") or e.get(\"session_id\") or \"\")); roots=e.get(\"workspace_roots\") or []; e.setdefault(\"cwd\", roots[0] if roots else \"\"); json.dump(e, sys.stdout)'); printf '%s' \"$NORM\" | \"$PY\" \"$ROOT/.codex/hooks/prmonitor_hook.py\" >/dev/null 2>&1 || true; printf '%s\\n' '{}'",
+        "failClosed": false,
+        "timeout": 30
+      }
     ]
   }
 }
