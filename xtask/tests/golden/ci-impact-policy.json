@@ -6,6 +6,7 @@
     "docs/ops/localtx-alerts.rules.yaml",
     "docs/spec/007-runtime-deployment-executable-plan/contracts/assembly-lock.schema.json",
     "docs/spec/007-runtime-deployment-executable-plan/contracts/runtime-plan.schema.json",
+    "docs/spec/007-runtime-deployment-executable-plan/contracts/deployment-plan.schema.json",
     "docs/spec/007-runtime-deployment-executable-plan/fixtures/fingerprint-v1-vectors.json"
   ],
   "requiredEvidenceOwners": [

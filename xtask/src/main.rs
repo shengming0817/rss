@@ -13,6 +13,8 @@
 //!                                      assembly.toml providers → committed typed provider catalog
 //!   `cargo xtask assembly lock generate|check`
 //!                                      全仓 v1 assembly.lock.json 原子生成 / raw-byte 漂移门
+//!   `cargo xtask deployment plan render|check`
+//!                                      RuntimePlan-bound DeploymentPlan exact-set 生成 / 漂移门
 //!   `cargo xtask graph assembly [--assembly <name>] [--format mermaid|json] [--check]`
 //!                                      assembly 静态声明图；runtime 双格式 committed，--check 守漂移
 //!   `cargo xtask archrules list|verify|matrix [--write|--check]`
@@ -100,6 +102,7 @@ mod contract;
 mod contract_binding_guard;
 mod coverage;
 mod defergate;
+mod deployment_plan;
 mod diagnostic;
 mod diffcov;
 mod dlx_lifecycle_funnel;
@@ -170,6 +173,7 @@ enum Command {
         check: bool,
     },
     AssemblyLock(assembly_lock::AssemblyLockAction),
+    DeploymentPlan(deployment_plan::Action),
     GraphAssembly(graph::Options),
     ArchRulesList,
     ArchRulesVerify,
@@ -284,6 +288,15 @@ fn parse_command(args: &[String]) -> Result<Command> {
         ["runtime-env", rest @ ..] => parse_runtime_env(rest),
         ["contract", rest @ ..] => parse_contract(rest),
         ["assembly", rest @ ..] => parse_assembly(rest),
+        ["deployment", "plan", "render"] => {
+            Ok(Command::DeploymentPlan(deployment_plan::Action::Render))
+        }
+        ["deployment", "plan", "check"] => {
+            Ok(Command::DeploymentPlan(deployment_plan::Action::Check))
+        }
+        ["deployment", ..] => {
+            bail!("invalid deployment command; use `cargo xtask deployment plan render|check`")
+        }
         ["graph", rest @ ..] => graph::parse(rest).map(Command::GraphAssembly),
         ["layer-deps"] => Ok(Command::LayerDeps),
         ["wsdeps-drift"] => Ok(Command::WsDepsDrift),
@@ -687,6 +700,7 @@ fn dispatch(args: &[String]) -> Result<()> {
         Command::AssemblyGenerateModules { check } => assembly_codegen::run(check),
         Command::AssemblyGenerateProviders { check } => assembly_codegen::run_providers(check),
         Command::AssemblyLock(action) => assembly_lock::run(action),
+        Command::DeploymentPlan(action) => deployment_plan::run(action),
         Command::GraphAssembly(options) => graph::run(&options),
         Command::ArchRulesList => archrules::list(),
         Command::ArchRulesVerify => diagnostic::run_check(&archrules::ArchRules),

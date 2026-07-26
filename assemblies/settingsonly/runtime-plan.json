@@ -1,0 +1,65 @@
+{
+  "schemaVersion": 1,
+  "assemblyFingerprint": "sha256:de83dad19129ffdb7ea15811296bceb2b76d35793b35d34f5e7e33c601ceaf70",
+  "runtimePlanFingerprint": "sha256:f688c7f3ac2ebb25a570c2073c8bdaf23ca2e35682a16c189792b54ac6b0aa29",
+  "providerPlans": [
+    {
+      "id": "listener-pdp",
+      "constructor": "oidc::OidcProvider",
+      "outputs": [
+        "resources"
+      ]
+    },
+    {
+      "id": "listener-rate-limiter",
+      "constructor": "ratelimit::GovernorLimiter",
+      "outputs": []
+    },
+    {
+      "id": "settings-key-provider",
+      "constructor": "vault::VaultKeyProvider",
+      "outputs": [
+        "resources"
+      ]
+    },
+    {
+      "id": "settings-secret-resolver",
+      "constructor": "vault::VaultSecretResolver",
+      "outputs": [
+        "resources"
+      ]
+    }
+  ],
+  "listenerPlans": [
+    {
+      "id": "health-main",
+      "kind": "health",
+      "auth": "noAuth",
+      "domains": []
+    },
+    {
+      "id": "primary-main",
+      "kind": "primary",
+      "auth": "federatedAccessToken",
+      "domains": [
+        "settings"
+      ]
+    }
+  ],
+  "domainPlans": [
+    {
+      "id": "settings",
+      "lifecycle": [
+        "construct",
+        "ready",
+        "shutdown"
+      ]
+    }
+  ],
+  "placementPlans": [
+    {
+      "domain": "settings",
+      "workload": "settingsonly"
+    }
+  ]
+}

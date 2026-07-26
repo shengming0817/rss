@@ -1,0 +1,73 @@
+{
+  "schemaVersion": 1,
+  "assemblyFingerprint": "sha256:de83dad19129ffdb7ea15811296bceb2b76d35793b35d34f5e7e33c601ceaf70",
+  "runtimePlanFingerprint": "sha256:f688c7f3ac2ebb25a570c2073c8bdaf23ca2e35682a16c189792b54ac6b0aa29",
+  "deploymentFingerprint": "sha256:dab206c4f6c16ebadba0a9c04dab2408135c873dbbec3d2807d529885d969a7b",
+  "workloads": [
+    {
+      "name": "settingsonly",
+      "image": "ghcr.io/gocell/rss-settingsonly@sha256:e3f9c79d3f396df5434290783e22d87226b85cfbbcb9e30ce8f09163257a3ec2",
+      "identity": {
+        "name": "settingsonly",
+        "serviceAccount": "settingsonly"
+      },
+      "secretRefs": [
+        {
+          "kind": "kubernetesSecret",
+          "name": "rss-settingsonly",
+          "key": "oidc-client-secret"
+        },
+        {
+          "kind": "vaultRef",
+          "storeId": "rss-vault",
+          "refKey": "settingsonly/keyring"
+        }
+      ],
+      "resources": {
+        "requests": {
+          "cpu": "100m",
+          "memory": "128Mi"
+        },
+        "limits": {
+          "cpu": "1",
+          "memory": "512Mi"
+        }
+      },
+      "probes": [
+        {
+          "kind": "startup",
+          "path": "/health/v1/healthz",
+          "port": 8081
+        },
+        {
+          "kind": "readiness",
+          "path": "/health/v1/readyz",
+          "port": 8081
+        },
+        {
+          "kind": "liveness",
+          "path": "/health/v1/healthz",
+          "port": 8081
+        }
+      ]
+    }
+  ],
+  "services": [
+    {
+      "name": "settingsonly",
+      "workload": "settingsonly",
+      "ports": [
+        {
+          "name": "health",
+          "port": 8081,
+          "exposure": "serviceExposed"
+        },
+        {
+          "name": "http",
+          "port": 8080,
+          "exposure": "serviceExposed"
+        }
+      ]
+    }
+  ]
+}

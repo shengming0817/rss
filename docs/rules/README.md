@@ -64,6 +64,7 @@
 | [`runtime-api.md`](runtime-api.md) | Runtime HTTP / route 硬约束 |
 | [`runtime-wiring.md`](runtime-wiring.md) | 运行时接线与 SharedRuntimeDeps |
 | [`runtime-assembly-plan.md`](runtime-assembly-plan.md) | runtime assembly 系列补充规则 |
+| [`runtime-deployment-plan.md`](runtime-deployment-plan.md) | RuntimePlan 到 DeploymentPlan 的身份与 secret 边界 |
 | [`eventbus.md`](eventbus.md) | EventBus / outbox |
 | [`localtx.md`](localtx.md) | LocalTx |
 | [`consistency-l0.md`](consistency-l0.md) | L0 LocalOnly |

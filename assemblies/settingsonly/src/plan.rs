@@ -244,4 +244,16 @@ mod tests {
                 .collect::<Vec<_>>()
         );
     }
+
+    #[test]
+    fn bundled_plan_json_matches_committed_runtime_plan() {
+        let plan = SettingsOnlyPlan::bundled().expect("bundled settingsonly plan");
+        let mut actual = serde_json::to_string_pretty(plan.as_typed()).expect("RuntimePlan JSON");
+        actual.push('\n');
+        assert_eq!(
+            actual.as_bytes(),
+            include_bytes!("../runtime-plan.json"),
+            "settingsonly RuntimePlan artifact drift"
+        );
+    }
 }

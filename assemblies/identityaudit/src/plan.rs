@@ -186,4 +186,17 @@ mod tests {
         );
         Ok(())
     }
+
+    #[test]
+    fn bundled_plan_json_matches_committed_runtime_plan() -> anyhow::Result<()> {
+        let plan = IdentityAuditPlan::bundled()?;
+        let mut actual = serde_json::to_string_pretty(plan.as_typed())?;
+        actual.push('\n');
+        assert_eq!(
+            actual.as_bytes(),
+            include_bytes!("../runtime-plan.json"),
+            "identityaudit RuntimePlan artifact drift"
+        );
+        Ok(())
+    }
 }

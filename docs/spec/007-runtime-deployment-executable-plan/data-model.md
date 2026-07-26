@@ -4,8 +4,9 @@
 
 The repository has canonical AssemblyLock generation/check, a process-lifetime
 `RuntimeConfigSnapshot`, and a closed typed RuntimePlan v1 carrying the upstream
-`assemblyFingerprint` and its own `runtimePlanFingerprint`. DeploymentPlan, protected
-RuntimeInventory, and the complete live/deployment evidence chain remain target models.
+`assemblyFingerprint` and its own `runtimePlanFingerprint`. DeploymentPlan v1 is also a closed
+typed protocol with three committed RuntimePlan-bound generated plans. Protected RuntimeInventory
+and the complete live/deployment evidence chain remain target models.
 
 ## 目标能力
 
@@ -73,9 +74,11 @@ Required fields:
 
 - `schemaVersion`, `assemblyFingerprint`, `runtimePlanFingerprint`, and `deploymentFingerprint`.
 - workloads with immutable image digests, identity references, resource facts, probes, and typed secret references.
-- services with workload references and closed port facts.
+- services with workload references and closed port facts. Every RuntimePlan listener has an
+  explicit port exposure: Primary/Admin/Health use `serviceExposed`, while Internal uses
+  `workloadOnly`; no listener disappears through renderer convention.
 
-`deploymentFingerprint` covers `{schemaVersion, assemblyFingerprint, runtimePlanFingerprint, workloads, services}` and excludes itself. Rendering must not infer identities, secrets, or resources; probe completeness is closed by #1802/#1805 policy per assembly rather than forcing all three probe kinds on every workload. #1802 owns changed-input/self-field red tests and schema-to-render golden.
+`deploymentFingerprint` covers `{schemaVersion, assemblyFingerprint, runtimePlanFingerprint, workloads, services}` and excludes itself. `DeploymentPlan::compile_v1` is the only compiler and copies both upstream fingerprints from a validated RuntimePlan. The only public reader receives that RuntimePlan and exact-matches both identities before returning a plan. Rendering consumes the verified artifact matrix plus the closed deployment block in `assemblies/artifacts.toml`; it does not infer identities, secrets, or resources. The committed runtime/settingsonly/identityaudit JSON files are an exact generated set guarded by raw-byte drift checks. Probe completeness remains assembly-specific rather than forcing all probe kinds on every workload.
 
 ### RuntimeInventory
 
@@ -147,6 +150,7 @@ There is no migration graph in this baseline. Consumers will accept version 1 an
 | RuntimePlan-driven live transition | #1789–#1794 | Landed Hard typestate/catalog/domain capability; Medium closure and root ratchets |
 | runtimeexec and subset artifacts | #1795–#1798 | Hard launch graph; Medium artifact matrix |
 | production security state | #1799–#1801 | Hard type/database/manifest constraints |
-| DeploymentPlan and Helm | #1802–#1805 | Hard schema/render; Medium deployment acceptance |
+| DeploymentPlan | #1802 | Landed Hard protocol/compiler/strict bound reader/schema; Medium exact generated-set drift gate |
+| Helm and deployment acceptance | #1803–#1805 | Hard render/policy types; Medium deployment acceptance |
 | RuntimeInventory | #1806 | Hard DTO/codegen; Medium authorization surface |
 | EvidenceReceipt | #1807–#1809 | Medium OCI and local aggregate verifiers |

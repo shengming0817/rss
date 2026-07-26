@@ -530,6 +530,17 @@ macro_rules! gate_catalog {
                         BOTH_INCLUDED,
                     )
             ),
+            DeploymentPlanCheck => (step_deployment_plan_check, Some("xtask/src/deployment_plan.rs"),
+                gate(
+                        GateId::DeploymentPlanCheck,
+                        "deployment-plan-check",
+                        META,
+                        CompileKind::NoCompile,
+                        INTERNAL,
+                        SOURCE,
+                        BOTH_INCLUDED,
+                    )
+            ),
             AssemblyGraphCheck => (step_assembly_graph_check, Some("xtask/src/graph.rs"),
                 gate(
                         GateId::AssemblyGraphCheck,

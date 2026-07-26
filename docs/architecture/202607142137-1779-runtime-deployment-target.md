@@ -10,11 +10,11 @@
 
 | Fact | Repository evidence | Consequence |
 |---|---|---|
-| Runtime plan has typed identity but does not yet drive live wiring | `assembly-schema` owns the closed v1 protocol/strict reader and provider registry; each assembly compiles a generated typed provider constructor catalog, while `assemblies/runtime/src/plan/**` compiles the bundled manifest, lock, and snapshot-backed listener auth before startup continues through handwritten wiring | plan/catalog identity and diagnostics are stable; #1792–#1794 still close live topology |
+| RuntimePlan drives the live typed topology | `assembly-schema` owns the closed v1 protocol/strict reader and provider registry; each assembly compiles a generated typed provider constructor catalog, and the unique runtime phase chain consumes listener, domain, placement, and auth facts without a handwritten compatibility path | plan identity and live topology are closed by the landed #1789–#1794 carriers |
 | Serving configuration is one captured generation | `RuntimeConfigSnapshot` and the runtime environment funnel cover serving/operator consumers; RuntimePlan receives only the borrowed snapshot capability | raw configuration and secrets cannot enter the plan artifact |
 | Settings-only assembly is an executable fail-closed closure | `assemblies/settingsonly` owns `settingsonly-server`, a closed config parser and Draft-07 schema, Primary and domain-free Health listeners, Postgres/Vault/JWKS/Settings probes, the `runtimeexec` launch path, a SIGTERM journey, and the `settingsonly-runtime` image target | Settings can be deployed as an independently runnable closure; Identity and Audit are intentionally absent, so invalid credentials receive 401 and every verified credential receives 403 |
-| Identity-audit assembly remains a compile-time closure | `assemblies/identityaudit` has its manifest and generated module/provider catalogs but no launch binary, probes, config schema, image target, or journey | its executable closure remains a later assembly boundary |
-| Deployment is demo-oriented | `deploy/docker-compose.yml` is the supported demo stack (`docs/ops/202606271438-003-container-image.md`); no `deploy/helm/rss` tree exists | assembly identity cannot be checked against Kubernetes output |
+| Identity-audit assembly is an executable subset closure | `assemblies/identityaudit` owns its launch binary, closed configuration schema, probes, image target, SIGTERM journey, and shared `runtimeexec` lifecycle | Identity/Audit has an independently runnable, fail-closed assembly profile |
+| Runtime-bound DeploymentPlan is landed | `assembly-schema` compiles the exact RuntimePlan identity with closed deployment facts; `cargo xtask deployment plan render|check` owns the committed runtime, settingsonly, and identityaudit JSON exact set | deployment identity and raw-byte drift are verifiable before future Helm/policy/kind acceptance |
 | CI evidence is local/shadow | `README.md` records the typed `ci-gate` and Azure active forge, while the gate is not a required forge check | future evidence must extend the local gate without claiming branch protection |
 
 `docs/spec/001-runtime-assembly-plan/` is superseded, immutable audit lineage. It is not an active reader, schema version, alias, or compatibility surface.
@@ -41,8 +41,8 @@ assembly.toml + generated modules/providers + contracts
 - **runtimeexec** owns provider-independent startup and typed lifecycle transitions for the full
   runtime and settingsonly. The identityaudit executable closure and the existing cross-assembly
   artifact-matrix boundary remain with #1797–#1798.
-- Production security posture will close persistent revocation, Vault allowlists, and production manifest requirements (#1799–#1801).
-- **DeploymentPlan** will derive renderable deployment facts from assembly identity; Helm, policy, and kind acceptance will detect drift (#1802–#1805).
+- Production security posture closes persistent revocation, Vault allowlists, and production manifest requirements through the landed #1799–#1801 carriers.
+- **DeploymentPlan** derives typed deployment facts from the exact RuntimePlan identity and renders three committed canonical JSON plans (#1802). Helm, policy, and kind acceptance remain downstream (#1803–#1805).
 - **RuntimeInventory** will expose authorized typed runtime evidence. Its design schema here is not the HTTP wire source; #1806 must add the formal `contracts/http/**` contract with auth mode `permission|serviceOwned` and explicit resource sharing `tenantScoped|global`; `public|bootstrap|clientsOnly` are rejected.
 - OCI evidence and the existing local `ci-gate` will verify exact source SHA, assembly/runtime-plan/deployment fingerprints, and same-head receipts (#1807–#1809).
 
@@ -67,9 +67,9 @@ The four Draft-07 files under the active SpecKit freeze only the minimum downstr
 | `deployment-plan.schema.json` | assembly/runtime-plan/deployment fingerprints, immutable images, workloads/services/probes/identities/secret refs/resources | #1802 |
 | `runtime-inventory.schema.json` | build identity, all three fingerprints, domains/listeners/provider posture/placements | #1806 |
 
-AssemblyLock and RuntimePlan now have matching Rust types, strict readers, generators/compilers and
-goldens. DeploymentPlan and RuntimeInventory remain design contracts; this table does not claim
-their renderers, endpoints, or gates already exist.
+AssemblyLock, RuntimePlan, and DeploymentPlan now have matching Rust types, strict readers,
+generators/compilers, and goldens. RuntimeInventory remains a design contract; this table does not
+claim its endpoint or downstream Helm/policy/kind evidence already exists.
 
 ## 缺口与 owner
 
@@ -80,16 +80,22 @@ their renderers, endpoints, or gates already exist.
 | fingerprinted typed plan identity | #1788 | Hard private protocol/compiler/reader/schema/golden |
 | plan-driven live cutover | #1792–#1794 | Landed: Hard typed dispatch/domain capability; Medium bijection, aggregate closure, and root ratchet |
 | reusable launch and settingsonly runnable closure | #1795–#1796 | Landed: Hard runtimeexec graph and closed Settings launch types; Medium schema, journey, and image closure |
-| identityaudit runnable closure and cross-assembly artifact matrix | #1797–#1798 | Planned: Hard assembly launch path; Medium artifact closure |
-| production security posture | #1799–#1801 | Hard types, database constraints, and manifest validation |
-| Kubernetes deployment fact chain | #1802–#1805 | Hard plan schema-to-golden; Medium Helm drift/policy/kind acceptance |
+| identityaudit runnable closure and cross-assembly artifact matrix | #1797–#1798 | Landed: Hard assembly launch path; Medium artifact closure |
+| production security posture | #1799–#1801 | Landed: Hard types, database constraints, and manifest validation |
+| Runtime-bound DeploymentPlan | #1802 | Landed: Hard schema/compiler/bound reader; Medium exact artifact closure |
+| Kubernetes render and acceptance | #1803–#1805 | Hard Helm/policy types; Medium drift/policy/kind acceptance |
 | protected inventory wire surface | #1806 | Hard DTO/codegen plus Medium authorization verification |
 | release and aggregate evidence | #1807–#1809 | Medium OCI verifier and extended local `ci-gate` |
 
-Until each owner lands its carrier, the row describes a planned capability only and must not be represented as present production closure.
+Rows explicitly marked Landed describe current repository carriers; the remaining rows describe
+planned capability and must not be represented as present production closure.
 
 ## Consequences
 
 - 007 directly replaces 001 as the active plan, while 001 remains unchanged for audit lineage.
 - DeploymentPlan follows the landed #1794 live RuntimePlan cutover; the tracker and 52-edge DAG retain this dependency for audit lineage.
-- #1779 implements the repository specification carrier, registers its selftest in the typed `verify --fast` Meta aggregate, and supplies schemas, fixtures, and target documents only. Runtime Rust types, generated deployment output, Helm, workflows, active-PR scheduling, and branch protection remain with downstream owners.
+- #1779 established the repository specification carrier and registered its selftest in the typed
+  `verify --fast` Meta aggregate. Subsequent owners through #1802 landed the RuntimePlan execution
+  chain, three runnable assembly profiles, and generated DeploymentPlan output. Helm,
+  policy/kind acceptance, RuntimeInventory, and OCI same-head/signature receipts remain with their
+  downstream owners.

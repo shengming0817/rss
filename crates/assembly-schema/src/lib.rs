@@ -1,11 +1,21 @@
 #[doc(hidden)]
 pub mod contract_manifest;
+mod deployment;
 mod lock;
 mod provider;
 #[doc(hidden)]
 pub mod repository_contract;
 mod runtime_plan;
 
+pub use deployment::{
+    DeploymentFingerprint, DeploymentIdentityV1Input, DeploymentPlan, DeploymentPlanError,
+    DeploymentPlanErrorStage, DeploymentPlanJsonCategory, DeploymentPlanJsonPath,
+    DeploymentPlanV1Input, DeploymentServiceV1Input, DeploymentWorkloadV1Input,
+    KubernetesSecretName, ParsedDeploymentPlan, PortExposure, PortPlan, PortV1Input, ProbeKind,
+    ProbePlan, ProbeV1Input, ResourceList, ResourceListV1Input, ResourceRequirements,
+    ResourceRequirementsV1Input, SecretRef, SecretRefKind, SecretRefV1Input, ServicePlan,
+    WorkloadIdentity, WorkloadPlan,
+};
 pub use lock::{
     AssemblyDigests, AssemblyFingerprint, AssemblyIdentity, AssemblyLock, AssemblyLockError,
     AssemblyLockErrorStage, GENERATED_MODULE_OWNERSHIP_MARKER, GENERATED_PROVIDER_OWNERSHIP_MARKER,

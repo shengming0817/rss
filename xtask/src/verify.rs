@@ -98,6 +98,8 @@ enum InternalCheck {
     AssemblyProvidersCheck,
     /// repository-verified committed assembly.lock.json raw-byte 漂移门（#1781）。
     AssemblyLockCheck,
+    /// RuntimePlan-bound DeploymentPlan exact generated-set raw-byte 漂移门（#1802）。
+    DeploymentPlanCheck,
     /// committed runtime assembly Mermaid/JSON graph 漂移与 source closure 门。
     AssemblyGraphCheck,
     /// wire JSON-Schema/manifest 跨版本破坏检测门（ADR-008，WIRE-BREAKING-01）。
@@ -282,6 +284,14 @@ fn step_assembly_lock_check() -> Step {
         id: GateId::AssemblyLockCheck,
         args: &[],
         kind: StepKind::Internal(InternalCheck::AssemblyLockCheck),
+        env: &[],
+    }
+}
+fn step_deployment_plan_check() -> Step {
+    Step {
+        id: GateId::DeploymentPlanCheck,
+        args: &[],
+        kind: StepKind::Internal(InternalCheck::DeploymentPlanCheck),
         env: &[],
     }
 }
@@ -1323,6 +1333,9 @@ fn run_internal(check: InternalCheck, opts: &VerifyOpts, root: &Path) -> Result<
         InternalCheck::AssemblyLockCheck => {
             assembly_lock::run(assembly_lock::AssemblyLockAction::Check)
         }
+        InternalCheck::DeploymentPlanCheck => {
+            crate::deployment_plan::run(crate::deployment_plan::Action::Check)
+        }
         InternalCheck::AssemblyGraphCheck => {
             crate::graph::run(&crate::graph::Options::check_runtime())
         }
@@ -2079,7 +2092,7 @@ mod tests {
 
     #[test]
     fn ci_lane_plans_are_registry_derived_and_partitioned() {
-        assert_eq!(labels(&plan_for(PlanTarget::Lane(CiLane::Meta))).len(), 42);
+        assert_eq!(labels(&plan_for(PlanTarget::Lane(CiLane::Meta))).len(), 43);
         assert_eq!(
             labels(&plan_for(PlanTarget::Lane(CiLane::Security))),
             vec!["deny", "audit"]
@@ -2238,14 +2251,14 @@ mod tests {
     }
 
     #[test]
-    fn ci_lane_compatibility_plan_keeps_62_unique_gates_and_supersedes_nextest() {
+    fn ci_lane_compatibility_plan_keeps_63_unique_gates_and_supersedes_nextest() {
         let plan = plan_for(PlanTarget::CompatibilityCi);
-        assert_eq!(plan.len(), 62);
+        assert_eq!(plan.len(), 63);
         assert!(!labels(&plan).contains(&"default-test-runner"));
         let mut ids: Vec<_> = plan.iter().map(|step| step.id as usize).collect();
         ids.sort_unstable();
         ids.dedup();
-        assert_eq!(ids.len(), 62);
+        assert_eq!(ids.len(), 63);
     }
 
     #[test]
@@ -2283,6 +2296,7 @@ mod tests {
                 "assembly-modules-check",
                 "assembly-providers-check",
                 "assembly-lock-check",
+                "deployment-plan-check",
                 "assembly-graph-check",
                 "contract-breaking",
                 "layer-deps",
@@ -2663,6 +2677,7 @@ mod tests {
                 "assembly-modules-check",
                 "assembly-providers-check",
                 "assembly-lock-check",
+                "deployment-plan-check",
                 "assembly-graph-check",
                 "contract-breaking",
                 "layer-deps",
@@ -2739,6 +2754,7 @@ mod tests {
                     "assembly-modules-check",
                     "assembly-providers-check",
                     "assembly-lock-check",
+                    "deployment-plan-check",
                     "assembly-graph-check",
                     "contract-breaking",
                     "layer-deps",
@@ -2917,6 +2933,7 @@ mod tests {
             GateId::AssemblyModulesCheck,
             GateId::AssemblyProvidersCheck,
             GateId::AssemblyLockCheck,
+            GateId::DeploymentPlanCheck,
             GateId::AssemblyGraphCheck,
         ]
         .map(|id| {
@@ -3116,13 +3133,20 @@ mod tests {
             .iter()
             .position(|step| step.id == GateId::AssemblyLockCheck)
             .context("plan lacks lock check")?;
+        let deployment = plan
+            .iter()
+            .position(|step| step.id == GateId::DeploymentPlanCheck)
+            .context("plan lacks deployment plan check")?;
         let graph = plan
             .iter()
             .position(|step| step.id == GateId::AssemblyGraphCheck)
             .context("plan lacks graph check")?;
         anyhow::ensure!(
-            providers == modules + 1 && lock == providers + 1 && graph == lock + 1,
-            "assembly order must be modules -> providers -> lock -> graph"
+            providers == modules + 1
+                && lock == providers + 1
+                && deployment == lock + 1
+                && graph == deployment + 1,
+            "assembly order must be modules -> providers -> lock -> deployment -> graph"
         );
         Ok(())
     }
@@ -3151,6 +3175,55 @@ mod tests {
             .clone();
         duplicated.push(duplicate);
         assert!(validate_assembly_lock_check(&duplicated).is_err());
+        Ok(())
+    }
+
+    fn validate_deployment_plan_check(plan: &[Step]) -> anyhow::Result<()> {
+        let members = plan
+            .iter()
+            .filter(|step| step.id == GateId::DeploymentPlanCheck)
+            .collect::<Vec<_>>();
+        anyhow::ensure!(members.len() == 1, "expected one deployment plan check");
+        let step = members[0];
+        anyhow::ensure!(
+            step.label() == "deployment-plan-check"
+                && !step.needs_compile()
+                && step.carrier_file() == Some("xtask/src/deployment_plan.rs")
+                && matches!(
+                    step.kind,
+                    StepKind::Internal(InternalCheck::DeploymentPlanCheck)
+                ),
+            "deployment plan gate binding drift"
+        );
+        anyhow::ensure!(
+            step.id.spec().lanes() == [Some(CiLane::Meta), None]
+                && step.id.spec().verify_membership() == VerifyMembership::Included
+                && step.id.spec().compat() == CompatMembership::Included,
+            "deployment plan gate membership drift"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn deployment_plan_check_is_typed_once_in_all_aggregate_plans() -> anyhow::Result<()> {
+        for (name, plan) in [
+            ("full", plan_for(PlanTarget::Verify)),
+            ("fast", verify_plan(&opts(true, false))),
+            ("ci-meta", plan_for(PlanTarget::Lane(CiLane::Meta))),
+            ("compatibility", plan_for(PlanTarget::CompatibilityCi)),
+        ] {
+            validate_deployment_plan_check(&plan).with_context(|| format!("{name} plan"))?;
+        }
+        let mut omitted = verify_plan(&opts(true, false));
+        omitted.retain(|step| step.id != GateId::DeploymentPlanCheck);
+        assert!(validate_deployment_plan_check(&omitted).is_err());
+        let mut wrong = verify_plan(&opts(true, false));
+        wrong
+            .iter_mut()
+            .find(|step| step.id == GateId::DeploymentPlanCheck)
+            .context("fast plan lacks deployment gate")?
+            .kind = StepKind::Internal(InternalCheck::AssemblyLockCheck);
+        assert!(validate_deployment_plan_check(&wrong).is_err());
         Ok(())
     }
 
@@ -3368,9 +3441,14 @@ mod tests {
                 .iter()
                 .position(|label| *label == "assembly-lock-check")
                 .ok_or_else(|| anyhow::anyhow!("{name} plan 缺 assembly-lock-check"))?;
+            let deployment = labels
+                .iter()
+                .position(|label| *label == "deployment-plan-check")
+                .ok_or_else(|| anyhow::anyhow!("{name} plan 缺 deployment-plan-check"))?;
             assert_eq!(providers, modules + 1, "{name} providers lane order drift");
             assert_eq!(lock, providers + 1, "{name} lock lane order drift");
-            assert_eq!(graph, lock + 1, "{name} graph lane order drift");
+            assert_eq!(deployment, lock + 1, "{name} deployment lane order drift");
+            assert_eq!(graph, deployment + 1, "{name} graph lane order drift");
             assert!(!plan[graph].needs_compile());
             assert_eq!(plan[graph].carrier_file(), Some("xtask/src/graph.rs"));
             assert!(matches!(
@@ -3693,6 +3771,7 @@ mod tests {
                 "assembly-modules-check",
                 "assembly-providers-check",
                 "assembly-lock-check",
+                "deployment-plan-check",
                 "assembly-graph-check",
                 "contract-breaking",
                 "layer-deps",
@@ -3822,6 +3901,7 @@ mod tests {
             "assembly-modules-check",
             "assembly-providers-check",
             "assembly-lock-check",
+            "deployment-plan-check",
             "assembly-graph-check",
             "contract-breaking",
             "layer-deps",

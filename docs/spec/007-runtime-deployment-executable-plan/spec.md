@@ -27,7 +27,11 @@
   currently supported assemblies through one typed xtask gate. This repository artifact inventory
   is not the authorized public RuntimeInventory owned by #1806 and does not establish #1801's
   production posture.
-- deployment is Compose-oriented and not derived from assembly identity; protected inventory and same-head deployment/release receipts do not exist.
+- DeploymentPlan v1 is landed: the exact RuntimePlan identity plus the closed deployment block in
+  `assemblies/artifacts.toml` compile into committed runtime, settingsonly, and identityaudit JSON
+  plans. `cargo xtask deployment plan render|check` owns their exact raw-byte drift closure. Helm,
+  deployment policy/kind acceptance, protected RuntimeInventory, and OCI same-head/signature
+  receipts remain downstream capabilities.
 - 001 is superseded, immutable audit lineage. 007 is the active planning entry and provides no compatibility path back to 001.
 
 ## 目标能力
@@ -54,9 +58,9 @@ As an operator, I can render drift-checked Helm from a DeploymentPlan bound to t
 - **FR-002**: Serving configuration MUST be read once into a required typed snapshot; ambient reads MUST be rejected outside named maintenance boundaries.
 - **FR-003**: RuntimePlan MUST close provider, listener, domain, lifecycle, and placement facts before launch and produce a `runtimePlanFingerprint` over those stable facts.
 - **FR-004**: The live root MUST consume RuntimePlan with no handwritten compatibility path after #1794.
-- **FR-005**: All three assemblies MUST close binary, exact image build target, configuration carrier, probes, and journey artifacts through an exact, lifecycle-classified artifact matrix. Digest-bound immutable OCI evidence remains owned by #1802.
+- **FR-005**: All three assemblies MUST close binary, exact image build target, configuration carrier, probes, and journey artifacts through an exact, lifecycle-classified artifact matrix. #1802 lands the expected digest-addressed image identity; OCI same-head/signature receipts remain owned by #1807–#1809.
 - **FR-006**: Production posture MUST require persistent revocation, typed Vault allowlists, and production manifest constraints.
-- **FR-007**: DeploymentPlan MUST carry assembly/runtime-plan/deployment fingerprints and complete workload/service/probe/identity/secret-reference/resource facts; its fingerprint MUST bind `runtimePlanFingerprint`.
+- **FR-007**: DeploymentPlan MUST carry assembly/runtime-plan/deployment fingerprints and complete workload/service/probe/identity/secret-reference/resource facts; every RuntimePlan listener MUST have an explicit closed port exposure (`serviceExposed` or `workloadOnly`), and its fingerprint MUST bind `runtimePlanFingerprint`.
 - **FR-008**: Stable artifacts MUST reject unknown versions/fields and MUST NOT represent secret material.
 - **FR-009**: Set-like collections MUST sort deterministically; domain and lifecycle sequences MUST preserve declaration order.
 - **FR-010**: RuntimeInventory MUST gain a separate authorized `contracts/http/**` source with auth mode `permission|serviceOwned` and explicit resource sharing `tenantScoped|global`; it MUST reject `public|bootstrap|clientsOnly`, and this design schema MUST NOT become the wire source.

@@ -149,7 +149,8 @@ fn runtime_plan_reader_accepts_the_shared_closed_vector() {
         parsed.provider_plans()[0].constructor(),
         ProviderConstructor::OidcProvider
     );
-    assert_eq!(parsed.listener_plans()[0].id(), "primary-main");
+    assert_eq!(parsed.listener_plans()[0].id(), "health-main");
+    assert_eq!(parsed.listener_plans()[1].id(), "primary-main");
     assert_eq!(parsed.domain_plans()[0].id().as_str(), "identity");
     assert_eq!(parsed.placement_plans()[0].workload(), "runtime");
 }
@@ -220,7 +221,11 @@ fn runtime_plan_reader_rejects_complete_negative_matrix() {
         assert_reader_rejects(seal_unsigned(missing), "must not be empty");
 
         let mut duplicate = runtime_vector()["unsigned"].clone();
-        let fact = duplicate[field][0].clone();
+        let fact = duplicate[field]
+            .as_array()
+            .and_then(|facts| facts.last())
+            .expect("non-empty plan array")
+            .clone();
         duplicate[field]
             .as_array_mut()
             .expect("plan array")

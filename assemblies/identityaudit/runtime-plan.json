@@ -1,0 +1,126 @@
+{
+  "schemaVersion": 1,
+  "assemblyFingerprint": "sha256:ca1634772109f74bd3c66f079f8c5775f82a30a3ae805bf5e23894a952feedb8",
+  "runtimePlanFingerprint": "sha256:d72dde6415e0c1d8e18dd8b04775a7570db9f68863b0900ee7f16416fade0600",
+  "providerPlans": [
+    {
+      "id": "auth-audit-sink",
+      "constructor": "postgres::PgAuthAuditSink",
+      "outputs": [
+        "resources",
+        "workers"
+      ]
+    },
+    {
+      "id": "distributed-cas-store",
+      "constructor": "postgres::PgCasStore",
+      "outputs": [
+        "resources",
+        "workers"
+      ]
+    },
+    {
+      "id": "distributed-lock-store",
+      "constructor": "redis::RedisLockStore",
+      "outputs": [
+        "resources"
+      ]
+    },
+    {
+      "id": "dlx-archive-key-provider",
+      "constructor": "vault::VaultKeyProvider",
+      "outputs": [
+        "workers"
+      ]
+    },
+    {
+      "id": "event-publisher",
+      "constructor": "amqp::AmqpPublisher",
+      "outputs": [
+        "probes",
+        "resources",
+        "workers"
+      ]
+    },
+    {
+      "id": "event-subscriber",
+      "constructor": "amqp::AmqpSubscriber",
+      "outputs": [
+        "probes",
+        "resources",
+        "workers"
+      ]
+    },
+    {
+      "id": "identity-signer",
+      "constructor": "vault::VaultSigner",
+      "outputs": [
+        "resources"
+      ]
+    },
+    {
+      "id": "listener-pdp",
+      "constructor": "oidc::OidcProvider",
+      "outputs": [
+        "resources"
+      ]
+    },
+    {
+      "id": "listener-rate-limiter",
+      "constructor": "ratelimit::GovernorLimiter",
+      "outputs": []
+    }
+  ],
+  "listenerPlans": [
+    {
+      "id": "admin-main",
+      "kind": "admin",
+      "auth": "rssAccessToken",
+      "domains": [
+        "audit"
+      ]
+    },
+    {
+      "id": "health-main",
+      "kind": "health",
+      "auth": "noAuth",
+      "domains": []
+    },
+    {
+      "id": "primary-main",
+      "kind": "primary",
+      "auth": "rssAccessToken",
+      "domains": [
+        "identity"
+      ]
+    }
+  ],
+  "domainPlans": [
+    {
+      "id": "identity",
+      "lifecycle": [
+        "construct",
+        "ready",
+        "shutdown"
+      ]
+    },
+    {
+      "id": "audit",
+      "lifecycle": [
+        "construct",
+        "ready",
+        "shutdown"
+      ]
+    }
+  ],
+  "placementPlans": [
+    {
+      "domain": "audit",
+      "workload": "identityaudit"
+    },
+    {
+      "domain": "identity",
+      "workload": "identityaudit"
+    }
+  ]
+}

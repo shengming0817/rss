@@ -60,6 +60,7 @@ const MACHINE_INPUT_PATHS: &[&str] = &[
     "docs/ops/localtx-alerts.rules.yaml",
     "docs/spec/007-runtime-deployment-executable-plan/contracts/assembly-lock.schema.json",
     "docs/spec/007-runtime-deployment-executable-plan/contracts/runtime-plan.schema.json",
+    "docs/spec/007-runtime-deployment-executable-plan/contracts/deployment-plan.schema.json",
     "docs/spec/007-runtime-deployment-executable-plan/fixtures/fingerprint-v1-vectors.json",
 ];
 const POLICY_BEHAVIOR_SPEC: &str = include_str!("../tests/golden/ci-impact-policy.json");

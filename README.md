@@ -70,6 +70,7 @@ cargo xtask assembly validate                          # assembly 声明与依�
 cargo xtask assembly generate-modules --check          # domain modules 生成物漂移门
 cargo xtask assembly generate-providers --check        # typed provider catalog 独立漂移门
 cargo xtask assembly lock check                        # 全仓 AssemblyLock raw-byte 漂移门
+cargo xtask deployment plan check                      # 三类 RuntimePlan 绑定的 DeploymentPlan 漂移门
 cargo xtask runtime-baseline verify                    # RuntimePlan 四族 live closure 与 wiring golden
 cargo xtask runtime-root guard                         # runtime root 单调职责/LOC ratchet
 cargo xtask layer-deps                                 # source-centric 分层依赖 lint

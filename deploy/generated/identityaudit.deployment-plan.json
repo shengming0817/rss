@@ -1,0 +1,83 @@
+{
+  "schemaVersion": 1,
+  "assemblyFingerprint": "sha256:ca1634772109f74bd3c66f079f8c5775f82a30a3ae805bf5e23894a952feedb8",
+  "runtimePlanFingerprint": "sha256:d72dde6415e0c1d8e18dd8b04775a7570db9f68863b0900ee7f16416fade0600",
+  "deploymentFingerprint": "sha256:d2e3b0481cf6da100e28258485a26b6f7489ab74465c5d75d4febddaf1178617",
+  "workloads": [
+    {
+      "name": "identityaudit",
+      "image": "ghcr.io/gocell/rss-identityaudit@sha256:0dc0251564b714e89c8d098560ddfe69eb08c87fb85ac87323c54a7650126592",
+      "identity": {
+        "name": "identityaudit",
+        "serviceAccount": "identityaudit"
+      },
+      "secretRefs": [
+        {
+          "kind": "kubernetesSecret",
+          "name": "rss-identityaudit",
+          "key": "database-url"
+        },
+        {
+          "kind": "kubernetesSecret",
+          "name": "rss-identityaudit",
+          "key": "oidc-client-secret"
+        },
+        {
+          "kind": "vaultRef",
+          "storeId": "rss-vault",
+          "refKey": "identityaudit/signing"
+        }
+      ],
+      "resources": {
+        "requests": {
+          "cpu": "250m",
+          "memory": "256Mi"
+        },
+        "limits": {
+          "cpu": "2",
+          "memory": "1Gi"
+        }
+      },
+      "probes": [
+        {
+          "kind": "startup",
+          "path": "/health/v1/healthz",
+          "port": 8082
+        },
+        {
+          "kind": "readiness",
+          "path": "/health/v1/readyz",
+          "port": 8082
+        },
+        {
+          "kind": "liveness",
+          "path": "/health/v1/healthz",
+          "port": 8082
+        }
+      ]
+    }
+  ],
+  "services": [
+    {
+      "name": "identityaudit",
+      "workload": "identityaudit",
+      "ports": [
+        {
+          "name": "admin",
+          "port": 8081,
+          "exposure": "serviceExposed"
+        },
+        {
+          "name": "health",
+          "port": 8082,
+          "exposure": "serviceExposed"
+        },
+        {
+          "name": "http",
+          "port": 8080,
+          "exposure": "serviceExposed"
+        }
+      ]
+    }
+  ]
+}

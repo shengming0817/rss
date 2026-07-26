@@ -4,7 +4,11 @@
 
 ## 当前事实
 
-All #1779–#1809 PBIs are open. The tracker bodies own scope, acceptance, budget, and focused validation; the latest `pm:epic-wave` comment on #1778 owns dynamic scheduling. This matrix freezes dependencies and carrier intent without claiming implementation.
+The tracker bodies own live status, scope, acceptance, budget, and focused validation; the latest
+`pm:epic-wave` comment on #1778 owns dynamic scheduling. This matrix freezes dependencies and
+carrier intent rather than copying mutable open/closed state. Repository current-fact documents
+record landed carriers, including #1802's RuntimePlan-bound DeploymentPlan and exact generated-set
+drift gate.
 
 ## 目标能力
 

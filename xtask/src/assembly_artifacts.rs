@@ -3,7 +3,12 @@
 //! INVARIANT: ASSEMBLY-ARTIFACT-MATRIX-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::synthetic_red_rejects_incomplete_or_unsafe_rows", anti_vacuity = "tests::real_workspace_matrix_is_exact_and_complete" } -- the schema-v1 lifecycle declaration is an exact bijection with `assemblies/*`; only rows whose Cargo, image, config, health/inventory and journey evidence all validate can become `VerifiedArtifactMatrix` values.
 
 use anyhow::{Context, Result, bail};
-use assembly_schema::{AssemblyListenerKind, AssemblyManifest};
+use assembly_schema::{
+    AssemblyListenerKind, AssemblyManifest, AssemblyProfile, DeploymentIdentityV1Input,
+    DeploymentPlan, DeploymentPlanV1Input, DeploymentServiceV1Input, DeploymentWorkloadV1Input,
+    ParsedAssemblyLock, ParsedRuntimePlan, PortExposure, PortV1Input, ProbeKind, ProbeV1Input,
+    ResourceListV1Input, ResourceRequirementsV1Input, SecretRefV1Input,
+};
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -15,8 +20,11 @@ const MATRIX_PATH: &str = "assemblies/artifacts.toml";
 const SCHEMA_VERSION: u32 = 1;
 const MAX_ARTIFACT_BYTES: u64 = 4 * 1024 * 1024;
 const MISSING: &str = "[missing]";
+#[cfg(test)]
 const UNKNOWN: &str = "[unknown]";
+#[cfg(test)]
 const INVALID: &str = "[invalid]";
+#[cfg(test)]
 const UNPARSEABLE: &str = "[unparseable]";
 const REQUIRED_SUPPORTED_ASSEMBLIES: &[&str] = &["identityaudit", "runtime", "settingsonly"];
 const MARKDOWN_HEADER: &str = "# Assembly Artifact Matrix\n\n| Assembly | Declared lifecycle | Binary | Image | Config carrier | Health / inventory | Journey | Reason |\n|---|---|---|---|---|---|---|---|\n";
@@ -46,6 +54,8 @@ struct RawAssembly {
     health_inventory: Option<RawHealthInventory>,
     #[serde(default)]
     journey: Option<RawJourney>,
+    #[serde(default)]
+    deployment: Option<RawDeploymentProfile>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -108,6 +118,104 @@ enum RawJourney {
     },
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawDeploymentProfile {
+    #[serde(rename = "runtimePlan")]
+    runtime_plan: RawRuntimePlanArtifact,
+    workloads: Vec<RawDeploymentWorkload>,
+    services: Vec<RawDeploymentService>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawRuntimePlanArtifact {
+    path: String,
+    profile: AssemblyProfile,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawDeploymentWorkload {
+    name: String,
+    image: String,
+    identity: RawDeploymentIdentity,
+    #[serde(default, rename = "secretRefs")]
+    secret_refs: Vec<RawSecretRef>,
+    resources: RawResources,
+    probes: Vec<RawProbe>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawDeploymentIdentity {
+    name: String,
+    #[serde(rename = "serviceAccount")]
+    service_account: String,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(tag = "kind", deny_unknown_fields)]
+enum RawSecretRef {
+    #[serde(rename = "kubernetesSecret")]
+    Kubernetes { name: String, key: String },
+    #[serde(rename = "vaultRef")]
+    Vault {
+        #[serde(rename = "storeId")]
+        store_id: String,
+        #[serde(rename = "refKey")]
+        ref_key: String,
+        #[serde(default, rename = "refVersion")]
+        ref_version: Option<String>,
+    },
+}
+
+impl std::fmt::Debug for RawSecretRef {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Kubernetes { .. } => "KubernetesSecretRef(<redacted>)",
+            Self::Vault { .. } => "VaultRef(<redacted>)",
+        })
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawResources {
+    requests: RawResourceList,
+    limits: RawResourceList,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawResourceList {
+    cpu: String,
+    memory: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawProbe {
+    kind: ProbeKind,
+    port: u16,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawDeploymentService {
+    name: String,
+    workload: String,
+    ports: Vec<RawDeploymentPort>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawDeploymentPort {
+    name: String,
+    port: u16,
+    exposure: PortExposure,
+}
+
 /// The only deployment-facing matrix value. Its fields are private and construction is confined to
 /// full validation below, so callers cannot accidentally treat observed declarations as evidence.
 #[derive(Debug)]
@@ -132,6 +240,14 @@ pub(crate) struct SupportedArtifact {
     config_schema: RawConfigSchema,
     health_inventory: RawHealthInventory,
     journey: RawJourney,
+    deployment: VerifiedDeploymentProfile,
+}
+
+/// Fully validated, secret-value-free deployment authoring facts for one RuntimePlan artifact.
+#[derive(Debug)]
+pub(crate) struct VerifiedDeploymentProfile {
+    runtime_plan: ParsedRuntimePlan,
+    facts: RawDeploymentProfile,
 }
 
 #[allow(dead_code)]
@@ -163,6 +279,30 @@ impl SupportedArtifact {
 
     pub(crate) fn journey(&self) -> String {
         journey_identity(&self.journey)
+    }
+
+    pub(crate) const fn deployment(&self) -> &VerifiedDeploymentProfile {
+        &self.deployment
+    }
+}
+
+impl VerifiedDeploymentProfile {
+    #[cfg(test)]
+    pub(crate) fn runtime_plan_path(&self) -> &str {
+        &self.facts.runtime_plan.path
+    }
+
+    pub(crate) fn runtime_plan(&self) -> &assembly_schema::RuntimePlan {
+        self.runtime_plan.as_plan()
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn profile(&self) -> AssemblyProfile {
+        self.facts.runtime_plan.profile
+    }
+
+    pub(crate) fn plan_input(&self) -> DeploymentPlanV1Input {
+        deployment_plan_input(&self.facts)
     }
 }
 
@@ -196,6 +336,7 @@ enum ArtifactRule {
     Journey,
     PathSafety,
     SpecializedBoundary,
+    Deployment,
 }
 
 type ArtifactFinding = diagnostic::Finding<ArtifactRule>;
@@ -228,13 +369,12 @@ pub(crate) fn run() -> Result<()> {
             return Err(error).with_context(|| format!("读取 {} 失败", path.display()));
         }
     };
-    let raw: RawMatrix = match toml::from_str(&source) {
+    let raw: RawMatrix = match parse_raw_matrix(&source) {
         Ok(raw) => raw,
         Err(error) => {
-            print!("{}", render_unverified_source(&source));
-            print_verification_failure(&[error.to_string()]);
-            return Err(error)
-                .with_context(|| format!("解析 closed artifact matrix {} 失败", path.display()));
+            print!("{MARKDOWN_HEADER}");
+            print_verification_failure(&["artifact matrix TOML rejected".to_owned()]);
+            return Err(error).context("解析 closed artifact matrix 失败");
         }
     };
     let observed = render_observed(&raw);
@@ -306,9 +446,33 @@ fn validate_root(root: &Path) -> Result<Validation> {
     ensure_regular_path(root, MATRIX_PATH)?;
     let source = read_artifact_utf8(&path, "assembly artifact matrix")
         .with_context(|| format!("读取 {} 失败", path.display()))?;
-    let raw: RawMatrix = toml::from_str(&source)
-        .with_context(|| format!("解析 closed artifact matrix {} 失败", path.display()))?;
+    let raw = parse_raw_matrix(&source)?;
     validate_matrix(root, raw)
+}
+
+fn parse_raw_matrix(source: &str) -> Result<RawMatrix> {
+    toml::from_str(source).map_err(|error: toml::de::Error| {
+        let category = if error.message().starts_with("unknown field")
+            || error.message().starts_with("missing field")
+            || error.message().starts_with("invalid type")
+        {
+            "data"
+        } else {
+            "syntax"
+        };
+        let (line, column) = error.span().map_or((1, 1), |span| {
+            let prefix = &source.as_bytes()[..span.start.min(source.len())];
+            let line = prefix.iter().filter(|byte| **byte == b'\n').count() + 1;
+            let column = prefix
+                .iter()
+                .rposition(|byte| *byte == b'\n')
+                .map_or(prefix.len() + 1, |offset| prefix.len() - offset);
+            (line, column)
+        });
+        anyhow::anyhow!(
+            "artifact matrix TOML rejected ({category} at line {line}, column {column})"
+        )
+    })
 }
 
 fn validate_matrix(root: &Path, raw: RawMatrix) -> Result<Validation> {
@@ -335,17 +499,19 @@ fn validate_matrix(root: &Path, raw: RawMatrix) -> Result<Validation> {
                     Some(config_schema),
                     Some(health_inventory),
                     Some(journey),
+                    Some(deployment),
                 ) = (
                     row.binary,
                     row.image,
                     row.config_schema,
                     row.health_inventory,
                     row.journey,
+                    row.deployment,
                 )
                 else {
                     continue;
                 };
-                validate_supported(
+                let Some(deployment) = validate_supported(
                     root,
                     &cargo,
                     &row.name,
@@ -354,8 +520,12 @@ fn validate_matrix(root: &Path, raw: RawMatrix) -> Result<Validation> {
                     &config_schema,
                     health_inventory,
                     &journey,
+                    &deployment,
                     &mut findings,
-                )?;
+                )?
+                else {
+                    continue;
+                };
                 register_identity(
                     &mut identities,
                     "binary",
@@ -391,6 +561,7 @@ fn validate_matrix(root: &Path, raw: RawMatrix) -> Result<Validation> {
                     config_schema,
                     health_inventory,
                     journey,
+                    deployment,
                 });
             }
         }
@@ -522,6 +693,7 @@ fn validate_lifecycle_shape(row: &RawAssembly, findings: &mut Vec<ArtifactFindin
                 || row.config_schema.is_some()
                 || row.health_inventory.is_some()
                 || row.journey.is_some()
+                || row.deployment.is_some()
             {
                 reject!(
                     findings,
@@ -546,6 +718,7 @@ fn validate_lifecycle_shape(row: &RawAssembly, findings: &mut Vec<ArtifactFindin
                 ("configSchema", row.config_schema.is_some()),
                 ("healthInventory", row.health_inventory.is_some()),
                 ("journey", row.journey.is_some()),
+                ("deployment", row.deployment.is_some()),
             ] {
                 if !present {
                     reject!(
@@ -570,8 +743,9 @@ fn validate_supported(
     config: &RawConfigSchema,
     _health: RawHealthInventory,
     journey: &RawJourney,
+    deployment: &RawDeploymentProfile,
     findings: &mut Vec<ArtifactFinding>,
-) -> Result<()> {
+) -> Result<Option<VerifiedDeploymentProfile>> {
     validate_identifier("binary.package", &binary.package, findings);
     validate_identifier("binary.target", &binary.target, findings);
     if !cargo.binary_belongs_to_assembly(assembly, &binary.package, &binary.target) {
@@ -588,7 +762,143 @@ fn validate_supported(
     validate_config(root, assembly, config, findings)?;
     validate_health_inventory(root, cargo, assembly, findings)?;
     validate_journey(root, cargo, assembly, journey, findings)?;
-    Ok(())
+    validate_deployment(root, assembly, deployment, findings)
+}
+
+fn validate_deployment(
+    root: &Path,
+    assembly: &str,
+    raw: &RawDeploymentProfile,
+    findings: &mut Vec<ArtifactFinding>,
+) -> Result<Option<VerifiedDeploymentProfile>> {
+    let expected_path = format!("assemblies/{assembly}/runtime-plan.json");
+    if raw.runtime_plan.path != expected_path {
+        reject!(
+            findings,
+            Deployment,
+            assembly,
+            "runtimePlan.path 必须 exact 为 {expected_path}"
+        );
+        return Ok(None);
+    }
+    let Some(runtime_path) = regular_file(
+        root,
+        &raw.runtime_plan.path,
+        assembly,
+        "deployment.runtimePlan",
+        findings,
+    )?
+    else {
+        return Ok(None);
+    };
+    let runtime_bytes = read_artifact_utf8(&runtime_path, &format!("{assembly} RuntimePlan"))?;
+    let runtime = match ParsedRuntimePlan::from_json_slice(runtime_bytes.as_bytes()) {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            reject!(
+                findings,
+                Deployment,
+                assembly,
+                "runtimePlan strict parse failed: {error}"
+            );
+            return Ok(None);
+        }
+    };
+
+    let lock_path = format!("assemblies/{assembly}/assembly.lock.json");
+    let Some(lock_path) = regular_file(root, &lock_path, assembly, "deployment.lock", findings)?
+    else {
+        return Ok(None);
+    };
+    let lock_bytes = read_artifact_utf8(&lock_path, &format!("{assembly} AssemblyLock"))?;
+    let lock = ParsedAssemblyLock::from_json_slice(lock_bytes.as_bytes())
+        .with_context(|| format!("parse {assembly} AssemblyLock for deployment profile"))?;
+    if raw.runtime_plan.profile != lock.identity().profile()
+        || runtime.assembly_fingerprint() != lock.fingerprint()
+    {
+        reject!(
+            findings,
+            Deployment,
+            assembly,
+            "runtimePlan profile/fingerprint does not match the bundled AssemblyLock"
+        );
+        return Ok(None);
+    }
+
+    let input = deployment_plan_input(raw);
+    if let Err(error) = DeploymentPlan::compile_v1(runtime.as_plan(), input) {
+        reject!(
+            findings,
+            Deployment,
+            assembly,
+            "typed DeploymentPlan facts rejected: {error}"
+        );
+        return Ok(None);
+    }
+    Ok(Some(VerifiedDeploymentProfile {
+        runtime_plan: runtime,
+        facts: raw.clone(),
+    }))
+}
+
+fn deployment_plan_input(raw: &RawDeploymentProfile) -> DeploymentPlanV1Input {
+    let mut input = DeploymentPlanV1Input::new();
+    for workload in &raw.workloads {
+        let secret_refs = workload
+            .secret_refs
+            .iter()
+            .map(|secret| match secret {
+                RawSecretRef::Kubernetes { name, key } => {
+                    SecretRefV1Input::kubernetes(name.clone(), key.clone())
+                }
+                RawSecretRef::Vault {
+                    store_id,
+                    ref_key,
+                    ref_version,
+                } => {
+                    SecretRefV1Input::vault(store_id.clone(), ref_key.clone(), ref_version.clone())
+                }
+            })
+            .collect();
+        let resources = ResourceRequirementsV1Input::new(
+            ResourceListV1Input::new(
+                workload.resources.requests.cpu.clone(),
+                workload.resources.requests.memory.clone(),
+            ),
+            ResourceListV1Input::new(
+                workload.resources.limits.cpu.clone(),
+                workload.resources.limits.memory.clone(),
+            ),
+        );
+        let probes = workload
+            .probes
+            .iter()
+            .map(|probe| ProbeV1Input::new(probe.kind, probe.port))
+            .collect();
+        input.workload(DeploymentWorkloadV1Input::new(
+            workload.name.clone(),
+            workload.image.clone(),
+            DeploymentIdentityV1Input::new(
+                workload.identity.name.clone(),
+                workload.identity.service_account.clone(),
+            ),
+            secret_refs,
+            resources,
+            probes,
+        ));
+    }
+    for service in &raw.services {
+        input.service(DeploymentServiceV1Input::new(
+            service.name.clone(),
+            service.workload.clone(),
+            service
+                .ports
+                .iter()
+                .map(|port| PortV1Input::new(port.name.clone(), port.port, port.exposure))
+                .collect(),
+        ));
+    }
+    input
 }
 
 fn validate_identifier(label: &str, value: &str, findings: &mut Vec<ArtifactFinding>) {
@@ -1477,6 +1787,7 @@ fn render_observed(raw: &RawMatrix) -> String {
     render_rows(rows)
 }
 
+#[cfg(test)]
 fn render_unverified_source(source: &str) -> String {
     let Ok(value) = source.parse::<toml::Value>() else {
         return format!(
@@ -1534,6 +1845,7 @@ fn render_unverified_source(source: &str) -> String {
     render_rows(rows)
 }
 
+#[cfg(test)]
 fn observed_pair(value: Option<&toml::Value>, left: &str, right: &str, separator: &str) -> String {
     value.map_or_else(
         || MISSING.to_owned(),
@@ -1548,6 +1860,7 @@ fn observed_pair(value: Option<&toml::Value>, left: &str, right: &str, separator
     )
 }
 
+#[cfg(test)]
 fn value_string(value: Option<&toml::Value>) -> String {
     value
         .and_then(toml::Value::as_str)
@@ -1583,6 +1896,74 @@ mod tests {
     }
 
     #[test]
+    fn deployment_toml_parse_error_never_echoes_secret_bait() -> Result<()> {
+        let bait = "ZZ_DEPLOYMENT_SECRET_BAIT_1802";
+        let source = format!("schemaVersion = 1\nvalue = \"{bait}\"\n");
+        let error = parse_raw_matrix(&source)
+            .err()
+            .context("unknown secret-bearing field was accepted")?;
+        assert!(!error.to_string().contains(bait));
+        assert!(!format!("{error:?}").contains(bait));
+        Ok(())
+    }
+
+    #[test]
+    fn deployment_toml_parse_error_retains_sanitized_location_and_category() -> Result<()> {
+        let bait = "ZZ_DEPLOYMENT_SECRET_BAIT_1802";
+        let source = format!("schemaVersion = 1\nvalue = \"{bait}\n");
+        let error = parse_raw_matrix(&source)
+            .err()
+            .context("malformed secret-bearing TOML was accepted")?;
+        let diagnostic = error.to_string();
+        assert!(!diagnostic.contains(bait));
+        assert!(
+            diagnostic.contains("syntax"),
+            "missing category: {diagnostic}"
+        );
+        assert!(
+            diagnostic.contains("line 2"),
+            "missing safe line: {diagnostic}"
+        );
+        assert!(
+            diagnostic.contains("column"),
+            "missing safe column: {diagnostic}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn deployment_raw_secret_debug_is_redacted_through_matrix_carriers() -> Result<()> {
+        let coordinates = [
+            "zz-kubernetes-secret-1802",
+            "ZZ_SECRET_REFERENCE_KEY_1802",
+            "zz-vault-store-1802",
+            "zz/vault/ref/key/1802",
+            "zz-vault-version-1802",
+        ];
+        let mut profile = runtime_deployment_profile()?;
+        profile.workloads[0].secret_refs = vec![
+            RawSecretRef::Kubernetes {
+                name: coordinates[0].to_owned(),
+                key: coordinates[1].to_owned(),
+            },
+            RawSecretRef::Vault {
+                store_id: coordinates[2].to_owned(),
+                ref_key: coordinates[3].to_owned(),
+                ref_version: Some(coordinates[4].to_owned()),
+            },
+        ];
+        let diagnostic = format!("{profile:?}");
+        for coordinate in coordinates {
+            assert!(
+                !diagnostic.contains(coordinate),
+                "outer Debug leaked {coordinate}"
+            );
+        }
+        assert!(diagnostic.contains("redacted"));
+        Ok(())
+    }
+
+    #[test]
     #[allow(clippy::cognitive_complexity)] // one red matrix mutates every closed declaration dimension.
     fn synthetic_red_rejects_incomplete_or_unsafe_rows() -> Result<()> {
         let mut green = green_matrix()?;
@@ -1597,6 +1978,7 @@ mod tests {
             "configSchema",
             "healthInventory",
             "journey",
+            "deployment",
         ] {
             let mut row = supported.clone();
             match field {
@@ -1605,6 +1987,7 @@ mod tests {
                 "configSchema" => row.config_schema = None,
                 "healthInventory" => row.health_inventory = None,
                 "journey" => row.journey = None,
+                "deployment" => row.deployment = None,
                 _ => unreachable!(),
             }
             let mut errors = Vec::new();
@@ -1661,6 +2044,7 @@ mod tests {
         downgraded.assemblies[0].config_schema = None;
         downgraded.assemblies[0].health_inventory = None;
         downgraded.assemblies[0].journey = None;
+        downgraded.assemblies[0].deployment = None;
         let mut ratchet_findings = Vec::new();
         validate_supported_ratchet_for(&downgraded, &universe, &["demo"], &mut ratchet_findings);
         assert!(
@@ -2068,6 +2452,78 @@ mod tests {
         Ok(())
     }
 
+    fn runtime_deployment_profile() -> Result<RawDeploymentProfile> {
+        let raw: RawMatrix = parse_raw_matrix(include_str!("../../assemblies/artifacts.toml"))?;
+        raw.assemblies
+            .into_iter()
+            .find(|row| row.name == "runtime")
+            .and_then(|row| row.deployment)
+            .context("runtime deployment profile missing")
+    }
+
+    fn assert_deployment_red(root: &Path, raw: &RawDeploymentProfile, label: &str) -> Result<()> {
+        let mut findings = Vec::new();
+        let _ = validate_deployment(root, "runtime", raw, &mut findings)?;
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == ArtifactRule::Deployment),
+            "deployment mutation escaped ({label}): {findings:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn deployment_profile_semantic_closure_has_synthetic_red() -> Result<()> {
+        let root = crate::workspace_root()?;
+
+        let mut wrong_path = runtime_deployment_profile()?;
+        wrong_path.runtime_plan.path = "assemblies/runtime/legacy-runtime-plan.json".to_owned();
+        assert_deployment_red(&root, &wrong_path, "runtime path")?;
+
+        let mut wrong_profile = runtime_deployment_profile()?;
+        wrong_profile.runtime_plan.profile = AssemblyProfile::Production;
+        assert_deployment_red(&root, &wrong_profile, "lock profile")?;
+
+        let mut missing_port = runtime_deployment_profile()?;
+        missing_port.services[0]
+            .ports
+            .retain(|port| port.name != "http");
+        assert_deployment_red(&root, &missing_port, "missing listener port")?;
+
+        let mut duplicate_port = runtime_deployment_profile()?;
+        let duplicate = duplicate_port.services[0].ports[0].clone();
+        duplicate_port.services[0].ports.push(duplicate);
+        assert_deployment_red(&root, &duplicate_port, "duplicate listener port")?;
+
+        let mut wrong_identity = runtime_deployment_profile()?;
+        wrong_identity.workloads[0].identity.name = "other".to_owned();
+        assert_deployment_red(&root, &wrong_identity, "identity name")?;
+
+        let mut wrong_probe = runtime_deployment_profile()?;
+        wrong_probe.workloads[0].probes[0].port = 8081;
+        assert_deployment_red(&root, &wrong_probe, "non-health probe port")?;
+
+        let foreign_root = temp_root("deployment-foreign-runtime")?;
+        let assembly_dir = foreign_root.join("assemblies/runtime");
+        std::fs::create_dir_all(&assembly_dir)?;
+        std::fs::copy(
+            root.join("assemblies/runtime/assembly.lock.json"),
+            assembly_dir.join("assembly.lock.json"),
+        )?;
+        std::fs::copy(
+            root.join("assemblies/settingsonly/runtime-plan.json"),
+            assembly_dir.join("runtime-plan.json"),
+        )?;
+        assert_deployment_red(
+            &foreign_root,
+            &runtime_deployment_profile()?,
+            "foreign RuntimePlan fingerprint",
+        )?;
+        std::fs::remove_dir_all(foreign_root)?;
+        Ok(())
+    }
+
     #[test]
     #[allow(clippy::cognitive_complexity)] // anti-vacuity pins every typed supported-row accessor.
     fn real_workspace_matrix_is_exact_and_complete() -> Result<()> {
@@ -2116,6 +2572,19 @@ mod tests {
         );
         assert_eq!(rows[1].journey(), "compose-smoke-v1:deploy/smoke.sh");
         assert_eq!(rows[2].binary(), ("settingsonly", "settingsonly-server"));
+        for (row, profile) in rows.iter().zip([
+            AssemblyProfile::Production,
+            AssemblyProfile::Demo,
+            AssemblyProfile::Demo,
+        ]) {
+            let deployment = row.deployment();
+            assert_eq!(deployment.profile(), profile);
+            assert_eq!(
+                deployment.runtime_plan_path(),
+                format!("assemblies/{}/runtime-plan.json", row.name())
+            );
+            DeploymentPlan::compile_v1(deployment.runtime_plan(), deployment.plan_input())?;
+        }
         assert!(!cargo_catalog.target_exists("server", "ghost", "bin"));
         assert!(
             cargo_catalog

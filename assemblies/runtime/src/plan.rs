@@ -199,10 +199,11 @@ pub(crate) fn is_kebab_case_workload(value: &str) -> bool {
 pub(crate) fn fixture_listener_spec(
     kind: AssemblyListenerKind,
 ) -> anyhow::Result<ListenerExecutionSpec> {
-    let parsed = assembly_schema::ParsedRuntimePlan::from_json_slice(include_bytes!(
-        "../tests/fixtures/runtime-plan-v1.json"
-    ))
-    .map_err(|error| anyhow::anyhow!("parse fingerprint-verified RuntimePlan fixture: {error}"))?;
+    let parsed =
+        assembly_schema::ParsedRuntimePlan::from_json_slice(include_bytes!("../runtime-plan.json"))
+            .map_err(|error| {
+                anyhow::anyhow!("parse fingerprint-verified RuntimePlan fixture: {error}")
+            })?;
     listener_execution_plan_from_typed(parsed.as_plan())
         .into_listeners()
         .into_iter()
@@ -729,11 +730,14 @@ mod tests {
 
     #[test]
     fn runtime_plan_bundled_json_matches_full_golden() {
-        let actual = serde_json::to_value(bundled(&[]).as_typed()).expect("plan JSON");
-        let expected: serde_json::Value =
-            serde_json::from_str(include_str!("../tests/fixtures/runtime-plan-v1.json"))
-                .expect("runtime plan golden");
-        assert_eq!(actual, expected);
+        let mut actual =
+            serde_json::to_string_pretty(bundled(&[]).as_typed()).expect("RuntimePlan JSON");
+        actual.push('\n');
+        assert_eq!(
+            actual.as_bytes(),
+            include_bytes!("../runtime-plan.json"),
+            "runtime RuntimePlan artifact drift"
+        );
     }
 
     #[test]

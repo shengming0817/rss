@@ -2,7 +2,10 @@
 
 ## 当前事实
 
-These commands validate a target baseline, not implemented runtime/deployment behavior. Run them from the #1779 worktree; do not edit `docs/spec/001-runtime-assembly-plan/`.
+The SpecKit command validates the frozen target baseline. The focused DeploymentPlan commands below
+validate the landed RuntimePlan-bound protocol plus the committed runtime, settingsonly, and
+identityaudit generated-plan set. Run them from the active worktree; do not edit
+`docs/spec/001-runtime-assembly-plan/`.
 
 ## 目标能力
 
@@ -10,6 +13,9 @@ Run the repository machine-input check. Its selftest exercises invalid Draft-07 
 
 ```bash
 cargo xtask runtime-deployment-spec --selftest
+cargo test -p assembly-schema deployment_plan
+cargo test -p xtask deployment_plan
+cargo xtask deployment plan check
 ```
 
 This checks the active pointer, Draft-07 schemas plus valid/invalid instances, recursive closure, secret/version boundaries, and RFC-8785 fingerprint vectors. It does not parse or freeze planning Markdown.
@@ -26,4 +32,9 @@ make verify-fast
 
 ## 缺口与 owner
 
-These commands do not prove future runtime Rust, Helm, inventory, OCI, same-head receipt, or active-PR scheduling capability. Each owner runs its exact tracker sequence from `tasks.md` after landing its carrier. #1779's content validator is Medium because its selftest is a typed `verify --fast` member; #1809 later binds exact same-head receipts through local `ci-gate` and does not grant forge activation.
+These commands prove the frozen SpecKit carrier and the landed DeploymentPlan protocol/generated-set
+closure; they do not prove Helm rendering, deployment policy/kind acceptance, protected
+RuntimeInventory, or OCI same-head/signature receipts. Each future
+owner runs its exact tracker sequence from `tasks.md` after landing its carrier. #1779's content
+validator is Medium because its selftest is a typed `verify --fast` member; #1809 later binds exact
+same-head receipts through local `ci-gate` and does not grant forge activation.
