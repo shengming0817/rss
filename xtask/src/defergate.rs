@@ -1,6 +1,6 @@
 //! `defer-gate` —— governed 高风险路径内**结构化 defer 完整性 + 经典注解**治理门（#1432）。
 //!
-//! INVARIANT: DEFER-GATE-01 { level = "Medium", exec = "verify", source = "code" }—— 在 governed scope（`docs/rules` / `docs/architecture` / `.claude/rules`
+//! INVARIANT: DEFER-GATE-01 { level = "Medium", exec = "verify", source = "code" }—— 在 governed scope（`docs/rules` / `docs/architecture`
 //! 及根 `deny.toml` / `clippy.toml` / `CLAUDE.md`）内强制两条：(1) 任一 `DEFER(#<issue>)` 标签须四字段齐全
 //! 非空——`owner=<..>`、`blocked-by=<#NNNN|trigger:..>`、`closes-when=<..>`（折行式可落在 DEFER 行 + 后续
 //! ≤[`FIELD_WINDOW`] 行注释续行窗口内），ID 须 `#<digits>`，缺即 fail；(2) governed scope 禁用经典注解
@@ -36,7 +36,7 @@ pub(crate) type Finding = diagnostic::Finding<Rule>;
 const FIELD_WINDOW: usize = 6;
 
 /// governed 扫描目录根（递归取 `.md`）。
-const GOVERNED_DIRS: &[&str] = &["docs/rules", "docs/architecture", ".claude/rules"];
+const GOVERNED_DIRS: &[&str] = &["docs/rules", "docs/architecture"];
 
 /// governed 扫描根级文件（显式）。
 const GOVERNED_FILES: &[&str] = &["deny.toml", "clippy.toml", "CLAUDE.md"];
@@ -67,7 +67,7 @@ impl GovernanceCheck for DeferGate {
         // 再兜「所有目录同时缩到极小」的灾难（显著低于实际，不误伤正常增减）。
         if scanned < 10 {
             bail!(
-                "defer-gate: 仅扫到 {scanned} 个 governed 文件，疑似 docs/rules·docs/architecture·.claude/rules 结构异常"
+                "defer-gate: 仅扫到 {scanned} 个 governed 文件，疑似 docs/rules·docs/architecture 结构异常"
             );
         }
         let summary =
@@ -690,22 +690,8 @@ mod tests {
     /// fail-closed canary：任一 governed 目录 0 .md → Err（路径漂移不放水）；全非空 → Ok。anti-vacuity。
     #[test]
     fn governed_coverage_fail_closed() {
-        assert!(
-            ensure_governed_coverage(&[
-                ("docs/rules", 7),
-                ("docs/architecture", 9),
-                (".claude/rules", 13)
-            ])
-            .is_ok()
-        );
-        assert!(
-            ensure_governed_coverage(&[
-                ("docs/rules", 7),
-                ("docs/architecture", 0),
-                (".claude/rules", 13)
-            ])
-            .is_err()
-        );
+        assert!(ensure_governed_coverage(&[("docs/rules", 7), ("docs/architecture", 9)]).is_ok());
+        assert!(ensure_governed_coverage(&[("docs/rules", 7), ("docs/architecture", 0)]).is_err());
     }
 
     // —— ⑥ 真 workspace governed scope 绿门（接 verify 机器门） ——

@@ -1,8 +1,8 @@
 # LocalTx Adoption Checklist
 
 This override is a planning entry point. The manifest/codegen/typed route carriers are Hard;
-cross-file backend, journey, operations, and this exact checklist closure are Medium. Completing a
-box does not replace those enforcement carriers.
+cross-file backend, journey, and operations carriers are Medium. Completing a box does not
+replace those enforcement carriers.
 
 - [ ] [LOCALTX-CONTRACT] Declare `consistencyLevel = "LocalTx"` and the complete typed `[capabilities.localTx]` block in the canonical contract manifest.
 - [ ] [LOCALTX-CODEGEN] Run `cargo xtask codegen --check` and confirm the contract is derived into `generated::http::LOCAL_TX_SPECS`.

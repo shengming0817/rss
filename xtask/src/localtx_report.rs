@@ -862,8 +862,6 @@ mod tests {
     use std::io;
     use std::path::{Path, PathBuf};
 
-    const ADOPTION_TEMPLATE_PATH: &str = ".specify/templates/overrides/localtx-tasks-template.md";
-
     struct FixtureCopy {
         path: PathBuf,
     }
@@ -875,12 +873,6 @@ mod tests {
                 &Path::new(env!("CARGO_MANIFEST_DIR"))
                     .join("tests/fixtures/localtx_coverage/green"),
                 &path,
-            )?;
-            let adoption = path.join(ADOPTION_TEMPLATE_PATH);
-            fs::create_dir_all(adoption.parent().context("adoption template parent")?)?;
-            fs::copy(
-                crate::workspace_root()?.join(ADOPTION_TEMPLATE_PATH),
-                adoption,
             )?;
             let descriptor = localtx_operations_descriptor();
             for relative in [descriptor.rules_path(), descriptor.runbook_path()] {
@@ -1298,9 +1290,9 @@ mod tests {
     #[test]
     fn symlink_collection_failure_leaves_stdout_empty() -> Result<()> {
         let fixture = FixtureCopy::new("localtx-report-structural-symlink")?;
-        let template = fixture.path.join(ADOPTION_TEMPLATE_PATH);
-        fs::remove_file(&template)?;
-        std::os::unix::fs::symlink(fixture.path.join("missing-template.md"), template)?;
+        let contracts = fixture.path.join("contracts");
+        fs::remove_dir_all(&contracts)?;
+        std::os::unix::fs::symlink(fixture.path.join("missing-contracts"), contracts)?;
         let mut output = Vec::new();
         let error = run_report_with(
             ReportFormat::Json,
@@ -1344,7 +1336,7 @@ mod tests {
         });
         report.contracts.push(alpha);
         report.findings.push(ReportFinding {
-            rule: "AdoptionTemplateDrift".to_string(),
+            rule: "DuplicateTestMarker".to_string(),
             subject: "z".to_string(),
             detail: "z".to_string(),
         });
@@ -1354,7 +1346,7 @@ mod tests {
         assert_eq!(report.contracts[0].contract_id, "alpha.write");
         assert_eq!(report.contracts[0].backend_profiles[0].provider, "alpha-pg");
         assert_eq!(report.contracts[0].journey.scenarios[0].kind, "abort");
-        assert_eq!(report.findings[0].rule, "AdoptionTemplateDrift");
+        assert_eq!(report.findings[0].rule, "DuplicateTestMarker");
         assert_eq!(
             report.contracts[0].evidence.route.sources,
             ["a/route.rs", "z/route.rs"]

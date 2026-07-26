@@ -86,5 +86,5 @@ gocell 那 11 个 workflow 在 Rust 下大致收敛成：
 ## 六、待核实 / 决策点
 
 1. **CodeQL Rust 成熟度**：截至 2026-01 为 preview，弱于 Go SAST；若要强 SAST 需评估当时状态，或更依赖 clippy 安全 lint + `cargo-deny` advisories。
-2. **覆盖率阈值口径**（**已定**）：沿用 gocell 覆盖率纪律——引擎与基础 crate（`consistency`/`primitives`/`vocab`/`ids`）≥90%、新增 ≥80%（见 `.claude/rules/rss/rust-standards.md`）。
+2. **覆盖率阈值口径**（**已定**）：沿用 gocell 覆盖率纪律——引擎与基础 crate（`consistency`/`primitives`/`vocab`/`ids`）≥90%、新增 ≥80%（见 `docs/rules/rust-standards.md`）。
 3. **runner/forge**：CI 落 GitHub Actions vs Azure Pipelines vs 纯本地 `cargo xtask verify`（与当前 azure `no-ci` 现实对齐）——决定 workflow 文件形态，但闸门集合不变。

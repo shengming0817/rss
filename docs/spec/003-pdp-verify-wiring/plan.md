@@ -40,7 +40,7 @@
 
 ## Constitution Check
 
-*GATE: 本仓无独立宪法文件——CLAUDE.md 为最高协作规范，docs/rules/* + .claude/rules/rss/* + ADR 为细则。逐条核查：*
+*GATE: 本仓无独立宪法文件——CLAUDE.md 为最高协作规范，docs/rules/* + ADR 为细则。逐条核查：*
 
 - **分层依赖（crate 图 + deny.toml + xtask layer-deps）**：✅ oidc(adapter) impl diport port、不被域依赖；httpserve(服务) **不新增 path dep**（不引兄弟服务 authn，守 `layers.rs:122`）；验签桥落 bins(组合根)，可依赖 httpserve+authn+oidc。无新增跨域/反向依赖。
 - **跨域只经 contract**：✅ 本 feature 不新增 wire contract；消费冻结的 diport port-own 类型 + httpserve own 标量，无手写共享 wire crate。

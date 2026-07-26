@@ -75,4 +75,4 @@ saga background worker 是生产运行形态，不替代 direct executor primiti
 
 ## 参考
 
-- 扇出规则：`.claude/rules/rss/contract-fanout.md`
+- 扇出规则：`docs/rules/contract-fanout.md`

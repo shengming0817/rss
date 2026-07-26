@@ -1,5 +1,5 @@
 # RSS clippy 配置（Medium 载体）。具体禁用列表在此；lint 开关等级在根 Cargo.toml
-# [workspace.lints.clippy]（两层缺一不可）。见 .claude/rules/rss/rust-standards.md。
+# [workspace.lints.clippy]（两层缺一不可）。见 docs/rules/rust-standards.md。
 cognitive-complexity-threshold = 15
 
 # clock 注入纪律：禁直调系统时钟，强制经构造器位置参注入的 Clock trait。

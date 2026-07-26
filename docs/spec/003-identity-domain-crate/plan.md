@@ -30,7 +30,7 @@
 
 ## Constitution Check
 
-*GATE: 对照 `CLAUDE.md` + `docs/rules/` + `.claude/rules/rss/`（无独立宪法文件）*
+*GATE: 对照 `CLAUDE.md` + `docs/rules/`（无独立宪法文件）*
 
 | 门 | 结论 |
 |----|------|

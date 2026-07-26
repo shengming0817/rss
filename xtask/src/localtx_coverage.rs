@@ -4,7 +4,6 @@
 //! INVARIANT: LOCALTX-BACKEND-PROFILE-CLOSURE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "active_contract_without_backend_profile_is_rejected|backend_profile_missing_required_probe_is_rejected|unawaited_backend_probe_does_not_count|tenant_contract_cannot_enroll_repo_atomic_probe_set|multiple_backend_profiles_in_one_test_function_are_rejected|backend_profile_non_executable_test_attributes_are_rejected|backend_profile_shadow_constructor_is_rejected|backend_profile_nested_constructor_bait_is_rejected|backend_profile_synthetic_action_is_rejected|backend_profile_observer_binding_does_not_count|backend_profile_bare_provider_reference_is_rejected|backend_profile_free_function_provider_argument_is_rejected|backend_profile_discarded_provider_call_is_rejected|backend_profile_discarded_call_cannot_launder_result|backend_profile_tuple_projection_cannot_launder_result|backend_profile_struct_projection_cannot_launder_result|backend_profile_direct_projection_cannot_launder_result|backend_profile_tail_block_cannot_launder_discarded_call|backend_profile_unpolled_provider_future_is_rejected", anti_vacuity = "single_backend_profile_in_test_function_is_accepted|actual_workspace_has_non_empty_complete_localtx_closure" }.
 //! INVARIANT: LOCALTX-JOURNEY-CLOSURE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "fixture_mutation_requires_exactly_one_match|journey_missing_entry_is_rejected|journey_extra_entry_is_rejected|journey_duplicate_entry_is_rejected|journey_legacy_scope_is_rejected|journey_wrong_tx_model_is_rejected|journey_missing_scenario_is_rejected|journey_non_commit_unknown_case_requires_commits|journey_fake_logout_conflict_is_rejected|journey_missing_board_is_rejected|journey_unknown_board_field_is_rejected|journey_unknown_spec_field_is_rejected|journey_unknown_fixture_field_is_rejected|journey_dangling_spec_is_rejected|journey_spec_metadata_drift_identifies_field_and_values|journey_fixture_metadata_drift_identifies_field_and_values|journey_missing_typed_marker_is_rejected|journey_marker_without_test_attribute_is_rejected|journey_marker_in_unused_closure_is_rejected|journey_ignored_test_is_rejected|journey_cfg_disabled_test_is_rejected|journey_cfg_disabled_ancestor_is_rejected|journey_should_panic_test_is_rejected|journey_return_expression_is_rejected|journey_wrong_route_marker_is_rejected|journey_missing_case_consumption_is_rejected|journey_duplicate_case_consumption_is_rejected|journey_dynamic_case_consumption_is_rejected|journey_case_consumption_in_unused_helper_is_rejected|journey_case_consumption_in_another_test_is_rejected|journey_case_consumption_in_noncanonical_flow_is_rejected|journey_unobserved_case_values_are_rejected|journey_target_must_require_integration|journey_runner_extra_marker_is_rejected|journey_runner_duplicate_marker_is_rejected", anti_vacuity = "journey_green_fixture_closes_active_matrix|journey_markers_may_span_real_tests|journey_entries_may_use_distinct_runners|journey_commit_unknown_case_may_omit_commits|actual_workspace_closes_active_localtx_journeys" }.
 //! INVARIANT: LOCALTX-REQUIRED-EVIDENCE-COUNTS-01 { level = "Medium", exec = "integration", source = "code", synthetic_red = "required_evidence_counts_reject_wrong_carrier_and_distinct_profile_gap|required_evidence_backend_profiles_reject_noncanonical_execution_carriers", anti_vacuity = "actual_workspace_has_verified_localtx_evidence_counts" }.
-//! INVARIANT: LOCALTX-ADOPTION-TEMPLATE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "adoption_template_missing_duplicate_unknown_and_drift_are_rejected", anti_vacuity = "actual_adoption_template_has_exact_canonical_checklist" }.
 
 use crate::contract::manifest::{
     ConsistencyLevel, ContractKind, ContractOwner, Lifecycle, LocalTxBoundary,
@@ -44,12 +43,11 @@ pub(crate) enum Rule {
     MultipleBackendProfilesInTest,
     UnexpectedBackendProfile,
     OpaqueSourceScope,
-    AdoptionTemplateDrift,
 }
 
 impl Rule {
     #[cfg(test)]
-    pub(crate) const ALL: [Self; 17] = [
+    pub(crate) const ALL: [Self; 16] = [
         Self::InvalidDomainOwner,
         Self::MissingOwnerCrate,
         Self::MissingGeneratedSpec,
@@ -66,7 +64,6 @@ impl Rule {
         Self::MultipleBackendProfilesInTest,
         Self::UnexpectedBackendProfile,
         Self::OpaqueSourceScope,
-        Self::AdoptionTemplateDrift,
     ];
 
     pub(crate) const fn report_wire(self) -> &'static str {
@@ -87,7 +84,6 @@ impl Rule {
             Self::MultipleBackendProfilesInTest => "MultipleBackendProfilesInTest",
             Self::UnexpectedBackendProfile => "UnexpectedBackendProfile",
             Self::OpaqueSourceScope => "OpaqueSourceScope",
-            Self::AdoptionTemplateDrift => "AdoptionTemplateDrift",
         }
     }
 }
@@ -128,7 +124,6 @@ pub(crate) struct LocalTxProofInventory {
     unexpected_test_markers: Vec<MarkerOccurrence>,
     unexpected_backend_profiles: Vec<BackendEnrollmentOccurrence>,
     unexpected_generated: Vec<String>,
-    adoption_template_violations: Vec<String>,
     cargo_targets: Vec<BackendCarrierIdentity>,
 }
 
@@ -181,7 +176,6 @@ impl LocalTxProofInventory {
             unexpected_test_markers,
             unexpected_backend_profiles,
             unexpected_generated,
-            adoption_template_violations: Vec::new(),
             cargo_targets,
         }
     }
@@ -707,10 +701,7 @@ fn check_root(root: &Path) -> Result<(String, Vec<Finding>)> {
 }
 
 pub(crate) fn collect_workspace_inventory(root: &Path) -> Result<LocalTxProofInventory> {
-    let mut inventory = collect_inventory(root)?;
-    inventory.adoption_template_violations =
-        adoption_template_findings(root).map_err(|error| sanitized(root, error))?;
-    Ok(inventory)
+    collect_inventory(root)
 }
 
 #[derive(Debug)]
@@ -831,31 +822,6 @@ pub(crate) fn verify_required_evidence_counts(root: &Path) -> Result<VerifiedLoc
     }
     let carrier = crate::integration_shards::localtx_backend_execution_unit()?;
     verify_required_evidence_inventory(&inventory, &carrier)
-}
-
-const ADOPTION_TEMPLATE_PATH: &str = ".specify/templates/overrides/localtx-tasks-template.md";
-const CANONICAL_ADOPTION_TEMPLATE: &str =
-    include_str!("../tests/golden/localtx-adoption-template.md");
-
-fn adoption_template_findings(root: &Path) -> Result<Vec<String>> {
-    let path = root.join(ADOPTION_TEMPLATE_PATH);
-    reject_symlinks(root, &path)?;
-    let text = match std::fs::read_to_string(&path) {
-        Ok(text) => text,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(vec![
-                "canonical seven-item LocalTx adoption template is missing".to_string(),
-            ]);
-        }
-        Err(error) => return Err(error).context(format!("read `{ADOPTION_TEMPLATE_PATH}`")),
-    };
-    if text == CANONICAL_ADOPTION_TEMPLATE {
-        return Ok(Vec::new());
-    }
-    Ok(vec![
-        "template must exactly match the canonical seven top-level visible checklist items"
-            .to_string(),
-    ])
 }
 
 fn collect_inventory(root: &Path) -> Result<LocalTxProofInventory> {
@@ -1148,13 +1114,6 @@ fn evaluate_inventory(inventory: &LocalTxProofInventory) -> Vec<Finding> {
             Rule::UnexpectedGeneratedSpec,
             "generated/src/http",
             format!("generated LocalTx evidence `{key}` has no active LocalTx manifest"),
-        )
-    }));
-    findings.extend(inventory.adoption_template_violations.iter().map(|detail| {
-        finding(
-            Rule::AdoptionTemplateDrift,
-            ADOPTION_TEMPLATE_PATH,
-            detail.clone(),
         )
     }));
     sort_findings(&mut findings);
@@ -8931,127 +8890,6 @@ impl ::bootstrap::Domain for Demo {
         Ok(())
     }
 
-    #[test]
-    fn adoption_template_missing_duplicate_unknown_and_drift_are_rejected() -> anyhow::Result<()> {
-        let workspace = crate::workspace_root()?;
-        let canonical = fs::read_to_string(workspace.join(ADOPTION_TEMPLATE_PATH))?;
-        let first_item = canonical
-            .lines()
-            .find(|line| line.starts_with("- [ ]"))
-            .context("canonical adoption checklist item")?;
-        let cases = [
-            (
-                "missing",
-                canonical.replacen(&format!("{first_item}\n"), "", 1),
-            ),
-            ("duplicate", format!("{canonical}\n{first_item}\n")),
-            (
-                "unknown",
-                format!("{canonical}\n- [ ] [LOCALTX-UNKNOWN] unsupported item\n"),
-            ),
-            (
-                "renamed",
-                canonical.replace("[LOCALTX-CONTRACT]", "[LOCALTX-MANIFEST]"),
-            ),
-            (
-                "command",
-                canonical.replace("cargo xtask codegen --check", "cargo xtask codegen"),
-            ),
-            (
-                "path",
-                canonical.replace(
-                    "docs/runbooks/202607130312-1705-localtx-unsafe-settlement.md",
-                    "docs/runbooks/localtx.md",
-                ),
-            ),
-            (
-                "nested",
-                canonical.replacen(first_item, &format!("  {first_item}"), 1),
-            ),
-            (
-                "strikethrough",
-                canonical.replacen(first_item, &format!("- [ ] ~~{}~~", &first_item[6..]), 1),
-            ),
-            (
-                "extra-text",
-                canonical.replacen(first_item, &format!("{first_item} hidden drift"), 1),
-            ),
-            (
-                "comment-hidden-command",
-                canonical.replace(
-                    "Run `cargo xtask codegen --check`",
-                    "Run `cargo xtask codegen` <!-- cargo xtask codegen --check -->",
-                ),
-            ),
-        ];
-        for (name, content) in cases {
-            let temp = FixtureCopy::new(&format!("localtx-adoption-{name}"))?;
-            let path = temp.path.join(ADOPTION_TEMPLATE_PATH);
-            fs::create_dir_all(path.parent().context("adoption template parent")?)?;
-            fs::write(path, content)?;
-            let inventory = collect_workspace_inventory(&temp.path)?;
-            assert!(
-                inventory
-                    .findings()
-                    .iter()
-                    .any(|finding| finding.rule == Rule::AdoptionTemplateDrift),
-                "{name} mutation unexpectedly passed"
-            );
-        }
-
-        let missing = FixtureCopy::new("localtx-adoption-missing-file")?;
-        assert!(
-            collect_workspace_inventory(&missing.path)?
-                .findings()
-                .iter()
-                .any(|finding| finding.rule == Rule::AdoptionTemplateDrift)
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn actual_adoption_template_has_exact_canonical_checklist() -> anyhow::Result<()> {
-        let checklist = CANONICAL_ADOPTION_TEMPLATE
-            .lines()
-            .filter(|line| line.starts_with("- [ ] [LOCALTX-"))
-            .collect::<Vec<_>>();
-        assert_eq!(
-            checklist.len(),
-            7,
-            "canonical golden must contain seven items"
-        );
-        let route_test = checklist
-            .iter()
-            .find(|item| item.starts_with("- [ ] [LOCALTX-ROUTE-TEST]"))
-            .context("canonical route/test checklist item")?;
-        assert!(
-            route_test.contains(
-                "production handler whose first extractor is `ContractMarker<RouteMarker>`"
-            ),
-            "route/test item must name the production ContractMarker carrier"
-        );
-        assert!(
-            route_test.contains(
-                "absolute `::vocab::HttpRouteBinding<::generated::http::<route>::RouteMarker, ::vocab::http::LocalTx> = ::generated::http::<route>::ROUTE`"
-            ),
-            "route/test item must spell out the absolute owner-test binding carrier"
-        );
-        let violations = adoption_template_findings(&crate::workspace_root()?)?;
-        assert!(violations.is_empty(), "{violations:#?}");
-        Ok(())
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn adoption_template_symlink_is_a_structural_error() -> anyhow::Result<()> {
-        let temp = FixtureCopy::new("localtx-adoption-symlink")?;
-        let path = temp.path.join(ADOPTION_TEMPLATE_PATH);
-        fs::create_dir_all(path.parent().context("adoption template parent")?)?;
-        std::os::unix::fs::symlink(temp.path.join("Cargo.toml"), path)?;
-        assert!(collect_workspace_inventory(&temp.path).is_err());
-        Ok(())
-    }
-
     #[cfg(unix)]
     #[test]
     fn dangling_and_intermediate_symlinks_are_structural_errors_without_absolute_paths()
@@ -9120,7 +8958,6 @@ impl ::bootstrap::Domain for Demo {
             "MultipleBackendProfilesInTest",
             "UnexpectedBackendProfile",
             "OpaqueSourceScope",
-            "AdoptionTemplateDrift",
         ];
         let actual = Rule::ALL.map(Rule::report_wire);
         assert_eq!(

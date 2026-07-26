@@ -3,6 +3,14 @@
 //! `PgOutboxCdcEmitter` is an explicit opt-in [`diport::OutboxEmitter`] implementation for
 //! logical-decoding/CDC pipelines. It writes immutable rows to `outbox_log` and intentionally does
 //! not participate in the relay `outbox` mutable status machine.
+//!
+//! # Ops vs enforcement
+//!
+//! Schema/integration carriers enforce that CDC header projection columns
+//! (`occurred_at` / related) are **stored generated columns**. Connector skeleton checks lock
+//! Debezium header placement and `publication.autocreate.mode=disabled`. Requiring
+//! `publish_generated_columns=stored` on the Postgres publication is ops/runbook guidance for
+//! logical replication to publish those columns — **not** an in-repo enforcement carrier.
 
 use consistency::{EventEntry, OutboxAppendOutcome, OutboxFactFingerprint};
 use diport::{Clock, EnvelopeSubjectId, OutboxEmitError, OutboxEmitter, OutboxEnvelopeParts};
@@ -349,44 +357,6 @@ mod tests {
                     "GRANT EXECUTE ON FUNCTION {signature}\n    TO rss_outbox_maintenance"
                 )),
                 "0055 must grant relay maintenance EXECUTE on `{signature}`"
-            );
-        }
-    }
-
-    #[test]
-    fn migration_readme_documents_cdc_generated_header_columns() {
-        let readme = include_str!("../migrations/README.md");
-        for needle in [
-            "`0049`",
-            "`occurred_at`、`trace`、`correlation_id`",
-            "stored generated columns",
-            "nullable trace/correlation 保持 persisted-only",
-            "`CREATE PUBLICATION ... WITH (publish_generated_columns = stored)`",
-            "PostgreSQL 18+",
-        ] {
-            assert!(
-                readme.contains(needle),
-                "migration README must document CDC generated-column boundary `{needle}`"
-            );
-        }
-    }
-
-    #[test]
-    fn migration_readme_has_complete_0055_cdc_cutover_runbook() {
-        let readme = include_str!("../migrations/README.md");
-        for needle in [
-            "0055 CDC cutover runbook",
-            "GET /connectors/<name>/config",
-            "GET /connectors/<name>/offsets",
-            "COPY (SELECT * FROM outbox_log ORDER BY event_id) TO STDOUT (FORMAT binary)",
-            "publish_generated_columns = stored",
-            "PATCH /connectors/<name>/offsets",
-            "禁止 `snapshot.mode=initial`",
-            "archive checksum",
-        ] {
-            assert!(
-                readme.contains(needle),
-                "CDC cutover runbook missing `{needle}`"
             );
         }
     }

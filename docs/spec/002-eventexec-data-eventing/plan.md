@@ -38,7 +38,7 @@
 
 ## Constitution Check
 
-*GATE: 本仓无独立宪法文件——CLAUDE.md 为最高协作规范，docs/rules/* + .claude/rules/rss/* + ADR 为细则。逐条核查：*
+*GATE: 本仓无独立宪法文件——CLAUDE.md 为最高协作规范，docs/rules/* + ADR 为细则。逐条核查：*
 
 - **分层依赖（crate 图 + deny.toml）**：✅ consistency(引擎) 不依赖服务/域/adapter；eventexec(服务) 依赖基础+引擎+diport，不依赖域/adapter；adapter 实现 trait 不被域依赖；resolver 落组合根侧 bootstrap。无新增跨域 crate 依赖。
 - **跨域只经 contract**：✅ 新增 command/saga 契约走 `contracts/` 声明 → `generated/`；不新增手写共享 wire crate。

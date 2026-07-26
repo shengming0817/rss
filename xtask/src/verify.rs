@@ -164,7 +164,7 @@ enum InternalCheck {
     CiEntryGuard,
     /// reconcile scheduler transactional command outbox seam guard（RECONCILE-COMMAND-OUTBOX-SEAM-01）。
     ReconcileOutboxCommandGuard,
-    /// governed scope（docs/rules + docs/architecture + .claude/rules + 根 config）结构化 defer 完整性 + 经典注解门
+    /// governed scope（docs/rules + docs/architecture + 根 config）结构化 defer 完整性 + 经典注解门
     /// （DEFER-GATE-01；内容扫描 .md/.toml，no-compile）。
     DeferGate,
     /// Postgres 无默认、三个单域及 all-features 编译矩阵；由 xtask 自管 cargo 子进程。
@@ -7860,46 +7860,11 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
     }
 
     #[test]
-    fn localtx_required_evidence_docs_match_typed_catalog() -> anyhow::Result<()> {
+    fn localtx_required_evidence_docs_forbid_stale_job_count() -> anyhow::Result<()> {
         let root = workspace_root()?;
-        let read = |path: &str| {
-            std::fs::read_to_string(root.join(path))
-                .with_context(|| format!("read required-evidence documentation `{path}`"))
-        };
-        let readme = read("README.md")?;
-        let localtx = read("docs/rules/localtx.md")?;
-        let shards = read("docs/ops/202607111214-1730-integration-shards.md")?;
-        let slo = read("docs/ops/202607120327-1733-ci-slo.md")?;
-        let adaptive = read("docs/ops/202607130824-1765-diff-adaptive-ci.md")?;
-        let activation = read("docs/ops/202607150329-1776-localtx-required-evidence.md")?;
-
-        assert!(readme.contains("integration/localtx-required.json"));
-        assert!(localtx.contains("active/journey/backend-profile = 5/5/5"));
-        assert!(adaptive.contains("active/journey/backend-profile 必须为 5/5/5"));
-        for target in crate::integration_shards::LOCALTX_JOURNEY_TARGETS {
-            assert!(
-                shards.contains(target),
-                "integration shard docs omit typed LocalTx target `{target}`"
-            );
-        }
-        assert!(slo.contains(&format!("{} 个 typed job", CiJobKey::COUNT)));
+        let slo = std::fs::read_to_string(root.join("docs/ops/202607120327-1733-ci-slo.md"))
+            .with_context(|| "read LocalTx evidence SLO documentation")?;
         assert!(!slo.contains("15 个 typed job"));
-        for required in [
-            "requiredContext",
-            "appId",
-            "configuredAtUtc",
-            "runAttempt",
-            "sourceRevision",
-            "planDigest",
-            "artifactUrl",
-            "checkUrl",
-        ] {
-            assert!(
-                activation.contains(required),
-                "activation checklist omits `{required}`"
-            );
-        }
-        assert!(activation.contains("#1776 保持打开"));
         Ok(())
     }
 

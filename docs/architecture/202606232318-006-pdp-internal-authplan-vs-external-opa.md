@@ -99,7 +99,7 @@ request future，耗尽 drop verifier + handler 且经共享 503 `ERR_CORE_UNAVA
 
 - **正**：授权决策进程内、编译期 typed（最小基建、零网络 hop）；`diport::Pdp` 接缝按 ADR-003 既定范式预留，未来换外置 OPA 只在 port 边界换 impl、不动 authplan / 域；符合「先内置简单 impl、port 预留、按需换外置」的分阶段节奏；与 #1109（验签接线）天然衔接。
 - **负 / 代价**：现阶段策略作者锁定为 Rust 工程师、策略变更需重部署（无运行期热更新）——这是 pre-GA 单进程下可接受的取舍，由 §4.1 切换判据兜住升级路径。
-- **负 / 安全空窗（见 §5 威胁矩阵）**：#1109 未落地期间签名 / MAC / exp 校验处于 **Soft** 约定（rustdoc + 本 ADR），非 Hard / Medium enforcement——httpserve 认证挂载须与 #1109 同批上线，W 阶段不得在 #1109 未落地时接线生产可达的认证路径。
+- **负 / 安全空窗（见 §5 威胁矩阵）**：历史窗口曾把签名 / MAC / exp 校验停在 **Soft** 约定（rustdoc + 本 ADR）；#1109 / Closeout addendum（#1584 / #1586）后已收口为 Hard `VerifiedClaims` mint——httpserve 认证挂载不得在 verifier 未就绪时接线生产可达的认证路径。
 - **负 / 可观测**：内置授权决策须显式埋点——httpserve middleware / `resolve_requirement` 调用点埋 tracing span（`authz.decision = allow|deny`、`authz.scheme`、`authz.route`），保留与外置 OPA decision log 等价的可观测颗粒度（对齐 `tenancy.md` 的「gRPC 与 HTTP 同一 PDP 决策指标 family」），随 #1109 落地交付。
 - **下游**：#1109 落地 `diport::Pdp` trait + `VerifiedClaims` mint funnel + httpserve↔authn 验签接线；W 阶段域行为消费 `AuthRequirement`，不感知 PDP 是内置还是外置。
 
@@ -122,7 +122,7 @@ request future，耗尽 drop verifier + handler 且经共享 503 `ERR_CORE_UNAVA
 
 | 威胁 | 暴露条件 | 缓解 | enforcement 档位 |
 |------|---------|------|-----------------|
-| **验签空窗认证绕过** | #1109 未落地期间 `authn` 仅结构化解码、不验签名/MAC/exp（`crates/authn/src/lib.rs` 注释）；若 W 阶段把 httpserve 认证路径接线到生产可达端点，等价零验签放行 | httpserve 认证挂载与 #1109 必须同批上线；`finalize_auth` 默认拒兜底；W 阶段 #1109 未落地时不得接线生产认证 matcher | 当前 **Soft**（rustdoc + 本 ADR 约定）→ #1109 落地后 **Hard**（`VerifiedClaims` 仅 Pdp mint + 构造器必填注入） |
+| **未验签认证绕过** | 历史窗口中 `authn` 曾仅结构化解码、不验签名/MAC/exp；若把 httpserve 认证路径接线到生产可达端点，等价零验签放行 | httpserve 认证挂载与 verifier 必须同批上线；`finalize_auth` 默认拒兜底；verifier 未就绪时不得接线生产认证 matcher | Closeout 后 **Hard**（`VerifiedClaims` 仅 Pdp mint + 构造器必填注入） |
 | 内置 PDP 误判放行 | `resolve_requirement` 逻辑错误 | 纯函数 + 表驱动单测（引擎 ≥90% 覆盖）；`AuthRequirement::Deny` 为无 plan / 非法 opt-out 的 fail-closed 默认 | **Hard**（类型：`AuthRequirement::Require` 不含 `NoAuth`，杜绝「要求无认证」自相矛盾） |
 | 推迟外置 OPA 后策略变更无独立审计 | 合规要求策略审计与部署解耦 | §4.1 切换判据 4 触发引外置 OPA（decision log） | 决策记录（切换判据兜底） |
 
@@ -133,7 +133,7 @@ request future，耗尽 drop verifier + handler 且经共享 503 `ERR_CORE_UNAVA
 | 约束 | 评级 | 载体 |
 |------|------|------|
 | 本 ADR 为纯决策记录，**当前不新增 enforcement** | —（N/A） | 决策方向 + 切换判据成文；无机器守卫新增 |
-| 未来 `diport::Pdp` 定义面只在 `diport`（上游） + impl 面仅 adapter/组合根（下游） | **Medium（cargo-deny + dylint）** | 上游定义面：dynosaur/trait-variant 宏收敛白名单（`DIPORT-MACRO-CONFINE-01′`，cargo-deny + xtask，Medium）；下游 impl 面：AST 级 impl-site allowlist（`DIPORT-IMPL-ALLOWLIST-01`，dylint #1060，Medium——sealed-trait 无法对独立 adapter crate 跨 crate Hard 封闭，dylint 为最强可用载体）。**非 Hard**（与 ADR-005 §6 同源评级） |
+| typed `diport::Pdp` 定义面只在 `diport`（上游） + impl 面仅 adapter/组合根（下游） | **Medium（cargo-deny + dylint）** | 上游定义面：dynosaur/trait-variant 宏收敛白名单（`DIPORT-MACRO-CONFINE-01′`，cargo-deny + xtask，Medium）；下游 impl 面：AST 级 impl-site allowlist（`DIPORT-IMPL-ALLOWLIST-01`，dylint #1060，Medium——sealed-trait 无法对独立 adapter crate 跨 crate Hard 封闭，dylint 为最强可用载体）。**非 Hard**（与 ADR-005 §6 同源评级） |
 | 未来 PDP 必填注入 + `VerifiedClaims` 仅 Pdp mint + `from_verified_*` 入参 newtype | **Hard（类型 / 可见性 / 构造器）** | `Arc<P>` 构造器必填位置参且 `P: Pdp + Send + Sync + 'static`（缺失或 provider 不可跨 serving task 共享即编译错误，继承 ADR-004 C5）；`VerifiedClaims` 私有构造 funnel + `from_verified_*` 仅收 newtype 而非裸 token（类型层杜绝旁路 mint）——这是本接缝**真正 Hard** 的部分（与上行 Medium 的 define/impl 守卫互补） |
 | 异步 PDP 永久 Pending 占用 request task | **Hard + Medium** | 非零 `ServerRequestBudget` 必填参数 + 私有 `ServerMakeService` capability + httpd 双 transport 同一入参，使无预算 bind 不可表达（Hard）；`server_budget_structure` 锁 runtime snapshot 注入、httpserve timeout 层与 httpd plaintext/mTLS 单路径，且 `auth_bridge_structure` 拒绝局部 timeout（Medium，均有 synthetic-red + anti-vacuity） |
 
@@ -144,7 +144,7 @@ request future，耗尽 drop verifier + handler 且经共享 503 `ERR_CORE_UNAVA
 ## 7. 备选（为何不取）
 
 - **现在就引入外置 OPA + Rego**：获得运行期热更新 + 非 Rust 作者。**否决**——RSS pre-GA 单进程、策略唯一作者是 Rust 工程师、无 hot-swap 需求；sidecar/server + 每决策网络 hop + Rego 语言面是过早基建税。其价值场景由 §4.1 切换判据触发时再引入（port 已预留，低成本）。
-- **内置但放弃 `Pdp` port 接缝（YAGNI）**：现在连 port 都不留。**否决**——authn 已显式依赖「未来 `diport::Pdp`」做验签（#1109），W 域 body 硬化后再补接缝爆炸半径大；ADR-003 provider-agnostic port 范式使预留几乎零成本，放弃反而割裂既有设计。
+- **内置但放弃 `Pdp` port 接缝（YAGNI）**：现在连 port 都不留。**否决**——authn 已显式依赖 typed `diport::Pdp` 做验签（#1109），W 域 body 硬化后再补接缝爆炸半径大；ADR-003 provider-agnostic port 范式使预留几乎零成本，放弃反而割裂既有设计。
 
 ---
 

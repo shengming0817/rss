@@ -101,7 +101,7 @@ closure；只有 completed owner 能把统一 provider module 交给 Launch。
 ### 2.5 defer gate — 散装 defer 受机器门约束
 
 为防「自底向上长能力」退化回无追踪 defer 补洞，本批新增 defer gate（#1432）：**governed 高风险路径**（`docs/rules` +
-`docs/architecture` + `.claude/rules` + 根 config）内，**结构化 defer 标签必须四字段齐全**。canonical 格式（示例）：
+`docs/architecture` + 根 config）内，**结构化 defer 标签必须四字段齐全**。canonical 格式（示例）：
 
 ```text
 // DEFER(#<issue>): <描述>; owner=<name>; blocked-by=<#NNNN | trigger:...>; closes-when=<关闭条件>

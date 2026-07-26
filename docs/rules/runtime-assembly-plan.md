@@ -1,6 +1,6 @@
 # Runtime Assembly Plan Rules
 
-This document governs the runtime assembly optimization series rooted at `docs/spec/001-runtime-assembly-plan/`. It supplements the architecture single source in `docs/rules/architecture.md`; it does not replace crate graph, contract, tenancy, observability, or eventbus rules. Review context also exposes this rule through `.claude/rules/rss/runtime-assembly-plan.md`.
+This document governs the runtime assembly optimization series rooted at `docs/spec/001-runtime-assembly-plan/`. It supplements the architecture single source in `docs/rules/architecture.md`; it does not replace crate graph, contract, tenancy, observability, or eventbus rules.
 
 ## Scope Boundaries
 

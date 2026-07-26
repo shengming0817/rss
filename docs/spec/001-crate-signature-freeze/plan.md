@@ -40,7 +40,7 @@
 
 ## Constitution Check
 
-*GATE: 无 `.specify/memory/constitution.md`；RSS 宪法载体 = `CLAUDE.md` + `docs/rules/*` + `.claude/rules/rss/*`。逐条核对：*
+*GATE: 无 `.specify/memory/constitution.md`；RSS 宪法载体 = `CLAUDE.md` + `docs/rules/*`。逐条核对：*
 
 | 治理门（RSS 宪法） | 本计划是否合规 | 说明 |
 |---|---|---|

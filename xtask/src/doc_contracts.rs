@@ -1,14 +1,18 @@
 //! `doc-contracts` —— 文档契约片段 + migration carry-over ledger 漂移门（AI-robust Medium 内容扫描门）。
 //!
+//! 本门只做**负向**扫描：禁止文档与 rustdoc 写出错误或已删除的语义。它不要求任何 Markdown 文件
+//! 包含指定句子——那样会把文档变成 carrier，逼规则文档复述实现细节，而语义本身早已由类型系统、
+//! trybuild UI 测试与各自的 xtask 门强制。
+//!
 //! INVARIANT: DOC-CONTRACTS-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::scan_content_rejects_removed_event_topology_and_entry_symbols", anti_vacuity = "tests::scan_content_accepts_current_event_topology_and_entry_symbols" }—— tenant + actor aware command /
 //! outbox envelope 签名已经进入 codegen 与 runtime；规则 / spec 文档与相关 public rustdoc 不得残留 tenantless /
 //! actorless 旧片段，也不得引用已删除的 event topology / entry symbols。
 //! 该门只锁已知高风险签名片段，避免宽泛词扫描误伤历史散文；同时从冻结来源机器派生
 //! carry-over 全集，以闭值状态、审计 PBI registry、仓内证据与 proof registry 守住唯一现行迁移索引。
 //!
-//! INVARIANT: OUTBOX-DELIVERY-SEMANTICS-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::scan_content_rejects_false_outbox_delivery_guarantees", anti_vacuity = "tests::scan_content_accepts_correct_and_scoped_delivery_semantics" }—— Outbox relay transport 只承诺 at-least-once；规则/spec、crash-matrix 说明与生产 rustdoc 不得把 CAS/lease fencing 误写成 broker at-most-once/exactly-once。负向扫描与 canonical 三 facet 完整性共同防止错误语义被 AI 复制或整段删除。
+//! INVARIANT: OUTBOX-DELIVERY-SEMANTICS-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::scan_content_rejects_false_outbox_delivery_guarantees", anti_vacuity = "tests::scan_content_accepts_correct_and_scoped_delivery_semantics" }—— Outbox relay transport 只承诺 at-least-once；规则/spec、crash-matrix 说明与生产 rustdoc 不得把 CAS/lease fencing 误写成 broker at-most-once/exactly-once。负向扫描防止错误语义被 AI 复制；真实投递语义由 relay 实现与 Postgres 验收测试强制。
 //!
-//! INVARIANT: LOCALONLY-BUSINESS-EFFECT-SEMANTICS-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::scan_content_rejects_legacy_localonly_effect_semantics", anti_vacuity = "tests::scan_content_accepts_current_localonly_business_effect_semantics" }—— active 文档与生产 rustdoc 只使用 business-qualified 写/事务词汇；LocalOnly 证明业务持久化/outbox/publish 为零，但允许 provider-owned read-path transaction。负向语义扫描、显式 carrier 清单与 canonical facets 共同阻断旧 token/API 和“完全无事务/等同纯函数”的回流或整段删除。
+//! INVARIANT: LOCALONLY-BUSINESS-EFFECT-SEMANTICS-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::scan_content_rejects_legacy_localonly_effect_semantics", anti_vacuity = "tests::scan_content_accepts_current_localonly_business_effect_semantics" }—— active 文档与生产 rustdoc 只使用 business-qualified 写/事务词汇；LocalOnly 证明业务持久化/outbox/publish 为零，但允许 provider-owned read-path transaction。负向语义扫描与显式 carrier 清单阻断旧 token/API 和“完全无事务/等同纯函数”的回流；LocalOnly 准入本身由 `BusinessWriteEffect` 类型层 compile-fail UI 测试与 `LOCAL-ONLY-EFFECTS-01` 强制。
 //!
 //! INVARIANT: TOKEN-PROFILE-RUSTDOC-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::token_profile_rustdoc_contract_is_required_and_rejects_legacy_semantics", anti_vacuity = "tests::workspace_token_profile_rustdoc_contract_is_exact" }—— 四个 profile trust-chain rustdoc carrier 以显式闭集守住 typed provider/binding、claim lifetime/tenant、authn funnel 与 trusted RawCredential profile 边界；缺文件、缺 anchor、旧 provider/future-work 语义和非 rustdoc bait 均 fail-closed。
 
@@ -38,7 +42,7 @@ const LOCALONLY_SEMANTIC_DOC_FILES: &[&str] = &[
     "docs/runbooks/202607141556-1771-local-only-proof.md",
     "contracts/README.md",
     "CLAUDE.md",
-    ".claude/rules/rss/rust-standards.md",
+    "docs/rules/rust-standards.md",
     "docs/rules/architecture.md",
     "docs/rules/audit-ledger.md",
     "docs/spec/consistency-runtime/spec.md",
@@ -53,53 +57,6 @@ const RUSTDOC_ROOTS: &[&str] = &[
     "journeys",
     "journeys-fault-matrix",
     "examples",
-];
-const OUTBOX_CANONICAL_FILE: &str = "docs/rules/eventbus.md";
-const OUTBOX_CANONICAL_FACETS: &[(&str, &str)] = &[
-    (
-        "transport-at-least-once",
-        "relay transport 是 **at-least-once**",
-    ),
-    (
-        "publish-before-settle-duplicate",
-        "publish 成功、settle 前崩溃允许 broker duplicate",
-    ),
-    (
-        "consumer-transactional-dedupe",
-        "tenant-scoped `Inbox` / `ConsumerTx` 收口重复数据库副作用",
-    ),
-];
-const LOCALONLY_CANONICAL_FILE: &str = "docs/rules/consistency-l0.md";
-const LOCALONLY_CANONICAL_HEADING: &str = "LocalOnly business effect 语义";
-const LOCALONLY_CANONICAL_FACETS: &[(&str, &str)] = &[
-    (
-        "qualified-vocabulary-and-admission",
-        "HTTP effect vocabulary 仅使用 `business-write` / `business-transaction`；LocalOnly 准入仍只允许 `auth` / `read` / `projection`",
-    ),
-    (
-        "typed-marker-and-observer",
-        "port marker 是 `BusinessWriteEffect`，runtime observer 使用 `BusinessWrite` / `business_writes`",
-    ),
-    (
-        "zero-business-effects",
-        "LocalOnly 证明的是业务持久化、outbox、publish 为零",
-    ),
-    (
-        "provider-owned-read-transaction",
-        "LocalOnly 允许 provider-owned read-path transaction",
-    ),
-    (
-        "postgres-non-guarantees",
-        "`tenant_scoped_read*` 保证 PostgreSQL `READ ONLY`，但不承诺稳定 snapshot",
-    ),
-    (
-        "operational-exclusions",
-        "correctness cache、metrics/trace、auth security audit 不计入 business effect",
-    ),
-    (
-        "durable-cross-tenant-audit",
-        "跨租户 durable audit 仍声明 `business-write + business-transaction + cross-tenant-audit` 并保持 LocalTx",
-    ),
 ];
 const CARRYOVER_DOC_FILE: &str =
     "docs/migration-from-gocell/202607101035-1444-persistence-migration-carry-over.md";
@@ -537,16 +494,10 @@ const GATE_PROOFS: &[GateProof] = &[
     },
     GateProof {
         proof: "gate: event transport and ops runbook",
-        carriers: &[
-            SourceAnchor {
-                path: "xtask/src/event_transport_guard.rs",
-                needle: "EVENT-TRANSPORT-PG-INBOX-01",
-            },
-            SourceAnchor {
-                path: "docs/rules/eventbus.md",
-                needle: "## DLX 与幂等",
-            },
-        ],
+        carriers: &[SourceAnchor {
+            path: "xtask/src/event_transport_guard.rs",
+            needle: "EVENT-TRANSPORT-PG-INBOX-01",
+        }],
     },
     GateProof {
         proof: "gate: event-transport-guard",
@@ -939,7 +890,7 @@ fn format_doc_contracts_summary(
     carryover_summary: &str,
 ) -> String {
     format!(
-        "{scanned} docs/source 文件扫描，command/outbox tenant-aware 片段无漂移；LocalOnly semantic carriers={localonly_carriers}、canonical 完整性与 production rustdoc files={rustdoc_files} 已检查；carry-over {carryover_summary}"
+        "{scanned} docs/source 文件扫描，command/outbox tenant-aware 片段无漂移；LocalOnly semantic carriers={localonly_carriers} 与 production rustdoc files={rustdoc_files} 已检查；carry-over {carryover_summary}"
     )
 }
 
@@ -976,12 +927,6 @@ fn scan_docs(root: &Path) -> Result<(usize, usize, usize, String, Vec<Finding>)>
             .map_err(|e| anyhow::anyhow!("doc-contracts: 读 {} 失败: {e}", path.display()))?;
         let rel = path.strip_prefix(root).unwrap_or(path);
         findings.extend(scan_content(rel, &content));
-        if rel == Path::new(OUTBOX_CANONICAL_FILE) {
-            findings.extend(scan_outbox_canonical_semantics(&content));
-        }
-        if rel == Path::new(LOCALONLY_CANONICAL_FILE) {
-            findings.extend(scan_localonly_canonical_semantics(&content));
-        }
         if rel == Path::new(POSTGRES_MIGRATION_WATCHDOG_FILE) {
             findings.extend(scan_postgres_migration_watchdog(&content));
         }
@@ -3110,123 +3055,6 @@ fn is_standalone_l0_definition(text: &str) -> bool {
         .is_some_and(|character| !character.is_ascii_alphanumeric() && character != '_')
 }
 
-fn scan_outbox_canonical_semantics(content: &str) -> Vec<Finding> {
-    let visible = visible_outbox_canonical_section(content);
-    OUTBOX_CANONICAL_FACETS
-        .iter()
-        .filter(|(_, needle)| {
-            let normalized_needle = normalize_semantic_text(needle);
-            !visible.lines().any(|line| {
-                let normalized_line = normalize_semantic_text(line);
-                normalized_line.contains(&normalized_needle)
-                    && !guarantee_is_denied(&normalized_line, &normalized_needle)
-            })
-        })
-        .map(|(facet, needle)| {
-            finding(
-                Rule::OutboxDeliverySemantics,
-                OUTBOX_CANONICAL_FILE,
-                format!("canonical Outbox delivery semantics 缺少 {facet} facet: {needle:?}"),
-            )
-        })
-        .collect()
-}
-
-fn scan_localonly_canonical_semantics(content: &str) -> Vec<Finding> {
-    let visible = visible_canonical_section(content, LOCALONLY_CANONICAL_HEADING);
-    LOCALONLY_CANONICAL_FACETS
-        .iter()
-        .filter(|(_, needle)| {
-            let normalized_needle = normalize_semantic_text(needle);
-            !visible.lines().any(|line| {
-                let normalized_line = normalize_semantic_text(line);
-                normalized_line.contains(&normalized_needle)
-                    && !guarantee_is_denied(&normalized_line, &normalized_needle)
-            })
-        })
-        .map(|(facet, needle)| {
-            finding(
-                Rule::LocalOnlyBusinessEffects,
-                LOCALONLY_CANONICAL_FILE,
-                format!("canonical LocalOnly business effect 语义缺少 {facet} facet: {needle:?}"),
-            )
-        })
-        .collect()
-}
-
-fn visible_outbox_canonical_section(content: &str) -> String {
-    visible_canonical_section(content, "Outbox relay 投递语义")
-}
-
-fn visible_canonical_section(content: &str, heading: &str) -> String {
-    let mut in_section = false;
-    let mut section_level = 0;
-    let mut open_fence = None;
-    let mut in_comment = false;
-    let mut visible = String::new();
-
-    for raw in content.lines() {
-        let trimmed = raw.trim();
-        if !in_section {
-            let level = trimmed
-                .chars()
-                .take_while(|character| *character == '#')
-                .count();
-            let title = trimmed[level..].trim_start();
-            in_section = level > 0 && title.starts_with(heading);
-            if in_section {
-                section_level = level;
-            }
-            continue;
-        }
-        if let Some(fence) = open_fence {
-            if is_fence_closer(raw, fence) {
-                open_fence = None;
-            }
-            continue;
-        }
-        let heading_level = trimmed
-            .chars()
-            .take_while(|character| *character == '#')
-            .count();
-        if heading_level > 0 && heading_level <= section_level {
-            break;
-        }
-        if let Some(fence) = fence_opening(raw) {
-            open_fence = Some(fence);
-            continue;
-        }
-        // CommonMark indented code + any open fence stay invisible (unclosed = fail-closed).
-        if trimmed.starts_with('>') || is_indented_code_line(raw) {
-            continue;
-        }
-        let mut remainder = raw;
-        loop {
-            if in_comment {
-                let Some((_, after)) = remainder.split_once("-->") else {
-                    break;
-                };
-                in_comment = false;
-                remainder = after;
-                continue;
-            }
-            let Some((before, after)) = remainder.split_once("<!--") else {
-                visible.push_str(remainder);
-                visible.push('\n');
-                break;
-            };
-            visible.push_str(before);
-            if let Some((_, tail)) = after.split_once("-->") {
-                remainder = tail;
-            } else {
-                in_comment = true;
-                break;
-            }
-        }
-    }
-    visible
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Fence {
     marker: char,
@@ -3244,18 +3072,6 @@ fn fence_opening(raw: &str) -> Option<Fence> {
         return None;
     }
     Some(fence)
-}
-
-fn is_fence_closer(raw: &str, opening: Fence) -> bool {
-    let Some(candidate) = commonmark_fence_candidate(raw) else {
-        return false;
-    };
-    let Some((closing, remainder)) = fence_run(candidate) else {
-        return false;
-    };
-    closing.marker == opening.marker
-        && closing.run_len >= opening.run_len
-        && remainder.chars().all(char::is_whitespace)
 }
 
 fn commonmark_fence_candidate(raw: &str) -> Option<&str> {
@@ -3280,10 +3096,6 @@ fn fence_run(candidate: &str) -> Option<(Fence, &str)> {
         .count();
     let byte_len = marker.len_utf8() * run_len;
     Some((Fence { marker, run_len }, &candidate[byte_len..]))
-}
-
-fn is_indented_code_line(raw: &str) -> bool {
-    raw.starts_with("    ") || raw.starts_with('\t')
 }
 
 #[derive(Debug)]
@@ -4665,79 +4477,10 @@ correctness cache、metrics/trace、auth security audit 不计入 business effec
     }
 
     #[test]
-    fn localonly_canonical_semantics_requires_every_visible_facet() {
-        let canonical = format!(
-            "## {LOCALONLY_CANONICAL_HEADING}\n{}\n",
-            LOCALONLY_CANONICAL_FACETS
-                .iter()
-                .map(|(_, needle)| *needle)
-                .collect::<Vec<_>>()
-                .join("。\n")
-        );
-        assert!(scan_localonly_canonical_semantics(&canonical).is_empty());
-
-        for (_, required) in LOCALONLY_CANONICAL_FACETS {
-            let incomplete = canonical.replacen(required, "", 1);
-            assert_eq!(
-                scan_localonly_canonical_semantics(&incomplete).len(),
-                1,
-                "missing facet should fail: {required:?}"
-            );
-        }
-
-        let hidden = format!(
-            "## {LOCALONLY_CANONICAL_HEADING}\n<!--\n{}\n-->\n",
-            LOCALONLY_CANONICAL_FACETS
-                .iter()
-                .map(|(_, needle)| *needle)
-                .collect::<Vec<_>>()
-                .join("\n")
-        );
-        assert_eq!(
-            scan_localonly_canonical_semantics(&hidden).len(),
-            LOCALONLY_CANONICAL_FACETS.len()
-        );
-
-        let denied = canonical.replacen(
-            LOCALONLY_CANONICAL_FACETS[0].1,
-            &format!("不再声明 {}", LOCALONLY_CANONICAL_FACETS[0].1),
-            1,
-        );
-        assert_eq!(scan_localonly_canonical_semantics(&denied).len(), 1);
-    }
-
-    #[test]
-    fn canonical_fences_require_matching_marker_length_and_bare_closer() {
-        let facets = LOCALONLY_CANONICAL_FACETS
-            .iter()
-            .map(|(_, needle)| *needle)
-            .collect::<Vec<_>>()
-            .join("\n");
-        for false_closer in ["```", "````text", "~~~"] {
-            let hidden = format!(
-                "## {LOCALONLY_CANONICAL_HEADING}\n````text\ndecoy\n{false_closer}\n{facets}\n````\n"
-            );
-            assert_eq!(
-                scan_localonly_canonical_semantics(&hidden).len(),
-                LOCALONLY_CANONICAL_FACETS.len(),
-                "false closer must not expose fenced facets: {false_closer:?}"
-            );
-        }
-
-        let hidden_with_longer_closer =
-            format!("## {LOCALONLY_CANONICAL_HEADING}\n```text\n{facets}\n````\n");
-        assert_eq!(
-            scan_localonly_canonical_semantics(&hidden_with_longer_closer).len(),
-            LOCALONLY_CANONICAL_FACETS.len()
-        );
-    }
-
-    #[test]
-    fn doc_contracts_summary_names_localonly_semantic_canonical_and_rustdoc_checks() {
+    fn doc_contracts_summary_names_localonly_semantic_and_rustdoc_checks() {
         let summary = format_doc_contracts_summary(321, 9, 87, "ledger ok");
         assert!(summary.contains("321 docs/source 文件扫描"));
         assert!(summary.contains("LocalOnly semantic carriers=9"));
-        assert!(summary.contains("canonical 完整性"));
         assert!(summary.contains("production rustdoc files=87"));
         assert!(summary.ends_with("carry-over ledger ok"));
     }
@@ -4867,86 +4610,6 @@ OutboxEnvelopeParts::new(CONTRACT, tenant, subject, actor)
         );
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].subject, "crates/eventexec/src/relay.rs:2");
-    }
-
-    #[test]
-    fn canonical_outbox_semantics_requires_every_faceted_statement() {
-        let canonical = "\
-## Outbox relay 投递语义（at-least-once）
-relay transport 是 **at-least-once**。
-publish 成功、settle 前崩溃允许 broker duplicate。
-tenant-scoped `Inbox` / `ConsumerTx` 收口重复数据库副作用。
-";
-        assert!(scan_outbox_canonical_semantics(canonical).is_empty());
-
-        for required in [
-            "relay transport 是 **at-least-once**。\n",
-            "publish 成功、settle 前崩溃允许 broker duplicate。\n",
-            "tenant-scoped `Inbox` / `ConsumerTx` 收口重复数据库副作用。\n",
-        ] {
-            let incomplete = canonical.replace(required, "");
-            assert_eq!(
-                scan_outbox_canonical_semantics(&incomplete).len(),
-                1,
-                "missing facet should fail: {required:?}"
-            );
-        }
-
-        let hidden_in_comment = format!(
-            "## Outbox relay 投递语义（at-least-once）\n<!--\n{}\n{}\n{}\n-->\n",
-            OUTBOX_CANONICAL_FACETS[0].1,
-            OUTBOX_CANONICAL_FACETS[1].1,
-            OUTBOX_CANONICAL_FACETS[2].1,
-        );
-        assert_eq!(scan_outbox_canonical_semantics(&hidden_in_comment).len(), 3);
-
-        let hidden_in_fence = format!(
-            "## Outbox relay 投递语义（at-least-once）\n```text\n{}\n{}\n{}\n```\n",
-            OUTBOX_CANONICAL_FACETS[0].1,
-            OUTBOX_CANONICAL_FACETS[1].1,
-            OUTBOX_CANONICAL_FACETS[2].1,
-        );
-        assert_eq!(scan_outbox_canonical_semantics(&hidden_in_fence).len(), 3);
-
-        let hidden_in_tilde_fence = format!(
-            "## Outbox relay 投递语义（at-least-once）\n~~~text\n{}\n{}\n{}\n~~~\n",
-            OUTBOX_CANONICAL_FACETS[0].1,
-            OUTBOX_CANONICAL_FACETS[1].1,
-            OUTBOX_CANONICAL_FACETS[2].1,
-        );
-        assert_eq!(
-            scan_outbox_canonical_semantics(&hidden_in_tilde_fence).len(),
-            3
-        );
-
-        let hidden_in_indented_code = format!(
-            "## Outbox relay 投递语义（at-least-once）\n\n    {}\n    {}\n    {}\n",
-            OUTBOX_CANONICAL_FACETS[0].1,
-            OUTBOX_CANONICAL_FACETS[1].1,
-            OUTBOX_CANONICAL_FACETS[2].1,
-        );
-        assert_eq!(
-            scan_outbox_canonical_semantics(&hidden_in_indented_code).len(),
-            3
-        );
-
-        let hidden_in_unclosed_fence = format!(
-            "## Outbox relay 投递语义（at-least-once）\n```text\n{}\n{}\n{}\n",
-            OUTBOX_CANONICAL_FACETS[0].1,
-            OUTBOX_CANONICAL_FACETS[1].1,
-            OUTBOX_CANONICAL_FACETS[2].1,
-        );
-        assert_eq!(
-            scan_outbox_canonical_semantics(&hidden_in_unclosed_fence).len(),
-            3
-        );
-
-        let denied = canonical.replacen(
-            OUTBOX_CANONICAL_FACETS[0].1,
-            &format!("不再声明 {}", OUTBOX_CANONICAL_FACETS[0].1),
-            1,
-        );
-        assert_eq!(scan_outbox_canonical_semantics(&denied).len(), 1);
     }
 
     #[test]

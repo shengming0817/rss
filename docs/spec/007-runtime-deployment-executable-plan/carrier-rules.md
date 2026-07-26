@@ -1,6 +1,8 @@
-# Runtime Deployment Plan Rules
+# Runtime Deployment Carrier Rules
 
-This rule governs how runtime-deployment target constraints select enforcement carriers. It supplements `docs/rules/architecture.md`, `runtime-assembly-plan.md`, and `runtime-wiring.md`; it does not copy their implemented carrier inventory.
+Feature-scoped carrier selection rules for #1779. This document belongs to the SpecKit feature, not to `docs/rules/`: it records the current runtime-deployment fact baseline, target capabilities, and open gaps, which is spec shape rather than standing repository rule shape.
+
+It supplements `docs/rules/architecture.md`, `docs/rules/runtime-assembly-plan.md`, and `docs/rules/runtime-wiring.md`; it does not copy their implemented carrier inventory.
 
 ## 当前事实
 

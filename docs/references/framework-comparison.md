@@ -64,7 +64,7 @@ raw 拉取 URL 形态：`https://raw.githubusercontent.com/{owner}/{repo}/{branc
 
 ## Rust 标准库参考
 
-> `fix` 技能（标准库 / 核心生态优先）查此表：有既定做法时遵循，不自创。语言层细则见 `.claude/rules/rss/rust-standards.md`。
+> `fix` 技能（标准库 / 核心生态优先）查此表：有既定做法时遵循，不自创。语言层细则见 `docs/rules/rust-standards.md`。
 
 | 场景 | 标准库 / 核心生态做法 |
 |------|----------------------|

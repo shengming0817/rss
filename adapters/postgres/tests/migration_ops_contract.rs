@@ -1,6 +1,12 @@
+//! Migration / ops carrier 对账。
+//!
+//! 只锁可执行 carrier：SQL migration、provisioning 与 capacity-gate 脚本。
+//! 面向人的 cutover runbook（`migrations/README.md`、`docs/ops/security-production-closeout.md`）
+//! 不做 `contains` 断言——要求散文包含某句话不增加 enforcement 强度，
+//! 见 `docs/rules/README.md` §红线一。
+
 const SECRET_REFS_HARDENING: &str =
     include_str!("../migrations/0058_harden_secret_refs_append_only.sql");
-const MIGRATION_README: &str = include_str!("../migrations/README.md");
 const DLX_CUTOVER: &str = include_str!("../migrations/0062_prepare_dead_letter_cutover.sql");
 const DLX_LIFECYCLE: &str = include_str!("../migrations/0063_dead_letter_lifecycle.sql");
 const LOCALONLY_READ_ROLE: &str = include_str!("../migrations/0067_localonly_read_role.sql");
@@ -9,8 +15,6 @@ const SERVICE_TOKEN_REPLAY_MIGRATION: &str =
 const ACCOUNT_SECURITY_MIGRATION: &str =
     include_str!("../migrations/0069_create_account_security_states.sql");
 const AUTH_GRANT_MIGRATION: &str = include_str!("../migrations/0070_create_auth_grants.sql");
-const SECURITY_PRODUCTION_CLOSEOUT: &str =
-    include_str!("../../../docs/ops/security-production-closeout.md");
 const ACCOUNT_SECURITY_CAPACITY_GATE: &str =
     include_str!("../../../docs/ops/0069-account-security-capacity-gate.sh");
 const ACCOUNT_SECURITY_CAPACITY_SELFTEST: &str =
@@ -105,182 +109,6 @@ fn auth_grant_cutover_is_strict_atomic_and_least_privilege() {
 }
 
 #[test]
-fn auth_grant_cutover_runbook_is_non_rolling_and_executable() -> Result<(), &'static str> {
-    let runbook = MIGRATION_README
-        .split_once("### 0070 AuthGrant root 破坏性切换")
-        .and_then(|(_, tail)| {
-            tail.split_once("## Append-only 表（REVOKE 强制）")
-                .map(|(runbook, _)| runbook)
-        })
-        .ok_or("0070 runbook must be a non-empty, independently scoped section")?;
-    assert!(
-        !runbook.trim().is_empty(),
-        "0070 runbook section must not be vacuous"
-    );
-
-    for required in [
-        "停止全部旧 binary",
-        "禁止滚动混跑",
-        "sessions",
-        "refresh_tokens",
-        "REFRESH_ROW_BUDGET",
-        "REFRESH_BYTE_BUDGET",
-        "WAL_FREE_BUDGET",
-        "ARCHIVE_FREE_BUDGET",
-        "EXPECTED_REPLICAS",
-        "RSS_IDENTITY_AUTH_GRANT_TTL_SECS",
-        "RSS_REFRESH_TTL_SECS",
-        "AuthGrant TTL 必须大于等于 refresh TTL",
-        "最大 365 天",
-        "set -eu",
-        "SELECT count(*) AS refresh_rows",
-        "pg_total_relation_size('public.refresh_tokens'::regclass)",
-        "pg_catalog.pg_stat_archiver",
-        "pg_catalog.pg_stat_replication",
-        "SELECT max(version) FROM public._sqlx_migrations",
-        "_sqlx_migrations` 必须为 `69`",
-        "_sqlx_migrations` 必须为 `70`",
-        "to_regclass('public.sessions') IS NULL",
-        "to_regclass('public.auth_grants') IS NOT NULL",
-        "rss_sweep_expired_auth_grants",
-        "rss_auth_grant_maintenance",
-        "relforcerowsecurity",
-        "has_table_privilege('rss_app', 'public.auth_grants', 'DELETE') = false",
-        "has_table_privilege('rss_app', 'public.auth_grants', 'UPDATE') = false",
-        "has_table_privilege('rss_app', 'public.refresh_tokens', 'UPDATE') = false",
-        "information_schema.column_privileges",
-        "旧 session/refresh 数据必须为 `0`",
-        "只允许 forward-only 修复",
-        "ledger 仍为 `69`",
-        "ledger 已为 `70`",
-    ] {
-        assert!(
-            runbook.contains(required),
-            "0070 cutover runbook omits executable evidence token: {required}"
-        );
-    }
-
-    let ordered_steps = [
-        "1. **停止旧 binary 并做迁移前探针。**",
-        "2. **容量、WAL、archive 与 replica fail-closed preflight。**",
-        "3. **执行唯一迁移。**",
-        "4. **迁移后精确探针。**",
-        "5. **核验根约束。**",
-        "6. **只启动新世界。**",
-        "7. **按 ledger 恢复。**",
-    ];
-    let positions = ordered_steps
-        .iter()
-        .map(|step| runbook.find(step))
-        .collect::<Vec<_>>();
-    assert!(
-        positions.iter().all(Option::is_some),
-        "0070 runbook must contain every ordered cutover step: {positions:?}"
-    );
-    assert!(
-        positions
-            .windows(2)
-            .all(|pair| matches!(pair, [Some(left), Some(right)] if left < right)),
-        "0070 cutover steps are not in executable order: {positions:?}"
-    );
-    Ok(())
-}
-
-#[test]
-fn certificate_revocation_cutover_is_non_rolling_and_forward_only() -> Result<(), &'static str> {
-    let runbook = MIGRATION_README
-        .split_once("### 0072 persistent certificate revocations")
-        .and_then(|(_, tail)| {
-            tail.split_once("## Append-only 表（REVOKE 强制）")
-                .map(|(runbook, _)| runbook)
-        })
-        .ok_or("0072 runbook must be a non-empty, independently scoped section")?;
-
-    for required in [
-        "非滚动 hard cutover",
-        "保持撤销入口关闭",
-        "SELECT max(version) FROM public._sqlx_migrations",
-        "停止全部旧 binary",
-        "禁止旧/新 generation 滚动混跑",
-        "OLD_REVOCATION_GENERATION",
-        "EXPECTED_OLD_REPLICAS=0",
-        "禁用旧 workload/controller/job 的自动重启",
-        "pg_catalog.pg_stat_activity",
-        "rss-postgres-writer",
-        "rss-postgres-reader",
-        "rss-postgres-audit-admin",
-        "rss-postgres-maintenance",
-        "rss-postgres-migrator",
-        "all_static_lanes_drained",
-        "任何新 binary 启动前",
-        "只启动新 binary",
-        "capability gate",
-        "再次证明旧 process inventory 为 `0`",
-        "不得再用静态 `application_name` 区分旧/新 generation",
-        "最后开放撤销流量",
-        "SELECT count(*) AS persisted_revocations FROM public.certificate_revocations",
-        "严禁回退到读取进程内 ledger 的旧 binary",
-        "新的前向修复 migration",
-        "不得修改 `0072`、增加双读/双写或恢复",
-    ] {
-        assert!(
-            runbook.contains(required),
-            "0072 cutover runbook omits executable evidence token: {required}"
-        );
-    }
-
-    let ordered_steps = [
-        "1. **先应用 additive migration，保持撤销入口关闭。**",
-        "2. **quiesce 撤销入口并停止全部旧 binary。**",
-        "3. **在任何新 binary 启动前证明全部静态连接 lane 为零。**",
-        "4. **只启动新 binary。**",
-        "5. **完成新世界探针。**",
-        "6. **最后开放撤销流量。**",
-        "7. **执行 rollback fence。**",
-    ];
-    let positions = ordered_steps
-        .iter()
-        .map(|step| runbook.find(step))
-        .collect::<Vec<_>>();
-    assert!(
-        positions.iter().all(Option::is_some),
-        "0072 runbook must contain every ordered non-rolling step: {positions:?}"
-    );
-    assert!(
-        positions
-            .windows(2)
-            .all(|pair| matches!(pair, [Some(left), Some(right)] if left < right)),
-        "0072 cutover steps are not in executable order: {positions:?}"
-    );
-    let process_zero = runbook
-        .find("EXPECTED_OLD_REPLICAS=0")
-        .ok_or("old process inventory gate missing")?;
-    let connection_zero = runbook
-        .find("all_static_lanes_drained")
-        .ok_or("static lane drain gate missing")?;
-    let new_binary = runbook
-        .find("4. **只启动新 binary。**")
-        .ok_or("new binary start gate missing")?;
-    assert!(
-        process_zero < connection_zero && connection_zero < new_binary,
-        "hard cutover must prove process=0, then all five static lanes=0, before starting new binary"
-    );
-    for closeout_evidence in [
-        "old generation process inventory is zero",
-        "Before any new binary starts",
-        "rss-postgres-{writer,reader,audit-admin,maintenance,migrator}",
-        "zero total connections",
-        "continue proving old-generation zero only from deployment process inventory",
-    ] {
-        assert!(
-            SECURITY_PRODUCTION_CLOSEOUT.contains(closeout_evidence),
-            "production closeout omits hard-cutover evidence: {closeout_evidence}"
-        );
-    }
-    Ok(())
-}
-
-#[test]
 fn account_security_migration_is_strict_closed_and_least_privilege() {
     let normalized = ACCOUNT_SECURITY_MIGRATION
         .split_whitespace()
@@ -328,8 +156,7 @@ fn account_security_migration_is_strict_closed_and_least_privilege() {
 }
 
 #[test]
-fn account_security_cutover_has_bounded_locking_and_executable_runbook() -> Result<(), &'static str>
-{
+fn account_security_cutover_has_bounded_locking_and_executable_capacity_gate() {
     for required in [
         "SET LOCAL lock_timeout = '5s'",
         "SET LOCAL statement_timeout = '5min'",
@@ -339,59 +166,6 @@ fn account_security_cutover_has_bounded_locking_and_executable_runbook() -> Resu
             "0069 omits bounded migration timeout: {required}"
         );
     }
-
-    let runbook = MIGRATION_README
-        .split_once("### 0069 account security state 原子切换")
-        .map_or(MIGRATION_README, |(_, runbook)| runbook);
-    for required in [
-        "零参数 `rss` bootstrap",
-        "pg_catalog.pg_stat_activity",
-        "pg_catalog.pg_locks",
-        "docs/ops/0069-account-security-capacity-gate.sh",
-        "EXPECTED_REPLICAS",
-        "MAINTENANCE_WINDOW_SECONDS",
-        "0069 account-security capacity gate: PASS",
-        "rss-postgres-migrator",
-        "_sqlx_migrations=69",
-        "missing_state",
-        "pg_catalog.pg_constraint",
-        "relforcerowsecurity",
-        "pg_catalog.pg_policies",
-        "information_schema.role_table_grants",
-        "active_legacy_refresh_families",
-        "WHERE status = 'active'",
-        "不得手工 DELETE",
-        "若 ledger 已为 `69`，禁止启动旧 binary",
-    ] {
-        assert!(
-            runbook.contains(required),
-            "0069 cutover runbook omits executable evidence token: {required}"
-        );
-    }
-
-    let blocker_list = runbook
-        .split_once("mode IN (")
-        .and_then(|(_, tail)| tail.split_once(");").map(|(list, _)| list))
-        .ok_or("0069 runbook must contain a closed lock blocker list")?;
-    let actual = blocker_list
-        .split('\'')
-        .skip(1)
-        .step_by(2)
-        .collect::<std::collections::BTreeSet<_>>();
-    let expected = [
-        "RowExclusiveLock",
-        "ShareUpdateExclusiveLock",
-        "ShareLock",
-        "ShareRowExclusiveLock",
-        "ExclusiveLock",
-        "AccessExclusiveLock",
-    ]
-    .into_iter()
-    .collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(
-        actual, expected,
-        "0069 preflight blockers must exactly match SHARE ROW EXCLUSIVE conflicts"
-    );
 
     for required in [
         "set -eu",
@@ -425,7 +199,6 @@ fn account_security_cutover_has_bounded_locking_and_executable_runbook() -> Resu
             "0069 capacity selftest omits red case: {required}"
         );
     }
-    Ok(())
 }
 
 #[test]
@@ -493,68 +266,6 @@ fn service_token_replay_store_is_async_fixed_shape_and_least_privilege() {
             "bounded replay retention function omits: {required}"
         );
     }
-}
-
-#[test]
-fn service_token_replay_cutover_runbook_is_non_rolling_and_executable() {
-    let runbook = MIGRATION_README
-        .split_once("### 0068 service-token replay store 破坏性切换")
-        .map_or(MIGRATION_README, |(_, runbook)| runbook);
-
-    for required in [
-        "零参数 `rss` bootstrap",
-        "rss-postgres-writer",
-        "rss-postgres-maintenance",
-        "rss-postgres-migrator",
-        "pg_catalog.pg_stat_activity",
-        "pg_catalog.pg_locks",
-        "service_token_replay_nonces",
-        "expires_at > pg_catalog.clock_timestamp()",
-        "SELECT max(version) FROM public._sqlx_migrations",
-        "to_regclass('public.service_token_replay_nonces') IS NULL",
-        "to_regclass('public.service_token_replay_keys') IS NOT NULL",
-        "pg_catalog.pg_get_userbyid",
-        "proc.proconfig",
-        "has_function_privilege",
-        "SET LOCAL ROLE rss_app",
-        "rss_service_token_replay_check_and_record",
-        "rss_service_token_replay_sweep_expired",
-        "service_token_replay_sweeper",
-        "readyz",
-    ] {
-        assert!(
-            runbook.contains(required),
-            "0068 cutover runbook omits executable evidence token: {required}"
-        );
-    }
-
-    let ordered_steps = [
-        "1. **停止旧世界**",
-        "2. **迁移前探针**",
-        "3. **唯一 migration runner**",
-        "4. **迁移后 catalog / ACL 探针**",
-        "5. **以 `rss_app` 实测固定函数**",
-        "6. **只启动新世界**",
-        "7. **失败恢复**",
-    ];
-    let positions: Vec<Option<usize>> = ordered_steps
-        .iter()
-        .map(|step| runbook.find(step))
-        .collect();
-    assert!(
-        positions.iter().all(Option::is_some),
-        "0068 cutover runbook must contain every ordered non-rolling step: {positions:?}"
-    );
-    assert!(
-        positions
-            .windows(2)
-            .all(|pair| matches!(pair, [Some(left), Some(right)] if left < right)),
-        "0068 cutover steps are not in executable order: {positions:?}"
-    );
-    assert!(
-        !runbook.contains("执行 migration job"),
-        "0068 must name the supported singleton bootstrap instead of a fictitious generic migration job"
-    );
 }
 
 #[test]
@@ -688,21 +399,9 @@ fn secret_refs_repair_must_finish_before_sqlx_reaches_0058() {
             "0058 recovery hint omits the deployment-order contract: {token}"
         );
     }
-    for token in [
-        "SQLx applies pending migrations",
-        "version order",
-        "0058 remains the first pending migration",
-        "no later forward migration can run first",
-        "reviewed out-of-band repair",
-    ] {
-        assert!(
-            MIGRATION_README.contains(token),
-            "migration runbook omits the SQLx ordering/recovery contract: {token}"
-        );
-    }
     for misleading in ["explicit forward data migration", "forward data migration"] {
         assert!(
-            !SECRET_REFS_HARDENING.contains(misleading) && !MIGRATION_README.contains(misleading),
+            !SECRET_REFS_HARDENING.contains(misleading),
             "failed 0058 must not claim that a later forward migration can repair it: {misleading}"
         );
     }

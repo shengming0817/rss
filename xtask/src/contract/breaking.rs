@@ -52,11 +52,6 @@ use super::redaction;
 pub(crate) const DEFAULT_AGAINST: &str = "origin/develop";
 
 const REVIEW_ACK_PREFIX: &str = "Contract-Review-Ack: sha256:";
-const REVIEW_POLICY_MARKER: &str = "INVARIANT: CONSISTENCY-EFFECT-BREAKING-REVIEW-01";
-const REVIEW_POLICY_DOCS: [&str; 2] = [
-    ".claude/rules/rss/api-versioning.md",
-    ".claude/rules/rss/contract-fanout.md",
-];
 
 /// JSON Schema `properties` 键名（DRY：compare_node + check_field_deletions 多处引用）。
 const PROPS: &str = "properties";
@@ -1371,7 +1366,6 @@ fn push_finding(
 /// base ref 不可解析或 Git 基线命令失败均 fail-closed。
 pub(crate) fn run(against: &str) -> Result<()> {
     let root = crate::workspace_root()?;
-    ensure_review_policy_docs(&root)?;
     match read_ref(&root, against) {
         GitRead::Found(()) => {}
         GitRead::Missing => return unresolved_ref(against),
@@ -1395,28 +1389,6 @@ pub(crate) fn run(against: &str) -> Result<()> {
     }
     enforce_review_ack(&root, against, &result.findings)?;
     Ok(())
-}
-
-fn ensure_review_policy_docs(root: &Path) -> Result<()> {
-    for relative in REVIEW_POLICY_DOCS {
-        let path = root.join(relative);
-        let content = std::fs::read_to_string(&path)
-            .with_context(|| format!("read contract breaking policy {}", path.display()))?;
-        if !policy_doc_is_aligned(&content) {
-            bail!(
-                "contract breaking policy drift: `{relative}` must reference {REVIEW_POLICY_MARKER} and the three fixed review rules"
-            );
-        }
-    }
-    Ok(())
-}
-
-fn policy_doc_is_aligned(content: &str) -> bool {
-    content.contains(REVIEW_POLICY_MARKER)
-        && content.contains("active 默认 deny")
-        && REVIEW_ONLY_RULES
-            .iter()
-            .all(|rule| content.contains(rule.id()))
 }
 
 fn enforce_review_ack(root: &Path, against: &str, findings: &[GradedFinding]) -> Result<()> {
@@ -3457,15 +3429,6 @@ lifecycle = "active"
             .is_err(),
             "active review warnings must still enter the fail-closed acknowledgement path"
         );
-    }
-
-    #[test]
-    fn canonical_policy_docs_must_name_the_fixed_review_rules() {
-        let aligned = "INVARIANT: CONSISTENCY-EFFECT-BREAKING-REVIEW-01 LOCAL_ONLY_BOUNDARY_CHANGED EFFECT_ADDED EFFECT_REMOVED active 默认 deny";
-        assert!(policy_doc_is_aligned(aligned));
-        assert!(!policy_doc_is_aligned(
-            "active deny、deprecated warn、draft skip"
-        ));
     }
 
     #[test]

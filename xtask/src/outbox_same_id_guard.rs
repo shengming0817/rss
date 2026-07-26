@@ -189,17 +189,6 @@ const CARRIERS: &[Carrier] = &[
         ],
     },
     Carrier {
-        path: "docs/rules/eventbus.md",
-        purpose: "normative terminal semantics forbid reopening expired same-ID delivery",
-        anchors: &[
-            "terminal `abandoned`",
-            "outbox_expired_resolutions",
-            "accepted_gap",
-            "compensated",
-            "rss_outbox_resolve_expired",
-        ],
-    },
-    Carrier {
         path: "lints/rss_dlq_operator_callsite/src/lib.rs",
         purpose: "authorized operator receipt construction remains at the auth/PDP boundary",
         anchors: &[

@@ -38,12 +38,11 @@ workspace(见 §扁平 workspace 结构、§Rust 原生强制)。
 | context 控制流值(tenant/principal) | `runctx::RequestCtx`/`AppCtx`(`task_local` 传播);tenant payload = `vocab::tenant::TenantId` | sealed 构造 + redacted Debug + fail-closed 取用(决策 #2 → ADR-002);base intra-base DAG `runctx → vocab` |
 | 层 | 扁平 `crates/` 分组 + `deny.toml` 强制 | 见 §扁平 workspace 结构、§分层 |
 
-active HTTP L2 producer 的 route hard binding 使用
-`HttpProducerBinding<RouteMarker>` → move-only `ProducerMarker` / `ProducerAssuranceReceipt` /
-`ProducerAuthorization<M>`；Postgres 侧只允许 `producer_tx` / `retry_producer_tx` 消费同一个
-crate-private `TxCapability`，并由 `ProducerTxOutcome<M,T>` 闭合 emitted/no-mutation。跨文件 residual
-由 Medium fail-closed execution graph 加 production-composition join 证明，committed 单一 artifact 是
-`generated/l2-assurance.json` schema v3；不保留旧 co-tx API、v2 reader、alias、shim 或双写。
+active HTTP L2 producer 的 route 绑定必须走 move-only typed 链：`HttpProducerBinding<RouteMarker>` →
+`ProducerMarker` / `ProducerAssuranceReceipt` / `ProducerAuthorization<M>`。provider 侧只允许受控
+producer transaction 入口消费同一个 crate-private capability，并由 typed outcome 闭合
+emitted / no-mutation。跨文件 residual 由 Medium fail-closed execution graph 加 production-composition
+join 证明，committed assurance artifact 唯一；不保留旧 co-tx API、旧版 reader、alias、shim 或双写。
 
 一句话:cargo 的 **crate ≈ 域 / 服务 / adapter / contract 派生体**,**workspace ≈ assembly**;
 Rust 的**类型系统 + crate 依赖图原生强制了大部分静态架构约束**(见 §Rust 原生强制)。
@@ -67,15 +66,15 @@ rss/
 │   ├── diagctx/          # 诊断信道 fail-open correlation（ADR-002 §D1-bis）
 │   ├── consistency/      # outbox / saga / reconcile / projection / command_journal / idempotency（纯态机 + trait，L0–L4）
 │   ├── primitives/       # crypto / authplan / healthz / circuitbreaker（引擎纯计算原语）
-│   ├── tracewire/        # W3C traceparent capture/restore 单源（outbox→consumer trace 续传，唯一 otel 桥落点，#1224）
-│   ├── diport/           # DI-infra：可替换 provider 的 port 单源；dynosaur 默认非 Sync，Pdp/KeyProvider 是共享例外（ADR-003 #1095/#1828）
+│   ├── tracewire/        # W3C traceparent capture/restore 单源（outbox→consumer trace 续传，唯一 otel 桥落点）
+│   ├── diport/           # DI-infra：可替换 provider 的 port 单源；dynosaur 默认非 Sync，Pdp/KeyProvider 是共享例外（ADR-003）
 │   ├── httpserve/        # axum router / middleware / health
 │   ├── authn/            # jwt / AuthGrant / security vocabulary / refresh / PDP / Principal
 │   ├── bootstrap/        # composition / config / shutdown / worker
 │   ├── runtimeexec/      # provider-independent runtime 启动/信号/逆序关闭内核（不拥有 HTTP/DTO/provider）
 │   ├── eventexec/        # outbox relay / eventbus / saga executor·tailer / command
 │   ├── deviceloop/       # cert lifecycle·signing（L4）
-│   ├── observ/           # metrics / logging / grpc interceptor / websocket（audit sink 迁 diport，#1075）
+│   ├── observ/           # metrics / logging / grpc interceptor / websocket（audit sink 归 diport）
 │   ├── distributed/      # distlock / cas / transport
 │   ├── testkit/          # 服务层 test-support：HTTP 契约测试 oneshot harness（经 [dev-dependencies] 被域/组合根消费，零 adapter 依赖，不进生产 shipped 图）
 │   ├── identity/         # 域：身份 / 凭据与账户安全编排 / RBAC / ABAC
@@ -85,7 +84,7 @@ rss/
 │   └── syshealth/        # 域：健康聚合
 ├── adapters/             # 一 adapter 一 crate + feature 门控；裸后端名（adapters/ 路径消歧）
 │   ├── postgres/ redis/ amqp/ mqtt/ s3/
-│   ├── oidc/ grpc/ httpd/ otel/ prometheus/ vault/   # httpd = HTTP 传输（只消费 budget-sealed ServerMakeService；HttpServer bind+serve+ManagedResource，#1320/#1828）
+│   ├── oidc/ grpc/ httpd/ otel/ prometheus/ vault/   # httpd = HTTP 传输（只消费 budget-sealed ServerMakeService；HttpServer bind+serve+ManagedResource）
 │   ├── softca/ ratelimit/
 │   └── memory/           # in-mem DI port provider（测试 / demo 注入；被 journeys 组合根消费）
 ├── bins/
@@ -107,17 +106,17 @@ rss/
 
 ## 分层(crate 图 + deny.toml 编译期强制)
 
-- **基础** `vocab`/`ids`/`securederive`/`secure`/`support`/`runctx`/`diagctx`:依赖 std + 外部 crate(serde/thiserror/uuid…),**不依赖引擎/DI-infra/服务/域/adapters**。基础层内部按 enumerated intra-base DAG 单向依赖:`diagctx（独立根）◁ vocab ◁ ids ◁ securederive ◁ secure ◁ support ◁ runctx`(右可依赖左 = **DAG 前向边均 sanctioned**、反向 / 同 crate 禁止)；`diagctx` 为独立根，不依赖其它基础 crate，不被其它基础 crate 依赖，仅向上被服务/域/adapters/组合根消费（诊断信道 fail-open，ADR-002 §D1-bis）。现有 sanctioned 前向边:`runctx → vocab`(`AppCtx` 的 tenant payload 收敛为具体 `vocab::tenant::TenantId`,ADR-002 §D3,决策 #2)与 `secure → securederive`(字段级脱敏 `#[derive(Redact)]` proc-macro,#1360；`securederive` 是编译期纯工具 crate,出边全外部,非 SemVer 库面 ⇒ public-api baseline 经 `layers::is_proc_macro` 排除)。`INVARIANT: BASE-INTRADAG-01`:无环由 cargo 天然守(反向 2-crate 边即成环被拒);前向 / 反向方向守由 `cargo xtask layer-deps` 的 `layers::basis_intra_dag_allows` 机器强制(#1022 已落，本 PR 加 intra-base 前向例外)。
-- **引擎/原语** `consistency`/`primitives`/`tracewire`:依赖基础(或仅外部 crate);不依赖 DI-infra/服务/域/adapters。`tracewire`(W3C traceparent capture/restore 单源,#1224)出边全是外部 `opentelemetry`/`tracing-opentelemetry`、无内部边,被服务 `eventexec`(consume 还原)+ adapter `postgres`(emit 捕获)依赖——otel 收口在此 + `adapters/otel`,二者外不直接 import otel(结构性收口,机器硬化待 follow-up dylint)。
+- **基础** `vocab`/`ids`/`securederive`/`secure`/`support`/`runctx`/`diagctx`:依赖 std + 外部 crate(serde/thiserror/uuid…),**不依赖引擎/DI-infra/服务/域/adapters**。基础层内部按 enumerated intra-base DAG 单向依赖:`diagctx（独立根）◁ vocab ◁ ids ◁ securederive ◁ secure ◁ support ◁ runctx`(右可依赖左 = **DAG 前向边均 sanctioned**、反向 / 同 crate 禁止)；`diagctx` 为独立根，不依赖其它基础 crate，不被其它基础 crate 依赖，仅向上被服务/域/adapters/组合根消费（诊断信道 fail-open，ADR-002 §D1-bis）。现有 sanctioned 前向边:`runctx → vocab`(`AppCtx` 的 tenant payload 收敛为具体 `vocab::tenant::TenantId`,ADR-002 §D3,决策 #2)与 `secure → securederive`(字段级脱敏 `#[derive(Redact)]` proc-macro；`securederive` 是编译期纯工具 crate,出边全外部,非 SemVer 库面 ⇒ public-api baseline 经 `layers::is_proc_macro` 排除)。`INVARIANT: BASE-INTRADAG-01`:无环由 cargo 天然守(反向 2-crate 边即成环被拒);前向 / 反向方向守由 `cargo xtask layer-deps` 的 `layers::basis_intra_dag_allows` 机器强制。
+- **引擎/原语** `consistency`/`primitives`/`tracewire`:依赖基础(或仅外部 crate);不依赖 DI-infra/服务/域/adapters。`tracewire`(W3C traceparent capture/restore 单源)出边全是外部 `opentelemetry`/`tracing-opentelemetry`、无内部边,被服务 `eventexec`(consume 还原)+ adapter `postgres`(emit 捕获)依赖——otel 只准在此与 `adapters/otel` 收口,二者外不直接 import otel(当前只有结构性收口,无机器守)。
 - **DI-infra** `diport`:依赖基础+引擎;**被服务/域/adapter/组合根消费**,自身不依赖服务及以上(无 back-path)。
-  **provider-agnostic** DI port trait 单源(Clock/Signer/Publisher/Subscriber/AuditSink/ManagedResource/DlxLifecycleRepository/DlxArchiveStore…,签名只引基础/wire/port-owned/associated types)。需要运行期动态消费的 async port 使用 dynosaur Dyn wrapper；默认 dyn wrapper 是 Send 非 Sync，跨 `Send + Sync` worker 多次调用且 provider 由组合根静态选择的 port 使用 ADR-003 #1095 静态泛型（DLX 两 port）。`KeyProvider` / `Pdp` 是 base trait 显式 `Send + Sync` 的窄例外，其中 PDP 由 #1828 正向/负向 compile gate 锁定并供 HTTP serving 跨 await 共享。不为无消费方的动态能力生成 wrapper。**服务/域 互不依赖,但都可向下依赖 diport** ——
+  **provider-agnostic** DI port trait 单源(Clock/Signer/Publisher/Subscriber/AuditSink/ManagedResource/DlxLifecycleRepository/DlxArchiveStore…,签名只引基础/wire/port-owned/associated types)。需要运行期动态消费的 async port 使用 dynosaur Dyn wrapper；默认 dyn wrapper 是 Send 非 Sync，跨 `Send + Sync` worker 多次调用且 provider 由组合根静态选择的 port 改用 ADR-003 静态泛型。`KeyProvider` / `Pdp` 是 base trait 显式 `Send + Sync` 的窄例外，其中 PDP 由正向/负向 compile gate 锁定并供 HTTP serving 跨 await 共享。不为无消费方的动态能力生成 wrapper。**服务/域 互不依赖,但都可向下依赖 diport** ——
   服务层 crate(bootstrap/deviceloop/eventexec/authn…)消费 DI port 须经此层,故 diport 不能与它们同层(服务→服务禁)。
   注:**域形** repo/service port(签名引用域内实体)**不归 diport**,归所属域 crate `pub mod ports`(ADR-005 Option 2,见下「域」行 + category line ADR-005 §2.1)。
-- **服务** `httpserve`/`authn`/`bootstrap`/`eventexec`/`observ`/`distributed`/`deviceloop`:依赖基础+引擎+DI-infra;不依赖域/adapters。**服务→服务横向默认禁(同 diport 行所述),唯一受控例外 = ADR-009 sanctioned `bootstrap → httpserve` 单向路由类型边**(组合根 typed route funnel:`bootstrap::finalize_routes` 产 `httpserve::UnfinalizedRoutes` → 经 `httpserve::finalize_auth` 换可 bind 的 `AuthenticatedRoutes`;反向 `httpserve → bootstrap` 及其它任意 `服务→服务` 边仍禁),由 `xtask layers::route_funnel_allows` 机器守(INVARIANT LAYER-DEPS-ROUTE-FUNNEL-01,见下「静态强制」表 + ADR-009)。跨层另有且仅有 **`eventexec → generated`** command seam 编译边：eventexec 实现 generated 的 `CommandEmit`/`CommandJournal`，再在自身 crate 内构造私有 reviewed DTO；由 `command_generated_seam_allows` 精确 crate pair 守，不能推广成一般 Service→Generated。`testkit` 是同层 **test-support 库**(HTTP 契约测试 oneshot harness,#1136):出边全外部 crate(axum/tower/serde…,无内部边),经 `[dev-dependencies]` 被域/组合根消费写 per-contract 测试——**零 production-adapter、零 workspace 依赖**(满足「域单测不依赖平台 adapter crate」),分层登记在 `xtask layers.rs` `SERVICE_CRATES`。另带 `containers` feature(#1137):testcontainers self-provision postgres/redis/rabbitmq 容器 fixture,供 adapter 集成测试 + journeys durable journey 经 `[dev-dependencies]` 消费(testcontainers 树 feature-gated + dev-dep-only 不进产物)。机器边界拆为正交两面：LAYER-DEPS-08 `check_test_support_confinement` 守任一 shipped 入边指向 testkit 均失败；LAYER-DEPS-10 `check_test_support_internal_dependencies` 守 testkit 任一 shipped 出边指向 workspace 成员均失败，保证其只依赖外部 crate。
+- **服务** `httpserve`/`authn`/`bootstrap`/`eventexec`/`observ`/`distributed`/`deviceloop`:依赖基础+引擎+DI-infra;不依赖域/adapters。**服务→服务横向默认禁(同 diport 行所述),唯一受控例外 = ADR-009 sanctioned `bootstrap → httpserve` 单向路由类型边**(组合根 typed route funnel:`bootstrap::finalize_routes` 产 `httpserve::UnfinalizedRoutes` → 经 `httpserve::finalize_auth` 换可 bind 的 `AuthenticatedRoutes`;反向 `httpserve → bootstrap` 及其它任意 `服务→服务` 边仍禁),由 `xtask layers::route_funnel_allows` 机器守(INVARIANT LAYER-DEPS-ROUTE-FUNNEL-01,见下「静态强制」表 + ADR-009)。跨层另有且仅有 **`eventexec → generated`** command seam 编译边：eventexec 实现 generated 的 `CommandEmit`/`CommandJournal`，再在自身 crate 内构造私有 reviewed DTO；由 `command_generated_seam_allows` 精确 crate pair 守，不能推广成一般 Service→Generated。`testkit` 是同层 **test-support 库**(HTTP 契约测试 oneshot harness):出边全外部 crate(axum/tower/serde…,无内部边),经 `[dev-dependencies]` 被域/组合根消费写 per-contract 测试——**零 production-adapter、零 workspace 依赖**(满足「域单测不依赖平台 adapter crate」),分层登记在 `xtask layers.rs` `SERVICE_CRATES`。另带 `containers` feature:testcontainers self-provision 容器 fixture,供 adapter 集成测试与 durable journey 经 `[dev-dependencies]` 消费(feature-gated + dev-dep-only,不进产物)。机器边界拆为正交两面：LAYER-DEPS-08 `check_test_support_confinement` 守任一 shipped 入边指向 testkit 均失败；LAYER-DEPS-10 `check_test_support_internal_dependencies` 守 testkit 任一 shipped 出边指向 workspace 成员均失败，保证其只依赖外部 crate。
 - **RuntimeExec** `runtimeexec`:provider-independent 的 runtime 启动、信号等待与逆序关闭内核；只可依赖基础/引擎/DI-infra/服务。shipped direct dependency 的实际集合以 `crates/runtimeexec/Cargo.toml` 为源，并由 `cargo xtask layer-deps` 的 RUNTIMEEXEC-DEPS-01 executable allowlist 收敛；本文不复制该集合。它不拥有 HTTP transport、wire DTO、域模型或具体 provider。分层矩阵只允许 Root 入边，`deny.toml` target wrapper 再收窄为 `assemblies/runtime|settingsonly|identityaudit` 三个 assembly 的集合相等白名单，禁止 bins/composition/journeys/xtask 直接消费（RUNTIMEEXEC-LAYER-01）。
 - **域** `identity`/`settings`/`audit`/`contractreg`/`syshealth`:依赖基础+引擎+DI-infra+服务+`generated`(contract 派生);
   **互不依赖**(跨域只经 contract);不依赖 adapters。**定义自身域形 repo/service DI port**(`pub mod ports`,签名引用域内实体,由 adapter 经 DIP 实现,ADR-005);为此可依赖 dynosaur/trait-variant(DIPORT-MACRO-CONFINE-02 白名单)。
-- **adapters/**:实现基础/引擎/DI-infra/服务定义的 trait(DI port 的 provider impl 在此);**不被域依赖**(组合根注入)。**可依赖域 crate 以 impl 其域形 repo/service port**(`adapter→域` = DIP 内向边,`allows(Adapter,Domain)=true` + deny.toml 该域 wrapper 放行 + 真实 source edge 校验,ADR-005;反向「域→adapter」仍禁,依赖反转方向保持)。通用 `Adapter→Service` 合法；#1676 仅对 provider output 边界增加精确 deny：`adapters/redis|s3|vault → bootstrap` 禁止（package 名为 `redis-adapter|s3|vault`），postgres→bootstrap 与目标 adapter→diport 不受影响（`LAYER-DEPS-PROVIDER-BOOTSTRAP-01`）。`postgres` 的域形实现由无默认值的 `domain-settings` / `domain-identity` / `domain-audit` Cargo feature 精确启用；assembly 必须显式选择，未选择的域依赖不进入目标 package 图。`adapters/memory` 是 **dev/test-only** in-mem DI port provider(测试 / demo)——**禁生产 bin(server/rss)依赖**,只准验收 journey + tooling(`xtask layers.rs` `DEV_ADAPTER_ROOTS`)依赖,机器边界由 `layer-deps` LAYER-DEPS-07(正向收窄 + 反向排除生产 bin)+ deny.toml 收窄 wrapper 守。
+- **adapters/**:实现基础/引擎/DI-infra/服务定义的 trait(DI port 的 provider impl 在此);**不被域依赖**(组合根注入)。**可依赖域 crate 以 impl 其域形 repo/service port**(`adapter→域` = DIP 内向边,`allows(Adapter,Domain)=true` + deny.toml 该域 wrapper 放行 + 真实 source edge 校验,ADR-005;反向「域→adapter」仍禁,依赖反转方向保持)。通用 `Adapter→Service` 合法；provider output 边界另有精确 deny：`adapters/redis|s3|vault → bootstrap` 禁止（package 名为 `redis-adapter|s3|vault`），postgres→bootstrap 与目标 adapter→diport 不受影响（`LAYER-DEPS-PROVIDER-BOOTSTRAP-01`）。`postgres` 的域形实现由无默认值的 `domain-settings` / `domain-identity` / `domain-audit` Cargo feature 精确启用；assembly 必须显式选择，未选择的域依赖不进入目标 package 图。`adapters/memory` 是 **dev/test-only** in-mem DI port provider(测试 / demo)——**禁生产 bin(server/rss)依赖**,只准验收 journey + tooling(`xtask layers.rs` `DEV_ADAPTER_ROOTS`)依赖,机器边界由 `layer-deps` LAYER-DEPS-07(正向收窄 + 反向排除生产 bin)+ deny.toml 收窄 wrapper 守。
 - **bins/**、**xtask/**、**assemblies/**、**composition/**、**journeys/**:组合根,可依赖所有普通库 crate；`runtimeexec` 是唯一收窄例外，只准上述三个 assembly 直接消费(`journeys` 为 tests-only 验收 journey 组合根；`composition/*` 为多个 assembly 复用的 typed domain wiring，不含 manifest 或启动入口)。**examples/** 为收窄示例层,只准依赖基础/引擎/DI-infra/服务,不直接依赖 RuntimeExec、域、adapters 或 generated。`assemblies/{name}/assembly.toml`
   是 static assembly intent + DI provider 声明源：`name`/`profile`/`domains`/`topology`/`listeners`
   声明组合根 intent/surface，`listeners.domains` 以闭合 domain/listener enum 声明 route surface 归属；
@@ -171,7 +170,7 @@ rss/
 | DB migration 命名空间 | `sqlx::migrate!` |
 | 依赖图导出 | `cargo tree` / `cargo-depgraph` |
 | mock(同模块)/ table-driven | `mockall` / `rstest` |
-| 残留真要 AST/HIR 级的少数 funnel(某 callsite) | `dylint`（自写 clippy lint）。实际注册清单以根 `Cargo.toml [workspace.metadata.dylint]` 与 `lints/Cargo.toml` 为准，当前同步为：`rss_domain_no_serialize`、`rss_spawn_missing_scope`、`rss_crosstenant_callsite`、`rss_dlq_operator_callsite`、`rss_diport_impl_allowlist`、`rss_principal_facet_impl_allowlist`、`rss_authplan_callsite`、`rss_raw_credential_callsite`、`rss_authenticated_callsite`、`rss_handler_local_principal_authz`、`rss_diport_error_debug_redacted`、`rss_diport_dto_debug_redacted`、`rss_pdp_impl_adapter_only`、`rss_projection_append_only`、`rss_partition_serial_allowlist`、`rss_diport_envelope_reserved_writer`、`rss_redact_debug_required`、`rss_runtime_env_funnel`。其中 `rss_raw_credential_callsite` 把 profile-specific `RawCredential` constructor 的生产调用者收敛到 `authn` funnel；`rss_handler_local_principal_authz` 是 typed route permission 的 Medium backstop；`rss_runtime_env_funnel` 以 pre-expansion 宏来源和名称解析后的 HIR `DefId` 共同封闭 `env!`/`option_env!`/`include!`、宏生成模块、跨文件 re-export 以及函数项别名绕过。符号/红例/盲区见各 `lints/<lint>/` rustdoc 与 `lints/README.md`；`cargo dylint --all` 已是 `cargo xtask verify` / `ci` 一步并经 `DYLINT_RUSTFLAGS=-D warnings` fail-closed。 |
+| 残留真要 AST/HIR 级的少数 funnel(某 callsite) | `dylint`（自写 clippy lint）。实际注册清单以根 `Cargo.toml [workspace.metadata.dylint]` 与 `lints/Cargo.toml` 为准；人类可读清单见 `lints/README.md`，派生索引可用 `cargo xtask archrules list`。符号/红例/盲区见各 `lints/<lint>/` rustdoc；`cargo dylint --all` 已是 `cargo xtask verify` / `ci` 一步并经 `DYLINT_RUSTFLAGS=-D warnings` fail-closed。 |
 | 治理脚本入口 | `cargo` + `xtask/` |
 | 错误码前缀所有权 golden | `cargo xtask` 前缀所有权治理测试（与 `error-handling.md` 一致） |
 | DI port + dynosaur 收敛到定义点白名单 | `deny.toml` wrapper：`dynosaur`/`trait-variant` 只准 **DI port 定义点 crate** 依赖——白名单 = `diport`（provider-agnostic infra port）+ 定义自身 repo/service port 的域 crate（域形 port，ADR-005 Option 2，INVARIANT DIPORT-MACRO-CONFINE-02；`layer-deps` `EXTERNAL_CONFINEMENT_WRAPPERS` 守白名单条目属 DiPort/Domain 层 + wrapper⟷源集合相等）。注：dynosaur 0.3 生成的 unsafe 经 def-site hygiene **不触发** consumer forbid（实测，ADR-003 §8），无 forbid 例外、无 unsafe carve-out——本约束是「DI port 定义点集中」架构守卫，非 unsafe 收敛；ADR-005 把原 `-01`「单一依赖点」放宽为白名单（域形 repo port 必然多点定义，前提失效，零安全代价） |
@@ -179,9 +178,9 @@ rss/
 | 受控 `bootstrap → httpserve` 路由类型边（组合根 typed route funnel；服务→服务唯一例外） | `xtask/src/layers.rs` `route_funnel_allows`（**只**放行 `bootstrap → httpserve` 这一对有向边，`check_layers` 在 `!allows(Service,Service)` 时叠加；反向 `httpserve → bootstrap` 及其它任意 `服务→服务` 仍禁；rstest + 端到端 `check_layers` 正反例 anti-vacuity）。INVARIANT LAYER-DEPS-ROUTE-FUNNEL-01，ADR-009 |
 | command sealed seam 编译边 | `xtask/src/layers.rs` `command_generated_seam_allows` 只放行 `eventexec → generated`；`authn/bootstrap/其它 Service → generated` 与反向边均保持 `GeneratedScope` 红。`deny.toml` generated wrapper 同步只增加 eventexec；正例、其它 Service 反例与真实 workspace green 三重 anti-vacuity。类型/可见性 Hard seal 见 ADR-016。 |
 | Redis/S3/Vault provider output 不反向依赖 bootstrap | `xtask/src/layers.rs` `provider_adapter_bootstrap_forbidden` 精确拒绝 `redis-adapter|s3|vault → bootstrap`，并在 `layerdeps::check_layers` 通用 `allows` 前应用；三目标 synthetic red、postgres→bootstrap 与目标→diport green、真实 workspace green。INVARIANT LAYER-DEPS-PROVIDER-BOOTSTRAP-01，**Medium（xtask + CI 门）**，ADR-010 |
-| ProviderPlan / output transaction 单一路径 | `PgRuntimeDeps`、factory permit 与 `ProviderBuild` 均按值消费；14 项 generated catalog 与 RuntimePlan exact-join 后，每项 role-specific typed accessor 只能消费一次，并由 8 个 sealed batch 从真实 `DomainModuleResult` 推导 lifecycle channels（Hard；无 trait/static binding/string lookup/平行 output）。`RUNTIME-PROVIDER-BIJECTION-LIVE-01` 以真实 workspace green + catalog/permit/finish/rollback synthetic red 锁 8 个 output batches、唯一 completion/handoff、失败异步 LIFO 回滚与 provider-before-domain 注册（AcceptedMedium）。ADR-010 #1677/#1792 amendment |
-| Event transport output 单一路径 | crate-private `wire_event_transport` 直接返回 owned `DomainModuleResult`，使旧 `.module/.infra_guards` 拆包不可编译（`EVENT-TRANSPORT-OUTPUT-TYPE-01`，Hard）；`EVENT-TRANSPORT-OUTPUT-FUNNEL-01` 以 synthetic red + anti-vacuity green 锁定 AMQP resources 只进入 module channel、run 恰好一次 merge、launch 只走公共注册 helper（AcceptedMedium）。ADR-010 #1678 amendment |
-| defer/follow-up 结构化完整性（governed docs + 根 config） | governed scope（`docs/rules`/`docs/architecture`/`.claude/rules` + 根 `deny.toml`/`clippy.toml`/`CLAUDE.md`）内 `DEFER(#NNNN)` 标签须 `owner=`/`blocked-by=<#NNNN｜trigger:..>`/`closes-when=` 齐全 + 禁裸 TODO/FIXME/XXX/HACK 注解（注解位）；`cargo xtask defer-gate`（接 verify/ci no-compile meta 步，synthetic red + anti-vacuity green）。INVARIANT DEFER-GATE-01；符号/盲区/红例见 `xtask/src/defergate.rs` rustdoc + ADR-010；v1 守结构化标签 + 经典注解，自由词散文 + 代码注释扩域 = ratchet follow-up |
+| ProviderPlan / output transaction 单一路径 | `PgRuntimeDeps`、factory permit 与 `ProviderBuild` 均按值消费；14 项 generated catalog 与 RuntimePlan exact-join 后，每项 role-specific typed accessor 只能消费一次，并由 8 个 sealed batch 从真实 `DomainModuleResult` 推导 lifecycle channels（Hard；无 trait/static binding/string lookup/平行 output）。`RUNTIME-PROVIDER-BIJECTION-LIVE-01` 以真实 workspace green + catalog/permit/finish/rollback synthetic red 锁 8 个 output batches、唯一 completion/handoff、失败异步 LIFO 回滚与 provider-before-domain 注册（AcceptedMedium）。ADR-010 |
+| Event transport output 单一路径 | crate-private `wire_event_transport` 直接返回 owned `DomainModuleResult`，使旧 `.module/.infra_guards` 拆包不可编译（`EVENT-TRANSPORT-OUTPUT-TYPE-01`，Hard）；`EVENT-TRANSPORT-OUTPUT-FUNNEL-01` 以 synthetic red + anti-vacuity green 锁定 AMQP resources 只进入 module channel、run 恰好一次 merge、launch 只走公共注册 helper（AcceptedMedium）。ADR-010 |
+| defer/follow-up 结构化完整性（governed docs + 根 config） | governed scope（`docs/rules`/`docs/architecture` + 根 `deny.toml`/`clippy.toml`/`CLAUDE.md`）内 `DEFER(#NNNN)` 标签须 `owner=`/`blocked-by=<#NNNN｜trigger:..>`/`closes-when=` 齐全 + 禁裸 TODO/FIXME/XXX/HACK 注解（注解位）；`cargo xtask defer-gate`（接 verify/ci no-compile meta 步，synthetic red + anti-vacuity green）。INVARIANT DEFER-GATE-01；符号/盲区/红例见 `xtask/src/defergate.rs` rustdoc + ADR-010；v1 守结构化标签 + 经典注解，自由词散文 + 代码注释扩域 = ratchet follow-up |
 
 ### 三档 · Cargo 替不了,框架自建(RSS 真差异化)
 
@@ -193,7 +192,7 @@ rss/
 | 分层依赖残留(无 back-path 反向边 / 兄弟域互斥 / adapter·generated scope / test-support 双向 shipped confinement / RuntimeExec wrapper 与 direct-dependency 精确闭包 / wrappers⟷源一致) | `cargo xtask layer-deps`(source-centric：读各成员 Cargo.toml shipped 依赖表按 §分层矩阵、LAYER-DEPS-08/10 与 RUNTIMEEXEC-LAYER/DEPS-01 校验；接入 `verify`；符号/规则/盲区见 `xtask/src/layerdeps.rs` rustdoc) | Medium(CI 门) |
 | `SharedRuntimeDeps` 字段仅基础设施 / value object（禁域 service / repo） | `cargo xtask runtime-deps guard`(syn 字段扫描 + `xtask/runtime-deps-guard.toml` 配置单源 + synthetic red；接入 `verify`) | Medium(CI 门) |
 | active LocalOnly ↔ source receipt exact-set、唯一性与逐 site marker/ID/mounted ROUTE proof/三维 observers/同一 routes finalize+tuple factory/generated GET operation 闭合 AST 证书 | `cargo xtask consistency local-only-effects`（LOCAL-ONLY-RECEIPT-COVERAGE-01；module/cfg-aware synthetic red + real 6/6 anti-vacuity；missing fail-closed）；posture artifact 只输出 breaking JSON schema v4 | Medium(CI 门) |
-| LocalOnly business effect 文档语义 | contract/Rust/observer 只使用 `business-write` / `business-transaction`、`BusinessWriteEffect`、`BusinessWrite` / `business_writes`；canonical facets 明示业务持久化/outbox/publish 为零但允许 provider-owned read-path transaction | `cargo xtask doc-contracts`（LOCALONLY-BUSINESS-EFFECT-SEMANTICS-01；显式 carrier、synthetic red + anti-vacuity、缺 facet fail-closed） | Medium(CI 门) |
+| LocalOnly business effect 语义不得写错 | contract/Rust/observer 只使用 `business-write` / `business-transaction`、`BusinessWriteEffect`、`BusinessWrite` / `business_writes`；文档不得声称 LocalOnly「完全无事务」 | `cargo xtask doc-contracts`（LOCALONLY-BUSINESS-EFFECT-SEMANTICS-01；纯负向扫描 + synthetic red；准入本身由类型层 compile-fail 与 `LOCAL-ONLY-EFFECTS-01` 强制） | Medium(CI 门) |
 | PostgreSQL tenant read/write lane 与 reader schema ACL | Hard typed `PgTenantReadPool` / `PgTenantWritePool` 拒绝能力交叉；`cargo xtask pg-tenant-tx-guard` 拒绝旧 mixed pool、raw capability 与 typed-lane drift（TENANCY-PG-READ-LANE-01）；`cargo xtask schema-rls` 要求 reader SELECT 同迁移、拒绝 DML/default privileges（TENANCY-PG-READER-ACL-01）；两门均含 synthetic red + anti-vacuity | Hard + Medium(CI 门) |
 | 组合根 DI 接线(SharedDeps / `module()`) | 手工 `main` + `bootstrap` crate | — |
 | outbox/saga/reconcile/projection/command_journal 引擎 + topology-gated resolver | tokio 自写(`consistency` 态机 + `eventexec` 执行 + 各 deps resolver) | — |
@@ -203,7 +202,7 @@ rss/
 存在性、active HTTP outbox producer 目标 readiness、consistency capability evidence、contract 扇出完整性、migration 只增不改、覆盖率阈值、no-op 业务理由、分层依赖残留(crate 图仅 Hard
 守已声明边的「下层依赖上层成环」；不成环的反向边 / 兄弟域互斥 / adapter·generated scope 由 `cargo xtask layer-deps`
 source-centric 补，免疫裸名×crates.io 命名冲突)。治理重心在 "crate-graph lint + clippy + 类型系统"(见
-`.claude/rules/rss/ai-robust.md`)。Medium gate 必须进入稳定的 repository aggregate，并在 aggregate 执行时
+`docs/rules/ai-robust.md`)。Medium gate 必须进入稳定的 repository aggregate，并在 aggregate 执行时
 fail-closed；这仍不等同于 active PR 已自动调度该 aggregate 或以其阻断合入。
 
 这些 Medium gate 的 **GitHub Actions typed CI** carrier 由 `.github/workflows/ci.yml` 定义：workflow 只保留
@@ -217,10 +216,9 @@ active PR 的 Medium enforcement；运行时激活状态、required-check 状态
 本地差异 preflight 统一使用 `make ci CI_BASE=<remote>/develop`：10 分钟有界、unknown 默认本地忽略并留痕，
 只跑受影响 package 与定向治理测试；显式全量 `cargo xtask ci full` 仅供人工诊断，不是 PR 完成条件。
 nightly/develop 重型门集包含 `verify` 全门（build/clippy 升 `--all-features --all-targets`）、覆盖率门
-(`cargo llvm-cov`,引擎-基础 ≥90%、无 ratchet 例外)、`public-api --check`
-(轴 A;`cargo-semver-checks` 因全 crate `publish=false` 空转、本轮 deferred) 与 cargo-audit(供应链漏洞,#1133)。
-**供应链门**(#1133):`cargo deny check`(advisories/RustSec+licenses+bans+sources)+ cargo-audit 通过 typed
-`cargo xtask ci run --job audit` 暴露 advisory-scoped 定时刷新能力，覆盖「未变依赖」后来披露 CVE 的时间维度。
+（引擎-基础 ≥90%，无 ratchet 例外）、`public-api --check`（轴 A）与供应链门。
+**供应链门**必须同时覆盖依赖内容与时间维度：`cargo deny check`（advisories/licenses/bans/sources）
+守当前依赖集，advisory-scoped 定时刷新覆盖「未变依赖」后来披露 CVE。
 实际 schedule、forge 与 required-check 状态以
 [CI 运维状态](../ops/202607130824-1765-diff-adaptive-ci.md) 为准，设计见
 [`202606231530-001-ci-lane.md`](../ops/202606231530-001-ci-lane.md)。
@@ -233,76 +231,72 @@ L0/L1 验证沿用同一 typed plan，不在规则文档维护第二份 gate inv
 ArchRules 反向索引由 `cargo xtask archrules list` 从真实 carrier 的 `INVARIANT:` 锚点派生，展示
 rule id → carrier → source → fixture/baseline → gate；`cargo xtask archrules verify` 接入 verify/ci 的
 no-compile meta gate。本文档只描述载体原则，不维护落地实例清单。
-11 个持久化 funnel 的强度与证据由
-[`202607091830-015-persistence-funnel-ai-robust-matrix.md`](../architecture/202607091830-015-persistence-funnel-ai-robust-matrix.md)
-派生展示；`cargo xtask archrules matrix --check` 与同一 ArchRules gate 一起进入 verify/ci。
+持久化 funnel 的强度与证据同样是派生展示，落在
+[`202607091830-015-persistence-funnel-ai-robust-matrix.md`](../architecture/202607091830-015-persistence-funnel-ai-robust-matrix.md)，
+由 `cargo xtask archrules matrix --check` 与同一 ArchRules gate 一起进入 verify/ci。
 
 ## 关键模式的 Rust 形态
 
-- **组合根 / `module()`**:当前 `bootstrap` 已落私有字段 `DomainBinding` + `DomainBinding::new` +
-  `compose_bindings(&mut Vec<DomainBinding>)`;该受控出口只在 compose 成功后返回聚合 `DomainModuleResult`,失败保持
-  bindings/outputs 原样。runtime 的 settings/identity/audit 统一返回 `Future<Result<DomainBinding>>`；
-  identity/audit 的 provider-to-binding 构造由 `composition/*` 必填 typed deps 单源承载，runtime 仅保留
-  env/provider 适配与 generated module 薄入口。
-  generated list 已由 #1672 接入 live `compose_bindings`；`assembly.toml` 顺序是唯一域构造、声明注册与生命周期输出聚合顺序。
-  adapter↔域绑定在 `bins/server` / assembly / reusable `composition/*` 用构造器注入完成。
-  topology-gated resolver(`eventtransport`/`replaydeps`/`sagaprojectiondeps`)
-  是 `bootstrap` 子模块(按 `Topology` 单源选型 eventbus / claimer / nonce / saga instance/journal 依赖)。
-- **持久化能力分层**:`DomainBinding`(域实例+生命周期输出的单一 owner) / `DomainModuleResult`(仅聚合
-  probes/resources/workers,不承载 domain service/routes/generic bag) / Pg
-  capability bundle(`PgRuntimeDeps` owner · `PgRuntimeHandle` capability · `PgDomainDeps`) / adapter bundle / defer gate 实施顺序的**设计单源**见 **ADR-010**
-  (`docs/architecture/202606270148-010-persistence-capability-layering.md`);执行体随 #1419(runtime base) / #1421(settings
-  闭环) / W 阶段落地,本处不复制未强制细节。
-- **运行时接线契约首切([PERSIST-001] #1422,ADR-010 §2.6 step 2 的 `DomainModuleResult` + `SharedRuntimeDeps` 聚合)**:
-  `bootstrap::DomainModuleResult`(probes/resources/workers 可聚合产物流出,组合根 `merge` 聚合后排空到 `Registry::probe`
-  / `ShutdownStack`,**归属 ADR-010 §2.2 = `bootstrap`**) + `assemblies/runtime` 的 `SharedRuntimeDeps`(infra 流入,持
-  `Arc<PgStore>` 故必留组合根层);`wire_settings` 首用。**INVARIANT WIRING-DEPS-NO-HANDOFF-01(Hard)**:
-  async `module(source: &impl XModuleSource) -> Result<DomainBinding>` 的 per-domain source trait sealed，且 typed
-  `wire_X` 入口均无参数可塞别域 result ⇒ 跨
-  module value handoff 编译期不可表达。`DomainModuleResult` 固定为 `DomainBinding.output` 的生命周期三出口；`name/domain` 属 binding，
-  domain service 留在 typed domain 内经 route 闭包捕获、不出向。live `wire_X` 切换 binding 属 runtime assembly Phase 4，
-  不改变当前运行时顺序。
-  **INVARIANT: WIRING-DEPS-INFRA-ONLY-01 { level = "Medium", exec = "verify", source = "code" }**:
-  `cargo xtask runtime-deps guard` 解析字段类型，按 `xtask/runtime-deps-guard.toml` 读取 provider bundle / infra
-  value object 允许根与精确 `Arc<dyn distributed::DomainTransport>` 例外，拒绝域 service / repo 经 deps bag 跨
-  module handoff。规则细节 / 盲区 / 扩展流程见 `docs/rules/runtime-wiring.md`。
-- **Transaction retry policy([PERSIST-018] #1439)**:`consistency::tx_retry` 持有闭值集
-  `TxRetryClass::{Transient, Conflict, Permanent, OwnershipLost}` + `TxRetryPolicy` + runtime-neutral
-  `run_tx_retry`。adapter 只在明确 UoW 边界套 retry（当前 postgres `settings.config` /
-  `settings.secret` / `identity.credential` / `identity.session` 写边界），每次 attempt 必须重建完整事务；仅注册的
-  config commit、`PgSecretUnitOfWork` mutation、credential password change 与 session logout 是 adapter UoW
-  入口，其余 repo 方法、handler、outbox
-  publish/settle、
-  consumer commit/release 内部不得隐式 retry 带副作用写入。分类规则：`Transient`
-  （如 PG `40001`/`40P01`/连接瞬断/池获取超时）可在预算内重试；`Conflict`（CAS/version 冲突）必须向上返回，
-  由 command 层显式 refetch/recompute；`Permanent`（约束/解码/租户 envelope mismatch/损坏行）fail-closed；
-  `OwnershipLost`（lease lost/fencing miss/stale owner）是终态围栏，不得把当前 side effect 当 transient 重跑。
-  settings secret 的 HTTP `publish`、identity password change 与 logout 只能消费 domain typed command 携带的
-  generated LocalTx observation 并使用 LocalTx runner；marker 经 crate-private `PgLocalTxOperation` 唯一映射到
-  retry boundary，调用方不能另传 boundary。`publish_internal` / rollback `republish` 使用 generic runner，二者
-  不得借用 HTTP contract telemetry。只读 `SecretRepo` 不暴露 mutation，四个 settings 写入口集中在
-  `SecretUnitOfWork`。
-  backoff 使用 full jitter；Postgres retry attempt 的 pool acquire 与 lock wait 均有上限，有限 attempt 数构成总等待
-  上界，调用 future 被请求 deadline 取消时不得在后台继续重放。durable command 的 request-side 幂等不靠重试包自动重放：
-  `command_journal` 先 claim request fingerprint；
-  需要业务写共提交时，由 Postgres/domain-shaped UoW 在同一 tenant transaction 内提交业务写与 outbox
-  append；重复请求只按 journal 结果回放，same-key different-fingerprint 返回 conflict。
-  **INVARIANT: TX-RETRY-BOUNDARY-01 { level = "Medium", exec = "manual/opt-in", source = "code" }**:
-  闭枚举 + postgres SQLSTATE 单源映射 + `testkit::repo_conformance::assert_retry_boundary_policy` 防止
-  retry 规则散落为 bool/string 约定。
-- **Init fail-fast**:`fn init(&self, reg: &mut Registry) -> Result<(), KernelError>`;必填依赖走构造器必填参数
-  (编译期);init 内不做 I/O、不 spawn task。
-- **Assembly manifest intent + provider declaration**:`assemblies/{name}/assembly.toml` 声明组合根的静态 intent
-  （`name`/`profile`/`domains`/`topology`/`listeners`）以及选择了哪个 DI provider 及其生命周期 / 持久性，不生成运行时接线，
-  也不驱动 live topology、route mounting、auth scheme、provider construction 或 readiness；真实接线仍在 assembly Rust
-  代码里经构造器注入完成。active provider 必须与 assembly `Cargo.toml [dependencies]` + required features 对齐，且安全关键 port 可追加专门约束。
-  `ASSEMBLY-DOMAIN-CLOSURE-01` 对每个 assembly 的目标 package 独立执行 normal-edge Cargo tree（含该 package 全 features），active domain 必须是同名直接依赖，inactive domain 不得进入该 artifact 闭包；workspace 联合 all-features 编译由 CI 另行覆盖，不作为单个部署 artifact 的裁剪事实
-  （当前 production `diport::RevocationStore` provider 必须 `durability=persistent`；draft/ephemeral 只允许
-  demo/test assembly）。Phase 3 字段边界与验证 carrier 见 `docs/rules/runtime-assembly-plan.md`。
-- **Adapter sealed marker**:unit sealed-marker(`struct PgStore;`)以 native AFIT impl diport 已冻 DI port
-  trait(`ManagedResource` 普适 + `Signer`/`Publisher` 按职责);DI port **不**跨 crate sealed(ADR-003 §4.2
-  方案②——impl-sealing 未机器强制、待 #1060);raw client(如 `PgPool`,`pub(crate)` 不泄漏)的字段延迟到 W 阶段接后端时填入。
-- **DTO 作用域**:域内 = `pub(crate)` 模块类型;跨域 wire = contract(`contracts/` 声明 → `generated/` crate)。
-- **错误**:`vocab`(error) + `thiserror`(库错误枚举);应用边界可 `anyhow`。错误码命名空间注册 + golden。
-- **代码生成**:`build.rs` / proc-macro / `xtask` 作为 codegen funnel,产物入 `generated/`(committed,一等审查材料)
-  或 `OUT_DIR` + `insta`。
+### 组合根与域装配
+
+- 域实例与其生命周期输出由 `bootstrap::DomainBinding` 单一持有，只经私有构造器与受控 `compose_bindings`
+  出口聚合；compose 失败必须保持 bindings/outputs 原样。
+- `DomainModuleResult` 固定为 `DomainBinding.output` 的生命周期三出口（probes / resources / workers），
+  **不得**承载 domain service、routes 或 generic bag；`name` / `domain` 属 binding。
+  domain service 留在 typed domain 内经 route 闭包捕获，不向外流出。
+- `assembly.toml` 的顺序是唯一的域构造、声明注册与生命周期输出聚合顺序。
+- 各域的 provider-to-binding 构造由 `composition/*` 的必填 typed deps 单源承载；assembly 只保留
+  env/provider 适配与薄入口。adapter↔域绑定一律在组合根用构造器注入完成。
+- topology-gated resolver 是 `bootstrap` 子模块，按 `Topology` 单源选型，不散落到各域。
+- 载体：`WIRING-DEPS-NO-HANDOFF-01`（Hard）——per-domain source trait sealed 且 typed 装配入口无参数可塞
+  别域 result，跨 module value handoff 在类型层不可表达。
+- `SharedRuntimeDeps` 只能放共享基础设施 / provider value object，**禁止**放 domain service / repo。
+  允许根由 `xtask/runtime-deps-guard.toml` 单源配置。
+  载体：`WIRING-DEPS-INFRA-ONLY-01`（Medium，`cargo xtask runtime-deps guard`）；
+  规则细节与盲区见 `docs/rules/runtime-wiring.md`。
+- 持久化能力分层（binding / module result / provider capability bundle / adapter bundle）的设计单源是
+  **ADR-010**（`docs/architecture/202606270148-010-persistence-capability-layering.md`），本文不复制。
+
+### Assembly manifest
+
+- `assemblies/{name}/assembly.toml` 只声明静态 intent（`name`/`profile`/`domains`/`topology`/`listeners`）
+  与 DI provider 选择及其 lifecycle / durability。它**不**生成运行时接线，也不驱动 live topology、
+  route mounting、auth scheme、provider construction 或 readiness——真实接线仍在 Rust 里经构造器注入完成。
+- active provider 必须与该 assembly `Cargo.toml [dependencies]` + required features 对齐；
+  安全关键 port 可追加专门约束（例如 production 撤销 store 必须持久，draft/ephemeral 只允许 demo/test assembly）。
+- 载体：`ASSEMBLY-DOMAIN-CLOSURE-01` 对每个 assembly 的目标 package 独立执行 normal-edge Cargo tree，
+  active domain 必须是同名直接依赖，inactive domain 不得进入该 artifact 闭包。
+  workspace 联合 all-features 编译由 CI 另行覆盖，**不**作为单个部署 artifact 的裁剪事实。
+- 字段边界与验证 carrier 见 `docs/rules/runtime-assembly-plan.md`。
+
+### Transaction retry
+
+- retry 分类是闭值集 `TxRetryClass::{Transient, Conflict, Permanent, OwnershipLost}`，
+  与 runtime-neutral 的 retry 执行体一起定义在 `consistency`；不得散落成 bool / string 约定。
+- 只有 adapter 的明确 UoW 边界可以套 retry，且每次 attempt 必须重建完整事务。
+  repo 方法、handler、outbox publish/settle、consumer commit/release 内部**不得**隐式 retry 带副作用的写入。
+- 分类语义：`Transient`（序列化失败 / 死锁 / 连接瞬断 / 池获取超时）可在预算内重试；
+  `Conflict`（CAS 或版本冲突）必须向上返回，由 command 层显式 refetch/recompute；
+  `Permanent`（约束 / 解码 / 租户 envelope mismatch / 损坏行）fail-closed；
+  `OwnershipLost`（lease lost / fencing miss / stale owner）是终态围栏，不得当 transient 重跑。
+- LocalTx contract 的写入口只能消费 domain typed command 携带的 generated observation 并使用 LocalTx runner；
+  marker 经 crate-private operation 类型唯一映射到 retry boundary，调用方不能另传 boundary。
+  内部 / rollback 路径使用 generic runner，二者不得借用 HTTP contract telemetry。
+- 只读 repo 不暴露 mutation；同一域的写入口集中在一个 UoW 类型。
+- backoff 使用 full jitter；pool acquire 与 lock wait 均有上限，有限 attempt 数构成总等待上界；
+  调用 future 被请求 deadline 取消时不得在后台继续重放。
+- durable command 的 request-side 幂等**不靠**重试包自动重放：先 claim request fingerprint；
+  需要业务写共提交时由同一 tenant transaction 提交业务写与 outbox append；
+  重复请求只按 journal 结果回放，same-key different-fingerprint 返回 conflict。
+- 载体：`TX-RETRY-BOUNDARY-01`（Medium）——闭枚举 + SQLSTATE 单源映射 + testkit conformance 断言。
+
+### 其它
+
+- **Init fail-fast**：必填依赖走构造器必填参数（编译期）；init 内不做 I/O、不 spawn task。
+- **Adapter sealed marker**：unit sealed-marker（如 `struct PgStore;`）以 native AFIT impl 已冻结的 DI port
+  trait；DI port **不**跨 crate sealed（ADR-003 §4.2 方案②，impl-sealing 未机器强制）。
+  raw client 字段一律 `pub(crate)`，不泄漏到 API 面。
+- **DTO 作用域**：域内 = `pub(crate)` 模块类型；跨域 wire = contract（`contracts/` 声明 → `generated/` crate）。
+- **错误**：`vocab`(error) + `thiserror`（库错误枚举）；应用边界可 `anyhow`。错误码命名空间注册 + golden。
+- **代码生成**：`build.rs` / proc-macro / `xtask` 作为 codegen funnel，产物入 `generated/`（committed，
+  一等审查材料）或 `OUT_DIR` + `insta`。

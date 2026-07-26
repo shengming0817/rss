@@ -14,11 +14,10 @@ use std::path::{Path, PathBuf};
 
 const FEATURE_REL: &str = "docs/spec/007-runtime-deployment-executable-plan";
 const ARCH_REL: &str = "docs/architecture/202607142137-1779-runtime-deployment-target.md";
-const RULE_REL: &str = "docs/rules/runtime-deployment-plan.md";
-const DIFF_ALLOWED_EXACT: [&str; 11] = [
+const RULE_REL: &str = "docs/spec/007-runtime-deployment-executable-plan/carrier-rules.md";
+const DIFF_ALLOWED_EXACT: [&str; 10] = [
     ".specify/feature.json",
     ARCH_REL,
-    RULE_REL,
     "docs/rules/architecture.md",
     "Cargo.toml",
     "Cargo.lock",
@@ -158,20 +157,6 @@ fn validate_documents(root: &Path, feature: &Path) -> Result<()> {
         !feature.join("validate.py").exists(),
         "legacy Python validator remains"
     );
-    for path in CORE_DOCS
-        .map(|name| feature.join(name))
-        .into_iter()
-        .chain([root.join(ARCH_REL), root.join(RULE_REL)])
-    {
-        let text = fs::read_to_string(&path)?;
-        for heading in ["## 当前事实", "## 目标能力", "## 缺口与 owner"] {
-            ensure!(
-                text.contains(heading),
-                "{}: missing {heading}",
-                path.display()
-            );
-        }
-    }
     let markers = [
         "NEEDS CLARIFICATION",
         "ACTION REQUIRED",

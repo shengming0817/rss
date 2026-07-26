@@ -39,11 +39,8 @@ RSS 的治理机制默认面向 AI co-author。新增约束必须让错误尽量
 1. **类型系统 / crate 依赖图**：用 Cargo `[dependencies]`、`pub(crate)` 可见性、sealed trait、
    trait 关联常量（类型 marker）、newtype、构造器必填参数表达约束——违反即编译错误。
    域 crate 依赖不到其它域 crate、必填依赖非 `Option` 都属此档（见 `docs/rules/architecture.md`
-   §Rust 原生强制（三档载体））。（注：「domain 类型不 derive `Serialize`」serde derive 对任何 crate
-   自由可用、类型系统无法封闭，由 `dylint` 自写 lint `rss_domain_no_serialize` 承载（二档载体）——见同节二档表。
-   v1 覆盖 `domain` 模块命名约定；已接入聚合门（#1023）：`cargo dylint --all` 是 `cargo xtask verify` 一步、
-   经 `DYLINT_RUSTFLAGS=-D warnings` fail-closed（azure 无 CI ⇒ verify 是唯一实际 gate，Medium）；完整域 crate
-   覆盖待 #1054。）
+   §Rust 原生强制（三档载体））。注意反例：「domain 类型不 derive `Serialize`」——serde derive 对任何 crate
+   自由可用，类型系统封不住，只能降到二档由 dylint 承载。
 2. **schema / marker 单源派生代码（codegen funnel）**：build.rs / proc-macro 从声明源派生执行体，
    再用 golden 锁字节输出。
 3. **clippy 自定义 lint / cargo-deny / cargo-udeps / cargo public-api**：crate-graph lint
@@ -59,8 +56,10 @@ RSS 的治理机制默认面向 AI co-author。新增约束必须让错误尽量
 规则反向索引由 `cargo xtask archrules list` 从真实 carrier 的 `INVARIANT:` 锚点派生；文档只能薄引用，
 不得成为 rule inventory 的事实源。
 持久化 funnel 的派生证明见
-[`202607091830-015-persistence-funnel-ai-robust-matrix.md`](../../../docs/architecture/202607091830-015-persistence-funnel-ai-robust-matrix.md)，
+[`202607091830-015-persistence-funnel-ai-robust-matrix.md`](../architecture/202607091830-015-persistence-funnel-ai-robust-matrix.md)，
 其内容只由 `cargo xtask archrules matrix --write` 生成。
+
+规则文档写作形状、正向 doc anchor 禁令与门预算见 [`README.md`](README.md)。
 
 ## Hard 范本
 
@@ -73,9 +72,9 @@ RSS 的治理机制默认面向 AI co-author。新增约束必须让错误尽量
 - **newtype funnel**：字符串 / 原始值入口必须经单一 newtype 构造，独立语义不复用裸 `String`。
 - **input struct field exclusion**：公开输入类型不暴露不该由业务传入的字段。
 - **serde derive 冻结**：wire struct 字段集、`#[serde(rename)]`、类型身份用 golden 精确冻结（Hard，codegen 单源）。
-  「只在 contract / DTO 类型上 derive、domain 类型不 derive」serde derive 无法类型封闭，由 `dylint` lint
-  `rss_domain_no_serialize` 承载（二档载体，见 `docs/rules/architecture.md` §二档）。v1 守 `domain` 模块命名
-  约定（非完整域 crate 边界）；已接入 `cargo xtask verify`（`-D warnings` fail-closed，#1023 完成）、完整覆盖待 #1054。
+  「只在 contract / DTO 类型上 derive、domain 类型不 derive」无法类型封闭，由 dylint
+  `rss_domain_no_serialize` 承载（二档载体）。该 lint 守 `domain` 模块命名约定，**不**等于完整域 crate 边界；
+  引用它时不得夸大覆盖面。
 - **codegen funnel + golden**：声明源经 build.rs / proc-macro 派生执行体，输出 drift 由字节 diff 暴露。
 
 新机制若不属于这些范本，先写 ADR 说明为何需要扩展范本。

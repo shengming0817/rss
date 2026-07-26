@@ -1,500 +1,326 @@
 # 多租户 / ABAC / 行列级数据权限规则
 
-本文件只保留当前行为约束。设计历史、分阶段计划和未来工作归 ADR、spec 或
-GitHub Issues。
-
-下游消费者迁移示例见 `docs/guides/202607090202-1596-tenancy-consumer-migration.md`；该指南和
-`examples/tenancy-consumer` 由 `cargo xtask tenancy-closeout` 反向自检锁定。
+本文件只写当前行为约束。设计历史、分阶段计划与未来工作归 ADR、spec 或 GitHub Issues；
+角色 provision、连接参数与 CLI flag 的完整清单归 adapter rustdoc 与运维文档。
 
 ## TenantID
 
-`tenant::TenantId` 是隔离域边界类型。空值和 nil UUID 非法；非空必须是 canonical
-UUID。service / auth 边界使用 typed tenant 参数，不传裸 `String`；tenant-scoped repo API
-使用各域本地 opaque `TenantRepoScope`，不接收裸 `TenantId`。
+- `tenant::TenantId` 是隔离域边界类型。空值与 nil UUID 非法，非空必须是 canonical UUID。
+- service / auth 边界使用 typed tenant 参数，不传裸 `String`。
+- tenant-scoped repo API 使用各域本地 opaque `TenantRepoScope`，不接收裸 `TenantId`。
 
 ## RowScope / RowVisibility
 
-`tenant::RowScope` 取值为 self、device、tenant、all，无默认（无 `Default` impl，构造即定）。
-`tenant::RowVisibility` 是 sealed obligation（私有字段 + sealed 构造入口），由构造器生成：
+- `tenant::RowScope` 取值为 self / device / tenant / all，无默认（构造即定）。
+- `tenant::RowVisibility` 是 sealed obligation：self / device 必须带 subject，tenant / all 不带；
+  `sql_predicate` / `allows` 是纯翻译器，不决定 all 是否可用。
+- 常规构造入口在类型层排除 `RowScope::All`。跨租户可见性只能由专用 cross-tenant 构造器生产，
+  跨租户读取 API 必须接收 sealed `CrossTenantVisibility` 位置参，不接受普通 `RowVisibility` 或裸 scope。
+- `RowScope::All` 只能从 audit 域的 durable-receipt scope mint 进入业务：先签发不含 visibility 的
+  target-bound grant，audit 应用层经 route-specific typed appender 成功后铸造模块私有 receipt，
+  cross-tenant read scope 只接受该 receipt。
+- 跨租户访问必须写持久 audit ledger（tenant / principal / resource / action / request / correlation），
+  tracing 不替代 ledger；append 失败 fail-closed。裸同步 `Principal::row_visibility` 永不签发 All-scope。
+- 载体：`rss_crosstenant_callsite` dylint 守 All-scope mint callsite。
 
-- self / device 必须带 subject。
-- tenant / all 不带 subject。
-- `sql_predicate` / `allows` 是纯翻译器，不决定 all 是否可用。
+### Audit read 边界
 
-`tenant::RowVisibility::new` 接收 `ScopedTenant`，类型层排除 `RowScope::All`。跨租户可见性只能由
-`tenant::RowVisibility::new_cross_tenant()` 生产；跨租户读取 API 必须接收 sealed
-`tenant::CrossTenantVisibility` 位置参，不能接收普通 `RowVisibility` 或裸 scope。
-`RowScope::All` 只能从 audit 域的 durable-receipt scope mint 进入业务：`authn` 先签发不含 visibility 的 target-bound `CrossTenantAuditGrant`，audit 应用层消费规范化事件，经 route-specific typed appender 成功后铸造模块私有 receipt，`CrossTenantReadScope` 只接受该 receipt。跨租户访问必须写持久 audit ledger（tenant / principal / resource / action / request / correlation），tracing 不替代 ledger；append 失败 fail-closed，裸同步 `Principal::row_visibility` 永不签发 All-scope。外部 no-op callback 旁路由 compile-fail 删除，All-scope vocab mint callsite 由 `rss_crosstenant_callsite` 精确函数门守护。
-
-`GET /api/v1/audit/entries` 只读 ambient `runctx` 租户，query 仅允许 `limit`/`cursor`；旧
-`?tenantId=` 输入返回 400。指定租户读取只走
-`GET /api/v1/audit/tenants/{tenantId}/entries`：仅 verified SuperAdmin 可用，普通
-admin/user/device/service 即使目标是同租户也拒绝；不提供全租户列表。读取前必须先 durable append
-`action="audit:list-cross-tenant"`、`resource_kind="audit_entries"`、`resource_id=<targetTenant>`，append
-失败不读取。audited `RowVisibility` 被消费并封装为不可 Clone、字段私有的 `CrossTenantReadScope`，admin
-repo 的 list 入口不接受裸 `TenantId`。cross-tenant cursor 必须绑定 path tenant，不一致返回 400；通过行
-可见性后仍应用 `ResourceProjection`，SuperAdmin 不自动获得字段明文。
-
-audit read 的 serving 池对 `RowScope::All` 始终 fail-closed。指定租户的 super-admin audit read 只能走专用
-`rss_audit_admin` admin 读取池；该池直连固定 LOGIN 角色 `rss_audit_admin`，角色必须非 superuser、
-`NOBYPASSRLS`，并且只拥有 `audit_entries` SELECT。该池不授写权限、不授其它 public relation 权限、不增加
-allow-all RLS policy，而是在只读事务内 `SET LOCAL rss.tenant_id = targetTenant` 复用现有 tenant-isolation RLS。
-admin 池未配置时返回 501 `ERR_CORE_NOT_IMPLEMENTED`；配置不完整或权限不安全则启动 fail-fast。
-
-`rss audit-ledger verify` 是同一只读 admin capability 的 operator full-chain verify 入口。它只接受
-`--tenant <uuid>` 单租户目标，operator 身份来自 tenant-bound service-token，并额外要求
-验出的 closed caller 必须是 `ServiceCallerDomain::MaintenanceOperator`
-（`sub=rss-maintenance-operator`）；`RSS_AUDIT_LEDGER_VERIFY_OPERATOR_GRANTS=tenant,...`
-只精确匹配目标 tenant，不接受 caller/subject 字符串。
-命令不接受 `--all-tenants` 或 `--namespace`：audit ledger 当前 schema 无 namespace 列，接受该 flag 会让
-调用方误以为存在 namespace 隔离；全租户枚举也不在 `rss_audit_admin` capability 内。start/finish 必须写
-`auth_audit_events`，`resource_kind="audit.ledger.verify"`。
+- 常规 audit 列表只读 ambient `runctx` 租户，query 仅允许分页参数；request 携带 tenant 输入返回 400。
+- 指定租户读取只走独立 path-param 路由，仅 verified SuperAdmin 可用；普通 admin / user / device / service
+  即使目标是同租户也拒绝，不提供全租户列表。
+- 读取前必须先 durable append 跨租户读审计，append 失败不读取。cross-tenant cursor 必须绑定 path tenant。
+- 通过行可见性后仍应用 `ResourceProjection`，SuperAdmin 不自动获得字段明文。
+- serving 池对 `RowScope::All` 始终 fail-closed；指定租户读只能走专用只读 admin 池。
+  该池必须非 superuser、`NOBYPASSRLS`、只持 audit 表 SELECT，且在只读事务内 `SET LOCAL rss.tenant_id`
+  复用现有 tenant-isolation RLS，不新增 allow-all policy。未配置返回 501，配置不完整或权限不安全启动 fail-fast。
+- operator full-chain verify 复用同一只读 capability，只接受单租户目标，operator 身份来自 tenant-bound
+  service-token 且必须是 closed maintenance caller；grant 只精确匹配目标 tenant，不接受 caller/subject 字符串。
+  不接受全租户或 namespace flag——schema 无 namespace 列，接受会让调用方误以为存在该隔离维度。
+  start / finish 必须写审计事件。
 
 ## Tenant source（认证通道，非 request body）
 
-tenant scope 只能来自**声明过且已认证的入口**：listener-fixed RSS/Federated Access verified tenant claim（→ ctx）或 service-token MAC-bound
-canonical `X-Tenant-ID`（→ ctx）。`INVARIANT: TENANCY-SERVICE-IDENTITY-SCOPE-01`：
-service-token MAC-bound tenant scope is the only service identity tenant assertion。mTLS/SPIFFE service identity is not a tenant source；
-`VerifiedMtlsPeer` / SPIFFE-ID 只证明 workload service principal，并经 exact SPIFFE allow-set /
-`RouteAuthorizer` 做 route allow/deny，不隐式建立 ambient tenant scope。
-`X-Tenant-ID = "populate-only"` 仅用于 public / pre-auth 填充路径（如 login），由
-contract/codegen/header-shape + handler fail-closed 解析保证形态，**不是** cryptographic header
-authenticity；service-token 路径必须使用 `service-token-tenant-bound`，runtime bridge 将 canonical
-`X-Tenant-ID` 纳入 HS256 MAC 输入（缺 header / 错 header / 旧 unsigned token 均 401），防跨 tenant replay。
-**HTTP request body 不得携带 `tenantId`**——body 不在 service-token tenant header MAC 绑定入口内，body tenant
-是未认证维度。契约 schema/codegen/validate 在不可绕的 request 路径拒绝 ambient `tenantId` 来源：
-upstream schema→DTO 拒绝是 **Hard**（codegen funnel + golden drift），downstream 单一 sanctioned
-call-site 是 **behavior-locked Medium**（reject 用例驱动真实入口，删调用即测试失败；单 site 无需独立
-call-site 强制）。所有 HTTP request schema 一律禁止 `tenantId`；指定租户只通过已声明的 path 参数进入
-`audit.list-tenant-entries`，contract validate/codegen 不保留例外 helper。
+tenant scope 只能来自声明过且已认证的入口：listener-fixed verified tenant claim，或 service-token
+MAC-bound canonical `X-Tenant-ID`。
+
+`INVARIANT: TENANCY-SERVICE-IDENTITY-SCOPE-01`：service-token MAC-bound tenant scope is the only service
+identity tenant assertion。mTLS/SPIFFE service identity is not a tenant source——`VerifiedMtlsPeer` /
+SPIFFE-ID 只证明 workload service principal，经 exact allow-set 与 `RouteAuthorizer` 做 route allow/deny，
+不隐式建立 ambient tenant scope。
+
+- `X-Tenant-ID = "populate-only"` 仅用于 public / pre-auth 填充路径，由 contract/codegen/header-shape +
+  handler fail-closed 解析保证形态，**不是** cryptographic header authenticity。
+- service-token 路径必须使用 `service-token-tenant-bound`：runtime bridge 将 canonical `X-Tenant-ID`
+  纳入 MAC 输入，缺 header、错 header 或旧 unsigned token 均 401，防跨 tenant replay。
+- **HTTP request body 不得携带 `tenantId`**：body 不在 MAC 绑定入口内，是未认证维度。
+  所有 HTTP request schema 一律禁止，指定租户只通过已声明的 path 参数进入专用路由。
+- 载体：upstream schema→DTO 拒绝是 Hard（codegen funnel + golden drift）；downstream 单一 sanctioned
+  call-site 是 behavior-locked Medium（reject 用例驱动真实入口，删调用即测试失败）。
 
 ## Broker tenant authority
 
-broker delivery metadata 中的 `tenantId` 只是传输属性，不具备认证强度。durable event transport 的可信
-tenant 绑定来自 relay 写入的 reserved `tenantAuthority` token：HMAC payload 固定绑定
-`iss/aud/tenantId/domain/contractId/topic/messageId/iat/exp`。consumer 写 app DLX 前必须验签并同时校验
-issuer/audience、TTL、topic、contract、message id 与 tenant；失败时不信任 metadata tenant、不写 app DLX，
-释放 claim 后 broker `Reject`。这条规则只覆盖 broker→consumer→DLX 信任边界；HTTP `X-Tenant-ID` /
-service-token tenant MAC 仍按上一节治理。
+- broker delivery metadata 中的 `tenantId` 只是传输属性，不具备认证强度。
+- durable event transport 的可信 tenant 绑定来自 relay 写入的 reserved `tenantAuthority` token。
+- consumer 写 app DLX 前必须验签并同时校验 issuer/audience、TTL、topic、contract、message id 与 tenant；
+  失败时不信任 metadata tenant、不写 app DLX，释放 claim 后 broker `Reject`。
+- 本节只覆盖 broker→consumer→DLX 信任边界；HTTP 侧按上一节治理。
 
 ## Principal claim source
 
-生产 RSS Access token 只能经 `JwtIssuer<RssAccessProfile>` typed issuer 签发，并且只接受 User：必须携带
-`TenantId` 与完整 `sid` / `jti` / `auth_time` / `authn_epoch` grant quartet。Federated Access 只有 typed
-verifier，没有 issuer；其 User / Device / Admin variant 必须携带 `TenantId` 并写入 `tenant_id` claim，
-SuperAdmin variant 不暴露 tenant 字段。Federated `superAdmin` access token 没有 ambient tenant，也不会直接
-产生 `RowScope::All`。service-token 不进入 access issuer，单独走 tenant-bound HS256 Service Token profile，
-并把 canonical `X-Tenant-ID` 纳入 MAC 输入。Federated Access 的 User/Device/Admin 缺 `tenant_id` 必须拒绝，
-SuperAdmin 携 tenant claim 也必须拒绝；listener profile、issuer、audience 与 ES256 key source 共同决定
-trust domain。
+- 生产 access token 只能经 typed issuer 签发且只接受 User，必须携带 `TenantId` 与完整 grant quartet。
+- 联邦 access 只有 typed verifier、没有 issuer。User / Device / Admin variant 必须携带 `TenantId`；
+  SuperAdmin variant 不暴露 tenant 字段，也不会直接产生 `RowScope::All`。缺失或多余 tenant claim 均拒绝。
+- service-token 不进入 access issuer，单独走 tenant-bound profile 并把 canonical `X-Tenant-ID` 纳入 MAC 输入。
+- listener profile、issuer、audience 与 key source 共同决定 trust domain。
+- JWT tenant claim 在 auth 边界解析并写入 context。service principal 与 service-token principal 自身无 tenant；
+  mTLS/SPIFFE service principal 不携带 tenant assertion。
 
-JWT tenant claim 在 auth 边界解析并写入 context。service principal 无 tenant。
-service-token principal 自身同样无 tenant；只有验签通过的 service-token MAC-bound canonical
-`X-Tenant-ID` 可单独写入 request tenant scope。mTLS/SPIFFE service principal 不携带 tenant assertion，
-不会从 `VerifiedMtlsPeer` 或 SPIFFE-ID 派生 ambient tenant。
 `Principal::row_visibility(ctx)` 是身份到 row-scope 的框架级派生入口：
 
-- normal user -> self
-- device -> device
-- admin -> tenant
-- super-admin -> fail-closed（裸同步 `row_visibility` 不签发 All-scope；跨租户读仅经 grant→typed append→durable receipt→scope，见上文 §RowScope）
-- service / anonymous / unknown -> fail-closed
+| principal | row scope |
+|---|---|
+| normal user | self |
+| device | device |
+| admin | tenant |
+| super-admin | fail-closed（跨租户读仅经 grant → typed append → durable receipt → scope） |
+| service / anonymous / unknown | fail-closed |
 
 ## RLS 与 PG scope
 
-PG tenant scope 使用 `SET LOCAL` 注入当前事务。tenant-scoped repository 不持有 raw
-`sqlx::PgPool` / `PgStore`，只持有所需的 opaque `PgTenantReadPool` / `PgTenantWritePool`；普通 repo 入口只能接收各域本地
-`TenantRepoScope` / `RowRepoScope`，不能接收裸 `TenantId`、`RowVisibility`、`RowScope` 或
-`ScopedTenant`。独立查询只经 `PgTenantReadPool::{read, read_map}`；mutation、deadline、retry 和 co-tx
-只经 `PgTenantWritePool`。两类 capability 均只接收 sealed scope handle，并且只在 `cotx` 内 lower 成
-`TenantId` 后执行 `SET LOCAL`。reader 以 SQLx transaction options 原子发送 `BEGIN READ ONLY`，随后
-`SET LOCAL rss.tenant_id`；writer 使用普通 read-write transaction，写事务内部为 CAS/锁定/一致性判断所需的
-SELECT 仍属同一 writer transaction。两类 capability 均不暴露 `begin`、`acquire`、raw `PgPool` / `PgStore`
-或 `Executor`，因此 tenant 表路径在类型层先被收口到 scoped transaction funnel。绕过该类型入口直接借连接或
-走 global transaction 必须 fail-fast。
+- PG tenant scope 使用 `SET LOCAL` 注入当前事务。
+- tenant-scoped repository 不持有 raw `sqlx::PgPool` / `PgStore`，只持有所需的 opaque
+  `PgTenantReadPool` / `PgTenantWritePool`；普通 repo 入口只能接收本地 `TenantRepoScope` / `RowRepoScope`，
+  不能接收裸 `TenantId`、`RowVisibility`、`RowScope` 或 `ScopedTenant`。
+- 独立查询只经 read pool；mutation、deadline、retry 与 co-tx 只经 write pool。
+  reader 必须原子发送 `BEGIN READ ONLY` 后再 `SET LOCAL`；写事务内部为 CAS/锁定所需的 SELECT 仍属同一 writer transaction。
+- 两类 capability 均不暴露 `begin`、`acquire`、raw pool/store 或 `Executor`，绕过类型入口直接借连接
+  或走 global transaction 必须 fail-fast。
+- 含 `tenant_id` 列的表必须有 `ENABLE ROW LEVEL SECURITY` + `FORCE ROW LEVEL SECURITY` + tenant-isolation
+  policy；缺失即门红。新增 tenant relation 必须在同一 migration 显式授予 reader SELECT，
+  reader DML 与 `ALTER DEFAULT PRIVILEGES` 一律门红。
+- 载体：`INVARIANT: TENANCY-RLS-FORCE-01` / `TENANCY-PG-READER-ACL-01`（`cargo xtask schema-rls`）。
 
-`cargo xtask schema-rls`（INVARIANT `TENANCY-RLS-FORCE-01`，接入 `cargo xtask verify` / `ci`，
-Medium）机器强制：含 `tenant_id` 列的表必须有 `ENABLE ROW LEVEL SECURITY` +
-`FORCE ROW LEVEL SECURITY` + tenant-isolation policy（目标态 `USING/WITH CHECK (tenant_id =
-NULLIF(current_setting('rss.tenant_id', true), '')::uuid)`，旧迁移可经前向迁移升级）；缺失即门红。
-同一命令的 `TENANCY-PG-READER-ACL-01` 还要求 `0067` 动态 backfill 精确覆盖当时已有的 public tenant
-relations；此后的 tenant relation 必须在建表/tenant 化的同一 migration 显式
-`GRANT SELECT ... TO rss_app_read`。reader DML 与 `ALTER DEFAULT PRIVILEGES` 一律门红，避免未来表被未分类授权。
+### 连接面与角色
 
-writer role `rss_app` 已 provision 为非 owner、NOBYPASSRLS，并按各 tenant 表最小授权 DML
-（sessions / config_entries / roles / credentials / refresh_tokens / abac_policies /
-resource_attributes / inbox_receipts；audit_entries 仅 SELECT+INSERT；dead_letter 仅 SELECT+INSERT；outbox 仅 SELECT+INSERT，relay settlement/retention
-不得直接授 UPDATE/DELETE）；`FORCE ROW LEVEL SECURITY` 使 owner 连接亦受 policy 约束。durable
-bootstrap 使用三个独立连接面：migrator pool 只用于迁移与启动前检查，writer serving pool 必须以
-`rss_app` 连接，reader serving pool 必须由必填 `RSS_PG_READ_USERNAME/PASSWORD` 以 `rss_app_read` 直连。
-reader 不从 writer 凭据 fallback，也不通过 `SET ROLE` 复用连接。`rss_app_read` 固定为 LOGIN、非 owner、
-NOSUPERUSER、NOBYPASSRLS、NOCREATEDB、NOCREATEROLE、NOREPLICATION、无 membership，且
-`default_transaction_read_only=on`、`search_path=pg_catalog, public`，启动门还要求
-`lo_compat_privileges=off` 并拒绝 permissive policy 的非 pinned operator/function dependency；它只具
-CONNECT、public schema USAGE 与 tenant relations SELECT，
-不具 DML/TRUNCATE、sequence、schema CREATE、function EXECUTE 或非 tenant relation 权限。
+- durable bootstrap 使用三个独立连接面：migrator pool 只用于迁移与启动前检查，writer serving pool 与
+  reader serving pool 分别以专用 LOGIN 角色直连。
+- reader 不从 writer 凭据 fallback，也不通过 `SET ROLE` 复用连接。
+- 两个 serving role 必须非 owner、非 superuser、`NOBYPASSRLS`，并按表最小授权；
+  append-only 表只授 `SELECT, INSERT`，relay settlement 与 retention 不得直接授 UPDATE/DELETE。
+- reader 只具 CONNECT、schema USAGE 与 tenant relations SELECT，且默认事务只读。
+- 部署连接预算必须按 `migrator + writer + reader + 命名 maintenance pools` 求和，不能沿用单 serving pool 预算。
+- readiness 同时采样 writer/reader 并取最差状态；任一未验证或不可用返回 503。
+- 注：superuser 连接永远绕过 RLS（含 FORCE），故生产 owner 与 serving role 均须为非 superuser。
 
-writer 与 reader pool 分别受 `RSS_PG_MAX_CONNECTIONS` / `RSS_PG_READ_MAX_CONNECTIONS` 约束（范围
-`1..=100`、缺省各 `5`，LocalOnly serving 默认总 ceiling 仍为 `10`）；部署连接预算必须按
-`migrator（启动期） + writer（常驻） + reader（常驻） + 命名 maintenance pools` 求和，而不能沿用单 serving
-pool 的预算。启动能力门分别核验两个 serving role；readiness 同时采样 writer/reader，以较差状态作为 PG
-readyz，任一 pool 未验证或不可用均返回 503。两池分别注册稳定、无凭据的 shutdown resource 名并被完整关闭。
-注：superuser 连接永远绕过 RLS（含 FORCE）；serving roles 为非 superuser 故受 policy 约束；
-生产 owner 须为非 superuser。
+### 各 durable 表的 tenant 约束
 
-`secret_refs` 是版本历史 append-only 表：`rss_app` 仅有 `SELECT, INSERT`，数据库 `CHECK (version > 0)`
-并拒绝直接 `UPDATE/DELETE`；删除只允许追加 tombstone。Postgres adapter 的 Hard 载体是
-`key_lock::LockedSecretKey`：唯一构造器在当前 `TxCapability` 上按 canonical `(tenant, secret_key)` 获取
-transaction advisory lock，CAS 与 tombstone INSERT 只能消费该 capability 内保存的坐标。PostgreSQL 权限与
-CHECK、Rust 私有 capability 共同令未授权 mutation 难以表达；`TENANCY-SECRET-KEY-MUTATION-01`
-（`cargo xtask pg-tenant-tx-guard`，Medium）再以 AST exact-owner、synthetic red 和真实 workspace
-anti-vacuity 阻断 raw INSERT、破坏性 DML、错误 owner 或重复/缺失 canonical site。
+- **append-only 版本表**（如 `secret_refs`）：`rss_app` 仅 `SELECT, INSERT`，DB CHECK 拒绝直接
+  `UPDATE/DELETE`，删除只允许追加 tombstone。Hard 载体是私有 key-lock capability——唯一构造器在当前
+  `TxCapability` 上按 canonical 坐标取 advisory lock，CAS 与 tombstone 只能消费该 capability 内的坐标。
+  载体：`TENANCY-SECRET-KEY-MUTATION-01`（`cargo xtask pg-tenant-tx-guard`）。
+- **outbox**：`tenant_id` 与 metadata `tenantId` 同源落库并受 RLS 约束。emit-only 与 co-tx 路径都必须先
+  `SET LOCAL`，co-tx 拒绝 envelope tenant 与事务 tenant 不一致。head-of-partition gating 按
+  `(tenant_id, domain, partition_key)` 判队头，tenant A 的 DLX 队头不得阻塞 tenant B 的同 key 投递。
+  跨租 relay / retention / backlog 维护不得开放全表 UPDATE/DELETE，只能调用迁移安装的固定
+  `SECURITY DEFINER` 函数；函数 owner 为 NOLOGIN BYPASSRLS 维护角色。
+- **inbox_receipts**：tenant-scoped mutable receipt 表，主键含 tenant，受 RLS 约束，不保留 dual write 或回填路径。
+- **saga 表**：instance 表持 lease token/epoch，journal 主键含 tenant 且 append-only（仅 `SELECT, INSERT`）。
+  所有状态变更必须经 write pool 注入 tenant scope，并由 DB 侧 `tenant_id + saga_id + lease_token + epoch +
+  expires_at` CAS fence，不能依赖调用方约定。
+- **projection_events**：无 `tenant_id` 列的全局表，不在 `schema-rls` 范围。`rss_app` 无任何表级 DML，
+  只能执行固定 `SECURITY DEFINER` 函数；append 函数校验 metadata tenant 为 canonical non-nil UUID、
+  参数匹配同事务可见 outbox row，且该 row 命中启动期刷新的 DB binding registry。
+  它依赖全局 LSN 顺序与上层 envelope tenant authority，不承载 outbox partition liveness 语义。
 
-outbox 是 tenant-scoped 表：`tenant_id uuid NOT NULL` 与 metadata `tenantId` 同源落库，并受
-`ENABLE/FORCE ROW LEVEL SECURITY` + `tenant_isolation` policy 约束。emit-only 路径和 co-tx 路径必须
-先在事务内 `SET LOCAL rss.tenant_id`，且 co-tx 会拒绝 envelope tenant 与事务 tenant 不一致。ordered delivery
-的 head-of-partition gating 按 `(tenant_id, domain, partition_key)` 判队头；同一 business key 下，tenant A
-进入 dlx 的队头不得阻塞 tenant B 的同 key 投递。跨租 relay / retention / backlog 维护不得给 `rss_app`
-开放 outbox 全表 UPDATE/DELETE，只能调用迁移安装的固定 `SECURITY DEFINER` 函数；函数 owner 为 NOLOGIN
-BYPASSRLS 维护角色，函数签名是运行期唯一全域 outbox DML 通道。
+> partition key 可能含凭据级 bearer 标识，故 `PartitionKey` 的 `Debug` 脱敏，不以明文进日志。
+> 见 `observability.md` §Outbox Envelope。
 
-inbox_receipts 是 tenant-scoped mutable receipt 表：主键为
-`(tenant_id, event_id, consumer_group)`，并持久化 contract/schema header、trace/correlation 与
-lease/commit 状态；它同样受 `ENABLE/FORCE ROW LEVEL SECURITY` + `tenant_isolation` policy 约束。#1650
-已将运行期 `InboxStore` context fanout、sweeper 与 durable consumer 切到该表；pre-GA 不保留
-dual write、兼容 shim 或回填路径。
+## 持久化模式 tenant 作用域合约
 
-saga_instances / saga_journal 是 tenant-scoped saga durable 表：`saga_instances` 持 instance 状态与
-lease token/epoch，`saga_journal` 主键为 `(tenant_id, saga_id, seq)` 且通过 composite FK 指回 instance。
-两表均受 `ENABLE/FORCE ROW LEVEL SECURITY` + `tenant_isolation` policy 约束；journal 是 append-only，
-`rss_app` 仅有 `SELECT, INSERT`，不得直接 `UPDATE/DELETE`。claim/extend/release/status mark 和 journal
-append 必须经 `PgTenantWritePool` 注入 `SET LOCAL rss.tenant_id`，并由 DB `WHERE tenant_id + saga_id +
-lease_token + epoch + expires_at` CAS fence，不能依赖调用方约定。
+**作用域来源**：`TenantId` 从声明过的认证 / 预认证通道流入；域内从已认证授权证据派生本地
+`TenantRepoScope`，repo 与 tenant read/write capability 只接收该 sealed handle。
+adapter 内有唯一 lower 点从 scope handle 取 `TenantId` 并注入当前 PG 事务；永不从 HTTP request body 读取。
 
-projection_events 仍是无 `tenant_id` 列的全局表，不在 `schema-rls` 检查范围。`projection_events`
-不授 `rss_app` 任何表级 `SELECT/INSERT/UPDATE/DELETE`；runtime 只能执行固定
-`rss_append_projection_event(...)` / `rss_read_projection_events(...)` SECURITY DEFINER 函数。append 函数
-执行时还会校验 metadata `tenantId` 是 canonical non-nil UUID、参数匹配同事务可见 outbox row，且该 row
-命中启动期由 generated `PROJECTION_INPUTS` 刷新的 DB projection binding registry；`rss_app` 不具备
-registry 写权限。旧 `projection_events` 行在 0040 migration fail-fast，不 backfill。它们依赖 seq/LSN
-全局顺序、owner checkpoint / consumer group 隔离与上层 envelope tenant authority，不承载 outbox
-partition liveness 语义。
+**缺失 SET LOCAL 的行为（预期 default-deny）**：未注入时 `current_setting` 返回 NULL，
+`tenant_id = NULL` 永不匹配任何行——所有 tenant 表行不可见、写操作被拒。
+这是设计预期的 fail-closed 默认拒绝，不是故障；无隐式 fallback 或 anonymous 租户。
 
-> partition key（如 sessionId）可能含**凭据级** bearer 标识，故 `PartitionKey` 的 `Debug`
-> 脱敏（`<redacted>`），不以明文进日志（F3，#1211 review；同 `SessionId`）——见 `observability.md` §Outbox Envelope。
+**单 funnel 强制**：生产路径所有 tenant GUC 注入只经唯一 helper 模块进行。
+Hard 载体是各域 scope 类型加 typed pool：外部代码不能从裸 `TenantId` 构造 scope，
+tenant repo 也无法直接调用 raw pool 的 transaction / connection API。
+载体：`INVARIANT: TENANCY-SETLOCAL-FUNNEL-01`（`cargo xtask setlocal-funnel`）。
 
-## 持久化模式 tenant 作用域合约（PERSIST-016 / #1437 RLS 解锁器）
+**raw-pool / TxManager bypass 守卫**：`INVARIANT: TENANCY-PG-TX-FUNNEL-01` 由两层承载。
+Hard 层是互不可换的 read / write pool——tenant 表 adapter 按行为只存所需 capability，混合 repo 显式存两者，
+不保留已删除混合 pool 的 alias 或兼容构造器。Medium backstop 从迁移派生 tenant 表集合并扫描生产 SQL site，
+禁止 tenant 表 SQL 经 raw `begin` / `acquire` / pool executor / 全局事务访问，并带 anti-vacuity 与 stale
+allowlist 测试。写事务内 SELECT 由 writer capability 所有，不被误判为独立读。
+载体：`TENANCY-PG-READ-LANE-01`（`cargo xtask pg-tenant-tx-guard`）。
 
-**作用域来源**：`TenantId`（`vocab`，fail-closed 解析，空值 / nil / 非 canonical UUID 非法）
-从声明过的认证/预认证通道（JWT tenant claim 或 `X-Tenant-ID` populate-only header，见 §Tenant source）
-流入；域内从已认证/授权证据派生本地 `TenantRepoScope`，repo / tenant read/write capability 只接收该 sealed handle。
-`adapters/postgres/src/cotx/mod.rs` 是唯一 lower 点：从 scope handle 取 `TenantId`，经
-`set_local_tenant` / `tenant_scoped_read` / `producer_tx` 注入当前 PG 事务；永不从 HTTP request body 读取。
+**repo scope 签名守卫**：禁止普通 tenant/row-scoped repo 方法重新引入裸 `TenantId`、`RowVisibility`、
+`RowScope` 或 `ScopedTenant` 参数；admin / maintenance 专用 port 保持独立入口。
+载体：`INVARIANT: TENANCY-REPO-SCOPE-SIGNATURE-01`（`cargo xtask repo-scope-guard`）。
 
-**缺失 SET LOCAL 的行为（预期 default-deny）**：若 `SET LOCAL rss.tenant_id` 未注入，
-`current_setting('rss.tenant_id', true)` 返回 NULL，`tenant_id = NULL` 永不匹配任何行——
-所有 tenant 表**行不可见、写操作被拒**。这是设计预期的 fail-closed 默认拒绝，不是故障；
-无隐式 fallback 或 anonymous 租户。
+**命名维护例外**：tenant 表 raw-pool 维护例外只允许在守卫中按窄形状显式登记，并带 stale-allowlist 测试。
+每条例外必须限定连接面（migrator/owner）、限定 SQL 形状、验签 operator service-token，并写 durable
+start/finish 审计。维护专用 AAD 只能经专用 capability 派生，普通 serving 路径不能读取历史明文。
+DLX lifecycle 拆为三个独立长期登录角色（archive / verify / purge），三者都必须非 superuser、
+`NOBYPASSRLS`、无任何表级 DML/DDL，且 serving role 对 lifecycle 函数全部无权；
+runtime 用三组独立凭据建 pool，启动时精确验证 current role 与能力集合，repository 内部按方法路由且不暴露 raw pool。
+raw 连接只允许在 setup、migration、readiness/capability probe、global infra adapter 与命名维护例外中出现。
 
-**单 funnel 强制**：postgres 生产路径所有 `SET LOCAL rss.tenant_id` 注入只经 `cotx`
-helper 进行；`INVARIANT TENANCY-SETLOCAL-FUNNEL-01`（`cargo xtask setlocal-funnel`，Medium
-内容扫描）机器强制：字面量 `set_config('rss.tenant_id'` 仅允许出现在
-`adapters/postgres/src/cotx/mod.rs`（测试代码豁免）。tenant repository 的 Hard 载体是
-各域 `TenantRepoScope` / `RowRepoScope` + `PgTenantReadPool` / `PgTenantWritePool`：外部代码不能从裸
-`TenantId` 构造 scope，普通 repo / typed pool 也不能用裸 tenant 或 row visibility 调用；tenant repo 无法直接调用 raw pool
-transaction / connection API。
-
-**raw-pool / TxManager bypass 守卫**：`INVARIANT TENANCY-PG-TX-FUNNEL-01` 由两层承载。
-Hard 层是互不可换的 `PgTenantReadPool` / `PgTenantWritePool`，tenant 表 adapter（sessions / config / roles /
-secret_refs / credentials / refresh_tokens / audit_entries / tenant dead_letter/DLQ 路径）按行为只存所需 capability，
-混合 repo 显式存两者；已删除的混合 tenant pool 不保留 alias 或兼容构造器。
-Medium backstop 是 `cargo xtask pg-tenant-tx-guard`（接入 `verify` / `ci`）：从迁移派生
-tenant 表集合，扫描生产 Rust SQL site，禁止 tenant 表 SQL 通过 raw `pool.begin` /
-`pool.acquire` / `&self.pool` executor / `run_global_transaction` 访问，并带 anti-vacuity 与 stale
-allowlist 测试；`TENANCY-PG-READ-LANE-01` 同时拒绝旧 mixed pool、reader/write API 交叉和 tenant repo
-持有 raw pool/store，并证明 reader/writer 两种 production site 均存在。写事务内 SELECT 由 writer capability
-所有，不被误判为独立读。同一 guard 还把 `SecretRepo` 限定为 read-only，精确限制 HTTP LocalTx retry 到
-`PgSecretUnitOfWork::publish`，并证明 publish/internal/republish 共享唯一 `LockedSecretKey` CAS funnel、delete
-只经同一 key lock 追加 tombstone。
-raw `PgPool` 只允许在 `PgStore` setup、migration、readiness/RLS capability probe、
-global infra adapter 和命名维护例外中出现。
-
-**repo scope 签名守卫**：`INVARIANT TENANCY-REPO-SCOPE-SIGNATURE-01`（`cargo xtask
-repo-scope-guard`，Medium，接入 `verify` / `ci`）扫描 `settings` / `identity` / `audit` 的
-repo/lifecycle/UoW/store port，禁止普通 tenant/row-scoped repo 方法重新引入裸 `TenantId`、
-`RowVisibility`、`RowScope` 或 `ScopedTenant` 参数；admin / maintenance 专用 port 保持独立入口。
-
-**命名维护例外**：tenant 表 raw-pool 维护例外只允许在 `pg-tenant-tx-guard` 中按窄形状显式登记，并带
-stale-allowlist 测试。当前 Rust raw-pool 例外只有两类：`config_entries` startup legacy plaintext probe
-（serving pool 接受前由 migrator/owner 连接只统计 encryption migration debt），以及 `rss
-settings-config-values maintenance` 的 `config_entries` backfill/rewrap。后者只能经
-`PgRuntimeDeps::setup_maintenance` 的 migrator/owner 连接执行，SQL 形状限定为按
-`(tenant_id, config_key, version)` 稳定扫描 `protection_scheme = 0|1`、原地 CAS `UPDATE` 同一版本行、统计
-remaining plaintext；runtime 必须验签 operator service-token，用已验证 service principal subject 写入
-`auth_audit_events` job start/finish durable audit。维护 AAD 只能经 `ConfigValueMaintenanceCapability` 派生，
-普通 serving 读写路径不能读取
-scheme=0 plaintext。`rss audit-ledger verify` 是另一条命名维护入口：migrator/owner 连接只用于 migration
-与 `auth_audit_events` start/finish，审计链读取只能经 `rss_audit_admin` 只读 pool + typed `TenantId`
-scope，不能使用 owner pool 扫 `audit_entries`。outbox relay/retention/backlog 不保留 owner/maintenance 长期连接，也不授
-`rss_app` 直接 DELETE/UPDATE；它们由迁移安装的窄 `SECURITY DEFINER` 函数承载。
-`dead_letter` lifecycle 进一步拆为三个独立长期登录角色：`rss_dlx_archiver` 只能 claim/retry/quarantine，
-`rss_dlx_verifier` 只能记录已验证回执，`rss_dlx_purger` 只能 purge/reconcile。三者都必须非 superuser、
-NOBYPASSRLS、无任何表级 DML/DDL，且 `rss_app` 对 lifecycle 函数全部无权。runtime 用三组独立
-`RSS_PG_DLX_{ARCHIVER,VERIFIER,PURGER}_{USERNAME,PASSWORD}` 建 pool，启动时精确验证 current role 与能力集合；
-repository 内部按方法路由 pool，且不暴露 raw pool。outbox relay 将 publish 失败写入 `dead_letter`
-前必须从 outbox metadata 取 tenant，并在同一事务内经 `set_local_tenant` 注入 tenant scope 后写入。
-
-**启动期 serving 能力门控**：`PgRuntimeDeps::setup` 在迁移完成后分别验证 writer 与 reader 直连池。
-两者都动态派生含 `tenant_id` 列的表集合，断言每张表满足
-`relrowsecurity AND relforcerowsecurity`、至少一条 tenant isolation policy，且
-`rss.tenant_id` GUC 可正确 round-trip。writer 的 `verify_rls_capability()` 另核验 current role 精确为
-`rss_app`、非 owner/superuser/BYPASSRLS；reader 的 `verify_tenant_read_capability()` 另核验 current role
-精确为 `rss_app_read`、role flags、默认 transaction read-only 与
-有效 ACL 精确集合。任一断言失败则 durable 模式**启动 fail-fast**（数据库状态无法在编译期校验，载体为
-Medium 运行期门）。readyz sampler 同时探测两池并取最差结果：全部 `Healthy` 才返回 200，任一
-`Unhealthy` 返回 503。
-
-**解锁器边界说明（#1437 是 PERSIST-016 解锁器）**：本 issue 落地统一的 typed cotx funnel
-（Hard）与 xtask setlocal-funnel / pg-tenant-tx-guard 守卫（Medium）及启动能力门控（Medium），
-为以下同批 issue 提供稳定底座：
-
-- **#1581 / #1626 / #1650**：outbox tenant 注入已落地（`tenant_id` + RLS + 固定 SECURITY DEFINER
-  维护函数）；#1626 落地 `inbox_receipts` 目标 schema/RLS，#1650 完成 runtime 切流与旧全局 receipt
-  storage 退役。
-- **#1582**：tenant repo conformance 已纳入真实 postgres repos（config seed + role / audit / dead_letter 等），完整 CAS / rollback / co-tx 扩展仍按后续 conformance 范围推进。
-- **#1436 / #1580**：PG tx funnel / raw-pool guard（`TxManager` 旁路保护）。
-
-migrator + writer `rss_app` + reader `rss_app_read` 三连接面接线见上文 §RLS 与 PG scope；两种 serving
-role 均为 NOBYPASSRLS，并由启动期精确能力门强制，无单 pool 兼容路径。
+**启动期 serving 能力门控**：迁移完成后分别验证 writer 与 reader 直连池。两者都动态派生含 `tenant_id`
+列的表集合，断言每张表 `relrowsecurity AND relforcerowsecurity`、至少一条 tenant isolation policy，
+且 GUC 可正确 round-trip。writer 另核验 current role 精确为 serving writer 角色且非 owner/superuser/BYPASSRLS；
+reader 另核验角色、role flags、默认只读与有效 ACL 精确集合。
+任一断言失败则 durable 模式启动 fail-fast——数据库状态无法在编译期校验，故载体是 Medium 运行期门。
 
 ## ABAC authz 接线（permission-based）
 
 业务端点授权走 PDP 决策，不在 handler 硬编 role-name 字面量。
 
-- HTTP 路由门直接消费 generated `HttpSpec::route: HttpRouteEvidence`，由
-  `GeneratedPrimaryEndpoint` 从 evidence auth/resource scope 推导 route permission，经
-  `httpserve::RouteAuthorizer` 单一入口授权；handler 只消费 route gate 插入的
-  `httpserve::AuthorizedSubject`，不用 `authn::any_role` / `authn::self_or` /
-  `authn::require_any_role` 做授权分支。Admin listener 的 audit read 因保持 Admin
-  `Route` 类型语义，读取前用同一 `RouteAuthorizer` 做等价 `audit:read` read gate。
-- `vocab::RoutePermissionId` 是 active HTTP route permission 与 audit projection permission 的闭值集；
-  `vocab::GrantPermission` 是 role 可持有授权项的闭值集（`Route(target)` /
-  `PolicyManage(target)`）。contract / storage 仍以字符串承载 wire 格式，但进入
-  `httpserve` route gate、`identity::ContractAuthorizer`、`PolicyRouteScope` 或 role hydrate 前必须解析成
-  typed permission；未知值视为损坏数据 fail-closed，不保留字符串授权 fallback。
-- handler 不手写 `Principal::has_role`、遍历 `Principal.roles`、比较 `PrincipalKind::{Admin,SuperAdmin,...}`
-  或比较 role-name 字面量做授权。
-- `Effect::Allow` 规则必须声明至少一个 action；空 action 只允许用于
-  `Effect::Deny` 的 deny-all。写侧和读侧都必须 fail-closed。
-- 路由门禁只做 coarse allow/deny；recognized FieldMask obligation 经 sealed
-  `ResourceProjection` 传给 read projection layer 消费。未知 obligation、RowScope obligation 或不能识别的
-  field obligation 必须 fail-closed。
+- HTTP 路由门直接消费 generated route evidence，由 generated endpoint 从 evidence 推导 route permission，
+  经 `httpserve::RouteAuthorizer` 单一入口授权；handler 只消费 route gate 插入的 `AuthorizedSubject`。
+- `vocab::RoutePermissionId` 是 active route permission 与 audit projection permission 的闭值集；
+  `vocab::GrantPermission` 是 role 可持有授权项的闭值集。contract / storage 以字符串承载 wire 格式，
+  但进入 route gate、contract authorizer 或 role hydrate 前必须解析成 typed permission；
+  未知值视为损坏数据 fail-closed，不保留字符串授权 fallback。
+- handler 不手写 role 判定、不遍历 roles、不比较 principal kind 或 role-name 字面量做授权。
+- `Effect::Allow` 规则必须声明至少一个 action；空 action 只允许用于 `Effect::Deny` 的 deny-all。
+- 路由门禁只做 coarse allow/deny；recognized FieldMask obligation 经 sealed `ResourceProjection`
+  传给 read projection layer。未知 obligation、RowScope obligation 或不能识别的 field obligation 必须 fail-closed。
 
 ## ResourceProjection / FieldMask
 
-字段级数据权限由 `httpserve::ResourceProjection` 承载，字段集合来自闭枚举
-`vocab::ProjectionField`，不得用裸字符串、wildcard 或 handler-local bool 表达。active GET response
-中声明 `x-pii` 或字段名为 `tenantId` 的 protected 字段必须在 contract
-`[endpoints.http.projection].fields.responsePath` enrollment；`cargo xtask contract validate` 的 R23
-按 schema 精确覆盖校验，generated `HttpProjectionFieldSpec` 是 handler/authorizer 的单源。
-
-粗粒度 route permission 缺 Authorizer 或被 Authorizer deny 时必须拒绝读取；读取已 allow 后，缺
-projection、缺字段权限或未知未来字段时，protected 字段默认 mask 为 `"<redacted>"` 以保持 required
-string schema。当前 enrollment：audit read 默认 mask `tenantId`、`actor`、`resourceId`；identity
-profile 默认 mask `subject`、`tenantId`。显式 unmask 只能由
-`RouteAuthorizationDecision::AllowWithProjection` 携带的 projection 进入 handler；handler 只消费
-projection，不读取角色、permission 字符串或 policy 细节。audit 的 `entryHash`、`seq`、`actorKind`、
-`action`、`resourceKind`、`outcome`、`recordedAt`、`nextCursor`、`hasMore` 保持明文。
+- 字段级数据权限由 `httpserve::ResourceProjection` 承载，字段集合来自闭枚举 `vocab::ProjectionField`，
+  不得用裸字符串、wildcard 或 handler-local bool 表达。
+- active GET response 中声明 `x-pii` 或字段名为 `tenantId` 的 protected 字段必须在 contract projection
+  enrollment 中声明 response path；由 contract validate R23 按 schema 精确覆盖校验，
+  generated projection spec 是 handler 与 authorizer 的单源。
+- 粗粒度 route permission 缺 Authorizer 或被 deny 时必须拒绝读取。
+- 读取已 allow 后，缺 projection、缺字段权限或遇未知未来字段时，protected 字段默认 mask 为 `"<redacted>"`
+  以保持 required string schema。
+- 显式 unmask 只能由授权决策携带的 projection 进入 handler；handler 只消费 projection，
+  不读取角色、permission 字符串或 policy 细节。
 
 ## Resource ownership
 
-path-param 标识的 resource ownership 是 PDP ABAC 决策，不是 handler 短路。owner-scoped /
-self-scoped gate **contract-derived**：契约声明 `endpoints.http.resource:
-<pathParam>`（owner-scoped）或 `endpoints.http.selfScoped: true`（self-scoped），生成
-handler 经 `GeneratedPrimaryEndpoint` 从同一 `HttpRouteEvidence` 派生 path-param resource / self subject
-resource——业务 handler / 域 crate 不手写 gate 或 scope 映射。
-`resource`/`selfScoped` 各 ⇒ permission、二者互斥（contract validate、codegen check
-和 `cargo xtask` 治理校验）。owner-scoped gate 把 canonical resource id（self-scoped 把
-调用者自身 subject）转发给 PDP。
+- path-param 标识的 resource ownership 是 PDP ABAC 决策，不是 handler 短路。
+- owner-scoped / self-scoped gate 是 contract-derived：契约声明 resource path param 或 self-scoped 标志，
+  generated endpoint 从同一 route evidence 派生 resource 或 self subject。业务 handler 与域 crate 不手写 gate。
+- 两种声明各自蕴含 permission、彼此互斥，由 contract validate、codegen check 与治理校验共同强制。
+- canonical resource parser 只接受 lowercase-hyphenated、非 nil UUID；空值、非 UUID、非 canonical
+  在 route gate 内 fail-closed 且不调用 PDP。
+- 动态 `resource.*` 属性来自 tenant-scoped durable attribute store，不是 handler 本地拼接。
+  store key 空间固定，其中 permission 段读侧必须解析回 typed permission 后才参与授权。
+  `resource.id` 是 route gate synthetic attribute，不能作为动态属性落库。
+- resolver 只返回闭枚举 `Known` / `Missing` / `Stale`；缺失、过期、store 不可用、reserved key 冲突或
+  非 canonical resource id 都在 baseline 前 deny，不用空集合表达失败，也不回退跨租户默认值。
+- 契约可显式声明 shared/global resource opt-out，必须带非空 reason 且仍声明 canonical route resource。
+  global route 不读全局属性表、不支持 tenant NULL fallback，也不允许租户 durable policy 使用动态
+  `resource.*` 属性。默认模式是 tenant-scoped。
 
-当前 HTTP `RouteResource` canonical parser 只接受 lowercase-hyphenated、非 nil UUID 字符串；空值、
-非 UUID、非 canonical UUID 在 route gate 内 fail-closed，且不调用 PDP。按 contract 声明不同
-resource type 的 typed parser/codegen 是后续架构项。
+判定规则：
 
-resource ownership 的动态 `resource.*` 属性来自 tenant-scoped durable resource attribute store，而不是
-handler 本地拼接。store key 空间固定为 `(tenant_id, contract_id, permission, resource_id, attribute_key)`；
-其中 `permission` 是 `PolicyRouteScope` 中 `RoutePermissionId::as_str()` 的持久化投影，读侧必须解析回
-`RoutePermissionId` 后才可参与授权。`resource.id` 是 route gate synthetic attribute，不能作为动态属性落库。resolver 只返回闭枚举
-`Known(attrs)` / `Missing(key)` / `Stale(key)`，缺失、过期、store 不可用、reserved key 冲突或非 canonical
-resource id 都在 RBAC/builtin baseline 前 deny，不用空集合表达失败，也不回退跨租户默认值。
-
-契约可通过 `[endpoints.http.resourceSharing] mode = "global"` 显式声明 shared/global resource opt-out；
-该模式必须带非空 `reason` 且仍声明 canonical route resource。global route 不读全局属性表，不支持
-tenant_id NULL fallback，也不允许租户 durable policy 条件使用动态 `resource.*` 属性。默认模式是
-tenant-scoped（未声明 block 等同 tenant-scoped）。
-
-- baseline ownership 用 `subject.sub == resource.id` 判定。
-- **owner vs admin 同 permission**：同一 owner-scoped action（如 `user:write`）既用于带
-  resource 的 owner 路由（改自己），也用于不带 resource 的 admin 路由（coarse，改任意）。
-  故 HTTP **不照搬** gRPC 侧「owner-scoped permission ⇒ resource 必填」规则（会误拒 admin
-  路由）；`resource` 是 per-route 授权选择，不从 permission 派生。
-- 空或非 canonical path-param 不等于 self；resource 不可解析时规则不命中并
-  fail-closed。
-- delegated ownership 用 `subject.sub == resource.owner`，owner 由 PIP lookup 供给。
-- device 读自身状态必须 kind-gated：`subject.kind == device AND subject.sub == resource.id`。
-- owner-scoped route gate 的 baseline allow surface 是 `{owner, admin}`；owner/self
-  不扩大数据访问，数据可见性仍由 principal 派生的 `RowScope` 独立治理。
-
-query-param self scoping 仍留在 handler / service：例如 audit 的空 `actorId` 对 admin
-表示全 actor permissioned 读，不是隐式 self；只有显式 `param == subject` 才走 PDP
-ownership 规则。
+- baseline ownership 用 `subject.sub == resource.id`；delegated ownership 用 `subject.sub == resource.owner`，
+  owner 由 PIP lookup 供给。
+- device 读自身状态必须 kind-gated：subject kind 为 device 且 sub 等于 resource id。
+- 空或非 canonical path-param 不等于 self；resource 不可解析时规则不命中并 fail-closed。
+- **owner vs admin 同 permission**：同一 owner-scoped action 既用于带 resource 的 owner 路由，
+  也用于不带 resource 的 admin 路由。故 HTTP 不照搬 gRPC 的「owner-scoped permission ⇒ resource 必填」
+  规则（会误拒 admin 路由）；resource 是 per-route 授权选择，不从 permission 派生。
+- owner-scoped route gate 的 baseline allow surface 是 `{owner, admin}`；owner/self 不扩大数据访问，
+  数据可见性仍由 principal 派生的 `RowScope` 独立治理。
+- query-param self scoping 仍留在 handler / service：空 actor 参数对 admin 表示全 actor permissioned 读，
+  不是隐式 self；只有显式相等才走 PDP ownership 规则。
 
 ## Authorizer 与 PDP
 
-Authorizer 经组合根注入 request context：runtime assembly 从 identity domain 取得
-`Arc<dyn httpserve::RouteAuthorizer>`，Primary listener 用
-`httpserve::finalize_primary_auth_with_audit` 装配；Admin listener 也注入同一 Authorizer，供 audit read
-请求 sealed field projection。域 crate 不依赖兄弟域 crate 的 Authorizer。
-
-强依赖缺失必须 fail-fast；可解析的 Authorizer 在 runtime router build（Init 后、
-serve 前）预解析。生产 Primary active route 通过必填 authorizer finalizer 装配；缺失 provider
-在启动期 fail-fast（构造器必填参数缺失即编译期 / 启动期报错），而不是首请求暴露。
-
-PDP 默认 fail-closed：缺 Authorizer、缺租户或 store 不可用都 deny；无适用 durable permit
-只表示 durable source 不授予权限，若没有独立 baseline allow 则 deny。
-baseline authorization source 是既有 self/RBAC/builtin 路由授权；其中 RBAC baseline 是
-action-scoped + `GrantPermission::Route(permission)` 命中的 allow 规则，不是 allow-all，也不读取 role name。租户 durable policy 是独立
-route-scoped source，可以叠加 allow / deny；deny 与 durable store/load failure 优先于 baseline。
-
-新装环境的 active settings publish API 在 role 管理面完整前有窄兜底：trusted `Admin` 主体对
-generated settings `config-publish` / `secret-publish` 两条无 resource route 内置 Allow；其它权限仍必须经
-`GrantPermission::Route` 命中，普通 user/device/service 不享有该兜底。
-
-租户 allow 可以放宽路由门禁，但不能扩大数据访问。读端点的数据可见性由 principal
-派生的 `RowScope` 决定；写端点没有 RowScope 维度，必须依赖 typed tenant 参数和 FORCE
-RLS 维护 tenant 边界。
+- Authorizer 经组合根注入 request context，域 crate 不依赖兄弟域 crate 的 Authorizer。
+- 强依赖缺失必须 fail-fast；可解析的 Authorizer 在 router build（Init 后、serve 前）预解析。
+  生产 active route 通过必填 finalizer 装配，缺失 provider 在启动期报错，而不是首请求暴露。
+- PDP 默认 fail-closed：缺 Authorizer、缺租户或 store 不可用都 deny。
+  无适用 durable permit 只表示 durable source 不授权；若无独立 baseline allow 则 deny。
+- baseline 是既有 self/RBAC/builtin 路由授权，其中 RBAC baseline 是 action-scoped + 命中 route grant 的
+  allow 规则，不是 allow-all，也不读取 role name。
+- 租户 durable policy 是独立 route-scoped source，可叠加 allow / deny；deny 与 durable load failure 优先于 baseline。
+- 租户 allow 可以放宽路由门禁，但不能扩大数据访问。读端点可见性由 `RowScope` 决定；
+  写端点没有 RowScope 维度，必须依赖 typed tenant 参数与 FORCE RLS 维护 tenant 边界。
 
 ## Open-source AuthZ parity boundary
 
 开源授权对标边界单源见
-`docs/architecture/202607021958-014-authz-open-source-parity-boundary.md`。RSS 只承诺同一安全目标由
-typed / in-process 机制承载，不承诺第三方产品、API 或策略语言兼容。
+`docs/architecture/202607021958-014-authz-open-source-parity-boundary.md`。
+RSS 只承诺同一安全目标由 typed / in-process 机制承载，不承诺第三方产品、API 或策略语言兼容。
 
 术语固定如下：
 
 - `diport::Pdp` 是 credential verification / claims port，负责验签、校验 claims 并产出已验证身份材料。
-- `httpserve::RouteAuthorizer` 是 route authorization 决策入口，负责 contract-derived permission / resource /
-  self-scoped gate。
+- `httpserve::RouteAuthorizer` 是 route authorization 决策入口，负责 contract-derived permission /
+  resource / self-scoped gate。
 - tenant isolation 是 typed `TenantId` + service-token tenant binding + `SET LOCAL rss.tenant_id` funnel +
   FORCE RLS + non-bypass serving role 的组合边界。
-- `RowVisibility` / `ResourceProjection` 是 RSS sealed obligation；OPA、Cedar、Casbin、SpiceDB、OpenFGA 或
-  PostgreSQL RLS 的对标能力不得被描述成这些类型的运行时兼容层。
+- `RowVisibility` / `ResourceProjection` 是 RSS sealed obligation，对标产品的相近能力不得被描述成
+  这些类型的运行时兼容层。
 
-边界不变：RLS does not replace RouteAuthorizer；ABAC is not the tenant boundary。租户 durable policy 可影响
-coarse route allow / deny，但不能扩大 tenant rows、跨租户可见性或字段明文投影。
+边界不变：RLS does not replace RouteAuthorizer；ABAC is not the tenant boundary。
+租户 durable policy 可影响 coarse route allow / deny，但不能扩大 tenant rows、跨租户可见性或字段明文投影。
 
 ## Durable ABAC policy store
 
-ABAC policy store 是 tenant-scoped durable PG store：每条 policy 必须带 `tenant_id`，
-并受 `ENABLE/FORCE ROW LEVEL SECURITY` + tenant-isolation policy 约束。生产读写入口必须经
-repo scope handle 和 PG tenant scope funnel 注入当前租户；不得提供全局 current policy 读取路径。
-
-policy 以 version + effective window 表达生效集。查询 active policy 时只加载当前租户中
-`effective_from <= now < effective_until`（无上界按 open-ended 处理）的版本；未生效、已过期或已删除
-版本不参与 PDP current active set。delete 必须保留 tombstone 并推进 version；普通 create 不复活同 id
-tombstone，也不得把 version 水位重置回 1。版本推进必须单调；同一租户内的更新不得影响其它租户同 key policy。
-
-policy load 必须 fail-closed：缺租户、store 不可用、反序列化失败、malformed JSON、未知字段、
-版本窗口非法或 storage error 都视为不可用 / 无有效 permit，PDP 和 route gate 返回 deny，不回退到
-内置 allow-all、旧缓存 allow 或跨租户默认值。malformed / unknown-field 输入必须在写侧拒绝落库；
-读侧遇到既有坏数据也必须拒绝授权。
-
-durable policy 若引用动态 `resource.*` 条件（不含 synthetic `resource.id`），Authorizer 必须先按
-route scope + canonical UUID resource id 从 `resource_attributes` resolver 取当前有效属性，再进入 ABAC
-规则求值。resolver 返回 `Missing` / `Stale` 或存储错误时直接 deny，且发生在 self/RBAC/builtin baseline
-之前；只有 `Known(attrs)` 才把属性注入 PDP context。`resourceSharing.global` route 禁止动态
-`resource.*` 条件，防止 shared/global 资源通过 tenant-local PIP 数据得到伪隔离判断。
-
-baseline semantics 保持最小允许面：durable active set 为空或没有命中时不授予权限，只允许既有
-self/RBAC/builtin baseline 独立判定；RBAC baseline 仍是 action-scoped + role-conditioned allow。
-tenant policy 可以叠加路由 coarse allow / deny，`Deny` 和 durable load/decode failure 覆盖 baseline，
-但不能扩大数据行可见性；数据可见性仍由 `RowScope` / FORCE RLS 独立治理。
-
-obligation 必须 round-trip 持久化，不得在 store 层静默丢弃或默认化。HTTP route gate 的默认语义仍是
-coarse allow/deny；唯一例外是 recognized FieldMask obligation 可转成 sealed `ResourceProjection`
-交给读模型渲染层。RowScope、未知 field obligation、或非 projection 路由上的 FieldMask obligation
-都必须 fail-closed deny。
+- policy store 是 tenant-scoped durable PG store：每条 policy 必须带 `tenant_id` 并受 RLS 约束。
+  生产读写入口必须经 repo scope handle 与 tenant scope funnel 注入当前租户，不提供全局 current policy 读取路径。
+- policy 以 version + effective window 表达生效集；只加载当前租户中处于有效窗口的版本。
+  未生效、已过期或已删除版本不参与 PDP active set。
+- delete 必须保留 tombstone 并推进 version；create 不复活同 id tombstone，也不得把 version 水位重置。
+  版本推进必须单调，同租户更新不得影响其它租户同 key policy。
+- policy load 必须 fail-closed：缺租户、store 不可用、反序列化失败、malformed JSON、未知字段、
+  版本窗口非法或 storage error 都视为无有效 permit 并 deny，不回退到内置 allow-all、旧缓存 allow
+  或跨租户默认值。malformed / unknown-field 输入必须在写侧拒绝落库，读侧遇既有坏数据也必须拒绝授权。
+- durable policy 引用动态 `resource.*` 条件时，Authorizer 必须先取当前有效属性再进入规则求值；
+  resolver 返回 `Missing` / `Stale` 或存储错误时直接 deny，且发生在 baseline 之前。
+  global route 禁止动态 `resource.*` 条件，防止 shared 资源通过 tenant-local PIP 数据得到伪隔离判断。
+- obligation 必须 round-trip 持久化，不得在 store 层静默丢弃或默认化。
 
 ## gRPC 授权
 
-非 public gRPC RPC 进入 runtime 后由 auth 拦截器（tower layer）调同一 `authn::Authorizer`
-做 PDP gate，不在 handler 手写谓词。
-
-- method -> permission 由契约 `endpoints.grpc.methods[].permission` overlay 派生。
-- 非 public 方法缺 permission overlay 必须 fail-closed，并在生成或注册期拒绝上线。
-- 未知 permission 必须启动 fail-fast。
-- owner-scoped permission 必须声明 `endpoints.grpc.methods[].resource`，拦截器
-  从请求消息字段提取 resource 并 canonicalize 后转发给 PDP。
-- unary RPC 在入口取 resource；server-streaming owner-scoped RPC 将 permission gate
-  延后到首个 `recv_msg`。
-- resource 提取失败（非 proto message、字段不存在、非 string）必须 deny，不回退到
-  full method；空或非 UUID 值转发给 PDP。提取值不得写入 ErrorInfo metadata。
-- `passwordResetExempt: true` 只允许用于非 public 且声明 permission 的方法。
-- 每个 deny 必须携带 sealed `google.rpc.ErrorInfo`，metadata 不含 subject / token /
-  resource value 等 PII。
+- 非 public RPC 由 auth 拦截器调同一 Authorizer 做 PDP gate，不在 handler 手写谓词。
+- method → permission 由契约 overlay 派生；非 public 方法缺 permission overlay 必须 fail-closed
+  并在生成或注册期拒绝上线；未知 permission 必须启动 fail-fast。
+- owner-scoped permission 必须声明 resource；拦截器从请求消息字段提取并 canonicalize 后转发 PDP。
+- unary RPC 在入口取 resource；server-streaming owner-scoped RPC 将 permission gate 延后到首个消息接收。
+- resource 提取失败（非 message、字段不存在、非 string）必须 deny，不回退到 full method；
+  空或非 UUID 值转发给 PDP。提取值不得写入错误 metadata。
+- 每个 deny 必须携带 sealed 结构化错误信息，metadata 不含 subject / token / resource value 等 PII。
 - gRPC 与 HTTP 使用同一 PDP 决策指标 family，不新增 transport 分叉。
 
 ## HTTP 授权
 
-HTTP route gate 与 gRPC 同源。HTTP route -> permission 由契约
-`endpoints.http.auth.permission` overlay 派生。codegen 将 contract/path/method/auth/resource/selfScoped/
-consistency/effects 原子渲染为 generated binding。普通 Primary route 只能经
-`GeneratedPrimaryEndpoint::new(ROUTE, handler)` 与同契约 `ContractMarker<RouteMarker>` 声明进入
-primary route gate；`OutboxFact` producer 只能经
-`GeneratedPrimaryEndpoint::new_producer(PRODUCER, handler)` 与同契约 move-only
-`ProducerMarker<RouteMarker>` 进入。`new_producer` 从 `PRODUCER` 安装私有 route-bound witness；
-witness 缺失时 extractor fail-closed，成功时 marker 自带 mounted binding。handler 必须消费
-`marker.into_receipt()` 铸造不可替换 binding 的 receipt，再交给 service / Unit-of-Work producer
-funnel。`SPEC.route` 仅用于元数据查询，不是 production 装配入口。
-`httpserve::RouteAuthorizer` 在 handler 前做统一判定，允许后插入 `AuthorizedSubject`；handler 只消费
-该授权主体上下文，不回读 `Authenticated`。owner-scoped（`endpoints.http.resource`）/ self-scoped
-（`endpoints.http.selfScoped`）由 endpoint 内部从 evidence 三分支派生，见
-§Resource ownership。
+- HTTP route gate 与 gRPC 同源，route → permission 由契约 overlay 派生。
+  codegen 将 contract/path/method/auth/resource/selfScoped/consistency/effects 原子渲染为 generated binding。
+- 普通 Primary route 只能经 generated endpoint 构造器与同契约 route marker 进入 route gate；
+  `OutboxFact` producer 只能经 producer 构造器与同契约 move-only producer marker 进入。
+  producer 构造器安装私有 route-bound witness，witness 缺失时 extractor fail-closed。
+  handler 必须消费 marker 铸造的 receipt 再交给 producer funnel。generated spec 的 route 字段仅用于元数据查询。
+- `RouteAuthorizer` 在 handler 前统一判定，允许后插入 `AuthorizedSubject`；handler 只消费该授权主体，
+  不回读认证态。
 
-每个 `lifecycle: active` 且 `codegen` 的 HTTP 契约必须声明恰好一个 AuthZ mode：
+每个 active 且 codegen 的 HTTP 契约必须声明恰好一个 AuthZ mode：
 
-- ABAC 默认：`endpoints.http.auth.permission`
-- 显式 opt-out：`public` / `bootstrap` / `clientsOnly` / `serviceOwned`
+- ABAC 默认：声明 permission。
+- 显式 opt-out：`public` / `bootstrap` / `clientsOnly` / `serviceOwned`，且必须带非空 reason。
 
-opt-out 必须带非空 `endpoints.http.auth.reason`。ABAC mode 不带 reason；
-reason-without-opt-out 必须拒绝。permission 与 opt-out mode 互斥。
-HTTP `passwordResetExempt` 不是 AuthZ mode；单独声明仍是 modeless，必须拒绝。
+ABAC mode 不带 reason；reason-without-opt-out 必须拒绝；permission 与 opt-out mode 互斥。
+`passwordResetExempt` 不是 AuthZ mode，单独声明仍是 modeless 并必须拒绝，且只允许用于已声明 permission 的方法。
 
-契约 codegen 的 `build_http_spec` 是 codegen 完整性门：modeless route 不得被渲染上线。
-active HTTP contract permission 与 audit projection permission 还必须能解析为 `RoutePermissionId`；
-generated spec 与 route 装配不一致或出现未知 permission 时必须 fail-closed。
-`cargo xtask` / governance 规则只做纵深检查，不能替代 codegen 强制门。
+契约 codegen 是完整性门：modeless route 不得被渲染上线；active permission 必须能解析为 typed permission；
+generated spec 与 route 装配不一致或出现未知 permission 时 fail-closed。
+治理规则只做纵深检查，不能替代 codegen 强制门。
 
 ## Governance reverse self-check
 
-`cargo xtask tenancy-closeout` 是本规则的最终 no-compile 反向自检，并接入
-`cargo xtask verify` / `cargo xtask ci full`。它不重做业务测试，而是锁以下 governance 锚点：
+`cargo xtask tenancy-closeout` 是本规则的反向自检，接入 `cargo xtask verify` / `ci full`。
+它不重做业务测试，只锁 governance 锚点：verify/ci plan 的门成员、dylint 注册一致性、
+projection contract → generated spec → rendering 的完整链路，以及 ADR 中不得残留已完成项的 future-work 措辞。
 
-- verify/ci plan 必须包含 tenant/RLS/AuthZ 相关门：`contract-validate`、`codegen-check`、
-  `schema-rls`、`setlocal-funnel`、`pg-tenant-tx-guard`、`repo-scope-guard`、`pdp-allow-guard`、
-  `tenancy-closeout`，以及实际可用时的 `dylint`。
-- RLS 静态与运行期纵深必须同时可见：迁移 DDL 由 `schema-rls` 守，SET LOCAL 注入由
-  `setlocal-funnel` 守，tenant 表 raw-pool / `TxManager` bypass 由 `pg-tenant-tx-guard` 守，
-  repo port 签名由 `repo-scope-guard` 守，durable startup 由 writer/reader serving capability gates 守。
-- AuthZ 路由 gate 必须经 `RouteAuthorizer`，handler 只消费 `AuthorizedSubject`，不回退到
-  handler-local role/self 分支。
-- 字段级数据权限必须从 contract projection fields + `responsePath` 派生到 generated spec，经
-  `RouteAuthorizationDecision::AllowWithProjection` 传入 `ResourceProjection`，并由 enrolled read
-  response rendering 消费；缺 projection 时 protected 字段默认 mask。
-- open-source AuthZ parity boundary 必须在
-  `docs/architecture/202607021958-014-authz-open-source-parity-boundary.md` 记录，且本规则文件与
-  ADR-006 必须引用该 ADR。
-- tenant/AuthZ/projection dylint 注册清单必须在根 `Cargo.toml`、`lints/Cargo.toml`、
-  `docs/rules/architecture.md` 和 `lints/README.md` 中一致。
-- governed closeout docs 不得把 #1577-#1585 已完成的 tenant/RLS/AuthZ/projection 项继续描述成
-  future work。
+该命令不要求任何规则文档包含指定句子。本文件描述约束，不是它的 carrier。

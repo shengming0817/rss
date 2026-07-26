@@ -41,67 +41,22 @@ const TENANCY_DYLINTS: &[&str] = &[
     "rss_projection_append_only",
 ];
 
-const REGISTRY_FILES: &[&str] = &[
-    "Cargo.toml",
-    "lints/Cargo.toml",
-    "docs/rules/architecture.md",
-    "lints/README.md",
-];
+const REGISTRY_FILES: &[&str] = &["Cargo.toml", "lints/Cargo.toml", "lints/README.md"];
 
 const AUTHZ_PARITY_ADR_PATH: &str =
     "docs/architecture/202607021958-014-authz-open-source-parity-boundary.md";
 
+const PDP_BOUNDARY_ADR_PATH: &str =
+    "docs/architecture/202606232318-006-pdp-internal-authplan-vs-external-opa.md";
+
 const AUTHZ_PARITY_DOCS: &[&str] = &[
     AUTHZ_PARITY_ADR_PATH,
     "docs/rules/tenancy.md",
-    "docs/architecture/202606232318-006-pdp-internal-authplan-vs-external-opa.md",
+    PDP_BOUNDARY_ADR_PATH,
     TENANCY_CONSUMER_GUIDE_PATH,
     "docs/spec/005-tenancy-abac-dataperm-closeout/research.md",
     "docs/spec/005-tenancy-abac-dataperm-closeout/tasks.md",
     "docs/spec/005-tenancy-abac-dataperm-closeout/quickstart.md",
-];
-
-const AUTHZ_PARITY_FRAMEWORKS: &[&str] = &[
-    "OPA",
-    "Cedar",
-    "SpiceDB",
-    "OpenFGA",
-    "Casbin",
-    "PostgreSQL RLS",
-    "RSS",
-];
-
-const AUTHZ_PARITY_DIMENSIONS: &[&str] = &[
-    "policy model",
-    "decision evaluation",
-    "relationship/attribute source",
-    "tenant isolation",
-    "row/field obligation",
-    "auditability",
-    "governance gate",
-    "operational tradeoff",
-    "rss position",
-];
-
-const AUTHZ_PARITY_REQUIRED_CLAIMS: &[&str] = &[
-    "same security objective carried by RSS typed/in-process mechanisms",
-    "no external PDP process",
-    "no Rego runtime",
-    "no Cedar/Casbin DSL runtime",
-    "no SpiceDB/OpenFGA tuple graph service",
-    "RLS does not replace RouteAuthorizer",
-    "ABAC is not the tenant boundary",
-];
-
-const AUTHZ_PARITY_RSS_ROW_REQUIRED_ANCHORS: &[&str] = &[
-    "credential verification",
-    "RouteAuthorizer",
-    "service-token tenant binding",
-    "SET LOCAL rss.tenant_id",
-    "FORCE RLS",
-    "non-bypass serving role",
-    "RowVisibility",
-    "ResourceProjection",
 ];
 
 const AUTHZ_PARITY_FORBIDDEN_CLAIMS: &[&str] = &[
@@ -119,262 +74,63 @@ const TENANCY_CONSUMER_EXAMPLE_PATH: &str = "examples/tenancy-consumer/src/main.
 const TENANCY_CONSUMER_GENERATED_SPEC_TEST_PATH: &str =
     "xtask/tests/tenancy_closeout_generated_specs.rs";
 const AUTH_E2E_TEST_PATH: &str = "assemblies/runtime/tests/auth_e2e.rs";
-const SERVICE_IDENTITY_SCOPE_INVARIANT: &str = "TENANCY-SERVICE-IDENTITY-SCOPE-01";
-const MTLS_NOT_TENANT_SOURCE_ANCHOR: &str = "mTLS/SPIFFE service identity is not a tenant source";
-const SERVICE_TOKEN_MAC_SCOPE_ANCHOR: &str =
-    "service-token MAC-bound tenant scope is the only service identity tenant assertion";
 
-const REQUIRED_ANCHORS: &[RequiredAnchor] = &[
-    RequiredAnchor {
-        rule: Rule::DocAnchor,
-        path: "docs/rules/tenancy.md",
-        needle: "cargo xtask tenancy-closeout",
-        detail: "tenancy rule doc must name the closeout reverse self-check",
-    },
-    RequiredAnchor {
-        rule: Rule::DocAnchor,
-        path: "docs/rules/tenancy.md",
-        needle: "verify_rls_capability",
-        detail: "tenancy rule doc must keep the RLS capability anchor",
-    },
-    RequiredAnchor {
-        rule: Rule::DocAnchor,
-        path: "docs/rules/tenancy.md",
-        needle: "schema-rls",
-        detail: "tenancy rule doc must keep the RLS schema guard anchor",
-    },
-    RequiredAnchor {
-        rule: Rule::DocAnchor,
-        path: "docs/rules/tenancy.md",
-        needle: "setlocal-funnel",
-        detail: "tenancy rule doc must keep the SET LOCAL funnel guard anchor",
-    },
-    RequiredAnchor {
-        rule: Rule::DocAnchor,
-        path: "docs/rules/tenancy.md",
-        needle: "pg-tenant-tx-guard",
-        detail: "tenancy rule doc must keep the tenant Tx guard anchor",
-    },
-    RequiredAnchor {
-        rule: Rule::DocAnchor,
-        path: "docs/rules/tenancy.md",
-        needle: "RouteAuthorizer",
-        detail: "tenancy rule doc must keep the RouteAuthorizer anchor",
-    },
-    RequiredAnchor {
-        rule: Rule::DocAnchor,
-        path: "docs/rules/tenancy.md",
-        needle: "AuthorizedSubject",
-        detail: "tenancy rule doc must keep the AuthorizedSubject anchor",
-    },
-    RequiredAnchor {
-        rule: Rule::DocAnchor,
-        path: "docs/rules/tenancy.md",
-        needle: "ResourceProjection",
-        detail: "tenancy rule doc must keep the ResourceProjection anchor",
-    },
-    RequiredAnchor {
-        rule: Rule::DocAnchor,
-        path: "docs/rules/tenancy.md",
-        needle: SERVICE_IDENTITY_SCOPE_INVARIANT,
-        detail: "tenancy rule doc must lock the service identity tenant-scope invariant",
-    },
-    RequiredAnchor {
-        rule: Rule::DocAnchor,
-        path: "docs/rules/tenancy.md",
-        needle: SERVICE_TOKEN_MAC_SCOPE_ANCHOR,
-        detail: "tenancy rule doc must state the service-token MAC-bound tenant assertion",
-    },
-    RequiredAnchor {
-        rule: Rule::DocAnchor,
-        path: "docs/rules/tenancy.md",
-        needle: MTLS_NOT_TENANT_SOURCE_ANCHOR,
-        detail: "tenancy rule doc must state mTLS/SPIFFE does not mint tenant scope",
-    },
-    RequiredAnchor {
-        rule: Rule::DocAnchor,
+/// Code carriers bind governance facts to **code/config** only.
+///
+/// Positive Markdown must-contain checks are not enforcement: they duplicate a constraint that
+/// some real gate already owns, and they force rule/ADR prose to restate implementation detail.
+/// Negative scans (forbidden stale wording / misleading claims) on docs remain. Constraints that
+/// earlier positive doc anchors named are carried by their own gates (`schema-rls`,
+/// `setlocal-funnel`, `pg-tenant-tx-guard`, `PgStore::verify_rls_capability`, the tenancy dylints,
+/// and the projection chain checks below).
+const REQUIRED_CODE_CARRIERS: &[RequiredCodeCarrier] = &[
+    RequiredCodeCarrier {
+        rule: Rule::CodeCarrier,
         path: "Cargo.toml",
         needle: "\"examples/tenancy-consumer\"",
         detail: "tenancy consumer example must be a workspace member",
     },
-    RequiredAnchor {
-        rule: Rule::DocAnchor,
-        path: "docs/rules/tenancy.md",
-        needle: TENANCY_CONSUMER_GUIDE_PATH,
-        detail: "tenancy rule doc must link the consumer migration guide",
-    },
-    RequiredAnchor {
-        rule: Rule::DocAnchor,
-        path: AUTHZ_PARITY_ADR_PATH,
-        needle: TENANCY_CONSUMER_GUIDE_PATH,
-        detail: "authz parity ADR must link the consumer migration guide",
-    },
-    RequiredAnchor {
-        rule: Rule::DocAnchor,
-        path: "docs/spec/005-tenancy-abac-dataperm-closeout/tasks.md",
-        needle: "#1596",
-        detail: "tenancy closeout tasks must track the consumer migration guide",
-    },
-    RequiredAnchor {
-        rule: Rule::DocAnchor,
-        path: "docs/spec/005-tenancy-abac-dataperm-closeout/tasks.md",
-        needle: "#1597",
-        detail: "tenancy closeout tasks must track service identity integration closeout",
-    },
-    RequiredAnchor {
-        rule: Rule::DocAnchor,
-        path: "docs/spec/005-tenancy-abac-dataperm-closeout/quickstart.md",
-        needle: "cargo check -p tenancyconsumer",
-        detail: "tenancy closeout quickstart must include the compilable consumer example check",
-    },
-    RequiredAnchor {
-        rule: Rule::DocAnchor,
-        path: "docs/spec/005-tenancy-abac-dataperm-closeout/quickstart.md",
-        needle: "cargo test -p xtask tenancy_closeout",
-        detail: "tenancy closeout quickstart must include the generated-spec smoke test lane",
-    },
-    RequiredAnchor {
-        rule: Rule::DocAnchor,
-        path: TENANCY_CONSUMER_GUIDE_PATH,
-        needle: "service-token-tenant-bound",
-        detail: "consumer guide must document service-token tenant binding",
-    },
-    RequiredAnchor {
-        rule: Rule::DocAnchor,
-        path: TENANCY_CONSUMER_GUIDE_PATH,
-        needle: SERVICE_TOKEN_MAC_SCOPE_ANCHOR,
-        detail: "consumer guide must document service-token MAC-bound tenant scope",
-    },
-    RequiredAnchor {
-        rule: Rule::DocAnchor,
-        path: TENANCY_CONSUMER_GUIDE_PATH,
-        needle: MTLS_NOT_TENANT_SOURCE_ANCHOR,
-        detail: "consumer guide must document mTLS/SPIFFE as tenantless service identity",
-    },
-    RequiredAnchor {
-        rule: Rule::DocAnchor,
+    RequiredCodeCarrier {
+        rule: Rule::CodeCarrier,
         path: AUTH_E2E_TEST_PATH,
         needle: "internal_mtls_verified_peer_remains_tenantless_scope",
         detail: "runtime auth e2e must lock mTLS service principal as tenantless",
     },
-    RequiredAnchor {
-        rule: Rule::DocAnchor,
+    RequiredCodeCarrier {
+        rule: Rule::CodeCarrier,
         path: AUTH_E2E_TEST_PATH,
         needle: "VerifiedMtlsPeer",
         detail: "runtime auth e2e must inject verified mTLS evidence",
     },
-    RequiredAnchor {
-        rule: Rule::DocAnchor,
+    RequiredCodeCarrier {
+        rule: Rule::CodeCarrier,
         path: AUTH_E2E_TEST_PATH,
         needle: "body, SCOPE_MISSING",
         detail: "runtime auth e2e must assert mTLS does not establish ambient tenant scope",
     },
-    RequiredAnchor {
-        rule: Rule::DocAnchor,
-        path: TENANCY_CONSUMER_GUIDE_PATH,
-        needle: "populate-only",
-        detail: "consumer guide must document populate-only tenant header mode",
-    },
-    RequiredAnchor {
-        rule: Rule::DocAnchor,
-        path: TENANCY_CONSUMER_GUIDE_PATH,
-        needle: "RouteAuthorizer",
-        detail: "consumer guide must document route authorization entrypoint",
-    },
-    RequiredAnchor {
-        rule: Rule::DocAnchor,
-        path: TENANCY_CONSUMER_GUIDE_PATH,
-        needle: "AuthorizedSubject",
-        detail: "consumer guide must document handler authorization evidence",
-    },
-    RequiredAnchor {
-        rule: Rule::DocAnchor,
-        path: TENANCY_CONSUMER_GUIDE_PATH,
-        needle: "RowVisibility",
-        detail: "consumer guide must document row visibility consumption",
-    },
-    RequiredAnchor {
-        rule: Rule::DocAnchor,
-        path: TENANCY_CONSUMER_GUIDE_PATH,
-        needle: "ResourceProjection",
-        detail: "consumer guide must document field projection consumption",
-    },
-    RequiredAnchor {
-        rule: Rule::DocAnchor,
-        path: TENANCY_CONSUMER_GUIDE_PATH,
-        needle: "audit.list-entries",
-        detail: "consumer guide must document tenant-scoped audit read semantics",
-    },
-    RequiredAnchor {
-        rule: Rule::DocAnchor,
-        path: TENANCY_CONSUMER_GUIDE_PATH,
-        needle: "audit.list-tenant-entries",
-        detail: "consumer guide must document audited target-tenant read semantics",
-    },
-    RequiredAnchor {
-        rule: Rule::DocAnchor,
-        path: TENANCY_CONSUMER_GUIDE_PATH,
-        needle: "request body/query schema 中的 `tenantId`",
-        detail: "consumer guide must reject request-schema tenant sources",
-    },
-    RequiredAnchor {
-        rule: Rule::DocAnchor,
+    RequiredCodeCarrier {
+        rule: Rule::CodeCarrier,
         path: TENANCY_CONSUMER_GENERATED_SPEC_TEST_PATH,
         needle: "generated::http::identity_v1::login::SPEC",
         detail: "tenancy closeout generated-spec smoke test must compile against generated login spec",
     },
-    RequiredAnchor {
-        rule: Rule::DocAnchor,
+    RequiredCodeCarrier {
+        rule: Rule::CodeCarrier,
         path: TENANCY_CONSUMER_EXAMPLE_PATH,
         needle: "GeneratedPrimaryEndpoint::new",
         detail: "consumer example must compile against generated Primary endpoint wiring",
     },
-    RequiredAnchor {
-        rule: Rule::DocAnchor,
+    RequiredCodeCarrier {
+        rule: Rule::CodeCarrier,
         path: TENANCY_CONSUMER_EXAMPLE_PATH,
         needle: "evidence.self_scoped()",
         detail: "consumer example must read generated self-scoped route evidence",
     },
-    RequiredAnchor {
-        rule: Rule::DocAnchor,
+    RequiredCodeCarrier {
+        rule: Rule::CodeCarrier,
         path: TENANCY_CONSUMER_EXAMPLE_PATH,
         needle: "ProjectionField::AuditActor",
         detail: "consumer example must compile against projection field vocabulary",
-    },
-];
-
-const ADR_CLOSEOUT_COVERAGE: &[AdrCloseoutCoverage] = &[
-    AdrCloseoutCoverage {
-        path: "docs/architecture/202606232318-006-pdp-internal-authplan-vs-external-opa.md",
-        historical_needles: &["#1109 未落地", "验签空窗", "未来 `diport::Pdp`"],
-        closeout_needles: &[
-            "Closeout addendum（#1584 / #1586）",
-            "RawCredential",
-            "VerifiedClaims",
-            "VerifiedJwt",
-            "rss_pdp_impl_adapter_only",
-        ],
-        detail: "ADR 006 historical PDP/verifier future wording must be covered by final closeout addendum",
-    },
-    AdrCloseoutCoverage {
-        path: "docs/architecture/202606232319-007-service-identity-service-token-vs-spiffe-mtls.md",
-        historical_needles: &[
-            "MAC verifier 随 #1109",
-            "service-token 验签空窗",
-            "MAC binding 尚未实装",
-            "`AuthScheme::Mtls` 仅作类型层接缝预留",
-            "无 verifier 实现",
-        ],
-        closeout_needles: &[
-            "Closeout addendum（#1500 / #1577 / #1586 / #1597）",
-            "ServiceTokenTenantBinding",
-            "service_token_mac_input",
-            "service_token_tenant_binding",
-            "VerifiedMtlsPeer",
-            "MtlsRouteAuthorizer",
-            SERVICE_IDENTITY_SCOPE_INVARIANT,
-        ],
-        detail: "ADR 007 historical service-token/MAC future wording must be covered by final closeout addendum",
     },
 ];
 
@@ -464,6 +220,36 @@ const STALE_CLOSEOUT_PATTERNS: &[ForbiddenPattern] = &[
         needle: "无 verifier 实现",
         detail: "ADR 007 must not describe mTLS verifier implementation as absent after #1500/#1597",
     },
+    ForbiddenPattern {
+        path: "docs/architecture/202606232318-006-pdp-internal-authplan-vs-external-opa.md",
+        needle: "#1109 未落地",
+        detail: "ADR 006 must not keep historical #1109-unlanded future wording after closeout",
+    },
+    ForbiddenPattern {
+        path: "docs/architecture/202606232318-006-pdp-internal-authplan-vs-external-opa.md",
+        needle: "验签空窗",
+        detail: "ADR 006 must not keep historical verifier-gap wording after closeout",
+    },
+    ForbiddenPattern {
+        path: "docs/architecture/202606232318-006-pdp-internal-authplan-vs-external-opa.md",
+        needle: "未来 `diport::Pdp`",
+        detail: "ADR 006 must not keep historical future-Pdp wording after closeout",
+    },
+    ForbiddenPattern {
+        path: "docs/architecture/202606232319-007-service-identity-service-token-vs-spiffe-mtls.md",
+        needle: "MAC verifier 随 #1109",
+        detail: "ADR 007 must not keep historical MAC-verifier-future wording after closeout",
+    },
+    ForbiddenPattern {
+        path: "docs/architecture/202606232319-007-service-identity-service-token-vs-spiffe-mtls.md",
+        needle: "service-token 验签空窗",
+        detail: "ADR 007 must not keep historical service-token verifier-gap wording after closeout",
+    },
+    ForbiddenPattern {
+        path: "docs/architecture/202606232319-007-service-identity-service-token-vs-spiffe-mtls.md",
+        needle: "MAC binding 尚未实装",
+        detail: "ADR 007 must not keep historical MAC-binding-unimplemented wording after closeout",
+    },
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -471,13 +257,12 @@ pub(crate) enum Rule {
     VerifyGate,
     DylintRegistry,
     ProjectionAnchor,
-    DocAnchor,
-    AuthzParityBoundary,
+    CodeCarrier,
     StaleCloseoutWording,
 }
 
 #[derive(Debug, Clone, Copy)]
-struct RequiredAnchor {
+struct RequiredCodeCarrier {
     rule: Rule,
     path: &'static str,
     needle: &'static str,
@@ -488,14 +273,6 @@ struct RequiredAnchor {
 struct ForbiddenPattern {
     path: &'static str,
     needle: &'static str,
-    detail: &'static str,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct AdrCloseoutCoverage {
-    path: &'static str,
-    historical_needles: &'static [&'static str],
-    closeout_needles: &'static [&'static str],
     detail: &'static str,
 }
 
@@ -529,17 +306,17 @@ impl GovernanceCheck for TenancyCloseout {
         findings.extend(check_verify_ci_membership());
         findings.extend(check_required_lint_registry(&root)?);
         findings.extend(check_projection_wiring(&root)?);
-        findings.extend(check_required_anchors(&root)?);
+        findings.extend(check_required_code_carriers(&root)?);
         findings.extend(check_authz_parity_boundary(&root)?);
         findings.extend(check_stale_closeout_wording(&root)?);
 
         Ok((
             format!(
-                "{} verify/ci gates, {} dylints, {} doc anchors, {} authz parity frameworks, {} projection fields checked",
+                "{} verify/ci gates, {} dylints, {} code carriers, {} forbidden-claim docs, {} projection fields checked",
                 VERIFY_CI_REQUIRED_GATES.len(),
                 TENANCY_DYLINTS.len(),
-                REQUIRED_ANCHORS.len(),
-                AUTHZ_PARITY_FRAMEWORKS.len(),
+                REQUIRED_CODE_CARRIERS.len(),
+                AUTHZ_PARITY_DOCS.len(),
                 projection_field_count()
             ),
             findings,
@@ -990,217 +767,41 @@ fn missing_projection(
     )
 }
 
-fn check_required_anchors(root: &Path) -> Result<Vec<Finding>> {
+fn check_required_code_carriers(root: &Path) -> Result<Vec<Finding>> {
     let mut findings = Vec::new();
-    for anchor in REQUIRED_ANCHORS {
-        let content = read_required(root, anchor.path)?;
-        findings.extend(scan_required_anchor(anchor, &content));
+    for carrier in REQUIRED_CODE_CARRIERS {
+        let content = read_required(root, carrier.path)?;
+        findings.extend(scan_required_code_carrier(carrier, &content));
     }
     Ok(findings)
 }
 
-fn scan_required_anchor(anchor: &RequiredAnchor, content: &str) -> Vec<Finding> {
+fn scan_required_code_carrier(carrier: &RequiredCodeCarrier, content: &str) -> Vec<Finding> {
     let stripped;
-    let searchable = if anchor.path.ends_with(".rs") {
+    let searchable = if carrier.path.ends_with(".rs") {
         stripped = strip_rust_line_comments(content);
         stripped.as_str()
     } else {
         content
     };
-    if searchable.contains(anchor.needle) {
+    if searchable.contains(carrier.needle) {
         Vec::new()
     } else {
         vec![finding(
-            anchor.rule,
-            format!("{}:{}", anchor.path, anchor.needle),
-            anchor.detail,
+            carrier.rule,
+            format!("{}:{}", carrier.path, carrier.needle),
+            carrier.detail,
         )]
     }
 }
 
 fn check_authz_parity_boundary(root: &Path) -> Result<Vec<Finding>> {
     let mut findings = Vec::new();
-    let adr = read_required(root, AUTHZ_PARITY_ADR_PATH)?;
-    findings.extend(scan_authz_parity_adr(&adr));
-
     for path in AUTHZ_PARITY_DOCS {
         let content = read_required(root, path)?;
         findings.extend(scan_authz_forbidden_claims(path, &content));
     }
-
-    findings.extend(scan_authz_required_reference(
-        "docs/rules/tenancy.md",
-        &read_required(root, "docs/rules/tenancy.md")?,
-    ));
-    findings.extend(scan_authz_required_reference(
-        "docs/architecture/202606232318-006-pdp-internal-authplan-vs-external-opa.md",
-        &read_required(
-            root,
-            "docs/architecture/202606232318-006-pdp-internal-authplan-vs-external-opa.md",
-        )?,
-    ));
-
     Ok(findings)
-}
-
-fn scan_authz_parity_adr(content: &str) -> Vec<Finding> {
-    let mut findings = Vec::new();
-    let matrix = find_authz_parity_matrix(content);
-
-    findings.extend(scan_authz_parity_matrix_rows(matrix.as_ref()));
-    findings.extend(scan_authz_parity_matrix_headers(matrix.as_ref()));
-    findings.extend(scan_authz_parity_rss_row(matrix.as_ref()));
-
-    for claim in AUTHZ_PARITY_REQUIRED_CLAIMS {
-        if !content.contains(claim) {
-            findings.push(finding(
-                Rule::AuthzParityBoundary,
-                format!("{AUTHZ_PARITY_ADR_PATH}:claim:{claim}"),
-                "authz parity ADR must state the in-scope boundary and explicit deviations",
-            ));
-        }
-    }
-
-    findings
-}
-
-#[derive(Debug, Clone)]
-struct MarkdownTable {
-    headers: Vec<String>,
-    rows: Vec<Vec<String>>,
-}
-
-fn find_authz_parity_matrix(content: &str) -> Option<MarkdownTable> {
-    parse_markdown_tables(content).into_iter().find(|table| {
-        table
-            .headers
-            .first()
-            .is_some_and(|header| same_cell(header, "framework"))
-    })
-}
-
-fn scan_authz_parity_matrix_rows(matrix: Option<&MarkdownTable>) -> Vec<Finding> {
-    AUTHZ_PARITY_FRAMEWORKS
-        .iter()
-        .filter(|framework| {
-            !matrix.is_some_and(|table| {
-                table
-                    .rows
-                    .iter()
-                    .any(|row| row.first().is_some_and(|cell| same_cell(cell, framework)))
-            })
-        })
-        .map(|framework| {
-            finding(
-                Rule::AuthzParityBoundary,
-                format!("{AUTHZ_PARITY_ADR_PATH}:matrix-row:{framework}"),
-                "authz parity matrix must keep a structured row for each comparison target",
-            )
-        })
-        .collect()
-}
-
-fn scan_authz_parity_matrix_headers(matrix: Option<&MarkdownTable>) -> Vec<Finding> {
-    AUTHZ_PARITY_DIMENSIONS
-        .iter()
-        .filter(|dimension| {
-            !matrix.is_some_and(|table| {
-                table
-                    .headers
-                    .iter()
-                    .any(|header| same_cell(header, dimension))
-            })
-        })
-        .map(|dimension| {
-            finding(
-                Rule::AuthzParityBoundary,
-                format!("{AUTHZ_PARITY_ADR_PATH}:matrix-header:{dimension}"),
-                "authz parity matrix header must keep every required comparison dimension",
-            )
-        })
-        .collect()
-}
-
-fn scan_authz_parity_rss_row(matrix: Option<&MarkdownTable>) -> Vec<Finding> {
-    let Some(rss_row) = matrix.and_then(|table| {
-        table
-            .rows
-            .iter()
-            .find(|row| row.first().is_some_and(|cell| same_cell(cell, "RSS")))
-    }) else {
-        return Vec::new();
-    };
-    let row_text = rss_row.join(" ");
-    AUTHZ_PARITY_RSS_ROW_REQUIRED_ANCHORS
-        .iter()
-        .filter(|anchor| !row_text.contains(**anchor))
-        .map(|anchor| {
-            finding(
-                Rule::AuthzParityBoundary,
-                format!("{AUTHZ_PARITY_ADR_PATH}:rss-boundary:{anchor}"),
-                "authz parity RSS matrix row must keep the concrete RSS tenant/AuthZ safety boundary",
-            )
-        })
-        .collect()
-}
-
-fn parse_markdown_tables(content: &str) -> Vec<MarkdownTable> {
-    let lines = content.lines().collect::<Vec<_>>();
-    let mut tables = Vec::new();
-    let mut idx = 0;
-    while idx + 1 < lines.len() {
-        if !is_markdown_table_row(lines[idx]) || !is_markdown_separator_row(lines[idx + 1]) {
-            idx += 1;
-            continue;
-        }
-
-        let headers = split_markdown_table_row(lines[idx]);
-        let mut rows = Vec::new();
-        idx += 2;
-        while idx < lines.len() && is_markdown_table_row(lines[idx]) {
-            rows.push(split_markdown_table_row(lines[idx]));
-            idx += 1;
-        }
-        tables.push(MarkdownTable { headers, rows });
-    }
-    tables
-}
-
-fn is_markdown_table_row(line: &str) -> bool {
-    let trimmed = line.trim();
-    trimmed.starts_with('|') && trimmed.ends_with('|')
-}
-
-fn is_markdown_separator_row(line: &str) -> bool {
-    is_markdown_table_row(line)
-        && split_markdown_table_row(line).iter().all(|cell| {
-            let trimmed = cell.trim();
-            trimmed.contains('-') && trimmed.chars().all(|ch| matches!(ch, '-' | ':' | ' '))
-        })
-}
-
-fn split_markdown_table_row(line: &str) -> Vec<String> {
-    line.trim()
-        .trim_matches('|')
-        .split('|')
-        .map(|cell| compact_ws(cell.trim()))
-        .collect()
-}
-
-fn same_cell(actual: &str, expected: &str) -> bool {
-    compact_ws(&actual.to_ascii_lowercase()) == compact_ws(&expected.to_ascii_lowercase())
-}
-
-fn scan_authz_required_reference(path: &str, content: &str) -> Vec<Finding> {
-    if content.contains(AUTHZ_PARITY_ADR_PATH) {
-        Vec::new()
-    } else {
-        vec![finding(
-            Rule::AuthzParityBoundary,
-            format!("{path}:{AUTHZ_PARITY_ADR_PATH}"),
-            "tenancy and PDP ADR docs must link to the authz parity boundary ADR",
-        )]
-    }
 }
 
 fn scan_authz_forbidden_claims(path: &str, content: &str) -> Vec<Finding> {
@@ -1249,10 +850,6 @@ fn check_stale_closeout_wording(root: &Path) -> Result<Vec<Finding>> {
         let content = read_required(root, pattern.path)?;
         findings.extend(scan_forbidden_pattern(pattern, &content));
     }
-    for coverage in ADR_CLOSEOUT_COVERAGE {
-        let content = read_required(root, coverage.path)?;
-        findings.extend(scan_adr_closeout_coverage(coverage, &content));
-    }
     Ok(findings)
 }
 
@@ -1269,32 +866,6 @@ fn scan_forbidden_pattern(pattern: &ForbiddenPattern, content: &str) -> Vec<Find
             )
         })
         .collect()
-}
-
-fn scan_adr_closeout_coverage(coverage: &AdrCloseoutCoverage, content: &str) -> Vec<Finding> {
-    let has_historical_future = coverage
-        .historical_needles
-        .iter()
-        .any(|needle| content.contains(needle));
-    if !has_historical_future {
-        return Vec::new();
-    }
-
-    let missing = coverage
-        .closeout_needles
-        .iter()
-        .filter(|needle| !content.contains(**needle))
-        .copied()
-        .collect::<Vec<_>>();
-    if missing.is_empty() {
-        Vec::new()
-    } else {
-        vec![finding(
-            Rule::StaleCloseoutWording,
-            format!("{}:closeout-addendum", coverage.path),
-            format!("{}; missing {}", coverage.detail, missing.join(", ")),
-        )]
-    }
 }
 
 fn strip_rust_line_comments(content: &str) -> String {
@@ -1369,39 +940,39 @@ mod tests {
     }
 
     #[test]
-    fn missing_service_identity_scope_anchor_is_reported() {
-        let anchor = RequiredAnchor {
-            rule: Rule::DocAnchor,
-            path: "docs/rules/tenancy.md",
-            needle: SERVICE_IDENTITY_SCOPE_INVARIANT,
+    fn missing_service_identity_scope_carrier_is_reported() {
+        let carrier = RequiredCodeCarrier {
+            rule: Rule::CodeCarrier,
+            path: AUTH_E2E_TEST_PATH,
+            needle: "internal_mtls_verified_peer_remains_tenantless_scope",
             detail: "must exist",
         };
-        let findings = scan_required_anchor(&anchor, "service-token tenant binding");
+        let findings = scan_required_code_carrier(&carrier, "async fn unrelated_case() {}");
         assert_eq!(findings.len(), 1, "{findings:?}");
-        assert_eq!(findings[0].rule, Rule::DocAnchor);
+        assert_eq!(findings[0].rule, Rule::CodeCarrier);
         assert!(
             findings[0]
                 .subject
-                .contains(SERVICE_IDENTITY_SCOPE_INVARIANT),
+                .contains("internal_mtls_verified_peer_remains_tenantless_scope"),
             "{findings:?}"
         );
     }
 
     #[test]
-    fn missing_mtls_tenantless_e2e_anchor_is_reported() {
-        let anchor = RequiredAnchor {
-            rule: Rule::DocAnchor,
+    fn missing_mtls_tenantless_e2e_carrier_is_reported() {
+        let carrier = RequiredCodeCarrier {
+            rule: Rule::CodeCarrier,
             path: AUTH_E2E_TEST_PATH,
             needle: "internal_mtls_verified_peer_remains_tenantless_scope",
             detail: "must exist",
         };
-        let findings = scan_required_anchor(
-            &anchor,
+        let findings = scan_required_code_carrier(
+            &carrier,
             "// internal_mtls_verified_peer_remains_tenantless_scope documented only\n\
              async fn service_token_establishes_scope_from_mac_bound_tenant() {}",
         );
         assert_eq!(findings.len(), 1, "{findings:?}");
-        assert_eq!(findings[0].rule, Rule::DocAnchor);
+        assert_eq!(findings[0].rule, Rule::CodeCarrier);
         assert!(
             findings[0]
                 .subject
@@ -1457,28 +1028,28 @@ members = [
     }
 
     #[test]
-    fn missing_projection_anchor_is_reported() {
-        let anchor = RequiredAnchor {
+    fn missing_projection_carrier_is_reported() {
+        let carrier = RequiredCodeCarrier {
             rule: Rule::ProjectionAnchor,
             path: "generated/src/http/audit_v1.rs",
             needle: "ProjectionField::AuditActor",
             detail: "must exist",
         };
-        let findings = scan_required_anchor(&anchor, "ProjectionField::Other");
+        let findings = scan_required_code_carrier(&carrier, "ProjectionField::Other");
         assert_eq!(findings.len(), 1, "{findings:?}");
         assert_eq!(findings[0].rule, Rule::ProjectionAnchor);
     }
 
     #[test]
-    fn rust_source_required_anchor_ignores_line_comment_only() {
-        let anchor = RequiredAnchor {
-            rule: Rule::DocAnchor,
+    fn rust_source_required_code_carrier_ignores_line_comment_only() {
+        let carrier = RequiredCodeCarrier {
+            rule: Rule::CodeCarrier,
             path: TENANCY_CONSUMER_EXAMPLE_PATH,
             needle: "GeneratedPrimaryEndpoint::new",
             detail: "must exist",
         };
-        let findings = scan_required_anchor(
-            &anchor,
+        let findings = scan_required_code_carrier(
+            &carrier,
             r#"
 fn main() {
     // GeneratedPrimaryEndpoint::new
@@ -1687,106 +1258,15 @@ pub mod unrelated {
     }
 
     #[test]
-    fn adr_historical_future_wording_requires_closeout_addendum() {
-        let coverage = AdrCloseoutCoverage {
-            path: "docs/architecture/adr-006.md",
-            historical_needles: &["#1109 未落地", "验签空窗"],
-            closeout_needles: &["Closeout addendum", "VerifiedClaims"],
-            detail: "ADR historical future wording must be covered by closeout addendum",
+    fn adr_historical_future_wording_is_forbidden() {
+        let pattern = ForbiddenPattern {
+            path: "docs/architecture/202606232318-006-pdp-internal-authplan-vs-external-opa.md",
+            needle: "#1109 未落地",
+            detail: "ADR historical future wording must not remain",
         };
-        let findings = scan_adr_closeout_coverage(&coverage, "#1109 未落地期间存在验签空窗。");
+        let findings = scan_forbidden_pattern(&pattern, "#1109 未落地期间存在验签空窗。");
         assert_eq!(findings.len(), 1, "{findings:?}");
         assert_eq!(findings[0].rule, Rule::StaleCloseoutWording);
-    }
-
-    #[test]
-    fn authz_parity_adr_requires_matrix_dimensions_and_claims() {
-        let findings = scan_authz_parity_adr("OPA\nCedar\nSpiceDB\nOpenFGA\nCasbin\nRSS\n");
-        assert!(
-            findings.iter().any(|finding| {
-                finding.rule == Rule::AuthzParityBoundary
-                    && finding.subject.contains("PostgreSQL RLS")
-            }),
-            "{findings:?}"
-        );
-        assert!(
-            findings.iter().any(|finding| {
-                finding.rule == Rule::AuthzParityBoundary
-                    && finding.subject.contains("policy model")
-            }),
-            "{findings:?}"
-        );
-        assert!(
-            findings.iter().any(|finding| {
-                finding.rule == Rule::AuthzParityBoundary
-                    && finding.subject.contains(
-                        "same security objective carried by RSS typed/in-process mechanisms",
-                    )
-            }),
-            "{findings:?}"
-        );
-    }
-
-    #[test]
-    fn authz_parity_adr_requires_structured_matrix_rows() {
-        let content = format!(
-            "{}\n{}\n{}\n",
-            AUTHZ_PARITY_FRAMEWORKS.join("\n"),
-            AUTHZ_PARITY_DIMENSIONS.join("\n"),
-            AUTHZ_PARITY_REQUIRED_CLAIMS.join("\n"),
-        );
-        let findings = scan_authz_parity_adr(&content);
-        assert!(
-            findings
-                .iter()
-                .any(|finding| finding.subject.contains("matrix-row:OPA")),
-            "{findings:?}"
-        );
-        assert!(
-            findings
-                .iter()
-                .any(|finding| finding.subject.contains("matrix-header:policy model")),
-            "{findings:?}"
-        );
-    }
-
-    #[test]
-    fn authz_parity_adr_requires_rss_row_security_boundaries() {
-        let matrix_without_service_token_binding = r#"
-same security objective carried by RSS typed/in-process mechanisms
-no external PDP process
-no Rego runtime
-no Cedar/Casbin DSL runtime
-no SpiceDB/OpenFGA tuple graph service
-RLS does not replace RouteAuthorizer
-ABAC is not the tenant boundary
-
-| framework | policy model | decision evaluation | relationship/attribute source | tenant isolation | row/field obligation | auditability | governance gate | operational tradeoff | rss position |
-|-----------|--------------|---------------------|-------------------------------|------------------|----------------------|--------------|-----------------|----------------------|--------------|
-| OPA | Rego | sidecar | data | context | structured data | decision log | tests | infra | ref |
-| Cedar | PARC | embedded | entities | context | diagnostics | response | schema | DSL | ref |
-| SpiceDB | graph | check | tuples | namespace | caveats | tokens | schema | service | ref |
-| OpenFGA | model | check | tuples | store | conditions | history | validation | service | ref |
-| Casbin | PERM | enforcer | adapter | domain | boolean | logs | syntax | matcher | ref |
-| PostgreSQL RLS | SQL policy | database | rows | FORCE RLS | rows only | database audit | schema-rls | data only | ref |
-| RSS | typed permission | RouteAuthorizer and diport::Pdp | verified principal | typed TenantId, SET LOCAL rss.tenant_id, FORCE RLS, non-bypass serving role | RowVisibility and ResourceProjection | durable audit | codegen and xtask | typed local boundary | reference implementation |
-"#;
-        let findings = scan_authz_parity_adr(matrix_without_service_token_binding);
-        assert!(
-            findings.iter().any(|finding| {
-                finding
-                    .subject
-                    .contains("rss-boundary:service-token tenant binding")
-            }),
-            "{findings:?}"
-        );
-    }
-
-    #[test]
-    fn authz_parity_docs_must_link_boundary_adr() {
-        let findings = scan_authz_required_reference("docs/rules/tenancy.md", "RouteAuthorizer");
-        assert_eq!(findings.len(), 1, "{findings:?}");
-        assert_eq!(findings[0].rule, Rule::AuthzParityBoundary);
     }
 
     #[test]
@@ -1850,13 +1330,13 @@ ABAC is not the tenant boundary
         let lint_doc_fixture = TENANCY_DYLINTS.join("\n");
         assert!(scan_lint_registry("lints/README.md", &lint_doc_fixture).is_empty());
 
-        let anchor = RequiredAnchor {
-            rule: Rule::DocAnchor,
-            path: "docs/rules/tenancy.md",
-            needle: "ResourceProjection",
+        let carrier = RequiredCodeCarrier {
+            rule: Rule::CodeCarrier,
+            path: AUTH_E2E_TEST_PATH,
+            needle: "VerifiedMtlsPeer",
             detail: "must exist",
         };
-        assert!(scan_required_anchor(&anchor, "ResourceProjection").is_empty());
+        assert!(scan_required_code_carrier(&carrier, "VerifiedMtlsPeer").is_empty());
 
         let pattern = ForbiddenPattern {
             path: "docs/architecture/adr.md",
@@ -1865,26 +1345,6 @@ ABAC is not the tenant boundary
         };
         assert!(scan_forbidden_pattern(&pattern, "final status").is_empty());
 
-        let authz_adr_fixture = format!(
-            r#"{}
-
-| framework | policy model | decision evaluation | relationship/attribute source | tenant isolation | row/field obligation | auditability | governance gate | operational tradeoff | rss position |
-|-----------|--------------|---------------------|-------------------------------|------------------|----------------------|--------------|-----------------|----------------------|--------------|
-| OPA | Rego | sidecar/server | input/data | context convention | structured result | decision log | policy tests | extra infra | reference |
-| Cedar | PARC | embedded authorizer | entities | context convention | diagnostics | response | schema | policy runtime | reference |
-| SpiceDB | relationship graph | graph check | tuples | namespace convention | caveats | tracing | schema | graph service | reference |
-| OpenFGA | authorization model | API check | tuples | store convention | conditions | history | model validation | service dependency | reference |
-| Casbin | PERM | enforcer | adapter | domain convention | boolean | logs | model syntax | matcher DSL | reference |
-| PostgreSQL RLS | SQL policy | database | rows | FORCE RLS and SET LOCAL rss.tenant_id | row filtering | database audit | schema-rls | data boundary only | reference |
-| RSS | typed permission | RouteAuthorizer and credential verification via diport::Pdp | verified principal and route metadata | typed TenantId, service-token tenant binding, SET LOCAL rss.tenant_id, FORCE RLS, non-bypass serving role | RowVisibility and ResourceProjection | durable audit | codegen and xtask | typed local boundary | reference implementation |
-"#,
-            AUTHZ_PARITY_REQUIRED_CLAIMS.join("\n"),
-        );
-        assert!(scan_authz_parity_adr(&authz_adr_fixture).is_empty());
-        assert!(
-            scan_authz_required_reference("docs/rules/tenancy.md", AUTHZ_PARITY_ADR_PATH)
-                .is_empty()
-        );
         assert!(
             scan_authz_forbidden_claims("docs/architecture/adr.md", "explicit deviation")
                 .is_empty()

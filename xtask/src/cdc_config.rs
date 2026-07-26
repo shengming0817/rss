@@ -2,6 +2,15 @@
 //!
 //! This is a read-only helper: it prints a Kafka Connect JSON skeleton with RSS placeholders,
 //! and does not participate in committed `generated/` drift gates.
+//!
+//! # Ops vs enforcement
+//!
+//! Executable gates lock the SQL shape of CDC header projection columns (stored generated
+//! columns on `outbox_log`), the Debezium EventRouter additional-header placement in this
+//! skeleton, and `publication.autocreate.mode=disabled`. The DBA publication option
+//! `publish_generated_columns=stored` is an **ops/runbook** requirement for PostgreSQL logical
+//! replication to emit those generated columns; it is **not** an enforcement carrier and must
+//! not be reintroduced as a Markdown `contains` gate.
 
 use anyhow::Result;
 use serde::Serialize;
@@ -317,22 +326,5 @@ mod tests {
             );
         }
         Ok(())
-    }
-
-    #[test]
-    fn cdc_runbook_publishes_generated_header_columns() {
-        let runbook = include_str!("../../docs/runbooks/202607081921-1633-cdc-outbox.md");
-        for needle in [
-            "PostgreSQL 18+",
-            "SHOW server_version_num; -- must be >= 180000",
-            "WITH (publish_generated_columns = stored)",
-            "trace/correlation generated columns stay out of Debezium additional headers",
-            "Debezium 的 additional placement 缺字段行为固定为 `error`",
-        ] {
-            assert!(
-                runbook.contains(needle),
-                "CDC runbook must document generated-column publication guard `{needle}`"
-            );
-        }
     }
 }

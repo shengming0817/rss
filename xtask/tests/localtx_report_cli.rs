@@ -1,8 +1,5 @@
 use std::process::{Command, Output};
 
-const ADOPTION_TEMPLATE: &str =
-    include_str!("../../.specify/templates/overrides/localtx-tasks-template.md");
-
 fn run(args: &[&str]) -> anyhow::Result<Output> {
     Command::new(env!("CARGO_BIN_EXE_xtask"))
         .args(args)
@@ -24,34 +21,6 @@ fn assert_deterministic_success(first: &Output, second: &Output) {
     assert_eq!(first.stdout, second.stdout);
     assert!(first.stderr.is_empty());
     assert!(second.stderr.is_empty());
-}
-
-fn report_argv_from_template(template: &str) -> anyhow::Result<Vec<Vec<&str>>> {
-    let mut commands = Vec::new();
-    for inline_code in template
-        .lines()
-        .flat_map(|line| line.split('`').skip(1).step_by(2))
-        .filter(|code| code.starts_with("cargo xtask localtx report "))
-    {
-        anyhow::ensure!(
-            !inline_code
-                .chars()
-                .any(|character| matches!(character, '|' | '&' | ';' | '<' | '>')),
-            "canonical command contains a pipeline or redirection metacharacter: {inline_code}"
-        );
-        let argv = inline_code.split_ascii_whitespace().collect::<Vec<_>>();
-        anyhow::ensure!(
-            argv.starts_with(&["cargo", "xtask"]),
-            "canonical command must start with `cargo xtask`"
-        );
-        commands.push(argv[2..].to_vec());
-    }
-    anyhow::ensure!(
-        commands.len() == 2,
-        "expected two independent LocalTx report commands, found {}",
-        commands.len()
-    );
-    Ok(commands)
 }
 
 #[test]
@@ -97,37 +66,6 @@ fn localtx_report_cli_emits_complete_deterministic_artifacts() -> anyhow::Result
         expected_ids.len()
     )));
     assert!(markdown.ends_with('\n'));
-    Ok(())
-}
-
-#[test]
-fn adoption_template_report_commands_are_independent_executable_argv() -> anyhow::Result<()> {
-    let commands = report_argv_from_template(ADOPTION_TEMPLATE)?;
-    assert_eq!(
-        commands,
-        [
-            vec!["localtx", "report", "--format", "json"],
-            vec!["localtx", "report", "--format", "markdown"],
-        ]
-    );
-    for argv in commands {
-        let output = run(&argv)?;
-        assert!(
-            output.status.success(),
-            "template command {argv:?} failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert!(!output.stdout.is_empty(), "template command {argv:?}");
-    }
-
-    let pipeline = ADOPTION_TEMPLATE.replace(
-        "cargo xtask localtx report --format json",
-        "cargo xtask localtx report --format json | tee proof.json",
-    );
-    assert!(
-        report_argv_from_template(&pipeline).is_err(),
-        "pipeline metacharacters must be rejected"
-    );
     Ok(())
 }
 

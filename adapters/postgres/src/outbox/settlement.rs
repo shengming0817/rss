@@ -1213,28 +1213,6 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::expect_used)]
-    fn migration_0066_recovery_is_forward_only() {
-        let readme = include_str!("../../migrations/README.md");
-        let section = readme
-            .split("### 0066 sealed settlement outcome cutover")
-            .nth(1)
-            .and_then(|tail| tail.split("\n### ").next())
-            .expect("0066 runbook section");
-
-        assert!(
-            !section.contains("回滚应用版本"),
-            "0066 schema cannot be served by a rolled-back binary"
-        );
-        for required in ["数据库保持 0066", "0066-compatible", "forward migration"] {
-            assert!(
-                section.contains(required),
-                "0066 recovery must state forward-only action `{required}`"
-            );
-        }
-    }
-
-    #[test]
     fn metric_labels_are_closed_and_low_cardinality() {
         assert_eq!(SettlementOperation::Published.as_label(), "published");
         assert_eq!(SettlementOperation::Retry.as_label(), "retry");

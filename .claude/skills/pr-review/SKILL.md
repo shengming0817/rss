@@ -70,7 +70,7 @@ ACTUAL_SHA=$(git -C "$WORKTREE" rev-parse HEAD)
 以下读取全部以 `$WORKTREE` 为根；改动文件清单只提供 repo-relative path
 输入，不作为文件内容来源。
 
-必读：CLAUDE.md + `.claude/rules/rss/*.md`（repo 级规则，develop/PR 合入后可用；若任一文件缺失则 fail-fast，不执行后续审查流程）+
+必读：CLAUDE.md + `docs/rules/*.md`（repo 级规则，develop/PR 合入后可用；若任一文件缺失则 fail-fast，不执行后续审查流程）+
 `.github/project-template/PROJECT.md` §3（P/Cx 评级单源）。
 rules 已瘦身，pr-review 阶段全量读取，避免本审查流程因条件过滤漏加载规则。
 
@@ -96,7 +96,7 @@ pr-review 的 `diff < 200` 约定：不派发 sub-agent，主 agent 在阶段 3 
 - 工作目录 `$WORKTREE` 绝对路径，所有 Read/Grep 路径前缀 `$WORKTREE/`
 - Finding 输出的 `文件:行号` 必须是 **repo-relative**（去掉 `$WORKTREE/` 与 `worktrees/<name>/` 前缀），便于主 agent 汇总后排版
 - 分配的维度子集（见 reviewer.md §派发分档）
-- 必读：阶段 3 的共享上下文和全部 `.claude/rules/rss/*.md`。
+- 必读：阶段 3 的共享上下文和全部 `docs/rules/*.md`。
 - Finding 格式、Cx 分级、输出契约 → 沿用 `.claude/agents/reviewer.md`
 
 ---

@@ -980,19 +980,6 @@ fn auth_grant_and_refresh_ttl_are_paired_in_deploy_and_ops_contracts() {
         auth_grant_ttl >= refresh_ttl,
         "deploy example must satisfy AuthGrant TTL >= refresh TTL"
     );
-
-    let ops = include_str!("../../../docs/ops/202606271438-003-container-image.md");
-    for required in [
-        "RSS_IDENTITY_AUTH_GRANT_TTL_SECS",
-        "默认 30 天",
-        "最大 365 天",
-        "必须大于等于 `RSS_REFRESH_TTL_SECS`",
-    ] {
-        assert!(
-            ops.contains(required),
-            "container-image operations contract omits AuthGrant TTL rule: {required}"
-        );
-    }
 }
 
 static CONFIG_TEMP_COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);

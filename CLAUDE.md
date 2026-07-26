@@ -3,8 +3,7 @@
 > 架构：domain-native 治理（bounded context 只经 contract 通信 + L0–L4 一致性 + journeys 验收），惯用扁平 Rust
 > workspace。
 > 本文件是项目最高协作规范（无独立宪法文件）；完整 workspace 结构树 / 分层 / 架构单源见
-> `docs/rules/architecture.md`，规则分布于 `docs/rules/`（architecture·eventbus·tenancy·observability·reconcile·saga·runtime-assembly-plan·runtime-wiring）
-> 与 `.claude/rules/rss/`（ai-robust·rust-standards·error-handling·contract-fanout·domain-patterns·api-versioning·runtime-api·runtime-assembly-plan·runtime-wiring）。
+> `docs/rules/architecture.md`；其余规则单源见 `docs/rules/`（入口 [`docs/rules/README.md`](docs/rules/README.md)）。
 
 domain-native 治理 + 惯用 Rust workspace 工程底座。只保留稳定的开发规则和架构约束。
 
@@ -72,7 +71,7 @@ feature 模块是域 crate 内的子单元；`adapters/`、`contracts/`、`bins/
 
 ## Rust 编码规范
 
-- 错误用 `vocab`(error) + `thiserror`（库错误枚举），应用边界可 `anyhow`；新错误码命名空间须注册所有权并更新 golden，见 `.claude/rules/rss/error-handling.md`
+- 错误用 `vocab`(error) + `thiserror`（库错误枚举），应用边界可 `anyhow`；新错误码命名空间须注册所有权并更新 golden，见 `docs/rules/error-handling.md`
 - 日志 / 追踪用 `tracing`（结构化字段 + span）
 - DB 字段 `snake_case`，JSON/Query/Path `camelCase`（serde rename）
 - clippy 认知复杂度 ≤ 15（`clippy::cognitive_complexity`）
@@ -89,7 +88,7 @@ feature 模块是域 crate 内的子单元；`adapters/`、`contracts/`、`bins/
 
 主要实施者是 AI。新增/修改约束 enforcement 机制按 AI-robust 三档（Hard / Medium / Soft）评级；Soft 严禁立项。
 Rust 重写优先级：**能用类型系统 / crate 依赖图 / clippy lint 静态强制的约束，不要退化成运行期治理测试**。
-载体决策原则、review checklist 详见 `.claude/rules/rss/ai-robust.md`，静态强制清单见 `docs/rules/architecture.md` §Rust 原生强制（三档载体）。
+载体决策原则、review checklist 详见 `docs/rules/ai-robust.md`，静态强制清单见 `docs/rules/architecture.md` §Rust 原生强制（三档载体）。
 
 ## 参考框架
 

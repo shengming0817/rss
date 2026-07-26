@@ -26,8 +26,8 @@
 ## 1. 背景
 
 2026-06-23 的原始问题是：RSS 内部 service-to-service 认证要先采用 service-token+MAC，还是立即引入
-SPIFFE/SPIRE + mTLS。原文中的 `MAC verifier 随 #1109`、`MAC binding 尚未实装`、`service-token 验签空窗`
-均是当时的历史状态描述；#1577 / #1586 已把 service-token tenant header MAC binding 收口，#1500 已把
+SPIFFE/SPIRE + mTLS。当时尚未收口的 MAC verifier / tenant-header binding / service-token 验签路径
+均为历史状态；#1577 / #1586 已把 service-token tenant header MAC binding 收口，#1500 已把
 mTLS/SPIFFE 生产接线落地，#1597 只关闭 service identity 到 tenancy 的最终边界。
 
 迁移溯源（gocell）多处提及 SPIFFE + 跨 Cell mTLS（`spiffeid` sealed 身份）。RSS 当前执行模型采用

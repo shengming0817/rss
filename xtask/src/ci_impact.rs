@@ -25,8 +25,7 @@ const PLAN_SCHEMA_VERSION: u8 = 1;
 const POLICY_SCHEMA_VERSION: u8 = 1;
 const UNKNOWN_REVISION: &str = "unknown";
 const DOCUMENTATION_PATHS: &[&str] = &["README.md"];
-const DOCUMENTATION_PREFIXES: &[&str] =
-    &["docs/", ".github/", ".codex/", ".claude/rules/", "hack/"];
+const DOCUMENTATION_PREFIXES: &[&str] = &["docs/", ".github/", ".codex/", "hack/"];
 const LOCAL_SNAPSHOT_TARGET_SUFFIX: &str = "ci-local-snapshot";
 
 trait LocalClock {
@@ -51,18 +50,14 @@ impl LocalClock for SystemLocalClock {
         end.duration_since(start)
     }
 }
+/// `docs/` 下被测试 `include_str!` 的 **可执行 carrier**：脚本、Prometheus 规则、schema 与 fixture。
+///
+/// 面向人的 runbook / checklist / 报告说明不在此列——测试不得断言散文包含某句话
+/// （`docs/rules/README.md` §红线一），因此它们改动时只走 docs-only 快路径。
 const MACHINE_INPUT_PATHS: &[&str] = &[
     "docs/ops/0069-account-security-capacity-gate.selftest.sh",
     "docs/ops/0069-account-security-capacity-gate.sh",
-    "docs/ops/202606271438-003-container-image.md",
     "docs/ops/localtx-alerts.rules.yaml",
-    "docs/ops/202607082104-1642-consistency-dashboard-checklist.md",
-    "docs/runbooks/202607130312-1705-localtx-unsafe-settlement.md",
-    "docs/runbooks/202607081921-1633-cdc-outbox.md",
-    "docs/runbooks/202607082104-1642-consistency-ops-runbook-index.md",
-    "docs/ops/localtx-proof-report.md",
-    "docs/ops/security-production-closeout.md",
-    "docs/rules/localtx.md",
     "docs/spec/007-runtime-deployment-executable-plan/contracts/assembly-lock.schema.json",
     "docs/spec/007-runtime-deployment-executable-plan/contracts/runtime-plan.schema.json",
     "docs/spec/007-runtime-deployment-executable-plan/fixtures/fingerprint-v1-vectors.json",
@@ -3775,7 +3770,7 @@ mod tests {
             "hack/automation/forge.sh",
             "docs/rules/architecture.md",
             "docs/architecture/README.md",
-            ".claude/rules/rust.md",
+            "docs/rules/README.md",
             "Makefile",
             "CLAUDE.md",
         ] {

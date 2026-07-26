@@ -1,7 +1,7 @@
 //! `cargo xtask public-api` —— 库公开 API 面 baseline（封装外部 `cargo-public-api`）。
 //!
 //! 用途：基础/引擎层签名冻结 + 安全敏感 curated extras 的 exported 符号面冻结为可 commit 的 baseline，
-//! 后续 PR diff（crate 公开 API = 轴 A SemVer，见 `.claude/rules/rss/api-versioning.md`）。
+//! 后续 PR diff（crate 公开 API = 轴 A SemVer，见 `docs/rules/api-versioning.md`）。
 //!
 //! **PR-0 仅落工具入口**；baseline 快照随 PR-1/PR-2 产出并 commit 到 `public-api/<crate>.txt`
 //! （PR-1 `--layer basis`、PR-2 `--layer engine`、安全敏感例外 `--layer curated`；无 `--layer` =

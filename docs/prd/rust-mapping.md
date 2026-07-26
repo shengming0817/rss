@@ -173,7 +173,7 @@ type marker + rustdoc 约定守约束。在 Rust 里很多约束**编译期免�
 
 **残留运行期/CI 检查**（类型系统 / crate 图管不到）显式为 **Medium（xtask/CI 门），严禁 Soft**：active subscriber
 存在性、contract 扇出完整性、migration 只增不改、覆盖率阈值、no-op 业务理由。AI-robust 规则集因此收缩，重心从
-"archtest" 迁到 "crate-graph lint + clippy + 类型系统"（见 `.claude/rules/rss/ai-robust.md`）。
+"archtest" 迁到 "crate-graph lint + clippy + 类型系统"（见 `docs/rules/ai-robust.md`）。
 
 ## 关键模式的 Rust 形态
 

@@ -21,7 +21,7 @@
 
 ### 1. 治理章程的载体升级 —— 最强、最 GoCell-specific 的论据
 
-`.claude/rules/gocell/ai-robust.md` 把约束分 Hard / Medium / Soft，要求「优先用 type system 表达约束」「Soft 严禁立项」。但 Go 表达不了很多约束，所以才有 ~200 个 archtest 兜底。Rust 把其中一大批 Medium 抬成编译期 Hard：
+gocell 仓历史路径 `.claude/rules/gocell/ai-robust.md`（RSS 对应 `docs/rules/ai-robust.md`） 把约束分 Hard / Medium / Soft，要求「优先用 type system 表达约束」「Soft 严禁立项」。但 Go 表达不了很多约束，所以才有 ~200 个 archtest 兜底。Rust 把其中一大批 Medium 抬成编译期 Hard：
 
 | GoCell 现在的做法（Go） | Rust 原生等价 | 评级变化 |
 |---|---|---|

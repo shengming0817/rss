@@ -240,7 +240,7 @@ impl Probe for RlsReadyProbe {
 ## 7. 备选（为何不取）
 
 - **保留 `&str` 参数 + 仅靠命名约定**：Soft，不可机器验证，被 ai-robust 章程拒绝（新增机制最低
-  Medium 门，见 `.claude/rules/rss/ai-robust.md`）。
+  Medium 门，见 `docs/rules/ai-robust.md`）。
 - **同时为 `outbox` / `inbox_dedup` 加 `tenant_id` 列（在本 PR 一起落）**：范围蔓延——`outbox`
   加列需 L2 原子性测试、consumer 幂等验证、partition_key 语义变更，单独 #1405 更干净；
   `InboxStore` 加 tenant 维度会把 L0 引擎语义与业务租户混入基础设施层（分层违规）。
