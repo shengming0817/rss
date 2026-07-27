@@ -1,7 +1,9 @@
 # postgres migrations
 
-`adapters/postgres/migrations/` 是 postgres adapter 的迁移单源，由 `PgStore::run_migrations`
-经 `sqlx::migrate!("./migrations")`（编译期 `include_str!` 内嵌）应用。eventexec durable 拓扑
+`adapters/postgres/migrations/` 是 postgres adapter 的迁移单源，仅由 `postgres-migration`
+operator crate 经 `sqlx::migrate!` 编译期内嵌并应用；SQL-text-free
+`postgres-migration-inventory` 基础 crate 单次生成 typed version/checksum facts，供 operator、serving
+ledger gate 与部署生成共同消费。serving postgres adapter 不包含 SQL 或迁移执行能力。eventexec durable 拓扑
 （outbox / inbox_receipts / dead_letter / saga_journal / checkpoint / projection_events）的表由 P4–P10
 各自的迁移按需新增；`0001_init_schema.sql` 是基线占位（不建表）。
 
@@ -11,7 +13,7 @@
 
 - `序号`：4 位零填充、单调递增、**全局唯一**（`0001`、`0002`…）。sqlx 解析 `{version}_{description}`，`version` 须能 parse 为正 `i64`。
   序号唯一性由 `cargo xtask migrations`（接入 `cargo xtask verify` / `ci`，Medium，INVARIANT `MIGRATION-SERIAL-UNIQUE-01`）机器守——
-  两文件同序号即门红（sqlx 按 `version` 键迁移，重号会让 `run_migrations` 在任意 fresh DB 上 `VersionMismatch`／重复主键，#1134 修复）。
+  两文件同序号即门红（sqlx 按 `version` 键迁移，重号会让 `rss postgres migrate-all` 在任意 fresh DB 上 `VersionMismatch`／重复主键，#1134 修复）。
 - `动词_对象`：如 `create_outbox`、`add_lease_token_to_outbox`。下划线在 sqlx 展示时转空格。
 - 例：`0003_create_outbox.sql`、`0016_add_seq_and_partition_to_outbox.sql`。
 
@@ -22,7 +24,7 @@
 已提交的迁移文件**只增不改**（`rust-standards.md`）。例外须 ADR 说明。
 
 机器守卫：sqlx 在 `_sqlx_migrations` 表记每个已应用迁移的 `checksum`；改动已应用文件的内容会在下次
-`run_migrations` 触发 `VersionMismatch` 报错（Medium，运行期 fail-fast）。改顺序 / 删文件触发 `VersionMissing`。
+`rss postgres migrate-all` 触发 `VersionMismatch` 报错（Medium，运行期 fail-fast）。改顺序 / 删文件触发 `VersionMissing`。
 
 > **例外（#1134，pre-GA append-only carve-out）**：本次把 4 对历史重复序号（旧 `0002`/`0008`/`0009`/`0013`，
 > 各两文件同号）整体重编为唯一连续 `0001`–`0018`。依据：pre-GA 无外部消费方、无已部署 DB（`_sqlx_migrations`
@@ -99,9 +101,8 @@ out-of-band 注入。runtime 还会用显式 `BEGIN READ ONLY`，并在 mint rea
 由于 PostgreSQL 没有针对单一角色的 ACL DENY，`0067` 同时撤销当前数据库的 PUBLIC TEMPORARY，并把该权限
 显式回授既有 writer `rss_app`；reader 只获 CONNECT，因此不改变 writer 行为，也不让 PUBLIC TEMP 绕过 reader
 的精确数据库权限门。
-存量库必须用待发布镜像的 `rss postgres migrate-reader-lane` 先执行精确 0066→0067 migration job，再 provision
-reader 密码并启动新 binary。该命令只用 migrator 凭据，保留 SQLx lock/checksum/ledger，并在数据库不是
-0066/0067 或镜像含 0068+ 时无写入拒绝，不能退化为通用迁移入口。
+存量库由待发布镜像的 `rss postgres migrate-all` forward-only migration Job 在 serving phase 前推进至
+当前 HEAD；reader 密码随后 provision。旧的 0067 专用 reader-lane 命令已删除，不保留版本特判入口。
 
 ### 0068 service-token replay store 破坏性切换
 
@@ -109,9 +110,9 @@ reader 密码并启动新 binary。该命令只用 migrator 凭据，保留 SQLx
 `SHA-256(issuer, audience, verified kid, jti)` digest。不存在兼容视图、双写或旧表读取。
 旧行缺少 issuer/audience/kid，无法安全转换；只要旧表仍有未过期行，迁移就以固定错误失败并完整回滚。
 
-这是 non-rolling、forward-only cutover。唯一受支持的迁移入口是待发布镜像的**零参数 `rss` bootstrap**：
-`rss` 会先以短生命周期 migrator 连接执行 SQLx migration，成功关闭 migrator 后才构造 serving pools。
-不得用旧镜像、maintenance CLI、手工 `psql -f` 或通用迁移脚本替代。按以下顺序执行：
+这是 non-rolling、forward-only cutover。唯一受支持的迁移入口是待发布镜像中的
+`rss postgres migrate-all` migration Job；serving 进程绝不执行迁移，只读核验 ledger 精确等于 HEAD。
+不得用旧镜像、maintenance CLI 或手工 `psql -f` 替代。按以下顺序执行：
 
 1. **停止旧世界**：停止签发旧 operator token，等待其最长 TTL 到期；随后把所有旧 runtime 实例缩容到
    0，并停止 projection、audit-ledger、DLQ、reconcile 和 settings maintenance CLI。确认数据库中不再有
@@ -131,8 +132,8 @@ reader 密码并启动新 binary。该命令只用 migrator 凭据，保留 SQLx
       AND held.granted;
    ```
 
-3. **唯一 migration runner**：只启动 1 个待发布镜像的零参数 `rss` 实例，不并行启动第二个实例或任何
-   maintenance CLI。等待该实例完成 `rss-postgres-migrator` 阶段；migration/startup 非零退出即进入步骤 7，
+3. **唯一 migration runner**：只启动 1 个待发布镜像的 `rss postgres migrate-all` Job，不并行启动第二个实例或任何
+   maintenance CLI。等待 Job 完成；migration 非零退出即进入步骤 7，
    不得继续扩容。
 4. **迁移后 catalog / ACL 探针**：仍以 migrator 凭据确认 ledger 为 `68`、旧表消失、新表存在；两个函数
    owner 均为 `rss_service_token_replay_owner`、`pg_proc.proconfig` 中 search path 精确为
@@ -207,7 +208,7 @@ state、双写或自动补行 fallback。表启用并强制 RLS，policy 使用 
 非空 `authn_epoch_at_issue`。它不会用当前 account epoch 猜测回填，也不保留 legacy decoder；新 binary 的
 初始签发和每次轮换都继承该 family epoch。
 
-唯一正式 runner 是待发布镜像的**零参数 `rss` bootstrap**；不得使用旧 binary、maintenance CLI、手工
+唯一正式 runner 是待发布镜像的 `rss postgres migrate-all` Job；不得使用旧 binary、maintenance CLI、手工
 `psql -f` 或通用迁移脚本。按以下 non-rolling runbook 执行：
 
 1. **停止旧 writer 并做迁移前探针。** 将全部旧 runtime 缩容到 0。用 migrator 凭据确认 ledger 为 `68`，
@@ -250,9 +251,8 @@ state、双写或自动补行 fallback。表启用并强制 RLS，policy 使用 
    docs/ops/0069-account-security-capacity-gate.selftest.sh
    ```
 
-3. **运行 singleton。** 只启动一个待发布镜像的零参数 `rss` 实例，等待
-   `rss-postgres-migrator` 完成；`0069` 内置 `lock_timeout=5s`、`statement_timeout=5min`，任一超时或
-   migration/startup 非零退出都不得继续扩容。运行期间若 data、`pg_wal`、archive 或 replica 指标越过
+3. **运行 singleton。** 只启动一个待发布镜像的 `rss postgres migrate-all` Job；`0069` 内置
+   `lock_timeout=5s`、`statement_timeout=5min`，任一超时或 migration 非零退出都不得继续扩容。运行期间若 data、`pg_wal`、archive 或 replica 指标越过
    gate receipt 的预算，立即停止扩容流程并等待该事务按 timeout 回滚；不得把已失效的 preflight 当作授权。
 4. **迁移后验证。** 仍以 migrator 凭据确认 `_sqlx_migrations=69`，credential/security 缺失计数为 0，
    双向 FK（含 deferred 反向 FK）、四项 CHECK、FORCE RLS/policy 均存在；同时确认 `rss_app` 只有
@@ -823,14 +823,14 @@ forward-only 不写 `.down.sql`；当前 pre-GA 无自动 retention 策略或分
 
 ## 调用时机与行为
 
-- **时机**：`PgStore::run_migrations()` 在组合根 / bootstrap 中、`Domain::init` **之前**调用（init 不做外部 I/O，`domain-patterns.md` §Init fail-fast）。本基座 PR 只提供方法，接线到 bootstrap 属后续。
-- **失败传播**：迁移失败返回 `PgError::Migrate(MigrateError)`，调用方应 **fail-fast**（启动中止），不静默继续。adapter 内已 `error!` 记账失败、`info!` 记账成功。
-- **多实例并发**：`sqlx::migrate!` 默认 `locking = true`（pg advisory lock）——多实例同时启动时只有一个实例真正执行迁移，其余等待锁释放后看到已应用、各自 no-op。
-- **编译期内嵌**：`sqlx::migrate!("./migrations")` 在编译时把每个 `.sql` 内嵌进二进制（不依赖运行时文件系统）。**改动迁移文件后须重编 postgres crate**，否则旧 binary 跑的是旧 SQL。
+- **时机**：先运行 migration phase 的 `rss postgres migrate-all` Job，成功后才允许 serving phase。
+- **失败传播**：migration Job 与 serving ledger probe 都 **fail closed**；前者失败不发布，后者发现 stale、超前、失败或 checksum 漂移即拒绝启动。
+- **多实例并发**：operator 使用 SQLx advisory lock；重复 Job 只会在同一精确 ledger 上幂等收敛。
+- **编译期内嵌**：仅 `postgres-migration` crate 内嵌 SQL；共享 typed inventory carrier 单次生成 version/checksum facts。
 
 ## 本地应用 / 测试
 
-集成测试（`tests/pg_integration.rs`，`integration` feature 门控）对真实 postgres 跑 `run_migrations`
+集成测试（`integration` feature 门控）对真实 postgres 跑 migration fixtures
 并验证幂等。本地用 docker postgres + libpq 标准 env（`PGHOST` / `PGPORT` / `PGDATABASE` / `PGUSER` /
 `PGPASSWORD`）：
 

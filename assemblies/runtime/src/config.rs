@@ -16,7 +16,20 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use base64::Engine as _;
+use runtimeexec::config::{SecretDocument, SecretValue};
 use secure::SecretText;
+use serde::Deserialize;
+
+const SERVING_SECRET_BUNDLE_PATH: &str = "/var/run/rss/secrets/serving-secret-bundle";
+pub(crate) const BUNDLE_PG_PASSWORD: &str = "RSS_INTERNAL_BUNDLE_PG_PASSWORD";
+pub(crate) const BUNDLE_PG_READ_PASSWORD: &str = "RSS_INTERNAL_BUNDLE_PG_READ_PASSWORD";
+pub(crate) const BUNDLE_PG_AUDIT_ADMIN_PASSWORD: &str =
+    "RSS_INTERNAL_BUNDLE_PG_AUDIT_ADMIN_PASSWORD";
+pub(crate) const BUNDLE_PG_DLX_ARCHIVER_PASSWORD: &str =
+    "RSS_INTERNAL_BUNDLE_PG_DLX_ARCHIVER_PASSWORD";
+pub(crate) const BUNDLE_PG_DLX_VERIFIER_PASSWORD: &str =
+    "RSS_INTERNAL_BUNDLE_PG_DLX_VERIFIER_PASSWORD";
+pub(crate) const BUNDLE_PG_DLX_PURGER_PASSWORD: &str = "RSS_INTERNAL_BUNDLE_PG_DLX_PURGER_PASSWORD";
 
 const DOMAIN_TRANSPORT_URL_ENV_SUFFIX: &str = "DOMAIN_TRANSPORT_URL";
 const DOMAIN_TRANSPORT_MTLS_SPIFFE_ALLOW_SET_ENV_SUFFIX: &str =
@@ -58,6 +71,12 @@ const FORBIDDEN_SERVING_KEYS: &[&str] = &["RSS_ACCESS_TOKEN_TRUSTED_KINDS"];
 /// material must not be added here. Generated AMQP and configured domain-transport keys are added
 /// through the two explicit families below, never by enumerating the process environment.
 const FIXED_SERVING_KEYS: &[&str] = &[
+    BUNDLE_PG_PASSWORD,
+    BUNDLE_PG_READ_PASSWORD,
+    BUNDLE_PG_AUDIT_ADMIN_PASSWORD,
+    BUNDLE_PG_DLX_ARCHIVER_PASSWORD,
+    BUNDLE_PG_DLX_VERIFIER_PASSWORD,
+    BUNDLE_PG_DLX_PURGER_PASSWORD,
     "RUST_LOG",
     "SPIFFE_ENDPOINT_SOCKET",
     "RSS_ADMIN_LISTEN_ADDR",
@@ -109,22 +128,32 @@ const FIXED_SERVING_KEYS: &[&str] = &[
     "RSS_OUTBOX_SWEEP_INTERVAL_MS",
     "RSS_PASSWORD_BLOCKLIST_PATH",
     "RSS_PG_AUDIT_ADMIN_PASSWORD",
+    "RSS_PG_AUDIT_ADMIN_PASSWORD_FILE",
     "RSS_PG_AUDIT_ADMIN_USERNAME",
     "RSS_PG_DATABASE",
     "RSS_PG_DLX_ARCHIVER_PASSWORD",
+    "RSS_PG_DLX_ARCHIVER_PASSWORD_FILE",
+    "RSS_PG_DLX_ARCHIVER_MAX_CONNECTIONS",
     "RSS_PG_DLX_ARCHIVER_USERNAME",
     "RSS_PG_DLX_PURGER_PASSWORD",
+    "RSS_PG_DLX_PURGER_PASSWORD_FILE",
+    "RSS_PG_DLX_PURGER_MAX_CONNECTIONS",
     "RSS_PG_DLX_PURGER_USERNAME",
     "RSS_PG_DLX_VERIFIER_PASSWORD",
+    "RSS_PG_DLX_VERIFIER_PASSWORD_FILE",
+    "RSS_PG_DLX_VERIFIER_MAX_CONNECTIONS",
     "RSS_PG_DLX_VERIFIER_USERNAME",
     "RSS_PG_HOST",
     "RSS_PG_MAX_CONNECTIONS",
     "RSS_PG_MIGRATOR_PASSWORD",
+    "RSS_PG_MIGRATOR_PASSWORD_FILE",
     "RSS_PG_MIGRATOR_USERNAME",
     "RSS_PG_PASSWORD",
+    "RSS_PG_PASSWORD_FILE",
     "RSS_PG_PORT",
     "RSS_PG_READ_MAX_CONNECTIONS",
     "RSS_PG_READ_PASSWORD",
+    "RSS_PG_READ_PASSWORD_FILE",
     "RSS_PG_READ_USERNAME",
     "RSS_PG_READINESS_SAMPLE_INTERVAL_SECS",
     "RSS_PG_SSL_MODE",
@@ -209,7 +238,148 @@ pub(crate) trait RuntimeConfigSource {
 }
 
 /// Production environment source. It reads only the key supplied by the closed catalog.
+struct ServingSecretBundle {
+    secrets: BTreeMap<String, SecretText>,
+}
+
 struct EnvConfigSource;
+
+const LEGACY_SECRET_ENVIRONMENT_KEYS: &[&str] = &[
+    BUNDLE_PG_PASSWORD,
+    BUNDLE_PG_READ_PASSWORD,
+    BUNDLE_PG_AUDIT_ADMIN_PASSWORD,
+    BUNDLE_PG_DLX_ARCHIVER_PASSWORD,
+    BUNDLE_PG_DLX_VERIFIER_PASSWORD,
+    BUNDLE_PG_DLX_PURGER_PASSWORD,
+    "RSS_AMQP_URL",
+    "RSS_SETTINGS_AMQP_URL",
+    "RSS_IDENTITY_AMQP_URL",
+    "RSS_AUDIT_AMQP_URL",
+    "RSS_AUDIT_CHAIN_KEY_B64URL",
+    "RSS_COMMAND_IDEMPOTENCY_KEYS_JSON",
+    "RSS_DLX_ARCHIVE_VAULT_TOKEN",
+    "RSS_DLX_HOT_VAULT_TOKEN",
+    "RSS_PG_PASSWORD",
+    "RSS_PG_PASSWORD_FILE",
+    "RSS_PG_READ_PASSWORD",
+    "RSS_PG_READ_PASSWORD_FILE",
+    "RSS_PG_AUDIT_ADMIN_PASSWORD",
+    "RSS_PG_AUDIT_ADMIN_PASSWORD_FILE",
+    "RSS_PG_DLX_ARCHIVER_PASSWORD",
+    "RSS_PG_DLX_ARCHIVER_PASSWORD_FILE",
+    "RSS_PG_DLX_VERIFIER_PASSWORD",
+    "RSS_PG_DLX_VERIFIER_PASSWORD_FILE",
+    "RSS_PG_DLX_PURGER_PASSWORD",
+    "RSS_PG_DLX_PURGER_PASSWORD_FILE",
+    "RSS_REDIS_URL",
+    "RSS_S3_ACCESS_KEY_ID",
+    "RSS_S3_SECRET_ACCESS_KEY",
+    "RSS_S3_SESSION_TOKEN",
+    "RSS_SERVICE_TOKEN_HS256_SECRET_B64URL",
+    "RSS_TENANT_AUTHORITY_HMAC_KEY_B64URL",
+    "RSS_VAULT_TOKEN",
+];
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RuntimeServingSecretBundle {
+    amqp_url: Option<SecretValue>,
+    settings_amqp_url: Option<SecretValue>,
+    identity_amqp_url: Option<SecretValue>,
+    audit_amqp_url: Option<SecretValue>,
+    audit_chain_key: Option<SecretValue>,
+    command_idempotency_keys: Option<SecretValue>,
+    dlx_archive_vault_token: Option<SecretValue>,
+    dlx_hot_vault_token: Option<SecretValue>,
+    pg_password: Option<SecretValue>,
+    pg_read_password: Option<SecretValue>,
+    pg_audit_admin_password: Option<SecretValue>,
+    pg_dlx_archiver_password: Option<SecretValue>,
+    pg_dlx_verifier_password: Option<SecretValue>,
+    pg_dlx_purger_password: Option<SecretValue>,
+    redis_url: Option<SecretValue>,
+    s3_access_key_id: Option<SecretValue>,
+    s3_secret_access_key: Option<SecretValue>,
+    s3_session_token: Option<SecretValue>,
+    service_token_secret: Option<SecretValue>,
+    tenant_authority_key: Option<SecretValue>,
+    vault_token: Option<SecretValue>,
+}
+
+impl ServingSecretBundle {
+    fn capture() -> Result<Self, RuntimeConfigCaptureError> {
+        let document =
+            runtimeexec::config::read_secret_document(Path::new(SERVING_SECRET_BUNDLE_PATH))
+                .map_err(|_| RuntimeConfigCaptureError::SecretBundleRead)?;
+        Self::from_secret_document(&document)
+    }
+
+    #[cfg(test)]
+    fn from_document(document: &str) -> Result<Self, RuntimeConfigCaptureError> {
+        let document = SecretDocument::new(zeroize::Zeroizing::new(document.to_owned()));
+        Self::from_secret_document(&document)
+    }
+
+    fn from_secret_document(document: &SecretDocument) -> Result<Self, RuntimeConfigCaptureError> {
+        let bundle: RuntimeServingSecretBundle = document
+            .parse()
+            .map_err(|_| RuntimeConfigCaptureError::InvalidSecretBundle)?;
+        let mut secrets = BTreeMap::new();
+        let entries = [
+            ("RSS_AMQP_URL", bundle.amqp_url),
+            ("RSS_SETTINGS_AMQP_URL", bundle.settings_amqp_url),
+            ("RSS_IDENTITY_AMQP_URL", bundle.identity_amqp_url),
+            ("RSS_AUDIT_AMQP_URL", bundle.audit_amqp_url),
+            ("RSS_AUDIT_CHAIN_KEY_B64URL", bundle.audit_chain_key),
+            (
+                "RSS_COMMAND_IDEMPOTENCY_KEYS_JSON",
+                bundle.command_idempotency_keys,
+            ),
+            (
+                "RSS_DLX_ARCHIVE_VAULT_TOKEN",
+                bundle.dlx_archive_vault_token,
+            ),
+            ("RSS_DLX_HOT_VAULT_TOKEN", bundle.dlx_hot_vault_token),
+            (BUNDLE_PG_PASSWORD, bundle.pg_password),
+            (BUNDLE_PG_READ_PASSWORD, bundle.pg_read_password),
+            (
+                BUNDLE_PG_AUDIT_ADMIN_PASSWORD,
+                bundle.pg_audit_admin_password,
+            ),
+            (
+                BUNDLE_PG_DLX_ARCHIVER_PASSWORD,
+                bundle.pg_dlx_archiver_password,
+            ),
+            (
+                BUNDLE_PG_DLX_VERIFIER_PASSWORD,
+                bundle.pg_dlx_verifier_password,
+            ),
+            (BUNDLE_PG_DLX_PURGER_PASSWORD, bundle.pg_dlx_purger_password),
+            ("RSS_REDIS_URL", bundle.redis_url),
+            ("RSS_S3_ACCESS_KEY_ID", bundle.s3_access_key_id),
+            ("RSS_S3_SECRET_ACCESS_KEY", bundle.s3_secret_access_key),
+            ("RSS_S3_SESSION_TOKEN", bundle.s3_session_token),
+            (
+                "RSS_SERVICE_TOKEN_HS256_SECRET_B64URL",
+                bundle.service_token_secret,
+            ),
+            (
+                "RSS_TENANT_AUTHORITY_HMAC_KEY_B64URL",
+                bundle.tenant_authority_key,
+            ),
+            ("RSS_VAULT_TOKEN", bundle.vault_token),
+        ];
+        for (name, value) in entries {
+            if let Some(value) = value {
+                if value.is_empty() {
+                    return Err(RuntimeConfigCaptureError::InvalidSecretBundle);
+                }
+                secrets.insert(name.to_owned(), value.into_secret_text());
+            }
+        }
+        Ok(Self { secrets })
+    }
+}
 
 impl RuntimeConfigSource for EnvConfigSource {
     fn read(&mut self, key: &RuntimeConfigKey) -> CapturedConfigValue {
@@ -259,6 +429,12 @@ pub(crate) enum RuntimeConfigCaptureError {
     DuplicateFixedKey,
     #[error("removed runtime serving configuration key must not be set: {0}")]
     ForbiddenServingKey(&'static str),
+    #[error("runtime serving secret bundle could not be read")]
+    SecretBundleRead,
+    #[error("runtime serving secret bundle is invalid")]
+    InvalidSecretBundle,
+    #[error("runtime secret environment channel is forbidden: {0}")]
+    ForbiddenSecretEnvironment(&'static str),
 }
 
 /// Immutable process-lifetime configuration generation.
@@ -1241,7 +1417,11 @@ impl RuntimeConfigSnapshot {
     /// concrete environment source stay private to this module so sibling modules cannot express a
     /// second or alternate production capture.
     pub(crate) fn capture_process_snapshot() -> Result<Self, RuntimeConfigCaptureError> {
-        Self::capture_with_forbidden_check(EnvConfigSource)
+        let bundle = ServingSecretBundle::capture()?;
+        let mut snapshot = Self::capture_with_forbidden_check(EnvConfigSource)?;
+        snapshot.reject_legacy_secret_environment()?;
+        snapshot.install_secret_bundle(bundle)?;
+        Ok(snapshot)
     }
 
     /// Test-only generic capture surface for purpose-built source fakes.
@@ -1263,6 +1443,9 @@ impl RuntimeConfigSnapshot {
     fn capture(mut source: impl RuntimeConfigSource) -> Result<Self, RuntimeConfigCaptureError> {
         let mut catalog = fixed_catalog()?;
         add_generated_event_keys(&mut catalog);
+        for key in LEGACY_SECRET_ENVIRONMENT_KEYS {
+            catalog.insert(RuntimeConfigKey::from_static(key));
+        }
 
         let mut values = BTreeMap::new();
         for key in catalog {
@@ -1285,6 +1468,37 @@ impl RuntimeConfigSnapshot {
         }
 
         Ok(Self { values })
+    }
+
+    fn reject_legacy_secret_environment(&self) -> Result<(), RuntimeConfigCaptureError> {
+        for name in LEGACY_SECRET_ENVIRONMENT_KEYS {
+            if self
+                .values
+                .get(*name)
+                .is_some_and(|value| !matches!(value, CapturedConfigValue::Missing))
+            {
+                return Err(RuntimeConfigCaptureError::ForbiddenSecretEnvironment(name));
+            }
+        }
+        Ok(())
+    }
+
+    fn install_secret_bundle(
+        &mut self,
+        bundle: ServingSecretBundle,
+    ) -> Result<(), RuntimeConfigCaptureError> {
+        for (name, value) in bundle.secrets {
+            let Some(slot) = self.values.get_mut(name.as_str()) else {
+                return Err(RuntimeConfigCaptureError::InvalidSecretBundle);
+            };
+            if !matches!(slot, CapturedConfigValue::Missing) {
+                return Err(RuntimeConfigCaptureError::ForbiddenSecretEnvironment(
+                    "internal bundle target",
+                ));
+            }
+            *slot = CapturedConfigValue::Present(value);
+        }
+        Ok(())
     }
 
     /// Mint the only configuration capability accepted by serving-runtime consumers.
@@ -1413,5 +1627,42 @@ mod forbidden_serving_key_tests {
         let rendered = format!("{error:?}: {error}");
         assert!(rendered.contains(FORBIDDEN_SERVING_KEYS[0]), "{rendered}");
         assert!(!rendered.contains(REMOVED_VALUE_BAIT), "{rendered}");
+    }
+}
+
+#[cfg(test)]
+mod serving_secret_bundle_tests {
+    use super::*;
+
+    #[test]
+    fn closed_bundle_maps_secrets_without_exposing_values() {
+        let mut bundle = ServingSecretBundle::from_document(
+            r#"{
+                "pgPassword":"writer-bait",
+                "pgReadPassword":"reader-bait",
+                "amqpUrl":"amqp-bait"
+            }"#,
+        )
+        .expect("valid closed bundle");
+
+        for key in [BUNDLE_PG_PASSWORD, BUNDLE_PG_READ_PASSWORD, "RSS_AMQP_URL"] {
+            assert!(bundle.secrets.remove(key).is_some());
+        }
+    }
+
+    #[test]
+    fn bundle_rejects_unknown_and_empty_fields_without_value_diagnostics() {
+        for document in [
+            r#"{"legacyPassword":"unknown-bait"}"#,
+            r#"{"pgPassword":""}"#,
+        ] {
+            let error = match ServingSecretBundle::from_document(document) {
+                Ok(_) => panic!("invalid secret bundle must fail closed"),
+                Err(error) => error,
+            };
+            let rendered = format!("{error:?}: {error}");
+            assert_eq!(error, RuntimeConfigCaptureError::InvalidSecretBundle);
+            assert!(!rendered.contains("unknown-bait"), "{rendered}");
+        }
     }
 }

@@ -287,12 +287,12 @@ mod tests {
 
     #[test]
     fn target_crates_counts_and_curated_exact_set() {
-        // basis = assembly-schema/diagctx/vocab/ids/secure/support/runctx（proc-macro securederive 经 is_proc_macro 排除）。
-        assert_eq!(target_crates(Some(Layer::Basis)).len(), 7);
+        // basis = assembly-schema/diagctx/vocab/ids/postgres-migration-inventory/secure/support/runctx（proc-macro securederive 经 is_proc_macro 排除）。
+        assert_eq!(target_crates(Some(Layer::Basis)).len(), 8);
         // engine = consistency/primitives/tracewire（#1224 新增 traceparent capture/restore 单源，轴 A SemVer 面）。
         assert_eq!(target_crates(Some(Layer::Engine)).len(), 3);
-        // None = basis(7) + engine(3) + curated extras(authn/diport/generated/runtimeexec=4) 全集。
-        assert_eq!(target_crates(None).len(), 14);
+        // None = basis(8) + engine(3) + curated extras(authn/diport/generated/runtimeexec=4) 全集。
+        assert_eq!(target_crates(None).len(), 15);
         assert!(target_crates(Some(Layer::Basis)).contains(&"assembly-schema"));
         assert!(target_crates(Some(Layer::Basis)).contains(&"vocab"));
         assert!(target_crates(Some(Layer::Engine)).contains(&"primitives"));

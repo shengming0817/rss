@@ -1,6 +1,14 @@
-{{/* RSS chart-local names. Values deliberately expose only the closed profile selector. */}}
+{{/* RSS chart-local names. Values expose only the closed profile and phase selectors. */}}
 {{- define "rss.name" -}}
 {{- .Chart.Name | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+
+{{- define "rss.phase" -}}
+{{- $phase := required "values.phase is required" .Values.phase -}}
+{{- if not (has $phase (list "migration" "serving")) -}}
+{{- fail "values.phase must be migration or serving" -}}
+{{- end -}}
+{{- $phase -}}
 {{- end -}}
 
 {{- define "rss.fullname" -}}
@@ -46,6 +54,7 @@
 {{- if or (gt (len $identity) 253) (not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$" $identity)) -}}
 {{- fail "DeploymentPlan workload identity serviceAccount must be a DNS subdomain of at most 253 characters" -}}
 {{- end -}}
+
 {{- $scope := include "rss.fullname" .root | trunc 20 | trimSuffix "-" -}}
 {{- $identityBudget := sub 49 (len $scope) | int -}}
 {{- $identityPart := $identity | replace "." "-" | trunc $identityBudget | trimSuffix "-" -}}
@@ -54,8 +63,50 @@
 {{- printf "%s-%s-%s" $scope $identityPart $digest -}}
 {{- end -}}
 
+{{- define "rss.phaseServiceAccountName" -}}
+{{- $identity := .identity -}}
+{{- if eq .phase "migration" -}}
+{{- $identity = printf "%s-migration" $identity -}}
+{{- end -}}
+{{- include "rss.serviceAccountName" (dict "root" .root "identity" $identity) -}}
+{{- end -}}
+
+{{- define "rss.secretProviderClassName" -}}
+{{- $suffix := printf "%s-%s-%s-secrets" .profile .workload .phase -}}
+{{- include "rss.resourceName" (dict "root" .root "name" $suffix) -}}
+{{- end -}}
+
+{{- define "rss.secretFileName" -}}
+{{- if or (eq . "migrationDatabaseUrl") (eq . "servingDatabaseUrl") -}}database-url
+{{- else if eq . "servingSecretBundle" -}}serving-secret-bundle
+{{- else -}}{{- fail "DeploymentPlan contains an unsupported SecretPurpose" -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "rss.applicationConfigPath" -}}
+{{- if eq . "settingsOnlyV1" -}}configs/settings-only-v1.toml
+{{- else if eq . "identityAuditV1" -}}configs/identity-audit-v1.toml
+{{- else -}}{{- fail "DeploymentPlan contains an unsupported applicationConfig" -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "rss.dependencyPort" -}}
+{{- if eq . "vault" -}}8200
+{{- else if eq . "postgresql" -}}5432
+{{- else if eq . "amqp" -}}5671
+{{- else if eq . "redis" -}}6379
+{{- else if eq . "objectStorage" -}}443
+{{- else if eq . "oidc" -}}443
+{{- else -}}{{- fail "DeploymentPlan contains an unsupported dependency peer role" -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "rss.deploymentFingerprint" -}}
 {{- required "DeploymentPlan deploymentFingerprint is required" .deploymentFingerprint | trimPrefix "sha256:" -}}
+{{- end -}}
+
+{{- define "rss.migrationHeadFingerprint" -}}
+{{- required "DeploymentPlan migrationHeadFingerprint is required for migration phase" .migrationHeadFingerprint | trimPrefix "sha256:" -}}
 {{- end -}}
 
 {{- define "rss.planConfigMapName" -}}

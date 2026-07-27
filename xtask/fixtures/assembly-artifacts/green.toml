@@ -20,6 +20,12 @@ package = "journeys"
 target = "demo_runtime"
 test = "demo_is_ready"
 
+[assemblies.deployment]
+migrationMode = "none"
+availabilityClass = "highlyAvailable"
+drainSeconds = 20
+replicaDatabaseBudget = { minReplicas = 2, maxReplicas = 10, poolCeilings = { writer = 5, reader = 5 }, databaseConnectionLimit = 200, reservedConnections = 100 }
+
 [assemblies.deployment.runtimePlan]
 path = "assemblies/demo/runtime-plan.json"
 profile = "demo"
@@ -27,6 +33,8 @@ profile = "demo"
 [[assemblies.deployment.workloads]]
 name = "demo"
 image = "ghcr.io/gocell/rss-demo@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+sourceRevision = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+applicationConfig = "none"
 [assemblies.deployment.workloads.identity]
 name = "demo"
 serviceAccount = "demo"

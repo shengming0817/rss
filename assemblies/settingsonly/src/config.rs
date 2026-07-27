@@ -11,9 +11,18 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use zeroize::Zeroizing;
 
+const SERVING_SECRET_BUNDLE_PATH: &str = "/var/run/rss/secrets/serving-secret-bundle";
+#[cfg(test)]
+use runtimeexec::config::{
+    ADMIN_PORT_ENV, HEALTH_PORT_ENV, MTLS_ALLOW_SET_ENV, POD_IP_ENV, PRIMARY_PORT_ENV,
+    SPIFFE_ENDPOINT_ENV,
+};
+use runtimeexec::config::{FrontendConfigError, SecretDocument, SecretValue};
+#[cfg(test)]
 const PG_WRITER_PASSWORD_ENV: &str = "RSS_SETTINGSONLY_PG_WRITER_PASSWORD";
+#[cfg(test)]
 const PG_READER_PASSWORD_ENV: &str = "RSS_SETTINGSONLY_PG_READER_PASSWORD";
-const PG_MIGRATOR_PASSWORD_ENV: &str = "RSS_SETTINGSONLY_PG_MIGRATOR_PASSWORD";
+#[cfg(test)]
 const VAULT_TOKEN_ENV: &str = "RSS_SETTINGSONLY_VAULT_TOKEN";
 const BUILD_SOURCE_SHA_ENV: &str = "RSS_BUILD_SOURCE_SHA";
 const BUILD_IMAGE_DIGEST_ENV: &str = "RSS_BUILD_IMAGE_DIGEST";
@@ -36,27 +45,32 @@ fn capture_from(
     let config = parse_document(&document)?;
     config.validate()?;
 
-    let secrets = ResolvedSecrets {
-        pg_writer_password: resolve_environment(source, PG_WRITER_PASSWORD_ENV)?,
-        pg_reader_password: resolve_environment(source, PG_READER_PASSWORD_ENV)?,
-        pg_migrator_password: resolve_environment(source, PG_MIGRATOR_PASSWORD_ENV)?,
-        vault_token: resolve_environment(source, VAULT_TOKEN_ENV)?,
-    };
-    let source_sha = resolve_environment(source, BUILD_SOURCE_SHA_ENV)?;
-    let image_digest = resolve_environment(source, BUILD_IMAGE_DIGEST_ENV)?;
+    let document = source
+        .read_secret_bundle(Path::new(SERVING_SECRET_BUNDLE_PATH))
+        .map_err(|error| ConfigError::SecretBundleRead(ReadFailure::from(error.kind())))?;
+    let bundle: ServingSecretBundle = document
+        .parse()
+        .map_err(|_| ConfigError::InvalidSecretBundle)?;
+    let secrets = bundle.try_into()?;
+    let source_sha = resolve_public_environment(source, BUILD_SOURCE_SHA_ENV)?;
+    let image_digest = resolve_public_environment(source, BUILD_IMAGE_DIGEST_ENV)?;
     let build_identity = runtimeexec::inventory::BuildIdentity::parse(&source_sha, &image_digest)
         .map_err(|_| ConfigError::InvalidValue("buildIdentity"))?;
+    let frontend =
+        runtimeexec::config::capture_serving_frontend(|name| source.read_environment(name))
+            .map_err(frontend_error)?;
     Ok(CapturedConfig {
         config,
         secrets,
         build_identity,
+        frontend,
     })
 }
 
-fn resolve_environment(
+fn resolve_public_environment(
     source: &mut impl ConfigSource,
     name: &'static str,
-) -> Result<Zeroizing<String>, ConfigError> {
+) -> Result<String, ConfigError> {
     let value = source
         .read_environment(name)
         .ok_or(ConfigError::MissingEnvironment(name))?
@@ -65,11 +79,12 @@ fn resolve_environment(
     if value.is_empty() {
         return Err(ConfigError::EmptyEnvironment(name));
     }
-    Ok(Zeroizing::new(value))
+    Ok(value)
 }
 
 trait ConfigSource {
     fn read_document(&mut self, path: &Path) -> std::io::Result<String>;
+    fn read_secret_bundle(&mut self, path: &Path) -> std::io::Result<SecretDocument>;
     fn read_environment(&mut self, name: &'static str) -> Option<OsString>;
 }
 
@@ -78,6 +93,10 @@ struct ProcessConfigSource;
 impl ConfigSource for ProcessConfigSource {
     fn read_document(&mut self, path: &Path) -> std::io::Result<String> {
         std::fs::read_to_string(path)
+    }
+
+    fn read_secret_bundle(&mut self, path: &Path) -> std::io::Result<SecretDocument> {
+        runtimeexec::config::read_secret_document(path)
     }
 
     fn read_environment(&mut self, name: &'static str) -> Option<OsString> {
@@ -137,6 +156,8 @@ pub(crate) enum ConfigError {
         column: u32,
     },
     InvalidValue(&'static str),
+    SecretBundleRead(ReadFailure),
+    InvalidSecretBundle,
     MissingEnvironment(&'static str),
     NonUnicodeEnvironment(&'static str),
     EmptyEnvironment(&'static str),
@@ -188,6 +209,15 @@ impl fmt::Display for ConfigError {
             Self::InvalidValue(field) => {
                 write!(formatter, "settings-only config field is invalid: {field}")
             }
+            Self::SecretBundleRead(kind) => {
+                write!(
+                    formatter,
+                    "settings-only secret bundle could not be read: {kind:?}"
+                )
+            }
+            Self::InvalidSecretBundle => {
+                formatter.write_str("settings-only secret bundle is invalid")
+            }
             Self::MissingEnvironment(name) => {
                 write!(
                     formatter,
@@ -215,6 +245,7 @@ pub(crate) struct CapturedConfig {
     config: SettingsOnlyConfig,
     secrets: ResolvedSecrets,
     build_identity: runtimeexec::inventory::BuildIdentity,
+    frontend: ServingFrontendConfig,
 }
 
 impl CapturedConfig {
@@ -224,8 +255,25 @@ impl CapturedConfig {
         SettingsOnlyConfig,
         ResolvedSecrets,
         runtimeexec::inventory::BuildIdentity,
+        ServingFrontendConfig,
     ) {
-        (self.config, self.secrets, self.build_identity)
+        (
+            self.config,
+            self.secrets,
+            self.build_identity,
+            self.frontend,
+        )
+    }
+}
+
+pub(crate) type ServingFrontendConfig = runtimeexec::config::ServingFrontendConfig;
+
+fn frontend_error(error: FrontendConfigError) -> ConfigError {
+    match error {
+        FrontendConfigError::Missing(name) => ConfigError::MissingEnvironment(name),
+        FrontendConfigError::NonUnicode(name) => ConfigError::NonUnicodeEnvironment(name),
+        FrontendConfigError::Empty(name) => ConfigError::EmptyEnvironment(name),
+        FrontendConfigError::Invalid(name) => ConfigError::InvalidValue(name),
     }
 }
 
@@ -235,27 +283,50 @@ impl fmt::Debug for CapturedConfig {
     }
 }
 
-/// Four resolved secret allocations, each erased when its final owner is dropped.
+/// Three resolved secret allocations, each erased when its final owner is dropped.
 pub(crate) struct ResolvedSecrets {
     pg_writer_password: Zeroizing<String>,
     pg_reader_password: Zeroizing<String>,
-    pg_migrator_password: Zeroizing<String>,
     vault_token: Zeroizing<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ServingSecretBundle {
+    pg_writer_password: SecretValue,
+    pg_reader_password: SecretValue,
+    vault_token: SecretValue,
+}
+
+impl TryFrom<ServingSecretBundle> for ResolvedSecrets {
+    type Error = ConfigError;
+
+    fn try_from(value: ServingSecretBundle) -> Result<Self, Self::Error> {
+        if [
+            value.pg_writer_password.as_str(),
+            value.pg_reader_password.as_str(),
+            value.vault_token.as_str(),
+        ]
+        .iter()
+        .any(|value| value.is_empty())
+        {
+            return Err(ConfigError::InvalidSecretBundle);
+        }
+        Ok(Self {
+            pg_writer_password: value.pg_writer_password.into_zeroizing(),
+            pg_reader_password: value.pg_reader_password.into_zeroizing(),
+            vault_token: value.vault_token.into_zeroizing(),
+        })
+    }
 }
 
 impl ResolvedSecrets {
     pub(crate) fn into_secret_material(
         self,
-    ) -> (
-        Zeroizing<String>,
-        Zeroizing<String>,
-        Zeroizing<String>,
-        Zeroizing<String>,
-    ) {
+    ) -> (Zeroizing<String>, Zeroizing<String>, Zeroizing<String>) {
         (
             self.pg_writer_password,
             self.pg_reader_password,
-            self.pg_migrator_password,
             self.vault_token,
         )
     }
@@ -524,7 +595,6 @@ pub(crate) struct PostgresConfig {
     ssl_root_cert_path: Option<PathBuf>,
     writer: PgWriterRoleConfig,
     reader: PgReaderRoleConfig,
-    migrator: PgMigratorRoleConfig,
     #[schemars(range(min = 1, max = 300))]
     readiness_seconds: u64,
 }
@@ -541,7 +611,6 @@ impl PostgresConfig {
         }
         self.writer.validate()?;
         self.reader.validate()?;
-        self.migrator.validate()?;
         if !(1..=300).contains(&self.readiness_seconds) {
             return Err(ConfigError::InvalidValue("postgres.readinessSeconds"));
         }
@@ -554,7 +623,6 @@ impl PostgresConfig {
         PgConnectionConfig,
         PgWriterRoleConfig,
         PgReaderRoleConfig,
-        PgMigratorRoleConfig,
         Duration,
     ) {
         (
@@ -567,7 +635,6 @@ impl PostgresConfig {
             },
             self.writer,
             self.reader,
-            self.migrator,
             Duration::from_secs(self.readiness_seconds),
         )
     }
@@ -598,7 +665,6 @@ impl PgConnectionConfig {
 pub(crate) struct PgWriterRoleConfig {
     #[schemars(length(min = 1), regex(pattern = "^.*\\S.*$"))]
     username: String,
-    password: PgWriterPasswordReference,
     #[schemars(range(min = 1, max = 100))]
     max_connections: u32,
 }
@@ -608,9 +674,6 @@ impl PgWriterRoleConfig {
         non_blank(&self.username, "postgres.writer.username")?;
         if self.max_connections == 0 || self.max_connections > 100 {
             return Err(ConfigError::InvalidValue("postgres.writer.maxConnections"));
-        }
-        if self.password.environment_name() != PG_WRITER_PASSWORD_ENV {
-            return Err(ConfigError::InvalidValue("postgres.writer.password"));
         }
         Ok(())
     }
@@ -625,7 +688,6 @@ impl PgWriterRoleConfig {
 pub(crate) struct PgReaderRoleConfig {
     #[schemars(length(min = 1), regex(pattern = "^.*\\S.*$"))]
     username: String,
-    password: PgReaderPasswordReference,
     #[schemars(range(min = 1, max = 100))]
     max_connections: u32,
 }
@@ -635,9 +697,6 @@ impl PgReaderRoleConfig {
         non_blank(&self.username, "postgres.reader.username")?;
         if self.max_connections == 0 || self.max_connections > 100 {
             return Err(ConfigError::InvalidValue("postgres.reader.maxConnections"));
-        }
-        if self.password.environment_name() != PG_READER_PASSWORD_ENV {
-            return Err(ConfigError::InvalidValue("postgres.reader.password"));
         }
         Ok(())
     }
@@ -649,84 +708,6 @@ impl PgReaderRoleConfig {
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct PgMigratorRoleConfig {
-    #[schemars(length(min = 1), regex(pattern = "^.*\\S.*$"))]
-    username: String,
-    password: PgMigratorPasswordReference,
-}
-
-impl PgMigratorRoleConfig {
-    fn validate(&self) -> Result<(), ConfigError> {
-        non_blank(&self.username, "postgres.migrator.username")?;
-        if self.password.environment_name() != PG_MIGRATOR_PASSWORD_ENV {
-            return Err(ConfigError::InvalidValue("postgres.migrator.password"));
-        }
-        Ok(())
-    }
-
-    pub(crate) fn into_username(self) -> String {
-        self.username
-    }
-}
-
-#[derive(Clone, Copy, Deserialize, JsonSchema)]
-enum EnvironmentReferenceKind {
-    #[serde(rename = "environmentRef")]
-    EnvironmentRef,
-}
-
-macro_rules! environment_reference {
-    ($reference:ident, $environment:ident, $wire_name:literal, $name:expr) => {
-        #[derive(Deserialize, JsonSchema)]
-        #[serde(rename_all = "camelCase", deny_unknown_fields)]
-        struct $reference {
-            kind: EnvironmentReferenceKind,
-            name: $environment,
-        }
-
-        impl $reference {
-            fn environment_name(&self) -> &'static str {
-                match (self.kind, self.name) {
-                    (EnvironmentReferenceKind::EnvironmentRef, $environment::$environment) => $name,
-                }
-            }
-        }
-
-        #[derive(Clone, Copy, Deserialize, JsonSchema)]
-        enum $environment {
-            #[serde(rename = $wire_name)]
-            $environment,
-        }
-    };
-}
-
-environment_reference!(
-    PgWriterPasswordReference,
-    PgWriterPasswordEnvironment,
-    "RSS_SETTINGSONLY_PG_WRITER_PASSWORD",
-    PG_WRITER_PASSWORD_ENV
-);
-environment_reference!(
-    PgReaderPasswordReference,
-    PgReaderPasswordEnvironment,
-    "RSS_SETTINGSONLY_PG_READER_PASSWORD",
-    PG_READER_PASSWORD_ENV
-);
-environment_reference!(
-    PgMigratorPasswordReference,
-    PgMigratorPasswordEnvironment,
-    "RSS_SETTINGSONLY_PG_MIGRATOR_PASSWORD",
-    PG_MIGRATOR_PASSWORD_ENV
-);
-environment_reference!(
-    VaultTokenReference,
-    VaultTokenEnvironment,
-    "RSS_SETTINGSONLY_VAULT_TOKEN",
-    VAULT_TOKEN_ENV
-);
-
-#[derive(Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct VaultConfig {
     #[schemars(length(min = 1), regex(pattern = "^.*\\S.*$"))]
     addr: String,
@@ -735,7 +716,6 @@ pub(crate) struct VaultConfig {
     transit_mount: String,
     #[schemars(length(min = 1), regex(pattern = "^.*\\S.*$"))]
     settings_key_name: String,
-    token: VaultTokenReference,
     #[schemars(schema_with = "unique_vault_bindings_schema")]
     tenant_store_allowlist: Vec<VaultStoreBindingConfig>,
     #[schemars(range(min = 1, max = 30))]
@@ -761,9 +741,6 @@ impl VaultConfig {
         }
         non_blank(&self.transit_mount, "vault.transitMount")?;
         non_blank(&self.settings_key_name, "vault.settingsKeyName")?;
-        if self.token.environment_name() != VAULT_TOKEN_ENV {
-            return Err(ConfigError::InvalidValue("vault.token"));
-        }
         if self.tenant_store_allowlist.is_empty() {
             return Err(ConfigError::InvalidValue("vault.tenantStoreAllowlist"));
         }
@@ -988,23 +965,16 @@ readinessSeconds = 5
 [postgres.writer]
 username = "rss_settings_writer"
 maxConnections = 5
-password = { kind = "environmentRef", name = "RSS_SETTINGSONLY_PG_WRITER_PASSWORD" }
 
 [postgres.reader]
 username = "rss_settings_reader"
 maxConnections = 5
-password = { kind = "environmentRef", name = "RSS_SETTINGSONLY_PG_READER_PASSWORD" }
-
-[postgres.migrator]
-username = "rss_settings_migrator"
-password = { kind = "environmentRef", name = "RSS_SETTINGSONLY_PG_MIGRATOR_PASSWORD" }
 
 [vault]
 addr = "https://vault.example.test:8200"
 caCertPemPath = "/run/rss/vault-ca.pem"
 transitMount = "transit"
 settingsKeyName = "settings-config-value"
-token = { kind = "environmentRef", name = "RSS_SETTINGSONLY_VAULT_TOKEN" }
 readinessSeconds = 5
 
 [[vault.tenantStoreAllowlist]]
@@ -1029,7 +999,6 @@ kvPathPrefix = "tenants/settings"
                 environments: [
                     PG_WRITER_PASSWORD_ENV,
                     PG_READER_PASSWORD_ENV,
-                    PG_MIGRATOR_PASSWORD_ENV,
                     VAULT_TOKEN_ENV,
                 ]
                 .into_iter()
@@ -1039,6 +1008,18 @@ kvPathPrefix = "tenants/settings"
                     (
                         BUILD_IMAGE_DIGEST_ENV,
                         OsString::from(format!("sha256:{}", "b".repeat(64))),
+                    ),
+                    (POD_IP_ENV, OsString::from("127.0.0.2")),
+                    (PRIMARY_PORT_ENV, OsString::from("8080")),
+                    (ADMIN_PORT_ENV, OsString::from("8082")),
+                    (HEALTH_PORT_ENV, OsString::from("8083")),
+                    (
+                        MTLS_ALLOW_SET_ENV,
+                        OsString::from("[\"spiffe://rss.local/ns/rss/sa/ingress-gateway\"]"),
+                    ),
+                    (
+                        SPIFFE_ENDPOINT_ENV,
+                        OsString::from("unix:///run/spire/sockets/agent.sock"),
                     ),
                 ])
                 .collect(),
@@ -1051,6 +1032,23 @@ kvPathPrefix = "tenants/settings"
         fn read_document(&mut self, _path: &Path) -> std::io::Result<String> {
             self.document_reads += 1;
             Ok(self.document.clone())
+        }
+
+        fn read_secret_bundle(&mut self, _path: &Path) -> std::io::Result<SecretDocument> {
+            let value = |source: &mut Self, name| {
+                source
+                    .read_environment(name)
+                    .and_then(|value| value.into_string().ok())
+                    .unwrap_or_default()
+            };
+            Ok(SecretDocument::new(Zeroizing::new(
+                serde_json::json!({
+                    "pgWriterPassword": value(self, PG_WRITER_PASSWORD_ENV),
+                    "pgReaderPassword": value(self, PG_READER_PASSWORD_ENV),
+                    "vaultToken": value(self, VAULT_TOKEN_ENV),
+                })
+                .to_string(),
+            )))
         }
 
         fn read_environment(&mut self, name: &'static str) -> Option<OsString> {
@@ -1152,16 +1150,16 @@ kvPathPrefix = "tenants/settings"
     #[test]
     fn plaintext_and_non_closed_secret_references_are_rejected_without_leaking_values() {
         let plaintext = VALID_CONFIG.replace(
-            "password = { kind = \"environmentRef\", name = \"RSS_SETTINGSONLY_PG_WRITER_PASSWORD\" }",
-            &format!("password = \"{SECRET_SENTINEL}\""),
+            "username = \"rss_settings_writer\"",
+            &format!("username = \"rss_settings_writer\"\npassword = \"{SECRET_SENTINEL}\""),
         );
         let wrong_kind = VALID_CONFIG.replace(
-            "kind = \"environmentRef\", name = \"RSS_SETTINGSONLY_VAULT_TOKEN\"",
-            "kind = \"fileRef\", name = \"RSS_SETTINGSONLY_VAULT_TOKEN\"",
+            "settingsKeyName = \"settings-config-value\"",
+            "settingsKeyName = \"settings-config-value\"\ntoken = { kind = \"fileRef\", path = \"/tmp/token\" }",
         );
         let generic_name = VALID_CONFIG.replace(
-            "RSS_SETTINGSONLY_PG_READER_PASSWORD",
-            "RSS_ARBITRARY_SECRET",
+            "username = \"rss_settings_reader\"",
+            "username = \"rss_settings_reader\"\nsecretEnvironment = \"RSS_ARBITRARY_SECRET\"",
         );
 
         for document in [&plaintext, &wrong_kind, &generic_name] {
@@ -1177,17 +1175,29 @@ kvPathPrefix = "tenants/settings"
         let mut source = TestSource::complete(VALID_CONFIG);
         let captured = capture_from(Path::new("ignored"), &mut source).expect("capture");
         assert_eq!(source.document_reads, 1);
-        assert_eq!(source.environment_reads.len(), 6);
+        assert_eq!(source.environment_reads.len(), 11);
         assert!(source.environment_reads.values().all(|reads| *reads == 1));
         assert!(!format!("{captured:?}").contains(SECRET_SENTINEL));
-        let (_, secrets, build_identity) = captured.into_runtime_inputs();
+        let (_, secrets, build_identity, frontend) = captured.into_runtime_inputs();
         assert_eq!(build_identity.source_sha(), "a".repeat(40));
+        assert_eq!(frontend.primary_port, 8080);
         assert!(!format!("{secrets:?}").contains(SECRET_SENTINEL));
-        let (writer, reader, migrator, vault) = secrets.into_secret_material();
+        let (writer, reader, vault) = secrets.into_secret_material();
         assert_eq!(&**writer, SECRET_SENTINEL);
         assert_eq!(&**reader, SECRET_SENTINEL);
-        assert_eq!(&**migrator, SECRET_SENTINEL);
         assert_eq!(&**vault, SECRET_SENTINEL);
+    }
+
+    #[test]
+    fn frontend_failure_names_the_exact_environment_variable() {
+        let mut source = TestSource::complete(VALID_CONFIG);
+        source
+            .environments
+            .insert(PRIMARY_PORT_ENV, OsString::from("not-a-port"));
+
+        let error = capture_from(Path::new("ignored"), &mut source).unwrap_err();
+
+        assert_eq!(error, ConfigError::InvalidValue(PRIMARY_PORT_ENV));
     }
 
     #[test]
@@ -1195,7 +1205,7 @@ kvPathPrefix = "tenants/settings"
         let mut source = TestSource::complete(VALID_CONFIG);
         source.environments.remove(VAULT_TOKEN_ENV);
         let error = capture_from(Path::new("ignored"), &mut source).unwrap_err();
-        assert_eq!(error, ConfigError::MissingEnvironment(VAULT_TOKEN_ENV));
+        assert_eq!(error, ConfigError::InvalidSecretBundle);
         assert!(!format!("{error:?} {error}").contains(SECRET_SENTINEL));
     }
 
@@ -1312,7 +1322,7 @@ kvPathPrefix = "tenants/settings"
             ["user", "device", "admin", "superAdmin"]
         );
 
-        let (connection, writer, reader, migrator, readiness) = postgres.into_postgres_inputs();
+        let (connection, writer, reader, readiness) = postgres.into_postgres_inputs();
         assert_eq!(connection.into_connect_options().1, 5432);
         assert_eq!(
             writer.into_writer_pool(),
@@ -1322,7 +1332,6 @@ kvPathPrefix = "tenants/settings"
             reader.into_reader_pool(),
             ("rss_settings_reader".to_owned(), 5)
         );
-        assert_eq!(migrator.into_username(), "rss_settings_migrator");
         assert_eq!(readiness, Duration::from_secs(5));
 
         let (_, _, _, key, allowlist, vault_readiness) = vault.into_vault_inputs();

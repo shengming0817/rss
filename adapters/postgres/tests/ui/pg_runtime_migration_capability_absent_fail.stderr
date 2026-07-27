@@ -1,0 +1,5 @@
+error[E0599]: no associated function or constant named `migrate_reader_lane_only` found for struct `PgRuntimeDeps` in the current scope
+ --> tests/ui/pg_runtime_migration_capability_absent_fail.rs:6:37
+  |
+6 |     let _migration = PgRuntimeDeps::migrate_reader_lane_only(config);
+  |                                     ^^^^^^^^^^^^^^^^^^^^^^^^ associated function or constant not found in `PgRuntimeDeps`

@@ -2,26 +2,80 @@
   "schemaVersion": 1,
   "assemblyFingerprint": "sha256:98193728fc6996a80f5c39a1f01f837addbeb3c7275ac4ab3f136ee34db4ec82",
   "runtimePlanFingerprint": "sha256:0560ab22cf6318e35a4e5dddf7bb1e2eb40fdc4e2981fc1f138d8a47425ccafb",
-  "deploymentFingerprint": "sha256:57232de2bd8aa105516e4e0d8bc8c7ff16f33ef6d95ebc00e621e408d1ef4dc7",
+  "deploymentFingerprint": "sha256:1a5d98c186658296fdaa00247d44e54623817f3b493c06b401e6e34dc055254f",
+  "migrationMode": "forwardOnlyTwoPhase",
+  "migrationHeadFingerprint": "sha256:10b73724fbe634b3514e17a315b80a3c15e0bd14ac2a0ce233ca12d9f9e067b9",
+  "migrationArtifact": {
+    "image": "ghcr.io/gocell/rss-operator@sha256:8cf9af483e68f4c086f8fc49dca072fe43b528f35b2e95da309d5d29a310f35d",
+    "sourceRevision": "0f386a442354452055c8dcd621316ed1768fdbdf"
+  },
+  "migrationExecutionBudget": {
+    "activeDeadlineSeconds": 900,
+    "backoffLimit": 0
+  },
+  "availabilityClass": "maintenanceWindow",
+  "drainSeconds": 20,
+  "replicaDatabaseBudget": {
+    "minReplicas": 2,
+    "maxReplicas": 10,
+    "poolCeilings": {
+      "writer": 10,
+      "reader": 10
+    },
+    "connectionsPerReplica": 20,
+    "databaseConnectionLimit": 300,
+    "reservedConnections": 100
+  },
+  "dependencyPeerRoles": [
+    "dns",
+    "vault",
+    "postgresql",
+    "oidc"
+  ],
   "workloads": [
     {
       "name": "settingsonly",
       "image": "ghcr.io/gocell/rss-settingsonly@sha256:e3f9c79d3f396df5434290783e22d87226b85cfbbcb9e30ce8f09163257a3ec2",
+      "sourceRevision": "0f386a442354452055c8dcd621316ed1768fdbdf",
+      "applicationConfig": "settingsOnlyV1",
       "identity": {
         "name": "settingsonly",
         "serviceAccount": "settingsonly"
       },
-      "secretRefs": [
+      "secretBindings": [
         {
-          "kind": "kubernetesSecret",
-          "name": "rss-settingsonly",
-          "key": "oidc-client-secret"
+          "purpose": "migrationDatabaseUrl",
+          "consumers": [
+            "migration"
+          ],
+          "vault": {
+            "storeId": "rss-vault",
+            "refKey": "settingsonly/database-url"
+          }
         },
         {
-          "kind": "vaultRef",
-          "storeId": "rss-vault",
-          "refKey": "settingsonly/keyring"
+          "purpose": "servingDatabaseUrl",
+          "consumers": [
+            "serving"
+          ],
+          "vault": {
+            "storeId": "rss-vault",
+            "refKey": "settingsonly/serving-database-url"
+          }
+        },
+        {
+          "purpose": "servingSecretBundle",
+          "consumers": [
+            "serving"
+          ],
+          "vault": {
+            "storeId": "rss-vault",
+            "refKey": "settingsonly/serving-secret-bundle"
+          }
         }
+      ],
+      "ingressPeerIdentities": [
+        "spiffe://rss.local/ns/rss/sa/ingress-gateway"
       ],
       "resources": {
         "requests": {

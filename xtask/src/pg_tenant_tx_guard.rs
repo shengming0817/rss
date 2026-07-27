@@ -668,10 +668,7 @@ pub(crate) fn scan_guard(
         }
     }
 
-    for expected in [
-        "config-legacy-plaintext-startup-probe",
-        "config-value-maintenance",
-    ] {
+    for expected in ["config-value-maintenance"] {
         if !state.allowed_exceptions.contains(expected) {
             findings.push(finding(
                 Rule::StaleException,
@@ -7073,20 +7070,6 @@ fn allowed_site_exception(
     }
     if let Some(exception) = allowed_fault_matrix_raw_tenant_site(rel, symbol, tables, window) {
         return Some(exception);
-    }
-    if rel == "migrator.rs"
-        && tables == ["config_entries"]
-        && window.contains("select count(*)::bigint from config_entries")
-        && window.contains("protection_scheme = 0")
-    {
-        return Some("config-legacy-plaintext-startup-probe");
-    }
-    if rel == "migrator.rs"
-        && tables == ["config_entries"]
-        && window.contains("protection_scheme = 0")
-        && window.contains("fetch_one(&self.pool")
-    {
-        return Some("config-legacy-plaintext-startup-probe");
     }
     if rel == "config_repo.rs"
         && tables == ["config_entries"]

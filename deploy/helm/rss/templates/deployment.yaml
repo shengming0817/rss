@@ -1,8 +1,23 @@
 {{- $profile := include "rss.profile" . -}}
+{{- $phase := include "rss.phase" . -}}
+{{- if eq $phase "serving" }}
 {{- $planSource := include "rss.planSource" . -}}
 {{- $plan := $planSource | mustFromJson -}}
+{{- if not (has $plan.migrationMode (list "none" "forwardOnlyTwoPhase")) -}}{{- fail "DeploymentPlan contains an unsupported migration mode" -}}{{- end -}}
+{{- if and (eq $plan.migrationMode "forwardOnlyTwoPhase") (ne $plan.availabilityClass "maintenanceWindow") -}}{{- fail "forward-only migration requires maintenanceWindow availability" -}}{{- end -}}
+{{- if and (eq $plan.migrationMode "none") (ne $plan.availabilityClass "highlyAvailable") -}}{{- fail "migration-free serving requires highlyAvailable availability" -}}{{- end -}}
 {{- $planConfigMapName := include "rss.planConfigMapName" (dict "root" . "profile" $profile "plan" $plan) -}}
 {{- range $workload := $plan.workloads }}
+{{- $hasSpiffeListener := false -}}
+{{- range $service := $plan.services -}}
+{{- if eq $service.workload $workload.name -}}
+{{- range $port := $service.ports -}}
+{{- if eq $port.exposure "workloadOnly" -}}{{- $hasSpiffeListener = true -}}{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- $hasIngressPeers := gt (len $workload.ingressPeerIdentities) 0 -}}
+{{- $requiresSpiffe := or $hasSpiffeListener $hasIngressPeers -}}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -13,9 +28,15 @@ metadata:
   annotations:
     {{- include "rss.fingerprintAnnotations" $plan | nindent 4 }}
 spec:
-  replicas: 1
   strategy:
+    {{- if eq $plan.migrationMode "forwardOnlyTwoPhase" }}
     type: Recreate
+    {{- else }}
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+    {{- end }}
   selector:
     matchLabels:
       {{- include "rss.selectorLabels" (dict "root" $ "workload" $workload.name) | nindent 6 }}
@@ -25,11 +46,27 @@ spec:
         {{- include "rss.selectorLabels" (dict "root" $ "workload" $workload.name) | nindent 8 }}
       annotations:
         {{- include "rss.fingerprintAnnotations" $plan | nindent 8 }}
+        {{- if $requiresSpiffe }}
+        spiffe.io/spiffe-id: {{ printf "spiffe://rss.local/ns/%s/sa/%s" $.Release.Namespace $workload.identity.serviceAccount | quote }}
+        {{- end }}
     spec:
-      serviceAccountName: {{ include "rss.serviceAccountName" (dict "root" $ "identity" $workload.identity.serviceAccount) }}
+      serviceAccountName: {{ include "rss.phaseServiceAccountName" (dict "root" $ "identity" $workload.identity.serviceAccount "phase" $phase) }}
       automountServiceAccountToken: false
       enableServiceLinks: false
-      terminationGracePeriodSeconds: 60
+      terminationGracePeriodSeconds: {{ add $plan.drainSeconds 15 }}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              {{- include "rss.selectorLabels" (dict "root" $ "workload" $workload.name) | nindent 14 }}
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              {{- include "rss.selectorLabels" (dict "root" $ "workload" $workload.name) | nindent 14 }}
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
@@ -40,6 +77,78 @@ spec:
         - name: {{ $workload.name }}
           image: {{ $workload.image | quote }}
           imagePullPolicy: IfNotPresent
+          {{- if ne $workload.applicationConfig "none" }}
+          args: ["--config", "/var/run/rss/deployment/application.toml"]
+          {{- end }}
+          env:
+            - name: RSS_BUILD_SOURCE_SHA
+              value: {{ $workload.sourceRevision | quote }}
+            - name: RSS_BUILD_IMAGE_DIGEST
+              value: {{ regexFind "sha256:[0-9a-f]{64}$" $workload.image | quote }}
+            {{- if eq $workload.applicationConfig "none" }}
+            - name: RSS_PG_MAX_CONNECTIONS
+              value: {{ $plan.replicaDatabaseBudget.poolCeilings.writer | quote }}
+            - name: RSS_PG_READ_MAX_CONNECTIONS
+              value: {{ $plan.replicaDatabaseBudget.poolCeilings.reader | quote }}
+            - name: RSS_PG_DLX_ARCHIVER_MAX_CONNECTIONS
+              value: {{ required "runtime dlxArchiver pool ceiling is required" $plan.replicaDatabaseBudget.poolCeilings.dlxArchiver | quote }}
+            - name: RSS_PG_DLX_VERIFIER_MAX_CONNECTIONS
+              value: {{ required "runtime dlxVerifier pool ceiling is required" $plan.replicaDatabaseBudget.poolCeilings.dlxVerifier | quote }}
+            - name: RSS_PG_DLX_PURGER_MAX_CONNECTIONS
+              value: {{ required "runtime dlxPurger pool ceiling is required" $plan.replicaDatabaseBudget.poolCeilings.dlxPurger | quote }}
+            {{- range $service := $plan.services }}
+            {{- if eq $service.workload $workload.name }}
+            {{- range $port := $service.ports }}
+            {{- if eq $port.name "http" }}
+            - name: RSS_PRIMARY_LISTEN_ADDR
+              value: {{ printf "0.0.0.0:%v" $port.port | quote }}
+            {{- else if eq $port.name "internal" }}
+            - name: RSS_INTERNAL_LISTEN_ADDR
+              value: {{ printf "0.0.0.0:%v" $port.port | quote }}
+            {{- else if eq $port.name "admin" }}
+            - name: RSS_ADMIN_LISTEN_ADDR
+              value: {{ printf "0.0.0.0:%v" $port.port | quote }}
+            {{- else if eq $port.name "health" }}
+            - name: RSS_HEALTH_LISTEN_ADDR
+              value: {{ printf "0.0.0.0:%v" $port.port | quote }}
+            {{- end }}
+            {{- end }}
+            {{- end }}
+            {{- end }}
+            {{- end }}
+            {{- if $requiresSpiffe }}
+            - name: SPIFFE_ENDPOINT_SOCKET
+              value: unix:///run/spire/sockets/agent.sock
+            {{- if $hasIngressPeers }}
+            - name: RSS_DEPLOYMENT_POD_IP
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: status.podIP
+            - name: RSS_DEPLOYMENT_MTLS_SPIFFE_ALLOW_SET
+              value: {{ $workload.ingressPeerIdentities | toJson | quote }}
+            {{- range $service := $plan.services }}
+            {{- if eq $service.workload $workload.name }}
+            {{- range $port := $service.ports }}
+            {{- if eq $port.name "http" }}
+            - name: RSS_DEPLOYMENT_PRIMARY_PORT
+              value: {{ $port.port | quote }}
+            {{- else if eq $port.name "admin" }}
+            - name: RSS_DEPLOYMENT_ADMIN_PORT
+              value: {{ $port.port | quote }}
+            {{- else if eq $port.name "health" }}
+            - name: RSS_DEPLOYMENT_HEALTH_PORT
+              value: {{ $port.port | quote }}
+            {{- end }}
+            {{- end }}
+            {{- end }}
+            {{- end }}
+            {{- end }}
+            {{- end }}
+          lifecycle:
+            preStop:
+              sleep:
+                seconds: 5
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
@@ -91,14 +200,64 @@ spec:
             - name: deployment-plan
               mountPath: /var/run/rss/deployment
               readOnly: true
+            - name: vault-secrets
+              mountPath: /var/run/rss/secrets
+              readOnly: true
+            {{- if ne $workload.applicationConfig "none" }}
+            - name: public-trust
+              mountPath: /run/rss
+              readOnly: true
+            {{- end }}
+            {{- if $requiresSpiffe }}
+            - name: spiffe-workload-api
+              mountPath: /run/spire/sockets
+              readOnly: true
+            {{- end }}
       volumes:
         - name: deployment-plan
           projected:
-            defaultMode: 0444
+            defaultMode: 292
             sources:
               - configMap:
                   name: {{ $planConfigMapName }}
                   items:
                     - key: plan.json
                       path: plan.json
+                    {{- if ne $workload.applicationConfig "none" }}
+                    - key: {{ $workload.name }}.toml
+                      path: application.toml
+                    {{- end }}
+        - name: vault-secrets
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: {{ include "rss.secretProviderClassName" (dict "root" $ "profile" $profile "workload" $workload.name "phase" $phase) }}
+        {{- if ne $workload.applicationConfig "none" }}
+        - name: public-trust
+          configMap:
+            name: rss-public-trust-v1
+            defaultMode: 292
+            items:
+              - key: postgres-ca.pem
+                path: postgres-ca.pem
+              - key: vault-ca.pem
+                path: vault-ca.pem
+              {{- if eq $workload.applicationConfig "settingsOnlyV1" }}
+              - key: federated.jwks.json
+                path: federated.jwks.json
+              {{- else if eq $workload.applicationConfig "identityAuditV1" }}
+              - key: oidc.jwks.json
+                path: oidc.jwks.json
+              - key: password-blocklist.sha256
+                path: password-blocklist.sha256
+              {{- end }}
+        {{- end }}
+        {{- if $requiresSpiffe }}
+        - name: spiffe-workload-api
+          csi:
+            driver: csi.spiffe.io
+            readOnly: true
+        {{- end }}
+{{ end }}
 {{- end }}

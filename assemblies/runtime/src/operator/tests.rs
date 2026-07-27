@@ -39,8 +39,7 @@ use super::settings::{
     verified_config_value_maintenance_operator_subject,
 };
 use super::{
-    is_audit_ledger_verify_command, is_postgres_command, is_projection_command,
-    run_projection_control_command,
+    is_audit_ledger_verify_command, is_projection_command, run_projection_control_command,
 };
 use crate::phase::test_support::{
     COMMAND_IDEMPOTENCY_KEYS_ENV, build_command_idempotency_keyring_from,
@@ -49,22 +48,6 @@ use crate::phase::{OperatorRuntimeInputs, PreparedRuntimeInputs};
 
 fn args(parts: &[&str]) -> Vec<String> {
     parts.iter().map(|part| (*part).to_string()).collect()
-}
-
-#[test]
-fn postgres_reader_migration_command_is_exact_and_has_no_legacy_shape() {
-    assert!(is_postgres_command(&args(&[
-        "postgres",
-        "migrate-reader-lane"
-    ])));
-    for dispatched_but_rejected_by_runner in [
-        args(&["postgres"]),
-        args(&["postgres", "migrate"]),
-        args(&["postgres", "migrate-reader-lane", "--all"]),
-    ] {
-        assert!(is_postgres_command(&dispatched_but_rejected_by_runner));
-    }
-    assert!(!is_postgres_command(&args(&["migrate-reader-lane"])));
 }
 
 static PROJECTION_REGISTRY_FIXTURE_INPUTS: &[vocab::ProjectionInputBinding] =

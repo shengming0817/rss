@@ -29,15 +29,27 @@ FROM chef AS planner
 COPY . .
 RUN cargo chef prepare --recipe-path recipe.json
 
-# ── builder：先 cook 依赖层（缓存命中点）→ 再编 server/rss bins → strip 符号 ─────────────────────────
+# ── builder：只构建 serving binary；迁移能力不进入 serving artifact ───────────────────────────────
 FROM chef AS builder
-# 仅 server/rss 子图的依赖被 cook（--bin 透传给底层 cargo），无关 workspace 成员不参与。
+# 仅 server 子图的依赖被 cook（--bin 透传给底层 cargo），无关 workspace 成员不参与。
 COPY --from=planner /app/recipe.json recipe.json
-RUN cargo chef cook --release --locked --recipe-path recipe.json --bin server --bin rss
+RUN cargo chef cook --release --locked --recipe-path recipe.json --bin server
 COPY . .
-RUN cargo build --release --locked --bin server --bin rss
+RUN cargo build --release --locked --bin server
 # reason: strip 符号缩体积（不改全局 [profile.release]，避免影响整个 workspace 的开发构建）。
-RUN strip target/release/server target/release/rss
+RUN strip target/release/server
+
+# ── operator-builder/operator-runtime：唯一包含 forward migration capability 的 artifact ─────────
+FROM chef AS operator-builder
+COPY --from=planner /app/recipe.json recipe.json
+RUN cargo chef cook --release --locked --recipe-path recipe.json --package rss --bin rss
+COPY . .
+RUN cargo build --release --locked --package rss --bin rss
+RUN strip target/release/rss
+
+FROM gcr.io/distroless/cc-debian12:nonroot AS operator-runtime
+COPY --from=operator-builder /app/target/release/rss /usr/local/bin/rss
+ENTRYPOINT ["/usr/local/bin/rss"]
 
 # ── settingsonly-builder：独立 cook/build settingsonly-server，不污染 full runtime artifact ──────────
 FROM chef AS settingsonly-builder
@@ -70,13 +82,12 @@ COPY --from=identityaudit-builder /app/target/release/identityaudit-server /usr/
 COPY --from=identityaudit-builder /app/assemblies/identityaudit/config.schema.json /usr/share/rss/identityaudit/config.schema.json
 ENTRYPOINT ["/usr/local/bin/identityaudit-server"]
 
-# ── runtime：distroless/cc 非 root，server 为入口，rss 供离线维护命令使用 ─────────────────────────────
+# ── runtime：distroless/cc 非 root，仅含 server ─────────────────────────────────────────────────
 # 保持最后 stage，确保普通 `docker build .` 的默认镜像语义不变。
 FROM gcr.io/distroless/cc-debian12:nonroot AS runtime
 # 4 个 listener（Primary/Internal/Admin/Health）默认演示端口；实际 bind 地址由 RSS_*_LISTEN_ADDR 决定。
 EXPOSE 8080 8081 8082 8083
 COPY --from=builder /app/target/release/server /usr/local/bin/server
-COPY --from=builder /app/target/release/rss /usr/local/bin/rss
 # distroless:nonroot 已内置 USER 65532:65532（只读 rootfs 友好；无 shell ⇒ 无 Docker HEALTHCHECK，
 # 探针交编排器 httpGet /health/v1/readyz，见部署文档）。
 ENTRYPOINT ["/usr/local/bin/server"]

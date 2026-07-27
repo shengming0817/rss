@@ -5,6 +5,7 @@ set -o pipefail
 
 SEAL_NAME=.rss-tool-seal-v1
 HELM_LINUX_AMD64_SHA256=97dbeb971be4ac4b27e3839976d9564c0fb35c6f3b1da89dd1e292d236af4096
+KUBECONFORM_LINUX_AMD64_SHA256=c31518ddd122663b3f3aa874cfe8178cb0988de944f29c74a0b9260920d115d3
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 CATALOG=$SCRIPT_DIR/ci-tool-catalog.txt
 
@@ -73,7 +74,7 @@ lane_has_tool() {
   case "$lane:$name" in
     all:* | \
     *:sccache | \
-    ci-meta:promtool | ci-meta:helm | \
+    ci-meta:promtool | ci-meta:helm | ci-meta:kubeconform | \
     ci-core-prerequisites:cargo-dylint | ci-core-prerequisites:dylint-link | \
     ci-core-tests:cargo-nextest | ci-local-only:cargo-nextest | \
     ci-security:cargo-deny | ci-security:cargo-audit | \
@@ -104,7 +105,7 @@ validate_catalog() {
       case "$relative" in *//*|*/./*|*/../*|*/..|/*) die 'invalid catalog binary path' ;; esac
     fi
     case "$backend:$probe" in
-      install-action:nextest|install-action:llvm-cov|install-action:direct|install-action:sccache|binstall:dylint|binstall:direct|binstall:receipt|download:helm|docker:promtool) ;;
+      install-action:nextest|install-action:llvm-cov|install-action:direct|install-action:sccache|binstall:dylint|binstall:direct|binstall:receipt|download:helm|download:kubeconform|docker:promtool) ;;
       *) die 'invalid catalog probe/backend combination' ;;
     esac
     case "$seen" in *"|$name|"*) die 'duplicate catalog tool' ;; esac
@@ -343,6 +344,10 @@ fresh_probe() {
       output=$(capture_probe "$binary" "$spec" version --template '{{.Version}}')
       [ "$output" = "v$version" ] || die "tool version mismatch: $spec"
       ;;
+    kubeconform)
+      output=$(capture_probe "$binary" "$spec" -v)
+      [ "$output" = "v$version" ] || die "tool version mismatch: $spec"
+      ;;
     sccache)
       verify_sccache_version "$binary" "$name" "$version"
       ;;
@@ -369,25 +374,38 @@ install_download() {
   case "$(uname -m)" in x86_64|amd64) ;; *) die 'download backend only supports x86_64' ;; esac
 
   while IFS='|' read -r name version backend relative probe; do
-    [ "$name" = helm ] && [ "$backend" = download ] && [ "$probe" = helm ] ||
-      die 'unsupported download catalog row'
-    archive_url="https://get.helm.sh/helm-v$version-linux-amd64.tar.gz"
-    stage=$(mktemp -d "${TMPDIR:-/tmp}/rss-helm-download.XXXXXX") || die 'cannot create download staging directory'
-    archive=$stage/helm.tar.gz
+    [ "$backend" = download ] || die 'unsupported download catalog row'
+    case "$name:$probe" in
+      helm:helm)
+        archive_url="https://get.helm.sh/helm-v$version-linux-amd64.tar.gz"
+        expected_digest=$HELM_LINUX_AMD64_SHA256
+        archive_member=linux-amd64/helm
+        extracted_relative=linux-amd64/helm
+        ;;
+      kubeconform:kubeconform)
+        archive_url="https://github.com/yannh/kubeconform/releases/download/v$version/kubeconform-linux-amd64.tar.gz"
+        expected_digest=$KUBECONFORM_LINUX_AMD64_SHA256
+        archive_member=kubeconform
+        extracted_relative=kubeconform
+        ;;
+      *) die 'unsupported download catalog row' ;;
+    esac
+    stage=$(mktemp -d "${TMPDIR:-/tmp}/rss-$name-download.XXXXXX") || die 'cannot create download staging directory'
+    archive=$stage/$name.tar.gz
     curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
-      --output "$archive" "$archive_url" || { rm -rf -- "$stage"; die 'Helm download failed'; }
-    [ "$(hash_file "$archive")" = "$HELM_LINUX_AMD64_SHA256" ] || {
+      --output "$archive" "$archive_url" || { rm -rf -- "$stage"; die "$name download failed"; }
+    [ "$(hash_file "$archive")" = "$expected_digest" ] || {
       rm -rf -- "$stage"
-      die 'Helm archive SHA-256 mismatch'
+      die "$name archive SHA-256 mismatch"
     }
-    tar -xzf "$archive" -C "$stage" linux-amd64/helm || {
+    tar -xzf "$archive" -C "$stage" "$archive_member" || {
       rm -rf -- "$stage"
-      die 'Helm archive extraction failed'
+      die "$name archive extraction failed"
     }
-    extracted=$stage/linux-amd64/helm
+    extracted=$stage/$extracted_relative
     [ -f "$extracted" ] && [ ! -L "$extracted" ] || {
       rm -rf -- "$stage"
-      die 'Helm archive binary is unsafe'
+      die "$name archive binary is unsafe"
     }
     destination=$root/$relative
     directory=${destination%/*}
@@ -415,11 +433,11 @@ install_download() {
         die 'download binary destination is unsafe'
       }
     fi
-    temporary=$(mktemp "$directory/.helm.tmp.XXXXXX") || {
+    temporary=$(mktemp "$directory/.$name.tmp.XXXXXX") || {
       if [ "$directory_existed" -eq 0 ]; then rmdir -- "$directory" 2>/dev/null || true; fi
       if [ "$download_root_existed" -eq 0 ]; then rmdir -- "$download_root" 2>/dev/null || true; fi
       rm -rf -- "$stage"
-      die 'cannot stage Helm binary'
+      die "cannot stage $name binary"
     }
     if ! cp -- "$extracted" "$temporary" ||
        ! chmod 755 "$temporary" ||
@@ -428,7 +446,7 @@ install_download() {
       if [ "$directory_existed" -eq 0 ]; then rmdir -- "$directory" 2>/dev/null || true; fi
       if [ "$download_root_existed" -eq 0 ]; then rmdir -- "$download_root" 2>/dev/null || true; fi
       rm -rf -- "$stage"
-      die 'cannot publish Helm binary'
+      die "cannot publish $name binary"
     fi
     rm -rf -- "$stage"
   done <<EOF

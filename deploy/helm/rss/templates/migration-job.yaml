@@ -1,0 +1,81 @@
+{{- $profile := include "rss.profile" . -}}
+{{- $phase := include "rss.phase" . -}}
+{{- if eq $phase "migration" }}
+{{- $planSource := include "rss.planSource" . -}}
+{{- $plan := $planSource | mustFromJson -}}
+{{- if eq $plan.migrationMode "forwardOnlyTwoPhase" }}
+{{- $fingerprint := include "rss.migrationHeadFingerprint" $plan | trunc 12 -}}
+{{- $artifact := required "DeploymentPlan migrationArtifact is required" $plan.migrationArtifact -}}
+{{- $budget := required "DeploymentPlan migrationExecutionBudget is required" $plan.migrationExecutionBudget -}}
+{{- range $workload := $plan.workloads }}
+{{- $component := printf "%s-migration" $workload.name -}}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "rss.resourceName" (dict "root" $ "name" (printf "%s-migration-r%v-%s" $workload.name $.Release.Revision $fingerprint)) }}
+  labels:
+    {{- include "rss.labels" (dict "root" $ "profile" $profile "workload" $component) | nindent 4 }}
+  annotations:
+    {{- include "rss.fingerprintAnnotations" $plan | nindent 4 }}
+spec:
+  activeDeadlineSeconds: {{ $budget.activeDeadlineSeconds }}
+  backoffLimit: {{ $budget.backoffLimit }}
+  template:
+    metadata:
+      labels:
+        {{- include "rss.selectorLabels" (dict "root" $ "workload" $component) | nindent 8 }}
+      annotations:
+        {{- include "rss.fingerprintAnnotations" $plan | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "rss.phaseServiceAccountName" (dict "root" $ "identity" $workload.identity.serviceAccount "phase" $phase) }}
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: migrate
+          image: {{ $artifact.image | quote }}
+          imagePullPolicy: IfNotPresent
+          command: ["rss", "postgres", "migrate-all"]
+          env:
+            - name: RSS_PG_DATABASE_URL_FILE
+              value: /var/run/rss/secrets/database-url
+            - name: RSS_BUILD_SOURCE_SHA
+              value: {{ $artifact.sourceRevision | quote }}
+            - name: RSS_BUILD_IMAGE_DIGEST
+              value: {{ regexFind "sha256:[0-9a-f]{64}$" $artifact.image | quote }}
+          resources:
+            {{- $workload.resources | toYaml | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            privileged: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: vault-secrets
+              mountPath: /var/run/rss/secrets
+              readOnly: true
+      volumes:
+        - name: vault-secrets
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: {{ include "rss.secretProviderClassName" (dict "root" $ "profile" $profile "workload" $workload.name "phase" $phase) }}
+{{ end }}
+{{- else if ne $plan.migrationMode "none" -}}
+{{- fail "DeploymentPlan contains an unsupported migration mode" -}}
+{{- end }}
+{{- end }}

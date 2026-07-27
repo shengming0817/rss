@@ -71,6 +71,7 @@ pub(crate) struct ExecutionUnit {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum LocalFeatureScope {
     Postgres,
+    PostgresMigration,
     RedisAdapter,
     Amqp,
     Mqtt,
@@ -82,8 +83,9 @@ pub(crate) enum LocalFeatureScope {
 }
 
 impl LocalFeatureScope {
-    pub(crate) const ALL: [Self; 9] = [
+    pub(crate) const ALL: [Self; 10] = [
         Self::Postgres,
+        Self::PostgresMigration,
         Self::RedisAdapter,
         Self::Amqp,
         Self::Mqtt,
@@ -97,6 +99,7 @@ impl LocalFeatureScope {
     pub(crate) const fn package(self) -> &'static str {
         match self {
             Self::Postgres => "postgres",
+            Self::PostgresMigration => "postgres-migration",
             Self::RedisAdapter => "redis-adapter",
             Self::Amqp => "amqp",
             Self::Mqtt => "mqtt",
@@ -111,6 +114,7 @@ impl LocalFeatureScope {
     pub(crate) const fn feature(self) -> &'static str {
         match self {
             Self::Postgres
+            | Self::PostgresMigration
             | Self::RedisAdapter
             | Self::Amqp
             | Self::Mqtt
@@ -227,9 +231,10 @@ integration_shard_catalog! {
         name: "postgres-domain",
         resources: [Postgres],
         capabilities: [],
-        local_feature_scopes: [Postgres, Journeys, Runtime],
+        local_feature_scopes: [Postgres, PostgresMigration, Journeys, Runtime],
         units: [
             ("postgres", "postgres", Lib, Serial),
+            ("postgres-migration", "postgres_migration", Lib, Serial),
             ("postgres", "feature_manifest", Test, Parallel),
             ("postgres", "migration_ops_contract", Test, Parallel),
             ("postgres", "tx_capability_trybuild", Test, Parallel),
@@ -333,6 +338,7 @@ integration_shard_catalog! {
         units: [
             ("journeys", "two_replica_runtime", Test, Serial),
             ("journeys", "production_runtime", Test, Parallel),
+            ("journeys", "runtime_inventory", Test, Parallel),
         ],
     },
 }
@@ -492,8 +498,9 @@ pub(crate) fn localtx_backend_execution_unit() -> Result<ExecutionUnit> {
     localtx_backend_execution_unit_from(shard.spec().units)
 }
 
-const LEGACY_PACKAGES: &[&str] = &[
+const INTEGRATION_PACKAGES: &[&str] = &[
     "postgres",
+    "postgres-migration",
     "redis-adapter",
     "amqp",
     "mqtt",
@@ -536,7 +543,10 @@ fn validate_local_feature_catalog(specs: &[ShardSpec]) -> Result<()> {
         .collect::<BTreeMap<_, _>>();
     if known_by_package.len() != LocalFeatureScope::ALL.len()
         || known_by_package.keys().copied().collect::<BTreeSet<_>>()
-            != LEGACY_PACKAGES.iter().copied().collect::<BTreeSet<_>>()
+            != INTEGRATION_PACKAGES
+                .iter()
+                .copied()
+                .collect::<BTreeSet<_>>()
     {
         bail!("local feature scopes and integration package catalog must be bijective");
     }
@@ -599,7 +609,7 @@ fn metadata_targets(metadata: &Value) -> Result<BTreeSet<TargetId>> {
             .get("name")
             .and_then(Value::as_str)
             .context("cargo metadata package missing name")?;
-        if !LEGACY_PACKAGES.contains(&name) {
+        if !INTEGRATION_PACKAGES.contains(&name) {
             continue;
         }
         seen_packages.insert(name);
@@ -623,7 +633,7 @@ fn metadata_targets(metadata: &Value) -> Result<BTreeSet<TargetId>> {
             }
         }
     }
-    let missing_packages: Vec<_> = LEGACY_PACKAGES
+    let missing_packages: Vec<_> = INTEGRATION_PACKAGES
         .iter()
         .copied()
         .filter(|package| !seen_packages.contains(package))
@@ -744,7 +754,7 @@ mod tests {
 
     #[test]
     fn local_feature_scope_catalog_is_non_vacuous_and_rejects_omissions() -> Result<()> {
-        assert_eq!(LocalFeatureScope::ALL.len(), LEGACY_PACKAGES.len());
+        assert_eq!(LocalFeatureScope::ALL.len(), INTEGRATION_PACKAGES.len());
         assert!(
             LocalFeatureScope::ALL
                 .into_iter()
@@ -769,9 +779,32 @@ mod tests {
     }
 
     #[test]
+    fn postgres_migration_real_backend_carrier_is_unique_serial_and_feature_enabled() {
+        let spec = IntegrationShard::PostgresDomain.spec();
+        assert!(
+            spec.local_feature_scopes
+                .contains(&LocalFeatureScope::PostgresMigration)
+        );
+        let units = spec
+            .units
+            .iter()
+            .filter(|unit| unit.package == "postgres-migration")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            units.len(),
+            1,
+            "operator integration carrier must be unique"
+        );
+        assert_eq!(units[0].target, "postgres_migration");
+        assert_eq!(units[0].kind, TargetKind::Lib);
+        assert_eq!(units[0].scheduling, Scheduling::Serial);
+    }
+
+    #[test]
     fn scheduling_plan_rejects_dangerous_target_parallelism() {
         let expected_serial = BTreeSet::from([
             ("postgres", "postgres"),
+            ("postgres-migration", "postgres_migration"),
             ("journeys", "audit_list_tenant_entries_localtx_journey"),
             ("journeys", "identity_logout_localtx_journey"),
             ("journeys", "identity_password_change_localtx_journey"),
@@ -940,7 +973,7 @@ mod tests {
             packages.entry(unit.package).or_default().push(unit);
         }
         json!({
-            "packages": LEGACY_PACKAGES.iter().map(|package| {
+            "packages": INTEGRATION_PACKAGES.iter().map(|package| {
                 let package_targets = packages.get(package).cloned().unwrap_or_default();
                 json!({
                     "name": package,

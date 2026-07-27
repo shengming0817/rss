@@ -5,7 +5,7 @@ use std::fs;
 use std::io;
 use std::path::PathBuf;
 
-const EXPECTED_TOOLS: [&str; 10] = [
+const EXPECTED_TOOLS: [&str; 11] = [
     "cargo-nextest",
     "cargo-llvm-cov",
     "cargo-deny",
@@ -16,6 +16,7 @@ const EXPECTED_TOOLS: [&str; 10] = [
     "sccache",
     "promtool",
     "helm",
+    "kubeconform",
 ];
 
 fn invalid_catalog(row: usize, message: &str) -> io::Error {
@@ -90,13 +91,19 @@ fn main() -> Result<(), Box<dyn Error>> {
                 | "sccache"
                 | "promtool"
                 | "helm"
+                | "kubeconform"
         ) {
             return Err(invalid_catalog(row, "invalid probe").into());
         }
         if (backend == "docker") != (name == "promtool" && probe == "promtool") {
             return Err(invalid_catalog(row, "invalid docker policy").into());
         }
-        if (backend == "download") != (name == "helm" && probe == "helm") {
+        if (backend == "download")
+            != matches!(
+                (name, probe),
+                ("helm", "helm") | ("kubeconform", "kubeconform")
+            )
+        {
             return Err(invalid_catalog(row, "invalid download policy").into());
         }
         if versions.insert(name, version).is_some() {

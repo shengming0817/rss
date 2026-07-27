@@ -40,11 +40,10 @@ make verify-fast
 
 ## 缺口与 owner
 
-These commands prove the frozen SpecKit carrier, landed DeploymentPlan generated set, and #1803's
-repository-static Helm profile/render closure. They do not execute install/upgrade/rollback, map
-secret references, add sidecars, or prove #1804 deployment policy, #1805 kind acceptance, protected
-RuntimeInventory, or OCI same-head/signature receipts. Each future
+These commands prove the frozen SpecKit carrier, landed DeploymentPlan generated set, and #1804's
+repository-static two-phase Helm/policy closure. They do not execute install/upgrade/rollback or prove
+#1805 kind acceptance, protected RuntimeInventory, or OCI same-head/signature receipts. Each future
 owner runs its exact tracker sequence from `tasks.md` after landing its carrier. #1779's content
 validator is Medium because its selftest is a typed `verify --fast` member; #1809 later binds exact
 same-head receipts through local `ci-gate` and does not grant forge activation. #1803 rollback is a
-whole-change revert of chart/tooling/generated files; no cluster, database, or secret state is mutated.
+whole-change revert of chart/tooling/generated files; live forward-only migration state can only roll forward.

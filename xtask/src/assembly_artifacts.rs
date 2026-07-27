@@ -5,10 +5,13 @@
 
 use anyhow::{Context, Result, bail};
 use assembly_schema::{
-    AssemblyListenerKind, AssemblyManifest, AssemblyProfile, DeploymentIdentityV1Input,
-    DeploymentPlan, DeploymentPlanV1Input, DeploymentServiceV1Input, DeploymentWorkloadV1Input,
-    ParsedAssemblyLock, ParsedRuntimePlan, PortExposure, PortV1Input, ProbeKind, ProbeV1Input,
-    ResourceListV1Input, ResourceRequirementsV1Input, SecretRefV1Input,
+    ApplicationConfig, AssemblyListenerKind, AssemblyManifest, AssemblyProfile, AvailabilityClass,
+    DatabasePoolCeilingsV1Input, DependencyPeerRole, DeploymentIdentityV1Input, DeploymentPlan,
+    DeploymentPlanV1Input, DeploymentServiceV1Input, DeploymentWorkloadV1Input,
+    MigrationArtifactV1Input, MigrationExecutionBudgetV1Input, MigrationMode, ParsedAssemblyLock,
+    ParsedRuntimePlan, PortExposure, PortV1Input, ProbeKind, ProbeV1Input, ProviderConstructor,
+    ReplicaDatabaseBudgetV1Input, ResourceListV1Input, ResourceRequirementsV1Input,
+    SecretBindingV1Input, SecretConsumer, SecretPurpose, VaultObjectRefV1Input,
 };
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -124,8 +127,67 @@ enum RawJourney {
 struct RawDeploymentProfile {
     #[serde(rename = "runtimePlan")]
     runtime_plan: RawRuntimePlanArtifact,
+    #[serde(rename = "migrationMode")]
+    migration_mode: MigrationMode,
+    #[serde(default, rename = "migrationArtifact")]
+    migration_artifact: Option<RawMigrationArtifact>,
+    #[serde(default, rename = "migrationExecutionBudget")]
+    migration_execution_budget: Option<RawMigrationExecutionBudget>,
+    #[serde(rename = "availabilityClass")]
+    availability_class: AvailabilityClass,
+    #[serde(rename = "drainSeconds")]
+    drain_seconds: u16,
+    #[serde(rename = "replicaDatabaseBudget")]
+    replica_database_budget: RawReplicaDatabaseBudget,
     workloads: Vec<RawDeploymentWorkload>,
     services: Vec<RawDeploymentService>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawMigrationArtifact {
+    image: String,
+    #[serde(rename = "sourceRevision")]
+    source_revision: String,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawMigrationExecutionBudget {
+    #[serde(rename = "activeDeadlineSeconds")]
+    active_deadline_seconds: u32,
+    #[serde(rename = "backoffLimit")]
+    backoff_limit: u8,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawReplicaDatabaseBudget {
+    #[serde(rename = "minReplicas")]
+    min_replicas: u8,
+    #[serde(rename = "maxReplicas")]
+    max_replicas: u8,
+    #[serde(rename = "poolCeilings")]
+    pool_ceilings: RawDatabasePoolCeilings,
+    #[serde(rename = "databaseConnectionLimit")]
+    database_connection_limit: u16,
+    #[serde(rename = "reservedConnections")]
+    reserved_connections: u16,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawDatabasePoolCeilings {
+    writer: u16,
+    reader: u16,
+    #[serde(default, rename = "auditAdmin")]
+    audit_admin: Option<u16>,
+    #[serde(default, rename = "dlxArchiver")]
+    dlx_archiver: Option<u16>,
+    #[serde(default, rename = "dlxVerifier")]
+    dlx_verifier: Option<u16>,
+    #[serde(default, rename = "dlxPurger")]
+    dlx_purger: Option<u16>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -140,9 +202,15 @@ struct RawRuntimePlanArtifact {
 struct RawDeploymentWorkload {
     name: String,
     image: String,
+    #[serde(rename = "sourceRevision")]
+    source_revision: String,
+    #[serde(rename = "applicationConfig")]
+    application_config: ApplicationConfig,
     identity: RawDeploymentIdentity,
-    #[serde(default, rename = "secretRefs")]
-    secret_refs: Vec<RawSecretRef>,
+    #[serde(default, rename = "secretBindings")]
+    secret_bindings: Vec<RawSecretBinding>,
+    #[serde(default, rename = "ingressPeerIdentities")]
+    ingress_peer_identities: Vec<String>,
     resources: RawResources,
     probes: Vec<RawProbe>,
 }
@@ -156,27 +224,32 @@ struct RawDeploymentIdentity {
 }
 
 #[derive(Clone, Deserialize)]
-#[serde(tag = "kind", deny_unknown_fields)]
-enum RawSecretRef {
-    #[serde(rename = "kubernetesSecret")]
-    Kubernetes { name: String, key: String },
-    #[serde(rename = "vaultRef")]
-    Vault {
-        #[serde(rename = "storeId")]
-        store_id: String,
-        #[serde(rename = "refKey")]
-        ref_key: String,
-        #[serde(default, rename = "refVersion")]
-        ref_version: Option<String>,
-    },
+#[serde(deny_unknown_fields)]
+struct RawSecretBinding {
+    purpose: SecretPurpose,
+    consumers: Vec<SecretConsumer>,
+    vault: RawVaultObjectRef,
 }
 
-impl std::fmt::Debug for RawSecretRef {
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawVaultObjectRef {
+    #[serde(rename = "storeId")]
+    store_id: String,
+    #[serde(rename = "refKey")]
+    ref_key: String,
+    #[serde(default, rename = "refVersion")]
+    ref_version: Option<String>,
+}
+
+impl std::fmt::Debug for RawSecretBinding {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(match self {
-            Self::Kubernetes { .. } => "KubernetesSecretRef(<redacted>)",
-            Self::Vault { .. } => "VaultRef(<redacted>)",
-        })
+        formatter
+            .debug_struct("RawSecretBinding")
+            .field("purpose", &self.purpose)
+            .field("consumers", &self.consumers)
+            .field("vault", &"<redacted>")
+            .finish()
     }
 }
 
@@ -249,6 +322,7 @@ pub(crate) struct SupportedArtifact {
 pub(crate) struct VerifiedDeploymentProfile {
     runtime_plan: ParsedRuntimePlan,
     facts: RawDeploymentProfile,
+    migration_head_fingerprint: Option<String>,
 }
 
 #[allow(dead_code)]
@@ -297,13 +371,21 @@ impl VerifiedDeploymentProfile {
         self.runtime_plan.as_plan()
     }
 
+    pub(crate) const fn drain_seconds(&self) -> u16 {
+        self.facts.drain_seconds
+    }
+
     #[cfg(test)]
     pub(crate) const fn profile(&self) -> AssemblyProfile {
         self.facts.runtime_plan.profile
     }
 
     pub(crate) fn plan_input(&self) -> DeploymentPlanV1Input {
-        deployment_plan_input(&self.facts)
+        deployment_plan_input(
+            &self.facts,
+            self.migration_head_fingerprint.clone(),
+            dependency_peer_roles(self.runtime_plan.as_plan()),
+        )
     }
 }
 
@@ -805,6 +887,25 @@ fn validate_deployment(
             return Ok(None);
         }
     };
+    let expected_peer_roles = dependency_peer_roles(runtime.as_plan());
+    let expected_app_config = match assembly {
+        "settingsonly" => ApplicationConfig::SettingsOnlyV1,
+        "identityaudit" => ApplicationConfig::IdentityAuditV1,
+        _ => ApplicationConfig::None,
+    };
+    if raw
+        .workloads
+        .iter()
+        .any(|workload| workload.application_config != expected_app_config)
+    {
+        reject!(
+            findings,
+            Deployment,
+            assembly,
+            "applicationConfig does not match the closed assembly startup contract"
+        );
+        return Ok(None);
+    }
 
     let lock_path = format!("assemblies/{assembly}/assembly.lock.json");
     let Some(lock_path) = regular_file(root, &lock_path, assembly, "deployment.lock", findings)?
@@ -826,7 +927,11 @@ fn validate_deployment(
         return Ok(None);
     }
 
-    let input = deployment_plan_input(raw);
+    let migration_head_fingerprint = match raw.migration_mode {
+        MigrationMode::None => None,
+        MigrationMode::ForwardOnlyTwoPhase => Some(migration_head_fingerprint(root)?),
+    };
+    let input = deployment_plan_input(raw, migration_head_fingerprint.clone(), expected_peer_roles);
     if let Err(error) = DeploymentPlan::compile_v1(runtime.as_plan(), input) {
         reject!(
             findings,
@@ -839,26 +944,93 @@ fn validate_deployment(
     Ok(Some(VerifiedDeploymentProfile {
         runtime_plan: runtime,
         facts: raw.clone(),
+        migration_head_fingerprint,
     }))
 }
 
-fn deployment_plan_input(raw: &RawDeploymentProfile) -> DeploymentPlanV1Input {
-    let mut input = DeploymentPlanV1Input::new();
+fn dependency_peer_roles(runtime: &assembly_schema::RuntimePlan) -> Vec<DependencyPeerRole> {
+    let mut roles = BTreeSet::from([DependencyPeerRole::Dns]);
+    for provider in runtime.provider_plans() {
+        match provider.constructor() {
+            ProviderConstructor::VaultSigner
+            | ProviderConstructor::VaultKeyProvider
+            | ProviderConstructor::VaultSecretResolver => {
+                roles.insert(DependencyPeerRole::Vault);
+            }
+            ProviderConstructor::PostgresRevocationStore
+            | ProviderConstructor::PostgresCasStore
+            | ProviderConstructor::PostgresAuthAuditSink
+            | ProviderConstructor::PostgresServiceTokenReplayStore
+            | ProviderConstructor::PostgresDlxLifecycleRepository => {
+                roles.insert(DependencyPeerRole::Postgresql);
+            }
+            ProviderConstructor::AmqpPublisher | ProviderConstructor::AmqpSubscriber => {
+                roles.insert(DependencyPeerRole::Amqp);
+            }
+            ProviderConstructor::RedisLockStore | ProviderConstructor::RedisCasStore => {
+                roles.insert(DependencyPeerRole::Redis);
+            }
+            ProviderConstructor::S3Store | ProviderConstructor::S3VerifiedDlxArchiveStore => {
+                roles.insert(DependencyPeerRole::ObjectStorage);
+            }
+            ProviderConstructor::OidcProvider => {
+                roles.insert(DependencyPeerRole::Oidc);
+            }
+            ProviderConstructor::RatelimitGovernorLimiter => {}
+        }
+    }
+    roles.into_iter().collect()
+}
+
+fn deployment_plan_input(
+    raw: &RawDeploymentProfile,
+    migration_head_fingerprint: Option<String>,
+    dependency_peer_roles: Vec<DependencyPeerRole>,
+) -> DeploymentPlanV1Input {
+    let mut input = DeploymentPlanV1Input::new(
+        raw.migration_mode,
+        migration_head_fingerprint,
+        raw.migration_artifact.as_ref().map(|artifact| {
+            MigrationArtifactV1Input::new(&artifact.image, &artifact.source_revision)
+        }),
+        raw.migration_execution_budget.map(|budget| {
+            MigrationExecutionBudgetV1Input::new(
+                budget.active_deadline_seconds,
+                budget.backoff_limit,
+            )
+        }),
+        raw.availability_class,
+        raw.drain_seconds,
+        ReplicaDatabaseBudgetV1Input::new(
+            raw.replica_database_budget.min_replicas,
+            raw.replica_database_budget.max_replicas,
+            DatabasePoolCeilingsV1Input::new(
+                raw.replica_database_budget.pool_ceilings.writer,
+                raw.replica_database_budget.pool_ceilings.reader,
+                raw.replica_database_budget.pool_ceilings.audit_admin,
+                raw.replica_database_budget.pool_ceilings.dlx_archiver,
+                raw.replica_database_budget.pool_ceilings.dlx_verifier,
+                raw.replica_database_budget.pool_ceilings.dlx_purger,
+            ),
+            raw.replica_database_budget.database_connection_limit,
+            raw.replica_database_budget.reserved_connections,
+        ),
+        dependency_peer_roles,
+    );
     for workload in &raw.workloads {
-        let secret_refs = workload
-            .secret_refs
+        let secret_bindings = workload
+            .secret_bindings
             .iter()
-            .map(|secret| match secret {
-                RawSecretRef::Kubernetes { name, key } => {
-                    SecretRefV1Input::kubernetes(name.clone(), key.clone())
-                }
-                RawSecretRef::Vault {
-                    store_id,
-                    ref_key,
-                    ref_version,
-                } => {
-                    SecretRefV1Input::vault(store_id.clone(), ref_key.clone(), ref_version.clone())
-                }
+            .map(|binding| {
+                SecretBindingV1Input::new(
+                    binding.purpose,
+                    binding.consumers.clone(),
+                    VaultObjectRefV1Input::new(
+                        binding.vault.store_id.clone(),
+                        binding.vault.ref_key.clone(),
+                        binding.vault.ref_version.clone(),
+                    ),
+                )
             })
             .collect();
         let resources = ResourceRequirementsV1Input::new(
@@ -879,11 +1051,14 @@ fn deployment_plan_input(raw: &RawDeploymentProfile) -> DeploymentPlanV1Input {
         input.workload(DeploymentWorkloadV1Input::new(
             workload.name.clone(),
             workload.image.clone(),
+            workload.source_revision.clone(),
+            workload.application_config,
             DeploymentIdentityV1Input::new(
                 workload.identity.name.clone(),
                 workload.identity.service_account.clone(),
             ),
-            secret_refs,
+            secret_bindings,
+            workload.ingress_peer_identities.clone(),
             resources,
             probes,
         ));
@@ -900,6 +1075,10 @@ fn deployment_plan_input(raw: &RawDeploymentProfile) -> DeploymentPlanV1Input {
         ));
     }
     input
+}
+
+fn migration_head_fingerprint(_root: &Path) -> Result<String> {
+    Ok(postgres_migration_inventory::migration_head_fingerprint())
 }
 
 fn validate_identifier(label: &str, value: &str, findings: &mut Vec<ArtifactFinding>) {
@@ -1056,13 +1235,36 @@ fn typed_env_catalog_is_bound(source: &str) -> Result<bool> {
             };
             method.sig.ident == "capture_process_snapshot"
                 && method.sig.inputs.is_empty()
-                && !method.attrs.iter().any(|attr| {
-                    attr.path().is_ident("cfg") || attr.path().is_ident("cfg_attr")
-                })
-                && matches!(method.block.stmts.as_slice(), [syn::Stmt::Expr(expr, None)] if exact_typed_env_capture_call(expr))
+                && !method
+                    .attrs
+                    .iter()
+                    .any(|attr| attr.path().is_ident("cfg") || attr.path().is_ident("cfg_attr"))
+                && method
+                    .block
+                    .stmts
+                    .iter()
+                    .filter(|statement| statement_contains_typed_env_capture(statement))
+                    .count()
+                    == 1
         })
     });
     Ok(env_source && capture)
+}
+
+fn statement_contains_typed_env_capture(statement: &syn::Stmt) -> bool {
+    let expression = match statement {
+        syn::Stmt::Local(local) => local.init.as_ref().map(|init| init.expr.as_ref()),
+        syn::Stmt::Expr(expression, _) => Some(expression),
+        syn::Stmt::Item(_) | syn::Stmt::Macro(_) => None,
+    };
+    let Some(expression) = expression else {
+        return false;
+    };
+    let expression = match expression {
+        syn::Expr::Try(expression) => expression.expr.as_ref(),
+        expression => expression,
+    };
+    exact_typed_env_capture_call(expression)
 }
 
 fn exact_typed_env_capture_call(expression: &syn::Expr) -> bool {
@@ -1229,12 +1431,15 @@ fn validate_journey(
             let env_path = root.join("deploy/.env.example");
             let env_source = std::fs::read_to_string(&env_path)
                 .with_context(|| format!("读取 {} 失败", env_path.display()))?;
-            if !compose_smoke_env_has_required_keyring(&env_source) {
+            let bundle_path = root.join("deploy/demo-secrets/runtime-serving-secret-bundle");
+            let bundle_source = std::fs::read_to_string(&bundle_path)
+                .with_context(|| format!("读取 {} 失败", bundle_path.display()))?;
+            if !compose_serving_secret_bundle_is_closed(&env_source, &bundle_source) {
                 reject!(
                     findings,
                     Journey,
                     assembly,
-                    "compose-smoke-v1 的 deploy/.env.example 缺唯一有效 command idempotency keyring"
+                    "compose-smoke-v1 的 serving Secret bundle/env 边界不闭合"
                 );
             }
         }
@@ -1482,16 +1687,78 @@ fn validate_compose_smoke_outage_closure(
     Ok(())
 }
 
-fn compose_smoke_env_has_required_keyring(source: &str) -> bool {
-    const PREFIX: &str = "RSS_COMMAND_IDEMPOTENCY_KEYS_JSON=";
-    let mut values = source.lines().filter_map(|line| line.strip_prefix(PREFIX));
-    let Some(raw) = values.next() else {
-        return false;
-    };
-    if values.next().is_some() {
+fn compose_serving_secret_bundle_is_closed(env_source: &str, bundle_source: &str) -> bool {
+    const FORBIDDEN_ENV_KEYS: &[&str] = &[
+        "RSS_AMQP_URL",
+        "RSS_SETTINGS_AMQP_URL",
+        "RSS_IDENTITY_AMQP_URL",
+        "RSS_AUDIT_AMQP_URL",
+        "RSS_AUDIT_CHAIN_KEY_B64URL",
+        "RSS_COMMAND_IDEMPOTENCY_KEYS_JSON",
+        "RSS_DLX_ARCHIVE_VAULT_TOKEN",
+        "RSS_DLX_HOT_VAULT_TOKEN",
+        "RSS_PG_PASSWORD_FILE",
+        "RSS_PG_READ_PASSWORD_FILE",
+        "RSS_PG_AUDIT_ADMIN_PASSWORD_FILE",
+        "RSS_PG_DLX_ARCHIVER_PASSWORD_FILE",
+        "RSS_PG_DLX_VERIFIER_PASSWORD_FILE",
+        "RSS_PG_DLX_PURGER_PASSWORD_FILE",
+        "RSS_REDIS_URL",
+        "RSS_S3_ACCESS_KEY_ID",
+        "RSS_S3_SECRET_ACCESS_KEY",
+        "RSS_S3_SESSION_TOKEN",
+        "RSS_SERVICE_TOKEN_HS256_SECRET_B64URL",
+        "RSS_TENANT_AUTHORITY_HMAC_KEY_B64URL",
+        "RSS_VAULT_TOKEN",
+    ];
+    if env_source.lines().any(|line| {
+        FORBIDDEN_ENV_KEYS
+            .iter()
+            .any(|key| line.starts_with(&format!("{key}=")))
+    }) {
         return false;
     }
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
+    let Ok(bundle) = serde_json::from_str::<serde_json::Value>(bundle_source) else {
+        return false;
+    };
+    let Some(bundle) = bundle.as_object() else {
+        return false;
+    };
+    let required = [
+        "amqpUrl",
+        "auditChainKey",
+        "commandIdempotencyKeys",
+        "dlxArchiveVaultToken",
+        "dlxHotVaultToken",
+        "pgPassword",
+        "pgReadPassword",
+        "pgDlxArchiverPassword",
+        "pgDlxVerifierPassword",
+        "pgDlxPurgerPassword",
+        "redisUrl",
+        "s3AccessKeyId",
+        "s3SecretAccessKey",
+        "serviceTokenSecret",
+        "tenantAuthorityKey",
+        "vaultToken",
+    ];
+    if bundle.len() != required.len()
+        || required.iter().any(|key| {
+            !bundle
+                .get(*key)
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|value| !value.is_empty())
+        })
+    {
+        return false;
+    }
+    let Some(raw_keyring) = bundle
+        .get("commandIdempotencyKeys")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(raw_keyring) else {
         return false;
     };
     value
@@ -1903,6 +2170,49 @@ fn validate_image(
             "Docker target 未从 exact builder COPY binary"
         );
     }
+    if stage.instructions.iter().any(|line| {
+        crate::assembly::docker_instruction_arguments(line, "COPY").is_some_and(|args| {
+            args.contains("/app/target/release/rss") || args.contains("/usr/local/bin/rss")
+        })
+    }) {
+        reject!(
+            findings,
+            Image,
+            assembly,
+            "serving Docker target 禁止包含 rss migration operator"
+        );
+    }
+    let operator_stages = stages
+        .iter()
+        .filter(|candidate| candidate.name == "operator-runtime")
+        .collect::<Vec<_>>();
+    let [operator] = operator_stages.as_slice() else {
+        reject!(
+            findings,
+            Image,
+            assembly,
+            "Docker 必须有唯一 operator-runtime stage"
+        );
+        return Ok(());
+    };
+    if operator.base != "gcr.io/distroless/cc-debian12:nonroot"
+        || operator.instructions.iter().any(|line| {
+            crate::assembly::docker_instruction_arguments(line, "COPY")
+                .is_some_and(|args| !args.contains("/app/target/release/rss"))
+        })
+        || !operator.instructions.iter().any(|line| {
+            crate::assembly::docker_instruction_arguments(line, "COPY").is_some_and(|args| {
+                args.contains("/app/target/release/rss") && args.ends_with("/usr/local/bin/rss")
+            })
+        })
+    {
+        reject!(
+            findings,
+            Image,
+            assembly,
+            "operator-runtime 必须仅投影 rss migration operator"
+        );
+    }
     match config {
         RawConfigSchema::JsonSchema { path } => {
             let schema_source = format!("/app/{path}");
@@ -1940,17 +2250,7 @@ fn validate_image(
 fn docker_run_builds_binary(args: &str, assembly: &str, package: &str, target: &str) -> bool {
     let tokens = args.split_whitespace().collect::<Vec<_>>();
     if assembly == "runtime" {
-        tokens
-            == [
-                "cargo",
-                "build",
-                "--release",
-                "--locked",
-                "--bin",
-                target,
-                "--bin",
-                "rss",
-            ]
+        tokens == ["cargo", "build", "--release", "--locked", "--bin", target]
     } else {
         tokens
             == [
@@ -2205,6 +2505,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn migration_head_identity_delegates_to_the_typed_inventory() -> Result<()> {
+        let root = crate::workspace_root()?;
+        let actual = migration_head_fingerprint(&root)?;
+        assert_eq!(
+            actual,
+            postgres_migration_inventory::migration_head_fingerprint()
+        );
+        assert!(!postgres_migration_inventory::migrations().is_empty());
+        Ok(())
+    }
+
+    #[test]
     fn schema_v1_and_lifecycle_are_closed() -> Result<()> {
         let green = green_matrix()?;
         assert_eq!(green.schema_version, 1);
@@ -2262,24 +2574,20 @@ mod tests {
     #[test]
     fn deployment_raw_secret_debug_is_redacted_through_matrix_carriers() -> Result<()> {
         let coordinates = [
-            "zz-kubernetes-secret-1802",
-            "ZZ_SECRET_REFERENCE_KEY_1802",
             "zz-vault-store-1802",
             "zz/vault/ref/key/1802",
             "zz-vault-version-1802",
         ];
         let mut profile = runtime_deployment_profile()?;
-        profile.workloads[0].secret_refs = vec![
-            RawSecretRef::Kubernetes {
-                name: coordinates[0].to_owned(),
-                key: coordinates[1].to_owned(),
+        profile.workloads[0].secret_bindings = vec![RawSecretBinding {
+            purpose: SecretPurpose::MigrationDatabaseUrl,
+            consumers: vec![SecretConsumer::Migration],
+            vault: RawVaultObjectRef {
+                store_id: coordinates[0].to_owned(),
+                ref_key: coordinates[1].to_owned(),
+                ref_version: Some(coordinates[2].to_owned()),
             },
-            RawSecretRef::Vault {
-                store_id: coordinates[2].to_owned(),
-                ref_key: coordinates[3].to_owned(),
-                ref_version: Some(coordinates[4].to_owned()),
-            },
-        ];
+        }];
         let diagnostic = format!("{profile:?}");
         for coordinate in coordinates {
             assert!(
@@ -2506,6 +2814,11 @@ mod tests {
         let green = concat!(
             "FROM chef AS demo-builder\n",
             "RUN cargo build --release --locked --package demo --bin demo-server\n",
+            "FROM chef AS operator-builder\n",
+            "RUN cargo build --release --locked --package rss --bin rss\n",
+            "FROM gcr.io/distroless/cc-debian12:nonroot AS operator-runtime\n",
+            "COPY --from=operator-builder /app/target/release/rss /usr/local/bin/rss\n",
+            "ENTRYPOINT [\"/usr/local/bin/rss\"]\n",
             "FROM gcr.io/distroless/cc-debian12:nonroot AS demo-runtime\n",
             "COPY --from=demo-builder /app/target/release/demo-server /usr/local/bin/demo-server\n",
             "COPY --from=demo-builder /app/assemblies/demo/config.schema.json /usr/share/rss/demo/config.schema.json\n",
@@ -2542,6 +2855,13 @@ mod tests {
                 green.replace(
                     "RUN cargo build --release --locked --package demo --bin demo-server",
                     "RUN echo cargo build --release --locked --package demo --bin demo-server",
+                ),
+            ),
+            (
+                "operator-leaks-into-serving",
+                green.replace(
+                    "COPY --from=demo-builder /app/assemblies/demo/config.schema.json /usr/share/rss/demo/config.schema.json\n",
+                    "COPY --from=operator-builder /app/target/release/rss /usr/local/bin/rss\nCOPY --from=demo-builder /app/assemblies/demo/config.schema.json /usr/share/rss/demo/config.schema.json\n",
                 ),
             ),
             (
@@ -2596,29 +2916,37 @@ mod tests {
             "real deploy/smoke.sh is not strict production evidence"
         );
         let env_source = std::fs::read_to_string(workspace.join("deploy/.env.example"))?;
+        let bundle_source = std::fs::read_to_string(
+            workspace.join("deploy/demo-secrets/runtime-serving-secret-bundle"),
+        )?;
         assert!(
-            compose_smoke_env_has_required_keyring(&env_source),
-            "real deploy/.env.example cannot start the strict smoke runtime"
+            compose_serving_secret_bundle_is_closed(&env_source, &bundle_source),
+            "real compose serving Secret boundary is not closed"
         );
-        for (label, mutated) in [
+        for (label, mutated_bundle) in [
             (
                 "missing-command-keyring",
-                env_source.replace("RSS_COMMAND_IDEMPOTENCY_KEYS_JSON=", "REMOVED_KEYRING="),
+                bundle_source.replace("\"commandIdempotencyKeys\"", "\"removedKeyring\""),
             ),
             (
                 "malformed-command-keyring",
-                env_source.replace(
-                    "{\"current\":{\"id\":\"demo-v1\",\"key\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"}}",
-                    "not-json",
-                ),
+                bundle_source.replace("{\\\"current\\\"", "not-json"),
             ),
         ] {
-            assert_ne!(mutated, env_source, "{label} mutation was vacuous");
+            assert_ne!(
+                mutated_bundle, bundle_source,
+                "{label} mutation was vacuous"
+            );
             assert!(
-                !compose_smoke_env_has_required_keyring(&mutated),
+                !compose_serving_secret_bundle_is_closed(&env_source, &mutated_bundle),
                 "{label} mutation escaped"
             );
         }
+        let raw_env = format!("{env_source}\nRSS_REDIS_URL=redis://legacy\n");
+        assert!(
+            !compose_serving_secret_bundle_is_closed(&raw_env, &bundle_source),
+            "legacy raw Secret environment mutation escaped"
+        );
 
         for (label, expected, needle, replacement) in [
             (
@@ -2774,15 +3102,16 @@ mod tests {
         }
 
         assert!(docker_run_builds_binary(
-            "cargo build --release --locked --package demo --bin demo-server",
+            "cargo build --release --locked --package demo --bin demo-server --package rss --bin rss",
             "demo",
             "demo",
             "demo-server"
         ));
         for bypass in [
-            "cargo build --release --locked --package demo --bin demo-server --help",
-            "cargo build --release --locked --package missing --bin missing --help --package demo --bin demo-server",
-            "cargo build --release --locked --package demo --bin demo-server --features bait",
+            "cargo build --release --locked --package demo --bin demo-server",
+            "cargo build --release --locked --package demo --bin demo-server --package rss --bin rss --help",
+            "cargo build --release --locked --package demo --bin demo-server --package rss --bin other",
+            "cargo build --release --locked --package demo --bin demo-server --package rss --bin rss --package third --bin third",
         ] {
             assert!(
                 !docker_run_builds_binary(bypass, "demo", "demo", "demo-server"),
@@ -2962,7 +3291,7 @@ mod tests {
         assert_deployment_red(&root, &wrong_path, "runtime path")?;
 
         let mut wrong_profile = runtime_deployment_profile()?;
-        wrong_profile.runtime_plan.profile = AssemblyProfile::Production;
+        wrong_profile.runtime_plan.profile = AssemblyProfile::Demo;
         assert_deployment_red(&root, &wrong_profile, "lock profile")?;
 
         let mut missing_port = runtime_deployment_profile()?;
@@ -3054,7 +3383,7 @@ mod tests {
         assert_eq!(rows[2].binary(), ("settingsonly", "settingsonly-server"));
         for (row, profile) in rows.iter().zip([
             AssemblyProfile::Production,
-            AssemblyProfile::Demo,
+            AssemblyProfile::Production,
             AssemblyProfile::Demo,
         ]) {
             let deployment = row.deployment();

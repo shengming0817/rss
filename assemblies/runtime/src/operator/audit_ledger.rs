@@ -384,7 +384,7 @@ impl AuditLedgerVerifyRuntime for ProductionAuditLedgerVerifyRuntime<'_> {
         let hasher = domains::audit::build_audit_hasher_from_snapshot(self.config)
             .context("audit chain key")?;
         let repo = session.audit_admin_repo(hasher).context(
-            "audit ledger verify requires RSS_PG_AUDIT_ADMIN_USERNAME/RSS_PG_AUDIT_ADMIN_PASSWORD",
+            "audit ledger verify requires RSS_PG_AUDIT_ADMIN_USERNAME/RSS_PG_AUDIT_ADMIN_PASSWORD_FILE",
         )?;
         repo.verify_tenant(parsed.tenant, parsed.batch)
             .await

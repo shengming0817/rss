@@ -103,13 +103,25 @@ const CARRIERS: &[Carrier] = &[
     },
     Carrier {
         path: "adapters/postgres/src/bundle.rs",
-        purpose: "startup loads DB policy inside the rollback-owned migrator transaction and carries it privately",
+        purpose: "serving startup loads DB policy only after verified-writer ledger validation and carries it privately",
         anchors: &[
             "delivery_policy: EventDeliveryPolicy",
-            "let mut migrator_transaction = PgSetupTransaction::new();",
-            "migrator_transaction.register(PgStoreGuard::new_named(",
-            "let delivery_policy = migrator.load_event_delivery_policy().await?",
-            "let delivery_policy = migrator_transaction.close(migration_result).await?;",
+            "let mut serving_transaction = PgSetupTransaction::new();",
+            "let writer = PgStore::connect_verified_writer(serving_config).await?;",
+            "serving_transaction.register(PgStoreGuard::new_named(",
+            "let writer_store = writer.store_arc();",
+            "let delivery_policy = match writer_store.load_event_delivery_policy().await",
+            "serving_transaction.commit();",
+        ],
+    },
+    Carrier {
+        path: "adapters/postgres/src/pool.rs",
+        purpose: "verified serving writer fails closed on an inexact embedded migration ledger",
+        anchors: &[
+            "pub(crate) async fn connect_verified_writer(",
+            "let store = Arc::new(Self::connect_for(config, \"writer\", WRITER_APPLICATION_NAME).await?);",
+            "if let Err(error) = store.verify_migration_ledger().await",
+            "return Err(error);",
         ],
     },
     Carrier {
@@ -253,10 +265,12 @@ const ORDERED_SEQUENCES: &[(&str, &[&str])] = &[
     (
         "adapters/postgres/src/bundle.rs",
         &[
-            "let mut migrator_transaction = PgSetupTransaction::new();",
-            "migrator_transaction.register(PgStoreGuard::new_named(",
-            "let delivery_policy = migrator.load_event_delivery_policy().await?",
-            "let delivery_policy = migrator_transaction.close(migration_result).await?;",
+            "let mut serving_transaction = PgSetupTransaction::new();",
+            "let writer = PgStore::connect_verified_writer(serving_config).await?;",
+            "serving_transaction.register(PgStoreGuard::new_named(",
+            "let writer_store = writer.store_arc();",
+            "let delivery_policy = match writer_store.load_event_delivery_policy().await",
+            "serving_transaction.commit();",
         ],
     ),
     (

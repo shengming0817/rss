@@ -62,9 +62,9 @@ expect_failure_stderr_equals() {
 }
 
 # The executable catalog is the only source of lane/backend/version policy.
-expect_output 'ci-meta seals compiler cache, promtool, and Helm' 'sccache@0.15.0,promtool@3.5.3,helm@4.2.0' "$ADAPTER" specs --lane ci-meta --backend all
+expect_output 'ci-meta seals compiler cache, promtool, Helm, and kubeconform' 'sccache@0.15.0,promtool@3.5.3,helm@4.2.0,kubeconform@0.7.0' "$ADAPTER" specs --lane ci-meta --backend all
 expect_output 'ci-meta promtool uses the hermetic docker backend' 'promtool@3.5.3' "$ADAPTER" specs --lane ci-meta --backend docker
-expect_output 'ci-meta Helm uses the checksum-pinned download backend' 'helm@4.2.0' "$ADAPTER" specs --lane ci-meta --backend download
+expect_output 'ci-meta manifest tools use checksum-pinned downloads' 'helm@4.2.0,kubeconform@0.7.0' "$ADAPTER" specs --lane ci-meta --backend download
 expect_output 'prerequisites use only binstall tools' \
   'cargo-dylint@6.0.1,dylint-link@6.0.1' \
   "$ADAPTER" specs --lane ci-core-prerequisites --backend binstall
@@ -88,7 +88,7 @@ expect_output 'audit shares the security set' \
 expect_failure 'unknown lane fails closed' "$ADAPTER" specs --lane unknown --backend all
 expect_failure 'unknown backend fails closed' "$ADAPTER" specs --lane audit --backend mystery
 expect_output 'all tools preserve canonical catalog order' \
-  'cargo-nextest@0.9.137,cargo-llvm-cov@0.8.7,cargo-deny@0.19.9,cargo-audit@0.22.2,cargo-dylint@6.0.1,dylint-link@6.0.1,cargo-public-api@0.52.0,sccache@0.15.0,promtool@3.5.3,helm@4.2.0' \
+  'cargo-nextest@0.9.137,cargo-llvm-cov@0.8.7,cargo-deny@0.19.9,cargo-audit@0.22.2,cargo-dylint@6.0.1,dylint-link@6.0.1,cargo-public-api@0.52.0,sccache@0.15.0,promtool@3.5.3,helm@4.2.0,kubeconform@0.7.0' \
   "$ADAPTER" specs --lane all --backend all
 expect_output 'sccache spec is derived from the catalog' \
   'sccache|0.15.0|install-action|.install-action/bin/sccache|sccache' \
@@ -144,6 +144,8 @@ make_ci_meta_tools() {
     "[ \"\$*\" = '--version' ]; printf '%s\\n' 'sccache 0.15.0'"
   make_binary "$ROOT/.download/bin/helm" \
     "[ \"\$*\" = 'version --template {{.Version}}' ]; printf '%s\\n' 'v4.2.0'"
+  make_binary "$ROOT/.download/bin/kubeconform" \
+    "[ \"\$*\" = '-v' ]; printf '%s\\n' 'v0.7.0'"
 }
 
 make_download_fixture() {
@@ -158,15 +160,21 @@ case "$1" in
   *) exit 64 ;;
 esac
 EOF
-  cat >"$download_fake_bin/curl" <<'EOF'
+cat >"$download_fake_bin/curl" <<'EOF'
 #!/usr/bin/env bash
 set -eu
 printf 'curl|%s\n' "$*" >>"${RSS_DOWNLOAD_TRACE:?}"
 [ "$#" -eq 10 ] && [ "$1" = --proto ] && [ "$2" = '=https' ] &&
   [ "$3" = --tlsv1.2 ] && [ "$4" = --fail ] && [ "$5" = --location ] &&
-  [ "$6" = --silent ] && [ "$7" = --show-error ] && [ "$8" = --output ] &&
-  [ "${10}" = 'https://get.helm.sh/helm-v4.2.0-linux-amd64.tar.gz' ] || exit 65
-printf '%s\n' offline-helm-archive >"$9"
+  [ "$6" = --silent ] && [ "$7" = --show-error ] && [ "$8" = --output ] || exit 65
+case "${10}" in
+  https://get.helm.sh/helm-v4.2.0-linux-amd64.tar.gz) payload=offline-helm-archive ;;
+  https://github.com/yannh/kubeconform/releases/download/v0.7.0/kubeconform-linux-amd64.tar.gz) payload=offline-kubeconform-archive ;;
+  *) exit 65 ;;
+esac
+[ "${RSS_DOWNLOAD_MODE:-success}" != kubeconform-download-fail ] ||
+  [ "$payload" != offline-kubeconform-archive ] || exit 69
+printf '%s\n' "$payload" >"$9"
 EOF
   cat >"$download_fake_bin/sha256sum" <<'EOF'
 #!/usr/bin/env bash
@@ -174,7 +182,17 @@ set -eu
 printf 'sha256sum|%s\n' "$*" >>"${RSS_DOWNLOAD_TRACE:?}"
 case "${RSS_DOWNLOAD_MODE:-success}" in
   checksum-mismatch) digest=0000000000000000000000000000000000000000000000000000000000000000 ;;
-  *) digest=97dbeb971be4ac4b27e3839976d9564c0fb35c6f3b1da89dd1e292d236af4096 ;;
+  *)
+    case "$1" in
+      */helm.tar.gz) digest=97dbeb971be4ac4b27e3839976d9564c0fb35c6f3b1da89dd1e292d236af4096 ;;
+      */kubeconform.tar.gz) digest=c31518ddd122663b3f3aa874cfe8178cb0988de944f29c74a0b9260920d115d3 ;;
+      *) exit 65 ;;
+    esac
+    if [ "${RSS_DOWNLOAD_MODE:-success}" = kubeconform-checksum-mismatch ] &&
+       [ "${1##*/}" = kubeconform.tar.gz ]; then
+      digest=0000000000000000000000000000000000000000000000000000000000000000
+    fi
+    ;;
 esac
 printf '%s  %s\n' "$digest" "$1"
 EOF
@@ -182,17 +200,28 @@ EOF
 #!/usr/bin/env bash
 set -eu
 printf 'tar|%s\n' "$*" >>"${RSS_DOWNLOAD_TRACE:?}"
-[ "$#" -eq 5 ] && [ "$1" = -xzf ] && [ "$3" = -C ] &&
-  [ "$5" = linux-amd64/helm ] || exit 66
+[ "$#" -eq 5 ] && [ "$1" = -xzf ] && [ "$3" = -C ] || exit 66
 [ "${RSS_DOWNLOAD_MODE:-success}" != extract-fail ] || exit 67
-mkdir -p "$4/linux-amd64"
-printf '#!/usr/bin/env sh\nprintf "v4.2.0\\n"\n' >"$4/linux-amd64/helm"
+[ "${RSS_DOWNLOAD_MODE:-success}" != kubeconform-extract-fail ] ||
+  [ "$5" != kubeconform ] || exit 67
+case "$5" in
+  linux-amd64/helm)
+    mkdir -p "$4/linux-amd64"
+    printf '#!/usr/bin/env sh\nprintf "v4.2.0\\n"\n' >"$4/linux-amd64/helm"
+    ;;
+  kubeconform)
+    printf '#!/usr/bin/env sh\nprintf "v0.7.0\\n"\n' >"$4/kubeconform"
+    ;;
+  *) exit 66 ;;
+esac
 EOF
   cat >"$download_fake_bin/mv" <<'EOF'
 #!/usr/bin/env bash
 set -eu
 printf 'mv|%s\n' "$*" >>"${RSS_DOWNLOAD_TRACE:?}"
 [ "${RSS_DOWNLOAD_MODE:-success}" != publish-fail ] || exit 68
+[ "${RSS_DOWNLOAD_MODE:-success}" != kubeconform-publish-fail ] ||
+  case "$*" in *kubeconform*) exit 68 ;; esac
 exec /bin/mv "$@"
 EOF
   chmod +x "$download_fake_bin/uname" "$download_fake_bin/curl" \
@@ -225,10 +254,17 @@ expect_success 'offline Helm download uses the pinned installation protocol' \
 if [ -f "$DOWNLOAD_ROOT/.download/bin/helm" ] &&
    [ -x "$DOWNLOAD_ROOT/.download/bin/helm" ] &&
    [ "$("$DOWNLOAD_ROOT/.download/bin/helm")" = v4.2.0 ] &&
+   [ -f "$DOWNLOAD_ROOT/.download/bin/kubeconform" ] &&
+   [ -x "$DOWNLOAD_ROOT/.download/bin/kubeconform" ] &&
+   [ "$("$DOWNLOAD_ROOT/.download/bin/kubeconform")" = v0.7.0 ] &&
    grep -Eq '^curl\|--proto =https --tlsv1\.2 --fail --location --silent --show-error --output .*/helm\.tar\.gz https://get\.helm\.sh/helm-v4\.2\.0-linux-amd64\.tar\.gz$' "$DOWNLOAD_TRACE" &&
+   grep -Eq '^curl\|--proto =https --tlsv1\.2 --fail --location --silent --show-error --output .*/kubeconform\.tar\.gz https://github\.com/yannh/kubeconform/releases/download/v0\.7\.0/kubeconform-linux-amd64\.tar\.gz$' "$DOWNLOAD_TRACE" &&
    grep -Eq '^sha256sum\|.*/helm\.tar\.gz$' "$DOWNLOAD_TRACE" &&
+   grep -Eq '^sha256sum\|.*/kubeconform\.tar\.gz$' "$DOWNLOAD_TRACE" &&
    grep -Eq '^tar\|-xzf .*/helm\.tar\.gz -C .*/rss-helm-download\.[^/]+ linux-amd64/helm$' "$DOWNLOAD_TRACE" &&
+   grep -Eq '^tar\|-xzf .*/kubeconform\.tar\.gz -C .*/rss-kubeconform-download\.[^/]+ kubeconform$' "$DOWNLOAD_TRACE" &&
    grep -Eq '^mv\|-f -- .*/\.helm\.tmp\.[^/]+ .*/\.download/bin/helm$' "$DOWNLOAD_TRACE" &&
+   grep -Eq '^mv\|-f -- .*/\.kubeconform\.tmp\.[^/]+ .*/\.download/bin/kubeconform$' "$DOWNLOAD_TRACE" &&
    [ -z "$(find "$DOWNLOAD_TMP" -mindepth 1 -maxdepth 1 -print -quit)" ]; then
   pass 'offline Helm download publishes only the expected executable'
 else
@@ -244,6 +280,22 @@ for mode in checksum-mismatch extract-fail publish-fail; do
   assert_download_clean "failed Helm download leaves zero pollution: $mode" \
     "$DOWNLOAD_ROOT" "$DOWNLOAD_TMP"
 done
+
+for case_row in \
+  'kubeconform-download-fail|kubeconform download failed' \
+  'kubeconform-checksum-mismatch|kubeconform archive SHA-256 mismatch' \
+  'kubeconform-extract-fail|kubeconform archive extraction failed' \
+  'kubeconform-publish-fail|cannot publish kubeconform binary'; do
+  mode=${case_row%%|*}
+  expected=${case_row#*|}
+  rm -rf "$DOWNLOAD_ROOT/.download"
+  : >"$DOWNLOAD_TRACE"
+  expect_failure_stderr_contains "offline kubeconform diagnostic is tool-specific: $mode" \
+    "$expected" \
+    env PATH="$DOWNLOAD_FAKE_BIN:$PATH" TMPDIR="$DOWNLOAD_TMP" RSS_DOWNLOAD_MODE="$mode" \
+    "$ADAPTER" install-download --lane ci-meta --root "$DOWNLOAD_ROOT"
+done
+rm -rf "$DOWNLOAD_ROOT/.download"
 
 mkdir -p "$DOWNLOAD_ROOT/.download/bin"
 expect_failure 'publication failure preserves pre-existing safe directories' \
@@ -430,6 +482,9 @@ else fail 'seal records the exact promtool image digest'; fi
 if grep -Fq $'tool\tdownload\thelm@4.2.0\t.download/bin/helm\t' "$ROOT/.rss-tool-seal-v1"; then
   pass 'seal records the exact Helm binary identity'
 else fail 'seal records the exact Helm binary identity'; fi
+if grep -Fq $'tool\tdownload\tkubeconform@0.7.0\t.download/bin/kubeconform\t' "$ROOT/.rss-tool-seal-v1"; then
+  pass 'seal records the exact kubeconform binary identity'
+else fail 'seal records the exact kubeconform binary identity'; fi
 NO_DOCKER_BIN="$TMP_ROOT/no-docker-bin"
 mkdir -p "$NO_DOCKER_BIN"
 for command_name in bash cat cmp comm dirname find mktemp rm sort tr wc; do
@@ -456,6 +511,12 @@ expect_failure 'Helm version mismatch fails the dedicated fresh probe closed' \
   "$ADAPTER" verify --mode fresh --lane ci-meta --root "$ROOT"
 make_binary "$ROOT/.download/bin/helm" \
   "[ \"\$*\" = 'version --template {{.Version}}' ]; printf '%s\\n' 'v4.2.0'"
+make_binary "$ROOT/.download/bin/kubeconform" \
+  "[ \"\$*\" = '-v' ]; printf '%s\\n' 'v0.6.7'"
+expect_failure 'kubeconform version mismatch fails the dedicated fresh probe closed' \
+  "$ADAPTER" verify --mode fresh --lane ci-meta --root "$ROOT"
+make_binary "$ROOT/.download/bin/kubeconform" \
+  "[ \"\$*\" = '-v' ]; printf '%s\\n' 'v0.7.0'"
 expect_success 'exact promtool version restores the fresh seal after negative probes' \
   "$ADAPTER" verify --mode fresh --lane ci-meta --root "$ROOT"
 cp "$SEAL" "$TMP_ROOT/empty-seal" 2>/dev/null || true

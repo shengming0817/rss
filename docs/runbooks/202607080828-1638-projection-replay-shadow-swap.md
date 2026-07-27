@@ -18,7 +18,7 @@
 
 | Group | Required env | Notes |
 |---|---|---|
-| Postgres migrator | `RSS_PG_HOST`, `RSS_PG_PORT`, `RSS_PG_DATABASE`, `RSS_PG_MIGRATOR_USERNAME`, `RSS_PG_MIGRATOR_PASSWORD` | 维护 CLI 用 migrator 身份 setup maintenance deps；缺失时报对应 env 名。 |
+| Postgres maintenance | `RSS_PG_HOST`, `RSS_PG_PORT`, `RSS_PG_DATABASE`, `RSS_PG_MIGRATOR_USERNAME`, `RSS_PG_MIGRATOR_PASSWORD_FILE` | 维护 CLI 只从绝对只读文件读取窄角色口令；raw env 与双源均拒绝。 |
 | Postgres TLS | `RSS_PG_SSL_MODE`, `RSS_PG_SSL_ROOT_CERT_PATH` | 可选；未配置时默认 `verify-full`。本地无 TLS 只能显式降级。 |
 | Service-token verifier | `RSS_SERVICE_TOKEN_ISSUER`, `RSS_SERVICE_TOKEN_AUDIENCE`, `RSS_SERVICE_TOKEN_HS256_SECRET_B64URL`, `RSS_SERVICE_TOKEN_HS256_KID` | projection CLI 验证 `--operator-service-token`；缺 issuer/audience/key 会 fail-fast。 |
 | Projection authorization | `RSS_PROJECTION_MAINTENANCE_OPERATOR_GRANTS` | typed maintenance caller 认证后的精确三元组 `action|tenant|projection`；无 caller 字符串、无 wildcard。 |

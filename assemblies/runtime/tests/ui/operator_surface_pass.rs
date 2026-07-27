@@ -1,12 +1,10 @@
 fn main() {
-    let _ = runtime::operator::is_postgres_command;
     let _ = runtime::operator::is_projection_command;
     let _ = runtime::operator::is_audit_ledger_verify_command;
     let _ = runtime::operator::is_dlq_command;
     let _ = runtime::operator::is_reconcile_target_command;
     let _ = runtime::operator::is_settings_config_value_maintenance_command;
     let _ = runtime::operator::is_rss_access_jwks_export_command;
-    let _ = runtime::operator::run_postgres_reader_migration_command;
     let _ = runtime::operator::run_projection_control_command;
     let _ = runtime::operator::run_audit_ledger_verify_command;
     let _ = runtime::operator::run_dlq_control_command;

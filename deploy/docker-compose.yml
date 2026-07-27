@@ -1,6 +1,6 @@
 # RSS 演示栈（#1134 验收 harness）：postgres + redis + minio + rabbitmq + vault + server。
 #
-# 用途：本地证明镜像「能起进程 + 连 PG + 跑迁移 + readyz 就绪 + 非 root + 只读 rootfs 兼容」。
+# 用途：本地证明同一镜像的独立 migration Job + serving 进程、readyz、非 root 与只读 rootfs。
 # 非生产编排（Vault 使用 dev TLS + in-memory storage；生产用 k8s + 私有 CA TLS + 真 OIDC/Vault，见 docs/ops/202606271438-003-container-image.md）。
 # deploy/smoke.sh：必须显式选择 developer|release。stock compose 保持全 Local、不依赖 SPIRE；
 # Remote placement + SPIFFE fixture 不全时默认失败，仅 developer + RSS_SMOKE_ALLOW_SKIP=1 可输出
@@ -11,17 +11,16 @@
 # 验：  curl -fsS http://localhost:${RSS_HEALTH_HOST_PORT:-8083}/health/v1/readyz   # all-Local → 必经 smoke
 # 关：  docker compose -f deploy/docker-compose.yml down -v
 #
-# compose 演示栈共享 .env.example 作配置单源：postgres 读 POSTGRES_*，server 读 RSS_*，
-# redis/rabbitmq 用服务默认值；各自忽略不认的变量 ⇒ demo 口令两边自动一致（无需手抄两遍）。
+# .env.example 只承载非 Secret 配置；基础设施 bootstrap 文件和 serving bundle 均从
+# deploy/demo-secrets 精确挂载，server 环境中不出现旧 Secret 变量。
 
 x-minio-image: &minio-image minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
 
 services:
   postgres:
     image: postgres:16-alpine # 演示用；生产钉 digest（see 部署文档 §复现性）。
-    env_file: [.env.example]
-    # reason: server 启动期 connect + run_migrations 是 fail-fast；postgres 须先 healthy 再起 server，
-    # 否则 readyz 初值 Down（fail-closed）会让 server 在迁移阶段直接退出。
+    env_file: [.env.example, ./demo-secrets/postgres.env]
+    # reason: migration Job 须在 PostgreSQL healthy 后执行；serving 仅在 Job 成功后启动并核验 ledger。
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
       interval: 3s
@@ -33,6 +32,11 @@ services:
       - "127.0.0.1:5432:5432"
     volumes:
       - ./postgres-init:/docker-entrypoint-initdb.d:ro
+      - ./demo-secrets/pg-writer-password:/run/rss-demo-secrets/pg-writer-password:ro
+      - ./demo-secrets/pg-reader-password:/run/rss-demo-secrets/pg-reader-password:ro
+      - ./demo-secrets/pg-dlx-archiver-password:/run/rss-demo-secrets/pg-dlx-archiver-password:ro
+      - ./demo-secrets/pg-dlx-verifier-password:/run/rss-demo-secrets/pg-dlx-verifier-password:ro
+      - ./demo-secrets/pg-dlx-purger-password:/run/rss-demo-secrets/pg-dlx-purger-password:ro
 
   redis:
     image: redis:7-alpine # 演示用；生产钉 digest 并启 TLS / AUTH。
@@ -56,7 +60,7 @@ services:
 
   minio:
     image: *minio-image # 演示用固定 release+digest；生产用托管 S3 或启 TLS 的对象存储。
-    env_file: [.env.example]
+    env_file: [.env.example, ./demo-secrets/minio.env]
     command: ["server", "/data", "--console-address", ":9001"]
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9000/minio/health/ready"]
@@ -71,10 +75,13 @@ services:
 
   minio-init:
     image: *minio-image # 复用 server 镜像内置 mc，避免演示栈额外拉 minio/mc。
-    env_file: [.env.example]
+    env_file: [.env.example, ./demo-secrets/minio.env]
     depends_on:
       minio:
         condition: service_healthy
+    volumes:
+      - ./demo-secrets/dlx-archive-access-key:/run/rss-demo-secrets/dlx-archive-access-key:ro
+      - ./demo-secrets/dlx-archive-secret-key:/run/rss-demo-secrets/dlx-archive-secret-key:ro
     entrypoint:
       - sh
       - -ec
@@ -91,10 +98,10 @@ services:
         mc admin policy create local rss-dlx-archiver "$${policy_file}"
         rm -f "$${policy_file}"
         mc admin user add local \
-          "$${AWS_ACCESS_KEY_ID}" \
-          "$${AWS_SECRET_ACCESS_KEY}"
+          "$$(cat /run/rss-demo-secrets/dlx-archive-access-key)" \
+          "$$(cat /run/rss-demo-secrets/dlx-archive-secret-key)"
         mc admin policy attach local rss-dlx-archiver \
-          --user "$${AWS_ACCESS_KEY_ID}"
+          --user "$$(cat /run/rss-demo-secrets/dlx-archive-access-key)"
 
   vault:
     image: hashicorp/vault:1.17 # 演示用 dev-tls；生产钉 digest 并使用正式 Vault 集群。
@@ -106,18 +113,19 @@ services:
         vault server -dev -dev-tls \
           -dev-tls-cert-dir=/vault/tls \
           -dev-tls-san=vault \
-          -dev-root-token-id="$${RSS_VAULT_TOKEN}" \
+          -dev-root-token-id="$$(cat /run/rss-demo-secrets/vault-root-token)" \
           -dev-listen-address=0.0.0.0:8200
     env_file: [.env.example]
     cap_add:
       - IPC_LOCK
     volumes:
       - vault-tls:/vault/tls
+      - ./demo-secrets/vault-root-token:/run/rss-demo-secrets/vault-root-token:ro
     healthcheck:
       test:
         [
           "CMD-SHELL",
-          "VAULT_ADDR=https://127.0.0.1:8200 VAULT_CACERT=/vault/tls/vault-ca.pem VAULT_TOKEN=\"$${RSS_VAULT_TOKEN}\" vault status >/dev/null",
+          "VAULT_ADDR=https://127.0.0.1:8200 VAULT_CACERT=/vault/tls/vault-ca.pem VAULT_TOKEN=\"$$(cat /run/rss-demo-secrets/vault-root-token)\" vault status >/dev/null",
         ]
       interval: 3s
       timeout: 5s
@@ -132,13 +140,16 @@ services:
         condition: service_healthy
     volumes:
       - vault-tls:/run/rss-demo-vault:ro
+      - ./demo-secrets/vault-root-token:/run/rss-demo-secrets/vault-root-token:ro
+      - ./demo-secrets/vault-dlx-hot-token:/run/rss-demo-secrets/vault-dlx-hot-token:ro
+      - ./demo-secrets/vault-dlx-archive-token:/run/rss-demo-secrets/vault-dlx-archive-token:ro
     command:
       - sh
       - -ec
       - |
         export VAULT_ADDR="$${RSS_VAULT_ADDR}"
         export VAULT_CACERT="$${RSS_VAULT_CA_CERT_PEM_PATH}"
-        export VAULT_TOKEN="$${RSS_VAULT_TOKEN}"
+        export VAULT_TOKEN="$$(cat /run/rss-demo-secrets/vault-root-token)"
         vault secrets enable -path="$${RSS_VAULT_TRANSIT_MOUNT}" transit 2>/dev/null || true
         vault secrets enable -path=secret -version=2 kv 2>/dev/null || true
         vault kv put -mount=secret tenants/a/.rss-readiness value=ready >/dev/null
@@ -154,13 +165,13 @@ services:
           "$${RSS_VAULT_TRANSIT_MOUNT}" "$${RSS_DLX_ARCHIVE_KEY_NAME}" \
           | vault policy write rss-dlx-archive -
         vault write auth/token/create \
-          id="$${RSS_DLX_HOT_VAULT_TOKEN}" \
+          id="$$(cat /run/rss-demo-secrets/vault-dlx-hot-token)" \
           policies=rss-dlx-hot \
           no_default_policy=true \
           no_parent=true \
           renewable=false >/dev/null
         vault write auth/token/create \
-          id="$${RSS_DLX_ARCHIVE_VAULT_TOKEN}" \
+          id="$$(cat /run/rss-demo-secrets/vault-dlx-archive-token)" \
           policies=rss-dlx-archive \
           no_default_policy=true \
           no_parent=true \
@@ -186,6 +197,27 @@ services:
     volumes:
       - vault-tls:/run/rss-demo-vault:ro
       - rss-access-jwks:/run/rss-access-token
+      - ./demo-secrets/runtime-serving-secret-bundle:/var/run/rss/secrets/serving-secret-bundle:ro
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+  migration:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: rss-server:dev
+    entrypoint: ["/usr/local/bin/rss"]
+    command: ["postgres", "migrate-all"]
+    env_file: [.env.example, ./demo-secrets/migration.env]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    read_only: true
+    user: "65532:65532"
+    volumes:
+      - ./demo-secrets/pg-migrator-password:/run/rss-demo-secrets/pg-migrator-password:ro
     cap_drop:
       - ALL
     security_opt:
@@ -200,6 +232,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      migration:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
       minio-init:
@@ -223,6 +257,8 @@ services:
       - vault-tls:/run/rss-demo-vault:ro
       - rss-access-jwks:/run/rss-access-token:ro
       - ./password-blocklist.demo.sha256:/run/rss-password-blocklist.sha256:ro
+      - ./demo-secrets/runtime-serving-secret-bundle:/var/run/rss/secrets/serving-secret-bundle:ro
+      - ./demo-secrets/aws-credentials:/run/rss-demo-secrets/aws-credentials:ro
     cap_drop:
       - ALL # 不需任何 Linux capability（仅 bind 高位端口 8080-8083，无需 NET_BIND_SERVICE）。
     security_opt:

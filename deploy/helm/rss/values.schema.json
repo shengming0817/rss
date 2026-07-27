@@ -2,6 +2,13 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "additionalProperties": false,
   "properties": {
+    "phase": {
+      "enum": [
+        "migration",
+        "serving"
+      ],
+      "type": "string"
+    },
     "profile": {
       "enum": [
         "identityaudit",
@@ -12,7 +19,8 @@
     }
   },
   "required": [
-    "profile"
+    "profile",
+    "phase"
   ],
   "type": "object"
 }

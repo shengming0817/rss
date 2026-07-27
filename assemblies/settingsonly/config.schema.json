@@ -30,12 +30,6 @@
   },
   "additionalProperties": false,
   "definitions": {
-    "EnvironmentReferenceKind": {
-      "type": "string",
-      "enum": [
-        "environmentRef"
-      ]
-    },
     "FederatedConfig": {
       "type": "object",
       "required": [
@@ -116,73 +110,10 @@
       },
       "additionalProperties": false
     },
-    "PgMigratorPasswordEnvironment": {
-      "type": "string",
-      "enum": [
-        "RSS_SETTINGSONLY_PG_MIGRATOR_PASSWORD"
-      ]
-    },
-    "PgMigratorPasswordReference": {
-      "type": "object",
-      "required": [
-        "kind",
-        "name"
-      ],
-      "properties": {
-        "kind": {
-          "$ref": "#/definitions/EnvironmentReferenceKind"
-        },
-        "name": {
-          "$ref": "#/definitions/PgMigratorPasswordEnvironment"
-        }
-      },
-      "additionalProperties": false
-    },
-    "PgMigratorRoleConfig": {
-      "type": "object",
-      "required": [
-        "password",
-        "username"
-      ],
-      "properties": {
-        "password": {
-          "$ref": "#/definitions/PgMigratorPasswordReference"
-        },
-        "username": {
-          "type": "string",
-          "minLength": 1,
-          "pattern": "^.*\\S.*$"
-        }
-      },
-      "additionalProperties": false
-    },
-    "PgReaderPasswordEnvironment": {
-      "type": "string",
-      "enum": [
-        "RSS_SETTINGSONLY_PG_READER_PASSWORD"
-      ]
-    },
-    "PgReaderPasswordReference": {
-      "type": "object",
-      "required": [
-        "kind",
-        "name"
-      ],
-      "properties": {
-        "kind": {
-          "$ref": "#/definitions/EnvironmentReferenceKind"
-        },
-        "name": {
-          "$ref": "#/definitions/PgReaderPasswordEnvironment"
-        }
-      },
-      "additionalProperties": false
-    },
     "PgReaderRoleConfig": {
       "type": "object",
       "required": [
         "maxConnections",
-        "password",
         "username"
       ],
       "properties": {
@@ -191,9 +122,6 @@
           "format": "uint32",
           "maximum": 100.0,
           "minimum": 1.0
-        },
-        "password": {
-          "$ref": "#/definitions/PgReaderPasswordReference"
         },
         "username": {
           "type": "string",
@@ -214,33 +142,10 @@
         "verifyFull"
       ]
     },
-    "PgWriterPasswordEnvironment": {
-      "type": "string",
-      "enum": [
-        "RSS_SETTINGSONLY_PG_WRITER_PASSWORD"
-      ]
-    },
-    "PgWriterPasswordReference": {
-      "type": "object",
-      "required": [
-        "kind",
-        "name"
-      ],
-      "properties": {
-        "kind": {
-          "$ref": "#/definitions/EnvironmentReferenceKind"
-        },
-        "name": {
-          "$ref": "#/definitions/PgWriterPasswordEnvironment"
-        }
-      },
-      "additionalProperties": false
-    },
     "PgWriterRoleConfig": {
       "type": "object",
       "required": [
         "maxConnections",
-        "password",
         "username"
       ],
       "properties": {
@@ -249,9 +154,6 @@
           "format": "uint32",
           "maximum": 100.0,
           "minimum": 1.0
-        },
-        "password": {
-          "$ref": "#/definitions/PgWriterPasswordReference"
         },
         "username": {
           "type": "string",
@@ -271,7 +173,6 @@
       "required": [
         "database",
         "host",
-        "migrator",
         "port",
         "reader",
         "readinessSeconds",
@@ -288,9 +189,6 @@
           "type": "string",
           "minLength": 1,
           "pattern": "^.*\\S.*$"
-        },
-        "migrator": {
-          "$ref": "#/definitions/PgMigratorRoleConfig"
         },
         "port": {
           "type": "integer",
@@ -338,7 +236,6 @@
         "readinessSeconds",
         "settingsKeyName",
         "tenantStoreAllowlist",
-        "token",
         "transitMount"
       ],
       "properties": {
@@ -371,9 +268,6 @@
           },
           "minItems": 1,
           "uniqueItems": true
-        },
-        "token": {
-          "$ref": "#/definitions/VaultTokenReference"
         },
         "transitMount": {
           "type": "string",
@@ -422,28 +316,6 @@
           },
           "minLength": 1,
           "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
-        }
-      },
-      "additionalProperties": false
-    },
-    "VaultTokenEnvironment": {
-      "type": "string",
-      "enum": [
-        "RSS_SETTINGSONLY_VAULT_TOKEN"
-      ]
-    },
-    "VaultTokenReference": {
-      "type": "object",
-      "required": [
-        "kind",
-        "name"
-      ],
-      "properties": {
-        "kind": {
-          "$ref": "#/definitions/EnvironmentReferenceKind"
-        },
-        "name": {
-          "$ref": "#/definitions/VaultTokenEnvironment"
         }
       },
       "additionalProperties": false

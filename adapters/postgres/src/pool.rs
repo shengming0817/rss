@@ -27,7 +27,6 @@ const APPLICATION_NAME: &str = "rss-postgres-maintenance";
 const WRITER_APPLICATION_NAME: &str = "rss-postgres-writer";
 const READER_APPLICATION_NAME: &str = "rss-postgres-reader";
 const AUDIT_ADMIN_APPLICATION_NAME: &str = "rss-postgres-audit-admin";
-const MIGRATOR_APPLICATION_NAME: &str = "rss-postgres-migrator";
 
 /// postgres adapter 错误（adapter-内部 `thiserror`；**不**映射 HTTP 状态码——域 / handler 才映射）。
 ///
@@ -62,21 +61,21 @@ pub enum PgError {
         #[source]
         source: sqlx::Error,
     },
-    /// 迁移应用失败。
-    #[error("postgres migration failed")]
+    #[cfg(any(test, feature = "test-support", feature = "fault-matrix-test-support"))]
+    #[error("postgres test migration failed")]
     Migrate(#[source] sqlx::migrate::MigrateError),
-    /// 0067 one-shot migration 命令的 embedded/ledger 前置状态不精确。
-    #[error("postgres reader-lane migration precondition failed: {reason}")]
-    ReaderLaneMigrationPrecondition {
-        reason: &'static str,
-        embedded_max: Option<i64>,
-        ledger_last: Option<i64>,
-        ledger_entries: usize,
+    /// Serving role cannot read the SQLx ledger.
+    #[error("postgres schema ledger probe failed")]
+    SchemaLedgerProbe(#[source] sqlx::Error),
+    /// The database ledger is not the exact migration identity embedded by this serving binary.
+    #[error("postgres schema ledger does not match serving binary")]
+    SchemaLedgerMismatch {
+        expected_head: Option<i64>,
+        actual_head: Option<i64>,
+        expected_entries: usize,
+        actual_entries: usize,
         first_invalid: Option<i64>,
     },
-    /// 0067 one-shot migration 命令无法读取 SQLx ledger。
-    #[error("postgres reader-lane migration ledger probe failed")]
-    ReaderLaneMigrationLedgerProbe(#[source] sqlx::Error),
     /// RLS 能力自检的探测 SQL 失败（acquire / set_config / catalog 查询）。
     #[error("postgres rls capability probe failed")]
     RlsCapability(#[source] sqlx::Error),
@@ -90,14 +89,18 @@ pub enum PgError {
     /// RLS 能力门：`rss.tenant_id` GUC set/current_setting roundtrip 未回显预期值（GUC 基础设施异常）。
     #[error("postgres rls capability: tenant guc roundtrip mismatch")]
     RlsGucRoundtrip,
-    /// RLS 能力门：连接角色为 superuser 或 `BYPASSRLS`——绕过 FORCE RLS，serving 连接须用非 superuser
-    /// NOBYPASSRLS 角色（fail-closed，拒绝启动；tenancy.md「生产 owner 须为非 superuser」）。
-    #[error("postgres rls capability: connection role bypasses RLS (superuser or BYPASSRLS)")]
-    RlsBypassRole,
     /// RLS 能力门：durable serving pool 必须以固定 app-serving role `rss_app` 连接；其它 non-bypass role
     /// 也不得作为生产 serving pool，避免测试替身 / owner-like 角色漂进 bootstrap。
     #[error("postgres rls capability: serving role must be rss_app")]
     RlsUnexpectedServingRole,
+    #[error("postgres writer capability: role attributes are not exact")]
+    WriterRoleAttributes,
+    #[error("postgres writer capability: role membership is not empty")]
+    WriterMembership,
+    #[error("postgres writer capability: role owns database objects")]
+    WriterOwnership,
+    #[error("postgres writer capability: effective privileges are not exact")]
+    WriterPrivileges { actual_fingerprint: String },
     /// Certificate-revocation capability catalog/ACL probe failed.
     #[error("postgres certificate revocation capability probe failed")]
     RevocationCapability(#[source] sqlx::Error),
@@ -174,13 +177,6 @@ pub enum PgError {
     /// audit admin 能力门：admin read pool 只能拥有 `audit_entries` SELECT，不得有其它 public relation 权限。
     #[error("postgres audit admin capability: audit admin relation privileges are not exact")]
     AuditAdminPrivileges,
-    /// config_entries 中仍存在 legacy plaintext `ConfigValue` 行。默认启动 fail-closed；临时兼容只能经显式
-    /// `LegacyConfigPlaintextPolicy::AllowTemporary` 放行。
-    #[error("postgres legacy plaintext config values are present")]
-    LegacyConfigPlaintextPresent { count: i64 },
-    /// legacy plaintext 扫描 SQL 失败（启动关键路径）。
-    #[error("postgres legacy plaintext config value probe failed")]
-    LegacyConfigPlaintextProbe(#[source] sqlx::Error),
     /// settings ConfigValue maintenance durable audit 写入失败（维护入口 fail-closed）。
     #[error("postgres config value maintenance audit failed")]
     MaintenanceAudit(#[source] sqlx::Error),
@@ -212,18 +208,6 @@ pub enum PgError {
     /// Configured key identity or key verification tag disagrees with the durable singleton.
     #[error("postgres audit chain key identity mismatch")]
     AuditChainKeyMismatch,
-}
-
-/// 启动期 legacy plaintext `ConfigValue` 行策略。
-///
-/// 默认 [`Deny`](Self::Deny)：迁移后发现 `protection_scheme = 0` 即拒绝启动。[`AllowTemporary`](Self::AllowTemporary)
-/// 仅供 backfill 前的短期人工豁免；新写路径仍只能写 encrypted scheme。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LegacyConfigPlaintextPolicy {
-    /// 默认 fail-closed：存在 legacy plaintext 行即启动失败。
-    Deny,
-    /// 临时放行 legacy plaintext 行，供人工规划 backfill 前短期运行。
-    AllowTemporary,
 }
 
 /// postgres 连接密码：私有字段 + redacted `Debug`，杜绝明文进日志 / panic message / `PgConfig` 派生 Debug。
@@ -718,6 +702,86 @@ WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p')
 const CONNECTION_ROLE_SQL: &str = "\
 SELECT session_user, current_user, rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user";
 
+const WRITER_ROLE_SQL: &str = r#"
+SELECT session_user, current_user, role.rolcanlogin, role.rolsuper, role.rolbypassrls,
+       role.rolcreatedb, role.rolcreaterole, role.rolreplication, role.rolinherit
+FROM pg_roles AS role
+WHERE role.rolname = current_user
+"#;
+
+const WRITER_EFFECTIVE_CAPABILITIES_SQL: &str = r#"
+WITH capabilities AS (
+    SELECT 'database:' || privilege.name AS capability
+    FROM (VALUES ('CONNECT'), ('CREATE'), ('TEMPORARY'),
+                 ('CONNECT WITH GRANT OPTION'), ('CREATE WITH GRANT OPTION'),
+                 ('TEMPORARY WITH GRANT OPTION')) AS privilege(name)
+    WHERE has_database_privilege(current_user, current_database(), privilege.name)
+    UNION ALL
+    SELECT 'schema:' || namespace.nspname || ':' || privilege.name
+    FROM pg_namespace AS namespace
+    CROSS JOIN (VALUES ('USAGE'), ('CREATE'), ('USAGE WITH GRANT OPTION'),
+                       ('CREATE WITH GRANT OPTION')) AS privilege(name)
+    WHERE namespace.nspname <> 'information_schema'
+      AND namespace.nspname !~ '^pg_'
+      AND has_schema_privilege(current_user, namespace.oid, privilege.name)
+    UNION ALL
+    SELECT 'relation:' || namespace.nspname || '.' || relation.relname || ':' || privilege.name
+    FROM pg_class AS relation
+    JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+    CROSS JOIN (VALUES ('SELECT'), ('INSERT'), ('UPDATE'), ('DELETE'), ('TRUNCATE'),
+                       ('REFERENCES'), ('TRIGGER'), ('SELECT WITH GRANT OPTION'),
+                       ('INSERT WITH GRANT OPTION'), ('UPDATE WITH GRANT OPTION'),
+                       ('DELETE WITH GRANT OPTION'), ('TRUNCATE WITH GRANT OPTION'),
+                       ('REFERENCES WITH GRANT OPTION'), ('TRIGGER WITH GRANT OPTION'))
+                       AS privilege(name)
+    WHERE namespace.nspname <> 'information_schema'
+      AND namespace.nspname !~ '^pg_'
+      AND relation.relkind IN ('r', 'p', 'v', 'm', 'f')
+      AND has_table_privilege(current_user, relation.oid, privilege.name)
+    UNION ALL
+    SELECT 'sequence:' || namespace.nspname || '.' || relation.relname || ':' || privilege.name
+    FROM pg_class AS relation
+    JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+    CROSS JOIN (VALUES ('USAGE'), ('SELECT'), ('UPDATE'), ('USAGE WITH GRANT OPTION'),
+                       ('SELECT WITH GRANT OPTION'), ('UPDATE WITH GRANT OPTION'))
+                       AS privilege(name)
+    WHERE namespace.nspname <> 'information_schema'
+      AND namespace.nspname !~ '^pg_'
+      AND relation.relkind = 'S'
+      AND has_sequence_privilege(current_user, relation.oid, privilege.name)
+    UNION ALL
+    SELECT 'column:' || namespace.nspname || '.' || relation.relname || '.' ||
+           attribute.attname || ':' || privilege.name
+    FROM pg_class AS relation
+    JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+    JOIN pg_attribute AS attribute ON attribute.attrelid = relation.oid
+    CROSS JOIN (VALUES ('SELECT'), ('INSERT'), ('UPDATE'), ('REFERENCES'),
+                       ('SELECT WITH GRANT OPTION'), ('INSERT WITH GRANT OPTION'),
+                       ('UPDATE WITH GRANT OPTION'), ('REFERENCES WITH GRANT OPTION'))
+                       AS privilege(name)
+    WHERE namespace.nspname <> 'information_schema'
+      AND namespace.nspname !~ '^pg_'
+      AND relation.relkind IN ('r', 'p', 'v', 'm', 'f')
+      AND attribute.attnum > 0 AND NOT attribute.attisdropped
+      AND has_column_privilege(current_user, relation.oid, attribute.attnum, privilege.name)
+    UNION ALL
+    SELECT 'function:' || namespace.nspname || '.' || procedure.proname ||
+           '(' || pg_get_function_identity_arguments(procedure.oid) || '):' || privilege.name
+    FROM pg_proc AS procedure
+    JOIN pg_namespace AS namespace ON namespace.oid = procedure.pronamespace
+    CROSS JOIN (VALUES ('EXECUTE'), ('EXECUTE WITH GRANT OPTION')) AS privilege(name)
+    WHERE namespace.nspname <> 'information_schema'
+      AND namespace.nspname !~ '^pg_'
+      AND has_function_privilege(current_user, procedure.oid, privilege.name)
+)
+SELECT capability FROM capabilities ORDER BY capability
+"#;
+
+// Byte-level golden of the complete effective capability catalog after the committed migration
+// head. Any migration that intentionally changes writer authority must update this reviewed value.
+const EXPECTED_WRITER_CAPABILITY_FINGERPRINT: &str =
+    "sha256:5d5fec8a666975ca47b34364f82091c6d42e239afed3bd742c43d8dfcf419c92";
+
 const AUDIT_ADMIN_PRIVILEGES_SQL: &str = r#"
 WITH effective AS (
     SELECT c.relname AS relation_name, p.privilege
@@ -1060,6 +1124,18 @@ struct ServingRole {
     bypass_rls: bool,
 }
 
+struct WriterRole {
+    session_user: String,
+    current_user: String,
+    can_login: bool,
+    superuser: bool,
+    bypass_rls: bool,
+    create_db: bool,
+    create_role: bool,
+    replication: bool,
+    inherit: bool,
+}
+
 /// 含 `tenant_id` 列的 public 表总数（anti-vacuity：durable 库应至少有迁移建出的 tenant 表）。
 /// 用 `pg_catalog`（非 `information_schema`——后者按当前角色权限过滤，非 superuser serving 角色会漏看
 /// 未授权的 tenant 表导致门控盲区；pg_class/pg_attribute 不受权限过滤，确保门看到全部 tenant 表）。
@@ -1155,24 +1231,32 @@ async fn ensure_tenant_read_exact_external_capabilities(
 async fn ensure_serving_role(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
 ) -> Result<(), PgError> {
-    let (session_user, current_user, superuser, bypass_rls): (String, String, bool, bool) =
-        sqlx::query_as(CONNECTION_ROLE_SQL)
+    let row: (String, String, bool, bool, bool, bool, bool, bool, bool) =
+        sqlx::query_as(WRITER_ROLE_SQL)
             .fetch_one(&mut **tx)
             .await
             .map_err(PgError::RlsCapability)?;
-    let role = ServingRole {
-        session_user,
-        current_user,
-        superuser,
-        bypass_rls,
+    let role = WriterRole {
+        session_user: row.0,
+        current_user: row.1,
+        can_login: row.2,
+        superuser: row.3,
+        bypass_rls: row.4,
+        create_db: row.5,
+        create_role: row.6,
+        replication: row.7,
+        inherit: row.8,
     };
     ensure_expected_serving_role(&role)?;
-    ensure_serving_role_cannot_bypass_rls(&role)?;
+    ensure_writer_role_attributes(&role)?;
+    ensure_writer_no_membership(tx).await?;
+    ensure_writer_no_ownership(tx).await?;
+    ensure_writer_effective_privileges(tx).await?;
     log_serving_role_accepted(&role);
     Ok(())
 }
 
-fn ensure_expected_serving_role(role: &ServingRole) -> Result<(), PgError> {
+fn ensure_expected_serving_role(role: &WriterRole) -> Result<(), PgError> {
     if role.session_user == EXPECTED_SERVING_ROLE && role.current_user == EXPECTED_SERVING_ROLE {
         return Ok(());
     }
@@ -1186,15 +1270,101 @@ fn ensure_expected_serving_role(role: &ServingRole) -> Result<(), PgError> {
     Err(PgError::RlsUnexpectedServingRole)
 }
 
-fn ensure_serving_role_cannot_bypass_rls(role: &ServingRole) -> Result<(), PgError> {
-    if !role.superuser && !role.bypass_rls {
+fn ensure_writer_role_attributes(role: &WriterRole) -> Result<(), PgError> {
+    if role.can_login
+        && !role.superuser
+        && !role.bypass_rls
+        && !role.create_db
+        && !role.create_role
+        && !role.replication
+        && !role.inherit
+    {
         return Ok(());
     }
     log_serving_role_bypass(role);
-    Err(PgError::RlsBypassRole)
+    Err(PgError::WriterRoleAttributes)
 }
 
-fn log_serving_role_accepted(role: &ServingRole) {
+async fn ensure_writer_no_membership(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+) -> Result<(), PgError> {
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*)::bigint FROM pg_auth_members AS membership \
+         JOIN pg_roles AS role ON role.oid = membership.roleid OR role.oid = membership.member \
+         WHERE role.rolname = current_user",
+    )
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(PgError::RlsCapability)?;
+    if count == 0 {
+        Ok(())
+    } else {
+        Err(PgError::WriterMembership)
+    }
+}
+
+async fn ensure_writer_no_ownership(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+) -> Result<(), PgError> {
+    let count: i64 = sqlx::query_scalar(
+        r#"SELECT count(*)::bigint FROM (
+               SELECT database.oid FROM pg_database AS database
+               JOIN pg_roles AS role ON role.oid = database.datdba
+               WHERE role.rolname = current_user
+               UNION ALL
+               SELECT namespace.oid FROM pg_namespace AS namespace
+               JOIN pg_roles AS role ON role.oid = namespace.nspowner
+               WHERE role.rolname = current_user AND namespace.nspname !~ '^pg_'
+               UNION ALL
+               SELECT relation.oid FROM pg_class AS relation
+               JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+               JOIN pg_roles AS role ON role.oid = relation.relowner
+               WHERE role.rolname = current_user AND namespace.nspname !~ '^pg_'
+               UNION ALL
+               SELECT procedure.oid FROM pg_proc AS procedure
+               JOIN pg_namespace AS namespace ON namespace.oid = procedure.pronamespace
+               JOIN pg_roles AS role ON role.oid = procedure.proowner
+               WHERE role.rolname = current_user AND namespace.nspname !~ '^pg_'
+           ) AS owned"#,
+    )
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(PgError::RlsCapability)?;
+    if count == 0 {
+        Ok(())
+    } else {
+        Err(PgError::WriterOwnership)
+    }
+}
+
+async fn ensure_writer_effective_privileges(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+) -> Result<(), PgError> {
+    use sha2::{Digest as _, Sha256};
+    let capabilities: Vec<(String,)> = sqlx::query_as(WRITER_EFFECTIVE_CAPABILITIES_SQL)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(PgError::RlsCapability)?;
+    if capabilities.is_empty() {
+        return Err(PgError::WriterPrivileges {
+            actual_fingerprint: "empty".to_owned(),
+        });
+    }
+    let mut digest = Sha256::new();
+    for (capability,) in &capabilities {
+        digest.update(capability.as_bytes());
+        digest.update([b'\n']);
+    }
+    let actual_fingerprint = format!("sha256:{:x}", digest.finalize());
+    if actual_fingerprint == EXPECTED_WRITER_CAPABILITY_FINGERPRINT {
+        Ok(())
+    } else {
+        tracing::error!(target: "postgres", %actual_fingerprint, "writer effective capability fingerprint mismatch");
+        Err(PgError::WriterPrivileges { actual_fingerprint })
+    }
+}
+
+fn log_serving_role_accepted(role: &WriterRole) {
     tracing::info!(
         target: "postgres",
         session_user = %role.session_user,
@@ -1203,7 +1373,7 @@ fn log_serving_role_accepted(role: &ServingRole) {
     );
 }
 
-fn log_serving_role_bypass(role: &ServingRole) {
+fn log_serving_role_bypass(role: &WriterRole) {
     tracing::error!(
         target: "postgres",
         session_user = %role.session_user,
@@ -1626,6 +1796,10 @@ impl PgStore {
         config: &PgConfig,
     ) -> Result<VerifiedPgWriteStore, PgError> {
         let store = Arc::new(Self::connect_for(config, "writer", WRITER_APPLICATION_NAME).await?);
+        if let Err(error) = store.verify_migration_ledger().await {
+            store.pool.close().await;
+            return Err(error);
+        }
         if let Err(error) = store.verify_rls_capability().await {
             store.pool.close().await;
             return Err(error);
@@ -1668,10 +1842,6 @@ impl PgStore {
     /// 外部不能直接 mint `PgStore`、故拿不到 `&PgStore` 散装构造 repo。
     pub(crate) async fn connect(config: &PgConfig) -> Result<Self, PgError> {
         Self::connect_for(config, "maintenance", APPLICATION_NAME).await
-    }
-
-    pub(crate) async fn connect_migrator(config: &PgConfig) -> Result<Self, PgError> {
-        Self::connect_for(config, "migrator", MIGRATOR_APPLICATION_NAME).await
     }
 
     async fn connect_for(

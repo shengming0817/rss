@@ -2,31 +2,83 @@
   "schemaVersion": 1,
   "assemblyFingerprint": "sha256:e67c48118b9e32632bcf194d2a5ce93d557e534461693887ce15967182a36d0c",
   "runtimePlanFingerprint": "sha256:bd4b4391cd0121e167a8e715bb4850ff87f9e8a66635afccf9bd62851c34ccf3",
-  "deploymentFingerprint": "sha256:e7d02a0d8a3830abc73b6d4ebdd8c1401a730ef222550ccc749c4c22e73c4a4a",
+  "deploymentFingerprint": "sha256:91ac2a78f68cefa062f856796d50a42bfbfc9ecae4235143a71c803b5d97f2c5",
+  "migrationMode": "forwardOnlyTwoPhase",
+  "migrationHeadFingerprint": "sha256:10b73724fbe634b3514e17a315b80a3c15e0bd14ac2a0ce233ca12d9f9e067b9",
+  "migrationArtifact": {
+    "image": "ghcr.io/gocell/rss-operator@sha256:8cf9af483e68f4c086f8fc49dca072fe43b528f35b2e95da309d5d29a310f35d",
+    "sourceRevision": "0f386a442354452055c8dcd621316ed1768fdbdf"
+  },
+  "migrationExecutionBudget": {
+    "activeDeadlineSeconds": 900,
+    "backoffLimit": 0
+  },
+  "availabilityClass": "maintenanceWindow",
+  "drainSeconds": 50,
+  "replicaDatabaseBudget": {
+    "minReplicas": 2,
+    "maxReplicas": 10,
+    "poolCeilings": {
+      "writer": 10,
+      "reader": 10,
+      "auditAdmin": 5
+    },
+    "connectionsPerReplica": 25,
+    "databaseConnectionLimit": 400,
+    "reservedConnections": 100
+  },
+  "dependencyPeerRoles": [
+    "dns",
+    "vault",
+    "postgresql",
+    "amqp",
+    "redis",
+    "oidc"
+  ],
   "workloads": [
     {
       "name": "identityaudit",
       "image": "ghcr.io/gocell/rss-identityaudit@sha256:0dc0251564b714e89c8d098560ddfe69eb08c87fb85ac87323c54a7650126592",
+      "sourceRevision": "0f386a442354452055c8dcd621316ed1768fdbdf",
+      "applicationConfig": "identityAuditV1",
       "identity": {
         "name": "identityaudit",
         "serviceAccount": "identityaudit"
       },
-      "secretRefs": [
+      "secretBindings": [
         {
-          "kind": "kubernetesSecret",
-          "name": "rss-identityaudit",
-          "key": "database-url"
+          "purpose": "migrationDatabaseUrl",
+          "consumers": [
+            "migration"
+          ],
+          "vault": {
+            "storeId": "rss-vault",
+            "refKey": "identityaudit/database-url"
+          }
         },
         {
-          "kind": "kubernetesSecret",
-          "name": "rss-identityaudit",
-          "key": "oidc-client-secret"
+          "purpose": "servingDatabaseUrl",
+          "consumers": [
+            "serving"
+          ],
+          "vault": {
+            "storeId": "rss-vault",
+            "refKey": "identityaudit/serving-database-url"
+          }
         },
         {
-          "kind": "vaultRef",
-          "storeId": "rss-vault",
-          "refKey": "identityaudit/signing"
+          "purpose": "servingSecretBundle",
+          "consumers": [
+            "serving"
+          ],
+          "vault": {
+            "storeId": "rss-vault",
+            "refKey": "identityaudit/serving-secret-bundle"
+          }
         }
+      ],
+      "ingressPeerIdentities": [
+        "spiffe://rss.local/ns/rss/sa/ingress-gateway"
       ],
       "resources": {
         "requests": {
@@ -42,17 +94,17 @@
         {
           "kind": "startup",
           "path": "/health/v1/healthz",
-          "port": 8082
+          "port": 8083
         },
         {
           "kind": "readiness",
           "path": "/health/v1/readyz",
-          "port": 8082
+          "port": 8083
         },
         {
           "kind": "liveness",
           "path": "/health/v1/healthz",
-          "port": 8082
+          "port": 8083
         }
       ]
     }
@@ -69,7 +121,7 @@
         },
         {
           "name": "health",
-          "port": 8082,
+          "port": 8083,
           "exposure": "serviceExposed"
         },
         {

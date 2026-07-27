@@ -11,8 +11,11 @@ use diport::DynManagedResource;
 use httpd::HttpServer;
 use primitives::{AuthScheme, ListenerKind};
 
+#[path = "deployment_facts.rs"]
+mod deployment_facts;
+
 pub(crate) const HTTP_SERVER_REQUEST_BUDGET_ENV: &str = "RSS_HTTP_SERVER_REQUEST_BUDGET_MS";
-const TOTAL_DRAIN_BUDGET: Duration = Duration::from_secs(20);
+const TOTAL_DRAIN_BUDGET: Duration = Duration::from_secs(deployment_facts::TOTAL_DRAIN_SECONDS);
 const DEPLOYMENT_GRACE_PERIOD: Duration = Duration::from_secs(30);
 const EXIT_BUFFER: Duration = Duration::from_secs(5);
 

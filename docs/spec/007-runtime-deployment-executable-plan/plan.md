@@ -23,7 +23,7 @@ The old 001 tree is read-only. 007 replaces it as the active pointer without rea
 - AssemblyLock, RuntimePlan, and DeploymentPlan have separate domain-tagged fingerprints; every downstream artifact carries its immediate upstream identity.
 - Fingerprint bytes are `ASCII(stageTag) || NUL || RFC8785(unsignedObject)`; input aggregates close membership, path, order, and child digest semantics before hashing.
 - RuntimeInventory is a design boundary; #1806 must add the authorized production HTTP contract.
-- Typed secret references are the only stable secret representation.
+- Purpose/consumer-bound Vault file bindings are the only stable DeploymentPlan secret representation; Kubernetes Secret and raw environment-value paths are removed rather than negotiated.
 - Domain/lifecycle order remains semantic; set-like facts sort canonically.
 - Carrier choice prefers type/visibility/schema/codegen/golden Hard proof, then fail-closed Medium proof with red and anti-vacuity evidence.
 - Skills invoke repository gates; #1809 extends the existing local `ci-gate` and does not activate a forge required check.

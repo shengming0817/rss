@@ -334,7 +334,8 @@ fn runtime_serving_config_accepts_complete_isolated_event_transport() {
 
 #[test]
 fn runtime_infra_pg_redis_snapshot_reads_each_key_once_across_repeated_typed_mapping() {
-    const PG_REDIS_KEYS: [&str; 26] = [
+    const TEST_PASSWORD_FILE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml");
+    const PG_REDIS_KEYS: [&str; 33] = [
         "RSS_PG_HOST",
         "RSS_PG_PORT",
         "RSS_PG_DATABASE",
@@ -342,20 +343,27 @@ fn runtime_infra_pg_redis_snapshot_reads_each_key_once_across_repeated_typed_map
         "RSS_PG_SSL_ROOT_CERT_PATH",
         "RSS_PG_USERNAME",
         "RSS_PG_PASSWORD",
+        "RSS_PG_PASSWORD_FILE",
         "RSS_PG_MAX_CONNECTIONS",
         "RSS_PG_READ_USERNAME",
         "RSS_PG_READ_PASSWORD",
+        "RSS_PG_READ_PASSWORD_FILE",
         "RSS_PG_READ_MAX_CONNECTIONS",
         "RSS_PG_MIGRATOR_USERNAME",
         "RSS_PG_MIGRATOR_PASSWORD",
+        "RSS_PG_MIGRATOR_PASSWORD_FILE",
         "RSS_PG_AUDIT_ADMIN_USERNAME",
         "RSS_PG_AUDIT_ADMIN_PASSWORD",
+        "RSS_PG_AUDIT_ADMIN_PASSWORD_FILE",
         "RSS_PG_DLX_ARCHIVER_USERNAME",
         "RSS_PG_DLX_ARCHIVER_PASSWORD",
+        "RSS_PG_DLX_ARCHIVER_PASSWORD_FILE",
         "RSS_PG_DLX_VERIFIER_USERNAME",
         "RSS_PG_DLX_VERIFIER_PASSWORD",
+        "RSS_PG_DLX_VERIFIER_PASSWORD_FILE",
         "RSS_PG_DLX_PURGER_USERNAME",
         "RSS_PG_DLX_PURGER_PASSWORD",
+        "RSS_PG_DLX_PURGER_PASSWORD_FILE",
         "RSS_SETTINGS_ALLOW_LEGACY_PLAINTEXT_CONFIG_VALUES",
         "RSS_PG_READINESS_SAMPLE_INTERVAL_SECS",
         "RSS_REDIS_URL",
@@ -367,7 +375,8 @@ fn runtime_infra_pg_redis_snapshot_reads_each_key_once_across_repeated_typed_map
         let value = match *key {
             "RSS_PG_SSL_ROOT_CERT_PATH"
             | "RSS_PG_AUDIT_ADMIN_USERNAME"
-            | "RSS_PG_AUDIT_ADMIN_PASSWORD" => return None,
+            | "RSS_PG_AUDIT_ADMIN_PASSWORD"
+            | "RSS_PG_AUDIT_ADMIN_PASSWORD_FILE" => return None,
             "RSS_PG_HOST" => "pg.generation-one",
             "RSS_PG_PORT" => "5432",
             "RSS_PG_DATABASE" => "rss",
@@ -380,7 +389,8 @@ fn runtime_infra_pg_redis_snapshot_reads_each_key_once_across_repeated_typed_map
                 "false"
             }
             key if key.ends_with("USERNAME") => "role",
-            key if key.ends_with("PASSWORD") => "secret",
+            key if key.ends_with("PASSWORD") => return None,
+            key if key.ends_with("PASSWORD_FILE") => TEST_PASSWORD_FILE,
             _ => return None,
         };
         Some((*key, FakeValue::Present(value.to_owned())))
@@ -535,7 +545,7 @@ fn runtime_config_catalog_deduplicates_static_dynamic_keys_and_excludes_maintena
     for expected in [
         "RSS_KEYPROVIDER_READINESS_SAMPLE_INTERVAL_SECS",
         "RSS_PG_READ_USERNAME",
-        "RSS_PG_READ_PASSWORD",
+        "RSS_PG_READ_PASSWORD_FILE",
         "RSS_PG_MAX_CONNECTIONS",
         "RSS_PG_READ_MAX_CONNECTIONS",
         "RSS_IDENTITY_DOMAIN_TRANSPORT_URL",

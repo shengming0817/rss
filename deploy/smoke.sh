@@ -156,6 +156,9 @@ teardown() {
 }
 
 log "构建演示栈同版本镜像…"
+"${SCRIPT_DIR}/compose-secret-boundary.sh" >/dev/null \
+    || fail "compose serving Secret boundary 校验失败"
+log "compose serving Secret boundary ✓"
 $COMPOSE build
 
 # ── 离线 preflight：同一 strict parser，且不注入 Vault/provider env、不发网络请求 ──────────────

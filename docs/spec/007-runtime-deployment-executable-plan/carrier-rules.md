@@ -175,16 +175,20 @@ Schema ownership is exclusive:
 - #1788 owns RuntimePlan implementation and `runtimePlanFingerprint` golden parity.
 - #1802 owns the landed DeploymentPlan implementation, consumes an exact RuntimePlan, and produces `deploymentFingerprint`.
 - #1803 owns the landed static Helm profile/plan/schema/render closure; it creates no deployment receipt and performs no cluster operation.
+- #1804 owns the landed Vault file binding, SPIFFE/network boundary, forward-only migration separation, availability resources, two-phase rendered closure and strict DeploymentPolicy gate; it creates no cluster runtime receipt.
 - #1806 owns RuntimeInventory, carries assembly/runtime-plan/deployment fingerprints, and adds a separate authorized HTTP contract: auth mode is `permission|serviceOwned`, resource sharing is explicit `tenantScoped|global`, and `public|bootstrap|clientsOnly` are invalid.
 - #1796 and #1797 own the landed subset launch paths and closed JSON configuration schemas. #1798 owns the cross-assembly artifact classification and exact closure gate.
 
-The #1803 Medium carrier is `cargo xtask deployment plan check`: exact Helm 4.2.0 lint/render for
-runtime/settingsonly/identityaudit is composed with raw-byte closure for chart-local plans,
-default/profile selectors, values schema and render goldens. The chart reads plan-owned
-image/port/probe/resource/identity facts and values cannot override them. Security semantics freeze
-non-root, read-only rootfs, drop ALL, no privilege escalation and no shell assumption. This remains
-static acceptance: #1804 owns secret-reference mapping, sidecars and deployment policy; #1805 owns
-kind execution. Whole-change revert is the rollback and has no cluster/database/secret mutation.
+The #1804 Medium carrier is the pair `cargo xtask deployment plan check` and
+`cargo xtask deployment policy check`: exact Helm 4.2.0 lint/render for three profiles × two phases
+is composed with raw-byte closure for chart plans, `profile+phase` selectors, values schema, six
+goldens and 6+6 core/extension manifests. The chart reads plan-owned closed facts and values cannot
+override them. The shared semantic validator enforces Vault file-only bindings, SPIFFE listener
+closure, default-deny networking, migrate-all/serving capability separation, HPA/PDB/topology/drain
+and ServiceMonitor. The policy command additionally verifies pinned schema digests and kubeconform
+v0.7.0 strict validation against Kubernetes 1.30 plus local CRD schemas. #1805 still owns kind
+execution. Repository carriers can be reverted as a unit; an applied forward-only database migration
+cannot be rolled back to an old serving image.
 
 The landed #1788 Hard carrier is `RUNTIME-PLAN-CONSTRUCTION-01`: protocol fields are private,
 `RuntimePlan::compile_v1` validates canonical manifest/lock identity and declaration bijections,

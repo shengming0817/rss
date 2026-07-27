@@ -102,7 +102,7 @@ async fn connect_pg()
     .await?;
     let tenant_read_config =
         PgTenantReadConfig::new(pg_config(p, TEST_READ_ROLE, TEST_READ_PASSWORD));
-    let deps = PgRuntimeDeps::setup(
+    let deps = PgRuntimeDeps::setup_test_fixture(
         &owner_config,
         &pg_config(p, TEST_APP_ROLE, TEST_APP_PASSWORD),
         &tenant_read_config,

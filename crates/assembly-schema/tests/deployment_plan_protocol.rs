@@ -1,16 +1,21 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use assembly_schema::{
+    ApplicationConfig, AvailabilityClass, DatabasePoolCeilingsV1Input, DependencyPeerRole,
     DeploymentIdentityV1Input, DeploymentPlan, DeploymentPlanErrorStage, DeploymentPlanV1Input,
-    DeploymentServiceV1Input, DeploymentWorkloadV1Input, ParsedDeploymentPlan, ParsedRuntimePlan,
-    PortExposure, PortV1Input, ProbeKind, ProbeV1Input, ResourceListV1Input,
-    ResourceRequirementsV1Input, SecretRefV1Input,
+    DeploymentServiceV1Input, DeploymentWorkloadV1Input, MigrationArtifactV1Input,
+    MigrationExecutionBudgetV1Input, MigrationMode, ParsedDeploymentPlan, ParsedRuntimePlan,
+    PortExposure, PortV1Input, ProbeKind, ProbeV1Input, ReplicaDatabaseBudgetV1Input,
+    ResourceListV1Input, ResourceRequirementsV1Input, SecretBindingV1Input, SecretConsumer,
+    SecretPurpose, VaultObjectRefV1Input,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 const TAG: &str = "rss-deployment-plan-v1";
+const MIGRATION_HEAD: &str =
+    "sha256:10b73724fbe634b3514e17a315b80a3c15e0bd14ac2a0ce233ca12d9f9e067b9";
 const SECRET: &str = "ZZ_DEPLOYMENT_SECRET_1802_DO_NOT_LEAK";
 type WireMutation = (&'static str, fn(Value) -> Value);
 
@@ -74,7 +79,7 @@ fn assert_production_fingerprint_rejects(runtime: &ParsedRuntimePlan, wire: Valu
 }
 
 fn deployment_wire() -> Value {
-    let vector = vector("deployment-plan-kubernetes-secret");
+    let vector = vector("deployment-plan-vault-binding");
     let mut wire = vector["unsigned"].clone();
     wire.as_object_mut().unwrap().insert(
         "deploymentFingerprint".to_owned(),
@@ -105,7 +110,7 @@ fn strict_reader_rejects(wire: Value) -> bool {
 
 #[test]
 fn deployment_plan_shared_vector_and_runtime_bound_reader_are_exact() {
-    let vector = vector("deployment-plan-kubernetes-secret");
+    let vector = vector("deployment-plan-vault-binding");
     assert_eq!(fingerprint(TAG, &vector["unsigned"]), vector["expected"]);
     let runtime = runtime();
     let parsed = ParsedDeploymentPlan::from_json_slice(
@@ -133,9 +138,50 @@ fn deployment_plan_shared_vector_and_runtime_bound_reader_are_exact() {
 }
 
 #[test]
+fn migration_head_identity_is_required_for_forward_fence_and_forbidden_for_none() {
+    let runtime = runtime();
+    let valid = deployment_wire();
+
+    let mut missing = valid.clone();
+    missing
+        .as_object_mut()
+        .unwrap()
+        .remove("migrationHeadFingerprint");
+    assert!(
+        ParsedDeploymentPlan::from_json_slice(
+            runtime.as_plan(),
+            &serde_json::to_vec(&resign(missing)).unwrap(),
+        )
+        .is_err()
+    );
+
+    let mut null_forward = valid.clone();
+    null_forward["migrationHeadFingerprint"] = Value::Null;
+    assert!(strict_reader_rejects(null_forward));
+
+    let mut none = valid;
+    none["migrationMode"] = json!("none");
+    none["migrationHeadFingerprint"] = Value::Null;
+    none["migrationArtifact"] = Value::Null;
+    none["migrationExecutionBudget"] = Value::Null;
+    none["availabilityClass"] = json!("highlyAvailable");
+    none["workloads"][0]["secretBindings"]
+        .as_array_mut()
+        .unwrap()
+        .remove(0);
+    let parsed = ParsedDeploymentPlan::from_json_slice(
+        runtime.as_plan(),
+        &serde_json::to_vec(&resign(none)).unwrap(),
+    )
+    .expect("none mode without a migration head");
+    assert_eq!(parsed.migration_mode(), MigrationMode::None);
+    assert!(parsed.migration_head_fingerprint().is_none());
+}
+
+#[test]
 fn deployment_plan_reader_rejects_changed_runtime_even_with_recomputed_deployment_identity() {
     let runtime = runtime();
-    let mut unsigned = vector("deployment-plan-kubernetes-secret")["unsigned"].clone();
+    let mut unsigned = vector("deployment-plan-vault-binding")["unsigned"].clone();
     unsigned["runtimePlanFingerprint"] =
         json!("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
     let mut wire = unsigned.clone();
@@ -173,6 +219,19 @@ fn deployment_plan_reader_rejects_unknown_duplicate_trailing_and_secret_bait_wit
         assert!(!error.to_string().contains(SECRET));
         assert!(!format!("{error:?}").contains(SECRET));
     }
+}
+
+#[test]
+fn deployment_plan_v1_rejects_legacy_kubernetes_secret_wire() {
+    let mut legacy = deployment_wire();
+    legacy["workloads"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("secretBindings");
+    legacy["workloads"][0]["secretRefs"] = json!([{
+        "kind":"kubernetesSecret", "name":"runtime-secrets", "key":"database-url"
+    }]);
+    assert!(strict_reader_rejects(legacy));
 }
 
 #[test]
@@ -261,11 +320,11 @@ fn deployment_plan_schema_and_reader_share_closed_name_and_image_grammar() {
         .build(&committed)
         .unwrap();
 
-    let mut dns_63 = deployment_wire();
-    dns_63["workloads"][0]["secretRefs"][0]["name"] = json!("a".repeat(63));
-    let dns_63 = resign(dns_63);
-    assert!(validator.validate(&dns_63).is_ok());
-    assert!(!strict_reader_rejects(dns_63));
+    let mut store_63 = deployment_wire();
+    store_63["workloads"][0]["secretBindings"][0]["vault"]["storeId"] = json!("a".repeat(63));
+    let store_63 = resign(store_63);
+    assert!(validator.validate(&store_63).is_ok());
+    assert!(!strict_reader_rejects(store_63));
 
     let mut dotted_service_account = deployment_wire();
     dotted_service_account["workloads"][0]["identity"]["serviceAccount"] = json!("runtime.team");
@@ -275,8 +334,8 @@ fn deployment_plan_schema_and_reader_share_closed_name_and_image_grammar() {
 
     for (label, pointer, invalid) in [
         (
-            "64-byte DNS label",
-            "/workloads/0/secretRefs/0/name",
+            "64-byte Vault store ID",
+            "/workloads/0/secretBindings/0/vault/storeId",
             "a".repeat(64),
         ),
         (
@@ -368,8 +427,8 @@ fn deployment_plan_keyed_sets_reject_swapped_and_duplicate_facts() {
     assert!(strict_reader_rejects(swapped_workloads));
 
     let mut duplicate_secret = deployment_wire();
-    let secret = duplicate_secret["workloads"][0]["secretRefs"][0].clone();
-    duplicate_secret["workloads"][0]["secretRefs"] = json!([secret.clone(), secret]);
+    let secret = duplicate_secret["workloads"][0]["secretBindings"][0].clone();
+    duplicate_secret["workloads"][0]["secretBindings"] = json!([secret.clone(), secret]);
     assert!(strict_reader_rejects(duplicate_secret));
 
     let mut duplicate_service = deployment_wire();
@@ -383,11 +442,12 @@ fn deployment_plan_keyed_sets_reject_swapped_and_duplicate_facts() {
     assert!(strict_reader_rejects(duplicate_port));
 
     let mut swapped_secrets = deployment_wire();
-    let first_secret = swapped_secrets["workloads"][0]["secretRefs"][0].clone();
+    let first_secret = swapped_secrets["workloads"][0]["secretBindings"][0].clone();
     let second_secret = json!({
-        "kind":"kubernetesSecret", "name":"runtime-secrets", "key":"zz-last"
+        "purpose":"servingSecretBundle", "consumers":["serving"],
+        "vault":{"storeId":"rss-vault", "refKey":"runtime/serving-secret-bundle"}
     });
-    swapped_secrets["workloads"][0]["secretRefs"] = json!([second_secret, first_secret]);
+    swapped_secrets["workloads"][0]["secretBindings"] = json!([second_secret, first_secret]);
     assert!(strict_reader_rejects(swapped_secrets));
 
     let mut swapped_ports = deployment_wire();
@@ -410,9 +470,10 @@ fn deployment_plan_keyed_sets_reject_swapped_and_duplicate_facts() {
 #[test]
 fn deployment_plan_two_element_sorted_sets_are_non_vacuous_where_v1_is_expressible() {
     let mut secrets = deployment_wire();
-    secrets["workloads"][0]["secretRefs"] = json!([
-        {"kind":"kubernetesSecret", "name":"runtime-secrets", "key":"database.url"},
-        {"kind":"vaultRef", "storeId":"vault", "refKey":"runtime/keyring"}
+    secrets["workloads"][0]["secretBindings"] = json!([
+        {"purpose":"migrationDatabaseUrl", "consumers":["migration"], "vault":{"storeId":"rss-vault","refKey":"runtime/database-url"}},
+        {"purpose":"servingDatabaseUrl", "consumers":["serving"], "vault":{"storeId":"rss-vault","refKey":"runtime/serving-database-url"}},
+        {"purpose":"servingSecretBundle", "consumers":["serving"], "vault":{"storeId":"rss-vault","refKey":"runtime/serving-secret-bundle"}}
     ]);
     assert!(!strict_reader_rejects(secrets));
 
@@ -488,7 +549,6 @@ fn deployment_plan_two_workload_ordering_reaches_the_target_branch() {
     let mut worker = deployment["workloads"][0].clone();
     worker["name"] = json!("worker");
     worker["identity"]["name"] = json!("worker");
-    worker["secretRefs"] = json!([]);
     for probe in worker["probes"].as_array_mut().unwrap() {
         probe["port"] = json!(9081);
     }
@@ -554,12 +614,44 @@ fn deployment_plan_writer_and_rust_schema_match_committed_draft7() {
 #[test]
 fn deployment_plan_compile_v1_copies_runtime_identity_and_emits_no_secret_values() {
     let runtime = runtime();
-    let mut input = DeploymentPlanV1Input::new();
+    let mut input = DeploymentPlanV1Input::new(
+        MigrationMode::ForwardOnlyTwoPhase,
+        Some(MIGRATION_HEAD.to_owned()),
+        Some(MigrationArtifactV1Input::new(
+            "registry.example/rss-operator@sha256:5555555555555555555555555555555555555555555555555555555555555555",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )),
+        Some(MigrationExecutionBudgetV1Input::new(900, 0)),
+        AvailabilityClass::MaintenanceWindow,
+        20,
+        ReplicaDatabaseBudgetV1Input::new(
+            2,
+            10,
+            DatabasePoolCeilingsV1Input::new(5, 5, None, None, None, None),
+            200,
+            100,
+        ),
+        vec![DependencyPeerRole::Dns, DependencyPeerRole::Postgresql],
+    );
     input.workload(DeploymentWorkloadV1Input::new(
         "runtime",
         "registry.example/rss@sha256:4444444444444444444444444444444444444444444444444444444444444444",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ApplicationConfig::None,
         DeploymentIdentityV1Input::new("runtime", "runtime"),
-        vec![SecretRefV1Input::kubernetes("runtime-secrets", "database.url")],
+        vec![
+            SecretBindingV1Input::new(
+                SecretPurpose::MigrationDatabaseUrl,
+                vec![SecretConsumer::Migration],
+                VaultObjectRefV1Input::new("rss-vault", "runtime/database-url", None),
+            ),
+            SecretBindingV1Input::new(
+                SecretPurpose::ServingDatabaseUrl,
+                vec![SecretConsumer::Serving],
+                VaultObjectRefV1Input::new("rss-vault", "runtime/serving-database-url", None),
+            ),
+        ],
+        Vec::new(),
         ResourceRequirementsV1Input::new(
             ResourceListV1Input::new("500m", "256Mi"),
             ResourceListV1Input::new("1", "512Mi"),
@@ -585,14 +677,126 @@ fn deployment_plan_compile_v1_copies_runtime_identity_and_emits_no_secret_values
     );
     assert_eq!(
         plan.deployment_fingerprint().as_str(),
-        vector("deployment-plan-kubernetes-secret")["expected"]
+        vector("deployment-plan-vault-binding")["expected"]
     );
-    assert!(!format!("{:?}", plan.workloads()[0].secret_refs()[0]).contains("runtime-secrets"));
+    assert!(
+        !format!("{:?}", plan.workloads()[0].secret_bindings()[0]).contains("runtime/database-url")
+    );
+}
+
+#[test]
+fn deployment_plan_v1_uses_closed_vault_bindings_and_deployment_posture() {
+    let runtime = runtime();
+    let mut input = DeploymentPlanV1Input::new(
+        MigrationMode::ForwardOnlyTwoPhase,
+        Some(MIGRATION_HEAD.to_owned()),
+        Some(MigrationArtifactV1Input::new(
+            "registry.example/rss-operator@sha256:5555555555555555555555555555555555555555555555555555555555555555",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )),
+        Some(MigrationExecutionBudgetV1Input::new(900, 0)),
+        AvailabilityClass::MaintenanceWindow,
+        20,
+        ReplicaDatabaseBudgetV1Input::new(
+            2,
+            10,
+            DatabasePoolCeilingsV1Input::new(5, 5, None, None, None, None),
+            200,
+            100,
+        ),
+        vec![DependencyPeerRole::Dns, DependencyPeerRole::Postgresql],
+    );
+    input.workload(DeploymentWorkloadV1Input::new(
+        "runtime",
+        "registry.example/rss@sha256:4444444444444444444444444444444444444444444444444444444444444444",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ApplicationConfig::None,
+        DeploymentIdentityV1Input::new("runtime", "runtime"),
+        vec![
+            SecretBindingV1Input::new(
+                SecretPurpose::MigrationDatabaseUrl,
+                vec![SecretConsumer::Migration],
+                VaultObjectRefV1Input::new("rss-vault", "runtime/database-url", None),
+            ),
+            SecretBindingV1Input::new(
+                SecretPurpose::ServingDatabaseUrl,
+                vec![SecretConsumer::Serving],
+                VaultObjectRefV1Input::new("rss-vault", "runtime/serving-database-url", None),
+            ),
+        ],
+        Vec::new(),
+        ResourceRequirementsV1Input::new(
+            ResourceListV1Input::new("500m", "256Mi"),
+            ResourceListV1Input::new("1", "512Mi"),
+        ),
+        vec![ProbeV1Input::new(ProbeKind::Readiness, 8081)],
+    ));
+    input.service(DeploymentServiceV1Input::new(
+        "runtime",
+        "runtime",
+        vec![
+            PortV1Input::new("health", 8081, PortExposure::ServiceExposed),
+            PortV1Input::new("http", 8080, PortExposure::ServiceExposed),
+        ],
+    ));
+    let plan = DeploymentPlan::compile_v1(runtime.as_plan(), input).expect("compiled plan");
+    let wire = serde_json::to_value(&plan).unwrap();
+    assert_eq!(wire["migrationMode"], "forwardOnlyTwoPhase");
+    assert_eq!(wire["availabilityClass"], "maintenanceWindow");
+    assert_eq!(wire["drainSeconds"], 20);
+    assert_eq!(wire["dependencyPeerRoles"], json!(["dns", "postgresql"]));
+    assert_eq!(
+        wire["workloads"][0]["secretBindings"][0]["purpose"],
+        "migrationDatabaseUrl"
+    );
+    assert!(wire["workloads"][0].get("secretRefs").is_none());
+    let binding = &plan.workloads()[0].secret_bindings()[0];
+    assert_eq!(binding.target_file_name(), "database-url");
+    assert_eq!(
+        binding.target_mount_path(),
+        "/var/run/rss/secrets/database-url"
+    );
+}
+
+#[test]
+fn deployment_plan_rejects_pool_aggregate_drift_after_valid_resign() {
+    let runtime = runtime();
+    let mut wire = deployment_wire();
+    wire["replicaDatabaseBudget"]["connectionsPerReplica"] = json!(11);
+    let wire = resign(wire);
+    let error = ParsedDeploymentPlan::from_json_slice(
+        runtime.as_plan(),
+        &serde_json::to_vec(&wire).unwrap(),
+    )
+    .unwrap_err();
+    assert_eq!(error.stage(), DeploymentPlanErrorStage::PlanFacts);
+    assert_eq!(
+        error.to_string(),
+        "DeploymentPlan field `replicaDatabaseBudget.connectionsPerReplica` contains an invalid closed value"
+    );
+}
+
+#[test]
+fn migration_artifact_secret_and_database_capacity_boundaries_are_closed() {
+    let mut shared_image = deployment_wire();
+    shared_image["migrationArtifact"]["image"] = shared_image["workloads"][0]["image"].clone();
+    assert!(strict_reader_rejects(resign(shared_image)));
+
+    let mut over_capacity = deployment_wire();
+    over_capacity["replicaDatabaseBudget"]["maxReplicas"] = json!(11);
+    assert!(strict_reader_rejects(resign(over_capacity)));
+
+    let mut missing_serving_credential = deployment_wire();
+    missing_serving_credential["workloads"][0]["secretBindings"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|binding| binding["purpose"] != "servingDatabaseUrl");
+    assert!(strict_reader_rejects(resign(missing_serving_credential)));
 }
 
 #[test]
 fn deployment_plan_fingerprint_covers_every_unsigned_leaf_and_excludes_itself() {
-    let dep_vector = vector("deployment-plan-kubernetes-secret");
+    let dep_vector = vector("deployment-plan-vault-binding");
     let unsigned = dep_vector["unsigned"].clone();
     let expected = dep_vector["expected"].as_str().unwrap();
     for pointer in [
@@ -620,10 +824,16 @@ fn deployment_plan_fingerprint_covers_every_unsigned_leaf_and_excludes_itself() 
         );
     }
     for pointer in [
+        "/migrationMode",
+        "/availabilityClass",
+        "/drainSeconds",
+        "/dependencyPeerRoles/0",
         "/workloads/0/identity/name",
         "/workloads/0/identity/serviceAccount",
-        "/workloads/0/secretRefs/0/name",
-        "/workloads/0/secretRefs/0/key",
+        "/workloads/0/secretBindings/0/purpose",
+        "/workloads/0/secretBindings/0/consumers/0",
+        "/workloads/0/secretBindings/0/vault/storeId",
+        "/workloads/0/secretBindings/0/vault/refKey",
         "/workloads/0/resources/requests/cpu",
         "/workloads/0/resources/requests/memory",
         "/workloads/0/resources/limits/cpu",
@@ -658,12 +868,13 @@ fn deployment_plan_fingerprint_covers_every_unsigned_leaf_and_excludes_itself() 
             value["workloads"][0]["identity"]["serviceAccount"] = json!("runtime-service");
             value
         }),
-        ("secret.name", |mut value| {
-            value["workloads"][0]["secretRefs"][0]["name"] = json!("runtime-secrets-v2");
+        ("secret.storeId", |mut value| {
+            value["workloads"][0]["secretBindings"][0]["vault"]["storeId"] = json!("rss-vault-v2");
             value
         }),
-        ("secret.key", |mut value| {
-            value["workloads"][0]["secretRefs"][0]["key"] = json!("database.v2");
+        ("secret.refKey", |mut value| {
+            value["workloads"][0]["secretBindings"][0]["vault"]["refKey"] =
+                json!("runtime/database-url-v2");
             value
         }),
         ("requests", |mut value| {
@@ -694,9 +905,7 @@ fn deployment_plan_fingerprint_covers_every_unsigned_leaf_and_excludes_itself() 
     }
 
     let mut vault = deployment_wire();
-    vault["workloads"][0]["secretRefs"] = json!([{
-        "kind":"vaultRef", "storeId":"rss-vault", "refKey":"runtime/keyring", "refVersion":"v1"
-    }]);
+    vault["workloads"][0]["secretBindings"][0]["vault"]["refVersion"] = json!("v1");
     let mut vault_unsigned = vault.clone();
     vault_unsigned
         .as_object_mut()
@@ -711,7 +920,7 @@ fn deployment_plan_fingerprint_covers_every_unsigned_leaf_and_excludes_itself() 
         ("refVersion", json!("v2")),
     ] {
         let mut changed = vault.clone();
-        changed["workloads"][0]["secretRefs"][0][field] = value;
+        changed["workloads"][0]["secretBindings"][0]["vault"][field] = value;
         assert_production_fingerprint_rejects(&runtime, changed, field);
     }
 

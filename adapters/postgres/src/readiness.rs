@@ -47,7 +47,7 @@ impl PgDbReadiness {
     ///
     /// 保持 `pub`（#1423）：`PgDbReadiness` 是 provider-agnostic 状态原子（**非** pool/store/repo），
     /// 封闭其构造无 funnel 价值、且破坏 hermetic probe 单测（probe→503 路径不需真 DB）；生产编排路径仍是
-    /// [`crate::PgRuntimeDeps::setup`] 建 + [`crate::PgRuntimeHandle::readiness_handle`] 派发。
+    /// [`crate::PgRuntimeDeps::connect_serving`] 建 + [`crate::PgRuntimeHandle::readiness_handle`] 派发。
     pub fn new() -> Self {
         Self(AtomicU8::new(READINESS_DOWN))
     }

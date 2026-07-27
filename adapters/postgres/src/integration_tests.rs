@@ -34,7 +34,7 @@ use futures::future::{BoxFuture, poll_fn};
 use std::future::Future;
 
 use crate::{
-    PgConfig, PgPassword, PgRuntimeDeps, PgSslMode, PgStore, ReconcileLeaseOutcome,
+    PgConfig, PgError, PgPassword, PgRuntimeDeps, PgSslMode, PgStore, ReconcileLeaseOutcome,
     ReconcileTargetKey,
 };
 
@@ -397,7 +397,7 @@ async fn setup_runtime_deps_with_projection_inputs(
         TEST_READ_ROLE,
         TEST_READ_PASSWORD,
     ));
-    let deps = PgRuntimeDeps::setup(
+    let deps = PgRuntimeDeps::setup_test_fixture(
         &owner_config,
         &runtime_pg_config(p, TEST_APP_ROLE, TEST_APP_PASSWORD),
         &tenant_read_config,
@@ -497,6 +497,111 @@ async fn drop_isolated_database(store: &PgStore, database: &str) -> Result<(), s
     .execute(&store.pool)
     .await?;
     Ok(())
+}
+
+async fn assert_serving_ledger_rejected(config: &PgConfig, case: &str) -> TestResult {
+    assert!(
+        matches!(
+            PgStore::connect_verified_writer(config).await,
+            Err(PgError::SchemaLedgerProbe(_) | PgError::SchemaLedgerMismatch { .. })
+        ),
+        "serving ledger drift must fail closed: {case}"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn serving_gate_rejects_every_real_postgres_ledger_drift_before_runtime() -> TestResult {
+    let (fixture, admin) = connect_pg().await?;
+    provision_runtime_logins(fixture.params()).await?;
+    let database = create_isolated_database(&admin, "serving_ledger_fence").await?;
+    let owner_config = isolated_database_config(fixture.params(), &database);
+    let serving_config = isolated_database_role_config(
+        fixture.params(),
+        &database,
+        TEST_APP_ROLE,
+        TEST_APP_PASSWORD,
+    );
+    let verdict: TestResult = async {
+        let owner = PgStore::connect(&owner_config).await?;
+        owner.run_migrations().await?;
+        let exact = PgStore::connect_verified_writer(&serving_config).await?;
+        exact.store_arc().shutdown().await?;
+
+        sqlx::query("ALTER TABLE public._sqlx_migrations RENAME TO _sqlx_migrations_missing")
+            .execute(&owner.pool)
+            .await?;
+        assert_serving_ledger_rejected(&serving_config, "missing").await?;
+        sqlx::query("ALTER TABLE public._sqlx_migrations_missing RENAME TO _sqlx_migrations")
+            .execute(&owner.pool)
+            .await?;
+
+        let head = postgres_migration_inventory::migrations()
+            .last()
+            .ok_or("typed migration inventory is empty")?;
+        let row: (String, String, bool, Vec<u8>, i64) = sqlx::query_as(
+            "DELETE FROM public._sqlx_migrations WHERE version = $1 \
+             RETURNING description, installed_on::text, success, checksum, execution_time",
+        )
+        .bind(head.version)
+        .fetch_one(&owner.pool)
+        .await?;
+        assert_serving_ledger_rejected(&serving_config, "stale").await?;
+        sqlx::query(
+            "INSERT INTO public._sqlx_migrations \
+             (version, description, installed_on, success, checksum, execution_time) \
+             VALUES ($1, $2, $3::timestamptz, $4, $5, $6)",
+        )
+        .bind(head.version)
+        .bind(&row.0)
+        .bind(row.1)
+        .bind(row.2)
+        .bind(&row.3)
+        .bind(row.4)
+        .execute(&owner.pool)
+        .await?;
+
+        sqlx::query(
+            "INSERT INTO public._sqlx_migrations \
+             (version, description, installed_on, success, checksum, execution_time) \
+             VALUES ($1, 'synthetic ahead', now(), true, $2, 0)",
+        )
+        .bind(head.version + 1)
+        .bind(head.checksum.as_slice())
+        .execute(&owner.pool)
+        .await?;
+        assert_serving_ledger_rejected(&serving_config, "ahead").await?;
+        sqlx::query("DELETE FROM public._sqlx_migrations WHERE version = $1")
+            .bind(head.version + 1)
+            .execute(&owner.pool)
+            .await?;
+
+        sqlx::query("UPDATE public._sqlx_migrations SET success = false WHERE version = $1")
+            .bind(head.version)
+            .execute(&owner.pool)
+            .await?;
+        assert_serving_ledger_rejected(&serving_config, "failed").await?;
+        sqlx::query("UPDATE public._sqlx_migrations SET success = true WHERE version = $1")
+            .bind(head.version)
+            .execute(&owner.pool)
+            .await?;
+
+        sqlx::query(
+            "UPDATE public._sqlx_migrations \
+             SET checksum = decode(repeat('00', 48), 'hex') WHERE version = $1",
+        )
+        .bind(head.version)
+        .execute(&owner.pool)
+        .await?;
+        assert_serving_ledger_rejected(&serving_config, "checksum").await?;
+        owner.shutdown().await?;
+        Ok(())
+    }
+    .await;
+    let cleanup = drop_isolated_database(&admin, &database).await;
+    admin.shutdown().await?;
+    cleanup?;
+    verdict
 }
 
 #[allow(clippy::unwrap_used)]
@@ -623,7 +728,7 @@ async fn assert_revocation_capability_drift(
     sqlx::raw_sql(case.mutate_sql)
         .execute(&mutator.pool)
         .await?;
-    let setup = PgRuntimeDeps::setup(
+    let setup = PgRuntimeDeps::setup_test_fixture(
         owner_config,
         serving_config,
         tenant_read_config,
@@ -803,7 +908,7 @@ async fn revocation_store_commit_failure_is_redacted_rolled_back_and_quarantined
     let verdict: TestResult = async {
         let mutator = PgStore::connect(&owner_config).await?;
         mutator.run_migrations().await?;
-        let deps = PgRuntimeDeps::setup(
+        let deps = PgRuntimeDeps::setup_test_fixture(
             &owner_config,
             &serving_config,
             &tenant_read_config,
@@ -974,7 +1079,7 @@ async fn revocation_store_survives_full_runtime_pool_rebuild() -> TestResult {
         TEST_READ_ROLE,
         TEST_READ_PASSWORD,
     ));
-    let rebuilt = PgRuntimeDeps::setup(
+    let rebuilt = PgRuntimeDeps::setup_test_fixture(
         &owner_config,
         &runtime_pg_config(p, TEST_APP_ROLE, TEST_APP_PASSWORD),
         &tenant_read_config,
@@ -1012,7 +1117,7 @@ async fn revocation_store_ignores_search_path_shadow_table_and_function() -> Tes
         let mutator = PgStore::connect(&owner_config).await?;
         mutator.run_migrations().await?;
 
-        let deps = PgRuntimeDeps::setup(
+        let deps = PgRuntimeDeps::setup_test_fixture(
             &owner_config,
             &serving_config,
             &tenant_read_config,
@@ -1242,7 +1347,7 @@ async fn revocation_startup_capability_gate_rejects_rls_acl_role_and_function_dr
         )
         .execute(&mutator.pool)
         .await?;
-        let policy_drift = PgRuntimeDeps::setup(
+        let policy_drift = PgRuntimeDeps::setup_test_fixture(
             &owner_config,
             &serving_config,
             &tenant_read_config,
@@ -1268,7 +1373,7 @@ async fn revocation_startup_capability_gate_rejects_rls_acl_role_and_function_dr
         sqlx::query("ALTER TABLE certificate_revocations DISABLE ROW LEVEL SECURITY")
             .execute(&mutator.pool)
             .await?;
-        let rls_drift = PgRuntimeDeps::setup(
+        let rls_drift = PgRuntimeDeps::setup_test_fixture(
             &owner_config,
             &serving_config,
             &tenant_read_config,
@@ -1287,7 +1392,7 @@ async fn revocation_startup_capability_gate_rejects_rls_acl_role_and_function_dr
         sqlx::query("GRANT UPDATE ON certificate_revocations TO rss_app")
             .execute(&mutator.pool)
             .await?;
-        let acl_drift = PgRuntimeDeps::setup(
+        let acl_drift = PgRuntimeDeps::setup_test_fixture(
             &owner_config,
             &serving_config,
             &tenant_read_config,
@@ -1306,7 +1411,7 @@ async fn revocation_startup_capability_gate_rejects_rls_acl_role_and_function_dr
         sqlx::query("ALTER ROLE rss_revocation_maintenance INHERIT")
             .execute(&mutator.pool)
             .await?;
-        let role_drift = PgRuntimeDeps::setup(
+        let role_drift = PgRuntimeDeps::setup_test_fixture(
             &owner_config,
             &serving_config,
             &tenant_read_config,
@@ -1325,7 +1430,7 @@ async fn revocation_startup_capability_gate_rejects_rls_acl_role_and_function_dr
         sqlx::query("GRANT CREATE ON SCHEMA public TO rss_revocation_maintenance")
             .execute(&mutator.pool)
             .await?;
-        let schema_acl_drift = PgRuntimeDeps::setup(
+        let schema_acl_drift = PgRuntimeDeps::setup_test_fixture(
             &owner_config,
             &serving_config,
             &tenant_read_config,
@@ -1353,7 +1458,7 @@ async fn revocation_startup_capability_gate_rejects_rls_acl_role_and_function_dr
         )
         .execute(&mutator.pool)
         .await?;
-        let extra_relation_acl = PgRuntimeDeps::setup(
+        let extra_relation_acl = PgRuntimeDeps::setup_test_fixture(
             &owner_config,
             &serving_config,
             &tenant_read_config,
@@ -1387,7 +1492,7 @@ async fn revocation_startup_capability_gate_rejects_rls_acl_role_and_function_dr
         )
         .execute(&mutator.pool)
         .await?;
-        let extra_function_acl = PgRuntimeDeps::setup(
+        let extra_function_acl = PgRuntimeDeps::setup_test_fixture(
             &owner_config,
             &serving_config,
             &tenant_read_config,
@@ -1412,7 +1517,7 @@ async fn revocation_startup_capability_gate_rejects_rls_acl_role_and_function_dr
         )
         .execute(&mutator.pool)
         .await?;
-        let function_drift = PgRuntimeDeps::setup(
+        let function_drift = PgRuntimeDeps::setup_test_fixture(
             &owner_config,
             &serving_config,
             &tenant_read_config,
@@ -1446,7 +1551,7 @@ async fn revocation_startup_capability_gate_rejects_rls_acl_role_and_function_dr
         )
         .execute(&mutator.pool)
         .await?;
-        let function_body_drift = PgRuntimeDeps::setup(
+        let function_body_drift = PgRuntimeDeps::setup_test_fixture(
             &owner_config,
             &serving_config,
             &tenant_read_config,
@@ -2310,7 +2415,7 @@ async fn public_setup_funnels_reject_missing_and_drifted_delivery_policy() -> Te
         mutator.shutdown().await?;
 
         let tenant_read_config = crate::pool::PgTenantReadConfig::new(config.clone());
-        let runtime_missing = PgRuntimeDeps::setup(
+        let runtime_missing = PgRuntimeDeps::setup_test_fixture(
             &config,
             &config,
             &tenant_read_config,
@@ -2346,7 +2451,7 @@ async fn public_setup_funnels_reject_missing_and_drifted_delivery_policy() -> Te
         .await?;
         mutator.shutdown().await?;
 
-        let runtime_drift = PgRuntimeDeps::setup(
+        let runtime_drift = PgRuntimeDeps::setup_test_fixture(
             &config,
             &config,
             &tenant_read_config,
@@ -2407,37 +2512,6 @@ async fn maintenance_connect_cannot_apply_pending_migrations() -> TestResult {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn legacy_config_plaintext_policy_rejects_existing_scheme_zero_rows() -> TestResult {
-    let (_pg, store) = connect_pg().await?;
-    store.run_migrations().await?;
-    sqlx::query("DELETE FROM config_entries")
-        .execute(&store.pool)
-        .await?;
-    sqlx::query(
-        "INSERT INTO config_entries (tenant_id, config_key, version, value, protection_scheme) \
-         VALUES ($1::uuid, $2, 1, $3, 0)",
-    )
-    .bind(COTX_TENANT_A)
-    .bind("legacy.startup.block")
-    .bind("plain")
-    .execute(&store.pool)
-    .await?;
-
-    let verdict = store
-        .verify_config_legacy_plaintext_policy(crate::LegacyConfigPlaintextPolicy::Deny)
-        .await;
-    assert!(
-        matches!(
-            verdict,
-            Err(crate::PgError::LegacyConfigPlaintextPresent { count: 1 })
-        ),
-        "scheme=0 row must block default startup policy, got: {verdict:?}"
-    );
-    store.shutdown().await?;
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread")]
 async fn migration_0028_rejects_non_empty_dead_letter() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     sqlx::query(
@@ -2474,30 +2548,6 @@ async fn migration_0028_rejects_non_empty_dead_letter() -> TestResult {
         rendered.contains("dead_letter must be empty before enabling encrypted original_entry"),
         "unexpected migration error: {rendered}"
     );
-    store.shutdown().await?;
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn legacy_config_plaintext_policy_allows_temporary_override() -> TestResult {
-    let (_pg, store) = connect_pg().await?;
-    store.run_migrations().await?;
-    sqlx::query("DELETE FROM config_entries")
-        .execute(&store.pool)
-        .await?;
-    sqlx::query(
-        "INSERT INTO config_entries (tenant_id, config_key, version, value, protection_scheme) \
-         VALUES ($1::uuid, $2, 1, $3, 0)",
-    )
-    .bind(COTX_TENANT_A)
-    .bind("legacy.startup.allow")
-    .bind("plain")
-    .execute(&store.pool)
-    .await?;
-
-    store
-        .verify_config_legacy_plaintext_policy(crate::LegacyConfigPlaintextPolicy::AllowTemporary)
-        .await?;
     store.shutdown().await?;
     Ok(())
 }
@@ -2590,6 +2640,88 @@ async fn verify_rls_capability_ok_after_migrations() -> TestResult {
     app.verify_rls_capability().await?; // rss_app + FORCE RLS + 规范 policy + GUC roundtrip 全通过
     app.shutdown().await?;
     store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn writer_gate_rejects_attribute_membership_ownership_and_effective_privilege_drift()
+-> TestResult {
+    let (pg, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    let app = connect_pg_rss_app_role(&pg, &owner).await?;
+
+    sqlx::query("ALTER ROLE rss_app INHERIT")
+        .execute(&owner.pool)
+        .await?;
+    assert!(matches!(
+        app.verify_rls_capability().await,
+        Err(PgError::WriterRoleAttributes)
+    ));
+    sqlx::query("ALTER ROLE rss_app NOINHERIT")
+        .execute(&owner.pool)
+        .await?;
+
+    sqlx::query("CREATE ROLE synthetic_writer_parent NOLOGIN")
+        .execute(&owner.pool)
+        .await?;
+    sqlx::query("GRANT synthetic_writer_parent TO rss_app")
+        .execute(&owner.pool)
+        .await?;
+    assert!(matches!(
+        app.verify_rls_capability().await,
+        Err(PgError::WriterMembership)
+    ));
+    sqlx::query("REVOKE synthetic_writer_parent FROM rss_app")
+        .execute(&owner.pool)
+        .await?;
+    sqlx::query("DROP ROLE synthetic_writer_parent")
+        .execute(&owner.pool)
+        .await?;
+
+    sqlx::query("CREATE TABLE public.synthetic_writer_owned(id bigint)")
+        .execute(&owner.pool)
+        .await?;
+    sqlx::query("ALTER TABLE public.synthetic_writer_owned OWNER TO rss_app")
+        .execute(&owner.pool)
+        .await?;
+    assert!(matches!(
+        app.verify_rls_capability().await,
+        Err(PgError::WriterOwnership)
+    ));
+    sqlx::query("DROP TABLE public.synthetic_writer_owned")
+        .execute(&owner.pool)
+        .await?;
+
+    let database = pg.params().database.replace('"', "\"\"");
+    sqlx::query(&format!(
+        "GRANT CREATE ON DATABASE \"{database}\" TO rss_app"
+    ))
+    .execute(&owner.pool)
+    .await?;
+    assert!(matches!(
+        app.verify_rls_capability().await,
+        Err(PgError::WriterPrivileges { .. })
+    ));
+    sqlx::query(&format!(
+        "REVOKE CREATE ON DATABASE \"{database}\" FROM rss_app"
+    ))
+    .execute(&owner.pool)
+    .await?;
+
+    sqlx::query("GRANT SELECT ON TABLE public._sqlx_migrations TO rss_app WITH GRANT OPTION")
+        .execute(&owner.pool)
+        .await?;
+    assert!(matches!(
+        app.verify_rls_capability().await,
+        Err(PgError::WriterPrivileges { .. })
+    ));
+    sqlx::query("REVOKE GRANT OPTION FOR SELECT ON TABLE public._sqlx_migrations FROM rss_app")
+        .execute(&owner.pool)
+        .await?;
+
+    app.verify_rls_capability().await?;
+    app.shutdown().await?;
+    owner.shutdown().await?;
     Ok(())
 }
 
@@ -23307,33 +23439,9 @@ async fn bootstrap_reader_upgrade_smoke_predecessor() -> TestResult {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn reader_lane_migration_command_rejects_binary_embedding_0068_without_advancing()
--> TestResult {
-    let (fixture, store) = connect_pg().await?;
-    migrations_through(66).run(&store.pool).await?;
-    let config = isolated_database_config(fixture.params(), &fixture.params().database);
-
-    let verdict = PgRuntimeDeps::migrate_reader_lane_only(&config).await;
-
-    assert!(matches!(
-        verdict,
-        Err(crate::PgError::ReaderLaneMigrationPrecondition { .. })
-    ));
-    let latest: i64 = sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations")
-        .fetch_one(&store.pool)
-        .await?;
-    assert_eq!(
-        latest, 66,
-        "0067 release-only command must reject a binary embedding 0068 before any write"
-    );
-    store.shutdown().await?;
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires the historical release artifact embedding exactly migrations 0001..0067"]
-async fn reader_lane_0067_release_artifact_applies_only_0067_and_is_idempotent() -> TestResult {
-    let (fixture, store) = connect_pg().await?;
+async fn migration_0067_historical_fixture_is_idempotent() -> TestResult {
+    let (_fixture, store) = connect_pg().await?;
     migrations_through(66).run(&store.pool).await?;
     sqlx::raw_sql(
         r#"
@@ -23366,10 +23474,8 @@ async fn reader_lane_0067_release_artifact_applies_only_0067_and_is_idempotent()
     ))
     .execute(&store.pool)
     .await?;
-    let config = isolated_database_config(fixture.params(), &fixture.params().database);
-
-    PgRuntimeDeps::migrate_reader_lane_only(&config).await?;
-    PgRuntimeDeps::migrate_reader_lane_only(&config).await?;
+    migrations_through(67).run(&store.pool).await?;
+    migrations_through(67).run(&store.pool).await?;
 
     let applied: Vec<(i64, bool)> = sqlx::query_as(
         "SELECT version, success FROM _sqlx_migrations WHERE version >= 66 ORDER BY version",
@@ -23459,29 +23565,6 @@ async fn reader_lane_0067_release_artifact_applies_only_0067_and_is_idempotent()
     ))
     .execute(&store.pool)
     .await?;
-    store.shutdown().await?;
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn reader_lane_migration_command_rejects_non_0066_ledger_without_advancing() -> TestResult {
-    let (fixture, store) = connect_pg().await?;
-    migrations_through(65).run(&store.pool).await?;
-    let config = isolated_database_config(fixture.params(), &fixture.params().database);
-
-    let verdict = PgRuntimeDeps::migrate_reader_lane_only(&config).await;
-
-    assert!(matches!(
-        verdict,
-        Err(crate::PgError::ReaderLaneMigrationPrecondition { .. })
-    ));
-    let latest: i64 = sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations")
-        .fetch_one(&store.pool)
-        .await?;
-    assert_eq!(
-        latest, 65,
-        "failed precondition must not apply 0066 or 0067"
-    );
     store.shutdown().await?;
     Ok(())
 }

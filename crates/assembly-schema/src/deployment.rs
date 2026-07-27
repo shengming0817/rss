@@ -2,7 +2,10 @@
 //!
 //! INVARIANT: DEPLOYMENT-PLAN-CONSTRUCTION-01 { level = "Hard", exec = "native-compile", source = "code", native = "private plan fields plus compile_v1 and runtime-bound reader" }.
 //! INVARIANT: DEPLOYMENT-PLAN-UPSTREAM-IDENTITY-01 { level = "Hard", exec = "native-compile", source = "code", native = "assembly/runtime fingerprints copied from RuntimePlan" }.
-//! INVARIANT: DEPLOYMENT-PLAN-SECRET-BOUNDARY-01 { level = "Hard", exec = "native-compile", source = "code", native = "closed typed SecretRef with redacted Debug and diagnostics" }.
+//! INVARIANT: DEPLOYMENT-POLICY-TYPED-CLOSURE-01 { level = "Hard", exec = "native-compile", source = "code", native = "closed deployment posture enums plus private plan fields and canonical constructors" }.
+//! INVARIANT: DEPLOYMENT-PLAN-SECRET-BOUNDARY-01 { level = "Hard", exec = "native-compile", source = "code", native = "closed typed SecretBinding with Vault-only coordinates, purpose-derived targets, redacted Debug and diagnostics" }.
+//! INVARIANT: MIGRATION-ARTIFACT-SEPARATION-01 { level = "Hard", exec = "native-compile", source = "code", native = "private phase-specific artifact types plus compile_v1 coupling reject a serving image as migration capability" }.
+//! INVARIANT: DEPLOYMENT-CAPACITY-BUDGET-01 { level = "Hard", exec = "native-compile", source = "code", native = "private DatabasePoolCeilings construction derives per-replica connections from the exact shipped long-lived pool roles before ReplicaDatabaseBudget validates the database reserve equation" }.
 
 use crate::{AssemblyFingerprint, AssemblyListenerKind, RuntimePlan, RuntimePlanFingerprint};
 use schemars::JsonSchema;
@@ -45,6 +48,17 @@ validated_name_type!(WorkloadName, valid_dns_label);
 validated_name_type!(ServiceName, valid_dns_label);
 validated_name_type!(ServiceAccountName, valid_dns_name);
 validated_name_type!(PortName, valid_service_port_name);
+validated_name_type!(VaultStoreId, valid_dns_label);
+validated_name_type!(IngressPeerIdentity, valid_spiffe_id);
+validated_name_type!(SourceRevision, valid_source_revision);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ApplicationConfig {
+    None,
+    SettingsOnlyV1,
+    IdentityAuditV1,
+}
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(transparent)]
@@ -59,22 +73,63 @@ impl ImmutableImageIdentity {
     }
 }
 
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
-#[serde(transparent)]
-/// Validated Kubernetes DNS-1123 subdomain used only as a secret reference coordinate.
-pub struct KubernetesSecretName(String);
-impl KubernetesSecretName {
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-    fn parse(value: String) -> Result<Self, DeploymentPlanError> {
-        if !valid_dns_name(&value) {
-            return Err(DeploymentPlanError::new(DeploymentPlanErrorKind::Invalid(
-                "workloads.secretRefs.name",
-            )));
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum MigrationMode {
+    None,
+    ForwardOnlyTwoPhase,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AvailabilityClass {
+    HighlyAvailable,
+    MaintenanceWindow,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DependencyPeerRole {
+    Dns,
+    Vault,
+    Postgresql,
+    Amqp,
+    Redis,
+    ObjectStorage,
+    Oidc,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SecretPurpose {
+    MigrationDatabaseUrl,
+    ServingDatabaseUrl,
+    ServingSecretBundle,
+}
+
+impl SecretPurpose {
+    pub const fn file_name(self) -> &'static str {
+        match self {
+            Self::MigrationDatabaseUrl | Self::ServingDatabaseUrl => "database-url",
+            Self::ServingSecretBundle => "serving-secret-bundle",
         }
-        Ok(Self(value))
     }
+
+    pub const fn mount_path(self) -> &'static str {
+        match self {
+            Self::MigrationDatabaseUrl | Self::ServingDatabaseUrl => {
+                "/var/run/rss/secrets/database-url"
+            }
+            Self::ServingSecretBundle => "/var/run/rss/secrets/serving-secret-bundle",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SecretConsumer {
+    Migration,
+    Serving,
 }
 
 #[derive(Serialize)]
@@ -85,6 +140,14 @@ pub struct DeploymentPlan {
     assembly_fingerprint: AssemblyFingerprint,
     runtime_plan_fingerprint: RuntimePlanFingerprint,
     deployment_fingerprint: DeploymentFingerprint,
+    migration_mode: MigrationMode,
+    migration_head_fingerprint: Option<MigrationHeadFingerprint>,
+    migration_artifact: Option<MigrationArtifact>,
+    migration_execution_budget: Option<MigrationExecutionBudget>,
+    availability_class: AvailabilityClass,
+    drain_seconds: u16,
+    replica_database_budget: ReplicaDatabaseBudget,
+    dependency_peer_roles: Vec<DependencyPeerRole>,
     workloads: Vec<WorkloadPlan>,
     services: Vec<ServicePlan>,
 }
@@ -125,28 +188,84 @@ impl DeploymentPlan {
             .into_iter()
             .map(ServicePlan::try_from)
             .collect::<Result<Vec<_>, _>>()?;
-        Self::from_parts(runtime, workloads, services)
+        Self::from_parts(
+            runtime,
+            input.migration_mode,
+            input
+                .migration_head_fingerprint
+                .map(MigrationHeadFingerprint::parse)
+                .transpose()?,
+            input
+                .migration_artifact
+                .map(MigrationArtifact::try_from)
+                .transpose()?,
+            input.migration_execution_budget.map(Into::into),
+            input.availability_class,
+            input.drain_seconds,
+            input.replica_database_budget.into(),
+            input.dependency_peer_roles,
+            workloads,
+            services,
+        )
     }
 
     fn from_parts(
         runtime: &RuntimePlan,
+        migration_mode: MigrationMode,
+        migration_head_fingerprint: Option<MigrationHeadFingerprint>,
+        migration_artifact: Option<MigrationArtifact>,
+        migration_execution_budget: Option<MigrationExecutionBudget>,
+        availability_class: AvailabilityClass,
+        drain_seconds: u16,
+        replica_database_budget: ReplicaDatabaseBudget,
+        dependency_peer_roles: Vec<DependencyPeerRole>,
         workloads: Vec<WorkloadPlan>,
         services: Vec<ServicePlan>,
     ) -> Result<Self, DeploymentPlanError> {
-        validate_facts(runtime, &workloads, &services)?;
-        let assembly_fingerprint = runtime.assembly_fingerprint().clone();
-        let runtime_plan_fingerprint = runtime.runtime_plan_fingerprint().clone();
-        let deployment_fingerprint = fingerprint_for(
-            &assembly_fingerprint,
-            &runtime_plan_fingerprint,
+        validate_facts(
+            runtime,
+            migration_mode,
+            migration_head_fingerprint.as_ref(),
+            migration_artifact.as_ref(),
+            migration_execution_budget.as_ref(),
+            availability_class,
+            drain_seconds,
+            &replica_database_budget,
+            &dependency_peer_roles,
             &workloads,
             &services,
         )?;
+        let assembly_fingerprint = runtime.assembly_fingerprint().clone();
+        let runtime_plan_fingerprint = runtime.runtime_plan_fingerprint().clone();
+        let unsigned = Unsigned {
+            schema_version: SCHEMA_VERSION,
+            assembly_fingerprint: &assembly_fingerprint,
+            runtime_plan_fingerprint: &runtime_plan_fingerprint,
+            migration_mode,
+            migration_head_fingerprint: migration_head_fingerprint.as_ref(),
+            migration_artifact: migration_artifact.as_ref(),
+            migration_execution_budget: migration_execution_budget.as_ref(),
+            availability_class,
+            drain_seconds,
+            replica_database_budget: &replica_database_budget,
+            dependency_peer_roles: &dependency_peer_roles,
+            workloads: &workloads,
+            services: &services,
+        };
+        let deployment_fingerprint = fingerprint_for(&unsigned)?;
         Ok(Self {
             schema_version: SCHEMA_VERSION,
             assembly_fingerprint,
             runtime_plan_fingerprint,
             deployment_fingerprint,
+            migration_mode,
+            migration_head_fingerprint,
+            migration_artifact,
+            migration_execution_budget,
+            availability_class,
+            drain_seconds,
+            replica_database_budget,
+            dependency_peer_roles,
             workloads,
             services,
         })
@@ -163,6 +282,30 @@ impl DeploymentPlan {
     }
     pub const fn deployment_fingerprint(&self) -> &DeploymentFingerprint {
         &self.deployment_fingerprint
+    }
+    pub const fn migration_mode(&self) -> MigrationMode {
+        self.migration_mode
+    }
+    pub const fn migration_head_fingerprint(&self) -> Option<&MigrationHeadFingerprint> {
+        self.migration_head_fingerprint.as_ref()
+    }
+    pub const fn migration_artifact(&self) -> Option<&MigrationArtifact> {
+        self.migration_artifact.as_ref()
+    }
+    pub const fn migration_execution_budget(&self) -> Option<&MigrationExecutionBudget> {
+        self.migration_execution_budget.as_ref()
+    }
+    pub const fn availability_class(&self) -> AvailabilityClass {
+        self.availability_class
+    }
+    pub const fn drain_seconds(&self) -> u16 {
+        self.drain_seconds
+    }
+    pub const fn replica_database_budget(&self) -> &ReplicaDatabaseBudget {
+        &self.replica_database_budget
+    }
+    pub fn dependency_peer_roles(&self) -> &[DependencyPeerRole] {
+        &self.dependency_peer_roles
     }
     pub fn workloads(&self) -> &[WorkloadPlan] {
         &self.workloads
@@ -183,6 +326,13 @@ impl fmt::Debug for DeploymentPlan {
             .field(
                 "deployment_fingerprint",
                 &self.deployment_fingerprint.as_str(),
+            )
+            .field(
+                "migration_head_fingerprint",
+                &self
+                    .migration_head_fingerprint
+                    .as_ref()
+                    .map(MigrationHeadFingerprint::as_str),
             )
             .field("workload_count", &self.workloads.len())
             .field("service_count", &self.services.len())
@@ -212,6 +362,9 @@ impl ParsedDeploymentPlan {
         validate_sha256("assemblyFingerprint", &wire.assembly_fingerprint)?;
         validate_sha256("runtimePlanFingerprint", &wire.runtime_plan_fingerprint)?;
         validate_sha256("deploymentFingerprint", &wire.deployment_fingerprint)?;
+        if let Some(fingerprint) = &wire.migration_head_fingerprint.0 {
+            validate_sha256("migrationHeadFingerprint", fingerprint)?;
+        }
         if wire.assembly_fingerprint != runtime.assembly_fingerprint().as_str()
             || wire.runtime_plan_fingerprint != runtime.runtime_plan_fingerprint().as_str()
         {
@@ -219,7 +372,17 @@ impl ParsedDeploymentPlan {
                 DeploymentPlanErrorKind::UpstreamIdentityMismatch,
             ));
         }
-        let mut input = DeploymentPlanV1Input::new();
+        let wire_connections_per_replica = wire.replica_database_budget.connections_per_replica;
+        let mut input = DeploymentPlanV1Input::new(
+            wire.migration_mode,
+            wire.migration_head_fingerprint.0,
+            wire.migration_artifact.map(TryInto::try_into).transpose()?,
+            wire.migration_execution_budget.map(Into::into),
+            wire.availability_class,
+            wire.drain_seconds,
+            wire.replica_database_budget.into(),
+            wire.dependency_peer_roles,
+        );
         for workload in wire.workloads {
             input.workload(workload.try_into()?);
         }
@@ -227,6 +390,12 @@ impl ParsedDeploymentPlan {
             input.service(service.try_into()?);
         }
         let plan = DeploymentPlan::compile_v1(runtime, input)?;
+        if plan.replica_database_budget().connections_per_replica() != wire_connections_per_replica
+        {
+            return Err(DeploymentPlanError::new(DeploymentPlanErrorKind::Invalid(
+                "replicaDatabaseBudget.connectionsPerReplica",
+            )));
+        }
         if plan.deployment_fingerprint.as_str() != wire.deployment_fingerprint {
             return Err(DeploymentPlanError::new(
                 DeploymentPlanErrorKind::FingerprintMismatch,
@@ -249,6 +418,30 @@ impl ParsedDeploymentPlan {
     pub const fn deployment_fingerprint(&self) -> &DeploymentFingerprint {
         self.0.deployment_fingerprint()
     }
+    pub const fn migration_mode(&self) -> MigrationMode {
+        self.0.migration_mode()
+    }
+    pub const fn migration_head_fingerprint(&self) -> Option<&MigrationHeadFingerprint> {
+        self.0.migration_head_fingerprint()
+    }
+    pub const fn migration_artifact(&self) -> Option<&MigrationArtifact> {
+        self.0.migration_artifact()
+    }
+    pub const fn migration_execution_budget(&self) -> Option<&MigrationExecutionBudget> {
+        self.0.migration_execution_budget()
+    }
+    pub const fn availability_class(&self) -> AvailabilityClass {
+        self.0.availability_class()
+    }
+    pub const fn drain_seconds(&self) -> u16 {
+        self.0.drain_seconds()
+    }
+    pub const fn replica_database_budget(&self) -> &ReplicaDatabaseBudget {
+        self.0.replica_database_budget()
+    }
+    pub fn dependency_peer_roles(&self) -> &[DependencyPeerRole] {
+        self.0.dependency_peer_roles()
+    }
     pub fn workloads(&self) -> &[WorkloadPlan] {
         self.0.workloads()
     }
@@ -263,15 +456,42 @@ impl fmt::Debug for ParsedDeploymentPlan {
     }
 }
 
-#[derive(Default)]
 /// Candidate collection; set-like workloads and services must already use canonical ID order.
 pub struct DeploymentPlanV1Input {
+    migration_mode: MigrationMode,
+    migration_head_fingerprint: Option<String>,
+    migration_artifact: Option<MigrationArtifactV1Input>,
+    migration_execution_budget: Option<MigrationExecutionBudgetV1Input>,
+    availability_class: AvailabilityClass,
+    drain_seconds: u16,
+    replica_database_budget: ReplicaDatabaseBudgetV1Input,
+    dependency_peer_roles: Vec<DependencyPeerRole>,
     workloads: Vec<DeploymentWorkloadV1Input>,
     services: Vec<DeploymentServiceV1Input>,
 }
 impl DeploymentPlanV1Input {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(
+        migration_mode: MigrationMode,
+        migration_head_fingerprint: Option<String>,
+        migration_artifact: Option<MigrationArtifactV1Input>,
+        migration_execution_budget: Option<MigrationExecutionBudgetV1Input>,
+        availability_class: AvailabilityClass,
+        drain_seconds: u16,
+        replica_database_budget: ReplicaDatabaseBudgetV1Input,
+        dependency_peer_roles: Vec<DependencyPeerRole>,
+    ) -> Self {
+        Self {
+            migration_mode,
+            migration_head_fingerprint,
+            migration_artifact,
+            migration_execution_budget,
+            availability_class,
+            drain_seconds,
+            replica_database_budget,
+            dependency_peer_roles,
+            workloads: Vec::new(),
+            services: Vec::new(),
+        }
     }
     pub fn workload(&mut self, workload: DeploymentWorkloadV1Input) {
         self.workloads.push(workload);
@@ -281,12 +501,247 @@ impl DeploymentPlanV1Input {
     }
 }
 
+/// Candidate immutable operator artifact used only by the migration phase.
+pub struct MigrationArtifactV1Input {
+    image: String,
+    source_revision: String,
+}
+impl MigrationArtifactV1Input {
+    pub fn new(image: impl Into<String>, source_revision: impl Into<String>) -> Self {
+        Self {
+            image: image.into(),
+            source_revision: source_revision.into(),
+        }
+    }
+}
+
+/// Candidate bounded execution policy for one auditable migration Job attempt.
+pub struct MigrationExecutionBudgetV1Input {
+    active_deadline_seconds: u32,
+    backoff_limit: u8,
+}
+impl MigrationExecutionBudgetV1Input {
+    pub const fn new(active_deadline_seconds: u32, backoff_limit: u8) -> Self {
+        Self {
+            active_deadline_seconds,
+            backoff_limit,
+        }
+    }
+}
+
+/// Candidate closed autoscaling/database capacity equation.
+pub struct ReplicaDatabaseBudgetV1Input {
+    min_replicas: u8,
+    max_replicas: u8,
+    pool_ceilings: DatabasePoolCeilingsV1Input,
+    database_connection_limit: u16,
+    reserved_connections: u16,
+}
+impl ReplicaDatabaseBudgetV1Input {
+    pub const fn new(
+        min_replicas: u8,
+        max_replicas: u8,
+        pool_ceilings: DatabasePoolCeilingsV1Input,
+        database_connection_limit: u16,
+        reserved_connections: u16,
+    ) -> Self {
+        Self {
+            min_replicas,
+            max_replicas,
+            pool_ceilings,
+            database_connection_limit,
+            reserved_connections,
+        }
+    }
+}
+
+/// Candidate exact ceilings for every long-lived PostgreSQL pool in one serving replica.
+pub struct DatabasePoolCeilingsV1Input {
+    writer: u16,
+    reader: u16,
+    audit_admin: Option<u16>,
+    dlx_archiver: Option<u16>,
+    dlx_verifier: Option<u16>,
+    dlx_purger: Option<u16>,
+}
+impl DatabasePoolCeilingsV1Input {
+    pub const fn new(
+        writer: u16,
+        reader: u16,
+        audit_admin: Option<u16>,
+        dlx_archiver: Option<u16>,
+        dlx_verifier: Option<u16>,
+        dlx_purger: Option<u16>,
+    ) -> Self {
+        Self {
+            writer,
+            reader,
+            audit_admin,
+            dlx_archiver,
+            dlx_verifier,
+            dlx_purger,
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MigrationArtifact {
+    image: ImmutableImageIdentity,
+    source_revision: SourceRevision,
+}
+impl MigrationArtifact {
+    pub fn image(&self) -> &str {
+        self.image.as_str()
+    }
+    pub fn source_revision(&self) -> &str {
+        self.source_revision.as_str()
+    }
+}
+impl TryFrom<MigrationArtifactV1Input> for MigrationArtifact {
+    type Error = DeploymentPlanError;
+    fn try_from(value: MigrationArtifactV1Input) -> Result<Self, Self::Error> {
+        Ok(Self {
+            image: ImmutableImageIdentity::parse(value.image)?,
+            source_revision: SourceRevision::parse(
+                value.source_revision,
+                "migrationArtifact.sourceRevision",
+            )?,
+        })
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MigrationExecutionBudget {
+    active_deadline_seconds: u32,
+    backoff_limit: u8,
+}
+impl MigrationExecutionBudget {
+    pub const fn active_deadline_seconds(&self) -> u32 {
+        self.active_deadline_seconds
+    }
+    pub const fn backoff_limit(&self) -> u8 {
+        self.backoff_limit
+    }
+}
+impl From<MigrationExecutionBudgetV1Input> for MigrationExecutionBudget {
+    fn from(value: MigrationExecutionBudgetV1Input) -> Self {
+        Self {
+            active_deadline_seconds: value.active_deadline_seconds,
+            backoff_limit: value.backoff_limit,
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReplicaDatabaseBudget {
+    min_replicas: u8,
+    max_replicas: u8,
+    pool_ceilings: DatabasePoolCeilings,
+    connections_per_replica: u32,
+    database_connection_limit: u16,
+    reserved_connections: u16,
+}
+impl ReplicaDatabaseBudget {
+    pub const fn min_replicas(&self) -> u8 {
+        self.min_replicas
+    }
+    pub const fn max_replicas(&self) -> u8 {
+        self.max_replicas
+    }
+    pub const fn pool_ceilings(&self) -> &DatabasePoolCeilings {
+        &self.pool_ceilings
+    }
+    pub const fn connections_per_replica(&self) -> u32 {
+        self.connections_per_replica
+    }
+    pub const fn database_connection_limit(&self) -> u16 {
+        self.database_connection_limit
+    }
+    pub const fn reserved_connections(&self) -> u16 {
+        self.reserved_connections
+    }
+}
+impl From<ReplicaDatabaseBudgetV1Input> for ReplicaDatabaseBudget {
+    fn from(value: ReplicaDatabaseBudgetV1Input) -> Self {
+        let pool_ceilings = DatabasePoolCeilings::from(value.pool_ceilings);
+        Self {
+            min_replicas: value.min_replicas,
+            max_replicas: value.max_replicas,
+            connections_per_replica: pool_ceilings.total(),
+            pool_ceilings,
+            database_connection_limit: value.database_connection_limit,
+            reserved_connections: value.reserved_connections,
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DatabasePoolCeilings {
+    writer: u16,
+    reader: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    audit_admin: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dlx_archiver: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dlx_verifier: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dlx_purger: Option<u16>,
+}
+impl DatabasePoolCeilings {
+    pub const fn writer(&self) -> u16 {
+        self.writer
+    }
+    pub const fn reader(&self) -> u16 {
+        self.reader
+    }
+    pub const fn audit_admin(&self) -> Option<u16> {
+        self.audit_admin
+    }
+    pub const fn dlx_archiver(&self) -> Option<u16> {
+        self.dlx_archiver
+    }
+    pub const fn dlx_verifier(&self) -> Option<u16> {
+        self.dlx_verifier
+    }
+    pub const fn dlx_purger(&self) -> Option<u16> {
+        self.dlx_purger
+    }
+    pub fn total(&self) -> u32 {
+        self.writer as u32
+            + self.reader as u32
+            + self.audit_admin.unwrap_or(0) as u32
+            + self.dlx_archiver.unwrap_or(0) as u32
+            + self.dlx_verifier.unwrap_or(0) as u32
+            + self.dlx_purger.unwrap_or(0) as u32
+    }
+}
+impl From<DatabasePoolCeilingsV1Input> for DatabasePoolCeilings {
+    fn from(value: DatabasePoolCeilingsV1Input) -> Self {
+        Self {
+            writer: value.writer,
+            reader: value.reader,
+            audit_admin: value.audit_admin,
+            dlx_archiver: value.dlx_archiver,
+            dlx_verifier: value.dlx_verifier,
+            dlx_purger: value.dlx_purger,
+        }
+    }
+}
+
 /// Candidate workload facts validated in full by [`DeploymentPlan::compile_v1`].
 pub struct DeploymentWorkloadV1Input {
     name: String,
     image: String,
+    source_revision: String,
+    application_config: ApplicationConfig,
     identity: DeploymentIdentityV1Input,
-    secret_refs: Vec<SecretRefV1Input>,
+    secret_bindings: Vec<SecretBindingV1Input>,
+    ingress_peer_identities: Vec<String>,
     resources: ResourceRequirementsV1Input,
     probes: Vec<ProbeV1Input>,
 }
@@ -294,16 +749,22 @@ impl DeploymentWorkloadV1Input {
     pub fn new(
         name: impl Into<String>,
         image: impl Into<String>,
+        source_revision: impl Into<String>,
+        application_config: ApplicationConfig,
         identity: DeploymentIdentityV1Input,
-        secret_refs: Vec<SecretRefV1Input>,
+        secret_bindings: Vec<SecretBindingV1Input>,
+        ingress_peer_identities: Vec<String>,
         resources: ResourceRequirementsV1Input,
         probes: Vec<ProbeV1Input>,
     ) -> Self {
         Self {
             name: name.into(),
             image: image.into(),
+            source_revision: source_revision.into(),
+            application_config,
             identity,
-            secret_refs,
+            secret_bindings,
+            ingress_peer_identities,
             resources,
             probes,
         }
@@ -322,43 +783,57 @@ impl DeploymentIdentityV1Input {
         }
     }
 }
-/// Candidate secret reference; no variant can represent an inline secret value.
-pub enum SecretRefV1Input {
-    Kubernetes {
-        name: String,
-        key: String,
-    },
-    Vault {
-        store_id: String,
-        ref_key: String,
-        ref_version: Option<String>,
-    },
+/// Candidate Vault object coordinate; no field can represent secret material.
+pub struct VaultObjectRefV1Input {
+    store_id: String,
+    ref_key: String,
+    ref_version: Option<String>,
 }
-impl SecretRefV1Input {
-    pub fn kubernetes(name: impl Into<String>, key: impl Into<String>) -> Self {
-        Self::Kubernetes {
-            name: name.into(),
-            key: key.into(),
-        }
-    }
-    pub fn vault(
+impl VaultObjectRefV1Input {
+    pub fn new(
         store_id: impl Into<String>,
         ref_key: impl Into<String>,
         ref_version: Option<String>,
     ) -> Self {
-        Self::Vault {
+        Self {
             store_id: store_id.into(),
             ref_key: ref_key.into(),
             ref_version,
         }
     }
 }
-impl fmt::Debug for SecretRefV1Input {
+impl fmt::Debug for VaultObjectRefV1Input {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::Kubernetes { .. } => "KubernetesSecretRef(<redacted>)",
-            Self::Vault { .. } => "VaultRef(<redacted>)",
-        })
+        f.write_str("VaultObjectRefV1Input(<redacted>)")
+    }
+}
+
+/// Candidate purpose-bound Vault secret consumed by one or both closed execution phases.
+pub struct SecretBindingV1Input {
+    purpose: SecretPurpose,
+    consumers: Vec<SecretConsumer>,
+    vault: VaultObjectRefV1Input,
+}
+impl SecretBindingV1Input {
+    pub fn new(
+        purpose: SecretPurpose,
+        consumers: Vec<SecretConsumer>,
+        vault: VaultObjectRefV1Input,
+    ) -> Self {
+        Self {
+            purpose,
+            consumers,
+            vault,
+        }
+    }
+}
+impl fmt::Debug for SecretBindingV1Input {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SecretBindingV1Input")
+            .field("purpose", &self.purpose)
+            .field("consumers", &self.consumers)
+            .field("vault", &"<redacted>")
+            .finish()
     }
 }
 /// Candidate request/limit pair; compilation rejects request greater than limit.
@@ -436,8 +911,11 @@ impl PortV1Input {
 pub struct WorkloadPlan {
     name: WorkloadName,
     image: ImmutableImageIdentity,
+    source_revision: SourceRevision,
+    application_config: ApplicationConfig,
     identity: WorkloadIdentity,
-    secret_refs: Vec<SecretRef>,
+    secret_bindings: Vec<SecretBinding>,
+    ingress_peer_identities: Vec<IngressPeerIdentity>,
     resources: ResourceRequirements,
     probes: Vec<ProbePlan>,
 }
@@ -448,11 +926,22 @@ impl WorkloadPlan {
     pub fn image(&self) -> &str {
         self.image.as_str()
     }
+    pub fn source_revision(&self) -> &str {
+        self.source_revision.as_str()
+    }
+    pub const fn application_config(&self) -> ApplicationConfig {
+        self.application_config
+    }
     pub const fn identity(&self) -> &WorkloadIdentity {
         &self.identity
     }
-    pub fn secret_refs(&self) -> &[SecretRef] {
-        &self.secret_refs
+    pub fn secret_bindings(&self) -> &[SecretBinding] {
+        &self.secret_bindings
+    }
+    pub fn ingress_peer_identities(&self) -> impl Iterator<Item = &str> {
+        self.ingress_peer_identities
+            .iter()
+            .map(IngressPeerIdentity::as_str)
     }
     pub const fn resources(&self) -> &ResourceRequirements {
         &self.resources
@@ -468,11 +957,23 @@ impl TryFrom<DeploymentWorkloadV1Input> for WorkloadPlan {
         Ok(Self {
             name: WorkloadName::parse(input.name, "workloads.name")?,
             image: ImmutableImageIdentity::parse(input.image)?,
+            source_revision: SourceRevision::parse(
+                input.source_revision,
+                "workloads.sourceRevision",
+            )?,
+            application_config: input.application_config,
             identity: input.identity.try_into()?,
-            secret_refs: input
-                .secret_refs
+            secret_bindings: input
+                .secret_bindings
                 .into_iter()
-                .map(SecretRef::try_from)
+                .map(SecretBinding::try_from)
+                .collect::<Result<Vec<_>, _>>()?,
+            ingress_peer_identities: input
+                .ingress_peer_identities
+                .into_iter()
+                .map(|identity| {
+                    IngressPeerIdentity::parse(identity, "workloads.ingressPeerIdentities")
+                })
                 .collect::<Result<Vec<_>, _>>()?,
             resources: input.resources.into(),
             probes: input.probes.into_iter().map(Into::into).collect(),
@@ -509,66 +1010,82 @@ impl TryFrom<DeploymentIdentityV1Input> for WorkloadIdentity {
 }
 
 #[derive(Serialize)]
-#[serde(tag = "kind")]
-/// Validated Kubernetes or Vault reference with redacted `Debug`; never a secret value.
-pub enum SecretRef {
-    #[serde(rename = "kubernetesSecret")]
-    Kubernetes {
-        name: KubernetesSecretName,
-        key: String,
-    },
-    #[serde(rename = "vaultRef")]
-    Vault {
-        #[serde(rename = "storeId")]
-        store_id: String,
-        #[serde(rename = "refKey")]
-        ref_key: String,
-        #[serde(rename = "refVersion", skip_serializing_if = "Option::is_none")]
-        ref_version: Option<String>,
-    },
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SecretBinding {
+    purpose: SecretPurpose,
+    consumers: Vec<SecretConsumer>,
+    vault: VaultObjectRef,
 }
-impl SecretRef {
-    pub const fn kind(&self) -> SecretRefKind {
-        match self {
-            Self::Kubernetes { .. } => SecretRefKind::KubernetesSecret,
-            Self::Vault { .. } => SecretRefKind::VaultRef,
-        }
+impl SecretBinding {
+    pub const fn purpose(&self) -> SecretPurpose {
+        self.purpose
+    }
+    pub fn consumers(&self) -> &[SecretConsumer] {
+        &self.consumers
+    }
+    pub const fn vault(&self) -> &VaultObjectRef {
+        &self.vault
+    }
+    pub const fn target_file_name(&self) -> &'static str {
+        self.purpose.file_name()
+    }
+    pub const fn target_mount_path(&self) -> &'static str {
+        self.purpose.mount_path()
     }
 }
-impl fmt::Debug for SecretRef {
+impl fmt::Debug for SecretBinding {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::Kubernetes { .. } => "KubernetesSecretRef(<redacted>)",
-            Self::Vault { .. } => "VaultRef(<redacted>)",
-        })
+        f.debug_struct("SecretBinding")
+            .field("purpose", &self.purpose)
+            .field("consumers", &self.consumers)
+            .field("vault", &"<redacted>")
+            .finish()
     }
 }
-impl TryFrom<SecretRefV1Input> for SecretRef {
+impl TryFrom<SecretBindingV1Input> for SecretBinding {
     type Error = DeploymentPlanError;
 
-    fn try_from(value: SecretRefV1Input) -> Result<Self, Self::Error> {
-        Ok(match value {
-            SecretRefV1Input::Kubernetes { name, key } => Self::Kubernetes {
-                name: KubernetesSecretName::parse(name)?,
-                key,
-            },
-            SecretRefV1Input::Vault {
-                store_id,
-                ref_key,
-                ref_version,
-            } => Self::Vault {
-                store_id,
-                ref_key,
-                ref_version,
-            },
+    fn try_from(value: SecretBindingV1Input) -> Result<Self, Self::Error> {
+        Ok(Self {
+            purpose: value.purpose,
+            consumers: value.consumers,
+            vault: value.vault.try_into()?,
         })
     }
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-/// Closed discriminator for validated secret-reference variants.
-pub enum SecretRefKind {
-    KubernetesSecret,
-    VaultRef,
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VaultObjectRef {
+    store_id: VaultStoreId,
+    ref_key: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ref_version: Option<String>,
+}
+impl VaultObjectRef {
+    pub fn store_id(&self) -> &str {
+        self.store_id.as_str()
+    }
+    pub fn ref_key(&self) -> &str {
+        &self.ref_key
+    }
+    pub fn ref_version(&self) -> Option<&str> {
+        self.ref_version.as_deref()
+    }
+}
+impl TryFrom<VaultObjectRefV1Input> for VaultObjectRef {
+    type Error = DeploymentPlanError;
+
+    fn try_from(value: VaultObjectRefV1Input) -> Result<Self, Self::Error> {
+        Ok(Self {
+            store_id: VaultStoreId::parse(
+                value.store_id,
+                "workloads.secretBindings.vault.storeId",
+            )?,
+            ref_key: value.ref_key,
+            ref_version: value.ref_version,
+        })
+    }
 }
 
 #[derive(Serialize)]
@@ -750,6 +1267,21 @@ impl DeploymentFingerprint {
     }
 }
 
+#[derive(Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(transparent)]
+/// Domain-separated identity of the complete embedded forward-migration ledger.
+pub struct MigrationHeadFingerprint(#[schemars(regex(pattern = "^sha256:[0-9a-f]{64}$"))] String);
+impl MigrationHeadFingerprint {
+    fn parse(value: String) -> Result<Self, DeploymentPlanError> {
+        validate_sha256("migrationHeadFingerprint", &value)?;
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 #[error(transparent)]
 /// Sanitized DeploymentPlan failure; it never retains secret-reference coordinates or values.
@@ -869,16 +1401,93 @@ struct WireDeploymentPlan {
     assembly_fingerprint: String,
     runtime_plan_fingerprint: String,
     deployment_fingerprint: String,
+    migration_mode: MigrationMode,
+    migration_head_fingerprint: NullableMigrationHeadFingerprint,
+    migration_artifact: Option<WireMigrationArtifact>,
+    migration_execution_budget: Option<WireMigrationExecutionBudget>,
+    availability_class: AvailabilityClass,
+    drain_seconds: u16,
+    replica_database_budget: WireReplicaDatabaseBudget,
+    dependency_peer_roles: Vec<DependencyPeerRole>,
     workloads: Vec<WireWorkload>,
     services: Vec<WireService>,
 }
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct WireMigrationArtifact {
+    image: String,
+    source_revision: String,
+}
+impl TryFrom<WireMigrationArtifact> for MigrationArtifactV1Input {
+    type Error = DeploymentPlanError;
+    fn try_from(value: WireMigrationArtifact) -> Result<Self, Self::Error> {
+        Ok(Self::new(value.image, value.source_revision))
+    }
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct WireMigrationExecutionBudget {
+    active_deadline_seconds: u32,
+    backoff_limit: u8,
+}
+impl From<WireMigrationExecutionBudget> for MigrationExecutionBudgetV1Input {
+    fn from(value: WireMigrationExecutionBudget) -> Self {
+        Self::new(value.active_deadline_seconds, value.backoff_limit)
+    }
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct WireReplicaDatabaseBudget {
+    min_replicas: u8,
+    max_replicas: u8,
+    pool_ceilings: WireDatabasePoolCeilings,
+    connections_per_replica: u32,
+    database_connection_limit: u16,
+    reserved_connections: u16,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct WireDatabasePoolCeilings {
+    writer: u16,
+    reader: u16,
+    audit_admin: Option<u16>,
+    dlx_archiver: Option<u16>,
+    dlx_verifier: Option<u16>,
+    dlx_purger: Option<u16>,
+}
+impl From<WireReplicaDatabaseBudget> for ReplicaDatabaseBudgetV1Input {
+    fn from(value: WireReplicaDatabaseBudget) -> Self {
+        Self::new(
+            value.min_replicas,
+            value.max_replicas,
+            DatabasePoolCeilingsV1Input::new(
+                value.pool_ceilings.writer,
+                value.pool_ceilings.reader,
+                value.pool_ceilings.audit_admin,
+                value.pool_ceilings.dlx_archiver,
+                value.pool_ceilings.dlx_verifier,
+                value.pool_ceilings.dlx_purger,
+            ),
+            value.database_connection_limit,
+            value.reserved_connections,
+        )
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(transparent)]
+struct NullableMigrationHeadFingerprint(Option<String>);
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct WireWorkload {
     name: String,
     image: String,
+    source_revision: String,
+    application_config: ApplicationConfig,
     identity: WireIdentity,
-    secret_refs: Vec<WireSecretRef>,
+    secret_bindings: Vec<WireSecretBinding>,
+    ingress_peer_identities: Vec<String>,
     resources: WireResources,
     probes: Vec<WireProbe>,
 }
@@ -889,19 +1498,18 @@ struct WireIdentity {
     service_account: String,
 }
 #[derive(Deserialize)]
-#[serde(tag = "kind", deny_unknown_fields)]
-enum WireSecretRef {
-    #[serde(rename = "kubernetesSecret")]
-    Kubernetes { name: String, key: String },
-    #[serde(rename = "vaultRef")]
-    Vault {
-        #[serde(rename = "storeId")]
-        store_id: String,
-        #[serde(rename = "refKey")]
-        ref_key: String,
-        #[serde(rename = "refVersion")]
-        ref_version: Option<String>,
-    },
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct WireSecretBinding {
+    purpose: SecretPurpose,
+    consumers: Vec<SecretConsumer>,
+    vault: WireVaultObjectRef,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct WireVaultObjectRef {
+    store_id: String,
+    ref_key: String,
+    ref_version: Option<String>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -952,23 +1560,29 @@ impl TryFrom<WireWorkload> for DeploymentWorkloadV1Input {
                 Ok(ProbeV1Input::new(probe.kind, probe.port))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let secret_refs = v
-            .secret_refs
+        let secret_bindings = v
+            .secret_bindings
             .into_iter()
-            .map(|secret| match secret {
-                WireSecretRef::Kubernetes { name, key } => SecretRefV1Input::kubernetes(name, key),
-                WireSecretRef::Vault {
-                    store_id,
-                    ref_key,
-                    ref_version,
-                } => SecretRefV1Input::vault(store_id, ref_key, ref_version),
+            .map(|secret| {
+                SecretBindingV1Input::new(
+                    secret.purpose,
+                    secret.consumers,
+                    VaultObjectRefV1Input::new(
+                        secret.vault.store_id,
+                        secret.vault.ref_key,
+                        secret.vault.ref_version,
+                    ),
+                )
             })
             .collect();
         Ok(Self::new(
             v.name,
             v.image,
+            v.source_revision,
+            v.application_config,
             DeploymentIdentityV1Input::new(v.identity.name, v.identity.service_account),
-            secret_refs,
+            secret_bindings,
+            v.ingress_peer_identities,
             ResourceRequirementsV1Input::new(
                 ResourceListV1Input::new(v.resources.requests.cpu, v.resources.requests.memory),
                 ResourceListV1Input::new(v.resources.limits.cpu, v.resources.limits.memory),
@@ -998,18 +1612,105 @@ struct Unsigned<'a> {
     schema_version: u32,
     assembly_fingerprint: &'a AssemblyFingerprint,
     runtime_plan_fingerprint: &'a RuntimePlanFingerprint,
+    migration_mode: MigrationMode,
+    migration_head_fingerprint: Option<&'a MigrationHeadFingerprint>,
+    migration_artifact: Option<&'a MigrationArtifact>,
+    migration_execution_budget: Option<&'a MigrationExecutionBudget>,
+    availability_class: AvailabilityClass,
+    drain_seconds: u16,
+    replica_database_budget: &'a ReplicaDatabaseBudget,
+    dependency_peer_roles: &'a [DependencyPeerRole],
     workloads: &'a [WorkloadPlan],
     services: &'a [ServicePlan],
 }
 
 fn validate_facts(
     runtime: &RuntimePlan,
+    migration_mode: MigrationMode,
+    migration_head_fingerprint: Option<&MigrationHeadFingerprint>,
+    migration_artifact: Option<&MigrationArtifact>,
+    migration_execution_budget: Option<&MigrationExecutionBudget>,
+    availability_class: AvailabilityClass,
+    drain_seconds: u16,
+    replica_database_budget: &ReplicaDatabaseBudget,
+    dependency_peer_roles: &[DependencyPeerRole],
     workloads: &[WorkloadPlan],
     services: &[ServicePlan],
 ) -> Result<(), DeploymentPlanError> {
+    if matches!(migration_mode, MigrationMode::ForwardOnlyTwoPhase)
+        != (migration_head_fingerprint.is_some()
+            && migration_artifact.is_some()
+            && migration_execution_budget.is_some())
+    {
+        return Err(DeploymentPlanError::new(DeploymentPlanErrorKind::Invalid(
+            "migrationHeadFingerprint",
+        )));
+    }
+    if matches!(migration_mode, MigrationMode::ForwardOnlyTwoPhase)
+        != matches!(availability_class, AvailabilityClass::MaintenanceWindow)
+    {
+        return Err(DeploymentPlanError::new(DeploymentPlanErrorKind::Invalid(
+            "availabilityClass",
+        )));
+    }
+    if let Some(budget) = migration_execution_budget {
+        if budget.active_deadline_seconds == 0 || budget.backoff_limit > 3 {
+            return Err(DeploymentPlanError::new(DeploymentPlanErrorKind::Invalid(
+                "migrationExecutionBudget",
+            )));
+        }
+    }
+    let budget = replica_database_budget;
+    let optional_pool_shape = (
+        budget.pool_ceilings.audit_admin.is_some(),
+        budget.pool_ceilings.dlx_archiver.is_some(),
+        budget.pool_ceilings.dlx_verifier.is_some(),
+        budget.pool_ceilings.dlx_purger.is_some(),
+    );
+    if budget.min_replicas < 2
+        || budget.max_replicas < budget.min_replicas
+        || budget.pool_ceilings.writer == 0
+        || budget.pool_ceilings.reader == 0
+        || [
+            budget.pool_ceilings.audit_admin,
+            budget.pool_ceilings.dlx_archiver,
+            budget.pool_ceilings.dlx_verifier,
+            budget.pool_ceilings.dlx_purger,
+        ]
+        .into_iter()
+        .flatten()
+        .any(|ceiling| ceiling == 0 || ceiling > 100)
+        || budget.pool_ceilings.writer > 100
+        || budget.pool_ceilings.reader > 100
+        || !matches!(
+            optional_pool_shape,
+            (false, false, false, false) | (true, false, false, false) | (false, true, true, true)
+        )
+        || u32::from(budget.max_replicas) * budget.connections_per_replica
+            > u32::from(
+                budget
+                    .database_connection_limit
+                    .saturating_sub(budget.reserved_connections),
+            )
+    {
+        return Err(DeploymentPlanError::new(DeploymentPlanErrorKind::Invalid(
+            "replicaDatabaseBudget",
+        )));
+    }
     if workloads.is_empty() {
         return Err(DeploymentPlanError::new(DeploymentPlanErrorKind::Empty(
             "workloads",
+        )));
+    }
+    if drain_seconds == 0 {
+        return Err(DeploymentPlanError::new(DeploymentPlanErrorKind::Invalid(
+            "drainSeconds",
+        )));
+    }
+    validate_sorted_unique(dependency_peer_roles, |role| *role, "dependencyPeerRoles")?;
+    if !dependency_peer_roles.contains(&DependencyPeerRole::Dns) {
+        return Err(DeploymentPlanError::new(DeploymentPlanErrorKind::Empty(
+            "dependencyPeerRoles.dns",
         )));
     }
     validate_sorted_unique(workloads, |w| w.name.clone(), "workloads")?;
@@ -1029,7 +1730,25 @@ fn validate_facts(
         ));
     }
     for workload in workloads {
-        validate_workload(workload)?;
+        validate_workload(workload, migration_mode)?;
+        if dependency_peer_roles.contains(&DependencyPeerRole::Postgresql)
+            && !workload
+                .secret_bindings
+                .iter()
+                .any(|binding| binding.purpose == SecretPurpose::ServingDatabaseUrl)
+        {
+            return Err(DeploymentPlanError::new(DeploymentPlanErrorKind::Empty(
+                "workloads.secretBindings.servingDatabaseUrl",
+            )));
+        }
+        if let Some(artifact) = migration_artifact
+            && (artifact.image == workload.image
+                || artifact.source_revision != workload.source_revision)
+        {
+            return Err(DeploymentPlanError::new(DeploymentPlanErrorKind::Invalid(
+                "migrationArtifact",
+            )));
+        }
     }
     for service in services {
         if !workload_names.contains(service.workload.as_str()) {
@@ -1116,14 +1835,22 @@ fn validate_runtime_ports(
     Ok(())
 }
 
-fn validate_workload(workload: &WorkloadPlan) -> Result<(), DeploymentPlanError> {
+fn validate_workload(
+    workload: &WorkloadPlan,
+    migration_mode: MigrationMode,
+) -> Result<(), DeploymentPlanError> {
     if workload.identity.name != workload.name {
         return Err(DeploymentPlanError::new(
             DeploymentPlanErrorKind::RuntimeClosure("workloads.identity.name"),
         ));
     }
     validate_image(workload.image.as_str())?;
-    validate_secret_refs(&workload.secret_refs)?;
+    validate_secret_bindings(&workload.secret_bindings, migration_mode)?;
+    validate_sorted_unique(
+        &workload.ingress_peer_identities,
+        Clone::clone,
+        "workloads.ingressPeerIdentities",
+    )?;
     let request_cpu = parse_cpu(&workload.resources.requests.cpu)?;
     let limit_cpu = parse_cpu(&workload.resources.limits.cpu)?;
     let request_memory = parse_memory(&workload.resources.requests.memory)?;
@@ -1217,57 +1944,61 @@ fn valid_registry_domain(value: &str) -> bool {
             .is_none_or(|port| !port.is_empty() && port.bytes().all(|byte| byte.is_ascii_digit()))
 }
 
-fn validate_secret_refs(values: &[SecretRef]) -> Result<(), DeploymentPlanError> {
-    let keys = values.iter().map(secret_key).collect::<Vec<_>>();
-    validate_sorted_unique(&keys, |key| *key, "workloads.secretRefs")?;
+fn validate_secret_bindings(
+    values: &[SecretBinding],
+    migration_mode: MigrationMode,
+) -> Result<(), DeploymentPlanError> {
+    validate_sorted_unique(
+        values,
+        |binding| binding.purpose,
+        "workloads.secretBindings",
+    )?;
     for value in values {
-        match value {
-            SecretRef::Kubernetes { name, key } => {
-                if !valid_dns_name(name.as_str())
-                    || key.is_empty()
-                    || key.len() > 253
-                    || !key
-                        .bytes()
-                        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
-                {
-                    return Err(DeploymentPlanError::new(DeploymentPlanErrorKind::Invalid(
-                        "workloads.secretRefs",
-                    )));
-                }
+        validate_sorted_unique(
+            &value.consumers,
+            |consumer| *consumer,
+            "workloads.secretBindings.consumers",
+        )?;
+        let expected_consumers: &[SecretConsumer] = match value.purpose {
+            SecretPurpose::MigrationDatabaseUrl => &[SecretConsumer::Migration],
+            SecretPurpose::ServingDatabaseUrl | SecretPurpose::ServingSecretBundle => {
+                &[SecretConsumer::Serving]
             }
-            SecretRef::Vault {
-                store_id,
-                ref_key,
-                ref_version,
-            } => {
-                if store_id.is_empty()
-                    || store_id.len() > 256
-                    || !store_id
-                        .bytes()
-                        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
-                    || !valid_vault_path(ref_key)
-                    || ref_version.as_ref().is_some_and(|v| {
-                        v.is_empty() || v.len() > 256 || v.bytes().any(invalid_secret_byte)
-                    })
-                {
-                    return Err(DeploymentPlanError::new(DeploymentPlanErrorKind::Invalid(
-                        "workloads.secretRefs",
-                    )));
-                }
-            }
+        };
+        if value.consumers != expected_consumers
+            || (value.purpose == SecretPurpose::MigrationDatabaseUrl
+                && migration_mode != MigrationMode::ForwardOnlyTwoPhase)
+        {
+            return Err(DeploymentPlanError::new(DeploymentPlanErrorKind::Invalid(
+                "workloads.secretBindings.consumers",
+            )));
         }
-    }
-    Ok(())
-}
-fn secret_key(value: &SecretRef) -> (u8, &str, &str, &str) {
-    match value {
-        SecretRef::Kubernetes { name, key } => (0, name.as_str(), key, ""),
-        SecretRef::Vault {
+        let VaultObjectRef {
             store_id,
             ref_key,
             ref_version,
-        } => (1, store_id, ref_key, ref_version.as_deref().unwrap_or("")),
+        } = &value.vault;
+        if !valid_dns_label(store_id.as_str())
+            || !valid_vault_path(ref_key)
+            || ref_version.as_ref().is_some_and(|v| {
+                v.is_empty() || v.len() > 256 || v.bytes().any(invalid_secret_byte)
+            })
+        {
+            return Err(DeploymentPlanError::new(DeploymentPlanErrorKind::Invalid(
+                "workloads.secretBindings.vault",
+            )));
+        }
     }
+    if migration_mode == MigrationMode::ForwardOnlyTwoPhase
+        && !values
+            .iter()
+            .any(|binding| binding.purpose == SecretPurpose::MigrationDatabaseUrl)
+    {
+        return Err(DeploymentPlanError::new(DeploymentPlanErrorKind::Empty(
+            "workloads.secretBindings.migrationDatabaseUrl",
+        )));
+    }
+    Ok(())
 }
 fn valid_vault_path(value: &str) -> bool {
     !value.is_empty()
@@ -1330,6 +2061,33 @@ fn parse_quantity(
 fn valid_dns_name(value: &str) -> bool {
     !value.is_empty() && value.len() <= 253 && value.split('.').all(valid_dns_label)
 }
+fn valid_spiffe_id(value: &str) -> bool {
+    let Some(rest) = value.strip_prefix("spiffe://") else {
+        return false;
+    };
+    let Some((trust_domain, path)) = rest.split_once('/') else {
+        return false;
+    };
+    valid_dns_name(trust_domain)
+        && !path.is_empty()
+        && path.len() <= 1024
+        && path.split('/').all(|segment| {
+            !segment.is_empty()
+                && segment != "."
+                && segment != ".."
+                && segment.bytes().all(|byte| {
+                    byte.is_ascii_lowercase()
+                        || byte.is_ascii_digit()
+                        || matches!(byte, b'-' | b'_' | b'.')
+                })
+        })
+}
+fn valid_source_revision(value: &str) -> bool {
+    value.len() == 40
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
 fn valid_dns_label(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 63
@@ -1385,20 +2143,9 @@ fn validate_sorted_unique<T, K: Ord>(
     Ok(())
 }
 
-fn fingerprint_for(
-    assembly: &AssemblyFingerprint,
-    runtime: &RuntimePlanFingerprint,
-    workloads: &[WorkloadPlan],
-    services: &[ServicePlan],
-) -> Result<DeploymentFingerprint, DeploymentPlanError> {
-    let canonical = serde_json_canonicalizer::to_vec(&Unsigned {
-        schema_version: SCHEMA_VERSION,
-        assembly_fingerprint: assembly,
-        runtime_plan_fingerprint: runtime,
-        workloads,
-        services,
-    })
-    .map_err(|e| DeploymentPlanError::new(DeploymentPlanErrorKind::CanonicalJson(e)))?;
+fn fingerprint_for(unsigned: &Unsigned<'_>) -> Result<DeploymentFingerprint, DeploymentPlanError> {
+    let canonical = serde_json_canonicalizer::to_vec(unsigned)
+        .map_err(|e| DeploymentPlanError::new(DeploymentPlanErrorKind::CanonicalJson(e)))?;
     let mut hasher = Sha256::new();
     hasher.update(TAG.as_bytes());
     hasher.update([0]);
@@ -1450,15 +2197,25 @@ fn safe_json_path(path: &serde_path_to_error::Path) -> DeploymentPlanJsonPath {
         "assemblyFingerprint",
         "runtimePlanFingerprint",
         "deploymentFingerprint",
+        "migrationMode",
+        "migrationHeadFingerprint",
+        "availabilityClass",
+        "drainSeconds",
+        "dependencyPeerRoles",
         "workloads",
         "services",
         "name",
         "image",
+        "sourceRevision",
+        "applicationConfig",
         "identity",
         "serviceAccount",
-        "secretRefs",
+        "secretBindings",
+        "ingressPeerIdentities",
+        "purpose",
+        "consumers",
+        "vault",
         "kind",
-        "key",
         "storeId",
         "refKey",
         "refVersion",

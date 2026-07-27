@@ -1,4 +1,6 @@
 {{- $profile := include "rss.profile" . -}}
+{{- $phase := include "rss.phase" . -}}
+{{- if eq $phase "serving" }}
 {{- $planSource := include "rss.planSource" . -}}
 {{- $plan := $planSource | mustFromJson -}}
 {{- range $service := $plan.services }}
@@ -31,5 +33,6 @@ spec:
       protocol: TCP
     {{- end }}
     {{- end }}
+{{- end }}
 {{- end }}
 {{- end }}

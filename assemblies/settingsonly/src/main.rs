@@ -4,8 +4,7 @@ use std::path::PathBuf;
 
 const HELP: &str = r#"Usage: settingsonly-server --config <path>
 
-Runs the fail-closed Settings deployment closure. Listener binds must be canonical loopback
-addresses because this executable has no TLS listener capability.
+Runs the fail-closed Settings deployment closure.
 
 Options:
   --config <path>  Closed schemaVersion=1 TOML document
@@ -13,11 +12,10 @@ Options:
 
 Image schema: /usr/share/rss/settingsonly/config.schema.json
 
-Required secret environment:
-  RSS_SETTINGSONLY_PG_WRITER_PASSWORD
-  RSS_SETTINGSONLY_PG_READER_PASSWORD
-  RSS_SETTINGSONLY_PG_MIGRATOR_PASSWORD
-  RSS_SETTINGSONLY_VAULT_TOKEN
+Required read-only secret file:
+  /var/run/rss/secrets/serving-secret-bundle
+
+Required build identity environment:
   RSS_BUILD_SOURCE_SHA
   RSS_BUILD_IMAGE_DIGEST
 

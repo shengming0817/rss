@@ -62,21 +62,14 @@ pub(crate) async fn build(
     transaction: &mut runtimeexec::StartupTransaction<'_>,
 ) -> anyhow::Result<CompletedProviderBuild> {
     let (listeners, federated, postgres, vault_config) = config.into_sections();
-    let (writer_password, reader_password, migrator_password, vault_token) =
-        secrets.into_secret_material();
+    let (writer_password, reader_password, vault_token) = secrets.into_secret_material();
     let auth_audit_sink = roles.auth_audit_sink()?;
     let listener_pdp = roles.listener_pdp()?;
     let listener_rate_limiter = roles.listener_rate_limiter()?;
     let settings_key_provider = roles.settings_key_provider()?;
     let settings_secret_resolver = roles.settings_secret_resolver()?;
 
-    let (pg, pg_readiness) = build_postgres(
-        postgres,
-        writer_password,
-        reader_password,
-        migrator_password,
-    )
-    .await?;
+    let (pg, pg_readiness) = build_postgres(postgres, writer_password, reader_password).await?;
     let pg_handle = pg.handle();
     let (pg_resources, pg_sampler) = pg.into_runtime_parts(pg_readiness);
     let mut pg_output = bootstrap::DomainModuleResult::default();
@@ -167,13 +160,11 @@ async fn build_postgres(
     config: config::PostgresConfig,
     writer_password: zeroize::Zeroizing<String>,
     reader_password: zeroize::Zeroizing<String>,
-    migrator_password: zeroize::Zeroizing<String>,
 ) -> anyhow::Result<(postgres::PgRuntimeDeps, std::time::Duration)> {
-    let (connection, writer, reader, migrator, readiness) = config.into_postgres_inputs();
+    let (connection, writer, reader, readiness) = config.into_postgres_inputs();
     let (host, port, database, ssl_mode, root_cert) = connection.into_connect_options();
     let (writer_name, writer_max) = writer.into_writer_pool();
     let (reader_name, reader_max) = reader.into_reader_pool();
-    let migrator_name = migrator.into_username();
     let make = |username: String, password: String, max_connections: u32| {
         let mut value = postgres::PgConfig::new(
             host.clone(),
@@ -195,16 +186,15 @@ async fn build_postgres(
         reader_password.to_string(),
         reader_max,
     ));
-    let migrator = make(migrator_name, migrator_password.to_string(), 1);
-    let owner = postgres::PgRuntimeDeps::setup(
-        &migrator,
+    let owner = postgres::PgRuntimeDeps::connect_serving(
         &serving,
         &reader,
+        None,
         generated::event::PROJECTION_INPUT_GENERATION,
         generated::event::PROJECTION_INPUTS,
     )
     .await
-    .context("setup settingsonly postgres")?;
+    .context("connect settingsonly postgres serving pools")?;
     Ok((owner, readiness))
 }
 

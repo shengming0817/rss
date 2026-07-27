@@ -554,6 +554,17 @@ macro_rules! gate_catalog {
                         BOTH_INCLUDED,
                     )
             ),
+            DeploymentPolicyCheck => (step_deployment_policy_check, Some("xtask/src/deployment_policy.rs"),
+                gate(
+                        GateId::DeploymentPolicyCheck,
+                        "deployment-policy-check",
+                        META,
+                        CompileKind::NoCompile,
+                        KUBECONFORM_TOOL,
+                        SOURCE,
+                        BOTH_INCLUDED,
+                    )
+            ),
             AssemblyGraphCheck => (step_assembly_graph_check, Some("xtask/src/graph.rs"),
                 gate(
                         GateId::AssemblyGraphCheck,
@@ -1446,6 +1457,16 @@ const HELM_TOOL: ToolRequirement = ToolRequirement::ExternalTool {
     program: crate::cmd::ExternalProgram::Helm,
     version: env!("RSS_TOOL_VERSION_HELM"),
     install_hint: HELM_HINT,
+};
+pub(crate) const KUBECONFORM_HINT: &str = concat!(
+    "install kubeconform v",
+    env!("RSS_TOOL_VERSION_KUBECONFORM"),
+    " from https://github.com/yannh/kubeconform/releases"
+);
+const KUBECONFORM_TOOL: ToolRequirement = ToolRequirement::ExternalTool {
+    program: crate::cmd::ExternalProgram::Kubeconform,
+    version: env!("RSS_TOOL_VERSION_KUBECONFORM"),
+    install_hint: KUBECONFORM_HINT,
 };
 
 macro_rules! define_registry {

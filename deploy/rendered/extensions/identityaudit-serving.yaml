@@ -1,0 +1,56 @@
+apiVersion: secrets-store.csi.x-k8s.io/v1
+kind: SecretProviderClass
+metadata:
+  name: rss-identityaudit-identityaudit-serving-secrets
+  labels:
+    helm.sh/chart: rss-0.1.0
+    app.kubernetes.io/name: rss
+    app.kubernetes.io/instance: rss
+    app.kubernetes.io/component: identityaudit
+    app.kubernetes.io/managed-by: Helm
+    rss.gocell.io/profile: identityaudit
+  annotations:
+    rss.gocell.io/assembly-fingerprint: sha256:e67c48118b9e32632bcf194d2a5ce93d557e534461693887ce15967182a36d0c
+    rss.gocell.io/runtime-plan-fingerprint: sha256:bd4b4391cd0121e167a8e715bb4850ff87f9e8a66635afccf9bd62851c34ccf3
+    rss.gocell.io/deployment-fingerprint: sha256:91ac2a78f68cefa062f856796d50a42bfbfc9ecae4235143a71c803b5d97f2c5
+spec:
+  provider: vault
+  parameters:
+    vaultAddress: https://rss-vault.vault.svc:8200
+    roleName: rss-identityaudit-serving
+    objects: |
+      - objectName: "database-url"
+        secretPath: "identityaudit/serving-database-url"
+        secretKey: "value"
+      - objectName: "serving-secret-bundle"
+        secretPath: "identityaudit/serving-secret-bundle"
+        secretKey: "value"
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: rss-identityaudit-monitor
+  labels:
+    helm.sh/chart: rss-0.1.0
+    app.kubernetes.io/name: rss
+    app.kubernetes.io/instance: rss
+    app.kubernetes.io/component: identityaudit
+    app.kubernetes.io/managed-by: Helm
+    rss.gocell.io/profile: identityaudit
+  annotations:
+    rss.gocell.io/assembly-fingerprint: sha256:e67c48118b9e32632bcf194d2a5ce93d557e534461693887ce15967182a36d0c
+    rss.gocell.io/runtime-plan-fingerprint: sha256:bd4b4391cd0121e167a8e715bb4850ff87f9e8a66635afccf9bd62851c34ccf3
+    rss.gocell.io/deployment-fingerprint: sha256:91ac2a78f68cefa062f856796d50a42bfbfc9ecae4235143a71c803b5d97f2c5
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: rss
+      app.kubernetes.io/instance: rss
+      app.kubernetes.io/component: identityaudit
+  namespaceSelector:
+    matchNames:
+    - rss-system
+  endpoints:
+  - port: health
+    path: /health/v1/metrics
+    scheme: http

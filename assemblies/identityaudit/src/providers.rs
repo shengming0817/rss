@@ -103,11 +103,9 @@ pub(crate) async fn build(
 ) -> anyhow::Result<BuildResult> {
     let (listeners, identity, oidc, postgres, vault, eventing) = config.into_sections();
     let eventing = eventing.into_eventing_inputs();
-    let _captured_eventing_environment = eventing.environment_names;
     let (
         writer_password,
         reader_password,
-        migrator_password,
         audit_admin_password,
         vault_signer_token,
         vault_dlx_token,
@@ -131,7 +129,6 @@ pub(crate) async fn build(
         postgres,
         writer_password,
         reader_password,
-        migrator_password,
         audit_admin_password,
     )
     .await?;
@@ -301,22 +298,18 @@ async fn build_postgres(
     config: config::PostgresConfig,
     writer_password: zeroize::Zeroizing<String>,
     reader_password: zeroize::Zeroizing<String>,
-    migrator_password: zeroize::Zeroizing<String>,
     audit_admin_password: zeroize::Zeroizing<String>,
 ) -> anyhow::Result<postgres::PgRuntimeDeps> {
-    let (serving, reader, migrator, audit_admin) = postgres_setup_configs(
+    let (serving, reader, audit_admin) = postgres_setup_configs(
         config,
         writer_password,
         reader_password,
-        migrator_password,
         audit_admin_password,
     );
-    let owner = postgres::PgRuntimeDeps::setup_with_audit_admin_config(
-        &migrator,
+    let owner = postgres::PgRuntimeDeps::connect_serving(
         &serving,
         &reader,
         Some(&audit_admin),
-        postgres::LegacyConfigPlaintextPolicy::Deny,
         generated::event::PROJECTION_INPUT_GENERATION,
         generated::event::PROJECTION_INPUTS,
     )
@@ -329,15 +322,13 @@ fn postgres_setup_configs(
     config: config::PostgresConfig,
     writer_password: zeroize::Zeroizing<String>,
     reader_password: zeroize::Zeroizing<String>,
-    migrator_password: zeroize::Zeroizing<String>,
     audit_admin_password: zeroize::Zeroizing<String>,
 ) -> (
     postgres::PgConfig,
     postgres::PgTenantReadConfig,
     postgres::PgConfig,
-    postgres::PgConfig,
 ) {
-    let (connection, writer, reader, migrator, audit_admin) = config.into_postgres_inputs();
+    let (connection, writer, reader, audit_admin) = config.into_postgres_inputs();
     let (host, port, database, ssl_mode, root_cert) = connection.into_connect_options();
     let make = |username: String, password: String, max_connections: u32| {
         let mut value = postgres::PgConfig::new(
@@ -366,13 +357,12 @@ fn postgres_setup_configs(
         reader_password.to_string(),
         reader_max,
     ));
-    let migrator = make(migrator.into_username(), migrator_password.to_string(), 1);
     let audit_admin = make(
         audit_admin_name,
         audit_admin_password.to_string(),
         audit_admin_max,
     );
-    (serving, reader, migrator, audit_admin)
+    (serving, reader, audit_admin)
 }
 
 async fn build_redis(url: zeroize::Zeroizing<String>) -> anyhow::Result<redis::RedisRuntimeDeps> {
@@ -1440,11 +1430,10 @@ mod tests {
         let config = crate::config::parse_for_test(&document)?;
         let (_, _, _, postgres, _, _) = config.into_sections();
         let secret = || zeroize::Zeroizing::new("coverage-secret".to_owned());
-        let configs = postgres_setup_configs(postgres, secret(), secret(), secret(), secret());
-        let rendered = format!("{:?} {:?} {:?}", configs.0, configs.2, configs.3);
+        let configs = postgres_setup_configs(postgres, secret(), secret(), secret());
+        let rendered = format!("{:?} {:?} {:?}", configs.0, configs.1, configs.2);
         assert!(rendered.contains("127.0.0.1"));
         assert!(rendered.contains("rss_identity_writer"));
-        assert!(rendered.contains("rss_identity_migrator"));
         assert!(rendered.contains("rss_audit_admin"));
         assert!(!rendered.contains("coverage-secret"));
         assert!(

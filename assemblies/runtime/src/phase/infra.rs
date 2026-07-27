@@ -64,11 +64,9 @@ where
 }
 
 struct PhaseBSetupInputs {
-    migrator_config: postgres::PgConfig,
     app_pg_config: postgres::PgConfig,
     tenant_read_pg_config: postgres::PgTenantReadConfig,
     audit_admin_config: Option<postgres::PgConfig>,
-    plaintext_policy: postgres::LegacyConfigPlaintextPolicy,
 }
 
 struct PhaseADlxPreflightInputs {
@@ -417,12 +415,10 @@ impl<'a> ProvidersBuilt<'a> {
         let PgRuntimeConfigParts {
             serving: app_pg_config,
             tenant_read: tenant_read_pg_config,
-            migrator: migrator_config,
             audit_admin: audit_admin_config,
             dlx_archiver: dlx_archiver_pg_config,
             dlx_verifier: dlx_verifier_pg_config,
             dlx_purger: dlx_purger_pg_config,
-            legacy_policy: plaintext_policy,
             readiness_period: pg_readiness_period,
         } = pg_config.into_parts();
         let S3RuntimeConfigParts {
@@ -518,11 +514,9 @@ impl<'a> ProvidersBuilt<'a> {
 
         Ok(PhaseAPrepared {
             pg_setup: PhaseBSetupInputs {
-                migrator_config,
                 app_pg_config,
                 tenant_read_pg_config,
                 audit_admin_config,
-                plaintext_policy,
             },
             carried: PhaseACarried {
                 password_blocklist,
@@ -613,26 +607,21 @@ impl<'a> ProvidersBuilt<'a> {
     }
 
     async fn phase_b_setup_postgres(inputs: PhaseBSetupInputs) -> anyhow::Result<PgRuntimeDeps> {
-        // Phase B is the only destructive step. Exact function/table ACL checks run
-        // only after the migration has installed the closed surface.
+        // Serving startup is non-destructive and accepts no migration capability.
         let PhaseBSetupInputs {
-            migrator_config,
             app_pg_config,
             tenant_read_pg_config,
             audit_admin_config,
-            plaintext_policy,
         } = inputs;
-        PgRuntimeDeps::setup_with_audit_admin_config(
-            &migrator_config,
+        PgRuntimeDeps::connect_serving(
             &app_pg_config,
             &tenant_read_pg_config,
             audit_admin_config.as_ref(),
-            plaintext_policy,
             generated::event::PROJECTION_INPUT_GENERATION,
             generated::event::PROJECTION_INPUTS,
         )
         .await
-        .context("setup postgres deps after DLX capability preflight")
+        .context("connect postgres serving deps after DLX capability preflight")
     }
 
     async fn phase_b_setup_postgres_after_preflight(

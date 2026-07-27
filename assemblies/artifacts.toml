@@ -26,6 +26,14 @@ package = "journeys"
 target = "identityaudit_runtime"
 test = "identityaudit_login_audit_ready_sigterm_drain"
 
+[assemblies.deployment]
+migrationMode = "forwardOnlyTwoPhase"
+availabilityClass = "maintenanceWindow"
+drainSeconds = 50
+migrationArtifact = { image = "ghcr.io/gocell/rss-operator@sha256:8cf9af483e68f4c086f8fc49dca072fe43b528f35b2e95da309d5d29a310f35d", sourceRevision = "0f386a442354452055c8dcd621316ed1768fdbdf" }
+migrationExecutionBudget = { activeDeadlineSeconds = 900, backoffLimit = 0 }
+replicaDatabaseBudget = { minReplicas = 2, maxReplicas = 10, poolCeilings = { writer = 10, reader = 10, auditAdmin = 5 }, databaseConnectionLimit = 400, reservedConnections = 100 }
+
 [assemblies.deployment.runtimePlan]
 path = "assemblies/identityaudit/runtime-plan.json"
 profile = "production"
@@ -33,6 +41,9 @@ profile = "production"
 [[assemblies.deployment.workloads]]
 name = "identityaudit"
 image = "ghcr.io/gocell/rss-identityaudit@sha256:0dc0251564b714e89c8d098560ddfe69eb08c87fb85ac87323c54a7650126592"
+sourceRevision = "0f386a442354452055c8dcd621316ed1768fdbdf"
+applicationConfig = "identityAuditV1"
+ingressPeerIdentities = ["spiffe://rss.local/ns/rss/sa/ingress-gateway"]
 [assemblies.deployment.workloads.identity]
 name = "identityaudit"
 serviceAccount = "identityaudit"
@@ -42,27 +53,27 @@ memory = "256Mi"
 [assemblies.deployment.workloads.resources.limits]
 cpu = "2"
 memory = "1Gi"
-[[assemblies.deployment.workloads.secretRefs]]
-kind = "kubernetesSecret"
-name = "rss-identityaudit"
-key = "database-url"
-[[assemblies.deployment.workloads.secretRefs]]
-kind = "kubernetesSecret"
-name = "rss-identityaudit"
-key = "oidc-client-secret"
-[[assemblies.deployment.workloads.secretRefs]]
-kind = "vaultRef"
-storeId = "rss-vault"
-refKey = "identityaudit/signing"
+[[assemblies.deployment.workloads.secretBindings]]
+purpose = "migrationDatabaseUrl"
+consumers = ["migration"]
+vault = { storeId = "rss-vault", refKey = "identityaudit/database-url" }
+[[assemblies.deployment.workloads.secretBindings]]
+purpose = "servingDatabaseUrl"
+consumers = ["serving"]
+vault = { storeId = "rss-vault", refKey = "identityaudit/serving-database-url" }
+[[assemblies.deployment.workloads.secretBindings]]
+purpose = "servingSecretBundle"
+consumers = ["serving"]
+vault = { storeId = "rss-vault", refKey = "identityaudit/serving-secret-bundle" }
 [[assemblies.deployment.workloads.probes]]
 kind = "startup"
-port = 8082
+port = 8083
 [[assemblies.deployment.workloads.probes]]
 kind = "readiness"
-port = 8082
+port = 8083
 [[assemblies.deployment.workloads.probes]]
 kind = "liveness"
-port = 8082
+port = 8083
 
 [[assemblies.deployment.services]]
 name = "identityaudit"
@@ -73,7 +84,7 @@ port = 8081
 exposure = "serviceExposed"
 [[assemblies.deployment.services.ports]]
 name = "health"
-port = 8082
+port = 8083
 exposure = "serviceExposed"
 [[assemblies.deployment.services.ports]]
 name = "http"
@@ -104,6 +115,14 @@ listener = "health"
 kind = "compose-smoke-v1"
 path = "deploy/smoke.sh"
 
+[assemblies.deployment]
+migrationMode = "forwardOnlyTwoPhase"
+availabilityClass = "maintenanceWindow"
+drainSeconds = 20
+migrationArtifact = { image = "ghcr.io/gocell/rss-operator@sha256:8cf9af483e68f4c086f8fc49dca072fe43b528f35b2e95da309d5d29a310f35d", sourceRevision = "0f386a442354452055c8dcd621316ed1768fdbdf" }
+migrationExecutionBudget = { activeDeadlineSeconds = 900, backoffLimit = 0 }
+replicaDatabaseBudget = { minReplicas = 2, maxReplicas = 3, poolCeilings = { writer = 5, reader = 5, dlxArchiver = 10, dlxVerifier = 10, dlxPurger = 10 }, databaseConnectionLimit = 200, reservedConnections = 50 }
+
 [assemblies.deployment.runtimePlan]
 path = "assemblies/runtime/runtime-plan.json"
 profile = "production"
@@ -111,6 +130,8 @@ profile = "production"
 [[assemblies.deployment.workloads]]
 name = "runtime"
 image = "ghcr.io/gocell/rss-runtime@sha256:d92c6a81b2ff50096bcda80885427d1f59a25b5f483f7055523504925d16ab23"
+sourceRevision = "0f386a442354452055c8dcd621316ed1768fdbdf"
+applicationConfig = "none"
 [assemblies.deployment.workloads.identity]
 name = "runtime"
 serviceAccount = "runtime"
@@ -120,22 +141,18 @@ memory = "512Mi"
 [assemblies.deployment.workloads.resources.limits]
 cpu = "4"
 memory = "2Gi"
-[[assemblies.deployment.workloads.secretRefs]]
-kind = "kubernetesSecret"
-name = "rss-runtime"
-key = "database-url"
-[[assemblies.deployment.workloads.secretRefs]]
-kind = "kubernetesSecret"
-name = "rss-runtime"
-key = "oidc-client-secret"
-[[assemblies.deployment.workloads.secretRefs]]
-kind = "kubernetesSecret"
-name = "rss-runtime"
-key = "service-token-signing-key"
-[[assemblies.deployment.workloads.secretRefs]]
-kind = "vaultRef"
-storeId = "rss-vault"
-refKey = "runtime/keyring"
+[[assemblies.deployment.workloads.secretBindings]]
+purpose = "migrationDatabaseUrl"
+consumers = ["migration"]
+vault = { storeId = "rss-vault", refKey = "runtime/database-url" }
+[[assemblies.deployment.workloads.secretBindings]]
+purpose = "servingDatabaseUrl"
+consumers = ["serving"]
+vault = { storeId = "rss-vault", refKey = "runtime/serving-database-url" }
+[[assemblies.deployment.workloads.secretBindings]]
+purpose = "servingSecretBundle"
+consumers = ["serving"]
+vault = { storeId = "rss-vault", refKey = "runtime/serving-secret-bundle" }
 [[assemblies.deployment.workloads.probes]]
 kind = "startup"
 port = 8083
@@ -196,6 +213,14 @@ package = "journeys"
 target = "settingsonly_runtime"
 test = "settingsonly_lifecycle_fixture_ready_request_sigterm_drain"
 
+[assemblies.deployment]
+migrationMode = "forwardOnlyTwoPhase"
+availabilityClass = "maintenanceWindow"
+drainSeconds = 20
+migrationArtifact = { image = "ghcr.io/gocell/rss-operator@sha256:8cf9af483e68f4c086f8fc49dca072fe43b528f35b2e95da309d5d29a310f35d", sourceRevision = "0f386a442354452055c8dcd621316ed1768fdbdf" }
+migrationExecutionBudget = { activeDeadlineSeconds = 900, backoffLimit = 0 }
+replicaDatabaseBudget = { minReplicas = 2, maxReplicas = 10, poolCeilings = { writer = 10, reader = 10 }, databaseConnectionLimit = 300, reservedConnections = 100 }
+
 [assemblies.deployment.runtimePlan]
 path = "assemblies/settingsonly/runtime-plan.json"
 profile = "demo"
@@ -203,6 +228,9 @@ profile = "demo"
 [[assemblies.deployment.workloads]]
 name = "settingsonly"
 image = "ghcr.io/gocell/rss-settingsonly@sha256:e3f9c79d3f396df5434290783e22d87226b85cfbbcb9e30ce8f09163257a3ec2"
+sourceRevision = "0f386a442354452055c8dcd621316ed1768fdbdf"
+applicationConfig = "settingsOnlyV1"
+ingressPeerIdentities = ["spiffe://rss.local/ns/rss/sa/ingress-gateway"]
 [assemblies.deployment.workloads.identity]
 name = "settingsonly"
 serviceAccount = "settingsonly"
@@ -212,14 +240,18 @@ memory = "128Mi"
 [assemblies.deployment.workloads.resources.limits]
 cpu = "1"
 memory = "512Mi"
-[[assemblies.deployment.workloads.secretRefs]]
-kind = "kubernetesSecret"
-name = "rss-settingsonly"
-key = "oidc-client-secret"
-[[assemblies.deployment.workloads.secretRefs]]
-kind = "vaultRef"
-storeId = "rss-vault"
-refKey = "settingsonly/keyring"
+[[assemblies.deployment.workloads.secretBindings]]
+purpose = "migrationDatabaseUrl"
+consumers = ["migration"]
+vault = { storeId = "rss-vault", refKey = "settingsonly/database-url" }
+[[assemblies.deployment.workloads.secretBindings]]
+purpose = "servingDatabaseUrl"
+consumers = ["serving"]
+vault = { storeId = "rss-vault", refKey = "settingsonly/serving-database-url" }
+[[assemblies.deployment.workloads.secretBindings]]
+purpose = "servingSecretBundle"
+consumers = ["serving"]
+vault = { storeId = "rss-vault", refKey = "settingsonly/serving-secret-bundle" }
 [[assemblies.deployment.workloads.probes]]
 kind = "startup"
 port = 8083

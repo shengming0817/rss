@@ -37,58 +37,17 @@
   },
   "additionalProperties": false,
   "definitions": {
-    "AuditChainKeyEnvironment": {
-      "type": "string",
-      "enum": [
-        "RSS_AUDIT_CHAIN_KEY_B64URL"
-      ]
-    },
-    "AuditChainKeyReference": {
-      "type": "object",
-      "required": [
-        "kind",
-        "name"
-      ],
-      "properties": {
-        "kind": {
-          "$ref": "#/definitions/EnvironmentReferenceKind"
-        },
-        "name": {
-          "$ref": "#/definitions/AuditChainKeyEnvironment"
-        }
-      },
-      "additionalProperties": false
-    },
-    "EnvironmentReferenceKind": {
-      "type": "string",
-      "enum": [
-        "environmentRef"
-      ]
-    },
     "EventingConfig": {
       "type": "object",
       "required": [
-        "auditChainKey",
         "auditChainKeyId",
-        "identityAmqpUrl",
-        "redisUrl",
         "tenantAuthorityClockSkewSeconds",
-        "tenantAuthorityKey",
         "tenantAuthorityTtlSeconds"
       ],
       "properties": {
-        "auditChainKey": {
-          "$ref": "#/definitions/AuditChainKeyReference"
-        },
         "auditChainKeyId": {
           "type": "integer",
           "const": 1
-        },
-        "identityAmqpUrl": {
-          "$ref": "#/definitions/IdentityAmqpUrlReference"
-        },
-        "redisUrl": {
-          "$ref": "#/definitions/RedisUrlReference"
         },
         "tenantAuthorityClockSkewSeconds": {
           "type": "integer",
@@ -96,36 +55,11 @@
           "maximum": 300.0,
           "minimum": 0.0
         },
-        "tenantAuthorityKey": {
-          "$ref": "#/definitions/TenantAuthorityKeyReference"
-        },
         "tenantAuthorityTtlSeconds": {
           "type": "integer",
           "format": "uint64",
           "maximum": 86400.0,
           "minimum": 3600.0
-        }
-      },
-      "additionalProperties": false
-    },
-    "IdentityAmqpUrlEnvironment": {
-      "type": "string",
-      "enum": [
-        "RSS_IDENTITY_AMQP_URL"
-      ]
-    },
-    "IdentityAmqpUrlReference": {
-      "type": "object",
-      "required": [
-        "kind",
-        "name"
-      ],
-      "properties": {
-        "kind": {
-          "$ref": "#/definitions/EnvironmentReferenceKind"
-        },
-        "name": {
-          "$ref": "#/definitions/IdentityAmqpUrlEnvironment"
         }
       },
       "additionalProperties": false
@@ -253,33 +187,10 @@
       },
       "additionalProperties": false
     },
-    "PgAuditAdminPasswordEnvironment": {
-      "type": "string",
-      "enum": [
-        "RSS_IDENTITYAUDIT_PG_AUDIT_ADMIN_PASSWORD"
-      ]
-    },
-    "PgAuditAdminPasswordReference": {
-      "type": "object",
-      "required": [
-        "kind",
-        "name"
-      ],
-      "properties": {
-        "kind": {
-          "$ref": "#/definitions/EnvironmentReferenceKind"
-        },
-        "name": {
-          "$ref": "#/definitions/PgAuditAdminPasswordEnvironment"
-        }
-      },
-      "additionalProperties": false
-    },
     "PgAuditAdminRoleConfig": {
       "type": "object",
       "required": [
         "maxConnections",
-        "password",
         "username"
       ],
       "properties": {
@@ -288,9 +199,6 @@
           "format": "uint32",
           "maximum": 100.0,
           "minimum": 1.0
-        },
-        "password": {
-          "$ref": "#/definitions/PgAuditAdminPasswordReference"
         },
         "username": {
           "type": "string",
@@ -336,73 +244,10 @@
       },
       "additionalProperties": false
     },
-    "PgMigratorPasswordEnvironment": {
-      "type": "string",
-      "enum": [
-        "RSS_IDENTITYAUDIT_PG_MIGRATOR_PASSWORD"
-      ]
-    },
-    "PgMigratorPasswordReference": {
-      "type": "object",
-      "required": [
-        "kind",
-        "name"
-      ],
-      "properties": {
-        "kind": {
-          "$ref": "#/definitions/EnvironmentReferenceKind"
-        },
-        "name": {
-          "$ref": "#/definitions/PgMigratorPasswordEnvironment"
-        }
-      },
-      "additionalProperties": false
-    },
-    "PgMigratorRoleConfig": {
-      "type": "object",
-      "required": [
-        "password",
-        "username"
-      ],
-      "properties": {
-        "password": {
-          "$ref": "#/definitions/PgMigratorPasswordReference"
-        },
-        "username": {
-          "type": "string",
-          "minLength": 1,
-          "pattern": "^.*\\S.*$"
-        }
-      },
-      "additionalProperties": false
-    },
-    "PgReaderPasswordEnvironment": {
-      "type": "string",
-      "enum": [
-        "RSS_IDENTITYAUDIT_PG_READER_PASSWORD"
-      ]
-    },
-    "PgReaderPasswordReference": {
-      "type": "object",
-      "required": [
-        "kind",
-        "name"
-      ],
-      "properties": {
-        "kind": {
-          "$ref": "#/definitions/EnvironmentReferenceKind"
-        },
-        "name": {
-          "$ref": "#/definitions/PgReaderPasswordEnvironment"
-        }
-      },
-      "additionalProperties": false
-    },
     "PgReaderRoleConfig": {
       "type": "object",
       "required": [
         "maxConnections",
-        "password",
         "username"
       ],
       "properties": {
@@ -411,9 +256,6 @@
           "format": "uint32",
           "maximum": 100.0,
           "minimum": 1.0
-        },
-        "password": {
-          "$ref": "#/definitions/PgReaderPasswordReference"
         },
         "username": {
           "type": "string",
@@ -430,33 +272,10 @@
         "verifyFull"
       ]
     },
-    "PgWriterPasswordEnvironment": {
-      "type": "string",
-      "enum": [
-        "RSS_IDENTITYAUDIT_PG_WRITER_PASSWORD"
-      ]
-    },
-    "PgWriterPasswordReference": {
-      "type": "object",
-      "required": [
-        "kind",
-        "name"
-      ],
-      "properties": {
-        "kind": {
-          "$ref": "#/definitions/EnvironmentReferenceKind"
-        },
-        "name": {
-          "$ref": "#/definitions/PgWriterPasswordEnvironment"
-        }
-      },
-      "additionalProperties": false
-    },
     "PgWriterRoleConfig": {
       "type": "object",
       "required": [
         "maxConnections",
-        "password",
         "username"
       ],
       "properties": {
@@ -465,9 +284,6 @@
           "format": "uint32",
           "maximum": 100.0,
           "minimum": 1.0
-        },
-        "password": {
-          "$ref": "#/definitions/PgWriterPasswordReference"
         },
         "username": {
           "type": "string",
@@ -487,7 +303,6 @@
       "required": [
         "auditAdmin",
         "connection",
-        "migrator",
         "reader",
         "writer"
       ],
@@ -498,58 +313,11 @@
         "connection": {
           "$ref": "#/definitions/PgConnectionConfig"
         },
-        "migrator": {
-          "$ref": "#/definitions/PgMigratorRoleConfig"
-        },
         "reader": {
           "$ref": "#/definitions/PgReaderRoleConfig"
         },
         "writer": {
           "$ref": "#/definitions/PgWriterRoleConfig"
-        }
-      },
-      "additionalProperties": false
-    },
-    "RedisUrlEnvironment": {
-      "type": "string",
-      "enum": [
-        "RSS_REDIS_URL"
-      ]
-    },
-    "RedisUrlReference": {
-      "type": "object",
-      "required": [
-        "kind",
-        "name"
-      ],
-      "properties": {
-        "kind": {
-          "$ref": "#/definitions/EnvironmentReferenceKind"
-        },
-        "name": {
-          "$ref": "#/definitions/RedisUrlEnvironment"
-        }
-      },
-      "additionalProperties": false
-    },
-    "TenantAuthorityKeyEnvironment": {
-      "type": "string",
-      "enum": [
-        "RSS_TENANT_AUTHORITY_HMAC_KEY_B64URL"
-      ]
-    },
-    "TenantAuthorityKeyReference": {
-      "type": "object",
-      "required": [
-        "kind",
-        "name"
-      ],
-      "properties": {
-        "kind": {
-          "$ref": "#/definitions/EnvironmentReferenceKind"
-        },
-        "name": {
-          "$ref": "#/definitions/TenantAuthorityKeyEnvironment"
         }
       },
       "additionalProperties": false
@@ -560,9 +328,7 @@
         "addr",
         "caCertPemPath",
         "dlxPayloadKeyName",
-        "dlxToken",
         "readinessSeconds",
-        "signerToken",
         "signingKeyName",
         "transitMount"
       ],
@@ -581,17 +347,11 @@
           "minLength": 1,
           "pattern": "^.*\\S.*$"
         },
-        "dlxToken": {
-          "$ref": "#/definitions/VaultDlxTokenReference"
-        },
         "readinessSeconds": {
           "type": "integer",
           "format": "uint64",
           "maximum": 30.0,
           "minimum": 1.0
-        },
-        "signerToken": {
-          "$ref": "#/definitions/VaultSignerTokenReference"
         },
         "signingKeyName": {
           "type": "string",
@@ -602,50 +362,6 @@
           "type": "string",
           "minLength": 1,
           "pattern": "^.*\\S.*$"
-        }
-      },
-      "additionalProperties": false
-    },
-    "VaultDlxTokenEnvironment": {
-      "type": "string",
-      "enum": [
-        "RSS_IDENTITYAUDIT_VAULT_DLX_TOKEN"
-      ]
-    },
-    "VaultDlxTokenReference": {
-      "type": "object",
-      "required": [
-        "kind",
-        "name"
-      ],
-      "properties": {
-        "kind": {
-          "$ref": "#/definitions/EnvironmentReferenceKind"
-        },
-        "name": {
-          "$ref": "#/definitions/VaultDlxTokenEnvironment"
-        }
-      },
-      "additionalProperties": false
-    },
-    "VaultSignerTokenEnvironment": {
-      "type": "string",
-      "enum": [
-        "RSS_IDENTITYAUDIT_VAULT_SIGNER_TOKEN"
-      ]
-    },
-    "VaultSignerTokenReference": {
-      "type": "object",
-      "required": [
-        "kind",
-        "name"
-      ],
-      "properties": {
-        "kind": {
-          "$ref": "#/definitions/EnvironmentReferenceKind"
-        },
-        "name": {
-          "$ref": "#/definitions/VaultSignerTokenEnvironment"
         }
       },
       "additionalProperties": false

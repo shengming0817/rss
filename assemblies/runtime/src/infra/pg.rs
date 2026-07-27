@@ -1,11 +1,14 @@
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::Context as _;
-use postgres::{LegacyConfigPlaintextPolicy, PgConfig, PgPassword, PgSslMode, PgTenantReadConfig};
+use postgres::{PgConfig, PgPassword, PgSslMode, PgTenantReadConfig};
 
-use crate::config::SnapshotConfig;
+use crate::config::{
+    BUNDLE_PG_AUDIT_ADMIN_PASSWORD, BUNDLE_PG_DLX_ARCHIVER_PASSWORD, BUNDLE_PG_DLX_PURGER_PASSWORD,
+    BUNDLE_PG_DLX_VERIFIER_PASSWORD, BUNDLE_PG_PASSWORD, BUNDLE_PG_READ_PASSWORD, SnapshotConfig,
+};
 
 // ── postgres 配置 wiring ─────────────────────────────────────────────────────────────────────
 
@@ -18,57 +21,81 @@ const PG_WRITER_MAX_CONNECTIONS_ENV: &str = "RSS_PG_MAX_CONNECTIONS";
 const PG_READER_MAX_CONNECTIONS_ENV: &str = "RSS_PG_READ_MAX_CONNECTIONS";
 const PG_READINESS_INTERVAL_ENV: &str = "RSS_PG_READINESS_SAMPLE_INTERVAL_SECS";
 const PG_USERNAME_ENV: &str = "RSS_PG_USERNAME";
-const PG_PASSWORD_ENV: &str = "RSS_PG_PASSWORD";
+const PG_PASSWORD_FILE_ENV: &str = "RSS_PG_PASSWORD_FILE";
+const PG_REMOVED_PASSWORD_ENV: &str = "RSS_PG_PASSWORD";
 const PG_READ_USERNAME_ENV: &str = "RSS_PG_READ_USERNAME";
-const PG_READ_PASSWORD_ENV: &str = "RSS_PG_READ_PASSWORD";
+const PG_READ_PASSWORD_FILE_ENV: &str = "RSS_PG_READ_PASSWORD_FILE";
+const PG_READ_REMOVED_PASSWORD_ENV: &str = "RSS_PG_READ_PASSWORD";
 const PG_MIGRATOR_USERNAME_ENV: &str = "RSS_PG_MIGRATOR_USERNAME";
-const PG_MIGRATOR_PASSWORD_ENV: &str = "RSS_PG_MIGRATOR_PASSWORD";
+const PG_MIGRATOR_PASSWORD_FILE_ENV: &str = "RSS_PG_MIGRATOR_PASSWORD_FILE";
+const PG_MIGRATOR_REMOVED_PASSWORD_ENV: &str = "RSS_PG_MIGRATOR_PASSWORD";
 const PG_AUDIT_ADMIN_USERNAME_ENV: &str = "RSS_PG_AUDIT_ADMIN_USERNAME";
-const PG_AUDIT_ADMIN_PASSWORD_ENV: &str = "RSS_PG_AUDIT_ADMIN_PASSWORD";
+const PG_AUDIT_ADMIN_PASSWORD_FILE_ENV: &str = "RSS_PG_AUDIT_ADMIN_PASSWORD_FILE";
+const PG_AUDIT_ADMIN_REMOVED_PASSWORD_ENV: &str = "RSS_PG_AUDIT_ADMIN_PASSWORD";
 const PG_DLX_ARCHIVER_USERNAME_ENV: &str = "RSS_PG_DLX_ARCHIVER_USERNAME";
-const PG_DLX_ARCHIVER_PASSWORD_ENV: &str = "RSS_PG_DLX_ARCHIVER_PASSWORD";
+const PG_DLX_ARCHIVER_MAX_CONNECTIONS_ENV: &str = "RSS_PG_DLX_ARCHIVER_MAX_CONNECTIONS";
+const PG_DLX_ARCHIVER_PASSWORD_FILE_ENV: &str = "RSS_PG_DLX_ARCHIVER_PASSWORD_FILE";
+const PG_DLX_ARCHIVER_REMOVED_PASSWORD_ENV: &str = "RSS_PG_DLX_ARCHIVER_PASSWORD";
 const PG_DLX_VERIFIER_USERNAME_ENV: &str = "RSS_PG_DLX_VERIFIER_USERNAME";
-const PG_DLX_VERIFIER_PASSWORD_ENV: &str = "RSS_PG_DLX_VERIFIER_PASSWORD";
+const PG_DLX_VERIFIER_MAX_CONNECTIONS_ENV: &str = "RSS_PG_DLX_VERIFIER_MAX_CONNECTIONS";
+const PG_DLX_VERIFIER_PASSWORD_FILE_ENV: &str = "RSS_PG_DLX_VERIFIER_PASSWORD_FILE";
+const PG_DLX_VERIFIER_REMOVED_PASSWORD_ENV: &str = "RSS_PG_DLX_VERIFIER_PASSWORD";
 const PG_DLX_PURGER_USERNAME_ENV: &str = "RSS_PG_DLX_PURGER_USERNAME";
-const PG_DLX_PURGER_PASSWORD_ENV: &str = "RSS_PG_DLX_PURGER_PASSWORD";
+const PG_DLX_PURGER_MAX_CONNECTIONS_ENV: &str = "RSS_PG_DLX_PURGER_MAX_CONNECTIONS";
+const PG_DLX_PURGER_PASSWORD_FILE_ENV: &str = "RSS_PG_DLX_PURGER_PASSWORD_FILE";
+const PG_DLX_PURGER_REMOVED_PASSWORD_ENV: &str = "RSS_PG_DLX_PURGER_PASSWORD";
 const DEFAULT_SERVING_LANE_MAX_CONNECTIONS: u32 = 5;
 const MAX_SERVING_LANE_MAX_CONNECTIONS: u32 = 100;
-const SETTINGS_ALLOW_LEGACY_PLAINTEXT_CONFIG_VALUES_ENV: &str =
-    "RSS_SETTINGS_ALLOW_LEGACY_PLAINTEXT_CONFIG_VALUES";
 
 #[derive(Clone, Copy)]
 struct PgRoleKeys {
     username: &'static str,
-    password: &'static str,
+    password_file: &'static str,
+    removed_password: &'static str,
+    bundle_password: Option<&'static str>,
 }
 
 const PG_SERVING_ROLE_KEYS: PgRoleKeys = PgRoleKeys {
     username: PG_USERNAME_ENV,
-    password: PG_PASSWORD_ENV,
+    password_file: PG_PASSWORD_FILE_ENV,
+    removed_password: PG_REMOVED_PASSWORD_ENV,
+    bundle_password: Some(BUNDLE_PG_PASSWORD),
 };
 const PG_TENANT_READ_ROLE_KEYS: PgRoleKeys = PgRoleKeys {
     username: PG_READ_USERNAME_ENV,
-    password: PG_READ_PASSWORD_ENV,
+    password_file: PG_READ_PASSWORD_FILE_ENV,
+    removed_password: PG_READ_REMOVED_PASSWORD_ENV,
+    bundle_password: Some(BUNDLE_PG_READ_PASSWORD),
 };
 const PG_MIGRATOR_ROLE_KEYS: PgRoleKeys = PgRoleKeys {
     username: PG_MIGRATOR_USERNAME_ENV,
-    password: PG_MIGRATOR_PASSWORD_ENV,
+    password_file: PG_MIGRATOR_PASSWORD_FILE_ENV,
+    removed_password: PG_MIGRATOR_REMOVED_PASSWORD_ENV,
+    bundle_password: None,
 };
 const PG_AUDIT_ADMIN_ROLE_KEYS: PgRoleKeys = PgRoleKeys {
     username: PG_AUDIT_ADMIN_USERNAME_ENV,
-    password: PG_AUDIT_ADMIN_PASSWORD_ENV,
+    password_file: PG_AUDIT_ADMIN_PASSWORD_FILE_ENV,
+    removed_password: PG_AUDIT_ADMIN_REMOVED_PASSWORD_ENV,
+    bundle_password: Some(BUNDLE_PG_AUDIT_ADMIN_PASSWORD),
 };
 const PG_DLX_ARCHIVER_ROLE_KEYS: PgRoleKeys = PgRoleKeys {
     username: PG_DLX_ARCHIVER_USERNAME_ENV,
-    password: PG_DLX_ARCHIVER_PASSWORD_ENV,
+    password_file: PG_DLX_ARCHIVER_PASSWORD_FILE_ENV,
+    removed_password: PG_DLX_ARCHIVER_REMOVED_PASSWORD_ENV,
+    bundle_password: Some(BUNDLE_PG_DLX_ARCHIVER_PASSWORD),
 };
 const PG_DLX_VERIFIER_ROLE_KEYS: PgRoleKeys = PgRoleKeys {
     username: PG_DLX_VERIFIER_USERNAME_ENV,
-    password: PG_DLX_VERIFIER_PASSWORD_ENV,
+    password_file: PG_DLX_VERIFIER_PASSWORD_FILE_ENV,
+    removed_password: PG_DLX_VERIFIER_REMOVED_PASSWORD_ENV,
+    bundle_password: Some(BUNDLE_PG_DLX_VERIFIER_PASSWORD),
 };
 const PG_DLX_PURGER_ROLE_KEYS: PgRoleKeys = PgRoleKeys {
     username: PG_DLX_PURGER_USERNAME_ENV,
-    password: PG_DLX_PURGER_PASSWORD_ENV,
+    password_file: PG_DLX_PURGER_PASSWORD_FILE_ENV,
+    removed_password: PG_DLX_PURGER_REMOVED_PASSWORD_ENV,
+    bundle_password: Some(BUNDLE_PG_DLX_PURGER_PASSWORD),
 };
 
 /// One immutable, fully parsed PostgreSQL configuration generation.
@@ -79,12 +106,10 @@ const PG_DLX_PURGER_ROLE_KEYS: PgRoleKeys = PgRoleKeys {
 pub(crate) struct PgRuntimeConfig {
     serving: PgConfig,
     tenant_read: PgTenantReadConfig,
-    migrator: PgConfig,
     audit_admin: Option<PgConfig>,
     dlx_archiver: PgConfig,
     dlx_verifier: PgConfig,
     dlx_purger: PgConfig,
-    legacy_policy: LegacyConfigPlaintextPolicy,
     readiness_period: Duration,
 }
 
@@ -93,12 +118,10 @@ pub(crate) struct PgRuntimeConfig {
 pub(crate) struct PgRuntimeConfigParts {
     pub(crate) serving: PgConfig,
     pub(crate) tenant_read: PgTenantReadConfig,
-    pub(crate) migrator: PgConfig,
     pub(crate) audit_admin: Option<PgConfig>,
     pub(crate) dlx_archiver: PgConfig,
     pub(crate) dlx_verifier: PgConfig,
     pub(crate) dlx_purger: PgConfig,
-    pub(crate) legacy_policy: LegacyConfigPlaintextPolicy,
     pub(crate) readiness_period: Duration,
 }
 
@@ -135,24 +158,48 @@ impl PgSharedValues {
         config: SnapshotConfig<'_>,
         keys: PgRoleKeys,
     ) -> anyhow::Result<PgConfig> {
+        reject_removed_password(config, keys)?;
         let username = required_value(config, keys.username)?;
-        let password = required_value(config, keys.password)?;
-        Ok(self.config(username, password))
+        let password = role_password(config, keys)?;
+        let role = self.config(username, password);
+        let pool_limit = match keys.username {
+            PG_DLX_ARCHIVER_USERNAME_ENV => Some(PG_DLX_ARCHIVER_MAX_CONNECTIONS_ENV),
+            PG_DLX_VERIFIER_USERNAME_ENV => Some(PG_DLX_VERIFIER_MAX_CONNECTIONS_ENV),
+            PG_DLX_PURGER_USERNAME_ENV => Some(PG_DLX_PURGER_MAX_CONNECTIONS_ENV),
+            _ => None,
+        };
+        match pool_limit {
+            Some(env) => apply_pool_limit_from_value(role, config.value(env), env),
+            None => Ok(role),
+        }
     }
 
     fn optional_audit_config(
         &self,
         config: SnapshotConfig<'_>,
     ) -> anyhow::Result<Option<PgConfig>> {
+        reject_removed_password(config, PG_AUDIT_ADMIN_ROLE_KEYS)?;
         let username = config.value(PG_AUDIT_ADMIN_ROLE_KEYS.username);
-        let password = config.value(PG_AUDIT_ADMIN_ROLE_KEYS.password);
-        match (username, password) {
-            (None, None) => Ok(None),
-            (Some(username), Some(password)) => {
+        let password_file = config.value(PG_AUDIT_ADMIN_ROLE_KEYS.password_file);
+        let bundle_password = PG_AUDIT_ADMIN_ROLE_KEYS
+            .bundle_password
+            .and_then(|key| config.value(key));
+        match (username, password_file, bundle_password) {
+            (None, None, None) => Ok(None),
+            (Some(username), Some(path), None) => Ok(Some(self.config(
+                username.to_owned(),
+                read_password_file(path.to_owned(), PG_AUDIT_ADMIN_ROLE_KEYS.password_file)?,
+            ))),
+            (Some(username), None, Some(password)) => {
                 Ok(Some(self.config(username.to_owned(), password.to_owned())))
             }
-            (None, Some(_)) => Err(missing_required_value(PG_AUDIT_ADMIN_ROLE_KEYS.username)),
-            (Some(_), None) => Err(missing_required_value(PG_AUDIT_ADMIN_ROLE_KEYS.password)),
+            (None, Some(_), None) | (None, None, Some(_)) => {
+                Err(missing_required_value(PG_AUDIT_ADMIN_ROLE_KEYS.username))
+            }
+            (Some(_), None, None) => Err(missing_required_value(
+                PG_AUDIT_ADMIN_ROLE_KEYS.password_file,
+            )),
+            _ => anyhow::bail!("postgres audit password has multiple sources"),
         }
     }
 
@@ -172,38 +219,72 @@ impl PgSharedValues {
     }
 }
 
+fn role_password(config: SnapshotConfig<'_>, keys: PgRoleKeys) -> anyhow::Result<String> {
+    let bundle = keys.bundle_password.and_then(|key| config.value(key));
+    let file = config.value(keys.password_file);
+    match (bundle, file) {
+        (Some(password), None) => Ok(password.to_owned()),
+        (None, Some(path)) => read_password_file(path.to_owned(), keys.password_file),
+        (None, None) => Err(missing_required_value(keys.password_file)),
+        (Some(_), Some(_)) => anyhow::bail!("postgres password has multiple sources"),
+    }
+}
+
+fn reject_removed_password(config: SnapshotConfig<'_>, keys: PgRoleKeys) -> anyhow::Result<()> {
+    if config.value(keys.removed_password).is_some() {
+        return Err(anyhow::Error::msg(format!(
+            "{} was removed; use {}",
+            keys.removed_password, keys.password_file
+        )));
+    }
+    Ok(())
+}
+
+fn read_password_file(raw_path: String, key: &'static str) -> anyhow::Result<String> {
+    let path = Path::new(&raw_path);
+    anyhow::ensure!(
+        path.is_absolute()
+            && !path
+                .components()
+                .any(|part| matches!(part, Component::ParentDir)),
+        "{key} must be an absolute path without parent traversal"
+    );
+    let mut password = fs::read_to_string(path)
+        .with_context(|| format!("failed to read postgres password file from {key}"))?;
+    password.truncate(password.trim_end_matches(['\r', '\n']).len());
+    anyhow::ensure!(
+        !password.is_empty(),
+        "postgres password file from {key} is empty"
+    );
+    Ok(password)
+}
+
 impl PgRuntimeConfig {
     pub(crate) fn from_snapshot(config: SnapshotConfig<'_>) -> anyhow::Result<Self> {
         let shared = PgSharedValues::from_snapshot(config)?;
-        let serving = apply_serving_lane_pool_limit_from_value(
+        let serving = apply_pool_limit_from_value(
             shared.role_config(config, PG_SERVING_ROLE_KEYS)?,
             config.value(PG_WRITER_MAX_CONNECTIONS_ENV),
             PG_WRITER_MAX_CONNECTIONS_ENV,
         )?;
-        let tenant_read = PgTenantReadConfig::new(apply_serving_lane_pool_limit_from_value(
+        let tenant_read = PgTenantReadConfig::new(apply_pool_limit_from_value(
             shared.role_config(config, PG_TENANT_READ_ROLE_KEYS)?,
             config.value(PG_READER_MAX_CONNECTIONS_ENV),
             PG_READER_MAX_CONNECTIONS_ENV,
         )?);
-        let migrator = shared.role_config(config, PG_MIGRATOR_ROLE_KEYS)?;
         let audit_admin = shared.optional_audit_config(config)?;
         let dlx_archiver = shared.role_config(config, PG_DLX_ARCHIVER_ROLE_KEYS)?;
         let dlx_verifier = shared.role_config(config, PG_DLX_VERIFIER_ROLE_KEYS)?;
         let dlx_purger = shared.role_config(config, PG_DLX_PURGER_ROLE_KEYS)?;
-        let legacy_policy = legacy_config_plaintext_policy_from_value(
-            config.value(SETTINGS_ALLOW_LEGACY_PLAINTEXT_CONFIG_VALUES_ENV),
-        )?;
         let readiness_period =
             pg_readiness_interval_from_value(config.value(PG_READINESS_INTERVAL_ENV));
         Ok(Self {
             serving,
             tenant_read,
-            migrator,
             audit_admin,
             dlx_archiver,
             dlx_verifier,
             dlx_purger,
-            legacy_policy,
             readiness_period,
         })
     }
@@ -212,18 +293,16 @@ impl PgRuntimeConfig {
         PgRuntimeConfigParts {
             serving: self.serving,
             tenant_read: self.tenant_read,
-            migrator: self.migrator,
             audit_admin: self.audit_admin,
             dlx_archiver: self.dlx_archiver,
             dlx_verifier: self.dlx_verifier,
             dlx_purger: self.dlx_purger,
-            legacy_policy: self.legacy_policy,
             readiness_period: self.readiness_period,
         }
     }
 }
 
-fn apply_serving_lane_pool_limit_from_value(
+fn apply_pool_limit_from_value(
     config: PgConfig,
     raw: Option<&str>,
     env: &'static str,
@@ -320,21 +399,6 @@ pub(crate) fn parse_pg_ssl_mode(raw: Option<String>) -> PgSslMode {
     }
 }
 
-fn legacy_config_plaintext_policy_from_value(
-    raw: Option<&str>,
-) -> anyhow::Result<LegacyConfigPlaintextPolicy> {
-    let Some(raw) = raw else {
-        return Ok(LegacyConfigPlaintextPolicy::Deny);
-    };
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "1" | "true" | "yes" => Ok(LegacyConfigPlaintextPolicy::AllowTemporary),
-        "0" | "false" | "no" => Ok(LegacyConfigPlaintextPolicy::Deny),
-        _ => anyhow::bail!(
-            "{SETTINGS_ALLOW_LEGACY_PLAINTEXT_CONFIG_VALUES_ENV} must be true/false (or 1/0, yes/no)"
-        ),
-    }
-}
-
 /// 默认 DB readiness 采样周期（5 秒）。
 pub(crate) const DEFAULT_READINESS_INTERVAL: Duration = Duration::from_secs(5);
 /// 采样间隔上限（秒）：限制 DB 失联后维持旧 Ready 状态的最长时间。
@@ -366,8 +430,9 @@ fn pg_readiness_interval_from_value(raw: Option<&str>) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use postgres::LegacyConfigPlaintextPolicy;
     use std::time::Duration;
+
+    const TEST_PASSWORD_FILE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml");
 
     struct GetterSource<F>(F);
 
@@ -396,7 +461,7 @@ mod tests {
     fn build_pg_config_from(get: impl Fn(&str) -> Option<String>) -> anyhow::Result<PgConfig> {
         let snapshot = snapshot_from_get(get)?;
         let config = snapshot.view();
-        apply_serving_lane_pool_limit_from_value(
+        apply_pool_limit_from_value(
             PgSharedValues::from_snapshot(config)?.role_config(config, PG_SERVING_ROLE_KEYS)?,
             config.value(PG_WRITER_MAX_CONNECTIONS_ENV),
             PG_WRITER_MAX_CONNECTIONS_ENV,
@@ -408,7 +473,7 @@ mod tests {
     ) -> anyhow::Result<PgTenantReadConfig> {
         let snapshot = snapshot_from_get(get)?;
         let config = snapshot.view();
-        apply_serving_lane_pool_limit_from_value(
+        apply_pool_limit_from_value(
             PgSharedValues::from_snapshot(config)?.role_config(config, PG_TENANT_READ_ROLE_KEYS)?,
             config.value(PG_READER_MAX_CONNECTIONS_ENV),
             PG_READER_MAX_CONNECTIONS_ENV,
@@ -438,17 +503,6 @@ mod tests {
     role_builder!(build_pg_dlx_verifier_config_from, PG_DLX_VERIFIER_ROLE_KEYS);
     role_builder!(build_pg_dlx_purger_config_from, PG_DLX_PURGER_ROLE_KEYS);
 
-    fn legacy_config_plaintext_policy_from(
-        get: impl Fn(&str) -> Option<String>,
-    ) -> anyhow::Result<LegacyConfigPlaintextPolicy> {
-        let snapshot = snapshot_from_get(get)?;
-        legacy_config_plaintext_policy_from_value(
-            snapshot
-                .view()
-                .value(SETTINGS_ALLOW_LEGACY_PLAINTEXT_CONFIG_VALUES_ENV),
-        )
-    }
-
     #[allow(clippy::expect_used)]
     fn build_readiness_interval_from(get: impl Fn(&str) -> Option<String>) -> Duration {
         let snapshot = snapshot_from_get(get).expect("closed test catalog");
@@ -463,20 +517,22 @@ mod tests {
                 PG_DATABASE_ENV => "rss_snapshot",
                 PG_SSL_MODE_ENV => "require",
                 PG_USERNAME_ENV => "rss_app_snapshot",
-                PG_PASSWORD_ENV => "app-snapshot-secret",
+                PG_PASSWORD_FILE_ENV => TEST_PASSWORD_FILE,
                 PG_READ_USERNAME_ENV => "rss_app_read_snapshot",
-                PG_READ_PASSWORD_ENV => "reader-snapshot-secret",
+                PG_READ_PASSWORD_FILE_ENV => TEST_PASSWORD_FILE,
                 PG_MIGRATOR_USERNAME_ENV => "rss_migrator_snapshot",
-                PG_MIGRATOR_PASSWORD_ENV => "migrator-snapshot-secret",
+                PG_MIGRATOR_PASSWORD_FILE_ENV => TEST_PASSWORD_FILE,
                 PG_AUDIT_ADMIN_USERNAME_ENV => "rss_audit_admin_snapshot",
-                PG_AUDIT_ADMIN_PASSWORD_ENV => "audit-admin-snapshot-secret",
+                PG_AUDIT_ADMIN_PASSWORD_FILE_ENV => TEST_PASSWORD_FILE,
                 PG_DLX_ARCHIVER_USERNAME_ENV => "rss_dlx_archiver_snapshot",
-                PG_DLX_ARCHIVER_PASSWORD_ENV => "archiver-snapshot-secret",
+                PG_DLX_ARCHIVER_PASSWORD_FILE_ENV => TEST_PASSWORD_FILE,
+                PG_DLX_ARCHIVER_MAX_CONNECTIONS_ENV => "7",
                 PG_DLX_VERIFIER_USERNAME_ENV => "rss_dlx_verifier_snapshot",
-                PG_DLX_VERIFIER_PASSWORD_ENV => "verifier-snapshot-secret",
+                PG_DLX_VERIFIER_PASSWORD_FILE_ENV => TEST_PASSWORD_FILE,
+                PG_DLX_VERIFIER_MAX_CONNECTIONS_ENV => "8",
                 PG_DLX_PURGER_USERNAME_ENV => "rss_dlx_purger_snapshot",
-                PG_DLX_PURGER_PASSWORD_ENV => "purger-snapshot-secret",
-                SETTINGS_ALLOW_LEGACY_PLAINTEXT_CONFIG_VALUES_ENV => "true",
+                PG_DLX_PURGER_PASSWORD_FILE_ENV => TEST_PASSWORD_FILE,
+                PG_DLX_PURGER_MAX_CONNECTIONS_ENV => "9",
                 PG_READINESS_INTERVAL_ENV => "19",
                 _ => return None,
             }
@@ -491,15 +547,18 @@ mod tests {
         let parts = PgRuntimeConfig::from_snapshot(snapshot.view())
             .expect("runtime config")
             .into_parts();
-        for (config, role) in [
-            (&parts.serving, "rss_app_snapshot"),
-            (&parts.migrator, "rss_migrator_snapshot"),
-            (&parts.dlx_archiver, "rss_dlx_archiver_snapshot"),
-            (&parts.dlx_verifier, "rss_dlx_verifier_snapshot"),
-            (&parts.dlx_purger, "rss_dlx_purger_snapshot"),
+        for (config, role, max) in [
+            (&parts.serving, "rss_app_snapshot", 5),
+            (&parts.dlx_archiver, "rss_dlx_archiver_snapshot", 7),
+            (&parts.dlx_verifier, "rss_dlx_verifier_snapshot", 8),
+            (&parts.dlx_purger, "rss_dlx_purger_snapshot", 9),
         ] {
             let debug = format!("{config:?}");
             assert!(debug.contains(role), "{debug}");
+            assert!(
+                debug.contains(&format!("max_connections: {max}")),
+                "{debug}"
+            );
             assert!(!debug.contains("-snapshot-secret"), "{debug}");
         }
         let reader = format!("{:?}", parts.tenant_read);
@@ -508,10 +567,6 @@ mod tests {
         let audit = format!("{:?}", parts.audit_admin.expect("audit role"));
         assert!(audit.contains("rss_audit_admin_snapshot"));
         assert!(!audit.contains("audit-admin-snapshot-secret"));
-        assert_eq!(
-            parts.legacy_policy,
-            LegacyConfigPlaintextPolicy::AllowTemporary
-        );
         assert_eq!(parts.readiness_period, Duration::from_secs(19));
     }
 
@@ -520,11 +575,10 @@ mod tests {
     fn runtime_infra_pg_snapshot_never_falls_back_and_preserves_optional_audit_pair() {
         for missing in [
             PG_READ_USERNAME_ENV,
-            PG_READ_PASSWORD_ENV,
-            PG_MIGRATOR_USERNAME_ENV,
-            PG_DLX_ARCHIVER_PASSWORD_ENV,
+            PG_READ_PASSWORD_FILE_ENV,
+            PG_DLX_ARCHIVER_PASSWORD_FILE_ENV,
             PG_DLX_VERIFIER_USERNAME_ENV,
-            PG_DLX_PURGER_PASSWORD_ENV,
+            PG_DLX_PURGER_PASSWORD_FILE_ENV,
         ] {
             let snapshot = snapshot_from_get(|name| {
                 (name != missing).then(|| full_runtime_get(name)).flatten()
@@ -538,7 +592,8 @@ mod tests {
         }
 
         let snapshot = snapshot_from_get(|name| {
-            (name != PG_AUDIT_ADMIN_ROLE_KEYS.username && name != PG_AUDIT_ADMIN_ROLE_KEYS.password)
+            (name != PG_AUDIT_ADMIN_ROLE_KEYS.username
+                && name != PG_AUDIT_ADMIN_ROLE_KEYS.password_file)
                 .then(|| full_runtime_get(name))
                 .flatten()
         })
@@ -550,7 +605,10 @@ mod tests {
                 .audit_admin
                 .is_none()
         );
-        for missing in [PG_AUDIT_ADMIN_USERNAME_ENV, PG_AUDIT_ADMIN_PASSWORD_ENV] {
+        for missing in [
+            PG_AUDIT_ADMIN_USERNAME_ENV,
+            PG_AUDIT_ADMIN_PASSWORD_FILE_ENV,
+        ] {
             let snapshot = snapshot_from_get(|name| {
                 (name != missing).then(|| full_runtime_get(name)).flatten()
             })
@@ -606,7 +664,7 @@ mod tests {
             PG_PORT_ENV => Some("5432".to_string()),
             PG_DATABASE_ENV => Some("rss".to_string()),
             PG_USERNAME_ENV => Some("rss_app".to_string()),
-            PG_PASSWORD_ENV => Some("app_pw".to_string()),
+            PG_PASSWORD_FILE_ENV => Some(TEST_PASSWORD_FILE.to_string()),
             _ => None,
         });
         match result {
@@ -623,9 +681,9 @@ mod tests {
             PG_PORT_ENV => Some("5432".to_string()),
             PG_DATABASE_ENV => Some("rss".to_string()),
             PG_USERNAME_ENV => Some("rss_app".to_string()),
-            PG_PASSWORD_ENV => Some("app_pw".to_string()),
+            PG_PASSWORD_FILE_ENV => Some(TEST_PASSWORD_FILE.to_string()),
             PG_MIGRATOR_USERNAME_ENV => Some("postgres".to_string()),
-            PG_MIGRATOR_PASSWORD_ENV => Some("owner_pw".to_string()),
+            PG_MIGRATOR_PASSWORD_FILE_ENV => Some(TEST_PASSWORD_FILE.to_string()),
             PG_SSL_MODE_ENV => Some("disable".to_string()),
             _ => None,
         }) {
@@ -652,7 +710,7 @@ mod tests {
         });
         match missing_password {
             Ok(_) => panic!("reader username without reader password must fail"),
-            Err(err) => assert!(err.to_string().contains(PG_READ_PASSWORD_ENV)),
+            Err(err) => assert!(err.to_string().contains(PG_READ_PASSWORD_FILE_ENV)),
         }
     }
 
@@ -661,7 +719,7 @@ mod tests {
     fn pg_read_config_uses_dedicated_credentials() {
         let cfg = build_pg_read_config_from(|name| match name {
             PG_READ_USERNAME_ENV => Some("rss_app_read".to_string()),
-            PG_READ_PASSWORD_ENV => Some("read_pw".to_string()),
+            PG_READ_PASSWORD_FILE_ENV => Some(TEST_PASSWORD_FILE.to_string()),
             _ => full_pg_get(name),
         })
         .unwrap_or_else(|err| panic!("tenant reader config: {err}"));
@@ -677,7 +735,7 @@ mod tests {
         let writer = build_pg_config_from(full_pg_get).expect("writer config");
         let reader = build_pg_read_config_from(|name| match name {
             PG_READ_USERNAME_ENV => Some("rss_app_read".to_string()),
-            PG_READ_PASSWORD_ENV => Some("read_pw".to_string()),
+            PG_READ_PASSWORD_FILE_ENV => Some(TEST_PASSWORD_FILE.to_string()),
             _ => full_pg_get(name),
         })
         .expect("reader config");
@@ -691,7 +749,7 @@ mod tests {
         .expect("custom writer pool");
         let reader = build_pg_read_config_from(|name| match name {
             PG_READ_USERNAME_ENV => Some("rss_app_read".to_string()),
-            PG_READ_PASSWORD_ENV => Some("read_pw".to_string()),
+            PG_READ_PASSWORD_FILE_ENV => Some(TEST_PASSWORD_FILE.to_string()),
             PG_READER_MAX_CONNECTIONS_ENV => Some("3".to_string()),
             _ => full_pg_get(name),
         })
@@ -711,7 +769,7 @@ mod tests {
             let result = if reader {
                 build_pg_read_config_from(|name| match name {
                     PG_READ_USERNAME_ENV => Some("rss_app_read".to_string()),
-                    PG_READ_PASSWORD_ENV => Some("read_pw".to_string()),
+                    PG_READ_PASSWORD_FILE_ENV => Some(TEST_PASSWORD_FILE.to_string()),
                     name if name == env => Some(value.to_string()),
                     _ => full_pg_get(name),
                 })
@@ -735,7 +793,7 @@ mod tests {
         let ca = write_temp_file("pg-reader-root-ca.pem", b"test ca");
         let cfg = build_pg_read_config_from(|name| match name {
             PG_READ_USERNAME_ENV => Some("rss_app_read".to_string()),
-            PG_READ_PASSWORD_ENV => Some("read_pw".to_string()),
+            PG_READ_PASSWORD_FILE_ENV => Some(TEST_PASSWORD_FILE.to_string()),
             PG_SSL_MODE_ENV => Some("verify-ca".to_string()),
             PG_SSL_ROOT_CERT_PATH_ENV => Some(ca.display().to_string()),
             _ => full_pg_get(name),
@@ -761,12 +819,12 @@ mod tests {
         });
         match missing_password {
             Ok(_) => panic!("missing DLX archiver password should fail"),
-            Err(err) => assert!(err.to_string().contains(PG_DLX_ARCHIVER_PASSWORD_ENV)),
+            Err(err) => assert!(err.to_string().contains(PG_DLX_ARCHIVER_PASSWORD_FILE_ENV)),
         }
 
         let cfg = match build_pg_dlx_archiver_config_from(|name| match name {
             PG_DLX_ARCHIVER_USERNAME_ENV => Some("rss_dlx_archiver".to_string()),
-            PG_DLX_ARCHIVER_PASSWORD_ENV => Some("dlx_pw".to_string()),
+            PG_DLX_ARCHIVER_PASSWORD_FILE_ENV => Some(TEST_PASSWORD_FILE.to_string()),
             _ => full_pg_get(name),
         }) {
             Ok(cfg) => cfg,
@@ -783,13 +841,13 @@ mod tests {
     fn pg_dlx_verifier_and_purger_configs_require_distinct_credentials() {
         let verifier = build_pg_dlx_verifier_config_from(|name| match name {
             PG_DLX_VERIFIER_USERNAME_ENV => Some("rss_dlx_verifier".to_string()),
-            PG_DLX_VERIFIER_PASSWORD_ENV => Some("verify_pw".to_string()),
+            PG_DLX_VERIFIER_PASSWORD_FILE_ENV => Some(TEST_PASSWORD_FILE.to_string()),
             _ => full_pg_get(name),
         })
         .unwrap_or_else(|error| panic!("DLX verifier config: {error}"));
         let purger = build_pg_dlx_purger_config_from(|name| match name {
             PG_DLX_PURGER_USERNAME_ENV => Some("rss_dlx_purger".to_string()),
-            PG_DLX_PURGER_PASSWORD_ENV => Some("purge_pw".to_string()),
+            PG_DLX_PURGER_PASSWORD_FILE_ENV => Some(TEST_PASSWORD_FILE.to_string()),
             _ => full_pg_get(name),
         })
         .unwrap_or_else(|error| panic!("DLX purger config: {error}"));
@@ -829,7 +887,7 @@ mod tests {
             PG_PORT_ENV => Some("5432".to_string()),
             PG_DATABASE_ENV => Some("rss_db".to_string()),
             PG_USERNAME_ENV => Some("rss_app".to_string()),
-            PG_PASSWORD_ENV => Some("s3cr3t".to_string()),
+            PG_PASSWORD_FILE_ENV => Some(TEST_PASSWORD_FILE.to_string()),
             _ => None,
         }
     }
@@ -844,6 +902,34 @@ mod tests {
         assert!(debug.contains("pg.internal"), "host 在 debug 输出中");
         assert!(debug.contains("rss_app"), "serving user 示例为 rss_app");
         assert!(!debug.contains("s3cr3t"), "password 不在 debug 输出中");
+    }
+
+    #[test]
+    fn raw_and_dual_source_passwords_are_rejected_without_secret_diagnostics() {
+        const FORBIDDEN: &str = "raw-secret-must-not-leak";
+        let error = build_pg_config_from(|key| {
+            (key == PG_REMOVED_PASSWORD_ENV)
+                .then(|| FORBIDDEN.to_owned())
+                .or_else(|| full_pg_get(key))
+        })
+        .expect_err("raw password presence must reject even when file source also exists");
+        let diagnostic = error.to_string();
+        assert!(diagnostic.contains(PG_REMOVED_PASSWORD_ENV));
+        assert!(diagnostic.contains(PG_PASSWORD_FILE_ENV));
+        assert!(!diagnostic.contains(FORBIDDEN));
+    }
+
+    #[test]
+    fn relative_or_parent_traversing_password_file_is_rejected_before_read() {
+        for path in ["relative/password", "/run/rss/../password"] {
+            let error = build_pg_config_from(|key| {
+                (key == PG_PASSWORD_FILE_ENV)
+                    .then(|| path.to_owned())
+                    .or_else(|| full_pg_get(key))
+            })
+            .expect_err("non-canonical password file path must fail");
+            assert!(error.to_string().contains(PG_PASSWORD_FILE_ENV));
+        }
     }
 
     #[test]
@@ -864,11 +950,11 @@ mod tests {
         assert!(
             missing_password
                 .to_string()
-                .contains(PG_AUDIT_ADMIN_PASSWORD_ENV)
+                .contains(PG_AUDIT_ADMIN_PASSWORD_FILE_ENV)
         );
 
         let missing_username = build_pg_audit_admin_config_from(|k| match k {
-            PG_AUDIT_ADMIN_PASSWORD_ENV => Some("admin_pw".to_string()),
+            PG_AUDIT_ADMIN_PASSWORD_FILE_ENV => Some(TEST_PASSWORD_FILE.to_string()),
             _ => full_pg_get(k),
         })
         .expect_err("missing username must fail");
@@ -884,7 +970,7 @@ mod tests {
     fn build_pg_audit_admin_config_happy() {
         let cfg = build_pg_audit_admin_config_from(|k| match k {
             PG_AUDIT_ADMIN_USERNAME_ENV => Some("rss_audit_admin".to_string()),
-            PG_AUDIT_ADMIN_PASSWORD_ENV => Some("admin_pw".to_string()),
+            PG_AUDIT_ADMIN_PASSWORD_FILE_ENV => Some(TEST_PASSWORD_FILE.to_string()),
             _ => full_pg_get(k),
         })
         .expect("admin config ok")
@@ -912,12 +998,12 @@ mod tests {
         );
     }
 
-    /// `RSS_PG_PASSWORD` 缺失 → Err 含变量名（fail-fast）。
+    /// `RSS_PG_PASSWORD_FILE` 缺失 → Err 含变量名（fail-fast）。
     #[test]
     #[allow(clippy::expect_used)]
     fn build_pg_config_from_missing_password() {
         let get = |k: &str| {
-            if k == PG_PASSWORD_ENV {
+            if k == PG_PASSWORD_FILE_ENV {
                 None
             } else {
                 full_pg_get(k)
@@ -925,7 +1011,7 @@ mod tests {
         };
         let err = build_pg_config_from(get).expect_err("password required");
         assert!(
-            err.to_string().contains(PG_PASSWORD_ENV),
+            err.to_string().contains(PG_PASSWORD_FILE_ENV),
             "error contains var name"
         );
     }
@@ -1013,7 +1099,7 @@ mod tests {
         let ca = write_temp_file("pg-migrator-root-ca.pem", b"test ca");
         let cfg = build_pg_migrator_config_from(|name| match name {
             PG_MIGRATOR_USERNAME_ENV => Some("rss_migrator".to_string()),
-            PG_MIGRATOR_PASSWORD_ENV => Some("migrator-secret".to_string()),
+            PG_MIGRATOR_PASSWORD_FILE_ENV => Some(TEST_PASSWORD_FILE.to_string()),
             PG_SSL_ROOT_CERT_PATH_ENV => Some(ca.display().to_string()),
             _ => full_pg_get(name),
         })
@@ -1101,57 +1187,6 @@ mod tests {
         assert!(
             format!("{err:#}").contains(PG_SSL_ROOT_CERT_PATH_ENV),
             "error must identify env var: {err:#}"
-        );
-    }
-
-    #[test]
-    #[allow(clippy::expect_used)]
-    fn legacy_config_plaintext_policy_defaults_to_deny() {
-        let policy = legacy_config_plaintext_policy_from(|_| None).expect("policy");
-        assert_eq!(policy, LegacyConfigPlaintextPolicy::Deny);
-    }
-
-    #[test]
-    #[allow(clippy::expect_used)]
-    fn legacy_config_plaintext_policy_allows_explicit_temporary_values() {
-        for raw in ["true", "1", "yes", " TRUE "] {
-            let policy = legacy_config_plaintext_policy_from(|n| {
-                (n == SETTINGS_ALLOW_LEGACY_PLAINTEXT_CONFIG_VALUES_ENV).then(|| raw.to_string())
-            })
-            .expect("policy");
-            assert_eq!(
-                policy,
-                LegacyConfigPlaintextPolicy::AllowTemporary,
-                "{SETTINGS_ALLOW_LEGACY_PLAINTEXT_CONFIG_VALUES_ENV}={raw:?}"
-            );
-        }
-    }
-
-    #[test]
-    #[allow(clippy::expect_used)]
-    fn legacy_config_plaintext_policy_denies_explicit_false_values() {
-        for raw in ["false", "0", "no", " FALSE "] {
-            let policy = legacy_config_plaintext_policy_from(|n| {
-                (n == SETTINGS_ALLOW_LEGACY_PLAINTEXT_CONFIG_VALUES_ENV).then(|| raw.to_string())
-            })
-            .expect("policy");
-            assert_eq!(
-                policy,
-                LegacyConfigPlaintextPolicy::Deny,
-                "{SETTINGS_ALLOW_LEGACY_PLAINTEXT_CONFIG_VALUES_ENV}={raw:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn legacy_config_plaintext_policy_rejects_invalid_value() {
-        let result = legacy_config_plaintext_policy_from(|n| {
-            (n == SETTINGS_ALLOW_LEGACY_PLAINTEXT_CONFIG_VALUES_ENV).then(|| "enabled".to_string())
-        });
-        let err = result.err().map(|e| e.to_string()).unwrap_or_default();
-        assert!(
-            err.contains(SETTINGS_ALLOW_LEGACY_PLAINTEXT_CONFIG_VALUES_ENV),
-            "error must identify env var: {err}"
         );
     }
 

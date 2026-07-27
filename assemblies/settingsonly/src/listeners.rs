@@ -185,6 +185,7 @@ pub(crate) struct LaunchAdapter {
     health_addr: SocketAddr,
     inventory_publisher: runtimeexec::inventory::InventoryPublisher,
     request_budget: httpserve::ServerRequestBudget,
+    frontend: Option<crate::config::ServingFrontendConfig>,
     #[cfg(feature = "test-support")]
     activation_gate: Option<SocketAddr>,
 }
@@ -197,6 +198,7 @@ impl LaunchAdapter {
         health_addr: SocketAddr,
         request_budget: std::time::Duration,
         inventory_publisher: runtimeexec::inventory::InventoryPublisher,
+        frontend: Option<crate::config::ServingFrontendConfig>,
     ) -> anyhow::Result<Self> {
         let millis = u64::try_from(request_budget.as_millis())
             .context("settingsonly request budget is too large")?;
@@ -209,6 +211,7 @@ impl LaunchAdapter {
             health_addr,
             inventory_publisher,
             request_budget: httpserve::ServerRequestBudget::from_millis(millis),
+            frontend,
             #[cfg(feature = "test-support")]
             activation_gate: None,
         })
@@ -226,12 +229,21 @@ pub(crate) struct PreparedListeners {
     primary: PreparedListener,
     admin: PreparedListener,
     health: PreparedListener,
+    primary_front: Option<PreparedMtlsListener>,
+    admin_front: Option<PreparedMtlsListener>,
+    health_front: Option<PreparedListener>,
     inventory_publisher: runtimeexec::inventory::InventoryPublisher,
 }
 
 struct PreparedListener {
     bound: httpd::BoundHttpServer,
     service: httpserve::ServerMakeService,
+}
+
+struct PreparedMtlsListener {
+    bound: httpd::BoundHttpServer,
+    service: httpserve::ServerMakeService,
+    mtls: httpd::MtlsServerConfig,
 }
 
 pub(crate) struct ListenerInventory {
@@ -247,7 +259,7 @@ impl runtimeexec::LaunchAdapter<FinalizedProbeReceipt> for LaunchAdapter {
     async fn prepare(
         self,
         _probe_receipt: FinalizedProbeReceipt,
-        _transaction: &mut runtimeexec::LaunchTransaction<'_>,
+        transaction: &mut runtimeexec::LaunchTransaction<'_>,
     ) -> anyhow::Result<Self::Prepared> {
         let Self {
             listeners,
@@ -256,6 +268,7 @@ impl runtimeexec::LaunchAdapter<FinalizedProbeReceipt> for LaunchAdapter {
             health_addr,
             inventory_publisher,
             request_budget,
+            frontend,
             #[cfg(feature = "test-support")]
             activation_gate,
         } = self;
@@ -283,19 +296,66 @@ impl runtimeexec::LaunchAdapter<FinalizedProbeReceipt> for LaunchAdapter {
                 .await
                 .context("wait for settingsonly activation release")?;
         }
+        let primary_service = listeners.primary.into_make_service(request_budget);
+        let admin_service = listeners.admin.into_make_service(request_budget);
+        let health_service = listeners.health.into_make_service(request_budget);
+        let (primary_front, admin_front, health_front) = if let Some(frontend) = frontend {
+            let primary_address = SocketAddr::new(frontend.pod_ip, frontend.primary_port);
+            let admin_address = SocketAddr::new(frontend.pod_ip, frontend.admin_port);
+            let primary_bound = HttpServer::bind("settingsonly-primary-mtls", primary_address)
+                .await
+                .context("bind settingsonly Primary mTLS frontend")?;
+            let admin_bound = HttpServer::bind("settingsonly-admin-mtls", admin_address)
+                .await
+                .context("bind settingsonly Admin mTLS frontend")?;
+            let health_bound = HttpServer::bind(
+                "settingsonly-health-front",
+                SocketAddr::new(frontend.pod_ip, frontend.health_port),
+            )
+            .await
+            .context("bind settingsonly Health frontend")?;
+            let prepared = httpd::MtlsServerConfig::from_spire(
+                frontend.allow_set,
+                Some(&frontend.spiffe_endpoint),
+            )
+            .await
+            .context("prepare settingsonly SPIFFE mTLS frontend")?;
+            let mtls = prepared.stage_with(|resource| transaction.stage_resource(resource));
+            (
+                Some(PreparedMtlsListener {
+                    bound: primary_bound,
+                    service: primary_service.clone(),
+                    mtls: mtls.clone(),
+                }),
+                Some(PreparedMtlsListener {
+                    bound: admin_bound,
+                    service: admin_service.clone(),
+                    mtls,
+                }),
+                Some(PreparedListener {
+                    bound: health_bound,
+                    service: health_service.clone(),
+                }),
+            )
+        } else {
+            (None, None, None)
+        };
         Ok(PreparedListeners {
             primary: PreparedListener {
                 bound: primary,
-                service: listeners.primary.into_make_service(request_budget),
+                service: primary_service,
             },
             admin: PreparedListener {
                 bound: admin,
-                service: listeners.admin.into_make_service(request_budget),
+                service: admin_service,
             },
             health: PreparedListener {
                 bound: health,
-                service: listeners.health.into_make_service(request_budget),
+                service: health_service,
             },
+            primary_front,
+            admin_front,
+            health_front,
             inventory_publisher,
         })
     }
@@ -304,35 +364,73 @@ impl runtimeexec::LaunchAdapter<FinalizedProbeReceipt> for LaunchAdapter {
         prepared: Self::Prepared,
         mut registrar: runtimeexec::LaunchRegistrar<'_>,
     ) -> anyhow::Result<runtimeexec::Activated<Self::Inventory>> {
+        let primary_bound = prepared
+            .primary_front
+            .as_ref()
+            .map_or(&prepared.primary.bound, |front| &front.bound);
+        let admin_bound = prepared
+            .admin_front
+            .as_ref()
+            .map_or(&prepared.admin.bound, |front| &front.bound);
+        let edge_scheme = if prepared.primary_front.is_some() {
+            runtimeexec::inventory::InventoryEndpointScheme::Https
+        } else {
+            runtimeexec::inventory::InventoryEndpointScheme::Http
+        };
+        let health_bound = prepared
+            .health_front
+            .as_ref()
+            .map_or(&prepared.health.bound, |front| &front.bound);
         prepared.inventory_publisher.publish(Vec::from([
             runtimeexec::inventory::BoundListenerObservation::from_bound(
                 "primary-main",
                 assembly_schema::AssemblyListenerKind::Primary,
                 assembly_schema::ListenerAuth::FederatedAccessToken,
-                runtimeexec::inventory::InventoryEndpointScheme::Http,
-                prepared.primary.bound.local_addr(),
+                edge_scheme,
+                prepared
+                    .primary_front
+                    .as_ref()
+                    .map_or(&prepared.primary.bound, |front| &front.bound)
+                    .local_addr(),
             ),
             runtimeexec::inventory::BoundListenerObservation::from_bound(
                 "admin-main",
                 assembly_schema::AssemblyListenerKind::Admin,
                 assembly_schema::ListenerAuth::FederatedAccessToken,
-                runtimeexec::inventory::InventoryEndpointScheme::Http,
-                prepared.admin.bound.local_addr(),
+                edge_scheme,
+                prepared
+                    .admin_front
+                    .as_ref()
+                    .map_or(&prepared.admin.bound, |front| &front.bound)
+                    .local_addr(),
             ),
             runtimeexec::inventory::BoundListenerObservation::from_bound(
                 "health-main",
                 assembly_schema::AssemblyListenerKind::Health,
                 assembly_schema::ListenerAuth::NoAuth,
                 runtimeexec::inventory::InventoryEndpointScheme::Http,
-                prepared.health.bound.local_addr(),
+                prepared
+                    .health_front
+                    .as_ref()
+                    .map_or(&prepared.health.bound, |front| &front.bound)
+                    .local_addr(),
             ),
         ]))?;
-        let primary = prepared.primary.bound.local_addr();
-        let admin = prepared.admin.bound.local_addr();
-        let health = prepared.health.bound.local_addr();
+        let primary = primary_bound.local_addr();
+        let admin = admin_bound.local_addr();
+        let health = health_bound.local_addr();
         register(prepared.primary, &mut registrar);
         register(prepared.admin, &mut registrar);
         register(prepared.health, &mut registrar);
+        if let Some(front) = prepared.primary_front {
+            register_mtls(front, &mut registrar);
+        }
+        if let Some(front) = prepared.admin_front {
+            register_mtls(front, &mut registrar);
+        }
+        if let Some(front) = prepared.health_front {
+            register(front, &mut registrar);
+        }
         registrar.complete(ListenerInventory {
             primary,
             admin,
@@ -344,6 +442,16 @@ impl runtimeexec::LaunchAdapter<FinalizedProbeReceipt> for LaunchAdapter {
 fn register(listener: PreparedListener, registrar: &mut runtimeexec::LaunchRegistrar<'_>) {
     registrar.register_listener_with_token(move |token| {
         DynManagedResource::new_box(listener.bound.serve(listener.service, token))
+    });
+}
+
+fn register_mtls(listener: PreparedMtlsListener, registrar: &mut runtimeexec::LaunchRegistrar<'_>) {
+    registrar.register_listener_with_token(move |token| {
+        DynManagedResource::new_box(listener.bound.serve_mtls(
+            listener.service,
+            listener.mtls,
+            token,
+        ))
     });
 }
 
@@ -470,6 +578,7 @@ mod tests {
             health,
             Duration::from_secs(1),
             inventory_publisher()?,
+            None,
         )?;
         let ready = Arc::new(AtomicUsize::new(0));
         let ready_hook = Arc::clone(&ready);

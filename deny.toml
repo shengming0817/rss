@@ -109,6 +109,9 @@ deny = [
   # adapter package 名须与其依赖的同名 crates.io crate 区分（redis adapter package = `redis-adapter`、
   # prometheus adapter package = `prometheus-adapter`，见各自 Cargo.toml），避免误伤同名 crates.io crate。
   { crate = "postgres", wrappers = ["server", "rss", "runtime", "settings-composition", "identity-composition", "audit-composition", "eventing-composition", "settingsonly", "identityaudit", "xtask", "journeys", "journeys-fault-matrix"] },
+  # Forward-only schema migration implementation is operator-only. Serving assemblies cannot name
+  # this crate, making migration capability absent from their production crate graphs.
+  { crate = "postgres-migration", wrappers = ["rss"] },
   { crate = "redis-adapter", wrappers = ["server", "rss", "runtime", "settings-composition", "identity-composition", "audit-composition", "eventing-composition", "settingsonly", "identityaudit", "xtask", "journeys", "journeys-fault-matrix"] },
   { crate = "amqp", wrappers = ["server", "rss", "runtime", "settings-composition", "identity-composition", "audit-composition", "eventing-composition", "settingsonly", "identityaudit", "xtask", "journeys", "journeys-fault-matrix"] },
   { crate = "mqtt", wrappers = ["server", "rss", "runtime", "settings-composition", "identity-composition", "audit-composition", "eventing-composition", "settingsonly", "identityaudit", "xtask", "journeys", "journeys-fault-matrix"] },

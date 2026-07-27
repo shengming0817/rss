@@ -268,8 +268,8 @@ async fn login_audit_durable_topology() -> Result<()> {
         RSS_APP_READ_ROLE,
         RSS_APP_READ_PASSWORD,
     ));
-    // postgres capability bundle（#1423）：`setup` 含 connect + run_migrations；identity 域受控句柄派发 repo。
-    let deps = PgRuntimeDeps::setup(
+    // test-only fixture owns migration setup; serving APIs cannot reach migration capability.
+    let deps = PgRuntimeDeps::setup_test_fixture(
         &owner_config,
         &app_config,
         &tenant_read_config,

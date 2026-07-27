@@ -522,19 +522,19 @@ const SETTINGSONLY_LISTENER_OBSERVATIONS: &[ExpectedListenerObservation] = &[
         id: "\"primary-main\"",
         kind: "assembly_schema::AssemblyListenerKind::Primary",
         auth: "assembly_schema::ListenerAuth::FederatedAccessToken",
-        receiver: "prepared.primary.bound",
+        receiver: "prepared.primary_front.as_ref().map_or(&prepared.primary.bound,|front|&front.bound)",
     },
     ExpectedListenerObservation {
         id: "\"admin-main\"",
         kind: "assembly_schema::AssemblyListenerKind::Admin",
         auth: "assembly_schema::ListenerAuth::FederatedAccessToken",
-        receiver: "prepared.admin.bound",
+        receiver: "prepared.admin_front.as_ref().map_or(&prepared.admin.bound,|front|&front.bound)",
     },
     ExpectedListenerObservation {
         id: "\"health-main\"",
         kind: "assembly_schema::AssemblyListenerKind::Health",
         auth: "assembly_schema::ListenerAuth::NoAuth",
-        receiver: "prepared.health.bound",
+        receiver: "prepared.health_front.as_ref().map_or(&prepared.health.bound,|front|&front.bound)",
     },
 ];
 const IDENTITYAUDIT_LISTENER_OBSERVATIONS: &[ExpectedListenerObservation] = &[
@@ -542,19 +542,19 @@ const IDENTITYAUDIT_LISTENER_OBSERVATIONS: &[ExpectedListenerObservation] = &[
         id: "\"primary-main\"",
         kind: "assembly_schema::AssemblyListenerKind::Primary",
         auth: "assembly_schema::ListenerAuth::RssAccessToken",
-        receiver: "prepared.primary.bound",
+        receiver: "prepared.primary_front.as_ref().map_or(&prepared.primary.bound,|front|&front.bound)",
     },
     ExpectedListenerObservation {
         id: "\"admin-main\"",
         kind: "assembly_schema::AssemblyListenerKind::Admin",
         auth: "assembly_schema::ListenerAuth::RssAccessToken",
-        receiver: "prepared.admin.bound",
+        receiver: "prepared.admin_front.as_ref().map_or(&prepared.admin.bound,|front|&front.bound)",
     },
     ExpectedListenerObservation {
         id: "\"health-main\"",
         kind: "assembly_schema::AssemblyListenerKind::Health",
         auth: "assembly_schema::ListenerAuth::NoAuth",
-        receiver: "prepared.health.bound",
+        receiver: "prepared.health_front.as_ref().map_or(&prepared.health.bound,|front|&front.bound)",
     },
 ];
 
@@ -2100,6 +2100,7 @@ const IDENTITYAUDIT_ALLOWED_NORMAL_WORKSPACE_PACKAGES: &[&str] = &[
     "observ",
     "oidc",
     "postgres",
+    "postgres-migration-inventory",
     "primitives",
     "prometheus-adapter",
     "ratelimit",
@@ -2177,7 +2178,7 @@ fn validate_identityaudit_executable_evidence(
         findings.push(finding(
             Rule::IdentityAuditBoundary,
             subject,
-            "field=Dockerfile expected exact two-COPY + ENTRYPOINT identityaudit-runtime on the distroless nonroot base, with no EXPOSE/ENV/CMD/USER override, while runtime remains the default final stage",
+            "field=Dockerfile expected migration-free serving builder and identityaudit-runtime on the distroless nonroot base, while runtime remains the default final stage",
         ));
     }
     findings
@@ -2199,6 +2200,7 @@ const SETTINGSONLY_ALLOWED_NORMAL_WORKSPACE_PACKAGES: &[&str] = &[
     "observ",
     "oidc",
     "postgres",
+    "postgres-migration-inventory",
     "primitives",
     "prometheus-adapter",
     "ratelimit",
@@ -2332,7 +2334,7 @@ fn validate_settingsonly_executable_evidence(
         findings.push(finding(
             Rule::SettingsOnlyExecutableBoundary,
             subject,
-            "field=Dockerfile expected exact EXPOSE 8080 8082 8083 followed by two COPY instructions and ENTRYPOINT settingsonly-server on the distroless nonroot settingsonly-runtime stage, while runtime remains the default final stage",
+            "field=Dockerfile expected migration-free serving builder and EXPOSE 8080 8082 8083 followed by serving/schema COPY and ENTRYPOINT settingsonly-server, while runtime remains the default final stage",
         ));
     }
     findings
@@ -2779,6 +2781,30 @@ fn identityaudit_artifact_contract_tail(
     }
 }
 
+fn subset_builder_is_closed(builder: &DockerStage<'_>, package: &str, target: &str) -> bool {
+    let cook = format!(
+        "cargo chef cook --release --locked --recipe-path recipe.json --package {package} --bin {target}"
+    );
+    let build = format!("cargo build --release --locked --package {package} --bin {target}");
+    let strip = format!("strip target/release/{target}");
+    let expected = [
+        ("COPY", "--from=planner /app/recipe.json recipe.json"),
+        ("RUN", cook.as_str()),
+        ("COPY", ". ."),
+        ("RUN", build.as_str()),
+        ("RUN", strip.as_str()),
+    ];
+    builder.base == "chef"
+        && builder.instructions.len() == expected.len()
+        && builder
+            .instructions
+            .iter()
+            .zip(expected)
+            .all(|(instruction, (keyword, arguments))| {
+                docker_instruction_arguments(instruction, keyword) == Some(arguments)
+            })
+}
+
 fn identityaudit_docker_target_is_closed(source: &str) -> bool {
     let stages = docker_stages(source);
     let builders = stages
@@ -2792,21 +2818,7 @@ fn identityaudit_docker_target_is_closed(source: &str) -> bool {
     let ([builder], [runtime]) = (builders.as_slice(), runtimes.as_slice()) else {
         return false;
     };
-    let builder_ok = builder.base == "chef"
-        && builder.instructions.iter().any(|instruction| {
-            docker_instruction_arguments(instruction, "RUN").is_some_and(|arguments| {
-                arguments.starts_with("cargo chef cook ")
-                    && arguments.contains("--package identityaudit")
-                    && arguments.contains("--bin identityaudit-server")
-            })
-        })
-        && builder.instructions.iter().any(|instruction| {
-            docker_instruction_arguments(instruction, "RUN").is_some_and(|arguments| {
-                arguments.starts_with("cargo build ")
-                    && arguments.contains("--package identityaudit")
-                    && arguments.contains("--bin identityaudit-server")
-            })
-        });
+    let builder_ok = subset_builder_is_closed(builder, "identityaudit", "identityaudit-server");
     const RUNTIME_INSTRUCTIONS: &[(&str, &str)] = &[
         (
             "COPY",
@@ -3187,19 +3199,7 @@ fn settingsonly_docker_target_is_closed(source: &str) -> bool {
     let ([builder], [runtime]) = (builders.as_slice(), runtimes.as_slice()) else {
         return false;
     };
-    let builder_ok = builder.base == "chef"
-        && builder.instructions.iter().any(|instruction| {
-            docker_instruction_arguments(instruction, "RUN").is_some_and(|arguments| {
-                arguments.starts_with("cargo chef cook ")
-                    && arguments.contains("--bin settingsonly-server")
-            })
-        })
-        && builder.instructions.iter().any(|instruction| {
-            docker_instruction_arguments(instruction, "RUN").is_some_and(|arguments| {
-                arguments.starts_with("cargo build ")
-                    && arguments.contains("--bin settingsonly-server")
-            })
-        });
+    let builder_ok = subset_builder_is_closed(builder, "settingsonly", "settingsonly-server");
     const RUNTIME_INSTRUCTIONS: &[(&str, &str)] = &[
         ("EXPOSE", "8080 8082 8083"),
         (
@@ -7374,6 +7374,50 @@ audit = { path = "../../crates/audit" }
     }
 
     #[test]
+    fn subset_docker_boundaries_reject_third_binary_and_arbitrary_copy() -> anyhow::Result<()> {
+        let source = std::fs::read_to_string(crate::workspace_root()?.join("Dockerfile"))?;
+        for (label, mutated) in [
+            (
+                "identityaudit third binary",
+                source.replace(
+                    "--package identityaudit --bin identityaudit-server",
+                    "--package identityaudit --bin identityaudit-server --package third --bin third",
+                ),
+            ),
+            (
+                "settingsonly third binary",
+                source.replace(
+                    "--package settingsonly --bin settingsonly-server",
+                    "--package settingsonly --bin settingsonly-server --package third --bin third",
+                ),
+            ),
+            (
+                "identityaudit arbitrary copy",
+                source.replace(
+                    "ENTRYPOINT [\"/usr/local/bin/identityaudit-server\"]",
+                    "COPY --from=identityaudit-builder /app/target/release/third /usr/local/bin/third\nENTRYPOINT [\"/usr/local/bin/identityaudit-server\"]",
+                ),
+            ),
+            (
+                "settingsonly arbitrary copy",
+                source.replace(
+                    "ENTRYPOINT [\"/usr/local/bin/settingsonly-server\"]",
+                    "COPY --from=settingsonly-builder /app/target/release/third /usr/local/bin/third\nENTRYPOINT [\"/usr/local/bin/settingsonly-server\"]",
+                ),
+            ),
+        ] {
+            assert_ne!(mutated, source, "{label} mutation was vacuous");
+            let accepted = if label.starts_with("identityaudit") {
+                identityaudit_docker_target_is_closed(&mutated)
+            } else {
+                settingsonly_docker_target_is_closed(&mutated)
+            };
+            assert!(!accepted, "subset Docker boundary accepted {label}");
+        }
+        Ok(())
+    }
+
+    #[test]
     fn identityaudit_journey_gate_requires_runtime_witness_chain() -> anyhow::Result<()> {
         let source = include_str!("../../journeys/tests/identityaudit_runtime.rs");
         assert!(identityaudit_journey_has_required_test(source)?);
@@ -7407,9 +7451,10 @@ audit = { path = "../../crates/audit" }
     const SETTINGSONLY_DOCKER_FIXTURE: &str = r#"
 FROM chef AS settingsonly-builder
 COPY --from=planner /app/recipe.json recipe.json
-RUN cargo chef cook --release --locked --recipe-path recipe.json --bin settingsonly-server
+RUN cargo chef cook --release --locked --recipe-path recipe.json --package settingsonly --bin settingsonly-server
 COPY . .
-RUN cargo build --release --locked --bin settingsonly-server && strip target/release/settingsonly-server
+RUN cargo build --release --locked --package settingsonly --bin settingsonly-server
+RUN strip target/release/settingsonly-server
 FROM gcr.io/distroless/cc-debian12:nonroot AS settingsonly-runtime
 EXPOSE 8080 8082 8083
 COPY --from=settingsonly-builder /app/target/release/settingsonly-server /usr/local/bin/settingsonly-server
@@ -7604,7 +7649,7 @@ ENTRYPOINT ["/usr/local/bin/server"]
         assert_eq!(findings.len(), 1);
         assert_eq!(
             findings[0].detail,
-            "field=Dockerfile expected exact EXPOSE 8080 8082 8083 followed by two COPY instructions and ENTRYPOINT settingsonly-server on the distroless nonroot settingsonly-runtime stage, while runtime remains the default final stage"
+            "field=Dockerfile expected migration-free serving builder and EXPOSE 8080 8082 8083 followed by serving/schema COPY and ENTRYPOINT settingsonly-server, while runtime remains the default final stage"
         );
     }
 

@@ -365,40 +365,31 @@ fn sorted_unique_objects(
     Ok(identities)
 }
 
-fn sorted_unique_secret_refs(values: &[Value]) -> Result<()> {
+fn sorted_unique_strings(values: &[Value], label: &str) -> Result<()> {
     let identities = values
         .iter()
         .map(|value| {
-            let kind = string_field(value, "kind")?;
-            match kind {
-                "kubernetesSecret" => Ok(vec![
-                    kind.to_owned(),
-                    string_field(value, "name")?.to_owned(),
-                    string_field(value, "key")?.to_owned(),
-                ]),
-                "vaultRef" => {
-                    let reference = object(value)?;
-                    let ref_version = match reference.get("refVersion") {
-                        None => "",
-                        Some(version) => version
-                            .as_str()
-                            .context("vaultRef.refVersion must be a string")?,
-                    };
-                    Ok(vec![
-                        kind.to_owned(),
-                        string_field(value, "storeId")?.to_owned(),
-                        string_field(value, "refKey")?.to_owned(),
-                        ref_version.to_owned(),
-                    ])
-                }
-                other => bail!("unknown secret reference kind {other}"),
-            }
+            value
+                .as_str()
+                .map(str::to_owned)
+                .with_context(|| format!("{label}: expected string"))
         })
         .collect::<Result<Vec<_>>>()?;
     ensure!(
         identities.windows(2).all(|pair| pair[0] < pair[1]),
-        "workload.secretRefs are not unique and strictly sorted"
+        "{label}: values are not unique and strictly sorted"
     );
+    Ok(())
+}
+
+fn sorted_unique_secret_bindings(values: &[Value]) -> Result<()> {
+    sorted_unique_objects(values, "workload.secretBindings", &["purpose"])?;
+    for binding in values {
+        sorted_unique_strings(
+            array_field(binding, "consumers")?,
+            "workload.secretBindings.consumers",
+        )?;
+    }
     Ok(())
 }
 
@@ -418,7 +409,7 @@ fn validate_deployment_plan(instance: &Value) -> Result<()> {
             "workload.probes",
             &["kind"],
         )?;
-        sorted_unique_secret_refs(array_field(workload, "secretRefs")?)?;
+        sorted_unique_secret_bindings(array_field(workload, "secretBindings")?)?;
         validate_resources(
             object(workload)?
                 .get("resources")
@@ -897,8 +888,12 @@ mod tests {
     #[test]
     fn vault_ref_version_is_optional_in_semantic_carrier() -> Result<()> {
         let values = serde_json::json!([
-            {"kind": "vaultRef", "storeId": "primary", "refKey": "db/password"}
+            {
+                "purpose": "migrationDatabaseUrl",
+                "consumers": ["migration"],
+                "vault": {"storeId": "primary", "refKey": "db/password"}
+            }
         ]);
-        sorted_unique_secret_refs(values.as_array().context("test values must be an array")?)
+        sorted_unique_secret_bindings(values.as_array().context("test values must be an array")?)
     }
 }

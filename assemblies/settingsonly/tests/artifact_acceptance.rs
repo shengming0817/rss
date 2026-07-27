@@ -23,10 +23,9 @@ const IMAGE_CONFIG_PATH: &str = "/fixtures/settingsonly-image.toml";
 const MISSING_SECRET_ERROR: &str =
     "settings-only secret environment is missing: RSS_SETTINGSONLY_PG_READER_PASSWORD";
 const SECRET_SENTINEL: &str = "settingsonly-artifact-secret-sentinel";
-const SECRET_ENVIRONMENTS: [&str; 4] = [
+const SECRET_ENVIRONMENTS: [&str; 3] = [
     "RSS_SETTINGSONLY_PG_WRITER_PASSWORD",
     "RSS_SETTINGSONLY_PG_READER_PASSWORD",
-    "RSS_SETTINGSONLY_PG_MIGRATOR_PASSWORD",
     "RSS_SETTINGSONLY_VAULT_TOKEN",
 ];
 const READY_PATH: &str = "/health/v1/readyz";
@@ -169,10 +168,6 @@ impl Artifact<'_> {
         command
             .env("RSS_SETTINGSONLY_PG_WRITER_PASSWORD", PG_WRITER_PASSWORD)
             .env("RSS_SETTINGSONLY_PG_READER_PASSWORD", PG_READER_PASSWORD)
-            .env(
-                "RSS_SETTINGSONLY_PG_MIGRATOR_PASSWORD",
-                &fixture.pg.params().password,
-            )
             .env("RSS_SETTINGSONLY_VAULT_TOKEN", VAULT_TOKEN)
             .env("RSS_BUILD_SOURCE_SHA", BUILD_SOURCE_SHA)
             .env("RSS_BUILD_IMAGE_DIGEST", BUILD_IMAGE_DIGEST)
@@ -410,10 +405,6 @@ username = "{pg_reader_username}"
 maxConnections = 4
 password = {{ kind = "environmentRef", name = "RSS_SETTINGSONLY_PG_READER_PASSWORD" }}
 
-[postgres.migrator]
-username = "{pg_migrator_username}"
-password = {{ kind = "environmentRef", name = "RSS_SETTINGSONLY_PG_MIGRATOR_PASSWORD" }}
-
 [vault]
 addr = "https://{vault_host}:{vault_port}"
 caCertPemPath = "{ca_path}"
@@ -433,7 +424,6 @@ kvPathPrefix = "tenants/settings"
             pg_database = pg.database,
             pg_writer_username = PG_WRITER_ROLE,
             pg_reader_username = PG_READER_ROLE,
-            pg_migrator_username = pg.username,
             vault_port = self.vault.port,
         );
         let path = self.root.join(filename);

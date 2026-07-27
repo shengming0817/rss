@@ -92,7 +92,8 @@ pub(crate) async fn connect_pg_rss_app_role_with_limits(
     acquire_timeout: Duration,
 ) -> Result<PgStore, Box<dyn std::error::Error + Send + Sync>> {
     sqlx::query(&format!(
-        "ALTER ROLE {RSS_APP_ROLE} LOGIN PASSWORD '{RSS_APP_PASSWORD}' NOBYPASSRLS"
+        "ALTER ROLE {RSS_APP_ROLE} LOGIN PASSWORD '{RSS_APP_PASSWORD}' \
+         NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION NOINHERIT"
     ))
     .execute(&store.pool)
     .await?;

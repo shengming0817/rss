@@ -1,0 +1,22 @@
+pub mod postgres_migration_inventory
+pub struct postgres_migration_inventory::MigrationIdentity
+pub postgres_migration_inventory::MigrationIdentity::checksum: [u8; 48]
+pub postgres_migration_inventory::MigrationIdentity::version: i64
+impl core::clone::Clone for postgres_migration_inventory::MigrationIdentity
+pub fn postgres_migration_inventory::MigrationIdentity::clone(&self) -> postgres_migration_inventory::MigrationIdentity
+impl core::cmp::Eq for postgres_migration_inventory::MigrationIdentity
+impl core::cmp::PartialEq for postgres_migration_inventory::MigrationIdentity
+pub fn postgres_migration_inventory::MigrationIdentity::eq(&self, &postgres_migration_inventory::MigrationIdentity) -> bool
+impl core::fmt::Debug for postgres_migration_inventory::MigrationIdentity
+pub fn postgres_migration_inventory::MigrationIdentity::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for postgres_migration_inventory::MigrationIdentity
+impl core::marker::StructuralPartialEq for postgres_migration_inventory::MigrationIdentity
+impl core::marker::Freeze for postgres_migration_inventory::MigrationIdentity
+impl core::marker::Send for postgres_migration_inventory::MigrationIdentity
+impl core::marker::Sync for postgres_migration_inventory::MigrationIdentity
+impl core::marker::Unpin for postgres_migration_inventory::MigrationIdentity
+impl core::marker::UnsafeUnpin for postgres_migration_inventory::MigrationIdentity
+impl core::panic::unwind_safe::RefUnwindSafe for postgres_migration_inventory::MigrationIdentity
+impl core::panic::unwind_safe::UnwindSafe for postgres_migration_inventory::MigrationIdentity
+pub fn postgres_migration_inventory::migration_head_fingerprint() -> alloc::string::String
+pub fn postgres_migration_inventory::migrations() -> &'static [postgres_migration_inventory::MigrationIdentity]

@@ -93,7 +93,7 @@ impl PgStore {
 
     /// Add one deployment generation to the DB-side projection input registry.
     ///
-    /// This runs during [`crate::PgRuntimeDeps::setup`] on the migrator connection. Runtime
+    /// This runs during [`crate::PgRuntimeDeps::connect_serving`] on the verified writer connection. Runtime
     /// `rss_app` can execute the fixed append function, but the function only accepts rows whose
     /// outbox metadata matches this DB-side generated registry.
     pub(crate) async fn register_projection_input_bindings(

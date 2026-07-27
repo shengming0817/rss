@@ -1,38 +1,86 @@
 {
   "schemaVersion": 1,
-  "assemblyFingerprint": "sha256:d351aa60214f224295b471fced7b91be88d9008fb8950ae69b3d5e3dc6a3b7af",
-  "runtimePlanFingerprint": "sha256:64c527bac08cffa336decaa1099769c0b8822ab8d69dd15d7de69e1359b36064",
-  "deploymentFingerprint": "sha256:e58f45e6573048e9c1b32fcf7e6aa22802f1451bfee057456f4ce0f8b0250f51",
+  "assemblyFingerprint": "sha256:b4bc250c0cce2979dd0c37588c7879ea80ad891c5530073ef41152394891be9f",
+  "runtimePlanFingerprint": "sha256:7aa65aa20339fb380eb025971532e9938b9cec3d8a074cbcb8d5152d5cd08fcd",
+  "deploymentFingerprint": "sha256:f0aeba24549e0f244af68ccda8f24b84f6c3acf568975fb1d31114a44b9f1edb",
+  "migrationMode": "forwardOnlyTwoPhase",
+  "migrationHeadFingerprint": "sha256:10b73724fbe634b3514e17a315b80a3c15e0bd14ac2a0ce233ca12d9f9e067b9",
+  "migrationArtifact": {
+    "image": "ghcr.io/gocell/rss-operator@sha256:8cf9af483e68f4c086f8fc49dca072fe43b528f35b2e95da309d5d29a310f35d",
+    "sourceRevision": "0f386a442354452055c8dcd621316ed1768fdbdf"
+  },
+  "migrationExecutionBudget": {
+    "activeDeadlineSeconds": 900,
+    "backoffLimit": 0
+  },
+  "availabilityClass": "maintenanceWindow",
+  "drainSeconds": 20,
+  "replicaDatabaseBudget": {
+    "minReplicas": 2,
+    "maxReplicas": 3,
+    "poolCeilings": {
+      "writer": 5,
+      "reader": 5,
+      "dlxArchiver": 10,
+      "dlxVerifier": 10,
+      "dlxPurger": 10
+    },
+    "connectionsPerReplica": 40,
+    "databaseConnectionLimit": 200,
+    "reservedConnections": 50
+  },
+  "dependencyPeerRoles": [
+    "dns",
+    "vault",
+    "postgresql",
+    "amqp",
+    "redis",
+    "objectStorage",
+    "oidc"
+  ],
   "workloads": [
     {
       "name": "runtime",
       "image": "ghcr.io/gocell/rss-runtime@sha256:d92c6a81b2ff50096bcda80885427d1f59a25b5f483f7055523504925d16ab23",
+      "sourceRevision": "0f386a442354452055c8dcd621316ed1768fdbdf",
+      "applicationConfig": "none",
       "identity": {
         "name": "runtime",
         "serviceAccount": "runtime"
       },
-      "secretRefs": [
+      "secretBindings": [
         {
-          "kind": "kubernetesSecret",
-          "name": "rss-runtime",
-          "key": "database-url"
+          "purpose": "migrationDatabaseUrl",
+          "consumers": [
+            "migration"
+          ],
+          "vault": {
+            "storeId": "rss-vault",
+            "refKey": "runtime/database-url"
+          }
         },
         {
-          "kind": "kubernetesSecret",
-          "name": "rss-runtime",
-          "key": "oidc-client-secret"
+          "purpose": "servingDatabaseUrl",
+          "consumers": [
+            "serving"
+          ],
+          "vault": {
+            "storeId": "rss-vault",
+            "refKey": "runtime/serving-database-url"
+          }
         },
         {
-          "kind": "kubernetesSecret",
-          "name": "rss-runtime",
-          "key": "service-token-signing-key"
-        },
-        {
-          "kind": "vaultRef",
-          "storeId": "rss-vault",
-          "refKey": "runtime/keyring"
+          "purpose": "servingSecretBundle",
+          "consumers": [
+            "serving"
+          ],
+          "vault": {
+            "storeId": "rss-vault",
+            "refKey": "runtime/serving-secret-bundle"
+          }
         }
       ],
+      "ingressPeerIdentities": [],
       "resources": {
         "requests": {
           "cpu": "500m",
@@ -47,17 +95,17 @@
         {
           "kind": "startup",
           "path": "/health/v1/healthz",
-          "port": 8082
+          "port": 8083
         },
         {
           "kind": "readiness",
           "path": "/health/v1/readyz",
-          "port": 8082
+          "port": 8083
         },
         {
           "kind": "liveness",
           "path": "/health/v1/healthz",
-          "port": 8082
+          "port": 8083
         }
       ]
     }
@@ -69,12 +117,12 @@
       "ports": [
         {
           "name": "admin",
-          "port": 8081,
+          "port": 8082,
           "exposure": "serviceExposed"
         },
         {
           "name": "health",
-          "port": 8082,
+          "port": 8083,
           "exposure": "serviceExposed"
         },
         {
@@ -90,7 +138,7 @@
       "ports": [
         {
           "name": "internal",
-          "port": 8083,
+          "port": 8081,
           "exposure": "workloadOnly"
         }
       ]

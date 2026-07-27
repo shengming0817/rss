@@ -8,9 +8,27 @@ set -euo pipefail
 : "${RSS_PG_PORT:?missing RSS_PG_PORT}"
 : "${RSS_PG_DATABASE:?missing RSS_PG_DATABASE}"
 : "${RSS_PG_MIGRATOR_USERNAME:?missing RSS_PG_MIGRATOR_USERNAME}"
-: "${RSS_PG_MIGRATOR_PASSWORD:?missing RSS_PG_MIGRATOR_PASSWORD}"
+: "${RSS_PG_MIGRATOR_PASSWORD_FILE:?missing RSS_PG_MIGRATOR_PASSWORD_FILE}"
 : "${RSS_PG_READ_USERNAME:?missing RSS_PG_READ_USERNAME}"
-: "${RSS_PG_READ_PASSWORD:?missing RSS_PG_READ_PASSWORD}"
+: "${RSS_PG_READ_PASSWORD_FILE:?missing RSS_PG_READ_PASSWORD_FILE}"
+
+read_secret_file() {
+  local path="$1"
+  [[ "${path}" == /* && "${path}" != *"/../"* && -r "${path}" ]] || {
+    echo "invalid PostgreSQL password file reference" >&2
+    exit 1
+  }
+  local value
+  value="$(<"${path}")"
+  [[ -n "${value}" ]] || {
+    echo "empty PostgreSQL password file" >&2
+    exit 1
+  }
+  printf '%s' "${value}"
+}
+
+migrator_password="$(read_secret_file "${RSS_PG_MIGRATOR_PASSWORD_FILE}")"
+reader_password="$(read_secret_file "${RSS_PG_READ_PASSWORD_FILE}")"
 
 if [[ "${RSS_PG_READ_USERNAME}" != "rss_app_read" ]]; then
   echo "RSS_PG_READ_USERNAME must be exactly rss_app_read" >&2
@@ -22,20 +40,21 @@ run_psql() {
   if [[ -n "${PSQL_CONTAINER:-}" ]]; then
     docker exec -i \
       -e PGPASSWORD \
-      -e RSS_PG_READ_PASSWORD \
+      -e RSS_PROVISION_READER_PASSWORD \
       "${PSQL_CONTAINER}" psql "$@"
   else
     "${PSQL_BIN}" "$@"
   fi
 }
-export PGPASSWORD="${RSS_PG_MIGRATOR_PASSWORD}"
+export PGPASSWORD="${migrator_password}"
+export RSS_PROVISION_READER_PASSWORD="${reader_password}"
 
 run_psql -X --no-password --set ON_ERROR_STOP=1 \
   --host "${RSS_PG_HOST}" \
   --port "${RSS_PG_PORT}" \
   --username "${RSS_PG_MIGRATOR_USERNAME}" \
   --dbname "${RSS_PG_DATABASE}" <<'EOSQL'
-\getenv reader_password RSS_PG_READ_PASSWORD
+\getenv reader_password RSS_PROVISION_READER_PASSWORD
 
 DO $$
 DECLARE
@@ -72,7 +91,8 @@ ALTER ROLE rss_app_read SET search_path = pg_catalog, public;
 EOSQL
 
 unset PGPASSWORD
-export PGPASSWORD="${RSS_PG_READ_PASSWORD}"
+unset RSS_PROVISION_READER_PASSWORD
+export PGPASSWORD="${reader_password}"
 readonly_state="$(run_psql -X --no-password --tuples-only --no-align \
   --host "${RSS_PG_HOST}" \
   --port "${RSS_PG_PORT}" \

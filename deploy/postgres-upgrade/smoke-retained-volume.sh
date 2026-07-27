@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Docker-gated upgrade smoke: a real SQLx 0066 ledger and durable data exist before the release
-# binary applies 0067 and the production provisioning script sets the reader credential.
+# operator applies every migration through HEAD and the provisioning script sets the reader credential.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -8,6 +8,10 @@ container="rss-pg-reader-upgrade-${$}"
 volume="${container}-data"
 port="${RSS_UPGRADE_SMOKE_PORT:-55467}"
 database="rss_upgrade_test"
+migration_password_file="$(mktemp)"
+reader_password_file="$(mktemp)"
+printf '%s\n' owner_pw >"${migration_password_file}"
+printf '%s\n' reader_pw >"${reader_password_file}"
 
 owner_psql() {
   docker exec -i -e PGPASSWORD=owner_pw "${container}" \
@@ -15,6 +19,8 @@ owner_psql() {
 }
 
 cleanup() {
+  rm -f "${migration_password_file}"
+  rm -f "${reader_password_file}"
   docker rm -f "${container}" >/dev/null 2>&1 || true
   docker volume rm "${volume}" >/dev/null 2>&1 || true
 }
@@ -61,18 +67,18 @@ RSS_PG_HOST=127.0.0.1 \
 RSS_PG_PORT="${port}" \
 RSS_PG_DATABASE="${database}" \
 RSS_PG_MIGRATOR_USERNAME=postgres \
-RSS_PG_MIGRATOR_PASSWORD=owner_pw \
+RSS_PG_MIGRATOR_PASSWORD_FILE="${migration_password_file}" \
 RSS_PG_SSL_MODE=disable \
   "${repo_root}/hack/cargo.sh" run --quiet -p rss --bin rss -- \
-    postgres migrate-reader-lane
+    postgres migrate-all
 
 RSS_PG_HOST=127.0.0.1 \
 RSS_PG_PORT=5432 \
 RSS_PG_DATABASE="${database}" \
 RSS_PG_MIGRATOR_USERNAME=postgres \
-RSS_PG_MIGRATOR_PASSWORD=owner_pw \
+RSS_PG_MIGRATOR_PASSWORD_FILE="${migration_password_file}" \
 RSS_PG_READ_USERNAME=rss_app_read \
-RSS_PG_READ_PASSWORD=reader_pw \
+RSS_PG_READ_PASSWORD_FILE="${reader_password_file}" \
 PSQL_CONTAINER="${container}" \
   "${repo_root}/deploy/postgres-upgrade/provision-reader-role.sh"
 

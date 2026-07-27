@@ -16,6 +16,9 @@ Options:
 
 Image schema: /usr/share/rss/identityaudit/config.schema.json
 
+Required read-only secret file:
+  /var/run/rss/secrets/serving-secret-bundle
+
 Required build identity environment:
   RSS_BUILD_SOURCE_SHA
   RSS_BUILD_IMAGE_DIGEST

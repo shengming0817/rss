@@ -12,7 +12,8 @@ use diport::{DynManagedResource, ManagedResource, ShutdownError};
 
 use crate::listeners;
 
-const TOTAL_DRAIN_BUDGET: Duration = Duration::from_secs(20);
+const TOTAL_DRAIN_BUDGET: Duration =
+    Duration::from_secs(crate::deployment_facts::TOTAL_DRAIN_SECONDS);
 const DEPLOYMENT_GRACE_PERIOD: Duration = Duration::from_secs(30);
 const EXIT_BUFFER: Duration = Duration::from_secs(5);
 const READINESS_POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -47,7 +48,7 @@ impl runtimeexec::StartupAdapter for ProductionStartup {
         runtimeexec::PreparedLaunch<Self::Adapter, Self::ProbeReceipt, Self::ReadyHook>,
     > {
         let compiled_plan = crate::plan::SettingsOnlyPlan::bundled()?;
-        let (config, secrets, build_identity) = self.captured.into_runtime_inputs();
+        let (config, secrets, build_identity, frontend) = self.captured.into_runtime_inputs();
         let completed = crate::providers::build(
             compiled_plan.provider_build()?,
             config,
@@ -85,7 +86,8 @@ impl runtimeexec::StartupAdapter for ProductionStartup {
                 request_budget,
                 inventory_seed,
                 ReadyAction::Log,
-            ),
+            )
+            .with_frontend(frontend),
             transaction,
         )
         .await
@@ -104,6 +106,7 @@ pub(crate) struct AssemblyStartupInputs {
     request_budget: Duration,
     ready: ReadyAction,
     inventory_seed: runtimeexec::inventory::RuntimeInventorySeed,
+    frontend: Option<crate::config::ServingFrontendConfig>,
     #[cfg(feature = "test-support")]
     activation_gate: Option<SocketAddr>,
 }
@@ -135,9 +138,15 @@ impl AssemblyStartupInputs {
             request_budget,
             ready,
             inventory_seed,
+            frontend: None,
             #[cfg(feature = "test-support")]
             activation_gate: None,
         }
+    }
+
+    fn with_frontend(mut self, frontend: crate::config::ServingFrontendConfig) -> Self {
+        self.frontend = Some(frontend);
+        self
     }
 
     #[cfg(feature = "test-support")]
@@ -189,6 +198,7 @@ pub(crate) async fn prepare_assembly(
         inputs.health,
         inputs.request_budget,
         inventory_publisher,
+        inputs.frontend,
     )?;
     #[cfg(feature = "test-support")]
     let adapter = match inputs.activation_gate {

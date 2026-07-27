@@ -1,0 +1,213 @@
+---
+# Source: rss/templates/networkpolicy.yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: rss-settingsonly-migration-default-deny
+  labels:
+    helm.sh/chart: rss-0.1.0
+    app.kubernetes.io/name: rss
+    app.kubernetes.io/instance: rss
+    app.kubernetes.io/component: settingsonly-migration
+    app.kubernetes.io/managed-by: Helm
+    rss.gocell.io/profile: settingsonly
+  annotations:
+    rss.gocell.io/assembly-fingerprint: "sha256:98193728fc6996a80f5c39a1f01f837addbeb3c7275ac4ab3f136ee34db4ec82"
+    rss.gocell.io/runtime-plan-fingerprint: "sha256:0560ab22cf6318e35a4e5dddf7bb1e2eb40fdc4e2981fc1f138d8a47425ccafb"
+    rss.gocell.io/deployment-fingerprint: "sha256:1a5d98c186658296fdaa00247d44e54623817f3b493c06b401e6e34dc055254f"
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: rss
+      app.kubernetes.io/instance: rss
+      app.kubernetes.io/component: settingsonly-migration
+  policyTypes: [Ingress, Egress]
+  ingress: []
+  egress: []
+---
+# Source: rss/templates/networkpolicy.yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: rss-settingsonly-migration-egress
+  labels:
+    helm.sh/chart: rss-0.1.0
+    app.kubernetes.io/name: rss
+    app.kubernetes.io/instance: rss
+    app.kubernetes.io/component: settingsonly-migration
+    app.kubernetes.io/managed-by: Helm
+    rss.gocell.io/profile: settingsonly
+  annotations:
+    rss.gocell.io/assembly-fingerprint: "sha256:98193728fc6996a80f5c39a1f01f837addbeb3c7275ac4ab3f136ee34db4ec82"
+    rss.gocell.io/runtime-plan-fingerprint: "sha256:0560ab22cf6318e35a4e5dddf7bb1e2eb40fdc4e2981fc1f138d8a47425ccafb"
+    rss.gocell.io/deployment-fingerprint: "sha256:1a5d98c186658296fdaa00247d44e54623817f3b493c06b401e6e34dc055254f"
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: rss
+      app.kubernetes.io/instance: rss
+      app.kubernetes.io/component: settingsonly-migration
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              rss.gocell.io/dependency-role: "vault"
+          podSelector:
+            matchLabels:
+              rss.gocell.io/dependency-role: "vault"
+      ports:
+        - protocol: TCP
+          port: 8200
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              rss.gocell.io/dependency-role: "postgresql"
+          podSelector:
+            matchLabels:
+              rss.gocell.io/dependency-role: "postgresql"
+      ports:
+        - protocol: TCP
+          port: 5432
+
+---
+# Source: rss/templates/serviceaccount.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: rss-settingsonly-migration-eb460b19f6f6
+  labels:
+    helm.sh/chart: rss-0.1.0
+    app.kubernetes.io/name: rss
+    app.kubernetes.io/instance: rss
+    app.kubernetes.io/component: settingsonly-migration
+    app.kubernetes.io/managed-by: Helm
+    rss.gocell.io/profile: settingsonly
+  annotations:
+    rss.gocell.io/assembly-fingerprint: "sha256:98193728fc6996a80f5c39a1f01f837addbeb3c7275ac4ab3f136ee34db4ec82"
+    rss.gocell.io/runtime-plan-fingerprint: "sha256:0560ab22cf6318e35a4e5dddf7bb1e2eb40fdc4e2981fc1f138d8a47425ccafb"
+    rss.gocell.io/deployment-fingerprint: "sha256:1a5d98c186658296fdaa00247d44e54623817f3b493c06b401e6e34dc055254f"
+automountServiceAccountToken: false
+
+---
+# Source: rss/templates/migration-job.yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: rss-settingsonly-migration-r1-10b73724fbe6
+  labels:
+    helm.sh/chart: rss-0.1.0
+    app.kubernetes.io/name: rss
+    app.kubernetes.io/instance: rss
+    app.kubernetes.io/component: settingsonly-migration
+    app.kubernetes.io/managed-by: Helm
+    rss.gocell.io/profile: settingsonly
+  annotations:
+    rss.gocell.io/assembly-fingerprint: "sha256:98193728fc6996a80f5c39a1f01f837addbeb3c7275ac4ab3f136ee34db4ec82"
+    rss.gocell.io/runtime-plan-fingerprint: "sha256:0560ab22cf6318e35a4e5dddf7bb1e2eb40fdc4e2981fc1f138d8a47425ccafb"
+    rss.gocell.io/deployment-fingerprint: "sha256:1a5d98c186658296fdaa00247d44e54623817f3b493c06b401e6e34dc055254f"
+spec:
+  activeDeadlineSeconds: 900
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: rss
+        app.kubernetes.io/instance: rss
+        app.kubernetes.io/component: settingsonly-migration
+      annotations:
+        rss.gocell.io/assembly-fingerprint: "sha256:98193728fc6996a80f5c39a1f01f837addbeb3c7275ac4ab3f136ee34db4ec82"
+        rss.gocell.io/runtime-plan-fingerprint: "sha256:0560ab22cf6318e35a4e5dddf7bb1e2eb40fdc4e2981fc1f138d8a47425ccafb"
+        rss.gocell.io/deployment-fingerprint: "sha256:1a5d98c186658296fdaa00247d44e54623817f3b493c06b401e6e34dc055254f"
+    spec:
+      serviceAccountName: rss-settingsonly-migration-eb460b19f6f6
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: migrate
+          image: "ghcr.io/gocell/rss-operator@sha256:8cf9af483e68f4c086f8fc49dca072fe43b528f35b2e95da309d5d29a310f35d"
+          imagePullPolicy: IfNotPresent
+          command: ["rss", "postgres", "migrate-all"]
+          env:
+            - name: RSS_PG_DATABASE_URL_FILE
+              value: /var/run/rss/secrets/database-url
+            - name: RSS_BUILD_SOURCE_SHA
+              value: "0f386a442354452055c8dcd621316ed1768fdbdf"
+            - name: RSS_BUILD_IMAGE_DIGEST
+              value: "sha256:8cf9af483e68f4c086f8fc49dca072fe43b528f35b2e95da309d5d29a310f35d"
+          resources:
+            limits:
+              cpu: "1"
+              memory: 512Mi
+            requests:
+              cpu: 100m
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            privileged: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: vault-secrets
+              mountPath: /var/run/rss/secrets
+              readOnly: true
+      volumes:
+        - name: vault-secrets
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: rss-settingsonly-settingsonly-migration-secrets
+
+
+---
+# Source: rss/templates/secretproviderclass.yaml
+apiVersion: secrets-store.csi.x-k8s.io/v1
+kind: SecretProviderClass
+metadata:
+  name: rss-settingsonly-settingsonly-migration-secrets
+  labels:
+    helm.sh/chart: rss-0.1.0
+    app.kubernetes.io/name: rss
+    app.kubernetes.io/instance: rss
+    app.kubernetes.io/component: settingsonly
+    app.kubernetes.io/managed-by: Helm
+    rss.gocell.io/profile: settingsonly
+  annotations:
+    rss.gocell.io/assembly-fingerprint: "sha256:98193728fc6996a80f5c39a1f01f837addbeb3c7275ac4ab3f136ee34db4ec82"
+    rss.gocell.io/runtime-plan-fingerprint: "sha256:0560ab22cf6318e35a4e5dddf7bb1e2eb40fdc4e2981fc1f138d8a47425ccafb"
+    rss.gocell.io/deployment-fingerprint: "sha256:1a5d98c186658296fdaa00247d44e54623817f3b493c06b401e6e34dc055254f"
+spec:
+  provider: vault
+  parameters:
+    vaultAddress: "https://rss-vault.vault.svc:8200"
+    roleName: "rss-settingsonly-migration"
+    objects: |
+      - objectName: "database-url"
+        secretPath: "settingsonly/database-url"
+        secretKey: "value"

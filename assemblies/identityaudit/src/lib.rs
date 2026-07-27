@@ -9,6 +9,7 @@ use primitives::MacKey;
 
 mod auth_bridge;
 mod config;
+mod deployment_facts;
 mod eventing;
 mod framework_routes;
 #[cfg(feature = "test-support")]

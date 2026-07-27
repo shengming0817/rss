@@ -1,4 +1,6 @@
 {{- $profile := include "rss.profile" . -}}
+{{- $phase := include "rss.phase" . -}}
+{{- if eq $phase "serving" }}
 {{- $planSource := include "rss.planSource" . -}}
 {{- $plan := $planSource | mustFromJson -}}
 apiVersion: v1
@@ -13,3 +15,24 @@ immutable: true
 data:
   plan.json: |
 {{- $planSource | trimSuffix "\n" | nindent 4 }}
+  {{- range $workload := $plan.workloads }}
+  {{- if ne $workload.applicationConfig "none" }}
+  {{ $workload.name }}.toml: |
+{{- $configPath := include "rss.applicationConfigPath" $workload.applicationConfig -}}
+{{- $listenerPorts := dict -}}
+{{- range $service := $plan.services -}}
+{{- if eq $service.workload $workload.name -}}
+{{- range $port := $service.ports -}}
+{{- $_ := set $listenerPorts $port.name $port.port -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- $configContext := dict
+      "primaryPort" (required "DeploymentPlan http port is required" (get $listenerPorts "http"))
+      "adminPort" (required "DeploymentPlan admin port is required" (get $listenerPorts "admin"))
+      "healthPort" (required "DeploymentPlan health port is required" (get $listenerPorts "health"))
+      "poolCeilings" $plan.replicaDatabaseBudget.poolCeilings -}}
+{{- tpl (required (printf "bundled application config is missing: %s" $configPath) ($.Files.Get $configPath)) $configContext | trimSuffix "\n" | nindent 4 }}
+  {{- end }}
+{{- end }}
+{{- end }}

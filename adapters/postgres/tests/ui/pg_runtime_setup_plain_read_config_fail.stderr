@@ -1,16 +1,5 @@
-error[E0308]: mismatched types
-  --> tests/ui/pg_runtime_setup_plain_read_config_fail.rs:12:9
-   |
- 9 |     let _setup = PgRuntimeDeps::setup(
-   |                  -------------------- arguments to this function are incorrect
-...
-12 |         serving_config,
-   |         ^^^^^^^^^^^^^^ expected `&PgTenantReadConfig`, found `&PgConfig`
-   |
-   = note: expected reference `&PgTenantReadConfig`
-              found reference `&PgConfig`
-note: associated function defined here
-  --> src/bundle.rs
-   |
-   |     pub async fn setup(
-   |                  ^^^^^
+error[E0599]: no associated function or constant named `setup` found for struct `PgRuntimeDeps` in the current scope
+ --> tests/ui/pg_runtime_setup_plain_read_config_fail.rs:9:33
+  |
+9 |     let _setup = PgRuntimeDeps::setup(
+  |                                 ^^^^^ associated function or constant not found in `PgRuntimeDeps`

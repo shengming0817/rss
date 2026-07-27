@@ -32,7 +32,7 @@
 //!
 //! INVARIANT: RUNTIME-SERVICE-TOKEN-REPLAY-LIVE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_service_token_replay_live_rejects_bait_parallel_paths_and_process_local_guards", anti_vacuity = "tests::runtime_service_token_replay_live_accepts_typed_pg_composition" } -- the only production service-token constructor accepts the closed PostgreSQL replay-owner trait, whose implementation set is exactly `PgRuntimeDeps` plus `PgMaintenanceDeps`. Serving and the five operator paths call that typed constructor directly at their run-reachable sites. Missing calls, extra/dead helpers, macro indirection, test-only evidence, process-local guards, comments, and strings cannot satisfy the inventory.
 //!
-//! INVARIANT: POSTGRES-SETUP-TRANSACTION-LIVE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::postgres_setup_transaction_rejects_missing_live_edges", anti_vacuity = "tests::postgres_setup_transaction_accepts_live_workspace" } -- the unique production `PgRuntimeDeps::setup_with_audit_admin_config` must register each constructed pool immediately, mint the revocation capability receipt before constructing the reader, close the migrator after every post-connect outcome, roll back writer/reader partial construction on capability, reader, or audit-admin failure, and commit only after the typed owner holds all serving pools and the receipt. The AST gate pins the live statement/branch structure; helper-only tests, comments, strings, and dead bait cannot satisfy it.
+//! INVARIANT: POSTGRES-SETUP-TRANSACTION-LIVE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::postgres_setup_transaction_rejects_missing_live_edges", anti_vacuity = "tests::postgres_setup_transaction_accepts_live_workspace" } -- the unique production `PgRuntimeDeps::connect_serving` must register each constructed pool immediately, mint the revocation capability receipt before constructing the reader, close the migrator after every post-connect outcome, roll back writer/reader partial construction on capability, reader, or audit-admin failure, and commit only after the typed owner holds all serving pools and the receipt. The AST gate pins the live statement/branch structure; helper-only tests, comments, strings, and dead bait cannot satisfy it.
 
 use crate::diagnostic::{Finding, GovernanceCheck, finding};
 use crate::localtx_coverage::attrs_may_be_production;
@@ -87,7 +87,6 @@ const RUNTIME_OPERATOR_VAULT_ALLOWLIST_PATH: &str =
     "assemblies/runtime/src/operator/vault_allowlist.rs";
 const RUNTIME_PLAN_LIVE_INVENTORY_PATH: &str =
     "assemblies/runtime/tests/fixtures/runtime-plan-live-inventory-v1.txt";
-const RUNTIME_OPERATOR_POSTGRES_PATH: &str = "assemblies/runtime/src/operator/postgres.rs";
 const RUNTIME_OPERATOR_PROJECTION_PATH: &str = "assemblies/runtime/src/operator/projection.rs";
 const RUNTIME_OPERATOR_AUDIT_PATH: &str = "assemblies/runtime/src/operator/audit_ledger.rs";
 const RUNTIME_OPERATOR_DLQ_PATH: &str = "assemblies/runtime/src/operator/dlq.rs";
@@ -2354,10 +2353,7 @@ impl RunRuntimeConfigWiring {
             }
             _ => {}
         }
-        if path_ends_with(
-            &call.func,
-            &["PgRuntimeDeps", "setup_with_audit_admin_config"],
-        ) {
+        if path_ends_with(&call.func, &["PgRuntimeDeps", "connect_serving"]) {
             self.pg_setup_calls += 1;
             let canonical = pg_setup_uses_named_parts(call, &self.pg_part_bindings);
             self.canonical_pg_setup_calls += usize::from(canonical);
@@ -2678,12 +2674,10 @@ fn runtime_wiring_inputs_struct_is_canonical(
 const PG_RUNTIME_PART_FIELDS: &[&str] = &[
     "serving",
     "tenant_read",
-    "migrator",
     "audit_admin",
     "dlx_archiver",
     "dlx_verifier",
     "dlx_purger",
-    "legacy_policy",
     "readiness_period",
 ];
 
@@ -2772,9 +2766,6 @@ fn pg_setup_uses_named_parts(
     call: &syn::ExprCall,
     bindings: &BTreeMap<String, syn::Ident>,
 ) -> bool {
-    let Some(migrator) = bindings.get("migrator") else {
-        return false;
-    };
     let Some(serving) = bindings.get("serving") else {
         return false;
     };
@@ -2784,34 +2775,21 @@ fn pg_setup_uses_named_parts(
     let Some(audit_admin) = bindings.get("audit_admin") else {
         return false;
     };
-    let Some(legacy_policy) = bindings.get("legacy_policy") else {
-        return false;
-    };
-    call.args.len() == 7
+    call.args.len() == 5
         && call
             .args
             .first()
-            .is_some_and(|arg| reference_to_binding(arg, migrator))
-        && call
-            .args
-            .iter()
-            .nth(1)
             .is_some_and(|arg| reference_to_binding(arg, serving))
         && call
             .args
             .iter()
-            .nth(2)
+            .nth(1)
             .is_some_and(|arg| reference_to_binding(arg, tenant_read))
         && call
             .args
             .iter()
-            .nth(3)
+            .nth(2)
             .is_some_and(|arg| method_on_binding(arg, "as_ref", audit_admin))
-        && call
-            .args
-            .iter()
-            .nth(4)
-            .is_some_and(|arg| is_exact_ident_path(arg, legacy_policy))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Default)]
@@ -3806,6 +3784,12 @@ impl BinaryRuntimeWiring {
 }
 
 impl<'ast> Visit<'ast> for BinaryRuntimeWiring {
+    fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
+        if attrs_may_be_production(&item.attrs) {
+            syn::visit::visit_item_mod(self, item);
+        }
+    }
+
     fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
         if attrs_may_be_production(&item.attrs) && use_tree_has_binary_indirection(&item.tree) {
             self.forbidden_indirections += 1;
@@ -3860,11 +3844,6 @@ impl<'ast> Visit<'ast> for BinaryRuntimeWiring {
 
 const RSS_COMMAND_FAMILIES: &[(&str, Option<&str>, Option<&str>)] = &[
     ("Serving", None, None),
-    (
-        "Postgres",
-        Some("is_postgres_command"),
-        Some("run_postgres_reader_migration_command"),
-    ),
     (
         "Projection",
         Some("is_projection_command"),
@@ -4115,11 +4094,12 @@ fn classifier_is_canonical(file: &syn::File) -> bool {
                     if fields.unnamed.len() == 1
                         && compact_type_tokens(&fields.unnamed[0].ty) == "OperatorCommand")
         });
-    let expected_variants = RSS_COMMAND_FAMILIES
+    let mut expected_variants = RSS_COMMAND_FAMILIES
         .iter()
         .filter(|(variant, _, _)| *variant != "Serving")
         .map(|(variant, _, _)| (*variant).to_owned())
         .collect::<BTreeSet<_>>();
+    expected_variants.insert("Postgres".to_owned());
     let observed_variants = operator_enums[0]
         .variants
         .iter()
@@ -4147,20 +4127,21 @@ fn classifier_is_canonical(file: &syn::File) -> bool {
         .iter()
         .filter_map(|(variant, predicate, _)| predicate.map(|predicate| (*variant, predicate)))
         .collect::<Vec<_>>();
-    if classifier.block.stmts.len() != operator_families.len() + 3 {
+    if classifier.block.stmts.len() != operator_families.len() + 4 {
         return false;
     }
     if !classifier_offline_if_is_canonical(&classifier.block.stmts[0], args)
+        || !classifier_migration_if_is_canonical(&classifier.block.stmts[1], args)
         || !operator_families
             .iter()
-            .zip(&classifier.block.stmts[1..])
+            .zip(&classifier.block.stmts[2..])
             .all(|((variant, predicate), statement)| {
                 classifier_if_is_canonical(statement, args, predicate, variant)
             })
     {
         return false;
     }
-    let ensure_statement = &classifier.block.stmts[operator_families.len() + 1];
+    let ensure_statement = &classifier.block.stmts[operator_families.len() + 2];
     let ensure_is_canonical = match ensure_statement {
         syn::Stmt::Macro(statement) => {
             let parser = syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated;
@@ -4186,6 +4167,23 @@ fn classifier_is_canonical(file: &syn::File) -> bool {
         _ => false,
     };
     ensure_is_canonical && serving_is_canonical
+}
+
+fn classifier_migration_if_is_canonical(statement: &syn::Stmt, args: &syn::Ident) -> bool {
+    let syn::Stmt::Expr(expr, None) = statement else {
+        return false;
+    };
+    let syn::Expr::If(branch) = transparent_expr(expr) else {
+        return false;
+    };
+    let condition = compact_tokens(&branch.cond);
+    condition.contains("matches!(")
+        && condition.contains(&args.to_string())
+        && condition.contains("namespace==\"postgres\"")
+        && condition.contains("command==\"migrate-all\"")
+        && branch.else_branch.is_none()
+        && matches!(branch.then_branch.stmts.as_slice(), [syn::Stmt::Expr(expr, Some(_))] | [syn::Stmt::Expr(expr, None)]
+            if compact_tokens(expr) == "returnOk(CommandFamily::Operator(OperatorCommand::Postgres))")
 }
 
 fn offline_dispatch_is_canonical(
@@ -4237,7 +4235,7 @@ fn rss_main_is_canonical(main: &syn::ItemFn) -> bool {
     if main.sig.asyncness.is_none()
         || !matches!(&main.sig.output, syn::ReturnType::Type(_, ty)
             if compact_type_tokens(ty.as_ref()) == "anyhow::Result<()>")
-        || main.block.stmts.len() != 8
+        || main.block.stmts.len() != 9
     {
         return false;
     }
@@ -4246,6 +4244,7 @@ fn rss_main_is_canonical(main: &syn::ItemFn) -> bool {
         command_statement,
         offline_statement,
         serving_statement,
+        migration_statement,
         prepare_statement,
         result_statement,
         shutdown_statement,
@@ -4339,6 +4338,9 @@ fn rss_main_is_canonical(main: &syn::ItemFn) -> bool {
     if !serving_is_canonical {
         return false;
     }
+    if !migration_dispatch_is_canonical(migration_statement, &operator_command.ident, args) {
+        return false;
+    }
 
     let syn::Stmt::Local(prepare_local) = prepare_statement else {
         return false;
@@ -4374,7 +4376,7 @@ fn rss_main_is_canonical(main: &syn::ItemFn) -> bool {
         return false;
     };
     if !is_exact_ident_path(&dispatch.expr, &operator_command.ident)
-        || dispatch.arms.len() != RSS_COMMAND_FAMILIES.len() - 1
+        || dispatch.arms.len() != RSS_COMMAND_FAMILIES.len()
     {
         return false;
     }
@@ -4388,15 +4390,23 @@ fn rss_main_is_canonical(main: &syn::ItemFn) -> bool {
         else {
             return false;
         };
+        if !observed.insert(variant.clone()) {
+            return false;
+        }
+        if variant == "Postgres" {
+            if compact_tokens(&arm.body)
+                != "{unreachable!(\"postgresmigrationreturnsbeforeruntimesetup\")}"
+            {
+                return false;
+            }
+            continue;
+        }
         let Some((_, _, runner)) = RSS_COMMAND_FAMILIES
             .iter()
             .find(|(expected, _, _)| *expected == variant)
         else {
             return false;
         };
-        if !observed.insert(variant.clone()) {
-            return false;
-        }
         let Some(runner) = runner else {
             return false;
         };
@@ -4438,10 +4448,35 @@ fn rss_main_is_canonical(main: &syn::ItemFn) -> bool {
     {
         return false;
     }
-    matches!(
+    let tail_ok = matches!(
         tail_statement,
         syn::Stmt::Expr(expr, None) if is_exact_ident_path(expr, result)
-    )
+    );
+    if !tail_ok {}
+    tail_ok
+}
+
+fn migration_dispatch_is_canonical(
+    statement: &syn::Stmt,
+    command: &syn::Ident,
+    args: &syn::Ident,
+) -> bool {
+    let syn::Stmt::Expr(expr, None) = statement else {
+        return false;
+    };
+    let syn::Expr::If(branch) = transparent_expr(expr) else {
+        return false;
+    };
+    let condition = compact_tokens(&branch.cond);
+    let body = compact_tokens(&branch.then_branch);
+    condition == format!("letOperatorCommand::Postgres={command}")
+        && branch.else_branch.is_none()
+        && branch.then_branch.stmts.len() == 3
+        && body.contains("init_migration_tracing()?")
+        && body.contains(&format!("matches!({args}.as_slice(),[namespace,command]"))
+        && body.contains("namespace==\"postgres\"")
+        && body.contains("command==\"migrate-all\"")
+        && body.contains("returnpostgres_migration::migrate_all_from_process_environment().await.map_err(anyhow::Error::from)")
 }
 
 fn runtime_config_snapshot_live_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
@@ -7155,7 +7190,7 @@ impl PgBuilderFlow<'_> {
                         .and_then(|arg| self.config_provenance(arg))
                         == Some(PgConfigProvenance::AuditAdmin)
             }
-            (_, Some("connect_maintenance" | "migrate_reader_lane_only")) => {
+            (_, Some("connect_maintenance")) => {
                 call.args.len() == 1
                     && call
                         .args
@@ -7742,7 +7777,6 @@ fn settings_vault_snapshot_definition_is_exact(file: &syn::File) -> bool {
 #[cfg(test)]
 fn pg_operator_definitions_are_exact(file: &syn::File) -> bool {
     let specs = [
-        ("run_postgres_reader_migration_command", None),
         (
             "run_projection_control_command",
             Some((
@@ -7822,11 +7856,6 @@ fn pg_operator_definition_is_exact(
 
 fn pg_operator_module_graph_is_exact(files: &BTreeMap<String, syn::File>) -> bool {
     [
-        (
-            RUNTIME_OPERATOR_POSTGRES_PATH,
-            "run_postgres_reader_migration_command",
-            None,
-        ),
         (
             RUNTIME_OPERATOR_PROJECTION_PATH,
             "run_projection_control_command",
@@ -9546,7 +9575,13 @@ fn runtime_binary_config_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
                 Rule::ForbiddenWiring,
                 relative,
                 if rss {
-                    "rss main must classify the closed command family before preparation; serving must inline the sole prepare_runtime -> run path, while operators must use the exact runtime::operator prepare/run/shutdown surface once without aliases, macros, or bait"
+                    if !classifier_is_canonical(&file) {
+                        "rss main must use the closed serving/offline/migrate-all/operator classifier before preparation"
+                    } else if !rss_main_is_canonical(mains[0]) {
+                        "rss main must isolate migrate-all before operator preparation; serving must inline the sole prepare_runtime -> run path, while stateful operators use the exact prepare/run/shutdown surface once"
+                    } else {
+                        "rss binary contains a forbidden runtime prepare/run/shutdown indirection outside the exact main funnel"
+                    }
                 } else {
                     "server main must bind its sole runtime::prepare_runtime result and pass that exact binding exactly once to runtime::run, with no shutdown or alias side path"
                 },
@@ -11451,7 +11486,6 @@ fn operator_module_ownership_is_closed(file: &syn::File) -> bool {
             "audit_ledger",
             "dlq",
             "jwks",
-            "postgres",
             "projection",
             "reconcile",
             "settings",
@@ -13564,99 +13598,80 @@ fn postgres_setup_transaction_live_findings(root: &Path) -> Result<Vec<Finding<R
         return Ok(vec![finding(
             Rule::ForbiddenWiring,
             POSTGRES_BUNDLE_PATH,
-            "缺少 PgRuntimeDeps::setup_with_audit_admin_config 的受保护生产 carrier",
+            "缺少 PgRuntimeDeps::connect_serving 的受保护生产 carrier",
         )]);
     }
     let file = parse_rust_file(&path)?;
-    let setup =
-        unique_production_inherent_method(&file, "PgRuntimeDeps", "setup_with_audit_admin_config");
+    let setup = unique_production_inherent_method(&file, "PgRuntimeDeps", "connect_serving");
     if setup.is_some_and(|method| postgres_setup_transaction_is_canonical(&method.block)) {
         return Ok(Vec::new());
     }
     Ok(vec![finding(
         Rule::ForbiddenWiring,
         POSTGRES_BUNDLE_PATH,
-        "PgRuntimeDeps::setup_with_audit_admin_config 必须在真实生产 AST 中按构造顺序注册 migrator/writer/reader/audit-admin，所有失败 await rollback，成功 owner 后唯一 commit",
+        "PgRuntimeDeps::connect_serving 必须在真实生产 AST 中先连接 exact-ledger writer，再按构造顺序注册 writer/reader/audit-admin，所有失败 await rollback，成功 owner 后唯一 commit",
     )])
 }
 
 fn postgres_setup_transaction_is_canonical(block: &syn::Block) -> bool {
     let statements = block.stmts.as_slice();
-    if statements.len() != 16 {
+    if statements.len() != 14 {
         return false;
     }
-    let Some(migrator) = exact_local_initializer(&statements[0], "migrator", false) else {
-        return false;
-    };
-    let Some(migrator_transaction) =
-        exact_local_initializer(&statements[1], "migrator_transaction", true)
+    let Some(serving_transaction) =
+        exact_local_initializer(&statements[0], "serving_transaction", true)
     else {
         return false;
     };
-    let Some(migration_result) = exact_local_initializer(&statements[3], "migration_result", false)
-    else {
+    let Some(writer) = exact_local_initializer(&statements[1], "writer", false) else {
+        return false;
+    };
+    let Some(writer_store) = exact_local_initializer(&statements[3], "writer_store", false) else {
         return false;
     };
     let Some(delivery_policy) = exact_local_initializer(&statements[4], "delivery_policy", false)
     else {
         return false;
     };
-    let Some(serving_transaction) =
-        exact_local_initializer(&statements[5], "serving_transaction", true)
-    else {
-        return false;
-    };
-    let Some(writer) = exact_local_initializer(&statements[6], "writer", false) else {
-        return false;
-    };
     let Some(revocation_receipt) =
-        exact_local_initializer(&statements[8], "revocation_receipt", false)
+        exact_local_initializer(&statements[6], "revocation_receipt", false)
     else {
         return false;
     };
-    let Some(reader) = exact_local_initializer(&statements[9], "reader", false) else {
+    let Some(reader) = exact_local_initializer(&statements[7], "reader", false) else {
         return false;
     };
-    let Some(stores) = exact_local_initializer(&statements[11], "stores", false) else {
+    let Some(stores) = exact_local_initializer(&statements[9], "stores", false) else {
         return false;
     };
     let Some(audit_admin_store) =
-        exact_local_initializer(&statements[12], "audit_admin_store", false)
+        exact_local_initializer(&statements[10], "audit_admin_store", false)
     else {
         return false;
     };
-    let Some(owner) = exact_local_initializer(&statements[13], "owner", false) else {
+    let Some(owner) = exact_local_initializer(&statements[11], "owner", false) else {
         return false;
     };
 
-    compact_tokens(migrator) == "Arc::new(PgStore::connect_migrator(migrator_config).await?)"
-        && compact_tokens(migrator_transaction) == "PgSetupTransaction::new()"
-        && exact_register_statement(
-            &statements[2],
-            "migrator_transaction",
-            "Arc::clone(&migrator)",
-            "postgres-migrator",
-        )
-        && migration_result_is_canonical(migration_result)
-        && exact_awaited_method_call(
-            delivery_policy,
-            true,
-            "migrator_transaction",
-            "close",
-            &["migration_result"],
-        )
-        && compact_tokens(serving_transaction) == "PgSetupTransaction::new()"
+    compact_tokens(serving_transaction) == "PgSetupTransaction::new()"
         && compact_tokens(writer) == "PgStore::connect_verified_writer(serving_config).await?"
         && exact_register_statement(
-            &statements[7],
+            &statements[2],
             "serving_transaction",
             "writer.store_arc()",
             "postgres-writer",
         )
+        && compact_tokens(writer_store) == "writer.store_arc()"
+        && fallible_serving_match_is_canonical(
+            delivery_policy,
+            "writer_store.load_event_delivery_policy().await",
+            "policy",
+        )
+        && projection_binding_registration_is_canonical(&statements[5])
         && revocation_receipt_is_canonical(revocation_receipt)
         && reader_connect_is_canonical(reader)
         && exact_register_statement(
-            &statements[10],
+            &statements[8],
             "serving_transaction",
             "reader.store_arc()",
             "postgres-reader",
@@ -13664,8 +13679,38 @@ fn postgres_setup_transaction_is_canonical(block: &syn::Block) -> bool {
         && compact_tokens(stores) == "Arc::new(PgRuntimeStores::new(writer,reader))"
         && audit_connect_is_canonical(audit_admin_store)
         && postgres_runtime_owner_is_canonical(owner)
-        && exact_method_statement(&statements[14], "serving_transaction", "commit", &[])
-        && exact_path_call_statement(&statements[15], "Ok", &["owner"])
+        && exact_method_statement(&statements[12], "serving_transaction", "commit", &[])
+        && exact_path_call_statement(&statements[13], "Ok", &["owner"])
+}
+
+fn fallible_serving_match_is_canonical(
+    expression: &syn::Expr,
+    awaited: &str,
+    success: &str,
+) -> bool {
+    let syn::Expr::Match(match_) = transparent_expr(expression) else {
+        return false;
+    };
+    compact_tokens(&match_.expr) == awaited
+        && match_.arms.len() == 2
+        && compact_tokens(&match_.arms[0].pat) == format!("Ok({success})")
+        && compact_tokens(&match_.arms[0].body) == success
+        && compact_tokens(&match_.arms[1].pat) == "Err(primary)"
+        && returned_failure_close_is_exact(&match_.arms[1].body)
+}
+
+fn projection_binding_registration_is_canonical(statement: &syn::Stmt) -> bool {
+    let Some(expression) = expression_statement(statement) else {
+        return false;
+    };
+    let syn::Expr::If(branch) = transparent_expr(expression) else {
+        return false;
+    };
+    compact_tokens(&branch.cond)
+        == "letErr(primary)=writer_store.register_projection_input_bindings(projection_generation,projection_inputs).await.map_err(PgError::ProjectionBindings)"
+        && branch.else_branch.is_none()
+        && matches!(branch.then_branch.stmts.as_slice(), [syn::Stmt::Expr(expr, Some(_))]
+            if returned_failure_close_is_exact(expr))
 }
 
 fn exact_local_initializer<'a>(
@@ -13790,45 +13835,6 @@ fn exact_awaited_method_call(
         return false;
     };
     exact_method_call(&await_.base, receiver, method, arguments)
-}
-
-fn migration_result_is_canonical(expression: &syn::Expr) -> bool {
-    let syn::Expr::Await(await_) = transparent_expr(expression) else {
-        return false;
-    };
-    let syn::Expr::Async(async_) = transparent_expr(&await_.base) else {
-        return false;
-    };
-    let statements = async_.block.stmts.as_slice();
-    statements.len() == 5
-        && expression_statement(&statements[0]).is_some_and(|expression| {
-            exact_awaited_method_call(expression, true, "migrator", "run_migrations", &[])
-        })
-        && exact_local_initializer(&statements[1], "delivery_policy", false).is_some_and(
-            |expression| {
-                exact_awaited_method_call(
-                    expression,
-                    true,
-                    "migrator",
-                    "load_event_delivery_policy",
-                    &[],
-                )
-            },
-        )
-        && expression_statement(&statements[2]).is_some_and(|expression| {
-            exact_awaited_method_call(
-                expression,
-                true,
-                "migrator",
-                "verify_config_legacy_plaintext_policy",
-                &["legacy_config_plaintext_policy"],
-            )
-        })
-        && expression_statement(&statements[3]).is_some_and(|expression| {
-            compact_tokens(expression)
-                == "migrator.register_projection_input_bindings(projection_generation,projection_inputs).await.map_err(PgError::ProjectionBindings)?"
-        })
-        && exact_path_call_statement(&statements[4], "Ok", &["delivery_policy"])
 }
 
 fn reader_connect_is_canonical(expression: &syn::Expr) -> bool {
@@ -15273,7 +15279,7 @@ const RUNTIME_ANCHORS: &[AnchorSpec] = &[
     AnchorSpec {
         id: "run.provider.pg",
         path: RUNTIME_PHASE_INFRA_PATH,
-        pattern: "PgRuntimeDeps::setup_with_audit_admin_config",
+        pattern: "PgRuntimeDeps::connect_serving",
     },
     AnchorSpec {
         id: "run.provider.service-token",
@@ -16054,15 +16060,15 @@ mod tests {
 
         let cases = [
             (
-                "migrator immediate register",
-                "migrator_transaction.register(PgStoreGuard::new_named(",
-                "migrator_transaction.skip_register(PgStoreGuard::new_named(",
+                "verified writer connection",
+                "PgStore::connect_verified_writer(serving_config).await?",
+                "PgStore::connect(serving_config).await?",
                 0,
             ),
             (
-                "migrator outcome close",
-                "migrator_transaction.close(migration_result).await?",
-                "migration_result?",
+                "delivery policy failure close",
+                "return serving_transaction.close(Err(primary)).await",
+                "return Err(primary)",
                 0,
             ),
             (
@@ -16075,13 +16081,13 @@ mod tests {
                 "revocation capability failure close",
                 "return serving_transaction.close(Err(primary)).await",
                 "return Err(primary)",
-                0,
+                2,
             ),
             (
                 "reader failure close",
                 "return serving_transaction.close(Err(primary)).await",
                 "return Err(primary)",
-                1,
+                3,
             ),
             (
                 "reader immediate register",
@@ -16093,7 +16099,7 @@ mod tests {
                 "audit-admin failure close",
                 "return serving_transaction.close(Err(primary)).await",
                 "return Err(primary)",
-                2,
+                4,
             ),
             (
                 "audit-admin immediate register",
@@ -17920,12 +17926,10 @@ pub async fn run(mut runtime_inputs: RuntimeInputs) {
     let PgRuntimeConfigParts {
         serving: serving_config,
         tenant_read: tenant_read_config,
-        migrator: migrator_config,
         audit_admin: audit_admin_config,
         dlx_archiver: dlx_archiver_config,
         dlx_verifier: dlx_verifier_config,
         dlx_purger: dlx_purger_config,
-        legacy_policy: plaintext_policy,
         readiness_period: pg_readiness_period,
     } = pg_config.into_parts();
     let S3RuntimeConfigParts {
@@ -17970,9 +17974,8 @@ pub async fn run(mut runtime_inputs: RuntimeInputs) {
         s3_canary_module,
         ..assembly_inputs
     });
-    PgRuntimeDeps::setup_with_audit_admin_config(
-        &migrator_config, &serving_config, &tenant_read_config,
-        audit_admin_config.as_ref(), plaintext_policy, generation, inputs,
+    PgRuntimeDeps::connect_serving(
+        &serving_config, &tenant_read_config, audit_admin_config.as_ref(), generation, inputs,
     );
     let config_value = |name: &str| config.value(name).map(str::to_owned);
     build_dlx_lifecycle_bootstrap_config_from(
@@ -19360,12 +19363,10 @@ async fn run_startup(runtime_inputs: &mut ServingRuntimeInputs) -> anyhow::Resul
     let PgRuntimeConfigParts {
         serving: serving_config,
         tenant_read: tenant_read_config,
-        migrator: migrator_config,
         audit_admin: audit_admin_config,
         dlx_archiver: dlx_archiver_config,
         dlx_verifier: dlx_verifier_config,
         dlx_purger: dlx_purger_config,
-        legacy_policy: plaintext_policy,
         readiness_period: pg_readiness_period,
     } = pg_config.into_parts();
     let S3RuntimeConfigParts {
@@ -19410,12 +19411,10 @@ async fn run_startup(runtime_inputs: &mut ServingRuntimeInputs) -> anyhow::Resul
         s3_canary_module,
         ..assembly_inputs
     });
-    PgRuntimeDeps::setup_with_audit_admin_config(
-        &migrator_config,
+    PgRuntimeDeps::connect_serving(
         &serving_config,
         &tenant_read_config,
         audit_admin_config.as_ref(),
-        plaintext_policy,
         generation,
         inputs,
     );
@@ -19537,76 +19536,7 @@ async fn run_startup(runtime_inputs: &mut ServingRuntimeInputs) -> anyhow::Resul
     }
 
     fn canonical_rss_binary_fixture() -> &'static str {
-        r#"
-enum CommandFamily {
-    Serving,
-    VaultAllowlistValidation,
-    Operator(OperatorCommand),
-}
-
-enum OperatorCommand {
-    Postgres,
-    Projection,
-    AuditLedgerVerify,
-    Dlq,
-    ReconcileTarget,
-    SettingsConfigValueMaintenance,
-    RssAccessJwksExport,
-}
-
-fn classify_command(args: &[String]) -> anyhow::Result<CommandFamily> {
-    if runtime::operator::is_vault_allowlist_validation_command(args) {
-        return Ok(CommandFamily::VaultAllowlistValidation);
-    }
-    if runtime::operator::is_postgres_command(args) {
-        return Ok(CommandFamily::Operator(OperatorCommand::Postgres));
-    }
-    if runtime::operator::is_projection_command(args) {
-        return Ok(CommandFamily::Operator(OperatorCommand::Projection));
-    }
-    if runtime::operator::is_audit_ledger_verify_command(args) {
-        return Ok(CommandFamily::Operator(OperatorCommand::AuditLedgerVerify));
-    }
-    if runtime::operator::is_dlq_command(args) {
-        return Ok(CommandFamily::Operator(OperatorCommand::Dlq));
-    }
-    if runtime::operator::is_reconcile_target_command(args) {
-        return Ok(CommandFamily::Operator(OperatorCommand::ReconcileTarget));
-    }
-    if runtime::operator::is_settings_config_value_maintenance_command(args) {
-        return Ok(CommandFamily::Operator(OperatorCommand::SettingsConfigValueMaintenance));
-    }
-    if runtime::operator::is_rss_access_jwks_export_command(args) {
-        return Ok(CommandFamily::Operator(OperatorCommand::RssAccessJwksExport));
-    }
-    anyhow::ensure!(args.is_empty(), "unknown rss command: {args:?}");
-    Ok(CommandFamily::Serving)
-}
-
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let command = classify_command(&args)?;
-    if let CommandFamily::VaultAllowlistValidation = command {
-        return runtime::operator::run_vault_allowlist_validation_command(&args);
-    }
-    let CommandFamily::Operator(command) = command else {
-        return runtime::run(runtime::prepare_runtime()?).await;
-    };
-    let runtime_inputs = runtime::operator::prepare_runtime()?;
-    let operator_result = match command {
-        OperatorCommand::Postgres => runtime::operator::run_postgres_reader_migration_command(&args, &runtime_inputs).await,
-        OperatorCommand::Projection => runtime::operator::run_projection_control_command(&args, &runtime_inputs).await,
-        OperatorCommand::AuditLedgerVerify => runtime::operator::run_audit_ledger_verify_command(&args, &runtime_inputs).await,
-        OperatorCommand::Dlq => runtime::operator::run_dlq_control_command(&args, &runtime_inputs).await,
-        OperatorCommand::ReconcileTarget => runtime::operator::run_reconcile_target_command(&args, &runtime_inputs).await,
-        OperatorCommand::SettingsConfigValueMaintenance => runtime::operator::run_settings_config_value_maintenance(&args, &runtime_inputs).await,
-        OperatorCommand::RssAccessJwksExport => runtime::operator::run_rss_access_jwks_export_command(&args, &runtime_inputs).await,
-    };
-    runtime::operator::shutdown_runtime(runtime_inputs).await?;
-    operator_result
-}
-"#
+        include_str!("../../bins/rss/src/main.rs")
     }
 
     #[test]
@@ -19774,15 +19704,15 @@ async fn main() -> anyhow::Result<()> {
             ),
             (
                 "typed parts do not feed postgres setup",
-                canonical.replace("&migrator_config,", "&wrong_migrator_config,"),
+                canonical.replace("&serving_config,", "&wrong_serving_config,"),
             ),
             (
                 "discarded typed parts are compliant bait",
                 canonical.replace(
                     "} = pg_config.into_parts();",
-                    "} = pg_config.into_parts();\n    let _ = (serving_config, tenant_read_config, migrator_config, audit_admin_config, plaintext_policy);",
+                    "} = pg_config.into_parts();\n    let _ = (serving_config, tenant_read_config, audit_admin_config);",
                 )
-                .replace("&migrator_config,", "&wrong_migrator_config,"),
+                .replace("&serving_config,", "&wrong_serving_config,"),
             ),
             (
                 "ambient std env PG getter",
@@ -19837,15 +19767,15 @@ async fn main() -> anyhow::Result<()> {
         write(&rss_path, canonical_rss)?;
         assert!(
             runtime_binary_config_findings(&root)?.is_empty(),
-            "six PG operator calls must receive the exact prepared &runtime_inputs binding"
+            "stateful operator calls must receive the exact prepared &runtime_inputs binding"
         );
         for operator_call in [
-            "run_postgres_reader_migration_command(&args, &runtime_inputs)",
             "run_projection_control_command(&args, &runtime_inputs)",
             "run_audit_ledger_verify_command(&args, &runtime_inputs)",
             "run_dlq_control_command(&args, &runtime_inputs)",
             "run_reconcile_target_command(&args, &runtime_inputs)",
             "run_settings_config_value_maintenance(&args, &runtime_inputs)",
+            "run_rss_access_jwks_export_command(&args, &runtime_inputs)",
         ] {
             let wrong_inputs = canonical_rss.replace(
                 operator_call,
@@ -19874,7 +19804,6 @@ async fn main() -> anyhow::Result<()> {
     fn workspace_operator_source() -> Result<String> {
         let root = workspace_root()?;
         [
-            RUNTIME_OPERATOR_POSTGRES_PATH,
             RUNTIME_OPERATOR_PROJECTION_PATH,
             RUNTIME_OPERATOR_AUDIT_PATH,
             RUNTIME_OPERATOR_DLQ_PATH,
@@ -19908,7 +19837,7 @@ async fn main() -> anyhow::Result<()> {
         let canonical = syn::parse_file(&source)?;
         assert!(
             pg_operator_definitions_are_exact(&canonical),
-            "the six production operator definitions are the anti-vacuity green"
+            "the five PG-backed operator definitions are the anti-vacuity green"
         );
 
         let mutations = [
@@ -19941,22 +19870,6 @@ async fn main() -> anyhow::Result<()> {
                 source.replacen(
                     "build_pg_migrator_config(self.config)?",
                     "build_pg_migrator_config(other.config)?",
-                    1,
-                ),
-            ),
-            (
-                "direct operator reads the wrong RuntimeInputs",
-                source.replacen(
-                    "build_pg_migrator_config(runtime_inputs.config())?",
-                    "build_pg_migrator_config(other_inputs.config())?",
-                    1,
-                ),
-            ),
-            (
-                "ambient wrapper beside compliant typed bait",
-                source.replacen(
-                    "build_pg_migrator_config(runtime_inputs.config())?",
-                    "{ let _compliant_bait = build_pg_migrator_config(runtime_inputs.config())?; build_pg_migrator_config_from(|name| std::env::var(name).ok())? }",
                     1,
                 ),
             ),
@@ -20329,15 +20242,15 @@ pub(crate) async fn build_redis_runtime_deps(config: RedisRuntimeConfig) -> anyh
             (
                 "operator arm returns before shared shutdown",
                 canonical.replace(
-                    "OperatorCommand::Projection => runtime::operator::run_projection_control_command(&args, &runtime_inputs).await,",
-                    "OperatorCommand::Projection => return runtime::operator::run_projection_control_command(&args, &runtime_inputs).await,",
+                    "runtime::operator::run_projection_control_command(&args, &runtime_inputs).await",
+                    "return runtime::operator::run_projection_control_command(&args, &runtime_inputs).await",
                 ),
             ),
             (
                 "duplicate operator arm is unreachable bait",
                 canonical.replace(
-                    "OperatorCommand::AuditLedgerVerify => runtime::operator::run_audit_ledger_verify_command(&args, &runtime_inputs).await,",
-                    "OperatorCommand::AuditLedgerVerify => runtime::operator::run_audit_ledger_verify_command(&args, &runtime_inputs).await,\n        OperatorCommand::AuditLedgerVerify => command_bait().await,",
+                    "OperatorCommand::AuditLedgerVerify => {\n            runtime::operator::run_audit_ledger_verify_command(&args, &runtime_inputs).await\n        }",
+                    "OperatorCommand::AuditLedgerVerify => {\n            runtime::operator::run_audit_ledger_verify_command(&args, &runtime_inputs).await\n        }\n        OperatorCommand::AuditLedgerVerify => command_bait().await,",
                 ),
             ),
             (
@@ -21431,7 +21344,7 @@ fn record_vault_redis_s3() {
     build_s3_runtime_deps(s3_general_config);
 }
 fn phase_b_setup_postgres() {
-    PgRuntimeDeps::setup_with_audit_admin_config();
+    PgRuntimeDeps::connect_serving();
 }
 "#,
             ),
@@ -21462,7 +21375,7 @@ async fn build_infra(self) {
     S3RuntimeConfig::from_snapshot(config);
     VaultRuntimeConfig::from_snapshot(config);
     Self::phase_a();
-    PgRuntimeDeps::setup_with_audit_admin_config();
+    PgRuntimeDeps::connect_serving();
     build_service_token_provider();
     crate::provider_output::build_pg_runtime_module(pg_owner, pg_readiness_period);
     if let Some(provider) = runtime_service_token.as_ref() {}
@@ -21495,7 +21408,7 @@ async fn build_infra(self) {
     S3RuntimeConfig::from_snapshot(config);
     VaultRuntimeConfig::from_snapshot(config);
     Self::phase_a();
-    PgRuntimeDeps::setup_with_audit_admin_config();
+    PgRuntimeDeps::connect_serving();
     build_service_token_provider();
     crate::provider_output::build_pg_runtime_module(pg_owner, pg_readiness_period);
     if let Some(provider) = runtime_service_token.as_ref() {}
@@ -21529,7 +21442,7 @@ async fn build_infra(self) {
     S3RuntimeConfig::from_snapshot(config);
     VaultRuntimeConfig::from_snapshot(config);
     Self::phase_a();
-    PgRuntimeDeps::setup_with_audit_admin_config();
+    PgRuntimeDeps::connect_serving();
     build_service_token_provider();
     crate::provider_output::build_pg_runtime_module(pg_owner, pg_readiness_period);
     if let Some(provider) = runtime_service_token.as_ref() {}
@@ -21613,7 +21526,7 @@ impl<'a> ProvidersBuilt<'a> {
 async fn build_infra(self) {
     S3RuntimeConfig::from_snapshot(config);
     VaultRuntimeConfig::from_snapshot(config);
-    PgRuntimeDeps::setup_with_audit_admin_config();
+    PgRuntimeDeps::connect_serving();
     build_service_token_provider();
     crate::provider_output::build_pg_runtime_module(pg_owner, pg_readiness_period);
     if let Some(provider) = runtime_service_token.as_ref() {}
@@ -21697,7 +21610,7 @@ fn phase_a() {
     build_s3_runtime_deps(s3_general_config);
 }
 fn phase_b_setup_postgres() {
-    PgRuntimeDeps::setup_with_audit_admin_config();
+    PgRuntimeDeps::connect_serving();
 }
 "#,
             ),
@@ -21744,7 +21657,7 @@ fn phase_a(renamed_vault: VaultRuntimeConfig, renamed_redis: RedisRuntimeConfig,
     build_s3_runtime_deps(renamed_s3);
 }
 fn phase_b_setup_postgres() {
-    PgRuntimeDeps::setup_with_audit_admin_config();
+    PgRuntimeDeps::connect_serving();
 }
 "#,
             ),
@@ -21809,7 +21722,7 @@ fn phase_a(&self) {
     build_s3_runtime_deps(s3_general_config);
 }
 fn phase_b_setup_postgres() {
-    PgRuntimeDeps::setup_with_audit_admin_config();
+    PgRuntimeDeps::connect_serving();
 }
 "#,
             ),

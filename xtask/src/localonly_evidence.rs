@@ -896,12 +896,12 @@ mod tests {
     fn real_workspace_execution_inventory_is_exact_and_non_empty() -> Result<()> {
         let inventory =
             crate::consistency_effects::local_only_execution_inventory(&crate::workspace_root()?)?;
-        assert_eq!(inventory.active_contract_ids.len(), 7);
+        assert_eq!(inventory.active_contract_ids.len(), 8);
         assert_eq!(
             inventory.active_contract_ids,
             inventory.source_receipt_contract_ids
         );
-        assert_eq!(inventory.tests.len(), 7);
+        assert_eq!(inventory.tests.len(), 8);
         assert!(inventory.tests.iter().all(|test| test.test_target == "lib"));
         assert_eq!(
             inventory
@@ -909,7 +909,7 @@ mod tests {
                 .iter()
                 .map(|test| test.package.as_str())
                 .collect::<BTreeSet<_>>(),
-            BTreeSet::from(["audit", "identity", "settings"])
+            BTreeSet::from(["audit", "identity", "settings", "settingsonly"])
         );
         Ok(())
     }

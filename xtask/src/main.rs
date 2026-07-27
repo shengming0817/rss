@@ -15,6 +15,8 @@
 //!                                      全仓 v1 assembly.lock.json 原子生成 / raw-byte 漂移门
 //!   `cargo xtask deployment plan render|check`
 //!                                      RuntimePlan-bound DeploymentPlan exact-set 生成 / 漂移门
+//!   `cargo xtask deployment policy check`
+//!                                      two-phase manifest policy + strict kubeconform gate
 //!   `cargo xtask graph assembly [--assembly <name>] [--format mermaid|json] [--check]`
 //!                                      assembly 静态声明图；runtime 双格式 committed，--check 守漂移
 //!   `cargo xtask archrules list|verify|matrix [--write|--check]`
@@ -103,6 +105,7 @@ mod contract_binding_guard;
 mod coverage;
 mod defergate;
 mod deployment_plan;
+mod deployment_policy;
 mod diagnostic;
 mod diffcov;
 mod dlx_lifecycle_funnel;
@@ -174,6 +177,7 @@ enum Command {
     },
     AssemblyLock(assembly_lock::AssemblyLockAction),
     DeploymentPlan(deployment_plan::Action),
+    DeploymentPolicyCheck,
     GraphAssembly(graph::Options),
     ArchRulesList,
     ArchRulesVerify,
@@ -297,8 +301,11 @@ fn parse_command(args: &[String]) -> Result<Command> {
         ["deployment", "plan", "check"] => {
             Ok(Command::DeploymentPlan(deployment_plan::Action::Check))
         }
+        ["deployment", "policy", "check"] => Ok(Command::DeploymentPolicyCheck),
         ["deployment", ..] => {
-            bail!("invalid deployment command; use `cargo xtask deployment plan render|check`")
+            bail!(
+                "invalid deployment command; use `cargo xtask deployment plan render|check` or `cargo xtask deployment policy check`"
+            )
         }
         ["graph", rest @ ..] => graph::parse(rest).map(Command::GraphAssembly),
         ["layer-deps"] => Ok(Command::LayerDeps),
@@ -723,6 +730,7 @@ fn dispatch(args: &[String]) -> Result<()> {
         Command::AssemblyGenerateProviders { check } => assembly_codegen::run_providers(check),
         Command::AssemblyLock(action) => assembly_lock::run(action),
         Command::DeploymentPlan(action) => deployment_plan::run(action),
+        Command::DeploymentPolicyCheck => deployment_policy::run(),
         Command::GraphAssembly(options) => graph::run(&options),
         Command::ArchRulesList => archrules::list(),
         Command::ArchRulesVerify => diagnostic::run_check(&archrules::ArchRules),
@@ -1004,6 +1012,26 @@ mod tests {
             assert!(
                 parse_command(&s(&invalid)).is_err(),
                 "unexpected compatibility surface accepted: {invalid:?}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn deployment_policy_cli_is_exact_and_fail_closed() -> anyhow::Result<()> {
+        assert_eq!(
+            parse_command(&s(&["deployment", "policy", "check"]))?,
+            Command::DeploymentPolicyCheck
+        );
+        for invalid in [
+            vec!["deployment", "policy"],
+            vec!["deployment", "policy", "check", "extra"],
+            vec!["deployment", "policy", "--check"],
+            vec!["deployment-policy", "check"],
+        ] {
+            assert!(
+                parse_command(&s(&invalid)).is_err(),
+                "unexpected policy compatibility surface accepted: {invalid:?}"
             );
         }
         Ok(())

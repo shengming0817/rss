@@ -1,0 +1,56 @@
+apiVersion: secrets-store.csi.x-k8s.io/v1
+kind: SecretProviderClass
+metadata:
+  name: rss-runtime-runtime-serving-secrets
+  labels:
+    helm.sh/chart: rss-0.1.0
+    app.kubernetes.io/name: rss
+    app.kubernetes.io/instance: rss
+    app.kubernetes.io/component: runtime
+    app.kubernetes.io/managed-by: Helm
+    rss.gocell.io/profile: runtime
+  annotations:
+    rss.gocell.io/assembly-fingerprint: sha256:b4bc250c0cce2979dd0c37588c7879ea80ad891c5530073ef41152394891be9f
+    rss.gocell.io/runtime-plan-fingerprint: sha256:7aa65aa20339fb380eb025971532e9938b9cec3d8a074cbcb8d5152d5cd08fcd
+    rss.gocell.io/deployment-fingerprint: sha256:f0aeba24549e0f244af68ccda8f24b84f6c3acf568975fb1d31114a44b9f1edb
+spec:
+  provider: vault
+  parameters:
+    vaultAddress: https://rss-vault.vault.svc:8200
+    roleName: rss-runtime-serving
+    objects: |
+      - objectName: "database-url"
+        secretPath: "runtime/serving-database-url"
+        secretKey: "value"
+      - objectName: "serving-secret-bundle"
+        secretPath: "runtime/serving-secret-bundle"
+        secretKey: "value"
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: rss-runtime-monitor
+  labels:
+    helm.sh/chart: rss-0.1.0
+    app.kubernetes.io/name: rss
+    app.kubernetes.io/instance: rss
+    app.kubernetes.io/component: runtime
+    app.kubernetes.io/managed-by: Helm
+    rss.gocell.io/profile: runtime
+  annotations:
+    rss.gocell.io/assembly-fingerprint: sha256:b4bc250c0cce2979dd0c37588c7879ea80ad891c5530073ef41152394891be9f
+    rss.gocell.io/runtime-plan-fingerprint: sha256:7aa65aa20339fb380eb025971532e9938b9cec3d8a074cbcb8d5152d5cd08fcd
+    rss.gocell.io/deployment-fingerprint: sha256:f0aeba24549e0f244af68ccda8f24b84f6c3acf568975fb1d31114a44b9f1edb
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: rss
+      app.kubernetes.io/instance: rss
+      app.kubernetes.io/component: runtime
+  namespaceSelector:
+    matchNames:
+    - rss-system
+  endpoints:
+  - port: health
+    path: /health/v1/metrics
+    scheme: http

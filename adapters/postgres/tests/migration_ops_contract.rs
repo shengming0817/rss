@@ -24,6 +24,39 @@ const READER_PROVISIONING: &str =
     include_str!("../../../deploy/postgres-upgrade/provision-reader-role.sh");
 const READER_UPGRADE_SMOKE: &str =
     include_str!("../../../deploy/postgres-upgrade/smoke-retained-volume.sh");
+const POSTGRES_ROLE_INIT: &str =
+    include_str!("../../../deploy/postgres-init/001-create-app-role.sh");
+
+#[test]
+fn postgres_role_init_keeps_file_passwords_out_of_psql_argv_and_unsets_them() {
+    for forbidden in [
+        "--set app_password=",
+        "--set read_password=",
+        "--set dlx_archiver_password=",
+        "--set dlx_verifier_password=",
+        "--set dlx_purger_password=",
+    ] {
+        assert!(
+            !POSTGRES_ROLE_INIT.contains(forbidden),
+            "argv secret: {forbidden}"
+        );
+    }
+    for required in [
+        "\\getenv app_password RSS_INIT_APP_PASSWORD",
+        "\\getenv read_password RSS_INIT_READ_PASSWORD",
+        "\\getenv dlx_archiver_password RSS_INIT_DLX_ARCHIVER_PASSWORD",
+        "\\getenv dlx_verifier_password RSS_INIT_DLX_VERIFIER_PASSWORD",
+        "\\getenv dlx_purger_password RSS_INIT_DLX_PURGER_PASSWORD",
+        "trap clear_init_passwords EXIT",
+        "clear_init_passwords\ntrap - EXIT",
+        "NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION NOINHERIT",
+    ] {
+        assert!(
+            POSTGRES_ROLE_INIT.contains(required),
+            "missing secret cleanup: {required}"
+        );
+    }
+}
 
 #[test]
 fn auth_grant_cutover_is_strict_atomic_and_least_privilege() {
@@ -361,11 +394,12 @@ fn localonly_reader_migration_is_exact_and_has_no_future_grant_fallback() {
 }
 
 #[test]
-fn reader_upgrade_smoke_uses_real_sqlx_ledger_and_release_cli_with_bounded_startup() {
+fn reader_upgrade_smoke_uses_real_sqlx_ledger_and_forward_only_cli_with_bounded_startup() {
     for required in [
         "RSS_TEST_ALLOW_EXTERNAL_POSTGRES=1",
         "integration_tests::bootstrap_reader_upgrade_smoke_predecessor",
-        "postgres migrate-reader-lane",
+        "RSS_PG_MIGRATOR_PASSWORD_FILE=",
+        "postgres migrate-all",
         "FROM _sqlx_migrations WHERE version = 67",
         "docker inspect",
         "deadline=",

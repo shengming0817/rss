@@ -25,6 +25,7 @@
 /// crate import diagctx）见 follow-up #1400。
 pub(crate) const BASIS_CRATES: &[&str] = &[
     "assembly-schema",
+    "postgres-migration-inventory",
     "diagctx",
     "vocab",
     "ids",

@@ -10,7 +10,8 @@ use diport::{DynManagedResource, ManagedResource, ShutdownError};
 
 use crate::listeners;
 
-const TOTAL_DRAIN_BUDGET: Duration = Duration::from_secs(50);
+const TOTAL_DRAIN_BUDGET: Duration =
+    Duration::from_secs(crate::deployment_facts::TOTAL_DRAIN_SECONDS);
 const DEPLOYMENT_GRACE_PERIOD: Duration = Duration::from_secs(60);
 const EXIT_BUFFER: Duration = Duration::from_secs(5);
 const READINESS_POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -46,7 +47,7 @@ impl runtimeexec::StartupAdapter for ProductionStartup {
         runtimeexec::PreparedLaunch<Self::Adapter, Self::ProbeReceipt, Self::ReadyHook>,
     > {
         let plan = crate::plan::IdentityAuditPlan::bundled()?;
-        let (config, secrets, build_identity) = self.captured.into_runtime_inputs();
+        let (config, secrets, build_identity, frontend) = self.captured.into_runtime_inputs();
         let build =
             crate::providers::build(plan.provider_build()?, config, secrets, transaction).await?;
         let crate::providers::BuildResult {
@@ -128,6 +129,7 @@ impl runtimeexec::StartupAdapter for ProductionStartup {
             health,
             request_budget,
             inventory_publisher,
+            Some(frontend),
         )?;
         let readiness = receipt.readiness();
         let ready: ReadyHook = Box::new(move |inventory| {

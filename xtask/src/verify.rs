@@ -127,6 +127,8 @@ enum InternalCheck {
     AssemblyLockCheck,
     /// RuntimePlan-bound DeploymentPlan exact generated-set raw-byte 漂移门（#1802）。
     DeploymentPlanCheck,
+    /// Two-phase rendered manifest policy plus strict kubeconform validation（#1804）。
+    DeploymentPolicyCheck,
     /// committed runtime assembly Mermaid/JSON graph 漂移与 source closure 门。
     AssemblyGraphCheck,
     /// wire JSON-Schema/manifest 跨版本破坏检测门（ADR-008，WIRE-BREAKING-01）。
@@ -326,6 +328,14 @@ fn step_deployment_plan_check() -> Step {
         id: GateId::DeploymentPlanCheck,
         args: &[],
         kind: StepKind::Internal(InternalCheck::DeploymentPlanCheck),
+        env: &[],
+    }
+}
+fn step_deployment_policy_check() -> Step {
+    Step {
+        id: GateId::DeploymentPolicyCheck,
+        args: &[],
+        kind: StepKind::Internal(InternalCheck::DeploymentPolicyCheck),
         env: &[],
     }
 }
@@ -1353,13 +1363,24 @@ fn run_external_tool_gated(
     let probe_result = match program {
         crate::cmd::ExternalProgram::Helm => crate::workspace_root()
             .and_then(|root| crate::deployment_plan::helm_probe(&root).map_err(Into::into)),
+        crate::cmd::ExternalProgram::Kubeconform => crate::workspace_root().and_then(|root| {
+            crate::deployment_policy::probe_kubeconform(&root).map_err(Into::into)
+        }),
         _ => bail!("{lane}: unsupported external tool probe `{probe}`"),
     };
-    if let Err(error) = &probe_result
-        && !matches!(
+    let missing = probe_result.as_ref().is_err_and(|error| match program {
+        crate::cmd::ExternalProgram::Helm => matches!(
             error.downcast_ref::<crate::deployment_plan::HelmProbeError>(),
             Some(crate::deployment_plan::HelmProbeError::Missing)
-        )
+        ),
+        crate::cmd::ExternalProgram::Kubeconform => matches!(
+            error.downcast_ref::<crate::deployment_policy::KubeconformProbeError>(),
+            Some(crate::deployment_policy::KubeconformProbeError::Missing)
+        ),
+        _ => false,
+    });
+    if let Err(error) = &probe_result
+        && !missing
     {
         bail!("{lane}: `{probe}` probe rejected gate `{label}`: {error}");
     }
@@ -1462,6 +1483,9 @@ fn run_internal(check: InternalCheck, opts: &VerifyOpts, root: &Path) -> Result<
         }
         InternalCheck::DeploymentPlanCheck => {
             crate::deployment_plan::run(crate::deployment_plan::Action::Check)
+        }
+        InternalCheck::DeploymentPolicyCheck => {
+            crate::deployment_policy::run_after_plan_preflight()
         }
         InternalCheck::AssemblyGraphCheck => {
             crate::graph::run(&crate::graph::Options::check_runtime())
@@ -3381,6 +3405,7 @@ mod tests {
             GateId::AssemblyProvidersCheck,
             GateId::AssemblyLockCheck,
             GateId::DeploymentPlanCheck,
+            GateId::DeploymentPolicyCheck,
             GateId::AssemblyGraphCheck,
         ]
         .map(|id| {
@@ -3584,6 +3609,10 @@ mod tests {
             .iter()
             .position(|step| step.id == GateId::DeploymentPlanCheck)
             .context("plan lacks deployment plan check")?;
+        let policy = plan
+            .iter()
+            .position(|step| step.id == GateId::DeploymentPolicyCheck)
+            .context("plan lacks deployment policy check")?;
         let graph = plan
             .iter()
             .position(|step| step.id == GateId::AssemblyGraphCheck)
@@ -3592,8 +3621,9 @@ mod tests {
             providers == modules + 1
                 && lock == providers + 1
                 && deployment == lock + 1
-                && graph == deployment + 1,
-            "assembly order must be modules -> providers -> lock -> deployment -> graph"
+                && policy == deployment + 1
+                && graph == policy + 1,
+            "assembly order must be modules -> providers -> lock -> deployment plan -> deployment policy -> graph"
         );
         Ok(())
     }
@@ -3677,6 +3707,71 @@ mod tests {
             .context("fast plan lacks deployment gate")?
             .kind = StepKind::Internal(InternalCheck::AssemblyLockCheck);
         assert!(validate_deployment_plan_check(&wrong).is_err());
+        Ok(())
+    }
+
+    fn validate_deployment_policy_check(plan: &[Step]) -> anyhow::Result<()> {
+        let members = plan
+            .iter()
+            .filter(|step| step.id == GateId::DeploymentPolicyCheck)
+            .collect::<Vec<_>>();
+        anyhow::ensure!(members.len() == 1, "expected one deployment policy check");
+        let step = members[0];
+        anyhow::ensure!(
+            step.label() == "deployment-policy-check"
+                && !step.needs_compile()
+                && step.carrier_file() == Some("xtask/src/deployment_policy.rs")
+                && matches!(
+                    step.kind,
+                    StepKind::Internal(InternalCheck::DeploymentPolicyCheck)
+                ),
+            "deployment policy gate binding drift"
+        );
+        anyhow::ensure!(
+            step.id.spec().lanes() == [Some(CiLane::Meta), None]
+                && step.id.spec().verify_membership() == VerifyMembership::Included
+                && step.id.spec().compat() == CompatMembership::Included
+                && step.id.spec().tool()
+                    == ToolRequirement::ExternalTool {
+                        program: crate::cmd::ExternalProgram::Kubeconform,
+                        version: crate::deployment_policy::KUBECONFORM_VERSION,
+                        install_hint: crate::ci_lanes::KUBECONFORM_HINT,
+                    },
+            "deployment policy gate membership drift"
+        );
+        let deployment = plan
+            .iter()
+            .position(|step| step.id == GateId::DeploymentPlanCheck)
+            .context("plan lacks deployment plan check")?;
+        let policy = plan
+            .iter()
+            .position(|step| step.id == GateId::DeploymentPolicyCheck)
+            .context("plan lacks deployment policy check")?;
+        anyhow::ensure!(policy == deployment + 1, "deployment policy ordering drift");
+        Ok(())
+    }
+
+    #[test]
+    fn deployment_policy_check_is_typed_once_and_ordered_in_all_aggregate_plans()
+    -> anyhow::Result<()> {
+        for (name, plan) in [
+            ("full", plan_for(PlanTarget::Verify)),
+            ("fast", verify_plan(&opts(true, false))),
+            ("ci-meta", plan_for(PlanTarget::Lane(CiLane::Meta))),
+            ("compatibility", plan_for(PlanTarget::CompatibilityCi)),
+        ] {
+            validate_deployment_policy_check(&plan).with_context(|| format!("{name} plan"))?;
+        }
+        let mut omitted = verify_plan(&opts(true, false));
+        omitted.retain(|step| step.id != GateId::DeploymentPolicyCheck);
+        assert!(validate_deployment_policy_check(&omitted).is_err());
+        let mut wrong = verify_plan(&opts(true, false));
+        wrong
+            .iter_mut()
+            .find(|step| step.id == GateId::DeploymentPolicyCheck)
+            .context("fast plan lacks deployment policy gate")?
+            .kind = StepKind::Internal(InternalCheck::AssemblyLockCheck);
+        assert!(validate_deployment_policy_check(&wrong).is_err());
         Ok(())
     }
 

@@ -31,7 +31,7 @@ const RUNTIME_INFRA_REQUIRED: &[&str] = &[
     "verify_dlx_vault_key_capability(&hot_vault_provider",
     "verify_dlx_vault_key_capability(&archive_vault_provider",
     "Ok(PhaseADlxVerified{dlx_archiver_pg_config,dlx_verifier_pg_config,dlx_purger_pg_config,archive_store,archive_vault_provider,})",
-    "PgRuntimeDeps::setup_with_audit_admin_config(",
+    "PgRuntimeDeps::connect_serving(",
     "PgDlxLifecycleRuntime::setup(&dlx_archiver_pg_config,&dlx_verifier_pg_config,&dlx_purger_pg_config,hot_payload_protector,)",
     "DlxLifecycleRuntimeDeps::new(dlx_pg_owner,archive_store,archive_vault_provider,archive_key",
     "wire_dlx_lifecycle(dlx_lifecycle,dlx_worker)",
@@ -729,30 +729,39 @@ fn required_runtime_source_findings(path: &Path, content: &str) -> Vec<Finding<R
 }
 
 fn required_pg_shapes(file: &syn::File) -> Vec<String> {
-    const ROLES: [(&str, &str, &str, &str, &str, &str); 3] = [
+    const ROLES: [(&str, &str, &str, &str, &str, &str, &str, &str, &str); 3] = [
         (
             "dlx_archiver",
             "PG_DLX_ARCHIVER_ROLE_KEYS",
             "PG_DLX_ARCHIVER_USERNAME_ENV",
             "RSS_PG_DLX_ARCHIVER_USERNAME",
-            "PG_DLX_ARCHIVER_PASSWORD_ENV",
+            "PG_DLX_ARCHIVER_PASSWORD_FILE_ENV",
+            "RSS_PG_DLX_ARCHIVER_PASSWORD_FILE",
+            "PG_DLX_ARCHIVER_REMOVED_PASSWORD_ENV",
             "RSS_PG_DLX_ARCHIVER_PASSWORD",
+            "BUNDLE_PG_DLX_ARCHIVER_PASSWORD",
         ),
         (
             "dlx_verifier",
             "PG_DLX_VERIFIER_ROLE_KEYS",
             "PG_DLX_VERIFIER_USERNAME_ENV",
             "RSS_PG_DLX_VERIFIER_USERNAME",
-            "PG_DLX_VERIFIER_PASSWORD_ENV",
+            "PG_DLX_VERIFIER_PASSWORD_FILE_ENV",
+            "RSS_PG_DLX_VERIFIER_PASSWORD_FILE",
+            "PG_DLX_VERIFIER_REMOVED_PASSWORD_ENV",
             "RSS_PG_DLX_VERIFIER_PASSWORD",
+            "BUNDLE_PG_DLX_VERIFIER_PASSWORD",
         ),
         (
             "dlx_purger",
             "PG_DLX_PURGER_ROLE_KEYS",
             "PG_DLX_PURGER_USERNAME_ENV",
             "RSS_PG_DLX_PURGER_USERNAME",
-            "PG_DLX_PURGER_PASSWORD_ENV",
+            "PG_DLX_PURGER_PASSWORD_FILE_ENV",
+            "RSS_PG_DLX_PURGER_PASSWORD_FILE",
+            "PG_DLX_PURGER_REMOVED_PASSWORD_ENV",
             "RSS_PG_DLX_PURGER_PASSWORD",
+            "BUNDLE_PG_DLX_PURGER_PASSWORD",
         ),
     ];
     let fields = file.items.iter().find_map(|item| match item {
@@ -775,7 +784,7 @@ fn required_pg_shapes(file: &syn::File) -> Vec<String> {
         _ => None,
     });
     let valid = fields.is_some_and(|fields| {
-        ROLES.iter().all(|(binding, _, _, _, _, _)| {
+        ROLES.iter().all(|(binding, _, _, _, _, _, _, _, _)| {
             fields
                 .named
                 .iter()
@@ -784,10 +793,28 @@ fn required_pg_shapes(file: &syn::File) -> Vec<String> {
                 == 1
         })
     }) && ROLES.iter().all(
-        |(_, descriptor, username_const, username, password_const, password)| {
+        |(
+            _,
+            descriptor,
+            username_const,
+            username,
+            password_const,
+            password,
+            removed_const,
+            removed,
+            bundle_const,
+        )| {
             const_string_value(file, username_const).as_deref() == Some(*username)
                 && const_string_value(file, password_const).as_deref() == Some(*password)
-                && exact_pg_role_descriptor(file, descriptor, username_const, password_const)
+                && const_string_value(file, removed_const).as_deref() == Some(*removed)
+                && exact_pg_role_descriptor(
+                    file,
+                    descriptor,
+                    username_const,
+                    password_const,
+                    removed_const,
+                    bundle_const,
+                )
         },
     ) && constructor
         .is_some_and(|constructor| exact_pg_dlx_role_mapping(constructor, &ROLES));
@@ -799,7 +826,7 @@ fn required_pg_shapes(file: &syn::File) -> Vec<String> {
 
 fn exact_pg_dlx_role_mapping(
     method: &syn::ImplItemFn,
-    roles: &[(&str, &str, &str, &str, &str, &str)],
+    roles: &[(&str, &str, &str, &str, &str, &str, &str, &str, &str)],
 ) -> bool {
     let snapshot_argument_is_exact = method.sig.inputs.iter().any(|argument| {
         let syn::FnArg::Typed(argument) = argument else {
@@ -817,10 +844,12 @@ fn exact_pg_dlx_role_mapping(
     let mut calls = DlxRoleConfigCallCount::default();
     syn::visit::Visit::visit_block(&mut calls, &method.block);
     calls.0 == roles.len()
-        && roles.iter().all(|(binding, descriptor, _, _, _, _)| {
-            exact_role_local(method, binding, descriptor)
-                && returned_self_field_is_exact(&method.block, binding)
-        })
+        && roles
+            .iter()
+            .all(|(binding, descriptor, _, _, _, _, _, _, _)| {
+                exact_role_local(method, binding, descriptor)
+                    && returned_self_field_is_exact(&method.block, binding)
+            })
 }
 
 fn exact_pg_role_descriptor(
@@ -828,6 +857,8 @@ fn exact_pg_role_descriptor(
     descriptor: &str,
     username_const: &str,
     password_const: &str,
+    removed_password_const: &str,
+    bundle_password_const: &str,
 ) -> bool {
     let descriptors = file.items.iter().filter_map(|item| match item {
         syn::Item::Const(item) if item.ident == descriptor => Some(item),
@@ -845,7 +876,7 @@ fn exact_pg_role_descriptor(
     let syn::Expr::Struct(value) = item.expr.as_ref() else {
         return false;
     };
-    if !path_is_ident(&value.path, "PgRoleKeys") || value.rest.is_some() || value.fields.len() != 2
+    if !path_is_ident(&value.path, "PgRoleKeys") || value.rest.is_some() || value.fields.len() != 4
     {
         return false;
     }
@@ -860,7 +891,28 @@ fn exact_pg_role_descriptor(
             .count()
             == 1
     };
-    field_is("username", username_const) && field_is("password", password_const)
+    let optional_field_is = |name: &str, expected: &str| {
+        value
+            .fields
+            .iter()
+            .filter(|field| {
+                if !matches!(&field.member, syn::Member::Named(member) if member == name) {
+                    return false;
+                }
+                let syn::Expr::Call(call) = &field.expr else {
+                    return false;
+                };
+                expression_is_ident(call.func.as_ref(), "Some")
+                    && call.args.len() == 1
+                    && expression_is_ident(&call.args[0], expected)
+            })
+            .count()
+            == 1
+    };
+    field_is("username", username_const)
+        && field_is("password_file", password_const)
+        && field_is("removed_password", removed_password_const)
+        && optional_field_is("bundle_password", bundle_password_const)
 }
 
 fn type_path_is_exact(ty: &syn::Type, expected: &str) -> bool {
@@ -1434,7 +1486,7 @@ mod tests {
                         archive_store,
                         archive_vault_provider,
                     });
-                    PgRuntimeDeps::setup_with_audit_admin_config();
+                    PgRuntimeDeps::connect_serving();
                     PgDlxLifecycleRuntime::setup(
                         &dlx_archiver_pg_config,
                         &dlx_verifier_pg_config,
@@ -1500,7 +1552,7 @@ mod tests {
                 }
 
                 async fn phase_b_setup_postgres() {
-                    PgRuntimeDeps::setup_with_audit_admin_config();
+                    PgRuntimeDeps::connect_serving();
                 }
             }
         "#
@@ -1603,28 +1655,39 @@ pub(crate) async fn build_s3_dlx_archive_store(
             use crate::config::SnapshotConfig;
 
             const PG_DLX_ARCHIVER_USERNAME_ENV: &str = "RSS_PG_DLX_ARCHIVER_USERNAME";
-            const PG_DLX_ARCHIVER_PASSWORD_ENV: &str = "RSS_PG_DLX_ARCHIVER_PASSWORD";
+            const PG_DLX_ARCHIVER_PASSWORD_FILE_ENV: &str = "RSS_PG_DLX_ARCHIVER_PASSWORD_FILE";
+            const PG_DLX_ARCHIVER_REMOVED_PASSWORD_ENV: &str = "RSS_PG_DLX_ARCHIVER_PASSWORD";
             const PG_DLX_VERIFIER_USERNAME_ENV: &str = "RSS_PG_DLX_VERIFIER_USERNAME";
-            const PG_DLX_VERIFIER_PASSWORD_ENV: &str = "RSS_PG_DLX_VERIFIER_PASSWORD";
+            const PG_DLX_VERIFIER_PASSWORD_FILE_ENV: &str = "RSS_PG_DLX_VERIFIER_PASSWORD_FILE";
+            const PG_DLX_VERIFIER_REMOVED_PASSWORD_ENV: &str = "RSS_PG_DLX_VERIFIER_PASSWORD";
             const PG_DLX_PURGER_USERNAME_ENV: &str = "RSS_PG_DLX_PURGER_USERNAME";
-            const PG_DLX_PURGER_PASSWORD_ENV: &str = "RSS_PG_DLX_PURGER_PASSWORD";
+            const PG_DLX_PURGER_PASSWORD_FILE_ENV: &str = "RSS_PG_DLX_PURGER_PASSWORD_FILE";
+            const PG_DLX_PURGER_REMOVED_PASSWORD_ENV: &str = "RSS_PG_DLX_PURGER_PASSWORD";
 
             struct PgRoleKeys {
                 username: &'static str,
-                password: &'static str,
+                password_file: &'static str,
+                removed_password: &'static str,
+                bundle_password: Option<&'static str>,
             }
 
             const PG_DLX_ARCHIVER_ROLE_KEYS: PgRoleKeys = PgRoleKeys {
                 username: PG_DLX_ARCHIVER_USERNAME_ENV,
-                password: PG_DLX_ARCHIVER_PASSWORD_ENV,
+                password_file: PG_DLX_ARCHIVER_PASSWORD_FILE_ENV,
+                removed_password: PG_DLX_ARCHIVER_REMOVED_PASSWORD_ENV,
+                bundle_password: Some(BUNDLE_PG_DLX_ARCHIVER_PASSWORD),
             };
             const PG_DLX_VERIFIER_ROLE_KEYS: PgRoleKeys = PgRoleKeys {
                 username: PG_DLX_VERIFIER_USERNAME_ENV,
-                password: PG_DLX_VERIFIER_PASSWORD_ENV,
+                password_file: PG_DLX_VERIFIER_PASSWORD_FILE_ENV,
+                removed_password: PG_DLX_VERIFIER_REMOVED_PASSWORD_ENV,
+                bundle_password: Some(BUNDLE_PG_DLX_VERIFIER_PASSWORD),
             };
             const PG_DLX_PURGER_ROLE_KEYS: PgRoleKeys = PgRoleKeys {
                 username: PG_DLX_PURGER_USERNAME_ENV,
-                password: PG_DLX_PURGER_PASSWORD_ENV,
+                password_file: PG_DLX_PURGER_PASSWORD_FILE_ENV,
+                removed_password: PG_DLX_PURGER_REMOVED_PASSWORD_ENV,
+                bundle_password: Some(BUNDLE_PG_DLX_PURGER_PASSWORD),
             };
 
             pub(crate) struct PgRuntimeConfig {
@@ -1716,12 +1779,12 @@ pub(crate) async fn build_s3_dlx_archive_store(
                 "RSS_PG_DLX_ARCHIVER_USERNAME",
             )
             .replace("SWAPPED_USERNAME", "RSS_PG_DLX_VERIFIER_USERNAME")
-            .replace("RSS_PG_DLX_ARCHIVER_PASSWORD", "SWAPPED_PASSWORD")
+            .replace("RSS_PG_DLX_ARCHIVER_PASSWORD_FILE", "SWAPPED_PASSWORD")
             .replace(
-                "RSS_PG_DLX_VERIFIER_PASSWORD",
-                "RSS_PG_DLX_ARCHIVER_PASSWORD",
+                "RSS_PG_DLX_VERIFIER_PASSWORD_FILE",
+                "RSS_PG_DLX_ARCHIVER_PASSWORD_FILE",
             )
-            .replace("SWAPPED_PASSWORD", "RSS_PG_DLX_VERIFIER_PASSWORD");
+            .replace("SWAPPED_PASSWORD", "RSS_PG_DLX_VERIFIER_PASSWORD_FILE");
         assert!(
             !required_runtime_source_findings(
                 Path::new("assemblies/runtime/src/infra/pg.rs"),
@@ -1746,8 +1809,8 @@ pub(crate) async fn build_s3_dlx_archive_store(
         );
 
         let crossed_descriptor_fields = canonical.replacen(
-            "username: PG_DLX_ARCHIVER_USERNAME_ENV,\n                password: PG_DLX_ARCHIVER_PASSWORD_ENV,",
-            "username: PG_DLX_ARCHIVER_PASSWORD_ENV,\n                password: PG_DLX_ARCHIVER_USERNAME_ENV,",
+            "username: PG_DLX_ARCHIVER_USERNAME_ENV,\n                password_file: PG_DLX_ARCHIVER_PASSWORD_FILE_ENV,",
+            "username: PG_DLX_ARCHIVER_PASSWORD_FILE_ENV,\n                password_file: PG_DLX_ARCHIVER_USERNAME_ENV,",
             1,
         );
         assert_ne!(crossed_descriptor_fields, canonical);
@@ -1926,7 +1989,7 @@ pub(crate) async fn build_s3_dlx_archive_store(
     fn required_runtime_provider_rejects_comment_and_string_bait() {
         let bait = r#"
             // RSS_PG_DLX_ARCHIVER_USERNAME
-            const BAIT: &str = "RSS_PG_DLX_ARCHIVER_PASSWORD";
+            const BAIT: &str = "RSS_PG_DLX_ARCHIVER_PASSWORD_FILE";
         "#;
         let missing =
             required_runtime_source_findings(Path::new("assemblies/runtime/src/infra/pg.rs"), bait);
@@ -2176,7 +2239,7 @@ pub(crate) async fn build_s3_dlx_archive_store(
                 }
 
                 async fn phase_b_setup_postgres() {
-                    PgRuntimeDeps::setup_with_audit_admin_config();
+                    PgRuntimeDeps::connect_serving();
                 }
             }
         "#;
@@ -2226,7 +2289,7 @@ pub(crate) async fn build_s3_dlx_archive_store(
                 async fn build_infra(self) {
                     // after_required_preflight() PgDlxLifecycleRuntime::preflight_identities(
                     // archive_store.verify() verify_dlx_vault_key_capability(
-                    // PgRuntimeDeps::setup_with_audit_admin_config(
+                    // PgRuntimeDeps::connect_serving(
                     // PgDlxLifecycleRuntime::setup( DlxLifecycleRuntimeDeps::new(
                 }
             }
@@ -2234,7 +2297,7 @@ pub(crate) async fn build_s3_dlx_archive_store(
         let string_bait = r#"
             impl<'a> ProvidersBuilt<'a> {
                 async fn build_infra(self) {
-                    let _bait = "after_required_preflight() PgDlxLifecycleRuntime::preflight_identities(&dlx_archiver_pg_config,&dlx_verifier_pg_config,&dlx_purger_pg_config,) archive_store.verify() verify_dlx_vault_key_capability(&hot_vault_provider) verify_dlx_vault_key_capability(&archive_vault_provider) PgRuntimeDeps::setup_with_audit_admin_config() PgDlxLifecycleRuntime::setup(&dlx_archiver_pg_config,&dlx_verifier_pg_config,&dlx_purger_pg_config,hot_payload_protector,) DlxLifecycleRuntimeDeps::new(dlx_pg_owner,archive_store,archive_vault_provider,archive_key)";
+                    let _bait = "after_required_preflight() PgDlxLifecycleRuntime::preflight_identities(&dlx_archiver_pg_config,&dlx_verifier_pg_config,&dlx_purger_pg_config,) archive_store.verify() verify_dlx_vault_key_capability(&hot_vault_provider) verify_dlx_vault_key_capability(&archive_vault_provider) PgRuntimeDeps::connect_serving() PgDlxLifecycleRuntime::setup(&dlx_archiver_pg_config,&dlx_verifier_pg_config,&dlx_purger_pg_config,hot_payload_protector,) DlxLifecycleRuntimeDeps::new(dlx_pg_owner,archive_store,archive_vault_provider,archive_key)";
                 }
             }
         "#;

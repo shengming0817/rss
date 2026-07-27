@@ -259,6 +259,7 @@ pub(crate) enum ExternalProgram {
     Rustfmt,
     Docker,
     Helm,
+    Kubeconform,
     SystemPython,
     SystemShell,
     #[cfg(test)]
@@ -273,6 +274,7 @@ impl ExternalProgram {
             Self::Rustfmt => "rustfmt",
             Self::Docker => "docker",
             Self::Helm => "helm",
+            Self::Kubeconform => "kubeconform",
             Self::SystemPython => "/usr/bin/python3",
             Self::SystemShell => "/bin/sh",
             #[cfg(test)]

@@ -1,0 +1,26 @@
+[package]
+name = "postgres-migration"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[features]
+default = []
+integration = ["testkit/containers"]
+
+[dependencies]
+postgres-migration-inventory = { path = "../../crates/postgres-migration-inventory" }
+sqlx = { workspace = true }
+secure = { path = "../../crates/secure" }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+zeroize = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt"] }
+testkit = { path = "../../crates/testkit" }

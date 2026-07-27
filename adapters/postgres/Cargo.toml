@@ -11,6 +11,7 @@ workspace = true
 # adapter 依赖基础 + 引擎（W 阶段实现 body 时用）+ DI-infra（diport，见下，impl 其 port trait）；实现其上层 trait 的具体服务 crate 在落地该 trait 时按需添加，
 # 不预连全服务层（见 architecture.md §分层「adapters 实现基础/引擎/服务定义的 trait」+ PR #137 review A1/B1/C1）。
 [dependencies]
+postgres-migration-inventory = { path = "../../crates/postgres-migration-inventory" }
 vocab = { path = "../../crates/vocab" }
 ids = { path = "../../crates/ids" }
 secure = { path = "../../crates/secure" }
@@ -85,6 +86,7 @@ integration = [
     "domain-settings",
     "domain-identity",
     "domain-audit",
+    "auth-audit-sink",
     "testkit/containers",
 ]
 # 组合根默认单测专用：只开放 lazy pool 的 capability bundle，不连接数据库、不暴露 pool/store。

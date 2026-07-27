@@ -1,8 +1,8 @@
 //! postgres — RSS workspace crate（eventexec 持久化基座；P3/#1116）。See docs/rules/architecture.md.
 //!
 //! sealed-marker [`PgStore`] 持 `sqlx::PgPool`（`pub(crate)`），提供连接池（`connect`）、事务运行器
-//! （`run_global_transaction`）、Migrator（`run_migrations`）——均 `pub(crate)` funnel，外部经
-//! [`PgRuntimeDeps::setup`] 构造（#1423，PG-BUNDLE-FUNNEL-01）；并 impl
+//! （`run_global_transaction`）与只读 schema ledger 验证；迁移执行只存在于 operator-only
+//! `postgres-migration` crate。外部经 [`PgRuntimeDeps::connect_serving`] 构造；并 impl
 //! `diport::ManagedResource`（关池接入 `bootstrap::ShutdownStack` 逆序编排）。
 //!
 //! port 来源两类：provider-agnostic 基建 port 来自 `diport`（`ManagedResource`…）；**域形** repo port 来自
@@ -64,7 +64,6 @@ pub mod fault_matrix;
 #[cfg(feature = "domain-identity")]
 mod identity_security_lifecycle;
 mod inbox;
-mod migrator;
 mod outbox;
 mod outbox_cdc;
 #[cfg(feature = "domain-identity")]
@@ -88,6 +87,7 @@ mod role_binding_read_repo;
 mod role_repo;
 mod saga;
 mod saga_candidates;
+mod schema_ledger;
 #[cfg(feature = "domain-settings")]
 mod secret_repo;
 mod service_token_replay;
@@ -101,6 +101,20 @@ mod tx;
     allow(dead_code, unused_imports)
 )]
 mod tx_retry;
+
+#[cfg(any(test, feature = "test-support", feature = "fault-matrix-test-support"))]
+mod test_migration {
+    use crate::{PgError, PgStore};
+
+    impl PgStore {
+        pub(crate) async fn run_migrations(&self) -> Result<(), PgError> {
+            sqlx::migrate!("./migrations")
+                .run(&self.pool)
+                .await
+                .map_err(PgError::Migrate)
+        }
+    }
+}
 
 #[cfg(feature = "domain-audit")]
 pub use audit_repo::{PgAuditAdminRepo, PgAuditRepo};
@@ -197,9 +211,7 @@ mod integration_tests;
 mod test_pg;
 
 pub use inbox::{PgInboxStore, PgInboxSweeper};
-pub use pool::{
-    LegacyConfigPlaintextPolicy, PgConfig, PgError, PgPassword, PgTenantReadConfig, PoolReadiness,
-};
+pub use pool::{PgConfig, PgError, PgPassword, PgTenantReadConfig, PoolReadiness};
 // `pg_readiness_sampling_loop` 保持 `pub(crate)`，仅经 consuming `PgReadinessSamplerFactory::spawn` 收口；
 // 类型 `PgDbReadiness`/`PgReadinessSampler` 仍公开（probe / runtime lifecycle output 返回类型）。
 pub use readiness::{PgDbReadiness, PgReadinessSampler};
@@ -215,8 +227,8 @@ use sqlx::PgPool;
 pub(crate) const PG_STORE_NAME: &str = "postgres";
 
 /// PostgreSQL 存储 adapter（sealed-marker）。持 `sqlx::PgPool`（`pub(crate)`，仅 crate 内 repo / tx /
-/// migrator impl 取用）。外部经 [`PgRuntimeDeps::setup`](crate::PgRuntimeDeps::setup) 构造
-/// （PG-BUNDLE-FUNNEL-01）；`connect`/`run_migrations` 为 `pub(crate)`、不对外暴露。
+/// test fixture 取用）。外部经 [`PgRuntimeDeps::connect_serving`](crate::PgRuntimeDeps::connect_serving)
+/// 构造（PG-BUNDLE-FUNNEL-01）；连接与测试迁移 helper 均不对外暴露。
 pub(crate) struct PgStore {
     pub(crate) pool: PgPool,
 }

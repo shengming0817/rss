@@ -52,12 +52,12 @@ Migrations 0072 and 0073 are forward-only hard cutovers. Before the new generati
 
 1. Quiesce login, refresh, revocation and authenticated ingress; disable every old workload, job and
    controller restart path, then prove the old process inventory is zero.
-2. Record the required static PostgreSQL lane snapshot and migration preconditions. A new process may
-   run the embedded migrator before opening listeners; "before startup" in older prose means before
-   serving traffic, not before the operating-system process exists.
-3. Verify the migration ledger through the release's final embedded version, then start only replicas
-   from the same sealed image/configuration generation and restore traffic after the complete
-   readiness set is healthy.
+2. Record the required static PostgreSQL lane snapshot and migration preconditions. Run the sealed
+   release's independent operator Job while every serving Deployment remains stopped. A serving
+   process never contains or executes migration capability.
+3. Require the operator Job to complete and verify the ledger exactly matches the release's embedded
+   migration head. Only then start replicas from the same sealed image/configuration generation and
+   restore traffic after the complete readiness set is healthy.
 
 Do not mix old and new generations. Once ledger 0073 is present, an old audit writer is forbidden.
 Once a persistent certificate revocation has been accepted, an in-memory revocation binary is

@@ -1,9 +1,9 @@
-//! postgres capability bundle（#1423 / PERSIST-002）：把 connect、migration、readiness handle、
+//! postgres capability bundle（#1423 / PERSIST-002）：把 serving connect、ledger verification、readiness handle、
 //! per-domain repo 构造收口到单一 funnel，对组合根的 wire_X 暴露**受控 per-domain 能力句柄**，
 //! 绝不泄漏裸 `sqlx::PgPool`。
 //!
 //! 五个核心类型：
-//! - [`PgRuntimeDeps`]：不可克隆的组合根生命周期 owner。唯一公开构造路径 [`PgRuntimeDeps::setup`]；能力只经
+//! - [`PgRuntimeDeps`]：不可克隆的组合根生命周期 owner。唯一 serving 构造路径 [`PgRuntimeDeps::connect_serving`]；能力只经
 //!   [`PgRuntimeDeps::handle`] 投影，生命周期只经 [`PgRuntimeDeps::into_runtime_parts`] 按值交接。
 //! - [`PgRuntimeHandle`]：可克隆的运行期能力句柄，派发 [`PgRuntimeHandle::for_domain`] /
 //!   [`PgRuntimeHandle::infra`] 与 readiness/RLS probe handle，不拥有生命周期出口。
@@ -18,9 +18,9 @@
 //!
 //! ## INVARIANT
 //!
-//! - **PG-BUNDLE-FUNNEL-01**（Hard，可见性封装）：公开 store 构造路径只允许三个受控 funnel：
-//!   [`PgRuntimeDeps::setup`]（serving runtime）、[`PgRuntimeDeps::migrate_reader_lane_only`]（0067 one-shot）
-//!   与 [`PgRuntimeDeps::connect_maintenance`]（离线维护）。三者之外
+//! - **PG-BUNDLE-FUNNEL-01**（Hard，可见性封装）：公开 store 构造路径只允许两个受控 funnel：
+//!   [`PgRuntimeDeps::connect_serving`]（serving runtime，只读验证 schema ledger）与
+//!   [`PgRuntimeDeps::connect_maintenance`]（离线维护）。二者之外
 //!   `PgStore::connect` / `run_migrations` 已降 `pub(crate)`，外部无法 mint `PgStore`、也拿不到 `&PgStore`；
 //!   且**所有** `&PgStore`-taking repo 构造器（含 credential/role/refresh_token/emitter + dead_letter/
 //!   checkpoint/saga/projection）均 `pub(crate)`——serving repo 只能经 `PgDomainDeps` / `PgInfraDeps` 构造，
@@ -45,7 +45,7 @@
 //!
 //! - `ref: oxidecomputer/omicron nexus/db-queries/src/db/datastore/mod.rs@main` —— 两层私有
 //!   （`Pool.inner` → `DataStore.pool: Arc<Pool>`）+ `pool_connection_authorized` `pub(super)`；构造器集中 +
-//!   schema 门控。本模块对应：`connect`/`run_migrations` `pub(crate)` + `PgRuntimeDeps` 私有持 `Arc<PgRuntimeStores>`。
+//!   schema 门控。本模块对应：连接函数 `pub(crate)` + `PgRuntimeDeps` 私有持 `Arc<PgRuntimeStores>`。
 //! - `ref: risingwavelabs/risingwave src/meta/src/manager/env.rs@main` —— `MetaSrvEnv`（`meta_store_impl`
 //!   私有）`#[derive(Clone)]` 能力包 + accessor，各 manager 接 `env.clone()`。对应：`PgDomainDeps` Clone 句柄。
 //! - `ref: kube-rs/kube kube-runtime/src/controller/mod.rs@main` —— `Controller::run(.., Arc<Ctx>)` 注入
@@ -84,12 +84,12 @@ use crate::{
     PgConfigValueMaintenance, PgSecretRepo, PgSecretUnitOfWork, PgSettingsConsumerTx,
 };
 use crate::{
-    DlxPayloadProtector, LegacyConfigPlaintextPolicy, PgAuthGrantSweeper, PgCheckpointStore,
-    PgCommandJournal, PgConfig, PgDbReadiness, PgDeadLetterStore, PgDlqStore, PgEmitter, PgError,
-    PgInboxStore, PgInboxSweeper, PgOutboxCdcEmitter, PgOutboxMaintenance, PgProjectionControl,
-    PgProjectionEvents, PgReadinessSampler, PgReconcileStore, PgRevocationStore,
-    PgRevocationSweeper, PgSagaInstanceStore, PgSagaJournal, PgServiceTokenReplayStore,
-    PgServiceTokenReplaySweeper, PgStore, PgStoreGuard, PgTenantReadConfig,
+    DlxPayloadProtector, PgAuthGrantSweeper, PgCheckpointStore, PgCommandJournal, PgConfig,
+    PgDbReadiness, PgDeadLetterStore, PgDlqStore, PgEmitter, PgError, PgInboxStore, PgInboxSweeper,
+    PgOutboxCdcEmitter, PgOutboxMaintenance, PgProjectionControl, PgProjectionEvents,
+    PgReadinessSampler, PgReconcileStore, PgRevocationStore, PgRevocationSweeper,
+    PgSagaInstanceStore, PgSagaJournal, PgServiceTokenReplayStore, PgServiceTokenReplaySweeper,
+    PgStore, PgStoreGuard, PgTenantReadConfig,
 };
 #[cfg(feature = "domain-audit")]
 use crate::{PgAuditAdminRepo, PgAuditRepo};
@@ -157,7 +157,7 @@ impl PgDomain for caps::Audit {
     const NAME: &'static str = "audit";
 }
 
-/// 组合根级 postgres 生命周期 owner：集中 connect + migration，并唯一拥有 pool 与 sampler 的关闭权。
+/// 组合根级 postgres 生命周期 owner：只连接已迁移 schema，并唯一拥有 pool 与 sampler 的关闭权。
 ///
 /// INVARIANT: PG-RUNTIME-OWNER-01 { level = "Hard", exec = "native-compile", source = "code", native = "non-Clone owner and consuming into_runtime_parts self receiver; trybuild rejects clone and double consumption" }
 ///
@@ -453,6 +453,28 @@ impl Clock for PgMaintenanceSystemClock {
 }
 
 impl PgRuntimeDeps {
+    #[cfg(any(test, feature = "test-support", feature = "fault-matrix-test-support"))]
+    pub async fn setup_test_fixture(
+        migrator_config: &PgConfig,
+        serving_config: &PgConfig,
+        tenant_read_config: &PgTenantReadConfig,
+        projection_generation: &'static str,
+        projection_inputs: &'static [vocab::ProjectionInputBinding],
+    ) -> Result<Self, PgError> {
+        let migrator = PgStore::connect(migrator_config).await?;
+        let migration = migrator.run_migrations().await;
+        let _ = migrator.shutdown().await;
+        migration?;
+        Self::connect_serving(
+            serving_config,
+            tenant_read_config,
+            None,
+            projection_generation,
+            projection_inputs,
+        )
+        .await
+    }
+
     /// Owner-only projection for serving service-token authentication.
     ///
     /// The cloneable [`PgRuntimeHandle`] deliberately has no replay writer projection, so only the
@@ -464,103 +486,35 @@ impl PgRuntimeDeps {
         ))
     }
 
-    /// Release-only SQLx migration runner for the exact 0066 → 0067 LocalOnly reader cutover.
+    /// 唯一 serving 构造路径。只读核验 SQLx ledger 与编译进 binary 的 HEAD 完全一致，然后建立
+    /// 最小权限 writer/reader pools；本 API 不接受 migrator config，也无法执行 DDL。
     ///
-    /// This entry does not construct writer/reader serving pools. The adapter verifies both the
-    /// embedded migration universe and `_sqlx_migrations` ledger before applying anything, so it
-    /// cannot silently become a generic migration bypass when a later migration is added.
-    pub async fn migrate_reader_lane_only(migrator_config: &PgConfig) -> Result<(), PgError> {
-        let migrator = PgStore::connect_migrator(migrator_config).await?;
-        let result = migrator.run_reader_lane_migration_only().await;
-        let _ = migrator.shutdown().await;
-        result
-    }
-
-    /// 唯一公开构造路径：migrator 连接跑迁移，serving 连接建长期 pool 并跑 RLS 能力门。
-    ///
-    /// `migrator_config` 必须是短生命周期 DDL 角色；`serving_config` 必须是长期最小权限
-    /// `rss_app` NOBYPASSRLS 角色。缺配 / 连不上 / 迁移失败 / **RLS 能力缺失**均 fail-fast 返 [`PgError`]
-    /// （区分 `Connect` / `Migrate` / `Rls*` 阶段）；组合根在边界 `.context(..)` 成 anyhow。
-    /// 对标 omicron `DataStore::new_with_timeout`（构造器集中 + schema/能力门控，对象返回前校验）。
-    pub async fn setup(
-        migrator_config: &PgConfig,
-        serving_config: &PgConfig,
-        tenant_read_config: &PgTenantReadConfig,
-        projection_generation: &'static str,
-        projection_inputs: &'static [vocab::ProjectionInputBinding],
-    ) -> Result<Self, PgError> {
-        Self::setup_with_audit_admin_config(
-            migrator_config,
-            serving_config,
-            tenant_read_config,
-            None,
-            LegacyConfigPlaintextPolicy::Deny,
-            projection_generation,
-            projection_inputs,
-        )
-        .await
-    }
-
-    /// [`setup`](Self::setup) 的显式 legacy plaintext 策略版本。runtime 组合根只在读取到人工临时豁免 env 时
-    /// 传入 [`LegacyConfigPlaintextPolicy::AllowTemporary`]；默认 deny。
-    pub async fn setup_with_legacy_config_policy(
-        migrator_config: &PgConfig,
-        serving_config: &PgConfig,
-        tenant_read_config: &PgTenantReadConfig,
-        legacy_config_plaintext_policy: LegacyConfigPlaintextPolicy,
-        projection_generation: &'static str,
-        projection_inputs: &'static [vocab::ProjectionInputBinding],
-    ) -> Result<Self, PgError> {
-        Self::setup_with_audit_admin_config(
-            migrator_config,
-            serving_config,
-            tenant_read_config,
-            None,
-            legacy_config_plaintext_policy,
-            projection_generation,
-            projection_inputs,
-        )
-        .await
-    }
-
-    /// 显式 audit admin pool 版本：admin config 缺省时仅 scoped audit read 可用；提供时启动期验证
-    /// `rss_audit_admin` 直连、NOBYPASSRLS、只读权限。
-    pub async fn setup_with_audit_admin_config(
-        migrator_config: &PgConfig,
+    /// INVARIANT: MIGRATION-CAPABILITY-SEPARATION-01 { level = "Hard", exec = "native-compile", source = "code", native = "serving API has no migration credential or executor and postgres-migration is absent from serving Cargo graphs" }
+    pub async fn connect_serving(
         serving_config: &PgConfig,
         tenant_read_config: &PgTenantReadConfig,
         audit_admin_config: Option<&PgConfig>,
-        legacy_config_plaintext_policy: LegacyConfigPlaintextPolicy,
         projection_generation: &'static str,
         projection_inputs: &'static [vocab::ProjectionInputBinding],
     ) -> Result<Self, PgError> {
-        let migrator = Arc::new(PgStore::connect_migrator(migrator_config).await?);
-        let mut migrator_transaction = PgSetupTransaction::new();
-        migrator_transaction.register(PgStoreGuard::new_named(
-            Arc::clone(&migrator),
-            "postgres-migrator",
-        ));
-        let migration_result = async {
-            migrator.run_migrations().await?;
-            let delivery_policy = migrator.load_event_delivery_policy().await?;
-            migrator
-                .verify_config_legacy_plaintext_policy(legacy_config_plaintext_policy)
-                .await?;
-            migrator
-                .register_projection_input_bindings(projection_generation, projection_inputs)
-                .await
-                .map_err(PgError::ProjectionBindings)?;
-            Ok(delivery_policy)
-        }
-        .await;
-        let delivery_policy = migrator_transaction.close(migration_result).await?;
-
         let mut serving_transaction = PgSetupTransaction::new();
         let writer = PgStore::connect_verified_writer(serving_config).await?;
         serving_transaction.register(PgStoreGuard::new_named(
             writer.store_arc(),
             "postgres-writer",
         ));
+        let writer_store = writer.store_arc();
+        let delivery_policy = match writer_store.load_event_delivery_policy().await {
+            Ok(policy) => policy,
+            Err(primary) => return serving_transaction.close(Err(primary)).await,
+        };
+        if let Err(primary) = writer_store
+            .register_projection_input_bindings(projection_generation, projection_inputs)
+            .await
+            .map_err(PgError::ProjectionBindings)
+        {
+            return serving_transaction.close(Err(primary)).await;
+        }
         let revocation_receipt = match writer.verify_revocation_capability().await {
             Ok(receipt) => receipt,
             Err(primary) => return serving_transaction.close(Err(primary)).await,

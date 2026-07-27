@@ -40,21 +40,14 @@ sslRootCertPath = "/run/rss/postgres-ca.pem"
 [postgres.writer]
 username = "rss_identity_writer"
 maxConnections = 10
-password = { kind = "environmentRef", name = "RSS_IDENTITYAUDIT_PG_WRITER_PASSWORD" }
 
 [postgres.reader]
 username = "rss_identity_reader"
 maxConnections = 10
-password = { kind = "environmentRef", name = "RSS_IDENTITYAUDIT_PG_READER_PASSWORD" }
-
-[postgres.migrator]
-username = "rss_identity_migrator"
-password = { kind = "environmentRef", name = "RSS_IDENTITYAUDIT_PG_MIGRATOR_PASSWORD" }
 
 [postgres.auditAdmin]
 username = "rss_audit_admin"
 maxConnections = 5
-password = { kind = "environmentRef", name = "RSS_IDENTITYAUDIT_PG_AUDIT_ADMIN_PASSWORD" }
 
 [vault]
 addr = "https://vault.example.com:8200"
@@ -62,15 +55,9 @@ caCertPemPath = "/run/rss/vault-ca.pem"
 transitMount = "transit"
 signingKeyName = "identity-access"
 dlxPayloadKeyName = "identityaudit-dlx-payload"
-signerToken = { kind = "environmentRef", name = "RSS_IDENTITYAUDIT_VAULT_SIGNER_TOKEN" }
-dlxToken = { kind = "environmentRef", name = "RSS_IDENTITYAUDIT_VAULT_DLX_TOKEN" }
 readinessSeconds = 10
 
 [eventing]
-identityAmqpUrl = { kind = "environmentRef", name = "RSS_IDENTITY_AMQP_URL" }
-redisUrl = { kind = "environmentRef", name = "RSS_REDIS_URL" }
-auditChainKey = { kind = "environmentRef", name = "RSS_AUDIT_CHAIN_KEY_B64URL" }
 auditChainKeyId = 1
-tenantAuthorityKey = { kind = "environmentRef", name = "RSS_TENANT_AUTHORITY_HMAC_KEY_B64URL" }
 tenantAuthorityTtlSeconds = 3600
 tenantAuthorityClockSkewSeconds = 60

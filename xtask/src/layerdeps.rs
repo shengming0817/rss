@@ -44,8 +44,8 @@
 //!   `runtimeexec` target wrapper 必须恰为 runtime/settingsonly/identityaudit 三个 assembly，禁止 bins、composition、
 //!   journeys 与 xtask 直接依赖；该特殊 wrapper 不得被一般 Domain/Adapter/Generated stale 逻辑误判。
 //! INVARIANT: RUNTIMEEXEC-DEPS-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtimeexec_direct_dependencies_extra_internal_and_external_red|tests::runtimeexec_direct_dependencies_package_alias_red", anti_vacuity = "tests::runtimeexec_direct_dependencies_allowlist_green|tests::real_workspace_green" }——
-//!   `runtimeexec` shipped direct dependency 只准内部 assembly-schema/bootstrap/diport/primitives/secure 与外部
-//!   anyhow/thiserror/tokio/tokio-util/tracing；
+//!   `runtimeexec` shipped direct dependency 只准内部 assembly-schema/authn/bootstrap/diport/primitives/secure 与外部
+//!   anyhow/serde/serde_json/thiserror/tokio/tokio-util/tracing/zeroize；
 //!   `[dev-dependencies]` 不入扫描。
 //! `LAYER-DEPS-PROVIDER-BOOTSTRAP-01` 的精确 deny 与元数据单源见 `layers.rs`；本 lint 在通用允许矩阵
 //! 之前应用它，并以 Redis/S3/Vault synthetic red + postgres/diport anti-vacuity green 承载。
@@ -255,13 +255,24 @@ const RUNTIMEEXEC_CRATE: &str = "runtimeexec";
 const RUNTIMEEXEC_ALLOWED_WRAPPERS: &[&str] = &["runtime", "settingsonly", "identityaudit"];
 const RUNTIMEEXEC_INTERNAL_SHIPPED_DEPS: &[&str] = &[
     "assembly-schema",
+    "authn",
     "bootstrap",
     "diport",
     "primitives",
     "secure",
 ];
-const RUNTIMEEXEC_EXTERNAL_SHIPPED_DEPS: &[&str] =
-    &["anyhow", "thiserror", "tokio", "tokio-util", "tracing"];
+const RUNTIMEEXEC_EXTERNAL_SHIPPED_DEPS: &[&str] = &[
+    "anyhow",
+    "serde",
+    "serde_json",
+    "thiserror",
+    "tokio",
+    "tokio-util",
+    "tracing",
+    "zeroize",
+];
+const POSTGRES_MIGRATION_OPERATOR_CRATE: &str = "postgres-migration";
+const POSTGRES_MIGRATION_OPERATOR_ROOT: &str = "rss";
 
 /// LAYER-DEPS-06：deny.toml 分层 wrappers ⟷ 源分类一致性（守 LAYER-WRAP-01 漂移）。
 /// 正向：每个 Domain/Adapter/Generated 成员须有 ban entry 且 wrappers ⊇ 所需消费者
@@ -285,6 +296,15 @@ fn required_consumers<'a>(
     domains: &[&'a str],
     services: &[&'a str],
 ) -> Option<Vec<&'a str>> {
+    if layer == Some(Layer::Adapter) && name == POSTGRES_MIGRATION_OPERATOR_CRATE {
+        return Some(
+            roots
+                .iter()
+                .copied()
+                .filter(|root| *root == POSTGRES_MIGRATION_OPERATOR_ROOT)
+                .collect(),
+        );
+    }
     match layer {
         Some(Layer::Adapter) if layers::is_dev_adapter(name) => Some(
             roots
@@ -358,6 +378,9 @@ pub(crate) fn check_wrappers(
         .collect();
 
     let mut findings = check_runtimeexec_wrapper_coverage(members, bans);
+    findings.extend(check_postgres_migration_operator_confinement(
+        members, bans, edges,
+    ));
     for m in members {
         let Some(required) = required_consumers(m.layer, &m.name, &roots, &domains, &services)
         else {
@@ -456,6 +479,62 @@ pub(crate) fn check_wrappers(
                 )),
             }
         }
+    }
+    findings
+}
+
+fn check_postgres_migration_operator_confinement(
+    members: &[Member],
+    bans: &[BanEntry],
+    edges: &[Edge],
+) -> Vec<Finding> {
+    if !members
+        .iter()
+        .any(|member| member.name == POSTGRES_MIGRATION_OPERATOR_CRATE)
+    {
+        return Vec::new();
+    }
+    let mut findings = Vec::new();
+    let wrappers = bans
+        .iter()
+        .find(|ban| ban.crate_name == POSTGRES_MIGRATION_OPERATOR_CRATE)
+        .map(|ban| {
+            ban.wrappers
+                .iter()
+                .map(String::as_str)
+                .collect::<BTreeSet<_>>()
+        })
+        .unwrap_or_default();
+    let expected = BTreeSet::from([POSTGRES_MIGRATION_OPERATOR_ROOT]);
+    if wrappers != expected {
+        findings.push(finding(
+            Rule::WrapperCoverage,
+            POSTGRES_MIGRATION_OPERATOR_CRATE,
+            "migration capability wrapper must be exactly the rss operator binary",
+        ));
+    }
+    if !members.iter().any(|member| {
+        member.name == POSTGRES_MIGRATION_OPERATOR_ROOT && member.layer == Some(Layer::Root)
+    }) || !edges.iter().any(|edge| {
+        edge.from == POSTGRES_MIGRATION_OPERATOR_ROOT
+            && edge.to == POSTGRES_MIGRATION_OPERATOR_CRATE
+    }) {
+        findings.push(finding(
+            Rule::WrapperCoverage,
+            POSTGRES_MIGRATION_OPERATOR_CRATE,
+            "rss must have the non-vacuous source edge to migration capability",
+        ));
+    }
+    let unauthorized = edges.iter().any(|edge| {
+        edge.to == POSTGRES_MIGRATION_OPERATOR_CRATE
+            && edge.from != POSTGRES_MIGRATION_OPERATOR_ROOT
+    });
+    if unauthorized {
+        findings.push(finding(
+            Rule::WrapperCoverage,
+            POSTGRES_MIGRATION_OPERATOR_CRATE,
+            "migration capability is reachable from a non-rss workspace crate",
+        ));
     }
     findings
 }
@@ -1768,6 +1847,7 @@ identity_alias = { package = "identity", version = "1", features = ["test-suppor
     fn runtimeexec_direct_dependencies_allowlist_green() {
         let edges = [
             e("runtimeexec", "assembly-schema"),
+            e("runtimeexec", "authn"),
             e("runtimeexec", "bootstrap"),
             e("runtimeexec", "diport"),
             e("runtimeexec", "primitives"),
@@ -1775,15 +1855,19 @@ identity_alias = { package = "identity", version = "1", features = ["test-suppor
         ];
         let deps = [
             runtime_dep("assembly-schema", true),
+            runtime_dep("authn", true),
             runtime_dep("bootstrap", true),
             runtime_dep("diport", true),
             runtime_dep("primitives", true),
             runtime_dep("secure", true),
             runtime_dep("anyhow", false),
+            runtime_dep("serde", false),
+            runtime_dep("serde_json", false),
             runtime_dep("thiserror", false),
             runtime_dep("tokio", false),
             runtime_dep("tokio-util", false),
             runtime_dep("tracing", false),
+            runtime_dep("zeroize", false),
         ];
         assert!(check_runtimeexec_direct_dependencies(&edges, &deps).is_empty());
     }

@@ -138,6 +138,7 @@ pub(crate) struct LaunchAdapter {
     health: SocketAddr,
     budget: httpserve::ServerRequestBudget,
     inventory_publisher: runtimeexec::inventory::InventoryPublisher,
+    frontend: Option<crate::config::ServingFrontendConfig>,
 }
 
 impl LaunchAdapter {
@@ -148,6 +149,7 @@ impl LaunchAdapter {
         health: SocketAddr,
         budget: std::time::Duration,
         inventory_publisher: runtimeexec::inventory::InventoryPublisher,
+        frontend: Option<crate::config::ServingFrontendConfig>,
     ) -> anyhow::Result<Self> {
         Ok(Self {
             listeners,
@@ -156,6 +158,7 @@ impl LaunchAdapter {
             health,
             budget: server_request_budget(budget)?,
             inventory_publisher,
+            frontend,
         })
     }
 }
@@ -173,10 +176,19 @@ struct PreparedListener {
     service: httpserve::ServerMakeService,
 }
 
+struct PreparedMtlsListener {
+    bound: httpd::BoundHttpServer,
+    service: httpserve::ServerMakeService,
+    mtls: httpd::MtlsServerConfig,
+}
+
 pub(crate) struct PreparedListeners {
     primary: PreparedListener,
     admin: PreparedListener,
     health: PreparedListener,
+    primary_front: Option<PreparedMtlsListener>,
+    admin_front: Option<PreparedMtlsListener>,
+    health_front: Option<PreparedListener>,
 }
 
 pub(crate) struct PreparedLaunchListeners {
@@ -198,7 +210,7 @@ impl runtimeexec::LaunchAdapter<FinalizedProbeReceipt> for LaunchAdapter {
     async fn prepare(
         self,
         _receipt: FinalizedProbeReceipt,
-        _transaction: &mut runtimeexec::LaunchTransaction<'_>,
+        transaction: &mut runtimeexec::LaunchTransaction<'_>,
     ) -> anyhow::Result<Self::Prepared> {
         let listeners = prepare_listeners(
             self.listeners,
@@ -208,6 +220,7 @@ impl runtimeexec::LaunchAdapter<FinalizedProbeReceipt> for LaunchAdapter {
             self.budget,
         )
         .await?;
+        let listeners = prepare_frontends(listeners, self.frontend, transaction).await?;
         Ok(PreparedLaunchListeners {
             listeners,
             inventory_publisher: self.inventory_publisher,
@@ -222,11 +235,65 @@ impl runtimeexec::LaunchAdapter<FinalizedProbeReceipt> for LaunchAdapter {
             listeners: prepared,
             inventory_publisher,
         } = prepared;
-        let observations = bound_listener_observations(&prepared);
+        let primary_bound = prepared
+            .primary_front
+            .as_ref()
+            .map_or(&prepared.primary.bound, |front| &front.bound);
+        let admin_bound = prepared
+            .admin_front
+            .as_ref()
+            .map_or(&prepared.admin.bound, |front| &front.bound);
+        let health_bound = prepared
+            .health_front
+            .as_ref()
+            .map_or(&prepared.health.bound, |front| &front.bound);
+        let edge_scheme = if prepared.primary_front.is_some() {
+            runtimeexec::inventory::InventoryEndpointScheme::Https
+        } else {
+            runtimeexec::inventory::InventoryEndpointScheme::Http
+        };
+        let observations = Vec::from([
+            runtimeexec::inventory::BoundListenerObservation::from_bound(
+                "primary-main",
+                assembly_schema::AssemblyListenerKind::Primary,
+                assembly_schema::ListenerAuth::RssAccessToken,
+                edge_scheme,
+                prepared
+                    .primary_front
+                    .as_ref()
+                    .map_or(&prepared.primary.bound, |front| &front.bound)
+                    .local_addr(),
+            ),
+            runtimeexec::inventory::BoundListenerObservation::from_bound(
+                "admin-main",
+                assembly_schema::AssemblyListenerKind::Admin,
+                assembly_schema::ListenerAuth::RssAccessToken,
+                edge_scheme,
+                prepared
+                    .admin_front
+                    .as_ref()
+                    .map_or(&prepared.admin.bound, |front| &front.bound)
+                    .local_addr(),
+            ),
+            runtimeexec::inventory::BoundListenerObservation::from_bound(
+                "health-main",
+                assembly_schema::AssemblyListenerKind::Health,
+                assembly_schema::ListenerAuth::NoAuth,
+                runtimeexec::inventory::InventoryEndpointScheme::Http,
+                prepared
+                    .health_front
+                    .as_ref()
+                    .map_or(&prepared.health.bound, |front| &front.bound)
+                    .local_addr(),
+            ),
+        ]);
+        let primary = primary_bound.local_addr();
+        let admin = admin_bound.local_addr();
+        let health = health_bound.local_addr();
         let inventory = ListenerInventory {
-            primary: prepared.primary.bound.local_addr(),
-            admin: prepared.admin.bound.local_addr(),
-            health: prepared.health.bound.local_addr(),
+            primary,
+            admin,
+            health,
         };
         inventory_publisher
             .publish(observations)
@@ -234,36 +301,17 @@ impl runtimeexec::LaunchAdapter<FinalizedProbeReceipt> for LaunchAdapter {
         register(prepared.primary, &mut registrar);
         register(prepared.admin, &mut registrar);
         register(prepared.health, &mut registrar);
+        if let Some(front) = prepared.primary_front {
+            register_mtls(front, &mut registrar);
+        }
+        if let Some(front) = prepared.admin_front {
+            register_mtls(front, &mut registrar);
+        }
+        if let Some(front) = prepared.health_front {
+            register(front, &mut registrar);
+        }
         registrar.complete(inventory)
     }
-}
-
-fn bound_listener_observations(
-    prepared: &PreparedListeners,
-) -> Vec<runtimeexec::inventory::BoundListenerObservation> {
-    Vec::from([
-        runtimeexec::inventory::BoundListenerObservation::from_bound(
-            "primary-main",
-            assembly_schema::AssemblyListenerKind::Primary,
-            assembly_schema::ListenerAuth::RssAccessToken,
-            runtimeexec::inventory::InventoryEndpointScheme::Http,
-            prepared.primary.bound.local_addr(),
-        ),
-        runtimeexec::inventory::BoundListenerObservation::from_bound(
-            "admin-main",
-            assembly_schema::AssemblyListenerKind::Admin,
-            assembly_schema::ListenerAuth::RssAccessToken,
-            runtimeexec::inventory::InventoryEndpointScheme::Http,
-            prepared.admin.bound.local_addr(),
-        ),
-        runtimeexec::inventory::BoundListenerObservation::from_bound(
-            "health-main",
-            assembly_schema::AssemblyListenerKind::Health,
-            assembly_schema::ListenerAuth::NoAuth,
-            runtimeexec::inventory::InventoryEndpointScheme::Http,
-            prepared.health.bound.local_addr(),
-        ),
-    ])
 }
 
 async fn prepare_listeners(
@@ -295,12 +343,73 @@ async fn prepare_listeners(
             bound: health,
             service: listeners.health.into_make_service(budget),
         },
+        primary_front: None,
+        admin_front: None,
+        health_front: None,
     })
+}
+
+async fn prepare_frontends(
+    mut listeners: PreparedListeners,
+    frontend: Option<crate::config::ServingFrontendConfig>,
+    transaction: &mut runtimeexec::LaunchTransaction<'_>,
+) -> anyhow::Result<PreparedListeners> {
+    let Some(frontend) = frontend else {
+        return Ok(listeners);
+    };
+    let primary_bound = HttpServer::bind(
+        "identityaudit-primary-mtls",
+        SocketAddr::new(frontend.pod_ip, frontend.primary_port),
+    )
+    .await
+    .context("bind identityaudit Primary mTLS frontend")?;
+    let admin_bound = HttpServer::bind(
+        "identityaudit-admin-mtls",
+        SocketAddr::new(frontend.pod_ip, frontend.admin_port),
+    )
+    .await
+    .context("bind identityaudit Admin mTLS frontend")?;
+    let health_bound = HttpServer::bind(
+        "identityaudit-health-front",
+        SocketAddr::new(frontend.pod_ip, frontend.health_port),
+    )
+    .await
+    .context("bind identityaudit Health frontend")?;
+    let prepared =
+        httpd::MtlsServerConfig::from_spire(frontend.allow_set, Some(&frontend.spiffe_endpoint))
+            .await
+            .context("prepare identityaudit SPIFFE mTLS frontend")?;
+    let mtls = prepared.stage_with(|resource| transaction.stage_resource(resource));
+    listeners.primary_front = Some(PreparedMtlsListener {
+        bound: primary_bound,
+        service: listeners.primary.service.clone(),
+        mtls: mtls.clone(),
+    });
+    listeners.admin_front = Some(PreparedMtlsListener {
+        bound: admin_bound,
+        service: listeners.admin.service.clone(),
+        mtls,
+    });
+    listeners.health_front = Some(PreparedListener {
+        bound: health_bound,
+        service: listeners.health.service.clone(),
+    });
+    Ok(listeners)
 }
 
 fn register(listener: PreparedListener, registrar: &mut runtimeexec::LaunchRegistrar<'_>) {
     registrar.register_listener_with_token(move |token| {
         DynManagedResource::new_box(listener.bound.serve(listener.service, token))
+    });
+}
+
+fn register_mtls(listener: PreparedMtlsListener, registrar: &mut runtimeexec::LaunchRegistrar<'_>) {
+    registrar.register_listener_with_token(move |token| {
+        DynManagedResource::new_box(listener.bound.serve_mtls(
+            listener.service,
+            listener.mtls,
+            token,
+        ))
     });
 }
 

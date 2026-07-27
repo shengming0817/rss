@@ -1,0 +1,24 @@
+apiVersion: secrets-store.csi.x-k8s.io/v1
+kind: SecretProviderClass
+metadata:
+  name: rss-settingsonly-settingsonly-migration-secrets
+  labels:
+    helm.sh/chart: rss-0.1.0
+    app.kubernetes.io/name: rss
+    app.kubernetes.io/instance: rss
+    app.kubernetes.io/component: settingsonly
+    app.kubernetes.io/managed-by: Helm
+    rss.gocell.io/profile: settingsonly
+  annotations:
+    rss.gocell.io/assembly-fingerprint: sha256:98193728fc6996a80f5c39a1f01f837addbeb3c7275ac4ab3f136ee34db4ec82
+    rss.gocell.io/runtime-plan-fingerprint: sha256:0560ab22cf6318e35a4e5dddf7bb1e2eb40fdc4e2981fc1f138d8a47425ccafb
+    rss.gocell.io/deployment-fingerprint: sha256:1a5d98c186658296fdaa00247d44e54623817f3b493c06b401e6e34dc055254f
+spec:
+  provider: vault
+  parameters:
+    vaultAddress: https://rss-vault.vault.svc:8200
+    roleName: rss-settingsonly-migration
+    objects: |
+      - objectName: "database-url"
+        secretPath: "settingsonly/database-url"
+        secretKey: "value"

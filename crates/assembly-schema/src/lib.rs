@@ -8,13 +8,17 @@ pub mod repository_contract;
 mod runtime_plan;
 
 pub use deployment::{
-    DeploymentFingerprint, DeploymentIdentityV1Input, DeploymentPlan, DeploymentPlanError,
-    DeploymentPlanErrorStage, DeploymentPlanJsonCategory, DeploymentPlanJsonPath,
-    DeploymentPlanV1Input, DeploymentServiceV1Input, DeploymentWorkloadV1Input,
-    KubernetesSecretName, ParsedDeploymentPlan, PortExposure, PortPlan, PortV1Input, ProbeKind,
-    ProbePlan, ProbeV1Input, ResourceList, ResourceListV1Input, ResourceRequirements,
-    ResourceRequirementsV1Input, SecretRef, SecretRefKind, SecretRefV1Input, ServicePlan,
-    WorkloadIdentity, WorkloadPlan,
+    ApplicationConfig, AvailabilityClass, DatabasePoolCeilings, DatabasePoolCeilingsV1Input,
+    DependencyPeerRole, DeploymentFingerprint, DeploymentIdentityV1Input, DeploymentPlan,
+    DeploymentPlanError, DeploymentPlanErrorStage, DeploymentPlanJsonCategory,
+    DeploymentPlanJsonPath, DeploymentPlanV1Input, DeploymentServiceV1Input,
+    DeploymentWorkloadV1Input, MigrationArtifact, MigrationArtifactV1Input,
+    MigrationExecutionBudget, MigrationExecutionBudgetV1Input, MigrationHeadFingerprint,
+    MigrationMode, ParsedDeploymentPlan, PortExposure, PortPlan, PortV1Input, ProbeKind, ProbePlan,
+    ProbeV1Input, ReplicaDatabaseBudget, ReplicaDatabaseBudgetV1Input, ResourceList,
+    ResourceListV1Input, ResourceRequirements, ResourceRequirementsV1Input, SecretBinding,
+    SecretBindingV1Input, SecretConsumer, SecretPurpose, ServicePlan, VaultObjectRef,
+    VaultObjectRefV1Input, WorkloadIdentity, WorkloadPlan,
 };
 pub use lock::{
     AssemblyDigests, AssemblyFingerprint, AssemblyIdentity, AssemblyLock, AssemblyLockError,

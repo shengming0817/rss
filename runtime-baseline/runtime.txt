@@ -66,6 +66,7 @@ tracing-subscriber = workspace=true
 uuid = workspace=true; features=[v4]
 vault = path=../../adapters/vault; features=[backend]
 vocab = path=../../crates/vocab
+zeroize = workspace=true
 
 [assembly.intent]
 name = runtime
@@ -130,7 +131,7 @@ mergeExtends = probes,resources,workers
 18 | run.provider.vault | assemblies/runtime/src/phase/infra.rs | vault_config.into_runtime() | status=ok
 19 | run.provider.redis | assemblies/runtime/src/phase/infra.rs | build_redis_runtime_deps(redis_config) | status=ok
 20 | run.provider.s3 | assemblies/runtime/src/phase/infra.rs | build_s3_runtime_deps(s3_general_config) | status=ok
-21 | run.provider.pg | assemblies/runtime/src/phase/infra.rs | PgRuntimeDeps::setup_with_audit_admin_config | status=ok
+21 | run.provider.pg | assemblies/runtime/src/phase/infra.rs | PgRuntimeDeps::connect_serving | status=ok
 22 | run.provider.service-token | assemblies/runtime/src/phase/infra.rs | build_service_token_provider( | status=ok
 23 | run.provider-output.pg | assemblies/runtime/src/phase/infra.rs | crate::provider_output::build_pg_runtime_module(pg_owner, pg_readiness_period) | status=ok
 24 | run.resources.service-token | assemblies/runtime/src/phase/infra.rs | if let Some(provider) = runtime_service_token.as_ref() { | status=ok

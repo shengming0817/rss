@@ -41,6 +41,8 @@ members = [
   "crates/syshealth",
   # adapters（实现基础 / 引擎 / 服务 trait；不被域依赖）
   "adapters/postgres",
+  "crates/postgres-migration-inventory",
+  "adapters/postgres-migration",
   "adapters/redis",
   "adapters/amqp",
   "adapters/mqtt",

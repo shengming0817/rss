@@ -7,18 +7,50 @@ set -euo pipefail
 : "${POSTGRES_DB:?missing POSTGRES_DB}"
 : "${POSTGRES_USER:?missing POSTGRES_USER}"
 : "${POSTGRES_APP_USER:?missing POSTGRES_APP_USER}"
-: "${POSTGRES_APP_PASSWORD:?missing POSTGRES_APP_PASSWORD}"
 : "${RSS_PG_READ_USERNAME:?missing RSS_PG_READ_USERNAME}"
-: "${RSS_PG_READ_PASSWORD:?missing RSS_PG_READ_PASSWORD}"
+: "${RSS_PG_PASSWORD_FILE:?missing RSS_PG_PASSWORD_FILE}"
+: "${RSS_PG_READ_PASSWORD_FILE:?missing RSS_PG_READ_PASSWORD_FILE}"
 : "${RSS_PG_DLX_ARCHIVER_USERNAME:?missing RSS_PG_DLX_ARCHIVER_USERNAME}"
-: "${RSS_PG_DLX_ARCHIVER_PASSWORD:?missing RSS_PG_DLX_ARCHIVER_PASSWORD}"
+: "${RSS_PG_DLX_ARCHIVER_PASSWORD_FILE:?missing RSS_PG_DLX_ARCHIVER_PASSWORD_FILE}"
 : "${RSS_PG_DLX_VERIFIER_USERNAME:?missing RSS_PG_DLX_VERIFIER_USERNAME}"
-: "${RSS_PG_DLX_VERIFIER_PASSWORD:?missing RSS_PG_DLX_VERIFIER_PASSWORD}"
+: "${RSS_PG_DLX_VERIFIER_PASSWORD_FILE:?missing RSS_PG_DLX_VERIFIER_PASSWORD_FILE}"
 : "${RSS_PG_DLX_PURGER_USERNAME:?missing RSS_PG_DLX_PURGER_USERNAME}"
-: "${RSS_PG_DLX_PURGER_PASSWORD:?missing RSS_PG_DLX_PURGER_PASSWORD}"
+: "${RSS_PG_DLX_PURGER_PASSWORD_FILE:?missing RSS_PG_DLX_PURGER_PASSWORD_FILE}"
+
+read_secret_file() {
+  local path="$1"
+  [[ "${path}" == /* && "${path}" != *"/../"* && -r "${path}" ]] || {
+    echo "invalid PostgreSQL password file reference" >&2
+    exit 1
+  }
+  local value
+  value="$(<"${path}")"
+  [[ -n "${value}" ]] || {
+    echo "empty PostgreSQL password file" >&2
+    exit 1
+  }
+  printf '%s' "${value}"
+}
+
+RSS_INIT_APP_PASSWORD="$(read_secret_file "${RSS_PG_PASSWORD_FILE}")"
+RSS_INIT_READ_PASSWORD="$(read_secret_file "${RSS_PG_READ_PASSWORD_FILE}")"
+RSS_INIT_DLX_ARCHIVER_PASSWORD="$(read_secret_file "${RSS_PG_DLX_ARCHIVER_PASSWORD_FILE}")"
+RSS_INIT_DLX_VERIFIER_PASSWORD="$(read_secret_file "${RSS_PG_DLX_VERIFIER_PASSWORD_FILE}")"
+RSS_INIT_DLX_PURGER_PASSWORD="$(read_secret_file "${RSS_PG_DLX_PURGER_PASSWORD_FILE}")"
+export RSS_INIT_APP_PASSWORD RSS_INIT_READ_PASSWORD RSS_INIT_DLX_ARCHIVER_PASSWORD
+export RSS_INIT_DLX_VERIFIER_PASSWORD RSS_INIT_DLX_PURGER_PASSWORD
+clear_init_passwords() {
+  unset RSS_INIT_APP_PASSWORD RSS_INIT_READ_PASSWORD RSS_INIT_DLX_ARCHIVER_PASSWORD
+  unset RSS_INIT_DLX_VERIFIER_PASSWORD RSS_INIT_DLX_PURGER_PASSWORD
+}
+trap clear_init_passwords EXIT
 
 if [[ "$RSS_PG_DLX_ARCHIVER_USERNAME" != "rss_dlx_archiver" ]]; then
   echo "RSS_PG_DLX_ARCHIVER_USERNAME must be exactly rss_dlx_archiver" >&2
+  exit 1
+fi
+if [[ "$POSTGRES_APP_USER" != "rss_app" ]]; then
+  echo "POSTGRES_APP_USER must be exactly rss_app" >&2
   exit 1
 fi
 if [[ "$RSS_PG_READ_USERNAME" != "rss_app_read" ]]; then
@@ -38,12 +70,13 @@ psql \
   --username "$POSTGRES_USER" \
   --dbname "$POSTGRES_DB" \
   --set app_user="$POSTGRES_APP_USER" \
-  --set app_password="$POSTGRES_APP_PASSWORD" \
-  --set dlx_archiver_password="$RSS_PG_DLX_ARCHIVER_PASSWORD" \
-  --set dlx_verifier_password="$RSS_PG_DLX_VERIFIER_PASSWORD" \
-  --set dlx_purger_password="$RSS_PG_DLX_PURGER_PASSWORD" \
   --set db_name="$POSTGRES_DB" <<'EOSQL'
-\getenv read_password RSS_PG_READ_PASSWORD
+
+\getenv app_password RSS_INIT_APP_PASSWORD
+\getenv read_password RSS_INIT_READ_PASSWORD
+\getenv dlx_archiver_password RSS_INIT_DLX_ARCHIVER_PASSWORD
+\getenv dlx_verifier_password RSS_INIT_DLX_VERIFIER_PASSWORD
+\getenv dlx_purger_password RSS_INIT_DLX_PURGER_PASSWORD
 
 SELECT format(
   'CREATE ROLE rss_app NOLOGIN NOBYPASSRLS'
@@ -58,7 +91,7 @@ SELECT format(
 WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = :'app_user')\gexec
 
 SELECT format(
-  'ALTER ROLE %I LOGIN PASSWORD %L NOBYPASSRLS',
+  'ALTER ROLE %I LOGIN PASSWORD %L NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION NOINHERIT',
   :'app_user',
   :'app_password'
 )\gexec
@@ -115,3 +148,6 @@ SELECT format(
 )\gexec
 SELECT format('GRANT CONNECT ON DATABASE %I TO rss_dlx_purger', :'db_name')\gexec
 EOSQL
+
+clear_init_passwords
+trap - EXIT

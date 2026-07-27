@@ -12,15 +12,30 @@ use serde::Deserialize;
 use url::{Host, Url};
 use zeroize::Zeroizing;
 
+const SERVING_SECRET_BUNDLE_PATH: &str = "/var/run/rss/secrets/serving-secret-bundle";
+#[cfg(test)]
+use runtimeexec::config::{
+    ADMIN_PORT_ENV, HEALTH_PORT_ENV, MTLS_ALLOW_SET_ENV, POD_IP_ENV, PRIMARY_PORT_ENV,
+    SPIFFE_ENDPOINT_ENV,
+};
+use runtimeexec::config::{FrontendConfigError, SecretDocument, SecretValue};
+#[cfg(test)]
 const PG_WRITER_PASSWORD_ENV: &str = "RSS_IDENTITYAUDIT_PG_WRITER_PASSWORD";
+#[cfg(test)]
 const PG_READER_PASSWORD_ENV: &str = "RSS_IDENTITYAUDIT_PG_READER_PASSWORD";
-const PG_MIGRATOR_PASSWORD_ENV: &str = "RSS_IDENTITYAUDIT_PG_MIGRATOR_PASSWORD";
+#[cfg(test)]
 const PG_AUDIT_ADMIN_PASSWORD_ENV: &str = "RSS_IDENTITYAUDIT_PG_AUDIT_ADMIN_PASSWORD";
+#[cfg(test)]
 const VAULT_SIGNER_TOKEN_ENV: &str = "RSS_IDENTITYAUDIT_VAULT_SIGNER_TOKEN";
+#[cfg(test)]
 const VAULT_DLX_TOKEN_ENV: &str = "RSS_IDENTITYAUDIT_VAULT_DLX_TOKEN";
+#[cfg(test)]
 const IDENTITY_AMQP_URL_ENV: &str = "RSS_IDENTITY_AMQP_URL";
+#[cfg(test)]
 const REDIS_URL_ENV: &str = "RSS_REDIS_URL";
+#[cfg(test)]
 const AUDIT_CHAIN_KEY_ENV: &str = "RSS_AUDIT_CHAIN_KEY_B64URL";
+#[cfg(test)]
 const TENANT_AUTHORITY_KEY_ENV: &str = "RSS_TENANT_AUTHORITY_HMAC_KEY_B64URL";
 const FORBIDDEN_SHARED_AMQP_URL_ENV: &str = "RSS_AMQP_URL";
 const BUILD_SOURCE_SHA_ENV: &str = "RSS_BUILD_SOURCE_SHA";
@@ -50,30 +65,27 @@ fn capture_from(
         ));
     }
 
-    let audit_chain_key = resolve_environment(source, AUDIT_CHAIN_KEY_ENV)?;
-    let tenant_authority_key = resolve_environment(source, TENANT_AUTHORITY_KEY_ENV)?;
+    let document = source
+        .read_secret_bundle(Path::new(SERVING_SECRET_BUNDLE_PATH))
+        .map_err(|error| ConfigError::SecretBundleRead(ReadFailure::from(error.kind())))?;
+    let bundle: ServingSecretBundle = document
+        .parse()
+        .map_err(|_| ConfigError::InvalidSecretBundle)?;
     let build_source_sha = resolve_public_environment(source, BUILD_SOURCE_SHA_ENV)?;
     let build_image_digest = resolve_public_environment(source, BUILD_IMAGE_DIGEST_ENV)?;
     let build_identity =
         runtimeexec::inventory::BuildIdentity::parse(&build_source_sha, &build_image_digest)
             .map_err(|_| ConfigError::InvalidValue("buildIdentity"))?;
-    let secrets = ResolvedSecrets {
-        pg_writer_password: resolve_environment(source, PG_WRITER_PASSWORD_ENV)?,
-        pg_reader_password: resolve_environment(source, PG_READER_PASSWORD_ENV)?,
-        pg_migrator_password: resolve_environment(source, PG_MIGRATOR_PASSWORD_ENV)?,
-        pg_audit_admin_password: resolve_environment(source, PG_AUDIT_ADMIN_PASSWORD_ENV)?,
-        vault_signer_token: resolve_environment(source, VAULT_SIGNER_TOKEN_ENV)?,
-        vault_dlx_token: resolve_environment(source, VAULT_DLX_TOKEN_ENV)?,
-        identity_amqp_url: resolve_environment(source, IDENTITY_AMQP_URL_ENV)?,
-        redis_url: resolve_environment(source, REDIS_URL_ENV)?,
-        audit_chain_key: decode_mac_key(&audit_chain_key, "eventing.auditChainKey")?,
-        tenant_authority_key: decode_mac_key(&tenant_authority_key, "eventing.tenantAuthorityKey")?,
-    };
+    let secrets: ResolvedSecrets = bundle.try_into()?;
     secrets.validate()?;
+    let frontend =
+        runtimeexec::config::capture_serving_frontend(|name| source.read_environment(name))
+            .map_err(frontend_error)?;
     Ok(CapturedConfig {
         config,
         secrets,
         build_identity,
+        frontend,
     })
 }
 
@@ -92,23 +104,9 @@ fn resolve_public_environment(
     Ok(value)
 }
 
-fn resolve_environment(
-    source: &mut impl ConfigSource,
-    name: &'static str,
-) -> Result<Zeroizing<String>, ConfigError> {
-    let value = source
-        .read_environment(name)
-        .ok_or(ConfigError::MissingEnvironment(name))?
-        .into_string()
-        .map_err(|_| ConfigError::NonUnicodeEnvironment(name))?;
-    if value.is_empty() {
-        return Err(ConfigError::EmptyEnvironment(name));
-    }
-    Ok(Zeroizing::new(value))
-}
-
 trait ConfigSource {
     fn read_document(&mut self, path: &Path) -> std::io::Result<String>;
+    fn read_secret_bundle(&mut self, path: &Path) -> std::io::Result<SecretDocument>;
     fn read_environment(&mut self, name: &'static str) -> Option<OsString>;
 }
 
@@ -117,6 +115,10 @@ struct ProcessConfigSource;
 impl ConfigSource for ProcessConfigSource {
     fn read_document(&mut self, path: &Path) -> std::io::Result<String> {
         std::fs::read_to_string(path)
+    }
+
+    fn read_secret_bundle(&mut self, path: &Path) -> std::io::Result<SecretDocument> {
+        runtimeexec::config::read_secret_document(path)
     }
 
     fn read_environment(&mut self, name: &'static str) -> Option<OsString> {
@@ -175,6 +177,8 @@ pub(crate) enum ConfigError {
         column: u32,
     },
     InvalidValue(&'static str),
+    SecretBundleRead(ReadFailure),
+    InvalidSecretBundle,
     MissingEnvironment(&'static str),
     NonUnicodeEnvironment(&'static str),
     EmptyEnvironment(&'static str),
@@ -227,6 +231,15 @@ impl fmt::Display for ConfigError {
             Self::InvalidValue(field) => {
                 write!(formatter, "identityaudit config field is invalid: {field}")
             }
+            Self::SecretBundleRead(kind) => {
+                write!(
+                    formatter,
+                    "identityaudit secret bundle could not be read: {kind:?}"
+                )
+            }
+            Self::InvalidSecretBundle => {
+                formatter.write_str("identityaudit secret bundle is invalid")
+            }
             Self::MissingEnvironment(name) => {
                 write!(
                     formatter,
@@ -259,6 +272,7 @@ pub(crate) struct CapturedConfig {
     config: IdentityAuditConfig,
     secrets: ResolvedSecrets,
     build_identity: runtimeexec::inventory::BuildIdentity,
+    frontend: ServingFrontendConfig,
 }
 
 impl CapturedConfig {
@@ -268,8 +282,25 @@ impl CapturedConfig {
         IdentityAuditConfig,
         ResolvedSecrets,
         runtimeexec::inventory::BuildIdentity,
+        ServingFrontendConfig,
     ) {
-        (self.config, self.secrets, self.build_identity)
+        (
+            self.config,
+            self.secrets,
+            self.build_identity,
+            self.frontend,
+        )
+    }
+}
+
+pub(crate) type ServingFrontendConfig = runtimeexec::config::ServingFrontendConfig;
+
+fn frontend_error(error: FrontendConfigError) -> ConfigError {
+    match error {
+        FrontendConfigError::Missing(name) => ConfigError::MissingEnvironment(name),
+        FrontendConfigError::NonUnicode(name) => ConfigError::NonUnicodeEnvironment(name),
+        FrontendConfigError::Empty(name) => ConfigError::EmptyEnvironment(name),
+        FrontendConfigError::Invalid(name) => ConfigError::InvalidValue(name),
     }
 }
 
@@ -282,7 +313,6 @@ impl fmt::Debug for CapturedConfig {
 pub(crate) struct ResolvedSecrets {
     pg_writer_password: Zeroizing<String>,
     pg_reader_password: Zeroizing<String>,
-    pg_migrator_password: Zeroizing<String>,
     pg_audit_admin_password: Zeroizing<String>,
     vault_signer_token: Zeroizing<String>,
     vault_dlx_token: Zeroizing<String>,
@@ -290,6 +320,59 @@ pub(crate) struct ResolvedSecrets {
     redis_url: Zeroizing<String>,
     audit_chain_key: primitives::MacKey,
     tenant_authority_key: primitives::MacKey,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ServingSecretBundle {
+    pg_writer_password: SecretValue,
+    pg_reader_password: SecretValue,
+    pg_audit_admin_password: SecretValue,
+    vault_signer_token: SecretValue,
+    vault_dlx_token: SecretValue,
+    identity_amqp_url: SecretValue,
+    redis_url: SecretValue,
+    audit_chain_key: SecretValue,
+    tenant_authority_key: SecretValue,
+}
+
+impl TryFrom<ServingSecretBundle> for ResolvedSecrets {
+    type Error = ConfigError;
+
+    fn try_from(value: ServingSecretBundle) -> Result<Self, Self::Error> {
+        let values = [
+            value.pg_writer_password.as_str(),
+            value.pg_reader_password.as_str(),
+            value.pg_audit_admin_password.as_str(),
+            value.vault_signer_token.as_str(),
+            value.vault_dlx_token.as_str(),
+            value.identity_amqp_url.as_str(),
+            value.redis_url.as_str(),
+            value.audit_chain_key.as_str(),
+            value.tenant_authority_key.as_str(),
+        ];
+        if values.iter().any(|value| value.is_empty()) {
+            return Err(ConfigError::InvalidSecretBundle);
+        }
+        let audit_chain_key = value.audit_chain_key.into_zeroizing();
+        let tenant_authority_key = value.tenant_authority_key.into_zeroizing();
+        let secrets = Self {
+            pg_writer_password: value.pg_writer_password.into_zeroizing(),
+            pg_reader_password: value.pg_reader_password.into_zeroizing(),
+            pg_audit_admin_password: value.pg_audit_admin_password.into_zeroizing(),
+            vault_signer_token: value.vault_signer_token.into_zeroizing(),
+            vault_dlx_token: value.vault_dlx_token.into_zeroizing(),
+            identity_amqp_url: value.identity_amqp_url.into_zeroizing(),
+            redis_url: value.redis_url.into_zeroizing(),
+            audit_chain_key: decode_mac_key(&audit_chain_key, "eventing.auditChainKey")?,
+            tenant_authority_key: decode_mac_key(
+                &tenant_authority_key,
+                "eventing.tenantAuthorityKey",
+            )?,
+        };
+        secrets.validate()?;
+        Ok(secrets)
+    }
 }
 
 impl ResolvedSecrets {
@@ -318,14 +401,12 @@ impl ResolvedSecrets {
         Zeroizing<String>,
         Zeroizing<String>,
         Zeroizing<String>,
-        Zeroizing<String>,
         primitives::MacKey,
         primitives::MacKey,
     ) {
         (
             self.pg_writer_password,
             self.pg_reader_password,
-            self.pg_migrator_password,
             self.pg_audit_admin_password,
             self.vault_signer_token,
             self.vault_dlx_token,
@@ -631,7 +712,6 @@ pub(crate) struct PostgresConfig {
     connection: PgConnectionConfig,
     writer: PgWriterRoleConfig,
     reader: PgReaderRoleConfig,
-    migrator: PgMigratorRoleConfig,
     audit_admin: PgAuditAdminRoleConfig,
 }
 
@@ -640,7 +720,6 @@ impl PostgresConfig {
         self.connection.validate()?;
         self.writer.validate()?;
         self.reader.validate()?;
-        self.migrator.validate()?;
         self.audit_admin.validate()
     }
 
@@ -650,16 +729,9 @@ impl PostgresConfig {
         PgConnectionConfig,
         PgWriterRoleConfig,
         PgReaderRoleConfig,
-        PgMigratorRoleConfig,
         PgAuditAdminRoleConfig,
     ) {
-        (
-            self.connection,
-            self.writer,
-            self.reader,
-            self.migrator,
-            self.audit_admin,
-        )
+        (self.connection, self.writer, self.reader, self.audit_admin)
     }
 }
 
@@ -710,13 +782,12 @@ impl PgConnectionConfig {
 }
 
 macro_rules! postgres_role {
-    ($type:ident, $reference:ident, $field:literal, $getter:ident) => {
+    ($type:ident, $field:literal, $getter:ident) => {
         #[derive(Deserialize, JsonSchema)]
         #[serde(rename_all = "camelCase", deny_unknown_fields)]
         pub(crate) struct $type {
             #[schemars(length(min = 1), regex(pattern = "^.*\\S.*$"))]
             username: String,
-            password: $reference,
             #[schemars(range(min = 1, max = 100))]
             max_connections: u32,
         }
@@ -730,7 +801,6 @@ macro_rules! postgres_role {
                     100,
                     concat!($field, ".maxConnections"),
                 )?;
-                let _environment = self.password.environment_name();
                 Ok(())
             }
 
@@ -741,135 +811,12 @@ macro_rules! postgres_role {
     };
 }
 
-postgres_role!(
-    PgWriterRoleConfig,
-    PgWriterPasswordReference,
-    "postgres.writer",
-    into_writer_pool
-);
-postgres_role!(
-    PgReaderRoleConfig,
-    PgReaderPasswordReference,
-    "postgres.reader",
-    into_reader_pool
-);
+postgres_role!(PgWriterRoleConfig, "postgres.writer", into_writer_pool);
+postgres_role!(PgReaderRoleConfig, "postgres.reader", into_reader_pool);
 postgres_role!(
     PgAuditAdminRoleConfig,
-    PgAuditAdminPasswordReference,
     "postgres.auditAdmin",
     into_audit_admin_pool
-);
-
-#[derive(Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct PgMigratorRoleConfig {
-    #[schemars(length(min = 1), regex(pattern = "^.*\\S.*$"))]
-    username: String,
-    password: PgMigratorPasswordReference,
-}
-
-impl PgMigratorRoleConfig {
-    fn validate(&self) -> Result<(), ConfigError> {
-        non_blank(&self.username, "postgres.migrator.username")?;
-        let _environment = self.password.environment_name();
-        Ok(())
-    }
-
-    pub(crate) fn into_username(self) -> String {
-        self.username
-    }
-}
-
-#[derive(Clone, Copy, Deserialize, JsonSchema)]
-enum EnvironmentReferenceKind {
-    #[serde(rename = "environmentRef")]
-    EnvironmentRef,
-}
-
-macro_rules! environment_reference {
-    ($reference:ident, $environment:ident, $wire_name:literal, $name:expr) => {
-        #[derive(Deserialize, JsonSchema)]
-        #[serde(rename_all = "camelCase", deny_unknown_fields)]
-        struct $reference {
-            kind: EnvironmentReferenceKind,
-            name: $environment,
-        }
-
-        impl $reference {
-            fn environment_name(&self) -> &'static str {
-                match (self.kind, self.name) {
-                    (EnvironmentReferenceKind::EnvironmentRef, $environment::$environment) => $name,
-                }
-            }
-        }
-
-        #[derive(Clone, Copy, Deserialize, JsonSchema)]
-        enum $environment {
-            #[serde(rename = $wire_name)]
-            $environment,
-        }
-    };
-}
-
-environment_reference!(
-    PgWriterPasswordReference,
-    PgWriterPasswordEnvironment,
-    "RSS_IDENTITYAUDIT_PG_WRITER_PASSWORD",
-    PG_WRITER_PASSWORD_ENV
-);
-environment_reference!(
-    PgReaderPasswordReference,
-    PgReaderPasswordEnvironment,
-    "RSS_IDENTITYAUDIT_PG_READER_PASSWORD",
-    PG_READER_PASSWORD_ENV
-);
-environment_reference!(
-    PgMigratorPasswordReference,
-    PgMigratorPasswordEnvironment,
-    "RSS_IDENTITYAUDIT_PG_MIGRATOR_PASSWORD",
-    PG_MIGRATOR_PASSWORD_ENV
-);
-environment_reference!(
-    PgAuditAdminPasswordReference,
-    PgAuditAdminPasswordEnvironment,
-    "RSS_IDENTITYAUDIT_PG_AUDIT_ADMIN_PASSWORD",
-    PG_AUDIT_ADMIN_PASSWORD_ENV
-);
-environment_reference!(
-    VaultSignerTokenReference,
-    VaultSignerTokenEnvironment,
-    "RSS_IDENTITYAUDIT_VAULT_SIGNER_TOKEN",
-    VAULT_SIGNER_TOKEN_ENV
-);
-environment_reference!(
-    VaultDlxTokenReference,
-    VaultDlxTokenEnvironment,
-    "RSS_IDENTITYAUDIT_VAULT_DLX_TOKEN",
-    VAULT_DLX_TOKEN_ENV
-);
-environment_reference!(
-    IdentityAmqpUrlReference,
-    IdentityAmqpUrlEnvironment,
-    "RSS_IDENTITY_AMQP_URL",
-    IDENTITY_AMQP_URL_ENV
-);
-environment_reference!(
-    RedisUrlReference,
-    RedisUrlEnvironment,
-    "RSS_REDIS_URL",
-    REDIS_URL_ENV
-);
-environment_reference!(
-    AuditChainKeyReference,
-    AuditChainKeyEnvironment,
-    "RSS_AUDIT_CHAIN_KEY_B64URL",
-    AUDIT_CHAIN_KEY_ENV
-);
-environment_reference!(
-    TenantAuthorityKeyReference,
-    TenantAuthorityKeyEnvironment,
-    "RSS_TENANT_AUTHORITY_HMAC_KEY_B64URL",
-    TENANT_AUTHORITY_KEY_ENV
 );
 
 #[derive(Deserialize, JsonSchema)]
@@ -885,8 +832,6 @@ pub(crate) struct VaultConfig {
     signing_key_name: String,
     #[schemars(length(min = 1), regex(pattern = "^.*\\S.*$"))]
     dlx_payload_key_name: String,
-    signer_token: VaultSignerTokenReference,
-    dlx_token: VaultDlxTokenReference,
     #[schemars(range(min = 1, max = 30))]
     readiness_seconds: u64,
 }
@@ -898,11 +843,6 @@ impl VaultConfig {
         non_blank(&self.transit_mount, "vault.transitMount")?;
         non_blank(&self.signing_key_name, "vault.signingKeyName")?;
         non_blank(&self.dlx_payload_key_name, "vault.dlxPayloadKeyName")?;
-        if self.signer_token.environment_name() != VAULT_SIGNER_TOKEN_ENV
-            || self.dlx_token.environment_name() != VAULT_DLX_TOKEN_ENV
-        {
-            return Err(ConfigError::InvalidValue("vault.workloadTokens"));
-        }
         bounded(self.readiness_seconds, 1, 30, "vault.readinessSeconds")
     }
 
@@ -921,11 +861,7 @@ impl VaultConfig {
 #[derive(Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct EventingConfig {
-    identity_amqp_url: IdentityAmqpUrlReference,
-    redis_url: RedisUrlReference,
-    audit_chain_key: AuditChainKeyReference,
     audit_chain_key_id: AuditChainKeyId,
-    tenant_authority_key: TenantAuthorityKeyReference,
     #[schemars(range(min = 3600, max = 86_400))]
     tenant_authority_ttl_seconds: u64,
     #[schemars(range(min = 0, max = 300))]
@@ -961,7 +897,6 @@ impl AuditChainKeyId {
 }
 
 pub(crate) struct EventingInputs {
-    pub(crate) environment_names: (&'static str, &'static str, &'static str, &'static str),
     pub(crate) audit_chain_key_id: AuditChainKeyId,
     pub(crate) tenant_authority_ttl: Duration,
     pub(crate) tenant_authority_clock_skew: Duration,
@@ -969,21 +904,6 @@ pub(crate) struct EventingInputs {
 
 impl EventingConfig {
     fn validate(&self) -> Result<(), ConfigError> {
-        let actual = [
-            self.identity_amqp_url.environment_name(),
-            self.redis_url.environment_name(),
-            self.audit_chain_key.environment_name(),
-            self.tenant_authority_key.environment_name(),
-        ];
-        let expected = [
-            IDENTITY_AMQP_URL_ENV,
-            REDIS_URL_ENV,
-            AUDIT_CHAIN_KEY_ENV,
-            TENANT_AUTHORITY_KEY_ENV,
-        ];
-        if actual != expected {
-            return Err(ConfigError::InvalidValue("eventing"));
-        }
         if self.audit_chain_key_id.get() != 1 {
             return Err(ConfigError::InvalidValue("eventing.auditChainKeyId"));
         }
@@ -1004,12 +924,6 @@ impl EventingConfig {
 
     pub(crate) fn into_eventing_inputs(self) -> EventingInputs {
         EventingInputs {
-            environment_names: (
-                self.identity_amqp_url.environment_name(),
-                self.redis_url.environment_name(),
-                self.audit_chain_key.environment_name(),
-                self.tenant_authority_key.environment_name(),
-            ),
             audit_chain_key_id: self.audit_chain_key_id,
             tenant_authority_ttl: Duration::from_secs(self.tenant_authority_ttl_seconds),
             tenant_authority_clock_skew: Duration::from_secs(
@@ -1149,18 +1063,12 @@ sslRootCertPath = "/run/rss/postgres-ca.pem"
 [postgres.writer]
 username = "rss_identity_writer"
 maxConnections = 10
-password = { kind = "environmentRef", name = "RSS_IDENTITYAUDIT_PG_WRITER_PASSWORD" }
 [postgres.reader]
 username = "rss_identity_reader"
 maxConnections = 10
-password = { kind = "environmentRef", name = "RSS_IDENTITYAUDIT_PG_READER_PASSWORD" }
-[postgres.migrator]
-username = "rss_identity_migrator"
-password = { kind = "environmentRef", name = "RSS_IDENTITYAUDIT_PG_MIGRATOR_PASSWORD" }
 [postgres.auditAdmin]
 username = "rss_audit_admin"
 maxConnections = 5
-password = { kind = "environmentRef", name = "RSS_IDENTITYAUDIT_PG_AUDIT_ADMIN_PASSWORD" }
 
 [vault]
 addr = "https://vault.example.test:8200"
@@ -1168,16 +1076,10 @@ caCertPemPath = "/run/rss/vault-ca.pem"
 transitMount = "transit"
 signingKeyName = "identity-access"
 dlxPayloadKeyName = "identityaudit-dlx-payload"
-signerToken = { kind = "environmentRef", name = "RSS_IDENTITYAUDIT_VAULT_SIGNER_TOKEN" }
-dlxToken = { kind = "environmentRef", name = "RSS_IDENTITYAUDIT_VAULT_DLX_TOKEN" }
 readinessSeconds = 10
 
 [eventing]
-identityAmqpUrl = { kind = "environmentRef", name = "RSS_IDENTITY_AMQP_URL" }
-redisUrl = { kind = "environmentRef", name = "RSS_REDIS_URL" }
-auditChainKey = { kind = "environmentRef", name = "RSS_AUDIT_CHAIN_KEY_B64URL" }
 auditChainKeyId = 1
-tenantAuthorityKey = { kind = "environmentRef", name = "RSS_TENANT_AUTHORITY_HMAC_KEY_B64URL" }
 tenantAuthorityTtlSeconds = 3600
 tenantAuthorityClockSkewSeconds = 60
 "#;
@@ -1194,7 +1096,6 @@ tenantAuthorityClockSkewSeconds = 60
             let environments = [
                 (PG_WRITER_PASSWORD_ENV, SECRET_SENTINEL),
                 (PG_READER_PASSWORD_ENV, SECRET_SENTINEL),
-                (PG_MIGRATOR_PASSWORD_ENV, SECRET_SENTINEL),
                 (PG_AUDIT_ADMIN_PASSWORD_ENV, SECRET_SENTINEL),
                 (VAULT_SIGNER_TOKEN_ENV, SECRET_SENTINEL),
                 (VAULT_DLX_TOKEN_ENV, "identityaudit-dlx-token-distinct"),
@@ -1213,6 +1114,15 @@ tenantAuthorityClockSkewSeconds = 60
                     BUILD_IMAGE_DIGEST_ENV,
                     "sha256:0dc0251564b714e89c8d098560ddfe69eb08c87fb85ac87323c54a7650126592",
                 ),
+                (POD_IP_ENV, "127.0.0.2"),
+                (PRIMARY_PORT_ENV, "8080"),
+                (ADMIN_PORT_ENV, "8081"),
+                (HEALTH_PORT_ENV, "8083"),
+                (
+                    MTLS_ALLOW_SET_ENV,
+                    "[\"spiffe://rss.local/ns/rss/sa/ingress-gateway\"]",
+                ),
+                (SPIFFE_ENDPOINT_ENV, "unix:///run/spire/sockets/agent.sock"),
             ]
             .into_iter()
             .map(|(name, value)| (name, OsString::from(value)))
@@ -1230,6 +1140,37 @@ tenantAuthorityClockSkewSeconds = 60
         fn read_document(&mut self, _path: &Path) -> std::io::Result<String> {
             self.document_reads += 1;
             Ok(self.document.clone())
+        }
+
+        fn read_secret_bundle(&mut self, _path: &Path) -> std::io::Result<SecretDocument> {
+            let pg_writer_password = self.read_environment(PG_WRITER_PASSWORD_ENV);
+            let pg_reader_password = self.read_environment(PG_READER_PASSWORD_ENV);
+            let pg_audit_admin_password = self.read_environment(PG_AUDIT_ADMIN_PASSWORD_ENV);
+            let vault_signer_token = self.read_environment(VAULT_SIGNER_TOKEN_ENV);
+            let vault_dlx_token = self.read_environment(VAULT_DLX_TOKEN_ENV);
+            let identity_amqp_url = self.read_environment(IDENTITY_AMQP_URL_ENV);
+            let redis_url = self.read_environment(REDIS_URL_ENV);
+            let audit_chain_key = self.read_environment(AUDIT_CHAIN_KEY_ENV);
+            let tenant_authority_key = self.read_environment(TENANT_AUTHORITY_KEY_ENV);
+            let text = |value: Option<OsString>| {
+                value
+                    .and_then(|value| value.into_string().ok())
+                    .unwrap_or_default()
+            };
+            Ok(SecretDocument::new(Zeroizing::new(
+                serde_json::json!({
+                    "pgWriterPassword": text(pg_writer_password),
+                    "pgReaderPassword": text(pg_reader_password),
+                    "pgAuditAdminPassword": text(pg_audit_admin_password),
+                    "vaultSignerToken": text(vault_signer_token),
+                    "vaultDlxToken": text(vault_dlx_token),
+                    "identityAmqpUrl": text(identity_amqp_url),
+                    "redisUrl": text(redis_url),
+                    "auditChainKey": text(audit_chain_key),
+                    "tenantAuthorityKey": text(tenant_authority_key),
+                })
+                .to_string(),
+            )))
         }
 
         fn read_environment(&mut self, name: &'static str) -> Option<OsString> {
@@ -1317,14 +1258,17 @@ tenantAuthorityClockSkewSeconds = 60
     #[test]
     fn plaintext_and_non_closed_secret_references_are_rejected_without_leaking_values() {
         let plaintext = VALID_CONFIG.replace(
-            "password = { kind = \"environmentRef\", name = \"RSS_IDENTITYAUDIT_PG_WRITER_PASSWORD\" }",
-            &format!("password = \"{SECRET_SENTINEL}\""),
+            "username = \"rss_identity_writer\"",
+            &format!("username = \"rss_identity_writer\"\npassword = \"{SECRET_SENTINEL}\""),
         );
         let wrong_kind = VALID_CONFIG.replace(
-            "kind = \"environmentRef\", name = \"RSS_IDENTITYAUDIT_VAULT_SIGNER_TOKEN\"",
-            "kind = \"fileRef\", name = \"RSS_IDENTITYAUDIT_VAULT_SIGNER_TOKEN\"",
+            "signingKeyName = \"identity-access\"",
+            "signingKeyName = \"identity-access\"\nsignerToken = { kind = \"fileRef\", path = \"/tmp/token\" }",
         );
-        let generic_name = VALID_CONFIG.replace("RSS_REDIS_URL", "RSS_ARBITRARY_SECRET");
+        let generic_name = VALID_CONFIG.replace(
+            "[eventing]",
+            "[eventing]\nsecretEnvironment = \"RSS_ARBITRARY_SECRET\"",
+        );
         for document in [&plaintext, &wrong_kind, &generic_name] {
             let error = parse_error(document);
             assert!(matches!(error, ConfigError::InvalidDocument { .. }));
@@ -1338,21 +1282,34 @@ tenantAuthorityClockSkewSeconds = 60
         let mut source = TestSource::complete(VALID_CONFIG);
         let captured = capture_from(Path::new("ignored"), &mut source).expect("capture");
         assert_eq!(source.document_reads, 1);
-        assert_eq!(source.environment_reads.len(), 13);
+        assert_eq!(source.environment_reads.len(), 18);
         assert!(source.environment_reads.values().all(|reads| *reads == 1));
         assert_eq!(source.environment_reads[FORBIDDEN_SHARED_AMQP_URL_ENV], 1);
         assert!(!format!("{captured:?}").contains(SECRET_SENTINEL));
-        let (_, secrets, build_identity) = captured.into_runtime_inputs();
+        let (_, secrets, build_identity, frontend) = captured.into_runtime_inputs();
         assert_eq!(
             build_identity.source_sha(),
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         );
+        assert_eq!(frontend.primary_port, 8080);
         assert!(!format!("{secrets:?}").contains(SECRET_SENTINEL));
         let material = secrets.into_secret_material();
         assert_eq!(&*material.0, SECRET_SENTINEL);
-        assert_eq!(&*material.4, SECRET_SENTINEL);
+        assert_eq!(&*material.3, SECRET_SENTINEL);
+        assert_eq!(material.7.as_bytes().len(), 32);
         assert_eq!(material.8.as_bytes().len(), 32);
-        assert_eq!(material.9.as_bytes().len(), 32);
+    }
+
+    #[test]
+    fn frontend_failure_names_the_exact_environment_variable() {
+        let mut source = TestSource::complete(VALID_CONFIG);
+        source
+            .environments
+            .insert(PRIMARY_PORT_ENV, OsString::from("not-a-port"));
+
+        let error = capture_from(Path::new("ignored"), &mut source).unwrap_err();
+
+        assert_eq!(error, ConfigError::InvalidValue(PRIMARY_PORT_ENV));
     }
 
     #[test]
@@ -1375,10 +1332,7 @@ tenantAuthorityClockSkewSeconds = 60
         let mut missing = TestSource::complete(VALID_CONFIG);
         missing.environments.remove(VAULT_SIGNER_TOKEN_ENV);
         let error = capture_from(Path::new("ignored"), &mut missing).unwrap_err();
-        assert_eq!(
-            error,
-            ConfigError::MissingEnvironment(VAULT_SIGNER_TOKEN_ENV)
-        );
+        assert_eq!(error, ConfigError::InvalidSecretBundle);
         assert!(!format!("{error:?} {error}").contains(SECRET_SENTINEL));
 
         let mut plaintext_remote = TestSource::complete(VALID_CONFIG);
@@ -1531,15 +1485,13 @@ tenantAuthorityClockSkewSeconds = 60
         assert_eq!(budget, Duration::from_secs(30));
         assert_eq!(identity.into_identity_inputs().3, Duration::from_secs(900));
         assert_eq!(oidc.into_oidc_inputs().3, Duration::from_secs(30));
-        let (connection, writer, reader, migrator, audit_admin) = postgres.into_postgres_inputs();
+        let (connection, writer, reader, audit_admin) = postgres.into_postgres_inputs();
         assert_eq!(connection.into_connect_options().1, 5432);
         assert_eq!(writer.into_writer_pool().1, 10);
         assert_eq!(reader.into_reader_pool().1, 10);
-        assert_eq!(migrator.into_username(), "rss_identity_migrator");
         assert_eq!(audit_admin.into_audit_admin_pool().1, 5);
         assert_eq!(vault.into_vault_inputs().3, "identity-access");
         let eventing = eventing.into_eventing_inputs();
-        assert_eq!(eventing.environment_names.0, IDENTITY_AMQP_URL_ENV);
         assert_eq!(eventing.audit_chain_key_id.get(), 1);
         assert_eq!(eventing.tenant_authority_ttl, Duration::from_secs(3600));
         assert_eq!(

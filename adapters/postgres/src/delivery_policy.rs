@@ -1,7 +1,7 @@
 //! Database policy for bounded same-ID outbox delivery and relay I/O.
 //!
 //! The type and every field stay crate-private. Runtime assemblies can only receive capabilities
-//! bound to a policy loaded during [`crate::PgRuntimeDeps::setup`]; before transport activation they
+//! bound to a policy loaded during [`crate::PgRuntimeDeps::connect_serving`]; before transport activation they
 //! exact-match the configured typed relay budget through [`crate::PgRuntimeHandle`].
 
 use crate::{PgError, PgStore};
