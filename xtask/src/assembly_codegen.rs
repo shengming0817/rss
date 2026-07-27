@@ -578,24 +578,23 @@ fn render_providers(manifest: &CanonicalAssemblyManifestV1, source_label: &str) 
     }
     code.push_str("];\n");
     if matches!(manifest.name(), "settingsonly" | "identityaudit") {
-        render_settingsonly_provider_role_batches(&mut code, &providers)?;
-        if manifest.name() == "identityaudit" {
-            code = code.replace("settingsonly", "identityaudit");
-        }
+        render_provider_role_batches(&mut code, manifest.name(), &providers)?;
     }
     let formatted = crate::codegen::format_rust(&code)?;
     validate_provider_catalog_syntax(&formatted)?;
     Ok(formatted)
 }
 
-fn render_settingsonly_provider_role_batches(
+fn render_provider_role_batches(
     code: &mut String,
+    assembly_name: &str,
     providers: &[&assembly_schema::DiportProvider],
 ) -> Result<()> {
     ensure!(
         !providers.is_empty(),
-        "settingsonly provider role batches require a non-empty active catalog"
+        "{assembly_name} provider role batches require a non-empty active catalog"
     );
+    let scoped = |template: &str| template.replace("__ASSEMBLY__", assembly_name);
 
     code.push_str("\npub(crate) struct ProviderRoleBatches {\n");
     for provider in providers {
@@ -606,60 +605,63 @@ fn render_settingsonly_provider_role_batches(
     code.push_str(
         "}\n\
          \npub(crate) struct CompletedProviderRoles {\n\
-             _sealed: (),\n\
+             probe_bindings: Vec<runtimeexec::inventory::ProviderProbeBinding>,\n\
+         }\n\
+         \nimpl CompletedProviderRoles {\n\
+             pub(crate) fn into_probe_bindings(self) -> Vec<runtimeexec::inventory::ProviderProbeBinding> { self.probe_bindings }\n\
          }\n\
          \nimpl ProviderRoleBatches {\n",
     );
-    code.push_str(
+    code.push_str(&scoped(
         "    pub(crate) fn exact_join(plans: &[assembly_schema::ProviderPlan]) -> anyhow::Result<Self> {\n\
-                 anyhow::ensure!(plans.len() == PROVIDER_CATALOG.len(), \"settingsonly RuntimePlan/generated provider catalog count drift\");\n\
+                 anyhow::ensure!(plans.len() == PROVIDER_CATALOG.len(), \"__ASSEMBLY__ RuntimePlan/generated provider catalog count drift\");\n\
                  let mut batches = Self {\n",
-    );
+    ));
     for provider in providers {
         let field = provider.id.as_str().replace('-', "_");
         code.push_str(&format!("            {field}: None,\n"));
     }
-    code.push_str(
+    code.push_str(&scoped(
         "        };\n\
                  for entry in PROVIDER_CATALOG {\n\
                      let mut matching = plans.iter().filter(|plan| plan.id() == entry.role().as_str());\n\
-                     let plan = matching.next().ok_or_else(|| anyhow::anyhow!(\"settingsonly RuntimePlan omits generated provider role '{}'\", entry.role().as_str()))?;\n\
-                     anyhow::ensure!(matching.next().is_none(), \"settingsonly RuntimePlan duplicates generated provider role '{}'\", entry.role().as_str());\n\
-                     anyhow::ensure!(plan.constructor() == entry.evidence().constructor() && plan.outputs() == entry.evidence().outputs(), \"settingsonly RuntimePlan disagrees with generated provider role '{}'\", entry.role().as_str());\n\
+                     let plan = matching.next().ok_or_else(|| anyhow::anyhow!(\"__ASSEMBLY__ RuntimePlan omits generated provider role '{}'\", entry.role().as_str()))?;\n\
+                     anyhow::ensure!(matching.next().is_none(), \"__ASSEMBLY__ RuntimePlan duplicates generated provider role '{}'\", entry.role().as_str());\n\
+                     anyhow::ensure!(plan.constructor() == entry.evidence().constructor() && plan.outputs() == entry.evidence().outputs(), \"__ASSEMBLY__ RuntimePlan disagrees with generated provider role '{}'\", entry.role().as_str());\n\
                      match entry.role() {\n",
-    );
+    ));
     for provider in providers {
         let role = provider_role_variant(provider.id);
         let field = provider.id.as_str().replace('-', "_");
         let constructor = format!("{role}Constructor");
-        code.push_str(&format!(
-            "                ProviderRole::{role} => anyhow::ensure!(batches.{field}.replace({constructor} {{ entry }}).is_none(), \"settingsonly generated provider role '{{}}' is duplicated\", entry.role().as_str()),\n"
-        ));
+        code.push_str(&scoped(&format!(
+            "                ProviderRole::{role} => anyhow::ensure!(batches.{field}.replace({constructor} {{ entry }}).is_none(), \"__ASSEMBLY__ generated provider role '{{}}' is duplicated\", entry.role().as_str()),\n"
+        )));
     }
-    code.push_str(
-        "                _ => anyhow::bail!(\"settingsonly generated provider catalog contains unsupported role '{}'\", entry.role().as_str()),\n\
+    code.push_str(&scoped(
+        "                _ => anyhow::bail!(\"__ASSEMBLY__ generated provider catalog contains unsupported role '{}'\", entry.role().as_str()),\n\
                      }\n\
                  }\n\
                  batches.require_complete()?;\n\
                  Ok(batches)\n\
              }\n\
              fn require_complete(&self) -> anyhow::Result<()> {\n",
-    );
+    ));
     for provider in providers {
         let field = provider.id.as_str().replace('-', "_");
-        code.push_str(&format!(
-            "        anyhow::ensure!(self.{field}.is_some(), \"settingsonly generated provider role '{}' is missing\");\n",
+        code.push_str(&scoped(&format!(
+            "        anyhow::ensure!(self.{field}.is_some(), \"__ASSEMBLY__ generated provider role '{}' is missing\");\n",
             provider.id.as_str()
-        ));
+        )));
     }
     code.push_str("        Ok(())\n    }\n");
     for provider in providers {
         let field = provider.id.as_str().replace('-', "_");
         let constructor = format!("{}Constructor", provider_role_variant(provider.id));
-        code.push_str(&format!(
-            "    pub(crate) fn {field}(&mut self) -> anyhow::Result<{constructor}> {{\n        self.{field}.take().ok_or_else(|| anyhow::anyhow!(\"settingsonly provider constructor '{role}' was consumed more than once\"))\n    }}\n",
+        code.push_str(&scoped(&format!(
+            "    pub(crate) fn {field}(&mut self) -> anyhow::Result<{constructor}> {{\n        self.{field}.take().ok_or_else(|| anyhow::anyhow!(\"__ASSEMBLY__ provider constructor '{role}' was consumed more than once\"))\n    }}\n",
             role = provider.id.as_str()
-        ));
+        )));
     }
     code.push_str(
         "    #[allow(clippy::too_many_arguments)]\n    // reason: generated exact-join closure has one move-only receipt per declared provider role.\n    pub(crate) fn finish(\n        self,\n        inventory: &bootstrap::DomainModuleResult,\n",
@@ -671,11 +673,13 @@ fn render_settingsonly_provider_role_batches(
     }
     code.push_str("    ) -> anyhow::Result<CompletedProviderRoles> {\n");
     code.push_str("        let mut staged = [0_usize; 3];\n");
+    code.push_str("        let mut probe_bindings = Vec::with_capacity(PROVIDER_CATALOG.len());\n");
     for provider in providers {
         let field = provider.id.as_str().replace('-', "_");
         let receipt = format!("{}Receipt", provider_role_variant(provider.id));
         code.push_str(&format!(
-            "        let {receipt} {{ probes, resources, workers }} = {field};\n        staged[0] += probes;\n        staged[1] += resources;\n        staged[2] += workers;\n"
+            "        let {receipt} {{ probes, resources, workers, probe_names }} = {field};\n        staged[0] += probes;\n        staged[1] += resources;\n        staged[2] += workers;\n        probe_bindings.push(runtimeexec::inventory::ProviderProbeBinding::new(\"{}\", probe_names)?);\n",
+            provider.id.as_str(),
         ));
     }
     code.push_str("        if ");
@@ -688,17 +692,17 @@ fn render_settingsonly_provider_role_batches(
             provider.id.as_str().replace('-', "_")
         ));
     }
-    code.push_str(
+    code.push_str(&scoped(
         " {\n\
-                     anyhow::bail!(\"settingsonly provider role receipt came from a different exact-join generation\");\n\
+                     anyhow::bail!(\"__ASSEMBLY__ provider role receipt came from a different exact-join generation\");\n\
                  }\n\
-                 anyhow::ensure!(inventory.probes.len() >= staged[0] && inventory.resources.len() >= staged[1] && inventory.workers.len() >= staged[2], \"settingsonly transaction omits transferred provider lifecycle output\");\n\
-                 Ok(CompletedProviderRoles { _sealed: () })\n\
+                 anyhow::ensure!(inventory.probes.len() >= staged[0] && inventory.resources.len() >= staged[1] && inventory.workers.len() >= staged[2], \"__ASSEMBLY__ transaction omits transferred provider lifecycle output\");\n\
+                 Ok(CompletedProviderRoles { probe_bindings })\n\
              }\n\
          }\n",
-    );
+    ));
 
-    code.push_str(
+    code.push_str(&scoped(
         "\nfn lifecycle_channels(output: &bootstrap::DomainModuleResult) -> Vec<LifecycleChannel> {\n\
              let mut channels = Vec::new();\n\
              if !output.probes.is_empty() { channels.push(LifecycleChannel::Probes); }\n\
@@ -708,10 +712,10 @@ fn render_settingsonly_provider_role_batches(
          }\n\
          \nfn validate_lifecycle_output(entry: &ProviderCatalogEntry, output: &bootstrap::DomainModuleResult) -> anyhow::Result<()> {\n\
              let actual = lifecycle_channels(output);\n\
-             anyhow::ensure!(actual == entry.evidence().outputs(), \"settingsonly provider role '{}' lifecycle mismatch: expected {:?}, actual {:?}\", entry.role().as_str(), entry.evidence().outputs(), actual);\n\
+             anyhow::ensure!(actual == entry.evidence().outputs(), \"__ASSEMBLY__ provider role '{}' lifecycle mismatch: expected {:?}, actual {:?}\", entry.role().as_str(), entry.evidence().outputs(), actual);\n\
              Ok(())\n\
          }\n",
-    );
+    ));
 
     for provider in providers {
         let role = provider_role_variant(provider.id);
@@ -721,7 +725,7 @@ fn render_settingsonly_provider_role_batches(
         code.push_str(&format!(
             "\npub(crate) struct {constructor} {{\n    entry: &'static ProviderCatalogEntry,\n}}\n\
              pub(crate) struct {batch}(bootstrap::DomainModuleResult);\n\
-             pub(crate) struct {receipt} {{\n    probes: usize,\n    resources: usize,\n    workers: usize,\n}}\n\
+             pub(crate) struct {receipt} {{\n    probes: usize,\n    resources: usize,\n    workers: usize,\n    probe_names: Vec<primitives::ProbeName>,\n}}\n\
              impl {constructor} {{\n\
                  pub(crate) fn finish(self, output: bootstrap::DomainModuleResult) -> anyhow::Result<{batch}> {{\n\
                      validate_lifecycle_output(self.entry, &output)?;\n\
@@ -730,7 +734,8 @@ fn render_settingsonly_provider_role_batches(
              }}\n\
              impl {batch} {{\n\
                  pub(crate) fn transfer(self, inventory: &mut bootstrap::DomainModuleResult) -> {receipt} {{\n\
-                     let receipt = {receipt} {{ probes: self.0.probes.len(), resources: self.0.resources.len(), workers: self.0.workers.len() }};\n\
+                     let probe_names = self.0.probes.iter().map(|(name, _)| name.clone()).collect();\n\
+                     let receipt = {receipt} {{ probes: self.0.probes.len(), resources: self.0.resources.len(), workers: self.0.workers.len(), probe_names }};\n\
                      inventory.merge(self.0);\n\
                      receipt\n\
                  }}\n\
@@ -810,14 +815,20 @@ fn validate_provider_role_batch_syntax(items: &[syn::Item], roles: &[String]) ->
         "CompletedProviderRoles".to_owned(),
         "ProviderRoleBatches".to_owned(),
     ];
-    let mut expected_impls = vec![(
-        "ProviderRoleBatches".to_owned(),
-        std::iter::once("exact_join".to_owned())
-            .chain(std::iter::once("require_complete".to_owned()))
-            .chain(roles.iter().map(|role| pascal_to_snake(role)))
-            .chain(std::iter::once("finish".to_owned()))
-            .collect::<Vec<_>>(),
-    )];
+    let mut expected_impls = vec![
+        (
+            "ProviderRoleBatches".to_owned(),
+            std::iter::once("exact_join".to_owned())
+                .chain(std::iter::once("require_complete".to_owned()))
+                .chain(roles.iter().map(|role| pascal_to_snake(role)))
+                .chain(std::iter::once("finish".to_owned()))
+                .collect::<Vec<_>>(),
+        ),
+        (
+            "CompletedProviderRoles".to_owned(),
+            vec!["into_probe_bindings".to_owned()],
+        ),
+    ];
     for role in roles {
         expected_structs.extend([
             format!("{role}Constructor"),
@@ -1211,7 +1222,7 @@ const fn failure_posture_variant(posture: ProviderFailurePosture) -> &'static st
 
 fn render_modules(
     manifest: &CanonicalAssemblyManifestV1,
-    framework_routes: &[String],
+    framework_routes: &[(String, AssemblyListenerKind)],
     source_label: &str,
 ) -> Result<String> {
     let manifest_digest = manifest.manifest_digest();
@@ -1281,21 +1292,20 @@ pub(crate) async fn wire_test_domains() -> anyhow::Result<Vec<DomainBinding>> {\
     code.push_str("}\n\n");
     if manifest.name() == "runtime" || !framework_routes.is_empty() {
         code.push_str("pub const FRAMEWORK_HTTP_ROUTES: &[bootstrap::FrameworkHttpRoute] = &[\n");
-        for route in framework_routes {
+        for (route, listener) in framework_routes {
             code.push_str(&format!(
-                "    bootstrap::FrameworkHttpRoute::new({route}),\n"
+                "    bootstrap::FrameworkHttpRoute::new(bootstrap::ListenerKind::{}, {route}),\n",
+                listener_variant(*listener),
             ));
         }
         code.push_str("];\n\n");
         code.push_str(
-            "pub fn register_framework_routes(registry: &mut bootstrap::Registry) -> Result<(), bootstrap::KernelError> {\n",
+            "pub fn register_framework_routes(routes: &impl bootstrap::FrameworkRoutes, registry: &mut bootstrap::Registry) -> Result<(), bootstrap::KernelError> {\n",
         );
         if framework_routes.is_empty() {
-            code.push_str("    let _ = registry;\n    Ok(())\n}\n");
+            code.push_str("    let _ = (routes, registry);\n    Ok(())\n}\n");
         } else {
-            code.push_str(
-                "    bootstrap::FrameworkRoutes::register(&crate::framework_routes::ROUTES, registry)\n}\n",
-            );
+            code.push_str("    bootstrap::FrameworkRoutes::register(routes, registry)\n}\n");
         }
     }
     crate::codegen::format_rust(&code)
@@ -1334,7 +1344,7 @@ fn render_test_domain_wiring(
 fn framework_http_routes(
     root: &Path,
     manifest: &CanonicalAssemblyManifestV1,
-) -> Result<Vec<String>> {
+) -> Result<Vec<(String, AssemblyListenerKind)>> {
     use crate::contract::manifest::{ContractKind, ContractOwner, Lifecycle};
 
     let contracts = crate::contract::discover(&root.join("contracts"))?;
@@ -1343,7 +1353,8 @@ fn framework_http_routes(
         .map(|contract| (contract.manifest.id.as_str(), contract))
         .collect::<std::collections::BTreeMap<_, _>>();
     let mut routes = Vec::new();
-    for contract_id in manifest.framework_contracts() {
+    for mount in manifest.framework_contracts() {
+        let contract_id = &mount.id;
         let contract = by_id
             .get(contract_id.as_str())
             .with_context(|| format!("unknown framework contract `{contract_id}`"))?;
@@ -1353,7 +1364,10 @@ fn framework_http_routes(
             bail!("framework contract `{contract_id}` must be active and framework-owned")
         }
         if contract.manifest.kind == ContractKind::Http {
-            routes.push(crate::codegen::rendered_http_route_evidence_path(contract)?);
+            routes.push((
+                crate::codegen::rendered_http_route_evidence_path(contract)?,
+                mount.listener,
+            ));
         }
     }
     Ok(routes)
@@ -1642,20 +1656,21 @@ domains = [{domains}]
     fn framework_routes_render_as_typed_expected_evidence_and_single_funnel() -> Result<()> {
         let source = manifest(r#""identity""#).replace(
             "frameworkContracts = []",
-            "frameworkContracts = [\"framework.status\"]",
-        );
+            "frameworkContracts = [{ id = \"framework.status\", listener = \"admin\" }]",
+        ) + "\n[[listeners]]\nkind = \"admin\"\ndomains = []\n";
         let parsed = AssemblyManifest::from_toml_str(&source)?.canonicalize_v1()?;
         let rendered = render_modules(
             &parsed,
-            &["::generated::http::framework_v1::status::ROUTE.evidence()".to_string()],
+            &[(
+                "::generated::http::framework_v1::status::ROUTE.evidence()".to_string(),
+                AssemblyListenerKind::Admin,
+            )],
             "assemblies/runtime/assembly.toml",
         )?;
         assert!(rendered.contains("pub const FRAMEWORK_HTTP_ROUTES"));
         assert!(rendered.contains("bootstrap::FrameworkHttpRoute::new("));
         assert!(rendered.contains("::generated::http::framework_v1::status::ROUTE.evidence()"));
-        assert!(rendered.contains(
-            "bootstrap::FrameworkRoutes::register(&crate::framework_routes::ROUTES, registry)"
-        ));
+        assert!(rendered.contains("bootstrap::FrameworkRoutes::register(routes, registry)"));
         assert!(!rendered.contains("contract_id =="));
         Ok(())
     }
@@ -1998,6 +2013,30 @@ const _: () = assert!(!providers_gen::PROVIDER_CATALOG.is_empty());
         assert!(rendered.contains("ProviderRole::ListenerRateLimiter"));
         assert!(rendered.contains("ProviderRole::SettingsKeyProvider"));
         assert!(rendered.contains("ProviderRole::SettingsSecretResolver"));
+        Ok(())
+    }
+
+    #[test]
+    fn identityaudit_provider_role_renderer_names_only_diagnostics() -> Result<()> {
+        let root = crate::workspace_root()?;
+        let source = fs::read_to_string(root.join("assemblies/identityaudit/assembly.toml"))?;
+        let manifest = AssemblyManifest::from_toml_str(&source)?.canonicalize_v1()?;
+        let mut providers = manifest
+            .diport_providers()
+            .iter()
+            .filter(|provider| provider.lifecycle == ProviderLifecycle::Active)
+            .collect::<Vec<_>>();
+        providers.sort_by_key(|provider| provider.id.as_str());
+        let mut rendered =
+            "const PROVIDER_DATA: &str = \"settingsonly-must-remain-data\";\n".to_owned();
+
+        render_provider_role_batches(&mut rendered, manifest.name(), &providers)?;
+
+        assert!(rendered.contains("settingsonly-must-remain-data"));
+        assert!(
+            rendered.contains("identityaudit RuntimePlan/generated provider catalog count drift")
+        );
+        assert!(!rendered.contains("__ASSEMBLY__"));
         Ok(())
     }
 

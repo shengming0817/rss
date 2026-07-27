@@ -506,6 +506,7 @@ pub(crate) struct ProviderBuild {
     expected: BTreeMap<ProviderFactorySymbol, ExpectedProvider>,
     claimed: BTreeSet<ProviderFactorySymbol>,
     produced: BTreeSet<ProviderFactorySymbol>,
+    probe_bindings: BTreeMap<ProviderRole, Vec<primitives::ProbeName>>,
     provider_module: DomainModuleResult,
     domain_module: DomainModuleResult,
 }
@@ -578,6 +579,7 @@ impl ProviderBuild {
             expected,
             claimed: BTreeSet::new(),
             produced: BTreeSet::new(),
+            probe_bindings: BTreeMap::new(),
             provider_module: DomainModuleResult::default(),
             domain_module: DomainModuleResult::default(),
         })
@@ -604,6 +606,12 @@ impl ProviderBuild {
 
     pub(crate) fn record(&mut self, output: ProviderOutput) -> Result<(), ProviderBuildError> {
         let actual_channels = module_channels(&output.module);
+        let probe_names = output
+            .module
+            .probes
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect::<Vec<_>>();
         let validation = if !same_channels(&actual_channels, output.expected_channels) {
             Err(ProviderBuildError::ProviderBatchChannelsMismatch {
                 batch: output.batch,
@@ -637,6 +645,11 @@ impl ProviderBuild {
             .iter()
             .map(|receipt| receipt.permit().factory)
             .collect::<Vec<_>>();
+        let roles = output
+            .receipts
+            .iter()
+            .map(|receipt| receipt.permit().role)
+            .collect::<Vec<_>>();
         // Ownership transfer precedes validation propagation: even a bad receipt/channel batch
         // remains inside the startup transaction and therefore receives async rollback.
         self.provider_module.merge(output.module);
@@ -644,6 +657,20 @@ impl ProviderBuild {
         for factory in factories {
             if !self.produced.insert(factory) {
                 return Err(ProviderBuildError::DuplicateFactory { factory });
+            }
+        }
+        for role in roles {
+            if self
+                .probe_bindings
+                .insert(role, probe_names.clone())
+                .is_some()
+            {
+                return Err(ProviderBuildError::PlanCatalogDrift {
+                    detail: format!(
+                        "provider role '{}' produced more than one probe binding",
+                        role.as_str()
+                    ),
+                });
             }
         }
         Ok(())
@@ -693,9 +720,32 @@ impl ProviderBuild {
                 error,
             });
         }
+        let probe_bindings = match self
+            .probe_bindings
+            .iter()
+            .map(|(role, probes)| {
+                runtimeexec::inventory::ProviderProbeBinding::new(role.as_str(), probes.clone())
+                    .map_err(|_| ProviderBuildError::PlanCatalogDrift {
+                        detail: format!(
+                            "provider role '{}' produced an invalid probe binding",
+                            role.as_str()
+                        ),
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()
+        {
+            Ok(bindings) => bindings,
+            Err(error) => {
+                return Err(ProviderBuildFailure {
+                    build: Box::new(self),
+                    error,
+                });
+            }
+        };
         Ok(CompletedProviderBuild {
             provider_module: self.provider_module,
             domain_module: self.domain_module,
+            inventory_receipt: Some(ProviderInventoryReceipt(probe_bindings)),
         })
     }
 
@@ -756,9 +806,15 @@ fn module_channels(module: &DomainModuleResult) -> Vec<LifecycleChannel> {
 pub(crate) struct CompletedProviderBuild {
     provider_module: DomainModuleResult,
     domain_module: DomainModuleResult,
+    inventory_receipt: Option<ProviderInventoryReceipt>,
 }
 
 impl CompletedProviderBuild {
+    pub(crate) fn take_inventory_receipt(&mut self) -> anyhow::Result<ProviderInventoryReceipt> {
+        self.inventory_receipt.take().ok_or_else(|| {
+            anyhow::anyhow!("provider inventory receipt was consumed more than once")
+        })
+    }
     pub(crate) fn register_probes(
         &mut self,
         registry: &mut bootstrap::Registry,
@@ -786,6 +842,14 @@ impl CompletedProviderBuild {
 
     pub(crate) async fn abort(self, primary: anyhow::Error) -> anyhow::Error {
         abort_modules(self.provider_module, self.domain_module, primary).await
+    }
+}
+
+pub(crate) struct ProviderInventoryReceipt(Vec<runtimeexec::inventory::ProviderProbeBinding>);
+
+impl ProviderInventoryReceipt {
+    pub(crate) fn into_probe_bindings(self) -> Vec<runtimeexec::inventory::ProviderProbeBinding> {
+        self.0
     }
 }
 
@@ -865,7 +929,7 @@ mod tests {
     async fn provider_plan_active_catalog_claims_all_factories_exactly_once() {
         let (mut build, mut dispatch) = provider_build_and_dispatch();
         record_all_batches(&mut build, &mut dispatch, true, true);
-        let completed = build
+        let mut completed = build
             .finish()
             .expect("all active factories produced exact receipts");
         // finish() already required one receipt per active catalog factory; pin occupancy shape.
@@ -876,6 +940,14 @@ mod tests {
         assert!(completed.domain_module.probes.is_empty());
         assert!(completed.domain_module.resources.is_empty());
         assert!(completed.domain_module.workers.is_empty());
+        let receipt = completed
+            .take_inventory_receipt()
+            .expect("inventory receipt is present exactly once");
+        assert_eq!(receipt.into_probe_bindings().len(), PROVIDER_CATALOG.len());
+        assert!(
+            completed.take_inventory_receipt().is_err(),
+            "inventory completion receipt must be move-only"
+        );
     }
 
     #[tokio::test]
@@ -985,7 +1057,7 @@ mod tests {
             .map(assembly_schema::ProviderPlan::id)
             .collect::<BTreeSet<_>>();
         for draft in [ProviderRole::DistributedCasStoreAlternative] {
-            assert!(plan_ids.contains(draft.as_str()));
+            assert!(!plan_ids.contains(draft.as_str()));
             assert!(
                 draft.factory_symbol().is_none(),
                 "draft provider must not expose a claimable factory permit"

@@ -16,6 +16,10 @@ Options:
 
 Image schema: /usr/share/rss/identityaudit/config.schema.json
 
+Required build identity environment:
+  RSS_BUILD_SOURCE_SHA
+  RSS_BUILD_IMAGE_DIGEST
+
 Surfaces: Primary /api/v1/identity, Admin /api/v1/audit, Health /health/v1
 Health endpoints: /health/v1/healthz, /health/v1/readyz, /health/v1/metrics
 "#;

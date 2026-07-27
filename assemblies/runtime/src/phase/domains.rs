@@ -291,6 +291,7 @@ impl<'a> InfraBuilt<'a> {
                         metrics_exporter,
                         registry: wired.registry,
                         provider_build: completed,
+                        placement_execution_plan,
                     }),
                 },
             },

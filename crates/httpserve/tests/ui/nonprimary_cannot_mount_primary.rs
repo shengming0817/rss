@@ -21,6 +21,7 @@ fn endpoint() -> httpserve::GeneratedPrimaryEndpoint<(), vocab::http::LocalOnly>
         vocab::HttpRouteAuth::Public,
         None,
         false,
+        vocab::http::HttpResourceSharing::TenantScoped,
         vocab::HttpEffectProfile::new(EFFECTS),
     );
     httpserve::GeneratedPrimaryEndpoint::new(

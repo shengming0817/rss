@@ -11,13 +11,16 @@ use std::collections::HashMap;
 #[cfg(all(test, feature = "integration"))]
 use std::sync::{Arc, Mutex};
 
-use audit::ports::{AuditListTenantAppend, AuditListTenantAppender, actor_kind_to_db};
+#[cfg(feature = "domain-audit")]
+use audit::ports::{AuditListTenantAppend, AuditListTenantAppender};
 use diport::{AuditEvent, AuditOutcome, AuditSink, AuditSinkError};
 
 #[cfg(all(test, feature = "integration"))]
 use crate::PgStore;
+#[cfg(feature = "domain-audit")]
 use crate::cotx::PgTenantWritePool;
 use crate::pool::VerifiedPgWriteStore;
+#[cfg(feature = "domain-audit")]
 use crate::tx_retry::{classify_sqlx_error, run_pg_localtx_retry};
 
 const INSERT_AUTH_AUDIT_EVENT: &str = "INSERT INTO auth_audit_events \
@@ -30,6 +33,7 @@ const INSERT_AUTH_AUDIT_EVENT: &str = "INSERT INTO auth_audit_events \
 /// Constructed through the postgres capability bundle; stores only the structured audit DTO supplied by httpserve.
 pub struct PgAuthAuditSink {
     global_pool: sqlx::PgPool,
+    #[cfg(feature = "domain-audit")]
     pool: PgTenantWritePool,
     #[cfg(all(test, feature = "integration"))]
     append_faults: Arc<Mutex<AuthAuditAppendFaultState>>,
@@ -81,6 +85,7 @@ impl PgAuthAuditSink {
     pub(crate) fn new(store: &VerifiedPgWriteStore) -> Self {
         Self {
             global_pool: store.pool().clone(),
+            #[cfg(feature = "domain-audit")]
             pool: PgTenantWritePool::new(store),
             #[cfg(all(test, feature = "integration"))]
             append_faults: Arc::new(Mutex::new(AuthAuditAppendFaultState::default())),
@@ -91,6 +96,7 @@ impl PgAuthAuditSink {
     pub(crate) fn from_unverified_for_test(store: &PgStore) -> Self {
         Self {
             global_pool: store.pool.clone(),
+            #[cfg(feature = "domain-audit")]
             pool: PgTenantWritePool::from_unverified_for_test(store),
             #[cfg(all(test, feature = "integration"))]
             append_faults: Arc::new(Mutex::new(AuthAuditAppendFaultState::default())),
@@ -199,6 +205,18 @@ fn tenant_context(event: &AuditEvent) -> Option<String> {
     event.tenant_id.map(|tenant| tenant.as_uuid().to_string())
 }
 
+fn actor_kind_to_db(kind: vocab::PrincipalKind) -> &'static str {
+    match kind {
+        vocab::PrincipalKind::User => "user",
+        vocab::PrincipalKind::Device => "device",
+        vocab::PrincipalKind::Admin => "admin",
+        vocab::PrincipalKind::SuperAdmin => "super_admin",
+        vocab::PrincipalKind::Service => "service",
+        vocab::PrincipalKind::Anonymous => "anonymous",
+        _ => "unknown",
+    }
+}
+
 fn outcome_parts(outcome: &AuditOutcome) -> (&'static str, Option<&'static str>) {
     match outcome {
         AuditOutcome::Success => ("success", None),
@@ -262,6 +280,7 @@ impl AuditSink for PgAuthAuditSink {
     }
 }
 
+#[cfg(feature = "domain-audit")]
 impl AuditListTenantAppender for PgAuthAuditSink {
     async fn append(&self, command: AuditListTenantAppend) -> Result<(), AuditSinkError> {
         let (scope, event, observation) = command.into_parts();

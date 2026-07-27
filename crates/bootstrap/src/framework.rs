@@ -12,7 +12,10 @@ pub trait FrameworkRoutes {
 
 /// One typed framework HTTP route expected by an assembly manifest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FrameworkHttpRoute(HttpRouteEvidence);
+pub struct FrameworkHttpRoute {
+    listener: ListenerKind,
+    evidence: HttpRouteEvidence,
+}
 
 impl FrameworkHttpRoute {
     /// Bind generated framework-owned route evidence into an assembly expected set.
@@ -21,17 +24,22 @@ impl FrameworkHttpRoute {
     ///
     /// Panics in const evaluation for domain-owned evidence.
     #[must_use]
-    pub const fn new(evidence: HttpRouteEvidence) -> Self {
+    pub const fn new(listener: ListenerKind, evidence: HttpRouteEvidence) -> Self {
         assert!(
             evidence.owner().is_framework(),
             "framework serving declarations require framework-owned HTTP evidence"
         );
-        Self(evidence)
+        Self { listener, evidence }
     }
 
     #[must_use]
     pub const fn evidence(self) -> HttpRouteEvidence {
-        self.0
+        self.evidence
+    }
+
+    #[must_use]
+    pub const fn listener(self) -> ListenerKind {
+        self.listener
     }
 }
 
@@ -55,21 +63,27 @@ pub fn validate_framework_serving(
 ) -> Result<(), FrameworkServingError> {
     let actual = routes
         .iter()
-        .flat_map(|(_, routes)| routes.route_evidence().iter().copied())
-        .filter(|evidence| evidence.owner().is_framework())
+        .flat_map(|(listener, routes)| {
+            routes
+                .route_evidence()
+                .iter()
+                .copied()
+                .map(|evidence| (*listener, evidence))
+        })
+        .filter(|(_, evidence)| evidence.owner().is_framework())
         .collect::<Vec<_>>();
     validate_framework_evidence(&actual, expected)
 }
 
 fn validate_framework_evidence(
-    actual: &[HttpRouteEvidence],
+    actual: &[(ListenerKind, HttpRouteEvidence)],
     expected: &[FrameworkHttpRoute],
 ) -> Result<(), FrameworkServingError> {
     for expected_route in expected {
         let expected_evidence = expected_route.evidence();
         let matches = actual
             .iter()
-            .filter(|actual| actual.contract_id() == expected_evidence.contract_id())
+            .filter(|(_, actual)| actual.contract_id() == expected_evidence.contract_id())
             .collect::<Vec<_>>();
         match matches.as_slice() {
             [] => {
@@ -77,7 +91,7 @@ fn validate_framework_evidence(
                     contract_id: expected_evidence.contract_id(),
                 });
             }
-            [actual] if **actual == expected_evidence => {}
+            [actual] if actual.0 == expected_route.listener() && actual.1 == expected_evidence => {}
             [_] => {
                 return Err(FrameworkServingError::Mismatch {
                     contract_id: expected_evidence.contract_id(),
@@ -90,13 +104,13 @@ fn validate_framework_evidence(
             }
         }
     }
-    if let Some(extra) = actual.iter().find(|actual| {
+    if let Some(extra) = actual.iter().find(|(_, actual)| {
         !expected
             .iter()
             .any(|expected| expected.evidence().contract_id() == actual.contract_id())
     }) {
         return Err(FrameworkServingError::Extra {
-            contract_id: extra.contract_id(),
+            contract_id: extra.1.contract_id(),
         });
     }
     Ok(())
@@ -128,6 +142,7 @@ mod tests {
             HttpRouteAuth::ServiceOwned,
             None,
             false,
+            vocab::http::HttpResourceSharing::TenantScoped,
             HttpConsistencyLevel::LocalOnly,
             HttpEffectProfile::new(EFFECTS),
         )
@@ -136,10 +151,13 @@ mod tests {
     #[test]
     fn exact_framework_serving_set_is_required() {
         const EXPECTED_EVIDENCE: HttpRouteEvidence = route("framework.status", "/status");
-        const EXPECTED: &[FrameworkHttpRoute] = &[FrameworkHttpRoute::new(EXPECTED_EVIDENCE)];
+        const EXPECTED: &[FrameworkHttpRoute] = &[FrameworkHttpRoute::new(
+            ListenerKind::Admin,
+            EXPECTED_EVIDENCE,
+        )];
 
         assert_eq!(
-            validate_framework_evidence(&[EXPECTED_EVIDENCE], EXPECTED),
+            validate_framework_evidence(&[(ListenerKind::Admin, EXPECTED_EVIDENCE)], EXPECTED),
             Ok(())
         );
         assert_eq!(
@@ -149,20 +167,35 @@ mod tests {
             })
         );
         assert_eq!(
-            validate_framework_evidence(&[EXPECTED_EVIDENCE, EXPECTED_EVIDENCE], EXPECTED),
+            validate_framework_evidence(
+                &[
+                    (ListenerKind::Admin, EXPECTED_EVIDENCE),
+                    (ListenerKind::Admin, EXPECTED_EVIDENCE),
+                ],
+                EXPECTED,
+            ),
             Err(FrameworkServingError::Duplicate {
                 contract_id: "framework.status"
             })
         );
         assert_eq!(
-            validate_framework_evidence(&[route("framework.status", "/other")], EXPECTED),
+            validate_framework_evidence(
+                &[(ListenerKind::Admin, route("framework.status", "/other"))],
+                EXPECTED,
+            ),
             Err(FrameworkServingError::Mismatch {
                 contract_id: "framework.status"
             })
         );
         assert_eq!(
-            validate_framework_evidence(&[EXPECTED_EVIDENCE], &[]),
+            validate_framework_evidence(&[(ListenerKind::Admin, EXPECTED_EVIDENCE)], &[]),
             Err(FrameworkServingError::Extra {
+                contract_id: "framework.status"
+            })
+        );
+        assert_eq!(
+            validate_framework_evidence(&[(ListenerKind::Primary, EXPECTED_EVIDENCE)], EXPECTED),
+            Err(FrameworkServingError::Mismatch {
                 contract_id: "framework.status"
             })
         );

@@ -1,7 +1,7 @@
 error[E0080]: evaluation panicked: HTTP producer emitted facts must not contain duplicates
-  --> tests/ui/producer_duplicate_facts.rs:37:45
+  --> tests/ui/producer_duplicate_facts.rs:38:45
    |
-37 | const _: HttpProducerBinding<RouteMarker> = HttpProducerBinding::from_static(ROUTE, &[FACT, FACT]);
+38 | const _: HttpProducerBinding<RouteMarker> = HttpProducerBinding::from_static(ROUTE, &[FACT, FACT]);
    |                                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ evaluation of `_` failed inside this call
    |
 note: inside `HttpProducerBinding::<RouteMarker>::from_static`

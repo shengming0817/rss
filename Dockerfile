@@ -49,7 +49,8 @@ RUN strip target/release/settingsonly-server
 
 # ── settingsonly-runtime：仅含 settingsonly binary + 外部 config schema ──────────────────────────────
 FROM gcr.io/distroless/cc-debian12:nonroot AS settingsonly-runtime
-# settingsonly 只允许 loopback plaintext；不声明 EXPOSE，外部流量/探针由同 Pod TLS sidecar 转发。
+# settingsonly 只允许 loopback plaintext；端口元数据供同 Pod TLS sidecar 与编排器显式接线。
+EXPOSE 8080 8082 8083
 COPY --from=settingsonly-builder /app/target/release/settingsonly-server /usr/local/bin/settingsonly-server
 COPY --from=settingsonly-builder /app/assemblies/settingsonly/config.schema.json /usr/share/rss/settingsonly/config.schema.json
 ENTRYPOINT ["/usr/local/bin/settingsonly-server"]

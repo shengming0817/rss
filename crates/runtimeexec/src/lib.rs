@@ -11,6 +11,8 @@
 //! transfer lifecycle ownership. As with every Tokio task, the originating runtime must remain
 //! alive for asynchronous cleanup to finish.
 
+pub mod inventory;
+
 use std::future::Future;
 use std::time::Duration;
 

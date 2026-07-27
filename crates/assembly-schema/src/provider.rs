@@ -403,10 +403,10 @@ impl ProviderConstructor {
             | Self::OidcProvider
             | Self::S3Store
             | Self::S3VerifiedDlxArchiveStore => &["backend"],
+            Self::PostgresAuthAuditSink => &["auth-audit-sink"],
             Self::RatelimitGovernorLimiter
             | Self::PostgresRevocationStore
             | Self::PostgresCasStore
-            | Self::PostgresAuthAuditSink
             | Self::PostgresServiceTokenReplayStore
             | Self::PostgresDlxLifecycleRepository => &[],
         }
@@ -758,7 +758,7 @@ const PROVIDER_ROLE_SPECS: [ProviderRoleSpec; ProviderRole::COUNT] = [
         port: DiportPort::AuditSink,
         constructor: ProviderConstructor::PostgresAuthAuditSink,
         provider_crate: "postgres",
-        required_features: &[],
+        required_features: &["auth-audit-sink"],
         consumer: ProviderConsumer::Httpserve,
         durability: ProviderDurability::Persistent,
         scope: None,

@@ -28,6 +28,7 @@ fn route() -> HttpRouteBinding<TestRoute, LocalTx> {
         HttpRouteAuth::ServiceOwned,
         None,
         false,
+        vocab::http::HttpResourceSharing::TenantScoped,
         HttpEffectProfile::new(&[HttpEffectKind::BusinessWrite]),
     )
 }

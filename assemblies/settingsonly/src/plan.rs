@@ -4,19 +4,23 @@ use anyhow::Context as _;
 use assembly_schema::{
     AssemblyDomain, AssemblyListenerKind, AssemblyManifest, AssemblyProfile, AssemblyTopology,
     CanonicalAssemblyManifestV1, DomainLifecyclePhase, ListenerAuth, ParsedAssemblyLock,
-    RuntimePlan as TypedRuntimePlan, RuntimePlanV1Input,
+    ParsedDeploymentPlan, RuntimePlan as TypedRuntimePlan, RuntimePlanV1Input,
 };
 
 const BUNDLED_ASSEMBLY_TOML: &str = include_str!("../assembly.toml");
 const BUNDLED_ASSEMBLY_LOCK: &[u8] = include_bytes!("../assembly.lock.json");
+const BUNDLED_DEPLOYMENT_PLAN: &[u8] =
+    include_bytes!("../../../deploy/generated/settingsonly.deployment-plan.json");
 const ASSEMBLY_NAME: &str = "settingsonly";
 const SETTINGS_WORKLOAD: &str = "settingsonly";
+const INVENTORY_CONTRACT: &str = "runtime.inventory";
 
 /// Capability proving that the bundled settings-only deployment closure compiled successfully.
 ///
 /// The field is private so no caller can construct or substitute a partially validated plan.
 pub(crate) struct SettingsOnlyPlan {
     typed: TypedRuntimePlan,
+    deployment: ParsedDeploymentPlan,
 }
 
 impl SettingsOnlyPlan {
@@ -33,18 +37,65 @@ impl SettingsOnlyPlan {
         let typed = TypedRuntimePlan::compile_v1(&manifest, &lock, input)
             .context("compile bundled settingsonly RuntimePlan")?;
         validate_typed_closure(&typed)?;
-        Ok(Self { typed })
+        let deployment = ParsedDeploymentPlan::from_json_slice(&typed, BUNDLED_DEPLOYMENT_PLAN)
+            .context("parse bundled settingsonly DeploymentPlan")?;
+        validate_deployment_closure(&deployment)?;
+        Ok(Self { typed, deployment })
     }
 
-    #[cfg(test)]
-    const fn as_typed(&self) -> &TypedRuntimePlan {
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) const fn as_typed(&self) -> &TypedRuntimePlan {
         &self.typed
     }
 
-    pub(crate) fn into_provider_build(
-        self,
+    pub(crate) fn provider_build(
+        &self,
     ) -> anyhow::Result<crate::providers_gen::ProviderRoleBatches> {
         crate::providers_gen::ProviderRoleBatches::exact_join(self.typed.provider_plans())
+    }
+
+    pub(crate) fn into_inventory_seed(
+        self,
+        build_identity: runtimeexec::inventory::BuildIdentity,
+        completed_roles: crate::providers_gen::CompletedProviderRoles,
+    ) -> anyhow::Result<runtimeexec::inventory::RuntimeInventorySeed> {
+        self.inventory_seed_with_bindings(build_identity, completed_roles.into_probe_bindings())
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn into_inventory_seed_fixture(
+        self,
+        build_identity: runtimeexec::inventory::BuildIdentity,
+        provider_bindings: Vec<runtimeexec::inventory::ProviderProbeBinding>,
+    ) -> anyhow::Result<runtimeexec::inventory::RuntimeInventorySeed> {
+        self.inventory_seed_with_bindings(build_identity, provider_bindings)
+    }
+
+    fn inventory_seed_with_bindings(
+        self,
+        build_identity: runtimeexec::inventory::BuildIdentity,
+        provider_bindings: Vec<runtimeexec::inventory::ProviderProbeBinding>,
+    ) -> anyhow::Result<runtimeexec::inventory::RuntimeInventorySeed> {
+        let placements = self
+            .typed
+            .placement_plans()
+            .iter()
+            .map(|placement| {
+                runtimeexec::inventory::PlacementObservation::local(
+                    placement.domain(),
+                    placement.workload(),
+                )
+            })
+            .collect();
+        runtimeexec::inventory::RuntimeInventorySeed::from_bound(
+            &self.typed,
+            &self.deployment,
+            SETTINGS_WORKLOAD,
+            build_identity,
+            provider_bindings,
+            placements,
+        )
+        .context("bind settingsonly runtime inventory seed")
     }
 }
 
@@ -62,8 +113,10 @@ fn validate_manifest_closure(
         "settingsonly requires the demo topology"
     );
     anyhow::ensure!(
-        manifest.framework_contracts().is_empty(),
-        "settingsonly does not admit framework contracts"
+        manifest.framework_contracts().len() == 1
+            && manifest.framework_contracts()[0].id == INVENTORY_CONTRACT
+            && manifest.framework_contracts()[0].listener == AssemblyListenerKind::Admin,
+        "settingsonly requires exactly the Admin runtime.inventory framework contract"
     );
     anyhow::ensure!(
         lock.identity().name() == ASSEMBLY_NAME
@@ -80,8 +133,8 @@ fn validate_manifest_closure(
 
 fn validate_manifest_listeners(manifest: &CanonicalAssemblyManifestV1) -> anyhow::Result<()> {
     anyhow::ensure!(
-        manifest.listeners().len() == 2,
-        "settingsonly requires exactly Primary and Health listeners"
+        manifest.listeners().len() == 3,
+        "settingsonly requires exactly Primary, Admin and Health listeners"
     );
     let primary = manifest
         .listeners()
@@ -101,6 +154,15 @@ fn validate_manifest_listeners(manifest: &CanonicalAssemblyManifestV1) -> anyhow
         health.domains.is_empty(),
         "settingsonly Health listener must be domain-free"
     );
+    let admin = manifest
+        .listeners()
+        .iter()
+        .find(|listener| listener.kind == AssemblyListenerKind::Admin)
+        .context("settingsonly manifest is missing the Admin listener")?;
+    anyhow::ensure!(
+        admin.domains.is_empty(),
+        "settingsonly Admin listener must be domain-free"
+    );
     Ok(())
 }
 
@@ -111,9 +173,11 @@ fn compiler_input(manifest: &CanonicalAssemblyManifestV1) -> anyhow::Result<Runt
     listeners.sort_by_key(|listener| listener.kind.as_str());
     for listener in listeners {
         let auth = match listener.kind {
-            AssemblyListenerKind::Primary => ListenerAuth::FederatedAccessToken,
+            AssemblyListenerKind::Primary | AssemblyListenerKind::Admin => {
+                ListenerAuth::FederatedAccessToken
+            }
             AssemblyListenerKind::Health => ListenerAuth::NoAuth,
-            AssemblyListenerKind::Internal | AssemblyListenerKind::Admin => {
+            AssemblyListenerKind::Internal => {
                 anyhow::bail!("settingsonly manifest contains an unsupported listener kind")
             }
         };
@@ -134,15 +198,19 @@ fn validate_typed_closure(plan: &TypedRuntimePlan) -> anyhow::Result<()> {
     );
     let listeners = plan.listener_plans();
     anyhow::ensure!(
-        listeners.len() == 2
-            && listeners[0].id() == "health-main"
-            && listeners[0].kind() == AssemblyListenerKind::Health
-            && listeners[0].auth() == ListenerAuth::NoAuth
+        listeners.len() == 3
+            && listeners[0].id() == "admin-main"
+            && listeners[0].kind() == AssemblyListenerKind::Admin
+            && listeners[0].auth() == ListenerAuth::FederatedAccessToken
             && listeners[0].domains().is_empty()
-            && listeners[1].id() == "primary-main"
-            && listeners[1].kind() == AssemblyListenerKind::Primary
-            && listeners[1].auth() == ListenerAuth::FederatedAccessToken
-            && listeners[1].domains() == [AssemblyDomain::Settings],
+            && listeners[1].id() == "health-main"
+            && listeners[1].kind() == AssemblyListenerKind::Health
+            && listeners[1].auth() == ListenerAuth::NoAuth
+            && listeners[1].domains().is_empty()
+            && listeners[2].id() == "primary-main"
+            && listeners[2].kind() == AssemblyListenerKind::Primary
+            && listeners[2].auth() == ListenerAuth::FederatedAccessToken
+            && listeners[2].domains() == [AssemblyDomain::Settings],
         "compiled settingsonly plan has an unexpected listener closure"
     );
     let domains = plan.domain_plans();
@@ -163,6 +231,14 @@ fn validate_typed_closure(plan: &TypedRuntimePlan) -> anyhow::Result<()> {
             && placements[0].domain() == AssemblyDomain::Settings
             && placements[0].workload() == SETTINGS_WORKLOAD,
         "compiled settingsonly plan has an unexpected placement closure"
+    );
+    Ok(())
+}
+
+fn validate_deployment_closure(plan: &ParsedDeploymentPlan) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        plan.workloads().len() == 1 && plan.workloads()[0].name() == SETTINGS_WORKLOAD,
+        "settingsonly DeploymentPlan must contain exactly the settingsonly workload"
     );
     Ok(())
 }
@@ -201,6 +277,11 @@ mod tests {
                 .map(|listener| (listener.kind(), listener.auth(), listener.domains()))
                 .collect::<Vec<_>>(),
             [
+                (
+                    AssemblyListenerKind::Admin,
+                    ListenerAuth::FederatedAccessToken,
+                    &[][..],
+                ),
                 (AssemblyListenerKind::Health, ListenerAuth::NoAuth, &[][..]),
                 (
                     AssemblyListenerKind::Primary,

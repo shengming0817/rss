@@ -67,9 +67,10 @@ use ::generated::http::identity_v1::{
         SPEC as ROLES_REVOKE_HTTP_SPEC,
     },
 };
+use ::generated::http::runtime_v1::inventory::SPEC as RUNTIME_INVENTORY_HTTP_SPEC;
 use ::generated::http::{
-    HttpHeaderMode, HttpResourceSharingMode, HttpSpec, SPECS as HTTP_SPECS,
-    settings_v1::SPEC as SETTINGS_CONFIG_HTTP_SPEC, settings_v2::SPEC as SETTINGS_SECRET_HTTP_SPEC,
+    HttpHeaderMode, HttpSpec, SPECS as HTTP_SPECS, settings_v1::SPEC as SETTINGS_CONFIG_HTTP_SPEC,
+    settings_v2::SPEC as SETTINGS_SECRET_HTTP_SPEC,
     settings_v4::SPEC as SETTINGS_CONFIG_GET_HTTP_SPEC,
     settings_v5::SPEC as SETTINGS_CONFIG_DELETE_HTTP_SPEC,
     settings_v6::SPEC as SETTINGS_CONFIG_ROLLBACK_HTTP_SPEC,
@@ -101,6 +102,7 @@ use diport::{
 use generated::event::identity_v1::session_created::{
     IdentitySessionCreatedPayload, SPEC as SESSION_CREATED_SPEC,
 };
+use vocab::http::HttpResourceSharing as HttpResourceSharingMode;
 // ListenerKind 仅测试断言用（lib 经 typed `route_group::<Primary>` 不再传运行期 ListenerKind 值）。
 #[cfg(test)]
 use primitives::ListenerKind;
@@ -1307,6 +1309,10 @@ fn contract_auth_policy(
             permission_from_request(request, &POLICIES_LIST_HTTP_SPEC)
                 .map(ContractAuthPolicy::RolePermission)
         }
+        id if id == RUNTIME_INVENTORY_HTTP_SPEC.route.contract_id() => {
+            permission_from_request(request, &RUNTIME_INVENTORY_HTTP_SPEC)
+                .map(ContractAuthPolicy::RolePermission)
+        }
         _ => Ok(ContractAuthPolicy::RolePermission(request.permission)),
     }
 }
@@ -1541,7 +1547,10 @@ impl ContractAuthorizer {
         {
             return Ok(RouteAuthorizationDecision::Allow);
         }
-        if ctx.kind != vocab::PrincipalKind::Admin {
+        let runtime_inventory_rss_user = ctx.kind == vocab::PrincipalKind::User
+            && contract_id == RUNTIME_INVENTORY_HTTP_SPEC.route.contract_id()
+            && RUNTIME_INVENTORY_HTTP_SPEC.route.auth() == HttpRouteAuth::Permission(permission);
+        if ctx.kind != vocab::PrincipalKind::Admin && !runtime_inventory_rss_user {
             return Err(AuthReject::Forbidden);
         }
         if builtin_admin_permission(contract_id, permission) {
@@ -4618,6 +4627,7 @@ mod tests {
                 vocab::HttpRouteAuth::Permission(vocab::RoutePermissionId::IdentityPolicyRead),
                 Some("resourceId"),
                 false,
+                vocab::http::HttpResourceSharing::Global,
                 vocab::HttpConsistencyLevel::LocalOnly,
                 vocab::HttpEffectProfile::new(&[
                     vocab::HttpEffectKind::Auth,
@@ -6023,6 +6033,111 @@ mod tests {
                 spec.route.contract_id()
             );
         }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn contract_authorizer_allows_rss_user_runtime_inventory_only_with_durable_grant() {
+        let inventory_role = role(
+            "role-runtime-inventory-reader",
+            "Runtime inventory reader",
+            &[vocab::RoutePermissionId::RuntimeInventoryRead.as_str()],
+        );
+        let inventory_role_id = inventory_role.id().clone();
+        let roles: Arc<DynRoleReadRepo<'static>> = Arc::from(DynRoleReadRepo::new_box(
+            crate::internal::mem::InMemRoleRepo::new()
+                .with_role_entity(tid(CANON_TENANT), inventory_role),
+        ));
+        let bindings: Arc<DynRoleBindingReadRepo<'static>> =
+            Arc::from(crate::ports::DynRoleBindingReadRepo::new_box(
+                crate::internal::mem::InMemRoleBindingLifecycle::new().with_binding(
+                    tid(CANON_TENANT),
+                    &inventory_role_id,
+                    CANON_USER,
+                ),
+            ));
+        let authorizer = ContractAuthorizer::new(
+            roles,
+            bindings,
+            empty_policy_repo(),
+            empty_resource_attribute_repo(),
+            make_shared_clock(1_000),
+        );
+
+        let decision = authorizer
+            .authorize(RouteAuthorizationRequest {
+                contract_id: RUNTIME_INVENTORY_HTTP_SPEC.route.contract_id(),
+                permission: vocab::RoutePermissionId::RuntimeInventoryRead,
+                tenant_id: Some(tid(CANON_TENANT)),
+                principal_kind: vocab::PrincipalKind::User,
+                principal_id: CANON_USER.to_string(),
+                resource: None,
+            })
+            .await;
+        assert_eq!(decision, RouteAuthorizationDecision::Allow);
+
+        for request in [
+            RouteAuthorizationRequest {
+                contract_id: RUNTIME_INVENTORY_HTTP_SPEC.route.contract_id(),
+                permission: vocab::RoutePermissionId::RuntimeInventoryRead,
+                tenant_id: None,
+                principal_kind: vocab::PrincipalKind::User,
+                principal_id: CANON_USER.to_string(),
+                resource: None,
+            },
+            RouteAuthorizationRequest {
+                contract_id: "other.contract",
+                permission: vocab::RoutePermissionId::RuntimeInventoryRead,
+                tenant_id: Some(tid(CANON_TENANT)),
+                principal_kind: vocab::PrincipalKind::User,
+                principal_id: CANON_USER.to_string(),
+                resource: None,
+            },
+            RouteAuthorizationRequest {
+                contract_id: RUNTIME_INVENTORY_HTTP_SPEC.route.contract_id(),
+                permission: vocab::RoutePermissionId::IdentityPolicyRead,
+                tenant_id: Some(tid(CANON_TENANT)),
+                principal_kind: vocab::PrincipalKind::User,
+                principal_id: CANON_USER.to_string(),
+                resource: None,
+            },
+        ] {
+            assert_eq!(
+                authorizer.authorize(request).await,
+                RouteAuthorizationDecision::Deny
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn contract_authorizer_denies_rss_user_runtime_inventory_without_durable_grant() {
+        let roles: Arc<DynRoleReadRepo<'static>> = Arc::from(DynRoleReadRepo::new_box(
+            crate::internal::mem::InMemRoleRepo::new(),
+        ));
+        let bindings: Arc<DynRoleBindingReadRepo<'static>> =
+            Arc::from(crate::ports::DynRoleBindingReadRepo::new_box(
+                crate::internal::mem::InMemRoleBindingLifecycle::new(),
+            ));
+        let authorizer = ContractAuthorizer::new(
+            roles,
+            bindings,
+            empty_policy_repo(),
+            empty_resource_attribute_repo(),
+            make_shared_clock(1_000),
+        );
+
+        let decision = authorizer
+            .authorize(RouteAuthorizationRequest {
+                contract_id: RUNTIME_INVENTORY_HTTP_SPEC.route.contract_id(),
+                permission: vocab::RoutePermissionId::RuntimeInventoryRead,
+                tenant_id: Some(tid(CANON_TENANT)),
+                principal_kind: vocab::PrincipalKind::User,
+                principal_id: CANON_USER.to_string(),
+                resource: None,
+            })
+            .await;
+        assert_eq!(decision, RouteAuthorizationDecision::Deny);
     }
 
     #[tokio::test]

@@ -16,6 +16,9 @@ use vault::VaultRuntimeDeps;
 
 mod auth_bridge;
 mod config;
+mod inventory;
+#[cfg(feature = "test-support")]
+pub use inventory::test_support as runtime_inventory_test_support;
 mod listeners;
 mod plan;
 mod providers;

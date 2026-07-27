@@ -12,6 +12,10 @@ workspace = true
 name = "identityaudit"
 path = "src/lib.rs"
 
+[features]
+default = []
+test-support = ["httpserve/test-util", "dep:ids"]
+
 [[bin]]
 name = "identityaudit-server"
 path = "src/main.rs"
@@ -40,10 +44,11 @@ generated = { path = "../../generated" }
 httpd = { path = "../../adapters/httpd" }
 httpserve = { path = "../../crates/httpserve" }
 identity = { path = "../../crates/identity" }
+ids = { path = "../../crates/ids", optional = true }
 identity-composition = { path = "../../composition/identity" }
 jsonschema = { workspace = true }
 oidc = { path = "../../adapters/oidc", features = ["backend"] }
-postgres = { path = "../../adapters/postgres", features = ["domain-identity", "domain-audit"] }
+postgres = { path = "../../adapters/postgres", features = ["domain-identity", "domain-audit", "auth-audit-sink"] }
 prometheus_adapter = { package = "prometheus-adapter", path = "../../adapters/prometheus", features = ["backend"] }
 primitives = { path = "../../crates/primitives" }
 ratelimit = { path = "../../adapters/ratelimit" }
@@ -69,6 +74,6 @@ zeroize = { workspace = true }
 audit-composition = { path = "../../composition/audit", features = ["test-support"] }
 httpserve = { path = "../../crates/httpserve", features = ["test-util"] }
 identity-composition = { path = "../../composition/identity", features = ["test-support"] }
-postgres = { path = "../../adapters/postgres", features = ["domain-identity", "domain-audit", "test-support"] }
+postgres = { path = "../../adapters/postgres", features = ["domain-identity", "domain-audit", "auth-audit-sink", "test-support"] }
 tokio = { workspace = true, features = ["macros", "rt"] }
 tower = { workspace = true, features = ["util"] }

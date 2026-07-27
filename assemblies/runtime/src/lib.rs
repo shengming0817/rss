@@ -49,10 +49,10 @@ mod phase;
 pub mod plan;
 mod provider_output;
 mod routes;
+mod runtime_inventory;
 pub mod saga_runtime;
 mod secret_config;
 pub mod support;
-
 pub(crate) use secret_config::EnvSecret;
 
 pub use distributed_runtime::DistributedRuntimeDeps;
@@ -189,7 +189,7 @@ fn prepare_runtime_kernel<Local>(
 /// Only this type can enter [`run`] or [`shutdown_runtime`].
 pub fn prepare_runtime() -> anyhow::Result<ServingRuntimeInputs> {
     let (prepared, password_blocklist) = prepare_runtime_kernel(prepare_serving_local)?;
-    Ok(ServingRuntimeInputs::new(prepared, password_blocklist))
+    ServingRuntimeInputs::from_prepared(prepared, password_blocklist)
 }
 
 /// Flush the trace exporter when a prepared runtime exits before serving launch.

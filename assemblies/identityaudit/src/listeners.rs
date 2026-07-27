@@ -48,6 +48,7 @@ pub(crate) struct FinalizeInputs {
     pub(crate) metrics: Arc<dyn diport::MetricsExporter>,
     pub(crate) audit_sink: httpserve::AuditSinkHandle,
     pub(crate) audit_clock: Arc<dyn diport::Clock>,
+    pub(crate) reporter: Arc<bootstrap::HealthReporter>,
 }
 
 pub(crate) fn finalize(
@@ -60,6 +61,8 @@ pub(crate) fn finalize(
     let mut live = registry
         .finalize_routes()
         .context("finalize identityaudit routes")?;
+    bootstrap::validate_framework_serving(&live, crate::modules_gen::FRAMEWORK_HTTP_ROUTES)
+        .context("validate identityaudit framework route exact set")?;
     let primary = take_routes(&mut live, ListenerKind::Primary)?;
     let admin = take_routes(&mut live, ListenerKind::Admin)?;
     anyhow::ensure!(
@@ -90,7 +93,7 @@ pub(crate) fn finalize(
     );
     let admin = with_access_layers(admin, inputs.verifier, inputs.limiter);
 
-    let reporter = Arc::new(registry.take_health_reporter());
+    let reporter = inputs.reporter;
     let report = Arc::clone(&reporter);
     let health =
         httpserve::health::routes(move || report.report(), move || inputs.metrics.render());
@@ -134,6 +137,7 @@ pub(crate) struct LaunchAdapter {
     admin: SocketAddr,
     health: SocketAddr,
     budget: httpserve::ServerRequestBudget,
+    inventory_publisher: runtimeexec::inventory::InventoryPublisher,
 }
 
 impl LaunchAdapter {
@@ -143,17 +147,25 @@ impl LaunchAdapter {
         admin: SocketAddr,
         health: SocketAddr,
         budget: std::time::Duration,
+        inventory_publisher: runtimeexec::inventory::InventoryPublisher,
     ) -> anyhow::Result<Self> {
-        let millis = u64::try_from(budget.as_millis()).context("request budget too large")?;
-        let millis = NonZeroU64::new(millis).context("request budget must be non-zero")?;
         Ok(Self {
             listeners,
             primary,
             admin,
             health,
-            budget: httpserve::ServerRequestBudget::from_millis(millis),
+            budget: server_request_budget(budget)?,
+            inventory_publisher,
         })
     }
+}
+
+fn server_request_budget(
+    budget: std::time::Duration,
+) -> anyhow::Result<httpserve::ServerRequestBudget> {
+    let millis = u64::try_from(budget.as_millis()).context("request budget too large")?;
+    let millis = NonZeroU64::new(millis).context("request budget must be non-zero")?;
+    Ok(httpserve::ServerRequestBudget::from_millis(millis))
 }
 
 struct PreparedListener {
@@ -167,6 +179,11 @@ pub(crate) struct PreparedListeners {
     health: PreparedListener,
 }
 
+pub(crate) struct PreparedLaunchListeners {
+    listeners: PreparedListeners,
+    inventory_publisher: runtimeexec::inventory::InventoryPublisher,
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct ListenerInventory {
     pub(crate) primary: SocketAddr,
@@ -175,7 +192,7 @@ pub(crate) struct ListenerInventory {
 }
 
 impl runtimeexec::LaunchAdapter<FinalizedProbeReceipt> for LaunchAdapter {
-    type Prepared = PreparedListeners;
+    type Prepared = PreparedLaunchListeners;
     type Inventory = ListenerInventory;
 
     async fn prepare(
@@ -183,30 +200,70 @@ impl runtimeexec::LaunchAdapter<FinalizedProbeReceipt> for LaunchAdapter {
         _receipt: FinalizedProbeReceipt,
         _transaction: &mut runtimeexec::LaunchTransaction<'_>,
     ) -> anyhow::Result<Self::Prepared> {
-        prepare_listeners(
+        let listeners = prepare_listeners(
             self.listeners,
             self.primary,
             self.admin,
             self.health,
             self.budget,
         )
-        .await
+        .await?;
+        Ok(PreparedLaunchListeners {
+            listeners,
+            inventory_publisher: self.inventory_publisher,
+        })
     }
 
     fn activate(
         prepared: Self::Prepared,
         mut registrar: runtimeexec::LaunchRegistrar<'_>,
     ) -> anyhow::Result<runtimeexec::Activated<Self::Inventory>> {
+        let PreparedLaunchListeners {
+            listeners: prepared,
+            inventory_publisher,
+        } = prepared;
+        let observations = bound_listener_observations(&prepared);
         let inventory = ListenerInventory {
             primary: prepared.primary.bound.local_addr(),
             admin: prepared.admin.bound.local_addr(),
             health: prepared.health.bound.local_addr(),
         };
+        inventory_publisher
+            .publish(observations)
+            .context("publish exact identityaudit listener inventory")?;
         register(prepared.primary, &mut registrar);
         register(prepared.admin, &mut registrar);
         register(prepared.health, &mut registrar);
         registrar.complete(inventory)
     }
+}
+
+fn bound_listener_observations(
+    prepared: &PreparedListeners,
+) -> Vec<runtimeexec::inventory::BoundListenerObservation> {
+    Vec::from([
+        runtimeexec::inventory::BoundListenerObservation::from_bound(
+            "primary-main",
+            assembly_schema::AssemblyListenerKind::Primary,
+            assembly_schema::ListenerAuth::RssAccessToken,
+            runtimeexec::inventory::InventoryEndpointScheme::Http,
+            prepared.primary.bound.local_addr(),
+        ),
+        runtimeexec::inventory::BoundListenerObservation::from_bound(
+            "admin-main",
+            assembly_schema::AssemblyListenerKind::Admin,
+            assembly_schema::ListenerAuth::RssAccessToken,
+            runtimeexec::inventory::InventoryEndpointScheme::Http,
+            prepared.admin.bound.local_addr(),
+        ),
+        runtimeexec::inventory::BoundListenerObservation::from_bound(
+            "health-main",
+            assembly_schema::AssemblyListenerKind::Health,
+            assembly_schema::ListenerAuth::NoAuth,
+            runtimeexec::inventory::InventoryEndpointScheme::Http,
+            prepared.health.bound.local_addr(),
+        ),
+    ])
 }
 
 async fn prepare_listeners(
@@ -292,29 +349,40 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn runtime_inventory_admin_pairs_rss_user_bridge_with_identity_durable_authorizer()
+    -> anyhow::Result<()> {
+        let tenant = vocab::TenantId::parse("00000000-0000-4000-8000-000000001797")?;
+        let mut bindings = vec![identity_composition::test_support::binding()?];
+        let (mut registry, _output) = bootstrap::compose_bindings(&mut bindings)?;
+        let registered = registry.take_primary_authorizer()?;
+        assert_eq!(
+            auth_plan(ListenerKind::Admin)?.scheme(),
+            AuthScheme::RssAccessToken,
+            "production Admin listener must retain the RSS User-only verifier"
+        );
+
+        let request = httpserve::RouteAuthorizationRequest {
+            contract_id: generated::http::runtime_v1::inventory::SPEC
+                .route
+                .contract_id(),
+            permission: vocab::RoutePermissionId::RuntimeInventoryRead,
+            tenant_id: Some(tenant),
+            principal_kind: vocab::PrincipalKind::User,
+            principal_id: "unbound-rss-user".to_string(),
+            resource: None,
+        };
+        assert_eq!(
+            registered.authorize(request).await,
+            httpserve::RouteAuthorizationDecision::Deny
+        );
+        Ok(())
+    }
+
     #[test]
     fn launch_adapter_rejects_invalid_request_budgets() -> anyhow::Result<()> {
-        let address = "127.0.0.1:0".parse()?;
-        assert!(
-            LaunchAdapter::new(
-                empty_listener_set()?,
-                address,
-                address,
-                address,
-                std::time::Duration::ZERO,
-            )
-            .is_err()
-        );
-        assert!(
-            LaunchAdapter::new(
-                empty_listener_set()?,
-                address,
-                address,
-                address,
-                std::time::Duration::MAX,
-            )
-            .is_err()
-        );
+        assert!(server_request_budget(std::time::Duration::ZERO).is_err());
+        assert!(server_request_budget(std::time::Duration::MAX).is_err());
         Ok(())
     }
 

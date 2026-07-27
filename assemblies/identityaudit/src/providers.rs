@@ -5,7 +5,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::Context as _;
-use base64::Engine as _;
 use diport::{DynKeyProvider, DynManagedResource};
 
 use crate::config;
@@ -66,7 +65,7 @@ impl ProviderRoleCloser {
         self,
         outputs: EventingRoleOutputs,
         inventory: &mut bootstrap::DomainModuleResult,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<crate::providers_gen::CompletedProviderRoles> {
         let mut cas = outputs.distributed_cas;
         cas.resources.push(self.cas_resource);
         let distributed_cas_store = self
@@ -81,7 +80,7 @@ impl ProviderRoleCloser {
             .event_subscriber_constructor
             .finish(outputs.event_subscriber)?
             .transfer(inventory);
-        let _completed = self.roles.finish(
+        self.roles.finish(
             inventory,
             self.auth_audit_sink,
             distributed_cas_store,
@@ -92,8 +91,7 @@ impl ProviderRoleCloser {
             self.identity_signer,
             self.listener_pdp,
             self.listener_rate_limiter,
-        )?;
-        Ok(())
+        )
     }
 }
 
@@ -971,6 +969,7 @@ mod tests {
 
     use super::*;
     use axum::{Json, Router, routing::post};
+    use base64::Engine as _;
     use diport::{KeyProvider as _, ManagedResource as _};
 
     struct TestResource {
@@ -1098,7 +1097,7 @@ mod tests {
     fn generated_provider_receipts_close_the_exact_lifecycle_inventory() {
         let mut roles = crate::plan::IdentityAuditPlan::bundled()
             .expect("bundled identityaudit plan")
-            .into_provider_build()
+            .provider_build()
             .expect("generated provider exact join");
         let auth_audit_sink = roles
             .auth_audit_sink()
@@ -1180,7 +1179,7 @@ mod tests {
     fn generated_provider_roles_fail_closed_on_wrong_or_reused_outputs() {
         let mut roles = crate::plan::IdentityAuditPlan::bundled()
             .expect("bundled identityaudit plan")
-            .into_provider_build()
+            .provider_build()
             .expect("generated provider exact join");
         let constructor = roles.listener_pdp().expect("PDP constructor");
         assert!(
@@ -1202,7 +1201,7 @@ mod tests {
     fn provider_role_closer_commits_eventing_outputs_into_one_inventory() {
         let mut roles = crate::plan::IdentityAuditPlan::bundled()
             .expect("bundled identityaudit plan")
-            .into_provider_build()
+            .provider_build()
             .expect("generated provider exact join");
         let auth_audit_sink = roles
             .auth_audit_sink()

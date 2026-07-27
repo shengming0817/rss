@@ -15,6 +15,8 @@ const PG_WRITER_PASSWORD_ENV: &str = "RSS_SETTINGSONLY_PG_WRITER_PASSWORD";
 const PG_READER_PASSWORD_ENV: &str = "RSS_SETTINGSONLY_PG_READER_PASSWORD";
 const PG_MIGRATOR_PASSWORD_ENV: &str = "RSS_SETTINGSONLY_PG_MIGRATOR_PASSWORD";
 const VAULT_TOKEN_ENV: &str = "RSS_SETTINGSONLY_VAULT_TOKEN";
+const BUILD_SOURCE_SHA_ENV: &str = "RSS_BUILD_SOURCE_SHA";
+const BUILD_IMAGE_DIGEST_ENV: &str = "RSS_BUILD_IMAGE_DIGEST";
 
 /// Capture, parse, validate, and resolve one immutable settings-only configuration generation.
 ///
@@ -40,7 +42,15 @@ fn capture_from(
         pg_migrator_password: resolve_environment(source, PG_MIGRATOR_PASSWORD_ENV)?,
         vault_token: resolve_environment(source, VAULT_TOKEN_ENV)?,
     };
-    Ok(CapturedConfig { config, secrets })
+    let source_sha = resolve_environment(source, BUILD_SOURCE_SHA_ENV)?;
+    let image_digest = resolve_environment(source, BUILD_IMAGE_DIGEST_ENV)?;
+    let build_identity = runtimeexec::inventory::BuildIdentity::parse(&source_sha, &image_digest)
+        .map_err(|_| ConfigError::InvalidValue("buildIdentity"))?;
+    Ok(CapturedConfig {
+        config,
+        secrets,
+        build_identity,
+    })
 }
 
 fn resolve_environment(
@@ -204,11 +214,18 @@ impl std::error::Error for ConfigError {}
 pub(crate) struct CapturedConfig {
     config: SettingsOnlyConfig,
     secrets: ResolvedSecrets,
+    build_identity: runtimeexec::inventory::BuildIdentity,
 }
 
 impl CapturedConfig {
-    pub(crate) fn into_runtime_inputs(self) -> (SettingsOnlyConfig, ResolvedSecrets) {
-        (self.config, self.secrets)
+    pub(crate) fn into_runtime_inputs(
+        self,
+    ) -> (
+        SettingsOnlyConfig,
+        ResolvedSecrets,
+        runtimeexec::inventory::BuildIdentity,
+    ) {
+        (self.config, self.secrets, self.build_identity)
     }
 }
 
@@ -366,6 +383,7 @@ impl JsonSchema for PlaintextLoopbackAddress {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct ListenersConfig {
     primary: ListenerEndpoint,
+    admin: ListenerEndpoint,
     health: ListenerEndpoint,
     #[schemars(range(min = 1, max = 300_000))]
     request_budget_ms: u64,
@@ -376,15 +394,20 @@ impl ListenersConfig {
         if !(1..=300_000).contains(&self.request_budget_ms) {
             return Err(ConfigError::InvalidValue("listeners.requestBudgetMs"));
         }
-        if self.primary.bind.0 == self.health.bind.0 {
+        let addresses = [self.primary.bind.0, self.admin.bind.0, self.health.bind.0];
+        if addresses[0] == addresses[1]
+            || addresses[0] == addresses[2]
+            || addresses[1] == addresses[2]
+        {
             return Err(ConfigError::InvalidValue("listeners.bind"));
         }
         Ok(())
     }
 
-    pub(crate) fn into_listener_inputs(self) -> (SocketAddr, SocketAddr, Duration) {
+    pub(crate) fn into_listener_inputs(self) -> (SocketAddr, SocketAddr, SocketAddr, Duration) {
         (
             self.primary.bind.get(),
+            self.admin.bind.get(),
             self.health.bind.get(),
             Duration::from_millis(self.request_budget_ms),
         )
@@ -941,6 +964,9 @@ requestBudgetMs = 30000
 [listeners.primary]
 bind = "127.0.0.1:18080"
 
+[listeners.admin]
+bind = "127.0.0.1:18082"
+
 [listeners.health]
 bind = "127.0.0.1:18081"
 
@@ -1008,6 +1034,13 @@ kvPathPrefix = "tenants/settings"
                 ]
                 .into_iter()
                 .map(|name| (name, OsString::from(SECRET_SENTINEL)))
+                .chain([
+                    (BUILD_SOURCE_SHA_ENV, OsString::from("a".repeat(40))),
+                    (
+                        BUILD_IMAGE_DIGEST_ENV,
+                        OsString::from(format!("sha256:{}", "b".repeat(64))),
+                    ),
+                ])
                 .collect(),
                 environment_reads: BTreeMap::new(),
             }
@@ -1144,10 +1177,11 @@ kvPathPrefix = "tenants/settings"
         let mut source = TestSource::complete(VALID_CONFIG);
         let captured = capture_from(Path::new("ignored"), &mut source).expect("capture");
         assert_eq!(source.document_reads, 1);
-        assert_eq!(source.environment_reads.len(), 4);
+        assert_eq!(source.environment_reads.len(), 6);
         assert!(source.environment_reads.values().all(|reads| *reads == 1));
         assert!(!format!("{captured:?}").contains(SECRET_SENTINEL));
-        let (_, secrets) = captured.into_runtime_inputs();
+        let (_, secrets, build_identity) = captured.into_runtime_inputs();
+        assert_eq!(build_identity.source_sha(), "a".repeat(40));
         assert!(!format!("{secrets:?}").contains(SECRET_SENTINEL));
         let (writer, reader, migrator, vault) = secrets.into_secret_material();
         assert_eq!(&**writer, SECRET_SENTINEL);
@@ -1262,8 +1296,9 @@ kvPathPrefix = "tenants/settings"
     fn consuming_accessors_preserve_closed_values() {
         let config = parse(VALID_CONFIG).expect("valid config");
         let (listeners, federated, postgres, vault) = config.into_sections();
-        let (primary, health, budget) = listeners.into_listener_inputs();
+        let (primary, admin, health, budget) = listeners.into_listener_inputs();
         assert_eq!(primary, "127.0.0.1:18080".parse().unwrap());
+        assert_eq!(admin, "127.0.0.1:18082".parse().unwrap());
         assert_eq!(health, "127.0.0.1:18081".parse().unwrap());
         assert_eq!(budget, Duration::from_secs(30));
 

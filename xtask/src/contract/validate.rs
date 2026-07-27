@@ -1773,7 +1773,12 @@ fn rule_http_permission_auth(
             "endpoints.http.auth mode=permission 禁止 reason".to_string(),
         ));
     }
-    if let Some(resource) = http.resource.as_ref().filter(|s| !s.trim().is_empty()) {
+    if let Some(resource) = http.resource.as_ref().filter(|s| !s.trim().is_empty())
+        && !http
+            .resource_sharing
+            .as_ref()
+            .is_some_and(|sharing| sharing.mode == HttpResourceSharingMode::Global)
+    {
         let path = m.path.as_deref().unwrap_or_default();
         if !http_path_params(path).any(|param| param == resource.trim()) {
             out.push(finding(
@@ -4099,6 +4104,40 @@ mod tests {
                 .any(|f| f.detail.contains("必须声明 endpoints.http.resource")),
             "{findings:?}"
         );
+    }
+
+    #[test]
+    fn r18_global_resource_is_canonical_not_a_dynamic_path_attribute() {
+        let mut m = manifest(
+            ContractKind::Http,
+            ConsistencyLevel::LocalOnly,
+            ContractOwner::Framework,
+            http_schemas(),
+        );
+        m.lifecycle = Lifecycle::Active;
+        m.path = Some("/api/v1/runtime/inventory".to_string());
+        m.method = Some(HttpMethod::Get);
+        m.endpoints = Some(Endpoints {
+            http: Some(HttpEndpoint {
+                success_status: 200,
+                idempotency: HttpIdempotency::Idempotent,
+                auth: Some(HttpAuth {
+                    mode: HttpAuthMode::Permission,
+                    reason: None,
+                    permission: Some("runtime:inventory:read".to_string()),
+                }),
+                resource: Some("runtimeInventory".to_string()),
+                self_scoped: false,
+                resource_sharing: Some(HttpResourceSharing {
+                    mode: HttpResourceSharingMode::Global,
+                    reason: Some("process-wide operator state".to_string()),
+                }),
+                headers: BTreeMap::new(),
+                projection: None,
+            }),
+        });
+        let findings = rule_http_auth(&m, "runtime.inventory");
+        assert!(findings.is_empty(), "{findings:?}");
     }
 
     #[test]

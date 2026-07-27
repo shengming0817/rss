@@ -34,6 +34,7 @@ const ROUTE: HttpRouteBinding<RouteMarker, OutboxFact> = HttpRouteBinding::from_
     HttpRouteAuth::Public,
     None,
     false,
+    vocab::http::HttpResourceSharing::TenantScoped,
     HttpEffectProfile::new(EFFECTS),
 );
 const PRODUCER: HttpProducerBinding<RouteMarker> =

@@ -273,6 +273,39 @@ impl DomainTransportRuntime {
             Self::InProc(inner) => inner.module_result(),
         }
     }
+
+    pub(crate) fn readiness_sampler(&self) -> runtimeexec::inventory::PlacementReadinessSampler {
+        match self {
+            Self::Remote(inner) => {
+                let transport = inner.transport.clone();
+                Arc::new(move || inventory_readiness(transport.readiness()))
+            }
+            Self::InProc(inner) => {
+                let transport = inner.transport.clone();
+                Arc::new(move || inventory_readiness(transport.readiness()))
+            }
+        }
+    }
+}
+
+fn inventory_readiness(
+    readiness: httpd::DomainHttpReadiness,
+) -> runtimeexec::inventory::InventoryPlacementReadiness {
+    match readiness {
+        httpd::DomainHttpReadiness::Ready => {
+            runtimeexec::inventory::InventoryPlacementReadiness::Ready
+        }
+        httpd::DomainHttpReadiness::MtlsSourceUnavailable => {
+            runtimeexec::inventory::InventoryPlacementReadiness::MtlsSourceUnavailable
+        }
+        httpd::DomainHttpReadiness::PeerEndpointUnresolved => {
+            runtimeexec::inventory::InventoryPlacementReadiness::PeerEndpointUnresolved
+        }
+        httpd::DomainHttpReadiness::PeerEndpointUnavailable => {
+            runtimeexec::inventory::InventoryPlacementReadiness::PeerEndpointUnavailable
+        }
+        _ => runtimeexec::inventory::InventoryPlacementReadiness::PeerEndpointUnavailable,
+    }
 }
 
 pub(crate) const DOMAIN_TRANSPORT_READY_PROBE_NAME: &str = "domain_transport_ready";

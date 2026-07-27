@@ -348,6 +348,15 @@ pub enum HttpIdempotency {
     NonIdempotent,
 }
 
+/// Whether the route resource is tenant-owned or process-global.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HttpResourceSharing {
+    /// Authorization is bound to the authenticated principal's tenant.
+    TenantScoped,
+    /// Authorization targets a canonical resource with no tenant owner.
+    Global,
+}
+
 /// Atomic proof used to register one generated HTTP route.
 ///
 /// All fields are private. Code generation constructs the complete value in one expression;
@@ -363,6 +372,7 @@ pub struct HttpRouteEvidence {
     auth: HttpRouteAuth,
     resource: Option<&'static str>,
     self_scoped: bool,
+    resource_sharing: HttpResourceSharing,
     consistency_level: HttpConsistencyLevel,
     effect_profile: HttpEffectProfile,
 }
@@ -407,6 +417,7 @@ impl<M, C: HttpConsistencyClass> HttpRouteBinding<M, C> {
         auth: HttpRouteAuth,
         resource: Option<&'static str>,
         self_scoped: bool,
+        resource_sharing: HttpResourceSharing,
         effect_profile: HttpEffectProfile,
     ) -> Self {
         Self {
@@ -420,6 +431,7 @@ impl<M, C: HttpConsistencyClass> HttpRouteBinding<M, C> {
                 auth,
                 resource,
                 self_scoped,
+                resource_sharing,
                 C::LEVEL,
                 effect_profile,
             ),
@@ -585,6 +597,7 @@ impl HttpRouteEvidence {
         auth: HttpRouteAuth,
         resource: Option<&'static str>,
         self_scoped: bool,
+        resource_sharing: HttpResourceSharing,
         consistency_level: HttpConsistencyLevel,
         effect_profile: HttpEffectProfile,
     ) -> Self {
@@ -601,6 +614,10 @@ impl HttpRouteEvidence {
             matches!(auth, HttpRouteAuth::Permission(_)) || (resource.is_none() && !self_scoped),
             "non-permission HTTP routes cannot carry resource scope"
         );
+        assert!(
+            !matches!(resource_sharing, HttpResourceSharing::Global) || resource.is_some(),
+            "global HTTP routes must carry a canonical resource"
+        );
 
         Self {
             owner,
@@ -612,6 +629,7 @@ impl HttpRouteEvidence {
             auth,
             resource,
             self_scoped,
+            resource_sharing,
             consistency_level,
             effect_profile,
         }
@@ -677,6 +695,12 @@ impl HttpRouteEvidence {
         self.self_scoped
     }
 
+    /// Tenant ownership posture generated from the contract manifest.
+    #[must_use]
+    pub const fn resource_sharing(&self) -> HttpResourceSharing {
+        self.resource_sharing
+    }
+
     /// Declared consistency semantics.
     #[must_use]
     pub const fn consistency_level(&self) -> HttpConsistencyLevel {
@@ -712,6 +736,7 @@ mod tests {
         HttpRouteAuth::Permission(RoutePermissionId::IdentityProfileRead),
         None,
         true,
+        HttpResourceSharing::TenantScoped,
         HttpConsistencyLevel::LocalOnly,
         PROFILE,
     );
@@ -752,6 +777,7 @@ mod tests {
             HttpRouteAuth::Public,
             None,
             false,
+            HttpResourceSharing::TenantScoped,
             PROFILE,
         );
 
@@ -810,6 +836,7 @@ mod tests {
             HttpRouteAuth::Public,
             None,
             false,
+            HttpResourceSharing::TenantScoped,
             HttpConsistencyLevel::LocalOnly,
             PROFILE,
         );
@@ -828,6 +855,7 @@ mod tests {
             HttpRouteAuth::Public,
             Some("subject"),
             false,
+            HttpResourceSharing::TenantScoped,
             HttpConsistencyLevel::LocalOnly,
             PROFILE,
         );

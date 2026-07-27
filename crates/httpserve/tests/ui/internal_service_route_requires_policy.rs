@@ -19,6 +19,7 @@ fn main() {
         vocab::HttpRouteAuth::ServiceOwned,
         None,
         false,
+        vocab::http::HttpResourceSharing::TenantScoped,
         vocab::HttpEffectProfile::new(EFFECTS),
     );
     let endpoint = httpserve::GeneratedEndpoint::new(

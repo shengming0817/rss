@@ -137,6 +137,7 @@ pub(crate) struct FinalizedProbeReceipt {
 pub(crate) struct FinalizedListenerPlan {
     listeners: FinalizedListenerSet,
     probe_receipt: FinalizedProbeReceipt,
+    health_reporter: Arc<bootstrap::HealthReporter>,
 }
 
 /// Transport material resolved during route assembly from the same captured generation.
@@ -171,12 +172,14 @@ impl AssembledListener {
     pub(crate) fn into_launch_parts(
         self,
     ) -> (
+        String,
         ListenerKind,
         AuthScheme,
         httpserve::AuthenticatedRoutes,
         ListenerTransport,
     ) {
         (
+            self.spec.id().to_owned(),
             self.spec.kind(),
             self.spec.auth_scheme(),
             self.routes,
@@ -205,8 +208,14 @@ impl FinalizedListenerSet {
 }
 
 impl FinalizedListenerPlan {
-    pub(crate) fn into_parts(self) -> (FinalizedListenerSet, FinalizedProbeReceipt) {
-        (self.listeners, self.probe_receipt)
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        FinalizedListenerSet,
+        FinalizedProbeReceipt,
+        Arc<bootstrap::HealthReporter>,
+    ) {
+        (self.listeners, self.probe_receipt, self.health_reporter)
     }
 }
 
@@ -380,6 +389,7 @@ pub(crate) struct FinalizeListenerPlanInputs<'config, 'borrow> {
     pub(crate) audit_clock: Arc<dyn diport::Clock>,
     pub(crate) rate_limiter: Arc<GovernorLimiter>,
     pub(crate) metrics: Arc<dyn diport::MetricsExporter>,
+    pub(crate) framework_routes: crate::runtime_inventory::RuntimeInventoryRoutes,
 }
 
 pub(crate) fn finalize_listener_plan(
@@ -394,11 +404,13 @@ pub(crate) fn finalize_listener_plan(
         audit_clock,
         rate_limiter,
         metrics,
+        framework_routes,
     } = inputs;
     providers.validate_exact_presence(&execution_plan)?;
     let internal_mtls_allow_set = config.value(INTERNAL_MTLS_SPIFFE_ALLOW_SET_ENV);
     let spiffe_endpoint = config.value(SPIFFE_ENDPOINT_SOCKET_ENV);
-    crate::modules_gen::register_framework_routes(registry).context("register framework routes")?;
+    crate::modules_gen::register_framework_routes(&framework_routes, registry)
+        .context("register framework routes")?;
     let primary_authorizer = registry
         .take_primary_authorizer()
         .context("take Primary route authorizer")?;
@@ -474,9 +486,9 @@ pub(crate) fn finalize_listener_plan(
 
     let (health_index, health_spec) =
         health.context("RuntimePlan does not declare the required Health listener")?;
-    let reporter = Arc::new(registry.take_health_reporter());
+    let health_reporter = Arc::new(registry.take_health_reporter());
     let probe_receipt = FinalizedProbeReceipt { _private: () };
-    let health = finalize_health_spec(health_spec, reporter, metrics)?;
+    let health = finalize_health_spec(health_spec, Arc::clone(&health_reporter), metrics)?;
     finalized.push((health_index, health));
     finalized.sort_by_key(|(plan_index, _)| *plan_index);
     Ok(FinalizedListenerPlan {
@@ -487,6 +499,7 @@ pub(crate) fn finalize_listener_plan(
                 .collect(),
         },
         probe_receipt,
+        health_reporter,
     })
 }
 
@@ -746,12 +759,11 @@ fn finalize_access_fixture_listener(
     audit_sink: httpserve::AuditSinkHandle,
     audit_clock: Arc<dyn diport::Clock>,
 ) -> anyhow::Result<httpserve::AuthenticatedRoutes> {
-    crate::modules_gen::register_framework_routes(registry).context("register framework routes")?;
     let primary_authorizer = registry
         .take_primary_authorizer()
         .context("take Primary route authorizer")?;
     let mut live_routes = registry.finalize_routes().context("finalize_routes")?;
-    bootstrap::validate_framework_serving(&live_routes, crate::modules_gen::FRAMEWORK_HTTP_ROUTES)
+    bootstrap::validate_framework_serving(&live_routes, &[])
         .context("validate framework serving")?;
     let index = live_routes
         .iter()
@@ -1003,6 +1015,8 @@ mod tests {
             registry.route_group::<httpserve::Admin>("/test-admin", Ok)?;
         }
         let snapshot = test_snapshot(values)?;
+        let framework_routes =
+            crate::runtime_inventory::RuntimeInventoryRoutes::unpublished_fixture(snapshot.view())?;
         let execution_plan =
             crate::plan::RuntimePlan::bundled(snapshot.view())?.listener_execution_plan();
         finalize_listener_plan(FinalizeListenerPlanInputs {
@@ -1014,6 +1028,7 @@ mod tests {
             audit_clock: Arc::new(SystemClock),
             rate_limiter: build_runtime_rate_limiter(),
             metrics: noop_metrics(),
+            framework_routes,
         })
         .map(|plan| plan.into_parts().0)
     }
@@ -1103,12 +1118,12 @@ mod tests {
         );
         let mut missing = bootstrap::Registry::new();
         missing
-            .route_group::<httpserve::Primary>("/primary", Ok)
-            .expect("Primary group");
-        missing
             .register_primary_authorizer(allow_authorizer())
             .expect("Primary authorizer");
         let config = snapshot();
+        let framework_routes =
+            crate::runtime_inventory::RuntimeInventoryRoutes::unpublished_fixture(config.view())
+                .expect("inventory fixture");
         let error = finalize_listener_plan(FinalizeListenerPlanInputs {
             execution_plan: crate::plan::RuntimePlan::bundled(config.view())
                 .expect("RuntimePlan")
@@ -1120,9 +1135,10 @@ mod tests {
             audit_clock: Arc::new(SystemClock),
             rate_limiter: build_runtime_rate_limiter(),
             metrics: noop_metrics(),
+            framework_routes,
         })
         .err()
-        .expect("declared Admin without live routes must fail");
+        .expect("declared Primary without live routes must fail");
         assert!(error.to_string().contains("produced no live routes"));
 
         let mut manual_health = bootstrap::Registry::new();
@@ -1139,6 +1155,9 @@ mod tests {
             .register_primary_authorizer(allow_authorizer())
             .expect("Primary authorizer");
         let config = snapshot();
+        let framework_routes =
+            crate::runtime_inventory::RuntimeInventoryRoutes::unpublished_fixture(config.view())
+                .expect("inventory fixture");
         let error = finalize_listener_plan(FinalizeListenerPlanInputs {
             execution_plan: crate::plan::RuntimePlan::bundled(config.view())
                 .expect("RuntimePlan")
@@ -1150,6 +1169,7 @@ mod tests {
             audit_clock: Arc::new(SystemClock),
             rate_limiter: build_runtime_rate_limiter(),
             metrics: noop_metrics(),
+            framework_routes,
         })
         .err()
         .expect("manual live Health routes must fail");

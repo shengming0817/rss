@@ -18,9 +18,12 @@ Required secret environment:
   RSS_SETTINGSONLY_PG_READER_PASSWORD
   RSS_SETTINGSONLY_PG_MIGRATOR_PASSWORD
   RSS_SETTINGSONLY_VAULT_TOKEN
+  RSS_BUILD_SOURCE_SHA
+  RSS_BUILD_IMAGE_DIGEST
 
 Health endpoints: /health/v1/healthz, /health/v1/readyz, /health/v1/metrics
 Primary semantics: missing/invalid credential = 401; valid federated credential = 403
+Admin inventory: GET /api/v1/runtime/inventory (federated Admin/SuperAdmin only)
 "#;
 
 enum CliCommand {

@@ -21,6 +21,7 @@ fn endpoint() -> httpserve::GeneratedEndpoint<(), vocab::http::LocalOnly> {
         vocab::HttpRouteAuth::ServiceOwned,
         None,
         false,
+        vocab::http::HttpResourceSharing::TenantScoped,
         vocab::HttpEffectProfile::new(EFFECTS),
     );
     httpserve::GeneratedEndpoint::new(binding, |_: httpserve::ContractMarker<RouteMarker>| async {

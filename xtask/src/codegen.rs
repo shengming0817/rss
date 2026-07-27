@@ -313,8 +313,12 @@ fn render_module_file(
             );
         }
         let body = render_contract_body(c, "super::super::", contracts)?;
+        let generated_regex_lint = body
+            .contains("::regress::Regex")
+            .then_some("#![allow(clippy::unwrap_used)] // reason: typify emits infallible static regex initialization.\n")
+            .unwrap_or_default();
         out.push_str(&format!(
-            "\n/// 端点 `{slug}` 派生契约（源 `{slug}/contract.toml`）。由 `cargo xtask codegen` 派生；勿手改。\npub mod {ident} {{\n{body}\n}}\n"
+            "\n/// 端点 `{slug}` 派生契约（源 `{slug}/contract.toml`）。由 `cargo xtask codegen` 派生；勿手改。\npub mod {ident} {{\n{generated_regex_lint}{body}\n}}\n"
         ));
     }
     Ok(out)
@@ -837,6 +841,7 @@ pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker, ::vocab::http::{consiste
     {auth},
     {resource},
     {self_scoped},
+    ::vocab::http::HttpResourceSharing::{resource_sharing_mode},
     EFFECT_PROFILE,
 );
 {producer_binding}
@@ -848,7 +853,7 @@ pub const SPEC: {sup}HttpSpec = {sup}HttpSpec {{
     route: ROUTE.evidence(),
     local_tx: {local_tx},
     resource_sharing: {sup}HttpResourceSharingSpec {{
-        mode: {sup}HttpResourceSharingMode::{resource_sharing_mode},
+        mode: ROUTE.evidence().resource_sharing(),
         reason: {resource_sharing_reason},
     }},
     projection_fields: PROJECTION_FIELDS,
@@ -2188,14 +2193,8 @@ pub struct LocalTxSpec {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HttpResourceSharingSpec {
-    pub mode: HttpResourceSharingMode,
+    pub mode: ::vocab::http::HttpResourceSharing,
     pub reason: Option<&'static str>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HttpResourceSharingMode {
-    TenantScoped,
-    Global,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3755,8 +3754,13 @@ mod tests {
 
         assert_generated_contains(
             &rendered,
-            "mode: super::HttpResourceSharingMode::Global",
-            "endpoint SPEC 应携带 global resourceSharing mode",
+            "::vocab::http::HttpResourceSharing::Global",
+            "typed route evidence 应携带 global resourceSharing mode",
+        );
+        assert_generated_contains(
+            &rendered,
+            "mode: ROUTE.evidence().resource_sharing()",
+            "endpoint SPEC sharing mode 应从 route evidence 派生",
         );
         assert_generated_contains(
             &rendered,

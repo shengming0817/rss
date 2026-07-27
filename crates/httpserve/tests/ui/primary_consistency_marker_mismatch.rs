@@ -16,6 +16,7 @@ fn main() {
         vocab::HttpRouteAuth::ServiceOwned,
         None,
         false,
+        vocab::http::HttpResourceSharing::TenantScoped,
         vocab::HttpEffectProfile::new(&[vocab::HttpEffectKind::BusinessTransaction]),
     );
     let _ = httpserve::GeneratedPrimaryEndpoint::<(), vocab::http::LocalOnly>::new(

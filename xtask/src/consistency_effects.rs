@@ -366,7 +366,7 @@ where
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum ServingScope {
     Domain(String),
-    Framework(String),
+    Framework(Vec<String>),
 }
 
 impl ServingScope {
@@ -382,7 +382,7 @@ fn serving_scope(root: &Path, route: vocab::HttpRouteEvidence) -> Result<Serving
     match route.owner().domain_name() {
         Some(domain) => Ok(ServingScope::Domain(domain.to_string())),
         None if route.owner().is_framework() => Ok(ServingScope::Framework(
-            framework_serving_assembly(root, route.contract_id())?,
+            framework_serving_assemblies(root, route.contract_id())?,
         )),
         None => bail!("generated HTTP route has an unrecognized owner"),
     }
@@ -396,8 +396,36 @@ fn canonical_evidence_for_scope(
         ServingScope::Domain(owner) => {
             crate::localtx_coverage::ServingEvidenceSource::Domain(owner)
         }
-        ServingScope::Framework(assembly) => {
-            crate::localtx_coverage::ServingEvidenceSource::Framework(assembly)
+        ServingScope::Framework(assemblies) => {
+            let mut evidence_by_assembly = Vec::new();
+            for assembly in assemblies {
+                let evidence = crate::localtx_coverage::canonical_serving_evidence(
+                    root,
+                    crate::localtx_coverage::ServingEvidenceSource::Framework(assembly),
+                )
+                .map_err(|error| sanitized(root, error))?;
+                evidence_by_assembly.push(evidence);
+            }
+            let mut evidence_by_assembly = evidence_by_assembly.into_iter();
+            let mut canonical = evidence_by_assembly
+                .next()
+                .ok_or_else(|| anyhow!("framework serving scope has no assembly"))?;
+            // One framework contract may intentionally be mounted by several assemblies. The
+            // assembly/codegen exact-set guard proves every declared mount independently; this
+            // effect posture uses one deterministic carrier only when every declaring assembly
+            // exposes exactly one canonical mount for the same contract, avoiding false
+            // ambiguity from assembly-local adapter state type names.
+            let remaining = evidence_by_assembly.collect::<Vec<_>>();
+            canonical.mounts.retain(|contract, mounts| {
+                mounts.len() == 1
+                    && remaining.iter().all(|evidence| {
+                        evidence
+                            .mounts
+                            .get(contract)
+                            .is_some_and(|candidate| candidate.len() == 1)
+                    })
+            });
+            return Ok(canonical);
         }
     };
     crate::localtx_coverage::canonical_serving_evidence(root, source)
@@ -489,7 +517,7 @@ fn module_path_from_mount_key(mount_key: &str) -> Vec<String> {
     mount_key.split("::").map(ToString::to_string).collect()
 }
 
-fn framework_serving_assembly(root: &Path, contract_id: &str) -> Result<String> {
+fn framework_serving_assemblies(root: &Path, contract_id: &str) -> Result<Vec<String>> {
     let mut matches = Vec::new();
     for entry in std::fs::read_dir(root.join("assemblies")).context("read assemblies")? {
         let entry = entry.context("read assembly entry")?;
@@ -510,17 +538,16 @@ fn framework_serving_assembly(root: &Path, contract_id: &str) -> Result<String> 
         if manifest
             .framework_contracts
             .iter()
-            .any(|declared| declared == contract_id)
+            .any(|declared| declared.id == contract_id)
         {
             matches.push(manifest.name);
         }
     }
     matches.sort();
-    match matches.as_slice() {
-        [assembly] => Ok(assembly.clone()),
-        [] => bail!("framework contract `{contract_id}` has no serving assembly"),
-        _ => bail!("framework contract `{contract_id}` has ambiguous serving assemblies"),
+    if matches.is_empty() {
+        bail!("framework contract `{contract_id}` has no serving assembly");
     }
+    Ok(matches)
 }
 
 fn finalize_report(
@@ -897,7 +924,7 @@ fn contracts_and_profile_findings(
                 ServingScope::Domain(owner.clone())
             }
             ContractOwner::Framework => {
-                ServingScope::Framework(framework_serving_assembly(root, &manifest.id)?)
+                ServingScope::Framework(framework_serving_assemblies(root, &manifest.id)?)
             }
             ContractOwner::Domain(_) => bail!(
                 "{subject}: LocalOnly contract `{}` must have its domain as owner",
@@ -4351,17 +4378,21 @@ fn verify_router_factory(
         return None;
     }
     let lineage = registry_lineage(&function.block, &proof_routes)?;
-    if block_reassigns_any(
-        &function.block,
-        &[
-            &tail_router,
-            &tail_proof,
-            &proof_routes,
-            &lineage.finalized,
-            &lineage.registry,
-            &lineage.domain,
-        ],
-    ) {
+    let mut immutable_lineage = vec![
+        tail_router.as_str(),
+        tail_proof.as_str(),
+        proof_routes.as_str(),
+        lineage.finalized.as_str(),
+        lineage.domain.as_str(),
+    ];
+    if lineage.framework_registration {
+        if mutable_reference_count(&function.block, &lineage.registry) != 1 {
+            return None;
+        }
+    } else {
+        immutable_lineage.push(lineage.registry.as_str());
+    }
+    if block_reassigns_any(&function.block, &immutable_lineage) {
         return None;
     }
     if block_has_mutable_binding(
@@ -4402,6 +4433,26 @@ fn verify_router_factory(
         constructor_repo_fields,
         parameters,
     })
+}
+
+fn mutable_reference_count(block: &syn::Block, binding: &str) -> usize {
+    struct Counter<'a> {
+        binding: &'a str,
+        count: usize,
+    }
+    impl<'ast> Visit<'ast> for Counter<'_> {
+        fn visit_expr_reference(&mut self, reference: &'ast syn::ExprReference) {
+            if reference.mutability.is_some()
+                && simple_ident(&reference.expr).as_deref() == Some(self.binding)
+            {
+                self.count += 1;
+            }
+            visit::visit_expr_reference(self, reference);
+        }
+    }
+    let mut counter = Counter { binding, count: 0 };
+    counter.visit_block(block);
+    counter.count
 }
 
 fn settings_factory_lineage(
@@ -4646,6 +4697,7 @@ struct RegistryLineage {
     domain: String,
     registry: String,
     finalized: String,
+    framework_registration: bool,
 }
 
 fn registry_lineage(block: &syn::Block, routes: &str) -> Option<RegistryLineage> {
@@ -4693,6 +4745,19 @@ fn registry_lineage(block: &syn::Block, routes: &str) -> Option<RegistryLineage>
     }
     let registry = simple_ident(&finalize.receiver)?;
     let registry_initializer = unique_direct_initializer(block, &registry)?;
+    if matches!(peel_expr(registry_initializer), Expr::Call(new)
+        if relative_call_path_is(&new.func, &["bootstrap", "Registry", "new"])
+            && new.args.is_empty())
+    {
+        let framework = framework_routes_registered_into(block, &registry)?;
+        unique_direct_initializer(block, &framework)?;
+        return Some(RegistryLineage {
+            domain: framework,
+            registry,
+            finalized,
+            framework_registration: true,
+        });
+    }
     let Expr::MethodCall(expect) = peel_expr(registry_initializer) else {
         return None;
     };
@@ -4723,7 +4788,49 @@ fn registry_lineage(block: &syn::Block, routes: &str) -> Option<RegistryLineage>
         domain,
         registry,
         finalized,
+        framework_registration: false,
     })
+}
+
+fn framework_routes_registered_into(block: &syn::Block, registry: &str) -> Option<String> {
+    let mut matches = block.stmts.iter().filter_map(|statement| {
+        let syn::Stmt::Expr(expression, _) = statement else {
+            return None;
+        };
+        let Expr::MethodCall(expect) = peel_expr(expression) else {
+            return None;
+        };
+        if expect.method != "expect" || expect.args.len() != 1 || expect.turbofish.is_some() {
+            return None;
+        }
+        let Expr::Call(register) = peel_expr(&expect.receiver) else {
+            return None;
+        };
+        let Expr::Path(function) = peel_expr(&register.func) else {
+            return None;
+        };
+        let segments = function
+            .path
+            .segments
+            .iter()
+            .map(|segment| segment.ident.to_string())
+            .collect::<Vec<_>>();
+        if function.path.leading_colon.is_some()
+            || segments != ["crate", "modules_gen", "register_framework_routes"]
+            || register.args.len() != 2
+        {
+            return None;
+        }
+        let framework = referenced_ident(register.args.first()?)?;
+        let Expr::Reference(registry_ref) = register.args.iter().nth(1)? else {
+            return None;
+        };
+        (registry_ref.mutability.is_some()
+            && simple_ident(&registry_ref.expr).as_deref() == Some(registry))
+        .then_some(framework)
+    });
+    let only = matches.next()?;
+    matches.next().is_none().then_some(only)
 }
 
 fn mounted_constructor_parameters(
@@ -6460,6 +6567,22 @@ impl ProofSource {
     ) -> Result<()> {
         match ty {
             Type::Path(path) if path.qself.is_none() => {
+                if path.path.leading_colon.is_none()
+                    && path.path.segments.len() == 3
+                    && path.path.segments[0].ident == "runtimeexec"
+                    && path.path.segments[1].ident == "inventory"
+                    && path.path.segments[2].ident == "InventoryReader"
+                {
+                    out.push(PortClass {
+                        effect: "ReadEffect".to_owned(),
+                        privilege: "LocalPrivilege".to_owned(),
+                        subject: field_subject.to_owned(),
+                        port: "runtimeexec::inventory::InventoryReader".to_owned(),
+                        privilege_subject: field_subject.to_owned(),
+                        privilege_port: "runtimeexec::inventory::InventoryReader".to_owned(),
+                    });
+                    return Ok(());
+                }
                 let Some(segment) = path.path.segments.last() else {
                     return Ok(());
                 };
@@ -7604,12 +7727,13 @@ fn test_http_spec_with_owner(
             vocab::HttpRouteAuth::Public,
             None,
             false,
+            vocab::http::HttpResourceSharing::TenantScoped,
             level,
             vocab::HttpEffectProfile::new(effects),
         ),
         local_tx: None,
         resource_sharing: generated::http::HttpResourceSharingSpec {
-            mode: generated::http::HttpResourceSharingMode::TenantScoped,
+            mode: vocab::http::HttpResourceSharing::TenantScoped,
             reason: None,
         },
         projection_fields: &[],
@@ -7874,8 +7998,8 @@ mod tests {
             fs::write(
                 assembly.join("assembly.toml"),
                 include_str!("../../assemblies/runtime/assembly.toml").replace(
-                    "frameworkContracts = []",
-                    "frameworkContracts = [\"demo.safe\"]",
+                    "frameworkContracts = [{ id = \"runtime.inventory\", listener = \"admin\" }]",
+                    "frameworkContracts = [{ id = \"demo.safe\", listener = \"admin\" }]",
                 ),
             )?;
             Ok(())
@@ -10227,9 +10351,9 @@ impl ConfigRepo for SettingsConfigGetRepoProbe {
     fn real_workspace_local_only_receipt_coverage_is_non_vacuous() -> Result<()> {
         let root = crate::workspace_root()?;
         let report = collect_report(&root)?;
-        assert_eq!(generated::http::LOCAL_ONLY_SPECS.len(), 7);
-        assert_eq!(report.local_only_receipt_coverage.active_count, 7);
-        assert_eq!(report.local_only_receipt_coverage.registered_count, 7);
+        assert_eq!(generated::http::LOCAL_ONLY_SPECS.len(), 8);
+        assert_eq!(report.local_only_receipt_coverage.active_count, 8);
+        assert_eq!(report.local_only_receipt_coverage.registered_count, 8);
         assert_eq!(report.local_only_receipt_coverage.missing_count, 0);
         assert!(
             report
@@ -10254,6 +10378,7 @@ impl ConfigRepo for SettingsConfigGetRepoProbe {
                 "identity.policies-list",
                 "identity.profile",
                 "identity.roles-list",
+                "runtime.inventory",
                 "settings.config-get",
                 "settings.secret-resolve",
             ]
@@ -10279,7 +10404,7 @@ impl ConfigRepo for SettingsConfigGetRepoProbe {
         );
         let posture = build_contract_posture(
             &spec,
-            &ServingScope::Framework("runtime".to_string()),
+            &ServingScope::Framework(vec!["runtime".to_string()]),
             None,
             None,
         )?;
@@ -10428,20 +10553,20 @@ impl ConfigRepo for SettingsConfigGetRepoProbe {
     }
 
     #[test]
-    fn framework_serving_assembly_is_unique_and_manifest_backed() -> Result<()> {
+    fn framework_serving_assemblies_are_manifest_backed() -> Result<()> {
         let root = crate::testutil::unique_tmp("framework-serving-assembly");
         let runtime = root.join("assemblies/runtime");
         std::fs::create_dir_all(&runtime)?;
         std::fs::write(
             runtime.join("assembly.toml"),
             include_str!("../../assemblies/runtime/assembly.toml").replace(
-                "frameworkContracts = []",
-                "frameworkContracts = [\"framework.status\"]",
+                "frameworkContracts = [{ id = \"runtime.inventory\", listener = \"admin\" }]",
+                "frameworkContracts = [{ id = \"framework.status\", listener = \"admin\" }]",
             ),
         )?;
         assert_eq!(
-            framework_serving_assembly(&root, "framework.status")?,
-            "runtime"
+            framework_serving_assemblies(&root, "framework.status")?,
+            vec!["runtime"]
         );
 
         let duplicate = root.join("assemblies/duplicate");
@@ -10451,8 +10576,98 @@ impl ConfigRepo for SettingsConfigGetRepoProbe {
             std::fs::read_to_string(runtime.join("assembly.toml"))?
                 .replace("name = \"runtime\"", "name = \"duplicate\""),
         )?;
-        assert!(framework_serving_assembly(&root, "framework.status").is_err());
+        assert_eq!(
+            framework_serving_assemblies(&root, "framework.status")?,
+            vec!["duplicate", "runtime"]
+        );
         std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn framework_receipt_factory_registry_lineage_is_canonical() -> Result<()> {
+        fn find<'a>(items: &'a [syn::Item]) -> Option<&'a syn::ItemFn> {
+            for item in items {
+                match item {
+                    syn::Item::Fn(function)
+                        if function.sig.ident == "finalized_runtime_inventory_router" =>
+                    {
+                        return Some(function);
+                    }
+                    syn::Item::Mod(module) => {
+                        if let Some((_, nested)) = &module.content
+                            && let Some(function) = find(nested)
+                        {
+                            return Some(function);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            None
+        }
+
+        let syntax = syn::parse_file(include_str!(
+            "../../assemblies/settingsonly/src/inventory.rs"
+        ))?;
+        let factory = find(&syntax.items).context("runtime inventory receipt factory")?;
+        assert_eq!(
+            framework_routes_registered_into(&factory.block, "registry"),
+            Some("framework_routes".to_owned()),
+            "generated framework registration must bind the same Registry"
+        );
+        assert!(
+            registry_lineage(&factory.block, "routes").is_some(),
+            "framework Registry::new + generated registration must be canonical"
+        );
+        let (router, proof) = factory_tail_tuple(&factory.block).expect("factory tail tuple");
+        let proof_initializer =
+            unique_direct_initializer(&factory.block, &proof).expect("proof initializer");
+        assert!(
+            mounted_route_proof(proof_initializer).is_some(),
+            "mounted framework proof must be canonical"
+        );
+        let router_initializer =
+            unique_direct_initializer(&factory.block, &router).expect("router initializer");
+        assert_eq!(
+            finalized_router_routes(router_initializer).as_deref(),
+            Some("routes"),
+            "framework router must pass the auth finalizer"
+        );
+        assert!(
+            mounted_proof_return_module(&factory.sig.output).is_some(),
+            "factory return type must name the generated marker"
+        );
+        let lineage = registry_lineage(&factory.block, "routes").expect("registry lineage");
+        assert!(
+            !block_reassigns_any(
+                &factory.block,
+                &[
+                    &router,
+                    &proof,
+                    &"routes".to_owned(),
+                    &lineage.finalized,
+                    &lineage.domain,
+                ],
+            ),
+            "factory lineage must not be reassigned"
+        );
+        assert_eq!(
+            mutable_reference_count(&factory.block, &lineage.registry),
+            1,
+            "framework Registry has one exact generated registration mutation"
+        );
+        assert!(
+            !block_has_mutable_binding(
+                &factory.block,
+                &[&router, &proof, &"routes".to_owned(), &"routes".to_owned()],
+            ),
+            "router, proof, and routes must be immutable"
+        );
+        assert!(
+            verify_router_factory(factory, &BTreeMap::new(), None).is_some(),
+            "framework receipt factory must close route, proof, and finalizer lineage"
+        );
         Ok(())
     }
 

@@ -68,6 +68,8 @@ use settings::ports::{DynConfigRepo, DynConfigUnitOfWork, DynSecretRepo, DynSecr
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use tokio_util::sync::CancellationToken;
 
+#[cfg(feature = "auth-audit-sink")]
+use crate::PgAuthAuditSink;
 #[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
 use crate::PgOutbox;
 #[cfg(feature = "domain-audit")]
@@ -90,7 +92,7 @@ use crate::{
     PgServiceTokenReplaySweeper, PgStore, PgStoreGuard, PgTenantReadConfig,
 };
 #[cfg(feature = "domain-audit")]
-use crate::{PgAuditAdminRepo, PgAuditRepo, PgAuthAuditSink};
+use crate::{PgAuditAdminRepo, PgAuditRepo};
 #[cfg(feature = "domain-identity")]
 use crate::{
     PgAuthGrantLifecycle, PgAuthGrantProvider, PgAuthGrantValidator, PgCredentialRepo,
@@ -694,6 +696,13 @@ impl PgRuntimeDeps {
 }
 
 impl PgRuntimeHandle {
+    /// Flat durable auth-decision sink for framework HTTP enforcement.
+    #[cfg(feature = "auth-audit-sink")]
+    #[must_use]
+    pub fn auth_audit_sink(&self) -> PgAuthAuditSink {
+        PgAuthAuditSink::new(self.stores.writer_capability())
+    }
+
     /// Fail closed unless the runtime budget exactly matches the policy loaded from the
     /// maintenance-owned database singleton during setup. This synchronous gate is intentionally
     /// callable before any AMQP connection is attempted.
@@ -1487,6 +1496,7 @@ impl PgDomainDeps<caps::Audit> {
     /// This deliberately stays outside the hash-chain audit repository actor model because auth principals
     /// are generic subjects, not only `ids::UserId`.
     #[must_use]
+    #[cfg(feature = "auth-audit-sink")]
     pub fn auth_audit_sink(&self) -> PgAuthAuditSink {
         PgAuthAuditSink::new(self.stores.writer_capability())
     }

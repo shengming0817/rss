@@ -58,6 +58,18 @@ impl diport::MetricsExporter for FixtureMetrics {
     }
 }
 
+struct FixtureAuditSink;
+
+impl diport::AuditSink for FixtureAuditSink {
+    async fn record(&self, _event: diport::AuditEvent) -> Result<(), diport::AuditSinkError> {
+        Ok(())
+    }
+
+    async fn shutdown(&self) -> Result<(), diport::AuditSinkError> {
+        Ok(())
+    }
+}
+
 struct HealthyProbe {
     name: primitives::ProbeName,
 }
@@ -114,15 +126,19 @@ impl runtimeexec::StartupAdapter for FixtureStartup {
                 .context("build settings test binding")?,
         ];
         let verifier = auth_bridge::FederatedVerifier::test(diport::DynPdp::new_arc(FixturePdp));
+        let admin = "127.0.0.1:0".parse().context("build fixture Admin bind")?;
         runtime::prepare_assembly(
             runtime::AssemblyStartupInputs::new(
                 bindings,
                 verifier,
+                httpserve::AuditSinkHandle::new(FixtureAuditSink),
                 listeners::rate_limiter(),
                 Arc::new(FixtureMetrics),
                 primary,
+                admin,
                 health,
                 Duration::from_secs(2),
+                fixture_inventory_seed()?,
                 runtime::ReadyAction::Notify(ready_notify),
             )
             .with_activation_gate(activation_gate),
@@ -130,6 +146,28 @@ impl runtimeexec::StartupAdapter for FixtureStartup {
         )
         .await
     }
+}
+
+fn fixture_inventory_seed() -> anyhow::Result<runtimeexec::inventory::RuntimeInventorySeed> {
+    let plan = crate::plan::SettingsOnlyPlan::bundled()?;
+    let deployment: serde_json::Value = serde_json::from_slice(include_bytes!(
+        "../../../deploy/generated/settingsonly.deployment-plan.json"
+    ))?;
+    let image = deployment["workloads"][0]["image"]
+        .as_str()
+        .context("read fixture deployment image")?;
+    let digest = image
+        .rsplit_once('@')
+        .context("fixture deployment image is mutable")?
+        .1;
+    let build = runtimeexec::inventory::BuildIdentity::parse(&"a".repeat(40), digest)?;
+    let bindings = crate::providers_gen::PROVIDER_CATALOG
+        .iter()
+        .map(|provider| {
+            runtimeexec::inventory::ProviderProbeBinding::new(provider.role().as_str(), Vec::new())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    plan.into_inventory_seed_fixture(build, bindings)
 }
 
 pub async fn run_fixture(config: FixtureConfig) -> anyhow::Result<()> {

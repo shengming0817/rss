@@ -17,10 +17,13 @@ uuid = { workspace = true, features = ["serde"] }
 vocab = { path = "../crates/vocab" }
 # generated DTO 的 Debug 由 contract schema 字段级 x-pii/x-redaction 派生为 secure::Redact（#1358）。
 secure = { path = "../crates/secure" }
+# typify emits regress-backed parsers for contract schema string patterns.
+regress = { workspace = true }
 
 [dev-dependencies]
 # contract roundtrip 回归测试用（仅 tests/，不进 generated 产物 / 公开 API；F7）。
 serde_json = { workspace = true }
+jsonschema = { workspace = true }
 
 [lints]
 workspace = true

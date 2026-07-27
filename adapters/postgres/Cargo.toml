@@ -78,6 +78,7 @@ default = []
 domain-settings = ["dep:settings", "dep:httpserve", "dep:observ"]
 domain-identity = ["dep:identity", "dep:httpserve", "dep:observ"]
 domain-audit = ["dep:audit", "dep:observ"]
+auth-audit-sink = []
 # 需真实 postgres 的集成测试门控（azure 无 CI；feature 关闭时 src/integration_tests.rs 不编译，verify 永远绿）。
 # testkit/containers 经此传递激活 testcontainers（self-provision pg，无需手工预置）。
 integration = [

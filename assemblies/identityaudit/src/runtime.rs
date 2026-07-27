@@ -46,10 +46,9 @@ impl runtimeexec::StartupAdapter for ProductionStartup {
         runtimeexec::PreparedLaunch<Self::Adapter, Self::ProbeReceipt, Self::ReadyHook>,
     > {
         let plan = crate::plan::IdentityAuditPlan::bundled()?;
-        let (config, secrets) = self.captured.into_runtime_inputs();
+        let (config, secrets, build_identity) = self.captured.into_runtime_inputs();
         let build =
-            crate::providers::build(plan.into_provider_build()?, config, secrets, transaction)
-                .await?;
+            crate::providers::build(plan.provider_build()?, config, secrets, transaction).await?;
         let crate::providers::BuildResult {
             providers,
             listeners: listeners_config,
@@ -96,11 +95,20 @@ impl runtimeexec::StartupAdapter for ProductionStartup {
             dlx_payload_protector,
         )
         .await?;
-        roles.finish(event_outputs, transaction.provider_output_mut())?;
+        let completed_roles = roles.finish(event_outputs, transaction.provider_output_mut())?;
+        let inventory_seed = plan.inventory_seed(build_identity, completed_roles)?;
 
         let (provider_output, domain_output) = transaction.outputs_mut();
         register_probes(&mut registry, provider_output)?;
         register_probes(&mut registry, domain_output)?;
+        let reporter = Arc::new(registry.take_health_reporter());
+        let (inventory_publisher, inventory_reader) =
+            runtimeexec::inventory::inventory_channel(inventory_seed, Arc::clone(&reporter));
+        crate::modules_gen::register_framework_routes(
+            &crate::framework_routes::IdentityAuditFrameworkRoutes::new(inventory_reader),
+            &mut registry,
+        )
+        .context("register identityaudit framework routes")?;
         let (finalized, receipt) = listeners::finalize(
             &mut registry,
             listeners::FinalizeInputs {
@@ -109,11 +117,18 @@ impl runtimeexec::StartupAdapter for ProductionStartup {
                 metrics,
                 audit_sink,
                 audit_clock: Arc::new(crate::SystemClock),
+                reporter,
             },
         )?;
         let (primary, admin, health, request_budget) = listeners_config.into_listener_inputs();
-        let adapter =
-            listeners::LaunchAdapter::new(finalized, primary, admin, health, request_budget)?;
+        let adapter = listeners::LaunchAdapter::new(
+            finalized,
+            primary,
+            admin,
+            health,
+            request_budget,
+            inventory_publisher,
+        )?;
         let readiness = receipt.readiness();
         let ready: ReadyHook = Box::new(move |inventory| {
             Box::pin(async move {

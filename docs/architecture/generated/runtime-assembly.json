@@ -11,14 +11,14 @@
       "path": "assemblies/runtime/assembly.toml",
       "digest": {
         "algorithm": "sha256",
-        "value": "3e8420416a82011ebc810d13b3f3c810389252cfd97ebabb6dc36229190ac431"
+        "value": "51752fcfebc922aa16a7710769bb5b9adfd20d7f0fc484d9fe06590e28d44e9d"
       }
     },
     {
       "path": "assemblies/runtime/src/generated/modules_gen.rs",
       "digest": {
         "algorithm": "sha256",
-        "value": "381d24063c6a59176684e9e84218ea6aa193a5dc6e4ba570b84a27c1557ba661"
+        "value": "c502022368b619bfe3ff3486a0f2fa309312ac37ec960dbc53ab1d40cdce4d66"
       }
     },
     {
@@ -248,7 +248,10 @@
       "port": "diport::AuditSink",
       "lifecycle": "active",
       "durability": "persistent",
-      "purpose": "http-auth-decision-audit"
+      "purpose": "http-auth-decision-audit",
+      "requiredFeatures": [
+        "auth-audit-sink"
+      ]
     },
     {
       "id": "n_5c724f207600d6bdcf9fab27",

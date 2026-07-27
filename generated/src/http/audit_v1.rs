@@ -341,6 +341,7 @@ pub mod list_entries {
             ::vocab::HttpRouteAuth::Permission(::vocab::RoutePermissionId::AuditRead),
             None,
             false,
+            ::vocab::http::HttpResourceSharing::TenantScoped,
             EFFECT_PROFILE,
         );
 
@@ -350,7 +351,7 @@ pub mod list_entries {
         route: ROUTE.evidence(),
         local_tx: None,
         resource_sharing: super::super::HttpResourceSharingSpec {
-            mode: super::super::HttpResourceSharingMode::TenantScoped,
+            mode: ROUTE.evidence().resource_sharing(),
             reason: None,
         },
         projection_fields: PROJECTION_FIELDS,
@@ -699,6 +700,7 @@ pub mod list_tenant_entries {
             ::vocab::HttpRouteAuth::Permission(::vocab::RoutePermissionId::AuditRead),
             None,
             false,
+            ::vocab::http::HttpResourceSharing::TenantScoped,
             EFFECT_PROFILE,
         );
 
@@ -716,7 +718,7 @@ pub mod list_tenant_entries {
         route: ROUTE.evidence(),
         local_tx: Some(LOCAL_TX),
         resource_sharing: super::super::HttpResourceSharingSpec {
-            mode: super::super::HttpResourceSharingMode::TenantScoped,
+            mode: ROUTE.evidence().resource_sharing(),
             reason: None,
         },
         projection_fields: PROJECTION_FIELDS,

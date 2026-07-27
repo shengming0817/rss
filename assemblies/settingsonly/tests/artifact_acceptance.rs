@@ -33,12 +33,17 @@ const READY_PATH: &str = "/health/v1/readyz";
 const HEALTH_PATH: &str = "/health/v1/healthz";
 const METRICS_PATH: &str = "/health/v1/metrics";
 const SETTINGS_PATH: &str = "/api/v1/settings/configs/artifact-acceptance";
+const INVENTORY_PATH: &str = "/api/v1/runtime/inventory";
 const ISSUER: &str = "https://issuer.settingsonly.test";
 const AUDIENCE: &str = "rss-settingsonly-artifact";
 const JWT_KID: &str = "settingsonly-artifact-es256";
 const VAULT_TOKEN: &str = "settingsonly-artifact-vault-token";
 const CONTAINER_PRIMARY_PROXY_PORT: u16 = 18_080;
+const CONTAINER_ADMIN_PROXY_PORT: u16 = 18_082;
 const CONTAINER_HEALTH_PROXY_PORT: u16 = 18_083;
+const BUILD_SOURCE_SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const BUILD_IMAGE_DIGEST: &str =
+    "sha256:e3f9c79d3f396df5434290783e22d87226b85cfbbcb9e30ce8f09163257a3ec2";
 const PG_WRITER_ROLE: &str = "rss_app";
 const PG_WRITER_PASSWORD: &str = "rss_app_settingsonly_artifact_pw";
 const PG_READER_ROLE: &str = "rss_app_read";
@@ -109,6 +114,7 @@ impl Artifact<'_> {
         fixture: &LiveFixture,
         config: &Path,
         primary: SocketAddr,
+        admin: SocketAddr,
         health: SocketAddr,
     ) -> anyhow::Result<LiveProcess> {
         let label = self.label();
@@ -134,6 +140,11 @@ impl Artifact<'_> {
                     .arg(&container_name)
                     .args(["--publish"])
                     .arg(format!(
+                        "127.0.0.1:{}:{CONTAINER_ADMIN_PROXY_PORT}",
+                        admin.port()
+                    ))
+                    .args(["--publish"])
+                    .arg(format!(
                         "127.0.0.1:{}:{CONTAINER_PRIMARY_PROXY_PORT}",
                         primary.port()
                     ))
@@ -145,6 +156,9 @@ impl Artifact<'_> {
                     .args(["--volume"])
                     .arg(format!("{}:/fixtures:ro", fixture.root.display()));
                 for name in SECRET_ENVIRONMENTS {
+                    command.args(["--env", name]);
+                }
+                for name in ["RSS_BUILD_SOURCE_SHA", "RSS_BUILD_IMAGE_DIGEST"] {
                     command.args(["--env", name]);
                 }
                 command.arg(image).args(["--config", IMAGE_CONFIG_PATH]);
@@ -160,6 +174,8 @@ impl Artifact<'_> {
                 &fixture.pg.params().password,
             )
             .env("RSS_SETTINGSONLY_VAULT_TOKEN", VAULT_TOKEN)
+            .env("RSS_BUILD_SOURCE_SHA", BUILD_SOURCE_SHA)
+            .env("RSS_BUILD_IMAGE_DIGEST", BUILD_IMAGE_DIGEST)
             .stdout(Stdio::from(stdout))
             .stderr(Stdio::from(stderr));
         let container_name = matches!(self, Self::Image(_)).then(|| fixture.container_name());
@@ -167,7 +183,7 @@ impl Artifact<'_> {
             .spawn()
             .with_context(|| format!("spawn live {label}"))?;
         let proxy_container_name = if let Some(container_name) = &container_name {
-            match start_loopback_proxy(container_name, primary, health) {
+            match start_loopback_proxy(container_name, primary, admin, health) {
                 Ok(proxy) => Some(proxy),
                 Err(error) => {
                     let _output = Command::new("docker")
@@ -308,18 +324,22 @@ impl LiveFixture {
         format!("rss-settingsonly-artifact-{}", std::process::id())
     }
 
-    async fn reserve_addresses(&self) -> anyhow::Result<(SocketAddr, SocketAddr)> {
+    async fn reserve_addresses(&self) -> anyhow::Result<(SocketAddr, SocketAddr, SocketAddr)> {
         let primary = TcpListener::bind("127.0.0.1:0")
             .await
             .context("reserve artifact Primary address")?;
         let health = TcpListener::bind("127.0.0.1:0")
             .await
             .context("reserve artifact Health address")?;
+        let admin = TcpListener::bind("127.0.0.1:0")
+            .await
+            .context("reserve artifact Admin address")?;
         let addresses = (
             primary.local_addr().context("read Primary address")?,
+            admin.local_addr().context("read Admin address")?,
             health.local_addr().context("read Health address")?,
         );
-        drop((primary, health));
+        drop((primary, admin, health));
         Ok(addresses)
     }
 
@@ -327,6 +347,7 @@ impl LiveFixture {
         &self,
         artifact: Artifact<'_>,
         primary: SocketAddr,
+        admin: SocketAddr,
         health: SocketAddr,
     ) -> anyhow::Result<PathBuf> {
         let (jwks_path, ca_path, vault_host, filename) = match artifact {
@@ -359,6 +380,9 @@ requestBudgetMs = 30000
 [listeners.primary]
 bind = "{primary}"
 
+[listeners.admin]
+bind = "{admin}"
+
 [listeners.health]
 bind = "{health}"
 
@@ -367,7 +391,7 @@ issuer = "{ISSUER}"
 audience = "{AUDIENCE}"
 jwksPath = "{jwks_path}"
 refreshSeconds = 1
-trustedKinds = ["user"]
+trustedKinds = ["user", "admin"]
 
 [postgres]
 host = "{pg_host}"
@@ -417,7 +441,7 @@ kvPathPrefix = "tenants/settings"
         Ok(path)
     }
 
-    fn valid_token(&self) -> String {
+    fn valid_token(&self, kind: &'static str) -> String {
         let now = diport::Clock::now(&ArtifactClock)
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -429,7 +453,7 @@ kvPathPrefix = "tenants/settings"
             "token_use": "access",
             "iss": ISSUER,
             "aud": AUDIENCE,
-            "kind": "user",
+            "kind": kind,
             "tenant_id": "00000000-0000-4000-8000-000000000147",
             "sid": "7d65e5f2-e716-4c4e-8e4c-6f7ab1754ef8",
             "jti": "d8dbe849-1d7e-49aa-b68a-a7b41ed252df",
@@ -535,13 +559,16 @@ impl LiveProcess {
 fn start_loopback_proxy(
     target: &str,
     primary: SocketAddr,
+    admin: SocketAddr,
     health: SocketAddr,
 ) -> anyhow::Result<String> {
     let proxy_name = format!("{target}-loopback-proxy");
     let script = format!(
         "nc -lk -p {CONTAINER_PRIMARY_PROXY_PORT} -e nc 127.0.0.1 {} & \
+         nc -lk -p {CONTAINER_ADMIN_PROXY_PORT} -e nc 127.0.0.1 {} & \
          nc -lk -p {CONTAINER_HEALTH_PROXY_PORT} -e nc 127.0.0.1 {} & wait",
         primary.port(),
+        admin.port(),
         health.port()
     );
     let mut last_error = String::new();
@@ -572,9 +599,9 @@ async fn exercise_live_artifact(
     artifact: Artifact<'_>,
     fixture: &LiveFixture,
 ) -> anyhow::Result<()> {
-    let (primary, health) = fixture.reserve_addresses().await?;
-    let config = fixture.write_config(artifact, primary, health)?;
-    let mut process = artifact.spawn_live(fixture, &config, primary, health)?;
+    let (primary, admin, health) = fixture.reserve_addresses().await?;
+    let config = fixture.write_config(artifact, primary, admin, health)?;
+    let mut process = artifact.spawn_live(fixture, &config, primary, admin, health)?;
     let result = async {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(2))
@@ -582,7 +609,14 @@ async fn exercise_live_artifact(
             .context("build artifact acceptance client")?;
         wait_until_ready(&client, health, &mut process).await?;
         assert_health_contract(&client, health).await?;
-        assert_primary_contract(&client, primary, &fixture.valid_token()).await?;
+        assert_primary_contract(&client, primary, &fixture.valid_token("user")).await?;
+        assert_admin_inventory_contract(
+            &client,
+            admin,
+            &fixture.valid_token("user"),
+            &fixture.valid_token("admin"),
+        )
+        .await?;
         process.send_sigterm()?;
         let status = process.wait().await?;
         ensure!(
@@ -593,6 +627,7 @@ async fn exercise_live_artifact(
         );
         process.stop_proxy();
         assert_port_released(primary, "Primary").await?;
+        assert_port_released(admin, "Admin").await?;
         assert_port_released(health, "Health").await
     }
     .await;
@@ -689,6 +724,47 @@ async fn assert_primary_contract(
     ensure!(
         client.get(url).bearer_auth(token).send().await?.status() == reqwest::StatusCode::FORBIDDEN,
         "Primary with valid federated JWT was not terminal 403"
+    );
+    Ok(())
+}
+
+async fn assert_admin_inventory_contract(
+    client: &reqwest::Client,
+    admin: SocketAddr,
+    user_token: &str,
+    admin_token: &str,
+) -> anyhow::Result<()> {
+    let url = format!("http://{admin}{INVENTORY_PATH}");
+    ensure!(
+        client.get(&url).send().await?.status() == reqwest::StatusCode::UNAUTHORIZED,
+        "Admin inventory without credentials was not 401"
+    );
+    ensure!(
+        client
+            .get(&url)
+            .bearer_auth(user_token)
+            .send()
+            .await?
+            .status()
+            == reqwest::StatusCode::FORBIDDEN,
+        "Admin inventory admitted an unprivileged user"
+    );
+    let response = client.get(url).bearer_auth(admin_token).send().await?;
+    let status = response.status();
+    let body: serde_json::Value = serde_json::from_str(&response.text().await?)?;
+    ensure!(
+        status == reqwest::StatusCode::OK,
+        "Admin inventory was {status}: {body}"
+    );
+    ensure!(
+        body["data"]["schemaVersion"] == 1,
+        "inventory schema drift: {body}"
+    );
+    ensure!(
+        body["data"]["listeners"]
+            .as_array()
+            .is_some_and(|value| value.len() == 3),
+        "inventory listener closure drift: {body}"
     );
     Ok(())
 }

@@ -36,6 +36,7 @@ fn main() {
             vocab::HttpRouteAuth::ServiceOwned,
             None,
             false,
+            vocab::http::HttpResourceSharing::TenantScoped,
             vocab::HttpEffectProfile::new(&[vocab::HttpEffectKind::Read]),
         );
     let _read = httpserve::GeneratedPrimaryEndpoint::new(
@@ -61,6 +62,7 @@ fn main() {
             vocab::HttpRouteAuth::ServiceOwned,
             None,
             false,
+            vocab::http::HttpResourceSharing::TenantScoped,
             vocab::HttpEffectProfile::new(&[vocab::HttpEffectKind::Read]),
         );
     let _auth = httpserve::GeneratedPrimaryEndpoint::new(

@@ -15,6 +15,7 @@ impl Finalized<'_> {
             command_idempotency_keyring: _command_idempotency_keyring,
             listeners,
             probe_receipt,
+            inventory_publisher,
         } = self;
 
         // Validate every fallible launch input while the completed provider transaction still owns
@@ -35,6 +36,7 @@ impl Finalized<'_> {
                     move |listener, scheme| {
                         crate::listeners::listener_addr_for_scheme(config, listener, scheme)
                     },
+                    inventory_publisher,
                 );
                 let launch_plan = runtimeexec::LaunchPlan::new(
                     adapter,

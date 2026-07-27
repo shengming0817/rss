@@ -25,7 +25,7 @@
 mod account_security_repo;
 #[cfg(feature = "domain-audit")]
 mod audit_repo;
-#[cfg(feature = "domain-audit")]
+#[cfg(feature = "auth-audit-sink")]
 mod auth_audit_sink;
 #[cfg(feature = "domain-identity")]
 mod auth_grant_lifecycle;
@@ -104,7 +104,7 @@ mod tx_retry;
 
 #[cfg(feature = "domain-audit")]
 pub use audit_repo::{PgAuditAdminRepo, PgAuditRepo};
-#[cfg(feature = "domain-audit")]
+#[cfg(feature = "auth-audit-sink")]
 pub use auth_audit_sink::PgAuthAuditSink;
 // postgres capability bundle（#1423）：connect/migration/readiness/per-domain repo 构造的单一 funnel。
 #[cfg(feature = "domain-identity")]

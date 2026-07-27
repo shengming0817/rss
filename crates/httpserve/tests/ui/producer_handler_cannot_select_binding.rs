@@ -39,6 +39,7 @@ const ROUTE: HttpRouteBinding<RouteMarker, OutboxFact> = HttpRouteBinding::from_
     HttpRouteAuth::Public,
     None,
     false,
+    vocab::http::HttpResourceSharing::TenantScoped,
     HttpEffectProfile::new(EFFECTS),
 );
 const FORGED_ROUTE: HttpRouteBinding<RouteMarker, OutboxFact> = HttpRouteBinding::from_static(
@@ -56,6 +57,7 @@ const FORGED_ROUTE: HttpRouteBinding<RouteMarker, OutboxFact> = HttpRouteBinding
     HttpRouteAuth::Public,
     None,
     false,
+    vocab::http::HttpResourceSharing::TenantScoped,
     HttpEffectProfile::new(EFFECTS),
 );
 const PRODUCER: HttpProducerBinding<RouteMarker> = HttpProducerBinding::from_static(ROUTE, &[FACT]);

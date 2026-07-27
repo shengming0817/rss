@@ -223,6 +223,7 @@ pub mod login {
             ::vocab::HttpRouteAuth::Public,
             None,
             false,
+            ::vocab::http::HttpResourceSharing::TenantScoped,
             EFFECT_PROFILE,
         );
 
@@ -240,7 +241,7 @@ pub mod login {
         route: ROUTE.evidence(),
         local_tx: None,
         resource_sharing: super::super::HttpResourceSharingSpec {
-            mode: super::super::HttpResourceSharingMode::TenantScoped,
+            mode: ROUTE.evidence().resource_sharing(),
             reason: None,
         },
         projection_fields: PROJECTION_FIELDS,
@@ -413,6 +414,7 @@ pub mod logout {
             ::vocab::HttpRouteAuth::Permission(::vocab::RoutePermissionId::IdentitySessionWrite),
             None,
             true,
+            ::vocab::http::HttpResourceSharing::TenantScoped,
             EFFECT_PROFILE,
         );
 
@@ -430,7 +432,7 @@ pub mod logout {
         route: ROUTE.evidence(),
         local_tx: Some(LOCAL_TX),
         resource_sharing: super::super::HttpResourceSharingSpec {
-            mode: super::super::HttpResourceSharingMode::TenantScoped,
+            mode: ROUTE.evidence().resource_sharing(),
             reason: None,
         },
         projection_fields: PROJECTION_FIELDS,
@@ -680,6 +682,7 @@ pub mod password_change {
             ::vocab::HttpRouteAuth::Permission(::vocab::RoutePermissionId::IdentityProfileWrite),
             None,
             true,
+            ::vocab::http::HttpResourceSharing::TenantScoped,
             EFFECT_PROFILE,
         );
 
@@ -697,7 +700,7 @@ pub mod password_change {
         route: ROUTE.evidence(),
         local_tx: Some(LOCAL_TX),
         resource_sharing: super::super::HttpResourceSharingSpec {
-            mode: super::super::HttpResourceSharingMode::TenantScoped,
+            mode: ROUTE.evidence().resource_sharing(),
             reason: None,
         },
         projection_fields: PROJECTION_FIELDS,
@@ -2569,6 +2572,7 @@ pub mod policies_create {
             ::vocab::HttpRouteAuth::Permission(::vocab::RoutePermissionId::IdentityPolicyCreate),
             None,
             false,
+            ::vocab::http::HttpResourceSharing::TenantScoped,
             EFFECT_PROFILE,
         );
 
@@ -2586,7 +2590,7 @@ pub mod policies_create {
         route: ROUTE.evidence(),
         local_tx: None,
         resource_sharing: super::super::HttpResourceSharingSpec {
-            mode: super::super::HttpResourceSharingMode::TenantScoped,
+            mode: ROUTE.evidence().resource_sharing(),
             reason: None,
         },
         projection_fields: PROJECTION_FIELDS,
@@ -2774,6 +2778,7 @@ pub mod policies_deactivate {
             ),
             None,
             false,
+            ::vocab::http::HttpResourceSharing::TenantScoped,
             EFFECT_PROFILE,
         );
 
@@ -2791,7 +2796,7 @@ pub mod policies_deactivate {
         route: ROUTE.evidence(),
         local_tx: None,
         resource_sharing: super::super::HttpResourceSharingSpec {
-            mode: super::super::HttpResourceSharingMode::TenantScoped,
+            mode: ROUTE.evidence().resource_sharing(),
             reason: None,
         },
         projection_fields: PROJECTION_FIELDS,
@@ -3705,6 +3710,7 @@ pub mod policies_get {
             ::vocab::HttpRouteAuth::Permission(::vocab::RoutePermissionId::IdentityPolicyRead),
             None,
             false,
+            ::vocab::http::HttpResourceSharing::TenantScoped,
             EFFECT_PROFILE,
         );
 
@@ -3714,7 +3720,7 @@ pub mod policies_get {
         route: ROUTE.evidence(),
         local_tx: None,
         resource_sharing: super::super::HttpResourceSharingSpec {
-            mode: super::super::HttpResourceSharingMode::TenantScoped,
+            mode: ROUTE.evidence().resource_sharing(),
             reason: None,
         },
         projection_fields: PROJECTION_FIELDS,
@@ -4683,6 +4689,7 @@ pub mod policies_list {
             ::vocab::HttpRouteAuth::Permission(::vocab::RoutePermissionId::IdentityPolicyRead),
             None,
             false,
+            ::vocab::http::HttpResourceSharing::TenantScoped,
             EFFECT_PROFILE,
         );
 
@@ -4692,7 +4699,7 @@ pub mod policies_list {
         route: ROUTE.evidence(),
         local_tx: None,
         resource_sharing: super::super::HttpResourceSharingSpec {
-            mode: super::super::HttpResourceSharingMode::TenantScoped,
+            mode: ROUTE.evidence().resource_sharing(),
             reason: None,
         },
         projection_fields: PROJECTION_FIELDS,
@@ -6566,6 +6573,7 @@ pub mod policies_update {
             ::vocab::HttpRouteAuth::Permission(::vocab::RoutePermissionId::IdentityPolicyUpdate),
             None,
             false,
+            ::vocab::http::HttpResourceSharing::TenantScoped,
             EFFECT_PROFILE,
         );
 
@@ -6583,7 +6591,7 @@ pub mod policies_update {
         route: ROUTE.evidence(),
         local_tx: None,
         resource_sharing: super::super::HttpResourceSharingSpec {
-            mode: super::super::HttpResourceSharingMode::TenantScoped,
+            mode: ROUTE.evidence().resource_sharing(),
             reason: None,
         },
         projection_fields: PROJECTION_FIELDS,
@@ -6892,6 +6900,7 @@ pub mod profile {
             ::vocab::HttpRouteAuth::Permission(::vocab::RoutePermissionId::IdentityProfileRead),
             None,
             true,
+            ::vocab::http::HttpResourceSharing::TenantScoped,
             EFFECT_PROFILE,
         );
 
@@ -6901,7 +6910,7 @@ pub mod profile {
         route: ROUTE.evidence(),
         local_tx: None,
         resource_sharing: super::super::HttpResourceSharingSpec {
-            mode: super::super::HttpResourceSharingMode::TenantScoped,
+            mode: ROUTE.evidence().resource_sharing(),
             reason: None,
         },
         projection_fields: PROJECTION_FIELDS,
@@ -7099,6 +7108,7 @@ pub mod refresh {
             ::vocab::HttpRouteAuth::Public,
             None,
             false,
+            ::vocab::http::HttpResourceSharing::TenantScoped,
             EFFECT_PROFILE,
         );
 
@@ -7116,7 +7126,7 @@ pub mod refresh {
         route: ROUTE.evidence(),
         local_tx: Some(LOCAL_TX),
         resource_sharing: super::super::HttpResourceSharingSpec {
-            mode: super::super::HttpResourceSharingMode::TenantScoped,
+            mode: ROUTE.evidence().resource_sharing(),
             reason: None,
         },
         projection_fields: PROJECTION_FIELDS,
@@ -7289,6 +7299,7 @@ pub mod roles_assign {
             ::vocab::HttpRouteAuth::Permission(::vocab::RoutePermissionId::IdentityRoleAssign),
             None,
             false,
+            ::vocab::http::HttpResourceSharing::TenantScoped,
             EFFECT_PROFILE,
         );
 
@@ -7306,7 +7317,7 @@ pub mod roles_assign {
         route: ROUTE.evidence(),
         local_tx: None,
         resource_sharing: super::super::HttpResourceSharingSpec {
-            mode: super::super::HttpResourceSharingMode::TenantScoped,
+            mode: ROUTE.evidence().resource_sharing(),
             reason: None,
         },
         projection_fields: PROJECTION_FIELDS,
@@ -7550,6 +7561,7 @@ pub mod roles_list {
             ::vocab::HttpRouteAuth::Permission(::vocab::RoutePermissionId::IdentityRoleRead),
             None,
             false,
+            ::vocab::http::HttpResourceSharing::TenantScoped,
             EFFECT_PROFILE,
         );
 
@@ -7559,7 +7571,7 @@ pub mod roles_list {
         route: ROUTE.evidence(),
         local_tx: None,
         resource_sharing: super::super::HttpResourceSharingSpec {
-            mode: super::super::HttpResourceSharingMode::TenantScoped,
+            mode: ROUTE.evidence().resource_sharing(),
             reason: None,
         },
         projection_fields: PROJECTION_FIELDS,
@@ -7723,6 +7735,7 @@ pub mod roles_revoke {
             ::vocab::HttpRouteAuth::Permission(::vocab::RoutePermissionId::IdentityRoleRevoke),
             None,
             false,
+            ::vocab::http::HttpResourceSharing::TenantScoped,
             EFFECT_PROFILE,
         );
 
@@ -7740,7 +7753,7 @@ pub mod roles_revoke {
         route: ROUTE.evidence(),
         local_tx: None,
         resource_sharing: super::super::HttpResourceSharingSpec {
-            mode: super::super::HttpResourceSharingMode::TenantScoped,
+            mode: ROUTE.evidence().resource_sharing(),
             reason: None,
         },
         projection_fields: PROJECTION_FIELDS,

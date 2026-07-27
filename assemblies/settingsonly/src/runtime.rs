@@ -47,15 +47,18 @@ impl runtimeexec::StartupAdapter for ProductionStartup {
         runtimeexec::PreparedLaunch<Self::Adapter, Self::ProbeReceipt, Self::ReadyHook>,
     > {
         let compiled_plan = crate::plan::SettingsOnlyPlan::bundled()?;
-        let (config, secrets) = self.captured.into_runtime_inputs();
+        let (config, secrets, build_identity) = self.captured.into_runtime_inputs();
         let completed = crate::providers::build(
-            compiled_plan.into_provider_build()?,
+            compiled_plan.provider_build()?,
             config,
             secrets,
             transaction,
         )
         .await?;
-        let (providers, listeners_config, support_probe) = completed.into_parts();
+        let (providers, listeners_config, support_probe, provider_bindings) =
+            completed.into_parts();
+        let inventory_seed =
+            compiled_plan.into_inventory_seed(build_identity, provider_bindings)?;
         let (support_name, support_probe) = support_probe.into_parts();
         transaction
             .provider_output_mut()
@@ -68,16 +71,19 @@ impl runtimeexec::StartupAdapter for ProductionStartup {
             providers.vault_readiness,
         );
         let bindings = crate::wire_domains(&deps).await?;
-        let (primary, health, request_budget) = listeners_config.into_listener_inputs();
+        let (primary, admin, health, request_budget) = listeners_config.into_listener_inputs();
         prepare_assembly(
             AssemblyStartupInputs::new(
                 bindings,
                 providers.verifier,
+                providers.audit_sink,
                 providers.limiter,
                 providers.metrics,
                 primary,
+                admin,
                 health,
                 request_budget,
+                inventory_seed,
                 ReadyAction::Log,
             ),
             transaction,
@@ -89,12 +95,15 @@ impl runtimeexec::StartupAdapter for ProductionStartup {
 pub(crate) struct AssemblyStartupInputs {
     bindings: Vec<bootstrap::DomainBinding>,
     verifier: crate::auth_bridge::FederatedVerifier,
+    audit_sink: httpserve::AuditSinkHandle,
     limiter: Arc<ratelimit::GovernorLimiter>,
     metrics: Arc<dyn diport::MetricsExporter>,
     primary: std::net::SocketAddr,
+    admin: std::net::SocketAddr,
     health: std::net::SocketAddr,
     request_budget: Duration,
     ready: ReadyAction,
+    inventory_seed: runtimeexec::inventory::RuntimeInventorySeed,
     #[cfg(feature = "test-support")]
     activation_gate: Option<SocketAddr>,
 }
@@ -104,22 +113,28 @@ impl AssemblyStartupInputs {
     pub(crate) fn new(
         bindings: Vec<bootstrap::DomainBinding>,
         verifier: crate::auth_bridge::FederatedVerifier,
+        audit_sink: httpserve::AuditSinkHandle,
         limiter: Arc<ratelimit::GovernorLimiter>,
         metrics: Arc<dyn diport::MetricsExporter>,
         primary: std::net::SocketAddr,
+        admin: std::net::SocketAddr,
         health: std::net::SocketAddr,
         request_budget: Duration,
+        inventory_seed: runtimeexec::inventory::RuntimeInventorySeed,
         ready: ReadyAction,
     ) -> Self {
         Self {
             bindings,
             verifier,
+            audit_sink,
             limiter,
             metrics,
             primary,
+            admin,
             health,
             request_budget,
             ready,
+            inventory_seed,
             #[cfg(feature = "test-support")]
             activation_gate: None,
         }
@@ -154,17 +169,26 @@ pub(crate) async fn prepare_assembly(
     let (provider_output, domain_output) = transaction.outputs_mut();
     register_probes(&mut registry, provider_output)?;
     register_probes(&mut registry, domain_output)?;
+    let reporter = Arc::new(registry.take_health_reporter());
+    let (inventory_publisher, inventory_reader) =
+        runtimeexec::inventory::inventory_channel(inputs.inventory_seed, Arc::clone(&reporter));
+    let framework_routes = crate::inventory::InventoryFrameworkRoutes::new(inventory_reader);
     let (finalized, receipt) = listeners::finalize(
         &mut registry,
         inputs.verifier,
         inputs.limiter,
         inputs.metrics,
+        inputs.audit_sink,
+        reporter,
+        &framework_routes,
     )?;
     let adapter = listeners::LaunchAdapter::new(
         finalized,
         inputs.primary,
+        inputs.admin,
         inputs.health,
         inputs.request_budget,
+        inventory_publisher,
     )?;
     #[cfg(feature = "test-support")]
     let adapter = match inputs.activation_gate {
@@ -270,6 +294,7 @@ impl ReadyAction {
 fn log_listeners_activated(inventory: &listeners::ListenerInventory) {
     tracing::info!(
         primary = %inventory.primary,
+        admin = %inventory.admin,
         health = %inventory.health,
         state = "listeners_activated",
         "settingsonly listeners activated"
@@ -279,6 +304,7 @@ fn log_listeners_activated(inventory: &listeners::ListenerInventory) {
 fn log_assembly_ready(inventory: &listeners::ListenerInventory) {
     tracing::info!(
         primary = %inventory.primary,
+        admin = %inventory.admin,
         health = %inventory.health,
         state = "ready",
         "settingsonly assembly ready"
@@ -333,6 +359,7 @@ mod tests {
         let reporter = Arc::new(registry.take_health_reporter());
         let inventory = listeners::ListenerInventory {
             primary: "127.0.0.1:1".parse().expect("primary address"),
+            admin: "127.0.0.1:3".parse().expect("admin address"),
             health: "127.0.0.1:2".parse().expect("health address"),
         };
         let mut ready = tokio::spawn(ReadyAction::Log.publish(inventory, reporter));

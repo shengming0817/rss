@@ -12,7 +12,7 @@
 //!
 //! INVARIANT: RUNTIME-GENERATED-DOMAINS-LIVE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_generated_domains_rejects_handwritten_wiring_and_missing_merge", anti_vacuity = "tests::runtime_baseline_accepts_fixture" } -- the runtime phase must consume the committed generated domain list through the plan-owned validator and private `ValidatedDomainBindings` handoff into `compose_bindings`, retain partial bindings on constructor/validation/compose failure, record every output in `ProviderBuild`'s startup transaction, and must not restore per-domain handwritten wiring.
 //!
-//! INVARIANT: RUNTIME-CONFIG-SNAPSHOT-LIVE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_vault_s3_snapshot_wiring + tests::runtime_vault_allowlist_typed_funnel_rejects_bypasses + tests::runtime_jwks_export_requires_snapshot_and_operator_capability", anti_vacuity = "tests::runtime_vault_s3_snapshot_wiring + tests::runtime_vault_allowlist_typed_funnel_rejects_bypasses + tests::runtime_jwks_export_requires_snapshot_and_operator_capability" } -- the unique serving `prepare_runtime()` calls exactly one closed process snapshot factory and seals the password blocklist into `ServingRuntimeInputs`, while `runtime::operator::prepare_runtime()` produces an exact `OperatorRuntimeInputs` that cannot carry that serving capability. `run_startup()` delegates once to the typed phase executor; `ProvidersBuilt::build_infra` maps the serving snapshot view into the exact serving, PG, Redis, Vault, and S3 generations, and `InfraBuilt::wire_domains` consumes the serving aggregate by value as event transport, domain transport, worker, and exact domain-module inputs. Redis and Vault are consumed by value, named S3 parts are destructured once, exact general and DLX parts reach their builders, and canonical PG setup is preserved. The Vault tenant/store allowlist key occurs exactly once in the closed snapshot catalog and flows through the sole typed JSON parser into the private, non-optional `VaultRuntimeConfig::stores` field, then by-value into the sole resolver constructor; the one closed file/stdin validator calls that same parser before operator runtime preparation and cannot read ambient configuration, construct providers, or emit input-derived output. Empty reconstruction, alternate parsers/sources, output leaks, and maintenance reads fail closed. Settings ConfigValue maintenance receives one exact `SnapshotConfig` view and consumes the distinct allowlist-free `VaultKeyProviderConfig` generation. The JWKS operator has one direct production call into a crate-private Vault exporter that requires both the snapshot view and `OperatorRuntimeCapability`, with no getter, HTTP boolean, alias, wrapper, or legacy raw seam. Discarded/wrong generations, ambient getter revival, duplicate mapping or consumption, aliases, wrappers, macros, compliant bait, and serving/operator type mixing all fail closed. Ordered phase-method anchors and the phase snapshot visitor share one syn expander (`expand_inherent_phase_method`) that recursively inlines same-impl private `Self::helper` / `self.helper` calls in call order into a virtual buffer (monotonic virtual offsets): anchors rewrite helper body text with param→arg idents from call remaps, while the visitor remaps tracked bindings arg→param; helper-definition absolute file offsets are never compared in a phase lane, and helper cycles fail closed on both expand and visitor paths. `SnapshotConfig` plus private typed constructors form the native Hard boundary; exact production flow and ambient-reader exclusivity across the conservatively reachable consumer graph remain this explicit Medium AST gate.
+//! INVARIANT: RUNTIME-CONFIG-SNAPSHOT-LIVE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_vault_s3_snapshot_wiring + tests::runtime_vault_allowlist_typed_funnel_rejects_bypasses + tests::runtime_jwks_export_requires_snapshot_and_operator_capability", anti_vacuity = "tests::runtime_vault_s3_snapshot_wiring + tests::runtime_vault_allowlist_typed_funnel_rejects_bypasses + tests::runtime_jwks_export_requires_snapshot_and_operator_capability" } -- the unique serving `prepare_runtime()` calls exactly one closed process snapshot factory and seals the password blocklist plus strict build identity into `ServingRuntimeInputs`, while `runtime::operator::prepare_runtime()` produces an exact `OperatorRuntimeInputs` that cannot carry those serving capabilities. `run_startup()` delegates once to the typed phase executor; `ProvidersBuilt::build_infra` maps the serving snapshot view into the exact serving, PG, Redis, Vault, and S3 generations, and `InfraBuilt::wire_domains` consumes the serving aggregate by value as event transport, domain transport, worker, and exact domain-module inputs. Redis and Vault are consumed by value, named S3 parts are destructured once, exact general and DLX parts reach their builders, and canonical PG setup is preserved. The Vault tenant/store allowlist key occurs exactly once in the closed snapshot catalog and flows through the sole typed JSON parser into the private, non-optional `VaultRuntimeConfig::stores` field, then by-value into the sole resolver constructor; the one closed file/stdin validator calls that same parser before operator runtime preparation and cannot read ambient configuration, construct providers, or emit input-derived output. Empty reconstruction, alternate parsers/sources, output leaks, and maintenance reads fail closed. Settings ConfigValue maintenance receives one exact `SnapshotConfig` view and consumes the distinct allowlist-free `VaultKeyProviderConfig` generation. The JWKS operator has one direct production call into a crate-private Vault exporter that requires both the snapshot view and `OperatorRuntimeCapability`, with no getter, HTTP boolean, alias, wrapper, or legacy raw seam. Discarded/wrong generations, ambient getter revival, duplicate mapping or consumption, aliases, wrappers, macros, compliant bait, and serving/operator type mixing all fail closed. Ordered phase-method anchors and the phase snapshot visitor share one syn expander (`expand_inherent_phase_method`) that recursively inlines same-impl private `Self::helper` / `self.helper` calls in call order into a virtual buffer (monotonic virtual offsets): anchors rewrite helper body text with param→arg idents from call remaps, while the visitor remaps tracked bindings arg→param; helper-definition absolute file offsets are never compared in a phase lane, and helper cycles fail closed on both expand and visitor paths. `SnapshotConfig` plus private typed constructors form the native Hard boundary; exact production flow and ambient-reader exclusivity across the conservatively reachable consumer graph remain this explicit Medium AST gate.
 //!
 //! INVARIANT: RUNTIME-BINARY-SNAPSHOT-LIFECYCLE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_binary_operator_lifecycle_is_proof_aware", anti_vacuity = "tests::runtime_binary_snapshot_wiring_rejects_duplicate_discarded_and_wrong_bindings" } -- `rss` must classify the closed command family from real process arguments before preparation; the Vault allowlist validator returns through its sole file/stdin runner before any runtime preparation, serving uniquely prepares and transfers `ServingRuntimeInputs` to `run`, while stateful operator commands prepare only `OperatorRuntimeInputs`, every stateful operator arm receives that exact binding, and the sole operator shutdown consumes it. No shared input type, pre-consumption early return, validator preparation, alias, macro, shadow path, or unreachable bait is accepted.
 //!
@@ -1113,9 +1113,11 @@ fn listener_plan_execution_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
         (
             finalize.contains("listener_execution_plan,")
                 && finalize.contains("let finalized_listeners = finalize_listener_plan(")
-                && finalize.contains("Ok(finalized_listeners.into_parts())")
+                && finalize.contains("let (listeners, probe_receipt, health_reporter) = finalized_listeners.into_parts();")
+                && finalize.contains("Ok(((listeners, probe_receipt), inventory_publisher))")
                 && finalize.contains("listeners,")
-                && finalize.contains("probe_receipt,"),
+                && finalize.contains("probe_receipt,")
+                && finalize.contains("inventory_publisher,"),
             RUNTIME_PHASE_FINALIZE_PATH,
             "Finalize phase 必须消费 plan capability 后调用唯一 listener finalizer",
         ),
@@ -1402,6 +1404,10 @@ fn finalizer_input_struct_is_canonical(item: &syn::ItemStruct) -> bool {
         ("audit_clock", "Arc<dyndiport::Clock>"),
         ("rate_limiter", "Arc<GovernorLimiter>"),
         ("metrics", "Arc<dyndiport::MetricsExporter>"),
+        (
+            "framework_routes",
+            "crate::runtime_inventory::RuntimeInventoryRoutes",
+        ),
     ];
     item.ident == "FinalizeListenerPlanInputs"
         && is_exact_pub_crate(&item.vis)
@@ -1436,6 +1442,10 @@ fn finalizer_call_is_canonical(call: &syn::ExprCall) -> bool {
         ("audit_clock", "auth_audit_clock"),
         ("rate_limiter", "rate_limiter"),
         ("metrics", "metrics_exporter"),
+        (
+            "framework_routes",
+            "crate::runtime_inventory::RuntimeInventoryRoutes::new(inventory_reader,)",
+        ),
     ];
     let Some(syn::Expr::Struct(inputs)) = call.args.first() else {
         return false;
@@ -4715,7 +4725,7 @@ fn runtime_profile_inputs_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
         findings.push(finding(
             Rule::ForbiddenWiring,
             RUNTIME_PHASE_PATH,
-            "ServingRuntimeInputs must privately own exactly PreparedRuntimeInputs plus Arc<secure::DigestPasswordBlocklist>; OperatorRuntimeInputs must privately own only PreparedRuntimeInputs, making the password capability unrepresentable",
+            "ServingRuntimeInputs must privately own exactly PreparedRuntimeInputs, Arc<secure::DigestPasswordBlocklist>, and BuildIdentity; OperatorRuntimeInputs must privately own only PreparedRuntimeInputs, making serving capabilities unrepresentable",
         ));
     }
 
@@ -4860,6 +4870,7 @@ fn runtime_profile_input_structs_are_exact(file: &syn::File) -> bool {
                 "password_blocklist",
                 "std::sync::Arc<secure::DigestPasswordBlocklist>",
             ),
+            ("build_identity", "runtimeexec::inventory::BuildIdentity"),
         ],
     ) && exact_fields(
         file,
@@ -9172,11 +9183,15 @@ fn profile_prepare_function_is_canonical(
     {
         return false;
     }
-    let [syn::Stmt::Local(prepared), syn::Stmt::Expr(result, None)] =
-        function.block.stmts.as_slice()
+    let statements = function.block.stmts.as_slice();
+    let (Some(syn::Stmt::Local(prepared)), Some(syn::Stmt::Expr(result, None))) =
+        (statements.first(), statements.last())
     else {
         return false;
     };
+    if statements.len() != 2 {
+        return false;
+    }
     let syn::Pat::Tuple(bindings) = &prepared.pat else {
         return false;
     };
@@ -9200,26 +9215,39 @@ fn profile_prepare_function_is_canonical(
     else {
         return false;
     };
-    let syn::Expr::Call(ok) = transparent_expr(result) else {
-        return false;
-    };
-    let Some(syn::Expr::Call(constructor)) = ok.args.first().map(transparent_expr) else {
-        return false;
-    };
-    let constructor_arguments_are_canonical = constructor.args.len()
-        == if carries_password_blocklist { 2 } else { 1 }
-        && constructor
-            .args
-            .first()
-            .is_some_and(|arg| is_exact_ident_path(arg, prepared_binding))
-        && (!carries_password_blocklist
-            || password_binding.is_some_and(|password| {
+    let result_is_canonical = if carries_password_blocklist {
+        let syn::Expr::Call(constructor) = transparent_expr(result) else {
+            return false;
+        };
+        is_exact_path(&constructor.func, &[output_type, "from_prepared"])
+            && constructor.args.len() == 2
+            && constructor
+                .args
+                .first()
+                .is_some_and(|arg| is_exact_ident_path(arg, prepared_binding))
+            && password_binding.is_some_and(|password| {
                 constructor
                     .args
                     .iter()
                     .nth(1)
                     .is_some_and(|arg| is_exact_ident_path(arg, password))
-            }));
+            })
+    } else {
+        let syn::Expr::Call(ok) = transparent_expr(result) else {
+            return false;
+        };
+        let Some(syn::Expr::Call(constructor)) = ok.args.first().map(transparent_expr) else {
+            return false;
+        };
+        is_exact_path(&ok.func, &["Ok"])
+            && ok.args.len() == 1
+            && is_exact_path(&constructor.func, &[output_type, "new"])
+            && constructor.args.len() == 1
+            && constructor
+                .args
+                .first()
+                .is_some_and(|arg| is_exact_ident_path(arg, prepared_binding))
+    };
 
     is_exact_path(&kernel_call.func, kernel_path)
         && kernel_call.args.len() == 1
@@ -9227,10 +9255,7 @@ fn profile_prepare_function_is_canonical(
             .args
             .first()
             .is_some_and(|arg| is_exact_path(arg, local_path))
-        && is_exact_path(&ok.func, &["Ok"])
-        && ok.args.len() == 1
-        && is_exact_path(&constructor.func, &[output_type, "new"])
-        && constructor_arguments_are_canonical
+        && result_is_canonical
 }
 
 fn runtime_kernel_uses_ordered_helper(file: &syn::File) -> bool {
@@ -16549,7 +16574,7 @@ fn prepare_runtime_kernel<Local>(prepare_local: impl FnOnce() -> Local) {
 }
 pub fn prepare_runtime() -> anyhow::Result<ServingRuntimeInputs> {
     let (prepared, password_blocklist) = prepare_runtime_kernel(prepare_serving_local)?;
-    Ok(ServingRuntimeInputs::new(prepared, password_blocklist))
+    ServingRuntimeInputs::from_prepared(prepared, password_blocklist)
 }
 pub fn prepare_operator_runtime() -> anyhow::Result<OperatorRuntimeInputs> {
     let (prepared, ()) = prepare_runtime_kernel(prepare_operator_local)?;
@@ -16601,6 +16626,7 @@ pub struct PreparedRuntimeInputs;
 pub struct ServingRuntimeInputs {
     prepared: PreparedRuntimeInputs,
     password_blocklist: std::sync::Arc<secure::DigestPasswordBlocklist>,
+    build_identity: runtimeexec::inventory::BuildIdentity,
 }
 pub struct OperatorRuntimeInputs {
     prepared: PreparedRuntimeInputs,

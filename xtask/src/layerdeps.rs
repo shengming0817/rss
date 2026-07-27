@@ -44,7 +44,8 @@
 //!   `runtimeexec` target wrapper 必须恰为 runtime/settingsonly/identityaudit 三个 assembly，禁止 bins、composition、
 //!   journeys 与 xtask 直接依赖；该特殊 wrapper 不得被一般 Domain/Adapter/Generated stale 逻辑误判。
 //! INVARIANT: RUNTIMEEXEC-DEPS-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtimeexec_direct_dependencies_extra_internal_and_external_red|tests::runtimeexec_direct_dependencies_package_alias_red", anti_vacuity = "tests::runtimeexec_direct_dependencies_allowlist_green|tests::real_workspace_green" }——
-//!   `runtimeexec` shipped direct dependency 只准内部 bootstrap/diport/secure 与外部 anyhow/tokio/tokio-util/tracing；
+//!   `runtimeexec` shipped direct dependency 只准内部 assembly-schema/bootstrap/diport/primitives/secure 与外部
+//!   anyhow/thiserror/tokio/tokio-util/tracing；
 //!   `[dev-dependencies]` 不入扫描。
 //! `LAYER-DEPS-PROVIDER-BOOTSTRAP-01` 的精确 deny 与元数据单源见 `layers.rs`；本 lint 在通用允许矩阵
 //! 之前应用它，并以 Redis/S3/Vault synthetic red + postgres/diport anti-vacuity green 承载。
@@ -252,8 +253,15 @@ const EXTERNAL_CONFINEMENT_WRAPPERS: &[(&str, &[&str])] = &[
 
 const RUNTIMEEXEC_CRATE: &str = "runtimeexec";
 const RUNTIMEEXEC_ALLOWED_WRAPPERS: &[&str] = &["runtime", "settingsonly", "identityaudit"];
-const RUNTIMEEXEC_INTERNAL_SHIPPED_DEPS: &[&str] = &["bootstrap", "diport", "secure"];
-const RUNTIMEEXEC_EXTERNAL_SHIPPED_DEPS: &[&str] = &["anyhow", "tokio", "tokio-util", "tracing"];
+const RUNTIMEEXEC_INTERNAL_SHIPPED_DEPS: &[&str] = &[
+    "assembly-schema",
+    "bootstrap",
+    "diport",
+    "primitives",
+    "secure",
+];
+const RUNTIMEEXEC_EXTERNAL_SHIPPED_DEPS: &[&str] =
+    &["anyhow", "thiserror", "tokio", "tokio-util", "tracing"];
 
 /// LAYER-DEPS-06：deny.toml 分层 wrappers ⟷ 源分类一致性（守 LAYER-WRAP-01 漂移）。
 /// 正向：每个 Domain/Adapter/Generated 成员须有 ban entry 且 wrappers ⊇ 所需消费者
@@ -1759,15 +1767,20 @@ identity_alias = { package = "identity", version = "1", features = ["test-suppor
     #[test]
     fn runtimeexec_direct_dependencies_allowlist_green() {
         let edges = [
+            e("runtimeexec", "assembly-schema"),
             e("runtimeexec", "bootstrap"),
             e("runtimeexec", "diport"),
+            e("runtimeexec", "primitives"),
             e("runtimeexec", "secure"),
         ];
         let deps = [
+            runtime_dep("assembly-schema", true),
             runtime_dep("bootstrap", true),
             runtime_dep("diport", true),
+            runtime_dep("primitives", true),
             runtime_dep("secure", true),
             runtime_dep("anyhow", false),
+            runtime_dep("thiserror", false),
             runtime_dep("tokio", false),
             runtime_dep("tokio-util", false),
             runtime_dep("tracing", false),

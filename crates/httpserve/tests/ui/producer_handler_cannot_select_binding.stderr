@@ -1,7 +1,7 @@
 error[E0061]: this method takes 0 arguments but 1 argument was supplied
-  --> tests/ui/producer_handler_cannot_select_binding.rs:66:20
+  --> tests/ui/producer_handler_cannot_select_binding.rs:68:20
    |
-66 |     let _ = marker.into_receipt(FORGED_PRODUCER);
+68 |     let _ = marker.into_receipt(FORGED_PRODUCER);
    |                    ^^^^^^^^^^^^ --------------- unexpected argument of type `HttpProducerBinding<RouteMarker>`
    |
 note: method defined here
@@ -11,6 +11,6 @@ note: method defined here
    |            ^^^^^^^^^^^^
 help: remove the extra argument
    |
-66 -     let _ = marker.into_receipt(FORGED_PRODUCER);
-66 +     let _ = marker.into_receipt();
+68 -     let _ = marker.into_receipt(FORGED_PRODUCER);
+68 +     let _ = marker.into_receipt();
    |

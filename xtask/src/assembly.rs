@@ -11,6 +11,7 @@ use assembly_schema::{
     DiportProvider, ManifestValidationError, ProviderConstructor, ProviderConsumer,
     ProviderDurability, ProviderFailurePosture, ProviderLifecycle, ProviderScope,
 };
+use quote::ToTokens as _;
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -48,6 +49,16 @@ pub(crate) enum Rule {
     DuplicateListener,
     /// Framework contract declarations must exactly cover active framework-owned contracts.
     FrameworkContractServing,
+    /// Provider-to-probe inventory bindings may only be minted by the generated/private
+    /// completion receipt funnels.
+    ///
+    /// INVARIANT: RUNTIME-INVENTORY-PROVIDER-PROVENANCE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_inventory_provider_binding_rejects_handwritten_production_callsite", anti_vacuity = "tests::runtime_inventory_provider_binding_real_completion_funnels_are_exact" } -- provider IDs and probe names remain coupled to the move-only completion receipts; production assembly code cannot handwrite or alias the raw binding constructor.
+    RuntimeInventoryProviderProvenance,
+    /// Listener observations are minted only at the three production launch roots and directly
+    /// consume the successfully bound server handle's `local_addr()`.
+    ///
+    /// INVARIANT: RUNTIME-INVENTORY-LISTENER-PROVENANCE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_inventory_listener_provenance_rejects_detached_or_aliased_construction", anti_vacuity = "tests::runtime_inventory_listener_provenance_real_launch_roots_are_exact" } -- copied addresses, helper aliases, macros, and extra production minting sites cannot masquerade as actual listener publication.
+    RuntimeInventoryListenerProvenance,
     /// assembly manifest 不能空转：至少声明一个 DI provider。
     EmptyDiportProviders,
     /// assembly manifest 中 `diportProviders` 不得重复。
@@ -240,6 +251,14 @@ fn regular_file_or_missing(path: &Path) -> Result<bool> {
 pub(crate) fn validate_root(root: &Path) -> Result<(usize, Vec<Finding>)> {
     let (assemblies, mut findings) = discover(root)?;
     findings.extend(validate_framework_contracts(root, &assemblies)?);
+    findings.extend(validate_runtime_inventory_provider_provenance(
+        root,
+        &assemblies,
+    )?);
+    findings.extend(validate_runtime_inventory_listener_provenance(
+        root,
+        &assemblies,
+    )?);
     let metadata = load_workspace_metadata(root)?;
     for assembly in &assemblies {
         findings.extend(validate_assembly(assembly));
@@ -248,6 +267,451 @@ pub(crate) fn validate_root(root: &Path) -> Result<(usize, Vec<Finding>)> {
         }
     }
     Ok((assemblies.len(), findings))
+}
+
+fn validate_runtime_inventory_provider_provenance(
+    root: &Path,
+    assemblies: &[DiscoveredAssembly],
+) -> Result<Vec<Finding>> {
+    let mut findings = Vec::new();
+    for assembly in assemblies {
+        let mut sources = Vec::new();
+        collect_rust_sources(&assembly.dir.join("src"), &mut sources)?;
+        let mut sanctioned = 0_usize;
+        for path in sources {
+            if external_module_is_explicit_test_only(&assembly.dir.join("src"), &path)? {
+                continue;
+            }
+            let source = std::fs::read_to_string(&path)?;
+            let file = syn::parse_file(&source)
+                .with_context(|| format!("parse runtime inventory source {}", path.display()))?;
+            let evidence = production_provider_binding_evidence(&file);
+            if evidence.calls == 0
+                && evidence.imports == 0
+                && evidence.constructor_references == 0
+                && evidence.type_aliases == 0
+                && evidence.macros == 0
+            {
+                continue;
+            }
+            let relative = path
+                .strip_prefix(&assembly.dir)
+                .unwrap_or(path.as_path())
+                .to_string_lossy();
+            let allowed = match assembly.manifest.name.as_str() {
+                "runtime" => relative == "src/provider_output.rs",
+                "settingsonly" | "identityaudit" => relative == "src/generated/providers_gen.rs",
+                _ => false,
+            };
+            if allowed
+                && evidence.imports == 0
+                && evidence.type_aliases == 0
+                && evidence.macros == 0
+                && evidence.calls > 0
+                && evidence.constructor_references == evidence.calls
+            {
+                sanctioned += 1;
+            } else {
+                findings.push(finding(
+                    Rule::RuntimeInventoryProviderProvenance,
+                    rel_label(root, &path),
+                    format!("ProviderProbeBinding construction/import must stay inside the generated or private consuming completion receipt funnel (calls={}, refs={}, imports={}, aliases={}, macros={})", evidence.calls, evidence.constructor_references, evidence.imports, evidence.type_aliases, evidence.macros),
+                ));
+            }
+        }
+        if matches!(
+            assembly.manifest.name.as_str(),
+            "runtime" | "settingsonly" | "identityaudit"
+        ) && sanctioned != 1
+        {
+            findings.push(finding(
+                Rule::RuntimeInventoryProviderProvenance,
+                &assembly.manifest_label,
+                format!(
+                    "runtime inventory provider binding requires exactly one sanctioned completion funnel, found {sanctioned}"
+                ),
+            ));
+        }
+    }
+    Ok(findings)
+}
+
+#[derive(Default)]
+struct ProviderBindingEvidence {
+    calls: usize,
+    imports: usize,
+    constructor_references: usize,
+    type_aliases: usize,
+    macros: usize,
+}
+
+fn production_provider_binding_evidence(file: &syn::File) -> ProviderBindingEvidence {
+    use syn::visit::Visit as _;
+    let mut visitor = ProviderBindingVisitor::default();
+    visitor.visit_file(file);
+    visitor.evidence
+}
+
+#[derive(Default)]
+struct ProviderBindingVisitor {
+    evidence: ProviderBindingEvidence,
+}
+
+impl<'ast> syn::visit::Visit<'ast> for ProviderBindingVisitor {
+    fn visit_item_mod(&mut self, node: &'ast syn::ItemMod) {
+        if has_test_or_test_support_cfg(&node.attrs) {
+            return;
+        }
+        syn::visit::visit_item_mod(self, node);
+    }
+
+    fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
+        if has_test_or_test_support_cfg(&node.attrs) || node.attrs.iter().any(is_test_attribute) {
+            return;
+        }
+        syn::visit::visit_item_fn(self, node);
+    }
+
+    fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
+        if has_test_or_test_support_cfg(&node.attrs) || node.attrs.iter().any(is_test_attribute) {
+            return;
+        }
+        syn::visit::visit_impl_item_fn(self, node);
+    }
+
+    fn visit_item_use(&mut self, node: &'ast syn::ItemUse) {
+        if node
+            .to_token_stream()
+            .to_string()
+            .contains("ProviderProbeBinding")
+        {
+            self.evidence.imports += 1;
+        }
+        syn::visit::visit_item_use(self, node);
+    }
+
+    fn visit_item_type(&mut self, node: &'ast syn::ItemType) {
+        if node
+            .ty
+            .to_token_stream()
+            .to_string()
+            .contains("ProviderProbeBinding")
+        {
+            self.evidence.type_aliases += 1;
+        }
+        syn::visit::visit_item_type(self, node);
+    }
+
+    fn visit_macro(&mut self, node: &'ast syn::Macro) {
+        if node.tokens.to_string().contains("ProviderProbeBinding") {
+            self.evidence.macros += 1;
+        }
+        syn::visit::visit_macro(self, node);
+    }
+
+    fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
+        let segments = path_segments(&node.path);
+        if segments.ends_with(&["ProviderProbeBinding".to_owned(), "new".to_owned()]) {
+            self.evidence.constructor_references += 1;
+        }
+        syn::visit::visit_expr_path(self, node);
+    }
+
+    fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+        if let syn::Expr::Path(path) = node.func.as_ref() {
+            let segments = path_segments(&path.path);
+            if segments.ends_with(&["ProviderProbeBinding".to_owned(), "new".to_owned()]) {
+                self.evidence.calls += 1;
+            }
+        }
+        syn::visit::visit_expr_call(self, node);
+    }
+}
+
+fn path_segments(path: &syn::Path) -> Vec<String> {
+    path.segments
+        .iter()
+        .map(|segment| segment.ident.to_string())
+        .collect()
+}
+
+fn validate_runtime_inventory_listener_provenance(
+    root: &Path,
+    assemblies: &[DiscoveredAssembly],
+) -> Result<Vec<Finding>> {
+    let mut findings = Vec::new();
+    for assembly in assemblies {
+        let (allowed_file, expected_calls): (Option<&str>, &[ExpectedListenerObservation]) =
+            match assembly.manifest.name.as_str() {
+                "runtime" => (Some("src/launch.rs"), RUNTIME_LISTENER_OBSERVATIONS),
+                "settingsonly" | "identityaudit" => (
+                    Some("src/listeners.rs"),
+                    match assembly.manifest.name.as_str() {
+                        "settingsonly" => SETTINGSONLY_LISTENER_OBSERVATIONS,
+                        _ => IDENTITYAUDIT_LISTENER_OBSERVATIONS,
+                    },
+                ),
+                _ => (None, &[]),
+            };
+        let expected_call_count = expected_calls.len();
+        let mut valid_calls = 0_usize;
+        let mut sources = Vec::new();
+        collect_rust_sources(&assembly.dir.join("src"), &mut sources)?;
+        for path in sources {
+            if external_module_is_explicit_test_only(&assembly.dir.join("src"), &path)? {
+                continue;
+            }
+            let source = std::fs::read_to_string(&path)?;
+            let file = syn::parse_file(&source)
+                .with_context(|| format!("parse listener inventory source {}", path.display()))?;
+            let evidence = production_listener_observation_evidence(&file);
+            if evidence.is_empty() {
+                continue;
+            }
+            let relative = path
+                .strip_prefix(&assembly.dir)
+                .unwrap_or(path.as_path())
+                .to_string_lossy();
+            let exact_funnel = allowed_file.is_some_and(|allowed| relative == allowed)
+                && evidence.imports == 0
+                && evidence.type_aliases == 0
+                && evidence.macros == 0
+                && evidence.constructor_references == evidence.calls
+                && evidence.calls == evidence.direct_local_addr_calls
+                && evidence.has_exact_observations(expected_calls);
+            if exact_funnel {
+                valid_calls += evidence.calls;
+            } else {
+                findings.push(finding(
+                    Rule::RuntimeInventoryListenerProvenance,
+                    rel_label(root, &path),
+                    format!("BoundListenerObservation must be constructed only at the exact launch root with local_addr() passed directly from the bound handle (calls={}, direct={}, refs={}, imports={}, aliases={}, macros={})", evidence.calls, evidence.direct_local_addr_calls, evidence.constructor_references, evidence.imports, evidence.type_aliases, evidence.macros),
+                ));
+            }
+        }
+        if allowed_file.is_some() && valid_calls != expected_call_count {
+            findings.push(finding(
+                Rule::RuntimeInventoryListenerProvenance,
+                &assembly.manifest_label,
+                format!(
+                    "runtime listener inventory requires {expected_call_count} exact id/kind/auth/bound observation constructors, found {valid_calls}"
+                ),
+            ));
+        }
+    }
+    Ok(findings)
+}
+
+#[derive(Clone, Copy)]
+struct ExpectedListenerObservation {
+    id: &'static str,
+    kind: &'static str,
+    auth: &'static str,
+    receiver: &'static str,
+}
+
+const RUNTIME_LISTENER_OBSERVATIONS: &[ExpectedListenerObservation] =
+    &[ExpectedListenerObservation {
+        id: "self.id.clone()",
+        kind: "kind",
+        auth: "auth",
+        receiver: "self.bound",
+    }];
+const SETTINGSONLY_LISTENER_OBSERVATIONS: &[ExpectedListenerObservation] = &[
+    ExpectedListenerObservation {
+        id: "\"primary-main\"",
+        kind: "assembly_schema::AssemblyListenerKind::Primary",
+        auth: "assembly_schema::ListenerAuth::FederatedAccessToken",
+        receiver: "prepared.primary.bound",
+    },
+    ExpectedListenerObservation {
+        id: "\"admin-main\"",
+        kind: "assembly_schema::AssemblyListenerKind::Admin",
+        auth: "assembly_schema::ListenerAuth::FederatedAccessToken",
+        receiver: "prepared.admin.bound",
+    },
+    ExpectedListenerObservation {
+        id: "\"health-main\"",
+        kind: "assembly_schema::AssemblyListenerKind::Health",
+        auth: "assembly_schema::ListenerAuth::NoAuth",
+        receiver: "prepared.health.bound",
+    },
+];
+const IDENTITYAUDIT_LISTENER_OBSERVATIONS: &[ExpectedListenerObservation] = &[
+    ExpectedListenerObservation {
+        id: "\"primary-main\"",
+        kind: "assembly_schema::AssemblyListenerKind::Primary",
+        auth: "assembly_schema::ListenerAuth::RssAccessToken",
+        receiver: "prepared.primary.bound",
+    },
+    ExpectedListenerObservation {
+        id: "\"admin-main\"",
+        kind: "assembly_schema::AssemblyListenerKind::Admin",
+        auth: "assembly_schema::ListenerAuth::RssAccessToken",
+        receiver: "prepared.admin.bound",
+    },
+    ExpectedListenerObservation {
+        id: "\"health-main\"",
+        kind: "assembly_schema::AssemblyListenerKind::Health",
+        auth: "assembly_schema::ListenerAuth::NoAuth",
+        receiver: "prepared.health.bound",
+    },
+];
+
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct ListenerObservationCall {
+    id: String,
+    kind: String,
+    auth: String,
+    receiver: String,
+}
+
+#[derive(Default)]
+struct ListenerObservationEvidence {
+    calls: usize,
+    direct_local_addr_calls: usize,
+    constructor_references: usize,
+    imports: usize,
+    type_aliases: usize,
+    macros: usize,
+    direct_observations: Vec<ListenerObservationCall>,
+}
+
+impl ListenerObservationEvidence {
+    fn is_empty(&self) -> bool {
+        self.calls == 0
+            && self.constructor_references == 0
+            && self.imports == 0
+            && self.type_aliases == 0
+            && self.macros == 0
+    }
+
+    fn has_exact_observations(&self, expected: &[ExpectedListenerObservation]) -> bool {
+        let mut actual = self.direct_observations.clone();
+        actual.sort();
+        let mut expected = expected
+            .iter()
+            .map(|call| ListenerObservationCall {
+                id: call.id.to_owned(),
+                kind: call.kind.to_owned(),
+                auth: call.auth.to_owned(),
+                receiver: call.receiver.to_owned(),
+            })
+            .collect::<Vec<_>>();
+        expected.sort();
+        actual == expected
+    }
+}
+
+fn production_listener_observation_evidence(file: &syn::File) -> ListenerObservationEvidence {
+    use syn::visit::Visit as _;
+    let mut visitor = ListenerObservationVisitor::default();
+    visitor.visit_file(file);
+    visitor.evidence
+}
+
+#[derive(Default)]
+struct ListenerObservationVisitor {
+    evidence: ListenerObservationEvidence,
+}
+
+impl<'ast> syn::visit::Visit<'ast> for ListenerObservationVisitor {
+    fn visit_item_mod(&mut self, node: &'ast syn::ItemMod) {
+        if has_test_or_test_support_cfg(&node.attrs) {
+            return;
+        }
+        syn::visit::visit_item_mod(self, node);
+    }
+
+    fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
+        if has_test_or_test_support_cfg(&node.attrs) || node.attrs.iter().any(is_test_attribute) {
+            return;
+        }
+        syn::visit::visit_item_fn(self, node);
+    }
+
+    fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
+        if has_test_or_test_support_cfg(&node.attrs) || node.attrs.iter().any(is_test_attribute) {
+            return;
+        }
+        syn::visit::visit_impl_item_fn(self, node);
+    }
+
+    fn visit_item_use(&mut self, node: &'ast syn::ItemUse) {
+        if node
+            .to_token_stream()
+            .to_string()
+            .contains("BoundListenerObservation")
+        {
+            self.evidence.imports += 1;
+        }
+        syn::visit::visit_item_use(self, node);
+    }
+
+    fn visit_item_type(&mut self, node: &'ast syn::ItemType) {
+        if node
+            .ty
+            .to_token_stream()
+            .to_string()
+            .contains("BoundListenerObservation")
+        {
+            self.evidence.type_aliases += 1;
+        }
+        syn::visit::visit_item_type(self, node);
+    }
+
+    fn visit_macro(&mut self, node: &'ast syn::Macro) {
+        if node.tokens.to_string().contains("BoundListenerObservation") {
+            self.evidence.macros += 1;
+        }
+        syn::visit::visit_macro(self, node);
+    }
+
+    fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
+        let segments = path_segments(&node.path);
+        if segments.ends_with(&[
+            "BoundListenerObservation".to_owned(),
+            "from_bound".to_owned(),
+        ]) {
+            self.evidence.constructor_references += 1;
+        }
+        syn::visit::visit_expr_path(self, node);
+    }
+
+    fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+        if let syn::Expr::Path(path) = node.func.as_ref() {
+            let segments = path_segments(&path.path);
+            if segments.ends_with(&[
+                "BoundListenerObservation".to_owned(),
+                "from_bound".to_owned(),
+            ]) {
+                self.evidence.calls += 1;
+                if node.args.iter().nth(4).is_some_and(|argument| {
+                    matches!(argument, syn::Expr::MethodCall(call) if call.method == "local_addr" && call.args.is_empty())
+                }) {
+                    self.evidence.direct_local_addr_calls += 1;
+                    if let Some(syn::Expr::MethodCall(call)) = node.args.iter().nth(4) {
+                        self.evidence.direct_observations.push(ListenerObservationCall {
+                            id: token_key(&node.args[0]),
+                            kind: token_key(&node.args[1]),
+                            auth: token_key(&node.args[2]),
+                            receiver: token_key(call.receiver.as_ref()),
+                        });
+                    }
+                }
+            }
+        }
+        syn::visit::visit_expr_call(self, node);
+    }
+}
+
+fn token_key(tokens: &impl quote::ToTokens) -> String {
+    tokens
+        .to_token_stream()
+        .to_string()
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect()
 }
 
 /// Target-specific artifact semantics shared with `assembly artifacts check`.
@@ -291,7 +755,8 @@ fn validate_framework_contracts(
     let mut declarations: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
     let mut findings = Vec::new();
     for assembly in assemblies {
-        for contract_id in &assembly.manifest.framework_contracts {
+        for mount in &assembly.manifest.framework_contracts {
+            let contract_id = &mount.id;
             declarations
                 .entry(contract_id)
                 .or_default()
@@ -319,25 +784,19 @@ fn validate_framework_contracts(
         contract.manifest.lifecycle == Lifecycle::Active
             && contract.manifest.owner == ContractOwner::Framework
     }) {
-        match declarations.get(contract.manifest.id.as_str()).map(Vec::as_slice) {
+        match declarations
+            .get(contract.manifest.id.as_str())
+            .map(Vec::as_slice)
+        {
             None | Some([]) => findings.push(finding(
                 Rule::FrameworkContractServing,
                 rel_label(root, &contract.dir.join("contract.toml")),
                 format!(
-                    "active framework contract `{}` must be declared by exactly one assembly",
+                    "active framework contract `{}` must be declared by at least one assembly",
                     contract.manifest.id
                 ),
             )),
-            Some([_]) => {}
-            Some(many) => findings.push(finding(
-                Rule::FrameworkContractServing,
-                many.join(", "),
-                format!(
-                    "active framework contract `{}` is declared by {} assemblies; expected exactly one",
-                    contract.manifest.id,
-                    many.len()
-                ),
-            )),
+            Some(_) => {}
         }
     }
     Ok(findings)
@@ -1873,7 +2332,7 @@ fn validate_settingsonly_executable_evidence(
         findings.push(finding(
             Rule::SettingsOnlyExecutableBoundary,
             subject,
-            "field=Dockerfile expected exact two-COPY + ENTRYPOINT settingsonly-runtime on the distroless nonroot base, with no EXPOSE/ENV/CMD/USER override, while runtime remains the default final stage",
+            "field=Dockerfile expected exact EXPOSE 8080 8082 8083 followed by two COPY instructions and ENTRYPOINT settingsonly-server on the distroless nonroot settingsonly-runtime stage, while runtime remains the default final stage",
         ));
     }
     findings
@@ -2742,6 +3201,7 @@ fn settingsonly_docker_target_is_closed(source: &str) -> bool {
             })
         });
     const RUNTIME_INSTRUCTIONS: &[(&str, &str)] = &[
+        ("EXPOSE", "8080 8082 8083"),
         (
             "COPY",
             "--from=settingsonly-builder /app/target/release/settingsonly-server /usr/local/bin/settingsonly-server",
@@ -3046,6 +3506,37 @@ fn collect_rust_sources(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn external_module_is_explicit_test_only(source_root: &Path, path: &Path) -> Result<bool> {
+    let relative = path.strip_prefix(source_root).unwrap_or(path);
+    let Some(module_name) = relative.file_stem().and_then(|stem| stem.to_str()) else {
+        return Ok(false);
+    };
+    if matches!(module_name, "lib" | "main" | "mod") {
+        return Ok(false);
+    }
+    let parent = path.parent().unwrap_or(source_root);
+    let mut owners = if parent == source_root {
+        vec![source_root.join("lib.rs"), source_root.join("main.rs")]
+    } else {
+        vec![parent.with_extension("rs"), parent.join("mod.rs")]
+    };
+    owners.retain(|owner| owner.is_file());
+    let mut declarations = Vec::new();
+    for owner in owners {
+        let source = std::fs::read_to_string(&owner)?;
+        let file = syn::parse_file(&source)
+            .with_context(|| format!("parse module owner {}", owner.display()))?;
+        declarations.extend(file.items.into_iter().filter_map(|item| {
+            let syn::Item::Mod(module) = item else {
+                return None;
+            };
+            (module.ident == module_name && module.content.is_none())
+                .then(|| has_test_or_test_support_cfg(&module.attrs))
+        }));
+    }
+    Ok(!declarations.is_empty() && declarations.into_iter().all(|test_only| test_only))
 }
 
 fn file_has_distributed_consumer_evidence(file: &syn::File) -> bool {
@@ -4404,6 +4895,48 @@ fn has_cfg_test(attrs: &[syn::Attribute]) -> bool {
             Ok(())
         });
         found
+    })
+}
+
+fn has_test_or_test_support_cfg(attrs: &[syn::Attribute]) -> bool {
+    const TEST_FEATURES: &[&str] = &[
+        "test-support",
+        "test_support",
+        "integration",
+        "integration-tests",
+        "integration_tests",
+        "test-utils",
+        "test_utils",
+    ];
+    fn is_test_cfg(meta: &syn::Meta, test_features: &[&str]) -> bool {
+        use syn::parse::Parser as _;
+        match meta {
+            syn::Meta::Path(path) => path.is_ident("test"),
+            syn::Meta::NameValue(value) if value.path.is_ident("feature") => {
+                matches!(&value.value, syn::Expr::Lit(literal) if matches!(&literal.lit, syn::Lit::Str(feature) if test_features.contains(&feature.value().as_str())))
+            }
+            syn::Meta::List(list) if list.path.is_ident("all") => {
+                syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated
+                    .parse2(list.tokens.clone())
+                    .is_ok_and(|nested| nested.iter().any(|meta| is_test_cfg(meta, test_features)))
+            }
+            syn::Meta::List(list) if list.path.is_ident("any") => {
+                syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated
+                    .parse2(list.tokens.clone())
+                    .is_ok_and(|nested| {
+                        !nested.is_empty()
+                            && nested.iter().all(|meta| is_test_cfg(meta, test_features))
+                    })
+            }
+            _ => false,
+        }
+    }
+
+    attrs.iter().any(|attr| {
+        attr.path().is_ident("cfg")
+            && attr
+                .parse_args::<syn::Meta>()
+                .is_ok_and(|meta| is_test_cfg(&meta, TEST_FEATURES))
     })
 }
 
@@ -6009,7 +6542,7 @@ durability = "ephemeral-memory""#
     }
 
     #[test]
-    fn active_framework_contract_requires_one_exact_assembly_declaration() -> anyhow::Result<()> {
+    fn active_framework_contract_requires_explicit_assembly_declarations() -> anyhow::Result<()> {
         let root = unique_tmp("assembly-framework-contract");
         let contract_dir = root.join("contracts/http/_seed/v1");
         fs::create_dir_all(&contract_dir)?;
@@ -6036,7 +6569,7 @@ durability = "ephemeral-memory""#
 
         let declared = manifest_with_intent().replace(
             "frameworkContracts = []",
-            "frameworkContracts = [\"seed.echo\"]",
+            "frameworkContracts = [{ id = \"seed.echo\", listener = \"primary\" }]",
         );
         write_assembly(
             &root,
@@ -6045,7 +6578,268 @@ durability = "ephemeral-memory""#
         )?;
         let (assemblies, _) = discover(&root)?;
         assert!(validate_framework_contracts(&root, &assemblies)?.is_empty());
+
+        let second = root.join("assemblies/second");
+        fs::create_dir_all(second.join("src"))?;
+        write(
+            &second.join("assembly.toml"),
+            &declared.replace("name = \"runtime\"", "name = \"second\""),
+        )?;
+        write(
+            &second.join("Cargo.toml"),
+            "[package]\nname = \"second\"\nversion = \"0.0.0\"\n",
+        )?;
+        let (assemblies, _) = discover(&root)?;
+        assert!(validate_framework_contracts(&root, &assemblies)?.is_empty());
         fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_inventory_provider_binding_rejects_handwritten_production_callsite()
+    -> anyhow::Result<()> {
+        let handwritten = syn::parse_file(
+            r#"
+fn build() {
+    let _ = runtimeexec::inventory::ProviderProbeBinding::new("provider", Vec::new());
+}
+"#,
+        )
+        .expect("synthetic production source");
+        assert_eq!(production_provider_binding_evidence(&handwritten).calls, 1);
+
+        let aliased = syn::parse_file(
+            r#"
+use runtimeexec::inventory::ProviderProbeBinding as Binding;
+fn build() { let _ = Binding::new("provider", Vec::new()); }
+"#,
+        )
+        .expect("synthetic alias source");
+        assert_eq!(production_provider_binding_evidence(&aliased).imports, 1);
+
+        let module_aliased_impl = syn::parse_file(
+            r#"
+use runtimeexec::inventory as model;
+struct Receipt;
+impl Receipt {
+    fn consume(self) {
+        let _ = model::ProviderProbeBinding::new("provider", Vec::new());
+    }
+}
+"#,
+        )
+        .expect("synthetic module alias source");
+        let evidence = production_provider_binding_evidence(&module_aliased_impl);
+        assert_eq!(evidence.calls, 1);
+        assert_eq!(evidence.constructor_references, 1);
+
+        let type_aliased = syn::parse_file(
+            r#"
+type Binding = runtimeexec::inventory::ProviderProbeBinding;
+fn build() { let _ = Binding::new("provider", Vec::new()); }
+"#,
+        )
+        .expect("synthetic type alias source");
+        assert_eq!(
+            production_provider_binding_evidence(&type_aliased).type_aliases,
+            1
+        );
+
+        let macro_wrapped = syn::parse_file(
+            r#"
+macro_rules! mint {
+    () => { runtimeexec::inventory::ProviderProbeBinding::new("provider", Vec::new()) };
+}
+fn build() { let _ = mint!(); }
+"#,
+        )
+        .expect("synthetic macro source");
+        assert!(production_provider_binding_evidence(&macro_wrapped).macros > 0);
+
+        let test_only = syn::parse_file(
+            r#"
+#[cfg(test)]
+mod tests {
+    use runtimeexec::inventory::ProviderProbeBinding;
+    fn fixture() { let _ = ProviderProbeBinding::new("provider", Vec::new()); }
+}
+"#,
+        )
+        .expect("synthetic test source");
+        assert_eq!(
+            production_provider_binding_evidence(&test_only).calls
+                + production_provider_binding_evidence(&test_only).imports,
+            0
+        );
+
+        let root = unique_tmp("inventory-provider-production-validator");
+        write_assembly(
+            &root,
+            &manifest_with_intent(),
+            "[package]\nname = \"runtime\"\nversion = \"0.0.0\"\n",
+        )?;
+        let source_dir = root.join("assemblies/runtime/src");
+        fs::create_dir_all(&source_dir)?;
+        write(
+            &source_dir.join("provider_output.rs"),
+            "fn consume() { let _ = runtimeexec::inventory::ProviderProbeBinding::new(\"provider\", Vec::new()); }",
+        )?;
+        // A production file/module named `test_support` is not a test boundary.
+        write(
+            &source_dir.join("test_support.rs"),
+            "mod test_support { fn mint() { let _ = runtimeexec::inventory::ProviderProbeBinding::new(\"forged\", Vec::new()); } }",
+        )?;
+        let (assemblies, _) = discover(&root)?;
+        let findings = validate_runtime_inventory_provider_provenance(&root, &assemblies)?;
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == Rule::RuntimeInventoryProviderProvenance),
+            "production validator accepted an unguarded test_support callsite: {findings:#?}"
+        );
+
+        write(
+            &source_dir.join("test_support.rs"),
+            "#[cfg(feature = \"test-support\")] mod test_support { fn mint() { let _ = runtimeexec::inventory::ProviderProbeBinding::new(\"fixture\", Vec::new()); } }",
+        )?;
+        let (assemblies, _) = discover(&root)?;
+        assert!(
+            validate_runtime_inventory_provider_provenance(&root, &assemblies)?.is_empty(),
+            "an explicit test-only cfg must remain outside production evidence"
+        );
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_inventory_provider_binding_real_completion_funnels_are_exact() -> anyhow::Result<()>
+    {
+        let root = crate::workspace_root()?;
+        let (assemblies, _) = discover(&root)?;
+        let findings = validate_runtime_inventory_provider_provenance(&root, &assemblies)?;
+        assert!(findings.is_empty(), "unexpected findings: {findings:#?}");
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_inventory_listener_provenance_rejects_detached_or_aliased_construction()
+    -> anyhow::Result<()> {
+        let direct = syn::parse_file(
+            r#"
+fn publish(bound: Server) {
+    let _ = runtimeexec::inventory::BoundListenerObservation::from_bound(
+        "admin", kind(), auth(), scheme(), bound.local_addr(),
+    );
+}
+"#,
+        )
+        .expect("direct bound construction");
+        let evidence = production_listener_observation_evidence(&direct);
+        assert_eq!(evidence.calls, 1);
+        assert_eq!(evidence.direct_local_addr_calls, 1);
+        assert_eq!(evidence.constructor_references, 1);
+        assert_eq!(evidence.direct_observations[0].receiver, "bound");
+
+        let detached = syn::parse_file(
+            r#"
+fn publish(bound: Server) {
+    let address = bound.local_addr();
+    let _ = runtimeexec::inventory::BoundListenerObservation::from_bound(
+        "admin", kind(), auth(), scheme(), address,
+    );
+}
+"#,
+        )
+        .expect("detached address construction");
+        let evidence = production_listener_observation_evidence(&detached);
+        assert_eq!(evidence.calls, 1);
+        assert_eq!(evidence.direct_local_addr_calls, 0);
+
+        let aliased = syn::parse_file(
+            r#"
+use runtimeexec::inventory::BoundListenerObservation as Observation;
+type CopyableObservation = runtimeexec::inventory::BoundListenerObservation;
+macro_rules! mint {
+    ($bound:expr) => { runtimeexec::inventory::BoundListenerObservation::from_bound(
+        "admin", kind(), auth(), scheme(), $bound.local_addr(),
+    ) };
+}
+"#,
+        )
+        .expect("listener escape source");
+        let evidence = production_listener_observation_evidence(&aliased);
+        assert_eq!(evidence.imports, 1);
+        assert_eq!(evidence.type_aliases, 1);
+        assert!(evidence.macros > 0);
+
+        let test_only = syn::parse_file(
+            r#"
+#[cfg(test)]
+mod tests {
+    fn fixture(bound: Server) {
+        let address = bound.local_addr();
+        let _ = runtimeexec::inventory::BoundListenerObservation::from_bound(
+            "admin", kind(), auth(), scheme(), address,
+        );
+    }
+}
+"#,
+        )
+        .expect("test-only listener source");
+        assert!(production_listener_observation_evidence(&test_only).is_empty());
+
+        let root = unique_tmp("inventory-listener-production-validator");
+        write_assembly(
+            &root,
+            &manifest_with_intent().replace("name = \"runtime\"", "name = \"settingsonly\""),
+            "[package]\nname = \"settingsonly\"\nversion = \"0.0.0\"\n",
+        )?;
+        let source_dir = root.join("assemblies/runtime/src");
+        fs::create_dir_all(&source_dir)?;
+        write(
+            &source_dir.join("listeners.rs"),
+            r#"
+fn observations(prepared: Prepared) {
+    runtimeexec::inventory::BoundListenerObservation::from_bound("primary-main", assembly_schema::AssemblyListenerKind::Primary, assembly_schema::ListenerAuth::FederatedAccessToken, scheme(), prepared.admin.bound.local_addr());
+    runtimeexec::inventory::BoundListenerObservation::from_bound("admin-main", assembly_schema::AssemblyListenerKind::Admin, assembly_schema::ListenerAuth::FederatedAccessToken, scheme(), prepared.primary.bound.local_addr());
+    runtimeexec::inventory::BoundListenerObservation::from_bound("health-main", assembly_schema::AssemblyListenerKind::Health, assembly_schema::ListenerAuth::NoAuth, scheme(), prepared.health.bound.local_addr());
+}
+"#,
+        )?;
+        // write_assembly uses the runtime directory; adjust the discovered manifest identity while
+        // keeping this compact synthetic repository structurally valid.
+        let (mut assemblies, _) = discover(&root)?;
+        assemblies[0].manifest.name = "settingsonly".to_owned();
+        let findings = validate_runtime_inventory_listener_provenance(&root, &assemblies)?;
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == Rule::RuntimeInventoryListenerProvenance),
+            "production validator accepted swapped primary/admin bound receivers: {findings:#?}"
+        );
+
+        write(
+            &source_dir.join("test_support.rs"),
+            "mod test_support { fn forge(bound: Server) { runtimeexec::inventory::BoundListenerObservation::from_bound(\"x\", kind(), auth(), scheme(), bound.local_addr()); } }",
+        )?;
+        let findings = validate_runtime_inventory_listener_provenance(&root, &assemblies)?;
+        assert!(
+            findings.iter().any(|finding| {
+                finding.rule == Rule::RuntimeInventoryListenerProvenance
+                    && finding.subject.ends_with("test_support.rs")
+            }),
+            "unguarded test_support source must be production evidence: {findings:#?}"
+        );
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_inventory_listener_provenance_real_launch_roots_are_exact() -> anyhow::Result<()> {
+        let root = crate::workspace_root()?;
+        let (assemblies, _) = discover(&root)?;
+        let findings = validate_runtime_inventory_listener_provenance(&root, &assemblies)?;
+        assert!(findings.is_empty(), "unexpected findings: {findings:#?}");
         Ok(())
     }
 
@@ -6617,6 +7411,7 @@ RUN cargo chef cook --release --locked --recipe-path recipe.json --bin settingso
 COPY . .
 RUN cargo build --release --locked --bin settingsonly-server && strip target/release/settingsonly-server
 FROM gcr.io/distroless/cc-debian12:nonroot AS settingsonly-runtime
+EXPOSE 8080 8082 8083
 COPY --from=settingsonly-builder /app/target/release/settingsonly-server /usr/local/bin/settingsonly-server
 COPY --from=settingsonly-builder /app/assemblies/settingsonly/config.schema.json /usr/share/rss/settingsonly/config.schema.json
 ENTRYPOINT ["/usr/local/bin/settingsonly-server"]
@@ -6773,6 +7568,44 @@ ENTRYPOINT ["/usr/local/bin/server"]
                 "settingsonly runtime accepted {case} bypass"
             );
         }
+    }
+
+    #[test]
+    fn settingsonly_docker_boundary_diagnoses_exact_listener_ports() {
+        let wrong_ports =
+            SETTINGSONLY_DOCKER_FIXTURE.replace("EXPOSE 8080 8082 8083", "EXPOSE 8080 8083");
+        let targets = [
+            MetadataTarget {
+                name: "settingsonly".to_owned(),
+                kind: vec!["lib".to_owned()],
+                src_path: PathBuf::new(),
+            },
+            MetadataTarget {
+                name: "settingsonly-server".to_owned(),
+                kind: vec!["bin".to_owned()],
+                src_path: PathBuf::new(),
+            },
+            MetadataTarget {
+                name: "settingsonly_artifact_acceptance".to_owned(),
+                kind: vec!["test".to_owned()],
+                src_path: PathBuf::new(),
+            },
+        ];
+        let closure = SETTINGSONLY_ALLOWED_NORMAL_WORKSPACE_PACKAGES
+            .iter()
+            .map(|package| (*package).to_owned())
+            .collect::<BTreeSet<_>>();
+        let findings = validate_settingsonly_executable_evidence(settingsonly_boundary_evidence(
+            &targets,
+            &closure,
+            &wrong_ports,
+        ));
+
+        assert_eq!(findings.len(), 1);
+        assert_eq!(
+            findings[0].detail,
+            "field=Dockerfile expected exact EXPOSE 8080 8082 8083 followed by two COPY instructions and ENTRYPOINT settingsonly-server on the distroless nonroot settingsonly-runtime stage, while runtime remains the default final stage"
+        );
     }
 
     #[test]

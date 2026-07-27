@@ -92,11 +92,15 @@
     "ListenersConfig": {
       "type": "object",
       "required": [
+        "admin",
         "health",
         "primary",
         "requestBudgetMs"
       ],
       "properties": {
+        "admin": {
+          "$ref": "#/definitions/ListenerEndpoint"
+        },
         "health": {
           "$ref": "#/definitions/ListenerEndpoint"
         },

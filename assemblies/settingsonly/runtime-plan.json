@@ -1,8 +1,16 @@
 {
   "schemaVersion": 1,
-  "assemblyFingerprint": "sha256:de83dad19129ffdb7ea15811296bceb2b76d35793b35d34f5e7e33c601ceaf70",
-  "runtimePlanFingerprint": "sha256:f688c7f3ac2ebb25a570c2073c8bdaf23ca2e35682a16c189792b54ac6b0aa29",
+  "assemblyFingerprint": "sha256:98193728fc6996a80f5c39a1f01f837addbeb3c7275ac4ab3f136ee34db4ec82",
+  "runtimePlanFingerprint": "sha256:0560ab22cf6318e35a4e5dddf7bb1e2eb40fdc4e2981fc1f138d8a47425ccafb",
   "providerPlans": [
+    {
+      "id": "auth-audit-sink",
+      "constructor": "postgres::PgAuthAuditSink",
+      "outputs": [
+        "resources",
+        "workers"
+      ]
+    },
     {
       "id": "listener-pdp",
       "constructor": "oidc::OidcProvider",
@@ -31,6 +39,12 @@
     }
   ],
   "listenerPlans": [
+    {
+      "id": "admin-main",
+      "kind": "admin",
+      "auth": "federatedAccessToken",
+      "domains": []
+    },
     {
       "id": "health-main",
       "kind": "health",

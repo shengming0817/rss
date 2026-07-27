@@ -1,0 +1,30 @@
+# Protected, tenant-authorized runtime topology and build identity for operators.
+id = "runtime.inventory"
+kind = "http"
+domain = "runtime"
+version = "v1"
+owner = "_framework"
+consistencyLevel = "LocalOnly"
+lifecycle = "active"
+path = "/api/v1/runtime/inventory"
+method = "GET"
+
+[schemas]
+request = "request.schema.json"
+response = "response.schema.json"
+
+[endpoints.http]
+successStatus = 200
+idempotency = "idempotent"
+resource = "runtimeInventory"
+
+[endpoints.http.auth]
+mode = "permission"
+permission = "runtime:inventory:read"
+
+[endpoints.http.resourceSharing]
+mode = "global"
+reason = "Process-wide runtime inventory is operator state without a tenant owner."
+
+[effectProfile]
+effects = ["auth", "read"]

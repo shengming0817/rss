@@ -56,6 +56,10 @@ name = "production_runtime"
 path = "tests/production_runtime.rs"
 
 [[test]]
+name = "runtime_inventory"
+path = "tests/runtime_inventory.rs"
+
+[[test]]
 name = "two_replica_runtime"
 path = "tests/two_replica_runtime.rs"
 required-features = ["integration"]
@@ -72,7 +76,7 @@ httpserve = { path = "../crates/httpserve", features = ["test-util"] }
 # Journey 自身不启动 runtime、容器或真实 provider。
 runtime = { path = "../assemblies/runtime", features = ["integration"] }
 settingsonly = { path = "../assemblies/settingsonly", features = ["test-support"] }
-identityaudit = { path = "../assemblies/identityaudit" }
+identityaudit = { path = "../assemblies/identityaudit", features = ["test-support"] }
 # seed-data：启用 settings 的 in-mem 配置 / flag 仓储构造器（仅 journeys/demo；生产组合根不启用）。
 # test-support：journey 测试显式构造 TenantRepoScope，证明外部测试只能走测试入口而非裸 TenantId。
 settings = { path = "../crates/settings", features = ["seed-data", "test-support"] }

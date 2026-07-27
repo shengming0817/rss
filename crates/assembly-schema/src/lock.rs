@@ -900,7 +900,7 @@ fn select_contracts(
     let framework_ids = manifest
         .framework_contracts()
         .iter()
-        .map(String::as_str)
+        .map(|mount| mount.id.as_str())
         .collect::<BTreeSet<_>>();
     let mut selected = catalog
         .bindings

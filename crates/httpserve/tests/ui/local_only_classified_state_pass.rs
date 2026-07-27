@@ -27,6 +27,7 @@ fn main() {
         vocab::HttpRouteAuth::ServiceOwned,
         None,
         false,
+        vocab::http::HttpResourceSharing::TenantScoped,
         vocab::HttpEffectProfile::new(&[vocab::HttpEffectKind::Read]),
     );
     let routes = unfinalized_for_test::<httpserve::Admin>(|rb| {

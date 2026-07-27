@@ -2,7 +2,7 @@ name = "runtime"
 profile = "production"
 domains = ["settings", "identity", "audit"]
 topology = "durable-shared"
-frameworkContracts = []
+frameworkContracts = [{ id = "runtime.inventory", listener = "admin" }]
 
 [[listeners]]
 kind = "primary"
@@ -127,6 +127,7 @@ id = "auth-audit-sink"
 port = "diport::AuditSink"
 provider = "postgres::PgAuthAuditSink"
 providerCrate = "postgres"
+requiredFeatures = ["auth-audit-sink"]
 consumer = "httpserve"
 lifecycle = "active"
 durability = "persistent"

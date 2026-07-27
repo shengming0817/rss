@@ -28,6 +28,7 @@ const ROUTE: HttpRouteBinding<RouteMarker, OutboxFact> = HttpRouteBinding::from_
     HttpRouteAuth::Public,
     None,
     false,
+    vocab::http::HttpResourceSharing::TenantScoped,
     HttpEffectProfile::new(&[
         HttpEffectKind::BusinessWrite,
         HttpEffectKind::BusinessTransaction,

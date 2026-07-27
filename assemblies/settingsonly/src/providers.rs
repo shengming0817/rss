@@ -13,6 +13,7 @@ pub(crate) struct ProviderBundle {
     pub(crate) vault: vault::VaultRuntimeDeps,
     pub(crate) settings_key: diport::KeyName,
     pub(crate) verifier: crate::auth_bridge::FederatedVerifier,
+    pub(crate) audit_sink: httpserve::AuditSinkHandle,
     pub(crate) metrics: Arc<dyn diport::MetricsExporter>,
     pub(crate) limiter: Arc<ratelimit::GovernorLimiter>,
     pub(crate) vault_readiness: settings_composition::KeyProviderReadinessInterval,
@@ -22,12 +23,24 @@ pub(crate) struct CompletedProviderBuild {
     providers: ProviderBundle,
     listeners: config::ListenersConfig,
     support_probe: JwksSupportProbe,
-    _provider_roles: crate::providers_gen::CompletedProviderRoles,
+    provider_roles: crate::providers_gen::CompletedProviderRoles,
 }
 
 impl CompletedProviderBuild {
-    pub(crate) fn into_parts(self) -> (ProviderBundle, config::ListenersConfig, JwksSupportProbe) {
-        (self.providers, self.listeners, self.support_probe)
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        ProviderBundle,
+        config::ListenersConfig,
+        JwksSupportProbe,
+        crate::providers_gen::CompletedProviderRoles,
+    ) {
+        (
+            self.providers,
+            self.listeners,
+            self.support_probe,
+            self.provider_roles,
+        )
     }
 }
 
@@ -35,6 +48,7 @@ struct BuildProducts {
     providers: ProviderBundle,
     listeners: config::ListenersConfig,
     support_probe: JwksSupportProbe,
+    auth_audit_sink: crate::providers_gen::AuthAuditSinkReceipt,
     listener_pdp: crate::providers_gen::ListenerPdpReceipt,
     listener_rate_limiter: crate::providers_gen::ListenerRateLimiterReceipt,
     settings_key_provider: crate::providers_gen::SettingsKeyProviderReceipt,
@@ -50,6 +64,7 @@ pub(crate) async fn build(
     let (listeners, federated, postgres, vault_config) = config.into_sections();
     let (writer_password, reader_password, migrator_password, vault_token) =
         secrets.into_secret_material();
+    let auth_audit_sink = roles.auth_audit_sink()?;
     let listener_pdp = roles.listener_pdp()?;
     let listener_rate_limiter = roles.listener_rate_limiter()?;
     let settings_key_provider = roles.settings_key_provider()?;
@@ -69,7 +84,10 @@ pub(crate) async fn build(
     pg_output.workers.push(Box::new(move |token| {
         DynManagedResource::new_box(pg_sampler.spawn(token))
     }));
-    transaction.stage_provider_output(pg_output);
+    let auth_audit_sink = auth_audit_sink
+        .finish(pg_output)?
+        .transfer(transaction.provider_output_mut());
+    let audit_sink = httpserve::AuditSinkHandle::new(pg_handle.auth_audit_sink());
 
     let vault = build_vault(
         vault_config,
@@ -116,12 +134,14 @@ pub(crate) async fn build(
             vault: vault.deps,
             settings_key: vault.settings_key,
             verifier: federated.verifier,
+            audit_sink,
             metrics: metrics_port,
             limiter,
             vault_readiness,
         },
         listeners,
         support_probe: federated.support_probe,
+        auth_audit_sink,
         listener_pdp,
         listener_rate_limiter,
         settings_key_provider,
@@ -129,6 +149,7 @@ pub(crate) async fn build(
     };
     let provider_roles = roles.finish(
         transaction.provider_output_mut(),
+        products.auth_audit_sink,
         products.listener_pdp,
         products.listener_rate_limiter,
         products.settings_key_provider,
@@ -138,7 +159,7 @@ pub(crate) async fn build(
         providers: products.providers,
         listeners: products.listeners,
         support_probe: products.support_probe,
-        _provider_roles: provider_roles,
+        provider_roles,
     })
 }
 
@@ -389,7 +410,7 @@ mod tests {
     fn generated_provider_roles_reject_jwks_probe_as_listener_pdp_output() {
         let mut roles = crate::plan::SettingsOnlyPlan::bundled()
             .expect("bundled plan")
-            .into_provider_build()
+            .provider_build()
             .expect("exact provider join");
         let listener_pdp = roles.listener_pdp().expect("listener PDP constructor");
         let probe_name = primitives::ProbeName::parse("federated_access_token_jwks_ready")
@@ -406,8 +427,13 @@ mod tests {
     fn generated_provider_finish_proves_role_inventory_and_support_probe_stays_separate() {
         let mut roles = crate::plan::SettingsOnlyPlan::bundled()
             .expect("bundled plan")
-            .into_provider_build()
+            .provider_build()
             .expect("exact provider join");
+        let auth_audit_sink = roles
+            .auth_audit_sink()
+            .expect("auth audit constructor")
+            .finish(auth_audit_output())
+            .expect("auth audit batch");
         let listener_pdp = roles
             .listener_pdp()
             .expect("listener PDP constructor")
@@ -430,6 +456,7 @@ mod tests {
             .expect("secret-resolver batch");
 
         let mut inventory = bootstrap::DomainModuleResult::default();
+        let auth_audit_sink = auth_audit_sink.transfer(&mut inventory);
         let listener_pdp = listener_pdp.transfer(&mut inventory);
         let listener_rate_limiter = listener_rate_limiter.transfer(&mut inventory);
         let settings_key_provider = settings_key_provider.transfer(&mut inventory);
@@ -437,6 +464,7 @@ mod tests {
         let _completed = roles
             .finish(
                 &inventory,
+                auth_audit_sink,
                 listener_pdp,
                 listener_rate_limiter,
                 settings_key_provider,
@@ -444,9 +472,9 @@ mod tests {
             )
             .expect("complete role inventory");
 
-        assert_eq!(inventory.resources.len(), 3);
+        assert_eq!(inventory.resources.len(), 4);
         assert!(inventory.probes.is_empty());
-        assert!(inventory.workers.is_empty());
+        assert_eq!(inventory.workers.len(), 1);
 
         let name = primitives::ProbeName::parse("federated_access_token_jwks_ready")
             .expect("valid probe name");
@@ -456,5 +484,13 @@ mod tests {
         };
         let (staged_name, _probe) = support_probe.into_parts();
         assert_eq!(staged_name, name);
+    }
+
+    fn auth_audit_output() -> bootstrap::DomainModuleResult {
+        let mut output = resource_output();
+        output
+            .workers
+            .push(Box::new(|_token| DynManagedResource::new_box(TestResource)));
+        output
     }
 }

@@ -2322,6 +2322,8 @@ dependencies = [
 name = "generated"
 version = "0.0.0"
 dependencies = [
+ "jsonschema",
+ "regress",
  "secure",
  "serde",
  "serde_json",
@@ -3117,6 +3119,7 @@ dependencies = [
  "httpserve",
  "identity",
  "identity-composition",
+ "ids",
  "jsonschema",
  "oidc",
  "postgres",
@@ -5095,11 +5098,16 @@ name = "runtimeexec"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "assembly-schema",
  "bootstrap",
  "diport",
  "primitives",
  "secure",
+ "serde_json",
+ "serde_json_canonicalizer",
+ "sha2 0.10.9",
  "static_assertions",
+ "thiserror",
  "tokio",
  "tokio-util",
  "tracing",

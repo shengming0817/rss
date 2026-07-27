@@ -37,22 +37,70 @@ pub(crate) fn server_request_budget(
     Ok(httpserve::ServerRequestBudget::from_millis(millis))
 }
 
-pub(crate) struct RuntimeLaunchAdapter<R> {
+pub(crate) struct RuntimeLaunchAdapter<R, P = runtimeexec::inventory::InventoryPublisher> {
     listeners: routes::FinalizedListenerSet,
     budget: httpserve::ServerRequestBudget,
     addr_resolver: R,
+    inventory_publisher: P,
 }
 
-impl<R> RuntimeLaunchAdapter<R> {
+impl<R> RuntimeLaunchAdapter<R, runtimeexec::inventory::InventoryPublisher> {
     pub(crate) fn new(
         listeners: routes::FinalizedListenerSet,
         budget: httpserve::ServerRequestBudget,
         addr_resolver: R,
+        inventory_publisher: runtimeexec::inventory::InventoryPublisher,
     ) -> Self {
         Self {
             listeners,
             budget,
             addr_resolver,
+            inventory_publisher,
+        }
+    }
+}
+
+trait InventoryPublication: Send {
+    fn publish(
+        self,
+        listeners: Vec<runtimeexec::inventory::BoundListenerObservation>,
+    ) -> Result<(), runtimeexec::inventory::InventoryError>;
+}
+
+impl InventoryPublication for runtimeexec::inventory::InventoryPublisher {
+    fn publish(
+        self,
+        listeners: Vec<runtimeexec::inventory::BoundListenerObservation>,
+    ) -> Result<(), runtimeexec::inventory::InventoryError> {
+        runtimeexec::inventory::InventoryPublisher::publish(self, listeners)
+    }
+}
+
+#[cfg(test)]
+struct NoopInventoryPublication;
+
+#[cfg(test)]
+impl InventoryPublication for NoopInventoryPublication {
+    fn publish(
+        self,
+        _: Vec<runtimeexec::inventory::BoundListenerObservation>,
+    ) -> Result<(), runtimeexec::inventory::InventoryError> {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+impl<R> RuntimeLaunchAdapter<R, NoopInventoryPublication> {
+    fn without_inventory(
+        set: routes::FinalizedListenerSet,
+        budget: httpserve::ServerRequestBudget,
+        addr_resolver: R,
+    ) -> Self {
+        Self {
+            listeners: set,
+            budget,
+            addr_resolver,
+            inventory_publisher: NoopInventoryPublication,
         }
     }
 }
@@ -65,9 +113,10 @@ pub(crate) struct RuntimeListenerInventory {
     listener_count: usize,
 }
 
-impl<R> runtimeexec::LaunchAdapter<routes::FinalizedProbeReceipt> for RuntimeLaunchAdapter<R>
+impl<R, P> runtimeexec::LaunchAdapter<routes::FinalizedProbeReceipt> for RuntimeLaunchAdapter<R, P>
 where
     R: Fn(ListenerKind, AuthScheme) -> anyhow::Result<SocketAddr> + Send + Sync,
+    P: InventoryPublication,
 {
     type Prepared = PreparedRuntimeListeners;
     type Inventory = RuntimeListenerInventory;
@@ -81,6 +130,7 @@ where
             listeners,
             budget,
             addr_resolver,
+            inventory_publisher,
         } = self;
         let _probe_receipt = probe_receipt;
         let listeners = BoundListenerSet::prepare(
@@ -91,6 +141,9 @@ where
         )
         .await?;
         listeners.preflight_activation()?;
+        inventory_publisher
+            .publish(listeners.inventory_observations())
+            .context("publish bound runtime inventory")?;
         Ok(PreparedRuntimeListeners { listeners })
     }
 
@@ -119,6 +172,7 @@ struct BoundListenerSet {
 }
 
 struct BoundListener {
+    id: String,
     listener: ListenerKind,
     scheme: AuthScheme,
     bound: httpd::BoundHttpServer,
@@ -135,6 +189,14 @@ enum PreparedListenerTransport {
 }
 
 impl BoundListenerSet {
+    fn inventory_observations(&self) -> Vec<runtimeexec::inventory::BoundListenerObservation> {
+        self.non_health
+            .iter()
+            .chain(&self.health)
+            .map(BoundListener::inventory_observation)
+            .collect()
+    }
+
     async fn prepare<R, P>(
         listeners: Vec<routes::AssembledListener>,
         budget: httpserve::ServerRequestBudget,
@@ -221,7 +283,7 @@ impl BoundListener {
         R: Fn(ListenerKind, AuthScheme) -> anyhow::Result<SocketAddr>,
         P: PreparationRegistrar,
     {
-        let (listener, scheme, routes, transport) = listener.into_launch_parts();
+        let (id, listener, scheme, routes, transport) = listener.into_launch_parts();
         let transport = resolve_listener_transport(listener, scheme, transport)?;
         let name = listeners::listener_name(listener);
         let addr = addr_resolver(listener, scheme)?;
@@ -245,6 +307,7 @@ impl BoundListener {
             ResolvedListenerTransport::Plaintext => PreparedListenerTransport::Plaintext,
         };
         Ok(Self {
+            id,
             listener,
             scheme,
             bound,
@@ -267,6 +330,7 @@ impl BoundListener {
         R: ListenerRegistrar,
     {
         let Self {
+            id: _,
             listener,
             scheme,
             bound,
@@ -291,6 +355,39 @@ impl BoundListener {
                 });
             }
         }
+    }
+
+    fn inventory_observation(&self) -> runtimeexec::inventory::BoundListenerObservation {
+        let kind = match self.listener {
+            ListenerKind::Primary => assembly_schema::AssemblyListenerKind::Primary,
+            ListenerKind::Internal => assembly_schema::AssemblyListenerKind::Internal,
+            ListenerKind::Health => assembly_schema::AssemblyListenerKind::Health,
+            ListenerKind::Admin => assembly_schema::AssemblyListenerKind::Admin,
+            _ => unreachable!("closed runtime listener kind"),
+        };
+        let auth = match self.scheme {
+            AuthScheme::NoAuth => assembly_schema::ListenerAuth::NoAuth,
+            AuthScheme::RssAccessToken => assembly_schema::ListenerAuth::RssAccessToken,
+            AuthScheme::FederatedAccessToken => assembly_schema::ListenerAuth::FederatedAccessToken,
+            AuthScheme::Mtls => assembly_schema::ListenerAuth::Mtls,
+            AuthScheme::ServiceToken => assembly_schema::ListenerAuth::ServiceToken,
+            _ => unreachable!("closed runtime listener auth scheme"),
+        };
+        let endpoint_scheme = match self.transport {
+            PreparedListenerTransport::Plaintext => {
+                runtimeexec::inventory::InventoryEndpointScheme::Http
+            }
+            PreparedListenerTransport::Mtls { .. } => {
+                runtimeexec::inventory::InventoryEndpointScheme::Https
+            }
+        };
+        runtimeexec::inventory::BoundListenerObservation::from_bound(
+            self.id.clone(),
+            kind,
+            auth,
+            endpoint_scheme,
+            self.bound.local_addr(),
+        )
     }
 }
 
@@ -514,6 +611,7 @@ mod tests {
             .await
             .expect("bind listener fixture");
         BoundListener {
+            id: format!("{:?}-test", listener).to_ascii_lowercase(),
             listener,
             scheme: AuthScheme::NoAuth,
             bound,
@@ -852,7 +950,7 @@ mod tests {
         let trace_shutdowns = Arc::new(AtomicUsize::new(0));
         let provider_shutdowns = Arc::new(AtomicUsize::new(0));
         let domain_shutdowns = Arc::new(AtomicUsize::new(0));
-        let adapter = RuntimeLaunchAdapter::new(
+        let adapter = RuntimeLaunchAdapter::without_inventory(
             routes::FinalizedListenerSet::for_test(vec![healthy_test_health_assembled()]),
             test_budget(),
             move |listener, scheme| {
@@ -922,7 +1020,7 @@ mod tests {
         let trace_shutdowns = Arc::new(AtomicUsize::new(0));
         let provider_shutdowns = Arc::new(AtomicUsize::new(0));
         let domain_shutdowns = Arc::new(AtomicUsize::new(0));
-        let adapter = RuntimeLaunchAdapter::new(
+        let adapter = RuntimeLaunchAdapter::without_inventory(
             routes::FinalizedListenerSet::for_test(vec![
                 test_health_assembled(),
                 test_health_assembled(),
@@ -1146,6 +1244,7 @@ mod tests {
         );
         let bound = BoundListenerSet {
             non_health: vec![BoundListener {
+                id: "internal-main".to_owned(),
                 listener: ListenerKind::Internal,
                 scheme: AuthScheme::Mtls,
                 bound,

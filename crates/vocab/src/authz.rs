@@ -71,6 +71,7 @@ pub enum RoutePermissionId {
     IdentityPolicyRead,
     IdentityPolicyUpdate,
     IdentityPolicyDeactivate,
+    RuntimeInventoryRead,
     SettingsConfigPublish,
     SettingsConfigGet,
     SettingsConfigDelete,
@@ -99,6 +100,7 @@ impl RoutePermissionId {
         Self::IdentityPolicyRead,
         Self::IdentityPolicyUpdate,
         Self::IdentityPolicyDeactivate,
+        Self::RuntimeInventoryRead,
         Self::SettingsConfigPublish,
         Self::SettingsConfigGet,
         Self::SettingsConfigDelete,
@@ -127,6 +129,7 @@ impl RoutePermissionId {
             "identity:policy:read" => Ok(Self::IdentityPolicyRead),
             "identity:policy:update" => Ok(Self::IdentityPolicyUpdate),
             "identity:policy:deactivate" => Ok(Self::IdentityPolicyDeactivate),
+            "runtime:inventory:read" => Ok(Self::RuntimeInventoryRead),
             "settings.config-publish" => Ok(Self::SettingsConfigPublish),
             "settings.config-get" => Ok(Self::SettingsConfigGet),
             "settings.config-delete" => Ok(Self::SettingsConfigDelete),
@@ -157,6 +160,7 @@ impl RoutePermissionId {
             Self::IdentityPolicyRead => "identity:policy:read",
             Self::IdentityPolicyUpdate => "identity:policy:update",
             Self::IdentityPolicyDeactivate => "identity:policy:deactivate",
+            Self::RuntimeInventoryRead => "runtime:inventory:read",
             Self::SettingsConfigPublish => "settings.config-publish",
             Self::SettingsConfigGet => "settings.config-get",
             Self::SettingsConfigDelete => "settings.config-delete",
@@ -186,6 +190,7 @@ impl RoutePermissionId {
             Self::IdentityPolicyRead => "IdentityPolicyRead",
             Self::IdentityPolicyUpdate => "IdentityPolicyUpdate",
             Self::IdentityPolicyDeactivate => "IdentityPolicyDeactivate",
+            Self::RuntimeInventoryRead => "RuntimeInventoryRead",
             Self::SettingsConfigPublish => "SettingsConfigPublish",
             Self::SettingsConfigGet => "SettingsConfigGet",
             Self::SettingsConfigDelete => "SettingsConfigDelete",
@@ -395,6 +400,10 @@ mod tests {
                 RoutePermissionId::IdentityPolicyDeactivate,
             ),
             (
+                "runtime:inventory:read",
+                RoutePermissionId::RuntimeInventoryRead,
+            ),
+            (
                 "settings.config-publish",
                 RoutePermissionId::SettingsConfigPublish,
             ),
@@ -421,6 +430,14 @@ mod tests {
             assert_eq!(RoutePermissionId::parse(raw), Ok(expected));
             assert_eq!(expected.as_str(), raw);
         }
+        assert!(
+            RoutePermissionId::ALL.contains(&RoutePermissionId::RuntimeInventoryRead),
+            "runtime inventory permission must remain in the closed catalog"
+        );
+        assert_eq!(
+            RoutePermissionId::RuntimeInventoryRead.variant_name(),
+            "RuntimeInventoryRead"
+        );
     }
 
     #[test]

@@ -30,12 +30,14 @@ fn complete_budget_boundary(routes: &str, phase_launch: &str, launch: &str, http
     ) && phase_launch.contains(
         "letadapter=crate::launch::RuntimeLaunchAdapter::new(listeners,request_budget,",
     ) && phase_launch.contains(
+        "inventory_publisher,);",
+    ) && phase_launch.contains(
         "letlaunch_plan=runtimeexec::LaunchPlan::new(adapter,probe_receipt,|inventory|asyncmove{crate::launch::log_ready(inventory)},trace_exporter,lifecycle_batches,crate::launch::total_drain_budget()?,);",
     ) && phase_launch.contains(
         "runtimeexec::launch(launch_plan).await",
     )
         && launch.contains("budget:httpserve::ServerRequestBudget")
-        && launch.contains("Self{listeners,budget,addr_resolver,}")
+        && launch.contains("Self{listeners,budget,addr_resolver,inventory_publisher,}")
         && launch.contains("routes.into_make_service(budget)")
         && httpd.matches("svc:httpserve::ServerMakeService").count() >= 5
         && !httpd.contains("svc:IntoMakeServiceWithConnectInfo")

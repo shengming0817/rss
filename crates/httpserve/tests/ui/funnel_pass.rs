@@ -22,6 +22,7 @@ fn main() {
         vocab::HttpRouteAuth::ServiceOwned,
         None,
         false,
+        vocab::http::HttpResourceSharing::TenantScoped,
         vocab::HttpEffectProfile::new(EFFECTS),
     );
     let routes = unfinalized_for_test::<httpserve::Admin>(|rb| {
@@ -46,6 +47,7 @@ fn main() {
                 vocab::HttpRouteAuth::ServiceOwned,
                 None,
                 false,
+                vocab::http::HttpResourceSharing::TenantScoped,
                 vocab::HttpEffectProfile::new(&[vocab::HttpEffectKind::BusinessTransaction]),
             );
         rb.mount(

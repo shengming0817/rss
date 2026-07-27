@@ -138,24 +138,24 @@ storeId = "rss-vault"
 refKey = "runtime/keyring"
 [[assemblies.deployment.workloads.probes]]
 kind = "startup"
-port = 8082
+port = 8083
 [[assemblies.deployment.workloads.probes]]
 kind = "readiness"
-port = 8082
+port = 8083
 [[assemblies.deployment.workloads.probes]]
 kind = "liveness"
-port = 8082
+port = 8083
 
 [[assemblies.deployment.services]]
 name = "runtime"
 workload = "runtime"
 [[assemblies.deployment.services.ports]]
 name = "admin"
-port = 8081
+port = 8082
 exposure = "serviceExposed"
 [[assemblies.deployment.services.ports]]
 name = "health"
-port = 8082
+port = 8083
 exposure = "serviceExposed"
 [[assemblies.deployment.services.ports]]
 name = "http"
@@ -167,7 +167,7 @@ name = "runtime-internal"
 workload = "runtime"
 [[assemblies.deployment.services.ports]]
 name = "internal"
-port = 8083
+port = 8081
 exposure = "workloadOnly"
 
 [[assemblies]]
@@ -222,20 +222,24 @@ storeId = "rss-vault"
 refKey = "settingsonly/keyring"
 [[assemblies.deployment.workloads.probes]]
 kind = "startup"
-port = 8081
+port = 8083
 [[assemblies.deployment.workloads.probes]]
 kind = "readiness"
-port = 8081
+port = 8083
 [[assemblies.deployment.workloads.probes]]
 kind = "liveness"
-port = 8081
+port = 8083
 
 [[assemblies.deployment.services]]
 name = "settingsonly"
 workload = "settingsonly"
 [[assemblies.deployment.services.ports]]
+name = "admin"
+port = 8082
+exposure = "serviceExposed"
+[[assemblies.deployment.services.ports]]
 name = "health"
-port = 8081
+port = 8083
 exposure = "serviceExposed"
 [[assemblies.deployment.services.ports]]
 name = "http"

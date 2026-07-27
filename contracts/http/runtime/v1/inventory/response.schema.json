@@ -1,0 +1,140 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "RuntimeInventoryResponse",
+  "type": "object",
+  "required": ["data"],
+  "properties": {
+    "data": {
+      "title": "RuntimeInventoryData",
+      "type": "object",
+      "required": [
+        "schemaVersion",
+        "assemblyFingerprint",
+        "runtimePlanFingerprint",
+        "deploymentFingerprint",
+        "buildIdentity",
+        "domains",
+        "listeners",
+        "providerPosture",
+        "placements"
+      ],
+      "properties": {
+        "schemaVersion": { "type": "integer", "const": 1 },
+        "assemblyFingerprint": { "$ref": "#/definitions/Sha256Fingerprint" },
+        "runtimePlanFingerprint": { "$ref": "#/definitions/Sha256Fingerprint" },
+        "deploymentFingerprint": { "$ref": "#/definitions/Sha256Fingerprint" },
+        "buildIdentity": { "$ref": "#/definitions/RuntimeBuildIdentity" },
+        "domains": {
+          "description": "Assembly domains in declaration order.",
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/definitions/RuntimeDomain" }
+        },
+        "listeners": {
+          "description": "Listeners in stable listener-id order.",
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/definitions/RuntimeListener" }
+        },
+        "providerPosture": {
+          "description": "Provider posture entries in stable provider-id order.",
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/definitions/RuntimeProviderPosture" }
+        },
+        "placements": {
+          "description": "Placements in stable domain then workload order.",
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/definitions/RuntimePlacement" }
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "Sha256Fingerprint": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "RuntimeDomain": {
+      "type": "string",
+      "enum": ["identity", "settings", "audit", "contractreg", "syshealth"]
+    },
+    "RuntimeListenerKind": {
+      "type": "string",
+      "enum": ["primary", "internal", "health", "admin"]
+    },
+    "RuntimeAuthScheme": {
+      "type": "string",
+      "enum": ["noAuth", "rssAccessToken", "federatedAccessToken", "mtls", "serviceToken"]
+    },
+    "RuntimeBuildIdentity": {
+      "title": "RuntimeBuildIdentity",
+      "type": "object",
+      "required": ["sourceSha", "imageDigest"],
+      "properties": {
+        "sourceSha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "imageDigest": { "$ref": "#/definitions/Sha256Fingerprint" }
+      },
+      "additionalProperties": false
+    },
+    "RuntimeListenerEndpoint": {
+      "title": "RuntimeListenerEndpoint",
+      "type": "object",
+      "required": ["scheme", "host", "port"],
+      "properties": {
+        "scheme": { "type": "string", "enum": ["http", "https"] },
+        "host": { "type": "string", "minLength": 1, "maxLength": 253 },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 }
+      },
+      "additionalProperties": false
+    },
+    "RuntimeListener": {
+      "title": "RuntimeListener",
+      "type": "object",
+      "required": ["id", "kind", "endpoint", "authScheme"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "kind": { "$ref": "#/definitions/RuntimeListenerKind" },
+        "endpoint": { "$ref": "#/definitions/RuntimeListenerEndpoint" },
+        "authScheme": { "$ref": "#/definitions/RuntimeAuthScheme" }
+      },
+      "additionalProperties": false
+    },
+    "RuntimeProviderPosture": {
+      "title": "RuntimeProviderPosture",
+      "type": "object",
+      "required": ["id", "state"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "state": { "type": "string", "enum": ["ready", "degraded", "unavailable"] }
+      },
+      "additionalProperties": false
+    },
+    "RuntimePlacement": {
+      "title": "RuntimePlacement",
+      "type": "object",
+      "required": ["domain", "workload", "mode", "readiness"],
+      "properties": {
+        "domain": { "$ref": "#/definitions/RuntimeDomain" },
+        "workload": { "type": "string", "minLength": 1 },
+        "mode": { "type": "string", "enum": ["local", "remote"] },
+        "endpoint": { "$ref": "#/definitions/RuntimeListenerEndpoint" },
+        "spiffeIdentity": { "type": "string", "minLength": 1 },
+        "readiness": {
+          "type": "string",
+          "enum": [
+            "ready",
+            "mtls-source-unavailable",
+            "peer-endpoint-unresolved",
+            "peer-endpoint-unavailable"
+          ]
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

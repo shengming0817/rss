@@ -778,6 +778,7 @@ fn test_route_evidence(
         auth,
         resource,
         self_scoped,
+        vocab::http::HttpResourceSharing::TenantScoped,
         vocab::HttpConsistencyLevel::LocalOnly,
         vocab::HttpEffectProfile::new(EFFECTS),
     ))
@@ -1128,7 +1129,11 @@ fn nonprimary_authz<C: HttpConsistencyClass>(
     }
     match evidence.auth() {
         HttpRouteAuth::Permission(_) => {
-            permission_authz(evidence, listener, RouteTenantBinding::Ambient).map(Some)
+            let tenant_binding = match evidence.resource_sharing() {
+                vocab::http::HttpResourceSharing::TenantScoped => RouteTenantBinding::Ambient,
+                vocab::http::HttpResourceSharing::Global => RouteTenantBinding::Unrestricted,
+            };
+            permission_authz(evidence, listener, tenant_binding).map(Some)
         }
         HttpRouteAuth::Bootstrap | HttpRouteAuth::ClientsOnly | HttpRouteAuth::ServiceOwned => {
             Ok(None)
@@ -1161,11 +1166,25 @@ fn permission_authz(
     let HttpRouteAuth::Permission(permission) = evidence.auth() else {
         return Err(invalid_auth(evidence, listener));
     };
-    let scope = match (evidence.resource(), evidence.self_scoped()) {
-        (Some(resource), false) => RouteResourceScope::PathParam(resource),
-        (None, true) => RouteResourceScope::SelfSubject,
-        (None, false) => RouteResourceScope::None,
-        (Some(_), true) => return Err(invalid_auth(evidence, listener)),
+    let scope = match (
+        evidence.resource_sharing(),
+        evidence.resource(),
+        evidence.self_scoped(),
+    ) {
+        (vocab::http::HttpResourceSharing::Global, Some(_), false) => RouteResourceScope::None,
+        (vocab::http::HttpResourceSharing::Global, _, _) => {
+            return Err(invalid_auth(evidence, listener));
+        }
+        (vocab::http::HttpResourceSharing::TenantScoped, Some(resource), false) => {
+            RouteResourceScope::PathParam(resource)
+        }
+        (vocab::http::HttpResourceSharing::TenantScoped, None, true) => {
+            RouteResourceScope::SelfSubject
+        }
+        (vocab::http::HttpResourceSharing::TenantScoped, None, false) => RouteResourceScope::None,
+        (vocab::http::HttpResourceSharing::TenantScoped, Some(_), true) => {
+            return Err(invalid_auth(evidence, listener));
+        }
     };
     Ok(PrimaryRouteAuthz::Permission(RoutePermission {
         permission,
@@ -1724,6 +1743,7 @@ mod tests {
             auth,
             None,
             false,
+            vocab::http::HttpResourceSharing::TenantScoped,
             vocab::HttpEffectProfile::new(effects),
         )
     }
@@ -1752,6 +1772,7 @@ mod tests {
             vocab::HttpRouteAuth::Public,
             None,
             false,
+            vocab::http::HttpResourceSharing::TenantScoped,
             vocab::HttpEffectProfile::new(PRODUCER_EFFECTS),
         );
         HttpProducerBinding::from_static(route, &[PRODUCER_FACT])
@@ -2302,6 +2323,37 @@ mod tests {
             admin,
             Some(PrimaryRouteAuthz::Permission(RoutePermission {
                 tenant_binding: RouteTenantBinding::Ambient,
+                ..
+            }))
+        ));
+
+        let global =
+            vocab::HttpRouteBinding::<TestRouteMarker, vocab::http::LocalOnly>::from_static(
+                vocab::HttpContractOwner::framework(),
+                vocab::ContractBinding::from_static(
+                    "runtime",
+                    "runtime.inventory",
+                    "v1",
+                    "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                ),
+                "/api/v1/runtime/inventory",
+                "GET",
+                vocab::HttpSuccessStatus::new(200),
+                vocab::HttpIdempotency::Idempotent,
+                vocab::HttpRouteAuth::Permission(vocab::RoutePermissionId::RuntimeInventoryRead),
+                Some("runtimeInventory"),
+                false,
+                vocab::http::HttpResourceSharing::Global,
+                vocab::HttpEffectProfile::new(TEST_EFFECTS),
+            );
+        let admin =
+            nonprimary_authz::<vocab::http::LocalOnly>(global.evidence(), ListenerKind::Admin)
+                .expect("Admin global LocalOnly permission metadata");
+        assert!(matches!(
+            admin,
+            Some(PrimaryRouteAuthz::Permission(RoutePermission {
+                tenant_binding: RouteTenantBinding::Unrestricted,
+                scope: RouteResourceScope::None,
                 ..
             }))
         ));

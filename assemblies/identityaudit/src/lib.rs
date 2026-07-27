@@ -10,6 +10,9 @@ use primitives::MacKey;
 mod auth_bridge;
 mod config;
 mod eventing;
+mod framework_routes;
+#[cfg(feature = "test-support")]
+pub use framework_routes::test_support as runtime_inventory_test_support;
 mod listeners;
 #[path = "generated/modules_gen.rs"]
 mod modules_gen;

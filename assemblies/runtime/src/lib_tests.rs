@@ -928,14 +928,29 @@ fn test_identity_domain_with_audit_role(
         &[vocab::AUDIT_READ_PERMISSION.to_string()],
     )
     .expect("audit role");
+    let inventory_role = identity::ports::Role::hydrate(
+        "runtime-inventory-reader",
+        "Runtime inventory reader",
+        &[vocab::RoutePermissionId::RuntimeInventoryRead
+            .as_str()
+            .to_string()],
+    )
+    .expect("runtime inventory role");
     let roles = Arc::from(identity::ports::DynRoleReadRepo::new_box(
-        StaticRoleRepo::new(vec![audit_role]),
+        StaticRoleRepo::new(vec![audit_role, inventory_role]),
     ));
-    let binding_provider = StaticRoleBindings::new(vec![(
-        tenant,
-        "11111111-2222-4333-8444-555555555555".to_string(),
-        "audit-reader".to_string(),
-    )]);
+    let binding_provider = StaticRoleBindings::new(vec![
+        (
+            tenant,
+            "11111111-2222-4333-8444-555555555555".to_string(),
+            "audit-reader".to_string(),
+        ),
+        (
+            tenant,
+            "11111111-2222-4333-8444-555555555555".to_string(),
+            "runtime-inventory-reader".to_string(),
+        ),
+    ]);
     let binding_lifecycle = Arc::from(identity::ports::DynRoleBindingLifecycle::new_box(
         binding_provider.clone(),
     ));
@@ -1165,6 +1180,8 @@ async fn assembled_admin_audit_read_uses_identity_authorizer_and_masks_sensitive
         }
     }
     let metrics: Arc<dyn diport::MetricsExporter> = Arc::new(NoopMetrics);
+    let framework_routes =
+        crate::runtime_inventory::RuntimeInventoryRoutes::unpublished_fixture(snapshot.view())?;
     let finalized = routes::finalize_listener_plan(routes::FinalizeListenerPlanInputs {
         execution_plan,
         config: snapshot.view(),
@@ -1174,6 +1191,7 @@ async fn assembled_admin_audit_read_uses_identity_authorizer_and_masks_sensitive
         audit_clock: Arc::new(SystemClock),
         rate_limiter: routes::build_runtime_rate_limiter(),
         metrics,
+        framework_routes,
     })?;
     let app = extract_admin_router(finalized.into_parts().0)?;
 
@@ -1218,6 +1236,49 @@ async fn assembled_admin_audit_read_uses_identity_authorizer_and_masks_sensitive
     let target_json: serde_json::Value = serde_json::from_slice(&target_body)?;
     assert_eq!(target_json["data"][0]["actor"], "<redacted>");
     assert_eq!(target_json["data"][0]["resourceId"], "<redacted>");
+    Ok(())
+}
+
+#[tokio::test]
+#[allow(clippy::expect_used)]
+async fn runtime_inventory_admin_uses_rss_user_and_identity_durable_grant_policy()
+-> anyhow::Result<()> {
+    let tenant = vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")?;
+    let bound_subject = "11111111-2222-4333-8444-555555555555";
+    let identity_domain = test_identity_domain_with_audit_role(tenant);
+    let mut registry = bootstrap::compose(&[&identity_domain])?;
+    let authorizer = registry.take_primary_authorizer()?;
+    let snapshot = crate::config::test_snapshot(&[
+        ("RSS_PRIMARY_TOKEN_PROFILE", "rss-access"),
+        ("RSS_ADMIN_TOKEN_PROFILE", "rss-access"),
+        ("RSS_INTERNAL_AUTH_SCHEME", "mtls"),
+    ])?;
+    let admin = plan::RuntimePlan::bundled(snapshot.view())?
+        .listener_execution_plan()
+        .into_listeners()
+        .into_iter()
+        .find(|listener| listener.kind() == primitives::ListenerKind::Admin)
+        .context("runtime Admin listener")?;
+    assert_eq!(admin.auth_scheme(), primitives::AuthScheme::RssAccessToken);
+
+    let request = |subject: &str| httpserve::RouteAuthorizationRequest {
+        contract_id: generated::http::runtime_v1::inventory::SPEC
+            .route
+            .contract_id(),
+        permission: vocab::RoutePermissionId::RuntimeInventoryRead,
+        tenant_id: Some(tenant),
+        principal_kind: vocab::PrincipalKind::User,
+        principal_id: subject.to_string(),
+        resource: None,
+    };
+    assert_eq!(
+        authorizer.authorize(request(bound_subject)).await,
+        httpserve::RouteAuthorizationDecision::Allow
+    );
+    assert_eq!(
+        authorizer.authorize(request("unbound-rss-user")).await,
+        httpserve::RouteAuthorizationDecision::Deny
+    );
     Ok(())
 }
 
@@ -1802,6 +1863,7 @@ async fn run_pre_handoff_failure_explicitly_shuts_down_trace_exporter() {
     let inputs = ServingRuntimeInputs::new(
         PreparedRuntimeInputs::new(snapshot, Some(otel::OtelExporter::new(provider))),
         test_password_blocklist(),
+        crate::phase::test_build_identity(),
     );
 
     let err = run(inputs)
@@ -1825,6 +1887,7 @@ async fn runtime_lifecycle_owner_does_not_shutdown_exporter_after_handoff() {
     let inputs = ServingRuntimeInputs::new(
         PreparedRuntimeInputs::new(snapshot, Some(otel::OtelExporter::new(provider))),
         test_password_blocklist(),
+        crate::phase::test_build_identity(),
     );
     let mut owner = RuntimeLifecycleOwner::new(inputs);
     let handed_off = owner

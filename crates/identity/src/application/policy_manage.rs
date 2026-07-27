@@ -21,10 +21,10 @@ use generated::http::identity_v1::{
         IdentityPoliciesUpdateRequest, IdentityPoliciesUpdateResponse, IdentityPolicyUpdateView,
     },
 };
-use generated::http::{HttpResourceSharingMode, HttpSpec, SPECS as HTTP_SPECS};
+use generated::http::{HttpSpec, SPECS as HTTP_SPECS};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use uuid::Uuid;
-use vocab::{HttpRouteAuth, TenantId};
+use vocab::{HttpRouteAuth, TenantId, http::HttpResourceSharing as HttpResourceSharingMode};
 
 use super::unix_secs;
 use crate::domain::{
@@ -1072,6 +1072,7 @@ mod tests {
                 vocab::HttpRouteAuth::Permission(vocab::RoutePermissionId::IdentityPolicyRead),
                 Some("resourceId"),
                 false,
+                vocab::http::HttpResourceSharing::Global,
                 vocab::HttpConsistencyLevel::LocalOnly,
                 vocab::HttpEffectProfile::new(&[
                     vocab::HttpEffectKind::Auth,

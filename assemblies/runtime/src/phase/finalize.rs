@@ -19,7 +19,8 @@ impl<'a> DomainsWired<'a> {
             command_idempotency_keyring,
             metrics_exporter,
             mut registry,
-            provider_build,
+            mut provider_build,
+            placement_execution_plan,
         } = self;
         let result = (|| {
             // Auth decision audit is a flat durable sink, not the audit ledger hash-chain actor
@@ -47,6 +48,33 @@ impl<'a> DomainsWired<'a> {
                     .as_ref()
                     .map(|provider| provider.provider()),
             );
+            let deployment_plan = context
+                .runtime_plan
+                .bundled_deployment_plan()
+                .context("bind bundled DeploymentPlan")?;
+            let seed = runtimeexec::inventory::RuntimeInventorySeed::from_bound(
+                context.runtime_plan.as_typed(),
+                &deployment_plan,
+                context.runtime_plan.assembly_identity(),
+                context.runtime_inputs.build_identity().clone(),
+                provider_build
+                    .take_inventory_receipt()
+                    .context("consume provider inventory completion receipt")?
+                    .into_probe_bindings(),
+                placement_execution_plan
+                    .inventory_observations()
+                    .context("project runtime placement inventory")?,
+            )
+            .context("seal runtime inventory seed")?;
+            let (
+                inventory_publisher,
+                inventory_reader,
+                inventory_health_publisher,
+                inventory_placement_publisher,
+            ) = runtimeexec::inventory::deferred_inventory_channel(seed);
+            inventory_placement_publisher
+                .publish(domain_transport.readiness_sampler())
+                .context("publish runtime inventory placement readiness sampler")?;
             let finalized_listeners = finalize_listener_plan(FinalizeListenerPlanInputs {
                 execution_plan: listener_execution_plan,
                 config: context.config(),
@@ -56,13 +84,20 @@ impl<'a> DomainsWired<'a> {
                 audit_clock: auth_audit_clock,
                 rate_limiter,
                 metrics: metrics_exporter,
+                framework_routes: crate::runtime_inventory::RuntimeInventoryRoutes::new(
+                    inventory_reader,
+                ),
             })
             .context("finalize RuntimePlan listeners")?;
+            let (listeners, probe_receipt, health_reporter) = finalized_listeners.into_parts();
+            inventory_health_publisher
+                .publish(health_reporter)
+                .context("publish runtime inventory health reporter")?;
 
-            Ok(finalized_listeners.into_parts())
+            Ok(((listeners, probe_receipt), inventory_publisher))
         })();
         let result = match result {
-            Ok((listeners, probe_receipt)) => Ok(Finalized {
+            Ok(((listeners, probe_receipt), inventory_publisher)) => Ok(Finalized {
                 context,
                 provider_build,
                 deps,
@@ -73,6 +108,7 @@ impl<'a> DomainsWired<'a> {
                 command_idempotency_keyring,
                 listeners,
                 probe_receipt,
+                inventory_publisher,
             }),
             Err(error) => Err(provider_build.abort(error).await),
         };

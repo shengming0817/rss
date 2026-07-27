@@ -49,7 +49,7 @@ pub struct AssemblyManifest {
     pub domains: Vec<AssemblyDomain>,
     pub topology: AssemblyTopology,
     #[serde(rename = "frameworkContracts")]
-    pub framework_contracts: Vec<String>,
+    pub framework_contracts: Vec<FrameworkContractMount>,
     pub listeners: Vec<AssemblyListener>,
     #[serde(rename = "diportProviders")]
     pub diport_providers: Vec<DiportProvider>,
@@ -78,12 +78,14 @@ impl AssemblyManifest {
 
         ensure_unique(self.domains.iter().copied(), "domains", &mut errors);
         ensure_unique(
-            self.framework_contracts.iter().map(String::as_str),
+            self.framework_contracts
+                .iter()
+                .map(|mount| mount.id.as_str()),
             "frameworkContracts",
             &mut errors,
         );
-        for contract in &self.framework_contracts {
-            ensure_non_empty_string(contract, "frameworkContracts", &mut errors);
+        for mount in &self.framework_contracts {
+            ensure_non_empty_string(&mount.id, "frameworkContracts", &mut errors);
         }
         ensure_unique(
             self.listeners.iter().map(|listener| listener.kind),
@@ -135,6 +137,19 @@ impl AssemblyManifest {
         let declared_domains: BTreeSet<_> = self.domains.iter().copied().collect();
         let mut bound_domains = BTreeSet::new();
         let mut bindings = BTreeSet::new();
+        let listener_kinds = self
+            .listeners
+            .iter()
+            .map(|listener| listener.kind)
+            .collect::<BTreeSet<_>>();
+        for mount in &self.framework_contracts {
+            if !listener_kinds.contains(&mount.listener) {
+                errors.push(GraphEvidenceValidationError::UnknownFrameworkListener {
+                    contract_id: mount.id.clone(),
+                    listener: mount.listener,
+                });
+            }
+        }
         for listener in &self.listeners {
             for domain in &listener.domains {
                 if !declared_domains.contains(domain) {
@@ -239,7 +254,7 @@ struct CanonicalAssemblyManifestV1Value {
     profile: AssemblyProfile,
     domains: Vec<AssemblyDomain>,
     topology: AssemblyTopology,
-    framework_contracts: Vec<String>,
+    framework_contracts: Vec<FrameworkContractMount>,
     listeners: Vec<AssemblyListener>,
     diport_providers: Vec<DiportProvider>,
 }
@@ -261,7 +276,7 @@ impl CanonicalAssemblyManifestV1 {
         self.value.topology
     }
 
-    pub fn framework_contracts(&self) -> &[String] {
+    pub fn framework_contracts(&self) -> &[FrameworkContractMount] {
         &self.value.framework_contracts
     }
 
@@ -302,6 +317,10 @@ impl GraphEvidenceValidationErrors {
     pub fn as_slice(&self) -> &[GraphEvidenceValidationError] {
         &self.errors
     }
+
+    pub fn into_vec(self) -> Vec<GraphEvidenceValidationError> {
+        self.errors
+    }
 }
 
 impl fmt::Display for GraphEvidenceValidationErrors {
@@ -312,8 +331,13 @@ impl fmt::Display for GraphEvidenceValidationErrors {
 
 impl std::error::Error for GraphEvidenceValidationErrors {}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum GraphEvidenceValidationError {
+    #[error("framework contract `{contract_id}` references undeclared listener `{listener}")]
+    UnknownFrameworkListener {
+        contract_id: String,
+        listener: AssemblyListenerKind,
+    },
     #[error("listener references undeclared domain `{domain}`")]
     UnknownDomain { domain: AssemblyDomain },
     #[error("declared domain `{domain}` has no listener")]
@@ -454,6 +478,14 @@ impl AssemblyTopology {
 pub struct AssemblyListener {
     pub kind: AssemblyListenerKind,
     pub domains: Vec<AssemblyDomain>,
+}
+
+/// One explicit framework-owned contract mount in an assembly.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct FrameworkContractMount {
+    pub id: String,
+    pub listener: AssemblyListenerKind,
 }
 
 #[derive(
@@ -678,9 +710,18 @@ outputs = ["resources"]
                 .is_err()
         );
 
+        assert!(
+            AssemblyManifest::from_toml_str(&MINIMAL.replace(
+                "frameworkContracts = []",
+                "frameworkContracts = [\"seed.echo\"]",
+            ))
+            .is_err(),
+            "legacy string declarations must not parse"
+        );
+
         let invalid = AssemblyManifest::from_toml_str(&MINIMAL.replace(
             "frameworkContracts = []",
-            "frameworkContracts = [\"\", \"seed.echo\", \"seed.echo\"]",
+            "frameworkContracts = [{ id = \"\", listener = \"admin\" }, { id = \"seed.echo\", listener = \"admin\" }, { id = \"seed.echo\", listener = \"primary\" }]",
         ))
         .expect("closed framework contract declarations parse before semantic validation");
         let errors = invalid.basic_validation_errors();
@@ -690,6 +731,25 @@ outputs = ["resources"]
         assert!(errors.contains(&ManifestValidationError::Duplicate {
             field: "frameworkContracts"
         }));
+    }
+
+    #[test]
+    fn framework_contract_listener_must_be_declared() {
+        let invalid = AssemblyManifest::from_toml_str(&MINIMAL.replace(
+            "frameworkContracts = []",
+            "frameworkContracts = [{ id = \"seed.echo\", listener = \"admin\" }]",
+        ))
+        .expect("typed framework mount parses before graph validation");
+        let errors = invalid
+            .validate_graph_evidence()
+            .expect_err("undeclared listener must fail")
+            .into_vec();
+        assert!(
+            errors.contains(&GraphEvidenceValidationError::UnknownFrameworkListener {
+                contract_id: "seed.echo".to_string(),
+                listener: AssemblyListenerKind::Admin,
+            })
+        );
     }
 
     #[test]

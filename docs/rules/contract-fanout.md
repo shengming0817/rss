@@ -61,10 +61,14 @@ DI-infra port provider（如 `diport::RevocationStore` / `Signer` / `Pdp`）不�
 - owner→域 crate 解析**只经 `c.owner().domain()`**（框架 owner 返回 `None`）；禁止直接索引 `project.domains[c.owner]`。
 - 框架归属今适用于 http/event/command（command 是 provider-agnostic 分发机制，#1124 扩展 R2）；`lifecycle: active` 须在某 `assembly.toml` 的 `frameworkContracts` 声明且经 `bootstrap::validate_framework_serving` 验证 route group 已挂载；否则须为 draft|deprecated。
 
-`frameworkContracts` 是必填闭合列表（无默认/兼容路径）；active framework contract 在 workspace 中必须恰由
-一个 assembly 声明。HTTP declaration 经 assembly codegen 变成 `FrameworkHttpRoute` typed expected evidence；
-assembly 只能通过 `FrameworkRoutes::register(&mut Registry)` 注册，auth finalize 前由
-`validate_framework_serving` 对 framework-owned actual mount 做 missing/duplicate/mismatch/extra exact-set 校验。
+`frameworkContracts` 是必填闭合 mount 列表（无默认/兼容路径），每项必须同时显式声明
+`{ id = "<contract>", listener = "<listener-id>" }`；旧字符串项和隐式 listener 均拒绝。每个 active framework
+contract 在 workspace 中至少有一个声明者；同一 assembly 内 contract ID 必须唯一，且 mount 的 listener ID 必须
+存在于该 assembly。HTTP declaration 经 assembly codegen 变成同时携带 generated route evidence 与 listener kind 的
+`FrameworkHttpRoute` typed expected evidence；assembly 只能通过实例化的
+`FrameworkRoutes::register(&mut Registry)` 注册。auth finalize 前，`validate_framework_serving` 按
+`(listener, contract)` 对 framework-owned actual mount 做 exact-set 校验，拒绝 missing、duplicate、mismatch、
+extra 和挂错 listener；不得以全局静态 route 实例或仅比较 contract ID 绕过 listener 归属。
 
 owner→域 crate 收口由 sealed struct（私有内层 enum + 受控构造关联函数）+ `owner().domain()` API（类型系统强制 `Framework` 无法解析成域、外部无法 mint 任意 owner）守，无需运行期 guard。
 构造封闭符号/盲区见 `crates/vocab/src/contract/owner.rs`（INVARIANT: CONTRACT-OWNER-SEAL-01）。

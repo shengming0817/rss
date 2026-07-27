@@ -2,11 +2,15 @@ name = "settingsonly"
 profile = "demo"
 domains = ["settings"]
 topology = "demo"
-frameworkContracts = []
+frameworkContracts = [{ id = "runtime.inventory", listener = "admin" }]
 
 [[listeners]]
 kind = "primary"
 domains = ["settings"]
+
+[[listeners]]
+kind = "admin"
+domains = []
 
 [[listeners]]
 kind = "health"
@@ -35,6 +39,18 @@ lifecycle = "active"
 durability = "persistent"
 purpose = "jwt-credential-verification"
 outputs = ["resources"]
+
+[[diportProviders]]
+id = "auth-audit-sink"
+port = "diport::AuditSink"
+provider = "postgres::PgAuthAuditSink"
+providerCrate = "postgres"
+requiredFeatures = ["auth-audit-sink"]
+consumer = "httpserve"
+lifecycle = "active"
+durability = "persistent"
+purpose = "http-auth-decision-audit"
+outputs = ["resources", "workers"]
 
 [[diportProviders]]
 id = "listener-rate-limiter"

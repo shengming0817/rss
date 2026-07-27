@@ -22,14 +22,8 @@ pub struct LocalTxSpec {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HttpResourceSharingSpec {
-    pub mode: HttpResourceSharingMode,
+    pub mode: ::vocab::http::HttpResourceSharing,
     pub reason: Option<&'static str>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HttpResourceSharingMode {
-    TenantScoped,
-    Global,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,6 +50,7 @@ pub mod audit_v1;
 pub mod audit_v2;
 pub mod identity_v1;
 pub mod identity_v2;
+pub mod runtime_v1;
 pub mod settings_v1;
 pub mod settings_v2;
 pub mod settings_v3;
@@ -81,6 +76,7 @@ pub const SPECS: &[HttpSpec] = &[
     identity_v1::roles_assign::SPEC,
     identity_v1::roles_list::SPEC,
     identity_v1::roles_revoke::SPEC,
+    runtime_v1::inventory::SPEC,
     settings_v1::SPEC,
     settings_v2::SPEC,
     settings_v4::SPEC,
@@ -96,6 +92,7 @@ pub const LOCAL_ONLY_SPECS: &[HttpSpec] = &[
     identity_v1::policies_list::SPEC,
     identity_v1::profile::SPEC,
     identity_v1::roles_list::SPEC,
+    runtime_v1::inventory::SPEC,
     settings_v4::SPEC,
     settings_v7::SPEC,
 ];

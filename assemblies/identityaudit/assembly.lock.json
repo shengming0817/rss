@@ -5,9 +5,9 @@
     "profile": "production"
   },
   "digests": {
-    "manifest": "sha256:a47149f65e573a1a011845170e4de573061de0b192a62b774cea719714e7502f",
-    "generated": "sha256:d15e115d103aa7300eb87f60de33129b967610cfffb44ceab649a899379dc7ae",
-    "contracts": "sha256:55266459c172826e410e5487e1f6120aa994ab56030bbc18d9be07b08a67df49"
+    "manifest": "sha256:58a22cd0eaccd574ab8f8a3dfc43c53da4a41ba082b3263a9b7f8cdc0d084ad5",
+    "generated": "sha256:4fa7a36eb5f48a8968f090debabb026517f7e2b4757e5c0a1b7b0cfa933a092b",
+    "contracts": "sha256:64046e7ed0439f0457522bd4c1f730b7bbbe4b4a38110e3e2ebe461f54b361e9"
   },
-  "fingerprint": "sha256:ca1634772109f74bd3c66f079f8c5775f82a30a3ae805bf5e23894a952feedb8"
+  "fingerprint": "sha256:e67c48118b9e32632bcf194d2a5ce93d557e534461693887ce15967182a36d0c"
 }

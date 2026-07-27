@@ -177,6 +177,7 @@ pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker, ::vocab::http::LocalOnly
         ::vocab::HttpRouteAuth::Permission(::vocab::RoutePermissionId::SettingsConfigGet),
         None,
         false,
+        ::vocab::http::HttpResourceSharing::TenantScoped,
         EFFECT_PROFILE,
     );
 
@@ -186,7 +187,7 @@ pub const SPEC: super::HttpSpec = super::HttpSpec {
     route: ROUTE.evidence(),
     local_tx: None,
     resource_sharing: super::HttpResourceSharingSpec {
-        mode: super::HttpResourceSharingMode::TenantScoped,
+        mode: ROUTE.evidence().resource_sharing(),
         reason: None,
     },
     projection_fields: PROJECTION_FIELDS,

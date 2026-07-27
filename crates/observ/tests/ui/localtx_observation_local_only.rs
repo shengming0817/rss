@@ -2,8 +2,7 @@ use consistency::LocalTxBoundary;
 use observ::LocalTxObservation;
 use vocab::{
     ContractBinding, HttpContractOwner, HttpEffectKind, HttpEffectProfile, HttpIdempotency,
-    HttpRouteAuth, HttpRouteBinding, HttpSuccessStatus,
-    http::LocalOnly,
+    HttpRouteAuth, HttpRouteBinding, HttpSuccessStatus, http::LocalOnly,
 };
 
 struct Route;
@@ -19,6 +18,7 @@ fn main() {
         HttpRouteAuth::ServiceOwned,
         None,
         false,
+        vocab::http::HttpResourceSharing::TenantScoped,
         HttpEffectProfile::new(&[HttpEffectKind::BusinessWrite]),
     );
     let _ = LocalTxObservation::new(route, LocalTxBoundary::SingleDomain);

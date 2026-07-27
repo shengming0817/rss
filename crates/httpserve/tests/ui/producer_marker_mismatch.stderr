@@ -1,13 +1,13 @@
 error[E0631]: type mismatch in function arguments
-  --> tests/ui/producer_marker_mismatch.rs:47:9
+  --> tests/ui/producer_marker_mismatch.rs:48:9
    |
-40 | async fn wrong_handler(marker: httpserve::ProducerMarker<OtherRouteMarker>) {
+41 | async fn wrong_handler(marker: httpserve::ProducerMarker<OtherRouteMarker>) {
    | --------------------------------------------------------------------------- found signature defined here
 ...
-45 |     let _ = httpserve::GeneratedPrimaryEndpoint::<(), OutboxFact>::new_producer(
+46 |     let _ = httpserve::GeneratedPrimaryEndpoint::<(), OutboxFact>::new_producer(
    |             ------------------------------------------------------------------- required by a bound introduced by this call
-46 |         PRODUCER,
-47 |         wrong_handler,
+47 |         PRODUCER,
+48 |         wrong_handler,
    |         ^^^^^^^^^^^^^ expected due to this
    |
    = note: expected function signature `fn(ProducerMarker<RouteMarker>) -> _`
@@ -23,5 +23,5 @@ note: required by a bound in `GeneratedPrimaryEndpoint::<S, vocab::http::OutboxF
    |            ^^^^^^^^^^^^^ required by this bound in `GeneratedPrimaryEndpoint::<S, OutboxFact>::new_producer`
 help: consider wrapping the function in a closure
    |
-47 |         |arg0: ProducerMarker<RouteMarker>| wrong_handler(/* ProducerMarker<OtherRouteMarker> */),
+48 |         |arg0: ProducerMarker<RouteMarker>| wrong_handler(/* ProducerMarker<OtherRouteMarker> */),
    |         +++++++++++++++++++++++++++++++++++              ++++++++++++++++++++++++++++++++++++++++

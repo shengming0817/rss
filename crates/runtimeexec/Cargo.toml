@@ -10,15 +10,20 @@ workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
+assembly-schema = { path = "../assembly-schema" }
 bootstrap = { path = "../bootstrap" }
 diport = { path = "../diport" }
+primitives = { path = "../primitives" }
 secure = { path = "../secure" }
 tokio = { workspace = true, features = ["signal"] }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
+thiserror = { workspace = true }
 
 [dev-dependencies]
-primitives = { path = "../primitives" }
+serde_json = { workspace = true }
+serde_json_canonicalizer = { workspace = true }
+sha2 = { workspace = true }
 static_assertions = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "sync"] }
 tracing-subscriber = { workspace = true }

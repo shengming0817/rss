@@ -103,6 +103,7 @@ fn permission_binding(
         vocab::HttpRouteAuth::Permission(TEST_PERMISSION),
         resource,
         self_scoped,
+        vocab::http::HttpResourceSharing::TenantScoped,
         vocab::HttpEffectProfile::new(TEST_EFFECTS),
     )
 }
@@ -714,6 +715,7 @@ async fn route_meta_in_request_extension() {
             vocab::HttpRouteAuth::Public,
             None,
             false,
+            vocab::http::HttpResourceSharing::TenantScoped,
             vocab::HttpEffectProfile::new(META_EFFECTS),
         );
 
@@ -761,6 +763,7 @@ async fn route_meta_exposes_both_declared_idempotency_classes() {
             vocab::HttpRouteAuth::Public,
             None,
             false,
+            vocab::http::HttpResourceSharing::TenantScoped,
             vocab::HttpEffectProfile::new(TEST_EFFECTS),
         );
     const NON_IDEMPOTENT_BINDING: vocab::HttpRouteBinding<
@@ -776,6 +779,7 @@ async fn route_meta_exposes_both_declared_idempotency_classes() {
         vocab::HttpRouteAuth::Public,
         None,
         false,
+        vocab::http::HttpResourceSharing::TenantScoped,
         vocab::HttpEffectProfile::new(TEST_EFFECTS),
     );
 
@@ -838,6 +842,7 @@ async fn declared_success_status_drift_fails_closed() {
             vocab::HttpRouteAuth::Public,
             None,
             false,
+            vocab::http::HttpResourceSharing::TenantScoped,
             vocab::HttpEffectProfile::new(TEST_EFFECTS),
         );
 
@@ -882,6 +887,7 @@ async fn undeclared_redirect_status_fails_closed() {
             vocab::HttpRouteAuth::Public,
             None,
             false,
+            vocab::http::HttpResourceSharing::TenantScoped,
             vocab::HttpEffectProfile::new(TEST_EFFECTS),
         );
 

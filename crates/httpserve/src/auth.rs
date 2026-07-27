@@ -1432,7 +1432,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::SystemTime;
 
@@ -1500,6 +1500,7 @@ mod tests {
         vocab::HttpRouteAuth::Public,
         None,
         false,
+        vocab::http::HttpResourceSharing::TenantScoped,
         vocab::HttpConsistencyLevel::LocalOnly,
         vocab::HttpEffectProfile::new(TEST_EFFECTS),
     );
@@ -1943,6 +1944,31 @@ mod tests {
     }
 
     #[allow(clippy::unwrap_used)]
+    fn build_counted_router_with_audit(
+        plan: Option<AuthPlan>,
+        sink: RecordingAuditSink,
+        handler_calls: Arc<AtomicUsize>,
+    ) -> Router {
+        let mut router = Router::new()
+            .route(
+                "/test",
+                get(move || {
+                    let handler_calls = Arc::clone(&handler_calls);
+                    async move {
+                        handler_calls.fetch_add(1, Ordering::SeqCst);
+                        "ok"
+                    }
+                })
+                .layer(enforce_layer(None, Method::GET, TEST_EVIDENCE)),
+            )
+            .layer(Extension(audit_ext(sink)));
+        if let Some(plan) = plan {
+            router = router.layer(Extension(plan));
+        }
+        router
+    }
+
+    #[allow(clippy::unwrap_used)]
     #[tokio::test]
     async fn no_plan_is_403() {
         let router = build_router(None, None);
@@ -1971,9 +1997,12 @@ mod tests {
 
     #[allow(clippy::unwrap_used)]
     #[tokio::test]
-    async fn require_without_auth_header_is_401() {
+    async fn inventory_auth_require_without_auth_header_is_401() {
+        let handler_calls = Arc::new(AtomicUsize::new(0));
+        let sink = RecordingAuditSink::new();
         let plan = AuthPlan::new(ListenerKind::Primary, AuthScheme::RssAccessToken).unwrap();
-        let router = build_router(None, Some(plan));
+        let router =
+            build_counted_router_with_audit(Some(plan), sink.clone(), Arc::clone(&handler_calls));
         let req = Request::builder()
             .method(Method::GET)
             .uri("/test")
@@ -1981,6 +2010,8 @@ mod tests {
             .unwrap();
         let resp = router.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(handler_calls.load(Ordering::SeqCst), 0);
+        assert!(sink.events().is_empty());
     }
 
     #[allow(clippy::unwrap_used)]
@@ -2055,10 +2086,12 @@ mod tests {
 
     #[allow(clippy::unwrap_used)]
     #[tokio::test]
-    async fn allow_records_success_audit_event() {
+    async fn inventory_auth_allow_records_success_audit_event() {
+        let handler_calls = Arc::new(AtomicUsize::new(0));
         let sink = RecordingAuditSink::new();
         let plan = AuthPlan::new(ListenerKind::Primary, AuthScheme::RssAccessToken).unwrap();
-        let router = build_router_with_audit(None, Some(plan), sink.clone());
+        let router =
+            build_counted_router_with_audit(Some(plan), sink.clone(), Arc::clone(&handler_calls));
         let mut req = Request::builder()
             .method(Method::GET)
             .uri("/test")
@@ -2068,6 +2101,7 @@ mod tests {
             .insert(authed(RequiredScheme::RssAccessToken, PrincipalKind::User));
         let resp = router.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(handler_calls.load(Ordering::SeqCst), 1);
 
         let events = sink.events();
         assert_eq!(events.len(), 1);
@@ -2152,9 +2186,11 @@ mod tests {
 
     #[allow(clippy::unwrap_used)]
     #[tokio::test]
-    async fn deny_with_evidence_records_forbidden_audit_event() {
+    async fn inventory_auth_deny_with_evidence_records_forbidden_audit_event() {
+        let handler_calls = Arc::new(AtomicUsize::new(0));
         let sink = RecordingAuditSink::new();
-        let router = build_router_with_audit(None, None, sink.clone());
+        let router =
+            build_counted_router_with_audit(None, sink.clone(), Arc::clone(&handler_calls));
         let mut req = Request::builder()
             .method(Method::GET)
             .uri("/test")
@@ -2164,6 +2200,7 @@ mod tests {
             .insert(authed(RequiredScheme::RssAccessToken, PrincipalKind::User));
         let resp = router.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        assert_eq!(handler_calls.load(Ordering::SeqCst), 0);
 
         let events = sink.events();
         assert_eq!(events.len(), 1);
@@ -2177,10 +2214,11 @@ mod tests {
 
     #[allow(clippy::unwrap_used)]
     #[tokio::test]
-    async fn allow_audit_failure_fails_closed_500() {
+    async fn inventory_auth_allow_audit_failure_skips_handler_and_success_runs_it_once() {
+        let handler_calls = Arc::new(AtomicUsize::new(0));
         let sink = RecordingAuditSink::failing();
         let plan = AuthPlan::new(ListenerKind::Primary, AuthScheme::RssAccessToken).unwrap();
-        let router = build_router_with_audit(None, Some(plan), sink);
+        let router = build_counted_router_with_audit(Some(plan), sink, Arc::clone(&handler_calls));
         let mut req = Request::builder()
             .method(Method::GET)
             .uri("/test")
@@ -2190,6 +2228,21 @@ mod tests {
             .insert(authed(RequiredScheme::RssAccessToken, PrincipalKind::User));
         let resp = router.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(handler_calls.load(Ordering::SeqCst), 0);
+
+        let sink = RecordingAuditSink::new();
+        let plan = AuthPlan::new(ListenerKind::Primary, AuthScheme::RssAccessToken).unwrap();
+        let router = build_counted_router_with_audit(Some(plan), sink, Arc::clone(&handler_calls));
+        let mut req = Request::builder()
+            .method(Method::GET)
+            .uri("/test")
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut()
+            .insert(authed(RequiredScheme::RssAccessToken, PrincipalKind::User));
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(handler_calls.load(Ordering::SeqCst), 1);
     }
 
     #[allow(clippy::unwrap_used)]

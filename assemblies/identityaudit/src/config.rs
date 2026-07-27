@@ -23,6 +23,8 @@ const REDIS_URL_ENV: &str = "RSS_REDIS_URL";
 const AUDIT_CHAIN_KEY_ENV: &str = "RSS_AUDIT_CHAIN_KEY_B64URL";
 const TENANT_AUTHORITY_KEY_ENV: &str = "RSS_TENANT_AUTHORITY_HMAC_KEY_B64URL";
 const FORBIDDEN_SHARED_AMQP_URL_ENV: &str = "RSS_AMQP_URL";
+const BUILD_SOURCE_SHA_ENV: &str = "RSS_BUILD_SOURCE_SHA";
+const BUILD_IMAGE_DIGEST_ENV: &str = "RSS_BUILD_IMAGE_DIGEST";
 
 /// Read, parse, validate, and resolve one immutable configuration generation.
 pub(crate) fn capture(path: &Path) -> Result<CapturedConfig, ConfigError> {
@@ -50,6 +52,11 @@ fn capture_from(
 
     let audit_chain_key = resolve_environment(source, AUDIT_CHAIN_KEY_ENV)?;
     let tenant_authority_key = resolve_environment(source, TENANT_AUTHORITY_KEY_ENV)?;
+    let build_source_sha = resolve_public_environment(source, BUILD_SOURCE_SHA_ENV)?;
+    let build_image_digest = resolve_public_environment(source, BUILD_IMAGE_DIGEST_ENV)?;
+    let build_identity =
+        runtimeexec::inventory::BuildIdentity::parse(&build_source_sha, &build_image_digest)
+            .map_err(|_| ConfigError::InvalidValue("buildIdentity"))?;
     let secrets = ResolvedSecrets {
         pg_writer_password: resolve_environment(source, PG_WRITER_PASSWORD_ENV)?,
         pg_reader_password: resolve_environment(source, PG_READER_PASSWORD_ENV)?,
@@ -63,7 +70,26 @@ fn capture_from(
         tenant_authority_key: decode_mac_key(&tenant_authority_key, "eventing.tenantAuthorityKey")?,
     };
     secrets.validate()?;
-    Ok(CapturedConfig { config, secrets })
+    Ok(CapturedConfig {
+        config,
+        secrets,
+        build_identity,
+    })
+}
+
+fn resolve_public_environment(
+    source: &mut impl ConfigSource,
+    name: &'static str,
+) -> Result<String, ConfigError> {
+    let value = source
+        .read_environment(name)
+        .ok_or(ConfigError::MissingEnvironment(name))?
+        .into_string()
+        .map_err(|_| ConfigError::NonUnicodeEnvironment(name))?;
+    if value.is_empty() {
+        return Err(ConfigError::EmptyEnvironment(name));
+    }
+    Ok(value)
 }
 
 fn resolve_environment(
@@ -232,11 +258,18 @@ impl std::error::Error for ConfigError {}
 pub(crate) struct CapturedConfig {
     config: IdentityAuditConfig,
     secrets: ResolvedSecrets,
+    build_identity: runtimeexec::inventory::BuildIdentity,
 }
 
 impl CapturedConfig {
-    pub(crate) fn into_runtime_inputs(self) -> (IdentityAuditConfig, ResolvedSecrets) {
-        (self.config, self.secrets)
+    pub(crate) fn into_runtime_inputs(
+        self,
+    ) -> (
+        IdentityAuditConfig,
+        ResolvedSecrets,
+        runtimeexec::inventory::BuildIdentity,
+    ) {
+        (self.config, self.secrets, self.build_identity)
     }
 }
 
@@ -1172,6 +1205,14 @@ tenantAuthorityClockSkewSeconds = 60
                 (REDIS_URL_ENV, "rediss://redis.example.test:6379/0"),
                 (AUDIT_CHAIN_KEY_ENV, VALID_KEY),
                 (TENANT_AUTHORITY_KEY_ENV, VALID_KEY),
+                (
+                    BUILD_SOURCE_SHA_ENV,
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                ),
+                (
+                    BUILD_IMAGE_DIGEST_ENV,
+                    "sha256:0dc0251564b714e89c8d098560ddfe69eb08c87fb85ac87323c54a7650126592",
+                ),
             ]
             .into_iter()
             .map(|(name, value)| (name, OsString::from(value)))
@@ -1297,11 +1338,15 @@ tenantAuthorityClockSkewSeconds = 60
         let mut source = TestSource::complete(VALID_CONFIG);
         let captured = capture_from(Path::new("ignored"), &mut source).expect("capture");
         assert_eq!(source.document_reads, 1);
-        assert_eq!(source.environment_reads.len(), 11);
+        assert_eq!(source.environment_reads.len(), 13);
         assert!(source.environment_reads.values().all(|reads| *reads == 1));
         assert_eq!(source.environment_reads[FORBIDDEN_SHARED_AMQP_URL_ENV], 1);
         assert!(!format!("{captured:?}").contains(SECRET_SENTINEL));
-        let (_, secrets) = captured.into_runtime_inputs();
+        let (_, secrets, build_identity) = captured.into_runtime_inputs();
+        assert_eq!(
+            build_identity.source_sha(),
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
         assert!(!format!("{secrets:?}").contains(SECRET_SENTINEL));
         let material = secrets.into_secret_material();
         assert_eq!(&*material.0, SECRET_SENTINEL);

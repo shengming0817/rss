@@ -150,6 +150,63 @@ impl PlacementExecutionPlan {
             .map(PlacementExecutionSpec::domain)
     }
 
+    pub(crate) fn inventory_observations(
+        &self,
+    ) -> Result<
+        Vec<runtimeexec::inventory::PlacementObservation>,
+        runtimeexec::inventory::InventoryError,
+    > {
+        self.placements
+            .iter()
+            .map(|placement| match placement.mode() {
+                PlacementMode::Local => Ok(runtimeexec::inventory::PlacementObservation::local(
+                    placement.domain(),
+                    placement.workload(),
+                )),
+                PlacementMode::Remote => {
+                    let endpoint = placement
+                        .endpoint()
+                        .map(|endpoint| {
+                            let scheme = match endpoint.scheme() {
+                                "https" => runtimeexec::inventory::InventoryEndpointScheme::Https,
+                                _ => return Err(runtimeexec::inventory::InventoryError::Endpoint),
+                            };
+                            runtimeexec::inventory::PlacementEndpoint::from_typed_parts(
+                                scheme,
+                                endpoint.host(),
+                                endpoint.port(),
+                            )
+                        })
+                        .transpose()?;
+                    let readiness = match placement.readiness() {
+                        Some(httpd::DomainHttpReadiness::Ready) => {
+                            runtimeexec::inventory::InventoryPlacementReadiness::Ready
+                        }
+                        Some(httpd::DomainHttpReadiness::MtlsSourceUnavailable) => {
+                            runtimeexec::inventory::InventoryPlacementReadiness::MtlsSourceUnavailable
+                        }
+                        Some(httpd::DomainHttpReadiness::PeerEndpointUnresolved) => {
+                            runtimeexec::inventory::InventoryPlacementReadiness::PeerEndpointUnresolved
+                        }
+                        Some(httpd::DomainHttpReadiness::PeerEndpointUnavailable) | None => {
+                            runtimeexec::inventory::InventoryPlacementReadiness::PeerEndpointUnavailable
+                        }
+                        Some(_) => {
+                            runtimeexec::inventory::InventoryPlacementReadiness::PeerEndpointUnavailable
+                        }
+                    };
+                    runtimeexec::inventory::PlacementObservation::remote(
+                        placement.domain(),
+                        placement.workload(),
+                        endpoint,
+                        placement.spiffe_identity().map(str::to_owned),
+                        readiness,
+                    )
+                }
+            })
+            .collect()
+    }
+
     pub(crate) fn reject_remote_on_local_listeners(
         &self,
         listeners: &super::ListenerExecutionPlan,

@@ -22,7 +22,7 @@ path = "tests/artifact_acceptance.rs"
 
 [features]
 default = []
-test-support = ["settings-composition/test-support"]
+test-support = ["settings-composition/test-support", "httpserve/test-util"]
 
 [dependencies]
 anyhow = { workspace = true }
@@ -36,7 +36,7 @@ generated = { path = "../../generated" }
 httpd = { path = "../../adapters/httpd" }
 httpserve = { path = "../../crates/httpserve" }
 oidc = { path = "../../adapters/oidc", features = ["backend"] }
-postgres = { path = "../../adapters/postgres", features = ["domain-settings"] }
+postgres = { path = "../../adapters/postgres", features = ["domain-settings", "auth-audit-sink"] }
 prometheus_adapter = { package = "prometheus-adapter", path = "../../adapters/prometheus", features = [
     "backend",
 ] }
@@ -61,10 +61,11 @@ vocab = { path = "../../crates/vocab" }
 zeroize = { workspace = true }
 
 [dev-dependencies]
+httpserve = { path = "../../crates/httpserve", features = ["test-util"] }
 vault = { path = "../../adapters/vault", features = ["backend", "test-support"] }
 base64 = { workspace = true }
 p256 = { workspace = true, features = ["ecdsa"] }
-postgres = { path = "../../adapters/postgres", features = ["domain-settings", "test-support"] }
+postgres = { path = "../../adapters/postgres", features = ["domain-settings", "auth-audit-sink", "test-support"] }
 rcgen = { workspace = true }
 reqwest = { workspace = true }
 rustls = { workspace = true }

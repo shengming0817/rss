@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
-  "assemblyFingerprint": "sha256:d351aa60214f224295b471fced7b91be88d9008fb8950ae69b3d5e3dc6a3b7af",
-  "runtimePlanFingerprint": "sha256:64c527bac08cffa336decaa1099769c0b8822ab8d69dd15d7de69e1359b36064",
-  "deploymentFingerprint": "sha256:e58f45e6573048e9c1b32fcf7e6aa22802f1451bfee057456f4ce0f8b0250f51",
+  "assemblyFingerprint": "sha256:b4bc250c0cce2979dd0c37588c7879ea80ad891c5530073ef41152394891be9f",
+  "runtimePlanFingerprint": "sha256:7aa65aa20339fb380eb025971532e9938b9cec3d8a074cbcb8d5152d5cd08fcd",
+  "deploymentFingerprint": "sha256:b9570af2f089ef02130b821217f01d799d1133322b563cb46a285b1f20dc75ba",
   "workloads": [
     {
       "name": "runtime",
@@ -47,17 +47,17 @@
         {
           "kind": "startup",
           "path": "/health/v1/healthz",
-          "port": 8082
+          "port": 8083
         },
         {
           "kind": "readiness",
           "path": "/health/v1/readyz",
-          "port": 8082
+          "port": 8083
         },
         {
           "kind": "liveness",
           "path": "/health/v1/healthz",
-          "port": 8082
+          "port": 8083
         }
       ]
     }
@@ -69,12 +69,12 @@
       "ports": [
         {
           "name": "admin",
-          "port": 8081,
+          "port": 8082,
           "exposure": "serviceExposed"
         },
         {
           "name": "health",
-          "port": 8082,
+          "port": 8083,
           "exposure": "serviceExposed"
         },
         {
@@ -90,7 +90,7 @@
       "ports": [
         {
           "name": "internal",
-          "port": 8083,
+          "port": 8081,
           "exposure": "workloadOnly"
         }
       ]

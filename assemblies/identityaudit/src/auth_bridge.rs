@@ -10,8 +10,15 @@ use httpserve::{Authenticated, AuthenticatedRoutes, CurrentAuthGrant};
 
 #[derive(Clone)]
 pub(crate) struct RssAccessVerifier {
-    provider: Arc<oidc::OidcProvider<diport::RssAccessProfile>>,
+    provider: VerifierProvider,
     validate_grant: Arc<GrantValidator>,
+}
+
+#[derive(Clone)]
+enum VerifierProvider {
+    Production(Arc<oidc::OidcProvider<diport::RssAccessProfile>>),
+    #[cfg(feature = "test-support")]
+    Test(Arc<diport::DynPdp<'static>>),
 }
 
 type GrantFuture = Pin<
@@ -30,7 +37,21 @@ impl RssAccessVerifier {
         grants: Arc<identity::AuthGrantValidationService>,
     ) -> Self {
         Self {
-            provider,
+            provider: VerifierProvider::Production(provider),
+            validate_grant: Arc::new(move |input| {
+                let grants = Arc::clone(&grants);
+                Box::pin(async move { grants.validate(input).await })
+            }),
+        }
+    }
+
+    #[cfg(feature = "test-support")]
+    pub(crate) fn test(
+        provider: Arc<diport::DynPdp<'static>>,
+        grants: Arc<identity::AuthGrantValidationService>,
+    ) -> Self {
+        Self {
+            provider: VerifierProvider::Test(provider),
             validate_grant: Arc::new(move |input| {
                 let grants = Arc::clone(&grants);
                 Box::pin(async move { grants.validate(input).await })
@@ -44,7 +65,7 @@ impl RssAccessVerifier {
         validate_grant: Arc<GrantValidator>,
     ) -> Self {
         Self {
-            provider,
+            provider: VerifierProvider::Production(provider),
             validate_grant,
         }
     }
@@ -76,8 +97,17 @@ async fn authenticate(
     if profile != diport::TokenProfile::RssAccess || tenant_binding.is_some() {
         return VerifyOutcome::Rejected;
     }
-    let pdp = diport::DynPdp::from_ref(verifier.provider.as_ref());
-    let (jwt, principal) = match authn::verify_rss_access(&token, pdp).await {
+    let verified = match &verifier.provider {
+        VerifierProvider::Production(provider) => {
+            let pdp = diport::DynPdp::from_ref(provider.as_ref());
+            authn::verify_rss_access(&token, pdp).await
+        }
+        #[cfg(feature = "test-support")]
+        VerifierProvider::Test(provider) => {
+            authn::verify_rss_access(&token, provider.as_ref()).await
+        }
+    };
+    let (jwt, principal) = match verified {
         Ok(verified) => verified,
         Err(authn::AuthnError::ProviderUnavailable) => return VerifyOutcome::ProviderUnavailable,
         Err(_) => return VerifyOutcome::Rejected,

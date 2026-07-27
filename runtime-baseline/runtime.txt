@@ -38,11 +38,12 @@ httpd = path=../../adapters/httpd
 httpserve = path=../../crates/httpserve
 identity = path=../../crates/identity
 identity-composition = path=../../composition/identity
+ids = path=../../crates/ids; optional=true
 metrics = workspace=true
 oidc = path=../../adapters/oidc; features=[backend]
 otel = path=../../adapters/otel; features=[backend]
 p256 = workspace=true; features=[ecdsa,pem]
-postgres = path=../../adapters/postgres; features=[domain-settings,domain-identity,domain-audit]
+postgres = path=../../adapters/postgres; features=[domain-settings,domain-identity,domain-audit,auth-audit-sink]
 primitives = path=../../crates/primitives
 prometheus-adapter = path=../../adapters/prometheus; features=[backend]
 ratelimit = path=../../adapters/ratelimit
@@ -82,7 +83,7 @@ listeners = [primary,internal,admin,health]
 06 | id=settings-secret-resolver | port=diport::SecretResolver | provider=vault::VaultSecretResolver | providerCrate=vault | requiredFeatures=[backend] | consumer=settings | lifecycle=active | durability=persistent | scope=unset | failurePosture=unset | purpose=settings-secret-material-resolution
 07 | id=listener-pdp | port=diport::Pdp | provider=oidc::OidcProvider | providerCrate=oidc | requiredFeatures=[backend] | consumer=httpserve | lifecycle=active | durability=persistent | scope=unset | failurePosture=unset | purpose=jwt-credential-verification
 08 | id=service-token-replay-store | port=diport::ServiceTokenReplayStore | provider=postgres::PgServiceTokenReplayStore | providerCrate=postgres | requiredFeatures=[] | consumer=oidc | lifecycle=active | durability=persistent | scope=cluster-global | failurePosture=fail-closed | purpose=service-token-atomic-replay-consume
-09 | id=auth-audit-sink | port=diport::AuditSink | provider=postgres::PgAuthAuditSink | providerCrate=postgres | requiredFeatures=[] | consumer=httpserve | lifecycle=active | durability=persistent | scope=unset | failurePosture=unset | purpose=http-auth-decision-audit
+09 | id=auth-audit-sink | port=diport::AuditSink | provider=postgres::PgAuthAuditSink | providerCrate=postgres | requiredFeatures=[auth-audit-sink] | consumer=httpserve | lifecycle=active | durability=persistent | scope=unset | failurePosture=unset | purpose=http-auth-decision-audit
 10 | id=listener-rate-limiter | port=diport::RateLimiter | provider=ratelimit::GovernorLimiter | providerCrate=ratelimit | requiredFeatures=[] | consumer=httpserve | lifecycle=active | durability=ephemeral-memory | scope=unset | failurePosture=unset | purpose=per-peer-IP request rate limiting (pre-auth, DoS/brute-force 防护)
 11 | id=distributed-lock-store | port=diport::LockStore | provider=redis::RedisLockStore | providerCrate=redis | requiredFeatures=[backend] | consumer=distributed | lifecycle=active | durability=persistent | scope=unset | failurePosture=unset | purpose=distributed-lock-fencing
 12 | id=distributed-cas-store | port=diport::CasStore | provider=postgres::PgCasStore | providerCrate=postgres | requiredFeatures=[] | consumer=distributed | lifecycle=active | durability=persistent | scope=unset | failurePosture=unset | purpose=distributed-state-cas
