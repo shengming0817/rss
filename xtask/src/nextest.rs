@@ -73,8 +73,9 @@ pub(crate) fn run_local_only_exact(
     packages: &[String],
     tests: &[String],
     marker_dir: &Path,
+    execution_policy: crate::cmd::ExecutionPolicy,
 ) -> Result<()> {
-    let args = local_only_args(packages, tests)?;
+    let args = local_only_args(packages, tests, execution_policy)?;
     let marker_dir = marker_dir
         .to_str()
         .context("LocalOnly execution marker directory must be UTF-8")?;
@@ -115,7 +116,11 @@ fn valid_cargo_package_name(name: &str) -> bool {
         })
 }
 
-fn local_only_args(packages: &[String], tests: &[String]) -> Result<Vec<String>> {
+fn local_only_args(
+    packages: &[String],
+    tests: &[String],
+    execution_policy: crate::cmd::ExecutionPolicy,
+) -> Result<Vec<String>> {
     if packages.is_empty() || tests.is_empty() {
         bail!("LocalOnly exact conformance inventory must be non-empty");
     }
@@ -144,6 +149,9 @@ fn local_only_args(packages: &[String], tests: &[String]) -> Result<Vec<String>>
         "--no-tests=fail".to_owned(),
         "--lib".to_owned(),
     ];
+    if execution_policy.keeps_going() {
+        args.push("--no-fail-fast".to_owned());
+    }
     for package in packages {
         args.extend(["-p".to_owned(), package.clone()]);
     }
@@ -478,6 +486,7 @@ pub(crate) struct NextestInvocation {
     runner: NextestRunner,
     args: Vec<String>,
     replay_spec: ReplaySpec,
+    execution_policy: crate::cmd::ExecutionPolicy,
 }
 
 impl NextestInvocation {
@@ -506,7 +515,16 @@ impl NextestInvocation {
                     partition,
                 }
             },
+            execution_policy: crate::cmd::ExecutionPolicy::FailFast,
         }
+    }
+
+    pub(crate) fn with_execution_policy(
+        mut self,
+        execution_policy: crate::cmd::ExecutionPolicy,
+    ) -> Self {
+        self.execution_policy = execution_policy;
+        self
     }
 
     pub(crate) fn for_core(
@@ -645,6 +663,9 @@ impl NextestInvocation {
             NextestRunner::LlvmCov => {
                 argv.extend(["llvm-cov".to_owned(), "nextest".to_owned()]);
             }
+        }
+        if self.execution_policy.keeps_going() {
+            argv.push("--no-fail-fast".to_owned());
         }
         argv.extend(self.args.iter().cloned());
         if let Some(partition) = self.partition {
@@ -1190,7 +1211,9 @@ pub(crate) fn replay(sidecar: &Path, root: &Path) -> Result<()> {
         ReplaySpec::Core { scope, partition } => {
             NextestInvocation::for_core(scope, NextestLane::CiCore, partition).run(root, &[])
         }
-        ReplaySpec::Coverage { scope } => crate::coverage::run(scope),
+        ReplaySpec::Coverage { scope } => {
+            crate::coverage::run(scope, crate::cmd::ExecutionPolicy::FailFast)
+        }
         ReplaySpec::Integration {
             shard,
             batch,
@@ -1800,7 +1823,7 @@ mod tests {
             "application::tests::audit_receipt".to_owned(),
             "application::tests::identity_receipt".to_owned(),
         ];
-        let args = local_only_args(&packages, &tests)?;
+        let args = local_only_args(&packages, &tests, crate::cmd::ExecutionPolicy::FailFast)?;
         assert_eq!(
             args,
             [
@@ -1819,10 +1842,49 @@ mod tests {
                 "--exact",
             ]
         );
-        assert!(local_only_args(&[], &tests).is_err());
-        assert!(local_only_args(&packages, &[]).is_err());
-        assert!(local_only_args(&["identity".into(), "audit".into()], &tests).is_err());
-        assert!(local_only_args(&packages, &["bad/name".into()]).is_err());
+        assert!(local_only_args(&[], &tests, crate::cmd::ExecutionPolicy::FailFast).is_err());
+        assert!(local_only_args(&packages, &[], crate::cmd::ExecutionPolicy::FailFast).is_err());
+        assert!(
+            local_only_args(
+                &["identity".into(), "audit".into()],
+                &tests,
+                crate::cmd::ExecutionPolicy::FailFast,
+            )
+            .is_err()
+        );
+        assert!(
+            local_only_args(
+                &packages,
+                &["bad/name".into()],
+                crate::cmd::ExecutionPolicy::FailFast,
+            )
+            .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn nextest_failure_policy_is_explicit_and_local_only() -> Result<()> {
+        use crate::cmd::ExecutionPolicy;
+
+        let remote =
+            NextestInvocation::for_core(CoreTestScope::Workspace, NextestLane::CiCore, None)
+                .execution_argv();
+        assert!(!remote.iter().any(|arg| arg == "--no-fail-fast"));
+
+        let local =
+            NextestInvocation::for_core(CoreTestScope::Workspace, NextestLane::Verify, None)
+                .with_execution_policy(ExecutionPolicy::KeepGoing)
+                .execution_argv();
+        assert!(local.iter().any(|arg| arg == "--no-fail-fast"));
+
+        let packages = vec!["identity".to_owned()];
+        let tests = vec!["application::tests::identity_receipt".to_owned()];
+        assert!(
+            local_only_args(&packages, &tests, ExecutionPolicy::KeepGoing)?
+                .iter()
+                .any(|arg| arg == "--no-fail-fast")
+        );
         Ok(())
     }
 

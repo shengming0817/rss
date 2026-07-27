@@ -127,8 +127,11 @@ fn resolve_output_path(root: &Path, output: Option<&Path>) -> PathBuf {
 pub(crate) fn execute(
     root: &Path,
     request: LocalOnlyEvidenceRequest,
+    execution_policy: crate::cmd::ExecutionPolicy,
 ) -> Result<ValidatedLocalOnlyReport> {
-    execute_with_suite_runner(root, request, crate::nextest::run_local_only_exact)
+    execute_with_suite_runner(root, request, |root, packages, tests, marker_dir| {
+        crate::nextest::run_local_only_exact(root, packages, tests, marker_dir, execution_policy)
+    })
 }
 
 fn execute_with_suite_runner(

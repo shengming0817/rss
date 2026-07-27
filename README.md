@@ -17,6 +17,9 @@ RSS 是 GoCell 的 Rust 重写——domain-native 治理 + 惯用扁平 Cargo wo
 ```bash
 make ci                                  # 分析 origin/develop...HEAD 的已提交差异并运行本地 preflight
 make ci CI_BASE=upstream/develop         # 显式指定比较基准
+make ci CI_ARGS='--fail-fast'            # 需要首错停止时显式启用
+make ci CI_ARGS='--only test --only clippy' # 仅复验 affected test/clippy（partial）
+make verify VERIFY_ARGS='--only runtime-root-guard' # 仅复验一个 typed gate（partial）
 make ci-full                             # 显式执行完整本地 CI 门集
 ./hack/cargo.sh xtask ci local --base origin/develop
 ./hack/cargo.sh xtask ci full
@@ -31,6 +34,12 @@ Make 通过 `hack/cargo.sh` 启动 xtask，是本地治理门的受控 bootstrap
 影响包 test/clippy。未知路径本地忽略并留痕，但不会抹掉同一 diff 中已知包的定向测试；rename/copy 运行
 fast/meta，影响分析失败直接报错。本地 preflight 的 worker 进程组受 600 秒 wall-clock deadline 约束，且不运行
 coverage、audit 或真实后端 integration；需要人工诊断无条件全量门时使用 `make ci-full`。
+
+本地 `verify`、`ci local` 与 `ci full` 默认 keep-going：聚合层继续执行后续 gate/stage，Cargo
+build/check/clippy 与 cargo test/nextest 同时启用各自的继续执行参数，最后稳定汇总全部失败并返回非零。
+`--fail-fast` 可恢复首错停止；600 秒 supervisor 超时和取消信号仍立即终止。推荐修复循环是：先运行默认
+完整诊断收齐错误，再用可重复的 `--only` 定向复验，最后不带 `--only` 完整运行一次 affected CI。
+任何 `--only` 成功都只是 partial 诊断结果，不代表完整 CI 通过。远端 `ci run --job` 保持 fail-fast。
 L0/L1 的采用与故障语义分别见
 [`docs/rules/consistency-l0.md`](docs/rules/consistency-l0.md) 与
 [`docs/rules/localtx.md`](docs/rules/localtx.md)；精确 gate 成员与顺序只以 typed registry 和

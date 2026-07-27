@@ -84,14 +84,70 @@ pub(crate) struct Options {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LocalOptions {
     base: String,
+    fail_fast: bool,
+    only: BTreeSet<LocalStage>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum LocalStage {
+    FastMeta,
+    PythonHooks,
+    CargoWrapperSelftest,
+    Check,
+    Test,
+    Clippy,
+}
+
+impl LocalStage {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::FastMeta => "fast-meta",
+            Self::PythonHooks => "python-hooks",
+            Self::CargoWrapperSelftest => "cargo-wrapper-selftest",
+            Self::Check => "check",
+            Self::Test => "test",
+            Self::Clippy => "clippy",
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "fast-meta" => Ok(Self::FastMeta),
+            "python-hooks" => Ok(Self::PythonHooks),
+            "cargo-wrapper-selftest" => Ok(Self::CargoWrapperSelftest),
+            "check" => Ok(Self::Check),
+            "test" => Ok(Self::Test),
+            "clippy" => Ok(Self::Clippy),
+            _ => bail!("ci local --only 未知 stage: {value}"),
+        }
+    }
 }
 
 pub(crate) fn parse_local_options(args: &[&str]) -> Result<LocalOptions> {
     let mut base = None;
+    let mut fail_fast = false;
+    let mut only = BTreeSet::new();
     let mut iter = args.iter().copied();
     while let Some(flag) = iter.next() {
-        if flag != "--base" {
-            bail!("ci local 未知参数: {flag}");
+        match flag {
+            "--fail-fast" if !fail_fast => {
+                fail_fast = true;
+                continue;
+            }
+            "--fail-fast" => bail!("ci local 重复参数: --fail-fast"),
+            "--only" => {
+                let value = iter.next().context("ci local 参数 --only 缺少值")?;
+                if value.is_empty() || value.starts_with("--") {
+                    bail!("ci local 参数 --only 必须是非空 stage，不能是 flag");
+                }
+                let stage = LocalStage::parse(value)?;
+                if !only.insert(stage) {
+                    bail!("ci local 重复 stage: {value}");
+                }
+                continue;
+            }
+            "--base" => {}
+            _ => bail!("ci local 未知参数: {flag}"),
         }
         let value = iter.next().context("ci local 参数 --base 缺少值")?;
         if value.is_empty() || value.starts_with("--") {
@@ -103,6 +159,8 @@ pub(crate) fn parse_local_options(args: &[&str]) -> Result<LocalOptions> {
     }
     Ok(LocalOptions {
         base: base.context("ci local 缺少 --base")?,
+        fail_fast,
+        only,
     })
 }
 
@@ -1867,7 +1925,7 @@ pub(crate) fn run_local(root: &Path, options: &LocalOptions) -> Result<()> {
     let impact = context
         .impact_entries(&entries)
         .context("ci local 影响分析失败；未自动执行 full，请修复分析输入或显式运行 make ci-full")?;
-    let steps = local_steps(&impact);
+    let steps = select_local_steps(local_steps(&impact), &options.only)?;
     for deferred in local_deferred(&impact) {
         eprintln!("ci local：DEFERRED {deferred}");
     }
@@ -1875,16 +1933,24 @@ pub(crate) fn run_local(root: &Path, options: &LocalOptions) -> Result<()> {
         eprintln!("ci local：<base>...HEAD 无需执行本地步骤");
         return Ok(());
     }
-    eprintln!(
-        "ci local：{} 步，由外层 supervisor 约束 wall-clock 预算",
-        steps.len()
-    );
+    if options.only.is_empty() {
+        eprintln!(
+            "ci local：{} 步，由外层 supervisor 约束 wall-clock 预算",
+            steps.len()
+        );
+    } else {
+        eprintln!(
+            "ci local partial：{} 步；仅供诊断，不代表完整 affected CI 通过",
+            steps.len()
+        );
+    }
+    let execution_policy = crate::cmd::ExecutionPolicy::from_fail_fast(options.fail_fast);
     let mut index = 0;
-    execute_local_steps(&steps, |step| {
+    execute_local_steps(&steps, execution_policy, |step| {
         index += 1;
         eprintln!("ci local：[{}/{}] {}", index, steps.len(), step.label());
         let step_started = clock.now();
-        let result = run_local_step(&context, step);
+        let result = run_local_step(&context, step, execution_policy);
         let step_elapsed = clock.elapsed(step_started, clock.now()).as_secs_f64();
         match result {
             Ok(()) => {
@@ -1904,23 +1970,44 @@ pub(crate) fn run_local(root: &Path, options: &LocalOptions) -> Result<()> {
                     step_elapsed,
                     clock.elapsed(run_started, clock.now()).as_secs_f64()
                 );
-                Err(error)
+                Err(error.context(format!("步骤耗时 {step_elapsed:.1} 秒")))
             }
         }
     })?;
-    eprintln!(
-        "ci local：全部通过，总耗时 {:.1} 秒",
-        clock.elapsed(run_started, clock.now()).as_secs_f64()
-    );
+    if options.only.is_empty() {
+        eprintln!(
+            "ci local：全部通过，总耗时 {:.1} 秒",
+            clock.elapsed(run_started, clock.now()).as_secs_f64()
+        );
+    } else {
+        eprintln!(
+            "ci local partial：所选 stage 通过，总耗时 {:.1} 秒；不代表完整 affected CI 通过",
+            clock.elapsed(run_started, clock.now()).as_secs_f64()
+        );
+    }
     Ok(())
 }
 
 fn execute_local_steps(
     steps: &[LocalStep],
+    execution_policy: crate::cmd::ExecutionPolicy,
     mut execute: impl FnMut(&LocalStep) -> Result<()>,
 ) -> Result<()> {
+    let mut failures = Vec::new();
     for step in steps {
-        execute(step)?;
+        if let Err(error) = execute(step) {
+            if !execution_policy.keeps_going() {
+                return Err(error);
+            }
+            failures.push((step.label(), format!("{error:#}")));
+        }
+    }
+    if !failures.is_empty() {
+        eprintln!("ci local：失败汇总（{} 项）", failures.len());
+        for (label, error) in &failures {
+            eprintln!("- {label}：{error}");
+        }
+        bail!("ci local：{} 个步骤失败", failures.len());
     }
     Ok(())
 }
@@ -2197,6 +2284,19 @@ fn resolve_commit(root: &Path, revision: &str) -> Result<String> {
 }
 
 impl LocalStep {
+    const fn stage(&self) -> LocalStage {
+        match self {
+            Self::FastMeta => LocalStage::FastMeta,
+            Self::PythonHooks => LocalStage::PythonHooks,
+            Self::CargoWrapperSelftest => LocalStage::CargoWrapperSelftest,
+            Self::Packages { operation, .. } => match operation {
+                LocalCargoOperation::Check => LocalStage::Check,
+                LocalCargoOperation::Test => LocalStage::Test,
+                LocalCargoOperation::Clippy => LocalStage::Clippy,
+            },
+        }
+    }
+
     fn label(&self) -> String {
         match self {
             Self::FastMeta => "fast/meta".to_owned(),
@@ -2208,6 +2308,27 @@ impl LocalStep {
             } => format!("{} {}", operation.label(), packages.join(",")),
         }
     }
+}
+
+fn select_local_steps(
+    steps: Vec<LocalStep>,
+    only: &BTreeSet<LocalStage>,
+) -> Result<Vec<LocalStep>> {
+    if only.is_empty() {
+        return Ok(steps);
+    }
+    for stage in only {
+        if !steps.iter().any(|step| step.stage() == *stage) {
+            bail!(
+                "ci local --only stage 不属于当前 affected plan: {}",
+                stage.as_str()
+            );
+        }
+    }
+    Ok(steps
+        .into_iter()
+        .filter(|step| only.contains(&step.stage()))
+        .collect())
 }
 
 impl LocalCargoOperation {
@@ -2228,9 +2349,13 @@ impl LocalCargoOperation {
     }
 }
 
-fn run_local_step(context: &LocalExecutionContext, step: &LocalStep) -> Result<()> {
+fn run_local_step(
+    context: &LocalExecutionContext,
+    step: &LocalStep,
+    execution_policy: crate::cmd::ExecutionPolicy,
+) -> Result<()> {
     match step {
-        LocalStep::FastMeta => run_snapshot_verify(context, true),
+        LocalStep::FastMeta => run_snapshot_verify(context, true, execution_policy),
         LocalStep::PythonHooks => {
             let status = external_cmd(
                 ExternalProgram::SystemPython,
@@ -2274,14 +2399,22 @@ fn run_local_step(context: &LocalExecutionContext, step: &LocalStep) -> Result<(
             context.cargo_target_text()?,
             *operation,
             packages,
+            execution_policy,
         ),
     }
 }
 
-fn run_snapshot_verify(context: &LocalExecutionContext, fast: bool) -> Result<()> {
+fn run_snapshot_verify(
+    context: &LocalExecutionContext,
+    fast: bool,
+    execution_policy: crate::cmd::ExecutionPolicy,
+) -> Result<()> {
     let mut args = vec!["verify"];
     if fast {
         args.push("--fast");
+    }
+    if !execution_policy.keeps_going() {
+        args.push("--fail-fast");
     }
     args.extend(["--against", context.base.as_str()]);
     let target = context.cargo_target_text()?;
@@ -2314,7 +2447,28 @@ fn run_package_operation(
     cargo_target: &str,
     operation: LocalCargoOperation,
     packages: &[String],
+    execution_policy: crate::cmd::ExecutionPolicy,
 ) -> Result<()> {
+    let owned = package_operation_args(operation, packages, execution_policy)?;
+    let args = owned.iter().map(String::as_str).collect::<Vec<_>>();
+    let status = cargo_cmd(
+        operation.subcommand(),
+        &args,
+        &[("CARGO_TARGET_DIR", cargo_target)],
+        Some(root),
+    )
+    .status()?;
+    if !status.success() {
+        bail!("ci local {} failed", operation.label());
+    }
+    Ok(())
+}
+
+fn package_operation_args(
+    operation: LocalCargoOperation,
+    packages: &[String],
+    execution_policy: crate::cmd::ExecutionPolicy,
+) -> Result<Vec<String>> {
     if packages.is_empty() {
         bail!("ci local selective operation has an empty package set");
     }
@@ -2329,21 +2483,19 @@ fn run_package_operation(
         owned.push("-p".to_owned());
         owned.push(package.clone());
     }
+    if execution_policy.keeps_going() {
+        owned.push(
+            match operation {
+                LocalCargoOperation::Check | LocalCargoOperation::Clippy => "--keep-going",
+                LocalCargoOperation::Test => "--no-fail-fast",
+            }
+            .to_owned(),
+        );
+    }
     if operation == LocalCargoOperation::Clippy {
         owned.extend(["--".to_owned(), "-D".to_owned(), "warnings".to_owned()]);
     }
-    let args = owned.iter().map(String::as_str).collect::<Vec<_>>();
-    let status = cargo_cmd(
-        operation.subcommand(),
-        &args,
-        &[("CARGO_TARGET_DIR", cargo_target)],
-        Some(root),
-    )
-    .status()?;
-    if !status.success() {
-        bail!("ci local {} failed", operation.label());
-    }
-    Ok(())
+    Ok(owned)
 }
 
 fn read_diff(root: &Path, base: &str, head: &str) -> Result<Vec<DiffEntry>> {
@@ -3421,6 +3573,24 @@ mod tests {
             parse_local_options(&["--base", "origin/develop"])?,
             LocalOptions {
                 base: "origin/develop".to_owned(),
+                fail_fast: false,
+                only: BTreeSet::new(),
+            }
+        );
+        assert_eq!(
+            parse_local_options(&[
+                "--base",
+                "origin/develop",
+                "--fail-fast",
+                "--only",
+                "test",
+                "--only",
+                "clippy",
+            ])?,
+            LocalOptions {
+                base: "origin/develop".to_owned(),
+                fail_fast: true,
+                only: BTreeSet::from([LocalStage::Test, LocalStage::Clippy]),
             }
         );
         for args in [
@@ -3430,6 +3600,11 @@ mod tests {
             vec!["--base", "--working-tree"],
             vec!["--head", "main"],
             vec!["main"],
+            vec!["--base", "main", "--only"],
+            vec!["--base", "main", "--only", "--fail-fast"],
+            vec!["--base", "main", "--only", "unknown"],
+            vec!["--base", "main", "--only", "test", "--only", "test"],
+            vec!["--base", "main", "--fail-fast", "--fail-fast"],
         ] {
             assert!(parse_local_options(&args).is_err(), "accepted {args:?}");
         }
@@ -3942,7 +4117,7 @@ mod tests {
     }
 
     #[test]
-    fn local_executor_stops_at_the_first_failed_step() {
+    fn local_executor_supports_keep_going_and_fail_fast() {
         let steps = vec![
             LocalStep::FastMeta,
             LocalStep::Packages {
@@ -3955,7 +4130,18 @@ mod tests {
             },
         ];
         let mut executed = Vec::new();
-        let result = execute_local_steps(&steps, |step| {
+        let result = execute_local_steps(&steps, crate::cmd::ExecutionPolicy::KeepGoing, |step| {
+            executed.push(step.clone());
+            if executed.len() <= 2 {
+                bail!("synthetic failure");
+            }
+            Ok(())
+        });
+        assert!(result.is_err());
+        assert_eq!(executed, steps);
+
+        executed.clear();
+        let result = execute_local_steps(&steps, crate::cmd::ExecutionPolicy::FailFast, |step| {
             executed.push(step.clone());
             if executed.len() == 2 {
                 bail!("synthetic failure");
@@ -3964,6 +4150,89 @@ mod tests {
         });
         assert!(result.is_err());
         assert_eq!(executed, steps[..2]);
+    }
+
+    #[test]
+    fn local_stage_selection_preserves_affected_plan_order_and_scope() -> Result<()> {
+        let steps = vec![
+            LocalStep::FastMeta,
+            LocalStep::Packages {
+                operation: LocalCargoOperation::Check,
+                packages: vec!["consumer".to_owned(), "leaf".to_owned()],
+            },
+            LocalStep::Packages {
+                operation: LocalCargoOperation::Test,
+                packages: vec!["leaf".to_owned()],
+            },
+            LocalStep::Packages {
+                operation: LocalCargoOperation::Clippy,
+                packages: vec!["leaf".to_owned()],
+            },
+        ];
+        let selected = select_local_steps(
+            steps,
+            &BTreeSet::from([LocalStage::Clippy, LocalStage::Check]),
+        )?;
+        assert_eq!(
+            selected.iter().map(LocalStep::stage).collect::<Vec<_>>(),
+            [LocalStage::Check, LocalStage::Clippy]
+        );
+        assert!(
+            select_local_steps(
+                vec![LocalStep::FastMeta],
+                &BTreeSet::from([LocalStage::Test]),
+            )
+            .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn local_package_native_flags_follow_execution_policy() -> Result<()> {
+        use crate::cmd::ExecutionPolicy;
+        let packages = vec!["leaf".to_owned()];
+        assert_eq!(
+            package_operation_args(
+                LocalCargoOperation::Check,
+                &packages,
+                ExecutionPolicy::KeepGoing
+            )?,
+            ["--locked", "--all-targets", "-p", "leaf", "--keep-going"]
+        );
+        assert_eq!(
+            package_operation_args(
+                LocalCargoOperation::Test,
+                &packages,
+                ExecutionPolicy::KeepGoing
+            )?,
+            ["--locked", "-p", "leaf", "--no-fail-fast"]
+        );
+        assert_eq!(
+            package_operation_args(
+                LocalCargoOperation::Clippy,
+                &packages,
+                ExecutionPolicy::KeepGoing
+            )?,
+            [
+                "--locked",
+                "--all-targets",
+                "-p",
+                "leaf",
+                "--keep-going",
+                "--",
+                "-D",
+                "warnings"
+            ]
+        );
+        assert_eq!(
+            package_operation_args(
+                LocalCargoOperation::Test,
+                &packages,
+                ExecutionPolicy::FailFast
+            )?,
+            ["--locked", "-p", "leaf"]
+        );
+        Ok(())
     }
 
     #[test]

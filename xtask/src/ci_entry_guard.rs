@@ -40,46 +40,71 @@ pub(crate) fn run() -> Result<()> {
 }
 
 fn findings_for_makefile(content: &str) -> Vec<Finding<Rule>> {
-    const CI_RECIPE: &str = "/usr/bin/python3 hack/ci-local-supervisor.py --repo-root \"$(CURDIR)\" --budget-seconds 600 -- $(RSS_CARGO) xtask ci local --base \"$(CI_BASE)\"";
+    const VERIFY_RECIPE: &str = "$(RSS_CARGO) xtask verify $(VERIFY_ARGS)";
+    const CI_RECIPE: &str = "/usr/bin/python3 hack/ci-local-supervisor.py --repo-root \"$(CURDIR)\" --budget-seconds 600 -- $(RSS_CARGO) xtask ci local --base \"$(CI_BASE)\" $(CI_ARGS)";
+    const CI_FULL_RECIPE: &str = "$(RSS_CARGO) xtask ci full $(CI_ARGS)";
     let base_count = content
         .lines()
         .filter(|line| line.trim() == "CI_BASE ?= origin/develop")
         .count();
     let base_assignments = content
         .lines()
-        .filter(|line| ci_base_assignment(line))
+        .filter(|line| make_variable_assignment(line, "CI_BASE"))
         .count();
+    let verify_args_count = content
+        .lines()
+        .filter(|line| line.trim() == "VERIFY_ARGS =")
+        .count();
+    let verify_args_assignments = content
+        .lines()
+        .filter(|line| make_variable_assignment(line, "VERIFY_ARGS"))
+        .count();
+    let ci_args_count = content
+        .lines()
+        .filter(|line| line.trim() == "CI_ARGS =")
+        .count();
+    let ci_args_assignments = content
+        .lines()
+        .filter(|line| make_variable_assignment(line, "CI_ARGS"))
+        .count();
+    let verify = make_target_recipes(content, "verify");
     let ci = make_target_recipes(content, "ci");
     let full = make_target_recipes(content, "ci-full");
     if base_count == 1
         && base_assignments == 1
+        && verify_args_count == 1
+        && verify_args_assignments == 1
+        && ci_args_count == 1
+        && ci_args_assignments == 1
+        && make_target_declarations(content, "verify") == 1
         && make_target_declarations(content, "ci") == 1
         && make_target_declarations(content, "ci-full") == 1
+        && verify == [vec![VERIFY_RECIPE]]
         && ci == [vec![CI_RECIPE]]
-        && full == [vec!["$(RSS_CARGO) xtask ci full"]]
+        && full == [vec![CI_FULL_RECIPE]]
     {
         Vec::new()
     } else {
         vec![finding(
             Rule::MakefileContract,
             "Makefile",
-            "`ci` 必须在 Cargo bootstrap 外由 600 秒 supervisor 精确委托 `ci local --base $(CI_BASE)`，`ci-full` 必须精确委托 `ci full`，默认 base 为 origin/develop",
+            "`verify`/`ci`/`ci-full` 必须经受控参数变量精确委托；`ci` 保持 600 秒 supervisor，默认 base 为 origin/develop",
         )]
     }
 }
 
-fn ci_base_assignment(line: &str) -> bool {
+fn make_variable_assignment(line: &str, variable: &str) -> bool {
     let line = line.trim_start();
     if line.starts_with('#') {
         return false;
     }
-    line.match_indices("CI_BASE").any(|(index, _)| {
+    line.match_indices(variable).any(|(index, _)| {
         let boundary = index == 0
             || line[..index]
                 .chars()
                 .next_back()
                 .is_some_and(|ch| ch.is_whitespace() || ch == ':');
-        let suffix = line[index + "CI_BASE".len()..].trim_start();
+        let suffix = line[index + variable.len()..].trim_start();
         boundary
             && (suffix.starts_with("?=")
                 || suffix.starts_with(":=")
@@ -145,13 +170,13 @@ mod tests {
 
     #[test]
     fn makefile_canonical_targets_are_closed() {
-        let green = "CI_BASE ?= origin/develop\nci:\n\t/usr/bin/python3 hack/ci-local-supervisor.py --repo-root \"$(CURDIR)\" --budget-seconds 600 -- $(RSS_CARGO) xtask ci local --base \"$(CI_BASE)\"\nci-full:\n\t$(RSS_CARGO) xtask ci full\n";
+        let green = "CI_BASE ?= origin/develop\nVERIFY_ARGS =\nCI_ARGS =\nverify:\n\t$(RSS_CARGO) xtask verify $(VERIFY_ARGS)\nci:\n\t/usr/bin/python3 hack/ci-local-supervisor.py --repo-root \"$(CURDIR)\" --budget-seconds 600 -- $(RSS_CARGO) xtask ci local --base \"$(CI_BASE)\" $(CI_ARGS)\nci-full:\n\t$(RSS_CARGO) xtask ci full $(CI_ARGS)\n";
         assert!(findings_for_makefile(green).is_empty());
         for red in [
             green.replace("ci local --base \"$(CI_BASE)\"", "ci full"),
             green.replace("CI_BASE ?= origin/develop", "CI_BASE ?= HEAD"),
             green.replace(
-                "ci-full:\n\t$(RSS_CARGO) xtask ci full",
+                "ci-full:\n\t$(RSS_CARGO) xtask ci full $(CI_ARGS)",
                 "ci-full:\n\t@true",
             ),
             green.replace(
@@ -159,6 +184,12 @@ mod tests {
                 "ci local --base \"$(CI_BASE)\"\n\t$(RSS_CARGO) check --workspace",
             ),
             green.replace("--budget-seconds 600", "--budget-seconds 601"),
+            green.replace(" $(VERIFY_ARGS)", ""),
+            green.replace(" $(CI_ARGS)", ""),
+            format!("{green}override VERIFY_ARGS := --fail-fast\n"),
+            format!("{green}override CI_ARGS := --fail-fast\n"),
+            green.replace("VERIFY_ARGS =", "VERIFY_ARGS ?="),
+            green.replace("CI_ARGS =", "CI_ARGS ?="),
             green.replace(
                 "/usr/bin/python3 hack/ci-local-supervisor.py --repo-root \"$(CURDIR)\" --budget-seconds 600 -- ",
                 "",

@@ -105,13 +105,17 @@ fn validate_matrix(cases: &[MatrixCase], expected_domains: &[String]) -> Result<
     Ok(())
 }
 
-pub(crate) fn run() -> Result<()> {
+pub(crate) fn run(execution_policy: crate::cmd::ExecutionPolicy) -> Result<()> {
     let root = workspace_root()?;
     let domains = domain_features_from_manifest(&root)?;
     let cases = build_matrix(&domains);
     validate_matrix(&cases, &domains)?;
+    let mut failures = Vec::new();
     for (index, case) in cases.iter().enumerate() {
-        let args = case.args();
+        let mut args = case.args();
+        if execution_policy.keeps_going() {
+            args.push("--keep-going".to_owned());
+        }
         let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
         eprintln!(
             "postgres-feature-matrix: [{}/{}] {}",
@@ -127,12 +131,23 @@ pub(crate) fn run() -> Result<()> {
         )
         .status()?;
         if !status.success() {
-            bail!(
+            let failure = format!(
                 "Postgres feature matrix case `{}` failed (cargo {})",
                 case.label(),
                 args.join(" ")
             );
+            if !execution_policy.keeps_going() {
+                bail!(failure);
+            }
+            failures.push(failure);
         }
+    }
+    if !failures.is_empty() {
+        bail!(
+            "Postgres feature matrix failures ({}):\n{}",
+            failures.len(),
+            failures.join("\n")
+        );
     }
     Ok(())
 }

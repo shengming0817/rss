@@ -2,13 +2,15 @@
 //!
 //! RSS 本地全量治理门。Azure 是 active PR forge；GitHub typed lanes 当前用于 Shadow 取证，
 //! `ci-gate` 尚不是 required check。完整门集与顺序只由 typed registry 派生，本说明不复制 gate inventory。
-//! 聚合按 fail-fast 执行：no-compile Meta 证明优先，随后是 workspace/feature 编译、lint、默认与
+//! 本地聚合默认 keep-going，显式 `--fail-fast` 可恢复首错停止：no-compile Meta 证明优先，随后是 workspace/feature 编译、lint、默认与
 //! feature-gated 行为测试、供应链检查和注册 lint。
 //!
 //! `--fast` 的 inner typed plan 只跑不依赖 Docker、额外 Cargo 工具或 crate 编译的轻量
 //! `CompileKind::NoCompile` gate（fmt + repository meta），
 //! 供快速迭代；冷缓存或 xtask 变更时，外层 Cargo 仍会构建 xtask 启动器。`--allow-missing-tools`
 //! 在缺外部工具时显式宽限（默认 fail-closed）。
+//! 本地聚合默认 keep-going；`--fail-fast` 恢复首错停止，重复 `--only <gate-label>` 仅运行
+//! registry 中属于当前计划的 gate，并明确标记为 partial 诊断。远端 typed job 始终 fail-fast。
 //!
 //! **`cargo xtask ci full`（[`run_ci`]）= 本地完整 CI 聚合**（issue #1132）：
 //! verify 全门 + build/clippy 升 `--all-features --all-targets` + 覆盖率门（`cargo llvm-cov nextest` 替
@@ -26,7 +28,7 @@
 //! `cargo-semver-checks`（轴 A 语义破坏检测）当前所有 crate `publish = false` ⇒ `--workspace` 选 0 包、门
 //! 空转，故本轮不入 ci（public-api --check 已非空转兜轴 A）；待 crate 可发布后 follow-up 接入（见 PR body）。
 //!
-//! INVARIANT: VERIFY-AGGREGATE-01 { level = "Medium", exec = "verify", source = "code" }—— 任一门步失败 ⇒ verify/ci/audit 非零退出（聚合 fail-fast，不吞错）。
+//! INVARIANT: VERIFY-AGGREGATE-01 { level = "Medium", exec = "verify", source = "code" }—— 本地 verify/ci-full 默认 keep-going、显式 fail-fast；远端 typed job 保持 fail-fast；任一门步失败均非零退出。
 //! INVARIANT: VERIFY-TOOL-GATE-01 { level = "Medium", exec = "verify", source = "code" }—— 缺外部工具默认 fail-closed；豁免仅经显式 `--allow-missing-tools`。
 //! INVARIANT: ASSEMBLY-PROVIDERS-VERIFY-GATE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "assembly_provider_codegen_gate_is_typed_once_and_ordered_in_all_aggregate_plans", anti_vacuity = "assembly_codegen::tests::assembly_provider_codegen_generated_provider_catalogs_are_non_empty_and_check_clean" }—— provider catalog drift is an independent typed no-compile gate exactly once between modules drift and AssemblyLock in every aggregate plan.
 //! INVARIANT: RUNTIME-DYLINT-UI-GATE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "runtime_dylint_ui_gate_is_typed_closed_and_in_aggregate_plans", anti_vacuity = "runtime_dylint_ui_gate_is_typed_closed_and_in_aggregate_plans" }—— the three runtime Dylint UI carriers run as one typed `cargo test --locked` gate from the fixed `lints` workspace in full verify, compatibility CI, and core prerequisites, while fast remains no-compile.
@@ -67,6 +69,30 @@ use crate::{
 use anyhow::{Context, Result, bail};
 use std::path::Path;
 use std::process::Stdio;
+use std::time::{Duration, Instant};
+
+trait AggregateClock {
+    type Tick: Copy;
+
+    fn now(&self) -> Self::Tick;
+    fn elapsed(&self, start: Self::Tick, end: Self::Tick) -> Duration;
+}
+
+struct SystemAggregateClock;
+
+impl AggregateClock for SystemAggregateClock {
+    type Tick = Instant;
+
+    #[allow(clippy::disallowed_methods)] // system clock adapter boundary for local CLI timing
+    fn now(&self) -> Self::Tick {
+        Instant::now()
+    }
+
+    #[allow(clippy::disallowed_methods)] // system clock adapter boundary for local CLI timing
+    fn elapsed(&self, start: Self::Tick, end: Self::Tick) -> Duration {
+        end.duration_since(start)
+    }
+}
 
 /// verify 选项。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,6 +108,7 @@ struct VerifyOpts {
     /// `ci run --job ci-coverage`：用与 plan 同 base 的 CoverageProjection。
     /// `ci full` / CompatibilityCi：恒 Workspace。
     coverage_typed_job: bool,
+    execution_policy: crate::cmd::ExecutionPolicy,
 }
 
 /// in-process Rust 门（无外部进程 / 自管子进程）。
@@ -207,6 +234,13 @@ impl Step {
 
     fn needs_compile(&self) -> bool {
         self.id.spec().compile_kind() != CompileKind::NoCompile
+    }
+
+    fn uses_nextest(&self) -> bool {
+        matches!(
+            self.kind,
+            StepKind::Nextest(_) | StepKind::LocalOnlyExecution
+        ) || matches!(self.kind, StepKind::Internal(InternalCheck::Coverage))
     }
 
     /// 该步对应的 xtask carrier 源文件——仅 in-process 检查（`Internal` / `ToolGatedInternal`）有；
@@ -1148,12 +1182,15 @@ fn run_step(
     args: &[&str],
     env: &[(&str, &str)],
     cwd: &Path,
+    execution_policy: crate::cmd::ExecutionPolicy,
 ) -> Result<()> {
+    let args = cargo_args_for_policy(subcommand, args, execution_policy);
+    let args = args.iter().map(String::as_str).collect::<Vec<_>>();
     let rendered = std::iter::once(subcommand.as_str())
         .chain(args.iter().copied())
         .collect::<Vec<_>>()
         .join(" ");
-    let status = crate::cmd::cargo_cmd(subcommand, args, env, Some(cwd))
+    let status = crate::cmd::cargo_cmd(subcommand, &args, env, Some(cwd))
         .status()
         .map_err(|e| {
             anyhow::anyhow!("{lane}: 启动门步 `{label}`（cargo {}）失败: {e}", rendered)
@@ -1168,6 +1205,33 @@ fn run_step(
         "{lane}: 门步 `{label}` 失败（cargo {} 退出码 {code}）",
         rendered
     )
+}
+
+fn cargo_args_for_policy(
+    subcommand: crate::cmd::CargoSubcommand,
+    args: &[&str],
+    execution_policy: crate::cmd::ExecutionPolicy,
+) -> Vec<String> {
+    let mut owned = args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
+    let flag = if execution_policy.keeps_going() {
+        match subcommand {
+            crate::cmd::CargoSubcommand::Build
+            | crate::cmd::CargoSubcommand::Check
+            | crate::cmd::CargoSubcommand::Clippy => Some("--keep-going"),
+            crate::cmd::CargoSubcommand::Test => Some("--no-fail-fast"),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    if let Some(flag) = flag {
+        let insert_at = owned
+            .iter()
+            .position(|arg| arg == "--")
+            .unwrap_or(owned.len());
+        owned.insert(insert_at, flag.to_owned());
+    }
+    owned
 }
 
 /// 跑单步：Internal 进程内执行；CargoBuiltin 直接 spawn；Tool 先探测再按决策分派。
@@ -1187,10 +1251,11 @@ fn run_one(
                 root,
             )?
             .context("verify must prepare LocalOnly execution evidence")?;
-            crate::localonly_evidence::execute(root, request).map(|_| ())
+            crate::localonly_evidence::execute(root, request, opts.execution_policy).map(|_| ())
         }
         StepKind::Nextest(scope) => {
             crate::nextest::NextestInvocation::for_core(scope, opts.nextest_lane, opts.partition)
+                .with_execution_policy(opts.execution_policy)
                 .run(root, step.env)
         }
         StepKind::LintWorkspaceTests => {
@@ -1206,6 +1271,7 @@ fn run_one(
                 args,
                 step.env,
                 &root.join("lints"),
+                opts.execution_policy,
             )
         }
         StepKind::Cargo => {
@@ -1220,7 +1286,15 @@ fn run_one(
                 .ok_or_else(|| {
                     anyhow::anyhow!("{}: typed cargo subcommand 与 argv 漂移", step.label())
                 })?;
-            run_step(lane, step.label(), subcommand, args, step.env, root)
+            run_step(
+                lane,
+                step.label(),
+                subcommand,
+                args,
+                step.env,
+                root,
+                opts.execution_policy,
+            )
         }
     };
     match step.id.spec().tool() {
@@ -1443,14 +1517,16 @@ fn run_internal(check: InternalCheck, opts: &VerifyOpts, root: &Path) -> Result<
             run_check(&reconcile_outbox_command_guard::ReconcileOutboxCommandGuard)
         }
         InternalCheck::DeferGate => run_check(&crate::defergate::DeferGate),
-        InternalCheck::PostgresFeatureMatrix => crate::postgres_feature_matrix::run(),
+        InternalCheck::PostgresFeatureMatrix => {
+            crate::postgres_feature_matrix::run(opts.execution_policy)
+        }
         InternalCheck::Coverage => {
             let scope = if opts.coverage_typed_job {
                 crate::ci_impact::coverage_scope_for_typed_job(root)?
             } else {
                 crate::ci_impact::coverage_scope_for_full_ci()
             };
-            crate::coverage::run(scope)
+            crate::coverage::run(scope, opts.execution_policy)
         }
         // 轴 A 封装面：basis+engine+curated extras 全集（layer=None）；check=true 漂移门 fail-closed（PUBLICAPI-DRIFT-GATE-01）。
         InternalCheck::PublicApiCheck => crate::publicapi::run(true, false, None),
@@ -1458,19 +1534,138 @@ fn run_internal(check: InternalCheck, opts: &VerifyOpts, root: &Path) -> Result<
 }
 
 fn run_labeled_plan(lane: &str, plan: &[Step], opts: &VerifyOpts, root: &Path) -> Result<()> {
-    crate::nextest::validate_workspace(root)?;
-    for (i, step) in plan.iter().enumerate() {
-        eprintln!("{lane}: [{}/{}] {}", i + 1, plan.len(), step.label());
-        run_one(lane, step, opts, root, crate::cmd::tool_available)?;
+    execute_labeled_items_with_prerequisite(
+        lane,
+        plan,
+        opts.execution_policy,
+        &SystemAggregateClock,
+        "nextest-workspace-validation",
+        Step::uses_nextest,
+        || crate::nextest::validate_workspace(root),
+        |step| step.label().to_owned(),
+        |step| run_one(lane, step, opts, root, crate::cmd::tool_available),
+    )
+}
+
+#[cfg(test)]
+fn validate_nextest_for_plan(
+    plan: &[Step],
+    root: &Path,
+    validate: impl FnOnce(&Path) -> Result<()>,
+) -> Result<()> {
+    if plan.iter().any(Step::uses_nextest) {
+        validate(root)?;
     }
     Ok(())
 }
 
-/// verify 入口：按 plan 顺序跑每步，fail-fast。
+#[cfg(test)]
+fn execute_labeled_items<T>(
+    lane: &str,
+    items: &[T],
+    execution_policy: crate::cmd::ExecutionPolicy,
+    clock: &impl AggregateClock,
+    label: impl Fn(&T) -> String,
+    execute: impl FnMut(&T) -> Result<()>,
+) -> Result<()> {
+    execute_labeled_items_with_prerequisite(
+        lane,
+        items,
+        execution_policy,
+        clock,
+        "unused-prerequisite",
+        |_| false,
+        || Ok(()),
+        label,
+        execute,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_labeled_items_with_prerequisite<T>(
+    lane: &str,
+    items: &[T],
+    execution_policy: crate::cmd::ExecutionPolicy,
+    clock: &impl AggregateClock,
+    prerequisite_label: &str,
+    requires_prerequisite: impl Fn(&T) -> bool,
+    validate_prerequisite: impl FnOnce() -> Result<()>,
+    label: impl Fn(&T) -> String,
+    mut execute: impl FnMut(&T) -> Result<()>,
+) -> Result<()> {
+    let mut failures = Vec::new();
+    let prerequisite_failed = if items.iter().any(&requires_prerequisite) {
+        let started = clock.now();
+        match validate_prerequisite() {
+            Ok(()) => false,
+            Err(error) if execution_policy.keeps_going() => {
+                failures.push((
+                    prerequisite_label.to_owned(),
+                    clock.elapsed(started, clock.now()).as_secs_f64(),
+                    format!("{error:#}"),
+                ));
+                true
+            }
+            Err(error) => return Err(error),
+        }
+    } else {
+        false
+    };
+    for (i, item) in items.iter().enumerate() {
+        let item_label = label(item);
+        if prerequisite_failed && requires_prerequisite(item) {
+            eprintln!(
+                "{lane}: [{}/{}] {item_label}（跳过：{prerequisite_label} 失败）",
+                i + 1,
+                items.len()
+            );
+            continue;
+        }
+        eprintln!("{lane}: [{}/{}] {item_label}", i + 1, items.len());
+        let started = clock.now();
+        if let Err(error) = execute(item) {
+            let elapsed = clock.elapsed(started, clock.now()).as_secs_f64();
+            if !execution_policy.keeps_going() {
+                return Err(error);
+            }
+            failures.push((item_label, elapsed, format!("{error:#}")));
+        }
+    }
+    if !failures.is_empty() {
+        eprintln!("{lane}: 失败汇总（{} 项）", failures.len());
+        for (label, elapsed, error) in &failures {
+            eprintln!("- {label}（{elapsed:.1} 秒）：{error}");
+        }
+        bail!("{lane}: {} 个门步失败", failures.len());
+    }
+    Ok(())
+}
+
+fn select_verify_plan(plan: Vec<Step>, only: &[String]) -> Result<Vec<Step>> {
+    if only.is_empty() {
+        return Ok(plan);
+    }
+    for label in only {
+        if !REGISTRY.iter().any(|spec| spec.label() == label) {
+            bail!("verify --only 未知 gate: {label}");
+        }
+        if !plan.iter().any(|step| step.label() == label) {
+            bail!("verify --only gate 不属于当前计划: {label}");
+        }
+    }
+    Ok(plan
+        .into_iter()
+        .filter(|step| only.iter().any(|label| label == step.label()))
+        .collect())
+}
+
+/// verify 入口：按 registry 顺序执行所选 plan；默认 keep-going，显式 `--fail-fast` 首错停止。
 pub(crate) fn run(
     fast: bool,
     allow_missing_tools: bool,
     contract_against: Option<&str>,
+    fail_fast: bool,
+    only: &[String],
 ) -> Result<()> {
     let opts = VerifyOpts {
         fast,
@@ -1481,22 +1676,34 @@ pub(crate) fn run(
             .unwrap_or(contract::breaking::DEFAULT_AGAINST)
             .to_owned(),
         coverage_typed_job: false,
+        execution_policy: crate::cmd::ExecutionPolicy::from_fail_fast(fail_fast),
     };
     let root = workspace_root()?;
-    let plan = verify_plan(&opts);
+    let plan = select_verify_plan(verify_plan(&opts), only)?;
     let mode = if fast { "fast" } else { "full" };
-    eprintln!("verify（{mode}）：{} 步", plan.len());
+    if only.is_empty() {
+        eprintln!("verify（{mode}）：{} 步", plan.len());
+    } else {
+        eprintln!(
+            "verify（{mode} partial）：{} 步；仅供诊断，不代表完整 CI 通过",
+            plan.len()
+        );
+    }
     // 每步开始打 label——build/clippy/nextest 各数分钟，让操作者实时知道卡在哪步。
     run_labeled_plan("verify", &plan, &opts, &root)?;
-    eprintln!("verify（{mode}）：全部通过");
+    if only.is_empty() {
+        eprintln!("verify（{mode}）：全部通过");
+    } else {
+        eprintln!("verify（{mode} partial）：所选 gate 通过；不代表完整 CI 通过");
+    }
     Ok(())
 }
 
 /// `ci full` 本地兼容聚合入口（issue #1132）：按 [`plan_for`] 的兼容计划顺序跑每步，
-/// fail-fast。GitHub Actions 不调此聚合，而是分别调用四条 [`CiLane`]。本地完整
+/// 默认 keep-going，显式 fail-fast。GitHub Actions 不调此聚合，而是分别调用四条 [`CiLane`]。本地完整
 /// canonical 入口是 `make ci-full`；`make ci` 仅执行 10 分钟有界 adaptive preflight，不调用本聚合。
 /// `allow_missing_tools` 仅本地便利——CI 不传 = 缺工具 fail-closed。
-pub(crate) fn run_ci(allow_missing_tools: bool) -> Result<()> {
+pub(crate) fn run_ci(allow_missing_tools: bool, fail_fast: bool) -> Result<()> {
     let opts = VerifyOpts {
         fast: false,
         allow_missing_tools,
@@ -1504,6 +1711,7 @@ pub(crate) fn run_ci(allow_missing_tools: bool) -> Result<()> {
         nextest_lane: crate::nextest::NextestLane::CiCore,
         contract_against: contract::breaking::DEFAULT_AGAINST.to_owned(),
         coverage_typed_job: false,
+        execution_policy: crate::cmd::ExecutionPolicy::from_fail_fast(fail_fast),
     };
     let root = workspace_root()?;
     let plan = plan_for(PlanTarget::CompatibilityCi);
@@ -1528,6 +1736,7 @@ pub(crate) fn run_lane(
         nextest_lane: crate::nextest::NextestLane::CiCore,
         contract_against: contract::breaking::DEFAULT_AGAINST.to_owned(),
         coverage_typed_job: lane == CiLane::Coverage,
+        execution_policy: crate::cmd::ExecutionPolicy::FailFast,
     };
     let root = workspace_root()?;
     let plan = if lane == CiLane::Core {
@@ -1559,6 +1768,7 @@ pub(crate) fn run_core_execution(
         nextest_lane: crate::nextest::NextestLane::CiCore,
         contract_against: contract::breaking::DEFAULT_AGAINST.to_owned(),
         coverage_typed_job: false,
+        execution_policy: crate::cmd::ExecutionPolicy::FailFast,
     };
     let root = workspace_root()?;
     let plan = plan_for(PlanTarget::Core(execution));
@@ -1710,7 +1920,11 @@ pub(crate) fn run_job(job: CiJobKey, required_evidence_output: Option<&Path>) ->
         JobExecution::LocalOnlyRequired => {
             let request = localonly_evidence
                 .context("ci-local-only must prepare its required execution evidence")?;
-            crate::localonly_evidence::execute(&root, request)?;
+            crate::localonly_evidence::execute(
+                &root,
+                request,
+                crate::cmd::ExecutionPolicy::FailFast,
+            )?;
             Ok(())
         }
         JobExecution::Audit => run_audit(false),
@@ -1728,6 +1942,7 @@ pub(crate) fn run_audit(allow_missing_tools: bool) -> Result<()> {
         nextest_lane: crate::nextest::NextestLane::Verify,
         contract_against: contract::breaking::DEFAULT_AGAINST.to_owned(),
         coverage_typed_job: false,
+        execution_policy: crate::cmd::ExecutionPolicy::FailFast,
     };
     let root = workspace_root()?;
     let plan = audit_plan();
@@ -2140,11 +2355,186 @@ mod tests {
             nextest_lane: crate::nextest::NextestLane::Verify,
             contract_against: contract::breaking::DEFAULT_AGAINST.to_owned(),
             coverage_typed_job: false,
+            execution_policy: crate::cmd::ExecutionPolicy::FailFast,
         }
     }
 
     fn labels(plan: &[Step]) -> Vec<&'static str> {
         plan.iter().map(|s| s.label()).collect()
+    }
+
+    #[test]
+    fn verify_only_uses_registry_membership_and_canonical_order() -> anyhow::Result<()> {
+        let plan = verify_plan(&opts(false, false));
+        let selected = select_verify_plan(
+            plan,
+            &["clippy".to_owned(), "runtime-root-guard".to_owned()],
+        )?;
+        assert_eq!(labels(&selected), ["runtime-root-guard", "clippy"]);
+        assert!(
+            select_verify_plan(verify_plan(&opts(true, false)), &["build".to_owned()]).is_err()
+        );
+        assert!(
+            select_verify_plan(verify_plan(&opts(false, false)), &["not-a-gate".to_owned()])
+                .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn partial_non_nextest_plan_skips_unrelated_nextest_validation() -> anyhow::Result<()> {
+        let root = workspace_root()?;
+        let fmt_only = select_verify_plan(verify_plan(&opts(false, false)), &["fmt".to_owned()])?;
+        let mut called = false;
+        validate_nextest_for_plan(&fmt_only, &root, |_| {
+            called = true;
+            Ok(())
+        })?;
+        assert!(
+            !called,
+            "non-nextest partial plan must not run nextest validation"
+        );
+
+        let nextest_only = select_verify_plan(
+            verify_plan(&opts(false, false)),
+            &["default-test-runner".to_owned()],
+        )?;
+        validate_nextest_for_plan(&nextest_only, &root, |_| {
+            called = true;
+            Ok(())
+        })?;
+        assert!(called, "nextest gate must retain workspace validation");
+        Ok(())
+    }
+
+    #[test]
+    fn native_cargo_keep_going_flags_are_local_policy_only() {
+        use crate::cmd::{CargoSubcommand, ExecutionPolicy};
+
+        assert_eq!(
+            cargo_args_for_policy(
+                CargoSubcommand::Build,
+                &["--workspace"],
+                ExecutionPolicy::KeepGoing
+            ),
+            ["--workspace", "--keep-going"]
+        );
+        assert_eq!(
+            cargo_args_for_policy(
+                CargoSubcommand::Test,
+                &["--workspace"],
+                ExecutionPolicy::KeepGoing
+            ),
+            ["--workspace", "--no-fail-fast"]
+        );
+        assert_eq!(
+            cargo_args_for_policy(
+                CargoSubcommand::Clippy,
+                &["--workspace", "--", "-D", "warnings"],
+                ExecutionPolicy::KeepGoing,
+            ),
+            ["--workspace", "--keep-going", "--", "-D", "warnings"]
+        );
+        assert_eq!(
+            cargo_args_for_policy(
+                CargoSubcommand::Build,
+                &["--workspace"],
+                ExecutionPolicy::FailFast
+            ),
+            ["--workspace"]
+        );
+        assert_eq!(
+            cargo_args_for_policy(
+                CargoSubcommand::Deny,
+                &["check"],
+                ExecutionPolicy::KeepGoing
+            ),
+            ["check"]
+        );
+    }
+
+    #[test]
+    fn aggregate_executor_collects_or_stops_according_to_policy() {
+        use crate::cmd::ExecutionPolicy;
+
+        let items = [1, 2, 3];
+        let mut executed = Vec::new();
+        let result = execute_labeled_items(
+            "verify-test",
+            &items,
+            ExecutionPolicy::KeepGoing,
+            &SystemAggregateClock,
+            |item| format!("gate-{item}"),
+            |item| {
+                executed.push(*item);
+                if *item < 3 {
+                    bail!("failure-{item}");
+                }
+                Ok(())
+            },
+        );
+        assert!(result.is_err());
+        assert_eq!(executed, items);
+
+        executed.clear();
+        let result = execute_labeled_items(
+            "verify-test",
+            &items,
+            ExecutionPolicy::FailFast,
+            &SystemAggregateClock,
+            |item| format!("gate-{item}"),
+            |item| {
+                executed.push(*item);
+                if *item == 2 {
+                    bail!("failure-{item}");
+                }
+                Ok(())
+            },
+        );
+        assert!(result.is_err());
+        assert_eq!(executed, [1, 2]);
+    }
+
+    #[test]
+    fn prerequisite_failure_is_aggregated_or_fail_fast() {
+        use crate::cmd::ExecutionPolicy;
+
+        let items = [1, 2, 3];
+        let mut executed = Vec::new();
+        let result = execute_labeled_items_with_prerequisite(
+            "verify-test",
+            &items,
+            ExecutionPolicy::KeepGoing,
+            &SystemAggregateClock,
+            "nextest-validation",
+            |item| *item != 2,
+            || bail!("invalid nextest workspace"),
+            |item| format!("gate-{item}"),
+            |item| {
+                executed.push(*item);
+                Ok(())
+            },
+        );
+        assert!(result.is_err());
+        assert_eq!(executed, [2], "independent gate must continue");
+
+        executed.clear();
+        let result = execute_labeled_items_with_prerequisite(
+            "verify-test",
+            &items,
+            ExecutionPolicy::FailFast,
+            &SystemAggregateClock,
+            "nextest-validation",
+            |_| true,
+            || bail!("invalid nextest workspace"),
+            |item| format!("gate-{item}"),
+            |item| {
+                executed.push(*item);
+                Ok(())
+            },
+        );
+        assert!(result.is_err());
+        assert!(executed.is_empty(), "fail-fast stops at prerequisite");
     }
 
     #[test]
@@ -3698,7 +4088,8 @@ mod tests {
                 crate::cmd::CargoSubcommand::Fmt,
                 &["--zzz-not-a-cargo-flag"],
                 &[],
-                &root
+                &root,
+                crate::cmd::ExecutionPolicy::FailFast,
             )
             .is_err()
         );
@@ -3716,7 +4107,8 @@ mod tests {
                 crate::cmd::CargoSubcommand::Fmt,
                 &["--version"],
                 &[],
-                &root
+                &root,
+                crate::cmd::ExecutionPolicy::FailFast,
             )
             .is_ok()
         );

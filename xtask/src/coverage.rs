@@ -165,13 +165,16 @@ fn render_failures(failing: &[Shortfall]) -> String {
 /// ci 覆盖率门：跑 llvm-cov nextest（= nextest 门，留 profdata）→ 评**两子门**（任一红即 ci 非零退出）：
 /// ① 绝对地板（export JSON；Packages 下条件评 StrictTouched）；② per-diff 增量（复用同一 profdata 出 lcov）。
 /// Workspace 路径额外追加 IdentityAudit Journey supplement（`--no-clean`）。
-pub(crate) fn run(scope: CoverageScope) -> Result<()> {
+pub(crate) fn run(
+    scope: CoverageScope,
+    execution_policy: crate::cmd::ExecutionPolicy,
+) -> Result<()> {
     eprintln!("coverage: scope {}", scope.summary());
     let root = workspace_root()?;
-    let json = run_llvm_cov(&root, &scope)?;
+    let json = run_llvm_cov(&root, &scope, execution_policy)?;
     evaluate_strict_floor(&json, &scope)?;
     if matches!(scope, CoverageScope::Workspace { .. }) {
-        run_identityaudit_supplement(&root)?;
+        run_identityaudit_supplement(&root, execution_policy)?;
     }
     // ② per-diff 增量门：复用 nextest 跑测试留下的 profdata 出 lcov（不重跑测试），本 PR 新增/修改可执行行
     //    ≥80%（COVERAGE-DIFF-FLOOR-01，见 crate::diffcov）。
@@ -213,7 +216,10 @@ fn evaluate_strict_floor(json: &str, scope: &CoverageScope) -> Result<()> {
     Ok(())
 }
 
-fn run_identityaudit_supplement(root: &Path) -> Result<()> {
+fn run_identityaudit_supplement(
+    root: &Path,
+    execution_policy: crate::cmd::ExecutionPolicy,
+) -> Result<()> {
     let out = coverage_output_path(
         &coverage_report_dir(root),
         "xtask-ci-coverage-identityaudit-supplement.lcov",
@@ -223,13 +229,19 @@ fn run_identityaudit_supplement(root: &Path) -> Result<()> {
         .context("IdentityAudit supplement 输出必须位于 workspace 内")?
         .to_str()
         .context("IdentityAudit supplement 输出路径非法 UTF-8")?;
-    crate::nextest::NextestInvocation::for_identityaudit_coverage(out_str)?.run(root, &[])
+    crate::nextest::NextestInvocation::for_identityaudit_coverage(out_str)?
+        .with_execution_policy(execution_policy)
+        .run(root, &[])
 }
 
 /// 跑 `cargo llvm-cov nextest`（Packages：`-p`；Workspace：`--workspace`）+ features；
 /// workspace 的 `integration` features 不启用，因此无需 DB/broker。stdio 继承（实时看测试输出）。
 /// 非零退出 = 测试失败（nextest 门）⇒ `Err`。
-fn run_llvm_cov(root: &Path, scope: &CoverageScope) -> Result<String> {
+fn run_llvm_cov(
+    root: &Path,
+    scope: &CoverageScope,
+    execution_policy: crate::cmd::ExecutionPolicy,
+) -> Result<String> {
     // 跟随 CARGO_TARGET_DIR（clean_cmd 不清它——见 cmd.rs STRIPPED_ENV charter），否则默认 root/target；
     // 与 llvm-cov 实际写 JSON 的 target 目录一致（review #206 C6）。
     let out = coverage_output_path(&coverage_report_dir(root), "xtask-ci-coverage.json")?;
@@ -238,7 +250,9 @@ fn run_llvm_cov(root: &Path, scope: &CoverageScope) -> Result<String> {
         .context("coverage output 必须位于 workspace 内，避免证据泄露绝对路径")?
         .to_str()
         .context("覆盖率 JSON 输出路径非法 UTF-8")?;
-    crate::nextest::NextestInvocation::for_coverage(out_str, scope.clone())?.run(root, &[])?;
+    crate::nextest::NextestInvocation::for_coverage(out_str, scope.clone())?
+        .with_execution_policy(execution_policy)
+        .run(root, &[])?;
     std::fs::read_to_string(&out).with_context(|| format!("读覆盖率 JSON 失败: {}", out.display()))
 }
 

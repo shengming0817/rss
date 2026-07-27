@@ -302,6 +302,28 @@ pub(crate) enum CargoSubcommand {
     LlvmCovReport,
 }
 
+/// Aggregate execution policy. Local diagnostic entrypoints default to collecting every
+/// independent failure, while remote typed jobs explicitly retain fail-fast behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExecutionPolicy {
+    KeepGoing,
+    FailFast,
+}
+
+impl ExecutionPolicy {
+    pub(crate) const fn from_fail_fast(fail_fast: bool) -> Self {
+        if fail_fast {
+            Self::FailFast
+        } else {
+            Self::KeepGoing
+        }
+    }
+
+    pub(crate) const fn keeps_going(self) -> bool {
+        matches!(self, Self::KeepGoing)
+    }
+}
+
 impl CargoSubcommand {
     pub(crate) const fn as_str(self) -> &'static str {
         match self {

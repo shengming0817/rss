@@ -54,7 +54,7 @@
 //!   `cargo xtask reconcile-outbox-command-guard`
 //!                                      reconcile scheduler transactional command outbox seam 守卫（CI 门）
 //!   `cargo xtask tenancy-closeout`      tenancy/AuthZ/projection closeout 反向自检（CI 门）
-//!   `cargo xtask verify [--fast] [--allow-missing-tools]`
+//!   `cargo xtask verify [--fast] [--allow-missing-tools] [--fail-fast] [--only <gate>]...`
 //!                                      本地全量治理门聚合入口（GitHub Actions 与本地共用同一门）：fmt + meta（contract
 //!                                      validate / assembly validate / layer-deps / codegen --check）+ build + Postgres
 //!                                      feature compile matrix + clippy + nextest + deny + dylint；
@@ -64,9 +64,9 @@
 //!                                      封装面 baseline（包装 cargo-public-api，需 nightly rustdoc-json；无
 //!                                      --layer 时检查 basis + engine + curated extras）；
 //!                                      --check 缺 baseline 默认 fail-fast，--allow-missing 显式宽限（PR-0 自检）
-//!   `cargo xtask ci local --base <ref>`
+//!   `cargo xtask ci local --base <ref> [--fail-fast] [--only <stage>]...`
 //!                                      仅分析 `<ref>...HEAD` 已提交差异，经 typed ImpactSet 生成本地 preflight。
-//!   `cargo xtask ci full [--allow-missing-tools]`
+//!   `cargo xtask ci full [--allow-missing-tools] [--fail-fast]`
 //!                                      原本地 CI lane 超集聚合（coverage/public-api/audit 等完整门集）。
 //!   `cargo xtask ci plan --event-path <json> --policy <toml> --output <json> --github-output <file>`
 //!                                      GitHub event/diff → typed 16-job impact plan 与动态 matrix。
@@ -212,6 +212,8 @@ enum Command {
         fast: bool,
         allow_missing_tools: bool,
         against: Option<String>,
+        fail_fast: bool,
+        only: Vec<String>,
     },
     PublicApi {
         check: bool,
@@ -220,6 +222,7 @@ enum Command {
     },
     CiFull {
         allow_missing_tools: bool,
+        fail_fast: bool,
     },
     CiLocal(ci_impact::LocalOptions),
     CiRun {
@@ -561,11 +564,25 @@ fn parse_verify(args: &[&str]) -> Result<Command> {
     let mut fast = false;
     let mut allow_missing_tools = false;
     let mut against = None;
+    let mut fail_fast = false;
+    let mut only = Vec::new();
     let mut iter = args.iter().copied();
     while let Some(tok) = iter.next() {
         match tok {
             "--fast" => fast = true,
             "--allow-missing-tools" => allow_missing_tools = true,
+            "--fail-fast" if !fail_fast => fail_fast = true,
+            "--fail-fast" => bail!("verify 重复参数: --fail-fast"),
+            "--only" => {
+                let value = iter.next().context("verify 参数 --only 缺少值")?;
+                if value.is_empty() || value.starts_with("--") {
+                    bail!("verify 参数 --only 必须是非空 gate label，不能是 flag");
+                }
+                if only.iter().any(|selected| selected == value) {
+                    bail!("verify 重复 gate: {value}");
+                }
+                only.push(value.to_owned());
+            }
             "--against" => {
                 let value = iter.next().context("verify 参数 --against 缺少值")?;
                 if value.is_empty() || value.starts_with("--") {
@@ -576,7 +593,7 @@ fn parse_verify(args: &[&str]) -> Result<Command> {
                 }
             }
             other => bail!(
-                "verify 未知参数: {other}；用法: cargo xtask verify [--fast] [--allow-missing-tools] [--against <git-ref>]"
+                "verify 未知参数: {other}；用法: cargo xtask verify [--fast] [--allow-missing-tools] [--against <git-ref>] [--fail-fast] [--only <gate-label>]..."
             ),
         }
     }
@@ -584,6 +601,8 @@ fn parse_verify(args: &[&str]) -> Result<Command> {
         fast,
         allow_missing_tools,
         against,
+        fail_fast,
+        only,
     })
 }
 
@@ -604,18 +623,21 @@ fn parse_ci(args: &[&str]) -> Result<Command> {
 
 fn parse_ci_full(args: &[&str]) -> Result<Command> {
     let mut allow_missing_tools = false;
+    let mut fail_fast = false;
     for &tok in args {
         match tok {
             "--allow-missing-tools" if !allow_missing_tools => allow_missing_tools = true,
+            "--fail-fast" if !fail_fast => fail_fast = true,
             other => {
                 bail!(
-                    "ci full 未知或重复参数: {other}；用法: cargo xtask ci full [--allow-missing-tools]"
+                    "ci full 未知或重复参数: {other}；用法: cargo xtask ci full [--allow-missing-tools] [--fail-fast]"
                 )
             }
         }
     }
     Ok(Command::CiFull {
         allow_missing_tools,
+        fail_fast,
     })
 }
 
@@ -740,7 +762,15 @@ fn dispatch(args: &[String]) -> Result<()> {
             fast,
             allow_missing_tools,
             against,
-        } => verify::run(fast, allow_missing_tools, against.as_deref()),
+            fail_fast,
+            only,
+        } => verify::run(
+            fast,
+            allow_missing_tools,
+            against.as_deref(),
+            fail_fast,
+            &only,
+        ),
         Command::PublicApi {
             check,
             allow_missing,
@@ -748,7 +778,8 @@ fn dispatch(args: &[String]) -> Result<()> {
         } => publicapi::run(check, allow_missing, layer),
         Command::CiFull {
             allow_missing_tools,
-        } => verify::run_ci(allow_missing_tools),
+            fail_fast,
+        } => verify::run_ci(allow_missing_tools, fail_fast),
         Command::CiLocal(options) => ci_impact::run_local(&workspace_root()?, &options),
         Command::CiRun {
             job,
@@ -1347,6 +1378,8 @@ mod tests {
                 fast: false,
                 allow_missing_tools: false,
                 against: None,
+                fail_fast: false,
+                only: Vec::new(),
             }
         );
         Ok(())
@@ -1360,6 +1393,8 @@ mod tests {
                 fast: true,
                 allow_missing_tools: false,
                 against: None,
+                fail_fast: false,
+                only: Vec::new(),
             }
         );
         assert_eq!(
@@ -1368,6 +1403,8 @@ mod tests {
                 fast: false,
                 allow_missing_tools: true,
                 against: None,
+                fail_fast: false,
+                only: Vec::new(),
             }
         );
         assert_eq!(
@@ -1376,6 +1413,25 @@ mod tests {
                 fast: true,
                 allow_missing_tools: true,
                 against: None,
+                fail_fast: false,
+                only: Vec::new(),
+            }
+        );
+        assert_eq!(
+            parse_command(&s(&[
+                "verify",
+                "--fail-fast",
+                "--only",
+                "clippy",
+                "--only",
+                "build",
+            ]))?,
+            Command::Verify {
+                fast: false,
+                allow_missing_tools: false,
+                against: None,
+                fail_fast: true,
+                only: vec!["clippy".to_owned(), "build".to_owned()],
             }
         );
         Ok(())
@@ -1386,6 +1442,10 @@ mod tests {
     fn parse_command_verify_rejects_unknown_flag() {
         assert!(parse_command(&s(&["verify", "--bogus"])).is_err());
         assert!(parse_command(&s(&["verify", "--fast", "extra"])).is_err());
+        assert!(parse_command(&s(&["verify", "--only"])).is_err());
+        assert!(parse_command(&s(&["verify", "--only", "--fast"])).is_err());
+        assert!(parse_command(&s(&["verify", "--only", "fmt", "--only", "fmt"])).is_err());
+        assert!(parse_command(&s(&["verify", "--fail-fast", "--fail-fast"])).is_err());
     }
 
     #[test]
@@ -1401,6 +1461,8 @@ mod tests {
                 fast: true,
                 allow_missing_tools: false,
                 against: Some("0123456789abcdef0123456789abcdef01234567".to_owned()),
+                fail_fast: false,
+                only: Vec::new(),
             }
         );
         for args in [
@@ -1492,13 +1554,22 @@ mod tests {
         assert_eq!(
             parse_command(&s(&["ci", "full"]))?,
             Command::CiFull {
-                allow_missing_tools: false
+                allow_missing_tools: false,
+                fail_fast: false,
             }
         );
         assert_eq!(
             parse_command(&s(&["ci", "full", "--allow-missing-tools"]))?,
             Command::CiFull {
-                allow_missing_tools: true
+                allow_missing_tools: true,
+                fail_fast: false,
+            }
+        );
+        assert_eq!(
+            parse_command(&s(&["ci", "full", "--fail-fast"]))?,
+            Command::CiFull {
+                allow_missing_tools: false,
+                fail_fast: true,
             }
         );
         assert!(matches!(
