@@ -14,7 +14,8 @@
 | Serving configuration is one captured generation | `RuntimeConfigSnapshot` and the runtime environment funnel cover serving/operator consumers; RuntimePlan receives only the borrowed snapshot capability | raw configuration and secrets cannot enter the plan artifact |
 | Settings-only assembly is an executable fail-closed closure | `assemblies/settingsonly` owns `settingsonly-server`, a closed config parser and Draft-07 schema, Primary and domain-free Health listeners, Postgres/Vault/JWKS/Settings probes, the `runtimeexec` launch path, a SIGTERM journey, and the `settingsonly-runtime` image target | Settings can be deployed as an independently runnable closure; Identity and Audit are intentionally absent, so invalid credentials receive 401 and every verified credential receives 403 |
 | Identity-audit assembly is an executable subset closure | `assemblies/identityaudit` owns its launch binary, closed configuration schema, probes, image target, SIGTERM journey, and shared `runtimeexec` lifecycle | Identity/Audit has an independently runnable, fail-closed assembly profile |
-| Runtime-bound DeploymentPlan is landed | `assembly-schema` compiles the exact RuntimePlan identity with closed deployment facts; `cargo xtask deployment plan render|check` owns the committed runtime, settingsonly, and identityaudit JSON exact set | deployment identity and raw-byte drift are verifiable before future Helm/policy/kind acceptance |
+| Runtime-bound DeploymentPlan is landed | `assembly-schema` compiles the exact RuntimePlan identity with closed deployment facts; `cargo xtask deployment plan render|check` owns the committed runtime, settingsonly, and identityaudit JSON exact set | deployment identity and raw-byte drift are the sole input to the static Helm projection |
+| Static multi-assembly Helm projection is landed | one chart bundles the three verified plans; closed profile values/schema and render goldens are owned by the DeploymentPlan gate and Helm 4.2.0 | rendered Kubernetes YAML is deterministic, but policy/kind runtime acceptance is not yet claimed |
 | CI evidence is local/shadow | `README.md` records the typed `ci-gate` and Azure active forge, while the gate is not a required forge check | future evidence must extend the local gate without claiming branch protection |
 
 `docs/spec/001-runtime-assembly-plan/` is superseded, immutable audit lineage. It is not an active reader, schema version, alias, or compatibility surface.
@@ -42,7 +43,7 @@ assembly.toml + generated modules/providers + contracts
   runtime and settingsonly. The identityaudit executable closure and the existing cross-assembly
   artifact-matrix boundary remain with #1797–#1798.
 - Production security posture closes persistent revocation, Vault allowlists, and production manifest requirements through the landed #1799–#1801 carriers.
-- **DeploymentPlan** derives typed deployment facts from the exact RuntimePlan identity and renders three committed canonical JSON plans (#1802). Helm, policy, and kind acceptance remain downstream (#1803–#1805).
+- **DeploymentPlan** derives typed deployment facts from the exact RuntimePlan identity and renders three committed canonical JSON plans (#1802). #1803 projects them through one drift-checked Helm chart; #1804 policy/secret/sidecar closure and #1805 kind acceptance remain downstream.
 - **RuntimeInventory** will expose authorized typed runtime evidence. Its design schema here is not the HTTP wire source; #1806 must add the formal `contracts/http/**` contract with auth mode `permission|serviceOwned` and explicit resource sharing `tenantScoped|global`; `public|bootstrap|clientsOnly` are rejected.
 - OCI evidence and the existing local `ci-gate` will verify exact source SHA, assembly/runtime-plan/deployment fingerprints, and same-head receipts (#1807–#1809).
 
@@ -69,7 +70,8 @@ The four Draft-07 files under the active SpecKit freeze only the minimum downstr
 
 AssemblyLock, RuntimePlan, and DeploymentPlan now have matching Rust types, strict readers,
 generators/compilers, and goldens. RuntimeInventory remains a design contract; this table does not
-claim its endpoint or downstream Helm/policy/kind evidence already exists.
+claim its endpoint or downstream policy/kind runtime evidence already exists. #1803's Helm evidence is
+limited to repository-static lint/render/profile closure.
 
 ## 缺口与 owner
 
@@ -83,7 +85,8 @@ claim its endpoint or downstream Helm/policy/kind evidence already exists.
 | identityaudit runnable closure and cross-assembly artifact matrix | #1797–#1798 | Landed: Hard assembly launch path; Medium artifact closure |
 | production security posture | #1799–#1801 | Landed: Hard types, database constraints, and manifest validation |
 | Runtime-bound DeploymentPlan | #1802 | Landed: Hard schema/compiler/bound reader; Medium exact artifact closure |
-| Kubernetes render and acceptance | #1803–#1805 | Hard Helm/policy types; Medium drift/policy/kind acceptance |
+| Kubernetes static render | #1803 | Landed: closed profile/schema/plan projection; Medium Helm lint/render drift |
+| Kubernetes policy and kind acceptance | #1804–#1805 | Planned Hard policy types; Medium policy/kind runtime acceptance |
 | protected inventory wire surface | #1806 | Hard DTO/codegen plus Medium authorization verification |
 | release and aggregate evidence | #1807–#1809 | Medium OCI verifier and extended local `ci-gate` |
 
@@ -96,6 +99,7 @@ planned capability and must not be represented as present production closure.
 - DeploymentPlan follows the landed #1794 live RuntimePlan cutover; the tracker and 52-edge DAG retain this dependency for audit lineage.
 - #1779 established the repository specification carrier and registered its selftest in the typed
   `verify --fast` Meta aggregate. Subsequent owners through #1802 landed the RuntimePlan execution
-  chain, three runnable assembly profiles, and generated DeploymentPlan output. Helm,
-  policy/kind acceptance, RuntimeInventory, and OCI same-head/signature receipts remain with their
-  downstream owners.
+  chain, three runnable assembly profiles, generated DeploymentPlan output, and #1803's static Helm
+  profile/render closure. Secret mapping/sidecars/policy, kind execution, RuntimeInventory, and OCI
+  same-head/signature receipts remain with their downstream owners. Reverting #1803 removes only
+  repository chart/tooling/generated carriers; it performs no cluster, database, or secret rollback.

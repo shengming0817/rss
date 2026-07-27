@@ -1,0 +1,288 @@
+---
+# Source: rss/templates/serviceaccount.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: rss-runtime-d70f52d0f100
+  labels:
+    helm.sh/chart: rss-0.1.0
+    app.kubernetes.io/name: rss
+    app.kubernetes.io/instance: rss
+    app.kubernetes.io/component: runtime
+    app.kubernetes.io/managed-by: Helm
+    rss.gocell.io/profile: runtime
+  annotations:
+    rss.gocell.io/assembly-fingerprint: "sha256:d351aa60214f224295b471fced7b91be88d9008fb8950ae69b3d5e3dc6a3b7af"
+    rss.gocell.io/runtime-plan-fingerprint: "sha256:64c527bac08cffa336decaa1099769c0b8822ab8d69dd15d7de69e1359b36064"
+    rss.gocell.io/deployment-fingerprint: "sha256:e58f45e6573048e9c1b32fcf7e6aa22802f1451bfee057456f4ce0f8b0250f51"
+automountServiceAccountToken: false
+
+---
+# Source: rss/templates/configmap.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rss-runtime-plan-e58f45e65730
+  labels:
+    helm.sh/chart: rss-0.1.0
+    app.kubernetes.io/name: rss
+    app.kubernetes.io/instance: rss
+    app.kubernetes.io/component: runtime
+    app.kubernetes.io/managed-by: Helm
+    rss.gocell.io/profile: runtime
+  annotations:
+    rss.gocell.io/assembly-fingerprint: "sha256:d351aa60214f224295b471fced7b91be88d9008fb8950ae69b3d5e3dc6a3b7af"
+    rss.gocell.io/runtime-plan-fingerprint: "sha256:64c527bac08cffa336decaa1099769c0b8822ab8d69dd15d7de69e1359b36064"
+    rss.gocell.io/deployment-fingerprint: "sha256:e58f45e6573048e9c1b32fcf7e6aa22802f1451bfee057456f4ce0f8b0250f51"
+immutable: true
+data:
+  plan.json: |
+    {
+      "schemaVersion": 1,
+      "assemblyFingerprint": "sha256:d351aa60214f224295b471fced7b91be88d9008fb8950ae69b3d5e3dc6a3b7af",
+      "runtimePlanFingerprint": "sha256:64c527bac08cffa336decaa1099769c0b8822ab8d69dd15d7de69e1359b36064",
+      "deploymentFingerprint": "sha256:e58f45e6573048e9c1b32fcf7e6aa22802f1451bfee057456f4ce0f8b0250f51",
+      "workloads": [
+        {
+          "name": "runtime",
+          "image": "ghcr.io/gocell/rss-runtime@sha256:d92c6a81b2ff50096bcda80885427d1f59a25b5f483f7055523504925d16ab23",
+          "identity": {
+            "name": "runtime",
+            "serviceAccount": "runtime"
+          },
+          "secretRefs": [
+            {
+              "kind": "kubernetesSecret",
+              "name": "rss-runtime",
+              "key": "database-url"
+            },
+            {
+              "kind": "kubernetesSecret",
+              "name": "rss-runtime",
+              "key": "oidc-client-secret"
+            },
+            {
+              "kind": "kubernetesSecret",
+              "name": "rss-runtime",
+              "key": "service-token-signing-key"
+            },
+            {
+              "kind": "vaultRef",
+              "storeId": "rss-vault",
+              "refKey": "runtime/keyring"
+            }
+          ],
+          "resources": {
+            "requests": {
+              "cpu": "500m",
+              "memory": "512Mi"
+            },
+            "limits": {
+              "cpu": "4",
+              "memory": "2Gi"
+            }
+          },
+          "probes": [
+            {
+              "kind": "startup",
+              "path": "/health/v1/healthz",
+              "port": 8082
+            },
+            {
+              "kind": "readiness",
+              "path": "/health/v1/readyz",
+              "port": 8082
+            },
+            {
+              "kind": "liveness",
+              "path": "/health/v1/healthz",
+              "port": 8082
+            }
+          ]
+        }
+      ],
+      "services": [
+        {
+          "name": "runtime",
+          "workload": "runtime",
+          "ports": [
+            {
+              "name": "admin",
+              "port": 8081,
+              "exposure": "serviceExposed"
+            },
+            {
+              "name": "health",
+              "port": 8082,
+              "exposure": "serviceExposed"
+            },
+            {
+              "name": "http",
+              "port": 8080,
+              "exposure": "serviceExposed"
+            }
+          ]
+        },
+        {
+          "name": "runtime-internal",
+          "workload": "runtime",
+          "ports": [
+            {
+              "name": "internal",
+              "port": 8083,
+              "exposure": "workloadOnly"
+            }
+          ]
+        }
+      ]
+    }
+
+---
+# Source: rss/templates/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: rss-runtime
+  labels:
+    helm.sh/chart: rss-0.1.0
+    app.kubernetes.io/name: rss
+    app.kubernetes.io/instance: rss
+    app.kubernetes.io/component: runtime
+    app.kubernetes.io/managed-by: Helm
+    rss.gocell.io/profile: runtime
+  annotations:
+    rss.gocell.io/assembly-fingerprint: "sha256:d351aa60214f224295b471fced7b91be88d9008fb8950ae69b3d5e3dc6a3b7af"
+    rss.gocell.io/runtime-plan-fingerprint: "sha256:64c527bac08cffa336decaa1099769c0b8822ab8d69dd15d7de69e1359b36064"
+    rss.gocell.io/deployment-fingerprint: "sha256:e58f45e6573048e9c1b32fcf7e6aa22802f1451bfee057456f4ce0f8b0250f51"
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: rss
+    app.kubernetes.io/instance: rss
+    app.kubernetes.io/component: runtime
+  ports:
+    - name: admin
+      port: 8081
+      targetPort: admin
+      protocol: TCP
+    - name: health
+      port: 8082
+      targetPort: health
+      protocol: TCP
+    - name: http
+      port: 8080
+      targetPort: http
+      protocol: TCP
+
+---
+# Source: rss/templates/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rss-runtime
+  labels:
+    helm.sh/chart: rss-0.1.0
+    app.kubernetes.io/name: rss
+    app.kubernetes.io/instance: rss
+    app.kubernetes.io/component: runtime
+    app.kubernetes.io/managed-by: Helm
+    rss.gocell.io/profile: runtime
+  annotations:
+    rss.gocell.io/assembly-fingerprint: "sha256:d351aa60214f224295b471fced7b91be88d9008fb8950ae69b3d5e3dc6a3b7af"
+    rss.gocell.io/runtime-plan-fingerprint: "sha256:64c527bac08cffa336decaa1099769c0b8822ab8d69dd15d7de69e1359b36064"
+    rss.gocell.io/deployment-fingerprint: "sha256:e58f45e6573048e9c1b32fcf7e6aa22802f1451bfee057456f4ce0f8b0250f51"
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: rss
+      app.kubernetes.io/instance: rss
+      app.kubernetes.io/component: runtime
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: rss
+        app.kubernetes.io/instance: rss
+        app.kubernetes.io/component: runtime
+      annotations:
+        rss.gocell.io/assembly-fingerprint: "sha256:d351aa60214f224295b471fced7b91be88d9008fb8950ae69b3d5e3dc6a3b7af"
+        rss.gocell.io/runtime-plan-fingerprint: "sha256:64c527bac08cffa336decaa1099769c0b8822ab8d69dd15d7de69e1359b36064"
+        rss.gocell.io/deployment-fingerprint: "sha256:e58f45e6573048e9c1b32fcf7e6aa22802f1451bfee057456f4ce0f8b0250f51"
+    spec:
+      serviceAccountName: rss-runtime-d70f52d0f100
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: runtime
+          image: "ghcr.io/gocell/rss-runtime@sha256:d92c6a81b2ff50096bcda80885427d1f59a25b5f483f7055523504925d16ab23"
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            privileged: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            seccompProfile:
+              type: RuntimeDefault
+          ports:
+            - name: admin
+              containerPort: 8081
+              protocol: TCP
+            - name: health
+              containerPort: 8082
+              protocol: TCP
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+            - name: internal
+              containerPort: 8083
+              protocol: TCP
+          resources:
+            limits:
+              cpu: "4"
+              memory: 2Gi
+            requests:
+              cpu: 500m
+              memory: 512Mi
+          startupProbe:
+            httpGet:
+              path: "/health/v1/healthz"
+              port: 8082
+              scheme: HTTP
+          readinessProbe:
+            httpGet:
+              path: "/health/v1/readyz"
+              port: 8082
+              scheme: HTTP
+          livenessProbe:
+            httpGet:
+              path: "/health/v1/healthz"
+              port: 8082
+              scheme: HTTP
+          volumeMounts:
+            - name: deployment-plan
+              mountPath: /var/run/rss/deployment
+              readOnly: true
+      volumes:
+        - name: deployment-plan
+          projected:
+            defaultMode: 0444
+            sources:
+              - configMap:
+                  name: rss-runtime-plan-e58f45e65730
+                  items:
+                    - key: plan.json
+                      path: plan.json

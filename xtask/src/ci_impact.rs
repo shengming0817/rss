@@ -72,7 +72,7 @@ const HIGH_IMPACT_PATHS: &[&str] = &[
     "deny.toml",
     "clippy.toml",
 ];
-const HIGH_IMPACT_PREFIXES: &[&str] = &[".config/ci-impact"];
+const HIGH_IMPACT_PREFIXES: &[&str] = &[".config/ci-impact", "deploy/generated/", "deploy/helm/"];
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Options {
     pub(crate) event_path: PathBuf,
@@ -3833,6 +3833,34 @@ mod tests {
                     .map(LocalStep::label)
                     .collect::<Vec<_>>(),
                 expected
+            );
+        }
+    }
+
+    #[test]
+    fn deployment_machine_paths_run_local_meta_and_remote_full() {
+        for path in [
+            "deploy/generated/runtime.deployment-plan.json",
+            "deploy/helm/rss/Chart.yaml",
+            "deploy/helm/rss/values/runtime.yaml",
+            "deploy/helm/rss/templates/deployment.yaml",
+            "deploy/helm/rss/tests/golden/runtime.yaml",
+        ] {
+            let impact = impact_entries(
+                &[DiffEntry::modified(path)],
+                None,
+                &BTreeSet::new(),
+                &BTreeMap::new(),
+            );
+            assert_eq!(
+                LocalProjection::from(&impact),
+                LocalProjection::FastMeta,
+                "deployment machine path must execute local fast/meta: {path}"
+            );
+            assert_eq!(
+                RemoteProjection::from(&impact).into_recommendation(),
+                Recommendation::Full(FullCause::GlobalImpact),
+                "deployment machine path must remain fail-safe full remotely: {path}"
             );
         }
     }

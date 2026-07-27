@@ -1225,6 +1225,19 @@ fn run_one(
     };
     match step.id.spec().tool() {
         ToolRequirement::InProcess | ToolRequirement::CargoBuiltin(_) => execute(),
+        ToolRequirement::ExternalTool {
+            program,
+            version,
+            install_hint,
+        } => run_external_tool_gated(
+            lane,
+            program,
+            version,
+            opts.allow_missing_tools,
+            install_hint,
+            step.label(),
+            execute,
+        ),
         ToolRequirement::Nextest => run_nextest_step_gated(
             lane,
             step,
@@ -1249,6 +1262,43 @@ fn run_one(
             install_hint,
             step.label(),
             execute,
+        ),
+    }
+}
+
+fn run_external_tool_gated(
+    lane: &str,
+    program: crate::cmd::ExternalProgram,
+    version: &str,
+    allow_missing: bool,
+    install_hint: &str,
+    label: &str,
+    on_run: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    let probe = program.as_str();
+    let probe_result = match program {
+        crate::cmd::ExternalProgram::Helm => crate::workspace_root()
+            .and_then(|root| crate::deployment_plan::helm_probe(&root).map_err(Into::into)),
+        _ => bail!("{lane}: unsupported external tool probe `{probe}`"),
+    };
+    if let Err(error) = &probe_result
+        && !matches!(
+            error.downcast_ref::<crate::deployment_plan::HelmProbeError>(),
+            Some(crate::deployment_plan::HelmProbeError::Missing)
+        )
+    {
+        bail!("{lane}: `{probe}` probe rejected gate `{label}`: {error}");
+    }
+    match resolve_tool(probe_result.is_ok(), allow_missing) {
+        ToolAction::Run => on_run(),
+        ToolAction::SkipWarn => {
+            eprintln!(
+                "{lane}: [跳过] `{label}`（缺 `{probe} v{version}`，--allow-missing-tools 宽限）。装：{install_hint}"
+            );
+            Ok(())
+        }
+        ToolAction::Fail => bail!(
+            "{lane}: 缺 `{probe} v{version}`（门步 `{label}`）。装：{install_hint}\n（门不建议绕过；确需可显式 --allow-missing-tools）"
         ),
     }
 }
@@ -3205,7 +3255,13 @@ mod tests {
         anyhow::ensure!(
             step.id.spec().lanes() == [Some(CiLane::Meta), None]
                 && step.id.spec().verify_membership() == VerifyMembership::Included
-                && step.id.spec().compat() == CompatMembership::Included,
+                && step.id.spec().compat() == CompatMembership::Included
+                && step.id.spec().tool()
+                    == ToolRequirement::ExternalTool {
+                        program: crate::cmd::ExternalProgram::Helm,
+                        version: crate::deployment_plan::HELM_VERSION,
+                        install_hint: crate::ci_lanes::HELM_HINT,
+                    },
             "deployment plan gate membership drift"
         );
         Ok(())
@@ -5314,6 +5370,7 @@ mod tests {
             "cargo-dylint@",
             "dylint-link@",
             "cargo-public-api@",
+            "helm@",
         ];
 
         let reusable_lines = yaml_indented_code_lines(reusable_yaml);
@@ -5411,6 +5468,9 @@ mod tests {
                 ) && step.env_exact(
                     "RSS_BINSTALL_TOOLS",
                     &["${{ steps.tool-policy.outputs.binstall-tools }}"],
+                ) && step.env_exact(
+                    "RSS_DOWNLOAD_TOOLS",
+                    &["${{ steps.tool-policy.outputs.download-tools }}"],
                 ) && step.run_contains("tools_hash=")
                     && step.run_contains(&format!("taiki-e/install-action@{INSTALL_ACTION_SHA}"))
                     && step.run_contains("RSS_ADAPTER_SHA256")
@@ -5418,6 +5478,7 @@ mod tests {
                     && step.run_contains("sha256")
                     && step.run_contains("RSS_INSTALL_ACTION_TOOLS")
                     && step.run_contains("RSS_BINSTALL_TOOLS")
+                    && step.run_contains("RSS_DOWNLOAD_TOOLS")
             });
         let catalog_is_executable_single_source = policy.is_some_and(|index| {
             let step = &action_steps[index];
@@ -5425,6 +5486,7 @@ mod tests {
                 && step.run_contains("--lane")
                 && step.run_contains("--backend install-action")
                 && step.run_contains("--backend binstall")
+                && step.run_contains("--backend download")
                 && step.run_contains("adapter-sha256")
                 && step.run_contains("catalog-sha256")
         });
@@ -5452,11 +5514,16 @@ mod tests {
             && adapter_source.contains("sha256sum");
         let fallback_installer_precedes_prebuilt_and_verify =
             unique_named_step(&action_steps, "Install fallback tools").is_some_and(|fallback| {
-                install_action
-                    .first()
-                    .copied()
+                unique_named_step(&action_steps, "Install checksum-pinned download tools")
+                    .zip(install_action.first().copied())
                     .zip(verifiers.first().copied())
-                    .is_some_and(|(prebuilt, verify)| fallback < prebuilt && prebuilt < verify)
+                    .is_some_and(|((download, prebuilt), verify)| {
+                        fallback < prebuilt
+                            && prebuilt < download
+                            && download < verify
+                            && action_steps[download]
+                                .run_contains("ci-tool-adapters.sh install-download")
+                    })
             });
 
         workflow_has_no_tool_catalog
@@ -5896,20 +5963,24 @@ runs:
         echo "catalog-sha256=$catalog_hash" >> "$GITHUB_OUTPUT"
         echo "install-action-tools=$(.github/scripts/ci-tool-adapters.sh specs --lane "$RSS_LANE" --backend install-action)" >> "$GITHUB_OUTPUT"
         echo "binstall-tools=$(.github/scripts/ci-tool-adapters.sh specs --lane "$RSS_LANE" --backend binstall)" >> "$GITHUB_OUTPUT"
+        echo "download-tools=$(.github/scripts/ci-tool-adapters.sh specs --lane "$RSS_LANE" --backend download)" >> "$GITHUB_OUTPUT"
     - id: cache-keys
       env:
         RSS_ADAPTER_SHA256: ${{ steps.tool-policy.outputs.adapter-sha256 }}
         RSS_CATALOG_SHA256: ${{ steps.tool-policy.outputs.catalog-sha256 }}
         RSS_INSTALL_ACTION_TOOLS: ${{ steps.tool-policy.outputs.install-action-tools }}
         RSS_BINSTALL_TOOLS: ${{ steps.tool-policy.outputs.binstall-tools }}
+        RSS_DOWNLOAD_TOOLS: ${{ steps.tool-policy.outputs.download-tools }}
       run: |
-        tools_hash="$(printf '%s\n' 'taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5' "$RSS_ADAPTER_SHA256" "$RSS_CATALOG_SHA256" "$RSS_INSTALL_ACTION_TOOLS" "$RSS_BINSTALL_TOOLS" | sha256sum | cut -d' ' -f1)"
+        tools_hash="$(printf '%s\n' 'taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5' "$RSS_ADAPTER_SHA256" "$RSS_CATALOG_SHA256" "$RSS_INSTALL_ACTION_TOOLS" "$RSS_BINSTALL_TOOLS" "$RSS_DOWNLOAD_TOOLS" | sha256sum | cut -d' ' -f1)"
     - name: Install fallback tools
       run: cargo binstall --root "$RSS_TOOL_ROOT" "$spec"
     - name: Install pinned prebuilt tools
       uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5
       with:
         tool: ${{ steps.tool-policy.outputs.install-action-tools }}
+    - name: Install checksum-pinned download tools
+      run: .github/scripts/ci-tool-adapters.sh install-download --lane "$RSS_LANE" --root "$RSS_TOOL_ROOT"
     - id: verify-tools
       run: |
         mode=fresh
@@ -5917,6 +5988,7 @@ runs:
         .github/scripts/ci-tool-adapters.sh verify --mode "$mode" --lane "$RSS_LANE" --root "$RSS_TOOL_ROOT"
         echo "$RSS_TOOL_ROOT/.install-action/bin" >> "$GITHUB_PATH"
         echo "$RSS_TOOL_ROOT/bin" >> "$GITHUB_PATH"
+        echo "$RSS_TOOL_ROOT/.download/bin" >> "$GITHUB_PATH"
 "#;
         const ADAPTER: &str = r#"#!/usr/bin/env bash
 seal="$RSS_TOOL_ROOT/.rss-tool-seal-v1"

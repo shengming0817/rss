@@ -1,0 +1,18 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "properties": {
+    "profile": {
+      "enum": [
+        "identityaudit",
+        "runtime",
+        "settingsonly"
+      ],
+      "type": "string"
+    }
+  },
+  "required": [
+    "profile"
+  ],
+  "type": "object"
+}

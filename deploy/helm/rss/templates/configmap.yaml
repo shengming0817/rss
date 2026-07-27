@@ -1,0 +1,15 @@
+{{- $profile := include "rss.profile" . -}}
+{{- $planSource := include "rss.planSource" . -}}
+{{- $plan := $planSource | mustFromJson -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "rss.planConfigMapName" (dict "root" . "profile" $profile "plan" $plan) }}
+  labels:
+    {{- include "rss.labels" (dict "root" . "profile" $profile "workload" $profile) | nindent 4 }}
+  annotations:
+    {{- include "rss.fingerprintAnnotations" $plan | nindent 4 }}
+immutable: true
+data:
+  plan.json: |
+{{- $planSource | trimSuffix "\n" | nindent 4 }}

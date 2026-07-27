@@ -1,0 +1,269 @@
+---
+# Source: rss/templates/serviceaccount.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: rss-identityaudit-77423a99261e
+  labels:
+    helm.sh/chart: rss-0.1.0
+    app.kubernetes.io/name: rss
+    app.kubernetes.io/instance: rss
+    app.kubernetes.io/component: identityaudit
+    app.kubernetes.io/managed-by: Helm
+    rss.gocell.io/profile: identityaudit
+  annotations:
+    rss.gocell.io/assembly-fingerprint: "sha256:ca1634772109f74bd3c66f079f8c5775f82a30a3ae805bf5e23894a952feedb8"
+    rss.gocell.io/runtime-plan-fingerprint: "sha256:d72dde6415e0c1d8e18dd8b04775a7570db9f68863b0900ee7f16416fade0600"
+    rss.gocell.io/deployment-fingerprint: "sha256:d2e3b0481cf6da100e28258485a26b6f7489ab74465c5d75d4febddaf1178617"
+automountServiceAccountToken: false
+
+---
+# Source: rss/templates/configmap.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rss-identityaudit-plan-d2e3b0481cf6
+  labels:
+    helm.sh/chart: rss-0.1.0
+    app.kubernetes.io/name: rss
+    app.kubernetes.io/instance: rss
+    app.kubernetes.io/component: identityaudit
+    app.kubernetes.io/managed-by: Helm
+    rss.gocell.io/profile: identityaudit
+  annotations:
+    rss.gocell.io/assembly-fingerprint: "sha256:ca1634772109f74bd3c66f079f8c5775f82a30a3ae805bf5e23894a952feedb8"
+    rss.gocell.io/runtime-plan-fingerprint: "sha256:d72dde6415e0c1d8e18dd8b04775a7570db9f68863b0900ee7f16416fade0600"
+    rss.gocell.io/deployment-fingerprint: "sha256:d2e3b0481cf6da100e28258485a26b6f7489ab74465c5d75d4febddaf1178617"
+immutable: true
+data:
+  plan.json: |
+    {
+      "schemaVersion": 1,
+      "assemblyFingerprint": "sha256:ca1634772109f74bd3c66f079f8c5775f82a30a3ae805bf5e23894a952feedb8",
+      "runtimePlanFingerprint": "sha256:d72dde6415e0c1d8e18dd8b04775a7570db9f68863b0900ee7f16416fade0600",
+      "deploymentFingerprint": "sha256:d2e3b0481cf6da100e28258485a26b6f7489ab74465c5d75d4febddaf1178617",
+      "workloads": [
+        {
+          "name": "identityaudit",
+          "image": "ghcr.io/gocell/rss-identityaudit@sha256:0dc0251564b714e89c8d098560ddfe69eb08c87fb85ac87323c54a7650126592",
+          "identity": {
+            "name": "identityaudit",
+            "serviceAccount": "identityaudit"
+          },
+          "secretRefs": [
+            {
+              "kind": "kubernetesSecret",
+              "name": "rss-identityaudit",
+              "key": "database-url"
+            },
+            {
+              "kind": "kubernetesSecret",
+              "name": "rss-identityaudit",
+              "key": "oidc-client-secret"
+            },
+            {
+              "kind": "vaultRef",
+              "storeId": "rss-vault",
+              "refKey": "identityaudit/signing"
+            }
+          ],
+          "resources": {
+            "requests": {
+              "cpu": "250m",
+              "memory": "256Mi"
+            },
+            "limits": {
+              "cpu": "2",
+              "memory": "1Gi"
+            }
+          },
+          "probes": [
+            {
+              "kind": "startup",
+              "path": "/health/v1/healthz",
+              "port": 8082
+            },
+            {
+              "kind": "readiness",
+              "path": "/health/v1/readyz",
+              "port": 8082
+            },
+            {
+              "kind": "liveness",
+              "path": "/health/v1/healthz",
+              "port": 8082
+            }
+          ]
+        }
+      ],
+      "services": [
+        {
+          "name": "identityaudit",
+          "workload": "identityaudit",
+          "ports": [
+            {
+              "name": "admin",
+              "port": 8081,
+              "exposure": "serviceExposed"
+            },
+            {
+              "name": "health",
+              "port": 8082,
+              "exposure": "serviceExposed"
+            },
+            {
+              "name": "http",
+              "port": 8080,
+              "exposure": "serviceExposed"
+            }
+          ]
+        }
+      ]
+    }
+
+---
+# Source: rss/templates/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: rss-identityaudit
+  labels:
+    helm.sh/chart: rss-0.1.0
+    app.kubernetes.io/name: rss
+    app.kubernetes.io/instance: rss
+    app.kubernetes.io/component: identityaudit
+    app.kubernetes.io/managed-by: Helm
+    rss.gocell.io/profile: identityaudit
+  annotations:
+    rss.gocell.io/assembly-fingerprint: "sha256:ca1634772109f74bd3c66f079f8c5775f82a30a3ae805bf5e23894a952feedb8"
+    rss.gocell.io/runtime-plan-fingerprint: "sha256:d72dde6415e0c1d8e18dd8b04775a7570db9f68863b0900ee7f16416fade0600"
+    rss.gocell.io/deployment-fingerprint: "sha256:d2e3b0481cf6da100e28258485a26b6f7489ab74465c5d75d4febddaf1178617"
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: rss
+    app.kubernetes.io/instance: rss
+    app.kubernetes.io/component: identityaudit
+  ports:
+    - name: admin
+      port: 8081
+      targetPort: admin
+      protocol: TCP
+    - name: health
+      port: 8082
+      targetPort: health
+      protocol: TCP
+    - name: http
+      port: 8080
+      targetPort: http
+      protocol: TCP
+
+---
+# Source: rss/templates/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rss-identityaudit
+  labels:
+    helm.sh/chart: rss-0.1.0
+    app.kubernetes.io/name: rss
+    app.kubernetes.io/instance: rss
+    app.kubernetes.io/component: identityaudit
+    app.kubernetes.io/managed-by: Helm
+    rss.gocell.io/profile: identityaudit
+  annotations:
+    rss.gocell.io/assembly-fingerprint: "sha256:ca1634772109f74bd3c66f079f8c5775f82a30a3ae805bf5e23894a952feedb8"
+    rss.gocell.io/runtime-plan-fingerprint: "sha256:d72dde6415e0c1d8e18dd8b04775a7570db9f68863b0900ee7f16416fade0600"
+    rss.gocell.io/deployment-fingerprint: "sha256:d2e3b0481cf6da100e28258485a26b6f7489ab74465c5d75d4febddaf1178617"
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: rss
+      app.kubernetes.io/instance: rss
+      app.kubernetes.io/component: identityaudit
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: rss
+        app.kubernetes.io/instance: rss
+        app.kubernetes.io/component: identityaudit
+      annotations:
+        rss.gocell.io/assembly-fingerprint: "sha256:ca1634772109f74bd3c66f079f8c5775f82a30a3ae805bf5e23894a952feedb8"
+        rss.gocell.io/runtime-plan-fingerprint: "sha256:d72dde6415e0c1d8e18dd8b04775a7570db9f68863b0900ee7f16416fade0600"
+        rss.gocell.io/deployment-fingerprint: "sha256:d2e3b0481cf6da100e28258485a26b6f7489ab74465c5d75d4febddaf1178617"
+    spec:
+      serviceAccountName: rss-identityaudit-77423a99261e
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: identityaudit
+          image: "ghcr.io/gocell/rss-identityaudit@sha256:0dc0251564b714e89c8d098560ddfe69eb08c87fb85ac87323c54a7650126592"
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            privileged: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            seccompProfile:
+              type: RuntimeDefault
+          ports:
+            - name: admin
+              containerPort: 8081
+              protocol: TCP
+            - name: health
+              containerPort: 8082
+              protocol: TCP
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          resources:
+            limits:
+              cpu: "2"
+              memory: 1Gi
+            requests:
+              cpu: 250m
+              memory: 256Mi
+          startupProbe:
+            httpGet:
+              path: "/health/v1/healthz"
+              port: 8082
+              scheme: HTTP
+          readinessProbe:
+            httpGet:
+              path: "/health/v1/readyz"
+              port: 8082
+              scheme: HTTP
+          livenessProbe:
+            httpGet:
+              path: "/health/v1/healthz"
+              port: 8082
+              scheme: HTTP
+          volumeMounts:
+            - name: deployment-plan
+              mountPath: /var/run/rss/deployment
+              readOnly: true
+      volumes:
+        - name: deployment-plan
+          projected:
+            defaultMode: 0444
+            sources:
+              - configMap:
+                  name: rss-identityaudit-plan-d2e3b0481cf6
+                  items:
+                    - key: plan.json
+                      path: plan.json

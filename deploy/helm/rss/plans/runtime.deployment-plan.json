@@ -1,0 +1,99 @@
+{
+  "schemaVersion": 1,
+  "assemblyFingerprint": "sha256:d351aa60214f224295b471fced7b91be88d9008fb8950ae69b3d5e3dc6a3b7af",
+  "runtimePlanFingerprint": "sha256:64c527bac08cffa336decaa1099769c0b8822ab8d69dd15d7de69e1359b36064",
+  "deploymentFingerprint": "sha256:e58f45e6573048e9c1b32fcf7e6aa22802f1451bfee057456f4ce0f8b0250f51",
+  "workloads": [
+    {
+      "name": "runtime",
+      "image": "ghcr.io/gocell/rss-runtime@sha256:d92c6a81b2ff50096bcda80885427d1f59a25b5f483f7055523504925d16ab23",
+      "identity": {
+        "name": "runtime",
+        "serviceAccount": "runtime"
+      },
+      "secretRefs": [
+        {
+          "kind": "kubernetesSecret",
+          "name": "rss-runtime",
+          "key": "database-url"
+        },
+        {
+          "kind": "kubernetesSecret",
+          "name": "rss-runtime",
+          "key": "oidc-client-secret"
+        },
+        {
+          "kind": "kubernetesSecret",
+          "name": "rss-runtime",
+          "key": "service-token-signing-key"
+        },
+        {
+          "kind": "vaultRef",
+          "storeId": "rss-vault",
+          "refKey": "runtime/keyring"
+        }
+      ],
+      "resources": {
+        "requests": {
+          "cpu": "500m",
+          "memory": "512Mi"
+        },
+        "limits": {
+          "cpu": "4",
+          "memory": "2Gi"
+        }
+      },
+      "probes": [
+        {
+          "kind": "startup",
+          "path": "/health/v1/healthz",
+          "port": 8082
+        },
+        {
+          "kind": "readiness",
+          "path": "/health/v1/readyz",
+          "port": 8082
+        },
+        {
+          "kind": "liveness",
+          "path": "/health/v1/healthz",
+          "port": 8082
+        }
+      ]
+    }
+  ],
+  "services": [
+    {
+      "name": "runtime",
+      "workload": "runtime",
+      "ports": [
+        {
+          "name": "admin",
+          "port": 8081,
+          "exposure": "serviceExposed"
+        },
+        {
+          "name": "health",
+          "port": 8082,
+          "exposure": "serviceExposed"
+        },
+        {
+          "name": "http",
+          "port": 8080,
+          "exposure": "serviceExposed"
+        }
+      ]
+    },
+    {
+      "name": "runtime-internal",
+      "workload": "runtime",
+      "ports": [
+        {
+          "name": "internal",
+          "port": 8083,
+          "exposure": "workloadOnly"
+        }
+      ]
+    }
+  ]
+}

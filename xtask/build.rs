@@ -5,7 +5,7 @@ use std::fs;
 use std::io;
 use std::path::PathBuf;
 
-const EXPECTED_TOOLS: [&str; 9] = [
+const EXPECTED_TOOLS: [&str; 10] = [
     "cargo-nextest",
     "cargo-llvm-cov",
     "cargo-deny",
@@ -15,6 +15,7 @@ const EXPECTED_TOOLS: [&str; 9] = [
     "cargo-public-api",
     "sccache",
     "promtool",
+    "helm",
 ];
 
 fn invalid_catalog(row: usize, message: &str) -> io::Error {
@@ -61,7 +62,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         {
             return Err(invalid_catalog(row, "invalid version").into());
         }
-        if !matches!(backend, "install-action" | "binstall" | "docker") {
+        if !matches!(
+            backend,
+            "install-action" | "binstall" | "docker" | "download"
+        ) {
             return Err(invalid_catalog(row, "invalid backend").into());
         }
         if relative.is_empty()
@@ -78,12 +82,22 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
         if !matches!(
             probe,
-            "nextest" | "llvm-cov" | "dylint" | "direct" | "receipt" | "sccache" | "promtool"
+            "nextest"
+                | "llvm-cov"
+                | "dylint"
+                | "direct"
+                | "receipt"
+                | "sccache"
+                | "promtool"
+                | "helm"
         ) {
             return Err(invalid_catalog(row, "invalid probe").into());
         }
         if (backend == "docker") != (name == "promtool" && probe == "promtool") {
             return Err(invalid_catalog(row, "invalid docker policy").into());
+        }
+        if (backend == "download") != (name == "helm" && probe == "helm") {
+            return Err(invalid_catalog(row, "invalid download policy").into());
         }
         if versions.insert(name, version).is_some() {
             return Err(invalid_catalog(row, "duplicate tool").into());

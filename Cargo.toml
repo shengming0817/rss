@@ -121,6 +121,7 @@ tokio-util = { version = "0.7", features = ["rt"] }   # CancellationToken（toki
 tokio-stream = { version = "0.1", features = ["net"] }   # TcpListenerStream（adapters/grpc serve_with_incoming_shutdown：自绑 listener 读回 ephemeral 端口供测试）
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serde_yaml_ng = "=0.10.0"
 serde_path_to_error = "0.1"
 jsonschema = { version = "=0.20.0", default-features = false }
 serde_json_canonicalizer = "=0.3.2"

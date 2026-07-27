@@ -4,12 +4,14 @@ set -f
 set -o pipefail
 
 SEAL_NAME=.rss-tool-seal-v1
+HELM_LINUX_AMD64_SHA256=97dbeb971be4ac4b27e3839976d9564c0fb35c6f3b1da89dd1e292d236af4096
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 CATALOG=$SCRIPT_DIR/ci-tool-catalog.txt
 
 usage() {
   printf '%s\n' \
-    "usage: $0 specs --lane <lane|all> --backend <install-action|binstall|all>" \
+    "usage: $0 specs --lane <lane|all> --backend <install-action|binstall|download|docker|all>" \
+    "       $0 install-download --lane <lane> --root <absolute-profile-tool-root>" \
     "       $0 sccache-spec" \
     "       $0 verify-sccache --candidate <absolute-sccache-path>" \
     "       $0 verify --mode <fresh|cache> --lane <lane> --root <absolute-profile-tool-root>" >&2
@@ -71,7 +73,7 @@ lane_has_tool() {
   case "$lane:$name" in
     all:* | \
     *:sccache | \
-    ci-meta:promtool | \
+    ci-meta:promtool | ci-meta:helm | \
     ci-core-prerequisites:cargo-dylint | ci-core-prerequisites:dylint-link | \
     ci-core-tests:cargo-nextest | ci-local-only:cargo-nextest | \
     ci-security:cargo-deny | ci-security:cargo-audit | \
@@ -89,9 +91,9 @@ validate_catalog() {
     [ -n "$name" ] && [ -z "$extra" ] || die 'invalid catalog row'
     [[ "$name" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]] || die 'invalid catalog tool name'
     valid_semver "$version" || die 'invalid catalog SemVer'
-    case "$backend" in install-action|binstall|docker) ;; *) die 'invalid catalog backend' ;; esac
+    case "$backend" in install-action|binstall|download|docker) ;; *) die 'invalid catalog backend' ;; esac
     case "$backend:$relative" in
-      "install-action:.install-action/bin/$name"|"binstall:bin/$name") ;;
+      "install-action:.install-action/bin/$name"|"binstall:bin/$name"|"download:.download/bin/$name") ;;
       docker:prom/prometheus@sha256:*)
         digest=${relative#prom/prometheus@sha256:}
         [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || die 'invalid digest-pinned docker image'
@@ -102,7 +104,7 @@ validate_catalog() {
       case "$relative" in *//*|*/./*|*/../*|*/..|/*) die 'invalid catalog binary path' ;; esac
     fi
     case "$backend:$probe" in
-      install-action:nextest|install-action:llvm-cov|install-action:direct|install-action:sccache|binstall:dylint|binstall:direct|binstall:receipt|docker:promtool) ;;
+      install-action:nextest|install-action:llvm-cov|install-action:direct|install-action:sccache|binstall:dylint|binstall:direct|binstall:receipt|download:helm|docker:promtool) ;;
       *) die 'invalid catalog probe/backend combination' ;;
     esac
     case "$seen" in *"|$name|"*) die 'duplicate catalog tool' ;; esac
@@ -151,7 +153,7 @@ emit_specs() {
     esac
   done
   valid_lane "$lane" || die 'unknown lane'
-  case "$backend" in install-action|binstall|docker|all) ;; *) die 'unknown backend' ;; esac
+  case "$backend" in install-action|binstall|download|docker|all) ;; *) die 'unknown backend' ;; esac
   output=
   while IFS='|' read -r name version _backend _relative _probe; do
     [ -n "$name" ] || continue
@@ -200,7 +202,7 @@ verify_exact_layout() {
   done <<EOF
 $(selected_rows "$lane" all)
 EOF
-  for directory in "$root/.install-action/bin" "$root/bin"; do
+  for directory in "$root/.install-action/bin" "$root/bin" "$root/.download/bin"; do
     [ ! -L "$directory" ] || {
       rm -f "$expected" "$actual"
       die "tool binary directory is unsafe: ${directory#"$root"/}"
@@ -337,6 +339,10 @@ fresh_probe() {
       output=$(capture_probe "$binary" "$spec" --version)
       verify_direct_output "$name" "$version" "$output" || die "tool version mismatch: $spec"
       ;;
+    helm)
+      output=$(capture_probe "$binary" "$spec" version --template '{{.Version}}')
+      [ "$output" = "v$version" ] || die "tool version mismatch: $spec"
+      ;;
     sccache)
       verify_sccache_version "$binary" "$name" "$version"
       ;;
@@ -344,6 +350,90 @@ fresh_probe() {
       verify_receipt "$root" "$name" "$version" || die "tool install receipt mismatch: $spec"
       ;;
   esac
+}
+
+install_download() {
+  lane='' root=''
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --lane) [ "$#" -ge 2 ] || usage; lane=$2; shift 2 ;;
+      --root) [ "$#" -ge 2 ] || usage; root=$2; shift 2 ;;
+      *) usage ;;
+    esac
+  done
+  valid_lane "$lane" && [ "$lane" != all ] || die 'unknown lane'
+  validate_root "$root" || die 'tool root is not a normalized physical directory'
+  rows=$(selected_rows "$lane" download)
+  [ -n "$rows" ] || return 0
+  [ "$(uname -s)" = Linux ] || die 'download backend only supports Linux'
+  case "$(uname -m)" in x86_64|amd64) ;; *) die 'download backend only supports x86_64' ;; esac
+
+  while IFS='|' read -r name version backend relative probe; do
+    [ "$name" = helm ] && [ "$backend" = download ] && [ "$probe" = helm ] ||
+      die 'unsupported download catalog row'
+    archive_url="https://get.helm.sh/helm-v$version-linux-amd64.tar.gz"
+    stage=$(mktemp -d "${TMPDIR:-/tmp}/rss-helm-download.XXXXXX") || die 'cannot create download staging directory'
+    archive=$stage/helm.tar.gz
+    curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
+      --output "$archive" "$archive_url" || { rm -rf -- "$stage"; die 'Helm download failed'; }
+    [ "$(hash_file "$archive")" = "$HELM_LINUX_AMD64_SHA256" ] || {
+      rm -rf -- "$stage"
+      die 'Helm archive SHA-256 mismatch'
+    }
+    tar -xzf "$archive" -C "$stage" linux-amd64/helm || {
+      rm -rf -- "$stage"
+      die 'Helm archive extraction failed'
+    }
+    extracted=$stage/linux-amd64/helm
+    [ -f "$extracted" ] && [ ! -L "$extracted" ] || {
+      rm -rf -- "$stage"
+      die 'Helm archive binary is unsafe'
+    }
+    destination=$root/$relative
+    directory=${destination%/*}
+    download_root=$root/.download
+    download_root_existed=0
+    directory_existed=0
+    if [ -e "$download_root" ] || [ -L "$download_root" ]; then
+      [ -d "$download_root" ] && [ ! -L "$download_root" ] || {
+        rm -rf -- "$stage"
+        die 'download tool directory is unsafe'
+      }
+      download_root_existed=1
+    fi
+    if [ -e "$directory" ] || [ -L "$directory" ]; then
+      [ -d "$directory" ] && [ ! -L "$directory" ] || {
+        rm -rf -- "$stage"
+        die 'download binary directory is unsafe'
+      }
+      directory_existed=1
+    fi
+    mkdir -p -- "$directory" || { rm -rf -- "$stage"; die 'cannot create download tool directory'; }
+    if [ -e "$destination" ] || [ -L "$destination" ]; then
+      [ -f "$destination" ] && [ ! -L "$destination" ] || {
+        rm -rf -- "$stage"
+        die 'download binary destination is unsafe'
+      }
+    fi
+    temporary=$(mktemp "$directory/.helm.tmp.XXXXXX") || {
+      if [ "$directory_existed" -eq 0 ]; then rmdir -- "$directory" 2>/dev/null || true; fi
+      if [ "$download_root_existed" -eq 0 ]; then rmdir -- "$download_root" 2>/dev/null || true; fi
+      rm -rf -- "$stage"
+      die 'cannot stage Helm binary'
+    }
+    if ! cp -- "$extracted" "$temporary" ||
+       ! chmod 755 "$temporary" ||
+       ! mv -f -- "$temporary" "$destination"; then
+      rm -f -- "$temporary"
+      if [ "$directory_existed" -eq 0 ]; then rmdir -- "$directory" 2>/dev/null || true; fi
+      if [ "$download_root_existed" -eq 0 ]; then rmdir -- "$download_root" 2>/dev/null || true; fi
+      rm -rf -- "$stage"
+      die 'cannot publish Helm binary'
+    fi
+    rm -rf -- "$stage"
+  done <<EOF
+$rows
+EOF
 }
 
 write_expected_seal() {
@@ -448,6 +538,7 @@ command_name=$1
 shift
 case "$command_name" in
   specs) emit_specs "$@" ;;
+  install-download) install_download "$@" ;;
   sccache-spec) emit_sccache_spec "$@" ;;
   verify-sccache) verify_sccache_candidate "$@" ;;
   verify) verify_set "$@" ;;

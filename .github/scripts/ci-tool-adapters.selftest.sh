@@ -62,8 +62,9 @@ expect_failure_stderr_equals() {
 }
 
 # The executable catalog is the only source of lane/backend/version policy.
-expect_output 'ci-meta seals compiler cache plus digest-pinned promtool' 'sccache@0.15.0,promtool@3.5.3' "$ADAPTER" specs --lane ci-meta --backend all
+expect_output 'ci-meta seals compiler cache, promtool, and Helm' 'sccache@0.15.0,promtool@3.5.3,helm@4.2.0' "$ADAPTER" specs --lane ci-meta --backend all
 expect_output 'ci-meta promtool uses the hermetic docker backend' 'promtool@3.5.3' "$ADAPTER" specs --lane ci-meta --backend docker
+expect_output 'ci-meta Helm uses the checksum-pinned download backend' 'helm@4.2.0' "$ADAPTER" specs --lane ci-meta --backend download
 expect_output 'prerequisites use only binstall tools' \
   'cargo-dylint@6.0.1,dylint-link@6.0.1' \
   "$ADAPTER" specs --lane ci-core-prerequisites --backend binstall
@@ -87,7 +88,7 @@ expect_output 'audit shares the security set' \
 expect_failure 'unknown lane fails closed' "$ADAPTER" specs --lane unknown --backend all
 expect_failure 'unknown backend fails closed' "$ADAPTER" specs --lane audit --backend mystery
 expect_output 'all tools preserve canonical catalog order' \
-  'cargo-nextest@0.9.137,cargo-llvm-cov@0.8.7,cargo-deny@0.19.9,cargo-audit@0.22.2,cargo-dylint@6.0.1,dylint-link@6.0.1,cargo-public-api@0.52.0,sccache@0.15.0,promtool@3.5.3' \
+  'cargo-nextest@0.9.137,cargo-llvm-cov@0.8.7,cargo-deny@0.19.9,cargo-audit@0.22.2,cargo-dylint@6.0.1,dylint-link@6.0.1,cargo-public-api@0.52.0,sccache@0.15.0,promtool@3.5.3,helm@4.2.0' \
   "$ADAPTER" specs --lane all --backend all
 expect_output 'sccache spec is derived from the catalog' \
   'sccache|0.15.0|install-action|.install-action/bin/sccache|sccache' \
@@ -136,6 +137,152 @@ make_binary() {
   printf '#!/usr/bin/env bash\nset -eu\nprintf "%%s\\n" "$*" >>"${RSS_TEST_TRACE:?}"\n%s\n' "$body" >"$path"
   chmod +x "$path"
 }
+
+make_ci_meta_tools() {
+  mkdir -p "$ROOT/.install-action/bin" "$ROOT/.download/bin"
+  make_binary "$ROOT/.install-action/bin/sccache" \
+    "[ \"\$*\" = '--version' ]; printf '%s\\n' 'sccache 0.15.0'"
+  make_binary "$ROOT/.download/bin/helm" \
+    "[ \"\$*\" = 'version --template {{.Version}}' ]; printf '%s\\n' 'v4.2.0'"
+}
+
+make_download_fixture() {
+  download_fake_bin=$1
+  mkdir -p "$download_fake_bin"
+  cat >"$download_fake_bin/uname" <<'EOF'
+#!/usr/bin/env bash
+set -eu
+case "$1" in
+  -s) printf '%s\n' Linux ;;
+  -m) printf '%s\n' x86_64 ;;
+  *) exit 64 ;;
+esac
+EOF
+  cat >"$download_fake_bin/curl" <<'EOF'
+#!/usr/bin/env bash
+set -eu
+printf 'curl|%s\n' "$*" >>"${RSS_DOWNLOAD_TRACE:?}"
+[ "$#" -eq 10 ] && [ "$1" = --proto ] && [ "$2" = '=https' ] &&
+  [ "$3" = --tlsv1.2 ] && [ "$4" = --fail ] && [ "$5" = --location ] &&
+  [ "$6" = --silent ] && [ "$7" = --show-error ] && [ "$8" = --output ] &&
+  [ "${10}" = 'https://get.helm.sh/helm-v4.2.0-linux-amd64.tar.gz' ] || exit 65
+printf '%s\n' offline-helm-archive >"$9"
+EOF
+  cat >"$download_fake_bin/sha256sum" <<'EOF'
+#!/usr/bin/env bash
+set -eu
+printf 'sha256sum|%s\n' "$*" >>"${RSS_DOWNLOAD_TRACE:?}"
+case "${RSS_DOWNLOAD_MODE:-success}" in
+  checksum-mismatch) digest=0000000000000000000000000000000000000000000000000000000000000000 ;;
+  *) digest=97dbeb971be4ac4b27e3839976d9564c0fb35c6f3b1da89dd1e292d236af4096 ;;
+esac
+printf '%s  %s\n' "$digest" "$1"
+EOF
+  cat >"$download_fake_bin/tar" <<'EOF'
+#!/usr/bin/env bash
+set -eu
+printf 'tar|%s\n' "$*" >>"${RSS_DOWNLOAD_TRACE:?}"
+[ "$#" -eq 5 ] && [ "$1" = -xzf ] && [ "$3" = -C ] &&
+  [ "$5" = linux-amd64/helm ] || exit 66
+[ "${RSS_DOWNLOAD_MODE:-success}" != extract-fail ] || exit 67
+mkdir -p "$4/linux-amd64"
+printf '#!/usr/bin/env sh\nprintf "v4.2.0\\n"\n' >"$4/linux-amd64/helm"
+EOF
+  cat >"$download_fake_bin/mv" <<'EOF'
+#!/usr/bin/env bash
+set -eu
+printf 'mv|%s\n' "$*" >>"${RSS_DOWNLOAD_TRACE:?}"
+[ "${RSS_DOWNLOAD_MODE:-success}" != publish-fail ] || exit 68
+exec /bin/mv "$@"
+EOF
+  chmod +x "$download_fake_bin/uname" "$download_fake_bin/curl" \
+    "$download_fake_bin/sha256sum" "$download_fake_bin/tar" "$download_fake_bin/mv"
+}
+
+assert_download_clean() {
+  name=$1 root=$2 staging=$3
+  if [ ! -e "$root/.download" ] &&
+     [ -z "$(find "$staging" -mindepth 1 -maxdepth 1 -print -quit)" ]; then
+    pass "$name"
+  else
+    fail "$name"
+  fi
+}
+
+# Download installation is exercised without the network. Fakes enforce the
+# pinned transport, checksum, archive member, and atomic publication protocol.
+DOWNLOAD_FAKE_BIN="$TMP_ROOT/download-fake-bin"
+DOWNLOAD_TMP="$TMP_ROOT/download-tmp"
+DOWNLOAD_TRACE="$TMP_ROOT/download-trace"
+DOWNLOAD_ROOT="$TMP_ROOT/download-tools"
+mkdir -p "$DOWNLOAD_TMP" "$DOWNLOAD_ROOT"
+make_download_fixture "$DOWNLOAD_FAKE_BIN"
+export RSS_DOWNLOAD_TRACE="$DOWNLOAD_TRACE"
+: >"$DOWNLOAD_TRACE"
+expect_success 'offline Helm download uses the pinned installation protocol' \
+  env PATH="$DOWNLOAD_FAKE_BIN:$PATH" TMPDIR="$DOWNLOAD_TMP" RSS_DOWNLOAD_MODE=success \
+  "$ADAPTER" install-download --lane ci-meta --root "$DOWNLOAD_ROOT"
+if [ -f "$DOWNLOAD_ROOT/.download/bin/helm" ] &&
+   [ -x "$DOWNLOAD_ROOT/.download/bin/helm" ] &&
+   [ "$("$DOWNLOAD_ROOT/.download/bin/helm")" = v4.2.0 ] &&
+   grep -Eq '^curl\|--proto =https --tlsv1\.2 --fail --location --silent --show-error --output .*/helm\.tar\.gz https://get\.helm\.sh/helm-v4\.2\.0-linux-amd64\.tar\.gz$' "$DOWNLOAD_TRACE" &&
+   grep -Eq '^sha256sum\|.*/helm\.tar\.gz$' "$DOWNLOAD_TRACE" &&
+   grep -Eq '^tar\|-xzf .*/helm\.tar\.gz -C .*/rss-helm-download\.[^/]+ linux-amd64/helm$' "$DOWNLOAD_TRACE" &&
+   grep -Eq '^mv\|-f -- .*/\.helm\.tmp\.[^/]+ .*/\.download/bin/helm$' "$DOWNLOAD_TRACE" &&
+   [ -z "$(find "$DOWNLOAD_TMP" -mindepth 1 -maxdepth 1 -print -quit)" ]; then
+  pass 'offline Helm download publishes only the expected executable'
+else
+  fail 'offline Helm download publishes only the expected executable'
+fi
+
+for mode in checksum-mismatch extract-fail publish-fail; do
+  rm -rf "$DOWNLOAD_ROOT/.download"
+  : >"$DOWNLOAD_TRACE"
+  expect_failure "offline Helm download fails closed: $mode" \
+    env PATH="$DOWNLOAD_FAKE_BIN:$PATH" TMPDIR="$DOWNLOAD_TMP" RSS_DOWNLOAD_MODE="$mode" \
+    "$ADAPTER" install-download --lane ci-meta --root "$DOWNLOAD_ROOT"
+  assert_download_clean "failed Helm download leaves zero pollution: $mode" \
+    "$DOWNLOAD_ROOT" "$DOWNLOAD_TMP"
+done
+
+mkdir -p "$DOWNLOAD_ROOT/.download/bin"
+expect_failure 'publication failure preserves pre-existing safe directories' \
+  env PATH="$DOWNLOAD_FAKE_BIN:$PATH" TMPDIR="$DOWNLOAD_TMP" RSS_DOWNLOAD_MODE=publish-fail \
+  "$ADAPTER" install-download --lane ci-meta --root "$DOWNLOAD_ROOT"
+if [ -d "$DOWNLOAD_ROOT/.download/bin" ] &&
+   [ -z "$(find "$DOWNLOAD_ROOT/.download/bin" -mindepth 1 -print -quit)" ] &&
+   [ -z "$(find "$DOWNLOAD_TMP" -mindepth 1 -maxdepth 1 -print -quit)" ]; then
+  pass 'publication failure does not remove or pollute pre-existing directories'
+else
+  fail 'publication failure does not remove or pollute pre-existing directories'
+fi
+rm -rf "$DOWNLOAD_ROOT/.download"
+
+UNSAFE_DOWNLOAD_TARGET="$TMP_ROOT/unsafe-download-target"
+mkdir -p "$UNSAFE_DOWNLOAD_TARGET"
+ln -s "$UNSAFE_DOWNLOAD_TARGET" "$DOWNLOAD_ROOT/.download"
+expect_failure_stderr_contains 'symlinked download root fails closed' \
+  'download tool directory is unsafe' \
+  env PATH="$DOWNLOAD_FAKE_BIN:$PATH" TMPDIR="$DOWNLOAD_TMP" RSS_DOWNLOAD_MODE=success \
+  "$ADAPTER" install-download --lane ci-meta --root "$DOWNLOAD_ROOT"
+if [ -z "$(find "$UNSAFE_DOWNLOAD_TARGET" -mindepth 1 -print -quit)" ] &&
+   [ -z "$(find "$DOWNLOAD_TMP" -mindepth 1 -maxdepth 1 -print -quit)" ]; then
+  pass 'unsafe download root leaves its target and staging clean'
+else
+  fail 'unsafe download root leaves its target and staging clean'
+fi
+rm -f "$DOWNLOAD_ROOT/.download"
+mkdir -p "$DOWNLOAD_ROOT/.download/bin/helm"
+expect_failure_stderr_contains 'directory at Helm destination fails closed' \
+  'download binary destination is unsafe' \
+  env PATH="$DOWNLOAD_FAKE_BIN:$PATH" TMPDIR="$DOWNLOAD_TMP" RSS_DOWNLOAD_MODE=success \
+  "$ADAPTER" install-download --lane ci-meta --root "$DOWNLOAD_ROOT"
+if [ -z "$(find "$DOWNLOAD_ROOT/.download/bin/helm" -mindepth 1 -print -quit)" ] &&
+   [ -z "$(find "$DOWNLOAD_TMP" -mindepth 1 -maxdepth 1 -print -quit)" ]; then
+  pass 'unsafe Helm destination receives no published file'
+else
+  fail 'unsafe Helm destination receives no published file'
+fi
 
 ROOT="$TMP_ROOT/tools"
 TRACE="$TMP_ROOT/trace"
@@ -274,14 +421,15 @@ make_binary "$FAKE_DOCKER_BIN/docker" \
   "printf '%s\n' 'promtool, version 3.5.3 (branch: HEAD, revision: fixture)'"
 PATH="$FAKE_DOCKER_BIN:$PATH"
 export PATH
-rm -rf "$ROOT"; mkdir -p "$ROOT/.install-action/bin"
-make_binary "$ROOT/.install-action/bin/sccache" \
-  "[ \"\$*\" = '--version' ]; printf '%s\\n' 'sccache 0.15.0'"
+rm -rf "$ROOT"; make_ci_meta_tools
 expect_success 'ci-meta creates a compiler-cache and OCI policy seal' \
   "$ADAPTER" verify --mode fresh --lane ci-meta --root "$ROOT"
 if grep -Fq 'prom/prometheus@sha256:ddc2493835a1509976d5e4e0c94199c4f843ce1f42dd6bcfc8231ba734a93ff7' "$ROOT/.rss-tool-seal-v1"; then
   pass 'seal records the exact promtool image digest'
 else fail 'seal records the exact promtool image digest'; fi
+if grep -Fq $'tool\tdownload\thelm@4.2.0\t.download/bin/helm\t' "$ROOT/.rss-tool-seal-v1"; then
+  pass 'seal records the exact Helm binary identity'
+else fail 'seal records the exact Helm binary identity'; fi
 NO_DOCKER_BIN="$TMP_ROOT/no-docker-bin"
 mkdir -p "$NO_DOCKER_BIN"
 for command_name in bash cat cmp comm dirname find mktemp rm sort tr wc; do
@@ -302,6 +450,12 @@ make_binary "$BAD_DOCKER_BIN/docker" \
   "printf '%s\n' 'promtool, version 3.5.2 (branch: HEAD, revision: fixture)'"
 expect_failure 'promtool version mismatch fails the fresh probe closed' \
   env PATH="$BAD_DOCKER_BIN:/usr/bin:/bin" "$ADAPTER" verify --mode fresh --lane ci-meta --root "$ROOT"
+make_binary "$ROOT/.download/bin/helm" \
+  "[ \"\$*\" = 'version --template {{.Version}}' ]; printf '%s\\n' 'v4.1.0'"
+expect_failure 'Helm version mismatch fails the dedicated fresh probe closed' \
+  "$ADAPTER" verify --mode fresh --lane ci-meta --root "$ROOT"
+make_binary "$ROOT/.download/bin/helm" \
+  "[ \"\$*\" = 'version --template {{.Version}}' ]; printf '%s\\n' 'v4.2.0'"
 expect_success 'exact promtool version restores the fresh seal after negative probes' \
   "$ADAPTER" verify --mode fresh --lane ci-meta --root "$ROOT"
 cp "$SEAL" "$TMP_ROOT/empty-seal" 2>/dev/null || true
@@ -314,9 +468,7 @@ mkdir -p "$CATALOG_ADAPTER_DIR"
 cp "$ADAPTER" "$CATALOG_ADAPTER_DIR/ci-tool-adapters.sh"
 cp "$CATALOG" "$CATALOG_ADAPTER_DIR/ci-tool-catalog.txt"
 chmod +x "$CATALOG_ADAPTER_DIR/ci-tool-adapters.sh"
-rm -rf "$ROOT"; mkdir -p "$ROOT/.install-action/bin"
-make_binary "$ROOT/.install-action/bin/sccache" \
-  "[ \"\$*\" = '--version' ]; printf '%s\\n' 'sccache 0.15.0'"
+rm -rf "$ROOT"; make_ci_meta_tools
 expect_success 'catalog identity is sealed independently from the adapter' \
   "$CATALOG_ADAPTER_DIR/ci-tool-adapters.sh" verify --mode fresh --lane ci-meta --root "$ROOT"
 sed -i.bak 's/cargo-nextest|0\.9\.137|/cargo-nextest|9.9.9|/' \
@@ -352,9 +504,7 @@ esac
 EOF
 chmod +x "$FAKE_HASH_BIN/sha256sum"
 for mode in fail empty malformed; do
-  rm -rf "$ROOT"; mkdir -p "$ROOT/.install-action/bin"
-  make_binary "$ROOT/.install-action/bin/sccache" \
-    "[ \"\$*\" = '--version' ]; printf '%s\\n' 'sccache 0.15.0'"
+  rm -rf "$ROOT"; make_ci_meta_tools
   expect_failure "hash evidence fails closed: $mode" \
     env PATH="$FAKE_HASH_BIN:$PATH" FAKE_HASH_MODE="$mode" \
     "$ADAPTER" verify --mode fresh --lane ci-meta --root "$ROOT"

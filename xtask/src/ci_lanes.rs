@@ -400,6 +400,11 @@ pub(crate) enum CompileKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ToolRequirement {
     InProcess,
+    ExternalTool {
+        program: crate::cmd::ExternalProgram,
+        version: &'static str,
+        install_hint: &'static str,
+    },
     CargoBuiltin(crate::cmd::CargoSubcommand),
     Nextest,
     CoverageTools,
@@ -544,7 +549,7 @@ macro_rules! gate_catalog {
                         "deployment-plan-check",
                         META,
                         CompileKind::NoCompile,
-                        INTERNAL,
+                        HELM_TOOL,
                         SOURCE,
                         BOTH_INCLUDED,
                     )
@@ -1366,6 +1371,11 @@ const PUBLIC_API_HINT: &str = concat!(
     env!("RSS_TOOL_VERSION_CARGO_PUBLIC_API"),
     " --locked"
 );
+pub(crate) const HELM_HINT: &str = concat!(
+    "install Helm v",
+    env!("RSS_TOOL_VERSION_HELM"),
+    " from https://get.helm.sh/"
+);
 
 const fn gate(
     id: GateId,
@@ -1432,6 +1442,11 @@ const NIGHTLY_ONLY: GateMembership = GateMembership {
 };
 const SOURCE: EvidenceKind = EvidenceKind::Source;
 const INTERNAL: ToolRequirement = ToolRequirement::InProcess;
+const HELM_TOOL: ToolRequirement = ToolRequirement::ExternalTool {
+    program: crate::cmd::ExternalProgram::Helm,
+    version: env!("RSS_TOOL_VERSION_HELM"),
+    install_hint: HELM_HINT,
+};
 
 macro_rules! define_registry {
     ($( $id:ident => ($step:ident, $carrier:expr, $spec:expr), )*) => {

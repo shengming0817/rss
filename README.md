@@ -70,7 +70,7 @@ cargo xtask assembly validate                          # assembly 声明与依�
 cargo xtask assembly generate-modules --check          # domain modules 生成物漂移门
 cargo xtask assembly generate-providers --check        # typed provider catalog 独立漂移门
 cargo xtask assembly lock check                        # 全仓 AssemblyLock raw-byte 漂移门
-cargo xtask deployment plan check                      # 三类 RuntimePlan 绑定的 DeploymentPlan 漂移门
+cargo xtask deployment plan check                      # DeploymentPlan + 三 profile Helm 静态/render 漂移门（需 Helm 4.2.0）
 cargo xtask runtime-baseline verify                    # RuntimePlan 四族 live closure 与 wiring golden
 cargo xtask runtime-root guard                         # runtime root 单调职责/LOC ratchet
 cargo xtask layer-deps                                 # source-centric 分层依赖 lint
@@ -84,6 +84,12 @@ cargo clippy --workspace --all-targets -- -D warnings  # lint（clock 注入 / p
 cargo deny check                                       # 分层禁依赖 + license + advisory
 cargo dylint --all                                     # AST 级自写 lint（domain 禁 derive serde 等）
 ```
+
+`deployment plan render|check` 还拥有 chart 内三份 DeploymentPlan、仅含 profile selector 的
+default/profile values、闭合 values schema 与三份 `helm template` golden。`check` 使用 Helm 4.2.0 对
+runtime/settingsonly/identityaudit 全量 lint/render，且零写入；`render` 仅在全 profile 预检成功后原子发布静态
+载体。该闭包不执行 `helm install/upgrade/rollback`，也不证明 secret 映射、sidecar/policy 或 kind 运行验收；
+这些边界分别留给 #1804/#1805。
 
 `runtime::operator::*` 是 operator 命令的唯一 Rust API 路径，serving 继续只使用
 `runtime::{prepare_runtime, run, shutdown_runtime}`。共享时钟与审计 sink 只从

@@ -80,6 +80,12 @@ Required fields:
 
 `deploymentFingerprint` covers `{schemaVersion, assemblyFingerprint, runtimePlanFingerprint, workloads, services}` and excludes itself. `DeploymentPlan::compile_v1` is the only compiler and copies both upstream fingerprints from a validated RuntimePlan. The only public reader receives that RuntimePlan and exact-matches both identities before returning a plan. Rendering consumes the verified artifact matrix plus the closed deployment block in `assemblies/artifacts.toml`; it does not infer identities, secrets, or resources. The committed runtime/settingsonly/identityaudit JSON files are an exact generated set guarded by raw-byte drift checks. Probe completeness remains assembly-specific rather than forcing all probe kinds on every workload.
 
+#1803 adds a repository-static Helm projection, not a new fact-chain stage or fingerprint. The chart
+bundles the exact three plans and accepts only a closed profile selector; default/profile values and
+their Draft-07 schema cannot override plan facts. Templates project immutable images, resources,
+identity, probes and port exposure, while committed Helm 4.2.0 render goldens close the three-profile
+output set. Secret references remain inert identifiers: no env/volume mapping or sidecar is supplied.
+
 ### RuntimeInventory
 
 Required fields:
@@ -151,6 +157,7 @@ There is no migration graph in this baseline. Consumers will accept version 1 an
 | runtimeexec and subset artifacts | #1795–#1798 | Hard launch graph; Medium artifact matrix |
 | production security state | #1799–#1801 | Hard type/database/manifest constraints |
 | DeploymentPlan | #1802 | Landed Hard protocol/compiler/strict bound reader/schema; Medium exact generated-set drift gate |
-| Helm and deployment acceptance | #1803–#1805 | Hard render/policy types; Medium deployment acceptance |
+| Helm static projection | #1803 | Landed closed profile/schema/plan projection; Medium lint/render drift |
+| Deployment policy and kind acceptance | #1804–#1805 | Planned Hard policy types; Medium runtime acceptance |
 | RuntimeInventory | #1806 | Hard DTO/codegen; Medium authorization surface |
 | EvidenceReceipt | #1807–#1809 | Medium OCI and local aggregate verifiers |

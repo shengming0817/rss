@@ -1,0 +1,104 @@
+{{- $profile := include "rss.profile" . -}}
+{{- $planSource := include "rss.planSource" . -}}
+{{- $plan := $planSource | mustFromJson -}}
+{{- $planConfigMapName := include "rss.planConfigMapName" (dict "root" . "profile" $profile "plan" $plan) -}}
+{{- range $workload := $plan.workloads }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "rss.resourceName" (dict "root" $ "name" $workload.name) }}
+  labels:
+    {{- include "rss.labels" (dict "root" $ "profile" $profile "workload" $workload.name) | nindent 4 }}
+  annotations:
+    {{- include "rss.fingerprintAnnotations" $plan | nindent 4 }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "rss.selectorLabels" (dict "root" $ "workload" $workload.name) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "rss.selectorLabels" (dict "root" $ "workload" $workload.name) | nindent 8 }}
+      annotations:
+        {{- include "rss.fingerprintAnnotations" $plan | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "rss.serviceAccountName" (dict "root" $ "identity" $workload.identity.serviceAccount) }}
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: {{ $workload.name }}
+          image: {{ $workload.image | quote }}
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            privileged: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            seccompProfile:
+              type: RuntimeDefault
+          ports:
+            {{- range $service := $plan.services }}
+            {{- if eq $service.workload $workload.name }}
+            {{- range $port := $service.ports }}
+            - name: {{ $port.name }}
+              containerPort: {{ $port.port }}
+              protocol: TCP
+            {{- end }}
+            {{- end }}
+            {{- end }}
+          resources:
+            {{- $workload.resources | toYaml | nindent 12 }}
+          {{- range $probe := $workload.probes }}
+          {{- if eq $probe.kind "startup" }}
+          startupProbe:
+            httpGet:
+              path: {{ $probe.path | quote }}
+              port: {{ $probe.port }}
+              scheme: HTTP
+          {{- else if eq $probe.kind "readiness" }}
+          readinessProbe:
+            httpGet:
+              path: {{ $probe.path | quote }}
+              port: {{ $probe.port }}
+              scheme: HTTP
+          {{- else if eq $probe.kind "liveness" }}
+          livenessProbe:
+            httpGet:
+              path: {{ $probe.path | quote }}
+              port: {{ $probe.port }}
+              scheme: HTTP
+          {{- else }}
+          {{- fail "DeploymentPlan contains an unsupported probe kind" }}
+          {{- end }}
+          {{- end }}
+          volumeMounts:
+            - name: deployment-plan
+              mountPath: /var/run/rss/deployment
+              readOnly: true
+      volumes:
+        - name: deployment-plan
+          projected:
+            defaultMode: 0444
+            sources:
+              - configMap:
+                  name: {{ $planConfigMapName }}
+                  items:
+                    - key: plan.json
+                      path: plan.json
+{{- end }}

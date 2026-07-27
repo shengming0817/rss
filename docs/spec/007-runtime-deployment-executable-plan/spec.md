@@ -29,9 +29,10 @@
   production posture.
 - DeploymentPlan v1 is landed: the exact RuntimePlan identity plus the closed deployment block in
   `assemblies/artifacts.toml` compile into committed runtime, settingsonly, and identityaudit JSON
-  plans. `cargo xtask deployment plan render|check` owns their exact raw-byte drift closure. Helm,
-  deployment policy/kind acceptance, protected RuntimeInventory, and OCI same-head/signature
-  receipts remain downstream capabilities.
+  plans. `cargo xtask deployment plan render|check` owns their exact raw-byte drift closure plus
+  #1803's chart-local plans, closed profile values/schema and Helm 4.2.0 render goldens. This is
+  static repository evidence only: #1804 secret mapping/sidecars/policy, #1805 kind acceptance,
+  protected RuntimeInventory, and OCI same-head/signature receipts remain downstream capabilities.
 - 001 is superseded, immutable audit lineage. 007 is the active planning entry and provides no compatibility path back to 001.
 
 ## 目标能力
@@ -66,6 +67,9 @@ As an operator, I can render drift-checked Helm from a DeploymentPlan bound to t
 - **FR-010**: RuntimeInventory MUST gain a separate authorized `contracts/http/**` source with auth mode `permission|serviceOwned` and explicit resource sharing `tenantScoped|global`; it MUST reject `public|bootstrap|clientsOnly`, and this design schema MUST NOT become the wire source.
 - **FR-011**: Inventory, release, and aggregate evidence MUST carry assembly/runtime-plan/deployment fingerprints and bind exact source SHA; missing, cross-HEAD, or mismatched receipts MUST fail closed.
 - **FR-012**: Every target MUST name its owner and Hard/Medium planned carrier; unlanded capability MUST be described in future tense.
+- **FR-013**: The Helm projection MUST select exactly one supported profile, consume its bundled
+  DeploymentPlan without values overrides, render plan-owned images/ports/probes/resources, and
+  preserve the non-root/read-only/drop-ALL/no-shell baseline.
 
 ## 缺口与 owner
 
@@ -78,4 +82,9 @@ The owner groups are #1780–#1781 identity, #1782–#1787 configuration, #1788�
 
 ## Out of scope
 
-Runtime Rust carriers, generated deployment output, Helm, active-PR scheduling, branch protection, MDM/L4 production surface, schema migration readers, aliases, shims, fallbacks, and dual writes are owned elsewhere or intentionally absent. The `runtime-deployment-spec` xtask and its typed `verify --fast` membership are in scope only as #1779's repository specification carrier.
+Runtime Rust carriers, generated deployment output, and #1803's static Helm projection have landed
+under their implementation owners. Helm cluster operations, secret mapping, sidecars, deployment
+policy/kind acceptance, active-PR scheduling, branch protection, MDM/L4 production surface, schema
+migration readers, aliases, shims, fallbacks, and dual writes remain owned elsewhere or intentionally
+absent. The `runtime-deployment-spec` xtask and its typed `verify --fast` membership remain #1779's
+repository specification carrier.
