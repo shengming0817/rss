@@ -514,7 +514,7 @@ async fn rss_verified_evidence_handler(
         || receipt.auth_time_unix_secs() != (NOW - 30) as u64
         || receipt.authn_epoch() != 7
         || authenticated.principal_kind() != vocab::PrincipalKind::User
-        || !current.binds_principal(tenant(), USER_SUBJECT)
+        || !current.binds_principal(production_tenant(), USER_ID)
     {
         return Err(StatusCode::INTERNAL_SERVER_ERROR);
     }

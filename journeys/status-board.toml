@@ -11,15 +11,6 @@ marker = "AUDIT_LIST_TENANT_ENTRIES"
 runner = "journeys/tests/audit_list_tenant_entries_localtx_journey.rs"
 
 [[journeys]]
-id = "identity-password-change-localtx"
-contractId = "identity.password-change"
-txModel = "repo-atomic-cas"
-spec = "journeys/identity-password-change-localtx-journey.toml"
-fixture = "fixtures/identity-password-change-localtx.toml"
-marker = "IDENTITY_PASSWORD_CHANGE"
-runner = "journeys/tests/identity_password_change_localtx_journey.rs"
-
-[[journeys]]
 id = "identity-refresh-localtx"
 contractId = "identity.refresh"
 txModel = "tenant-scoped-uow"

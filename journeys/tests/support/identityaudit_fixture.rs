@@ -101,8 +101,6 @@ pub struct FixtureProviders {
     postgres_host: String,
     postgres_port: u16,
     postgres_database: String,
-    migrator_username: String,
-    migrator_password: String,
     identity_amqp_url: String,
     redis_url: String,
 }
@@ -113,8 +111,6 @@ impl FixtureProviders {
         postgres_host: impl Into<String>,
         postgres_port: u16,
         postgres_database: impl Into<String>,
-        migrator_username: impl Into<String>,
-        migrator_password: impl Into<String>,
         identity_amqp_url: impl Into<String>,
         redis_url: impl Into<String>,
     ) -> anyhow::Result<Self> {
@@ -129,8 +125,6 @@ impl FixtureProviders {
             postgres_host,
             postgres_port,
             postgres_database: postgres_database.into(),
-            migrator_username: migrator_username.into(),
-            migrator_password: migrator_password.into(),
             identity_amqp_url: literal_loopback_url(identity_amqp_url.into())?,
             redis_url: literal_loopback_url(redis_url.into())?,
         })
@@ -494,6 +488,7 @@ fn copy_der_integer(integer: &[u8], output: &mut [u8]) -> anyhow::Result<()> {
 
 pub struct RuntimeFixture {
     child: Option<Child>,
+    secret_bundle: Option<ServingSecretBundle>,
     root: Option<FixtureRoot>,
     logs: ChildLogs,
     vault: Option<VaultFixture>,
@@ -537,6 +532,7 @@ impl RuntimeFixture {
             )?,
         )
         .context("write fixture IdentityAudit config")?;
+        let secret_bundle = ServingSecretBundle::create(&root, &providers)?;
 
         let (stdout, stderr) = logs.stdio()?;
         let mut command = Command::new(identityaudit_binary()?);
@@ -545,28 +541,31 @@ impl RuntimeFixture {
                 "--config",
                 config_path.to_str().context("config path is not UTF-8")?,
             ])
-            .env("RSS_IDENTITYAUDIT_PG_WRITER_PASSWORD", WRITER_PASSWORD)
-            .env("RSS_IDENTITYAUDIT_PG_READER_PASSWORD", READER_PASSWORD)
             .env(
-                "RSS_IDENTITYAUDIT_PG_MIGRATOR_PASSWORD",
-                &providers.migrator_password,
+                "RSS_BUILD_SOURCE_SHA",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             )
             .env(
-                "RSS_IDENTITYAUDIT_PG_AUDIT_ADMIN_PASSWORD",
-                AUDIT_ADMIN_PASSWORD,
-            )
-            .env("RSS_IDENTITYAUDIT_VAULT_SIGNER_TOKEN", VAULT_SIGNER_TOKEN)
-            .env("RSS_IDENTITYAUDIT_VAULT_DLX_TOKEN", VAULT_DLX_TOKEN)
-            .env("RSS_IDENTITY_AMQP_URL", &providers.identity_amqp_url)
-            .env("RSS_REDIS_URL", &providers.redis_url)
-            .env(
-                "RSS_AUDIT_CHAIN_KEY_B64URL",
-                base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(AUDIT_CHAIN_KEY),
+                "RSS_BUILD_IMAGE_DIGEST",
+                "sha256:0dc0251564b714e89c8d098560ddfe69eb08c87fb85ac87323c54a7650126592",
             )
             .env(
-                "RSS_TENANT_AUTHORITY_HMAC_KEY_B64URL",
-                base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(TENANT_AUTHORITY_KEY),
+                "RSS_IDENTITYAUDIT_TEST_SECRET_BUNDLE_PATH",
+                &secret_bundle.path,
             )
+            .env("RSS_DEPLOYMENT_POD_IP", "127.0.0.1")
+            .env("RSS_DEPLOYMENT_PRIMARY_PORT", "8080")
+            .env("RSS_DEPLOYMENT_ADMIN_PORT", "8081")
+            .env("RSS_DEPLOYMENT_HEALTH_PORT", "8083")
+            .env(
+                "RSS_DEPLOYMENT_MTLS_SPIFFE_ALLOW_SET",
+                "[\"spiffe://rss.local/ns/rss/sa/ingress-gateway\"]",
+            )
+            .env(
+                "SPIFFE_ENDPOINT_SOCKET",
+                "unix:///run/spire/sockets/agent.sock",
+            )
+            .env("RSS_IDENTITYAUDIT_TEST_MTLS", "1")
             .env_remove("RSS_AMQP_URL")
             .stdout(stdout)
             .stderr(stderr);
@@ -577,6 +576,7 @@ impl RuntimeFixture {
             .context("build IdentityAudit fixture HTTP client")?;
         Ok(Self {
             child: Some(child),
+            secret_bundle: Some(secret_bundle),
             root: Some(root),
             logs,
             vault: Some(vault),
@@ -728,6 +728,9 @@ impl RuntimeFixture {
         if let Some(root) = self.root.take() {
             root.remove()?;
         }
+        if let Some(secret_bundle) = self.secret_bundle.take() {
+            secret_bundle.remove()?;
+        }
         Ok(())
     }
 
@@ -759,6 +762,41 @@ impl Drop for RuntimeFixture {
         if let Some(root) = self.root.take() {
             let _result = fs::remove_dir_all(root.path);
         }
+        if let Some(secret_bundle) = self.secret_bundle.take() {
+            let _result = secret_bundle.remove();
+        }
+    }
+}
+
+struct ServingSecretBundle {
+    path: PathBuf,
+}
+
+impl ServingSecretBundle {
+    fn create(root: &FixtureRoot, providers: &FixtureProviders) -> anyhow::Result<Self> {
+        let path = root.join("serving-secret-bundle.json");
+        let mut file = File::create(&path).context("create IdentityAudit secret bundle")?;
+        let document = serde_json::json!({
+            "pgWriterPassword": WRITER_PASSWORD,
+            "pgReaderPassword": READER_PASSWORD,
+            "pgAuditAdminPassword": AUDIT_ADMIN_PASSWORD,
+            "vaultSignerToken": VAULT_SIGNER_TOKEN,
+            "vaultDlxToken": VAULT_DLX_TOKEN,
+            "identityAmqpUrl": providers.identity_amqp_url,
+            "redisUrl": providers.redis_url,
+            "auditChainKey": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(AUDIT_CHAIN_KEY),
+            "tenantAuthorityKey": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(TENANT_AUTHORITY_KEY),
+        });
+        serde_json::to_writer(&mut file, &document).context("write secret bundle")?;
+        file.sync_all().context("sync secret bundle")?;
+        Ok(Self { path })
+    }
+
+    fn remove(self) -> anyhow::Result<()> {
+        if self.path.exists() {
+            fs::remove_file(&self.path).context("remove secret bundle")?;
+        }
+        Ok(())
     }
 }
 
@@ -857,18 +895,12 @@ sslMode = "disable"
 [postgres.writer]
 username = "{WRITER_USERNAME}"
 maxConnections = 5
-password = {{ kind = "environmentRef", name = "RSS_IDENTITYAUDIT_PG_WRITER_PASSWORD" }}
 [postgres.reader]
 username = "{READER_USERNAME}"
 maxConnections = 5
-password = {{ kind = "environmentRef", name = "RSS_IDENTITYAUDIT_PG_READER_PASSWORD" }}
-[postgres.migrator]
-username = "{}"
-password = {{ kind = "environmentRef", name = "RSS_IDENTITYAUDIT_PG_MIGRATOR_PASSWORD" }}
 [postgres.auditAdmin]
 username = "{AUDIT_ADMIN_USERNAME}"
 maxConnections = 3
-password = {{ kind = "environmentRef", name = "RSS_IDENTITYAUDIT_PG_AUDIT_ADMIN_PASSWORD" }}
 
 [vault]
 addr = "http://{vault}"
@@ -876,23 +908,14 @@ caCertPemPath = "{ca}"
 transitMount = "transit"
 signingKeyName = "{SIGNING_KEY_NAME}"
 dlxPayloadKeyName = "{DLX_PAYLOAD_KEY_NAME}"
-signerToken = {{ kind = "environmentRef", name = "RSS_IDENTITYAUDIT_VAULT_SIGNER_TOKEN" }}
-dlxToken = {{ kind = "environmentRef", name = "RSS_IDENTITYAUDIT_VAULT_DLX_TOKEN" }}
 readinessSeconds = 5
 
 [eventing]
-identityAmqpUrl = {{ kind = "environmentRef", name = "RSS_IDENTITY_AMQP_URL" }}
-redisUrl = {{ kind = "environmentRef", name = "RSS_REDIS_URL" }}
-auditChainKey = {{ kind = "environmentRef", name = "RSS_AUDIT_CHAIN_KEY_B64URL" }}
 auditChainKeyId = 1
-tenantAuthorityKey = {{ kind = "environmentRef", name = "RSS_TENANT_AUTHORITY_HMAC_KEY_B64URL" }}
 tenantAuthorityTtlSeconds = 3600
 tenantAuthorityClockSkewSeconds = 60
 "#,
-        providers.postgres_host,
-        providers.postgres_port,
-        providers.postgres_database,
-        providers.migrator_username,
+        providers.postgres_host, providers.postgres_port, providers.postgres_database,
     ))
 }
 

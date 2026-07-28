@@ -34,6 +34,8 @@ pub enum MigrationError {
     Migrate(#[source] sqlx::migrate::MigrateError),
     #[error("postgres migration ledger probe failed")]
     LedgerProbe(#[source] sqlx::Error),
+    #[error("postgres projection input binding registration failed")]
+    ProjectionBindings(#[source] sqlx::Error),
     #[error("postgres migration phase found legacy plaintext config rows: count={count}")]
     LegacyPlaintextPresent { count: i64 },
     #[error(
@@ -180,7 +182,29 @@ async fn run_and_verify(
         })
         .map_err(MigrationError::Migrate)?;
     verify_exact_ledger(pool).await?;
-    verify_legacy_plaintext_zero_stock(pool).await
+    verify_legacy_plaintext_zero_stock(pool).await?;
+    register_projection_input_bindings(pool).await
+}
+
+async fn register_projection_input_bindings(pool: &sqlx::PgPool) -> Result<(), MigrationError> {
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(MigrationError::ProjectionBindings)?;
+    for binding in postgres_migration_inventory::projection_inputs() {
+        sqlx::query("SELECT public.rss_register_projection_input_binding($1, $2, $3, $4, $5)")
+            .bind(postgres_migration_inventory::projection_input_generation())
+            .bind(binding.contract_id())
+            .bind(binding.version())
+            .bind(binding.schema_hash())
+            .bind(binding.topic())
+            .execute(&mut *tx)
+            .await
+            .map_err(MigrationError::ProjectionBindings)?;
+    }
+    tx.commit()
+        .await
+        .map_err(MigrationError::ProjectionBindings)
 }
 
 async fn verify_exact_ledger(pool: &sqlx::PgPool) -> Result<(), MigrationError> {
@@ -498,6 +522,33 @@ mod integration_tests {
         Ok(())
     }
 
+    async fn assert_generated_projection_bindings(pool: &sqlx::PgPool) -> TestResult {
+        let rows: Vec<(String, String, String, String)> = sqlx::query_as(
+            "SELECT contract_id, contract_version, schema_hash, topic \
+             FROM public.projection_input_bindings WHERE generation = $1 ORDER BY contract_id",
+        )
+        .bind(postgres_migration_inventory::projection_input_generation())
+        .fetch_all(pool)
+        .await?;
+        let mut expected = postgres_migration_inventory::projection_inputs()
+            .iter()
+            .map(|binding| {
+                (
+                    binding.contract_id().to_owned(),
+                    binding.version().to_owned(),
+                    binding.schema_hash().to_owned(),
+                    binding.topic().to_owned(),
+                )
+            })
+            .collect::<Vec<_>>();
+        expected.sort();
+        assert_eq!(
+            rows, expected,
+            "production migrator must register the generated binding set"
+        );
+        Ok(())
+    }
+
     #[tokio::test]
     async fn empty_database_reaches_exact_head_and_all_ledger_drifts_fail_closed() -> TestResult {
         let fixture = testkit::env_or_postgres().await?;
@@ -510,6 +561,7 @@ mod integration_tests {
         let migrator = embedded_migrator();
         verify_exact_ledger(&pool).await?;
         assert_minimal_ledger_grants(&pool).await?;
+        assert_generated_projection_bindings(&pool).await?;
 
         let head = migrator
             .iter()
@@ -592,6 +644,7 @@ mod integration_tests {
         let pool = connection_pool(fixture.params()).await?;
         verify_exact_ledger(&pool).await?;
         assert_minimal_ledger_grants(&pool).await?;
+        assert_generated_projection_bindings(&pool).await?;
         pool.close().await;
         Ok(())
     }

@@ -240,7 +240,7 @@ integration_shard_catalog! {
             ("postgres", "tx_capability_trybuild", Test, Parallel),
             ("journeys", "audit_list_tenant_entries_localtx_journey", Test, Serial),
             ("journeys", "identity_logout_grant_journey", Test, Parallel),
-            ("journeys", "identity_password_change_localtx_journey", Test, Serial),
+            ("journeys", "identity_password_security_event_journey", Test, Serial),
             ("journeys", "identity_refresh_localtx_journey", Test, Serial),
             ("journeys", "settings_secret_publish_localtx_journey", Test, Serial),
             ("runtime", "settings_secret_e2e", Test, Serial),
@@ -438,16 +438,16 @@ pub(crate) fn batches(shard: IntegrationShard) -> Vec<ShardBatch> {
         .collect()
 }
 
-pub(crate) const LOCALTX_JOURNEY_TARGETS: &[&str] = &[
+pub(crate) const POSTGRES_TRANSACTION_JOURNEY_TARGETS: &[&str] = &[
     "audit_list_tenant_entries_localtx_journey",
-    "identity_password_change_localtx_journey",
+    "identity_password_security_event_journey",
     "identity_refresh_localtx_journey",
     "settings_secret_publish_localtx_journey",
 ];
 
-pub(crate) fn localtx_journey_execution_batch() -> Result<ShardBatch> {
+pub(crate) fn postgres_transaction_journey_execution_batch() -> Result<ShardBatch> {
     if IntegrationShard::PostgresDomain.partition_policy() != PartitionPolicy::Unpartitioned {
-        bail!("LocalTx journey shard must remain unpartitioned");
+        bail!("Postgres transaction journey shard must remain unpartitioned");
     }
     let matches = batches(IntegrationShard::PostgresDomain)
         .into_iter()
@@ -455,12 +455,12 @@ pub(crate) fn localtx_journey_execution_batch() -> Result<ShardBatch> {
             batch.scheduling == Scheduling::Serial
                 && batch.kind == TargetKind::Test
                 && batch.package == "journeys"
-                && batch.targets.as_slice() == LOCALTX_JOURNEY_TARGETS
+                && batch.targets.as_slice() == POSTGRES_TRANSACTION_JOURNEY_TARGETS
         })
         .collect::<Vec<_>>();
     let [batch] = matches.as_slice() else {
         bail!(
-            "LocalTx journey must have exactly one postgres-domain Serial integration batch; found {}",
+            "Postgres transaction journeys must have exactly one postgres-domain Serial integration batch; found {}",
             matches.len()
         );
     };
@@ -805,7 +805,7 @@ mod tests {
             ("postgres", "postgres"),
             ("postgres-migration", "postgres_migration"),
             ("journeys", "audit_list_tenant_entries_localtx_journey"),
-            ("journeys", "identity_password_change_localtx_journey"),
+            ("journeys", "identity_password_security_event_journey"),
             ("journeys", "identity_refresh_localtx_journey"),
             ("journeys", "settings_secret_publish_localtx_journey"),
             ("runtime", "settings_secret_e2e"),
@@ -852,12 +852,12 @@ mod tests {
     }
 
     #[test]
-    fn localtx_journeys_form_one_unpartitioned_serial_batch() -> Result<()> {
-        let batch = localtx_journey_execution_batch()?;
+    fn postgres_transaction_journeys_form_one_unpartitioned_serial_batch() -> Result<()> {
+        let batch = postgres_transaction_journey_execution_batch()?;
         assert_eq!(batch.scheduling, Scheduling::Serial);
         assert_eq!(batch.kind, TargetKind::Test);
         assert_eq!(batch.package, "journeys");
-        assert_eq!(batch.targets, LOCALTX_JOURNEY_TARGETS);
+        assert_eq!(batch.targets, POSTGRES_TRANSACTION_JOURNEY_TARGETS);
         Ok(())
     }
 

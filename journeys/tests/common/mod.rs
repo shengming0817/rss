@@ -7,6 +7,7 @@
 #![allow(dead_code)]
 
 use std::sync::{Arc, Mutex};
+use std::time::SystemTime;
 
 use audit::ports::{
     AuditChainHasher, AuditListTenantAppender, DynAuditReadRepo, DynAuditWriteRepo,
@@ -20,8 +21,12 @@ use diport::{
 use eventexec::{DlxHotKeyName, TenantAuthority, TenantAuthorityBinding};
 use generated::event::identity_v1::session_created;
 use identity::ports::{
-    DynPolicyLifecycle, DynPolicyRepo, DynResourceAttributeReadRepo, DynRoleBindingLifecycle,
-    DynRoleBindingReadRepo, DynRoleReadRepo, IdentityError, PoliciesCreateProducerReceipt,
+    AccountReactivationLifecycle, AccountSecurityReadRepo, AccountStatusSetProducerReceipt,
+    AuthOutcome, Credential, CredentialRepo, DynAccountSecurityReadRepo, DynAuthGrantLifecycle,
+    DynCredentialRepo, DynPolicyLifecycle, DynPolicyRepo, DynResourceAttributeReadRepo,
+    DynRoleBindingLifecycle, DynRoleBindingReadRepo, DynRoleReadRepo, IdentityError,
+    IdentitySecurityLifecycle, LoginIdentifier, LogoutAllProducerReceipt,
+    LogoutCurrentProducerReceipt, PasswordChangeProducerReceipt, PoliciesCreateProducerReceipt,
     PoliciesDeactivateProducerReceipt, PoliciesUpdateProducerReceipt, Policy, PolicyId,
     PolicyLifecycle, PolicyListResult, PolicyPage, PolicyRepo, PolicyRouteScope, PolicyVersion,
     ResourceAttributeKey, ResourceAttributeReadRepo, ResourceAttributeResolution,
@@ -30,8 +35,10 @@ use identity::ports::{
     RolesRevokeProducerReceipt, TenantRepoScope,
 };
 use identity::{
-    CredentialSecurityService, IdentityDomain, IdentityDomainDeps, LoginService,
-    PolicyManageService, RbacAdminService, RefreshService,
+    AccountSecurityState, AccountStatusSetCommand, CredentialSecurityReceipt,
+    CredentialSecurityService, IdentityDomain, IdentityDomainDeps, LoginService, LogoutAllCommand,
+    LogoutCurrentCommand, PasswordChangeCommand, PolicyManageService, RbacAdminService,
+    ReactivateAccountCommand, RefreshService,
 };
 use primitives::{Mac, MacAlgorithm, MacKey, MacVerifier};
 use vocab::TenantId;
@@ -456,6 +463,7 @@ impl PolicyLifecycle for NoopPolicyLifecycle {
 pub fn identity_domain<S>(
     login: Arc<LoginService<S>>,
     refresh: Arc<RefreshService<S>>,
+    credential_security: Arc<CredentialSecurityService>,
 ) -> IdentityDomain<S>
 where
     S: diport::Signer + Send + Sync + 'static,
@@ -481,10 +489,6 @@ where
         policy_lifecycle,
         Box::new(memory::FixedClock::at_unix_secs(NOW_SECS)),
     ));
-    let credential_security = Arc::new(CredentialSecurityService::inert_for_non_logout_tests(
-        &login,
-        Box::new(memory::FixedClock::at_unix_secs(NOW_SECS)),
-    ));
     IdentityDomain::new(IdentityDomainDeps {
         login,
         refresh,
@@ -497,6 +501,121 @@ where
         resource_attribute_reads,
         clock: Arc::new(memory::FixedClock::at_unix_secs(NOW_SECS)),
     })
+}
+
+fn unavailable_identity_provider() -> IdentityError {
+    IdentityError::ProviderUnavailable(Box::new(std::io::Error::other(
+        "credential security is unavailable in this in-memory journey",
+    )))
+}
+
+struct FailClosedCredentialRepo;
+
+impl CredentialRepo for FailClosedCredentialRepo {
+    async fn find_by_user_id(
+        &self,
+        _scope: TenantRepoScope,
+        _user_id: ids::UserId,
+    ) -> Result<Option<Credential>, IdentityError> {
+        Err(unavailable_identity_provider())
+    }
+
+    async fn authenticate(
+        &self,
+        _scope: TenantRepoScope,
+        _login: LoginIdentifier,
+        _candidate: secure::RawPassword,
+        _now: SystemTime,
+    ) -> Result<AuthOutcome, IdentityError> {
+        Err(unavailable_identity_provider())
+    }
+
+    async fn insert(
+        &self,
+        _scope: TenantRepoScope,
+        _credential: Credential,
+    ) -> Result<(), IdentityError> {
+        Err(unavailable_identity_provider())
+    }
+}
+
+struct FailClosedAccountSecurityReadRepo;
+
+impl AccountSecurityReadRepo for FailClosedAccountSecurityReadRepo {
+    async fn find(
+        &self,
+        _scope: TenantRepoScope,
+        _user_id: ids::UserId,
+    ) -> Result<Option<AccountSecurityState>, IdentityError> {
+        Err(unavailable_identity_provider())
+    }
+}
+
+struct FailClosedIdentitySecurityLifecycle;
+
+impl IdentitySecurityLifecycle for FailClosedIdentitySecurityLifecycle {
+    async fn execute_password_change(
+        &self,
+        _receipt: PasswordChangeProducerReceipt,
+        _scope: TenantRepoScope,
+        _command: PasswordChangeCommand,
+    ) -> Result<CredentialSecurityReceipt, IdentityError> {
+        Err(unavailable_identity_provider())
+    }
+
+    async fn execute_account_status_set(
+        &self,
+        _receipt: AccountStatusSetProducerReceipt,
+        _scope: TenantRepoScope,
+        _command: AccountStatusSetCommand,
+    ) -> Result<CredentialSecurityReceipt, IdentityError> {
+        Err(unavailable_identity_provider())
+    }
+
+    async fn execute_logout_current(
+        &self,
+        _receipt: LogoutCurrentProducerReceipt,
+        _scope: TenantRepoScope,
+        _command: LogoutCurrentCommand,
+    ) -> Result<CredentialSecurityReceipt, IdentityError> {
+        Err(unavailable_identity_provider())
+    }
+
+    async fn execute_logout_all(
+        &self,
+        _receipt: LogoutAllProducerReceipt,
+        _scope: TenantRepoScope,
+        _command: LogoutAllCommand,
+    ) -> Result<CredentialSecurityReceipt, IdentityError> {
+        Err(unavailable_identity_provider())
+    }
+}
+
+impl AccountReactivationLifecycle for FailClosedIdentitySecurityLifecycle {
+    async fn execute_reactivation(
+        &self,
+        _scope: TenantRepoScope,
+        _command: ReactivateAccountCommand,
+    ) -> Result<AccountSecurityState, IdentityError> {
+        Err(unavailable_identity_provider())
+    }
+}
+
+/// Closed, fail-closed credential-security fixture for journeys that intentionally exercise only
+/// the in-memory login/event path. PostgreSQL-backed journeys must inject their production
+/// lifecycle instead.
+pub fn fail_closed_credential_security(
+    grants: Arc<DynAuthGrantLifecycle<'static>>,
+) -> Arc<CredentialSecurityService> {
+    Arc::new(CredentialSecurityService::new(
+        Arc::from(DynCredentialRepo::new_box(FailClosedCredentialRepo)),
+        grants,
+        DynAccountSecurityReadRepo::new_box(FailClosedAccountSecurityReadRepo),
+        FailClosedIdentitySecurityLifecycle,
+        FailClosedIdentitySecurityLifecycle,
+        password_policy(),
+        Box::new(memory::FixedClock::at_unix_secs(NOW_SECS)),
+    ))
 }
 
 /// 取 session-created 订阅绑定（audit 域可能还声明其它 event subscriptions）。

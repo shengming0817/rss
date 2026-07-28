@@ -66,6 +66,21 @@ async fn seed_login(pool: &PgPool) -> Result<()> {
     Ok(())
 }
 
+async fn register_projection_inputs(pool: &PgPool) -> Result<()> {
+    for binding in generated::event::PROJECTION_INPUTS {
+        sqlx::query("SELECT rss_register_projection_input_binding($1, $2, $3, $4, $5)")
+            .bind(generated::event::PROJECTION_INPUT_GENERATION)
+            .bind(binding.contract_id())
+            .bind(binding.version())
+            .bind(binding.schema_hash())
+            .bind(binding.topic())
+            .execute(pool)
+            .await
+            .context("register IdentityAudit projection input")?;
+    }
+    Ok(())
+}
+
 async fn wait_for_auth_audit(pool: &PgPool) -> Result<()> {
     tokio::time::timeout(WAIT_TIMEOUT, async {
         loop {
@@ -184,20 +199,23 @@ async fn identityaudit_login_audit_ready_sigterm_drain() -> Result<()> {
         .map(|login| testkit::PostgresTestLogin::new(login.username(), login.password()))
         .collect::<Vec<_>>();
     testkit::provision_postgres_test_logins(postgres.params(), &test_logins).await?;
+    let pool = owner_pool(postgres.params()).await?;
+    sqlx::migrate!("../adapters/postgres/migrations")
+        .run(&pool)
+        .await
+        .context("migrate IdentityAudit journey database")?;
+    register_projection_inputs(&pool).await?;
     let amqp = rabbit.vhost_url("rss_identity").await?;
     let providers = FixtureProviders::new(
         postgres.params().host.clone(),
         postgres.params().port,
         postgres.params().database.clone(),
-        postgres.params().username.clone(),
-        postgres.params().password.clone(),
         amqp,
         redis.url().to_owned(),
     )?;
     let mut runtime = RuntimeFixture::start(providers).await?;
 
     runtime.wait_until_ready().await?;
-    let pool = owner_pool(postgres.params()).await?;
     seed_login(&pool).await?;
     let login = runtime.login().await?;
     wait_for_auth_audit(&pool).await?;

@@ -39,6 +39,17 @@ manifest, RuntimePlan, generated artifacts and lock rotate together.
   After the new binary accepts its first certificate revocation, never roll back to a binary that
   reads an in-memory ledger; keep traffic stopped and roll forward with a corrected migration/runtime
   instead.
+- Treat the #1842 identity credential-security writer switch as a non-rolling application cutover,
+  even though it adds no migration. First stop ingress for password change, account status
+  restriction, logout and any internal reactivation caller; then drain every in-flight
+  old-generation identity writer and scale the old serving generation to zero. Prove both the old
+  process inventory and its PostgreSQL writer connections are zero before starting the new
+  generation and reopening traffic. Never mix the old password-only CAS writer with the new
+  `PgIdentitySecurityLifecycle`: the old path cannot atomically bump account epoch, revoke
+  grant/family and append `identity.security-event`. There is no dual-write, compatibility helper or
+  rolling rollback. If startup or verification fails, keep these writes quiesced and roll forward.
+  Reactivation after cutover remains eventless and must not revive any revoked/compromised grant or
+  refresh family.
 
 ## Atomic Vault Allowlist Cutover
 

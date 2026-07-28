@@ -13,6 +13,8 @@ use url::{Host, Url};
 use zeroize::Zeroizing;
 
 const SERVING_SECRET_BUNDLE_PATH: &str = "/var/run/rss/secrets/serving-secret-bundle";
+#[cfg(feature = "test-support")]
+const TEST_SECRET_BUNDLE_PATH_ENV: &str = "RSS_IDENTITYAUDIT_TEST_SECRET_BUNDLE_PATH";
 const BUILD_SOURCE_REVISION_ENV: &str = "RSS_BUILD_SOURCE_REVISION";
 const DECLARED_IMAGE_DIGEST_ENV: &str = "RSS_DECLARED_IMAGE_DIGEST";
 #[cfg(test)]
@@ -39,6 +41,8 @@ const REDIS_URL_ENV: &str = "RSS_REDIS_URL";
 const AUDIT_CHAIN_KEY_ENV: &str = "RSS_AUDIT_CHAIN_KEY_B64URL";
 #[cfg(test)]
 const TENANT_AUTHORITY_KEY_ENV: &str = "RSS_TENANT_AUTHORITY_HMAC_KEY_B64URL";
+#[cfg(test)]
+const IDENTITY_PSEUDONYM_KEY_ENV: &str = "RSS_IDENTITY_PSEUDONYM_KEY_B64URL";
 const FORBIDDEN_SHARED_AMQP_URL_ENV: &str = "RSS_AMQP_URL";
 
 /// Read, parse, validate, and resolve one immutable configuration generation.
@@ -125,7 +129,11 @@ impl ConfigSource for ProcessConfigSource {
     }
 
     fn read_secret_bundle(&mut self, path: &Path) -> std::io::Result<SecretDocument> {
-        runtimeexec::config::read_secret_document(path)
+        #[cfg(feature = "test-support")]
+        let path = std::env::var_os(TEST_SECRET_BUNDLE_PATH_ENV)
+            .map(PathBuf::from)
+            .unwrap_or_else(|| path.to_owned());
+        runtimeexec::config::read_secret_document(&path)
     }
 
     fn read_environment(&mut self, name: &'static str) -> Option<OsString> {
@@ -327,6 +335,7 @@ pub(crate) struct ResolvedSecrets {
     redis_url: Zeroizing<String>,
     audit_chain_key: primitives::MacKey,
     tenant_authority_key: primitives::MacKey,
+    identity_pseudonym_key: secure::RedactionHashKey,
 }
 
 #[derive(Deserialize)]
@@ -341,6 +350,7 @@ struct ServingSecretBundle {
     redis_url: SecretValue,
     audit_chain_key: SecretValue,
     tenant_authority_key: SecretValue,
+    identity_pseudonym_key: SecretValue,
 }
 
 impl TryFrom<ServingSecretBundle> for ResolvedSecrets {
@@ -357,12 +367,14 @@ impl TryFrom<ServingSecretBundle> for ResolvedSecrets {
             value.redis_url.as_str(),
             value.audit_chain_key.as_str(),
             value.tenant_authority_key.as_str(),
+            value.identity_pseudonym_key.as_str(),
         ];
         if values.iter().any(|value| value.is_empty()) {
             return Err(ConfigError::InvalidSecretBundle);
         }
         let audit_chain_key = value.audit_chain_key.into_zeroizing();
         let tenant_authority_key = value.tenant_authority_key.into_zeroizing();
+        let identity_pseudonym_key = value.identity_pseudonym_key.into_zeroizing();
         let secrets = Self {
             pg_writer_password: value.pg_writer_password.into_zeroizing(),
             pg_reader_password: value.pg_reader_password.into_zeroizing(),
@@ -375,6 +387,10 @@ impl TryFrom<ServingSecretBundle> for ResolvedSecrets {
             tenant_authority_key: decode_mac_key(
                 &tenant_authority_key,
                 "eventing.tenantAuthorityKey",
+            )?,
+            identity_pseudonym_key: decode_pseudonym_key(
+                &identity_pseudonym_key,
+                "identity.pseudonymKey",
             )?,
         };
         secrets.validate()?;
@@ -410,6 +426,7 @@ impl ResolvedSecrets {
         Zeroizing<String>,
         primitives::MacKey,
         primitives::MacKey,
+        secure::RedactionHashKey,
     ) {
         (
             self.pg_writer_password,
@@ -421,6 +438,7 @@ impl ResolvedSecrets {
             self.redis_url,
             self.audit_chain_key,
             self.tenant_authority_key,
+            self.identity_pseudonym_key,
         )
     }
 }
@@ -1006,6 +1024,16 @@ fn decode_mac_key(
         .ok_or(ConfigError::InvalidValue(field))
 }
 
+fn decode_pseudonym_key(
+    value: &Zeroizing<String>,
+    field: &'static str,
+) -> Result<secure::RedactionHashKey, ConfigError> {
+    let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(value.as_bytes())
+        .map_err(|_| ConfigError::InvalidValue(field))?;
+    secure::RedactionHashKey::from_bytes(decoded).map_err(|_| ConfigError::InvalidValue(field))
+}
+
 #[cfg(test)]
 pub(crate) fn parse_for_test(document: &str) -> Result<IdentityAuditConfig, ConfigError> {
     let config = parse_document(document)?;
@@ -1113,6 +1141,7 @@ tenantAuthorityClockSkewSeconds = 60
                 (REDIS_URL_ENV, "rediss://redis.example.test:6379/0"),
                 (AUDIT_CHAIN_KEY_ENV, VALID_KEY),
                 (TENANT_AUTHORITY_KEY_ENV, VALID_KEY),
+                (IDENTITY_PSEUDONYM_KEY_ENV, VALID_KEY),
                 (
                     BUILD_SOURCE_REVISION_ENV,
                     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -1159,6 +1188,7 @@ tenantAuthorityClockSkewSeconds = 60
             let redis_url = self.read_environment(REDIS_URL_ENV);
             let audit_chain_key = self.read_environment(AUDIT_CHAIN_KEY_ENV);
             let tenant_authority_key = self.read_environment(TENANT_AUTHORITY_KEY_ENV);
+            let identity_pseudonym_key = self.read_environment(IDENTITY_PSEUDONYM_KEY_ENV);
             let text = |value: Option<OsString>| {
                 value
                     .and_then(|value| value.into_string().ok())
@@ -1175,6 +1205,7 @@ tenantAuthorityClockSkewSeconds = 60
                     "redisUrl": text(redis_url),
                     "auditChainKey": text(audit_chain_key),
                     "tenantAuthorityKey": text(tenant_authority_key),
+                    "identityPseudonymKey": text(identity_pseudonym_key),
                 })
                 .to_string(),
             )))
@@ -1373,6 +1404,7 @@ tenantAuthorityClockSkewSeconds = 60
         for (name, field) in [
             (AUDIT_CHAIN_KEY_ENV, "eventing.auditChainKey"),
             (TENANT_AUTHORITY_KEY_ENV, "eventing.tenantAuthorityKey"),
+            (IDENTITY_PSEUDONYM_KEY_ENV, "identity.pseudonymKey"),
         ] {
             for invalid in ["not-base64", "dGlueQ"] {
                 let mut source = TestSource::complete(VALID_CONFIG);

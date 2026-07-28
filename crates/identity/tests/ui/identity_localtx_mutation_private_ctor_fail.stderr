@@ -1,7 +1,7 @@
 error[E0624]: associated function `new` is private
- --> tests/ui/identity_localtx_mutation_private_ctor_fail.rs:8:38
+ --> tests/ui/identity_localtx_mutation_private_ctor_fail.rs:6:38
   |
-8 |     let _login = LoginGrantMutation::new;
+6 |     let _login = LoginGrantMutation::new;
   |                                      ^^^ private associated function
   |
  ::: src/ports.rs
@@ -9,24 +9,8 @@ error[E0624]: associated function `new` is private
   |     pub(crate) fn new(grant: AuthGrant, initial_refresh: RefreshTokenRecord) -> Self {
   |     -------------------------------------------------------------------------------- private associated function defined here
 
-error[E0624]: associated function `new` is private
- --> tests/ui/identity_localtx_mutation_private_ctor_fail.rs:9:42
+error[E0599]: no associated function or constant named `new` found for struct `AuthGrantCloseCommand` in the current scope
+ --> tests/ui/identity_localtx_mutation_private_ctor_fail.rs:7:42
   |
-9 |     let _logout = AuthGrantCloseCommand::new;
-  |                                          ^^^ private associated function
-  |
- ::: src/ports.rs
-  |
-  |     pub(crate) fn new(mutation: AuthGrantCloseMutation) -> Self {
-  |     ----------------------------------------------------------- private associated function defined here
-
-error[E0624]: associated function `new` is private
-  --> tests/ui/identity_localtx_mutation_private_ctor_fail.rs:10:45
-   |
-10 |     let _password = PasswordChangeMutation::new;
-   |                                             ^^^ private associated function
-   |
-  ::: src/ports.rs
-   |
-   |     pub(crate) fn new(expected: u32, next: Credential) -> Self {
-   |     ---------------------------------------------------------- private associated function defined here
+7 |     let _logout = AuthGrantCloseCommand::new;
+  |                                          ^^^ associated function or constant not found in `AuthGrantCloseCommand`

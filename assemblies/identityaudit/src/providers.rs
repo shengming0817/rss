@@ -23,6 +23,7 @@ pub(crate) struct ProviderBundle {
     pub(crate) metrics: Arc<dyn diport::MetricsExporter>,
     pub(crate) limiter: Arc<ratelimit::GovernorLimiter>,
     pub(crate) audit_chain_key: primitives::MacKey,
+    pub(crate) identity_pseudonym_keys: Arc<secure::PseudonymKeyRing>,
     pub(crate) tenant_authority: Arc<eventexec::TenantAuthority>,
     pub(crate) dlx_payload_protector: postgres::DlxPayloadProtector,
     pub(crate) identity: IdentityInputs,
@@ -113,7 +114,15 @@ pub(crate) async fn build(
         redis_url,
         audit_chain_key,
         tenant_authority_key,
+        identity_pseudonym_key,
     ) = secrets.into_secret_material();
+    let identity_pseudonym_keys = Arc::new(secure::PseudonymKeyRing::new(
+        secure::VersionedPseudonymKey::new(
+            secure::PseudonymKeyId::new(std::num::NonZeroU16::MIN),
+            identity_pseudonym_key,
+        ),
+        Vec::new(),
+    )?);
 
     let auth_audit_sink_constructor = roles.auth_audit_sink()?;
     let distributed_cas_constructor = roles.distributed_cas_store()?;
@@ -272,6 +281,7 @@ pub(crate) async fn build(
             metrics: metrics_port,
             limiter,
             audit_chain_key,
+            identity_pseudonym_keys,
             tenant_authority,
             dlx_payload_protector,
             identity,

@@ -59,6 +59,11 @@ postgres adapter 把「连接池 + 一组域形 repo/UoW provider impl」打包�
   pool guard、sampler factory 或 lifecycle output API。`SharedRuntimeDeps` 与无 launch assembly 只保存此 handle。
 - **`PgDomainDeps<D>`**（域级能力句柄）：由 `PgRuntimeHandle::for_domain` 按域投影所需 repo/UoW（如 settings 的
   `ConfigRepo` + `SecretRepo` + `ConfigUnitOfWork`），交该域 `module()` 构造器。
+- Identity 投影只提供一个 `PgIdentitySecurityLifecycle` capability，并由 composition 作为非可选依赖注入
+  `CredentialSecurityService`。password change、account restriction 与 current/all logout 共用该
+  concrete provider 和 producer transaction funnel；`CredentialRepo` 只负责 insert/find/authenticate，不再暴露
+  password mutation，亦不存在平行 `AccountSecurityLifecycle`。reactivation 仍通过同一个 provider 的窄 CAS method，
+  但无 producer receipt、无 OutboxFact、无 grant/family 复活语义。
 - 生命周期交接只能由 `PgRuntimeDeps::into_runtime_parts(self, period)` 按值完成：返回顺序固定为 primary → optional
   audit-admin 的 pool guards，以及 non-`Clone` `PgReadinessSamplerFactory`；factory 的 `spawn(self, token)` 再按值消费，单个
   owner/factory 均不能生成第二套关闭或 sampler 路径。

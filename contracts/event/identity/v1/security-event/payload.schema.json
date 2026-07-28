@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "IdentitySecurityEventPayload",
   "type": "object",
-  "required": ["kind", "target", "tenantId", "occurredAt"],
+  "required": ["kind", "actor", "target", "tenantId", "occurredAt"],
   "properties": {
     "kind": {
       "type": "string",
@@ -12,20 +12,51 @@
         "accountLocked",
         "accountSuspended",
         "accountDeactivated",
+        "accountReactivated",
         "logoutCurrent",
         "logoutAll",
         "refreshReuseDetected",
         "credentialDeleted"
       ]
     },
+    "actor": {
+      "title": "IdentitySecurityEventPayloadActor",
+      "type": "object",
+      "x-redaction": "secret",
+      "required": ["kind", "keyId", "ref"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["user", "device", "admin", "superAdmin", "service"]
+        },
+        "keyId": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "x-redaction": "internal"
+        },
+        "ref": {
+          "type": "string",
+          "format": "uuid",
+          "x-redaction": "secret"
+        }
+      },
+      "additionalProperties": false
+    },
     "target": {
       "title": "IdentitySecurityEventPayloadTarget",
       "type": "object",
-      "required": ["kind", "ref"],
+      "required": ["kind", "keyId", "ref"],
       "properties": {
         "kind": {
           "type": "string",
           "enum": ["subject", "grant"]
+        },
+        "keyId": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "x-redaction": "internal"
         },
         "ref": {
           "type": "string",

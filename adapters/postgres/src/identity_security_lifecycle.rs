@@ -14,8 +14,9 @@
 
 use authn::{AuthGrant, AuthGrantCloseMutation, AuthGrantStatus};
 use identity::ports::{
-    AccountSecurityMutation, CredentialSecurityCommand, CredentialSecurityEmissionParts,
-    CredentialSecurityEvent, CredentialSecurityReceipt, IdentityError, IdentitySecurityLifecycle,
+    AccountReactivationLifecycle, AccountSecurityMutation, AccountSecurityState, Credential,
+    CredentialSecurityCommand, CredentialSecurityEmissionParts, CredentialSecurityEvent,
+    CredentialSecurityReceipt, IdentityError, IdentitySecurityLifecycle,
     PendingCredentialSecurityCommit, SECURITY_EVENT_CONTRACT, SECURITY_EVENT_FACT, TenantRepoScope,
 };
 
@@ -29,15 +30,50 @@ use crate::projection_events::ProjectionWriteRegistry;
 /// Durable provider for the active credential-security event protocol.
 pub struct PgIdentitySecurityLifecycle {
     write_pool: PgTenantWritePool,
+    pseudonym_keys: std::sync::Arc<secure::PseudonymKeyRing>,
     #[cfg(all(test, feature = "integration"))]
     fault: Option<IdentitySecurityFault>,
-    #[cfg(all(test, feature = "integration"))]
-    start_barrier: Option<std::sync::Arc<tokio::sync::Barrier>>,
+    #[cfg(any(all(test, feature = "integration"), feature = "journey-fault-support"))]
+    start_barrier: Option<std::sync::Arc<IdentitySecurityStartBarrier>>,
 }
 
-#[cfg(all(test, feature = "integration"))]
-#[derive(Clone, Copy)]
+#[cfg(any(all(test, feature = "integration"), feature = "journey-fault-support"))]
+struct IdentitySecurityStartBarrier {
+    barrier: std::sync::Arc<tokio::sync::Barrier>,
+    remaining: std::sync::atomic::AtomicU8,
+}
+
+#[cfg(any(all(test, feature = "integration"), feature = "journey-fault-support"))]
+impl IdentitySecurityStartBarrier {
+    fn two_requests(barrier: std::sync::Arc<tokio::sync::Barrier>) -> Self {
+        Self {
+            barrier,
+            remaining: std::sync::atomic::AtomicU8::new(2),
+        }
+    }
+
+    async fn wait_once(&self) {
+        if self
+            .remaining
+            .fetch_update(
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+                |remaining| remaining.checked_sub(1),
+            )
+            .is_ok()
+        {
+            self.barrier.wait().await;
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub(crate) enum IdentitySecurityFault {
+    AfterCredential,
+    AfterAccount,
+    AfterFamily,
+    AfterGrant,
     AfterProjection,
     OutboxAppend,
     AfterOutboxBeforeCommit,
@@ -48,12 +84,14 @@ impl PgIdentitySecurityLifecycle {
     pub(crate) fn new(
         writer: &VerifiedPgWriteStore,
         projection_registry: ProjectionWriteRegistry,
+        pseudonym_keys: std::sync::Arc<secure::PseudonymKeyRing>,
     ) -> Self {
         Self {
             write_pool: PgTenantWritePool::with_projection_registry(writer, projection_registry),
+            pseudonym_keys,
             #[cfg(all(test, feature = "integration"))]
             fault: None,
-            #[cfg(all(test, feature = "integration"))]
+            #[cfg(any(all(test, feature = "integration"), feature = "journey-fault-support"))]
             start_barrier: None,
         }
     }
@@ -62,6 +100,7 @@ impl PgIdentitySecurityLifecycle {
     pub(crate) fn from_unverified_for_test(store: &crate::PgStore) -> Self {
         Self {
             write_pool: PgTenantWritePool::from_unverified_for_test(store),
+            pseudonym_keys: test_pseudonym_keys(),
             fault: None,
             start_barrier: None,
         }
@@ -73,24 +112,87 @@ impl PgIdentitySecurityLifecycle {
         self
     }
 
-    #[cfg(all(test, feature = "integration"))]
+    #[cfg(any(all(test, feature = "integration"), feature = "journey-fault-support"))]
     pub(crate) fn with_start_barrier(
         mut self,
         barrier: std::sync::Arc<tokio::sync::Barrier>,
     ) -> Self {
-        self.start_barrier = Some(barrier);
+        self.start_barrier = Some(std::sync::Arc::new(
+            IdentitySecurityStartBarrier::two_requests(barrier),
+        ));
         self
     }
 }
 
+#[cfg(all(test, feature = "integration"))]
+fn test_pseudonym_keys() -> std::sync::Arc<secure::PseudonymKeyRing> {
+    use std::num::NonZeroU16;
+
+    let key_id = secure::PseudonymKeyId::new(NonZeroU16::MIN);
+    let key = match secure::RedactionHashKey::from_bytes(vec![0x42; 32]) {
+        Ok(key) => key,
+        Err(error) => unreachable!("fixed integration pseudonym key is valid: {error}"),
+    };
+    let ring = match secure::PseudonymKeyRing::new(
+        secure::VersionedPseudonymKey::new(key_id, key),
+        Vec::new(),
+    ) {
+        Ok(ring) => ring,
+        Err(error) => unreachable!("single integration pseudonym key is valid: {error}"),
+    };
+    std::sync::Arc::new(ring)
+}
+
 impl IdentitySecurityLifecycle for PgIdentitySecurityLifecycle {
+    async fn execute_password_change(
+        &self,
+        receipt: identity::ports::PasswordChangeProducerReceipt,
+        scope: TenantRepoScope,
+        command: identity::ports::PasswordChangeCommand,
+    ) -> Result<CredentialSecurityReceipt, IdentityError> {
+        let emission = identity::ports::password_change_emission(command, &self.pseudonym_keys)?;
+        let authorization = receipt
+            .authorize(SECURITY_EVENT_FACT, SECURITY_EVENT_CONTRACT)
+            .ok_or_else(|| corrupt("password-change receipt does not authorize security-event"))?;
+        let (command, entry, envelope_parts) = emission.into_parts();
+        let (expected, next, security) = command.into_parts();
+        let (mutation, event, pending) = security.into_parts();
+        let prepared = PreparedSecurityCommand {
+            entry,
+            envelope_parts,
+            mutation: SecurityMutation::Password {
+                credential: CredentialCasRow::try_from((&expected, &next, &event))?,
+                account: AccountSecurityRow::try_from((mutation, &event))?,
+            },
+            event,
+            pending,
+        };
+        self.execute_prepared(authorization, scope, prepared).await
+    }
+
+    async fn execute_account_status_set(
+        &self,
+        receipt: identity::ports::AccountStatusSetProducerReceipt,
+        scope: TenantRepoScope,
+        command: identity::ports::AccountStatusSetCommand,
+    ) -> Result<CredentialSecurityReceipt, IdentityError> {
+        let emission = identity::ports::account_status_set_emission(command, &self.pseudonym_keys)?;
+        let authorization = receipt
+            .authorize(SECURITY_EVENT_FACT, SECURITY_EVENT_CONTRACT)
+            .ok_or_else(|| {
+                corrupt("account restriction receipt does not authorize security-event")
+            })?;
+        let prepared = PreparedSecurityCommand::try_from(emission.into_parts())?;
+        self.execute_prepared(authorization, scope, prepared).await
+    }
+
     async fn execute_logout_current(
         &self,
         receipt: identity::ports::LogoutCurrentProducerReceipt,
         scope: TenantRepoScope,
         command: identity::ports::LogoutCurrentCommand,
     ) -> Result<CredentialSecurityReceipt, IdentityError> {
-        let emission = identity::ports::logout_current_emission(command)?;
+        let emission = identity::ports::logout_current_emission(command, &self.pseudonym_keys)?;
         let authorization = receipt
             .authorize(SECURITY_EVENT_FACT, SECURITY_EVENT_CONTRACT)
             .ok_or_else(|| corrupt("logout-current receipt does not authorize security-event"))?;
@@ -104,12 +206,31 @@ impl IdentitySecurityLifecycle for PgIdentitySecurityLifecycle {
         scope: TenantRepoScope,
         command: identity::ports::LogoutAllCommand,
     ) -> Result<CredentialSecurityReceipt, IdentityError> {
-        let emission = identity::ports::logout_all_emission(command)?;
+        let emission = identity::ports::logout_all_emission(command, &self.pseudonym_keys)?;
         let authorization = receipt
             .authorize(SECURITY_EVENT_FACT, SECURITY_EVENT_CONTRACT)
             .ok_or_else(|| corrupt("logout-all receipt does not authorize security-event"))?;
         let prepared = PreparedSecurityCommand::try_from(emission.into_parts())?;
         self.execute_prepared(authorization, scope, prepared).await
+    }
+}
+
+impl AccountReactivationLifecycle for PgIdentitySecurityLifecycle {
+    async fn execute_reactivation(
+        &self,
+        scope: TenantRepoScope,
+        command: identity::ports::ReactivateAccountCommand,
+    ) -> Result<AccountSecurityState, IdentityError> {
+        let (expected, next) = command.into_mutation().into_parts();
+        let row = AccountStateCasRow::from_states(expected, next.clone())?;
+        self.write_pool
+            .write(
+                scope,
+                move |tx| Box::pin(async move { apply_account_state_cas(tx.conn(), &row).await }),
+                storage,
+            )
+            .await?;
+        Ok(next)
     }
 }
 
@@ -121,7 +242,7 @@ impl PgIdentitySecurityLifecycle {
         command: CredentialSecurityCommand,
     ) -> Result<CredentialSecurityReceipt, IdentityError> {
         let prepared = PreparedSecurityCommand::try_from(
-            identity::ports::credential_security_emission_for_test(command)?,
+            identity::ports::credential_security_emission_for_test(command, &self.pseudonym_keys)?,
         )?;
         let authorization = crate::cotx::IntegrationCredentialSecurityAuthorization::new();
         self.execute_prepared(authorization, scope, prepared).await
@@ -164,7 +285,9 @@ impl PgIdentitySecurityLifecycle {
         .with_causation_id_opt(causation_id);
         #[cfg(all(test, feature = "integration"))]
         let fault = self.fault;
-        #[cfg(all(test, feature = "integration"))]
+        #[cfg(not(all(test, feature = "integration")))]
+        let fault = None;
+        #[cfg(any(all(test, feature = "integration"), feature = "journey-fault-support"))]
         let start_barrier = self.start_barrier.clone();
 
         self.write_pool
@@ -174,11 +297,14 @@ impl PgIdentitySecurityLifecycle {
                 &envelope,
                 move |tx| {
                     Box::pin(async move {
-                        #[cfg(all(test, feature = "integration"))]
+                        #[cfg(any(
+                            all(test, feature = "integration"),
+                            feature = "journey-fault-support"
+                        ))]
                         if let Some(start_barrier) = start_barrier {
-                            start_barrier.wait().await;
+                            start_barrier.wait_once().await;
                         }
-                        apply_security_mutation(tx.conn(), mutation).await?;
+                        apply_security_mutation(tx.conn(), mutation, fault).await?;
                         #[cfg(all(test, feature = "integration"))]
                         if matches!(fault, Some(IdentitySecurityFault::AfterProjection)) {
                             return Err(corrupt(
@@ -262,14 +388,19 @@ impl TryFrom<CredentialSecurityEmissionParts> for PreparedSecurityCommand {
 enum SecurityMutation {
     Account(AccountSecurityRow),
     Grant(GrantCloseCas),
+    Password {
+        credential: CredentialCasRow,
+        account: AccountSecurityRow,
+    },
 }
 
 async fn apply_security_mutation(
     conn: &mut sqlx::PgConnection,
     mutation: SecurityMutation,
+    fault: Option<IdentitySecurityFault>,
 ) -> Result<(), IdentityError> {
     match mutation {
-        SecurityMutation::Account(row) => apply_account_security(conn, &row).await,
+        SecurityMutation::Account(row) => apply_account_security(conn, &row, fault).await,
         SecurityMutation::Grant(row) => {
             if apply_grant_close_cas(conn, &row).await.map_err(storage)? {
                 Ok(())
@@ -277,22 +408,106 @@ async fn apply_security_mutation(
                 Err(IdentityError::VersionConflict)
             }
         }
+        SecurityMutation::Password {
+            credential,
+            account,
+        } => {
+            apply_credential_cas(conn, &credential).await?;
+            inject_mutation_fault(fault, IdentitySecurityFault::AfterCredential)?;
+            apply_account_security(conn, &account, fault).await
+        }
+    }
+}
+
+struct CredentialCasRow {
+    tenant: String,
+    user: String,
+    login: String,
+    expected_hash: String,
+    expected_version: i64,
+    next_hash: String,
+    next_version: i64,
+}
+
+impl TryFrom<(&Credential, &Credential, &CredentialSecurityEvent)> for CredentialCasRow {
+    type Error = IdentityError;
+
+    fn try_from(
+        (expected, next, event): (&Credential, &Credential, &CredentialSecurityEvent),
+    ) -> Result<Self, Self::Error> {
+        if expected.tenant() != event.tenant()
+            || next.tenant() != event.tenant()
+            || expected.user_id() != event.user_id()
+            || next.user_id() != event.user_id()
+            || expected.login().as_str() != next.login().as_str()
+            || expected.version().checked_add(1) != Some(next.version())
+        {
+            return Err(corrupt("password credential mutation mismatch"));
+        }
+        Ok(Self {
+            tenant: event.tenant().as_uuid().to_string(),
+            user: event.user_id().as_uuid().to_string(),
+            login: expected.login().as_str().to_owned(),
+            expected_hash: expected.password_hash().as_str().to_owned(),
+            expected_version: i64::from(expected.version()),
+            next_hash: next.password_hash().as_str().to_owned(),
+            next_version: i64::from(next.version()),
+        })
+    }
+}
+
+async fn apply_credential_cas(
+    conn: &mut sqlx::PgConnection,
+    row: &CredentialCasRow,
+) -> Result<(), IdentityError> {
+    let changed = sqlx::query(
+        r#"
+        UPDATE credentials
+        SET password_hash = $5,
+            version = $6
+        WHERE tenant_id = $1::uuid
+          AND user_id = $2::uuid
+          AND login = $3
+          AND password_hash = $4
+          AND version = $7
+        "#,
+    )
+    .bind(&row.tenant)
+    .bind(&row.user)
+    .bind(&row.login)
+    .bind(&row.expected_hash)
+    .bind(&row.next_hash)
+    .bind(row.next_version)
+    .bind(row.expected_version)
+    .execute(&mut *conn)
+    .await
+    .map_err(storage)?;
+    if changed.rows_affected() == 1 {
+        Ok(())
+    } else {
+        Err(IdentityError::VersionConflict)
     }
 }
 
 struct AccountSecurityRow {
+    state: AccountStateCasRow,
+    occurred_at: i64,
+    reason: &'static str,
+}
+
+struct AccountStateCasRow {
     tenant: String,
     user: String,
     expected_status: &'static str,
     expected_epoch: i64,
     expected_version: i64,
+    expected_status_changed_at_micros: i64,
+    expected_updated_at_micros: i64,
     next_status: &'static str,
     next_epoch: i64,
     next_version: i64,
-    status_changed_at: i64,
-    updated_at: i64,
-    occurred_at: i64,
-    reason: &'static str,
+    status_changed_at_micros: i64,
+    updated_at_micros: i64,
 }
 
 impl TryFrom<(AccountSecurityMutation, &CredentialSecurityEvent)> for AccountSecurityRow {
@@ -310,18 +525,43 @@ impl TryFrom<(AccountSecurityMutation, &CredentialSecurityEvent)> for AccountSec
             return Err(corrupt("credential security account mutation mismatch"));
         }
         Ok(Self {
-            tenant: event.tenant().as_uuid().to_string(),
-            user: event.user_id().as_uuid().to_string(),
+            state: AccountStateCasRow::from_states(expected, next)?,
+            occurred_at: unix_secs(event.occurred_at()),
+            reason: event.kind().as_db_str(),
+        })
+    }
+}
+
+impl AccountStateCasRow {
+    fn from_states(
+        expected: AccountSecurityState,
+        next: AccountSecurityState,
+    ) -> Result<Self, IdentityError> {
+        if expected.tenant() != next.tenant() || expected.user_id() != next.user_id() {
+            return Err(corrupt("account security mutation identity mismatch"));
+        }
+        Ok(Self {
+            tenant: expected.tenant().as_uuid().to_string(),
+            user: expected.user_id().as_uuid().to_string(),
             expected_status: status_to_db(expected.status()),
             expected_epoch: persisted_counter(expected.authn_epoch().get(), "expected epoch")?,
             expected_version: persisted_counter(expected.version().get(), "expected version")?,
+            expected_status_changed_at_micros: persisted_time_micros(
+                expected.status_changed_at(),
+                "expected status_changed_at",
+            )?,
+            expected_updated_at_micros: persisted_time_micros(
+                expected.updated_at(),
+                "expected updated_at",
+            )?,
             next_status: status_to_db(next.status()),
             next_epoch: persisted_counter(next.authn_epoch().get(), "next epoch")?,
             next_version: persisted_counter(next.version().get(), "next version")?,
-            status_changed_at: unix_secs(next.status_changed_at()),
-            updated_at: unix_secs(next.updated_at()),
-            occurred_at: unix_secs(event.occurred_at()),
-            reason: event.kind().as_db_str(),
+            status_changed_at_micros: persisted_time_micros(
+                next.status_changed_at(),
+                "next status_changed_at",
+            )?,
+            updated_at_micros: persisted_time_micros(next.updated_at(), "next updated_at")?,
         })
     }
 }
@@ -329,39 +569,22 @@ impl TryFrom<(AccountSecurityMutation, &CredentialSecurityEvent)> for AccountSec
 async fn apply_account_security(
     conn: &mut sqlx::PgConnection,
     row: &AccountSecurityRow,
+    fault: Option<IdentitySecurityFault>,
 ) -> Result<(), IdentityError> {
-    let changed = sqlx::query(
-        r#"
-        UPDATE account_security_states
-        SET status = $3,
-            authn_epoch = $4,
-            version = $5,
-            status_changed_at = to_timestamp($6),
-            updated_at = to_timestamp($7)
-        WHERE tenant_id = $1::uuid
-          AND user_id = $2::uuid
-          AND status = $8
-          AND authn_epoch = $9
-          AND version = $10
-        "#,
-    )
-    .bind(&row.tenant)
-    .bind(&row.user)
-    .bind(row.next_status)
-    .bind(row.next_epoch)
-    .bind(row.next_version)
-    .bind(row.status_changed_at)
-    .bind(row.updated_at)
-    .bind(row.expected_status)
-    .bind(row.expected_epoch)
-    .bind(row.expected_version)
-    .execute(&mut *conn)
-    .await
-    .map_err(storage)?;
-    if changed.rows_affected() != 1 {
-        return Err(IdentityError::VersionConflict);
-    }
+    apply_account_state_cas(conn, &row.state).await?;
+    inject_mutation_fault(fault, IdentitySecurityFault::AfterAccount)?;
 
+    revoke_refresh_families(conn, &row.state).await?;
+    inject_mutation_fault(fault, IdentitySecurityFault::AfterFamily)?;
+
+    revoke_auth_grants(conn, row).await?;
+    inject_mutation_fault(fault, IdentitySecurityFault::AfterGrant)
+}
+
+async fn revoke_refresh_families(
+    conn: &mut sqlx::PgConnection,
+    state: &AccountStateCasRow,
+) -> Result<(), IdentityError> {
     sqlx::query(
         r#"
         UPDATE refresh_tokens AS refresh
@@ -378,12 +601,19 @@ async fn apply_account_security(
           AND refresh.status <> 'revoked'
         "#,
     )
-    .bind(&row.tenant)
-    .bind(&row.user)
+    .bind(&state.tenant)
+    .bind(&state.user)
     .execute(&mut *conn)
     .await
     .map_err(storage)?;
+    Ok(())
+}
 
+async fn revoke_auth_grants(
+    conn: &mut sqlx::PgConnection,
+    row: &AccountSecurityRow,
+) -> Result<(), IdentityError> {
+    let state = &row.state;
     sqlx::query(
         r#"
         UPDATE auth_grants
@@ -395,13 +625,66 @@ async fn apply_account_security(
           AND status = 'active'
         "#,
     )
-    .bind(&row.tenant)
-    .bind(&row.user)
+    .bind(&state.tenant)
+    .bind(&state.user)
     .bind(row.occurred_at)
     .bind(row.reason)
     .execute(&mut *conn)
     .await
     .map_err(storage)?;
+    Ok(())
+}
+
+fn inject_mutation_fault(
+    fault: Option<IdentitySecurityFault>,
+    stage: IdentitySecurityFault,
+) -> Result<(), IdentityError> {
+    if fault == Some(stage) {
+        Err(corrupt("injected identity security mutation failure"))
+    } else {
+        Ok(())
+    }
+}
+
+async fn apply_account_state_cas(
+    conn: &mut sqlx::PgConnection,
+    row: &AccountStateCasRow,
+) -> Result<(), IdentityError> {
+    let changed = sqlx::query(
+        r#"
+        UPDATE account_security_states
+        SET status = $3,
+            authn_epoch = $4,
+            version = $5,
+            status_changed_at = TIMESTAMPTZ 'epoch' + $6 * INTERVAL '1 microsecond',
+            updated_at = TIMESTAMPTZ 'epoch' + $7 * INTERVAL '1 microsecond'
+        WHERE tenant_id = $1::uuid
+          AND user_id = $2::uuid
+          AND status = $8
+          AND authn_epoch = $9
+          AND version = $10
+          AND status_changed_at = TIMESTAMPTZ 'epoch' + $11 * INTERVAL '1 microsecond'
+          AND updated_at = TIMESTAMPTZ 'epoch' + $12 * INTERVAL '1 microsecond'
+        "#,
+    )
+    .bind(&row.tenant)
+    .bind(&row.user)
+    .bind(row.next_status)
+    .bind(row.next_epoch)
+    .bind(row.next_version)
+    .bind(row.status_changed_at_micros)
+    .bind(row.updated_at_micros)
+    .bind(row.expected_status)
+    .bind(row.expected_epoch)
+    .bind(row.expected_version)
+    .bind(row.expected_status_changed_at_micros)
+    .bind(row.expected_updated_at_micros)
+    .execute(&mut *conn)
+    .await
+    .map_err(storage)?;
+    if changed.rows_affected() != 1 {
+        return Err(IdentityError::VersionConflict);
+    }
     Ok(())
 }
 
@@ -435,6 +718,21 @@ fn validate_grant_binding(
 
 fn persisted_counter(value: u64, field: &'static str) -> Result<i64, IdentityError> {
     i64::try_from(value).map_err(|_| corrupt(field))
+}
+
+fn persisted_time_micros(
+    value: std::time::SystemTime,
+    field: &'static str,
+) -> Result<i64, IdentityError> {
+    let duration = value
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .map_err(|_| corrupt(field))?;
+    let micros = duration
+        .as_secs()
+        .checked_mul(1_000_000)
+        .and_then(|seconds| seconds.checked_add(u64::from(duration.subsec_micros())))
+        .ok_or_else(|| corrupt(field))?;
+    i64::try_from(micros).map_err(|_| corrupt(field))
 }
 
 fn storage(error: impl std::error::Error + Send + Sync + 'static) -> IdentityError {

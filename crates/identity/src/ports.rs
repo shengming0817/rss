@@ -25,10 +25,7 @@ use authn::{AuthGrantSnapshot, AuthnEpoch};
 use consistency::EventEntry;
 use diport::{EnvelopeSubjectId, OpaqueActorId, OutboxActor, OutboxEmitError, OutboxEnvelopeParts};
 use dynosaur::dynosaur;
-use generated::http::identity_v1::{
-    password_change::{LOCAL_TX as PASSWORD_CHANGE_LOCAL_TX, ROUTE as PASSWORD_CHANGE_ROUTE},
-    refresh::{LOCAL_TX as REFRESH_LOCAL_TX, ROUTE as REFRESH_ROUTE},
-};
+use generated::http::identity_v1::refresh::{LOCAL_TX as REFRESH_LOCAL_TX, ROUTE as REFRESH_ROUTE};
 
 // Exact fact bindings cross the domain→adapter port as zero-copy re-exports. Adapters retain the
 // normal Adapter→Domain dependency and cannot introduce an Adapter→Generated layer edge.
@@ -39,9 +36,10 @@ pub use generated::event::identity_v1::security_event::{
     CONTRACT as SECURITY_EVENT_CONTRACT, FACT as SECURITY_EVENT_FACT,
 };
 use generated::event::identity_v1::security_event::{
-    IdentitySecurityEventPayload, IdentitySecurityEventPayloadKind as WireSecurityEventKind,
-    IdentitySecurityEventPayloadTarget, IdentitySecurityEventPayloadTargetKind as WireTargetKind,
-    SPEC as SECURITY_EVENT_SPEC,
+    IdentitySecurityEventPayload, IdentitySecurityEventPayloadActor,
+    IdentitySecurityEventPayloadActorKind as WireActorKind,
+    IdentitySecurityEventPayloadKind as WireSecurityEventKind, IdentitySecurityEventPayloadTarget,
+    IdentitySecurityEventPayloadTargetKind as WireTargetKind, SPEC as SECURITY_EVENT_SPEC,
 };
 pub use generated::event::identity_v1::session_created::CONTRACT as SESSION_CREATED_CONTRACT;
 
@@ -60,18 +58,20 @@ pub type FaultMatrixSessionCreatedPayload =
 pub use crate::domain::{
     AbacAttribute, AccountCredentialSecurityCommand, AccountLockout, AccountSecurityHydrationError,
     AccountSecurityMutation, AccountSecuritySnapshot, AccountSecurityState,
-    AccountSecurityTransitionError, AccountSecurityVersion, AccountStatus, AttributeKey,
-    AttributeValue, AuthOutcome, BruteForceDecision, Credential, CredentialSecurityCommand,
-    CredentialSecurityEvent, CredentialSecurityReceipt, CredentialSecurityTargetKind,
-    CredentialSecurityTargetRef, GlobPattern, GrantCredentialSecurityCommand, IdentityError,
-    LoginIdentifier, LogoutAllCommand, LogoutCurrentCommand, Operator, POLICY_ATTR_CONTRACT_ID,
-    POLICY_ATTR_PERMISSION, POLICY_ATTR_PRINCIPAL_ID, POLICY_ATTR_PRINCIPAL_KIND,
-    POLICY_ATTR_RESOURCE_ID, POLICY_ATTR_TENANT_ID, PendingCredentialSecurityCommit, Policy,
+    AccountSecurityTransitionError, AccountSecurityVersion, AccountStatus, AccountStatusSetCommand,
+    AttributeKey, AttributeValue, AuthOutcome, BruteForceDecision, Credential,
+    CredentialSecurityCommand, CredentialSecurityEvent, CredentialSecurityInitiator,
+    CredentialSecurityReceipt, CredentialSecurityTargetKind, CredentialSecurityTargetRef,
+    GlobPattern, GrantCredentialSecurityCommand, IdentityError, LoginIdentifier, LogoutAllCommand,
+    LogoutCurrentCommand, Operator, POLICY_ATTR_CONTRACT_ID, POLICY_ATTR_PERMISSION,
+    POLICY_ATTR_PRINCIPAL_ID, POLICY_ATTR_PRINCIPAL_KIND, POLICY_ATTR_RESOURCE_ID,
+    POLICY_ATTR_TENANT_ID, PasswordChangeCommand, PendingCredentialSecurityCommit, Policy,
     PolicyCondition, PolicyEffect, PolicyId, PolicyObligations, PolicyRouteScope, PolicyRule,
-    PolicyVersion, RefreshRotation, RefreshRotationOutcome, RefreshStatus, RefreshTokenHash,
-    RefreshTokenId, RefreshTokenRecord, RefreshTokenSnapshot, ResourceAttribute,
-    ResourceAttributeKey, ResourceAttributeKeyError, ResourceAttributeResolution,
-    ResourceAttributeResourceId, ResourceAttributeVersion, Role, RoleBinding, RoleId,
+    PolicyVersion, ReactivateAccountCommand, RefreshRotation, RefreshRotationOutcome,
+    RefreshStatus, RefreshTokenHash, RefreshTokenId, RefreshTokenRecord, RefreshTokenSnapshot,
+    ResourceAttribute, ResourceAttributeKey, ResourceAttributeKeyError,
+    ResourceAttributeResolution, ResourceAttributeResourceId, ResourceAttributeVersion, Role,
+    RoleBinding, RoleId,
 };
 pub use vocab::TenantId;
 
@@ -101,14 +101,26 @@ pub struct LogoutCurrentEmission(CredentialSecurityEmission);
 /// account-wide command, so the generated fact cannot be replaced independently of the mutation.
 pub struct LogoutAllEmission(CredentialSecurityEmission);
 
+/// Move-only desired account-status emission.
+pub struct AccountStatusSetEmission(CredentialSecurityEmission);
+
+/// Move-only password-change emission retaining the credential CAS command.
+pub struct PasswordChangeEmission {
+    command: PasswordChangeCommand,
+    fact: CredentialSecurityFact,
+}
+
 struct CredentialSecurityEmission {
     command: CredentialSecurityCommand,
     fact: CredentialSecurityFact,
 }
 
 impl CredentialSecurityEmission {
-    fn new(command: CredentialSecurityCommand) -> Result<Self, IdentityError> {
-        let fact = credential_security_fact(command.event())?;
+    fn new(
+        command: CredentialSecurityCommand,
+        pseudonym_keys: &secure::PseudonymKeyRing,
+    ) -> Result<Self, IdentityError> {
+        let fact = credential_security_fact(command.event(), pseudonym_keys)?;
         Ok(Self { command, fact })
     }
 
@@ -148,30 +160,68 @@ impl LogoutAllEmission {
     }
 }
 
+impl AccountStatusSetEmission {
+    pub fn into_parts(self) -> CredentialSecurityEmissionParts {
+        self.0.into_parts()
+    }
+}
+
+impl PasswordChangeEmission {
+    pub fn into_parts(self) -> (PasswordChangeCommand, EventEntry, OutboxEnvelopeParts) {
+        let (entry, envelope) = self.fact.into_parts();
+        (self.command, entry, envelope)
+    }
+}
+
 /// Consume the exact logout-current command into its only valid generated emission.
 pub fn logout_current_emission(
     command: LogoutCurrentCommand,
+    pseudonym_keys: &secure::PseudonymKeyRing,
 ) -> Result<LogoutCurrentEmission, IdentityError> {
-    CredentialSecurityEmission::new(command.into_security_command()).map(LogoutCurrentEmission)
+    CredentialSecurityEmission::new(command.into_security_command(), pseudonym_keys)
+        .map(LogoutCurrentEmission)
 }
 
 /// Consume the exact logout-all command into its only valid generated emission.
-pub fn logout_all_emission(command: LogoutAllCommand) -> Result<LogoutAllEmission, IdentityError> {
-    CredentialSecurityEmission::new(command.into_security_command()).map(LogoutAllEmission)
+pub fn logout_all_emission(
+    command: LogoutAllCommand,
+    pseudonym_keys: &secure::PseudonymKeyRing,
+) -> Result<LogoutAllEmission, IdentityError> {
+    CredentialSecurityEmission::new(command.into_security_command(), pseudonym_keys)
+        .map(LogoutAllEmission)
+}
+
+pub fn account_status_set_emission(
+    command: AccountStatusSetCommand,
+    pseudonym_keys: &secure::PseudonymKeyRing,
+) -> Result<AccountStatusSetEmission, IdentityError> {
+    CredentialSecurityEmission::new(command.into_security_command(), pseudonym_keys)
+        .map(AccountStatusSetEmission)
+}
+
+pub fn password_change_emission(
+    command: PasswordChangeCommand,
+    pseudonym_keys: &secure::PseudonymKeyRing,
+) -> Result<PasswordChangeEmission, IdentityError> {
+    let fact = credential_security_fact(command.event(), pseudonym_keys)?;
+    Ok(PasswordChangeEmission { command, fact })
 }
 
 #[cfg(feature = "test-support")]
 pub fn credential_security_emission_for_test(
     command: CredentialSecurityCommand,
+    pseudonym_keys: &secure::PseudonymKeyRing,
 ) -> Result<CredentialSecurityEmissionParts, IdentityError> {
-    CredentialSecurityEmission::new(command).map(CredentialSecurityEmission::into_parts)
+    CredentialSecurityEmission::new(command, pseudonym_keys)
+        .map(CredentialSecurityEmission::into_parts)
 }
 
-/// The wire payload intentionally excludes subject, grant, credential and token identifiers. Its
-/// event id and target reference are independent opaque UUIDs. The target reference is used as the
-/// non-PII envelope subject and the actor is a fixed service identity.
+/// The wire payload intentionally excludes raw subject, grant, credential and token identifiers.
+/// Target and actor references are stable tenant-scoped pseudonyms; the same actor projection is
+/// used in the payload and persisted outbox metadata so durable consumers can attribute safely.
 pub fn credential_security_fact(
     event: &CredentialSecurityEvent,
+    pseudonym_keys: &secure::PseudonymKeyRing,
 ) -> Result<CredentialSecurityFact, IdentityError> {
     let kind = match event.kind() {
         CredentialSecurityEventKind::Account(AccountSecurityEventKind::PasswordChanged) => {
@@ -189,6 +239,9 @@ pub fn credential_security_fact(
         CredentialSecurityEventKind::Account(AccountSecurityEventKind::AccountDeactivated) => {
             WireSecurityEventKind::AccountDeactivated
         }
+        CredentialSecurityEventKind::Account(AccountSecurityEventKind::AccountReactivated) => {
+            WireSecurityEventKind::AccountReactivated
+        }
         CredentialSecurityEventKind::Account(AccountSecurityEventKind::LogoutAll) => {
             WireSecurityEventKind::LogoutAll
         }
@@ -202,21 +255,49 @@ pub fn credential_security_fact(
             WireSecurityEventKind::RefreshReuseDetected
         }
     };
-    let target_ref = CredentialSecurityTargetRef::generate();
+    let target_ref = event
+        .target_ref(pseudonym_keys)
+        .map_err(security_fact_build)?;
     let target_kind = match event.target_kind() {
         CredentialSecurityTargetKind::Subject => WireTargetKind::Subject,
         CredentialSecurityTargetKind::Grant => WireTargetKind::Grant,
     };
-    let occurred_at = event
-        .occurred_at()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|duration| i64::try_from(duration.as_secs()).unwrap_or(i64::MAX))
-        .unwrap_or(0);
+    let actor_kind = match event.initiator().kind() {
+        vocab::PrincipalKind::User => WireActorKind::User,
+        vocab::PrincipalKind::Device => WireActorKind::Device,
+        vocab::PrincipalKind::Admin => WireActorKind::Admin,
+        vocab::PrincipalKind::SuperAdmin => WireActorKind::SuperAdmin,
+        vocab::PrincipalKind::Service => WireActorKind::Service,
+        vocab::PrincipalKind::Anonymous => {
+            return Err(security_fact_build(std::io::Error::other(
+                "anonymous credential-security initiator",
+            )));
+        }
+        _ => {
+            return Err(security_fact_build(std::io::Error::other(
+                "unsupported credential-security initiator",
+            )));
+        }
+    };
+    let actor_ref = event
+        .initiator()
+        .privacy_ref(pseudonym_keys)
+        .map_err(security_fact_build)?;
+    let actor_uuid = uuid::Uuid::from_bytes(actor_ref.as_bytes());
+    let occurred_at = vocab::UnixEpochSeconds::try_from(event.occurred_at())
+        .map_err(security_fact_build)?
+        .get();
     let payload = IdentitySecurityEventPayload {
+        actor: IdentitySecurityEventPayloadActor {
+            kind: actor_kind,
+            key_id: wire_pseudonym_key_id(actor_ref.key_id()),
+            ref_: actor_uuid,
+        },
         kind,
         occurred_at,
         target: IdentitySecurityEventPayloadTarget {
             kind: target_kind,
+            key_id: wire_pseudonym_key_id(target_ref.key_id()),
             ref_: target_ref.as_uuid(),
         },
         tenant_id: event.tenant().to_string(),
@@ -230,9 +311,11 @@ pub fn credential_security_fact(
         event.tenant(),
         EnvelopeSubjectId::from_opaque(target_ref.as_uuid().to_string())
             .map_err(security_fact_build)?,
-        OutboxActor::service(
-            OpaqueActorId::from_opaque("identity-security-lifecycle".to_owned())
-                .map_err(security_fact_build)?,
+        OutboxActor::scoped(
+            event.initiator().kind(),
+            OpaqueActorId::from_opaque(actor_uuid.to_string()).map_err(security_fact_build)?,
+            event.tenant(),
+            vocab::ScopedTenant::SelfOnly,
         ),
     );
     Ok(CredentialSecurityFact { entry, envelope })
@@ -240,6 +323,13 @@ pub fn credential_security_fact(
 
 fn security_fact_build(error: impl std::error::Error + Send + Sync + 'static) -> IdentityError {
     IdentityError::SecurityFactBuild(Box::new(error))
+}
+
+fn wire_pseudonym_key_id(id: secure::PseudonymKeyId) -> std::num::NonZeroU64 {
+    match std::num::NonZeroU64::new(u64::from(id.get())) {
+        Some(id) => id,
+        None => unreachable!("PseudonymKeyId is non-zero by construction"),
+    }
 }
 
 fn security_payload_encode(error: serde_json::Error) -> IdentityError {
@@ -252,7 +342,7 @@ mod credential_security_fact_tests {
     use super::*;
     use std::time::Duration;
 
-    const CASES: [(CredentialSecurityEventKind, &str, &str); 9] = [
+    const CASES: [(CredentialSecurityEventKind, &str, &str); 10] = [
         (
             CredentialSecurityEventKind::Account(AccountSecurityEventKind::PasswordChanged),
             "passwordChanged",
@@ -279,6 +369,11 @@ mod credential_security_fact_tests {
             "subject",
         ),
         (
+            CredentialSecurityEventKind::Account(AccountSecurityEventKind::AccountReactivated),
+            "accountReactivated",
+            "subject",
+        ),
+        (
             CredentialSecurityEventKind::Account(AccountSecurityEventKind::LogoutAll),
             "logoutAll",
             "subject",
@@ -300,6 +395,19 @@ mod credential_security_fact_tests {
         ),
     ];
 
+    fn pseudonym_keys() -> secure::PseudonymKeyRing {
+        let key =
+            secure::RedactionHashKey::from_bytes(vec![0x42; 32]).expect("valid pseudonym key");
+        secure::PseudonymKeyRing::new(
+            secure::VersionedPseudonymKey::new(
+                secure::PseudonymKeyId::new(std::num::NonZeroU16::MIN),
+                key,
+            ),
+            Vec::new(),
+        )
+        .expect("valid pseudonym key ring")
+    }
+
     fn command(
         kind: CredentialSecurityEventKind,
         tenant: TenantId,
@@ -307,12 +415,33 @@ mod credential_security_fact_tests {
         occurred_at: SystemTime,
     ) -> CredentialSecurityCommand {
         match kind {
-            CredentialSecurityEventKind::Account(kind) => CredentialSecurityCommand::account(
-                AccountSecurityState::initial(tenant, user, SystemTime::UNIX_EPOCH),
-                kind,
-                occurred_at,
-            )
-            .expect("account command"),
+            CredentialSecurityEventKind::Account(kind) => {
+                let state = if kind == AccountSecurityEventKind::AccountReactivated {
+                    AccountSecurityState::try_from(AccountSecuritySnapshot {
+                        tenant,
+                        user_id: user,
+                        status: AccountStatus::Suspended,
+                        authn_epoch: 1,
+                        version: 2,
+                        status_changed_at: SystemTime::UNIX_EPOCH,
+                        updated_at: SystemTime::UNIX_EPOCH,
+                    })
+                    .expect("suspended state")
+                } else {
+                    AccountSecurityState::initial(tenant, user, SystemTime::UNIX_EPOCH)
+                };
+                CredentialSecurityCommand::account(
+                    state,
+                    kind,
+                    CredentialSecurityInitiator::authenticated(
+                        tenant,
+                        vocab::PrincipalKind::User,
+                        user.as_uuid().hyphenated().to_string(),
+                    ),
+                    occurred_at,
+                )
+                .unwrap_or_else(|error| panic!("account command {kind:?}: {error:?}"))
+            }
             CredentialSecurityEventKind::Grant(kind) => CredentialSecurityCommand::grant(
                 AuthGrant::hydrate(AuthGrantSnapshot {
                     id: AuthGrantId::hydrate("7d65e5f2-e716-4c4e-8e4c-6f7ab1754ef8")
@@ -329,6 +458,11 @@ mod credential_security_fact_tests {
                 })
                 .expect("active grant"),
                 kind,
+                CredentialSecurityInitiator::authenticated(
+                    tenant,
+                    vocab::PrincipalKind::User,
+                    user.as_uuid().hyphenated().to_string(),
+                ),
                 occurred_at,
             )
             .expect("grant command"),
@@ -340,10 +474,11 @@ mod credential_security_fact_tests {
         clippy::cognitive_complexity,
         reason = "one table-driven assertion intentionally checks the full nine-kind protocol matrix"
     )]
-    fn security_event_commands_map_to_their_exact_wire_kind_and_opaque_target() {
+    fn security_event_commands_bind_real_actor_and_stable_tenant_scoped_target() {
         let tenant = TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").expect("tenant");
         let user = ids::UserId::parse("11111111-2222-4333-8444-555555555555").expect("user");
         let occurred_at = SystemTime::UNIX_EPOCH + Duration::from_secs(42);
+        let pseudonym_keys = pseudonym_keys();
 
         for (kind, wire_kind, wire_target_kind) in CASES {
             let command = command(kind, tenant, user, occurred_at);
@@ -357,18 +492,31 @@ mod credential_security_fact_tests {
                     event
                 }
             };
-            let fact = credential_security_fact(&event).expect("fact");
+            let repeat = credential_security_fact(&event, &pseudonym_keys).expect("repeat fact");
+            let (repeat_entry, _) = repeat.into_parts();
+            let repeat_payload: serde_json::Value =
+                serde_json::from_slice(repeat_entry.payload()).expect("repeat payload");
+            let fact = credential_security_fact(&event, &pseudonym_keys).expect("fact");
             let (entry, envelope) = fact.into_parts();
             let payload: serde_json::Value =
                 serde_json::from_slice(entry.payload()).expect("payload");
             let target_ref = payload["target"]["ref"]
                 .as_str()
                 .expect("target ref must be a string");
+            let actor_ref = payload["actor"]["ref"]
+                .as_str()
+                .expect("actor ref must be a string");
             assert_eq!(
                 payload,
                 serde_json::json!({
+                    "actor": {
+                        "keyId": 1,
+                        "kind": "user",
+                        "ref": actor_ref,
+                    },
                     "kind": wire_kind,
                     "target": {
+                        "keyId": 1,
                         "kind": wire_target_kind,
                         "ref": target_ref,
                     },
@@ -381,17 +529,80 @@ mod credential_security_fact_tests {
             assert!(!encoded.contains(&user.as_uuid().to_string()));
             assert!(!encoded.contains("grant-sensitive-id"));
             assert!(uuid::Uuid::parse_str(target_ref).is_ok());
+            assert_eq!(repeat_payload["target"]["ref"], target_ref);
+            assert_eq!(repeat_payload["actor"]["ref"], actor_ref);
             assert_eq!(entry.generated_fact(), Some(SECURITY_EVENT_FACT));
             assert!(uuid::Uuid::parse_str(entry.idem_key().as_str()).is_ok());
             assert_ne!(entry.idem_key().as_str(), target_ref);
             assert_eq!(envelope.contract(), &SECURITY_EVENT_CONTRACT);
             assert_eq!(envelope.tenant(), tenant);
             assert_eq!(envelope.subject_id().as_str(), target_ref);
-            assert_eq!(envelope.actor().kind(), vocab::PrincipalKind::Service);
-            assert_eq!(
-                envelope.actor().actor_id().as_str(),
-                "identity-security-lifecycle"
-            );
+            assert_eq!(envelope.actor().kind(), vocab::PrincipalKind::User);
+            assert_eq!(envelope.actor().actor_id().as_str(), actor_ref);
+            assert_eq!(envelope.actor().tenant(), Some(tenant));
+        }
+
+        let other_tenant =
+            TenantId::parse("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee").expect("other tenant");
+        let subject = user.as_uuid().hyphenated().to_string();
+        let actor_ref = CredentialSecurityInitiator::authenticated(
+            tenant,
+            vocab::PrincipalKind::User,
+            subject.clone(),
+        )
+        .privacy_ref(&pseudonym_keys)
+        .expect("actor ref");
+        let other_actor_ref = CredentialSecurityInitiator::authenticated(
+            other_tenant,
+            vocab::PrincipalKind::User,
+            subject.clone(),
+        )
+        .privacy_ref(&pseudonym_keys)
+        .expect("actor ref");
+        assert_ne!(actor_ref, other_actor_ref);
+
+        let publicly_recomputable_actor = uuid::Uuid::new_v5(
+            &tenant.as_uuid(),
+            format!("actor:user:{subject}").as_bytes(),
+        );
+        assert_ne!(
+            uuid::Uuid::from_bytes(actor_ref.as_bytes()),
+            publicly_recomputable_actor,
+            "a public tenant UUID must not be sufficient to enumerate actor references"
+        );
+    }
+
+    #[test]
+    fn security_event_actor_projection_preserves_typed_attribution_without_raw_subject() {
+        let tenant = TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").expect("tenant");
+        let user = ids::UserId::parse("11111111-2222-4333-8444-555555555555").expect("user");
+        let pseudonym_keys = pseudonym_keys();
+        for (kind, subject, wire_kind) in [
+            (vocab::PrincipalKind::User, "opaque-user", "user"),
+            (vocab::PrincipalKind::Admin, "opaque-admin", "admin"),
+            (vocab::PrincipalKind::Service, "system-worker", "service"),
+        ] {
+            let command = CredentialSecurityCommand::account(
+                AccountSecurityState::initial(tenant, user, SystemTime::UNIX_EPOCH),
+                AccountSecurityEventKind::LogoutAll,
+                CredentialSecurityInitiator::authenticated(tenant, kind, subject),
+                SystemTime::UNIX_EPOCH,
+            )
+            .expect("account command");
+            let CredentialSecurityCommand::Account(command) = command else {
+                unreachable!("account command")
+            };
+            let (_, event, _) = command.into_parts();
+            let (entry, envelope) = credential_security_fact(&event, &pseudonym_keys)
+                .expect("security fact")
+                .into_parts();
+            let payload: serde_json::Value =
+                serde_json::from_slice(entry.payload()).expect("payload");
+            let projected = payload["actor"]["ref"].as_str().expect("actor ref");
+            assert_eq!(payload["actor"]["kind"], wire_kind);
+            assert_eq!(envelope.actor().kind(), kind);
+            assert_eq!(envelope.actor().actor_id().as_str(), projected);
+            assert!(!String::from_utf8_lossy(entry.payload()).contains(subject));
         }
     }
 
@@ -412,16 +623,42 @@ mod credential_security_fact_tests {
         assert!(matches!(encode, IdentityError::SecurityPayloadEncode(_)));
         assert!(encode.source().is_some());
     }
+
+    #[test]
+    fn security_fact_rejects_pre_epoch_time_instead_of_emitting_epoch_zero() {
+        let tenant = TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").expect("tenant");
+        let user = ids::UserId::parse("11111111-2222-4333-8444-555555555555").expect("user");
+        let before_epoch = SystemTime::UNIX_EPOCH - Duration::from_secs(1);
+        let command = CredentialSecurityCommand::account(
+            AccountSecurityState::initial(tenant, user, before_epoch),
+            AccountSecurityEventKind::LogoutAll,
+            CredentialSecurityInitiator::authenticated(
+                tenant,
+                vocab::PrincipalKind::User,
+                user.as_uuid().hyphenated().to_string(),
+            ),
+            before_epoch,
+        )
+        .expect("account command");
+
+        assert!(matches!(
+            credential_security_fact(command.event(), &pseudonym_keys()),
+            Err(IdentityError::SecurityFactBuild(_))
+        ));
+    }
 }
 
-/// Generated route marker retained by the password-change LocalTx command.
-pub type PasswordChangeRouteMarker = generated::http::identity_v1::password_change::RouteMarker;
 /// Generated route marker retained by the refresh rotation LocalTx command.
 pub type RefreshRotationRouteMarker = generated::http::identity_v1::refresh::RouteMarker;
 
 /// `identity.login` request-scoped producer assurance carried into the AuthGrant co-tx funnel.
 pub type LoginProducerReceipt =
     httpserve::ProducerAssuranceReceipt<generated::http::identity_v1::login::RouteMarker>;
+pub type PasswordChangeProducerReceipt =
+    httpserve::ProducerAssuranceReceipt<generated::http::identity_v1::password_change::RouteMarker>;
+pub type AccountStatusSetProducerReceipt = httpserve::ProducerAssuranceReceipt<
+    generated::http::identity_v1::account_status_set::RouteMarker,
+>;
 pub type LogoutCurrentProducerReceipt =
     httpserve::ProducerAssuranceReceipt<generated::http::identity_v1::logout::RouteMarker>;
 pub type LogoutCurrentRouteMarker = generated::http::identity_v1::logout::RouteMarker;
@@ -554,45 +791,6 @@ impl AuthGrantCloseCommand {
                 REFRESH_LOCAL_TX.boundary,
             )),
         }
-    }
-}
-
-/// `identity.password-change` 的不可伪造 CAS 命令。
-///
-/// expected version、next credential 与 generated route marker observation 被绑定成一个 owned
-/// mutation；adapter 不再分别接收可错配的业务参数和观测证据。
-pub struct PasswordChangeMutation {
-    expected: u32,
-    next: Credential,
-    observation: observ::LocalTxObservation<PasswordChangeRouteMarker>,
-}
-
-impl PasswordChangeMutation {
-    pub(crate) fn new(expected: u32, next: Credential) -> Self {
-        Self {
-            expected,
-            next,
-            observation: observ::LocalTxObservation::new(
-                PASSWORD_CHANGE_ROUTE,
-                PASSWORD_CHANGE_LOCAL_TX.boundary,
-            ),
-        }
-    }
-
-    /// Adapter 消费命令并取得 CAS 参数与精确 route marker evidence。
-    pub fn into_parts(
-        self,
-    ) -> (
-        u32,
-        Credential,
-        observ::LocalTxObservation<PasswordChangeRouteMarker>,
-    ) {
-        (self.expected, self.next, self.observation)
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn for_test(expected: u32, next: Credential) -> Self {
-        Self::new(expected, next)
     }
 }
 
@@ -961,22 +1159,6 @@ pub trait AccountSecurityReadRepoLocal: Send + Sync {
     ) -> Result<Option<AccountSecurityState>, IdentityError>;
 }
 
-/// Tenant-scoped account-security lifecycle capability.
-#[trait_variant::make(AccountSecurityLifecycle: Send)]
-#[dynosaur(
-    pub DynAccountSecurityLifecycle = dyn(box) AccountSecurityLifecycle,
-    bridge(dyn)
-)]
-#[allow(async_fn_in_trait)]
-pub trait AccountSecurityLifecycleLocal: Send + Sync {
-    /// Apply a sealed optimistic-concurrency transition.
-    async fn apply_transition(
-        &self,
-        scope: TenantRepoScope,
-        mutation: AccountSecurityMutation,
-    ) -> Result<AccountSecurityState, IdentityError>;
-}
-
 /// 凭据仓储 DI port（async；provider 可换：prod postgres / test in-mem / mockall）。
 ///
 /// 公开 [`CredentialRepo`] 是 **Send 变体**（adapter `impl CredentialRepo for ...`），[`DynCredentialRepo`]
@@ -994,7 +1176,7 @@ pub trait AccountSecurityLifecycleLocal: Send + Sync {
 /// 生产 PostgreSQL adapter 与 in-memory 替身实现相同的 combined authentication contract；
 /// `Credential` / `AccountLockout` 只经受控 hydrate/accessor 跨 crate 持久化。
 ///
-/// **租户/主体一致性 = 类型层 Hard（F2）**：携带完整 `Credential` 的写方法（`save` / `apply_password_change`）**不收**
+/// **租户/主体一致性 = 类型层 Hard（F2）**：insert-only provisioning **不收**
 /// 独立 `tenant`/`login` 参，store key 直接派生自 `credential.tenant()` / `.login()`——错位组合不可表达
 /// （零信任租户隔离不靠调用方约定 / debug_assert）。只持标识的方法 `authenticate` 收
 /// [`TenantRepoScope`] + [`LoginIdentifier`]（登录路径，攻击者可控查找键）；`find_by_user_id` 收 [`TenantRepoScope`] +
@@ -1053,22 +1235,11 @@ pub trait CredentialRepoLocal: Send + Sync {
         now: SystemTime,
     ) -> Result<AuthOutcome, IdentityError>;
 
-    /// 持久化凭据（upsert）。store key 派生自 `credential`（F2：tenant/login 错位不可表达）。
-    async fn save(
+    /// Insert an initial credential. Existing tenant/login or tenant/user rows fail closed.
+    async fn insert(
         &self,
         scope: TenantRepoScope,
         credential: Credential,
-    ) -> Result<(), IdentityError>;
-
-    /// 密码变更的**原子 CAS**：provider 在一个不可分割的写边界内，仅当存储版本
-    /// == `expected` 时以 `next` 替换；版本不匹配 → `Err(VersionConflict)` 且零变更，查无凭据 →
-    /// `Err(CredentialNotFound)`。单次 port 调用可按 provider 的既定策略重试 transient storage 错误；
-    /// `VersionConflict` / CAS 冲突不自动重试。store key 派生自 `next`（F2）；消费方经
-    /// `Credential::rotate`（保持 login/user_id/tenant、version + 1）构造 `next`。
-    async fn apply_password_change(
-        &self,
-        scope: TenantRepoScope,
-        mutation: PasswordChangeMutation,
     ) -> Result<(), IdentityError>;
 }
 
@@ -1152,6 +1323,20 @@ pub trait AuthGrantValidatorLocal: Send + Sync {
 #[dynosaur(pub DynIdentitySecurityLifecycle = dyn(box) IdentitySecurityLifecycle, bridge(dyn))]
 #[allow(async_fn_in_trait)]
 pub trait IdentitySecurityLifecycleLocal: Send + Sync {
+    async fn execute_password_change(
+        &self,
+        receipt: PasswordChangeProducerReceipt,
+        scope: TenantRepoScope,
+        command: PasswordChangeCommand,
+    ) -> Result<CredentialSecurityReceipt, IdentityError>;
+
+    async fn execute_account_status_set(
+        &self,
+        receipt: AccountStatusSetProducerReceipt,
+        scope: TenantRepoScope,
+        command: AccountStatusSetCommand,
+    ) -> Result<CredentialSecurityReceipt, IdentityError>;
+
     async fn execute_logout_current(
         &self,
         receipt: LogoutCurrentProducerReceipt,
@@ -1165,6 +1350,22 @@ pub trait IdentitySecurityLifecycleLocal: Send + Sync {
         scope: TenantRepoScope,
         command: LogoutAllCommand,
     ) -> Result<CredentialSecurityReceipt, IdentityError>;
+}
+
+/// Narrow plain-write capability for internal account reactivation.
+///
+/// This port cannot consume a producer receipt or append a security fact. Keeping it separate from
+/// [`IdentitySecurityLifecycle`] prevents a non-event write from being smuggled through the L2
+/// producer capability and lets HTTP restoration use its own auditable OutboxFact command.
+#[trait_variant::make(AccountReactivationLifecycle: Send)]
+#[dynosaur(pub DynAccountReactivationLifecycle = dyn(box) AccountReactivationLifecycle, bridge(dyn))]
+#[allow(async_fn_in_trait)]
+pub trait AccountReactivationLifecycleLocal: Send + Sync {
+    async fn execute_reactivation(
+        &self,
+        scope: TenantRepoScope,
+        command: ReactivateAccountCommand,
+    ) -> Result<AccountSecurityState, IdentityError>;
 }
 
 /// refresh token 持久化 store DI port（域形；provider 可换：prod postgres / test in-mem）——#1325。
@@ -1393,13 +1594,13 @@ classify_identity_ports! {
     DynRoleWriteRepo => diport::BusinessWriteEffect,
     DynAccountSecurityReadRepo => diport::AuthEffect,
     DynAuthGrantValidator => diport::AuthEffect,
-    DynAccountSecurityLifecycle => diport::BusinessWriteEffect,
     DynCredentialRepo => diport::BusinessWriteEffect,
     DynRefreshTokenStore => diport::BusinessWriteEffect,
     DynPolicyLifecycle => diport::OutboxEffect,
     DynRoleBindingLifecycle => diport::OutboxEffect,
     DynAuthGrantLifecycle => diport::OutboxEffect,
     DynIdentitySecurityLifecycle => diport::OutboxEffect,
+    DynAccountReactivationLifecycle => diport::BusinessWriteEffect,
 }
 
 impl<T> identity_port_effect_sealed::Sealed for std::sync::Arc<T> where
@@ -1654,7 +1855,7 @@ mod smoke_credential {
     //! round-trip 测试覆盖）。
     use super::{
         AuthOutcome, Credential, CredentialRepo, DynCredentialRepo, IdentityError, LoginIdentifier,
-        PasswordChangeMutation, SystemTime, TenantRepoScope,
+        SystemTime, TenantRepoScope,
     };
     use std::sync::Arc;
 
@@ -1676,17 +1877,10 @@ mod smoke_credential {
         ) -> Result<AuthOutcome, IdentityError> {
             todo!()
         }
-        async fn save(
+        async fn insert(
             &self,
             _scope: TenantRepoScope,
             _credential: Credential,
-        ) -> Result<(), IdentityError> {
-            todo!()
-        }
-        async fn apply_password_change(
-            &self,
-            _scope: TenantRepoScope,
-            _mutation: PasswordChangeMutation,
         ) -> Result<(), IdentityError> {
             todo!()
         }
@@ -1732,8 +1926,7 @@ mod smoke_credential {
         impl CredentialRepo for TestCredentialRepo {
             async fn find_by_user_id(&self, scope: TenantRepoScope, user_id: ids::UserId) -> Result<Option<Credential>, IdentityError>;
             async fn authenticate(&self, scope: TenantRepoScope, login: LoginIdentifier, candidate: secure::RawPassword, now: SystemTime) -> Result<AuthOutcome, IdentityError>;
-            async fn save(&self, scope: TenantRepoScope, credential: Credential) -> Result<(), IdentityError>;
-            async fn apply_password_change(&self, scope: TenantRepoScope, mutation: PasswordChangeMutation) -> Result<(), IdentityError>;
+            async fn insert(&self, scope: TenantRepoScope, credential: Credential) -> Result<(), IdentityError>;
         }
     }
 }

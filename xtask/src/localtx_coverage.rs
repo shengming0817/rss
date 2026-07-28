@@ -1483,7 +1483,7 @@ fn validate_journey_cargo_targets(
             );
         }
     }
-    let batch = crate::integration_shards::localtx_journey_execution_batch()?;
+    let batch = crate::integration_shards::postgres_transaction_journey_execution_batch()?;
     if !crate::nextest::integration_batch_fails_on_empty(&batch) {
         bail!("LocalTx journey runners: postgres-domain Serial execution must use --no-tests=fail");
     }

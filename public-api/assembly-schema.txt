@@ -239,6 +239,9 @@ pub assembly_schema::GraphEvidenceValidationError::UnboundDomain
 pub assembly_schema::GraphEvidenceValidationError::UnboundDomain::domain: assembly_schema::AssemblyDomain
 pub assembly_schema::GraphEvidenceValidationError::UnknownDomain
 pub assembly_schema::GraphEvidenceValidationError::UnknownDomain::domain: assembly_schema::AssemblyDomain
+pub assembly_schema::GraphEvidenceValidationError::UnknownFrameworkListener
+pub assembly_schema::GraphEvidenceValidationError::UnknownFrameworkListener::contract_id: alloc::string::String
+pub assembly_schema::GraphEvidenceValidationError::UnknownFrameworkListener::listener: assembly_schema::AssemblyListenerKind
 impl core::clone::Clone for assembly_schema::GraphEvidenceValidationError
 pub fn assembly_schema::GraphEvidenceValidationError::clone(&self) -> assembly_schema::GraphEvidenceValidationError
 impl core::cmp::Eq for assembly_schema::GraphEvidenceValidationError
@@ -249,7 +252,6 @@ impl core::fmt::Debug for assembly_schema::GraphEvidenceValidationError
 pub fn assembly_schema::GraphEvidenceValidationError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::fmt::Display for assembly_schema::GraphEvidenceValidationError
 pub fn assembly_schema::GraphEvidenceValidationError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Copy for assembly_schema::GraphEvidenceValidationError
 impl core::marker::StructuralPartialEq for assembly_schema::GraphEvidenceValidationError
 impl core::marker::Freeze for assembly_schema::GraphEvidenceValidationError
 impl core::marker::Send for assembly_schema::GraphEvidenceValidationError
@@ -855,7 +857,7 @@ impl !core::panic::unwind_safe::UnwindSafe for assembly_schema::AssemblyLockErro
 pub struct assembly_schema::AssemblyManifest
 pub assembly_schema::AssemblyManifest::diport_providers: alloc::vec::Vec<assembly_schema::DiportProvider>
 pub assembly_schema::AssemblyManifest::domains: alloc::vec::Vec<assembly_schema::AssemblyDomain>
-pub assembly_schema::AssemblyManifest::framework_contracts: alloc::vec::Vec<alloc::string::String>
+pub assembly_schema::AssemblyManifest::framework_contracts: alloc::vec::Vec<assembly_schema::FrameworkContractMount>
 pub assembly_schema::AssemblyManifest::listeners: alloc::vec::Vec<assembly_schema::AssemblyListener>
 pub assembly_schema::AssemblyManifest::name: alloc::string::String
 pub assembly_schema::AssemblyManifest::profile: assembly_schema::AssemblyProfile
@@ -903,7 +905,7 @@ pub struct assembly_schema::CanonicalAssemblyManifestV1
 impl assembly_schema::CanonicalAssemblyManifestV1
 pub fn assembly_schema::CanonicalAssemblyManifestV1::diport_providers(&self) -> &[assembly_schema::DiportProvider]
 pub fn assembly_schema::CanonicalAssemblyManifestV1::domains(&self) -> &[assembly_schema::AssemblyDomain]
-pub fn assembly_schema::CanonicalAssemblyManifestV1::framework_contracts(&self) -> &[alloc::string::String]
+pub fn assembly_schema::CanonicalAssemblyManifestV1::framework_contracts(&self) -> &[assembly_schema::FrameworkContractMount]
 pub fn assembly_schema::CanonicalAssemblyManifestV1::listeners(&self) -> &[assembly_schema::AssemblyListener]
 pub fn assembly_schema::CanonicalAssemblyManifestV1::manifest_digest(&self) -> &str
 pub fn assembly_schema::CanonicalAssemblyManifestV1::name(&self) -> &str
@@ -961,9 +963,32 @@ impl core::marker::Unpin for assembly_schema::DomainPlan
 impl core::marker::UnsafeUnpin for assembly_schema::DomainPlan
 impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::DomainPlan
 impl core::panic::unwind_safe::UnwindSafe for assembly_schema::DomainPlan
+pub struct assembly_schema::FrameworkContractMount
+pub assembly_schema::FrameworkContractMount::id: alloc::string::String
+pub assembly_schema::FrameworkContractMount::listener: assembly_schema::AssemblyListenerKind
+impl core::clone::Clone for assembly_schema::FrameworkContractMount
+pub fn assembly_schema::FrameworkContractMount::clone(&self) -> assembly_schema::FrameworkContractMount
+impl core::cmp::Eq for assembly_schema::FrameworkContractMount
+impl core::cmp::PartialEq for assembly_schema::FrameworkContractMount
+pub fn assembly_schema::FrameworkContractMount::eq(&self, &assembly_schema::FrameworkContractMount) -> bool
+impl core::fmt::Debug for assembly_schema::FrameworkContractMount
+pub fn assembly_schema::FrameworkContractMount::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for assembly_schema::FrameworkContractMount
+impl serde_core::ser::Serialize for assembly_schema::FrameworkContractMount
+pub fn assembly_schema::FrameworkContractMount::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for assembly_schema::FrameworkContractMount
+pub fn assembly_schema::FrameworkContractMount::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for assembly_schema::FrameworkContractMount
+impl core::marker::Send for assembly_schema::FrameworkContractMount
+impl core::marker::Sync for assembly_schema::FrameworkContractMount
+impl core::marker::Unpin for assembly_schema::FrameworkContractMount
+impl core::marker::UnsafeUnpin for assembly_schema::FrameworkContractMount
+impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::FrameworkContractMount
+impl core::panic::unwind_safe::UnwindSafe for assembly_schema::FrameworkContractMount
 pub struct assembly_schema::GraphEvidenceValidationErrors
 impl assembly_schema::GraphEvidenceValidationErrors
 pub fn assembly_schema::GraphEvidenceValidationErrors::as_slice(&self) -> &[assembly_schema::GraphEvidenceValidationError]
+pub fn assembly_schema::GraphEvidenceValidationErrors::into_vec(self) -> alloc::vec::Vec<assembly_schema::GraphEvidenceValidationError>
 impl core::clone::Clone for assembly_schema::GraphEvidenceValidationErrors
 pub fn assembly_schema::GraphEvidenceValidationErrors::clone(&self) -> assembly_schema::GraphEvidenceValidationErrors
 impl core::cmp::Eq for assembly_schema::GraphEvidenceValidationErrors
@@ -1039,6 +1064,7 @@ pub const fn assembly_schema::ParsedRuntimePlan::as_plan(&self) -> &assembly_sch
 pub const fn assembly_schema::ParsedRuntimePlan::assembly_fingerprint(&self) -> &assembly_schema::AssemblyFingerprint
 pub fn assembly_schema::ParsedRuntimePlan::domain_plans(&self) -> &[assembly_schema::DomainPlan]
 pub fn assembly_schema::ParsedRuntimePlan::from_json_slice(&[u8]) -> core::result::Result<Self, assembly_schema::RuntimePlanError>
+pub fn assembly_schema::ParsedRuntimePlan::from_json_slice_bound(&[u8], &assembly_schema::CanonicalAssemblyManifestV1, &assembly_schema::ParsedAssemblyLock) -> core::result::Result<Self, assembly_schema::RuntimePlanError>
 pub fn assembly_schema::ParsedRuntimePlan::listener_plans(&self) -> &[assembly_schema::ListenerPlan]
 pub fn assembly_schema::ParsedRuntimePlan::placement_plans(&self) -> &[assembly_schema::PlacementPlan]
 pub fn assembly_schema::ParsedRuntimePlan::provider_plans(&self) -> &[assembly_schema::ProviderPlan]
@@ -1234,6 +1260,7 @@ impl core::panic::unwind_safe::UnwindSafe for assembly_schema::RuntimePlanJsonPa
 pub struct assembly_schema::RuntimePlanV1Input
 impl assembly_schema::RuntimePlanV1Input
 pub fn assembly_schema::RuntimePlanV1Input::domain(&mut self, assembly_schema::AssemblyDomain)
+pub fn assembly_schema::RuntimePlanV1Input::from_manifest(&assembly_schema::CanonicalAssemblyManifestV1) -> Self
 pub fn assembly_schema::RuntimePlanV1Input::listener(&mut self, assembly_schema::AssemblyListenerKind, assembly_schema::ListenerAuth, alloc::vec::Vec<assembly_schema::AssemblyDomain>)
 pub fn assembly_schema::RuntimePlanV1Input::new() -> Self
 pub fn assembly_schema::RuntimePlanV1Input::placement(&mut self, assembly_schema::AssemblyDomain, impl core::convert::Into<alloc::string::String>)
@@ -1250,3 +1277,4 @@ impl core::panic::unwind_safe::UnwindSafe for assembly_schema::RuntimePlanV1Inpu
 pub const assembly_schema::GENERATED_MODULE_OWNERSHIP_MARKER: &str
 pub const assembly_schema::GENERATED_PROVIDER_OWNERSHIP_MARKER: &str
 pub const assembly_schema::REGISTERED_DOMAIN_LABELS: &[&str]
+pub fn assembly_schema::validate_runtime_plan_json_slice(&[u8]) -> core::result::Result<(), assembly_schema::RuntimePlanError>

@@ -62,6 +62,7 @@ impl runtimeexec::StartupAdapter for ProductionStartup {
             metrics,
             limiter,
             audit_chain_key,
+            identity_pseudonym_keys,
             tenant_authority,
             dlx_payload_protector,
             identity,
@@ -70,6 +71,7 @@ impl runtimeexec::StartupAdapter for ProductionStartup {
             pg.clone(),
             Arc::clone(&signer),
             audit_chain_key.clone(),
+            identity_pseudonym_keys,
             identity.runtime_config,
             identity.blocklist,
         );

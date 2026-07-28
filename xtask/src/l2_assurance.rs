@@ -47,7 +47,7 @@ use crate::{
 
 const OUTPUT: &str = "generated/l2-assurance.json";
 const LF_DECLARATION: &str = "generated/l2-assurance.json text eol=lf";
-const EXPECTED_PRODUCERS: usize = 11;
+const EXPECTED_PRODUCERS: usize = 13;
 const EXPECTED_FACTS: usize = 6;
 const MAX_RUST_CARRIER_BYTES: u64 = 2 * 1024 * 1024;
 

@@ -10,11 +10,78 @@ pub struct MigrationIdentity {
     pub checksum: [u8; 48],
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProjectionInputIdentity {
+    projection_id: &'static str,
+    domain: &'static str,
+    contract_id: &'static str,
+    version: &'static str,
+    schema_hash: &'static str,
+    topic: &'static str,
+}
+
+impl ProjectionInputIdentity {
+    const fn from_static(
+        projection_id: &'static str,
+        domain: &'static str,
+        contract_id: &'static str,
+        version: &'static str,
+        schema_hash: &'static str,
+        topic: &'static str,
+    ) -> Self {
+        Self {
+            projection_id,
+            domain,
+            contract_id,
+            version,
+            schema_hash,
+            topic,
+        }
+    }
+
+    #[must_use]
+    pub const fn projection_id(self) -> &'static str {
+        self.projection_id
+    }
+    #[must_use]
+    pub const fn domain(self) -> &'static str {
+        self.domain
+    }
+    #[must_use]
+    pub const fn contract_id(self) -> &'static str {
+        self.contract_id
+    }
+    #[must_use]
+    pub const fn version(self) -> &'static str {
+        self.version
+    }
+    #[must_use]
+    pub const fn schema_hash(self) -> &'static str {
+        self.schema_hash
+    }
+    #[must_use]
+    pub const fn topic(self) -> &'static str {
+        self.topic
+    }
+}
+
+mod projection_inputs;
+
 static MIGRATIONS: &[MigrationIdentity] = include!(concat!(env!("OUT_DIR"), "/inventory.rs"));
 
 #[must_use]
 pub fn migrations() -> &'static [MigrationIdentity] {
     MIGRATIONS
+}
+
+#[must_use]
+pub const fn projection_input_generation() -> &'static str {
+    projection_inputs::PROJECTION_INPUT_GENERATION
+}
+
+#[must_use]
+pub const fn projection_inputs() -> &'static [ProjectionInputIdentity] {
+    projection_inputs::PROJECTION_INPUTS
 }
 
 #[must_use]

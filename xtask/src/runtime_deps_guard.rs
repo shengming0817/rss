@@ -20,6 +20,7 @@ const STRUCT_NAME: &str = "SharedRuntimeDeps";
 const EXACT_DOMAIN_TRANSPORT_ARC: &str = "Arc<dyn distributed::DomainTransport>";
 const EXACT_IDENTITY_RUNTIME_CONFIG: &str = "identity_composition::IdentityRuntimeConfig";
 const EXACT_PASSWORD_BLOCKLIST_ARC: &str = "Arc<secure::DigestPasswordBlocklist>";
+const EXACT_PSEUDONYM_KEY_RING_ARC: &str = "Arc<secure::PseudonymKeyRing>";
 const EXACT_OIDC_PROVIDER_ARC: &str = "Arc<oidc::OidcProvider>";
 const EXACT_POSTGRES_REVOCATION_STORE: &str = "postgres::PgRevocationStore";
 const EXACT_SETTINGS_READINESS_INTERVAL: &str =
@@ -29,6 +30,7 @@ const SUPPORTED_EXACT_EXCEPTIONS: &[&str] = &[
     EXACT_DOMAIN_TRANSPORT_ARC,
     EXACT_IDENTITY_RUNTIME_CONFIG,
     EXACT_PASSWORD_BLOCKLIST_ARC,
+    EXACT_PSEUDONYM_KEY_RING_ARC,
     EXACT_OIDC_PROVIDER_ARC,
     EXACT_POSTGRES_REVOCATION_STORE,
     EXACT_SETTINGS_READINESS_INTERVAL,
@@ -403,6 +405,16 @@ fn is_allowed_field_type(ty: &Type, resolver: &TypeResolver, policy: &RuntimeDep
             ty,
             resolver,
             &["secure", "DigestPasswordBlocklist"],
+            &mut Vec::new(),
+        )
+    {
+        return true;
+    }
+    if policy.allows_exact_exception(EXACT_PSEUDONYM_KEY_RING_ARC)
+        && is_exact_arc_of_path(
+            ty,
+            resolver,
+            &["secure", "PseudonymKeyRing"],
             &mut Vec::new(),
         )
     {
@@ -814,6 +826,7 @@ mod tests {
                 "Arc<dyn distributed::DomainTransport>",
                 "Arc<oidc::OidcProvider>",
                 "Arc<secure::DigestPasswordBlocklist>",
+                "Arc<secure::PseudonymKeyRing>",
                 "Arc<vault::VaultSigner>",
                 "identity_composition::IdentityRuntimeConfig",
                 "postgres::PgRevocationStore",
@@ -994,6 +1007,21 @@ exactExceptions = ["Arc<dyn distributed::Other>"]
 
         let rejected =
             findings_with_policy("pub struct SharedRuntimeDeps { pub raw: postgres::PgStore }\n")?;
+        assert_eq!(rejected.len(), 1, "{rejected:?}");
+        assert_eq!(rejected[0].rule, Rule::DisallowedFieldType);
+        Ok(())
+    }
+
+    #[test]
+    fn pseudonym_key_ring_arc_is_exact_and_does_not_open_arbitrary_secure_arcs() -> Result<()> {
+        let accepted = findings_with_policy(
+            "pub struct SharedRuntimeDeps { pub keys: std::sync::Arc<secure::PseudonymKeyRing> }\n",
+        )?;
+        assert!(accepted.is_empty(), "{accepted:?}");
+
+        let rejected = findings_with_policy(
+            "pub struct SharedRuntimeDeps { pub secret: std::sync::Arc<secure::SecretText> }\n",
+        )?;
         assert_eq!(rejected.len(), 1, "{rejected:?}");
         assert_eq!(rejected[0].rule, Rule::DisallowedFieldType);
         Ok(())

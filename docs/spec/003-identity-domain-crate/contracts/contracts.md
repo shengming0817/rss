@@ -2,6 +2,9 @@
 
 > 契约真源在 `contracts/{http,event}/identity/v1/`（声明）→ `generated/src/{http,event}/identity_v1.rs`（派生）。HTTP identity 契约采用 nested v1 形态（`contracts/http/identity/v1/<slug>/`），不再使用旧 `identity/v2` refresh workaround。本文件只是 spec 阶段的契约范围说明，不复制 schema；实际 schema 走 contract-fanout.md 闭环。
 
+> #1842 amendment：`identity.password-change` 与 `identity.account-status-set` 均为 active L2
+> OutboxFact producer，精确产生 `identity.security-event`；password-change 不再属于 LocalTx inventory。
+
 ## 现存（draft，本 feature 升 active）
 
 - **`identity.login`**（http，**L2 OutboxFact**，`contracts/http/identity/v1/login/`）：`POST /api/v1/identity/login`，Public（opt_out）。tenant 来源 `X-Tenant-ID` header（body 禁 `tenantId`）。req `{username,password}` → resp `{data:{sessionId,expiresAt,accessToken,refreshToken,accessExpiresAt}}`——登录成功首发 access JWT（vault `Signer` 经 `authn::JwtIssuer` 签）+ refresh token bundle（#1252 Join 接线）。
@@ -14,7 +17,9 @@
 |------|------|--------|-------|------------|-------------------|
 | `identity.role-assigned` | event | L2 OutboxFact | identity | 触发：角色分配；订阅：audit（延 #1017，contract lifecycle 暂留 draft 以免触发 active-subscriber 校验） | — |
 | `identity.role-revoked` | event | L2 OutboxFact | identity | 触发：角色撤销；订阅：audit（同上） | — |
-| `identity.password-change` | http | L1 | identity | `POST /api/v1/identity/password/change`，鉴权（selfScoped） | `identity:profile:write` |
+| `identity.password-change` | http | L2 OutboxFact | identity | `POST /api/v1/identity/password/change`；credential/account/grant/family/outbox 同事务 | `identity:profile:write` |
+| `identity.account-status-get` | http | L0 LocalOnly | identity | `GET /api/v1/identity/accounts/{userId}/status` | `identity:account-security:read` |
+| `identity.account-status-set` | http | L2 OutboxFact | identity | `PUT /api/v1/identity/accounts/{userId}/status`；四值 desired state，同态零副作用 | `identity:account-security:write` |
 | `identity.logout` | http | L2 OutboxFact | identity | `POST /api/v1/identity/logout`，严格 `{}`，按当前 grant evidence 撤销 | `identity:session:logout-current` |
 | `identity.logout-all` | http | L2 OutboxFact | identity | `POST /api/v1/identity/logout-all`，严格 `{}`，按 account epoch CAS 撤销全部既存授权 | `identity:session:logout-all` |
 | `identity.roles-assign` | http | L2 | identity | `POST /api/v1/identity/roles/{roleId}/bindings`，鉴权 | `identity:role:assign` |
@@ -39,6 +44,7 @@ schema（`*.schema.json`）→ contract.toml（id/kind/consistencyLevel/owner/en
 | `identity.roles-list` | 新增 | 新增 | 新增 | 新增 contract test | 更新 |
 | `identity.profile` | 新增 | 新增 | 新增 | 新增 contract test | 更新 |
 | `identity.password-change` | 新增 | 新增 | 新增 | 新增 contract test | 更新 |
+| `identity.account-status-get/set` | 新增 | 新增 | 新增 | producer assurance + contract test | 更新 |
 | `identity.logout` | 新增 | 新增 | 新增 | 新增 contract test | 更新 |
 
 ## 字段约定

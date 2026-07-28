@@ -30,7 +30,8 @@ This checklist records delivered work. Issue ordering is historical context, not
 - [x] T014 [L1-02] #1698 Add LocalTx boundary vocabulary and closed labels.
 - [x] T015 [L1-03] #1699 Close the Postgres LocalTx runner over `PgTenantPool`.
 - [x] T016 [L1-04] #1700 Add Settings repo-atomic CAS proof.
-- [x] T017 [L1-05] #1701 Add Identity logout/password-change proof.
+- [x] T017 [L1-05] #1701 Add the historical Identity logout/password-change proof. #1842 later moved
+  password-change to L2 OutboxFact, so it is no longer part of the active LocalTx inventory.
 - [x] T018 [L1-06] #1702 Add the LocalTx conformance suite.
 - [x] T019 [L1-07] #1703 Add the SecretRepo live Postgres matrix.
 - [x] T020 [L1-08] #1704 Add the Identity live Postgres matrix.

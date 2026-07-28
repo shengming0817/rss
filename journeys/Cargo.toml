@@ -24,8 +24,8 @@ path = "tests/identity_logout_grant_journey.rs"
 required-features = ["integration"]
 
 [[test]]
-name = "identity_password_change_localtx_journey"
-path = "tests/identity_password_change_localtx_journey.rs"
+name = "identity_password_security_event_journey"
+path = "tests/identity_password_security_event_journey.rs"
 required-features = ["integration"]
 
 [[test]]
@@ -91,14 +91,17 @@ secure = { path = "../crates/secure", features = ["test-support"] }
 diagctx = { path = "../crates/diagctx" }
 runctx = { path = "../crates/runctx", features = ["test-support"] }
 primitives = { path = "../crates/primitives" }
+assembly-schema = { path = "../crates/assembly-schema" }
 # settings 配置发布 journey 需 TenantId 构造 + 事件 payload 解码。
 vocab = { path = "../crates/vocab" }
 # #1277：登录种子的 canonical user id（ids::UserId）与登录标识（username）解耦——审计 actor 取 canonical id。
 ids = { path = "../crates/ids" }
 generated = { path = "../generated" }
+distributed = { path = "../crates/distributed" }
 memory = { path = "../adapters/memory" }
 crypto-adapter = { path = "../adapters/crypto" }
 vault = { path = "../adapters/vault", features = ["backend"] }
+oidc = { path = "../adapters/oidc", features = ["backend"] }
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "time"] }
 tokio-util = { workspace = true }
 futures = { workspace = true }
@@ -122,6 +125,8 @@ metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
 reqwest = { workspace = true }
 base64 = { workspace = true }
+p256 = { workspace = true }
+wiremock = { workspace = true }
 url = { workspace = true }
 # F9：从 canonical UUID 字符串算 16B 原始字节，断言 tenant/actor 贯穿审计链 canonical 输入。
 uuid = { workspace = true, features = ["v4"] }

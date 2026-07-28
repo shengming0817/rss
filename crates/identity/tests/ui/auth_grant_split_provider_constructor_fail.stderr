@@ -7,4 +7,4 @@ error[E0308]: mismatched types
    |                                      expected due to this
    |
    = note: expected fn pointer `fn(Arc<DynCredentialRepo<'static>>, Arc<DynAuthGrantLifecycle<'static>>, Arc<RefreshService<TestSigner>>, PasswordPolicy, Box<(dyn Clock + 'static)>, std::time::Duration) -> LoginService<TestSigner>`
-                 found fn item `fn(Arc<DynCredentialRepo<'static>>, AuthGrantServices<_>, PasswordPolicy, Box<(dyn Clock + 'static)>, std::time::Duration) -> LoginService<_> {LoginService::<_>::new}`
+                 found fn item `fn(Arc<DynCredentialRepo<'static>>, AuthGrantServices<_>, Box<(dyn Clock + 'static)>, std::time::Duration) -> LoginService<_> {LoginService::<_>::new}`

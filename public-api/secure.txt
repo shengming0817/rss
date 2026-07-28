@@ -498,6 +498,99 @@ impl core::marker::Unpin for secure::protection::ProtectionContext
 impl core::marker::UnsafeUnpin for secure::protection::ProtectionContext
 impl core::panic::unwind_safe::RefUnwindSafe for secure::protection::ProtectionContext
 impl core::panic::unwind_safe::UnwindSafe for secure::protection::ProtectionContext
+pub mod secure::pseudonym
+pub enum secure::pseudonym::PseudonymError
+pub secure::pseudonym::PseudonymError::DuplicateKeyId
+pub secure::pseudonym::PseudonymError::EmptyDomain
+impl core::clone::Clone for secure::pseudonym::PseudonymError
+pub fn secure::pseudonym::PseudonymError::clone(&self) -> secure::pseudonym::PseudonymError
+impl core::cmp::Eq for secure::pseudonym::PseudonymError
+impl core::cmp::PartialEq for secure::pseudonym::PseudonymError
+pub fn secure::pseudonym::PseudonymError::eq(&self, &secure::pseudonym::PseudonymError) -> bool
+impl core::error::Error for secure::pseudonym::PseudonymError
+impl core::fmt::Debug for secure::pseudonym::PseudonymError
+pub fn secure::pseudonym::PseudonymError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for secure::pseudonym::PseudonymError
+pub fn secure::pseudonym::PseudonymError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for secure::pseudonym::PseudonymError
+impl core::marker::StructuralPartialEq for secure::pseudonym::PseudonymError
+impl core::marker::Freeze for secure::pseudonym::PseudonymError
+impl core::marker::Send for secure::pseudonym::PseudonymError
+impl core::marker::Sync for secure::pseudonym::PseudonymError
+impl core::marker::Unpin for secure::pseudonym::PseudonymError
+impl core::marker::UnsafeUnpin for secure::pseudonym::PseudonymError
+impl core::panic::unwind_safe::RefUnwindSafe for secure::pseudonym::PseudonymError
+impl core::panic::unwind_safe::UnwindSafe for secure::pseudonym::PseudonymError
+pub struct secure::pseudonym::PseudonymKeyId(_)
+impl secure::pseudonym::PseudonymKeyId
+pub const fn secure::pseudonym::PseudonymKeyId::get(self) -> u16
+pub const fn secure::pseudonym::PseudonymKeyId::new(core::num::nonzero::NonZeroU16) -> Self
+impl core::clone::Clone for secure::pseudonym::PseudonymKeyId
+pub fn secure::pseudonym::PseudonymKeyId::clone(&self) -> secure::pseudonym::PseudonymKeyId
+impl core::cmp::Eq for secure::pseudonym::PseudonymKeyId
+impl core::cmp::PartialEq for secure::pseudonym::PseudonymKeyId
+pub fn secure::pseudonym::PseudonymKeyId::eq(&self, &secure::pseudonym::PseudonymKeyId) -> bool
+impl core::fmt::Debug for secure::pseudonym::PseudonymKeyId
+pub fn secure::pseudonym::PseudonymKeyId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for secure::pseudonym::PseudonymKeyId
+pub fn secure::pseudonym::PseudonymKeyId::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for secure::pseudonym::PseudonymKeyId
+impl core::marker::StructuralPartialEq for secure::pseudonym::PseudonymKeyId
+impl core::marker::Freeze for secure::pseudonym::PseudonymKeyId
+impl core::marker::Send for secure::pseudonym::PseudonymKeyId
+impl core::marker::Sync for secure::pseudonym::PseudonymKeyId
+impl core::marker::Unpin for secure::pseudonym::PseudonymKeyId
+impl core::marker::UnsafeUnpin for secure::pseudonym::PseudonymKeyId
+impl core::panic::unwind_safe::RefUnwindSafe for secure::pseudonym::PseudonymKeyId
+impl core::panic::unwind_safe::UnwindSafe for secure::pseudonym::PseudonymKeyId
+pub struct secure::pseudonym::PseudonymKeyRing
+impl secure::pseudonym::PseudonymKeyRing
+pub fn secure::pseudonym::PseudonymKeyRing::current(&self, vocab::tenant::TenantId, &str, &[u8]) -> core::result::Result<secure::pseudonym::PseudonymRef, secure::pseudonym::PseudonymError>
+pub fn secure::pseudonym::PseudonymKeyRing::lookup_set(&self, vocab::tenant::TenantId, &str, &[u8]) -> core::result::Result<alloc::vec::Vec<secure::pseudonym::PseudonymRef>, secure::pseudonym::PseudonymError>
+pub fn secure::pseudonym::PseudonymKeyRing::new(secure::pseudonym::VersionedPseudonymKey, alloc::vec::Vec<secure::pseudonym::VersionedPseudonymKey>) -> core::result::Result<Self, secure::pseudonym::PseudonymError>
+impl core::fmt::Debug for secure::pseudonym::PseudonymKeyRing
+pub fn secure::pseudonym::PseudonymKeyRing::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for secure::pseudonym::PseudonymKeyRing
+impl core::marker::Send for secure::pseudonym::PseudonymKeyRing
+impl core::marker::Sync for secure::pseudonym::PseudonymKeyRing
+impl core::marker::Unpin for secure::pseudonym::PseudonymKeyRing
+impl core::marker::UnsafeUnpin for secure::pseudonym::PseudonymKeyRing
+impl core::panic::unwind_safe::RefUnwindSafe for secure::pseudonym::PseudonymKeyRing
+impl core::panic::unwind_safe::UnwindSafe for secure::pseudonym::PseudonymKeyRing
+pub struct secure::pseudonym::PseudonymRef
+impl secure::pseudonym::PseudonymRef
+pub const fn secure::pseudonym::PseudonymRef::as_bytes(self) -> [u8; 16]
+pub const fn secure::pseudonym::PseudonymRef::key_id(self) -> secure::pseudonym::PseudonymKeyId
+impl core::clone::Clone for secure::pseudonym::PseudonymRef
+pub fn secure::pseudonym::PseudonymRef::clone(&self) -> secure::pseudonym::PseudonymRef
+impl core::cmp::Eq for secure::pseudonym::PseudonymRef
+impl core::cmp::PartialEq for secure::pseudonym::PseudonymRef
+pub fn secure::pseudonym::PseudonymRef::eq(&self, &secure::pseudonym::PseudonymRef) -> bool
+impl core::fmt::Debug for secure::pseudonym::PseudonymRef
+pub fn secure::pseudonym::PseudonymRef::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for secure::pseudonym::PseudonymRef
+pub fn secure::pseudonym::PseudonymRef::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for secure::pseudonym::PseudonymRef
+impl core::marker::StructuralPartialEq for secure::pseudonym::PseudonymRef
+impl core::marker::Freeze for secure::pseudonym::PseudonymRef
+impl core::marker::Send for secure::pseudonym::PseudonymRef
+impl core::marker::Sync for secure::pseudonym::PseudonymRef
+impl core::marker::Unpin for secure::pseudonym::PseudonymRef
+impl core::marker::UnsafeUnpin for secure::pseudonym::PseudonymRef
+impl core::panic::unwind_safe::RefUnwindSafe for secure::pseudonym::PseudonymRef
+impl core::panic::unwind_safe::UnwindSafe for secure::pseudonym::PseudonymRef
+pub struct secure::pseudonym::VersionedPseudonymKey
+impl secure::pseudonym::VersionedPseudonymKey
+pub fn secure::pseudonym::VersionedPseudonymKey::new(secure::pseudonym::PseudonymKeyId, secure::redaction::RedactionHashKey) -> Self
+impl core::fmt::Debug for secure::pseudonym::VersionedPseudonymKey
+pub fn secure::pseudonym::VersionedPseudonymKey::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for secure::pseudonym::VersionedPseudonymKey
+impl core::marker::Send for secure::pseudonym::VersionedPseudonymKey
+impl core::marker::Sync for secure::pseudonym::VersionedPseudonymKey
+impl core::marker::Unpin for secure::pseudonym::VersionedPseudonymKey
+impl core::marker::UnsafeUnpin for secure::pseudonym::VersionedPseudonymKey
+impl core::panic::unwind_safe::RefUnwindSafe for secure::pseudonym::VersionedPseudonymKey
+impl core::panic::unwind_safe::UnwindSafe for secure::pseudonym::VersionedPseudonymKey
 pub mod secure::redaction
 #[non_exhaustive] pub enum secure::redaction::PiiKind
 pub secure::redaction::PiiKind::Address
@@ -1137,6 +1230,28 @@ impl core::marker::Unpin for secure::transport_endpoint::PlaintextEndpointPolicy
 impl core::marker::UnsafeUnpin for secure::transport_endpoint::PlaintextEndpointPolicy
 impl core::panic::unwind_safe::RefUnwindSafe for secure::transport_endpoint::PlaintextEndpointPolicy
 impl core::panic::unwind_safe::UnwindSafe for secure::transport_endpoint::PlaintextEndpointPolicy
+pub enum secure::PseudonymError
+pub secure::PseudonymError::DuplicateKeyId
+pub secure::PseudonymError::EmptyDomain
+impl core::clone::Clone for secure::pseudonym::PseudonymError
+pub fn secure::pseudonym::PseudonymError::clone(&self) -> secure::pseudonym::PseudonymError
+impl core::cmp::Eq for secure::pseudonym::PseudonymError
+impl core::cmp::PartialEq for secure::pseudonym::PseudonymError
+pub fn secure::pseudonym::PseudonymError::eq(&self, &secure::pseudonym::PseudonymError) -> bool
+impl core::error::Error for secure::pseudonym::PseudonymError
+impl core::fmt::Debug for secure::pseudonym::PseudonymError
+pub fn secure::pseudonym::PseudonymError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for secure::pseudonym::PseudonymError
+pub fn secure::pseudonym::PseudonymError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for secure::pseudonym::PseudonymError
+impl core::marker::StructuralPartialEq for secure::pseudonym::PseudonymError
+impl core::marker::Freeze for secure::pseudonym::PseudonymError
+impl core::marker::Send for secure::pseudonym::PseudonymError
+impl core::marker::Sync for secure::pseudonym::PseudonymError
+impl core::marker::Unpin for secure::pseudonym::PseudonymError
+impl core::marker::UnsafeUnpin for secure::pseudonym::PseudonymError
+impl core::panic::unwind_safe::RefUnwindSafe for secure::pseudonym::PseudonymError
+impl core::panic::unwind_safe::UnwindSafe for secure::pseudonym::PseudonymError
 #[non_exhaustive] pub enum secure::RedactScope
 pub secure::RedactScope::ServerLog
 pub secure::RedactScope::Wire
@@ -1625,6 +1740,64 @@ impl core::marker::Unpin for secure::protection::ProtectionContext
 impl core::marker::UnsafeUnpin for secure::protection::ProtectionContext
 impl core::panic::unwind_safe::RefUnwindSafe for secure::protection::ProtectionContext
 impl core::panic::unwind_safe::UnwindSafe for secure::protection::ProtectionContext
+pub struct secure::PseudonymKeyId(_)
+impl secure::pseudonym::PseudonymKeyId
+pub const fn secure::pseudonym::PseudonymKeyId::get(self) -> u16
+pub const fn secure::pseudonym::PseudonymKeyId::new(core::num::nonzero::NonZeroU16) -> Self
+impl core::clone::Clone for secure::pseudonym::PseudonymKeyId
+pub fn secure::pseudonym::PseudonymKeyId::clone(&self) -> secure::pseudonym::PseudonymKeyId
+impl core::cmp::Eq for secure::pseudonym::PseudonymKeyId
+impl core::cmp::PartialEq for secure::pseudonym::PseudonymKeyId
+pub fn secure::pseudonym::PseudonymKeyId::eq(&self, &secure::pseudonym::PseudonymKeyId) -> bool
+impl core::fmt::Debug for secure::pseudonym::PseudonymKeyId
+pub fn secure::pseudonym::PseudonymKeyId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for secure::pseudonym::PseudonymKeyId
+pub fn secure::pseudonym::PseudonymKeyId::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for secure::pseudonym::PseudonymKeyId
+impl core::marker::StructuralPartialEq for secure::pseudonym::PseudonymKeyId
+impl core::marker::Freeze for secure::pseudonym::PseudonymKeyId
+impl core::marker::Send for secure::pseudonym::PseudonymKeyId
+impl core::marker::Sync for secure::pseudonym::PseudonymKeyId
+impl core::marker::Unpin for secure::pseudonym::PseudonymKeyId
+impl core::marker::UnsafeUnpin for secure::pseudonym::PseudonymKeyId
+impl core::panic::unwind_safe::RefUnwindSafe for secure::pseudonym::PseudonymKeyId
+impl core::panic::unwind_safe::UnwindSafe for secure::pseudonym::PseudonymKeyId
+pub struct secure::PseudonymKeyRing
+impl secure::pseudonym::PseudonymKeyRing
+pub fn secure::pseudonym::PseudonymKeyRing::current(&self, vocab::tenant::TenantId, &str, &[u8]) -> core::result::Result<secure::pseudonym::PseudonymRef, secure::pseudonym::PseudonymError>
+pub fn secure::pseudonym::PseudonymKeyRing::lookup_set(&self, vocab::tenant::TenantId, &str, &[u8]) -> core::result::Result<alloc::vec::Vec<secure::pseudonym::PseudonymRef>, secure::pseudonym::PseudonymError>
+pub fn secure::pseudonym::PseudonymKeyRing::new(secure::pseudonym::VersionedPseudonymKey, alloc::vec::Vec<secure::pseudonym::VersionedPseudonymKey>) -> core::result::Result<Self, secure::pseudonym::PseudonymError>
+impl core::fmt::Debug for secure::pseudonym::PseudonymKeyRing
+pub fn secure::pseudonym::PseudonymKeyRing::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for secure::pseudonym::PseudonymKeyRing
+impl core::marker::Send for secure::pseudonym::PseudonymKeyRing
+impl core::marker::Sync for secure::pseudonym::PseudonymKeyRing
+impl core::marker::Unpin for secure::pseudonym::PseudonymKeyRing
+impl core::marker::UnsafeUnpin for secure::pseudonym::PseudonymKeyRing
+impl core::panic::unwind_safe::RefUnwindSafe for secure::pseudonym::PseudonymKeyRing
+impl core::panic::unwind_safe::UnwindSafe for secure::pseudonym::PseudonymKeyRing
+pub struct secure::PseudonymRef
+impl secure::pseudonym::PseudonymRef
+pub const fn secure::pseudonym::PseudonymRef::as_bytes(self) -> [u8; 16]
+pub const fn secure::pseudonym::PseudonymRef::key_id(self) -> secure::pseudonym::PseudonymKeyId
+impl core::clone::Clone for secure::pseudonym::PseudonymRef
+pub fn secure::pseudonym::PseudonymRef::clone(&self) -> secure::pseudonym::PseudonymRef
+impl core::cmp::Eq for secure::pseudonym::PseudonymRef
+impl core::cmp::PartialEq for secure::pseudonym::PseudonymRef
+pub fn secure::pseudonym::PseudonymRef::eq(&self, &secure::pseudonym::PseudonymRef) -> bool
+impl core::fmt::Debug for secure::pseudonym::PseudonymRef
+pub fn secure::pseudonym::PseudonymRef::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for secure::pseudonym::PseudonymRef
+pub fn secure::pseudonym::PseudonymRef::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for secure::pseudonym::PseudonymRef
+impl core::marker::StructuralPartialEq for secure::pseudonym::PseudonymRef
+impl core::marker::Freeze for secure::pseudonym::PseudonymRef
+impl core::marker::Send for secure::pseudonym::PseudonymRef
+impl core::marker::Sync for secure::pseudonym::PseudonymRef
+impl core::marker::Unpin for secure::pseudonym::PseudonymRef
+impl core::marker::UnsafeUnpin for secure::pseudonym::PseudonymRef
+impl core::panic::unwind_safe::RefUnwindSafe for secure::pseudonym::PseudonymRef
+impl core::panic::unwind_safe::UnwindSafe for secure::pseudonym::PseudonymRef
 pub struct secure::RawPassword
 impl secure::password::RawPassword
 pub fn secure::password::RawPassword::new(alloc::string::String) -> Self
@@ -1756,6 +1929,18 @@ impl core::marker::Unpin for secure::password::VerifiedPassword
 impl core::marker::UnsafeUnpin for secure::password::VerifiedPassword
 impl core::panic::unwind_safe::RefUnwindSafe for secure::password::VerifiedPassword
 impl core::panic::unwind_safe::UnwindSafe for secure::password::VerifiedPassword
+pub struct secure::VersionedPseudonymKey
+impl secure::pseudonym::VersionedPseudonymKey
+pub fn secure::pseudonym::VersionedPseudonymKey::new(secure::pseudonym::PseudonymKeyId, secure::redaction::RedactionHashKey) -> Self
+impl core::fmt::Debug for secure::pseudonym::VersionedPseudonymKey
+pub fn secure::pseudonym::VersionedPseudonymKey::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for secure::pseudonym::VersionedPseudonymKey
+impl core::marker::Send for secure::pseudonym::VersionedPseudonymKey
+impl core::marker::Sync for secure::pseudonym::VersionedPseudonymKey
+impl core::marker::Unpin for secure::pseudonym::VersionedPseudonymKey
+impl core::marker::UnsafeUnpin for secure::pseudonym::VersionedPseudonymKey
+impl core::panic::unwind_safe::RefUnwindSafe for secure::pseudonym::VersionedPseudonymKey
+impl core::panic::unwind_safe::UnwindSafe for secure::pseudonym::VersionedPseudonymKey
 pub const secure::ENVELOPE_VERSION: u8
 pub trait secure::Aead
 pub fn secure::Aead::open(&self, &secure::envelope::CiphertextEnvelope, &secure::protection::DerivedAad) -> core::result::Result<secure::aead::Plaintext, secure::aead::AeadError>

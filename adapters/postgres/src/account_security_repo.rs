@@ -1,34 +1,29 @@
 //! PostgreSQL account-security state adapter.
 
-use crate::cotx::{PgTenantReadPool, PgTenantWritePool};
-use crate::outbox::{epoch_secs_to_time, unix_secs};
-use crate::pool::{VerifiedPgReadStore, VerifiedPgWriteStore};
+use crate::cotx::PgTenantReadPool;
+use crate::pool::VerifiedPgReadStore;
 use identity::ports::{
-    AccountSecurityLifecycle, AccountSecurityMutation, AccountSecurityReadRepo,
-    AccountSecuritySnapshot, AccountSecurityState, AccountStatus, IdentityError, TenantId,
-    TenantRepoScope,
+    AccountSecurityReadRepo, AccountSecuritySnapshot, AccountSecurityState, AccountStatus,
+    IdentityError, TenantId, TenantRepoScope,
 };
 
-/// The single PostgreSQL provider for read-only authentication gates and sealed lifecycle CAS.
+/// PostgreSQL read model for authentication gates.
 pub struct PgAccountSecurityRepo {
     read_pool: PgTenantReadPool,
-    write_pool: PgTenantWritePool,
 }
 
 impl Clone for PgAccountSecurityRepo {
     fn clone(&self) -> Self {
         Self {
             read_pool: self.read_pool.clone(),
-            write_pool: self.write_pool.clone(),
         }
     }
 }
 
 impl PgAccountSecurityRepo {
-    pub(crate) fn new(reader: &VerifiedPgReadStore, writer: &VerifiedPgWriteStore) -> Self {
+    pub(crate) fn new(reader: &VerifiedPgReadStore) -> Self {
         Self {
             read_pool: PgTenantReadPool::new(reader),
-            write_pool: PgTenantWritePool::new(writer),
         }
     }
 
@@ -36,7 +31,6 @@ impl PgAccountSecurityRepo {
     pub(crate) fn from_unverified_for_test(store: &crate::PgStore) -> Self {
         Self {
             read_pool: PgTenantReadPool::from_unverified_for_test(store),
-            write_pool: PgTenantWritePool::from_unverified_for_test(store),
         }
     }
 }
@@ -75,8 +69,16 @@ pub(crate) struct SecurityRow {
     pub(crate) status: String,
     pub(crate) authn_epoch: i64,
     pub(crate) version: i64,
-    pub(crate) status_changed_at: i64,
-    pub(crate) updated_at: i64,
+    pub(crate) status_changed_at_micros: i64,
+    pub(crate) updated_at_micros: i64,
+}
+
+fn epoch_micros_to_time(
+    micros: i64,
+    field: &'static str,
+) -> Result<std::time::SystemTime, IdentityError> {
+    let micros = u64::try_from(micros).map_err(|_| storage(std::io::Error::other(field)))?;
+    Ok(std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_micros(micros))
 }
 
 pub(crate) fn hydrate_security(
@@ -94,8 +96,14 @@ pub(crate) fn hydrate_security(
         status: status_from_db(&row.status)?,
         authn_epoch,
         version,
-        status_changed_at: epoch_secs_to_time(row.status_changed_at),
-        updated_at: epoch_secs_to_time(row.updated_at),
+        status_changed_at: epoch_micros_to_time(
+            row.status_changed_at_micros,
+            "negative account security status_changed_at",
+        )?,
+        updated_at: epoch_micros_to_time(
+            row.updated_at_micros,
+            "negative account security updated_at",
+        )?,
     })
     .map_err(storage)
 }
@@ -110,8 +118,9 @@ async fn fetch_row(
         SELECT status,
                authn_epoch,
                version,
-               extract(epoch from status_changed_at)::bigint AS status_changed_at,
-               extract(epoch from updated_at)::bigint AS updated_at
+               (extract(epoch from status_changed_at) * 1000000)::bigint
+                   AS status_changed_at_micros,
+               (extract(epoch from updated_at) * 1000000)::bigint AS updated_at_micros
         FROM account_security_states
         WHERE tenant_id = $1::uuid AND user_id = $2::uuid
         "#,
@@ -143,88 +152,9 @@ impl AccountSecurityReadRepo for PgAccountSecurityRepo {
     }
 }
 
-impl AccountSecurityLifecycle for PgAccountSecurityRepo {
-    async fn apply_transition(
-        &self,
-        scope: TenantRepoScope,
-        mutation: AccountSecurityMutation,
-    ) -> Result<AccountSecurityState, IdentityError> {
-        let tenant = scope.tenant();
-        let (expected, next) = mutation.into_parts();
-        if expected.tenant() != tenant
-            || next.tenant() != tenant
-            || expected.user_id() != next.user_id()
-        {
-            return Err(storage(std::io::Error::other(
-                "account security tenant scope mismatch",
-            )));
-        }
-        let tenant_sql = tenant_param(tenant);
-        let user_id = next.user_id();
-        let user_sql = user_id.as_uuid().to_string();
-        let status = status_to_db(next.status());
-        let epoch = i64::try_from(next.authn_epoch().get())
-            .map_err(|_| storage(std::io::Error::other("authentication epoch overflow")))?;
-        let version = i64::try_from(next.version().get())
-            .map_err(|_| storage(std::io::Error::other("account security version overflow")))?;
-        let expected_version = i64::try_from(expected.version().get())
-            .map_err(|_| storage(std::io::Error::other("expected version overflow")))?;
-        let expected_status = status_to_db(expected.status());
-        let expected_epoch = i64::try_from(expected.authn_epoch().get())
-            .map_err(|_| storage(std::io::Error::other("expected epoch overflow")))?;
-        let changed = unix_secs(next.status_changed_at());
-        let updated = unix_secs(next.updated_at());
-
-        let applied = self
-            .write_pool
-            .write(
-                scope,
-                move |tx| {
-                    Box::pin(async move {
-                        let result = sqlx::query(
-                            r#"
-                            UPDATE account_security_states
-                            SET status = $3,
-                                authn_epoch = $4,
-                                version = $5,
-                                status_changed_at = to_timestamp($6),
-                                updated_at = to_timestamp($7)
-                            WHERE tenant_id = $1::uuid
-                              AND user_id = $2::uuid
-                              AND version = $8
-                              AND status = $9
-                              AND authn_epoch = $10
-                            "#,
-                        )
-                        .bind(tenant_sql)
-                        .bind(user_sql)
-                        .bind(status)
-                        .bind(epoch)
-                        .bind(version)
-                        .bind(changed)
-                        .bind(updated)
-                        .bind(expected_version)
-                        .bind(expected_status)
-                        .bind(expected_epoch)
-                        .execute(tx.conn())
-                        .await
-                        .map_err(storage)?;
-                        Ok(result.rows_affected())
-                    })
-                },
-                storage,
-            )
-            .await?;
-        if applied != 1 {
-            return Err(IdentityError::VersionConflict);
-        }
-        Ok(next)
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{status_from_db, status_to_db};
+    use super::{SecurityRow, hydrate_security, status_from_db, status_to_db};
     use identity::ports::{AccountStatus, IdentityError};
 
     #[test]
@@ -243,6 +173,34 @@ mod tests {
 
         assert!(status_from_db("pending").is_err());
         assert!(status_from_db("").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn account_security_hydration_rejects_each_negative_persisted_timestamp()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let tenant = vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")?;
+        let user_id = ids::UserId::parse("67e55044-10b1-426f-9247-bb680e5fe0c8")?;
+
+        for (status_changed_at_micros, updated_at_micros, field) in
+            [(-1, 0, "status_changed_at"), (0, -1, "updated_at")]
+        {
+            let hydrated = hydrate_security(
+                tenant,
+                user_id,
+                SecurityRow {
+                    status: "active".to_owned(),
+                    authn_epoch: 0,
+                    version: 1,
+                    status_changed_at_micros,
+                    updated_at_micros,
+                },
+            );
+            assert!(
+                hydrated.is_err(),
+                "negative persisted {field} must fail closed instead of becoming Unix epoch"
+            );
+        }
         Ok(())
     }
 }

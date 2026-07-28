@@ -61,8 +61,9 @@ may not be durable.
 3. If the intended state is already durable, close the incident without replay and verify dependent
    reads remain consistent.
 4. If the intended state is absent, reconcile only through an approved idempotent domain operation
-   after the database is healthy. The password-change CAS path has no generic replay command; do not
-   invent one with direct SQL.
+   after the database is healthy. Since #1842, password-change is an OutboxFact producer transaction,
+   not an HTTP LocalTx route; its generic `outbox.producer` commit-unknown path still has no replay
+   command. Do not invent one with direct SQL or relabel it as LocalTx evidence.
 5. Escalate to the owning domain when state cannot be proven. Preserve the ambiguous operation as an
    incident artifact rather than guessing its outcome.
 

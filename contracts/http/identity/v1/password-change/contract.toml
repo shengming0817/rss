@@ -1,10 +1,10 @@
-# 当前认证主体密码变更 HTTP 契约。CredentialRepo 单次原子 CAS 写入；并发冲突零写且 handler 不自动重试 ⇒ L1。
+# 当前认证主体密码变更 HTTP 契约。credential/account/grant/family/outbox 同事务提交 ⇒ L2。
 id = "identity.password-change"
 kind = "http"
 domain = "identity"
 version = "v1"
 owner = "identity"
-consistencyLevel = "LocalTx"
+consistencyLevel = "OutboxFact"
 lifecycle = "active"
 path = "/api/v1/identity/password/change"
 method = "POST"
@@ -22,11 +22,10 @@ idempotency = "non-idempotent"
 mode = "permission"
 permission = "identity:profile:write"
 
-[capabilities.localTx]
-boundary = "single-domain"
-txModel = "repo-atomic-cas"
-retry = "bounded-transient"
-commitUnknown = "not-retryable"
+[capabilities.outbox]
+role = "producer"
+atomicity = "same-transaction"
+emits = ["identity.security-event"]
 
 [effectProfile]
-effects = ["auth", "business-write", "business-transaction"]
+effects = ["auth", "business-write", "business-transaction", "outbox", "publish"]

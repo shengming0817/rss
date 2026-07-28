@@ -2,6 +2,7 @@ pub mod authn
 pub enum authn::AccountSecurityEventKind
 pub authn::AccountSecurityEventKind::AccountDeactivated
 pub authn::AccountSecurityEventKind::AccountLocked
+pub authn::AccountSecurityEventKind::AccountReactivated
 pub authn::AccountSecurityEventKind::AccountSuspended
 pub authn::AccountSecurityEventKind::CredentialDeleted
 pub authn::AccountSecurityEventKind::LogoutAll
@@ -64,6 +65,7 @@ pub authn::AuthGrantStateError::ActiveHasTerminalMetadata
 pub authn::AuthGrantStateError::AlreadyClosed
 pub authn::AuthGrantStateError::InvalidTimeOrder
 pub authn::AuthGrantStateError::StatusReasonMismatch
+pub authn::AuthGrantStateError::TenantMismatch
 pub authn::AuthGrantStateError::TerminalMetadataMissing
 impl core::cmp::Eq for authn::AuthGrantStateError
 impl core::cmp::PartialEq for authn::AuthGrantStateError

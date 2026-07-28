@@ -89,6 +89,7 @@ pub struct IdentityModuleDeps<S> {
     auth_grant_ttl: Duration,
     refresh_ttl: Duration,
     blocklist: Arc<secure::DigestPasswordBlocklist>,
+    pseudonym_keys: Arc<secure::PseudonymKeyRing>,
 }
 
 impl<S> IdentityModuleDeps<S> {
@@ -101,6 +102,7 @@ impl<S> IdentityModuleDeps<S> {
         auth_grant_ttl: Duration,
         refresh_ttl: Duration,
         blocklist: Arc<secure::DigestPasswordBlocklist>,
+        pseudonym_keys: Arc<secure::PseudonymKeyRing>,
     ) -> Self {
         Self {
             pg,
@@ -110,6 +112,7 @@ impl<S> IdentityModuleDeps<S> {
             auth_grant_ttl,
             refresh_ttl,
             blocklist,
+            pseudonym_keys,
         }
     }
 }
@@ -216,6 +219,7 @@ where
         auth_grant_ttl,
         refresh_ttl,
         blocklist,
+        pseudonym_keys,
     } = deps;
 
     let credentials = Arc::from(DynCredentialRepo::new_box(pg.credential_repo()));
@@ -235,18 +239,21 @@ where
         refresh_ttl,
     );
     let refresh = auth_grants.refresh_service();
-    let identity_security_lifecycle = pg.identity_security_lifecycle();
+    let identity_security_lifecycle = pg.identity_security_lifecycle(Arc::clone(&pseudonym_keys));
+    let account_reactivation_lifecycle = pg.account_reactivation_lifecycle(pseudonym_keys);
+    let password_policy = secure::PasswordPolicy::new(blocklist);
     let credential_security = Arc::new(CredentialSecurityService::new(
+        Arc::clone(&credentials),
         auth_grants.lifecycle(),
         DynAccountSecurityReadRepo::new_box(pg.account_security_repo()),
         identity_security_lifecycle,
+        account_reactivation_lifecycle,
+        password_policy,
         boxed_clock(&clock),
     ));
-    let password_policy = secure::PasswordPolicy::new(blocklist);
     let login = Arc::new(LoginService::new(
         credentials,
         auth_grants,
-        password_policy,
         boxed_clock(&clock),
         auth_grant_ttl,
     ));
@@ -324,6 +331,21 @@ pub mod test_support {
         }
     }
 
+    fn test_pseudonym_keys() -> Arc<secure::PseudonymKeyRing> {
+        let key =
+            secure::RedactionHashKey::from_bytes(vec![0x42; 32]).expect("valid pseudonym key");
+        Arc::new(
+            secure::PseudonymKeyRing::new(
+                secure::VersionedPseudonymKey::new(
+                    secure::PseudonymKeyId::new(std::num::NonZeroU16::MIN),
+                    key,
+                ),
+                Vec::new(),
+            )
+            .expect("valid pseudonym key ring"),
+        )
+    }
+
     /// Construct complete hermetic identity composition inputs.
     ///
     /// # Errors
@@ -346,6 +368,7 @@ pub mod test_support {
             Duration::from_secs(3_600),
             Duration::from_secs(30 * 24 * 60 * 60),
             Arc::new(blocklist),
+            test_pseudonym_keys(),
         ))
     }
 

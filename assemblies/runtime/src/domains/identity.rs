@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context as _;
+use base64::Engine as _;
 use bootstrap::DomainBinding;
 use identity_composition::{FederatedIdentityModuleDeps, IdentityModuleDeps};
 use postgres::{PgDomainDeps, caps};
@@ -20,6 +21,7 @@ const DEFAULT_IDENTITY_AUTH_GRANT_TTL_SECS: u64 = 30 * 24 * 60 * 60;
 const MAX_IDENTITY_AUTH_GRANT_TTL_SECS: u64 = 365 * 24 * 60 * 60;
 const IDENTITY_AUTH_GRANT_TTL_ENV: &str = "RSS_IDENTITY_AUTH_GRANT_TTL_SECS";
 const REFRESH_TTL_ENV: &str = "RSS_REFRESH_TTL_SECS";
+const IDENTITY_PSEUDONYM_KEY_ENV: &str = "RSS_IDENTITY_PSEUDONYM_KEY_B64URL";
 pub(crate) const PASSWORD_BLOCKLIST_PATH_ENV: &str = "RSS_PASSWORD_BLOCKLIST_PATH";
 const DEFAULT_REFRESH_TTL_SECS: u64 = 30 * 24 * 60 * 60;
 const MAX_REFRESH_TTL_SECS: u64 = 365 * 24 * 60 * 60;
@@ -42,6 +44,7 @@ pub(crate) struct RssLocalAuthGrantInput {
     rss_access_issuer: authn::JwtIssuerConfig<diport::RssAccessProfile>,
     auth_grant_ttl: Duration,
     refresh_ttl: Duration,
+    pseudonym_keys: Arc<secure::PseudonymKeyRing>,
 }
 
 pub(crate) enum IdentityModuleInput {
@@ -64,11 +67,13 @@ impl IdentityModuleInput {
             config.value(IDENTITY_AUTH_GRANT_TTL_ENV),
         )?);
         let refresh_ttl = Duration::from_secs(refresh_ttl_secs(config.value(REFRESH_TTL_ENV))?);
+        let pseudonym_keys = pseudonym_keys(config.value(IDENTITY_PSEUDONYM_KEY_ENV))?;
         validate_auth_grant_covers_refresh(auth_grant_ttl, refresh_ttl)?;
         Ok(Self::RssAccess(RssLocalAuthGrantInput {
             rss_access_issuer,
             auth_grant_ttl,
             refresh_ttl,
+            pseudonym_keys,
         }))
     }
 
@@ -101,6 +106,7 @@ impl IdentityModuleInput {
             rss_access_issuer,
             auth_grant_ttl: values.auth_grant_ttl,
             refresh_ttl: values.refresh_ttl,
+            pseudonym_keys: test_pseudonym_keys(),
         }))
     }
 
@@ -224,6 +230,7 @@ fn wire_rss_access(
         rss_access_issuer,
         auth_grant_ttl,
         refresh_ttl,
+        pseudonym_keys,
     } = input;
     let composition = IdentityModuleDeps::new(
         pg,
@@ -233,8 +240,36 @@ fn wire_rss_access(
         auth_grant_ttl,
         refresh_ttl,
         blocklist,
+        pseudonym_keys,
     );
     identity_composition::wire(composition)
+}
+
+fn pseudonym_keys(raw: Option<&str>) -> anyhow::Result<Arc<secure::PseudonymKeyRing>> {
+    let raw = raw
+        .ok_or_else(|| anyhow::anyhow!("missing required env var: {IDENTITY_PSEUDONYM_KEY_ENV}"))?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(raw.as_bytes())
+        .with_context(|| format!("{IDENTITY_PSEUDONYM_KEY_ENV} must be base64url"))?;
+    let key = secure::RedactionHashKey::from_bytes(bytes).with_context(|| {
+        format!("{IDENTITY_PSEUDONYM_KEY_ENV} must decode to at least 32 bytes")
+    })?;
+    let ring = secure::PseudonymKeyRing::new(
+        secure::VersionedPseudonymKey::new(
+            secure::PseudonymKeyId::new(std::num::NonZeroU16::MIN),
+            key,
+        ),
+        Vec::new(),
+    )?;
+    Ok(Arc::new(ring))
+}
+
+#[cfg(any(test, feature = "integration"))]
+fn test_pseudonym_keys() -> Arc<secure::PseudonymKeyRing> {
+    match pseudonym_keys(Some("MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY")) {
+        Ok(keys) => keys,
+        Err(error) => unreachable!("fixed test pseudonym key is valid: {error}"),
+    }
 }
 
 #[cfg(any(test, feature = "integration"))]
@@ -262,6 +297,22 @@ pub(crate) fn wire_identity_with(
 ) -> anyhow::Result<DomainBinding> {
     wire_with_profile(
         deps.pg.for_domain(),
+        Arc::clone(&deps.password_blocklist),
+        Arc::clone(&deps.identity_signer),
+        IdentityModuleInput::from_test_values(values)?,
+    )
+}
+
+#[cfg(feature = "integration")]
+pub(crate) fn wire_identity_with_password_change_barrier(
+    deps: &SharedRuntimeDeps,
+    values: IdentityTestValues,
+    barrier: Arc<tokio::sync::Barrier>,
+) -> anyhow::Result<DomainBinding> {
+    wire_with_profile(
+        deps.pg
+            .for_domain()
+            .with_identity_security_start_barrier_for_test(barrier),
         Arc::clone(&deps.password_blocklist),
         Arc::clone(&deps.identity_signer),
         IdentityModuleInput::from_test_values(values)?,

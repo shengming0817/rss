@@ -2319,7 +2319,12 @@ fn route_sealed_command_binding(signature: &syn::Signature) -> Option<String> {
             };
             matches!(
                 type_last_ident(&argument.ty).as_deref(),
-                Some("LogoutCurrentCommand" | "LogoutAllCommand")
+                Some(
+                    "LogoutCurrentCommand"
+                        | "LogoutAllCommand"
+                        | "PasswordChangeCommand"
+                        | "AccountStatusSetCommand"
+                )
             )
             .then(|| binding.ident.to_string())
         })
@@ -2882,22 +2887,23 @@ mod tests {
     }
 
     #[test]
-    fn sealed_logout_command_proof_depends_only_on_the_route_specific_signature()
+    fn sealed_identity_security_command_proof_depends_only_on_the_route_specific_signature()
     -> anyhow::Result<()> {
-        let canonical: syn::ItemFn = syn::parse_str(
-            r#"
-            async fn execute(
-                command: identity::ports::LogoutCurrentCommand,
-            ) {
-                let fact = identity::ports::credential_security_fact(command.event())?;
-                let entry = fact.entry().clone();
-            }
-            "#,
-        )?;
-        assert_eq!(
-            route_sealed_command_binding(&canonical.sig).as_deref(),
-            Some("command")
-        );
+        for command in [
+            "LogoutCurrentCommand",
+            "LogoutAllCommand",
+            "PasswordChangeCommand",
+            "AccountStatusSetCommand",
+        ] {
+            let canonical: syn::ItemFn = syn::parse_str(&format!(
+                "async fn execute(command: identity::ports::{command}) {{ helper(command).await }}"
+            ))?;
+            assert_eq!(
+                route_sealed_command_binding(&canonical.sig).as_deref(),
+                Some("command"),
+                "{command} must remain a route-sealed producer command"
+            );
+        }
 
         for source in [
             r#"
@@ -2911,6 +2917,9 @@ mod tests {
                 current: identity::ports::LogoutCurrentCommand,
                 all: identity::ports::LogoutAllCommand,
             ) {}
+            "#,
+            r#"
+            async fn execute(command: identity::ports::ReactivateAccountCommand) {}
             "#,
         ] {
             let rejected: syn::ItemFn = syn::parse_str(source)?;
@@ -2934,6 +2943,84 @@ mod tests {
             Some("exact"),
             "proof must not depend on local names, clone calls, or top-level statement layout"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn workspace_identity_security_producer_commands_are_exact_and_non_vacuous()
+    -> anyhow::Result<()> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .context("xtask must live below the workspace root")?;
+        let source = fs::read_to_string(root.join("crates/identity/src/ports.rs"))?;
+        let syntax = syn::parse_file(&source)?;
+        let lifecycle = syntax
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Trait(item) if item.ident == "IdentitySecurityLifecycleLocal" => Some(item),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let [lifecycle] = lifecycle.as_slice() else {
+            bail!("workspace must contain one IdentitySecurityLifecycleLocal trait")
+        };
+        let methods = lifecycle
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                syn::TraitItem::Fn(method) => Some(method),
+                _ => None,
+            })
+            .map(|method| {
+                (
+                    method.sig.ident.to_string(),
+                    route_sealed_command_binding(&method.sig),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        assert!(
+            methods
+                .get("execute_password_change")
+                .is_some_and(Option::is_some)
+        );
+        assert!(
+            methods
+                .get("execute_account_status_set")
+                .is_some_and(Option::is_some)
+        );
+        assert!(!methods.contains_key("execute_reactivation"));
+        assert_eq!(
+            methods
+                .iter()
+                .filter_map(|(method, command)| command.as_ref().map(|_| method.as_str()))
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([
+                "execute_account_status_set",
+                "execute_logout_all",
+                "execute_logout_current",
+                "execute_password_change",
+            ]),
+            "the route-sealed identity-security producer method set must remain exact"
+        );
+        let reactivation = syntax
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                syn::Item::Trait(item) if item.ident == "AccountReactivationLifecycleLocal" => {
+                    Some(item)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let [reactivation] = reactivation.as_slice() else {
+            bail!("workspace must contain one AccountReactivationLifecycleLocal trait")
+        };
+        assert_eq!(reactivation.items.len(), 1);
+        assert!(matches!(
+            &reactivation.items[0],
+            syn::TraitItem::Fn(method) if method.sig.ident == "execute_reactivation"
+        ));
         Ok(())
     }
 

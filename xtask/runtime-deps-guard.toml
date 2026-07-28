@@ -5,6 +5,7 @@ schemaVersion = 1
 allowedRoots = ["postgres", "redis", "s3", "vault", "oidc", "diport", "primitives", "secure", "vocab"]
 exactExceptions = [
   "Arc<secure::DigestPasswordBlocklist>",
+  "Arc<secure::PseudonymKeyRing>",
   "Arc<dyn distributed::DomainTransport>",
   "Arc<oidc::OidcProvider>",
   "postgres::PgRevocationStore",

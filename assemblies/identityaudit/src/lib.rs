@@ -51,6 +51,7 @@ pub struct SharedRuntimeDeps {
     pg: PgRuntimeHandle,
     signer: Arc<vault::VaultSigner>,
     audit_chain_key: MacKey,
+    identity_pseudonym_keys: Arc<secure::PseudonymKeyRing>,
     identity_config: identity_composition::IdentityRuntimeConfig,
     blocklist: Arc<secure::DigestPasswordBlocklist>,
 }
@@ -61,6 +62,7 @@ impl SharedRuntimeDeps {
         pg: PgRuntimeHandle,
         signer: Arc<vault::VaultSigner>,
         audit_chain_key: MacKey,
+        identity_pseudonym_keys: Arc<secure::PseudonymKeyRing>,
         identity_config: identity_composition::IdentityRuntimeConfig,
         blocklist: Arc<secure::DigestPasswordBlocklist>,
     ) -> Self {
@@ -69,6 +71,7 @@ impl SharedRuntimeDeps {
             pg,
             signer,
             audit_chain_key,
+            identity_pseudonym_keys,
             identity_config,
             blocklist,
         }
@@ -106,6 +109,7 @@ mod domains {
                 deps.identity_config.auth_grant_ttl(),
                 deps.identity_config.refresh_ttl(),
                 Arc::clone(&deps.blocklist),
+                Arc::clone(&deps.identity_pseudonym_keys),
             ))
         }
 

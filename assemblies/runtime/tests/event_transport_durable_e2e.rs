@@ -582,6 +582,7 @@ async fn event_transport_durable_e2e() -> Result<()> {
 
     // identity 域：with_seed_credential 注入 in-mem 凭据 + PgAuthGrantLifecycle durable co-tx。
     let mut refresh_identity = None;
+    let mut credential_security_grants = None;
     let login_identity = Arc::new(LoginService::with_seed_credential(
         |accounts| {
             let services = identity::seed_auth_grant_services(
@@ -591,9 +592,9 @@ async fn event_transport_durable_e2e() -> Result<()> {
                 Duration::from_secs(TTL_SECS),
             );
             refresh_identity = Some(services.refresh_service());
+            credential_security_grants = Some(services.lifecycle());
             services
         },
-        test_password_policy()?,
         Box::new(FixedClock::at_unix_secs(NOW_SECS)),
         Duration::from_secs(TTL_SECS),
         LOGIN_USERNAME,
@@ -603,6 +604,8 @@ async fn event_transport_durable_e2e() -> Result<()> {
     )?);
     let refresh_identity = refresh_identity
         .ok_or_else(|| anyhow::anyhow!("seed refresh service was not constructed"))?;
+    let credential_security_grants = credential_security_grants
+        .ok_or_else(|| anyhow::anyhow!("seed auth-grant lifecycle was not constructed"))?;
     let roles_for_admin = Arc::from(DynRoleReadRepo::new_box(id.role_repo()));
     let roles_for_list = Arc::from(DynRoleReadRepo::new_box(id.role_repo()));
     let policies = Arc::from(DynPolicyRepo::new_box(id.policy_repo()));
@@ -627,12 +630,17 @@ async fn event_transport_durable_e2e() -> Result<()> {
         policy_lifecycle_for_service,
         Box::new(FixedClock::at_unix_secs(NOW_SECS)),
     ));
-    let credential_security = Arc::new(
-        identity::CredentialSecurityService::inert_for_non_logout_tests(
-            &login_identity,
-            Box::new(FixedClock::at_unix_secs(NOW_SECS)),
-        ),
-    );
+    let credential_security = Arc::new(identity::CredentialSecurityService::new(
+        Arc::from(identity::ports::DynCredentialRepo::new_box(
+            id.credential_repo(),
+        )),
+        credential_security_grants,
+        identity::ports::DynAccountSecurityReadRepo::new_box(id.account_security_repo()),
+        id.identity_security_lifecycle(postgres::identity_pseudonym_keys_for_test()),
+        id.identity_security_lifecycle(postgres::identity_pseudonym_keys_for_test()),
+        test_password_policy()?,
+        Box::new(FixedClock::at_unix_secs(NOW_SECS)),
+    ));
     let identity_domain = IdentityDomain::new(IdentityDomainDeps {
         login: login_identity,
         refresh: refresh_identity,
@@ -1014,7 +1022,6 @@ async fn event_transport_durable_e2e() -> Result<()> {
                 Duration::from_secs(TTL_SECS),
             )
         },
-        test_password_policy()?,
         Box::new(FixedClock::at_unix_secs(NOW_SECS)),
         Duration::from_secs(TTL_SECS),
         LOGIN_USERNAME,

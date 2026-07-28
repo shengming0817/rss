@@ -12,10 +12,7 @@ use crate::domain::{
     AccountLockout, AccountSecurityState, AccountStatus, AuthOutcome, Credential, IdentityError,
     LoginIdentifier,
 };
-use crate::ports::{
-    AccountSecurityLifecycle, AccountSecurityMutation, AccountSecurityReadRepo, CredentialRepo,
-    PasswordChangeMutation, TenantRepoScope,
-};
+use crate::ports::{AccountSecurityReadRepo, CredentialRepo, TenantRepoScope};
 #[cfg(test)]
 use authn::{AuthGrant, AuthGrantId, AuthGrantStatus};
 use vocab::TenantId;
@@ -136,6 +133,17 @@ impl InMemCredentialRepo {
     pub(crate) fn lockout_len(&self) -> usize {
         recover(&self.inner).lockouts.len()
     }
+
+    /// Test-only fixture seam for installing a complete durable account-security snapshot.
+    ///
+    /// The key is derived from `state`; this deliberately provides no lifecycle transition or CAS
+    /// compatibility behavior.
+    #[cfg(test)]
+    pub(crate) fn set_account_security_for_test(&self, state: AccountSecurityState) {
+        recover(&self.inner)
+            .security
+            .insert((state.tenant(), state.user_id()), state);
+    }
 }
 
 impl CredentialRepo for InMemCredentialRepo {
@@ -219,23 +227,21 @@ impl CredentialRepo for InMemCredentialRepo {
         })
     }
 
-    async fn save(
+    async fn insert(
         &self,
         scope: TenantRepoScope,
         credential: Credential,
     ) -> Result<(), IdentityError> {
         if scope.tenant() != credential.tenant() {
             return Err(IdentityError::Storage(Box::new(std::io::Error::other(
-                "credential save tenant scope mismatch",
+                "credential insert tenant scope mismatch",
             ))));
         }
         let key = Self::cred_key(&credential);
         let mut inner = recover(&self.inner);
-        if let Some(existing) = inner.creds.get(&key)
-            && existing.user_id() != credential.user_id()
-        {
+        if inner.creds.contains_key(&key) {
             return Err(IdentityError::Storage(Box::new(std::io::Error::other(
-                "credential identity rebind is forbidden",
+                "credential already exists",
             ))));
         }
         if inner.creds.iter().any(|(existing_key, existing)| {
@@ -257,32 +263,9 @@ impl CredentialRepo for InMemCredentialRepo {
                     SystemTime::UNIX_EPOCH,
                 )
             });
-        inner.creds.insert(key, credential);
+        let replaced = inner.creds.insert(key, credential);
+        debug_assert!(replaced.is_none(), "duplicate credential rejected above");
         Ok(())
-    }
-
-    async fn apply_password_change(
-        &self,
-        scope: TenantRepoScope,
-        mutation: PasswordChangeMutation,
-    ) -> Result<(), IdentityError> {
-        let (expected, next, _observation) = mutation.into_parts();
-        if scope.tenant() != next.tenant() {
-            return Err(IdentityError::Storage(Box::new(std::io::Error::other(
-                "credential bump tenant scope mismatch",
-            ))));
-        }
-        // key 派生自 next（F2：错位不可表达，无需 debug_assert）。
-        let key = Self::cred_key(&next);
-        let mut inner = recover(&self.inner);
-        match inner.creds.get(&key).map(Credential::version) {
-            None => Err(IdentityError::CredentialNotFound),
-            Some(v) if v != expected => Err(IdentityError::VersionConflict),
-            Some(_) => {
-                inner.creds.insert(key, next);
-                Ok(())
-            }
-        }
     }
 }
 
@@ -296,30 +279,6 @@ impl AccountSecurityReadRepo for InMemCredentialRepo {
             .security
             .get(&(scope.tenant(), user_id))
             .cloned())
-    }
-}
-
-impl AccountSecurityLifecycle for InMemCredentialRepo {
-    async fn apply_transition(
-        &self,
-        scope: TenantRepoScope,
-        mutation: AccountSecurityMutation,
-    ) -> Result<AccountSecurityState, IdentityError> {
-        let (expected, next) = mutation.into_parts();
-        if scope.tenant() != next.tenant() {
-            return Err(IdentityError::Storage(Box::new(std::io::Error::other(
-                "account security transition tenant scope mismatch",
-            ))));
-        }
-        let mut inner = recover(&self.inner);
-        let key = (scope.tenant(), next.user_id());
-        match inner.security.get(&key) {
-            Some(current) if current == &expected => {
-                inner.security.insert(key, next.clone());
-                Ok(next)
-            }
-            _ => Err(IdentityError::VersionConflict),
-        }
     }
 }
 
@@ -1402,17 +1361,16 @@ mod tests {
         InMemResourceAttributeRepo, InMemRoleBindingLifecycle, TenantId, recover,
     };
     use crate::domain::{
-        AccountSecurityState, AccountStatus, AttributeValue, AuthOutcome, IdentityError,
-        LoginIdentifier, Policy, PolicyId, PolicyRouteScope, PolicyVersion, RefreshStatus,
-        RefreshTokenHash, RefreshTokenId, RefreshTokenRecord, ResourceAttribute,
-        ResourceAttributeKey, ResourceAttributeResolution, ResourceAttributeResourceId,
-        ResourceAttributeVersion, RoleBinding, RoleId,
+        AccountSecurityState, AttributeValue, AuthOutcome, IdentityError, LoginIdentifier, Policy,
+        PolicyId, PolicyRouteScope, PolicyVersion, RefreshStatus, RefreshTokenHash, RefreshTokenId,
+        RefreshTokenRecord, ResourceAttribute, ResourceAttributeKey, ResourceAttributeResolution,
+        ResourceAttributeResourceId, ResourceAttributeVersion, RoleBinding, RoleId,
     };
     use crate::ports::{
-        AccountSecurityLifecycle, AccountSecurityReadRepo, AuthGrantCloseCommand,
-        AuthGrantLifecycle, CredentialRepo, LoginGrantMutation, PasswordChangeMutation,
-        PolicyLifecycle, PolicyRepo, RefreshTokenStore, ResourceAttributeReadRepo,
-        ResourceAttributeWriteRepo, RoleBindingLifecycle, TenantRepoScope,
+        AccountSecurityReadRepo, AuthGrantCloseCommand, AuthGrantLifecycle, CredentialRepo,
+        LoginGrantMutation, PolicyLifecycle, PolicyRepo, RefreshTokenStore,
+        ResourceAttributeReadRepo, ResourceAttributeWriteRepo, RoleBindingLifecycle,
+        TenantRepoScope,
     };
     use authn::{
         AuthGrant, AuthGrantId, AuthGrantSnapshot, AuthGrantStatus, AuthnEpoch,
@@ -1694,13 +1652,13 @@ mod tests {
     // ---------------------------------------------------------------------------
 
     #[tokio::test]
-    async fn save_then_find_roundtrip() {
+    async fn insert_then_find_roundtrip() {
         let repo = InMemCredentialRepo::new();
         let t = tid(TENANT_A);
-        // save key 派生自 credential（F2，无独立 tenant 参）。
-        repo.save(scope(t), cred("alice", USER_ALICE, "pw", 1, t))
+        // insert key 派生自 credential（F2，无独立 tenant 参）。
+        repo.insert(scope(t), cred("alice", USER_ALICE, "pw", 1, t))
             .await
-            .expect("save");
+            .expect("insert");
         let found = repo
             .find_by_user_id(scope(t), uid(USER_ALICE))
             .await
@@ -1721,23 +1679,42 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn save_rejects_second_login_for_same_user_without_mutating_state() {
+    async fn insert_rejects_tenant_scope_mismatch_without_mutating_state() {
+        let repo = InMemCredentialRepo::new();
+        let credential_tenant = tid(TENANT_A);
+
+        assert!(matches!(
+            repo.insert(
+                scope(tid(TENANT_B)),
+                cred("alice", USER_ALICE, "original", 1, credential_tenant),
+            )
+            .await,
+            Err(IdentityError::Storage(_))
+        ));
+
+        let inner = recover(&repo.inner);
+        assert!(inner.creds.is_empty());
+        assert!(inner.security.is_empty());
+    }
+
+    #[tokio::test]
+    async fn insert_rejects_second_login_for_same_user_without_mutating_state() {
         let repo = InMemCredentialRepo::new();
         let tenant = tid(TENANT_A);
         let user = uid(USER_ALICE);
-        repo.save(
+        repo.insert(
             scope(tenant),
             cred("alice", USER_ALICE, "original", 1, tenant),
         )
         .await
-        .expect("save original");
+        .expect("insert original");
         let before_security = AccountSecurityReadRepo::find(&repo, scope(tenant), user)
             .await
             .expect("read security")
             .expect("security");
 
         assert!(matches!(
-            repo.save(
+            repo.insert(
                 scope(tenant),
                 cred("alice-alias", USER_ALICE, "replacement", 2, tenant),
             )
@@ -1746,7 +1723,7 @@ mod tests {
         ));
 
         let inner = recover(&repo.inner);
-        assert_eq!(inner.creds.len(), 1, "failed save adds no credential");
+        assert_eq!(inner.creds.len(), 1, "failed insert adds no credential");
         let original = inner
             .creds
             .get(&(tenant, lid("alice")))
@@ -1756,57 +1733,52 @@ mod tests {
         assert_eq!(
             inner.security.get(&(tenant, user)),
             Some(&before_security),
-            "failed save leaves account security unchanged"
+            "failed insert leaves account security unchanged"
         );
     }
 
     #[tokio::test]
-    async fn full_snapshot_cas_cannot_restore_a_deactivated_row_from_forged_hydration() {
+    async fn insert_rejects_existing_tenant_login_without_mutating_state() {
+        let repo = InMemCredentialRepo::new();
         let tenant = tid(TENANT_A);
-        let user = uid(USER_ALICE);
-        let repo = InMemCredentialRepo::with_seed_credential("alice", user, "correct", tenant)
-            .expect("seed");
-        let active = AccountSecurityReadRepo::find(&repo, scope(tenant), user)
-            .await
-            .expect("read")
-            .expect("state");
-        let deactivated = AccountSecurityLifecycle::apply_transition(
-            &repo,
+        let original_user = uid(USER_ALICE);
+        let rejected_user = uid(USER_GHOST);
+        repo.insert(
             scope(tenant),
-            active
-                .transition(AccountStatus::Deactivated, epoch(10))
-                .expect("deactivate"),
+            cred("alice", USER_ALICE, "original", 1, tenant),
         )
         .await
-        .expect("persist deactivation");
+        .expect("insert original");
+        let before_security = AccountSecurityReadRepo::find(&repo, scope(tenant), original_user)
+            .await
+            .expect("read security")
+            .expect("security");
 
-        // A caller can hydrate a state from storage-facing primitives, but cannot use a fabricated
-        // non-terminal snapshot with the same version to recover the terminal durable row.
-        let forged = AccountSecurityState::try_from(crate::AccountSecuritySnapshot {
-            tenant,
-            user_id: user,
-            status: AccountStatus::Suspended,
-            authn_epoch: deactivated.authn_epoch().get(),
-            version: deactivated.version().get(),
-            status_changed_at: deactivated.status_changed_at(),
-            updated_at: deactivated.updated_at(),
-        })
-        .expect("syntactically valid forged row");
-        let result = AccountSecurityLifecycle::apply_transition(
-            &repo,
-            scope(tenant),
-            forged
-                .transition(AccountStatus::Active, epoch(11))
-                .expect("suspended may transition active"),
-        )
-        .await;
-        assert!(matches!(result, Err(IdentityError::VersionConflict)));
+        assert!(matches!(
+            repo.insert(
+                scope(tenant),
+                cred("alice", USER_GHOST, "replacement", 2, tenant),
+            )
+            .await,
+            Err(IdentityError::Storage(_))
+        ));
+
+        let inner = recover(&repo.inner);
+        assert_eq!(inner.creds.len(), 1, "duplicate insert adds no credential");
+        let original = inner
+            .creds
+            .get(&(tenant, lid("alice")))
+            .expect("original remains");
+        assert_eq!(original.user_id(), original_user);
+        assert!(verifies(original, "original"));
         assert_eq!(
-            AccountSecurityReadRepo::find(&repo, scope(tenant), user)
-                .await
-                .expect("read")
-                .expect("state"),
-            deactivated
+            inner.security.get(&(tenant, original_user)),
+            Some(&before_security),
+            "duplicate insert leaves original security state unchanged"
+        );
+        assert!(
+            !inner.security.contains_key(&(tenant, rejected_user)),
+            "duplicate insert must not initialize rejected user's security state"
         );
     }
 
@@ -1851,12 +1823,12 @@ mod tests {
         let weak = secure::PasswordHash::for_test_with_params(raw("correct"), 1_024, 1, 1)
             .expect("weak test PHC");
         let before = weak.as_str().to_owned();
-        repo.save(
+        repo.insert(
             scope(tenant),
             Credential::new(lid("alice"), uid(USER_ALICE), tenant, weak, 7),
         )
         .await
-        .expect("save weak credential");
+        .expect("insert weak credential");
 
         let authenticated = authenticated_state(
             repo.authenticate(scope(tenant), lid("alice"), raw("correct"), epoch(1_000))
@@ -1886,12 +1858,12 @@ mod tests {
         let weak = secure::PasswordHash::for_test_with_params(raw("correct"), 1_024, 1, 1)
             .expect("weak test PHC");
         let expected = weak.clone();
-        repo.save(
+        repo.insert(
             scope(tenant),
             Credential::new(lid("alice"), uid(USER_ALICE), tenant, weak, 11),
         )
         .await
-        .expect("save weak credential");
+        .expect("insert weak credential");
 
         let first = secure::PasswordHash::for_test(raw("correct")).expect("first replacement");
         let winner = first.as_str().to_owned();
@@ -2008,70 +1980,6 @@ mod tests {
             .expect("cross-tenant auth"),
             AuthOutcome::RejectedUnknown
         );
-    }
-
-    #[tokio::test]
-    async fn cross_tenant_password_change_isolated() {
-        let a = tid(TENANT_A);
-        let other = tid(TENANT_B);
-        let repo = InMemCredentialRepo::new();
-        repo.save(scope(a), cred("alice", USER_ALICE, "pw", 1, a))
-            .await
-            .expect("save");
-        // 跨租 bump：next 在 TENANT_B（key 派生自 next）→ 查无 → CredentialNotFound，不动 TENANT_A。
-        let res = repo
-            .apply_password_change(
-                scope(other),
-                PasswordChangeMutation::for_test(1, cred("alice", USER_ALICE, "pw2", 2, other)),
-            )
-            .await;
-        assert!(matches!(res, Err(IdentityError::CredentialNotFound)));
-        let still = repo
-            .find_by_user_id(scope(a), uid(USER_ALICE))
-            .await
-            .expect("find")
-            .expect("some");
-        assert_eq!(still.version(), 1);
-        assert!(verifies(&still, "pw"));
-    }
-
-    #[tokio::test]
-    async fn password_change_cas_hit_miss_and_unknown() {
-        let repo = InMemCredentialRepo::new();
-        let t = tid(TENANT_A);
-        repo.save(scope(t), cred("alice", USER_ALICE, "pw", 1, t))
-            .await
-            .expect("save");
-        // 期望版本不匹配 → VersionConflict（key 派生自 next）。
-        let conflict = repo
-            .apply_password_change(
-                scope(t),
-                PasswordChangeMutation::for_test(99, cred("alice", USER_ALICE, "pw2", 2, t)),
-            )
-            .await;
-        assert!(matches!(conflict, Err(IdentityError::VersionConflict)));
-        // 期望版本命中 → 替换。
-        repo.apply_password_change(
-            scope(t),
-            PasswordChangeMutation::for_test(1, cred("alice", USER_ALICE, "pw2", 2, t)),
-        )
-        .await
-        .expect("cas hit");
-        let found = repo
-            .find_by_user_id(scope(t), uid(USER_ALICE))
-            .await
-            .expect("find")
-            .expect("some");
-        assert_eq!(found.version(), 2);
-        assert!(verifies(&found, "pw2"));
-        // 查无凭据 → CredentialNotFound。
-        let missing = repo
-            .apply_password_change(
-                scope(t),
-                PasswordChangeMutation::for_test(1, cred("ghost", USER_ALICE, "x", 1, t)),
-            )
-            .await;
-        assert!(matches!(missing, Err(IdentityError::CredentialNotFound)));
     }
 
     #[tokio::test]
@@ -2242,57 +2150,6 @@ mod tests {
             )
             .await;
         assert!(matches!(failed_write, Err(IdentityError::Storage(_))));
-    }
-
-    #[tokio::test]
-    async fn authenticate_covers_every_durable_status_and_password_result_without_lockout_coupling()
-    {
-        for status in [
-            AccountStatus::Active,
-            AccountStatus::Suspended,
-            AccountStatus::Locked,
-            AccountStatus::Deactivated,
-        ] {
-            for (password, correct) in [("correct", true), ("wrong", false)] {
-                let tenant = tid(TENANT_A);
-                let user = uid(USER_ALICE);
-                let repo =
-                    InMemCredentialRepo::with_seed_credential("alice", user, "correct", tenant)
-                        .expect("seed");
-                if status != AccountStatus::Active {
-                    let state = AccountSecurityReadRepo::find(&repo, scope(tenant), user)
-                        .await
-                        .expect("read security")
-                        .expect("security state");
-                    let mutation = state
-                        .transition(status, epoch(1_001))
-                        .expect("active may enter every non-active state");
-                    AccountSecurityLifecycle::apply_transition(&repo, scope(tenant), mutation)
-                        .await
-                        .expect("persist lifecycle state");
-                }
-
-                let outcome = repo
-                    .authenticate(scope(tenant), lid("alice"), raw(password), epoch(1_002))
-                    .await
-                    .expect("authenticate");
-                if status == AccountStatus::Active && correct {
-                    assert!(matches!(
-                        outcome,
-                        AuthOutcome::Authenticated(ref state)
-                            if state.status() == AccountStatus::Active
-                    ));
-                    assert_eq!(repo.lockout_len(), 0);
-                } else {
-                    assert_eq!(outcome, AuthOutcome::RejectedKnown);
-                    assert_eq!(
-                        repo.lockout_len(),
-                        usize::from(status == AccountStatus::Active),
-                        "{status:?} with password result {correct} must not couple lifecycle to temporary lockout"
-                    );
-                }
-            }
-        }
     }
 
     #[tokio::test]

@@ -141,8 +141,7 @@ impl PgStore {
                    relay_publish_timeout_ms,
                    relay_settle_timeout_ms,
                    relay_safety_margin_ms
-            FROM event_delivery_policy
-            WHERE singleton
+            FROM rss_load_event_delivery_policy()
             "#,
         )
         .fetch_all(&self.pool)

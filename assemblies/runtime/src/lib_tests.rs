@@ -746,20 +746,10 @@ impl identity::ports::CredentialRepo for UnusedCredentialRepo {
         ))
     }
 
-    async fn save(
+    async fn insert(
         &self,
         _scope: IdentityTenantRepoScope,
         _credential: identity::ports::Credential,
-    ) -> Result<(), identity::ports::IdentityError> {
-        Err(identity_storage_error(
-            "runtime test credential repo is read-only",
-        ))
-    }
-
-    async fn apply_password_change(
-        &self,
-        _scope: IdentityTenantRepoScope,
-        _mutation: identity::ports::PasswordChangeMutation,
     ) -> Result<(), identity::ports::IdentityError> {
         Err(identity_storage_error(
             "runtime test credential repo is read-only",
@@ -776,6 +766,66 @@ impl identity::ports::AccountSecurityReadRepo for UnusedAccountSecurityRepo {
         _user_id: ids::UserId,
     ) -> Result<Option<identity::ports::AccountSecurityState>, identity::ports::IdentityError> {
         Ok(None)
+    }
+}
+
+struct FailingIdentitySecurityLifecycle;
+
+impl identity::ports::IdentitySecurityLifecycle for FailingIdentitySecurityLifecycle {
+    async fn execute_password_change(
+        &self,
+        _receipt: identity::ports::PasswordChangeProducerReceipt,
+        _scope: IdentityTenantRepoScope,
+        _command: identity::ports::PasswordChangeCommand,
+    ) -> Result<identity::ports::CredentialSecurityReceipt, identity::ports::IdentityError> {
+        Err(identity_storage_error(
+            "runtime test identity security lifecycle must not be called",
+        ))
+    }
+
+    async fn execute_account_status_set(
+        &self,
+        _receipt: identity::ports::AccountStatusSetProducerReceipt,
+        _scope: IdentityTenantRepoScope,
+        _command: identity::ports::AccountStatusSetCommand,
+    ) -> Result<identity::ports::CredentialSecurityReceipt, identity::ports::IdentityError> {
+        Err(identity_storage_error(
+            "runtime test identity security lifecycle must not be called",
+        ))
+    }
+
+    async fn execute_logout_current(
+        &self,
+        _receipt: identity::ports::LogoutCurrentProducerReceipt,
+        _scope: IdentityTenantRepoScope,
+        _command: identity::ports::LogoutCurrentCommand,
+    ) -> Result<identity::ports::CredentialSecurityReceipt, identity::ports::IdentityError> {
+        Err(identity_storage_error(
+            "runtime test identity security lifecycle must not be called",
+        ))
+    }
+
+    async fn execute_logout_all(
+        &self,
+        _receipt: identity::ports::LogoutAllProducerReceipt,
+        _scope: IdentityTenantRepoScope,
+        _command: identity::ports::LogoutAllCommand,
+    ) -> Result<identity::ports::CredentialSecurityReceipt, identity::ports::IdentityError> {
+        Err(identity_storage_error(
+            "runtime test identity security lifecycle must not be called",
+        ))
+    }
+}
+
+impl identity::ports::AccountReactivationLifecycle for FailingIdentitySecurityLifecycle {
+    async fn execute_reactivation(
+        &self,
+        _scope: IdentityTenantRepoScope,
+        _command: identity::ports::ReactivateAccountCommand,
+    ) -> Result<identity::ports::AccountSecurityState, identity::ports::IdentityError> {
+        Err(identity_storage_error(
+            "runtime test identity security lifecycle must not be called",
+        ))
     }
 }
 
@@ -980,17 +1030,13 @@ fn test_identity_domain_with_audit_role(
         Duration::from_secs(900),
     );
     let refresh = auth_grants.refresh_service();
+    let credential_security_grants = auth_grants.lifecycle();
+    let credentials = Arc::from(identity::ports::DynCredentialRepo::new_box(
+        UnusedCredentialRepo,
+    ));
     let login = Arc::new(identity::LoginService::new(
-        Arc::from(identity::ports::DynCredentialRepo::new_box(
-            UnusedCredentialRepo,
-        )),
+        Arc::clone(&credentials),
         auth_grants,
-        secure::PasswordPolicy::new(Arc::new(
-            crypto::load_password_blocklist_from_reader(std::io::Cursor::new(include_bytes!(
-                "../../../deploy/password-blocklist.demo.sha256"
-            )))
-            .expect("embedded runtime test blocklist"),
-        )),
         Box::new(SystemClock),
         Duration::from_secs(900),
     ));
@@ -1011,12 +1057,20 @@ fn test_identity_domain_with_audit_role(
         policy_lifecycle,
         Box::new(SystemClock),
     ));
-    let credential_security = Arc::new(
-        identity::CredentialSecurityService::inert_for_non_logout_tests(
-            &login,
-            Box::new(SystemClock),
-        ),
-    );
+    let credential_security = Arc::new(identity::CredentialSecurityService::new(
+        credentials,
+        credential_security_grants,
+        identity::ports::DynAccountSecurityReadRepo::new_box(UnusedAccountSecurityRepo),
+        FailingIdentitySecurityLifecycle,
+        FailingIdentitySecurityLifecycle,
+        secure::PasswordPolicy::new(Arc::new(
+            crypto::load_password_blocklist_from_reader(std::io::Cursor::new(include_bytes!(
+                "../../../deploy/password-blocklist.demo.sha256"
+            )))
+            .expect("embedded runtime test blocklist"),
+        )),
+        Box::new(SystemClock),
+    ));
     identity::IdentityDomain::new(identity::IdentityDomainDeps {
         login,
         refresh,

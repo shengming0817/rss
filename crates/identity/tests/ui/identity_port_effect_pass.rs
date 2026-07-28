@@ -5,11 +5,10 @@ use diport::{
     PortPrivilegeClass, ReadEffect,
 };
 use identity::ports::{
-    DynAccountSecurityLifecycle, DynAccountSecurityReadRepo, DynAuthGrantLifecycle,
-    DynCredentialRepo, DynIdentitySecurityLifecycle, DynPolicyLifecycle, DynPolicyRepo,
-    DynRefreshTokenStore, DynResourceAttributeReadRepo,
-    DynResourceAttributeWriteRepo, DynRoleBindingLifecycle, DynRoleBindingReadRepo,
-    DynRoleReadRepo, DynRoleWriteRepo, IdentityPortEffect,
+    DynAccountReactivationLifecycle, DynAccountSecurityReadRepo, DynAuthGrantLifecycle, DynCredentialRepo,
+    DynIdentitySecurityLifecycle, DynPolicyLifecycle, DynPolicyRepo, DynRefreshTokenStore,
+    DynResourceAttributeReadRepo, DynResourceAttributeWriteRepo, DynRoleBindingLifecycle,
+    DynRoleBindingReadRepo, DynRoleReadRepo, DynRoleWriteRepo, IdentityPortEffect,
 };
 
 fn assert_effect<T, E, P>()
@@ -29,7 +28,6 @@ fn main() {
     assert_effect::<DynRoleBindingReadRepo<'static>, AuthEffect, LocalPrivilege>();
     assert_effect::<DynRoleWriteRepo<'static>, BusinessWriteEffect, LocalPrivilege>();
     assert_effect::<DynAccountSecurityReadRepo<'static>, AuthEffect, LocalPrivilege>();
-    assert_effect::<DynAccountSecurityLifecycle<'static>, BusinessWriteEffect, LocalPrivilege>();
     assert_effect::<DynCredentialRepo<'static>, BusinessWriteEffect, LocalPrivilege>();
     assert_effect::<DynRefreshTokenStore<'static>, BusinessWriteEffect, LocalPrivilege>();
 
@@ -37,6 +35,7 @@ fn main() {
     assert_effect::<DynRoleBindingLifecycle<'static>, OutboxEffect, LocalPrivilege>();
     assert_effect::<DynAuthGrantLifecycle<'static>, OutboxEffect, LocalPrivilege>();
     assert_effect::<DynIdentitySecurityLifecycle<'static>, OutboxEffect, LocalPrivilege>();
+    assert_effect::<DynAccountReactivationLifecycle<'static>, BusinessWriteEffect, LocalPrivilege>();
     assert_effect::<Arc<DynPolicyRepo<'static>>, AuthEffect, LocalPrivilege>();
     assert_effect::<Box<DynRoleReadRepo<'static>>, ReadEffect, LocalPrivilege>();
 }

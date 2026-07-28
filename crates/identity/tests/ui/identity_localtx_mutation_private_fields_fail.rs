@@ -1,8 +1,6 @@
 //! INVARIANT: IDENTITY-LOCALTX-COMMAND-01 { level = "Hard", exec = "verify", source = "trybuild" }
 
-use identity::ports::{
-    AuthGrantCloseCommand, LoginGrantMutation, PasswordChangeMutation,
-};
+use identity::ports::{AuthGrantCloseCommand, LoginGrantMutation};
 
 fn value<T>() -> T {
     panic!("compile-fail fixture")
@@ -16,11 +14,6 @@ fn main() {
     };
     let _logout = AuthGrantCloseCommand {
         mutation: value(),
-        observation: value(),
-    };
-    let _password = PasswordChangeMutation {
-        expected: 1,
-        next: value(),
         observation: value(),
     };
 }

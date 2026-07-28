@@ -2390,6 +2390,7 @@ fn generated_terminal_module(path: &syn::Path, terminal: &str) -> Option<Vec<Str
 
 fn canonical_receipt_operation(expression: &Expr) -> Option<(String, Vec<String>)> {
     enum PathReplacement {
+        IdentityAccount,
         IdentityPolicy,
         SettingsKey,
     }
@@ -2431,6 +2432,18 @@ fn canonical_receipt_operation(expression: &Expr) -> Option<(String, Vec<String>
             if replace.method == "replace"
                 && replace.args.len() == 2
                 && replace.turbofish.is_none()
+                && string_literal_is(replace.args.first(), "{userId}")
+                && string_literal_is(
+                    replace.args.iter().nth(1),
+                    "11111111-2222-4333-8444-555555555555",
+                ) =>
+        {
+            (&*replace.receiver, Some(PathReplacement::IdentityAccount))
+        }
+        Expr::MethodCall(replace)
+            if replace.method == "replace"
+                && replace.args.len() == 2
+                && replace.turbofish.is_none()
                 && string_literal_is(replace.args.first(), "{policyId}")
                 && string_literal_is(replace.args.iter().nth(1), "policy-a") =>
         {
@@ -2464,6 +2477,11 @@ fn canonical_receipt_operation(expression: &Expr) -> Option<(String, Vec<String>
     };
     let module = generated_terminal_module(&spec.path, "SPEC")?;
     match replacement {
+        Some(PathReplacement::IdentityAccount)
+            if module != ["identity_v1", "account_status_get"] =>
+        {
+            return None;
+        }
         Some(PathReplacement::IdentityPolicy) if module != ["identity_v1", "policies_get"] => {
             return None;
         }
@@ -2641,6 +2659,9 @@ fn canonical_identity_router_layer(local: &syn::Local, router: &str) -> bool {
     let rss_access = expression_path_is(
         authenticated.args.first(),
         &["primitives", "RequiredScheme", "RssAccessToken"],
+    ) || expression_path_is(
+        authenticated.args.first(),
+        &["primitives", "RequiredScheme", "FederatedAccessToken"],
     );
     let identity = authenticated.args.iter().nth(1).is_some_and(|principal| {
         expression_path_is(Some(principal), &["vocab", "PrincipalKind", "User"])
@@ -2840,7 +2861,10 @@ fn identity_local_only_receipt_module(module: &[String]) -> bool {
         module,
         [api, route]
             if api == "identity_v1"
-                && matches!(route.as_str(), "roles_list" | "policies_get" | "policies_list")
+                && matches!(
+                    route.as_str(),
+                    "account_status_get" | "roles_list" | "policies_get" | "policies_list"
+                )
     )
 }
 

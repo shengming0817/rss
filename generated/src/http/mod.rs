@@ -63,6 +63,8 @@ pub mod settings_v7;
 pub const SPECS: &[HttpSpec] = &[
     audit_v1::list_entries::SPEC,
     audit_v1::list_tenant_entries::SPEC,
+    identity_v1::account_status_get::SPEC,
+    identity_v1::account_status_set::SPEC,
     identity_v1::login::SPEC,
     identity_v1::logout::SPEC,
     identity_v1::logout_all::SPEC,
@@ -89,6 +91,7 @@ pub const SPECS: &[HttpSpec] = &[
 /// Root registry for active LocalOnly HTTP specs generated from `consistencyLevel = "LocalOnly"`.
 pub const LOCAL_ONLY_SPECS: &[HttpSpec] = &[
     audit_v1::list_entries::SPEC,
+    identity_v1::account_status_get::SPEC,
     identity_v1::policies_get::SPEC,
     identity_v1::policies_list::SPEC,
     identity_v1::profile::SPEC,
@@ -101,16 +104,17 @@ pub const LOCAL_ONLY_SPECS: &[HttpSpec] = &[
 /// Root registry for active LocalTx HTTP specs generated from `consistencyLevel = "LocalTx"`.
 pub const LOCAL_TX_SPECS: &[HttpSpec] = &[
     audit_v1::list_tenant_entries::SPEC,
-    identity_v1::password_change::SPEC,
     identity_v1::refresh::SPEC,
     settings_v2::SPEC,
 ];
 
 /// Closed registry of every active OutboxFact HTTP producer and its exact generated fact set.
 pub const OUTBOX_PRODUCERS: &[::vocab::http::HttpProducerEvidence] = &[
+    identity_v1::account_status_set::PRODUCER.evidence(),
     identity_v1::login::PRODUCER.evidence(),
     identity_v1::logout::PRODUCER.evidence(),
     identity_v1::logout_all::PRODUCER.evidence(),
+    identity_v1::password_change::PRODUCER.evidence(),
     identity_v1::policies_create::PRODUCER.evidence(),
     identity_v1::policies_deactivate::PRODUCER.evidence(),
     identity_v1::policies_update::PRODUCER.evidence(),

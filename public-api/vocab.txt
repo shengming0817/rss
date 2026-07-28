@@ -92,6 +92,8 @@ pub vocab::authz::RoutePermissionId::AuditFieldActor
 pub vocab::authz::RoutePermissionId::AuditFieldResourceId
 pub vocab::authz::RoutePermissionId::AuditFieldTenantId
 pub vocab::authz::RoutePermissionId::AuditRead
+pub vocab::authz::RoutePermissionId::IdentityAccountSecurityRead
+pub vocab::authz::RoutePermissionId::IdentityAccountSecurityWrite
 pub vocab::authz::RoutePermissionId::IdentityPolicyCreate
 pub vocab::authz::RoutePermissionId::IdentityPolicyDeactivate
 pub vocab::authz::RoutePermissionId::IdentityPolicyRead
@@ -106,6 +108,7 @@ pub vocab::authz::RoutePermissionId::IdentityRoleRevoke
 pub vocab::authz::RoutePermissionId::IdentitySessionLogoutAll
 pub vocab::authz::RoutePermissionId::IdentitySessionLogoutCurrent
 pub vocab::authz::RoutePermissionId::MtlsInvoke
+pub vocab::authz::RoutePermissionId::RuntimeInventoryRead
 pub vocab::authz::RoutePermissionId::SettingsConfigDelete
 pub vocab::authz::RoutePermissionId::SettingsConfigGet
 pub vocab::authz::RoutePermissionId::SettingsConfigPublish
@@ -549,6 +552,25 @@ impl core::marker::Unpin for vocab::http::HttpIdempotency
 impl core::marker::UnsafeUnpin for vocab::http::HttpIdempotency
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::http::HttpIdempotency
 impl core::panic::unwind_safe::UnwindSafe for vocab::http::HttpIdempotency
+pub enum vocab::http::HttpResourceSharing
+pub vocab::http::HttpResourceSharing::Global
+pub vocab::http::HttpResourceSharing::TenantScoped
+impl core::clone::Clone for vocab::http::HttpResourceSharing
+pub fn vocab::http::HttpResourceSharing::clone(&self) -> vocab::http::HttpResourceSharing
+impl core::cmp::Eq for vocab::http::HttpResourceSharing
+impl core::cmp::PartialEq for vocab::http::HttpResourceSharing
+pub fn vocab::http::HttpResourceSharing::eq(&self, &vocab::http::HttpResourceSharing) -> bool
+impl core::fmt::Debug for vocab::http::HttpResourceSharing
+pub fn vocab::http::HttpResourceSharing::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for vocab::http::HttpResourceSharing
+impl core::marker::StructuralPartialEq for vocab::http::HttpResourceSharing
+impl core::marker::Freeze for vocab::http::HttpResourceSharing
+impl core::marker::Send for vocab::http::HttpResourceSharing
+impl core::marker::Sync for vocab::http::HttpResourceSharing
+impl core::marker::Unpin for vocab::http::HttpResourceSharing
+impl core::marker::UnsafeUnpin for vocab::http::HttpResourceSharing
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::http::HttpResourceSharing
+impl core::panic::unwind_safe::UnwindSafe for vocab::http::HttpResourceSharing
 pub enum vocab::http::HttpRouteAuth
 pub vocab::http::HttpRouteAuth::Bootstrap
 pub vocab::http::HttpRouteAuth::ClientsOnly
@@ -759,7 +781,7 @@ impl core::panic::unwind_safe::UnwindSafe for vocab::http::HttpProducerEvidence
 pub struct vocab::http::HttpRouteBinding<M, C>
 impl<M, C: vocab::http::HttpConsistencyClass> vocab::http::HttpRouteBinding<M, C>
 pub const fn vocab::http::HttpRouteBinding<M, C>::evidence(&self) -> vocab::http::HttpRouteEvidence
-pub const fn vocab::http::HttpRouteBinding<M, C>::from_static(vocab::http::HttpContractOwner, vocab::contract::binding::ContractBinding, &'static str, &'static str, vocab::http::HttpSuccessStatus, vocab::http::HttpIdempotency, vocab::http::HttpRouteAuth, core::option::Option<&'static str>, bool, vocab::http::HttpEffectProfile) -> Self
+pub const fn vocab::http::HttpRouteBinding<M, C>::from_static(vocab::http::HttpContractOwner, vocab::contract::binding::ContractBinding, &'static str, &'static str, vocab::http::HttpSuccessStatus, vocab::http::HttpIdempotency, vocab::http::HttpRouteAuth, core::option::Option<&'static str>, bool, vocab::http::HttpResourceSharing, vocab::http::HttpEffectProfile) -> Self
 impl<M, C> core::clone::Clone for vocab::http::HttpRouteBinding<M, C>
 pub fn vocab::http::HttpRouteBinding<M, C>::clone(&self) -> Self
 impl<M, C> core::marker::Copy for vocab::http::HttpRouteBinding<M, C>
@@ -777,12 +799,13 @@ pub const fn vocab::http::HttpRouteEvidence::consistency_level(&self) -> vocab::
 pub const fn vocab::http::HttpRouteEvidence::contract(&self) -> vocab::contract::binding::ContractBinding
 pub const fn vocab::http::HttpRouteEvidence::contract_id(&self) -> &'static str
 pub const fn vocab::http::HttpRouteEvidence::effect_profile(&self) -> vocab::http::HttpEffectProfile
-pub const fn vocab::http::HttpRouteEvidence::from_static(vocab::http::HttpContractOwner, vocab::contract::binding::ContractBinding, &'static str, &'static str, vocab::http::HttpSuccessStatus, vocab::http::HttpIdempotency, vocab::http::HttpRouteAuth, core::option::Option<&'static str>, bool, vocab::http::HttpConsistencyLevel, vocab::http::HttpEffectProfile) -> Self
+pub const fn vocab::http::HttpRouteEvidence::from_static(vocab::http::HttpContractOwner, vocab::contract::binding::ContractBinding, &'static str, &'static str, vocab::http::HttpSuccessStatus, vocab::http::HttpIdempotency, vocab::http::HttpRouteAuth, core::option::Option<&'static str>, bool, vocab::http::HttpResourceSharing, vocab::http::HttpConsistencyLevel, vocab::http::HttpEffectProfile) -> Self
 pub const fn vocab::http::HttpRouteEvidence::idempotency(&self) -> vocab::http::HttpIdempotency
 pub const fn vocab::http::HttpRouteEvidence::method(&self) -> &'static str
 pub const fn vocab::http::HttpRouteEvidence::owner(&self) -> vocab::http::HttpContractOwner
 pub const fn vocab::http::HttpRouteEvidence::path(&self) -> &'static str
 pub const fn vocab::http::HttpRouteEvidence::resource(&self) -> core::option::Option<&'static str>
+pub const fn vocab::http::HttpRouteEvidence::resource_sharing(&self) -> vocab::http::HttpResourceSharing
 pub const fn vocab::http::HttpRouteEvidence::self_scoped(&self) -> bool
 pub const fn vocab::http::HttpRouteEvidence::success_status(&self) -> vocab::http::HttpSuccessStatus
 impl core::clone::Clone for vocab::http::HttpRouteEvidence
@@ -1206,6 +1229,60 @@ impl core::marker::Unpin for vocab::tenant::TenantId
 impl core::marker::UnsafeUnpin for vocab::tenant::TenantId
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::tenant::TenantId
 impl core::panic::unwind_safe::UnwindSafe for vocab::tenant::TenantId
+pub mod vocab::time
+pub enum vocab::time::UnixEpochSecondsError
+pub vocab::time::UnixEpochSecondsError::BeforeEpoch
+pub vocab::time::UnixEpochSecondsError::Overflow
+impl core::clone::Clone for vocab::time::UnixEpochSecondsError
+pub fn vocab::time::UnixEpochSecondsError::clone(&self) -> vocab::time::UnixEpochSecondsError
+impl core::cmp::Eq for vocab::time::UnixEpochSecondsError
+impl core::cmp::PartialEq for vocab::time::UnixEpochSecondsError
+pub fn vocab::time::UnixEpochSecondsError::eq(&self, &vocab::time::UnixEpochSecondsError) -> bool
+impl core::error::Error for vocab::time::UnixEpochSecondsError
+impl core::fmt::Debug for vocab::time::UnixEpochSecondsError
+pub fn vocab::time::UnixEpochSecondsError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for vocab::time::UnixEpochSecondsError
+pub fn vocab::time::UnixEpochSecondsError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for vocab::time::UnixEpochSecondsError
+impl core::marker::StructuralPartialEq for vocab::time::UnixEpochSecondsError
+impl core::marker::Freeze for vocab::time::UnixEpochSecondsError
+impl core::marker::Send for vocab::time::UnixEpochSecondsError
+impl core::marker::Sync for vocab::time::UnixEpochSecondsError
+impl core::marker::Unpin for vocab::time::UnixEpochSecondsError
+impl core::marker::UnsafeUnpin for vocab::time::UnixEpochSecondsError
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::time::UnixEpochSecondsError
+impl core::panic::unwind_safe::UnwindSafe for vocab::time::UnixEpochSecondsError
+pub struct vocab::time::UnixEpochSeconds(_)
+impl vocab::time::UnixEpochSeconds
+pub const fn vocab::time::UnixEpochSeconds::get(self) -> i64
+pub fn vocab::time::UnixEpochSeconds::to_system_time(self) -> core::result::Result<std::time::SystemTime, vocab::time::UnixEpochSecondsError>
+pub fn vocab::time::UnixEpochSeconds::try_from_duration(core::time::Duration) -> core::result::Result<Self, vocab::time::UnixEpochSecondsError>
+impl core::clone::Clone for vocab::time::UnixEpochSeconds
+pub fn vocab::time::UnixEpochSeconds::clone(&self) -> vocab::time::UnixEpochSeconds
+impl core::cmp::Eq for vocab::time::UnixEpochSeconds
+impl core::cmp::Ord for vocab::time::UnixEpochSeconds
+pub fn vocab::time::UnixEpochSeconds::cmp(&self, &vocab::time::UnixEpochSeconds) -> core::cmp::Ordering
+impl core::cmp::PartialEq for vocab::time::UnixEpochSeconds
+pub fn vocab::time::UnixEpochSeconds::eq(&self, &vocab::time::UnixEpochSeconds) -> bool
+impl core::cmp::PartialOrd for vocab::time::UnixEpochSeconds
+pub fn vocab::time::UnixEpochSeconds::partial_cmp(&self, &vocab::time::UnixEpochSeconds) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::TryFrom<i64> for vocab::time::UnixEpochSeconds
+pub type vocab::time::UnixEpochSeconds::Error = vocab::time::UnixEpochSecondsError
+pub fn vocab::time::UnixEpochSeconds::try_from(i64) -> core::result::Result<Self, Self::Error>
+impl core::convert::TryFrom<std::time::SystemTime> for vocab::time::UnixEpochSeconds
+pub type vocab::time::UnixEpochSeconds::Error = vocab::time::UnixEpochSecondsError
+pub fn vocab::time::UnixEpochSeconds::try_from(std::time::SystemTime) -> core::result::Result<Self, Self::Error>
+impl core::fmt::Debug for vocab::time::UnixEpochSeconds
+pub fn vocab::time::UnixEpochSeconds::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for vocab::time::UnixEpochSeconds
+impl core::marker::StructuralPartialEq for vocab::time::UnixEpochSeconds
+impl core::marker::Freeze for vocab::time::UnixEpochSeconds
+impl core::marker::Send for vocab::time::UnixEpochSeconds
+impl core::marker::Sync for vocab::time::UnixEpochSeconds
+impl core::marker::Unpin for vocab::time::UnixEpochSeconds
+impl core::marker::UnsafeUnpin for vocab::time::UnixEpochSeconds
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::time::UnixEpochSeconds
+impl core::panic::unwind_safe::UnwindSafe for vocab::time::UnixEpochSeconds
 #[non_exhaustive] pub enum vocab::ActionError
 pub vocab::ActionError::Empty
 pub vocab::ActionError::Format
@@ -1662,6 +1739,8 @@ pub vocab::RoutePermissionId::AuditFieldActor
 pub vocab::RoutePermissionId::AuditFieldResourceId
 pub vocab::RoutePermissionId::AuditFieldTenantId
 pub vocab::RoutePermissionId::AuditRead
+pub vocab::RoutePermissionId::IdentityAccountSecurityRead
+pub vocab::RoutePermissionId::IdentityAccountSecurityWrite
 pub vocab::RoutePermissionId::IdentityPolicyCreate
 pub vocab::RoutePermissionId::IdentityPolicyDeactivate
 pub vocab::RoutePermissionId::IdentityPolicyRead
@@ -1676,6 +1755,7 @@ pub vocab::RoutePermissionId::IdentityRoleRevoke
 pub vocab::RoutePermissionId::IdentitySessionLogoutAll
 pub vocab::RoutePermissionId::IdentitySessionLogoutCurrent
 pub vocab::RoutePermissionId::MtlsInvoke
+pub vocab::RoutePermissionId::RuntimeInventoryRead
 pub vocab::RoutePermissionId::SettingsConfigDelete
 pub vocab::RoutePermissionId::SettingsConfigGet
 pub vocab::RoutePermissionId::SettingsConfigPublish
@@ -1795,6 +1875,28 @@ impl core::marker::Unpin for vocab::tenant::TenantIdError
 impl core::marker::UnsafeUnpin for vocab::tenant::TenantIdError
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::tenant::TenantIdError
 impl core::panic::unwind_safe::UnwindSafe for vocab::tenant::TenantIdError
+pub enum vocab::UnixEpochSecondsError
+pub vocab::UnixEpochSecondsError::BeforeEpoch
+pub vocab::UnixEpochSecondsError::Overflow
+impl core::clone::Clone for vocab::time::UnixEpochSecondsError
+pub fn vocab::time::UnixEpochSecondsError::clone(&self) -> vocab::time::UnixEpochSecondsError
+impl core::cmp::Eq for vocab::time::UnixEpochSecondsError
+impl core::cmp::PartialEq for vocab::time::UnixEpochSecondsError
+pub fn vocab::time::UnixEpochSecondsError::eq(&self, &vocab::time::UnixEpochSecondsError) -> bool
+impl core::error::Error for vocab::time::UnixEpochSecondsError
+impl core::fmt::Debug for vocab::time::UnixEpochSecondsError
+pub fn vocab::time::UnixEpochSecondsError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for vocab::time::UnixEpochSecondsError
+pub fn vocab::time::UnixEpochSecondsError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for vocab::time::UnixEpochSecondsError
+impl core::marker::StructuralPartialEq for vocab::time::UnixEpochSecondsError
+impl core::marker::Freeze for vocab::time::UnixEpochSecondsError
+impl core::marker::Send for vocab::time::UnixEpochSecondsError
+impl core::marker::Sync for vocab::time::UnixEpochSecondsError
+impl core::marker::Unpin for vocab::time::UnixEpochSecondsError
+impl core::marker::UnsafeUnpin for vocab::time::UnixEpochSecondsError
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::time::UnixEpochSecondsError
+impl core::panic::unwind_safe::UnwindSafe for vocab::time::UnixEpochSecondsError
 pub struct vocab::Action(_)
 impl vocab::authz::Action
 pub fn vocab::authz::Action::as_str(&self) -> &str
@@ -2018,7 +2120,7 @@ impl core::panic::unwind_safe::UnwindSafe for vocab::http::HttpEffectProfile
 pub struct vocab::HttpRouteBinding<M, C>
 impl<M, C: vocab::http::HttpConsistencyClass> vocab::http::HttpRouteBinding<M, C>
 pub const fn vocab::http::HttpRouteBinding<M, C>::evidence(&self) -> vocab::http::HttpRouteEvidence
-pub const fn vocab::http::HttpRouteBinding<M, C>::from_static(vocab::http::HttpContractOwner, vocab::contract::binding::ContractBinding, &'static str, &'static str, vocab::http::HttpSuccessStatus, vocab::http::HttpIdempotency, vocab::http::HttpRouteAuth, core::option::Option<&'static str>, bool, vocab::http::HttpEffectProfile) -> Self
+pub const fn vocab::http::HttpRouteBinding<M, C>::from_static(vocab::http::HttpContractOwner, vocab::contract::binding::ContractBinding, &'static str, &'static str, vocab::http::HttpSuccessStatus, vocab::http::HttpIdempotency, vocab::http::HttpRouteAuth, core::option::Option<&'static str>, bool, vocab::http::HttpResourceSharing, vocab::http::HttpEffectProfile) -> Self
 impl<M, C> core::clone::Clone for vocab::http::HttpRouteBinding<M, C>
 pub fn vocab::http::HttpRouteBinding<M, C>::clone(&self) -> Self
 impl<M, C> core::marker::Copy for vocab::http::HttpRouteBinding<M, C>
@@ -2036,12 +2138,13 @@ pub const fn vocab::http::HttpRouteEvidence::consistency_level(&self) -> vocab::
 pub const fn vocab::http::HttpRouteEvidence::contract(&self) -> vocab::contract::binding::ContractBinding
 pub const fn vocab::http::HttpRouteEvidence::contract_id(&self) -> &'static str
 pub const fn vocab::http::HttpRouteEvidence::effect_profile(&self) -> vocab::http::HttpEffectProfile
-pub const fn vocab::http::HttpRouteEvidence::from_static(vocab::http::HttpContractOwner, vocab::contract::binding::ContractBinding, &'static str, &'static str, vocab::http::HttpSuccessStatus, vocab::http::HttpIdempotency, vocab::http::HttpRouteAuth, core::option::Option<&'static str>, bool, vocab::http::HttpConsistencyLevel, vocab::http::HttpEffectProfile) -> Self
+pub const fn vocab::http::HttpRouteEvidence::from_static(vocab::http::HttpContractOwner, vocab::contract::binding::ContractBinding, &'static str, &'static str, vocab::http::HttpSuccessStatus, vocab::http::HttpIdempotency, vocab::http::HttpRouteAuth, core::option::Option<&'static str>, bool, vocab::http::HttpResourceSharing, vocab::http::HttpConsistencyLevel, vocab::http::HttpEffectProfile) -> Self
 pub const fn vocab::http::HttpRouteEvidence::idempotency(&self) -> vocab::http::HttpIdempotency
 pub const fn vocab::http::HttpRouteEvidence::method(&self) -> &'static str
 pub const fn vocab::http::HttpRouteEvidence::owner(&self) -> vocab::http::HttpContractOwner
 pub const fn vocab::http::HttpRouteEvidence::path(&self) -> &'static str
 pub const fn vocab::http::HttpRouteEvidence::resource(&self) -> core::option::Option<&'static str>
+pub const fn vocab::http::HttpRouteEvidence::resource_sharing(&self) -> vocab::http::HttpResourceSharing
 pub const fn vocab::http::HttpRouteEvidence::self_scoped(&self) -> bool
 pub const fn vocab::http::HttpRouteEvidence::success_status(&self) -> vocab::http::HttpSuccessStatus
 impl core::clone::Clone for vocab::http::HttpRouteEvidence
@@ -2236,6 +2339,37 @@ impl core::marker::Unpin for vocab::tenant::TenantId
 impl core::marker::UnsafeUnpin for vocab::tenant::TenantId
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::tenant::TenantId
 impl core::panic::unwind_safe::UnwindSafe for vocab::tenant::TenantId
+pub struct vocab::UnixEpochSeconds(_)
+impl vocab::time::UnixEpochSeconds
+pub const fn vocab::time::UnixEpochSeconds::get(self) -> i64
+pub fn vocab::time::UnixEpochSeconds::to_system_time(self) -> core::result::Result<std::time::SystemTime, vocab::time::UnixEpochSecondsError>
+pub fn vocab::time::UnixEpochSeconds::try_from_duration(core::time::Duration) -> core::result::Result<Self, vocab::time::UnixEpochSecondsError>
+impl core::clone::Clone for vocab::time::UnixEpochSeconds
+pub fn vocab::time::UnixEpochSeconds::clone(&self) -> vocab::time::UnixEpochSeconds
+impl core::cmp::Eq for vocab::time::UnixEpochSeconds
+impl core::cmp::Ord for vocab::time::UnixEpochSeconds
+pub fn vocab::time::UnixEpochSeconds::cmp(&self, &vocab::time::UnixEpochSeconds) -> core::cmp::Ordering
+impl core::cmp::PartialEq for vocab::time::UnixEpochSeconds
+pub fn vocab::time::UnixEpochSeconds::eq(&self, &vocab::time::UnixEpochSeconds) -> bool
+impl core::cmp::PartialOrd for vocab::time::UnixEpochSeconds
+pub fn vocab::time::UnixEpochSeconds::partial_cmp(&self, &vocab::time::UnixEpochSeconds) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::TryFrom<i64> for vocab::time::UnixEpochSeconds
+pub type vocab::time::UnixEpochSeconds::Error = vocab::time::UnixEpochSecondsError
+pub fn vocab::time::UnixEpochSeconds::try_from(i64) -> core::result::Result<Self, Self::Error>
+impl core::convert::TryFrom<std::time::SystemTime> for vocab::time::UnixEpochSeconds
+pub type vocab::time::UnixEpochSeconds::Error = vocab::time::UnixEpochSecondsError
+pub fn vocab::time::UnixEpochSeconds::try_from(std::time::SystemTime) -> core::result::Result<Self, Self::Error>
+impl core::fmt::Debug for vocab::time::UnixEpochSeconds
+pub fn vocab::time::UnixEpochSeconds::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for vocab::time::UnixEpochSeconds
+impl core::marker::StructuralPartialEq for vocab::time::UnixEpochSeconds
+impl core::marker::Freeze for vocab::time::UnixEpochSeconds
+impl core::marker::Send for vocab::time::UnixEpochSeconds
+impl core::marker::Sync for vocab::time::UnixEpochSeconds
+impl core::marker::Unpin for vocab::time::UnixEpochSeconds
+impl core::marker::UnsafeUnpin for vocab::time::UnixEpochSeconds
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::time::UnixEpochSeconds
+impl core::panic::unwind_safe::UnwindSafe for vocab::time::UnixEpochSeconds
 pub const vocab::AUDIT_ACTOR_FIELD_OBLIGATION: &str
 pub const vocab::AUDIT_FIELD_ACTOR_PERMISSION: vocab::authz::RoutePermissionId
 pub const vocab::AUDIT_FIELD_RESOURCE_ID_PERMISSION: vocab::authz::RoutePermissionId

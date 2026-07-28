@@ -7,7 +7,12 @@ error[E0599]: no method named `insert` found for reference `&S` in the current s
    = help: items from traits can only be used if the type parameter is bounded by the trait
 help: the following traits define an item `insert`, perhaps you need to restrict type parameter `S` with one of them:
    |
+ 7 | async fn insert_initial<S: RefreshTokenStore + CredentialRepo>(
+   |                                              ++++++++++++++++
+ 7 | async fn insert_initial<S: RefreshTokenStore + CredentialRepoLocal>(
+   |                                              +++++++++++++++++++++
  7 | async fn insert_initial<S: RefreshTokenStore + bitflags::traits::Flags>(
    |                                              +++++++++++++++++++++++++
- 7 | async fn insert_initial<S: RefreshTokenStore + tonic::metadata::map::into_metadata_key::Sealed</* VE */>>(
-   |                                              +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 7 | async fn insert_initial<S: RefreshTokenStore + ports::__dynosaur_macro_dyncredentialrepo::ErasedCredentialRepo>(
+   |                                              +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+   = and 1 other candidate

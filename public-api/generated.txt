@@ -559,9 +559,56 @@ impl core::marker::Unpin for generated::event::identity_v1::security_event::erro
 impl core::marker::UnsafeUnpin for generated::event::identity_v1::security_event::error::ConversionError
 impl core::panic::unwind_safe::RefUnwindSafe for generated::event::identity_v1::security_event::error::ConversionError
 impl core::panic::unwind_safe::UnwindSafe for generated::event::identity_v1::security_event::error::ConversionError
+pub enum generated::event::identity_v1::security_event::IdentitySecurityEventPayloadActorKind
+pub generated::event::identity_v1::security_event::IdentitySecurityEventPayloadActorKind::Admin
+pub generated::event::identity_v1::security_event::IdentitySecurityEventPayloadActorKind::Device
+pub generated::event::identity_v1::security_event::IdentitySecurityEventPayloadActorKind::Service
+pub generated::event::identity_v1::security_event::IdentitySecurityEventPayloadActorKind::SuperAdmin
+pub generated::event::identity_v1::security_event::IdentitySecurityEventPayloadActorKind::User
+impl core::clone::Clone for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadActorKind
+pub fn generated::event::identity_v1::security_event::IdentitySecurityEventPayloadActorKind::clone(&self) -> generated::event::identity_v1::security_event::IdentitySecurityEventPayloadActorKind
+impl core::cmp::Eq for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadActorKind
+impl core::cmp::Ord for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadActorKind
+pub fn generated::event::identity_v1::security_event::IdentitySecurityEventPayloadActorKind::cmp(&self, &generated::event::identity_v1::security_event::IdentitySecurityEventPayloadActorKind) -> core::cmp::Ordering
+impl core::cmp::PartialEq for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadActorKind
+pub fn generated::event::identity_v1::security_event::IdentitySecurityEventPayloadActorKind::eq(&self, &generated::event::identity_v1::security_event::IdentitySecurityEventPayloadActorKind) -> bool
+impl core::cmp::PartialOrd for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadActorKind
+pub fn generated::event::identity_v1::security_event::IdentitySecurityEventPayloadActorKind::partial_cmp(&self, &generated::event::identity_v1::security_event::IdentitySecurityEventPayloadActorKind) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::TryFrom<&alloc::string::String> for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadActorKind
+pub type generated::event::identity_v1::security_event::IdentitySecurityEventPayloadActorKind::Error = generated::event::identity_v1::security_event::error::ConversionError
+pub fn generated::event::identity_v1::security_event::IdentitySecurityEventPayloadActorKind::try_from(&alloc::string::String) -> core::result::Result<Self, generated::event::identity_v1::security_event::error::ConversionError>
+impl core::convert::TryFrom<&str> for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadActorKind
+pub type generated::event::identity_v1::security_event::IdentitySecurityEventPayloadActorKind::Error = generated::event::identity_v1::security_event::error::ConversionError
+pub fn generated::event::identity_v1::security_event::IdentitySecurityEventPayloadActorKind::try_from(&str) -> core::result::Result<Self, generated::event::identity_v1::security_event::error::ConversionError>
+impl core::convert::TryFrom<alloc::string::String> for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadActorKind
+pub type generated::event::identity_v1::security_event::IdentitySecurityEventPayloadActorKind::Error = generated::event::identity_v1::security_event::error::ConversionError
+pub fn generated::event::identity_v1::security_event::IdentitySecurityEventPayloadActorKind::try_from(alloc::string::String) -> core::result::Result<Self, generated::event::identity_v1::security_event::error::ConversionError>
+impl core::fmt::Debug for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadActorKind
+pub fn generated::event::identity_v1::security_event::IdentitySecurityEventPayloadActorKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadActorKind
+pub fn generated::event::identity_v1::security_event::IdentitySecurityEventPayloadActorKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadActorKind
+pub fn generated::event::identity_v1::security_event::IdentitySecurityEventPayloadActorKind::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadActorKind
+impl core::marker::StructuralPartialEq for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadActorKind
+impl core::str::traits::FromStr for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadActorKind
+pub type generated::event::identity_v1::security_event::IdentitySecurityEventPayloadActorKind::Err = generated::event::identity_v1::security_event::error::ConversionError
+pub fn generated::event::identity_v1::security_event::IdentitySecurityEventPayloadActorKind::from_str(&str) -> core::result::Result<Self, generated::event::identity_v1::security_event::error::ConversionError>
+impl serde_core::ser::Serialize for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadActorKind
+pub fn generated::event::identity_v1::security_event::IdentitySecurityEventPayloadActorKind::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadActorKind
+pub fn generated::event::identity_v1::security_event::IdentitySecurityEventPayloadActorKind::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadActorKind
+impl core::marker::Send for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadActorKind
+impl core::marker::Sync for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadActorKind
+impl core::marker::Unpin for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadActorKind
+impl core::marker::UnsafeUnpin for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadActorKind
+impl core::panic::unwind_safe::RefUnwindSafe for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadActorKind
+impl core::panic::unwind_safe::UnwindSafe for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadActorKind
 pub enum generated::event::identity_v1::security_event::IdentitySecurityEventPayloadKind
 pub generated::event::identity_v1::security_event::IdentitySecurityEventPayloadKind::AccountDeactivated
 pub generated::event::identity_v1::security_event::IdentitySecurityEventPayloadKind::AccountLocked
+pub generated::event::identity_v1::security_event::IdentitySecurityEventPayloadKind::AccountReactivated
 pub generated::event::identity_v1::security_event::IdentitySecurityEventPayloadKind::AccountSuspended
 pub generated::event::identity_v1::security_event::IdentitySecurityEventPayloadKind::CredentialDeleted
 pub generated::event::identity_v1::security_event::IdentitySecurityEventPayloadKind::LogoutAll
@@ -653,6 +700,7 @@ impl core::marker::UnsafeUnpin for generated::event::identity_v1::security_event
 impl core::panic::unwind_safe::RefUnwindSafe for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadTargetKind
 impl core::panic::unwind_safe::UnwindSafe for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadTargetKind
 pub struct generated::event::identity_v1::security_event::IdentitySecurityEventPayload
+pub generated::event::identity_v1::security_event::IdentitySecurityEventPayload::actor: generated::event::identity_v1::security_event::IdentitySecurityEventPayloadActor
 pub generated::event::identity_v1::security_event::IdentitySecurityEventPayload::kind: generated::event::identity_v1::security_event::IdentitySecurityEventPayloadKind
 pub generated::event::identity_v1::security_event::IdentitySecurityEventPayload::occurred_at: i64
 pub generated::event::identity_v1::security_event::IdentitySecurityEventPayload::target: generated::event::identity_v1::security_event::IdentitySecurityEventPayloadTarget
@@ -676,7 +724,29 @@ impl core::marker::Unpin for generated::event::identity_v1::security_event::Iden
 impl core::marker::UnsafeUnpin for generated::event::identity_v1::security_event::IdentitySecurityEventPayload
 impl core::panic::unwind_safe::RefUnwindSafe for generated::event::identity_v1::security_event::IdentitySecurityEventPayload
 impl core::panic::unwind_safe::UnwindSafe for generated::event::identity_v1::security_event::IdentitySecurityEventPayload
+pub struct generated::event::identity_v1::security_event::IdentitySecurityEventPayloadActor
+pub generated::event::identity_v1::security_event::IdentitySecurityEventPayloadActor::key_id: core::num::nonzero::NonZeroU64
+pub generated::event::identity_v1::security_event::IdentitySecurityEventPayloadActor::kind: generated::event::identity_v1::security_event::IdentitySecurityEventPayloadActorKind
+pub generated::event::identity_v1::security_event::IdentitySecurityEventPayloadActor::ref_: uuid::Uuid
+impl core::clone::Clone for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadActor
+pub fn generated::event::identity_v1::security_event::IdentitySecurityEventPayloadActor::clone(&self) -> generated::event::identity_v1::security_event::IdentitySecurityEventPayloadActor
+impl core::fmt::Debug for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadActor
+pub fn generated::event::identity_v1::security_event::IdentitySecurityEventPayloadActor::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl secure::redaction::Redact for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadActor
+pub fn generated::event::identity_v1::security_event::IdentitySecurityEventPayloadActor::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
+impl serde_core::ser::Serialize for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadActor
+pub fn generated::event::identity_v1::security_event::IdentitySecurityEventPayloadActor::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadActor
+pub fn generated::event::identity_v1::security_event::IdentitySecurityEventPayloadActor::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadActor
+impl core::marker::Send for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadActor
+impl core::marker::Sync for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadActor
+impl core::marker::Unpin for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadActor
+impl core::marker::UnsafeUnpin for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadActor
+impl core::panic::unwind_safe::RefUnwindSafe for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadActor
+impl core::panic::unwind_safe::UnwindSafe for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadActor
 pub struct generated::event::identity_v1::security_event::IdentitySecurityEventPayloadTarget
+pub generated::event::identity_v1::security_event::IdentitySecurityEventPayloadTarget::key_id: core::num::nonzero::NonZeroU64
 pub generated::event::identity_v1::security_event::IdentitySecurityEventPayloadTarget::kind: generated::event::identity_v1::security_event::IdentitySecurityEventPayloadTargetKind
 pub generated::event::identity_v1::security_event::IdentitySecurityEventPayloadTarget::ref_: uuid::Uuid
 impl core::clone::Clone for generated::event::identity_v1::security_event::IdentitySecurityEventPayloadTarget
@@ -907,6 +977,7 @@ pub enum generated::event::SubscriptionDispatchKey
 pub generated::event::SubscriptionDispatchKey::IdentityPolicyUpdatedV1Audit
 pub generated::event::SubscriptionDispatchKey::IdentityRoleAssignedV1Audit
 pub generated::event::SubscriptionDispatchKey::IdentityRoleRevokedV1Audit
+pub generated::event::SubscriptionDispatchKey::IdentitySecurityEventV1Audit
 pub generated::event::SubscriptionDispatchKey::IdentitySessionCreatedV1Audit
 pub generated::event::SubscriptionDispatchKey::SettingsConfigVersionChangedV1Settings
 impl core::clone::Clone for generated::event::SubscriptionDispatchKey
@@ -1382,6 +1453,337 @@ impl core::panic::unwind_safe::UnwindSafe for generated::http::audit_v2::AuditSe
 pub const generated::http::audit_v2::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::http::audit_v2::CONTRACT_ID: &str
 pub mod generated::http::identity_v1
+pub mod generated::http::identity_v1::account_status_get
+pub mod generated::http::identity_v1::account_status_get::error
+pub struct generated::http::identity_v1::account_status_get::error::ConversionError(_)
+impl core::convert::From<&'static str> for generated::http::identity_v1::account_status_get::error::ConversionError
+pub fn generated::http::identity_v1::account_status_get::error::ConversionError::from(&'static str) -> Self
+impl core::convert::From<alloc::string::String> for generated::http::identity_v1::account_status_get::error::ConversionError
+pub fn generated::http::identity_v1::account_status_get::error::ConversionError::from(alloc::string::String) -> Self
+impl core::error::Error for generated::http::identity_v1::account_status_get::error::ConversionError
+impl core::fmt::Debug for generated::http::identity_v1::account_status_get::error::ConversionError
+pub fn generated::http::identity_v1::account_status_get::error::ConversionError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::result::Result<(), core::fmt::Error>
+impl core::fmt::Display for generated::http::identity_v1::account_status_get::error::ConversionError
+pub fn generated::http::identity_v1::account_status_get::error::ConversionError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::result::Result<(), core::fmt::Error>
+impl core::marker::Freeze for generated::http::identity_v1::account_status_get::error::ConversionError
+impl core::marker::Send for generated::http::identity_v1::account_status_get::error::ConversionError
+impl core::marker::Sync for generated::http::identity_v1::account_status_get::error::ConversionError
+impl core::marker::Unpin for generated::http::identity_v1::account_status_get::error::ConversionError
+impl core::marker::UnsafeUnpin for generated::http::identity_v1::account_status_get::error::ConversionError
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::account_status_get::error::ConversionError
+impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::account_status_get::error::ConversionError
+pub enum generated::http::identity_v1::account_status_get::IdentityAccountStatusGetDataStatus
+pub generated::http::identity_v1::account_status_get::IdentityAccountStatusGetDataStatus::Active
+pub generated::http::identity_v1::account_status_get::IdentityAccountStatusGetDataStatus::Deactivated
+pub generated::http::identity_v1::account_status_get::IdentityAccountStatusGetDataStatus::Locked
+pub generated::http::identity_v1::account_status_get::IdentityAccountStatusGetDataStatus::Suspended
+impl core::clone::Clone for generated::http::identity_v1::account_status_get::IdentityAccountStatusGetDataStatus
+pub fn generated::http::identity_v1::account_status_get::IdentityAccountStatusGetDataStatus::clone(&self) -> generated::http::identity_v1::account_status_get::IdentityAccountStatusGetDataStatus
+impl core::cmp::Eq for generated::http::identity_v1::account_status_get::IdentityAccountStatusGetDataStatus
+impl core::cmp::Ord for generated::http::identity_v1::account_status_get::IdentityAccountStatusGetDataStatus
+pub fn generated::http::identity_v1::account_status_get::IdentityAccountStatusGetDataStatus::cmp(&self, &generated::http::identity_v1::account_status_get::IdentityAccountStatusGetDataStatus) -> core::cmp::Ordering
+impl core::cmp::PartialEq for generated::http::identity_v1::account_status_get::IdentityAccountStatusGetDataStatus
+pub fn generated::http::identity_v1::account_status_get::IdentityAccountStatusGetDataStatus::eq(&self, &generated::http::identity_v1::account_status_get::IdentityAccountStatusGetDataStatus) -> bool
+impl core::cmp::PartialOrd for generated::http::identity_v1::account_status_get::IdentityAccountStatusGetDataStatus
+pub fn generated::http::identity_v1::account_status_get::IdentityAccountStatusGetDataStatus::partial_cmp(&self, &generated::http::identity_v1::account_status_get::IdentityAccountStatusGetDataStatus) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::TryFrom<&alloc::string::String> for generated::http::identity_v1::account_status_get::IdentityAccountStatusGetDataStatus
+pub type generated::http::identity_v1::account_status_get::IdentityAccountStatusGetDataStatus::Error = generated::http::identity_v1::account_status_get::error::ConversionError
+pub fn generated::http::identity_v1::account_status_get::IdentityAccountStatusGetDataStatus::try_from(&alloc::string::String) -> core::result::Result<Self, generated::http::identity_v1::account_status_get::error::ConversionError>
+impl core::convert::TryFrom<&str> for generated::http::identity_v1::account_status_get::IdentityAccountStatusGetDataStatus
+pub type generated::http::identity_v1::account_status_get::IdentityAccountStatusGetDataStatus::Error = generated::http::identity_v1::account_status_get::error::ConversionError
+pub fn generated::http::identity_v1::account_status_get::IdentityAccountStatusGetDataStatus::try_from(&str) -> core::result::Result<Self, generated::http::identity_v1::account_status_get::error::ConversionError>
+impl core::convert::TryFrom<alloc::string::String> for generated::http::identity_v1::account_status_get::IdentityAccountStatusGetDataStatus
+pub type generated::http::identity_v1::account_status_get::IdentityAccountStatusGetDataStatus::Error = generated::http::identity_v1::account_status_get::error::ConversionError
+pub fn generated::http::identity_v1::account_status_get::IdentityAccountStatusGetDataStatus::try_from(alloc::string::String) -> core::result::Result<Self, generated::http::identity_v1::account_status_get::error::ConversionError>
+impl core::fmt::Debug for generated::http::identity_v1::account_status_get::IdentityAccountStatusGetDataStatus
+pub fn generated::http::identity_v1::account_status_get::IdentityAccountStatusGetDataStatus::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for generated::http::identity_v1::account_status_get::IdentityAccountStatusGetDataStatus
+pub fn generated::http::identity_v1::account_status_get::IdentityAccountStatusGetDataStatus::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for generated::http::identity_v1::account_status_get::IdentityAccountStatusGetDataStatus
+pub fn generated::http::identity_v1::account_status_get::IdentityAccountStatusGetDataStatus::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for generated::http::identity_v1::account_status_get::IdentityAccountStatusGetDataStatus
+impl core::marker::StructuralPartialEq for generated::http::identity_v1::account_status_get::IdentityAccountStatusGetDataStatus
+impl core::str::traits::FromStr for generated::http::identity_v1::account_status_get::IdentityAccountStatusGetDataStatus
+pub type generated::http::identity_v1::account_status_get::IdentityAccountStatusGetDataStatus::Err = generated::http::identity_v1::account_status_get::error::ConversionError
+pub fn generated::http::identity_v1::account_status_get::IdentityAccountStatusGetDataStatus::from_str(&str) -> core::result::Result<Self, generated::http::identity_v1::account_status_get::error::ConversionError>
+impl serde_core::ser::Serialize for generated::http::identity_v1::account_status_get::IdentityAccountStatusGetDataStatus
+pub fn generated::http::identity_v1::account_status_get::IdentityAccountStatusGetDataStatus::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::http::identity_v1::account_status_get::IdentityAccountStatusGetDataStatus
+pub fn generated::http::identity_v1::account_status_get::IdentityAccountStatusGetDataStatus::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::http::identity_v1::account_status_get::IdentityAccountStatusGetDataStatus
+impl core::marker::Send for generated::http::identity_v1::account_status_get::IdentityAccountStatusGetDataStatus
+impl core::marker::Sync for generated::http::identity_v1::account_status_get::IdentityAccountStatusGetDataStatus
+impl core::marker::Unpin for generated::http::identity_v1::account_status_get::IdentityAccountStatusGetDataStatus
+impl core::marker::UnsafeUnpin for generated::http::identity_v1::account_status_get::IdentityAccountStatusGetDataStatus
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::account_status_get::IdentityAccountStatusGetDataStatus
+impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::account_status_get::IdentityAccountStatusGetDataStatus
+pub enum generated::http::identity_v1::account_status_get::LocalOnlyConformanceMarker
+impl core::marker::Freeze for generated::http::identity_v1::account_status_get::LocalOnlyConformanceMarker
+impl core::marker::Send for generated::http::identity_v1::account_status_get::LocalOnlyConformanceMarker
+impl core::marker::Sync for generated::http::identity_v1::account_status_get::LocalOnlyConformanceMarker
+impl core::marker::Unpin for generated::http::identity_v1::account_status_get::LocalOnlyConformanceMarker
+impl core::marker::UnsafeUnpin for generated::http::identity_v1::account_status_get::LocalOnlyConformanceMarker
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::account_status_get::LocalOnlyConformanceMarker
+impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::account_status_get::LocalOnlyConformanceMarker
+pub enum generated::http::identity_v1::account_status_get::RouteMarker
+impl core::marker::Freeze for generated::http::identity_v1::account_status_get::RouteMarker
+impl core::marker::Send for generated::http::identity_v1::account_status_get::RouteMarker
+impl core::marker::Sync for generated::http::identity_v1::account_status_get::RouteMarker
+impl core::marker::Unpin for generated::http::identity_v1::account_status_get::RouteMarker
+impl core::marker::UnsafeUnpin for generated::http::identity_v1::account_status_get::RouteMarker
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::account_status_get::RouteMarker
+impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::account_status_get::RouteMarker
+pub struct generated::http::identity_v1::account_status_get::IdentityAccountStatusGetData
+pub generated::http::identity_v1::account_status_get::IdentityAccountStatusGetData::status: generated::http::identity_v1::account_status_get::IdentityAccountStatusGetDataStatus
+impl core::clone::Clone for generated::http::identity_v1::account_status_get::IdentityAccountStatusGetData
+pub fn generated::http::identity_v1::account_status_get::IdentityAccountStatusGetData::clone(&self) -> generated::http::identity_v1::account_status_get::IdentityAccountStatusGetData
+impl core::fmt::Debug for generated::http::identity_v1::account_status_get::IdentityAccountStatusGetData
+pub fn generated::http::identity_v1::account_status_get::IdentityAccountStatusGetData::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl secure::redaction::Redact for generated::http::identity_v1::account_status_get::IdentityAccountStatusGetData
+pub fn generated::http::identity_v1::account_status_get::IdentityAccountStatusGetData::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
+impl serde_core::ser::Serialize for generated::http::identity_v1::account_status_get::IdentityAccountStatusGetData
+pub fn generated::http::identity_v1::account_status_get::IdentityAccountStatusGetData::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::http::identity_v1::account_status_get::IdentityAccountStatusGetData
+pub fn generated::http::identity_v1::account_status_get::IdentityAccountStatusGetData::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::http::identity_v1::account_status_get::IdentityAccountStatusGetData
+impl core::marker::Send for generated::http::identity_v1::account_status_get::IdentityAccountStatusGetData
+impl core::marker::Sync for generated::http::identity_v1::account_status_get::IdentityAccountStatusGetData
+impl core::marker::Unpin for generated::http::identity_v1::account_status_get::IdentityAccountStatusGetData
+impl core::marker::UnsafeUnpin for generated::http::identity_v1::account_status_get::IdentityAccountStatusGetData
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::account_status_get::IdentityAccountStatusGetData
+impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::account_status_get::IdentityAccountStatusGetData
+pub struct generated::http::identity_v1::account_status_get::IdentityAccountStatusGetRequest
+impl core::clone::Clone for generated::http::identity_v1::account_status_get::IdentityAccountStatusGetRequest
+pub fn generated::http::identity_v1::account_status_get::IdentityAccountStatusGetRequest::clone(&self) -> generated::http::identity_v1::account_status_get::IdentityAccountStatusGetRequest
+impl core::default::Default for generated::http::identity_v1::account_status_get::IdentityAccountStatusGetRequest
+pub fn generated::http::identity_v1::account_status_get::IdentityAccountStatusGetRequest::default() -> Self
+impl core::fmt::Debug for generated::http::identity_v1::account_status_get::IdentityAccountStatusGetRequest
+pub fn generated::http::identity_v1::account_status_get::IdentityAccountStatusGetRequest::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl secure::redaction::Redact for generated::http::identity_v1::account_status_get::IdentityAccountStatusGetRequest
+pub fn generated::http::identity_v1::account_status_get::IdentityAccountStatusGetRequest::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
+impl serde_core::ser::Serialize for generated::http::identity_v1::account_status_get::IdentityAccountStatusGetRequest
+pub fn generated::http::identity_v1::account_status_get::IdentityAccountStatusGetRequest::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::http::identity_v1::account_status_get::IdentityAccountStatusGetRequest
+pub fn generated::http::identity_v1::account_status_get::IdentityAccountStatusGetRequest::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::http::identity_v1::account_status_get::IdentityAccountStatusGetRequest
+impl core::marker::Send for generated::http::identity_v1::account_status_get::IdentityAccountStatusGetRequest
+impl core::marker::Sync for generated::http::identity_v1::account_status_get::IdentityAccountStatusGetRequest
+impl core::marker::Unpin for generated::http::identity_v1::account_status_get::IdentityAccountStatusGetRequest
+impl core::marker::UnsafeUnpin for generated::http::identity_v1::account_status_get::IdentityAccountStatusGetRequest
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::account_status_get::IdentityAccountStatusGetRequest
+impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::account_status_get::IdentityAccountStatusGetRequest
+pub struct generated::http::identity_v1::account_status_get::IdentityAccountStatusGetResponse
+pub generated::http::identity_v1::account_status_get::IdentityAccountStatusGetResponse::data: generated::http::identity_v1::account_status_get::IdentityAccountStatusGetData
+impl core::clone::Clone for generated::http::identity_v1::account_status_get::IdentityAccountStatusGetResponse
+pub fn generated::http::identity_v1::account_status_get::IdentityAccountStatusGetResponse::clone(&self) -> generated::http::identity_v1::account_status_get::IdentityAccountStatusGetResponse
+impl core::fmt::Debug for generated::http::identity_v1::account_status_get::IdentityAccountStatusGetResponse
+pub fn generated::http::identity_v1::account_status_get::IdentityAccountStatusGetResponse::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl secure::redaction::Redact for generated::http::identity_v1::account_status_get::IdentityAccountStatusGetResponse
+pub fn generated::http::identity_v1::account_status_get::IdentityAccountStatusGetResponse::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
+impl serde_core::ser::Serialize for generated::http::identity_v1::account_status_get::IdentityAccountStatusGetResponse
+pub fn generated::http::identity_v1::account_status_get::IdentityAccountStatusGetResponse::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::http::identity_v1::account_status_get::IdentityAccountStatusGetResponse
+pub fn generated::http::identity_v1::account_status_get::IdentityAccountStatusGetResponse::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::http::identity_v1::account_status_get::IdentityAccountStatusGetResponse
+impl core::marker::Send for generated::http::identity_v1::account_status_get::IdentityAccountStatusGetResponse
+impl core::marker::Sync for generated::http::identity_v1::account_status_get::IdentityAccountStatusGetResponse
+impl core::marker::Unpin for generated::http::identity_v1::account_status_get::IdentityAccountStatusGetResponse
+impl core::marker::UnsafeUnpin for generated::http::identity_v1::account_status_get::IdentityAccountStatusGetResponse
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::account_status_get::IdentityAccountStatusGetResponse
+impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::account_status_get::IdentityAccountStatusGetResponse
+pub const generated::http::identity_v1::account_status_get::CONTRACT: vocab::contract::binding::ContractBinding
+pub const generated::http::identity_v1::account_status_get::CONTRACT_ID: &str
+pub const generated::http::identity_v1::account_status_get::EFFECTS: &[vocab::http::HttpEffectKind]
+pub const generated::http::identity_v1::account_status_get::EFFECT_PROFILE: vocab::http::HttpEffectProfile
+pub const generated::http::identity_v1::account_status_get::PATH: &str
+pub const generated::http::identity_v1::account_status_get::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
+pub const generated::http::identity_v1::account_status_get::ROUTE: vocab::http::HttpRouteBinding<generated::http::identity_v1::account_status_get::RouteMarker, vocab::http::LocalOnly>
+pub const generated::http::identity_v1::account_status_get::SPEC: generated::http::HttpSpec
+pub mod generated::http::identity_v1::account_status_set
+pub mod generated::http::identity_v1::account_status_set::error
+pub struct generated::http::identity_v1::account_status_set::error::ConversionError(_)
+impl core::convert::From<&'static str> for generated::http::identity_v1::account_status_set::error::ConversionError
+pub fn generated::http::identity_v1::account_status_set::error::ConversionError::from(&'static str) -> Self
+impl core::convert::From<alloc::string::String> for generated::http::identity_v1::account_status_set::error::ConversionError
+pub fn generated::http::identity_v1::account_status_set::error::ConversionError::from(alloc::string::String) -> Self
+impl core::error::Error for generated::http::identity_v1::account_status_set::error::ConversionError
+impl core::fmt::Debug for generated::http::identity_v1::account_status_set::error::ConversionError
+pub fn generated::http::identity_v1::account_status_set::error::ConversionError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::result::Result<(), core::fmt::Error>
+impl core::fmt::Display for generated::http::identity_v1::account_status_set::error::ConversionError
+pub fn generated::http::identity_v1::account_status_set::error::ConversionError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::result::Result<(), core::fmt::Error>
+impl core::marker::Freeze for generated::http::identity_v1::account_status_set::error::ConversionError
+impl core::marker::Send for generated::http::identity_v1::account_status_set::error::ConversionError
+impl core::marker::Sync for generated::http::identity_v1::account_status_set::error::ConversionError
+impl core::marker::Unpin for generated::http::identity_v1::account_status_set::error::ConversionError
+impl core::marker::UnsafeUnpin for generated::http::identity_v1::account_status_set::error::ConversionError
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::account_status_set::error::ConversionError
+impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::account_status_set::error::ConversionError
+pub enum generated::http::identity_v1::account_status_set::IdentityAccountStatusSetDataStatus
+pub generated::http::identity_v1::account_status_set::IdentityAccountStatusSetDataStatus::Active
+pub generated::http::identity_v1::account_status_set::IdentityAccountStatusSetDataStatus::Deactivated
+pub generated::http::identity_v1::account_status_set::IdentityAccountStatusSetDataStatus::Locked
+pub generated::http::identity_v1::account_status_set::IdentityAccountStatusSetDataStatus::Suspended
+impl core::clone::Clone for generated::http::identity_v1::account_status_set::IdentityAccountStatusSetDataStatus
+pub fn generated::http::identity_v1::account_status_set::IdentityAccountStatusSetDataStatus::clone(&self) -> generated::http::identity_v1::account_status_set::IdentityAccountStatusSetDataStatus
+impl core::cmp::Eq for generated::http::identity_v1::account_status_set::IdentityAccountStatusSetDataStatus
+impl core::cmp::Ord for generated::http::identity_v1::account_status_set::IdentityAccountStatusSetDataStatus
+pub fn generated::http::identity_v1::account_status_set::IdentityAccountStatusSetDataStatus::cmp(&self, &generated::http::identity_v1::account_status_set::IdentityAccountStatusSetDataStatus) -> core::cmp::Ordering
+impl core::cmp::PartialEq for generated::http::identity_v1::account_status_set::IdentityAccountStatusSetDataStatus
+pub fn generated::http::identity_v1::account_status_set::IdentityAccountStatusSetDataStatus::eq(&self, &generated::http::identity_v1::account_status_set::IdentityAccountStatusSetDataStatus) -> bool
+impl core::cmp::PartialOrd for generated::http::identity_v1::account_status_set::IdentityAccountStatusSetDataStatus
+pub fn generated::http::identity_v1::account_status_set::IdentityAccountStatusSetDataStatus::partial_cmp(&self, &generated::http::identity_v1::account_status_set::IdentityAccountStatusSetDataStatus) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::TryFrom<&alloc::string::String> for generated::http::identity_v1::account_status_set::IdentityAccountStatusSetDataStatus
+pub type generated::http::identity_v1::account_status_set::IdentityAccountStatusSetDataStatus::Error = generated::http::identity_v1::account_status_set::error::ConversionError
+pub fn generated::http::identity_v1::account_status_set::IdentityAccountStatusSetDataStatus::try_from(&alloc::string::String) -> core::result::Result<Self, generated::http::identity_v1::account_status_set::error::ConversionError>
+impl core::convert::TryFrom<&str> for generated::http::identity_v1::account_status_set::IdentityAccountStatusSetDataStatus
+pub type generated::http::identity_v1::account_status_set::IdentityAccountStatusSetDataStatus::Error = generated::http::identity_v1::account_status_set::error::ConversionError
+pub fn generated::http::identity_v1::account_status_set::IdentityAccountStatusSetDataStatus::try_from(&str) -> core::result::Result<Self, generated::http::identity_v1::account_status_set::error::ConversionError>
+impl core::convert::TryFrom<alloc::string::String> for generated::http::identity_v1::account_status_set::IdentityAccountStatusSetDataStatus
+pub type generated::http::identity_v1::account_status_set::IdentityAccountStatusSetDataStatus::Error = generated::http::identity_v1::account_status_set::error::ConversionError
+pub fn generated::http::identity_v1::account_status_set::IdentityAccountStatusSetDataStatus::try_from(alloc::string::String) -> core::result::Result<Self, generated::http::identity_v1::account_status_set::error::ConversionError>
+impl core::fmt::Debug for generated::http::identity_v1::account_status_set::IdentityAccountStatusSetDataStatus
+pub fn generated::http::identity_v1::account_status_set::IdentityAccountStatusSetDataStatus::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for generated::http::identity_v1::account_status_set::IdentityAccountStatusSetDataStatus
+pub fn generated::http::identity_v1::account_status_set::IdentityAccountStatusSetDataStatus::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for generated::http::identity_v1::account_status_set::IdentityAccountStatusSetDataStatus
+pub fn generated::http::identity_v1::account_status_set::IdentityAccountStatusSetDataStatus::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for generated::http::identity_v1::account_status_set::IdentityAccountStatusSetDataStatus
+impl core::marker::StructuralPartialEq for generated::http::identity_v1::account_status_set::IdentityAccountStatusSetDataStatus
+impl core::str::traits::FromStr for generated::http::identity_v1::account_status_set::IdentityAccountStatusSetDataStatus
+pub type generated::http::identity_v1::account_status_set::IdentityAccountStatusSetDataStatus::Err = generated::http::identity_v1::account_status_set::error::ConversionError
+pub fn generated::http::identity_v1::account_status_set::IdentityAccountStatusSetDataStatus::from_str(&str) -> core::result::Result<Self, generated::http::identity_v1::account_status_set::error::ConversionError>
+impl serde_core::ser::Serialize for generated::http::identity_v1::account_status_set::IdentityAccountStatusSetDataStatus
+pub fn generated::http::identity_v1::account_status_set::IdentityAccountStatusSetDataStatus::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::http::identity_v1::account_status_set::IdentityAccountStatusSetDataStatus
+pub fn generated::http::identity_v1::account_status_set::IdentityAccountStatusSetDataStatus::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::http::identity_v1::account_status_set::IdentityAccountStatusSetDataStatus
+impl core::marker::Send for generated::http::identity_v1::account_status_set::IdentityAccountStatusSetDataStatus
+impl core::marker::Sync for generated::http::identity_v1::account_status_set::IdentityAccountStatusSetDataStatus
+impl core::marker::Unpin for generated::http::identity_v1::account_status_set::IdentityAccountStatusSetDataStatus
+impl core::marker::UnsafeUnpin for generated::http::identity_v1::account_status_set::IdentityAccountStatusSetDataStatus
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::account_status_set::IdentityAccountStatusSetDataStatus
+impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::account_status_set::IdentityAccountStatusSetDataStatus
+pub enum generated::http::identity_v1::account_status_set::IdentityAccountStatusSetRequestTargetStatus
+pub generated::http::identity_v1::account_status_set::IdentityAccountStatusSetRequestTargetStatus::Active
+pub generated::http::identity_v1::account_status_set::IdentityAccountStatusSetRequestTargetStatus::Deactivated
+pub generated::http::identity_v1::account_status_set::IdentityAccountStatusSetRequestTargetStatus::Locked
+pub generated::http::identity_v1::account_status_set::IdentityAccountStatusSetRequestTargetStatus::Suspended
+impl core::clone::Clone for generated::http::identity_v1::account_status_set::IdentityAccountStatusSetRequestTargetStatus
+pub fn generated::http::identity_v1::account_status_set::IdentityAccountStatusSetRequestTargetStatus::clone(&self) -> generated::http::identity_v1::account_status_set::IdentityAccountStatusSetRequestTargetStatus
+impl core::cmp::Eq for generated::http::identity_v1::account_status_set::IdentityAccountStatusSetRequestTargetStatus
+impl core::cmp::Ord for generated::http::identity_v1::account_status_set::IdentityAccountStatusSetRequestTargetStatus
+pub fn generated::http::identity_v1::account_status_set::IdentityAccountStatusSetRequestTargetStatus::cmp(&self, &generated::http::identity_v1::account_status_set::IdentityAccountStatusSetRequestTargetStatus) -> core::cmp::Ordering
+impl core::cmp::PartialEq for generated::http::identity_v1::account_status_set::IdentityAccountStatusSetRequestTargetStatus
+pub fn generated::http::identity_v1::account_status_set::IdentityAccountStatusSetRequestTargetStatus::eq(&self, &generated::http::identity_v1::account_status_set::IdentityAccountStatusSetRequestTargetStatus) -> bool
+impl core::cmp::PartialOrd for generated::http::identity_v1::account_status_set::IdentityAccountStatusSetRequestTargetStatus
+pub fn generated::http::identity_v1::account_status_set::IdentityAccountStatusSetRequestTargetStatus::partial_cmp(&self, &generated::http::identity_v1::account_status_set::IdentityAccountStatusSetRequestTargetStatus) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::TryFrom<&alloc::string::String> for generated::http::identity_v1::account_status_set::IdentityAccountStatusSetRequestTargetStatus
+pub type generated::http::identity_v1::account_status_set::IdentityAccountStatusSetRequestTargetStatus::Error = generated::http::identity_v1::account_status_set::error::ConversionError
+pub fn generated::http::identity_v1::account_status_set::IdentityAccountStatusSetRequestTargetStatus::try_from(&alloc::string::String) -> core::result::Result<Self, generated::http::identity_v1::account_status_set::error::ConversionError>
+impl core::convert::TryFrom<&str> for generated::http::identity_v1::account_status_set::IdentityAccountStatusSetRequestTargetStatus
+pub type generated::http::identity_v1::account_status_set::IdentityAccountStatusSetRequestTargetStatus::Error = generated::http::identity_v1::account_status_set::error::ConversionError
+pub fn generated::http::identity_v1::account_status_set::IdentityAccountStatusSetRequestTargetStatus::try_from(&str) -> core::result::Result<Self, generated::http::identity_v1::account_status_set::error::ConversionError>
+impl core::convert::TryFrom<alloc::string::String> for generated::http::identity_v1::account_status_set::IdentityAccountStatusSetRequestTargetStatus
+pub type generated::http::identity_v1::account_status_set::IdentityAccountStatusSetRequestTargetStatus::Error = generated::http::identity_v1::account_status_set::error::ConversionError
+pub fn generated::http::identity_v1::account_status_set::IdentityAccountStatusSetRequestTargetStatus::try_from(alloc::string::String) -> core::result::Result<Self, generated::http::identity_v1::account_status_set::error::ConversionError>
+impl core::fmt::Debug for generated::http::identity_v1::account_status_set::IdentityAccountStatusSetRequestTargetStatus
+pub fn generated::http::identity_v1::account_status_set::IdentityAccountStatusSetRequestTargetStatus::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for generated::http::identity_v1::account_status_set::IdentityAccountStatusSetRequestTargetStatus
+pub fn generated::http::identity_v1::account_status_set::IdentityAccountStatusSetRequestTargetStatus::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for generated::http::identity_v1::account_status_set::IdentityAccountStatusSetRequestTargetStatus
+pub fn generated::http::identity_v1::account_status_set::IdentityAccountStatusSetRequestTargetStatus::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for generated::http::identity_v1::account_status_set::IdentityAccountStatusSetRequestTargetStatus
+impl core::marker::StructuralPartialEq for generated::http::identity_v1::account_status_set::IdentityAccountStatusSetRequestTargetStatus
+impl core::str::traits::FromStr for generated::http::identity_v1::account_status_set::IdentityAccountStatusSetRequestTargetStatus
+pub type generated::http::identity_v1::account_status_set::IdentityAccountStatusSetRequestTargetStatus::Err = generated::http::identity_v1::account_status_set::error::ConversionError
+pub fn generated::http::identity_v1::account_status_set::IdentityAccountStatusSetRequestTargetStatus::from_str(&str) -> core::result::Result<Self, generated::http::identity_v1::account_status_set::error::ConversionError>
+impl serde_core::ser::Serialize for generated::http::identity_v1::account_status_set::IdentityAccountStatusSetRequestTargetStatus
+pub fn generated::http::identity_v1::account_status_set::IdentityAccountStatusSetRequestTargetStatus::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::http::identity_v1::account_status_set::IdentityAccountStatusSetRequestTargetStatus
+pub fn generated::http::identity_v1::account_status_set::IdentityAccountStatusSetRequestTargetStatus::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::http::identity_v1::account_status_set::IdentityAccountStatusSetRequestTargetStatus
+impl core::marker::Send for generated::http::identity_v1::account_status_set::IdentityAccountStatusSetRequestTargetStatus
+impl core::marker::Sync for generated::http::identity_v1::account_status_set::IdentityAccountStatusSetRequestTargetStatus
+impl core::marker::Unpin for generated::http::identity_v1::account_status_set::IdentityAccountStatusSetRequestTargetStatus
+impl core::marker::UnsafeUnpin for generated::http::identity_v1::account_status_set::IdentityAccountStatusSetRequestTargetStatus
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::account_status_set::IdentityAccountStatusSetRequestTargetStatus
+impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::account_status_set::IdentityAccountStatusSetRequestTargetStatus
+pub enum generated::http::identity_v1::account_status_set::RouteMarker
+impl core::marker::Freeze for generated::http::identity_v1::account_status_set::RouteMarker
+impl core::marker::Send for generated::http::identity_v1::account_status_set::RouteMarker
+impl core::marker::Sync for generated::http::identity_v1::account_status_set::RouteMarker
+impl core::marker::Unpin for generated::http::identity_v1::account_status_set::RouteMarker
+impl core::marker::UnsafeUnpin for generated::http::identity_v1::account_status_set::RouteMarker
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::account_status_set::RouteMarker
+impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::account_status_set::RouteMarker
+pub struct generated::http::identity_v1::account_status_set::IdentityAccountStatusSetData
+pub generated::http::identity_v1::account_status_set::IdentityAccountStatusSetData::changed: bool
+pub generated::http::identity_v1::account_status_set::IdentityAccountStatusSetData::status: generated::http::identity_v1::account_status_set::IdentityAccountStatusSetDataStatus
+impl core::clone::Clone for generated::http::identity_v1::account_status_set::IdentityAccountStatusSetData
+pub fn generated::http::identity_v1::account_status_set::IdentityAccountStatusSetData::clone(&self) -> generated::http::identity_v1::account_status_set::IdentityAccountStatusSetData
+impl core::fmt::Debug for generated::http::identity_v1::account_status_set::IdentityAccountStatusSetData
+pub fn generated::http::identity_v1::account_status_set::IdentityAccountStatusSetData::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl secure::redaction::Redact for generated::http::identity_v1::account_status_set::IdentityAccountStatusSetData
+pub fn generated::http::identity_v1::account_status_set::IdentityAccountStatusSetData::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
+impl serde_core::ser::Serialize for generated::http::identity_v1::account_status_set::IdentityAccountStatusSetData
+pub fn generated::http::identity_v1::account_status_set::IdentityAccountStatusSetData::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::http::identity_v1::account_status_set::IdentityAccountStatusSetData
+pub fn generated::http::identity_v1::account_status_set::IdentityAccountStatusSetData::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::http::identity_v1::account_status_set::IdentityAccountStatusSetData
+impl core::marker::Send for generated::http::identity_v1::account_status_set::IdentityAccountStatusSetData
+impl core::marker::Sync for generated::http::identity_v1::account_status_set::IdentityAccountStatusSetData
+impl core::marker::Unpin for generated::http::identity_v1::account_status_set::IdentityAccountStatusSetData
+impl core::marker::UnsafeUnpin for generated::http::identity_v1::account_status_set::IdentityAccountStatusSetData
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::account_status_set::IdentityAccountStatusSetData
+impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::account_status_set::IdentityAccountStatusSetData
+pub struct generated::http::identity_v1::account_status_set::IdentityAccountStatusSetRequest
+pub generated::http::identity_v1::account_status_set::IdentityAccountStatusSetRequest::target_status: generated::http::identity_v1::account_status_set::IdentityAccountStatusSetRequestTargetStatus
+impl core::clone::Clone for generated::http::identity_v1::account_status_set::IdentityAccountStatusSetRequest
+pub fn generated::http::identity_v1::account_status_set::IdentityAccountStatusSetRequest::clone(&self) -> generated::http::identity_v1::account_status_set::IdentityAccountStatusSetRequest
+impl core::fmt::Debug for generated::http::identity_v1::account_status_set::IdentityAccountStatusSetRequest
+pub fn generated::http::identity_v1::account_status_set::IdentityAccountStatusSetRequest::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl secure::redaction::Redact for generated::http::identity_v1::account_status_set::IdentityAccountStatusSetRequest
+pub fn generated::http::identity_v1::account_status_set::IdentityAccountStatusSetRequest::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
+impl serde_core::ser::Serialize for generated::http::identity_v1::account_status_set::IdentityAccountStatusSetRequest
+pub fn generated::http::identity_v1::account_status_set::IdentityAccountStatusSetRequest::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::http::identity_v1::account_status_set::IdentityAccountStatusSetRequest
+pub fn generated::http::identity_v1::account_status_set::IdentityAccountStatusSetRequest::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::http::identity_v1::account_status_set::IdentityAccountStatusSetRequest
+impl core::marker::Send for generated::http::identity_v1::account_status_set::IdentityAccountStatusSetRequest
+impl core::marker::Sync for generated::http::identity_v1::account_status_set::IdentityAccountStatusSetRequest
+impl core::marker::Unpin for generated::http::identity_v1::account_status_set::IdentityAccountStatusSetRequest
+impl core::marker::UnsafeUnpin for generated::http::identity_v1::account_status_set::IdentityAccountStatusSetRequest
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::account_status_set::IdentityAccountStatusSetRequest
+impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::account_status_set::IdentityAccountStatusSetRequest
+pub struct generated::http::identity_v1::account_status_set::IdentityAccountStatusSetResponse
+pub generated::http::identity_v1::account_status_set::IdentityAccountStatusSetResponse::data: generated::http::identity_v1::account_status_set::IdentityAccountStatusSetData
+impl core::clone::Clone for generated::http::identity_v1::account_status_set::IdentityAccountStatusSetResponse
+pub fn generated::http::identity_v1::account_status_set::IdentityAccountStatusSetResponse::clone(&self) -> generated::http::identity_v1::account_status_set::IdentityAccountStatusSetResponse
+impl core::fmt::Debug for generated::http::identity_v1::account_status_set::IdentityAccountStatusSetResponse
+pub fn generated::http::identity_v1::account_status_set::IdentityAccountStatusSetResponse::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl secure::redaction::Redact for generated::http::identity_v1::account_status_set::IdentityAccountStatusSetResponse
+pub fn generated::http::identity_v1::account_status_set::IdentityAccountStatusSetResponse::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
+impl serde_core::ser::Serialize for generated::http::identity_v1::account_status_set::IdentityAccountStatusSetResponse
+pub fn generated::http::identity_v1::account_status_set::IdentityAccountStatusSetResponse::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::http::identity_v1::account_status_set::IdentityAccountStatusSetResponse
+pub fn generated::http::identity_v1::account_status_set::IdentityAccountStatusSetResponse::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::http::identity_v1::account_status_set::IdentityAccountStatusSetResponse
+impl core::marker::Send for generated::http::identity_v1::account_status_set::IdentityAccountStatusSetResponse
+impl core::marker::Sync for generated::http::identity_v1::account_status_set::IdentityAccountStatusSetResponse
+impl core::marker::Unpin for generated::http::identity_v1::account_status_set::IdentityAccountStatusSetResponse
+impl core::marker::UnsafeUnpin for generated::http::identity_v1::account_status_set::IdentityAccountStatusSetResponse
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::account_status_set::IdentityAccountStatusSetResponse
+impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::account_status_set::IdentityAccountStatusSetResponse
+pub const generated::http::identity_v1::account_status_set::CONTRACT: vocab::contract::binding::ContractBinding
+pub const generated::http::identity_v1::account_status_set::CONTRACT_ID: &str
+pub const generated::http::identity_v1::account_status_set::EFFECTS: &[vocab::http::HttpEffectKind]
+pub const generated::http::identity_v1::account_status_set::EFFECT_PROFILE: vocab::http::HttpEffectProfile
+pub const generated::http::identity_v1::account_status_set::EMITTED_FACTS: &[vocab::contract::binding::ContractBinding]
+pub const generated::http::identity_v1::account_status_set::PATH: &str
+pub const generated::http::identity_v1::account_status_set::PRODUCER: vocab::http::HttpProducerBinding<generated::http::identity_v1::account_status_set::RouteMarker>
+pub const generated::http::identity_v1::account_status_set::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
+pub const generated::http::identity_v1::account_status_set::ROUTE: vocab::http::HttpRouteBinding<generated::http::identity_v1::account_status_set::RouteMarker, vocab::http::OutboxFact>
+pub const generated::http::identity_v1::account_status_set::SPEC: generated::http::HttpSpec
 pub mod generated::http::identity_v1::login
 pub mod generated::http::identity_v1::login::error
 pub struct generated::http::identity_v1::login::error::ConversionError(_)
@@ -1528,9 +1930,10 @@ impl core::marker::UnsafeUnpin for generated::http::identity_v1::logout::Identit
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::logout::IdentityLogoutData
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::logout::IdentityLogoutData
 pub struct generated::http::identity_v1::logout::IdentityLogoutRequest
-pub generated::http::identity_v1::logout::IdentityLogoutRequest::session_id: alloc::string::String
 impl core::clone::Clone for generated::http::identity_v1::logout::IdentityLogoutRequest
 pub fn generated::http::identity_v1::logout::IdentityLogoutRequest::clone(&self) -> generated::http::identity_v1::logout::IdentityLogoutRequest
+impl core::default::Default for generated::http::identity_v1::logout::IdentityLogoutRequest
+pub fn generated::http::identity_v1::logout::IdentityLogoutRequest::default() -> Self
 impl core::fmt::Debug for generated::http::identity_v1::logout::IdentityLogoutRequest
 pub fn generated::http::identity_v1::logout::IdentityLogoutRequest::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl secure::redaction::Redact for generated::http::identity_v1::logout::IdentityLogoutRequest
@@ -1569,11 +1972,107 @@ pub const generated::http::identity_v1::logout::CONTRACT: vocab::contract::bindi
 pub const generated::http::identity_v1::logout::CONTRACT_ID: &str
 pub const generated::http::identity_v1::logout::EFFECTS: &[vocab::http::HttpEffectKind]
 pub const generated::http::identity_v1::logout::EFFECT_PROFILE: vocab::http::HttpEffectProfile
-pub const generated::http::identity_v1::logout::LOCAL_TX: generated::http::LocalTxSpec
+pub const generated::http::identity_v1::logout::EMITTED_FACTS: &[vocab::contract::binding::ContractBinding]
 pub const generated::http::identity_v1::logout::PATH: &str
+pub const generated::http::identity_v1::logout::PRODUCER: vocab::http::HttpProducerBinding<generated::http::identity_v1::logout::RouteMarker>
 pub const generated::http::identity_v1::logout::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
-pub const generated::http::identity_v1::logout::ROUTE: vocab::http::HttpRouteBinding<generated::http::identity_v1::logout::RouteMarker, vocab::http::LocalTx>
+pub const generated::http::identity_v1::logout::ROUTE: vocab::http::HttpRouteBinding<generated::http::identity_v1::logout::RouteMarker, vocab::http::OutboxFact>
 pub const generated::http::identity_v1::logout::SPEC: generated::http::HttpSpec
+pub mod generated::http::identity_v1::logout_all
+pub mod generated::http::identity_v1::logout_all::error
+pub struct generated::http::identity_v1::logout_all::error::ConversionError(_)
+impl core::convert::From<&'static str> for generated::http::identity_v1::logout_all::error::ConversionError
+pub fn generated::http::identity_v1::logout_all::error::ConversionError::from(&'static str) -> Self
+impl core::convert::From<alloc::string::String> for generated::http::identity_v1::logout_all::error::ConversionError
+pub fn generated::http::identity_v1::logout_all::error::ConversionError::from(alloc::string::String) -> Self
+impl core::error::Error for generated::http::identity_v1::logout_all::error::ConversionError
+impl core::fmt::Debug for generated::http::identity_v1::logout_all::error::ConversionError
+pub fn generated::http::identity_v1::logout_all::error::ConversionError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::result::Result<(), core::fmt::Error>
+impl core::fmt::Display for generated::http::identity_v1::logout_all::error::ConversionError
+pub fn generated::http::identity_v1::logout_all::error::ConversionError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::result::Result<(), core::fmt::Error>
+impl core::marker::Freeze for generated::http::identity_v1::logout_all::error::ConversionError
+impl core::marker::Send for generated::http::identity_v1::logout_all::error::ConversionError
+impl core::marker::Sync for generated::http::identity_v1::logout_all::error::ConversionError
+impl core::marker::Unpin for generated::http::identity_v1::logout_all::error::ConversionError
+impl core::marker::UnsafeUnpin for generated::http::identity_v1::logout_all::error::ConversionError
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::logout_all::error::ConversionError
+impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::logout_all::error::ConversionError
+pub enum generated::http::identity_v1::logout_all::RouteMarker
+impl core::marker::Freeze for generated::http::identity_v1::logout_all::RouteMarker
+impl core::marker::Send for generated::http::identity_v1::logout_all::RouteMarker
+impl core::marker::Sync for generated::http::identity_v1::logout_all::RouteMarker
+impl core::marker::Unpin for generated::http::identity_v1::logout_all::RouteMarker
+impl core::marker::UnsafeUnpin for generated::http::identity_v1::logout_all::RouteMarker
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::logout_all::RouteMarker
+impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::logout_all::RouteMarker
+pub struct generated::http::identity_v1::logout_all::IdentityLogoutAllData
+pub generated::http::identity_v1::logout_all::IdentityLogoutAllData::logged_out: bool
+impl core::clone::Clone for generated::http::identity_v1::logout_all::IdentityLogoutAllData
+pub fn generated::http::identity_v1::logout_all::IdentityLogoutAllData::clone(&self) -> generated::http::identity_v1::logout_all::IdentityLogoutAllData
+impl core::fmt::Debug for generated::http::identity_v1::logout_all::IdentityLogoutAllData
+pub fn generated::http::identity_v1::logout_all::IdentityLogoutAllData::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl secure::redaction::Redact for generated::http::identity_v1::logout_all::IdentityLogoutAllData
+pub fn generated::http::identity_v1::logout_all::IdentityLogoutAllData::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
+impl serde_core::ser::Serialize for generated::http::identity_v1::logout_all::IdentityLogoutAllData
+pub fn generated::http::identity_v1::logout_all::IdentityLogoutAllData::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::http::identity_v1::logout_all::IdentityLogoutAllData
+pub fn generated::http::identity_v1::logout_all::IdentityLogoutAllData::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::http::identity_v1::logout_all::IdentityLogoutAllData
+impl core::marker::Send for generated::http::identity_v1::logout_all::IdentityLogoutAllData
+impl core::marker::Sync for generated::http::identity_v1::logout_all::IdentityLogoutAllData
+impl core::marker::Unpin for generated::http::identity_v1::logout_all::IdentityLogoutAllData
+impl core::marker::UnsafeUnpin for generated::http::identity_v1::logout_all::IdentityLogoutAllData
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::logout_all::IdentityLogoutAllData
+impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::logout_all::IdentityLogoutAllData
+pub struct generated::http::identity_v1::logout_all::IdentityLogoutAllRequest
+impl core::clone::Clone for generated::http::identity_v1::logout_all::IdentityLogoutAllRequest
+pub fn generated::http::identity_v1::logout_all::IdentityLogoutAllRequest::clone(&self) -> generated::http::identity_v1::logout_all::IdentityLogoutAllRequest
+impl core::default::Default for generated::http::identity_v1::logout_all::IdentityLogoutAllRequest
+pub fn generated::http::identity_v1::logout_all::IdentityLogoutAllRequest::default() -> Self
+impl core::fmt::Debug for generated::http::identity_v1::logout_all::IdentityLogoutAllRequest
+pub fn generated::http::identity_v1::logout_all::IdentityLogoutAllRequest::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl secure::redaction::Redact for generated::http::identity_v1::logout_all::IdentityLogoutAllRequest
+pub fn generated::http::identity_v1::logout_all::IdentityLogoutAllRequest::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
+impl serde_core::ser::Serialize for generated::http::identity_v1::logout_all::IdentityLogoutAllRequest
+pub fn generated::http::identity_v1::logout_all::IdentityLogoutAllRequest::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::http::identity_v1::logout_all::IdentityLogoutAllRequest
+pub fn generated::http::identity_v1::logout_all::IdentityLogoutAllRequest::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::http::identity_v1::logout_all::IdentityLogoutAllRequest
+impl core::marker::Send for generated::http::identity_v1::logout_all::IdentityLogoutAllRequest
+impl core::marker::Sync for generated::http::identity_v1::logout_all::IdentityLogoutAllRequest
+impl core::marker::Unpin for generated::http::identity_v1::logout_all::IdentityLogoutAllRequest
+impl core::marker::UnsafeUnpin for generated::http::identity_v1::logout_all::IdentityLogoutAllRequest
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::logout_all::IdentityLogoutAllRequest
+impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::logout_all::IdentityLogoutAllRequest
+pub struct generated::http::identity_v1::logout_all::IdentityLogoutAllResponse
+pub generated::http::identity_v1::logout_all::IdentityLogoutAllResponse::data: generated::http::identity_v1::logout_all::IdentityLogoutAllData
+impl core::clone::Clone for generated::http::identity_v1::logout_all::IdentityLogoutAllResponse
+pub fn generated::http::identity_v1::logout_all::IdentityLogoutAllResponse::clone(&self) -> generated::http::identity_v1::logout_all::IdentityLogoutAllResponse
+impl core::fmt::Debug for generated::http::identity_v1::logout_all::IdentityLogoutAllResponse
+pub fn generated::http::identity_v1::logout_all::IdentityLogoutAllResponse::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl secure::redaction::Redact for generated::http::identity_v1::logout_all::IdentityLogoutAllResponse
+pub fn generated::http::identity_v1::logout_all::IdentityLogoutAllResponse::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
+impl serde_core::ser::Serialize for generated::http::identity_v1::logout_all::IdentityLogoutAllResponse
+pub fn generated::http::identity_v1::logout_all::IdentityLogoutAllResponse::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::http::identity_v1::logout_all::IdentityLogoutAllResponse
+pub fn generated::http::identity_v1::logout_all::IdentityLogoutAllResponse::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::http::identity_v1::logout_all::IdentityLogoutAllResponse
+impl core::marker::Send for generated::http::identity_v1::logout_all::IdentityLogoutAllResponse
+impl core::marker::Sync for generated::http::identity_v1::logout_all::IdentityLogoutAllResponse
+impl core::marker::Unpin for generated::http::identity_v1::logout_all::IdentityLogoutAllResponse
+impl core::marker::UnsafeUnpin for generated::http::identity_v1::logout_all::IdentityLogoutAllResponse
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::logout_all::IdentityLogoutAllResponse
+impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::logout_all::IdentityLogoutAllResponse
+pub const generated::http::identity_v1::logout_all::CONTRACT: vocab::contract::binding::ContractBinding
+pub const generated::http::identity_v1::logout_all::CONTRACT_ID: &str
+pub const generated::http::identity_v1::logout_all::EFFECTS: &[vocab::http::HttpEffectKind]
+pub const generated::http::identity_v1::logout_all::EFFECT_PROFILE: vocab::http::HttpEffectProfile
+pub const generated::http::identity_v1::logout_all::EMITTED_FACTS: &[vocab::contract::binding::ContractBinding]
+pub const generated::http::identity_v1::logout_all::PATH: &str
+pub const generated::http::identity_v1::logout_all::PRODUCER: vocab::http::HttpProducerBinding<generated::http::identity_v1::logout_all::RouteMarker>
+pub const generated::http::identity_v1::logout_all::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
+pub const generated::http::identity_v1::logout_all::ROUTE: vocab::http::HttpRouteBinding<generated::http::identity_v1::logout_all::RouteMarker, vocab::http::OutboxFact>
+pub const generated::http::identity_v1::logout_all::SPEC: generated::http::HttpSpec
 pub mod generated::http::identity_v1::password_change
 pub mod generated::http::identity_v1::password_change::error
 pub struct generated::http::identity_v1::password_change::error::ConversionError(_)
@@ -1708,10 +2207,11 @@ pub const generated::http::identity_v1::password_change::CONTRACT: vocab::contra
 pub const generated::http::identity_v1::password_change::CONTRACT_ID: &str
 pub const generated::http::identity_v1::password_change::EFFECTS: &[vocab::http::HttpEffectKind]
 pub const generated::http::identity_v1::password_change::EFFECT_PROFILE: vocab::http::HttpEffectProfile
-pub const generated::http::identity_v1::password_change::LOCAL_TX: generated::http::LocalTxSpec
+pub const generated::http::identity_v1::password_change::EMITTED_FACTS: &[vocab::contract::binding::ContractBinding]
 pub const generated::http::identity_v1::password_change::PATH: &str
+pub const generated::http::identity_v1::password_change::PRODUCER: vocab::http::HttpProducerBinding<generated::http::identity_v1::password_change::RouteMarker>
 pub const generated::http::identity_v1::password_change::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
-pub const generated::http::identity_v1::password_change::ROUTE: vocab::http::HttpRouteBinding<generated::http::identity_v1::password_change::RouteMarker, vocab::http::LocalTx>
+pub const generated::http::identity_v1::password_change::ROUTE: vocab::http::HttpRouteBinding<generated::http::identity_v1::password_change::RouteMarker, vocab::http::OutboxFact>
 pub const generated::http::identity_v1::password_change::SPEC: generated::http::HttpSpec
 pub mod generated::http::identity_v1::policies_create
 pub mod generated::http::identity_v1::policies_create::error
@@ -4072,6 +4572,849 @@ impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v2::I
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v2::IdentityReconcileLoopResponse
 pub const generated::http::identity_v2::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::http::identity_v2::CONTRACT_ID: &str
+pub mod generated::http::runtime_v1
+pub mod generated::http::runtime_v1::inventory
+pub mod generated::http::runtime_v1::inventory::error
+pub struct generated::http::runtime_v1::inventory::error::ConversionError(_)
+impl core::convert::From<&'static str> for generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::error::ConversionError::from(&'static str) -> Self
+impl core::convert::From<alloc::string::String> for generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::error::ConversionError::from(alloc::string::String) -> Self
+impl core::error::Error for generated::http::runtime_v1::inventory::error::ConversionError
+impl core::fmt::Debug for generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::error::ConversionError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::result::Result<(), core::fmt::Error>
+impl core::fmt::Display for generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::error::ConversionError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::result::Result<(), core::fmt::Error>
+impl core::marker::Freeze for generated::http::runtime_v1::inventory::error::ConversionError
+impl core::marker::Send for generated::http::runtime_v1::inventory::error::ConversionError
+impl core::marker::Sync for generated::http::runtime_v1::inventory::error::ConversionError
+impl core::marker::Unpin for generated::http::runtime_v1::inventory::error::ConversionError
+impl core::marker::UnsafeUnpin for generated::http::runtime_v1::inventory::error::ConversionError
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::runtime_v1::inventory::error::ConversionError
+impl core::panic::unwind_safe::UnwindSafe for generated::http::runtime_v1::inventory::error::ConversionError
+pub enum generated::http::runtime_v1::inventory::LocalOnlyConformanceMarker
+impl core::marker::Freeze for generated::http::runtime_v1::inventory::LocalOnlyConformanceMarker
+impl core::marker::Send for generated::http::runtime_v1::inventory::LocalOnlyConformanceMarker
+impl core::marker::Sync for generated::http::runtime_v1::inventory::LocalOnlyConformanceMarker
+impl core::marker::Unpin for generated::http::runtime_v1::inventory::LocalOnlyConformanceMarker
+impl core::marker::UnsafeUnpin for generated::http::runtime_v1::inventory::LocalOnlyConformanceMarker
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::runtime_v1::inventory::LocalOnlyConformanceMarker
+impl core::panic::unwind_safe::UnwindSafe for generated::http::runtime_v1::inventory::LocalOnlyConformanceMarker
+pub enum generated::http::runtime_v1::inventory::RouteMarker
+impl core::marker::Freeze for generated::http::runtime_v1::inventory::RouteMarker
+impl core::marker::Send for generated::http::runtime_v1::inventory::RouteMarker
+impl core::marker::Sync for generated::http::runtime_v1::inventory::RouteMarker
+impl core::marker::Unpin for generated::http::runtime_v1::inventory::RouteMarker
+impl core::marker::UnsafeUnpin for generated::http::runtime_v1::inventory::RouteMarker
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::runtime_v1::inventory::RouteMarker
+impl core::panic::unwind_safe::UnwindSafe for generated::http::runtime_v1::inventory::RouteMarker
+pub enum generated::http::runtime_v1::inventory::RuntimeAuthScheme
+pub generated::http::runtime_v1::inventory::RuntimeAuthScheme::FederatedAccessToken
+pub generated::http::runtime_v1::inventory::RuntimeAuthScheme::Mtls
+pub generated::http::runtime_v1::inventory::RuntimeAuthScheme::NoAuth
+pub generated::http::runtime_v1::inventory::RuntimeAuthScheme::RssAccessToken
+pub generated::http::runtime_v1::inventory::RuntimeAuthScheme::ServiceToken
+impl core::clone::Clone for generated::http::runtime_v1::inventory::RuntimeAuthScheme
+pub fn generated::http::runtime_v1::inventory::RuntimeAuthScheme::clone(&self) -> generated::http::runtime_v1::inventory::RuntimeAuthScheme
+impl core::cmp::Eq for generated::http::runtime_v1::inventory::RuntimeAuthScheme
+impl core::cmp::Ord for generated::http::runtime_v1::inventory::RuntimeAuthScheme
+pub fn generated::http::runtime_v1::inventory::RuntimeAuthScheme::cmp(&self, &generated::http::runtime_v1::inventory::RuntimeAuthScheme) -> core::cmp::Ordering
+impl core::cmp::PartialEq for generated::http::runtime_v1::inventory::RuntimeAuthScheme
+pub fn generated::http::runtime_v1::inventory::RuntimeAuthScheme::eq(&self, &generated::http::runtime_v1::inventory::RuntimeAuthScheme) -> bool
+impl core::cmp::PartialOrd for generated::http::runtime_v1::inventory::RuntimeAuthScheme
+pub fn generated::http::runtime_v1::inventory::RuntimeAuthScheme::partial_cmp(&self, &generated::http::runtime_v1::inventory::RuntimeAuthScheme) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::TryFrom<&alloc::string::String> for generated::http::runtime_v1::inventory::RuntimeAuthScheme
+pub type generated::http::runtime_v1::inventory::RuntimeAuthScheme::Error = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::RuntimeAuthScheme::try_from(&alloc::string::String) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl core::convert::TryFrom<&str> for generated::http::runtime_v1::inventory::RuntimeAuthScheme
+pub type generated::http::runtime_v1::inventory::RuntimeAuthScheme::Error = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::RuntimeAuthScheme::try_from(&str) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl core::convert::TryFrom<alloc::string::String> for generated::http::runtime_v1::inventory::RuntimeAuthScheme
+pub type generated::http::runtime_v1::inventory::RuntimeAuthScheme::Error = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::RuntimeAuthScheme::try_from(alloc::string::String) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl core::fmt::Debug for generated::http::runtime_v1::inventory::RuntimeAuthScheme
+pub fn generated::http::runtime_v1::inventory::RuntimeAuthScheme::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for generated::http::runtime_v1::inventory::RuntimeAuthScheme
+pub fn generated::http::runtime_v1::inventory::RuntimeAuthScheme::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for generated::http::runtime_v1::inventory::RuntimeAuthScheme
+pub fn generated::http::runtime_v1::inventory::RuntimeAuthScheme::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for generated::http::runtime_v1::inventory::RuntimeAuthScheme
+impl core::marker::StructuralPartialEq for generated::http::runtime_v1::inventory::RuntimeAuthScheme
+impl core::str::traits::FromStr for generated::http::runtime_v1::inventory::RuntimeAuthScheme
+pub type generated::http::runtime_v1::inventory::RuntimeAuthScheme::Err = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::RuntimeAuthScheme::from_str(&str) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl serde_core::ser::Serialize for generated::http::runtime_v1::inventory::RuntimeAuthScheme
+pub fn generated::http::runtime_v1::inventory::RuntimeAuthScheme::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::http::runtime_v1::inventory::RuntimeAuthScheme
+pub fn generated::http::runtime_v1::inventory::RuntimeAuthScheme::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::http::runtime_v1::inventory::RuntimeAuthScheme
+impl core::marker::Send for generated::http::runtime_v1::inventory::RuntimeAuthScheme
+impl core::marker::Sync for generated::http::runtime_v1::inventory::RuntimeAuthScheme
+impl core::marker::Unpin for generated::http::runtime_v1::inventory::RuntimeAuthScheme
+impl core::marker::UnsafeUnpin for generated::http::runtime_v1::inventory::RuntimeAuthScheme
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::runtime_v1::inventory::RuntimeAuthScheme
+impl core::panic::unwind_safe::UnwindSafe for generated::http::runtime_v1::inventory::RuntimeAuthScheme
+pub enum generated::http::runtime_v1::inventory::RuntimeDomain
+pub generated::http::runtime_v1::inventory::RuntimeDomain::Audit
+pub generated::http::runtime_v1::inventory::RuntimeDomain::Contractreg
+pub generated::http::runtime_v1::inventory::RuntimeDomain::Identity
+pub generated::http::runtime_v1::inventory::RuntimeDomain::Settings
+pub generated::http::runtime_v1::inventory::RuntimeDomain::Syshealth
+impl core::clone::Clone for generated::http::runtime_v1::inventory::RuntimeDomain
+pub fn generated::http::runtime_v1::inventory::RuntimeDomain::clone(&self) -> generated::http::runtime_v1::inventory::RuntimeDomain
+impl core::cmp::Eq for generated::http::runtime_v1::inventory::RuntimeDomain
+impl core::cmp::Ord for generated::http::runtime_v1::inventory::RuntimeDomain
+pub fn generated::http::runtime_v1::inventory::RuntimeDomain::cmp(&self, &generated::http::runtime_v1::inventory::RuntimeDomain) -> core::cmp::Ordering
+impl core::cmp::PartialEq for generated::http::runtime_v1::inventory::RuntimeDomain
+pub fn generated::http::runtime_v1::inventory::RuntimeDomain::eq(&self, &generated::http::runtime_v1::inventory::RuntimeDomain) -> bool
+impl core::cmp::PartialOrd for generated::http::runtime_v1::inventory::RuntimeDomain
+pub fn generated::http::runtime_v1::inventory::RuntimeDomain::partial_cmp(&self, &generated::http::runtime_v1::inventory::RuntimeDomain) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::TryFrom<&alloc::string::String> for generated::http::runtime_v1::inventory::RuntimeDomain
+pub type generated::http::runtime_v1::inventory::RuntimeDomain::Error = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::RuntimeDomain::try_from(&alloc::string::String) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl core::convert::TryFrom<&str> for generated::http::runtime_v1::inventory::RuntimeDomain
+pub type generated::http::runtime_v1::inventory::RuntimeDomain::Error = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::RuntimeDomain::try_from(&str) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl core::convert::TryFrom<alloc::string::String> for generated::http::runtime_v1::inventory::RuntimeDomain
+pub type generated::http::runtime_v1::inventory::RuntimeDomain::Error = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::RuntimeDomain::try_from(alloc::string::String) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl core::fmt::Debug for generated::http::runtime_v1::inventory::RuntimeDomain
+pub fn generated::http::runtime_v1::inventory::RuntimeDomain::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for generated::http::runtime_v1::inventory::RuntimeDomain
+pub fn generated::http::runtime_v1::inventory::RuntimeDomain::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for generated::http::runtime_v1::inventory::RuntimeDomain
+pub fn generated::http::runtime_v1::inventory::RuntimeDomain::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for generated::http::runtime_v1::inventory::RuntimeDomain
+impl core::marker::StructuralPartialEq for generated::http::runtime_v1::inventory::RuntimeDomain
+impl core::str::traits::FromStr for generated::http::runtime_v1::inventory::RuntimeDomain
+pub type generated::http::runtime_v1::inventory::RuntimeDomain::Err = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::RuntimeDomain::from_str(&str) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl serde_core::ser::Serialize for generated::http::runtime_v1::inventory::RuntimeDomain
+pub fn generated::http::runtime_v1::inventory::RuntimeDomain::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::http::runtime_v1::inventory::RuntimeDomain
+pub fn generated::http::runtime_v1::inventory::RuntimeDomain::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::http::runtime_v1::inventory::RuntimeDomain
+impl core::marker::Send for generated::http::runtime_v1::inventory::RuntimeDomain
+impl core::marker::Sync for generated::http::runtime_v1::inventory::RuntimeDomain
+impl core::marker::Unpin for generated::http::runtime_v1::inventory::RuntimeDomain
+impl core::marker::UnsafeUnpin for generated::http::runtime_v1::inventory::RuntimeDomain
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::runtime_v1::inventory::RuntimeDomain
+impl core::panic::unwind_safe::UnwindSafe for generated::http::runtime_v1::inventory::RuntimeDomain
+pub enum generated::http::runtime_v1::inventory::RuntimeListenerEndpointScheme
+pub generated::http::runtime_v1::inventory::RuntimeListenerEndpointScheme::Http
+pub generated::http::runtime_v1::inventory::RuntimeListenerEndpointScheme::Https
+impl core::clone::Clone for generated::http::runtime_v1::inventory::RuntimeListenerEndpointScheme
+pub fn generated::http::runtime_v1::inventory::RuntimeListenerEndpointScheme::clone(&self) -> generated::http::runtime_v1::inventory::RuntimeListenerEndpointScheme
+impl core::cmp::Eq for generated::http::runtime_v1::inventory::RuntimeListenerEndpointScheme
+impl core::cmp::Ord for generated::http::runtime_v1::inventory::RuntimeListenerEndpointScheme
+pub fn generated::http::runtime_v1::inventory::RuntimeListenerEndpointScheme::cmp(&self, &generated::http::runtime_v1::inventory::RuntimeListenerEndpointScheme) -> core::cmp::Ordering
+impl core::cmp::PartialEq for generated::http::runtime_v1::inventory::RuntimeListenerEndpointScheme
+pub fn generated::http::runtime_v1::inventory::RuntimeListenerEndpointScheme::eq(&self, &generated::http::runtime_v1::inventory::RuntimeListenerEndpointScheme) -> bool
+impl core::cmp::PartialOrd for generated::http::runtime_v1::inventory::RuntimeListenerEndpointScheme
+pub fn generated::http::runtime_v1::inventory::RuntimeListenerEndpointScheme::partial_cmp(&self, &generated::http::runtime_v1::inventory::RuntimeListenerEndpointScheme) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::TryFrom<&alloc::string::String> for generated::http::runtime_v1::inventory::RuntimeListenerEndpointScheme
+pub type generated::http::runtime_v1::inventory::RuntimeListenerEndpointScheme::Error = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::RuntimeListenerEndpointScheme::try_from(&alloc::string::String) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl core::convert::TryFrom<&str> for generated::http::runtime_v1::inventory::RuntimeListenerEndpointScheme
+pub type generated::http::runtime_v1::inventory::RuntimeListenerEndpointScheme::Error = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::RuntimeListenerEndpointScheme::try_from(&str) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl core::convert::TryFrom<alloc::string::String> for generated::http::runtime_v1::inventory::RuntimeListenerEndpointScheme
+pub type generated::http::runtime_v1::inventory::RuntimeListenerEndpointScheme::Error = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::RuntimeListenerEndpointScheme::try_from(alloc::string::String) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl core::fmt::Debug for generated::http::runtime_v1::inventory::RuntimeListenerEndpointScheme
+pub fn generated::http::runtime_v1::inventory::RuntimeListenerEndpointScheme::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for generated::http::runtime_v1::inventory::RuntimeListenerEndpointScheme
+pub fn generated::http::runtime_v1::inventory::RuntimeListenerEndpointScheme::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for generated::http::runtime_v1::inventory::RuntimeListenerEndpointScheme
+pub fn generated::http::runtime_v1::inventory::RuntimeListenerEndpointScheme::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for generated::http::runtime_v1::inventory::RuntimeListenerEndpointScheme
+impl core::marker::StructuralPartialEq for generated::http::runtime_v1::inventory::RuntimeListenerEndpointScheme
+impl core::str::traits::FromStr for generated::http::runtime_v1::inventory::RuntimeListenerEndpointScheme
+pub type generated::http::runtime_v1::inventory::RuntimeListenerEndpointScheme::Err = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::RuntimeListenerEndpointScheme::from_str(&str) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl serde_core::ser::Serialize for generated::http::runtime_v1::inventory::RuntimeListenerEndpointScheme
+pub fn generated::http::runtime_v1::inventory::RuntimeListenerEndpointScheme::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::http::runtime_v1::inventory::RuntimeListenerEndpointScheme
+pub fn generated::http::runtime_v1::inventory::RuntimeListenerEndpointScheme::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::http::runtime_v1::inventory::RuntimeListenerEndpointScheme
+impl core::marker::Send for generated::http::runtime_v1::inventory::RuntimeListenerEndpointScheme
+impl core::marker::Sync for generated::http::runtime_v1::inventory::RuntimeListenerEndpointScheme
+impl core::marker::Unpin for generated::http::runtime_v1::inventory::RuntimeListenerEndpointScheme
+impl core::marker::UnsafeUnpin for generated::http::runtime_v1::inventory::RuntimeListenerEndpointScheme
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::runtime_v1::inventory::RuntimeListenerEndpointScheme
+impl core::panic::unwind_safe::UnwindSafe for generated::http::runtime_v1::inventory::RuntimeListenerEndpointScheme
+pub enum generated::http::runtime_v1::inventory::RuntimeListenerKind
+pub generated::http::runtime_v1::inventory::RuntimeListenerKind::Admin
+pub generated::http::runtime_v1::inventory::RuntimeListenerKind::Health
+pub generated::http::runtime_v1::inventory::RuntimeListenerKind::Internal
+pub generated::http::runtime_v1::inventory::RuntimeListenerKind::Primary
+impl core::clone::Clone for generated::http::runtime_v1::inventory::RuntimeListenerKind
+pub fn generated::http::runtime_v1::inventory::RuntimeListenerKind::clone(&self) -> generated::http::runtime_v1::inventory::RuntimeListenerKind
+impl core::cmp::Eq for generated::http::runtime_v1::inventory::RuntimeListenerKind
+impl core::cmp::Ord for generated::http::runtime_v1::inventory::RuntimeListenerKind
+pub fn generated::http::runtime_v1::inventory::RuntimeListenerKind::cmp(&self, &generated::http::runtime_v1::inventory::RuntimeListenerKind) -> core::cmp::Ordering
+impl core::cmp::PartialEq for generated::http::runtime_v1::inventory::RuntimeListenerKind
+pub fn generated::http::runtime_v1::inventory::RuntimeListenerKind::eq(&self, &generated::http::runtime_v1::inventory::RuntimeListenerKind) -> bool
+impl core::cmp::PartialOrd for generated::http::runtime_v1::inventory::RuntimeListenerKind
+pub fn generated::http::runtime_v1::inventory::RuntimeListenerKind::partial_cmp(&self, &generated::http::runtime_v1::inventory::RuntimeListenerKind) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::TryFrom<&alloc::string::String> for generated::http::runtime_v1::inventory::RuntimeListenerKind
+pub type generated::http::runtime_v1::inventory::RuntimeListenerKind::Error = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::RuntimeListenerKind::try_from(&alloc::string::String) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl core::convert::TryFrom<&str> for generated::http::runtime_v1::inventory::RuntimeListenerKind
+pub type generated::http::runtime_v1::inventory::RuntimeListenerKind::Error = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::RuntimeListenerKind::try_from(&str) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl core::convert::TryFrom<alloc::string::String> for generated::http::runtime_v1::inventory::RuntimeListenerKind
+pub type generated::http::runtime_v1::inventory::RuntimeListenerKind::Error = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::RuntimeListenerKind::try_from(alloc::string::String) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl core::fmt::Debug for generated::http::runtime_v1::inventory::RuntimeListenerKind
+pub fn generated::http::runtime_v1::inventory::RuntimeListenerKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for generated::http::runtime_v1::inventory::RuntimeListenerKind
+pub fn generated::http::runtime_v1::inventory::RuntimeListenerKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for generated::http::runtime_v1::inventory::RuntimeListenerKind
+pub fn generated::http::runtime_v1::inventory::RuntimeListenerKind::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for generated::http::runtime_v1::inventory::RuntimeListenerKind
+impl core::marker::StructuralPartialEq for generated::http::runtime_v1::inventory::RuntimeListenerKind
+impl core::str::traits::FromStr for generated::http::runtime_v1::inventory::RuntimeListenerKind
+pub type generated::http::runtime_v1::inventory::RuntimeListenerKind::Err = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::RuntimeListenerKind::from_str(&str) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl serde_core::ser::Serialize for generated::http::runtime_v1::inventory::RuntimeListenerKind
+pub fn generated::http::runtime_v1::inventory::RuntimeListenerKind::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::http::runtime_v1::inventory::RuntimeListenerKind
+pub fn generated::http::runtime_v1::inventory::RuntimeListenerKind::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::http::runtime_v1::inventory::RuntimeListenerKind
+impl core::marker::Send for generated::http::runtime_v1::inventory::RuntimeListenerKind
+impl core::marker::Sync for generated::http::runtime_v1::inventory::RuntimeListenerKind
+impl core::marker::Unpin for generated::http::runtime_v1::inventory::RuntimeListenerKind
+impl core::marker::UnsafeUnpin for generated::http::runtime_v1::inventory::RuntimeListenerKind
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::runtime_v1::inventory::RuntimeListenerKind
+impl core::panic::unwind_safe::UnwindSafe for generated::http::runtime_v1::inventory::RuntimeListenerKind
+pub enum generated::http::runtime_v1::inventory::RuntimePlacementMode
+pub generated::http::runtime_v1::inventory::RuntimePlacementMode::Local
+pub generated::http::runtime_v1::inventory::RuntimePlacementMode::Remote
+impl core::clone::Clone for generated::http::runtime_v1::inventory::RuntimePlacementMode
+pub fn generated::http::runtime_v1::inventory::RuntimePlacementMode::clone(&self) -> generated::http::runtime_v1::inventory::RuntimePlacementMode
+impl core::cmp::Eq for generated::http::runtime_v1::inventory::RuntimePlacementMode
+impl core::cmp::Ord for generated::http::runtime_v1::inventory::RuntimePlacementMode
+pub fn generated::http::runtime_v1::inventory::RuntimePlacementMode::cmp(&self, &generated::http::runtime_v1::inventory::RuntimePlacementMode) -> core::cmp::Ordering
+impl core::cmp::PartialEq for generated::http::runtime_v1::inventory::RuntimePlacementMode
+pub fn generated::http::runtime_v1::inventory::RuntimePlacementMode::eq(&self, &generated::http::runtime_v1::inventory::RuntimePlacementMode) -> bool
+impl core::cmp::PartialOrd for generated::http::runtime_v1::inventory::RuntimePlacementMode
+pub fn generated::http::runtime_v1::inventory::RuntimePlacementMode::partial_cmp(&self, &generated::http::runtime_v1::inventory::RuntimePlacementMode) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::TryFrom<&alloc::string::String> for generated::http::runtime_v1::inventory::RuntimePlacementMode
+pub type generated::http::runtime_v1::inventory::RuntimePlacementMode::Error = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::RuntimePlacementMode::try_from(&alloc::string::String) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl core::convert::TryFrom<&str> for generated::http::runtime_v1::inventory::RuntimePlacementMode
+pub type generated::http::runtime_v1::inventory::RuntimePlacementMode::Error = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::RuntimePlacementMode::try_from(&str) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl core::convert::TryFrom<alloc::string::String> for generated::http::runtime_v1::inventory::RuntimePlacementMode
+pub type generated::http::runtime_v1::inventory::RuntimePlacementMode::Error = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::RuntimePlacementMode::try_from(alloc::string::String) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl core::fmt::Debug for generated::http::runtime_v1::inventory::RuntimePlacementMode
+pub fn generated::http::runtime_v1::inventory::RuntimePlacementMode::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for generated::http::runtime_v1::inventory::RuntimePlacementMode
+pub fn generated::http::runtime_v1::inventory::RuntimePlacementMode::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for generated::http::runtime_v1::inventory::RuntimePlacementMode
+pub fn generated::http::runtime_v1::inventory::RuntimePlacementMode::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for generated::http::runtime_v1::inventory::RuntimePlacementMode
+impl core::marker::StructuralPartialEq for generated::http::runtime_v1::inventory::RuntimePlacementMode
+impl core::str::traits::FromStr for generated::http::runtime_v1::inventory::RuntimePlacementMode
+pub type generated::http::runtime_v1::inventory::RuntimePlacementMode::Err = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::RuntimePlacementMode::from_str(&str) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl serde_core::ser::Serialize for generated::http::runtime_v1::inventory::RuntimePlacementMode
+pub fn generated::http::runtime_v1::inventory::RuntimePlacementMode::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::http::runtime_v1::inventory::RuntimePlacementMode
+pub fn generated::http::runtime_v1::inventory::RuntimePlacementMode::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::http::runtime_v1::inventory::RuntimePlacementMode
+impl core::marker::Send for generated::http::runtime_v1::inventory::RuntimePlacementMode
+impl core::marker::Sync for generated::http::runtime_v1::inventory::RuntimePlacementMode
+impl core::marker::Unpin for generated::http::runtime_v1::inventory::RuntimePlacementMode
+impl core::marker::UnsafeUnpin for generated::http::runtime_v1::inventory::RuntimePlacementMode
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::runtime_v1::inventory::RuntimePlacementMode
+impl core::panic::unwind_safe::UnwindSafe for generated::http::runtime_v1::inventory::RuntimePlacementMode
+pub enum generated::http::runtime_v1::inventory::RuntimePlacementReadiness
+pub generated::http::runtime_v1::inventory::RuntimePlacementReadiness::MtlsSourceUnavailable
+pub generated::http::runtime_v1::inventory::RuntimePlacementReadiness::PeerEndpointUnavailable
+pub generated::http::runtime_v1::inventory::RuntimePlacementReadiness::PeerEndpointUnresolved
+pub generated::http::runtime_v1::inventory::RuntimePlacementReadiness::Ready
+impl core::clone::Clone for generated::http::runtime_v1::inventory::RuntimePlacementReadiness
+pub fn generated::http::runtime_v1::inventory::RuntimePlacementReadiness::clone(&self) -> generated::http::runtime_v1::inventory::RuntimePlacementReadiness
+impl core::cmp::Eq for generated::http::runtime_v1::inventory::RuntimePlacementReadiness
+impl core::cmp::Ord for generated::http::runtime_v1::inventory::RuntimePlacementReadiness
+pub fn generated::http::runtime_v1::inventory::RuntimePlacementReadiness::cmp(&self, &generated::http::runtime_v1::inventory::RuntimePlacementReadiness) -> core::cmp::Ordering
+impl core::cmp::PartialEq for generated::http::runtime_v1::inventory::RuntimePlacementReadiness
+pub fn generated::http::runtime_v1::inventory::RuntimePlacementReadiness::eq(&self, &generated::http::runtime_v1::inventory::RuntimePlacementReadiness) -> bool
+impl core::cmp::PartialOrd for generated::http::runtime_v1::inventory::RuntimePlacementReadiness
+pub fn generated::http::runtime_v1::inventory::RuntimePlacementReadiness::partial_cmp(&self, &generated::http::runtime_v1::inventory::RuntimePlacementReadiness) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::TryFrom<&alloc::string::String> for generated::http::runtime_v1::inventory::RuntimePlacementReadiness
+pub type generated::http::runtime_v1::inventory::RuntimePlacementReadiness::Error = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::RuntimePlacementReadiness::try_from(&alloc::string::String) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl core::convert::TryFrom<&str> for generated::http::runtime_v1::inventory::RuntimePlacementReadiness
+pub type generated::http::runtime_v1::inventory::RuntimePlacementReadiness::Error = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::RuntimePlacementReadiness::try_from(&str) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl core::convert::TryFrom<alloc::string::String> for generated::http::runtime_v1::inventory::RuntimePlacementReadiness
+pub type generated::http::runtime_v1::inventory::RuntimePlacementReadiness::Error = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::RuntimePlacementReadiness::try_from(alloc::string::String) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl core::fmt::Debug for generated::http::runtime_v1::inventory::RuntimePlacementReadiness
+pub fn generated::http::runtime_v1::inventory::RuntimePlacementReadiness::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for generated::http::runtime_v1::inventory::RuntimePlacementReadiness
+pub fn generated::http::runtime_v1::inventory::RuntimePlacementReadiness::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for generated::http::runtime_v1::inventory::RuntimePlacementReadiness
+pub fn generated::http::runtime_v1::inventory::RuntimePlacementReadiness::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for generated::http::runtime_v1::inventory::RuntimePlacementReadiness
+impl core::marker::StructuralPartialEq for generated::http::runtime_v1::inventory::RuntimePlacementReadiness
+impl core::str::traits::FromStr for generated::http::runtime_v1::inventory::RuntimePlacementReadiness
+pub type generated::http::runtime_v1::inventory::RuntimePlacementReadiness::Err = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::RuntimePlacementReadiness::from_str(&str) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl serde_core::ser::Serialize for generated::http::runtime_v1::inventory::RuntimePlacementReadiness
+pub fn generated::http::runtime_v1::inventory::RuntimePlacementReadiness::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::http::runtime_v1::inventory::RuntimePlacementReadiness
+pub fn generated::http::runtime_v1::inventory::RuntimePlacementReadiness::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::http::runtime_v1::inventory::RuntimePlacementReadiness
+impl core::marker::Send for generated::http::runtime_v1::inventory::RuntimePlacementReadiness
+impl core::marker::Sync for generated::http::runtime_v1::inventory::RuntimePlacementReadiness
+impl core::marker::Unpin for generated::http::runtime_v1::inventory::RuntimePlacementReadiness
+impl core::marker::UnsafeUnpin for generated::http::runtime_v1::inventory::RuntimePlacementReadiness
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::runtime_v1::inventory::RuntimePlacementReadiness
+impl core::panic::unwind_safe::UnwindSafe for generated::http::runtime_v1::inventory::RuntimePlacementReadiness
+pub enum generated::http::runtime_v1::inventory::RuntimeProviderPostureState
+pub generated::http::runtime_v1::inventory::RuntimeProviderPostureState::Degraded
+pub generated::http::runtime_v1::inventory::RuntimeProviderPostureState::Ready
+pub generated::http::runtime_v1::inventory::RuntimeProviderPostureState::Unavailable
+impl core::clone::Clone for generated::http::runtime_v1::inventory::RuntimeProviderPostureState
+pub fn generated::http::runtime_v1::inventory::RuntimeProviderPostureState::clone(&self) -> generated::http::runtime_v1::inventory::RuntimeProviderPostureState
+impl core::cmp::Eq for generated::http::runtime_v1::inventory::RuntimeProviderPostureState
+impl core::cmp::Ord for generated::http::runtime_v1::inventory::RuntimeProviderPostureState
+pub fn generated::http::runtime_v1::inventory::RuntimeProviderPostureState::cmp(&self, &generated::http::runtime_v1::inventory::RuntimeProviderPostureState) -> core::cmp::Ordering
+impl core::cmp::PartialEq for generated::http::runtime_v1::inventory::RuntimeProviderPostureState
+pub fn generated::http::runtime_v1::inventory::RuntimeProviderPostureState::eq(&self, &generated::http::runtime_v1::inventory::RuntimeProviderPostureState) -> bool
+impl core::cmp::PartialOrd for generated::http::runtime_v1::inventory::RuntimeProviderPostureState
+pub fn generated::http::runtime_v1::inventory::RuntimeProviderPostureState::partial_cmp(&self, &generated::http::runtime_v1::inventory::RuntimeProviderPostureState) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::TryFrom<&alloc::string::String> for generated::http::runtime_v1::inventory::RuntimeProviderPostureState
+pub type generated::http::runtime_v1::inventory::RuntimeProviderPostureState::Error = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::RuntimeProviderPostureState::try_from(&alloc::string::String) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl core::convert::TryFrom<&str> for generated::http::runtime_v1::inventory::RuntimeProviderPostureState
+pub type generated::http::runtime_v1::inventory::RuntimeProviderPostureState::Error = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::RuntimeProviderPostureState::try_from(&str) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl core::convert::TryFrom<alloc::string::String> for generated::http::runtime_v1::inventory::RuntimeProviderPostureState
+pub type generated::http::runtime_v1::inventory::RuntimeProviderPostureState::Error = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::RuntimeProviderPostureState::try_from(alloc::string::String) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl core::fmt::Debug for generated::http::runtime_v1::inventory::RuntimeProviderPostureState
+pub fn generated::http::runtime_v1::inventory::RuntimeProviderPostureState::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for generated::http::runtime_v1::inventory::RuntimeProviderPostureState
+pub fn generated::http::runtime_v1::inventory::RuntimeProviderPostureState::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for generated::http::runtime_v1::inventory::RuntimeProviderPostureState
+pub fn generated::http::runtime_v1::inventory::RuntimeProviderPostureState::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for generated::http::runtime_v1::inventory::RuntimeProviderPostureState
+impl core::marker::StructuralPartialEq for generated::http::runtime_v1::inventory::RuntimeProviderPostureState
+impl core::str::traits::FromStr for generated::http::runtime_v1::inventory::RuntimeProviderPostureState
+pub type generated::http::runtime_v1::inventory::RuntimeProviderPostureState::Err = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::RuntimeProviderPostureState::from_str(&str) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl serde_core::ser::Serialize for generated::http::runtime_v1::inventory::RuntimeProviderPostureState
+pub fn generated::http::runtime_v1::inventory::RuntimeProviderPostureState::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::http::runtime_v1::inventory::RuntimeProviderPostureState
+pub fn generated::http::runtime_v1::inventory::RuntimeProviderPostureState::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::http::runtime_v1::inventory::RuntimeProviderPostureState
+impl core::marker::Send for generated::http::runtime_v1::inventory::RuntimeProviderPostureState
+impl core::marker::Sync for generated::http::runtime_v1::inventory::RuntimeProviderPostureState
+impl core::marker::Unpin for generated::http::runtime_v1::inventory::RuntimeProviderPostureState
+impl core::marker::UnsafeUnpin for generated::http::runtime_v1::inventory::RuntimeProviderPostureState
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::runtime_v1::inventory::RuntimeProviderPostureState
+impl core::panic::unwind_safe::UnwindSafe for generated::http::runtime_v1::inventory::RuntimeProviderPostureState
+pub struct generated::http::runtime_v1::inventory::RuntimeBuildMetadata
+pub generated::http::runtime_v1::inventory::RuntimeBuildMetadata::image_digest: generated::http::runtime_v1::inventory::Sha256Fingerprint
+pub generated::http::runtime_v1::inventory::RuntimeBuildMetadata::source_revision: generated::http::runtime_v1::inventory::RuntimeBuildMetadataSourceRevision
+impl core::clone::Clone for generated::http::runtime_v1::inventory::RuntimeBuildMetadata
+pub fn generated::http::runtime_v1::inventory::RuntimeBuildMetadata::clone(&self) -> generated::http::runtime_v1::inventory::RuntimeBuildMetadata
+impl core::fmt::Debug for generated::http::runtime_v1::inventory::RuntimeBuildMetadata
+pub fn generated::http::runtime_v1::inventory::RuntimeBuildMetadata::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl secure::redaction::Redact for generated::http::runtime_v1::inventory::RuntimeBuildMetadata
+pub fn generated::http::runtime_v1::inventory::RuntimeBuildMetadata::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
+impl serde_core::ser::Serialize for generated::http::runtime_v1::inventory::RuntimeBuildMetadata
+pub fn generated::http::runtime_v1::inventory::RuntimeBuildMetadata::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::http::runtime_v1::inventory::RuntimeBuildMetadata
+pub fn generated::http::runtime_v1::inventory::RuntimeBuildMetadata::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::http::runtime_v1::inventory::RuntimeBuildMetadata
+impl core::marker::Send for generated::http::runtime_v1::inventory::RuntimeBuildMetadata
+impl core::marker::Sync for generated::http::runtime_v1::inventory::RuntimeBuildMetadata
+impl core::marker::Unpin for generated::http::runtime_v1::inventory::RuntimeBuildMetadata
+impl core::marker::UnsafeUnpin for generated::http::runtime_v1::inventory::RuntimeBuildMetadata
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::runtime_v1::inventory::RuntimeBuildMetadata
+impl core::panic::unwind_safe::UnwindSafe for generated::http::runtime_v1::inventory::RuntimeBuildMetadata
+pub struct generated::http::runtime_v1::inventory::RuntimeBuildMetadataSourceRevision(_)
+impl core::clone::Clone for generated::http::runtime_v1::inventory::RuntimeBuildMetadataSourceRevision
+pub fn generated::http::runtime_v1::inventory::RuntimeBuildMetadataSourceRevision::clone(&self) -> generated::http::runtime_v1::inventory::RuntimeBuildMetadataSourceRevision
+impl core::cmp::Eq for generated::http::runtime_v1::inventory::RuntimeBuildMetadataSourceRevision
+impl core::cmp::Ord for generated::http::runtime_v1::inventory::RuntimeBuildMetadataSourceRevision
+pub fn generated::http::runtime_v1::inventory::RuntimeBuildMetadataSourceRevision::cmp(&self, &generated::http::runtime_v1::inventory::RuntimeBuildMetadataSourceRevision) -> core::cmp::Ordering
+impl core::cmp::PartialEq for generated::http::runtime_v1::inventory::RuntimeBuildMetadataSourceRevision
+pub fn generated::http::runtime_v1::inventory::RuntimeBuildMetadataSourceRevision::eq(&self, &generated::http::runtime_v1::inventory::RuntimeBuildMetadataSourceRevision) -> bool
+impl core::cmp::PartialOrd for generated::http::runtime_v1::inventory::RuntimeBuildMetadataSourceRevision
+pub fn generated::http::runtime_v1::inventory::RuntimeBuildMetadataSourceRevision::partial_cmp(&self, &generated::http::runtime_v1::inventory::RuntimeBuildMetadataSourceRevision) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::From<generated::http::runtime_v1::inventory::RuntimeBuildMetadataSourceRevision> for alloc::string::String
+pub fn alloc::string::String::from(generated::http::runtime_v1::inventory::RuntimeBuildMetadataSourceRevision) -> Self
+impl core::convert::TryFrom<&alloc::string::String> for generated::http::runtime_v1::inventory::RuntimeBuildMetadataSourceRevision
+pub type generated::http::runtime_v1::inventory::RuntimeBuildMetadataSourceRevision::Error = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::RuntimeBuildMetadataSourceRevision::try_from(&alloc::string::String) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl core::convert::TryFrom<&str> for generated::http::runtime_v1::inventory::RuntimeBuildMetadataSourceRevision
+pub type generated::http::runtime_v1::inventory::RuntimeBuildMetadataSourceRevision::Error = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::RuntimeBuildMetadataSourceRevision::try_from(&str) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl core::convert::TryFrom<alloc::string::String> for generated::http::runtime_v1::inventory::RuntimeBuildMetadataSourceRevision
+pub type generated::http::runtime_v1::inventory::RuntimeBuildMetadataSourceRevision::Error = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::RuntimeBuildMetadataSourceRevision::try_from(alloc::string::String) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl core::fmt::Debug for generated::http::runtime_v1::inventory::RuntimeBuildMetadataSourceRevision
+pub fn generated::http::runtime_v1::inventory::RuntimeBuildMetadataSourceRevision::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for generated::http::runtime_v1::inventory::RuntimeBuildMetadataSourceRevision
+pub fn generated::http::runtime_v1::inventory::RuntimeBuildMetadataSourceRevision::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for generated::http::runtime_v1::inventory::RuntimeBuildMetadataSourceRevision
+impl core::ops::deref::Deref for generated::http::runtime_v1::inventory::RuntimeBuildMetadataSourceRevision
+pub type generated::http::runtime_v1::inventory::RuntimeBuildMetadataSourceRevision::Target = alloc::string::String
+pub fn generated::http::runtime_v1::inventory::RuntimeBuildMetadataSourceRevision::deref(&self) -> &alloc::string::String
+impl core::str::traits::FromStr for generated::http::runtime_v1::inventory::RuntimeBuildMetadataSourceRevision
+pub type generated::http::runtime_v1::inventory::RuntimeBuildMetadataSourceRevision::Err = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::RuntimeBuildMetadataSourceRevision::from_str(&str) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl secure::redaction::Redact for generated::http::runtime_v1::inventory::RuntimeBuildMetadataSourceRevision
+pub fn generated::http::runtime_v1::inventory::RuntimeBuildMetadataSourceRevision::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
+impl serde_core::ser::Serialize for generated::http::runtime_v1::inventory::RuntimeBuildMetadataSourceRevision
+pub fn generated::http::runtime_v1::inventory::RuntimeBuildMetadataSourceRevision::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::http::runtime_v1::inventory::RuntimeBuildMetadataSourceRevision
+pub fn generated::http::runtime_v1::inventory::RuntimeBuildMetadataSourceRevision::deserialize<D>(D) -> core::result::Result<Self, <D as serde_core::de::Deserializer>::Error> where D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::http::runtime_v1::inventory::RuntimeBuildMetadataSourceRevision
+impl core::marker::Send for generated::http::runtime_v1::inventory::RuntimeBuildMetadataSourceRevision
+impl core::marker::Sync for generated::http::runtime_v1::inventory::RuntimeBuildMetadataSourceRevision
+impl core::marker::Unpin for generated::http::runtime_v1::inventory::RuntimeBuildMetadataSourceRevision
+impl core::marker::UnsafeUnpin for generated::http::runtime_v1::inventory::RuntimeBuildMetadataSourceRevision
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::runtime_v1::inventory::RuntimeBuildMetadataSourceRevision
+impl core::panic::unwind_safe::UnwindSafe for generated::http::runtime_v1::inventory::RuntimeBuildMetadataSourceRevision
+pub struct generated::http::runtime_v1::inventory::RuntimeInventoryData
+pub generated::http::runtime_v1::inventory::RuntimeInventoryData::assembly_fingerprint: generated::http::runtime_v1::inventory::Sha256Fingerprint
+pub generated::http::runtime_v1::inventory::RuntimeInventoryData::build_metadata: core::option::Option<generated::http::runtime_v1::inventory::RuntimeBuildMetadata>
+pub generated::http::runtime_v1::inventory::RuntimeInventoryData::domains: alloc::vec::Vec<generated::http::runtime_v1::inventory::RuntimeDomain>
+pub generated::http::runtime_v1::inventory::RuntimeInventoryData::listeners: alloc::vec::Vec<generated::http::runtime_v1::inventory::RuntimeListener>
+pub generated::http::runtime_v1::inventory::RuntimeInventoryData::placements: alloc::vec::Vec<generated::http::runtime_v1::inventory::RuntimePlacement>
+pub generated::http::runtime_v1::inventory::RuntimeInventoryData::provider_posture: alloc::vec::Vec<generated::http::runtime_v1::inventory::RuntimeProviderPosture>
+pub generated::http::runtime_v1::inventory::RuntimeInventoryData::runtime_plan_fingerprint: generated::http::runtime_v1::inventory::Sha256Fingerprint
+pub generated::http::runtime_v1::inventory::RuntimeInventoryData::schema_version: i64
+impl core::clone::Clone for generated::http::runtime_v1::inventory::RuntimeInventoryData
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryData::clone(&self) -> generated::http::runtime_v1::inventory::RuntimeInventoryData
+impl core::fmt::Debug for generated::http::runtime_v1::inventory::RuntimeInventoryData
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryData::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl secure::redaction::Redact for generated::http::runtime_v1::inventory::RuntimeInventoryData
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryData::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
+impl serde_core::ser::Serialize for generated::http::runtime_v1::inventory::RuntimeInventoryData
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryData::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::http::runtime_v1::inventory::RuntimeInventoryData
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryData::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::http::runtime_v1::inventory::RuntimeInventoryData
+impl core::marker::Send for generated::http::runtime_v1::inventory::RuntimeInventoryData
+impl core::marker::Sync for generated::http::runtime_v1::inventory::RuntimeInventoryData
+impl core::marker::Unpin for generated::http::runtime_v1::inventory::RuntimeInventoryData
+impl core::marker::UnsafeUnpin for generated::http::runtime_v1::inventory::RuntimeInventoryData
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::runtime_v1::inventory::RuntimeInventoryData
+impl core::panic::unwind_safe::UnwindSafe for generated::http::runtime_v1::inventory::RuntimeInventoryData
+pub struct generated::http::runtime_v1::inventory::RuntimeInventoryRequest
+impl core::clone::Clone for generated::http::runtime_v1::inventory::RuntimeInventoryRequest
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryRequest::clone(&self) -> generated::http::runtime_v1::inventory::RuntimeInventoryRequest
+impl core::default::Default for generated::http::runtime_v1::inventory::RuntimeInventoryRequest
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryRequest::default() -> Self
+impl core::fmt::Debug for generated::http::runtime_v1::inventory::RuntimeInventoryRequest
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryRequest::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl secure::redaction::Redact for generated::http::runtime_v1::inventory::RuntimeInventoryRequest
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryRequest::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
+impl serde_core::ser::Serialize for generated::http::runtime_v1::inventory::RuntimeInventoryRequest
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryRequest::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::http::runtime_v1::inventory::RuntimeInventoryRequest
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryRequest::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::http::runtime_v1::inventory::RuntimeInventoryRequest
+impl core::marker::Send for generated::http::runtime_v1::inventory::RuntimeInventoryRequest
+impl core::marker::Sync for generated::http::runtime_v1::inventory::RuntimeInventoryRequest
+impl core::marker::Unpin for generated::http::runtime_v1::inventory::RuntimeInventoryRequest
+impl core::marker::UnsafeUnpin for generated::http::runtime_v1::inventory::RuntimeInventoryRequest
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::runtime_v1::inventory::RuntimeInventoryRequest
+impl core::panic::unwind_safe::UnwindSafe for generated::http::runtime_v1::inventory::RuntimeInventoryRequest
+pub struct generated::http::runtime_v1::inventory::RuntimeInventoryResponse
+pub generated::http::runtime_v1::inventory::RuntimeInventoryResponse::data: generated::http::runtime_v1::inventory::RuntimeInventoryData
+impl core::clone::Clone for generated::http::runtime_v1::inventory::RuntimeInventoryResponse
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryResponse::clone(&self) -> generated::http::runtime_v1::inventory::RuntimeInventoryResponse
+impl core::fmt::Debug for generated::http::runtime_v1::inventory::RuntimeInventoryResponse
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryResponse::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl secure::redaction::Redact for generated::http::runtime_v1::inventory::RuntimeInventoryResponse
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryResponse::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
+impl serde_core::ser::Serialize for generated::http::runtime_v1::inventory::RuntimeInventoryResponse
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryResponse::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::http::runtime_v1::inventory::RuntimeInventoryResponse
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryResponse::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::http::runtime_v1::inventory::RuntimeInventoryResponse
+impl core::marker::Send for generated::http::runtime_v1::inventory::RuntimeInventoryResponse
+impl core::marker::Sync for generated::http::runtime_v1::inventory::RuntimeInventoryResponse
+impl core::marker::Unpin for generated::http::runtime_v1::inventory::RuntimeInventoryResponse
+impl core::marker::UnsafeUnpin for generated::http::runtime_v1::inventory::RuntimeInventoryResponse
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::runtime_v1::inventory::RuntimeInventoryResponse
+impl core::panic::unwind_safe::UnwindSafe for generated::http::runtime_v1::inventory::RuntimeInventoryResponse
+pub struct generated::http::runtime_v1::inventory::RuntimeListener
+pub generated::http::runtime_v1::inventory::RuntimeListener::auth_scheme: generated::http::runtime_v1::inventory::RuntimeAuthScheme
+pub generated::http::runtime_v1::inventory::RuntimeListener::endpoint: generated::http::runtime_v1::inventory::RuntimeListenerEndpoint
+pub generated::http::runtime_v1::inventory::RuntimeListener::id: generated::http::runtime_v1::inventory::RuntimeListenerId
+pub generated::http::runtime_v1::inventory::RuntimeListener::kind: generated::http::runtime_v1::inventory::RuntimeListenerKind
+impl core::clone::Clone for generated::http::runtime_v1::inventory::RuntimeListener
+pub fn generated::http::runtime_v1::inventory::RuntimeListener::clone(&self) -> generated::http::runtime_v1::inventory::RuntimeListener
+impl core::fmt::Debug for generated::http::runtime_v1::inventory::RuntimeListener
+pub fn generated::http::runtime_v1::inventory::RuntimeListener::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl secure::redaction::Redact for generated::http::runtime_v1::inventory::RuntimeListener
+pub fn generated::http::runtime_v1::inventory::RuntimeListener::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
+impl serde_core::ser::Serialize for generated::http::runtime_v1::inventory::RuntimeListener
+pub fn generated::http::runtime_v1::inventory::RuntimeListener::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::http::runtime_v1::inventory::RuntimeListener
+pub fn generated::http::runtime_v1::inventory::RuntimeListener::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::http::runtime_v1::inventory::RuntimeListener
+impl core::marker::Send for generated::http::runtime_v1::inventory::RuntimeListener
+impl core::marker::Sync for generated::http::runtime_v1::inventory::RuntimeListener
+impl core::marker::Unpin for generated::http::runtime_v1::inventory::RuntimeListener
+impl core::marker::UnsafeUnpin for generated::http::runtime_v1::inventory::RuntimeListener
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::runtime_v1::inventory::RuntimeListener
+impl core::panic::unwind_safe::UnwindSafe for generated::http::runtime_v1::inventory::RuntimeListener
+pub struct generated::http::runtime_v1::inventory::RuntimeListenerEndpoint
+pub generated::http::runtime_v1::inventory::RuntimeListenerEndpoint::host: generated::http::runtime_v1::inventory::RuntimeListenerEndpointHost
+pub generated::http::runtime_v1::inventory::RuntimeListenerEndpoint::port: core::num::nonzero::NonZeroU64
+pub generated::http::runtime_v1::inventory::RuntimeListenerEndpoint::scheme: generated::http::runtime_v1::inventory::RuntimeListenerEndpointScheme
+impl core::clone::Clone for generated::http::runtime_v1::inventory::RuntimeListenerEndpoint
+pub fn generated::http::runtime_v1::inventory::RuntimeListenerEndpoint::clone(&self) -> generated::http::runtime_v1::inventory::RuntimeListenerEndpoint
+impl core::fmt::Debug for generated::http::runtime_v1::inventory::RuntimeListenerEndpoint
+pub fn generated::http::runtime_v1::inventory::RuntimeListenerEndpoint::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl secure::redaction::Redact for generated::http::runtime_v1::inventory::RuntimeListenerEndpoint
+pub fn generated::http::runtime_v1::inventory::RuntimeListenerEndpoint::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
+impl serde_core::ser::Serialize for generated::http::runtime_v1::inventory::RuntimeListenerEndpoint
+pub fn generated::http::runtime_v1::inventory::RuntimeListenerEndpoint::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::http::runtime_v1::inventory::RuntimeListenerEndpoint
+pub fn generated::http::runtime_v1::inventory::RuntimeListenerEndpoint::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::http::runtime_v1::inventory::RuntimeListenerEndpoint
+impl core::marker::Send for generated::http::runtime_v1::inventory::RuntimeListenerEndpoint
+impl core::marker::Sync for generated::http::runtime_v1::inventory::RuntimeListenerEndpoint
+impl core::marker::Unpin for generated::http::runtime_v1::inventory::RuntimeListenerEndpoint
+impl core::marker::UnsafeUnpin for generated::http::runtime_v1::inventory::RuntimeListenerEndpoint
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::runtime_v1::inventory::RuntimeListenerEndpoint
+impl core::panic::unwind_safe::UnwindSafe for generated::http::runtime_v1::inventory::RuntimeListenerEndpoint
+pub struct generated::http::runtime_v1::inventory::RuntimeListenerEndpointHost(_)
+impl core::clone::Clone for generated::http::runtime_v1::inventory::RuntimeListenerEndpointHost
+pub fn generated::http::runtime_v1::inventory::RuntimeListenerEndpointHost::clone(&self) -> generated::http::runtime_v1::inventory::RuntimeListenerEndpointHost
+impl core::cmp::Eq for generated::http::runtime_v1::inventory::RuntimeListenerEndpointHost
+impl core::cmp::Ord for generated::http::runtime_v1::inventory::RuntimeListenerEndpointHost
+pub fn generated::http::runtime_v1::inventory::RuntimeListenerEndpointHost::cmp(&self, &generated::http::runtime_v1::inventory::RuntimeListenerEndpointHost) -> core::cmp::Ordering
+impl core::cmp::PartialEq for generated::http::runtime_v1::inventory::RuntimeListenerEndpointHost
+pub fn generated::http::runtime_v1::inventory::RuntimeListenerEndpointHost::eq(&self, &generated::http::runtime_v1::inventory::RuntimeListenerEndpointHost) -> bool
+impl core::cmp::PartialOrd for generated::http::runtime_v1::inventory::RuntimeListenerEndpointHost
+pub fn generated::http::runtime_v1::inventory::RuntimeListenerEndpointHost::partial_cmp(&self, &generated::http::runtime_v1::inventory::RuntimeListenerEndpointHost) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::From<generated::http::runtime_v1::inventory::RuntimeListenerEndpointHost> for alloc::string::String
+pub fn alloc::string::String::from(generated::http::runtime_v1::inventory::RuntimeListenerEndpointHost) -> Self
+impl core::convert::TryFrom<&alloc::string::String> for generated::http::runtime_v1::inventory::RuntimeListenerEndpointHost
+pub type generated::http::runtime_v1::inventory::RuntimeListenerEndpointHost::Error = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::RuntimeListenerEndpointHost::try_from(&alloc::string::String) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl core::convert::TryFrom<&str> for generated::http::runtime_v1::inventory::RuntimeListenerEndpointHost
+pub type generated::http::runtime_v1::inventory::RuntimeListenerEndpointHost::Error = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::RuntimeListenerEndpointHost::try_from(&str) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl core::convert::TryFrom<alloc::string::String> for generated::http::runtime_v1::inventory::RuntimeListenerEndpointHost
+pub type generated::http::runtime_v1::inventory::RuntimeListenerEndpointHost::Error = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::RuntimeListenerEndpointHost::try_from(alloc::string::String) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl core::fmt::Debug for generated::http::runtime_v1::inventory::RuntimeListenerEndpointHost
+pub fn generated::http::runtime_v1::inventory::RuntimeListenerEndpointHost::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for generated::http::runtime_v1::inventory::RuntimeListenerEndpointHost
+pub fn generated::http::runtime_v1::inventory::RuntimeListenerEndpointHost::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for generated::http::runtime_v1::inventory::RuntimeListenerEndpointHost
+impl core::ops::deref::Deref for generated::http::runtime_v1::inventory::RuntimeListenerEndpointHost
+pub type generated::http::runtime_v1::inventory::RuntimeListenerEndpointHost::Target = alloc::string::String
+pub fn generated::http::runtime_v1::inventory::RuntimeListenerEndpointHost::deref(&self) -> &alloc::string::String
+impl core::str::traits::FromStr for generated::http::runtime_v1::inventory::RuntimeListenerEndpointHost
+pub type generated::http::runtime_v1::inventory::RuntimeListenerEndpointHost::Err = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::RuntimeListenerEndpointHost::from_str(&str) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl secure::redaction::Redact for generated::http::runtime_v1::inventory::RuntimeListenerEndpointHost
+pub fn generated::http::runtime_v1::inventory::RuntimeListenerEndpointHost::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
+impl serde_core::ser::Serialize for generated::http::runtime_v1::inventory::RuntimeListenerEndpointHost
+pub fn generated::http::runtime_v1::inventory::RuntimeListenerEndpointHost::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::http::runtime_v1::inventory::RuntimeListenerEndpointHost
+pub fn generated::http::runtime_v1::inventory::RuntimeListenerEndpointHost::deserialize<D>(D) -> core::result::Result<Self, <D as serde_core::de::Deserializer>::Error> where D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::http::runtime_v1::inventory::RuntimeListenerEndpointHost
+impl core::marker::Send for generated::http::runtime_v1::inventory::RuntimeListenerEndpointHost
+impl core::marker::Sync for generated::http::runtime_v1::inventory::RuntimeListenerEndpointHost
+impl core::marker::Unpin for generated::http::runtime_v1::inventory::RuntimeListenerEndpointHost
+impl core::marker::UnsafeUnpin for generated::http::runtime_v1::inventory::RuntimeListenerEndpointHost
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::runtime_v1::inventory::RuntimeListenerEndpointHost
+impl core::panic::unwind_safe::UnwindSafe for generated::http::runtime_v1::inventory::RuntimeListenerEndpointHost
+pub struct generated::http::runtime_v1::inventory::RuntimeListenerId(_)
+impl core::clone::Clone for generated::http::runtime_v1::inventory::RuntimeListenerId
+pub fn generated::http::runtime_v1::inventory::RuntimeListenerId::clone(&self) -> generated::http::runtime_v1::inventory::RuntimeListenerId
+impl core::cmp::Eq for generated::http::runtime_v1::inventory::RuntimeListenerId
+impl core::cmp::Ord for generated::http::runtime_v1::inventory::RuntimeListenerId
+pub fn generated::http::runtime_v1::inventory::RuntimeListenerId::cmp(&self, &generated::http::runtime_v1::inventory::RuntimeListenerId) -> core::cmp::Ordering
+impl core::cmp::PartialEq for generated::http::runtime_v1::inventory::RuntimeListenerId
+pub fn generated::http::runtime_v1::inventory::RuntimeListenerId::eq(&self, &generated::http::runtime_v1::inventory::RuntimeListenerId) -> bool
+impl core::cmp::PartialOrd for generated::http::runtime_v1::inventory::RuntimeListenerId
+pub fn generated::http::runtime_v1::inventory::RuntimeListenerId::partial_cmp(&self, &generated::http::runtime_v1::inventory::RuntimeListenerId) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::From<generated::http::runtime_v1::inventory::RuntimeListenerId> for alloc::string::String
+pub fn alloc::string::String::from(generated::http::runtime_v1::inventory::RuntimeListenerId) -> Self
+impl core::convert::TryFrom<&alloc::string::String> for generated::http::runtime_v1::inventory::RuntimeListenerId
+pub type generated::http::runtime_v1::inventory::RuntimeListenerId::Error = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::RuntimeListenerId::try_from(&alloc::string::String) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl core::convert::TryFrom<&str> for generated::http::runtime_v1::inventory::RuntimeListenerId
+pub type generated::http::runtime_v1::inventory::RuntimeListenerId::Error = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::RuntimeListenerId::try_from(&str) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl core::convert::TryFrom<alloc::string::String> for generated::http::runtime_v1::inventory::RuntimeListenerId
+pub type generated::http::runtime_v1::inventory::RuntimeListenerId::Error = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::RuntimeListenerId::try_from(alloc::string::String) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl core::fmt::Debug for generated::http::runtime_v1::inventory::RuntimeListenerId
+pub fn generated::http::runtime_v1::inventory::RuntimeListenerId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for generated::http::runtime_v1::inventory::RuntimeListenerId
+pub fn generated::http::runtime_v1::inventory::RuntimeListenerId::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for generated::http::runtime_v1::inventory::RuntimeListenerId
+impl core::ops::deref::Deref for generated::http::runtime_v1::inventory::RuntimeListenerId
+pub type generated::http::runtime_v1::inventory::RuntimeListenerId::Target = alloc::string::String
+pub fn generated::http::runtime_v1::inventory::RuntimeListenerId::deref(&self) -> &alloc::string::String
+impl core::str::traits::FromStr for generated::http::runtime_v1::inventory::RuntimeListenerId
+pub type generated::http::runtime_v1::inventory::RuntimeListenerId::Err = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::RuntimeListenerId::from_str(&str) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl secure::redaction::Redact for generated::http::runtime_v1::inventory::RuntimeListenerId
+pub fn generated::http::runtime_v1::inventory::RuntimeListenerId::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
+impl serde_core::ser::Serialize for generated::http::runtime_v1::inventory::RuntimeListenerId
+pub fn generated::http::runtime_v1::inventory::RuntimeListenerId::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::http::runtime_v1::inventory::RuntimeListenerId
+pub fn generated::http::runtime_v1::inventory::RuntimeListenerId::deserialize<D>(D) -> core::result::Result<Self, <D as serde_core::de::Deserializer>::Error> where D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::http::runtime_v1::inventory::RuntimeListenerId
+impl core::marker::Send for generated::http::runtime_v1::inventory::RuntimeListenerId
+impl core::marker::Sync for generated::http::runtime_v1::inventory::RuntimeListenerId
+impl core::marker::Unpin for generated::http::runtime_v1::inventory::RuntimeListenerId
+impl core::marker::UnsafeUnpin for generated::http::runtime_v1::inventory::RuntimeListenerId
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::runtime_v1::inventory::RuntimeListenerId
+impl core::panic::unwind_safe::UnwindSafe for generated::http::runtime_v1::inventory::RuntimeListenerId
+pub struct generated::http::runtime_v1::inventory::RuntimePlacement
+pub generated::http::runtime_v1::inventory::RuntimePlacement::domain: generated::http::runtime_v1::inventory::RuntimeDomain
+pub generated::http::runtime_v1::inventory::RuntimePlacement::endpoint: core::option::Option<generated::http::runtime_v1::inventory::RuntimeListenerEndpoint>
+pub generated::http::runtime_v1::inventory::RuntimePlacement::mode: generated::http::runtime_v1::inventory::RuntimePlacementMode
+pub generated::http::runtime_v1::inventory::RuntimePlacement::readiness: generated::http::runtime_v1::inventory::RuntimePlacementReadiness
+pub generated::http::runtime_v1::inventory::RuntimePlacement::spiffe_identity: core::option::Option<generated::http::runtime_v1::inventory::RuntimePlacementSpiffeIdentity>
+pub generated::http::runtime_v1::inventory::RuntimePlacement::workload: generated::http::runtime_v1::inventory::RuntimePlacementWorkload
+impl core::clone::Clone for generated::http::runtime_v1::inventory::RuntimePlacement
+pub fn generated::http::runtime_v1::inventory::RuntimePlacement::clone(&self) -> generated::http::runtime_v1::inventory::RuntimePlacement
+impl core::fmt::Debug for generated::http::runtime_v1::inventory::RuntimePlacement
+pub fn generated::http::runtime_v1::inventory::RuntimePlacement::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl secure::redaction::Redact for generated::http::runtime_v1::inventory::RuntimePlacement
+pub fn generated::http::runtime_v1::inventory::RuntimePlacement::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
+impl serde_core::ser::Serialize for generated::http::runtime_v1::inventory::RuntimePlacement
+pub fn generated::http::runtime_v1::inventory::RuntimePlacement::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::http::runtime_v1::inventory::RuntimePlacement
+pub fn generated::http::runtime_v1::inventory::RuntimePlacement::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::http::runtime_v1::inventory::RuntimePlacement
+impl core::marker::Send for generated::http::runtime_v1::inventory::RuntimePlacement
+impl core::marker::Sync for generated::http::runtime_v1::inventory::RuntimePlacement
+impl core::marker::Unpin for generated::http::runtime_v1::inventory::RuntimePlacement
+impl core::marker::UnsafeUnpin for generated::http::runtime_v1::inventory::RuntimePlacement
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::runtime_v1::inventory::RuntimePlacement
+impl core::panic::unwind_safe::UnwindSafe for generated::http::runtime_v1::inventory::RuntimePlacement
+pub struct generated::http::runtime_v1::inventory::RuntimePlacementSpiffeIdentity(_)
+impl core::clone::Clone for generated::http::runtime_v1::inventory::RuntimePlacementSpiffeIdentity
+pub fn generated::http::runtime_v1::inventory::RuntimePlacementSpiffeIdentity::clone(&self) -> generated::http::runtime_v1::inventory::RuntimePlacementSpiffeIdentity
+impl core::cmp::Eq for generated::http::runtime_v1::inventory::RuntimePlacementSpiffeIdentity
+impl core::cmp::Ord for generated::http::runtime_v1::inventory::RuntimePlacementSpiffeIdentity
+pub fn generated::http::runtime_v1::inventory::RuntimePlacementSpiffeIdentity::cmp(&self, &generated::http::runtime_v1::inventory::RuntimePlacementSpiffeIdentity) -> core::cmp::Ordering
+impl core::cmp::PartialEq for generated::http::runtime_v1::inventory::RuntimePlacementSpiffeIdentity
+pub fn generated::http::runtime_v1::inventory::RuntimePlacementSpiffeIdentity::eq(&self, &generated::http::runtime_v1::inventory::RuntimePlacementSpiffeIdentity) -> bool
+impl core::cmp::PartialOrd for generated::http::runtime_v1::inventory::RuntimePlacementSpiffeIdentity
+pub fn generated::http::runtime_v1::inventory::RuntimePlacementSpiffeIdentity::partial_cmp(&self, &generated::http::runtime_v1::inventory::RuntimePlacementSpiffeIdentity) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::From<generated::http::runtime_v1::inventory::RuntimePlacementSpiffeIdentity> for alloc::string::String
+pub fn alloc::string::String::from(generated::http::runtime_v1::inventory::RuntimePlacementSpiffeIdentity) -> Self
+impl core::convert::TryFrom<&alloc::string::String> for generated::http::runtime_v1::inventory::RuntimePlacementSpiffeIdentity
+pub type generated::http::runtime_v1::inventory::RuntimePlacementSpiffeIdentity::Error = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::RuntimePlacementSpiffeIdentity::try_from(&alloc::string::String) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl core::convert::TryFrom<&str> for generated::http::runtime_v1::inventory::RuntimePlacementSpiffeIdentity
+pub type generated::http::runtime_v1::inventory::RuntimePlacementSpiffeIdentity::Error = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::RuntimePlacementSpiffeIdentity::try_from(&str) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl core::convert::TryFrom<alloc::string::String> for generated::http::runtime_v1::inventory::RuntimePlacementSpiffeIdentity
+pub type generated::http::runtime_v1::inventory::RuntimePlacementSpiffeIdentity::Error = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::RuntimePlacementSpiffeIdentity::try_from(alloc::string::String) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl core::fmt::Debug for generated::http::runtime_v1::inventory::RuntimePlacementSpiffeIdentity
+pub fn generated::http::runtime_v1::inventory::RuntimePlacementSpiffeIdentity::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for generated::http::runtime_v1::inventory::RuntimePlacementSpiffeIdentity
+pub fn generated::http::runtime_v1::inventory::RuntimePlacementSpiffeIdentity::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for generated::http::runtime_v1::inventory::RuntimePlacementSpiffeIdentity
+impl core::ops::deref::Deref for generated::http::runtime_v1::inventory::RuntimePlacementSpiffeIdentity
+pub type generated::http::runtime_v1::inventory::RuntimePlacementSpiffeIdentity::Target = alloc::string::String
+pub fn generated::http::runtime_v1::inventory::RuntimePlacementSpiffeIdentity::deref(&self) -> &alloc::string::String
+impl core::str::traits::FromStr for generated::http::runtime_v1::inventory::RuntimePlacementSpiffeIdentity
+pub type generated::http::runtime_v1::inventory::RuntimePlacementSpiffeIdentity::Err = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::RuntimePlacementSpiffeIdentity::from_str(&str) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl secure::redaction::Redact for generated::http::runtime_v1::inventory::RuntimePlacementSpiffeIdentity
+pub fn generated::http::runtime_v1::inventory::RuntimePlacementSpiffeIdentity::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
+impl serde_core::ser::Serialize for generated::http::runtime_v1::inventory::RuntimePlacementSpiffeIdentity
+pub fn generated::http::runtime_v1::inventory::RuntimePlacementSpiffeIdentity::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::http::runtime_v1::inventory::RuntimePlacementSpiffeIdentity
+pub fn generated::http::runtime_v1::inventory::RuntimePlacementSpiffeIdentity::deserialize<D>(D) -> core::result::Result<Self, <D as serde_core::de::Deserializer>::Error> where D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::http::runtime_v1::inventory::RuntimePlacementSpiffeIdentity
+impl core::marker::Send for generated::http::runtime_v1::inventory::RuntimePlacementSpiffeIdentity
+impl core::marker::Sync for generated::http::runtime_v1::inventory::RuntimePlacementSpiffeIdentity
+impl core::marker::Unpin for generated::http::runtime_v1::inventory::RuntimePlacementSpiffeIdentity
+impl core::marker::UnsafeUnpin for generated::http::runtime_v1::inventory::RuntimePlacementSpiffeIdentity
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::runtime_v1::inventory::RuntimePlacementSpiffeIdentity
+impl core::panic::unwind_safe::UnwindSafe for generated::http::runtime_v1::inventory::RuntimePlacementSpiffeIdentity
+pub struct generated::http::runtime_v1::inventory::RuntimePlacementWorkload(_)
+impl core::clone::Clone for generated::http::runtime_v1::inventory::RuntimePlacementWorkload
+pub fn generated::http::runtime_v1::inventory::RuntimePlacementWorkload::clone(&self) -> generated::http::runtime_v1::inventory::RuntimePlacementWorkload
+impl core::cmp::Eq for generated::http::runtime_v1::inventory::RuntimePlacementWorkload
+impl core::cmp::Ord for generated::http::runtime_v1::inventory::RuntimePlacementWorkload
+pub fn generated::http::runtime_v1::inventory::RuntimePlacementWorkload::cmp(&self, &generated::http::runtime_v1::inventory::RuntimePlacementWorkload) -> core::cmp::Ordering
+impl core::cmp::PartialEq for generated::http::runtime_v1::inventory::RuntimePlacementWorkload
+pub fn generated::http::runtime_v1::inventory::RuntimePlacementWorkload::eq(&self, &generated::http::runtime_v1::inventory::RuntimePlacementWorkload) -> bool
+impl core::cmp::PartialOrd for generated::http::runtime_v1::inventory::RuntimePlacementWorkload
+pub fn generated::http::runtime_v1::inventory::RuntimePlacementWorkload::partial_cmp(&self, &generated::http::runtime_v1::inventory::RuntimePlacementWorkload) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::From<generated::http::runtime_v1::inventory::RuntimePlacementWorkload> for alloc::string::String
+pub fn alloc::string::String::from(generated::http::runtime_v1::inventory::RuntimePlacementWorkload) -> Self
+impl core::convert::TryFrom<&alloc::string::String> for generated::http::runtime_v1::inventory::RuntimePlacementWorkload
+pub type generated::http::runtime_v1::inventory::RuntimePlacementWorkload::Error = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::RuntimePlacementWorkload::try_from(&alloc::string::String) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl core::convert::TryFrom<&str> for generated::http::runtime_v1::inventory::RuntimePlacementWorkload
+pub type generated::http::runtime_v1::inventory::RuntimePlacementWorkload::Error = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::RuntimePlacementWorkload::try_from(&str) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl core::convert::TryFrom<alloc::string::String> for generated::http::runtime_v1::inventory::RuntimePlacementWorkload
+pub type generated::http::runtime_v1::inventory::RuntimePlacementWorkload::Error = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::RuntimePlacementWorkload::try_from(alloc::string::String) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl core::fmt::Debug for generated::http::runtime_v1::inventory::RuntimePlacementWorkload
+pub fn generated::http::runtime_v1::inventory::RuntimePlacementWorkload::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for generated::http::runtime_v1::inventory::RuntimePlacementWorkload
+pub fn generated::http::runtime_v1::inventory::RuntimePlacementWorkload::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for generated::http::runtime_v1::inventory::RuntimePlacementWorkload
+impl core::ops::deref::Deref for generated::http::runtime_v1::inventory::RuntimePlacementWorkload
+pub type generated::http::runtime_v1::inventory::RuntimePlacementWorkload::Target = alloc::string::String
+pub fn generated::http::runtime_v1::inventory::RuntimePlacementWorkload::deref(&self) -> &alloc::string::String
+impl core::str::traits::FromStr for generated::http::runtime_v1::inventory::RuntimePlacementWorkload
+pub type generated::http::runtime_v1::inventory::RuntimePlacementWorkload::Err = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::RuntimePlacementWorkload::from_str(&str) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl secure::redaction::Redact for generated::http::runtime_v1::inventory::RuntimePlacementWorkload
+pub fn generated::http::runtime_v1::inventory::RuntimePlacementWorkload::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
+impl serde_core::ser::Serialize for generated::http::runtime_v1::inventory::RuntimePlacementWorkload
+pub fn generated::http::runtime_v1::inventory::RuntimePlacementWorkload::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::http::runtime_v1::inventory::RuntimePlacementWorkload
+pub fn generated::http::runtime_v1::inventory::RuntimePlacementWorkload::deserialize<D>(D) -> core::result::Result<Self, <D as serde_core::de::Deserializer>::Error> where D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::http::runtime_v1::inventory::RuntimePlacementWorkload
+impl core::marker::Send for generated::http::runtime_v1::inventory::RuntimePlacementWorkload
+impl core::marker::Sync for generated::http::runtime_v1::inventory::RuntimePlacementWorkload
+impl core::marker::Unpin for generated::http::runtime_v1::inventory::RuntimePlacementWorkload
+impl core::marker::UnsafeUnpin for generated::http::runtime_v1::inventory::RuntimePlacementWorkload
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::runtime_v1::inventory::RuntimePlacementWorkload
+impl core::panic::unwind_safe::UnwindSafe for generated::http::runtime_v1::inventory::RuntimePlacementWorkload
+pub struct generated::http::runtime_v1::inventory::RuntimeProviderPosture
+pub generated::http::runtime_v1::inventory::RuntimeProviderPosture::id: generated::http::runtime_v1::inventory::RuntimeProviderPostureId
+pub generated::http::runtime_v1::inventory::RuntimeProviderPosture::state: generated::http::runtime_v1::inventory::RuntimeProviderPostureState
+impl core::clone::Clone for generated::http::runtime_v1::inventory::RuntimeProviderPosture
+pub fn generated::http::runtime_v1::inventory::RuntimeProviderPosture::clone(&self) -> generated::http::runtime_v1::inventory::RuntimeProviderPosture
+impl core::fmt::Debug for generated::http::runtime_v1::inventory::RuntimeProviderPosture
+pub fn generated::http::runtime_v1::inventory::RuntimeProviderPosture::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl secure::redaction::Redact for generated::http::runtime_v1::inventory::RuntimeProviderPosture
+pub fn generated::http::runtime_v1::inventory::RuntimeProviderPosture::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
+impl serde_core::ser::Serialize for generated::http::runtime_v1::inventory::RuntimeProviderPosture
+pub fn generated::http::runtime_v1::inventory::RuntimeProviderPosture::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::http::runtime_v1::inventory::RuntimeProviderPosture
+pub fn generated::http::runtime_v1::inventory::RuntimeProviderPosture::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::http::runtime_v1::inventory::RuntimeProviderPosture
+impl core::marker::Send for generated::http::runtime_v1::inventory::RuntimeProviderPosture
+impl core::marker::Sync for generated::http::runtime_v1::inventory::RuntimeProviderPosture
+impl core::marker::Unpin for generated::http::runtime_v1::inventory::RuntimeProviderPosture
+impl core::marker::UnsafeUnpin for generated::http::runtime_v1::inventory::RuntimeProviderPosture
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::runtime_v1::inventory::RuntimeProviderPosture
+impl core::panic::unwind_safe::UnwindSafe for generated::http::runtime_v1::inventory::RuntimeProviderPosture
+pub struct generated::http::runtime_v1::inventory::RuntimeProviderPostureId(_)
+impl core::clone::Clone for generated::http::runtime_v1::inventory::RuntimeProviderPostureId
+pub fn generated::http::runtime_v1::inventory::RuntimeProviderPostureId::clone(&self) -> generated::http::runtime_v1::inventory::RuntimeProviderPostureId
+impl core::cmp::Eq for generated::http::runtime_v1::inventory::RuntimeProviderPostureId
+impl core::cmp::Ord for generated::http::runtime_v1::inventory::RuntimeProviderPostureId
+pub fn generated::http::runtime_v1::inventory::RuntimeProviderPostureId::cmp(&self, &generated::http::runtime_v1::inventory::RuntimeProviderPostureId) -> core::cmp::Ordering
+impl core::cmp::PartialEq for generated::http::runtime_v1::inventory::RuntimeProviderPostureId
+pub fn generated::http::runtime_v1::inventory::RuntimeProviderPostureId::eq(&self, &generated::http::runtime_v1::inventory::RuntimeProviderPostureId) -> bool
+impl core::cmp::PartialOrd for generated::http::runtime_v1::inventory::RuntimeProviderPostureId
+pub fn generated::http::runtime_v1::inventory::RuntimeProviderPostureId::partial_cmp(&self, &generated::http::runtime_v1::inventory::RuntimeProviderPostureId) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::From<generated::http::runtime_v1::inventory::RuntimeProviderPostureId> for alloc::string::String
+pub fn alloc::string::String::from(generated::http::runtime_v1::inventory::RuntimeProviderPostureId) -> Self
+impl core::convert::TryFrom<&alloc::string::String> for generated::http::runtime_v1::inventory::RuntimeProviderPostureId
+pub type generated::http::runtime_v1::inventory::RuntimeProviderPostureId::Error = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::RuntimeProviderPostureId::try_from(&alloc::string::String) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl core::convert::TryFrom<&str> for generated::http::runtime_v1::inventory::RuntimeProviderPostureId
+pub type generated::http::runtime_v1::inventory::RuntimeProviderPostureId::Error = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::RuntimeProviderPostureId::try_from(&str) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl core::convert::TryFrom<alloc::string::String> for generated::http::runtime_v1::inventory::RuntimeProviderPostureId
+pub type generated::http::runtime_v1::inventory::RuntimeProviderPostureId::Error = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::RuntimeProviderPostureId::try_from(alloc::string::String) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl core::fmt::Debug for generated::http::runtime_v1::inventory::RuntimeProviderPostureId
+pub fn generated::http::runtime_v1::inventory::RuntimeProviderPostureId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for generated::http::runtime_v1::inventory::RuntimeProviderPostureId
+pub fn generated::http::runtime_v1::inventory::RuntimeProviderPostureId::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for generated::http::runtime_v1::inventory::RuntimeProviderPostureId
+impl core::ops::deref::Deref for generated::http::runtime_v1::inventory::RuntimeProviderPostureId
+pub type generated::http::runtime_v1::inventory::RuntimeProviderPostureId::Target = alloc::string::String
+pub fn generated::http::runtime_v1::inventory::RuntimeProviderPostureId::deref(&self) -> &alloc::string::String
+impl core::str::traits::FromStr for generated::http::runtime_v1::inventory::RuntimeProviderPostureId
+pub type generated::http::runtime_v1::inventory::RuntimeProviderPostureId::Err = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::RuntimeProviderPostureId::from_str(&str) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl secure::redaction::Redact for generated::http::runtime_v1::inventory::RuntimeProviderPostureId
+pub fn generated::http::runtime_v1::inventory::RuntimeProviderPostureId::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
+impl serde_core::ser::Serialize for generated::http::runtime_v1::inventory::RuntimeProviderPostureId
+pub fn generated::http::runtime_v1::inventory::RuntimeProviderPostureId::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::http::runtime_v1::inventory::RuntimeProviderPostureId
+pub fn generated::http::runtime_v1::inventory::RuntimeProviderPostureId::deserialize<D>(D) -> core::result::Result<Self, <D as serde_core::de::Deserializer>::Error> where D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::http::runtime_v1::inventory::RuntimeProviderPostureId
+impl core::marker::Send for generated::http::runtime_v1::inventory::RuntimeProviderPostureId
+impl core::marker::Sync for generated::http::runtime_v1::inventory::RuntimeProviderPostureId
+impl core::marker::Unpin for generated::http::runtime_v1::inventory::RuntimeProviderPostureId
+impl core::marker::UnsafeUnpin for generated::http::runtime_v1::inventory::RuntimeProviderPostureId
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::runtime_v1::inventory::RuntimeProviderPostureId
+impl core::panic::unwind_safe::UnwindSafe for generated::http::runtime_v1::inventory::RuntimeProviderPostureId
+pub struct generated::http::runtime_v1::inventory::Sha256Fingerprint(_)
+impl core::clone::Clone for generated::http::runtime_v1::inventory::Sha256Fingerprint
+pub fn generated::http::runtime_v1::inventory::Sha256Fingerprint::clone(&self) -> generated::http::runtime_v1::inventory::Sha256Fingerprint
+impl core::cmp::Eq for generated::http::runtime_v1::inventory::Sha256Fingerprint
+impl core::cmp::Ord for generated::http::runtime_v1::inventory::Sha256Fingerprint
+pub fn generated::http::runtime_v1::inventory::Sha256Fingerprint::cmp(&self, &generated::http::runtime_v1::inventory::Sha256Fingerprint) -> core::cmp::Ordering
+impl core::cmp::PartialEq for generated::http::runtime_v1::inventory::Sha256Fingerprint
+pub fn generated::http::runtime_v1::inventory::Sha256Fingerprint::eq(&self, &generated::http::runtime_v1::inventory::Sha256Fingerprint) -> bool
+impl core::cmp::PartialOrd for generated::http::runtime_v1::inventory::Sha256Fingerprint
+pub fn generated::http::runtime_v1::inventory::Sha256Fingerprint::partial_cmp(&self, &generated::http::runtime_v1::inventory::Sha256Fingerprint) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::From<generated::http::runtime_v1::inventory::Sha256Fingerprint> for alloc::string::String
+pub fn alloc::string::String::from(generated::http::runtime_v1::inventory::Sha256Fingerprint) -> Self
+impl core::convert::TryFrom<&alloc::string::String> for generated::http::runtime_v1::inventory::Sha256Fingerprint
+pub type generated::http::runtime_v1::inventory::Sha256Fingerprint::Error = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::Sha256Fingerprint::try_from(&alloc::string::String) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl core::convert::TryFrom<&str> for generated::http::runtime_v1::inventory::Sha256Fingerprint
+pub type generated::http::runtime_v1::inventory::Sha256Fingerprint::Error = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::Sha256Fingerprint::try_from(&str) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl core::convert::TryFrom<alloc::string::String> for generated::http::runtime_v1::inventory::Sha256Fingerprint
+pub type generated::http::runtime_v1::inventory::Sha256Fingerprint::Error = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::Sha256Fingerprint::try_from(alloc::string::String) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl core::fmt::Debug for generated::http::runtime_v1::inventory::Sha256Fingerprint
+pub fn generated::http::runtime_v1::inventory::Sha256Fingerprint::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for generated::http::runtime_v1::inventory::Sha256Fingerprint
+pub fn generated::http::runtime_v1::inventory::Sha256Fingerprint::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for generated::http::runtime_v1::inventory::Sha256Fingerprint
+impl core::ops::deref::Deref for generated::http::runtime_v1::inventory::Sha256Fingerprint
+pub type generated::http::runtime_v1::inventory::Sha256Fingerprint::Target = alloc::string::String
+pub fn generated::http::runtime_v1::inventory::Sha256Fingerprint::deref(&self) -> &alloc::string::String
+impl core::str::traits::FromStr for generated::http::runtime_v1::inventory::Sha256Fingerprint
+pub type generated::http::runtime_v1::inventory::Sha256Fingerprint::Err = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::Sha256Fingerprint::from_str(&str) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl secure::redaction::Redact for generated::http::runtime_v1::inventory::Sha256Fingerprint
+pub fn generated::http::runtime_v1::inventory::Sha256Fingerprint::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
+impl serde_core::ser::Serialize for generated::http::runtime_v1::inventory::Sha256Fingerprint
+pub fn generated::http::runtime_v1::inventory::Sha256Fingerprint::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::http::runtime_v1::inventory::Sha256Fingerprint
+pub fn generated::http::runtime_v1::inventory::Sha256Fingerprint::deserialize<D>(D) -> core::result::Result<Self, <D as serde_core::de::Deserializer>::Error> where D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::http::runtime_v1::inventory::Sha256Fingerprint
+impl core::marker::Send for generated::http::runtime_v1::inventory::Sha256Fingerprint
+impl core::marker::Sync for generated::http::runtime_v1::inventory::Sha256Fingerprint
+impl core::marker::Unpin for generated::http::runtime_v1::inventory::Sha256Fingerprint
+impl core::marker::UnsafeUnpin for generated::http::runtime_v1::inventory::Sha256Fingerprint
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::runtime_v1::inventory::Sha256Fingerprint
+impl core::panic::unwind_safe::UnwindSafe for generated::http::runtime_v1::inventory::Sha256Fingerprint
+pub const generated::http::runtime_v1::inventory::CONTRACT: vocab::contract::binding::ContractBinding
+pub const generated::http::runtime_v1::inventory::CONTRACT_ID: &str
+pub const generated::http::runtime_v1::inventory::EFFECTS: &[vocab::http::HttpEffectKind]
+pub const generated::http::runtime_v1::inventory::EFFECT_PROFILE: vocab::http::HttpEffectProfile
+pub const generated::http::runtime_v1::inventory::PATH: &str
+pub const generated::http::runtime_v1::inventory::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
+pub const generated::http::runtime_v1::inventory::ROUTE: vocab::http::HttpRouteBinding<generated::http::runtime_v1::inventory::RouteMarker, vocab::http::LocalOnly>
+pub const generated::http::runtime_v1::inventory::SPEC: generated::http::HttpSpec
 pub mod generated::http::settings_v1
 pub mod generated::http::settings_v1::error
 pub struct generated::http::settings_v1::error::ConversionError(_)
@@ -4724,25 +6067,6 @@ impl core::marker::Unpin for generated::http::HttpHeaderMode
 impl core::marker::UnsafeUnpin for generated::http::HttpHeaderMode
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::HttpHeaderMode
 impl core::panic::unwind_safe::UnwindSafe for generated::http::HttpHeaderMode
-pub enum generated::http::HttpResourceSharingMode
-pub generated::http::HttpResourceSharingMode::Global
-pub generated::http::HttpResourceSharingMode::TenantScoped
-impl core::clone::Clone for generated::http::HttpResourceSharingMode
-pub fn generated::http::HttpResourceSharingMode::clone(&self) -> generated::http::HttpResourceSharingMode
-impl core::cmp::Eq for generated::http::HttpResourceSharingMode
-impl core::cmp::PartialEq for generated::http::HttpResourceSharingMode
-pub fn generated::http::HttpResourceSharingMode::eq(&self, &generated::http::HttpResourceSharingMode) -> bool
-impl core::fmt::Debug for generated::http::HttpResourceSharingMode
-pub fn generated::http::HttpResourceSharingMode::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Copy for generated::http::HttpResourceSharingMode
-impl core::marker::StructuralPartialEq for generated::http::HttpResourceSharingMode
-impl core::marker::Freeze for generated::http::HttpResourceSharingMode
-impl core::marker::Send for generated::http::HttpResourceSharingMode
-impl core::marker::Sync for generated::http::HttpResourceSharingMode
-impl core::marker::Unpin for generated::http::HttpResourceSharingMode
-impl core::marker::UnsafeUnpin for generated::http::HttpResourceSharingMode
-impl core::panic::unwind_safe::RefUnwindSafe for generated::http::HttpResourceSharingMode
-impl core::panic::unwind_safe::UnwindSafe for generated::http::HttpResourceSharingMode
 pub struct generated::http::HttpHeaderSpec
 pub generated::http::HttpHeaderSpec::mode: generated::http::HttpHeaderMode
 pub generated::http::HttpHeaderSpec::name: &'static str
@@ -4784,7 +6108,7 @@ impl core::marker::UnsafeUnpin for generated::http::HttpProjectionFieldSpec
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::HttpProjectionFieldSpec
 impl core::panic::unwind_safe::UnwindSafe for generated::http::HttpProjectionFieldSpec
 pub struct generated::http::HttpResourceSharingSpec
-pub generated::http::HttpResourceSharingSpec::mode: generated::http::HttpResourceSharingMode
+pub generated::http::HttpResourceSharingSpec::mode: vocab::http::HttpResourceSharing
 pub generated::http::HttpResourceSharingSpec::reason: core::option::Option<&'static str>
 impl core::clone::Clone for generated::http::HttpResourceSharingSpec
 pub fn generated::http::HttpResourceSharingSpec::clone(&self) -> generated::http::HttpResourceSharingSpec

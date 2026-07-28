@@ -11,8 +11,8 @@ mod common;
 
 use std::collections::HashMap;
 use std::future::{Future, poll_fn};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context as _, Result, anyhow, ensure};
@@ -21,35 +21,31 @@ use audit::ports::{
     AuditOutcome, AuditPage, AuditRecord, AuditWriteRepo, CrossTenantReadScope, DynAuditAdminRepo,
     DynAuditReadRepo, ResourceRef, TenantRepoScope as AuditScope,
 };
-use authn::{AuthGrant, AuthGrantId};
 use axum::body::{Body, to_bytes};
 use axum::http::{Method, Request, StatusCode, header};
 use diport::{
     DynKeyProvider, DynSecretResolver, EncryptOutput, KeyName, KeyProvider, KeyProviderError,
-    KeyRef, KeyVersion, ManagedResource, OutboxEmitError, RedactedBytes, SecretCoordinate,
-    SecretMaterial, SecretResolver, SecretResolverError,
+    KeyRef, KeyVersion, ManagedResource, RedactedBytes, SecretCoordinate, SecretMaterial,
+    SecretResolver, SecretResolverError,
 };
 use generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesResponse;
-use generated::http::identity_v1::{
-    password_change::{IdentityPasswordChangeRequest, IdentityPasswordChangeResponse},
-    refresh::{IdentityRefreshRequest, IdentityRefreshResponse},
-};
+use generated::http::identity_v1::refresh::{IdentityRefreshRequest, IdentityRefreshResponse};
 use generated::http::settings_v2::{SettingsSecretPublishRequest, SettingsSecretPublishResponse};
 use identity::ports::{
-    AuthGrantCloseCommand, AuthGrantLifecycle, AuthOutcome, Credential, CredentialRepo,
-    DynAccountSecurityReadRepo, DynCredentialRepo, DynRefreshTokenStore, IdentityError,
-    LoginGrantMutation, LoginIdentifier, PasswordChangeMutation, RefreshRotationMutation,
-    RefreshRotationOutcome, RefreshTokenHash, RefreshTokenId, RefreshTokenRecord,
-    RefreshTokenStore, TenantRepoScope as IdentityScope,
+    Credential, CredentialRepo, DynAccountSecurityReadRepo, DynCredentialRepo,
+    DynRefreshTokenStore, IdentityError, RefreshRotationMutation, RefreshRotationOutcome,
+    RefreshTokenHash, RefreshTokenId, RefreshTokenRecord, RefreshTokenStore,
+    TenantRepoScope as IdentityScope,
 };
-use identity::{AuthGrantProvider, AuthGrantServices, LoginService, SeedSigner};
+use identity::{
+    AuthGrantProvider, AuthGrantServices, CredentialSecurityService, LoginService, SeedSigner,
+};
 use memory::{FixedClock, MemBus, MemEmitter};
 use postgres::{
-    ConfigValueProtections, PgAuditAdminRepo, PgAuthGrantLifecycle, PgAuthGrantProvider, PgConfig,
-    PgCredentialRepo, PgPassword, PgRefreshTokenStore, PgRuntimeDeps, PgSslMode,
-    PgTenantReadConfig, caps,
+    ConfigValueProtections, PgAuditAdminRepo, PgAuthGrantLifecycle, PgConfig, PgCredentialRepo,
+    PgPassword, PgRuntimeDeps, PgSslMode, PgTenantReadConfig, caps,
 };
-use primitives::{AuthPlan, AuthScheme, ListenerKind, MacKey, RequiredScheme};
+use primitives::{AuthPlan, AuthScheme, ListenerKind, MacKey};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use settings::ports::{
@@ -66,10 +62,6 @@ use vocab::{PrincipalKind, TenantId};
 const TENANT_A: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
 const TENANT_B: &str = "a47ac10b-58cc-4372-a567-0e02b2c3d470";
 const HAPPY_USER: &str = "11111111-2222-4333-8444-555555555551";
-const CONFLICT_USER: &str = "11111111-2222-4333-8444-555555555552";
-const SESSION_USER: &str = "11111111-2222-4333-8444-555555555553";
-const OTHER_USER: &str = "11111111-2222-4333-8444-555555555554";
-const TENANT_B_USER: &str = "11111111-2222-4333-8444-555555555555";
 const NOW_SECS: u64 = 1_000;
 const TTL_SECS: u64 = 3_600;
 
@@ -89,32 +81,17 @@ static RSS_APP_READ_LOGIN: TestPgCredential =
     TestPgCredential::new("rss_app_read", "rss_app_read_test_pw");
 static RSS_AUDIT_ADMIN_LOGIN: TestPgCredential =
     TestPgCredential::new("rss_audit_admin", "rss_audit_admin_test_pw");
-const CURRENT_PASSWORD: &str = "journey-current-password-sentinel";
-const NEW_PASSWORD: &str = "journey-new-password-sentinel";
-const CONFLICT_PASSWORD_A: &str = "journey-conflict-password-a-sentinel";
-const CONFLICT_PASSWORD_B: &str = "journey-conflict-password-b-sentinel";
+const IDENTITY_SEED_PASSWORD: &str = "journey-identity-seed-password-sentinel";
 const AUDIT_LEDGER_ACTION: &str = "audit:journey_entry";
 const AUDIT_LEDGER_RESOURCE_KIND: &str = "journey-audit-resource";
 const AUDIT_LEDGER_RESOURCE_SENTINEL: &str = "audit-ledger-resource-sentinel";
 
 const SETTINGS_FIXTURE: &str =
     include_str!("../../../fixtures/settings-secret-publish-localtx.toml");
-const PASSWORD_FIXTURE: &str =
-    include_str!("../../../fixtures/identity-password-change-localtx.toml");
 const AUDIT_TENANT_FIXTURE: &str =
     include_str!("../../../fixtures/audit-list-tenant-entries-localtx.toml");
 const REFRESH_FIXTURE: &str = include_str!("../../../fixtures/identity-refresh-localtx.toml");
 const AUDIT_ROUTE_ACTION: &str = "audit:list-cross-tenant";
-
-fn password_matches(
-    candidate: &str,
-    stored: &secure::PasswordHash,
-) -> Result<bool, secure::PasswordError> {
-    Ok(matches!(
-        secure::verify_password(secure::RawPassword::new(candidate.to_owned()), Some(stored))?,
-        secure::PasswordVerification::Verified(_)
-    ))
-}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -362,154 +339,6 @@ impl SecretRepo for BarrierSecretRepo {
             self.barrier.wait().await;
         }
         Ok(version)
-    }
-}
-
-struct BarrierCredentialRepo {
-    inner: PgCredentialRepo,
-    conflict_user: ids::UserId,
-    barrier: Arc<Barrier>,
-}
-
-impl CredentialRepo for BarrierCredentialRepo {
-    async fn find_by_user_id(
-        &self,
-        scope: IdentityScope,
-        user_id: ids::UserId,
-    ) -> Result<Option<Credential>, IdentityError> {
-        let credential = self.inner.find_by_user_id(scope, user_id).await?;
-        if user_id == self.conflict_user {
-            self.barrier.wait().await;
-        }
-        Ok(credential)
-    }
-
-    async fn authenticate(
-        &self,
-        scope: IdentityScope,
-        login: LoginIdentifier,
-        candidate: secure::RawPassword,
-        now: SystemTime,
-    ) -> Result<AuthOutcome, IdentityError> {
-        self.inner.authenticate(scope, login, candidate, now).await
-    }
-
-    async fn save(
-        &self,
-        scope: IdentityScope,
-        credential: Credential,
-    ) -> Result<(), IdentityError> {
-        self.inner.save(scope, credential).await
-    }
-
-    async fn apply_password_change(
-        &self,
-        scope: IdentityScope,
-        mutation: PasswordChangeMutation,
-    ) -> Result<(), IdentityError> {
-        self.inner.apply_password_change(scope, mutation).await
-    }
-}
-
-struct AuthGrantFindBarrier {
-    target: Mutex<Option<String>>,
-    barrier: Barrier,
-}
-
-impl AuthGrantFindBarrier {
-    fn new() -> Self {
-        Self {
-            target: Mutex::new(None),
-            barrier: Barrier::new(2),
-        }
-    }
-
-    fn arm(&self, session_id: &str) -> Result<()> {
-        let mut target = self
-            .target
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        ensure!(target.is_none(), "auth-grant find barrier is already armed");
-        *target = Some(session_id.to_owned());
-        Ok(())
-    }
-
-    async fn wait_if_armed(&self, grant_id: &AuthGrantId) {
-        let armed = self
-            .target
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .as_deref()
-            .is_some_and(|target| target == grant_id.as_str());
-        if armed && self.barrier.wait().await.is_leader() {
-            self.target
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .take();
-        }
-    }
-}
-
-struct BarrierAuthGrantProvider {
-    inner: PgAuthGrantProvider,
-    find_barrier: Arc<AuthGrantFindBarrier>,
-}
-
-struct BarrierAuthGrantLifecycle {
-    inner: PgAuthGrantLifecycle,
-    find_barrier: Arc<AuthGrantFindBarrier>,
-}
-
-impl AuthGrantLifecycle for BarrierAuthGrantLifecycle {
-    async fn persist_login_grant(
-        &self,
-        receipt: identity::ports::LoginProducerReceipt,
-        scope: IdentityScope,
-        mutation: LoginGrantMutation,
-        entry: consistency::EventEntry,
-        envelope: diport::OutboxEnvelopeParts,
-    ) -> Result<identity::ports::PersistedLoginGrantReceipt, OutboxEmitError> {
-        self.inner
-            .persist_login_grant(receipt, scope, mutation, entry, envelope)
-            .await
-    }
-
-    async fn find_active(
-        &self,
-        scope: IdentityScope,
-        grant_id: AuthGrantId,
-        observed_at: SystemTime,
-    ) -> Result<Option<AuthGrant>, IdentityError> {
-        let grant = self
-            .inner
-            .find_active(scope, grant_id.clone(), observed_at)
-            .await?;
-        self.find_barrier.wait_if_armed(&grant_id).await;
-        Ok(grant)
-    }
-
-    async fn close(
-        &self,
-        scope: IdentityScope,
-        command: AuthGrantCloseCommand,
-    ) -> Result<(), IdentityError> {
-        self.inner.close(scope, command).await
-    }
-}
-
-impl AuthGrantProvider for BarrierAuthGrantProvider {
-    type Lifecycle = BarrierAuthGrantLifecycle;
-    type RefreshStore = PgRefreshTokenStore;
-
-    fn into_auth_grant_parts(self) -> (Self::Lifecycle, Self::RefreshStore) {
-        let (lifecycle, refresh) = self.inner.into_auth_grant_parts();
-        (
-            BarrierAuthGrantLifecycle {
-                inner: lifecycle,
-                find_barrier: self.find_barrier,
-            },
-            refresh,
-        )
     }
 }
 
@@ -874,18 +703,14 @@ fn assert_accounting(
     expected_final: ExpectedLocalTxFinal,
 ) -> Result<()> {
     let expected_scenario = match case.id.as_str() {
-        "settings-secret-publish-happy"
-        | "identity-password-change-happy"
-        | "identity-logout-happy" => "happy",
+        "settings-secret-publish-happy" | "identity-logout-happy" => "happy",
         "settings-secret-publish-auth-failure"
-        | "identity-password-change-unauthenticated"
-        | "identity-password-change-invalid-subject"
         | "identity-logout-unauthenticated"
         | "identity-logout-other-owner" => "auth-failure",
-        "settings-secret-publish-validation-failure"
-        | "identity-password-change-validation-failure"
-        | "identity-logout-validation-failure" => "validation-failure",
-        "settings-secret-publish-conflict" | "identity-password-change-conflict" => "conflict",
+        "settings-secret-publish-validation-failure" | "identity-logout-validation-failure" => {
+            "validation-failure"
+        }
+        "settings-secret-publish-conflict" => "conflict",
         "identity-logout-contention"
         | "identity-logout-repeat"
         | "identity-logout-cross-tenant" => "contention",
@@ -985,9 +810,13 @@ fn finalized_router(
         .pop()
         .ok_or_else(|| anyhow!("journey route group missing"))?;
     ensure!(listener == ListenerKind::Primary);
+    let auth_scheme = match principal {
+        Some((PrincipalKind::User, _, _)) | None => AuthScheme::RssAccessToken,
+        Some(_) => AuthScheme::FederatedAccessToken,
+    };
     let authenticated = httpserve::finalize_primary_auth(
         routes,
-        AuthPlan::new(ListenerKind::Primary, AuthScheme::RssAccessToken)?,
+        AuthPlan::new(ListenerKind::Primary, auth_scheme)?,
         authorizer,
     )?;
     Ok(match principal {
@@ -1013,11 +842,8 @@ fn test_authenticated(
             tenant.context("RSS user test evidence requires tenant")?,
         ));
     }
-    Ok(httpserve::Authenticated::new(
-        RequiredScheme::RssAccessToken,
-        kind,
-        subject,
-        tenant,
+    Ok(httpserve::Authenticated::new_federated(
+        kind, subject, tenant,
     ))
 }
 
@@ -1143,32 +969,6 @@ async fn secret_snapshot(
 }
 
 #[derive(PartialEq, Eq)]
-struct CredentialSnapshot(Vec<Option<CredentialSnapshotRow>>);
-
-type CredentialSnapshotRow = (String, String, u32);
-
-async fn credential_snapshot(
-    repo: &PgCredentialRepo,
-    probes: [(TenantId, ids::UserId); 2],
-) -> Result<CredentialSnapshot> {
-    let mut rows = Vec::with_capacity(2);
-    for (tenant, user) in probes {
-        rows.push(
-            repo.find_by_user_id(IdentityScope::for_test(tenant), user)
-                .await?
-                .map(|credential| {
-                    (
-                        credential.login().as_str().to_owned(),
-                        credential.password_hash().as_str().to_owned(),
-                        credential.version(),
-                    )
-                }),
-        );
-    }
-    Ok(CredentialSnapshot(rows))
-}
-
-#[derive(PartialEq, Eq)]
 struct AuthGrantSnapshot(Vec<bool>);
 
 async fn auth_grant_snapshot(
@@ -1199,7 +999,7 @@ async fn seed_credential(
     login: &str,
     password: &str,
 ) -> Result<()> {
-    repo.save(
+    repo.insert(
         IdentityScope::for_test(tenant),
         Credential::hydrate(
             login,
@@ -1227,14 +1027,6 @@ fn finish_with_pg_cleanup(body: Result<()>, cleanup: Result<()>) -> Result<()> {
 pub(crate) struct SettingsCases {
     pub(crate) happy: JourneyCase,
     pub(crate) auth_failure: JourneyCase,
-    pub(crate) validation_failure: JourneyCase,
-    pub(crate) conflict: JourneyCase,
-}
-
-pub(crate) struct PasswordCases {
-    pub(crate) happy: JourneyCase,
-    pub(crate) unauthenticated: JourneyCase,
-    pub(crate) invalid_subject: JourneyCase,
     pub(crate) validation_failure: JourneyCase,
     pub(crate) conflict: JourneyCase,
 }
@@ -1531,372 +1323,45 @@ async fn drive_settings(
     Ok(())
 }
 
-struct IdentityHarness {
-    tenant_a: TenantId,
-    tenant_b: TenantId,
-    happy_user: ids::UserId,
-    conflict_user: ids::UserId,
-    tenant_b_user: ids::UserId,
-    primary_authorizer: Arc<dyn httpserve::RouteAuthorizer>,
-    login: Arc<LoginService<identity::SeedSigner>>,
-    happy_identity: axum::Router,
-    conflict_identity: axum::Router,
-    identity_unauthed: axum::Router,
-    invalid_subject: axum::Router,
-    other_identity: axum::Router,
-    session_identity: axum::Router,
-    tenant_b_identity: axum::Router,
-    credential_observer: PgCredentialRepo,
-    grant_find_barrier: Arc<AuthGrantFindBarrier>,
-}
-
-async fn build_identity_harness(
+async fn build_identity_authorizer(
     deps: &PgRuntimeDeps,
-    tenant_a: TenantId,
-    tenant_b: TenantId,
-) -> Result<IdentityHarness> {
-    let happy_user = ids::UserId::parse(HAPPY_USER)?;
-    let conflict_user = ids::UserId::parse(CONFLICT_USER)?;
-    let session_user = ids::UserId::parse(SESSION_USER)?;
-    let other_user = ids::UserId::parse(OTHER_USER)?;
-    let tenant_b_user = ids::UserId::parse(TENANT_B_USER)?;
+    tenant: TenantId,
+) -> Result<Arc<dyn httpserve::RouteAuthorizer>> {
     let identity_deps = deps.handle().for_domain::<caps::Identity>();
-    let seed_repo = identity_deps.credential_repo();
     seed_credential(
-        &seed_repo,
-        tenant_a,
-        happy_user,
-        "happy-login",
-        CURRENT_PASSWORD,
+        &identity_deps.credential_repo(),
+        tenant,
+        ids::UserId::parse(HAPPY_USER)?,
+        "settings-authorizer-login",
+        IDENTITY_SEED_PASSWORD,
     )
     .await?;
-    seed_credential(
-        &seed_repo,
-        tenant_a,
-        conflict_user,
-        "conflict-login",
-        CURRENT_PASSWORD,
-    )
-    .await?;
-    seed_credential(
-        &seed_repo,
-        tenant_a,
-        session_user,
-        "session-login",
-        CURRENT_PASSWORD,
-    )
-    .await?;
-    seed_credential(
-        &seed_repo,
-        tenant_a,
-        other_user,
-        "other-login",
-        CURRENT_PASSWORD,
-    )
-    .await?;
-    seed_credential(
-        &seed_repo,
-        tenant_b,
-        tenant_b_user,
-        "tenant-b-login",
-        CURRENT_PASSWORD,
-    )
-    .await?;
-
     let credentials: Arc<DynCredentialRepo<'static>> =
-        Arc::from(DynCredentialRepo::new_box(BarrierCredentialRepo {
-            inner: identity_deps.credential_repo(),
-            conflict_user,
-            barrier: Arc::new(Barrier::new(2)),
-        }));
-    let grant_find_barrier = Arc::new(AuthGrantFindBarrier::new());
+        Arc::from(DynCredentialRepo::new_box(identity_deps.credential_repo()));
     let auth_grants = seed_auth_grant_services(
-        BarrierAuthGrantProvider {
-            inner: identity_deps.auth_grant_provider(Box::new(FixedClock::at_unix_secs(NOW_SECS))),
-            find_barrier: Arc::clone(&grant_find_barrier),
-        },
+        identity_deps.auth_grant_provider(Box::new(FixedClock::at_unix_secs(NOW_SECS))),
         DynAccountSecurityReadRepo::new_box(identity_deps.account_security_repo()),
     );
     let refresh = auth_grants.refresh_service();
+    let grants = auth_grants.lifecycle();
+    let credential_security = Arc::new(CredentialSecurityService::new(
+        Arc::clone(&credentials),
+        grants,
+        DynAccountSecurityReadRepo::new_box(identity_deps.account_security_repo()),
+        identity_deps.identity_security_lifecycle(postgres::identity_pseudonym_keys_for_test()),
+        identity_deps.identity_security_lifecycle(postgres::identity_pseudonym_keys_for_test()),
+        common::password_policy(),
+        Box::new(FixedClock::at_unix_secs(NOW_SECS)),
+    ));
     let login = Arc::new(LoginService::new(
         credentials,
         auth_grants,
-        common::password_policy(),
         Box::new(FixedClock::at_unix_secs(NOW_SECS)),
         Duration::from_secs(TTL_SECS),
     ));
-    let identity_domain = common::identity_domain(Arc::clone(&login), refresh);
-    let primary_authorizer = {
-        let mut registry = bootstrap::compose(&[&identity_domain])?;
-        registry.take_primary_authorizer()?
-    };
-    Ok(IdentityHarness {
-        tenant_a,
-        tenant_b,
-        happy_user,
-        conflict_user,
-        tenant_b_user,
-        primary_authorizer,
-        login,
-        happy_identity: finalized_router(
-            &identity_domain,
-            Some((PrincipalKind::User, HAPPY_USER, tenant_a)),
-            None,
-        )?,
-        conflict_identity: finalized_router(
-            &identity_domain,
-            Some((PrincipalKind::User, CONFLICT_USER, tenant_a)),
-            None,
-        )?,
-        identity_unauthed: finalized_router(&identity_domain, None, None)?,
-        invalid_subject: finalized_router(
-            &identity_domain,
-            Some((PrincipalKind::Service, "not-a-canonical-user", tenant_a)),
-            None,
-        )?,
-        other_identity: finalized_router(
-            &identity_domain,
-            Some((PrincipalKind::User, OTHER_USER, tenant_a)),
-            None,
-        )?,
-        session_identity: finalized_router(
-            &identity_domain,
-            Some((PrincipalKind::User, SESSION_USER, tenant_a)),
-            None,
-        )?,
-        tenant_b_identity: finalized_router(
-            &identity_domain,
-            Some((PrincipalKind::User, TENANT_B_USER, tenant_b)),
-            None,
-        )?,
-        credential_observer: identity_deps.credential_repo(),
-        grant_find_barrier,
-    })
-}
-
-fn credential_commit_delta(before: &CredentialSnapshot, after: &CredentialSnapshot) -> Result<u16> {
-    ensure!(before.0.len() == 2 && after.0.len() == 2);
-    ensure!(
-        before.0[1] == after.0[1],
-        "second-tenant credential snapshot changed"
-    );
-    let before_version = before.0[0]
-        .as_ref()
-        .context("credential missing before case")?;
-    let after_version = after.0[0]
-        .as_ref()
-        .context("credential missing after case")?;
-    ensure!(
-        after_version.2 >= before_version.2,
-        "credential version regressed"
-    );
-    u16::try_from(after_version.2 - before_version.2).context("credential commit delta exceeds u16")
-}
-
-fn password_probes(harness: &IdentityHarness, user: ids::UserId) -> [(TenantId, ids::UserId); 2] {
-    [
-        (harness.tenant_a, user),
-        (harness.tenant_b, harness.tenant_b_user),
-    ]
-}
-
-async fn drive_password_happy(harness: &IdentityHarness, case: &JourneyCase) -> Result<()> {
-    let probes = password_probes(harness, harness.happy_user);
-    let request = IdentityPasswordChangeRequest {
-        current_password: CURRENT_PASSWORD.to_owned(),
-        new_password: NEW_PASSWORD.try_into()?,
-    };
-    let body = serde_json::to_vec(&request)?;
-    let sentinels = case_sentinels(case, &[&body], None)?;
-    let before = credential_snapshot(&harness.credential_observer, probes).await?;
-    let changed = send_recorded(
-        &harness.happy_identity,
-        generated::http::identity_v1::password_change::PATH,
-        body,
-        "rid-password-happy",
-        generated::http::identity_v1::password_change::CONTRACT_ID,
-    )
-    .await?;
-    let decoded: IdentityPasswordChangeResponse =
-        decode_case_success(case, &changed.response, "rid-password-happy", &sentinels)?;
-    ensure!(
-        decoded.data.changed,
-        "password success response must be changed=true"
-    );
-    let stored = harness
-        .credential_observer
-        .find_by_user_id(
-            IdentityScope::for_test(harness.tenant_a),
-            harness.happy_user,
-        )
-        .await?
-        .context("happy credential missing")?;
-    ensure!(!password_matches(CURRENT_PASSWORD, stored.password_hash())?);
-    ensure!(password_matches(NEW_PASSWORD, stored.password_hash())?);
-    let after = credential_snapshot(&harness.credential_observer, probes).await?;
-    assert_accounting(
-        case,
-        &[&changed.localtx],
-        credential_commit_delta(&before, &after)?,
-        ExpectedLocalTxFinal::Committed,
-    )
-}
-
-async fn drive_password_auth_failure(
-    harness: &IdentityHarness,
-    case: &JourneyCase,
-    router: &axum::Router,
-    request_id: &str,
-) -> Result<()> {
-    let probes = password_probes(harness, harness.happy_user);
-    let body = serde_json::to_vec(&IdentityPasswordChangeRequest {
-        current_password: CURRENT_PASSWORD.to_owned(),
-        new_password: NEW_PASSWORD.try_into()?,
-    })?;
-    let sentinels = case_sentinels(case, &[&body], None)?;
-    let before = credential_snapshot(&harness.credential_observer, probes).await?;
-    let response = send_recorded(
-        router,
-        generated::http::identity_v1::password_change::PATH,
-        body,
-        request_id,
-        generated::http::identity_v1::password_change::CONTRACT_ID,
-    )
-    .await?;
-    assert_case_error(case, &response.response, request_id, &sentinels)?;
-    let after = credential_snapshot(&harness.credential_observer, probes).await?;
-    ensure!(
-        before == after,
-        "password auth rejection mutated durable state"
-    );
-    assert_accounting(case, &[&response.localtx], 0, ExpectedLocalTxFinal::None)
-}
-
-async fn drive_password_validation(harness: &IdentityHarness, case: &JourneyCase) -> Result<()> {
-    let probes = password_probes(harness, harness.happy_user);
-    let body =
-        br#"{"currentPassword":"journey-current-password-sentinel","unexpected":"journey-new-password-sentinel"}"#.to_vec();
-    let sentinels = case_sentinels(case, &[&body], None)?;
-    let before = credential_snapshot(&harness.credential_observer, probes).await?;
-    let response = send_recorded(
-        &harness.happy_identity,
-        generated::http::identity_v1::password_change::PATH,
-        body,
-        "rid-password-validation",
-        generated::http::identity_v1::password_change::CONTRACT_ID,
-    )
-    .await?;
-    assert_case_error(
-        case,
-        &response.response,
-        "rid-password-validation",
-        &sentinels,
-    )?;
-    let after = credential_snapshot(&harness.credential_observer, probes).await?;
-    ensure!(
-        before == after,
-        "password validation rejection mutated durable state"
-    );
-    assert_accounting(case, &[&response.localtx], 0, ExpectedLocalTxFinal::None)
-}
-
-async fn drive_password_conflict(harness: &IdentityHarness, case: &JourneyCase) -> Result<()> {
-    let request_a = IdentityPasswordChangeRequest {
-        current_password: CURRENT_PASSWORD.to_owned(),
-        new_password: CONFLICT_PASSWORD_A.try_into()?,
-    };
-    let request_b = IdentityPasswordChangeRequest {
-        current_password: CURRENT_PASSWORD.to_owned(),
-        new_password: CONFLICT_PASSWORD_B.try_into()?,
-    };
-    let body_a = serde_json::to_vec(&request_a)?;
-    let body_b = serde_json::to_vec(&request_b)?;
-    let sentinels = case_sentinels(case, &[&body_a, &body_b], None)?;
-    let probes = password_probes(harness, harness.conflict_user);
-    let before = credential_snapshot(&harness.credential_observer, probes).await?;
-    let pair = tokio::time::timeout(Duration::from_secs(15), async {
-        tokio::join!(
-            send_recorded(
-                &harness.conflict_identity,
-                generated::http::identity_v1::password_change::PATH,
-                body_a,
-                "rid-password-conflict-a",
-                generated::http::identity_v1::password_change::CONTRACT_ID,
-            ),
-            send_recorded(
-                &harness.conflict_identity,
-                generated::http::identity_v1::password_change::PATH,
-                body_b,
-                "rid-password-conflict-b",
-                generated::http::identity_v1::password_change::CONTRACT_ID,
-            )
-        )
-    })
-    .await?;
-    let (response_a, response_b) = (pair.0?, pair.1?);
-    let (winner, winner_id, loser, loser_id) = if response_a.response.status == StatusCode::OK {
-        (
-            &response_a,
-            "rid-password-conflict-a",
-            &response_b,
-            "rid-password-conflict-b",
-        )
-    } else {
-        (
-            &response_b,
-            "rid-password-conflict-b",
-            &response_a,
-            "rid-password-conflict-a",
-        )
-    };
-    let decoded: IdentityPasswordChangeResponse =
-        decode_success(&winner.response, StatusCode::OK, winner_id, &sentinels)?;
-    ensure!(
-        decoded.data.changed,
-        "password CAS winner must report changed=true"
-    );
-    assert_case_error(case, &loser.response, loser_id, &sentinels)?;
-    let stored = harness
-        .credential_observer
-        .find_by_user_id(
-            IdentityScope::for_test(harness.tenant_a),
-            harness.conflict_user,
-        )
-        .await?
-        .context("conflict credential missing")?;
-    let password_a_won = password_matches(CONFLICT_PASSWORD_A, stored.password_hash())?;
-    let password_b_won = password_matches(CONFLICT_PASSWORD_B, stored.password_hash())?;
-    ensure!(
-        password_a_won ^ password_b_won,
-        "exactly one new password must win"
-    );
-    let after = credential_snapshot(&harness.credential_observer, probes).await?;
-    assert_cas_conflict_accounting(
-        case,
-        &winner.localtx,
-        &loser.localtx,
-        credential_commit_delta(&before, &after)?,
-    )
-}
-
-async fn drive_password(harness: &IdentityHarness, cases: PasswordCases) -> Result<()> {
-    drive_password_happy(harness, &cases.happy).await?;
-    drive_password_auth_failure(
-        harness,
-        &cases.unauthenticated,
-        &harness.identity_unauthed,
-        "rid-password-auth",
-    )
-    .await?;
-    drive_password_auth_failure(
-        harness,
-        &cases.invalid_subject,
-        &harness.invalid_subject,
-        "rid-password-forbidden",
-    )
-    .await?;
-    drive_password_validation(harness, &cases.validation_failure).await?;
-    drive_password_conflict(harness, &cases.conflict).await
+    let identity_domain = common::identity_domain(login, refresh, credential_security);
+    let mut registry = bootstrap::compose(&[&identity_domain])?;
+    Ok(registry.take_primary_authorizer()?)
 }
 
 fn auth_grant_commit_delta(before: &AuthGrantSnapshot, after: &AuthGrantSnapshot) -> Result<u16> {
@@ -2038,14 +1503,23 @@ where
         Duration::from_secs(TTL_SECS),
     );
     let refresh = auth_grants.refresh_service();
+    let grants = auth_grants.lifecycle();
+    let credential_security = Arc::new(CredentialSecurityService::new(
+        Arc::from(DynCredentialRepo::new_box(identity_deps.credential_repo())),
+        grants,
+        DynAccountSecurityReadRepo::new_box(identity_deps.account_security_repo()),
+        identity_deps.identity_security_lifecycle(postgres::identity_pseudonym_keys_for_test()),
+        identity_deps.identity_security_lifecycle(postgres::identity_pseudonym_keys_for_test()),
+        common::password_policy(),
+        Box::new(FixedClock::new(observed_at)),
+    ));
     let login = Arc::new(LoginService::new(
         Arc::from(DynCredentialRepo::new_box(identity_deps.credential_repo())),
         auth_grants,
-        common::password_policy(),
         Box::new(FixedClock::new(observed_at)),
         Duration::from_secs(TTL_SECS),
     ));
-    let domain = common::identity_domain(login, refresh);
+    let domain = common::identity_domain(login, refresh, credential_security);
     finalized_router(&domain, None, None)
 }
 
@@ -2620,7 +2094,7 @@ fn finalized_audit_router(
         .into_iter()
         .find(|(listener, _)| *listener == ListenerKind::Admin)
         .context("audit admin routes missing")?;
-    let plan = AuthPlan::new(ListenerKind::Admin, AuthScheme::RssAccessToken)?;
+    let plan = AuthPlan::new(ListenerKind::Admin, AuthScheme::FederatedAccessToken)?;
     let router = httpserve::finalize_auth_with_audit_and_authorizer(
         admin,
         plan,
@@ -3027,24 +2501,15 @@ impl LocalTxJourneyRuntime {
 
 pub(crate) async fn drive_settings_journey(cases: SettingsCases) -> Result<()> {
     let runtime = LocalTxJourneyRuntime::setup().await?;
-    let identity =
-        build_identity_harness(&runtime.deps, runtime.tenant_a, runtime.tenant_b).await?;
+    let primary_authorizer = build_identity_authorizer(&runtime.deps, runtime.tenant_a).await?;
     let body = drive_settings(
         &runtime.deps,
         runtime.tenant_a,
         runtime.tenant_b,
-        Arc::clone(&identity.primary_authorizer),
+        primary_authorizer,
         cases,
     )
     .await;
-    runtime.finish(body).await
-}
-
-pub(crate) async fn drive_password_journey(cases: PasswordCases) -> Result<()> {
-    let runtime = LocalTxJourneyRuntime::setup().await?;
-    let identity =
-        build_identity_harness(&runtime.deps, runtime.tenant_a, runtime.tenant_b).await?;
-    let body = drive_password(&identity, cases).await;
     runtime.finish(body).await
 }
 
@@ -3059,7 +2524,7 @@ pub(crate) async fn drive_refresh_journey(cases: RefreshCases) -> Result<()> {
         runtime.tenant_a,
         ids::UserId::parse(HAPPY_USER)?,
         "refresh-active-user",
-        CURRENT_PASSWORD,
+        IDENTITY_SEED_PASSWORD,
     )
     .await?;
     let body = drive_refresh(&runtime.deps, &runtime.observer, runtime.tenant_a, cases).await;

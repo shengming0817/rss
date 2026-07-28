@@ -20,6 +20,7 @@ use authn::{
 
 use super::{
     AccountSecurityMutation, AccountSecurityState, AccountSecurityTransitionError, AccountStatus,
+    Credential,
 };
 
 fn transition_account_security(
@@ -37,6 +38,9 @@ fn transition_account_security(
         AccountSecurityEventKind::AccountDeactivated => {
             state.transition(AccountStatus::Deactivated, occurred_at)
         }
+        AccountSecurityEventKind::AccountReactivated => {
+            state.transition(AccountStatus::Active, occurred_at)
+        }
         AccountSecurityEventKind::PasswordChanged
         | AccountSecurityEventKind::PasswordReset
         | AccountSecurityEventKind::LogoutAll
@@ -51,17 +55,110 @@ pub enum CredentialSecurityTargetKind {
     Grant,
 }
 
-/// Opaque, non-PII reference used by the active security-event wire contract.
-#[derive(Clone, PartialEq, Eq, Hash, secure::Redact)]
-pub struct CredentialSecurityTargetRef(#[redact(sensitivity = secret)] uuid::Uuid);
+/// Opaque, keyed reference used by the active security-event wire contract.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CredentialSecurityTargetRef(secure::PseudonymRef);
 
 impl CredentialSecurityTargetRef {
-    pub(crate) fn generate() -> Self {
-        Self(uuid::Uuid::new_v4())
+    fn for_target(
+        keys: &secure::PseudonymKeyRing,
+        tenant: TenantId,
+        target: &CredentialSecurityTarget,
+    ) -> Result<Self, secure::PseudonymError> {
+        match target {
+            CredentialSecurityTarget::Subject { user_id } => keys
+                .current(
+                    tenant,
+                    "identity.security-event/target/subject",
+                    user_id.as_uuid().as_bytes(),
+                )
+                .map(Self),
+            CredentialSecurityTarget::Grant { grant_id, .. } => keys
+                .current(
+                    tenant,
+                    "identity.security-event/target/grant",
+                    grant_id.as_str().as_bytes(),
+                )
+                .map(Self),
+        }
     }
 
     pub fn as_uuid(&self) -> uuid::Uuid {
-        self.0
+        uuid::Uuid::from_bytes(self.0.as_bytes())
+    }
+
+    pub const fn key_id(&self) -> secure::PseudonymKeyId {
+        self.0.key_id()
+    }
+}
+
+impl std::fmt::Debug for CredentialSecurityTargetRef {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CredentialSecurityTargetRef")
+            .field("key_id", &self.key_id())
+            .field("value", &"<redacted>")
+            .finish()
+    }
+}
+
+/// Authenticated or system initiator sealed into the security command before persistence.
+#[derive(Clone, PartialEq, Eq)]
+pub struct CredentialSecurityInitiator {
+    tenant: TenantId,
+    kind: vocab::PrincipalKind,
+    subject: String,
+}
+
+impl CredentialSecurityInitiator {
+    pub(crate) fn authenticated(
+        tenant: TenantId,
+        kind: vocab::PrincipalKind,
+        subject: impl Into<String>,
+    ) -> Self {
+        Self {
+            tenant,
+            kind,
+            subject: subject.into(),
+        }
+    }
+
+    pub fn tenant(&self) -> TenantId {
+        self.tenant
+    }
+
+    pub fn kind(&self) -> vocab::PrincipalKind {
+        self.kind
+    }
+
+    /// Tenant-scoped stable pseudonym used by durable metadata and event consumers.
+    ///
+    /// The authenticated subject is deliberately never exposed by this domain object.
+    pub fn privacy_ref(
+        &self,
+        keys: &secure::PseudonymKeyRing,
+    ) -> Result<secure::PseudonymRef, secure::PseudonymError> {
+        let domain = match self.kind {
+            vocab::PrincipalKind::User => "identity.security-event/actor/user",
+            vocab::PrincipalKind::Device => "identity.security-event/actor/device",
+            vocab::PrincipalKind::Admin => "identity.security-event/actor/admin",
+            vocab::PrincipalKind::SuperAdmin => "identity.security-event/actor/super-admin",
+            vocab::PrincipalKind::Service => "identity.security-event/actor/service",
+            vocab::PrincipalKind::Anonymous => "identity.security-event/actor/anonymous",
+            _ => "identity.security-event/actor/unsupported",
+        };
+        keys.current(self.tenant, domain, self.subject.as_bytes())
+    }
+}
+
+impl std::fmt::Debug for CredentialSecurityInitiator {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CredentialSecurityInitiator")
+            .field("tenant", &self.tenant)
+            .field("kind", &self.kind)
+            .field("subject", &"<redacted>")
+            .finish()
     }
 }
 
@@ -104,6 +201,7 @@ pub struct CredentialSecurityEvent {
     kind: CredentialSecurityEventKind,
     tenant: TenantId,
     target: CredentialSecurityTarget,
+    initiator: CredentialSecurityInitiator,
     occurred_at: SystemTime,
 }
 
@@ -111,6 +209,7 @@ impl CredentialSecurityEvent {
     fn from_account(
         state: &AccountSecurityState,
         kind: AccountSecurityEventKind,
+        initiator: CredentialSecurityInitiator,
         occurred_at: SystemTime,
     ) -> Self {
         Self {
@@ -119,6 +218,7 @@ impl CredentialSecurityEvent {
             target: CredentialSecurityTarget::Subject {
                 user_id: state.user_id(),
             },
+            initiator,
             occurred_at,
         }
     }
@@ -126,6 +226,7 @@ impl CredentialSecurityEvent {
     fn from_grant(
         grant: &AuthGrant,
         kind: GrantSecurityEventKind,
+        initiator: CredentialSecurityInitiator,
         occurred_at: SystemTime,
     ) -> Self {
         Self {
@@ -135,6 +236,7 @@ impl CredentialSecurityEvent {
                 user_id: grant.user_id(),
                 grant_id: grant.id().clone(),
             },
+            initiator,
             occurred_at,
         }
     }
@@ -158,6 +260,17 @@ impl CredentialSecurityEvent {
 
     pub fn grant_id(&self) -> Option<&AuthGrantId> {
         self.target.grant_id()
+    }
+
+    pub fn target_ref(
+        &self,
+        keys: &secure::PseudonymKeyRing,
+    ) -> Result<CredentialSecurityTargetRef, secure::PseudonymError> {
+        CredentialSecurityTargetRef::for_target(keys, self.tenant, &self.target)
+    }
+
+    pub fn initiator(&self) -> &CredentialSecurityInitiator {
+        &self.initiator
     }
 
     pub fn occurred_at(&self) -> SystemTime {
@@ -188,9 +301,13 @@ impl AccountCredentialSecurityCommand {
     pub(crate) fn new(
         state: AccountSecurityState,
         kind: AccountSecurityEventKind,
+        initiator: CredentialSecurityInitiator,
         occurred_at: SystemTime,
     ) -> Result<Self, AccountSecurityTransitionError> {
-        let event = CredentialSecurityEvent::from_account(&state, kind, occurred_at);
+        if initiator.tenant() != state.tenant() {
+            return Err(AccountSecurityTransitionError::Illegal);
+        }
+        let event = CredentialSecurityEvent::from_account(&state, kind, initiator, occurred_at);
         let mutation = transition_account_security(kind, state, occurred_at)?;
         Ok(Self {
             mutation,
@@ -229,9 +346,13 @@ impl GrantCredentialSecurityCommand {
     pub(crate) fn new(
         grant: AuthGrant,
         kind: GrantSecurityEventKind,
+        initiator: CredentialSecurityInitiator,
         occurred_at: SystemTime,
     ) -> Result<Self, AuthGrantStateError> {
-        let event = CredentialSecurityEvent::from_grant(&grant, kind, occurred_at);
+        if initiator.tenant() != grant.tenant() {
+            return Err(AuthGrantStateError::TenantMismatch);
+        }
+        let event = CredentialSecurityEvent::from_grant(&grant, kind, initiator, occurred_at);
         let mutation = grant.close(kind, occurred_at)?;
         Ok(Self {
             mutation,
@@ -273,36 +394,78 @@ pub struct LogoutCurrentCommand(CredentialSecurityCommand);
 /// `LogoutAll` mutation and cannot be substituted with a grant command.
 pub struct LogoutAllCommand(CredentialSecurityCommand);
 
+/// Credential CAS bound to the exact account-wide PasswordChanged mutation.
+pub struct PasswordChangeCommand {
+    expected_credential: Credential,
+    next_credential: Credential,
+    security: AccountCredentialSecurityCommand,
+}
+
+/// Sealed desired account-status command.
+pub struct AccountStatusSetCommand(CredentialSecurityCommand);
+
+/// Sealed no-event reactivation mutation.
+pub struct ReactivateAccountCommand(AccountSecurityMutation);
+
+/// Password-change command construction failed before persistence.
+#[derive(Debug, thiserror::Error)]
+pub enum PasswordChangeCommandError {
+    #[error("credential and account security state do not match")]
+    IdentityMismatch,
+    #[error("account is not active")]
+    AccountInactive,
+    #[error("password rotation failed")]
+    Password(#[source] secure::PasswordError),
+    #[error("account invalidation failed")]
+    Account(#[source] AccountSecurityTransitionError),
+}
+
 impl CredentialSecurityCommand {
     pub(crate) fn logout_all(
         state: AccountSecurityState,
+        initiator: CredentialSecurityInitiator,
         occurred_at: SystemTime,
     ) -> Result<LogoutAllCommand, AccountSecurityTransitionError> {
-        Self::account(state, AccountSecurityEventKind::LogoutAll, occurred_at).map(LogoutAllCommand)
+        Self::account(
+            state,
+            AccountSecurityEventKind::LogoutAll,
+            initiator,
+            occurred_at,
+        )
+        .map(LogoutAllCommand)
     }
 
     pub(crate) fn logout_current(
         grant: AuthGrant,
+        initiator: CredentialSecurityInitiator,
         occurred_at: SystemTime,
     ) -> Result<LogoutCurrentCommand, AuthGrantStateError> {
-        Self::grant(grant, GrantSecurityEventKind::LogoutCurrent, occurred_at)
-            .map(LogoutCurrentCommand)
+        Self::grant(
+            grant,
+            GrantSecurityEventKind::LogoutCurrent,
+            initiator,
+            occurred_at,
+        )
+        .map(LogoutCurrentCommand)
     }
 
     pub(crate) fn account(
         state: AccountSecurityState,
         kind: AccountSecurityEventKind,
+        initiator: CredentialSecurityInitiator,
         occurred_at: SystemTime,
     ) -> Result<Self, AccountSecurityTransitionError> {
-        AccountCredentialSecurityCommand::new(state, kind, occurred_at).map(Self::Account)
+        AccountCredentialSecurityCommand::new(state, kind, initiator, occurred_at)
+            .map(Self::Account)
     }
 
     pub(crate) fn grant(
         grant: AuthGrant,
         kind: GrantSecurityEventKind,
+        initiator: CredentialSecurityInitiator,
         occurred_at: SystemTime,
     ) -> Result<Self, AuthGrantStateError> {
-        GrantCredentialSecurityCommand::new(grant, kind, occurred_at).map(Self::Grant)
+        GrantCredentialSecurityCommand::new(grant, kind, initiator, occurred_at).map(Self::Grant)
     }
 
     pub fn event(&self) -> &CredentialSecurityEvent {
@@ -310,6 +473,94 @@ impl CredentialSecurityCommand {
             Self::Account(command) => command.event(),
             Self::Grant(command) => command.event(),
         }
+    }
+}
+
+impl PasswordChangeCommand {
+    pub(crate) fn new(
+        credential: Credential,
+        account: AccountSecurityState,
+        password: secure::ValidatedPassword,
+        initiator: CredentialSecurityInitiator,
+        occurred_at: SystemTime,
+    ) -> Result<Self, PasswordChangeCommandError> {
+        if credential.tenant() != account.tenant() || credential.user_id() != account.user_id() {
+            return Err(PasswordChangeCommandError::IdentityMismatch);
+        }
+        if account.status() != AccountStatus::Active {
+            return Err(PasswordChangeCommandError::AccountInactive);
+        }
+        let next_credential = credential
+            .rotate(password)
+            .map_err(PasswordChangeCommandError::Password)?;
+        let security = AccountCredentialSecurityCommand::new(
+            account,
+            AccountSecurityEventKind::PasswordChanged,
+            initiator,
+            occurred_at,
+        )
+        .map_err(PasswordChangeCommandError::Account)?;
+        Ok(Self {
+            expected_credential: credential,
+            next_credential,
+            security,
+        })
+    }
+
+    pub fn event(&self) -> &CredentialSecurityEvent {
+        self.security.event()
+    }
+
+    pub fn into_parts(self) -> (Credential, Credential, AccountCredentialSecurityCommand) {
+        (
+            self.expected_credential,
+            self.next_credential,
+            self.security,
+        )
+    }
+}
+
+impl AccountStatusSetCommand {
+    pub(crate) fn new(
+        state: AccountSecurityState,
+        target: AccountStatus,
+        initiator: CredentialSecurityInitiator,
+        occurred_at: SystemTime,
+    ) -> Result<Self, AccountSecurityTransitionError> {
+        let kind = match target {
+            AccountStatus::Suspended => AccountSecurityEventKind::AccountSuspended,
+            AccountStatus::Locked => AccountSecurityEventKind::AccountLocked,
+            AccountStatus::Deactivated => AccountSecurityEventKind::AccountDeactivated,
+            AccountStatus::Active => AccountSecurityEventKind::AccountReactivated,
+        };
+        CredentialSecurityCommand::account(state, kind, initiator, occurred_at).map(Self)
+    }
+
+    pub fn event(&self) -> &CredentialSecurityEvent {
+        self.0.event()
+    }
+
+    pub fn into_security_command(self) -> CredentialSecurityCommand {
+        self.0
+    }
+}
+
+impl ReactivateAccountCommand {
+    pub(crate) fn new(
+        state: AccountSecurityState,
+        occurred_at: SystemTime,
+    ) -> Result<Self, AccountSecurityTransitionError> {
+        state
+            .transition(AccountStatus::Active, occurred_at)
+            .map(Self)
+    }
+
+    pub fn mutation(&self) -> &AccountSecurityMutation {
+        &self.0
+    }
+
+    pub fn into_mutation(self) -> AccountSecurityMutation {
+        self.0
     }
 }
 
@@ -336,12 +587,14 @@ impl LogoutAllCommand {
 const _: fn(
     AccountSecurityState,
     AccountSecurityEventKind,
+    CredentialSecurityInitiator,
     SystemTime,
 ) -> Result<CredentialSecurityCommand, AccountSecurityTransitionError> =
     CredentialSecurityCommand::account;
 const _: fn(
     AuthGrant,
     GrantSecurityEventKind,
+    CredentialSecurityInitiator,
     SystemTime,
 ) -> Result<CredentialSecurityCommand, AuthGrantStateError> = CredentialSecurityCommand::grant;
 
@@ -479,8 +732,17 @@ mod tests {
                 updated_at: at(10),
             })
             .expect("state");
-            let command =
-                CredentialSecurityCommand::account(state, kind, at(20)).expect("account command");
+            let command = CredentialSecurityCommand::account(
+                state,
+                kind,
+                CredentialSecurityInitiator::authenticated(
+                    tenant(),
+                    vocab::PrincipalKind::User,
+                    user().as_uuid().hyphenated().to_string(),
+                ),
+                at(20),
+            )
+            .expect("account command");
             let CredentialSecurityCommand::Account(command) = command else {
                 unreachable!()
             };
@@ -535,8 +797,17 @@ mod tests {
         ];
 
         for (kind, expected_status) in cases {
-            let command = CredentialSecurityCommand::grant(active_grant(), kind, at(20))
-                .expect("grant command");
+            let command = CredentialSecurityCommand::grant(
+                active_grant(),
+                kind,
+                CredentialSecurityInitiator::authenticated(
+                    tenant(),
+                    vocab::PrincipalKind::User,
+                    user().as_uuid().hyphenated().to_string(),
+                ),
+                at(20),
+            )
+            .expect("grant command");
             let CredentialSecurityCommand::Grant(command) = command else {
                 unreachable!()
             };
@@ -560,5 +831,24 @@ mod tests {
 
             let (_mutation, _event, _pending) = command.into_parts();
         }
+    }
+
+    #[test]
+    fn grant_command_rejects_cross_tenant_initiator() {
+        let other = TenantId::parse("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee").expect("other tenant");
+        let error = match CredentialSecurityCommand::grant(
+            active_grant(),
+            GrantSecurityEventKind::LogoutCurrent,
+            CredentialSecurityInitiator::authenticated(
+                other,
+                vocab::PrincipalKind::User,
+                "opaque-user",
+            ),
+            at(20),
+        ) {
+            Ok(_) => panic!("cross-tenant initiator must fail closed"),
+            Err(error) => error,
+        };
+        assert_eq!(error, AuthGrantStateError::TenantMismatch);
     }
 }

@@ -15,8 +15,8 @@
 //! This guard is a Medium backstop for the Hard typed wrapper in `adapters/postgres/src/cotx/`
 //! and the canonical fact funnels in `outbox.rs` / `outbox_cdc.rs`.
 //!
-//! INVARIANT: LOCALTX-PG-RETRY-PLACEMENT-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::retry_guard_rejects_secret_contract_attribution_bypasses|tests::localtx_deadline_guard_rejects_legacy_missing_forged_and_escaped_tokens|tests::localtx_deadline_observation_guard_rejects_rogue_and_fabricated_stages", anti_vacuity = "tests::retry_guard_real_workspace_contains_all_exact_boundaries|tests::localtx_deadline_guard_real_workspace_closes_mint_and_nine_dataflows|tests::localtx_deadline_observation_guard_real_workspace_closes_exact_sink" } —
-//! Postgres retry wrappers are confined to their exact config, secret, identity, and audit
+//! INVARIANT: LOCALTX-PG-RETRY-PLACEMENT-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::retry_guard_rejects_secret_contract_attribution_bypasses|tests::localtx_deadline_guard_rejects_legacy_missing_forged_and_escaped_tokens|tests::localtx_deadline_observation_guard_rejects_rogue_and_fabricated_stages", anti_vacuity = "tests::retry_guard_real_workspace_contains_all_exact_boundaries|tests::localtx_deadline_guard_real_workspace_closes_mint_and_eight_dataflows|tests::localtx_deadline_observation_guard_real_workspace_closes_exact_sink" } —
+//! Postgres retry wrappers are confined to their exact config, secret, session, refresh, and audit
 //! mutation boundaries. Each LocalTx owner must consume its command-carried
 //! generated observation beside `retry_write`; `PgSecretUnitOfWork::publish` is the only settings
 //! secret LocalTx owner;
@@ -24,6 +24,16 @@
 //! contract. Deadline observations are emitted only by the typed retry runner: attempt stages must
 //! originate from `LocalTxRetryError::deadline_stages`, and backoff exhaustion from the canonical
 //! runner callback.
+//!
+//! INVARIANT: IDENTITY-SECURITY-SQL-OWNER-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::identity_security_sql_owner_gate_rejects_missing_and_extra_sites", anti_vacuity = "tests::identity_security_sql_owner_gate_accepts_live_workspace" } —
+//! password rotation, account status CAS, refresh-family revocation, and auth-grant revocation SQL
+//! have one exact production owner: `identity_security_lifecycle.rs`. The password-change LocalTx
+//! repository/retry seam is removed rather than retained as an alias.
+//!
+//! INVARIANT: IDENTITY-REACTIVATION-ISOLATION-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::identity_reactivation_gate_rejects_producer_outbox_grant_and_family_paths", anti_vacuity = "tests::identity_reactivation_gate_accepts_live_workspace" } —
+//! `execute_reactivation` reaches exactly one typed plain-write lane and the canonical account CAS,
+//! but cannot reach producer/retry-producer, outbox, credential, refresh-family, or auth-grant
+//! mutation paths through its same-file call graph.
 //!
 //! INVARIANT: PG-LOCALTX-QUARANTINE-FUNNEL-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::localtx_quarantine_guard_rejects_bypass_and_escape_classes", anti_vacuity = "tests::localtx_quarantine_guard_real_workspace_closes_exact_sites" } —
 //! all four LocalTx entries must flow through one typed execution core that acquires and begins
@@ -97,6 +107,14 @@ pub(crate) enum Rule {
     ProducerFunnelBypass,
     /// An exact authorized generated-fact provider call site disappeared.
     ProducerFunnelSitesAbsent,
+    /// Password/account-security SQL escaped the canonical identity security lifecycle owner.
+    IdentitySecuritySqlOwnerBypass,
+    /// A required canonical password/account-security SQL site disappeared or was duplicated.
+    IdentitySecuritySqlOwnerSitesAbsent,
+    /// Account reactivation reached producer/outbox/credential/grant/family side effects.
+    IdentityReactivationBypass,
+    /// The exact non-producing account reactivation write path disappeared.
+    IdentityReactivationSitesAbsent,
     /// The feature-gated fault harness attempted to author a production terminal state directly.
     FaultMatrixTerminalBypass,
 }
@@ -145,6 +163,7 @@ impl GovernanceCheck for PgTenantTxGuard {
             &root.join("adapters/postgres/src"),
         )?);
         findings.extend(producer_funnel_findings(&files));
+        findings.extend(identity_security_sql_funnel_findings(&files));
         findings.extend(localtx_required_carriers_missing(&files));
         findings.extend(localtx_deadline_observation_findings(&workspace_files));
         let dlx_path = root.join("adapters/postgres/src/dlx_lifecycle.rs");
@@ -305,6 +324,8 @@ fn producer_funnel_findings(files: &[(String, String)]) -> Vec<Finding> {
         };
         let mut scan = CallScan::default();
         scan.visit_file(&parsed);
+        let permits_reactivation_write = path == "identity_security_lifecycle.rs"
+            && identity_reactivation_plain_write_is_exclusive(&parsed);
         for (method, count) in [
             ("producer_tx", scan.producer_tx),
             ("retry_producer_tx", scan.retry_producer_tx),
@@ -318,6 +339,9 @@ fn producer_funnel_findings(files: &[(String, String)]) -> Vec<Finding> {
             .any(|(expected_path, _, _)| expected_path == path)
         {
             for forbidden in scan.forbidden {
+                if forbidden == "write" && permits_reactivation_write {
+                    continue;
+                }
                 findings.push(finding(
                     Rule::ProducerFunnelBypass,
                     path,
@@ -351,6 +375,579 @@ fn producer_funnel_findings(files: &[(String, String)]) -> Vec<Finding> {
         }
     }
     findings
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum IdentitySecuritySqlKind {
+    PasswordCas,
+    AccountCas,
+    RefreshFamilyRevoke,
+    AuthGrantRevoke,
+    OutboxAppend,
+}
+
+impl IdentitySecuritySqlKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::PasswordCas => "password CAS",
+            Self::AccountCas => "account-security CAS",
+            Self::RefreshFamilyRevoke => "refresh-family revocation",
+            Self::AuthGrantRevoke => "auth-grant revocation",
+            Self::OutboxAppend => "outbox append",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct IdentitySecuritySqlSite {
+    path: String,
+    function: String,
+    kind: IdentitySecuritySqlKind,
+}
+
+fn identity_security_sql_funnel_findings(files: &[(String, String)]) -> Vec<Finding> {
+    const OWNER: &str = "identity_security_lifecycle.rs";
+    let mut findings = Vec::new();
+    let mut sites = Vec::new();
+    let mut owner_syntax = None;
+    for (path, source) in files {
+        let Ok(syntax) = syn::parse_file(&strip_cfg_test_modules(source)) else {
+            if path == OWNER {
+                findings.push(finding(
+                    Rule::IdentitySecuritySqlOwnerSitesAbsent,
+                    OWNER,
+                    "canonical identity security lifecycle cannot be parsed",
+                ));
+            }
+            continue;
+        };
+        sites.extend(identity_security_sql_sites(path, &syntax));
+        if path == OWNER {
+            owner_syntax = Some(syntax);
+        }
+    }
+
+    for kind in [
+        IdentitySecuritySqlKind::PasswordCas,
+        IdentitySecuritySqlKind::AccountCas,
+        IdentitySecuritySqlKind::RefreshFamilyRevoke,
+        IdentitySecuritySqlKind::AuthGrantRevoke,
+    ] {
+        let matching = sites
+            .iter()
+            .filter(|site| site.kind == kind)
+            .collect::<Vec<_>>();
+        for site in matching.iter().filter(|site| site.path != OWNER) {
+            findings.push(finding(
+                Rule::IdentitySecuritySqlOwnerBypass,
+                format!("{}::{}", site.path, site.function),
+                format!("{} SQL must be owned only by {OWNER}", kind.label()),
+            ));
+        }
+        let owner_count = matching.iter().filter(|site| site.path == OWNER).count();
+        if owner_count != 1 || matching.len() != 1 {
+            findings.push(finding(
+                Rule::IdentitySecuritySqlOwnerSitesAbsent,
+                format!("{OWNER}::{}", kind.label()),
+                format!(
+                    "expected exactly one canonical {} SQL site; owner_count={owner_count} total_count={}",
+                    kind.label(),
+                    matching.len()
+                ),
+            ));
+        }
+    }
+
+    match owner_syntax {
+        Some(syntax) => findings.extend(identity_reactivation_findings(OWNER, &syntax)),
+        None => findings.push(finding(
+            Rule::IdentityReactivationSitesAbsent,
+            format!("{OWNER}::execute_reactivation"),
+            "canonical identity security lifecycle is missing",
+        )),
+    }
+    findings
+}
+
+fn identity_security_sql_sites(path: &str, syntax: &syn::File) -> Vec<IdentitySecuritySqlSite> {
+    struct Scan<'a> {
+        path: &'a str,
+        constants: &'a BTreeMap<String, String>,
+        function: Option<String>,
+        sites: Vec<IdentitySecuritySqlSite>,
+    }
+
+    impl<'ast> syn::visit::Visit<'ast> for Scan<'_> {
+        fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
+            if attributes_are_test_only(&node.attrs) {
+                return;
+            }
+            let previous = self.function.replace(node.sig.ident.to_string());
+            syn::visit::visit_block(self, &node.block);
+            self.function = previous;
+        }
+
+        fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
+            if attributes_are_test_only(&node.attrs) {
+                return;
+            }
+            let previous = self.function.replace(node.sig.ident.to_string());
+            syn::visit::visit_block(self, &node.block);
+            self.function = previous;
+        }
+
+        fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+            if let Some(kind) = identity_security_sql_call_kind(node, self.constants) {
+                self.sites.push(IdentitySecuritySqlSite {
+                    path: self.path.to_owned(),
+                    function: self
+                        .function
+                        .clone()
+                        .unwrap_or_else(|| "<module>".to_owned()),
+                    kind,
+                });
+            }
+            syn::visit::visit_expr_call(self, node);
+        }
+
+        fn visit_expr_macro(&mut self, node: &'ast syn::ExprMacro) {
+            if let Some(kind) = identity_security_sql_macro_kind(node, self.constants) {
+                self.sites.push(IdentitySecuritySqlSite {
+                    path: self.path.to_owned(),
+                    function: self
+                        .function
+                        .clone()
+                        .unwrap_or_else(|| "<module>".to_owned()),
+                    kind,
+                });
+            }
+            syn::visit::visit_expr_macro(self, node);
+        }
+    }
+
+    let constants = sql_string_constants(syntax);
+    let mut scan = Scan {
+        path,
+        constants: &constants,
+        function: None,
+        sites: Vec::new(),
+    };
+    syn::visit::Visit::visit_file(&mut scan, syntax);
+    scan.sites
+}
+
+fn identity_security_sql_call_kind(
+    call: &syn::ExprCall,
+    constants: &BTreeMap<String, String>,
+) -> Option<IdentitySecuritySqlKind> {
+    let syn::Expr::Path(path) = call.func.as_ref() else {
+        return None;
+    };
+    if path.path.segments.last().is_none_or(|segment| {
+        !matches!(
+            segment.ident.to_string().as_str(),
+            "query" | "query_as" | "query_scalar"
+        )
+    }) {
+        return None;
+    }
+    resolve_static_sql_expr(call.args.first()?, constants)
+        .as_deref()
+        .and_then(identity_security_sql_kind)
+}
+
+fn identity_security_sql_macro_kind(
+    expression: &syn::ExprMacro,
+    constants: &BTreeMap<String, String>,
+) -> Option<IdentitySecuritySqlKind> {
+    use syn::parse::Parser as _;
+
+    let name = expression.mac.path.segments.last()?.ident.to_string();
+    if !matches!(name.as_str(), "query" | "query_as" | "query_scalar") {
+        return None;
+    }
+    let arguments = syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated
+        .parse2(expression.mac.tokens.clone())
+        .ok()?;
+    let sql_index = usize::from(name == "query_as");
+    resolve_static_sql_expr(arguments.iter().nth(sql_index)?, constants)
+        .as_deref()
+        .and_then(identity_security_sql_kind)
+}
+
+fn identity_security_sql_kind(sql: &str) -> Option<IdentitySecuritySqlKind> {
+    let sql = sql
+        .split_ascii_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase();
+    if sql.contains("update credentials")
+        && sql.contains("password_hash")
+        && sql.contains("version =")
+    {
+        Some(IdentitySecuritySqlKind::PasswordCas)
+    } else if sql.contains("update account_security_states")
+        && sql.contains("set status =")
+        && sql.contains("authn_epoch =")
+        && sql.contains("version =")
+    {
+        Some(IdentitySecuritySqlKind::AccountCas)
+    } else if sql.contains("update refresh_tokens")
+        && sql.contains("status = 'revoked'")
+        && sql.contains("from auth_grants as root")
+        && sql.contains("root.tenant_id")
+        && sql.contains("root.user_id")
+        && sql.contains("refresh.tenant_id = root.tenant_id")
+        && sql.contains("refresh.auth_grant_id = root.grant_id")
+    {
+        Some(IdentitySecuritySqlKind::RefreshFamilyRevoke)
+    } else if sql.contains("update auth_grants set status = 'revoked'")
+        && sql.contains("close_reason")
+        && sql.contains("user_id")
+    {
+        Some(IdentitySecuritySqlKind::AuthGrantRevoke)
+    } else if sql.contains("insert into outbox") {
+        Some(IdentitySecuritySqlKind::OutboxAppend)
+    } else {
+        None
+    }
+}
+
+#[derive(Default)]
+struct ReactivationReachability {
+    plain_writes: usize,
+    forbidden_calls: Vec<String>,
+    sql: BTreeMap<IdentitySecuritySqlKind, usize>,
+    local_calls: BTreeSet<String>,
+}
+
+#[derive(Clone)]
+struct IdentitySecurityCallable {
+    self_ty: Option<String>,
+    block: syn::Block,
+}
+
+fn identity_security_free_callable(name: &str) -> String {
+    format!("identity_security_lifecycle::free::{name}")
+}
+
+fn identity_security_method_callable(self_ty: &str, name: &str) -> String {
+    format!("identity_security_lifecycle::impl::{self_ty}::{name}")
+}
+
+fn identity_reactivation_findings(path: &str, syntax: &syn::File) -> Vec<Finding> {
+    let callables = identity_security_callables(syntax);
+    let constants = sql_string_constants(syntax);
+    let root_key =
+        identity_security_method_callable("PgIdentitySecurityLifecycle", "execute_reactivation");
+    let roots = callables.get(&root_key).cloned().unwrap_or_default();
+    let [root] = roots.as_slice() else {
+        return vec![finding(
+            Rule::IdentityReactivationSitesAbsent,
+            format!("{path}::execute_reactivation"),
+            format!(
+                "expected one production execute_reactivation method, found {}",
+                roots.len()
+            ),
+        )];
+    };
+
+    let mut aggregate = ReactivationReachability::default();
+    let mut pending = vec![(root_key, root.clone())];
+    let mut visited = BTreeSet::new();
+    let mut ambiguous = Vec::new();
+    while let Some((name, block)) = pending.pop() {
+        if !visited.insert(name) {
+            continue;
+        }
+        let scan = scan_reactivation_block(&block.block, &constants, block.self_ty.as_deref());
+        aggregate.plain_writes += scan.plain_writes;
+        aggregate.forbidden_calls.extend(scan.forbidden_calls);
+        for (kind, count) in scan.sql {
+            *aggregate.sql.entry(kind).or_default() += count;
+        }
+        for called in scan.local_calls {
+            let Some(targets) = callables.get(&called) else {
+                continue;
+            };
+            if targets.len() != 1 {
+                ambiguous.push(called);
+                continue;
+            }
+            pending.push((called, targets[0].clone()));
+        }
+    }
+
+    let account_cas = aggregate
+        .sql
+        .get(&IdentitySecuritySqlKind::AccountCas)
+        .copied()
+        .unwrap_or_default();
+    let forbidden_sql = aggregate
+        .sql
+        .iter()
+        .filter(|(kind, _)| **kind != IdentitySecuritySqlKind::AccountCas)
+        .map(|(kind, count)| format!("{}={count}", kind.label()))
+        .collect::<Vec<_>>();
+    let mut findings = Vec::new();
+    if aggregate.plain_writes != 1 || account_cas != 1 || !ambiguous.is_empty() {
+        findings.push(finding(
+            Rule::IdentityReactivationSitesAbsent,
+            format!("{path}::execute_reactivation"),
+            format!(
+                "reactivation must reach one unique typed plain write and one account CAS; writes={} account_cas={account_cas} ambiguous_helpers={ambiguous:?}",
+                aggregate.plain_writes
+            ),
+        ));
+    }
+    if !aggregate.forbidden_calls.is_empty() || !forbidden_sql.is_empty() {
+        findings.push(finding(
+            Rule::IdentityReactivationBypass,
+            format!("{path}::execute_reactivation"),
+            format!(
+                "reactivation reached forbidden producer/outbox/grant/family effects: calls={:?} sql={forbidden_sql:?}",
+                aggregate.forbidden_calls
+            ),
+        ));
+    }
+    findings
+}
+
+fn identity_reactivation_plain_write_is_exclusive(syntax: &syn::File) -> bool {
+    let callables = identity_security_callables(syntax);
+    let constants = sql_string_constants(syntax);
+    let reactivation =
+        identity_security_method_callable("PgIdentitySecurityLifecycle", "execute_reactivation");
+    let Some(reactivation) =
+        reachable_identity_security_callables(&reactivation, &callables, &constants)
+    else {
+        return false;
+    };
+    let reachable_write_count = |reachable: &BTreeSet<String>| {
+        reachable
+            .iter()
+            .filter_map(|name| callables.get(name))
+            .flatten()
+            .map(|callable| {
+                scan_reactivation_block(&callable.block, &constants, callable.self_ty.as_deref())
+                    .plain_writes
+            })
+            .sum::<usize>()
+    };
+    let all_write_count = production_plain_write_count(syntax);
+    if all_write_count != 1 || reachable_write_count(&reactivation) != 1 {
+        return false;
+    }
+    for producer in [
+        "execute_password_change",
+        "execute_account_status_set",
+        "execute_logout_current",
+        "execute_logout_all",
+    ] {
+        let producer = identity_security_method_callable("PgIdentitySecurityLifecycle", producer);
+        let Some(reachable) =
+            reachable_identity_security_callables(&producer, &callables, &constants)
+        else {
+            return false;
+        };
+        if reachable_write_count(&reachable) != 0 {
+            return false;
+        }
+    }
+    identity_reactivation_findings("identity_security_lifecycle.rs", syntax).is_empty()
+}
+
+fn reachable_identity_security_callables(
+    root: &str,
+    callables: &BTreeMap<String, Vec<IdentitySecurityCallable>>,
+    constants: &BTreeMap<String, String>,
+) -> Option<BTreeSet<String>> {
+    let roots = callables.get(root)?;
+    if roots.len() != 1 {
+        return None;
+    }
+    let mut reachable = BTreeSet::new();
+    let mut pending = vec![root.to_owned()];
+    while let Some(name) = pending.pop() {
+        if !reachable.insert(name.clone()) {
+            continue;
+        }
+        let blocks = callables.get(&name)?;
+        if blocks.len() != 1 {
+            return None;
+        }
+        for called in
+            scan_reactivation_block(&blocks[0].block, constants, blocks[0].self_ty.as_deref())
+                .local_calls
+        {
+            if let Some(targets) = callables.get(&called) {
+                if targets.len() != 1 {
+                    return None;
+                }
+                pending.push(called);
+            }
+        }
+    }
+    Some(reachable)
+}
+
+fn identity_security_callables(
+    syntax: &syn::File,
+) -> BTreeMap<String, Vec<IdentitySecurityCallable>> {
+    let mut callables = BTreeMap::<String, Vec<IdentitySecurityCallable>>::new();
+    for item in &syntax.items {
+        match item {
+            syn::Item::Fn(function)
+                if function.sig.asyncness.is_some()
+                    && !attributes_are_test_only(&function.attrs) =>
+            {
+                callables
+                    .entry(identity_security_free_callable(
+                        &function.sig.ident.to_string(),
+                    ))
+                    .or_default()
+                    .push(IdentitySecurityCallable {
+                        self_ty: None,
+                        block: (*function.block).clone(),
+                    });
+            }
+            syn::Item::Impl(item) if !attributes_are_test_only(&item.attrs) => {
+                let self_ty = compact_tokens(item.self_ty.as_ref());
+                for method in &item.items {
+                    if let syn::ImplItem::Fn(method) = method
+                        && method.sig.asyncness.is_some()
+                        && !attributes_are_test_only(&method.attrs)
+                    {
+                        callables
+                            .entry(identity_security_method_callable(
+                                &self_ty,
+                                &method.sig.ident.to_string(),
+                            ))
+                            .or_default()
+                            .push(IdentitySecurityCallable {
+                                self_ty: Some(self_ty.clone()),
+                                block: method.block.clone(),
+                            });
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    callables
+}
+
+fn production_plain_write_count(syntax: &syn::File) -> usize {
+    struct Writes {
+        count: usize,
+    }
+    impl<'ast> syn::visit::Visit<'ast> for Writes {
+        fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
+            if !attributes_are_test_only(&node.attrs) {
+                syn::visit::visit_item_fn(self, node);
+            }
+        }
+
+        fn visit_item_impl(&mut self, node: &'ast syn::ItemImpl) {
+            if !attributes_are_test_only(&node.attrs) {
+                syn::visit::visit_item_impl(self, node);
+            }
+        }
+
+        fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
+            if !attributes_are_test_only(&node.attrs) {
+                syn::visit::visit_impl_item_fn(self, node);
+            }
+        }
+
+        fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+            if node.method == "write" {
+                self.count += 1;
+            }
+            syn::visit::visit_expr_method_call(self, node);
+        }
+    }
+    let mut writes = Writes { count: 0 };
+    syn::visit::Visit::visit_file(&mut writes, syntax);
+    writes.count
+}
+
+fn scan_reactivation_block(
+    block: &syn::Block,
+    constants: &BTreeMap<String, String>,
+    self_ty: Option<&str>,
+) -> ReactivationReachability {
+    struct Scan<'a> {
+        result: ReactivationReachability,
+        constants: &'a BTreeMap<String, String>,
+        self_ty: Option<&'a str>,
+    }
+
+    impl<'ast> syn::visit::Visit<'ast> for Scan<'_> {
+        fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+            if let Some(kind) = identity_security_sql_call_kind(node, self.constants) {
+                *self.result.sql.entry(kind).or_default() += 1;
+            }
+            if let syn::Expr::Path(path) = node.func.as_ref()
+                && let Some(segment) = path.path.segments.last()
+            {
+                let name = segment.ident.to_string();
+                let lower = name.to_ascii_lowercase();
+                if lower.contains("outbox")
+                    || lower.contains("grant")
+                    || lower.contains("refresh")
+                    || lower.contains("family")
+                {
+                    self.result.forbidden_calls.push(name.clone());
+                }
+                self.result
+                    .local_calls
+                    .insert(identity_security_free_callable(&name));
+            }
+            syn::visit::visit_expr_call(self, node);
+        }
+
+        fn visit_expr_macro(&mut self, node: &'ast syn::ExprMacro) {
+            if let Some(kind) = identity_security_sql_macro_kind(node, self.constants) {
+                *self.result.sql.entry(kind).or_default() += 1;
+            }
+            syn::visit::visit_expr_macro(self, node);
+        }
+
+        fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+            let name = node.method.to_string();
+            let lower = name.to_ascii_lowercase();
+            if matches!(
+                node.receiver.as_ref(),
+                syn::Expr::Path(path) if path.path.is_ident("self")
+            ) && let Some(self_ty) = self.self_ty
+            {
+                self.result
+                    .local_calls
+                    .insert(identity_security_method_callable(self_ty, &name));
+            }
+            if name == "write" {
+                self.result.plain_writes += 1;
+            }
+            if matches!(name.as_str(), "producer_tx" | "retry_producer_tx")
+                || lower.contains("outbox")
+                || lower.contains("grant")
+                || lower.contains("refresh")
+                || lower.contains("family")
+            {
+                self.result.forbidden_calls.push(name);
+            }
+            syn::visit::visit_expr_method_call(self, node);
+        }
+    }
+
+    let mut scan = Scan {
+        result: ReactivationReachability::default(),
+        constants,
+        self_ty,
+    };
+    syn::visit::Visit::visit_block(&mut scan, block);
+    scan.result
 }
 
 fn dlx_lifecycle_funnel_findings(source: &str) -> Vec<Finding> {
@@ -2169,7 +2766,6 @@ fn required_retry_site_findings(
             "settings-secret-publish",
             "settings-secret-publish-internal",
             "settings-secret-republish",
-            "identity-password-change",
             "identity-session-logout",
             "identity-refresh-rotate",
             "audit-append",
@@ -3151,7 +3747,6 @@ fn retry_placement_findings(
 
     let allowed = match rel {
         "config_repo.rs" => Some(("commit_authorized", "settings-config-commit")),
-        "credential_repo.rs" => Some(("apply_password_change", "identity-password-change")),
         "auth_grant_lifecycle.rs" => Some(("close", "identity-session-logout")),
         "refresh_token_store.rs" => Some(("rotate", "identity-refresh-rotate")),
         "audit_repo.rs" => Some(("append", "audit-append")),
@@ -3186,7 +3781,6 @@ fn retry_placement_findings(
     let valid = calls.len() == 1
         && match rel {
             "config_repo.rs" => valid_settings_retry(calls[0]),
-            "credential_repo.rs" => valid_identity_password_retry(calls[0]),
             "auth_grant_lifecycle.rs" => valid_identity_logout_retry(calls[0]),
             "refresh_token_store.rs" => valid_identity_refresh_retry(calls[0]),
             "audit_repo.rs" => valid_audit_append_retry(calls[0]),
@@ -3526,7 +4120,6 @@ struct RetryExprFacts {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CommandEvidence {
-    PasswordChange,
     SessionLogout,
     RefreshRotation,
     SecretPublish,
@@ -3736,10 +4329,7 @@ impl<'ast> syn::visit::Visit<'ast> for RetryAstScan {
         use syn::spanned::Spanned as _;
         if matches!(
             exact_expr_path(&node.func).as_deref(),
-            Some(
-                "identity::password_change_localtx_observation"
-                    | "settings::secret_publish_localtx_observation"
-            )
+            Some("settings::secret_publish_localtx_observation")
         ) {
             self.legacy_command_evidence_calls
                 .push((node.func.span().start().line, self.current_function.clone()));
@@ -3778,16 +4368,6 @@ fn valid_settings_retry(call: &RetryCall) -> bool {
         && call.arguments.len() == 3
         && call.arguments[0].exact_path.as_deref() == Some("SETTINGS_CONFIG_BOUNDARY")
         && call.arguments[1].operation_method.as_deref() == Some("retry_producer_tx")
-        && call.arguments[1].scoped_operation_calls == 1
-        && !call.arguments[1].legacy_write
-        && call.arguments[1].deadline_dataflow
-}
-
-fn valid_identity_password_retry(call: &RetryCall) -> bool {
-    call.wrapper == Some(RetryWrapper::Local)
-        && call.arguments.len() == 3
-        && call.arguments[0].command_evidence == Some(CommandEvidence::PasswordChange)
-        && call.arguments[1].operation_method.as_deref() == Some("retry_write")
         && call.arguments[1].scoped_operation_calls == 1
         && !call.arguments[1].legacy_write
         && call.arguments[1].deadline_dataflow
@@ -3897,7 +4477,6 @@ fn typed_command_param(signature: &syn::Signature) -> Option<(String, CommandEvi
         };
         let factory = match path.path.segments.last()?.ident.to_string().as_str() {
             "SecretPublishCommand" => CommandEvidence::SecretPublish,
-            "PasswordChangeMutation" => CommandEvidence::PasswordChange,
             "AuthGrantCloseCommand" => CommandEvidence::SessionLogout,
             "RefreshRotationMutation" => CommandEvidence::RefreshRotation,
             "AuditListTenantAppend" => CommandEvidence::AuditListTenantAppend,
@@ -7835,6 +8414,263 @@ fn braced_body(s: &str) -> Option<(&str, usize)> {
 mod tests {
     use super::*;
 
+    fn identity_security_sql_green_source() -> &'static str {
+        r#"
+impl PgIdentitySecurityLifecycle {
+    async fn execute_reactivation(&self) {
+        self.write_pool.write(
+            scope,
+            move |tx| Box::pin(async move {
+                apply_account_security_cas(tx.conn()).await
+            }),
+            storage,
+        ).await;
+    }
+}
+
+async fn apply_password_change(conn: &mut PgConnection) {
+    sqlx::query(
+        "UPDATE credentials SET password_hash = $3, version = $4 \
+         WHERE tenant_id = $1::uuid AND login = $2",
+    ).execute(conn).await;
+}
+
+async fn apply_account_security_cas(conn: &mut PgConnection) {
+    sqlx::query(
+        "UPDATE account_security_states \
+         SET status = $3, authn_epoch = $4, version = $5 \
+         WHERE tenant_id = $1::uuid AND user_id = $2::uuid",
+    ).execute(conn).await;
+}
+
+async fn revoke_identity_sessions(conn: &mut PgConnection) {
+    sqlx::query(
+        "UPDATE refresh_tokens AS refresh SET status = 'revoked' \
+         FROM auth_grants AS root \
+         WHERE root.tenant_id = $1::uuid AND root.user_id = $2::uuid \
+           AND refresh.tenant_id = root.tenant_id \
+           AND refresh.auth_grant_id = root.grant_id",
+    ).execute(conn).await;
+    sqlx::query(
+        "UPDATE auth_grants SET status = 'revoked', close_reason = $2 \
+         WHERE user_id = $1::uuid",
+    ).execute(conn).await;
+}
+"#
+    }
+
+    fn identity_security_sql_green_files() -> Vec<(String, String)> {
+        files(&[
+            (
+                "identity_security_lifecycle.rs",
+                identity_security_sql_green_source(),
+            ),
+            (
+                "auth_grant_lifecycle.rs",
+                r#"async fn apply_grant_close_cas(conn: &mut PgConnection) {
+                    sqlx::query_scalar(
+                        "WITH revoked AS (
+                            UPDATE refresh_tokens SET status = 'revoked'
+                            WHERE tenant_id = $1::uuid AND auth_grant_id = $2 AND user_id = $3::uuid
+                        )
+                        UPDATE auth_grants SET status = $5, close_reason = $7
+                        WHERE tenant_id = $1::uuid AND grant_id = $2 AND user_id = $3::uuid",
+                    ).fetch_optional(conn).await;
+                }"#,
+            ),
+        ])
+    }
+
+    #[test]
+    fn identity_security_sql_owner_gate_accepts_canonical_shape() {
+        let findings = identity_security_sql_funnel_findings(&identity_security_sql_green_files());
+        assert!(findings.is_empty(), "{findings:#?}");
+    }
+
+    #[test]
+    fn identity_security_sql_owner_gate_rejects_missing_and_extra_sites() {
+        let missing = identity_security_sql_funnel_findings(&files(&[(
+            "identity_security_lifecycle.rs",
+            &identity_security_sql_green_source()
+                .replace("password_hash = $3, version = $4", "password_hash = $3"),
+        )]));
+        assert!(
+            missing.iter().any(|finding| {
+                finding.rule == Rule::IdentitySecuritySqlOwnerSitesAbsent
+                    && finding.subject.contains("password CAS")
+            }),
+            "missing password CAS must be synthetic-red: {missing:#?}"
+        );
+
+        let mut extra = identity_security_sql_green_files();
+        extra.push((
+            "credential_repo.rs".to_owned(),
+            r#"async fn legacy(conn: &mut PgConnection) {
+                sqlx::query("UPDATE credentials SET password_hash = $3, version = $4 WHERE tenant_id = $1")
+                    .execute(conn).await;
+            }"#
+                .to_owned(),
+        ));
+        let extra = identity_security_sql_funnel_findings(&extra);
+        assert!(
+            extra.iter().any(|finding| {
+                finding.rule == Rule::IdentitySecuritySqlOwnerBypass
+                    && finding.subject.starts_with("credential_repo.rs::")
+            }),
+            "extra password owner must be synthetic-red: {extra:#?}"
+        );
+
+        for source in [
+            r#"const PASSWORD_CAS: &str = "UPDATE credentials SET password_hash = $3, version = $4 WHERE tenant_id = $1";
+                async fn legacy(conn: &mut PgConnection) {
+                    sqlx::query(PASSWORD_CAS).execute(conn).await;
+                }"#,
+            r#"async fn legacy(conn: &mut PgConnection) {
+                    sqlx::query!("UPDATE credentials SET password_hash = $3, version = $4 WHERE tenant_id = $1")
+                        .execute(conn).await;
+                }"#,
+        ] {
+            let mut macro_or_const = identity_security_sql_green_files();
+            macro_or_const.push(("credential_repo.rs".to_owned(), source.to_owned()));
+            let findings = identity_security_sql_funnel_findings(&macro_or_const);
+            assert!(
+                findings.iter().any(|finding| {
+                    finding.rule == Rule::IdentitySecuritySqlOwnerBypass
+                        && finding.subject.starts_with("credential_repo.rs::")
+                }),
+                "macro/const rogue password owner must be synthetic-red: {findings:#?}"
+            );
+        }
+    }
+
+    #[test]
+    fn identity_security_sql_owner_gate_accepts_live_workspace() -> anyhow::Result<()> {
+        let root = crate::workspace_root()?;
+        let files = load_prod_rs(&root.join("adapters/postgres/src"))?;
+        let findings = identity_security_sql_funnel_findings(&files);
+        assert!(
+            !findings.iter().any(|finding| matches!(
+                finding.rule,
+                Rule::IdentitySecuritySqlOwnerBypass | Rule::IdentitySecuritySqlOwnerSitesAbsent
+            )),
+            "{findings:#?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn identity_reactivation_gate_accepts_canonical_shape() {
+        let syntax = syn::parse_file(identity_security_sql_green_source()).expect("green syntax");
+        let findings = identity_reactivation_findings("identity_security_lifecycle.rs", &syntax);
+        assert!(findings.is_empty(), "{findings:#?}");
+    }
+
+    #[test]
+    fn identity_reactivation_call_graph_keeps_free_and_impl_callables_distinct()
+    -> anyhow::Result<()> {
+        let source = format!(
+            "{}\nimpl UnrelatedLifecycle {{\n    async fn apply_account_security_cas(&self) {{\n        self.write_pool.producer_tx(scope, op).await;\n    }}\n}}",
+            identity_security_sql_green_source()
+        );
+        let syntax = syn::parse_file(&source)?;
+        let findings = identity_reactivation_findings("identity_security_lifecycle.rs", &syntax);
+        assert!(
+            findings.is_empty(),
+            "an unrelated impl method must not collide with the free helper: {findings:#?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn identity_reactivation_gate_rejects_producer_outbox_grant_and_family_paths() {
+        for (label, source) in [
+            (
+                "producer",
+                identity_security_sql_green_source().replace(
+                    "self.write_pool.write(",
+                    "self.write_pool.producer_tx(",
+                ),
+            ),
+            (
+                "outbox",
+                identity_security_sql_green_source().replace(
+                    "apply_account_security_cas(tx.conn()).await",
+                    "append_outbox(tx.conn()).await; apply_account_security_cas(tx.conn()).await",
+                ),
+            ),
+            (
+                "grant/family",
+                identity_security_sql_green_source().replace(
+                    "apply_account_security_cas(tx.conn()).await",
+                    "apply_account_security_cas(tx.conn()).await; revoke_identity_sessions(tx.conn()).await",
+                ),
+            ),
+        ] {
+            let syntax = syn::parse_file(&source).expect("synthetic red syntax");
+            let findings =
+                identity_reactivation_findings("identity_security_lifecycle.rs", &syntax);
+            assert!(
+                findings
+                    .iter()
+                    .any(|finding| finding.rule == Rule::IdentityReactivationBypass),
+                "{label} reactivation bypass must be synthetic-red: {findings:#?}"
+            );
+        }
+
+        let neutral_outbox_helper = format!(
+            "{}\nasync fn persist(conn: &mut PgConnection) {{ sqlx::query!(\"INSERT INTO outbox (event_id) VALUES ('rogue')\").execute(conn).await; }}",
+            identity_security_sql_green_source().replace(
+                "apply_account_security_cas(tx.conn()).await",
+                "apply_account_security_cas(tx.conn()).await; persist(tx.conn()).await",
+            )
+        );
+        let syntax = syn::parse_file(&neutral_outbox_helper).expect("neutral helper syntax");
+        let findings = identity_reactivation_findings("identity_security_lifecycle.rs", &syntax);
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == Rule::IdentityReactivationBypass),
+            "neutral helper with direct outbox SQL must be synthetic-red: {findings:#?}"
+        );
+    }
+
+    #[test]
+    fn identity_reactivation_gate_rejects_missing_and_extra_plain_writes() {
+        for source in [
+            identity_security_sql_green_source()
+                .replace("self.write_pool.write(", "self.write_pool.read("),
+            identity_security_sql_green_source().replace(
+                "self.write_pool.write(",
+                "self.write_pool.write(scope, op, storage).await; self.write_pool.write(",
+            ),
+        ] {
+            let syntax = syn::parse_file(&source).expect("synthetic red syntax");
+            let findings =
+                identity_reactivation_findings("identity_security_lifecycle.rs", &syntax);
+            assert!(
+                findings
+                    .iter()
+                    .any(|finding| finding.rule == Rule::IdentityReactivationSitesAbsent),
+                "missing/extra reactivation write must be synthetic-red: {findings:#?}"
+            );
+        }
+    }
+
+    #[test]
+    fn identity_reactivation_gate_accepts_live_workspace() -> anyhow::Result<()> {
+        let root = crate::workspace_root()?;
+        let files = load_prod_rs(&root.join("adapters/postgres/src"))?;
+        let findings = identity_security_sql_funnel_findings(&files);
+        assert!(
+            !findings.iter().any(|finding| matches!(
+                finding.rule,
+                Rule::IdentityReactivationBypass | Rule::IdentityReactivationSitesAbsent
+            )),
+            "{findings:#?}"
+        );
+        Ok(())
+    }
+
     #[test]
     fn producer_funnel_guard_real_workspace_closes_exact_sites() -> anyhow::Result<()> {
         let root = crate::workspace_root()?;
@@ -7899,6 +8735,90 @@ mod tests {
             ),
         ]));
         assert!(findings.is_empty(), "{findings:#?}");
+    }
+
+    fn producer_funnel_identity_reactivation_source() -> &'static str {
+        r#"
+impl PgIdentitySecurityLifecycle {
+    async fn execute_password_change(&self) { self.execute_prepared().await; }
+    async fn execute_account_status_set(&self) { self.execute_prepared().await; }
+    async fn execute_logout_current(&self) { self.execute_prepared().await; }
+    async fn execute_logout_all(&self) { self.execute_prepared().await; }
+    async fn execute_prepared(&self) { self.write_pool.producer_tx().await; }
+    async fn execute_reactivation(&self) {
+        self.write_pool.write(scope, move |tx| Box::pin(async move {
+            apply_account_security_cas(tx.conn()).await
+        }), storage).await;
+    }
+}
+async fn apply_account_security_cas(conn: &mut PgConnection) {
+    sqlx::query(
+        "UPDATE account_security_states SET status = $3, authn_epoch = $4, version = $5 WHERE tenant_id = $1",
+    ).execute(conn).await;
+}
+"#
+    }
+
+    fn producer_funnel_files_with_identity(identity: &str) -> Vec<(String, String)> {
+        files(&[
+            (
+                "auth_grant_lifecycle.rs",
+                "async fn persist(pool: P) { pool.producer_tx().await; }",
+            ),
+            ("identity_security_lifecycle.rs", identity),
+            (
+                "policy_repo.rs",
+                "async fn a(pool: P) { pool.producer_tx().await; } async fn b(pool: P) { pool.producer_tx().await; } async fn c(pool: P) { pool.producer_tx().await; }",
+            ),
+            (
+                "role_binding_lifecycle.rs",
+                "async fn a(pool: P) { pool.producer_tx().await; } async fn b(pool: P) { pool.producer_tx().await; }",
+            ),
+            (
+                "config_repo.rs",
+                "async fn persist(pool: P) { pool.retry_producer_tx().await; }",
+            ),
+        ])
+    }
+
+    #[test]
+    fn producer_funnel_guard_allows_exact_exclusive_reactivation_write() {
+        let findings = producer_funnel_findings(&producer_funnel_files_with_identity(
+            producer_funnel_identity_reactivation_source(),
+        ));
+        assert!(findings.is_empty(), "{findings:#?}");
+    }
+
+    #[test]
+    fn producer_funnel_guard_rejects_reactivation_write_reachable_from_producer() {
+        let shared = producer_funnel_identity_reactivation_source().replace(
+            "async fn execute_password_change(&self) { self.execute_prepared().await; }",
+            "async fn execute_password_change(&self) { self.execute_reactivation().await; self.execute_prepared().await; }",
+        );
+        let findings = producer_funnel_findings(&producer_funnel_files_with_identity(&shared));
+        assert!(
+            findings.iter().any(|finding| {
+                finding.rule == Rule::ProducerFunnelBypass
+                    && finding.detail.contains("forbidden `write`")
+            }),
+            "a producer-reachable reactivation write must be synthetic-red: {findings:#?}"
+        );
+    }
+
+    #[test]
+    fn producer_funnel_guard_rejects_extra_plain_write_outside_reactivation() {
+        let extra = producer_funnel_identity_reactivation_source().replace(
+            "async fn execute_password_change(&self) { self.execute_prepared().await; }",
+            "async fn execute_password_change(&self) { self.write_pool.write().await; self.execute_prepared().await; }",
+        );
+        let findings = producer_funnel_findings(&producer_funnel_files_with_identity(&extra));
+        assert!(
+            findings.iter().any(|finding| {
+                finding.rule == Rule::ProducerFunnelBypass
+                    && finding.detail.contains("forbidden `write`")
+            }),
+            "an extra plain write must be synthetic-red: {findings:#?}"
+        );
     }
 
     #[test]
@@ -10374,18 +11294,6 @@ pub mod fault_matrix;
     }
 
     #[test]
-    fn retry_guard_accepts_local_wrapper_alias_with_typed_identity_command() {
-        let mut sites = BTreeSet::new();
-        let findings = retry_placement_findings(
-            "credential_repo.rs",
-            "use crate::tx_retry::{run_pg_localtx_retry as retry}; impl Repo { async fn apply_password_change(&self, mutation: PasswordChangeMutation){ let (_, _, observation) = mutation.into_parts(); retry(observation, |_attempt, deadline| async { self.pool.retry_write(scope, deadline) }, classify).await; } }",
-            &mut sites,
-        );
-        assert!(findings.is_empty(), "{findings:?}");
-        assert!(sites.contains("identity-password-change"));
-    }
-
-    #[test]
     fn retry_guard_accepts_command_carried_settings_secret_observation() {
         let mut sites = BTreeSet::new();
         let source = r#"
@@ -10407,23 +11315,18 @@ impl SecretUnitOfWork for PgSecretUnitOfWork {
     }
 
     #[test]
-    fn retry_guard_rejects_wrong_wrapper_or_unbound_identity_evidence() {
+    fn retry_guard_rejects_wrong_wrapper_or_unbound_command_evidence() {
         let mut sites = BTreeSet::new();
         for source in [
-            "impl Repo { async fn bump_version(&self){ run_pg_tx_retry(IDENTITY_CREDENTIAL_BOUNDARY, || async { self.pool.retry_write() }, classify).await; } }",
-            "impl Repo { async fn bump_version(&self){ run_pg_localtx_retry(IDENTITY_CREDENTIAL_BOUNDARY, observation, || async { self.pool.retry_write() }, classify).await; } }",
             "impl Uow { async fn commit(&self){ run_pg_localtx_retry(SETTINGS_CONFIG_BOUNDARY, observation, || async { self.pool.retry_producer_tx() }, classify).await; } }",
             "impl Repo { async fn save(&self){ run_pg_tx_retry(SETTINGS_SECRET_BOUNDARY, || async { self.pool.retry_write() }, classify).await; } }",
             "impl Repo { async fn save(&self){ run_pg_localtx_retry(SETTINGS_SECRET_BOUNDARY, observation, || async { self.pool.retry_write() }, classify).await; } }",
-            "impl Repo { async fn save(&self){ run_pg_localtx_retry(SETTINGS_SECRET_BOUNDARY, identity::password_change_localtx_observation().ok_or_else(missing)?, || async { self.pool.retry_write() }, classify).await; } }",
             "impl Repo { async fn save(&self){ let mut observation = settings::secret_publish_localtx_observation().ok_or_else(missing)?; observation = handmade(); run_pg_localtx_retry(SETTINGS_SECRET_BOUNDARY, observation, || async { self.pool.retry_write() }, classify).await; } }",
             "impl Repo { async fn save(&self){ run_pg_localtx_retry(SETTINGS_SECRET_BOUNDARY, settings::secret_publish_localtx_observation().ok_or_else(missing)?, || async { self.pool.write() }, classify).await; } }",
             "impl Repo { async fn save(&self){ run_pg_localtx_retry(SETTINGS_SECRET_BOUNDARY, settings::secret_publish_localtx_observation().ok_or_else(missing)?, || async { self.pool.write().await; self.pool.retry_write().await }, classify).await; } }",
         ] {
             let rel = if source.contains("SETTINGS_SECRET_BOUNDARY") {
                 "secret_repo.rs"
-            } else if source.contains("impl Repo") {
-                "credential_repo.rs"
             } else {
                 "config_repo.rs"
             };
@@ -10755,36 +11658,11 @@ pub trait SecretRepoLocal: Send + Sync {
     }
 
     #[test]
-    fn retry_guard_rejects_block_tuple_and_dead_branch_argument_bait() {
-        let mut sites = BTreeSet::new();
-        for source in [
-            "impl Repo { async fn bump_version(&self){ run_pg_localtx_retry({ let _ = IDENTITY_CREDENTIAL_BOUNDARY; WRONG_BOUNDARY }, identity::password_change_localtx_observation().ok_or_else(missing)?, |_attempt| async { self.pool.retry_write() }, classify).await; } }",
-            "impl Repo { async fn bump_version(&self){ run_pg_localtx_retry(IDENTITY_CREDENTIAL_BOUNDARY, (identity::password_change_localtx_observation(), observation).1, |_attempt| async { self.pool.retry_write() }, classify).await; } }",
-            "impl Repo { async fn bump_version(&self){ run_pg_localtx_retry(IDENTITY_CREDENTIAL_BOUNDARY, match identity::password_change_localtx_observation() { Some(observation) => fake_observation, None => return Err(missing) }, |_attempt| async { self.pool.retry_write() }, classify).await; } }",
-            "impl Repo { async fn bump_version(&self){ run_pg_localtx_retry(IDENTITY_CREDENTIAL_BOUNDARY, identity::password_change_localtx_observation().ok_or_else(missing)?, |_attempt| async { if false { self.pool.retry_write() } else { raw_write() } }, classify).await; } }",
-        ] {
-            let findings = retry_placement_findings("credential_repo.rs", source, &mut sites);
-            assert!(
-                findings
-                    .iter()
-                    .any(|finding| finding.rule == Rule::RetryPlacement),
-                "argument bait must not satisfy the canonical retry shape: {findings:?}"
-            );
-        }
-    }
-
-    #[test]
     fn retry_guard_rejects_removed_optional_observation_factories() {
-        for (rel, source) in [
-            (
-                "credential_repo.rs",
-                "impl Repo { async fn apply_password_change(&self, mutation: PasswordChangeMutation){ let (_, _, command_observation) = mutation.into_parts(); let observation = identity::password_change_localtx_observation().unwrap(); run_pg_localtx_retry(observation, || async { self.pool.retry_write() }, classify).await; } }",
-            ),
-            (
-                "secret_repo.rs",
-                "impl Uow { async fn publish(&self, command: SecretPublishCommand){ let (_, command_observation) = command.into_parts(); let observation = settings::secret_publish_localtx_observation().unwrap(); run_pg_localtx_retry(observation, || async { self.pool.retry_write() }, classify).await; } }",
-            ),
-        ] {
+        for (rel, source) in [(
+            "secret_repo.rs",
+            "impl Uow { async fn publish(&self, command: SecretPublishCommand){ let (_, command_observation) = command.into_parts(); let observation = settings::secret_publish_localtx_observation().unwrap(); run_pg_localtx_retry(observation, || async { self.pool.retry_write() }, classify).await; } }",
+        )] {
             let mut sites = BTreeSet::new();
             let findings = retry_placement_findings(rel, source, &mut sites);
             assert!(
@@ -10803,11 +11681,6 @@ pub trait SecretRepoLocal: Send + Sync {
             &mut sites,
             "config_repo.rs",
             "impl Uow { async fn commit_authorized(&self){ run_pg_tx_retry(SETTINGS_CONFIG_BOUNDARY, |_attempt, deadline| async { self.pool.retry_producer_tx(scope, deadline) }, classify).await; } }",
-        );
-        assert_retry_shape(
-            &mut sites,
-            "credential_repo.rs",
-            "impl Repo { async fn apply_password_change(&self, mutation: PasswordChangeMutation){ let (_, _, observation) = mutation.into_parts(); run_pg_localtx_retry(observation, |_attempt, deadline| async { self.pool.retry_write(scope, deadline) }, classify).await; } }",
         );
         assert_retry_shape(
             &mut sites,
@@ -10835,7 +11708,6 @@ pub trait SecretRepoLocal: Send + Sync {
             BTreeSet::from([
                 "audit-append",
                 "audit-list-tenant-append",
-                "identity-password-change",
                 "identity-refresh-rotate",
                 "identity-session-logout",
                 "settings-config-commit",
@@ -10894,7 +11766,6 @@ pub trait SecretRepoLocal: Send + Sync {
                 "tx_retry.rs"
                     | "config_repo.rs"
                     | "secret_repo.rs"
-                    | "credential_repo.rs"
                     | "auth_grant_lifecycle.rs"
                     | "refresh_token_store.rs"
                     | "audit_repo.rs"
@@ -10908,7 +11779,6 @@ pub trait SecretRepoLocal: Send + Sync {
         assert_eq!(
             sites,
             BTreeSet::from([
-                "identity-password-change",
                 "identity-refresh-rotate",
                 "identity-session-logout",
                 "audit-append",
@@ -11096,7 +11966,7 @@ async fn run_pg_localtx_retry(observation: LocalTxObservation<M>) {
     }
 
     #[test]
-    fn localtx_deadline_guard_real_workspace_closes_mint_and_nine_dataflows() -> Result<()> {
+    fn localtx_deadline_guard_real_workspace_closes_mint_and_eight_dataflows() -> Result<()> {
         let root = crate::workspace_root()?;
         let files = load_prod_rs(&root.join("adapters/postgres/src"))?;
         let mut sites = BTreeSet::new();
@@ -11108,7 +11978,6 @@ async fn run_pg_localtx_retry(observation: LocalTxObservation<M>) {
                     | "cotx/mod.rs"
                     | "config_repo.rs"
                     | "secret_repo.rs"
-                    | "credential_repo.rs"
                     | "auth_grant_lifecycle.rs"
                     | "refresh_token_store.rs"
                     | "audit_repo.rs"
@@ -11119,7 +11988,7 @@ async fn run_pg_localtx_retry(observation: LocalTxObservation<M>) {
             findings.extend(retry_placement_findings(rel, &source, &mut sites));
         }
         assert!(findings.is_empty(), "{findings:?}");
-        assert_eq!(sites.len(), 9, "{sites:?}");
+        assert_eq!(sites.len(), 8, "{sites:?}");
 
         let runner = files
             .iter()
@@ -11133,7 +12002,7 @@ async fn run_pg_localtx_retry(observation: LocalTxObservation<M>) {
     }
 
     #[test]
-    fn retry_guard_requires_the_closed_nine_site_set() {
+    fn retry_guard_requires_the_closed_eight_site_set() {
         let files = vec![("tx_retry.rs".to_string(), String::new())];
         let findings = required_retry_site_findings(&files, &BTreeSet::new());
         assert_eq!(
@@ -11141,7 +12010,7 @@ async fn run_pg_localtx_retry(observation: LocalTxObservation<M>) {
                 .iter()
                 .filter(|finding| finding.rule == Rule::RetrySitesAbsent)
                 .count(),
-            9,
+            8,
             "{findings:?}"
         );
         assert!(

@@ -41,10 +41,11 @@ mod security_event;
 // Role / RoleBinding 是 pub（ports::{RoleReadRepo, RoleBindingLifecycle} 签名实体，跨 crate 命名）。
 pub use rbac::{Role, RoleBinding};
 pub use security_event::{
-    AccountCredentialSecurityCommand, CredentialSecurityCommand, CredentialSecurityEvent,
-    CredentialSecurityReceipt, CredentialSecurityTargetKind, CredentialSecurityTargetRef,
-    GrantCredentialSecurityCommand, LogoutAllCommand, LogoutCurrentCommand,
-    PendingCredentialSecurityCommit,
+    AccountCredentialSecurityCommand, AccountStatusSetCommand, CredentialSecurityCommand,
+    CredentialSecurityEvent, CredentialSecurityInitiator, CredentialSecurityReceipt,
+    CredentialSecurityTargetKind, CredentialSecurityTargetRef, GrantCredentialSecurityCommand,
+    LogoutAllCommand, LogoutCurrentCommand, PasswordChangeCommand, PasswordChangeCommandError,
+    PendingCredentialSecurityCommit, ReactivateAccountCommand,
 };
 // RefreshTokenRecord / RefreshTokenId / RefreshTokenHash / RefreshStatus 是 pub（ports::RefreshTokenStore
 // 签名实体，跨 crate 命名）；kind_to_db / kind_from_db 是 PrincipalKind↔text 单源映射（postgres adapter 消费）。
@@ -393,7 +394,7 @@ impl PolicyId {
 /// - `InvalidPolicy`：策略构造 / 校验失败。
 /// - `PermissionDenied`：handler / 服务层把 `Decision::Deny` 落为域错误时使用（生产接线待 W 阶段 PR5）。
 /// - `CredentialNotFound`：`CredentialRepo` 查无凭据（PR3）。
-/// - `VersionConflict`：`CredentialRepo::apply_password_change` CAS 期望版本不匹配（并发密码变更，PR3）。
+/// - `VersionConflict`：统一 identity-security lifecycle 的完整 snapshot CAS 不匹配。
 /// - `SecurityFactBuild`：事务开始前构造 generated fact identity/envelope 失败。
 /// - `SecurityPayloadEncode`：事务开始前编码 generated security-event payload 失败。
 /// - `Storage`：持久化层错误（`RoleReadRepo` postgres adapter 边界把 sqlx 等存储错误收口于此；#1250）。

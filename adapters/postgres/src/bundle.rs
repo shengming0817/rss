@@ -179,6 +179,8 @@ pub struct PgRuntimeHandle {
     audit_admin_store: Option<VerifiedPgAuditAdminStore>,
     delivery_policy: EventDeliveryPolicy,
     projection_registry: ProjectionWriteRegistry,
+    projection_generation: &'static str,
+    projection_inputs: &'static [vocab::ProjectionInputBinding],
     readiness: Arc<PgDbReadiness>,
     rls_ready: Arc<AtomicBool>,
 }
@@ -189,6 +191,8 @@ pub struct PgRuntimeHandle {
 pub struct PgReadinessSamplerFactory {
     writer_store: Arc<PgStore>,
     reader_store: Arc<PgStore>,
+    projection_generation: &'static str,
+    projection_inputs: &'static [vocab::ProjectionInputBinding],
     readiness: Arc<PgDbReadiness>,
     period: Duration,
 }
@@ -393,6 +397,8 @@ impl PgReadinessSamplerFactory {
         let handle = tokio::spawn(crate::readiness::pg_readiness_sampling_loop(
             self.writer_store,
             self.reader_store,
+            self.projection_generation,
+            self.projection_inputs,
             self.period,
             token.clone(),
             Arc::clone(&self.readiness),
@@ -532,7 +538,6 @@ impl PgRuntimeDeps {
             "postgres-writer",
         ));
         let writer_store = writer.store_arc();
-        let projection_bindings_preloaded = preloaded_delivery_policy.is_some();
         let delivery_policy = match preloaded_delivery_policy {
             Some(policy) => policy,
             None => match writer_store.load_event_delivery_policy().await {
@@ -540,11 +545,13 @@ impl PgRuntimeDeps {
                 Err(primary) => return serving_transaction.close(Err(primary)).await,
             },
         };
-        if !projection_bindings_preloaded
-            && let Err(primary) = writer_store
-                .register_projection_input_bindings(projection_generation, projection_inputs)
-                .await
-                .map_err(PgError::ProjectionBindings)
+        if let Err(primary) = writer_store
+            .validate_registered_projection_input_generation(
+                projection_generation,
+                projection_inputs,
+            )
+            .await
+            .map_err(PgError::ProjectionBindings)
         {
             return serving_transaction.close(Err(primary)).await;
         }
@@ -582,6 +589,8 @@ impl PgRuntimeDeps {
                 audit_admin_store,
                 delivery_policy,
                 projection_registry: ProjectionWriteRegistry::from_generated(projection_inputs),
+                projection_generation,
+                projection_inputs,
                 readiness: Arc::new(PgDbReadiness::new()),
                 rls_ready: Arc::new(AtomicBool::new(true)),
             },
@@ -652,6 +661,8 @@ impl PgRuntimeDeps {
             audit_admin_store,
             delivery_policy: _,
             projection_registry: _,
+            projection_generation,
+            projection_inputs,
             readiness,
             rls_ready: _,
         } = self.handle;
@@ -675,6 +686,8 @@ impl PgRuntimeDeps {
             PgReadinessSamplerFactory {
                 writer_store,
                 reader_store,
+                projection_generation,
+                projection_inputs,
                 readiness,
                 period,
             },
@@ -706,6 +719,8 @@ impl PgRuntimeHandle {
             stores: Arc::clone(&self.stores),
             audit_admin_store: self.audit_admin_store.clone(),
             projection_registry: self.projection_registry,
+            #[cfg(feature = "journey-fault-support")]
+            identity_security_start_barrier: None,
             _marker: PhantomData,
         }
     }
@@ -766,6 +781,8 @@ impl PgRuntimeHandle {
             audit_admin_store: None,
             delivery_policy: EventDeliveryPolicy::release(),
             projection_registry: ProjectionWriteRegistry::empty(),
+            projection_generation: "",
+            projection_inputs: &[],
             readiness: Arc::new(PgDbReadiness::new()),
             rls_ready: Arc::new(AtomicBool::new(true)),
         }
@@ -814,6 +831,8 @@ impl PgRuntimeDeps {
                     .map(VerifiedPgAuditAdminStore::from_unverified_for_test),
                 delivery_policy: EventDeliveryPolicy::release(),
                 projection_registry: ProjectionWriteRegistry::empty(),
+                projection_generation: "",
+                projection_inputs: &[],
                 readiness: Arc::new(PgDbReadiness::new()),
                 rls_ready: Arc::new(AtomicBool::new(true)),
             },
@@ -839,6 +858,8 @@ impl PgRuntimeHandle {
             audit_admin_store: None,
             delivery_policy: EventDeliveryPolicy::release(),
             projection_registry: ProjectionWriteRegistry::empty(),
+            projection_generation: "",
+            projection_inputs: &[],
             readiness: Arc::new(PgDbReadiness::new()),
             rls_ready: Arc::new(AtomicBool::new(true)),
         }
@@ -1129,6 +1150,8 @@ pub struct PgDomainDeps<D: PgDomain> {
     stores: Arc<PgRuntimeStores>,
     audit_admin_store: Option<VerifiedPgAuditAdminStore>,
     projection_registry: ProjectionWriteRegistry,
+    #[cfg(feature = "journey-fault-support")]
+    identity_security_start_barrier: Option<Arc<tokio::sync::Barrier>>,
     _marker: PhantomData<D>,
 }
 
@@ -1139,6 +1162,8 @@ impl<D: PgDomain> Clone for PgDomainDeps<D> {
             stores: Arc::clone(&self.stores),
             audit_admin_store: self.audit_admin_store.clone(),
             projection_registry: self.projection_registry,
+            #[cfg(feature = "journey-fault-support")]
+            identity_security_start_barrier: self.identity_security_start_barrier.clone(),
             _marker: PhantomData,
         }
     }
@@ -1275,7 +1300,38 @@ impl PgSettingsBundle {
 }
 
 #[cfg(feature = "domain-identity")]
+#[cfg(all(feature = "domain-identity", any(test, feature = "test-support")))]
+pub fn identity_pseudonym_keys_for_test() -> std::sync::Arc<secure::PseudonymKeyRing> {
+    let key = match secure::RedactionHashKey::from_bytes(vec![0x42; 32]) {
+        Ok(key) => key,
+        Err(error) => unreachable!("fixed test pseudonym key must be valid: {error}"),
+    };
+    let ring = match secure::PseudonymKeyRing::new(
+        secure::VersionedPseudonymKey::new(
+            secure::PseudonymKeyId::new(std::num::NonZeroU16::MIN),
+            key,
+        ),
+        Vec::new(),
+    ) {
+        Ok(ring) => ring,
+        Err(error) => unreachable!("fixed test pseudonym key ring must be valid: {error}"),
+    };
+    std::sync::Arc::new(ring)
+}
+
+#[cfg(feature = "domain-identity")]
 impl PgDomainDeps<caps::Identity> {
+    /// Inject a deterministic transaction-start rendezvous for the HTTP concurrency journey.
+    #[cfg(feature = "journey-fault-support")]
+    #[must_use]
+    pub fn with_identity_security_start_barrier_for_test(
+        mut self,
+        barrier: Arc<tokio::sync::Barrier>,
+    ) -> Self {
+        self.identity_security_start_barrier = Some(barrier);
+        self
+    }
+
     /// Request-time durable fence for verified RSS access-token grant bindings.
     #[must_use]
     pub fn auth_grant_validator(&self) -> PgAuthGrantValidator {
@@ -1327,13 +1383,10 @@ impl PgDomainDeps<caps::Identity> {
         )
     }
 
-    /// Durable account-security state provider for mandatory auth gates and sealed lifecycle CAS.
+    /// Durable account-security read model for mandatory authentication gates.
     #[must_use]
     pub fn account_security_repo(&self) -> crate::PgAccountSecurityRepo {
-        crate::PgAccountSecurityRepo::new(
-            self.stores.reader_capability(),
-            self.stores.writer_capability(),
-        )
+        crate::PgAccountSecurityRepo::new(self.stores.reader_capability())
     }
 
     /// Draft credential-security projection + OutboxFact lifecycle.
@@ -1341,8 +1394,33 @@ impl PgDomainDeps<caps::Identity> {
     /// This constructor does not wire a production producer; callers must already hold the
     /// domain's sealed command.
     #[must_use]
-    pub fn identity_security_lifecycle(&self) -> PgIdentitySecurityLifecycle {
-        PgIdentitySecurityLifecycle::new(self.stores.writer_capability(), self.projection_registry)
+    pub fn identity_security_lifecycle(
+        &self,
+        pseudonym_keys: std::sync::Arc<secure::PseudonymKeyRing>,
+    ) -> PgIdentitySecurityLifecycle {
+        let lifecycle = PgIdentitySecurityLifecycle::new(
+            self.stores.writer_capability(),
+            self.projection_registry,
+            pseudonym_keys,
+        );
+        #[cfg(feature = "journey-fault-support")]
+        if let Some(barrier) = &self.identity_security_start_barrier {
+            return lifecycle.with_start_barrier(Arc::clone(barrier));
+        }
+        lifecycle
+    }
+
+    /// Narrow plain-write account reactivation capability.
+    #[must_use]
+    pub fn account_reactivation_lifecycle(
+        &self,
+        pseudonym_keys: std::sync::Arc<secure::PseudonymKeyRing>,
+    ) -> PgIdentitySecurityLifecycle {
+        PgIdentitySecurityLifecycle::new(
+            self.stores.writer_capability(),
+            self.projection_registry,
+            pseudonym_keys,
+        )
     }
 
     /// 角色仓储（roles 表 + tenant scope）。

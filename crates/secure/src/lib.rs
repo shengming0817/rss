@@ -13,6 +13,7 @@ pub mod envelope;
 pub mod password;
 pub mod pathsafe;
 pub mod protection;
+pub mod pseudonym;
 pub mod redaction;
 pub mod refresh;
 mod secret_text;
@@ -36,6 +37,9 @@ pub use password::{
 };
 pub use pathsafe::is_safe_segment;
 pub use protection::{AadError, DerivedAad, ProtectionAad, ProtectionContext};
+pub use pseudonym::{
+    PseudonymError, PseudonymKeyId, PseudonymKeyRing, PseudonymRef, VersionedPseudonymKey,
+};
 // 字段级脱敏策略模型（#1360）：trait `Redact` + 派生宏 `Redact`（同名异命名空间，对齐
 // `serde::Serialize` trait+derive 范式）+ 策略类型 + 公开 funnel `redact_struct`（封闭 `Redacted::new`
 // 的外部替身）。`Redactor` 是旧 sink 接缝；三个 key/error/url funnel 保留。

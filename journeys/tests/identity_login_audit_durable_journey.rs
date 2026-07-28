@@ -51,8 +51,11 @@ use futures::future::BoxFuture;
 use generated::event::identity_v1::session_created::IdentitySessionCreatedPayload;
 use generated::http::identity_v1::login::{IdentityLoginRequest, PRODUCER as LOGIN_PRODUCER};
 use httpserve::ProducerMarker;
-use identity::LoginService;
-use identity::ports::LoginProducerReceipt;
+use identity::ports::{
+    Credential, CredentialRepo as _, DynAccountSecurityReadRepo, DynCredentialRepo,
+    LoginProducerReceipt, TenantRepoScope as IdentityTenantRepoScope,
+};
+use identity::{CredentialSecurityService, LoginService};
 use memory::{FixedClock, MemBus};
 use postgres::{PgConfig, PgPassword, PgRuntimeDeps, PgSslMode, PgTenantReadConfig, caps};
 use primitives::MacKey;
@@ -281,6 +284,19 @@ async fn login_audit_durable_topology() -> Result<()> {
     let body_result: Result<()> = async {
         let pg_handle = deps.handle();
         let id = pg_handle.for_domain::<caps::Identity>();
+        let tenant = TenantId::parse(CANON_TENANT)?;
+        id.credential_repo()
+            .insert(
+                IdentityTenantRepoScope::for_test(tenant),
+                Credential::hydrate(
+                    LOGIN_USERNAME,
+                    ids::UserId::parse(CANON_USER)?,
+                    tenant,
+                    secure::PasswordHash::for_test(secure::RawPassword::new(PASSWORD.to_owned()))?,
+                    1,
+                ),
+            )
+            .await?;
 
         let bus = MemBus::new();
         let (audit_domain, audit, audit_repo) = audit_domain();
@@ -290,6 +306,7 @@ async fn login_audit_durable_topology() -> Result<()> {
 
         // 组装 audit 订阅（contract/topic/group 单源自 generated SPEC.subscriptions()）。
         let mut refresh_identity = None;
+        let mut credential_security_grants = None;
         let login_identity = Arc::new(LoginService::with_seed_credential(
             |accounts| {
                 let services = identity::seed_auth_grant_services(
@@ -299,9 +316,9 @@ async fn login_audit_durable_topology() -> Result<()> {
                     Duration::from_secs(TTL_SECS),
                 );
                 refresh_identity = Some(services.refresh_service());
+                credential_security_grants = Some(services.lifecycle());
                 services
             },
-            password_policy(),
             Box::new(FixedClock::at_unix_secs(NOW_SECS)),
             Duration::from_secs(TTL_SECS),
             LOGIN_USERNAME,
@@ -311,7 +328,18 @@ async fn login_audit_durable_topology() -> Result<()> {
         )?);
         let refresh_identity = refresh_identity
             .ok_or_else(|| anyhow::anyhow!("seed refresh service was not constructed"))?;
-        let identity_domain = identity_domain(login_identity, refresh_identity);
+        let credential_security = Arc::new(CredentialSecurityService::new(
+            Arc::from(DynCredentialRepo::new_box(id.credential_repo())),
+            credential_security_grants
+                .ok_or_else(|| anyhow::anyhow!("seed grant lifecycle was not constructed"))?,
+            DynAccountSecurityReadRepo::new_box(id.account_security_repo()),
+            id.identity_security_lifecycle(postgres::identity_pseudonym_keys_for_test()),
+            id.identity_security_lifecycle(postgres::identity_pseudonym_keys_for_test()),
+            password_policy(),
+            Box::new(FixedClock::at_unix_secs(NOW_SECS)),
+        ));
+        let identity_domain =
+            identity_domain(login_identity, refresh_identity, credential_security);
         let registry = bootstrap::compose(&[&identity_domain, &audit_domain])?;
         let binding = session_created_subscription(registry)?;
         anyhow::ensure!(binding.topic() == SESSION_CREATED_TOPIC);
@@ -362,7 +390,6 @@ async fn login_audit_durable_topology() -> Result<()> {
                     Duration::from_secs(TTL_SECS),
                 )
             },
-            password_policy(),
             Box::new(FixedClock::at_unix_secs(NOW_SECS)),
             Duration::from_secs(TTL_SECS),
             LOGIN_USERNAME,

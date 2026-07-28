@@ -15,6 +15,10 @@ const SERVICE_TOKEN_REPLAY_MIGRATION: &str =
 const ACCOUNT_SECURITY_MIGRATION: &str =
     include_str!("../migrations/0069_create_account_security_states.sql");
 const AUTH_GRANT_MIGRATION: &str = include_str!("../migrations/0070_create_auth_grants.sql");
+const DELIVERY_POLICY_PROBE: &str =
+    include_str!("../migrations/0077_expose_event_delivery_policy_probe.sql");
+const PROJECTION_INPUT_PROBE: &str =
+    include_str!("../migrations/0078_expose_projection_input_generation_probe.sql");
 const ACCOUNT_SECURITY_CAPACITY_GATE: &str =
     include_str!("../../../docs/ops/0069-account-security-capacity-gate.sh");
 const ACCOUNT_SECURITY_CAPACITY_SELFTEST: &str =
@@ -26,6 +30,23 @@ const READER_UPGRADE_SMOKE: &str =
     include_str!("../../../deploy/postgres-upgrade/smoke-retained-volume.sh");
 const POSTGRES_ROLE_INIT: &str =
     include_str!("../../../deploy/postgres-init/001-create-app-role.sh");
+
+#[test]
+fn security_definer_probes_trust_only_pg_catalog_and_pg_temp() {
+    for (migration, sql) in [
+        ("0077", DELIVERY_POLICY_PROBE),
+        ("0078", PROJECTION_INPUT_PROBE),
+    ] {
+        assert!(
+            sql.contains("SECURITY DEFINER\nSET search_path = pg_catalog, pg_temp"),
+            "{migration} must exclude writable schemas from SECURITY DEFINER search_path"
+        );
+        assert!(
+            !sql.contains("SET search_path = pg_catalog, public"),
+            "{migration} must not trust public"
+        );
+    }
+}
 
 #[test]
 fn postgres_role_init_keeps_file_passwords_out_of_psql_argv_and_unsets_them() {

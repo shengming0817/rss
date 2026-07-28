@@ -851,12 +851,47 @@ pub mod security_event {
     ///  "title": "IdentitySecurityEventPayload",
     ///  "type": "object",
     ///  "required": [
+    ///    "actor",
     ///    "kind",
     ///    "occurredAt",
     ///    "target",
     ///    "tenantId"
     ///  ],
     ///  "properties": {
+    ///    "actor": {
+    ///      "title": "IdentitySecurityEventPayloadActor",
+    ///      "type": "object",
+    ///      "required": [
+    ///        "keyId",
+    ///        "kind",
+    ///        "ref"
+    ///      ],
+    ///      "properties": {
+    ///        "keyId": {
+    ///          "type": "integer",
+    ///          "maximum": 65535.0,
+    ///          "minimum": 1.0,
+    ///          "x-redaction": "internal"
+    ///        },
+    ///        "kind": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "user",
+    ///            "device",
+    ///            "admin",
+    ///            "superAdmin",
+    ///            "service"
+    ///          ]
+    ///        },
+    ///        "ref": {
+    ///          "type": "string",
+    ///          "format": "uuid",
+    ///          "x-redaction": "secret"
+    ///        }
+    ///      },
+    ///      "additionalProperties": false,
+    ///      "x-redaction": "secret"
+    ///    },
     ///    "kind": {
     ///      "type": "string",
     ///      "enum": [
@@ -865,6 +900,7 @@ pub mod security_event {
     ///        "accountLocked",
     ///        "accountSuspended",
     ///        "accountDeactivated",
+    ///        "accountReactivated",
     ///        "logoutCurrent",
     ///        "logoutAll",
     ///        "refreshReuseDetected",
@@ -879,10 +915,17 @@ pub mod security_event {
     ///      "title": "IdentitySecurityEventPayloadTarget",
     ///      "type": "object",
     ///      "required": [
+    ///        "keyId",
     ///        "kind",
     ///        "ref"
     ///      ],
     ///      "properties": {
+    ///        "keyId": {
+    ///          "type": "integer",
+    ///          "maximum": 65535.0,
+    ///          "minimum": 1.0,
+    ///          "x-redaction": "internal"
+    ///        },
     ///        "kind": {
     ///          "type": "string",
     ///          "enum": [
@@ -909,6 +952,8 @@ pub mod security_event {
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
     #[serde(deny_unknown_fields)]
     pub struct IdentitySecurityEventPayload {
+        #[redact(sensitivity = secret)]
+        pub actor: IdentitySecurityEventPayloadActor,
         #[redact(sensitivity = public)]
         pub kind: IdentitySecurityEventPayloadKind,
         #[serde(rename = "occurredAt")]
@@ -919,6 +964,146 @@ pub mod security_event {
         #[serde(rename = "tenantId")]
         #[redact(sensitivity = public)]
         pub tenant_id: ::std::string::String,
+    }
+    ///`IdentitySecurityEventPayloadActor`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentitySecurityEventPayloadActor",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "keyId",
+    ///    "kind",
+    ///    "ref"
+    ///  ],
+    ///  "properties": {
+    ///    "keyId": {
+    ///      "type": "integer",
+    ///      "maximum": 65535.0,
+    ///      "minimum": 1.0,
+    ///      "x-redaction": "internal"
+    ///    },
+    ///    "kind": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "user",
+    ///        "device",
+    ///        "admin",
+    ///        "superAdmin",
+    ///        "service"
+    ///      ]
+    ///    },
+    ///    "ref": {
+    ///      "type": "string",
+    ///      "format": "uuid",
+    ///      "x-redaction": "secret"
+    ///    }
+    ///  },
+    ///  "additionalProperties": false,
+    ///  "x-redaction": "secret"
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct IdentitySecurityEventPayloadActor {
+        #[serde(rename = "keyId")]
+        #[redact(sensitivity = internal)]
+        pub key_id: ::std::num::NonZeroU64,
+        #[redact(sensitivity = public)]
+        pub kind: IdentitySecurityEventPayloadActorKind,
+        #[serde(rename = "ref")]
+        #[redact(sensitivity = secret)]
+        pub ref_: ::uuid::Uuid,
+    }
+    ///`IdentitySecurityEventPayloadActorKind`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "user",
+    ///    "device",
+    ///    "admin",
+    ///    "superAdmin",
+    ///    "service"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentitySecurityEventPayloadActorKind {
+        #[serde(rename = "user")]
+        User,
+        #[serde(rename = "device")]
+        Device,
+        #[serde(rename = "admin")]
+        Admin,
+        #[serde(rename = "superAdmin")]
+        SuperAdmin,
+        #[serde(rename = "service")]
+        Service,
+    }
+    impl ::std::fmt::Display for IdentitySecurityEventPayloadActorKind {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::User => f.write_str("user"),
+                Self::Device => f.write_str("device"),
+                Self::Admin => f.write_str("admin"),
+                Self::SuperAdmin => f.write_str("superAdmin"),
+                Self::Service => f.write_str("service"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentitySecurityEventPayloadActorKind {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "user" => Ok(Self::User),
+                "device" => Ok(Self::Device),
+                "admin" => Ok(Self::Admin),
+                "superAdmin" => Ok(Self::SuperAdmin),
+                "service" => Ok(Self::Service),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentitySecurityEventPayloadActorKind {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String> for IdentitySecurityEventPayloadActorKind {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String> for IdentitySecurityEventPayloadActorKind {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
     }
     ///`IdentitySecurityEventPayloadKind`
     ///
@@ -933,6 +1118,7 @@ pub mod security_event {
     ///    "accountLocked",
     ///    "accountSuspended",
     ///    "accountDeactivated",
+    ///    "accountReactivated",
     ///    "logoutCurrent",
     ///    "logoutAll",
     ///    "refreshReuseDetected",
@@ -964,6 +1150,8 @@ pub mod security_event {
         AccountSuspended,
         #[serde(rename = "accountDeactivated")]
         AccountDeactivated,
+        #[serde(rename = "accountReactivated")]
+        AccountReactivated,
         #[serde(rename = "logoutCurrent")]
         LogoutCurrent,
         #[serde(rename = "logoutAll")]
@@ -981,6 +1169,7 @@ pub mod security_event {
                 Self::AccountLocked => f.write_str("accountLocked"),
                 Self::AccountSuspended => f.write_str("accountSuspended"),
                 Self::AccountDeactivated => f.write_str("accountDeactivated"),
+                Self::AccountReactivated => f.write_str("accountReactivated"),
                 Self::LogoutCurrent => f.write_str("logoutCurrent"),
                 Self::LogoutAll => f.write_str("logoutAll"),
                 Self::RefreshReuseDetected => f.write_str("refreshReuseDetected"),
@@ -997,6 +1186,7 @@ pub mod security_event {
                 "accountLocked" => Ok(Self::AccountLocked),
                 "accountSuspended" => Ok(Self::AccountSuspended),
                 "accountDeactivated" => Ok(Self::AccountDeactivated),
+                "accountReactivated" => Ok(Self::AccountReactivated),
                 "logoutCurrent" => Ok(Self::LogoutCurrent),
                 "logoutAll" => Ok(Self::LogoutAll),
                 "refreshReuseDetected" => Ok(Self::RefreshReuseDetected),
@@ -1036,10 +1226,17 @@ pub mod security_event {
     ///  "title": "IdentitySecurityEventPayloadTarget",
     ///  "type": "object",
     ///  "required": [
+    ///    "keyId",
     ///    "kind",
     ///    "ref"
     ///  ],
     ///  "properties": {
+    ///    "keyId": {
+    ///      "type": "integer",
+    ///      "maximum": 65535.0,
+    ///      "minimum": 1.0,
+    ///      "x-redaction": "internal"
+    ///    },
     ///    "kind": {
     ///      "type": "string",
     ///      "enum": [
@@ -1060,6 +1257,9 @@ pub mod security_event {
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
     #[serde(deny_unknown_fields)]
     pub struct IdentitySecurityEventPayloadTarget {
+        #[serde(rename = "keyId")]
+        #[redact(sensitivity = internal)]
+        pub key_id: ::std::num::NonZeroU64,
         #[redact(sensitivity = public)]
         pub kind: IdentitySecurityEventPayloadTargetKind,
         #[serde(rename = "ref")]
@@ -1154,7 +1354,7 @@ pub mod security_event {
         "identity",
         "identity.security-event",
         "v1",
-        "sha256:241ea0c46d1b77a94d547d39be86d32e4910c60bdaf6648d2320b87301e62996",
+        "sha256:784efd6dbfadafbf211248d86328df85cc476eb95d7aeda7ca0951e218ac5929",
     );
 
     /// Generated contract + topic identity carried by this event payload.

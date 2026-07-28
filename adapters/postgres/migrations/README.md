@@ -845,3 +845,9 @@ PGHOST=127.0.0.1 PGPORT=5432 PGDATABASE=rss PGUSER=rss PGPASSWORD=... \
 ```
 
 `PGHOST` 未设时集成测试整组跳过（azure 无 CI，不阻塞 `cargo xtask verify`）。
+`0077` 以 `SECURITY DEFINER`、`search_path=pg_catalog, pg_temp` 的窄函数向 serving writer 暴露冻结的 delivery policy；`rss_app`
+保持对策略表零权限，只能读取启动校验所需的单例字段。
+
+`0078` 以 `search_path=pg_catalog, pg_temp`、撤销 `PUBLIC` 执行权的 `SECURITY DEFINER` 窄函数向 `rss_app`
+暴露指定 projection generation 的有序 binding 集合。serving 启动与周期 readiness 对该集合做 exact compare；
+`rss_app` 仍不持有 `projection_input_bindings` 的表级权限，missing/less/more 任一漂移均 fail closed。

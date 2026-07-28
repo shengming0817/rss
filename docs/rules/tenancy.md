@@ -129,7 +129,8 @@ SPIFFE-ID 只证明 workload service principal，经 exact allow-set 与 `RouteA
   expires_at` CAS fence，不能依赖调用方约定。
 - **projection_events**：无 `tenant_id` 列的全局表，不在 `schema-rls` 范围。`rss_app` 无任何表级 DML，
   只能执行固定 `SECURITY DEFINER` 函数；append 函数校验 metadata tenant 为 canonical non-nil UUID、
-  参数匹配同事务可见 outbox row，且该 row 命中启动期刷新的 DB binding registry。
+  参数匹配同事务可见 outbox row，且该 row 命中部署期由唯一 migration Job 写入的 DB binding registry；
+  serving 仅校验编译进 binary 的 generation，不能取得 registry 注册能力。
   它依赖全局 LSN 顺序与上层 envelope tenant authority，不承载 outbox partition liveness 语义。
 
 > partition key 可能含凭据级 bearer 标识，故 `PartitionKey` 的 `Debug` 脱敏，不以明文进日志。

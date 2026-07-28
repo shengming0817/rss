@@ -68,7 +68,7 @@ description: "Task list — identity 域 crate body 兑现"
 **Independent Test**: in-mem `CredentialRepo` 替身 + 表驱动覆盖凭据校验、四值状态/epoch/version、临时阻断、非 Active 登录拒绝和脱敏。覆盖率命令：`cargo llvm-cov --lib -p identity`。
 
 - [ ] T012 [PR3][US3] 先写测试（`domain/account.rs` + `domain/account_security.rs` + `internal/mem.rs`）：密码校验正确/错误/版本不匹配（constant-time）、完整状态迁移矩阵、epoch/version/CAS/溢出、`AccountLockout` 阈值/窗口/临时阻断 TTL、非 Active 正确密码拒绝、password/receipt Debug 脱敏；确认暴破阈值和 TTL 到期都不迁移 durable status。运行确认 FAIL。
-- [ ] T013 [PR3][US3] 定义 `CredentialRepo` 的 combined `authenticate`，删除 `lockout_status`；新增只读 `AccountSecurityReadRepo` 与只消费 sealed mutation 的 `AccountSecurityLifecycle`，所有依赖为必填非 `Option`。
+- [ ] T013 [PR3][US3] 定义 `CredentialRepo` 的 combined `authenticate`，删除 `lockout_status`；新增只读 `AccountSecurityReadRepo`。原计划的 `AccountSecurityLifecycle` 已由 #1842 删除并收敛为统一 `IdentitySecurityLifecycle`，所有依赖为必填非 `Option`。
 - [ ] T014 [PR3][US3] 在 `domain/account_security.rs` 实现 `AccountSecurityState`、四值 `AccountStatus`、`AuthnEpoch`、`AccountSecurityVersion`、sealed mutation/active receipt；在 `domain/account.rs` 保留 `Credential` 与独立 `AccountLockout`，其 `record_failure` 返回 `AllowRetry|TemporarilyBlocked`。
 - [ ] T015 [PR3][US3] `internal/mem.rs` 以一个 inner lock 原子承载 credential/security/lockout；unknown path 保留 dummy KDF，缺失/损坏 security state 完成 KDF floor 后 fail-closed；清理旧明文比对与拆分状态预检。
 - [ ] T015b [PR3][US3] 核查 `deny.toml` `wrappers` 集合与 xtask `EXTERNAL_CONFINEMENT_WRAPPERS` 相等（DIPORT-MACRO-CONFINE-01′，identity 已在白名单，作显式核查）。clippy/dylint/fmt/`cargo llvm-cov --lib -p identity`。
@@ -105,8 +105,8 @@ description: "Task list — identity 域 crate body 兑现"
 
 ### PR5b：HTTP 端点契约 + handler + contract test + 生命周期升级
 
-- [ ] T020 [PR5b][US5] 先写 contract test（stub-first：先 codegen 空 handler stub → contract test 可编译但 FAIL → 再填实现）：login/roles/roles-revoke/profile/password/logout 各端点正常 schema + 参数错误码 + 鉴权边界 + path 校验。运行确认 FAIL。
-- [ ] T022 [PR5b][US5] 新 HTTP 端点契约（roles-assign/roles-revoke/roles-list/profile/password-change/logout）+ 每端点声明具体 permission overlay（见 spec.md US5 端点表）：`contracts/http/identity/v1/` + generated；`identity.login`/`identity.session-created` draft→active（pre-GA 原地）；roles-list 分页响应格式 `{data,nextCursor,hasMore}` + limit≤500。
+- [ ] T020 [PR5b][US5] 先写 contract test（stub-first：先 codegen 空 handler stub → contract test 可编译但 FAIL → 再填实现）：login/roles/roles-revoke/profile/password/account-status-get/set/logout 各端点正常 schema + 参数错误码 + 鉴权边界 + path 校验。运行确认 FAIL。
+- [ ] T022 [PR5b][US5] 新 HTTP 端点契约（roles-assign/roles-revoke/roles-list/profile/password-change/account-status-get/account-status-set/logout）+ 每端点声明具体 permission overlay（见 spec.md US5 端点表）：`contracts/http/identity/v1/` + generated；`identity.login`/`identity.session-created` draft→active（pre-GA 原地）；roles-list 分页响应格式 `{data,nextCursor,hasMore}` + limit≤500。#1842 将 password-change 与 account-status-set 收敛为 `identity.security-event` L2 producer。
 - [ ] T024 [PR5b][US5] 真实 axum handler（`handler.rs`）+ typed response envelope；`IdentityDomain::init` 路由组接线（Primary listener，login opt-out Public，其余端点鉴权 + 各自 permission）+ audit 订阅声明对齐。
 - [ ] T025 [PR5b][US5] `cargo xtask contract validate` 绿 + generated diff 审查；clippy/dylint/fmt/`cargo llvm-cov --lib -p identity`。
 
@@ -121,6 +121,7 @@ description: "Task list — identity 域 crate body 兑现"
 | `identity.roles-list` | 新增 | 新增 | 新增 | 新增 contract test | 更新 |
 | `identity.profile` | 新增 | 新增 | 新增 | 新增 contract test | 更新 |
 | `identity.password-change` | 新增 | 新增 | 新增 | 新增 contract test | 更新 |
+| `identity.account-status-get/set` | 新增 | 新增 | 新增 | producer assurance + contract test | 更新 |
 | `identity.logout` | 新增 | 新增 | 新增 | 新增 contract test | 更新 |
 
 ---

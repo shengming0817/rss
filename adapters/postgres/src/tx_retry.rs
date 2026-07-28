@@ -328,8 +328,6 @@ pub(crate) enum PgTxRetryBoundary {
     #[cfg(feature = "domain-settings")]
     SettingsSecret,
     #[cfg(feature = "domain-identity")]
-    IdentityCredential,
-    #[cfg(feature = "domain-identity")]
     IdentityRefresh,
     #[cfg(feature = "domain-audit")]
     AuditAppend,
@@ -346,8 +344,6 @@ impl PgTxRetryBoundary {
             Self::SettingsConfig => "settings.config",
             #[cfg(feature = "domain-settings")]
             Self::SettingsSecret => "settings.secret",
-            #[cfg(feature = "domain-identity")]
-            Self::IdentityCredential => "identity.credential",
             #[cfg(feature = "domain-identity")]
             Self::IdentityRefresh => "identity.refresh",
             #[cfg(feature = "domain-audit")]
@@ -367,10 +363,6 @@ pub(crate) const SETTINGS_CONFIG_BOUNDARY: PgTxRetryBoundary = PgTxRetryBoundary
 /// Retry boundary for settings secret CAS writes.
 #[cfg(feature = "domain-settings")]
 pub(crate) const SETTINGS_SECRET_BOUNDARY: PgTxRetryBoundary = PgTxRetryBoundary::SettingsSecret;
-/// Retry boundary for identity credential UoW writes.
-#[cfg(feature = "domain-identity")]
-pub(crate) const IDENTITY_CREDENTIAL_BOUNDARY: PgTxRetryBoundary =
-    PgTxRetryBoundary::IdentityCredential;
 /// Retry boundary for identity refresh-token rotation writes.
 #[cfg(feature = "domain-identity")]
 pub(crate) const IDENTITY_REFRESH_BOUNDARY: PgTxRetryBoundary = PgTxRetryBoundary::IdentityRefresh;
@@ -455,11 +447,6 @@ where
 #[cfg(feature = "domain-settings")]
 impl PgLocalTxOperation for settings::ports::SecretPublishRouteMarker {
     const BOUNDARY: PgTxRetryBoundary = SETTINGS_SECRET_BOUNDARY;
-}
-
-#[cfg(feature = "domain-identity")]
-impl PgLocalTxOperation for identity::ports::PasswordChangeRouteMarker {
-    const BOUNDARY: PgTxRetryBoundary = IDENTITY_CREDENTIAL_BOUNDARY;
 }
 
 #[cfg(feature = "domain-identity")]

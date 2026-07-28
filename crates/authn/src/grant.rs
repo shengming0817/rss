@@ -75,6 +75,7 @@ pub enum AccountSecurityEventKind {
     AccountLocked,
     AccountSuspended,
     AccountDeactivated,
+    AccountReactivated,
     LogoutAll,
     CredentialDeleted,
 }
@@ -111,6 +112,7 @@ impl CredentialSecurityEventKind {
             Self::Account(AccountSecurityEventKind::AccountLocked) => "account_locked",
             Self::Account(AccountSecurityEventKind::AccountSuspended) => "account_suspended",
             Self::Account(AccountSecurityEventKind::AccountDeactivated) => "account_deactivated",
+            Self::Account(AccountSecurityEventKind::AccountReactivated) => "account_reactivated",
             Self::Account(AccountSecurityEventKind::LogoutAll) => "logout_all",
             Self::Account(AccountSecurityEventKind::CredentialDeleted) => "credential_deleted",
             Self::Grant(GrantSecurityEventKind::LogoutCurrent) => "logout_current",
@@ -127,6 +129,9 @@ impl CredentialSecurityEventKind {
             "account_suspended" => Some(Self::Account(AccountSecurityEventKind::AccountSuspended)),
             "account_deactivated" => {
                 Some(Self::Account(AccountSecurityEventKind::AccountDeactivated))
+            }
+            "account_reactivated" => {
+                Some(Self::Account(AccountSecurityEventKind::AccountReactivated))
             }
             "logout_all" => Some(Self::Account(AccountSecurityEventKind::LogoutAll)),
             "credential_deleted" => {
@@ -220,6 +225,8 @@ pub enum AuthGrantStateError {
     StatusReasonMismatch,
     #[error("authentication grant is already closed")]
     AlreadyClosed,
+    #[error("authentication grant tenant does not match the command initiator")]
+    TenantMismatch,
 }
 
 /// Durable server-side authentication grant.
@@ -681,6 +688,7 @@ mod tests {
             CredentialSecurityEventKind::Account(AccountSecurityEventKind::AccountLocked),
             CredentialSecurityEventKind::Account(AccountSecurityEventKind::AccountSuspended),
             CredentialSecurityEventKind::Account(AccountSecurityEventKind::AccountDeactivated),
+            CredentialSecurityEventKind::Account(AccountSecurityEventKind::AccountReactivated),
             CredentialSecurityEventKind::Account(AccountSecurityEventKind::CredentialDeleted),
         ] {
             assert_eq!(

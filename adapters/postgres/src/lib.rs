@@ -125,6 +125,8 @@ pub use auth_audit_sink::PgAuthAuditSink;
 pub use account_security_repo::PgAccountSecurityRepo;
 #[cfg(feature = "domain-settings")]
 pub use bundle::PgSettingsBundle;
+#[cfg(all(feature = "domain-identity", any(test, feature = "test-support")))]
+pub use bundle::identity_pseudonym_keys_for_test;
 pub use bundle::{
     MaintenanceAuditOutcome, PgDomain, PgDomainDeps, PgInfraDeps, PgMaintenanceDeps,
     PgProjectionReplayStores, PgReadinessSamplerFactory, PgRuntimeDeps, PgRuntimeHandle, caps,

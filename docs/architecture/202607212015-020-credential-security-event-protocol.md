@@ -2,7 +2,7 @@
 
 - **状态**：Accepted
 - **日期**：2026-07-21
-- **关联**：issue #1841 / #1840；承接 ADR-018 / ADR-019；#1840 完成生产激活
+- **关联**：issue #1841 / #1840 / #1842；承接 ADR-018 / ADR-019；#1842 完成 password/account 生产接线
 - **对标**：Ory Fosite refresh rotation、Keycloak user-session management
 
 > **ADR-021 ownership amendment（#1835）**：`CredentialSecurityEventKind` 及其 Account/Grant 子枚举与
@@ -34,23 +34,35 @@ schema 而没有生产 producer、subscriber、审计和运行时证据时，不
 Compromised 优先级最高，允许 Revoked 提升为 Compromised，禁止降级。公开的描述性 policy/scope API 已删除，
 避免声明策略与真实 mutation 平行漂移。
 
-identity 的账户级和 grant 级命令分别封闭私有字段；生产 logout 再由不可互换的
-`LogoutCurrentCommand` / `LogoutAllCommand` 包装。构造命令时固定完整 expected snapshot 与 closed target；
-执行只接受对应 generated route receipt 和精确 command，冲突要求调用方读取新状态并重建命令，
-不能把旧命令重放成成功。memory 与 PostgreSQL provider 都必须比较完整 expected snapshot，不能把 stale command
-改写为终态幂等成功。
+identity 的账户级和 grant 级命令分别封闭私有字段；生产入口使用不可互换的
+`PasswordChangeCommand`、`AccountStatusSetCommand`、`LogoutCurrentCommand` 与 `LogoutAllCommand`。
+构造命令时固定完整 expected snapshot 与 closed target；执行只接受对应 generated route receipt 和精确 command，
+冲突要求调用方读取新状态并重建命令，不能把旧命令重放成成功。domain command 与 PostgreSQL provider 都必须
+保留完整 expected snapshot，不能把 stale command 改写为终态幂等成功。
+
+`ReactivateAccountCommand` 只表达 Suspended/Locked→Active，不携带 event，也不接受 producer receipt。恢复保留
+已经递增的 epoch，仅更新账户 snapshot；此前被撤销或标记 Compromised 的 grant/family 保持终态，不能随账户
+恢复而复活。Deactivated 不可恢复。
 
 ### 唯一事务漏斗与锁序
 
 不新增 identity 专用事务入口。现有 PostgreSQL `producer_tx` 接受 crate-private sealed
 `ProducerFactAuthorization`；生产 credential-security authorization 只能来自对应 mounted route receipt，
 fact/entry 由 route-specific command 内部事件派生，不接受调用方独立替换。
-不存在零参数 mint、无 receipt 的生产入口或 sibling-module 固定 fact token。authorization 进入同一个 projection + OutboxFact
-提交漏斗，canonical append 仍不可从漏斗外调用。
+不存在零参数 mint、无 receipt 的事件生产入口或 sibling-module 固定 fact token。password-change、
+account-status-set、logout-current 与 logout-all 各自由 mounted generated producer route 铸造精确 receipt；
+receipt 只能授权 `identity.security-event` 的 exact fact/contract。authorization 进入同一个 projection +
+OutboxFact 提交漏斗，canonical append 仍不可从漏斗外调用。reactivation 的无事件 CAS 不是 producer 入口。
 
-安全事件事务固定锁序为 `account-security → refresh-family → auth-grant`。未来把 credential material 更新合入
-同一事务时，只能向前扩为 `credential → account-security → refresh-family → auth-grant`。账户状态/epoch、
-refresh family、AuthGrant 和 OutboxFact 必须全成或全败。
+因此 `identity.password-change` 与 `identity.account-status-set` 的 HTTP consistency 都是 L2
+`OutboxFact`；password-change 不再生成 `LOCAL_TX` spec/observation，也不属于 active LocalTx inventory。两条路由
+的数据库 settlement 由 plain producer transaction 的 closed outcome/告警承载，不能套 LocalTx runner 或遥测。
+
+安全事件事务固定锁序为 `credential（仅 password）→ account-security → refresh-family → auth-grant`。
+credential material、账户状态/epoch、refresh family、AuthGrant 和 OutboxFact 必须全成或全败；不触及 credential
+的命令从 account-security 开始，不能反向取得锁。PostgreSQL 的全部路径由一个
+`PgIdentitySecurityLifecycle` 进入同一个 SQLx producer transaction funnel，不再由 `CredentialRepo` 或独立账户
+lifecycle 提供第二写入口。
 
 成功 receipt 只能在数据库确认 commit 后铸造。CAS 冲突返回冲突；commit result unknown 返回错误且不返回
 receipt、不自动重试。#1841 不新增 dedup ledger：线性命令、expected snapshot 与不可伪造 receipt 是本协议的重放
@@ -60,21 +72,24 @@ receipt、不自动重试。#1841 不新增 dedup ledger：线性命令、expect
 
 ### Active wire 与生产闭环
 
-`identity.security-event@v1` 已由 #1840 提升为 `active`，只含 `kind`、`target`、`tenantId`、`occurredAt` 四个必填
+`identity.security-event@v1` 已由 #1840 提升为 `active`；actor/target 均携版本化 `keyId` 与独立密钥生成的
+tenant/domain-separated HMAC-SHA256 opaque ref，`occurredAt` 只接受 epoch 后且可由 wire `int64` 表示的时间，
+producer/consumer 对 epoch 前或范围溢出显式返回 typed error。事件其余必填字段为 `kind`、`tenantId`、`occurredAt`，
 字段，`additionalProperties=false`。kind 为上述九个闭值；target 是唯一 tagged object，kind 只有
 `subject | grant`，ref 是随机 opaque UUID。payload 与 transport metadata 不出现 raw subject、grant/session、
 sid/jti、token、password/credential material、email/username 或其他 PII。tenant、target kind、opaque ref 与
 并由同一 sealed command/fact 数据流派生。不存在把 opaque ref 还原为 subject/grant 的生产 port 或数据库表。
 
-`audit.security-event` 以 transactional-only adapter-native consumer 激活；current/all route receipt、生产
-producer、幂等 audit append、runtime dispatch 与 L2 assurance 已形成闭环。audit 域只从四字段 wire 消费式
-构造私有字段的 sealed command：`logoutCurrent + grant` 与 `logoutAll + subject` 是仅有的合法组合，随机 opaque
-target ref 同时作为本事件的脱敏 actor/resource correlation。consumer 不读取 identity-owned target mapping，也不把
-opaque ref 还原为 raw subject/grant。激活不增加兼容 shim 或双写。
+`audit.security-event` 以 transactional-only adapter-native consumer 激活；四个 mounted producer route、
+幂等 audit append、runtime dispatch 与 L2 assurance 已形成闭环。audit 域只从四字段 wire
+消费式构造私有字段的 sealed command，并精确接受九组合法 kind/target：七个 Account kind 只能配 `subject`，
+`logoutCurrent` 与 `refreshReuseDetected` 只能配 `grant`；任何 mismatch 都 fail-closed。随机 opaque target ref
+只作为本事件的脱敏 resource correlation。consumer 不读取 identity-owned target mapping，也不把 opaque ref
+还原为 raw subject/grant。激活不增加兼容 shim 或双写。
 
 ## 失败语义与安全模型
 
-- projection、grant/family 与 OutboxFact 任一步失败都回滚；不得返回成功 receipt。
+- credential/account projection、grant/family 与 OutboxFact 任一步失败都回滚；不得返回成功 receipt。
 - stale expected snapshot 不能部分更新、补写 outbox 或静默 no-op。
 - active fact 只携带随机 opaque ref，不携带 raw 用户/会话标识或凭据材料；audit 直接消费脱敏 fact，生产代码
   不提供 reverse-resolution side channel。
@@ -91,6 +106,8 @@ opaque ref 还原为 raw subject/grant。激活不增加兼容 shim 或双写。
 | opaque target 不可逆解析 | 无 resolver port、无 mapping relation、无 raw id wire 字段 | Hard + 数据库 Hard |
 | audit consumer 不能旁路 contract 还原 identity target 或替换 fact 字段 | audit-owned sealed command + runtime-baseline forbidden-side-channel gate | Hard + Medium |
 | active topology 不得缺 producer/subscriber/runtime 闭环 | codegen registry + L2 assurance | Hard + Medium |
+| password/status route 不能在无 exact producer receipt 时调用安全 writer | generated route marker + `ProducerAssuranceReceipt` 参数 + provider authorization | Hard |
+| reactivation 不得产生安全事件或复活 grant/family | 无 producer receipt 的窄 CAS command + 单调终态测试 | Hard + Medium |
 | 合法跨文件 producer_tx 调用集合保持双向闭合 | 全 production AST exact-set guard + extra-file synthetic red/green | Medium |
 | 共事务锁序、回滚、CAS 与 commit-unknown 语义 | PostgreSQL 并发/故障注入测试 | Medium |
 | plain producer 的数据库锁等待有界且不重放 | 不可表达无界 Plain policy + PostgreSQL 持锁集成测试 | Hard + Medium |
@@ -112,4 +129,4 @@ opaque ref 还原为 raw subject/grant。激活不增加兼容 shim 或双写。
 
 - Keycloak current-session 对标采用其 OIDC logout endpoint：`/realms/{realm-name}/protocol/openid-connect/logout`，语义为注销已认证用户；见 [Keycloak OIDC layers — Logout endpoint](https://www.keycloak.org/securing-apps/oidc-layers#_logout_endpoint)。
 - Keycloak all-session 对标采用其 Admin REST user logout：`POST /admin/realms/{realm}/users/{user-id}/logout`，并区分 realm-wide `POST /admin/realms/{realm}/logout-all`；见 [Keycloak Admin REST API](https://www.keycloak.org/docs-api/latest/rest-api/index.html#_post_adminrealmsrealmusersuser_idlogout)。RSS route 不复制 Keycloak 管理面授权模型，只对标 current/all 撤销范围。
-- PostgreSQL 实现沿用仓库 `PgIdentitySecurityLifecycle` 的 SQLx transaction funnel；事务语义参考 [sqlx-core transaction.rs](https://github.com/launchbadge/sqlx/blob/main/sqlx-core/src/transaction.rs)，不建立第二套 logout transaction API。
+- PostgreSQL 实现统一使用一个 `PgIdentitySecurityLifecycle` 的 SQLx transaction funnel；password change、account restriction 与 logout 不建立分离 transaction API。事务语义参考 [sqlx-core transaction.rs](https://github.com/launchbadge/sqlx/blob/main/sqlx-core/src/transaction.rs)。

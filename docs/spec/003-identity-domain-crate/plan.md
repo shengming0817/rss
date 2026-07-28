@@ -36,7 +36,7 @@
 |----|------|
 | 跨域只经 contract（crate 图 + deny.toml） | ✅ 仅消费 `generated` + `diport` + 服务冻结签名；不依赖兄弟域 crate |
 | identity → authn（服务层依赖） | ✅ 域可依赖服务层，authn::Principal 已 deny.toml 放行 |
-| 域形 repo port 归属（ADR-005 Option 2） | ✅ `CredentialRepo`/`AccountSecurityReadRepo`/`AccountSecurityLifecycle`/`SessionRepo` 定义在 `identity::ports`，非 diport |
+| 域形 repo port 归属（ADR-005 Option 2） | ✅ `CredentialRepo`/`AccountSecurityReadRepo`/`IdentitySecurityLifecycle`/`AuthGrantLifecycle` 定义在 `identity::ports`，非 diport；旧 account lifecycle/session port 已删除 |
 | domain 不 derive `Serialize`（`rss_domain_no_serialize`） | ✅ wire 类型只经 contract/generated；domain newtype 字段 `pub(crate)` + funnel |
 | 一致性等级在 contract.toml | ✅ session-created/role-* event 的 consistencyLevel 在 `contract.toml`，非 manifest |
 | 必填依赖构造器位置参（非 Option）+ Clock 位参 | ✅ `CredentialRepo`/`AccountSecurityReadRepo`/`SessionRepo`/`Publisher`/`Clock` 均位置参 |

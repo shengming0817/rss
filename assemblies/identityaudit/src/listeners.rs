@@ -459,11 +459,24 @@ async fn prepare_frontends(
     )
     .await
     .context("bind identityaudit Health frontend")?;
-    let prepared =
+    #[cfg(feature = "test-support")]
+    let use_test_mtls = std::env::var_os("RSS_IDENTITYAUDIT_TEST_MTLS").is_some();
+    #[cfg(not(feature = "test-support"))]
+    let use_test_mtls = false;
+    let mtls = if use_test_mtls {
+        #[cfg(feature = "test-support")]
+        {
+            httpd::MtlsServerConfig::for_test(frontend.allow_set.clone())
+                .context("prepare hermetic identityaudit mTLS frontend")?
+        }
+        #[cfg(not(feature = "test-support"))]
+        unreachable!()
+    } else {
         httpd::MtlsServerConfig::from_spire(frontend.allow_set, Some(&frontend.spiffe_endpoint))
             .await
-            .context("prepare identityaudit SPIFFE mTLS frontend")?;
-    let mtls = prepared.stage_with(|resource| transaction.stage_resource(resource));
+            .context("prepare identityaudit SPIFFE mTLS frontend")?
+            .stage_with(|resource| transaction.stage_resource(resource))
+    };
     listeners.primary_front = Some(PreparedMtlsListener {
         bound: primary_bound,
         service: listeners.primary.service.clone(),

@@ -22,6 +22,7 @@ use base64::engine::general_purpose::{STANDARD as B64_STD, URL_SAFE_NO_PAD as B6
 use diport::Clock as _;
 use diport::Pdp as _;
 use generated::event::settings_v1::TOPIC as SETTINGS_VERSION_CHANGED_TOPIC;
+use generated::http::identity_v1::account_status_set::PRODUCER as ACCOUNT_STATUS_SET_PRODUCER;
 use generated::http::identity_v1::login::SPEC as LOGIN_SPEC;
 use generated::http::identity_v1::logout::SPEC as LOGOUT_SPEC;
 use generated::http::identity_v1::logout_all::SPEC as LOGOUT_ALL_SPEC;
@@ -34,9 +35,9 @@ use generated::http::identity_v1::roles_revoke::SPEC as ROLES_REVOKE_SPEC;
 use generated::http::settings_v1::SPEC as SETTINGS_CONFIG_SPEC;
 use httpserve::ProducerMarker;
 use identity::ports::{
-    AccountSecurityLifecycle as _, AccountSecurityReadRepo as _, AccountStatus, Credential,
-    CredentialRepo as _, DynRoleBindingLifecycle, DynRoleReadRepo, Role, RoleWriteRepo as _,
-    TenantId, TenantRepoScope,
+    AccountSecurityReadRepo as _, AccountStatus, Credential, CredentialRepo as _,
+    DynRoleBindingLifecycle, DynRoleReadRepo, IdentitySecurityLifecycle as _, Role,
+    RoleWriteRepo as _, TenantId, TenantRepoScope,
 };
 use p256::ecdsa::{Signature, SigningKey, signature::Signer as _};
 use postgres::{PgConfig, PgPassword, PgRuntimeDeps, PgSslMode, PgTenantReadConfig, caps};
@@ -482,7 +483,7 @@ async fn refresh_rotation_snapshot(
     .await?)
 }
 
-async fn assert_refresh_rejected_without_rotation(
+async fn assert_revoked_refresh_rejected_without_rotation(
     app: &axum::Router,
     pool: &PgPool,
     token: &str,
@@ -493,8 +494,8 @@ async fn assert_refresh_rejected_without_rotation(
         .ok_or("seeded refresh token is missing before account-security rejection")?;
     assert_eq!(
         before,
-        ("active".to_owned(), 0),
-        "precondition: initial refresh token must be active with no successor"
+        ("revoked".to_owned(), 0),
+        "account-status transition must revoke the initial refresh token without a successor"
     );
 
     let response = app
@@ -518,7 +519,7 @@ async fn assert_refresh_rejected_without_rotation(
     assert_eq!(
         refresh_rotation_snapshot(pool, token).await?,
         Some(before),
-        "{status:?} rejection must leave the original refresh active with zero successors"
+        "{status:?} rejection must leave the original refresh revoked with zero successors"
     );
     Ok(())
 }
@@ -603,7 +604,7 @@ async fn wire_identity_logout_current_all_e2e() -> TestResult {
     );
     pg.for_domain::<caps::Identity>()
         .credential_repo()
-        .save(tenant_scope, credential)
+        .insert(tenant_scope, credential)
         .await?;
     for (username, user_id) in [
         (SUSPENDED_USERNAME, SUSPENDED_USER),
@@ -611,7 +612,7 @@ async fn wire_identity_logout_current_all_e2e() -> TestResult {
     ] {
         pg.for_domain::<caps::Identity>()
             .credential_repo()
-            .save(
+            .insert(
                 TenantRepoScope::for_test(tenant),
                 Credential::hydrate(
                     username,
@@ -735,15 +736,31 @@ async fn wire_identity_logout_current_all_e2e() -> TestResult {
             .find(scope, user_id)
             .await?
             .ok_or("credential save omitted its account-security state")?;
-        let transitioned = account_security
-            .apply_transition(
+        let lifecycle = pg
+            .for_domain::<caps::Identity>()
+            .identity_security_lifecycle(postgres::identity_pseudonym_keys_for_test());
+        let occurred_at = current.updated_at() + Duration::from_secs(1);
+        let command =
+            identity::test_support::account_status_set_command(current, next_status, occurred_at);
+        let _receipt = lifecycle
+            .execute_account_status_set(
+                ProducerMarker::for_test(ACCOUNT_STATUS_SET_PRODUCER).into_receipt(),
                 TenantRepoScope::for_test(tenant),
-                current.transition(next_status, current.updated_at() + Duration::from_secs(1))?,
+                command,
             )
             .await?;
+        let transitioned = account_security
+            .find(TenantRepoScope::for_test(tenant), user_id)
+            .await?
+            .ok_or("account-status set removed account-security state")?;
         assert_eq!(transitioned.status(), next_status);
-        assert_refresh_rejected_without_rotation(&app, &observation_pool, token, next_status)
-            .await?;
+        assert_revoked_refresh_rejected_without_rotation(
+            &app,
+            &observation_pool,
+            token,
+            next_status,
+        )
+        .await?;
     }
 
     // ── 断言 a: login → 201 + token bundle ────────────────────────────────────────────────────

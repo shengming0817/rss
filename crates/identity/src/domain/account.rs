@@ -182,12 +182,16 @@ impl Credential {
         password: secure::ValidatedPassword,
     ) -> Result<Credential, secure::PasswordError> {
         let new_hash = secure::PasswordHash::from_validated(password)?;
+        let version = self
+            .version
+            .checked_add(1)
+            .ok_or(secure::PasswordError::Hash)?;
         Ok(Credential {
             login: self.login.clone(),
             user_id: self.user_id,
             tenant: self.tenant,
             password_hash: new_hash,
-            version: self.version.saturating_add(1),
+            version,
         })
     }
 

@@ -38,11 +38,11 @@ mod internal;
 pub mod ports;
 
 pub use application::{
-    AccessGrantValidationError, AuthGrantServices, AuthGrantValidationService, ChangePasswordError,
-    CredentialSecurityService, CurrentAuthGrant, FederatedIdentityDomain,
-    FederatedIdentityDomainDeps, IdentityDomain, IdentityDomainDeps, LoginError, LoginService,
-    PolicyManageError, PolicyManageService, RbacAdminError, RbacAdminService, RefreshBundle,
-    RefreshError, RefreshService, ValidatedAuthGrant,
+    AccessGrantValidationError, AccountStatusChangeError, AuthGrantServices,
+    AuthGrantValidationService, ChangePasswordError, CredentialSecurityService, CurrentAuthGrant,
+    FederatedIdentityDomain, FederatedIdentityDomainDeps, IdentityDomain, IdentityDomainDeps,
+    LoginError, LoginService, PolicyManageError, PolicyManageService, RbacAdminError,
+    RbacAdminService, RefreshBundle, RefreshError, RefreshService, ValidatedAuthGrant,
 };
 /// Demo/journey 首发 token 装配（seed-login/test 门控；生产经组合根注入 vault `Signer`，#1252）。
 #[cfg(any(test, feature = "seed-login"))]
@@ -50,9 +50,11 @@ pub use application::{SeedSigner, seed_auth_grant_services};
 pub use domain::{
     AccountCredentialSecurityCommand, AccountSecurityHydrationError, AccountSecurityMutation,
     AccountSecuritySnapshot, AccountSecurityState, AccountSecurityTransitionError,
-    AccountSecurityVersion, AccountStatus, CredentialSecurityCommand, CredentialSecurityEvent,
-    CredentialSecurityReceipt, CredentialSecurityTargetKind, CredentialSecurityTargetRef,
-    GrantCredentialSecurityCommand, LogoutAllCommand, LogoutCurrentCommand, RefreshRotationOutcome,
+    AccountSecurityVersion, AccountStatus, AccountStatusSetCommand, CredentialSecurityCommand,
+    CredentialSecurityEvent, CredentialSecurityInitiator, CredentialSecurityReceipt,
+    CredentialSecurityTargetKind, CredentialSecurityTargetRef, GrantCredentialSecurityCommand,
+    LogoutAllCommand, LogoutCurrentCommand, PasswordChangeCommand, PasswordChangeCommandError,
+    ReactivateAccountCommand, RefreshRotationOutcome,
 };
 pub use ports::AuthGrantProvider;
 
@@ -83,9 +85,10 @@ pub mod test_support {
     }
 
     use crate::domain::{
-        AccountSecuritySnapshot, AccountSecurityState, CredentialSecurityCommand, LoginIdentifier,
-        LogoutAllCommand, LogoutCurrentCommand, RefreshTokenHash, RefreshTokenId,
-        RefreshTokenRecord,
+        AccountSecuritySnapshot, AccountSecurityState, AccountStatus, AccountStatusSetCommand,
+        Credential, CredentialSecurityCommand, CredentialSecurityInitiator, LoginIdentifier,
+        LogoutAllCommand, LogoutCurrentCommand, PasswordChangeCommand, ReactivateAccountCommand,
+        RefreshTokenHash, RefreshTokenId, RefreshTokenRecord,
     };
     use authn::{
         AccountSecurityEventKind, AuthGrant, AuthGrantId, AuthGrantSnapshot, AuthGrantStatus,
@@ -155,7 +158,12 @@ pub mod test_support {
         kind: AccountSecurityEventKind,
         occurred_at: SystemTime,
     ) -> CredentialSecurityCommand {
-        CredentialSecurityCommand::account(state, kind, occurred_at)
+        let initiator = CredentialSecurityInitiator::authenticated(
+            state.tenant(),
+            vocab::PrincipalKind::User,
+            state.user_id().as_uuid().hyphenated().to_string(),
+        );
+        CredentialSecurityCommand::account(state, kind, initiator, occurred_at)
             .expect("test account credential-security command must satisfy state invariants")
     }
 
@@ -166,7 +174,12 @@ pub mod test_support {
         kind: GrantSecurityEventKind,
         occurred_at: SystemTime,
     ) -> CredentialSecurityCommand {
-        CredentialSecurityCommand::grant(grant, kind, occurred_at)
+        let initiator = CredentialSecurityInitiator::authenticated(
+            grant.tenant(),
+            vocab::PrincipalKind::User,
+            grant.user_id().as_uuid().hyphenated().to_string(),
+        );
+        CredentialSecurityCommand::grant(grant, kind, initiator, occurred_at)
             .expect("test grant credential-security command must satisfy state invariants")
     }
 
@@ -177,7 +190,12 @@ pub mod test_support {
         state: AccountSecurityState,
         occurred_at: SystemTime,
     ) -> LogoutAllCommand {
-        CredentialSecurityCommand::logout_all(state, occurred_at)
+        let initiator = CredentialSecurityInitiator::authenticated(
+            state.tenant(),
+            vocab::PrincipalKind::User,
+            state.user_id().as_uuid().hyphenated().to_string(),
+        );
+        CredentialSecurityCommand::logout_all(state, initiator, occurred_at)
             .expect("test logout-all command must satisfy state invariants")
     }
 
@@ -188,8 +206,56 @@ pub mod test_support {
         grant: AuthGrant,
         occurred_at: SystemTime,
     ) -> LogoutCurrentCommand {
-        CredentialSecurityCommand::logout_current(grant, occurred_at)
+        let initiator = CredentialSecurityInitiator::authenticated(
+            grant.tenant(),
+            vocab::PrincipalKind::User,
+            grant.user_id().as_uuid().hyphenated().to_string(),
+        );
+        CredentialSecurityCommand::logout_current(grant, initiator, occurred_at)
             .expect("test logout-current command must satisfy state invariants")
+    }
+
+    /// Build the route-specific password command through its sealed constructor.
+    #[allow(clippy::expect_used)]
+    pub fn password_change_command(
+        credential: Credential,
+        account: AccountSecurityState,
+        password: secure::ValidatedPassword,
+        occurred_at: SystemTime,
+    ) -> PasswordChangeCommand {
+        let initiator = CredentialSecurityInitiator::authenticated(
+            account.tenant(),
+            vocab::PrincipalKind::User,
+            account.user_id().as_uuid().hyphenated().to_string(),
+        );
+        PasswordChangeCommand::new(credential, account, password, initiator, occurred_at)
+            .expect("test password-change command must satisfy state invariants")
+    }
+
+    /// Build the route-specific desired account-status command through its sealed constructor.
+    #[allow(clippy::expect_used)]
+    pub fn account_status_set_command(
+        state: AccountSecurityState,
+        target: AccountStatus,
+        occurred_at: SystemTime,
+    ) -> AccountStatusSetCommand {
+        let initiator = CredentialSecurityInitiator::authenticated(
+            state.tenant(),
+            vocab::PrincipalKind::Admin,
+            "test-admin",
+        );
+        AccountStatusSetCommand::new(state, target, initiator, occurred_at)
+            .expect("test account-status command must satisfy state invariants")
+    }
+
+    /// Build the internal reactivation command through its sealed constructor.
+    #[allow(clippy::expect_used)]
+    pub fn reactivate_account_command(
+        state: AccountSecurityState,
+        occurred_at: SystemTime,
+    ) -> ReactivateAccountCommand {
+        ReactivateAccountCommand::new(state, occurred_at)
+            .expect("test reactivation command must satisfy state invariants")
     }
 
     /// Construct an initial refresh record derived from the exact test AuthGrant binding.

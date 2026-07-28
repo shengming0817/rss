@@ -1,4 +1,451 @@
 pub mod runtimeexec
+pub mod runtimeexec::config
+pub enum runtimeexec::config::FrontendConfigError
+pub runtimeexec::config::FrontendConfigError::Empty(&'static str)
+pub runtimeexec::config::FrontendConfigError::Invalid(&'static str)
+pub runtimeexec::config::FrontendConfigError::Missing(&'static str)
+pub runtimeexec::config::FrontendConfigError::NonUnicode(&'static str)
+impl core::clone::Clone for runtimeexec::config::FrontendConfigError
+pub fn runtimeexec::config::FrontendConfigError::clone(&self) -> runtimeexec::config::FrontendConfigError
+impl core::cmp::Eq for runtimeexec::config::FrontendConfigError
+impl core::cmp::PartialEq for runtimeexec::config::FrontendConfigError
+pub fn runtimeexec::config::FrontendConfigError::eq(&self, &runtimeexec::config::FrontendConfigError) -> bool
+impl core::fmt::Debug for runtimeexec::config::FrontendConfigError
+pub fn runtimeexec::config::FrontendConfigError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for runtimeexec::config::FrontendConfigError
+impl core::marker::StructuralPartialEq for runtimeexec::config::FrontendConfigError
+impl core::marker::Freeze for runtimeexec::config::FrontendConfigError
+impl core::marker::Send for runtimeexec::config::FrontendConfigError
+impl core::marker::Sync for runtimeexec::config::FrontendConfigError
+impl core::marker::Unpin for runtimeexec::config::FrontendConfigError
+impl core::marker::UnsafeUnpin for runtimeexec::config::FrontendConfigError
+impl core::panic::unwind_safe::RefUnwindSafe for runtimeexec::config::FrontendConfigError
+impl core::panic::unwind_safe::UnwindSafe for runtimeexec::config::FrontendConfigError
+pub struct runtimeexec::config::SecretDocument(_)
+impl runtimeexec::config::SecretDocument
+pub fn runtimeexec::config::SecretDocument::new(zeroize::Zeroizing<alloc::string::String>) -> Self
+pub fn runtimeexec::config::SecretDocument::parse<T: serde_core::de::DeserializeOwned>(&self) -> core::result::Result<T, runtimeexec::config::SecretJsonError>
+impl core::ops::drop::Drop for runtimeexec::config::SecretDocument
+pub fn runtimeexec::config::SecretDocument::drop(&mut self)
+impl core::marker::Freeze for runtimeexec::config::SecretDocument
+impl core::marker::Send for runtimeexec::config::SecretDocument
+impl core::marker::Sync for runtimeexec::config::SecretDocument
+impl core::marker::Unpin for runtimeexec::config::SecretDocument
+impl core::marker::UnsafeUnpin for runtimeexec::config::SecretDocument
+impl core::panic::unwind_safe::RefUnwindSafe for runtimeexec::config::SecretDocument
+impl core::panic::unwind_safe::UnwindSafe for runtimeexec::config::SecretDocument
+pub struct runtimeexec::config::SecretJsonError
+impl core::clone::Clone for runtimeexec::config::SecretJsonError
+pub fn runtimeexec::config::SecretJsonError::clone(&self) -> runtimeexec::config::SecretJsonError
+impl core::cmp::Eq for runtimeexec::config::SecretJsonError
+impl core::cmp::PartialEq for runtimeexec::config::SecretJsonError
+pub fn runtimeexec::config::SecretJsonError::eq(&self, &runtimeexec::config::SecretJsonError) -> bool
+impl core::fmt::Debug for runtimeexec::config::SecretJsonError
+pub fn runtimeexec::config::SecretJsonError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for runtimeexec::config::SecretJsonError
+impl core::marker::StructuralPartialEq for runtimeexec::config::SecretJsonError
+impl core::marker::Freeze for runtimeexec::config::SecretJsonError
+impl core::marker::Send for runtimeexec::config::SecretJsonError
+impl core::marker::Sync for runtimeexec::config::SecretJsonError
+impl core::marker::Unpin for runtimeexec::config::SecretJsonError
+impl core::marker::UnsafeUnpin for runtimeexec::config::SecretJsonError
+impl core::panic::unwind_safe::RefUnwindSafe for runtimeexec::config::SecretJsonError
+impl core::panic::unwind_safe::UnwindSafe for runtimeexec::config::SecretJsonError
+pub struct runtimeexec::config::SecretValue(_)
+impl runtimeexec::config::SecretValue
+pub fn runtimeexec::config::SecretValue::as_bytes(&self) -> &[u8]
+pub fn runtimeexec::config::SecretValue::as_str(&self) -> &str
+pub fn runtimeexec::config::SecretValue::into_secret_text(self) -> secure::secret_text::SecretText
+pub fn runtimeexec::config::SecretValue::into_zeroizing(self) -> zeroize::Zeroizing<alloc::string::String>
+pub fn runtimeexec::config::SecretValue::is_empty(&self) -> bool
+impl core::cmp::Eq for runtimeexec::config::SecretValue
+impl core::cmp::PartialEq for runtimeexec::config::SecretValue
+pub fn runtimeexec::config::SecretValue::eq(&self, &Self) -> bool
+impl core::ops::drop::Drop for runtimeexec::config::SecretValue
+pub fn runtimeexec::config::SecretValue::drop(&mut self)
+impl<'de> serde_core::de::Deserialize<'de> for runtimeexec::config::SecretValue
+pub fn runtimeexec::config::SecretValue::deserialize<D>(D) -> core::result::Result<Self, <D as serde_core::de::Deserializer>::Error> where D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for runtimeexec::config::SecretValue
+impl core::marker::Send for runtimeexec::config::SecretValue
+impl core::marker::Sync for runtimeexec::config::SecretValue
+impl core::marker::Unpin for runtimeexec::config::SecretValue
+impl core::marker::UnsafeUnpin for runtimeexec::config::SecretValue
+impl core::panic::unwind_safe::RefUnwindSafe for runtimeexec::config::SecretValue
+impl core::panic::unwind_safe::UnwindSafe for runtimeexec::config::SecretValue
+pub struct runtimeexec::config::ServingFrontendConfig
+pub runtimeexec::config::ServingFrontendConfig::admin_port: u16
+pub runtimeexec::config::ServingFrontendConfig::allow_set: authn::mtls::MtlsAllowSet
+pub runtimeexec::config::ServingFrontendConfig::health_port: u16
+pub runtimeexec::config::ServingFrontendConfig::pod_ip: core::net::ip_addr::IpAddr
+pub runtimeexec::config::ServingFrontendConfig::primary_port: u16
+pub runtimeexec::config::ServingFrontendConfig::spiffe_endpoint: alloc::string::String
+impl core::marker::Freeze for runtimeexec::config::ServingFrontendConfig
+impl core::marker::Send for runtimeexec::config::ServingFrontendConfig
+impl core::marker::Sync for runtimeexec::config::ServingFrontendConfig
+impl core::marker::Unpin for runtimeexec::config::ServingFrontendConfig
+impl core::marker::UnsafeUnpin for runtimeexec::config::ServingFrontendConfig
+impl core::panic::unwind_safe::RefUnwindSafe for runtimeexec::config::ServingFrontendConfig
+impl core::panic::unwind_safe::UnwindSafe for runtimeexec::config::ServingFrontendConfig
+pub const runtimeexec::config::ADMIN_PORT_ENV: &str
+pub const runtimeexec::config::HEALTH_PORT_ENV: &str
+pub const runtimeexec::config::MTLS_ALLOW_SET_ENV: &str
+pub const runtimeexec::config::POD_IP_ENV: &str
+pub const runtimeexec::config::PRIMARY_PORT_ENV: &str
+pub const runtimeexec::config::SPIFFE_ENDPOINT_ENV: &str
+pub fn runtimeexec::config::capture_serving_frontend(impl core::ops::function::FnMut(&'static str) -> core::option::Option<std::ffi::os_str::OsString>) -> core::result::Result<runtimeexec::config::ServingFrontendConfig, runtimeexec::config::FrontendConfigError>
+pub fn runtimeexec::config::read_secret_document(&std::path::Path) -> std::io::error::Result<runtimeexec::config::SecretDocument>
+pub mod runtimeexec::inventory
+pub enum runtimeexec::inventory::InventoryEndpointScheme
+pub runtimeexec::inventory::InventoryEndpointScheme::Http
+pub runtimeexec::inventory::InventoryEndpointScheme::Https
+impl core::clone::Clone for runtimeexec::inventory::InventoryEndpointScheme
+pub fn runtimeexec::inventory::InventoryEndpointScheme::clone(&self) -> runtimeexec::inventory::InventoryEndpointScheme
+impl core::cmp::Eq for runtimeexec::inventory::InventoryEndpointScheme
+impl core::cmp::Ord for runtimeexec::inventory::InventoryEndpointScheme
+pub fn runtimeexec::inventory::InventoryEndpointScheme::cmp(&self, &runtimeexec::inventory::InventoryEndpointScheme) -> core::cmp::Ordering
+impl core::cmp::PartialEq for runtimeexec::inventory::InventoryEndpointScheme
+pub fn runtimeexec::inventory::InventoryEndpointScheme::eq(&self, &runtimeexec::inventory::InventoryEndpointScheme) -> bool
+impl core::cmp::PartialOrd for runtimeexec::inventory::InventoryEndpointScheme
+pub fn runtimeexec::inventory::InventoryEndpointScheme::partial_cmp(&self, &runtimeexec::inventory::InventoryEndpointScheme) -> core::option::Option<core::cmp::Ordering>
+impl core::fmt::Debug for runtimeexec::inventory::InventoryEndpointScheme
+pub fn runtimeexec::inventory::InventoryEndpointScheme::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for runtimeexec::inventory::InventoryEndpointScheme
+impl core::marker::StructuralPartialEq for runtimeexec::inventory::InventoryEndpointScheme
+impl core::marker::Freeze for runtimeexec::inventory::InventoryEndpointScheme
+impl core::marker::Send for runtimeexec::inventory::InventoryEndpointScheme
+impl core::marker::Sync for runtimeexec::inventory::InventoryEndpointScheme
+impl core::marker::Unpin for runtimeexec::inventory::InventoryEndpointScheme
+impl core::marker::UnsafeUnpin for runtimeexec::inventory::InventoryEndpointScheme
+impl core::panic::unwind_safe::RefUnwindSafe for runtimeexec::inventory::InventoryEndpointScheme
+impl core::panic::unwind_safe::UnwindSafe for runtimeexec::inventory::InventoryEndpointScheme
+pub enum runtimeexec::inventory::InventoryError
+pub runtimeexec::inventory::InventoryError::AlreadyPublished
+pub runtimeexec::inventory::InventoryError::BuildMetadata
+pub runtimeexec::inventory::InventoryError::Endpoint
+pub runtimeexec::inventory::InventoryError::ListenerBinding
+pub runtimeexec::inventory::InventoryError::Placement
+pub runtimeexec::inventory::InventoryError::ProviderBinding
+pub runtimeexec::inventory::InventoryError::Unavailable
+impl core::clone::Clone for runtimeexec::inventory::InventoryError
+pub fn runtimeexec::inventory::InventoryError::clone(&self) -> runtimeexec::inventory::InventoryError
+impl core::cmp::Eq for runtimeexec::inventory::InventoryError
+impl core::cmp::PartialEq for runtimeexec::inventory::InventoryError
+pub fn runtimeexec::inventory::InventoryError::eq(&self, &runtimeexec::inventory::InventoryError) -> bool
+impl core::error::Error for runtimeexec::inventory::InventoryError
+impl core::fmt::Debug for runtimeexec::inventory::InventoryError
+pub fn runtimeexec::inventory::InventoryError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for runtimeexec::inventory::InventoryError
+pub fn runtimeexec::inventory::InventoryError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for runtimeexec::inventory::InventoryError
+impl core::marker::StructuralPartialEq for runtimeexec::inventory::InventoryError
+impl core::marker::Freeze for runtimeexec::inventory::InventoryError
+impl core::marker::Send for runtimeexec::inventory::InventoryError
+impl core::marker::Sync for runtimeexec::inventory::InventoryError
+impl core::marker::Unpin for runtimeexec::inventory::InventoryError
+impl core::marker::UnsafeUnpin for runtimeexec::inventory::InventoryError
+impl core::panic::unwind_safe::RefUnwindSafe for runtimeexec::inventory::InventoryError
+impl core::panic::unwind_safe::UnwindSafe for runtimeexec::inventory::InventoryError
+pub enum runtimeexec::inventory::InventoryPlacementMode
+pub runtimeexec::inventory::InventoryPlacementMode::Local
+pub runtimeexec::inventory::InventoryPlacementMode::Remote
+impl core::clone::Clone for runtimeexec::inventory::InventoryPlacementMode
+pub fn runtimeexec::inventory::InventoryPlacementMode::clone(&self) -> runtimeexec::inventory::InventoryPlacementMode
+impl core::cmp::Eq for runtimeexec::inventory::InventoryPlacementMode
+impl core::cmp::Ord for runtimeexec::inventory::InventoryPlacementMode
+pub fn runtimeexec::inventory::InventoryPlacementMode::cmp(&self, &runtimeexec::inventory::InventoryPlacementMode) -> core::cmp::Ordering
+impl core::cmp::PartialEq for runtimeexec::inventory::InventoryPlacementMode
+pub fn runtimeexec::inventory::InventoryPlacementMode::eq(&self, &runtimeexec::inventory::InventoryPlacementMode) -> bool
+impl core::cmp::PartialOrd for runtimeexec::inventory::InventoryPlacementMode
+pub fn runtimeexec::inventory::InventoryPlacementMode::partial_cmp(&self, &runtimeexec::inventory::InventoryPlacementMode) -> core::option::Option<core::cmp::Ordering>
+impl core::fmt::Debug for runtimeexec::inventory::InventoryPlacementMode
+pub fn runtimeexec::inventory::InventoryPlacementMode::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for runtimeexec::inventory::InventoryPlacementMode
+impl core::marker::StructuralPartialEq for runtimeexec::inventory::InventoryPlacementMode
+impl core::marker::Freeze for runtimeexec::inventory::InventoryPlacementMode
+impl core::marker::Send for runtimeexec::inventory::InventoryPlacementMode
+impl core::marker::Sync for runtimeexec::inventory::InventoryPlacementMode
+impl core::marker::Unpin for runtimeexec::inventory::InventoryPlacementMode
+impl core::marker::UnsafeUnpin for runtimeexec::inventory::InventoryPlacementMode
+impl core::panic::unwind_safe::RefUnwindSafe for runtimeexec::inventory::InventoryPlacementMode
+impl core::panic::unwind_safe::UnwindSafe for runtimeexec::inventory::InventoryPlacementMode
+pub enum runtimeexec::inventory::InventoryPlacementReadiness
+pub runtimeexec::inventory::InventoryPlacementReadiness::MtlsSourceUnavailable
+pub runtimeexec::inventory::InventoryPlacementReadiness::PeerEndpointUnavailable
+pub runtimeexec::inventory::InventoryPlacementReadiness::PeerEndpointUnresolved
+pub runtimeexec::inventory::InventoryPlacementReadiness::Ready
+impl core::clone::Clone for runtimeexec::inventory::InventoryPlacementReadiness
+pub fn runtimeexec::inventory::InventoryPlacementReadiness::clone(&self) -> runtimeexec::inventory::InventoryPlacementReadiness
+impl core::cmp::Eq for runtimeexec::inventory::InventoryPlacementReadiness
+impl core::cmp::Ord for runtimeexec::inventory::InventoryPlacementReadiness
+pub fn runtimeexec::inventory::InventoryPlacementReadiness::cmp(&self, &runtimeexec::inventory::InventoryPlacementReadiness) -> core::cmp::Ordering
+impl core::cmp::PartialEq for runtimeexec::inventory::InventoryPlacementReadiness
+pub fn runtimeexec::inventory::InventoryPlacementReadiness::eq(&self, &runtimeexec::inventory::InventoryPlacementReadiness) -> bool
+impl core::cmp::PartialOrd for runtimeexec::inventory::InventoryPlacementReadiness
+pub fn runtimeexec::inventory::InventoryPlacementReadiness::partial_cmp(&self, &runtimeexec::inventory::InventoryPlacementReadiness) -> core::option::Option<core::cmp::Ordering>
+impl core::fmt::Debug for runtimeexec::inventory::InventoryPlacementReadiness
+pub fn runtimeexec::inventory::InventoryPlacementReadiness::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for runtimeexec::inventory::InventoryPlacementReadiness
+impl core::marker::StructuralPartialEq for runtimeexec::inventory::InventoryPlacementReadiness
+impl core::marker::Freeze for runtimeexec::inventory::InventoryPlacementReadiness
+impl core::marker::Send for runtimeexec::inventory::InventoryPlacementReadiness
+impl core::marker::Sync for runtimeexec::inventory::InventoryPlacementReadiness
+impl core::marker::Unpin for runtimeexec::inventory::InventoryPlacementReadiness
+impl core::marker::UnsafeUnpin for runtimeexec::inventory::InventoryPlacementReadiness
+impl core::panic::unwind_safe::RefUnwindSafe for runtimeexec::inventory::InventoryPlacementReadiness
+impl core::panic::unwind_safe::UnwindSafe for runtimeexec::inventory::InventoryPlacementReadiness
+pub enum runtimeexec::inventory::InventoryProviderState
+pub runtimeexec::inventory::InventoryProviderState::Degraded
+pub runtimeexec::inventory::InventoryProviderState::Ready
+pub runtimeexec::inventory::InventoryProviderState::Unavailable
+impl core::clone::Clone for runtimeexec::inventory::InventoryProviderState
+pub fn runtimeexec::inventory::InventoryProviderState::clone(&self) -> runtimeexec::inventory::InventoryProviderState
+impl core::cmp::Eq for runtimeexec::inventory::InventoryProviderState
+impl core::cmp::Ord for runtimeexec::inventory::InventoryProviderState
+pub fn runtimeexec::inventory::InventoryProviderState::cmp(&self, &runtimeexec::inventory::InventoryProviderState) -> core::cmp::Ordering
+impl core::cmp::PartialEq for runtimeexec::inventory::InventoryProviderState
+pub fn runtimeexec::inventory::InventoryProviderState::eq(&self, &runtimeexec::inventory::InventoryProviderState) -> bool
+impl core::cmp::PartialOrd for runtimeexec::inventory::InventoryProviderState
+pub fn runtimeexec::inventory::InventoryProviderState::partial_cmp(&self, &runtimeexec::inventory::InventoryProviderState) -> core::option::Option<core::cmp::Ordering>
+impl core::fmt::Debug for runtimeexec::inventory::InventoryProviderState
+pub fn runtimeexec::inventory::InventoryProviderState::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for runtimeexec::inventory::InventoryProviderState
+impl core::marker::StructuralPartialEq for runtimeexec::inventory::InventoryProviderState
+impl core::marker::Freeze for runtimeexec::inventory::InventoryProviderState
+impl core::marker::Send for runtimeexec::inventory::InventoryProviderState
+impl core::marker::Sync for runtimeexec::inventory::InventoryProviderState
+impl core::marker::Unpin for runtimeexec::inventory::InventoryProviderState
+impl core::marker::UnsafeUnpin for runtimeexec::inventory::InventoryProviderState
+impl core::panic::unwind_safe::RefUnwindSafe for runtimeexec::inventory::InventoryProviderState
+impl core::panic::unwind_safe::UnwindSafe for runtimeexec::inventory::InventoryProviderState
+pub struct runtimeexec::inventory::BoundListenerObservation
+impl runtimeexec::inventory::BoundListenerObservation
+pub const fn runtimeexec::inventory::BoundListenerObservation::auth(&self) -> assembly_schema::runtime_plan::ListenerAuth
+pub const fn runtimeexec::inventory::BoundListenerObservation::endpoint(&self) -> &runtimeexec::inventory::InventoryEndpoint
+pub fn runtimeexec::inventory::BoundListenerObservation::from_bound(impl core::convert::Into<alloc::string::String>, assembly_schema::AssemblyListenerKind, assembly_schema::runtime_plan::ListenerAuth, runtimeexec::inventory::InventoryEndpointScheme, core::net::socket_addr::SocketAddr) -> Self
+pub fn runtimeexec::inventory::BoundListenerObservation::id(&self) -> &str
+pub const fn runtimeexec::inventory::BoundListenerObservation::kind(&self) -> assembly_schema::AssemblyListenerKind
+impl core::clone::Clone for runtimeexec::inventory::BoundListenerObservation
+pub fn runtimeexec::inventory::BoundListenerObservation::clone(&self) -> runtimeexec::inventory::BoundListenerObservation
+impl core::cmp::Eq for runtimeexec::inventory::BoundListenerObservation
+impl core::cmp::PartialEq for runtimeexec::inventory::BoundListenerObservation
+pub fn runtimeexec::inventory::BoundListenerObservation::eq(&self, &runtimeexec::inventory::BoundListenerObservation) -> bool
+impl core::fmt::Debug for runtimeexec::inventory::BoundListenerObservation
+pub fn runtimeexec::inventory::BoundListenerObservation::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for runtimeexec::inventory::BoundListenerObservation
+impl core::marker::Freeze for runtimeexec::inventory::BoundListenerObservation
+impl core::marker::Send for runtimeexec::inventory::BoundListenerObservation
+impl core::marker::Sync for runtimeexec::inventory::BoundListenerObservation
+impl core::marker::Unpin for runtimeexec::inventory::BoundListenerObservation
+impl core::marker::UnsafeUnpin for runtimeexec::inventory::BoundListenerObservation
+impl core::panic::unwind_safe::RefUnwindSafe for runtimeexec::inventory::BoundListenerObservation
+impl core::panic::unwind_safe::UnwindSafe for runtimeexec::inventory::BoundListenerObservation
+pub struct runtimeexec::inventory::BuildMetadata
+impl runtimeexec::inventory::BuildMetadata
+pub fn runtimeexec::inventory::BuildMetadata::from_optional(core::option::Option<&str>, core::option::Option<&str>) -> core::result::Result<core::option::Option<Self>, runtimeexec::inventory::InventoryError>
+pub fn runtimeexec::inventory::BuildMetadata::image_digest(&self) -> &str
+pub fn runtimeexec::inventory::BuildMetadata::parse(&str, &str) -> core::result::Result<Self, runtimeexec::inventory::InventoryError>
+pub fn runtimeexec::inventory::BuildMetadata::source_revision(&self) -> &str
+impl core::clone::Clone for runtimeexec::inventory::BuildMetadata
+pub fn runtimeexec::inventory::BuildMetadata::clone(&self) -> runtimeexec::inventory::BuildMetadata
+impl core::cmp::Eq for runtimeexec::inventory::BuildMetadata
+impl core::cmp::PartialEq for runtimeexec::inventory::BuildMetadata
+pub fn runtimeexec::inventory::BuildMetadata::eq(&self, &runtimeexec::inventory::BuildMetadata) -> bool
+impl core::fmt::Debug for runtimeexec::inventory::BuildMetadata
+pub fn runtimeexec::inventory::BuildMetadata::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for runtimeexec::inventory::BuildMetadata
+impl core::marker::Freeze for runtimeexec::inventory::BuildMetadata
+impl core::marker::Send for runtimeexec::inventory::BuildMetadata
+impl core::marker::Sync for runtimeexec::inventory::BuildMetadata
+impl core::marker::Unpin for runtimeexec::inventory::BuildMetadata
+impl core::marker::UnsafeUnpin for runtimeexec::inventory::BuildMetadata
+impl core::panic::unwind_safe::RefUnwindSafe for runtimeexec::inventory::BuildMetadata
+impl core::panic::unwind_safe::UnwindSafe for runtimeexec::inventory::BuildMetadata
+pub struct runtimeexec::inventory::InventoryEndpoint
+impl runtimeexec::inventory::InventoryEndpoint
+pub fn runtimeexec::inventory::InventoryEndpoint::host(&self) -> &str
+pub const fn runtimeexec::inventory::InventoryEndpoint::port(&self) -> u16
+pub const fn runtimeexec::inventory::InventoryEndpoint::scheme(&self) -> runtimeexec::inventory::InventoryEndpointScheme
+impl core::clone::Clone for runtimeexec::inventory::InventoryEndpoint
+pub fn runtimeexec::inventory::InventoryEndpoint::clone(&self) -> runtimeexec::inventory::InventoryEndpoint
+impl core::cmp::Eq for runtimeexec::inventory::InventoryEndpoint
+impl core::cmp::PartialEq for runtimeexec::inventory::InventoryEndpoint
+pub fn runtimeexec::inventory::InventoryEndpoint::eq(&self, &runtimeexec::inventory::InventoryEndpoint) -> bool
+impl core::fmt::Debug for runtimeexec::inventory::InventoryEndpoint
+pub fn runtimeexec::inventory::InventoryEndpoint::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for runtimeexec::inventory::InventoryEndpoint
+impl core::marker::Freeze for runtimeexec::inventory::InventoryEndpoint
+impl core::marker::Send for runtimeexec::inventory::InventoryEndpoint
+impl core::marker::Sync for runtimeexec::inventory::InventoryEndpoint
+impl core::marker::Unpin for runtimeexec::inventory::InventoryEndpoint
+impl core::marker::UnsafeUnpin for runtimeexec::inventory::InventoryEndpoint
+impl core::panic::unwind_safe::RefUnwindSafe for runtimeexec::inventory::InventoryEndpoint
+impl core::panic::unwind_safe::UnwindSafe for runtimeexec::inventory::InventoryEndpoint
+pub struct runtimeexec::inventory::InventoryHealthPublisher(_)
+impl runtimeexec::inventory::InventoryHealthPublisher
+pub fn runtimeexec::inventory::InventoryHealthPublisher::publish(self, alloc::sync::Arc<bootstrap::registry::HealthReporter>) -> core::result::Result<(), runtimeexec::inventory::InventoryError>
+impl core::marker::Freeze for runtimeexec::inventory::InventoryHealthPublisher
+impl core::marker::Send for runtimeexec::inventory::InventoryHealthPublisher
+impl core::marker::Sync for runtimeexec::inventory::InventoryHealthPublisher
+impl core::marker::Unpin for runtimeexec::inventory::InventoryHealthPublisher
+impl core::marker::UnsafeUnpin for runtimeexec::inventory::InventoryHealthPublisher
+impl !core::panic::unwind_safe::RefUnwindSafe for runtimeexec::inventory::InventoryHealthPublisher
+impl !core::panic::unwind_safe::UnwindSafe for runtimeexec::inventory::InventoryHealthPublisher
+pub struct runtimeexec::inventory::InventoryPlacementReadinessPublisher(_)
+impl runtimeexec::inventory::InventoryPlacementReadinessPublisher
+pub fn runtimeexec::inventory::InventoryPlacementReadinessPublisher::publish(self, runtimeexec::inventory::PlacementReadinessSampler) -> core::result::Result<(), runtimeexec::inventory::InventoryError>
+impl core::marker::Freeze for runtimeexec::inventory::InventoryPlacementReadinessPublisher
+impl core::marker::Send for runtimeexec::inventory::InventoryPlacementReadinessPublisher
+impl core::marker::Sync for runtimeexec::inventory::InventoryPlacementReadinessPublisher
+impl core::marker::Unpin for runtimeexec::inventory::InventoryPlacementReadinessPublisher
+impl core::marker::UnsafeUnpin for runtimeexec::inventory::InventoryPlacementReadinessPublisher
+impl !core::panic::unwind_safe::RefUnwindSafe for runtimeexec::inventory::InventoryPlacementReadinessPublisher
+impl !core::panic::unwind_safe::UnwindSafe for runtimeexec::inventory::InventoryPlacementReadinessPublisher
+pub struct runtimeexec::inventory::InventoryPublisher(_)
+impl runtimeexec::inventory::InventoryPublisher
+pub fn runtimeexec::inventory::InventoryPublisher::publish(self, alloc::vec::Vec<runtimeexec::inventory::BoundListenerObservation>) -> core::result::Result<(), runtimeexec::inventory::InventoryError>
+impl core::marker::Freeze for runtimeexec::inventory::InventoryPublisher
+impl core::marker::Send for runtimeexec::inventory::InventoryPublisher
+impl core::marker::Sync for runtimeexec::inventory::InventoryPublisher
+impl core::marker::Unpin for runtimeexec::inventory::InventoryPublisher
+impl core::marker::UnsafeUnpin for runtimeexec::inventory::InventoryPublisher
+impl !core::panic::unwind_safe::RefUnwindSafe for runtimeexec::inventory::InventoryPublisher
+impl !core::panic::unwind_safe::UnwindSafe for runtimeexec::inventory::InventoryPublisher
+pub struct runtimeexec::inventory::InventoryReader(_)
+impl runtimeexec::inventory::InventoryReader
+pub fn runtimeexec::inventory::InventoryReader::read(&self) -> core::result::Result<runtimeexec::inventory::RuntimeInventorySnapshot, runtimeexec::inventory::InventoryError>
+impl core::clone::Clone for runtimeexec::inventory::InventoryReader
+pub fn runtimeexec::inventory::InventoryReader::clone(&self) -> runtimeexec::inventory::InventoryReader
+impl core::marker::Freeze for runtimeexec::inventory::InventoryReader
+impl core::marker::Send for runtimeexec::inventory::InventoryReader
+impl core::marker::Sync for runtimeexec::inventory::InventoryReader
+impl core::marker::Unpin for runtimeexec::inventory::InventoryReader
+impl core::marker::UnsafeUnpin for runtimeexec::inventory::InventoryReader
+impl !core::panic::unwind_safe::RefUnwindSafe for runtimeexec::inventory::InventoryReader
+impl !core::panic::unwind_safe::UnwindSafe for runtimeexec::inventory::InventoryReader
+pub struct runtimeexec::inventory::PlacementEndpoint
+impl runtimeexec::inventory::PlacementEndpoint
+pub fn runtimeexec::inventory::PlacementEndpoint::from_typed_parts(runtimeexec::inventory::InventoryEndpointScheme, &str, u16) -> core::result::Result<Self, runtimeexec::inventory::InventoryError>
+pub fn runtimeexec::inventory::PlacementEndpoint::host(&self) -> &str
+pub const fn runtimeexec::inventory::PlacementEndpoint::port(&self) -> u16
+pub const fn runtimeexec::inventory::PlacementEndpoint::scheme(&self) -> runtimeexec::inventory::InventoryEndpointScheme
+impl core::clone::Clone for runtimeexec::inventory::PlacementEndpoint
+pub fn runtimeexec::inventory::PlacementEndpoint::clone(&self) -> runtimeexec::inventory::PlacementEndpoint
+impl core::cmp::Eq for runtimeexec::inventory::PlacementEndpoint
+impl core::cmp::PartialEq for runtimeexec::inventory::PlacementEndpoint
+pub fn runtimeexec::inventory::PlacementEndpoint::eq(&self, &runtimeexec::inventory::PlacementEndpoint) -> bool
+impl core::fmt::Debug for runtimeexec::inventory::PlacementEndpoint
+pub fn runtimeexec::inventory::PlacementEndpoint::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for runtimeexec::inventory::PlacementEndpoint
+impl core::marker::Freeze for runtimeexec::inventory::PlacementEndpoint
+impl core::marker::Send for runtimeexec::inventory::PlacementEndpoint
+impl core::marker::Sync for runtimeexec::inventory::PlacementEndpoint
+impl core::marker::Unpin for runtimeexec::inventory::PlacementEndpoint
+impl core::marker::UnsafeUnpin for runtimeexec::inventory::PlacementEndpoint
+impl core::panic::unwind_safe::RefUnwindSafe for runtimeexec::inventory::PlacementEndpoint
+impl core::panic::unwind_safe::UnwindSafe for runtimeexec::inventory::PlacementEndpoint
+pub struct runtimeexec::inventory::PlacementObservation
+impl runtimeexec::inventory::PlacementObservation
+pub const fn runtimeexec::inventory::PlacementObservation::domain(&self) -> assembly_schema::AssemblyDomain
+pub fn runtimeexec::inventory::PlacementObservation::endpoint(&self) -> core::option::Option<&runtimeexec::inventory::PlacementEndpoint>
+pub fn runtimeexec::inventory::PlacementObservation::local(assembly_schema::AssemblyDomain, impl core::convert::Into<alloc::string::String>) -> Self
+pub const fn runtimeexec::inventory::PlacementObservation::mode(&self) -> runtimeexec::inventory::InventoryPlacementMode
+pub const fn runtimeexec::inventory::PlacementObservation::readiness(&self) -> runtimeexec::inventory::InventoryPlacementReadiness
+pub fn runtimeexec::inventory::PlacementObservation::remote(assembly_schema::AssemblyDomain, impl core::convert::Into<alloc::string::String>, core::option::Option<runtimeexec::inventory::PlacementEndpoint>, core::option::Option<alloc::string::String>, runtimeexec::inventory::InventoryPlacementReadiness) -> core::result::Result<Self, runtimeexec::inventory::InventoryError>
+pub fn runtimeexec::inventory::PlacementObservation::spiffe_identity(&self) -> core::option::Option<&str>
+pub fn runtimeexec::inventory::PlacementObservation::workload(&self) -> &str
+impl core::clone::Clone for runtimeexec::inventory::PlacementObservation
+pub fn runtimeexec::inventory::PlacementObservation::clone(&self) -> runtimeexec::inventory::PlacementObservation
+impl core::cmp::Eq for runtimeexec::inventory::PlacementObservation
+impl core::cmp::PartialEq for runtimeexec::inventory::PlacementObservation
+pub fn runtimeexec::inventory::PlacementObservation::eq(&self, &runtimeexec::inventory::PlacementObservation) -> bool
+impl core::fmt::Debug for runtimeexec::inventory::PlacementObservation
+pub fn runtimeexec::inventory::PlacementObservation::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for runtimeexec::inventory::PlacementObservation
+impl core::marker::Freeze for runtimeexec::inventory::PlacementObservation
+impl core::marker::Send for runtimeexec::inventory::PlacementObservation
+impl core::marker::Sync for runtimeexec::inventory::PlacementObservation
+impl core::marker::Unpin for runtimeexec::inventory::PlacementObservation
+impl core::marker::UnsafeUnpin for runtimeexec::inventory::PlacementObservation
+impl core::panic::unwind_safe::RefUnwindSafe for runtimeexec::inventory::PlacementObservation
+impl core::panic::unwind_safe::UnwindSafe for runtimeexec::inventory::PlacementObservation
+pub struct runtimeexec::inventory::ProviderPosture
+impl runtimeexec::inventory::ProviderPosture
+pub fn runtimeexec::inventory::ProviderPosture::id(&self) -> &str
+pub const fn runtimeexec::inventory::ProviderPosture::state(&self) -> runtimeexec::inventory::InventoryProviderState
+impl core::clone::Clone for runtimeexec::inventory::ProviderPosture
+pub fn runtimeexec::inventory::ProviderPosture::clone(&self) -> runtimeexec::inventory::ProviderPosture
+impl core::cmp::Eq for runtimeexec::inventory::ProviderPosture
+impl core::cmp::PartialEq for runtimeexec::inventory::ProviderPosture
+pub fn runtimeexec::inventory::ProviderPosture::eq(&self, &runtimeexec::inventory::ProviderPosture) -> bool
+impl core::fmt::Debug for runtimeexec::inventory::ProviderPosture
+pub fn runtimeexec::inventory::ProviderPosture::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for runtimeexec::inventory::ProviderPosture
+impl core::marker::Freeze for runtimeexec::inventory::ProviderPosture
+impl core::marker::Send for runtimeexec::inventory::ProviderPosture
+impl core::marker::Sync for runtimeexec::inventory::ProviderPosture
+impl core::marker::Unpin for runtimeexec::inventory::ProviderPosture
+impl core::marker::UnsafeUnpin for runtimeexec::inventory::ProviderPosture
+impl core::panic::unwind_safe::RefUnwindSafe for runtimeexec::inventory::ProviderPosture
+impl core::panic::unwind_safe::UnwindSafe for runtimeexec::inventory::ProviderPosture
+pub struct runtimeexec::inventory::ProviderProbeBinding
+impl runtimeexec::inventory::ProviderProbeBinding
+pub fn runtimeexec::inventory::ProviderProbeBinding::new(impl core::convert::Into<alloc::string::String>, alloc::vec::Vec<primitives::healthz::ProbeName>) -> core::result::Result<Self, runtimeexec::inventory::InventoryError>
+pub fn runtimeexec::inventory::ProviderProbeBinding::probe_names(&self) -> &[primitives::healthz::ProbeName]
+pub fn runtimeexec::inventory::ProviderProbeBinding::provider_id(&self) -> &str
+impl core::clone::Clone for runtimeexec::inventory::ProviderProbeBinding
+pub fn runtimeexec::inventory::ProviderProbeBinding::clone(&self) -> runtimeexec::inventory::ProviderProbeBinding
+impl core::cmp::Eq for runtimeexec::inventory::ProviderProbeBinding
+impl core::cmp::PartialEq for runtimeexec::inventory::ProviderProbeBinding
+pub fn runtimeexec::inventory::ProviderProbeBinding::eq(&self, &runtimeexec::inventory::ProviderProbeBinding) -> bool
+impl core::fmt::Debug for runtimeexec::inventory::ProviderProbeBinding
+pub fn runtimeexec::inventory::ProviderProbeBinding::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for runtimeexec::inventory::ProviderProbeBinding
+impl core::marker::Freeze for runtimeexec::inventory::ProviderProbeBinding
+impl core::marker::Send for runtimeexec::inventory::ProviderProbeBinding
+impl core::marker::Sync for runtimeexec::inventory::ProviderProbeBinding
+impl core::marker::Unpin for runtimeexec::inventory::ProviderProbeBinding
+impl core::marker::UnsafeUnpin for runtimeexec::inventory::ProviderProbeBinding
+impl core::panic::unwind_safe::RefUnwindSafe for runtimeexec::inventory::ProviderProbeBinding
+impl core::panic::unwind_safe::UnwindSafe for runtimeexec::inventory::ProviderProbeBinding
+pub struct runtimeexec::inventory::RuntimeInventorySeed
+impl runtimeexec::inventory::RuntimeInventorySeed
+pub fn runtimeexec::inventory::RuntimeInventorySeed::from_runtime_plan(&assembly_schema::runtime_plan::RuntimePlan, alloc::vec::Vec<runtimeexec::inventory::ProviderProbeBinding>, alloc::vec::Vec<runtimeexec::inventory::PlacementObservation>) -> core::result::Result<Self, runtimeexec::inventory::InventoryError>
+pub fn runtimeexec::inventory::RuntimeInventorySeed::with_build_metadata(self, runtimeexec::inventory::BuildMetadata) -> Self
+impl core::marker::Freeze for runtimeexec::inventory::RuntimeInventorySeed
+impl core::marker::Send for runtimeexec::inventory::RuntimeInventorySeed
+impl core::marker::Sync for runtimeexec::inventory::RuntimeInventorySeed
+impl core::marker::Unpin for runtimeexec::inventory::RuntimeInventorySeed
+impl core::marker::UnsafeUnpin for runtimeexec::inventory::RuntimeInventorySeed
+impl core::panic::unwind_safe::RefUnwindSafe for runtimeexec::inventory::RuntimeInventorySeed
+impl core::panic::unwind_safe::UnwindSafe for runtimeexec::inventory::RuntimeInventorySeed
+pub struct runtimeexec::inventory::RuntimeInventorySnapshot
+impl runtimeexec::inventory::RuntimeInventorySnapshot
+pub fn runtimeexec::inventory::RuntimeInventorySnapshot::assembly_fingerprint(&self) -> &str
+pub fn runtimeexec::inventory::RuntimeInventorySnapshot::build_metadata(&self) -> core::option::Option<&runtimeexec::inventory::BuildMetadata>
+pub fn runtimeexec::inventory::RuntimeInventorySnapshot::domains(&self) -> &[assembly_schema::AssemblyDomain]
+pub fn runtimeexec::inventory::RuntimeInventorySnapshot::listeners(&self) -> &[runtimeexec::inventory::BoundListenerObservation]
+pub fn runtimeexec::inventory::RuntimeInventorySnapshot::placements(&self) -> &[runtimeexec::inventory::PlacementObservation]
+pub fn runtimeexec::inventory::RuntimeInventorySnapshot::provider_posture(&self) -> &[runtimeexec::inventory::ProviderPosture]
+pub fn runtimeexec::inventory::RuntimeInventorySnapshot::runtime_plan_fingerprint(&self) -> &str
+pub const fn runtimeexec::inventory::RuntimeInventorySnapshot::schema_version(&self) -> u32
+impl core::clone::Clone for runtimeexec::inventory::RuntimeInventorySnapshot
+pub fn runtimeexec::inventory::RuntimeInventorySnapshot::clone(&self) -> runtimeexec::inventory::RuntimeInventorySnapshot
+impl core::cmp::Eq for runtimeexec::inventory::RuntimeInventorySnapshot
+impl core::cmp::PartialEq for runtimeexec::inventory::RuntimeInventorySnapshot
+pub fn runtimeexec::inventory::RuntimeInventorySnapshot::eq(&self, &runtimeexec::inventory::RuntimeInventorySnapshot) -> bool
+impl core::fmt::Debug for runtimeexec::inventory::RuntimeInventorySnapshot
+pub fn runtimeexec::inventory::RuntimeInventorySnapshot::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for runtimeexec::inventory::RuntimeInventorySnapshot
+impl core::marker::Freeze for runtimeexec::inventory::RuntimeInventorySnapshot
+impl core::marker::Send for runtimeexec::inventory::RuntimeInventorySnapshot
+impl core::marker::Sync for runtimeexec::inventory::RuntimeInventorySnapshot
+impl core::marker::Unpin for runtimeexec::inventory::RuntimeInventorySnapshot
+impl core::marker::UnsafeUnpin for runtimeexec::inventory::RuntimeInventorySnapshot
+impl core::panic::unwind_safe::RefUnwindSafe for runtimeexec::inventory::RuntimeInventorySnapshot
+impl core::panic::unwind_safe::UnwindSafe for runtimeexec::inventory::RuntimeInventorySnapshot
+pub fn runtimeexec::inventory::deferred_inventory_channel(runtimeexec::inventory::RuntimeInventorySeed) -> (runtimeexec::inventory::InventoryPublisher, runtimeexec::inventory::InventoryReader, runtimeexec::inventory::InventoryHealthPublisher, runtimeexec::inventory::InventoryPlacementReadinessPublisher)
+pub fn runtimeexec::inventory::inventory_channel(runtimeexec::inventory::RuntimeInventorySeed, alloc::sync::Arc<bootstrap::registry::HealthReporter>) -> (runtimeexec::inventory::InventoryPublisher, runtimeexec::inventory::InventoryReader)
+pub type runtimeexec::inventory::PlacementReadinessSampler = alloc::sync::Arc<(dyn core::ops::function::Fn() -> runtimeexec::inventory::InventoryPlacementReadiness + core::marker::Send + core::marker::Sync)>
 pub struct runtimeexec::Activated<Inventory>
 impl<Inventory> core::marker::Freeze for runtimeexec::Activated<Inventory> where Inventory: core::marker::Freeze
 impl<Inventory> core::marker::Send for runtimeexec::Activated<Inventory> where Inventory: core::marker::Send
@@ -113,7 +560,7 @@ impl<'stack> !core::panic::unwind_safe::RefUnwindSafe for runtimeexec::StartupTr
 impl<'stack> !core::panic::unwind_safe::UnwindSafe for runtimeexec::StartupTransaction<'stack>
 pub struct runtimeexec::TotalDrainBudget(_)
 impl runtimeexec::TotalDrainBudget
-pub fn runtimeexec::TotalDrainBudget::new(core::time::Duration, core::time::Duration, core::time::Duration) -> anyhow::Result<Self>
+pub fn runtimeexec::TotalDrainBudget::new(core::time::Duration) -> anyhow::Result<Self>
 impl core::clone::Clone for runtimeexec::TotalDrainBudget
 pub fn runtimeexec::TotalDrainBudget::clone(&self) -> runtimeexec::TotalDrainBudget
 impl core::marker::Copy for runtimeexec::TotalDrainBudget

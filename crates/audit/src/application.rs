@@ -18,7 +18,7 @@
 //! ref: sigstore/sigstore-rs src/rekor（append-only transparency log → 域 hash chain）
 
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 #[cfg(test)]
 use ::generated::http::audit_v1::list_entries::SPEC as AUDIT_LIST_HTTP_SPEC;
@@ -59,8 +59,9 @@ use generated::event::identity_v1::{
         IdentityRoleRevokedPayload, IdentityRoleRevokedPayloadActorKind, SPEC as ROLE_REVOKED_SPEC,
     },
     security_event::{
-        IdentitySecurityEventPayload, IdentitySecurityEventPayloadKind,
-        IdentitySecurityEventPayloadTargetKind, SPEC as SECURITY_EVENT_SPEC,
+        IdentitySecurityEventPayload, IdentitySecurityEventPayloadActorKind,
+        IdentitySecurityEventPayloadKind, IdentitySecurityEventPayloadTargetKind,
+        SPEC as SECURITY_EVENT_SPEC,
     },
     session_created::{IdentitySessionCreatedPayload, SPEC as SESSION_CREATED_SPEC},
 };
@@ -90,14 +91,16 @@ const ACTION_ROLE_REVOKE: &str = "identity:role_revoke";
 const ACTION_POLICY_CREATE: &str = "identity:policy_create";
 const ACTION_POLICY_UPDATE: &str = "identity:policy_update";
 const ACTION_POLICY_DEACTIVATE: &str = "identity:policy_deactivate";
-const ACTION_LOGOUT_CURRENT: &str = "identity:logout_current";
+const ACTION_PASSWORD_CHANGED: &str = "identity:password_changed";
+const ACTION_PASSWORD_RESET: &str = "identity:password_reset";
+const ACTION_ACCOUNT_LOCKED: &str = "identity:account_locked";
+const ACTION_ACCOUNT_SUSPENDED: &str = "identity:account_suspended";
+const ACTION_ACCOUNT_DEACTIVATED: &str = "identity:account_deactivated";
+const ACTION_ACCOUNT_REACTIVATED: &str = "identity:account_reactivated";
 const ACTION_LOGOUT_ALL: &str = "identity:logout_all";
-/// Stable service principal for records emitted by the credential-security event consumer.
-///
-/// `AuditRecord` uses a UUID-backed actor slot for every principal kind. Keeping this identity
-/// stable and service-scoped avoids misrepresenting the opaque target reference as a user.
-const CREDENTIAL_SECURITY_AUDIT_ACTOR: u128 = 0x0000_0000_0000_4000_8000_0000_0000_0184;
-
+const ACTION_CREDENTIAL_DELETED: &str = "identity:credential_deleted";
+const ACTION_LOGOUT_CURRENT: &str = "identity:logout_current";
+const ACTION_REFRESH_REUSE_DETECTED: &str = "identity:refresh_reuse_detected";
 /// admin 读路由组 nest 前缀（Admin listener；与 contracts/http/audit/v1 单源对齐）。
 const AUDIT_ROUTE_PREFIX: &str = "/api/v1/audit";
 const RESOURCE_KIND_AUDIT_ENTRIES: &str = "audit_entries";
@@ -175,6 +178,8 @@ pub enum AuditEventRecordError {
     Session(#[source] ids::IdParseError),
     #[error("audit security event kind is not auditable")]
     SecurityKind,
+    #[error("audit event timestamp is outside the Unix int64 range")]
+    Time(#[source] vocab::UnixEpochSecondsError),
 }
 
 /// Decode a generated identity event payload into the audit domain record shape.
@@ -203,26 +208,65 @@ pub fn security_audit_command_from_message(
         vocab::TenantId::parse(&payload.tenant_id).map_err(AuditEventRecordError::Tenant)?;
     let action_raw = match (payload.kind, payload.target.kind) {
         (
-            IdentitySecurityEventPayloadKind::LogoutCurrent,
-            IdentitySecurityEventPayloadTargetKind::Grant,
-        ) => ACTION_LOGOUT_CURRENT,
+            IdentitySecurityEventPayloadKind::PasswordChanged,
+            IdentitySecurityEventPayloadTargetKind::Subject,
+        ) => ACTION_PASSWORD_CHANGED,
+        (
+            IdentitySecurityEventPayloadKind::PasswordReset,
+            IdentitySecurityEventPayloadTargetKind::Subject,
+        ) => ACTION_PASSWORD_RESET,
+        (
+            IdentitySecurityEventPayloadKind::AccountLocked,
+            IdentitySecurityEventPayloadTargetKind::Subject,
+        ) => ACTION_ACCOUNT_LOCKED,
+        (
+            IdentitySecurityEventPayloadKind::AccountSuspended,
+            IdentitySecurityEventPayloadTargetKind::Subject,
+        ) => ACTION_ACCOUNT_SUSPENDED,
+        (
+            IdentitySecurityEventPayloadKind::AccountDeactivated,
+            IdentitySecurityEventPayloadTargetKind::Subject,
+        ) => ACTION_ACCOUNT_DEACTIVATED,
+        (
+            IdentitySecurityEventPayloadKind::AccountReactivated,
+            IdentitySecurityEventPayloadTargetKind::Subject,
+        ) => ACTION_ACCOUNT_REACTIVATED,
         (
             IdentitySecurityEventPayloadKind::LogoutAll,
             IdentitySecurityEventPayloadTargetKind::Subject,
         ) => ACTION_LOGOUT_ALL,
+        (
+            IdentitySecurityEventPayloadKind::CredentialDeleted,
+            IdentitySecurityEventPayloadTargetKind::Subject,
+        ) => ACTION_CREDENTIAL_DELETED,
+        (
+            IdentitySecurityEventPayloadKind::LogoutCurrent,
+            IdentitySecurityEventPayloadTargetKind::Grant,
+        ) => ACTION_LOGOUT_CURRENT,
+        (
+            IdentitySecurityEventPayloadKind::RefreshReuseDetected,
+            IdentitySecurityEventPayloadTargetKind::Grant,
+        ) => ACTION_REFRESH_REUSE_DETECTED,
         _ => return Err(AuditEventRecordError::SecurityKind),
     };
     let action = vocab::Action::parse(action_raw).map_err(AuditEventRecordError::Action)?;
     let target_ref = payload.target.ref_;
+    let actor_kind = match payload.actor.kind {
+        IdentitySecurityEventPayloadActorKind::User => vocab::PrincipalKind::User,
+        IdentitySecurityEventPayloadActorKind::Device => vocab::PrincipalKind::Device,
+        IdentitySecurityEventPayloadActorKind::Admin => vocab::PrincipalKind::Admin,
+        IdentitySecurityEventPayloadActorKind::SuperAdmin => vocab::PrincipalKind::SuperAdmin,
+        IdentitySecurityEventPayloadActorKind::Service => vocab::PrincipalKind::Service,
+    };
     Ok(SecurityAuditCommand {
         record: AuditRecord {
             tenant,
-            actor: ids::UserId::new(uuid::Uuid::from_u128(CREDENTIAL_SECURITY_AUDIT_ACTOR)),
-            actor_kind: vocab::PrincipalKind::Service,
+            actor: ids::UserId::new(payload.actor.ref_),
+            actor_kind,
             action,
             resource: ResourceRef::new(RESOURCE_KIND_SECURITY_TARGET, target_ref.to_string()),
             outcome: AuditOutcome::Success,
-            recorded_at: from_unix_secs(payload.occurred_at),
+            recorded_at: from_unix_secs(payload.occurred_at)?,
         },
     })
 }
@@ -275,9 +319,11 @@ where
     }
 }
 
-/// i64 unix 秒 → `SystemTime`（负值收口为 epoch）。
-fn from_unix_secs(secs: i64) -> SystemTime {
-    SystemTime::UNIX_EPOCH + Duration::from_secs(u64::try_from(secs).unwrap_or(0))
+/// i64 unix 秒 → `SystemTime`，任何负值或平台范围溢出都显式失败。
+fn from_unix_secs(secs: i64) -> Result<SystemTime, AuditEventRecordError> {
+    vocab::UnixEpochSeconds::try_from(secs)
+        .and_then(vocab::UnixEpochSeconds::to_system_time)
+        .map_err(AuditEventRecordError::Time)
 }
 
 fn session_created_record_from_message(
@@ -297,7 +343,7 @@ fn session_created_record_from_message(
         action,
         resource: ResourceRef::new(RESOURCE_KIND_SESSION, session.as_uuid().to_string()),
         outcome: AuditOutcome::Success,
-        recorded_at: from_unix_secs(payload.occurred_at),
+        recorded_at: from_unix_secs(payload.occurred_at)?,
     })
 }
 
@@ -317,7 +363,7 @@ fn role_assigned_record_from_message(
         action,
         resource: ResourceRef::new(RESOURCE_KIND_ROLE_BINDING, resource_id),
         outcome: AuditOutcome::Success,
-        recorded_at: from_unix_secs(payload.occurred_at),
+        recorded_at: from_unix_secs(payload.occurred_at)?,
     })
 }
 
@@ -337,7 +383,7 @@ fn role_revoked_record_from_message(
         action,
         resource: ResourceRef::new(RESOURCE_KIND_ROLE_BINDING, resource_id),
         outcome: AuditOutcome::Success,
-        recorded_at: from_unix_secs(payload.occurred_at),
+        recorded_at: from_unix_secs(payload.occurred_at)?,
     })
 }
 
@@ -365,7 +411,7 @@ fn policy_updated_record_from_message(
             ),
         ),
         outcome: AuditOutcome::Success,
-        recorded_at: from_unix_secs(payload.occurred_at),
+        recorded_at: from_unix_secs(payload.occurred_at)?,
     })
 }
 
@@ -1717,14 +1763,29 @@ mod tests {
 
     #[test]
     #[allow(clippy::expect_used)]
-    fn security_event_fact_is_sealed_for_current_and_all_logout() {
+    fn security_event_fact_maps_all_legal_kinds_and_rejects_target_mismatches() {
         let target = "550e8400-e29b-41d4-a716-446655440000";
-        for (kind, target_kind, action) in [
-            ("logoutCurrent", "grant", ACTION_LOGOUT_CURRENT),
+        let actor_ref = "550e8400-e29b-41d4-a716-446655440001";
+        let legal_cases = [
+            ("passwordChanged", "subject", ACTION_PASSWORD_CHANGED),
+            ("passwordReset", "subject", ACTION_PASSWORD_RESET),
+            ("accountLocked", "subject", ACTION_ACCOUNT_LOCKED),
+            ("accountSuspended", "subject", ACTION_ACCOUNT_SUSPENDED),
+            ("accountDeactivated", "subject", ACTION_ACCOUNT_DEACTIVATED),
+            ("accountReactivated", "subject", ACTION_ACCOUNT_REACTIVATED),
             ("logoutAll", "subject", ACTION_LOGOUT_ALL),
-        ] {
+            ("credentialDeleted", "subject", ACTION_CREDENTIAL_DELETED),
+            ("logoutCurrent", "grant", ACTION_LOGOUT_CURRENT),
+            (
+                "refreshReuseDetected",
+                "grant",
+                ACTION_REFRESH_REUSE_DETECTED,
+            ),
+        ];
+
+        for (kind, target_kind, action) in legal_cases {
             let payload = format!(
-                r#"{{"kind":"{kind}","occurredAt":1700000400,"target":{{"kind":"{target_kind}","ref":"{target}"}},"tenantId":"{CANON_TENANT}"}}"#
+                r#"{{"actor":{{"keyId":1,"kind":"admin","ref":"{actor_ref}"}},"kind":"{kind}","occurredAt":1700000400,"target":{{"keyId":1,"kind":"{target_kind}","ref":"{target}"}},"tenantId":"{CANON_TENANT}"}}"#
             );
             let command = security_audit_command_from_message(&Message::new(
                 "security",
@@ -1734,34 +1795,74 @@ mod tests {
             assert_eq!(command.tenant().to_string(), CANON_TENANT);
             assert_eq!(format!("{command:?}"), "SecurityAuditCommand(<redacted>)");
             let record = command.into_record();
-            assert_ne!(record.actor.as_uuid().to_string(), target);
-            assert_eq!(record.actor_kind, vocab::PrincipalKind::Service);
+            assert_eq!(record.actor.as_uuid().to_string(), actor_ref);
+            assert_eq!(record.actor_kind, vocab::PrincipalKind::Admin);
             assert_eq!(record.resource.id(), target);
             assert_eq!(record.action.as_str(), action);
         }
 
-        for rejected in [
-            format!(
-                r#"{{"kind":"passwordChanged","occurredAt":1,"target":{{"kind":"subject","ref":"{target}"}},"tenantId":"{CANON_TENANT}"}}"#
-            ),
-            format!(
-                r#"{{"kind":"logoutAll","occurredAt":1,"target":{{"kind":"subject","ref":"{target}"}},"tenantId":"{CANON_TENANT}","sid":"secret"}}"#
-            ),
-            format!(
-                r#"{{"kind":"logoutCurrent","occurredAt":1,"target":{{"kind":"subject","ref":"{target}"}},"tenantId":"{CANON_TENANT}"}}"#
-            ),
-            format!(
-                r#"{{"kind":"logoutAll","occurredAt":1,"target":{{"kind":"grant","ref":"{target}"}},"tenantId":"{CANON_TENANT}"}}"#
-            ),
-        ] {
-            assert!(
-                security_audit_command_from_message(&Message::new(
-                    "security",
-                    rejected.into_bytes()
-                ))
-                .is_err()
+        for (kind, target_kind, _) in legal_cases {
+            let mismatched_target_kind = match target_kind {
+                "subject" => "grant",
+                "grant" => "subject",
+                _ => unreachable!("legal target kinds are sealed by the test table"),
+            };
+            let payload = format!(
+                r#"{{"actor":{{"keyId":1,"kind":"admin","ref":"{actor_ref}"}},"kind":"{kind}","occurredAt":1,"target":{{"keyId":1,"kind":"{mismatched_target_kind}","ref":"{target}"}},"tenantId":"{CANON_TENANT}"}}"#
             );
+            let error = security_audit_command_from_message(&Message::new(
+                "security",
+                payload.into_bytes(),
+            ))
+            .expect_err("kind/target mismatch must fail closed");
+            assert!(matches!(error, AuditEventRecordError::SecurityKind));
         }
+
+        let pre_epoch = format!(
+            r#"{{"actor":{{"keyId":1,"kind":"admin","ref":"{actor_ref}"}},"kind":"logoutAll","occurredAt":-1,"target":{{"keyId":1,"kind":"subject","ref":"{target}"}},"tenantId":"{CANON_TENANT}"}}"#
+        );
+        let error =
+            security_audit_command_from_message(&Message::new("security", pre_epoch.into_bytes()))
+                .expect_err("pre-epoch security event must fail closed");
+        assert!(matches!(error, AuditEventRecordError::Time(_)));
+
+        let payload_with_unknown_field = format!(
+            r#"{{"actor":{{"keyId":1,"kind":"admin","ref":"{actor_ref}"}},"kind":"logoutAll","occurredAt":1,"target":{{"keyId":1,"kind":"subject","ref":"{target}"}},"tenantId":"{CANON_TENANT}","sid":"secret"}}"#
+        );
+        let error = security_audit_command_from_message(&Message::new(
+            "security",
+            payload_with_unknown_field.into_bytes(),
+        ))
+        .expect_err("unknown fields must remain rejected");
+        assert!(matches!(error, AuditEventRecordError::Decode(_)));
+
+        for (actor_kind, expected) in [
+            ("user", vocab::PrincipalKind::User),
+            ("admin", vocab::PrincipalKind::Admin),
+            ("service", vocab::PrincipalKind::Service),
+        ] {
+            let payload = format!(
+                r#"{{"actor":{{"keyId":1,"kind":"{actor_kind}","ref":"{actor_ref}"}},"kind":"accountReactivated","occurredAt":1,"target":{{"keyId":1,"kind":"subject","ref":"{target}"}},"tenantId":"{CANON_TENANT}"}}"#
+            );
+            let record = security_audit_command_from_message(&Message::new(
+                "security",
+                payload.into_bytes(),
+            ))
+            .expect("typed security actor")
+            .into_record();
+            assert_eq!(record.actor.as_uuid().to_string(), actor_ref);
+            assert_eq!(record.actor_kind, expected);
+        }
+
+        let payload_with_unknown_actor_field = format!(
+            r#"{{"actor":{{"keyId":1,"kind":"admin","ref":"{actor_ref}","subject":"secret"}},"kind":"logoutAll","occurredAt":1,"target":{{"keyId":1,"kind":"subject","ref":"{target}"}},"tenantId":"{CANON_TENANT}"}}"#
+        );
+        let error = security_audit_command_from_message(&Message::new(
+            "security",
+            payload_with_unknown_actor_field.into_bytes(),
+        ))
+        .expect_err("unknown actor fields must remain rejected");
+        assert!(matches!(error, AuditEventRecordError::Decode(_)));
     }
 
     #[tokio::test]
@@ -2108,6 +2209,7 @@ mod tests {
             ROLE_ASSIGNED_SPEC,
             ROLE_REVOKED_SPEC,
             POLICY_UPDATED_SPEC,
+            SECURITY_EVENT_SPEC,
         ]
         .into_iter()
         .flat_map(|event| {
@@ -2118,7 +2220,7 @@ mod tests {
                 .map(move |spec| (event, spec))
         })
         .collect();
-        assert_eq!(expected.len(), 4);
+        assert_eq!(expected.len(), 5);
         assert_eq!(subs.len(), expected.len());
         for (event, spec) in expected {
             assert_eq!(spec.consumer(), AUDIT_DOMAIN);
@@ -2417,13 +2519,15 @@ mod tests {
             &::generated::http::audit_v1::list_entries::ROUTE,
         )
         .expect("audit list route is mounted in finalized routes");
-        let plan =
-            primitives::AuthPlan::new(ListenerKind::Admin, primitives::AuthScheme::RssAccessToken)
-                .expect("admin jwt plan");
+        let plan = primitives::AuthPlan::new(
+            ListenerKind::Admin,
+            primitives::AuthScheme::FederatedAccessToken,
+        )
+        .expect("admin jwt plan");
         let ambient = vocab::TenantId::parse(CANON_TENANT).expect("ambient tenant");
         let bridge_principal = principal(vocab::PrincipalKind::Admin, evidence_tenant);
         let authenticated = httpserve::Authenticated::new(
-            primitives::RequiredScheme::RssAccessToken,
+            primitives::RequiredScheme::FederatedAccessToken,
             vocab::PrincipalKind::Admin,
             CANON_SUBJECT,
             evidence_tenant,
@@ -3111,7 +3215,7 @@ mod tests {
                 .expect("admin routes");
             let plan = primitives::AuthPlan::new(
                 ListenerKind::Admin,
-                primitives::AuthScheme::RssAccessToken,
+                primitives::AuthScheme::FederatedAccessToken,
             )
             .expect("admin jwt plan");
             let principal_for_bridge = principal.clone();
@@ -3128,7 +3232,7 @@ mod tests {
                     let principal = principal_for_bridge.clone();
                     async move {
                         req.extensions_mut().insert(httpserve::Authenticated::new(
-                            primitives::RequiredScheme::RssAccessToken,
+                            primitives::RequiredScheme::FederatedAccessToken,
                             vocab::PrincipalKind::SuperAdmin,
                             CANON_SUBJECT,
                             None,

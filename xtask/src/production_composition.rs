@@ -911,14 +911,15 @@ fn validate_identity_rss_wire(items: &[Item]) -> Result<()> {
             return None;
         };
         (path_is_exact_expr(&call.func, &["IdentityModuleDeps", "new"])
-            && call.args.len() == 7
+            && call.args.len() == 8
             && call.args.first().and_then(simple_expr_ident).as_deref() == Some("pg")
             && call.args.get(1).and_then(simple_expr_ident).as_deref() == Some("signer")
-            && call.args.get(6).and_then(simple_expr_ident).as_deref() == Some("blocklist"))
+            && call.args.get(6).and_then(simple_expr_ident).as_deref() == Some("blocklist")
+            && call.args.get(7).and_then(simple_expr_ident).as_deref() == Some("pseudonym_keys"))
         .then(|| binding.ident.to_string())
     });
     let composition_binding = composition_binding.context(
-        "identity runtime must bind IdentityModuleDeps::new(pg, signer, ..., blocklist)",
+        "identity runtime must bind IdentityModuleDeps::new(pg, signer, ..., blocklist, pseudonym_keys)",
     )?;
     ensure_local_binding_count(&wire.block, "pg", 0, IDENTITY_RUNTIME_MODULE)?;
     ensure_local_binding_count(
@@ -1508,6 +1509,36 @@ fn collect_identity_wire(
                 injection.service_type,
                 injection.provider_method
             );
+            if injection.port == ProducerCompositionPort::IdentitySecurityLifecycleLocal {
+                let reactivation = unique_method_result_binding(
+                    injection_wire,
+                    "pg",
+                    "account_reactivation_lifecycle",
+                )
+                .with_context(|| {
+                    format!(
+                        "{repo_path}: resolve PgDomainDeps::account_reactivation_lifecycle binding"
+                    )
+                })?;
+                ensure!(
+                    constructor.call.args.len() == 7
+                        && constructor
+                            .call
+                            .args
+                            .get(3)
+                            .and_then(simple_expr_ident)
+                            .as_deref()
+                            == Some(&binding)
+                        && constructor
+                            .call
+                            .args
+                            .get(4)
+                            .and_then(simple_expr_ident)
+                            .as_deref()
+                            == Some(&reactivation),
+                    "{repo_path}: CredentialSecurityService::new must keep the exact seven-part credentials/grants/accounts/security-lifecycle/reactivation/password-policy/clock shape and consume `{binding}` plus `{reactivation}` in their exact slots"
+                );
+            }
             constructor
         };
         if matches!(
@@ -1862,6 +1893,7 @@ fn reject_protected_local_name(name: &str, repo_path: &str) -> Result<()> {
         !matches!(
             name,
             "LoginService"
+                | "CredentialSecurityService"
                 | "PolicyManageService"
                 | "RbacAdminService"
                 | "SettingsService"
@@ -2301,9 +2333,9 @@ mod tests {
             r#"
             use std::sync::Arc;
             use identity::{{
-                AuthGrantServices, FederatedIdentityDomain, FederatedIdentityDomainDeps,
-                IdentityDomain, IdentityDomainDeps, LoginService, PolicyManageService,
-                RbacAdminService,
+                AuthGrantServices, CredentialSecurityService, FederatedIdentityDomain,
+                FederatedIdentityDomainDeps, IdentityDomain, IdentityDomainDeps, LoginService,
+                PolicyManageService, RbacAdminService,
             }};
             use postgres::PgDomainDeps;
             pub struct IdentityModuleDeps {{ pg: PgDomainDeps }}
@@ -2337,7 +2369,9 @@ mod tests {
             }}
 
             pub fn wire(deps: IdentityModuleDeps) {{
-                let IdentityModuleDeps {{ pg, .. }} = deps;
+                let IdentityModuleDeps {{ pg, pseudonym_keys, .. }} = deps;
+                let credentials = Arc::from(DynCredentialRepo::new_box(pg.credential_repo()));
+                let accounts = DynAccountSecurityReadRepo::new_box(pg.account_security_repo());
                 let provider = pg.auth_grant_provider(boxed_clock(&clock));
                 let common = common_identity_services(&pg, &clock);
                 let auth_grants = AuthGrantServices::from_provider(
@@ -2348,16 +2382,30 @@ mod tests {
                     refresh_ttl,
                 );
                 let refresh = auth_grants.refresh_service();
+                let security_lifecycle =
+                    pg.identity_security_lifecycle(Arc::clone(&pseudonym_keys));
+                let account_reactivation_lifecycle =
+                    pg.account_reactivation_lifecycle(pseudonym_keys);
+                let password_policy = secure::PasswordPolicy::new(blocklist);
+                let credential_security = Arc::new(CredentialSecurityService::new(
+                    credentials,
+                    auth_grants.lifecycle(),
+                    accounts,
+                    security_lifecycle,
+                    account_reactivation_lifecycle,
+                    password_policy,
+                    boxed_clock(&clock),
+                ));
                 let login = Arc::new(LoginService::new(
                     credentials,
                     auth_grants,
-                    password_policy,
                     clock,
                     auth_grant_ttl,
                 ));
                 let domain = IdentityDomain::new(IdentityDomainDeps {{
                     login: {domain_login},
                     refresh,
+                    credential_security,
                     rbac_admin: common.rbac_admin,
                     policy_manage: common.policy_manage,
                 }});
@@ -2396,6 +2444,43 @@ mod tests {
             collect_identity_wire(&source, IDENTITY_COMPOSITION).is_err(),
             "constructing LoginService is not live composition evidence unless that exact result enters IdentityDomainDeps.login"
         );
+    }
+
+    #[test]
+    fn identity_security_wire_rejects_missing_extra_or_misplaced_lifecycle() {
+        let canonical = identity_wire("provider", "login");
+        assert!(
+            collect_identity_wire(&canonical, IDENTITY_COMPOSITION).is_ok(),
+            "canonical seven-part credential-security injection must be green"
+        );
+        for (label, source) in [
+            (
+                "foreign lifecycle",
+                canonical.replace(
+                    "pg.identity_security_lifecycle(Arc::clone(&pseudonym_keys));",
+                    "decoy.identity_security_lifecycle(Arc::clone(&pseudonym_keys));",
+                ),
+            ),
+            (
+                "extra dependency",
+                canonical.replace(
+                    "                    boxed_clock(&clock),\n                ));",
+                    "                    boxed_clock(&clock),\n                    extra_dependency,\n                ));",
+                ),
+            ),
+            (
+                "misplaced lifecycle",
+                canonical.replace(
+                    "                    security_lifecycle,\n                    account_reactivation_lifecycle,",
+                    "                    account_reactivation_lifecycle,\n                    security_lifecycle,",
+                ),
+            ),
+        ] {
+            assert!(
+                collect_identity_wire(&source, IDENTITY_COMPOSITION).is_err(),
+                "{label} evidence must remain synthetic-red"
+            );
+        }
     }
 
     #[test]
@@ -2452,7 +2537,7 @@ mod tests {
             .parent()
             .context("xtask must live below the workspace root")?;
         let projections = collect_producer_composition(root)?;
-        assert_eq!(projections.len(), 4);
+        assert_eq!(projections.len(), 5);
         assert_eq!(
             projections
                 .keys()
@@ -2460,6 +2545,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             [
                 "AuthGrantLifecycleLocal",
+                "IdentitySecurityLifecycleLocal",
                 "PolicyLifecycleLocal",
                 "RoleBindingLifecycleLocal",
                 "ConfigUnitOfWorkLocal",

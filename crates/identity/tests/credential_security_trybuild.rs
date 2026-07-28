@@ -10,5 +10,6 @@ fn credential_security_protocol_is_closed_and_typed() {
     tests.compile_fail("tests/ui/credential_security_route_command_swap_fail.rs");
     tests.compile_fail("tests/ui/credential_security_account_grant_close_fail.rs");
     tests.compile_fail("tests/ui/credential_security_legacy_reason_removed_fail.rs");
+    tests.compile_fail("tests/ui/password_change_raw_string_fail.rs");
     tests.compile_fail("tests/ui/current_auth_grant_cannot_be_forged.rs");
 }

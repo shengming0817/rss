@@ -235,3 +235,12 @@ pub fn wire_identity_with(
 ) -> anyhow::Result<bootstrap::DomainBinding> {
     crate::domains::identity::wire_identity_with(deps, values)
 }
+
+/// Builds the identity binding with a deterministic password producer transaction rendezvous.
+pub fn wire_identity_with_password_change_barrier(
+    deps: &SharedRuntimeDeps,
+    values: IdentityTestValues,
+    barrier: Arc<tokio::sync::Barrier>,
+) -> anyhow::Result<bootstrap::DomainBinding> {
+    crate::domains::identity::wire_identity_with_password_change_barrier(deps, values, barrier)
+}

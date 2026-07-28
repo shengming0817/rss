@@ -30,6 +30,7 @@ use eventexec::{
     ReconcileTargetStatus, ReviewedCommand, ScheduleActionOutcome, ScheduleAttemptOutcome,
 };
 use futures::future::{BoxFuture, poll_fn};
+use identity::ports::AccountReactivationLifecycle as _;
 use std::future::Future;
 
 use crate::{
@@ -160,6 +161,16 @@ fn logout_current_producer_receipt() -> identity::ports::LogoutCurrentProducerRe
 
 fn logout_all_producer_receipt() -> identity::ports::LogoutAllProducerReceipt {
     httpserve::ProducerMarker::for_test(generated::http::identity_v1::logout_all::PRODUCER)
+        .into_receipt()
+}
+
+fn password_change_producer_receipt() -> identity::ports::PasswordChangeProducerReceipt {
+    httpserve::ProducerMarker::for_test(generated::http::identity_v1::password_change::PRODUCER)
+        .into_receipt()
+}
+
+fn account_status_set_producer_receipt() -> identity::ports::AccountStatusSetProducerReceipt {
+    httpserve::ProducerMarker::for_test(generated::http::identity_v1::account_status_set::PRODUCER)
         .into_receipt()
 }
 
@@ -718,6 +729,167 @@ async fn shutdown_runtime_deps(deps: PgRuntimeDeps) -> TestResult {
     for resource in resources.into_iter().rev() {
         resource.shutdown().await?;
     }
+    Ok(())
+}
+
+async fn replace_test_projection_generation(
+    store: &PgStore,
+    generation: &str,
+    bindings: &[(&str, &str, &str, &str)],
+) -> Result<(), sqlx::Error> {
+    sqlx::query("SELECT public.rss_retire_projection_input_generation($1)")
+        .bind(generation)
+        .execute(&store.pool)
+        .await?;
+    for (contract_id, contract_version, schema_hash, topic) in bindings {
+        sqlx::query("SELECT public.rss_register_projection_input_binding($1, $2, $3, $4, $5)")
+            .bind(generation)
+            .bind(contract_id)
+            .bind(contract_version)
+            .bind(schema_hash)
+            .bind(topic)
+            .execute(&store.pool)
+            .await?;
+    }
+    Ok(())
+}
+
+async fn connect_test_projection_runtime(
+    params: &testkit::PgConnParams,
+    generation: &'static str,
+    bindings: &'static [vocab::ProjectionInputBinding],
+) -> Result<PgRuntimeDeps, PgError> {
+    PgRuntimeDeps::connect_serving(
+        &runtime_pg_config(params, TEST_APP_ROLE, TEST_APP_PASSWORD),
+        &crate::pool::PgTenantReadConfig::new(runtime_pg_config(
+            params,
+            TEST_READ_ROLE,
+            TEST_READ_PASSWORD,
+        )),
+        None,
+        generation,
+        bindings,
+    )
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn serving_rejects_missing_less_and_more_projection_generation_rows() -> TestResult {
+    static EXACT_INPUTS: &[vocab::ProjectionInputBinding] = &[
+        vocab::ProjectionInputBinding::from_static(
+            "test-projection-a",
+            "test",
+            "projection.bound-a",
+            "v1",
+            TEST_SCHEMA_HASH,
+            "test.event-a",
+        ),
+        vocab::ProjectionInputBinding::from_static(
+            "test-projection-b",
+            "test",
+            "projection.bound-b",
+            "v1",
+            TEST_SCHEMA_HASH,
+            "test.event-b",
+        ),
+    ];
+    let (fixture, owner) = connect_pg().await?;
+    provision_runtime_logins(fixture.params()).await?;
+    owner.run_migrations().await?;
+    let generation: &'static str = Box::leak(
+        crate::projection_events::projection_input_generation(EXACT_INPUTS).into_boxed_str(),
+    );
+    let exact = [
+        ("projection.bound-a", "v1", TEST_SCHEMA_HASH, "test.event-a"),
+        ("projection.bound-b", "v1", TEST_SCHEMA_HASH, "test.event-b"),
+    ];
+    replace_test_projection_generation(&owner, generation, &exact).await?;
+    let exact_runtime =
+        connect_test_projection_runtime(fixture.params(), generation, EXACT_INPUTS).await?;
+    shutdown_runtime_deps(exact_runtime).await?;
+
+    let cases: [(&str, &[(&str, &str, &str, &str)]); 3] = [
+        ("missing", &[]),
+        (
+            "less",
+            &[("projection.bound-a", "v1", TEST_SCHEMA_HASH, "test.event-a")],
+        ),
+        (
+            "more",
+            &[
+                ("projection.bound-a", "v1", TEST_SCHEMA_HASH, "test.event-a"),
+                ("projection.bound-b", "v1", TEST_SCHEMA_HASH, "test.event-b"),
+                (
+                    "projection.unexpected",
+                    "v1",
+                    TEST_SCHEMA_HASH,
+                    "test.unexpected",
+                ),
+            ],
+        ),
+    ];
+    let mut accepted_drift = Vec::new();
+    for (label, rows) in cases {
+        replace_test_projection_generation(&owner, generation, rows).await?;
+        match connect_test_projection_runtime(fixture.params(), generation, EXACT_INPUTS).await {
+            Ok(runtime) => {
+                accepted_drift.push(label);
+                shutdown_runtime_deps(runtime).await?;
+            }
+            Err(PgError::ProjectionBindings(_)) => {}
+            Err(error) => return Err(format!("{label} returned unrelated error: {error}").into()),
+        }
+    }
+    assert!(
+        accepted_drift.is_empty(),
+        "serving accepted non-exact projection generations: {accepted_drift:?}"
+    );
+    owner.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn readiness_degrades_when_active_projection_generation_drifts() -> TestResult {
+    let (fixture, deps) = setup_runtime_deps_with_projection_inputs(
+        TEST_PROJECTION_INPUT_GENERATION,
+        TEST_PROJECTION_INPUTS,
+    )
+    .await?;
+    let owner = runtime_assertion_pool(fixture.params()).await?;
+    let readiness = deps.handle().readiness_handle();
+    let (resources, sampler_factory) =
+        deps.into_runtime_parts(std::time::Duration::from_millis(20));
+    let sampler = sampler_factory.spawn(tokio_util::sync::CancellationToken::new());
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while readiness.snapshot() != crate::PoolReadiness::Ready {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .map_err(|_| "projection readiness did not become ready for the exact generation")?;
+
+    replace_test_projection_generation(
+        &PgStore {
+            pool: owner.clone(),
+        },
+        TEST_PROJECTION_INPUT_GENERATION,
+        &[],
+    )
+    .await?;
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while readiness.snapshot() != crate::PoolReadiness::Down {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .map_err(|_| "projection registry drift did not degrade postgres readiness")?;
+
+    sampler.shutdown().await?;
+    for resource in resources.into_iter().rev() {
+        resource.shutdown().await?;
+    }
+    owner.close().await;
     Ok(())
 }
 
@@ -9845,6 +10017,64 @@ async fn projection_events_runtime_uses_fixed_functions_not_direct_table_privile
             "rss_app must not have direct projection_input_bindings table privilege for: {sql}"
         );
     }
+
+    let projection_probe_acl: (String, bool, bool, bool, bool, bool, bool, bool) = sqlx::query_as(
+        r#"
+        SELECT owner.rolname,
+               owner.rolcanlogin,
+               procedure.prosecdef,
+               procedure.proconfig = ARRAY['search_path=pg_catalog, pg_temp']::text[],
+               has_function_privilege('rss_app', procedure.oid, 'EXECUTE'),
+               NOT EXISTS (
+                   SELECT 1
+                   FROM aclexplode(
+                       COALESCE(procedure.proacl, acldefault('f', procedure.proowner))
+                   ) AS acl
+                   WHERE acl.grantee = 0
+                     AND acl.privilege_type = 'EXECUTE'
+               ),
+               has_schema_privilege('rss_app', 'public', 'USAGE'),
+               has_schema_privilege('rss_app', 'public', 'CREATE')
+        FROM pg_proc AS procedure
+        JOIN pg_namespace AS namespace ON namespace.oid = procedure.pronamespace
+        JOIN pg_roles AS owner ON owner.oid = procedure.proowner
+        WHERE namespace.nspname = 'public'
+          AND procedure.proname = 'rss_read_projection_input_generation'
+          AND pg_get_function_identity_arguments(procedure.oid) = 'p_generation text'
+        "#,
+    )
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(
+        projection_probe_acl,
+        (
+            "rss_projection_events_runtime".to_owned(),
+            false,
+            true,
+            true,
+            true,
+            true,
+            true,
+            false,
+        ),
+        "projection generation probe must have a NOLOGIN owner, trusted search_path, exact EXECUTE grants and read-only schema access"
+    );
+    let registered: Vec<(String, String, String, String)> = sqlx::query_as(
+        "SELECT contract_id, contract_version, schema_hash, topic \
+         FROM public.rss_read_projection_input_generation($1)",
+    )
+    .bind(TEST_PROJECTION_INPUT_GENERATION)
+    .fetch_all(&app.pool)
+    .await?;
+    assert_eq!(
+        registered,
+        vec![(
+            "projection.bound".to_owned(),
+            "v1".to_owned(),
+            TEST_SCHEMA_HASH.to_owned(),
+            "test.event".to_owned(),
+        )]
+    );
 
     let entry = make_entry(&event_id);
     let env = make_test_env("test", "projection.bound");
@@ -20294,6 +20524,669 @@ async fn auth_grant_close_revokes_refresh_family_before_closing_root() -> TestRe
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn password_change_security_event_updates_credential_revokes_sessions_and_appends_one_fact()
+-> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let user = ids::UserId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let credentials = crate::PgCredentialRepo::from_unverified_for_test(&store);
+    credentials
+        .insert(
+            identity_scope(tenant),
+            make_cred(
+                "alice",
+                user.as_uuid().to_string().as_str(),
+                "old-password-phrase",
+                1,
+                tenant,
+            )?,
+        )
+        .await?;
+
+    let grant_lifecycle = crate::PgAuthGrantLifecycle::new(&store, fixed_clock());
+    for suffix in [0xc1_u8, 0xc2_u8] {
+        let (grant, refresh) = auth_grant_fixture(
+            tenant,
+            user,
+            &uuid::Uuid::new_v4().to_string(),
+            &uuid::Uuid::new_v4().to_string(),
+            [suffix; 32],
+        );
+        let (mutation, entry, envelope) =
+            auth_grant_login_parts(&unique_event_id("password-security-login"), grant, refresh);
+        let _ = grant_lifecycle
+            .persist_login_grant(
+                login_producer_receipt(),
+                identity_scope(tenant),
+                mutation,
+                entry,
+                envelope,
+            )
+            .await?;
+    }
+
+    let credential = credentials
+        .find_by_user_id(identity_scope(tenant), user)
+        .await?
+        .ok_or("seeded credential missing")?;
+    let accounts = crate::PgAccountSecurityRepo::from_unverified_for_test(&store);
+    let account = accounts
+        .find(identity_scope(tenant), user)
+        .await?
+        .ok_or("seeded account state missing")?;
+    let changed_at = account.updated_at() + Duration::from_secs(1);
+    let validated = secure::PasswordPolicy::for_test("passwordpassword", &[])
+        .validate(secure::RawPassword::new("new-password-phrase".to_owned()))?;
+    let command =
+        identity::test_support::password_change_command(credential, account, validated, changed_at);
+    let lifecycle = crate::PgIdentitySecurityLifecycle::from_unverified_for_test(&store);
+    let _receipt = lifecycle
+        .execute_password_change(
+            password_change_producer_receipt(),
+            identity_scope(tenant),
+            command,
+        )
+        .await?;
+
+    let stored = credentials
+        .find_by_user_id(identity_scope(tenant), user)
+        .await?
+        .ok_or("changed credential missing")?;
+    assert_eq!(stored.version(), 2);
+    assert!(password_matches(
+        "new-password-phrase",
+        stored.password_hash()
+    )?);
+    assert!(!password_matches(
+        "old-password-phrase",
+        stored.password_hash()
+    )?);
+    let state = accounts
+        .find(identity_scope(tenant), user)
+        .await?
+        .ok_or("changed account state missing")?;
+    assert_eq!(state.status(), AccountStatus::Active);
+    assert_eq!(state.authn_epoch().get(), 1);
+    assert_eq!(state.version().get(), 2);
+    let roots: Vec<(String,)> = sqlx::query_as(
+        "SELECT status FROM auth_grants WHERE tenant_id = $1::uuid AND user_id = $2::uuid",
+    )
+    .bind(tenant.as_uuid().to_string())
+    .bind(user.as_uuid().to_string())
+    .fetch_all(&store.pool)
+    .await?;
+    assert_eq!(roots.len(), 2);
+    assert!(roots.iter().all(|(status,)| status == "revoked"));
+    let refreshes: Vec<(String, String)> = sqlx::query_as(
+        "SELECT status, auth_grant_status FROM refresh_tokens \
+         WHERE tenant_id = $1::uuid AND user_id = $2::uuid",
+    )
+    .bind(tenant.as_uuid().to_string())
+    .bind(user.as_uuid().to_string())
+    .fetch_all(&store.pool)
+    .await?;
+    assert_eq!(refreshes.len(), 2);
+    assert!(
+        refreshes
+            .iter()
+            .all(|(token, root)| token == "revoked" && root == "revoked")
+    );
+    let facts: Vec<Vec<u8>> = sqlx::query_scalar(
+        "SELECT payload FROM outbox WHERE tenant_id = $1::uuid AND contract_id = $2",
+    )
+    .bind(tenant.as_uuid().to_string())
+    .bind(identity::ports::SECURITY_EVENT_CONTRACT.contract_id())
+    .fetch_all(&store.pool)
+    .await?;
+    assert_eq!(facts.len(), 1);
+    let payload: serde_json::Value = serde_json::from_slice(&facts[0])?;
+    assert_eq!(payload.as_object().map(serde_json::Map::len), Some(4));
+    assert_eq!(payload["kind"], "passwordChanged");
+    assert_eq!(payload["target"]["kind"], "subject");
+    assert!(
+        payload["target"]["ref"]
+            .as_str()
+            .is_some_and(|value| !value.is_empty())
+    );
+    assert_ne!(payload["target"]["ref"], user.as_uuid().to_string());
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn password_change_concurrent_full_lifecycle_cas_has_exactly_one_winner() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let user = ids::UserId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let credentials = crate::PgCredentialRepo::from_unverified_for_test(&store);
+    credentials
+        .insert(
+            identity_scope(tenant),
+            make_cred(
+                "password-concurrent",
+                user.as_uuid().to_string().as_str(),
+                "old-password-phrase",
+                1,
+                tenant,
+            )?,
+        )
+        .await?;
+
+    let grant_lifecycle = crate::PgAuthGrantLifecycle::new(&store, fixed_clock());
+    for suffix in [0xd1_u8, 0xd2_u8] {
+        let (grant, refresh) = auth_grant_fixture(
+            tenant,
+            user,
+            &uuid::Uuid::new_v4().to_string(),
+            &uuid::Uuid::new_v4().to_string(),
+            [suffix; 32],
+        );
+        let (mutation, entry, envelope) = auth_grant_login_parts(
+            &unique_event_id("password-concurrent-login"),
+            grant,
+            refresh,
+        );
+        let _ = grant_lifecycle
+            .persist_login_grant(
+                login_producer_receipt(),
+                identity_scope(tenant),
+                mutation,
+                entry,
+                envelope,
+            )
+            .await?;
+    }
+
+    let expected_credential = credentials
+        .find_by_user_id(identity_scope(tenant), user)
+        .await?
+        .ok_or("seeded concurrent credential missing")?;
+    let accounts = crate::PgAccountSecurityRepo::from_unverified_for_test(&store);
+    let expected_account = accounts
+        .find(identity_scope(tenant), user)
+        .await?
+        .ok_or("seeded concurrent account state missing")?;
+    let changed_at = expected_account.updated_at() + Duration::from_secs(1);
+    let policy = secure::PasswordPolicy::for_test("passwordpassword", &[]);
+    let left_command = identity::test_support::password_change_command(
+        expected_credential.clone(),
+        expected_account.clone(),
+        policy.validate(secure::RawPassword::new("left-password-phrase".to_owned()))?,
+        changed_at,
+    );
+    let right_command = identity::test_support::password_change_command(
+        expected_credential,
+        expected_account,
+        policy.validate(secure::RawPassword::new("right-password-phrase".to_owned()))?,
+        changed_at + Duration::from_micros(1),
+    );
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(3));
+    let left_lifecycle = crate::PgIdentitySecurityLifecycle::from_unverified_for_test(&store)
+        .with_start_barrier(std::sync::Arc::clone(&barrier));
+    let right_lifecycle = crate::PgIdentitySecurityLifecycle::from_unverified_for_test(&store)
+        .with_start_barrier(std::sync::Arc::clone(&barrier));
+    let left = tokio::spawn(async move {
+        left_lifecycle
+            .execute_password_change(
+                password_change_producer_receipt(),
+                identity_scope(tenant),
+                left_command,
+            )
+            .await
+    });
+    let right = tokio::spawn(async move {
+        right_lifecycle
+            .execute_password_change(
+                password_change_producer_receipt(),
+                identity_scope(tenant),
+                right_command,
+            )
+            .await
+    });
+    barrier.wait().await;
+    let outcomes = [left.await?, right.await?];
+    assert_eq!(outcomes.iter().filter(|result| result.is_ok()).count(), 1);
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|result| matches!(result, Err(IdentityError::VersionConflict)))
+            .count(),
+        1
+    );
+
+    let stored = credentials
+        .find_by_user_id(identity_scope(tenant), user)
+        .await?
+        .ok_or("concurrent password winner missing")?;
+    assert_eq!(stored.version(), 2, "credential CAS must advance once");
+    let left_won = password_matches("left-password-phrase", stored.password_hash())?;
+    let right_won = password_matches("right-password-phrase", stored.password_hash())?;
+    assert_ne!(left_won, right_won, "exactly one candidate hash must win");
+    assert!(!password_matches(
+        "old-password-phrase",
+        stored.password_hash()
+    )?);
+    let account = accounts
+        .find(identity_scope(tenant), user)
+        .await?
+        .ok_or("concurrent password account state missing")?;
+    assert_eq!(account.authn_epoch().get(), 1);
+    assert_eq!(account.version().get(), 2);
+    let closure: (i64, i64, i64) = sqlx::query_as(
+        "SELECT count(*) FILTER (WHERE status = 'revoked'), \
+                (SELECT count(*) FROM refresh_tokens \
+                 WHERE tenant_id = $1::uuid AND user_id = $2::uuid \
+                   AND status = 'revoked' AND auth_grant_status = 'revoked'), \
+                (SELECT count(*) FROM outbox \
+                 WHERE tenant_id = $1::uuid AND contract_id = $3) \
+         FROM auth_grants WHERE tenant_id = $1::uuid AND user_id = $2::uuid",
+    )
+    .bind(tenant.as_uuid().to_string())
+    .bind(user.as_uuid().to_string())
+    .bind(identity::ports::SECURITY_EVENT_CONTRACT.contract_id())
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(closure, (2, 2, 1));
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn identity_security_full_snapshot_cas_rejects_timestamp_only_staleness() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let credentials = crate::PgCredentialRepo::from_unverified_for_test(&store);
+    let accounts = crate::PgAccountSecurityRepo::from_unverified_for_test(&store);
+    let lifecycle = crate::PgIdentitySecurityLifecycle::from_unverified_for_test(&store);
+
+    let password_tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let password_user = ids::UserId::parse(&uuid::Uuid::new_v4().to_string())?;
+    credentials
+        .insert(
+            identity_scope(password_tenant),
+            make_cred(
+                "timestamp-password",
+                password_user.as_uuid().to_string().as_str(),
+                "old-password-phrase",
+                1,
+                password_tenant,
+            )?,
+        )
+        .await?;
+    let (grant, refresh) = auth_grant_fixture(
+        password_tenant,
+        password_user,
+        &uuid::Uuid::new_v4().to_string(),
+        &uuid::Uuid::new_v4().to_string(),
+        [0xe1; 32],
+    );
+    let (mutation, entry, envelope) =
+        auth_grant_login_parts(&unique_event_id("timestamp-stale-login"), grant, refresh);
+    let _ = crate::PgAuthGrantLifecycle::new(&store, fixed_clock())
+        .persist_login_grant(
+            login_producer_receipt(),
+            identity_scope(password_tenant),
+            mutation,
+            entry,
+            envelope,
+        )
+        .await?;
+    let password_account = accounts
+        .find(identity_scope(password_tenant), password_user)
+        .await?
+        .ok_or("password account missing")?;
+    let password_credential = credentials
+        .find_by_user_id(identity_scope(password_tenant), password_user)
+        .await?
+        .ok_or("password credential missing")?;
+    sqlx::query(
+        "UPDATE account_security_states SET updated_at = updated_at + INTERVAL '1 microsecond' \
+         WHERE tenant_id = $1::uuid AND user_id = $2::uuid",
+    )
+    .bind(password_tenant.as_uuid().to_string())
+    .bind(password_user.as_uuid().to_string())
+    .execute(&store.pool)
+    .await?;
+    let validated = secure::PasswordPolicy::for_test("passwordpassword", &[])
+        .validate(secure::RawPassword::new("new-password-phrase".to_owned()))?;
+    let stale_password = identity::test_support::password_change_command(
+        password_credential,
+        password_account.clone(),
+        validated,
+        password_account.updated_at() + Duration::from_secs(1),
+    );
+    assert!(matches!(
+        lifecycle
+            .execute_password_change(
+                password_change_producer_receipt(),
+                identity_scope(password_tenant),
+                stale_password,
+            )
+            .await,
+        Err(IdentityError::VersionConflict)
+    ));
+    let password_rows: (i64, i64, String, String, i64) = sqlx::query_as(
+        "SELECT c.version, s.version, g.status, r.status, \
+         (SELECT count(*) FROM outbox o WHERE o.tenant_id = c.tenant_id AND o.contract_id = $3) \
+         FROM credentials c \
+         JOIN account_security_states s ON s.tenant_id = c.tenant_id AND s.user_id = c.user_id \
+         JOIN auth_grants g ON g.tenant_id = c.tenant_id AND g.user_id = c.user_id \
+         JOIN refresh_tokens r ON r.tenant_id = g.tenant_id AND r.auth_grant_id = g.grant_id \
+         WHERE c.tenant_id = $1::uuid AND c.user_id = $2::uuid",
+    )
+    .bind(password_tenant.as_uuid().to_string())
+    .bind(password_user.as_uuid().to_string())
+    .bind(identity::ports::SECURITY_EVENT_CONTRACT.contract_id())
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(password_rows, (1, 1, "active".into(), "active".into(), 0));
+
+    let state_tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let state_user = ids::UserId::parse(&uuid::Uuid::new_v4().to_string())?;
+    credentials
+        .insert(
+            identity_scope(state_tenant),
+            make_cred(
+                "timestamp-state",
+                state_user.as_uuid().to_string().as_str(),
+                "old-password-phrase",
+                1,
+                state_tenant,
+            )?,
+        )
+        .await?;
+    let active = accounts
+        .find(identity_scope(state_tenant), state_user)
+        .await?
+        .ok_or("state account missing")?;
+    sqlx::query(
+        "UPDATE account_security_states \
+         SET status_changed_at = status_changed_at - INTERVAL '1 microsecond' \
+         WHERE tenant_id = $1::uuid AND user_id = $2::uuid",
+    )
+    .bind(state_tenant.as_uuid().to_string())
+    .bind(state_user.as_uuid().to_string())
+    .execute(&store.pool)
+    .await?;
+    let stale_restriction = identity::test_support::account_status_set_command(
+        active.clone(),
+        AccountStatus::Suspended,
+        active.updated_at() + Duration::from_secs(1),
+    );
+    assert!(matches!(
+        lifecycle
+            .execute_account_status_set(
+                account_status_set_producer_receipt(),
+                identity_scope(state_tenant),
+                stale_restriction,
+            )
+            .await,
+        Err(IdentityError::VersionConflict)
+    ));
+    let current = accounts
+        .find(identity_scope(state_tenant), state_user)
+        .await?
+        .ok_or("current state missing")?;
+    assert_eq!(current.status(), AccountStatus::Active);
+    assert_eq!(current.version().get(), 1);
+
+    let restrict = identity::test_support::account_status_set_command(
+        current.clone(),
+        AccountStatus::Suspended,
+        current.updated_at() + Duration::from_secs(1),
+    );
+    let _ = lifecycle
+        .execute_account_status_set(
+            account_status_set_producer_receipt(),
+            identity_scope(state_tenant),
+            restrict,
+        )
+        .await?;
+    let suspended = accounts
+        .find(identity_scope(state_tenant), state_user)
+        .await?
+        .ok_or("suspended state missing")?;
+    sqlx::query(
+        "UPDATE account_security_states SET updated_at = updated_at + INTERVAL '1 microsecond' \
+         WHERE tenant_id = $1::uuid AND user_id = $2::uuid",
+    )
+    .bind(state_tenant.as_uuid().to_string())
+    .bind(state_user.as_uuid().to_string())
+    .execute(&store.pool)
+    .await?;
+    let stale_reactivation = identity::test_support::reactivate_account_command(
+        suspended.clone(),
+        suspended.updated_at() + Duration::from_secs(1),
+    );
+    assert!(matches!(
+        lifecycle
+            .execute_reactivation(identity_scope(state_tenant), stale_reactivation)
+            .await,
+        Err(IdentityError::VersionConflict)
+    ));
+    let final_state = accounts
+        .find(identity_scope(state_tenant), state_user)
+        .await?
+        .ok_or("final state missing")?;
+    assert_eq!(final_state.status(), AccountStatus::Suspended);
+    assert_eq!(final_state.version().get(), 2);
+    let security_facts: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM outbox WHERE tenant_id = $1::uuid AND contract_id = $2",
+    )
+    .bind(state_tenant.as_uuid().to_string())
+    .bind(identity::ports::SECURITY_EVENT_CONTRACT.contract_id())
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(
+        security_facts, 1,
+        "only the successful restriction emits a fact"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn password_change_security_event_fault_matrix_rolls_back_every_stage() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    for (suffix, fault) in [
+        (
+            0xd1_u8,
+            crate::identity_security_lifecycle::IdentitySecurityFault::AfterCredential,
+        ),
+        (
+            0xd2,
+            crate::identity_security_lifecycle::IdentitySecurityFault::AfterAccount,
+        ),
+        (
+            0xd3,
+            crate::identity_security_lifecycle::IdentitySecurityFault::AfterFamily,
+        ),
+        (
+            0xd4,
+            crate::identity_security_lifecycle::IdentitySecurityFault::AfterGrant,
+        ),
+        (
+            0xd5,
+            crate::identity_security_lifecycle::IdentitySecurityFault::OutboxAppend,
+        ),
+        (
+            0xd6,
+            crate::identity_security_lifecycle::IdentitySecurityFault::AfterOutboxBeforeCommit,
+        ),
+    ] {
+        let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+        let user = ids::UserId::parse(&uuid::Uuid::new_v4().to_string())?;
+        let credentials = crate::PgCredentialRepo::from_unverified_for_test(&store);
+        credentials
+            .insert(
+                identity_scope(tenant),
+                make_cred(
+                    "alice",
+                    user.as_uuid().to_string().as_str(),
+                    "old-password-phrase",
+                    1,
+                    tenant,
+                )?,
+            )
+            .await?;
+        let (grant, refresh) = auth_grant_fixture(
+            tenant,
+            user,
+            &uuid::Uuid::new_v4().to_string(),
+            &uuid::Uuid::new_v4().to_string(),
+            [suffix; 32],
+        );
+        let (mutation, entry, envelope) = auth_grant_login_parts(
+            &unique_event_id("password-security-fault-login"),
+            grant,
+            refresh,
+        );
+        let _ = crate::PgAuthGrantLifecycle::new(&store, fixed_clock())
+            .persist_login_grant(
+                login_producer_receipt(),
+                identity_scope(tenant),
+                mutation,
+                entry,
+                envelope,
+            )
+            .await?;
+        let account = crate::PgAccountSecurityRepo::from_unverified_for_test(&store)
+            .find(identity_scope(tenant), user)
+            .await?
+            .ok_or("fault account missing")?;
+        let credential = credentials
+            .find_by_user_id(identity_scope(tenant), user)
+            .await?
+            .ok_or("fault credential missing")?;
+        let validated = secure::PasswordPolicy::for_test("passwordpassword", &[])
+            .validate(secure::RawPassword::new("new-password-phrase".to_owned()))?;
+        let command = identity::test_support::password_change_command(
+            credential,
+            account.clone(),
+            validated,
+            account.updated_at() + Duration::from_secs(1),
+        );
+        let result = crate::PgIdentitySecurityLifecycle::from_unverified_for_test(&store)
+            .with_fault(fault)
+            .execute_password_change(
+                password_change_producer_receipt(),
+                identity_scope(tenant),
+                command,
+            )
+            .await;
+        assert!(result.is_err(), "fault stage must not return a receipt");
+
+        let after: (i64, i64, i64, String, String, String, i64) = sqlx::query_as(
+            "SELECT c.version, s.authn_epoch, s.version, g.status, r.status, r.auth_grant_status, \
+                (SELECT count(*) FROM outbox o WHERE o.tenant_id = c.tenant_id AND o.contract_id = $3) \
+             FROM credentials c \
+             JOIN account_security_states s ON s.tenant_id = c.tenant_id AND s.user_id = c.user_id \
+             JOIN auth_grants g ON g.tenant_id = c.tenant_id AND g.user_id = c.user_id \
+             JOIN refresh_tokens r ON r.tenant_id = g.tenant_id AND r.auth_grant_id = g.grant_id \
+             WHERE c.tenant_id = $1::uuid AND c.user_id = $2::uuid",
+        )
+        .bind(tenant.as_uuid().to_string())
+        .bind(user.as_uuid().to_string())
+        .bind(identity::ports::SECURITY_EVENT_CONTRACT.contract_id())
+        .fetch_one(&store.pool)
+        .await?;
+        assert_eq!(
+            after,
+            (
+                1,
+                0,
+                1,
+                "active".to_owned(),
+                "active".to_owned(),
+                "active".to_owned(),
+                0
+            ),
+            "every pre-commit stage must roll back credential, account, family, grant and fact"
+        );
+    }
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn account_restriction_and_reactivation_preserve_revocation_epoch_without_second_fact()
+-> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let user = ids::UserId::parse(&uuid::Uuid::new_v4().to_string())?;
+    crate::PgCredentialRepo::from_unverified_for_test(&store)
+        .insert(
+            identity_scope(tenant),
+            make_cred(
+                "alice",
+                user.as_uuid().to_string().as_str(),
+                "old-password-phrase",
+                1,
+                tenant,
+            )?,
+        )
+        .await?;
+    let accounts = crate::PgAccountSecurityRepo::from_unverified_for_test(&store);
+    let active = accounts
+        .find(identity_scope(tenant), user)
+        .await?
+        .ok_or("seeded account state missing")?;
+    let lifecycle = crate::PgIdentitySecurityLifecycle::from_unverified_for_test(&store);
+    let restrict = identity::test_support::account_status_set_command(
+        active.clone(),
+        AccountStatus::Suspended,
+        active.updated_at() + Duration::from_secs(1),
+    );
+    let _receipt = lifecycle
+        .execute_account_status_set(
+            account_status_set_producer_receipt(),
+            identity_scope(tenant),
+            restrict,
+        )
+        .await?;
+    let suspended = accounts
+        .find(identity_scope(tenant), user)
+        .await?
+        .ok_or("suspended account state missing")?;
+    assert_eq!(suspended.status(), AccountStatus::Suspended);
+    assert_eq!(suspended.authn_epoch().get(), 1);
+    assert_eq!(suspended.version().get(), 2);
+
+    let reactivate = identity::test_support::reactivate_account_command(
+        suspended.clone(),
+        suspended.updated_at() + Duration::from_secs(1),
+    );
+    let active = lifecycle
+        .execute_reactivation(identity_scope(tenant), reactivate)
+        .await?;
+    assert_eq!(active.status(), AccountStatus::Active);
+    assert_eq!(
+        active.authn_epoch().get(),
+        1,
+        "reactivation preserves epoch"
+    );
+    assert_eq!(active.version().get(), 3);
+    let fact_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM outbox WHERE tenant_id = $1::uuid AND contract_id = $2",
+    )
+    .bind(tenant.as_uuid().to_string())
+    .bind(identity::ports::SECURITY_EVENT_CONTRACT.contract_id())
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(fact_count, 1, "reactivation must not append a fact");
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn credential_security_lifecycle_applies_account_cas_and_grant_promotion_atomically()
 -> TestResult {
     let (_pg, store) = connect_pg().await?;
@@ -22734,6 +23627,48 @@ async fn event_delivery_policy_constraints_loader_and_acl_fail_closed() -> TestR
     .await?;
     assert_eq!(policy_owner, "rss_outbox_maintenance");
 
+    let policy_probe_acl: (String, bool, bool, bool, bool, bool, bool, bool) = sqlx::query_as(
+        r#"
+        SELECT owner.rolname,
+               owner.rolcanlogin,
+               procedure.prosecdef,
+               procedure.proconfig = ARRAY['search_path=pg_catalog, pg_temp']::text[],
+               has_function_privilege('rss_app', procedure.oid, 'EXECUTE'),
+               NOT EXISTS (
+                   SELECT 1
+                   FROM aclexplode(
+                       COALESCE(procedure.proacl, acldefault('f', procedure.proowner))
+                   ) AS acl
+                   WHERE acl.grantee = 0
+                     AND acl.privilege_type = 'EXECUTE'
+               ),
+               has_schema_privilege('rss_app', 'public', 'USAGE'),
+               has_schema_privilege('rss_app', 'public', 'CREATE')
+        FROM pg_proc AS procedure
+        JOIN pg_namespace AS namespace ON namespace.oid = procedure.pronamespace
+        JOIN pg_roles AS owner ON owner.oid = procedure.proowner
+        WHERE namespace.nspname = 'public'
+          AND procedure.proname = 'rss_load_event_delivery_policy'
+          AND pg_get_function_identity_arguments(procedure.oid) = ''
+        "#,
+    )
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(
+        policy_probe_acl,
+        (
+            "rss_outbox_maintenance".to_owned(),
+            false,
+            true,
+            true,
+            true,
+            true,
+            true,
+            false,
+        ),
+        "delivery policy probe must have a NOLOGIN owner, trusted search_path, exact EXECUTE grants and read-only schema access"
+    );
+
     let resolution_acl: (bool, bool, bool, bool, bool, bool, bool, bool) = sqlx::query_as(
         r#"
         SELECT has_table_privilege('rss_app', 'outbox_expired_resolutions', 'SELECT'),
@@ -23202,7 +24137,7 @@ async fn migration_0076_drops_unconsumed_credential_security_target_mapping() ->
     let ledger: i64 = sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations")
         .fetch_one(&store.pool)
         .await?;
-    assert_eq!(ledger, 76);
+    assert_eq!(ledger, 77);
 
     store.shutdown().await?;
     Ok(())
@@ -23284,7 +24219,7 @@ async fn migration_0075_replaces_legacy_session_permission_without_expanding_aut
     let ledger: i64 = sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations")
         .fetch_one(&store.pool)
         .await?;
-    assert_eq!(ledger, 76);
+    assert_eq!(ledger, 77);
     store.shutdown().await?;
     Ok(())
 }
@@ -31682,6 +32617,8 @@ async fn sampling_loop_marks_ready_with_live_db() -> TestResult {
     let handle = tokio::spawn(pg_readiness_sampling_loop(
         Arc::clone(&store),
         Arc::clone(&store),
+        EMPTY_PROJECTION_INPUT_GENERATION,
+        &[],
         Duration::from_millis(50),
         token.clone(),
         Arc::clone(&health),
@@ -31730,6 +32667,8 @@ async fn sampling_loop_marks_down_when_reader_pool_is_closed() -> TestResult {
     let handle = tokio::spawn(pg_readiness_sampling_loop(
         Arc::clone(&writer),
         reader,
+        EMPTY_PROJECTION_INPUT_GENERATION,
+        &[],
         Duration::from_millis(50),
         token.clone(),
         Arc::clone(&health),
@@ -31761,18 +32700,16 @@ async fn sampling_loop_marks_down_when_reader_pool_is_closed() -> TestResult {
 // ───────────────────────────────────────────────────────────────────────────
 
 use identity::ports::{
-    AccountSecurityLifecycle, AccountSecurityReadRepo, AccountSecurityState, AccountStatus,
-    AuthOutcome, Credential, CredentialRepo, LoginIdentifier, PasswordChangeMutation,
+    AccountSecurityReadRepo, AccountStatus, AuthOutcome, Credential, CredentialRepo,
+    LoginIdentifier,
 };
 
-use crate::credential_repo::CredentialMutationFault;
 use crate::{PgAccountSecurityRepo, PgCredentialRepo};
 
 const CRED_TENANT_A: &str = "a1a2a3a4-b1b2-4c3c-8d4d-e1e2e3e4e5e6";
 const CRED_TENANT_B: &str = "b9b8b7b6-c5c4-4a3a-8f2f-d1d2d3d4d5d6";
 const CRED_USER_ALICE: &str = "11111111-2222-4333-8444-555555555555";
 const CRED_USER_BOB: &str = "22222222-3333-4444-8555-666666666666";
-const CRED_USER_RETRY: &str = "33333333-4444-4555-8666-777777777777";
 // 锁定 TTL（域 AccountLockout 单源镜像；仅供测试时间步进推算，非生产复刻）。
 const LOCK_TTL_SECS: u64 = 15 * 60;
 // 测试基准时刻（well-after-epoch，避开 unix_secs 的 epoch 前钳零边界）。
@@ -31841,263 +32778,8 @@ fn make_cred(
     make_cred_with_hash(login, user, test_password_hash(password)?, version, tenant)
 }
 
-fn password_change(expected: u32, next: Credential) -> PasswordChangeMutation {
-    PasswordChangeMutation::for_test(expected, next)
-}
-
 fn cred_epoch(secs: u64) -> std::time::SystemTime {
     std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(secs)
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn account_security_save_transition_and_authentication_gate_are_atomic() -> TestResult {
-    let (_pg, store) = connect_pg().await?;
-    store.run_migrations().await?;
-    let credentials = PgCredentialRepo::from_unverified_for_test(&store);
-    let security = PgAccountSecurityRepo::from_unverified_for_test(&store);
-    let tenant = cred_tenant(CRED_TENANT_A)?;
-    let user = cred_uid(CRED_USER_ALICE)?;
-    let scope = identity_scope(tenant);
-
-    credentials
-        .save(
-            scope,
-            make_cred("alice", CRED_USER_ALICE, "correct", 1, tenant)?,
-        )
-        .await?;
-    let initial = security
-        .find(scope, user)
-        .await?
-        .ok_or("account security row missing after credential save")?;
-    assert_eq!(initial.status(), AccountStatus::Active);
-    assert_eq!(initial.authn_epoch().get(), 0);
-    assert_eq!(initial.version().get(), 1);
-
-    let changed_at = initial
-        .updated_at()
-        .checked_add(std::time::Duration::from_secs(1))
-        .ok_or("account-security test time overflow")?;
-    let suspended = security
-        .apply_transition(
-            scope,
-            initial
-                .transition(AccountStatus::Suspended, changed_at)
-                .map_err(|error| format!("transition failed: {error}"))?,
-        )
-        .await?;
-    assert_eq!(suspended.authn_epoch().get(), 1);
-    assert_eq!(suspended.version().get(), 2);
-
-    credentials
-        .save(
-            scope,
-            make_cred("alice", CRED_USER_ALICE, "correct", 2, tenant)?,
-        )
-        .await?;
-    let after_resave = security
-        .find(scope, user)
-        .await?
-        .ok_or("state disappeared")?;
-    assert_eq!(after_resave.status(), suspended.status());
-    assert_eq!(after_resave.authn_epoch(), suspended.authn_epoch());
-    assert_eq!(
-        after_resave.version(),
-        suspended.version(),
-        "credential save must not reset lifecycle"
-    );
-    assert_eq!(
-        credentials
-            .authenticate(
-                scope,
-                login_id("alice"),
-                raw_password("correct"),
-                changed_at
-            )
-            .await?,
-        AuthOutcome::RejectedKnown,
-        "durably suspended account cannot authenticate"
-    );
-    assert_eq!(
-        db_failure_count(&store, CRED_TENANT_A, "alice").await?,
-        0,
-        "durable rejection does not advance brute-force state"
-    );
-
-    store.shutdown().await?;
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn account_security_lifecycle_uses_version_cas() -> TestResult {
-    let (_pg, store) = connect_pg().await?;
-    store.run_migrations().await?;
-    let credentials = PgCredentialRepo::from_unverified_for_test(&store);
-    let security = PgAccountSecurityRepo::from_unverified_for_test(&store);
-    let tenant = cred_tenant(CRED_TENANT_A)?;
-    let user = cred_uid(CRED_USER_ALICE)?;
-    let scope = identity_scope(tenant);
-    credentials
-        .save(
-            scope,
-            make_cred("alice", CRED_USER_ALICE, "correct", 1, tenant)?,
-        )
-        .await?;
-    let initial = security.find(scope, user).await?.ok_or("missing state")?;
-    let mutation = initial
-        .transition(
-            AccountStatus::Locked,
-            initial
-                .updated_at()
-                .checked_add(std::time::Duration::from_secs(1))
-                .ok_or("account-security test time overflow")?,
-        )
-        .map_err(|error| format!("transition failed: {error}"))?;
-    security.apply_transition(scope, mutation.clone()).await?;
-    assert!(matches!(
-        security.apply_transition(scope, mutation).await,
-        Err(identity::ports::IdentityError::VersionConflict)
-    ));
-    store.shutdown().await?;
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn account_security_lifecycle_persists_every_legal_transition() -> TestResult {
-    let (_pg, store) = connect_pg().await?;
-    store.run_migrations().await?;
-    let credentials = PgCredentialRepo::from_unverified_for_test(&store);
-    let security = PgAccountSecurityRepo::from_unverified_for_test(&store);
-    let tenant = cred_tenant(CRED_TENANT_A)?;
-    let scope = identity_scope(tenant);
-    let cases = [
-        (AccountStatus::Active, AccountStatus::Suspended),
-        (AccountStatus::Active, AccountStatus::Locked),
-        (AccountStatus::Active, AccountStatus::Deactivated),
-        (AccountStatus::Suspended, AccountStatus::Active),
-        (AccountStatus::Suspended, AccountStatus::Deactivated),
-        (AccountStatus::Locked, AccountStatus::Active),
-        (AccountStatus::Locked, AccountStatus::Deactivated),
-    ];
-
-    for (index, (from, to)) in cases.into_iter().enumerate() {
-        let user_raw = uuid::Uuid::new_v4().to_string();
-        let user = cred_uid(&user_raw)?;
-        let login = format!("security-transition-{index}");
-        credentials
-            .save(scope, make_cred(&login, &user_raw, "correct", 1, tenant)?)
-            .await?;
-        let initial = security.find(scope, user).await?.ok_or("missing state")?;
-        let current = if from == AccountStatus::Active {
-            initial
-        } else {
-            let changed_at = initial
-                .updated_at()
-                .checked_add(std::time::Duration::from_secs(1))
-                .ok_or("account-security test time overflow")?;
-            security
-                .apply_transition(
-                    scope,
-                    initial
-                        .transition(from, changed_at)
-                        .map_err(|error| format!("setup transition failed: {error}"))?,
-                )
-                .await?
-        };
-        let next_at = current
-            .updated_at()
-            .checked_add(std::time::Duration::from_secs(1))
-            .ok_or("account-security test time overflow")?;
-        let expected_epoch = current.authn_epoch().get() + u64::from(to != AccountStatus::Active);
-        let expected_version = current.version().get() + 1;
-        let applied = security
-            .apply_transition(
-                scope,
-                current.transition(to, next_at).map_err(|error| {
-                    format!("legal transition {from:?}->{to:?} failed: {error}")
-                })?,
-            )
-            .await?;
-        let persisted = security
-            .find(scope, user)
-            .await?
-            .ok_or("transition removed state")?;
-
-        assert_eq!(applied.status(), to, "{from:?}->{to:?}");
-        assert_eq!(
-            applied.authn_epoch().get(),
-            expected_epoch,
-            "{from:?}->{to:?}"
-        );
-        assert_eq!(
-            applied.version().get(),
-            expected_version,
-            "{from:?}->{to:?}"
-        );
-        assert_eq!(persisted, applied, "{from:?}->{to:?}");
-    }
-
-    store.shutdown().await?;
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn account_security_cas_rejects_same_version_with_forged_expected_status() -> TestResult {
-    let (_pg, store) = connect_pg().await?;
-    store.run_migrations().await?;
-    let credentials = PgCredentialRepo::from_unverified_for_test(&store);
-    let security = PgAccountSecurityRepo::from_unverified_for_test(&store);
-    let tenant = cred_tenant(CRED_TENANT_A)?;
-    let user = cred_uid(CRED_USER_ALICE)?;
-    let scope = identity_scope(tenant);
-    credentials
-        .save(
-            scope,
-            make_cred("alice", CRED_USER_ALICE, "correct", 1, tenant)?,
-        )
-        .await?;
-    let initial = security.find(scope, user).await?.ok_or("missing state")?;
-    let deactivated_at = initial
-        .updated_at()
-        .checked_add(std::time::Duration::from_secs(1))
-        .ok_or("account-security test time overflow")?;
-    let deactivated = security
-        .apply_transition(
-            scope,
-            initial
-                .transition(AccountStatus::Deactivated, deactivated_at)
-                .map_err(|error| format!("deactivation failed: {error}"))?,
-        )
-        .await?;
-
-    let forged_suspended =
-        AccountSecurityState::try_from(identity::ports::AccountSecuritySnapshot {
-            tenant,
-            user_id: user,
-            status: AccountStatus::Suspended,
-            authn_epoch: deactivated.authn_epoch().get(),
-            version: deactivated.version().get(),
-            status_changed_at: deactivated.status_changed_at(),
-            updated_at: deactivated.updated_at(),
-        })?;
-    let forged_mutation = forged_suspended.transition(
-        AccountStatus::Active,
-        forged_suspended
-            .updated_at()
-            .checked_add(std::time::Duration::from_secs(1))
-            .ok_or("account-security test time overflow")?,
-    )?;
-    assert!(matches!(
-        security.apply_transition(scope, forged_mutation).await,
-        Err(IdentityError::VersionConflict)
-    ));
-    assert_eq!(
-        security.find(scope, user).await?.ok_or("missing state")?,
-        deactivated,
-        "matching version must not revive a terminal row when the expected status differs"
-    );
-
-    store.shutdown().await?;
-    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -32107,7 +32789,7 @@ async fn credential_authentication_missing_security_state_is_storage_error() -> 
     let credentials = PgCredentialRepo::from_unverified_for_test(&store);
     let tenant = cred_tenant(CRED_TENANT_A)?;
     credentials
-        .save(
+        .insert(
             identity_scope(tenant),
             make_cred("alice", CRED_USER_ALICE, "correct", 1, tenant)?,
         )
@@ -32204,10 +32886,9 @@ async fn db_locked_until(
     Ok(row.0)
 }
 
-// CRUD：未存 → None；save → find_by_user_id 往返一致（user_id/login/version + PHC 列形态）；同 login 二次 save
-// → upsert 覆盖 version（非新增行）。
+// CRUD：未存 → None；insert → find_by_user_id 往返一致；重复键拒绝且不覆盖 hash/version。
 #[tokio::test(flavor = "multi_thread")]
-async fn credential_repo_save_find_roundtrip_and_upsert() -> TestResult {
+async fn credential_repo_insert_find_roundtrip_and_duplicate_conflict() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
     let repo = PgCredentialRepo::from_unverified_for_test(&store);
@@ -32221,8 +32902,8 @@ async fn credential_repo_save_find_roundtrip_and_upsert() -> TestResult {
         "未保存 → None"
     );
 
-    // save → find_by_user_id 往返一致。
-    repo.save(
+    // insert → find_by_user_id 往返一致。
+    repo.insert(
         identity_scope(tenant),
         make_cred("alice", CRED_USER_ALICE, "pw1", 1, tenant)?,
     )
@@ -32245,19 +32926,23 @@ async fn credential_repo_save_find_roundtrip_and_upsert() -> TestResult {
         "回读 PHC 为 argon2 格式（明文永不落库）"
     );
 
-    // 同 login 二次 save → upsert 覆盖 version（DO UPDATE，非新增行）。
-    repo.save(
-        identity_scope(tenant),
-        make_cred("alice", CRED_USER_ALICE, "pw2", 2, tenant)?,
-    )
-    .await?;
+    // 同 login 二次 insert 必须 conflict，不能覆盖现有 hash/version。
+    assert!(
+        repo.insert(
+            identity_scope(tenant),
+            make_cred("alice", CRED_USER_ALICE, "pw2", 2, tenant)?,
+        )
+        .await
+        .is_err()
+    );
     let Some(got2) = repo
         .find_by_user_id(identity_scope(tenant), cred_uid(CRED_USER_ALICE)?)
         .await?
     else {
-        return Err("upserted credential visible".into());
+        return Err("original credential remains visible".into());
     };
-    assert_eq!(got2.version(), 2, "upsert 覆盖 version");
+    assert_eq!(got2.version(), 1, "duplicate insert preserves version");
+    assert!(password_matches("pw1", got2.password_hash())?);
     let n: (i64,) = sqlx::query_as(
         "SELECT count(*) FROM credentials WHERE tenant_id = $1::uuid AND login = $2",
     )
@@ -32265,14 +32950,14 @@ async fn credential_repo_save_find_roundtrip_and_upsert() -> TestResult {
     .bind("alice")
     .fetch_one(&store.pool)
     .await?;
-    assert_eq!(n.0, 1, "upsert 不新增行");
+    assert_eq!(n.0, 1, "duplicate insert does not add a row");
 
     store.shutdown().await?;
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn credential_repo_save_rebind_rolls_back_credential_and_security_together() -> TestResult {
+async fn credential_repo_insert_rebind_rolls_back_credential_and_security_together() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
     let credentials = PgCredentialRepo::from_unverified_for_test(&store);
@@ -32282,7 +32967,7 @@ async fn credential_repo_save_rebind_rolls_back_credential_and_security_together
     let user_a = cred_uid(CRED_USER_ALICE)?;
     let user_b = cred_uid(CRED_USER_BOB)?;
     credentials
-        .save(
+        .insert(
             scope,
             make_cred("alice", CRED_USER_ALICE, "original", 7, tenant)?,
         )
@@ -32291,25 +32976,13 @@ async fn credential_repo_save_rebind_rolls_back_credential_and_security_together
         .find(scope, user_a)
         .await?
         .ok_or("initial security missing")?;
-    let suspended = security
-        .apply_transition(
-            scope,
-            initial_security.transition(
-                AccountStatus::Suspended,
-                initial_security
-                    .updated_at()
-                    .checked_add(std::time::Duration::from_secs(1))
-                    .ok_or("account-security test time overflow")?,
-            )?,
-        )
-        .await?;
     let credential_before = owner_credential_snapshot(&store, tenant, "alice")
         .await?
         .ok_or("initial credential missing")?;
 
     assert!(matches!(
         credentials
-            .save(
+            .insert(
                 scope,
                 make_cred("alice", CRED_USER_BOB, "replacement", 99, tenant)?,
             )
@@ -32328,7 +33001,7 @@ async fn credential_repo_save_rebind_rolls_back_credential_and_security_together
             .find(scope, user_a)
             .await?
             .ok_or("security disappeared")?,
-        suspended,
+        initial_security,
         "failed user rebind must preserve the original lifecycle row"
     );
     assert!(
@@ -32348,7 +33021,7 @@ async fn credential_repo_authenticate_known_wrong_and_unknown() -> TestResult {
     store.run_migrations().await?;
     let repo = PgCredentialRepo::from_unverified_for_test(&store);
     let tenant = cred_tenant(CRED_TENANT_A)?;
-    repo.save(
+    repo.insert(
         identity_scope(tenant),
         make_cred("alice", CRED_USER_ALICE, "correct", 1, tenant)?,
     )
@@ -32404,7 +33077,7 @@ async fn credential_authenticate_post_write_fault_rolls_back_lockout_and_securit
     let tenant = cred_tenant(CRED_TENANT_A)?;
     let scope = identity_scope(tenant);
     let user = cred_uid(CRED_USER_ALICE)?;
-    seed.save(
+    seed.insert(
         scope,
         make_cred("alice", CRED_USER_ALICE, "correct", 11, tenant)?,
     )
@@ -32458,7 +33131,7 @@ async fn credential_authenticate_holds_credential_while_waiting_for_security_loc
     let repo = Arc::new(PgCredentialRepo::from_unverified_for_test(&store));
     let tenant = cred_tenant(CRED_TENANT_A)?;
     let scope = identity_scope(tenant);
-    repo.save(
+    repo.insert(
         scope,
         make_cred("alice", CRED_USER_ALICE, "correct", 1, tenant)?,
     )
@@ -32549,7 +33222,7 @@ async fn credential_repo_rehash_upgrades_weak_phc_without_bumping_version() -> T
     let weak =
         secure::PasswordHash::for_test_with_params(raw_password("legacy-short"), 8 * 1024, 1, 1)?;
     let weak_phc = weak.as_str().to_owned();
-    repo.save(
+    repo.insert(
         identity_scope(tenant),
         make_cred_with_hash("alice", CRED_USER_ALICE, weak, 7, tenant)?,
     )
@@ -32623,7 +33296,7 @@ async fn credential_repo_rehash_preserves_current_and_stronger_phc() -> TestResu
         ("stronger", CRED_USER_BOB, "stronger-password", stronger),
     ] {
         let original_phc = hash.as_str().to_owned();
-        repo.save(
+        repo.insert(
             identity_scope(tenant),
             make_cred_with_hash(login, user, hash, 11, tenant)?,
         )
@@ -32663,7 +33336,7 @@ async fn credential_repo_rehash_update_failure_rolls_back() -> TestResult {
     let weak =
         secure::PasswordHash::for_test_with_params(raw_password("legacy-short"), 8 * 1024, 1, 1)?;
     let weak_phc = weak.as_str().to_owned();
-    repo.save(
+    repo.insert(
         identity_scope(tenant),
         make_cred_with_hash("alice", CRED_USER_ALICE, weak, 19, tenant)?,
     )
@@ -32709,7 +33382,7 @@ async fn credential_repo_rehash_commit_failure_rolls_back_hash_and_lockout_clear
     let tenant = cred_tenant(CRED_TENANT_A)?;
     let weak =
         secure::PasswordHash::for_test_with_params(raw_password("legacy-short"), 8 * 1024, 1, 1)?;
-    repo.save(
+    repo.insert(
         identity_scope(tenant),
         make_cred_with_hash("alice", CRED_USER_ALICE, weak, 23, tenant)?,
     )
@@ -32793,7 +33466,7 @@ async fn credential_repo_rehash_concurrent_logins_upgrade_weak_phc_once() -> Tes
     let tenant = cred_tenant(CRED_TENANT_A)?;
     let weak =
         secure::PasswordHash::for_test_with_params(raw_password("legacy-short"), 8 * 1024, 1, 1)?;
-    repo.save(
+    repo.insert(
         identity_scope(tenant),
         make_cred_with_hash("alice", CRED_USER_ALICE, weak, 17, tenant)?,
     )
@@ -32874,7 +33547,7 @@ async fn credential_repo_unknown_subject_creates_no_row() -> TestResult {
     store.run_migrations().await?;
     let repo = PgCredentialRepo::from_unverified_for_test(&store);
     let tenant = cred_tenant(CRED_TENANT_A)?;
-    repo.save(
+    repo.insert(
         identity_scope(tenant),
         make_cred("alice", CRED_USER_ALICE, "correct", 1, tenant)?,
     )
@@ -32912,7 +33585,7 @@ async fn credential_repo_cross_tenant_fail_closed() -> TestResult {
     let repo = PgCredentialRepo::from_unverified_for_test(&store);
     let a = cred_tenant(CRED_TENANT_A)?;
     let b = cred_tenant(CRED_TENANT_B)?;
-    repo.save(
+    repo.insert(
         identity_scope(a),
         make_cred("alice", CRED_USER_ALICE, "correct", 1, a)?,
     )
@@ -32986,7 +33659,7 @@ async fn credential_repo_tenant_noop_conformance() -> TestResult {
 
     testkit::repo_conformance::assert_cross_tenant_noop(
         || async {
-            repo.save(identity_scope(a), credential).await?;
+            repo.insert(identity_scope(a), credential).await?;
             Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
         },
         || async {
@@ -33039,7 +33712,7 @@ async fn credential_repo_accumulate_failures_then_locks() -> TestResult {
     store.run_migrations().await?;
     let repo = PgCredentialRepo::from_unverified_for_test(&store);
     let a = cred_tenant(CRED_TENANT_A)?;
-    repo.save(
+    repo.insert(
         identity_scope(a),
         make_cred("alice", CRED_USER_ALICE, "correct", 1, a)?,
     )
@@ -33093,7 +33766,7 @@ async fn credential_repo_lockout_lazy_unlocks_after_ttl() -> TestResult {
     store.run_migrations().await?;
     let repo = PgCredentialRepo::from_unverified_for_test(&store);
     let a = cred_tenant(CRED_TENANT_A)?;
-    repo.save(
+    repo.insert(
         identity_scope(a),
         make_cred("alice", CRED_USER_ALICE, "correct", 1, a)?,
     )
@@ -33168,7 +33841,7 @@ async fn credential_repo_authenticate_success_clears_lockout() -> TestResult {
     store.run_migrations().await?;
     let repo = PgCredentialRepo::from_unverified_for_test(&store);
     let a = cred_tenant(CRED_TENANT_A)?;
-    repo.save(
+    repo.insert(
         identity_scope(a),
         make_cred("alice", CRED_USER_ALICE, "correct", 1, a)?,
     )
@@ -33209,1109 +33882,6 @@ async fn credential_repo_authenticate_success_clears_lockout() -> TestResult {
     );
 
     store.shutdown().await?;
-    Ok(())
-}
-
-// apply_password_change CAS：期望不匹配 → VersionConflict；命中 → 替换 hash+version（authenticate 新密码真）；
-// 查无 → CredentialNotFound；跨租（next 在 B）→ CredentialNotFound 且不动 A。
-#[tokio::test(flavor = "multi_thread")]
-async fn credential_repo_apply_password_change_cas() -> TestResult {
-    let (_pg, store) = connect_pg().await?;
-    store.run_migrations().await?;
-    let repo = PgCredentialRepo::from_unverified_for_test(&store);
-    let a = cred_tenant(CRED_TENANT_A)?;
-    let b = cred_tenant(CRED_TENANT_B)?;
-    repo.save(
-        identity_scope(a),
-        make_cred("alice", CRED_USER_ALICE, "pw1", 1, a)?,
-    )
-    .await?;
-    let now = cred_epoch(CRED_BASE_SECS);
-
-    // 期望版本不匹配 → VersionConflict。
-    assert!(
-        matches!(
-            repo.apply_password_change(
-                identity_scope(a),
-                password_change(99, make_cred("alice", CRED_USER_ALICE, "pw2", 2, a)?)
-            )
-            .await,
-            Err(IdentityError::VersionConflict)
-        ),
-        "期望不匹配 → VersionConflict"
-    );
-    let Some(after_conflict) = repo
-        .find_by_user_id(identity_scope(a), cred_uid(CRED_USER_ALICE)?)
-        .await?
-    else {
-        return Err("credential visible after stale CAS conflict".into());
-    };
-    assert_eq!(after_conflict.version(), 1, "stale CAS 不推进 version");
-    assert!(
-        password_matches("pw1", after_conflict.password_hash())?,
-        "stale CAS 后旧密码仍有效"
-    );
-    assert!(
-        !password_matches("pw2", after_conflict.password_hash())?,
-        "stale CAS 后候选密码不得生效"
-    );
-    // 命中 → 替换 hash + version。
-    repo.apply_password_change(
-        identity_scope(a),
-        password_change(1, make_cred("alice", CRED_USER_ALICE, "pw2", 2, a)?),
-    )
-    .await?;
-    let Some(got) = repo
-        .find_by_user_id(identity_scope(a), cred_uid(CRED_USER_ALICE)?)
-        .await?
-    else {
-        return Err("credential visible after CAS hit".into());
-    };
-    assert_eq!(got.version(), 2, "CAS 命中后 version = 2");
-    assert_eq!(
-        authenticated_user(
-            repo.authenticate(
-                identity_scope(a),
-                login_id("alice"),
-                raw_password("pw2"),
-                now
-            )
-            .await?
-        )?,
-        cred_uid(CRED_USER_ALICE)?,
-        "新密码验签真"
-    );
-    // 查无凭据 → CredentialNotFound。
-    assert!(
-        matches!(
-            repo.apply_password_change(
-                identity_scope(a),
-                password_change(1, make_cred("ghost", CRED_USER_BOB, "x", 1, a)?)
-            )
-            .await,
-            Err(IdentityError::CredentialNotFound)
-        ),
-        "查无 → CredentialNotFound"
-    );
-    // 跨租 bump（next 在 B）→ CredentialNotFound（key 派生自 next，B 无行），不动 A。
-    assert!(
-        matches!(
-            repo.apply_password_change(
-                identity_scope(b),
-                password_change(2, make_cred("alice", CRED_USER_ALICE, "pw3", 3, b)?)
-            )
-            .await,
-            Err(IdentityError::CredentialNotFound)
-        ),
-        "跨租 bump → CredentialNotFound"
-    );
-    let Some(still_a) = repo
-        .find_by_user_id(identity_scope(a), cred_uid(CRED_USER_ALICE)?)
-        .await?
-    else {
-        return Err("tenant A credential still present after cross-tenant bump".into());
-    };
-    assert_eq!(still_a.version(), 2, "跨租 bump 不动 A（仍 v2）");
-
-    store.shutdown().await?;
-    Ok(())
-}
-
-/// 两个持有同一 v1 快照的真实并发写者只能有一个 CAS 胜出；败者冲突且不覆盖胜者。
-#[tokio::test(flavor = "multi_thread")]
-async fn credential_repo_password_change_concurrent_writers_one_wins() -> TestResult {
-    let (pg, owner) = connect_pg().await?;
-    owner.run_migrations().await?;
-    let app = connect_pg_rss_app_role(&pg, &owner).await?;
-    let setup_repo = PgCredentialRepo::from_unverified_for_test(&app);
-    let tenant = cred_tenant(CRED_TENANT_A)?;
-    setup_repo
-        .save(
-            identity_scope(tenant),
-            make_cred("alice", CRED_USER_ALICE, "pw-v1", 1, tenant)?,
-        )
-        .await?;
-
-    let left = make_cred("alice", CRED_USER_ALICE, "pw-left", 2, tenant)?;
-    let right = make_cred("alice", CRED_USER_ALICE, "pw-right", 2, tenant)?;
-    let gate = crate::credential_repo::PasswordChangeCasPauseGate::new();
-    let left_repo = PgCredentialRepo::from_unverified_for_test(&app)
-        .with_password_change_post_update_pause(gate.clone());
-    let left_task = tokio::spawn(async move {
-        left_repo
-            .apply_password_change(identity_scope(tenant), password_change(1, left))
-            .await
-    });
-    tokio::time::timeout(std::time::Duration::from_secs(5), gate.wait_until_updated())
-        .await
-        .map_err(|_| "first CAS writer did not reach the post-update pause gate")?;
-
-    let right_repo = PgCredentialRepo::from_unverified_for_test(&app);
-    let mut right_task = tokio::spawn(async move {
-        right_repo
-            .apply_password_change(identity_scope(tenant), password_change(1, right))
-            .await
-    });
-    assert!(
-        tokio::time::timeout(std::time::Duration::from_millis(200), &mut right_task)
-            .await
-            .is_err(),
-        "second CAS writer must remain pending while the first writer owns the row lock"
-    );
-
-    gate.release();
-    let left_result = tokio::time::timeout(std::time::Duration::from_secs(5), left_task)
-        .await
-        .map_err(|_| "left CAS task timed out after release")?
-        .map_err(|error| format!("left CAS task failed to join: {error}"))?;
-    let right_result = tokio::time::timeout(std::time::Duration::from_secs(5), right_task)
-        .await
-        .map_err(|_| "right CAS task timed out after release")?
-        .map_err(|error| format!("right CAS task failed to join: {error}"))?;
-    assert!(
-        left_result.is_ok(),
-        "持锁的第一写者必须提交：{left_result:?}"
-    );
-    assert!(
-        matches!(right_result, Err(IdentityError::VersionConflict)),
-        "等待行锁的第二写者必须观察到 VersionConflict：{right_result:?}"
-    );
-
-    let Some((final_version, final_hash)) =
-        owner_credential_snapshot(&owner, tenant, "alice").await?
-    else {
-        return Err("credential visible after concurrent CAS".into());
-    };
-    assert_eq!(final_version, 2, "并发 CAS 最终只推进至 v2");
-    let final_hash = secure::PasswordHash::parse(&final_hash)?;
-    assert!(
-        password_matches("pw-left", &final_hash)?,
-        "最终 hash 必须属于先持锁并提交的写者"
-    );
-    assert!(
-        !password_matches("pw-right", &final_hash)?,
-        "冲突写者不得覆盖胜出的 hash"
-    );
-    assert!(
-        !password_matches("pw-v1", &final_hash)?,
-        "成功 CAS 后 v1 密码必须失效"
-    );
-
-    app.shutdown().await?;
-    owner.shutdown().await?;
-    Ok(())
-}
-
-/// identity credential 的 Postgres retry 边界 conformance。
-///
-/// transient 用真实 tenant-scoped 事务更新 credentials：第一轮更新后返回 transient storage error，事务回滚；
-/// 第二轮重建事务后提交。CAS conflict / permanent 走 production `apply_password_change`，证明不会盲目重试或提交副作用。
-#[tokio::test(flavor = "multi_thread")]
-async fn credential_repo_retry_boundary_conformance() -> TestResult {
-    let (_pg, store) = connect_pg().await?;
-    store.run_migrations().await?;
-    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
-    let metrics_handle = recorder.handle();
-    let repo = PgCredentialRepo::from_unverified_for_test(&store);
-    let tenant = cred_tenant(CRED_TENANT_A)?;
-    let retry_uid = cred_uid(CRED_USER_RETRY)?;
-    let bob_uid = cred_uid(CRED_USER_BOB)?;
-    let transient_next = make_cred("retry-alice", CRED_USER_RETRY, "pw-transient", 2, tenant)?;
-    let conflict_next = make_cred("retry-alice", CRED_USER_RETRY, "pw-conflict", 3, tenant)?;
-    let exhaustion_next = make_cred("retry-alice", CRED_USER_RETRY, "pw-exhausted", 3, tenant)?;
-    let ghost_next = make_cred("ghost", CRED_USER_BOB, "pw-ghost", 1, tenant)?;
-    repo.save(
-        identity_scope(tenant),
-        make_cred("retry-alice", CRED_USER_RETRY, "pw1", 1, tenant)?,
-    )
-    .await?;
-    let transient_repo = PgCredentialRepo::from_unverified_for_test(&store)
-        .with_password_change_fault("retry-alice", CredentialMutationFault::Transient, 1);
-    let conflict_repo = PgCredentialRepo::from_unverified_for_test(&store);
-    let permanent_repo = PgCredentialRepo::from_unverified_for_test(&store);
-    let exhaustion_repo = PgCredentialRepo::from_unverified_for_test(&store)
-        .with_password_change_fault("retry-alice", CredentialMutationFault::Transient, 3);
-
-    metrics::with_local_recorder(&recorder, || {
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(
-                testkit::repo_conformance::assert_retry_boundary_policy(
-                    testkit::repo_conformance::RetryBoundaryCase::new(
-                        testkit::repo_conformance::TransientSuccessPath::new(
-                            || {
-                                let transient_repo = &transient_repo;
-                                let transient_next = transient_next.clone();
-                                async move {
-                                    transient_repo
-                                        .apply_password_change(
-                                            identity_scope(tenant),
-                                            password_change(1, transient_next),
-                                        )
-                                        .await
-                                }
-                            },
-                            || transient_repo.password_change_attempts("retry-alice"),
-                            2,
-                            || async {
-                                let Some(got) = repo
-                                    .find_by_user_id(identity_scope(tenant), retry_uid)
-                                    .await?
-                                else {
-                                    return Ok::<usize, IdentityError>(0);
-                                };
-                                Ok::<usize, IdentityError>(usize::from(got.version() == 2))
-                            },
-                        ),
-                        testkit::repo_conformance::ConflictPath::new(
-                            || async {
-                                conflict_repo
-                                    .apply_password_change(
-                                        identity_scope(tenant),
-                                        password_change(99, conflict_next.clone()),
-                                    )
-                                    .await
-                            },
-                            || conflict_repo.password_change_attempts("retry-alice"),
-                            || async {
-                                let Some(got) = repo
-                                    .find_by_user_id(identity_scope(tenant), retry_uid)
-                                    .await?
-                                else {
-                                    return Ok::<usize, IdentityError>(0);
-                                };
-                                Ok::<usize, IdentityError>(usize::from(got.version() == 3))
-                            },
-                        ),
-                        testkit::repo_conformance::PermanentPath::new(
-                            || async {
-                                permanent_repo
-                                    .apply_password_change(
-                                        identity_scope(tenant),
-                                        password_change(1, ghost_next.clone()),
-                                    )
-                                    .await
-                            },
-                            || permanent_repo.password_change_attempts("ghost"),
-                            || async {
-                                Ok::<usize, IdentityError>(usize::from(
-                                    repo.find_by_user_id(identity_scope(tenant), bob_uid)
-                                        .await?
-                                        .is_some(),
-                                ))
-                            },
-                        ),
-                        testkit::repo_conformance::TransientExhaustionPath::new(
-                            || {
-                                let exhaustion_repo = &exhaustion_repo;
-                                let exhaustion_next = exhaustion_next.clone();
-                                async move {
-                                    exhaustion_repo
-                                        .apply_password_change(
-                                            identity_scope(tenant),
-                                            password_change(2, exhaustion_next),
-                                        )
-                                        .await
-                                }
-                            },
-                            || exhaustion_repo.password_change_attempts("retry-alice"),
-                            3,
-                            || async {
-                                let Some(got) = repo
-                                    .find_by_user_id(identity_scope(tenant), retry_uid)
-                                    .await?
-                                else {
-                                    return Ok::<usize, IdentityError>(0);
-                                };
-                                Ok::<usize, IdentityError>(usize::from(got.version() != 2))
-                            },
-                        ),
-                    ),
-                    |error| conformance_retry_category(classify_identity_error(error)),
-                ),
-            )
-        })
-    })?;
-
-    let rendered = metrics_handle.render();
-    for expected in [
-        "localtx_retry_attempts_total",
-        "localtx_final_total",
-        "localtx_attempts",
-        "domain=\"identity\"",
-        "contract_id=\"identity.password-change\"",
-        "boundary=\"single_domain\"",
-        "retry_class=\"transient\"",
-        "retry_class=\"conflict\"",
-        "retry_class=\"permanent\"",
-        "final_status=\"committed\"",
-        "final_status=\"rolled_back\"",
-        "status=\"exhausted\"",
-    ] {
-        assert!(
-            rendered.contains(expected),
-            "production credential retry boundary omitted {expected}: {rendered}"
-        );
-    }
-
-    store.shutdown().await?;
-    Ok(())
-}
-
-/// #1704：真实 `rss_app` + `PgCredentialRepo` password-change LocalTx 后端矩阵。
-#[tokio::test(flavor = "multi_thread")]
-#[allow(clippy::unwrap_used)]
-async fn identity_password_change_real_rss_app_localtx_matrix() -> TestResult {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    const LOCALTX_BACKEND_PROFILE_IDENTITY_PASSWORD_CHANGE: ::vocab::HttpRouteBinding<
-        ::generated::http::identity_v1::password_change::RouteMarker,
-        ::vocab::http::LocalTx,
-    > = ::generated::http::identity_v1::password_change::ROUTE;
-    const LOCALTX_BACKEND_PROVIDER_IDENTITY_PASSWORD_CHANGE: ::std::marker::PhantomData<(
-        ::generated::http::identity_v1::password_change::RouteMarker,
-        crate::PgCredentialRepo,
-    )> = ::std::marker::PhantomData;
-    let _typed_enrollment = LOCALTX_BACKEND_PROFILE_IDENTITY_PASSWORD_CHANGE;
-    let _typed_provider = LOCALTX_BACKEND_PROVIDER_IDENTITY_PASSWORD_CHANGE;
-
-    let (pg, owner) = connect_pg().await?;
-    owner.run_migrations().await?;
-    let app = connect_pg_rss_app_role(&pg, &owner).await?;
-    let tenant_a = TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
-    let fixture_repo = PgCredentialRepo::from_unverified_for_test(&app);
-
-    let commit_login = format!("pc-commit-{}", uuid::Uuid::new_v4().simple());
-    let commit_user = uuid::Uuid::new_v4().to_string();
-    fixture_repo
-        .save(
-            identity_scope(tenant_a),
-            make_cred(&commit_login, &commit_user, "pw-v1", 1, tenant_a)?,
-        )
-        .await?;
-    let commit_repo = PgCredentialRepo::from_unverified_for_test(&app);
-    let commit_writes = AtomicUsize::new(0);
-    ::testkit::localtx::assert_commit(::testkit::localtx::CommitCase::new(
-        || async {
-            commit_repo
-                .apply_password_change(
-                    identity_scope(tenant_a),
-                    password_change(
-                        1,
-                        make_cred(&commit_login, &commit_user, "pw-v2", 2, tenant_a).map_err(
-                            |error| {
-                                testkit::localtx::ClassifiedError::new(
-                                    testkit::ConformanceErrorCategory::Storage,
-                                    IdentityError::Storage(error),
-                                )
-                            },
-                        )?,
-                    ),
-                )
-                .await
-                .map_err(classified_identity_error)?;
-            commit_writes.fetch_add(1, Ordering::Relaxed);
-            Ok(())
-        },
-        || async {
-            owner_credential_snapshot(&owner, tenant_a, &commit_login)
-                .await
-                .map(|snapshot| snapshot.map(|(version, _)| version))
-                .map_err(|error| {
-                    testkit::localtx::ClassifiedError::new(
-                        testkit::ConformanceErrorCategory::Storage,
-                        error,
-                    )
-                })
-        },
-        Some(2),
-        || commit_writes.load(Ordering::Relaxed),
-    ))
-    .await?;
-    let (_, committed_hash) = owner_credential_snapshot(&owner, tenant_a, &commit_login)
-        .await?
-        .ok_or("committed credential snapshot missing")?;
-    assert!(password_matches(
-        "pw-v2",
-        &secure::PasswordHash::parse(&committed_hash)?
-    )?);
-
-    let missing_login = format!("pc-missing-{}", uuid::Uuid::new_v4().simple());
-    let missing_user = uuid::Uuid::new_v4().to_string();
-    let missing_repo = PgCredentialRepo::from_unverified_for_test(&app);
-    assert!(matches!(
-        missing_repo
-            .apply_password_change(
-                identity_scope(tenant_a),
-                password_change(
-                    1,
-                    make_cred(&missing_login, &missing_user, "pw-missing", 2, tenant_a)?,
-                ),
-            )
-            .await,
-        Err(IdentityError::CredentialNotFound)
-    ));
-    assert_eq!(missing_repo.password_change_attempts(&missing_login), 1);
-    assert_eq!(
-        owner_credential_snapshot(&owner, tenant_a, &missing_login).await?,
-        None
-    );
-
-    app.shutdown().await?;
-    owner.shutdown().await?;
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[allow(clippy::unwrap_used)]
-async fn identity_password_change_real_rss_app_validation_profile() -> TestResult {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    const LOCALTX_BACKEND_PROFILE_IDENTITY_PASSWORD_CHANGE: ::vocab::HttpRouteBinding<
-        ::generated::http::identity_v1::password_change::RouteMarker,
-        ::vocab::http::LocalTx,
-    > = ::generated::http::identity_v1::password_change::ROUTE;
-    const LOCALTX_BACKEND_PROVIDER_IDENTITY_PASSWORD_CHANGE: ::std::marker::PhantomData<(
-        ::generated::http::identity_v1::password_change::RouteMarker,
-        crate::PgCredentialRepo,
-    )> = ::std::marker::PhantomData;
-    let _typed_enrollment = LOCALTX_BACKEND_PROFILE_IDENTITY_PASSWORD_CHANGE;
-    let _typed_provider = LOCALTX_BACKEND_PROVIDER_IDENTITY_PASSWORD_CHANGE;
-
-    let (pg, owner) = connect_pg().await?;
-    owner.run_migrations().await?;
-    let app = connect_pg_rss_app_role(&pg, &owner).await?;
-    let tenant_a = TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
-    let tenant_b = TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
-    let fixture_repo = PgCredentialRepo::from_unverified_for_test(&app);
-
-    let validation_login = format!("pc-validation-{}", uuid::Uuid::new_v4().simple());
-    let validation_user = uuid::Uuid::new_v4().to_string();
-    fixture_repo
-        .save(
-            identity_scope(tenant_a),
-            make_cred(&validation_login, &validation_user, "pw-v1", 1, tenant_a)?,
-        )
-        .await?;
-    let validation_repo = PgCredentialRepo::from_unverified_for_test(&app);
-    let validation_baseline = owner_credential_snapshot(&owner, tenant_a, &validation_login)
-        .await?
-        .ok_or("validation credential baseline missing")?;
-    let validation_mutations = AtomicUsize::new(0);
-    ::testkit::localtx::assert_rejected_no_write(::testkit::localtx::RejectedNoWriteCase::new(
-        || async {
-            let result = validation_repo
-                .apply_password_change(
-                    identity_scope(tenant_a),
-                    password_change(
-                        1,
-                        make_cred(
-                            &validation_login,
-                            &validation_user,
-                            "pw-invalid",
-                            2,
-                            tenant_b,
-                        )
-                        .map_err(|error| {
-                            testkit::localtx::ClassifiedError::new(
-                                testkit::ConformanceErrorCategory::Validation,
-                                IdentityError::Storage(error),
-                            )
-                        })?,
-                    ),
-                )
-                .await;
-            let changed = owner_credential_snapshot(&owner, tenant_a, &validation_login)
-                .await
-                .map_err(|error| {
-                    testkit::localtx::ClassifiedError::new(
-                        testkit::ConformanceErrorCategory::Storage,
-                        IdentityError::Storage(Box::new(error)),
-                    )
-                })?
-                .is_some_and(|snapshot| snapshot != validation_baseline);
-            validation_mutations.store(usize::from(changed), Ordering::Relaxed);
-            result.map_err(|error| {
-                testkit::localtx::ClassifiedError::new(
-                    testkit::ConformanceErrorCategory::Validation,
-                    error,
-                )
-            })
-        },
-        testkit::ConformanceErrorCategory::Validation,
-        || async {
-            owner_credential_snapshot(&owner, tenant_a, &validation_login)
-                .await
-                .map_err(|error| {
-                    testkit::localtx::ClassifiedError::new(
-                        testkit::ConformanceErrorCategory::Storage,
-                        error,
-                    )
-                })
-        },
-        Some(validation_baseline.clone()),
-        || validation_mutations.load(Ordering::Relaxed),
-    ))
-    .await?;
-    let validation_hash = secure::PasswordHash::parse(&validation_baseline.1)?;
-    assert!(password_matches("pw-v1", &validation_hash)?);
-    assert!(!password_matches("pw-invalid", &validation_hash)?);
-
-    app.shutdown().await?;
-    owner.shutdown().await?;
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[allow(clippy::unwrap_used)]
-async fn identity_password_change_real_rss_app_authorization_profile() -> TestResult {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    const LOCALTX_BACKEND_PROFILE_IDENTITY_PASSWORD_CHANGE: ::vocab::HttpRouteBinding<
-        ::generated::http::identity_v1::password_change::RouteMarker,
-        ::vocab::http::LocalTx,
-    > = ::generated::http::identity_v1::password_change::ROUTE;
-    const LOCALTX_BACKEND_PROVIDER_IDENTITY_PASSWORD_CHANGE: ::std::marker::PhantomData<(
-        ::generated::http::identity_v1::password_change::RouteMarker,
-        crate::PgCredentialRepo,
-    )> = ::std::marker::PhantomData;
-    let _typed_enrollment = LOCALTX_BACKEND_PROFILE_IDENTITY_PASSWORD_CHANGE;
-    let _typed_provider = LOCALTX_BACKEND_PROVIDER_IDENTITY_PASSWORD_CHANGE;
-
-    let (pg, owner) = connect_pg().await?;
-    owner.run_migrations().await?;
-    let app = connect_pg_rss_app_role(&pg, &owner).await?;
-    let tenant_a = TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
-    let tenant_b = TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
-    let fixture_repo = PgCredentialRepo::from_unverified_for_test(&app);
-
-    let authorization_login = format!("pc-authorization-{}", uuid::Uuid::new_v4().simple());
-    let authorization_user = uuid::Uuid::new_v4().to_string();
-    fixture_repo
-        .save(
-            identity_scope(tenant_a),
-            make_cred(
-                &authorization_login,
-                &authorization_user,
-                "pw-v1",
-                1,
-                tenant_a,
-            )?,
-        )
-        .await?;
-    let authorization_repo = PgCredentialRepo::from_unverified_for_test(&app);
-    let authorization_baseline = owner_credential_snapshot(&owner, tenant_a, &authorization_login)
-        .await?
-        .ok_or("authorization credential baseline missing")?;
-    let authorization_mutations = AtomicUsize::new(0);
-    ::testkit::localtx::assert_rejected_no_write(::testkit::localtx::RejectedNoWriteCase::new(
-        || async {
-            let result = authorization_repo
-                .apply_password_change(
-                    identity_scope(tenant_b),
-                    password_change(
-                        1,
-                        make_cred(
-                            &authorization_login,
-                            &authorization_user,
-                            "pw-cross",
-                            2,
-                            tenant_b,
-                        )
-                        .map_err(|error| {
-                            testkit::localtx::ClassifiedError::new(
-                                testkit::ConformanceErrorCategory::Authorization,
-                                IdentityError::Storage(error),
-                            )
-                        })?,
-                    ),
-                )
-                .await;
-            let changed = owner_credential_snapshot(&owner, tenant_a, &authorization_login)
-                .await
-                .map_err(|error| {
-                    testkit::localtx::ClassifiedError::new(
-                        testkit::ConformanceErrorCategory::Storage,
-                        IdentityError::Storage(Box::new(error)),
-                    )
-                })?
-                .is_some_and(|snapshot| snapshot != authorization_baseline);
-            authorization_mutations.store(usize::from(changed), Ordering::Relaxed);
-            result.map_err(|error| {
-                testkit::localtx::ClassifiedError::new(
-                    testkit::ConformanceErrorCategory::Authorization,
-                    error,
-                )
-            })
-        },
-        testkit::ConformanceErrorCategory::Authorization,
-        || async {
-            owner_credential_snapshot(&owner, tenant_a, &authorization_login)
-                .await
-                .map_err(|error| {
-                    testkit::localtx::ClassifiedError::new(
-                        testkit::ConformanceErrorCategory::Storage,
-                        error,
-                    )
-                })
-        },
-        Some(authorization_baseline.clone()),
-        || authorization_mutations.load(Ordering::Relaxed),
-    ))
-    .await?;
-    let authorization_hash = secure::PasswordHash::parse(&authorization_baseline.1)?;
-    assert!(password_matches("pw-v1", &authorization_hash)?);
-    assert!(!password_matches("pw-cross", &authorization_hash)?);
-
-    app.shutdown().await?;
-    owner.shutdown().await?;
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[allow(clippy::unwrap_used)]
-async fn identity_password_change_real_rss_app_tenant_profile() -> TestResult {
-    const LOCALTX_BACKEND_PROFILE_IDENTITY_PASSWORD_CHANGE: ::vocab::HttpRouteBinding<
-        ::generated::http::identity_v1::password_change::RouteMarker,
-        ::vocab::http::LocalTx,
-    > = ::generated::http::identity_v1::password_change::ROUTE;
-    const LOCALTX_BACKEND_PROVIDER_IDENTITY_PASSWORD_CHANGE: ::std::marker::PhantomData<(
-        ::generated::http::identity_v1::password_change::RouteMarker,
-        crate::PgCredentialRepo,
-    )> = ::std::marker::PhantomData;
-    let _typed_enrollment = LOCALTX_BACKEND_PROFILE_IDENTITY_PASSWORD_CHANGE;
-    let _typed_provider = LOCALTX_BACKEND_PROVIDER_IDENTITY_PASSWORD_CHANGE;
-
-    let (pg, owner) = connect_pg().await?;
-    owner.run_migrations().await?;
-    let app = connect_pg_rss_app_role(&pg, &owner).await?;
-    let tenant_a = TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
-    let tenant_b = TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
-    let fixture_repo = PgCredentialRepo::from_unverified_for_test(&app);
-
-    let tenant_login = format!("pc-tenant-{}", uuid::Uuid::new_v4().simple());
-    let tenant_a_user = uuid::Uuid::new_v4().to_string();
-    let tenant_b_user = uuid::Uuid::new_v4().to_string();
-    fixture_repo
-        .save(
-            identity_scope(tenant_a),
-            make_cred(&tenant_login, &tenant_a_user, "pw-a1", 1, tenant_a)?,
-        )
-        .await?;
-    fixture_repo
-        .save(
-            identity_scope(tenant_b),
-            make_cred(&tenant_login, &tenant_b_user, "pw-b1", 1, tenant_b)?,
-        )
-        .await?;
-    let tenant_repo = PgCredentialRepo::from_unverified_for_test(&app);
-    ::testkit::tenant_conformance::assert_tenant_isolation(
-        tenant_a,
-        tenant_b,
-        |tenant| {
-            let (user, password) = if tenant == tenant_a {
-                (&tenant_a_user, "pw-a2")
-            } else {
-                (&tenant_b_user, "pw-b2")
-            };
-            let next = make_cred(&tenant_login, user, password, 2, tenant);
-            let tenant_repo = &tenant_repo;
-            async move {
-                tenant_repo
-                    .apply_password_change(
-                        identity_scope(tenant),
-                        password_change(1, next.map_err(IdentityError::Storage)?),
-                    )
-                    .await
-            }
-        },
-        |tenant| {
-            let owner = &owner;
-            let tenant_login = &tenant_login;
-            async move {
-                owner_credential_snapshot(owner, tenant, tenant_login)
-                    .await
-                    .map(|snapshot| snapshot.is_some_and(|(version, _)| version == 2))
-                    .map_err(|error| IdentityError::Storage(Box::new(error)))
-            }
-        },
-        |error| conformance_retry_category(classify_identity_error(error)),
-    )
-    .await?;
-
-    app.shutdown().await?;
-    owner.shutdown().await?;
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[allow(clippy::unwrap_used)]
-async fn identity_password_change_real_rss_app_transient_stage_profile() -> TestResult {
-    const LOCALTX_BACKEND_PROFILE_IDENTITY_PASSWORD_CHANGE: ::vocab::HttpRouteBinding<
-        ::generated::http::identity_v1::password_change::RouteMarker,
-        ::vocab::http::LocalTx,
-    > = ::generated::http::identity_v1::password_change::ROUTE;
-    const LOCALTX_BACKEND_PROVIDER_IDENTITY_PASSWORD_CHANGE: ::std::marker::PhantomData<(
-        ::generated::http::identity_v1::password_change::RouteMarker,
-        crate::PgCredentialRepo,
-    )> = ::std::marker::PhantomData;
-    let _typed_enrollment = LOCALTX_BACKEND_PROFILE_IDENTITY_PASSWORD_CHANGE;
-    let _typed_provider = LOCALTX_BACKEND_PROVIDER_IDENTITY_PASSWORD_CHANGE;
-
-    let (pg, owner) = connect_pg().await?;
-    owner.run_migrations().await?;
-    let app = connect_pg_rss_app_role(&pg, &owner).await?;
-    let tenant_a = TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
-    let fixture_repo = PgCredentialRepo::from_unverified_for_test(&app);
-
-    let before_begin_login = format!("pc-before-begin-{}", uuid::Uuid::new_v4().simple());
-    let before_begin_user = uuid::Uuid::new_v4().to_string();
-    fixture_repo
-        .save(
-            identity_scope(tenant_a),
-            make_cred(
-                &before_begin_login,
-                &before_begin_user,
-                "pw-begin-1",
-                1,
-                tenant_a,
-            )?,
-        )
-        .await?;
-    let begin_app =
-        connect_pg_rss_app_role_with_limits(&pg, &owner, 1, std::time::Duration::from_millis(100))
-            .await?;
-    let held_connection = begin_app.pool.acquire().await?;
-    let before_begin = std::sync::Arc::new(PgCredentialRepo::from_unverified_for_test(&begin_app));
-    let before_begin_task = {
-        let before_begin = std::sync::Arc::clone(&before_begin);
-        let login = before_begin_login.clone();
-        let next = make_cred(
-            &before_begin_login,
-            &before_begin_user,
-            "pw-begin-2",
-            2,
-            tenant_a,
-        )?;
-        tokio::spawn(async move {
-            before_begin
-                .apply_password_change(identity_scope(tenant_a), password_change(1, next))
-                .await
-                .map(|()| login)
-        })
-    };
-    tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        while before_begin.password_change_attempts(&before_begin_login) < 2 {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .map_err(|_| "password-change before-begin transient was not retried")?;
-    drop(held_connection);
-    let completed_login = before_begin_task.await??;
-    assert_eq!(completed_login, before_begin_login);
-    assert_eq!(
-        before_begin.password_change_attempts(&before_begin_login),
-        2
-    );
-    let (before_begin_version, before_begin_hash) =
-        owner_credential_snapshot(&owner, tenant_a, &before_begin_login)
-            .await?
-            .ok_or("before-begin credential snapshot missing")?;
-    assert_eq!(before_begin_version, 2);
-    assert!(password_matches(
-        "pw-begin-2",
-        &secure::PasswordHash::parse(&before_begin_hash)?
-    )?);
-    begin_app.shutdown().await?;
-
-    let before_write_login = format!("pc-before-write-{}", uuid::Uuid::new_v4().simple());
-    let before_write_user = uuid::Uuid::new_v4().to_string();
-    fixture_repo
-        .save(
-            identity_scope(tenant_a),
-            make_cred(
-                &before_write_login,
-                &before_write_user,
-                "pw-write-1",
-                1,
-                tenant_a,
-            )?,
-        )
-        .await?;
-    let before_write = PgCredentialRepo::from_unverified_for_test(&app).with_password_change_fault(
-        &before_write_login,
-        CredentialMutationFault::TransientBeforeWrite,
-        1,
-    );
-    before_write
-        .apply_password_change(
-            identity_scope(tenant_a),
-            password_change(
-                1,
-                make_cred(
-                    &before_write_login,
-                    &before_write_user,
-                    "pw-write-2",
-                    2,
-                    tenant_a,
-                )?,
-            ),
-        )
-        .await?;
-    assert_eq!(
-        before_write.password_change_attempts(&before_write_login),
-        2
-    );
-    let (before_write_version, before_write_hash) =
-        owner_credential_snapshot(&owner, tenant_a, &before_write_login)
-            .await?
-            .ok_or("before-write credential snapshot missing")?;
-    assert_eq!(before_write_version, 2);
-    assert!(password_matches(
-        "pw-write-2",
-        &secure::PasswordHash::parse(&before_write_hash)?
-    )?);
-
-    app.shutdown().await?;
-    owner.shutdown().await?;
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[allow(clippy::unwrap_used)]
-async fn identity_password_change_real_rss_app_retry_profile() -> TestResult {
-    const LOCALTX_BACKEND_PROFILE_IDENTITY_PASSWORD_CHANGE: ::vocab::HttpRouteBinding<
-        ::generated::http::identity_v1::password_change::RouteMarker,
-        ::vocab::http::LocalTx,
-    > = ::generated::http::identity_v1::password_change::ROUTE;
-    const LOCALTX_BACKEND_PROVIDER_IDENTITY_PASSWORD_CHANGE: ::std::marker::PhantomData<(
-        ::generated::http::identity_v1::password_change::RouteMarker,
-        crate::PgCredentialRepo,
-    )> = ::std::marker::PhantomData;
-    let _typed_enrollment = LOCALTX_BACKEND_PROFILE_IDENTITY_PASSWORD_CHANGE;
-    let _typed_provider = LOCALTX_BACKEND_PROVIDER_IDENTITY_PASSWORD_CHANGE;
-
-    let (pg, owner) = connect_pg().await?;
-    owner.run_migrations().await?;
-    let app = connect_pg_rss_app_role(&pg, &owner).await?;
-    let tenant_a = TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
-    let fixture_repo = PgCredentialRepo::from_unverified_for_test(&app);
-
-    let retry_login = format!("pc-retry-{}", uuid::Uuid::new_v4().simple());
-    let retry_user = uuid::Uuid::new_v4().to_string();
-    fixture_repo
-        .save(
-            identity_scope(tenant_a),
-            make_cred(&retry_login, &retry_user, "pw-r1", 1, tenant_a)?,
-        )
-        .await?;
-    let transient_repo = PgCredentialRepo::from_unverified_for_test(&app)
-        .with_password_change_fault(&retry_login, CredentialMutationFault::Transient, 1);
-    let conflict_repo = PgCredentialRepo::from_unverified_for_test(&app);
-    let permanent_repo = PgCredentialRepo::from_unverified_for_test(&app)
-        .with_password_change_fault(&retry_login, CredentialMutationFault::Permanent, 1);
-    let exhaustion_repo = PgCredentialRepo::from_unverified_for_test(&app)
-        .with_password_change_fault(&retry_login, CredentialMutationFault::Transient, 3);
-    let retry_baseline = std::sync::OnceLock::new();
-    ::testkit::repo_conformance::assert_retry_boundary_policy(
-        ::testkit::repo_conformance::RetryBoundaryCase::new(
-            ::testkit::repo_conformance::TransientSuccessPath::new(
-                || async {
-                    transient_repo
-                        .apply_password_change(
-                            identity_scope(tenant_a),
-                            password_change(
-                                1,
-                                make_cred(&retry_login, &retry_user, "pw-r2", 2, tenant_a)
-                                    .map_err(IdentityError::Storage)?,
-                            ),
-                        )
-                        .await
-                },
-                || transient_repo.password_change_attempts(&retry_login),
-                2,
-                || async {
-                    owner_credential_snapshot(&owner, tenant_a, &retry_login)
-                        .await
-                        .map(|snapshot| {
-                            let Some(snapshot) = snapshot else {
-                                return 0;
-                            };
-                            let valid = snapshot.0 == 2;
-                            if valid {
-                                let _ = retry_baseline.set(snapshot);
-                            }
-                            usize::from(valid)
-                        })
-                        .map_err(|error| IdentityError::Storage(Box::new(error)))
-                },
-            ),
-            ::testkit::repo_conformance::ConflictPath::new(
-                || async {
-                    conflict_repo
-                        .apply_password_change(
-                            identity_scope(tenant_a),
-                            password_change(
-                                99,
-                                make_cred(&retry_login, &retry_user, "pw-conflict", 3, tenant_a)
-                                    .map_err(IdentityError::Storage)?,
-                            ),
-                        )
-                        .await
-                },
-                || conflict_repo.password_change_attempts(&retry_login),
-                || async {
-                    owner_credential_snapshot(&owner, tenant_a, &retry_login)
-                        .await
-                        .map(|snapshot| usize::from(snapshot.as_ref() != retry_baseline.get()))
-                        .map_err(|error| IdentityError::Storage(Box::new(error)))
-                },
-            ),
-            ::testkit::repo_conformance::PermanentPath::new(
-                || async {
-                    permanent_repo
-                        .apply_password_change(
-                            identity_scope(tenant_a),
-                            password_change(
-                                2,
-                                make_cred(&retry_login, &retry_user, "pw-permanent", 3, tenant_a)
-                                    .map_err(IdentityError::Storage)?,
-                            ),
-                        )
-                        .await
-                },
-                || permanent_repo.password_change_attempts(&retry_login),
-                || async {
-                    owner_credential_snapshot(&owner, tenant_a, &retry_login)
-                        .await
-                        .map(|snapshot| usize::from(snapshot.as_ref() != retry_baseline.get()))
-                        .map_err(|error| IdentityError::Storage(Box::new(error)))
-                },
-            ),
-            ::testkit::repo_conformance::TransientExhaustionPath::new(
-                || async {
-                    exhaustion_repo
-                        .apply_password_change(
-                            identity_scope(tenant_a),
-                            password_change(
-                                2,
-                                make_cred(&retry_login, &retry_user, "pw-exhausted", 3, tenant_a)
-                                    .map_err(IdentityError::Storage)?,
-                            ),
-                        )
-                        .await
-                },
-                || exhaustion_repo.password_change_attempts(&retry_login),
-                3,
-                || async {
-                    owner_credential_snapshot(&owner, tenant_a, &retry_login)
-                        .await
-                        .map(|snapshot| usize::from(snapshot.as_ref() != retry_baseline.get()))
-                        .map_err(|error| IdentityError::Storage(Box::new(error)))
-                },
-            ),
-        ),
-        |error| conformance_retry_category(classify_identity_error(error)),
-    )
-    .await?;
-    let (retry_version, retry_hash) = owner_credential_snapshot(&owner, tenant_a, &retry_login)
-        .await?
-        .ok_or("retry credential snapshot missing")?;
-    assert_eq!(retry_version, 2);
-    assert!(password_matches(
-        "pw-r2",
-        &secure::PasswordHash::parse(&retry_hash)?
-    )?);
-    for rejected_password in ["pw-conflict", "pw-permanent", "pw-exhausted"] {
-        assert!(
-            !password_matches(
-                rejected_password,
-                &secure::PasswordHash::parse(&retry_hash)?
-            )?,
-            "rejected retry path must not replace the durable password hash: {rejected_password}"
-        );
-    }
-
-    app.shutdown().await?;
-    owner.shutdown().await?;
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[allow(clippy::unwrap_used)]
-async fn identity_password_change_real_rss_app_commit_unknown_profile() -> TestResult {
-    const LOCALTX_BACKEND_PROFILE_IDENTITY_PASSWORD_CHANGE: ::vocab::HttpRouteBinding<
-        ::generated::http::identity_v1::password_change::RouteMarker,
-        ::vocab::http::LocalTx,
-    > = ::generated::http::identity_v1::password_change::ROUTE;
-    const LOCALTX_BACKEND_PROVIDER_IDENTITY_PASSWORD_CHANGE: ::std::marker::PhantomData<(
-        ::generated::http::identity_v1::password_change::RouteMarker,
-        crate::PgCredentialRepo,
-    )> = ::std::marker::PhantomData;
-    let _typed_enrollment = LOCALTX_BACKEND_PROFILE_IDENTITY_PASSWORD_CHANGE;
-    let _typed_provider = LOCALTX_BACKEND_PROVIDER_IDENTITY_PASSWORD_CHANGE;
-
-    let (pg, owner) = connect_pg().await?;
-    owner.run_migrations().await?;
-    let app = connect_pg_rss_app_role(&pg, &owner).await?;
-    let tenant_a = TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
-    let fixture_repo = PgCredentialRepo::from_unverified_for_test(&app);
-
-    let unknown_login = format!("pc-unknown-{}", uuid::Uuid::new_v4().simple());
-    let unknown_user = uuid::Uuid::new_v4().to_string();
-    fixture_repo
-        .save(
-            identity_scope(tenant_a),
-            make_cred(&unknown_login, &unknown_user, "pw-u1", 1, tenant_a)?,
-        )
-        .await?;
-    let unknown_repo = PgCredentialRepo::from_unverified_for_test(&app).with_password_change_fault(
-        &unknown_login,
-        CredentialMutationFault::CommitUnknown,
-        1,
-    );
-    ::testkit::localtx::assert_commit_unknown_no_replay(
-        ::testkit::localtx::CommitUnknownCase::new(
-            || async {
-                unknown_repo
-                    .apply_password_change(
-                        identity_scope(tenant_a),
-                        password_change(
-                            1,
-                            make_cred(&unknown_login, &unknown_user, "pw-u2", 2, tenant_a)
-                                .map_err(|error| {
-                                    testkit::localtx::ClassifiedError::new(
-                                        testkit::ConformanceErrorCategory::CommitUnknown,
-                                        IdentityError::Storage(error),
-                                    )
-                                })?,
-                        ),
-                    )
-                    .await
-                    .map_err(|error| {
-                        testkit::localtx::ClassifiedError::new(
-                            testkit::ConformanceErrorCategory::CommitUnknown,
-                            error,
-                        )
-                    })
-            },
-            testkit::ConformanceErrorCategory::CommitUnknown,
-            || unknown_repo.password_change_attempts(&unknown_login),
-        ),
-    )
-    .await?;
-    let (unknown_version, unknown_hash) =
-        owner_credential_snapshot(&owner, tenant_a, &unknown_login)
-            .await?
-            .ok_or("commit-unknown credential snapshot missing")?;
-    assert_eq!(unknown_version, 2);
-    assert!(password_matches(
-        "pw-u2",
-        &secure::PasswordHash::parse(&unknown_hash)?
-    )?);
-
-    app.shutdown().await?;
-    owner.shutdown().await?;
     Ok(())
 }
 
@@ -34364,7 +33934,7 @@ async fn credential_repo_authenticate_correct_rejects_active_lock() -> TestResul
     store.run_migrations().await?;
     let repo = PgCredentialRepo::from_unverified_for_test(&store);
     let a = cred_tenant(CRED_TENANT_A)?;
-    repo.save(
+    repo.insert(
         identity_scope(a),
         make_cred("alice", CRED_USER_ALICE, "correct", 1, a)?,
     )
@@ -34617,7 +34187,7 @@ async fn credential_repo_concurrent_failures_no_lost_update() -> TestResult {
     store.run_migrations().await?;
     let repo = Arc::new(PgCredentialRepo::from_unverified_for_test(&store));
     let a = cred_tenant(CRED_TENANT_A)?;
-    repo.save(
+    repo.insert(
         identity_scope(a),
         make_cred("alice", CRED_USER_ALICE, "correct", 1, a)?,
     )

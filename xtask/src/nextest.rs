@@ -2191,8 +2191,9 @@ mod tests {
     }
 
     #[test]
-    fn localtx_journey_serial_batch_fails_when_compiled_inventory_is_empty() -> Result<()> {
-        let batch = crate::integration_shards::localtx_journey_execution_batch()?;
+    fn postgres_transaction_journey_serial_batch_fails_when_compiled_inventory_is_empty()
+    -> Result<()> {
+        let batch = crate::integration_shards::postgres_transaction_journey_execution_batch()?;
         assert!(integration_batch_fails_on_empty(&batch));
         let batches = crate::integration_shards::batches(
             crate::integration_shards::IntegrationShard::PostgresDomain,
@@ -2216,7 +2217,7 @@ mod tests {
             .collect();
         assert_eq!(
             selected,
-            crate::integration_shards::LOCALTX_JOURNEY_TARGETS
+            crate::integration_shards::POSTGRES_TRANSACTION_JOURNEY_TARGETS
                 .iter()
                 .copied()
                 .collect()

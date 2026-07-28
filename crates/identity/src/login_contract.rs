@@ -96,7 +96,6 @@ fn login_router() -> axum::Router {
     #[allow(clippy::expect_used)]
     let service = LoginService::with_seed_credential(
         move |accounts| make_auth_grant_services(grant_store, accounts),
-        crate::application::seed_password_policy(),
         clock(),
         Duration::from_secs(AUTH_GRANT_TTL_SECS),
         SEED_USER,

@@ -48,7 +48,7 @@ use bootstrap::shutdown::ShutdownStack;
 use bootstrap::{IdempotencyConfig, ResolvedIdempotency, SubscriberCapability, Topology};
 use common::{
     CANON_TENANT, CANON_USER, LOGIN_USERNAME, NOW_SECS, PASSWORD, SESSION_CREATED_TOPIC, TTL_SECS,
-    audit_domain, identity_domain, memory_tenant_signer, password_policy,
+    audit_domain, fail_closed_credential_security, identity_domain, memory_tenant_signer,
     session_created_subscription, signed_metadata, tenant_authority,
 };
 use consistency::{
@@ -63,7 +63,7 @@ use eventexec::{ConsumerMeta, EVENT_CONSUMER_PROBE, LeaseConfig, WorkerHealth, s
 use futures::future::BoxFuture;
 use generated::http::identity_v1::login::{IdentityLoginRequest, PRODUCER as LOGIN_PRODUCER};
 use httpserve::ProducerMarker;
-use identity::ports::LoginProducerReceipt;
+use identity::ports::{DynAuthGrantLifecycle, LoginProducerReceipt};
 use identity::{LoginService, RefreshService, SeedSigner};
 use memory::{FixedClock, InMemClaimer, MemAuthGrantStore, MemBus, MemDeadLetterStore, MemEmitter};
 use primitives::ListenerKind;
@@ -251,12 +251,14 @@ where
 type LoginBundle = (
     Arc<LoginService<SeedSigner>>,
     Arc<RefreshService<SeedSigner>>,
+    Arc<DynAuthGrantLifecycle<'static>>,
 );
 
 /// 登录服务（同一个 MemAuthGrantStore provider 同时提供 lifecycle + refresh store）。
 /// 同时构造 seed refresh service 并返回，供 `IdentityDomain::new` 注入。
 fn login_service(bus: &MemBus, tenant: TenantId) -> Result<LoginBundle> {
     let mut refresh = None;
+    let mut grant_lifecycle = None;
     let grants = MemAuthGrantStore::with_tenant_metadata_signer(
         bus.clone(),
         memory_tenant_signer(),
@@ -271,9 +273,9 @@ fn login_service(bus: &MemBus, tenant: TenantId) -> Result<LoginBundle> {
                 Duration::from_secs(TTL_SECS),
             );
             refresh = Some(services.refresh_service());
+            grant_lifecycle = Some(services.lifecycle());
             services
         },
-        password_policy(),
         Box::new(FixedClock::at_unix_secs(NOW_SECS)),
         Duration::from_secs(TTL_SECS),
         LOGIN_USERNAME,
@@ -283,7 +285,9 @@ fn login_service(bus: &MemBus, tenant: TenantId) -> Result<LoginBundle> {
     )?);
     let refresh =
         refresh.ok_or_else(|| anyhow::anyhow!("seed refresh service was not constructed"))?;
-    Ok((login, refresh))
+    let grant_lifecycle = grant_lifecycle
+        .ok_or_else(|| anyhow::anyhow!("seed grant lifecycle was not constructed"))?;
+    Ok((login, refresh, grant_lifecycle))
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -292,8 +296,8 @@ async fn login_emits_event_audited_end_to_end() -> Result<()> {
 
     // bootstrap 组装：identity 声明登录路由组，audit 声明 session-created 订阅 + admin 读路由组。
     let (audit_domain, audit, audit_repo) = audit_domain();
-    let (login, refresh) = login_service(&bus, TenantId::parse(CANON_TENANT)?)?;
-    let identity_domain = identity_domain(login, refresh);
+    let (login, refresh, grants) = login_service(&bus, TenantId::parse(CANON_TENANT)?)?;
+    let identity_domain = identity_domain(login, refresh, fail_closed_credential_security(grants));
     let registry = bootstrap::compose(&[&identity_domain, &audit_domain])?;
 
     let route_groups = registry.route_groups();
@@ -339,7 +343,7 @@ async fn login_emits_event_audited_end_to_end() -> Result<()> {
 
     // 登录（emit）+ 等 audit；worker 在独立线程并发消费，无需同任务 `tokio::join!`。
     let tenant = TenantId::parse(CANON_TENANT)?;
-    let (login, _refresh) = login_service(&bus, tenant)?;
+    let (login, _refresh, _grants) = login_service(&bus, tenant)?;
     let response = login
         .login(
             login_producer_receipt(),
@@ -522,8 +526,8 @@ async fn relay_redelivery_audits_once() -> Result<()> {
 async fn rejected_login_does_not_audit() -> Result<()> {
     let bus = MemBus::new();
     let (audit_domain, audit, audit_repo) = audit_domain();
-    let (login, refresh) = login_service(&bus, TenantId::parse(CANON_TENANT)?)?;
-    let identity_domain = identity_domain(login, refresh);
+    let (login, refresh, grants) = login_service(&bus, TenantId::parse(CANON_TENANT)?)?;
+    let identity_domain = identity_domain(login, refresh, fail_closed_credential_security(grants));
     let registry = bootstrap::compose(&[&identity_domain, &audit_domain])?;
 
     let (contract_id, topic, _, group, execution) =
@@ -550,7 +554,7 @@ async fn rejected_login_does_not_audit() -> Result<()> {
     .await?;
 
     let tenant = TenantId::parse(CANON_TENANT)?;
-    let (login, _refresh) = login_service(&bus, tenant)?;
+    let (login, _refresh, _grants) = login_service(&bus, tenant)?;
     let result = login
         .login(
             login_producer_receipt(),

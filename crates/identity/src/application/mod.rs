@@ -17,6 +17,17 @@ use std::time::{Duration, SystemTime};
 #[cfg(test)]
 use ::generated::http::audit_v1::list_entries::SPEC as AUDIT_LIST_HTTP_SPEC;
 use ::generated::http::identity_v1::{
+    account_status_get::{
+        IdentityAccountStatusGetData, IdentityAccountStatusGetDataStatus,
+        IdentityAccountStatusGetResponse, ROUTE as ACCOUNT_STATUS_GET_HTTP_ROUTE,
+        SPEC as ACCOUNT_STATUS_GET_HTTP_SPEC,
+    },
+    account_status_set::{
+        IdentityAccountStatusSetData, IdentityAccountStatusSetDataStatus,
+        IdentityAccountStatusSetRequest, IdentityAccountStatusSetRequestTargetStatus,
+        IdentityAccountStatusSetResponse, PRODUCER as ACCOUNT_STATUS_SET_PRODUCER,
+        SPEC as ACCOUNT_STATUS_SET_HTTP_SPEC,
+    },
     login::{
         IdentityLoginData, IdentityLoginRequest, IdentityLoginResponse, PRODUCER as LOGIN_PRODUCER,
         SPEC as LOGIN_HTTP_SPEC,
@@ -31,7 +42,7 @@ use ::generated::http::identity_v1::{
     },
     password_change::{
         IdentityPasswordChangeData, IdentityPasswordChangeRequest, IdentityPasswordChangeResponse,
-        ROUTE as PASSWORD_CHANGE_HTTP_ROUTE, SPEC as PASSWORD_CHANGE_HTTP_SPEC,
+        PRODUCER as PASSWORD_CHANGE_PRODUCER, SPEC as PASSWORD_CHANGE_HTTP_SPEC,
     },
     policies_create::{
         IdentityPoliciesCreateRequest, PRODUCER as POLICIES_CREATE_PRODUCER,
@@ -130,12 +141,13 @@ use crate::domain::{
     evaluate_policies_for_tenant,
 };
 use crate::ports::{
-    AccountSecurityReadRepo, AuthGrantCloseCommand, AuthGrantLifecycle, AuthGrantProvider,
-    CredentialRepo, DynAccountSecurityReadRepo, DynAuthGrantLifecycle, DynCredentialRepo,
-    DynIdentitySecurityLifecycle, DynPolicyRepo, DynResourceAttributeReadRepo,
+    AccountReactivationLifecycle, AccountSecurityReadRepo, AccountStatusSetProducerReceipt,
+    AuthGrantCloseCommand, AuthGrantLifecycle, AuthGrantProvider, CredentialRepo,
+    DynAccountReactivationLifecycle, DynAccountSecurityReadRepo, DynAuthGrantLifecycle,
+    DynCredentialRepo, DynIdentitySecurityLifecycle, DynPolicyRepo, DynResourceAttributeReadRepo,
     DynRoleBindingReadRepo, DynRoleReadRepo, IdentitySecurityLifecycle, LoginGrantMutation,
     LoginProducerReceipt, LogoutAllProducerReceipt, LogoutCurrentProducerReceipt, Operator,
-    PasswordChangeMutation, PersistedLoginGrantReceipt, PolicyPage, PolicyRepo,
+    PasswordChangeProducerReceipt, PersistedLoginGrantReceipt, PolicyPage, PolicyRepo,
     RefreshRotationMutation, RefreshTokenStore, ResourceAttributeReadRepo, RoleBindingReadRepo,
     RolePage, RoleReadRepo, TenantRepoScope,
 };
@@ -224,6 +236,30 @@ pub enum ChangePasswordError {
     Store(#[source] IdentityError),
 }
 
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum AccountStatusChangeError {
+    #[error("account security state not found")]
+    NotFound,
+    #[error("account security transition is invalid")]
+    InvalidTransition,
+    #[error("account security version conflict")]
+    VersionConflict,
+    #[error("account security store error")]
+    Store(#[source] IdentityError),
+}
+
+fn map_account_transition_error(
+    error: crate::domain::AccountSecurityTransitionError,
+) -> AccountStatusChangeError {
+    match error {
+        crate::domain::AccountSecurityTransitionError::Illegal => {
+            AccountStatusChangeError::InvalidTransition
+        }
+        other => AccountStatusChangeError::Store(IdentityError::Storage(Box::new(other))),
+    }
+}
+
 /// `SystemTime` → UNIX epoch 秒（i64）。负偏移（早于 epoch）收口为 0；溢出收口为 `i64::MAX`。
 /// 不取系统时钟（`now` 经注入 [`Clock`]）；`SystemTime::duration_since` 不在 clippy disallowed-methods。
 pub(crate) fn unix_secs(t: SystemTime) -> i64 {
@@ -248,7 +284,6 @@ pub struct LoginService<S> {
     credentials: Arc<DynCredentialRepo<'static>>,
     lifecycle: Arc<DynAuthGrantLifecycle<'static>>,
     refresh: Arc<RefreshService<S>>,
-    password_policy: secure::PasswordPolicy,
     clock: Box<dyn Clock>,
     auth_grant_ttl: Duration,
 }
@@ -305,7 +340,6 @@ impl<S: diport::Signer + Send + Sync + 'static> LoginService<S> {
     pub fn new(
         credentials: Arc<DynCredentialRepo<'static>>,
         auth_grants: AuthGrantServices<S>,
-        password_policy: secure::PasswordPolicy,
         clock: Box<dyn Clock>,
         auth_grant_ttl: Duration,
     ) -> Self {
@@ -314,7 +348,6 @@ impl<S: diport::Signer + Send + Sync + 'static> LoginService<S> {
             credentials,
             lifecycle,
             refresh,
-            password_policy,
             clock,
             auth_grant_ttl,
         }
@@ -323,12 +356,11 @@ impl<S: diport::Signer + Send + Sync + 'static> LoginService<S> {
     /// 种子构造（test/seed-login 门控）：哈希凭据种子 + 注入的 AuthGrant 生命周期 provider。
     /// 明文 `password` 仅入参，经 argon2 哈希入库，不存明文。
     #[cfg(any(test, feature = "seed-login"))]
-    // reason: seed-login 构造器含 9 个必填位置参（lifecycle/refresh/password_policy/clock/ttl/login/user_id/password/tenant），
+    // reason: seed-login constructor carries the required provider, clock, ttl and seed identity.
     // 每个均为不可省略的域依赖，不拆 builder（YAGNI；test-only / seed-login feature-gated，非业务 public API）。
     #[allow(clippy::too_many_arguments)]
     pub fn with_seed_credential<F>(
         make_auth_grants: F,
-        password_policy: secure::PasswordPolicy,
         clock: Box<dyn Clock>,
         auth_grant_ttl: Duration,
         login: impl Into<String>,
@@ -348,7 +380,6 @@ impl<S: diport::Signer + Send + Sync + 'static> LoginService<S> {
         Ok(Self::new(
             Arc::from(crate::ports::DynCredentialRepo::new_box(creds)),
             auth_grants,
-            password_policy,
             clock,
             auth_grant_ttl,
         ))
@@ -486,106 +517,254 @@ impl<S: diport::Signer + Send + Sync + 'static> LoginService<S> {
             },
         })
     }
-
-    /// 密码变更（校验当前密码 + CAS）。
-    ///
-    /// `user_id` = 认证主体的 canonical [`ids::UserId`]（self-scoped 锚点，#1277 F2）——身份来自认证上下文，
-    /// **非**请求体可选择的登录标识；调用方无法传 login 串定位他人凭据（类型层杜绝越权改他人密码）。
-    ///
-    /// `skip_all`：不记 current_password / new_password（凭据，zero-trust）；失败经 `err` 记
-    /// [`ChangePasswordError`] Display（const literal，无 PII）。低基数定位字段 `domain` / `operation` /
-    /// `tenant_id` 显式记入（observability.md §日志，F5）；密码仍 skip（user_id 是 canonical actor、非凭据）。
-    #[tracing::instrument(
-        skip_all,
-        fields(domain = SESSION_DOMAIN, operation = "change_password", tenant_id = %tenant),
-        err
-    )]
-    pub async fn change_password(
-        &self,
-        tenant: TenantId,
-        user_id: ids::UserId,
-        current_password: String,
-        new_password: String,
-    ) -> Result<(), ChangePasswordError> {
-        let tenant_scope = tenant_repo_scope(tenant);
-        let Some(credential) = self
-            .credentials
-            .find_by_user_id(tenant_scope, user_id)
-            .await
-            .map_err(ChangePasswordError::Store)?
-        else {
-            // F3 工作下限：查无凭据仍跑当前 profile KDF，关闭 NotFound 的零 KDF 快路径；变量 PHC
-            // profile 不承诺严格等时（与 login 路径 typed `verify_password` 同源；身份锚点 = 认证主体 user_id）。
-            secure::verify_password(secure::RawPassword::new(current_password), None)
-                .map_err(|_| ChangePasswordError::Hash)?;
-            return Err(ChangePasswordError::NotFound);
-        };
-        if !matches!(
-            credential
-                .verify_password(secure::RawPassword::new(current_password))
-                .map_err(|_| ChangePasswordError::Hash)?,
-            secure::PasswordVerification::Verified(_)
-        ) {
-            return Err(ChangePasswordError::InvalidCredentials);
-        }
-        let validated = self
-            .password_policy
-            .validate(secure::RawPassword::new(new_password))
-            .map_err(ChangePasswordError::Policy)?;
-        let next = credential
-            .rotate(validated)
-            .map_err(|_| ChangePasswordError::Hash)?;
-        self.credentials
-            .apply_password_change(
-                tenant_scope,
-                PasswordChangeMutation::new(credential.version(), next),
-            )
-            .await
-            .map_err(|e| match e {
-                IdentityError::VersionConflict => ChangePasswordError::VersionConflict,
-                IdentityError::CredentialNotFound => ChangePasswordError::NotFound,
-                // reason: IdentityError #[non_exhaustive]——postgres adapter 接线可能携其它持久化错误，兜底进 Store 通道。
-                other => ChangePasswordError::Store(other),
-            })
-    }
 }
 
 pub struct CredentialSecurityService {
+    credentials: Arc<DynCredentialRepo<'static>>,
     grants: Arc<DynAuthGrantLifecycle<'static>>,
-    accounts: Box<DynAccountSecurityReadRepo<'static>>,
+    accounts: Arc<DynAccountSecurityReadRepo<'static>>,
     lifecycle: Box<DynIdentitySecurityLifecycle<'static>>,
+    reactivation: Box<DynAccountReactivationLifecycle<'static>>,
+    password_policy: secure::PasswordPolicy,
     clock: Box<dyn Clock>,
 }
 
+/// Linear proof that the current credential passed the shared authentication/lockout funnel.
+///
+/// The producer receipt and authenticated aggregate are consumed together by the final write, so
+/// callers cannot validate or persist a replacement password before reauthentication succeeds.
+struct PreparedPasswordChange {
+    scope: TenantRepoScope,
+    credential: crate::domain::Credential,
+    account: crate::domain::AccountSecurityState,
+    initiator: crate::domain::CredentialSecurityInitiator,
+    occurred_at: SystemTime,
+}
+
+impl std::fmt::Debug for PreparedPasswordChange {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("PreparedPasswordChange(<redacted>)")
+    }
+}
+
 impl CredentialSecurityService {
-    pub fn new<P>(
+    pub fn new<P, R>(
+        credentials: Arc<DynCredentialRepo<'static>>,
         grants: Arc<DynAuthGrantLifecycle<'static>>,
         accounts: Box<DynAccountSecurityReadRepo<'static>>,
         lifecycle: P,
+        reactivation: R,
+        password_policy: secure::PasswordPolicy,
         clock: Box<dyn Clock>,
     ) -> Self
     where
         P: IdentitySecurityLifecycle + 'static,
+        R: AccountReactivationLifecycle + 'static,
     {
         Self {
+            credentials,
             grants,
-            accounts,
+            accounts: Arc::from(accounts),
             lifecycle: DynIdentitySecurityLifecycle::new_box(lifecycle),
+            reactivation: DynAccountReactivationLifecycle::new_box(reactivation),
+            password_policy,
             clock,
         }
     }
 
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn inert_for_non_logout_tests<S: diport::Signer + Send + Sync + 'static>(
-        login: &LoginService<S>,
-        clock: Box<dyn Clock>,
-    ) -> Self {
-        Self::new(
-            Arc::clone(&login.lifecycle),
-            DynAccountSecurityReadRepo::new_box(InertAccountSecurityRead),
-            InertIdentitySecurityLifecycle,
-            clock,
+    pub fn validate_new_password(
+        &self,
+        password: secure::RawPassword,
+    ) -> Result<secure::ValidatedPassword, ChangePasswordError> {
+        self.password_policy
+            .validate(password)
+            .map_err(ChangePasswordError::Policy)
+    }
+
+    async fn reauthenticate_password_change(
+        &self,
+        tenant: TenantId,
+        user_id: ids::UserId,
+        current_password: secure::RawPassword,
+    ) -> Result<PreparedPasswordChange, ChangePasswordError> {
+        let scope = tenant_repo_scope(tenant);
+        let now = self.clock.now();
+        let Some(credential) = self
+            .credentials
+            .find_by_user_id(scope, user_id)
+            .await
+            .map_err(ChangePasswordError::Store)?
+        else {
+            secure::verify_password(current_password, None)
+                .map_err(|_| ChangePasswordError::Hash)?;
+            return Err(ChangePasswordError::NotFound);
+        };
+        let account = match self
+            .credentials
+            .authenticate(scope, credential.login().clone(), current_password, now)
+            .await
+            .map_err(ChangePasswordError::Store)?
+        {
+            AuthOutcome::Authenticated(account)
+                if account.tenant() == tenant && account.user_id() == user_id =>
+            {
+                account
+            }
+            AuthOutcome::Authenticated(_)
+            | AuthOutcome::RejectedKnown
+            | AuthOutcome::RejectedUnknown => {
+                return Err(ChangePasswordError::InvalidCredentials);
+            }
+        };
+        Ok(PreparedPasswordChange {
+            scope,
+            credential,
+            account,
+            initiator: crate::domain::CredentialSecurityInitiator::authenticated(
+                tenant,
+                vocab::PrincipalKind::User,
+                user_id.as_uuid().hyphenated().to_string(),
+            ),
+            occurred_at: now,
+        })
+    }
+
+    #[tracing::instrument(
+        skip_all,
+        fields(domain = SESSION_DOMAIN, operation = "change_password"),
+        err
+    )]
+    async fn change_password(
+        &self,
+        receipt: PasswordChangeProducerReceipt,
+        prepared: PreparedPasswordChange,
+        new_password: secure::ValidatedPassword,
+    ) -> Result<(), ChangePasswordError> {
+        let PreparedPasswordChange {
+            scope,
+            credential,
+            account,
+            initiator,
+            occurred_at,
+        } = prepared;
+        let command = crate::domain::PasswordChangeCommand::new(
+            credential,
+            account,
+            new_password,
+            initiator,
+            occurred_at,
         )
+        .map_err(|error| match error {
+            crate::domain::PasswordChangeCommandError::AccountInactive
+            | crate::domain::PasswordChangeCommandError::IdentityMismatch => {
+                ChangePasswordError::InvalidCredentials
+            }
+            crate::domain::PasswordChangeCommandError::Password(_) => ChangePasswordError::Hash,
+            crate::domain::PasswordChangeCommandError::Account(_) => {
+                ChangePasswordError::VersionConflict
+            }
+        })?;
+        self.lifecycle
+            .execute_password_change(receipt, scope, command)
+            .await
+            .map(|_| ())
+            .map_err(|error| match error {
+                IdentityError::VersionConflict => ChangePasswordError::VersionConflict,
+                IdentityError::CredentialNotFound => ChangePasswordError::NotFound,
+                other => ChangePasswordError::Store(other),
+            })
+    }
+
+    pub async fn set_account_status(
+        &self,
+        receipt: AccountStatusSetProducerReceipt,
+        tenant: TenantId,
+        user_id: ids::UserId,
+        target: crate::domain::AccountStatus,
+        initiator: crate::domain::CredentialSecurityInitiator,
+    ) -> Result<bool, AccountStatusChangeError> {
+        let scope = tenant_repo_scope(tenant);
+        let state = self
+            .accounts
+            .find(scope, user_id)
+            .await
+            .map_err(AccountStatusChangeError::Store)?
+            .ok_or(AccountStatusChangeError::NotFound)?;
+        if state.status() == target {
+            return Ok(false);
+        }
+        let command =
+            crate::domain::AccountStatusSetCommand::new(state, target, initiator, self.clock.now())
+                .map_err(map_account_transition_error)?;
+        match self
+            .lifecycle
+            .execute_account_status_set(receipt, scope, command)
+            .await
+        {
+            Ok(_) => Ok(true),
+            Err(IdentityError::VersionConflict) => {
+                let converged = self
+                    .accounts
+                    .find(scope, user_id)
+                    .await
+                    .map_err(AccountStatusChangeError::Store)?
+                    .ok_or(AccountStatusChangeError::NotFound)?;
+                if converged.status() == target {
+                    Ok(false)
+                } else {
+                    Err(AccountStatusChangeError::VersionConflict)
+                }
+            }
+            Err(IdentityError::CredentialNotFound) => Err(AccountStatusChangeError::NotFound),
+            Err(other) => Err(AccountStatusChangeError::Store(other)),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct AccountStatusQueryService {
+    accounts: Arc<DynAccountSecurityReadRepo<'static>>,
+}
+
+impl AccountStatusQueryService {
+    async fn account_status(
+        &self,
+        tenant: TenantId,
+        user_id: ids::UserId,
+    ) -> Result<crate::domain::AccountStatus, AccountStatusChangeError> {
+        self.accounts
+            .find(tenant_repo_scope(tenant), user_id)
+            .await
+            .map_err(AccountStatusChangeError::Store)?
+            .map(|state| state.status())
+            .ok_or(AccountStatusChangeError::NotFound)
+    }
+}
+
+impl CredentialSecurityService {
+    // Internal-only typed entrypoint: reactivation is deliberately not mounted on HTTP.
+    #[allow(dead_code)]
+    pub(crate) async fn reactivate_account(
+        &self,
+        scope: TenantRepoScope,
+        user_id: ids::UserId,
+    ) -> Result<crate::domain::AccountSecurityState, AccountStatusChangeError> {
+        let state = self
+            .accounts
+            .find(scope, user_id)
+            .await
+            .map_err(AccountStatusChangeError::Store)?
+            .ok_or(AccountStatusChangeError::NotFound)?;
+        let command = crate::domain::ReactivateAccountCommand::new(state, self.clock.now())
+            .map_err(map_account_transition_error)?;
+        self.reactivation
+            .execute_reactivation(scope, command)
+            .await
+            .map_err(|error| match error {
+                IdentityError::VersionConflict => AccountStatusChangeError::VersionConflict,
+                IdentityError::CredentialNotFound => AccountStatusChangeError::NotFound,
+                other => AccountStatusChangeError::Store(other),
+            })
     }
 
     pub async fn logout_current(
@@ -608,8 +787,14 @@ impl CredentialSecurityService {
         {
             return Err(IdentityError::VersionConflict);
         }
-        let command = crate::domain::CredentialSecurityCommand::logout_current(grant, now)
-            .map_err(|error| IdentityError::Storage(Box::new(error)))?;
+        let initiator = crate::domain::CredentialSecurityInitiator::authenticated(
+            evidence.tenant_id(),
+            vocab::PrincipalKind::User,
+            evidence.user_id().as_uuid().hyphenated().to_string(),
+        );
+        let command =
+            crate::domain::CredentialSecurityCommand::logout_current(grant, initiator, now)
+                .map_err(|error| IdentityError::Storage(Box::new(error)))?;
         self.lifecycle
             .execute_logout_current(receipt, scope, command)
             .await
@@ -634,56 +819,21 @@ impl CredentialSecurityService {
         {
             return Err(IdentityError::VersionConflict);
         }
-        let command = crate::domain::CredentialSecurityCommand::logout_all(state, self.clock.now())
-            .map_err(|error| IdentityError::Storage(Box::new(error)))?;
+        let initiator = crate::domain::CredentialSecurityInitiator::authenticated(
+            evidence.tenant_id(),
+            vocab::PrincipalKind::User,
+            evidence.user_id().as_uuid().hyphenated().to_string(),
+        );
+        let command = crate::domain::CredentialSecurityCommand::logout_all(
+            state,
+            initiator,
+            self.clock.now(),
+        )
+        .map_err(|error| IdentityError::Storage(Box::new(error)))?;
         self.lifecycle
             .execute_logout_all(receipt, scope, command)
             .await
             .map(|_| ())
-    }
-}
-
-#[cfg(any(test, feature = "test-support"))]
-struct InertAccountSecurityRead;
-
-#[cfg(any(test, feature = "test-support"))]
-impl AccountSecurityReadRepo for InertAccountSecurityRead {
-    async fn find(
-        &self,
-        _scope: TenantRepoScope,
-        _user_id: ids::UserId,
-    ) -> Result<Option<crate::domain::AccountSecurityState>, IdentityError> {
-        Err(IdentityError::Storage(Box::new(std::io::Error::other(
-            "inert credential-security test dependency",
-        ))))
-    }
-}
-
-#[cfg(any(test, feature = "test-support"))]
-struct InertIdentitySecurityLifecycle;
-
-#[cfg(any(test, feature = "test-support"))]
-impl IdentitySecurityLifecycle for InertIdentitySecurityLifecycle {
-    async fn execute_logout_current(
-        &self,
-        _receipt: LogoutCurrentProducerReceipt,
-        _scope: TenantRepoScope,
-        _command: crate::domain::LogoutCurrentCommand,
-    ) -> Result<crate::domain::CredentialSecurityReceipt, IdentityError> {
-        Err(IdentityError::Storage(Box::new(std::io::Error::other(
-            "inert credential-security test dependency",
-        ))))
-    }
-
-    async fn execute_logout_all(
-        &self,
-        _receipt: LogoutAllProducerReceipt,
-        _scope: TenantRepoScope,
-        _command: crate::domain::LogoutAllCommand,
-    ) -> Result<crate::domain::CredentialSecurityReceipt, IdentityError> {
-        Err(IdentityError::Storage(Box::new(std::io::Error::other(
-            "inert credential-security test dependency",
-        ))))
     }
 }
 
@@ -1376,61 +1526,32 @@ fn policy_management_permission(scope: &PolicyRouteScope) -> GrantPermission {
 fn contract_auth_policy(
     request: &RouteAuthorizationRequest,
 ) -> Result<ContractAuthPolicy, AuthReject> {
-    match request.contract_id {
-        id if id == PROFILE_HTTP_SPEC.route.contract_id() => {
-            permission_from_request(request, &PROFILE_HTTP_SPEC)?;
-            Ok(ContractAuthPolicy::SelfScoped)
+    for spec in [PROFILE_HTTP_SPEC, PASSWORD_CHANGE_HTTP_SPEC] {
+        if request.contract_id == spec.route.contract_id() {
+            permission_from_request(request, &spec)?;
+            return Ok(ContractAuthPolicy::SelfScoped);
         }
-        id if id == PASSWORD_CHANGE_HTTP_SPEC.route.contract_id() => {
-            permission_from_request(request, &PASSWORD_CHANGE_HTTP_SPEC)?;
-            Ok(ContractAuthPolicy::SelfScoped)
-        }
-        id if id == LOGOUT_HTTP_SPEC.route.contract_id() => {
-            permission_from_request(request, &LOGOUT_HTTP_SPEC)
-                .map(ContractAuthPolicy::RolePermission)
-        }
-        id if id == LOGOUT_ALL_HTTP_SPEC.route.contract_id() => {
-            permission_from_request(request, &LOGOUT_ALL_HTTP_SPEC)
-                .map(ContractAuthPolicy::RolePermission)
-        }
-        id if id == ROLES_ASSIGN_HTTP_SPEC.route.contract_id() => {
-            permission_from_request(request, &ROLES_ASSIGN_HTTP_SPEC)
-                .map(ContractAuthPolicy::RolePermission)
-        }
-        id if id == ROLES_LIST_HTTP_SPEC.route.contract_id() => {
-            permission_from_request(request, &ROLES_LIST_HTTP_SPEC)
-                .map(ContractAuthPolicy::RolePermission)
-        }
-        id if id == ROLES_REVOKE_HTTP_SPEC.route.contract_id() => {
-            permission_from_request(request, &ROLES_REVOKE_HTTP_SPEC)
-                .map(ContractAuthPolicy::RolePermission)
-        }
-        id if id == POLICIES_CREATE_HTTP_SPEC.route.contract_id() => {
-            permission_from_request(request, &POLICIES_CREATE_HTTP_SPEC)
-                .map(ContractAuthPolicy::RolePermission)
-        }
-        id if id == POLICIES_UPDATE_HTTP_SPEC.route.contract_id() => {
-            permission_from_request(request, &POLICIES_UPDATE_HTTP_SPEC)
-                .map(ContractAuthPolicy::RolePermission)
-        }
-        id if id == POLICIES_DEACTIVATE_HTTP_SPEC.route.contract_id() => {
-            permission_from_request(request, &POLICIES_DEACTIVATE_HTTP_SPEC)
-                .map(ContractAuthPolicy::RolePermission)
-        }
-        id if id == POLICIES_GET_HTTP_SPEC.route.contract_id() => {
-            permission_from_request(request, &POLICIES_GET_HTTP_SPEC)
-                .map(ContractAuthPolicy::RolePermission)
-        }
-        id if id == POLICIES_LIST_HTTP_SPEC.route.contract_id() => {
-            permission_from_request(request, &POLICIES_LIST_HTTP_SPEC)
-                .map(ContractAuthPolicy::RolePermission)
-        }
-        id if id == RUNTIME_INVENTORY_HTTP_SPEC.route.contract_id() => {
-            permission_from_request(request, &RUNTIME_INVENTORY_HTTP_SPEC)
-                .map(ContractAuthPolicy::RolePermission)
-        }
-        _ => Ok(ContractAuthPolicy::RolePermission(request.permission)),
     }
+    for spec in [
+        ACCOUNT_STATUS_SET_HTTP_SPEC,
+        ACCOUNT_STATUS_GET_HTTP_SPEC,
+        LOGOUT_HTTP_SPEC,
+        LOGOUT_ALL_HTTP_SPEC,
+        ROLES_ASSIGN_HTTP_SPEC,
+        ROLES_LIST_HTTP_SPEC,
+        ROLES_REVOKE_HTTP_SPEC,
+        POLICIES_CREATE_HTTP_SPEC,
+        POLICIES_UPDATE_HTTP_SPEC,
+        POLICIES_DEACTIVATE_HTTP_SPEC,
+        POLICIES_GET_HTTP_SPEC,
+        POLICIES_LIST_HTTP_SPEC,
+        RUNTIME_INVENTORY_HTTP_SPEC,
+    ] {
+        if request.contract_id == spec.route.contract_id() {
+            return permission_from_request(request, &spec).map(ContractAuthPolicy::RolePermission);
+        }
+    }
+    Ok(ContractAuthPolicy::RolePermission(request.permission))
 }
 
 impl ContractAuthorizer {
@@ -1677,9 +1798,17 @@ impl ContractAuthorizer {
                     RoutePermissionId::IdentitySessionLogoutAll
                 )
             );
+        let rss_user_account_status = ctx.kind == vocab::PrincipalKind::User
+            && [ACCOUNT_STATUS_GET_HTTP_SPEC, ACCOUNT_STATUS_SET_HTTP_SPEC]
+                .iter()
+                .any(|spec| {
+                    spec.route.contract_id() == contract_id
+                        && spec.route.auth() == HttpRouteAuth::Permission(permission)
+                });
         if ctx.kind != vocab::PrincipalKind::Admin
             && !runtime_inventory_rss_user
             && !rss_user_session_logout
+            && !rss_user_account_status
         {
             return Err(AuthReject::Forbidden);
         }
@@ -2054,21 +2183,19 @@ struct PolicyManageHandlerState {
     authorizer: Arc<ContractAuthorizer>,
 }
 
-struct SelfServiceHandlerState<S> {
-    service: Arc<LoginService<S>>,
-}
-
 #[derive(Clone)]
 struct CredentialSecurityHandlerState {
     service: Arc<CredentialSecurityService>,
 }
 
-impl<S> Clone for SelfServiceHandlerState<S> {
-    fn clone(&self) -> Self {
-        Self {
-            service: Arc::clone(&self.service),
-        }
-    }
+#[derive(Clone)]
+struct AccountStatusQueryHandlerState {
+    query: AccountStatusQueryService,
+}
+
+impl httpserve::ClassifiedRouteState for AccountStatusQueryHandlerState {
+    type Effect = diport::AuthEffect;
+    type Privilege = diport::LocalPrivilege;
 }
 
 #[derive(Clone)]
@@ -2710,9 +2837,9 @@ async fn profile_handler(
         .into_response()
 }
 
-async fn password_change_handler<S: diport::Signer + Send + Sync + 'static>(
-    _: ContractMarker<::generated::http::identity_v1::password_change::RouteMarker>,
-    State(state): State<SelfServiceHandlerState<S>>,
+async fn password_change_handler(
+    marker: ProducerMarker<::generated::http::identity_v1::password_change::RouteMarker>,
+    State(state): State<CredentialSecurityHandlerState>,
     req: Request<Body>,
 ) -> Response {
     let request_id = request_id_from(&req);
@@ -2732,14 +2859,28 @@ async fn password_change_handler<S: diport::Signer + Send + Sync + 'static>(
         Ok(request) => request,
         Err(_) => return httpserve::error::validation_bad_request(&request_id),
     };
-    match state
+    let prepared = match state
         .service
-        .change_password(
+        .reauthenticate_password_change(
             auth.tenant,
             auth.user_id,
-            request.current_password,
-            request.new_password.into(),
+            secure::RawPassword::new(request.current_password),
         )
+        .await
+    {
+        Ok(prepared) => prepared,
+        Err(error) => return password_error_response(&error, auth.tenant, &request_id),
+    };
+    let validated = match state
+        .service
+        .validate_new_password(secure::RawPassword::new(request.new_password.into()))
+    {
+        Ok(validated) => validated,
+        Err(error) => return password_error_response(&error, auth.tenant, &request_id),
+    };
+    match state
+        .service
+        .change_password(marker.into_receipt(), prepared, validated)
         .await
     {
         Ok(()) => (
@@ -2750,6 +2891,113 @@ async fn password_change_handler<S: diport::Signer + Send + Sync + 'static>(
         )
             .into_response(),
         Err(err) => password_error_response(&err, auth.tenant, &request_id),
+    }
+}
+
+async fn account_status_get_handler(
+    _: ContractMarker<::generated::http::identity_v1::account_status_get::RouteMarker>,
+    State(state): State<AccountStatusQueryHandlerState>,
+    Path(user_id_raw): Path<String>,
+    req: Request<Body>,
+) -> Response {
+    let request_id = request_id_from(&req);
+    let auth = match authenticated_subject_context(&req) {
+        Ok(auth) => auth,
+        Err(reject) => return reject.into_response(&request_id),
+    };
+    let user_id = match ids::UserId::parse(&user_id_raw) {
+        Ok(user_id) => user_id,
+        Err(_) => return httpserve::error::validation_bad_request(&request_id),
+    };
+    match state.query.account_status(auth.tenant, user_id).await {
+        Ok(status) => {
+            let status = match status {
+                crate::domain::AccountStatus::Active => IdentityAccountStatusGetDataStatus::Active,
+                crate::domain::AccountStatus::Suspended => {
+                    IdentityAccountStatusGetDataStatus::Suspended
+                }
+                crate::domain::AccountStatus::Locked => IdentityAccountStatusGetDataStatus::Locked,
+                crate::domain::AccountStatus::Deactivated => {
+                    IdentityAccountStatusGetDataStatus::Deactivated
+                }
+            };
+            (
+                StatusCode::OK,
+                Json(IdentityAccountStatusGetResponse {
+                    data: IdentityAccountStatusGetData { status },
+                }),
+            )
+                .into_response()
+        }
+        Err(error) => account_status_error_response(&error, auth.tenant, &request_id),
+    }
+}
+
+async fn account_status_set_handler(
+    marker: ProducerMarker<::generated::http::identity_v1::account_status_set::RouteMarker>,
+    State(state): State<CredentialSecurityHandlerState>,
+    Path(user_id_raw): Path<String>,
+    req: Request<Body>,
+) -> Response {
+    let request_id = request_id_from(&req);
+    let subject = match authenticated_subject_context(&req) {
+        Ok(ctx) => ctx,
+        Err(reject) => return reject.into_response(&request_id),
+    };
+    let auth = subject;
+    let user_id = match ids::UserId::parse(&user_id_raw) {
+        Ok(user_id) => user_id,
+        Err(_) => return httpserve::error::validation_bad_request(&request_id),
+    };
+    let body = match body_bytes(req, &request_id).await {
+        Ok(body) => body,
+        Err(response) => return response,
+    };
+    let request: IdentityAccountStatusSetRequest = match serde_json::from_slice(&body) {
+        Ok(request) => request,
+        Err(_) => return httpserve::error::validation_bad_request(&request_id),
+    };
+    let (target, status) = match request.target_status {
+        IdentityAccountStatusSetRequestTargetStatus::Active => (
+            crate::domain::AccountStatus::Active,
+            IdentityAccountStatusSetDataStatus::Active,
+        ),
+        IdentityAccountStatusSetRequestTargetStatus::Suspended => (
+            crate::domain::AccountStatus::Suspended,
+            IdentityAccountStatusSetDataStatus::Suspended,
+        ),
+        IdentityAccountStatusSetRequestTargetStatus::Locked => (
+            crate::domain::AccountStatus::Locked,
+            IdentityAccountStatusSetDataStatus::Locked,
+        ),
+        IdentityAccountStatusSetRequestTargetStatus::Deactivated => (
+            crate::domain::AccountStatus::Deactivated,
+            IdentityAccountStatusSetDataStatus::Deactivated,
+        ),
+    };
+    match state
+        .service
+        .set_account_status(
+            marker.into_receipt(),
+            auth.tenant,
+            user_id,
+            target,
+            crate::domain::CredentialSecurityInitiator::authenticated(
+                auth.tenant,
+                auth.kind,
+                auth.subject,
+            ),
+        )
+        .await
+    {
+        Ok(changed) => (
+            StatusCode::OK,
+            Json(IdentityAccountStatusSetResponse {
+                data: IdentityAccountStatusSetData { changed, status },
+            }),
+        )
+            .into_response(),
+        Err(error) => account_status_error_response(&error, auth.tenant, &request_id),
     }
 }
 
@@ -2979,6 +3227,31 @@ fn password_error_response(
     core_response(kind, request_id)
 }
 
+fn account_status_error_response(
+    error: &AccountStatusChangeError,
+    tenant: TenantId,
+    request_id: &str,
+) -> Response {
+    let kind = match error {
+        AccountStatusChangeError::NotFound => CoreErrorKind::NotFound,
+        AccountStatusChangeError::InvalidTransition => CoreErrorKind::Conflict,
+        AccountStatusChangeError::VersionConflict => CoreErrorKind::VersionConflict,
+        AccountStatusChangeError::Store(_) => CoreErrorKind::Internal,
+    };
+    if matches!(kind, CoreErrorKind::Internal) {
+        tracing::error!(
+            error = %error,
+            error_chain = %secure::redact_error(error),
+            request_id,
+            tenant_id = %tenant,
+            contract_id = ACCOUNT_STATUS_SET_HTTP_SPEC.route.contract_id(),
+            operation = "account_status_set",
+            "identity account status set failed"
+        );
+    }
+    core_response(kind, request_id)
+}
+
 /// identity 域 bootstrap 生命周期：声明 identity HTTP 路由组（Primary listener，同 `/api/v1/identity` 前缀）。
 /// 泛型 `S: Signer` 随 login/refresh 服务穿透，组合根单态化 `S = vault::VaultSigner`。
 pub struct IdentityDomainDeps<S> {
@@ -3200,12 +3473,16 @@ impl<S: diport::Signer + Send + Sync + 'static> ::bootstrap::Domain for Identity
         let login = Arc::clone(&self.login);
         let refresh = Arc::clone(&self.refresh);
         let common = self.common.route_state();
-        let password = SelfServiceHandlerState {
-            service: Arc::clone(&self.login),
+        let account_status_get = AccountStatusQueryHandlerState {
+            query: AccountStatusQueryService {
+                accounts: Arc::clone(&self.credential_security.accounts),
+            },
         };
         let credential_security = CredentialSecurityHandlerState {
             service: Arc::clone(&self.credential_security),
         };
+        let password = credential_security.clone();
+        let account_status = credential_security.clone();
         let logout_all = credential_security.clone();
         reg.route_group::<Primary>(LOGIN_ROUTE_PREFIX, move |rb| {
             let rb = rb.mount(
@@ -3218,11 +3495,25 @@ impl<S: diport::Signer + Send + Sync + 'static> ::bootstrap::Domain for Identity
             )?;
             let rb = mount_common_identity_routes(rb, common)?;
             let rb = rb.mount(
-                GeneratedPrimaryEndpoint::new(
-                    PASSWORD_CHANGE_HTTP_ROUTE,
-                    password_change_handler::<S>,
+                GeneratedPrimaryEndpoint::new_producer(
+                    PASSWORD_CHANGE_PRODUCER,
+                    password_change_handler,
                 )?
                 .with_state(password),
+            )?;
+            let rb = rb.mount(
+                GeneratedPrimaryEndpoint::new_producer(
+                    ACCOUNT_STATUS_SET_PRODUCER,
+                    account_status_set_handler,
+                )?
+                .with_state(account_status),
+            )?;
+            let rb = rb.mount(
+                GeneratedPrimaryEndpoint::new(
+                    ACCOUNT_STATUS_GET_HTTP_ROUTE,
+                    account_status_get_handler,
+                )?
+                .with_classified_state(account_status_get),
             )?;
             let rb = rb.mount(
                 GeneratedPrimaryEndpoint::new_producer(LOGOUT_PRODUCER, logout_handler)?
@@ -3255,9 +3546,8 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use crate::ports::{
-        AccountSecurityLifecycle, AccountSecurityReadRepo, AccountSecurityState, Credential,
-        DynPolicyLifecycle, Operator, Policy, PolicyCondition, PolicyEffect, PolicyObligations,
-        PolicyRule, Role,
+        AccountSecurityReadRepo, AccountSecurityState, Credential, DynPolicyLifecycle, Operator,
+        Policy, PolicyCondition, PolicyEffect, PolicyObligations, PolicyRule, Role,
     };
     use authn::CredentialSecurityEventKind;
     use diport::OutboxEmitError;
@@ -3271,6 +3561,24 @@ mod tests {
     // 未种子化的 canonical user id（change_password 未知主体 → NotFound，#1277 F2）。
     const GHOST_USER: &str = "99999999-8888-4777-8666-555544443333";
     const RESOURCE_ID: &str = "550e8400-e29b-41d4-a716-446655440000";
+
+    #[test]
+    fn account_transition_errors_only_classify_illegal_edges_as_validation() {
+        use crate::domain::AccountSecurityTransitionError::{
+            EpochOverflow, Illegal, TimeRegression, VersionOverflow,
+        };
+
+        assert!(matches!(
+            map_account_transition_error(Illegal),
+            AccountStatusChangeError::InvalidTransition
+        ));
+        for error in [EpochOverflow, VersionOverflow, TimeRegression] {
+            assert!(matches!(
+                map_account_transition_error(error),
+                AccountStatusChangeError::Store(IdentityError::Storage(_))
+            ));
+        }
+    }
 
     fn login_receipt() -> LoginProducerReceipt {
         ProducerMarker::for_test(LOGIN_PRODUCER).into_receipt()
@@ -3295,6 +3603,32 @@ mod tests {
     struct ConfirmingIdentitySecurityLifecycle;
 
     impl IdentitySecurityLifecycle for ConfirmingIdentitySecurityLifecycle {
+        async fn execute_password_change(
+            &self,
+            _receipt: PasswordChangeProducerReceipt,
+            _scope: TenantRepoScope,
+            command: crate::domain::PasswordChangeCommand,
+        ) -> Result<crate::domain::CredentialSecurityReceipt, IdentityError> {
+            let (_, _, command) = command.into_parts();
+            let (_, _, pending) = command.into_parts();
+            Ok(pending.confirm())
+        }
+
+        async fn execute_account_status_set(
+            &self,
+            _receipt: AccountStatusSetProducerReceipt,
+            _scope: TenantRepoScope,
+            command: crate::domain::AccountStatusSetCommand,
+        ) -> Result<crate::domain::CredentialSecurityReceipt, IdentityError> {
+            let crate::domain::CredentialSecurityCommand::Account(command) =
+                command.into_security_command()
+            else {
+                unreachable!("account status set is account-wide")
+            };
+            let (_, _, pending) = command.into_parts();
+            Ok(pending.confirm())
+        }
+
         async fn execute_logout_current(
             &self,
             _receipt: LogoutCurrentProducerReceipt,
@@ -3326,9 +3660,170 @@ mod tests {
         }
     }
 
+    impl AccountReactivationLifecycle for ConfirmingIdentitySecurityLifecycle {
+        async fn execute_reactivation(
+            &self,
+            _scope: TenantRepoScope,
+            command: crate::domain::ReactivateAccountCommand,
+        ) -> Result<AccountSecurityState, IdentityError> {
+            let (_, next) = command.into_mutation().into_parts();
+            Ok(next)
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct CapturingStatusSetLifecycle {
+        observed: Arc<Mutex<Vec<(CredentialSecurityEventKind, vocab::PrincipalKind)>>>,
+    }
+
+    impl CapturingStatusSetLifecycle {
+        fn observed(&self) -> Vec<(CredentialSecurityEventKind, vocab::PrincipalKind)> {
+            self.observed
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .clone()
+        }
+    }
+
+    impl IdentitySecurityLifecycle for CapturingStatusSetLifecycle {
+        async fn execute_password_change(
+            &self,
+            _receipt: PasswordChangeProducerReceipt,
+            _scope: TenantRepoScope,
+            _command: crate::domain::PasswordChangeCommand,
+        ) -> Result<crate::domain::CredentialSecurityReceipt, IdentityError> {
+            Err(provider_unavailable())
+        }
+
+        async fn execute_account_status_set(
+            &self,
+            _receipt: AccountStatusSetProducerReceipt,
+            _scope: TenantRepoScope,
+            command: crate::domain::AccountStatusSetCommand,
+        ) -> Result<crate::domain::CredentialSecurityReceipt, IdentityError> {
+            self.observed
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .push((command.event().kind(), command.event().initiator().kind()));
+            let crate::domain::CredentialSecurityCommand::Account(command) =
+                command.into_security_command()
+            else {
+                unreachable!("account status set is account-wide")
+            };
+            let (_, _, pending) = command.into_parts();
+            Ok(pending.confirm())
+        }
+
+        async fn execute_logout_current(
+            &self,
+            _receipt: LogoutCurrentProducerReceipt,
+            _scope: TenantRepoScope,
+            _command: crate::domain::LogoutCurrentCommand,
+        ) -> Result<crate::domain::CredentialSecurityReceipt, IdentityError> {
+            Err(provider_unavailable())
+        }
+
+        async fn execute_logout_all(
+            &self,
+            _receipt: LogoutAllProducerReceipt,
+            _scope: TenantRepoScope,
+            _command: crate::domain::LogoutAllCommand,
+        ) -> Result<crate::domain::CredentialSecurityReceipt, IdentityError> {
+            Err(provider_unavailable())
+        }
+    }
+
+    #[derive(Clone)]
+    struct ConcurrentWinnerStatusSetLifecycle {
+        accounts: crate::internal::mem::InMemCredentialRepo,
+        winner_status: crate::AccountStatus,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl IdentitySecurityLifecycle for ConcurrentWinnerStatusSetLifecycle {
+        async fn execute_password_change(
+            &self,
+            _receipt: PasswordChangeProducerReceipt,
+            _scope: TenantRepoScope,
+            _command: crate::domain::PasswordChangeCommand,
+        ) -> Result<crate::domain::CredentialSecurityReceipt, IdentityError> {
+            Err(provider_unavailable())
+        }
+
+        async fn execute_account_status_set(
+            &self,
+            _receipt: AccountStatusSetProducerReceipt,
+            _scope: TenantRepoScope,
+            command: crate::domain::AccountStatusSetCommand,
+        ) -> Result<crate::domain::CredentialSecurityReceipt, IdentityError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let crate::domain::CredentialSecurityCommand::Account(command) =
+                command.into_security_command()
+            else {
+                unreachable!("account status set is account-wide")
+            };
+            let (mutation, _, _) = command.into_parts();
+            let (expected, requested) = mutation.into_parts();
+            let persisted = if requested.status() == self.winner_status {
+                requested
+            } else {
+                expected
+                    .transition(
+                        self.winner_status,
+                        SystemTime::UNIX_EPOCH + Duration::from_secs(1_000),
+                    )
+                    .expect("simulated concurrent winner transition")
+                    .into_parts()
+                    .1
+            };
+            self.accounts.set_account_security_for_test(persisted);
+            Err(IdentityError::VersionConflict)
+        }
+
+        async fn execute_logout_current(
+            &self,
+            _receipt: LogoutCurrentProducerReceipt,
+            _scope: TenantRepoScope,
+            _command: crate::domain::LogoutCurrentCommand,
+        ) -> Result<crate::domain::CredentialSecurityReceipt, IdentityError> {
+            Err(provider_unavailable())
+        }
+
+        async fn execute_logout_all(
+            &self,
+            _receipt: LogoutAllProducerReceipt,
+            _scope: TenantRepoScope,
+            _command: crate::domain::LogoutAllCommand,
+        ) -> Result<crate::domain::CredentialSecurityReceipt, IdentityError> {
+            Err(provider_unavailable())
+        }
+    }
+
+    fn provider_unavailable() -> IdentityError {
+        IdentityError::ProviderUnavailable(Box::new(std::io::Error::other("database unavailable")))
+    }
+
     struct UnavailableIdentitySecurityLifecycle;
 
     impl IdentitySecurityLifecycle for UnavailableIdentitySecurityLifecycle {
+        async fn execute_password_change(
+            &self,
+            _receipt: PasswordChangeProducerReceipt,
+            _scope: TenantRepoScope,
+            _command: crate::domain::PasswordChangeCommand,
+        ) -> Result<crate::domain::CredentialSecurityReceipt, IdentityError> {
+            Err(provider_unavailable())
+        }
+
+        async fn execute_account_status_set(
+            &self,
+            _receipt: AccountStatusSetProducerReceipt,
+            _scope: TenantRepoScope,
+            _command: crate::domain::AccountStatusSetCommand,
+        ) -> Result<crate::domain::CredentialSecurityReceipt, IdentityError> {
+            Err(provider_unavailable())
+        }
+
         async fn execute_logout_current(
             &self,
             _receipt: LogoutCurrentProducerReceipt,
@@ -3352,9 +3847,37 @@ mod tests {
         }
     }
 
+    impl AccountReactivationLifecycle for UnavailableIdentitySecurityLifecycle {
+        async fn execute_reactivation(
+            &self,
+            _scope: TenantRepoScope,
+            _command: crate::domain::ReactivateAccountCommand,
+        ) -> Result<AccountSecurityState, IdentityError> {
+            Err(provider_unavailable())
+        }
+    }
+
     struct ConflictingIdentitySecurityLifecycle;
 
     impl IdentitySecurityLifecycle for ConflictingIdentitySecurityLifecycle {
+        async fn execute_password_change(
+            &self,
+            _receipt: PasswordChangeProducerReceipt,
+            _scope: TenantRepoScope,
+            _command: crate::domain::PasswordChangeCommand,
+        ) -> Result<crate::domain::CredentialSecurityReceipt, IdentityError> {
+            Err(IdentityError::VersionConflict)
+        }
+
+        async fn execute_account_status_set(
+            &self,
+            _receipt: AccountStatusSetProducerReceipt,
+            _scope: TenantRepoScope,
+            _command: crate::domain::AccountStatusSetCommand,
+        ) -> Result<crate::domain::CredentialSecurityReceipt, IdentityError> {
+            Err(IdentityError::VersionConflict)
+        }
+
         async fn execute_logout_current(
             &self,
             _receipt: LogoutCurrentProducerReceipt,
@@ -3370,6 +3893,16 @@ mod tests {
             _scope: TenantRepoScope,
             _command: crate::domain::LogoutAllCommand,
         ) -> Result<crate::domain::CredentialSecurityReceipt, IdentityError> {
+            Err(IdentityError::VersionConflict)
+        }
+    }
+
+    impl AccountReactivationLifecycle for ConflictingIdentitySecurityLifecycle {
+        async fn execute_reactivation(
+            &self,
+            _scope: TenantRepoScope,
+            _command: crate::domain::ReactivateAccountCommand,
+        ) -> Result<AccountSecurityState, IdentityError> {
             Err(IdentityError::VersionConflict)
         }
     }
@@ -3378,11 +3911,569 @@ mod tests {
         login: &Arc<LoginService<S>>,
     ) -> Arc<CredentialSecurityService> {
         Arc::new(CredentialSecurityService::new(
+            Arc::clone(&login.credentials),
             Arc::clone(&login.lifecycle),
             DynAccountSecurityReadRepo::new_box(EmptyAccountSecurityRead::default()),
             ConfirmingIdentitySecurityLifecycle,
+            ConfirmingIdentitySecurityLifecycle,
+            seed_password_policy(),
             make_clock(1_000),
         ))
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn credential_security_reactivation_preserves_epoch_and_advances_version() {
+        let tenant = tid(CANON_TENANT);
+        let user = uid(CANON_USER);
+        let accounts = crate::internal::mem::InMemCredentialRepo::with_seed_credential(
+            "alice",
+            user,
+            "correct-horse",
+            tenant,
+        )
+        .expect("seed credential and account");
+        let active = accounts
+            .find(tenant_repo_scope(tenant), user)
+            .await
+            .expect("read account")
+            .expect("seed account");
+        let (_, suspended) = active
+            .transition(
+                crate::AccountStatus::Suspended,
+                SystemTime::UNIX_EPOCH + Duration::from_secs(999),
+            )
+            .expect("active can suspend")
+            .into_parts();
+        accounts.set_account_security_for_test(suspended.clone());
+
+        let grants = crate::internal::mem::InMemAuthGrantStore::new();
+        let service = CredentialSecurityService::new(
+            Arc::from(DynCredentialRepo::new_box(accounts.clone())),
+            test_lifecycle(grants),
+            DynAccountSecurityReadRepo::new_box(accounts),
+            ConfirmingIdentitySecurityLifecycle,
+            ConfirmingIdentitySecurityLifecycle,
+            seed_password_policy(),
+            make_clock(1_000),
+        );
+
+        let restored = service
+            .reactivate_account(tenant_repo_scope(tenant), user)
+            .await
+            .expect("suspended account can reactivate");
+        assert_eq!(restored.status(), crate::AccountStatus::Active);
+        assert_eq!(restored.authn_epoch(), suspended.authn_epoch());
+        assert_eq!(restored.version().get(), suspended.version().get() + 1);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn account_status_set_handler_maps_success_and_cross_tenant_not_found() {
+        let tenant = tid(CANON_TENANT);
+        let user = uid(CANON_USER);
+        let accounts = crate::internal::mem::InMemCredentialRepo::with_seed_credential(
+            "alice",
+            user,
+            "correct-horse",
+            tenant,
+        )
+        .expect("seed credential and account");
+        let service = Arc::new(CredentialSecurityService::new(
+            Arc::from(DynCredentialRepo::new_box(accounts.clone())),
+            test_lifecycle(crate::internal::mem::InMemAuthGrantStore::new()),
+            DynAccountSecurityReadRepo::new_box(accounts),
+            ConfirmingIdentitySecurityLifecycle,
+            ConfirmingIdentitySecurityLifecycle,
+            seed_password_policy(),
+            make_clock(1_000),
+        ));
+        let state = State(CredentialSecurityHandlerState { service });
+
+        let mut opaque_admin = Request::builder()
+            .body(Body::from(r#"{"targetStatus":"suspended"}"#))
+            .expect("request");
+        opaque_admin
+            .extensions_mut()
+            .insert(AuthorizedSubject::for_test(
+                tenant,
+                vocab::PrincipalKind::Admin,
+                "admin-subj",
+                Some(httpserve::RouteResource::new(CANON_USER).expect("canonical route resource")),
+            ));
+        let response = account_status_set_handler(
+            ProducerMarker::for_test(ACCOUNT_STATUS_SET_PRODUCER),
+            state.clone(),
+            Path(CANON_USER.to_string()),
+            opaque_admin,
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "an already-authorized opaque admin subject must not be reparsed as a user UUID"
+        );
+
+        let mut request = Request::builder()
+            .body(Body::from(r#"{"targetStatus":"locked"}"#))
+            .expect("request");
+        request.extensions_mut().insert(AuthorizedSubject::for_test(
+            tenant,
+            vocab::PrincipalKind::User,
+            CANON_USER,
+            Some(httpserve::RouteResource::new(CANON_USER).expect("canonical route resource")),
+        ));
+        let response = account_status_set_handler(
+            ProducerMarker::for_test(ACCOUNT_STATUS_SET_PRODUCER),
+            state.clone(),
+            Path(CANON_USER.to_string()),
+            request,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let mut cross_tenant = Request::builder()
+            .body(Body::from(r#"{"targetStatus":"suspended"}"#))
+            .expect("request");
+        cross_tenant
+            .extensions_mut()
+            .insert(AuthorizedSubject::for_test(
+                tid(OTHER_TENANT),
+                vocab::PrincipalKind::User,
+                CANON_USER,
+                Some(httpserve::RouteResource::new(CANON_USER).expect("canonical route resource")),
+            ));
+        let response = account_status_set_handler(
+            ProducerMarker::for_test(ACCOUNT_STATUS_SET_PRODUCER),
+            state,
+            Path(CANON_USER.to_string()),
+            cross_tenant,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn account_status_get_and_same_state_put_are_readable_and_effect_free() {
+        let tenant = tid(CANON_TENANT);
+        let user = uid(CANON_USER);
+        let accounts = crate::internal::mem::InMemCredentialRepo::with_seed_credential(
+            "alice",
+            user,
+            "correct-horse",
+            tenant,
+        )
+        .expect("seed credential and account");
+        let service = Arc::new(CredentialSecurityService::new(
+            Arc::from(DynCredentialRepo::new_box(accounts.clone())),
+            test_lifecycle(crate::internal::mem::InMemAuthGrantStore::new()),
+            DynAccountSecurityReadRepo::new_box(accounts.clone()),
+            UnavailableIdentitySecurityLifecycle,
+            ConfirmingIdentitySecurityLifecycle,
+            seed_password_policy(),
+            make_clock(1_000),
+        ));
+        let mut set_request = Request::builder()
+            .body(Body::from(r#"{"targetStatus":"active"}"#))
+            .expect("set request");
+        set_request
+            .extensions_mut()
+            .insert(AuthorizedSubject::for_test(
+                tenant,
+                vocab::PrincipalKind::Admin,
+                "opaque-admin",
+                None,
+            ));
+        let response = account_status_set_handler(
+            ProducerMarker::for_test(ACCOUNT_STATUS_SET_PRODUCER),
+            State(CredentialSecurityHandlerState { service }),
+            Path(CANON_USER.to_string()),
+            set_request,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body");
+        let body: serde_json::Value = serde_json::from_slice(&body).expect("response json");
+        assert_eq!(body["data"]["status"], "active");
+        assert_eq!(body["data"]["changed"], false);
+
+        let mut get_request = Request::builder().body(Body::empty()).expect("get request");
+        get_request
+            .extensions_mut()
+            .insert(AuthorizedSubject::for_test(
+                tenant,
+                vocab::PrincipalKind::Admin,
+                "opaque-admin",
+                None,
+            ));
+        let response = account_status_get_handler(
+            ContractMarker::for_test(),
+            State(AccountStatusQueryHandlerState {
+                query: AccountStatusQueryService {
+                    accounts: Arc::from(DynAccountSecurityReadRepo::new_box(accounts)),
+                },
+            }),
+            Path(CANON_USER.to_string()),
+            get_request,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body");
+        let body: serde_json::Value = serde_json::from_slice(&body).expect("response json");
+        assert_eq!(body["data"]["status"], "active");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn account_status_restore_emits_reactivated_with_real_admin_initiator() {
+        let tenant = tid(CANON_TENANT);
+        let user = uid(CANON_USER);
+        let accounts = crate::internal::mem::InMemCredentialRepo::with_seed_credential(
+            "alice",
+            user,
+            "correct-horse",
+            tenant,
+        )
+        .expect("seed credential and account");
+        let active = accounts
+            .find(tenant_repo_scope(tenant), user)
+            .await
+            .expect("read")
+            .expect("account");
+        let (_, suspended) = active
+            .transition(
+                crate::AccountStatus::Suspended,
+                SystemTime::UNIX_EPOCH + Duration::from_secs(999),
+            )
+            .expect("suspend")
+            .into_parts();
+        accounts.set_account_security_for_test(suspended);
+        let lifecycle = CapturingStatusSetLifecycle::default();
+        let service = Arc::new(CredentialSecurityService::new(
+            Arc::from(DynCredentialRepo::new_box(accounts.clone())),
+            test_lifecycle(crate::internal::mem::InMemAuthGrantStore::new()),
+            DynAccountSecurityReadRepo::new_box(accounts),
+            lifecycle.clone(),
+            ConfirmingIdentitySecurityLifecycle,
+            seed_password_policy(),
+            make_clock(1_000),
+        ));
+        let mut request = Request::builder()
+            .body(Body::from(r#"{"targetStatus":"active"}"#))
+            .expect("request");
+        request.extensions_mut().insert(AuthorizedSubject::for_test(
+            tenant,
+            vocab::PrincipalKind::Admin,
+            "opaque-admin",
+            None,
+        ));
+        let response = account_status_set_handler(
+            ProducerMarker::for_test(ACCOUNT_STATUS_SET_PRODUCER),
+            State(CredentialSecurityHandlerState { service }),
+            Path(CANON_USER.to_string()),
+            request,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            lifecycle.observed(),
+            vec![(
+                CredentialSecurityEventKind::Account(
+                    authn::AccountSecurityEventKind::AccountReactivated,
+                ),
+                vocab::PrincipalKind::Admin,
+            )]
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn concurrent_desired_status_put_converges_only_when_winner_matches_target() {
+        async fn run(
+            requested: crate::AccountStatus,
+            winner: crate::AccountStatus,
+        ) -> (Result<bool, AccountStatusChangeError>, usize) {
+            let tenant = tid(CANON_TENANT);
+            let user = uid(CANON_USER);
+            let accounts = crate::internal::mem::InMemCredentialRepo::with_seed_credential(
+                "alice",
+                user,
+                "correct-horse",
+                tenant,
+            )
+            .expect("seed credential and account");
+            let calls = Arc::new(AtomicUsize::new(0));
+            let lifecycle = ConcurrentWinnerStatusSetLifecycle {
+                accounts: accounts.clone(),
+                winner_status: winner,
+                calls: Arc::clone(&calls),
+            };
+            let service = CredentialSecurityService::new(
+                Arc::from(DynCredentialRepo::new_box(accounts.clone())),
+                test_lifecycle(crate::internal::mem::InMemAuthGrantStore::new()),
+                DynAccountSecurityReadRepo::new_box(accounts),
+                lifecycle,
+                ConfirmingIdentitySecurityLifecycle,
+                seed_password_policy(),
+                make_clock(1_000),
+            );
+            let result = service
+                .set_account_status(
+                    ProducerMarker::for_test(ACCOUNT_STATUS_SET_PRODUCER).into_receipt(),
+                    tenant,
+                    user,
+                    requested,
+                    crate::domain::CredentialSecurityInitiator::authenticated(
+                        tenant,
+                        vocab::PrincipalKind::Admin,
+                        "opaque-admin",
+                    ),
+                )
+                .await;
+            (result, calls.load(Ordering::SeqCst))
+        }
+
+        let (same, same_calls) = run(
+            crate::AccountStatus::Suspended,
+            crate::AccountStatus::Suspended,
+        )
+        .await;
+        assert_eq!(same.expect("same desired status converges"), false);
+        assert_eq!(same_calls, 1, "conflict reconciliation must not emit/retry");
+
+        let (different, different_calls) = run(
+            crate::AccountStatus::Suspended,
+            crate::AccountStatus::Locked,
+        )
+        .await;
+        assert!(matches!(
+            different,
+            Err(AccountStatusChangeError::VersionConflict)
+        ));
+        assert_eq!(different_calls, 1, "different target must not be retried");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn account_status_set_handler_fails_closed_across_input_and_provider_errors() {
+        fn authorized_request(tenant: TenantId, body: &'static str) -> Request<Body> {
+            let mut request = Request::builder().body(Body::from(body)).expect("request");
+            request.extensions_mut().insert(AuthorizedSubject::for_test(
+                tenant,
+                vocab::PrincipalKind::Admin,
+                "opaque-admin",
+                None,
+            ));
+            request
+        }
+
+        let tenant = tid(CANON_TENANT);
+        let empty = EmptyAccountSecurityRead::default();
+        let empty_state = State(CredentialSecurityHandlerState {
+            service: Arc::new(CredentialSecurityService::new(
+                Arc::from(DynCredentialRepo::new_box(
+                    crate::internal::mem::InMemCredentialRepo::new(),
+                )),
+                test_lifecycle(crate::internal::mem::InMemAuthGrantStore::new()),
+                DynAccountSecurityReadRepo::new_box(empty.clone()),
+                ConfirmingIdentitySecurityLifecycle,
+                ConfirmingIdentitySecurityLifecycle,
+                seed_password_policy(),
+                make_clock(1_000),
+            )),
+        });
+
+        let response = account_status_set_handler(
+            ProducerMarker::for_test(ACCOUNT_STATUS_SET_PRODUCER),
+            empty_state.clone(),
+            Path(CANON_USER.to_string()),
+            Request::builder()
+                .body(Body::from(r#"{"targetStatus":"suspended"}"#))
+                .expect("request"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let response = account_status_set_handler(
+            ProducerMarker::for_test(ACCOUNT_STATUS_SET_PRODUCER),
+            empty_state.clone(),
+            Path("not-a-user-id".to_string()),
+            authorized_request(tenant, r#"{"targetStatus":"suspended"}"#),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let response = account_status_set_handler(
+            ProducerMarker::for_test(ACCOUNT_STATUS_SET_PRODUCER),
+            empty_state.clone(),
+            Path(CANON_USER.to_string()),
+            authorized_request(tenant, r#"{"targetStatus":"unsupported"}"#),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(empty.find_calls.load(Ordering::SeqCst), 0);
+
+        let response = account_status_set_handler(
+            ProducerMarker::for_test(ACCOUNT_STATUS_SET_PRODUCER),
+            empty_state,
+            Path(CANON_USER.to_string()),
+            authorized_request(tenant, r#"{"targetStatus":"suspended"}"#),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        for (unavailable, expected) in [
+            (true, StatusCode::INTERNAL_SERVER_ERROR),
+            (false, StatusCode::CONFLICT),
+        ] {
+            let accounts = crate::internal::mem::InMemCredentialRepo::with_seed_credential(
+                "alice",
+                uid(CANON_USER),
+                "correct-horse",
+                tenant,
+            )
+            .expect("seed credential and account");
+            let lifecycle: Box<DynIdentitySecurityLifecycle<'static>> = if unavailable {
+                DynIdentitySecurityLifecycle::new_box(UnavailableIdentitySecurityLifecycle)
+            } else {
+                DynIdentitySecurityLifecycle::new_box(ConflictingIdentitySecurityLifecycle)
+            };
+            let service = CredentialSecurityService {
+                credentials: Arc::from(DynCredentialRepo::new_box(accounts.clone())),
+                grants: test_lifecycle(crate::internal::mem::InMemAuthGrantStore::new()),
+                accounts: Arc::from(DynAccountSecurityReadRepo::new_box(accounts)),
+                lifecycle,
+                reactivation: DynAccountReactivationLifecycle::new_box(
+                    ConfirmingIdentitySecurityLifecycle,
+                ),
+                password_policy: seed_password_policy(),
+                clock: make_clock(1_000),
+            };
+            let response = account_status_set_handler(
+                ProducerMarker::for_test(ACCOUNT_STATUS_SET_PRODUCER),
+                State(CredentialSecurityHandlerState {
+                    service: Arc::new(service),
+                }),
+                Path(CANON_USER.to_string()),
+                authorized_request(tenant, r#"{"targetStatus":"suspended"}"#),
+            )
+            .await;
+            assert_eq!(response.status(), expected);
+        }
+    }
+
+    #[test]
+    fn account_status_invalid_transition_is_an_http_conflict() {
+        let response = account_status_error_response(
+            &AccountStatusChangeError::InvalidTransition,
+            tid(CANON_TENANT),
+            "request-invalid-transition",
+        );
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn password_reauthentication_failures_share_the_login_lockout_funnel() {
+        let tenant = tid(CANON_TENANT);
+        let user = uid(CANON_USER);
+        let credentials = crate::internal::mem::InMemCredentialRepo::with_seed_credential(
+            "alice",
+            user,
+            "correct-horse",
+            tenant,
+        )
+        .expect("seed credential and account");
+        let service = CredentialSecurityService::new(
+            Arc::from(DynCredentialRepo::new_box(credentials.clone())),
+            test_lifecycle(crate::internal::mem::InMemAuthGrantStore::new()),
+            DynAccountSecurityReadRepo::new_box(credentials.clone()),
+            ConfirmingIdentitySecurityLifecycle,
+            ConfirmingIdentitySecurityLifecycle,
+            seed_password_policy(),
+            make_clock(1_000),
+        );
+
+        for _attempt in 1..=5 {
+            let error = service
+                .reauthenticate_password_change(
+                    tenant,
+                    user,
+                    secure::RawPassword::new("wrong-current".to_owned()),
+                )
+                .await
+                .expect_err("wrong current password must reject");
+            assert!(matches!(error, ChangePasswordError::InvalidCredentials));
+        }
+
+        let outcome = credentials
+            .authenticate(
+                tenant_repo_scope(tenant),
+                LoginIdentifier::new("alice"),
+                secure::RawPassword::new("correct-horse".to_owned()),
+                SystemTime::UNIX_EPOCH + Duration::from_secs(1_001),
+            )
+            .await
+            .expect("lockout observation");
+        assert_eq!(
+            outcome,
+            AuthOutcome::RejectedKnown,
+            "password-change failures must atomically advance the same lockout used by login"
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn password_change_reauthentication_wins_over_new_password_policy() {
+        let tenant = tid(CANON_TENANT);
+        let user = uid(CANON_USER);
+        let credentials = crate::internal::mem::InMemCredentialRepo::with_seed_credential(
+            "alice",
+            user,
+            "correct-horse",
+            tenant,
+        )
+        .expect("seed credential and account");
+        let state = State(CredentialSecurityHandlerState {
+            service: Arc::new(CredentialSecurityService::new(
+                Arc::from(DynCredentialRepo::new_box(credentials.clone())),
+                test_lifecycle(crate::internal::mem::InMemAuthGrantStore::new()),
+                DynAccountSecurityReadRepo::new_box(credentials),
+                UnavailableIdentitySecurityLifecycle,
+                ConfirmingIdentitySecurityLifecycle,
+                seed_password_policy(),
+                make_clock(1_000),
+            )),
+        });
+        let mut request = Request::builder()
+            .body(Body::from(
+                r#"{"currentPassword":"wrong-current","newPassword":"weak"}"#,
+            ))
+            .expect("request");
+        request.extensions_mut().insert(AuthorizedSubject::for_test(
+            tenant,
+            vocab::PrincipalKind::User,
+            CANON_USER,
+            None,
+        ));
+
+        let response = password_change_handler(
+            ProducerMarker::for_test(PASSWORD_CHANGE_PRODUCER),
+            state,
+            request,
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "wrong current password must fail before replacement-password policy is observable"
+        );
     }
 
     fn attach_current_grant(req: &mut Request<Body>, evidence: CurrentAuthGrant) {
@@ -3403,9 +4494,12 @@ mod tests {
         let account_reader = EmptyAccountSecurityRead::default();
         let state = State(CredentialSecurityHandlerState {
             service: Arc::new(CredentialSecurityService::new(
+                Arc::clone(&login.credentials),
                 Arc::clone(&login.lifecycle),
                 DynAccountSecurityReadRepo::new_box(account_reader.clone()),
                 ConfirmingIdentitySecurityLifecycle,
+                ConfirmingIdentitySecurityLifecycle,
+                seed_password_policy(),
                 make_clock(1_000),
             )),
         });
@@ -3488,9 +4582,12 @@ mod tests {
         );
         let state = State(CredentialSecurityHandlerState {
             service: Arc::new(CredentialSecurityService::new(
+                seeded_credential_reader(),
                 test_lifecycle(store),
                 seeded_account_reader(),
                 UnavailableIdentitySecurityLifecycle,
+                UnavailableIdentitySecurityLifecycle,
+                seed_password_policy(),
                 make_clock(1_700_000_001),
             )),
         });
@@ -3536,9 +4633,12 @@ mod tests {
         );
         let state = State(CredentialSecurityHandlerState {
             service: Arc::new(CredentialSecurityService::new(
+                seeded_credential_reader(),
                 test_lifecycle(store),
                 seeded_account_reader(),
                 ConflictingIdentitySecurityLifecycle,
+                ConflictingIdentitySecurityLifecycle,
+                seed_password_policy(),
                 make_clock(1_700_000_001),
             )),
         });
@@ -3606,136 +4706,6 @@ mod tests {
     }
 
     // 域单测不依赖 adapter crate（rust-standards.md §命名）：AuthGrantLifecycle / Clock 替身在此手写。
-    #[derive(Default)]
-    struct CredentialRepoCalls {
-        find: AtomicUsize,
-        authenticate: AtomicUsize,
-        save: AtomicUsize,
-        bump_attempts: AtomicUsize,
-        bump_commits: AtomicUsize,
-    }
-
-    /// 改密路径的最小 test-only probe：所有存储行为委托给 `InMemCredentialRepo`，
-    /// 仅记录方法计数与可选的 CAS 冲突脚本，不保存或暴露明文密码。
-    #[derive(Clone)]
-    struct CredentialRepoProbe {
-        inner: Arc<crate::internal::mem::InMemCredentialRepo>,
-        calls: Arc<CredentialRepoCalls>,
-        conflict_on_bump: bool,
-    }
-
-    impl CredentialRepoProbe {
-        #[allow(clippy::expect_used)]
-        fn seeded(conflict_on_bump: bool) -> Self {
-            Self {
-                inner: Arc::new(
-                    crate::internal::mem::InMemCredentialRepo::with_seed_credential(
-                        "alice",
-                        uid(CANON_USER),
-                        "correct-horse",
-                        tid(CANON_TENANT),
-                    )
-                    .expect("seed credential probe"),
-                ),
-                calls: Arc::new(CredentialRepoCalls::default()),
-                conflict_on_bump,
-            }
-        }
-
-        fn total_calls(&self) -> usize {
-            self.calls.find.load(Ordering::SeqCst)
-                + self.calls.authenticate.load(Ordering::SeqCst)
-                + self.calls.save.load(Ordering::SeqCst)
-                + self.calls.bump_attempts.load(Ordering::SeqCst)
-        }
-
-        fn find_calls(&self) -> usize {
-            self.calls.find.load(Ordering::SeqCst)
-        }
-
-        fn bump_attempts(&self) -> usize {
-            self.calls.bump_attempts.load(Ordering::SeqCst)
-        }
-
-        fn bump_commits(&self) -> usize {
-            self.calls.bump_commits.load(Ordering::SeqCst)
-        }
-
-        #[allow(clippy::expect_used)]
-        async fn stored_credential(&self) -> Credential {
-            self.inner
-                .find_by_user_id(tenant_repo_scope(tid(CANON_TENANT)), uid(CANON_USER))
-                .await
-                .expect("probe read succeeds")
-                .expect("seed credential remains")
-        }
-
-        #[allow(clippy::expect_used)]
-        async fn suspend(&self, now: SystemTime) {
-            let scope = tenant_repo_scope(tid(CANON_TENANT));
-            let state = self
-                .inner
-                .find(scope, uid(CANON_USER))
-                .await
-                .expect("read security")
-                .expect("security exists");
-            let mutation = state
-                .transition(crate::AccountStatus::Suspended, now)
-                .expect("active can suspend");
-            self.inner
-                .apply_transition(scope, mutation)
-                .await
-                .expect("suspend account");
-        }
-    }
-
-    impl CredentialRepo for CredentialRepoProbe {
-        async fn find_by_user_id(
-            &self,
-            scope: TenantRepoScope,
-            user_id: ids::UserId,
-        ) -> Result<Option<Credential>, IdentityError> {
-            self.calls.find.fetch_add(1, Ordering::SeqCst);
-            self.inner.find_by_user_id(scope, user_id).await
-        }
-
-        async fn authenticate(
-            &self,
-            scope: TenantRepoScope,
-            login: LoginIdentifier,
-            candidate: secure::RawPassword,
-            now: SystemTime,
-        ) -> Result<AuthOutcome, IdentityError> {
-            self.calls.authenticate.fetch_add(1, Ordering::SeqCst);
-            self.inner.authenticate(scope, login, candidate, now).await
-        }
-
-        async fn save(
-            &self,
-            scope: TenantRepoScope,
-            credential: Credential,
-        ) -> Result<(), IdentityError> {
-            self.calls.save.fetch_add(1, Ordering::SeqCst);
-            self.inner.save(scope, credential).await
-        }
-
-        async fn apply_password_change(
-            &self,
-            scope: TenantRepoScope,
-            mutation: PasswordChangeMutation,
-        ) -> Result<(), IdentityError> {
-            self.calls.bump_attempts.fetch_add(1, Ordering::SeqCst);
-            if self.conflict_on_bump {
-                return Err(IdentityError::VersionConflict);
-            }
-            let result = self.inner.apply_password_change(scope, mutation).await;
-            if result.is_ok() {
-                self.calls.bump_commits.fetch_add(1, Ordering::SeqCst);
-            }
-            result
-        }
-    }
-
     // CapturingAuthGrantLifecycle 捕获原子 login mutation，并将 grant/refresh 一起委托给共享
     // `InMemAuthGrantStore`；同一 store 也注入 RefreshService，避免测试出现双存储漂移。
     #[derive(Clone, Default)]
@@ -3919,13 +4889,6 @@ mod tests {
             .expect("derived test grant id is canonical UUIDv4")
     }
 
-    fn credential_matches(credential: &Credential, password: &str) -> bool {
-        matches!(
-            credential.verify_password(secure::RawPassword::new(password.to_string())),
-            Ok(secure::PasswordVerification::Verified(_))
-        )
-    }
-
     /// 构造用 with_seed_credential 的 LoginService（默认 CANON_TENANT + 登录标识 alice / canonical
     /// CANON_USER / correct-horse）。lifecycle 与 refresh 复用同一个 in-memory AuthGrant store。
     fn seed_service(
@@ -3944,7 +4907,6 @@ mod tests {
                     Duration::from_secs(2_592_000),
                 )
             },
-            seed_password_policy(),
             make_clock(now_secs),
             Duration::from_secs(ttl_secs),
             "alice",
@@ -3953,24 +4915,6 @@ mod tests {
             tid(CANON_TENANT),
         )
         .expect("seed_service ok")
-    }
-
-    fn probed_service(
-        credentials: CredentialRepoProbe,
-        capture: &CapturingAuthGrantLifecycle,
-    ) -> LoginService<TestSigner> {
-        LoginService::new(
-            Arc::from(DynCredentialRepo::new_box(credentials)),
-            make_auth_grant_services(
-                capture.clone(),
-                seeded_account_reader(),
-                make_clock(1_000),
-                Duration::from_secs(2_592_000),
-            ),
-            seed_password_policy(),
-            make_clock(1_000),
-            Duration::from_secs(3_600),
-        )
     }
 
     /// 构造 IdentityDomain<TestSigner>（shared RefreshService）供路由声明测试使用。
@@ -4006,7 +4950,6 @@ mod tests {
         let login = Arc::new(LoginService::new(
             Arc::from(DynCredentialRepo::new_box(credentials)),
             auth_grants,
-            seed_password_policy(),
             make_clock(now_secs),
             Duration::from_secs(ttl_secs),
         ));
@@ -4117,7 +5060,7 @@ mod tests {
         .expect("identity profile route is mounted in finalized routes");
         let plan = primitives::AuthPlan::new(
             ListenerKind::Primary,
-            primitives::AuthScheme::RssAccessToken,
+            primitives::AuthScheme::FederatedAccessToken,
         )
         .expect("Primary JWT auth plan");
         let router = ::httpserve::finalize_primary_auth_with_audit(
@@ -4141,7 +5084,7 @@ mod tests {
     ) -> (axum::Router, ::testkit::local_only::LocalOnlyObservers) {
         let router = if let Some((kind, subject)) = authenticated {
             router.layer(axum::Extension(httpserve::Authenticated::new(
-                primitives::RequiredScheme::RssAccessToken,
+                primitives::RequiredScheme::FederatedAccessToken,
                 kind,
                 subject,
                 Some(tid(CANON_TENANT)),
@@ -4226,7 +5169,12 @@ mod tests {
             let read_role = role(
                 "role-a",
                 "Identity reader",
-                &["identity:role:read", "identity:policy:read"],
+                &[
+                    "identity:role:read",
+                    "identity:policy:read",
+                    "identity:account-security:read",
+                    "identity:account-security:write",
+                ],
             );
             let read_role_id = read_role.id().clone();
             Self {
@@ -4517,7 +5465,6 @@ mod tests {
         let login = Arc::new(LoginService::new(
             Arc::from(DynCredentialRepo::new_box(credentials)),
             auth_grants,
-            seed_password_policy(),
             make_clock(1_000),
             Duration::from_secs(3_600),
         ));
@@ -4583,7 +5530,83 @@ mod tests {
         .expect("identity roles-list LocalOnly state is mounted");
         let plan = primitives::AuthPlan::new(
             ListenerKind::Primary,
-            primitives::AuthScheme::RssAccessToken,
+            primitives::AuthScheme::FederatedAccessToken,
+        )
+        .expect("Primary JWT auth plan");
+        let router = ::httpserve::finalize_primary_auth_with_audit(
+            routes,
+            plan,
+            httpserve::AuditSinkHandle::new(auth_sink),
+            make_shared_clock(1_000),
+            authorizer,
+        )
+        .expect("finalize Primary auth")
+        .into_router_for_test();
+        (router, proof)
+    }
+
+    #[allow(clippy::expect_used)]
+    fn finalized_identity_v1_account_status_get_router(
+        repo: TestRepo,
+        auth_sink: RecordingAuthAuditSink,
+    ) -> (
+        axum::Router,
+        ::httpserve::LocalOnlyMountedRouteProof<
+            ::generated::http::identity_v1::account_status_get::RouteMarker,
+            AccountStatusQueryHandlerState,
+        >,
+    ) {
+        let IdentityLocalOnlyAncillaryServices {
+            login,
+            refresh,
+            rbac_admin,
+            policy_manage,
+        } = identity_local_only_ancillary_services();
+        let accounts = crate::internal::mem::InMemCredentialRepo::with_seed_credential(
+            "alice",
+            uid(CANON_USER),
+            "correct-horse",
+            tid(CANON_TENANT),
+        )
+        .expect("seed account-status query credential");
+        let credential_security = Arc::new(CredentialSecurityService::new(
+            Arc::from(DynCredentialRepo::new_box(accounts.clone())),
+            test_lifecycle(crate::internal::mem::InMemAuthGrantStore::new()),
+            DynAccountSecurityReadRepo::new_box(accounts),
+            ConfirmingIdentitySecurityLifecycle,
+            ConfirmingIdentitySecurityLifecycle,
+            seed_password_policy(),
+            make_clock(1_000),
+        ));
+        let domain = super::IdentityDomain::new(super::IdentityDomainDeps {
+            login,
+            refresh,
+            credential_security,
+            rbac_admin,
+            policy_manage,
+            roles: repo.roles,
+            binding_reads: repo.binding_reads,
+            policies: repo.policies,
+            resource_attribute_reads: repo.resource_attribute_reads,
+            clock: make_shared_clock(1_000),
+        });
+        let mut registry = bootstrap::compose(&[&domain]).expect("compose identity domain");
+        let authorizer = registry
+            .take_primary_authorizer()
+            .expect("identity Primary authorizer");
+        let mut finalized = registry
+            .finalize_routes()
+            .expect("finalize identity routes");
+        let (_, routes) = finalized.pop().expect("identity Primary routes");
+        let proof =
+            ::httpserve::prove_local_only_mounted_route_state::<AccountStatusQueryHandlerState, _>(
+                &routes,
+                &::generated::http::identity_v1::account_status_get::ROUTE,
+            )
+            .expect("identity account-status-get LocalOnly state is mounted");
+        let plan = primitives::AuthPlan::new(
+            ListenerKind::Primary,
+            primitives::AuthScheme::FederatedAccessToken,
         )
         .expect("Primary JWT auth plan");
         let router = ::httpserve::finalize_primary_auth_with_audit(
@@ -4642,7 +5665,7 @@ mod tests {
         .expect("identity policies-get LocalOnly state is mounted");
         let plan = primitives::AuthPlan::new(
             ListenerKind::Primary,
-            primitives::AuthScheme::RssAccessToken,
+            primitives::AuthScheme::FederatedAccessToken,
         )
         .expect("Primary JWT auth plan");
         let router = ::httpserve::finalize_primary_auth_with_audit(
@@ -4701,7 +5724,7 @@ mod tests {
         .expect("identity policies-list LocalOnly state is mounted");
         let plan = primitives::AuthPlan::new(
             ListenerKind::Primary,
-            primitives::AuthScheme::RssAccessToken,
+            primitives::AuthScheme::FederatedAccessToken,
         )
         .expect("Primary JWT auth plan");
         let router = ::httpserve::finalize_primary_auth_with_audit(
@@ -4780,12 +5803,6 @@ mod tests {
 
     fn with_auth(router: axum::Router, auth: AuthorizedSubject) -> axum::Router {
         router.layer(axum::Extension(auth))
-    }
-
-    fn self_service_state(
-        service: Arc<LoginService<TestSigner>>,
-    ) -> SelfServiceHandlerState<TestSigner> {
-        SelfServiceHandlerState { service }
     }
 
     #[allow(clippy::expect_used)]
@@ -5188,7 +6205,7 @@ mod tests {
         fn assert_state<T: Clone + Send + Sync + 'static>() {}
         assert_state::<Arc<ContractAuthorizer>>();
         assert_state::<RbacHandlerState>();
-        assert_state::<SelfServiceHandlerState<TestSigner>>();
+        assert_state::<CredentialSecurityHandlerState>();
         assert_state::<RolesListHandlerState>();
     }
 
@@ -5376,33 +6393,6 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::expect_used)]
-    async fn login_suspended_account_with_valid_password_returns_invalid_credentials_and_zero_effects()
-     {
-        let capture = CapturingAuthGrantLifecycle::default();
-        let credentials = CredentialRepoProbe::seeded(false);
-        credentials
-            .suspend(SystemTime::UNIX_EPOCH + Duration::from_secs(999))
-            .await;
-        let svc = probed_service(credentials, &capture);
-
-        let err = svc
-            .login(
-                login_receipt(),
-                tid(CANON_TENANT),
-                IdentityLoginRequest {
-                    username: "alice".to_owned(),
-                    password: "correct-horse".to_owned(),
-                },
-            )
-            .await
-            .expect_err("suspended account must reject");
-
-        assert!(matches!(err, LoginError::InvalidCredentials));
-        assert_eq!(capture.count(), 0, "rejection creates no session or outbox");
-    }
-
-    #[tokio::test]
-    #[allow(clippy::expect_used)]
     async fn login_second_account_gate_rejection_is_unauthenticated_not_internal_error() {
         let tenant = tid(CANON_TENANT);
         let user = uid(CANON_USER);
@@ -5425,18 +6415,14 @@ mod tests {
             .await
             .expect("read second gate")
             .expect("second gate state");
-        second_gate
-            .apply_transition(
-                tenant_repo_scope(tenant),
-                current
-                    .transition(
-                        crate::AccountStatus::Suspended,
-                        SystemTime::UNIX_EPOCH + Duration::from_secs(1_001),
-                    )
-                    .expect("suspend second gate"),
+        let (_, suspended) = current
+            .transition(
+                crate::AccountStatus::Suspended,
+                SystemTime::UNIX_EPOCH + Duration::from_secs(1_001),
             )
-            .await
-            .expect("persist second gate");
+            .expect("suspend second gate")
+            .into_parts();
+        second_gate.set_account_security_for_test(suspended);
 
         let capture = CapturingAuthGrantLifecycle::default();
         let auth_grants = make_auth_grant_services(
@@ -5448,7 +6434,6 @@ mod tests {
         let service = Arc::new(LoginService::new(
             Arc::from(DynCredentialRepo::new_box(credentials)),
             auth_grants,
-            seed_password_policy(),
             make_clock(1_000),
             Duration::from_secs(3_600),
         ));
@@ -5505,15 +6490,11 @@ mod tests {
                     .await
                     .expect("read")
                     .expect("state");
-                credentials
-                    .apply_transition(
-                        tenant_repo_scope(tenant),
-                        state
-                            .transition(status, SystemTime::UNIX_EPOCH + Duration::from_secs(1))
-                            .expect("enter non-active state"),
-                    )
-                    .await
-                    .expect("persist state");
+                let (_, blocked) = state
+                    .transition(status, SystemTime::UNIX_EPOCH + Duration::from_secs(1))
+                    .expect("enter non-active state")
+                    .into_parts();
+                credentials.set_account_security_for_test(blocked);
 
                 let sign_calls = Arc::new(AtomicUsize::new(0));
                 let issuer = authn::JwtIssuer::<diport::RssAccessProfile, _>::new(
@@ -5540,7 +6521,6 @@ mod tests {
                 let service = LoginService::new(
                     Arc::from(DynCredentialRepo::new_box(credentials)),
                     auth_grants,
-                    seed_password_policy(),
                     make_clock(1_000),
                     Duration::from_secs(3_600),
                 );
@@ -5597,20 +6577,12 @@ mod tests {
                 Ok(AuthOutcome::Authenticated(self.0.clone()))
             }
 
-            async fn save(
+            async fn insert(
                 &self,
                 _scope: TenantRepoScope,
                 _credential: Credential,
             ) -> Result<(), IdentityError> {
-                unreachable!("login does not save credentials")
-            }
-
-            async fn apply_password_change(
-                &self,
-                _scope: TenantRepoScope,
-                _mutation: PasswordChangeMutation,
-            ) -> Result<(), IdentityError> {
-                unreachable!("login does not change passwords")
+                unreachable!("login does not insert credentials")
             }
         }
 
@@ -5664,7 +6636,6 @@ mod tests {
                 mismatched,
             ))),
             auth_grants,
-            seed_password_policy(),
             make_clock(1_000),
             Duration::from_secs(3_600),
         );
@@ -5773,185 +6744,6 @@ mod tests {
 
         assert!(matches!(err, LoginError::InvalidCredentials));
         assert_eq!(capture.count(), 0);
-    }
-
-    // ── 测试 6：change_password 成功（轮换生效） ──────────────────────────────
-
-    #[tokio::test]
-    #[allow(clippy::expect_used)]
-    async fn change_password_success_rotates_credential() {
-        let capture = CapturingAuthGrantLifecycle::default();
-        let svc = seed_service(&capture, 1_000, 3_600);
-
-        svc.change_password(
-            tid(CANON_TENANT),
-            uid(CANON_USER),
-            "correct-horse".to_string(),
-            "new-password-phrase".to_string(),
-        )
-        .await
-        .expect("change_password ok");
-
-        // 用新密码 login 成功。
-        let resp = svc
-            .login(
-                login_receipt(),
-                tid(CANON_TENANT),
-                IdentityLoginRequest {
-                    username: "alice".to_string(),
-                    password: "new-password-phrase".to_string(),
-                },
-            )
-            .await
-            .expect("login with new-pw ok");
-        assert!(!resp.data.session_id.is_empty());
-
-        // 用旧密码 login 失败（先把 service 清 lockout，用额外 svc 测）。
-        // 旧密码在 change 后应失效：
-        let err = svc
-            .login(
-                login_receipt(),
-                tid(CANON_TENANT),
-                IdentityLoginRequest {
-                    username: "alice".to_string(),
-                    password: "correct-horse".to_string(),
-                },
-            )
-            .await
-            .expect_err("old pw must be rejected");
-        assert!(matches!(err, LoginError::InvalidCredentials));
-    }
-
-    // ── 测试 7：change_password 旧密码错 ─────────────────────────────────────
-
-    #[tokio::test]
-    #[allow(clippy::expect_used)]
-    async fn change_password_wrong_current_password_rejected() {
-        let capture = CapturingAuthGrantLifecycle::default();
-        let svc = seed_service(&capture, 1_000, 3_600);
-
-        let err = svc
-            .change_password(
-                tid(CANON_TENANT),
-                uid(CANON_USER),
-                "wrong-current".to_string(),
-                "new-pw".to_string(),
-            )
-            .await
-            .expect_err("wrong current pw must reject");
-
-        assert!(matches!(err, ChangePasswordError::InvalidCredentials));
-
-        // 旧密码仍可用（change 失败后不影响原凭据）。
-        svc.login(
-            login_receipt(),
-            tid(CANON_TENANT),
-            IdentityLoginRequest {
-                username: "alice".to_string(),
-                password: "correct-horse".to_string(),
-            },
-        )
-        .await
-        .expect("original pw still works");
-    }
-
-    // ── 测试 8：change_password 凭据不存在 ───────────────────────────────────
-
-    #[tokio::test]
-    #[allow(clippy::expect_used)]
-    async fn change_password_unknown_subject_returns_not_found() {
-        let capture = CapturingAuthGrantLifecycle::default();
-        let svc = seed_service(&capture, 1_000, 3_600);
-
-        let err = svc
-            .change_password(
-                tid(CANON_TENANT),
-                uid(GHOST_USER),
-                "any-pw".to_string(),
-                "new-pw".to_string(),
-            )
-            .await
-            .expect_err("unknown subject must be not found");
-
-        assert!(matches!(err, ChangePasswordError::NotFound));
-    }
-
-    // ── 测试 8b：change_password 跨租 → NotFound（与 login 跨租对称，fail-closed）────
-
-    #[tokio::test]
-    #[allow(clippy::expect_used)]
-    async fn change_password_cross_tenant_returns_not_found() {
-        let capture = CapturingAuthGrantLifecycle::default();
-        let svc = seed_service(&capture, 1_000, 3_600); // 凭据在 CANON_TENANT
-
-        let err = svc
-            .change_password(
-                tid(OTHER_TENANT),
-                uid(CANON_USER),
-                "correct-horse".to_string(),
-                "new-pw".to_string(),
-            )
-            .await
-            .expect_err("cross-tenant change must be not found");
-
-        assert!(matches!(err, ChangePasswordError::NotFound));
-
-        // 原租户凭据未被改动：旧密码仍可登录。
-        svc.login(
-            login_receipt(),
-            tid(CANON_TENANT),
-            IdentityLoginRequest {
-                username: "alice".to_string(),
-                password: "correct-horse".to_string(),
-            },
-        )
-        .await
-        .expect("original tenant credential intact");
-    }
-
-    // ── 测试 8c：change_password 以 canonical user_id 定位（login≠user_id，self-scoped 锚点，#1277 F2）──
-    // 种子登录标识 "alice" 与 canonical user_id CANON_USER 解耦（不同值）。证明改密锚点是认证主体 user_id、
-    // 非请求可选的登录标识：① 用本人 user_id 改密成功（即便它≠login）；② 用他人 user_id 无法定位本凭据
-    // （type 层只能传 ids::UserId，无法用 login 串越权改他人密码）。
-    #[tokio::test]
-    #[allow(clippy::expect_used)]
-    async fn change_password_anchors_on_user_id_not_login() {
-        let capture = CapturingAuthGrantLifecycle::default();
-        let svc = seed_service(&capture, 1_000, 3_600);
-
-        // ① 本人 canonical user_id（≠ 登录标识 "alice"）改密成功。
-        svc.change_password(
-            tid(CANON_TENANT),
-            uid(CANON_USER),
-            "correct-horse".to_string(),
-            "new-password-phrase".to_string(),
-        )
-        .await
-        .expect("change by canonical user_id ok");
-
-        // ② 他人 user_id 无法定位本凭据 → NotFound（认证主体锚点，请求不可选目标账号）。
-        let err = svc
-            .change_password(
-                tid(CANON_TENANT),
-                uid(GHOST_USER),
-                "new-password-phrase".to_string(),
-                "x".to_string(),
-            )
-            .await
-            .expect_err("other user_id must not locate this credential");
-        assert!(matches!(err, ChangePasswordError::NotFound));
-
-        // 新密码生效（login 路径仍以登录标识 "alice" 认证）。
-        svc.login(
-            login_receipt(),
-            tid(CANON_TENANT),
-            IdentityLoginRequest {
-                username: "alice".to_string(),
-                password: "new-password-phrase".to_string(),
-            },
-        )
-        .await
-        .expect("login with new pw via login identifier");
     }
 
     // ── 测试 12：login route group 声明（保留既有测试）────────────────────────
@@ -6235,11 +7027,19 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::expect_used)]
-    async fn contract_authorizer_denies_user_role_assign_permission() {
+    async fn contract_authorizer_limits_rss_user_grants_to_explicitly_supported_routes() {
         let repo = crate::internal::mem::InMemRoleRepo::new();
         repo.save(
             tenant_repo_scope(tid(CANON_TENANT)),
-            role("role-admin", "Admin", &["identity:role:assign"]),
+            role(
+                "role-admin",
+                "Admin",
+                &[
+                    "identity:role:assign",
+                    "identity:account-security:read",
+                    "identity:account-security:write",
+                ],
+            ),
         )
         .await
         .expect("save role");
@@ -6270,6 +7070,44 @@ mod tests {
             })
             .await;
         assert_eq!(decision, RouteAuthorizationDecision::Deny);
+
+        let decision = authorizer
+            .authorize(RouteAuthorizationRequest {
+                contract_id: ACCOUNT_STATUS_SET_HTTP_SPEC.route.contract_id(),
+                permission: vocab::RoutePermissionId::IdentityAccountSecurityWrite,
+                tenant_id: Some(tid(CANON_TENANT)),
+                principal_kind: vocab::PrincipalKind::User,
+                principal_id: CANON_USER.to_string(),
+                resource: Some(httpserve::RouteResource::new(CANON_USER).expect("route resource")),
+            })
+            .await;
+        assert_eq!(decision, RouteAuthorizationDecision::Allow);
+
+        let HttpRouteAuth::Permission(get_permission) = ACCOUNT_STATUS_GET_HTTP_SPEC.route.auth()
+        else {
+            panic!("account-status GET must require a typed permission")
+        };
+        let decision = authorizer
+            .authorize(RouteAuthorizationRequest {
+                contract_id: ACCOUNT_STATUS_GET_HTTP_SPEC.route.contract_id(),
+                permission: get_permission,
+                tenant_id: Some(tid(CANON_TENANT)),
+                principal_kind: vocab::PrincipalKind::User,
+                principal_id: CANON_USER.to_string(),
+                resource: Some(httpserve::RouteResource::new(CANON_USER).expect("route resource")),
+            })
+            .await;
+        assert_eq!(decision, RouteAuthorizationDecision::Allow);
+    }
+
+    #[test]
+    fn account_status_get_uses_a_distinct_read_permission() {
+        let HttpRouteAuth::Permission(permission) = ACCOUNT_STATUS_GET_HTTP_SPEC.route.auth()
+        else {
+            panic!("account-status GET must require a typed permission")
+        };
+
+        assert_eq!(permission.as_str(), "identity:account-security:read");
     }
 
     #[tokio::test]
@@ -7896,7 +8734,7 @@ mod tests {
             auth_sink.clone(),
         );
         let router = router.layer(::axum::Extension(httpserve::Authenticated::new(
-            primitives::RequiredScheme::RssAccessToken,
+            primitives::RequiredScheme::FederatedAccessToken,
             vocab::PrincipalKind::Admin,
             CANON_USER,
             Some(tid(CANON_TENANT)),
@@ -7958,6 +8796,77 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::expect_used)]
+    async fn account_status_get_local_only_finalized_route_has_canonical_receipt() {
+        let repo_probe = IdentityLocalOnlyReadProbe::default();
+        let auth_sink = RecordingAuthAuditSink::default();
+        let (router, proof) = self::finalized_identity_v1_account_status_get_router(
+            repo_probe.test_repo(),
+            auth_sink.clone(),
+        );
+        let router = router.layer(::axum::Extension(httpserve::Authenticated::new(
+            primitives::RequiredScheme::FederatedAccessToken,
+            vocab::PrincipalKind::Admin,
+            CANON_USER,
+            Some(tid(CANON_TENANT)),
+        )));
+        let observers = ::testkit::local_only::LocalOnlyObservers::new(
+            ::testkit::local_only::StaticExclusion::<
+                ::testkit::local_only::BusinessWrite,
+            >::from_governed(&proof),
+            ::testkit::local_only::StaticExclusion::<::testkit::local_only::Outbox>::from_governed(
+                &proof,
+            ),
+            ::testkit::local_only::StaticExclusion::<::testkit::local_only::Publish>::from_governed(
+                &proof,
+            ),
+        );
+        let (response, receipt) = ::testkit::local_only::assert_local_only_with_receipt::<
+            ::generated::http::identity_v1::account_status_get::LocalOnlyConformanceMarker,
+            _,
+            _,
+            _,
+        >(
+            ::generated::http::identity_v1::account_status_get::SPEC
+                .route
+                .contract_id(),
+            observers,
+            move || {
+                ::testkit::call(
+                    router,
+                    ::testkit::ContractRequest::get(
+                        ::generated::http::identity_v1::account_status_get::SPEC
+                            .route
+                            .path()
+                            .replace("{userId}", "11111111-2222-4333-8444-555555555555"),
+                    ),
+                )
+            },
+        )
+        .await
+        .expect("account-status-get remains LocalOnly");
+        ::core::assert_eq!(
+            receipt.contract_id(),
+            ::generated::http::identity_v1::account_status_get::SPEC
+                .route
+                .contract_id()
+        );
+        let response = response.expect("call finalized account-status-get");
+        response
+            .ensure_status(StatusCode::OK)
+            .expect("account-status-get 200");
+        let body: IdentityAccountStatusGetResponse =
+            response.json().expect("account-status-get json");
+        assert_eq!(body.data.status, IdentityAccountStatusGetDataStatus::Active);
+        assert_route_auth_event(
+            &auth_sink,
+            ACCOUNT_STATUS_GET_HTTP_SPEC.route.contract_id(),
+            vocab::PrincipalKind::Admin,
+            diport::AuditOutcome::Success,
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
     async fn policies_get_local_only_finalized_route_has_canonical_receipt() {
         let repo_probe = IdentityLocalOnlyReadProbe::default();
         let auth_sink = RecordingAuthAuditSink::default();
@@ -7966,7 +8875,7 @@ mod tests {
             auth_sink.clone(),
         );
         let router = router.layer(::axum::Extension(httpserve::Authenticated::new(
-            primitives::RequiredScheme::RssAccessToken,
+            primitives::RequiredScheme::FederatedAccessToken,
             vocab::PrincipalKind::Admin,
             CANON_USER,
             Some(tid(CANON_TENANT)),
@@ -8033,7 +8942,7 @@ mod tests {
             auth_sink.clone(),
         );
         let router = router.layer(::axum::Extension(httpserve::Authenticated::new(
-            primitives::RequiredScheme::RssAccessToken,
+            primitives::RequiredScheme::FederatedAccessToken,
             vocab::PrincipalKind::Admin,
             CANON_USER,
             Some(tid(CANON_TENANT)),
@@ -8102,7 +9011,7 @@ mod tests {
             RecordingAuthAuditSink::default(),
         );
         let router = router.layer(::axum::Extension(httpserve::Authenticated::new(
-            primitives::RequiredScheme::RssAccessToken,
+            primitives::RequiredScheme::FederatedAccessToken,
             vocab::PrincipalKind::Admin,
             CANON_USER,
             Some(tid(CANON_TENANT)),
@@ -8178,7 +9087,7 @@ mod tests {
             RecordingAuthAuditSink::default(),
         );
         let router = router.layer(::axum::Extension(httpserve::Authenticated::new(
-            primitives::RequiredScheme::RssAccessToken,
+            primitives::RequiredScheme::FederatedAccessToken,
             vocab::PrincipalKind::Admin,
             CANON_USER,
             Some(tid(CANON_TENANT)),
@@ -8254,7 +9163,7 @@ mod tests {
             RecordingAuthAuditSink::default(),
         );
         let router = router.layer(::axum::Extension(httpserve::Authenticated::new(
-            primitives::RequiredScheme::RssAccessToken,
+            primitives::RequiredScheme::FederatedAccessToken,
             vocab::PrincipalKind::Admin,
             CANON_USER,
             Some(tid(CANON_TENANT)),
@@ -8328,7 +9237,7 @@ mod tests {
             );
         let missing_permission_router =
             missing_permission_router.layer(::axum::Extension(httpserve::Authenticated::new(
-                primitives::RequiredScheme::RssAccessToken,
+                primitives::RequiredScheme::FederatedAccessToken,
                 vocab::PrincipalKind::Admin,
                 CANON_USER,
                 Some(tid(CANON_TENANT)),
@@ -8376,7 +9285,7 @@ mod tests {
         let other_tenant = tid("00000000-0000-4000-8000-000000000abc");
         let cross_tenant_router =
             cross_tenant_router.layer(::axum::Extension(httpserve::Authenticated::new(
-                primitives::RequiredScheme::RssAccessToken,
+                primitives::RequiredScheme::FederatedAccessToken,
                 vocab::PrincipalKind::Admin,
                 CANON_USER,
                 Some(other_tenant),
@@ -8430,7 +9339,7 @@ mod tests {
             RecordingAuthAuditSink::default(),
         );
         let roles_router = roles_router.layer(::axum::Extension(httpserve::Authenticated::new(
-            primitives::RequiredScheme::RssAccessToken,
+            primitives::RequiredScheme::FederatedAccessToken,
             vocab::PrincipalKind::Admin,
             CANON_USER,
             Some(tid(CANON_TENANT)),
@@ -8456,7 +9365,7 @@ mod tests {
             RecordingAuthAuditSink::default(),
         );
         let get_router = get_router.layer(::axum::Extension(httpserve::Authenticated::new(
-            primitives::RequiredScheme::RssAccessToken,
+            primitives::RequiredScheme::FederatedAccessToken,
             vocab::PrincipalKind::Admin,
             CANON_USER,
             Some(tid(CANON_TENANT)),
@@ -8482,7 +9391,7 @@ mod tests {
             RecordingAuthAuditSink::default(),
         );
         let list_router = list_router.layer(::axum::Extension(httpserve::Authenticated::new(
-            primitives::RequiredScheme::RssAccessToken,
+            primitives::RequiredScheme::FederatedAccessToken,
             vocab::PrincipalKind::Admin,
             CANON_USER,
             Some(tid(CANON_TENANT)),
@@ -8552,7 +9461,7 @@ mod tests {
                         >::from_governed(&proof),
                     );
                     let router = router.layer(::axum::Extension(httpserve::Authenticated::new(
-                        primitives::RequiredScheme::RssAccessToken,
+                        primitives::RequiredScheme::FederatedAccessToken,
                         vocab::PrincipalKind::Admin,
                         CANON_USER,
                         Some(tid(CANON_TENANT)),
@@ -8581,7 +9490,7 @@ mod tests {
                         >::from_governed(&proof),
                     );
                     let router = router.layer(::axum::Extension(httpserve::Authenticated::new(
-                        primitives::RequiredScheme::RssAccessToken,
+                        primitives::RequiredScheme::FederatedAccessToken,
                         vocab::PrincipalKind::Admin,
                         CANON_USER,
                         Some(tid(CANON_TENANT)),
@@ -8610,7 +9519,7 @@ mod tests {
                         >::from_governed(&proof),
                     );
                     let router = router.layer(::axum::Extension(httpserve::Authenticated::new(
-                        primitives::RequiredScheme::RssAccessToken,
+                        primitives::RequiredScheme::FederatedAccessToken,
                         vocab::PrincipalKind::Admin,
                         CANON_USER,
                         Some(tid(CANON_TENANT)),
@@ -8742,7 +9651,7 @@ mod tests {
         let auth_sink = RecordingAuthAuditSink::default();
         let (router, proof) = self::finalized_profile_router(capture, &[], auth_sink.clone());
         let router = router.layer(::axum::Extension(httpserve::Authenticated::new(
-            primitives::RequiredScheme::RssAccessToken,
+            primitives::RequiredScheme::FederatedAccessToken,
             vocab::PrincipalKind::User,
             CANON_USER,
             Some(tid(CANON_TENANT)),
@@ -8859,314 +9768,6 @@ mod tests {
                 reason: "forbidden",
             },
         );
-    }
-
-    #[tokio::test]
-    #[allow(clippy::expect_used)]
-    async fn password_change_handler_success_commits_exactly_once() {
-        let capture = CapturingAuthGrantLifecycle::default();
-        let probe = CredentialRepoProbe::seeded(false);
-        let svc = Arc::new(probed_service(probe.clone(), &capture));
-        let router = with_auth(
-            axum::Router::new().route(
-                "/password/change",
-                post(password_change_handler::<TestSigner>).with_state(self_service_state(svc)),
-            ),
-            user_evidence(CANON_USER),
-        );
-        let resp = testkit::call(
-            router,
-            ContractRequest::post("/password/change").json(&IdentityPasswordChangeRequest {
-                current_password: "correct-horse".to_string(),
-                new_password: "new-correct-horse".try_into().expect("valid new password"),
-            }),
-        )
-        .await
-        .expect("call");
-        resp.ensure_status(StatusCode::OK).expect("200");
-        let decoded: IdentityPasswordChangeResponse = resp.json().expect("json");
-        assert!(decoded.data.changed);
-        assert_eq!(probe.find_calls(), 1);
-        assert_eq!(probe.bump_attempts(), 1);
-        assert_eq!(probe.bump_commits(), 1);
-        let stored = probe.stored_credential().await;
-        assert_eq!(stored.version(), 2);
-        assert!(credential_matches(&stored, "new-correct-horse"));
-    }
-
-    #[tokio::test]
-    #[allow(clippy::expect_used)]
-    async fn password_change_handler_wrong_current_password_returns_403() {
-        let capture = CapturingAuthGrantLifecycle::default();
-        let probe = CredentialRepoProbe::seeded(false);
-        let before = probe.stored_credential().await;
-        let svc = Arc::new(probed_service(probe.clone(), &capture));
-        let router = with_auth(
-            axum::Router::new().route(
-                "/password/change",
-                post(password_change_handler::<TestSigner>).with_state(self_service_state(svc)),
-            ),
-            user_evidence(CANON_USER),
-        );
-        let resp = testkit::call(
-            router,
-            ContractRequest::post("/password/change").json(&IdentityPasswordChangeRequest {
-                current_password: "wrong-current".to_string(),
-                new_password: "new-correct-horse".try_into().expect("valid new password"),
-            }),
-        )
-        .await
-        .expect("call");
-        resp.ensure_status(StatusCode::FORBIDDEN)
-            .expect("wrong current password -> 403");
-        assert_eq!(probe.find_calls(), 1);
-        assert_eq!(probe.bump_attempts(), 0);
-        assert_eq!(probe.bump_commits(), 0);
-        let stored = probe.stored_credential().await;
-        assert_eq!(stored.version(), before.version());
-        assert!(credential_matches(&stored, "correct-horse"));
-        assert!(!credential_matches(&stored, "new-correct-horse"));
-    }
-
-    #[tokio::test]
-    #[allow(clippy::expect_used)]
-    async fn password_change_policy_rejection_is_400_and_current_password_wins() {
-        for (current, new_password, status, code, expected_reason) in [
-            (
-                "correct-horse",
-                "a".repeat(14),
-                StatusCode::BAD_REQUEST,
-                "ERR_CORE_VALIDATION",
-                Some("too_short"),
-            ),
-            (
-                "correct-horse",
-                "a".repeat(65),
-                StatusCode::BAD_REQUEST,
-                "ERR_CORE_VALIDATION",
-                Some("too_long"),
-            ),
-            (
-                "correct-horse",
-                "passwordpassword".to_string(),
-                StatusCode::BAD_REQUEST,
-                "ERR_CORE_VALIDATION",
-                Some("compromised"),
-            ),
-            (
-                "wrong-current",
-                "a".repeat(14),
-                StatusCode::FORBIDDEN,
-                "ERR_CORE_FORBIDDEN",
-                None,
-            ),
-            (
-                "wrong-current",
-                "passwordpassword".to_string(),
-                StatusCode::FORBIDDEN,
-                "ERR_CORE_FORBIDDEN",
-                None,
-            ),
-        ] {
-            let capture = CapturingAuthGrantLifecycle::default();
-            let probe = CredentialRepoProbe::seeded(false);
-            let svc = Arc::new(probed_service(probe.clone(), &capture));
-            let router = with_auth(
-                axum::Router::new().route(
-                    "/password/change",
-                    post(password_change_handler::<TestSigner>).with_state(self_service_state(svc)),
-                ),
-                user_evidence(CANON_USER),
-            );
-            let response = testkit::call(
-                router,
-                ContractRequest::post("/password/change").json(&serde_json::json!({
-                    "currentPassword": current,
-                    "newPassword": new_password,
-                })),
-            )
-            .await
-            .expect("call");
-            response.ensure_error(status, code).expect("mapped error");
-            assert_eq!(probe.bump_attempts(), 0, "policy failure performs zero CAS");
-            let wire = response.wire_error().expect("wire error");
-            match expected_reason {
-                Some(reason) => assert_eq!(wire.details, [serde_json::json!({"reason": reason})]),
-                None => assert!(
-                    wire.details.is_empty(),
-                    "wrong current password must not expose policy status"
-                ),
-            }
-        }
-    }
-
-    #[tokio::test]
-    #[allow(clippy::expect_used)]
-    async fn password_change_rejects_presented_65_code_points_before_policy_oracle_exposure() {
-        let raw_password = format!("{}e\u{301}", "a".repeat(63));
-        assert_eq!(
-            raw_password.chars().count(),
-            65,
-            "transport proof must exceed maxLength"
-        );
-        for (current, status, code, reason) in [
-            (
-                "correct-horse",
-                StatusCode::BAD_REQUEST,
-                "ERR_CORE_VALIDATION",
-                Some("too_long"),
-            ),
-            (
-                "wrong-current",
-                StatusCode::FORBIDDEN,
-                "ERR_CORE_FORBIDDEN",
-                None,
-            ),
-        ] {
-            let capture = CapturingAuthGrantLifecycle::default();
-            let probe = CredentialRepoProbe::seeded(false);
-            let svc = Arc::new(probed_service(probe.clone(), &capture));
-            let router = with_auth(
-                axum::Router::new().route(
-                    "/password/change",
-                    post(password_change_handler::<TestSigner>).with_state(self_service_state(svc)),
-                ),
-                user_evidence(CANON_USER),
-            );
-            let response = testkit::call(
-                router,
-                ContractRequest::post("/password/change").json(&serde_json::json!({
-                    "currentPassword": current,
-                    "newPassword": raw_password.clone(),
-                })),
-            )
-            .await
-            .expect("call");
-
-            response.ensure_error(status, code).expect("mapped error");
-            assert_eq!(probe.bump_attempts(), 0);
-            let wire = response.wire_error().expect("wire error");
-            match reason {
-                Some(reason) => assert_eq!(wire.details, [serde_json::json!({"reason": reason})]),
-                None => assert!(wire.details.is_empty()),
-            }
-        }
-    }
-
-    #[tokio::test]
-    #[allow(clippy::expect_used)]
-    async fn password_change_handler_rejects_missing_auth_malformed_json_and_bad_subject() {
-        {
-            const _: ::vocab::HttpRouteBinding<
-                ::generated::http::identity_v1::password_change::RouteMarker,
-                ::vocab::http::LocalTx,
-            > = ::generated::http::identity_v1::password_change::ROUTE;
-        }
-
-        {
-            let capture = CapturingAuthGrantLifecycle::default();
-            let probe = CredentialRepoProbe::seeded(false);
-            let svc = Arc::new(probed_service(probe.clone(), &capture));
-            let router = axum::Router::new().route(
-                PASSWORD_CHANGE_HTTP_SPEC.route.path(),
-                post(password_change_handler::<TestSigner>).with_state(self_service_state(svc)),
-            );
-
-            let missing_auth = testkit::call(
-                router.clone(),
-                ContractRequest::post(PASSWORD_CHANGE_HTTP_SPEC.route.path()).json(
-                    &IdentityPasswordChangeRequest {
-                        current_password: "correct-horse".to_string(),
-                        new_password: "new-correct-horse".try_into().expect("valid new password"),
-                    },
-                ),
-            )
-            .await
-            .expect("call missing auth");
-            missing_auth
-                .ensure_status(StatusCode::UNAUTHORIZED)
-                .expect("password change missing auth -> 401");
-
-            let authed = with_auth(router.clone(), user_evidence(CANON_USER));
-            let malformed = testkit::call(
-                authed,
-                ContractRequest::post(PASSWORD_CHANGE_HTTP_SPEC.route.path())
-                    .raw_json(br#"{"currentPassword":"correct-horse""#.to_vec()),
-            )
-            .await
-            .expect("call malformed");
-            malformed
-                .ensure_status(StatusCode::BAD_REQUEST)
-                .expect("password change malformed json -> 400");
-
-            let bad_subject = testkit::call(
-                with_auth(router, user_evidence("not-a-user-uuid")),
-                ContractRequest::post(PASSWORD_CHANGE_HTTP_SPEC.route.path()).json(
-                    &IdentityPasswordChangeRequest {
-                        current_password: "correct-horse".to_string(),
-                        new_password: "new-correct-horse".try_into().expect("valid new password"),
-                    },
-                ),
-            )
-            .await
-            .expect("call bad subject");
-            bad_subject
-                .ensure_status(StatusCode::FORBIDDEN)
-                .expect("password change bad principal id -> 403");
-            assert_eq!(
-                probe.total_calls(),
-                0,
-                "pre-service rejections must not touch credentials"
-            );
-        }
-    }
-
-    #[tokio::test]
-    #[allow(clippy::expect_used)]
-    async fn password_change_handler_stale_conflict_is_single_attempt_and_redacts_passwords() {
-        const CURRENT_PASSWORD: &str = "correct-horse";
-        const NEW_PASSWORD: &str = "new-correct-horse";
-
-        let capture = CapturingAuthGrantLifecycle::default();
-        let probe = CredentialRepoProbe::seeded(true);
-        let before = probe.stored_credential().await;
-        let svc = Arc::new(probed_service(probe.clone(), &capture));
-        let router = with_auth(
-            axum::Router::new().route(
-                PASSWORD_CHANGE_HTTP_SPEC.route.path(),
-                post(password_change_handler::<TestSigner>).with_state(self_service_state(svc)),
-            ),
-            user_evidence(CANON_USER),
-        );
-        let resp = testkit::call(
-            router,
-            ContractRequest::post(PASSWORD_CHANGE_HTTP_SPEC.route.path()).json(
-                &IdentityPasswordChangeRequest {
-                    current_password: CURRENT_PASSWORD.to_string(),
-                    new_password: NEW_PASSWORD.try_into().expect("valid new password"),
-                },
-            ),
-        )
-        .await
-        .expect("call");
-
-        resp.ensure_error(StatusCode::CONFLICT, "ERR_CORE_VERSION_CONFLICT")
-            .expect("stale CAS -> retryable version conflict");
-        assert!(resp.wire_error().expect("wire error").retryable);
-        assert_eq!(probe.find_calls(), 1);
-        assert_eq!(probe.bump_attempts(), 1);
-        assert_eq!(probe.bump_commits(), 0);
-        let stored = probe.stored_credential().await;
-        assert_eq!(stored.version(), before.version());
-        assert!(credential_matches(&stored, CURRENT_PASSWORD));
-        assert!(!credential_matches(&stored, NEW_PASSWORD));
-        let rendered = String::from_utf8_lossy(resp.body_bytes());
-        for secret in [CURRENT_PASSWORD, NEW_PASSWORD] {
-            assert!(
-                !rendered.contains(secret),
-                "password conflict response leaked sensitive input"
-            );
-        }
     }
 
     // ── RefreshService 集成测试 ────────────────────────────────────────────────
@@ -9303,6 +9904,18 @@ mod tests {
     }
 
     #[allow(clippy::expect_used)]
+    fn seeded_credential_reader() -> Arc<DynCredentialRepo<'static>> {
+        let credentials = crate::internal::mem::InMemCredentialRepo::with_seed_credential(
+            "alice",
+            uid(CANON_USER),
+            "correct-horse",
+            tid(CANON_TENANT),
+        )
+        .expect("seed credential reader");
+        Arc::from(DynCredentialRepo::new_box(credentials))
+    }
+
+    #[allow(clippy::expect_used)]
     async fn issue_test_user<S: diport::Signer + Send + Sync + 'static>(
         svc: &RefreshService<S>,
         store: &crate::internal::mem::InMemAuthGrantStore,
@@ -9395,30 +10008,22 @@ mod tests {
             .expect("read account")
             .expect("account");
         let receipt = state.clone().try_into_active().expect("active receipt");
-        let suspended = accounts
-            .apply_transition(
-                tenant_repo_scope(tenant),
-                state
-                    .transition(
-                        crate::AccountStatus::Suspended,
-                        SystemTime::UNIX_EPOCH + Duration::from_secs(1),
-                    )
-                    .expect("suspend"),
+        let (_, suspended) = state
+            .transition(
+                crate::AccountStatus::Suspended,
+                SystemTime::UNIX_EPOCH + Duration::from_secs(1),
             )
-            .await
-            .expect("persist suspend");
-        let restored = accounts
-            .apply_transition(
-                tenant_repo_scope(tenant),
-                suspended
-                    .transition(
-                        crate::AccountStatus::Active,
-                        SystemTime::UNIX_EPOCH + Duration::from_secs(2),
-                    )
-                    .expect("restore"),
+            .expect("suspend")
+            .into_parts();
+        accounts.set_account_security_for_test(suspended.clone());
+        let (_, restored) = suspended
+            .transition(
+                crate::AccountStatus::Active,
+                SystemTime::UNIX_EPOCH + Duration::from_secs(2),
             )
-            .await
-            .expect("persist restore");
+            .expect("restore")
+            .into_parts();
+        accounts.set_account_security_for_test(restored.clone());
         assert_eq!(restored.status(), crate::AccountStatus::Active);
         assert_ne!(
             restored.clone().try_into_active(),
@@ -9516,30 +10121,22 @@ mod tests {
             );
             let refresh = issue_test_user(&issuing_service, &store).await;
 
-            let blocked = accounts
-                .apply_transition(
-                    tenant_repo_scope(tenant),
-                    initial
-                        .transition(
-                            blocked_status,
-                            SystemTime::UNIX_EPOCH + Duration::from_secs(1),
-                        )
-                        .expect("block account"),
+            let (_, blocked) = initial
+                .transition(
+                    blocked_status,
+                    SystemTime::UNIX_EPOCH + Duration::from_secs(1),
                 )
-                .await
-                .expect("persist blocked state");
-            let restored = accounts
-                .apply_transition(
-                    tenant_repo_scope(tenant),
-                    blocked
-                        .transition(
-                            crate::AccountStatus::Active,
-                            SystemTime::UNIX_EPOCH + Duration::from_secs(2),
-                        )
-                        .expect("restore"),
+                .expect("block account")
+                .into_parts();
+            accounts.set_account_security_for_test(blocked.clone());
+            let (_, restored) = blocked
+                .transition(
+                    crate::AccountStatus::Active,
+                    SystemTime::UNIX_EPOCH + Duration::from_secs(2),
                 )
-                .await
-                .expect("persist restore");
+                .expect("restore")
+                .into_parts();
+            accounts.set_account_security_for_test(restored.clone());
             assert_ne!(
                 restored.authn_epoch(),
                 initial_active.authn_epoch(),
@@ -9737,15 +10334,11 @@ mod tests {
                 .await
                 .expect("read account")
                 .expect("account");
-            accounts
-                .apply_transition(
-                    tenant_repo_scope(tenant),
-                    state
-                        .transition(status, SystemTime::UNIX_EPOCH + Duration::from_secs(1))
-                        .expect("valid transition"),
-                )
-                .await
-                .expect("persist state");
+            let (_, blocked) = state
+                .transition(status, SystemTime::UNIX_EPOCH + Duration::from_secs(1))
+                .expect("valid transition")
+                .into_parts();
+            accounts.set_account_security_for_test(blocked);
 
             let issued = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
             let record = RefreshTokenRecord::hydrate(RefreshTokenSnapshot {
@@ -11058,7 +11651,6 @@ mod tests {
                     Duration::from_secs(2_592_000),
                 )
             },
-            seed_password_policy(),
             make_clock(1_700_000_000),
             Duration::from_secs(3_600),
             "alice",
@@ -11117,7 +11709,6 @@ mod tests {
         let login_svc = LoginService::new(
             Arc::from(DynCredentialRepo::new_box(credentials)),
             auth_grants,
-            seed_password_policy(),
             make_clock(1_700_000_000),
             Duration::from_secs(3_600),
         );

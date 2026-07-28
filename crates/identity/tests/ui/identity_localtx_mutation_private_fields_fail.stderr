@@ -1,33 +1,21 @@
 error[E0451]: fields `grant`, `initial_refresh` and `persistence` of struct `LoginGrantMutation` are private
-  --> tests/ui/identity_localtx_mutation_private_fields_fail.rs:13:9
+  --> tests/ui/identity_localtx_mutation_private_fields_fail.rs:11:9
    |
-12 |     let _login = LoginGrantMutation {
+10 |     let _login = LoginGrantMutation {
    |                  ------------------ in this type
-13 |         grant: value(),
+11 |         grant: value(),
    |         ^^^^^ private field
-14 |         initial_refresh: value(),
+12 |         initial_refresh: value(),
    |         ^^^^^^^^^^^^^^^ private field
-15 |         persistence: value(),
+13 |         persistence: value(),
    |         ^^^^^^^^^^^ private field
 
 error[E0451]: fields `mutation` and `observation` of struct `AuthGrantCloseCommand` are private
-  --> tests/ui/identity_localtx_mutation_private_fields_fail.rs:18:9
+  --> tests/ui/identity_localtx_mutation_private_fields_fail.rs:16:9
    |
-17 |     let _logout = AuthGrantCloseCommand {
+15 |     let _logout = AuthGrantCloseCommand {
    |                   --------------------- in this type
-18 |         mutation: value(),
+16 |         mutation: value(),
    |         ^^^^^^^^ private field
-19 |         observation: value(),
-   |         ^^^^^^^^^^^ private field
-
-error[E0451]: fields `expected`, `next` and `observation` of struct `PasswordChangeMutation` are private
-  --> tests/ui/identity_localtx_mutation_private_fields_fail.rs:22:9
-   |
-21 |     let _password = PasswordChangeMutation {
-   |                     ---------------------- in this type
-22 |         expected: 1,
-   |         ^^^^^^^^ private field
-23 |         next: value(),
-   |         ^^^^ private field
-24 |         observation: value(),
+17 |         observation: value(),
    |         ^^^^^^^^^^^ private field

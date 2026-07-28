@@ -13,7 +13,7 @@ help: the trait `ports::identity_port_effect_sealed::Sealed` is not implemented 
   = help: the following other types implement trait `ports::identity_port_effect_sealed::Sealed`:
             Arc<T>
             Box<T>
-            DynAccountSecurityLifecycle<'a>
+            DynAccountReactivationLifecycle<'a>
             DynAccountSecurityReadRepo<'a>
             DynAuthGrantLifecycle<'a>
             DynAuthGrantValidator<'a>

@@ -108,6 +108,8 @@ const RUNTIME_ROUTES_PATH: &str = "assemblies/runtime/src/routes.rs";
 const RUNTIME_LISTENERS_PATH: &str = "assemblies/runtime/src/listeners.rs";
 const RUNTIME_CONFIG_PATH: &str = "assemblies/runtime/src/config.rs";
 const POSTGRES_BUNDLE_PATH: &str = "adapters/postgres/src/bundle.rs";
+const POSTGRES_MIGRATION_PATH: &str = "adapters/postgres-migration/src/lib.rs";
+const POSTGRES_PROJECTION_EVENTS_PATH: &str = "adapters/postgres/src/projection_events.rs";
 const POSTGRES_CONSUMER_TX_PATH: &str = "adapters/postgres/src/consumer_tx.rs";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -13609,23 +13611,84 @@ fn event_output_record_is_canonical(block: &syn::Block) -> bool {
 
 fn postgres_setup_transaction_live_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
     let path = root.join(POSTGRES_BUNDLE_PATH);
-    if !path.exists() {
+    let migration_path = root.join(POSTGRES_MIGRATION_PATH);
+    let projection_path = root.join(POSTGRES_PROJECTION_EVENTS_PATH);
+    if !path.exists() || !migration_path.exists() || !projection_path.exists() {
         return Ok(vec![finding(
             Rule::ForbiddenWiring,
             POSTGRES_BUNDLE_PATH,
-            "缺少 PgRuntimeDeps::connect_serving 的受保护生产 carrier",
+            "缺少 serving validation 或 migrator registration 的受保护生产 carrier",
         )]);
     }
     let file = parse_rust_file(&path)?;
+    let migration = parse_rust_file(&migration_path)?;
+    let projection = parse_rust_file(&projection_path)?;
     let setup = unique_production_inherent_method(&file, "PgRuntimeDeps", "connect_serving_inner");
-    if setup.is_some_and(|method| postgres_setup_transaction_is_canonical(&method.block)) {
+    let serving_canonical =
+        setup.is_some_and(|method| postgres_setup_transaction_is_canonical(&method.block));
+    let migrator_canonical = migration_projection_registration_is_canonical(&migration);
+    let serving_api_closed = projection_registration_is_test_support_only(&projection);
+    if serving_canonical && migrator_canonical && serving_api_closed {
         return Ok(Vec::new());
     }
     Ok(vec![finding(
         Rule::ForbiddenWiring,
         POSTGRES_BUNDLE_PATH,
-        "PgRuntimeDeps::connect_serving_inner 必须在真实生产 AST 中先连接 exact-ledger writer，再按构造顺序注册 writer/reader/audit-admin，所有失败 await rollback，成功 owner 后唯一 commit",
+        format!(
+            "serving 必须只校验 generated projection generation 且禁止注册；production migrator 必须在迁移验证后登记 exact generated bindings；serving setup 失败 await rollback，成功 owner 后唯一 commit；serving_canonical={serving_canonical} migrator_canonical={migrator_canonical} serving_api_closed={serving_api_closed}"
+        ),
     )])
+}
+
+fn migration_projection_registration_is_canonical(file: &syn::File) -> bool {
+    let Some(register) = unique_production_function(file, "register_projection_input_bindings")
+    else {
+        return false;
+    };
+    let Some(run) = unique_production_function(file, "run_and_verify") else {
+        return false;
+    };
+    let register_tokens = compact_tokens(&register.block);
+    let run_tokens = compact_tokens(&run.block);
+    register_tokens.contains("postgres_migration_inventory::projection_inputs()")
+        && register_tokens.contains("postgres_migration_inventory::projection_input_generation()")
+        && register_tokens.contains("public.rss_register_projection_input_binding")
+        && register_tokens
+            .contains("pool.begin().await.map_err(MigrationError::ProjectionBindings)?")
+        && register_tokens.contains("tx.commit().await.map_err(MigrationError::ProjectionBindings)")
+        && run_tokens.contains("verify_exact_ledger(pool).await?;")
+        && run_tokens.contains("verify_legacy_plaintext_zero_stock(pool).await?;")
+        && run_tokens.ends_with("register_projection_input_bindings(pool).await}")
+}
+
+fn projection_registration_is_test_support_only(file: &syn::File) -> bool {
+    let methods = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Impl(item) if compact_tokens(&item.self_ty) == "PgStore" => Some(item),
+            _ => None,
+        })
+        .flat_map(|item| &item.items)
+        .filter_map(|item| match item {
+            syn::ImplItem::Fn(method)
+                if method.sig.ident == "register_projection_input_bindings" =>
+            {
+                Some(method)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let [method] = methods.as_slice() else {
+        return false;
+    };
+    method
+        .attrs
+        .iter()
+        .filter(|attribute| attribute.path().is_ident("cfg"))
+        .map(compact_tokens)
+        .collect::<String>()
+        == "#[cfg(any(test,feature=\"test-support\",feature=\"fault-matrix-test-support\"))]"
 }
 
 fn audit_security_fact_boundary_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
@@ -13646,7 +13709,7 @@ fn audit_security_fact_boundary_findings(root: &Path) -> Result<Vec<Finding<Rule
 
 fn postgres_setup_transaction_is_canonical(block: &syn::Block) -> bool {
     let statements = block.stmts.as_slice();
-    if statements.len() != 15 {
+    if statements.len() != 14 {
         return false;
     }
     let Some(serving_transaction) =
@@ -13660,32 +13723,27 @@ fn postgres_setup_transaction_is_canonical(block: &syn::Block) -> bool {
     let Some(writer_store) = exact_local_initializer(&statements[3], "writer_store", false) else {
         return false;
     };
-    let Some(projection_bindings_preloaded) =
-        exact_local_initializer(&statements[4], "projection_bindings_preloaded", false)
-    else {
-        return false;
-    };
-    let Some(delivery_policy) = exact_local_initializer(&statements[5], "delivery_policy", false)
+    let Some(delivery_policy) = exact_local_initializer(&statements[4], "delivery_policy", false)
     else {
         return false;
     };
     let Some(revocation_receipt) =
-        exact_local_initializer(&statements[7], "revocation_receipt", false)
+        exact_local_initializer(&statements[6], "revocation_receipt", false)
     else {
         return false;
     };
-    let Some(reader) = exact_local_initializer(&statements[8], "reader", false) else {
+    let Some(reader) = exact_local_initializer(&statements[7], "reader", false) else {
         return false;
     };
-    let Some(stores) = exact_local_initializer(&statements[10], "stores", false) else {
+    let Some(stores) = exact_local_initializer(&statements[9], "stores", false) else {
         return false;
     };
     let Some(audit_admin_store) =
-        exact_local_initializer(&statements[11], "audit_admin_store", false)
+        exact_local_initializer(&statements[10], "audit_admin_store", false)
     else {
         return false;
     };
-    let Some(owner) = exact_local_initializer(&statements[12], "owner", false) else {
+    let Some(owner) = exact_local_initializer(&statements[11], "owner", false) else {
         return false;
     };
 
@@ -13698,13 +13756,12 @@ fn postgres_setup_transaction_is_canonical(block: &syn::Block) -> bool {
             "postgres-writer",
         )
         && compact_tokens(writer_store) == "writer.store_arc()"
-        && compact_tokens(projection_bindings_preloaded) == "preloaded_delivery_policy.is_some()"
         && preloaded_delivery_policy_match_is_canonical(delivery_policy)
-        && conditional_projection_binding_registration_is_canonical(&statements[6])
+        && projection_binding_validation_is_canonical(&statements[5])
         && revocation_receipt_is_canonical(revocation_receipt)
         && reader_connect_is_canonical(reader)
         && exact_register_statement(
-            &statements[9],
+            &statements[8],
             "serving_transaction",
             "reader.store_arc()",
             "postgres-reader",
@@ -13712,8 +13769,8 @@ fn postgres_setup_transaction_is_canonical(block: &syn::Block) -> bool {
         && compact_tokens(stores) == "Arc::new(PgRuntimeStores::new(writer,reader))"
         && audit_connect_is_canonical(audit_admin_store)
         && postgres_runtime_owner_is_canonical(owner)
-        && exact_method_statement(&statements[13], "serving_transaction", "commit", &[])
-        && exact_path_call_statement(&statements[14], "Ok", &["owner"])
+        && exact_method_statement(&statements[12], "serving_transaction", "commit", &[])
+        && exact_path_call_statement(&statements[13], "Ok", &["owner"])
 }
 
 fn preloaded_delivery_policy_match_is_canonical(expression: &syn::Expr) -> bool {
@@ -13748,7 +13805,7 @@ fn fallible_serving_match_is_canonical(
         && returned_failure_close_is_exact(&match_.arms[1].body)
 }
 
-fn conditional_projection_binding_registration_is_canonical(statement: &syn::Stmt) -> bool {
+fn projection_binding_validation_is_canonical(statement: &syn::Stmt) -> bool {
     let Some(expression) = expression_statement(statement) else {
         return false;
     };
@@ -13756,7 +13813,7 @@ fn conditional_projection_binding_registration_is_canonical(statement: &syn::Stm
         return false;
     };
     compact_tokens(&outer.cond)
-        == "!projection_bindings_preloaded&&letErr(primary)=writer_store.register_projection_input_bindings(projection_generation,projection_inputs).await.map_err(PgError::ProjectionBindings)"
+        == "letErr(primary)=writer_store.validate_registered_projection_input_generation(projection_generation,projection_inputs,).await.map_err(PgError::ProjectionBindings)"
         && outer.else_branch.is_none()
         && matches!(outer.then_branch.stmts.as_slice(), [syn::Stmt::Expr(expr, Some(_))]
             if returned_failure_close_is_exact(expr))
@@ -14026,12 +14083,16 @@ fn postgres_runtime_owner_is_canonical(expression: &syn::Expr) -> bool {
             "audit_admin_store".to_owned(),
             "delivery_policy".to_owned(),
             "projection_registry".to_owned(),
+            "projection_generation".to_owned(),
+            "projection_inputs".to_owned(),
             "readiness".to_owned(),
             "rls_ready".to_owned(),
         ])
         && exact_field("stores", "stores")
         && exact_field("revocation_receipt", "revocation_receipt")
         && exact_field("audit_admin_store", "audit_admin_store")
+        && exact_field("projection_generation", "projection_generation")
+        && exact_field("projection_inputs", "projection_inputs")
 }
 
 fn parse_rust_file(path: &Path) -> Result<syn::File> {
@@ -16084,6 +16145,14 @@ mod tests {
             &root.join(POSTGRES_BUNDLE_PATH),
             &fs::read_to_string(workspace.join(POSTGRES_BUNDLE_PATH))?,
         )?;
+        write(
+            &root.join(POSTGRES_MIGRATION_PATH),
+            &fs::read_to_string(workspace.join(POSTGRES_MIGRATION_PATH))?,
+        )?;
+        write(
+            &root.join(POSTGRES_PROJECTION_EVENTS_PATH),
+            &fs::read_to_string(workspace.join(POSTGRES_PROJECTION_EVENTS_PATH))?,
+        )?;
         Ok(root)
     }
 
@@ -16099,13 +16168,13 @@ mod tests {
     }
 
     #[test]
-    fn postgres_setup_transaction_uses_collapsed_projection_failure_guard() -> Result<()> {
+    fn postgres_setup_transaction_uses_database_projection_validation_guard() -> Result<()> {
         let source = fs::read_to_string(workspace_root()?.join(POSTGRES_BUNDLE_PATH))?;
         assert!(
             source.contains(
-                "if !projection_bindings_preloaded\n            && let Err(primary) = writer_store"
+                "if let Err(primary) = writer_store\n            .validate_registered_projection_input_generation"
             ),
-            "projection registration failure must use the clippy-clean single guard"
+            "serving projection validation failure must use the exact database registry guard"
         );
         Ok(())
     }
@@ -16153,21 +16222,15 @@ mod tests {
                 0,
             ),
             (
-                "projection registration missing await",
-                ".register_projection_input_bindings(projection_generation, projection_inputs)\n                .await",
-                ".register_projection_input_bindings(projection_generation, projection_inputs)",
+                "projection validation missing",
+                "validate_registered_projection_input_generation(\n                projection_generation,\n                projection_inputs,\n            )",
+                "missing_registered_projection_input_generation(\n                projection_generation,\n                projection_inputs,\n            )",
                 0,
             ),
             (
-                "projection registration failure close",
+                "projection validation failure close",
                 "return serving_transaction.close(Err(primary)).await;",
                 "return Err(primary);",
-                0,
-            ),
-            (
-                "projection registration dead branch",
-                "if !projection_bindings_preloaded\n            && let Err(primary)",
-                "if false && !projection_bindings_preloaded\n            && let Err(primary)",
                 0,
             ),
             (
@@ -16259,6 +16322,50 @@ mod tests {
                 "{label} must fail closed"
             );
         }
+
+        for missing in [POSTGRES_MIGRATION_PATH, POSTGRES_PROJECTION_EVENTS_PATH] {
+            let root = postgres_setup_fixture(&format!(
+                "postgres-projection-capability-missing-{}",
+                missing.replace('/', "-")
+            ))?;
+            fs::remove_file(root.join(missing))?;
+            assert!(
+                !postgres_setup_transaction_live_findings(&root)?.is_empty(),
+                "missing {missing} must fail closed"
+            );
+        }
+
+        let root = postgres_setup_fixture("postgres-projection-migrator-handwritten")?;
+        let target = root.join(POSTGRES_MIGRATION_PATH);
+        let source = fs::read_to_string(&target)?;
+        write(
+            &target,
+            &source.replace(
+                "postgres_migration_inventory::projection_input_generation()",
+                "\"handwritten-generation\"",
+            ),
+        )?;
+        assert!(
+            !postgres_setup_transaction_live_findings(&root)?.is_empty(),
+            "migrator must consume the generated generation"
+        );
+
+        let root = postgres_setup_fixture("postgres-projection-serving-registration")?;
+        let target = root.join(POSTGRES_PROJECTION_EVENTS_PATH);
+        let source = fs::read_to_string(&target)?;
+        let production = source.replace(
+            "    #[cfg(any(test, feature = \"test-support\", feature = \"fault-matrix-test-support\"))]\n    pub(crate) async fn register_projection_input_bindings",
+            "    pub(crate) async fn register_projection_input_bindings",
+        );
+        assert_ne!(
+            source, production,
+            "serving capability mutation must be live"
+        );
+        write(&target, &production)?;
+        assert!(
+            !postgres_setup_transaction_live_findings(&root)?.is_empty(),
+            "production serving registration capability must fail closed"
+        );
         Ok(())
     }
 

@@ -1,6 +1,6 @@
 //! `PgCredentialRepo` —— identity 凭据仓储的 postgres adapter（#1316）。
 //!
-//! impl `identity::ports::CredentialRepo`（find_by_user_id / authenticate / save / apply_password_change），
+//! impl `identity::ports::CredentialRepo`（find_by_user_id / authenticate / insert），
 //! 作 durable login 密码校验真依赖，替换 in-mem `InMemCredentialRepo`（test/seed 门控）。adapter→域 DIP 内向边
 //! （postgres 依赖 identity、native AFIT impl 其域形 port，经 deny.toml identity wrapper + `allows(Adapter,Domain)`
 //! 放行；adapter 仍不被域依赖）。
@@ -11,7 +11,7 @@
 //! 仅 `password_hash`（argon2 PHC，经 `secure::PasswordHash`）。
 //!
 //! 原子性：authenticate 固定锁序 `credentials → account_security_states`，在一个 writer 事务内完成
-//! lifecycle/temporary-lock/KDF/rehash；apply_password_change 仍以 credential 行锁做 CAS。策略阈值（5 次 / 15min 滑窗 / 15min 锁定 TTL）
+//! lifecycle/temporary-lock/KDF/rehash。密码变更只经 `PgIdentitySecurityLifecycle`。策略阈值（5 次 / 15min 滑窗 / 15min 锁定 TTL）
 //! 域内单源（`identity::ports::AccountLockout`），adapter 仅 I/O：`from_parts` 重建 → `record_failure` /
 //! `try_lazy_unlock` 推进 → 访问器回写三列。
 //!
@@ -29,14 +29,14 @@
 //! ref: adapters/postgres/src/auth_grant_lifecycle.rs（#1278 epoch↔SystemTime 编码对称）
 
 #[cfg(all(test, feature = "integration"))]
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 #[cfg(all(test, feature = "integration"))]
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 use identity::ports::{
     AccountLockout, AccountStatus, AuthOutcome, BruteForceDecision, Credential, CredentialRepo,
-    IdentityError, LoginIdentifier, PasswordChangeMutation, TenantId, TenantRepoScope,
+    IdentityError, LoginIdentifier, TenantId, TenantRepoScope,
 };
 use sqlx::{PgConnection, Row};
 
@@ -44,7 +44,6 @@ use crate::account_security_repo::SecurityRow;
 use crate::cotx::{PgTenantReadPool, PgTenantWritePool};
 use crate::outbox::{epoch_secs_to_time, unix_secs};
 use crate::pool::{VerifiedPgReadStore, VerifiedPgWriteStore};
-use crate::tx_retry::{classify_identity_error, run_pg_localtx_retry};
 
 /// identity 凭据仓储的 PostgreSQL adapter。
 ///
@@ -55,64 +54,7 @@ pub struct PgCredentialRepo {
     read_pool: PgTenantReadPool,
     write_pool: PgTenantWritePool,
     #[cfg(all(test, feature = "integration"))]
-    password_change_post_update_gate: Option<Arc<PasswordChangeCasPauseGate>>,
-    #[cfg(all(test, feature = "integration"))]
-    password_change_faults: Arc<Mutex<CredentialFaultState>>,
-    #[cfg(all(test, feature = "integration"))]
     authenticate_post_write_faults: Arc<Mutex<HashSet<String>>>,
-}
-
-#[cfg(all(test, feature = "integration"))]
-#[derive(Clone, Copy)]
-pub(crate) enum CredentialMutationFault {
-    Permanent,
-    Transient,
-    TransientBeforeWrite,
-    CommitUnknown,
-}
-
-#[cfg(all(test, feature = "integration"))]
-#[derive(Clone, Copy)]
-struct CredentialFaultPlan {
-    fault: CredentialMutationFault,
-    remaining: usize,
-}
-
-#[cfg(all(test, feature = "integration"))]
-#[derive(Default)]
-struct CredentialFaultState {
-    plans: HashMap<String, CredentialFaultPlan>,
-    attempts: HashMap<String, usize>,
-}
-
-/// 实例级 CAS 编排门：第一写者完成 UPDATE 后通知测试，并等待显式放行后才返回事务闭包。
-#[cfg(all(test, feature = "integration"))]
-pub(crate) struct PasswordChangeCasPauseGate {
-    updated: tokio::sync::Notify,
-    release: tokio::sync::Notify,
-}
-
-#[cfg(all(test, feature = "integration"))]
-impl PasswordChangeCasPauseGate {
-    pub(crate) fn new() -> Arc<Self> {
-        Arc::new(Self {
-            updated: tokio::sync::Notify::new(),
-            release: tokio::sync::Notify::new(),
-        })
-    }
-
-    pub(crate) async fn wait_until_updated(&self) {
-        self.updated.notified().await;
-    }
-
-    pub(crate) fn release(&self) {
-        self.release.notify_one();
-    }
-
-    async fn pause_after_update(&self) {
-        self.updated.notify_one();
-        self.release.notified().await;
-    }
 }
 
 impl PgCredentialRepo {
@@ -124,10 +66,6 @@ impl PgCredentialRepo {
             read_pool: PgTenantReadPool::new(reader),
             write_pool: PgTenantWritePool::new(writer),
             #[cfg(all(test, feature = "integration"))]
-            password_change_post_update_gate: None,
-            #[cfg(all(test, feature = "integration"))]
-            password_change_faults: Arc::new(Mutex::new(CredentialFaultState::default())),
-            #[cfg(all(test, feature = "integration"))]
             authenticate_post_write_faults: Arc::new(Mutex::new(HashSet::new())),
         }
     }
@@ -137,46 +75,8 @@ impl PgCredentialRepo {
         Self {
             read_pool: PgTenantReadPool::from_unverified_for_test(store),
             write_pool: PgTenantWritePool::from_unverified_for_test(store),
-            password_change_post_update_gate: None,
-            password_change_faults: Arc::new(Mutex::new(CredentialFaultState::default())),
             authenticate_post_write_faults: Arc::new(Mutex::new(HashSet::new())),
         }
-    }
-
-    #[cfg(all(test, feature = "integration"))]
-    pub(crate) fn with_password_change_post_update_pause(
-        mut self,
-        gate: Arc<PasswordChangeCasPauseGate>,
-    ) -> Self {
-        self.password_change_post_update_gate = Some(gate);
-        self
-    }
-
-    #[cfg(all(test, feature = "integration"))]
-    pub(crate) fn with_password_change_fault(
-        self,
-        login: &str,
-        fault: CredentialMutationFault,
-        remaining: usize,
-    ) -> Self {
-        assert!(remaining > 0, "fault plan must affect at least one attempt");
-        self.password_change_faults
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .plans
-            .insert(login.to_owned(), CredentialFaultPlan { fault, remaining });
-        self
-    }
-
-    #[cfg(all(test, feature = "integration"))]
-    pub(crate) fn password_change_attempts(&self, login: &str) -> usize {
-        self.password_change_faults
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .attempts
-            .get(login)
-            .copied()
-            .unwrap_or_default()
     }
 
     /// Inject one failure after authentication has applied its credential-row writes but before
@@ -194,35 +94,6 @@ impl PgCredentialRepo {
 /// sqlx 错误 → 域 storage 错误（装箱保留 source；域 crate 不依赖 sqlx，adapter 边界收口；同 `PgRoleRepo`）。
 fn storage(e: sqlx::Error) -> IdentityError {
     IdentityError::Storage(Box::new(e))
-}
-
-#[cfg(all(test, feature = "integration"))]
-fn record_password_change_attempt(state: &Mutex<CredentialFaultState>, login: &str) {
-    let mut state = state
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    *state.attempts.entry(login.to_owned()).or_default() += 1;
-}
-
-#[cfg(all(test, feature = "integration"))]
-fn take_credential_fault_if(
-    state: &Mutex<CredentialFaultState>,
-    login: &str,
-    predicate: impl FnOnce(CredentialMutationFault) -> bool,
-) -> Option<CredentialMutationFault> {
-    let mut state = state
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let plan = state.plans.get_mut(login)?;
-    let fault = plan.fault;
-    if !predicate(fault) {
-        return None;
-    }
-    plan.remaining -= 1;
-    if plan.remaining == 0 {
-        state.plans.remove(login);
-    }
-    Some(fault)
 }
 
 #[cfg(all(test, feature = "integration"))]
@@ -401,7 +272,7 @@ impl CredentialRepo for PgCredentialRepo {
             .await
     }
 
-    async fn save(
+    async fn insert(
         &self,
         scope: TenantRepoScope,
         credential: Credential,
@@ -409,7 +280,7 @@ impl CredentialRepo for PgCredentialRepo {
         let tenant = scope.tenant();
         if credential.tenant() != tenant {
             return Err(IdentityError::Storage(Box::new(std::io::Error::other(
-                "credential save tenant scope mismatch",
+                "credential insert tenant scope mismatch",
             ))));
         }
         let tenant_uuid = tenant_param(tenant);
@@ -418,123 +289,12 @@ impl CredentialRepo for PgCredentialRepo {
                 scope,
                 move |conn| {
                     Box::pin(
-                        async move { save_in_tx(conn.conn(), &tenant_uuid, &credential).await },
+                        async move { insert_in_tx(conn.conn(), &tenant_uuid, &credential).await },
                     )
                 },
                 storage,
             )
             .await
-    }
-
-    async fn apply_password_change(
-        &self,
-        scope: TenantRepoScope,
-        mutation: PasswordChangeMutation,
-    ) -> Result<(), IdentityError> {
-        let (expected, next, observation) = mutation.into_parts();
-        let tenant = scope.tenant();
-        if next.tenant() != tenant {
-            return Err(IdentityError::Storage(Box::new(std::io::Error::other(
-                "credential bump tenant scope mismatch",
-            ))));
-        }
-        let tenant_uuid = tenant_param(tenant);
-        let login_str = next.login().as_str().to_owned();
-        #[cfg(all(test, feature = "integration"))]
-        let post_update_gate = self.password_change_post_update_gate.clone();
-        #[cfg(all(test, feature = "integration"))]
-        let password_change_faults = Arc::clone(&self.password_change_faults);
-        run_pg_localtx_retry(
-            observation,
-            |_attempt, deadline| {
-                let tenant_uuid = tenant_uuid.clone();
-                let login_str = login_str.clone();
-                let next = next.clone();
-                #[cfg(all(test, feature = "integration"))]
-                let post_update_gate = post_update_gate.clone();
-                #[cfg(all(test, feature = "integration"))]
-                let password_change_faults = Arc::clone(&password_change_faults);
-                #[cfg(all(test, feature = "integration"))]
-                record_password_change_attempt(&password_change_faults, &login_str);
-                async move {
-                    self.write_pool
-                        .retry_write(
-                            scope,
-                            deadline,
-                            move |tx| {
-                                Box::pin(async move {
-                                    #[cfg(all(test, feature = "integration"))]
-                                    if take_credential_fault_if(
-                                        &password_change_faults,
-                                        &login_str,
-                                        |fault| {
-                                            matches!(
-                                                fault,
-                                                CredentialMutationFault::TransientBeforeWrite
-                                            )
-                                        },
-                                    )
-                                    .is_some()
-                                    {
-                                        return Err(storage(sqlx::Error::PoolTimedOut));
-                                    }
-                                    apply_password_change_in_tx(
-                                        tx.conn(),
-                                        &tenant_uuid,
-                                        &login_str,
-                                        expected,
-                                        &next,
-                                    )
-                                    .await?;
-                                    #[cfg(all(test, feature = "integration"))]
-                                    if let Some(gate) = post_update_gate {
-                                        gate.pause_after_update().await;
-                                    }
-                                    #[cfg(all(test, feature = "integration"))]
-                                    if let Some(fault) = take_credential_fault_if(
-                                        &password_change_faults,
-                                        &login_str,
-                                        |fault| {
-                                            !matches!(
-                                                fault,
-                                                CredentialMutationFault::TransientBeforeWrite
-                                            )
-                                        },
-                                    ) {
-                                        match fault {
-                                            CredentialMutationFault::Permanent => {
-                                                return Err(IdentityError::Storage(Box::new(
-                                                    std::io::Error::other(
-                                                        "injected credential post-update failure",
-                                                    ),
-                                                )));
-                                            }
-                                            CredentialMutationFault::Transient => {
-                                                return Err(storage(sqlx::Error::PoolTimedOut));
-                                            }
-                                            CredentialMutationFault::TransientBeforeWrite => {
-                                                unreachable!(
-                                                    "before-write fault is consumed before SQL"
-                                                )
-                                            }
-                                            CredentialMutationFault::CommitUnknown => {
-                                                tx.inject_commit_unknown_after_commit()
-                                                    .await
-                                                    .map_err(storage)?;
-                                            }
-                                        }
-                                    }
-                                    Ok(())
-                                })
-                            },
-                            storage,
-                        )
-                        .await
-                }
-            },
-            classify_identity_error,
-        )
-        .await
     }
 }
 
@@ -699,8 +459,9 @@ async fn security_row_for_update(
         SELECT status,
                authn_epoch,
                version,
-               extract(epoch from status_changed_at)::bigint AS status_changed_at,
-               extract(epoch from updated_at)::bigint AS updated_at
+               (extract(epoch from status_changed_at) * 1000000)::bigint
+                   AS status_changed_at_micros,
+               (extract(epoch from updated_at) * 1000000)::bigint AS updated_at_micros
         FROM account_security_states
         WHERE tenant_id = $1::uuid AND user_id = $2::uuid
         FOR UPDATE
@@ -713,20 +474,16 @@ async fn security_row_for_update(
     .map_err(storage)
 }
 
-/// Save credential and its mandatory initial account-security row in one transaction.
-async fn save_in_tx(
+/// Insert credential and its mandatory initial account-security row in one transaction.
+async fn insert_in_tx(
     tx: &mut PgConnection,
     tenant_uuid: &str,
     credential: &Credential,
 ) -> Result<(), IdentityError> {
-    let saved = sqlx::query(
+    sqlx::query(
         r#"
         INSERT INTO credentials (tenant_id, user_id, login, password_hash, version)
         VALUES ($1::uuid, $2::uuid, $3, $4, $5)
-        ON CONFLICT (tenant_id, login) DO UPDATE
-        SET password_hash = EXCLUDED.password_hash,
-            version = EXCLUDED.version
-        WHERE credentials.user_id = EXCLUDED.user_id
         "#,
     )
     .bind(tenant_uuid)
@@ -737,11 +494,6 @@ async fn save_in_tx(
     .execute(&mut *tx)
     .await
     .map_err(storage)?;
-    if saved.rows_affected() != 1 {
-        return Err(IdentityError::Storage(Box::new(std::io::Error::other(
-            "credential login cannot be rebound to a different user",
-        ))));
-    }
     sqlx::query(
         r#"
         INSERT INTO account_security_states (
@@ -749,50 +501,10 @@ async fn save_in_tx(
             status_changed_at, updated_at
         )
         VALUES ($1::uuid, $2::uuid, 'active', 0, 1, clock_timestamp(), clock_timestamp())
-        ON CONFLICT (tenant_id, user_id) DO NOTHING
         "#,
     )
     .bind(tenant_uuid)
     .bind(credential.user_id().as_uuid().to_string())
-    .execute(&mut *tx)
-    .await
-    .map_err(storage)?;
-    Ok(())
-}
-
-/// password-change 事务体：单行 FOR UPDATE 读版本 → CAS 分支（None=CredentialNotFound / 不匹配=VersionConflict /
-/// 命中→替换 hash+version，保留锁定列，同 in-mem bump 不动 lockout）。key 派生自 `next`（F2）。
-async fn apply_password_change_in_tx(
-    tx: &mut PgConnection,
-    tenant_uuid: &str,
-    login: &str,
-    expected: u32,
-    next: &Credential,
-) -> Result<(), IdentityError> {
-    let row = sqlx::query(
-        "SELECT version FROM credentials WHERE tenant_id = $1::uuid AND login = $2 FOR UPDATE",
-    )
-    .bind(tenant_uuid)
-    .bind(login)
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(storage)?;
-    let Some(r) = row else {
-        return Err(IdentityError::CredentialNotFound);
-    };
-    let current: i64 = r.try_get("version").map_err(storage)?;
-    // 越界损坏值 → u32::MAX（除非 expected 恰为 MAX 否则不匹配 → VersionConflict，fail-closed）。
-    if u32::try_from(current).unwrap_or(u32::MAX) != expected {
-        return Err(IdentityError::VersionConflict);
-    }
-    sqlx::query(
-        "UPDATE credentials SET password_hash = $3, version = $4 \
-         WHERE tenant_id = $1::uuid AND login = $2",
-    )
-    .bind(tenant_uuid)
-    .bind(login)
-    .bind(next.password_hash().as_str())
-    .bind(i64::from(next.version()))
     .execute(&mut *tx)
     .await
     .map_err(storage)?;

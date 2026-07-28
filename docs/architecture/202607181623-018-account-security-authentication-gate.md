@@ -3,7 +3,7 @@
 - **状态**：Accepted
 - **日期**：2026-07-18
 - **关联**：issue #1833，AuthN hardening PR-06；由 ADR-019 / #1834 扩展 AuthGrant 根绑定，ADR-020 / #1841
-  冻结统一凭据安全事件协议
+  冻结统一凭据安全事件协议，#1842 完成密码与账户限制的生产共事务接线
 - **对标**：Keycloak `services/src/main/java/org/keycloak/services/managers/DefaultBruteForceProtector.java`
 
 ## 背景
@@ -39,14 +39,19 @@ snapshot；存储 CAS 必须同时匹配 tenant、user、status、epoch 和 vers
 伪造源状态当作 durable 真源。
 
 ADR-020 的密码变更/重置、全部退出和凭据删除不是“同态 transition”：它们使用独立的 sealed invalidation
-mutation，保持当前 status、递增 epoch/version，并在同一事务撤销全部 grant/family。账户锁定、暂停和停用仍只能
-走上述 transition 图；两类 mutation 都携带完整 expected snapshot，不能借 invalidation 绕过状态机。
+command，保持当前 status、递增 epoch/version，并在同一事务撤销全部 grant/family。账户锁定、暂停和停用仍只能
+走上述 transition 图；限制命令同时携带完整 expected snapshot 和 sealed security-event，不能借 invalidation
+绕过状态机。
 
-`AccountSecurityLifecycle` 仍只保留为 identity 内部的 sealed persistence capability，不作为第二条 production
-operation 挂载。ADR-020 / #1841 最初冻结统一内部 command、原子撤销能力和 draft
-`identity.security-event` fact；#1840 已通过精确 current/all HTTP producer receipt、PostgreSQL producer
-transaction、audit subscriber 与 runtime assurance 完成 active 激活。生产执行只进入该统一闭环，不能回退到
-旧 lifecycle 或以静态 wire 冒充生产接线。
+旧 `AccountSecurityLifecycle` 与 `PasswordChangeMutation` 已删除，不保留 inert implementation、alias 或兼容
+helper。所有生产凭据安全写入由 `IdentitySecurityLifecycle` 这一域形 capability 承载；PostgreSQL 只提供一个
+`PgIdentitySecurityLifecycle`，统一执行 password change、account restriction 与 current/all logout。
+其中 password-change 和 account-status-set 路由必须携带各自 generated producer receipt，业务投影、撤销和
+`identity.security-event` OutboxFact 在同一 producer transaction 中全成或全败。
+
+恢复 Active 是刻意更窄的例外：仅允许 Suspended/Locked→Active 的完整 snapshot CAS，不产生安全事件、不回退
+epoch，也不把已撤销或 compromised 的 grant/family 复活；Deactivated 仍为终态。reactivation 没有 HTTP producer
+receipt，不能借该路径伪造 OutboxFact 或会话恢复。
 
 持久化 CAS 必须消费 mutation 携带的完整 expected/next snapshots，以 tenant、user、expected status、
 expected epoch 与 expected version 作为更新条件，并原子写入完整 next snapshot；不得由 adapter 根据局部字段
@@ -99,23 +104,24 @@ epoch：旧 binary 先通过正常流程撤销全部 active family，迁移锁�
 - **PR-08（#1835 / #1839 / ADR-021）**：为 User-only RSS access JWT 增加
   `sid/jti/auth_time/authn_epoch`，以闭合 profile shape 保留 verified grant facts，并在每个受保护请求上
   以单次 tenant-scoped 读取校验当前 grant/account 后铸 `CurrentAuthGrant`。
-- **PR-13（#1841 / ADR-020）**：交付统一的凭据安全事件模型、原子 lifecycle 与 draft outbox fact；不挂载
-  production producer/subscriber。
-- **PR-14（#1842 / #1843）**：挂载生产 operation 与 producer，完成审计消费、runtime dispatch、refresh reuse
-  自动标记 Compromised 及 L2 assurance，再将 draft 激活。
+- **PR-13（#1841 / ADR-020，已交付）**：交付统一的凭据安全事件模型、原子 lifecycle 与 draft outbox fact。
+- **PR-14（#1842，已交付）**：password change 与 account restriction 进入和 current/all logout 相同的统一
+  producer transaction，审计消费、runtime dispatch 与 L2 assurance 覆盖新增路由。
+- **PR-15（#1843）**：refresh reuse 的生产 security-event 接线单独交付；本文不把 schema 中的
+  `RefreshReuseDetected` 闭值当作已挂载 producer 证据。
 
 ADR-018 已通过 refresh record epoch 与最终 account writer fence 消除账号状态的 read-to-CAS TOCTOU；
 ADR-019 进一步把 epoch 写入 AuthGrant 并建立 grant final fence；ADR-021 / #1835 / #1839 已把
 issuance epoch 与 grant 定位证据写入 User-only RSS JWT，并在每请求进入 handler 前核对当前
-grant/account 状态后铸 `CurrentAuthGrant`。本文不声称已有全部账户安全事件生产接线或
-reuse compromise 跨边界闭环。
+grant/account 状态后铸 `CurrentAuthGrant`。#1842 进一步把 password change、account restriction、授权撤销和
+安全事件写入收敛到同一个 PostgreSQL lifecycle capability；恢复 Active 不发布事件也不恢复旧授权。
 
 ## AI-HARD 载体
 
 | 不变式 | 载体 | 评级 |
 |---|---|---|
 | 非 Active 不能铸造认证 receipt | 私有字段 + crate-private Active conversion | Hard |
-| 调用方不能构造非法 lifecycle mutation | 私有字段 + transition-only constructor | Hard |
+| 调用方不能构造非法 restriction/reactivation command | 私有字段 + transition-only constructor | Hard |
 | 登录不能拆成状态预检与认证两次调用 | 删除 `lockout_status`，仅保留 combined authenticate | Hard |
 | refresh 不能缺少 security reader | 非 `Option` 构造器依赖 | Hard |
 | 裸 subject/tenant 不能签 initial refresh | 非公开 initial funnel + typed Active receipt | Hard |
@@ -126,6 +132,7 @@ reuse compromise 跨边界闭环。
 | PostgreSQL 共事务和 credential→security 锁序 | 并发、故障注入、missing-row 反空测试 | Medium |
 | production provider 与 refresh gate 确实接线 | composition anti-vacuity 与真实 PostgreSQL 测试 | Medium |
 | 安全事件 kind 不能与 closed target/可执行 transition 分离 | ADR-020 封闭层级 enum + 私有派生 API | Hard |
-| 账户级安全事件必须原子递增 epoch、撤销 grant/family 并写 outbox | 唯一 producer transaction + PostgreSQL 故障/并发测试 | Medium |
+| password/restriction 必须原子更新投影、撤销 grant/family 并写 outbox | generated producer receipt + 唯一 `PgIdentitySecurityLifecycle` producer transaction + PostgreSQL 故障/并发测试 | Medium |
+| reactivation 不能发布事件或复活旧授权 | 无 producer receipt的窄 CAS method + grant/family 单调终态测试 | Hard + Medium |
 
 本决策不建立 Soft-only 约束。subject、epoch、password、token 不进入 Debug、错误正文或 metric label。

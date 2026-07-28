@@ -18,5 +18,31 @@ impl core::marker::Unpin for postgres_migration_inventory::MigrationIdentity
 impl core::marker::UnsafeUnpin for postgres_migration_inventory::MigrationIdentity
 impl core::panic::unwind_safe::RefUnwindSafe for postgres_migration_inventory::MigrationIdentity
 impl core::panic::unwind_safe::UnwindSafe for postgres_migration_inventory::MigrationIdentity
+pub struct postgres_migration_inventory::ProjectionInputIdentity
+impl postgres_migration_inventory::ProjectionInputIdentity
+pub const fn postgres_migration_inventory::ProjectionInputIdentity::contract_id(self) -> &'static str
+pub const fn postgres_migration_inventory::ProjectionInputIdentity::domain(self) -> &'static str
+pub const fn postgres_migration_inventory::ProjectionInputIdentity::projection_id(self) -> &'static str
+pub const fn postgres_migration_inventory::ProjectionInputIdentity::schema_hash(self) -> &'static str
+pub const fn postgres_migration_inventory::ProjectionInputIdentity::topic(self) -> &'static str
+pub const fn postgres_migration_inventory::ProjectionInputIdentity::version(self) -> &'static str
+impl core::clone::Clone for postgres_migration_inventory::ProjectionInputIdentity
+pub fn postgres_migration_inventory::ProjectionInputIdentity::clone(&self) -> postgres_migration_inventory::ProjectionInputIdentity
+impl core::cmp::Eq for postgres_migration_inventory::ProjectionInputIdentity
+impl core::cmp::PartialEq for postgres_migration_inventory::ProjectionInputIdentity
+pub fn postgres_migration_inventory::ProjectionInputIdentity::eq(&self, &postgres_migration_inventory::ProjectionInputIdentity) -> bool
+impl core::fmt::Debug for postgres_migration_inventory::ProjectionInputIdentity
+pub fn postgres_migration_inventory::ProjectionInputIdentity::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for postgres_migration_inventory::ProjectionInputIdentity
+impl core::marker::StructuralPartialEq for postgres_migration_inventory::ProjectionInputIdentity
+impl core::marker::Freeze for postgres_migration_inventory::ProjectionInputIdentity
+impl core::marker::Send for postgres_migration_inventory::ProjectionInputIdentity
+impl core::marker::Sync for postgres_migration_inventory::ProjectionInputIdentity
+impl core::marker::Unpin for postgres_migration_inventory::ProjectionInputIdentity
+impl core::marker::UnsafeUnpin for postgres_migration_inventory::ProjectionInputIdentity
+impl core::panic::unwind_safe::RefUnwindSafe for postgres_migration_inventory::ProjectionInputIdentity
+impl core::panic::unwind_safe::UnwindSafe for postgres_migration_inventory::ProjectionInputIdentity
 pub fn postgres_migration_inventory::migration_head_fingerprint() -> alloc::string::String
 pub fn postgres_migration_inventory::migrations() -> &'static [postgres_migration_inventory::MigrationIdentity]
+pub const fn postgres_migration_inventory::projection_input_generation() -> &'static str
+pub const fn postgres_migration_inventory::projection_inputs() -> &'static [postgres_migration_inventory::ProjectionInputIdentity]

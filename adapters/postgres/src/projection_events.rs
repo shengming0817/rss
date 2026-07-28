@@ -93,20 +93,15 @@ impl PgStore {
 
     /// Add one deployment generation to the DB-side projection input registry.
     ///
-    /// This runs during [`crate::PgRuntimeDeps::connect_serving`] on the verified writer connection. Runtime
-    /// `rss_app` can execute the fixed append function, but the function only accepts rows whose
-    /// outbox metadata matches this DB-side generated registry.
+    /// This runs only on the migration lane before serving starts. Runtime `rss_app` cannot
+    /// register or retire bindings.
+    #[cfg(any(test, feature = "test-support", feature = "fault-matrix-test-support"))]
     pub(crate) async fn register_projection_input_bindings(
         &self,
         generation: &'static str,
         bindings: &'static [ProjectionInputBinding],
     ) -> Result<(), sqlx::Error> {
-        let expected = projection_input_generation(bindings);
-        if generation != expected {
-            return Err(sqlx::Error::Protocol(
-                "generated projection input generation does not match binding set".into(),
-            ));
-        }
+        validate_projection_input_generation(generation, bindings)?;
         let mut tx = self.pool.begin().await?;
         for binding in bindings {
             sqlx::query(
@@ -124,9 +119,74 @@ impl PgStore {
         }
         tx.commit().await
     }
+
+    /// Compare one generated projection generation with the migration-owned DB registry.
+    ///
+    /// The serving role reaches the table only through the fixed-shape
+    /// `rss_read_projection_input_generation` SECURITY DEFINER function. Missing, partial and extra
+    /// rows all return `Ok(false)`; probe failures remain errors so startup/readiness fail closed.
+    pub(crate) async fn projection_input_generation_is_exact(
+        &self,
+        generation: &'static str,
+        bindings: &'static [ProjectionInputBinding],
+    ) -> Result<bool, sqlx::Error> {
+        validate_projection_input_generation(generation, bindings)?;
+        let actual: Vec<(String, String, String, String)> = sqlx::query_as(
+            "SELECT contract_id, contract_version, schema_hash, topic \
+             FROM public.rss_read_projection_input_generation($1)",
+        )
+        .bind(generation)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut expected = bindings
+            .iter()
+            .map(|binding| {
+                (
+                    binding.contract_id().to_owned(),
+                    binding.version().to_owned(),
+                    binding.schema_hash().to_owned(),
+                    binding.topic().to_owned(),
+                )
+            })
+            .collect::<Vec<_>>();
+        expected.sort_unstable();
+        Ok(actual == expected)
+    }
+
+    pub(crate) async fn validate_registered_projection_input_generation(
+        &self,
+        generation: &'static str,
+        bindings: &'static [ProjectionInputBinding],
+    ) -> Result<(), sqlx::Error> {
+        if self
+            .projection_input_generation_is_exact(generation, bindings)
+            .await?
+        {
+            Ok(())
+        } else {
+            Err(sqlx::Error::Protocol(
+                "database projection input generation does not exactly match generated bindings"
+                    .into(),
+            ))
+        }
+    }
 }
 
-fn projection_input_generation(bindings: &[ProjectionInputBinding]) -> String {
+pub(crate) fn validate_projection_input_generation(
+    generation: &'static str,
+    bindings: &'static [ProjectionInputBinding],
+) -> Result<(), sqlx::Error> {
+    let expected = projection_input_generation(bindings);
+    if generation == expected {
+        Ok(())
+    } else {
+        Err(sqlx::Error::Protocol(
+            "generated projection input generation does not match binding set".into(),
+        ))
+    }
+}
+
+pub(crate) fn projection_input_generation(bindings: &[ProjectionInputBinding]) -> String {
     let mut tuples = bindings
         .iter()
         .map(|binding| {

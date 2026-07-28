@@ -20,6 +20,10 @@
 > `CredentialSecurityEventKind` 已下沉 `authn`，供 typed issuer 直接消费；identity 仍拥有凭据/账户状态、
 > lifecycle port、安全 command/transaction 与 wire 编排。RSS access claims 已在 #1835 交付。
 
+> **[#1842 credential-security 生产修订]** password-change 已从 L1 LocalTx 升级为 L2 OutboxFact，新增
+> `identity.account-status-set` L2 路由；两者与 logout 共用 `IdentitySecurityLifecycle` 和唯一
+> `PgIdentitySecurityLifecycle`。恢复 Active 不发事件且不复活旧授权。
+
 **Input**: User description: "identity 域 crate（身份/会话/RBAC/ABAC/密码变更 CAS）：在 #997 冻结签名内兑现 domain L0（RBAC/ABAC deny-overrides）+ application（真实登录/会话/密码 CAS/账户锁定/角色管理）+ ports（CredentialRepo/SessionRepo）+ 新事件契约 + handler + contract test。拆成 5 个 ≤2000 行可执行 PR，挂 Azure Boards #1012。"
 
 **Tracking**: Azure Boards Feature #1012（容器，跨 5 PR；子 PBI #1186–#1190）（`[RW-W-identity]`）· Epic #991（GoCell→Rust 迁移 · W 宽扇出阶段）· Blocked-by #999（G1 追踪弹，已闭环）
@@ -147,24 +151,26 @@
 
 ### User Story 4 - 会话登录生命周期 + 密码变更 CAS + logout（application，L1/L2）(Priority: P2)
 
-`LoginService` 兑现真实登录路径（超越 seed-login）：经 `CredentialRepo` 原子完成密码与 Active 状态门控（消费 US3）→ refresh pre-mint 重读 Active 状态并核对 epoch → 创建会话（`SessionRepo`，L1）→ 在同事务发布 `identity.session-created` outbox fact（L2，已存契约）。密码变更走 CAS（凭据版本 pin → bump，并发安全）。logout 撤销会话。
+`LoginService` 兑现真实登录路径（超越 seed-login）：经 `CredentialRepo` 原子完成密码与 Active 状态门控（消费 US3）→ refresh pre-mint 重读 Active 状态并核对 epoch → 创建授权根 → 在同事务发布 `identity.session-created` outbox fact（L2，已存契约）。密码变更不再由 repo 暴露独立 CAS：`PasswordChangeCommand` 把 credential/account expected snapshot、typed 新密码与 PasswordChanged event 封闭在一起，由唯一 producer transaction 原子更新、撤销既有 grant/family 并写 outbox。logout 同样进入该统一安全 lifecycle。
 
 **Tenant 来源**：login 请求的 tenant 来源为 `X-Tenant-ID` header（pre-auth 路径，tenancy.md Hard），**request body 不得含 `tenantId` 字段**——body 含 tenantId 是 tenancy Hard 违规。
 
-**Logout 安全边界**：current 由认证 grant evidence 精确撤销当前 grant/family；all 通过 account epoch CAS
-撤销主体全部既存 grant/family。状态、opaque target mapping 与 `identity.security-event` 在同一事务提交。
+**凭据安全边界**：current 由认证 grant evidence 精确撤销当前 grant/family；all 与 password change 通过 account
+epoch CAS 撤销主体全部既存 grant/family。account-status-set 接受四值 desired state，并同样
+递增 epoch 后撤销全部旧授权。投影与 `identity.security-event` 在同一事务提交，不存在 opaque target mapping。
+Suspended/Locked 恢复 Active 只做状态 CAS：保留 epoch、不发事件、不恢复旧 grant/family；Deactivated 为终态。
 
 **Login 响应**：响应 `data: {sessionId, expiresAt, accessToken, refreshToken, accessExpiresAt}`，登录成功首发 access JWT + refresh token bundle（#1252 已接线；vault Signer 经 authn::JwtIssuer 签）。
 
 **Why this priority**: 把 domain L0（US1–US3）编排成可用的登录会话闭环——这是 identity 对外的核心业务价值。依赖 US3（CredentialRepo）。独占 `application/login.rs` + `domain/session.rs` + `ports.rs`(SessionRepo)。
 
-**Independent Test**: 异步单测（tokio）+ fake Publisher/Clock/CredentialRepo/SessionRepo 替身：登录成功发一条 session-created；密码错误不发事件返 InvalidCredentials；密码变更 CAS 在版本冲突时拒绝；logout 撤销会话。覆盖 L1 事务完整性 + L2 outbox 原子性。追加：L2 outbox consumer 幂等红用例（同 event 重复投递时只处理一次）；跨租红用例（携 tenantA 凭据以 tenantB 登录 → Deny，不创建会话、不发事件）。
+**Independent Test**: 异步单测（tokio）+ fake Clock/typed lifecycle 替身：登录成功发一条 session-created；密码错误不发事件返 InvalidCredentials；password/account sealed command 在版本冲突时拒绝；logout 撤销授权。PostgreSQL 测试覆盖 credential/account/grant/family/outbox both-or-neither、commit-unknown 不返回 receipt；audit consumer 对九组 kind/target 幂等消费且 mismatch fail-closed。追加跨租红用例（携 tenantA 凭据以 tenantB 登录 → Deny，不创建授权、不发事件）。
 
 **Acceptance Scenarios**:
 
 1. **Given** 合法凭据 + Active 状态 + 合法 `X-Tenant-ID` header，**When** `login`，**Then** 在 token mint 前再次确认 Active/epoch，创建会话 + 发布一条 `identity.session-created`，响应 token bundle。
 2. **Given** 错误凭据，**When** `login`，**Then** 返回 `LoginError::InvalidCredentials`，**不**创建会话、**不**发事件（无孤立事件）。
-3. **Given** 密码变更请求携带旧版本号，**When** 并发两次变更，**Then** 仅一次成功（CAS），另一次因版本不匹配被拒。
+3. **Given** 同一 expected credential/account snapshot 的两次密码变更，**When** 并发执行，**Then** 仅一次原子提交 credential、epoch、授权撤销与 PasswordChanged fact，另一次冲突且零部分副作用。
 4. **Given** 两个活动授权，**When** `logout`，**Then** 只撤销当前授权；**When** `logout-all`，**Then** 撤销主体全部既存授权，旧 access/refresh 均返回 401。
 5. **Given** tenantA 凭据携 `X-Tenant-ID: tenantB` header，**When** `login`，**Then** Deny，不创建会话，不发事件。
 
@@ -172,7 +178,7 @@
 
 ### User Story 5 - RBAC 角色管理 + 角色事件 + HTTP handler + contract 接线（L2 + wire）(Priority: P2)
 
-`RoleRepo`（已存 port）兑现角色 CRUD；角色分配 / 撤销定义新事件契约 `identity.role-assigned` / `identity.role-revoked`（event L2 OutboxFact，扇出闭环 schema→generated→metadata→test→docs）+ 发布侧实现——但**本 feature 内 `role-*` 事件 lifecycle 暂为 draft**（audit 订阅消费 + active 升级延 #1017 Join，避免在无 subscriber 时触发 active-subscriber 守卫）。新增 HTTP 端点（roles / profile / password-change / logout）的契约 + 真实 axum handler + contract-level 测试；`identity.login` / `identity.session-created` 生命周期 draft→active。
+`RoleRepo`（已存 port）兑现角色 CRUD；角色分配 / 撤销定义新事件契约 `identity.role-assigned` / `identity.role-revoked`（event L2 OutboxFact，扇出闭环 schema→generated→metadata→test→docs）+ 发布侧实现——但**本 feature 内 `role-*` 事件 lifecycle 暂为 draft**（audit 订阅消费 + active 升级延 #1017 Join，避免在无 subscriber 时触发 active-subscriber 守卫）。新增 HTTP 端点（roles / profile / password-change / account-status-get/set / logout）的契约 + 真实 axum handler + contract-level 测试；`identity.login` / `identity.session-created` 生命周期 draft→active。
 
 **Why this priority**: 把 identity 能力暴露为 wire 契约 + handler，是域 crate 对外可服务的收口。依赖 US4（登录 handler）、US2（authz handler 用 ABAC）、US1（类型）。最重（含契约 codegen + handler + contract test），估行接近上限。
 
@@ -187,6 +193,8 @@
 | roles list | GET | `/api/v1/identity/roles` | 鉴权 + 分页(limit≤500)，响应 `{data,nextCursor,hasMore}` | `identity:role:read` |
 | profile | GET | `/api/v1/identity/profile` | 鉴权（selfScoped） | `identity:profile:read` |
 | password-change | POST | `/api/v1/identity/password/change` | 鉴权（selfScoped） | `identity:profile:write` |
+| account status get | GET | `/api/v1/identity/accounts/{userId}/status` | 鉴权；租户内状态查询 | `identity:account-security:read` |
+| account status set | PUT | `/api/v1/identity/accounts/{userId}/status` | 鉴权；四值 desired state；同态无副作用 | `identity:account-security:write` |
 | logout current | POST | `/api/v1/identity/logout` | 鉴权 grant evidence | `identity:session:logout-current` |
 | logout all | POST | `/api/v1/identity/logout-all` | 鉴权 grant evidence | `identity:session:logout-all` |
 
@@ -206,7 +214,7 @@
 - **跨租户**：任一授权 / 凭据 / 会话操作的 principal.tenant 与资源 tenant 不一致 → fail-closed Deny（不泄漏存在性）。
 - **空 / 非 canonical 输入**：所有 newtype parse 在空 / 非法字符时返回 `*Error`，绝不 panic、绝不静默接受。
 - **密码 / 凭据**：永不落明文、永不进日志 / Debug / wire；哈希比对 constant-time 防时序侧信道。
-- **并发**：密码变更 / 凭据版本 pin 用 CAS，版本冲突拒绝而非后写覆盖。
+- **并发**：password/status sealed command 同时 pin 完整 credential/account snapshot；status PUT 冲突后只在持久状态已收敛到同一目标时返回 `changed=false`，异目标仍 409，且不重试发布事件。
 - **事件原子性**：登录失败 / 业务回滚时 outbox 无孤立事件；发布失败按 relay 重试 / DLX（eventexec 已提供）。
 - **临时阻断边界**：失败窗口刚过期 / 临时阻断 TTL 刚过期的临界点，计数与解锁判定确定；不得迁移 durable `AccountStatus`。
 - **`like` operator**：glob 模式最大 256 字节，超长或含非法字符在 parse 阶段 fail-closed 拒绝，不推迟到求值——防 ReDoS。
@@ -221,9 +229,9 @@
 - **FR-004**: 系统 MUST 经 `CredentialRepo` 用 argon2/bcrypt + constant-time 校验密码、支持凭据版本 pin，且密码永不进明文 / 日志 / wire。
 - **FR-005**: 系统 MUST 分离持久 `AccountSecurityState`（四值状态 + epoch/version）与临时 `AccountLockout`（阈值 5 / 窗口 15min / 阻断 TTL 15min）；暴破阈值与 TTL 到期都不得迁移 durable 状态。
 - **FR-006**: 系统 MUST 在 `LoginService` 真实登录路径上：原子校验凭据和 Active 状态 → token mint 前重读 Active/epoch → 创建会话（L1）→ 同事务发布 `identity.session-created`（L2）；失败不 mint、不创建会话、不发事件。
-- **FR-007**: 系统 MUST 用 CAS（凭据版本 pin）实现密码变更并发安全。
+- **FR-007**: 系统 MUST 用一个 `IdentitySecurityLifecycle` producer transaction 原子完成密码 credential CAS、account epoch/version bump、全部 grant/family 撤销与 PasswordChanged OutboxFact；任一冲突/失败不得部分提交。
 - **FR-008**: 系统 MUST 提供 `RoleRepo` 角色 CRUD，并在分配 / 撤销时发布 `identity.role-assigned` / `identity.role-revoked`（L2 OutboxFact，扇出闭环完整）。
-- **FR-009**: 系统 MUST 为新 HTTP 端点（roles / profile / password-change / logout）提供契约 + 真实 axum handler + typed response envelope（业务 4xx/5xx 不返裸 framework 5xx）。
+- **FR-009**: 系统 MUST 为新 HTTP 端点（roles / profile / password-change / account-status-get/set / logout）提供契约 + 真实 axum handler + typed response envelope（业务 4xx/5xx 不返裸 framework 5xx）。
 - **FR-010**: 系统 MUST 经 contract-level 测试覆盖每个 served contract 的正常 schema / 参数错误码 / 鉴权边界 / path 参数校验。
 - **FR-011**: 系统 MUST 保留 #997 冻结签名与 INVARIANT（IDENTITY-AUTHZ-TENANT-01 等），不弱化既有 sealed / newtype / `pub(crate)` 静态强制。
 - **FR-012**: 系统 MUST NOT 给 domain 类型 derive `Serialize`（`rss_domain_no_serialize` dylint）；wire 类型只经 contract / generated。
@@ -234,13 +242,13 @@
 - **FR-016**: login tenant 来源 MUST 为 `X-Tenant-ID` header（pre-auth 路径，tenancy.md Hard）；request body 禁止含 `tenantId` 字段。
 - **FR-017**: 每个 active + codegen HTTP 契约 MUST 声明恰一个 AuthZ mode（permission overlay 值 或 显式 opt-out + reason）；缺声明的端点被 codegen fail-closed 拒绝。
 - **FR-018**: 列表响应格式 MUST 为 `{data, nextCursor, hasMore}`（rust-standards.md §API）。
-- **FR-019**: current/all logout MUST 经唯一 credential-security producer transaction 原子撤销目标 grant/family、写 opaque target mapping 与 security-event；旧 access/refresh 必须立即失效。
+- **FR-019**: password change、account status set 与 current/all logout MUST 经唯一 credential-security producer transaction 原子提交业务投影、撤销目标 grant/family 与 security-event；event payload 携 typed initiator kind + 独立版本密钥生成的 tenant/domain-separated HMAC-SHA256 ref 与 key ID，不写 raw subject/target mapping，旧 access/refresh 必须立即失效。
 - **FR-020**: `CredentialRepo::authenticate` MUST 是 credential + account-security 的唯一事务认证漏斗；不得提供可拆分的 `lockout_status` 或状态预检 port。
 - **FR-021**: 系统 MUST 只允许 Active 账户登录和签发 User refresh；缺失/损坏状态、非 User refresh record 和存储异常均 fail-closed。
 - **FR-023**: refresh family MUST 持久化不可改写的 issuance epoch；rotation 最终 writer MUST 在同一事务锁定
   account-security、校验 Active + epoch 后才允许 refresh CAS + child insert，并以 typed outcome 区分 replay
   与 account-stale。
-- **FR-022**: `AccountSecurityLifecycle` MUST 只消费 sealed CAS mutation；进入非 Active 状态递增 epoch，恢复 Active 保留 epoch，Deactivated 为终态。
+- **FR-022**: HTTP desired-state PUT MUST 经 sealed `AccountStatusSetCommand`；进入非 Active 状态递增 epoch 并撤销旧授权，Suspended/Locked→Active 保留 epoch并发布 `AccountReactivated`，不恢复旧 grant/family；同状态零写入/零事件；Deactivated 为终态。内部无事件恢复仅经独立 `AccountReactivationLifecycle` capability，不得混入 producer port。
 
 ### Key Entities *(详见 data-model.md)*
 
@@ -248,7 +256,7 @@
 - **Policy / PolicyRule / AbacAttribute**：ABAC 策略集、单条规则（operator + key + expected）、属性键值对。
 - **Credential / AccountSecurityState / AccountLockout**：凭据（哈希 + 版本）、持久账户状态（status + authn_epoch + version）、独立的临时暴破计数器。
 - **Session**：会话聚合（id / principal / expires_at；epoch 字段由 authn 提供）。
-- **事件**：`identity.session-created`（已存）、`identity.role-assigned` / `identity.role-revoked`（新增，L2）。
+- **事件**：`identity.session-created`、`identity.security-event`（active L2）、`identity.role-assigned` / `identity.role-revoked`（新增，L2）。
 
 ## Success Criteria *(mandatory)*
 

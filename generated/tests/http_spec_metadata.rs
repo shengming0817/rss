@@ -13,9 +13,18 @@ use vocab::{
 const EXPECTED_ACTIVE_SPECS: &[(&str, HttpConsistencyLevel)] = &[
     ("audit.list-entries", HttpConsistencyLevel::LocalOnly),
     ("audit.list-tenant-entries", HttpConsistencyLevel::LocalTx),
+    (
+        "identity.account-status-get",
+        HttpConsistencyLevel::LocalOnly,
+    ),
+    (
+        "identity.account-status-set",
+        HttpConsistencyLevel::OutboxFact,
+    ),
     ("identity.login", HttpConsistencyLevel::OutboxFact),
-    ("identity.logout", HttpConsistencyLevel::LocalTx),
-    ("identity.password-change", HttpConsistencyLevel::LocalTx),
+    ("identity.logout", HttpConsistencyLevel::OutboxFact),
+    ("identity.logout-all", HttpConsistencyLevel::OutboxFact),
+    ("identity.password-change", HttpConsistencyLevel::OutboxFact),
     ("identity.policies-create", HttpConsistencyLevel::OutboxFact),
     (
         "identity.policies-deactivate",
@@ -29,6 +38,7 @@ const EXPECTED_ACTIVE_SPECS: &[(&str, HttpConsistencyLevel)] = &[
     ("identity.roles-assign", HttpConsistencyLevel::OutboxFact),
     ("identity.roles-list", HttpConsistencyLevel::LocalOnly),
     ("identity.roles-revoke", HttpConsistencyLevel::OutboxFact),
+    ("runtime.inventory", HttpConsistencyLevel::LocalOnly),
     ("settings.config-get", HttpConsistencyLevel::LocalOnly),
     ("settings.config-delete", HttpConsistencyLevel::OutboxFact),
     ("settings.config-publish", HttpConsistencyLevel::OutboxFact),
@@ -39,18 +49,18 @@ const EXPECTED_ACTIVE_SPECS: &[(&str, HttpConsistencyLevel)] = &[
 
 const EXPECTED_LOCAL_TX_SPECS: &[(&str, LocalTxModel)] = &[
     ("audit.list-tenant-entries", LocalTxModel::TenantScopedUow),
-    ("identity.logout", LocalTxModel::TenantScopedUow),
-    ("identity.password-change", LocalTxModel::RepoAtomicCas),
     ("identity.refresh", LocalTxModel::TenantScopedUow),
     ("settings.secret-publish", LocalTxModel::RepoAtomicCas),
 ];
 
 const EXPECTED_LOCAL_ONLY_SPECS: &[&str] = &[
     "audit.list-entries",
+    "identity.account-status-get",
     "identity.policies-get",
     "identity.policies-list",
     "identity.profile",
     "identity.roles-list",
+    "runtime.inventory",
     "settings.config-get",
     "settings.secret-resolve",
 ];
@@ -241,10 +251,6 @@ fn local_tx_specs_reuse_required_module_evidence() {
             http::audit_v1::list_tenant_entries::LOCAL_TX,
         ),
         (
-            http::identity_v1::password_change::SPEC,
-            http::identity_v1::password_change::LOCAL_TX,
-        ),
-        (
             http::identity_v1::refresh::SPEC,
             http::identity_v1::refresh::LOCAL_TX,
         ),
@@ -258,6 +264,27 @@ fn local_tx_specs_reuse_required_module_evidence() {
             "{} must reuse its non-optional module LocalTx evidence",
             spec.route.contract_id()
         );
+    }
+}
+
+#[test]
+fn identity_security_routes_expose_outbox_producer_evidence() {
+    let producers = [
+        http::identity_v1::account_status_set::PRODUCER.evidence(),
+        http::identity_v1::password_change::PRODUCER.evidence(),
+    ];
+
+    for producer in producers {
+        assert_eq!(
+            producer.route().consistency_level(),
+            HttpConsistencyLevel::OutboxFact
+        );
+        assert_eq!(producer.emitted_facts().len(), 1);
+        assert_eq!(
+            producer.emitted_facts()[0].contract_id(),
+            "identity.security-event"
+        );
+        assert!(http::OUTBOX_PRODUCERS.contains(&producer));
     }
 }
 
@@ -300,9 +327,9 @@ fn active_http_registry_keeps_current_consistency_distribution() {
     assert_eq!(
         registry_distribution(),
         [
-            (HttpConsistencyLevel::LocalOnly, 7),
-            (HttpConsistencyLevel::LocalTx, 5),
-            (HttpConsistencyLevel::OutboxFact, 9),
+            (HttpConsistencyLevel::LocalOnly, 9),
+            (HttpConsistencyLevel::LocalTx, 3),
+            (HttpConsistencyLevel::OutboxFact, 13),
             (HttpConsistencyLevel::WorkflowEventual, 0),
             (HttpConsistencyLevel::DeviceLatent, 0),
         ],
