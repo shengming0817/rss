@@ -13,6 +13,8 @@
 
 pub mod config;
 pub mod inventory;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 
 use std::future::Future;
 use std::time::Duration;
@@ -242,31 +244,15 @@ pub struct LaunchLifecycleBatches {
 
 /// Validated total budget for the complete LIFO drain.
 ///
-/// The budget must be positive and end strictly before the deployment grace period's reserved
-/// exit buffer. This keeps cleanup bounded without relying on an outer timeout that could cancel
-/// the shutdown driver between resources.
+/// The assembly-owned budget must be positive. This keeps cleanup bounded without relying on an
+/// outer timeout that could cancel the shutdown driver between resources.
 #[derive(Clone, Copy)]
 pub struct TotalDrainBudget(Duration);
 
 impl TotalDrainBudget {
-    /// Validate the total drain deadline against the deployment termination contract.
-    pub fn new(
-        total: Duration,
-        deployment_grace: Duration,
-        exit_buffer: Duration,
-    ) -> anyhow::Result<Self> {
+    /// Validate an assembly-owned total drain deadline.
+    pub fn new(total: Duration) -> anyhow::Result<Self> {
         anyhow::ensure!(!total.is_zero(), "total drain budget must be positive");
-        anyhow::ensure!(
-            !exit_buffer.is_zero(),
-            "deployment exit buffer must be positive"
-        );
-        let available = deployment_grace
-            .checked_sub(exit_buffer)
-            .context("deployment grace must exceed the exit buffer")?;
-        anyhow::ensure!(
-            total < available,
-            "total drain budget must end before the deployment exit buffer"
-        );
         Ok(Self(total))
     }
 
@@ -318,11 +304,7 @@ impl LaunchLifecycleBatches {
 ///             bootstrap::DomainModuleResult::default(),
 ///         ),
 ///     ),
-///     runtimeexec::TotalDrainBudget::new(
-///         std::time::Duration::from_secs(20),
-///         std::time::Duration::from_secs(30),
-///         std::time::Duration::from_secs(5),
-///     )?,
+///     runtimeexec::TotalDrainBudget::new(std::time::Duration::from_secs(20))?,
 /// );
 /// let _second_owner = plan.clone();
 /// # Ok::<(), anyhow::Error>(())

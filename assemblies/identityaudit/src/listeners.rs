@@ -314,6 +314,90 @@ impl runtimeexec::LaunchAdapter<FinalizedProbeReceipt> for LaunchAdapter {
     }
 }
 
+#[cfg(feature = "test-support")]
+pub(crate) struct InventoryJourneyHttpResult {
+    pub(crate) status: reqwest::StatusCode,
+    pub(crate) body: Vec<u8>,
+    pub(crate) serving_address: SocketAddr,
+}
+
+/// Exercise the production bind, listener-inventory publication and activation funnel with
+/// kernel-assigned ports. The returned address is the exact Admin socket minted by activation.
+#[cfg(feature = "test-support")]
+pub(crate) async fn serve_inventory_journey(
+    admin: httpserve::AuthenticatedRoutes,
+    reporter: Arc<bootstrap::HealthReporter>,
+    inventory_publisher: runtimeexec::inventory::InventoryPublisher,
+    bearer: String,
+) -> anyhow::Result<InventoryJourneyHttpResult> {
+    struct JourneyMetrics;
+    impl diport::MetricsExporter for JourneyMetrics {
+        fn render(&self) -> String {
+            "# inventory-journey\n".to_owned()
+        }
+    }
+    let companion = || {
+        let reporter = Arc::clone(&reporter);
+        let metrics: Arc<dyn diport::MetricsExporter> = Arc::new(JourneyMetrics);
+        httpserve::finalize_auth(
+            httpserve::health::routes(move || reporter.report(), move || metrics.render()),
+            auth_plan(ListenerKind::Health)?,
+        )
+        .map_err(anyhow::Error::from)
+    };
+    let adapter = LaunchAdapter::new(
+        FinalizedListenerSet {
+            primary: companion()?,
+            admin,
+            health: companion()?,
+        },
+        "127.0.0.1:0".parse()?,
+        "127.0.0.1:0".parse()?,
+        "127.0.0.1:0".parse()?,
+        std::time::Duration::from_secs(1),
+        inventory_publisher,
+        None,
+    )?;
+    let (completion, controlled) = runtimeexec::test_support::controlled();
+    let launch = runtimeexec::LaunchPlan::new(
+        adapter,
+        FinalizedProbeReceipt { reporter },
+        move |inventory: ListenerInventory| async move {
+            let result = async {
+                let response = reqwest::Client::new()
+                    .get(format!(
+                        "http://{}{}",
+                        inventory.admin,
+                        generated::http::runtime_v1::inventory::PATH
+                    ))
+                    .bearer_auth(bearer)
+                    .send()
+                    .await?;
+                let status = response.status();
+                let body = response.bytes().await?.to_vec();
+                Ok(InventoryJourneyHttpResult {
+                    status,
+                    body,
+                    serving_address: inventory.admin,
+                })
+            }
+            .await;
+            completion.complete(result)
+        },
+        None,
+        runtimeexec::LaunchLifecycleBatches::new(
+            runtimeexec::ProviderLifecycleBatch::from_provider_output(
+                bootstrap::DomainModuleResult::default(),
+            ),
+            runtimeexec::DomainLifecycleBatch::from_domain_output(
+                bootstrap::DomainModuleResult::default(),
+            ),
+        ),
+        crate::runtime::total_drain_budget()?,
+    );
+    controlled.run(launch).await
+}
+
 async fn prepare_listeners(
     listeners: FinalizedListenerSet,
     primary_address: SocketAddr,

@@ -151,36 +151,16 @@ impl PreparedRuntimeInputs {
 pub struct ServingRuntimeInputs {
     prepared: PreparedRuntimeInputs,
     password_blocklist: std::sync::Arc<secure::DigestPasswordBlocklist>,
-    build_identity: runtimeexec::inventory::BuildIdentity,
 }
 
 impl ServingRuntimeInputs {
-    pub(crate) fn from_prepared(
-        prepared: PreparedRuntimeInputs,
-        password_blocklist: std::sync::Arc<secure::DigestPasswordBlocklist>,
-    ) -> anyhow::Result<Self> {
-        let source_sha = prepared
-            .config()
-            .value("RSS_BUILD_SOURCE_SHA")
-            .ok_or_else(|| anyhow::anyhow!("RSS_BUILD_SOURCE_SHA is required"))?;
-        let image_digest = prepared
-            .config()
-            .value("RSS_BUILD_IMAGE_DIGEST")
-            .ok_or_else(|| anyhow::anyhow!("RSS_BUILD_IMAGE_DIGEST is required"))?;
-        let build_identity =
-            runtimeexec::inventory::BuildIdentity::parse(source_sha, image_digest)?;
-        Ok(Self::new(prepared, password_blocklist, build_identity))
-    }
-
     pub(crate) fn new(
         prepared: PreparedRuntimeInputs,
         password_blocklist: std::sync::Arc<secure::DigestPasswordBlocklist>,
-        build_identity: runtimeexec::inventory::BuildIdentity,
     ) -> Self {
         Self {
             prepared,
             password_blocklist,
-            build_identity,
         }
     }
 
@@ -200,22 +180,9 @@ impl ServingRuntimeInputs {
         self.prepared.take_trace_export()
     }
 
-    pub(crate) const fn build_identity(&self) -> &runtimeexec::inventory::BuildIdentity {
-        &self.build_identity
-    }
-
     pub(crate) fn prepared_mut(&mut self) -> &mut PreparedRuntimeInputs {
         &mut self.prepared
     }
-}
-
-#[cfg(test)]
-pub(crate) fn test_build_identity() -> runtimeexec::inventory::BuildIdentity {
-    runtimeexec::inventory::BuildIdentity::parse(
-        &"a".repeat(40),
-        &format!("sha256:{}", "b".repeat(64)),
-    )
-    .unwrap_or_else(|_| unreachable!("static test build identity is valid"))
 }
 
 /// Operator-only inputs: no serving password-policy or ambient-config source is representable.
@@ -556,8 +523,7 @@ mod tests {
             .expect("closed catalog capture succeeds");
         let blocklist = test_password_blocklist();
         let prepared = PreparedRuntimeInputs::new(snapshot, None);
-        let mut serving =
-            ServingRuntimeInputs::new(prepared, Arc::clone(&blocklist), test_build_identity());
+        let mut serving = ServingRuntimeInputs::new(prepared, Arc::clone(&blocklist));
         assert!(serving.config().value("RSS_VAULT_TOKEN").is_none());
         assert!(Arc::ptr_eq(serving.password_blocklist(), &blocklist));
         assert!(serving.take_trace_export().is_none());

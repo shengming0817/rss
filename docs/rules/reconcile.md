@@ -51,7 +51,7 @@ snapshot 与闭集分类；真实 observe / write / command emission 仍由消�
 
 `T` 是域映射后的 provider-agnostic 比较值；泛型本身不尝试用 marker trait 证明该语义，域 reconciler
 负责在进入 `DesiredState::present` / `ActualState::present` 前完成映射。DB row、adapter handle、
-Vault/SoftCA/Redis/PG 类型、HTTP / Kubernetes / MQTT 类型、generated contract DTO、字段级 payload diff
+Vault/SoftCA/Redis/PG 类型、HTTP / external scheduler / MQTT 类型、generated contract DTO、字段级 payload diff
 不属于 `consistency` 模型边界。机器可守部分是：`consistency` 不依赖 adapter / runtime / serde、snapshot
 字段私有且只能经 presence 构造入口进入、`Debug` 只输出 presence/drift/action 而不展开 `T`、metric label
 只来自上述闭集 `as_label()`。

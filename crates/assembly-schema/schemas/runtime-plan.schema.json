@@ -1,6 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "https://rss.local/spec/runtime-deployment/runtime-plan.schema.json",
+  "$id": "https://rss.local/assembly-schema/runtime-plan.schema.json",
   "title": "RuntimePlan target contract",
   "type": "object", "additionalProperties": false,
   "required": ["assemblyFingerprint", "domainPlans", "listenerPlans", "placementPlans", "providerPlans", "runtimePlanFingerprint", "schemaVersion"],

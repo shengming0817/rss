@@ -4,10 +4,9 @@
     "docs/ops/0069-account-security-capacity-gate.selftest.sh",
     "docs/ops/0069-account-security-capacity-gate.sh",
     "docs/ops/localtx-alerts.rules.yaml",
-    "docs/spec/007-runtime-deployment-executable-plan/contracts/assembly-lock.schema.json",
-    "docs/spec/007-runtime-deployment-executable-plan/contracts/runtime-plan.schema.json",
-    "docs/spec/007-runtime-deployment-executable-plan/contracts/deployment-plan.schema.json",
-    "docs/spec/007-runtime-deployment-executable-plan/fixtures/fingerprint-v1-vectors.json"
+    "crates/assembly-schema/schemas/assembly-lock.schema.json",
+    "crates/assembly-schema/schemas/runtime-plan.schema.json",
+    "crates/assembly-schema/tests/fixtures/fingerprint-v1-vectors.json"
   ],
   "requiredEvidenceOwners": [
     {

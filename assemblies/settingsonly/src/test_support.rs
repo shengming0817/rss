@@ -152,24 +152,13 @@ impl runtimeexec::StartupAdapter for FixtureStartup {
 
 fn fixture_inventory_seed() -> anyhow::Result<runtimeexec::inventory::RuntimeInventorySeed> {
     let plan = crate::plan::SettingsOnlyPlan::bundled()?;
-    let deployment: serde_json::Value = serde_json::from_slice(include_bytes!(
-        "../../../deploy/generated/settingsonly.deployment-plan.json"
-    ))?;
-    let image = deployment["workloads"][0]["image"]
-        .as_str()
-        .context("read fixture deployment image")?;
-    let digest = image
-        .rsplit_once('@')
-        .context("fixture deployment image is mutable")?
-        .1;
-    let build = runtimeexec::inventory::BuildIdentity::parse(&"a".repeat(40), digest)?;
     let bindings = crate::providers_gen::PROVIDER_CATALOG
         .iter()
         .map(|provider| {
             runtimeexec::inventory::ProviderProbeBinding::new(provider.role().as_str(), Vec::new())
         })
         .collect::<Result<Vec<_>, _>>()?;
-    plan.into_inventory_seed_fixture(build, bindings)
+    plan.into_inventory_seed_fixture(bindings)
 }
 
 pub async fn run_fixture(config: FixtureConfig) -> anyhow::Result<()> {

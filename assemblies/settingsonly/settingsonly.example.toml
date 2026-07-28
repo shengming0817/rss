@@ -1,5 +1,5 @@
 # settingsonly schemaVersion=1 sample. Secret values are never stored in this document; export the
-# four fixed RSS_SETTINGSONLY_* secrets plus RSS_BUILD_SOURCE_SHA and RSS_BUILD_IMAGE_DIGEST before launch.
+# four fixed RSS_SETTINGSONLY_* secrets before launch.
 schemaVersion = 1
 
 [listeners]

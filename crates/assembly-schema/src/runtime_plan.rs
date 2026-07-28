@@ -45,9 +45,9 @@ impl JsonSchema for RuntimePlan {
     }
 
     fn json_schema(generator: &mut schemars::r#gen::SchemaGenerator) -> Schema {
-        let Ok(mut committed) = serde_json::from_str::<RootSchema>(include_str!(
-            "../../../docs/spec/007-runtime-deployment-executable-plan/contracts/runtime-plan.schema.json"
-        )) else {
+        let Ok(mut committed) =
+            serde_json::from_str::<RootSchema>(include_str!("../schemas/runtime-plan.schema.json"))
+        else {
             return Schema::Bool(false);
         };
         generator

@@ -16,11 +16,7 @@ fn main() {
                 bootstrap::DomainModuleResult::default(),
             ),
         ),
-        runtimeexec::TotalDrainBudget::new(
-            std::time::Duration::from_secs(20),
-            std::time::Duration::from_secs(30),
-            std::time::Duration::from_secs(5),
-        )
+        runtimeexec::TotalDrainBudget::new(std::time::Duration::from_secs(20))
         .expect("valid test drain budget"),
     );
     let _second_owner = plan.clone();

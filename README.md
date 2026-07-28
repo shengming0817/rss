@@ -79,8 +79,6 @@ cargo xtask assembly validate                          # assembly 声明与依�
 cargo xtask assembly generate-modules --check          # domain modules 生成物漂移门
 cargo xtask assembly generate-providers --check        # typed provider catalog 独立漂移门
 cargo xtask assembly lock check                        # 全仓 AssemblyLock raw-byte 漂移门
-cargo xtask deployment plan check                      # DeploymentPlan + 三 profile Helm 静态/render 漂移门（需 Helm 4.2.0）
-cargo xtask deployment policy check                    # 两阶段资源语义 + kubeconform v0.7.0 strict 门
 cargo xtask runtime-baseline verify                    # RuntimePlan 四族 live closure 与 wiring golden
 cargo xtask runtime-root guard                         # runtime root 单调职责/LOC ratchet
 cargo xtask layer-deps                                 # source-centric 分层依赖 lint
@@ -95,12 +93,12 @@ cargo deny check                                       # 分层禁依赖 + licen
 cargo dylint --all                                     # AST 级自写 lint（domain 禁 derive serde 等）
 ```
 
-`deployment plan render|check` 拥有 chart 内三份 DeploymentPlan、`profile+phase` 闭合 values/schema、六份
-`helm template` golden 与 migration/serving 的 6+6 core/extension manifests。`check` 使用 Helm 4.2.0 对
-runtime/settingsonly/identityaudit × migration/serving 全量 lint/render并复用跨资源 semantic policy；`render`
-只在全组合预检成功后原子发布 29 个载体。`deployment policy check` 再验证 rendered/schema exact closure，
-并用 kubeconform v0.7.0 对 Kubernetes 1.30 core 与固定 CRD schema做 strict validation。两门均不执行
-`helm install/upgrade/rollback`，cluster/kind 运行证据仍由 #1805 所有。
+本仓库交付边界是可重复构建的 OCI 镜像、`Dockerfile`、本地 `docker compose` 演示栈，
+以及应用自身的 RuntimePlan、typed 配置、health/readiness 和 SIGTERM drain 契约。
+生产调度、流量、secret projection、replica/resource policy 和 release provenance 由外部 delivery
+系统拥有；该系统应消费不可变镜像并尊重本仓公开的配置、探针和终止语义，不将编排事实反向注入应用启动。
+运行 inventory 可成对报告启动方声明的 source revision 与 image digest，但不在进程内验证 OCI/SLSA
+provenance，也不把这些声明并入 RuntimePlan、workload 或 deployment fingerprint。
 
 `runtime::operator::*` 是 operator 命令的唯一 Rust API 路径，serving 继续只使用
 `runtime::{prepare_runtime, run, shutdown_runtime}`。共享时钟与审计 sink 只从

@@ -10,10 +10,7 @@ use diport::{DynManagedResource, ManagedResource, ShutdownError};
 
 use crate::listeners;
 
-const TOTAL_DRAIN_BUDGET: Duration =
-    Duration::from_secs(crate::deployment_facts::TOTAL_DRAIN_SECONDS);
-const DEPLOYMENT_GRACE_PERIOD: Duration = Duration::from_secs(60);
-const EXIT_BUFFER: Duration = Duration::from_secs(5);
+const TOTAL_DRAIN_BUDGET: Duration = Duration::from_secs(50);
 const READINESS_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 type ReadyFuture = Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send>>;
@@ -26,8 +23,8 @@ pub(crate) async fn launch_captured(captured: crate::config::CapturedConfig) -> 
     Ok(())
 }
 
-fn total_drain_budget() -> anyhow::Result<runtimeexec::TotalDrainBudget> {
-    runtimeexec::TotalDrainBudget::new(TOTAL_DRAIN_BUDGET, DEPLOYMENT_GRACE_PERIOD, EXIT_BUFFER)
+pub(crate) fn total_drain_budget() -> anyhow::Result<runtimeexec::TotalDrainBudget> {
+    runtimeexec::TotalDrainBudget::new(TOTAL_DRAIN_BUDGET)
 }
 
 struct ProductionStartup {
@@ -47,7 +44,7 @@ impl runtimeexec::StartupAdapter for ProductionStartup {
         runtimeexec::PreparedLaunch<Self::Adapter, Self::ProbeReceipt, Self::ReadyHook>,
     > {
         let plan = crate::plan::IdentityAuditPlan::bundled()?;
-        let (config, secrets, build_identity, frontend) = self.captured.into_runtime_inputs();
+        let (config, secrets, build_metadata, frontend) = self.captured.into_runtime_inputs();
         let build =
             crate::providers::build(plan.provider_build()?, config, secrets, transaction).await?;
         let crate::providers::BuildResult {
@@ -97,7 +94,11 @@ impl runtimeexec::StartupAdapter for ProductionStartup {
         )
         .await?;
         let completed_roles = roles.finish(event_outputs, transaction.provider_output_mut())?;
-        let inventory_seed = plan.inventory_seed(build_identity, completed_roles)?;
+        let inventory_seed = plan.inventory_seed(completed_roles)?;
+        let inventory_seed = match build_metadata {
+            Some(metadata) => inventory_seed.with_build_metadata(metadata),
+            None => inventory_seed,
+        };
 
         let (provider_output, domain_output) = transaction.outputs_mut();
         register_probes(&mut registry, provider_output)?;
@@ -257,7 +258,6 @@ mod tests {
     #[test]
     fn drain_budget_covers_declared_worker_shutdown_bounds() {
         assert!(TOTAL_DRAIN_BUDGET >= Duration::from_secs(45));
-        assert!(TOTAL_DRAIN_BUDGET + EXIT_BUFFER < DEPLOYMENT_GRACE_PERIOD);
         assert!(total_drain_budget().is_ok());
     }
 

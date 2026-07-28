@@ -13,6 +13,8 @@ use url::{Host, Url};
 use zeroize::Zeroizing;
 
 const SERVING_SECRET_BUNDLE_PATH: &str = "/var/run/rss/secrets/serving-secret-bundle";
+const BUILD_SOURCE_REVISION_ENV: &str = "RSS_BUILD_SOURCE_REVISION";
+const DECLARED_IMAGE_DIGEST_ENV: &str = "RSS_DECLARED_IMAGE_DIGEST";
 #[cfg(test)]
 use runtimeexec::config::{
     ADMIN_PORT_ENV, HEALTH_PORT_ENV, MTLS_ALLOW_SET_ENV, POD_IP_ENV, PRIMARY_PORT_ENV,
@@ -38,8 +40,6 @@ const AUDIT_CHAIN_KEY_ENV: &str = "RSS_AUDIT_CHAIN_KEY_B64URL";
 #[cfg(test)]
 const TENANT_AUTHORITY_KEY_ENV: &str = "RSS_TENANT_AUTHORITY_HMAC_KEY_B64URL";
 const FORBIDDEN_SHARED_AMQP_URL_ENV: &str = "RSS_AMQP_URL";
-const BUILD_SOURCE_SHA_ENV: &str = "RSS_BUILD_SOURCE_SHA";
-const BUILD_IMAGE_DIGEST_ENV: &str = "RSS_BUILD_IMAGE_DIGEST";
 
 /// Read, parse, validate, and resolve one immutable configuration generation.
 pub(crate) fn capture(path: &Path) -> Result<CapturedConfig, ConfigError> {
@@ -71,37 +71,44 @@ fn capture_from(
     let bundle: ServingSecretBundle = document
         .parse()
         .map_err(|_| ConfigError::InvalidSecretBundle)?;
-    let build_source_sha = resolve_public_environment(source, BUILD_SOURCE_SHA_ENV)?;
-    let build_image_digest = resolve_public_environment(source, BUILD_IMAGE_DIGEST_ENV)?;
-    let build_identity =
-        runtimeexec::inventory::BuildIdentity::parse(&build_source_sha, &build_image_digest)
-            .map_err(|_| ConfigError::InvalidValue("buildIdentity"))?;
     let secrets: ResolvedSecrets = bundle.try_into()?;
     secrets.validate()?;
+    let build_metadata = capture_build_metadata(source)?;
     let frontend =
         runtimeexec::config::capture_serving_frontend(|name| source.read_environment(name))
             .map_err(frontend_error)?;
     Ok(CapturedConfig {
         config,
         secrets,
-        build_identity,
+        build_metadata,
         frontend,
     })
 }
 
-fn resolve_public_environment(
+fn capture_build_metadata(
     source: &mut impl ConfigSource,
-    name: &'static str,
-) -> Result<String, ConfigError> {
-    let value = source
-        .read_environment(name)
-        .ok_or(ConfigError::MissingEnvironment(name))?
-        .into_string()
-        .map_err(|_| ConfigError::NonUnicodeEnvironment(name))?;
-    if value.is_empty() {
-        return Err(ConfigError::EmptyEnvironment(name));
-    }
-    Ok(value)
+) -> Result<Option<runtimeexec::inventory::BuildMetadata>, ConfigError> {
+    let source_revision = source
+        .read_environment(BUILD_SOURCE_REVISION_ENV)
+        .map(|value| {
+            value
+                .into_string()
+                .map_err(|_| ConfigError::NonUnicodeEnvironment(BUILD_SOURCE_REVISION_ENV))
+        })
+        .transpose()?;
+    let image_digest = source
+        .read_environment(DECLARED_IMAGE_DIGEST_ENV)
+        .map(|value| {
+            value
+                .into_string()
+                .map_err(|_| ConfigError::NonUnicodeEnvironment(DECLARED_IMAGE_DIGEST_ENV))
+        })
+        .transpose()?;
+    runtimeexec::inventory::BuildMetadata::from_optional(
+        source_revision.as_deref(),
+        image_digest.as_deref(),
+    )
+    .map_err(|_| ConfigError::InvalidValue("buildMetadata"))
 }
 
 trait ConfigSource {
@@ -271,7 +278,7 @@ impl std::error::Error for ConfigError {}
 pub(crate) struct CapturedConfig {
     config: IdentityAuditConfig,
     secrets: ResolvedSecrets,
-    build_identity: runtimeexec::inventory::BuildIdentity,
+    build_metadata: Option<runtimeexec::inventory::BuildMetadata>,
     frontend: ServingFrontendConfig,
 }
 
@@ -281,13 +288,13 @@ impl CapturedConfig {
     ) -> (
         IdentityAuditConfig,
         ResolvedSecrets,
-        runtimeexec::inventory::BuildIdentity,
+        Option<runtimeexec::inventory::BuildMetadata>,
         ServingFrontendConfig,
     ) {
         (
             self.config,
             self.secrets,
-            self.build_identity,
+            self.build_metadata,
             self.frontend,
         )
     }
@@ -1107,12 +1114,12 @@ tenantAuthorityClockSkewSeconds = 60
                 (AUDIT_CHAIN_KEY_ENV, VALID_KEY),
                 (TENANT_AUTHORITY_KEY_ENV, VALID_KEY),
                 (
-                    BUILD_SOURCE_SHA_ENV,
+                    BUILD_SOURCE_REVISION_ENV,
                     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                 ),
                 (
-                    BUILD_IMAGE_DIGEST_ENV,
-                    "sha256:0dc0251564b714e89c8d098560ddfe69eb08c87fb85ac87323c54a7650126592",
+                    DECLARED_IMAGE_DIGEST_ENV,
+                    "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
                 ),
                 (POD_IP_ENV, "127.0.0.2"),
                 (PRIMARY_PORT_ENV, "8080"),
@@ -1286,10 +1293,15 @@ tenantAuthorityClockSkewSeconds = 60
         assert!(source.environment_reads.values().all(|reads| *reads == 1));
         assert_eq!(source.environment_reads[FORBIDDEN_SHARED_AMQP_URL_ENV], 1);
         assert!(!format!("{captured:?}").contains(SECRET_SENTINEL));
-        let (_, secrets, build_identity, frontend) = captured.into_runtime_inputs();
+        let (_, secrets, build_metadata, frontend) = captured.into_runtime_inputs();
+        let build_metadata = build_metadata.expect("build metadata");
         assert_eq!(
-            build_identity.source_sha(),
+            build_metadata.source_revision(),
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
+        assert_eq!(
+            build_metadata.image_digest(),
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
         );
         assert_eq!(frontend.primary_port, 8080);
         assert!(!format!("{secrets:?}").contains(SECRET_SENTINEL));
@@ -1298,6 +1310,18 @@ tenantAuthorityClockSkewSeconds = 60
         assert_eq!(&*material.3, SECRET_SENTINEL);
         assert_eq!(material.7.as_bytes().len(), 32);
         assert_eq!(material.8.as_bytes().len(), 32);
+    }
+
+    #[test]
+    fn capture_rejects_partial_build_metadata() {
+        for missing in [BUILD_SOURCE_REVISION_ENV, DECLARED_IMAGE_DIGEST_ENV] {
+            let mut source = TestSource::complete(VALID_CONFIG);
+            source.environments.remove(missing);
+            assert_eq!(
+                capture_from(Path::new("ignored"), &mut source).unwrap_err(),
+                ConfigError::InvalidValue("buildMetadata")
+            );
+        }
     }
 
     #[test]

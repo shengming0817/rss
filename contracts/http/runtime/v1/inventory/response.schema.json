@@ -11,8 +11,6 @@
         "schemaVersion",
         "assemblyFingerprint",
         "runtimePlanFingerprint",
-        "deploymentFingerprint",
-        "buildIdentity",
         "domains",
         "listeners",
         "providerPosture",
@@ -21,9 +19,8 @@
       "properties": {
         "schemaVersion": { "type": "integer", "const": 1 },
         "assemblyFingerprint": { "$ref": "#/definitions/Sha256Fingerprint" },
+        "buildMetadata": { "$ref": "#/definitions/RuntimeBuildMetadata" },
         "runtimePlanFingerprint": { "$ref": "#/definitions/Sha256Fingerprint" },
-        "deploymentFingerprint": { "$ref": "#/definitions/Sha256Fingerprint" },
-        "buildIdentity": { "$ref": "#/definitions/RuntimeBuildIdentity" },
         "domains": {
           "description": "Assembly domains in declaration order.",
           "type": "array",
@@ -59,6 +56,20 @@
       "type": "string",
       "pattern": "^sha256:[0-9a-f]{64}$"
     },
+    "RuntimeBuildMetadata": {
+      "title": "RuntimeBuildMetadata",
+      "description": "Launch-supplied build metadata reported by the process. This is not an in-process OCI or SLSA verification receipt.",
+      "type": "object",
+      "required": ["sourceRevision", "imageDigest"],
+      "properties": {
+        "sourceRevision": {
+          "type": "string",
+          "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$"
+        },
+        "imageDigest": { "$ref": "#/definitions/Sha256Fingerprint" }
+      },
+      "additionalProperties": false
+    },
     "RuntimeDomain": {
       "type": "string",
       "enum": ["identity", "settings", "audit", "contractreg", "syshealth"]
@@ -70,16 +81,6 @@
     "RuntimeAuthScheme": {
       "type": "string",
       "enum": ["noAuth", "rssAccessToken", "federatedAccessToken", "mtls", "serviceToken"]
-    },
-    "RuntimeBuildIdentity": {
-      "title": "RuntimeBuildIdentity",
-      "type": "object",
-      "required": ["sourceSha", "imageDigest"],
-      "properties": {
-        "sourceSha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
-        "imageDigest": { "$ref": "#/definitions/Sha256Fingerprint" }
-      },
-      "additionalProperties": false
     },
     "RuntimeListenerEndpoint": {
       "title": "RuntimeListenerEndpoint",

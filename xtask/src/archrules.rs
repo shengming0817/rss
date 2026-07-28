@@ -4,6 +4,7 @@
 //! baseline），不引入手写规则目录；文档仅作为 `doc_ref`。
 //! INVARIANT: ARCHRULES-VERIFY-GATE-01 { level = "Medium", exec = "verify", source = "code" } —— [`ArchRules`] 作为 no-compile governance gate 接入 verify/ci，
 //! 缺 carrier / fixture / gate 证据时 fail-closed。
+//! INVARIANT: APPLICATION-DELIVERY-BOUNDARY-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "archrules::tests::application_delivery_boundary_rejects_synthetic_red", anti_vacuity = "archrules::tests::application_delivery_boundary_accepts_real_workspace" } —— application production/default-CI carriers reject repository-owned deployment protocols and Kubernetes delivery projections.
 //! INVARIANT: PERSISTENCE-FUNNEL-MATRIX-01 { level = "Medium", exec = "verify", source = "code", facet = "derived-matrix" } —— 持久化 funnel 固定集合仅引用真实 rule key，强度和证明从 carrier 反向派生。
 
 use crate::diagnostic::{Finding, GovernanceCheck, finding};
@@ -12,6 +13,7 @@ use anyhow::{Context, Result, bail};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use syn::visit::Visit;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,6 +39,7 @@ pub(crate) enum Rule {
     MatrixEvidence,
     MatrixResidual,
     MatrixDocDrift,
+    ApplicationDeliveryResidual,
 }
 
 pub(crate) struct ArchRules;
@@ -53,6 +56,7 @@ impl GovernanceCheck for ArchRules {
         let index = build_index(&root)?;
         let mut findings = index.findings;
         findings.extend(validate_matrix(&root, &index.records, true)?);
+        findings.extend(application_delivery_boundary_findings(&root)?);
         Ok((
             format!(
                 "{} 条规则索引 + {} 行持久化 funnel",
@@ -62,6 +66,268 @@ impl GovernanceCheck for ArchRules {
             findings,
         ))
     }
+}
+
+const DELIVERY_GUARD_CARRIER: &str = "xtask/src/archrules.rs";
+
+fn application_delivery_boundary_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
+    let output = Command::new("/usr/bin/git")
+        .args(["-C", root.to_string_lossy().as_ref(), "ls-files", "-z"])
+        .output()
+        .context("list tracked files for application delivery boundary")?;
+    if !output.status.success() {
+        bail!(
+            "git ls-files failed for application delivery boundary: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let mut records = Vec::new();
+    for raw in output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|raw| !raw.is_empty())
+    {
+        let path = std::str::from_utf8(raw)
+            .context("tracked application delivery path is not UTF-8")?
+            .to_owned();
+        let absolute = root.join(&path);
+        if !absolute.is_file() {
+            continue;
+        }
+        let source = if scans_application_delivery_content(&path) {
+            Some(
+                String::from_utf8_lossy(
+                    &fs::read(&absolute)
+                        .with_context(|| format!("read application delivery carrier {path}"))?,
+                )
+                .into_owned(),
+            )
+        } else {
+            None
+        };
+        records.push((path, source));
+    }
+    Ok(application_delivery_records_findings(&records))
+}
+
+fn application_delivery_records_findings(
+    records: &[(String, Option<String>)],
+) -> Vec<Finding<Rule>> {
+    const FORBIDDEN_PREFIXES: &[&str] = &[
+        "deploy/helm/",
+        "deploy/generated/",
+        "deploy/rendered/",
+        "deploy/schemas/",
+        "docs/spec/007-runtime-deployment-executable-plan/",
+    ];
+    const FORBIDDEN_FILES: &[&str] = &[
+        "crates/assembly-schema/src/deployment.rs",
+        "xtask/src/deployment_plan.rs",
+        "xtask/src/deployment_policy.rs",
+        "xtask/src/runtime_deployment_spec.rs",
+        ".specify/feature.json",
+    ];
+    const FORBIDDEN_TOKENS: &[&str] = &[
+        "DeploymentPlan",
+        "ParsedDeploymentPlan",
+        "BUNDLED_DEPLOYMENT_PLAN",
+        "deployment_facts",
+        "deploymentFingerprint",
+        "deployment_fingerprint",
+        "SecretProviderClass",
+        "deployment-plan",
+        "deployment-policy",
+        "runtime-deployment-spec",
+        "install-download",
+        "--backend download",
+        ".download/bin",
+        "Helm",
+        "helm",
+        "kubeconform",
+        "kubeform",
+    ];
+
+    let mut findings = Vec::new();
+    for (path, source) in records {
+        let forbidden_path = FORBIDDEN_PREFIXES
+            .iter()
+            .any(|prefix| path.starts_with(prefix))
+            || FORBIDDEN_FILES.contains(&path.as_str())
+            || path.ends_with(".deployment-plan.json");
+        if forbidden_path {
+            findings.push(finding(
+                Rule::ApplicationDeliveryResidual,
+                path,
+                "repository-owned delivery projection path is forbidden",
+            ));
+        }
+        if path == DELIVERY_GUARD_CARRIER {
+            continue;
+        }
+        if let Some(source) = source {
+            for token in application_delivery_content_tokens(path, source, FORBIDDEN_TOKENS) {
+                findings.push(finding(
+                    Rule::ApplicationDeliveryResidual,
+                    path,
+                    format!("application/default-CI carrier contains removed token `{token}`"),
+                ));
+            }
+        }
+    }
+    findings
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ApplicationDeliveryCarrier {
+    RustSource,
+    ExecutableText,
+    TestEvidence,
+    HumanProse,
+    Other,
+}
+
+fn application_delivery_carrier(path: &str) -> ApplicationDeliveryCarrier {
+    let path = Path::new(path);
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("");
+    let extension = path.extension().and_then(|extension| extension.to_str());
+    let is_test_evidence = path.components().any(|component| {
+        matches!(
+            component.as_os_str().to_str(),
+            Some("tests" | "fixtures" | "golden" | "testdata")
+        )
+    }) || file_name.ends_with("_test.rs")
+        || file_name.ends_with("_tests.rs");
+
+    if is_test_evidence {
+        ApplicationDeliveryCarrier::TestEvidence
+    } else if extension == Some("md") {
+        ApplicationDeliveryCarrier::HumanProse
+    } else if path.to_string_lossy() == DELIVERY_GUARD_CARRIER {
+        ApplicationDeliveryCarrier::Other
+    } else if extension == Some("rs") {
+        ApplicationDeliveryCarrier::RustSource
+    } else if matches!(
+        extension,
+        Some("toml" | "json" | "yaml" | "yml" | "sh" | "bash" | "zsh" | "env")
+    ) || matches!(file_name, "Cargo.lock" | "Dockerfile" | "Makefile")
+        || file_name.starts_with("Dockerfile.")
+        || file_name.ends_with(".env.example")
+        || path.to_string_lossy() == ".github/scripts/ci-tool-catalog.txt"
+    {
+        ApplicationDeliveryCarrier::ExecutableText
+    } else {
+        ApplicationDeliveryCarrier::Other
+    }
+}
+
+fn scans_application_delivery_content(path: &str) -> bool {
+    matches!(
+        application_delivery_carrier(path),
+        ApplicationDeliveryCarrier::RustSource | ApplicationDeliveryCarrier::ExecutableText
+    )
+}
+
+fn application_delivery_content_tokens<'a>(
+    path: &str,
+    source: &str,
+    tokens: &'a [&'a str],
+) -> Vec<&'a str> {
+    match application_delivery_carrier(path) {
+        ApplicationDeliveryCarrier::RustSource => rust_source_delivery_tokens(source, tokens),
+        ApplicationDeliveryCarrier::ExecutableText => tokens
+            .iter()
+            .copied()
+            .filter(|token| source.contains(token))
+            .collect(),
+        ApplicationDeliveryCarrier::TestEvidence
+        | ApplicationDeliveryCarrier::HumanProse
+        | ApplicationDeliveryCarrier::Other => Vec::new(),
+    }
+}
+
+fn rust_source_delivery_tokens<'a>(source: &str, tokens: &'a [&'a str]) -> Vec<&'a str> {
+    let Ok(file) = syn::parse_file(source) else {
+        return tokens
+            .iter()
+            .copied()
+            .filter(|token| source.contains(token))
+            .collect();
+    };
+    let mut visitor = ApplicationDeliveryTokenVisitor {
+        tokens,
+        found: vec![false; tokens.len()],
+    };
+    visitor.visit_file(&file);
+    tokens
+        .iter()
+        .copied()
+        .zip(visitor.found)
+        .filter_map(|(token, found)| found.then_some(token))
+        .collect()
+}
+
+struct ApplicationDeliveryTokenVisitor<'a> {
+    tokens: &'a [&'a str],
+    found: Vec<bool>,
+}
+
+impl ApplicationDeliveryTokenVisitor<'_> {
+    fn observe(&mut self, value: &str) {
+        for (index, token) in self.tokens.iter().enumerate() {
+            self.found[index] |= value.contains(token);
+        }
+    }
+}
+
+impl<'ast> Visit<'ast> for ApplicationDeliveryTokenVisitor<'_> {
+    fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
+        if item.attrs.iter().any(attribute_is_test_only) {
+            return;
+        }
+        syn::visit::visit_item_mod(self, item);
+    }
+
+    fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
+        if item.attrs.iter().any(attribute_is_test_only) {
+            return;
+        }
+        syn::visit::visit_item_fn(self, item);
+    }
+
+    fn visit_impl_item_fn(&mut self, item: &'ast syn::ImplItemFn) {
+        if item.attrs.iter().any(attribute_is_test_only) {
+            return;
+        }
+        syn::visit::visit_impl_item_fn(self, item);
+    }
+
+    fn visit_attribute(&mut self, attribute: &'ast syn::Attribute) {
+        if attribute.path().is_ident("doc") || attribute.path().is_ident("cfg") {
+            return;
+        }
+        syn::visit::visit_attribute(self, attribute);
+    }
+
+    fn visit_ident(&mut self, ident: &'ast proc_macro2::Ident) {
+        self.observe(&ident.to_string());
+    }
+
+    fn visit_lit_str(&mut self, literal: &'ast syn::LitStr) {
+        self.observe(&literal.value());
+    }
+}
+
+fn attribute_is_test_only(attribute: &syn::Attribute) -> bool {
+    attribute.path().is_ident("test")
+        || (attribute.path().is_ident("cfg")
+            && attribute
+                .meta
+                .require_list()
+                .is_ok_and(|list| list.tokens.to_string().replace(' ', "") == "test"))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2691,16 +2957,6 @@ const XTASK_GATE_DECLARATIONS: &[GateDeclaration] = &[
         role: GateDeclarationRole::PlanStep,
     },
     GateDeclaration {
-        path: "xtask/src/deployment_plan.rs",
-        tokens: META_TOKENS,
-        role: GateDeclarationRole::PlanStep,
-    },
-    GateDeclaration {
-        path: "xtask/src/deployment_policy.rs",
-        tokens: META_TOKENS,
-        role: GateDeclarationRole::PlanStep,
-    },
-    GateDeclaration {
         path: "xtask/src/graph.rs",
         tokens: META_TOKENS,
         role: GateDeclarationRole::PlanStep,
@@ -2732,11 +2988,6 @@ const XTASK_GATE_DECLARATIONS: &[GateDeclaration] = &[
     },
     GateDeclaration {
         path: "xtask/src/ci_entry_guard.rs",
-        tokens: META_TOKENS,
-        role: GateDeclarationRole::PlanStep,
-    },
-    GateDeclaration {
-        path: "xtask/src/runtime_deployment_spec.rs",
         tokens: META_TOKENS,
         role: GateDeclarationRole::PlanStep,
     },
@@ -3230,6 +3481,91 @@ mod tests {
 
     fn rule_ids(found: &FoundInvariant) -> Vec<String> {
         found.rules.iter().map(|rule| rule.id.clone()).collect()
+    }
+
+    #[test]
+    fn application_delivery_boundary_rejects_synthetic_red() {
+        let cases = [
+            ("deploy/helm/rss/Chart.yaml", "apiVersion: v2"),
+            ("deploy/generated/runtime.json", "{}"),
+            (".specify/feature.json", "{}"),
+            ("crates/demo/src/lib.rs", "struct DeploymentPlan;"),
+            ("hack/check.sh", "cargo xtask deployment-plan"),
+            ("hack/check.sh", "cargo xtask deployment-policy"),
+            ("hack/check.sh", "cargo xtask runtime-deployment-spec"),
+            (".github/actions/setup/action.yml", "--backend download"),
+            (".github/actions/setup/action.yml", "install-download"),
+            (".github/actions/setup/action.yml", ".download/bin"),
+            ("hack/check.sh", "helm template"),
+            ("hack/check.sh", "kubeconform -strict"),
+        ];
+        for (path, source) in cases {
+            let findings = application_delivery_records_findings(&[(
+                path.to_owned(),
+                Some(source.to_owned()),
+            )]);
+            assert!(
+                findings
+                    .iter()
+                    .any(|finding| { finding.rule == Rule::ApplicationDeliveryResidual }),
+                "synthetic residual escaped: {path} => {source}"
+            );
+        }
+        assert!(
+            application_delivery_records_findings(&[(
+                "generated/tests/runtime_inventory.rs".to_owned(),
+                Some("deploymentFingerprint buildIdentity".to_owned()),
+            )])
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn application_delivery_content_scope_excludes_prose_and_keeps_executable_carriers() {
+        let findings_for = |path: &str, source: &str| {
+            application_delivery_records_findings(&[(
+                path.to_owned(),
+                scans_application_delivery_content(path).then(|| source.to_owned()),
+            )])
+        };
+
+        for path in ["README.md", "docs/architecture/delivery-notes.md"] {
+            assert!(
+                findings_for(path, "Helm DeploymentPlan deploymentFingerprint").is_empty(),
+                "human prose must not become a blocking carrier: {path}"
+            );
+        }
+        for (path, source) in [
+            ("crates/demo/src/lib.rs", "struct DeploymentPlan;"),
+            ("hack/check.sh", "helm template deploy/helm/rss"),
+            (".github/workflows/ci.yml", "run: kubeconform -strict"),
+        ] {
+            assert!(
+                findings_for(path, source)
+                    .iter()
+                    .any(|finding| finding.rule == Rule::ApplicationDeliveryResidual),
+                "executable delivery residual escaped: {path}"
+            );
+        }
+
+        assert!(
+            findings_for(
+                "crates/runtimeexec/src/inventory.rs",
+                "BuildIdentity buildIdentity RSS_BUILD_SOURCE_SHA RSS_BUILD_IMAGE_DIGEST \
+                 BuildMetadata buildMetadata RSS_BUILD_SOURCE_REVISION \
+                 RSS_DECLARED_IMAGE_DIGEST"
+            )
+            .is_empty(),
+            "provider-independent build metadata is an application-owned carrier"
+        );
+    }
+
+    #[test]
+    fn application_delivery_boundary_accepts_real_workspace() -> Result<()> {
+        let root = workspace_root()?;
+        let findings = application_delivery_boundary_findings(&root)?;
+        assert!(findings.is_empty(), "{findings:?}");
+        Ok(())
     }
 
     #[test]

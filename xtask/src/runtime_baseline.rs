@@ -51,6 +51,14 @@ use std::path::{Path, PathBuf};
 use syn::parse::Parser as _;
 use syn::visit::Visit;
 
+fn attrs_may_be_default_runtime_production(attrs: &[syn::Attribute]) -> bool {
+    attrs_may_be_production(attrs)
+        && !attrs.iter().any(|attribute| {
+            attribute.path().is_ident("cfg")
+                && compact_tokens(&attribute.meta).contains("feature=\"integration\"")
+        })
+}
+
 const BASELINE_PATH: &str = "runtime-baseline/runtime.txt";
 const RUNTIME_CARGO_PATH: &str = "assemblies/runtime/Cargo.toml";
 const ASSEMBLY_MANIFEST_PATH: &str = "assemblies/runtime/assembly.toml";
@@ -1468,13 +1476,13 @@ fn finalizer_call_is_canonical(call: &syn::ExprCall) -> bool {
 
 impl<'ast> Visit<'ast> for ListenerPlanExecutionInventory {
     fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
-        if attrs_may_be_production(&item.attrs) {
+        if attrs_may_be_default_runtime_production(&item.attrs) {
             syn::visit::visit_item_mod(self, item);
         }
     }
 
     fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
-        if !attrs_may_be_production(&item.attrs) {
+        if !attrs_may_be_default_runtime_production(&item.attrs) {
             return;
         }
         if return_type_mentions(&item.sig.output, "FinalizedListenerPlan") {
@@ -1489,7 +1497,7 @@ impl<'ast> Visit<'ast> for ListenerPlanExecutionInventory {
     }
 
     fn visit_item_struct(&mut self, item: &'ast syn::ItemStruct) {
-        if !attrs_may_be_production(&item.attrs) {
+        if !attrs_may_be_default_runtime_production(&item.attrs) {
             return;
         }
         if item.ident == "FinalizeListenerPlanInputs" {
@@ -1501,7 +1509,7 @@ impl<'ast> Visit<'ast> for ListenerPlanExecutionInventory {
     }
 
     fn visit_item_impl(&mut self, item: &'ast syn::ItemImpl) {
-        if !attrs_may_be_production(&item.attrs) {
+        if !attrs_may_be_default_runtime_production(&item.attrs) {
             return;
         }
         let is_set_impl =
@@ -1516,7 +1524,7 @@ impl<'ast> Visit<'ast> for ListenerPlanExecutionInventory {
     }
 
     fn visit_impl_item_fn(&mut self, item: &'ast syn::ImplItemFn) {
-        if !attrs_may_be_production(&item.attrs) {
+        if !attrs_may_be_default_runtime_production(&item.attrs) {
             return;
         }
         if self.inside_set_impl
@@ -4763,7 +4771,7 @@ fn runtime_profile_inputs_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
         findings.push(finding(
             Rule::ForbiddenWiring,
             RUNTIME_PHASE_PATH,
-            "ServingRuntimeInputs must privately own exactly PreparedRuntimeInputs, Arc<secure::DigestPasswordBlocklist>, and BuildIdentity; OperatorRuntimeInputs must privately own only PreparedRuntimeInputs, making serving capabilities unrepresentable",
+            "ServingRuntimeInputs must privately own exactly PreparedRuntimeInputs and Arc<secure::DigestPasswordBlocklist>; OperatorRuntimeInputs must privately own only PreparedRuntimeInputs, making serving capabilities unrepresentable",
         ));
     }
 
@@ -4908,7 +4916,6 @@ fn runtime_profile_input_structs_are_exact(file: &syn::File) -> bool {
                 "password_blocklist",
                 "std::sync::Arc<secure::DigestPasswordBlocklist>",
             ),
-            ("build_identity", "runtimeexec::inventory::BuildIdentity"),
         ],
     ) && exact_fields(
         file,
@@ -9248,10 +9255,15 @@ fn profile_prepare_function_is_canonical(
         return false;
     };
     let result_is_canonical = if carries_password_blocklist {
-        let syn::Expr::Call(constructor) = transparent_expr(result) else {
+        let syn::Expr::Call(ok) = transparent_expr(result) else {
             return false;
         };
-        is_exact_path(&constructor.func, &[output_type, "from_prepared"])
+        let Some(syn::Expr::Call(constructor)) = ok.args.first().map(transparent_expr) else {
+            return false;
+        };
+        is_exact_path(&ok.func, &["Ok"])
+            && ok.args.len() == 1
+            && is_exact_path(&constructor.func, &[output_type, "new"])
             && constructor.args.len() == 2
             && constructor
                 .args
@@ -12568,27 +12580,27 @@ fn production_lifecycle_primitive_uses(
     }
     impl<'ast> Visit<'ast> for Counter<'_> {
         fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
-            if attrs_may_be_production(&item.attrs) {
+            if attrs_may_be_default_runtime_production(&item.attrs) {
                 syn::visit::visit_item_mod(self, item);
             }
         }
         fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
-            if attrs_may_be_production(&item.attrs) {
+            if attrs_may_be_default_runtime_production(&item.attrs) {
                 syn::visit::visit_item_fn(self, item);
             }
         }
         fn visit_item_impl(&mut self, item: &'ast syn::ItemImpl) {
-            if attrs_may_be_production(&item.attrs) {
+            if attrs_may_be_default_runtime_production(&item.attrs) {
                 syn::visit::visit_item_impl(self, item);
             }
         }
         fn visit_impl_item_fn(&mut self, item: &'ast syn::ImplItemFn) {
-            if attrs_may_be_production(&item.attrs) {
+            if attrs_may_be_default_runtime_production(&item.attrs) {
                 syn::visit::visit_impl_item_fn(self, item);
             }
         }
         fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
-            if attrs_may_be_production(&item.attrs) {
+            if attrs_may_be_default_runtime_production(&item.attrs) {
                 self.record_use_tree(&item.tree, &mut Vec::new());
             }
         }
@@ -16667,7 +16679,7 @@ fn prepare_runtime_kernel<Local>(prepare_local: impl FnOnce() -> Local) {
 }
 pub fn prepare_runtime() -> anyhow::Result<ServingRuntimeInputs> {
     let (prepared, password_blocklist) = prepare_runtime_kernel(prepare_serving_local)?;
-    ServingRuntimeInputs::from_prepared(prepared, password_blocklist)
+    Ok(ServingRuntimeInputs::new(prepared, password_blocklist))
 }
 pub fn prepare_operator_runtime() -> anyhow::Result<OperatorRuntimeInputs> {
     let (prepared, ()) = prepare_runtime_kernel(prepare_operator_local)?;
@@ -16719,7 +16731,6 @@ pub struct PreparedRuntimeInputs;
 pub struct ServingRuntimeInputs {
     prepared: PreparedRuntimeInputs,
     password_blocklist: std::sync::Arc<secure::DigestPasswordBlocklist>,
-    build_identity: runtimeexec::inventory::BuildIdentity,
 }
 pub struct OperatorRuntimeInputs {
     prepared: PreparedRuntimeInputs,

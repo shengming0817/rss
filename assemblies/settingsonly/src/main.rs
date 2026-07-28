@@ -15,10 +15,6 @@ Image schema: /usr/share/rss/settingsonly/config.schema.json
 Required read-only secret file:
   /var/run/rss/secrets/serving-secret-bundle
 
-Required build identity environment:
-  RSS_BUILD_SOURCE_SHA
-  RSS_BUILD_IMAGE_DIGEST
-
 Health endpoints: /health/v1/healthz, /health/v1/readyz, /health/v1/metrics
 Primary semantics: missing/invalid credential = 401; valid federated credential = 403
 Admin inventory: GET /api/v1/runtime/inventory (federated Admin/SuperAdmin only)

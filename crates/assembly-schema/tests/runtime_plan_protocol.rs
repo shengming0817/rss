@@ -14,10 +14,8 @@ const ASSEMBLY_PLAN_TAG: &str = "rss-assembly-lock-v1";
 const SECRET_SENTINEL: &str = "ZZ_RUNTIME_PLAN_SECRET_1788_DO_NOT_SERIALIZE";
 
 fn vectors() -> Value {
-    serde_json::from_str(include_str!(
-        "../../../docs/spec/007-runtime-deployment-executable-plan/fixtures/fingerprint-v1-vectors.json"
-    ))
-    .expect("shared fingerprint vectors")
+    serde_json::from_str(include_str!("fixtures/fingerprint-v1-vectors.json"))
+        .expect("shared fingerprint vectors")
 }
 
 fn runtime_vector() -> Value {
@@ -560,10 +558,13 @@ fn runtime_plan_reader_reports_sealed_redacted_json_stage_category_and_path() {
 fn runtime_plan_writer_validates_against_draft7_and_round_trips_through_the_reader() {
     let writer = wire_from_vector();
     parse(&writer).expect("shared vector");
-    let committed: Value = serde_json::from_str(include_str!(
-        "../../../docs/spec/007-runtime-deployment-executable-plan/contracts/runtime-plan.schema.json"
-    ))
-    .expect("committed schema");
+    let committed: Value =
+        serde_json::from_str(include_str!("../schemas/runtime-plan.schema.json"))
+            .expect("committed schema");
+    assert_eq!(
+        committed["$id"],
+        "https://rss.local/assembly-schema/runtime-plan.schema.json"
+    );
     let validator = jsonschema::draft7::options()
         .should_validate_formats(true)
         .build(&committed)
@@ -580,10 +581,9 @@ fn runtime_plan_writer_validates_against_draft7_and_round_trips_through_the_read
 #[test]
 fn runtime_plan_rust_schema_matches_the_committed_v1_boundary() {
     let rust = serde_json::to_value(schemars::schema_for!(RuntimePlan)).expect("Rust schema");
-    let committed: Value = serde_json::from_str(include_str!(
-        "../../../docs/spec/007-runtime-deployment-executable-plan/contracts/runtime-plan.schema.json"
-    ))
-    .expect("committed schema");
+    let committed: Value =
+        serde_json::from_str(include_str!("../schemas/runtime-plan.schema.json"))
+            .expect("committed schema");
 
     assert_eq!(rust, committed);
 }

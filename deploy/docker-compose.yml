@@ -1,7 +1,7 @@
 # RSS 演示栈（#1134 验收 harness）：postgres + redis + minio + rabbitmq + vault + server。
 #
-# 用途：本地证明同一镜像的独立 migration Job + serving 进程、readyz、非 root 与只读 rootfs。
-# 非生产编排（Vault 使用 dev TLS + in-memory storage；生产用 k8s + 私有 CA TLS + 真 OIDC/Vault，见 docs/ops/202606271438-003-container-image.md）。
+# 用途：本地证明独立 operator migration task + serving 进程、readyz、非 root 与只读 rootfs。
+# 非生产编排（Vault 使用 dev TLS + in-memory storage；外部 delivery 系统负责生产 TLS、identity 与编排，见 docs/ops/202606271438-003-container-image.md）。
 # deploy/smoke.sh：必须显式选择 developer|release。stock compose 保持全 Local、不依赖 SPIRE；
 # Remote placement + SPIFFE fixture 不全时默认失败，仅 developer + RSS_SMOKE_ALLOW_SKIP=1 可输出
 # `NOT PRODUCTION EVIDENCE` 后跳过。release 全流程成功只输出 `RELEASE IMAGE ON DEMO INFRA EVIDENCE`：
@@ -20,7 +20,7 @@ services:
   postgres:
     image: postgres:16-alpine # 演示用；生产钉 digest（see 部署文档 §复现性）。
     env_file: [.env.example, ./demo-secrets/postgres.env]
-    # reason: migration Job 须在 PostgreSQL healthy 后执行；serving 仅在 Job 成功后启动并核验 ledger。
+    # reason: migration task 须在 PostgreSQL healthy 后执行；serving 仅在 task 成功后启动并核验 ledger。
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
       interval: 3s
@@ -182,7 +182,8 @@ services:
     build:
       context: ..
       dockerfile: Dockerfile
-    image: rss-server:dev
+      target: operator-runtime
+    image: rss-operator:dev
     entrypoint: ["/usr/local/bin/rss"]
     command: ["rss-access-jwks", "export-vault-transit"]
     env_file: [.env.example]
@@ -207,7 +208,8 @@ services:
     build:
       context: ..
       dockerfile: Dockerfile
-    image: rss-server:dev
+      target: operator-runtime
+    image: rss-operator:dev
     entrypoint: ["/usr/local/bin/rss"]
     command: ["postgres", "migrate-all"]
     env_file: [.env.example, ./demo-secrets/migration.env]
@@ -227,7 +229,8 @@ services:
     build:
       context: .. # 仓库根 = 构建上下文（Dockerfile 在根；.dockerignore 裁剪）。
       dockerfile: Dockerfile
-    image: rss-server:dev
+      target: runtime
+    image: rss-runtime:dev
     env_file: [.env.example]
     depends_on:
       postgres:
@@ -263,6 +266,7 @@ services:
       - ALL # 不需任何 Linux capability（仅 bind 高位端口 8080-8083，无需 NET_BIND_SERVICE）。
     security_opt:
       - no-new-privileges:true # 禁 setuid 提权。
+    stop_grace_period: 30s # 应用 drain 预算 20s；为正常退出保留终止余量。
     restart: on-failure
 
 volumes:

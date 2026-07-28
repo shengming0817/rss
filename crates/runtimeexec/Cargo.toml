@@ -8,6 +8,10 @@ publish = false
 [lints]
 workspace = true
 
+[features]
+default = []
+test-support = ["tokio/sync"]
+
 [dependencies]
 anyhow = { workspace = true }
 assembly-schema = { path = "../assembly-schema" }

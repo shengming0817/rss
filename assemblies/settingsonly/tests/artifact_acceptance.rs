@@ -40,9 +40,6 @@ const VAULT_TOKEN: &str = "settingsonly-artifact-vault-token";
 const CONTAINER_PRIMARY_PROXY_PORT: u16 = 18_080;
 const CONTAINER_ADMIN_PROXY_PORT: u16 = 18_082;
 const CONTAINER_HEALTH_PROXY_PORT: u16 = 18_083;
-const BUILD_SOURCE_SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-const BUILD_IMAGE_DIGEST: &str =
-    "sha256:e3f9c79d3f396df5434290783e22d87226b85cfbbcb9e30ce8f09163257a3ec2";
 const PG_WRITER_ROLE: &str = "rss_app";
 const PG_WRITER_PASSWORD: &str = "rss_app_settingsonly_artifact_pw";
 const PG_READER_ROLE: &str = "rss_app_read";
@@ -157,9 +154,6 @@ impl Artifact<'_> {
                 for name in SECRET_ENVIRONMENTS {
                     command.args(["--env", name]);
                 }
-                for name in ["RSS_BUILD_SOURCE_SHA", "RSS_BUILD_IMAGE_DIGEST"] {
-                    command.args(["--env", name]);
-                }
                 command.arg(image).args(["--config", IMAGE_CONFIG_PATH]);
                 command.env("RSS_SETTINGSONLY_CONTAINER_NAME", &container_name);
                 command
@@ -169,8 +163,6 @@ impl Artifact<'_> {
             .env("RSS_SETTINGSONLY_PG_WRITER_PASSWORD", PG_WRITER_PASSWORD)
             .env("RSS_SETTINGSONLY_PG_READER_PASSWORD", PG_READER_PASSWORD)
             .env("RSS_SETTINGSONLY_VAULT_TOKEN", VAULT_TOKEN)
-            .env("RSS_BUILD_SOURCE_SHA", BUILD_SOURCE_SHA)
-            .env("RSS_BUILD_IMAGE_DIGEST", BUILD_IMAGE_DIGEST)
             .stdout(Stdio::from(stdout))
             .stderr(Stdio::from(stderr));
         let container_name = matches!(self, Self::Image(_)).then(|| fixture.container_name());

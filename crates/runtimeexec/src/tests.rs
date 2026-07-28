@@ -117,12 +117,7 @@ fn worker(name: &'static str, transcript: &Transcript) -> bootstrap::WorkerSpec 
 struct ProbeReceipt;
 
 fn test_drain_budget() -> TotalDrainBudget {
-    TotalDrainBudget::new(
-        Duration::from_secs(2),
-        Duration::from_secs(5),
-        Duration::from_secs(1),
-    )
-    .expect("valid test drain budget")
+    TotalDrainBudget::new(Duration::from_secs(2)).expect("valid test drain budget")
 }
 
 struct FakeAdapter {
@@ -711,6 +706,54 @@ async fn ready_hook_failure_drains_activated_listener_and_preserves_error() {
 }
 
 #[tokio::test]
+async fn controlled_launch_completes_through_normal_shutdown_and_drains() {
+    let transcript = Transcript::new();
+    let (completion, controlled) = test_support::controlled::<usize>();
+    let launch = plan(
+        &transcript,
+        vec!["listener"],
+        false,
+        DomainModuleResult::default(),
+        DomainModuleResult::default(),
+        move |inventory| completion.complete(Ok(inventory.listener_count)),
+    );
+
+    let listener_count = controlled
+        .run(launch)
+        .await
+        .expect("controlled launch must stop successfully");
+
+    assert_eq!(listener_count, 1);
+    assert_eq!(transcript.snapshot(), vec!["listener", "trace"]);
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("controlled request failed")]
+struct ControlledRequestError;
+
+#[tokio::test]
+async fn controlled_launch_preserves_the_original_request_error() {
+    let transcript = Transcript::new();
+    let (completion, controlled) = test_support::controlled::<()>();
+    let launch = plan(
+        &transcript,
+        vec!["listener"],
+        false,
+        DomainModuleResult::default(),
+        DomainModuleResult::default(),
+        move |_| completion.complete(Err(anyhow::Error::new(ControlledRequestError))),
+    );
+
+    let error = controlled
+        .run(launch)
+        .await
+        .expect_err("request failure must be returned after a clean drain");
+
+    assert!(error.is::<ControlledRequestError>());
+    assert_eq!(transcript.snapshot(), vec!["listener", "trace"]);
+}
+
+#[tokio::test]
 async fn shutdown_signal_interrupts_pending_readiness_then_drains() {
     let transcript = Transcript::new();
     let readiness_started = Arc::new(Notify::new());
@@ -859,12 +902,7 @@ async fn total_drain_budget_bounds_multiple_hanging_resources() {
             ),
             DomainModuleResult::default(),
         ),
-        TotalDrainBudget::new(
-            Duration::from_millis(40),
-            Duration::from_millis(100),
-            Duration::from_millis(20),
-        )
-        .expect("valid bounded drain budget"),
+        TotalDrainBudget::new(Duration::from_millis(40)).expect("valid bounded drain budget"),
     );
 
     let error = tokio::time::timeout(
@@ -1189,38 +1227,7 @@ async fn startup_error_with_unregistered_probe_preserves_primary_and_drains() {
 }
 
 #[test]
-fn total_drain_budget_is_strictly_inside_deployment_grace_buffer() {
-    assert!(
-        TotalDrainBudget::new(
-            Duration::from_secs(20),
-            Duration::from_secs(30),
-            Duration::from_secs(5),
-        )
-        .is_ok()
-    );
-    assert!(
-        TotalDrainBudget::new(
-            Duration::ZERO,
-            Duration::from_secs(30),
-            Duration::from_secs(5),
-        )
-        .is_err()
-    );
-    assert!(
-        TotalDrainBudget::new(
-            Duration::from_secs(25),
-            Duration::from_secs(30),
-            Duration::from_secs(5),
-        )
-        .is_err(),
-        "drain must finish strictly before the reserved exit buffer"
-    );
-    assert!(
-        TotalDrainBudget::new(
-            Duration::from_secs(1),
-            Duration::from_secs(5),
-            Duration::from_secs(5),
-        )
-        .is_err()
-    );
+fn total_drain_budget_requires_positive_assembly_budget() {
+    assert!(TotalDrainBudget::new(Duration::from_secs(20)).is_ok());
+    assert!(TotalDrainBudget::new(Duration::ZERO).is_err());
 }

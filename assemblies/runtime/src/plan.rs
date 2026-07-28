@@ -16,8 +16,6 @@ use std::fmt;
 
 const BUNDLED_ASSEMBLY_TOML: &str = include_str!("../assembly.toml");
 const BUNDLED_ASSEMBLY_LOCK: &[u8] = include_bytes!("../assembly.lock.json");
-const BUNDLED_DEPLOYMENT_PLAN: &[u8] =
-    include_bytes!("../../../deploy/generated/runtime.deployment-plan.json");
 
 pub(crate) use domain_exec::DomainExecutionPlan;
 pub(crate) use placement_exec::PlacementExecutionPlan;
@@ -159,13 +157,6 @@ impl RuntimePlan {
     ) -> DomainExecutionPlan {
         domain_exec::mint(&self.plan, placement)
     }
-
-    pub(crate) fn bundled_deployment_plan(
-        &self,
-    ) -> Result<assembly_schema::ParsedDeploymentPlan, RuntimePlanError> {
-        assembly_schema::ParsedDeploymentPlan::from_json_slice(&self.plan, BUNDLED_DEPLOYMENT_PLAN)
-            .map_err(RuntimePlanError::DeploymentPlan)
-    }
 }
 
 fn listener_execution_plan_from_typed(plan: &TypedRuntimePlan) -> ListenerExecutionPlan {
@@ -267,8 +258,6 @@ pub(crate) enum RuntimePlanError {
         /// Exact `RSS_<DOMAIN>_DOMAIN_PLACEMENT_WORKLOAD` env key that failed validation.
         env: String,
     },
-    #[error("parse bundled DeploymentPlan failed")]
-    DeploymentPlan(#[source] assembly_schema::DeploymentPlanError),
     #[error("compile bundled RuntimePlan protocol failed: {0}")]
     Protocol(#[source] assembly_schema::RuntimePlanError),
 }

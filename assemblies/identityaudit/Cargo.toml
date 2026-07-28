@@ -14,7 +14,7 @@ path = "src/lib.rs"
 
 [features]
 default = []
-test-support = ["httpserve/test-util", "dep:ids"]
+test-support = ["httpserve/test-util", "runtimeexec/test-support", "dep:ids"]
 
 [[bin]]
 name = "identityaudit-server"

@@ -89,13 +89,11 @@ runs:
         set -euo pipefail
         install_action_tools="$(.github/scripts/ci-tool-adapters.sh specs --lane "$RSS_LANE" --backend install-action)"
         binstall_tools="$(.github/scripts/ci-tool-adapters.sh specs --lane "$RSS_LANE" --backend binstall)"
-        download_tools="$(.github/scripts/ci-tool-adapters.sh specs --lane "$RSS_LANE" --backend download)"
         adapter_sha256="$(sha256sum .github/scripts/ci-tool-adapters.sh | cut -d' ' -f1)"
         catalog_sha256="$(sha256sum .github/scripts/ci-tool-catalog.txt | cut -d' ' -f1)"
         {
           echo "install-action-tools=$install_action_tools"
           echo "binstall-tools=$binstall_tools"
-          echo "download-tools=$download_tools"
           echo "adapter-sha256=$adapter_sha256"
           echo "catalog-sha256=$catalog_sha256"
         } >> "$GITHUB_OUTPUT"
@@ -110,7 +108,6 @@ runs:
         RSS_NIGHTLY: ${{ inputs.nightly }}
         RSS_INSTALL_ACTION_TOOLS: ${{ steps.tool-policy.outputs.install-action-tools }}
         RSS_BINSTALL_TOOLS: ${{ steps.tool-policy.outputs.binstall-tools }}
-        RSS_DOWNLOAD_TOOLS: ${{ steps.tool-policy.outputs.download-tools }}
         RSS_ADAPTER_SHA256: ${{ steps.tool-policy.outputs.adapter-sha256 }}
         RSS_CATALOG_SHA256: ${{ steps.tool-policy.outputs.catalog-sha256 }}
         RSS_TOOL_CACHE_EPOCH: ${{ inputs.tool-cache-epoch }}
@@ -128,7 +125,7 @@ runs:
         .github/scripts/ci-cache-maintain.sh prepare-roots --workspace "$GITHUB_WORKSPACE" --tool-root "$RSS_TOOL_ROOT" --runner-temp "$RUNNER_TEMP" --fallback-target "$RSS_FALLBACK_TARGET"
         mkdir -p "$RSS_JOB_TARGET"
         source_hash="$(sha256sum Cargo.lock .cargo/config.toml rust-toolchain.toml | sha256sum | cut -d' ' -f1)"
-        tools_hash="$(printf '%s\n' 'taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5' 'cargo-bins/cargo-binstall@732870f031d2fb36309d0deaf36abcc704a7be65@1.20.1' "$RSS_ADAPTER_SHA256" "$RSS_CATALOG_SHA256" "$RSS_INSTALL_ACTION_TOOLS" "$RSS_BINSTALL_TOOLS" "$RSS_DOWNLOAD_TOOLS" | sha256sum | cut -d' ' -f1)"
+        tools_hash="$(printf '%s\n' 'taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5' 'cargo-bins/cargo-binstall@732870f031d2fb36309d0deaf36abcc704a7be65@1.20.1' "$RSS_ADAPTER_SHA256" "$RSS_CATALOG_SHA256" "$RSS_INSTALL_ACTION_TOOLS" "$RSS_BINSTALL_TOOLS" | sha256sum | cut -d' ' -f1)"
         common="${RUNNER_OS}-${RUNNER_ARCH}-$RSS_TOOLCHAIN-$RSS_NIGHTLY_ID"
         echo "download-primary-key=rss-download-v4-$common-$source_hash" >> "$GITHUB_OUTPUT"
         echo "tools-primary-key=rss-tools-$RSS_TOOL_CACHE_EPOCH-$common-$tools_hash" >> "$GITHUB_OUTPUT"
@@ -230,16 +227,6 @@ runs:
         tool: ${{ steps.tool-policy.outputs.install-action-tools }}
         fallback: none
 
-    - name: Install checksum-pinned download tools
-      if: ${{ steps.tool-policy.outputs.download-tools != '' && steps.tools-cache.outputs.cache-hit != 'true' }}
-      shell: bash
-      env:
-        RSS_LANE: ${{ inputs.lane }}
-        RSS_TOOL_ROOT: ${{ github.workspace }}/.cache/ci-tools/${{ inputs.profile }}
-      run: |
-        set -euo pipefail
-        .github/scripts/ci-tool-adapters.sh install-download --lane "$RSS_LANE" --root "$RSS_TOOL_ROOT"
-
     - name: Validate and expose isolated tool cache
       id: verify-tools
       shell: bash
@@ -262,7 +249,6 @@ runs:
         } >> "$GITHUB_OUTPUT"
         echo "$RSS_TOOL_ROOT/.install-action/bin" >> "$GITHUB_PATH"
         echo "$RSS_TOOL_ROOT/bin" >> "$GITHUB_PATH"
-        echo "$RSS_TOOL_ROOT/.download/bin" >> "$GITHUB_PATH"
 
     - name: Configure verified compiler cache
       id: compiler-policy

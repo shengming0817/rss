@@ -1,25 +1,11 @@
 #[doc(hidden)]
 pub mod contract_manifest;
-mod deployment;
 mod lock;
 mod provider;
 #[doc(hidden)]
 pub mod repository_contract;
 mod runtime_plan;
 
-pub use deployment::{
-    ApplicationConfig, AvailabilityClass, DatabasePoolCeilings, DatabasePoolCeilingsV1Input,
-    DependencyPeerRole, DeploymentFingerprint, DeploymentIdentityV1Input, DeploymentPlan,
-    DeploymentPlanError, DeploymentPlanErrorStage, DeploymentPlanJsonCategory,
-    DeploymentPlanJsonPath, DeploymentPlanV1Input, DeploymentServiceV1Input,
-    DeploymentWorkloadV1Input, MigrationArtifact, MigrationArtifactV1Input,
-    MigrationExecutionBudget, MigrationExecutionBudgetV1Input, MigrationHeadFingerprint,
-    MigrationMode, ParsedDeploymentPlan, PortExposure, PortPlan, PortV1Input, ProbeKind, ProbePlan,
-    ProbeV1Input, ReplicaDatabaseBudget, ReplicaDatabaseBudgetV1Input, ResourceList,
-    ResourceListV1Input, ResourceRequirements, ResourceRequirementsV1Input, SecretBinding,
-    SecretBindingV1Input, SecretConsumer, SecretPurpose, ServicePlan, VaultObjectRef,
-    VaultObjectRefV1Input, WorkloadIdentity, WorkloadPlan,
-};
 pub use lock::{
     AssemblyDigests, AssemblyFingerprint, AssemblyIdentity, AssemblyLock, AssemblyLockError,
     AssemblyLockErrorStage, GENERATED_MODULE_OWNERSHIP_MARKER, GENERATED_PROVIDER_OWNERSHIP_MARKER,

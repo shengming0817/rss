@@ -48,15 +48,8 @@ impl<'a> DomainsWired<'a> {
                     .as_ref()
                     .map(|provider| provider.provider()),
             );
-            let deployment_plan = context
-                .runtime_plan
-                .bundled_deployment_plan()
-                .context("bind bundled DeploymentPlan")?;
-            let seed = runtimeexec::inventory::RuntimeInventorySeed::from_bound(
+            let seed = runtimeexec::inventory::RuntimeInventorySeed::from_runtime_plan(
                 context.runtime_plan.as_typed(),
-                &deployment_plan,
-                context.runtime_plan.assembly_identity(),
-                context.runtime_inputs.build_identity().clone(),
                 provider_build
                     .take_inventory_receipt()
                     .context("consume provider inventory completion receipt")?
@@ -66,6 +59,12 @@ impl<'a> DomainsWired<'a> {
                     .context("project runtime placement inventory")?,
             )
             .context("seal runtime inventory seed")?;
+            let seed = match crate::config::build_metadata(context.config())
+                .context("capture launch-supplied build metadata")?
+            {
+                Some(metadata) => seed.with_build_metadata(metadata),
+                None => seed,
+            };
             let (
                 inventory_publisher,
                 inventory_reader,

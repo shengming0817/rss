@@ -25,30 +25,22 @@ impl RuntimeInventoryRoutes {
         ])?;
         let config = snapshot.view();
         let plan = crate::plan::RuntimePlan::bundled(config)?;
-        let deployment = plan.bundled_deployment_plan()?;
-        let workload = plan.assembly_identity();
-        let image_digest = deployment
-            .workloads()
-            .iter()
-            .find(|candidate| candidate.name() == workload)
-            .and_then(|candidate| candidate.image().rsplit_once('@').map(|(_, digest)| digest))
-            .ok_or_else(|| anyhow::anyhow!("runtime fixture deployment workload is missing"))?;
-        let identity = model::BuildIdentity::parse(&"a".repeat(40), image_digest)?;
         let provider_bindings = plan
             .as_typed()
             .provider_plans()
             .iter()
             .map(|provider| model::ProviderProbeBinding::new(provider.id(), Vec::new()))
             .collect::<Result<Vec<_>, _>>()?;
-        let seed = model::RuntimeInventorySeed::from_bound(
+        let seed = model::RuntimeInventorySeed::from_runtime_plan(
             plan.as_typed(),
-            &deployment,
-            workload,
-            identity,
             provider_bindings,
             plan.placement_execution_plan(config)
                 .inventory_observations()?,
-        )?;
+        )?
+        .with_build_metadata(model::BuildMetadata::parse(
+            &"a".repeat(40),
+            &format!("sha256:{}", "b".repeat(64)),
+        )?);
         let (_publisher, reader, _health_publisher, _placement_publisher) =
             model::deferred_inventory_channel(seed);
         Ok(Self::new(reader))
@@ -101,11 +93,15 @@ fn to_wire(
     Ok(wire::RuntimeInventoryResponse {
         data: wire::RuntimeInventoryData {
             assembly_fingerprint: parse(snapshot.assembly_fingerprint())?,
-            build_identity: wire::RuntimeBuildIdentity {
-                image_digest: parse(snapshot.build_identity().image_digest())?,
-                source_sha: parse(snapshot.build_identity().source_sha())?,
-            },
-            deployment_fingerprint: parse(snapshot.deployment_fingerprint())?,
+            build_metadata: snapshot
+                .build_metadata()
+                .map(|metadata| {
+                    Ok(wire::RuntimeBuildMetadata {
+                        image_digest: parse(metadata.image_digest())?,
+                        source_revision: parse(metadata.source_revision())?,
+                    })
+                })
+                .transpose()?,
             domains: snapshot
                 .domains()
                 .iter()
@@ -271,7 +267,6 @@ mod tests {
 
 #[cfg(feature = "integration")]
 pub mod test_support {
-    use std::net::TcpListener;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::SystemTime;
@@ -425,18 +420,6 @@ pub mod test_support {
             &lock,
         )?;
         let plan = parsed.as_plan();
-        let deployment = assembly_schema::ParsedDeploymentPlan::from_json_slice(
-            plan,
-            include_bytes!("../../../deploy/generated/runtime.deployment-plan.json"),
-        )?;
-        let workload = lock.identity().name();
-        let image_digest = deployment
-            .workloads()
-            .iter()
-            .find(|candidate| candidate.name() == workload)
-            .and_then(|candidate| candidate.image().rsplit_once('@').map(|(_, digest)| digest))
-            .context("runtime journey deployment workload")?;
-        let build = model::BuildIdentity::parse(&"a".repeat(40), image_digest)?;
         let (probe_name, reporter) = journey_probe_chain(case)?;
         let bindings = plan
             .provider_plans()
@@ -445,47 +428,6 @@ pub mod test_support {
                 model::ProviderProbeBinding::new(provider.id(), vec![probe_name.clone()])
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let listener_port = |kind: assembly_schema::AssemblyListenerKind| {
-            let name = match kind {
-                assembly_schema::AssemblyListenerKind::Primary => "http",
-                assembly_schema::AssemblyListenerKind::Admin => "admin",
-                assembly_schema::AssemblyListenerKind::Internal => "internal",
-                assembly_schema::AssemblyListenerKind::Health => "health",
-            };
-            deployment
-                .services()
-                .iter()
-                .filter(|service| service.workload() == workload)
-                .flat_map(|service| service.ports())
-                .find(|port| port.name() == name)
-                .map(assembly_schema::PortPlan::port)
-                .with_context(|| format!("runtime journey {name} deployment port"))
-        };
-        let mut sockets = Vec::<(assembly_schema::AssemblyListenerKind, TcpListener)>::new();
-        let mut bound_ports = std::collections::BTreeMap::<u16, TcpListener>::new();
-        let observations = plan
-            .listener_plans()
-            .iter()
-            .map(|listener| {
-                let port = listener_port(listener.kind())?;
-                let socket = if let Some(bound) = bound_ports.get(&port) {
-                    bound.try_clone()?
-                } else {
-                    let bound = std::net::TcpListener::bind(("127.0.0.1", port))?;
-                    bound_ports.insert(port, bound.try_clone()?);
-                    bound
-                };
-                let address = socket.local_addr()?;
-                sockets.push((listener.kind(), socket));
-                Ok(model::BoundListenerObservation::from_bound(
-                    listener.id(),
-                    listener.kind(),
-                    listener.auth(),
-                    model::InventoryEndpointScheme::Http,
-                    address,
-                ))
-            })
-            .collect::<anyhow::Result<Vec<_>>>()?;
         let placements = plan
             .placement_plans()
             .iter()
@@ -493,16 +435,12 @@ pub mod test_support {
                 model::PlacementObservation::local(placement.domain(), placement.workload())
             })
             .collect();
-        let seed = model::RuntimeInventorySeed::from_bound(
-            plan,
-            &deployment,
-            workload,
-            build,
-            bindings,
-            placements,
-        )?;
+        let seed = model::RuntimeInventorySeed::from_runtime_plan(plan, bindings, placements)?
+            .with_build_metadata(model::BuildMetadata::parse(
+                &"a".repeat(40),
+                &format!("sha256:{}", "b".repeat(64)),
+            )?);
         let (publisher, reader) = model::inventory_channel(seed, reporter);
-        publisher.publish(observations)?;
         let mut registry = bootstrap::Registry::new();
         crate::modules_gen::register_framework_routes(
             &RuntimeInventoryRoutes::new(reader),
@@ -534,33 +472,16 @@ pub mod test_support {
             FixturePdp(case),
             crate::test_support::always_current_access_grants(),
         );
-        let router = routes.into_router_for_test();
-        let admin_index = sockets
-            .iter()
-            .position(|(kind, _)| *kind == assembly_schema::AssemblyListenerKind::Admin)
-            .context("runtime journey Admin socket")?;
-        let (_, admin) = sockets.swap_remove(admin_index);
-        let serving_address = admin.local_addr()?;
-        admin.set_nonblocking(true)?;
-        let listener = tokio::net::TcpListener::from_std(admin)?;
-        let server = tokio::spawn(async move { axum::serve(listener, router).await });
-        let response = reqwest::Client::new()
-            .get(format!(
-                "http://{serving_address}{}",
-                generated::http::runtime_v1::inventory::PATH
-            ))
-            .bearer_auth("e30.eyJzdWIiOiJydW50aW1lLWZpeHR1cmUifQ.c2ln")
-            .send()
-            .await?;
-        let status = response.status();
-        let body = response.bytes().await?.to_vec();
-        server.abort();
-        let _ = server.await;
-        drop(sockets);
+        let response = crate::launch::serve_inventory_journey(
+            routes,
+            publisher,
+            "e30.eyJzdWIiOiJydW50aW1lLWZpeHR1cmUifQ.c2ln".to_owned(),
+        )
+        .await?;
         Ok(JourneyResult {
-            status,
-            body,
-            serving_address,
+            status: response.status,
+            body: response.body,
+            serving_address: response.serving_address,
             audit_calls: audit_calls.load(Ordering::Acquire),
         })
     }

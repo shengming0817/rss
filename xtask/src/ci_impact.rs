@@ -58,10 +58,9 @@ const MACHINE_INPUT_PATHS: &[&str] = &[
     "docs/ops/0069-account-security-capacity-gate.selftest.sh",
     "docs/ops/0069-account-security-capacity-gate.sh",
     "docs/ops/localtx-alerts.rules.yaml",
-    "docs/spec/007-runtime-deployment-executable-plan/contracts/assembly-lock.schema.json",
-    "docs/spec/007-runtime-deployment-executable-plan/contracts/runtime-plan.schema.json",
-    "docs/spec/007-runtime-deployment-executable-plan/contracts/deployment-plan.schema.json",
-    "docs/spec/007-runtime-deployment-executable-plan/fixtures/fingerprint-v1-vectors.json",
+    "crates/assembly-schema/schemas/assembly-lock.schema.json",
+    "crates/assembly-schema/schemas/runtime-plan.schema.json",
+    "crates/assembly-schema/tests/fixtures/fingerprint-v1-vectors.json",
 ];
 const POLICY_BEHAVIOR_SPEC: &str = include_str!("../tests/golden/ci-impact-policy.json");
 const HIGH_IMPACT_PATHS: &[&str] = &[
@@ -72,7 +71,7 @@ const HIGH_IMPACT_PATHS: &[&str] = &[
     "deny.toml",
     "clippy.toml",
 ];
-const HIGH_IMPACT_PREFIXES: &[&str] = &[".config/ci-impact", "deploy/generated/", "deploy/helm/"];
+const HIGH_IMPACT_PREFIXES: &[&str] = &[".config/ci-impact"];
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Options {
     pub(crate) event_path: PathBuf,
@@ -4008,34 +4007,6 @@ mod tests {
                     .map(LocalStep::label)
                     .collect::<Vec<_>>(),
                 expected
-            );
-        }
-    }
-
-    #[test]
-    fn deployment_machine_paths_run_local_meta_and_remote_full() {
-        for path in [
-            "deploy/generated/runtime.deployment-plan.json",
-            "deploy/helm/rss/Chart.yaml",
-            "deploy/helm/rss/values/runtime.yaml",
-            "deploy/helm/rss/templates/deployment.yaml",
-            "deploy/helm/rss/tests/golden/runtime.yaml",
-        ] {
-            let impact = impact_entries(
-                &[DiffEntry::modified(path)],
-                None,
-                &BTreeSet::new(),
-                &BTreeMap::new(),
-            );
-            assert_eq!(
-                LocalProjection::from(&impact),
-                LocalProjection::FastMeta,
-                "deployment machine path must execute local fast/meta: {path}"
-            );
-            assert_eq!(
-                RemoteProjection::from(&impact).into_recommendation(),
-                Recommendation::Full(FullCause::GlobalImpact),
-                "deployment machine path must remain fail-safe full remotely: {path}"
             );
         }
     }

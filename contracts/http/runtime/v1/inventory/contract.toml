@@ -1,4 +1,4 @@
-# Protected, tenant-authorized runtime topology and build identity for operators.
+# Protected, tenant-authorized runtime topology and declared build metadata for operators.
 id = "runtime.inventory"
 kind = "http"
 domain = "runtime"

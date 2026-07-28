@@ -17,8 +17,8 @@ settingsonly 只装配 Settings、PostgreSQL、Vault、federated OIDC、rate lim
 inventory handler。Primary 的 `RejectAuthorizer` 语义不受 Admin route 影响。
 
 该 binary 当前没有 TLS listener capability，因此配置类型只接受 canonical loopback 明文地址（`127/8` 或
-`[::1]`）。不得把 bearer 或匿名 metrics 暴露到公网。需要外部流量时，由同一 Pod 网络命名空间中的 TLS proxy
-sidecar 终止 TLS，再转发到 loopback；不要把配置改成 wildcard bind。
+`[::1]`）。不得把 bearer 或匿名 metrics 暴露到公网。需要外部流量时，由外部 delivery 系统在同一网络
+命名空间配置 TLS proxy，再转发到 loopback；不要把配置改成 wildcard bind。
 
 ## 构建与发现
 
@@ -53,16 +53,6 @@ RSS_SETTINGSONLY_PG_MIGRATOR_PASSWORD
 RSS_SETTINGSONLY_VAULT_TOKEN
 ```
 
-启动还必须注入两项非 secret 构建身份，进程只在启动快照读取一次：
-
-```text
-RSS_BUILD_SOURCE_SHA=<40 位小写十六进制提交 SHA>
-RSS_BUILD_IMAGE_DIGEST=sha256:<64 位小写十六进制镜像摘要>
-```
-
-`RSS_BUILD_IMAGE_DIGEST` 必须与绑定 DeploymentPlan 中 settingsonly workload 的镜像摘要完全一致，否则在 bind
-socket 前失败。`RSS_BUILD_SOURCE_SHA` 是部署方声明，不代表进程完成 OCI provenance 或 same-head 自证明。
-
 Linux 本机 smoke 可使用 host network 保持 loopback 策略：
 
 ```bash
@@ -75,12 +65,9 @@ docker run --rm --network host \
   rss-settingsonly:1796 --config /etc/rss/settingsonly.toml
 ```
 
-在 Kubernetes 中使用只读 ConfigMap/Secret projection，并让 TLS proxy sidecar 与进程共享 Pod 网络命名空间。
-Primary/Admin 流量和 kubelet HTTP probe 都不能直接访问 Pod IP 上的 settingsonly loopback socket：它们必须经
-同 Pod sidecar 的 TLS/探针端口转发；也可让 sidecar 在同一网络命名空间内执行 loopback probe 后导出自身的
-kubelet 探针端口。文件/Secret generation、DeploymentPlan、image 与两项 `RSS_BUILD_*` 必须作为同一 generation
-原子发布。回滚也必须原子恢复上一组 image digest、source SHA、DeploymentPlan、配置和 Secret，不得只回滚
-image 或通过旧 schema 双读、别名、digest fallback 拼接 generation。
+外部 delivery 系统必须以只读方式投影配置、JWKS、CA 和 secret，并让 TLS proxy 在同一网络命名空间访问
+loopback listener。具体调度资源不由本仓库定义。镜像、配置与 secret 必须作为同一 generation 发布和回滚，
+禁止旧 schema 双读、别名或 fallback。
 
 ## 探针、监控与终止
 
@@ -88,7 +75,7 @@ Health listener 固定提供：
 
 - `/health/v1/healthz`：进程存活；
 - `/health/v1/readyz`：聚合 PG、Vault resolver/key provider、federated JWKS 与 Settings workers；
-- `/health/v1/metrics`：Prometheus 文本，仅可由本机/同 Pod collector 访问。
+- `/health/v1/metrics`：Prometheus 文本，仅可由本机/同网络命名空间 collector 访问。
 
 只有 `/readyz` 返回 200 后才能接流量。Primary、Admin、Health 均使用各自配置的独立 loopback 端口。发送
 SIGTERM/SIGINT 后，`runtimeexec` 停止 listener 并按精确一次 LIFO 顺序 drain；容器停止示例：

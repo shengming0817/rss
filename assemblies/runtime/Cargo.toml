@@ -129,6 +129,7 @@ integration = [
   "identity/seed-login",
   "amqp/integration-test-support",
   "httpserve/test-util",
+  "runtimeexec/test-support",
   "dep:ids",
 ]
 

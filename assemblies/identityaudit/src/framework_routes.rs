@@ -91,18 +91,21 @@ fn inventory_http_response(
 fn inventory_response(
     snapshot: &RuntimeInventorySnapshot,
 ) -> anyhow::Result<wire::RuntimeInventoryResponse> {
-    let build = snapshot.build_identity();
     Ok(wire::RuntimeInventoryResponse {
         data: wire::RuntimeInventoryData {
             assembly_fingerprint: parse(snapshot.assembly_fingerprint(), "assembly fingerprint")?,
-            build_identity: wire::RuntimeBuildIdentity {
-                image_digest: parse(build.image_digest(), "build image digest")?,
-                source_sha: parse(build.source_sha(), "build source SHA")?,
-            },
-            deployment_fingerprint: parse(
-                snapshot.deployment_fingerprint(),
-                "deployment fingerprint",
-            )?,
+            build_metadata: snapshot
+                .build_metadata()
+                .map(|metadata| {
+                    Ok::<_, anyhow::Error>(wire::RuntimeBuildMetadata {
+                        image_digest: parse(metadata.image_digest(), "declared image digest")?,
+                        source_revision: parse(
+                            metadata.source_revision(),
+                            "build source revision",
+                        )?,
+                    })
+                })
+                .transpose()?,
             domains: snapshot.domains().iter().copied().map(domain).collect(),
             listeners: snapshot
                 .listeners()
@@ -248,7 +251,6 @@ const fn placement_readiness(
 
 #[cfg(feature = "test-support")]
 pub mod test_support {
-    use std::net::TcpListener;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::SystemTime;
@@ -403,26 +405,6 @@ pub mod test_support {
 
     pub async fn run_journey(case: JourneyCase) -> anyhow::Result<JourneyResult> {
         let plan = crate::plan::IdentityAuditPlan::bundled()?;
-        let deployment = assembly_schema::ParsedDeploymentPlan::from_json_slice(
-            plan.as_typed(),
-            include_bytes!("../../../deploy/generated/identityaudit.deployment-plan.json"),
-        )?;
-        let workload = deployment
-            .workloads()
-            .first()
-            .context("identityaudit journey deployment workload")?
-            .name();
-        let image = deployment
-            .workloads()
-            .iter()
-            .find(|candidate| candidate.name() == workload)
-            .context("identityaudit journey deployment workload")?
-            .image();
-        let digest = image
-            .rsplit_once('@')
-            .context("identityaudit journey immutable image")?
-            .1;
-        let build = model::BuildIdentity::parse(&"a".repeat(40), digest)?;
         let (probe_name, reporter) = journey_probe_chain(case)?;
         let bindings = crate::providers_gen::PROVIDER_CATALOG
             .iter()
@@ -430,44 +412,8 @@ pub mod test_support {
                 model::ProviderProbeBinding::new(provider.role().as_str(), vec![probe_name.clone()])
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let listener_port = |kind: assembly_schema::AssemblyListenerKind| {
-            let name = match kind {
-                assembly_schema::AssemblyListenerKind::Primary => "http",
-                assembly_schema::AssemblyListenerKind::Admin => "admin",
-                assembly_schema::AssemblyListenerKind::Internal => "internal",
-                assembly_schema::AssemblyListenerKind::Health => "health",
-            };
-            deployment
-                .services()
-                .iter()
-                .filter(|service| service.workload() == workload)
-                .flat_map(|service| service.ports())
-                .find(|port| port.name() == name)
-                .map(|port| port.port())
-                .with_context(|| format!("identityaudit journey {name} deployment port"))
-        };
-        let mut sockets = Vec::<(assembly_schema::AssemblyListenerKind, TcpListener)>::new();
-        let observations = plan
-            .as_typed()
-            .listener_plans()
-            .iter()
-            .map(|listener| {
-                let socket =
-                    std::net::TcpListener::bind(("127.0.0.1", listener_port(listener.kind())?))?;
-                let address = socket.local_addr()?;
-                sockets.push((listener.kind(), socket));
-                Ok(model::BoundListenerObservation::from_bound(
-                    listener.id(),
-                    listener.kind(),
-                    listener.auth(),
-                    model::InventoryEndpointScheme::Http,
-                    address,
-                ))
-            })
-            .collect::<anyhow::Result<Vec<_>>>()?;
-        let seed = plan.inventory_seed_fixture(build, bindings)?;
-        let (publisher, reader) = model::inventory_channel(seed, reporter);
-        publisher.publish(observations)?;
+        let seed = plan.inventory_seed_fixture(bindings)?;
+        let (publisher, reader) = model::inventory_channel(seed, Arc::clone(&reporter));
         let mut registry = bootstrap::Registry::new();
         crate::modules_gen::register_framework_routes(
             &IdentityAuditFrameworkRoutes::new(reader),
@@ -504,33 +450,18 @@ pub mod test_support {
             diport::DynPdp::new_arc(FixturePdp(case)),
             grants,
         );
-        let router = crate::auth_bridge::apply(routes, verifier).into_router_for_test();
-        let admin_index = sockets
-            .iter()
-            .position(|(kind, _)| *kind == assembly_schema::AssemblyListenerKind::Admin)
-            .context("identityaudit journey Admin socket")?;
-        let (_, admin) = sockets.swap_remove(admin_index);
-        let serving_address = admin.local_addr()?;
-        admin.set_nonblocking(true)?;
-        let listener = tokio::net::TcpListener::from_std(admin)?;
-        let server = tokio::spawn(async move { axum::serve(listener, router).await });
-        let response = reqwest::Client::new()
-            .get(format!(
-                "http://{serving_address}{}",
-                generated::http::runtime_v1::inventory::PATH
-            ))
-            .bearer_auth("e30.eyJzdWIiOiJpZGVudGl0eWF1ZGl0LWZpeHR1cmUifQ.c2ln")
-            .send()
-            .await?;
-        let status = response.status();
-        let body = response.bytes().await?.to_vec();
-        server.abort();
-        let _ = server.await;
-        drop(sockets);
+        let routes = crate::auth_bridge::apply(routes, verifier);
+        let response = crate::listeners::serve_inventory_journey(
+            routes,
+            reporter,
+            publisher,
+            "e30.eyJzdWIiOiJpZGVudGl0eWF1ZGl0LWZpeHR1cmUifQ.c2ln".to_owned(),
+        )
+        .await?;
         Ok(JourneyResult {
-            status,
-            body,
-            serving_address,
+            status: response.status,
+            body: response.body,
+            serving_address: response.serving_address,
             audit_calls: audit_calls.load(Ordering::Acquire),
         })
     }
@@ -541,7 +472,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use runtimeexec::inventory::{BoundListenerObservation, BuildIdentity, ProviderProbeBinding};
+    use runtimeexec::inventory::{BoundListenerObservation, ProviderProbeBinding};
 
     fn inventory_channel_fixture() -> anyhow::Result<(
         runtimeexec::inventory::InventoryPublisher,
@@ -552,13 +483,7 @@ mod tests {
             .iter()
             .map(|entry| ProviderProbeBinding::new(entry.role().as_str(), Vec::new()))
             .collect::<Result<Vec<_>, _>>()?;
-        let seed = plan.inventory_seed_fixture(
-            BuildIdentity::parse(
-                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                "sha256:0dc0251564b714e89c8d098560ddfe69eb08c87fb85ac87323c54a7650126592",
-            )?,
-            provider_bindings,
-        )?;
+        let seed = plan.inventory_seed_fixture(provider_bindings)?;
         let reporter = Arc::new(bootstrap::Registry::new().take_health_reporter());
         Ok(runtimeexec::inventory::inventory_channel(seed, reporter))
     }

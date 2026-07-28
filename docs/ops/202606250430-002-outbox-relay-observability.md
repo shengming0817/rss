@@ -178,7 +178,7 @@ timeout/lost-lease/storage 告警由持续速率测试锁定。
   fail-open**：broker 失败走 `Requeue` 退避 / 预算耗尽 `Reject` 进 DLX，无 drop 路径，故不设 `fail_open_drop` metric。
 - **relay/sampler worker unhealthy 无专属 Prometheus 告警**：worker 健康经 `WorkerHealth` → readyz probe
   （`outbox_relay`/`outbox_sweeper`/`outbox_sampler`，未导出为 metric）暴露，权威 liveness 信号是 readyz endpoint 的
-  外部监控（k8s liveness/readiness）。scoped backlog gauges 可在进程内保留零值 series，但空部署 / 新进程无已观测
+  外部 liveness/readiness 监控。scoped backlog gauges 可在进程内保留零值 series，但空部署 / 新进程无已观测
   scope 时仍可完全缺失，不能作为采样器 heartbeat；Prometheus 侧仅保留 `OutboxBacklogOldestAgeHigh`（积压增长）等业务信号。如需 worker health
   gauge/heartbeat，属 #1208 接线时决策。
 - **acceptance 边界**：#1209 验收标准 = 仪表 seam + 护栏 + 生产实现 + 单元测试（含 facade

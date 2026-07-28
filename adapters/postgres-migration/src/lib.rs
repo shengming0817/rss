@@ -133,7 +133,7 @@ fn embedded_migrator() -> sqlx::migrate::Migrator {
     sqlx::migrate!("../postgres/migrations")
 }
 
-/// Domain-separated identity shared with DeploymentPlan generation and migration Job names.
+/// Domain-separated identity for the embedded application migration inventory.
 pub fn embedded_migration_head_fingerprint() -> String {
     postgres_migration_inventory::migration_head_fingerprint()
 }
@@ -255,21 +255,6 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
-
-    #[test]
-    fn embedded_head_matches_every_committed_forward_deployment_plan()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let expected = embedded_migration_head_fingerprint();
-        for profile in ["identityaudit", "runtime", "settingsonly"] {
-            let path = root
-                .join("deploy/generated")
-                .join(format!("{profile}.deployment-plan.json"));
-            let plan: serde_json::Value = serde_json::from_slice(&std::fs::read(path)?)?;
-            assert_eq!(plan["migrationHeadFingerprint"], expected, "{profile}");
-        }
-        Ok(())
-    }
 
     #[test]
     fn sqlx_executor_matches_the_single_typed_inventory() {

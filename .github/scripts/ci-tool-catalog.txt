@@ -7,5 +7,3 @@ dylint-link|6.0.1|binstall|bin/dylint-link|receipt
 cargo-public-api|0.52.0|binstall|bin/cargo-public-api|direct
 sccache|0.15.0|install-action|.install-action/bin/sccache|sccache
 promtool|3.5.3|docker|prom/prometheus@sha256:ddc2493835a1509976d5e4e0c94199c4f843ce1f42dd6bcfc8231ba734a93ff7|promtool
-helm|4.2.0|download|.download/bin/helm|helm
-kubeconform|0.7.0|download|.download/bin/kubeconform|kubeconform

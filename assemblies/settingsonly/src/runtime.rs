@@ -12,14 +12,11 @@ use diport::{DynManagedResource, ManagedResource, ShutdownError};
 
 use crate::listeners;
 
-const TOTAL_DRAIN_BUDGET: Duration =
-    Duration::from_secs(crate::deployment_facts::TOTAL_DRAIN_SECONDS);
-const DEPLOYMENT_GRACE_PERIOD: Duration = Duration::from_secs(30);
-const EXIT_BUFFER: Duration = Duration::from_secs(5);
+const TOTAL_DRAIN_BUDGET: Duration = Duration::from_secs(20);
 const READINESS_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 pub(crate) fn total_drain_budget() -> anyhow::Result<runtimeexec::TotalDrainBudget> {
-    runtimeexec::TotalDrainBudget::new(TOTAL_DRAIN_BUDGET, DEPLOYMENT_GRACE_PERIOD, EXIT_BUFFER)
+    runtimeexec::TotalDrainBudget::new(TOTAL_DRAIN_BUDGET)
 }
 
 pub(crate) type ReadyFuture = Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send>>;
@@ -48,7 +45,7 @@ impl runtimeexec::StartupAdapter for ProductionStartup {
         runtimeexec::PreparedLaunch<Self::Adapter, Self::ProbeReceipt, Self::ReadyHook>,
     > {
         let compiled_plan = crate::plan::SettingsOnlyPlan::bundled()?;
-        let (config, secrets, build_identity, frontend) = self.captured.into_runtime_inputs();
+        let (config, secrets, build_metadata, frontend) = self.captured.into_runtime_inputs();
         let completed = crate::providers::build(
             compiled_plan.provider_build()?,
             config,
@@ -58,8 +55,11 @@ impl runtimeexec::StartupAdapter for ProductionStartup {
         .await?;
         let (providers, listeners_config, support_probe, provider_bindings) =
             completed.into_parts();
-        let inventory_seed =
-            compiled_plan.into_inventory_seed(build_identity, provider_bindings)?;
+        let inventory_seed = compiled_plan.into_inventory_seed(provider_bindings)?;
+        let inventory_seed = match build_metadata {
+            Some(metadata) => inventory_seed.with_build_metadata(metadata),
+            None => inventory_seed,
+        };
         let (support_name, support_probe) = support_probe.into_parts();
         transaction
             .provider_output_mut()

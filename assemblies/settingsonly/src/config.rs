@@ -12,6 +12,8 @@ use serde::Deserialize;
 use zeroize::Zeroizing;
 
 const SERVING_SECRET_BUNDLE_PATH: &str = "/var/run/rss/secrets/serving-secret-bundle";
+const BUILD_SOURCE_REVISION_ENV: &str = "RSS_BUILD_SOURCE_REVISION";
+const DECLARED_IMAGE_DIGEST_ENV: &str = "RSS_DECLARED_IMAGE_DIGEST";
 #[cfg(test)]
 use runtimeexec::config::{
     ADMIN_PORT_ENV, HEALTH_PORT_ENV, MTLS_ALLOW_SET_ENV, POD_IP_ENV, PRIMARY_PORT_ENV,
@@ -24,8 +26,6 @@ const PG_WRITER_PASSWORD_ENV: &str = "RSS_SETTINGSONLY_PG_WRITER_PASSWORD";
 const PG_READER_PASSWORD_ENV: &str = "RSS_SETTINGSONLY_PG_READER_PASSWORD";
 #[cfg(test)]
 const VAULT_TOKEN_ENV: &str = "RSS_SETTINGSONLY_VAULT_TOKEN";
-const BUILD_SOURCE_SHA_ENV: &str = "RSS_BUILD_SOURCE_SHA";
-const BUILD_IMAGE_DIGEST_ENV: &str = "RSS_BUILD_IMAGE_DIGEST";
 
 /// Capture, parse, validate, and resolve one immutable settings-only configuration generation.
 ///
@@ -52,34 +52,42 @@ fn capture_from(
         .parse()
         .map_err(|_| ConfigError::InvalidSecretBundle)?;
     let secrets = bundle.try_into()?;
-    let source_sha = resolve_public_environment(source, BUILD_SOURCE_SHA_ENV)?;
-    let image_digest = resolve_public_environment(source, BUILD_IMAGE_DIGEST_ENV)?;
-    let build_identity = runtimeexec::inventory::BuildIdentity::parse(&source_sha, &image_digest)
-        .map_err(|_| ConfigError::InvalidValue("buildIdentity"))?;
+    let build_metadata = capture_build_metadata(source)?;
     let frontend =
         runtimeexec::config::capture_serving_frontend(|name| source.read_environment(name))
             .map_err(frontend_error)?;
     Ok(CapturedConfig {
         config,
         secrets,
-        build_identity,
+        build_metadata,
         frontend,
     })
 }
 
-fn resolve_public_environment(
+fn capture_build_metadata(
     source: &mut impl ConfigSource,
-    name: &'static str,
-) -> Result<String, ConfigError> {
-    let value = source
-        .read_environment(name)
-        .ok_or(ConfigError::MissingEnvironment(name))?
-        .into_string()
-        .map_err(|_| ConfigError::NonUnicodeEnvironment(name))?;
-    if value.is_empty() {
-        return Err(ConfigError::EmptyEnvironment(name));
-    }
-    Ok(value)
+) -> Result<Option<runtimeexec::inventory::BuildMetadata>, ConfigError> {
+    let source_revision = source
+        .read_environment(BUILD_SOURCE_REVISION_ENV)
+        .map(|value| {
+            value
+                .into_string()
+                .map_err(|_| ConfigError::NonUnicodeEnvironment(BUILD_SOURCE_REVISION_ENV))
+        })
+        .transpose()?;
+    let image_digest = source
+        .read_environment(DECLARED_IMAGE_DIGEST_ENV)
+        .map(|value| {
+            value
+                .into_string()
+                .map_err(|_| ConfigError::NonUnicodeEnvironment(DECLARED_IMAGE_DIGEST_ENV))
+        })
+        .transpose()?;
+    runtimeexec::inventory::BuildMetadata::from_optional(
+        source_revision.as_deref(),
+        image_digest.as_deref(),
+    )
+    .map_err(|_| ConfigError::InvalidValue("buildMetadata"))
 }
 
 trait ConfigSource {
@@ -244,7 +252,7 @@ impl std::error::Error for ConfigError {}
 pub(crate) struct CapturedConfig {
     config: SettingsOnlyConfig,
     secrets: ResolvedSecrets,
-    build_identity: runtimeexec::inventory::BuildIdentity,
+    build_metadata: Option<runtimeexec::inventory::BuildMetadata>,
     frontend: ServingFrontendConfig,
 }
 
@@ -254,13 +262,13 @@ impl CapturedConfig {
     ) -> (
         SettingsOnlyConfig,
         ResolvedSecrets,
-        runtimeexec::inventory::BuildIdentity,
+        Option<runtimeexec::inventory::BuildMetadata>,
         ServingFrontendConfig,
     ) {
         (
             self.config,
             self.secrets,
-            self.build_identity,
+            self.build_metadata,
             self.frontend,
         )
     }
@@ -1004,9 +1012,9 @@ kvPathPrefix = "tenants/settings"
                 .into_iter()
                 .map(|name| (name, OsString::from(SECRET_SENTINEL)))
                 .chain([
-                    (BUILD_SOURCE_SHA_ENV, OsString::from("a".repeat(40))),
+                    (BUILD_SOURCE_REVISION_ENV, OsString::from("a".repeat(40))),
                     (
-                        BUILD_IMAGE_DIGEST_ENV,
+                        DECLARED_IMAGE_DIGEST_ENV,
                         OsString::from(format!("sha256:{}", "b".repeat(64))),
                     ),
                     (POD_IP_ENV, OsString::from("127.0.0.2")),
@@ -1178,14 +1186,31 @@ kvPathPrefix = "tenants/settings"
         assert_eq!(source.environment_reads.len(), 11);
         assert!(source.environment_reads.values().all(|reads| *reads == 1));
         assert!(!format!("{captured:?}").contains(SECRET_SENTINEL));
-        let (_, secrets, build_identity, frontend) = captured.into_runtime_inputs();
-        assert_eq!(build_identity.source_sha(), "a".repeat(40));
+        let (_, secrets, build_metadata, frontend) = captured.into_runtime_inputs();
+        let build_metadata = build_metadata.expect("build metadata");
+        assert_eq!(build_metadata.source_revision(), "a".repeat(40));
+        assert_eq!(
+            build_metadata.image_digest(),
+            format!("sha256:{}", "b".repeat(64))
+        );
         assert_eq!(frontend.primary_port, 8080);
         assert!(!format!("{secrets:?}").contains(SECRET_SENTINEL));
         let (writer, reader, vault) = secrets.into_secret_material();
         assert_eq!(&**writer, SECRET_SENTINEL);
         assert_eq!(&**reader, SECRET_SENTINEL);
         assert_eq!(&**vault, SECRET_SENTINEL);
+    }
+
+    #[test]
+    fn capture_rejects_partial_build_metadata() {
+        for missing in [BUILD_SOURCE_REVISION_ENV, DECLARED_IMAGE_DIGEST_ENV] {
+            let mut source = TestSource::complete(VALID_CONFIG);
+            source.environments.remove(missing);
+            assert_eq!(
+                capture_from(Path::new("ignored"), &mut source).unwrap_err(),
+                ConfigError::InvalidValue("buildMetadata")
+            );
+        }
     }
 
     #[test]

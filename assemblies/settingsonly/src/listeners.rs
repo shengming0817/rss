@@ -439,6 +439,91 @@ impl runtimeexec::LaunchAdapter<FinalizedProbeReceipt> for LaunchAdapter {
     }
 }
 
+#[cfg(feature = "test-support")]
+pub(crate) struct InventoryJourneyHttpResult {
+    pub(crate) status: reqwest::StatusCode,
+    pub(crate) body: Vec<u8>,
+    pub(crate) serving_address: SocketAddr,
+}
+
+/// Drive an inventory request through the production listener bind, publish and activation
+/// funnel. All configured ports are zero so the published Admin endpoint can only come from the
+/// socket actually bound by [`LaunchAdapter`].
+#[cfg(feature = "test-support")]
+pub(crate) async fn serve_inventory_journey(
+    admin: httpserve::AuthenticatedRoutes,
+    reporter: Arc<bootstrap::HealthReporter>,
+    inventory_publisher: runtimeexec::inventory::InventoryPublisher,
+    bearer: String,
+) -> anyhow::Result<InventoryJourneyHttpResult> {
+    struct JourneyMetrics;
+    impl diport::MetricsExporter for JourneyMetrics {
+        fn render(&self) -> String {
+            "# inventory-journey\n".to_owned()
+        }
+    }
+    let companion = || {
+        let reporter = Arc::clone(&reporter);
+        let metrics: Arc<dyn diport::MetricsExporter> = Arc::new(JourneyMetrics);
+        httpserve::finalize_auth(
+            httpserve::health::routes(move || reporter.report(), move || metrics.render()),
+            health_auth_plan()?,
+        )
+        .map_err(anyhow::Error::from)
+    };
+    let adapter = LaunchAdapter::new(
+        FinalizedListenerSet {
+            primary: companion()?,
+            admin,
+            health: companion()?,
+        },
+        "127.0.0.1:0".parse()?,
+        "127.0.0.1:0".parse()?,
+        "127.0.0.1:0".parse()?,
+        std::time::Duration::from_secs(1),
+        inventory_publisher,
+        None,
+    )?;
+    let (completion, controlled) = runtimeexec::test_support::controlled();
+    let launch = runtimeexec::LaunchPlan::new(
+        adapter,
+        FinalizedProbeReceipt { reporter },
+        move |inventory: ListenerInventory| async move {
+            let result = async {
+                let response = reqwest::Client::new()
+                    .get(format!(
+                        "http://{}{}",
+                        inventory.admin,
+                        generated::http::runtime_v1::inventory::PATH
+                    ))
+                    .bearer_auth(bearer)
+                    .send()
+                    .await?;
+                let status = response.status();
+                let body = response.bytes().await?.to_vec();
+                Ok(InventoryJourneyHttpResult {
+                    status,
+                    body,
+                    serving_address: inventory.admin,
+                })
+            }
+            .await;
+            completion.complete(result)
+        },
+        None,
+        runtimeexec::LaunchLifecycleBatches::new(
+            runtimeexec::ProviderLifecycleBatch::from_provider_output(
+                bootstrap::DomainModuleResult::default(),
+            ),
+            runtimeexec::DomainLifecycleBatch::from_domain_output(
+                bootstrap::DomainModuleResult::default(),
+            ),
+        ),
+        crate::runtime::total_drain_budget()?,
+    );
+    controlled.run(launch).await
+}
+
 fn register(listener: PreparedListener, registrar: &mut runtimeexec::LaunchRegistrar<'_>) {
     registrar.register_listener_with_token(move |token| {
         DynManagedResource::new_box(listener.bound.serve(listener.service, token))
@@ -633,14 +718,6 @@ mod tests {
 
     fn inventory_publisher() -> anyhow::Result<runtimeexec::inventory::InventoryPublisher> {
         let plan = crate::plan::SettingsOnlyPlan::bundled()?;
-        let deployment: serde_json::Value = serde_json::from_slice(include_bytes!(
-            "../../../deploy/generated/settingsonly.deployment-plan.json"
-        ))?;
-        let image = deployment["workloads"][0]["image"]
-            .as_str()
-            .context("deployment image")?;
-        let digest = image.rsplit_once('@').context("immutable image")?.1;
-        let build = runtimeexec::inventory::BuildIdentity::parse(&"a".repeat(40), digest)?;
         let bindings = crate::providers_gen::PROVIDER_CATALOG
             .iter()
             .map(|provider| {
@@ -650,7 +727,7 @@ mod tests {
                 )
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let seed = plan.into_inventory_seed_fixture(build, bindings)?;
+        let seed = plan.into_inventory_seed_fixture(bindings)?;
         let reporter = Arc::new(bootstrap::Registry::new().take_health_reporter());
         Ok(runtimeexec::inventory::inventory_channel(seed, reporter).0)
     }

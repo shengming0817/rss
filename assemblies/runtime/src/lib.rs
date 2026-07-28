@@ -189,7 +189,7 @@ fn prepare_runtime_kernel<Local>(
 /// Only this type can enter [`run`] or [`shutdown_runtime`].
 pub fn prepare_runtime() -> anyhow::Result<ServingRuntimeInputs> {
     let (prepared, password_blocklist) = prepare_runtime_kernel(prepare_serving_local)?;
-    ServingRuntimeInputs::from_prepared(prepared, password_blocklist)
+    Ok(ServingRuntimeInputs::new(prepared, password_blocklist))
 }
 
 /// Flush the trace exporter when a prepared runtime exits before serving launch.

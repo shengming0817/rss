@@ -13,12 +13,11 @@ fn valid_response() -> serde_json::Value {
     serde_json::json!({
         "data": {
             "assemblyFingerprint": fingerprint,
-            "runtimePlanFingerprint": format!("sha256:{}", "b".repeat(64)),
-            "deploymentFingerprint": format!("sha256:{}", "c".repeat(64)),
-            "buildIdentity": {
-                "sourceSha": "d".repeat(40),
+            "buildMetadata": {
+                "sourceRevision": "d".repeat(40),
                 "imageDigest": format!("sha256:{}", "e".repeat(64))
             },
+            "runtimePlanFingerprint": format!("sha256:{}", "b".repeat(64)),
             "schemaVersion": 1,
             "domains": ["identity"],
             "listeners": [],
@@ -40,6 +39,15 @@ fn runtime_inventory_wire_is_closed_and_camel_case() -> Result<(), Box<dyn std::
     let encoded = serde_json::to_value(response)?;
     assert!(encoded["data"].get("providerPosture").is_some());
     assert!(encoded["data"].get("provider_posture").is_none());
+    assert!(encoded["data"].get("deploymentFingerprint").is_none());
+    assert_eq!(
+        encoded["data"]["buildMetadata"]["sourceRevision"],
+        "d".repeat(40)
+    );
+    assert_eq!(
+        encoded["data"]["buildMetadata"]["imageDigest"],
+        format!("sha256:{}", "e".repeat(64))
+    );
 
     let mut unknown = encoded;
     unknown["data"]["secretSentinel"] = serde_json::json!("must-not-pass");
@@ -48,6 +56,11 @@ fn runtime_inventory_wire_is_closed_and_camel_case() -> Result<(), Box<dyn std::
         serde_json::from_value::<RuntimeInventoryRequest>(serde_json::json!({"extra": true}))
             .is_err()
     );
+
+    let mut legacy = valid_response();
+    legacy["data"]["deploymentFingerprint"] =
+        serde_json::json!(format!("sha256:{}", "c".repeat(64)));
+    assert!(serde_json::from_value::<RuntimeInventoryResponse>(legacy).is_err());
     Ok(())
 }
 
@@ -66,6 +79,14 @@ fn runtime_inventory_instances_obey_response_schema() -> Result<(), Box<dyn std:
     assert!(
         validator.validate(&empty_domains).is_err(),
         "domains minItems must be enforced against instances"
+    );
+
+    let mut invalid_build_metadata = valid.clone();
+    invalid_build_metadata["data"]["buildMetadata"]["sourceRevision"] =
+        serde_json::json!("A".repeat(40));
+    assert!(
+        validator.validate(&invalid_build_metadata).is_err(),
+        "build metadata source revision must be a lowercase Git object id"
     );
 
     let mut missing_readiness = valid;

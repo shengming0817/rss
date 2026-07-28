@@ -21,6 +21,8 @@ use secure::SecretText;
 use serde::Deserialize;
 
 const SERVING_SECRET_BUNDLE_PATH: &str = "/var/run/rss/secrets/serving-secret-bundle";
+pub(crate) const BUILD_SOURCE_REVISION_ENV: &str = "RSS_BUILD_SOURCE_REVISION";
+pub(crate) const DECLARED_IMAGE_DIGEST_ENV: &str = "RSS_DECLARED_IMAGE_DIGEST";
 pub(crate) const BUNDLE_PG_PASSWORD: &str = "RSS_INTERNAL_BUNDLE_PG_PASSWORD";
 pub(crate) const BUNDLE_PG_READ_PASSWORD: &str = "RSS_INTERNAL_BUNDLE_PG_READ_PASSWORD";
 pub(crate) const BUNDLE_PG_AUDIT_ADMIN_PASSWORD: &str =
@@ -83,14 +85,14 @@ const FIXED_SERVING_KEYS: &[&str] = &[
     "RSS_AMQP_ALLOW_PLAINTEXT",
     "RSS_AMQP_URL",
     "RSS_AUDIT_CHAIN_KEY_B64URL",
-    "RSS_BUILD_IMAGE_DIGEST",
-    "RSS_BUILD_SOURCE_SHA",
+    BUILD_SOURCE_REVISION_ENV,
     "RSS_COMMAND_IDEMPOTENCY_KEYS_JSON",
     "RSS_DLX_ARCHIVE_KEY_NAME",
     "RSS_DLX_ARCHIVE_S3_BUCKET",
     "RSS_DLX_ARCHIVE_VAULT_TOKEN",
     "RSS_DLX_HOT_VAULT_TOKEN",
     "RSS_DLX_PAYLOAD_KEY_NAME",
+    DECLARED_IMAGE_DIGEST_ENV,
     "RSS_DOMAIN_TRANSPORT_MTLS_LOCAL_SPIFFE_ID",
     DOMAIN_TRANSPORT_SHARED_URL_ENV,
     "RSS_HEALTH_LISTEN_ADDR",
@@ -472,6 +474,16 @@ impl<'a> SnapshotConfig<'a> {
             .get(name)
             .is_some_and(|value| !matches!(value, CapturedConfigValue::Missing))
     }
+}
+
+pub(crate) fn build_metadata(
+    config: SnapshotConfig<'_>,
+) -> anyhow::Result<Option<runtimeexec::inventory::BuildMetadata>> {
+    runtimeexec::inventory::BuildMetadata::from_optional(
+        config.value(BUILD_SOURCE_REVISION_ENV),
+        config.value(DECLARED_IMAGE_DIGEST_ENV),
+    )
+    .map_err(anyhow::Error::from)
 }
 
 const PRIMARY_TOKEN_PROFILE_ENV: &str = "RSS_PRIMARY_TOKEN_PROFILE";
@@ -1571,6 +1583,48 @@ pub(crate) fn domain_transport_mtls_allow_set_env(domain: &str) -> String {
         domain.to_ascii_uppercase(),
         DOMAIN_TRANSPORT_MTLS_SPIFFE_ALLOW_SET_ENV_SUFFIX
     )
+}
+
+#[cfg(test)]
+mod build_metadata_tests {
+    use super::*;
+
+    #[test]
+    fn build_metadata_capture_is_optional_but_atomic() {
+        let empty = test_snapshot(&[]).expect("empty snapshot");
+        assert!(
+            build_metadata(empty.view())
+                .expect("optional metadata")
+                .is_none()
+        );
+
+        let complete = test_snapshot(&[
+            (
+                BUILD_SOURCE_REVISION_ENV,
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ),
+            (
+                DECLARED_IMAGE_DIGEST_ENV,
+                "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            ),
+        ])
+        .expect("complete snapshot");
+        let metadata = build_metadata(complete.view())
+            .expect("valid metadata")
+            .expect("present metadata");
+        assert_eq!(metadata.source_revision(), "a".repeat(40));
+
+        for (key, value) in [
+            (BUILD_SOURCE_REVISION_ENV, "a".repeat(40)),
+            (
+                DECLARED_IMAGE_DIGEST_ENV,
+                format!("sha256:{}", "b".repeat(64)),
+            ),
+        ] {
+            let partial = test_snapshot(&[(key, value.as_str())]).expect("partial snapshot");
+            assert!(build_metadata(partial.view()).is_err());
+        }
+    }
 }
 
 #[cfg(test)]

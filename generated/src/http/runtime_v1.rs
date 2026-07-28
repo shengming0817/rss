@@ -116,25 +116,26 @@ pub mod inventory {
             value.parse()
         }
     }
-    ///`RuntimeBuildIdentity`
+    ///Launch-supplied build metadata reported by the process. This is not an in-process OCI or SLSA verification receipt.
     ///
     /// <details><summary>JSON schema</summary>
     ///
     /// ```json
     ///{
-    ///  "title": "RuntimeBuildIdentity",
+    ///  "title": "RuntimeBuildMetadata",
+    ///  "description": "Launch-supplied build metadata reported by the process. This is not an in-process OCI or SLSA verification receipt.",
     ///  "type": "object",
     ///  "required": [
     ///    "imageDigest",
-    ///    "sourceSha"
+    ///    "sourceRevision"
     ///  ],
     ///  "properties": {
     ///    "imageDigest": {
     ///      "$ref": "#/definitions/Sha256Fingerprint"
     ///    },
-    ///    "sourceSha": {
+    ///    "sourceRevision": {
     ///      "type": "string",
-    ///      "pattern": "^[0-9a-f]{40}$"
+    ///      "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$"
     ///    }
     ///  },
     ///  "additionalProperties": false
@@ -143,57 +144,61 @@ pub mod inventory {
     /// </details>
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
     #[serde(deny_unknown_fields)]
-    pub struct RuntimeBuildIdentity {
+    pub struct RuntimeBuildMetadata {
         #[serde(rename = "imageDigest")]
         #[redact(sensitivity = public)]
         pub image_digest: Sha256Fingerprint,
-        #[serde(rename = "sourceSha")]
+        #[serde(rename = "sourceRevision")]
         #[redact(sensitivity = public)]
-        pub source_sha: RuntimeBuildIdentitySourceSha,
+        pub source_revision: RuntimeBuildMetadataSourceRevision,
     }
-    ///`RuntimeBuildIdentitySourceSha`
+    ///`RuntimeBuildMetadataSourceRevision`
     ///
     /// <details><summary>JSON schema</summary>
     ///
     /// ```json
     ///{
     ///  "type": "string",
-    ///  "pattern": "^[0-9a-f]{40}$"
+    ///  "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$"
     ///}
     /// ```
     /// </details>
     #[derive(::serde::Serialize, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, ::secure::Redact)]
     #[serde(transparent)]
-    pub struct RuntimeBuildIdentitySourceSha(#[redact(sensitivity = public)] ::std::string::String);
-    impl ::std::ops::Deref for RuntimeBuildIdentitySourceSha {
+    pub struct RuntimeBuildMetadataSourceRevision(
+        #[redact(sensitivity = public)] ::std::string::String,
+    );
+    impl ::std::ops::Deref for RuntimeBuildMetadataSourceRevision {
         type Target = ::std::string::String;
         fn deref(&self) -> &::std::string::String {
             &self.0
         }
     }
-    impl ::std::convert::From<RuntimeBuildIdentitySourceSha> for ::std::string::String {
-        fn from(value: RuntimeBuildIdentitySourceSha) -> Self {
+    impl ::std::convert::From<RuntimeBuildMetadataSourceRevision> for ::std::string::String {
+        fn from(value: RuntimeBuildMetadataSourceRevision) -> Self {
             value.0
         }
     }
-    impl ::std::str::FromStr for RuntimeBuildIdentitySourceSha {
+    impl ::std::str::FromStr for RuntimeBuildMetadataSourceRevision {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             static PATTERN: ::std::sync::LazyLock<::regress::Regex> =
-                ::std::sync::LazyLock::new(|| ::regress::Regex::new("^[0-9a-f]{40}$").unwrap());
+                ::std::sync::LazyLock::new(|| {
+                    ::regress::Regex::new("^([0-9a-f]{40}|[0-9a-f]{64})$").unwrap()
+                });
             if PATTERN.find(value).is_none() {
-                return Err("doesn't match pattern \"^[0-9a-f]{40}$\"".into());
+                return Err("doesn't match pattern \"^([0-9a-f]{40}|[0-9a-f]{64})$\"".into());
             }
             Ok(Self(value.to_string()))
         }
     }
-    impl ::std::convert::TryFrom<&str> for RuntimeBuildIdentitySourceSha {
+    impl ::std::convert::TryFrom<&str> for RuntimeBuildMetadataSourceRevision {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<&::std::string::String> for RuntimeBuildIdentitySourceSha {
+    impl ::std::convert::TryFrom<&::std::string::String> for RuntimeBuildMetadataSourceRevision {
         type Error = self::error::ConversionError;
         fn try_from(
             value: &::std::string::String,
@@ -201,7 +206,7 @@ pub mod inventory {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<::std::string::String> for RuntimeBuildIdentitySourceSha {
+    impl ::std::convert::TryFrom<::std::string::String> for RuntimeBuildMetadataSourceRevision {
         type Error = self::error::ConversionError;
         fn try_from(
             value: ::std::string::String,
@@ -209,7 +214,7 @@ pub mod inventory {
             value.parse()
         }
     }
-    impl<'de> ::serde::Deserialize<'de> for RuntimeBuildIdentitySourceSha {
+    impl<'de> ::serde::Deserialize<'de> for RuntimeBuildMetadataSourceRevision {
         fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
         where
             D: ::serde::Deserializer<'de>,
@@ -318,8 +323,6 @@ pub mod inventory {
     ///  "type": "object",
     ///  "required": [
     ///    "assemblyFingerprint",
-    ///    "buildIdentity",
-    ///    "deploymentFingerprint",
     ///    "domains",
     ///    "listeners",
     ///    "placements",
@@ -331,11 +334,8 @@ pub mod inventory {
     ///    "assemblyFingerprint": {
     ///      "$ref": "#/definitions/Sha256Fingerprint"
     ///    },
-    ///    "buildIdentity": {
-    ///      "$ref": "#/definitions/RuntimeBuildIdentity"
-    ///    },
-    ///    "deploymentFingerprint": {
-    ///      "$ref": "#/definitions/Sha256Fingerprint"
+    ///    "buildMetadata": {
+    ///      "$ref": "#/definitions/RuntimeBuildMetadata"
     ///    },
     ///    "domains": {
     ///      "description": "Assembly domains in declaration order.",
@@ -388,12 +388,13 @@ pub mod inventory {
         #[serde(rename = "assemblyFingerprint")]
         #[redact(sensitivity = public)]
         pub assembly_fingerprint: Sha256Fingerprint,
-        #[serde(rename = "buildIdentity")]
+        #[serde(
+            rename = "buildMetadata",
+            default,
+            skip_serializing_if = "::std::option::Option::is_none"
+        )]
         #[redact(sensitivity = public)]
-        pub build_identity: RuntimeBuildIdentity,
-        #[serde(rename = "deploymentFingerprint")]
-        #[redact(sensitivity = public)]
-        pub deployment_fingerprint: Sha256Fingerprint,
+        pub build_metadata: ::std::option::Option<RuntimeBuildMetadata>,
         ///Assembly domains in declaration order.
         #[redact(sensitivity = public)]
         pub domains: Vec<RuntimeDomain>,
@@ -452,8 +453,6 @@ pub mod inventory {
     ///      "type": "object",
     ///      "required": [
     ///        "assemblyFingerprint",
-    ///        "buildIdentity",
-    ///        "deploymentFingerprint",
     ///        "domains",
     ///        "listeners",
     ///        "placements",
@@ -465,11 +464,8 @@ pub mod inventory {
     ///        "assemblyFingerprint": {
     ///          "$ref": "#/definitions/Sha256Fingerprint"
     ///        },
-    ///        "buildIdentity": {
-    ///          "$ref": "#/definitions/RuntimeBuildIdentity"
-    ///        },
-    ///        "deploymentFingerprint": {
-    ///          "$ref": "#/definitions/Sha256Fingerprint"
+    ///        "buildMetadata": {
+    ///          "$ref": "#/definitions/RuntimeBuildMetadata"
     ///        },
     ///        "domains": {
     ///          "description": "Assembly domains in declaration order.",
@@ -1539,7 +1535,7 @@ pub mod inventory {
         "runtime",
         "runtime.inventory",
         "v1",
-        "sha256:9723e958e0322250990b9d1eb3c8a7358894581ff91e8cb8f74ad8bc12c054e6",
+        "sha256:eae1ebf118cb3cabe0bb92931b0b3542ae863d3a24f16d7d677aa11ddf4260c5",
     );
 
     /// 业务绝对 HTTP path（来自 `contract.toml` `path`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。

@@ -6,17 +6,13 @@
 //!   `cargo xtask contract validate`     契约元数据校验（多规则，编号见 `contract::validate` 的 `Rule`，CI 门）
 //!   `cargo xtask assembly validate`     assembly-level DI provider 声明校验（RevocationStore 持久 provider 门）
 //!   `cargo xtask assembly artifacts check`
-//!                                      assembly lifecycle 与部署 artifact exact closure 门
+//!                                      assembly lifecycle 与应用 artifact exact closure 门
 //!   `cargo xtask assembly generate-modules [--check]`
 //!                                      assembly.toml domains → committed modules_gen.rs（--check 为漂移门）
 //!   `cargo xtask assembly generate-providers [--check]`
 //!                                      assembly.toml providers → committed typed provider catalog
 //!   `cargo xtask assembly lock generate|check`
 //!                                      全仓 v1 assembly.lock.json 原子生成 / raw-byte 漂移门
-//!   `cargo xtask deployment plan render|check`
-//!                                      RuntimePlan-bound DeploymentPlan exact-set 生成 / 漂移门
-//!   `cargo xtask deployment policy check`
-//!                                      two-phase manifest policy + strict kubeconform gate
 //!   `cargo xtask graph assembly [--assembly <name>] [--format mermaid|json] [--check]`
 //!                                      assembly 静态声明图；runtime 双格式 committed，--check 守漂移
 //!   `cargo xtask archrules list|verify|matrix [--write|--check]`
@@ -46,8 +42,6 @@
 //!   `cargo xtask runtime-root guard`    runtime composition-root 单调职责 ratchet（RUNTIME-ROOT-RATCHET-01）
 //!   `cargo xtask runtime-deps guard`    SharedRuntimeDeps infra-only 字段类型守卫（WIRING-DEPS-INFRA-ONLY-01）
 //!   `cargo xtask runtime-env guard`     runtime ambient environment single-funnel guard（RUNTIME-ENV-FUNNEL-01）
-//!   `cargo xtask runtime-deployment-spec [--selftest]`
-//!                                      #1779 Runtime Deployment SpecKit v2 schema/cases/fingerprint 机器门
 //!   `cargo xtask migrations`            migration 文件序号唯一性 + 连续性守卫（INVARIANT MIGRATION-SERIAL-UNIQUE-01，CI 门）
 //!   `cargo xtask inbox-cutover-guard`    inbox receipt cutover 旧 token 回流守卫（CI 门）
 //!   `cargo xtask dlx-lifecycle-funnel`   DLX verified WORM archive-before-purge 单漏斗守卫（CI 门）
@@ -104,8 +98,6 @@ mod contract;
 mod contract_binding_guard;
 mod coverage;
 mod defergate;
-mod deployment_plan;
-mod deployment_policy;
 mod diagnostic;
 mod diffcov;
 mod dlx_lifecycle_funnel;
@@ -136,7 +128,6 @@ mod publicapi;
 mod reconcile_outbox_command_guard;
 mod repo_scope_guard;
 mod runtime_baseline;
-mod runtime_deployment_spec;
 mod runtime_deps_guard;
 mod runtime_env_guard;
 mod runtime_root_guard;
@@ -176,15 +167,12 @@ enum Command {
         check: bool,
     },
     AssemblyLock(assembly_lock::AssemblyLockAction),
-    DeploymentPlan(deployment_plan::Action),
-    DeploymentPolicyCheck,
     GraphAssembly(graph::Options),
     ArchRulesList,
     ArchRulesVerify,
     ArchRulesMatrix(archrules::MatrixAction),
     RuntimeBaselineList,
     RuntimeBaselineVerify,
-    RuntimeDeploymentSpec(runtime_deployment_spec::Options),
     RuntimeRootGuard,
     RuntimeDepsGuard,
     RuntimeEnvGuard,
@@ -287,26 +275,11 @@ fn parse_command(args: &[String]) -> Result<Command> {
         ["cdc-config", rest @ ..] => parse_cdc_config(rest),
         ["archrules", rest @ ..] => parse_archrules(rest),
         ["runtime-baseline", rest @ ..] => parse_runtime_baseline(rest),
-        ["runtime-deployment-spec", rest @ ..] => {
-            runtime_deployment_spec::parse_options(rest).map(Command::RuntimeDeploymentSpec)
-        }
         ["runtime-root", rest @ ..] => parse_runtime_root(rest),
         ["runtime-deps", rest @ ..] => parse_runtime_deps(rest),
         ["runtime-env", rest @ ..] => parse_runtime_env(rest),
         ["contract", rest @ ..] => parse_contract(rest),
         ["assembly", rest @ ..] => parse_assembly(rest),
-        ["deployment", "plan", "render"] => {
-            Ok(Command::DeploymentPlan(deployment_plan::Action::Render))
-        }
-        ["deployment", "plan", "check"] => {
-            Ok(Command::DeploymentPlan(deployment_plan::Action::Check))
-        }
-        ["deployment", "policy", "check"] => Ok(Command::DeploymentPolicyCheck),
-        ["deployment", ..] => {
-            bail!(
-                "invalid deployment command; use `cargo xtask deployment plan render|check` or `cargo xtask deployment policy check`"
-            )
-        }
         ["graph", rest @ ..] => graph::parse(rest).map(Command::GraphAssembly),
         ["layer-deps"] => Ok(Command::LayerDeps),
         ["wsdeps-drift"] => Ok(Command::WsDepsDrift),
@@ -729,15 +702,12 @@ fn dispatch(args: &[String]) -> Result<()> {
         Command::AssemblyGenerateModules { check } => assembly_codegen::run(check),
         Command::AssemblyGenerateProviders { check } => assembly_codegen::run_providers(check),
         Command::AssemblyLock(action) => assembly_lock::run(action),
-        Command::DeploymentPlan(action) => deployment_plan::run(action),
-        Command::DeploymentPolicyCheck => deployment_policy::run(),
         Command::GraphAssembly(options) => graph::run(&options),
         Command::ArchRulesList => archrules::list(),
         Command::ArchRulesVerify => diagnostic::run_check(&archrules::ArchRules),
         Command::ArchRulesMatrix(action) => archrules::matrix(action),
         Command::RuntimeBaselineList => runtime_baseline::list(),
         Command::RuntimeBaselineVerify => diagnostic::run_check(&runtime_baseline::RuntimeBaseline),
-        Command::RuntimeDeploymentSpec(options) => runtime_deployment_spec::run(&options),
         Command::RuntimeRootGuard => diagnostic::run_check(&runtime_root_guard::RuntimeRootGuard),
         Command::RuntimeDepsGuard => diagnostic::run_check(&runtime_deps_guard::RuntimeDepsGuard),
         Command::RuntimeEnvGuard => diagnostic::run_check(&runtime_env_guard::RuntimeEnvGuard),
@@ -1018,26 +988,6 @@ mod tests {
     }
 
     #[test]
-    fn deployment_policy_cli_is_exact_and_fail_closed() -> anyhow::Result<()> {
-        assert_eq!(
-            parse_command(&s(&["deployment", "policy", "check"]))?,
-            Command::DeploymentPolicyCheck
-        );
-        for invalid in [
-            vec!["deployment", "policy"],
-            vec!["deployment", "policy", "check", "extra"],
-            vec!["deployment", "policy", "--check"],
-            vec!["deployment-policy", "check"],
-        ] {
-            assert!(
-                parse_command(&s(&invalid)).is_err(),
-                "unexpected policy compatibility surface accepted: {invalid:?}"
-            );
-        }
-        Ok(())
-    }
-
-    #[test]
     fn parse_command_assembly_generate_modules() -> anyhow::Result<()> {
         assert_eq!(
             parse_command(&s(&["assembly", "generate-modules"]))?,
@@ -1171,28 +1121,6 @@ mod tests {
         assert!(parse_command(&s(&["runtime-baseline", "--list"])).is_err());
         assert!(parse_command(&s(&["runtime-baseline", "list", "extra"])).is_err());
         assert!(parse_command(&s(&["runtime-baseline", "bogus"])).is_err());
-        Ok(())
-    }
-
-    #[test]
-    fn parse_command_runtime_deployment_spec_is_exact() -> anyhow::Result<()> {
-        assert_eq!(
-            parse_command(&s(&["runtime-deployment-spec"]))?,
-            Command::RuntimeDeploymentSpec(runtime_deployment_spec::Options { selftest: false })
-        );
-        assert_eq!(
-            parse_command(&s(&["runtime-deployment-spec", "--selftest"]))?,
-            Command::RuntimeDeploymentSpec(runtime_deployment_spec::Options { selftest: true })
-        );
-        for bad in [
-            s(&["runtime-deployment-spec", "--selftest", "--selftest"]),
-            s(&["runtime-deployment-spec", "--bogus"]),
-        ] {
-            assert!(
-                parse_command(&bad).is_err(),
-                "unexpectedly accepted {bad:?}"
-            );
-        }
         Ok(())
     }
 

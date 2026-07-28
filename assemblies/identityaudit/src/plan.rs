@@ -4,20 +4,17 @@ use anyhow::Context as _;
 use assembly_schema::{
     AssemblyDomain, AssemblyListenerKind, AssemblyManifest, AssemblyProfile, AssemblyTopology,
     CanonicalAssemblyManifestV1, DomainLifecyclePhase, ListenerAuth, ParsedAssemblyLock,
-    ParsedDeploymentPlan, RuntimePlan as TypedRuntimePlan, RuntimePlanV1Input,
+    RuntimePlan as TypedRuntimePlan, RuntimePlanV1Input,
 };
 
 const BUNDLED_ASSEMBLY_TOML: &str = include_str!("../assembly.toml");
 const BUNDLED_ASSEMBLY_LOCK: &[u8] = include_bytes!("../assembly.lock.json");
-const BUNDLED_DEPLOYMENT_PLAN: &[u8] =
-    include_bytes!("../../../deploy/generated/identityaudit.deployment-plan.json");
 const ASSEMBLY_NAME: &str = "identityaudit";
 const WORKLOAD: &str = "identityaudit";
 
 /// Proof that the bundled manifest, lock and generated provider catalog agree exactly.
 pub(crate) struct IdentityAuditPlan {
     typed: TypedRuntimePlan,
-    deployment: ParsedDeploymentPlan,
 }
 
 impl IdentityAuditPlan {
@@ -32,10 +29,7 @@ impl IdentityAuditPlan {
         let typed = TypedRuntimePlan::compile_v1(&manifest, &lock, compiler_input(&manifest)?)
             .context("compile bundled identityaudit RuntimePlan")?;
         validate_typed(&typed)?;
-        let deployment = ParsedDeploymentPlan::from_json_slice(&typed, BUNDLED_DEPLOYMENT_PLAN)
-            .context("parse bundled identityaudit DeploymentPlan")?;
-        validate_deployment(&deployment)?;
-        Ok(Self { typed, deployment })
+        Ok(Self { typed })
     }
 
     pub(crate) fn provider_build(
@@ -46,24 +40,26 @@ impl IdentityAuditPlan {
 
     pub(crate) fn inventory_seed(
         &self,
-        build_identity: runtimeexec::inventory::BuildIdentity,
         completed_roles: crate::providers_gen::CompletedProviderRoles,
     ) -> anyhow::Result<runtimeexec::inventory::RuntimeInventorySeed> {
-        self.inventory_seed_with_bindings(build_identity, completed_roles.into_probe_bindings())
+        self.inventory_seed_with_bindings(completed_roles.into_probe_bindings())
     }
 
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn inventory_seed_fixture(
         &self,
-        build_identity: runtimeexec::inventory::BuildIdentity,
         provider_bindings: Vec<runtimeexec::inventory::ProviderProbeBinding>,
     ) -> anyhow::Result<runtimeexec::inventory::RuntimeInventorySeed> {
-        self.inventory_seed_with_bindings(build_identity, provider_bindings)
+        Ok(self
+            .inventory_seed_with_bindings(provider_bindings)?
+            .with_build_metadata(runtimeexec::inventory::BuildMetadata::parse(
+                &"a".repeat(40),
+                &format!("sha256:{}", "b".repeat(64)),
+            )?))
     }
 
     fn inventory_seed_with_bindings(
         &self,
-        build_identity: runtimeexec::inventory::BuildIdentity,
         provider_bindings: Vec<runtimeexec::inventory::ProviderProbeBinding>,
     ) -> anyhow::Result<runtimeexec::inventory::RuntimeInventorySeed> {
         let placements = self
@@ -77,18 +73,15 @@ impl IdentityAuditPlan {
                 )
             })
             .collect();
-        runtimeexec::inventory::RuntimeInventorySeed::from_bound(
+        runtimeexec::inventory::RuntimeInventorySeed::from_runtime_plan(
             &self.typed,
-            &self.deployment,
-            WORKLOAD,
-            build_identity,
             provider_bindings,
             placements,
         )
-        .context("bind identityaudit runtime inventory seed")
+        .context("seal identityaudit runtime inventory seed")
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(test)]
     pub(crate) const fn as_typed(&self) -> &TypedRuntimePlan {
         &self.typed
     }
@@ -216,16 +209,6 @@ fn validate_typed(plan: &TypedRuntimePlan) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn validate_deployment(plan: &ParsedDeploymentPlan) -> anyhow::Result<()> {
-    anyhow::ensure!(
-        plan.schema_version() == 1
-            && plan.workloads().len() == 1
-            && plan.workloads()[0].name() == WORKLOAD,
-        "identityaudit DeploymentPlan workload closure mismatch"
-    );
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -238,7 +221,6 @@ mod tests {
             plan.as_typed().provider_plans().len(),
             crate::providers_gen::PROVIDER_CATALOG.len()
         );
-        assert_eq!(plan.deployment.workloads()[0].name(), WORKLOAD);
         Ok(())
     }
 

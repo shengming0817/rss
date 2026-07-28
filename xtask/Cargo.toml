@@ -13,14 +13,12 @@ assembly-schema = { path = "../crates/assembly-schema" }
 consistency = { path = "../crates/consistency" }
 generated = { path = "../generated" }
 observ = { path = "../crates/observ" }
-postgres-migration-inventory = { path = "../crates/postgres-migration-inventory" }
 vocab = { path = "../crates/vocab" }
 anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml_ng = { workspace = true }
 jsonschema = { workspace = true }
-serde_json_canonicalizer = { workspace = true }
 toml = { workspace = true }
 typify = { workspace = true }
 schemars = { workspace = true }

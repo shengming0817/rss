@@ -3,38 +3,74 @@ use generated::http::runtime_v1::inventory as wire;
 use serde_json::Value;
 
 #[test]
+fn inventory_journeys_delegate_listener_activation_to_production_owners() {
+    for (name, source) in [
+        (
+            "runtime",
+            include_str!("../../assemblies/runtime/src/runtime_inventory.rs"),
+        ),
+        (
+            "settingsonly",
+            include_str!("../../assemblies/settingsonly/src/inventory.rs"),
+        ),
+        (
+            "identityaudit",
+            include_str!("../../assemblies/identityaudit/src/framework_routes.rs"),
+        ),
+    ] {
+        assert!(
+            !source.contains("TcpListener::bind")
+                && !source.contains("publisher.publish(observations)"),
+            "{name} inventory journey must not bind or publish listeners outside its production listener owner"
+        );
+        assert!(
+            source.contains("serve_inventory_journey"),
+            "{name} inventory journey must delegate activation to its production listener owner"
+        );
+    }
+}
+
+#[test]
+fn runtime_inventory_journey_constructs_the_production_launch_adapter() {
+    let source = include_str!("../../assemblies/runtime/src/launch.rs");
+    let journey = source
+        .split_once("pub(crate) async fn serve_inventory_journey")
+        .expect("runtime inventory journey entrypoint")
+        .1
+        .split_once("trait ListenerRegistrar")
+        .expect("runtime inventory journey boundary")
+        .0;
+
+    assert!(
+        journey.contains("let adapter = RuntimeLaunchAdapter::new("),
+        "runtime inventory journey must construct the production RuntimeLaunchAdapter"
+    );
+    assert!(
+        !source.contains("struct InventoryJourneyAdapter"),
+        "runtime inventory journey must not define a parallel launch adapter"
+    );
+}
+
+#[test]
 fn runtime_inventory_artifacts_bind_all_three_assemblies() {
-    for (name, runtime_bytes, deployment_bytes, manifest) in [
+    for (name, runtime_bytes, manifest) in [
         (
             "runtime",
             include_bytes!("../../assemblies/runtime/runtime-plan.json").as_slice(),
-            include_bytes!("../../deploy/generated/runtime.deployment-plan.json").as_slice(),
             include_str!("../../assemblies/runtime/assembly.toml"),
         ),
         (
             "settingsonly",
             include_bytes!("../../assemblies/settingsonly/runtime-plan.json").as_slice(),
-            include_bytes!("../../deploy/generated/settingsonly.deployment-plan.json").as_slice(),
             include_str!("../../assemblies/settingsonly/assembly.toml"),
         ),
         (
             "identityaudit",
             include_bytes!("../../assemblies/identityaudit/runtime-plan.json").as_slice(),
-            include_bytes!("../../deploy/generated/identityaudit.deployment-plan.json").as_slice(),
             include_str!("../../assemblies/identityaudit/assembly.toml"),
         ),
     ] {
         let runtime: Value = serde_json::from_slice(runtime_bytes).expect("RuntimePlan JSON");
-        let deployment: Value =
-            serde_json::from_slice(deployment_bytes).expect("DeploymentPlan JSON");
-        assert_eq!(
-            runtime["assemblyFingerprint"], deployment["assemblyFingerprint"],
-            "{name} assembly fingerprint"
-        );
-        assert_eq!(
-            runtime["runtimePlanFingerprint"], deployment["runtimePlanFingerprint"],
-            "{name} runtime fingerprint"
-        );
         assert!(
             runtime["listenerPlans"]
                 .as_array()
@@ -70,32 +106,32 @@ fn assert_allow(
     serving_address: std::net::SocketAddr,
     audit_calls: usize,
     runtime_plan: &[u8],
-    deployment_plan: &[u8],
 ) -> anyhow::Result<()> {
     let expected_runtime: Value = serde_json::from_slice(runtime_plan)?;
-    let expected_deployment: Value = serde_json::from_slice(deployment_plan)?;
     let expected_assembly = expected_runtime["assemblyFingerprint"]
         .as_str()
         .context("RuntimePlan assembly fingerprint")?;
     let expected_runtime_fingerprint = expected_runtime["runtimePlanFingerprint"]
         .as_str()
         .context("RuntimePlan fingerprint")?;
-    let expected_deployment_fingerprint = expected_deployment["deploymentFingerprint"]
-        .as_str()
-        .context("DeploymentPlan fingerprint")?;
     assert_eq!(status, reqwest::StatusCode::OK, "{name} inventory route");
     assert!(audit_calls > 0, "{name} allow must record audit evidence");
     let response: wire::RuntimeInventoryResponse = serde_json::from_slice(body)?;
     let data = response.data;
     assert_eq!(data.schema_version, 1, "{name} schema version");
     assert_eq!(data.assembly_fingerprint.as_str(), expected_assembly);
+    let build_metadata = data
+        .build_metadata
+        .as_ref()
+        .context("runtime inventory build metadata")?;
+    assert_eq!(build_metadata.source_revision.as_str(), "a".repeat(40));
+    assert_eq!(
+        build_metadata.image_digest.as_str(),
+        format!("sha256:{}", "b".repeat(64))
+    );
     assert_eq!(
         data.runtime_plan_fingerprint.as_str(),
         expected_runtime_fingerprint
-    );
-    assert_eq!(
-        data.deployment_fingerprint.as_str(),
-        expected_deployment_fingerprint
     );
     assert_eq!(
         data.domains.len(),
@@ -142,7 +178,7 @@ fn assert_allow(
 }
 
 macro_rules! inventory_journey {
-    ($test:ident, $module:path, $runtime:literal, $deployment:literal) => {
+    ($test:ident, $module:path, $runtime:literal) => {
         async fn $test() -> anyhow::Result<()> {
             use $module as fixture;
 
@@ -154,7 +190,6 @@ macro_rules! inventory_journey {
                 allow.serving_address,
                 allow.audit_calls,
                 include_bytes!($runtime),
-                include_bytes!($deployment),
             )?;
 
             let degraded = fixture::run_journey(fixture::JourneyCase::ProbeDegraded).await?;
@@ -213,8 +248,7 @@ fn assert_provider_posture(
 inventory_journey!(
     runtime_inventory_live_journey,
     runtime::test_support::runtime_inventory,
-    "../../assemblies/runtime/runtime-plan.json",
-    "../../deploy/generated/runtime.deployment-plan.json"
+    "../../assemblies/runtime/runtime-plan.json"
 );
 
 #[tokio::test]
@@ -227,12 +261,10 @@ async fn runtime_inventory_live_journeys_are_port_exact_and_serial() -> anyhow::
 inventory_journey!(
     settingsonly_inventory_live_journey,
     settingsonly::runtime_inventory_test_support,
-    "../../assemblies/settingsonly/runtime-plan.json",
-    "../../deploy/generated/settingsonly.deployment-plan.json"
+    "../../assemblies/settingsonly/runtime-plan.json"
 );
 inventory_journey!(
     identityaudit_inventory_live_journey,
     identityaudit::runtime_inventory_test_support,
-    "../../assemblies/identityaudit/runtime-plan.json",
-    "../../deploy/generated/identityaudit.deployment-plan.json"
+    "../../assemblies/identityaudit/runtime-plan.json"
 );

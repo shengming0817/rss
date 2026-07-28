@@ -1,18 +1,11 @@
-//! Closed deployment-artifact inventory for every discovered assembly.
+//! Closed application-artifact inventory for every discovered assembly.
 //!
 //! INVARIANT: ASSEMBLY-ARTIFACT-MATRIX-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::synthetic_red_rejects_incomplete_or_unsafe_rows", anti_vacuity = "tests::real_workspace_matrix_is_exact_and_complete" } -- the schema-v1 lifecycle declaration is an exact bijection with `assemblies/*`; only rows whose Cargo, image, config, health/inventory and journey evidence all validate can become `VerifiedArtifactMatrix` values.
 //! INVARIANT: PRODUCTION-SMOKE-POLICY-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::strict_compose_smoke_policy_rejects_synthetic_mutations_and_binds_the_real_file", anti_vacuity = "tests::strict_compose_smoke_policy_rejects_synthetic_mutations_and_binds_the_real_file" } -- the executable compose journey requires an explicit closed mode, release never permits skip, and only an explicit developer opt-in can emit the unique non-production receipt before Docker execution.
+//! INVARIANT: COMPOSE-RUNTIME-DELIVERY-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::compose_runtime_delivery_rejects_each_synthetic_mutation", anti_vacuity = "tests::compose_runtime_delivery_rejects_each_synthetic_mutation" } -- the developer Compose carrier keeps operator and serving images distinct, grants the serving process enough grace for its application-owned drain budget, and the executable smoke witness proves ordered SIGTERM reception, complete drain, and exit zero.
 
 use anyhow::{Context, Result, bail};
-use assembly_schema::{
-    ApplicationConfig, AssemblyListenerKind, AssemblyManifest, AssemblyProfile, AvailabilityClass,
-    DatabasePoolCeilingsV1Input, DependencyPeerRole, DeploymentIdentityV1Input, DeploymentPlan,
-    DeploymentPlanV1Input, DeploymentServiceV1Input, DeploymentWorkloadV1Input,
-    MigrationArtifactV1Input, MigrationExecutionBudgetV1Input, MigrationMode, ParsedAssemblyLock,
-    ParsedRuntimePlan, PortExposure, PortV1Input, ProbeKind, ProbeV1Input, ProviderConstructor,
-    ReplicaDatabaseBudgetV1Input, ResourceListV1Input, ResourceRequirementsV1Input,
-    SecretBindingV1Input, SecretConsumer, SecretPurpose, VaultObjectRefV1Input,
-};
+use assembly_schema::{AssemblyListenerKind, AssemblyManifest};
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -58,8 +51,6 @@ struct RawAssembly {
     health_inventory: Option<RawHealthInventory>,
     #[serde(default)]
     journey: Option<RawJourney>,
-    #[serde(default)]
-    deployment: Option<RawDeploymentProfile>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -121,272 +112,9 @@ enum RawJourney {
         path: String,
     },
 }
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawDeploymentProfile {
-    #[serde(rename = "runtimePlan")]
-    runtime_plan: RawRuntimePlanArtifact,
-    #[serde(rename = "migrationMode")]
-    migration_mode: MigrationMode,
-    #[serde(default, rename = "migrationArtifact")]
-    migration_artifact: Option<RawMigrationArtifact>,
-    #[serde(default, rename = "migrationExecutionBudget")]
-    migration_execution_budget: Option<RawMigrationExecutionBudget>,
-    #[serde(rename = "availabilityClass")]
-    availability_class: AvailabilityClass,
-    #[serde(rename = "drainSeconds")]
-    drain_seconds: u16,
-    #[serde(rename = "replicaDatabaseBudget")]
-    replica_database_budget: RawReplicaDatabaseBudget,
-    workloads: Vec<RawDeploymentWorkload>,
-    services: Vec<RawDeploymentService>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawMigrationArtifact {
-    image: String,
-    #[serde(rename = "sourceRevision")]
-    source_revision: String,
-}
-
-#[derive(Debug, Clone, Copy, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawMigrationExecutionBudget {
-    #[serde(rename = "activeDeadlineSeconds")]
-    active_deadline_seconds: u32,
-    #[serde(rename = "backoffLimit")]
-    backoff_limit: u8,
-}
-
-#[derive(Debug, Clone, Copy, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawReplicaDatabaseBudget {
-    #[serde(rename = "minReplicas")]
-    min_replicas: u8,
-    #[serde(rename = "maxReplicas")]
-    max_replicas: u8,
-    #[serde(rename = "poolCeilings")]
-    pool_ceilings: RawDatabasePoolCeilings,
-    #[serde(rename = "databaseConnectionLimit")]
-    database_connection_limit: u16,
-    #[serde(rename = "reservedConnections")]
-    reserved_connections: u16,
-}
-
-#[derive(Debug, Clone, Copy, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawDatabasePoolCeilings {
-    writer: u16,
-    reader: u16,
-    #[serde(default, rename = "auditAdmin")]
-    audit_admin: Option<u16>,
-    #[serde(default, rename = "dlxArchiver")]
-    dlx_archiver: Option<u16>,
-    #[serde(default, rename = "dlxVerifier")]
-    dlx_verifier: Option<u16>,
-    #[serde(default, rename = "dlxPurger")]
-    dlx_purger: Option<u16>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawRuntimePlanArtifact {
-    path: String,
-    profile: AssemblyProfile,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawDeploymentWorkload {
-    name: String,
-    image: String,
-    #[serde(rename = "sourceRevision")]
-    source_revision: String,
-    #[serde(rename = "applicationConfig")]
-    application_config: ApplicationConfig,
-    identity: RawDeploymentIdentity,
-    #[serde(default, rename = "secretBindings")]
-    secret_bindings: Vec<RawSecretBinding>,
-    #[serde(default, rename = "ingressPeerIdentities")]
-    ingress_peer_identities: Vec<String>,
-    resources: RawResources,
-    probes: Vec<RawProbe>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawDeploymentIdentity {
-    name: String,
-    #[serde(rename = "serviceAccount")]
-    service_account: String,
-}
-
-#[derive(Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawSecretBinding {
-    purpose: SecretPurpose,
-    consumers: Vec<SecretConsumer>,
-    vault: RawVaultObjectRef,
-}
-
-#[derive(Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawVaultObjectRef {
-    #[serde(rename = "storeId")]
-    store_id: String,
-    #[serde(rename = "refKey")]
-    ref_key: String,
-    #[serde(default, rename = "refVersion")]
-    ref_version: Option<String>,
-}
-
-impl std::fmt::Debug for RawSecretBinding {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("RawSecretBinding")
-            .field("purpose", &self.purpose)
-            .field("consumers", &self.consumers)
-            .field("vault", &"<redacted>")
-            .finish()
-    }
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawResources {
-    requests: RawResourceList,
-    limits: RawResourceList,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawResourceList {
-    cpu: String,
-    memory: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawProbe {
-    kind: ProbeKind,
-    port: u16,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawDeploymentService {
-    name: String,
-    workload: String,
-    ports: Vec<RawDeploymentPort>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawDeploymentPort {
-    name: String,
-    port: u16,
-    exposure: PortExposure,
-}
-
-/// The only deployment-facing matrix value. Its fields are private and construction is confined to
-/// full validation below, so callers cannot accidentally treat observed declarations as evidence.
 #[derive(Debug)]
-#[allow(dead_code)]
-pub(crate) struct VerifiedArtifactMatrix {
-    supported: Vec<SupportedArtifact>,
-}
-
-impl VerifiedArtifactMatrix {
-    #[allow(dead_code)]
-    pub(crate) fn supported_rows(&self) -> &[SupportedArtifact] {
-        &self.supported
-    }
-}
-
-#[derive(Debug)]
-#[allow(dead_code)]
-pub(crate) struct SupportedArtifact {
-    name: String,
-    binary: RawBinary,
-    image: RawImage,
-    config_schema: RawConfigSchema,
-    health_inventory: RawHealthInventory,
-    journey: RawJourney,
-    deployment: VerifiedDeploymentProfile,
-}
-
-/// Fully validated, secret-value-free deployment authoring facts for one RuntimePlan artifact.
-#[derive(Debug)]
-pub(crate) struct VerifiedDeploymentProfile {
-    runtime_plan: ParsedRuntimePlan,
-    facts: RawDeploymentProfile,
-    migration_head_fingerprint: Option<String>,
-}
-
-#[allow(dead_code)]
-impl SupportedArtifact {
-    #[allow(dead_code)]
-    pub(crate) fn name(&self) -> &str {
-        &self.name
-    }
-
-    pub(crate) fn binary(&self) -> (&str, &str) {
-        (&self.binary.package, &self.binary.target)
-    }
-
-    pub(crate) fn image(&self) -> (&str, &str) {
-        (&self.image.dockerfile, &self.image.target)
-    }
-
-    pub(crate) fn config_carrier(&self) -> (&'static str, &str) {
-        match &self.config_schema {
-            RawConfigSchema::JsonSchema { path } => ("json-schema", path),
-            RawConfigSchema::TypedEnvCatalog { path } => ("typed-env-catalog", path),
-        }
-    }
-
-    pub(crate) fn health_inventory(&self) -> (&'static str, &'static str) {
-        let RawHealthInventory { owner, listener } = self.health_inventory;
-        (owner.as_str(), listener.as_str())
-    }
-
-    pub(crate) fn journey(&self) -> String {
-        journey_identity(&self.journey)
-    }
-
-    pub(crate) const fn deployment(&self) -> &VerifiedDeploymentProfile {
-        &self.deployment
-    }
-}
-
-impl VerifiedDeploymentProfile {
-    #[cfg(test)]
-    pub(crate) fn runtime_plan_path(&self) -> &str {
-        &self.facts.runtime_plan.path
-    }
-
-    pub(crate) fn runtime_plan(&self) -> &assembly_schema::RuntimePlan {
-        self.runtime_plan.as_plan()
-    }
-
-    pub(crate) const fn drain_seconds(&self) -> u16 {
-        self.facts.drain_seconds
-    }
-
-    #[cfg(test)]
-    pub(crate) const fn profile(&self) -> AssemblyProfile {
-        self.facts.runtime_plan.profile
-    }
-
-    pub(crate) fn plan_input(&self) -> DeploymentPlanV1Input {
-        deployment_plan_input(
-            &self.facts,
-            self.migration_head_fingerprint.clone(),
-            dependency_peer_roles(self.runtime_plan.as_plan()),
-        )
-    }
+struct VerifiedArtifactMatrix {
+    supported_count: usize,
 }
 
 impl HealthOwner {
@@ -419,7 +147,6 @@ enum ArtifactRule {
     Journey,
     PathSafety,
     SpecializedBoundary,
-    Deployment,
 }
 
 type ArtifactFinding = diagnostic::Finding<ArtifactRule>;
@@ -474,8 +201,8 @@ pub(crate) fn run() -> Result<()> {
             .verified
             .context("artifact matrix validation succeeded without verified value")?;
         println!(
-            "\n## Verification\n\n**STATIC CARRIERS VERIFIED** — {} supported assembly artifact rows passed closed validation.\n\nThis verdict does not include same-head test, image-build, or deployment execution receipts.",
-            verified.supported_rows().len()
+            "\n## Verification\n\n**STATIC CARRIERS VERIFIED** — {} supported assembly artifact rows passed closed validation.\n\nThis verdict does not include same-head test or image-build receipts.",
+            verified.supported_count
         );
         Ok(())
     } else {
@@ -508,22 +235,7 @@ fn verification_failure_markdown(errors: &[String]) -> String {
     output
 }
 
-/// Load the verified typed carrier for DeploymentPlan/release consumers. Observed rows never cross
-/// this boundary when any closed-world or artifact-semantic finding exists.
-#[allow(dead_code)]
-pub(crate) fn load_verified(root: &Path) -> Result<VerifiedArtifactMatrix> {
-    let validation = validate_root(root)?;
-    if !validation.findings.is_empty() {
-        bail!(
-            "{}",
-            format_artifact_findings(&validation.findings).join("\n")
-        );
-    }
-    validation
-        .verified
-        .context("artifact matrix validation succeeded without verified value")
-}
-
+#[cfg(test)]
 fn validate_root(root: &Path) -> Result<Validation> {
     let path = root.join(MATRIX_PATH);
     ensure_regular_path(root, MATRIX_PATH)?;
@@ -569,7 +281,7 @@ fn validate_matrix(root: &Path, raw: RawMatrix) -> Result<Validation> {
     validate_closed_world(&raw, &universe, &mut findings);
     validate_supported_ratchet(&raw, &universe, &mut findings);
 
-    let mut supported = Vec::new();
+    let mut supported_count = 0;
     let mut identities: BTreeMap<String, String> = BTreeMap::new();
     for row in raw.assemblies {
         validate_lifecycle_shape(&row, &mut findings);
@@ -582,19 +294,17 @@ fn validate_matrix(root: &Path, raw: RawMatrix) -> Result<Validation> {
                     Some(config_schema),
                     Some(health_inventory),
                     Some(journey),
-                    Some(deployment),
                 ) = (
                     row.binary,
                     row.image,
                     row.config_schema,
                     row.health_inventory,
                     row.journey,
-                    row.deployment,
                 )
                 else {
                     continue;
                 };
-                let Some(deployment) = validate_supported(
+                validate_supported(
                     root,
                     &cargo,
                     &row.name,
@@ -603,12 +313,8 @@ fn validate_matrix(root: &Path, raw: RawMatrix) -> Result<Validation> {
                     &config_schema,
                     health_inventory,
                     &journey,
-                    &deployment,
                     &mut findings,
-                )?
-                else {
-                    continue;
-                };
+                )?;
                 register_identity(
                     &mut identities,
                     "binary",
@@ -637,19 +343,10 @@ fn validate_matrix(root: &Path, raw: RawMatrix) -> Result<Validation> {
                     &row.name,
                     &mut findings,
                 );
-                supported.push(SupportedArtifact {
-                    name: row.name,
-                    binary,
-                    image,
-                    config_schema,
-                    health_inventory,
-                    journey,
-                    deployment,
-                });
+                supported_count += 1;
             }
         }
     }
-    supported.sort_by(|left, right| left.name.cmp(&right.name));
     for boundary in crate::assembly::artifact_boundary_findings(root)? {
         reject!(
             findings,
@@ -662,7 +359,7 @@ fn validate_matrix(root: &Path, raw: RawMatrix) -> Result<Validation> {
     }
     let verified = findings
         .is_empty()
-        .then_some(VerifiedArtifactMatrix { supported });
+        .then_some(VerifiedArtifactMatrix { supported_count });
     Ok(Validation { verified, findings })
 }
 
@@ -776,7 +473,6 @@ fn validate_lifecycle_shape(row: &RawAssembly, findings: &mut Vec<ArtifactFindin
                 || row.config_schema.is_some()
                 || row.health_inventory.is_some()
                 || row.journey.is_some()
-                || row.deployment.is_some()
             {
                 reject!(
                     findings,
@@ -801,7 +497,6 @@ fn validate_lifecycle_shape(row: &RawAssembly, findings: &mut Vec<ArtifactFindin
                 ("configSchema", row.config_schema.is_some()),
                 ("healthInventory", row.health_inventory.is_some()),
                 ("journey", row.journey.is_some()),
-                ("deployment", row.deployment.is_some()),
             ] {
                 if !present {
                     reject!(
@@ -816,7 +511,6 @@ fn validate_lifecycle_shape(row: &RawAssembly, findings: &mut Vec<ArtifactFindin
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn validate_supported(
     root: &Path,
     cargo: &crate::assembly::CargoTargetCatalog,
@@ -826,9 +520,8 @@ fn validate_supported(
     config: &RawConfigSchema,
     _health: RawHealthInventory,
     journey: &RawJourney,
-    deployment: &RawDeploymentProfile,
     findings: &mut Vec<ArtifactFinding>,
-) -> Result<Option<VerifiedDeploymentProfile>> {
+) -> Result<()> {
     validate_identifier("binary.package", &binary.package, findings);
     validate_identifier("binary.target", &binary.target, findings);
     if !cargo.binary_belongs_to_assembly(assembly, &binary.package, &binary.target) {
@@ -845,240 +538,7 @@ fn validate_supported(
     validate_config(root, assembly, config, findings)?;
     validate_health_inventory(root, cargo, assembly, findings)?;
     validate_journey(root, cargo, assembly, journey, findings)?;
-    validate_deployment(root, assembly, deployment, findings)
-}
-
-fn validate_deployment(
-    root: &Path,
-    assembly: &str,
-    raw: &RawDeploymentProfile,
-    findings: &mut Vec<ArtifactFinding>,
-) -> Result<Option<VerifiedDeploymentProfile>> {
-    let expected_path = format!("assemblies/{assembly}/runtime-plan.json");
-    if raw.runtime_plan.path != expected_path {
-        reject!(
-            findings,
-            Deployment,
-            assembly,
-            "runtimePlan.path 必须 exact 为 {expected_path}"
-        );
-        return Ok(None);
-    }
-    let Some(runtime_path) = regular_file(
-        root,
-        &raw.runtime_plan.path,
-        assembly,
-        "deployment.runtimePlan",
-        findings,
-    )?
-    else {
-        return Ok(None);
-    };
-    let runtime_bytes = read_artifact_utf8(&runtime_path, &format!("{assembly} RuntimePlan"))?;
-    let runtime = match ParsedRuntimePlan::from_json_slice(runtime_bytes.as_bytes()) {
-        Ok(runtime) => runtime,
-        Err(error) => {
-            reject!(
-                findings,
-                Deployment,
-                assembly,
-                "runtimePlan strict parse failed: {error}"
-            );
-            return Ok(None);
-        }
-    };
-    let expected_peer_roles = dependency_peer_roles(runtime.as_plan());
-    let expected_app_config = match assembly {
-        "settingsonly" => ApplicationConfig::SettingsOnlyV1,
-        "identityaudit" => ApplicationConfig::IdentityAuditV1,
-        _ => ApplicationConfig::None,
-    };
-    if raw
-        .workloads
-        .iter()
-        .any(|workload| workload.application_config != expected_app_config)
-    {
-        reject!(
-            findings,
-            Deployment,
-            assembly,
-            "applicationConfig does not match the closed assembly startup contract"
-        );
-        return Ok(None);
-    }
-
-    let lock_path = format!("assemblies/{assembly}/assembly.lock.json");
-    let Some(lock_path) = regular_file(root, &lock_path, assembly, "deployment.lock", findings)?
-    else {
-        return Ok(None);
-    };
-    let lock_bytes = read_artifact_utf8(&lock_path, &format!("{assembly} AssemblyLock"))?;
-    let lock = ParsedAssemblyLock::from_json_slice(lock_bytes.as_bytes())
-        .with_context(|| format!("parse {assembly} AssemblyLock for deployment profile"))?;
-    if raw.runtime_plan.profile != lock.identity().profile()
-        || runtime.assembly_fingerprint() != lock.fingerprint()
-    {
-        reject!(
-            findings,
-            Deployment,
-            assembly,
-            "runtimePlan profile/fingerprint does not match the bundled AssemblyLock"
-        );
-        return Ok(None);
-    }
-
-    let migration_head_fingerprint = match raw.migration_mode {
-        MigrationMode::None => None,
-        MigrationMode::ForwardOnlyTwoPhase => Some(migration_head_fingerprint(root)?),
-    };
-    let input = deployment_plan_input(raw, migration_head_fingerprint.clone(), expected_peer_roles);
-    if let Err(error) = DeploymentPlan::compile_v1(runtime.as_plan(), input) {
-        reject!(
-            findings,
-            Deployment,
-            assembly,
-            "typed DeploymentPlan facts rejected: {error}"
-        );
-        return Ok(None);
-    }
-    Ok(Some(VerifiedDeploymentProfile {
-        runtime_plan: runtime,
-        facts: raw.clone(),
-        migration_head_fingerprint,
-    }))
-}
-
-fn dependency_peer_roles(runtime: &assembly_schema::RuntimePlan) -> Vec<DependencyPeerRole> {
-    let mut roles = BTreeSet::from([DependencyPeerRole::Dns]);
-    for provider in runtime.provider_plans() {
-        match provider.constructor() {
-            ProviderConstructor::VaultSigner
-            | ProviderConstructor::VaultKeyProvider
-            | ProviderConstructor::VaultSecretResolver => {
-                roles.insert(DependencyPeerRole::Vault);
-            }
-            ProviderConstructor::PostgresRevocationStore
-            | ProviderConstructor::PostgresCasStore
-            | ProviderConstructor::PostgresAuthAuditSink
-            | ProviderConstructor::PostgresServiceTokenReplayStore
-            | ProviderConstructor::PostgresDlxLifecycleRepository => {
-                roles.insert(DependencyPeerRole::Postgresql);
-            }
-            ProviderConstructor::AmqpPublisher | ProviderConstructor::AmqpSubscriber => {
-                roles.insert(DependencyPeerRole::Amqp);
-            }
-            ProviderConstructor::RedisLockStore | ProviderConstructor::RedisCasStore => {
-                roles.insert(DependencyPeerRole::Redis);
-            }
-            ProviderConstructor::S3Store | ProviderConstructor::S3VerifiedDlxArchiveStore => {
-                roles.insert(DependencyPeerRole::ObjectStorage);
-            }
-            ProviderConstructor::OidcProvider => {
-                roles.insert(DependencyPeerRole::Oidc);
-            }
-            ProviderConstructor::RatelimitGovernorLimiter => {}
-        }
-    }
-    roles.into_iter().collect()
-}
-
-fn deployment_plan_input(
-    raw: &RawDeploymentProfile,
-    migration_head_fingerprint: Option<String>,
-    dependency_peer_roles: Vec<DependencyPeerRole>,
-) -> DeploymentPlanV1Input {
-    let mut input = DeploymentPlanV1Input::new(
-        raw.migration_mode,
-        migration_head_fingerprint,
-        raw.migration_artifact.as_ref().map(|artifact| {
-            MigrationArtifactV1Input::new(&artifact.image, &artifact.source_revision)
-        }),
-        raw.migration_execution_budget.map(|budget| {
-            MigrationExecutionBudgetV1Input::new(
-                budget.active_deadline_seconds,
-                budget.backoff_limit,
-            )
-        }),
-        raw.availability_class,
-        raw.drain_seconds,
-        ReplicaDatabaseBudgetV1Input::new(
-            raw.replica_database_budget.min_replicas,
-            raw.replica_database_budget.max_replicas,
-            DatabasePoolCeilingsV1Input::new(
-                raw.replica_database_budget.pool_ceilings.writer,
-                raw.replica_database_budget.pool_ceilings.reader,
-                raw.replica_database_budget.pool_ceilings.audit_admin,
-                raw.replica_database_budget.pool_ceilings.dlx_archiver,
-                raw.replica_database_budget.pool_ceilings.dlx_verifier,
-                raw.replica_database_budget.pool_ceilings.dlx_purger,
-            ),
-            raw.replica_database_budget.database_connection_limit,
-            raw.replica_database_budget.reserved_connections,
-        ),
-        dependency_peer_roles,
-    );
-    for workload in &raw.workloads {
-        let secret_bindings = workload
-            .secret_bindings
-            .iter()
-            .map(|binding| {
-                SecretBindingV1Input::new(
-                    binding.purpose,
-                    binding.consumers.clone(),
-                    VaultObjectRefV1Input::new(
-                        binding.vault.store_id.clone(),
-                        binding.vault.ref_key.clone(),
-                        binding.vault.ref_version.clone(),
-                    ),
-                )
-            })
-            .collect();
-        let resources = ResourceRequirementsV1Input::new(
-            ResourceListV1Input::new(
-                workload.resources.requests.cpu.clone(),
-                workload.resources.requests.memory.clone(),
-            ),
-            ResourceListV1Input::new(
-                workload.resources.limits.cpu.clone(),
-                workload.resources.limits.memory.clone(),
-            ),
-        );
-        let probes = workload
-            .probes
-            .iter()
-            .map(|probe| ProbeV1Input::new(probe.kind, probe.port))
-            .collect();
-        input.workload(DeploymentWorkloadV1Input::new(
-            workload.name.clone(),
-            workload.image.clone(),
-            workload.source_revision.clone(),
-            workload.application_config,
-            DeploymentIdentityV1Input::new(
-                workload.identity.name.clone(),
-                workload.identity.service_account.clone(),
-            ),
-            secret_bindings,
-            workload.ingress_peer_identities.clone(),
-            resources,
-            probes,
-        ));
-    }
-    for service in &raw.services {
-        input.service(DeploymentServiceV1Input::new(
-            service.name.clone(),
-            service.workload.clone(),
-            service
-                .ports
-                .iter()
-                .map(|port| PortV1Input::new(port.name.clone(), port.port, port.exposure))
-                .collect(),
-        ));
-    }
-    input
-}
-
-fn migration_head_fingerprint(_root: &Path) -> Result<String> {
-    Ok(postgres_migration_inventory::migration_head_fingerprint())
+    Ok(())
 }
 
 fn validate_identifier(label: &str, value: &str, findings: &mut Vec<ArtifactFinding>) {
@@ -1428,6 +888,18 @@ fn validate_journey(
                     rule.as_str()
                 );
             }
+            let compose_path = root.join("deploy/docker-compose.yml");
+            let compose_source = std::fs::read_to_string(&compose_path)
+                .with_context(|| format!("读取 {} 失败", compose_path.display()))?;
+            if let Err(rule) = validate_compose_runtime_delivery(&compose_source, &source) {
+                reject!(
+                    findings,
+                    Journey,
+                    assembly,
+                    "compose-smoke-v1 违反运行时交付规则 {}",
+                    rule.as_str()
+                );
+            }
             let env_path = root.join("deploy/.env.example");
             let env_source = std::fs::read_to_string(&env_path)
                 .with_context(|| format!("读取 {} 失败", env_path.display()))?;
@@ -1512,6 +984,7 @@ fn expression_is_trivial_success(expression: &syn::Expr) -> bool {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ComposeSmokeRule {
+    ComposeGrammar,
     ShellGrammar,
     StrictShell,
     ModeDeclaration,
@@ -1530,11 +1003,15 @@ enum ComposeSmokeRule {
     ComposeLifecycle,
     Cleanup,
     Readiness,
+    OperatorProjection,
+    ServerProjection,
+    DrainWitness,
 }
 
 impl ComposeSmokeRule {
     const fn as_str(self) -> &'static str {
         match self {
+            Self::ComposeGrammar => "COMPOSE-GRAMMAR-01",
             Self::ShellGrammar => "SMOKE-SHELL-GRAMMAR-01",
             Self::StrictShell => "SMOKE-STRICT-SHELL-01",
             Self::ModeDeclaration => "SMOKE-MODE-DECLARATION-01",
@@ -1553,8 +1030,118 @@ impl ComposeSmokeRule {
             Self::ComposeLifecycle => "SMOKE-COMPOSE-LIFECYCLE-01",
             Self::Cleanup => "SMOKE-CLEANUP-01",
             Self::Readiness => "SMOKE-READINESS-01",
+            Self::OperatorProjection => "COMPOSE-OPERATOR-PROJECTION-01",
+            Self::ServerProjection => "COMPOSE-SERVER-PROJECTION-01",
+            Self::DrainWitness => "COMPOSE-SIGTERM-DRAIN-WITNESS-01",
         }
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct ComposeDeliveryFile {
+    services: ComposeDeliveryServices,
+}
+
+#[derive(Debug, Deserialize)]
+struct ComposeDeliveryServices {
+    #[serde(rename = "rss-access-jwks-init")]
+    rss_access_jwks_init: ComposeDeliveryService,
+    migration: ComposeDeliveryService,
+    server: ComposeDeliveryService,
+}
+
+#[derive(Debug, Deserialize)]
+struct ComposeDeliveryService {
+    build: ComposeDeliveryBuild,
+    image: String,
+    #[serde(default)]
+    stop_grace_period: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ComposeDeliveryBuild {
+    target: String,
+}
+
+fn validate_compose_runtime_delivery(
+    compose: &str,
+    smoke: &str,
+) -> std::result::Result<(), ComposeSmokeRule> {
+    let compose: ComposeDeliveryFile =
+        serde_yaml_ng::from_str(compose).map_err(|_| ComposeSmokeRule::ComposeGrammar)?;
+    for service in [
+        &compose.services.rss_access_jwks_init,
+        &compose.services.migration,
+    ] {
+        if service.build.target != "operator-runtime" || service.image != "rss-operator:dev" {
+            return Err(ComposeSmokeRule::OperatorProjection);
+        }
+    }
+    let server = &compose.services.server;
+    if server.build.target != "runtime"
+        || server.image != "rss-runtime:dev"
+        || server.stop_grace_period.as_deref() != Some("30s")
+    {
+        return Err(ComposeSmokeRule::ServerProjection);
+    }
+
+    let commands = shell_semantic_lines(smoke).ok_or(ComposeSmokeRule::ShellGrammar)?;
+    let ordered: [(&str, &[ShellScope]); 3] = [
+        ("docker kill --signal=TERM \"$cid\" >/dev/null", &[]),
+        (
+            "server_state=\"$(docker inspect -f '{{.State.Status}}:{{.State.ExitCode}}' \"$cid\")\"",
+            &[ShellScope::Loop],
+        ),
+        (
+            "[[ \"$server_state\" = \"exited:0\" ]] && break",
+            &[ShellScope::Loop],
+        ),
+    ];
+    let mut cursor = 0;
+    for (text, scopes) in ordered {
+        let Some(offset) = commands[cursor..].iter().position(|command| {
+            command.function.is_none() && command.scopes == scopes && command.text == text
+        }) else {
+            return Err(ComposeSmokeRule::DrainWitness);
+        };
+        cursor += offset + 1;
+    }
+    if !commands[cursor..].iter().any(is_exit_zero_assertion) {
+        return Err(ComposeSmokeRule::DrainWitness);
+    }
+    Ok(())
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ShellAssertion<'a> {
+    subject: &'a str,
+    operator: &'a str,
+    expected: &'a str,
+    failure_command: &'a str,
+}
+
+fn parse_shell_assertion(command: &str) -> Option<ShellAssertion<'_>> {
+    let (condition, failure) = command.split_once("||")?;
+    let condition = condition.trim().strip_prefix("[[")?.strip_suffix("]]")?;
+    let mut terms = condition.split_ascii_whitespace();
+    let assertion = ShellAssertion {
+        subject: terms.next()?.trim_matches(['\'', '"']),
+        operator: terms.next()?,
+        expected: terms.next()?.trim_matches(['\'', '"']),
+        failure_command: failure.split_ascii_whitespace().next()?,
+    };
+    terms.next().is_none().then_some(assertion)
+}
+
+fn is_exit_zero_assertion(command: &ShellSemanticLine<'_>) -> bool {
+    command.function.is_none()
+        && command.scopes.is_empty()
+        && parse_shell_assertion(command.text).is_some_and(|assertion| {
+            assertion.subject == "$server_state"
+                && matches!(assertion.operator, "=" | "==")
+                && assertion.expected == "exited:0"
+                && assertion.failure_command == "fail"
+        })
 }
 
 fn validate_compose_smoke(source: &str) -> std::result::Result<(), ComposeSmokeRule> {
@@ -2504,16 +2091,20 @@ fn markdown_cell(value: &str) -> String {
 mod tests {
     use super::*;
 
-    #[test]
-    fn migration_head_identity_delegates_to_the_typed_inventory() -> Result<()> {
-        let root = crate::workspace_root()?;
-        let actual = migration_head_fingerprint(&root)?;
-        assert_eq!(
-            actual,
-            postgres_migration_inventory::migration_head_fingerprint()
-        );
-        assert!(!postgres_migration_inventory::migrations().is_empty());
-        Ok(())
+    fn compose_service_block<'a>(compose: &'a str, service: &str) -> Option<&'a str> {
+        let marker = format!("  {service}:\n");
+        let start = compose.find(&marker)?;
+        let body_start = start + marker.len();
+        let mut end = compose.len();
+        let mut offset = body_start;
+        for line in compose[body_start..].split_inclusive('\n') {
+            if !line.trim().is_empty() && !line.starts_with("    ") {
+                end = offset;
+                break;
+            }
+            offset += line.len();
+        }
+        Some(&compose[start..end])
     }
 
     #[test]
@@ -2536,24 +2127,24 @@ mod tests {
     }
 
     #[test]
-    fn deployment_toml_parse_error_never_echoes_secret_bait() -> Result<()> {
-        let bait = "ZZ_DEPLOYMENT_SECRET_BAIT_1802";
+    fn artifact_toml_parse_error_never_echoes_input_bait() -> Result<()> {
+        let bait = "ZZ_ARTIFACT_INPUT_BAIT";
         let source = format!("schemaVersion = 1\nvalue = \"{bait}\"\n");
         let error = parse_raw_matrix(&source)
             .err()
-            .context("unknown secret-bearing field was accepted")?;
+            .context("unknown artifact field was accepted")?;
         assert!(!error.to_string().contains(bait));
         assert!(!format!("{error:?}").contains(bait));
         Ok(())
     }
 
     #[test]
-    fn deployment_toml_parse_error_retains_sanitized_location_and_category() -> Result<()> {
-        let bait = "ZZ_DEPLOYMENT_SECRET_BAIT_1802";
+    fn artifact_toml_parse_error_retains_sanitized_location_and_category() -> Result<()> {
+        let bait = "ZZ_ARTIFACT_INPUT_BAIT";
         let source = format!("schemaVersion = 1\nvalue = \"{bait}\n");
         let error = parse_raw_matrix(&source)
             .err()
-            .context("malformed secret-bearing TOML was accepted")?;
+            .context("malformed artifact TOML was accepted")?;
         let diagnostic = error.to_string();
         assert!(!diagnostic.contains(bait));
         assert!(
@@ -2572,34 +2163,6 @@ mod tests {
     }
 
     #[test]
-    fn deployment_raw_secret_debug_is_redacted_through_matrix_carriers() -> Result<()> {
-        let coordinates = [
-            "zz-vault-store-1802",
-            "zz/vault/ref/key/1802",
-            "zz-vault-version-1802",
-        ];
-        let mut profile = runtime_deployment_profile()?;
-        profile.workloads[0].secret_bindings = vec![RawSecretBinding {
-            purpose: SecretPurpose::MigrationDatabaseUrl,
-            consumers: vec![SecretConsumer::Migration],
-            vault: RawVaultObjectRef {
-                store_id: coordinates[0].to_owned(),
-                ref_key: coordinates[1].to_owned(),
-                ref_version: Some(coordinates[2].to_owned()),
-            },
-        }];
-        let diagnostic = format!("{profile:?}");
-        for coordinate in coordinates {
-            assert!(
-                !diagnostic.contains(coordinate),
-                "outer Debug leaked {coordinate}"
-            );
-        }
-        assert!(diagnostic.contains("redacted"));
-        Ok(())
-    }
-
-    #[test]
     #[allow(clippy::cognitive_complexity)] // one red matrix mutates every closed declaration dimension.
     fn synthetic_red_rejects_incomplete_or_unsafe_rows() -> Result<()> {
         let mut green = green_matrix()?;
@@ -2614,7 +2177,6 @@ mod tests {
             "configSchema",
             "healthInventory",
             "journey",
-            "deployment",
         ] {
             let mut row = supported.clone();
             match field {
@@ -2623,7 +2185,6 @@ mod tests {
                 "configSchema" => row.config_schema = None,
                 "healthInventory" => row.health_inventory = None,
                 "journey" => row.journey = None,
-                "deployment" => row.deployment = None,
                 _ => unreachable!(),
             }
             let mut errors = Vec::new();
@@ -2680,7 +2241,6 @@ mod tests {
         downgraded.assemblies[0].config_schema = None;
         downgraded.assemblies[0].health_inventory = None;
         downgraded.assemblies[0].journey = None;
-        downgraded.assemblies[0].deployment = None;
         let mut ratchet_findings = Vec::new();
         validate_supported_ratchet_for(&downgraded, &universe, &["demo"], &mut ratchet_findings);
         assert!(
@@ -3061,6 +2621,198 @@ mod tests {
     }
 
     #[test]
+    fn compose_runtime_delivery_rejects_each_synthetic_mutation() -> Result<()> {
+        let workspace = crate::workspace_root()?;
+        let compose = std::fs::read_to_string(workspace.join("deploy/docker-compose.yml"))?;
+        let smoke = std::fs::read_to_string(workspace.join("deploy/smoke.sh"))?;
+        assert_eq!(validate_compose_runtime_delivery(&compose, &smoke), Ok(()));
+
+        let mutate_service = |service: &str, needle: &str, replacement: &str| -> Result<String> {
+            let block = compose_service_block(&compose, service)
+                .with_context(|| format!("canonical Compose service missing: {service}"))?;
+            let mutated_block = block.replacen(needle, replacement, 1);
+            Ok(compose.replacen(block, &mutated_block, 1))
+        };
+        for (label, service, needle, replacement, expected) in [
+            (
+                "jwks-operator-target",
+                "rss-access-jwks-init",
+                "      target: operator-runtime",
+                "      target: runtime",
+                ComposeSmokeRule::OperatorProjection,
+            ),
+            (
+                "jwks-operator-image",
+                "rss-access-jwks-init",
+                "    image: rss-operator:dev",
+                "    image: rss-runtime:dev",
+                ComposeSmokeRule::OperatorProjection,
+            ),
+            (
+                "migration-operator-target",
+                "migration",
+                "      target: operator-runtime",
+                "      target: runtime",
+                ComposeSmokeRule::OperatorProjection,
+            ),
+            (
+                "migration-operator-image",
+                "migration",
+                "    image: rss-operator:dev",
+                "    image: rss-runtime:dev",
+                ComposeSmokeRule::OperatorProjection,
+            ),
+            (
+                "server-target",
+                "server",
+                "      target: runtime",
+                "      target: operator-runtime",
+                ComposeSmokeRule::ServerProjection,
+            ),
+            (
+                "server-image",
+                "server",
+                "    image: rss-runtime:dev",
+                "    image: rss-operator:dev",
+                ComposeSmokeRule::ServerProjection,
+            ),
+            (
+                "server-grace",
+                "server",
+                "    stop_grace_period: 30s",
+                "    stop_grace_period: 20s",
+                ComposeSmokeRule::ServerProjection,
+            ),
+        ] {
+            let mutated = mutate_service(service, needle, replacement)?;
+            assert_ne!(mutated, compose, "{label} mutation was vacuous");
+            assert_eq!(
+                validate_compose_runtime_delivery(&mutated, &smoke),
+                Err(expected),
+                "{label}"
+            );
+        }
+
+        for (label, needle, replacement) in [
+            (
+                "missing-sigterm",
+                "docker kill --signal=TERM \"$cid\" >/dev/null",
+                "docker stop \"$cid\" >/dev/null",
+            ),
+            (
+                "missing-state-observation",
+                "server_state=\"$(docker inspect -f '{{.State.Status}}:{{.State.ExitCode}}' \"$cid\")\"",
+                "server_state=unknown",
+            ),
+            (
+                "missing-exit-zero",
+                "[[ \"$server_state\" = \"exited:0\" ]] || fail",
+                "[[ \"$server_state\" = exited:* ]] || fail",
+            ),
+            (
+                "missing-fail-branch",
+                "[[ \"$server_state\" = \"exited:0\" ]] || fail",
+                "[[ \"$server_state\" = \"exited:0\" ]] || log",
+            ),
+        ] {
+            let mutated = smoke.replacen(needle, replacement, 1);
+            assert_ne!(mutated, smoke, "{label} mutation was vacuous");
+            assert_eq!(
+                validate_compose_runtime_delivery(&compose, &mutated),
+                Err(ComposeSmokeRule::DrainWitness),
+                "{label}"
+            );
+        }
+        for removed_log_witness in [
+            "server_logs=\"$($COMPOSE logs --no-color server 2>&1)\"",
+            "shutdown signal received",
+            "all runtime resources drained; exiting",
+        ] {
+            assert!(
+                !smoke.contains(removed_log_witness),
+                "smoke must use the process exit receipt instead of log wording: {removed_log_witness}"
+            );
+        }
+        let term = "docker kill --signal=TERM \"$cid\" >/dev/null";
+        let exit_zero = "[[ \"$server_state\" = \"exited:0\" ]] || fail \"SIGTERM 后 server 未在 30 秒内正常退出（state=${server_state}）\"";
+        let reordered_chain = smoke
+            .replacen(term, "__TERM_WITNESS__", 1)
+            .replacen(exit_zero, term, 1)
+            .replacen("__TERM_WITNESS__", exit_zero, 1);
+        assert_ne!(reordered_chain, smoke, "TERM/exit-zero reorder was vacuous");
+        assert_eq!(
+            validate_compose_runtime_delivery(&compose, &reordered_chain),
+            Err(ComposeSmokeRule::DrainWitness)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn compose_runtime_delivery_accepts_typed_yaml_equivalence() -> Result<()> {
+        let compose = r#"
+services:
+  server:
+    stop_grace_period: "30s"
+    image: 'rss-runtime:dev'
+    build: { target: "runtime", dockerfile: Dockerfile, context: .. }
+  migration:
+    image: "rss-operator:dev"
+    build: { target: 'operator-runtime', context: .. }
+  rss-access-jwks-init:
+    build:
+      target: "operator-runtime"
+    image: 'rss-operator:dev'
+"#;
+        let smoke = std::fs::read_to_string(crate::workspace_root()?.join("deploy/smoke.sh"))?;
+
+        assert_eq!(validate_compose_runtime_delivery(compose, &smoke), Ok(()));
+        let reworded_diagnostic = smoke.replace(
+            "SIGTERM 后 server 未在 30 秒内正常退出（state=${server_state}）",
+            "server failed to stop cleanly (state=${server_state})",
+        );
+        assert_ne!(reworded_diagnostic, smoke, "diagnostic rewrite was vacuous");
+        assert_eq!(
+            validate_compose_runtime_delivery(compose, &reworded_diagnostic),
+            Ok(()),
+            "human-readable failure wording must not be part of the drain witness identity"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn compose_runtime_delivery_rejects_non_executable_drain_witnesses() -> Result<()> {
+        let compose =
+            std::fs::read_to_string(crate::workspace_root()?.join("deploy/docker-compose.yml"))?;
+        let witnesses = concat!(
+            "docker kill --signal=TERM \"$cid\" >/dev/null\n",
+            "[[ \"$server_state\" = \"exited:0\" ]] && break\n",
+            "[[ \"$server_state\" = \"exited:0\" ]] || fail\n",
+            "server_logs=\"$($COMPOSE logs --no-color server 2>&1)\"\n",
+            "[[ \"$server_logs\" = *\"shutdown signal received\"* ]]\n",
+            "[[ \"$server_logs\" = *\"all runtime resources drained; exiting\"* ]]\n",
+        );
+        let commented = witnesses
+            .lines()
+            .map(|line| format!("# {line}\n"))
+            .collect::<String>();
+        let heredoc = format!("cat <<'WITNESSES'\n{witnesses}WITNESSES\n");
+        let uncalled_function = format!("unused_witnesses() {{\n{witnesses}}}\n");
+
+        for (label, smoke) in [
+            ("comment", commented),
+            ("here-doc", heredoc),
+            ("uncalled-function", uncalled_function),
+        ] {
+            assert_eq!(
+                validate_compose_runtime_delivery(&compose, &smoke),
+                Err(ComposeSmokeRule::DrainWitness),
+                "non-executable {label} witness satisfied the delivery gate"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn closed_source_grammar_rejects_non_executed_witnesses() -> Result<()> {
         assert!(!cargo_journey_has_exact_test(
             "#[test]\nfn exact() { let dead = || panic!(\"not executed\"); }",
@@ -3102,13 +2854,13 @@ mod tests {
         }
 
         assert!(docker_run_builds_binary(
-            "cargo build --release --locked --package demo --bin demo-server --package rss --bin rss",
+            "cargo build --release --locked --package demo --bin demo-server",
             "demo",
             "demo",
             "demo-server"
         ));
         for bypass in [
-            "cargo build --release --locked --package demo --bin demo-server",
+            "cargo build --release --locked --package demo --bin demo-server --package rss --bin rss",
             "cargo build --release --locked --package demo --bin demo-server --package rss --bin rss --help",
             "cargo build --release --locked --package demo --bin demo-server --package rss --bin other",
             "cargo build --release --locked --package demo --bin demo-server --package rss --bin rss --package third --bin third",
@@ -3261,78 +3013,6 @@ mod tests {
         Ok(())
     }
 
-    fn runtime_deployment_profile() -> Result<RawDeploymentProfile> {
-        let raw: RawMatrix = parse_raw_matrix(include_str!("../../assemblies/artifacts.toml"))?;
-        raw.assemblies
-            .into_iter()
-            .find(|row| row.name == "runtime")
-            .and_then(|row| row.deployment)
-            .context("runtime deployment profile missing")
-    }
-
-    fn assert_deployment_red(root: &Path, raw: &RawDeploymentProfile, label: &str) -> Result<()> {
-        let mut findings = Vec::new();
-        let _ = validate_deployment(root, "runtime", raw, &mut findings)?;
-        assert!(
-            findings
-                .iter()
-                .any(|finding| finding.rule == ArtifactRule::Deployment),
-            "deployment mutation escaped ({label}): {findings:?}"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn deployment_profile_semantic_closure_has_synthetic_red() -> Result<()> {
-        let root = crate::workspace_root()?;
-
-        let mut wrong_path = runtime_deployment_profile()?;
-        wrong_path.runtime_plan.path = "assemblies/runtime/legacy-runtime-plan.json".to_owned();
-        assert_deployment_red(&root, &wrong_path, "runtime path")?;
-
-        let mut wrong_profile = runtime_deployment_profile()?;
-        wrong_profile.runtime_plan.profile = AssemblyProfile::Demo;
-        assert_deployment_red(&root, &wrong_profile, "lock profile")?;
-
-        let mut missing_port = runtime_deployment_profile()?;
-        missing_port.services[0]
-            .ports
-            .retain(|port| port.name != "http");
-        assert_deployment_red(&root, &missing_port, "missing listener port")?;
-
-        let mut duplicate_port = runtime_deployment_profile()?;
-        let duplicate = duplicate_port.services[0].ports[0].clone();
-        duplicate_port.services[0].ports.push(duplicate);
-        assert_deployment_red(&root, &duplicate_port, "duplicate listener port")?;
-
-        let mut wrong_identity = runtime_deployment_profile()?;
-        wrong_identity.workloads[0].identity.name = "other".to_owned();
-        assert_deployment_red(&root, &wrong_identity, "identity name")?;
-
-        let mut wrong_probe = runtime_deployment_profile()?;
-        wrong_probe.workloads[0].probes[0].port = 8081;
-        assert_deployment_red(&root, &wrong_probe, "non-health probe port")?;
-
-        let foreign_root = temp_root("deployment-foreign-runtime")?;
-        let assembly_dir = foreign_root.join("assemblies/runtime");
-        std::fs::create_dir_all(&assembly_dir)?;
-        std::fs::copy(
-            root.join("assemblies/runtime/assembly.lock.json"),
-            assembly_dir.join("assembly.lock.json"),
-        )?;
-        std::fs::copy(
-            root.join("assemblies/settingsonly/runtime-plan.json"),
-            assembly_dir.join("runtime-plan.json"),
-        )?;
-        assert_deployment_red(
-            &foreign_root,
-            &runtime_deployment_profile()?,
-            "foreign RuntimePlan fingerprint",
-        )?;
-        std::fs::remove_dir_all(foreign_root)?;
-        Ok(())
-    }
-
     #[test]
     #[allow(clippy::cognitive_complexity)] // anti-vacuity pins every typed supported-row accessor.
     fn real_workspace_matrix_is_exact_and_complete() -> Result<()> {
@@ -3358,42 +3038,7 @@ mod tests {
             assert!(!row.contains(MISSING), "vacuous Markdown row: {row}");
         }
         let verified = validation.verified.context("missing verified matrix")?;
-        let rows = verified.supported_rows();
-        assert_eq!(
-            rows.iter().map(SupportedArtifact::name).collect::<Vec<_>>(),
-            ["identityaudit", "runtime", "settingsonly"]
-        );
-        assert_eq!(rows[0].binary(), ("identityaudit", "identityaudit-server"));
-        assert_eq!(rows[0].image(), ("Dockerfile", "identityaudit-runtime"));
-        assert_eq!(
-            rows[0].config_carrier(),
-            ("json-schema", "assemblies/identityaudit/config.schema.json")
-        );
-        assert_eq!(rows[0].health_inventory(), ("runtimeexec", "health"));
-        assert_eq!(
-            rows[0].journey(),
-            "cargo-test:journeys#identityaudit_runtime#identityaudit_login_audit_ready_sigterm_drain"
-        );
-        assert_eq!(rows[1].binary(), ("server", "server"));
-        assert_eq!(
-            rows[1].config_carrier(),
-            ("typed-env-catalog", "assemblies/runtime/src/config.rs")
-        );
-        assert_eq!(rows[1].journey(), "compose-smoke-v1:deploy/smoke.sh");
-        assert_eq!(rows[2].binary(), ("settingsonly", "settingsonly-server"));
-        for (row, profile) in rows.iter().zip([
-            AssemblyProfile::Production,
-            AssemblyProfile::Production,
-            AssemblyProfile::Demo,
-        ]) {
-            let deployment = row.deployment();
-            assert_eq!(deployment.profile(), profile);
-            assert_eq!(
-                deployment.runtime_plan_path(),
-                format!("assemblies/{}/runtime-plan.json", row.name())
-            );
-            DeploymentPlan::compile_v1(deployment.runtime_plan(), deployment.plan_input())?;
-        }
+        assert_eq!(verified.supported_count, 3);
         assert!(!cargo_catalog.target_exists("server", "ghost", "bin"));
         assert!(
             cargo_catalog

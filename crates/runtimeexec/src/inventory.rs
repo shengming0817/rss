@@ -1,8 +1,6 @@
 //! Provider-independent, non-serializable runtime inventory observation model.
 
-use assembly_schema::{
-    AssemblyDomain, AssemblyListenerKind, ListenerAuth, ParsedDeploymentPlan, RuntimePlan,
-};
+use assembly_schema::{AssemblyDomain, AssemblyListenerKind, ListenerAuth, RuntimePlan};
 use bootstrap::HealthReporter;
 use primitives::{HealthStatus, ProbeName};
 use std::collections::{BTreeMap, BTreeSet};
@@ -11,42 +9,62 @@ use std::sync::{Arc, OnceLock};
 
 const SCHEMA_VERSION: u32 = 1;
 
+/// Build metadata declared to the process by its launch environment.
+///
+/// The image digest cannot be self-proven by a binary embedded in that image. This value is
+/// therefore reportable metadata, not an OCI/SLSA verification receipt, and is deliberately never
+/// joined to an external delivery plan or workload identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BuildIdentity {
-    source_sha: String,
+pub struct BuildMetadata {
+    source_revision: String,
     image_digest: String,
 }
 
-impl BuildIdentity {
-    pub fn parse(source_sha: &str, image_digest: &str) -> Result<Self, InventoryError> {
-        if source_sha.len() != 40 || !is_lower_hex(source_sha) {
-            return Err(InventoryError::BuildIdentity);
+impl BuildMetadata {
+    pub fn parse(source_revision: &str, image_digest: &str) -> Result<Self, InventoryError> {
+        if !matches!(source_revision.len(), 40 | 64) || !is_lower_hex(source_revision) {
+            return Err(InventoryError::BuildMetadata);
         }
         if image_digest.len() != 71
             || !image_digest.starts_with("sha256:")
             || !is_lower_hex(&image_digest[7..])
         {
-            return Err(InventoryError::BuildIdentity);
+            return Err(InventoryError::BuildMetadata);
         }
         Ok(Self {
-            source_sha: source_sha.to_owned(),
+            source_revision: source_revision.to_owned(),
             image_digest: image_digest.to_owned(),
         })
     }
 
-    pub fn source_sha(&self) -> &str {
-        &self.source_sha
+    pub fn source_revision(&self) -> &str {
+        &self.source_revision
     }
 
     pub fn image_digest(&self) -> &str {
         &self.image_digest
     }
+
+    /// Parse an optional launch assertion. The pair is atomic: a partial claim is rejected.
+    pub fn from_optional(
+        source_revision: Option<&str>,
+        image_digest: Option<&str>,
+    ) -> Result<Option<Self>, InventoryError> {
+        match (source_revision, image_digest) {
+            (None, None) => Ok(None),
+            (Some(source_revision), Some(image_digest)) => {
+                Self::parse(source_revision, image_digest).map(Some)
+            }
+            _ => Err(InventoryError::BuildMetadata),
+        }
+    }
 }
 
 fn is_lower_hex(value: &str) -> bool {
-    value
-        .bytes()
-        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -283,13 +301,10 @@ impl PlacementObservation {
 
 pub struct RuntimeInventorySeed {
     assembly_fingerprint: String,
+    build_metadata: Option<BuildMetadata>,
     runtime_plan_fingerprint: String,
-    deployment_fingerprint: String,
-    build_identity: BuildIdentity,
     domains: Vec<AssemblyDomain>,
     listeners: Vec<ExpectedListener>,
-    service_endpoints: Vec<(AssemblyListenerKind, u16)>,
-    probe_endpoints: BTreeSet<u16>,
     provider_bindings: Vec<ProviderProbeBinding>,
     placements: Vec<PlacementObservation>,
 }
@@ -302,56 +317,11 @@ struct ExpectedListener {
 }
 
 impl RuntimeInventorySeed {
-    pub fn from_bound(
+    pub fn from_runtime_plan(
         runtime: &RuntimePlan,
-        deployment: &ParsedDeploymentPlan,
-        workload: &str,
-        build_identity: BuildIdentity,
         mut provider_bindings: Vec<ProviderProbeBinding>,
         mut placements: Vec<PlacementObservation>,
     ) -> Result<Self, InventoryError> {
-        if deployment.assembly_fingerprint() != runtime.assembly_fingerprint() {
-            return Err(InventoryError::AssemblyFingerprintMismatch);
-        }
-        if deployment.runtime_plan_fingerprint() != runtime.runtime_plan_fingerprint() {
-            return Err(InventoryError::RuntimePlanFingerprintMismatch);
-        }
-        let workload_plan = deployment
-            .workloads()
-            .iter()
-            .find(|candidate| candidate.name() == workload)
-            .ok_or(InventoryError::DeploymentWorkload)?;
-        let (_, expected_digest) = workload_plan
-            .image()
-            .rsplit_once('@')
-            .ok_or(InventoryError::DeploymentWorkload)?;
-        if expected_digest != build_identity.image_digest() {
-            return Err(InventoryError::BuildImageMismatch);
-        }
-
-        let mut service_endpoints = deployment
-            .services()
-            .iter()
-            .filter(|service| service.workload() == workload)
-            .flat_map(|service| service.ports())
-            .map(|port| {
-                let kind = match port.name() {
-                    "http" => AssemblyListenerKind::Primary,
-                    "admin" => AssemblyListenerKind::Admin,
-                    "health" => AssemblyListenerKind::Health,
-                    "internal" => AssemblyListenerKind::Internal,
-                    _ => return Err(InventoryError::DeploymentWorkload),
-                };
-                Ok((kind, port.port()))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        service_endpoints.sort_unstable();
-        let probe_endpoints = workload_plan
-            .probes()
-            .iter()
-            .map(|probe| probe.port())
-            .collect();
-
         provider_bindings.sort_by(|left, right| left.provider_id.cmp(&right.provider_id));
         let expected_providers = runtime
             .provider_plans()
@@ -388,9 +358,8 @@ impl RuntimeInventorySeed {
 
         Ok(Self {
             assembly_fingerprint: runtime.assembly_fingerprint().as_str().to_owned(),
+            build_metadata: None,
             runtime_plan_fingerprint: runtime.runtime_plan_fingerprint().as_str().to_owned(),
-            deployment_fingerprint: deployment.deployment_fingerprint().as_str().to_owned(),
-            build_identity,
             domains: runtime
                 .domain_plans()
                 .iter()
@@ -405,11 +374,15 @@ impl RuntimeInventorySeed {
                     auth: listener.auth(),
                 })
                 .collect(),
-            service_endpoints,
-            probe_endpoints,
             provider_bindings,
             placements,
         })
+    }
+
+    /// Attach launch-supplied build metadata without coupling it to runtime/deployment identity.
+    pub fn with_build_metadata(mut self, build_metadata: BuildMetadata) -> Self {
+        self.build_metadata = Some(build_metadata);
+        self
     }
 }
 
@@ -440,9 +413,8 @@ impl ProviderPosture {
 pub struct RuntimeInventorySnapshot {
     schema_version: u32,
     assembly_fingerprint: String,
+    build_metadata: Option<BuildMetadata>,
     runtime_plan_fingerprint: String,
-    deployment_fingerprint: String,
-    build_identity: BuildIdentity,
     domains: Vec<AssemblyDomain>,
     listeners: Vec<BoundListenerObservation>,
     provider_posture: Vec<ProviderPosture>,
@@ -456,14 +428,11 @@ impl RuntimeInventorySnapshot {
     pub fn assembly_fingerprint(&self) -> &str {
         &self.assembly_fingerprint
     }
+    pub fn build_metadata(&self) -> Option<&BuildMetadata> {
+        self.build_metadata.as_ref()
+    }
     pub fn runtime_plan_fingerprint(&self) -> &str {
         &self.runtime_plan_fingerprint
-    }
-    pub fn deployment_fingerprint(&self) -> &str {
-        &self.deployment_fingerprint
-    }
-    pub const fn build_identity(&self) -> &BuildIdentity {
-        &self.build_identity
     }
     pub fn domains(&self) -> &[AssemblyDomain] {
         &self.domains
@@ -570,21 +539,6 @@ impl InventoryPublisher {
         if !exact {
             return Err(InventoryError::ListenerBinding);
         }
-        let mut actual_endpoints = listeners
-            .iter()
-            .map(|listener| (listener.kind, listener.endpoint.port))
-            .collect::<Vec<_>>();
-        actual_endpoints.sort_unstable();
-        let actual_probe_endpoints = listeners
-            .iter()
-            .filter(|listener| listener.kind == AssemblyListenerKind::Health)
-            .map(|listener| listener.endpoint.port)
-            .collect::<BTreeSet<_>>();
-        if actual_endpoints != self.0.seed.service_endpoints
-            || actual_probe_endpoints != self.0.seed.probe_endpoints
-        {
-            return Err(InventoryError::ListenerBinding);
-        }
         self.0
             .listeners
             .set(listeners)
@@ -631,9 +585,8 @@ impl InventoryReader {
         Ok(RuntimeInventorySnapshot {
             schema_version: SCHEMA_VERSION,
             assembly_fingerprint: self.0.seed.assembly_fingerprint.clone(),
+            build_metadata: self.0.seed.build_metadata.clone(),
             runtime_plan_fingerprint: self.0.seed.runtime_plan_fingerprint.clone(),
-            deployment_fingerprint: self.0.seed.deployment_fingerprint.clone(),
-            build_identity: self.0.seed.build_identity.clone(),
             domains: self.0.seed.domains.clone(),
             listeners: listeners.clone(),
             provider_posture,
@@ -666,16 +619,8 @@ fn provider_state(
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum InventoryError {
-    #[error("runtime inventory build identity is invalid")]
-    BuildIdentity,
-    #[error("runtime inventory build image does not match deployment")]
-    BuildImageMismatch,
-    #[error("runtime inventory deployment assembly fingerprint does not match runtime plan")]
-    AssemblyFingerprintMismatch,
-    #[error("runtime inventory deployment runtime fingerprint does not match runtime plan")]
-    RuntimePlanFingerprintMismatch,
-    #[error("runtime inventory deployment workload is invalid")]
-    DeploymentWorkload,
+    #[error("runtime inventory build metadata is invalid")]
+    BuildMetadata,
     #[error("runtime inventory provider binding is invalid")]
     ProviderBinding,
     #[error("runtime inventory listener binding is invalid")]
@@ -693,158 +638,18 @@ pub enum InventoryError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assembly_schema::{ParsedRuntimePlan, WorkloadPlan};
+    use assembly_schema::ParsedRuntimePlan;
     use bootstrap::{HealthProbe, Registry};
     use primitives::{HealthCheck, ProbeName};
-    use sha2::{Digest, Sha256};
     use std::error::Error;
     use std::sync::atomic::{AtomicU8, Ordering};
 
     type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
-    fn bound_plans() -> TestResult<(
-        ParsedRuntimePlan,
-        ParsedDeploymentPlan,
-        String,
-        BuildIdentity,
-    )> {
-        let runtime = ParsedRuntimePlan::from_json_slice(include_bytes!(
+    fn runtime_plan() -> TestResult<ParsedRuntimePlan> {
+        Ok(ParsedRuntimePlan::from_json_slice(include_bytes!(
             "../../../assemblies/settingsonly/runtime-plan.json"
-        ))?;
-        let deployment = ParsedDeploymentPlan::from_json_slice(
-            runtime.as_plan(),
-            include_bytes!("../../../deploy/generated/settingsonly.deployment-plan.json"),
-        )?;
-        let workload = deployment.workloads()[0].name().to_owned();
-        let digest = image_digest(&deployment.workloads()[0])?.to_owned();
-        let build = BuildIdentity::parse(&"a".repeat(40), &digest)?;
-        Ok((runtime, deployment, workload, build))
-    }
-
-    fn image_digest(workload: &WorkloadPlan) -> TestResult<&str> {
-        Ok(workload
-            .image()
-            .rsplit_once('@')
-            .ok_or("fixture image must be immutable")?
-            .1)
-    }
-
-    fn fingerprint(tag: &str, value: &serde_json::Value) -> TestResult<String> {
-        let canonical = serde_json_canonicalizer::to_vec(value)?;
-        let mut hasher = Sha256::new();
-        hasher.update(tag.as_bytes());
-        hasher.update([0]);
-        hasher.update(canonical);
-        Ok(format!("sha256:{:x}", hasher.finalize()))
-    }
-
-    fn same_assembly_different_runtime() -> TestResult<(ParsedRuntimePlan, ParsedDeploymentPlan)> {
-        let mut runtime: serde_json::Value = serde_json::from_slice(include_bytes!(
-            "../../../assemblies/settingsonly/runtime-plan.json"
-        ))?;
-        runtime["listenerPlans"][0]["auth"] =
-            serde_json::Value::String("rssAccessToken".to_owned());
-        let mut unsigned_runtime = runtime.clone();
-        unsigned_runtime
-            .as_object_mut()
-            .ok_or("runtime fixture must be an object")?
-            .remove("runtimePlanFingerprint");
-        let runtime_fingerprint = fingerprint("rss-runtime-plan-v1", &unsigned_runtime)?;
-        runtime["runtimePlanFingerprint"] = serde_json::Value::String(runtime_fingerprint.clone());
-        let runtime = ParsedRuntimePlan::from_json_slice(&serde_json::to_vec(&runtime)?)?;
-
-        let mut deployment: serde_json::Value = serde_json::from_slice(include_bytes!(
-            "../../../deploy/generated/settingsonly.deployment-plan.json"
-        ))?;
-        deployment["runtimePlanFingerprint"] = serde_json::Value::String(runtime_fingerprint);
-        let mut unsigned_deployment = deployment.clone();
-        unsigned_deployment
-            .as_object_mut()
-            .ok_or("deployment fixture must be an object")?
-            .remove("deploymentFingerprint");
-        deployment["deploymentFingerprint"] =
-            serde_json::Value::String(fingerprint("rss-deployment-plan-v1", &unsigned_deployment)?);
-        let deployment = ParsedDeploymentPlan::from_json_slice(
-            runtime.as_plan(),
-            &serde_json::to_vec(&deployment)?,
-        )?;
-        Ok((runtime, deployment))
-    }
-
-    #[test]
-    fn inventory_build_identity_is_closed() {
-        assert!(
-            BuildIdentity::parse(&"a".repeat(40), &format!("sha256:{}", "b".repeat(64))).is_ok()
-        );
-        assert_eq!(
-            BuildIdentity::parse(&"A".repeat(40), &format!("sha256:{}", "b".repeat(64))),
-            Err(InventoryError::BuildIdentity)
-        );
-        assert_eq!(
-            BuildIdentity::parse(&"a".repeat(40), &format!("sha256:{}", "B".repeat(64))),
-            Err(InventoryError::BuildIdentity)
-        );
-    }
-
-    #[test]
-    fn inventory_seed_rejects_image_mismatch() -> TestResult {
-        let (runtime, deployment, workload, _) = bound_plans()?;
-        let build = BuildIdentity::parse(&"a".repeat(40), &format!("sha256:{}", "b".repeat(64)))?;
-        let error = RuntimeInventorySeed::from_bound(
-            runtime.as_plan(),
-            &deployment,
-            &workload,
-            build,
-            Vec::new(),
-            Vec::new(),
-        )
-        .err();
-        assert_eq!(error, Some(InventoryError::BuildImageMismatch));
-        Ok(())
-    }
-
-    #[test]
-    fn inventory_seed_exact_joins_deployment_assembly_fingerprint() -> TestResult {
-        let (runtime, _, workload, build) = bound_plans()?;
-        let other_runtime = ParsedRuntimePlan::from_json_slice(include_bytes!(
-            "../../../assemblies/identityaudit/runtime-plan.json"
-        ))?;
-        let other_deployment = ParsedDeploymentPlan::from_json_slice(
-            other_runtime.as_plan(),
-            include_bytes!("../../../deploy/generated/identityaudit.deployment-plan.json"),
-        )?;
-        assert_eq!(
-            RuntimeInventorySeed::from_bound(
-                runtime.as_plan(),
-                &other_deployment,
-                &workload,
-                build,
-                Vec::new(),
-                Vec::new(),
-            )
-            .err(),
-            Some(InventoryError::AssemblyFingerprintMismatch)
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn inventory_seed_exact_joins_deployment_runtime_fingerprint() -> TestResult {
-        let (runtime, _, workload, build) = bound_plans()?;
-        let (_, changed_deployment) = same_assembly_different_runtime()?;
-        assert_eq!(
-            RuntimeInventorySeed::from_bound(
-                runtime.as_plan(),
-                &changed_deployment,
-                &workload,
-                build,
-                Vec::new(),
-                Vec::new(),
-            )
-            .err(),
-            Some(InventoryError::RuntimePlanFingerprintMismatch)
-        );
-        Ok(())
+        ))?)
     }
 
     struct FixedProbe(ProbeName, HealthStatus);
@@ -886,9 +691,6 @@ mod tests {
 
     fn exact_seed(
         runtime: &ParsedRuntimePlan,
-        deployment: &ParsedDeploymentPlan,
-        workload: &str,
-        build: BuildIdentity,
         probe: Option<ProbeName>,
     ) -> TestResult<RuntimeInventorySeed> {
         let providers = runtime
@@ -911,39 +713,59 @@ mod tests {
             .iter()
             .map(|placement| PlacementObservation::local(placement.domain(), placement.workload()))
             .collect();
-        Ok(RuntimeInventorySeed::from_bound(
-            runtime.as_plan(),
-            deployment,
-            workload,
-            build,
-            providers,
-            placements,
-        )?)
+        Ok(
+            RuntimeInventorySeed::from_runtime_plan(runtime.as_plan(), providers, placements)?
+                .with_build_metadata(BuildMetadata::parse(
+                    &"a".repeat(40),
+                    &format!("sha256:{}", "b".repeat(64)),
+                )?),
+        )
     }
 
-    fn exact_listeners(
-        runtime: &ParsedRuntimePlan,
-        deployment: &ParsedDeploymentPlan,
-        workload: &str,
-    ) -> TestResult<Vec<BoundListenerObservation>> {
+    #[test]
+    fn inventory_build_metadata_is_closed_and_reported_without_deployment_join() -> TestResult {
+        assert!(
+            BuildMetadata::parse(&"a".repeat(40), &format!("sha256:{}", "b".repeat(64))).is_ok()
+        );
+        assert!(
+            BuildMetadata::parse(&"a".repeat(64), &format!("sha256:{}", "b".repeat(64))).is_ok()
+        );
+        for (revision, digest) in [
+            ("A".repeat(40), format!("sha256:{}", "b".repeat(64))),
+            ("a".repeat(39), format!("sha256:{}", "b".repeat(64))),
+            ("a".repeat(40), format!("sha256:{}", "B".repeat(64))),
+            ("a".repeat(40), "sha256:short".to_owned()),
+        ] {
+            assert_eq!(
+                BuildMetadata::parse(&revision, &digest),
+                Err(InventoryError::BuildMetadata)
+            );
+        }
+
+        let runtime = runtime_plan()?;
+        let seed = exact_seed(&runtime, None)?;
+        let (publisher, reader) = inventory_channel(seed, reporter(HealthStatus::Healthy)?);
+        publisher.publish(exact_listeners(&runtime)?)?;
+        let metadata = reader
+            .read()?
+            .build_metadata()
+            .ok_or("fixture build metadata")?
+            .clone();
+        assert_eq!(metadata.source_revision(), "a".repeat(40));
+        assert_eq!(
+            metadata.image_digest(),
+            format!("sha256:{}", "b".repeat(64))
+        );
+        Ok(())
+    }
+
+    fn exact_listeners(runtime: &ParsedRuntimePlan) -> TestResult<Vec<BoundListenerObservation>> {
         runtime
             .listener_plans()
             .iter()
-            .map(|listener| {
-                let port_name = match listener.kind() {
-                    AssemblyListenerKind::Primary => "http",
-                    AssemblyListenerKind::Admin => "admin",
-                    AssemblyListenerKind::Health => "health",
-                    AssemblyListenerKind::Internal => "internal",
-                };
-                let port = deployment
-                    .services()
-                    .iter()
-                    .filter(|service| service.workload() == workload)
-                    .flat_map(|service| service.ports())
-                    .find(|port| port.name() == port_name)
-                    .ok_or("listener port must exist in deployment fixture")?
-                    .port();
+            .enumerate()
+            .map(|(index, listener)| {
+                let port = 10_000 + u16::try_from(index)?;
                 Ok(BoundListenerObservation::from_bound(
                     listener.id(),
                     listener.kind(),
@@ -989,9 +811,9 @@ mod tests {
     #[test]
     fn inventory_listener_publication_requires_exact_runtime_join() -> TestResult {
         let make = || -> TestResult<_> {
-            let (runtime, deployment, workload, build) = bound_plans()?;
-            let seed = exact_seed(&runtime, &deployment, &workload, build, None)?;
-            let listeners = exact_listeners(&runtime, &deployment, &workload)?;
+            let runtime = runtime_plan()?;
+            let seed = exact_seed(&runtime, None)?;
+            let listeners = exact_listeners(&runtime)?;
             Ok((runtime, seed, listeners))
         };
 
@@ -1063,54 +885,12 @@ mod tests {
     }
 
     #[test]
-    fn inventory_listener_publication_rejects_deployment_port_drift() -> TestResult {
-        let (runtime, deployment, workload, build) = bound_plans()?;
-        let seed = exact_seed(&runtime, &deployment, &workload, build, None)?;
-        let mut listeners = exact_listeners(&runtime, &deployment, &workload)?;
-        listeners[0].endpoint.port += 1;
-
-        assert_eq!(
-            inventory_channel(seed, reporter(HealthStatus::Healthy)?)
-                .0
-                .publish(listeners),
-            Err(InventoryError::ListenerBinding)
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn inventory_listener_publication_rejects_probe_endpoint_drift() -> TestResult {
-        let (runtime, deployment, workload, build) = bound_plans()?;
-        let mut seed = exact_seed(&runtime, &deployment, &workload, build, None)?;
-        let mut listeners = exact_listeners(&runtime, &deployment, &workload)?;
-        let health = listeners
-            .iter_mut()
-            .find(|listener| listener.kind == AssemblyListenerKind::Health)
-            .ok_or("fixture must contain a health listener")?;
-        health.endpoint.port += 1;
-        let service_health = seed
-            .service_endpoints
-            .iter_mut()
-            .find(|(kind, _)| *kind == AssemblyListenerKind::Health)
-            .ok_or("fixture must contain a health service endpoint")?;
-        service_health.1 += 1;
-
-        assert_eq!(
-            inventory_channel(seed, reporter(HealthStatus::Healthy)?)
-                .0
-                .publish(listeners),
-            Err(InventoryError::ListenerBinding)
-        );
-        Ok(())
-    }
-
-    #[test]
     fn inventory_reader_recomputes_provider_posture_on_each_request() -> TestResult {
-        let (runtime, deployment, workload, build) = bound_plans()?;
+        let runtime = runtime_plan()?;
         let (health, state, probe) = mutable_reporter()?;
-        let seed = exact_seed(&runtime, &deployment, &workload, build, Some(probe))?;
+        let seed = exact_seed(&runtime, Some(probe))?;
         let (publisher, reader) = inventory_channel(seed, health);
-        publisher.publish(exact_listeners(&runtime, &deployment, &workload)?)?;
+        publisher.publish(exact_listeners(&runtime)?)?;
 
         assert_eq!(
             reader.read()?.provider_posture()[0].state(),
@@ -1131,15 +911,15 @@ mod tests {
 
     #[test]
     fn inventory_reader_recomputes_remote_placement_on_each_request() -> TestResult {
-        let (runtime, deployment, workload, build) = bound_plans()?;
-        let mut seed = exact_seed(&runtime, &deployment, &workload, build, None)?;
+        let runtime = runtime_plan()?;
+        let mut seed = exact_seed(&runtime, None)?;
         let placement = seed
             .placements
             .first_mut()
             .ok_or("fixture must contain a placement")?;
         placement.mode = InventoryPlacementMode::Remote;
         placement.readiness = InventoryPlacementReadiness::PeerEndpointUnresolved;
-        let listeners = exact_listeners(&runtime, &deployment, &workload)?;
+        let listeners = exact_listeners(&runtime)?;
         let readiness = Arc::new(AtomicU8::new(0));
         let sampled = Arc::clone(&readiness);
         let (publisher, reader, health_publisher, placement_publisher) =
@@ -1172,7 +952,7 @@ mod tests {
     #[test]
     fn inventory_provider_bindings_require_exact_ids_and_allow_explicit_shared_probes() -> TestResult
     {
-        let (runtime, deployment, workload, build) = bound_plans()?;
+        let runtime = runtime_plan()?;
         let placements = || {
             runtime
                 .placement_plans()
@@ -1189,11 +969,8 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()?;
         let missing = bindings.pop().ok_or("fixture must contain a provider")?;
         assert_eq!(
-            RuntimeInventorySeed::from_bound(
+            RuntimeInventorySeed::from_runtime_plan(
                 runtime.as_plan(),
-                &deployment,
-                &workload,
-                build.clone(),
                 bindings.clone(),
                 placements(),
             )
@@ -1204,28 +981,14 @@ mod tests {
         duplicate.push(missing.clone());
         duplicate.push(missing.clone());
         assert_eq!(
-            RuntimeInventorySeed::from_bound(
-                runtime.as_plan(),
-                &deployment,
-                &workload,
-                build.clone(),
-                duplicate,
-                placements(),
-            )
-            .err(),
+            RuntimeInventorySeed::from_runtime_plan(runtime.as_plan(), duplicate, placements())
+                .err(),
             Some(InventoryError::ProviderBinding)
         );
         bindings.push(ProviderProbeBinding::new("unknown-provider", Vec::new())?);
         assert_eq!(
-            RuntimeInventorySeed::from_bound(
-                runtime.as_plan(),
-                &deployment,
-                &workload,
-                build.clone(),
-                bindings,
-                placements(),
-            )
-            .err(),
+            RuntimeInventorySeed::from_runtime_plan(runtime.as_plan(), bindings, placements())
+                .err(),
             Some(InventoryError::ProviderBinding)
         );
 
@@ -1235,20 +998,13 @@ mod tests {
             .iter()
             .map(|provider| ProviderProbeBinding::new(provider.id(), vec![shared.clone()]))
             .collect::<Result<Vec<_>, _>>()?;
-        RuntimeInventorySeed::from_bound(
-            runtime.as_plan(),
-            &deployment,
-            &workload,
-            build,
-            exact,
-            placements(),
-        )?;
+        RuntimeInventorySeed::from_runtime_plan(runtime.as_plan(), exact, placements())?;
         Ok(())
     }
 
     #[test]
     fn inventory_reader_is_unavailable_before_exact_listener_publication() -> TestResult {
-        let (runtime, deployment, workload, build) = bound_plans()?;
+        let runtime = runtime_plan()?;
         let providers = runtime
             .provider_plans()
             .iter()
@@ -1259,17 +1015,11 @@ mod tests {
             .iter()
             .map(|placement| PlacementObservation::local(placement.domain(), placement.workload()))
             .collect();
-        let seed = RuntimeInventorySeed::from_bound(
-            runtime.as_plan(),
-            &deployment,
-            &workload,
-            build,
-            providers,
-            placements,
-        )?;
+        let seed =
+            RuntimeInventorySeed::from_runtime_plan(runtime.as_plan(), providers, placements)?;
         let (publisher, reader) = inventory_channel(seed, reporter(HealthStatus::Healthy)?);
         assert!(matches!(reader.read(), Err(InventoryError::Unavailable)));
-        let listeners = exact_listeners(&runtime, &deployment, &workload)?;
+        let listeners = exact_listeners(&runtime)?;
         publisher.publish(listeners)?;
         let snapshot = reader.read()?;
         assert_eq!(snapshot.schema_version(), 1);

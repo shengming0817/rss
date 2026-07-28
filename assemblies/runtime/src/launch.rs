@@ -11,16 +11,11 @@ use diport::DynManagedResource;
 use httpd::HttpServer;
 use primitives::{AuthScheme, ListenerKind};
 
-#[path = "deployment_facts.rs"]
-mod deployment_facts;
-
 pub(crate) const HTTP_SERVER_REQUEST_BUDGET_ENV: &str = "RSS_HTTP_SERVER_REQUEST_BUDGET_MS";
-const TOTAL_DRAIN_BUDGET: Duration = Duration::from_secs(deployment_facts::TOTAL_DRAIN_SECONDS);
-const DEPLOYMENT_GRACE_PERIOD: Duration = Duration::from_secs(30);
-const EXIT_BUFFER: Duration = Duration::from_secs(5);
+const TOTAL_DRAIN_BUDGET: Duration = Duration::from_secs(20);
 
 pub(crate) fn total_drain_budget() -> anyhow::Result<runtimeexec::TotalDrainBudget> {
-    runtimeexec::TotalDrainBudget::new(TOTAL_DRAIN_BUDGET, DEPLOYMENT_GRACE_PERIOD, EXIT_BUFFER)
+    runtimeexec::TotalDrainBudget::new(TOTAL_DRAIN_BUDGET)
 }
 
 pub(crate) fn server_request_budget(
@@ -114,6 +109,8 @@ pub(crate) struct PreparedRuntimeListeners {
 
 pub(crate) struct RuntimeListenerInventory {
     listener_count: usize,
+    #[cfg(feature = "integration")]
+    admin: Option<SocketAddr>,
 }
 
 impl<R, P> runtimeexec::LaunchAdapter<routes::FinalizedProbeReceipt> for RuntimeLaunchAdapter<R, P>
@@ -242,11 +239,88 @@ impl BoundListenerSet {
         R: ListenerRegistrar,
     {
         let listener_count = self.non_health.len() + self.health.len();
+        #[cfg(feature = "integration")]
+        let admin = self
+            .non_health
+            .iter()
+            .chain(&self.health)
+            .find(|listener| listener.listener == ListenerKind::Admin)
+            .map(|listener| listener.bound.local_addr());
         for listener in self.non_health.into_iter().chain(self.health) {
             listener.activate(registrar);
         }
-        RuntimeListenerInventory { listener_count }
+        RuntimeListenerInventory {
+            listener_count,
+            #[cfg(feature = "integration")]
+            admin,
+        }
     }
+}
+
+#[cfg(feature = "integration")]
+pub(crate) struct InventoryJourneyHttpResult {
+    pub(crate) status: reqwest::StatusCode,
+    pub(crate) body: Vec<u8>,
+    pub(crate) serving_address: SocketAddr,
+}
+
+/// Exercise the production runtime bind, inventory publication and activation funnel using
+/// kernel-assigned ports, then query the exact activated Admin socket.
+#[cfg(feature = "integration")]
+pub(crate) async fn serve_inventory_journey(
+    admin: httpserve::AuthenticatedRoutes,
+    inventory_publisher: runtimeexec::inventory::InventoryPublisher,
+    bearer: String,
+) -> anyhow::Result<InventoryJourneyHttpResult> {
+    let (listeners, receipt) = routes::FinalizedListenerSet::for_inventory_journey(admin)?;
+    let adapter = RuntimeLaunchAdapter::new(
+        listeners,
+        httpserve::ServerRequestBudget::from_millis(
+            NonZeroU64::new(1_000).context("non-zero journey request budget")?,
+        ),
+        |_, _| "127.0.0.1:0".parse().map_err(anyhow::Error::from),
+        inventory_publisher,
+    );
+    let (completion, controlled) = runtimeexec::test_support::controlled();
+    let launch = runtimeexec::LaunchPlan::new(
+        adapter,
+        receipt,
+        move |inventory: RuntimeListenerInventory| async move {
+            let result = async {
+                let serving_address = inventory
+                    .admin
+                    .context("runtime activation did not mint an Admin socket")?;
+                let response = reqwest::Client::new()
+                    .get(format!(
+                        "http://{serving_address}{}",
+                        generated::http::runtime_v1::inventory::PATH
+                    ))
+                    .bearer_auth(bearer)
+                    .send()
+                    .await?;
+                let status = response.status();
+                let body = response.bytes().await?.to_vec();
+                Ok(InventoryJourneyHttpResult {
+                    status,
+                    body,
+                    serving_address,
+                })
+            }
+            .await;
+            completion.complete(result)
+        },
+        None,
+        runtimeexec::LaunchLifecycleBatches::new(
+            runtimeexec::ProviderLifecycleBatch::from_provider_output(
+                bootstrap::DomainModuleResult::default(),
+            ),
+            runtimeexec::DomainLifecycleBatch::from_domain_output(
+                bootstrap::DomainModuleResult::default(),
+            ),
+        ),
+        total_drain_budget()?,
+    );
+    controlled.run(launch).await
 }
 
 trait ListenerRegistrar {
@@ -435,6 +509,10 @@ fn resolve_listener_transport(
                 scheme != AuthScheme::Mtls,
                 "listener {listener:?} has mTLS auth without captured mTLS transport material"
             );
+            Ok(ResolvedListenerTransport::Plaintext)
+        }
+        #[cfg(feature = "integration")]
+        routes::ListenerTransport::InventoryJourneyPlaintext => {
             Ok(ResolvedListenerTransport::Plaintext)
         }
     }

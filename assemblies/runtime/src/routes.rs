@@ -146,6 +146,8 @@ pub(crate) struct FinalizedListenerPlan {
 /// launch phase cannot bind mTLS and then fall back to an ambient configuration source.
 pub(crate) enum ListenerTransport {
     Plaintext,
+    #[cfg(feature = "integration")]
+    InventoryJourneyPlaintext,
     Mtls {
         allow_set: authn::MtlsAllowSet,
         spiffe_endpoint: String,
@@ -204,6 +206,43 @@ impl FinalizedListenerSet {
     #[cfg(test)]
     pub(crate) fn for_test(listeners: Vec<AssembledListener>) -> Self {
         Self { listeners }
+    }
+
+    #[cfg(feature = "integration")]
+    pub(crate) fn for_inventory_journey(
+        admin: httpserve::AuthenticatedRoutes,
+    ) -> anyhow::Result<(Self, FinalizedProbeReceipt)> {
+        let mut admin = Some(admin);
+        struct JourneyMetrics;
+        impl diport::MetricsExporter for JourneyMetrics {
+            fn render(&self) -> String {
+                "# inventory-journey\n".to_owned()
+            }
+        }
+        let reporter = Arc::new(bootstrap::Registry::new().take_health_reporter());
+        let metrics: Arc<dyn diport::MetricsExporter> = Arc::new(JourneyMetrics);
+        let mut listeners = Vec::new();
+        for kind in [
+            assembly_schema::AssemblyListenerKind::Admin,
+            assembly_schema::AssemblyListenerKind::Health,
+            assembly_schema::AssemblyListenerKind::Internal,
+            assembly_schema::AssemblyListenerKind::Primary,
+        ] {
+            let spec = crate::plan::fixture_listener_spec(kind)?;
+            let routes = if kind == assembly_schema::AssemblyListenerKind::Admin {
+                admin
+                    .take()
+                    .context("Admin journey route already consumed")?
+            } else {
+                finalize_health_fixture(Arc::clone(&reporter), Arc::clone(&metrics))?
+            };
+            listeners.push(AssembledListener {
+                spec,
+                routes,
+                transport: ListenerTransport::InventoryJourneyPlaintext,
+            });
+        }
+        Ok((Self { listeners }, FinalizedProbeReceipt { _private: () }))
     }
 }
 
@@ -555,6 +594,8 @@ fn finalize_non_health_spec(
     let mtls_authorizer = match &transport {
         ListenerTransport::Mtls { allow_set, .. } => Some(allow_set.clone()),
         ListenerTransport::Plaintext => None,
+        #[cfg(feature = "integration")]
+        ListenerTransport::InventoryJourneyPlaintext => None,
     };
     let authed = finalize_listener_auth_with_mtls(
         listener,
@@ -1555,6 +1596,8 @@ mod tests {
                         ..
                     } => Some((allow_set, spiffe_endpoint)),
                     ListenerTransport::Plaintext => None,
+                    #[cfg(feature = "integration")]
+                    ListenerTransport::InventoryJourneyPlaintext => None,
                 };
                 assert!(
                     carried.is_some(),

@@ -117,7 +117,7 @@ enum InternalCheck {
     ContractValidate,
     /// assembly-level DI provider 声明校验（RevocationStore active provider 必须持久）。
     AssemblyValidate,
-    /// assembly lifecycle 与部署 artifact exact closure 门（#1798）。
+    /// assembly lifecycle 与应用 artifact exact closure 门（#1798）。
     AssemblyArtifactsCheck,
     /// assembly.toml domains → committed modules_gen.rs 漂移门（ASSEMBLY-MODULES-CODEGEN-01）。
     AssemblyModulesCheck,
@@ -125,10 +125,6 @@ enum InternalCheck {
     AssemblyProvidersCheck,
     /// repository-verified committed assembly.lock.json raw-byte 漂移门（#1781）。
     AssemblyLockCheck,
-    /// RuntimePlan-bound DeploymentPlan exact generated-set raw-byte 漂移门（#1802）。
-    DeploymentPlanCheck,
-    /// Two-phase rendered manifest policy plus strict kubeconform validation（#1804）。
-    DeploymentPolicyCheck,
     /// committed runtime assembly Mermaid/JSON graph 漂移与 source closure 门。
     AssemblyGraphCheck,
     /// wire JSON-Schema/manifest 跨版本破坏检测门（ADR-008，WIRE-BREAKING-01）。
@@ -158,8 +154,6 @@ enum InternalCheck {
     RuntimeRootGuard,
     /// runtime production ambient environment reader closure（RUNTIME-ENV-FUNNEL-01）。
     RuntimeEnvGuard,
-    /// Runtime Deployment SpecKit schemas/tasks/fingerprints + synthetic-red closure（#1779）。
-    RuntimeDeploymentSpec,
     /// SharedRuntimeDeps infra-only 字段类型守卫（WIRING-DEPS-INFRA-ONLY-01）。
     RuntimeDepsGuard,
     /// ArchRules 派生索引 + 14 行持久化 funnel matrix 文档漂移门。
@@ -323,22 +317,6 @@ fn step_assembly_lock_check() -> Step {
         env: &[],
     }
 }
-fn step_deployment_plan_check() -> Step {
-    Step {
-        id: GateId::DeploymentPlanCheck,
-        args: &[],
-        kind: StepKind::Internal(InternalCheck::DeploymentPlanCheck),
-        env: &[],
-    }
-}
-fn step_deployment_policy_check() -> Step {
-    Step {
-        id: GateId::DeploymentPolicyCheck,
-        args: &[],
-        kind: StepKind::Internal(InternalCheck::DeploymentPolicyCheck),
-        env: &[],
-    }
-}
 fn step_assembly_graph_check() -> Step {
     Step {
         id: GateId::AssemblyGraphCheck,
@@ -456,14 +434,6 @@ fn step_runtime_env_guard() -> Step {
         id: GateId::RuntimeEnvGuard,
         args: &[],
         kind: StepKind::Internal(InternalCheck::RuntimeEnvGuard),
-        env: &[],
-    }
-}
-fn step_runtime_deployment_spec() -> Step {
-    Step {
-        id: GateId::RuntimeDeploymentSpec,
-        args: &[],
-        kind: StepKind::Internal(InternalCheck::RuntimeDeploymentSpec),
         env: &[],
     }
 }
@@ -1309,19 +1279,6 @@ fn run_one(
     };
     match step.id.spec().tool() {
         ToolRequirement::InProcess | ToolRequirement::CargoBuiltin(_) => execute(),
-        ToolRequirement::ExternalTool {
-            program,
-            version,
-            install_hint,
-        } => run_external_tool_gated(
-            lane,
-            program,
-            version,
-            opts.allow_missing_tools,
-            install_hint,
-            step.label(),
-            execute,
-        ),
         ToolRequirement::Nextest => run_nextest_step_gated(
             lane,
             step,
@@ -1346,54 +1303,6 @@ fn run_one(
             install_hint,
             step.label(),
             execute,
-        ),
-    }
-}
-
-fn run_external_tool_gated(
-    lane: &str,
-    program: crate::cmd::ExternalProgram,
-    version: &str,
-    allow_missing: bool,
-    install_hint: &str,
-    label: &str,
-    on_run: impl FnOnce() -> Result<()>,
-) -> Result<()> {
-    let probe = program.as_str();
-    let probe_result = match program {
-        crate::cmd::ExternalProgram::Helm => crate::workspace_root()
-            .and_then(|root| crate::deployment_plan::helm_probe(&root).map_err(Into::into)),
-        crate::cmd::ExternalProgram::Kubeconform => crate::workspace_root().and_then(|root| {
-            crate::deployment_policy::probe_kubeconform(&root).map_err(Into::into)
-        }),
-        _ => bail!("{lane}: unsupported external tool probe `{probe}`"),
-    };
-    let missing = probe_result.as_ref().is_err_and(|error| match program {
-        crate::cmd::ExternalProgram::Helm => matches!(
-            error.downcast_ref::<crate::deployment_plan::HelmProbeError>(),
-            Some(crate::deployment_plan::HelmProbeError::Missing)
-        ),
-        crate::cmd::ExternalProgram::Kubeconform => matches!(
-            error.downcast_ref::<crate::deployment_policy::KubeconformProbeError>(),
-            Some(crate::deployment_policy::KubeconformProbeError::Missing)
-        ),
-        _ => false,
-    });
-    if let Err(error) = &probe_result
-        && !missing
-    {
-        bail!("{lane}: `{probe}` probe rejected gate `{label}`: {error}");
-    }
-    match resolve_tool(probe_result.is_ok(), allow_missing) {
-        ToolAction::Run => on_run(),
-        ToolAction::SkipWarn => {
-            eprintln!(
-                "{lane}: [跳过] `{label}`（缺 `{probe} v{version}`，--allow-missing-tools 宽限）。装：{install_hint}"
-            );
-            Ok(())
-        }
-        ToolAction::Fail => bail!(
-            "{lane}: 缺 `{probe} v{version}`（门步 `{label}`）。装：{install_hint}\n（门不建议绕过；确需可显式 --allow-missing-tools）"
         ),
     }
 }
@@ -1481,12 +1390,6 @@ fn run_internal(check: InternalCheck, opts: &VerifyOpts, root: &Path) -> Result<
         InternalCheck::AssemblyLockCheck => {
             assembly_lock::run(assembly_lock::AssemblyLockAction::Check)
         }
-        InternalCheck::DeploymentPlanCheck => {
-            crate::deployment_plan::run(crate::deployment_plan::Action::Check)
-        }
-        InternalCheck::DeploymentPolicyCheck => {
-            crate::deployment_policy::run_after_plan_preflight()
-        }
         InternalCheck::AssemblyGraphCheck => {
             crate::graph::run(&crate::graph::Options::check_runtime())
         }
@@ -1514,7 +1417,6 @@ fn run_internal(check: InternalCheck, opts: &VerifyOpts, root: &Path) -> Result<
         InternalCheck::RuntimeBaseline => run_check(&runtime_baseline::RuntimeBaseline),
         InternalCheck::RuntimeRootGuard => run_check(&runtime_root_guard::RuntimeRootGuard),
         InternalCheck::RuntimeEnvGuard => run_check(&runtime_env_guard::RuntimeEnvGuard),
-        InternalCheck::RuntimeDeploymentSpec => crate::runtime_deployment_spec::run_selftest_gate(),
         InternalCheck::RuntimeDepsGuard => run_check(&runtime_deps_guard::RuntimeDepsGuard),
         InternalCheck::SourceSemanticGuard => {
             run_check(&crate::source_semantic_guard::SourceSemanticGuard)
@@ -2563,7 +2465,7 @@ mod tests {
 
     #[test]
     fn ci_lane_plans_are_registry_derived_and_partitioned() {
-        assert_eq!(labels(&plan_for(PlanTarget::Lane(CiLane::Meta))).len(), 43);
+        assert_eq!(labels(&plan_for(PlanTarget::Lane(CiLane::Meta))).len(), 41);
         assert_eq!(
             labels(&plan_for(PlanTarget::Lane(CiLane::Security))),
             vec!["deny", "audit"]
@@ -2722,14 +2624,14 @@ mod tests {
     }
 
     #[test]
-    fn ci_lane_compatibility_plan_keeps_63_unique_gates_and_supersedes_nextest() {
+    fn ci_lane_compatibility_plan_keeps_61_unique_gates_and_supersedes_nextest() {
         let plan = plan_for(PlanTarget::CompatibilityCi);
-        assert_eq!(plan.len(), 63);
+        assert_eq!(plan.len(), 61);
         assert!(!labels(&plan).contains(&"default-test-runner"));
         let mut ids: Vec<_> = plan.iter().map(|step| step.id as usize).collect();
         ids.sort_unstable();
         ids.dedup();
-        assert_eq!(ids.len(), 63);
+        assert_eq!(ids.len(), 61);
     }
 
     #[test]
@@ -2767,7 +2669,6 @@ mod tests {
                 "assembly-modules-check",
                 "assembly-providers-check",
                 "assembly-lock-check",
-                "deployment-plan-check",
                 "assembly-graph-check",
                 "contract-breaking",
                 "layer-deps",
@@ -2783,7 +2684,6 @@ mod tests {
                 "runtime-baseline",
                 "runtime-root-guard",
                 "runtime-env-guard",
-                "runtime-deployment-spec",
                 "runtime-deps-guard",
                 "archrules",
                 "codegen-check",
@@ -2927,67 +2827,6 @@ mod tests {
         }
     }
 
-    fn validate_runtime_deployment_spec_membership(plan: &[Step]) -> anyhow::Result<()> {
-        let members = plan
-            .iter()
-            .filter(|step| step.id == GateId::RuntimeDeploymentSpec)
-            .collect::<Vec<_>>();
-        anyhow::ensure!(
-            members.len() == 1,
-            "aggregate plan must contain exactly one gate"
-        );
-        let step = members[0];
-        anyhow::ensure!(
-            step.label() == "runtime-deployment-spec",
-            "aggregate gate label drift"
-        );
-        anyhow::ensure!(!step.needs_compile(), "aggregate gate must be no-compile");
-        anyhow::ensure!(
-            step.carrier_file() == Some("xtask/src/runtime_deployment_spec.rs"),
-            "aggregate gate carrier drift"
-        );
-        anyhow::ensure!(
-            matches!(
-                step.kind,
-                StepKind::Internal(InternalCheck::RuntimeDeploymentSpec)
-            ),
-            "aggregate gate executor drift"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn runtime_deployment_spec_membership_predicate_green_and_synthetic_red() -> anyhow::Result<()>
-    {
-        for (name, plan) in [
-            ("fast", verify_plan(&opts(true, false))),
-            ("ci-meta", plan_for(PlanTarget::Lane(CiLane::Meta))),
-            ("compatibility", plan_for(PlanTarget::CompatibilityCi)),
-        ] {
-            validate_runtime_deployment_spec_membership(&plan)
-                .with_context(|| format!("{name} membership"))?;
-        }
-
-        let mut mutant = verify_plan(&opts(true, false));
-        mutant.retain(|step| step.id != GateId::RuntimeDeploymentSpec);
-        assert!(
-            validate_runtime_deployment_spec_membership(&mutant).is_err(),
-            "omission synthetic red must fail"
-        );
-
-        let mut mutant = verify_plan(&opts(true, false));
-        let mutant_step = mutant
-            .iter_mut()
-            .find(|step| step.id == GateId::RuntimeDeploymentSpec)
-            .context("committed fast plan lacks runtime-deployment-spec")?;
-        mutant_step.kind = StepKind::Internal(InternalCheck::RuntimeBaseline);
-        assert!(
-            validate_runtime_deployment_spec_membership(&mutant).is_err(),
-            "executor synthetic red must fail"
-        );
-        Ok(())
-    }
-
     fn runtime_env_guard_membership_is_exact(plan: &[Step]) -> bool {
         let members = plan
             .iter()
@@ -3008,7 +2847,7 @@ mod tests {
                 plan[before].id == GateId::RuntimeRootGuard
                     && plan
                         .get(index + 1)
-                        .is_some_and(|after| after.id == GateId::RuntimeDeploymentSpec)
+                        .is_some_and(|after| after.id == GateId::RuntimeDepsGuard)
             })
     }
 
@@ -3148,7 +2987,6 @@ mod tests {
                 "assembly-modules-check",
                 "assembly-providers-check",
                 "assembly-lock-check",
-                "deployment-plan-check",
                 "assembly-graph-check",
                 "contract-breaking",
                 "layer-deps",
@@ -3163,7 +3001,6 @@ mod tests {
                 "runtime-baseline",
                 "runtime-root-guard",
                 "runtime-env-guard",
-                "runtime-deployment-spec",
                 "runtime-deps-guard",
                 "archrules",
                 "codegen-check",
@@ -3200,7 +3037,7 @@ mod tests {
 
     /// 两种模式共享的轻量 repository meta checks（contract validate / assembly validate / assembly artifacts / contract breaking / layer-deps / wsdeps-drift /
     /// consistency-fixtures / event-transport-guard / inbox-cutover-guard /
-    /// runtime-baseline / runtime-root-guard / runtime-env-guard / runtime-deployment-spec / runtime-deps-guard / archrules / codegen / L2 assurance / pdp-allow-guard / contract-binding-guard /
+    /// runtime-baseline / runtime-root-guard / runtime-env-guard / runtime-deps-guard / archrules / codegen / L2 assurance / pdp-allow-guard / contract-binding-guard /
     /// schema-rls / setlocal-funnel / pg-tenant-tx-guard / repo-scope-guard / tenancy-closeout / migrations-serial / command-symmetry /
     /// reconcile-outbox-command-guard / defer-gate）在两种模式恒在。
     #[test]
@@ -3225,7 +3062,6 @@ mod tests {
                     "assembly-modules-check",
                     "assembly-providers-check",
                     "assembly-lock-check",
-                    "deployment-plan-check",
                     "assembly-graph-check",
                     "contract-breaking",
                     "layer-deps",
@@ -3240,7 +3076,6 @@ mod tests {
                     "runtime-baseline",
                     "runtime-root-guard",
                     "runtime-env-guard",
-                    "runtime-deployment-spec",
                     "runtime-deps-guard",
                     "archrules",
                     "codegen-check",
@@ -3404,8 +3239,6 @@ mod tests {
             GateId::AssemblyModulesCheck,
             GateId::AssemblyProvidersCheck,
             GateId::AssemblyLockCheck,
-            GateId::DeploymentPlanCheck,
-            GateId::DeploymentPolicyCheck,
             GateId::AssemblyGraphCheck,
         ]
         .map(|id| {
@@ -3605,25 +3438,13 @@ mod tests {
             .iter()
             .position(|step| step.id == GateId::AssemblyLockCheck)
             .context("plan lacks lock check")?;
-        let deployment = plan
-            .iter()
-            .position(|step| step.id == GateId::DeploymentPlanCheck)
-            .context("plan lacks deployment plan check")?;
-        let policy = plan
-            .iter()
-            .position(|step| step.id == GateId::DeploymentPolicyCheck)
-            .context("plan lacks deployment policy check")?;
         let graph = plan
             .iter()
             .position(|step| step.id == GateId::AssemblyGraphCheck)
             .context("plan lacks graph check")?;
         anyhow::ensure!(
-            providers == modules + 1
-                && lock == providers + 1
-                && deployment == lock + 1
-                && policy == deployment + 1
-                && graph == policy + 1,
-            "assembly order must be modules -> providers -> lock -> deployment plan -> deployment policy -> graph"
+            providers == modules + 1 && lock == providers + 1 && graph == lock + 1,
+            "assembly order must be modules -> providers -> lock -> graph"
         );
         Ok(())
     }
@@ -3652,126 +3473,6 @@ mod tests {
             .clone();
         duplicated.push(duplicate);
         assert!(validate_assembly_lock_check(&duplicated).is_err());
-        Ok(())
-    }
-
-    fn validate_deployment_plan_check(plan: &[Step]) -> anyhow::Result<()> {
-        let members = plan
-            .iter()
-            .filter(|step| step.id == GateId::DeploymentPlanCheck)
-            .collect::<Vec<_>>();
-        anyhow::ensure!(members.len() == 1, "expected one deployment plan check");
-        let step = members[0];
-        anyhow::ensure!(
-            step.label() == "deployment-plan-check"
-                && !step.needs_compile()
-                && step.carrier_file() == Some("xtask/src/deployment_plan.rs")
-                && matches!(
-                    step.kind,
-                    StepKind::Internal(InternalCheck::DeploymentPlanCheck)
-                ),
-            "deployment plan gate binding drift"
-        );
-        anyhow::ensure!(
-            step.id.spec().lanes() == [Some(CiLane::Meta), None]
-                && step.id.spec().verify_membership() == VerifyMembership::Included
-                && step.id.spec().compat() == CompatMembership::Included
-                && step.id.spec().tool()
-                    == ToolRequirement::ExternalTool {
-                        program: crate::cmd::ExternalProgram::Helm,
-                        version: crate::deployment_plan::HELM_VERSION,
-                        install_hint: crate::ci_lanes::HELM_HINT,
-                    },
-            "deployment plan gate membership drift"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn deployment_plan_check_is_typed_once_in_all_aggregate_plans() -> anyhow::Result<()> {
-        for (name, plan) in [
-            ("full", plan_for(PlanTarget::Verify)),
-            ("fast", verify_plan(&opts(true, false))),
-            ("ci-meta", plan_for(PlanTarget::Lane(CiLane::Meta))),
-            ("compatibility", plan_for(PlanTarget::CompatibilityCi)),
-        ] {
-            validate_deployment_plan_check(&plan).with_context(|| format!("{name} plan"))?;
-        }
-        let mut omitted = verify_plan(&opts(true, false));
-        omitted.retain(|step| step.id != GateId::DeploymentPlanCheck);
-        assert!(validate_deployment_plan_check(&omitted).is_err());
-        let mut wrong = verify_plan(&opts(true, false));
-        wrong
-            .iter_mut()
-            .find(|step| step.id == GateId::DeploymentPlanCheck)
-            .context("fast plan lacks deployment gate")?
-            .kind = StepKind::Internal(InternalCheck::AssemblyLockCheck);
-        assert!(validate_deployment_plan_check(&wrong).is_err());
-        Ok(())
-    }
-
-    fn validate_deployment_policy_check(plan: &[Step]) -> anyhow::Result<()> {
-        let members = plan
-            .iter()
-            .filter(|step| step.id == GateId::DeploymentPolicyCheck)
-            .collect::<Vec<_>>();
-        anyhow::ensure!(members.len() == 1, "expected one deployment policy check");
-        let step = members[0];
-        anyhow::ensure!(
-            step.label() == "deployment-policy-check"
-                && !step.needs_compile()
-                && step.carrier_file() == Some("xtask/src/deployment_policy.rs")
-                && matches!(
-                    step.kind,
-                    StepKind::Internal(InternalCheck::DeploymentPolicyCheck)
-                ),
-            "deployment policy gate binding drift"
-        );
-        anyhow::ensure!(
-            step.id.spec().lanes() == [Some(CiLane::Meta), None]
-                && step.id.spec().verify_membership() == VerifyMembership::Included
-                && step.id.spec().compat() == CompatMembership::Included
-                && step.id.spec().tool()
-                    == ToolRequirement::ExternalTool {
-                        program: crate::cmd::ExternalProgram::Kubeconform,
-                        version: crate::deployment_policy::KUBECONFORM_VERSION,
-                        install_hint: crate::ci_lanes::KUBECONFORM_HINT,
-                    },
-            "deployment policy gate membership drift"
-        );
-        let deployment = plan
-            .iter()
-            .position(|step| step.id == GateId::DeploymentPlanCheck)
-            .context("plan lacks deployment plan check")?;
-        let policy = plan
-            .iter()
-            .position(|step| step.id == GateId::DeploymentPolicyCheck)
-            .context("plan lacks deployment policy check")?;
-        anyhow::ensure!(policy == deployment + 1, "deployment policy ordering drift");
-        Ok(())
-    }
-
-    #[test]
-    fn deployment_policy_check_is_typed_once_and_ordered_in_all_aggregate_plans()
-    -> anyhow::Result<()> {
-        for (name, plan) in [
-            ("full", plan_for(PlanTarget::Verify)),
-            ("fast", verify_plan(&opts(true, false))),
-            ("ci-meta", plan_for(PlanTarget::Lane(CiLane::Meta))),
-            ("compatibility", plan_for(PlanTarget::CompatibilityCi)),
-        ] {
-            validate_deployment_policy_check(&plan).with_context(|| format!("{name} plan"))?;
-        }
-        let mut omitted = verify_plan(&opts(true, false));
-        omitted.retain(|step| step.id != GateId::DeploymentPolicyCheck);
-        assert!(validate_deployment_policy_check(&omitted).is_err());
-        let mut wrong = verify_plan(&opts(true, false));
-        wrong
-            .iter_mut()
-            .find(|step| step.id == GateId::DeploymentPolicyCheck)
-            .context("fast plan lacks deployment policy gate")?
-            .kind = StepKind::Internal(InternalCheck::AssemblyLockCheck);
-        assert!(validate_deployment_policy_check(&wrong).is_err());
         Ok(())
     }
 
@@ -3989,14 +3690,9 @@ mod tests {
                 .iter()
                 .position(|label| *label == "assembly-lock-check")
                 .ok_or_else(|| anyhow::anyhow!("{name} plan 缺 assembly-lock-check"))?;
-            let deployment = labels
-                .iter()
-                .position(|label| *label == "deployment-plan-check")
-                .ok_or_else(|| anyhow::anyhow!("{name} plan 缺 deployment-plan-check"))?;
             assert_eq!(providers, modules + 1, "{name} providers lane order drift");
             assert_eq!(lock, providers + 1, "{name} lock lane order drift");
-            assert_eq!(deployment, lock + 1, "{name} deployment lane order drift");
-            assert_eq!(graph, deployment + 1, "{name} graph lane order drift");
+            assert_eq!(graph, lock + 1, "{name} graph lane order drift");
             assert!(!plan[graph].needs_compile());
             assert_eq!(plan[graph].carrier_file(), Some("xtask/src/graph.rs"));
             assert!(matches!(
@@ -4321,7 +4017,6 @@ mod tests {
                 "assembly-modules-check",
                 "assembly-providers-check",
                 "assembly-lock-check",
-                "deployment-plan-check",
                 "assembly-graph-check",
                 "contract-breaking",
                 "layer-deps",
@@ -4337,7 +4032,6 @@ mod tests {
                 "runtime-baseline",
                 "runtime-root-guard",
                 "runtime-env-guard",
-                "runtime-deployment-spec",
                 "runtime-deps-guard",
                 "archrules",
                 "codegen-check",
@@ -4451,7 +4145,6 @@ mod tests {
             "assembly-modules-check",
             "assembly-providers-check",
             "assembly-lock-check",
-            "deployment-plan-check",
             "assembly-graph-check",
             "contract-breaking",
             "layer-deps",
@@ -4467,7 +4160,6 @@ mod tests {
             "runtime-baseline",
             "runtime-root-guard",
             "runtime-env-guard",
-            "runtime-deployment-spec",
             "runtime-deps-guard",
             "archrules",
             "codegen-check",
@@ -5857,7 +5549,6 @@ mod tests {
             "cargo-dylint@",
             "dylint-link@",
             "cargo-public-api@",
-            "helm@",
         ];
 
         let reusable_lines = yaml_indented_code_lines(reusable_yaml);
@@ -5897,6 +5588,15 @@ mod tests {
         let action_has_no_copied_catalog = !TOOL_LIST_MARKERS
             .iter()
             .any(|marker| action_yaml.contains(marker));
+        let action_has_no_removed_download_backend = [
+            "--backend download",
+            "install-download",
+            ".download/bin",
+            "download-tools",
+            "RSS_DOWNLOAD_TOOLS",
+        ]
+        .iter()
+        .all(|residual| !action_yaml.contains(residual));
 
         let setup = unique_step(&reusable_steps, "setup");
         let measure = unique_step(&reusable_steps, "measure-tools");
@@ -5955,9 +5655,6 @@ mod tests {
                 ) && step.env_exact(
                     "RSS_BINSTALL_TOOLS",
                     &["${{ steps.tool-policy.outputs.binstall-tools }}"],
-                ) && step.env_exact(
-                    "RSS_DOWNLOAD_TOOLS",
-                    &["${{ steps.tool-policy.outputs.download-tools }}"],
                 ) && step.run_contains("tools_hash=")
                     && step.run_contains(&format!("taiki-e/install-action@{INSTALL_ACTION_SHA}"))
                     && step.run_contains("RSS_ADAPTER_SHA256")
@@ -5965,7 +5662,6 @@ mod tests {
                     && step.run_contains("sha256")
                     && step.run_contains("RSS_INSTALL_ACTION_TOOLS")
                     && step.run_contains("RSS_BINSTALL_TOOLS")
-                    && step.run_contains("RSS_DOWNLOAD_TOOLS")
             });
         let catalog_is_executable_single_source = policy.is_some_and(|index| {
             let step = &action_steps[index];
@@ -5973,7 +5669,6 @@ mod tests {
                 && step.run_contains("--lane")
                 && step.run_contains("--backend install-action")
                 && step.run_contains("--backend binstall")
-                && step.run_contains("--backend download")
                 && step.run_contains("adapter-sha256")
                 && step.run_contains("catalog-sha256")
         });
@@ -6001,21 +5696,17 @@ mod tests {
             && adapter_source.contains("sha256sum");
         let fallback_installer_precedes_prebuilt_and_verify =
             unique_named_step(&action_steps, "Install fallback tools").is_some_and(|fallback| {
-                unique_named_step(&action_steps, "Install checksum-pinned download tools")
-                    .zip(install_action.first().copied())
+                install_action
+                    .first()
+                    .copied()
                     .zip(verifiers.first().copied())
-                    .is_some_and(|((download, prebuilt), verify)| {
-                        fallback < prebuilt
-                            && prebuilt < download
-                            && download < verify
-                            && action_steps[download]
-                                .run_contains("ci-tool-adapters.sh install-download")
-                    })
+                    .is_some_and(|(prebuilt, verify)| fallback < prebuilt && prebuilt < verify)
             });
 
         workflow_has_no_tool_catalog
             && action_has_no_arbitrary_tool_inputs
             && action_has_no_copied_catalog
+            && action_has_no_removed_download_backend
             && reusable_lines
                 .iter()
                 .filter(|(indent, line)| *indent == 0 && *line == "jobs:")
@@ -6450,24 +6141,20 @@ runs:
         echo "catalog-sha256=$catalog_hash" >> "$GITHUB_OUTPUT"
         echo "install-action-tools=$(.github/scripts/ci-tool-adapters.sh specs --lane "$RSS_LANE" --backend install-action)" >> "$GITHUB_OUTPUT"
         echo "binstall-tools=$(.github/scripts/ci-tool-adapters.sh specs --lane "$RSS_LANE" --backend binstall)" >> "$GITHUB_OUTPUT"
-        echo "download-tools=$(.github/scripts/ci-tool-adapters.sh specs --lane "$RSS_LANE" --backend download)" >> "$GITHUB_OUTPUT"
     - id: cache-keys
       env:
         RSS_ADAPTER_SHA256: ${{ steps.tool-policy.outputs.adapter-sha256 }}
         RSS_CATALOG_SHA256: ${{ steps.tool-policy.outputs.catalog-sha256 }}
         RSS_INSTALL_ACTION_TOOLS: ${{ steps.tool-policy.outputs.install-action-tools }}
         RSS_BINSTALL_TOOLS: ${{ steps.tool-policy.outputs.binstall-tools }}
-        RSS_DOWNLOAD_TOOLS: ${{ steps.tool-policy.outputs.download-tools }}
       run: |
-        tools_hash="$(printf '%s\n' 'taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5' "$RSS_ADAPTER_SHA256" "$RSS_CATALOG_SHA256" "$RSS_INSTALL_ACTION_TOOLS" "$RSS_BINSTALL_TOOLS" "$RSS_DOWNLOAD_TOOLS" | sha256sum | cut -d' ' -f1)"
+        tools_hash="$(printf '%s\n' 'taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5' "$RSS_ADAPTER_SHA256" "$RSS_CATALOG_SHA256" "$RSS_INSTALL_ACTION_TOOLS" "$RSS_BINSTALL_TOOLS" | sha256sum | cut -d' ' -f1)"
     - name: Install fallback tools
       run: cargo binstall --root "$RSS_TOOL_ROOT" "$spec"
     - name: Install pinned prebuilt tools
       uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5
       with:
         tool: ${{ steps.tool-policy.outputs.install-action-tools }}
-    - name: Install checksum-pinned download tools
-      run: .github/scripts/ci-tool-adapters.sh install-download --lane "$RSS_LANE" --root "$RSS_TOOL_ROOT"
     - id: verify-tools
       run: |
         mode=fresh
@@ -6475,7 +6162,6 @@ runs:
         .github/scripts/ci-tool-adapters.sh verify --mode "$mode" --lane "$RSS_LANE" --root "$RSS_TOOL_ROOT"
         echo "$RSS_TOOL_ROOT/.install-action/bin" >> "$GITHUB_PATH"
         echo "$RSS_TOOL_ROOT/bin" >> "$GITHUB_PATH"
-        echo "$RSS_TOOL_ROOT/.download/bin" >> "$GITHUB_PATH"
 "#;
         const ADAPTER: &str = r#"#!/usr/bin/env bash
 seal="$RSS_TOOL_ROOT/.rss-tool-seal-v1"
@@ -6506,6 +6192,36 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
                 "arbitrary-tool-input",
                 reusable.to_owned(),
                 action.replacen("  lane:\n", "  prebuilt-tools:\n    required: false\n  lane:\n", 1),
+                adapter.to_owned(),
+            ),
+            (
+                "removed-download-query",
+                reusable.to_owned(),
+                action.replacen(
+                    "echo \"binstall-tools=$(.github/scripts/ci-tool-adapters.sh specs --lane \"$RSS_LANE\" --backend binstall)\" >> \"$GITHUB_OUTPUT\"",
+                    "echo \"binstall-tools=$(.github/scripts/ci-tool-adapters.sh specs --lane \"$RSS_LANE\" --backend binstall)\" >> \"$GITHUB_OUTPUT\"\n        echo \"download-tools=$(.github/scripts/ci-tool-adapters.sh specs --lane \"$RSS_LANE\" --backend download)\" >> \"$GITHUB_OUTPUT\"",
+                    1,
+                ),
+                adapter.to_owned(),
+            ),
+            (
+                "removed-download-install",
+                reusable.to_owned(),
+                action.replacen(
+                    "    - id: verify-tools",
+                    "    - name: Install download tools\n      run: .github/scripts/ci-tool-adapters.sh install-download --lane \"$RSS_LANE\" --root \"$RSS_TOOL_ROOT\"\n    - id: verify-tools",
+                    1,
+                ),
+                adapter.to_owned(),
+            ),
+            (
+                "removed-download-path",
+                reusable.to_owned(),
+                action.replacen(
+                    "echo \"$RSS_TOOL_ROOT/bin\" >> \"$GITHUB_PATH\"",
+                    "echo \"$RSS_TOOL_ROOT/bin\" >> \"$GITHUB_PATH\"\n        echo \"$RSS_TOOL_ROOT/.download/bin\" >> \"$GITHUB_PATH\"",
+                    1,
+                ),
                 adapter.to_owned(),
             ),
             (

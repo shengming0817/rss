@@ -1,6 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "https://rss.local/spec/runtime-deployment/assembly-lock.schema.json",
+  "$id": "https://rss.local/assembly-schema/assembly-lock.schema.json",
   "title": "AssemblyLock target contract",
   "type": "object", "additionalProperties": false,
   "required": ["schemaVersion", "identity", "digests", "fingerprint"],

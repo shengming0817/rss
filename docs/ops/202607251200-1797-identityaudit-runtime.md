@@ -16,7 +16,7 @@ identityaudit 只装配 Identity、Audit 及其声明的持久 provider。登录
 默认 `127.0.0.1:8081`，承载 `/api/v1/audit` 与 `GET /api/v1/runtime/inventory`；Health 默认
 `127.0.0.1:8083`，承载 `/health/v1/{healthz,readyz,metrics}`。inventory 要求
 `runtime:inventory:read` 并沿用 Admin listener 的 RSS User 认证、Identity durable role-grant 授权和持久审计 funnel；global/operator 只描述进程资源没有 tenant owner，调用者仍必须携带 tenant-bound current AuthGrant，并在同 tenant 获得精确 permission binding；无 grant 返回 403，RSS Admin/SuperAdmin token 仍被 verifier 拒绝。失败时不会执行 handler。进程没有
-TLS listener capability；外部流量必须由同 Pod 网络命名空间中的 TLS proxy sidecar 转发，不能把配置改成
+TLS listener capability；外部流量必须由外部 delivery 系统在同一网络命名空间配置 TLS proxy 转发，不能把配置改成
 wildcard bind。
 
 ## 构建与镜像
@@ -45,17 +45,9 @@ identityaudit-server --config /etc/rss/identityaudit.toml
 列出的 typed reference，并由部署密管注入对应环境；不得把 secret 写入 TOML、argv、镜像层或日志。JWKS、
 密码 blocklist 与私有 CA 等文件按配置路径只读挂载，配置与这些文件必须作为同一 generation 原子发布。
 
-部署还必须注入两项非 secret 构建身份，进程只在启动快照读取一次：
-
-```text
-RSS_BUILD_SOURCE_SHA=<40 位小写十六进制提交 SHA>
-RSS_BUILD_IMAGE_DIGEST=sha256:<64 位小写十六进制镜像摘要>
-```
-
-image digest 必须与绑定 DeploymentPlan 中 identityaudit workload 的镜像摘要完全一致，否则在 bind socket 前
-失败。source SHA 是部署方声明，不代表运行时完成 OCI provenance 或 same-head 自证明。配置、Secret、
-DeploymentPlan、image 与两项 `RSS_BUILD_*` 必须同 generation 原子发布；允许回滚时也必须整组恢复，禁止只替换
-binary/image、伪造 digest 或使用 fallback 拼接新旧 generation。
+外部 delivery 系统必须将镜像、配置和 secret 作为同一 generation 发布与回滚。OCI provenance 与不可变
+镜像选择由外部 builder/release 流程证明；应用不读取外部 delivery manifest，也不提供旧 schema 双读、别名
+或 fallback。
 
 生产配置还有四项必须显式满足的安全闭包：
 
@@ -79,11 +71,11 @@ ledger=72 恢复旧 generation；提交后失败只能修复新配置或增加�
 - `/health/v1/healthz`：进程存活；
 - `/health/v1/readyz`：聚合 PostgreSQL、Vault signer、Vault DLX key、RSS access JWKS、broker relay/consumer 与
   Audit sink；Vault 两项由持续 capability 操作验证，不以一次启动成功代替运行期健康；
-- `/health/v1/metrics`：Prometheus 文本，仅供本机或同 Pod collector。
+- `/health/v1/metrics`：Prometheus 文本，仅供本机或同网络命名空间 collector。
 
 只有 readyz 返回 200 后才接收 Primary/Admin 流量。SIGTERM/SIGINT 由 `runtimeexec` 统一接管，停止 listener
-后按 LIFO 精确一次 drain provider、relay、consumer 与 domain worker。应用总 drain budget 为 50 秒，部署
-grace period 必须至少 60 秒，并保留 5 秒退出缓冲；强制 SIGKILL 不提供 drain 保证。
+后按 LIFO 精确一次 drain provider、relay、consumer 与 domain worker。应用总 drain budget 为 50 秒，外部
+launcher 的 termination allowance 必须至少 60 秒，并保留 5 秒退出缓冲；强制 SIGKILL 不提供 drain 保证。
 
 ## Artifact 验收
 

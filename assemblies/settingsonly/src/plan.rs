@@ -4,13 +4,11 @@ use anyhow::Context as _;
 use assembly_schema::{
     AssemblyDomain, AssemblyListenerKind, AssemblyManifest, AssemblyProfile, AssemblyTopology,
     CanonicalAssemblyManifestV1, DomainLifecyclePhase, ListenerAuth, ParsedAssemblyLock,
-    ParsedDeploymentPlan, RuntimePlan as TypedRuntimePlan, RuntimePlanV1Input,
+    RuntimePlan as TypedRuntimePlan, RuntimePlanV1Input,
 };
 
 const BUNDLED_ASSEMBLY_TOML: &str = include_str!("../assembly.toml");
 const BUNDLED_ASSEMBLY_LOCK: &[u8] = include_bytes!("../assembly.lock.json");
-const BUNDLED_DEPLOYMENT_PLAN: &[u8] =
-    include_bytes!("../../../deploy/generated/settingsonly.deployment-plan.json");
 const ASSEMBLY_NAME: &str = "settingsonly";
 const SETTINGS_WORKLOAD: &str = "settingsonly";
 const INVENTORY_CONTRACT: &str = "runtime.inventory";
@@ -20,7 +18,6 @@ const INVENTORY_CONTRACT: &str = "runtime.inventory";
 /// The field is private so no caller can construct or substitute a partially validated plan.
 pub(crate) struct SettingsOnlyPlan {
     typed: TypedRuntimePlan,
-    deployment: ParsedDeploymentPlan,
 }
 
 impl SettingsOnlyPlan {
@@ -37,13 +34,10 @@ impl SettingsOnlyPlan {
         let typed = TypedRuntimePlan::compile_v1(&manifest, &lock, input)
             .context("compile bundled settingsonly RuntimePlan")?;
         validate_typed_closure(&typed)?;
-        let deployment = ParsedDeploymentPlan::from_json_slice(&typed, BUNDLED_DEPLOYMENT_PLAN)
-            .context("parse bundled settingsonly DeploymentPlan")?;
-        validate_deployment_closure(&deployment)?;
-        Ok(Self { typed, deployment })
+        Ok(Self { typed })
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(test)]
     pub(crate) const fn as_typed(&self) -> &TypedRuntimePlan {
         &self.typed
     }
@@ -56,24 +50,26 @@ impl SettingsOnlyPlan {
 
     pub(crate) fn into_inventory_seed(
         self,
-        build_identity: runtimeexec::inventory::BuildIdentity,
         completed_roles: crate::providers_gen::CompletedProviderRoles,
     ) -> anyhow::Result<runtimeexec::inventory::RuntimeInventorySeed> {
-        self.inventory_seed_with_bindings(build_identity, completed_roles.into_probe_bindings())
+        self.inventory_seed_with_bindings(completed_roles.into_probe_bindings())
     }
 
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn into_inventory_seed_fixture(
         self,
-        build_identity: runtimeexec::inventory::BuildIdentity,
         provider_bindings: Vec<runtimeexec::inventory::ProviderProbeBinding>,
     ) -> anyhow::Result<runtimeexec::inventory::RuntimeInventorySeed> {
-        self.inventory_seed_with_bindings(build_identity, provider_bindings)
+        Ok(self
+            .inventory_seed_with_bindings(provider_bindings)?
+            .with_build_metadata(runtimeexec::inventory::BuildMetadata::parse(
+                &"a".repeat(40),
+                &format!("sha256:{}", "b".repeat(64)),
+            )?))
     }
 
     fn inventory_seed_with_bindings(
         self,
-        build_identity: runtimeexec::inventory::BuildIdentity,
         provider_bindings: Vec<runtimeexec::inventory::ProviderProbeBinding>,
     ) -> anyhow::Result<runtimeexec::inventory::RuntimeInventorySeed> {
         let placements = self
@@ -87,15 +83,12 @@ impl SettingsOnlyPlan {
                 )
             })
             .collect();
-        runtimeexec::inventory::RuntimeInventorySeed::from_bound(
+        runtimeexec::inventory::RuntimeInventorySeed::from_runtime_plan(
             &self.typed,
-            &self.deployment,
-            SETTINGS_WORKLOAD,
-            build_identity,
             provider_bindings,
             placements,
         )
-        .context("bind settingsonly runtime inventory seed")
+        .context("seal settingsonly runtime inventory seed")
     }
 }
 
@@ -231,14 +224,6 @@ fn validate_typed_closure(plan: &TypedRuntimePlan) -> anyhow::Result<()> {
             && placements[0].domain() == AssemblyDomain::Settings
             && placements[0].workload() == SETTINGS_WORKLOAD,
         "compiled settingsonly plan has an unexpected placement closure"
-    );
-    Ok(())
-}
-
-fn validate_deployment_closure(plan: &ParsedDeploymentPlan) -> anyhow::Result<()> {
-    anyhow::ensure!(
-        plan.workloads().len() == 1 && plan.workloads()[0].name() == SETTINGS_WORKLOAD,
-        "settingsonly DeploymentPlan must contain exactly the settingsonly workload"
     );
     Ok(())
 }

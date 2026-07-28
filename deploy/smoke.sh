@@ -164,13 +164,13 @@ $COMPOSE build
 # ── 离线 preflight：同一 strict parser，且不注入 Vault/provider env、不发网络请求 ──────────────
 demo_allowlist="$(read_env_file_value RSS_VAULT_TENANT_STORE_ALLOWLIST_JSON)"
 validator_output="$(printf '%s\n' "$demo_allowlist" | docker run --rm -i \
-    --entrypoint /usr/local/bin/rss rss-server:dev vault-allowlist validate --stdin)" \
+    --entrypoint /usr/local/bin/rss rss-operator:dev vault-allowlist validate --stdin)" \
     || fail "合法 Vault allowlist 离线校验失败"
 [[ "$validator_output" = "vault allowlist validation succeeded" ]] \
     || fail "合法 Vault allowlist 离线校验输出不是闭合成功分类"
 invalid_marker="smoke-secret-allowlist-marker"
 if invalid_output="$(printf '%s\n' "{\"bindings\":[],\"$invalid_marker\":true}" | docker run --rm -i \
-    --entrypoint /usr/local/bin/rss rss-server:dev vault-allowlist validate --stdin 2>&1)"; then
+    --entrypoint /usr/local/bin/rss rss-operator:dev vault-allowlist validate --stdin 2>&1)"; then
     fail "非法 Vault allowlist 被离线校验接受"
 fi
 [[ "$invalid_output" = "Error: vault allowlist validation failed: invalid-json" ]] \
@@ -372,6 +372,19 @@ done
 [[ $redis_restored -eq 1 ]] \
     || fail "Redis 恢复后未出现 redis_ready healthy / readyz 200（last=$(cat "$READYZ_TMP")）"
 log "Redis 恢复 → redis_ready healthy、readyz 200 ✓"
+
+# ── 闭环 8：SIGTERM → 完整 drain → exit 0 ──────────────────────────────────────────────────────
+log "发送 SIGTERM，验证 server 完整 drain 并正常退出…"
+docker kill --signal=TERM "$cid" >/dev/null
+deadline=$((SECONDS + 30))
+server_state=""
+while [[ $SECONDS -lt $deadline ]]; do
+    server_state="$(docker inspect -f '{{.State.Status}}:{{.State.ExitCode}}' "$cid")"
+    [[ "$server_state" = "exited:0" ]] && break
+    sleep 1
+done
+[[ "$server_state" = "exited:0" ]] || fail "SIGTERM 后 server 未在 30 秒内正常退出（state=${server_state}）"
+log "SIGTERM → drain 完成 → exit 0 ✓"
 
 teardown
 trap - EXIT

@@ -1870,7 +1870,6 @@ async fn run_pre_handoff_failure_explicitly_shuts_down_trace_exporter() {
     let inputs = ServingRuntimeInputs::new(
         PreparedRuntimeInputs::new(snapshot, Some(otel::OtelExporter::new(provider))),
         test_password_blocklist(),
-        crate::phase::test_build_identity(),
     );
 
     let err = run(inputs)
@@ -1894,7 +1893,6 @@ async fn runtime_lifecycle_owner_does_not_shutdown_exporter_after_handoff() {
     let inputs = ServingRuntimeInputs::new(
         PreparedRuntimeInputs::new(snapshot, Some(otel::OtelExporter::new(provider))),
         test_password_blocklist(),
-        crate::phase::test_build_identity(),
     );
     let mut owner = RuntimeLifecycleOwner::new(inputs);
     let handed_off = owner

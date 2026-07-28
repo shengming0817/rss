@@ -16,9 +16,3 @@ fn runtime_plan_construction_is_sealed() {
     cases.compile_fail("tests/ui/runtime_plan_private.rs");
     cases.compile_fail("tests/ui/runtime_plan_fingerprint_private.rs");
 }
-
-#[test]
-fn deployment_plan_construction_is_sealed() {
-    let cases = trybuild::TestCases::new();
-    cases.compile_fail("tests/ui/deployment_plan_private.rs");
-}

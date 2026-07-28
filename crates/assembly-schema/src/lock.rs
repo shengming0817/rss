@@ -1036,7 +1036,7 @@ mod tests {
     }
     fn fingerprint_vectors() -> serde_json::Value {
         serde_json::from_str(include_str!(
-            "../../../docs/spec/007-runtime-deployment-executable-plan/fixtures/fingerprint-v1-vectors.json"
+            "../tests/fixtures/fingerprint-v1-vectors.json"
         ))
         .expect("SpecKit fingerprint vectors")
     }
@@ -1135,7 +1135,7 @@ mod tests {
 
     #[test]
     fn canonical_and_lock_semantics_are_shared_end_to_end() {
-        let framework = "\"framework.alpha\", \"framework.beta\"";
+        let framework = "{ id = \"framework.alpha\", listener = \"primary\" }, { id = \"framework.beta\", listener = \"admin\" }";
         let source = semantic("semanticToml").replace("$FRAMEWORK", framework);
         let first = canonical(&source, framework);
         let equivalent = canonical(&semantic("equivalentToml"), framework);
@@ -1176,7 +1176,7 @@ mod tests {
         );
         for changed in [
             source.replacen("[\"identity\", \"settings\"]", "[\"settings\", \"identity\"]", 1),
-            source.replace(framework, "\"framework.beta\", \"framework.alpha\""),
+            source.replace(framework, "{ id = \"framework.beta\", listener = \"admin\" }, { id = \"framework.alpha\", listener = \"primary\" }"),
             source.replace(
                 "listeners = [{ kind = \"primary\", domains = [\"identity\", \"settings\"] }, { kind = \"admin\", domains = [\"settings\"] }]",
                 "listeners = [{ kind = \"admin\", domains = [\"settings\"] }, { kind = \"primary\", domains = [\"identity\", \"settings\"] }]",
@@ -1276,7 +1276,10 @@ mod tests {
 
     #[test]
     fn contract_catalog_closes_selection_validation_and_tuple_order() {
-        let manifest = canonical(&semantic("semanticToml"), "\"framework.status\"");
+        let manifest = canonical(
+            &semantic("semanticToml"),
+            "{ id = \"framework.status\", listener = \"admin\" }",
+        );
         let vectors = vectors();
         let catalog = make_catalog(fixture_bindings(&vectors["contractOrderInput"]));
         same(
@@ -1615,9 +1618,7 @@ payload = "payload.schema.json"
             text,
             std::str::from_utf8(&unsigned).expect("fixture invariant"),
             include_str!("../tests/fixtures/assembly-lock-v1-vectors.json"),
-            include_str!(
-                "../../../docs/spec/007-runtime-deployment-executable-plan/contracts/assembly-lock.schema.json"
-            ),
+            include_str!("../schemas/assembly-lock.schema.json"),
         ] {
             assert!(!carrier.contains(SECRET));
         }
@@ -1717,9 +1718,13 @@ payload = "payload.schema.json"
     fn derived_schema_structurally_matches_closed_contract() {
         let schema =
             serde_json::to_value(schemars::schema_for!(AssemblyLock)).expect("fixture invariant");
-        let contract: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../docs/spec/007-runtime-deployment-executable-plan/contracts/assembly-lock.schema.json"
-        )).expect("fixture invariant");
+        let contract: serde_json::Value =
+            serde_json::from_str(include_str!("../schemas/assembly-lock.schema.json"))
+                .expect("fixture invariant");
+        assert_eq!(
+            contract["$id"],
+            "https://rss.local/assembly-schema/assembly-lock.schema.json"
+        );
         let root_fields = ["schemaVersion", "identity", "digests", "fingerprint"];
         assert_closed(&schema, &root_fields);
         assert_closed(&contract, &root_fields);

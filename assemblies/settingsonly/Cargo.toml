@@ -22,7 +22,11 @@ path = "tests/artifact_acceptance.rs"
 
 [features]
 default = []
-test-support = ["settings-composition/test-support", "httpserve/test-util"]
+test-support = [
+    "settings-composition/test-support",
+    "httpserve/test-util",
+    "runtimeexec/test-support",
+]
 
 [dependencies]
 anyhow = { workspace = true }

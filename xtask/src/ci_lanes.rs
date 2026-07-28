@@ -400,11 +400,6 @@ pub(crate) enum CompileKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ToolRequirement {
     InProcess,
-    ExternalTool {
-        program: crate::cmd::ExternalProgram,
-        version: &'static str,
-        install_hint: &'static str,
-    },
     CargoBuiltin(crate::cmd::CargoSubcommand),
     Nextest,
     CoverageTools,
@@ -539,28 +534,6 @@ macro_rules! gate_catalog {
                         META,
                         CompileKind::NoCompile,
                         INTERNAL,
-                        SOURCE,
-                        BOTH_INCLUDED,
-                    )
-            ),
-            DeploymentPlanCheck => (step_deployment_plan_check, Some("xtask/src/deployment_plan.rs"),
-                gate(
-                        GateId::DeploymentPlanCheck,
-                        "deployment-plan-check",
-                        META,
-                        CompileKind::NoCompile,
-                        HELM_TOOL,
-                        SOURCE,
-                        BOTH_INCLUDED,
-                    )
-            ),
-            DeploymentPolicyCheck => (step_deployment_policy_check, Some("xtask/src/deployment_policy.rs"),
-                gate(
-                        GateId::DeploymentPolicyCheck,
-                        "deployment-policy-check",
-                        META,
-                        CompileKind::NoCompile,
-                        KUBECONFORM_TOOL,
                         SOURCE,
                         BOTH_INCLUDED,
                     )
@@ -723,17 +696,6 @@ macro_rules! gate_catalog {
                 gate(
                         GateId::RuntimeEnvGuard,
                         "runtime-env-guard",
-                        META,
-                        CompileKind::NoCompile,
-                        INTERNAL,
-                        SOURCE,
-                        BOTH_INCLUDED,
-                    )
-            ),
-            RuntimeDeploymentSpec => (step_runtime_deployment_spec, Some("xtask/src/runtime_deployment_spec.rs"),
-                gate(
-                        GateId::RuntimeDeploymentSpec,
-                        "runtime-deployment-spec",
                         META,
                         CompileKind::NoCompile,
                         INTERNAL,
@@ -1382,12 +1344,6 @@ const PUBLIC_API_HINT: &str = concat!(
     env!("RSS_TOOL_VERSION_CARGO_PUBLIC_API"),
     " --locked"
 );
-pub(crate) const HELM_HINT: &str = concat!(
-    "install Helm v",
-    env!("RSS_TOOL_VERSION_HELM"),
-    " from https://get.helm.sh/"
-);
-
 const fn gate(
     id: GateId,
     label: &'static str,
@@ -1453,22 +1409,6 @@ const NIGHTLY_ONLY: GateMembership = GateMembership {
 };
 const SOURCE: EvidenceKind = EvidenceKind::Source;
 const INTERNAL: ToolRequirement = ToolRequirement::InProcess;
-const HELM_TOOL: ToolRequirement = ToolRequirement::ExternalTool {
-    program: crate::cmd::ExternalProgram::Helm,
-    version: env!("RSS_TOOL_VERSION_HELM"),
-    install_hint: HELM_HINT,
-};
-pub(crate) const KUBECONFORM_HINT: &str = concat!(
-    "install kubeconform v",
-    env!("RSS_TOOL_VERSION_KUBECONFORM"),
-    " from https://github.com/yannh/kubeconform/releases"
-);
-const KUBECONFORM_TOOL: ToolRequirement = ToolRequirement::ExternalTool {
-    program: crate::cmd::ExternalProgram::Kubeconform,
-    version: env!("RSS_TOOL_VERSION_KUBECONFORM"),
-    install_hint: KUBECONFORM_HINT,
-};
-
 macro_rules! define_registry {
     ($( $id:ident => ($step:ident, $carrier:expr, $spec:expr), )*) => {
         pub(crate) const REGISTRY: &[GateSpec] = &[$($spec),*];
