@@ -14,8 +14,8 @@ impl PgStore {
         .await
         .map_err(PgError::SchemaLedgerProbe)?;
         let expected = postgres_migration_inventory::migrations();
-        let first_invalid = first_invalid_ledger_entry(&applied, &expected);
-        if ledger_is_exact(&applied, &expected) {
+        let first_invalid = first_invalid_ledger_entry(&applied, expected);
+        if ledger_is_exact(&applied, expected) {
             return Ok(());
         }
         let expected_head = expected.last().map(|migration| migration.version);

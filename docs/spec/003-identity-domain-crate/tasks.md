@@ -84,7 +84,7 @@ description: "Task list — identity 域 crate body 兑现"
 - [ ] T016 [PR4][US4] 先写测试（`application/login.rs` + `domain/session.rs`）：Active login 成功创建会话+发 session-created；Suspended/Locked/Deactivated 即使密码正确也返回 InvalidCredentials 且零 token/session/outbox；密码错误、跨租、storage failure 和缺失 security state 均 fail-closed；change_password CAS、logout 和 tenant header 边界继续覆盖。运行确认 FAIL。
 - [ ] T017 [PR4][US4] 定义 `SessionRepo`（`ports.rs`，域形 port）：`create`(L1)/`revoke`/`find`；`Session` 域类型（`domain/session.rs`）。
 - [ ] T018 [PR4][US4] `LoginService` 真实 `login`：从 `X-Tenant-ID` header 获取 tenant → combined authenticate 产出 active receipt → refresh pre-mint 重读并核对 Active/epoch → `SessionRepo::create`(L1) → 同事务 `Publisher::publish(identity.session-created)`(L2)；任一失败发生在 mint/session/outbox 之前。
-- [ ] T019 [PR4][US4] `change_password`（version pin CAS）+ `logout`（`SessionRepo::revoke`，域侧软撤销）。clippy/dylint/fmt/`cargo llvm-cov --lib -p identity` + L1/L2 原子性测试。
+- [ ] T019 [PR4][US4] `change_password`（version pin CAS）；logout 已由 #1840 替换为 current/all credential-security L2 原子撤销，不再走 `SessionRepo::revoke`。clippy/dylint/fmt/`cargo llvm-cov --lib -p identity` + L1/L2 原子性测试。
 
 ---
 

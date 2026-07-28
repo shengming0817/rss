@@ -39,9 +39,10 @@ pub mod ports;
 
 pub use application::{
     AccessGrantValidationError, AuthGrantServices, AuthGrantValidationService, ChangePasswordError,
-    FederatedIdentityDomain, FederatedIdentityDomainDeps, IdentityDomain, IdentityDomainDeps,
-    LoginError, LoginService, PolicyManageError, PolicyManageService, RbacAdminError,
-    RbacAdminService, RefreshBundle, RefreshError, RefreshService, ValidatedAuthGrant,
+    CredentialSecurityService, CurrentAuthGrant, FederatedIdentityDomain,
+    FederatedIdentityDomainDeps, IdentityDomain, IdentityDomainDeps, LoginError, LoginService,
+    PolicyManageError, PolicyManageService, RbacAdminError, RbacAdminService, RefreshBundle,
+    RefreshError, RefreshService, ValidatedAuthGrant,
 };
 /// Demo/journey 首发 token 装配（seed-login/test 门控；生产经组合根注入 vault `Signer`，#1252）。
 #[cfg(any(test, feature = "seed-login"))]
@@ -50,10 +51,8 @@ pub use domain::{
     AccountCredentialSecurityCommand, AccountSecurityHydrationError, AccountSecurityMutation,
     AccountSecuritySnapshot, AccountSecurityState, AccountSecurityTransitionError,
     AccountSecurityVersion, AccountStatus, CredentialSecurityCommand, CredentialSecurityEvent,
-    CredentialSecurityFactAuthorization, CredentialSecurityReceipt,
-    CredentialSecurityTargetHydrationError, CredentialSecurityTargetKind,
-    CredentialSecurityTargetMapping, CredentialSecurityTargetRef, CredentialSecurityTargetRefError,
-    GrantCredentialSecurityCommand, RefreshRotationOutcome, ResolvedCredentialSecurityTarget,
+    CredentialSecurityReceipt, CredentialSecurityTargetKind, CredentialSecurityTargetRef,
+    GrantCredentialSecurityCommand, LogoutAllCommand, LogoutCurrentCommand, RefreshRotationOutcome,
 };
 pub use ports::AuthGrantProvider;
 
@@ -85,7 +84,8 @@ pub mod test_support {
 
     use crate::domain::{
         AccountSecuritySnapshot, AccountSecurityState, CredentialSecurityCommand, LoginIdentifier,
-        RefreshTokenHash, RefreshTokenId, RefreshTokenRecord,
+        LogoutAllCommand, LogoutCurrentCommand, RefreshTokenHash, RefreshTokenId,
+        RefreshTokenRecord,
     };
     use authn::{
         AccountSecurityEventKind, AuthGrant, AuthGrantId, AuthGrantSnapshot, AuthGrantStatus,
@@ -93,12 +93,26 @@ pub mod test_support {
     };
 
     /// Mount the production logout handler for downstream adapter integration tests.
-    pub fn logout_router<S: diport::Signer + Send + Sync + 'static>(
-        service: Arc<crate::LoginService<S>>,
-        tenant: TenantId,
-        actor: &str,
+    pub fn logout_router(
+        service: Arc<crate::CredentialSecurityService>,
+        evidence: crate::CurrentAuthGrant,
     ) -> axum::Router {
-        crate::application::logout_router_for_test(service, tenant, actor)
+        crate::application::logout_router_for_test(service, evidence)
+    }
+
+    /// Construct opaque current-grant evidence for downstream integration tests.
+    pub fn current_auth_grant(
+        grant_id: &str,
+        user_id: ids::UserId,
+        tenant_id: TenantId,
+        authn_epoch: u64,
+    ) -> crate::CurrentAuthGrant {
+        crate::CurrentAuthGrant::for_test(
+            ids::CanonicalUuidV4::parse(grant_id).expect("test grant id must be canonical UUIDv4"),
+            user_id,
+            tenant_id,
+            authn_epoch,
+        )
     }
 
     /// 构造测试用 [`AuthGrant`]（经域 funnel；仅 test/dev 构建）。
@@ -154,6 +168,28 @@ pub mod test_support {
     ) -> CredentialSecurityCommand {
         CredentialSecurityCommand::grant(grant, kind, occurred_at)
             .expect("test grant credential-security command must satisfy state invariants")
+    }
+
+    /// Build the route-specific logout-all command; the returned type cannot be passed to the
+    /// logout-current lifecycle method.
+    #[allow(clippy::expect_used)]
+    pub fn logout_all_command(
+        state: AccountSecurityState,
+        occurred_at: SystemTime,
+    ) -> LogoutAllCommand {
+        CredentialSecurityCommand::logout_all(state, occurred_at)
+            .expect("test logout-all command must satisfy state invariants")
+    }
+
+    /// Build the route-specific logout-current command; the returned type cannot be passed to the
+    /// logout-all lifecycle method.
+    #[allow(clippy::expect_used)]
+    pub fn logout_current_command(
+        grant: AuthGrant,
+        occurred_at: SystemTime,
+    ) -> LogoutCurrentCommand {
+        CredentialSecurityCommand::logout_current(grant, occurred_at)
+            .expect("test logout-current command must satisfy state invariants")
     }
 
     /// Construct an initial refresh record derived from the exact test AuthGrant binding.
@@ -301,6 +337,7 @@ mod smoke {
             IdentityError::OutboxFactConflict(_) => {}
             IdentityError::SecurityFactBuild(_) => {}
             IdentityError::SecurityPayloadEncode(_) => {}
+            IdentityError::ProviderUnavailable(_) => {}
             IdentityError::Storage(_) => {}
         }
     }

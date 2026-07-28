@@ -330,8 +330,6 @@ pub(crate) enum PgTxRetryBoundary {
     #[cfg(feature = "domain-identity")]
     IdentityCredential,
     #[cfg(feature = "domain-identity")]
-    IdentityAuthGrant,
-    #[cfg(feature = "domain-identity")]
     IdentityRefresh,
     #[cfg(feature = "domain-audit")]
     AuditAppend,
@@ -350,8 +348,6 @@ impl PgTxRetryBoundary {
             Self::SettingsSecret => "settings.secret",
             #[cfg(feature = "domain-identity")]
             Self::IdentityCredential => "identity.credential",
-            #[cfg(feature = "domain-identity")]
-            Self::IdentityAuthGrant => "identity.auth-grant",
             #[cfg(feature = "domain-identity")]
             Self::IdentityRefresh => "identity.refresh",
             #[cfg(feature = "domain-audit")]
@@ -375,10 +371,6 @@ pub(crate) const SETTINGS_SECRET_BOUNDARY: PgTxRetryBoundary = PgTxRetryBoundary
 #[cfg(feature = "domain-identity")]
 pub(crate) const IDENTITY_CREDENTIAL_BOUNDARY: PgTxRetryBoundary =
     PgTxRetryBoundary::IdentityCredential;
-/// Retry boundary for identity AuthGrant close writes.
-#[cfg(feature = "domain-identity")]
-pub(crate) const IDENTITY_AUTH_GRANT_BOUNDARY: PgTxRetryBoundary =
-    PgTxRetryBoundary::IdentityAuthGrant;
 /// Retry boundary for identity refresh-token rotation writes.
 #[cfg(feature = "domain-identity")]
 pub(crate) const IDENTITY_REFRESH_BOUNDARY: PgTxRetryBoundary = PgTxRetryBoundary::IdentityRefresh;
@@ -471,11 +463,6 @@ impl PgLocalTxOperation for identity::ports::PasswordChangeRouteMarker {
 }
 
 #[cfg(feature = "domain-identity")]
-impl PgLocalTxOperation for identity::ports::AuthGrantCloseRouteMarker {
-    const BOUNDARY: PgTxRetryBoundary = IDENTITY_AUTH_GRANT_BOUNDARY;
-}
-
-#[cfg(feature = "domain-identity")]
 impl PgLocalTxOperation for identity::ports::RefreshRotationRouteMarker {
     const BOUNDARY: PgTxRetryBoundary = IDENTITY_REFRESH_BOUNDARY;
 }
@@ -484,9 +471,6 @@ impl PgLocalTxOperation for identity::ports::RefreshRotationRouteMarker {
 impl PgLocalTxObservation for identity::ports::AuthGrantCloseObservation {
     fn boundary(&self) -> PgTxRetryBoundary {
         match self {
-            Self::Logout(_) => {
-                <identity::ports::AuthGrantCloseRouteMarker as PgLocalTxOperation>::BOUNDARY
-            }
             Self::RefreshReplay(_) => {
                 <identity::ports::RefreshRotationRouteMarker as PgLocalTxOperation>::BOUNDARY
             }
@@ -500,9 +484,6 @@ impl PgLocalTxObservation for identity::ports::AuthGrantCloseObservation {
         settlement: Option<LocalTxFinalStatus>,
     ) {
         match self {
-            Self::Logout(observation) => {
-                observation.record_failed_attempt(attempt, retry_class, settlement);
-            }
             Self::RefreshReplay(observation) => {
                 observation.record_failed_attempt(attempt, retry_class, settlement);
             }
@@ -511,7 +492,6 @@ impl PgLocalTxObservation for identity::ports::AuthGrantCloseObservation {
 
     fn record_deadline_exceeded(&self, stage: LocalTxDeadlineStage) {
         match self {
-            Self::Logout(observation) => observation.record_deadline_exceeded(stage),
             Self::RefreshReplay(observation) => observation.record_deadline_exceeded(stage),
         }
     }
@@ -523,7 +503,6 @@ impl PgLocalTxObservation for identity::ports::AuthGrantCloseObservation {
         settlement: Option<LocalTxFinalStatus>,
     ) {
         match self {
-            Self::Logout(observation) => observation.finish(attempts, retry_status, settlement),
             Self::RefreshReplay(observation) => {
                 observation.finish(attempts, retry_status, settlement);
             }
@@ -538,16 +517,24 @@ impl PgLocalTxOperation for audit::ports::AuditListTenantRouteMarker {
 
 /// Classify a SQLSTATE code.
 pub(crate) fn classify_sqlstate(code: Option<&str>) -> TxRetryClass {
+    if sqlstate_provider_unavailable(code) {
+        return TxRetryClass::Transient;
+    }
     match code {
         // Serialization failure / deadlock / lock timeout: the whole transaction may be retried.
         Some("40001" | "40P01" | "55P03") => TxRetryClass::Transient,
-        // Connection exception family and server shutdown/recovery states.
-        Some(
-            "08000" | "08001" | "08003" | "08004" | "08006" | "08007" | "57P01" | "57P02" | "57P03",
-        ) => TxRetryClass::Transient,
         // Integrity / authorization / syntax / data exceptions are not made correct by retrying.
         Some(_) | None => TxRetryClass::Permanent,
     }
+}
+
+fn sqlstate_provider_unavailable(code: Option<&str>) -> bool {
+    matches!(
+        code,
+        Some(
+            "08000" | "08001" | "08003" | "08004" | "08006" | "08007" | "57P01" | "57P02" | "57P03"
+        )
+    )
 }
 
 /// Classify sqlx errors at the Postgres boundary.
@@ -569,6 +556,30 @@ pub(crate) fn classify_sqlx_error(error: &sqlx::Error) -> TxRetryClass {
         | sqlx::Error::AnyDriverError(_)
         | sqlx::Error::Migrate(_) => TxRetryClass::Permanent,
         _ => TxRetryClass::Permanent,
+    }
+}
+
+/// Exact temporary provider failures that may be exposed as retryable 503.
+pub(crate) fn sqlx_provider_unavailable(error: &sqlx::Error) -> bool {
+    match error {
+        sqlx::Error::Io(_) | sqlx::Error::PoolTimedOut | sqlx::Error::WorkerCrashed => true,
+        sqlx::Error::Database(database) => {
+            sqlstate_provider_unavailable(database.code().as_deref())
+        }
+        _ => false,
+    }
+}
+
+/// Single lowering funnel for identity storage failures at the PostgreSQL boundary.
+#[cfg(feature = "domain-identity")]
+pub(crate) fn identity_storage_error(error: impl Error + Send + Sync + 'static) -> IdentityError {
+    let unavailable = (&error as &(dyn Error + 'static))
+        .downcast_ref::<sqlx::Error>()
+        .is_some_and(sqlx_provider_unavailable);
+    if unavailable {
+        IdentityError::ProviderUnavailable(Box::new(error))
+    } else {
+        IdentityError::Storage(Box::new(error))
     }
 }
 
@@ -604,6 +615,7 @@ pub(crate) fn classify_secret_repo_error(error: &SecretRepoError) -> TxRetryClas
 pub(crate) fn classify_identity_error(error: &IdentityError) -> TxRetryClass {
     match error {
         IdentityError::VersionConflict => TxRetryClass::Conflict,
+        IdentityError::ProviderUnavailable(_) => TxRetryClass::Transient,
         IdentityError::Storage(source) => classify_source(source.as_ref()),
         _ => TxRetryClass::Permanent,
     }
@@ -897,6 +909,8 @@ fn record_final(boundary: PgTxRetryBoundary, report: TxRetryReport, reason: &'st
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "domain-identity")]
+    use super::identity_storage_error;
     #[cfg(feature = "domain-audit")]
     use super::{AUDIT_LIST_TENANT_APPEND_BOUNDARY, PgLocalTxOperation};
     use super::{
@@ -1089,6 +1103,37 @@ mod tests {
             classify_sqlx_error(&sqlx::Error::RowNotFound),
             TxRetryClass::Permanent
         );
+    }
+
+    #[cfg(feature = "domain-identity")]
+    #[test]
+    fn identity_storage_lowering_has_one_fail_closed_provider_funnel() {
+        for error in [
+            sqlx::Error::Io(std::io::Error::other("connection reset")),
+            sqlx::Error::PoolTimedOut,
+            sqlx::Error::WorkerCrashed,
+            sqlx::Error::Database(Box::new(FakeDatabaseError { code: "08006" })),
+            sqlx::Error::Database(Box::new(FakeDatabaseError { code: "57P03" })),
+        ] {
+            assert!(matches!(
+                identity_storage_error(error),
+                identity::ports::IdentityError::ProviderUnavailable(_)
+            ));
+        }
+        for error in [
+            sqlx::Error::Protocol("broken frame".to_owned()),
+            sqlx::Error::RowNotFound,
+            sqlx::Error::Database(Box::new(FakeDatabaseError { code: "23505" })),
+        ] {
+            assert!(matches!(
+                identity_storage_error(error),
+                identity::ports::IdentityError::Storage(_)
+            ));
+        }
+        assert!(matches!(
+            identity_storage_error(std::io::Error::other("corrupt row")),
+            identity::ports::IdentityError::Storage(_)
+        ));
     }
 
     #[test]

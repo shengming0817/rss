@@ -95,7 +95,8 @@
 |------|-------------|--------|------|------------|------|
 | login | POST `/api/v1/identity/login` | **L2 OutboxFact**（与权威 contract.toml 同源：同事务写 AuthGrant、初始 refresh 与 `identity.session-created`） | Public（opt_out） | — | ✓ draft→active；tenant 来源 X-Tenant-ID header，body 禁 tenantId；响应含 `{sessionId,expiresAt,accessToken,refreshToken,accessExpiresAt}`（#1252 首发 JWT bundle 已接线） |
 | password-change | POST `/api/v1/identity/password/change` | L1 | 鉴权（selfScoped） | `identity:profile:write` | 新增 |
-| logout | POST `/api/v1/identity/logout` | L1 | 鉴权（selfScoped） | `identity:session:write` | 新增；仅域侧软撤销，硬吊销延 #1003 |
+| logout current | POST `/api/v1/identity/logout` | L2 OutboxFact | 鉴权 grant evidence | `identity:session:logout-current` | 精确撤销当前 grant/family |
+| logout all | POST `/api/v1/identity/logout-all` | L2 OutboxFact | 鉴权 grant evidence | `identity:session:logout-all` | epoch CAS 撤销主体全部既存 grant/family |
 | roles assign | POST `/api/v1/identity/roles/{roleId}/bindings` | L2 | 鉴权 | `identity:role:assign` | 新增 |
 | roles revoke | DELETE `/api/v1/identity/roles/{roleId}/bindings/{subject}` | L2 | 鉴权（binding 级：tenant 从鉴权上下文，只撤目标 binding，跨租隐藏存在性） | `identity:role:revoke` | 新增 |
 | roles list | GET `/api/v1/identity/roles` | L0 | 鉴权 + 分页(limit≤500) | `identity:role:read` | 新增；响应格式 `{data,nextCursor,hasMore}` |

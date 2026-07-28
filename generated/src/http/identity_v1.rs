@@ -315,25 +315,18 @@ pub mod logout {
     ///{
     ///  "title": "IdentityLogoutRequest",
     ///  "type": "object",
-    ///  "required": [
-    ///    "sessionId"
-    ///  ],
-    ///  "properties": {
-    ///    "sessionId": {
-    ///      "type": "string",
-    ///      "x-redaction": "secret"
-    ///    }
-    ///  },
     ///  "additionalProperties": false
     ///}
     /// ```
     /// </details>
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
     #[serde(deny_unknown_fields)]
-    pub struct IdentityLogoutRequest {
-        #[serde(rename = "sessionId")]
-        #[redact(sensitivity = secret)]
-        pub session_id: ::std::string::String,
+    pub struct IdentityLogoutRequest {}
+    #[allow(clippy::derivable_impls)]
+    impl ::std::default::Default for IdentityLogoutRequest {
+        fn default() -> Self {
+            Self {}
+        }
     }
     ///`IdentityLogoutResponse`
     ///
@@ -380,7 +373,7 @@ pub mod logout {
         "identity",
         "identity.logout",
         "v1",
-        "sha256:472b836cd8a76a9eef01457a1e93585152b8c6e0246896d42bbd1754ebdbd962",
+        "sha256:973f7b48c442450e657414136de1c5427c57ad9eeb5979463e9df59a8c33d7d3",
     );
 
     /// 业务绝对 HTTP path（来自 `contract.toml` `path`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
@@ -394,6 +387,8 @@ pub mod logout {
         ::vocab::HttpEffectKind::Auth,
         ::vocab::HttpEffectKind::BusinessWrite,
         ::vocab::HttpEffectKind::BusinessTransaction,
+        ::vocab::HttpEffectKind::Outbox,
+        ::vocab::HttpEffectKind::Publish,
     ];
 
     /// HTTP effect profile（闭 effect vocabulary + required field）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
@@ -403,7 +398,7 @@ pub mod logout {
     pub enum RouteMarker {}
 
     /// Typed route binding（metadata + contract identity 单一载体）。由 codegen 派生；勿手改。
-    pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker, ::vocab::http::LocalTx> =
+    pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker, ::vocab::http::OutboxFact> =
         ::vocab::HttpRouteBinding::from_static(
             ::vocab::HttpContractOwner::domain("identity"),
             CONTRACT,
@@ -411,26 +406,213 @@ pub mod logout {
             "POST",
             ::vocab::http::HttpSuccessStatus::new(200),
             ::vocab::http::HttpIdempotency::Idempotent,
-            ::vocab::HttpRouteAuth::Permission(::vocab::RoutePermissionId::IdentitySessionWrite),
+            ::vocab::HttpRouteAuth::Permission(
+                ::vocab::RoutePermissionId::IdentitySessionLogoutCurrent,
+            ),
             None,
             true,
             ::vocab::http::HttpResourceSharing::TenantScoped,
             EFFECT_PROFILE,
         );
 
-    /// Required LocalTx capability evidence derived from `[capabilities.localTx]`.
-    pub const LOCAL_TX: super::super::LocalTxSpec = super::super::LocalTxSpec {
-        boundary: ::vocab::LocalTxBoundary::SingleDomain,
-        tx_model: ::vocab::LocalTxModel::TenantScopedUow,
-        retry: ::vocab::LocalTxRetry::BoundedTransient,
-        commit_unknown: ::vocab::LocalTxCommitUnknown::NotRetryable,
-    };
+    /// Exact emitted event contracts derived from `[capabilities.outbox].emits`.
+    pub const EMITTED_FACTS: &[::vocab::ContractBinding] =
+        &[crate::event::identity_v1::security_event::CONTRACT];
+
+    /// Generated producer binding（route + exact emitted facts 单一载体）。由 codegen 派生；勿手改。
+    pub const PRODUCER: ::vocab::http::HttpProducerBinding<RouteMarker> =
+        ::vocab::http::HttpProducerBinding::from_static(ROUTE, EMITTED_FACTS);
 
     /// HTTP serving metadata（path/method/auth/header 单源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const SPEC: super::super::HttpSpec = super::super::HttpSpec {
         mount_key: "identity_v1::logout",
         route: ROUTE.evidence(),
-        local_tx: Some(LOCAL_TX),
+        local_tx: None,
+        resource_sharing: super::super::HttpResourceSharingSpec {
+            mode: ROUTE.evidence().resource_sharing(),
+            reason: None,
+        },
+        projection_fields: PROJECTION_FIELDS,
+        headers: &[],
+    };
+}
+
+/// 端点 `logout-all` 派生契约（源 `logout-all/contract.toml`）。由 `cargo xtask codegen` 派生；勿手改。
+pub mod logout_all {
+    /// Error types.
+    pub mod error {
+        /// Error from a `TryFrom` or `FromStr` implementation.
+        pub struct ConversionError(::std::borrow::Cow<'static, str>);
+        impl ::std::error::Error for ConversionError {}
+        impl ::std::fmt::Display for ConversionError {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                ::std::fmt::Display::fmt(&self.0, f)
+            }
+        }
+        impl ::std::fmt::Debug for ConversionError {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                ::std::fmt::Debug::fmt(&self.0, f)
+            }
+        }
+        impl From<&'static str> for ConversionError {
+            fn from(value: &'static str) -> Self {
+                Self(value.into())
+            }
+        }
+        impl From<String> for ConversionError {
+            fn from(value: String) -> Self {
+                Self(value.into())
+            }
+        }
+    }
+    ///`IdentityLogoutAllData`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityLogoutAllData",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "loggedOut"
+    ///  ],
+    ///  "properties": {
+    ///    "loggedOut": {
+    ///      "type": "boolean"
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct IdentityLogoutAllData {
+        #[serde(rename = "loggedOut")]
+        #[redact(sensitivity = public)]
+        pub logged_out: bool,
+    }
+    ///`IdentityLogoutAllRequest`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityLogoutAllRequest",
+    ///  "type": "object",
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct IdentityLogoutAllRequest {}
+    #[allow(clippy::derivable_impls)]
+    impl ::std::default::Default for IdentityLogoutAllRequest {
+        fn default() -> Self {
+            Self {}
+        }
+    }
+    ///`IdentityLogoutAllResponse`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityLogoutAllResponse",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "data"
+    ///  ],
+    ///  "properties": {
+    ///    "data": {
+    ///      "title": "IdentityLogoutAllData",
+    ///      "type": "object",
+    ///      "required": [
+    ///        "loggedOut"
+    ///      ],
+    ///      "properties": {
+    ///        "loggedOut": {
+    ///          "type": "boolean"
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct IdentityLogoutAllResponse {
+        #[redact(sensitivity = public)]
+        pub data: IdentityLogoutAllData,
+    }
+
+    /// HTTP 契约 ID（`contract.toml` `id` 字段，单一事实源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+    pub const CONTRACT_ID: &str = "identity.logout-all";
+
+    /// 契约归属绑定（`domain` + `id` + `version` + `schema_hash` 同源派生）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+    pub const CONTRACT: ::vocab::ContractBinding = ::vocab::ContractBinding::from_static(
+        "identity",
+        "identity.logout-all",
+        "v1",
+        "sha256:c348052b4723cad810c1dfc18c8bf8debf606a17edbff9d615a88080dd136b9f",
+    );
+
+    /// 业务绝对 HTTP path（来自 `contract.toml` `path`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+    pub const PATH: &str = "/api/v1/identity/logout-all";
+
+    /// Field projection metadata（来自 `contract.toml` `[endpoints.http.projection]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+    pub const PROJECTION_FIELDS: &[super::super::HttpProjectionFieldSpec] = &[];
+
+    /// HTTP effect metadata（来自 `contract.toml` `[effectProfile]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+    pub const EFFECTS: &[::vocab::HttpEffectKind] = &[
+        ::vocab::HttpEffectKind::Auth,
+        ::vocab::HttpEffectKind::BusinessWrite,
+        ::vocab::HttpEffectKind::BusinessTransaction,
+        ::vocab::HttpEffectKind::Outbox,
+        ::vocab::HttpEffectKind::Publish,
+    ];
+
+    /// HTTP effect profile（闭 effect vocabulary + required field）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+    pub const EFFECT_PROFILE: ::vocab::HttpEffectProfile = ::vocab::HttpEffectProfile::new(EFFECTS);
+
+    /// Contract-specific route identity. Each generated HTTP contract owns a distinct marker type.
+    pub enum RouteMarker {}
+
+    /// Typed route binding（metadata + contract identity 单一载体）。由 codegen 派生；勿手改。
+    pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker, ::vocab::http::OutboxFact> =
+        ::vocab::HttpRouteBinding::from_static(
+            ::vocab::HttpContractOwner::domain("identity"),
+            CONTRACT,
+            PATH,
+            "POST",
+            ::vocab::http::HttpSuccessStatus::new(200),
+            ::vocab::http::HttpIdempotency::Idempotent,
+            ::vocab::HttpRouteAuth::Permission(
+                ::vocab::RoutePermissionId::IdentitySessionLogoutAll,
+            ),
+            None,
+            true,
+            ::vocab::http::HttpResourceSharing::TenantScoped,
+            EFFECT_PROFILE,
+        );
+
+    /// Exact emitted event contracts derived from `[capabilities.outbox].emits`.
+    pub const EMITTED_FACTS: &[::vocab::ContractBinding] =
+        &[crate::event::identity_v1::security_event::CONTRACT];
+
+    /// Generated producer binding（route + exact emitted facts 单一载体）。由 codegen 派生；勿手改。
+    pub const PRODUCER: ::vocab::http::HttpProducerBinding<RouteMarker> =
+        ::vocab::http::HttpProducerBinding::from_static(ROUTE, EMITTED_FACTS);
+
+    /// HTTP serving metadata（path/method/auth/header 单源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+    pub const SPEC: super::super::HttpSpec = super::super::HttpSpec {
+        mount_key: "identity_v1::logout_all",
+        route: ROUTE.evidence(),
+        local_tx: None,
         resource_sharing: super::super::HttpResourceSharingSpec {
             mode: ROUTE.evidence().resource_sharing(),
             reason: None,

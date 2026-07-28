@@ -33,6 +33,7 @@
 //! INVARIANT: RUNTIME-SERVICE-TOKEN-REPLAY-LIVE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_service_token_replay_live_rejects_bait_parallel_paths_and_process_local_guards", anti_vacuity = "tests::runtime_service_token_replay_live_accepts_typed_pg_composition" } -- the only production service-token constructor accepts the closed PostgreSQL replay-owner trait, whose implementation set is exactly `PgRuntimeDeps` plus `PgMaintenanceDeps`. Serving and the five operator paths call that typed constructor directly at their run-reachable sites. Missing calls, extra/dead helpers, macro indirection, test-only evidence, process-local guards, comments, and strings cannot satisfy the inventory.
 //!
 //! INVARIANT: POSTGRES-SETUP-TRANSACTION-LIVE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::postgres_setup_transaction_rejects_missing_live_edges", anti_vacuity = "tests::postgres_setup_transaction_accepts_live_workspace" } -- the unique production `PgRuntimeDeps::connect_serving` must register each constructed pool immediately, mint the revocation capability receipt before constructing the reader, close the migrator after every post-connect outcome, roll back writer/reader partial construction on capability, reader, or audit-admin failure, and commit only after the typed owner holds all serving pools and the receipt. The AST gate pins the live statement/branch structure; helper-only tests, comments, strings, and dead bait cannot satisfy it.
+//! INVARIANT: AUDIT-SECURITY-FACT-BOUNDARY-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::audit_security_fact_boundary_rejects_identity_table_reads", anti_vacuity = "tests::audit_security_fact_boundary_accepts_live_workspace" } -- the transactional audit security-event consumer must decode the generated redacted fact into the audit-owned sealed command and must never query the identity-owned credential-security target mapping relation.
 
 use crate::diagnostic::{Finding, GovernanceCheck, finding};
 use crate::localtx_coverage::attrs_may_be_production;
@@ -99,6 +100,7 @@ const RUNTIME_ROUTES_PATH: &str = "assemblies/runtime/src/routes.rs";
 const RUNTIME_LISTENERS_PATH: &str = "assemblies/runtime/src/listeners.rs";
 const RUNTIME_CONFIG_PATH: &str = "assemblies/runtime/src/config.rs";
 const POSTGRES_BUNDLE_PATH: &str = "adapters/postgres/src/bundle.rs";
+const POSTGRES_CONSUMER_TX_PATH: &str = "adapters/postgres/src/consumer_tx.rs";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Rule {
@@ -266,6 +268,7 @@ fn collect_report(root: &Path) -> Result<Report> {
     findings.extend(runtime_launch_kernel_owner_findings(root)?);
     findings.extend(runtime_service_token_replay_live_findings(root)?);
     findings.extend(postgres_setup_transaction_live_findings(root)?);
+    findings.extend(audit_security_fact_boundary_findings(root)?);
     findings.extend(generated_domains_live_findings(root)?);
     findings.extend(provider_outputs_live_findings(root)?);
     findings.extend(event_transport_output_findings(root)?);
@@ -13602,20 +13605,36 @@ fn postgres_setup_transaction_live_findings(root: &Path) -> Result<Vec<Finding<R
         )]);
     }
     let file = parse_rust_file(&path)?;
-    let setup = unique_production_inherent_method(&file, "PgRuntimeDeps", "connect_serving");
+    let setup = unique_production_inherent_method(&file, "PgRuntimeDeps", "connect_serving_inner");
     if setup.is_some_and(|method| postgres_setup_transaction_is_canonical(&method.block)) {
         return Ok(Vec::new());
     }
     Ok(vec![finding(
         Rule::ForbiddenWiring,
         POSTGRES_BUNDLE_PATH,
-        "PgRuntimeDeps::connect_serving 必须在真实生产 AST 中先连接 exact-ledger writer，再按构造顺序注册 writer/reader/audit-admin，所有失败 await rollback，成功 owner 后唯一 commit",
+        "PgRuntimeDeps::connect_serving_inner 必须在真实生产 AST 中先连接 exact-ledger writer，再按构造顺序注册 writer/reader/audit-admin，所有失败 await rollback，成功 owner 后唯一 commit",
+    )])
+}
+
+fn audit_security_fact_boundary_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
+    let path = root.join(POSTGRES_CONSUMER_TX_PATH);
+    let source =
+        fs::read_to_string(&path).with_context(|| format!("读 {} 失败", path.display()))?;
+    if source.contains("security_audit_command_from_message")
+        && !source.contains("credential_security_target_mappings")
+    {
+        return Ok(Vec::new());
+    }
+    Ok(vec![finding(
+        Rule::ForbiddenWiring,
+        POSTGRES_CONSUMER_TX_PATH,
+        "audit security-event consumer 必须只消费 sealed redacted fact command，禁止直读 identity credential-security target mapping",
     )])
 }
 
 fn postgres_setup_transaction_is_canonical(block: &syn::Block) -> bool {
     let statements = block.stmts.as_slice();
-    if statements.len() != 14 {
+    if statements.len() != 15 {
         return false;
     }
     let Some(serving_transaction) =
@@ -13629,27 +13648,32 @@ fn postgres_setup_transaction_is_canonical(block: &syn::Block) -> bool {
     let Some(writer_store) = exact_local_initializer(&statements[3], "writer_store", false) else {
         return false;
     };
-    let Some(delivery_policy) = exact_local_initializer(&statements[4], "delivery_policy", false)
+    let Some(projection_bindings_preloaded) =
+        exact_local_initializer(&statements[4], "projection_bindings_preloaded", false)
+    else {
+        return false;
+    };
+    let Some(delivery_policy) = exact_local_initializer(&statements[5], "delivery_policy", false)
     else {
         return false;
     };
     let Some(revocation_receipt) =
-        exact_local_initializer(&statements[6], "revocation_receipt", false)
+        exact_local_initializer(&statements[7], "revocation_receipt", false)
     else {
         return false;
     };
-    let Some(reader) = exact_local_initializer(&statements[7], "reader", false) else {
+    let Some(reader) = exact_local_initializer(&statements[8], "reader", false) else {
         return false;
     };
-    let Some(stores) = exact_local_initializer(&statements[9], "stores", false) else {
+    let Some(stores) = exact_local_initializer(&statements[10], "stores", false) else {
         return false;
     };
     let Some(audit_admin_store) =
-        exact_local_initializer(&statements[10], "audit_admin_store", false)
+        exact_local_initializer(&statements[11], "audit_admin_store", false)
     else {
         return false;
     };
-    let Some(owner) = exact_local_initializer(&statements[11], "owner", false) else {
+    let Some(owner) = exact_local_initializer(&statements[12], "owner", false) else {
         return false;
     };
 
@@ -13662,16 +13686,13 @@ fn postgres_setup_transaction_is_canonical(block: &syn::Block) -> bool {
             "postgres-writer",
         )
         && compact_tokens(writer_store) == "writer.store_arc()"
-        && fallible_serving_match_is_canonical(
-            delivery_policy,
-            "writer_store.load_event_delivery_policy().await",
-            "policy",
-        )
-        && projection_binding_registration_is_canonical(&statements[5])
+        && compact_tokens(projection_bindings_preloaded) == "preloaded_delivery_policy.is_some()"
+        && preloaded_delivery_policy_match_is_canonical(delivery_policy)
+        && conditional_projection_binding_registration_is_canonical(&statements[6])
         && revocation_receipt_is_canonical(revocation_receipt)
         && reader_connect_is_canonical(reader)
         && exact_register_statement(
-            &statements[8],
+            &statements[9],
             "serving_transaction",
             "reader.store_arc()",
             "postgres-reader",
@@ -13679,8 +13700,24 @@ fn postgres_setup_transaction_is_canonical(block: &syn::Block) -> bool {
         && compact_tokens(stores) == "Arc::new(PgRuntimeStores::new(writer,reader))"
         && audit_connect_is_canonical(audit_admin_store)
         && postgres_runtime_owner_is_canonical(owner)
-        && exact_method_statement(&statements[12], "serving_transaction", "commit", &[])
-        && exact_path_call_statement(&statements[13], "Ok", &["owner"])
+        && exact_method_statement(&statements[13], "serving_transaction", "commit", &[])
+        && exact_path_call_statement(&statements[14], "Ok", &["owner"])
+}
+
+fn preloaded_delivery_policy_match_is_canonical(expression: &syn::Expr) -> bool {
+    let syn::Expr::Match(match_) = transparent_expr(expression) else {
+        return false;
+    };
+    compact_tokens(&match_.expr) == "preloaded_delivery_policy"
+        && match_.arms.len() == 2
+        && compact_tokens(&match_.arms[0].pat) == "Some(policy)"
+        && compact_tokens(&match_.arms[0].body) == "policy"
+        && compact_tokens(&match_.arms[1].pat) == "None"
+        && fallible_serving_match_is_canonical(
+            &match_.arms[1].body,
+            "writer_store.load_event_delivery_policy().await",
+            "policy",
+        )
 }
 
 fn fallible_serving_match_is_canonical(
@@ -13699,17 +13736,17 @@ fn fallible_serving_match_is_canonical(
         && returned_failure_close_is_exact(&match_.arms[1].body)
 }
 
-fn projection_binding_registration_is_canonical(statement: &syn::Stmt) -> bool {
+fn conditional_projection_binding_registration_is_canonical(statement: &syn::Stmt) -> bool {
     let Some(expression) = expression_statement(statement) else {
         return false;
     };
-    let syn::Expr::If(branch) = transparent_expr(expression) else {
+    let syn::Expr::If(outer) = transparent_expr(expression) else {
         return false;
     };
-    compact_tokens(&branch.cond)
-        == "letErr(primary)=writer_store.register_projection_input_bindings(projection_generation,projection_inputs).await.map_err(PgError::ProjectionBindings)"
-        && branch.else_branch.is_none()
-        && matches!(branch.then_branch.stmts.as_slice(), [syn::Stmt::Expr(expr, Some(_))]
+    compact_tokens(&outer.cond)
+        == "!projection_bindings_preloaded&&letErr(primary)=writer_store.register_projection_input_bindings(projection_generation,projection_inputs).await.map_err(PgError::ProjectionBindings)"
+        && outer.else_branch.is_none()
+        && matches!(outer.then_branch.stmts.as_slice(), [syn::Stmt::Expr(expr, Some(_))]
             if returned_failure_close_is_exact(expr))
 }
 
@@ -16050,6 +16087,38 @@ mod tests {
     }
 
     #[test]
+    fn postgres_setup_transaction_uses_collapsed_projection_failure_guard() -> Result<()> {
+        let source = fs::read_to_string(workspace_root()?.join(POSTGRES_BUNDLE_PATH))?;
+        assert!(
+            source.contains(
+                "if !projection_bindings_preloaded\n            && let Err(primary) = writer_store"
+            ),
+            "projection registration failure must use the clippy-clean single guard"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn audit_security_fact_boundary_accepts_live_workspace() -> Result<()> {
+        assert_eq!(
+            audit_security_fact_boundary_findings(&workspace_root()?)?,
+            Vec::<Finding<Rule>>::new()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn audit_security_fact_boundary_rejects_identity_table_reads() -> Result<()> {
+        let root = unique_tmp("audit-security-side-channel");
+        write(
+            &root.join(POSTGRES_CONSUMER_TX_PATH),
+            "fn handle_security_attempt() { security_audit_command_from_message(); credential_security_target_mappings(); }",
+        )?;
+        assert!(!audit_security_fact_boundary_findings(&root)?.is_empty());
+        Ok(())
+    }
+
+    #[test]
     fn postgres_setup_transaction_rejects_missing_live_edges() -> Result<()> {
         let missing_root = postgres_setup_fixture("postgres-setup-transaction-missing-carrier")?;
         fs::remove_file(missing_root.join(POSTGRES_BUNDLE_PATH))?;
@@ -16069,6 +16138,24 @@ mod tests {
                 "delivery policy failure close",
                 "return serving_transaction.close(Err(primary)).await",
                 "return Err(primary)",
+                0,
+            ),
+            (
+                "projection registration missing await",
+                ".register_projection_input_bindings(projection_generation, projection_inputs)\n                .await",
+                ".register_projection_input_bindings(projection_generation, projection_inputs)",
+                0,
+            ),
+            (
+                "projection registration failure close",
+                "return serving_transaction.close(Err(primary)).await;",
+                "return Err(primary);",
+                0,
+            ),
+            (
+                "projection registration dead branch",
+                "if !projection_bindings_preloaded\n            && let Err(primary)",
+                "if false && !projection_bindings_preloaded\n            && let Err(primary)",
                 0,
             ),
             (

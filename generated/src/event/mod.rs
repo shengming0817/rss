@@ -162,6 +162,8 @@ pub enum SubscriptionDispatchKey {
     IdentityRoleAssignedV1Audit,
     /// Generated dispatch identity for `identity.role-revoked@v1:audit`.
     IdentityRoleRevokedV1Audit,
+    /// Generated dispatch identity for `identity.security-event@v1:audit`.
+    IdentitySecurityEventV1Audit,
     /// Generated dispatch identity for `identity.session-created@v1:audit`.
     IdentitySessionCreatedV1Audit,
     /// Generated dispatch identity for `settings.config-version-changed@v1:settings`.
@@ -176,6 +178,7 @@ pub const EVENTS: &[EventSpec] = &[
     identity_v1::policy_updated::SPEC,
     identity_v1::role_assigned::SPEC,
     identity_v1::role_revoked::SPEC,
+    identity_v1::security_event::SPEC,
     identity_v1::session_created::SPEC,
     settings_v1::SPEC,
 ];

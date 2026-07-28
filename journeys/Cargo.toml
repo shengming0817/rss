@@ -19,8 +19,8 @@ path = "tests/audit_list_tenant_entries_localtx_journey.rs"
 required-features = ["integration"]
 
 [[test]]
-name = "identity_logout_localtx_journey"
-path = "tests/identity_logout_localtx_journey.rs"
+name = "identity_logout_grant_journey"
+path = "tests/identity_logout_grant_journey.rs"
 required-features = ["integration"]
 
 [[test]]

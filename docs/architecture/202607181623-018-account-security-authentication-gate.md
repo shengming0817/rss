@@ -42,11 +42,11 @@ ADR-020 的密码变更/重置、全部退出和凭据删除不是“同态 tran
 mutation，保持当前 status、递增 epoch/version，并在同一事务撤销全部 grant/family。账户锁定、暂停和停用仍只能
 走上述 transition 图；两类 mutation 都携带完整 expected snapshot，不能借 invalidation 绕过状态机。
 
-`AccountSecurityLifecycle` 当前只保留为 identity 内部的 sealed persistence capability，不在 production
-composition 中构造或挂载，也没有 HTTP、command 或 event 的跨边界 operation。ADR-020 / #1841 只冻结统一的
-内部 command、原子撤销能力和 draft `identity.security-event` fact；draft 不进入 production registry，也没有
-subscriber。生产 operation、权限边界、producer/subscriber 接线、审计消费与运行时 assurance 必须在 #1842 / #1843
-中闭合后才能把契约激活，不能以 draft 冒充已接生产。
+`AccountSecurityLifecycle` 仍只保留为 identity 内部的 sealed persistence capability，不作为第二条 production
+operation 挂载。ADR-020 / #1841 最初冻结统一内部 command、原子撤销能力和 draft
+`identity.security-event` fact；#1840 已通过精确 current/all HTTP producer receipt、PostgreSQL producer
+transaction、audit subscriber 与 runtime assurance 完成 active 激活。生产执行只进入该统一闭环，不能回退到
+旧 lifecycle 或以静态 wire 冒充生产接线。
 
 持久化 CAS 必须消费 mutation 携带的完整 expected/next snapshots，以 tenant、user、expected status、
 expected epoch 与 expected version 作为更新条件，并原子写入完整 next snapshot；不得由 adapter 根据局部字段

@@ -135,7 +135,7 @@ pub(crate) struct VerifiedLocalTxCounts {
 }
 
 impl VerifiedLocalTxCounts {
-    pub(crate) const EXPECTED: usize = 5;
+    pub(crate) const EXPECTED: usize = 4;
 
     #[cfg(test)]
     pub(crate) const fn for_test() -> Self {
@@ -7337,7 +7337,7 @@ mod tests {
                 LocalTxModel::TenantScopedUow,
                 &scenarios,
                 &cases,
-                "identity-logout-localtx",
+                "synthetic-localtx",
             )
             .is_err()
         );

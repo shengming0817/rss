@@ -430,8 +430,8 @@ fn validate_audit_closure(
     subscriptions: &[eventing_composition::BridgedSubscription],
 ) -> anyhow::Result<()> {
     anyhow::ensure!(
-        subscriptions.len() == 4,
-        "identityaudit requires exactly four generated Identity-to-Audit subscriptions"
+        subscriptions.len() == 5,
+        "identityaudit requires exactly five generated Identity-to-Audit subscriptions"
     );
     let mut dispatches = subscriptions
         .iter()
@@ -442,6 +442,7 @@ fn validate_audit_closure(
         SubscriptionDispatchKey::IdentitySessionCreatedV1Audit,
         SubscriptionDispatchKey::IdentityRoleAssignedV1Audit,
         SubscriptionDispatchKey::IdentityRoleRevokedV1Audit,
+        SubscriptionDispatchKey::IdentitySecurityEventV1Audit,
         SubscriptionDispatchKey::IdentityPolicyUpdatedV1Audit,
     ];
     expected.sort_by_key(|dispatch| format!("{dispatch:?}"));
@@ -561,7 +562,7 @@ mod lifecycle_tests {
             registry.drain_subscribers(),
         )?;
         validate_audit_closure(&subscriptions)?;
-        assert_eq!(subscriptions.len(), 4);
+        assert_eq!(subscriptions.len(), 5);
         assert!(subscriptions.iter().all(|subscription| {
             subscription.readiness() == SubscriberReadiness::Required
                 && !subscription.identity_slug().is_empty()

@@ -31,8 +31,6 @@ use diport::{
 };
 use generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesResponse;
 use generated::http::identity_v1::{
-    login::IdentityLoginRequest,
-    logout::{IdentityLogoutRequest, IdentityLogoutResponse},
     password_change::{IdentityPasswordChangeRequest, IdentityPasswordChangeResponse},
     refresh::{IdentityRefreshRequest, IdentityRefreshResponse},
 };
@@ -103,7 +101,6 @@ const SETTINGS_FIXTURE: &str =
     include_str!("../../../fixtures/settings-secret-publish-localtx.toml");
 const PASSWORD_FIXTURE: &str =
     include_str!("../../../fixtures/identity-password-change-localtx.toml");
-const LOGOUT_FIXTURE: &str = include_str!("../../../fixtures/identity-logout-localtx.toml");
 const AUDIT_TENANT_FIXTURE: &str =
     include_str!("../../../fixtures/audit-list-tenant-entries-localtx.toml");
 const REFRESH_FIXTURE: &str = include_str!("../../../fixtures/identity-refresh-localtx.toml");
@@ -995,15 +992,33 @@ fn finalized_router(
     )?;
     Ok(match principal {
         Some((kind, subject, tenant)) => authenticated
-            .layer(axum::Extension(httpserve::Authenticated::new(
-                RequiredScheme::RssAccessToken,
+            .layer(axum::Extension(test_authenticated(
                 kind,
                 subject,
                 Some(tenant),
-            )))
+            )?))
             .into_router_for_test(),
         None => authenticated.into_router_for_test(),
     })
+}
+
+fn test_authenticated(
+    kind: PrincipalKind,
+    subject: &str,
+    tenant: Option<TenantId>,
+) -> Result<httpserve::Authenticated> {
+    if kind == PrincipalKind::User {
+        return Ok(httpserve::Authenticated::new_rss_user(
+            subject,
+            tenant.context("RSS user test evidence requires tenant")?,
+        ));
+    }
+    Ok(httpserve::Authenticated::new(
+        RequiredScheme::RssAccessToken,
+        kind,
+        subject,
+        tenant,
+    ))
 }
 
 fn pg_config(params: &testkit::PgConnParams) -> PgConfig {
@@ -1222,16 +1237,6 @@ pub(crate) struct PasswordCases {
     pub(crate) invalid_subject: JourneyCase,
     pub(crate) validation_failure: JourneyCase,
     pub(crate) conflict: JourneyCase,
-}
-
-pub(crate) struct LogoutCases {
-    pub(crate) happy: JourneyCase,
-    pub(crate) unauthenticated: JourneyCase,
-    pub(crate) other_owner: JourneyCase,
-    pub(crate) validation_failure: JourneyCase,
-    pub(crate) contention: JourneyCase,
-    pub(crate) repeat: JourneyCase,
-    pub(crate) cross_tenant: JourneyCase,
 }
 
 fn secret_commit_delta(before: &SecretSnapshot, after: &SecretSnapshot) -> Result<u16> {
@@ -1909,278 +1914,6 @@ fn auth_grant_commit_delta(before: &AuthGrantSnapshot, after: &AuthGrantSnapshot
     Ok(commits)
 }
 
-async fn seed_logout_session(harness: &IdentityHarness) -> Result<String> {
-    Ok(harness
-        .login
-        .login(
-            identity::test_support::login_producer_receipt(),
-            harness.tenant_a,
-            IdentityLoginRequest {
-                username: "session-login".to_owned(),
-                password: CURRENT_PASSWORD.to_owned(),
-            },
-        )
-        .await?
-        .data
-        .session_id)
-}
-
-fn logout_payload(case: &JourneyCase, session_id: &str) -> Result<(Vec<u8>, Vec<String>)> {
-    let body = serde_json::to_vec(&IdentityLogoutRequest {
-        session_id: session_id.to_owned(),
-    })?;
-    let sentinels = case_sentinels(case, &[&body], Some(session_id))?;
-    Ok((body, sentinels))
-}
-
-fn assert_logout_success(
-    case: &JourneyCase,
-    response: &HttpResult,
-    request_id: &str,
-    sentinels: &[String],
-) -> Result<()> {
-    let decoded: IdentityLogoutResponse =
-        decode_case_success(case, response, request_id, sentinels)?;
-    ensure!(
-        decoded.data.logged_out,
-        "logout success response must be loggedOut=true"
-    );
-    Ok(())
-}
-
-async fn drive_logout_error_case(
-    harness: &IdentityHarness,
-    observation_pool: &sqlx::PgPool,
-    case: &JourneyCase,
-    router: &axum::Router,
-    observed_session: &str,
-    body: Vec<u8>,
-    request_id: &str,
-) -> Result<()> {
-    let probes = [harness.tenant_a, harness.tenant_b];
-    let sentinel_session = case
-        .redact_sentinels
-        .iter()
-        .any(|sentinel| sentinel == "$sessionId")
-        .then_some(observed_session);
-    let sentinels = case_sentinels(case, &[&body], sentinel_session)?;
-    let before = auth_grant_snapshot(observation_pool, probes, observed_session).await?;
-    let response = send_recorded(
-        router,
-        generated::http::identity_v1::logout::PATH,
-        body,
-        request_id,
-        generated::http::identity_v1::logout::CONTRACT_ID,
-    )
-    .await?;
-    assert_case_error(case, &response.response, request_id, &sentinels)?;
-    let after = auth_grant_snapshot(observation_pool, probes, observed_session).await?;
-    ensure!(before == after, "logout rejection mutated durable state");
-    assert_accounting(case, &[&response.localtx], 0, ExpectedLocalTxFinal::None)
-}
-
-async fn drive_logout_cross_tenant(
-    harness: &IdentityHarness,
-    observation_pool: &sqlx::PgPool,
-    case: &JourneyCase,
-) -> Result<()> {
-    let session = seed_logout_session(harness).await?;
-    let (body, sentinels) = logout_payload(case, &session)?;
-    let probes = [harness.tenant_a, harness.tenant_b];
-    let before = auth_grant_snapshot(observation_pool, probes, &session).await?;
-    let response = send_recorded(
-        &harness.tenant_b_identity,
-        generated::http::identity_v1::logout::PATH,
-        body,
-        "rid-logout-cross-tenant",
-        generated::http::identity_v1::logout::CONTRACT_ID,
-    )
-    .await?;
-    assert_logout_success(
-        case,
-        &response.response,
-        "rid-logout-cross-tenant",
-        &sentinels,
-    )?;
-    let after = auth_grant_snapshot(observation_pool, probes, &session).await?;
-    ensure!(
-        after.0 == vec![true, false],
-        "cross-tenant logout must preserve owner session"
-    );
-    assert_accounting(
-        case,
-        &[&response.localtx],
-        auth_grant_commit_delta(&before, &after)?,
-        ExpectedLocalTxFinal::None,
-    )
-}
-
-async fn drive_logout_happy_and_repeat(
-    harness: &IdentityHarness,
-    observation_pool: &sqlx::PgPool,
-    happy_case: &JourneyCase,
-    repeat_case: &JourneyCase,
-) -> Result<()> {
-    let session = seed_logout_session(harness).await?;
-    let probes = [harness.tenant_a, harness.tenant_b];
-
-    let (happy_body, happy_sentinels) = logout_payload(happy_case, &session)?;
-    let before = auth_grant_snapshot(observation_pool, probes, &session).await?;
-    let happy = send_recorded(
-        &harness.session_identity,
-        generated::http::identity_v1::logout::PATH,
-        happy_body,
-        "rid-logout-happy",
-        generated::http::identity_v1::logout::CONTRACT_ID,
-    )
-    .await?;
-    assert_logout_success(
-        happy_case,
-        &happy.response,
-        "rid-logout-happy",
-        &happy_sentinels,
-    )?;
-    let after = auth_grant_snapshot(observation_pool, probes, &session).await?;
-    assert_accounting(
-        happy_case,
-        &[&happy.localtx],
-        auth_grant_commit_delta(&before, &after)?,
-        ExpectedLocalTxFinal::Committed,
-    )?;
-
-    let (repeat_body, repeat_sentinels) = logout_payload(repeat_case, &session)?;
-    let before = after;
-    let repeat = send_recorded(
-        &harness.session_identity,
-        generated::http::identity_v1::logout::PATH,
-        repeat_body,
-        "rid-logout-repeat",
-        generated::http::identity_v1::logout::CONTRACT_ID,
-    )
-    .await?;
-    assert_logout_success(
-        repeat_case,
-        &repeat.response,
-        "rid-logout-repeat",
-        &repeat_sentinels,
-    )?;
-    let after = auth_grant_snapshot(observation_pool, probes, &session).await?;
-    ensure!(
-        after.0 == vec![false, false],
-        "repeat logout must converge to revoked"
-    );
-    assert_accounting(
-        repeat_case,
-        &[&repeat.localtx],
-        auth_grant_commit_delta(&before, &after)?,
-        ExpectedLocalTxFinal::None,
-    )
-}
-
-async fn drive_logout_contention(
-    harness: &IdentityHarness,
-    observation_pool: &sqlx::PgPool,
-    case: &JourneyCase,
-) -> Result<()> {
-    let session = seed_logout_session(harness).await?;
-    let (body, sentinels) = logout_payload(case, &session)?;
-    let probes = [harness.tenant_a, harness.tenant_b];
-    let before = auth_grant_snapshot(observation_pool, probes, &session).await?;
-    harness.grant_find_barrier.arm(&session)?;
-    let pair = tokio::time::timeout(Duration::from_secs(15), async {
-        tokio::join!(
-            send_recorded(
-                &harness.session_identity,
-                generated::http::identity_v1::logout::PATH,
-                body.clone(),
-                "rid-logout-contention-a",
-                generated::http::identity_v1::logout::CONTRACT_ID,
-            ),
-            send_recorded(
-                &harness.session_identity,
-                generated::http::identity_v1::logout::PATH,
-                body,
-                "rid-logout-contention-b",
-                generated::http::identity_v1::logout::CONTRACT_ID,
-            )
-        )
-    })
-    .await
-    .context("concurrent logout exceeded 15 seconds")?;
-    let (response_a, response_b) = (pair.0?, pair.1?);
-    assert_logout_success(
-        case,
-        &response_a.response,
-        "rid-logout-contention-a",
-        &sentinels,
-    )?;
-    assert_logout_success(
-        case,
-        &response_b.response,
-        "rid-logout-contention-b",
-        &sentinels,
-    )?;
-    let after = auth_grant_snapshot(observation_pool, probes, &session).await?;
-    ensure!(
-        after.0 == vec![false, false],
-        "concurrent logout must converge to revoked"
-    );
-    assert_accounting(
-        case,
-        &[&response_a.localtx, &response_b.localtx],
-        auth_grant_commit_delta(&before, &after)?,
-        ExpectedLocalTxFinal::Committed,
-    )
-}
-
-async fn drive_logout(
-    harness: &IdentityHarness,
-    observation_pool: &sqlx::PgPool,
-    cases: LogoutCases,
-) -> Result<()> {
-    let unauth_session = seed_logout_session(harness).await?;
-    let (unauth_body, _) = logout_payload(&cases.unauthenticated, &unauth_session)?;
-    drive_logout_error_case(
-        harness,
-        observation_pool,
-        &cases.unauthenticated,
-        &harness.identity_unauthed,
-        &unauth_session,
-        unauth_body,
-        "rid-logout-auth",
-    )
-    .await?;
-
-    let other_session = seed_logout_session(harness).await?;
-    let (other_body, _) = logout_payload(&cases.other_owner, &other_session)?;
-    drive_logout_error_case(
-        harness,
-        observation_pool,
-        &cases.other_owner,
-        &harness.other_identity,
-        &other_session,
-        other_body,
-        "rid-logout-forbidden",
-    )
-    .await?;
-
-    let validation_session = seed_logout_session(harness).await?;
-    drive_logout_error_case(
-        harness,
-        observation_pool,
-        &cases.validation_failure,
-        &harness.session_identity,
-        &validation_session,
-        br#"{"unexpected":"logout-shape-sentinel"}"#.to_vec(),
-        "rid-logout-validation",
-    )
-    .await?;
-
-    drive_logout_cross_tenant(harness, observation_pool, &cases.cross_tenant).await?;
-    drive_logout_happy_and_repeat(harness, observation_pool, &cases.happy, &cases.repeat).await?;
-    drive_logout_contention(harness, observation_pool, &cases.contention).await
-}
-
 pub(crate) struct RefreshCases {
     pub(crate) happy: JourneyCase,
     pub(crate) unknown: JourneyCase,
@@ -2632,7 +2365,7 @@ async fn drive_refresh_contention(
             == Some("revoked".to_owned())
     );
     assert_refresh_accounting(winner_case, &[&winner.localtx], 1, 0)?;
-    assert_refresh_accounting(loser_case, &[&loser.localtx], 1, 0)
+    assert_refresh_accounting(loser_case, &[&loser.localtx], 2, 0)
 }
 
 async fn drive_refresh_commit_unknown(
@@ -2905,18 +2638,13 @@ fn finalized_audit_router(
         HAPPY_USER,
         evidence_tenant,
     ));
+    let authenticated = test_authenticated(kind, HAPPY_USER, evidence_tenant)?;
     Ok(router.layer(axum::middleware::from_fn(
         move |mut request: axum::extract::Request, next: axum::middleware::Next| {
             let principal = Arc::clone(&principal);
+            let authenticated = authenticated.clone();
             async move {
-                request
-                    .extensions_mut()
-                    .insert(httpserve::Authenticated::new(
-                        RequiredScheme::RssAccessToken,
-                        kind,
-                        HAPPY_USER,
-                        evidence_tenant,
-                    ));
+                request.extensions_mut().insert(authenticated);
                 request.extensions_mut().insert(principal);
                 request
                     .extensions_mut()
@@ -3261,12 +2989,11 @@ impl LocalTxJourneyRuntime {
         let app = app_login.config(pg.params());
         let tenant_read = PgTenantReadConfig::new(tenant_read_login.config(pg.params()));
         let audit_admin = audit_admin_login.config(pg.params());
-        let deps = PgRuntimeDeps::setup_with_audit_admin_config(
+        let deps = PgRuntimeDeps::setup_test_fixture(
             &owner,
             &app,
             &tenant_read,
             Some(&audit_admin),
-            postgres::LegacyConfigPlaintextPolicy::Deny,
             generated::event::PROJECTION_INPUT_GENERATION,
             generated::event::PROJECTION_INPUTS,
         )
@@ -3318,14 +3045,6 @@ pub(crate) async fn drive_password_journey(cases: PasswordCases) -> Result<()> {
     let identity =
         build_identity_harness(&runtime.deps, runtime.tenant_a, runtime.tenant_b).await?;
     let body = drive_password(&identity, cases).await;
-    runtime.finish(body).await
-}
-
-pub(crate) async fn drive_logout_journey(cases: LogoutCases) -> Result<()> {
-    let runtime = LocalTxJourneyRuntime::setup().await?;
-    let identity =
-        build_identity_harness(&runtime.deps, runtime.tenant_a, runtime.tenant_b).await?;
-    let body = drive_logout(&identity, &runtime.observer, cases).await;
     runtime.finish(body).await
 }
 

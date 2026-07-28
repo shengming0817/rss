@@ -12,33 +12,27 @@
 //! ref: launchbadge/sqlx sqlx-core/src/transaction.rs@main
 //! ref: ory/fosite handler/oauth2/flow_refresh.go@master
 
-use authn::{AuthGrant, AuthGrantCloseMutation, AuthGrantId, AuthGrantStatus};
+use authn::{AuthGrant, AuthGrantCloseMutation, AuthGrantStatus};
 use identity::ports::{
-    AccountSecurityMutation, CredentialSecurityCommand, CredentialSecurityEvent,
-    CredentialSecurityFactAuthorization, CredentialSecurityReceipt, CredentialSecurityTargetKind,
-    CredentialSecurityTargetMapping, CredentialSecurityTargetRef,
-    CredentialSecurityTargetResolutionRequest, CredentialSecurityTargetResolver, IdentityError,
-    IdentitySecurityLifecycle, PendingCredentialSecurityCommit, ResolvedCredentialSecurityTarget,
-    TenantRepoScope,
+    AccountSecurityMutation, CredentialSecurityCommand, CredentialSecurityEmissionParts,
+    CredentialSecurityEvent, CredentialSecurityReceipt, IdentityError, IdentitySecurityLifecycle,
+    PendingCredentialSecurityCommit, SECURITY_EVENT_CONTRACT, SECURITY_EVENT_FACT, TenantRepoScope,
 };
 
 use crate::account_security_repo::status_to_db;
 use crate::auth_grant_lifecycle::{GrantCloseCas, apply_grant_close_cas};
-use crate::cotx::{PgTenantReadPool, PgTenantWritePool, ProducerTxOutcome};
+use crate::cotx::{PgTenantWritePool, ProducerFactAuthorization, ProducerTxOutcome};
 use crate::outbox::{OutboxEnvelope, metadata_with_ambient, unix_secs};
 use crate::pool::VerifiedPgWriteStore;
 use crate::projection_events::ProjectionWriteRegistry;
 
-/// Durable provider for the draft credential-security event protocol.
+/// Durable provider for the active credential-security event protocol.
 pub struct PgIdentitySecurityLifecycle {
     write_pool: PgTenantWritePool,
     #[cfg(all(test, feature = "integration"))]
     fault: Option<IdentitySecurityFault>,
-}
-
-/// Tenant-scoped read provider for opaque security-event targets.
-pub struct PgCredentialSecurityTargetResolver {
-    read_pool: PgTenantReadPool,
+    #[cfg(all(test, feature = "integration"))]
+    start_barrier: Option<std::sync::Arc<tokio::sync::Barrier>>,
 }
 
 #[cfg(all(test, feature = "integration"))]
@@ -59,6 +53,8 @@ impl PgIdentitySecurityLifecycle {
             write_pool: PgTenantWritePool::with_projection_registry(writer, projection_registry),
             #[cfg(all(test, feature = "integration"))]
             fault: None,
+            #[cfg(all(test, feature = "integration"))]
+            start_barrier: None,
         }
     }
 
@@ -67,6 +63,7 @@ impl PgIdentitySecurityLifecycle {
         Self {
             write_pool: PgTenantWritePool::from_unverified_for_test(store),
             fault: None,
+            start_barrier: None,
         }
     }
 
@@ -75,41 +72,82 @@ impl PgIdentitySecurityLifecycle {
         self.fault = Some(fault);
         self
     }
-}
-
-impl PgCredentialSecurityTargetResolver {
-    pub(crate) fn new(reader: &crate::pool::VerifiedPgReadStore) -> Self {
-        Self {
-            read_pool: PgTenantReadPool::new(reader),
-        }
-    }
 
     #[cfg(all(test, feature = "integration"))]
-    pub(crate) fn from_unverified_for_test(store: &crate::PgStore) -> Self {
-        Self {
-            read_pool: PgTenantReadPool::from_unverified_for_test(store),
-        }
+    pub(crate) fn with_start_barrier(
+        mut self,
+        barrier: std::sync::Arc<tokio::sync::Barrier>,
+    ) -> Self {
+        self.start_barrier = Some(barrier);
+        self
     }
 }
 
 impl IdentitySecurityLifecycle for PgIdentitySecurityLifecycle {
-    async fn execute(
+    async fn execute_logout_current(
+        &self,
+        receipt: identity::ports::LogoutCurrentProducerReceipt,
+        scope: TenantRepoScope,
+        command: identity::ports::LogoutCurrentCommand,
+    ) -> Result<CredentialSecurityReceipt, IdentityError> {
+        let emission = identity::ports::logout_current_emission(command)?;
+        let authorization = receipt
+            .authorize(SECURITY_EVENT_FACT, SECURITY_EVENT_CONTRACT)
+            .ok_or_else(|| corrupt("logout-current receipt does not authorize security-event"))?;
+        let prepared = PreparedSecurityCommand::try_from(emission.into_parts())?;
+        self.execute_prepared(authorization, scope, prepared).await
+    }
+
+    async fn execute_logout_all(
+        &self,
+        receipt: identity::ports::LogoutAllProducerReceipt,
+        scope: TenantRepoScope,
+        command: identity::ports::LogoutAllCommand,
+    ) -> Result<CredentialSecurityReceipt, IdentityError> {
+        let emission = identity::ports::logout_all_emission(command)?;
+        let authorization = receipt
+            .authorize(SECURITY_EVENT_FACT, SECURITY_EVENT_CONTRACT)
+            .ok_or_else(|| corrupt("logout-all receipt does not authorize security-event"))?;
+        let prepared = PreparedSecurityCommand::try_from(emission.into_parts())?;
+        self.execute_prepared(authorization, scope, prepared).await
+    }
+}
+
+#[cfg(all(test, feature = "integration"))]
+impl PgIdentitySecurityLifecycle {
+    pub(crate) async fn execute_test_command(
         &self,
         scope: TenantRepoScope,
         command: CredentialSecurityCommand,
     ) -> Result<CredentialSecurityReceipt, IdentityError> {
+        let prepared = PreparedSecurityCommand::try_from(
+            identity::ports::credential_security_emission_for_test(command)?,
+        )?;
+        let authorization = crate::cotx::IntegrationCredentialSecurityAuthorization::new();
+        self.execute_prepared(authorization, scope, prepared).await
+    }
+}
+
+impl PgIdentitySecurityLifecycle {
+    async fn execute_prepared<A>(
+        &self,
+        authorization: A,
+        scope: TenantRepoScope,
+        prepared: PreparedSecurityCommand,
+    ) -> Result<CredentialSecurityReceipt, IdentityError>
+    where
+        A: ProducerFactAuthorization,
+    {
         let PreparedSecurityCommand {
+            entry,
+            envelope_parts,
             mutation,
             event,
             pending,
-            authorization,
-        } = PreparedSecurityCommand::try_from(command)?;
+        } = prepared;
         if scope.tenant() != event.tenant() {
             return Err(corrupt("credential security tenant scope mismatch"));
         }
-        let fact = identity::ports::credential_security_fact(&event, authorization)?;
-        let (entry, envelope_parts, target_mapping, authorization) = fact.into_parts();
-        let target_mapping = CredentialSecurityTargetRow::try_from(target_mapping)?;
         let (contract, envelope_tenant, subject_id, actor, partition_key, causation_id) =
             envelope_parts.into_parts();
         if envelope_tenant != scope.tenant() {
@@ -126,6 +164,8 @@ impl IdentitySecurityLifecycle for PgIdentitySecurityLifecycle {
         .with_causation_id_opt(causation_id);
         #[cfg(all(test, feature = "integration"))]
         let fault = self.fault;
+        #[cfg(all(test, feature = "integration"))]
+        let start_barrier = self.start_barrier.clone();
 
         self.write_pool
             .producer_tx(
@@ -134,8 +174,11 @@ impl IdentitySecurityLifecycle for PgIdentitySecurityLifecycle {
                 &envelope,
                 move |tx| {
                     Box::pin(async move {
+                        #[cfg(all(test, feature = "integration"))]
+                        if let Some(start_barrier) = start_barrier {
+                            start_barrier.wait().await;
+                        }
                         apply_security_mutation(tx.conn(), mutation).await?;
-                        insert_target_mapping(tx.conn(), &target_mapping).await?;
                         #[cfg(all(test, feature = "integration"))]
                         if matches!(fault, Some(IdentitySecurityFault::AfterProjection)) {
                             return Err(corrupt(
@@ -144,10 +187,14 @@ impl IdentitySecurityLifecycle for PgIdentitySecurityLifecycle {
                         }
                         #[cfg(all(test, feature = "integration"))]
                         if matches!(fault, Some(IdentitySecurityFault::OutboxAppend)) {
-                            sqlx::query("CREATE TEMP TABLE outbox (event_id text) ON COMMIT DROP")
-                                .execute(tx.conn())
-                                .await
-                                .map_err(storage)?;
+                            sqlx::query(
+                                "ALTER TABLE public.outbox \
+                                 ADD CONSTRAINT credential_security_outbox_fault \
+                                 CHECK (false) NOT VALID",
+                            )
+                            .execute(tx.conn())
+                            .await
+                            .map_err(storage)?;
                         }
                         #[cfg(all(test, feature = "integration"))]
                         if matches!(fault, Some(IdentitySecurityFault::AfterOutboxBeforeCommit)) {
@@ -173,35 +220,39 @@ impl IdentitySecurityLifecycle for PgIdentitySecurityLifecycle {
 }
 
 struct PreparedSecurityCommand {
+    entry: consistency::EventEntry,
+    envelope_parts: diport::OutboxEnvelopeParts,
     mutation: SecurityMutation,
     event: CredentialSecurityEvent,
     pending: PendingCredentialSecurityCommit,
-    authorization: CredentialSecurityFactAuthorization,
 }
 
-impl TryFrom<CredentialSecurityCommand> for PreparedSecurityCommand {
+impl TryFrom<CredentialSecurityEmissionParts> for PreparedSecurityCommand {
     type Error = IdentityError;
 
-    fn try_from(command: CredentialSecurityCommand) -> Result<Self, Self::Error> {
+    fn try_from(emission: CredentialSecurityEmissionParts) -> Result<Self, Self::Error> {
+        let (command, entry, envelope_parts) = emission.into_parts();
         match command {
             CredentialSecurityCommand::Account(command) => {
-                let (mutation, event, pending, authorization) = command.into_parts();
+                let (mutation, event, pending) = command.into_parts();
                 Ok(Self {
+                    entry,
+                    envelope_parts,
                     mutation: SecurityMutation::Account(AccountSecurityRow::try_from((
                         mutation, &event,
                     ))?),
                     event,
                     pending,
-                    authorization,
                 })
             }
             CredentialSecurityCommand::Grant(command) => {
-                let (mutation, event, pending, authorization) = command.into_parts();
+                let (mutation, event, pending) = command.into_parts();
                 Ok(Self {
+                    entry,
+                    envelope_parts,
                     mutation: SecurityMutation::Grant(prepare_grant_security(mutation, &event)?),
                     event,
                     pending,
-                    authorization,
                 })
             }
         }
@@ -211,124 +262,6 @@ impl TryFrom<CredentialSecurityCommand> for PreparedSecurityCommand {
 enum SecurityMutation {
     Account(AccountSecurityRow),
     Grant(GrantCloseCas),
-}
-
-struct CredentialSecurityTargetRow {
-    tenant: String,
-    target_ref: String,
-    target_kind: &'static str,
-    user_id: String,
-    grant_id: Option<String>,
-}
-
-impl TryFrom<CredentialSecurityTargetMapping> for CredentialSecurityTargetRow {
-    type Error = IdentityError;
-
-    fn try_from(mapping: CredentialSecurityTargetMapping) -> Result<Self, Self::Error> {
-        let (tenant, target_ref, resolved) = mapping.into_parts();
-        if resolved.tenant() != tenant || resolved.target_ref() != &target_ref {
-            return Err(corrupt("credential security target mapping mismatch"));
-        }
-        let (target_kind, grant_id) = match resolved.kind() {
-            CredentialSecurityTargetKind::Subject => {
-                if resolved.grant_id().is_some() {
-                    return Err(corrupt("credential security subject mapping has grant"));
-                }
-                ("subject", None)
-            }
-            CredentialSecurityTargetKind::Grant => {
-                let grant_id = resolved
-                    .grant_id()
-                    .ok_or_else(|| corrupt("credential security grant mapping lacks grant"))?;
-                ("grant", Some(grant_id.as_str().to_owned()))
-            }
-        };
-        Ok(Self {
-            tenant: tenant.as_uuid().to_string(),
-            target_ref: target_ref.as_uuid().to_string(),
-            target_kind,
-            user_id: resolved.user_id().as_uuid().to_string(),
-            grant_id,
-        })
-    }
-}
-
-async fn insert_target_mapping(
-    conn: &mut sqlx::PgConnection,
-    row: &CredentialSecurityTargetRow,
-) -> Result<(), IdentityError> {
-    sqlx::query(
-        "INSERT INTO credential_security_target_mappings \
-         (target_ref, tenant_id, target_kind, user_id, grant_id) \
-         VALUES ($1::uuid, $2::uuid, $3, $4::uuid, $5)",
-    )
-    .bind(&row.target_ref)
-    .bind(&row.tenant)
-    .bind(row.target_kind)
-    .bind(&row.user_id)
-    .bind(&row.grant_id)
-    .execute(conn)
-    .await
-    .map(|_| ())
-    .map_err(storage)
-}
-
-impl CredentialSecurityTargetResolver for PgCredentialSecurityTargetResolver {
-    async fn resolve(
-        &self,
-        request: CredentialSecurityTargetResolutionRequest,
-    ) -> Result<Option<ResolvedCredentialSecurityTarget>, IdentityError> {
-        let scope = *request.scope();
-        let target_ref_query = request.target_ref().as_uuid().to_string();
-        let row: Option<(String, String, String, String, Option<String>)> = self
-            .read_pool
-            .read_map(
-                scope,
-                move |conn| {
-                    Box::pin(async move {
-                        sqlx::query_as(
-                            "SELECT tenant_id::text, target_ref::text, target_kind, \
-                                    user_id::text, grant_id \
-                             FROM credential_security_target_mappings \
-                             WHERE target_ref = $1::uuid",
-                        )
-                        .bind(target_ref_query)
-                        .fetch_optional(&mut *conn)
-                        .await
-                        .map_err(storage)
-                    })
-                },
-                storage,
-            )
-            .await?;
-        let Some((stored_tenant, stored_ref, stored_kind, user_id, grant_id)) = row else {
-            return Ok(None);
-        };
-        let stored_tenant = vocab::TenantId::parse(&stored_tenant)
-            .map_err(|_| corrupt("corrupt credential security target tenant"))?;
-        let stored_ref = CredentialSecurityTargetRef::parse(&stored_ref)
-            .map_err(|_| corrupt("corrupt credential security target reference"))?;
-        let stored_kind = match stored_kind.as_str() {
-            "subject" => CredentialSecurityTargetKind::Subject,
-            "grant" => CredentialSecurityTargetKind::Grant,
-            _ => return Err(corrupt("corrupt credential security target kind")),
-        };
-        let user_id = ids::UserId::parse(&user_id)
-            .map_err(|_| corrupt("corrupt credential security target user"))?;
-        let grant_id = match grant_id {
-            Some(grant_id) if grant_id.is_empty() => {
-                return Err(corrupt("corrupt credential security target grant"));
-            }
-            Some(grant_id) => Some(
-                AuthGrantId::hydrate(grant_id)
-                    .map_err(|_| corrupt("corrupt credential security target grant"))?,
-            ),
-            None => None,
-        };
-        request
-            .resolve_provider_row(stored_tenant, stored_ref, stored_kind, user_id, grant_id)
-            .map_err(storage)
-    }
 }
 
 async fn apply_security_mutation(
@@ -505,7 +438,7 @@ fn persisted_counter(value: u64, field: &'static str) -> Result<i64, IdentityErr
 }
 
 fn storage(error: impl std::error::Error + Send + Sync + 'static) -> IdentityError {
-    IdentityError::Storage(Box::new(error))
+    crate::tx_retry::identity_storage_error(error)
 }
 
 fn corrupt(message: &'static str) -> IdentityError {

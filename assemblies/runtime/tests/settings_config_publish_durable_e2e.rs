@@ -347,6 +347,7 @@ async fn connect_pg() -> Result<(testkit::PgFixture, PgRuntimeDeps)> {
         &owner_config,
         &pg_config(p, TEST_APP_ROLE, TEST_APP_PASSWORD),
         &tenant_read_config,
+        None,
         generated::event::PROJECTION_INPUT_GENERATION,
         generated::event::PROJECTION_INPUTS,
     )

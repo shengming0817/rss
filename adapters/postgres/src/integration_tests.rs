@@ -12,8 +12,7 @@
 
 use audit::ports::AuditListTenantAppender as _;
 use authn::{
-    AccountSecurityEventKind, AuthGrant, AuthGrantId, AuthGrantStatus, AuthnEpoch,
-    GrantSecurityEventKind,
+    AccountSecurityEventKind, AuthGrant, AuthGrantStatus, AuthnEpoch, GrantSecurityEventKind,
 };
 use consistency::{
     BacklogObservation, CommandErrorSummary, CommandJournalOutcome, CommandJournalTerminalSummary,
@@ -152,6 +151,44 @@ fn identity_scope(tenant: vocab::TenantId) -> identity::ports::TenantRepoScope {
 fn login_producer_receipt() -> identity::ports::LoginProducerReceipt {
     httpserve::ProducerMarker::for_test(generated::http::identity_v1::login::PRODUCER)
         .into_receipt()
+}
+
+fn logout_current_producer_receipt() -> identity::ports::LogoutCurrentProducerReceipt {
+    httpserve::ProducerMarker::for_test(generated::http::identity_v1::logout::PRODUCER)
+        .into_receipt()
+}
+
+fn logout_all_producer_receipt() -> identity::ports::LogoutAllProducerReceipt {
+    httpserve::ProducerMarker::for_test(generated::http::identity_v1::logout_all::PRODUCER)
+        .into_receipt()
+}
+
+async fn execute_logout_current_route(
+    lifecycle: &crate::PgIdentitySecurityLifecycle,
+    tenant: vocab::TenantId,
+    command: identity::ports::LogoutCurrentCommand,
+) -> Result<identity::ports::CredentialSecurityReceipt, identity::ports::IdentityError> {
+    lifecycle
+        .execute_logout_current(
+            logout_current_producer_receipt(),
+            identity_scope(tenant),
+            command,
+        )
+        .await
+}
+
+async fn execute_logout_all_route(
+    lifecycle: &crate::PgIdentitySecurityLifecycle,
+    tenant: vocab::TenantId,
+    command: identity::ports::LogoutAllCommand,
+) -> Result<identity::ports::CredentialSecurityReceipt, identity::ports::IdentityError> {
+    lifecycle
+        .execute_logout_all(
+            logout_all_producer_receipt(),
+            identity_scope(tenant),
+            command,
+        )
+        .await
 }
 
 fn policies_create_producer_receipt() -> identity::ports::PoliciesCreateProducerReceipt {
@@ -401,6 +438,7 @@ async fn setup_runtime_deps_with_projection_inputs(
         &owner_config,
         &runtime_pg_config(p, TEST_APP_ROLE, TEST_APP_PASSWORD),
         &tenant_read_config,
+        None,
         projection_input_generation,
         projection_inputs,
     )
@@ -695,17 +733,31 @@ enum RevocationCapabilityDriftKind {
 impl RevocationCapabilityDriftKind {
     fn matches(self, error: &crate::PgError) -> bool {
         match self {
-            Self::Schema => matches!(error, crate::PgError::RevocationSchema),
+            Self::Schema => matches!(
+                error,
+                crate::PgError::RevocationSchema | crate::PgError::WriterPrivileges { .. }
+            ),
             Self::RlsOrSchema => matches!(
                 error,
                 crate::PgError::RlsNotEnforced | crate::PgError::RevocationSchema
             ),
-            Self::Privileges => matches!(error, crate::PgError::RevocationPrivileges),
+            Self::Privileges => matches!(
+                error,
+                crate::PgError::RevocationPrivileges | crate::PgError::WriterPrivileges { .. }
+            ),
             Self::MaintenanceRole => {
-                matches!(error, crate::PgError::RevocationMaintenanceRole)
+                matches!(
+                    error,
+                    crate::PgError::RevocationMaintenanceRole | crate::PgError::WriterMembership
+                )
             }
             Self::MaintenanceFunction => {
-                matches!(error, crate::PgError::RevocationMaintenanceFunction)
+                matches!(
+                    error,
+                    crate::PgError::RevocationMaintenanceFunction
+                        | crate::PgError::WriterOwnership
+                        | crate::PgError::WriterPrivileges { .. }
+                )
             }
         }
     }
@@ -732,6 +784,7 @@ async fn assert_revocation_capability_drift(
         owner_config,
         serving_config,
         tenant_read_config,
+        None,
         EMPTY_PROJECTION_INPUT_GENERATION,
         &[],
     )
@@ -912,6 +965,7 @@ async fn revocation_store_commit_failure_is_redacted_rolled_back_and_quarantined
             &owner_config,
             &serving_config,
             &tenant_read_config,
+            None,
             EMPTY_PROJECTION_INPUT_GENERATION,
             &[],
         )
@@ -1083,6 +1137,7 @@ async fn revocation_store_survives_full_runtime_pool_rebuild() -> TestResult {
         &owner_config,
         &runtime_pg_config(p, TEST_APP_ROLE, TEST_APP_PASSWORD),
         &tenant_read_config,
+        None,
         EMPTY_PROJECTION_INPUT_GENERATION,
         &[],
     )
@@ -1121,6 +1176,7 @@ async fn revocation_store_ignores_search_path_shadow_table_and_function() -> Tes
             &owner_config,
             &serving_config,
             &tenant_read_config,
+            None,
             EMPTY_PROJECTION_INPUT_GENERATION,
             &[],
         )
@@ -1351,6 +1407,7 @@ async fn revocation_startup_capability_gate_rejects_rls_acl_role_and_function_dr
             &owner_config,
             &serving_config,
             &tenant_read_config,
+            None,
             EMPTY_PROJECTION_INPUT_GENERATION,
             &[],
         )
@@ -1377,6 +1434,7 @@ async fn revocation_startup_capability_gate_rejects_rls_acl_role_and_function_dr
             &owner_config,
             &serving_config,
             &tenant_read_config,
+            None,
             EMPTY_PROJECTION_INPUT_GENERATION,
             &[],
         )
@@ -1396,6 +1454,7 @@ async fn revocation_startup_capability_gate_rejects_rls_acl_role_and_function_dr
             &owner_config,
             &serving_config,
             &tenant_read_config,
+            None,
             EMPTY_PROJECTION_INPUT_GENERATION,
             &[],
         )
@@ -1404,7 +1463,10 @@ async fn revocation_startup_capability_gate_rejects_rls_acl_role_and_function_dr
             .execute(&mutator.pool)
             .await?;
         assert!(
-            matches!(acl_drift, Err(crate::PgError::RevocationPrivileges)),
+            matches!(
+                acl_drift,
+                Err(crate::PgError::RevocationPrivileges | crate::PgError::WriterPrivileges { .. })
+            ),
             "widened serving ACL must reject revocation capability startup"
         );
 
@@ -1415,6 +1477,7 @@ async fn revocation_startup_capability_gate_rejects_rls_acl_role_and_function_dr
             &owner_config,
             &serving_config,
             &tenant_read_config,
+            None,
             EMPTY_PROJECTION_INPUT_GENERATION,
             &[],
         )
@@ -1434,6 +1497,7 @@ async fn revocation_startup_capability_gate_rejects_rls_acl_role_and_function_dr
             &owner_config,
             &serving_config,
             &tenant_read_config,
+            None,
             EMPTY_PROJECTION_INPUT_GENERATION,
             &[],
         )
@@ -1462,6 +1526,7 @@ async fn revocation_startup_capability_gate_rejects_rls_acl_role_and_function_dr
             &owner_config,
             &serving_config,
             &tenant_read_config,
+            None,
             EMPTY_PROJECTION_INPUT_GENERATION,
             &[],
         )
@@ -1496,6 +1561,7 @@ async fn revocation_startup_capability_gate_rejects_rls_acl_role_and_function_dr
             &owner_config,
             &serving_config,
             &tenant_read_config,
+            None,
             EMPTY_PROJECTION_INPUT_GENERATION,
             &[],
         )
@@ -1521,6 +1587,7 @@ async fn revocation_startup_capability_gate_rejects_rls_acl_role_and_function_dr
             &owner_config,
             &serving_config,
             &tenant_read_config,
+            None,
             EMPTY_PROJECTION_INPUT_GENERATION,
             &[],
         )
@@ -1555,6 +1622,7 @@ async fn revocation_startup_capability_gate_rejects_rls_acl_role_and_function_dr
             &owner_config,
             &serving_config,
             &tenant_read_config,
+            None,
             EMPTY_PROJECTION_INPUT_GENERATION,
             &[],
         )
@@ -2364,7 +2432,7 @@ async fn migration_0070_destroys_legacy_session_and_refresh_world_without_compat
 
     store.run_migrations().await?;
 
-    let shape: (bool, bool, i64, i64, i64, i64) = sqlx::query_as(
+    let shape: (bool, bool, i64, i64, i64, bool) = sqlx::query_as(
         "SELECT \
            to_regclass('public.sessions') IS NULL, \
            to_regclass('public.auth_grants') IS NOT NULL, \
@@ -2376,13 +2444,13 @@ async fn migration_0070_destroys_legacy_session_and_refresh_world_without_compat
              WHERE table_schema = 'public' AND table_name = 'refresh_tokens' \
                AND column_name IN ('auth_grant_id', 'user_id', 'auth_grant_status') \
                AND is_nullable = 'NO'), \
-           (SELECT max(version) FROM _sqlx_migrations)",
+           EXISTS (SELECT 1 FROM _sqlx_migrations WHERE version = 70 AND success)",
     )
     .fetch_one(&store.pool)
     .await?;
     assert_eq!(
         shape,
-        (true, true, 0, 0, 3, 70),
+        (true, true, 0, 0, 3, true),
         "0070 must erase legacy capabilities and expose only strict AuthGrant bindings"
     );
     let operational_cutover: (bool, bool, bool, bool) = sqlx::query_as(
@@ -2419,6 +2487,7 @@ async fn public_setup_funnels_reject_missing_and_drifted_delivery_policy() -> Te
             &config,
             &config,
             &tenant_read_config,
+            None,
             EMPTY_PROJECTION_INPUT_GENERATION,
             &[],
         )
@@ -2455,6 +2524,7 @@ async fn public_setup_funnels_reject_missing_and_drifted_delivery_policy() -> Te
             &config,
             &config,
             &tenant_read_config,
+            None,
             EMPTY_PROJECTION_INPUT_GENERATION,
             &[],
         )
@@ -5502,6 +5572,133 @@ async fn settings_consumer_tx_reconcile_failure_keeps_receipt_reclaimable() -> T
         "stale failed reconcile claim must be reclaimable for redelivery"
     );
 
+    app.shutdown().await?;
+    owner.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn credential_security_event_consumer_appends_current_and_all_without_identity_reads()
+-> TestResult {
+    let (fixture, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    let app = std::sync::Arc::new(connect_pg_rss_app_role(&fixture, &owner).await?);
+    let tenant = test_tenant();
+    let stores = crate::pool::PgRuntimeStores::from_unverified_for_test(
+        std::sync::Arc::clone(&app),
+        std::sync::Arc::clone(&app),
+    );
+    let handler = std::sync::Arc::new(crate::consumer_tx::PgAuditConsumerTx::security_event(
+        stores.writer_capability(),
+        crate::audit_repo::test_support::test_hasher(0x5a),
+    ));
+    let group = ConsumerGroup::parse(&format!("audit-security-{}", uuid::Uuid::new_v4())).unwrap();
+    let ctx = InboxReceiptContext::new(
+        tenant,
+        group,
+        "identity",
+        "identity.security-event",
+        "identity.security-event",
+        "v1",
+        TEST_SCHEMA_HASH,
+        None,
+        None,
+    )?;
+    for (index, kind, target_kind, expected_action) in [
+        (0_i64, "logoutCurrent", "grant", "identity:logout_current"),
+        (1_i64, "logoutAll", "subject", "identity:logout_all"),
+    ] {
+        let event_id = unique_event_id("audit-security");
+        let key = IdemKey::parse(&event_id).unwrap();
+        let lease = LeaseToken::mint();
+        let target = uuid::Uuid::new_v4();
+        assert_eq!(
+            app.inbox().try_claim(&ctx, &key, &lease).await?,
+            SeenState::Fresh
+        );
+        let payload = serde_json::json!({
+            "kind": kind,
+            "occurredAt": 1_700_000_400_i64 + index,
+            "target": {"kind": target_kind, "ref": target},
+            "tenantId": tenant.to_string(),
+        });
+        assert!(matches!(
+            std::sync::Arc::clone(&handler)
+                .handle(
+                    diport::Message::new(&event_id, serde_json::to_vec(&payload)?),
+                    ctx.clone(),
+                    key.clone(),
+                    lease
+                )
+                .await,
+            crate::PgConsumerTxOutcome::Committed(_)
+        ));
+        let row: (String, String, String, String) = sqlx::query_as(
+            "SELECT actor::text, actor_kind, action, resource_id FROM audit_entries \
+             WHERE tenant_id = $1::uuid ORDER BY seq DESC LIMIT 1",
+        )
+        .bind(tenant.to_string())
+        .fetch_one(&owner.pool)
+        .await?;
+        assert_ne!(row.0, target.to_string());
+        assert_eq!(row.1, "service");
+        assert_eq!(row.2, expected_action);
+        assert_eq!(row.3, target.to_string());
+        assert_eq!(
+            app.inbox()
+                .try_claim(&ctx, &key, &LeaseToken::mint())
+                .await?,
+            SeenState::Duplicate
+        );
+        let append_count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM audit_entries WHERE tenant_id = $1::uuid")
+                .bind(tenant.to_string())
+                .fetch_one(&owner.pool)
+                .await?;
+        assert_eq!(
+            append_count,
+            index + 1,
+            "duplicate delivery must not append again"
+        );
+    }
+
+    let invalid_id = unique_event_id("audit-security-invalid-shape");
+    let invalid_key = IdemKey::parse(&invalid_id).unwrap();
+    let invalid_lease = LeaseToken::mint();
+    assert_eq!(
+        app.inbox()
+            .try_claim(&ctx, &invalid_key, &invalid_lease)
+            .await?,
+        SeenState::Fresh
+    );
+    let invalid = serde_json::json!({
+        "kind": "logoutAll",
+        "occurredAt": 1_700_000_500_i64,
+        "target": {"kind": "grant", "ref": uuid::Uuid::new_v4()},
+        "tenantId": tenant.to_string(),
+    });
+    assert!(matches!(
+        handler
+            .handle(
+                diport::Message::new(&invalid_id, serde_json::to_vec(&invalid)?),
+                ctx,
+                invalid_key,
+                invalid_lease
+            )
+            .await,
+        crate::PgConsumerTxOutcome::Reject { .. }
+    ));
+    let after_failure: (i64, i64) = sqlx::query_as(
+        "SELECT \
+         (SELECT count(*) FROM audit_entries WHERE tenant_id = $1::uuid), \
+         (SELECT count(*) FROM inbox_receipts WHERE tenant_id = $1::uuid AND event_id = $2 AND status = 'done')",
+    )
+    .bind(tenant.to_string())
+    .bind(&invalid_id)
+    .fetch_one(&owner.pool)
+    .await?;
+    assert_eq!(after_failure, (2, 0));
     app.shutdown().await?;
     owner.shutdown().await?;
     Ok(())
@@ -18977,9 +19174,7 @@ use std::time::{Duration, SystemTime};
 use diport::OutboxEnvelopeParts;
 use identity::ports::{
     AccountSecuritySnapshot, AuthGrantCloseCommand, AuthGrantLifecycle, AuthGrantValidator,
-    CredentialSecurityTargetKind, CredentialSecurityTargetRef,
-    CredentialSecurityTargetResolutionRequest, CredentialSecurityTargetResolver, IdentityError,
-    IdentitySecurityLifecycle, LoginGrantMutation, RefreshTokenStore, TenantId,
+    IdentityError, IdentitySecurityLifecycle, LoginGrantMutation, RefreshTokenStore, TenantId,
 };
 
 fn classified_identity_error(
@@ -19122,461 +19317,6 @@ async fn auth_grant_login_counts(
     .bind(event_id)
     .fetch_one(&store.pool)
     .await
-}
-
-async fn credential_security_payload(
-    store: &PgStore,
-    tenant: vocab::TenantId,
-) -> Result<(CredentialSecurityTargetRef, serde_json::Value), TestError> {
-    let payload: Vec<u8> = sqlx::query_scalar(
-        "SELECT payload FROM outbox \
-         WHERE tenant_id = $1::uuid AND contract_id = $2 \
-         ORDER BY created_at DESC LIMIT 1",
-    )
-    .bind(tenant.as_uuid().to_string())
-    .bind(identity::ports::SECURITY_EVENT_CONTRACT.contract_id())
-    .fetch_one(&store.pool)
-    .await?;
-    let payload: serde_json::Value = serde_json::from_slice(&payload)?;
-    let target_ref = payload["target"]["ref"]
-        .as_str()
-        .ok_or("credential security target ref missing")?;
-    Ok((CredentialSecurityTargetRef::parse(target_ref)?, payload))
-}
-
-#[derive(Clone)]
-struct AuthGrantCloseLocalTxCase {
-    tenant: vocab::TenantId,
-    user_id: ids::UserId,
-    grant: AuthGrant,
-    refresh: identity::ports::RefreshTokenRecord,
-    event_id: String,
-}
-
-impl AuthGrantCloseLocalTxCase {
-    fn new(tenant: vocab::TenantId, grant_id: &str) -> Result<Self, TestError> {
-        let user_id = ids::UserId::parse(&uuid::Uuid::new_v4().to_string())?;
-        let refresh_id = uuid::Uuid::new_v4().to_string();
-        let mut hash = [0_u8; 32];
-        hash[..16].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
-        hash[16..].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
-        let (grant, refresh) = auth_grant_fixture(tenant, user_id, grant_id, &refresh_id, hash);
-        Ok(Self {
-            tenant,
-            user_id,
-            grant,
-            refresh,
-            event_id: unique_event_id("auth-grant-close-localtx"),
-        })
-    }
-
-    fn grant_id(&self) -> &str {
-        self.grant.id().as_str()
-    }
-
-    async fn seed(
-        &self,
-        lifecycle: &crate::PgAuthGrantLifecycle,
-        owner: &PgStore,
-    ) -> Result<(), IdentityError> {
-        seed_auth_grant_account(owner, self.tenant, self.user_id)
-            .await
-            .map_err(|error| IdentityError::Storage(Box::new(error)))?;
-        let (mutation, entry, envelope) =
-            auth_grant_login_parts(&self.event_id, self.grant.clone(), self.refresh.clone());
-        lifecycle
-            .persist_login_grant(
-                login_producer_receipt(),
-                identity_scope(self.tenant),
-                mutation,
-                entry,
-                envelope,
-            )
-            .await
-            .map(|_persisted| ())
-            .map_err(|error| {
-                IdentityError::Storage(Box::new(std::io::Error::other(format!(
-                    "seed AuthGrant close fixture failed: {error}"
-                ))))
-            })
-    }
-
-    async fn close(&self, lifecycle: &crate::PgAuthGrantLifecycle) -> Result<(), IdentityError> {
-        let transition = self
-            .grant
-            .clone()
-            .close(
-                GrantSecurityEventKind::LogoutCurrent,
-                self.grant.created_at() + Duration::from_secs(1),
-            )
-            .map_err(|error| {
-                IdentityError::Storage(Box::new(std::io::Error::other(format!(
-                    "invalid AuthGrant close fixture: {error}"
-                ))))
-            })?;
-        lifecycle
-            .close(
-                identity_scope(self.tenant),
-                AuthGrantCloseCommand::for_test(transition),
-            )
-            .await
-    }
-
-    async fn snapshot(&self, owner: &PgStore) -> Result<(String, String, String), sqlx::Error> {
-        sqlx::query_as(
-            "SELECT g.status, r.status, r.auth_grant_status \
-             FROM auth_grants g \
-             JOIN refresh_tokens r \
-               ON r.tenant_id = g.tenant_id AND r.auth_grant_id = g.grant_id \
-             WHERE g.tenant_id = $1::uuid AND g.grant_id = $2",
-        )
-        .bind(self.tenant.as_uuid().to_string())
-        .bind(self.grant_id())
-        .fetch_one(&owner.pool)
-        .await
-    }
-}
-
-/// The logout LocalTx contract is enrolled against its real AuthGrant lifecycle. Login is only
-/// fixture setup; every conformance action drives `PgAuthGrantLifecycle::close`, whose transaction
-/// revokes the refresh family before closing the root.
-#[tokio::test(flavor = "multi_thread")]
-async fn localtx_identity_logout_backend_profile_commit_and_rollback() -> TestResult {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    const LOCALTX_BACKEND_PROFILE_IDENTITY_LOGOUT: ::vocab::HttpRouteBinding<
-        ::generated::http::identity_v1::logout::RouteMarker,
-        ::vocab::http::LocalTx,
-    > = ::generated::http::identity_v1::logout::ROUTE;
-    const LOCALTX_BACKEND_PROVIDER_IDENTITY_LOGOUT: ::std::marker::PhantomData<(
-        ::generated::http::identity_v1::logout::RouteMarker,
-        crate::PgAuthGrantLifecycle,
-    )> = ::std::marker::PhantomData;
-    let _typed_enrollment = LOCALTX_BACKEND_PROFILE_IDENTITY_LOGOUT;
-    let _typed_provider = LOCALTX_BACKEND_PROVIDER_IDENTITY_LOGOUT;
-
-    let (pg, owner) = connect_pg().await?;
-    owner.run_migrations().await?;
-    let app = connect_pg_rss_app_role(&pg, &owner).await?;
-    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
-    let seed_lifecycle = crate::PgAuthGrantLifecycle::new(&app, fixed_clock());
-
-    let commit = AuthGrantCloseLocalTxCase::new(tenant, &uuid::Uuid::new_v4().to_string())?;
-    commit.seed(&seed_lifecycle, &owner).await?;
-    let commit_lifecycle = crate::PgAuthGrantLifecycle::new(&app, fixed_clock());
-    let commit_writes = AtomicUsize::new(0);
-    ::testkit::localtx::assert_commit(::testkit::localtx::CommitCase::new(
-        || async {
-            commit
-                .close(&commit_lifecycle)
-                .await
-                .map_err(classified_identity_error)?;
-            commit_writes.fetch_add(1, Ordering::Relaxed);
-            Ok(())
-        },
-        || async {
-            commit
-                .snapshot(&owner)
-                .await
-                .map_err(classified_pg_snapshot_error)
-        },
-        (
-            "revoked".to_owned(),
-            "revoked".to_owned(),
-            "revoked".to_owned(),
-        ),
-        || commit_writes.load(Ordering::Relaxed),
-    ))
-    .await?;
-
-    let rollback = AuthGrantCloseLocalTxCase::new(tenant, &uuid::Uuid::new_v4().to_string())?;
-    rollback.seed(&seed_lifecycle, &owner).await?;
-    let rollback_lifecycle = crate::PgAuthGrantLifecycle::new(&app, fixed_clock())
-        .with_close_fault(
-            rollback.grant_id(),
-            crate::auth_grant_lifecycle::AuthGrantCloseFault::Permanent,
-            1,
-        );
-    ::testkit::localtx::assert_rollback(::testkit::localtx::RollbackCase::new(
-        || async {
-            rollback
-                .close(&rollback_lifecycle)
-                .await
-                .map_err(classified_identity_error)
-        },
-        testkit::ConformanceErrorCategory::Permanent,
-        || async {
-            rollback
-                .snapshot(&owner)
-                .await
-                .map_err(classified_pg_snapshot_error)
-        },
-        (
-            "active".to_owned(),
-            "active".to_owned(),
-            "active".to_owned(),
-        ),
-    ))
-    .await?;
-
-    app.shutdown().await?;
-    owner.shutdown().await?;
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn localtx_identity_logout_backend_profile_transient_retry_policy() -> TestResult {
-    let (pg, owner) = connect_pg().await?;
-    owner.run_migrations().await?;
-    let app = connect_pg_rss_app_role(&pg, &owner).await?;
-    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
-    let seed_lifecycle = crate::PgAuthGrantLifecycle::new(&app, fixed_clock());
-    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
-    let metrics_handle = recorder.handle();
-
-    let before = AuthGrantCloseLocalTxCase::new(tenant, &uuid::Uuid::new_v4().to_string())?;
-    before.seed(&seed_lifecycle, &owner).await?;
-    let before_lifecycle = crate::PgAuthGrantLifecycle::new(&app, fixed_clock()).with_close_fault(
-        before.grant_id(),
-        crate::auth_grant_lifecycle::AuthGrantCloseFault::TransientBeforeWrite,
-        1,
-    );
-    let before_probe = before_lifecycle.close_attempt_probe();
-
-    let after = AuthGrantCloseLocalTxCase::new(tenant, &uuid::Uuid::new_v4().to_string())?;
-    after.seed(&seed_lifecycle, &owner).await?;
-    let after_lifecycle = crate::PgAuthGrantLifecycle::new(&app, fixed_clock()).with_close_fault(
-        after.grant_id(),
-        crate::auth_grant_lifecycle::AuthGrantCloseFault::TransientAfterWrite,
-        1,
-    );
-    let after_probe = after_lifecycle.close_attempt_probe();
-
-    let exhausted = AuthGrantCloseLocalTxCase::new(tenant, &uuid::Uuid::new_v4().to_string())?;
-    exhausted.seed(&seed_lifecycle, &owner).await?;
-    let exhausted_lifecycle = crate::PgAuthGrantLifecycle::new(&app, fixed_clock())
-        .with_close_fault(
-            exhausted.grant_id(),
-            crate::auth_grant_lifecycle::AuthGrantCloseFault::TransientAfterWrite,
-            3,
-        );
-    let exhausted_probe = exhausted_lifecycle.close_attempt_probe();
-
-    metrics::with_local_recorder(&recorder, || {
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                before.close(&before_lifecycle).await?;
-                after.close(&after_lifecycle).await?;
-                let exhausted_result = exhausted.close(&exhausted_lifecycle).await;
-                assert!(
-                    exhausted_result.is_err(),
-                    "three transient failures must exhaust the retry policy"
-                );
-                Ok::<(), IdentityError>(())
-            })
-        })
-    })?;
-
-    assert_eq!(before_probe.attempts(before.grant_id()), 2);
-    assert_eq!(after_probe.attempts(after.grant_id()), 2);
-    assert_eq!(exhausted_probe.attempts(exhausted.grant_id()), 3);
-    assert_eq!(
-        before.snapshot(&owner).await?,
-        (
-            "revoked".to_owned(),
-            "revoked".to_owned(),
-            "revoked".to_owned(),
-        )
-    );
-    assert_eq!(
-        after.snapshot(&owner).await?,
-        (
-            "revoked".to_owned(),
-            "revoked".to_owned(),
-            "revoked".to_owned(),
-        ),
-        "after-write transient must roll back before the retry commits both aggregate sides"
-    );
-    assert_eq!(
-        exhausted.snapshot(&owner).await?,
-        (
-            "active".to_owned(),
-            "active".to_owned(),
-            "active".to_owned(),
-        ),
-        "exhausted after-write transients must leave no partial aggregate transition"
-    );
-
-    let rendered = metrics_handle.render();
-    for exact in [
-        "tx_retry_attempts_total{boundary=\"identity.auth-grant\",class=\"transient\",reason=\"pool_timeout\"} 5",
-        "tx_retry_final_total{boundary=\"identity.auth-grant\",status=\"success\",reason=\"pool_timeout\"} 2",
-        "tx_retry_final_total{boundary=\"identity.auth-grant\",status=\"exhausted\",reason=\"pool_timeout\"} 1",
-        "localtx_retry_attempts_total{domain=\"identity\",contract_id=\"identity.logout\",boundary=\"single_domain\",retry_class=\"transient\"} 5",
-        "localtx_final_total{domain=\"identity\",contract_id=\"identity.logout\",boundary=\"single_domain\",final_status=\"committed\"} 2",
-        "localtx_attempts_sum{domain=\"identity\",contract_id=\"identity.logout\",boundary=\"single_domain\",final_status=\"committed\"} 4",
-        "localtx_final_total{domain=\"identity\",contract_id=\"identity.logout\",boundary=\"single_domain\",final_status=\"rolled_back\"} 1",
-        "localtx_attempts_sum{domain=\"identity\",contract_id=\"identity.logout\",boundary=\"single_domain\",final_status=\"rolled_back\"} 3",
-    ] {
-        assert!(
-            rendered.contains(exact),
-            "logout retry metrics omitted exact evidence `{exact}`: {rendered}"
-        );
-    }
-
-    app.shutdown().await?;
-    owner.shutdown().await?;
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn localtx_identity_logout_backend_profile_tenant_isolation() -> TestResult {
-    const LOCALTX_BACKEND_PROFILE_IDENTITY_LOGOUT: ::vocab::HttpRouteBinding<
-        ::generated::http::identity_v1::logout::RouteMarker,
-        ::vocab::http::LocalTx,
-    > = ::generated::http::identity_v1::logout::ROUTE;
-    const LOCALTX_BACKEND_PROVIDER_IDENTITY_LOGOUT: ::std::marker::PhantomData<(
-        ::generated::http::identity_v1::logout::RouteMarker,
-        crate::PgAuthGrantLifecycle,
-    )> = ::std::marker::PhantomData;
-    let _typed_enrollment = LOCALTX_BACKEND_PROFILE_IDENTITY_LOGOUT;
-    let _typed_provider = LOCALTX_BACKEND_PROVIDER_IDENTITY_LOGOUT;
-
-    let (pg, owner) = connect_pg().await?;
-    owner.run_migrations().await?;
-    let app = connect_pg_rss_app_role(&pg, &owner).await?;
-    let tenant_a = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
-    let tenant_b = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
-    let shared_grant_id = uuid::Uuid::new_v4().to_string();
-    let case_a = AuthGrantCloseLocalTxCase::new(tenant_a, &shared_grant_id)?;
-    let case_b = AuthGrantCloseLocalTxCase::new(tenant_b, &shared_grant_id)?;
-    let seed_lifecycle = crate::PgAuthGrantLifecycle::new(&app, fixed_clock());
-    case_a.seed(&seed_lifecycle, &owner).await?;
-    case_b.seed(&seed_lifecycle, &owner).await?;
-    let lifecycle = crate::PgAuthGrantLifecycle::new(&app, fixed_clock());
-
-    ::testkit::tenant_conformance::assert_tenant_isolation(
-        tenant_a,
-        tenant_b,
-        |tenant| {
-            let case = if tenant == tenant_a { &case_a } else { &case_b };
-            let lifecycle = &lifecycle;
-            async move { case.close(lifecycle).await }
-        },
-        |tenant| {
-            let case = if tenant == tenant_a { &case_a } else { &case_b };
-            let owner = &owner;
-            async move {
-                case.snapshot(owner)
-                    .await
-                    .map(|(grant, refresh, binding)| {
-                        grant == "revoked" && refresh == "revoked" && binding == "revoked"
-                    })
-                    .map_err(|error| IdentityError::Storage(Box::new(error)))
-            }
-        },
-        |error| conformance_retry_category(classify_identity_error(error)),
-    )
-    .await?;
-
-    app.shutdown().await?;
-    owner.shutdown().await?;
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn localtx_identity_logout_backend_profile_unsafe_settlements() -> TestResult {
-    const LOCALTX_BACKEND_PROFILE_IDENTITY_LOGOUT: ::vocab::HttpRouteBinding<
-        ::generated::http::identity_v1::logout::RouteMarker,
-        ::vocab::http::LocalTx,
-    > = ::generated::http::identity_v1::logout::ROUTE;
-    const LOCALTX_BACKEND_PROVIDER_IDENTITY_LOGOUT: ::std::marker::PhantomData<(
-        ::generated::http::identity_v1::logout::RouteMarker,
-        crate::PgAuthGrantLifecycle,
-    )> = ::std::marker::PhantomData;
-    let _typed_enrollment = LOCALTX_BACKEND_PROFILE_IDENTITY_LOGOUT;
-    let _typed_provider = LOCALTX_BACKEND_PROVIDER_IDENTITY_LOGOUT;
-
-    let (pg, owner) = connect_pg().await?;
-    owner.run_migrations().await?;
-    let app = connect_pg_rss_app_role(&pg, &owner).await?;
-    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
-    let seed_lifecycle = crate::PgAuthGrantLifecycle::new(&app, fixed_clock());
-
-    let unknown = AuthGrantCloseLocalTxCase::new(tenant, &uuid::Uuid::new_v4().to_string())?;
-    unknown.seed(&seed_lifecycle, &owner).await?;
-    let unknown_lifecycle = crate::PgAuthGrantLifecycle::new(&app, fixed_clock()).with_close_fault(
-        unknown.grant_id(),
-        crate::auth_grant_lifecycle::AuthGrantCloseFault::CommitUnknown,
-        1,
-    );
-    let unknown_probe = unknown_lifecycle.close_attempt_probe();
-    ::testkit::localtx::assert_commit_unknown_no_replay(
-        ::testkit::localtx::CommitUnknownCase::new(
-            || async {
-                unknown.close(&unknown_lifecycle).await.map_err(|error| {
-                    testkit::localtx::ClassifiedError::new(
-                        testkit::ConformanceErrorCategory::CommitUnknown,
-                        error,
-                    )
-                })
-            },
-            testkit::ConformanceErrorCategory::CommitUnknown,
-            || unknown_probe.attempts(unknown.grant_id()),
-        ),
-    )
-    .await?;
-    assert_eq!(
-        unknown.snapshot(&owner).await?,
-        (
-            "revoked".to_owned(),
-            "revoked".to_owned(),
-            "revoked".to_owned(),
-        ),
-        "commit-unknown close may not expose an acknowledged result but must remain atomic"
-    );
-
-    let rollback_failed =
-        AuthGrantCloseLocalTxCase::new(tenant, &uuid::Uuid::new_v4().to_string())?;
-    rollback_failed.seed(&seed_lifecycle, &owner).await?;
-    let rollback_failed_lifecycle = crate::PgAuthGrantLifecycle::new(&app, fixed_clock())
-        .with_close_fault(
-            rollback_failed.grant_id(),
-            crate::auth_grant_lifecycle::AuthGrantCloseFault::RollbackFailed,
-            1,
-        );
-    let rollback_failed_probe = rollback_failed_lifecycle.close_attempt_probe();
-    ::testkit::localtx::assert_rollback_failed_no_replay(
-        ::testkit::localtx::RollbackFailedCase::new(
-            || async {
-                rollback_failed
-                    .close(&rollback_failed_lifecycle)
-                    .await
-                    .map_err(|error| {
-                        testkit::localtx::ClassifiedError::new(
-                            testkit::ConformanceErrorCategory::RollbackFailed,
-                            error,
-                        )
-                    })
-            },
-            testkit::ConformanceErrorCategory::RollbackFailed,
-            || rollback_failed_probe.attempts(rollback_failed.grant_id()),
-        ),
-    )
-    .await?;
-    assert_eq!(
-        rollback_failed.snapshot(&owner).await?,
-        (
-            "active".to_owned(),
-            "active".to_owned(),
-            "active".to_owned(),
-        ),
-        "rollback-failed close must not commit either side of the aggregate transition"
-    );
-
-    app.shutdown().await?;
-    owner.shutdown().await?;
-    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -20064,7 +19804,7 @@ async fn auth_grant_login_rejects_stale_epoch_after_security_event_commits() -> 
         state_at + Duration::from_secs(1),
     );
     let _security_receipt = crate::PgIdentitySecurityLifecycle::from_unverified_for_test(&store)
-        .execute(identity_scope(tenant), security)
+        .execute_test_command(identity_scope(tenant), security)
         .await?;
 
     let grant_id = uuid::Uuid::new_v4().to_string();
@@ -20153,7 +19893,7 @@ async fn auth_grant_login_account_lock_serializes_security_event_without_deadloc
     );
     let security_task = tokio::spawn(async move {
         crate::PgIdentitySecurityLifecycle::from_unverified_for_test(&security_store)
-            .execute(identity_scope(tenant), security)
+            .execute_test_command(identity_scope(tenant), security)
             .await
     });
 
@@ -20554,7 +20294,7 @@ async fn auth_grant_close_revokes_refresh_family_before_closing_root() -> TestRe
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn identity_security_lifecycle_applies_account_cas_and_grant_promotion_atomically()
+async fn credential_security_lifecycle_applies_account_cas_and_grant_promotion_atomically()
 -> TestResult {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
@@ -20605,6 +20345,52 @@ async fn identity_security_lifecycle_applies_account_cas_and_grant_promotion_ato
             )
             .await?;
     }
+    let same_tenant_decoy_user = ids::UserId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let other_tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let other_tenant_decoy_user = ids::UserId::parse(&uuid::Uuid::new_v4().to_string())?;
+    seed_auth_grant_account(&store, account_tenant, same_tenant_decoy_user).await?;
+    seed_auth_grant_account(&store, other_tenant, other_tenant_decoy_user).await?;
+    let same_tenant_decoy_grant_id = uuid::Uuid::new_v4().to_string();
+    let other_tenant_decoy_grant_id = uuid::Uuid::new_v4().to_string();
+    let (same_tenant_decoy_grant, same_tenant_decoy_refresh) = auth_grant_fixture(
+        account_tenant,
+        same_tenant_decoy_user,
+        &same_tenant_decoy_grant_id,
+        &uuid::Uuid::new_v4().to_string(),
+        [0x9a; 32],
+    );
+    let (other_tenant_decoy_grant, other_tenant_decoy_refresh) = auth_grant_fixture(
+        other_tenant,
+        other_tenant_decoy_user,
+        &other_tenant_decoy_grant_id,
+        &uuid::Uuid::new_v4().to_string(),
+        [0x9b; 32],
+    );
+    for (event_id, tenant, grant, refresh) in [
+        (
+            unique_event_id("security-account-same-tenant-decoy"),
+            account_tenant,
+            same_tenant_decoy_grant,
+            same_tenant_decoy_refresh,
+        ),
+        (
+            unique_event_id("security-account-other-tenant-decoy"),
+            other_tenant,
+            other_tenant_decoy_grant,
+            other_tenant_decoy_refresh,
+        ),
+    ] {
+        let (mutation, entry, envelope) = auth_grant_login_parts(&event_id, grant, refresh);
+        let _persisted = grant_lifecycle
+            .persist_login_grant(
+                login_producer_receipt(),
+                identity_scope(tenant),
+                mutation,
+                entry,
+                envelope,
+            )
+            .await?;
+    }
     sqlx::query(
         "UPDATE refresh_tokens SET status = 'consumed' \
          WHERE tenant_id = $1::uuid AND id = $2::uuid",
@@ -20625,23 +20411,15 @@ async fn identity_security_lifecycle_applies_account_cas_and_grant_promotion_ato
         updated_at: state_at,
     });
     let account_event_at = state_at + Duration::from_secs(10);
-    let account_command = identity::test_support::account_credential_security_command(
-        account_state.clone(),
-        AccountSecurityEventKind::LogoutAll,
-        account_event_at,
-    );
-    let stale_account_command = identity::test_support::account_credential_security_command(
+    let account_command =
+        identity::test_support::logout_all_command(account_state.clone(), account_event_at);
+    let stale_account_command = identity::test_support::logout_all_command(
         account_state,
-        AccountSecurityEventKind::LogoutAll,
         account_event_at + Duration::from_secs(1),
     );
-    let _receipt = lifecycle
-        .execute(identity_scope(account_tenant), account_command)
-        .await?;
+    let _receipt = execute_logout_all_route(&lifecycle, account_tenant, account_command).await?;
     assert!(matches!(
-        lifecycle
-            .execute(identity_scope(account_tenant), stale_account_command)
-            .await,
+        execute_logout_all_route(&lifecycle, account_tenant, stale_account_command).await,
         Err(IdentityError::VersionConflict)
     ));
 
@@ -20695,6 +20473,42 @@ async fn identity_security_lifecycle_applies_account_cas_and_grant_promotion_ato
         !String::from_utf8_lossy(&account_security_facts[0])
             .contains(&account_user.as_uuid().to_string())
     );
+    for (tenant, user, grant_id) in [
+        (
+            account_tenant,
+            same_tenant_decoy_user,
+            &same_tenant_decoy_grant_id,
+        ),
+        (
+            other_tenant,
+            other_tenant_decoy_user,
+            &other_tenant_decoy_grant_id,
+        ),
+    ] {
+        let decoy: (String, i64, i64, String, String) = sqlx::query_as(
+            "SELECT account.status, account.authn_epoch, account.version, root.status, refresh.status \
+             FROM account_security_states account \
+             JOIN auth_grants root ON root.tenant_id = account.tenant_id AND root.user_id = account.user_id \
+             JOIN refresh_tokens refresh ON refresh.tenant_id = root.tenant_id AND refresh.auth_grant_id = root.grant_id \
+             WHERE account.tenant_id = $1::uuid AND account.user_id = $2::uuid AND root.grant_id = $3",
+        )
+        .bind(tenant.as_uuid().to_string())
+        .bind(user.as_uuid().to_string())
+        .bind(grant_id)
+        .fetch_one(&store.pool)
+        .await?;
+        assert_eq!(
+            decoy,
+            (
+                "active".to_owned(),
+                0,
+                1,
+                "active".to_owned(),
+                "active".to_owned(),
+            ),
+            "logout-all must not cross a user or tenant boundary"
+        );
+    }
 
     let grant_tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let grant_user = ids::UserId::parse(&uuid::Uuid::new_v4().to_string())?;
@@ -20736,35 +20550,26 @@ async fn identity_security_lifecycle_applies_account_cas_and_grant_promotion_ato
             .await?;
     }
     let logout_at = root.created_at() + Duration::from_secs(1);
-    let stale_logout = identity::test_support::grant_credential_security_command(
+    let stale_logout = identity::test_support::logout_current_command(
         root.clone(),
-        GrantSecurityEventKind::LogoutCurrent,
         logout_at + Duration::from_secs(2),
     );
     let (_, revoked) = root
         .clone()
         .close(GrantSecurityEventKind::LogoutCurrent, logout_at)?
         .into_parts();
-    let logout = identity::test_support::grant_credential_security_command(
-        root,
-        GrantSecurityEventKind::LogoutCurrent,
-        logout_at,
-    );
+    let logout = identity::test_support::logout_current_command(root, logout_at);
     let reuse = identity::test_support::grant_credential_security_command(
         revoked,
         GrantSecurityEventKind::RefreshReuseDetected,
         logout_at + Duration::from_secs(1),
     );
-    let _logout_receipt = lifecycle
-        .execute(identity_scope(grant_tenant), logout)
-        .await?;
+    let _logout_receipt = execute_logout_current_route(&lifecycle, grant_tenant, logout).await?;
     let _reuse_receipt = lifecycle
-        .execute(identity_scope(grant_tenant), reuse)
+        .execute_test_command(identity_scope(grant_tenant), reuse)
         .await?;
     assert!(matches!(
-        lifecycle
-            .execute(identity_scope(grant_tenant), stale_logout)
-            .await,
+        execute_logout_current_route(&lifecycle, grant_tenant, stale_logout).await,
         Err(IdentityError::VersionConflict)
     ));
     let grant_rows: Vec<(String, String, Option<String>)> = sqlx::query_as(
@@ -20824,175 +20629,154 @@ async fn identity_security_lifecycle_applies_account_cas_and_grant_promotion_ato
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn credential_security_target_mapping_resolves_typed_subject_and_grant_fail_closed()
+async fn credential_security_route_transactions_linearize_duplicate_validated_commands()
 -> TestResult {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
-    let lifecycle = crate::PgIdentitySecurityLifecycle::from_unverified_for_test(&store);
-    let resolver = crate::PgCredentialSecurityTargetResolver::from_unverified_for_test(&store);
+    let grant_lifecycle = crate::PgAuthGrantLifecycle::new(&store, fixed_clock());
 
-    let subject_tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
-    let subject_user = ids::UserId::parse(&uuid::Uuid::new_v4().to_string())?;
-    seed_auth_grant_account(&store, subject_tenant, subject_user).await?;
-    let state_at = SystemTime::UNIX_EPOCH + Duration::from_secs(TEST_OCCURRED_SECS);
-    let subject_state = identity::test_support::account_security_state(AccountSecuritySnapshot {
-        tenant: subject_tenant,
-        user_id: subject_user,
-        status: AccountStatus::Active,
-        authn_epoch: 0,
-        version: 1,
-        status_changed_at: state_at,
-        updated_at: state_at,
-    });
-    let subject_command = identity::test_support::account_credential_security_command(
-        subject_state,
-        AccountSecurityEventKind::LogoutAll,
-        state_at + Duration::from_secs(1),
+    let all_tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let all_user = ids::UserId::parse(&uuid::Uuid::new_v4().to_string())?;
+    seed_auth_grant_account(&store, all_tenant, all_user).await?;
+    let (all_grant, all_refresh) = auth_grant_fixture(
+        all_tenant,
+        all_user,
+        &uuid::Uuid::new_v4().to_string(),
+        &uuid::Uuid::new_v4().to_string(),
+        [0xa1; 32],
     );
-    let _subject_receipt = lifecycle
-        .execute(identity_scope(subject_tenant), subject_command)
-        .await?;
-    let (subject_ref, subject_payload) =
-        credential_security_payload(&store, subject_tenant).await?;
-    assert!(
-        !subject_payload
-            .to_string()
-            .contains(&subject_user.as_uuid().to_string()),
-        "raw subject must remain only in the provider mapping"
-    );
-    let subject = resolver
-        .resolve(CredentialSecurityTargetResolutionRequest::for_test(
-            identity_scope(subject_tenant),
-            subject_ref.clone(),
-            CredentialSecurityTargetKind::Subject,
-        ))
-        .await?
-        .ok_or("subject target mapping missing")?;
-    assert_eq!(subject.tenant(), subject_tenant);
-    assert_eq!(subject.target_ref().as_uuid(), subject_ref.as_uuid());
-    assert_eq!(subject.kind(), CredentialSecurityTargetKind::Subject);
-    assert_eq!(subject.user_id(), subject_user);
-    assert!(subject.grant_id().is_none());
-    assert!(
-        resolver
-            .resolve(CredentialSecurityTargetResolutionRequest::for_test(
-                identity_scope(subject_tenant),
-                subject_ref.clone(),
-                CredentialSecurityTargetKind::Grant,
-            ))
-            .await?
-            .is_none(),
-        "subject reference must not resolve as a grant"
-    );
-    let other_tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
-    assert!(
-        resolver
-            .resolve(CredentialSecurityTargetResolutionRequest::for_test(
-                identity_scope(other_tenant),
-                subject_ref,
-                CredentialSecurityTargetKind::Subject,
-            ))
-            .await?
-            .is_none(),
-        "opaque target reference must not cross tenant scope"
-    );
-
-    let grant_tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
-    let grant_user = ids::UserId::parse(&uuid::Uuid::new_v4().to_string())?;
-    seed_auth_grant_account(&store, grant_tenant, grant_user).await?;
-    let grant_id = uuid::Uuid::new_v4().to_string();
-    let refresh_id = uuid::Uuid::new_v4().to_string();
-    let (grant, refresh) =
-        auth_grant_fixture(grant_tenant, grant_user, &grant_id, &refresh_id, [0x98; 32]);
     let (mutation, entry, envelope) = auth_grant_login_parts(
-        &unique_event_id("security-target-grant-root"),
-        grant.clone(),
-        refresh,
+        &unique_event_id("security-concurrent-all-login"),
+        all_grant,
+        all_refresh,
     );
-    let _persisted = crate::PgAuthGrantLifecycle::new(&store, fixed_clock())
+    let _persisted = grant_lifecycle
         .persist_login_grant(
             login_producer_receipt(),
-            identity_scope(grant_tenant),
+            identity_scope(all_tenant),
             mutation,
             entry,
             envelope,
         )
         .await?;
-    let grant_command = identity::test_support::grant_credential_security_command(
-        grant,
-        GrantSecurityEventKind::LogoutCurrent,
-        state_at + Duration::from_secs(2),
+    let observed_at = SystemTime::UNIX_EPOCH + Duration::from_secs(TEST_OCCURRED_SECS);
+    let all_state = identity::test_support::account_security_state(AccountSecuritySnapshot {
+        tenant: all_tenant,
+        user_id: all_user,
+        status: AccountStatus::Active,
+        authn_epoch: 0,
+        version: 1,
+        status_changed_at: observed_at,
+        updated_at: observed_at,
+    });
+    let all_barrier = std::sync::Arc::new(tokio::sync::Barrier::new(3));
+    let all_lifecycle_a = crate::PgIdentitySecurityLifecycle::from_unverified_for_test(&store)
+        .with_start_barrier(std::sync::Arc::clone(&all_barrier));
+    let all_lifecycle_b = crate::PgIdentitySecurityLifecycle::from_unverified_for_test(&store)
+        .with_start_barrier(std::sync::Arc::clone(&all_barrier));
+    let all_command_a = identity::test_support::logout_all_command(
+        all_state.clone(),
+        observed_at + Duration::from_secs(1),
     );
-    let _grant_receipt = lifecycle
-        .execute(identity_scope(grant_tenant), grant_command)
-        .await?;
-    let (grant_ref, grant_payload) = credential_security_payload(&store, grant_tenant).await?;
-    assert!(
-        !grant_payload.to_string().contains(&grant_id),
-        "raw grant must remain only in the provider mapping"
-    );
-    let resolved_grant = resolver
-        .resolve(CredentialSecurityTargetResolutionRequest::for_test(
-            identity_scope(grant_tenant),
-            grant_ref.clone(),
-            CredentialSecurityTargetKind::Grant,
-        ))
-        .await?
-        .ok_or("grant target mapping missing")?;
-    assert_eq!(resolved_grant.kind(), CredentialSecurityTargetKind::Grant);
-    assert_eq!(resolved_grant.user_id(), grant_user);
+    let all_command_b =
+        identity::test_support::logout_all_command(all_state, observed_at + Duration::from_secs(2));
+    let all_a = tokio::spawn(async move {
+        execute_logout_all_route(&all_lifecycle_a, all_tenant, all_command_a).await
+    });
+    let all_b = tokio::spawn(async move {
+        execute_logout_all_route(&all_lifecycle_b, all_tenant, all_command_b).await
+    });
+    all_barrier.wait().await;
+    let all_results = [all_a.await?, all_b.await?];
     assert_eq!(
-        resolved_grant.grant_id().map(AuthGrantId::as_str),
-        Some(grant_id.as_str())
+        all_results.iter().filter(|result| result.is_ok()).count(),
+        1
     );
-    assert!(
-        resolver
-            .resolve(CredentialSecurityTargetResolutionRequest::for_test(
-                identity_scope(grant_tenant),
-                grant_ref,
-                CredentialSecurityTargetKind::Subject,
-            ))
-            .await?
-            .is_none(),
-        "grant reference must not resolve as a subject"
+    assert_eq!(
+        all_results
+            .iter()
+            .filter(|result| matches!(result, Err(IdentityError::VersionConflict)))
+            .count(),
+        1
     );
 
-    let mapping_count: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM credential_security_target_mappings \
-         WHERE tenant_id IN ($1::uuid, $2::uuid)",
-    )
-    .bind(subject_tenant.as_uuid().to_string())
-    .bind(grant_tenant.as_uuid().to_string())
-    .fetch_one(&store.pool)
-    .await?;
-    assert_eq!(mapping_count, 2);
-    let mapping_acl: (bool, bool, bool, bool, bool, bool, bool, bool, bool) = sqlx::query_as(
-        "SELECT c.relforcerowsecurity, \
-                has_table_privilege('rss_app', c.oid, 'SELECT'), \
-                has_table_privilege('rss_app', c.oid, 'INSERT'), \
-                has_table_privilege('rss_app', c.oid, 'UPDATE'), \
-                has_table_privilege('rss_app', c.oid, 'DELETE'), \
-                has_table_privilege('rss_app_read', c.oid, 'SELECT'), \
-                has_table_privilege('rss_app_read', c.oid, 'INSERT'), \
-                has_table_privilege('rss_app_read', c.oid, 'UPDATE'), \
-                has_table_privilege('rss_app_read', c.oid, 'DELETE') \
-         FROM pg_class c \
-         WHERE c.oid = 'public.credential_security_target_mappings'::regclass",
-    )
-    .fetch_one(&store.pool)
-    .await?;
-    assert_eq!(
-        mapping_acl,
-        (true, true, true, false, false, true, false, false, false),
-        "opaque target mapping must remain FORCE RLS and append-only for serving roles"
+    let current_tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let current_user = ids::UserId::parse(&uuid::Uuid::new_v4().to_string())?;
+    seed_auth_grant_account(&store, current_tenant, current_user).await?;
+    let (current_grant, current_refresh) = auth_grant_fixture(
+        current_tenant,
+        current_user,
+        &uuid::Uuid::new_v4().to_string(),
+        &uuid::Uuid::new_v4().to_string(),
+        [0xa2; 32],
     );
+    let (mutation, entry, envelope) = auth_grant_login_parts(
+        &unique_event_id("security-concurrent-current-login"),
+        current_grant.clone(),
+        current_refresh,
+    );
+    let _persisted = grant_lifecycle
+        .persist_login_grant(
+            login_producer_receipt(),
+            identity_scope(current_tenant),
+            mutation,
+            entry,
+            envelope,
+        )
+        .await?;
+    let current_barrier = std::sync::Arc::new(tokio::sync::Barrier::new(3));
+    let current_lifecycle_a = crate::PgIdentitySecurityLifecycle::from_unverified_for_test(&store)
+        .with_start_barrier(std::sync::Arc::clone(&current_barrier));
+    let current_lifecycle_b = crate::PgIdentitySecurityLifecycle::from_unverified_for_test(&store)
+        .with_start_barrier(std::sync::Arc::clone(&current_barrier));
+    let current_command_a = identity::test_support::logout_current_command(
+        current_grant.clone(),
+        observed_at + Duration::from_secs(3),
+    );
+    let current_command_b = identity::test_support::logout_current_command(
+        current_grant,
+        observed_at + Duration::from_secs(4),
+    );
+    let current_a = tokio::spawn(async move {
+        execute_logout_current_route(&current_lifecycle_a, current_tenant, current_command_a).await
+    });
+    let current_b = tokio::spawn(async move {
+        execute_logout_current_route(&current_lifecycle_b, current_tenant, current_command_b).await
+    });
+    current_barrier.wait().await;
+    let current_results = [current_a.await?, current_b.await?];
+    assert_eq!(
+        current_results
+            .iter()
+            .filter(|result| result.is_ok())
+            .count(),
+        1
+    );
+    assert_eq!(
+        current_results
+            .iter()
+            .filter(|result| matches!(result, Err(IdentityError::VersionConflict)))
+            .count(),
+        1
+    );
+
+    for tenant in [all_tenant, current_tenant] {
+        let fact_count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM outbox WHERE tenant_id = $1::uuid AND contract_id = $2",
+        )
+        .bind(tenant.as_uuid().to_string())
+        .bind(identity::ports::SECURITY_EVENT_CONTRACT.contract_id())
+        .fetch_one(&store.pool)
+        .await?;
+        assert_eq!(fact_count, 1, "losing CAS must not append an outbox fact");
+    }
 
     store.shutdown().await?;
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn identity_security_lifecycle_rolls_back_before_outbox_and_never_receipts_commit_unknown()
+async fn credential_security_lifecycle_rolls_back_before_outbox_and_never_receipts_commit_unknown()
 -> TestResult {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
@@ -21031,7 +20815,7 @@ async fn identity_security_lifecycle_rolls_back_before_outbox_and_never_receipts
     );
     let failed_result = crate::PgIdentitySecurityLifecycle::from_unverified_for_test(&store)
         .with_fault(crate::identity_security_lifecycle::IdentitySecurityFault::AfterProjection)
-        .execute(identity_scope(tenant), failed)
+        .execute_test_command(identity_scope(tenant), failed)
         .await;
     assert!(failed_result.is_err());
     let after_rollback: (i64, i64, String, String) = sqlx::query_as(
@@ -21057,16 +20841,6 @@ async fn identity_security_lifecycle_rolls_back_before_outbox_and_never_receipts
     .fetch_one(&store.pool)
     .await?;
     assert_eq!(after_rollback_facts, 0);
-    let after_rollback_mappings: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM credential_security_target_mappings WHERE tenant_id = $1::uuid",
-    )
-    .bind(tenant.as_uuid().to_string())
-    .fetch_one(&store.pool)
-    .await?;
-    assert_eq!(
-        after_rollback_mappings, 0,
-        "projection failure must roll back the opaque target mapping"
-    );
 
     let mismatch = identity::test_support::account_credential_security_command(
         state.clone(),
@@ -21075,7 +20849,7 @@ async fn identity_security_lifecycle_rolls_back_before_outbox_and_never_receipts
     );
     assert!(
         crate::PgIdentitySecurityLifecycle::from_unverified_for_test(&store)
-            .execute(identity_scope(other_tenant), mismatch)
+            .execute_test_command(identity_scope(other_tenant), mismatch)
             .await
             .is_err()
     );
@@ -21087,18 +20861,16 @@ async fn identity_security_lifecycle_rolls_back_before_outbox_and_never_receipts
     );
     let unknown_result = crate::PgIdentitySecurityLifecycle::from_unverified_for_test(&store)
         .with_fault(crate::identity_security_lifecycle::IdentitySecurityFault::CommitUnknown)
-        .execute(identity_scope(tenant), commit_unknown)
+        .execute_test_command(identity_scope(tenant), commit_unknown)
         .await;
     assert!(
         unknown_result.is_err(),
         "unknown commit must not return a receipt"
     );
-    let after_unknown: (i64, i64, String, String, i64, i64) = sqlx::query_as(
+    let after_unknown: (i64, i64, String, String, i64) = sqlx::query_as(
         "SELECT s.authn_epoch, s.version, g.status, r.status, \
             (SELECT count(*) FROM outbox o \
-             WHERE o.tenant_id = s.tenant_id AND o.contract_id = $3), \
-            (SELECT count(*) FROM credential_security_target_mappings target \
-             WHERE target.tenant_id = s.tenant_id) \
+             WHERE o.tenant_id = s.tenant_id AND o.contract_id = $3) \
          FROM account_security_states s \
          JOIN auth_grants g ON g.tenant_id = s.tenant_id AND g.user_id = s.user_id \
          JOIN refresh_tokens r ON r.tenant_id = g.tenant_id AND r.auth_grant_id = g.grant_id \
@@ -21111,7 +20883,7 @@ async fn identity_security_lifecycle_rolls_back_before_outbox_and_never_receipts
     .await?;
     assert_eq!(
         after_unknown,
-        (1, 2, "revoked".to_owned(), "revoked".to_owned(), 1, 1),
+        (1, 2, "revoked".to_owned(), "revoked".to_owned(), 1),
         "PostgreSQL accepted the commit, but the adapter returned no replayable receipt"
     );
 
@@ -21120,7 +20892,7 @@ async fn identity_security_lifecycle_rolls_back_before_outbox_and_never_receipts
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn identity_security_lifecycle_real_append_and_precommit_failures_roll_back_everything()
+async fn credential_security_lifecycle_real_append_and_precommit_failures_roll_back_everything()
 -> TestResult {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
@@ -21174,19 +20946,17 @@ async fn identity_security_lifecycle_real_append_and_precommit_failures_roll_bac
         );
         let result = crate::PgIdentitySecurityLifecycle::from_unverified_for_test(&store)
             .with_fault(fault)
-            .execute(identity_scope(tenant), command)
+            .execute_test_command(identity_scope(tenant), command)
             .await;
         assert!(
             result.is_err(),
             "append-boundary fault must not return a security receipt"
         );
 
-        let after_failure: (i64, i64, String, String, i64, i64) = sqlx::query_as(
+        let after_failure: (i64, i64, String, String, i64) = sqlx::query_as(
             "SELECT s.authn_epoch, s.version, g.status, r.status, \
                 (SELECT count(*) FROM outbox o \
-                 WHERE o.tenant_id = s.tenant_id AND o.contract_id = $3), \
-                (SELECT count(*) FROM credential_security_target_mappings target \
-                 WHERE target.tenant_id = s.tenant_id) \
+                 WHERE o.tenant_id = s.tenant_id AND o.contract_id = $3) \
              FROM account_security_states s \
              JOIN auth_grants g ON g.tenant_id = s.tenant_id AND g.user_id = s.user_id \
              JOIN refresh_tokens r ON r.tenant_id = g.tenant_id \
@@ -21200,8 +20970,8 @@ async fn identity_security_lifecycle_real_append_and_precommit_failures_roll_bac
         .await?;
         assert_eq!(
             after_failure,
-            (0, 1, "active".to_owned(), "active".to_owned(), 0, 0),
-            "projection, grant, refresh, target mapping and appended fact must roll back together"
+            (0, 1, "active".to_owned(), "active".to_owned(), 0),
+            "projection, grant, refresh and appended fact must roll back together"
         );
     }
 
@@ -23390,6 +23160,187 @@ fn migrations_through(max_version: i64) -> sqlx::migrate::Migrator {
         ),
         ..sqlx::migrate::Migrator::DEFAULT
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn migration_0076_drops_unconsumed_credential_security_target_mapping() -> TestResult {
+    let (_fixture, store) = connect_pg().await?;
+    migrations_through(75).run(&store.pool).await?;
+
+    let before: Option<String> = sqlx::query_scalar(
+        "SELECT to_regclass('public.credential_security_target_mappings')::text",
+    )
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(
+        before.as_deref(),
+        Some("credential_security_target_mappings")
+    );
+
+    sqlx::query(
+        "INSERT INTO credential_security_target_mappings \
+         (target_ref, tenant_id, target_kind, user_id) \
+         VALUES ($1::uuid, $2::uuid, 'subject', $3::uuid)",
+    )
+    .bind(uuid::Uuid::new_v4().to_string())
+    .bind(uuid::Uuid::new_v4().to_string())
+    .bind(uuid::Uuid::new_v4().to_string())
+    .execute(&store.pool)
+    .await?;
+
+    sqlx::migrate!("./migrations").run(&store.pool).await?;
+
+    let after: Option<String> = sqlx::query_scalar(
+        "SELECT to_regclass('public.credential_security_target_mappings')::text",
+    )
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(
+        after, None,
+        "0076 must remove both the relation and its rows"
+    );
+    let ledger: i64 = sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations")
+        .fetch_one(&store.pool)
+        .await?;
+    assert_eq!(ledger, 76);
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn migration_0075_replaces_legacy_session_permission_without_expanding_authority()
+-> TestResult {
+    let (_fixture, store) = connect_pg().await?;
+    migrations_through(74).run(&store.pool).await?;
+    let tenant = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
+    let resource = "11111111-2222-4333-8444-555555555555";
+
+    sqlx::query(
+        "INSERT INTO roles (tenant_id, id, name, permissions) VALUES \
+         ($1::uuid, 'legacy-logout', 'legacy logout', \
+          ARRAY['identity:profile:read', 'identity:session:write', \
+                'identity:session:logout-current']::text[])",
+    )
+    .bind(tenant)
+    .execute(&store.pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO abac_policies \
+         (tenant_id, id, contract_id, permission, effective_from, rules) VALUES \
+         ($1::uuid, 'legacy-logout', 'identity.logout@v1', \
+          'identity:session:write', to_timestamp(1), '{\"rules\":[]}'::jsonb)",
+    )
+    .bind(tenant)
+    .execute(&store.pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO resource_attributes \
+         (tenant_id, contract_id, permission, resource_id, attribute_key, attribute_value, effective_from) \
+         VALUES ($1::uuid, 'identity.logout@v1', 'identity:session:write', $2::uuid, \
+                 'resource.owner', 'alice', to_timestamp(1))",
+    )
+    .bind(tenant)
+    .bind(resource)
+    .execute(&store.pool)
+    .await?;
+
+    sqlx::migrate!("./migrations").run(&store.pool).await?;
+
+    let permissions: Vec<String> =
+        sqlx::query_scalar("SELECT permissions FROM roles WHERE id = 'legacy-logout'")
+            .fetch_one(&store.pool)
+            .await?;
+    assert_eq!(
+        permissions,
+        ["identity:profile:read", "identity:session:logout-current"]
+    );
+    let remaining_legacy: i64 = sqlx::query_scalar(
+        "SELECT \
+           (SELECT count(*) FROM roles WHERE 'identity:session:write' = ANY(permissions)) + \
+           (SELECT count(*) FROM abac_policies WHERE permission = 'identity:session:write') + \
+           (SELECT count(*) FROM resource_attributes WHERE permission = 'identity:session:write')",
+    )
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(remaining_legacy, 0);
+    let current_rows: (i64, i64) = sqlx::query_as(
+        "SELECT \
+           (SELECT count(*) FROM abac_policies WHERE permission = 'identity:session:logout-current'), \
+           (SELECT count(*) FROM resource_attributes WHERE permission = 'identity:session:logout-current')",
+    )
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(current_rows, (1, 1));
+    let expanded: i64 = sqlx::query_scalar(
+        "SELECT \
+           (SELECT count(*) FROM roles WHERE 'identity:session:logout-all' = ANY(permissions)) + \
+           (SELECT count(*) FROM abac_policies WHERE permission = 'identity:session:logout-all') + \
+           (SELECT count(*) FROM resource_attributes WHERE permission = 'identity:session:logout-all')",
+    )
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(expanded, 0, "migration must never grant logout-all");
+    let ledger: i64 = sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations")
+        .fetch_one(&store.pool)
+        .await?;
+    assert_eq!(ledger, 76);
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn migration_0075_resource_scope_collision_fails_closed_and_rolls_back() -> TestResult {
+    let (_fixture, store) = connect_pg().await?;
+    migrations_through(74).run(&store.pool).await?;
+    let tenant = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
+    let resource = "11111111-2222-4333-8444-555555555555";
+    for permission in ["identity:session:write", "identity:session:logout-current"] {
+        sqlx::query(
+            "INSERT INTO resource_attributes \
+             (tenant_id, contract_id, permission, resource_id, attribute_key, attribute_value, effective_from) \
+             VALUES ($1::uuid, 'identity.logout@v1', $2, $3::uuid, \
+                     'resource.owner', 'alice', to_timestamp(1))",
+        )
+        .bind(tenant)
+        .bind(permission)
+        .bind(resource)
+        .execute(&store.pool)
+        .await?;
+    }
+    sqlx::query(
+        "INSERT INTO abac_policies \
+         (tenant_id, id, contract_id, permission, effective_from, rules) VALUES \
+         ($1::uuid, 'rollback-proof', 'identity.logout@v1', \
+          'identity:session:write', to_timestamp(1), '{\"rules\":[]}'::jsonb)",
+    )
+    .bind(tenant)
+    .execute(&store.pool)
+    .await?;
+
+    let error = sqlx::migrate!("./migrations")
+        .run(&store.pool)
+        .await
+        .expect_err("colliding resource scope must abort migration");
+    assert!(error.to_string().contains("duplicate key"), "{error}");
+    let legacy_policy: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM abac_policies WHERE permission = 'identity:session:write'",
+    )
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(legacy_policy, 1, "the whole migration must roll back");
+    let legacy_resource: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM resource_attributes WHERE permission = 'identity:session:write'",
+    )
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(legacy_resource, 1);
+    let ledger: i64 = sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations")
+        .fetch_one(&store.pool)
+        .await?;
+    assert_eq!(ledger, 74, "failed migration must not advance the ledger");
+    store.shutdown().await?;
+    Ok(())
 }
 
 /// Predecessor-only half of `deploy/postgres-upgrade/smoke-retained-volume.sh`.

@@ -1,0 +1,13 @@
+error[E0451]: fields `grant_id`, `user_id`, `tenant_id` and `authn_epoch` of struct `CurrentAuthGrant` are private
+ --> tests/ui/current_auth_grant_cannot_be_forged.rs:3:9
+  |
+2 |     identity::CurrentAuthGrant {
+  |     -------------------------- in this type
+3 |         grant_id: ids::CanonicalUuidV4::parse("550e8400-e29b-41d4-a716-446655440000").unwrap(),
+  |         ^^^^^^^^ private field
+4 |         user_id: ids::UserId::parse("11111111-2222-4333-8444-555555555555").unwrap(),
+  |         ^^^^^^^ private field
+5 |         tenant_id: vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").unwrap(),
+  |         ^^^^^^^^^ private field
+6 |         authn_epoch: 0,
+  |         ^^^^^^^^^^^ private field

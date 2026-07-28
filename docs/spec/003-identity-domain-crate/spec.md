@@ -151,7 +151,8 @@
 
 **Tenant 来源**：login 请求的 tenant 来源为 `X-Tenant-ID` header（pre-auth 路径，tenancy.md Hard），**request body 不得含 `tenantId` 字段**——body 含 tenantId 是 tenancy Hard 违规。
 
-**Logout 安全边界**：本阶段仅域侧软撤销（`SessionRepo::revoke`）。**已颁发 JWT 在 TTL 内仍有效，无硬吊销**；硬吊销（CredentialFence / 黑名单）依赖 authn #1003 落地后在 Join #1017 接线。
+**Logout 安全边界**：current 由认证 grant evidence 精确撤销当前 grant/family；all 通过 account epoch CAS
+撤销主体全部既存 grant/family。状态、opaque target mapping 与 `identity.security-event` 在同一事务提交。
 
 **Login 响应**：响应 `data: {sessionId, expiresAt, accessToken, refreshToken, accessExpiresAt}`，登录成功首发 access JWT + refresh token bundle（#1252 已接线；vault Signer 经 authn::JwtIssuer 签）。
 
@@ -164,7 +165,7 @@
 1. **Given** 合法凭据 + Active 状态 + 合法 `X-Tenant-ID` header，**When** `login`，**Then** 在 token mint 前再次确认 Active/epoch，创建会话 + 发布一条 `identity.session-created`，响应 token bundle。
 2. **Given** 错误凭据，**When** `login`，**Then** 返回 `LoginError::InvalidCredentials`，**不**创建会话、**不**发事件（无孤立事件）。
 3. **Given** 密码变更请求携带旧版本号，**When** 并发两次变更，**Then** 仅一次成功（CAS），另一次因版本不匹配被拒。
-4. **Given** 活动会话，**When** `logout`，**Then** 会话被域侧软撤销（`SessionRepo::revoke`），已颁发 JWT 在 TTL 内仍有效（无硬吊销，硬吊销延 #1003）。
+4. **Given** 两个活动授权，**When** `logout`，**Then** 只撤销当前授权；**When** `logout-all`，**Then** 撤销主体全部既存授权，旧 access/refresh 均返回 401。
 5. **Given** tenantA 凭据携 `X-Tenant-ID: tenantB` header，**When** `login`，**Then** Deny，不创建会话，不发事件。
 
 ---
@@ -186,7 +187,8 @@
 | roles list | GET | `/api/v1/identity/roles` | 鉴权 + 分页(limit≤500)，响应 `{data,nextCursor,hasMore}` | `identity:role:read` |
 | profile | GET | `/api/v1/identity/profile` | 鉴权（selfScoped） | `identity:profile:read` |
 | password-change | POST | `/api/v1/identity/password/change` | 鉴权（selfScoped） | `identity:profile:write` |
-| logout | POST | `/api/v1/identity/logout` | 鉴权（selfScoped） | `identity:session:write` |
+| logout current | POST | `/api/v1/identity/logout` | 鉴权 grant evidence | `identity:session:logout-current` |
+| logout all | POST | `/api/v1/identity/logout-all` | 鉴权 grant evidence | `identity:session:logout-all` |
 
 每个受保护端点 MUST 在 contract.toml 声明具体 permission overlay，不能只写"鉴权"——缺 permission 声明的端点被 codegen fail-closed 拒绝。
 
@@ -232,7 +234,7 @@
 - **FR-016**: login tenant 来源 MUST 为 `X-Tenant-ID` header（pre-auth 路径，tenancy.md Hard）；request body 禁止含 `tenantId` 字段。
 - **FR-017**: 每个 active + codegen HTTP 契约 MUST 声明恰一个 AuthZ mode（permission overlay 值 或 显式 opt-out + reason）；缺声明的端点被 codegen fail-closed 拒绝。
 - **FR-018**: 列表响应格式 MUST 为 `{data, nextCursor, hasMore}`（rust-standards.md §API）。
-- **FR-019**: logout MUST 仅做域侧软撤销（`SessionRepo::revoke`）；本阶段无硬吊销，已颁发 JWT 在 TTL 内仍有效；硬吊销（CredentialFence）延 #1003 落地后在 Join #1017 接线。
+- **FR-019**: current/all logout MUST 经唯一 credential-security producer transaction 原子撤销目标 grant/family、写 opaque target mapping 与 security-event；旧 access/refresh 必须立即失效。
 - **FR-020**: `CredentialRepo::authenticate` MUST 是 credential + account-security 的唯一事务认证漏斗；不得提供可拆分的 `lockout_status` 或状态预检 port。
 - **FR-021**: 系统 MUST 只允许 Active 账户登录和签发 User refresh；缺失/损坏状态、非 User refresh record 和存储异常均 fail-closed。
 - **FR-023**: refresh family MUST 持久化不可改写的 issuance epoch；rotation 最终 writer MUST 在同一事务锁定

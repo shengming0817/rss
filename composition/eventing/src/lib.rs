@@ -32,6 +32,8 @@ enum DispatchPlan {
     RoleRevoked,
     #[cfg(feature = "audit-consumers")]
     PolicyUpdated,
+    #[cfg(feature = "audit-consumers")]
+    SecurityEvent,
     #[cfg(feature = "settings-consumers")]
     ConfigVersionChanged(Arc<settings::ConfigVersionReconciler>),
 }
@@ -281,6 +283,7 @@ const fn admitted_audit_dispatch(dispatch: SubscriptionDispatchKey) -> bool {
         SubscriptionDispatchKey::IdentityPolicyUpdatedV1Audit
         | SubscriptionDispatchKey::IdentityRoleAssignedV1Audit
         | SubscriptionDispatchKey::IdentityRoleRevokedV1Audit
+        | SubscriptionDispatchKey::IdentitySecurityEventV1Audit
         | SubscriptionDispatchKey::IdentitySessionCreatedV1Audit => true,
         SubscriptionDispatchKey::SettingsConfigVersionChangedV1Settings => false,
     }
@@ -291,6 +294,7 @@ const fn admitted_dispatch(dispatch: SubscriptionDispatchKey) -> bool {
         SubscriptionDispatchKey::IdentityPolicyUpdatedV1Audit
         | SubscriptionDispatchKey::IdentityRoleAssignedV1Audit
         | SubscriptionDispatchKey::IdentityRoleRevokedV1Audit
+        | SubscriptionDispatchKey::IdentitySecurityEventV1Audit
         | SubscriptionDispatchKey::IdentitySessionCreatedV1Audit => {
             cfg!(feature = "audit-consumers")
         }
@@ -359,6 +363,15 @@ fn resolve_parts(
             {
                 require_adapter_native(dispatch, execution, effect, policy, capability)?;
                 DispatchPlan::PolicyUpdated
+            }
+            #[cfg(not(feature = "audit-consumers"))]
+            return Err(feature_disabled(dispatch, "audit-consumers"));
+        }
+        SubscriptionDispatchKey::IdentitySecurityEventV1Audit => {
+            #[cfg(feature = "audit-consumers")]
+            {
+                require_adapter_native(dispatch, execution, effect, policy, capability)?;
+                DispatchPlan::SecurityEvent
             }
             #[cfg(not(feature = "audit-consumers"))]
             return Err(feature_disabled(dispatch, "audit-consumers"));
@@ -549,6 +562,15 @@ impl<'a> AuditConsumerFactory<'a> {
                     })?);
                 Ok(worker_spec::<policy::TransactionalOnly, _>(inputs, handler))
             }
+            DispatchPlan::SecurityEvent => {
+                let handler = self
+                    .pg
+                    .for_domain::<postgres::caps::Audit>()
+                    .security_event_consumer_tx(hasher().map_err(|error| {
+                        error.context("audit security-event consumer tx chain key")
+                    })?);
+                Ok(worker_spec::<policy::TransactionalOnly, _>(inputs, handler))
+            }
             #[cfg(feature = "settings-consumers")]
             DispatchPlan::ConfigVersionChanged(_) => {
                 anyhow::bail!("settings dispatch token passed to AuditConsumerFactory")
@@ -589,7 +611,8 @@ impl<'a> SettingsConsumerFactory<'a> {
             DispatchPlan::SessionCreated
             | DispatchPlan::RoleAssigned
             | DispatchPlan::RoleRevoked
-            | DispatchPlan::PolicyUpdated => {
+            | DispatchPlan::PolicyUpdated
+            | DispatchPlan::SecurityEvent => {
                 anyhow::bail!("audit dispatch token passed to SettingsConsumerFactory")
             }
         }
@@ -637,6 +660,7 @@ mod tests {
             SubscriptionDispatchKey::IdentityPolicyUpdatedV1Audit
             | SubscriptionDispatchKey::IdentityRoleAssignedV1Audit
             | SubscriptionDispatchKey::IdentityRoleRevokedV1Audit
+            | SubscriptionDispatchKey::IdentitySecurityEventV1Audit
             | SubscriptionDispatchKey::IdentitySessionCreatedV1Audit => {
                 SubscriberCapability::AdapterNativeTransactional
             }

@@ -3091,8 +3091,8 @@ fn localtx_deadline_observation_findings(files: &[(String, String)]) -> Vec<Find
             .count();
         runner_emissions == 2
             && generic_forwarders == 1
-            && auth_grant_forwarders == 2
-            && emissions.len() == 5
+            && auth_grant_forwarders == 1
+            && emissions.len() == 4
             && runner.contains(
                 "|attempt,retry_class,settlement,stages|{observation.record_failed_attempt(attempt,retry_class,settlement);forstageinstages.into_iter().flatten(){observation.record_deadline_exceeded(stage);}}",
             )

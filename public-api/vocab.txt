@@ -103,7 +103,8 @@ pub vocab::authz::RoutePermissionId::IdentityProfileWrite
 pub vocab::authz::RoutePermissionId::IdentityRoleAssign
 pub vocab::authz::RoutePermissionId::IdentityRoleRead
 pub vocab::authz::RoutePermissionId::IdentityRoleRevoke
-pub vocab::authz::RoutePermissionId::IdentitySessionWrite
+pub vocab::authz::RoutePermissionId::IdentitySessionLogoutAll
+pub vocab::authz::RoutePermissionId::IdentitySessionLogoutCurrent
 pub vocab::authz::RoutePermissionId::MtlsInvoke
 pub vocab::authz::RoutePermissionId::SettingsConfigDelete
 pub vocab::authz::RoutePermissionId::SettingsConfigGet
@@ -1672,7 +1673,8 @@ pub vocab::RoutePermissionId::IdentityProfileWrite
 pub vocab::RoutePermissionId::IdentityRoleAssign
 pub vocab::RoutePermissionId::IdentityRoleRead
 pub vocab::RoutePermissionId::IdentityRoleRevoke
-pub vocab::RoutePermissionId::IdentitySessionWrite
+pub vocab::RoutePermissionId::IdentitySessionLogoutAll
+pub vocab::RoutePermissionId::IdentitySessionLogoutCurrent
 pub vocab::RoutePermissionId::MtlsInvoke
 pub vocab::RoutePermissionId::SettingsConfigDelete
 pub vocab::RoutePermissionId::SettingsConfigGet

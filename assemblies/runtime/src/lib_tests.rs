@@ -1011,9 +1011,16 @@ fn test_identity_domain_with_audit_role(
         policy_lifecycle,
         Box::new(SystemClock),
     ));
+    let credential_security = Arc::new(
+        identity::CredentialSecurityService::inert_for_non_logout_tests(
+            &login,
+            Box::new(SystemClock),
+        ),
+    );
     identity::IdentityDomain::new(identity::IdentityDomainDeps {
         login,
         refresh,
+        credential_security,
         rbac_admin,
         policy_manage,
         roles,

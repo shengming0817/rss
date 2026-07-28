@@ -306,6 +306,7 @@ enum MintEvidenceOutcome {
         ctx: Option<runctx::AppCtx>,
         principal: Arc<authn::Principal>,
         verified_jwt: Option<Arc<authn::VerifiedJwt>>,
+        current_auth_grant: Option<identity::CurrentAuthGrant>,
     },
     Rejected,
     ProviderUnavailable,
@@ -316,6 +317,7 @@ struct AllowedEvidence {
     ctx: Option<runctx::AppCtx>,
     principal: Arc<authn::Principal>,
     verified_jwt: Option<Arc<authn::VerifiedJwt>>,
+    current_auth_grant: Option<identity::CurrentAuthGrant>,
 }
 
 /// 验签 + 埋点 → 铸 [`Authenticated`] 证据，或返回拒绝/安全关键 provider 故障。
@@ -352,6 +354,7 @@ async fn mint_evidence(
                 ctx: allowed.ctx,
                 principal: allowed.principal,
                 verified_jwt: allowed.verified_jwt,
+                current_auth_grant: allowed.current_auth_grant,
             }
         }
         // err = AuthnError 变体（PdpError 经 verify_* 一一保真），脱敏；不产证据 ⇒ enforce fail-closed。
@@ -406,27 +409,31 @@ fn allow_evidence(
     let verified_jwt = verified.verified_jwt;
     let kind = principal.kind();
     let tenant = verified.ambient_tenant;
-    let evidence = match (
+    let (evidence, current_auth_grant) = match (
         scheme,
         principal.service_caller_domain(),
         tenant,
         current_grant,
     ) {
         (RequiredScheme::ServiceToken, Some(caller), Some(tenant), None) => {
-            Authenticated::new_service(tenant, caller)
+            (Authenticated::new_service(tenant, caller), None)
         }
         (RequiredScheme::RssAccessToken, None, Some(tenant), Some(current))
             if kind == PrincipalKind::User =>
         {
-            Authenticated::new_rss_user(
-                current_auth_grant(current),
-                principal.audit_subject(),
-                tenant,
+            let current = current.into_current_auth_grant()?;
+            if !current.binds_principal(tenant, principal.audit_subject()) {
+                return None;
+            }
+            (
+                Authenticated::new_rss_user(principal.audit_subject(), tenant),
+                Some(current),
             )
         }
-        (RequiredScheme::FederatedAccessToken, None, tenant, None) => {
-            Authenticated::new_federated(kind, principal.audit_subject(), tenant)
-        }
+        (RequiredScheme::FederatedAccessToken, None, tenant, None) => (
+            Authenticated::new_federated(kind, principal.audit_subject(), tenant),
+            None,
+        ),
         _ => return None,
     };
     // `scoped_principal`（闭值 bool，非 PII）：有已认证 tenant source（JWT claim 或 service-token MAC header）
@@ -447,11 +454,8 @@ fn allow_evidence(
         ctx,
         principal,
         verified_jwt,
+        current_auth_grant,
     })
-}
-
-fn current_auth_grant(_validated: identity::ValidatedAuthGrant) -> httpserve::CurrentAuthGrant {
-    httpserve::CurrentAuthGrant::new()
 }
 
 /// mTLS allow 分支：只消费 httpd mTLS listener 在 TLS handshake 后注入的 [`authn::VerifiedMtlsPeer`]。
@@ -573,9 +577,13 @@ async fn verify(State(binding): State<ProfileBinding>, mut req: Request, next: N
                     ctx,
                     principal,
                     verified_jwt,
+                    current_auth_grant,
                 } => {
                     req.extensions_mut().insert(evidence);
                     req.extensions_mut().insert(principal);
+                    if let Some(current_auth_grant) = current_auth_grant {
+                        req.extensions_mut().insert(current_auth_grant);
+                    }
                     if let Some(verified_jwt) = verified_jwt {
                         req.extensions_mut().insert(verified_jwt);
                     }
@@ -661,6 +669,7 @@ async fn mint_test_evidence(
                 ctx: allowed.ctx,
                 principal: allowed.principal,
                 verified_jwt: allowed.verified_jwt,
+                current_auth_grant: allowed.current_auth_grant,
             }
         }
         Err(err) => {
@@ -715,9 +724,13 @@ async fn verify_test_profile(
                     ctx,
                     principal,
                     verified_jwt,
+                    current_auth_grant,
                 } => {
                     req.extensions_mut().insert(evidence);
                     req.extensions_mut().insert(principal);
+                    if let Some(current_auth_grant) = current_auth_grant {
+                        req.extensions_mut().insert(current_auth_grant);
+                    }
                     if let Some(verified_jwt) = verified_jwt {
                         req.extensions_mut().insert(verified_jwt);
                     }

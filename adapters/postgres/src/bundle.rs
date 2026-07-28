@@ -96,9 +96,8 @@ use crate::{PgAuditAdminRepo, PgAuditRepo};
 #[cfg(feature = "domain-identity")]
 use crate::{
     PgAuthGrantLifecycle, PgAuthGrantProvider, PgAuthGrantValidator, PgCredentialRepo,
-    PgCredentialSecurityTargetResolver, PgIdentitySecurityLifecycle, PgPolicyLifecycle,
-    PgPolicyRepo, PgRefreshTokenStore, PgResourceAttributeRepo, PgRoleBindingLifecycle,
-    PgRoleBindingReadRepo, PgRoleRepo,
+    PgIdentitySecurityLifecycle, PgPolicyLifecycle, PgPolicyRepo, PgRefreshTokenStore,
+    PgResourceAttributeRepo, PgRoleBindingLifecycle, PgRoleBindingReadRepo, PgRoleRepo,
 };
 
 /// per-domain 能力 marker 的 sealed 封闭——外部 crate 无法新增域 marker（无法 impl `Sealed`）。
@@ -458,19 +457,29 @@ impl PgRuntimeDeps {
         migrator_config: &PgConfig,
         serving_config: &PgConfig,
         tenant_read_config: &PgTenantReadConfig,
+        audit_admin_config: Option<&PgConfig>,
         projection_generation: &'static str,
         projection_inputs: &'static [vocab::ProjectionInputBinding],
     ) -> Result<Self, PgError> {
         let migrator = PgStore::connect(migrator_config).await?;
         let migration = migrator.run_migrations().await;
+        if let Err(error) = migration {
+            let _ = migrator.shutdown().await;
+            return Err(error);
+        }
+        let delivery_policy = migrator.load_event_delivery_policy().await?;
+        migrator
+            .register_projection_input_bindings(projection_generation, projection_inputs)
+            .await
+            .map_err(PgError::ProjectionBindings)?;
         let _ = migrator.shutdown().await;
-        migration?;
-        Self::connect_serving(
+        Self::connect_serving_inner(
             serving_config,
             tenant_read_config,
-            None,
+            audit_admin_config,
             projection_generation,
             projection_inputs,
+            Some(delivery_policy),
         )
         .await
     }
@@ -497,6 +506,25 @@ impl PgRuntimeDeps {
         projection_generation: &'static str,
         projection_inputs: &'static [vocab::ProjectionInputBinding],
     ) -> Result<Self, PgError> {
+        Self::connect_serving_inner(
+            serving_config,
+            tenant_read_config,
+            audit_admin_config,
+            projection_generation,
+            projection_inputs,
+            None,
+        )
+        .await
+    }
+
+    async fn connect_serving_inner(
+        serving_config: &PgConfig,
+        tenant_read_config: &PgTenantReadConfig,
+        audit_admin_config: Option<&PgConfig>,
+        projection_generation: &'static str,
+        projection_inputs: &'static [vocab::ProjectionInputBinding],
+        preloaded_delivery_policy: Option<EventDeliveryPolicy>,
+    ) -> Result<Self, PgError> {
         let mut serving_transaction = PgSetupTransaction::new();
         let writer = PgStore::connect_verified_writer(serving_config).await?;
         serving_transaction.register(PgStoreGuard::new_named(
@@ -504,14 +532,19 @@ impl PgRuntimeDeps {
             "postgres-writer",
         ));
         let writer_store = writer.store_arc();
-        let delivery_policy = match writer_store.load_event_delivery_policy().await {
-            Ok(policy) => policy,
-            Err(primary) => return serving_transaction.close(Err(primary)).await,
+        let projection_bindings_preloaded = preloaded_delivery_policy.is_some();
+        let delivery_policy = match preloaded_delivery_policy {
+            Some(policy) => policy,
+            None => match writer_store.load_event_delivery_policy().await {
+                Ok(policy) => policy,
+                Err(primary) => return serving_transaction.close(Err(primary)).await,
+            },
         };
-        if let Err(primary) = writer_store
-            .register_projection_input_bindings(projection_generation, projection_inputs)
-            .await
-            .map_err(PgError::ProjectionBindings)
+        if !projection_bindings_preloaded
+            && let Err(primary) = writer_store
+                .register_projection_input_bindings(projection_generation, projection_inputs)
+                .await
+                .map_err(PgError::ProjectionBindings)
         {
             return serving_transaction.close(Err(primary)).await;
         }
@@ -1312,12 +1345,6 @@ impl PgDomainDeps<caps::Identity> {
         PgIdentitySecurityLifecycle::new(self.stores.writer_capability(), self.projection_registry)
     }
 
-    /// Read-only resolver for the opaque target reference carried by credential-security facts.
-    #[must_use]
-    pub fn credential_security_target_resolver(&self) -> PgCredentialSecurityTargetResolver {
-        PgCredentialSecurityTargetResolver::new(self.stores.reader_capability())
-    }
-
     /// 角色仓储（roles 表 + tenant scope）。
     #[must_use]
     pub fn role_repo(&self) -> PgRoleRepo {
@@ -1501,6 +1528,17 @@ impl PgDomainDeps<caps::Audit> {
         M: primitives::MacVerifier + Send + Sync + 'static,
     {
         PgAuditConsumerTx::policy_updated(self.stores.writer_capability(), hasher)
+    }
+
+    #[must_use]
+    pub fn security_event_consumer_tx<M>(
+        &self,
+        hasher: audit::ports::AuditChainHasher<M>,
+    ) -> PgAuditConsumerTx<M>
+    where
+        M: primitives::MacVerifier + Send + Sync + 'static,
+    {
+        PgAuditConsumerTx::security_event(self.stores.writer_capability(), hasher)
     }
 }
 

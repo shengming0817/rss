@@ -176,7 +176,7 @@ pub(crate) fn check_root(root: &Path) -> Result<(String, Vec<Finding<Rule>>)> {
     findings.extend(scan_consumer_external_effect_capabilities(root)?);
     Ok((
         format!(
-            "{EVENTING_COMPOSITION_TARGET} 是 generated topology bridge + ConsumerTx 唯一真源；runtime/identityaudit durable closures 已接共享 factory；active handlers=5，unauthorized external effect callsites=0"
+            "{EVENTING_COMPOSITION_TARGET} 是 generated topology bridge + ConsumerTx 唯一真源；runtime/identityaudit durable closures 已接共享 factory；active handlers=6，unauthorized external effect callsites=0"
         ),
         findings,
     ))
@@ -690,12 +690,12 @@ fn scan_consumer_external_effect_capabilities(root: &Path) -> Result<Vec<Finding
         .iter()
         .flat_map(|event| event.subscriptions().iter())
         .collect::<Vec<_>>();
-    if active_subscriptions.len() != 5 {
+    if active_subscriptions.len() != 6 {
         findings.push(finding(
             Rule::ConsumerExternalEffectCapability,
             "generated::event::EVENTS",
             format!(
-                "ConsumerTx active handler anti-vacuity drift: expected 5, got {}",
+                "ConsumerTx active handler anti-vacuity drift: expected 6, got {}",
                 active_subscriptions.len()
             ),
         ));
@@ -1576,6 +1576,7 @@ fn scan_composition_content(path: &Path, content: &str) -> Vec<Finding<Rule>> {
                         "SubscriptionDispatchKey::IdentityPolicyUpdatedV1Audit",
                         "SubscriptionDispatchKey::IdentityRoleAssignedV1Audit",
                         "SubscriptionDispatchKey::IdentityRoleRevokedV1Audit",
+                        "SubscriptionDispatchKey::IdentitySecurityEventV1Audit",
                         "SubscriptionDispatchKey::IdentitySessionCreatedV1Audit",
                         "SubscriptionDispatchKey::SettingsConfigVersionChangedV1Settings",
                     ],
@@ -1593,6 +1594,7 @@ fn scan_composition_content(path: &Path, content: &str) -> Vec<Finding<Rule>> {
                         "SubscriptionDispatchKey::IdentityPolicyUpdatedV1Audit",
                         "SubscriptionDispatchKey::IdentityRoleAssignedV1Audit",
                         "SubscriptionDispatchKey::IdentityRoleRevokedV1Audit",
+                        "SubscriptionDispatchKey::IdentitySecurityEventV1Audit",
                         "SubscriptionDispatchKey::IdentitySessionCreatedV1Audit",
                         "SubscriptionDispatchKey::SettingsConfigVersionChangedV1Settings",
                     ],
@@ -1703,7 +1705,7 @@ fn generated_events_bridge_calls_selector(item: &syn::ItemFn, selector: &str) ->
 }
 
 fn audit_factory_mapping_is_closed(method: &syn::ImplItemFn) -> bool {
-    const EXPECTED: [(&str, &str); 4] = [
+    const EXPECTED: [(&str, &str); 5] = [
         (
             "DispatchPlan::SessionCreated",
             "session_created_consumer_tx",
@@ -1711,6 +1713,7 @@ fn audit_factory_mapping_is_closed(method: &syn::ImplItemFn) -> bool {
         ("DispatchPlan::RoleAssigned", "role_assigned_consumer_tx"),
         ("DispatchPlan::RoleRevoked", "role_revoked_consumer_tx"),
         ("DispatchPlan::PolicyUpdated", "policy_updated_consumer_tx"),
+        ("DispatchPlan::SecurityEvent", "security_event_consumer_tx"),
     ];
 
     struct MatchVisitor {
@@ -1805,6 +1808,7 @@ fn match_is_exhaustive_for_dispatch(item: &syn::ItemFn, input: &str) -> bool {
             "SubscriptionDispatchKey::IdentityPolicyUpdatedV1Audit",
             "SubscriptionDispatchKey::IdentityRoleAssignedV1Audit",
             "SubscriptionDispatchKey::IdentityRoleRevokedV1Audit",
+            "SubscriptionDispatchKey::IdentitySecurityEventV1Audit",
             "SubscriptionDispatchKey::IdentitySessionCreatedV1Audit",
             "SubscriptionDispatchKey::SettingsConfigVersionChangedV1Settings",
         ],
@@ -1896,11 +1900,12 @@ fn identityaudit_closure_findings(path: &Path, content: &str) -> Vec<Finding<Rul
             });
         }
         if item.sig.ident == "validate_audit_closure" {
-            audit_dispatch_closure = body.contains("subscriptions.len()==4")
+            audit_dispatch_closure = body.contains("subscriptions.len()==5")
                 && [
                     "SubscriptionDispatchKey::IdentitySessionCreatedV1Audit",
                     "SubscriptionDispatchKey::IdentityRoleAssignedV1Audit",
                     "SubscriptionDispatchKey::IdentityRoleRevokedV1Audit",
+                    "SubscriptionDispatchKey::IdentitySecurityEventV1Audit",
                     "SubscriptionDispatchKey::IdentityPolicyUpdatedV1Audit",
                 ]
                 .iter()
@@ -1913,7 +1918,7 @@ fn identityaudit_closure_findings(path: &Path, content: &str) -> Vec<Finding<Rul
     [
         (
             bridge_and_budget,
-            "identityaudit 必须先桥接并验证四条 audit closure，再校验 DB relay budget，最后连接 AMQP",
+            "identityaudit 必须先桥接并验证五条 audit closure，再校验 DB relay budget，最后连接 AMQP",
         ),
         (
             consumer_bundle,
@@ -1921,7 +1926,7 @@ fn identityaudit_closure_findings(path: &Path, content: &str) -> Vec<Finding<Rul
         ),
         (
             audit_dispatch_closure,
-            "identityaudit 必须精确封闭四条 Identity-to-Audit generated dispatch",
+            "identityaudit 必须精确封闭五条 Identity-to-Audit generated dispatch",
         ),
     ]
     .into_iter()

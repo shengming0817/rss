@@ -52,8 +52,8 @@ scenario = "contention"
 httpStatus = 401
 errorCode = "ERR_CORE_UNAUTHENTICATED"
 retryable = false
-attempts = 1
-commits = 1
+attempts = 2
+commits = 2
 redactSentinels = ["refresh-contention-secret-sentinel"]
 
 [[cases]]

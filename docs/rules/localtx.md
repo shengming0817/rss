@@ -169,13 +169,6 @@ owner domain、生产 typed route mount 与测试 marker。缺失、重复、孤
   且只接受以 `::vocab` / `::generated` 开头的 extern-prelude absolute 语法。
   旧 bare path、alias、注释、字符串、宏或集中 allowlist 均不兼容。
 
-```rust
-const _: ::vocab::HttpRouteBinding<
-    ::generated::http::identity_v1::logout::RouteMarker,
-    ::vocab::http::LocalTx,
-> = ::generated::http::identity_v1::logout::ROUTE;
-```
-
 - 第三方测试属性必须由 Cargo metadata 证明其 dependency key 指向真实 registry package。
 - marker 所在 lexical block 及其全部 enclosing scope 都不得含 item/statement-position 宏调用：
   这类宏可展开 `use` / `extern crate` / item，静态门无法证明它不会重绑定 carrier namespace，

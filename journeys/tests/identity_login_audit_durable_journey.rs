@@ -273,6 +273,7 @@ async fn login_audit_durable_topology() -> Result<()> {
         &owner_config,
         &app_config,
         &tenant_read_config,
+        None,
         generated::event::PROJECTION_INPUT_GENERATION,
         generated::event::PROJECTION_INPUTS,
     )

@@ -328,6 +328,7 @@ async fn connect_pg() -> Result<(testkit::PgFixture, PgRuntimeDeps)> {
         &owner_config,
         &pg_config(p, TEST_APP_ROLE, TEST_APP_PASSWORD),
         &tenant_read_config,
+        None,
         generated::event::PROJECTION_INPUT_GENERATION,
         generated::event::PROJECTION_INPUTS,
     )
@@ -626,9 +627,16 @@ async fn event_transport_durable_e2e() -> Result<()> {
         policy_lifecycle_for_service,
         Box::new(FixedClock::at_unix_secs(NOW_SECS)),
     ));
+    let credential_security = Arc::new(
+        identity::CredentialSecurityService::inert_for_non_logout_tests(
+            &login_identity,
+            Box::new(FixedClock::at_unix_secs(NOW_SECS)),
+        ),
+    );
     let identity_domain = IdentityDomain::new(IdentityDomainDeps {
         login: login_identity,
         refresh: refresh_identity,
+        credential_security,
         rbac_admin,
         policy_manage,
         roles: roles_for_list,

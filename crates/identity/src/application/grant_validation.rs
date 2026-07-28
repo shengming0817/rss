@@ -6,6 +6,56 @@ use authn::AccessGrantValidationInput;
 
 use crate::ports::{AuthGrantValidator, DynAuthGrantValidator, IdentityError};
 
+/// Opaque request-scoped evidence for the exact durable grant accepted by the validator.
+#[derive(Clone, PartialEq, Eq)]
+pub struct CurrentAuthGrant {
+    grant_id: ids::CanonicalUuidV4,
+    user_id: ids::UserId,
+    tenant_id: vocab::TenantId,
+    authn_epoch: u64,
+}
+
+impl std::fmt::Debug for CurrentAuthGrant {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("CurrentAuthGrant(<redacted>)")
+    }
+}
+
+impl CurrentAuthGrant {
+    pub(crate) fn grant_id(&self) -> ids::CanonicalUuidV4 {
+        self.grant_id
+    }
+    pub(crate) fn user_id(&self) -> ids::UserId {
+        self.user_id
+    }
+    pub(crate) fn tenant_id(&self) -> vocab::TenantId {
+        self.tenant_id
+    }
+    pub(crate) fn authn_epoch(&self) -> u64 {
+        self.authn_epoch
+    }
+
+    /// Compare against the verified HTTP principal without exposing correlation fields.
+    pub fn binds_principal(&self, tenant: vocab::TenantId, subject: &str) -> bool {
+        self.tenant_id == tenant && self.user_id.as_uuid().hyphenated().to_string() == subject
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn for_test(
+        grant_id: ids::CanonicalUuidV4,
+        user_id: ids::UserId,
+        tenant_id: vocab::TenantId,
+        authn_epoch: u64,
+    ) -> Self {
+        Self {
+            grant_id,
+            user_id,
+            tenant_id,
+            authn_epoch,
+        }
+    }
+}
+
 /// Opaque move-only proof that the durable grant and account epoch matched one verified token.
 ///
 /// The value has no public constructor or field access. It can only be returned after the
@@ -17,6 +67,19 @@ pub struct ValidatedAuthGrant {
 impl std::fmt::Debug for ValidatedAuthGrant {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str("ValidatedAuthGrant(<redacted>)")
+    }
+}
+
+impl ValidatedAuthGrant {
+    /// Consume the proof into identity-owned evidence. Callers cannot substitute individual fields.
+    pub fn into_current_auth_grant(self) -> Option<CurrentAuthGrant> {
+        let input = self._input;
+        Some(CurrentAuthGrant {
+            grant_id: ids::CanonicalUuidV4::parse(input.grant_id().as_str()).ok()?,
+            user_id: input.user_id(),
+            tenant_id: input.tenant(),
+            authn_epoch: input.authn_epoch().get(),
+        })
     }
 }
 

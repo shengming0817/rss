@@ -2,11 +2,14 @@
 
 ## 何时升级版本
 
-> 轴 B（HTTP / event / command wire）的 `active` 破坏式变更必须新建版本目录和
-> 新 contract ID，并完整保留旧 identity。唯一分期例外是 #1696 的三条 consistency/effect posture drift：
+> 轴 B（HTTP / event / command wire）的 `active` 破坏式变更默认必须新建版本目录和
+> 新 contract ID，并完整保留旧 identity。intentional no-compat 变更只有在用户明确授权且 commit
+> 携带 `contract breaking` 绑定 base commit 与完整 deny findings 生成的精确
+> `Contract-Breaking-Authorization` fingerprint 时才可原地实施；缺失、过期或部分授权均 fail-closed。
+> 另一个分期例外是 #1696 的三条 consistency/effect posture drift：
 > deny-mode ratchet 前只作精确确认的 review finding；除此之外不存在 pre-GA 或原地修改例外。
 
-以下变更必须新建版本目录和新 contract ID：
+除上述精确授权的 intentional breaking 外，以下变更必须新建版本目录和新 contract ID：
 
 - 删除或重命名响应字段
 - 改变字段类型或枚举语义
@@ -34,6 +37,10 @@ skip。`LOCAL_ONLY_BOUNDARY_CHANGED`、`EFFECT_ADDED`、`EFFECT_REMOVED` 是 #16
 review finding，不直接否决 active 变更；但必须用命令给出的精确 `Contract-Review-Ack` commit trailer
 确认后才能通过。trailer fingerprint 绑定 base commit 与排序后的 rule/subject/detail，变更漂移后不可复用。
 该例外不授予其它 active wire 原地破坏权限，更不得先将 `active` 降级绕门。
+
+intentional breaking authorization 与 review ack 正交：前者只授权 fingerprint 中精确列出的 deny，
+后者只确认固定 review-only posture findings。两者都不接受 flag、环境变量、自由文本或 lifecycle 降级；
+任何 contract/schema/base 漂移都会改变 fingerprint 并要求重新授权。
 
 INVARIANT: CONSISTENCY-EFFECT-BREAKING-REVIEW-01（Hard 闭枚举/fingerprint 内核 + Medium Git/verify 门；
 carrier 在 `xtask/src/contract/breaking.rs`）。active 默认 deny；固定三条 review rule 只有在精确确认存在时

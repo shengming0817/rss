@@ -2,9 +2,6 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "IdentityLogoutRequest",
   "type": "object",
-  "required": ["sessionId"],
-  "properties": {
-    "sessionId": { "type": "string", "x-redaction": "secret" }
-  },
+  "properties": {},
   "additionalProperties": false
 }

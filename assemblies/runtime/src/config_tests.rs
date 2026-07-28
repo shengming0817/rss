@@ -969,6 +969,15 @@ fn service_token_env_example_values() -> Vec<(String, String)> {
         .collect()
 }
 
+fn service_token_env_example_values_with_test_secret() -> Vec<(String, String)> {
+    let mut values = service_token_env_example_values();
+    values.push((
+        "RSS_SERVICE_TOKEN_HS256_SECRET_B64URL".to_owned(),
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([0x5a_u8; 32]),
+    ));
+    values
+}
+
 #[test]
 fn auth_grant_and_refresh_ttl_are_paired_in_deploy_and_ops_contracts() {
     let env_example = include_str!("../../../deploy/.env.example");
@@ -1046,7 +1055,7 @@ impl diport::Clock for ConfigTestClock {
 
 #[test]
 fn deploy_env_example_service_token_namespace_satisfies_the_production_parser() {
-    let values = service_token_env_example_values();
+    let values = service_token_env_example_values_with_test_secret();
     assert_eq!(values.len(), 4, "fixture must contain the closed namespace");
     service_token_config_from(values)
         .expect("deploy service-token fixture must be production-valid");
@@ -1054,7 +1063,7 @@ fn deploy_env_example_service_token_namespace_satisfies_the_production_parser() 
 
 #[test]
 fn deploy_env_example_service_token_secret_contract_rejects_31_bytes() {
-    let mut values = service_token_env_example_values();
+    let mut values = service_token_env_example_values_with_test_secret();
     replace_serving_value(
         &mut values,
         "RSS_SERVICE_TOKEN_HS256_SECRET_B64URL",

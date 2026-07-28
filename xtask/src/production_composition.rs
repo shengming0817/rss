@@ -32,6 +32,7 @@ const MAX_RUNTIME_PHASE_BYTES: u64 = 512 * 1024;
 #[allow(clippy::enum_variant_names)]
 pub(crate) enum ProducerCompositionPort {
     AuthGrantLifecycleLocal,
+    IdentitySecurityLifecycleLocal,
     PolicyLifecycleLocal,
     RoleBindingLifecycleLocal,
     ConfigUnitOfWorkLocal,
@@ -41,6 +42,7 @@ impl ProducerCompositionPort {
     pub(crate) fn trait_symbol(self) -> &'static str {
         match self {
             Self::AuthGrantLifecycleLocal => "AuthGrantLifecycleLocal",
+            Self::IdentitySecurityLifecycleLocal => "IdentitySecurityLifecycleLocal",
             Self::PolicyLifecycleLocal => "PolicyLifecycleLocal",
             Self::RoleBindingLifecycleLocal => "RoleBindingLifecycleLocal",
             Self::ConfigUnitOfWorkLocal => "ConfigUnitOfWorkLocal",
@@ -62,7 +64,6 @@ pub(crate) struct ProductionCompositionProjection {
     pub(crate) provider_factory: String,
 }
 
-/// Collect the exact four production injections shared by the nine active producer paths.
 pub(crate) fn collect_producer_composition(
     root: &Path,
 ) -> Result<BTreeMap<ProducerCompositionPort, ProductionCompositionProjection>> {
@@ -82,13 +83,14 @@ pub(crate) fn collect_producer_composition(
     }
     let expected = [
         ProducerCompositionPort::AuthGrantLifecycleLocal,
+        ProducerCompositionPort::IdentitySecurityLifecycleLocal,
         ProducerCompositionPort::PolicyLifecycleLocal,
         ProducerCompositionPort::RoleBindingLifecycleLocal,
         ProducerCompositionPort::ConfigUnitOfWorkLocal,
     ];
     ensure!(
         projections.keys().copied().eq(expected),
-        "production composition evidence must close the exact four producer ports"
+        "production composition evidence must close the exact five producer ports"
     );
     for (port, projection) in &mut projections {
         let lineage = runtime
@@ -125,6 +127,12 @@ fn collect_runtime_lineage(
     Ok(BTreeMap::from([
         (
             ProducerCompositionPort::AuthGrantLifecycleLocal,
+            RuntimeLineage {
+                repo_path: IDENTITY_RUNTIME_MODULE.to_string(),
+            },
+        ),
+        (
+            ProducerCompositionPort::IdentitySecurityLifecycleLocal,
             RuntimeLineage {
                 repo_path: IDENTITY_RUNTIME_MODULE.to_string(),
             },
@@ -1335,6 +1343,12 @@ const IDENTITY_INJECTIONS: &[IdentityInjection] = &[
         domain_field: "login",
     },
     IdentityInjection {
+        port: ProducerCompositionPort::IdentitySecurityLifecycleLocal,
+        provider_method: "identity_security_lifecycle",
+        service_type: "CredentialSecurityService",
+        domain_field: "credential_security",
+    },
+    IdentityInjection {
         port: ProducerCompositionPort::PolicyLifecycleLocal,
         provider_method: "policy_lifecycle",
         service_type: "PolicyManageService",
@@ -1412,7 +1426,11 @@ fn collect_identity_wire(
     for injection in IDENTITY_INJECTIONS {
         let canonical_service = format!("identity::{}", injection.service_type);
         let service_binding = ensure_canonical_import(&imports, &canonical_service, repo_path)?;
-        let injection_wire = if injection.port == ProducerCompositionPort::AuthGrantLifecycleLocal {
+        let injection_wire = if matches!(
+            injection.port,
+            ProducerCompositionPort::AuthGrantLifecycleLocal
+                | ProducerCompositionPort::IdentitySecurityLifecycleLocal
+        ) {
             wire
         } else {
             common_wire
@@ -1492,7 +1510,11 @@ fn collect_identity_wire(
             );
             constructor
         };
-        if injection.port == ProducerCompositionPort::AuthGrantLifecycleLocal {
+        if matches!(
+            injection.port,
+            ProducerCompositionPort::AuthGrantLifecycleLocal
+                | ProducerCompositionPort::IdentitySecurityLifecycleLocal
+        ) {
             ensure!(
                 domain_fields
                     .get(injection.domain_field)
@@ -1545,7 +1567,11 @@ fn collect_identity_wire(
                 runtime_module_path: String::new(),
                 runtime_module: String::new(),
                 repo_path: repo_path.to_string(),
-                wire: if injection.port == ProducerCompositionPort::AuthGrantLifecycleLocal {
+                wire: if matches!(
+                    injection.port,
+                    ProducerCompositionPort::AuthGrantLifecycleLocal
+                        | ProducerCompositionPort::IdentitySecurityLifecycleLocal
+                ) {
                     "wire"
                 } else {
                     "common_identity_services"

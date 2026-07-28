@@ -906,7 +906,13 @@ WITH reader AS (
     SELECT effective.schema_name || '.' || effective.relname || ':'
                || effective.privilege AS privilege
     FROM effective
-    WHERE NOT (effective.tenant_relation AND effective.privilege = 'SELECT')
+    WHERE NOT (
+        effective.privilege = 'SELECT'
+        AND (
+            effective.tenant_relation
+            OR (effective.schema_name = 'public' AND effective.relname = '_sqlx_migrations')
+        )
+    )
     UNION
     SELECT privilege FROM explicit_column_acl
     UNION

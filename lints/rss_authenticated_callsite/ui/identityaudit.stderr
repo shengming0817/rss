@@ -1,35 +1,19 @@
-warning: CurrentAuthGrant 仅可在 runtime 消费 durable validator proof 后构造
+warning: Authenticated 证据仅组合根（assembly / bin crate）可构造：profile-specific constructor 不得在此 crate 调用
   --> $DIR/identityaudit.rs:30:9
    |
-LL |         CurrentAuthGrant::new()
-   |         ^^^^^^^^^^^^^^^^^^^^^
-   |
-   = help: 仅在 identityaudit `auth_bridge::current_auth_grant` 精确 wrapper 中按值消费 `ValidatedAuthGrant` 并 mint marker
-   = note: `#[warn(rss_authenticated_callsite)]` on by default
-
-warning: CurrentAuthGrant 仅可在 runtime 消费 durable validator proof 后构造
-  --> $DIR/identityaudit.rs:35:9
-   |
-LL |         CurrentAuthGrant::new()
-   |         ^^^^^^^^^^^^^^^^^^^^^
-   |
-   = help: 仅在 identityaudit `auth_bridge::current_auth_grant` 精确 wrapper 中按值消费 `ValidatedAuthGrant` 并 mint marker
-
-warning: Authenticated 证据仅组合根（assembly / bin crate）可构造：profile-specific constructor 不得在此 crate 调用
-  --> $DIR/identityaudit.rs:44:9
-   |
-LL |         Authenticated::new_rss_user(
+LL |         Authenticated::new_rss_user(principal.audit_subject(), tenant)
    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
    = help: 仅在 identityaudit `auth_bridge::allow_evidence` 精确 proof-consuming 验签桥中构造 RSS Authenticated evidence；其它位置不得 mint evidence
+   = note: `#[warn(rss_authenticated_callsite)]` on by default
 
 warning: Principal 身份降维 accessor（`audit_subject` / `service_caller_domain`）仅组合根可调用
-  --> $DIR/identityaudit.rs:46:13
+  --> $DIR/identityaudit.rs:30:37
    |
-LL |             principal.audit_subject(),
-   |             ^^^^^^^^^^^^^^^^^^^^^^^^^
+LL |         Authenticated::new_rss_user(principal.audit_subject(), tenant)
+   |                                     ^^^^^^^^^^^^^^^^^^^^^^^^^
    |
    = help: 仅在 identityaudit `auth_bridge::allow_evidence` proof-consuming wrapper 中读取 Principal 身份；其它位置不得降维 verified Principal
 
-warning: 4 warnings emitted
+warning: 2 warnings emitted
 

@@ -10,9 +10,9 @@ metadata:
     app.kubernetes.io/managed-by: Helm
     rss.gocell.io/profile: runtime
   annotations:
-    rss.gocell.io/assembly-fingerprint: sha256:b4bc250c0cce2979dd0c37588c7879ea80ad891c5530073ef41152394891be9f
-    rss.gocell.io/runtime-plan-fingerprint: sha256:7aa65aa20339fb380eb025971532e9938b9cec3d8a074cbcb8d5152d5cd08fcd
-    rss.gocell.io/deployment-fingerprint: sha256:f0aeba24549e0f244af68ccda8f24b84f6c3acf568975fb1d31114a44b9f1edb
+    rss.gocell.io/assembly-fingerprint: sha256:08aec02367b22e4585ed3c0bf13b70ebc64766bb779caca3e0a36e5c8aa6ec84
+    rss.gocell.io/runtime-plan-fingerprint: sha256:a9df245015e1d65741b48942cb798fcb7ab17bdf358fc8d9ec1cf75cb608701a
+    rss.gocell.io/deployment-fingerprint: sha256:fea324bc609396fa597453cde992b0eed25910283c58a206f3eb38c8f411c9f8
 spec:
   podSelector:
     matchLabels:
@@ -37,9 +37,9 @@ metadata:
     app.kubernetes.io/managed-by: Helm
     rss.gocell.io/profile: runtime
   annotations:
-    rss.gocell.io/assembly-fingerprint: sha256:b4bc250c0cce2979dd0c37588c7879ea80ad891c5530073ef41152394891be9f
-    rss.gocell.io/runtime-plan-fingerprint: sha256:7aa65aa20339fb380eb025971532e9938b9cec3d8a074cbcb8d5152d5cd08fcd
-    rss.gocell.io/deployment-fingerprint: sha256:f0aeba24549e0f244af68ccda8f24b84f6c3acf568975fb1d31114a44b9f1edb
+    rss.gocell.io/assembly-fingerprint: sha256:08aec02367b22e4585ed3c0bf13b70ebc64766bb779caca3e0a36e5c8aa6ec84
+    rss.gocell.io/runtime-plan-fingerprint: sha256:a9df245015e1d65741b48942cb798fcb7ab17bdf358fc8d9ec1cf75cb608701a
+    rss.gocell.io/deployment-fingerprint: sha256:fea324bc609396fa597453cde992b0eed25910283c58a206f3eb38c8f411c9f8
 spec:
   podSelector:
     matchLabels:
@@ -134,9 +134,9 @@ metadata:
     app.kubernetes.io/managed-by: Helm
     rss.gocell.io/profile: runtime
   annotations:
-    rss.gocell.io/assembly-fingerprint: sha256:b4bc250c0cce2979dd0c37588c7879ea80ad891c5530073ef41152394891be9f
-    rss.gocell.io/runtime-plan-fingerprint: sha256:7aa65aa20339fb380eb025971532e9938b9cec3d8a074cbcb8d5152d5cd08fcd
-    rss.gocell.io/deployment-fingerprint: sha256:f0aeba24549e0f244af68ccda8f24b84f6c3acf568975fb1d31114a44b9f1edb
+    rss.gocell.io/assembly-fingerprint: sha256:08aec02367b22e4585ed3c0bf13b70ebc64766bb779caca3e0a36e5c8aa6ec84
+    rss.gocell.io/runtime-plan-fingerprint: sha256:a9df245015e1d65741b48942cb798fcb7ab17bdf358fc8d9ec1cf75cb608701a
+    rss.gocell.io/deployment-fingerprint: sha256:fea324bc609396fa597453cde992b0eed25910283c58a206f3eb38c8f411c9f8
 spec:
   podSelector:
     matchLabels:
@@ -186,9 +186,9 @@ metadata:
     app.kubernetes.io/managed-by: Helm
     rss.gocell.io/profile: runtime
   annotations:
-    rss.gocell.io/assembly-fingerprint: sha256:b4bc250c0cce2979dd0c37588c7879ea80ad891c5530073ef41152394891be9f
-    rss.gocell.io/runtime-plan-fingerprint: sha256:7aa65aa20339fb380eb025971532e9938b9cec3d8a074cbcb8d5152d5cd08fcd
-    rss.gocell.io/deployment-fingerprint: sha256:f0aeba24549e0f244af68ccda8f24b84f6c3acf568975fb1d31114a44b9f1edb
+    rss.gocell.io/assembly-fingerprint: sha256:08aec02367b22e4585ed3c0bf13b70ebc64766bb779caca3e0a36e5c8aa6ec84
+    rss.gocell.io/runtime-plan-fingerprint: sha256:a9df245015e1d65741b48942cb798fcb7ab17bdf358fc8d9ec1cf75cb608701a
+    rss.gocell.io/deployment-fingerprint: sha256:fea324bc609396fa597453cde992b0eed25910283c58a206f3eb38c8f411c9f8
 spec:
   maxUnavailable: 1
   selector:
@@ -209,15 +209,15 @@ metadata:
     app.kubernetes.io/managed-by: Helm
     rss.gocell.io/profile: runtime
   annotations:
-    rss.gocell.io/assembly-fingerprint: sha256:b4bc250c0cce2979dd0c37588c7879ea80ad891c5530073ef41152394891be9f
-    rss.gocell.io/runtime-plan-fingerprint: sha256:7aa65aa20339fb380eb025971532e9938b9cec3d8a074cbcb8d5152d5cd08fcd
-    rss.gocell.io/deployment-fingerprint: sha256:f0aeba24549e0f244af68ccda8f24b84f6c3acf568975fb1d31114a44b9f1edb
+    rss.gocell.io/assembly-fingerprint: sha256:08aec02367b22e4585ed3c0bf13b70ebc64766bb779caca3e0a36e5c8aa6ec84
+    rss.gocell.io/runtime-plan-fingerprint: sha256:a9df245015e1d65741b48942cb798fcb7ab17bdf358fc8d9ec1cf75cb608701a
+    rss.gocell.io/deployment-fingerprint: sha256:fea324bc609396fa597453cde992b0eed25910283c58a206f3eb38c8f411c9f8
 automountServiceAccountToken: false
 ---
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: rss-runtime-plan-f0aeba24549e
+  name: rss-runtime-plan-fea324bc6093
   labels:
     helm.sh/chart: rss-0.1.0
     app.kubernetes.io/name: rss
@@ -226,17 +226,17 @@ metadata:
     app.kubernetes.io/managed-by: Helm
     rss.gocell.io/profile: runtime
   annotations:
-    rss.gocell.io/assembly-fingerprint: sha256:b4bc250c0cce2979dd0c37588c7879ea80ad891c5530073ef41152394891be9f
-    rss.gocell.io/runtime-plan-fingerprint: sha256:7aa65aa20339fb380eb025971532e9938b9cec3d8a074cbcb8d5152d5cd08fcd
-    rss.gocell.io/deployment-fingerprint: sha256:f0aeba24549e0f244af68ccda8f24b84f6c3acf568975fb1d31114a44b9f1edb
+    rss.gocell.io/assembly-fingerprint: sha256:08aec02367b22e4585ed3c0bf13b70ebc64766bb779caca3e0a36e5c8aa6ec84
+    rss.gocell.io/runtime-plan-fingerprint: sha256:a9df245015e1d65741b48942cb798fcb7ab17bdf358fc8d9ec1cf75cb608701a
+    rss.gocell.io/deployment-fingerprint: sha256:fea324bc609396fa597453cde992b0eed25910283c58a206f3eb38c8f411c9f8
 immutable: true
 data:
   plan.json: |
     {
       "schemaVersion": 1,
-      "assemblyFingerprint": "sha256:b4bc250c0cce2979dd0c37588c7879ea80ad891c5530073ef41152394891be9f",
-      "runtimePlanFingerprint": "sha256:7aa65aa20339fb380eb025971532e9938b9cec3d8a074cbcb8d5152d5cd08fcd",
-      "deploymentFingerprint": "sha256:f0aeba24549e0f244af68ccda8f24b84f6c3acf568975fb1d31114a44b9f1edb",
+      "assemblyFingerprint": "sha256:08aec02367b22e4585ed3c0bf13b70ebc64766bb779caca3e0a36e5c8aa6ec84",
+      "runtimePlanFingerprint": "sha256:a9df245015e1d65741b48942cb798fcb7ab17bdf358fc8d9ec1cf75cb608701a",
+      "deploymentFingerprint": "sha256:fea324bc609396fa597453cde992b0eed25910283c58a206f3eb38c8f411c9f8",
       "migrationMode": "forwardOnlyTwoPhase",
       "migrationHeadFingerprint": "sha256:10b73724fbe634b3514e17a315b80a3c15e0bd14ac2a0ce233ca12d9f9e067b9",
       "migrationArtifact": {
@@ -392,9 +392,9 @@ metadata:
     app.kubernetes.io/managed-by: Helm
     rss.gocell.io/profile: runtime
   annotations:
-    rss.gocell.io/assembly-fingerprint: sha256:b4bc250c0cce2979dd0c37588c7879ea80ad891c5530073ef41152394891be9f
-    rss.gocell.io/runtime-plan-fingerprint: sha256:7aa65aa20339fb380eb025971532e9938b9cec3d8a074cbcb8d5152d5cd08fcd
-    rss.gocell.io/deployment-fingerprint: sha256:f0aeba24549e0f244af68ccda8f24b84f6c3acf568975fb1d31114a44b9f1edb
+    rss.gocell.io/assembly-fingerprint: sha256:08aec02367b22e4585ed3c0bf13b70ebc64766bb779caca3e0a36e5c8aa6ec84
+    rss.gocell.io/runtime-plan-fingerprint: sha256:a9df245015e1d65741b48942cb798fcb7ab17bdf358fc8d9ec1cf75cb608701a
+    rss.gocell.io/deployment-fingerprint: sha256:fea324bc609396fa597453cde992b0eed25910283c58a206f3eb38c8f411c9f8
 spec:
   type: ClusterIP
   selector:
@@ -427,9 +427,9 @@ metadata:
     app.kubernetes.io/managed-by: Helm
     rss.gocell.io/profile: runtime
   annotations:
-    rss.gocell.io/assembly-fingerprint: sha256:b4bc250c0cce2979dd0c37588c7879ea80ad891c5530073ef41152394891be9f
-    rss.gocell.io/runtime-plan-fingerprint: sha256:7aa65aa20339fb380eb025971532e9938b9cec3d8a074cbcb8d5152d5cd08fcd
-    rss.gocell.io/deployment-fingerprint: sha256:f0aeba24549e0f244af68ccda8f24b84f6c3acf568975fb1d31114a44b9f1edb
+    rss.gocell.io/assembly-fingerprint: sha256:08aec02367b22e4585ed3c0bf13b70ebc64766bb779caca3e0a36e5c8aa6ec84
+    rss.gocell.io/runtime-plan-fingerprint: sha256:a9df245015e1d65741b48942cb798fcb7ab17bdf358fc8d9ec1cf75cb608701a
+    rss.gocell.io/deployment-fingerprint: sha256:fea324bc609396fa597453cde992b0eed25910283c58a206f3eb38c8f411c9f8
 spec:
   strategy:
     type: Recreate
@@ -445,9 +445,9 @@ spec:
         app.kubernetes.io/instance: rss
         app.kubernetes.io/component: runtime
       annotations:
-        rss.gocell.io/assembly-fingerprint: sha256:b4bc250c0cce2979dd0c37588c7879ea80ad891c5530073ef41152394891be9f
-        rss.gocell.io/runtime-plan-fingerprint: sha256:7aa65aa20339fb380eb025971532e9938b9cec3d8a074cbcb8d5152d5cd08fcd
-        rss.gocell.io/deployment-fingerprint: sha256:f0aeba24549e0f244af68ccda8f24b84f6c3acf568975fb1d31114a44b9f1edb
+        rss.gocell.io/assembly-fingerprint: sha256:08aec02367b22e4585ed3c0bf13b70ebc64766bb779caca3e0a36e5c8aa6ec84
+        rss.gocell.io/runtime-plan-fingerprint: sha256:a9df245015e1d65741b48942cb798fcb7ab17bdf358fc8d9ec1cf75cb608701a
+        rss.gocell.io/deployment-fingerprint: sha256:fea324bc609396fa597453cde992b0eed25910283c58a206f3eb38c8f411c9f8
         spiffe.io/spiffe-id: spiffe://rss.local/ns/rss-system/sa/runtime
     spec:
       serviceAccountName: rss-runtime-d70f52d0f100
@@ -573,7 +573,7 @@ spec:
           defaultMode: 292
           sources:
           - configMap:
-              name: rss-runtime-plan-f0aeba24549e
+              name: rss-runtime-plan-fea324bc6093
               items:
               - key: plan.json
                 path: plan.json
@@ -600,9 +600,9 @@ metadata:
     app.kubernetes.io/managed-by: Helm
     rss.gocell.io/profile: runtime
   annotations:
-    rss.gocell.io/assembly-fingerprint: sha256:b4bc250c0cce2979dd0c37588c7879ea80ad891c5530073ef41152394891be9f
-    rss.gocell.io/runtime-plan-fingerprint: sha256:7aa65aa20339fb380eb025971532e9938b9cec3d8a074cbcb8d5152d5cd08fcd
-    rss.gocell.io/deployment-fingerprint: sha256:f0aeba24549e0f244af68ccda8f24b84f6c3acf568975fb1d31114a44b9f1edb
+    rss.gocell.io/assembly-fingerprint: sha256:08aec02367b22e4585ed3c0bf13b70ebc64766bb779caca3e0a36e5c8aa6ec84
+    rss.gocell.io/runtime-plan-fingerprint: sha256:a9df245015e1d65741b48942cb798fcb7ab17bdf358fc8d9ec1cf75cb608701a
+    rss.gocell.io/deployment-fingerprint: sha256:fea324bc609396fa597453cde992b0eed25910283c58a206f3eb38c8f411c9f8
 spec:
   scaleTargetRef:
     apiVersion: apps/v1

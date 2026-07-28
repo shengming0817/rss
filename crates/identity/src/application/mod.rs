@@ -23,7 +23,11 @@ use ::generated::http::identity_v1::{
     },
     logout::{
         IdentityLogoutData, IdentityLogoutRequest, IdentityLogoutResponse,
-        ROUTE as LOGOUT_HTTP_ROUTE, SPEC as LOGOUT_HTTP_SPEC,
+        PRODUCER as LOGOUT_PRODUCER, SPEC as LOGOUT_HTTP_SPEC,
+    },
+    logout_all::{
+        IdentityLogoutAllData, IdentityLogoutAllRequest, IdentityLogoutAllResponse,
+        PRODUCER as LOGOUT_ALL_PRODUCER, SPEC as LOGOUT_ALL_HTTP_SPEC,
     },
     password_change::{
         IdentityPasswordChangeData, IdentityPasswordChangeRequest, IdentityPasswordChangeResponse,
@@ -82,7 +86,9 @@ use ::httpserve::{
 };
 #[cfg(test)]
 use authn::AuthGrantSnapshot;
-use authn::{AuthGrant, AuthGrantId, AuthGrantStatus, GrantSecurityEventKind};
+#[cfg(test)]
+use authn::GrantSecurityEventKind;
+use authn::{AuthGrant, AuthGrantId, AuthGrantStatus};
 use axum::Json;
 use axum::body::{Body, Bytes, to_bytes};
 use axum::extract::{Path, Query, Request, State};
@@ -126,10 +132,12 @@ use crate::domain::{
 use crate::ports::{
     AccountSecurityReadRepo, AuthGrantCloseCommand, AuthGrantLifecycle, AuthGrantProvider,
     CredentialRepo, DynAccountSecurityReadRepo, DynAuthGrantLifecycle, DynCredentialRepo,
-    DynPolicyRepo, DynResourceAttributeReadRepo, DynRoleBindingReadRepo, DynRoleReadRepo,
-    LoginGrantMutation, LoginProducerReceipt, Operator, PasswordChangeMutation,
-    PersistedLoginGrantReceipt, PolicyPage, PolicyRepo, RefreshRotationMutation, RefreshTokenStore,
-    ResourceAttributeReadRepo, RoleBindingReadRepo, RolePage, RoleReadRepo, TenantRepoScope,
+    DynIdentitySecurityLifecycle, DynPolicyRepo, DynResourceAttributeReadRepo,
+    DynRoleBindingReadRepo, DynRoleReadRepo, IdentitySecurityLifecycle, LoginGrantMutation,
+    LoginProducerReceipt, LogoutAllProducerReceipt, LogoutCurrentProducerReceipt, Operator,
+    PasswordChangeMutation, PersistedLoginGrantReceipt, PolicyPage, PolicyRepo,
+    RefreshRotationMutation, RefreshTokenStore, ResourceAttributeReadRepo, RoleBindingReadRepo,
+    RolePage, RoleReadRepo, TenantRepoScope,
 };
 #[cfg(test)]
 use crate::ports::{DynRoleBindingLifecycle, RoleWriteRepo};
@@ -139,7 +147,7 @@ mod rbac_admin;
 pub use rbac_admin::{RbacAdminError, RbacAdminService};
 mod grant_validation;
 pub use grant_validation::{
-    AccessGrantValidationError, AuthGrantValidationService, ValidatedAuthGrant,
+    AccessGrantValidationError, AuthGrantValidationService, CurrentAuthGrant, ValidatedAuthGrant,
 };
 mod policy_manage;
 use policy_manage::PolicyQueryService;
@@ -281,6 +289,10 @@ impl<S: diport::Signer + Send + Sync + 'static> AuthGrantServices<S> {
 
     pub fn refresh_service(&self) -> Arc<RefreshService<S>> {
         Arc::clone(&self.refresh)
+    }
+
+    pub fn lifecycle(&self) -> Arc<DynAuthGrantLifecycle<'static>> {
+        Arc::clone(&self.lifecycle)
     }
 
     fn into_parts(self) -> (Arc<DynAuthGrantLifecycle<'static>>, Arc<RefreshService<S>>) {
@@ -536,42 +548,142 @@ impl<S: diport::Signer + Send + Sync + 'static> LoginService<S> {
                 other => ChangePasswordError::Store(other),
             })
     }
+}
 
-    /// logout（软撤销，直接冒泡 `IdentityError`，不新增错误枚举）。
-    /// 幂等——重复/未知/跨租均 Ok 且 no-op；同租户命中但 owner 不匹配则 403，避免撤销他人 session。
-    ///
-    /// `skip_all`：不记 session_id / actor（凭据级 bearer 标识 / 主体标识）；失败经 `err` 记 `IdentityError`
-    /// Display（const literal）。低基数定位字段 `domain` / `operation` / `tenant_id` 显式记入（observability.md
-    /// §日志，F5）；session_id / actor 仍 skip。
-    #[tracing::instrument(
-        skip_all,
-        fields(domain = SESSION_DOMAIN, operation = "logout", tenant_id = %tenant),
-        err
-    )]
-    pub async fn logout(
-        &self,
-        tenant: TenantId,
-        actor: ids::UserId,
-        session_id: AuthGrantId,
-    ) -> Result<(), IdentityError> {
-        let tenant_scope = tenant_repo_scope(tenant);
-        let now = self.clock.now();
-        let Some(grant) = self
-            .lifecycle
-            .find_active(tenant_scope, session_id, now)
-            .await?
-        else {
-            return Ok(());
-        };
-        if grant.user_id() != actor {
-            return Err(IdentityError::PermissionDenied);
+pub struct CredentialSecurityService {
+    grants: Arc<DynAuthGrantLifecycle<'static>>,
+    accounts: Box<DynAccountSecurityReadRepo<'static>>,
+    lifecycle: Box<DynIdentitySecurityLifecycle<'static>>,
+    clock: Box<dyn Clock>,
+}
+
+impl CredentialSecurityService {
+    pub fn new<P>(
+        grants: Arc<DynAuthGrantLifecycle<'static>>,
+        accounts: Box<DynAccountSecurityReadRepo<'static>>,
+        lifecycle: P,
+        clock: Box<dyn Clock>,
+    ) -> Self
+    where
+        P: IdentitySecurityLifecycle + 'static,
+    {
+        Self {
+            grants,
+            accounts,
+            lifecycle: DynIdentitySecurityLifecycle::new_box(lifecycle),
+            clock,
         }
-        let transition = grant
-            .close(GrantSecurityEventKind::LogoutCurrent, now)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn inert_for_non_logout_tests<S: diport::Signer + Send + Sync + 'static>(
+        login: &LoginService<S>,
+        clock: Box<dyn Clock>,
+    ) -> Self {
+        Self::new(
+            Arc::clone(&login.lifecycle),
+            DynAccountSecurityReadRepo::new_box(InertAccountSecurityRead),
+            InertIdentitySecurityLifecycle,
+            clock,
+        )
+    }
+
+    pub async fn logout_current(
+        &self,
+        receipt: LogoutCurrentProducerReceipt,
+        evidence: &CurrentAuthGrant,
+    ) -> Result<(), IdentityError> {
+        let scope = tenant_repo_scope(evidence.tenant_id());
+        let grant_id = AuthGrantId::hydrate(evidence.grant_id().to_string())
+            .map_err(|error| IdentityError::Storage(Box::new(error)))?;
+        let now = self.clock.now();
+        let grant = self
+            .grants
+            .find_active(scope, grant_id, now)
+            .await?
+            .ok_or(IdentityError::VersionConflict)?;
+        if grant.tenant() != evidence.tenant_id()
+            || grant.user_id() != evidence.user_id()
+            || grant.authn_epoch_at_issue().get() != evidence.authn_epoch()
+        {
+            return Err(IdentityError::VersionConflict);
+        }
+        let command = crate::domain::CredentialSecurityCommand::logout_current(grant, now)
             .map_err(|error| IdentityError::Storage(Box::new(error)))?;
         self.lifecycle
-            .close(tenant_scope, AuthGrantCloseCommand::new(transition))
+            .execute_logout_current(receipt, scope, command)
             .await
+            .map(|_| ())
+    }
+
+    pub async fn logout_all(
+        &self,
+        receipt: LogoutAllProducerReceipt,
+        evidence: &CurrentAuthGrant,
+    ) -> Result<(), IdentityError> {
+        let scope = tenant_repo_scope(evidence.tenant_id());
+        let state = self
+            .accounts
+            .find(scope, evidence.user_id())
+            .await?
+            .ok_or(IdentityError::VersionConflict)?;
+        if state.tenant() != evidence.tenant_id()
+            || state.user_id() != evidence.user_id()
+            || state.authn_epoch().get() != evidence.authn_epoch()
+            || state.status() != crate::domain::AccountStatus::Active
+        {
+            return Err(IdentityError::VersionConflict);
+        }
+        let command = crate::domain::CredentialSecurityCommand::logout_all(state, self.clock.now())
+            .map_err(|error| IdentityError::Storage(Box::new(error)))?;
+        self.lifecycle
+            .execute_logout_all(receipt, scope, command)
+            .await
+            .map(|_| ())
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+struct InertAccountSecurityRead;
+
+#[cfg(any(test, feature = "test-support"))]
+impl AccountSecurityReadRepo for InertAccountSecurityRead {
+    async fn find(
+        &self,
+        _scope: TenantRepoScope,
+        _user_id: ids::UserId,
+    ) -> Result<Option<crate::domain::AccountSecurityState>, IdentityError> {
+        Err(IdentityError::Storage(Box::new(std::io::Error::other(
+            "inert credential-security test dependency",
+        ))))
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+struct InertIdentitySecurityLifecycle;
+
+#[cfg(any(test, feature = "test-support"))]
+impl IdentitySecurityLifecycle for InertIdentitySecurityLifecycle {
+    async fn execute_logout_current(
+        &self,
+        _receipt: LogoutCurrentProducerReceipt,
+        _scope: TenantRepoScope,
+        _command: crate::domain::LogoutCurrentCommand,
+    ) -> Result<crate::domain::CredentialSecurityReceipt, IdentityError> {
+        Err(IdentityError::Storage(Box::new(std::io::Error::other(
+            "inert credential-security test dependency",
+        ))))
+    }
+
+    async fn execute_logout_all(
+        &self,
+        _receipt: LogoutAllProducerReceipt,
+        _scope: TenantRepoScope,
+        _command: crate::domain::LogoutAllCommand,
+    ) -> Result<crate::domain::CredentialSecurityReceipt, IdentityError> {
+        Err(IdentityError::Storage(Box::new(std::io::Error::other(
+            "inert credential-security test dependency",
+        ))))
     }
 }
 
@@ -1274,8 +1386,12 @@ fn contract_auth_policy(
             Ok(ContractAuthPolicy::SelfScoped)
         }
         id if id == LOGOUT_HTTP_SPEC.route.contract_id() => {
-            permission_from_request(request, &LOGOUT_HTTP_SPEC)?;
-            Ok(ContractAuthPolicy::SelfScoped)
+            permission_from_request(request, &LOGOUT_HTTP_SPEC)
+                .map(ContractAuthPolicy::RolePermission)
+        }
+        id if id == LOGOUT_ALL_HTTP_SPEC.route.contract_id() => {
+            permission_from_request(request, &LOGOUT_ALL_HTTP_SPEC)
+                .map(ContractAuthPolicy::RolePermission)
         }
         id if id == ROLES_ASSIGN_HTTP_SPEC.route.contract_id() => {
             permission_from_request(request, &ROLES_ASSIGN_HTTP_SPEC)
@@ -1550,7 +1666,21 @@ impl ContractAuthorizer {
         let runtime_inventory_rss_user = ctx.kind == vocab::PrincipalKind::User
             && contract_id == RUNTIME_INVENTORY_HTTP_SPEC.route.contract_id()
             && RUNTIME_INVENTORY_HTTP_SPEC.route.auth() == HttpRouteAuth::Permission(permission);
-        if ctx.kind != vocab::PrincipalKind::Admin && !runtime_inventory_rss_user {
+        let rss_user_session_logout = ctx.kind == vocab::PrincipalKind::User
+            && matches!(
+                (contract_id, permission),
+                (
+                    "identity.logout",
+                    RoutePermissionId::IdentitySessionLogoutCurrent
+                ) | (
+                    "identity.logout-all",
+                    RoutePermissionId::IdentitySessionLogoutAll
+                )
+            );
+        if ctx.kind != vocab::PrincipalKind::Admin
+            && !runtime_inventory_rss_user
+            && !rss_user_session_logout
+        {
             return Err(AuthReject::Forbidden);
         }
         if builtin_admin_permission(contract_id, permission) {
@@ -1928,6 +2058,11 @@ struct SelfServiceHandlerState<S> {
     service: Arc<LoginService<S>>,
 }
 
+#[derive(Clone)]
+struct CredentialSecurityHandlerState {
+    service: Arc<CredentialSecurityService>,
+}
+
 impl<S> Clone for SelfServiceHandlerState<S> {
     fn clone(&self) -> Self {
         Self {
@@ -1984,6 +2119,39 @@ fn authenticated_subject_context(req: &Request<Body>) -> Result<AuthSubjectConte
         kind: auth.principal_kind(),
         projection: auth.projection(),
     })
+}
+
+fn current_user_grant_context(req: &Request<Body>) -> Result<CurrentAuthGrant, AuthReject> {
+    let subject = req
+        .extensions()
+        .get::<AuthorizedSubject>()
+        .ok_or(AuthReject::Unauthenticated)?;
+    if subject.principal_kind() != vocab::PrincipalKind::User {
+        return Err(AuthReject::Forbidden);
+    }
+    let evidence = req
+        .extensions()
+        .get::<CurrentAuthGrant>()
+        .cloned()
+        .ok_or(AuthReject::Unauthenticated)?;
+    if !evidence.binds_principal(subject.tenant_id(), subject.principal_id()) {
+        return Err(AuthReject::Unauthenticated);
+    }
+    Ok(evidence)
+}
+
+fn logout_current_grant_context(
+    _marker: &ProducerMarker<::generated::http::identity_v1::logout::RouteMarker>,
+    req: &Request<Body>,
+) -> Result<CurrentAuthGrant, AuthReject> {
+    current_user_grant_context(req)
+}
+
+fn logout_all_grant_context(
+    _marker: &ProducerMarker<::generated::http::identity_v1::logout_all::RouteMarker>,
+    req: &Request<Body>,
+) -> Result<CurrentAuthGrant, AuthReject> {
+    current_user_grant_context(req)
 }
 
 fn authorized_user_context(ctx: AuthSubjectContext) -> Result<AuthUserContext, AuthReject> {
@@ -2585,35 +2753,27 @@ async fn password_change_handler<S: diport::Signer + Send + Sync + 'static>(
     }
 }
 
-async fn logout_handler<S: diport::Signer + Send + Sync + 'static>(
-    _: ContractMarker<::generated::http::identity_v1::logout::RouteMarker>,
-    State(state): State<SelfServiceHandlerState<S>>,
+async fn logout_handler(
+    marker: ProducerMarker<::generated::http::identity_v1::logout::RouteMarker>,
+    State(state): State<CredentialSecurityHandlerState>,
     req: Request<Body>,
 ) -> Response {
     let request_id = request_id_from(&req);
-    let subject = match authenticated_subject_context(&req) {
-        Ok(ctx) => ctx,
-        Err(reject) => return reject.into_response(&request_id),
-    };
-    let auth = match authorized_user_context(subject) {
-        Ok(auth) => auth,
+    let evidence = match logout_current_grant_context(&marker, &req) {
+        Ok(evidence) => evidence,
         Err(reject) => return reject.into_response(&request_id),
     };
     let body = match body_bytes(req, &request_id).await {
         Ok(body) => body,
         Err(resp) => return resp,
     };
-    let request: IdentityLogoutRequest = match serde_json::from_slice(&body) {
+    let _request: IdentityLogoutRequest = match serde_json::from_slice(&body) {
         Ok(request) => request,
-        Err(_) => return httpserve::error::validation_bad_request(&request_id),
-    };
-    let session_id = match AuthGrantId::hydrate(request.session_id) {
-        Ok(session_id) => session_id,
         Err(_) => return httpserve::error::validation_bad_request(&request_id),
     };
     match state
         .service
-        .logout(auth.tenant, auth.user_id, session_id)
+        .logout_current(marker.into_receipt(), &evidence)
         .await
     {
         Ok(()) => (
@@ -2623,19 +2783,74 @@ async fn logout_handler<S: diport::Signer + Send + Sync + 'static>(
             }),
         )
             .into_response(),
-        Err(IdentityError::PermissionDenied) => {
-            core_response(CoreErrorKind::Forbidden, &request_id)
+        Err(IdentityError::VersionConflict) => {
+            core_response(CoreErrorKind::VersionConflict, &request_id)
         }
         Err(IdentityError::OutboxFactConflict(_)) => fact_conflict_response(&request_id),
+        Err(IdentityError::ProviderUnavailable(_)) => {
+            core_response(CoreErrorKind::ProviderUnavailable, &request_id)
+        }
         Err(err) => {
             tracing::error!(
                 error = %err,
                 error_chain = %secure::redact_error(&err),
                 request_id,
-                tenant_id = %auth.tenant,
+                tenant_id = %evidence.tenant_id(),
                 contract_id = LOGOUT_HTTP_SPEC.route.contract_id(),
                 operation = "logout",
                 "identity logout failed"
+            );
+            core_response(CoreErrorKind::Internal, &request_id)
+        }
+    }
+}
+
+async fn logout_all_handler(
+    marker: ProducerMarker<::generated::http::identity_v1::logout_all::RouteMarker>,
+    State(state): State<CredentialSecurityHandlerState>,
+    req: Request<Body>,
+) -> Response {
+    let request_id = request_id_from(&req);
+    let evidence = match logout_all_grant_context(&marker, &req) {
+        Ok(evidence) => evidence,
+        Err(reject) => return reject.into_response(&request_id),
+    };
+    let body = match body_bytes(req, &request_id).await {
+        Ok(body) => body,
+        Err(response) => return response,
+    };
+    let _: IdentityLogoutAllRequest = match serde_json::from_slice(&body) {
+        Ok(request) => request,
+        Err(_) => return httpserve::error::validation_bad_request(&request_id),
+    };
+    match state
+        .service
+        .logout_all(marker.into_receipt(), &evidence)
+        .await
+    {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(IdentityLogoutAllResponse {
+                data: IdentityLogoutAllData { logged_out: true },
+            }),
+        )
+            .into_response(),
+        Err(IdentityError::VersionConflict) => {
+            core_response(CoreErrorKind::VersionConflict, &request_id)
+        }
+        Err(IdentityError::OutboxFactConflict(_)) => fact_conflict_response(&request_id),
+        Err(IdentityError::ProviderUnavailable(_)) => {
+            core_response(CoreErrorKind::ProviderUnavailable, &request_id)
+        }
+        Err(error) => {
+            tracing::error!(
+                error = %error,
+                error_chain = %secure::redact_error(&error),
+                request_id,
+                tenant_id = %evidence.tenant_id(),
+                contract_id = LOGOUT_ALL_HTTP_SPEC.route.contract_id(),
+                operation = "logout_all",
+                "identity logout-all failed"
             );
             core_response(CoreErrorKind::Internal, &request_id)
         }
@@ -2647,23 +2862,23 @@ async fn logout_handler<S: diport::Signer + Send + Sync + 'static>(
 /// This is deliberately feature-gated: adapter integration tests need the real decode/auth/service
 /// path, while production composition continues to mount the handler only through `IdentityDomain`.
 #[cfg(feature = "test-support")]
-pub(crate) fn logout_router_for_test<S: diport::Signer + Send + Sync + 'static>(
-    service: Arc<LoginService<S>>,
-    tenant: TenantId,
-    actor: &str,
+pub(crate) fn logout_router_for_test(
+    service: Arc<CredentialSecurityService>,
+    evidence: CurrentAuthGrant,
 ) -> axum::Router {
     axum::Router::new()
         .route(
             LOGOUT_HTTP_SPEC.route.path(),
-            axum::routing::post(logout_handler::<S>)
-                .with_state(SelfServiceHandlerState { service }),
+            axum::routing::post(logout_handler)
+                .with_state(CredentialSecurityHandlerState { service }),
         )
         .layer(axum::Extension(AuthorizedSubject::for_test(
-            tenant,
+            evidence.tenant_id(),
             vocab::PrincipalKind::User,
-            actor,
+            evidence.user_id().as_uuid().hyphenated().to_string(),
             None,
         )))
+        .layer(axum::Extension(evidence))
 }
 
 fn rbac_error_response(
@@ -2769,6 +2984,7 @@ fn password_error_response(
 pub struct IdentityDomainDeps<S> {
     pub login: Arc<LoginService<S>>,
     pub refresh: Arc<RefreshService<S>>,
+    pub credential_security: Arc<CredentialSecurityService>,
     pub rbac_admin: Arc<RbacAdminService>,
     pub policy_manage: Arc<PolicyManageService>,
     pub roles: Arc<DynRoleReadRepo<'static>>,
@@ -2858,6 +3074,7 @@ struct CommonIdentityRouteState {
 pub struct IdentityDomain<S> {
     login: Arc<LoginService<S>>,
     refresh: Arc<RefreshService<S>>,
+    credential_security: Arc<CredentialSecurityService>,
     common: IdentityCommonDomain,
 }
 
@@ -2874,6 +3091,7 @@ impl<S: diport::Signer + Send + Sync + 'static> IdentityDomain<S> {
         let IdentityDomainDeps {
             login,
             refresh,
+            credential_security,
             rbac_admin,
             policy_manage,
             roles,
@@ -2885,6 +3103,7 @@ impl<S: diport::Signer + Send + Sync + 'static> IdentityDomain<S> {
         Self {
             login,
             refresh,
+            credential_security,
             common: IdentityCommonDomain::new(
                 rbac_admin,
                 policy_manage,
@@ -2984,7 +3203,10 @@ impl<S: diport::Signer + Send + Sync + 'static> ::bootstrap::Domain for Identity
         let password = SelfServiceHandlerState {
             service: Arc::clone(&self.login),
         };
-        let logout = password.clone();
+        let credential_security = CredentialSecurityHandlerState {
+            service: Arc::clone(&self.credential_security),
+        };
+        let logout_all = credential_security.clone();
         reg.route_group::<Primary>(LOGIN_ROUTE_PREFIX, move |rb| {
             let rb = rb.mount(
                 GeneratedPrimaryEndpoint::new_producer(LOGIN_PRODUCER, login_handler::<S>)?
@@ -3003,8 +3225,12 @@ impl<S: diport::Signer + Send + Sync + 'static> ::bootstrap::Domain for Identity
                 .with_state(password),
             )?;
             let rb = rb.mount(
-                GeneratedPrimaryEndpoint::new(LOGOUT_HTTP_ROUTE, logout_handler::<S>)?
-                    .with_state(logout),
+                GeneratedPrimaryEndpoint::new_producer(LOGOUT_PRODUCER, logout_handler)?
+                    .with_state(credential_security),
+            )?;
+            let rb = rb.mount(
+                GeneratedPrimaryEndpoint::new_producer(LOGOUT_ALL_PRODUCER, logout_all_handler)?
+                    .with_state(logout_all),
             )?;
             Ok(rb)
         })?;
@@ -3048,6 +3274,289 @@ mod tests {
 
     fn login_receipt() -> LoginProducerReceipt {
         ProducerMarker::for_test(LOGIN_PRODUCER).into_receipt()
+    }
+
+    #[derive(Clone, Default)]
+    struct EmptyAccountSecurityRead {
+        find_calls: Arc<AtomicUsize>,
+    }
+
+    impl AccountSecurityReadRepo for EmptyAccountSecurityRead {
+        async fn find(
+            &self,
+            _scope: TenantRepoScope,
+            _user_id: ids::UserId,
+        ) -> Result<Option<AccountSecurityState>, IdentityError> {
+            self.find_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(None)
+        }
+    }
+
+    struct ConfirmingIdentitySecurityLifecycle;
+
+    impl IdentitySecurityLifecycle for ConfirmingIdentitySecurityLifecycle {
+        async fn execute_logout_current(
+            &self,
+            _receipt: LogoutCurrentProducerReceipt,
+            _scope: TenantRepoScope,
+            command: crate::domain::LogoutCurrentCommand,
+        ) -> Result<crate::domain::CredentialSecurityReceipt, IdentityError> {
+            let crate::domain::CredentialSecurityCommand::Grant(command) =
+                command.into_security_command()
+            else {
+                unreachable!("logout-current wrapper is grant-local")
+            };
+            let (_, _, pending) = command.into_parts();
+            Ok(pending.confirm())
+        }
+
+        async fn execute_logout_all(
+            &self,
+            _receipt: LogoutAllProducerReceipt,
+            _scope: TenantRepoScope,
+            command: crate::domain::LogoutAllCommand,
+        ) -> Result<crate::domain::CredentialSecurityReceipt, IdentityError> {
+            let crate::domain::CredentialSecurityCommand::Account(command) =
+                command.into_security_command()
+            else {
+                unreachable!("logout-all wrapper is account-wide")
+            };
+            let (_, _, pending) = command.into_parts();
+            Ok(pending.confirm())
+        }
+    }
+
+    struct UnavailableIdentitySecurityLifecycle;
+
+    impl IdentitySecurityLifecycle for UnavailableIdentitySecurityLifecycle {
+        async fn execute_logout_current(
+            &self,
+            _receipt: LogoutCurrentProducerReceipt,
+            _scope: TenantRepoScope,
+            _command: crate::domain::LogoutCurrentCommand,
+        ) -> Result<crate::domain::CredentialSecurityReceipt, IdentityError> {
+            Err(IdentityError::ProviderUnavailable(Box::new(
+                std::io::Error::other("database unavailable"),
+            )))
+        }
+
+        async fn execute_logout_all(
+            &self,
+            _receipt: LogoutAllProducerReceipt,
+            _scope: TenantRepoScope,
+            _command: crate::domain::LogoutAllCommand,
+        ) -> Result<crate::domain::CredentialSecurityReceipt, IdentityError> {
+            Err(IdentityError::ProviderUnavailable(Box::new(
+                std::io::Error::other("database unavailable"),
+            )))
+        }
+    }
+
+    struct ConflictingIdentitySecurityLifecycle;
+
+    impl IdentitySecurityLifecycle for ConflictingIdentitySecurityLifecycle {
+        async fn execute_logout_current(
+            &self,
+            _receipt: LogoutCurrentProducerReceipt,
+            _scope: TenantRepoScope,
+            _command: crate::domain::LogoutCurrentCommand,
+        ) -> Result<crate::domain::CredentialSecurityReceipt, IdentityError> {
+            Err(IdentityError::VersionConflict)
+        }
+
+        async fn execute_logout_all(
+            &self,
+            _receipt: LogoutAllProducerReceipt,
+            _scope: TenantRepoScope,
+            _command: crate::domain::LogoutAllCommand,
+        ) -> Result<crate::domain::CredentialSecurityReceipt, IdentityError> {
+            Err(IdentityError::VersionConflict)
+        }
+    }
+
+    fn test_credential_security<S: diport::Signer + Send + Sync + 'static>(
+        login: &Arc<LoginService<S>>,
+    ) -> Arc<CredentialSecurityService> {
+        Arc::new(CredentialSecurityService::new(
+            Arc::clone(&login.lifecycle),
+            DynAccountSecurityReadRepo::new_box(EmptyAccountSecurityRead::default()),
+            ConfirmingIdentitySecurityLifecycle,
+            make_clock(1_000),
+        ))
+    }
+
+    fn attach_current_grant(req: &mut Request<Body>, evidence: CurrentAuthGrant) {
+        req.extensions_mut().insert(AuthorizedSubject::for_test(
+            evidence.tenant_id(),
+            vocab::PrincipalKind::User,
+            evidence.user_id().as_uuid().hyphenated().to_string(),
+            None,
+        ));
+        req.extensions_mut().insert(evidence);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn logout_handlers_require_grant_evidence_and_reject_target_body() {
+        let capture = CapturingAuthGrantLifecycle::default();
+        let login = Arc::new(seed_service(&capture, 1_000, 3_600));
+        let account_reader = EmptyAccountSecurityRead::default();
+        let state = State(CredentialSecurityHandlerState {
+            service: Arc::new(CredentialSecurityService::new(
+                Arc::clone(&login.lifecycle),
+                DynAccountSecurityReadRepo::new_box(account_reader.clone()),
+                ConfirmingIdentitySecurityLifecycle,
+                make_clock(1_000),
+            )),
+        });
+        let missing = Request::builder().body(Body::from("{}")).expect("request");
+        let response = logout_handler(
+            ProducerMarker::for_test(LOGOUT_PRODUCER),
+            state.clone(),
+            missing,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let missing_all = Request::builder().body(Body::from("{}")).expect("request");
+        let response = logout_all_handler(
+            ProducerMarker::for_test(LOGOUT_ALL_PRODUCER),
+            state.clone(),
+            missing_all,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            capture.find_calls.load(Ordering::SeqCst),
+            0,
+            "missing route evidence must not reach the grant provider"
+        );
+        assert_eq!(
+            account_reader.find_calls.load(Ordering::SeqCst),
+            0,
+            "missing route evidence must not reach the account provider"
+        );
+
+        let evidence = CurrentAuthGrant::for_test(
+            ids::CanonicalUuidV4::parse("550e8400-e29b-41d4-a716-446655440000").expect("grant"),
+            uid(CANON_USER),
+            tid(CANON_TENANT),
+            0,
+        );
+        let mut targeted = Request::builder()
+            .body(Body::from(
+                r#"{"sessionId":"550e8400-e29b-41d4-a716-446655440000"}"#,
+            ))
+            .expect("request");
+        attach_current_grant(&mut targeted, evidence.clone());
+        let response = logout_handler(
+            ProducerMarker::for_test(LOGOUT_PRODUCER),
+            state.clone(),
+            targeted,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let mut targeted_all = Request::builder()
+            .body(Body::from(r#"{"target":"forbidden"}"#))
+            .expect("request");
+        attach_current_grant(&mut targeted_all, evidence);
+        let response = logout_all_handler(
+            ProducerMarker::for_test(LOGOUT_ALL_PRODUCER),
+            state,
+            targeted_all,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn logout_handler_maps_explicit_provider_unavailability_to_503() {
+        let store = crate::internal::mem::InMemAuthGrantStore::new();
+        let refresh = make_refresh_svc(
+            store.clone(),
+            make_clock(1_700_000_000),
+            Duration::from_secs(3_600),
+        );
+        let bundle = issue_test_user_bundle(&refresh, &store).await;
+        let claims = decode_access_claims(&bundle.access);
+        let evidence = CurrentAuthGrant::for_test(
+            ids::CanonicalUuidV4::parse(claims["sid"].as_str().expect("sid")).expect("grant"),
+            uid(CANON_USER),
+            tid(CANON_TENANT),
+            claims["authn_epoch"].as_u64().expect("epoch"),
+        );
+        let state = State(CredentialSecurityHandlerState {
+            service: Arc::new(CredentialSecurityService::new(
+                test_lifecycle(store),
+                seeded_account_reader(),
+                UnavailableIdentitySecurityLifecycle,
+                make_clock(1_700_000_001),
+            )),
+        });
+        let mut request = Request::builder().body(Body::from("{}")).expect("request");
+        attach_current_grant(&mut request, evidence.clone());
+
+        let response = logout_handler(
+            ProducerMarker::for_test(LOGOUT_PRODUCER),
+            state.clone(),
+            request,
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let mut request_all = Request::builder().body(Body::from("{}")).expect("request");
+        attach_current_grant(&mut request_all, evidence);
+        let response = logout_all_handler(
+            ProducerMarker::for_test(LOGOUT_ALL_PRODUCER),
+            state,
+            request_all,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn logout_handlers_map_stale_validated_commands_to_409() {
+        let store = crate::internal::mem::InMemAuthGrantStore::new();
+        let refresh = make_refresh_svc(
+            store.clone(),
+            make_clock(1_700_000_000),
+            Duration::from_secs(3_600),
+        );
+        let bundle = issue_test_user_bundle(&refresh, &store).await;
+        let claims = decode_access_claims(&bundle.access);
+        let evidence = CurrentAuthGrant::for_test(
+            ids::CanonicalUuidV4::parse(claims["sid"].as_str().expect("sid")).expect("grant"),
+            uid(CANON_USER),
+            tid(CANON_TENANT),
+            claims["authn_epoch"].as_u64().expect("epoch"),
+        );
+        let state = State(CredentialSecurityHandlerState {
+            service: Arc::new(CredentialSecurityService::new(
+                test_lifecycle(store),
+                seeded_account_reader(),
+                ConflictingIdentitySecurityLifecycle,
+                make_clock(1_700_000_001),
+            )),
+        });
+        let mut current = Request::builder().body(Body::from("{}")).expect("request");
+        attach_current_grant(&mut current, evidence.clone());
+        let current = logout_handler(
+            ProducerMarker::for_test(LOGOUT_PRODUCER),
+            state.clone(),
+            current,
+        )
+        .await;
+        assert_eq!(current.status(), StatusCode::CONFLICT);
+
+        let mut all = Request::builder().body(Body::from("{}")).expect("request");
+        attach_current_grant(&mut all, evidence);
+        let all =
+            logout_all_handler(ProducerMarker::for_test(LOGOUT_ALL_PRODUCER), state, all).await;
+        assert_eq!(all.status(), StatusCode::CONFLICT);
     }
 
     #[tokio::test]
@@ -3305,27 +3814,6 @@ mod tests {
         fn count(&self) -> usize {
             self.writes.lock().unwrap_or_else(|e| e.into_inner()).len()
         }
-
-        fn find_count(&self) -> usize {
-            self.find_calls.load(Ordering::SeqCst)
-        }
-
-        fn close_count(&self) -> usize {
-            self.close_calls.load(Ordering::SeqCst)
-        }
-
-        #[allow(clippy::expect_used)]
-        async fn is_active(&self, tenant: TenantId, session_id: AuthGrantId) -> bool {
-            self.inner
-                .find_active(
-                    tenant_repo_scope(tenant),
-                    session_id,
-                    SystemTime::UNIX_EPOCH,
-                )
-                .await
-                .expect("capturing lifecycle read succeeds")
-                .is_some()
-        }
     }
 
     #[derive(Clone, Default)]
@@ -3561,6 +4049,7 @@ mod tests {
         ));
         let (policy_manage, policies) = empty_policy_manage(now_secs);
         IdentityDomain::new(IdentityDomainDeps {
+            credential_security: test_credential_security(&login),
             login,
             refresh,
             rbac_admin,
@@ -4068,6 +4557,7 @@ mod tests {
             policy_manage,
         } = identity_local_only_ancillary_services();
         let domain = super::IdentityDomain::new(super::IdentityDomainDeps {
+            credential_security: test_credential_security(&login),
             login,
             refresh,
             rbac_admin,
@@ -4126,6 +4616,7 @@ mod tests {
             policy_manage,
         } = identity_local_only_ancillary_services();
         let domain = super::IdentityDomain::new(super::IdentityDomainDeps {
+            credential_security: test_credential_security(&login),
             login,
             refresh,
             rbac_admin,
@@ -4184,6 +4675,7 @@ mod tests {
             policy_manage,
         } = identity_local_only_ancillary_services();
         let domain = super::IdentityDomain::new(super::IdentityDomainDeps {
+            credential_security: test_credential_security(&login),
             login,
             refresh,
             rbac_admin,
@@ -4241,6 +4733,7 @@ mod tests {
             policy_manage,
         } = identity_local_only_ancillary_services();
         let domain = super::IdentityDomain::new(super::IdentityDomainDeps {
+            credential_security: test_credential_security(&login),
             login,
             refresh,
             rbac_admin,
@@ -5461,164 +5954,6 @@ mod tests {
         .expect("login with new pw via login identifier");
     }
 
-    // ── 测试 10：login → logout 全链回归（#1278 接缝闭合）─────────────────────────
-    // 经**单一** lifecycle：login 写入 AuthGrant+refresh → 同一 store find=Some → svc.logout 原子关闭 → find=None。
-    // anti-vacuity：login 写入的根真实可读，证明 persist/find/close/refresh 同源。
-    #[tokio::test]
-    #[allow(clippy::expect_used)]
-    async fn login_then_logout_revokes_via_shared_lifecycle() {
-        let capture = CapturingAuthGrantLifecycle::default();
-        let svc = seed_service(&capture, 1_000, 3_600);
-        let ta = tid(CANON_TENANT);
-
-        // login：经 lifecycle.persist_login_grant 原子创建根、初始 refresh 与 outbox。
-        let resp = svc
-            .login(
-                login_receipt(),
-                ta,
-                IdentityLoginRequest {
-                    username: "alice".to_string(),
-                    password: "correct-horse".to_string(),
-                },
-            )
-            .await
-            .expect("login ok");
-        let sid = grant_id(&resp.data.session_id);
-        assert_eq!(capture.count(), 1, "co-tx 写应恰一次");
-
-        // login 写入的会话经同一 lifecycle 可查回（anti-vacuity：非空 store、非两独立面）。
-        assert!(
-            capture
-                .find_active(
-                    tenant_repo_scope(ta),
-                    sid.clone(),
-                    SystemTime::UNIX_EPOCH + Duration::from_secs(1_000),
-                )
-                .await
-                .expect("find before")
-                .is_some(),
-            "login 后应能经同一 lifecycle 找到会话"
-        );
-
-        // logout：软撤销反映在同一 store → find=None（接缝闭合）。
-        svc.logout(ta, uid(CANON_USER), sid.clone())
-            .await
-            .expect("logout ok");
-        assert!(
-            capture
-                .find_active(
-                    tenant_repo_scope(ta),
-                    sid,
-                    SystemTime::UNIX_EPOCH + Duration::from_secs(1_000),
-                )
-                .await
-                .expect("find after")
-                .is_none(),
-            "经 service logout 后 find 应返回 None（软撤销，同源 store）"
-        );
-    }
-
-    // ── 测试 11：logout 跨租 no-op + 幂等（login 写入 + 同源 lifecycle 观测）──────────
-
-    #[tokio::test]
-    #[allow(clippy::expect_used)]
-    async fn logout_cross_tenant_noop_and_idempotent() {
-        let capture = CapturingAuthGrantLifecycle::default();
-        let svc = seed_service(&capture, 1_000, 3_600);
-        let ta = tid(CANON_TENANT);
-        let tb = tid(OTHER_TENANT);
-
-        // login（CANON_TENANT，凭据所在租户）写入会话。
-        let resp = svc
-            .login(
-                login_receipt(),
-                ta,
-                IdentityLoginRequest {
-                    username: "alice".to_string(),
-                    password: "correct-horse".to_string(),
-                },
-            )
-            .await
-            .expect("login ok");
-        let sid = grant_id(&resp.data.session_id);
-
-        // 跨租 logout（tenant B）：no-op，tenant A 会话仍在。
-        svc.logout(tb, uid(CANON_USER), sid.clone())
-            .await
-            .expect("cross-tenant logout ok");
-        assert!(
-            capture
-                .find_active(
-                    tenant_repo_scope(ta),
-                    sid.clone(),
-                    SystemTime::UNIX_EPOCH + Duration::from_secs(1_000),
-                )
-                .await
-                .expect("find")
-                .is_some(),
-            "跨租 logout 不应撤销 TENANT_A 的会话"
-        );
-
-        // tenant A logout：首次撤销，第二次幂等仍 Ok。
-        svc.logout(ta, uid(CANON_USER), sid.clone())
-            .await
-            .expect("logout 1 ok");
-        assert!(
-            capture
-                .find_active(
-                    tenant_repo_scope(ta),
-                    sid.clone(),
-                    SystemTime::UNIX_EPOCH + Duration::from_secs(1_000),
-                )
-                .await
-                .expect("find")
-                .is_none(),
-            "TENANT_A logout 后会话应被撤销"
-        );
-        svc.logout(ta, uid(CANON_USER), sid)
-            .await
-            .expect("logout 2 idempotent");
-    }
-
-    #[tokio::test]
-    #[allow(clippy::expect_used)]
-    async fn logout_same_tenant_other_actor_forbidden_and_keeps_session() {
-        let capture = CapturingAuthGrantLifecycle::default();
-        let svc = seed_service(&capture, 1_000, 3_600);
-        let ta = tid(CANON_TENANT);
-        let resp = svc
-            .login(
-                login_receipt(),
-                ta,
-                IdentityLoginRequest {
-                    username: "alice".to_string(),
-                    password: "correct-horse".to_string(),
-                },
-            )
-            .await
-            .expect("login ok");
-        let sid = grant_id(&resp.data.session_id);
-
-        let err = svc
-            .logout(ta, uid(GHOST_USER), sid.clone())
-            .await
-            .expect_err("other actor must not revoke session");
-
-        assert!(matches!(err, IdentityError::PermissionDenied));
-        assert!(
-            capture
-                .find_active(
-                    tenant_repo_scope(ta),
-                    sid,
-                    SystemTime::UNIX_EPOCH + Duration::from_secs(1_000),
-                )
-                .await
-                .expect("find")
-                .is_some(),
-            "他人 logout 失败后原 session 必须仍 active"
-        );
-    }
-
     // ── 测试 12：login route group 声明（保留既有测试）────────────────────────
 
     #[test]
@@ -5813,7 +6148,7 @@ mod tests {
                 &LOGOUT_HTTP_SPEC,
                 "POST",
                 "/logout",
-                Some(vocab::RoutePermissionId::IdentitySessionWrite),
+                Some(vocab::RoutePermissionId::IdentitySessionLogoutCurrent),
             ),
         ];
 
@@ -8832,189 +9167,6 @@ mod tests {
                 "password conflict response leaked sensitive input"
             );
         }
-    }
-
-    #[tokio::test]
-    #[allow(clippy::expect_used)]
-    async fn logout_handler_soft_revokes_session() {
-        {
-            const _: ::vocab::HttpRouteBinding<
-                ::generated::http::identity_v1::logout::RouteMarker,
-                ::vocab::http::LocalTx,
-            > = ::generated::http::identity_v1::logout::ROUTE;
-        }
-
-        {
-            let capture = CapturingAuthGrantLifecycle::default();
-            let svc = Arc::new(seed_service(&capture, 1_000, 3_600));
-            let login_resp = svc
-                .login(
-                    login_receipt(),
-                    tid(CANON_TENANT),
-                    IdentityLoginRequest {
-                        username: "alice".to_string(),
-                        password: "correct-horse".to_string(),
-                    },
-                )
-                .await
-                .expect("login ok");
-            let session_id = grant_id(login_resp.data.session_id.clone());
-            assert!(
-                capture
-                    .is_active(tid(CANON_TENANT), session_id.clone())
-                    .await
-            );
-            let router = with_auth(
-                axum::Router::new().route(
-                    LOGOUT_HTTP_SPEC.route.path(),
-                    post(logout_handler::<TestSigner>).with_state(self_service_state(svc)),
-                ),
-                user_evidence(CANON_USER),
-            );
-            let resp = testkit::call(
-                router,
-                ContractRequest::post(LOGOUT_HTTP_SPEC.route.path()).json(&IdentityLogoutRequest {
-                    session_id: login_resp.data.session_id,
-                }),
-            )
-            .await
-            .expect("call");
-            resp.ensure_status(StatusCode::OK).expect("200");
-            let decoded: IdentityLogoutResponse = resp.json().expect("json");
-            assert!(decoded.data.logged_out);
-            assert_eq!(capture.find_count(), 1);
-            assert_eq!(capture.close_count(), 1);
-            assert!(!capture.is_active(tid(CANON_TENANT), session_id).await);
-        }
-    }
-
-    #[tokio::test]
-    #[allow(clippy::expect_used)]
-    async fn logout_handler_rejects_other_actor_and_keeps_session() {
-        let capture = CapturingAuthGrantLifecycle::default();
-        let svc = Arc::new(seed_service(&capture, 1_000, 3_600));
-        let login_resp = svc
-            .login(
-                login_receipt(),
-                tid(CANON_TENANT),
-                IdentityLoginRequest {
-                    username: "alice".to_string(),
-                    password: "correct-horse".to_string(),
-                },
-            )
-            .await
-            .expect("login ok");
-        let router = with_auth(
-            axum::Router::new().route(
-                "/logout",
-                post(logout_handler::<TestSigner>).with_state(self_service_state(Arc::clone(&svc))),
-            ),
-            user_evidence(GHOST_USER),
-        );
-        let resp = testkit::call(
-            router,
-            ContractRequest::post("/logout").json(&IdentityLogoutRequest {
-                session_id: login_resp.data.session_id.clone(),
-            }),
-        )
-        .await
-        .expect("call");
-        resp.ensure_status(StatusCode::FORBIDDEN)
-            .expect("other actor logout -> 403");
-        assert_eq!(capture.find_count(), 1);
-        assert_eq!(capture.close_count(), 0);
-        assert!(
-            capture
-                .is_active(tid(CANON_TENANT), grant_id(login_resp.data.session_id))
-                .await,
-            "other actor logout 不应撤销 session"
-        );
-    }
-
-    #[tokio::test]
-    #[allow(clippy::expect_used)]
-    async fn logout_handler_rejects_missing_auth_malformed_json_invalid_session_and_bad_subject() {
-        let capture = CapturingAuthGrantLifecycle::default();
-        let svc = Arc::new(seed_service(&capture, 1_000, 3_600));
-        let login_resp = svc
-            .login(
-                login_receipt(),
-                tid(CANON_TENANT),
-                IdentityLoginRequest {
-                    username: "alice".to_string(),
-                    password: "correct-horse".to_string(),
-                },
-            )
-            .await
-            .expect("seed active session");
-        let session_id = grant_id(login_resp.data.session_id.clone());
-        assert!(
-            capture
-                .is_active(tid(CANON_TENANT), session_id.clone())
-                .await
-        );
-        let router = axum::Router::new().route(
-            LOGOUT_HTTP_SPEC.route.path(),
-            post(logout_handler::<TestSigner>).with_state(self_service_state(Arc::clone(&svc))),
-        );
-
-        let missing_auth = testkit::call(
-            router.clone(),
-            ContractRequest::post(LOGOUT_HTTP_SPEC.route.path()).json(&IdentityLogoutRequest {
-                session_id: login_resp.data.session_id.clone(),
-            }),
-        )
-        .await
-        .expect("call missing auth");
-        missing_auth
-            .ensure_status(StatusCode::UNAUTHORIZED)
-            .expect("logout missing auth -> 401");
-
-        let malformed = testkit::call(
-            with_auth(router.clone(), user_evidence(CANON_USER)),
-            ContractRequest::post(LOGOUT_HTTP_SPEC.route.path())
-                .raw_json(br#"{"sessionId":"malformed""#.to_vec()),
-        )
-        .await
-        .expect("call malformed");
-        malformed
-            .ensure_status(StatusCode::BAD_REQUEST)
-            .expect("logout malformed json -> 400");
-
-        for invalid_session_id in [
-            "not-a-uuid".to_string(),
-            login_resp.data.session_id.to_uppercase(),
-            login_resp.data.session_id.replace('-', ""),
-        ] {
-            let invalid_session = testkit::call(
-                with_auth(router.clone(), user_evidence(CANON_USER)),
-                ContractRequest::post(LOGOUT_HTTP_SPEC.route.path()).json(&IdentityLogoutRequest {
-                    session_id: invalid_session_id.clone(),
-                }),
-            )
-            .await
-            .expect("call invalid session id");
-            invalid_session
-                .ensure_status(StatusCode::BAD_REQUEST)
-                .expect("logout invalid session id -> 400");
-            assert_eq!(capture.find_count(), 0, "sessionId={invalid_session_id}");
-            assert_eq!(capture.close_count(), 0, "sessionId={invalid_session_id}");
-        }
-
-        let bad_subject = testkit::call(
-            with_auth(router, user_evidence("not-a-user-uuid")),
-            ContractRequest::post(LOGOUT_HTTP_SPEC.route.path()).json(&IdentityLogoutRequest {
-                session_id: login_resp.data.session_id,
-            }),
-        )
-        .await
-        .expect("call bad subject");
-        bad_subject
-            .ensure_status(StatusCode::FORBIDDEN)
-            .expect("logout bad principal id -> 403");
-        assert_eq!(capture.find_count(), 0);
-        assert_eq!(capture.close_count(), 0);
-        assert!(capture.is_active(tid(CANON_TENANT), session_id).await);
     }
 
     // ── RefreshService 集成测试 ────────────────────────────────────────────────

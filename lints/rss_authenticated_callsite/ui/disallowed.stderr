@@ -15,24 +15,8 @@ LL |     let mint = Authenticated::new_mtls;
    |
    = help: 仅在 runtime `auth_bridge::{allow_evidence,mtls_evidence}` 的精确验签桥函数中构造 Authenticated；其它 runtime 代码同样不得 mint evidence
 
-warning: CurrentAuthGrant 仅可在 runtime 消费 durable validator proof 后构造
-  --> $DIR/disallowed.rs:21:19
-   |
-LL |     let current = httpserve::CurrentAuthGrant::new();
-   |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-   |
-   = help: 仅在 runtime `auth_bridge::current_auth_grant` 精确 wrapper 中消费 `ValidatedAuthGrant` 并 mint marker
-
-warning: CurrentAuthGrant 仅可在 runtime 消费 durable validator proof 后构造
-  --> $DIR/disallowed.rs:22:24
-   |
-LL |     let current_mint = httpserve::CurrentAuthGrant::new;
-   |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-   |
-   = help: 仅在 runtime `auth_bridge::current_auth_grant` 精确 wrapper 中消费 `ValidatedAuthGrant` 并 mint marker
-
 warning: Authenticated 证据仅组合根（assembly / bin crate）可构造：profile-specific constructor 不得在此 crate 调用
-  --> $DIR/disallowed.rs:23:16
+  --> $DIR/disallowed.rs:21:16
    |
 LL |     let _rss = Authenticated::new_rss_user(
    |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -40,7 +24,7 @@ LL |     let _rss = Authenticated::new_rss_user(
    = help: 仅在 runtime `auth_bridge::{allow_evidence,mtls_evidence}` 的精确验签桥函数中构造 Authenticated；其它 runtime 代码同样不得 mint evidence
 
 warning: Authenticated 证据仅组合根（assembly / bin crate）可构造：profile-specific constructor 不得在此 crate 调用
-  --> $DIR/disallowed.rs:31:20
+  --> $DIR/disallowed.rs:27:20
    |
 LL |     let _service = Authenticated::new_service(
    |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -48,7 +32,7 @@ LL |     let _service = Authenticated::new_service(
    = help: 仅在 runtime `auth_bridge::{allow_evidence,mtls_evidence}` 的精确验签桥函数中构造 Authenticated；其它 runtime 代码同样不得 mint evidence
 
 warning: Authenticated 证据仅组合根（assembly / bin crate）可构造：profile-specific constructor 不得在此 crate 调用
-  --> $DIR/disallowed.rs:35:24
+  --> $DIR/disallowed.rs:31:24
    |
 LL |     let service_mint = Authenticated::new_service;
    |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -56,7 +40,7 @@ LL |     let service_mint = Authenticated::new_service;
    = help: 仅在 runtime `auth_bridge::{allow_evidence,mtls_evidence}` 的精确验签桥函数中构造 Authenticated；其它 runtime 代码同样不得 mint evidence
 
 warning: Authenticated 证据仅组合根（assembly / bin crate）可构造：profile-specific constructor 不得在此 crate 调用
-  --> $DIR/disallowed.rs:37:9
+  --> $DIR/disallowed.rs:33:9
    |
 LL |         Authenticated::new_service;
    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -64,7 +48,7 @@ LL |         Authenticated::new_service;
    = help: 仅在 runtime `auth_bridge::{allow_evidence,mtls_evidence}` 的精确验签桥函数中构造 Authenticated；其它 runtime 代码同样不得 mint evidence
 
 warning: Principal 身份降维 accessor（`audit_subject` / `service_caller_domain`）仅组合根可调用
-  --> $DIR/disallowed.rs:48:20
+  --> $DIR/disallowed.rs:44:20
    |
 LL |     let _subject = authn::Principal::audit_subject;
    |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -72,7 +56,7 @@ LL |     let _subject = authn::Principal::audit_subject;
    = help: 仅在列明的 runtime verification wrapper 中读取 Principal 身份；其它 runtime 代码同样不得把 verified Principal 降维为可转传值
 
 warning: Principal 身份降维 accessor（`audit_subject` / `service_caller_domain`）仅组合根可调用
-  --> $DIR/disallowed.rs:49:19
+  --> $DIR/disallowed.rs:45:19
    |
 LL |     let _caller = authn::Principal::service_caller_domain;
    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -80,7 +64,7 @@ LL |     let _caller = authn::Principal::service_caller_domain;
    = help: 仅在列明的 runtime verification wrapper 中读取 Principal 身份；其它 runtime 代码同样不得把 verified Principal 降维为可转传值
 
 warning: AuthGrant/RSS access-token 生产 funnel 出现在未授权调用点
-  --> $DIR/disallowed.rs:53:22
+  --> $DIR/disallowed.rs:49:22
    |
 LL |     let _new_grant = authn::AuthGrant::new_active;
    |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -88,7 +72,7 @@ LL |     let _new_grant = authn::AuthGrant::new_active;
    = help: AuthGrant::new_active 仅允许 identity::LoginService::login
 
 warning: AuthGrant/RSS access-token 生产 funnel 出现在未授权调用点
-  --> $DIR/disallowed.rs:54:19
+  --> $DIR/disallowed.rs:50:19
    |
 LL |     let hydrate = authn::AuthGrant::hydrate;
    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -96,7 +80,7 @@ LL |     let hydrate = authn::AuthGrant::hydrate;
    = help: AuthGrant::hydrate 仅允许 AuthGrant 内部状态转换与 postgres::auth_grant_lifecycle::find_active
 
 warning: AuthGrant/RSS access-token 生产 funnel 出现在未授权调用点
-  --> $DIR/disallowed.rs:55:24
+  --> $DIR/disallowed.rs:51:24
    |
 LL |     let _issue_input = grant_alias::Grant::access_issue_input;
    |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -104,7 +88,7 @@ LL |     let _issue_input = grant_alias::Grant::access_issue_input;
    = help: RSS access issue input 与 issuer 仅允许 identity refresh 的 prepare_initial/rotate
 
 warning: Principal 身份降维 accessor（`audit_subject` / `service_caller_domain`）仅组合根可调用
-  --> $DIR/disallowed.rs:63:13
+  --> $DIR/disallowed.rs:59:13
    |
 LL |     let _ = principal.service_caller_domain();
    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -112,12 +96,12 @@ LL |     let _ = principal.service_caller_domain();
    = help: 仅在列明的 runtime verification wrapper 中读取 Principal 身份；其它 runtime 代码同样不得把 verified Principal 降维为可转传值
 
 warning: AuthGrant/RSS access-token 生产 funnel 出现在未授权调用点
-  --> $DIR/disallowed.rs:71:18
+  --> $DIR/disallowed.rs:67:18
    |
 LL |     let _issue = authn::JwtIssuer::<diport::RssAccessProfile, S>::issue_access;
    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
    = help: RSS access issue input 与 issuer 仅允许 identity refresh 的 prepare_initial/rotate
 
-warning: 15 warnings emitted
+warning: 13 warnings emitted
 

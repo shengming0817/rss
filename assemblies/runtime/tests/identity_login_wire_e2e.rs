@@ -1,11 +1,10 @@
-//! identity login + refresh 生产 wire e2e（#1252）：wiremock vault Transit mock（动态 ES256 签）+
+//! identity login + refresh + current/all logout 生产 wire e2e（#1252/#1840）：wiremock vault Transit mock（动态 ES256 签）+
 //! postgres credential/AuthGrant/refresh store → `wire_identity_with` → Primary router handler。
 //!
 //! 覆盖：
 //! ① login → 201 + accessToken/refreshToken/accessExpiresAt/sessionId（vault mock 真实签发，生产 wire 通路）；
 //! ② refresh → 201 + 新 token bundle（rotation 闭环：旧 token 轮换、新 token 铸出）；
 //! ③ 同 refreshToken 再用 → 401（one-shot rotation reuse detection，refresh store 已废弃旧 token）。
-//! ④ 持久 Suspended/Locked 状态经 production account-security reader 拒绝 refresh，且零 rotation。
 //!
 //! hermetic：wiremock 模拟 vault Transit（无 live vault），postgres testcontainer 或 env pg。
 //! login/refresh 是 Public 端点，verify bridge 不拦截；响应 access token 仍经生产 OIDC
@@ -24,6 +23,8 @@ use diport::Clock as _;
 use diport::Pdp as _;
 use generated::event::settings_v1::TOPIC as SETTINGS_VERSION_CHANGED_TOPIC;
 use generated::http::identity_v1::login::SPEC as LOGIN_SPEC;
+use generated::http::identity_v1::logout::SPEC as LOGOUT_SPEC;
+use generated::http::identity_v1::logout_all::SPEC as LOGOUT_ALL_SPEC;
 use generated::http::identity_v1::refresh::SPEC as REFRESH_SPEC;
 use generated::http::identity_v1::roles_assign::{
     PRODUCER as ROLES_ASSIGN_PRODUCER, SPEC as ROLES_ASSIGN_SPEC,
@@ -285,6 +286,7 @@ async fn connect_pg()
         &owner_config,
         &pg_config(p, TEST_APP_ROLE, TEST_APP_PASSWORD),
         &tenant_read_config,
+        None,
         generated::event::PROJECTION_INPUT_GENERATION,
         generated::event::PROJECTION_INPUTS,
     )
@@ -427,6 +429,14 @@ fn identity_test_values() -> IdentityTestValues {
 }
 
 async fn login_refresh_token(app: &axum::Router, username: &str) -> TestResult<String> {
+    let body = login_bundle(app, username).await?;
+    Ok(body["data"]["refreshToken"]
+        .as_str()
+        .ok_or("login response missing data.refreshToken")?
+        .to_owned())
+}
+
+async fn login_bundle(app: &axum::Router, username: &str) -> TestResult<serde_json::Value> {
     let response = app
         .clone()
         .oneshot(
@@ -451,10 +461,7 @@ async fn login_refresh_token(app: &axum::Router, username: &str) -> TestResult<S
     );
     let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
     let body: serde_json::Value = serde_json::from_slice(&bytes)?;
-    Ok(body["data"]["refreshToken"]
-        .as_str()
-        .ok_or("login response missing data.refreshToken")?
-        .to_owned())
+    Ok(body)
 }
 
 async fn refresh_rotation_snapshot(
@@ -568,7 +575,7 @@ async fn config_entry_count(
 /// 断言 b: POST /api/v1/identity/refresh（login 取的 refreshToken）→ 201 + 新 token bundle。
 /// 断言 c: 再用同一 refreshToken → 401（one-shot rotation reuse detection）。
 #[tokio::test(flavor = "multi_thread")]
-async fn wire_identity_login_refresh_and_rotation_e2e() -> TestResult {
+async fn wire_identity_logout_current_all_e2e() -> TestResult {
     // 1. hermetic vault Transit mock：任意 POST + marshaling_algorithm=jws → 动态 ES256 签。
     //    anti-vacuity matcher（body_partial_json）保证 VaultSigner 必须请求 JWS marshaling，否则 404 → 失败。
     let vault_server = MockServer::start().await;
@@ -616,6 +623,34 @@ async fn wire_identity_login_refresh_and_rotation_e2e() -> TestResult {
             )
             .await?;
     }
+    let identity = pg.for_domain::<caps::Identity>();
+    let logout_role = Role::hydrate(
+        "session-owner",
+        "Current and all session logout",
+        &[
+            "identity:session:logout-current".to_string(),
+            "identity:role:read".to_string(),
+        ],
+    )?;
+    let logout_role_id = logout_role.id().clone();
+    identity.role_repo().save(tenant_scope, logout_role).await?;
+    let setup_rbac = identity::RbacAdminService::new(
+        Arc::from(DynRoleReadRepo::new_box(identity.role_repo())),
+        Arc::from(DynRoleBindingLifecycle::new_box(
+            identity.role_binding_lifecycle(Box::new(SystemClock)),
+        )),
+        Box::new(SystemClock),
+    );
+    setup_rbac
+        .assign_role(
+            ProducerMarker::for_test(ROLES_ASSIGN_PRODUCER).into_receipt(),
+            tenant,
+            ids::UserId::parse(CANON_USER)?,
+            vocab::PrincipalKind::User,
+            CANON_USER.to_string(),
+            logout_role_id,
+        )
+        .await?;
 
     // 3. vault bundle（#1498）：合法但未使用的单条 allowlist binding；secret resolver 不触 vault，
     //    仅构造器结构满足 SharedRuntimeDeps.vault 字段。mock URL 仅在构造期校验，不建立连接。
@@ -804,6 +839,10 @@ async fn wire_identity_login_refresh_and_rotation_e2e() -> TestResult {
         .as_str()
         .ok_or("refresh response missing data.accessToken")?
         .to_owned();
+    let refresh_token_next = refresh_json["data"]["refreshToken"]
+        .as_str()
+        .ok_or("refresh response missing data.refreshToken")?
+        .to_owned();
     let refresh_claims = verified_access_claims(&refresh_access_token).await?;
     let refresh_jti = refresh_claims["jti"]
         .as_str()
@@ -843,25 +882,38 @@ async fn wire_identity_login_refresh_and_rotation_e2e() -> TestResult {
         "the real PostgreSQL grant validator must accept the access token before replay"
     );
 
-    // ── 断言 c: 同 refreshToken 再用 → 401（one-shot rotation reuse detection）──────────────────
-    let reuse_resp = app
+    let grant_b = login_bundle(&app, LOGIN_USERNAME).await?;
+    let access_b = grant_b["data"]["accessToken"]
+        .as_str()
+        .ok_or("second login missing access token")?
+        .to_owned();
+    let refresh_b = grant_b["data"]["refreshToken"]
+        .as_str()
+        .ok_or("second login missing refresh token")?
+        .to_owned();
+
+    let current_logout = app
         .clone()
         .oneshot(
             Request::builder()
                 .method(Method::POST)
-                .uri(REFRESH_SPEC.route.path())
+                .uri(LOGOUT_SPEC.route.path())
                 .header(header::CONTENT_TYPE, "application/json")
-                .header("X-Tenant-ID", CANON_TENANT)
-                .body(Body::from(refresh_body))?,
+                .header(
+                    header::AUTHORIZATION,
+                    format!("Bearer {refresh_access_token}"),
+                )
+                .body(Body::from("{}"))?,
         )
         .await?;
     assert_eq!(
-        reuse_resp.status(),
-        StatusCode::UNAUTHORIZED,
-        "reused refresh token should return 401 (one-shot rotation reuse detection)"
+        current_logout.status(),
+        StatusCode::OK,
+        "current logout must commit through the credential-security producer transaction"
     );
 
-    let compromised_access_resp = app
+    let revoked_access = app
+        .clone()
         .oneshot(
             Request::builder()
                 .method(Method::GET)
@@ -874,10 +926,160 @@ async fn wire_identity_login_refresh_and_rotation_e2e() -> TestResult {
         )
         .await?;
     assert_eq!(
-        compromised_access_resp.status(),
+        revoked_access.status(),
         StatusCode::UNAUTHORIZED,
-        "refresh replay must immediately fence previously issued access through the real validator"
+        "current logout must immediately fence its access grant"
     );
+    let revoked_refresh = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(REFRESH_SPEC.route.path())
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("X-Tenant-ID", CANON_TENANT)
+                .body(Body::from(
+                    serde_json::json!({"refreshToken": refresh_token_next}).to_string(),
+                ))?,
+        )
+        .await?;
+    assert_eq!(revoked_refresh.status(), StatusCode::UNAUTHORIZED);
+
+    let grant_b_before_all = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(&protected_uri)
+                .header(header::AUTHORIZATION, format!("Bearer {access_b}"))
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_ne!(
+        grant_b_before_all.status(),
+        StatusCode::UNAUTHORIZED,
+        "current logout must not invalidate the account's other grant",
+    );
+
+    let missing_all_evidence = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(LOGOUT_ALL_SPEC.route.path())
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from("{}"))?,
+        )
+        .await?;
+    assert_eq!(missing_all_evidence.status(), StatusCode::UNAUTHORIZED);
+
+    let denied_all = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(LOGOUT_ALL_SPEC.route.path())
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::AUTHORIZATION, format!("Bearer {access_b}"))
+                .body(Body::from("{}"))?,
+        )
+        .await?;
+    assert_eq!(denied_all.status(), StatusCode::FORBIDDEN);
+    identity
+        .role_repo()
+        .save(
+            tenant_scope,
+            Role::hydrate(
+                "session-owner",
+                "All-session logout only",
+                &[
+                    "identity:session:logout-all".to_string(),
+                    "identity:role:read".to_string(),
+                ],
+            )?,
+        )
+        .await?;
+    let denied_current = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(LOGOUT_SPEC.route.path())
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::AUTHORIZATION, format!("Bearer {access_b}"))
+                .body(Body::from("{}"))?,
+        )
+        .await?;
+    assert_eq!(
+        denied_current.status(),
+        StatusCode::FORBIDDEN,
+        "logout-all permission must not imply logout-current"
+    );
+    identity
+        .role_repo()
+        .save(
+            tenant_scope,
+            Role::hydrate(
+                "session-owner",
+                "Current and all session logout",
+                &[
+                    "identity:session:logout-current".to_string(),
+                    "identity:session:logout-all".to_string(),
+                    "identity:role:read".to_string(),
+                ],
+            )?,
+        )
+        .await?;
+    let targeted_all = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(LOGOUT_ALL_SPEC.route.path())
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::AUTHORIZATION, format!("Bearer {access_b}"))
+                .body(Body::from(r#"{"sessionId":"forbidden"}"#))?,
+        )
+        .await?;
+    assert_eq!(targeted_all.status(), StatusCode::BAD_REQUEST);
+    let all_logout = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(LOGOUT_ALL_SPEC.route.path())
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::AUTHORIZATION, format!("Bearer {access_b}"))
+                .body(Body::from("{}"))?,
+        )
+        .await?;
+    assert_eq!(all_logout.status(), StatusCode::OK);
+
+    for (uri, body) in [
+        (protected_uri.as_str(), None),
+        (
+            REFRESH_SPEC.route.path(),
+            Some(serde_json::json!({"refreshToken": refresh_b}).to_string()),
+        ),
+    ] {
+        let mut request = Request::builder().uri(uri);
+        let request = if let Some(body) = body {
+            request = request
+                .method(Method::POST)
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("X-Tenant-ID", CANON_TENANT);
+            request.body(Body::from(body))?
+        } else {
+            request = request
+                .method(Method::GET)
+                .header(header::AUTHORIZATION, format!("Bearer {access_b}"));
+            request.body(Body::empty())?
+        };
+        assert_eq!(
+            app.clone().oneshot(request).await?.status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
 
     Ok(())
 }

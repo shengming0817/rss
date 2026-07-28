@@ -390,6 +390,9 @@ fn trait_names(item: &syn::ItemTrait) -> Result<BTreeSet<String>> {
 fn composition_port(method: &TraitMethod) -> Result<ProducerCompositionPort> {
     match method.trait_name.as_str() {
         "AuthGrantLifecycleLocal" => Ok(ProducerCompositionPort::AuthGrantLifecycleLocal),
+        "IdentitySecurityLifecycleLocal" => {
+            Ok(ProducerCompositionPort::IdentitySecurityLifecycleLocal)
+        }
         "PolicyLifecycleLocal" => Ok(ProducerCompositionPort::PolicyLifecycleLocal),
         "RoleBindingLifecycleLocal" => Ok(ProducerCompositionPort::RoleBindingLifecycleLocal),
         "ConfigUnitOfWorkLocal" => Ok(ProducerCompositionPort::ConfigUnitOfWorkLocal),
@@ -647,7 +650,12 @@ fn collect_postgres_terminals(
                     let expected = expected_fact_aliases.get(key).with_context(|| {
                         format!("producer route {key} has no emitted-fact aliases")
                     })?;
-                    let event_entries = event_entry_bindings_in_signature(&method.sig);
+                    let mut event_entries = event_entry_bindings_in_signature(&method.sig);
+                    let route_sealed = event_entries.is_empty();
+                    if route_sealed && let Some(binding) = route_sealed_command_binding(&method.sig)
+                    {
+                        event_entries.push(binding);
+                    }
                     ensure!(
                         event_entries.len() == 1,
                         "{}::{provider_name}::{} must bind one exact EventEntry, got {event_entries:?}",
@@ -659,6 +667,7 @@ fn collect_postgres_terminals(
                         &bindings[0],
                         &event_entries[0],
                         expected.values(),
+                        route_sealed,
                     );
                     let actual_aliases = authorizations
                         .iter()
@@ -773,6 +782,7 @@ fn authorization_bindings<'a>(
     receipt_binding: &str,
     event_entry_binding: &str,
     expected_aliases: impl Iterator<Item = &'a String>,
+    route_sealed: bool,
 ) -> Vec<(String, String)> {
     #[derive(Clone, Default)]
     struct FactEnvironment {
@@ -868,6 +878,7 @@ fn authorization_bindings<'a>(
         receipt_binding: &'a str,
         event_entry_binding: &'a str,
         expected_aliases: BTreeSet<String>,
+        route_sealed: bool,
         environment: FactEnvironment,
         found: Vec<(String, String)>,
     }
@@ -877,6 +888,7 @@ fn authorization_bindings<'a>(
                 receipt_binding: self.receipt_binding,
                 event_entry_binding: self.event_entry_binding,
                 expected_aliases: self.expected_aliases.clone(),
+                route_sealed: self.route_sealed,
                 environment: self.environment.clone(),
                 found: Vec::new(),
             }
@@ -904,7 +916,15 @@ fn authorization_bindings<'a>(
                             self.receipt_binding,
                             alias,
                             self.event_entry_binding,
-                            &|name| self.environment.proven(name),
+                            &|name| {
+                                self.environment.proven(name)
+                                    || (self.route_sealed
+                                        && self.expected_aliases.iter().any(|contract| {
+                                            contract.strip_suffix("_CONTRACT").is_some_and(
+                                                |prefix| name == format!("{prefix}_FACT"),
+                                            )
+                                        }))
+                            },
                         ) {
                             self.found.push((binding.ident.to_string(), alias.clone()));
                         }
@@ -1054,6 +1074,7 @@ fn authorization_bindings<'a>(
         receipt_binding,
         event_entry_binding,
         expected_aliases: expected_aliases.cloned().collect(),
+        route_sealed,
         environment: FactEnvironment::default(),
         found: Vec::new(),
     };
@@ -2282,6 +2303,33 @@ fn event_entry_bindings_in_signature(signature: &syn::Signature) -> Vec<String> 
         .collect()
 }
 
+/// Recognize the route-specific credential-security proof from the provider signature alone.
+/// The named command types have private fields and can only be minted by their exact domain
+/// transition; local variable names and statement layout deliberately carry no assurance weight.
+fn route_sealed_command_binding(signature: &syn::Signature) -> Option<String> {
+    let command_bindings = signature
+        .inputs
+        .iter()
+        .filter_map(|argument| {
+            let FnArg::Typed(argument) = argument else {
+                return None;
+            };
+            let syn::Pat::Ident(binding) = argument.pat.as_ref() else {
+                return None;
+            };
+            matches!(
+                type_last_ident(&argument.ty).as_deref(),
+                Some("LogoutCurrentCommand" | "LogoutAllCommand")
+            )
+            .then(|| binding.ident.to_string())
+        })
+        .collect::<Vec<_>>();
+    let [command] = command_bindings.as_slice() else {
+        return None;
+    };
+    Some(command.clone())
+}
+
 fn receipt_route_key(ty: &Type, aliases: &BTreeMap<String, String>) -> Option<String> {
     if let Type::Path(path) = ty {
         let last = path.path.segments.last()?;
@@ -2834,6 +2882,62 @@ mod tests {
     }
 
     #[test]
+    fn sealed_logout_command_proof_depends_only_on_the_route_specific_signature()
+    -> anyhow::Result<()> {
+        let canonical: syn::ItemFn = syn::parse_str(
+            r#"
+            async fn execute(
+                command: identity::ports::LogoutCurrentCommand,
+            ) {
+                let fact = identity::ports::credential_security_fact(command.event())?;
+                let entry = fact.entry().clone();
+            }
+            "#,
+        )?;
+        assert_eq!(
+            route_sealed_command_binding(&canonical.sig).as_deref(),
+            Some("command")
+        );
+
+        for source in [
+            r#"
+            async fn execute(command: identity::ports::CredentialSecurityCommand) {
+                let fact = identity::ports::credential_security_fact(command.event())?;
+                let entry = fact.entry().clone();
+            }
+            "#,
+            r#"
+            async fn execute(
+                current: identity::ports::LogoutCurrentCommand,
+                all: identity::ports::LogoutAllCommand,
+            ) {}
+            "#,
+        ] {
+            let rejected: syn::ItemFn = syn::parse_str(source)?;
+            assert!(
+                route_sealed_command_binding(&rejected.sig).is_none(),
+                "generic or ambiguous command signatures must fail closed"
+            );
+        }
+
+        let layout_independent: syn::ItemFn = syn::parse_str(
+            r#"
+            async fn renamed_and_delegated(
+                exact: identity::ports::LogoutAllCommand,
+            ) {
+                helper(exact).await
+            }
+            "#,
+        )?;
+        assert_eq!(
+            route_sealed_command_binding(&layout_independent.sig).as_deref(),
+            Some("exact"),
+            "proof must not depend on local names, clone calls, or top-level statement layout"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn postgres_provider_without_producer_tx_is_rejected() -> anyhow::Result<()> {
         let domain = syn::parse_file(
             r#"
@@ -3123,6 +3227,7 @@ mod tests {
                 "receipt",
                 "entry",
                 std::iter::once(&"EXACT_FACT_CONTRACT".to_string()),
+                false,
             )
             .is_empty(),
             "a cfg(test) local must not mint production authorization evidence"
@@ -3324,6 +3429,28 @@ mod tests {
 
     #[test]
     fn authorization_fact_provenance_is_semantic_not_a_local_name() -> anyhow::Result<()> {
+        let sealed_direct: syn::Block = syn::parse_str(
+            r#"{
+                let authorization = receipt
+                    .authorize(SECURITY_EVENT_FACT, SECURITY_EVENT_CONTRACT)
+                    .ok_or_else(storage)?;
+            }"#,
+        )?;
+        assert_eq!(
+            authorization_bindings(
+                &sealed_direct,
+                "receipt",
+                "command",
+                std::iter::once(&"SECURITY_EVENT_CONTRACT".to_string()),
+                true,
+            ),
+            [(
+                "authorization".to_string(),
+                "SECURITY_EVENT_CONTRACT".to_string()
+            )],
+            "an exact route-sealed command admits only the fact alias derived from its manifest contract"
+        );
+
         let renamed: syn::Block = syn::parse_str(
             r#"{
                 let fact = entry.generated_fact().ok_or_else(storage)?;
@@ -3338,6 +3465,7 @@ mod tests {
                 "receipt",
                 "entry",
                 std::iter::once(&"EXACT_FACT".to_string()),
+                false,
             ) == [("authorization".to_string(), "EXACT_FACT".to_string())],
             "renaming a binding derived from EventEntry::generated_fact must preserve evidence"
         );
@@ -3356,6 +3484,7 @@ mod tests {
                 "receipt",
                 "entry",
                 std::iter::once(&"EXACT_FACT".to_string()),
+                false,
             )
             .is_empty(),
             "a magic local name without EventEntry::generated_fact provenance is not evidence"
@@ -3375,6 +3504,7 @@ mod tests {
                 "receipt",
                 "entry",
                 std::iter::once(&"EXACT_FACT".to_string()),
+                false,
             )
             .is_empty(),
             "a mixed-source expression that merely contains generated_fact is not provenance"
@@ -3444,6 +3574,7 @@ mod tests {
                     "receipt",
                     "entry",
                     std::iter::once(&"EXACT_FACT".to_string()),
+                    false,
                 )
                 .is_empty(),
                 "{case} must invalidate the old generated-fact binding"
@@ -3469,6 +3600,7 @@ mod tests {
                 "receipt",
                 "entry",
                 std::iter::once(&"EXACT_FACT".to_string()),
+                false,
             ),
             [("authorization".to_string(), "EXACT_FACT".to_string())],
             "branch merge may retain provenance only when every incoming definition is generated"

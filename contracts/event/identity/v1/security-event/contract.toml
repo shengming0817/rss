@@ -1,12 +1,11 @@
-# identity security-event event 契约（draft）——持久凭据安全生命周期的 durable outbox fact。
-# draft 仅冻结 payload 与 codegen 形态；active producer/subscriber 接线另行完成后再激活。
+# identity security-event event 契约——持久凭据安全生命周期的 durable outbox fact。
 id = "identity.security-event"
 kind = "event"
 domain = "identity"
 version = "v1"
 owner = "identity"
 consistencyLevel = "OutboxFact"
-lifecycle = "draft"
+lifecycle = "active"
 topic = "identity.security-event"
 delivery = "at-least-once"
 
@@ -15,3 +14,13 @@ payload = "payload.schema.json"
 
 [capabilities.outbox]
 role = "fact"
+
+[[subscriptions]]
+consumer = "audit"
+group = "audit.security-event"
+execution = "adapter-native"
+externalEffectPolicy = "transactional-only"
+
+[subscriptions.topology]
+partitionKey = "none"
+readiness = "required"

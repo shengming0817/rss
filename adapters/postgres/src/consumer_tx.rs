@@ -9,7 +9,7 @@ use std::sync::Arc;
 #[cfg(feature = "domain-audit")]
 use audit::ports::{
     AuditChainHasher, AuditEventKind, AuditEventRecordError, AuditRecord,
-    audit_record_from_event_message,
+    audit_record_from_event_message, security_audit_command_from_message,
 };
 use consistency::idempotency::LeaseOutcome;
 #[cfg(feature = "domain-settings")]
@@ -126,6 +126,13 @@ where
         Self::new(store, hasher, AuditEventKind::PolicyUpdated)
     }
 
+    pub(crate) fn security_event(
+        store: &VerifiedPgWriteStore,
+        hasher: AuditChainHasher<M>,
+    ) -> Self {
+        Self::new(store, hasher, AuditEventKind::SecurityEvent)
+    }
+
     fn new(
         store: &VerifiedPgWriteStore,
         hasher: AuditChainHasher<M>,
@@ -145,6 +152,9 @@ where
         key: IdemKey,
         lease: LeaseToken,
     ) -> PgConsumerTxOutcome {
+        if self.kind == AuditEventKind::SecurityEvent {
+            return self.handle_security_attempt(message, ctx, key, lease).await;
+        }
         let record = match self.validated_record_from_message(&message, &ctx) {
             Ok(record) => record,
             Err(outcome) => return outcome,
@@ -152,6 +162,27 @@ where
         pg_consumer_tx_outcome(
             "audit",
             self.append_and_mark_done(record, ctx, key, lease).await,
+        )
+    }
+
+    async fn handle_security_attempt(
+        &self,
+        message: diport::Message,
+        ctx: InboxReceiptContext,
+        key: IdemKey,
+        lease: LeaseToken,
+    ) -> PgConsumerTxOutcome {
+        let command = match security_audit_command_from_message(&message) {
+            Ok(command) if command.tenant() == ctx.tenant_id() => command,
+            Ok(command) => {
+                return reject_audit_tenant_mismatch(&message, command.tenant(), &ctx);
+            }
+            Err(error) => return reject_audit_payload(&message, &error),
+        };
+        pg_consumer_tx_outcome(
+            "audit-security-event",
+            self.append_and_mark_done(command.into_record(), ctx, key, lease)
+                .await,
         )
     }
 
@@ -205,7 +236,7 @@ where
             .record_from_message(message)
             .map_err(|error| reject_audit_payload(message, &error))?;
         if record.tenant != ctx.tenant_id() {
-            return Err(reject_audit_tenant_mismatch(message, &record, ctx));
+            return Err(reject_audit_tenant_mismatch(message, record.tenant, ctx));
         }
         Ok(record)
     }
@@ -342,12 +373,12 @@ fn reject_audit_payload(
 #[cfg(feature = "domain-audit")]
 fn reject_audit_tenant_mismatch(
     message: &diport::Message,
-    record: &AuditRecord,
+    payload_tenant: vocab::TenantId,
     ctx: &InboxReceiptContext,
 ) -> PgConsumerTxOutcome {
     tracing::warn!(
         message_id = message.id.as_str(),
-        payload_tenant = %record.tenant,
+        payload_tenant = %payload_tenant,
         receipt_tenant = %ctx.tenant_id(),
         "consumer-tx: audit payload tenant does not match verified envelope tenant"
     );

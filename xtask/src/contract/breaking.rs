@@ -52,6 +52,7 @@ use super::redaction;
 pub(crate) const DEFAULT_AGAINST: &str = "origin/develop";
 
 const REVIEW_ACK_PREFIX: &str = "Contract-Review-Ack: sha256:";
+const BREAKING_AUTHORIZATION_PREFIX: &str = "Contract-Breaking-Authorization: sha256:";
 
 /// JSON Schema `properties` 键名（DRY：compare_node + check_field_deletions 多处引用）。
 const PROPS: &str = "properties";
@@ -1377,17 +1378,46 @@ pub(crate) fn run(against: &str) -> Result<()> {
     let diffs = plan_diffs(&base, &working)?;
     let result = evaluate(&diffs);
     print_result(against, &result);
-    if result.any_deny {
+    enforce_breaking_authorization(&root, against, &result.findings)?;
+    enforce_review_ack(&root, against, &result.findings)?;
+    Ok(())
+}
+
+fn enforce_breaking_authorization(
+    root: &Path,
+    against: &str,
+    findings: &[GradedFinding],
+) -> Result<()> {
+    let denied: Vec<GradedFinding> = findings
+        .iter()
+        .filter(|finding| finding.disposition == Disposition::Deny)
+        .cloned()
+        .collect();
+    if denied.is_empty() {
+        return Ok(());
+    }
+    let base_oid = git_stdout(
+        root,
+        &["rev-parse", "--verify", &format!("{against}^{{commit}}")],
+    )?;
+    let range = format!("{against}..HEAD");
+    let messages = git_stdout(root, &["log", "--format=%B%x00", &range])?;
+    verify_breaking_authorization(base_oid.trim(), &denied, &messages)
+}
+
+fn verify_breaking_authorization(
+    base_oid: &str,
+    findings: &[GradedFinding],
+    commit_messages: &str,
+) -> Result<()> {
+    let fingerprint = breaking_authorization_fingerprint(base_oid, findings);
+    let expected = format!("{BREAKING_AUTHORIZATION_PREFIX}{fingerprint}");
+    if !commit_messages_contain_review_ack(commit_messages, &expected) {
         bail!(
-            "contract breaking: {} 项 active 契约 wire 破坏（fail-closed）",
-            result
-                .findings
-                .iter()
-                .filter(|f| f.disposition == Disposition::Deny)
-                .count()
+            "contract breaking: {} 项 active 契约 wire 破坏未经精确授权（fingerprint={fingerprint}）。确认 intentional breaking 后，在承载变更或后续 commit body 中加入精确 trailer：\n{expected}",
+            findings.len()
         );
     }
-    enforce_review_ack(&root, against, &result.findings)?;
     Ok(())
 }
 
@@ -1437,6 +1467,18 @@ fn git_stdout(root: &Path, args: &[&str]) -> Result<String> {
 }
 
 fn review_ack_fingerprint(base_oid: &str, findings: &[GradedFinding]) -> String {
+    findings_fingerprint(b"rss-contract-review-ack-v1\0", base_oid, findings)
+}
+
+fn breaking_authorization_fingerprint(base_oid: &str, findings: &[GradedFinding]) -> String {
+    findings_fingerprint(
+        b"rss-contract-breaking-authorization-v1\0",
+        base_oid,
+        findings,
+    )
+}
+
+fn findings_fingerprint(domain: &[u8], base_oid: &str, findings: &[GradedFinding]) -> String {
     let mut canonical: Vec<(&str, &str, &str)> = findings
         .iter()
         .map(|finding| {
@@ -1450,7 +1492,7 @@ fn review_ack_fingerprint(base_oid: &str, findings: &[GradedFinding]) -> String 
     canonical.sort_unstable();
 
     let mut digest = Sha256::new();
-    digest.update(b"rss-contract-review-ack-v1\0");
+    digest.update(domain);
     digest.update(base_oid.as_bytes());
     digest.update([0]);
     for (rule, subject, detail) in canonical {
@@ -3395,6 +3437,42 @@ lifecycle = "active"
             &findings,
             &format!("subject\n\n{REVIEW_ACK_PREFIX}{fingerprint}\n"),
         )?;
+        Ok(())
+    }
+
+    #[test]
+    fn breaking_authorization_is_exact_and_domain_separated() -> anyhow::Result<()> {
+        let findings = [GradedFinding {
+            lifecycle: Lifecycle::Active,
+            disposition: Disposition::Deny,
+            rule: BreakingRule::FieldNoDelete,
+            subject: "http/identity/v1 request (sessionId)".to_string(),
+            detail: "字段被删除".to_string(),
+        }];
+        let fingerprint = breaking_authorization_fingerprint("base-oid", &findings);
+        assert_ne!(fingerprint, review_ack_fingerprint("base-oid", &findings));
+        assert!(verify_breaking_authorization("base-oid", &findings, "").is_err());
+        assert!(
+            verify_breaking_authorization(
+                "base-oid",
+                &findings,
+                "Contract-Breaking-Authorization: sha256:wrong",
+            )
+            .is_err()
+        );
+        verify_breaking_authorization(
+            "base-oid",
+            &findings,
+            &format!("subject\n\n{BREAKING_AUTHORIZATION_PREFIX}{fingerprint}\n"),
+        )?;
+        assert!(
+            verify_breaking_authorization(
+                "other-base",
+                &findings,
+                &format!("{BREAKING_AUTHORIZATION_PREFIX}{fingerprint}"),
+            )
+            .is_err()
+        );
         Ok(())
     }
 

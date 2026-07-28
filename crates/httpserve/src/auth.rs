@@ -18,8 +18,8 @@
 //! httpserve 自身不构造、不验签（finalize_auth 签名冻结，无 verifier 参）；本 crate 单独 merge 无注入方 →
 //! 所有 Require 路由仍 401，零端点放开（Medium，单测 + tests/runtime.rs 集成测试守）。
 //!
-//! INVARIANT: AUTH-EVIDENCE-MINT-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }—— [`Authenticated`] / [`CurrentAuthGrant`] 私有字段使非法 shape 不可表示；
-//! profile-specific constructors 及 [`CurrentAuthGrant::new`] 的精确组合根来源另由 Medium
+//! INVARIANT: AUTH-EVIDENCE-MINT-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }—— [`Authenticated`] 私有字段使非法 shape 不可表示；
+//! profile-specific constructors 的精确组合根来源另由 Medium
 //! `rss_authenticated_callsite` DefId callsite dylint 封闭，杜绝域 crate 伪造证据绕过 enforce。
 //!
 //! tower readiness 契约：call 使用的 inner 实例必须是 poll_ready 的实例。
@@ -561,35 +561,6 @@ pub struct Authenticated {
     principal_id: String,
     tenant_id: Option<TenantId>,
     service_caller: Option<vocab::ServiceCallerDomain>,
-    current_auth_grant: Option<CurrentAuthGrant>,
-}
-
-/// Opaque proof that an RSS User token matched current durable grant and account state.
-///
-/// Fields are private and the constructor is guarded to the runtime verification bridge. The
-/// marker carries no identifiers, so request extensions, logs and metrics cannot disclose grant
-/// or token correlation values.
-#[derive(Clone)]
-pub struct CurrentAuthGrant {
-    _private: (),
-}
-
-impl CurrentAuthGrant {
-    /// Mint the marker after the identity validator returned its move-only durable proof.
-    #[must_use]
-    #[allow(
-        clippy::new_without_default,
-        reason = "Default would create current-grant evidence without consuming validator proof"
-    )]
-    pub fn new() -> Self {
-        Self { _private: () }
-    }
-}
-
-impl fmt::Debug for CurrentAuthGrant {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("CurrentAuthGrant(<redacted>)")
-    }
 }
 
 /// Caller-supplied fields for an audit event whose principal identity must come from verified
@@ -624,13 +595,10 @@ impl Authenticated {
             principal_id: principal_id.into(),
             tenant_id,
             service_caller: None,
-            current_auth_grant: (scheme == RequiredScheme::RssAccessToken)
-                .then(CurrentAuthGrant::new),
         }
     }
 
-    /// Construct federated access evidence. Local RSS access has a separate constructor that
-    /// requires [`CurrentAuthGrant`].
+    /// Construct federated access evidence.
     pub fn new_federated(
         principal_kind: PrincipalKind,
         principal_id: impl Into<String>,
@@ -642,23 +610,18 @@ impl Authenticated {
             principal_id: principal_id.into(),
             tenant_id,
             service_caller: None,
-            current_auth_grant: None,
         }
     }
 
-    /// Construct local RSS User evidence only after current durable grant validation.
-    pub fn new_rss_user(
-        current_auth_grant: CurrentAuthGrant,
-        principal_id: impl Into<String>,
-        tenant_id: TenantId,
-    ) -> Self {
+    /// Construct local RSS User authentication evidence after durable grant validation.
+    /// Grant correlation remains in identity-owned request evidence.
+    pub fn new_rss_user(principal_id: impl Into<String>, tenant_id: TenantId) -> Self {
         Self {
             scheme: RequiredScheme::RssAccessToken,
             principal_kind: PrincipalKind::User,
             principal_id: principal_id.into(),
             tenant_id: Some(tenant_id),
             service_caller: None,
-            current_auth_grant: Some(current_auth_grant),
         }
     }
 
@@ -670,7 +633,6 @@ impl Authenticated {
             principal_id: principal_id.into(),
             tenant_id: None,
             service_caller: None,
-            current_auth_grant: None,
         }
     }
 
@@ -682,7 +644,6 @@ impl Authenticated {
             principal_id: caller.as_str().to_owned(),
             tenant_id: Some(tenant_id),
             service_caller: Some(caller),
-            current_auth_grant: None,
         }
     }
 
@@ -705,11 +666,6 @@ impl Authenticated {
     /// 已认证主体租户；跨租户主体（service / super-admin）可能为 `None`。
     pub fn tenant_id(&self) -> Option<TenantId> {
         self.tenant_id
-    }
-
-    /// Borrow the durable-current marker carried only by RSS User evidence.
-    pub fn current_auth_grant(&self) -> Option<&CurrentAuthGrant> {
-        self.current_auth_grant.as_ref()
     }
 
     /// Verified closed service caller, present only for service-token evidence.
@@ -1227,7 +1183,7 @@ where
             .filter(|ev| {
                 ev.principal_kind() != PrincipalKind::Anonymous
                     && (ev.scheme() != RequiredScheme::RssAccessToken
-                        || ev.current_auth_grant().is_some())
+                        || ev.principal_kind() == PrincipalKind::User)
             })
             .map(|ev| ev.scheme());
         let rid = req
@@ -1505,14 +1461,6 @@ mod tests {
         vocab::HttpEffectProfile::new(TEST_EFFECTS),
     );
     const TEST_TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
-
-    #[test]
-    fn current_auth_grant_debug_is_opaque() {
-        assert_eq!(
-            format!("{:?}", CurrentAuthGrant::new()),
-            "CurrentAuthGrant(<redacted>)"
-        );
-    }
 
     #[test]
     #[allow(clippy::expect_used)]

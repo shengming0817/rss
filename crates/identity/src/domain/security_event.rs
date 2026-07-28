@@ -51,7 +51,7 @@ pub enum CredentialSecurityTargetKind {
     Grant,
 }
 
-/// Opaque, non-PII reference used by the draft security-event wire contract.
+/// Opaque, non-PII reference used by the active security-event wire contract.
 #[derive(Clone, PartialEq, Eq, Hash, secure::Redact)]
 pub struct CredentialSecurityTargetRef(#[redact(sensitivity = secret)] uuid::Uuid);
 
@@ -60,23 +60,9 @@ impl CredentialSecurityTargetRef {
         Self(uuid::Uuid::new_v4())
     }
 
-    /// Parse a canonical UUID obtained from the generated wire DTO or provider row.
-    pub fn parse(raw: &str) -> Result<Self, CredentialSecurityTargetRefError> {
-        uuid::Uuid::parse_str(raw)
-            .map(Self)
-            .map_err(|_| CredentialSecurityTargetRefError::Invalid)
-    }
-
     pub fn as_uuid(&self) -> uuid::Uuid {
         self.0
     }
-}
-
-/// Invalid opaque target reference.
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
-pub enum CredentialSecurityTargetRefError {
-    #[error("credential security target reference is invalid")]
-    Invalid,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -110,114 +96,6 @@ impl CredentialSecurityTarget {
             Self::Grant { grant_id, .. } => Some(grant_id),
         }
     }
-}
-
-/// Provider-owned target mapping emitted atomically beside the generated fact.
-///
-/// Raw subject/grant identifiers stay in this record and never enter the payload or envelope.
-pub struct CredentialSecurityTargetMapping {
-    tenant: TenantId,
-    target_ref: CredentialSecurityTargetRef,
-    target: CredentialSecurityTarget,
-}
-
-impl CredentialSecurityTargetMapping {
-    pub fn tenant(&self) -> TenantId {
-        self.tenant
-    }
-
-    pub fn target_ref(&self) -> &CredentialSecurityTargetRef {
-        &self.target_ref
-    }
-
-    pub fn kind(&self) -> CredentialSecurityTargetKind {
-        self.target.kind()
-    }
-
-    pub fn into_parts(
-        self,
-    ) -> (
-        TenantId,
-        CredentialSecurityTargetRef,
-        ResolvedCredentialSecurityTarget,
-    ) {
-        let resolved = ResolvedCredentialSecurityTarget {
-            tenant: self.tenant,
-            target_ref: self.target_ref.clone(),
-            target: self.target,
-        };
-        (self.tenant, self.target_ref, resolved)
-    }
-}
-
-/// Closed resolver result. Private fields prevent consumers from forging a resolved target.
-pub struct ResolvedCredentialSecurityTarget {
-    tenant: TenantId,
-    target_ref: CredentialSecurityTargetRef,
-    target: CredentialSecurityTarget,
-}
-
-impl ResolvedCredentialSecurityTarget {
-    /// Hydrate a provider row while preserving the closed subject/grant target shape.
-    ///
-    /// A subject row must not carry a grant id; a grant row must carry one. Fields remain private
-    /// so adapters cannot bypass this validation with a struct literal.
-    pub(crate) fn hydrate_provider_row(
-        tenant: TenantId,
-        target_ref: CredentialSecurityTargetRef,
-        kind: CredentialSecurityTargetKind,
-        user_id: UserId,
-        grant_id: Option<AuthGrantId>,
-    ) -> Result<Self, CredentialSecurityTargetHydrationError> {
-        let target = match (kind, grant_id) {
-            (CredentialSecurityTargetKind::Subject, None) => {
-                CredentialSecurityTarget::Subject { user_id }
-            }
-            (CredentialSecurityTargetKind::Grant, Some(grant_id)) => {
-                CredentialSecurityTarget::Grant { user_id, grant_id }
-            }
-            (CredentialSecurityTargetKind::Subject, Some(_)) => {
-                return Err(CredentialSecurityTargetHydrationError::UnexpectedGrantId);
-            }
-            (CredentialSecurityTargetKind::Grant, None) => {
-                return Err(CredentialSecurityTargetHydrationError::MissingGrantId);
-            }
-        };
-        Ok(Self {
-            tenant,
-            target_ref,
-            target,
-        })
-    }
-
-    pub fn tenant(&self) -> TenantId {
-        self.tenant
-    }
-
-    pub fn target_ref(&self) -> &CredentialSecurityTargetRef {
-        &self.target_ref
-    }
-
-    pub fn kind(&self) -> CredentialSecurityTargetKind {
-        self.target.kind()
-    }
-
-    pub fn user_id(&self) -> UserId {
-        self.target.user_id()
-    }
-
-    pub fn grant_id(&self) -> Option<&AuthGrantId> {
-        self.target.grant_id()
-    }
-}
-
-/// A provider row violates the closed credential-security target shape.
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
-pub enum CredentialSecurityTargetHydrationError {
-    #[error("subject credential-security target unexpectedly contains a grant id")]
-    UnexpectedGrantId,
-    #[error("grant credential-security target is missing its grant id")]
-    MissingGrantId,
 }
 
 /// Unforgeable event identity derived together with a sealed persistence command.
@@ -285,17 +163,6 @@ impl CredentialSecurityEvent {
     pub fn occurred_at(&self) -> SystemTime {
         self.occurred_at
     }
-
-    pub(crate) fn target_mapping(
-        &self,
-        target_ref: CredentialSecurityTargetRef,
-    ) -> CredentialSecurityTargetMapping {
-        CredentialSecurityTargetMapping {
-            tenant: self.tenant,
-            target_ref,
-            target: self.target.clone(),
-        }
-    }
 }
 
 impl std::fmt::Debug for CredentialSecurityEvent {
@@ -315,7 +182,6 @@ pub struct AccountCredentialSecurityCommand {
     mutation: AccountSecurityMutation,
     event: CredentialSecurityEvent,
     pending: PendingCredentialSecurityCommit,
-    authorization: CredentialSecurityFactAuthorization,
 }
 
 impl AccountCredentialSecurityCommand {
@@ -330,7 +196,6 @@ impl AccountCredentialSecurityCommand {
             mutation,
             event,
             pending: PendingCredentialSecurityCommit(()),
-            authorization: CredentialSecurityFactAuthorization(()),
         })
     }
 
@@ -348,9 +213,8 @@ impl AccountCredentialSecurityCommand {
         AccountSecurityMutation,
         CredentialSecurityEvent,
         PendingCredentialSecurityCommit,
-        CredentialSecurityFactAuthorization,
     ) {
-        (self.mutation, self.event, self.pending, self.authorization)
+        (self.mutation, self.event, self.pending)
     }
 }
 
@@ -359,7 +223,6 @@ pub struct GrantCredentialSecurityCommand {
     mutation: AuthGrantCloseMutation,
     event: CredentialSecurityEvent,
     pending: PendingCredentialSecurityCommit,
-    authorization: CredentialSecurityFactAuthorization,
 }
 
 impl GrantCredentialSecurityCommand {
@@ -374,7 +237,6 @@ impl GrantCredentialSecurityCommand {
             mutation,
             event,
             pending: PendingCredentialSecurityCommit(()),
-            authorization: CredentialSecurityFactAuthorization(()),
         })
     }
 
@@ -392,9 +254,8 @@ impl GrantCredentialSecurityCommand {
         AuthGrantCloseMutation,
         CredentialSecurityEvent,
         PendingCredentialSecurityCommit,
-        CredentialSecurityFactAuthorization,
     ) {
-        (self.mutation, self.event, self.pending, self.authorization)
+        (self.mutation, self.event, self.pending)
     }
 }
 
@@ -404,11 +265,30 @@ pub enum CredentialSecurityCommand {
     Grant(GrantCredentialSecurityCommand),
 }
 
-/// Linear proof that one generated security fact came from a sealed domain command.
-#[must_use]
-pub struct CredentialSecurityFactAuthorization(());
+/// Sealed logout-current command. Its private inner value is always a grant-local
+/// `LogoutCurrent` mutation and cannot be substituted with an account command.
+pub struct LogoutCurrentCommand(CredentialSecurityCommand);
+
+/// Sealed logout-all command. Its private inner value is always an account-wide
+/// `LogoutAll` mutation and cannot be substituted with a grant command.
+pub struct LogoutAllCommand(CredentialSecurityCommand);
 
 impl CredentialSecurityCommand {
+    pub(crate) fn logout_all(
+        state: AccountSecurityState,
+        occurred_at: SystemTime,
+    ) -> Result<LogoutAllCommand, AccountSecurityTransitionError> {
+        Self::account(state, AccountSecurityEventKind::LogoutAll, occurred_at).map(LogoutAllCommand)
+    }
+
+    pub(crate) fn logout_current(
+        grant: AuthGrant,
+        occurred_at: SystemTime,
+    ) -> Result<LogoutCurrentCommand, AuthGrantStateError> {
+        Self::grant(grant, GrantSecurityEventKind::LogoutCurrent, occurred_at)
+            .map(LogoutCurrentCommand)
+    }
+
     pub(crate) fn account(
         state: AccountSecurityState,
         kind: AccountSecurityEventKind,
@@ -433,9 +313,26 @@ impl CredentialSecurityCommand {
     }
 }
 
-// The protocol deliberately stays draft until its production producer lands. These anonymous
-// compile-time bindings keep both sealed construction funnels type-checked and reachable without
-// opening them to adapter callers or pretending that runtime wiring already exists.
+impl LogoutCurrentCommand {
+    pub fn event(&self) -> &CredentialSecurityEvent {
+        self.0.event()
+    }
+
+    pub fn into_security_command(self) -> CredentialSecurityCommand {
+        self.0
+    }
+}
+
+impl LogoutAllCommand {
+    pub fn event(&self) -> &CredentialSecurityEvent {
+        self.0.event()
+    }
+
+    pub fn into_security_command(self) -> CredentialSecurityCommand {
+        self.0
+    }
+}
+
 const _: fn(
     AccountSecurityState,
     AccountSecurityEventKind,
@@ -604,7 +501,7 @@ mod tests {
             );
             assert_eq!(command.mutation().next().updated_at(), at(20));
 
-            let (_mutation, _event, _pending, _authorization) = command.into_parts();
+            let (_mutation, _event, _pending) = command.into_parts();
         }
     }
 
@@ -661,62 +558,7 @@ mod tests {
                 Some(CredentialSecurityEventKind::Grant(kind))
             );
 
-            let (_mutation, _event, _pending, _authorization) = command.into_parts();
+            let (_mutation, _event, _pending) = command.into_parts();
         }
-    }
-
-    #[test]
-    fn provider_target_hydration_rejects_malformed_closed_shapes() {
-        let subject_ref =
-            CredentialSecurityTargetRef::parse("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
-                .expect("subject ref");
-        let grant_ref = CredentialSecurityTargetRef::parse("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
-            .expect("grant ref");
-
-        let subject = ResolvedCredentialSecurityTarget::hydrate_provider_row(
-            tenant(),
-            subject_ref.clone(),
-            CredentialSecurityTargetKind::Subject,
-            user(),
-            None,
-        )
-        .expect("subject row");
-        assert_eq!(subject.kind(), CredentialSecurityTargetKind::Subject);
-        assert!(subject.grant_id().is_none());
-
-        let grant = ResolvedCredentialSecurityTarget::hydrate_provider_row(
-            tenant(),
-            grant_ref.clone(),
-            CredentialSecurityTargetKind::Grant,
-            user(),
-            Some(AuthGrantId::hydrate("7d65e5f2-e716-4c4e-8e4c-6f7ab1754ef8").expect("grant id")),
-        )
-        .expect("grant row");
-        assert_eq!(grant.kind(), CredentialSecurityTargetKind::Grant);
-
-        assert_eq!(
-            ResolvedCredentialSecurityTarget::hydrate_provider_row(
-                tenant(),
-                subject_ref,
-                CredentialSecurityTargetKind::Subject,
-                user(),
-                Some(
-                    AuthGrantId::hydrate("d8dbe849-1d7e-49aa-b68a-a7b41ed252df").expect("grant id"),
-                ),
-            )
-            .err(),
-            Some(CredentialSecurityTargetHydrationError::UnexpectedGrantId)
-        );
-        assert_eq!(
-            ResolvedCredentialSecurityTarget::hydrate_provider_row(
-                tenant(),
-                grant_ref,
-                CredentialSecurityTargetKind::Grant,
-                user(),
-                None,
-            )
-            .err(),
-            Some(CredentialSecurityTargetHydrationError::MissingGrantId)
-        );
     }
 }

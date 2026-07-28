@@ -1170,7 +1170,15 @@ pub mod security_event {
         CONTRACT,
         TOPIC,
         super::super::PartitionKeyStrategy::None,
-        &[],
+        &[super::super::SubscriptionSpec::new(
+            "audit",
+            "audit.security-event",
+            super::super::SubscriptionDispatchKey::IdentitySecurityEventV1Audit,
+            super::super::SubscriberReadiness::Required,
+            super::super::SubscriptionExecution::AdapterNative,
+            None,
+            ::vocab::ExternalEffectPolicy::TransactionalOnly,
+        )],
     );
 }
 

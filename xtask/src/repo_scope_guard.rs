@@ -202,6 +202,10 @@ const INFRA_TENANT_SCOPE_ALLOWED_CALLS: &[(&str, &str)] = &[
         "adapters/postgres/src/consumer_tx.rs",
         "append_and_mark_done",
     ),
+    (
+        "adapters/postgres/src/consumer_tx.rs",
+        "resolve_append_and_mark_done",
+    ),
     ("adapters/postgres/src/consumer_tx.rs", "mark_done_only"),
     (
         "adapters/postgres/src/command_journal.rs",

@@ -1,7 +1,7 @@
 {
   "schemaVersion": 3,
-  "producerCount": 9,
-  "factCount": 5,
+  "producerCount": 11,
+  "factCount": 6,
   "contracts": [
     {
       "contractId": "identity.login",
@@ -131,6 +131,314 @@
                 "kind": "rust-symbol",
                 "path": "adapters/postgres/src/auth_grant_lifecycle.rs",
                 "symbol": "PgAuthGrantLifecycle::persist_login_grant"
+              },
+              "transaction": {
+                "kind": "rust-symbol",
+                "path": "adapters/postgres/src/cotx/mod.rs",
+                "symbol": "PgWritePool::producer_tx"
+              },
+              "rollback": {
+                "kind": "rust-symbol",
+                "path": "adapters/postgres/src/cotx/mod.rs",
+                "symbol": "rollback_local_tx"
+              },
+              "commitUnknown": {
+                "kind": "rust-symbol",
+                "path": "adapters/postgres/src/cotx/mod.rs",
+                "symbol": "finish_local_tx_commit_result"
+              },
+              "rollbackFailed": {
+                "kind": "rust-symbol",
+                "path": "adapters/postgres/src/cotx/mod.rs",
+                "symbol": "finish_local_tx_rollback_result"
+              },
+              "noReplay": {
+                "kind": "rust-symbol",
+                "path": "adapters/postgres/src/cotx/mod.rs",
+                "symbol": "ProducerTxAttempt::into_result"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "contractId": "identity.logout",
+      "domain": "identity",
+      "version": "v1",
+      "role": "producer",
+      "status": "closed",
+      "emittedFacts": [
+        "identity.security-event"
+      ],
+      "evidence": {
+        "contract": {
+          "status": "complete",
+          "carriers": [
+            {
+              "kind": "manifest",
+              "path": "contracts/http/identity/v1/logout/contract.toml",
+              "symbol": "id"
+            }
+          ]
+        },
+        "generated": {
+          "status": "complete",
+          "carriers": [
+            {
+              "kind": "rust-symbol",
+              "path": "generated/src/http/identity_v1.rs",
+              "symbol": "generated::http::identity_v1::logout::PRODUCER"
+            },
+            {
+              "kind": "rust-symbol",
+              "path": "generated/src/http/identity_v1.rs",
+              "symbol": "generated::http::identity_v1::logout::SPEC"
+            }
+          ]
+        },
+        "execution": {
+          "status": "complete",
+          "route": {
+            "kind": "rust-symbol",
+            "path": "generated/src/http/identity_v1.rs",
+            "symbol": "generated::http::identity_v1::logout::SPEC"
+          },
+          "mountedHandler": {
+            "kind": "rust-symbol",
+            "path": "crates/identity/src/application/mod.rs",
+            "symbol": "logout_handler"
+          },
+          "terminals": [
+            {
+              "factId": "identity.security-event",
+              "domainPath": [
+                {
+                  "kind": "rust-symbol",
+                  "path": "crates/identity/src/application/mod.rs",
+                  "symbol": "CredentialSecurityService::logout_current"
+                }
+              ],
+              "portMethod": {
+                "kind": "rust-symbol",
+                "path": "crates/identity/src/ports.rs",
+                "symbol": "IdentitySecurityLifecycleLocal::execute_logout_current"
+              },
+              "providerMethod": {
+                "kind": "rust-symbol",
+                "path": "adapters/postgres/src/identity_security_lifecycle.rs",
+                "symbol": "PgIdentitySecurityLifecycle::execute_logout_current"
+              },
+              "productionComposition": {
+                "runtimeEntry": {
+                  "kind": "rust-symbol",
+                  "path": "assemblies/runtime/src/phase.rs",
+                  "symbol": "execute"
+                },
+                "runtimeAssembly": {
+                  "kind": "rust-symbol",
+                  "path": "assemblies/runtime/src/phase/domains.rs",
+                  "symbol": "InfraBuilt::wire_domains"
+                },
+                "runtimeModule": {
+                  "kind": "rust-symbol",
+                  "path": "assemblies/runtime/src/domains/identity.rs",
+                  "symbol": "module"
+                },
+                "wire": {
+                  "kind": "rust-symbol",
+                  "path": "composition/identity/src/lib.rs",
+                  "symbol": "wire"
+                },
+                "serviceConstructor": "CredentialSecurityService::new",
+                "providerFactory": "PgDomainDeps::identity_security_lifecycle"
+              },
+              "transaction": {
+                "kind": "rust-symbol",
+                "path": "adapters/postgres/src/cotx/mod.rs",
+                "symbol": "PgWritePool::producer_tx"
+              },
+              "capability": {
+                "kind": "rust-symbol",
+                "path": "adapters/postgres/src/cotx/mod.rs",
+                "symbol": "TxCapability"
+              },
+              "append": {
+                "kind": "rust-symbol",
+                "path": "adapters/postgres/src/outbox.rs",
+                "symbol": "append_outbox_with_projection"
+              },
+              "settlement": {
+                "kind": "rust-symbol",
+                "path": "adapters/postgres/src/cotx/mod.rs",
+                "symbol": "finish_local_tx"
+              }
+            }
+          ]
+        },
+        "fault": {
+          "status": "complete",
+          "terminals": [
+            {
+              "factId": "identity.security-event",
+              "providerMethod": {
+                "kind": "rust-symbol",
+                "path": "adapters/postgres/src/identity_security_lifecycle.rs",
+                "symbol": "PgIdentitySecurityLifecycle::execute_logout_current"
+              },
+              "transaction": {
+                "kind": "rust-symbol",
+                "path": "adapters/postgres/src/cotx/mod.rs",
+                "symbol": "PgWritePool::producer_tx"
+              },
+              "rollback": {
+                "kind": "rust-symbol",
+                "path": "adapters/postgres/src/cotx/mod.rs",
+                "symbol": "rollback_local_tx"
+              },
+              "commitUnknown": {
+                "kind": "rust-symbol",
+                "path": "adapters/postgres/src/cotx/mod.rs",
+                "symbol": "finish_local_tx_commit_result"
+              },
+              "rollbackFailed": {
+                "kind": "rust-symbol",
+                "path": "adapters/postgres/src/cotx/mod.rs",
+                "symbol": "finish_local_tx_rollback_result"
+              },
+              "noReplay": {
+                "kind": "rust-symbol",
+                "path": "adapters/postgres/src/cotx/mod.rs",
+                "symbol": "ProducerTxAttempt::into_result"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "contractId": "identity.logout-all",
+      "domain": "identity",
+      "version": "v1",
+      "role": "producer",
+      "status": "closed",
+      "emittedFacts": [
+        "identity.security-event"
+      ],
+      "evidence": {
+        "contract": {
+          "status": "complete",
+          "carriers": [
+            {
+              "kind": "manifest",
+              "path": "contracts/http/identity/v1/logout-all/contract.toml",
+              "symbol": "id"
+            }
+          ]
+        },
+        "generated": {
+          "status": "complete",
+          "carriers": [
+            {
+              "kind": "rust-symbol",
+              "path": "generated/src/http/identity_v1.rs",
+              "symbol": "generated::http::identity_v1::logout_all::PRODUCER"
+            },
+            {
+              "kind": "rust-symbol",
+              "path": "generated/src/http/identity_v1.rs",
+              "symbol": "generated::http::identity_v1::logout_all::SPEC"
+            }
+          ]
+        },
+        "execution": {
+          "status": "complete",
+          "route": {
+            "kind": "rust-symbol",
+            "path": "generated/src/http/identity_v1.rs",
+            "symbol": "generated::http::identity_v1::logout_all::SPEC"
+          },
+          "mountedHandler": {
+            "kind": "rust-symbol",
+            "path": "crates/identity/src/application/mod.rs",
+            "symbol": "logout_all_handler"
+          },
+          "terminals": [
+            {
+              "factId": "identity.security-event",
+              "domainPath": [
+                {
+                  "kind": "rust-symbol",
+                  "path": "crates/identity/src/application/mod.rs",
+                  "symbol": "CredentialSecurityService::logout_all"
+                }
+              ],
+              "portMethod": {
+                "kind": "rust-symbol",
+                "path": "crates/identity/src/ports.rs",
+                "symbol": "IdentitySecurityLifecycleLocal::execute_logout_all"
+              },
+              "providerMethod": {
+                "kind": "rust-symbol",
+                "path": "adapters/postgres/src/identity_security_lifecycle.rs",
+                "symbol": "PgIdentitySecurityLifecycle::execute_logout_all"
+              },
+              "productionComposition": {
+                "runtimeEntry": {
+                  "kind": "rust-symbol",
+                  "path": "assemblies/runtime/src/phase.rs",
+                  "symbol": "execute"
+                },
+                "runtimeAssembly": {
+                  "kind": "rust-symbol",
+                  "path": "assemblies/runtime/src/phase/domains.rs",
+                  "symbol": "InfraBuilt::wire_domains"
+                },
+                "runtimeModule": {
+                  "kind": "rust-symbol",
+                  "path": "assemblies/runtime/src/domains/identity.rs",
+                  "symbol": "module"
+                },
+                "wire": {
+                  "kind": "rust-symbol",
+                  "path": "composition/identity/src/lib.rs",
+                  "symbol": "wire"
+                },
+                "serviceConstructor": "CredentialSecurityService::new",
+                "providerFactory": "PgDomainDeps::identity_security_lifecycle"
+              },
+              "transaction": {
+                "kind": "rust-symbol",
+                "path": "adapters/postgres/src/cotx/mod.rs",
+                "symbol": "PgWritePool::producer_tx"
+              },
+              "capability": {
+                "kind": "rust-symbol",
+                "path": "adapters/postgres/src/cotx/mod.rs",
+                "symbol": "TxCapability"
+              },
+              "append": {
+                "kind": "rust-symbol",
+                "path": "adapters/postgres/src/outbox.rs",
+                "symbol": "append_outbox_with_projection"
+              },
+              "settlement": {
+                "kind": "rust-symbol",
+                "path": "adapters/postgres/src/cotx/mod.rs",
+                "symbol": "finish_local_tx"
+              }
+            }
+          ]
+        },
+        "fault": {
+          "status": "complete",
+          "terminals": [
+            {
+              "factId": "identity.security-event",
+              "providerMethod": {
+                "kind": "rust-symbol",
+                "path": "adapters/postgres/src/identity_security_lifecycle.rs",
+                "symbol": "PgIdentitySecurityLifecycle::execute_logout_all"
               },
               "transaction": {
                 "kind": "rust-symbol",
@@ -1203,6 +1511,98 @@
                 "path": "adapters/postgres/src/cotx/mod.rs",
                 "symbol": "ProducerTxAttempt::into_result"
               }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "contractId": "identity.security-event",
+      "domain": "identity",
+      "version": "v1",
+      "role": "fact",
+      "status": "closed",
+      "topic": "identity.security-event",
+      "subscriptions": [
+        {
+          "consumer": "audit",
+          "group": "audit.security-event",
+          "externalEffectPolicy": "transactional-only"
+        }
+      ],
+      "evidence": {
+        "contract": {
+          "status": "complete",
+          "carriers": [
+            {
+              "kind": "manifest",
+              "path": "contracts/event/identity/v1/security-event/contract.toml",
+              "symbol": "id"
+            }
+          ]
+        },
+        "generated": {
+          "status": "complete",
+          "carriers": [
+            {
+              "kind": "rust-symbol",
+              "path": "generated/src/event/identity_v1.rs",
+              "symbol": "generated::event::identity_v1::security_event::SPEC"
+            }
+          ]
+        },
+        "runtime": {
+          "status": "complete",
+          "carriers": [
+            {
+              "kind": "rust-symbol",
+              "path": "composition/eventing/src/lib.rs",
+              "symbol": "bridge_generated_subscriptions"
+            },
+            {
+              "kind": "rust-symbol",
+              "path": "composition/eventing/src/lib.rs",
+              "symbol": "resolve_parts"
+            }
+          ]
+        },
+        "effect": {
+          "status": "complete",
+          "carriers": [
+            {
+              "kind": "rust-symbol",
+              "path": "composition/eventing/src/consumer_tx.rs",
+              "symbol": "PgAuditConsumerTx::handle"
+            },
+            {
+              "kind": "rust-symbol",
+              "path": "composition/eventing/src/consumer_tx.rs",
+              "symbol": "spawn_consumer_ackable_tx_subscriber"
+            },
+            {
+              "kind": "rust-symbol",
+              "path": "composition/eventing/src/lib.rs",
+              "symbol": "resolve_parts"
+            },
+            {
+              "kind": "rust-symbol",
+              "path": "crates/audit/src/application.rs",
+              "symbol": "register_audit_subscriber"
+            }
+          ]
+        },
+        "fault": {
+          "status": "complete",
+          "carriers": [
+            {
+              "kind": "fault-fixture",
+              "path": "fixtures/consistency/outbox/fixture-outbox-security-event-transient-publish-failure.toml",
+              "symbol": "outbox-security-event-transient-publish-failure"
+            },
+            {
+              "kind": "rust-symbol",
+              "path": "journeys-fault-matrix/tests/consistency_fault_matrix_journey.rs",
+              "symbol": "run_outbox_transient_publish_failure"
             }
           ]
         }

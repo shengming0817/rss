@@ -508,6 +508,7 @@ impl PgFaultMatrixHarness {
             &migrator,
             &serving,
             &tenant_read,
+            None,
             projection_generation,
             projection_inputs,
         )

@@ -42,11 +42,9 @@ mod security_event;
 pub use rbac::{Role, RoleBinding};
 pub use security_event::{
     AccountCredentialSecurityCommand, CredentialSecurityCommand, CredentialSecurityEvent,
-    CredentialSecurityFactAuthorization, CredentialSecurityReceipt,
-    CredentialSecurityTargetHydrationError, CredentialSecurityTargetKind,
-    CredentialSecurityTargetMapping, CredentialSecurityTargetRef, CredentialSecurityTargetRefError,
-    GrantCredentialSecurityCommand, PendingCredentialSecurityCommit,
-    ResolvedCredentialSecurityTarget,
+    CredentialSecurityReceipt, CredentialSecurityTargetKind, CredentialSecurityTargetRef,
+    GrantCredentialSecurityCommand, LogoutAllCommand, LogoutCurrentCommand,
+    PendingCredentialSecurityCommit,
 };
 // RefreshTokenRecord / RefreshTokenId / RefreshTokenHash / RefreshStatus 是 pub（ports::RefreshTokenStore
 // 签名实体，跨 crate 命名）；kind_to_db / kind_from_db 是 PrincipalKind↔text 单源映射（postgres adapter 消费）。
@@ -431,6 +429,9 @@ pub enum IdentityError {
     /// Generated security-event payload encoding failed before persistence starts.
     #[error("identity security payload encode failed")]
     SecurityPayloadEncode(#[source] serde_json::Error),
+    /// Explicitly classified temporary provider outage.
+    #[error("identity provider unavailable")]
+    ProviderUnavailable(#[source] Box<dyn std::error::Error + Send + Sync>),
     /// 底层存储错误（持久化失败；原始错误进 `#[source]`，不进 Display / wire）。
     #[error("identity storage error")]
     Storage(#[source] Box<dyn std::error::Error + Send + Sync>),

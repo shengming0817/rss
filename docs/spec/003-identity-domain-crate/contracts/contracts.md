@@ -15,7 +15,8 @@
 | `identity.role-assigned` | event | L2 OutboxFact | identity | 触发：角色分配；订阅：audit（延 #1017，contract lifecycle 暂留 draft 以免触发 active-subscriber 校验） | — |
 | `identity.role-revoked` | event | L2 OutboxFact | identity | 触发：角色撤销；订阅：audit（同上） | — |
 | `identity.password-change` | http | L1 | identity | `POST /api/v1/identity/password/change`，鉴权（selfScoped） | `identity:profile:write` |
-| `identity.logout` | http | L1 | identity | `POST /api/v1/identity/logout`，鉴权（selfScoped）；仅域侧软撤销，硬吊销延 #1003 | `identity:session:write` |
+| `identity.logout` | http | L2 OutboxFact | identity | `POST /api/v1/identity/logout`，严格 `{}`，按当前 grant evidence 撤销 | `identity:session:logout-current` |
+| `identity.logout-all` | http | L2 OutboxFact | identity | `POST /api/v1/identity/logout-all`，严格 `{}`，按 account epoch CAS 撤销全部既存授权 | `identity:session:logout-all` |
 | `identity.roles-assign` | http | L2 | identity | `POST /api/v1/identity/roles/{roleId}/bindings`，鉴权 | `identity:role:assign` |
 | `identity.roles-revoke` | http | L2 | identity | `DELETE /api/v1/identity/roles/{roleId}/bindings/{subject}`，鉴权（binding 级资源：tenant 从鉴权上下文派生，只撤目标 binding，跨租隐藏存在性） | `identity:role:revoke` |
 | `identity.roles-list` | http | L0 | identity | `GET /api/v1/identity/roles`，鉴权 + 分页(limit≤500)，响应 `{data,nextCursor,hasMore}` | `identity:role:read` |

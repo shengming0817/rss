@@ -58,6 +58,10 @@ use generated::event::identity_v1::{
     role_revoked::{
         IdentityRoleRevokedPayload, IdentityRoleRevokedPayloadActorKind, SPEC as ROLE_REVOKED_SPEC,
     },
+    security_event::{
+        IdentitySecurityEventPayload, IdentitySecurityEventPayloadKind,
+        IdentitySecurityEventPayloadTargetKind, SPEC as SECURITY_EVENT_SPEC,
+    },
     session_created::{IdentitySessionCreatedPayload, SPEC as SESSION_CREATED_SPEC},
 };
 // ListenerKind 仅测试断言用（lib 经 typed `route_group::<Admin>` 不再传运行期 ListenerKind 值）。
@@ -78,6 +82,7 @@ const AUDIT_DOMAIN: &str = "audit";
 const RESOURCE_KIND_SESSION: &str = "session";
 const RESOURCE_KIND_ROLE_BINDING: &str = "role-binding";
 const RESOURCE_KIND_POLICY: &str = "policy";
+const RESOURCE_KIND_SECURITY_TARGET: &str = "credential-security-target";
 /// 登录动作（`domain:verb`，vocab::Action 形态）。
 const ACTION_LOGIN: &str = "identity:login";
 const ACTION_ROLE_ASSIGN: &str = "identity:role_assign";
@@ -85,6 +90,13 @@ const ACTION_ROLE_REVOKE: &str = "identity:role_revoke";
 const ACTION_POLICY_CREATE: &str = "identity:policy_create";
 const ACTION_POLICY_UPDATE: &str = "identity:policy_update";
 const ACTION_POLICY_DEACTIVATE: &str = "identity:policy_deactivate";
+const ACTION_LOGOUT_CURRENT: &str = "identity:logout_current";
+const ACTION_LOGOUT_ALL: &str = "identity:logout_all";
+/// Stable service principal for records emitted by the credential-security event consumer.
+///
+/// `AuditRecord` uses a UUID-backed actor slot for every principal kind. Keeping this identity
+/// stable and service-scoped avoids misrepresenting the opaque target reference as a user.
+const CREDENTIAL_SECURITY_AUDIT_ACTOR: u128 = 0x0000_0000_0000_4000_8000_0000_0000_0184;
 
 /// admin 读路由组 nest 前缀（Admin listener；与 contracts/http/audit/v1 单源对齐）。
 const AUDIT_ROUTE_PREFIX: &str = "/api/v1/audit";
@@ -123,6 +135,32 @@ pub enum AuditEventKind {
     RoleRevoked,
     /// `identity.policy-updated`.
     PolicyUpdated,
+    SecurityEvent,
+}
+
+/// Sealed audit command decoded entirely from the redacted security-event fact.
+///
+/// Security events deliberately use the event-scoped opaque target reference as their audit actor
+/// correlation. The raw identity subject/grant never crosses the event contract, and adapters
+/// cannot replace any record field after the generated payload has been validated.
+pub struct SecurityAuditCommand {
+    record: AuditRecord,
+}
+
+impl std::fmt::Debug for SecurityAuditCommand {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("SecurityAuditCommand(<redacted>)")
+    }
+}
+
+impl SecurityAuditCommand {
+    pub fn tenant(&self) -> vocab::TenantId {
+        self.record.tenant
+    }
+
+    pub fn into_record(self) -> AuditRecord {
+        self.record
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -135,6 +173,8 @@ pub enum AuditEventRecordError {
     Action(#[source] vocab::ActionError),
     #[error("audit event session parse failed")]
     Session(#[source] ids::IdParseError),
+    #[error("audit security event kind is not auditable")]
+    SecurityKind,
 }
 
 /// Decode a generated identity event payload into the audit domain record shape.
@@ -150,7 +190,41 @@ pub fn audit_record_from_event_message(
         AuditEventKind::RoleAssigned => role_assigned_record_from_message(message),
         AuditEventKind::RoleRevoked => role_revoked_record_from_message(message),
         AuditEventKind::PolicyUpdated => policy_updated_record_from_message(message),
+        AuditEventKind::SecurityEvent => Err(AuditEventRecordError::SecurityKind),
     }
+}
+
+pub fn security_audit_command_from_message(
+    message: &Message,
+) -> Result<SecurityAuditCommand, AuditEventRecordError> {
+    let payload: IdentitySecurityEventPayload = serde_json::from_slice(message.payload.as_bytes())
+        .map_err(AuditEventRecordError::Decode)?;
+    let tenant =
+        vocab::TenantId::parse(&payload.tenant_id).map_err(AuditEventRecordError::Tenant)?;
+    let action_raw = match (payload.kind, payload.target.kind) {
+        (
+            IdentitySecurityEventPayloadKind::LogoutCurrent,
+            IdentitySecurityEventPayloadTargetKind::Grant,
+        ) => ACTION_LOGOUT_CURRENT,
+        (
+            IdentitySecurityEventPayloadKind::LogoutAll,
+            IdentitySecurityEventPayloadTargetKind::Subject,
+        ) => ACTION_LOGOUT_ALL,
+        _ => return Err(AuditEventRecordError::SecurityKind),
+    };
+    let action = vocab::Action::parse(action_raw).map_err(AuditEventRecordError::Action)?;
+    let target_ref = payload.target.ref_;
+    Ok(SecurityAuditCommand {
+        record: AuditRecord {
+            tenant,
+            actor: ids::UserId::new(uuid::Uuid::from_u128(CREDENTIAL_SECURITY_AUDIT_ACTOR)),
+            actor_kind: vocab::PrincipalKind::Service,
+            action,
+            resource: ResourceRef::new(RESOURCE_KIND_SECURITY_TARGET, target_ref.to_string()),
+            outcome: AuditOutcome::Success,
+            recorded_at: from_unix_secs(payload.occurred_at),
+        },
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -959,6 +1033,7 @@ where
         register_audit_subscriber(reg, ROLE_ASSIGNED_SPEC)?;
         register_audit_subscriber(reg, ROLE_REVOKED_SPEC)?;
         register_audit_subscriber(reg, POLICY_UPDATED_SPEC)?;
+        register_audit_subscriber(reg, SECURITY_EVENT_SPEC)?;
 
         // admin 读路由组（Admin listener，typed marker；operator/管理面，非业务对外 Primary）。
         let scoped_repo = self.read_repo.clone();
@@ -1638,6 +1713,55 @@ mod tests {
             occurred_at: 1_700_000_300,
         };
         serde_json::to_vec(&payload).expect("encode")
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn security_event_fact_is_sealed_for_current_and_all_logout() {
+        let target = "550e8400-e29b-41d4-a716-446655440000";
+        for (kind, target_kind, action) in [
+            ("logoutCurrent", "grant", ACTION_LOGOUT_CURRENT),
+            ("logoutAll", "subject", ACTION_LOGOUT_ALL),
+        ] {
+            let payload = format!(
+                r#"{{"kind":"{kind}","occurredAt":1700000400,"target":{{"kind":"{target_kind}","ref":"{target}"}},"tenantId":"{CANON_TENANT}"}}"#
+            );
+            let command = security_audit_command_from_message(&Message::new(
+                "security",
+                payload.into_bytes(),
+            ))
+            .expect("logout security event");
+            assert_eq!(command.tenant().to_string(), CANON_TENANT);
+            assert_eq!(format!("{command:?}"), "SecurityAuditCommand(<redacted>)");
+            let record = command.into_record();
+            assert_ne!(record.actor.as_uuid().to_string(), target);
+            assert_eq!(record.actor_kind, vocab::PrincipalKind::Service);
+            assert_eq!(record.resource.id(), target);
+            assert_eq!(record.action.as_str(), action);
+        }
+
+        for rejected in [
+            format!(
+                r#"{{"kind":"passwordChanged","occurredAt":1,"target":{{"kind":"subject","ref":"{target}"}},"tenantId":"{CANON_TENANT}"}}"#
+            ),
+            format!(
+                r#"{{"kind":"logoutAll","occurredAt":1,"target":{{"kind":"subject","ref":"{target}"}},"tenantId":"{CANON_TENANT}","sid":"secret"}}"#
+            ),
+            format!(
+                r#"{{"kind":"logoutCurrent","occurredAt":1,"target":{{"kind":"subject","ref":"{target}"}},"tenantId":"{CANON_TENANT}"}}"#
+            ),
+            format!(
+                r#"{{"kind":"logoutAll","occurredAt":1,"target":{{"kind":"grant","ref":"{target}"}},"tenantId":"{CANON_TENANT}"}}"#
+            ),
+        ] {
+            assert!(
+                security_audit_command_from_message(&Message::new(
+                    "security",
+                    rejected.into_bytes()
+                ))
+                .is_err()
+            );
+        }
     }
 
     #[tokio::test]

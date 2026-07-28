@@ -70,10 +70,10 @@ impl ChildLogs {
 }
 
 async fn reserve_listener_addresses() -> TestResult<(SocketAddr, SocketAddr)> {
-    let primary = TcpListener::bind("127.0.0.1:0")
+    let primary = TcpListener::bind("127.0.0.1:8080")
         .await
         .context("reserve Primary address")?;
-    let health = TcpListener::bind("127.0.0.1:0")
+    let health = TcpListener::bind("127.0.0.1:8083")
         .await
         .context("reserve Health address")?;
     let primary_addr = primary.local_addr().context("read Primary address")?;

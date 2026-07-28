@@ -717,22 +717,11 @@ session 行级 DELETE，也不回填、不保留 nullable 绑定、view、trigge
    binary 的启动配置后只启动 0070-compatible 版本。需要 schema 修正时提交新的 forward migration，不修改
    0070，也不从备份恢复 `sessions` 或已失效 refresh。
 
-### 0071 credential-security opaque target mapping
+### 0071 credential-security opaque target mapping（已由 0076 移除）
 
-`0071` 新增 `credential_security_target_mappings`，把 wire 中的随机 UUID `target.ref` 映射为
-provider-owned typed raw target：`subject` 只携 `user_id`，`grant` 必须同时携 `user_id + grant_id`。
-闭合 CHECK 禁止两种形态混淆；表以 `target_ref` 为全局主键并启用 `FORCE RLS`，resolver 仍必须同时校验
-请求 tenant 与 expected target kind，跨租户或类型不匹配统一 fail closed。
-
-mapping 是 credential-security mutation 的提交证据之一：runtime 必须在同一 `producer_tx` 内依次持久化
-业务 mutation、mapping 与 outbox fact，任一失败全部回滚；不得异步补写或从 payload 反推 raw target。
-表对 `rss_app` 只授 `SELECT + INSERT`、对 `rss_app_read` 只授 `SELECT`，两者均显式撤销
-`UPDATE + DELETE`，因此已经发布的 opaque reference 不可重绑定。
-
-迁移是纯新增、可先于新 binary 应用；发布后探针须确认 ledger 为 `71`、表的 FORCE RLS/policy 与 closed
-CHECK 存在、`rss_app`/`rss_app_read` 无 UPDATE/DELETE，并用真实 lifecycle 验证 success 时
-mutation/mapping/outbox 三者同在，pre-commit failure 时三者同无。回滚只允许新的 forward migration，
-不得修改 `0071` 或删除已发布 mapping。
+`0071` 曾新增 `credential_security_target_mappings`。生产审计始终直接消费脱敏 fact，未读取该表；继续写入会
+形成无界、无消费者的数据集。`0076` 因而完整删除表、写入路径、resolver port 与公开类型。`0071` 仅作为不可
+改写的迁移历史保留，新 binary 不得查询或写入该 relation。
 
 ### 0072 persistent certificate revocations
 
@@ -818,6 +807,22 @@ forward-only 原则同样适用：`REVOKE` 不写 `.down.sql`，逆转须新前�
 forward-only 不写 `.down.sql`；当前 pre-GA 无自动 retention 策略或分区，表膨胀治理待后续规划。
 
 ## 新字段
+
+### 0075 session permission 窄化切换
+
+`0075` 在新 binary serving 前，把 `roles.permissions`、`abac_policies.permission` 与
+`resource_attributes.permission` 中已删除的 `identity:session:write` 原子替换为
+`identity:session:logout-current`。迁移绝不自动授予 `identity:session:logout-all`；role 数组保持首次出现顺序并
+去除替换产生的重复项。resource attribute successor 主键若已异常存在，迁移以唯一约束失败并完整回滚，不猜测合并。
+
+这是 non-rolling、forward-only cutover；只由唯一 migration runner 执行，成功后才允许新 binary serving。
+
+### 0076 删除无消费者的 credential-security target mapping
+
+`0076` 删除 `credential_security_target_mappings`。这是 intentional、non-rolling、forward-only cutover：先停止
+仍会写入该表的旧 binary，运行唯一 migration runner，再启动只写 projection 与 OutboxFact 的新 binary。表内
+数据没有生产消费者，也不是撤销或审计真源，因此不迁移、不归档、不保留兼容 view。回滚只能提交新的 forward
+migration；不得修改 `0071` 或 `0076`。
 
 新增列必须有默认值或允许 `NULL`（避免对已有行的 `NOT NULL` 回填失败）。
 

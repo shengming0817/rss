@@ -1636,6 +1636,7 @@ fn test_capability_for_spec(spec: SubscriptionSpec) -> anyhow::Result<Subscriber
         SubscriptionDispatchKey::IdentityPolicyUpdatedV1Audit
         | SubscriptionDispatchKey::IdentityRoleAssignedV1Audit
         | SubscriptionDispatchKey::IdentityRoleRevokedV1Audit
+        | SubscriptionDispatchKey::IdentitySecurityEventV1Audit
         | SubscriptionDispatchKey::IdentitySessionCreatedV1Audit => {
             SubscriberCapability::AdapterNativeTransactional
         }
@@ -1667,6 +1668,7 @@ fn consumer_tx_worker_for_subscription(
         SubscriptionDispatchKey::IdentityPolicyUpdatedV1Audit
         | SubscriptionDispatchKey::IdentityRoleAssignedV1Audit
         | SubscriptionDispatchKey::IdentityRoleRevokedV1Audit
+        | SubscriptionDispatchKey::IdentitySecurityEventV1Audit
         | SubscriptionDispatchKey::IdentitySessionCreatedV1Audit => {
             AuditConsumerFactory::new(pg, audit_key).worker(token, inputs)
         }

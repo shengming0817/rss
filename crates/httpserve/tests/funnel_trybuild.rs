@@ -49,4 +49,5 @@ fn ui() {
     t.compile_fail("tests/ui/producer_receipt_cannot_be_forged.rs");
     t.compile_fail("tests/ui/producer_handler_cannot_select_binding.rs");
     t.compile_fail("tests/ui/producer_duplicate_facts.rs");
+    t.compile_fail("tests/ui/authorized_subject_has_no_grant_evidence.rs");
 }

@@ -45,7 +45,7 @@ struct ValidationRow {
 }
 
 fn storage(error: impl std::error::Error + Send + Sync + 'static) -> IdentityError {
-    IdentityError::Storage(Box::new(error))
+    crate::tx_retry::identity_storage_error(error)
 }
 
 fn log_validation_query_failure(error: sqlx::Error) -> IdentityError {

@@ -10,9 +10,9 @@ metadata:
     app.kubernetes.io/managed-by: Helm
     rss.gocell.io/profile: identityaudit
   annotations:
-    rss.gocell.io/assembly-fingerprint: sha256:e67c48118b9e32632bcf194d2a5ce93d557e534461693887ce15967182a36d0c
-    rss.gocell.io/runtime-plan-fingerprint: sha256:bd4b4391cd0121e167a8e715bb4850ff87f9e8a66635afccf9bd62851c34ccf3
-    rss.gocell.io/deployment-fingerprint: sha256:91ac2a78f68cefa062f856796d50a42bfbfc9ecae4235143a71c803b5d97f2c5
+    rss.gocell.io/assembly-fingerprint: sha256:4b364f28288b2da1bc992adbfeb9ca8923edc7456a4bcae1cbd8eb33048e0cd2
+    rss.gocell.io/runtime-plan-fingerprint: sha256:057713f9ee2e3f588b0cebe2cdf85ce29e2b32456f6d27e8816650bd91273280
+    rss.gocell.io/deployment-fingerprint: sha256:9c024f9106a38fc5e4b044a668524bf89ada9ddd73645c8d5dc323dbb336de7b
 spec:
   provider: vault
   parameters:
@@ -38,9 +38,9 @@ metadata:
     app.kubernetes.io/managed-by: Helm
     rss.gocell.io/profile: identityaudit
   annotations:
-    rss.gocell.io/assembly-fingerprint: sha256:e67c48118b9e32632bcf194d2a5ce93d557e534461693887ce15967182a36d0c
-    rss.gocell.io/runtime-plan-fingerprint: sha256:bd4b4391cd0121e167a8e715bb4850ff87f9e8a66635afccf9bd62851c34ccf3
-    rss.gocell.io/deployment-fingerprint: sha256:91ac2a78f68cefa062f856796d50a42bfbfc9ecae4235143a71c803b5d97f2c5
+    rss.gocell.io/assembly-fingerprint: sha256:4b364f28288b2da1bc992adbfeb9ca8923edc7456a4bcae1cbd8eb33048e0cd2
+    rss.gocell.io/runtime-plan-fingerprint: sha256:057713f9ee2e3f588b0cebe2cdf85ce29e2b32456f6d27e8816650bd91273280
+    rss.gocell.io/deployment-fingerprint: sha256:9c024f9106a38fc5e4b044a668524bf89ada9ddd73645c8d5dc323dbb336de7b
 spec:
   selector:
     matchLabels:

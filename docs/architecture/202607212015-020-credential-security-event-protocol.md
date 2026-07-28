@@ -2,12 +2,12 @@
 
 - **状态**：Accepted
 - **日期**：2026-07-21
-- **关联**：issue #1841；承接 ADR-018 / ADR-019；生产激活依赖 #1842 / #1843
+- **关联**：issue #1841 / #1840；承接 ADR-018 / ADR-019；#1840 完成生产激活
 - **对标**：Ory Fosite refresh rotation、Keycloak user-session management
 
 > **ADR-021 ownership amendment（#1835）**：`CredentialSecurityEventKind` 及其 Account/Grant 子枚举与
 > AuthGrant 一起下沉 `authn`，identity 直接消费该 exact type。本文的 sealed command、事件 target、
-> authorization/receipt、resolver、`producer_tx` 与 draft wire 所有权仍在 identity；不增加 alias、translation
+> authorization/receipt、`producer_tx` 与 active wire 所有权仍在 identity；不增加 alias、translation
 > enum 或第二套 close reason。
 
 ## 背景
@@ -16,7 +16,7 @@
 事务顺序，AI 后续实现很容易遗漏 epoch、只撤销 refresh 或先写 outbox，形成多个安全真源。另一方面，只有 wire
 schema 而没有生产 producer、subscriber、审计和运行时证据时，不能把契约标为 active。
 
-本决策建立唯一的内部事件分类和共事务能力，并冻结一个严格 draft fact；不在 #1841 虚构生产闭环。
+本决策建立唯一的内部事件分类和共事务能力；#1841 冻结协议，#1840 完成 active fact 的生产闭环。
 
 ## 决策
 
@@ -34,17 +34,18 @@ schema 而没有生产 producer、subscriber、审计和运行时证据时，不
 Compromised 优先级最高，允许 Revoked 提升为 Compromised，禁止降级。公开的描述性 policy/scope API 已删除，
 避免声明策略与真实 mutation 平行漂移。
 
-identity 的账户级和 grant 级命令分别封闭私有字段，再由 `CredentialSecurityCommand` 包装。构造命令时固定完整 expected
-snapshot、closed target 与 move-only fact authorization；执行只接受 CAS，冲突要求调用方读取新状态并重建命令，
+identity 的账户级和 grant 级命令分别封闭私有字段；生产 logout 再由不可互换的
+`LogoutCurrentCommand` / `LogoutAllCommand` 包装。构造命令时固定完整 expected snapshot 与 closed target；
+执行只接受对应 generated route receipt 和精确 command，冲突要求调用方读取新状态并重建命令，
 不能把旧命令重放成成功。memory 与 PostgreSQL provider 都必须比较完整 expected snapshot，不能把 stale command
 改写为终态幂等成功。
 
 ### 唯一事务漏斗与锁序
 
 不新增 identity 专用事务入口。现有 PostgreSQL `producer_tx` 接受 crate-private sealed
-`ProducerFactAuthorization`；HTTP producer authorization 来自 mounted receipt，credential-security authorization
-只能由 sealed command 按值交给 fact builder，再由同一个 `CredentialSecurityFact` 原样交给 transaction outcome。
-不存在零参数 mint 或 sibling-module 固定 fact token。两类 authorization 都进入同一个 projection + OutboxFact
+`ProducerFactAuthorization`；生产 credential-security authorization 只能来自对应 mounted route receipt，
+fact/entry 由 route-specific command 内部事件派生，不接受调用方独立替换。
+不存在零参数 mint、无 receipt 的生产入口或 sibling-module 固定 fact token。authorization 进入同一个 projection + OutboxFact
 提交漏斗，canonical append 仍不可从漏斗外调用。
 
 安全事件事务固定锁序为 `account-security → refresh-family → auth-grant`。未来把 credential material 更新合入
@@ -53,42 +54,43 @@ refresh family、AuthGrant 和 OutboxFact 必须全成或全败。
 
 成功 receipt 只能在数据库确认 commit 后铸造。CAS 冲突返回冲突；commit result unknown 返回错误且不返回
 receipt、不自动重试。#1841 不新增 dedup ledger：线性命令、expected snapshot 与不可伪造 receipt 是本协议的重放
-边界。0069/0070 继续承载账户、grant、refresh 与 outbox；0071 只新增 append-only
-`credential_security_target_mappings`，把随机 opaque target ref 映射到 provider-owned subject/grant target。
-mapping 与 mutation、OutboxFact 在同一 `producer_tx` 提交，启用 FORCE RLS，业务角色只有 INSERT/SELECT、没有
-UPDATE/DELETE。
+边界。0069/0070 继续承载账户、grant、refresh 与 outbox。0071 曾新增 opaque target mapping，但生产 consumer
+从未读取它；0076 删除该无界数据集及全部写入、解析和公开能力。opaque ref 只作为脱敏事件 correlation，不是
+可逆目录。
 
-### Draft wire 与激活门
+### Active wire 与生产闭环
 
-`identity.security-event@v1` 保持 `lifecycle = "draft"`，只含 `kind`、`target`、`tenantId`、`occurredAt` 四个必填
+`identity.security-event@v1` 已由 #1840 提升为 `active`，只含 `kind`、`target`、`tenantId`、`occurredAt` 四个必填
 字段，`additionalProperties=false`。kind 为上述九个闭值；target 是唯一 tagged object，kind 只有
 `subject | grant`，ref 是随机 opaque UUID。payload 与 transport metadata 不出现 raw subject、grant/session、
 sid/jti、token、password/credential material、email/username 或其他 PII。tenant、target kind、opaque ref 与
-provider mapping 从同一 sealed command/fact 数据流派生；受权 resolver 请求同时绑定 tenant scope、ref 与 expected
-kind，wrong tenant/ref/kind 返回无结果，损坏的 subject/grant row shape 返回 typed error。
+并由同一 sealed command/fact 数据流派生。不存在把 opaque ref 还原为 subject/grant 的生产 port 或数据库表。
 
-draft 没有 subscriptions，不进入 active event registry，也不声称已接 production。#1842 / #1843 必须同时闭合
-真实 operation 权限、route receipt、生产 producer emit、审计 subscriber、runtime dispatch、reuse compromise
-传播和 L2 assurance 后，才能将其提升为 active；激活是生命周期晋级，不增加兼容 shim 或双写。
+`audit.security-event` 以 transactional-only adapter-native consumer 激活；current/all route receipt、生产
+producer、幂等 audit append、runtime dispatch 与 L2 assurance 已形成闭环。audit 域只从四字段 wire 消费式
+构造私有字段的 sealed command：`logoutCurrent + grant` 与 `logoutAll + subject` 是仅有的合法组合，随机 opaque
+target ref 同时作为本事件的脱敏 actor/resource correlation。consumer 不读取 identity-owned target mapping，也不把
+opaque ref 还原为 raw subject/grant。激活不增加兼容 shim 或双写。
 
 ## 失败语义与安全模型
 
-- projection、target mapping、grant/family 与 OutboxFact 任一步失败都回滚；不得返回成功 receipt。
+- projection、grant/family 与 OutboxFact 任一步失败都回滚；不得返回成功 receipt。
 - stale expected snapshot 不能部分更新、补写 outbox 或静默 no-op。
-- draft fact 只携带随机 opaque ref，不携带 raw 用户/会话标识或凭据材料；解析只能经 tenant-scoped sealed resolver
-  request，审计细节由未来受权的消费边界补充。
-- production 未挂载是显式边界，不以静态 contract/codegen 证据替代运行证据。
+- active fact 只携带随机 opaque ref，不携带 raw 用户/会话标识或凭据材料；audit 直接消费脱敏 fact，生产代码
+  不提供 reverse-resolution side channel。
+- production 挂载由 runtime E2E、PostgreSQL 故障注入与 L2 assurance 共同证明。
 
 ## AI-HARD 载体
 
 | 不变式 | 载体 | 评级 |
 |---|---|---|
 | kind、closed target 与可执行 transition 不能分离或由调用方覆盖 | 封闭层级 enum + 私有派生 API | Hard |
-| 外部不能伪造 command、producer authorization、resolver request 或成功 receipt | 私有字段 + move-only token + sealed trait/constructor | Hard |
+| 外部不能伪造 command、producer authorization 或成功 receipt | 私有字段 + move-only token + sealed trait/constructor | Hard |
 | 安全事件不能建立第二事务/append 漏斗 | 唯一 `producer_tx` + crate-private `TxCapability` | Hard |
 | wire 只有四字段、九 kind、typed opaque target 且拒绝未知字段 | JSON Schema + codegen `deny_unknown_fields` | Hard |
-| opaque target 只能解析为同 tenant/ref/kind 的 closed row | sealed resolver request + checked provider hydration + FORCE RLS | Hard + 数据库 Hard |
-| draft 不进入 active topology | lifecycle codegen registry 分流 | Hard |
+| opaque target 不可逆解析 | 无 resolver port、无 mapping relation、无 raw id wire 字段 | Hard + 数据库 Hard |
+| audit consumer 不能旁路 contract 还原 identity target 或替换 fact 字段 | audit-owned sealed command + runtime-baseline forbidden-side-channel gate | Hard + Medium |
+| active topology 不得缺 producer/subscriber/runtime 闭环 | codegen registry + L2 assurance | Hard + Medium |
 | 合法跨文件 producer_tx 调用集合保持双向闭合 | 全 production AST exact-set guard + extra-file synthetic red/green | Medium |
 | 共事务锁序、回滚、CAS 与 commit-unknown 语义 | PostgreSQL 并发/故障注入测试 | Medium |
 | plain producer 的数据库锁等待有界且不重放 | 不可表达无界 Plain policy + PostgreSQL 持锁集成测试 | Hard + Medium |
@@ -104,4 +106,10 @@ draft 没有 subscriptions，不进入 active event registry，也不声称已�
 - 只发布 tenant + scope、不提供 typed target：consumer 只能过宽处理或 fail-closed no-op。
 - 把 raw subject/grant id 直接写进 durable fact：扩大跨系统关联面，违反最小披露。
 - 为 commit-unknown 自动重试或新增通用 ledger：线性命令没有稳定跨请求幂等 key，自动重放可能重复安全变更。
-- 将 draft 直接标为 active：在 producer/subscriber/runtime assurance 缺失时制造虚假生产证据。
+- 在 producer/subscriber/runtime assurance 缺失时将 fact 标为 active：制造虚假生产证据。
+
+## 对标与实现参考
+
+- Keycloak current-session 对标采用其 OIDC logout endpoint：`/realms/{realm-name}/protocol/openid-connect/logout`，语义为注销已认证用户；见 [Keycloak OIDC layers — Logout endpoint](https://www.keycloak.org/securing-apps/oidc-layers#_logout_endpoint)。
+- Keycloak all-session 对标采用其 Admin REST user logout：`POST /admin/realms/{realm}/users/{user-id}/logout`，并区分 realm-wide `POST /admin/realms/{realm}/logout-all`；见 [Keycloak Admin REST API](https://www.keycloak.org/docs-api/latest/rest-api/index.html#_post_adminrealmsrealmusersuser_idlogout)。RSS route 不复制 Keycloak 管理面授权模型，只对标 current/all 撤销范围。
+- PostgreSQL 实现沿用仓库 `PgIdentitySecurityLifecycle` 的 SQLx transaction funnel；事务语义参考 [sqlx-core transaction.rs](https://github.com/launchbadge/sqlx/blob/main/sqlx-core/src/transaction.rs)，不建立第二套 logout transaction API。

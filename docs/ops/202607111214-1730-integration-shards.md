@@ -28,7 +28,7 @@ serial，再跑 parallel。`.config/nextest.toml` 不承载 integration shard �
 
 | Shard | 所需资源 | Serial targets | Parallel targets |
 |-------|----------|----------------|------------------|
-| `postgres-domain` | Postgres | `postgres:postgres` (lib)、`journeys:audit_list_tenant_entries_localtx_journey`、`journeys:identity_logout_localtx_journey`、`journeys:identity_password_change_localtx_journey`、`journeys:identity_refresh_localtx_journey`、`journeys:settings_secret_publish_localtx_journey`、`runtime:settings_secret_e2e` | `postgres:feature_manifest`、`postgres:migration_ops_contract`、`postgres:tx_capability_trybuild` |
+| `postgres-domain` | Postgres | `postgres:postgres` (lib)、`journeys:audit_list_tenant_entries_localtx_journey`、`journeys:identity_password_change_localtx_journey`、`journeys:identity_refresh_localtx_journey`、`journeys:settings_secret_publish_localtx_journey`、`runtime:settings_secret_e2e` | `postgres:feature_manifest`、`postgres:migration_ops_contract`、`postgres:tx_capability_trybuild`、`journeys:identity_logout_grant_journey` |
 | `event-transport` | Postgres、Redis、AMQP、MQTT | `amqp:integration`、`mqtt:integration`、`journeys:amqp_consumer_at_least_once_journey`、`journeys:identity_login_audit_durable_journey`、`runtime:event_transport_durable_e2e` | `amqp:amqp` (lib)、`mqtt:mqtt` (lib)、`journeys:eventtransport_journey`、`journeys:identity_login_audit_journey` |
 | `runtime-http-auth` | Postgres、Redis | `runtime:runtime` (lib)、`runtime:configs_ready_e2e`、`runtime:identity_login_wire_e2e`、`runtime:service_token_replay_e2e`、`runtime:wire_contract_e2e` | `runtime:auth_e2e`、`runtime:infra_builders_api`、`runtime:refresh_mint_e2e`、`runtime:key_rotation_e2e`、`runtime:runtime_outputs_trybuild`、`runtime:runtime_serve_e2e` |
 | `consistency-fault` | Postgres、Redis、AMQP | `redis-adapter:integration_claimer`、`journeys-fault-matrix:consistency_fault_matrix_journey` | `redis-adapter:redis` (lib)、`journeys:device_command_ack_timeout_journey`、`testkit:provider_catalog_trybuild` |
@@ -37,7 +37,8 @@ serial，再跑 parallel。`.config/nextest.toml` 不承载 integration shard �
 
 表中未标 `(lib)` 的项均为 Cargo test target。selector 只能由 typed execution unit 渲染为精确的
 `package(=...) and binary(=...) and kind(=...)`；环境变量或 CLI 输入不会进入 selector。
-五个 LocalTx journey 必须保持在 `postgres-domain` 唯一 unpartitioned Serial batch，并使用
+四个 LocalTx journey 必须保持在 `postgres-domain` 唯一 unpartitioned Serial batch；OutboxFact 的
+`identity_logout_grant_journey` 由 Parallel batch 调度。各 batch 使用
 `--no-tests=fail`；该 shard 的成功令牌只能在上述全部 batch 返回成功后生成。
 
 ## 资源解析

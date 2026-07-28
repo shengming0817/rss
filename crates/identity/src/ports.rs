@@ -26,7 +26,6 @@ use consistency::EventEntry;
 use diport::{EnvelopeSubjectId, OpaqueActorId, OutboxActor, OutboxEmitError, OutboxEnvelopeParts};
 use dynosaur::dynosaur;
 use generated::http::identity_v1::{
-    logout::{LOCAL_TX as LOGOUT_LOCAL_TX, ROUTE as LOGOUT_ROUTE},
     password_change::{LOCAL_TX as PASSWORD_CHANGE_LOCAL_TX, ROUTE as PASSWORD_CHANGE_ROUTE},
     refresh::{LOCAL_TX as REFRESH_LOCAL_TX, ROUTE as REFRESH_ROUTE},
 };
@@ -63,16 +62,14 @@ pub use crate::domain::{
     AccountSecurityMutation, AccountSecuritySnapshot, AccountSecurityState,
     AccountSecurityTransitionError, AccountSecurityVersion, AccountStatus, AttributeKey,
     AttributeValue, AuthOutcome, BruteForceDecision, Credential, CredentialSecurityCommand,
-    CredentialSecurityEvent, CredentialSecurityFactAuthorization, CredentialSecurityReceipt,
-    CredentialSecurityTargetHydrationError, CredentialSecurityTargetKind,
-    CredentialSecurityTargetMapping, CredentialSecurityTargetRef, GlobPattern,
-    GrantCredentialSecurityCommand, IdentityError, LoginIdentifier, Operator,
-    POLICY_ATTR_CONTRACT_ID, POLICY_ATTR_PERMISSION, POLICY_ATTR_PRINCIPAL_ID,
-    POLICY_ATTR_PRINCIPAL_KIND, POLICY_ATTR_RESOURCE_ID, POLICY_ATTR_TENANT_ID,
-    PendingCredentialSecurityCommit, Policy, PolicyCondition, PolicyEffect, PolicyId,
-    PolicyObligations, PolicyRouteScope, PolicyRule, PolicyVersion, RefreshRotation,
-    RefreshRotationOutcome, RefreshStatus, RefreshTokenHash, RefreshTokenId, RefreshTokenRecord,
-    RefreshTokenSnapshot, ResolvedCredentialSecurityTarget, ResourceAttribute,
+    CredentialSecurityEvent, CredentialSecurityReceipt, CredentialSecurityTargetKind,
+    CredentialSecurityTargetRef, GlobPattern, GrantCredentialSecurityCommand, IdentityError,
+    LoginIdentifier, LogoutAllCommand, LogoutCurrentCommand, Operator, POLICY_ATTR_CONTRACT_ID,
+    POLICY_ATTR_PERMISSION, POLICY_ATTR_PRINCIPAL_ID, POLICY_ATTR_PRINCIPAL_KIND,
+    POLICY_ATTR_RESOURCE_ID, POLICY_ATTR_TENANT_ID, PendingCredentialSecurityCommit, Policy,
+    PolicyCondition, PolicyEffect, PolicyId, PolicyObligations, PolicyRouteScope, PolicyRule,
+    PolicyVersion, RefreshRotation, RefreshRotationOutcome, RefreshStatus, RefreshTokenHash,
+    RefreshTokenId, RefreshTokenRecord, RefreshTokenSnapshot, ResourceAttribute,
     ResourceAttributeKey, ResourceAttributeKeyError, ResourceAttributeResolution,
     ResourceAttributeResourceId, ResourceAttributeVersion, Role, RoleBinding, RoleId,
 };
@@ -85,37 +82,96 @@ pub use vocab::TenantId;
 pub struct CredentialSecurityFact {
     entry: EventEntry,
     envelope: OutboxEnvelopeParts,
-    target_mapping: CredentialSecurityTargetMapping,
-    authorization: CredentialSecurityFactAuthorization,
 }
 
 impl CredentialSecurityFact {
-    pub fn into_parts(
-        self,
-    ) -> (
-        EventEntry,
-        OutboxEnvelopeParts,
-        CredentialSecurityTargetMapping,
-        CredentialSecurityFactAuthorization,
-    ) {
-        (
-            self.entry,
-            self.envelope,
-            self.target_mapping,
-            self.authorization,
-        )
+    pub fn entry(&self) -> &EventEntry {
+        &self.entry
+    }
+    pub fn into_parts(self) -> (EventEntry, OutboxEnvelopeParts) {
+        (self.entry, self.envelope)
     }
 }
 
-/// Build the exact generated credential-security fact from an unforgeable domain event and its
-/// move-only command authorization.
-///
+/// Move-only logout-current emission. Its private inner carrier is constructed from the sealed
+/// grant-local command, so the generated fact cannot be replaced independently of the mutation.
+pub struct LogoutCurrentEmission(CredentialSecurityEmission);
+
+/// Move-only logout-all emission. Its private inner carrier is constructed from the sealed
+/// account-wide command, so the generated fact cannot be replaced independently of the mutation.
+pub struct LogoutAllEmission(CredentialSecurityEmission);
+
+struct CredentialSecurityEmission {
+    command: CredentialSecurityCommand,
+    fact: CredentialSecurityFact,
+}
+
+impl CredentialSecurityEmission {
+    fn new(command: CredentialSecurityCommand) -> Result<Self, IdentityError> {
+        let fact = credential_security_fact(command.event())?;
+        Ok(Self { command, fact })
+    }
+
+    fn into_parts(self) -> CredentialSecurityEmissionParts {
+        let (entry, envelope) = self.fact.into_parts();
+        CredentialSecurityEmissionParts {
+            command: self.command,
+            entry,
+            envelope,
+        }
+    }
+}
+
+/// Owned pieces exposed to the provider only after a route-specific emission has been consumed.
+/// The fields stay private; adapters can only consume the tuple returned by [`Self::into_parts`].
+pub struct CredentialSecurityEmissionParts {
+    command: CredentialSecurityCommand,
+    entry: EventEntry,
+    envelope: OutboxEnvelopeParts,
+}
+
+impl CredentialSecurityEmissionParts {
+    pub fn into_parts(self) -> (CredentialSecurityCommand, EventEntry, OutboxEnvelopeParts) {
+        (self.command, self.entry, self.envelope)
+    }
+}
+
+impl LogoutCurrentEmission {
+    pub fn into_parts(self) -> CredentialSecurityEmissionParts {
+        self.0.into_parts()
+    }
+}
+
+impl LogoutAllEmission {
+    pub fn into_parts(self) -> CredentialSecurityEmissionParts {
+        self.0.into_parts()
+    }
+}
+
+/// Consume the exact logout-current command into its only valid generated emission.
+pub fn logout_current_emission(
+    command: LogoutCurrentCommand,
+) -> Result<LogoutCurrentEmission, IdentityError> {
+    CredentialSecurityEmission::new(command.into_security_command()).map(LogoutCurrentEmission)
+}
+
+/// Consume the exact logout-all command into its only valid generated emission.
+pub fn logout_all_emission(command: LogoutAllCommand) -> Result<LogoutAllEmission, IdentityError> {
+    CredentialSecurityEmission::new(command.into_security_command()).map(LogoutAllEmission)
+}
+
+#[cfg(feature = "test-support")]
+pub fn credential_security_emission_for_test(
+    command: CredentialSecurityCommand,
+) -> Result<CredentialSecurityEmissionParts, IdentityError> {
+    CredentialSecurityEmission::new(command).map(CredentialSecurityEmission::into_parts)
+}
+
 /// The wire payload intentionally excludes subject, grant, credential and token identifiers. Its
 /// event id and target reference are independent opaque UUIDs. The target reference is used as the
 /// non-PII envelope subject and the actor is a fixed service identity.
 pub fn credential_security_fact(
     event: &CredentialSecurityEvent,
-    authorization: CredentialSecurityFactAuthorization,
 ) -> Result<CredentialSecurityFact, IdentityError> {
     let kind = match event.kind() {
         CredentialSecurityEventKind::Account(AccountSecurityEventKind::PasswordChanged) => {
@@ -179,13 +235,7 @@ pub fn credential_security_fact(
                 .map_err(security_fact_build)?,
         ),
     );
-    let target_mapping = event.target_mapping(target_ref);
-    Ok(CredentialSecurityFact {
-        entry,
-        envelope,
-        target_mapping,
-        authorization,
-    })
+    Ok(CredentialSecurityFact { entry, envelope })
 }
 
 fn security_fact_build(error: impl std::error::Error + Send + Sync + 'static) -> IdentityError {
@@ -297,18 +347,18 @@ mod credential_security_fact_tests {
 
         for (kind, wire_kind, wire_target_kind) in CASES {
             let command = command(kind, tenant, user, occurred_at);
-            let (event, authorization) = match command {
+            let event = match command {
                 CredentialSecurityCommand::Account(command) => {
-                    let (_mutation, event, _pending, authorization) = command.into_parts();
-                    (event, authorization)
+                    let (_mutation, event, _pending) = command.into_parts();
+                    event
                 }
                 CredentialSecurityCommand::Grant(command) => {
-                    let (_mutation, event, _pending, authorization) = command.into_parts();
-                    (event, authorization)
+                    let (_mutation, event, _pending) = command.into_parts();
+                    event
                 }
             };
-            let fact = credential_security_fact(&event, authorization).expect("fact");
-            let (entry, envelope, mapping, _authorization) = fact.into_parts();
+            let fact = credential_security_fact(&event).expect("fact");
+            let (entry, envelope) = fact.into_parts();
             let payload: serde_json::Value =
                 serde_json::from_slice(entry.payload()).expect("payload");
             let target_ref = payload["target"]["ref"]
@@ -342,25 +392,6 @@ mod credential_security_fact_tests {
                 envelope.actor().actor_id().as_str(),
                 "identity-security-lifecycle"
             );
-            let (mapping_tenant, mapping_ref, resolved) = mapping.into_parts();
-            assert_eq!(mapping_tenant, tenant);
-            assert_eq!(mapping_ref.as_uuid().to_string(), target_ref);
-            assert_eq!(resolved.tenant(), tenant);
-            assert_eq!(resolved.target_ref().as_uuid().to_string(), target_ref);
-            assert_eq!(resolved.user_id(), user);
-            match kind {
-                CredentialSecurityEventKind::Account(_) => {
-                    assert_eq!(resolved.kind(), CredentialSecurityTargetKind::Subject);
-                    assert!(resolved.grant_id().is_none());
-                }
-                CredentialSecurityEventKind::Grant(_) => {
-                    assert_eq!(resolved.kind(), CredentialSecurityTargetKind::Grant);
-                    assert_eq!(
-                        resolved.grant_id().map(AuthGrantId::as_str),
-                        Some("7d65e5f2-e716-4c4e-8e4c-6f7ab1754ef8")
-                    );
-                }
-            }
         }
     }
 
@@ -383,8 +414,6 @@ mod credential_security_fact_tests {
     }
 }
 
-/// Generated route marker retained by the logout LocalTx command.
-pub type AuthGrantCloseRouteMarker = generated::http::identity_v1::logout::RouteMarker;
 /// Generated route marker retained by the password-change LocalTx command.
 pub type PasswordChangeRouteMarker = generated::http::identity_v1::password_change::RouteMarker;
 /// Generated route marker retained by the refresh rotation LocalTx command.
@@ -393,6 +422,12 @@ pub type RefreshRotationRouteMarker = generated::http::identity_v1::refresh::Rou
 /// `identity.login` request-scoped producer assurance carried into the AuthGrant co-tx funnel.
 pub type LoginProducerReceipt =
     httpserve::ProducerAssuranceReceipt<generated::http::identity_v1::login::RouteMarker>;
+pub type LogoutCurrentProducerReceipt =
+    httpserve::ProducerAssuranceReceipt<generated::http::identity_v1::logout::RouteMarker>;
+pub type LogoutCurrentRouteMarker = generated::http::identity_v1::logout::RouteMarker;
+pub type LogoutAllProducerReceipt =
+    httpserve::ProducerAssuranceReceipt<generated::http::identity_v1::logout_all::RouteMarker>;
+pub type LogoutAllRouteMarker = generated::http::identity_v1::logout_all::RouteMarker;
 /// `identity.roles-assign` request-scoped producer assurance.
 pub type RolesAssignProducerReceipt =
     httpserve::ProducerAssuranceReceipt<generated::http::identity_v1::roles_assign::RouteMarker>;
@@ -472,21 +507,10 @@ pub struct AuthGrantCloseCommand {
 /// Logout and refresh replay close the same aggregate through the same provider-owned atomic SQL,
 /// but they remain distinct LocalTx operations for retry telemetry and route governance.
 pub enum AuthGrantCloseObservation {
-    Logout(observ::LocalTxObservation<AuthGrantCloseRouteMarker>),
     RefreshReplay(observ::LocalTxObservation<RefreshRotationRouteMarker>),
 }
 
 impl AuthGrantCloseCommand {
-    pub(crate) fn new(mutation: AuthGrantCloseMutation) -> Self {
-        Self {
-            mutation,
-            observation: AuthGrantCloseObservation::Logout(observ::LocalTxObservation::new(
-                LOGOUT_ROUTE,
-                LOGOUT_LOCAL_TX.boundary,
-            )),
-        }
-    }
-
     /// Seal a refresh-replay transition from one persisted refresh record and its exact grant.
     ///
     /// The record supplies the tenant/user/grant/epoch binding. Callers cannot substitute any of
@@ -523,7 +547,13 @@ impl AuthGrantCloseCommand {
 
     #[cfg(any(test, feature = "test-support"))]
     pub fn for_test(mutation: AuthGrantCloseMutation) -> Self {
-        Self::new(mutation)
+        Self {
+            mutation,
+            observation: AuthGrantCloseObservation::RefreshReplay(observ::LocalTxObservation::new(
+                REFRESH_ROUTE,
+                REFRESH_LOCAL_TX.boundary,
+            )),
+        }
     }
 }
 
@@ -624,238 +654,6 @@ impl TenantRepoScope {
     #[cfg(any(test, feature = "test-support"))]
     pub fn for_test(tenant: TenantId) -> Self {
         Self { tenant, _seal: () }
-    }
-}
-
-/// Sealed lookup request for resolving one opaque credential-security target reference.
-///
-/// The tenant capability and expected target kind are captured together so a provider cannot
-/// accidentally resolve a grant reference as a subject reference or cross tenant boundaries.
-#[must_use]
-pub struct CredentialSecurityTargetResolutionRequest {
-    scope: TenantRepoScope,
-    target_ref: CredentialSecurityTargetRef,
-    expected_kind: CredentialSecurityTargetKind,
-}
-
-impl CredentialSecurityTargetResolutionRequest {
-    pub(crate) fn new(
-        scope: TenantRepoScope,
-        target_ref: CredentialSecurityTargetRef,
-        expected_kind: CredentialSecurityTargetKind,
-    ) -> Self {
-        Self {
-            scope,
-            target_ref,
-            expected_kind,
-        }
-    }
-
-    /// Borrow the sealed tenant capability for the provider query.
-    pub fn scope(&self) -> &TenantRepoScope {
-        &self.scope
-    }
-
-    /// Borrow the opaque reference for the provider query.
-    pub fn target_ref(&self) -> &CredentialSecurityTargetRef {
-        &self.target_ref
-    }
-
-    /// Validate one provider row against the sealed request and close its target shape.
-    ///
-    /// A row outside the requested tenant/reference/kind is indistinguishable from absence. A row
-    /// with the right binding but a malformed subject/grant shape is a typed hydration error.
-    pub fn resolve_provider_row(
-        self,
-        stored_tenant: TenantId,
-        stored_ref: CredentialSecurityTargetRef,
-        stored_kind: CredentialSecurityTargetKind,
-        user_id: ids::UserId,
-        grant_id: Option<AuthGrantId>,
-    ) -> Result<Option<ResolvedCredentialSecurityTarget>, CredentialSecurityTargetHydrationError>
-    {
-        if self.scope.tenant() != stored_tenant
-            || self.target_ref != stored_ref
-            || self.expected_kind != stored_kind
-        {
-            return Ok(None);
-        }
-        ResolvedCredentialSecurityTarget::hydrate_provider_row(
-            stored_tenant,
-            stored_ref,
-            stored_kind,
-            user_id,
-            grant_id,
-        )
-        .map(Some)
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn for_test(
-        scope: TenantRepoScope,
-        target_ref: CredentialSecurityTargetRef,
-        expected_kind: CredentialSecurityTargetKind,
-    ) -> Self {
-        Self::new(scope, target_ref, expected_kind)
-    }
-}
-
-// The draft resolver request is intentionally minted only by the future authenticated consumer.
-// Keep the sealed constructor type-checked without exposing a bare-tenant constructor to adapters.
-const _: fn(
-    TenantRepoScope,
-    CredentialSecurityTargetRef,
-    CredentialSecurityTargetKind,
-) -> CredentialSecurityTargetResolutionRequest = CredentialSecurityTargetResolutionRequest::new;
-
-#[cfg(test)]
-#[allow(clippy::expect_used)]
-mod credential_security_target_resolution_tests {
-    use super::*;
-
-    fn tenant(raw: &str) -> TenantId {
-        TenantId::parse(raw).expect("tenant")
-    }
-
-    fn target_ref(raw: &str) -> CredentialSecurityTargetRef {
-        CredentialSecurityTargetRef::parse(raw).expect("target ref")
-    }
-
-    fn user() -> ids::UserId {
-        ids::UserId::parse("11111111-2222-4333-8444-555555555555").expect("user")
-    }
-
-    #[test]
-    fn resolver_request_rejects_wrong_tenant_reference_and_kind() {
-        let tenant_a = tenant("f47ac10b-58cc-4372-a567-0e02b2c3d479");
-        let tenant_b = tenant("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
-        let reference_a = target_ref("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb");
-        let reference_b = target_ref("cccccccc-cccc-4ccc-8ccc-cccccccccccc");
-        let scope = TenantRepoScope::for_test(tenant_a);
-
-        let resolved = CredentialSecurityTargetResolutionRequest::for_test(
-            scope,
-            reference_a.clone(),
-            CredentialSecurityTargetKind::Subject,
-        )
-        .resolve_provider_row(
-            tenant_a,
-            reference_a.clone(),
-            CredentialSecurityTargetKind::Subject,
-            user(),
-            None,
-        )
-        .expect("valid subject shape")
-        .expect("matching subject row");
-        assert_eq!(resolved.kind(), CredentialSecurityTargetKind::Subject);
-
-        assert!(
-            CredentialSecurityTargetResolutionRequest::for_test(
-                scope,
-                reference_a.clone(),
-                CredentialSecurityTargetKind::Subject,
-            )
-            .resolve_provider_row(
-                tenant_b,
-                reference_a.clone(),
-                CredentialSecurityTargetKind::Subject,
-                user(),
-                None,
-            )
-            .expect("mismatched tenant is absence")
-            .is_none()
-        );
-        assert!(
-            CredentialSecurityTargetResolutionRequest::for_test(
-                scope,
-                reference_a.clone(),
-                CredentialSecurityTargetKind::Subject,
-            )
-            .resolve_provider_row(
-                tenant_a,
-                reference_b,
-                CredentialSecurityTargetKind::Subject,
-                user(),
-                None,
-            )
-            .expect("mismatched reference is absence")
-            .is_none()
-        );
-        assert!(
-            CredentialSecurityTargetResolutionRequest::for_test(
-                scope,
-                reference_a.clone(),
-                CredentialSecurityTargetKind::Grant,
-            )
-            .resolve_provider_row(
-                tenant_a,
-                reference_a.clone(),
-                CredentialSecurityTargetKind::Subject,
-                user(),
-                None,
-            )
-            .expect("mismatched expected kind is absence")
-            .is_none()
-        );
-        assert!(
-            CredentialSecurityTargetResolutionRequest::for_test(
-                scope,
-                reference_a.clone(),
-                CredentialSecurityTargetKind::Subject,
-            )
-            .resolve_provider_row(
-                tenant_a,
-                reference_a,
-                CredentialSecurityTargetKind::Grant,
-                user(),
-                Some(
-                    AuthGrantId::hydrate("7d65e5f2-e716-4c4e-8e4c-6f7ab1754ef8").expect("grant id"),
-                ),
-            )
-            .expect("mismatched expected kind is absence")
-            .is_none()
-        );
-    }
-
-    #[test]
-    fn resolver_request_reports_malformed_matching_provider_shape() {
-        let tenant = tenant("f47ac10b-58cc-4372-a567-0e02b2c3d479");
-        let reference = target_ref("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb");
-        let scope = TenantRepoScope::for_test(tenant);
-
-        let subject_with_grant = CredentialSecurityTargetResolutionRequest::for_test(
-            scope,
-            reference.clone(),
-            CredentialSecurityTargetKind::Subject,
-        )
-        .resolve_provider_row(
-            tenant,
-            reference.clone(),
-            CredentialSecurityTargetKind::Subject,
-            user(),
-            Some(AuthGrantId::hydrate("d8dbe849-1d7e-49aa-b68a-a7b41ed252df").expect("grant id")),
-        );
-        assert_eq!(
-            subject_with_grant.err(),
-            Some(CredentialSecurityTargetHydrationError::UnexpectedGrantId)
-        );
-
-        let grant_without_id = CredentialSecurityTargetResolutionRequest::for_test(
-            scope,
-            reference.clone(),
-            CredentialSecurityTargetKind::Grant,
-        )
-        .resolve_provider_row(
-            tenant,
-            reference,
-            CredentialSecurityTargetKind::Grant,
-            user(),
-            None,
-        );
-        assert_eq!(
-            grant_without_id.err(),
-            Some(CredentialSecurityTargetHydrationError::MissingGrantId)
-        );
     }
 }
 
@@ -1354,25 +1152,19 @@ pub trait AuthGrantValidatorLocal: Send + Sync {
 #[dynosaur(pub DynIdentitySecurityLifecycle = dyn(box) IdentitySecurityLifecycle, bridge(dyn))]
 #[allow(async_fn_in_trait)]
 pub trait IdentitySecurityLifecycleLocal: Send + Sync {
-    async fn execute(
+    async fn execute_logout_current(
         &self,
+        receipt: LogoutCurrentProducerReceipt,
         scope: TenantRepoScope,
-        command: CredentialSecurityCommand,
+        command: LogoutCurrentCommand,
     ) -> Result<CredentialSecurityReceipt, IdentityError>;
-}
 
-/// Read-only provider for resolving opaque security-event targets inside a sealed tenant scope.
-#[trait_variant::make(CredentialSecurityTargetResolver: Send)]
-#[dynosaur(
-    pub DynCredentialSecurityTargetResolver = dyn(box) CredentialSecurityTargetResolver,
-    bridge(dyn)
-)]
-#[allow(async_fn_in_trait)]
-pub trait CredentialSecurityTargetResolverLocal: Send + Sync {
-    async fn resolve(
+    async fn execute_logout_all(
         &self,
-        request: CredentialSecurityTargetResolutionRequest,
-    ) -> Result<Option<ResolvedCredentialSecurityTarget>, IdentityError>;
+        receipt: LogoutAllProducerReceipt,
+        scope: TenantRepoScope,
+        command: LogoutAllCommand,
+    ) -> Result<CredentialSecurityReceipt, IdentityError>;
 }
 
 /// refresh token 持久化 store DI port（域形；provider 可换：prod postgres / test in-mem）——#1325。
@@ -1608,7 +1400,6 @@ classify_identity_ports! {
     DynRoleBindingLifecycle => diport::OutboxEffect,
     DynAuthGrantLifecycle => diport::OutboxEffect,
     DynIdentitySecurityLifecycle => diport::OutboxEffect,
-    DynCredentialSecurityTargetResolver => diport::ReadEffect,
 }
 
 impl<T> identity_port_effect_sealed::Sealed for std::sync::Arc<T> where

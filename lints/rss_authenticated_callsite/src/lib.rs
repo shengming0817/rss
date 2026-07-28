@@ -1,7 +1,7 @@
 #![feature(rustc_private)]
 //! `rss_authenticated_callsite` — RSS 治理 dylint lint：限定认证证据、审计 subject 与 verified
 //! maintenance capability funnel 仅组合根可调用。
-//! `httpserve::Authenticated` profile-specific constructors、`httpserve::CurrentAuthGrant::new` 与
+//! `httpserve::Authenticated` profile-specific constructors 与
 //! `authn::Principal::{audit_subject,service_caller_domain}` 与
 //! `postgres::ConfigValueMaintenanceCapability::from_verified_service_caller` 仅 assembly / bin crate
 //! （组合根）可调用。DLQ verified subject 由专用 `rss_dlq_operator_callsite` 守护。
@@ -15,7 +15,7 @@
 //! 与 `rss_authplan_callsite`（AUTH-PLAN-MINT-01）同治理姿态：`AuthPlan` 是 listener 级认证计划、
 //! `Authenticated` 是 per-request 认证证据，二者均为安全敏感 mint，均限组合根构造。`Authenticated` 字段私有
 //! （外部无法 struct-literal 伪造），构造入口闭集为 profile-specific constructors；
-//! `CurrentAuthGrant` 与 AuthGrant/RSS issue 生产链亦按 callee DefId + caller impl ADT 的完整
+//! AuthGrant/RSS issue 生产链亦按 callee DefId + caller impl ADT 的完整
 //! DefPath 同闸闭合 funnel；caller 的 crate/type/method 短名不足以证明它是 canonical service。
 //!
 //! 上下游强度（ai-robust.md §审查要求「Funnel 类约束分别说明上游 / 下游」）：
@@ -63,18 +63,6 @@ const ALLOWED_AUTHENTICATED_MINT_FUNCTIONS: &[(&str, &str, &str)] = &[
         "settingsonly",
         "federated_evidence",
         "auth_bridge::federated_evidence",
-    ),
-];
-const ALLOWED_CURRENT_GRANT_MINT_FUNCTIONS: &[(&str, &str, &str)] = &[
-    (
-        "runtime",
-        "current_auth_grant",
-        "auth_bridge::current_auth_grant",
-    ),
-    (
-        "identityaudit",
-        "current_auth_grant",
-        "auth_bridge::current_auth_grant",
     ),
 ];
 const ALLOWED_PRINCIPAL_ACCESSOR_FUNCTIONS: &[(&str, &str, &str)] = &[
@@ -181,17 +169,6 @@ impl<'tcx> LateLintPass<'tcx> for RssAuthenticatedCallsite {
                 authenticated_mint_help(cx),
             );
         }
-        if is_current_grant_mint_did(cx, did)
-            && !current_grant_mint_caller_is_allowed(cx, expr.hir_id)
-        {
-            emit(
-                cx,
-                expr.hir_id,
-                expr.span,
-                "CurrentAuthGrant 仅可在 runtime 消费 durable validator proof 后构造",
-                current_grant_mint_help(cx),
-            );
-        }
         if let Some(funnel) = authn_grant_issue_funnel(cx, did)
             && !authn_grant_issue_caller_is_allowed(cx, expr.hir_id, funnel)
         {
@@ -236,14 +213,6 @@ fn authenticated_mint_help(cx: &LateContext<'_>) -> &'static str {
     }
 }
 
-fn current_grant_mint_help(cx: &LateContext<'_>) -> &'static str {
-    if cx.tcx.crate_name(LOCAL_CRATE).as_str() == "identityaudit" {
-        "仅在 identityaudit `auth_bridge::current_auth_grant` 精确 wrapper 中按值消费 `ValidatedAuthGrant` 并 mint marker"
-    } else {
-        "仅在 runtime `auth_bridge::current_auth_grant` 精确 wrapper 中消费 `ValidatedAuthGrant` 并 mint marker"
-    }
-}
-
 fn principal_accessor_help(cx: &LateContext<'_>) -> &'static str {
     if cx.tcx.crate_name(LOCAL_CRATE).as_str() == "identityaudit" {
         "仅在 identityaudit `auth_bridge::allow_evidence` proof-consuming wrapper 中读取 Principal 身份；其它位置不得降维 verified Principal"
@@ -276,21 +245,6 @@ fn authenticated_mint_caller_is_allowed(cx: &LateContext<'_>, hir_id: HirId) -> 
             exact_caller
                 && (*expected_crate != "identityaudit"
                     || caller_consumes_validated_auth_grant(cx, parent, false))
-        },
-    )
-}
-
-fn current_grant_mint_caller_is_allowed(cx: &LateContext<'_>, hir_id: HirId) -> bool {
-    let crate_name = cx.tcx.crate_name(LOCAL_CRATE);
-    let parent = cx.tcx.hir_get_parent_item(hir_id).to_def_id();
-    let item_name = cx.tcx.item_name(parent);
-    let def_path = cx.tcx.def_path_str(parent);
-    ALLOWED_CURRENT_GRANT_MINT_FUNCTIONS.iter().any(
-        |(expected_crate, expected_name, expected_path)| {
-            crate_name.as_str() == *expected_crate
-                && item_name.as_str() == *expected_name
-                && is_exact_crate_path(&def_path, expected_crate, expected_path)
-                && caller_consumes_validated_auth_grant(cx, parent, true)
         },
     )
 }
@@ -495,23 +449,6 @@ fn is_authenticated_mint_did(cx: &LateContext<'_>, did: DefId) -> bool {
     } else {
         false
     }
-}
-
-fn is_current_grant_mint_did(cx: &LateContext<'_>, did: DefId) -> bool {
-    if cx.tcx.crate_name(did.krate).as_str() != "httpserve"
-        || cx.tcx.item_name(did).as_str() != "new"
-    {
-        return false;
-    }
-    let parent_did = cx.tcx.parent(did);
-    if !matches!(cx.tcx.def_kind(parent_did), DefKind::Impl { .. }) {
-        return false;
-    }
-    cx.tcx
-        .type_of(parent_did)
-        .skip_binder()
-        .ty_adt_def()
-        .is_some_and(|adt| cx.tcx.item_name(adt.did()).as_str() == "CurrentAuthGrant")
 }
 
 /// `did` 是 `authn::Principal` 的审计 subject accessor。

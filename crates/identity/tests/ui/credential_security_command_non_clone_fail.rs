@@ -1,6 +1,5 @@
 use identity::ports::{
-    AccountCredentialSecurityCommand, CredentialSecurityCommand,
-    CredentialSecurityFactAuthorization, GrantCredentialSecurityCommand,
+    AccountCredentialSecurityCommand, CredentialSecurityCommand, GrantCredentialSecurityCommand,
     PendingCredentialSecurityCommit,
 };
 
@@ -10,6 +9,5 @@ fn main() {
     assert_clone::<AccountCredentialSecurityCommand>();
     assert_clone::<GrantCredentialSecurityCommand>();
     assert_clone::<CredentialSecurityCommand>();
-    assert_clone::<CredentialSecurityFactAuthorization>();
     assert_clone::<PendingCredentialSecurityCommit>();
 }

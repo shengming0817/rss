@@ -1,0 +1,31 @@
+# 当前认证主体全部 grant logout HTTP 契约。epoch bump + grant/family revoke + security-event outbox ⇒ L2。
+id = "identity.logout-all"
+kind = "http"
+domain = "identity"
+version = "v1"
+owner = "identity"
+consistencyLevel = "OutboxFact"
+lifecycle = "active"
+path = "/api/v1/identity/logout-all"
+method = "POST"
+
+[schemas]
+request = "request.schema.json"
+response = "response.schema.json"
+
+[endpoints.http]
+selfScoped = true
+successStatus = 200
+idempotency = "idempotent"
+
+[endpoints.http.auth]
+mode = "permission"
+permission = "identity:session:logout-all"
+
+[capabilities.outbox]
+role = "producer"
+atomicity = "same-transaction"
+emits = ["identity.security-event"]
+
+[effectProfile]
+effects = ["auth", "business-write", "business-transaction", "outbox", "publish"]

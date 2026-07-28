@@ -301,6 +301,13 @@ const READY_CASE_RUNNERS: &[ReadyCaseRunner] = &[
         run_outbox_transient_publish_failure,
     ),
     ReadyCaseRunner::new(
+        "outbox-security-event-transient-publish-failure",
+        CrashFaultSpec::OutboxTransientPublishFailure,
+        CrashRunner::Postgres,
+        generated::event::identity_v1::security_event::CONTRACT,
+        run_outbox_transient_publish_failure,
+    ),
+    ReadyCaseRunner::new(
         "outbox-role-revoked-permanent-publish-failure",
         CrashFaultSpec::OutboxPermanentPublishFailure,
         CrashRunner::Postgres,

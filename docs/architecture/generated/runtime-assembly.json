@@ -43,6 +43,13 @@
       }
     },
     {
+      "path": "contracts/event/identity/v1/security-event/contract.toml",
+      "digest": {
+        "algorithm": "sha256",
+        "value": "ac6efec0ceb499b6463a200cce26e49b48cf459f1474efb19aaf300aec79d77c"
+      }
+    },
+    {
       "path": "contracts/event/identity/v1/session-created/contract.toml",
       "digest": {
         "algorithm": "sha256",
@@ -356,6 +363,14 @@
       "label": "identity.role-revoked",
       "source": {
         "path": "contracts/event/identity/v1/role-revoked/contract.toml"
+      }
+    },
+    {
+      "id": "n_752fe832adcd32cfdaf491e7",
+      "kind": "contract",
+      "label": "identity.security-event",
+      "source": {
+        "path": "contracts/event/identity/v1/security-event/contract.toml"
       }
     },
     {
@@ -768,6 +783,16 @@
     },
     {
       "from": "n_684f35c7299cdecb0da586f4",
+      "to": "n_898c5c10c9bb5231abbd9afb",
+      "kind": "subscribes"
+    },
+    {
+      "from": "n_99822bcaecc5c17cf471b808",
+      "to": "n_752fe832adcd32cfdaf491e7",
+      "kind": "publishes"
+    },
+    {
+      "from": "n_752fe832adcd32cfdaf491e7",
       "to": "n_898c5c10c9bb5231abbd9afb",
       "kind": "subscribes"
     },

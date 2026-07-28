@@ -154,7 +154,7 @@ contracts/{kind}/{domain}/{version}/
 - **比较面**：base ↔ working 按 (契约, logical slot：request/response/payload/saga step) 取并集——删除整个 active/deprecated 契约、删除 schema slot、slot 改名丢字段均进入比较（base-only 字段报删除，对标 Buf FILE/MESSAGE_NO_DELETE）；递归对象 `properties` + 数组元素 `items`（首版不下探 oneOf/anyOf/$ref，ADR §8 增量）。
 - **schema 规则**：`FIELD_NO_DELETE`、`REQUIRED_FIELD_ADDED`、`FIELD_TYPE_CHANGED`、`FIELD_FORMAT_CHANGED`、`ENUM_VALUE_DELETED`、`ADDITIONAL_PROPS_TIGHTENED`、`NULLABLE_REMOVED`、`REDACTION_POLICY_CHANGED`、`PROTECTION_POLICY_CHANGED`。
 - **manifest 规则**：HTTP 比较 `successStatus`、`auth.mode + permission`（忽略说明性 `reason`）、`idempotency`；L2 比较 topic、delivery、consistency level、outbox role/atomicity/emits，以及 subscription 集合、consumer/group、topology、execution/effect/externalEffectPolicy。`emits` 与 subscription 忽略排序，但任何增、删、替换或既有 policy 变化都是 breaking；重复 contract identity 直接拒绝。
-- **lifecycle 分级**：以 base lifecycle 决定处置，`active` 默认 deny；`LOCAL_ONLY_BOUNDARY_CHANGED`、`EFFECT_ADDED`、`EFFECT_REMOVED` 固定 warn，但缺少命令生成、绑定 base + canonical findings 的精确 `Contract-Review-Ack` commit trailer 时 fail-closed。`deprecated` 恒 warn、`draft` 跳过；active 降级不能绕过门。
+- **lifecycle 分级**：以 base lifecycle 决定处置，`active` 默认 deny。只有用户明确授权的 intentional breaking，才可携命令生成的精确 `Contract-Breaking-Authorization: sha256:<fingerprint>` commit trailer 原地实施；fingerprint 绑定 base commit 与全部 canonical deny findings，缺失、过期或部分匹配均 fail-closed。`LOCAL_ONLY_BOUNDARY_CHANGED`、`EFFECT_ADDED`、`EFFECT_REMOVED` 固定 warn，但仍须独立携带绑定 base + canonical review findings 的 `Contract-Review-Ack` trailer；两种载体互不替代。`deprecated` 恒 warn、`draft` 跳过；active 降级不能绕过门。
 
 > 当前 4 个 draft HTTP（`seed.echo`、`audit.session-projection`、`identity.reconcile-loop`、`settings.config-projection`）声明 `successStatus = 200`仅为非 serving 的契约元数据，不构成运行时状态码承诺；激活前必须按实际 handler 重新确认。
 

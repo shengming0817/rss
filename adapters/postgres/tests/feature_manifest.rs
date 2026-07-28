@@ -102,6 +102,7 @@ fn domain_dependencies_are_optional_and_features_are_explicit()
         "default features must be empty"
     );
     let mut expected_integration = domain_feature_names.clone();
+    expected_integration.insert("auth-audit-sink".to_owned());
     expected_integration.insert("testkit/containers".to_owned());
     assert_eq!(
         feature_set(features, "integration")?,

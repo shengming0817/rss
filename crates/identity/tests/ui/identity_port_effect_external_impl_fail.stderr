@@ -18,7 +18,7 @@ help: the trait `ports::identity_port_effect_sealed::Sealed` is not implemented 
             DynAuthGrantLifecycle<'a>
             DynAuthGrantValidator<'a>
             DynCredentialRepo<'a>
-            DynCredentialSecurityTargetResolver<'a>
+            DynIdentitySecurityLifecycle<'a>
           and $N others
 note: required by a bound in `IdentityPortEffect`
  --> src/ports.rs

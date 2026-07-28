@@ -11,15 +11,6 @@ marker = "AUDIT_LIST_TENANT_ENTRIES"
 runner = "journeys/tests/audit_list_tenant_entries_localtx_journey.rs"
 
 [[journeys]]
-id = "identity-logout-localtx"
-contractId = "identity.logout"
-txModel = "tenant-scoped-uow"
-spec = "journeys/identity-logout-localtx-journey.toml"
-fixture = "fixtures/identity-logout-localtx.toml"
-marker = "IDENTITY_LOGOUT"
-runner = "journeys/tests/identity_logout_localtx_journey.rs"
-
-[[journeys]]
 id = "identity-password-change-localtx"
 contractId = "identity.password-change"
 txModel = "repo-atomic-cas"

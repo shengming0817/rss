@@ -126,7 +126,9 @@ impl runtimeexec::StartupAdapter for FixtureStartup {
                 .context("build settings test binding")?,
         ];
         let verifier = auth_bridge::FederatedVerifier::test(diport::DynPdp::new_arc(FixturePdp));
-        let admin = "127.0.0.1:0".parse().context("build fixture Admin bind")?;
+        let admin = "127.0.0.1:8082"
+            .parse()
+            .context("build fixture Admin bind")?;
         runtime::prepare_assembly(
             runtime::AssemblyStartupInputs::new(
                 bindings,

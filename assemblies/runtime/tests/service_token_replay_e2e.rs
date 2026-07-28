@@ -131,6 +131,7 @@ async fn setup_runtime_pg(p: &testkit::PgConnParams) -> TestResult<PgRuntimeDeps
         &pg_config(p, &p.username, &p.password),
         &pg_config(p, TEST_APP_ROLE, TEST_APP_PASSWORD),
         &read,
+        None,
         generated::event::PROJECTION_INPUT_GENERATION,
         generated::event::PROJECTION_INPUTS,
     )

@@ -11,7 +11,6 @@ use vocab::PrincipalKind;
 fn main() {
     let _ev = auth_bridge::allow_evidence();
     let _mtls = auth_bridge::mtls_evidence();
-    let _current = auth_bridge::current_auth_grant;
     operator::projection::verified_service_maintenance_operator_subject();
     operator::projection::verified_projection_maintenance_operator_subject();
     operator::projection::projection_maintenance_operator_receipt();
@@ -22,10 +21,8 @@ fn main() {
     let _direct_caller = authn::Principal::service_caller_domain;
     // R：runtime 组合根中的任意其它函数也不能 mint evidence。
     let _direct = Authenticated::new_federated(PrincipalKind::User, "subject-1", None);
-    let current = httpserve::CurrentAuthGrant::new();
     let _direct_rss = Authenticated::new_rss_user(
-        current,
-        "subject-1",
+        "11111111-2222-4333-8444-555555555555",
         vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").unwrap(),
     );
     let _direct_service = Authenticated::new_service(
@@ -46,12 +43,6 @@ mod auth_bridge {
 
     pub fn mtls_evidence() -> Authenticated {
         Authenticated::new_mtls("mtls-peer")
-    }
-
-    pub fn current_auth_grant(
-        _validated: identity::ValidatedAuthGrant,
-    ) -> httpserve::CurrentAuthGrant {
-        httpserve::CurrentAuthGrant::new()
     }
 }
 

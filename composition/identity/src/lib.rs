@@ -6,8 +6,9 @@ use std::time::Duration;
 use bootstrap::{DomainBinding, DomainModuleResult};
 use diport::{Clock, Signer};
 use identity::{
-    AuthGrantServices, FederatedIdentityDomain, FederatedIdentityDomainDeps, IdentityDomain,
-    IdentityDomainDeps, LoginService, PolicyManageService, RbacAdminService,
+    AuthGrantServices, CredentialSecurityService, FederatedIdentityDomain,
+    FederatedIdentityDomainDeps, IdentityDomain, IdentityDomainDeps, LoginService,
+    PolicyManageService, RbacAdminService,
     ports::{
         DynAccountSecurityReadRepo, DynAuthGrantValidator, DynCredentialRepo, DynPolicyLifecycle,
         DynPolicyRepo, DynResourceAttributeReadRepo, DynRoleBindingLifecycle,
@@ -234,6 +235,13 @@ where
         refresh_ttl,
     );
     let refresh = auth_grants.refresh_service();
+    let identity_security_lifecycle = pg.identity_security_lifecycle();
+    let credential_security = Arc::new(CredentialSecurityService::new(
+        auth_grants.lifecycle(),
+        DynAccountSecurityReadRepo::new_box(pg.account_security_repo()),
+        identity_security_lifecycle,
+        boxed_clock(&clock),
+    ));
     let password_policy = secure::PasswordPolicy::new(blocklist);
     let login = Arc::new(LoginService::new(
         credentials,
@@ -245,6 +253,7 @@ where
     let domain = IdentityDomain::new(IdentityDomainDeps {
         login,
         refresh,
+        credential_security,
         rbac_admin: common.rbac_admin,
         policy_manage: common.policy_manage,
         roles: common.roles,

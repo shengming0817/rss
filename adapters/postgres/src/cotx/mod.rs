@@ -151,9 +151,8 @@ mod producer_fact_authorization_seal {
 
 /// Crate-closed authorization for the exact generated fact appended by [`producer_tx`](PgTenantWritePool::producer_tx).
 ///
-/// HTTP routes obtain this capability from their mounted producer receipt. Credential-security
-/// obtains its move-only authorization together with the sealed domain command; neither path
-/// accepts a caller-selected fact or exposes an independent mint.
+/// Production HTTP routes obtain this capability from their mounted producer receipt; no domain
+/// command can independently mint an active fact authorization.
 #[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
 pub(crate) trait ProducerFactAuthorization:
     producer_fact_authorization_seal::Sealed + Send + 'static
@@ -171,14 +170,21 @@ impl<M: Send + 'static> ProducerFactAuthorization for ProducerAuthorization<M> {
     }
 }
 
-#[cfg(feature = "domain-identity")]
-impl producer_fact_authorization_seal::Sealed
-    for identity::ports::CredentialSecurityFactAuthorization
-{
+#[cfg(all(test, feature = "domain-identity", feature = "integration"))]
+pub(crate) struct IntegrationCredentialSecurityAuthorization;
+
+#[cfg(all(test, feature = "domain-identity", feature = "integration"))]
+impl IntegrationCredentialSecurityAuthorization {
+    pub(crate) const fn new() -> Self {
+        Self
+    }
 }
 
-#[cfg(feature = "domain-identity")]
-impl ProducerFactAuthorization for identity::ports::CredentialSecurityFactAuthorization {
+#[cfg(all(test, feature = "domain-identity", feature = "integration"))]
+impl producer_fact_authorization_seal::Sealed for IntegrationCredentialSecurityAuthorization {}
+
+#[cfg(all(test, feature = "domain-identity", feature = "integration"))]
+impl ProducerFactAuthorization for IntegrationCredentialSecurityAuthorization {
     fn fact(&self) -> vocab::EventFactBinding {
         identity::ports::SECURITY_EVENT_FACT
     }
@@ -1648,6 +1654,7 @@ impl MapOutboxAppendError for identity::ports::IdentityError {
     fn from_outbox_append(error: OutboxAppendError) -> Self {
         match error {
             OutboxAppendError::Conflict(conflict) => Self::OutboxFactConflict(conflict),
+            OutboxAppendError::Storage(error) => crate::tx_retry::identity_storage_error(error),
             other => Self::Storage(Box::new(other)),
         }
     }
@@ -1761,6 +1768,20 @@ mod tx_capability_tests {
     use consistency::LocalTxFinalStatus;
 
     use super::{Postgres, Transaction, TxCapability, finish_local_tx_commit_result};
+
+    #[cfg(feature = "domain-identity")]
+    #[test]
+    fn identity_outbox_append_unavailable_remains_retryable_to_http_boundary() {
+        use super::MapOutboxAppendError as _;
+
+        let error = identity::ports::IdentityError::from_outbox_append(
+            crate::outbox::OutboxAppendError::Storage(sqlx::Error::PoolTimedOut),
+        );
+        assert!(matches!(
+            error,
+            identity::ports::IdentityError::ProviderUnavailable(_)
+        ));
+    }
 
     fn tenant() -> Result<vocab::TenantId, String> {
         vocab::TenantId::parse("11111111-1111-1111-1111-111111111111")

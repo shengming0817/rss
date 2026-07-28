@@ -30,8 +30,8 @@ use identity::ports::{
     RolesRevokeProducerReceipt, TenantRepoScope,
 };
 use identity::{
-    IdentityDomain, IdentityDomainDeps, LoginService, PolicyManageService, RbacAdminService,
-    RefreshService,
+    CredentialSecurityService, IdentityDomain, IdentityDomainDeps, LoginService,
+    PolicyManageService, RbacAdminService, RefreshService,
 };
 use primitives::{Mac, MacAlgorithm, MacKey, MacVerifier};
 use vocab::TenantId;
@@ -481,9 +481,14 @@ where
         policy_lifecycle,
         Box::new(memory::FixedClock::at_unix_secs(NOW_SECS)),
     ));
+    let credential_security = Arc::new(CredentialSecurityService::inert_for_non_logout_tests(
+        &login,
+        Box::new(memory::FixedClock::at_unix_secs(NOW_SECS)),
+    ));
     IdentityDomain::new(IdentityDomainDeps {
         login,
         refresh,
+        credential_security,
         rbac_admin: rbac,
         policy_manage,
         roles,

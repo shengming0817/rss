@@ -1,10 +1,10 @@
-# 当前认证主体 logout HTTP 契约。session soft revoke ⇒ L1。
+# 当前认证 grant logout HTTP 契约。grant/family revoke + security-event outbox ⇒ L2。
 id = "identity.logout"
 kind = "http"
 domain = "identity"
 version = "v1"
 owner = "identity"
-consistencyLevel = "LocalTx"
+consistencyLevel = "OutboxFact"
 lifecycle = "active"
 path = "/api/v1/identity/logout"
 method = "POST"
@@ -20,13 +20,12 @@ idempotency = "idempotent"
 
 [endpoints.http.auth]
 mode = "permission"
-permission = "identity:session:write"
+permission = "identity:session:logout-current"
 
-[capabilities.localTx]
-boundary = "single-domain"
-txModel = "tenant-scoped-uow"
-retry = "bounded-transient"
-commitUnknown = "not-retryable"
+[capabilities.outbox]
+role = "producer"
+atomicity = "same-transaction"
+emits = ["identity.security-event"]
 
 [effectProfile]
-effects = ["auth", "business-write", "business-transaction"]
+effects = ["auth", "business-write", "business-transaction", "outbox", "publish"]

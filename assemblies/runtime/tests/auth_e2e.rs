@@ -504,6 +504,7 @@ fn jwt_router(with_bridge: bool) -> httpserve::AuthenticatedRoutes {
 async fn rss_verified_evidence_handler(
     axum::extract::Extension(verified): axum::extract::Extension<Arc<authn::VerifiedJwt>>,
     axum::extract::Extension(authenticated): axum::extract::Extension<httpserve::Authenticated>,
+    axum::extract::Extension(current): axum::extract::Extension<identity::CurrentAuthGrant>,
 ) -> Result<&'static str, StatusCode> {
     let Some(receipt) = verified.grant_receipt() else {
         return Err(StatusCode::INTERNAL_SERVER_ERROR);
@@ -512,7 +513,8 @@ async fn rss_verified_evidence_handler(
         || receipt.token_id().to_string().len() != 36
         || receipt.auth_time_unix_secs() != (NOW - 30) as u64
         || receipt.authn_epoch() != 7
-        || authenticated.current_auth_grant().is_none()
+        || authenticated.principal_kind() != vocab::PrincipalKind::User
+        || !current.binds_principal(tenant(), USER_SUBJECT)
     {
         return Err(StatusCode::INTERNAL_SERVER_ERROR);
     }

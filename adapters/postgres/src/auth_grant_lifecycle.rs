@@ -86,6 +86,7 @@ impl AuthGrantLoginLockGate {
 
 #[cfg(all(test, feature = "integration"))]
 #[derive(Clone, Copy)]
+#[allow(dead_code, reason = "refresh-replay fault seam")]
 pub(crate) enum AuthGrantCloseFault {
     TransientBeforeWrite,
     TransientAfterWrite,
@@ -109,11 +110,13 @@ struct AuthGrantCloseFaultState {
 }
 
 #[cfg(all(test, feature = "integration"))]
+#[allow(dead_code, reason = "refresh-replay fault seam")]
 pub(crate) struct AuthGrantCloseAttemptProbe {
     state: Arc<Mutex<AuthGrantCloseFaultState>>,
 }
 
 #[cfg(all(test, feature = "integration"))]
+#[allow(dead_code, reason = "refresh-replay fault seam")]
 impl AuthGrantCloseAttemptProbe {
     pub(crate) fn attempts(&self, grant_id: &str) -> usize {
         self.state
@@ -171,6 +174,7 @@ impl PgAuthGrantLifecycle {
     }
 
     #[cfg(all(test, feature = "integration"))]
+    #[allow(dead_code, reason = "refresh-replay fault seam")]
     pub(crate) fn with_close_fault(
         self,
         grant_id: &str,
@@ -190,6 +194,7 @@ impl PgAuthGrantLifecycle {
     }
 
     #[cfg(all(test, feature = "integration"))]
+    #[allow(dead_code, reason = "refresh-replay fault seam")]
     pub(crate) fn close_attempt_probe(&self) -> AuthGrantCloseAttemptProbe {
         AuthGrantCloseAttemptProbe {
             state: Arc::clone(&self.close_faults),
@@ -724,7 +729,7 @@ pub(crate) async fn apply_grant_close_cas(
 }
 
 fn storage(error: sqlx::Error) -> IdentityError {
-    IdentityError::Storage(Box::new(error))
+    crate::tx_retry::identity_storage_error(error)
 }
 
 fn corrupt(message: &'static str) -> IdentityError {

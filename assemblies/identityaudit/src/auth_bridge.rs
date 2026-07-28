@@ -6,7 +6,7 @@ use std::{future::Future, pin::Pin};
 use axum::extract::{Request, State};
 use axum::middleware::{self, Next};
 use axum::response::Response;
-use httpserve::{Authenticated, AuthenticatedRoutes, CurrentAuthGrant};
+use httpserve::{Authenticated, AuthenticatedRoutes};
 
 #[derive(Clone)]
 pub(crate) struct RssAccessVerifier {
@@ -81,6 +81,7 @@ pub(crate) fn apply(
 enum VerifyOutcome {
     Allowed {
         evidence: Authenticated,
+        current_auth_grant: identity::CurrentAuthGrant,
         principal: Arc<authn::Principal>,
         jwt: Arc<authn::VerifiedJwt>,
         ctx: runctx::AppCtx,
@@ -131,9 +132,14 @@ async fn authenticate(
     let principal = Arc::new(principal);
     let facet: Arc<dyn runctx::PrincipalFacet> = principal.clone();
     let ctx = runctx::RequestCtx::new(tenant, facet);
-    let evidence = allow_evidence(validated_grant, principal.as_ref(), tenant);
+    let Some((evidence, current_auth_grant)) =
+        allow_evidence(validated_grant, principal.as_ref(), tenant)
+    else {
+        return VerifyOutcome::Rejected;
+    };
     VerifyOutcome::Allowed {
         evidence,
+        current_auth_grant,
         principal,
         jwt: Arc::new(jwt),
         ctx,
@@ -144,16 +150,15 @@ fn allow_evidence(
     validated_grant: identity::ValidatedAuthGrant,
     principal: &authn::Principal,
     tenant: vocab::TenantId,
-) -> Authenticated {
-    Authenticated::new_rss_user(
-        current_auth_grant(validated_grant),
-        principal.audit_subject(),
-        tenant,
-    )
-}
-
-fn current_auth_grant(_validated: identity::ValidatedAuthGrant) -> CurrentAuthGrant {
-    CurrentAuthGrant::new()
+) -> Option<(Authenticated, identity::CurrentAuthGrant)> {
+    let current = validated_grant.into_current_auth_grant()?;
+    if !current.binds_principal(tenant, principal.audit_subject()) {
+        return None;
+    }
+    Some((
+        Authenticated::new_rss_user(principal.audit_subject(), tenant),
+        current,
+    ))
 }
 
 async fn verify(
@@ -165,11 +170,13 @@ async fn verify(
         Ok(Some(credential)) => match authenticate(&verifier, credential).await {
             VerifyOutcome::Allowed {
                 evidence,
+                current_auth_grant,
                 principal,
                 jwt,
                 ctx,
             } => {
                 request.extensions_mut().insert(evidence);
+                request.extensions_mut().insert(current_auth_grant);
                 request.extensions_mut().insert(principal);
                 request.extensions_mut().insert(jwt);
                 request
