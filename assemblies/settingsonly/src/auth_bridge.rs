@@ -38,7 +38,7 @@ impl FederatedVerifier {
     async fn verify(
         &self,
         token: &str,
-    ) -> Result<(authn::VerifiedJwt, authn::Principal), authn::AuthnError> {
+    ) -> Result<authn::VerifiedFederatedAccess, authn::AuthnError> {
         match &self.provider {
             VerifierProvider::Production(provider) => {
                 let pdp = diport::DynPdp::from_ref(provider.as_ref());
@@ -60,11 +60,13 @@ pub(crate) fn apply(
 }
 
 /// The single settingsonly evidence mint. The caller lint permits this exact path only.
-fn federated_evidence(principal: &authn::Principal) -> Authenticated {
+fn federated_evidence(access: &authn::VerifiedFederatedAccess) -> Authenticated {
+    let principal = access.principal();
     Authenticated::new_federated(
         principal.kind(),
         principal.audit_subject(),
         principal.tenant(),
+        access.permissions(),
     )
 }
 
@@ -92,9 +94,10 @@ async fn verify_request(
         );
     }
     match verifier.verify(&token).await {
-        Ok((verified, principal)) => {
-            let principal = Arc::new(principal);
-            let evidence = federated_evidence(principal.as_ref());
+        Ok(access) => {
+            let access = Arc::new(access);
+            let principal = access.principal_arc();
+            let evidence = federated_evidence(access.as_ref());
             if let Some(tenant) = principal.tenant() {
                 let facet: Arc<dyn runctx::PrincipalFacet> = principal.clone();
                 let ctx = runctx::RequestCtx::new(tenant, facet);
@@ -104,7 +107,6 @@ async fn verify_request(
             }
             request.extensions_mut().insert(evidence);
             request.extensions_mut().insert(principal);
-            request.extensions_mut().insert(Arc::new(verified));
         }
         Err(authn::AuthnError::ProviderUnavailable) => {
             return httpserve::error::provider_unavailable(

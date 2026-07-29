@@ -1,7 +1,7 @@
 name = "settingsonly"
-profile = "demo"
+profile = "production"
 domains = ["settings"]
-topology = "demo"
+topology = "durable-isolated"
 frameworkContracts = [{ id = "runtime.inventory", listener = "admin" }]
 
 [[listeners]]
@@ -26,7 +26,7 @@ consumer = "settings"
 lifecycle = "active"
 durability = "persistent"
 purpose = "settings-configvalue-at-rest-encryption"
-outputs = ["resources"]
+outputs = ["probes", "resources", "workers"]
 
 [[diportProviders]]
 id = "listener-pdp"
@@ -50,7 +50,7 @@ consumer = "httpserve"
 lifecycle = "active"
 durability = "persistent"
 purpose = "http-auth-decision-audit"
-outputs = ["resources", "workers"]
+outputs = ["probes", "resources", "workers"]
 
 [[diportProviders]]
 id = "listener-rate-limiter"
@@ -73,4 +73,98 @@ consumer = "settings"
 lifecycle = "active"
 durability = "persistent"
 purpose = "settings-secret-material-resolution"
-outputs = ["resources"]
+outputs = ["probes", "resources", "workers"]
+
+[[diportProviders]]
+id = "event-publisher"
+port = "diport::Publisher"
+provider = "amqp::AmqpPublisher"
+providerCrate = "amqp"
+requiredFeatures = ["backend"]
+consumer = "eventexec"
+lifecycle = "active"
+durability = "persistent"
+purpose = "settings-outbox-relay-amqp-publish"
+outputs = ["probes", "resources", "workers"]
+
+[[diportProviders]]
+id = "event-subscriber"
+port = "diport::AckableSubscriber"
+provider = "amqp::AmqpSubscriber"
+providerCrate = "amqp"
+requiredFeatures = ["backend"]
+consumer = "eventexec"
+lifecycle = "active"
+durability = "persistent"
+purpose = "settings-config-version-changed-consume-at-least-once"
+outputs = ["probes", "resources", "workers"]
+
+[[diportProviders]]
+id = "distributed-lock-store"
+port = "diport::LockStore"
+provider = "redis::RedisLockStore"
+providerCrate = "redis"
+requiredFeatures = ["backend"]
+consumer = "distributed"
+lifecycle = "active"
+durability = "persistent"
+purpose = "settings-outbox-maintenance-distributed-lock-fencing"
+outputs = ["probes", "resources", "workers"]
+
+[[diportProviders]]
+id = "distributed-cas-store"
+port = "diport::CasStore"
+provider = "postgres::PgCasStore"
+providerCrate = "postgres"
+consumer = "distributed"
+lifecycle = "active"
+durability = "persistent"
+purpose = "settings-outbox-maintenance-distributed-state-cas"
+outputs = ["probes", "resources", "workers"]
+
+[[diportProviders]]
+id = "dlx-lifecycle-repository"
+port = "diport::DlxLifecycleRepository"
+provider = "postgres::PgDlxLifecycleRepository"
+providerCrate = "postgres"
+consumer = "eventexec"
+lifecycle = "active"
+durability = "persistent"
+purpose = "settings-dead-letter-archive-receipt-purge-reconcile"
+outputs = ["probes", "resources", "workers"]
+
+[[diportProviders]]
+id = "dlx-archive-store"
+port = "diport::DlxArchiveStore"
+provider = "s3::VerifiedS3DlxArchiveStore"
+providerCrate = "s3"
+requiredFeatures = ["backend"]
+consumer = "eventexec"
+lifecycle = "active"
+durability = "persistent"
+purpose = "settings-dead-letter-compliance-worm-archive"
+outputs = ["probes", "workers"]
+
+[[diportProviders]]
+id = "dlx-hot-key-provider"
+port = "diport::KeyProvider"
+provider = "vault::VaultKeyProvider"
+providerCrate = "vault"
+requiredFeatures = ["backend"]
+consumer = "eventexec"
+lifecycle = "active"
+durability = "persistent"
+purpose = "settings-dead-letter-independent-hot-key-provider"
+outputs = ["probes", "resources", "workers"]
+
+[[diportProviders]]
+id = "dlx-archive-key-provider"
+port = "diport::KeyProvider"
+provider = "vault::VaultKeyProvider"
+providerCrate = "vault"
+requiredFeatures = ["backend"]
+consumer = "eventexec"
+lifecycle = "active"
+durability = "persistent"
+purpose = "settings-dead-letter-independent-archive-key-provider"
+outputs = ["probes", "resources", "workers"]

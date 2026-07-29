@@ -130,6 +130,7 @@ integration = [
   "amqp/integration-test-support",
   "httpserve/test-util",
   "runtimeexec/test-support",
+  "settings-composition/test-support",
   "dep:ids",
 ]
 

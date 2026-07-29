@@ -31,6 +31,7 @@
 //! INVARIANT: VERIFY-AGGREGATE-01 { level = "Medium", exec = "verify", source = "code" }—— 本地 verify/ci-full 默认 keep-going、显式 fail-fast；远端 typed job 保持 fail-fast；任一门步失败均非零退出。
 //! INVARIANT: VERIFY-TOOL-GATE-01 { level = "Medium", exec = "verify", source = "code" }—— 缺外部工具默认 fail-closed；豁免仅经显式 `--allow-missing-tools`。
 //! INVARIANT: ASSEMBLY-PROVIDERS-VERIFY-GATE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "assembly_provider_codegen_gate_is_typed_once_and_ordered_in_all_aggregate_plans", anti_vacuity = "assembly_codegen::tests::assembly_provider_codegen_generated_provider_catalogs_are_non_empty_and_check_clean" }—— provider catalog drift is an independent typed no-compile gate exactly once between modules drift and AssemblyLock in every aggregate plan.
+//! INVARIANT: ASSEMBLY-RUNTIME-PLAN-VERIFY-GATE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "assembly_runtime_plan_gate_is_typed_once_and_ordered_in_all_aggregate_plans", anti_vacuity = "assembly_runtime_plan::tests::committed_runtime_plans_are_check_clean" }—— committed runtime plans are checked by one typed in-process no-compile gate exactly once between assembly lock and graph checks in every aggregate plan.
 //! INVARIANT: RUNTIME-DYLINT-UI-GATE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "runtime_dylint_ui_gate_is_typed_closed_and_in_aggregate_plans", anti_vacuity = "runtime_dylint_ui_gate_is_typed_closed_and_in_aggregate_plans" }—— the three runtime Dylint UI carriers run as one typed `cargo test --locked` gate from the fixed `lints` workspace in full verify, compatibility CI, and core prerequisites, while fast remains no-compile.
 //! INVARIANT: L2-ASSURANCE-VERIFY-GATE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "l2_assurance_gate_is_typed_once_and_ordered_in_all_aggregate_plans", anti_vacuity = "l2_assurance::tests::workspace_inventory_is_exact_and_deterministic" }—— L2 assurance drift check is a typed, in-process, no-compile gate present exactly once immediately after codegen in every aggregate plan.
 //! INVARIANT: CI-ADAPTIVE-WORKFLOW-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "split_ci_caller_predicate_green_and_synthetic_red", anti_vacuity = "github_ci_workflow_delegates_to_split_xtask_lanes" }—— GitHub CI workflow
@@ -125,6 +126,8 @@ enum InternalCheck {
     AssemblyProvidersCheck,
     /// repository-verified committed assembly.lock.json raw-byte 漂移门（#1781）。
     AssemblyLockCheck,
+    /// committed runtime-plan.json raw-byte drift gate.
+    AssemblyRuntimePlanCheck,
     /// committed runtime assembly Mermaid/JSON graph 漂移与 source closure 门。
     AssemblyGraphCheck,
     /// wire JSON-Schema/manifest 跨版本破坏检测门（ADR-008，WIRE-BREAKING-01）。
@@ -314,6 +317,14 @@ fn step_assembly_lock_check() -> Step {
         id: GateId::AssemblyLockCheck,
         args: &[],
         kind: StepKind::Internal(InternalCheck::AssemblyLockCheck),
+        env: &[],
+    }
+}
+fn step_assembly_runtime_plan_check() -> Step {
+    Step {
+        id: GateId::AssemblyRuntimePlanCheck,
+        args: &[],
+        kind: StepKind::Internal(InternalCheck::AssemblyRuntimePlanCheck),
         env: &[],
     }
 }
@@ -1390,6 +1401,7 @@ fn run_internal(check: InternalCheck, opts: &VerifyOpts, root: &Path) -> Result<
         InternalCheck::AssemblyLockCheck => {
             assembly_lock::run(assembly_lock::AssemblyLockAction::Check)
         }
+        InternalCheck::AssemblyRuntimePlanCheck => crate::assembly_runtime_plan::run(true),
         InternalCheck::AssemblyGraphCheck => {
             crate::graph::run(&crate::graph::Options::check_runtime())
         }
@@ -2669,6 +2681,7 @@ mod tests {
                 "assembly-modules-check",
                 "assembly-providers-check",
                 "assembly-lock-check",
+                "assembly-runtime-plan-check",
                 "assembly-graph-check",
                 "contract-breaking",
                 "layer-deps",
@@ -2987,6 +3000,7 @@ mod tests {
                 "assembly-modules-check",
                 "assembly-providers-check",
                 "assembly-lock-check",
+                "assembly-runtime-plan-check",
                 "assembly-graph-check",
                 "contract-breaking",
                 "layer-deps",
@@ -3062,6 +3076,7 @@ mod tests {
                     "assembly-modules-check",
                     "assembly-providers-check",
                     "assembly-lock-check",
+                    "assembly-runtime-plan-check",
                     "assembly-graph-check",
                     "contract-breaking",
                     "layer-deps",
@@ -3239,6 +3254,7 @@ mod tests {
             GateId::AssemblyModulesCheck,
             GateId::AssemblyProvidersCheck,
             GateId::AssemblyLockCheck,
+            GateId::AssemblyRuntimePlanCheck,
             GateId::AssemblyGraphCheck,
         ]
         .map(|id| {
@@ -3442,9 +3458,16 @@ mod tests {
             .iter()
             .position(|step| step.id == GateId::AssemblyGraphCheck)
             .context("plan lacks graph check")?;
+        let runtime_plan = plan
+            .iter()
+            .position(|step| step.id == GateId::AssemblyRuntimePlanCheck)
+            .context("plan lacks runtime plan check")?;
         anyhow::ensure!(
-            providers == modules + 1 && lock == providers + 1 && graph == lock + 1,
-            "assembly order must be modules -> providers -> lock -> graph"
+            providers == modules + 1
+                && lock == providers + 1
+                && runtime_plan == lock + 1
+                && graph == runtime_plan + 1,
+            "assembly order must be modules -> providers -> lock -> runtime-plan -> graph"
         );
         Ok(())
     }
@@ -3473,6 +3496,92 @@ mod tests {
             .clone();
         duplicated.push(duplicate);
         assert!(validate_assembly_lock_check(&duplicated).is_err());
+        Ok(())
+    }
+
+    fn validate_assembly_runtime_plan_gate(plan: &[Step]) -> anyhow::Result<()> {
+        let registry = REGISTRY
+            .iter()
+            .filter(|spec| spec.id() == GateId::AssemblyRuntimePlanCheck)
+            .collect::<Vec<_>>();
+        anyhow::ensure!(
+            registry.len() == 1,
+            "expected exactly one assembly runtime plan registry entry"
+        );
+        let gates = plan
+            .iter()
+            .enumerate()
+            .filter(|(_, step)| step.id == GateId::AssemblyRuntimePlanCheck)
+            .collect::<Vec<_>>();
+        anyhow::ensure!(
+            gates.len() == 1,
+            "expected exactly one assembly runtime plan gate"
+        );
+        let (runtime_plan, gate) = gates[0];
+        anyhow::ensure!(
+            !gate.needs_compile()
+                && gate.carrier_file() == Some("xtask/src/assembly_runtime_plan.rs")
+                && matches!(
+                    gate.kind,
+                    StepKind::Internal(InternalCheck::AssemblyRuntimePlanCheck)
+                ),
+            "assembly runtime plan executor drift"
+        );
+        anyhow::ensure!(
+            gate.id.spec().lanes() == [Some(CiLane::Meta), None]
+                && gate.id.spec().verify_membership() == VerifyMembership::Included
+                && gate.id.spec().compat() == CompatMembership::Included
+                && gate.id.spec().tool() == ToolRequirement::InProcess,
+            "assembly runtime plan typed membership drift"
+        );
+        let lock = plan
+            .iter()
+            .position(|step| step.id == GateId::AssemblyLockCheck)
+            .context("plan lacks assembly lock check")?;
+        let graph = plan
+            .iter()
+            .position(|step| step.id == GateId::AssemblyGraphCheck)
+            .context("plan lacks assembly graph check")?;
+        anyhow::ensure!(
+            runtime_plan == lock + 1 && graph == runtime_plan + 1,
+            "assembly runtime plan must be exactly between lock and graph"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn assembly_runtime_plan_gate_is_typed_once_and_ordered_in_all_aggregate_plans()
+    -> anyhow::Result<()> {
+        for (name, plan) in [
+            ("verify", plan_for(PlanTarget::Verify)),
+            ("fast", verify_plan(&opts(true, false))),
+            ("ci-meta", plan_for(PlanTarget::Lane(CiLane::Meta))),
+            ("compatibility", plan_for(PlanTarget::CompatibilityCi)),
+        ] {
+            validate_assembly_runtime_plan_gate(&plan).with_context(|| format!("{name} plan"))?;
+        }
+
+        let real = verify_plan(&opts(true, false));
+        let mut omitted = real.clone();
+        omitted.retain(|step| step.id != GateId::AssemblyRuntimePlanCheck);
+        assert!(validate_assembly_runtime_plan_gate(&omitted).is_err());
+
+        let mut duplicated = real.clone();
+        duplicated.push(
+            real.iter()
+                .find(|step| step.id == GateId::AssemblyRuntimePlanCheck)
+                .context("committed fast plan lacks runtime plan check")?
+                .clone(),
+        );
+        assert!(validate_assembly_runtime_plan_gate(&duplicated).is_err());
+
+        let mut wrong_executor = real;
+        wrong_executor
+            .iter_mut()
+            .find(|step| step.id == GateId::AssemblyRuntimePlanCheck)
+            .context("committed fast plan lacks runtime plan check")?
+            .kind = StepKind::Internal(InternalCheck::AssemblyLockCheck);
+        assert!(validate_assembly_runtime_plan_gate(&wrong_executor).is_err());
         Ok(())
     }
 
@@ -3690,9 +3799,14 @@ mod tests {
                 .iter()
                 .position(|label| *label == "assembly-lock-check")
                 .ok_or_else(|| anyhow::anyhow!("{name} plan 缺 assembly-lock-check"))?;
+            let runtime_plan = labels
+                .iter()
+                .position(|label| *label == "assembly-runtime-plan-check")
+                .ok_or_else(|| anyhow::anyhow!("{name} plan 缺 assembly-runtime-plan-check"))?;
             assert_eq!(providers, modules + 1, "{name} providers lane order drift");
             assert_eq!(lock, providers + 1, "{name} lock lane order drift");
-            assert_eq!(graph, lock + 1, "{name} graph lane order drift");
+            assert_eq!(runtime_plan, lock + 1, "{name} runtime plan order drift");
+            assert_eq!(graph, runtime_plan + 1, "{name} graph lane order drift");
             assert!(!plan[graph].needs_compile());
             assert_eq!(plan[graph].carrier_file(), Some("xtask/src/graph.rs"));
             assert!(matches!(
@@ -4017,6 +4131,7 @@ mod tests {
                 "assembly-modules-check",
                 "assembly-providers-check",
                 "assembly-lock-check",
+                "assembly-runtime-plan-check",
                 "assembly-graph-check",
                 "contract-breaking",
                 "layer-deps",
@@ -4145,6 +4260,7 @@ mod tests {
             "assembly-modules-check",
             "assembly-providers-check",
             "assembly-lock-check",
+            "assembly-runtime-plan-check",
             "assembly-graph-check",
             "contract-breaking",
             "layer-deps",

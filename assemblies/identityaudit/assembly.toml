@@ -50,7 +50,7 @@ consumer = "identity"
 lifecycle = "active"
 durability = "persistent"
 purpose = "jwt-access-token-signing"
-outputs = ["resources"]
+outputs = ["probes", "resources", "workers"]
 
 [[diportProviders]]
 id = "dlx-archive-key-provider"
@@ -62,7 +62,7 @@ consumer = "eventexec"
 lifecycle = "active"
 durability = "persistent"
 purpose = "identityaudit-dead-letter-hot-payload-protection"
-outputs = ["workers"]
+outputs = ["probes", "resources", "workers"]
 
 [[diportProviders]]
 id = "listener-pdp"
@@ -86,7 +86,7 @@ consumer = "httpserve"
 lifecycle = "active"
 durability = "persistent"
 purpose = "http-auth-decision-audit"
-outputs = ["resources", "workers"]
+outputs = ["probes", "resources", "workers"]
 
 [[diportProviders]]
 id = "listener-rate-limiter"
@@ -109,7 +109,7 @@ consumer = "distributed"
 lifecycle = "active"
 durability = "persistent"
 purpose = "outbox-maintenance-distributed-lock-fencing"
-outputs = ["resources"]
+outputs = ["probes", "resources", "workers"]
 
 [[diportProviders]]
 id = "distributed-cas-store"
@@ -120,4 +120,4 @@ consumer = "distributed"
 lifecycle = "active"
 durability = "persistent"
 purpose = "outbox-maintenance-distributed-state-cas"
-outputs = ["resources", "workers"]
+outputs = ["probes", "resources", "workers"]

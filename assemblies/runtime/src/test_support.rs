@@ -177,6 +177,7 @@ pub fn build_shared_runtime_deps(
     settings_config_value_key_name: diport::KeyName,
     domain_transport: Arc<dyn distributed::DomainTransport>,
 ) -> SharedRuntimeDeps {
+    let settings_readiness = settings_composition::test_support::readiness(pg.readiness_handle());
     SharedRuntimeDeps::from_integration_parts(
         password_blocklist,
         pg,
@@ -185,6 +186,7 @@ pub fn build_shared_runtime_deps(
         vault,
         identity_signer,
         settings_config_value_key_name,
+        settings_readiness,
         domain_transport,
     )
 }

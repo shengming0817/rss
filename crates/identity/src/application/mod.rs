@@ -7142,6 +7142,7 @@ mod tests {
                 tenant_id: Some(tid(CANON_TENANT)),
                 principal_kind: vocab::PrincipalKind::User,
                 principal_id: CANON_USER.to_string(),
+                federated_permissions: None,
                 resource: None,
             })
             .await;
@@ -7154,6 +7155,7 @@ mod tests {
                 tenant_id: Some(tid(CANON_TENANT)),
                 principal_kind: vocab::PrincipalKind::User,
                 principal_id: CANON_USER.to_string(),
+                federated_permissions: None,
                 resource: Some(httpserve::RouteResource::new(CANON_USER).expect("route resource")),
             })
             .await;
@@ -7170,6 +7172,7 @@ mod tests {
                 tenant_id: Some(tid(CANON_TENANT)),
                 principal_kind: vocab::PrincipalKind::User,
                 principal_id: CANON_USER.to_string(),
+                federated_permissions: None,
                 resource: Some(httpserve::RouteResource::new(CANON_USER).expect("route resource")),
             })
             .await;
@@ -7223,6 +7226,7 @@ mod tests {
                     tenant_id: Some(tid(CANON_TENANT)),
                     principal_kind: vocab::PrincipalKind::Admin,
                     principal_id: CANON_USER.to_string(),
+                    federated_permissions: None,
                     resource: None,
                 })
                 .await;
@@ -7272,6 +7276,7 @@ mod tests {
                     tenant_id: Some(tid(CANON_TENANT)),
                     principal_kind: vocab::PrincipalKind::User,
                     principal_id: CANON_USER.to_string(),
+                    federated_permissions: None,
                     resource: None,
                 })
                 .await;
@@ -7320,6 +7325,7 @@ mod tests {
                 tenant_id: Some(tid(CANON_TENANT)),
                 principal_kind: vocab::PrincipalKind::User,
                 principal_id: CANON_USER.to_string(),
+                federated_permissions: None,
                 resource: None,
             })
             .await;
@@ -7332,6 +7338,7 @@ mod tests {
                 tenant_id: None,
                 principal_kind: vocab::PrincipalKind::User,
                 principal_id: CANON_USER.to_string(),
+                federated_permissions: None,
                 resource: None,
             },
             RouteAuthorizationRequest {
@@ -7340,6 +7347,7 @@ mod tests {
                 tenant_id: Some(tid(CANON_TENANT)),
                 principal_kind: vocab::PrincipalKind::User,
                 principal_id: CANON_USER.to_string(),
+                federated_permissions: None,
                 resource: None,
             },
             RouteAuthorizationRequest {
@@ -7348,6 +7356,7 @@ mod tests {
                 tenant_id: Some(tid(CANON_TENANT)),
                 principal_kind: vocab::PrincipalKind::User,
                 principal_id: CANON_USER.to_string(),
+                federated_permissions: None,
                 resource: None,
             },
         ] {
@@ -7383,6 +7392,7 @@ mod tests {
                 tenant_id: Some(tid(CANON_TENANT)),
                 principal_kind: vocab::PrincipalKind::User,
                 principal_id: CANON_USER.to_string(),
+                federated_permissions: None,
                 resource: None,
             })
             .await;
@@ -7414,6 +7424,7 @@ mod tests {
                 tenant_id: Some(tid(CANON_TENANT)),
                 principal_kind: vocab::PrincipalKind::Admin,
                 principal_id: CANON_USER.to_string(),
+                federated_permissions: None,
                 resource: None,
             })
             .await;
@@ -7454,6 +7465,7 @@ mod tests {
                 tenant_id: Some(tid(CANON_TENANT)),
                 principal_kind: vocab::PrincipalKind::Admin,
                 principal_id: CANON_USER.to_string(),
+                federated_permissions: None,
                 resource: None,
             })
             .await;
@@ -7492,6 +7504,7 @@ mod tests {
                 tenant_id: Some(tid(CANON_TENANT)),
                 principal_kind: vocab::PrincipalKind::User,
                 principal_id: CANON_USER.to_string(),
+                federated_permissions: None,
                 resource: Some(route_resource()),
             })
             .await;
@@ -7538,6 +7551,7 @@ mod tests {
                 tenant_id: Some(tid(CANON_TENANT)),
                 principal_kind: vocab::PrincipalKind::Admin,
                 principal_id: CANON_USER.to_string(),
+                federated_permissions: None,
                 resource: Some(route_resource()),
             })
             .await;
@@ -7588,6 +7602,7 @@ mod tests {
                 tenant_id: Some(tid(CANON_TENANT)),
                 principal_kind: vocab::PrincipalKind::Admin,
                 principal_id: CANON_USER.to_string(),
+                federated_permissions: None,
                 resource: Some(route_resource()),
             })
             .await;
@@ -7637,6 +7652,7 @@ mod tests {
                 tenant_id: Some(tid(CANON_TENANT)),
                 principal_kind: vocab::PrincipalKind::Admin,
                 principal_id: CANON_USER.to_string(),
+                federated_permissions: None,
                 resource: Some(route_resource()),
             })
             .await;
@@ -7683,6 +7699,7 @@ mod tests {
                 tenant_id: Some(tid(CANON_TENANT)),
                 principal_kind: vocab::PrincipalKind::Admin,
                 principal_id: CANON_USER.to_string(),
+                federated_permissions: None,
                 resource: Some(route_resource()),
             })
             .await;
@@ -7707,6 +7724,7 @@ mod tests {
             tenant_id: Some(tid(CANON_TENANT)),
             principal_kind: vocab::PrincipalKind::User,
             principal_id: CANON_USER.to_string(),
+            federated_permissions: None,
             resource: Some(route_resource()),
         };
         let specs = [synthetic_global_spec()];
@@ -7757,6 +7775,7 @@ mod tests {
                 tenant_id: Some(tid(CANON_TENANT)),
                 principal_kind: vocab::PrincipalKind::Admin,
                 principal_id: CANON_USER.to_string(),
+                federated_permissions: None,
                 resource: None,
             })
             .await;
@@ -7802,6 +7821,7 @@ mod tests {
                 tenant_id: Some(tid(CANON_TENANT)),
                 principal_kind: vocab::PrincipalKind::Admin,
                 principal_id: CANON_USER.to_string(),
+                federated_permissions: None,
                 resource: None,
             })
             .await;
@@ -7851,6 +7871,7 @@ mod tests {
                 tenant_id: Some(tid(CANON_TENANT)),
                 principal_kind: vocab::PrincipalKind::Admin,
                 principal_id: CANON_USER.to_string(),
+                federated_permissions: None,
                 resource: None,
             })
             .await;
@@ -7903,6 +7924,7 @@ mod tests {
                 tenant_id: Some(tid(CANON_TENANT)),
                 principal_kind: vocab::PrincipalKind::Admin,
                 principal_id: CANON_USER.to_string(),
+                federated_permissions: None,
                 resource: None,
             })
             .await;
@@ -7935,6 +7957,7 @@ mod tests {
                 tenant_id: Some(tid(CANON_TENANT)),
                 principal_kind: vocab::PrincipalKind::SuperAdmin,
                 principal_id: "super-admin".to_string(),
+                federated_permissions: None,
                 resource: None,
             })
             .await;
@@ -8022,6 +8045,7 @@ mod tests {
                 tenant_id: Some(tid(CANON_TENANT)),
                 principal_kind: vocab::PrincipalKind::Admin,
                 principal_id: CANON_USER.to_string(),
+                federated_permissions: None,
                 resource: None,
             })
             .await;
@@ -8076,6 +8100,7 @@ mod tests {
                 tenant_id: Some(tid(CANON_TENANT)),
                 principal_kind: vocab::PrincipalKind::Admin,
                 principal_id: CANON_USER.to_string(),
+                federated_permissions: None,
                 resource: None,
             })
             .await;
@@ -8126,6 +8151,7 @@ mod tests {
                 tenant_id: Some(tid(CANON_TENANT)),
                 principal_kind: vocab::PrincipalKind::User,
                 principal_id: CANON_USER.to_string(),
+                federated_permissions: None,
                 resource: Some(httpserve::RouteResource::new(CANON_USER).expect("self resource")),
             })
             .await;
@@ -8173,6 +8199,7 @@ mod tests {
                 tenant_id: Some(tid(CANON_TENANT)),
                 principal_kind: vocab::PrincipalKind::Admin,
                 principal_id: CANON_USER.to_string(),
+                federated_permissions: None,
                 resource: None,
             })
             .await;
@@ -8211,6 +8238,7 @@ mod tests {
                 tenant_id: Some(tid(CANON_TENANT)),
                 principal_kind: vocab::PrincipalKind::Admin,
                 principal_id: CANON_USER.to_string(),
+                federated_permissions: None,
                 resource: None,
             })
             .await;
@@ -8251,6 +8279,7 @@ mod tests {
                 tenant_id: Some(tid(CANON_TENANT)),
                 principal_kind: vocab::PrincipalKind::Admin,
                 principal_id: CANON_USER.to_string(),
+                federated_permissions: None,
                 resource: None,
             })
             .await;
@@ -9629,6 +9658,7 @@ mod tests {
                                 tenant_id: Some(tid(CANON_TENANT)),
                                 principal_kind: vocab::PrincipalKind::Admin,
                                 principal_id: CANON_USER.to_string(),
+                                federated_permissions: None,
                                 resource: Some(route_resource()),
                             })
                             .await;

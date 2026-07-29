@@ -49,7 +49,6 @@ use crate::config::{RuntimeConfigSnapshot, SnapshotConfig};
 use bootstrap::DomainModuleResult;
 use infra::domain_transport::DomainTransportRuntime;
 use std::sync::Arc;
-use std::time::Duration;
 
 const PG_MODULE_COMMITTED_ONCE: &str = "PG module is committed once";
 const TOKEN_MODULE_COMMITTED_ONCE: &str = "token provider module is committed once";
@@ -310,7 +309,6 @@ pub(crate) struct InfraBuilt<'a> {
     wiring_inputs: infra::RuntimeWiringInputs,
     domain_transport: DomainTransportRuntime,
     metrics_exporter: Arc<dyn diport::MetricsExporter>,
-    redis_readiness_period: Duration,
     command_idempotency_keyring: Arc<eventexec::command::CommandIdempotencyKeyring>,
     signing_rotation_probe: Option<crate::infra::signing_rotation::SigningKeyRotationProbe>,
     runtime_rss_access: Option<crate::infra::oidc::RuntimeAccessProvider<diport::RssAccessProfile>>,

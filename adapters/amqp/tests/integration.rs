@@ -1,5 +1,5 @@
 //! amqp adapter 集成测试——publish→subscribe 闭环 / 同-vhost topic 隔离 / 跨-vhost 隔离 / 凭据不进错误面 /
-//! 取消终止流 / **at-least-once**（manual-ack ack/requeue/崩溃重投三 case）。
+//! broker-confirmed 取消终止流 / **at-least-once**（manual-ack ack/requeue/崩溃重投）。
 //!
 //! `#![cfg(feature = "integration")]`：默认 build / `cargo xtask verify` 不编译本文件。
 //! broker 经 `testkit::env_or_rabbitmq()` self-provision（testcontainers，#1137）——无需手工预置、不再 `#[ignore]`；
@@ -8,9 +8,13 @@
 //! 本地：`cargo nextest run -p amqp --features integration`（docker 在场自起容器）。
 #![cfg(feature = "integration")]
 
+use std::sync::Arc;
 use std::time::Duration;
 
-use amqp::{AmqpPublisher, AmqpRuntimeDeps, AmqpSubscriber};
+use amqp::{
+    AmqpPrivateCa, AmqpPublisher, AmqpPublisherEndpoint, AmqpRuntimeDeps, AmqpSubscriber,
+    AmqpSubscriberEndpoint,
+};
 use anyhow::anyhow;
 use diport::{
     AckAction, AckableSubscriber, Acker, EnvelopeMetadata, KEY_CORRELATION, KEY_OCCURRED_AT,
@@ -21,6 +25,168 @@ use testkit::FixtureError;
 use tokio_util::sync::CancellationToken;
 
 const TEST_PUBLISH_TIMEOUT: Duration = Duration::from_secs(40);
+
+#[tokio::test(flavor = "multi_thread")]
+async fn integration_explicit_private_ca_accepts_matching_broker_and_rejects_wrong_ca()
+-> anyhow::Result<()> {
+    let fixture = testkit::rabbitmq_tls().await?;
+    let publisher_endpoint = AmqpPublisherEndpoint::new(secure::AmqpEndpoint::parse(
+        fixture.publisher_url(),
+        secure::PlaintextEndpointPolicy::Deny,
+    )?);
+    let subscriber_endpoint = AmqpSubscriberEndpoint::new(secure::AmqpEndpoint::parse(
+        fixture.subscriber_url(),
+        secure::PlaintextEndpointPolicy::Deny,
+    )?);
+    let good_ca = AmqpPrivateCa::from_pem(fixture.ca_pem().as_bytes().to_vec())?;
+    let deps = AmqpRuntimeDeps::connect_with_private_ca(
+        &publisher_endpoint,
+        &subscriber_endpoint,
+        good_ca,
+        "amqp-private-ca-it",
+        TEST_PUBLISH_TIMEOUT,
+    )
+    .await?;
+    assert_eq!(deps.runtime_resources().len(), 2);
+
+    assert!(
+        AmqpRuntimeDeps::connect(
+            &secure::AmqpEndpoint::parse(
+                fixture.publisher_url(),
+                secure::PlaintextEndpointPolicy::Deny,
+            )?,
+            "amqp-default-roots-private-ca-it",
+            TEST_PUBLISH_TIMEOUT,
+        )
+        .await
+        .is_err(),
+        "the default WebPKI roots must not authenticate the private-CA broker"
+    );
+
+    let publisher = deps.publisher_for_integration_test();
+    publisher.inject_post_send_connection_close_once();
+    let error = publisher
+        .publish(PublishRequest::new(
+            Topic::new("rss.it.private-ca-recovery"),
+            MessageId::new("evt-private-ca-recovery-1"),
+            b"force-private-ca-recovery".to_vec(),
+        ))
+        .await
+        .err()
+        .ok_or_else(|| anyhow!("forced post-send connection close must be ambiguous"))?;
+    assert!(error.is_ambiguous());
+    assert!(
+        publisher.wait_until_publish_ready_for_test().await,
+        "replacement generation must reconnect with the same exclusive private CA"
+    );
+
+    let wrong_ca = AmqpPrivateCa::from_pem(fixture.wrong_ca_pem().as_bytes().to_vec())?;
+    assert!(
+        AmqpRuntimeDeps::connect_with_private_ca(
+            &publisher_endpoint,
+            &subscriber_endpoint,
+            wrong_ca,
+            "amqp-wrong-private-ca-it",
+            TEST_PUBLISH_TIMEOUT,
+        )
+        .await
+        .is_err()
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn integration_tls_identities_enforce_publish_subscribe_acl() -> anyhow::Result<()> {
+    let fixture = testkit::rabbitmq_tls().await?;
+    let ca = AmqpPrivateCa::from_pem(fixture.ca_pem().as_bytes().to_vec())?;
+    let topic = Topic::new("rss.it.private-ca-acl");
+    let token = CancellationToken::new();
+
+    let publisher_raw = secure::AmqpEndpoint::parse(
+        fixture.publisher_url(),
+        secure::PlaintextEndpointPolicy::Deny,
+    )?;
+    let subscriber_raw = secure::AmqpEndpoint::parse(
+        fixture.subscriber_url(),
+        secure::PlaintextEndpointPolicy::Deny,
+    )?;
+    let publisher_endpoint = AmqpPublisherEndpoint::new(publisher_raw.clone());
+    let subscriber_endpoint = AmqpSubscriberEndpoint::new(subscriber_raw.clone());
+    let deps = AmqpRuntimeDeps::connect_with_private_ca(
+        &publisher_endpoint,
+        &subscriber_endpoint,
+        ca.clone(),
+        "amqp-private-ca-acl",
+        TEST_PUBLISH_TIMEOUT,
+    )
+    .await?;
+    let infra = deps.infra();
+    let subscriber = infra.subscriber();
+    let publisher = infra.publisher();
+    let mut stream = subscriber
+        .subscribe_ackable(topic.clone(), token.clone())
+        .await?;
+    publisher
+        .publish(PublishRequest::new(
+            topic.clone(),
+            MessageId::new("evt-private-ca-acl-1"),
+            b"acl-roundtrip".to_vec(),
+        ))
+        .await?;
+    let delivery = tokio::time::timeout(Duration::from_secs(5), stream.next())
+        .await?
+        .ok_or_else(|| anyhow!("private-CA ACL stream closed without a delivery"))?;
+    assert_eq!(delivery.message.payload.as_bytes(), b"acl-roundtrip");
+
+    let publisher_only = AmqpRuntimeDeps::connect_with_private_ca(
+        &publisher_endpoint,
+        &AmqpSubscriberEndpoint::new(publisher_raw),
+        ca.clone(),
+        "amqp-private-ca-publisher-only",
+        TEST_PUBLISH_TIMEOUT,
+    )
+    .await?;
+    assert!(
+        publisher_only
+            .infra()
+            .subscriber()
+            .subscribe_ackable(topic.clone(), CancellationToken::new())
+            .await
+            .is_err(),
+        "publisher identity must not declare/consume a queue"
+    );
+    assert!(
+        fixture.publisher_bind_permission_is_denied().await?,
+        "publisher identity must not bind queues"
+    );
+
+    let subscriber_only = AmqpRuntimeDeps::connect_with_private_ca(
+        &AmqpPublisherEndpoint::new(subscriber_raw),
+        &subscriber_endpoint,
+        ca,
+        "amqp-private-ca-subscriber-only",
+        TEST_PUBLISH_TIMEOUT,
+    )
+    .await?;
+    assert!(
+        subscriber_only
+            .infra()
+            .publisher()
+            .publish(PublishRequest::new(
+                topic,
+                MessageId::new("evt-private-ca-acl-denied"),
+                b"must-not-publish".to_vec(),
+            ))
+            .await
+            .is_err(),
+        "subscriber identity must not publish"
+    );
+
+    token.cancel();
+    publisher.shutdown().await?;
+    subscriber.shutdown().await?;
+    Ok(())
+}
 
 fn amqp_endpoint(url: &str) -> anyhow::Result<secure::AmqpEndpoint> {
     Ok(secure::AmqpEndpoint::parse(
@@ -115,7 +281,6 @@ async fn integration_publish_subscribe_roundtrip() -> Result<(), FixtureError> {
             b"hello-amqp".to_vec(),
         ))
         .await?;
-
     // 有界等待，防 broker 异常时挂死。
     let delivery = tokio::time::timeout(Duration::from_secs(5), stream.next())
         .await?
@@ -207,7 +372,7 @@ async fn integration_topic_isolation_same_vhost() -> Result<(), FixtureError> {
 }
 
 /// (F4/C4) 每订阅独立 channel：同 subscriber 订 A(tokenA) + B(tokenB)，cancel **tokenA** → 流 A 终止，但
-/// 流 B **仍能收到**后续发到 B 的消息——取消单订阅只关本订阅 channel，不连带关闭共享 channel 停掉其它 topic
+/// 流 B **仍能收到**后续发到 B 的消息——取消单订阅只 basic.cancel 本 consumer，不连带停掉其它 topic
 /// consumer（review #274 F4：原 `self.channel` 共享，任一 cancel 关 channel 会连带终止同实例其它订阅）。
 #[tokio::test(flavor = "multi_thread")]
 async fn integration_per_subscription_cancel_does_not_stop_others() -> Result<(), FixtureError> {
@@ -223,7 +388,7 @@ async fn integration_per_subscription_cancel_does_not_stop_others() -> Result<()
         .subscribe_ackable(Topic::new("rss.it.persub-b"), token_b.clone())
         .await?;
 
-    // 取消 A 的 token：仅关 A 的 channel。
+    // 取消 A 的 token：仅等待 A consumer 的 basic.cancel-ok。
     token_a.cancel();
     let ended_a = tokio::time::timeout(Duration::from_secs(5), stream_a.next()).await?;
     assert!(ended_a.is_none(), "A 流取消后须终止（Ok(None)）");
@@ -303,9 +468,9 @@ async fn integration_cross_vhost_isolation() -> Result<(), FixtureError> {
     Ok(())
 }
 
-/// 取消即流终止（take_until token + channel close）。
+/// 取消即流终止（take_until token + broker-confirmed basic.cancel）。
 /// cancel 后流须在超时内关闭（有界等待，防 broker 异常时挂死——对齐其他 broker 断言）。
-/// 使用 `subscribe_ackable`（at-least-once）——token cancel 触发 cancel_ackable_on_token 关 channel。
+/// 使用 `subscribe_ackable`（at-least-once）——token cancel 触发并等待 basic.cancel-ok。
 #[tokio::test(flavor = "multi_thread")]
 async fn integration_cancel_terminates_stream() -> Result<(), FixtureError> {
     let rmq = testkit::env_or_rabbitmq().await?;
@@ -568,10 +733,11 @@ async fn integration_ackable_crash_without_settle_redelivers() -> Result<(), Fix
     Ok(())
 }
 
-/// (d) F2/C2：**token cancel（非 shutdown）** 后，未 settle 的 in-flight 投递经 `cancel_ackable_on_token`
-/// 关 channel 被 broker 自动 requeue → 新 consumer 能再次收到。守 ackable 取消语义（区别于 auto-ack 仅 basic_cancel）。
+/// token cancel 必须等待 broker 确认 `basic.cancel`，停止新投递但保留 channel，
+/// 使取消前已在途的 delivery 仍能 settle；后续消息只由替代 consumer 获取。
 #[tokio::test(flavor = "multi_thread")]
-async fn integration_ackable_token_cancel_requeues_inflight() -> Result<(), FixtureError> {
+async fn integration_ackable_token_cancel_drains_inflight_before_shutdown()
+-> Result<(), FixtureError> {
     let rmq = testkit::env_or_rabbitmq().await?;
     let url = rmq.vhost_url("rss_ack_d").await?;
     let topic = Topic::new("rss.it.ack-d");
@@ -590,29 +756,56 @@ async fn integration_ackable_token_cancel_requeues_inflight() -> Result<(), Fixt
             b"cancel-payload".to_vec(),
         ))
         .await?;
+    // Queue the successor before cancellation. With prefetch=1 it must remain broker-owned while
+    // the first delivery is in flight, proving the cancel barrier prevents a second delivery.
+    publisher
+        .publish(PublishRequest::new(
+            topic.clone(),
+            MessageId::new("evt-after-cancel-d"),
+            b"after-cancel".to_vec(),
+        ))
+        .await?;
 
-    // 收到投递但**不 settle**，然后仅 token cancel（不 shutdown）——触发 cancel_ackable_on_token 关 channel。
+    // 先保留一条在途投递，然后仅取消 token（不 shutdown）。
     let delivery = tokio::time::timeout(Duration::from_secs(5), stream1.next())
         .await
         .map_err(|_| anyhow!("timeout waiting for delivery"))?
         .ok_or_else(|| anyhow!("stream closed"))?;
-    let _unsettled = delivery.acker; // 故意不 settle（in-flight unacked）
-    token1.cancel();
+    // ConsumerTx still owns the current delivery and therefore cannot poll the stream to None
+    // before settlement. Release cancel and Ack from one barrier so neither test ordering nor a
+    // requested-token precheck can hide the same-channel RPC race.
+    let race = Arc::new(tokio::sync::Barrier::new(2));
+    let cancel_race = Arc::clone(&race);
+    let cancel = async {
+        cancel_race.wait().await;
+        token1.cancel();
+    };
+    let ack_race = Arc::clone(&race);
+    let ack = async {
+        ack_race.wait().await;
+        delivery.acker.settle(AckAction::Ack).await
+    };
+    let ((), ack_result) =
+        tokio::time::timeout(Duration::from_secs(5), async { tokio::join!(cancel, ack) })
+            .await
+            .map_err(|_| anyhow!("inflight Ack hung behind basic.cancel"))?;
+    ack_result.map_err(|e| anyhow!("settle inflight after basic.cancel failed: {e}"))?;
     let ended = tokio::time::timeout(Duration::from_secs(5), stream1.next()).await?;
-    assert!(ended.is_none(), "token cancel 后 ackable 流应终止");
+    assert!(ended.is_none(), "basic.cancel 确认后 ackable 流应终止");
+    AckableSubscriber::shutdown(&sub1).await?;
 
-    // 新 consumer：未 settle 的 in-flight 已被 channel close requeue，应能再次收到（取消即可重投）。
+    // 替代 consumer 收到取消前已排队的第二条；已 Ack 的在途消息不重投。
     let sub2 = connect_subscriber(&url, "amqp-it-cancel-sub2").await?;
     let token2 = CancellationToken::new();
     let mut stream2 = sub2
         .subscribe_ackable(topic.clone(), token2.clone())
         .await?;
-    let redelivery = tokio::time::timeout(Duration::from_secs(5), stream2.next())
+    let next_delivery = tokio::time::timeout(Duration::from_secs(5), stream2.next())
         .await
-        .map_err(|_| anyhow!("timeout waiting for token-cancel redelivery"))?
-        .ok_or_else(|| anyhow!("token-cancel redelivery stream closed"))?;
-    assert_eq!(redelivery.message.payload.as_bytes(), b"cancel-payload");
-    redelivery
+        .map_err(|_| anyhow!("timeout waiting for post-cancel delivery"))?
+        .ok_or_else(|| anyhow!("replacement consumer stream closed"))?;
+    assert_eq!(next_delivery.message.id.as_str(), "evt-after-cancel-d");
+    next_delivery
         .acker
         .settle(AckAction::Ack)
         .await
@@ -701,12 +894,18 @@ async fn integration_bundle_dispatch_and_single_source_resources() -> Result<(),
     let token = CancellationToken::new();
 
     let deps = connect_runtime_deps(&url, "amqp-it-bundle").await?;
+    assert!(deps.publisher_readiness().is_ready());
+    assert!(
+        !deps.subscriber_readiness().is_ready(),
+        "subscriber readiness requires an activated subscription channel"
+    );
 
     // 经 bundle 派发的 port 句柄跑闭环（证明 dispatch 共享 bundle conn、port 可用）。
     let subscriber = deps.infra().subscriber();
     let mut stream = subscriber
         .subscribe_ackable(topic.clone(), token.clone())
         .await?;
+    assert!(deps.subscriber_readiness().is_ready());
     let publisher = deps.infra().publisher();
     publisher
         .publish(PublishRequest::new(
@@ -746,5 +945,7 @@ async fn integration_bundle_dispatch_and_single_source_resources() -> Result<(),
             .await
             .map_err(|e| anyhow!("bundle resource shutdown failed: {e}"))?;
     }
+    assert!(!deps.publisher_readiness().is_ready());
+    assert!(!deps.subscriber_readiness().is_ready());
     Ok(())
 }

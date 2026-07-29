@@ -973,9 +973,15 @@ mod tests {
             .add_es256_sec1("runtime-test-federated", public_key.as_bytes())
             .expect("federated public key")
             .build();
+        let permissions =
+            oidc::FederatedPermissionUniverse::try_new([vocab::GrantPermission::route(
+                vocab::RoutePermissionId::RuntimeInventoryRead,
+            )])
+            .expect("non-empty federated permission universe");
         let config = oidc::VerifierConfigBuilder::<diport::FederatedAccessProfile>::new(
             "https://federated.issuer.test",
             "federated-test",
+            permissions,
         )
         .keys_static(keys)
         .trust_kind("admin")
@@ -1761,6 +1767,7 @@ mod tests {
                                         ),
                                         principal_kind: vocab::PrincipalKind::Admin,
                                         principal_id: "admin-subject".to_string(),
+                                        federated_permissions: None,
                                         resource: None,
                                     })
                                     .await

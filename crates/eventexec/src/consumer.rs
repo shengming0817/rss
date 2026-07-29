@@ -573,6 +573,7 @@ async fn run_handler_loop<S, H>(
                         .error_summary()
                         .unwrap_or(SUMMARY_PERMANENT_REJECTION),
                     acker,
+                    None,
                 )
                 .await;
                 return;
@@ -601,6 +602,7 @@ async fn run_handler_loop<S, H>(
         // 未 set 摘要时的 `None`（非死代码，见 SUMMARY_REQUEUE_EXHAUSTED 注释）。
         last_requeue_summary.unwrap_or(SUMMARY_REQUEUE_EXHAUSTED),
         acker,
+        None,
     )
     .await;
 }
@@ -697,6 +699,7 @@ pub async fn dead_letter<S>(
     num_attempts: u32,
     error_summary: &'static str,
     acker: Option<&diport::DynAcker<'static>>,
+    terminal: Option<&tokio_util::sync::CancellationToken>,
 ) where
     S: consistency::InboxStore + Send + Sync + 'static,
 {
@@ -725,6 +728,9 @@ pub async fn dead_letter<S>(
             // dlx 写成功 → commit（标记 done）。仅 commit 成功才 broker Ack；commit 失败 → Requeue
             // （DLX 已落但 done 标记未持久，重投经幂等 Duplicate 收口，守「ack only after durable commit」F1/C1）。
             let action = if commit_key(idempotency, meta, ctx, key, lease, msg.id.as_str()).await {
+                if let Some(terminal) = terminal {
+                    terminal.cancel();
+                }
                 diport::AckAction::Ack
             } else {
                 diport::AckAction::Requeue

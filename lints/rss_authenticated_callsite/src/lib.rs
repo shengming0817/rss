@@ -30,9 +30,10 @@
 //! 强转、`principal.service_caller_domain()` 都解析到受守 `DefId`。
 //!
 //! 盲区：① 仅 `cargo dylint --all`（接 `cargo xtask verify`，`-D warnings` fail-closed）拦；
-//! ② **跨函数**洗白仍未覆盖（intraprocedural，跟踪 #1085）；③ `#[cfg(test)]` 树不扫，
-//! httpserve 内自测调用不命中（与 authplan 同）。`Authenticated` mint 与 Principal 降维 accessor
-//! 均不采用整 crate allowlist，只允许 runtime 中列明的精确 verification wrapper。
+//! ② **跨函数**洗白仍未覆盖（intraprocedural，跟踪 #1085）；③ dylint 不扫未编译的
+//! `#[cfg(test)]` 树，settingsonly 因此另由 `SETTINGSONLY-L2-PRODUCTION-CLOSURE-01` 对完整源码 AST
+//! fail-closed 扫描 raw JWT reparse bait。`Authenticated` mint 与 Principal 降维 accessor 均不采用整
+//! crate allowlist，只允许列明的精确 verification wrapper。
 
 extern crate rustc_hir;
 extern crate rustc_middle;
@@ -158,6 +159,15 @@ impl<'tcx> LateLintPass<'tcx> for RssAuthenticatedCallsite {
             }
             _ => return,
         };
+        if is_settingsonly_raw_jwt_reparse_did(cx, did) {
+            emit(
+                cx,
+                expr.hir_id,
+                expr.span,
+                "settingsonly 不得重新解析 raw federated JWT 或投影 verified raw token",
+                "仅消费 authn::verify_federated_access 返回的 VerifiedFederatedAccess；不得直接调用、别名或函数指针引用 Jwt::parse / VerifiedJwt::raw",
+            );
+        }
         if is_authenticated_mint_did(cx, did)
             && !authenticated_mint_caller_is_allowed(cx, expr.hir_id)
         {
@@ -205,6 +215,34 @@ impl<'tcx> LateLintPass<'tcx> for RssAuthenticatedCallsite {
     }
 }
 
+/// settingsonly must consume the sealed `VerifiedFederatedAccess` aggregate. Matching the
+/// resolved callee `DefId` catches direct calls, function-item aliases, and fn-pointer coercions;
+/// spelling or import aliases cannot evade it.
+fn is_settingsonly_raw_jwt_reparse_did(cx: &LateContext<'_>, did: DefId) -> bool {
+    if cx.tcx.crate_name(LOCAL_CRATE).as_str() != "settingsonly"
+        || cx.tcx.crate_name(did.krate).as_str() != "authn"
+    {
+        return false;
+    }
+    let parent_did = cx.tcx.parent(did);
+    if !matches!(cx.tcx.def_kind(parent_did), DefKind::Impl { .. }) {
+        return false;
+    }
+    let Some(self_name) = cx
+        .tcx
+        .type_of(parent_did)
+        .skip_binder()
+        .ty_adt_def()
+        .map(|adt| cx.tcx.item_name(adt.did()))
+    else {
+        return false;
+    };
+    matches!(
+        (self_name.as_str(), cx.tcx.item_name(did).as_str()),
+        ("Jwt", "parse") | ("VerifiedJwt", "raw")
+    )
+}
+
 fn authenticated_mint_help(cx: &LateContext<'_>) -> &'static str {
     if cx.tcx.crate_name(LOCAL_CRATE).as_str() == "identityaudit" {
         "仅在 identityaudit `auth_bridge::allow_evidence` 精确 proof-consuming 验签桥中构造 RSS Authenticated evidence；其它位置不得 mint evidence"
@@ -245,8 +283,26 @@ fn authenticated_mint_caller_is_allowed(cx: &LateContext<'_>, hir_id: HirId) -> 
             exact_caller
                 && (*expected_crate != "identityaudit"
                     || caller_consumes_validated_auth_grant(cx, parent, false))
+                && (*expected_crate != "settingsonly"
+                    || caller_consumes_verified_federated_access(cx, parent))
         },
     )
+}
+
+/// settingsonly's only evidence mint must consume the sealed aggregate directly. Requiring the
+/// concrete aggregate as the sole input prevents a wrapper from accepting independently supplied
+/// principal/claims/permission values that could be split, substituted, or reparsed.
+fn caller_consumes_verified_federated_access(cx: &LateContext<'_>, caller: DefId) -> bool {
+    if !matches!(cx.tcx.def_kind(caller), DefKind::Fn | DefKind::AssocFn) {
+        return false;
+    }
+    let signature = cx.tcx.fn_sig(caller).instantiate_identity().skip_binder();
+    let inputs = signature.inputs();
+    inputs.len() == 1
+        && inputs[0].peel_refs().ty_adt_def().is_some_and(|adt| {
+            cx.tcx.crate_name(adt.did().krate).as_str() == "authn"
+                && cx.tcx.item_name(adt.did()).as_str() == "VerifiedFederatedAccess"
+        })
 }
 
 /// The durable proof is deliberately move-only. The only mint wrappers must take the concrete

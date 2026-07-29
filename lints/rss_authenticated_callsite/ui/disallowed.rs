@@ -11,7 +11,7 @@ use vocab::PrincipalKind;
 
 fn main() {
     // R1：非组合根 crate 调 profile-specific evidence constructor → 触发。
-    let _ev = Authenticated::new_federated(PrincipalKind::User, "subject-1", None);
+    let _ev = Authenticated::new_federated(PrincipalKind::User, "subject-1", None, permissions());
 
     // R2（别名绕过闭合）：函数项别名引用即触发（path 解析到同一 DefId）；后续 `mint(...)` 调本地绑定不再触发。
     let mint = Authenticated::new_mtls;
@@ -69,6 +69,10 @@ fn forbidden_issue_access<S: diport::Signer + Send + Sync + 'static>() {
 
 #[allow(rss_authenticated_callsite)] // reason: UI fixture 验证逃生门
 fn allowed_by_attr() {
-    let _ev = Authenticated::new_federated(PrincipalKind::Admin, "admin-1", None);
+    let _ev = Authenticated::new_federated(PrincipalKind::Admin, "admin-1", None, permissions());
     let _subject = authn::Principal::audit_subject;
+}
+
+fn permissions() -> &'static diport::VerifiedFederatedPermissions {
+    unimplemented!()
 }

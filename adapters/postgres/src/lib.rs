@@ -128,8 +128,9 @@ pub use bundle::PgSettingsBundle;
 #[cfg(all(feature = "domain-identity", any(test, feature = "test-support")))]
 pub use bundle::identity_pseudonym_keys_for_test;
 pub use bundle::{
-    MaintenanceAuditOutcome, PgDomain, PgDomainDeps, PgInfraDeps, PgMaintenanceDeps,
-    PgProjectionReplayStores, PgReadinessSamplerFactory, PgRuntimeDeps, PgRuntimeHandle, caps,
+    MaintenanceAuditOutcome, PgConsumerRuntimeBundle, PgDomain, PgDomainDeps, PgInfraDeps,
+    PgMaintenanceDeps, PgProjectionReplayStores, PgReadinessSamplerFactory, PgRuntimeDeps,
+    PgRuntimeHandle, caps,
 };
 pub use cas_store::PgCasStore;
 pub use checkpoint::PgCheckpointStore;

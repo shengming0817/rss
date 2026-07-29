@@ -1623,6 +1623,19 @@ pub struct PgInfraDeps {
     delivery_policy: EventDeliveryPolicy,
 }
 
+/// Move-only inbox/DLX pair for one generated consumer runtime wiring pass.
+pub struct PgConsumerRuntimeBundle {
+    inbox: PgInboxStore,
+    dead_letter: PgDeadLetterStore,
+}
+
+impl PgConsumerRuntimeBundle {
+    #[must_use]
+    pub fn into_parts(self) -> (PgInboxStore, PgDeadLetterStore) {
+        (self.inbox, self.dead_letter)
+    }
+}
+
 impl PgInfraDeps {
     /// Persistent certificate revocation provider backed by the authoritative writer lane.
     #[must_use]
@@ -1687,6 +1700,18 @@ impl PgInfraDeps {
     #[must_use]
     pub fn dead_letter(&self, payload_protector: DlxPayloadProtector) -> PgDeadLetterStore {
         PgDeadLetterStore::new(self.stores.writer_capability(), payload_protector)
+    }
+
+    /// Construct the exact move-only resources consumed by a generated ConsumerTx worker.
+    #[must_use]
+    pub fn consumer_runtime_bundle(
+        &self,
+        payload_protector: DlxPayloadProtector,
+    ) -> PgConsumerRuntimeBundle {
+        PgConsumerRuntimeBundle {
+            inbox: self.inbox(),
+            dead_letter: self.dead_letter(payload_protector),
+        }
     }
 
     /// inbox_receipts 保留期清理 sweeper（**全域**，跨 consumer_group / 域，#1210）。

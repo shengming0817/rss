@@ -14,34 +14,41 @@ use ratelimit::{GovernorLimiter, QuotaConfig};
 
 use crate::auth_bridge::{self, FederatedVerifier};
 
-pub(crate) struct RejectAuthorizer;
+pub(crate) struct FederatedPermissionAuthorizer;
 
-impl httpserve::RouteAuthorizer for RejectAuthorizer {
-    fn authorize<'a>(
-        &'a self,
-        _request: httpserve::RouteAuthorizationRequest,
-    ) -> Pin<Box<dyn Future<Output = httpserve::RouteAuthorizationDecision> + Send + 'a>> {
-        Box::pin(async { httpserve::RouteAuthorizationDecision::Deny })
-    }
-}
-
-pub(crate) struct InventoryAuthorizer;
-
-impl httpserve::RouteAuthorizer for InventoryAuthorizer {
+impl httpserve::RouteAuthorizer for FederatedPermissionAuthorizer {
     fn authorize<'a>(
         &'a self,
         request: httpserve::RouteAuthorizationRequest,
     ) -> Pin<Box<dyn Future<Output = httpserve::RouteAuthorizationDecision> + Send + 'a>> {
         Box::pin(async move {
-            let exact_contract =
-                request.contract_id == generated::http::runtime_v1::inventory::CONTRACT_ID;
-            let exact_permission =
-                request.permission == vocab::RoutePermissionId::RuntimeInventoryRead;
-            let privileged = matches!(
-                request.principal_kind,
-                vocab::PrincipalKind::Admin | vocab::PrincipalKind::SuperAdmin
+            let exact_pair = matches!(
+                (request.contract_id, request.permission),
+                (
+                    generated::http::settings_v1::CONTRACT_ID,
+                    vocab::RoutePermissionId::SettingsConfigPublish,
+                ) | (
+                    generated::http::settings_v5::CONTRACT_ID,
+                    vocab::RoutePermissionId::SettingsConfigDelete,
+                ) | (
+                    generated::http::settings_v6::CONTRACT_ID,
+                    vocab::RoutePermissionId::SettingsConfigRollback,
+                ) | (
+                    generated::http::runtime_v1::inventory::CONTRACT_ID,
+                    vocab::RoutePermissionId::RuntimeInventoryRead,
+                )
             );
-            if exact_contract && exact_permission && privileged {
+            let exact_grant = request
+                .federated_permissions
+                .as_deref()
+                .is_some_and(|permissions| {
+                    permissions
+                        .iter()
+                        .any(|grant| grant.matches_route(request.permission))
+                });
+            let tenant_shape = request.permission == vocab::RoutePermissionId::RuntimeInventoryRead
+                || request.tenant_id.is_some();
+            if exact_pair && exact_grant && tenant_shape {
                 httpserve::RouteAuthorizationDecision::Allow
             } else {
                 httpserve::RouteAuthorizationDecision::Deny
@@ -99,13 +106,13 @@ pub(crate) fn finalize(
     framework_routes: &impl bootstrap::FrameworkRoutes,
 ) -> anyhow::Result<(FinalizedListenerSet, FinalizedProbeReceipt)> {
     registry
-        .register_primary_authorizer(Arc::new(RejectAuthorizer))
-        .context("register settingsonly reject authorizer")?;
+        .register_primary_authorizer(Arc::new(FederatedPermissionAuthorizer))
+        .context("register settingsonly federated permission authorizer")?;
     crate::modules_gen::register_framework_routes(framework_routes, registry)
         .context("register settingsonly framework routes")?;
     let primary_authorizer = registry
         .take_primary_authorizer()
-        .context("take settingsonly reject authorizer")?;
+        .context("take settingsonly federated permission authorizer")?;
     let mut routes = registry
         .finalize_routes()
         .context("finalize settings routes")?;
@@ -135,7 +142,7 @@ pub(crate) fn finalize(
         admin_auth_plan()?,
         audit_sink,
         clock,
-        Arc::new(InventoryAuthorizer),
+        Arc::new(FederatedPermissionAuthorizer),
     )
     .context("finalize settingsonly Admin auth")?;
     let primary = with_access_layers(primary, verifier.clone(), Arc::clone(&limiter));
@@ -583,53 +590,76 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn inventory_authorizer_allows_only_exact_admin_inventory_requests() {
-        let request =
-            |contract_id, permission, principal_kind| httpserve::RouteAuthorizationRequest {
-                contract_id,
-                permission,
-                tenant_id: None,
-                principal_kind,
-                principal_id: "operator".to_owned(),
-                resource: None,
-            };
-        for kind in [
-            vocab::PrincipalKind::Admin,
-            vocab::PrincipalKind::SuperAdmin,
+    async fn federated_authorizer_requires_exact_contract_permission_and_verified_grant()
+    -> anyhow::Result<()> {
+        let grant =
+            |permission| Some(vec![vocab::GrantPermission::route(permission)].into_boxed_slice());
+        let request = |contract_id, permission, permissions| httpserve::RouteAuthorizationRequest {
+            contract_id,
+            permission,
+            tenant_id: None,
+            principal_kind: vocab::PrincipalKind::User,
+            principal_id: "operator".to_owned(),
+            resource: None,
+            federated_permissions: permissions,
+        };
+        assert_eq!(
+            FederatedPermissionAuthorizer
+                .authorize(request(
+                    generated::http::runtime_v1::inventory::CONTRACT_ID,
+                    vocab::RoutePermissionId::RuntimeInventoryRead,
+                    grant(vocab::RoutePermissionId::RuntimeInventoryRead),
+                ))
+                .await,
+            httpserve::RouteAuthorizationDecision::Allow
+        );
+        for (contract, permission) in [
+            (
+                generated::http::settings_v1::CONTRACT_ID,
+                vocab::RoutePermissionId::SettingsConfigPublish,
+            ),
+            (
+                generated::http::settings_v5::CONTRACT_ID,
+                vocab::RoutePermissionId::SettingsConfigDelete,
+            ),
+            (
+                generated::http::settings_v6::CONTRACT_ID,
+                vocab::RoutePermissionId::SettingsConfigRollback,
+            ),
         ] {
+            let mut authorized = request(contract, permission, grant(permission));
+            authorized.tenant_id = Some(vocab::TenantId::parse(
+                "00000000-0000-4000-8000-000000001836",
+            )?);
             assert_eq!(
-                InventoryAuthorizer
-                    .authorize(request(
-                        generated::http::runtime_v1::inventory::CONTRACT_ID,
-                        vocab::RoutePermissionId::RuntimeInventoryRead,
-                        kind,
-                    ))
-                    .await,
-                httpserve::RouteAuthorizationDecision::Allow
+                FederatedPermissionAuthorizer.authorize(authorized).await,
+                httpserve::RouteAuthorizationDecision::Allow,
+                "{contract} must accept only its exact typed route grant"
             );
         }
         for denied in [
             request(
                 generated::http::runtime_v1::inventory::CONTRACT_ID,
                 vocab::RoutePermissionId::RuntimeInventoryRead,
-                vocab::PrincipalKind::User,
+                None,
             ),
             request(
                 generated::http::runtime_v1::inventory::CONTRACT_ID,
                 vocab::RoutePermissionId::SettingsConfigGet,
-                vocab::PrincipalKind::Admin,
+                grant(vocab::RoutePermissionId::SettingsConfigGet),
             ),
             request(
                 "settings.config.get",
                 vocab::RoutePermissionId::RuntimeInventoryRead,
-                vocab::PrincipalKind::Admin,
+                grant(vocab::RoutePermissionId::RuntimeInventoryRead),
             ),
         ] {
             assert_eq!(
-                InventoryAuthorizer.authorize(denied).await,
+                FederatedPermissionAuthorizer.authorize(denied).await,
                 httpserve::RouteAuthorizationDecision::Deny
             );
         }
+        Ok(())
     }
 
     #[tokio::test]
@@ -643,7 +673,7 @@ mod tests {
         let primary_routes = httpserve::finalize_primary_auth(
             httpserve::UnfinalizedRoutes::empty(),
             primary_auth_plan()?,
-            Arc::new(RejectAuthorizer),
+            Arc::new(FederatedPermissionAuthorizer),
         )?;
         let health_routes =
             httpserve::finalize_auth(httpserve::UnfinalizedRoutes::empty(), health_auth_plan()?)?;

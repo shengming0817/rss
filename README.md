@@ -79,6 +79,7 @@ cargo xtask contract validate                          # 契约元数据校验
 cargo xtask assembly validate                          # assembly 声明与依赖闭包校验
 cargo xtask assembly generate-modules --check          # domain modules 生成物漂移门
 cargo xtask assembly generate-providers --check        # typed provider catalog 独立漂移门
+cargo xtask assembly generate-runtime-plans --check    # manifest + lock 派生 RuntimePlan 漂移门
 cargo xtask assembly lock check                        # 全仓 AssemblyLock raw-byte 漂移门
 cargo xtask runtime-baseline verify                    # RuntimePlan 四族 live closure 与 wiring golden
 cargo xtask runtime-root guard                         # runtime root 单调职责/LOC ratchet

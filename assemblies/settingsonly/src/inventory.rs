@@ -55,26 +55,34 @@ fn inventory_response(
     reader: &model::InventoryReader,
     request_id: &str,
 ) -> axum::response::Response {
-    match reader.read() {
-        Ok(snapshot) => match response_from_snapshot(&snapshot) {
-            Ok(response) => axum::Json(response).into_response(),
-            Err(error) => {
-                tracing::error!(
-                    contract_id = wire::CONTRACT_ID,
-                    error = %error,
-                    "settingsonly runtime inventory projection failed"
-                );
-                httpserve::error::internal_error(request_id)
-            }
-        },
+    let snapshot = match reader.read() {
+        Ok(snapshot) => snapshot,
         Err(model::InventoryError::Unavailable) => {
-            httpserve::error::provider_unavailable(request_id)
+            return httpserve::error::provider_unavailable(request_id);
         }
         Err(error) => {
             tracing::error!(
                 contract_id = wire::CONTRACT_ID,
                 error = %error,
                 "settingsonly runtime inventory is unavailable"
+            );
+            return httpserve::error::internal_error(request_id);
+        }
+    };
+    project_inventory_response(&snapshot, request_id)
+}
+
+fn project_inventory_response(
+    snapshot: &model::RuntimeInventorySnapshot,
+    request_id: &str,
+) -> axum::response::Response {
+    match response_from_snapshot(snapshot) {
+        Ok(response) => axum::Json(response).into_response(),
+        Err(error) => {
+            tracing::error!(
+                contract_id = wire::CONTRACT_ID,
+                error = %error,
+                "settingsonly runtime inventory projection failed"
             );
             httpserve::error::internal_error(request_id)
         }
@@ -285,6 +293,18 @@ pub mod test_support {
                 "settingsonly-inventory-journey",
                 Some(tenant),
                 kind,
+                diport::VerifiedFederatedPermissions::new([vocab::GrantPermission::route(
+                    match self.0 {
+                        JourneyCase::Deny => vocab::RoutePermissionId::SettingsConfigPublish,
+                        JourneyCase::Allow
+                        | JourneyCase::AuditFail
+                        | JourneyCase::ProbeDegraded
+                        | JourneyCase::ProbeUnavailable => {
+                            vocab::RoutePermissionId::RuntimeInventoryRead
+                        }
+                    },
+                )])
+                .map_err(|_| diport::PdpError::InvalidSignature)?,
             )
             .map_err(|_| diport::PdpError::InvalidSignature)
         }
@@ -394,7 +414,7 @@ pub mod test_support {
                 calls: Arc::clone(&audit_calls),
             }),
             Arc::new(Clock),
-            Arc::new(crate::listeners::InventoryAuthorizer),
+            Arc::new(crate::listeners::FederatedPermissionAuthorizer),
         )?;
         let verifier =
             crate::auth_bridge::FederatedVerifier::test(diport::DynPdp::new_arc(FixturePdp(case)));
@@ -532,6 +552,7 @@ mod tests {
     fn authenticated_inventory_router(
         kind: vocab::PrincipalKind,
         audit_fails: bool,
+        permission: vocab::RoutePermissionId,
     ) -> anyhow::Result<axum::Router> {
         let (_, mut mounted) = published_inventory_routes()?;
         let (_, routes) = mounted.pop().context("mounted Admin inventory route")?;
@@ -550,44 +571,51 @@ mod tests {
                 "00000000-0000-4000-8000-000000000001",
             )?)
         };
-        let authenticated = httpserve::Authenticated::new(
-            primitives::RequiredScheme::FederatedAccessToken,
+        let permissions =
+            diport::VerifiedFederatedPermissions::new([vocab::GrantPermission::route(permission)])?;
+        let authenticated = httpserve::Authenticated::new_federated(
             kind,
             "inventory-operator",
             tenant,
+            &permissions,
         );
         Ok(httpserve::finalize_auth_with_audit_and_authorizer(
             routes,
             plan,
             httpserve::AuditSinkHandle::new(TestAuditSink { fail: audit_fails }),
             Arc::new(TestClock),
-            Arc::new(crate::listeners::InventoryAuthorizer),
+            Arc::new(crate::listeners::FederatedPermissionAuthorizer),
         )?
         .into_router_for_test()
         .layer(axum::Extension(authenticated)))
     }
 
     #[tokio::test]
-    async fn generated_global_inventory_auth_funnel_allows_operators_and_denies_user()
+    async fn generated_global_inventory_auth_funnel_uses_exact_typed_permission()
     -> anyhow::Result<()> {
         assert_eq!(
             wire::ROUTE.evidence().resource_sharing(),
             vocab::http::HttpResourceSharing::Global
         );
         assert_eq!(wire::ROUTE.evidence().resource(), Some("runtimeInventory"));
-        for kind in [
-            vocab::PrincipalKind::Admin,
-            vocab::PrincipalKind::SuperAdmin,
-        ] {
+        for kind in [vocab::PrincipalKind::User, vocab::PrincipalKind::Admin] {
             testkit::call(
-                authenticated_inventory_router(kind, false)?,
+                authenticated_inventory_router(
+                    kind,
+                    false,
+                    vocab::RoutePermissionId::RuntimeInventoryRead,
+                )?,
                 testkit::ContractRequest::get(wire::PATH),
             )
             .await?
             .ensure_status(axum::http::StatusCode::OK)?;
         }
         testkit::call(
-            authenticated_inventory_router(vocab::PrincipalKind::User, false)?,
+            authenticated_inventory_router(
+                vocab::PrincipalKind::SuperAdmin,
+                false,
+                vocab::RoutePermissionId::SettingsConfigPublish,
+            )?,
             testkit::ContractRequest::get(wire::PATH),
         )
         .await?
@@ -598,7 +626,11 @@ mod tests {
     #[tokio::test]
     async fn generated_global_inventory_audit_failure_remains_fail_closed() -> anyhow::Result<()> {
         testkit::call(
-            authenticated_inventory_router(vocab::PrincipalKind::SuperAdmin, true)?,
+            authenticated_inventory_router(
+                vocab::PrincipalKind::SuperAdmin,
+                true,
+                vocab::RoutePermissionId::RuntimeInventoryRead,
+            )?,
             testkit::ContractRequest::get(wire::PATH),
         )
         .await?

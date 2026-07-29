@@ -3870,6 +3870,12 @@ fn scan_amqp_connection_recovery_owner(content: &str) -> Vec<Finding<Rule>> {
     findings.extend(validate_amqp_connection_entry(
         &facts,
         PATH,
+        "connect_with_private_ca",
+        |context| context == "ConnectContext::Initial",
+    ));
+    findings.extend(validate_amqp_connection_entry(
+        &facts,
+        PATH,
         "reconnect_publisher",
         |context| context.starts_with("ConnectContext::Recovery{"),
     ));
@@ -3908,6 +3914,7 @@ fn scan_amqp_connection_sensitive_calls(
         }
         for properties in &calls.connection_properties {
             if !callable.is_root_free("connect_with_context")
+                && !callable.is_root_free("connect_with_exclusive_private_ca")
                 || properties != "ConnectionProperties::default()"
             {
                 findings.push(finding(
@@ -3944,6 +3951,7 @@ fn scan_amqp_connection_sensitive_calls(
         }
         if !calls.context_calls.is_empty()
             && !callable.is_root_free("connect")
+            && !callable.is_root_free("connect_with_private_ca")
             && !callable.is_root_free("reconnect_publisher")
         {
             findings.push(finding(
@@ -3956,21 +3964,21 @@ fn scan_amqp_connection_sensitive_calls(
             ));
         }
     }
-    if connection_calls != 1 {
+    if connection_calls != 2 {
         findings.push(finding(
             Rule::AmqpRecoveryOwner,
             path.to_string(),
             format!(
-                "AMQP-RSS-RECOVERY-OWNER-01 必须且只能有一个 Connection::connect owner；实际 {connection_calls}"
+                "AMQP-RSS-RECOVERY-OWNER-01 必须且只能有两个显式连接 owner；实际 {connection_calls}"
             ),
         ));
     }
-    if property_factories != 1 {
+    if property_factories != 2 {
         findings.push(finding(
             Rule::AmqpRecoveryOwner,
             path.to_string(),
             format!(
-                "AMQP-RSS-RECOVERY-OWNER-01 必须且只能有一个 ConnectionProperties factory；实际 {property_factories}"
+                "AMQP-RSS-RECOVERY-OWNER-01 两个显式连接 owner 必须各使用一个 ConnectionProperties factory；实际 {property_factories}"
             ),
         ));
     }
@@ -4049,6 +4057,15 @@ impl<'ast> Visit<'ast> for AmqpConnectionCalls {
                     .map_or_else(|| "<missing>".to_string(), normalized_tokens),
             );
         }
+        if call_ends_with(&node.func, "Connection", "connector") {
+            self.nested_connection_owner |= self.nested_callable_depth != 0;
+            self.connection_properties.push(
+                node.args
+                    .iter()
+                    .nth(3)
+                    .map_or_else(|| "<missing>".to_string(), normalized_tokens),
+            );
+        }
         if call_ident(&node.func).as_deref() == Some("connect_with_context") {
             self.nested_context_owner |= self.nested_callable_depth != 0;
             self.context_calls.push(
@@ -4072,6 +4089,13 @@ impl<'ast> Visit<'ast> for AmqpConnectionCalls {
 
     fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
         self.auto_recover |= node.method == "enable_auto_recover";
+        if node.method == "connect"
+            && normalized_tokens(&node.receiver).contains("DefaultConnectionBuilder::new()")
+        {
+            self.nested_connection_owner |= self.nested_callable_depth != 0;
+            self.connection_properties
+                .push("ConnectionProperties::default()".to_string());
+        }
         syn::visit::visit_expr_method_call(self, node);
     }
 
@@ -4310,10 +4334,11 @@ fn scan_relay_budget_live_seams(sources: &BTreeMap<&Path, &str>) -> Vec<Finding<
                 ),
                 (
                     Some("AmqpPublisher"),
-                    "connect",
+                    "connect_with_trust",
                     &[
                         "validate_publish_timeout(publish_timeout)",
                         "conn::connect(endpoint, &name, true)",
+                        "conn::connect_with_private_ca(endpoint, &name, true, ca)",
                         "endpoint: endpoint.clone()",
                         "PublisherTransport::new(conn, channel)",
                         "publish_timeout,",
@@ -10337,6 +10362,15 @@ impl<'a> ProvidersBuilt<'a> {{
                 connect_with_context(endpoint, name, confirm, ConnectContext::Initial).await
             }
 
+            pub(crate) async fn connect_with_private_ca(
+                endpoint: &AmqpEndpoint,
+                name: &str,
+                confirm: bool,
+                ca: &AmqpPrivateCa,
+            ) -> Result<Connection, Error> {
+                connect_with_context(endpoint, name, confirm, ConnectContext::Initial).await
+            }
+
             pub(crate) async fn reconnect_publisher(
                 endpoint: &AmqpEndpoint,
                 name: &str,
@@ -10359,6 +10393,18 @@ impl<'a> ProvidersBuilt<'a> {{
                 let url = endpoint.expose();
                 let connection = Connection::connect(url, ConnectionProperties::default()).await?;
                 Ok(connection)
+            }
+
+            async fn connect_with_exclusive_private_ca(
+                url: &str,
+                ca: &AmqpPrivateCa,
+            ) -> Result<Connection, Error> {
+                Connection::connector(
+                    uri,
+                    runtime,
+                    connector,
+                    ConnectionProperties::default(),
+                ).await
             }
         "#
     }

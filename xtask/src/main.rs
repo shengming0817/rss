@@ -11,6 +11,8 @@
 //!                                      assembly.toml domains → committed modules_gen.rs（--check 为漂移门）
 //!   `cargo xtask assembly generate-providers [--check]`
 //!                                      assembly.toml providers → committed typed provider catalog
+//!   `cargo xtask assembly generate-runtime-plans [--check]`
+//!                                      manifest + lock → committed typed runtime-plan.json
 //!   `cargo xtask assembly lock generate|check`
 //!                                      全仓 v1 assembly.lock.json 原子生成 / raw-byte 漂移门
 //!   `cargo xtask graph assembly [--assembly <name>] [--format mermaid|json] [--check]`
@@ -80,6 +82,7 @@ mod assembly;
 mod assembly_artifacts;
 mod assembly_codegen;
 mod assembly_lock;
+mod assembly_runtime_plan;
 mod cdc_config;
 mod ci_entry_guard;
 mod ci_evidence;
@@ -164,6 +167,9 @@ enum Command {
         check: bool,
     },
     AssemblyGenerateProviders {
+        check: bool,
+    },
+    AssemblyGenerateRuntimePlans {
         check: bool,
     },
     AssemblyLock(assembly_lock::AssemblyLockAction),
@@ -507,6 +513,10 @@ fn parse_assembly(args: &[&str]) -> Result<Command> {
         ["generate-modules", "--check"] => Ok(Command::AssemblyGenerateModules { check: true }),
         ["generate-providers"] => Ok(Command::AssemblyGenerateProviders { check: false }),
         ["generate-providers", "--check"] => Ok(Command::AssemblyGenerateProviders { check: true }),
+        ["generate-runtime-plans"] => Ok(Command::AssemblyGenerateRuntimePlans { check: false }),
+        ["generate-runtime-plans", "--check"] => {
+            Ok(Command::AssemblyGenerateRuntimePlans { check: true })
+        }
         ["lock", "generate"] => Ok(Command::AssemblyLock(
             assembly_lock::AssemblyLockAction::Generate,
         )),
@@ -514,7 +524,7 @@ fn parse_assembly(args: &[&str]) -> Result<Command> {
             assembly_lock::AssemblyLockAction::Check,
         )),
         _ => bail!(
-            "未知 assembly 子命令；用法: cargo xtask assembly <validate | artifacts check | generate-modules [--check] | generate-providers [--check] | lock <generate|check>>"
+            "未知 assembly 子命令；用法: cargo xtask assembly <validate | artifacts check | generate-modules [--check] | generate-providers [--check] | generate-runtime-plans [--check] | lock <generate|check>>"
         ),
     }
 }
@@ -701,6 +711,7 @@ fn dispatch(args: &[String]) -> Result<()> {
         Command::AssemblyArtifactsCheck => assembly_artifacts::run(),
         Command::AssemblyGenerateModules { check } => assembly_codegen::run(check),
         Command::AssemblyGenerateProviders { check } => assembly_codegen::run_providers(check),
+        Command::AssemblyGenerateRuntimePlans { check } => assembly_runtime_plan::run(check),
         Command::AssemblyLock(action) => assembly_lock::run(action),
         Command::GraphAssembly(options) => graph::run(&options),
         Command::ArchRulesList => archrules::list(),
@@ -1025,6 +1036,30 @@ mod tests {
             assert!(
                 parse_command(&s(&invalid)).is_err(),
                 "invalid provider codegen argv accepted: {invalid:?}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn assembly_runtime_plan_codegen_cli_is_exact_and_fail_closed() -> anyhow::Result<()> {
+        assert_eq!(
+            parse_command(&s(&["assembly", "generate-runtime-plans"]))?,
+            Command::AssemblyGenerateRuntimePlans { check: false }
+        );
+        assert_eq!(
+            parse_command(&s(&["assembly", "generate-runtime-plans", "--check"]))?,
+            Command::AssemblyGenerateRuntimePlans { check: true }
+        );
+        for invalid in [
+            vec!["assembly", "generate-runtime-plans", "--bogus"],
+            vec!["assembly", "generate-runtime-plans", "--check", "--check"],
+            vec!["assembly", "generate-runtime-plan"],
+            vec!["assembly", "runtime-plans", "generate"],
+        ] {
+            assert!(
+                parse_command(&s(&invalid)).is_err(),
+                "invalid runtime-plan codegen argv accepted: {invalid:?}"
             );
         }
         Ok(())

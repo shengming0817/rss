@@ -37,8 +37,9 @@ mod verify;
 
 #[cfg(feature = "backend")]
 pub use config::{
-    AccessStaticKeySource, AccessStaticKeySourceBuilder, ConfigError, RetirementSchedule,
-    ServiceTokenKeySource, ServiceTokenKeySourceBuilder, VerifierConfig, VerifierConfigBuilder,
+    AccessStaticKeySource, AccessStaticKeySourceBuilder, ConfigError, FederatedPermissionUniverse,
+    RetirementSchedule, ServiceTokenKeySource, ServiceTokenKeySourceBuilder, VerifierConfig,
+    VerifierConfigBuilder,
 };
 #[cfg(feature = "backend")]
 pub use jwks::{

@@ -25,7 +25,7 @@ pub(crate) fn run(action: AssemblyLockAction) -> anyhow::Result<()> {
 }
 
 fn run_root(root: &Path, action: AssemblyLockAction) -> CommandResult<()> {
-    let targets = preflight(root)?;
+    let targets = preflight(root, action)?;
     let plan = plan_locks(root, &targets)?;
     match action {
         AssemblyLockAction::Generate => generate(plan),
@@ -33,7 +33,10 @@ fn run_root(root: &Path, action: AssemblyLockAction) -> CommandResult<()> {
     }
 }
 
-fn preflight(root: &Path) -> CommandResult<Vec<crate::assembly::AssemblyTarget>> {
+fn preflight(
+    root: &Path,
+    action: AssemblyLockAction,
+) -> CommandResult<Vec<crate::assembly::AssemblyTarget>> {
     let discovered = crate::assembly::discover_targets(root)
         .map_err(|_| CommandError::Preflight(PreflightFailure::Discovery))?;
     let orphans = orphan_locks(root, &discovered)?;
@@ -55,8 +58,14 @@ fn preflight(root: &Path) -> CommandResult<Vec<crate::assembly::AssemblyTarget>>
             contract_findings.len(),
         )));
     }
-    let (_, assembly_findings) = crate::assembly::validate_root(root)
+    let (_, mut assembly_findings) = crate::assembly::validate_root(root)
         .map_err(|_| CommandError::Preflight(PreflightFailure::AssemblyHardError))?;
+    if action == AssemblyLockAction::Generate {
+        // The lock and runtime plan bind each other. Generation may cross exactly that stale
+        // settingsonly golden, while every other closure finding and all check-mode drift remain
+        // fail closed.
+        assembly_findings.retain(|finding| !is_settingsonly_lock_runtime_plan_drift(finding));
+    }
     if !assembly_findings.is_empty() {
         return Err(CommandError::Preflight(PreflightFailure::AssemblyFindings(
             assembly_findings.len(),
@@ -73,6 +82,12 @@ fn preflight(root: &Path) -> CommandResult<Vec<crate::assembly::AssemblyTarget>>
     crate::generated_file::verify_lf_checkout(root, LOCK_LF_RULE, &lock_paths)
         .map_err(CommandError::CheckoutPolicy)?;
     Ok(targets)
+}
+
+fn is_settingsonly_lock_runtime_plan_drift(finding: &crate::assembly::Finding) -> bool {
+    finding.rule == crate::assembly::Rule::SettingsOnlyL2ProductionClosure
+        && finding.subject == "assemblies/settingsonly"
+        && finding.detail.starts_with("field=lock-runtime-plan ")
 }
 
 fn orphan_locks(
@@ -390,6 +405,31 @@ mod tests {
     const ANSI: &str = "\u{1b}[31m";
     const INJECTED: &str = "INJECTED_DIAGNOSTIC_LINE";
     type FixtureMutation = fn(&Path) -> anyhow::Result<()>;
+
+    #[test]
+    fn generate_bootstrap_accepts_only_the_settingsonly_lock_runtime_plan_drift() {
+        let accepted = crate::diagnostic::finding(
+            crate::assembly::Rule::SettingsOnlyL2ProductionClosure,
+            "assemblies/settingsonly",
+            "field=lock-runtime-plan committed lock and runtime plan are stale",
+        );
+        assert!(is_settingsonly_lock_runtime_plan_drift(&accepted));
+
+        for rejected in [
+            crate::diagnostic::finding(
+                crate::assembly::Rule::SettingsOnlyL2ProductionClosure,
+                "assemblies/settingsonly",
+                "field=providers production provider closure is stale",
+            ),
+            crate::diagnostic::finding(
+                crate::assembly::Rule::SettingsOnlyL2ProductionClosure,
+                "assemblies/runtime",
+                "field=lock-runtime-plan unrelated assembly drift",
+            ),
+        ] {
+            assert!(!is_settingsonly_lock_runtime_plan_drift(&rejected));
+        }
+    }
 
     #[test]
     fn three_committed_locks_are_clean_and_verified() -> anyhow::Result<()> {

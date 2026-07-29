@@ -21,8 +21,7 @@ impl SettingsModuleInput {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn into_readiness_interval(self) -> KeyProviderReadinessInterval {
+    pub(crate) fn readiness_interval(&self) -> KeyProviderReadinessInterval {
         self.keyprovider_readiness_interval
     }
 }
@@ -51,15 +50,14 @@ pub(crate) async fn integration_binding(
 
 async fn wire_from_runtime(
     deps: &SharedRuntimeDeps,
-    input: SettingsModuleInput,
+    _input: SettingsModuleInput,
 ) -> anyhow::Result<DomainBinding> {
     settings_composition::wire(SettingsModuleDeps::new(
         deps.pg.for_domain(),
-        deps.pg.readiness_handle(),
         deps.vault.for_domain::<vault_caps::Settings>(),
         deps.settings_config_value_key_name.clone(),
         std::sync::Arc::new(SystemClock),
-        input.keyprovider_readiness_interval,
+        deps.settings_readiness.clone(),
     ))
     .await
 }

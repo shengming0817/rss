@@ -541,10 +541,8 @@ mod tests {
         assert!(ValidatedLocalTxReceipt::parse(&serde_json::to_string(&empty)?).is_err());
 
         let mut unsorted = valid.clone();
-        unsorted["localtxContractIds"] = serde_json::json!([
-            "settings.secret-publish",
-            "audit.list-tenant-entries"
-        ]);
+        unsorted["localtxContractIds"] =
+            serde_json::json!(["settings.secret-publish", "audit.list-tenant-entries"]);
         assert!(ValidatedLocalTxReceipt::parse(&serde_json::to_string(&unsorted)?).is_err());
 
         let mut duplicate = valid.clone();

@@ -19,8 +19,8 @@ mod lock;
 
 #[cfg(feature = "backend")]
 pub use bundle::{
-    RedisCasStore, RedisInboxStore, RedisInfraDeps, RedisLockStore, RedisPingError,
-    RedisRuntimeDeps,
+    RedisCasStore, RedisConnectError, RedisInboxStore, RedisInfraDeps, RedisLockStore,
+    RedisPingError, RedisPrivateCa, RedisPrivateCaError, RedisRuntimeDeps,
 };
 
 use diport::{ManagedResource, ShutdownError};

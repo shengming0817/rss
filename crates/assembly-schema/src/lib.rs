@@ -545,6 +545,7 @@ fn ensure_unique_provider_keys(
     let mut seen = BTreeSet::new();
     for provider in providers {
         let key = (
+            provider.id.as_str(),
             provider.port.as_str(),
             provider.provider.as_str(),
             provider.provider_crate.as_str(),
@@ -559,8 +560,9 @@ fn ensure_unique_provider_keys(
     }
 }
 
-fn provider_key(provider: &DiportProvider) -> (&str, &str, &str, &str) {
+fn provider_key(provider: &DiportProvider) -> (&str, &str, &str, &str, &str) {
     (
+        provider.id.as_str(),
         provider.port.as_str(),
         provider.provider.as_str(),
         provider.provider_crate.as_str(),

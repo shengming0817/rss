@@ -1,16 +1,34 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "SettingsOnlyConfig",
-  "description": "The complete version-one document. All fields are mandatory unless represented as `Option`.",
+  "description": "The complete version-two production document. Every field is mandatory.",
   "type": "object",
   "required": [
+    "dlx",
+    "drain",
+    "eventing",
     "federated",
     "listeners",
     "postgres",
+    "profile",
+    "readiness",
+    "redis",
+    "s3",
     "schemaVersion",
+    "tenantAuthority",
+    "topology",
     "vault"
   ],
   "properties": {
+    "dlx": {
+      "$ref": "#/definitions/DlxConfig"
+    },
+    "drain": {
+      "$ref": "#/definitions/DrainConfig"
+    },
+    "eventing": {
+      "$ref": "#/definitions/EventingConfig"
+    },
     "federated": {
       "$ref": "#/definitions/FederatedConfig"
     },
@@ -20,9 +38,27 @@
     "postgres": {
       "$ref": "#/definitions/PostgresConfig"
     },
+    "profile": {
+      "$ref": "#/definitions/ProductionProfile"
+    },
+    "readiness": {
+      "$ref": "#/definitions/ReadinessConfig"
+    },
+    "redis": {
+      "$ref": "#/definitions/RedisConfig"
+    },
+    "s3": {
+      "$ref": "#/definitions/S3Config"
+    },
     "schemaVersion": {
       "type": "integer",
-      "const": 1
+      "const": 2
+    },
+    "tenantAuthority": {
+      "$ref": "#/definitions/TenantAuthorityConfig"
+    },
+    "topology": {
+      "$ref": "#/definitions/DurableTopology"
     },
     "vault": {
       "$ref": "#/definitions/VaultConfig"
@@ -30,6 +66,71 @@
   },
   "additionalProperties": false,
   "definitions": {
+    "DlxConfig": {
+      "type": "object",
+      "required": [
+        "archiveKeyName",
+        "hotKeyName",
+        "readinessSeconds"
+      ],
+      "properties": {
+        "archiveKeyName": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^.*\\S.*$"
+        },
+        "hotKeyName": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^.*\\S.*$"
+        },
+        "readinessSeconds": {
+          "type": "integer",
+          "format": "uint64",
+          "maximum": 30.0,
+          "minimum": 1.0
+        }
+      },
+      "additionalProperties": false
+    },
+    "DrainConfig": {
+      "type": "object",
+      "required": [
+        "totalSeconds"
+      ],
+      "properties": {
+        "totalSeconds": {
+          "type": "integer",
+          "const": 60
+        }
+      },
+      "additionalProperties": false
+    },
+    "DurableTopology": {
+      "type": "string",
+      "enum": [
+        "durable-isolated"
+      ]
+    },
+    "EventingConfig": {
+      "type": "object",
+      "required": [
+        "amqpCaCertPemPath",
+        "publisherConfirmTimeoutMs"
+      ],
+      "properties": {
+        "amqpCaCertPemPath": {
+          "type": "string"
+        },
+        "publisherConfirmTimeoutMs": {
+          "type": "integer",
+          "format": "uint64",
+          "maximum": 60000.0,
+          "minimum": 1.0
+        }
+      },
+      "additionalProperties": false
+    },
     "FederatedConfig": {
       "type": "object",
       "required": [
@@ -104,8 +205,71 @@
         "requestBudgetMs": {
           "type": "integer",
           "format": "uint64",
-          "maximum": 300000.0,
+          "maximum": 20000.0,
           "minimum": 1.0
+        }
+      },
+      "additionalProperties": false
+    },
+    "PgDlxArchiverRoleConfig": {
+      "type": "object",
+      "required": [
+        "maxConnections",
+        "username"
+      ],
+      "properties": {
+        "maxConnections": {
+          "type": "integer",
+          "format": "uint32",
+          "maximum": 20.0,
+          "minimum": 1.0
+        },
+        "username": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^.*\\S.*$"
+        }
+      },
+      "additionalProperties": false
+    },
+    "PgDlxPurgerRoleConfig": {
+      "type": "object",
+      "required": [
+        "maxConnections",
+        "username"
+      ],
+      "properties": {
+        "maxConnections": {
+          "type": "integer",
+          "format": "uint32",
+          "maximum": 20.0,
+          "minimum": 1.0
+        },
+        "username": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^.*\\S.*$"
+        }
+      },
+      "additionalProperties": false
+    },
+    "PgDlxVerifierRoleConfig": {
+      "type": "object",
+      "required": [
+        "maxConnections",
+        "username"
+      ],
+      "properties": {
+        "maxConnections": {
+          "type": "integer",
+          "format": "uint32",
+          "maximum": 20.0,
+          "minimum": 1.0
+        },
+        "username": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^.*\\S.*$"
         }
       },
       "additionalProperties": false
@@ -130,17 +294,6 @@
         }
       },
       "additionalProperties": false
-    },
-    "PgSslMode": {
-      "description": "Closed PostgreSQL TLS policy.",
-      "type": "string",
-      "enum": [
-        "disable",
-        "prefer",
-        "require",
-        "verifyCa",
-        "verifyFull"
-      ]
     },
     "PgWriterRoleConfig": {
       "type": "object",
@@ -172,11 +325,15 @@
       "type": "object",
       "required": [
         "database",
+        "dlxArchiver",
+        "dlxPurger",
+        "dlxVerifier",
         "host",
         "port",
         "reader",
         "readinessSeconds",
         "sslMode",
+        "sslRootCertPath",
         "writer"
       ],
       "properties": {
@@ -184,6 +341,15 @@
           "type": "string",
           "minLength": 1,
           "pattern": "^.*\\S.*$"
+        },
+        "dlxArchiver": {
+          "$ref": "#/definitions/PgDlxArchiverRoleConfig"
+        },
+        "dlxPurger": {
+          "$ref": "#/definitions/PgDlxPurgerRoleConfig"
+        },
+        "dlxVerifier": {
+          "$ref": "#/definitions/PgDlxVerifierRoleConfig"
         },
         "host": {
           "type": "string",
@@ -205,16 +371,118 @@
           "minimum": 1.0
         },
         "sslMode": {
-          "$ref": "#/definitions/PgSslMode"
+          "type": "string",
+          "const": "verifyFull"
         },
         "sslRootCertPath": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": "string"
         },
         "writer": {
           "$ref": "#/definitions/PgWriterRoleConfig"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ProductionProfile": {
+      "type": "string",
+      "enum": [
+        "production"
+      ]
+    },
+    "ReadinessConfig": {
+      "type": "object",
+      "required": [
+        "startupTimeoutSeconds"
+      ],
+      "properties": {
+        "startupTimeoutSeconds": {
+          "type": "integer",
+          "format": "uint64",
+          "maximum": 300.0,
+          "minimum": 1.0
+        }
+      },
+      "additionalProperties": false
+    },
+    "RedisConfig": {
+      "type": "object",
+      "required": [
+        "caCertPemPath",
+        "readinessSeconds"
+      ],
+      "properties": {
+        "caCertPemPath": {
+          "type": "string"
+        },
+        "readinessSeconds": {
+          "type": "integer",
+          "format": "uint64",
+          "maximum": 30.0,
+          "minimum": 1.0
+        }
+      },
+      "additionalProperties": false
+    },
+    "S3Config": {
+      "type": "object",
+      "required": [
+        "archiveBucket",
+        "caCertPemPath",
+        "endpoint",
+        "forcePathStyle",
+        "readinessSeconds",
+        "region"
+      ],
+      "properties": {
+        "archiveBucket": {
+          "type": "string",
+          "maxLength": 63,
+          "minLength": 3,
+          "pattern": "^[a-z0-9][a-z0-9.-]*[a-z0-9]$"
+        },
+        "caCertPemPath": {
+          "type": "string"
+        },
+        "endpoint": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^https://.+$"
+        },
+        "forcePathStyle": {
+          "type": "boolean"
+        },
+        "readinessSeconds": {
+          "type": "integer",
+          "format": "uint64",
+          "maximum": 30.0,
+          "minimum": 1.0
+        },
+        "region": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^.*\\S.*$"
+        }
+      },
+      "additionalProperties": false
+    },
+    "TenantAuthorityConfig": {
+      "type": "object",
+      "required": [
+        "clockSkewSeconds",
+        "ttlSeconds"
+      ],
+      "properties": {
+        "clockSkewSeconds": {
+          "type": "integer",
+          "format": "uint64",
+          "maximum": 300.0,
+          "minimum": 0.0
+        },
+        "ttlSeconds": {
+          "type": "integer",
+          "format": "uint64",
+          "maximum": 86400.0,
+          "minimum": 3600.0
         }
       },
       "additionalProperties": false
@@ -233,6 +501,7 @@
       "type": "object",
       "required": [
         "addr",
+        "caCertPemPath",
         "readinessSeconds",
         "settingsKeyName",
         "tenantStoreAllowlist",
@@ -245,10 +514,7 @@
           "pattern": "^.*\\S.*$"
         },
         "caCertPemPath": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": "string"
         },
         "readinessSeconds": {
           "type": "integer",

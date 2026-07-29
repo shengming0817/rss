@@ -8,6 +8,7 @@
 //! ref: lapin examples/pubsub.rs@main；rabbitmq docs/confirms。
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use diport::{
     AckAction, AckError, AckableSubscriber, Delivery as DiDelivery, DeliveryStream,
@@ -19,7 +20,8 @@ use lapin::message::Delivery;
 #[cfg(feature = "integration-test-support")]
 use lapin::options::QueuePurgeOptions;
 use lapin::options::{
-    BasicAckOptions, BasicConsumeOptions, BasicNackOptions, BasicQosOptions, QueueDeclareOptions,
+    BasicAckOptions, BasicCancelOptions, BasicConsumeOptions, BasicNackOptions, BasicQosOptions,
+    QueueDeclareOptions,
 };
 use lapin::types::{AMQPValue, FieldTable};
 use lapin::{Channel, Connection};
@@ -30,16 +32,20 @@ use crate::settle::{SettleMode, settle_mode};
 
 /// channel 上最多 unacked 消息上限（限 channel 级 unacked window；at-least-once 背压）。
 /// 取值依据：RabbitMQ 推荐 100–300（ref: rabbitmq docs/confirms §prefetch / consumer-prefetch）。
-const PREFETCH: u16 = 100;
+// ConsumerTx is deliberately sequential. A window of one prevents a second delivery from becoming
+// in-flight while the first transaction is blocked during graceful shutdown.
+const PREFETCH: u16 = 1;
 
 /// AMQP 事件订阅 adapter（lapin）。raw `Arc<Connection>` **私有**——仅本 adapter 内部使用，不向 crate 内
 /// 其它模块暴露 raw 连接。impl `AckableSubscriber` + `ManagedResource`。
 ///
 /// **每订阅独立 channel**（review #274 F4/C4）：`subscribe_ackable` 每次从 `conn` 新开一个 channel 承载该
-/// 订阅，token cancel 只关**本订阅** channel，不连带终止同实例其它 topic 的 consumer；subscriber 级 shutdown
-/// 关闭整个 `conn`（其下所有订阅 channel 随之关闭）。
+/// 订阅，token cancel 只对**本订阅** consumer 执行 `basic.cancel`，不连带终止同实例其它
+/// topic 的 consumer；subscriber 级 shutdown 关闭整个 `conn`（其下所有订阅 channel 随之关闭）。
 pub struct AmqpSubscriber {
     conn: Arc<Connection>,
+    channels: std::sync::Mutex<Vec<Channel>>,
+    operational: AtomicBool,
     name: String,
 }
 
@@ -55,7 +61,35 @@ impl AmqpSubscriber {
         // reason: 订阅 channel 由 subscribe_ackable 按需 per-subscription 新开（F4）；connect 借
         // conn::connect 拿连接 + redaction 日志，其返回的初始 channel 不用于订阅，drop 即可。
         let (conn, _channel) = conn::connect(endpoint, &name, false).await?;
-        Ok(Self { conn, name })
+        Ok(Self {
+            conn,
+            channels: std::sync::Mutex::new(Vec::new()),
+            operational: AtomicBool::new(true),
+            name,
+        })
+    }
+
+    pub(crate) async fn connect_with_private_ca(
+        endpoint: &secure::AmqpEndpoint,
+        name: impl Into<String>,
+        ca: &conn::AmqpPrivateCa,
+    ) -> Result<Self, conn::AmqpConnectError> {
+        let name = name.into();
+        let (conn, _channel) = conn::connect_with_private_ca(endpoint, &name, false, ca).await?;
+        Ok(Self {
+            conn,
+            channels: std::sync::Mutex::new(Vec::new()),
+            operational: AtomicBool::new(true),
+            name,
+        })
+    }
+
+    pub(crate) fn readiness_snapshot(&self) -> bool {
+        self.operational.load(Ordering::Acquire)
+            && self.conn.status().connected()
+            && self.channels.lock().is_ok_and(|channels| {
+                !channels.is_empty() && channels.iter().all(|channel| channel.status().connected())
+            })
     }
 
     /// Purge the durable queue owned by one generated topic before an integration run.
@@ -103,19 +137,23 @@ async fn declare_durable_queue(channel: &Channel, topic_name: &str) -> Result<()
         .map_err(SubscriberError::new)
 }
 
-/// at-least-once 取消（`AckableSubscriber::subscribe_ackable` 专用）：token cancel → **关闭本订阅 channel**。
-/// manual-ack（`no_ack=false`）下，已投递未 settle 的消息是 channel 上的 in-flight unacked；`basic_cancel`
-/// 仅停**新**投递、**不**动 in-flight，会致其滞留至 channel 关闭才重投。关 channel 令 broker 立即 requeue
-/// 该 channel 上全部 unacked 投递（RabbitMQ channel-close 语义），保证取消即可被其它 consumer 重收（review
-/// #265 F2/C2）。**每订阅独立 channel**（review #274 F4/C4，见 `AmqpSubscriber`）⇒ 关的是**本订阅**的
-/// channel，不连带终止同 subscriber 其它 topic 的 consumer；`channel` 是 Clone（cheap handle）。
-async fn cancel_ackable_on_token(channel: Channel, token: CancellationToken) {
-    token.cancelled().await;
+/// 两阶段排空的 admission stop：token cancel 后以稳定 tag 发送 `basic.cancel`，并等待
+/// broker 的 `basic.cancel-ok`。只停止新 delivery，不关闭 channel，因此取消前已在途的
+/// manual-ack delivery 仍可由 worker settle。channel/connection 只由 subscriber shutdown 关闭；若排空
+/// 失败，该关闭语义使 broker 重投未 settle 消息。
+async fn cancel_ackable(channel: Channel, consumer_tag: String) {
     if let Err(error) = channel
-        .close(REPLY_SUCCESS, "ackable subscribe cancelled".into())
+        .basic_cancel(consumer_tag.into(), BasicCancelOptions::default())
         .await
     {
-        tracing::warn!(target: "amqp", error = %secure::redact_error(&error), "amqp ackable cancel channel close error");
+        tracing::warn!(target: "amqp", error = %secure::redact_error(&error), "amqp ackable basic.cancel error");
+        close_failed_subscription(&channel, "basic.cancel failed").await;
+    }
+}
+
+async fn close_failed_subscription(channel: &Channel, reason: &'static str) {
+    if let Err(error) = channel.close(REPLY_SUCCESS, reason.into()).await {
+        tracing::warn!(target: "amqp", error = %secure::redact_error(&error), "amqp failed subscription channel close error");
     }
 }
 
@@ -125,6 +163,7 @@ impl ManagedResource for AmqpSubscriber {
     }
 
     async fn shutdown(&self) -> Result<(), ShutdownError> {
+        self.operational.store(false, Ordering::Release);
         self.conn
             .close(REPLY_SUCCESS, "subscriber resource shutdown".into())
             .await
@@ -167,7 +206,11 @@ fn extract_metadata(props: &lapin::BasicProperties) -> EnvelopeMetadata {
 /// 先取出 `acker`（lapin `Acker` 是 Arc handle，cheap clone）再 move `data`/`properties` 构造 Message，
 /// 避免借用冲突。clone 出的句柄随 `Delivery` owned 交给 driver——driver 须保证最终只一方 settle
 /// （settle-once；二次 settle 在 lapin 层返 Err、由 eventexec 的 settle 失败日志承接，不 panic）。
-fn delivery_to_ackable(delivery: Delivery) -> DiDelivery {
+fn delivery_to_ackable(
+    delivery: Delivery,
+    channel: Channel,
+    subscription_rpc: Arc<tokio::sync::Mutex<()>>,
+) -> DiDelivery {
     let acker = delivery.acker.clone();
     let producer_id = delivery
         .properties
@@ -179,7 +222,11 @@ fn delivery_to_ackable(delivery: Delivery) -> DiDelivery {
     let message = Message::new_with_metadata(id, delivery.data, metadata);
     DiDelivery::new(
         message,
-        diport::DynAcker::new_box(AmqpAcker { inner: acker }),
+        diport::DynAcker::new_box(AmqpAcker {
+            inner: acker,
+            channel,
+            subscription_rpc,
+        }),
     )
 }
 
@@ -201,11 +248,17 @@ fn pick_message_id(message_id: Option<&str>, delivery_tag: u64) -> String {
 /// `AckError::new` 包装（source 脱敏，不进 wire——见 `diport::AckError` PII 边界）。
 pub(crate) struct AmqpAcker {
     inner: lapin::Acker,
+    channel: Channel,
+    subscription_rpc: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl diport::Acker for AmqpAcker {
     async fn settle(&self, action: AckAction) -> Result<(), AckError> {
-        match settle_mode(action) {
+        // Lapin routes settlement and basic.cancel through the same channel RPC. A per-subscription
+        // gate makes their ordering total: an Ack already admitted completes first; otherwise Ack
+        // waits for broker-confirmed cancel instead of becoming stranded behind the pending RPC.
+        let _rpc = self.subscription_rpc.lock().await;
+        let result = match settle_mode(action) {
             SettleMode::Ack => self.inner.ack(BasicAckOptions::default()).await,
             SettleMode::Nack { requeue } => {
                 self.inner
@@ -215,9 +268,15 @@ impl diport::Acker for AmqpAcker {
                     })
                     .await
             }
+        };
+        match result {
+            Ok(_) => Ok(()),
+            Err(error) => {
+                let error = AckError::new(error);
+                close_failed_subscription(&self.channel, "delivery settle failed").await;
+                Err(error)
+            }
         }
-        .map(|_| ())
-        .map_err(AckError::new)
     }
 }
 
@@ -233,8 +292,8 @@ impl AckableSubscriber for AmqpSubscriber {
         // 稳定 consumer tag（按 name+topic 派生）：重连/重订阅复用同一 tag，不变成新消费者
         // （eventbus.md §DLX「consumer group 命名稳定」）。
         let consumer_tag = format!("{}-ack-{}", self.name, topic_name);
-        // 每订阅独立 channel（review #274 F4/C4）：token cancel 关本 channel 不连带停掉同 subscriber 其它
-        // topic 的 consumer。channel 由本订阅的 consumer stream + cancel future 持有（owned），随流终止释放。
+        // 每订阅独立 channel（review #274 F4/C4）：token cancel 只停止本 channel 的 consumer，
+        // 不连带停掉同 subscriber 其它 topic 的 consumer。
         let channel = self
             .conn
             .create_channel()
@@ -259,32 +318,62 @@ impl AckableSubscriber for AmqpSubscriber {
             )
             .await
             .map_err(SubscriberError::new)?;
+        self.channels
+            .lock()
+            .map_err(|_| {
+                SubscriberError::new(std::io::Error::other("subscriber channel state poisoned"))
+            })?
+            .push(channel.clone());
 
-        // Consumer → Delivery（携 acker）。取消经 take_until(cancel_ackable_on_token)：token cancel → 关本订阅
-        // channel 令 broker requeue in-flight unacked（at-least-once 取消语义），不影响同 subscriber 其它订阅。
-        // consumer_tag 已用于 basic_consume（稳定 tag）；关 channel 取消该 channel 上 consumer，cancel future 不再需 tag。
+        // Consumer → Delivery（携 acker）。take_until 在 token cancel 后以同一稳定 tag 等待
+        // broker 确认 basic.cancel，再终止流；channel 保持打开，让 in-flight acker 继续 settle。
+        // Drive admission cancellation independently from stream polling. ConsumerTx processes one
+        // delivery at a time and may be blocked in its PG transaction when shutdown begins.
+        let cancel_confirmed = CancellationToken::new();
+        let cancel_confirmation = cancel_confirmed.clone();
+        let subscription_rpc = Arc::new(tokio::sync::Mutex::new(()));
+        let cancel_rpc = Arc::clone(&subscription_rpc);
+        let cancel_channel = channel.clone();
+        tokio::spawn(async move {
+            token.cancelled().await;
+            let _rpc = cancel_rpc.lock().await;
+            cancel_ackable(cancel_channel, consumer_tag).await;
+            cancel_confirmed.cancel();
+        });
+        let delivery_rpc = Arc::clone(&subscription_rpc);
         let stream = consumer
-            .filter_map(|res| async move {
-                match res {
-                    Ok(delivery) => Some(delivery_to_ackable(delivery)),
-                    Err(error) => {
-                        tracing::warn!(
-                            target: "amqp",
-                            error = %secure::redact_error(&error),
-                            "amqp ackable delivery error; skipping",
-                        );
-                        None
+            .filter_map(move |res| {
+                let delivery_channel = channel.clone();
+                let delivery_rpc = Arc::clone(&delivery_rpc);
+                async move {
+                    match res {
+                        Ok(delivery) => Some(delivery_to_ackable(
+                            delivery,
+                            delivery_channel,
+                            delivery_rpc,
+                        )),
+                        Err(error) => {
+                            tracing::warn!(
+                                target: "amqp",
+                                error = %secure::redact_error(&error),
+                                "amqp ackable delivery error; skipping",
+                            );
+                            None
+                        }
                     }
                 }
             })
-            .take_until(cancel_ackable_on_token(channel.clone(), token));
+            .take_until(async move {
+                cancel_confirmation.cancelled().await;
+            });
         tracing::info!(target: "amqp", resource = %self.name, topic = topic_name, "amqp ackable subscribe started");
         Ok(Box::pin(stream))
     }
 
     async fn shutdown(&self) -> Result<(), SubscriberError> {
         // subscriber 级关闭：关整个 connection（其下所有 per-subscription channel 随之关闭 → broker requeue
-        // 各 channel 上 in-flight unacked）。每订阅 channel 已由各自 token cancel 独立关闭（F4/C4）。
+        // 各 channel 上仍未 settle 的 in-flight delivery）。token cancel 只完成 consumer admission stop。
+        self.operational.store(false, Ordering::Release);
         self.conn
             .close(REPLY_SUCCESS, "ackable subscriber shutdown".into())
             .await

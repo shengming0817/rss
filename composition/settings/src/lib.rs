@@ -82,90 +82,214 @@ impl Default for KeyProviderReadinessInterval {
 /// path.
 pub struct SettingsModuleDeps {
     pg: PgDomainDeps<caps::Settings>,
-    pg_readiness: Arc<PgDbReadiness>,
-    readiness_key_provider: Box<DynKeyProvider<'static>>,
     secret_resolver: Box<DynSecretResolver<'static>>,
     read_key_provider: Box<DynKeyProvider<'static>>,
     write_key_provider: Box<DynKeyProvider<'static>>,
     key_name: KeyName,
     clock: Arc<dyn Clock>,
-    keyprovider_ready: Arc<AtomicBool>,
-    resolver_ready: Arc<AtomicBool>,
-    readiness_worker: WorkerSpec,
-    resolver_readiness_worker: WorkerSpec,
+    readiness: SettingsReadinessDeps,
+    http_surface: SettingsHttpSurface,
+}
+
+#[derive(Clone, Copy)]
+enum SettingsHttpSurface {
+    Full,
+    ConfigCud,
+}
+
+/// Non-optional readiness handles derived together with the three provider lifecycle outputs.
+#[derive(Clone)]
+pub struct SettingsReadinessDeps {
+    postgres: Arc<PgDbReadiness>,
+    key_provider: Arc<AtomicBool>,
+    secret_resolver: Arc<AtomicBool>,
+}
+
+/// Typed, non-interchangeable Postgres readiness probe output.
+pub struct SettingsPostgresReadinessOutput(DomainModuleResult);
+
+/// Typed, non-interchangeable Vault key-provider readiness output.
+pub struct SettingsKeyProviderReadinessOutput(DomainModuleResult);
+
+/// Typed, non-interchangeable Vault secret-resolver readiness output.
+pub struct SettingsSecretResolverReadinessOutput(DomainModuleResult);
+
+/// One construction generation for Settings PG/Vault readiness and its exact provider outputs.
+pub struct SettingsProviderReadiness {
+    pending: SettingsProviderReadinessAwaitingPostgres,
+    key_provider: SettingsKeyProviderReadinessOutput,
+    secret_resolver: SettingsSecretResolverReadinessOutput,
+}
+
+/// The same Settings Vault readiness generation awaiting the live PG readiness snapshot.
+pub struct SettingsProviderReadinessAwaitingPostgres {
+    key_provider: Arc<AtomicBool>,
+    secret_resolver: Arc<AtomicBool>,
+}
+
+impl SettingsProviderReadiness {
+    /// Derive all readiness handles and lifecycle outputs from the same provider capabilities.
+    pub async fn new(
+        vault: &VaultDomainDeps<vault_caps::Settings>,
+        key_name: KeyName,
+        interval: KeyProviderReadinessInterval,
+    ) -> anyhow::Result<Self> {
+        verify_keyprovider_ready(&vault.key_provider(), key_name.clone())
+            .await
+            .context("verify settings config value key provider")?;
+        let key_provider = Arc::new(AtomicBool::new(true));
+        let secret_resolver = Arc::new(AtomicBool::new(false));
+        let key_worker = keyprovider_readiness_worker(
+            vault.key_provider(),
+            key_name,
+            interval.get(),
+            Arc::clone(&key_provider),
+        );
+        let resolver_worker = secret_resolver_readiness_worker(
+            vault.secret_resolver(),
+            vault.secret_resolver_readiness_targets(),
+            interval.get(),
+            Arc::clone(&secret_resolver),
+        );
+        Self::from_workers(key_provider, secret_resolver, key_worker, resolver_worker)
+    }
+
+    fn from_workers(
+        key_provider: Arc<AtomicBool>,
+        secret_resolver: Arc<AtomicBool>,
+        key_worker: WorkerSpec,
+        resolver_worker: WorkerSpec,
+    ) -> anyhow::Result<Self> {
+        let key_name = ProbeName::parse(KEYPROVIDER_READY_PROBE_NAME)
+            .context("keyprovider_ready probe name is invalid")?;
+        let resolver_name = ProbeName::parse(SECRET_RESOLVER_READY_PROBE_NAME)
+            .context("vault secret resolver probe name is invalid")?;
+        Ok(Self {
+            pending: SettingsProviderReadinessAwaitingPostgres {
+                key_provider: Arc::clone(&key_provider),
+                secret_resolver: Arc::clone(&secret_resolver),
+            },
+            key_provider: SettingsKeyProviderReadinessOutput(DomainModuleResult {
+                probes: vec![(key_name, Box::new(KeyProviderReadyProbe::new(key_provider)))],
+                workers: vec![key_worker],
+                ..Default::default()
+            }),
+            secret_resolver: SettingsSecretResolverReadinessOutput(DomainModuleResult {
+                probes: vec![(
+                    resolver_name,
+                    Box::new(SecretResolverReadyProbe::new(secret_resolver)),
+                )],
+                workers: vec![resolver_worker],
+                ..Default::default()
+            }),
+        })
+    }
+
+    /// Consume the construction generation into domain handles and exact provider outputs.
+    pub fn into_vault_parts(
+        self,
+    ) -> (
+        SettingsProviderReadinessAwaitingPostgres,
+        SettingsKeyProviderReadinessOutput,
+        SettingsSecretResolverReadinessOutput,
+    ) {
+        (self.pending, self.key_provider, self.secret_resolver)
+    }
+}
+
+impl SettingsProviderReadinessAwaitingPostgres {
+    /// Bind the live PG snapshot and complete the non-optional domain readiness receipt.
+    pub fn bind_postgres(
+        self,
+        postgres: Arc<PgDbReadiness>,
+    ) -> anyhow::Result<(SettingsReadinessDeps, SettingsPostgresReadinessOutput)> {
+        let name = ProbeName::parse(CONFIGS_READY_PROBE_NAME)
+            .context("configs_ready probe name is invalid")?;
+        Ok((
+            SettingsReadinessDeps {
+                postgres: Arc::clone(&postgres),
+                key_provider: self.key_provider,
+                secret_resolver: self.secret_resolver,
+            },
+            SettingsPostgresReadinessOutput(DomainModuleResult {
+                probes: vec![(name, Box::new(ConfigsReadyProbe::new(postgres)))],
+                ..Default::default()
+            }),
+        ))
+    }
+}
+
+impl SettingsPostgresReadinessOutput {
+    /// Consume the typed output into the assembly lifecycle carrier.
+    pub fn into_output(self) -> DomainModuleResult {
+        self.0
+    }
+}
+
+impl SettingsKeyProviderReadinessOutput {
+    /// Consume the typed output into the assembly lifecycle carrier.
+    pub fn into_output(self) -> DomainModuleResult {
+        self.0
+    }
+}
+
+impl SettingsSecretResolverReadinessOutput {
+    /// Consume the typed output into the assembly lifecycle carrier.
+    pub fn into_output(self) -> DomainModuleResult {
+        self.0
+    }
 }
 
 impl SettingsModuleDeps {
-    /// Construct the settings composition inputs from one sealed settings Vault capability.
+    /// Construct settings from capabilities whose readiness lifecycle was already claimed by the
+    /// assembly's provider transaction.
     #[must_use]
     pub fn new(
         pg: PgDomainDeps<caps::Settings>,
-        pg_readiness: Arc<PgDbReadiness>,
         vault: VaultDomainDeps<vault_caps::Settings>,
         key_name: KeyName,
         clock: Arc<dyn Clock>,
-        keyprovider_readiness_interval: KeyProviderReadinessInterval,
+        readiness: SettingsReadinessDeps,
     ) -> Self {
-        let keyprovider_ready = Arc::new(AtomicBool::new(true));
-        let resolver_ready = Arc::new(AtomicBool::new(false));
-        let readiness_worker = keyprovider_readiness_worker(
-            vault.key_provider(),
-            key_name.clone(),
-            keyprovider_readiness_interval.get(),
-            Arc::clone(&keyprovider_ready),
-        );
-        let resolver_readiness_targets = vault.secret_resolver_readiness_targets();
-        let resolver_readiness_worker = secret_resolver_readiness_worker(
-            vault.secret_resolver(),
-            resolver_readiness_targets.clone(),
-            keyprovider_readiness_interval.get(),
-            Arc::clone(&resolver_ready),
-        );
         Self {
             pg,
-            pg_readiness,
-            readiness_key_provider: vault.key_provider(),
             secret_resolver: vault.secret_resolver(),
             read_key_provider: vault.key_provider(),
             write_key_provider: vault.key_provider(),
             key_name,
             clock,
-            keyprovider_ready,
-            resolver_ready,
-            readiness_worker,
-            resolver_readiness_worker,
+            readiness,
+            http_surface: SettingsHttpSurface::Full,
         }
+    }
+
+    /// Select the closed settingsonly HTTP surface without exposing a route allowlist.
+    #[must_use]
+    pub fn config_cud_only(mut self) -> Self {
+        self.http_surface = SettingsHttpSurface::ConfigCud;
+        self
     }
 
     #[cfg(any(test, feature = "test-support"))]
     #[allow(clippy::too_many_arguments)]
     fn for_test(
         pg: PgDomainDeps<caps::Settings>,
-        pg_readiness: Arc<PgDbReadiness>,
-        readiness_key_provider: Box<DynKeyProvider<'static>>,
         secret_resolver: Box<DynSecretResolver<'static>>,
         read_key_provider: Box<DynKeyProvider<'static>>,
         write_key_provider: Box<DynKeyProvider<'static>>,
         key_name: KeyName,
         clock: Arc<dyn Clock>,
-        keyprovider_ready: Arc<AtomicBool>,
-        resolver_ready: Arc<AtomicBool>,
-        readiness_worker: WorkerSpec,
-        resolver_readiness_worker: WorkerSpec,
+        readiness: SettingsReadinessDeps,
     ) -> Self {
         Self {
             pg,
-            pg_readiness,
-            readiness_key_provider,
             secret_resolver,
             read_key_provider,
             write_key_provider,
             key_name,
             clock,
-            keyprovider_ready,
-            resolver_ready,
-            readiness_worker,
-            resolver_readiness_worker,
+            readiness,
+            http_surface: SettingsHttpSurface::Full,
         }
     }
 }
@@ -191,22 +315,25 @@ impl Clock for SharedClock {
 pub async fn wire(deps: SettingsModuleDeps) -> anyhow::Result<DomainBinding> {
     let SettingsModuleDeps {
         pg,
-        pg_readiness,
-        readiness_key_provider,
         secret_resolver,
         read_key_provider,
         write_key_provider,
         key_name,
         clock,
-        keyprovider_ready,
-        resolver_ready,
-        readiness_worker,
-        resolver_readiness_worker,
+        readiness,
+        http_surface,
     } = deps;
-
-    verify_keyprovider_ready(&readiness_key_provider, key_name.clone())
-        .await
-        .context("verify settings config value key provider")?;
+    let SettingsReadinessDeps {
+        postgres: readiness_postgres,
+        key_provider: readiness_key_provider,
+        secret_resolver: readiness_secret_resolver,
+    } = readiness;
+    drop((
+        readiness_postgres,
+        readiness_key_provider,
+        readiness_secret_resolver,
+    ));
+    let output = DomainModuleResult::default();
 
     let service_clock = Arc::clone(&clock);
     let (configs, writer, secrets, secret_writer) = pg
@@ -228,15 +355,15 @@ pub async fn wire(deps: SettingsModuleDeps) -> anyhow::Result<DomainBinding> {
         secret_resolver,
     ));
     let domain = SettingsDomain::new(Arc::new(config_svc), secret_repo, secret_uow, secret_svc);
-    let output = module_result(
-        pg_readiness,
-        keyprovider_ready,
-        resolver_ready,
-        readiness_worker,
-        resolver_readiness_worker,
-    )?;
-
-    Ok(DomainBinding::new(DOMAIN_NAME, Box::new(domain), output))
+    let mounted_domain = match http_surface {
+        SettingsHttpSurface::Full => domain,
+        SettingsHttpSurface::ConfigCud => domain.config_cud_only(),
+    };
+    Ok(DomainBinding::new(
+        DOMAIN_NAME,
+        Box::new(mounted_domain),
+        output,
+    ))
 }
 
 /// Build a key-provider readiness worker tied to the supplied shared readiness snapshot.
@@ -258,7 +385,6 @@ fn keyprovider_readiness_worker(
 enum ResolverReadinessSample {
     Ready,
     Down,
-    Preserve,
 }
 
 async fn sample_secret_resolver_readiness(
@@ -268,7 +394,7 @@ async fn sample_secret_resolver_readiness(
     for target in targets {
         match resolver.resolve(target.tenant(), target.coordinate()).await {
             Ok(_) => {}
-            Err(SecretResolverError::Forbidden) => return ResolverReadinessSample::Preserve,
+            Err(SecretResolverError::Forbidden) => return ResolverReadinessSample::Down,
             Err(
                 SecretResolverError::StoreUnreachable { .. }
                 | SecretResolverError::Timeout
@@ -285,9 +411,6 @@ fn apply_secret_resolver_readiness_sample(ready: &AtomicBool, sample: ResolverRe
     match sample {
         ResolverReadinessSample::Ready => ready.store(true, Ordering::Release),
         ResolverReadinessSample::Down => ready.store(false, Ordering::Release),
-        ResolverReadinessSample::Preserve => {
-            tracing::warn!("vault resolver readiness target was locally forbidden")
-        }
     }
 }
 
@@ -384,40 +507,10 @@ impl bootstrap::HealthProbe for KeyProviderReadyProbe {
 fn readiness_to_health(readiness: PoolReadiness) -> (HealthStatus, &'static str) {
     match readiness {
         PoolReadiness::Ready => (HealthStatus::Healthy, "ready"),
-        PoolReadiness::Saturated => (HealthStatus::Degraded, "saturated"),
+        PoolReadiness::Saturated => (HealthStatus::Unhealthy, "saturated"),
         PoolReadiness::Down => (HealthStatus::Unhealthy, "down"),
         _ => (HealthStatus::Unhealthy, "unknown"),
     }
-}
-
-fn module_result(
-    pg_readiness: Arc<PgDbReadiness>,
-    keyprovider_ready: Arc<AtomicBool>,
-    resolver_ready: Arc<AtomicBool>,
-    readiness_worker: WorkerSpec,
-    resolver_readiness_worker: WorkerSpec,
-) -> anyhow::Result<DomainModuleResult> {
-    let configs_name = ProbeName::parse(CONFIGS_READY_PROBE_NAME)
-        .context("configs_ready probe name is invalid")?;
-    let keyprovider_name = ProbeName::parse(KEYPROVIDER_READY_PROBE_NAME)
-        .context("keyprovider_ready probe name is invalid")?;
-    let resolver_name = ProbeName::parse(SECRET_RESOLVER_READY_PROBE_NAME)
-        .context("vault secret resolver probe name is invalid")?;
-    Ok(DomainModuleResult {
-        probes: vec![
-            (configs_name, Box::new(ConfigsReadyProbe::new(pg_readiness))),
-            (
-                keyprovider_name,
-                Box::new(KeyProviderReadyProbe::new(keyprovider_ready)),
-            ),
-            (
-                resolver_name,
-                Box::new(SecretResolverReadyProbe::new(resolver_ready)),
-            ),
-        ],
-        resources: Vec::new(),
-        workers: vec![readiness_worker, resolver_readiness_worker],
-    })
 }
 
 fn keyprovider_readiness_aad(tenant: &str) -> anyhow::Result<secure::DerivedAad> {
@@ -581,18 +674,6 @@ pub mod test_support {
     };
     use secure::{DerivedAad, Plaintext};
 
-    struct NoopResource;
-
-    impl ManagedResource for NoopResource {
-        fn name(&self) -> &str {
-            "settings-test-worker"
-        }
-
-        async fn shutdown(&self) -> Result<(), ShutdownError> {
-            Ok(())
-        }
-    }
-
     #[derive(Default)]
     struct TestKeyProvider {
         decrypt_count: AtomicBool,
@@ -655,6 +736,15 @@ pub mod test_support {
 
     struct TestSecretResolver;
 
+    /// Mint healthy readiness handles for hermetic assembly tests only.
+    pub fn readiness(postgres: Arc<PgDbReadiness>) -> SettingsReadinessDeps {
+        SettingsReadinessDeps {
+            postgres,
+            key_provider: Arc::new(AtomicBool::new(true)),
+            secret_resolver: Arc::new(AtomicBool::new(true)),
+        }
+    }
+
     impl SecretResolver for TestSecretResolver {
         async fn resolve(
             &self,
@@ -673,22 +763,14 @@ pub mod test_support {
     pub async fn binding() -> anyhow::Result<DomainBinding> {
         let pg = postgres::PgRuntimeHandle::for_ready_module_test();
         let key_name = KeyName::try_new("settings-config")?;
-        let ready = Arc::new(AtomicBool::new(true));
-        let worker: WorkerSpec = Box::new(|_| DynManagedResource::new_box(NoopResource));
-        let resolver_worker: WorkerSpec = Box::new(|_| DynManagedResource::new_box(NoopResource));
         wire(SettingsModuleDeps::for_test(
             pg.for_domain(),
-            pg.readiness_handle(),
-            provider(),
             DynSecretResolver::new_box(TestSecretResolver),
             provider(),
             provider(),
             key_name,
             Arc::new(EpochClock),
-            ready,
-            Arc::new(AtomicBool::new(true)),
-            worker,
-            resolver_worker,
+            readiness(pg.readiness_handle()),
         ))
         .await
     }
@@ -710,12 +792,20 @@ mod tests {
         StoreBinding, TenantStoreAllowlist, VaultKeyProvider, VaultRuntimeDeps, VaultSecretResolver,
     };
 
-    struct TestClock;
+    struct ReadinessTestWorker;
 
-    impl Clock for TestClock {
-        fn now(&self) -> std::time::SystemTime {
-            std::time::SystemTime::UNIX_EPOCH
+    impl ManagedResource for ReadinessTestWorker {
+        fn name(&self) -> &str {
+            "settings-readiness-test-worker"
         }
+
+        async fn shutdown(&self) -> Result<(), ShutdownError> {
+            Ok(())
+        }
+    }
+
+    fn readiness_test_worker() -> WorkerSpec {
+        Box::new(|_| DynManagedResource::new_box(ReadinessTestWorker))
     }
 
     struct FailingKeyProvider;
@@ -851,7 +941,7 @@ mod tests {
         );
         assert_eq!(
             readiness_to_health(PoolReadiness::Saturated),
-            (HealthStatus::Degraded, "saturated")
+            (HealthStatus::Unhealthy, "saturated")
         );
         assert_eq!(
             readiness_to_health(PoolReadiness::Down),
@@ -862,7 +952,6 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn production_constructor_derives_all_roles_from_one_sealed_vault_capability() {
-        let pg = postgres::PgRuntimeHandle::for_module_test();
         let tenant = vocab::TenantId::parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
             .expect("canonical unused fixture tenant");
         let stores = TenantStoreAllowlist::new([(
@@ -892,14 +981,16 @@ mod tests {
             .expect("valid key provider"),
         );
 
-        let _deps = SettingsModuleDeps::new(
-            pg.for_domain(),
-            pg.readiness_handle(),
-            vault.for_domain::<vault_caps::Settings>(),
+        let readiness = SettingsProviderReadiness::new(
+            &vault.for_domain::<vault_caps::Settings>(),
             KeyName::try_new("settings-config").expect("valid key name"),
-            Arc::new(TestClock),
             KeyProviderReadinessInterval::try_new(Duration::from_secs(7))
                 .expect("valid readiness interval"),
+        )
+        .await;
+        assert!(
+            readiness.is_err(),
+            "unreachable Vault must fail startup verification"
         );
     }
 
@@ -923,7 +1014,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn secret_resolver_readiness_samples_ready_down_and_preserve_without_state_confusion() {
+    async fn secret_resolver_readiness_fails_closed_and_recovers() {
         let mode = Arc::new(AtomicU8::new(0));
         let resolver = DynSecretResolver::new_box(ScriptedSecretResolver {
             mode: Arc::clone(&mode),
@@ -955,11 +1046,19 @@ mod tests {
 
         mode.store(1, Ordering::Release);
         let sample = sample_secret_resolver_readiness(&resolver, &targets).await;
-        assert_eq!(sample, ResolverReadinessSample::Preserve);
+        assert_eq!(sample, ResolverReadinessSample::Down);
+        apply_secret_resolver_readiness_sample(&ready, sample);
+        assert!(
+            !ready.load(Ordering::Acquire),
+            "Forbidden must fail readiness closed"
+        );
+
+        mode.store(0, Ordering::Release);
+        let sample = sample_secret_resolver_readiness(&resolver, &targets).await;
         apply_secret_resolver_readiness_sample(&ready, sample);
         assert!(
             ready.load(Ordering::Acquire),
-            "local Forbidden preserves the previous provider state"
+            "success recovers after Forbidden"
         );
 
         mode.store(3, Ordering::Release);
@@ -980,12 +1079,36 @@ mod tests {
         assert_eq!(bindings[0].name(), DOMAIN_NAME);
         let (_, output) = compose_bindings(&mut bindings).expect("settings binding composes");
         assert!(bindings.is_empty());
-        assert_eq!(output.probes.len(), 3, "resolver readiness must be active");
-        assert_eq!(output.probes[0].0.as_str(), CONFIGS_READY_PROBE_NAME);
-        assert_eq!(output.probes[1].0.as_str(), KEYPROVIDER_READY_PROBE_NAME);
-        assert_eq!(output.probes[2].0.as_str(), "vault_secret_resolver_ready");
+        assert!(
+            output.probes.is_empty(),
+            "provider probes must not be duplicated by domain wiring"
+        );
         assert!(output.resources.is_empty());
-        assert_eq!(output.workers.len(), 2, "resolver sampler must be active");
+        assert!(
+            output.workers.is_empty(),
+            "provider samplers must not be duplicated by domain wiring"
+        );
+    }
+
+    #[tokio::test]
+    async fn typed_provider_readiness_outputs_are_non_interchangeable_and_exact()
+    -> anyhow::Result<()> {
+        let readiness = SettingsProviderReadiness::from_workers(
+            Arc::new(AtomicBool::new(true)),
+            Arc::new(AtomicBool::new(true)),
+            readiness_test_worker(),
+            readiness_test_worker(),
+        )?;
+        let (pending, key, resolver) = readiness.into_vault_parts();
+        let pg = postgres::PgRuntimeHandle::for_ready_module_test();
+        let (_deps, postgres) = pending.bind_postgres(pg.readiness_handle())?;
+        let postgres = postgres.into_output();
+        let key = key.into_output();
+        let resolver = resolver.into_output();
+        assert_eq!((postgres.probes.len(), postgres.workers.len()), (1, 0));
+        assert_eq!((key.probes.len(), key.workers.len()), (1, 1));
+        assert_eq!((resolver.probes.len(), resolver.workers.len()), (1, 1));
+        Ok(())
     }
 
     #[tokio::test]

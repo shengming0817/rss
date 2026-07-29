@@ -34,7 +34,8 @@ use consistency::RetentionSweeper;
 use crypto::RustCryptoMacVerifier;
 use diport::{
     Clock, DlxArchiveBacklog, DlxLifecycleError, DlxLifecycleRepository, DynDeadLetterStore,
-    DynKeyProvider, DynManagedResource, ManagedResource, ShutdownError, Topic,
+    DynKeyProvider, DynManagedResource, KeyProvider as _, ManagedResource, RedactedBytes,
+    ShutdownError, Topic,
 };
 use eventexec::{
     ConsumerMeta, DlxArchiveKeyName, DlxHotKeyName, DlxLifecycle, DlxLifecycleHealth,
@@ -362,6 +363,8 @@ pub(crate) const DLX_LIFECYCLE_WORKER_NAME: &str = "dlx-lifecycle";
 pub(crate) const DLX_LIFECYCLE_PROBE: &str = "dlx_lifecycle";
 pub(crate) const DLX_ARCHIVE_READINESS_WORKER_NAME: &str = "dlx-archive-readiness";
 pub(crate) const DLX_ARCHIVE_READINESS_PROBE: &str = "dlx_archive_ready";
+pub(crate) const DLX_ARCHIVE_KEY_READINESS_WORKER_NAME: &str = "dlx-archive-key-readiness";
+pub(crate) const DLX_ARCHIVE_KEY_READINESS_PROBE: &str = "dlx_archive_key_ready";
 const DLX_LIFECYCLE_INTERVAL: Duration = Duration::from_secs(30);
 const DLX_LIFECYCLE_TICK_TIMEOUT: Duration = Duration::from_secs(25);
 const DLX_ARCHIVE_READINESS_INTERVAL: Duration = Duration::from_secs(60);
@@ -555,8 +558,13 @@ pub(crate) struct DlxLifecycleRuntimeDeps {
     pg_owner: PgDlxLifecycleRuntime,
     backlog_repository: PgDlxLifecycleRepository,
     archive_store_readiness: s3::VerifiedS3DlxArchiveStore,
-    lifecycle:
-        DlxLifecycle<PgDlxLifecycleRepository, s3::VerifiedS3DlxArchiveStore, VaultKeyProvider>,
+    archive_key_provider: Arc<VaultKeyProvider>,
+    archive_key: DlxArchiveKeyName,
+    lifecycle: DlxLifecycle<
+        PgDlxLifecycleRepository,
+        s3::VerifiedS3DlxArchiveStore,
+        SharedVaultKeyProvider,
+    >,
 }
 
 impl DlxLifecycleRuntimeDeps {
@@ -567,14 +575,17 @@ impl DlxLifecycleRuntimeDeps {
         archive_key: DlxArchiveKeyName,
     ) -> Self {
         let repository = pg_owner.repository();
+        let archive_key_provider = Arc::new(archive_key_provider);
         Self {
             pg_owner,
             backlog_repository: repository.clone(),
             archive_store_readiness: archive_store.clone(),
+            archive_key_provider: Arc::clone(&archive_key_provider),
+            archive_key: archive_key.clone(),
             lifecycle: DlxLifecycle::new(
                 repository,
                 archive_store,
-                archive_key_provider,
+                SharedVaultKeyProvider(archive_key_provider),
                 archive_key,
             ),
         }
@@ -586,6 +597,58 @@ impl DlxLifecycleRuntimeDeps {
             ..DomainModuleResult::default()
         }
     }
+}
+
+#[derive(Clone)]
+struct SharedVaultKeyProvider(Arc<VaultKeyProvider>);
+
+impl diport::KeyProvider for SharedVaultKeyProvider {
+    async fn encrypt(
+        &self,
+        key: diport::KeyName,
+        plaintext: secure::Plaintext,
+        aad: secure::DerivedAad,
+    ) -> Result<diport::EncryptOutput, diport::KeyProviderError> {
+        self.0.encrypt(key, plaintext, aad).await
+    }
+
+    async fn decrypt(
+        &self,
+        ciphertext: RedactedBytes,
+        key: diport::KeyRef,
+        aad: secure::DerivedAad,
+    ) -> Result<secure::Plaintext, diport::KeyProviderError> {
+        self.0.decrypt(ciphertext, key, aad).await
+    }
+
+    async fn rewrap(
+        &self,
+        ciphertext: RedactedBytes,
+        key: diport::KeyRef,
+        aad: secure::DerivedAad,
+    ) -> Result<diport::EncryptOutput, diport::KeyProviderError> {
+        self.0.rewrap(ciphertext, key, aad).await
+    }
+
+    async fn shutdown(&self) -> Result<(), diport::KeyProviderError> {
+        diport::KeyProvider::shutdown(self.0.as_ref()).await
+    }
+}
+
+impl diport::ManagedResource for SharedVaultKeyProvider {
+    fn name(&self) -> &str {
+        "vault-dlx-archive-key-provider"
+    }
+
+    async fn shutdown(&self) -> Result<(), diport::ShutdownError> {
+        diport::ManagedResource::shutdown(self.0.as_ref()).await
+    }
+}
+
+pub(crate) struct DlxRoleOutputs {
+    pub(crate) lifecycle_repository: DomainModuleResult,
+    pub(crate) archive_store: DomainModuleResult,
+    pub(crate) archive_key_provider: DomainModuleResult,
 }
 
 #[derive(Clone)]
@@ -747,7 +810,7 @@ pub(crate) async fn wire_event_transport(
 pub(crate) fn wire_dlx_lifecycle(
     deps: DlxLifecycleRuntimeDeps,
     worker: DlxWorkerConfig,
-) -> Result<DomainModuleResult, DlxLifecycleWireFailure> {
+) -> Result<DlxRoleOutputs, DlxLifecycleWireFailure> {
     let probe_name =
         match ProbeName::parse(DLX_LIFECYCLE_PROBE).context("parse DLX lifecycle probe name") {
             Ok(name) => name,
@@ -769,10 +832,23 @@ pub(crate) fn wire_dlx_lifecycle(
             });
         }
     };
+    let archive_key_probe_name = match ProbeName::parse(DLX_ARCHIVE_KEY_READINESS_PROBE)
+        .context("parse DLX archive key readiness probe name")
+    {
+        Ok(name) => name,
+        Err(error) => {
+            return Err(DlxLifecycleWireFailure {
+                deps: Box::new(deps),
+                error,
+            });
+        }
+    };
     let DlxLifecycleRuntimeDeps {
         pg_owner,
         backlog_repository,
         archive_store_readiness,
+        archive_key_provider,
+        archive_key,
         lifecycle,
     } = deps;
     let health = Arc::new(WorkerHealth::starting());
@@ -789,10 +865,35 @@ pub(crate) fn wire_dlx_lifecycle(
         archive_probe_name.clone(),
         archive_health,
     ));
-    Ok(DomainModuleResult {
-        probes: vec![(probe_name, probe), (archive_probe_name, archive_probe)],
-        resources: vec![DynManagedResource::new_box(pg_owner)],
-        workers: vec![lifecycle_worker, archive_worker],
+    let archive_key_health = Arc::new(WorkerHealth::starting());
+    let archive_key_resource =
+        DynManagedResource::new_box(SharedVaultKeyProvider(Arc::clone(&archive_key_provider)));
+    let archive_key_worker = build_dlx_archive_key_readiness_worker(
+        archive_key_provider,
+        archive_key,
+        Arc::clone(&archive_key_health),
+        worker,
+    );
+    let archive_key_probe = Box::new(WorkerHealthProbe::new(
+        archive_key_probe_name.clone(),
+        archive_key_health,
+    ));
+    Ok(DlxRoleOutputs {
+        lifecycle_repository: DomainModuleResult {
+            probes: vec![(probe_name, probe)],
+            resources: vec![DynManagedResource::new_box(pg_owner)],
+            workers: vec![lifecycle_worker],
+        },
+        archive_store: DomainModuleResult {
+            probes: vec![(archive_probe_name, archive_probe)],
+            workers: vec![archive_worker],
+            ..Default::default()
+        },
+        archive_key_provider: DomainModuleResult {
+            probes: vec![(archive_key_probe_name, archive_key_probe)],
+            resources: vec![archive_key_resource],
+            workers: vec![archive_key_worker],
+        },
     })
 }
 
@@ -908,6 +1009,153 @@ async fn dlx_archive_readiness_loop<S>(
     }
 }
 
+fn build_dlx_archive_key_readiness_worker(
+    provider: Arc<VaultKeyProvider>,
+    key: DlxArchiveKeyName,
+    health: Arc<WorkerHealth>,
+    config: DlxWorkerConfig,
+) -> WorkerSpec {
+    Box::new(move |token| {
+        DynManagedResource::new_box(ThreadedEventWorker::spawn(
+            DLX_ARCHIVE_KEY_READINESS_WORKER_NAME,
+            token,
+            move |thread_token| {
+                let _stopped = health.stopped_on_exit();
+                let runtime = match tokio::runtime::Builder::new_current_thread()
+                    .enable_time()
+                    .enable_io()
+                    .build()
+                {
+                    Ok(runtime) => runtime,
+                    Err(error) => {
+                        tracing::error!(error = %error, "DLX archive key readiness runtime build failed");
+                        return;
+                    }
+                };
+                runtime.block_on(dlx_archive_key_readiness_loop(
+                    VaultArchiveKeyReadiness { provider, key },
+                    thread_token,
+                    Arc::clone(&health),
+                    config,
+                ));
+            },
+        ))
+    })
+}
+
+trait DlxArchiveKeyReadiness {
+    async fn probe_archive_key_readiness(&self) -> anyhow::Result<()>;
+}
+
+struct VaultArchiveKeyReadiness {
+    provider: Arc<VaultKeyProvider>,
+    key: DlxArchiveKeyName,
+}
+
+impl DlxArchiveKeyReadiness for VaultArchiveKeyReadiness {
+    async fn probe_archive_key_readiness(&self) -> anyhow::Result<()> {
+        verify_dlx_vault_key_capability(
+            self.provider.as_ref(),
+            self.key.as_key_name(),
+            "dlx-archive-readiness",
+        )
+        .await
+    }
+}
+
+async fn dlx_archive_key_readiness_loop<R>(
+    readiness: R,
+    token: tokio_util::sync::CancellationToken,
+    health: Arc<WorkerHealth>,
+    config: DlxWorkerConfig,
+) where
+    R: DlxArchiveKeyReadiness,
+{
+    let mut ticker = tokio::time::interval(config.archive_readiness_interval);
+    loop {
+        tokio::select! {
+            biased;
+            () = token.cancelled() => break,
+            _ = ticker.tick() => {
+                let sample = tokio::time::timeout(
+                    config.archive_readiness_timeout,
+                    readiness.probe_archive_key_readiness(),
+                ).await;
+                apply_dlx_archive_key_readiness_sample(&health, sample);
+            }
+        }
+    }
+}
+
+fn apply_dlx_archive_key_readiness_sample(
+    health: &WorkerHealth,
+    sample: Result<anyhow::Result<()>, tokio::time::error::Elapsed>,
+) {
+    match sample {
+        Ok(Ok(())) => apply_dlx_lifecycle_health(health, DlxLifecycleHealth::Healthy),
+        Ok(Err(error)) => {
+            apply_dlx_lifecycle_health(health, DlxLifecycleHealth::Degraded);
+            tracing::warn!(error = %error, "DLX archive key readiness failed");
+        }
+        Err(_) => {
+            apply_dlx_lifecycle_health(health, DlxLifecycleHealth::Degraded);
+            tracing::warn!("DLX archive key readiness timed out");
+        }
+    }
+}
+
+pub(crate) async fn verify_dlx_vault_key_capability(
+    provider: &VaultKeyProvider,
+    key: &diport::KeyName,
+    coordinate: &'static str,
+) -> anyhow::Result<()> {
+    const CANARY_TENANT: &str = "00000000-0000-4000-8000-000000001168";
+    const CANARY_PLAINTEXT: &[u8] = b"rss-dlx-vault-capability-v1";
+    let tenant = vocab::TenantId::parse(CANARY_TENANT).context("parse DLX canary tenant")?;
+    let aad = secure::ProtectionContext::authorized_maintenance(
+        tenant,
+        coordinate,
+        "readiness-canary",
+        1,
+    )
+    .context("derive DLX Vault canary AAD")?
+    .derive();
+    let wrong_aad = secure::ProtectionContext::authorized_maintenance(
+        tenant,
+        coordinate,
+        "readiness-canary-wrong-aad",
+        1,
+    )
+    .context("derive DLX Vault wrong-AAD canary")?
+    .derive();
+    let encrypted = provider
+        .encrypt(
+            key.clone(),
+            secure::Plaintext::new(CANARY_PLAINTEXT.to_vec()),
+            aad.clone(),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("DLX Vault capability encrypt failed"))?;
+    let ciphertext = encrypted.ciphertext().to_vec();
+    let key_ref = encrypted.key().clone();
+    let opened = provider
+        .decrypt(RedactedBytes::new(ciphertext.clone()), key_ref.clone(), aad)
+        .await
+        .map_err(|_| anyhow::anyhow!("DLX Vault capability decrypt failed"))?;
+    anyhow::ensure!(
+        opened.expose() == CANARY_PLAINTEXT,
+        "DLX Vault capability plaintext mismatch"
+    );
+    anyhow::ensure!(
+        provider
+            .decrypt(RedactedBytes::new(ciphertext), key_ref, wrong_aad)
+            .await
+            .is_err(),
+        "DLX Vault capability accepted wrong AAD"
+    );
+    Ok(())
+}
+
 async fn run_bounded_dlx_archive_readiness_probe<S>(
     store: &S,
     token: &tokio_util::sync::CancellationToken,
@@ -1020,7 +1268,11 @@ trait DlxTickRunner {
 }
 
 impl DlxTickRunner
-    for DlxLifecycle<PgDlxLifecycleRepository, s3::VerifiedS3DlxArchiveStore, VaultKeyProvider>
+    for DlxLifecycle<
+        PgDlxLifecycleRepository,
+        s3::VerifiedS3DlxArchiveStore,
+        SharedVaultKeyProvider,
+    >
 {
     async fn tick_observation(&self, now_epoch_secs: i64) -> DlxTickObservation {
         self.tick(now_epoch_secs).await.into()
@@ -2307,7 +2559,7 @@ mod tests {
             }
         }
 
-        assert_eq!(transactional, 4);
+        assert_eq!(transactional, 5);
         assert_eq!(reconcile, 1);
         Ok(())
     }
@@ -2768,6 +3020,26 @@ mod tests {
         }
     }
 
+    struct CancellingArchiveKeyReadiness {
+        result: Result<(), &'static str>,
+        token: tokio_util::sync::CancellationToken,
+    }
+
+    impl DlxArchiveKeyReadiness for CancellingArchiveKeyReadiness {
+        async fn probe_archive_key_readiness(&self) -> anyhow::Result<()> {
+            self.token.cancel();
+            self.result.map_err(anyhow::Error::msg)
+        }
+    }
+
+    struct NeverCompletingArchiveKeyReadiness;
+
+    impl DlxArchiveKeyReadiness for NeverCompletingArchiveKeyReadiness {
+        async fn probe_archive_key_readiness(&self) -> anyhow::Result<()> {
+            std::future::pending().await
+        }
+    }
+
     #[derive(Clone, Copy)]
     struct FakeDlxBacklogReader(Result<DlxArchiveBacklog, DlxLifecycleError>);
 
@@ -3166,6 +3438,48 @@ mod tests {
         let health = Arc::new(WorkerHealth::starting());
         let handle = tokio::spawn(dlx_archive_readiness_loop(
             NeverCompletingArchiveReadiness,
+            token.clone(),
+            Arc::clone(&health),
+            DlxWorkerConfig::canonical(),
+        ));
+        tokio::task::yield_now().await;
+        token.cancel();
+
+        let stopped = tokio::time::timeout(Duration::from_secs(1), handle).await;
+        assert!(matches!(stopped, Ok(Ok(()))));
+    }
+
+    #[tokio::test]
+    async fn dlx_archive_key_readiness_has_an_independent_continuous_carrier() {
+        for (result, expected) in [
+            (Ok(()), primitives::healthz::HealthStatus::Healthy),
+            (
+                Err("vault key unavailable"),
+                primitives::healthz::HealthStatus::Degraded,
+            ),
+        ] {
+            let token = tokio_util::sync::CancellationToken::new();
+            let health = Arc::new(WorkerHealth::starting());
+            dlx_archive_key_readiness_loop(
+                CancellingArchiveKeyReadiness {
+                    result,
+                    token: token.clone(),
+                },
+                token,
+                Arc::clone(&health),
+                DlxWorkerConfig::canonical(),
+            )
+            .await;
+            assert_eq!(health.status(), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn dlx_archive_key_readiness_cancels_an_in_flight_canary() {
+        let token = tokio_util::sync::CancellationToken::new();
+        let health = Arc::new(WorkerHealth::starting());
+        let handle = tokio::spawn(dlx_archive_key_readiness_loop(
+            NeverCompletingArchiveKeyReadiness,
             token.clone(),
             Arc::clone(&health),
             DlxWorkerConfig::canonical(),

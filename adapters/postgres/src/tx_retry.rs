@@ -508,6 +508,7 @@ pub(crate) fn classify_sqlx_error(error: &sqlx::Error) -> TxRetryClass {
 }
 
 /// Exact temporary provider failures that may be exposed as retryable 503.
+#[cfg(feature = "domain-identity")]
 pub(crate) fn sqlx_provider_unavailable(error: &sqlx::Error) -> bool {
     match error {
         sqlx::Error::Io(_) | sqlx::Error::PoolTimedOut | sqlx::Error::WorkerCrashed => true,

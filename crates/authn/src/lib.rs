@@ -300,6 +300,7 @@ impl Principal {
                 subject,
                 tenant,
                 kind,
+                ..
             } => Ok(Self {
                 kind,
                 subject: subject.to_owned(),
@@ -708,8 +709,13 @@ pub async fn verify_rss_access(
 pub async fn verify_federated_access(
     raw: &str,
     pdp: &diport::DynPdp<'_>,
-) -> Result<(VerifiedJwt, Principal), AuthnError> {
-    verify_access(raw, diport::RawCredential::federated_access(raw), pdp).await
+) -> Result<VerifiedFederatedAccess, AuthnError> {
+    let (verified_jwt, principal) =
+        verify_access(raw, diport::RawCredential::federated_access(raw), pdp).await?;
+    Ok(VerifiedFederatedAccess {
+        verified_jwt,
+        principal: std::sync::Arc::new(principal),
+    })
 }
 
 async fn verify_access(
@@ -768,6 +774,52 @@ pub async fn verify_service_token(
 // ---------------------------------------------------------------------------
 // JWT / token 值类型
 // ---------------------------------------------------------------------------
+
+/// A single, non-forgeable federated authentication result.
+///
+/// Identity and route grants are derived from the same verifier-owned [`diport::VerifiedClaims`]
+/// carried by `verified_jwt`. Private fields prevent callers from pairing one verified identity
+/// with another token's permissions.
+pub struct VerifiedFederatedAccess {
+    verified_jwt: VerifiedJwt,
+    principal: std::sync::Arc<Principal>,
+}
+
+impl std::fmt::Debug for VerifiedFederatedAccess {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("VerifiedFederatedAccess(<redacted>)")
+    }
+}
+
+impl VerifiedFederatedAccess {
+    pub fn principal(&self) -> &Principal {
+        self.principal.as_ref()
+    }
+
+    pub fn principal_arc(&self) -> std::sync::Arc<Principal> {
+        std::sync::Arc::clone(&self.principal)
+    }
+
+    pub fn allows_route(&self, permission: vocab::RoutePermissionId) -> bool {
+        match self.verified_jwt.claims.view() {
+            diport::VerifiedClaimsView::FederatedAccess { permissions, .. } => {
+                permissions.allows_route(permission)
+            }
+            diport::VerifiedClaimsView::RssUser { .. }
+            | diport::VerifiedClaimsView::ServiceToken { .. } => false,
+        }
+    }
+
+    pub fn permissions(&self) -> &diport::VerifiedFederatedPermissions {
+        match self.verified_jwt.claims.view() {
+            diport::VerifiedClaimsView::FederatedAccess { permissions, .. } => permissions,
+            diport::VerifiedClaimsView::RssUser { .. }
+            | diport::VerifiedClaimsView::ServiceToken { .. } => {
+                unreachable!("federated access carrier always holds federated claims")
+            }
+        }
+    }
+}
 
 /// JWT 原始令牌（私有字段；不 derive `Serialize`；构造经结构闸 funnel）。
 ///
@@ -1500,10 +1552,17 @@ mod principal_derive_tests {
     use super::{
         AccessToken, AuthnError, Principal, PrincipalKind, VerifiedJwt, VerifiedServiceToken,
     };
-    use diport::VerifiedClaims;
+    use diport::{VerifiedClaims, VerifiedFederatedPermissions};
     use vocab::tenant::TenantId;
 
     const CANON: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
+
+    fn permissions() -> VerifiedFederatedPermissions {
+        VerifiedFederatedPermissions::new([vocab::GrantPermission::route(
+            vocab::RoutePermissionId::SettingsConfigPublish,
+        )])
+        .unwrap_or_else(|_| unreachable!("literal permission set is valid"))
+    }
 
     /// 已验签 JWT 测试装箱：载体携 raw + verifier-canonical [`VerifiedClaims`]（单一身份源，直接构造，
     /// 模拟 verifier 验签产物）。
@@ -1517,7 +1576,9 @@ mod principal_derive_tests {
             _ => None,
         };
         let claims = parsed_kind
-            .and_then(|kind| VerifiedClaims::federated_access(sub, parsed_tenant, kind).ok())
+            .and_then(|kind| {
+                VerifiedClaims::federated_access(sub, parsed_tenant, kind, permissions()).ok()
+            })
             .unwrap_or_else(|| {
                 VerifiedClaims::service_token(vocab::ServiceCallerDomain::MaintenanceOperator)
             });
@@ -1608,6 +1669,7 @@ mod principal_derive_tests {
                 "arbitrary-service",
                 Some(TenantId::parse(CANON).expect("tenant")),
                 PrincipalKind::User,
+                permissions(),
             )
             .expect("federated claims"),
         );
@@ -1621,11 +1683,19 @@ mod principal_derive_tests {
     #[allow(clippy::expect_used)]
     fn rejects_empty_subject_both_funnels() {
         // F2：验签产物即便 subject 为空（adapter 绕过旧 decode_claims 非空检查），也绝不 mint 空主体。
-        assert!(VerifiedClaims::federated_access("", None, PrincipalKind::SuperAdmin).is_err());
+        assert!(
+            VerifiedClaims::federated_access("", None, PrincipalKind::SuperAdmin, permissions(),)
+                .is_err()
+        );
         let empty_svc = VerifiedServiceToken::seal(
             AccessToken::new("opaque"),
-            VerifiedClaims::federated_access("not-service", None, PrincipalKind::SuperAdmin)
-                .expect("federated"),
+            VerifiedClaims::federated_access(
+                "not-service",
+                None,
+                PrincipalKind::SuperAdmin,
+                permissions(),
+            )
+            .expect("federated"),
         );
         assert!(matches!(
             Principal::from_verified_service_token(&empty_svc),
@@ -1645,8 +1715,15 @@ mod verified_token_seal {
     use super::{
         AccessToken, AuthnError, Principal, PrincipalKind, VerifiedJwt, VerifiedServiceToken,
     };
-    use diport::VerifiedClaims;
+    use diport::{VerifiedClaims, VerifiedFederatedPermissions};
     use vocab::TenantId;
+
+    fn permissions() -> VerifiedFederatedPermissions {
+        VerifiedFederatedPermissions::new([vocab::GrantPermission::route(
+            vocab::RoutePermissionId::SettingsConfigPublish,
+        )])
+        .unwrap_or_else(|_| unreachable!("literal permission set is valid"))
+    }
 
     #[allow(clippy::expect_used)]
     fn federated_claims(subject: &str) -> VerifiedClaims {
@@ -1654,6 +1731,7 @@ mod verified_token_seal {
             subject,
             Some(TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").expect("tenant")),
             PrincipalKind::Admin,
+            permissions(),
         )
         .expect("federated claims")
     }
@@ -1723,7 +1801,7 @@ mod verify_bridge_tests {
     };
     use diport::{
         DynPdp, Pdp, PdpError, RawCredential, TokenProfile, VerifiedAccessGrantFacts,
-        VerifiedClaims,
+        VerifiedClaims, VerifiedFederatedPermissions,
     };
     use ids::UserId;
     use vocab::tenant::TenantId;
@@ -1757,7 +1835,12 @@ mod verify_bridge_tests {
             PrincipalKind::SuperAdmin => None,
             _ => Some(tenant()),
         };
-        VerifiedClaims::federated_access(subject, tenant, kind).expect("federated claims")
+        let permissions = VerifiedFederatedPermissions::new([vocab::GrantPermission::route(
+            vocab::RoutePermissionId::SettingsConfigPublish,
+        )])
+        .unwrap_or_else(|_| unreachable!("literal permission set is valid"));
+        VerifiedClaims::federated_access(subject, tenant, kind, permissions)
+            .expect("federated claims")
     }
 
     /// 桩 `Pdp`：先主动 yield，再按预置结果应答（native-AFIT impl → 经 `DynPdp` 注入）。
@@ -1844,18 +1927,18 @@ mod verify_bridge_tests {
             r#"{"sub":"raw-ignored","tenant":"f47ac10b-58cc-4372-a567-0e02b2c3d479","kind":"user"}"#,
         );
         let pdp = boxed(Ok(federated_claims("admin-subj", PrincipalKind::Admin)));
-        let (vj, principal) = verify_federated_access(&raw, &pdp)
+        let access = verify_federated_access(&raw, &pdp)
             .await
             .expect("verify ok mints");
+        let principal = access.principal();
         assert_eq!(
             principal.kind(),
             PrincipalKind::Admin,
             "身份须源自 VerifiedClaims（admin），非 raw（user）"
         );
-        assert!(vj.grant_receipt().is_none());
         assert!(
-            format!("{vj:?}").contains("redacted"),
-            "VerifiedJwt Debug 脱敏"
+            format!("{access:?}").contains("redacted"),
+            "VerifiedFederatedAccess Debug 脱敏"
         );
     }
 
@@ -1899,9 +1982,10 @@ mod verify_bridge_tests {
             r#"{"sub":"x","tenant":"f47ac10b-58cc-4372-a567-0e02b2c3d479","kind":"user"}"#,
         );
         let pdp = boxed(Ok(federated_claims("root", PrincipalKind::SuperAdmin)));
-        let (_vj, principal) = verify_federated_access(&raw, &pdp)
+        let access = verify_federated_access(&raw, &pdp)
             .await
             .expect("super-admin ok");
+        let principal = access.principal();
         assert_eq!(principal.kind(), PrincipalKind::SuperAdmin);
         assert_eq!(principal.tenant(), None, "super-admin 跨租户 tenant=None");
     }
@@ -1917,11 +2001,12 @@ mod verify_bridge_tests {
             PrincipalKind::SuperAdmin,
         ] {
             let pdp = boxed(Ok(federated_claims("federated", kind)));
-            let (verified, principal) = verify_federated_access(&raw, &pdp)
+            let access = verify_federated_access(&raw, &pdp)
                 .await
                 .expect("federated access");
+            let principal = access.principal();
             assert_eq!(principal.kind(), kind);
-            assert!(verified.grant_receipt().is_none(), "kind={kind:?}");
+            assert!(!access.permissions().as_slice().is_empty(), "kind={kind:?}");
         }
     }
 

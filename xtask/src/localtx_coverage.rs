@@ -139,10 +139,7 @@ pub(crate) struct VerifiedLocalTxContractSet {
 impl VerifiedLocalTxContractSet {
     #[cfg(test)]
     pub(crate) fn for_test() -> Self {
-        const IDS: [&str; 2] = [
-            "audit.list-tenant-entries",
-            "settings.secret-publish",
-        ];
+        const IDS: [&str; 2] = ["audit.list-tenant-entries", "settings.secret-publish"];
         let ids = IDS.iter().map(|id| (*id).to_owned()).collect::<Vec<_>>();
         Self {
             active_contract_ids: ids.clone(),
@@ -8759,10 +8756,7 @@ impl ::bootstrap::Domain for Demo {
     #[test]
     fn actual_workspace_has_verified_localtx_evidence_exact_set() -> anyhow::Result<()> {
         let verified = verify_required_evidence_set(&crate::workspace_root()?)?;
-        let expected = [
-            "audit.list-tenant-entries",
-            "settings.secret-publish",
-        ];
+        let expected = ["audit.list-tenant-entries", "settings.secret-publish"];
         assert_eq!(verified.active_contract_ids(), expected);
         assert_eq!(verified.journey_contract_ids(), expected);
         assert_eq!(verified.backend_profile_contract_ids(), expected);

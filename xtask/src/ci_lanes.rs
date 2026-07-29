@@ -538,6 +538,17 @@ macro_rules! gate_catalog {
                         BOTH_INCLUDED,
                     )
             ),
+            AssemblyRuntimePlanCheck => (step_assembly_runtime_plan_check, Some("xtask/src/assembly_runtime_plan.rs"),
+                gate(
+                        GateId::AssemblyRuntimePlanCheck,
+                        "assembly-runtime-plan-check",
+                        META,
+                        CompileKind::NoCompile,
+                        INTERNAL,
+                        SOURCE,
+                        BOTH_INCLUDED,
+                    )
+            ),
             AssemblyGraphCheck => (step_assembly_graph_check, Some("xtask/src/graph.rs"),
                 gate(
                         GateId::AssemblyGraphCheck,

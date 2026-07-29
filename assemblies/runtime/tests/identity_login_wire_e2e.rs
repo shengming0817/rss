@@ -175,7 +175,7 @@ fn mint_es256(sk: &SigningKey, payload: &str) -> String {
     format!("{signing_input}.{}", B64_URL.encode(sig.to_bytes()))
 }
 
-fn federated_access_jwt(kind: &str) -> String {
+fn federated_access_jwt(kind: &str, permissions: &[vocab::RoutePermissionId]) -> String {
     let iat = SystemClock
         .now()
         .duration_since(UNIX_EPOCH)
@@ -190,16 +190,26 @@ fn federated_access_jwt(kind: &str) -> String {
         "kind": kind,
         "tenant_id": CANON_TENANT,
         "token_use": "access",
+        "permissions": permissions
+            .iter()
+            .map(|permission| permission.as_str())
+            .collect::<Vec<_>>(),
     });
     mint_es256(&sk_jwt(), &payload.to_string())
 }
 
 fn admin_jwt() -> String {
-    federated_access_jwt("admin")
+    federated_access_jwt("admin", &[vocab::RoutePermissionId::SettingsConfigPublish])
 }
 
 fn operator_jwt() -> String {
-    federated_access_jwt("user")
+    federated_access_jwt(
+        "user",
+        &[
+            vocab::RoutePermissionId::IdentityRoleAssign,
+            vocab::RoutePermissionId::SettingsConfigPublish,
+        ],
+    )
 }
 
 /// wiremock Transit `/sign` 响应器：解 `{"input": base64std(signing_input)}` → 用 `sk` 对 signing-input
@@ -407,9 +417,14 @@ fn federated_test_provider() -> TestResult<oidc::OidcProvider<diport::FederatedA
     let keys = oidc::AccessStaticKeySource::builder()
         .add_es256_sec1("federated-jwt-es256", &sec1(&sk_jwt()))?
         .build();
+    let permissions = oidc::FederatedPermissionUniverse::try_new([
+        vocab::GrantPermission::route(vocab::RoutePermissionId::IdentityRoleAssign),
+        vocab::GrantPermission::route(vocab::RoutePermissionId::SettingsConfigPublish),
+    ])?;
     let config = oidc::VerifierConfigBuilder::<diport::FederatedAccessProfile>::new(
         "https://issuer.test",
         "rss",
+        permissions,
     )
     .keys_static(keys)
     .trust_kind("user")

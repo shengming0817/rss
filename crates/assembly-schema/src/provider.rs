@@ -214,6 +214,7 @@ provider_roles! {
     DlxLifecycleRepository => "dlx-lifecycle-repository",
     DlxArchiveStore => "dlx-archive-store",
     DlxArchiveKeyProvider => "dlx-archive-key-provider",
+    DlxHotKeyProvider => "dlx-hot-key-provider",
 }
 
 impl ProviderRole {
@@ -304,6 +305,7 @@ provider_factory_symbols! {
     EventexecPostgresDlxLifecycleRepository => "eventexec::postgres-dlx-lifecycle-repository",
     EventexecS3DlxArchiveStore => "eventexec::s3-dlx-archive-store",
     EventexecVaultArchiveKeyProvider => "eventexec::vault-archive-key-provider",
+    EventexecVaultHotKeyProvider => "eventexec::vault-hot-key-provider",
 }
 
 /// Closed registry of provider constructors accepted by an AssemblyManifest and RuntimePlan v1.
@@ -693,7 +695,7 @@ const PROVIDER_ROLE_SPECS: [ProviderRoleSpec; ProviderRole::COUNT] = [
         durability: ProviderDurability::Persistent,
         scope: None,
         failure_posture: None,
-        outputs: &[R],
+        outputs: &[P, R, W],
         factory: Some(ProviderFactorySymbol::IdentityVaultSigner),
     },
     ProviderRoleSpec {
@@ -707,7 +709,7 @@ const PROVIDER_ROLE_SPECS: [ProviderRoleSpec; ProviderRole::COUNT] = [
         durability: ProviderDurability::Persistent,
         scope: None,
         failure_posture: None,
-        outputs: &[R],
+        outputs: &[P, R, W],
         factory: Some(ProviderFactorySymbol::SettingsVaultKeyProvider),
     },
     ProviderRoleSpec {
@@ -721,7 +723,7 @@ const PROVIDER_ROLE_SPECS: [ProviderRoleSpec; ProviderRole::COUNT] = [
         durability: ProviderDurability::Persistent,
         scope: None,
         failure_posture: None,
-        outputs: &[R],
+        outputs: &[P, R, W],
         factory: Some(ProviderFactorySymbol::SettingsVaultSecretResolver),
     },
     ProviderRoleSpec {
@@ -763,7 +765,7 @@ const PROVIDER_ROLE_SPECS: [ProviderRoleSpec; ProviderRole::COUNT] = [
         durability: ProviderDurability::Persistent,
         scope: None,
         failure_posture: None,
-        outputs: &[R, W],
+        outputs: &[P, R, W],
         factory: Some(ProviderFactorySymbol::HttpservePostgresAuthAuditSink),
     },
     ProviderRoleSpec {
@@ -791,7 +793,7 @@ const PROVIDER_ROLE_SPECS: [ProviderRoleSpec; ProviderRole::COUNT] = [
         durability: ProviderDurability::Persistent,
         scope: None,
         failure_posture: None,
-        outputs: &[R],
+        outputs: &[P, R, W],
         factory: Some(ProviderFactorySymbol::DistributedRedisLockStore),
     },
     ProviderRoleSpec {
@@ -805,7 +807,7 @@ const PROVIDER_ROLE_SPECS: [ProviderRoleSpec; ProviderRole::COUNT] = [
         durability: ProviderDurability::Persistent,
         scope: None,
         failure_posture: None,
-        outputs: &[R, W],
+        outputs: &[P, R, W],
         factory: Some(ProviderFactorySymbol::DistributedPostgresCasStore),
     },
     ProviderRoleSpec {
@@ -875,8 +877,22 @@ const PROVIDER_ROLE_SPECS: [ProviderRoleSpec; ProviderRole::COUNT] = [
         durability: ProviderDurability::Persistent,
         scope: None,
         failure_posture: None,
-        outputs: &[W],
+        outputs: &[P, R, W],
         factory: Some(ProviderFactorySymbol::EventexecVaultArchiveKeyProvider),
+    },
+    ProviderRoleSpec {
+        role: ProviderRole::DlxHotKeyProvider,
+        lifecycle: ProviderLifecycle::Active,
+        port: DiportPort::KeyProvider,
+        constructor: ProviderConstructor::VaultKeyProvider,
+        provider_crate: "vault",
+        required_features: &["backend"],
+        consumer: ProviderConsumer::Eventexec,
+        durability: ProviderDurability::Persistent,
+        scope: None,
+        failure_posture: None,
+        outputs: &[P, R, W],
+        factory: Some(ProviderFactorySymbol::EventexecVaultHotKeyProvider),
     },
 ];
 
@@ -1158,7 +1174,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn registry_has_sixteen_unique_active_factories_and_one_draft() {
+    fn registry_has_seventeen_unique_active_factories_and_one_draft() {
         assert_eq!(PROVIDER_ROLE_SPECS.len(), ProviderRole::COUNT);
         assert_eq!(
             PROVIDER_ROLE_SPECS
@@ -1175,7 +1191,7 @@ mod tests {
             .iter()
             .filter(|spec| spec.lifecycle == ProviderLifecycle::Draft)
             .count();
-        assert_eq!(active, 16);
+        assert_eq!(active, 17);
         assert_eq!(drafts, 1);
         assert_registry_invariants(&PROVIDER_ROLE_SPECS);
     }
@@ -1207,6 +1223,46 @@ mod tests {
     fn missing_factory_is_rejected_by_the_registry_guard() {
         let mut specs = PROVIDER_ROLE_SPECS;
         specs[1].factory = None;
+        assert_registry_invariants(&specs);
+    }
+
+    #[test]
+    fn dlx_hot_and_archive_key_providers_have_distinct_typed_receipts() {
+        let hot = &PROVIDER_ROLE_SPECS[ProviderRole::DlxHotKeyProvider as usize];
+        let archive = &PROVIDER_ROLE_SPECS[ProviderRole::DlxArchiveKeyProvider as usize];
+
+        assert_eq!(hot.constructor, ProviderConstructor::VaultKeyProvider);
+        assert_eq!(hot.consumer, ProviderConsumer::Eventexec);
+        assert_eq!(
+            hot.outputs,
+            &[
+                LifecycleChannel::Probes,
+                LifecycleChannel::Resources,
+                LifecycleChannel::Workers,
+            ]
+        );
+        assert_eq!(
+            archive.outputs,
+            &[LifecycleChannel::Probes, LifecycleChannel::Workers]
+        );
+        assert_ne!(hot.role, archive.role);
+        assert_ne!(hot.factory, archive.factory);
+    }
+
+    #[test]
+    #[should_panic(expected = "provider factory symbols must be unique")]
+    fn duplicate_dlx_hot_archive_factory_is_rejected() {
+        let mut specs = PROVIDER_ROLE_SPECS;
+        specs[ProviderRole::DlxHotKeyProvider as usize].factory =
+            specs[ProviderRole::DlxArchiveKeyProvider as usize].factory;
+        assert_registry_invariants(&specs);
+    }
+
+    #[test]
+    #[should_panic(expected = "active roles require one factory")]
+    fn missing_dlx_hot_factory_is_rejected() {
+        let mut specs = PROVIDER_ROLE_SPECS;
+        specs[ProviderRole::DlxHotKeyProvider as usize].factory = None;
         assert_registry_invariants(&specs);
     }
 

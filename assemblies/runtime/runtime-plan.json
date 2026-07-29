@@ -1,12 +1,13 @@
 {
   "schemaVersion": 1,
-  "assemblyFingerprint": "sha256:0b6ad478d40b62bd0bdb3917530ef7442401892889154e442f17bb507927a9cf",
-  "runtimePlanFingerprint": "sha256:dc61a993015dfb557053d6a02173661be73592bf60fdbba42e2bcb38d4c0df60",
+  "assemblyFingerprint": "sha256:3cfd462cd676b64102719ff4e8bbe375b5feb76701f966b2a604f9c65a91cabf",
+  "runtimePlanFingerprint": "sha256:5e1d6e81beba832d14f6a87c0e4c3f9d0ee2dd0281891e7a7d67a6cdd417d376",
   "providerPlans": [
     {
       "id": "auth-audit-sink",
       "constructor": "postgres::PgAuthAuditSink",
       "outputs": [
+        "probes",
         "resources",
         "workers"
       ]
@@ -23,6 +24,7 @@
       "id": "distributed-cas-store",
       "constructor": "postgres::PgCasStore",
       "outputs": [
+        "probes",
         "resources",
         "workers"
       ]
@@ -31,13 +33,17 @@
       "id": "distributed-lock-store",
       "constructor": "redis::RedisLockStore",
       "outputs": [
-        "resources"
+        "probes",
+        "resources",
+        "workers"
       ]
     },
     {
       "id": "dlx-archive-key-provider",
       "constructor": "vault::VaultKeyProvider",
       "outputs": [
+        "probes",
+        "resources",
         "workers"
       ]
     },
@@ -80,7 +86,9 @@
       "id": "identity-signer",
       "constructor": "vault::VaultSigner",
       "outputs": [
-        "resources"
+        "probes",
+        "resources",
+        "workers"
       ]
     },
     {
@@ -115,14 +123,18 @@
       "id": "settings-key-provider",
       "constructor": "vault::VaultKeyProvider",
       "outputs": [
-        "resources"
+        "probes",
+        "resources",
+        "workers"
       ]
     },
     {
       "id": "settings-secret-resolver",
       "constructor": "vault::VaultSecretResolver",
       "outputs": [
-        "resources"
+        "probes",
+        "resources",
+        "workers"
       ]
     }
   ],

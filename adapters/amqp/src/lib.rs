@@ -7,8 +7,8 @@
 //!
 //! # per-domain vhost/credential 隔离
 //!
-//! adapter 从**单个已验证 per-domain AMQP endpoint**（生产 `amqps://user:pass@host/vhost`）连接——隔离经 broker
-//! 侧的 **vhost + credential**（operator 为每个域 provision 独立 vhost/user），**不**经 exchange/queue
+//! adapter 从已验证 per-domain AMQP endpoint 连接；生产 private-CA 组合根必须分别注入 publisher 与
+//! subscriber role endpoint——隔离经 broker 侧的 **vhost + role credential**，**不**经 exchange/queue
 //! 命名前缀（命名前缀会把域身份泄进 wire 且可绕过）。URL 由组合根经 `bootstrap::eventtransport` 决策
 //! 注入。凭据 non-leak：连接日志经 `conn_events`（`AmqpEndpoint` Display + `secure::redact_error`）。
 //! 明文 `amqp://` 只允许 testcontainer / dev loopback fixture 显式 opt-in，非 loopback 明文不可表达。
@@ -22,7 +22,7 @@
 //!   [`diport::AckAction`] 结算（`Ack`→basic_ack、`Requeue`→basic_nack(requeue=true)、
 //!   `Reject`→basic_nack(requeue=false)）。在途消息于消费者崩溃窗口 broker 自动 requeue——
 //!   channel close 即重投，兑现 **at-least-once**。
-//!   prefetch=100（channel 级 unacked 上限，RabbitMQ 推荐 100–300）。
+//!   prefetch=1（channel 级单在途 delivery，保证排空期间不领取下一条消息）。
 //!
 //! at-most-once 仅 demo 拓扑的 MemBus（`diport::Subscriber`）；AMQP 不实现该 trait。
 //!
@@ -75,9 +75,9 @@ mod subscriber;
 mod fallback;
 
 #[cfg(feature = "backend")]
-pub use bundle::{AmqpInfraDeps, AmqpRuntimeDeps};
+pub use bundle::{AmqpInfraDeps, AmqpPublisherEndpoint, AmqpRuntimeDeps, AmqpSubscriberEndpoint};
 #[cfg(feature = "backend")]
-pub use conn::AmqpConnectError;
+pub use conn::{AmqpConnectError, AmqpPrivateCa, AmqpPrivateCaError};
 #[cfg(feature = "backend")]
 pub use publisher::AmqpPublisher;
 #[cfg(feature = "backend")]

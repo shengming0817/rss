@@ -1,7 +1,7 @@
 warning: Authenticated 证据仅组合根（assembly / bin crate）可构造：profile-specific constructor 不得在此 crate 调用
   --> $DIR/disallowed.rs:14:15
    |
-LL |     let _ev = Authenticated::new_federated(PrincipalKind::User, "subject-1", None);
+LL |     let _ev = Authenticated::new_federated(PrincipalKind::User, "subject-1", None, permissions());
    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
    = help: 仅在 runtime `auth_bridge::{allow_evidence,mtls_evidence}` 的精确验签桥函数中构造 Authenticated；其它 runtime 代码同样不得 mint evidence

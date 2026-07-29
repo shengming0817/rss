@@ -3,7 +3,6 @@
 use crate::event_transport;
 use crate::infra::s3::{S3DlxArchiveConfig, build_s3_dlx_archive_store};
 use anyhow::Context as _;
-use diport::{KeyProvider as _, RedactedBytes};
 use std::sync::Arc;
 
 /// Fully parsed, independent DLX lifecycle dependencies that do not require external I/O.
@@ -51,52 +50,4 @@ pub(crate) async fn build_dlx_lifecycle_bootstrap_config_from(
         hot_key,
         archive_key,
     })
-}
-
-pub(crate) async fn verify_dlx_vault_key_capability(
-    provider: &vault::VaultKeyProvider,
-    key: &diport::KeyName,
-    coordinate: &'static str,
-) -> anyhow::Result<()> {
-    const CANARY_TENANT: &str = "00000000-0000-4000-8000-000000001168";
-    const CANARY_PLAINTEXT: &[u8] = b"rss-dlx-vault-capability-v1";
-    let tenant = vocab::TenantId::parse(CANARY_TENANT).context("parse DLX canary tenant")?;
-    let aad =
-        secure::ProtectionContext::authorized_maintenance(tenant, coordinate, "startup-canary", 1)
-            .context("derive DLX Vault canary AAD")?
-            .derive();
-    let wrong_aad = secure::ProtectionContext::authorized_maintenance(
-        tenant,
-        coordinate,
-        "startup-canary-wrong-aad",
-        1,
-    )
-    .context("derive DLX Vault wrong-AAD canary")?
-    .derive();
-    let encrypted = provider
-        .encrypt(
-            key.clone(),
-            secure::Plaintext::new(CANARY_PLAINTEXT.to_vec()),
-            aad.clone(),
-        )
-        .await
-        .map_err(|_| anyhow::anyhow!("DLX Vault capability encrypt failed"))?;
-    let ciphertext = encrypted.ciphertext().to_vec();
-    let key_ref = encrypted.key().clone();
-    let opened = provider
-        .decrypt(RedactedBytes::new(ciphertext.clone()), key_ref.clone(), aad)
-        .await
-        .map_err(|_| anyhow::anyhow!("DLX Vault capability decrypt failed"))?;
-    anyhow::ensure!(
-        opened.expose() == CANARY_PLAINTEXT,
-        "DLX Vault capability plaintext mismatch"
-    );
-    anyhow::ensure!(
-        provider
-            .decrypt(RedactedBytes::new(ciphertext), key_ref, wrong_aad)
-            .await
-            .is_err(),
-        "DLX Vault capability accepted wrong AAD"
-    );
-    Ok(())
 }

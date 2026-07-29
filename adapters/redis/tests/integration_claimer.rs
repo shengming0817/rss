@@ -20,11 +20,27 @@ use diport::{
     CasStore, CasStoreKey, CasStoreOutcome, CasStoreRequest, LockAcquireOutcome, LockRenewOutcome,
     LockStore, LockStoreKey, ManagedResource,
 };
-use redis::{RedisInboxStore, RedisRuntimeDeps};
+use redis::{RedisInboxStore, RedisPrivateCa, RedisRuntimeDeps};
 use testkit::FixtureError;
 use tokio::sync::Barrier;
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+#[tokio::test]
+async fn integration_explicit_private_ca_accepts_matching_redis_and_rejects_wrong_ca()
+-> Result<(), FixtureError> {
+    let fixture = testkit::redis_tls().await?;
+    let endpoint =
+        secure::RedisEndpoint::parse(fixture.url(), secure::PlaintextEndpointPolicy::Deny)?;
+    let good_ca = RedisPrivateCa::from_pem(fixture.ca_pem().as_bytes().to_vec())?;
+    let deps = RedisRuntimeDeps::connect_with_private_ca(&endpoint, good_ca)?;
+    deps.ping().await?;
+
+    let wrong_ca = RedisPrivateCa::from_pem(fixture.wrong_ca_pem().as_bytes().to_vec())?;
+    let wrong = RedisRuntimeDeps::connect_with_private_ca(&endpoint, wrong_ca)?;
+    assert!(wrong.ping().await.is_err());
+    Ok(())
+}
 
 fn unique_key(label: &str) -> IdemKey {
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);

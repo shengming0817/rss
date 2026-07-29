@@ -53,11 +53,6 @@ impl DomainModuleInputs {
 #[cfg(test)]
 mod tests {
     use bootstrap::compose_bindings;
-    use diport::ManagedResource as _;
-    use tokio_util::sync::CancellationToken;
-
-    use super::settings;
-
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn generated_modules_compose_in_manifest_order_with_stable_outputs() {
@@ -74,33 +69,8 @@ mod tests {
 
         let (_, output) = compose_bindings(&mut bindings).expect("domain modules compose");
         assert!(bindings.is_empty());
-        assert_eq!(output.probes.len(), 3);
-        assert_eq!(
-            output.probes[0].0.as_str(),
-            settings::CONFIGS_READY_PROBE_NAME
-        );
-        assert_eq!(
-            output.probes[1].0.as_str(),
-            settings_composition::KEYPROVIDER_READY_PROBE_NAME
-        );
-        assert_eq!(
-            output.probes[2].0.as_str(),
-            settings_composition::SECRET_RESOLVER_READY_PROBE_NAME
-        );
-        let resource_names = output
-            .resources
-            .iter()
-            .map(|resource| resource.name().to_owned())
-            .collect::<Vec<_>>();
-        assert_eq!(resource_names, Vec::<String>::new());
-        let worker_names = output
-            .workers
-            .into_iter()
-            .map(|worker| worker(CancellationToken::new()).name().to_owned())
-            .collect::<Vec<_>>();
-        assert_eq!(
-            worker_names,
-            ["settings-test-worker", "settings-test-worker"]
-        );
+        assert!(output.probes.is_empty());
+        assert!(output.resources.is_empty());
+        assert!(output.workers.is_empty());
     }
 }

@@ -10,6 +10,7 @@ exactExceptions = [
   "Arc<oidc::OidcProvider>",
   "postgres::PgRevocationStore",
   "settings_composition::KeyProviderReadinessInterval",
+  "settings_composition::SettingsReadinessDeps",
   "Arc<vault::VaultSigner>",
   "identity_composition::IdentityRuntimeConfig",
 ]

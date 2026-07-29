@@ -12,6 +12,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
 
 use anyhow::Context as _;
@@ -21,6 +22,12 @@ use assembly_schema::{
 use bootstrap::{DomainModuleResult, WorkerSpec};
 use diport::{DynManagedResource, ManagedResource, ShutdownError};
 use postgres::{PgRuntimeDeps, PgRuntimeHandle};
+use tokio_util::sync::CancellationToken;
+
+const IDENTITY_SIGNER_READINESS_PERIOD: Duration = Duration::from_secs(30);
+const IDENTITY_SIGNER_READINESS_PROBE: &str = "identity_signer_ready";
+const IDENTITY_SIGNER_READINESS_WORKER: &str = "identity-signer-readiness";
+const IDENTITY_SIGNER_READINESS_MESSAGE: &[u8] = b"rss-runtime-identity-signer-readiness-v1";
 
 /// Consumes the postgres lifecycle owner into the runtime's sole lifecycle output type.
 pub(crate) fn build_pg_runtime_module(
@@ -41,6 +48,143 @@ pub(crate) fn identity_signer_resource(
     signer: Arc<vault::VaultSigner>,
 ) -> Box<DynManagedResource<'static>> {
     DynManagedResource::new_box(IdentitySignerGuard { signer })
+}
+
+pub(crate) async fn identity_signer_module(
+    signer: Arc<vault::VaultSigner>,
+    key: diport::KeyId,
+) -> anyhow::Result<DomainModuleResult> {
+    verify_identity_signer(&signer, key.clone()).await?;
+    let health = Arc::new(IdentitySignerHealth::healthy());
+    let probe_name = primitives::ProbeName::parse(IDENTITY_SIGNER_READINESS_PROBE)
+        .context("parse identity signer readiness probe")?;
+    let worker_signer = Arc::clone(&signer);
+    let worker_health = Arc::clone(&health);
+    let worker: WorkerSpec = Box::new(move |token| {
+        DynManagedResource::new_box(IdentitySignerReadinessWorker::spawn(
+            token,
+            worker_signer,
+            key,
+            worker_health,
+        ))
+    });
+    Ok(DomainModuleResult {
+        probes: vec![(
+            probe_name.clone(),
+            Box::new(IdentitySignerProbe {
+                name: probe_name,
+                health,
+            }),
+        )],
+        resources: vec![identity_signer_resource(signer)],
+        workers: vec![worker],
+    })
+}
+
+async fn verify_identity_signer(
+    signer: &vault::VaultSigner,
+    key: diport::KeyId,
+) -> anyhow::Result<()> {
+    use diport::Signer as _;
+    signer
+        .sign(diport::SignRequest {
+            key,
+            purpose: diport::SigningPurpose::new("auth.rss-access"),
+            message: diport::RedactedBytes::new(IDENTITY_SIGNER_READINESS_MESSAGE.to_vec()),
+        })
+        .await
+        .context("verify runtime identity signer capability")?;
+    Ok(())
+}
+
+struct IdentitySignerHealth(AtomicU8);
+
+impl IdentitySignerHealth {
+    const fn healthy() -> Self {
+        Self(AtomicU8::new(0))
+    }
+
+    fn record(&self, healthy: bool) {
+        self.0.store(u8::from(!healthy), Ordering::Release);
+    }
+
+    fn stopped(&self) {
+        self.0.store(2, Ordering::Release);
+    }
+}
+
+struct IdentitySignerProbe {
+    name: primitives::ProbeName,
+    health: Arc<IdentitySignerHealth>,
+}
+
+impl bootstrap::HealthProbe for IdentitySignerProbe {
+    fn check(&self) -> primitives::HealthCheck {
+        match self.health.0.load(Ordering::Acquire) {
+            0 => primitives::HealthCheck::new(
+                self.name.clone(),
+                primitives::HealthStatus::Healthy,
+                "signer",
+            ),
+            1 => primitives::HealthCheck::new(
+                self.name.clone(),
+                primitives::HealthStatus::Degraded,
+                "signer-unavailable",
+            ),
+            _ => primitives::HealthCheck::new(
+                self.name.clone(),
+                primitives::HealthStatus::Unhealthy,
+                "worker-stopped",
+            ),
+        }
+    }
+}
+
+struct IdentitySignerReadinessWorker {
+    handle: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    token: CancellationToken,
+}
+
+impl IdentitySignerReadinessWorker {
+    fn spawn(
+        parent: CancellationToken,
+        signer: Arc<vault::VaultSigner>,
+        key: diport::KeyId,
+        health: Arc<IdentitySignerHealth>,
+    ) -> Self {
+        let token = parent.child_token();
+        let worker_token = token.clone();
+        let handle = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(IDENTITY_SIGNER_READINESS_PERIOD);
+            loop {
+                tokio::select! {
+                    _ = worker_token.cancelled() => break,
+                    _ = interval.tick() => {
+                        health.record(verify_identity_signer(&signer, key.clone()).await.is_ok());
+                    }
+                }
+            }
+            health.stopped();
+        });
+        Self {
+            handle: tokio::sync::Mutex::new(Some(handle)),
+            token,
+        }
+    }
+}
+
+impl ManagedResource for IdentitySignerReadinessWorker {
+    fn name(&self) -> &str {
+        IDENTITY_SIGNER_READINESS_WORKER
+    }
+
+    async fn shutdown(&self) -> Result<(), ShutdownError> {
+        self.token.cancel();
+        if let Some(handle) = self.handle.lock().await.take() {
+            let _ = handle.await;
+        }
+        Ok(())
+    }
 }
 
 struct IdentitySignerGuard {
@@ -125,6 +269,10 @@ impl ManagedResource for IdentitySignerGuard {
 /// Private fields prevent runtime wiring from fabricating a receipt without first consuming the
 /// unique permit minted by [`ProviderBuild::claim`].
 pub(crate) struct ProviderOutput {
+    batches: Vec<ProviderBatch>,
+}
+
+struct ProviderBatch {
     module: DomainModuleResult,
     receipts: Vec<ProviderReceipt>,
     batch: &'static str,
@@ -139,10 +287,12 @@ impl ProviderOutput {
         expected_channels: &'static [LifecycleChannel],
     ) -> Self {
         Self {
-            module,
-            receipts,
-            batch,
-            expected_channels,
+            batches: vec![ProviderBatch {
+                module,
+                receipts,
+                batch,
+                expected_channels,
+            }],
         }
     }
 
@@ -169,7 +319,7 @@ impl ProviderOutput {
             module,
             vec![ProviderReceipt::DistributedLockStore(permit.0)],
             "redis",
-            CHANNELS_RESOURCES,
+            CHANNELS_ALL,
         )
     }
 
@@ -183,21 +333,39 @@ impl ProviderOutput {
     }
 
     pub(crate) fn vault(
-        module: DomainModuleResult,
+        identity_signer_module: DomainModuleResult,
+        settings_key_provider_module: DomainModuleResult,
+        settings_secret_resolver_module: DomainModuleResult,
         identity_signer: IdentitySignerPermit,
         settings_key_provider: SettingsKeyProviderPermit,
         settings_secret_resolver: SettingsSecretResolverPermit,
     ) -> Self {
-        Self::new(
-            module,
-            vec![
-                ProviderReceipt::IdentitySigner(identity_signer.0),
-                ProviderReceipt::SettingsKeyProvider(settings_key_provider.0),
-                ProviderReceipt::SettingsSecretResolver(settings_secret_resolver.0),
+        Self {
+            batches: vec![
+                ProviderBatch {
+                    module: identity_signer_module,
+                    receipts: vec![ProviderReceipt::IdentitySigner(identity_signer.0)],
+                    batch: "identity-signer",
+                    expected_channels: CHANNELS_ALL,
+                },
+                ProviderBatch {
+                    module: settings_key_provider_module,
+                    receipts: vec![ProviderReceipt::SettingsKeyProvider(
+                        settings_key_provider.0,
+                    )],
+                    batch: "vault-settings-key-provider",
+                    expected_channels: CHANNELS_ALL,
+                },
+                ProviderBatch {
+                    module: settings_secret_resolver_module,
+                    receipts: vec![ProviderReceipt::SettingsSecretResolver(
+                        settings_secret_resolver.0,
+                    )],
+                    batch: "vault-settings-secret-resolver",
+                    expected_channels: CHANNELS_ALL,
+                },
             ],
-            "vault",
-            CHANNELS_RESOURCES,
-        )
+        }
     }
 
     pub(crate) fn postgres(
@@ -226,21 +394,39 @@ impl ProviderOutput {
     }
 
     pub(crate) fn dlx(
-        module: DomainModuleResult,
+        lifecycle_module: DomainModuleResult,
+        archive_store_module: DomainModuleResult,
+        archive_key_module: DomainModuleResult,
         lifecycle_repository: DlxLifecycleRepositoryPermit,
         archive_store: DlxArchiveStorePermit,
         archive_key_provider: DlxArchiveKeyProviderPermit,
     ) -> Self {
-        Self::new(
-            module,
-            vec![
-                ProviderReceipt::DlxLifecycleRepository(lifecycle_repository.0),
-                ProviderReceipt::DlxArchiveStore(archive_store.0),
-                ProviderReceipt::DlxArchiveKeyProvider(archive_key_provider.0),
+        Self {
+            batches: vec![
+                ProviderBatch {
+                    module: lifecycle_module,
+                    receipts: vec![ProviderReceipt::DlxLifecycleRepository(
+                        lifecycle_repository.0,
+                    )],
+                    batch: "dlx-lifecycle-repository",
+                    expected_channels: CHANNELS_ALL,
+                },
+                ProviderBatch {
+                    module: archive_store_module,
+                    receipts: vec![ProviderReceipt::DlxArchiveStore(archive_store.0)],
+                    batch: "dlx-archive-store",
+                    expected_channels: CHANNELS_PROBES_WORKERS,
+                },
+                ProviderBatch {
+                    module: archive_key_module,
+                    receipts: vec![ProviderReceipt::DlxArchiveKeyProvider(
+                        archive_key_provider.0,
+                    )],
+                    batch: "dlx-archive-key-provider",
+                    expected_channels: CHANNELS_ALL,
+                },
             ],
-            "dlx",
-            CHANNELS_ALL,
-        )
+        }
     }
 
     pub(crate) fn event(
@@ -270,9 +456,6 @@ const CHANNELS_NONE: &[LifecycleChannel] = &[];
 const CHANNELS_PROBES_WORKERS: &[LifecycleChannel] =
     &[LifecycleChannel::Probes, LifecycleChannel::Workers];
 const CHANNELS_RESOURCES: &[LifecycleChannel] = &[LifecycleChannel::Resources];
-const CHANNELS_RESOURCES_WORKERS: &[LifecycleChannel] =
-    &[LifecycleChannel::Resources, LifecycleChannel::Workers];
-const CHANNELS_WORKERS: &[LifecycleChannel] = &[LifecycleChannel::Workers];
 const CHANNELS_ALL: &[LifecycleChannel] = &[
     LifecycleChannel::Probes,
     LifecycleChannel::Resources,
@@ -347,6 +530,12 @@ macro_rules! provider_permits {
                             .$field
                             .replace($permit(permit))
                             .is_some(),)+
+                        ::assembly_schema::ProviderFactorySymbol::EventexecVaultHotKeyProvider => {
+                            return Err(ProviderBuildError::PlanCatalogDrift {
+                                detail: "runtime catalog contains settingsonly-only DLX hot-key factory"
+                                    .to_owned(),
+                            });
+                        }
                     };
                     if duplicate {
                         return Err(ProviderBuildError::DuplicateFactory {
@@ -405,25 +594,25 @@ provider_permits! {
         field: auth_audit_sink,
         factory: HttpservePostgresAuthAuditSink,
         receipt: AuthAuditSink,
-        channels: CHANNELS_RESOURCES_WORKERS,
+        channels: CHANNELS_ALL,
     },
     DistributedCasStorePermit {
         field: distributed_cas_store,
         factory: DistributedPostgresCasStore,
         receipt: DistributedCasStore,
-        channels: CHANNELS_RESOURCES_WORKERS,
+        channels: CHANNELS_ALL,
     },
     DistributedLockStorePermit {
         field: distributed_lock_store,
         factory: DistributedRedisLockStore,
         receipt: DistributedLockStore,
-        channels: CHANNELS_RESOURCES,
+        channels: CHANNELS_ALL,
     },
     DlxArchiveKeyProviderPermit {
         field: dlx_archive_key_provider,
         factory: EventexecVaultArchiveKeyProvider,
         receipt: DlxArchiveKeyProvider,
-        channels: CHANNELS_WORKERS,
+        channels: CHANNELS_ALL,
     },
     DlxArchiveStorePermit {
         field: dlx_archive_store,
@@ -453,7 +642,7 @@ provider_permits! {
         field: identity_signer,
         factory: IdentityVaultSigner,
         receipt: IdentitySigner,
-        channels: CHANNELS_RESOURCES,
+        channels: CHANNELS_ALL,
     },
     ListenerPdpPermit {
         field: listener_pdp,
@@ -483,13 +672,13 @@ provider_permits! {
         field: settings_key_provider,
         factory: SettingsVaultKeyProvider,
         receipt: SettingsKeyProvider,
-        channels: CHANNELS_RESOURCES,
+        channels: CHANNELS_ALL,
     },
     SettingsSecretResolverPermit {
         field: settings_secret_resolver,
         factory: SettingsVaultSecretResolver,
         receipt: SettingsSecretResolver,
-        channels: CHANNELS_RESOURCES,
+        channels: CHANNELS_ALL,
     },
 }
 
@@ -605,66 +794,62 @@ impl ProviderBuild {
     }
 
     pub(crate) fn record(&mut self, output: ProviderOutput) -> Result<(), ProviderBuildError> {
-        let actual_channels = module_channels(&output.module);
-        let probe_names = output
-            .module
-            .probes
-            .iter()
-            .map(|(name, _)| name.clone())
-            .collect::<Vec<_>>();
-        let validation = if !same_channels(&actual_channels, output.expected_channels) {
-            Err(ProviderBuildError::ProviderBatchChannelsMismatch {
-                batch: output.batch,
-                expected: output.expected_channels,
-                actual: actual_channels,
-            })
-        } else {
-            let mut batch_factories = BTreeSet::new();
-            output.receipts.iter().try_for_each(|receipt| {
+        let mut validation = Ok(());
+        let mut batch_factories = BTreeSet::new();
+        let mut factories = Vec::new();
+        let mut probe_bindings = Vec::new();
+        for batch in &output.batches {
+            let actual_channels = module_channels(&batch.module);
+            if validation.is_ok() && !same_channels(&actual_channels, batch.expected_channels) {
+                validation = Err(ProviderBuildError::ProviderBatchChannelsMismatch {
+                    batch: batch.batch,
+                    expected: batch.expected_channels,
+                    actual: actual_channels,
+                });
+            }
+            let probe_names = batch
+                .module
+                .probes
+                .iter()
+                .map(|(name, _)| name.clone())
+                .collect::<Vec<_>>();
+            for receipt in &batch.receipts {
                 let permit = receipt.permit();
-                if !same_channels(permit.expected_channels, receipt.sealed_channels()) {
-                    return Err(ProviderBuildError::PlanCatalogDrift {
+                if validation.is_ok()
+                    && !same_channels(permit.expected_channels, receipt.sealed_channels())
+                {
+                    validation = Err(ProviderBuildError::PlanCatalogDrift {
                         detail: format!(
                             "generated catalog channels for '{}' disagree with sealed factory output",
                             permit.role.as_str()
                         ),
                     });
                 }
-                if self.produced.contains(&permit.factory)
-                    || !batch_factories.insert(permit.factory)
+                if validation.is_ok()
+                    && (self.produced.contains(&permit.factory)
+                        || !batch_factories.insert(permit.factory))
                 {
-                    return Err(ProviderBuildError::DuplicateFactory {
+                    validation = Err(ProviderBuildError::DuplicateFactory {
                         factory: permit.factory,
                     });
                 }
-                Ok(())
-            })
-        };
-        let factories = output
-            .receipts
-            .iter()
-            .map(|receipt| receipt.permit().factory)
-            .collect::<Vec<_>>();
-        let roles = output
-            .receipts
-            .iter()
-            .map(|receipt| receipt.permit().role)
-            .collect::<Vec<_>>();
+                factories.push(permit.factory);
+                probe_bindings.push((permit.role, probe_names.clone()));
+            }
+        }
         // Ownership transfer precedes validation propagation: even a bad receipt/channel batch
         // remains inside the startup transaction and therefore receives async rollback.
-        self.provider_module.merge(output.module);
+        for batch in output.batches {
+            self.provider_module.merge(batch.module);
+        }
         validation?;
         for factory in factories {
             if !self.produced.insert(factory) {
                 return Err(ProviderBuildError::DuplicateFactory { factory });
             }
         }
-        for role in roles {
-            if self
-                .probe_bindings
-                .insert(role, probe_names.clone())
-                .is_some()
-            {
+        for (role, probe_names) in probe_bindings {
+            if self.probe_bindings.insert(role, probe_names).is_some() {
                 return Err(ProviderBuildError::PlanCatalogDrift {
                     detail: format!(
                         "provider role '{}' produced more than one probe binding",
@@ -904,7 +1089,7 @@ pub(crate) enum ProviderBuildError {
 #[cfg(test)]
 mod tests {
     use super::{
-        BuiltDeviceRevocationProvider, CHANNELS_ALL, CHANNELS_RESOURCES,
+        BuiltDeviceRevocationProvider, CHANNELS_ALL, CHANNELS_PROBES_WORKERS, CHANNELS_RESOURCES,
         DeviceRevocationStorePermit, DistributedLockStorePermit, ListenerPdpPermit, ProviderBuild,
         ProviderBuildError, ProviderFactoryDispatch, ProviderFactoryPermit, ProviderOutput,
         RuntimeObjectStorePermit, build_pg_runtime_module,
@@ -934,16 +1119,35 @@ mod tests {
             .expect("all active factories produced exact receipts");
         // finish() already required one receipt per active catalog factory; pin occupancy shape.
         assert!(!PROVIDER_CATALOG.is_empty());
-        assert_eq!(completed.provider_module.probes.len(), 4);
-        assert_eq!(completed.provider_module.resources.len(), 7);
-        assert_eq!(completed.provider_module.workers.len(), 4);
+        assert_eq!(completed.provider_module.probes.len(), 10);
+        assert_eq!(completed.provider_module.resources.len(), 10);
+        assert_eq!(completed.provider_module.workers.len(), 10);
         assert!(completed.domain_module.probes.is_empty());
         assert!(completed.domain_module.resources.is_empty());
         assert!(completed.domain_module.workers.is_empty());
         let receipt = completed
             .take_inventory_receipt()
             .expect("inventory receipt is present exactly once");
-        assert_eq!(receipt.into_probe_bindings().len(), PROVIDER_CATALOG.len());
+        let bindings = receipt.into_probe_bindings();
+        assert_eq!(bindings.len(), PROVIDER_CATALOG.len());
+        let dlx_binding = |provider_id| {
+            bindings
+                .iter()
+                .find(|binding| binding.provider_id() == provider_id)
+                .unwrap_or_else(|| panic!("missing {provider_id} binding"))
+        };
+        assert_eq!(
+            dlx_binding("dlx-lifecycle-repository").probe_names()[0].as_str(),
+            "dlx-lifecycle"
+        );
+        assert_eq!(
+            dlx_binding("dlx-archive-store").probe_names()[0].as_str(),
+            "dlx-archive-store"
+        );
+        assert_eq!(
+            dlx_binding("dlx-archive-key-provider").probe_names()[0].as_str(),
+            "dlx-archive-key"
+        );
         assert!(
             completed.take_inventory_receipt().is_err(),
             "inventory completion receipt must be move-only"
@@ -1078,7 +1282,7 @@ mod tests {
 
         build
             .record(ProviderOutput::redis(
-                recording_module("first-resource", Arc::clone(&shutdowns)),
+                recording_module_all("first-resource", Arc::clone(&shutdowns)),
                 dispatch.distributed_lock_store().expect("redis permit"),
             ))
             .expect("record redis");
@@ -1221,7 +1425,7 @@ mod tests {
         let shutdowns = Arc::new(Mutex::new(Vec::new()));
         build
             .record(ProviderOutput::redis(
-                recording_module("first-resource", Arc::clone(&shutdowns)),
+                recording_module_all("first-resource", Arc::clone(&shutdowns)),
                 dispatch.distributed_lock_store().expect("redis permit"),
             ))
             .expect("record redis");
@@ -1261,10 +1465,11 @@ mod tests {
         build
             .record(ProviderOutput::redis(
                 DomainModuleResult {
+                    probes: vec![probe("failing-cleanup")],
                     resources: vec![DynManagedResource::new_box(FailingShutdownResource {
                         name: "failing-cleanup",
                     })],
-                    ..DomainModuleResult::default()
+                    workers: vec![worker("failing-cleanup")],
                 },
                 dispatch.distributed_lock_store().expect("redis permit"),
             ))
@@ -1413,7 +1618,7 @@ mod tests {
         }
         build
             .record(ProviderOutput::redis(
-                module_for_channels("redis", CHANNELS_RESOURCES),
+                module_for_channels("redis", CHANNELS_ALL),
                 dispatch.distributed_lock_store().expect("redis permit"),
             ))
             .expect("redis output");
@@ -1425,7 +1630,9 @@ mod tests {
             .expect("S3 output");
         build
             .record(ProviderOutput::vault(
-                module_for_channels("vault", CHANNELS_RESOURCES),
+                module_for_channels("identity-signer", CHANNELS_ALL),
+                module_for_channels("vault-key", CHANNELS_ALL),
+                module_for_channels("vault-resolver", CHANNELS_ALL),
                 dispatch.identity_signer().expect("identity signer permit"),
                 dispatch
                     .settings_key_provider()
@@ -1459,7 +1666,9 @@ mod tests {
             .expect("postgres output");
         build
             .record(ProviderOutput::dlx(
-                module_for_channels("dlx", CHANNELS_ALL),
+                module_for_channels("dlx-lifecycle", CHANNELS_ALL),
+                module_for_channels("dlx-archive-store", CHANNELS_PROBES_WORKERS),
+                module_for_channels("dlx-archive-key", CHANNELS_ALL),
                 dispatch
                     .dlx_lifecycle_repository()
                     .expect("DLX repository permit"),
@@ -1541,6 +1750,16 @@ mod tests {
             })],
             ..DomainModuleResult::default()
         }
+    }
+
+    fn recording_module_all(
+        name: &'static str,
+        shutdowns: Arc<Mutex<Vec<&'static str>>>,
+    ) -> DomainModuleResult {
+        let mut module = recording_module(name, shutdowns);
+        module.probes.push(probe(name));
+        module.workers.push(worker(name));
+        module
     }
 
     #[allow(clippy::expect_used)]

@@ -98,12 +98,9 @@ fn validate_manifest_closure(
 ) -> anyhow::Result<()> {
     anyhow::ensure!(manifest.name() == ASSEMBLY_NAME, "unexpected assembly name");
     anyhow::ensure!(
-        manifest.profile() == AssemblyProfile::Demo,
-        "settingsonly requires the demo assembly profile"
-    );
-    anyhow::ensure!(
-        manifest.topology() == AssemblyTopology::Demo,
-        "settingsonly requires the demo topology"
+        manifest.profile() == AssemblyProfile::Production
+            && manifest.topology() == AssemblyTopology::DurableIsolated,
+        "settingsonly requires production + durable-isolated"
     );
     anyhow::ensure!(
         manifest.framework_contracts().len() == 1
@@ -113,7 +110,7 @@ fn validate_manifest_closure(
     );
     anyhow::ensure!(
         lock.identity().name() == ASSEMBLY_NAME
-            && lock.identity().profile() == AssemblyProfile::Demo,
+            && lock.identity().profile() == AssemblyProfile::Production,
         "settingsonly AssemblyLock identity does not match the closed assembly"
     );
     anyhow::ensure!(
@@ -236,7 +233,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn bundled_manifest_has_the_closed_demo_profile() {
+    fn bundled_manifest_has_the_closed_production_profile() {
         let manifest = AssemblyManifest::from_toml_str(BUNDLED_ASSEMBLY_TOML)
             .expect("bundled manifest")
             .canonicalize_v1()
@@ -246,8 +243,8 @@ mod tests {
 
         validate_manifest_closure(&manifest, &lock).expect("closed settingsonly manifest");
         assert_eq!(manifest.name(), ASSEMBLY_NAME);
-        assert_eq!(manifest.profile(), AssemblyProfile::Demo);
-        assert_eq!(manifest.topology(), AssemblyTopology::Demo);
+        assert_eq!(manifest.profile(), AssemblyProfile::Production);
+        assert_eq!(manifest.topology(), AssemblyTopology::DurableIsolated);
     }
 
     #[test]

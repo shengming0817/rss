@@ -25,6 +25,7 @@ const EXACT_OIDC_PROVIDER_ARC: &str = "Arc<oidc::OidcProvider>";
 const EXACT_POSTGRES_REVOCATION_STORE: &str = "postgres::PgRevocationStore";
 const EXACT_SETTINGS_READINESS_INTERVAL: &str =
     "settings_composition::KeyProviderReadinessInterval";
+const EXACT_SETTINGS_READINESS_DEPS: &str = "settings_composition::SettingsReadinessDeps";
 const EXACT_VAULT_SIGNER_ARC: &str = "Arc<vault::VaultSigner>";
 const SUPPORTED_EXACT_EXCEPTIONS: &[&str] = &[
     EXACT_DOMAIN_TRANSPORT_ARC,
@@ -34,6 +35,7 @@ const SUPPORTED_EXACT_EXCEPTIONS: &[&str] = &[
     EXACT_OIDC_PROVIDER_ARC,
     EXACT_POSTGRES_REVOCATION_STORE,
     EXACT_SETTINGS_READINESS_INTERVAL,
+    EXACT_SETTINGS_READINESS_DEPS,
     EXACT_VAULT_SIGNER_ARC,
 ];
 const FORBIDDEN_BROAD_ROOTS: &[&str] = &["std", "core", "alloc"];
@@ -444,6 +446,11 @@ fn is_allowed_field_type(ty: &Type, resolver: &TypeResolver, policy: &RuntimeDep
         return policy.allows_exact_exception(EXACT_SETTINGS_READINESS_INTERVAL);
     }
     if let Some(segments) = resolved_type_path_segments(ty, resolver, &mut Vec::new())
+        && segments == ["settings_composition", "SettingsReadinessDeps"]
+    {
+        return policy.allows_exact_exception(EXACT_SETTINGS_READINESS_DEPS);
+    }
+    if let Some(segments) = resolved_type_path_segments(ty, resolver, &mut Vec::new())
         && segments == ["identity_composition", "IdentityRuntimeConfig"]
     {
         return policy.allows_exact_exception(EXACT_IDENTITY_RUNTIME_CONFIG);
@@ -830,7 +837,8 @@ mod tests {
                 "Arc<vault::VaultSigner>",
                 "identity_composition::IdentityRuntimeConfig",
                 "postgres::PgRevocationStore",
-                "settings_composition::KeyProviderReadinessInterval"
+                "settings_composition::KeyProviderReadinessInterval",
+                "settings_composition::SettingsReadinessDeps"
             ]
         );
         Ok(())

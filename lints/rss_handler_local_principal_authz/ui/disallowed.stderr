@@ -1,5 +1,5 @@
 warning: handler/domain 不得直接读取 Authenticated tenant/principal/self subject 做本地授权
-  --> $DIR/disallowed.rs:30:19
+  --> $DIR/disallowed.rs:31:19
    |
 LL |     let _tenant = auth.tenant_id();
    |                   ^^^^^^^^^^^^^^^^
@@ -8,7 +8,7 @@ LL |     let _tenant = auth.tenant_id();
    = note: `#[warn(rss_handler_local_principal_authz)]` on by default
 
 warning: handler/domain 不得直接读取 Authenticated tenant/principal/self subject 做本地授权
-  --> $DIR/disallowed.rs:31:17
+  --> $DIR/disallowed.rs:32:17
    |
 LL |     let _kind = auth.principal_kind();
    |                 ^^^^^^^^^^^^^^^^^^^^^
@@ -16,7 +16,7 @@ LL |     let _kind = auth.principal_kind();
    = help: 改为读取 route gate 插入的 AuthorizedSubject；确需在 allowlist 外调用须经治理评审扩 `ALLOWED_CALLER_CRATES`，或 item-level `#[allow(rss_handler_local_principal_authz)] // reason: ...`
 
 warning: handler/domain 不得直接读取 Authenticated tenant/principal/self subject 做本地授权
-  --> $DIR/disallowed.rs:32:20
+  --> $DIR/disallowed.rs:33:20
    |
 LL |     let _subject = auth.self_scoped_principal_id();
    |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -24,7 +24,7 @@ LL |     let _subject = auth.self_scoped_principal_id();
    = help: 改为读取 route gate 插入的 AuthorizedSubject；确需在 allowlist 外调用须经治理评审扩 `ALLOWED_CALLER_CRATES`，或 item-level `#[allow(rss_handler_local_principal_authz)] // reason: ...`
 
 warning: handler/domain 不得直接读取 Authenticated tenant/principal/self subject 做本地授权
-  --> $DIR/disallowed.rs:33:62
+  --> $DIR/disallowed.rs:34:62
    |
 LL |     let _tenant_fn: fn(&Authenticated) -> Option<TenantId> = Authenticated::tenant_id;
    |                                                              ^^^^^^^^^^^^^^^^^^^^^^^^
@@ -32,7 +32,7 @@ LL |     let _tenant_fn: fn(&Authenticated) -> Option<TenantId> = Authenticated:
    = help: 改为读取 route gate 插入的 AuthorizedSubject；确需在 allowlist 外调用须经治理评审扩 `ALLOWED_CALLER_CRATES`，或 item-level `#[allow(rss_handler_local_principal_authz)] // reason: ...`
 
 warning: handler/domain 不得直接读取 Authenticated tenant/principal/self subject 做本地授权
-  --> $DIR/disallowed.rs:34:57
+  --> $DIR/disallowed.rs:35:57
    |
 LL |     let _kind_fn: fn(&Authenticated) -> PrincipalKind = Authenticated::principal_kind;
    |                                                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -40,7 +40,7 @@ LL |     let _kind_fn: fn(&Authenticated) -> PrincipalKind = Authenticated::prin
    = help: 改为读取 route gate 插入的 AuthorizedSubject；确需在 allowlist 外调用须经治理评审扩 `ALLOWED_CALLER_CRATES`，或 item-level `#[allow(rss_handler_local_principal_authz)] // reason: ...`
 
 warning: handler/domain 不得直接读取 Authenticated tenant/principal/self subject 做本地授权
-  --> $DIR/disallowed.rs:35:51
+  --> $DIR/disallowed.rs:36:51
    |
 LL |     let _subject_fn: fn(&Authenticated) -> &str = Authenticated::self_scoped_principal_id;
    |                                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -48,7 +48,7 @@ LL |     let _subject_fn: fn(&Authenticated) -> &str = Authenticated::self_scope
    = help: 改为读取 route gate 插入的 AuthorizedSubject；确需在 allowlist 外调用须经治理评审扩 `ALLOWED_CALLER_CRATES`，或 item-level `#[allow(rss_handler_local_principal_authz)] // reason: ...`
 
 warning: handler/domain 不得用 PrincipalKind 或 role-name 字面量做本地授权分支
-  --> $DIR/disallowed.rs:41:8
+  --> $DIR/disallowed.rs:42:8
    |
 LL |     if local.principal_kind() == PrincipalKind::Admin {
    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -56,7 +56,7 @@ LL |     if local.principal_kind() == PrincipalKind::Admin {
    = help: 改为比较 typed GrantPermission/RoutePermissionId，或把例外集中在 ContractAuthorizer / route gate / authn funnel
 
 warning: handler/domain 不得用 PrincipalKind 或 role-name 字面量做本地授权分支
-  --> $DIR/disallowed.rs:44:8
+  --> $DIR/disallowed.rs:45:8
    |
 LL |     if PrincipalKind::SuperAdmin != local.principal_kind() {
    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -64,7 +64,7 @@ LL |     if PrincipalKind::SuperAdmin != local.principal_kind() {
    = help: 改为比较 typed GrantPermission/RoutePermissionId，或把例外集中在 ContractAuthorizer / route gate / authn funnel
 
 warning: handler/domain 不得用 PrincipalKind 或 role-name 字面量做本地授权分支
-  --> $DIR/disallowed.rs:48:8
+  --> $DIR/disallowed.rs:49:8
    |
 LL |     if role_name == "Admin" {
    |        ^^^^^^^^^^^^^^^^^^^^
@@ -72,7 +72,7 @@ LL |     if role_name == "Admin" {
    = help: 改为比较 typed GrantPermission/RoutePermissionId，或把例外集中在 ContractAuthorizer / route gate / authn funnel
 
 warning: handler/domain 不得用 PrincipalKind 或 role-name 字面量做本地授权分支
-  --> $DIR/disallowed.rs:51:8
+  --> $DIR/disallowed.rs:52:8
    |
 LL |     if "superAdmin" != role_name {
    |        ^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -80,7 +80,7 @@ LL |     if "superAdmin" != role_name {
    = help: 改为比较 typed GrantPermission/RoutePermissionId，或把例外集中在 ContractAuthorizer / route gate / authn funnel
 
 warning: handler/domain 不得用 PrincipalKind 或 role-name 字面量做本地授权分支
-  --> $DIR/disallowed.rs:54:5
+  --> $DIR/disallowed.rs:55:5
    |
 LL | /     match local.principal_kind() {
 LL | |         PrincipalKind::Admin => {
@@ -92,7 +92,7 @@ LL | |     }
    = help: 改为比较 typed GrantPermission/RoutePermissionId，或把例外集中在 ContractAuthorizer / route gate / authn funnel
 
 warning: handler/domain 不得用 PrincipalKind 或 role-name 字面量做本地授权分支
-  --> $DIR/disallowed.rs:60:8
+  --> $DIR/disallowed.rs:61:8
    |
 LL |     if matches!(local.principal_kind(), PrincipalKind::SuperAdmin) {
    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -100,7 +100,7 @@ LL |     if matches!(local.principal_kind(), PrincipalKind::SuperAdmin) {
    = help: 改为比较 typed GrantPermission/RoutePermissionId，或把例外集中在 ContractAuthorizer / route gate / authn funnel
 
 warning: handler/domain 不得用 PrincipalKind 或 role-name 字面量做本地授权分支
-  --> $DIR/disallowed.rs:63:5
+  --> $DIR/disallowed.rs:64:5
    |
 LL | /     match role_name {
 LL | |         "service" => {

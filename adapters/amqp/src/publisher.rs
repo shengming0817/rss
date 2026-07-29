@@ -32,7 +32,9 @@ const MAX_PUBLISH_TIMEOUT_MILLIS: u64 = 86_400_000;
 ///
 /// 纯函数——无 broker 依赖；integration-gated（lapin 类型只在 integration feature 链接）。
 fn build_properties(event_id: &str, md: &EnvelopeMetadata) -> BasicProperties {
-    let props = BasicProperties::default().with_message_id(event_id.into());
+    let props = BasicProperties::default()
+        .with_message_id(event_id.into())
+        .with_delivery_mode(2);
     // occurred_at 用 AMQP 原生 timestamp 字段（u64），不重复进 headers（避免双写歧义）。
     // wire metadata bag 是 public scalar——畸形负值（epoch 前，理论不可达但 bag 可携）经 `u64::try_from`
     // fail-closed 跳过 timestamp，不 `as u64` wrap 成超大值（不依赖 producer 非负保证；F3 review）。
@@ -513,6 +515,15 @@ impl PublisherTransportLifecycle {
             recovery: None,
         }
     }
+
+    fn is_ready(&self) -> bool {
+        matches!(
+            &self.slot,
+            TransportSlot::Ready { transport, .. }
+                if transport.connection.status().connected()
+                    && transport.confirm_channel.status().connected()
+        )
+    }
 }
 
 /// 固定安全摘要；不携 endpoint、event、payload 或 lapin 原始错误链。
@@ -765,7 +776,7 @@ fn is_permanent_soft_error(soft: &AMQPSoftError) -> bool {
 /// 同时 impl `Publisher` 与 `ManagedResource`（各有 `shutdown`）；消费经 `DynPublisher` /
 /// `Box<DynManagedResource>` 无歧义，直接操作 raw struct 时用 UFCS 消歧。
 pub struct AmqpPublisher {
-    endpoint: secure::AmqpEndpoint,
+    connection_config: PublisherConnectionConfig,
     transports: Arc<Mutex<PublisherTransportLifecycle>>,
     name: String,
     publish_timeout: Duration,
@@ -773,7 +784,18 @@ pub struct AmqpPublisher {
     post_send_connection_close_once: AtomicBool,
 }
 
+#[derive(Clone)]
+struct PublisherConnectionConfig {
+    endpoint: secure::AmqpEndpoint,
+    trust: conn::AmqpTlsTrust,
+}
+
 impl AmqpPublisher {
+    pub(crate) fn readiness_snapshot(&self) -> bool {
+        self.lock_transports()
+            .is_ok_and(|lifecycle| lifecycle.is_ready())
+    }
+
     /// 从单个 per-domain AMQP URL 连接（URL 含 `user:pass@host/vhost`）。`name` 是 `ManagedResource`
     /// 可读名（kebab/snake 稳定标识）。`publish_timeout` 在任何网络连接前再次校验非零、整毫秒且可由
     /// 数据库/审计 `i64` 表示；连接失败日志只经 redaction funnel，URL 原文绝不进日志。
@@ -782,12 +804,44 @@ impl AmqpPublisher {
         name: impl Into<String>,
         publish_timeout: Duration,
     ) -> Result<Self, conn::AmqpConnectError> {
+        Self::connect_with_trust(endpoint, name, publish_timeout, conn::AmqpTlsTrust::WebPki).await
+    }
+
+    pub(crate) async fn connect_with_private_ca(
+        endpoint: &secure::AmqpEndpoint,
+        name: impl Into<String>,
+        publish_timeout: Duration,
+        ca: &conn::AmqpPrivateCa,
+    ) -> Result<Self, conn::AmqpConnectError> {
+        Self::connect_with_trust(
+            endpoint,
+            name,
+            publish_timeout,
+            conn::AmqpTlsTrust::PrivateCa(ca.clone()),
+        )
+        .await
+    }
+
+    async fn connect_with_trust(
+        endpoint: &secure::AmqpEndpoint,
+        name: impl Into<String>,
+        publish_timeout: Duration,
+        trust: conn::AmqpTlsTrust,
+    ) -> Result<Self, conn::AmqpConnectError> {
         validate_publish_timeout(publish_timeout).map_err(|_| conn::invalid_publisher_timeout())?;
         let name = name.into();
         // confirm=true：启用 publisher confirms，使 publish 能检测 broker ack/nack（durable publish-ok）。
-        let (conn, channel) = conn::connect(endpoint, &name, true).await?;
+        let (conn, channel) = match &trust {
+            conn::AmqpTlsTrust::WebPki => conn::connect(endpoint, &name, true).await?,
+            conn::AmqpTlsTrust::PrivateCa(ca) => {
+                conn::connect_with_private_ca(endpoint, &name, true, ca).await?
+            }
+        };
         Ok(Self {
-            endpoint: endpoint.clone(),
+            connection_config: PublisherConnectionConfig {
+                endpoint: endpoint.clone(),
+                trust,
+            },
             transports: Arc::new(Mutex::new(PublisherTransportLifecycle::new(
                 PublisherTransport::new(conn, channel),
             ))),
@@ -855,7 +909,7 @@ impl AmqpPublisher {
         let deadline = started + self.publish_timeout;
         let cancellation = CancellationToken::new();
         let task = tokio::spawn(run_transport_recovery(
-            self.endpoint.clone(),
+            self.connection_config.clone(),
             Arc::clone(&self.transports),
             self.name.clone(),
             started,
@@ -1036,7 +1090,7 @@ async fn join_cancelled_recovery(mut recovery: OwnedTransportRecovery) {
 #[allow(clippy::cognitive_complexity)]
 // reason: 实际分支仅 replacement 成功/失败与 lifecycle lock 成功/失败；tracing 宏展开抬高认知复杂度。
 async fn run_transport_recovery(
-    endpoint: secure::AmqpEndpoint,
+    connection_config: PublisherConnectionConfig,
     transports: Arc<Mutex<PublisherTransportLifecycle>>,
     name: String,
     started: tokio::time::Instant,
@@ -1046,7 +1100,7 @@ async fn run_transport_recovery(
 ) {
     let generation = recovery.generation;
     let Some(replacement) = recover_publisher_transport(
-        &endpoint,
+        &connection_config,
         recovery.retiring,
         &name,
         generation,
@@ -1249,7 +1303,7 @@ where
 #[allow(clippy::cognitive_complexity)]
 // reason: drain/close/create 三阶段各自需安全审计；复杂度主要来自 tracing 宏展开。
 async fn recover_publisher_transport(
-    endpoint: &secure::AmqpEndpoint,
+    connection_config: &PublisherConnectionConfig,
     retiring: Option<RetiringTransport<LapinPublisherTransport>>,
     name: &str,
     generation: u64,
@@ -1288,12 +1342,17 @@ async fn recover_publisher_transport(
             }
         },
         async {
-            conn::reconnect_publisher(endpoint, name, generation)
-                .await
-                .map(|(connection, confirm_channel)| {
-                    PublisherTransport::new(connection, confirm_channel)
-                })
-                .map_err(TransportRecoveryClientError::Connect)
+            conn::reconnect_publisher(
+                &connection_config.endpoint,
+                name,
+                generation,
+                &connection_config.trust,
+            )
+            .await
+            .map(|(connection, confirm_channel)| {
+                PublisherTransport::new(connection, confirm_channel)
+            })
+            .map_err(TransportRecoveryClientError::Connect)
         },
     )
     .await;
@@ -1713,13 +1772,14 @@ mod build_properties_tests {
     use super::build_properties;
 
     #[test]
-    fn empty_metadata_sets_only_message_id() {
+    fn empty_metadata_sets_message_id_and_persistent_delivery() {
         let md = EnvelopeMetadata::empty();
         let props = build_properties("evt-1", &md);
         assert_eq!(
             props.message_id().as_ref().map(|s| s.as_str()),
             Some("evt-1")
         );
+        assert_eq!(props.delivery_mode(), &Some(2));
         assert!(
             props.timestamp().is_none(),
             "no timestamp for empty metadata"

@@ -90,6 +90,9 @@ pub struct SharedRuntimeDeps {
     /// `RSS_SETTINGS_CONFIG_VALUE_KEY_NAME` fail-fast 解析，wire_settings 只消费 typed 值。
     pub settings_config_value_key_name: KeyName,
 
+    /// Readiness handles proven and lifecycle-owned by the exact PG/Vault provider receipts.
+    pub(crate) settings_readiness: settings_composition::SettingsReadinessDeps,
+
     /// 共享 outbound domain transport dispatch seam。组合根构造真实 provider 并注入 typed trait
     /// object，后续域/运行时消费者只能经 `distributed::DomainTransport` 发起跨域同步调用；底层 HTTP
     /// adapter 的 mTLS source 生命周期另由 `DomainModuleResult.resources` 托管。
@@ -108,6 +111,7 @@ impl SharedRuntimeDeps {
         vault: VaultRuntimeDeps,
         identity_signer: Arc<vault::VaultSigner>,
         settings_config_value_key_name: KeyName,
+        settings_readiness: settings_composition::SettingsReadinessDeps,
         domain_transport: Arc<dyn distributed::DomainTransport>,
     ) -> Self {
         Self::from_parts(
@@ -119,6 +123,7 @@ impl SharedRuntimeDeps {
             vault,
             identity_signer,
             settings_config_value_key_name,
+            settings_readiness,
             domain_transport,
         )
     }
@@ -137,6 +142,7 @@ impl SharedRuntimeDeps {
         vault: VaultRuntimeDeps,
         identity_signer: Arc<vault::VaultSigner>,
         settings_config_value_key_name: KeyName,
+        settings_readiness: settings_composition::SettingsReadinessDeps,
         domain_transport: Arc<dyn distributed::DomainTransport>,
     ) -> Self {
         let revocation_store = pg.infra().revocation_store();
@@ -149,6 +155,7 @@ impl SharedRuntimeDeps {
             vault,
             identity_signer,
             settings_config_value_key_name,
+            settings_readiness,
             domain_transport,
         )
     }
@@ -163,6 +170,7 @@ impl SharedRuntimeDeps {
         vault: VaultRuntimeDeps,
         identity_signer: Arc<vault::VaultSigner>,
         settings_config_value_key_name: KeyName,
+        settings_readiness: settings_composition::SettingsReadinessDeps,
         domain_transport: Arc<dyn distributed::DomainTransport>,
     ) -> Self {
         Self {
@@ -174,6 +182,7 @@ impl SharedRuntimeDeps {
             vault,
             identity_signer,
             settings_config_value_key_name,
+            settings_readiness,
             domain_transport,
         }
     }

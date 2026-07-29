@@ -4,14 +4,10 @@ use crate::infra::oidc::{
     AccessTokenJwksReadyProbe, FEDERATED_ACCESS_TOKEN_JWKS_READY_PROBE_NAME,
     RSS_ACCESS_TOKEN_JWKS_READY_PROBE_NAME,
 };
-use crate::infra::redis::{REDIS_READY_PROBE_NAME, RedisReadyProbe, spawn_redis_readiness_sampler};
 use crate::infra::s3::wire_s3_canary;
 use crate::infra::signing_rotation::RSS_ACCESS_TOKEN_SIGNING_ROTATION_PROBE_NAME;
 use anyhow::{Context as _, Result};
-use bootstrap::DomainModuleResult;
-use diport::DynManagedResource;
 use primitives::ProbeName;
-use std::sync::Arc;
 
 struct WiredDomains {
     registry: bootstrap::Registry,
@@ -106,7 +102,6 @@ impl<'a> InfraBuilt<'a> {
             wiring_inputs,
             domain_transport,
             metrics_exporter,
-            redis_readiness_period,
             command_idempotency_keyring,
             signing_rotation_probe,
             runtime_rss_access,
@@ -181,15 +176,6 @@ impl<'a> InfraBuilt<'a> {
                     Box::new(RlsReadyProbe::new(deps.pg.rls_ready_handle())),
                 )
                 .context("register rls_ready probe")?;
-            let redis_ready = Arc::new(std::sync::atomic::AtomicBool::new(true));
-            let redis_probe_name =
-                ProbeName::parse(REDIS_READY_PROBE_NAME).context("parse redis_ready probe name")?;
-            registry
-                .probe(
-                    redis_probe_name,
-                    Box::new(RedisReadyProbe::new(Arc::clone(&redis_ready))),
-                )
-                .context("register redis_ready probe")?;
             if let Some(provider) = runtime_rss_access.as_ref() {
                 let name = ProbeName::parse(RSS_ACCESS_TOKEN_JWKS_READY_PROBE_NAME)
                     .context("parse RSS access-token JWKS probe name")?;
@@ -248,25 +234,6 @@ impl<'a> InfraBuilt<'a> {
                     event_subscriber_permit,
                 ))
                 .context("record event provider output")?;
-
-            let redis_for_sampler = deps.redis.clone();
-            let redis_readiness_worker: bootstrap::WorkerSpec = Box::new(move |token| {
-                DynManagedResource::new_box(spawn_redis_readiness_sampler(
-                    redis_for_sampler.clone(),
-                    redis_readiness_period,
-                    token,
-                    Arc::clone(&redis_ready),
-                ))
-            });
-            provider_build.record_domain(DomainModuleResult {
-                workers: vec![redis_readiness_worker],
-                ..DomainModuleResult::default()
-            });
-
-            tracing::info!(
-                sample_interval_secs = redis_readiness_period.as_secs(),
-                "redis readiness sampler interval configured"
-            );
 
             Result::<_, anyhow::Error>::Ok(WiredDomains { registry })
         }

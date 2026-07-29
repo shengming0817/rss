@@ -70,7 +70,7 @@ consumer = "identity"
 lifecycle = "active"
 durability = "persistent"
 purpose = "jwt-access-token-signing"
-outputs = ["resources"]
+outputs = ["probes", "resources", "workers"]
 
 [[diportProviders]]
 id = "settings-key-provider"
@@ -82,7 +82,7 @@ consumer = "settings"
 lifecycle = "active"
 durability = "persistent"
 purpose = "settings-configvalue-at-rest-encryption"
-outputs = ["resources"]
+outputs = ["probes", "resources", "workers"]
 
 [[diportProviders]]
 id = "settings-secret-resolver"
@@ -94,7 +94,7 @@ consumer = "settings"
 lifecycle = "active"
 durability = "persistent"
 purpose = "settings-secret-material-resolution"
-outputs = ["resources"]
+outputs = ["probes", "resources", "workers"]
 
 [[diportProviders]]
 id = "listener-pdp"
@@ -132,7 +132,7 @@ consumer = "httpserve"
 lifecycle = "active"
 durability = "persistent"
 purpose = "http-auth-decision-audit"
-outputs = ["resources", "workers"]
+outputs = ["probes", "resources", "workers"]
 
 # edge 防护：per-peer-IP 限流（#1106，pre-auth DoS/brute-force 防护）——httpserve 消费、active。
 [[diportProviders]]
@@ -159,7 +159,7 @@ consumer = "distributed"
 lifecycle = "active"
 durability = "persistent"
 purpose = "distributed-lock-fencing"
-outputs = ["resources"]
+outputs = ["probes", "resources", "workers"]
 
 [[diportProviders]]
 id = "distributed-cas-store"
@@ -170,7 +170,7 @@ consumer = "distributed"
 lifecycle = "active"
 durability = "persistent"
 purpose = "distributed-state-cas"
-outputs = ["resources", "workers"]
+outputs = ["probes", "resources", "workers"]
 
 # S3 object-store provider（#1164）：runtime canary 对真实 bucket 执行 put/get/delete/get-miss，
 # readiness 失败即摘流；adapter 经 backend feature 启 AWS SDK 真身。
@@ -222,4 +222,4 @@ consumer = "eventexec"
 lifecycle = "active"
 durability = "persistent"
 purpose = "dead-letter-independent-archive-key-provider"
-outputs = ["workers"]
+outputs = ["probes", "resources", "workers"]

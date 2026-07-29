@@ -76,6 +76,12 @@ pub enum ConfigError {
     /// replay-store timeout must be explicit, non-zero, and operationally bounded.
     #[error("oidc service-token replay timeout must be between 1ns and 60s")]
     ReplayTimeoutOutOfRange,
+    /// Federated access must declare the exact typed permission universe it accepts.
+    #[error("oidc federated permission universe must not be empty")]
+    MissingFederatedPermissions,
+    /// Repeating a permission is configuration drift rather than an idempotent builder update.
+    #[error("oidc federated permission universe contains a duplicate")]
+    DuplicateFederatedPermission,
 }
 
 /// 单把验签 key + 非空 `kid`。所有 key source 都只允许 exact-kid lookup。
@@ -340,6 +346,7 @@ struct VerifierCore {
     /// operator 信任本 IdP 可 assert 的 kind claim 值集。**默认空** → 空集时一律剥离 kind（→ None），杜绝
     /// 外部 IdP 擅自 assert RSS 特权 kind（INVARIANT: OIDC-KIND-ALLOWLIST-01， { level = "Medium", exec = "manual/opt-in", source = "code" }secure-by-default）。
     kind_allowlist: HashSet<String>,
+    federated_permission_allowlist: HashSet<vocab::GrantPermission>,
     leeway_secs: u64,
     keys: KeySource,
     /// Optional retirement deadlines; `None` = no deadline filtering (legacy behavior).
@@ -378,6 +385,14 @@ impl<P: TokenProfileMarker> VerifierConfig<P> {
     pub(crate) fn is_kind_trusted(&self, kind: &str) -> bool {
         self.core.kind_allowlist.contains(kind)
     }
+    pub(crate) fn is_federated_permission_trusted(
+        &self,
+        permission: vocab::GrantPermission,
+    ) -> bool {
+        self.core
+            .federated_permission_allowlist
+            .contains(&permission)
+    }
     pub(crate) fn leeway_secs(&self) -> u64 {
         self.core.leeway_secs
     }
@@ -406,6 +421,7 @@ pub struct VerifierConfigBuilder<P: TokenProfileMarker> {
     tenant_claim: String,
     kind_claim: String,
     kind_allowlist: HashSet<String>,
+    federated_permission_allowlist: HashSet<vocab::GrantPermission>,
     leeway_secs: u64,
     keys: Option<KeySource>,
     retirement_schedule: Option<RetirementSchedule>,
@@ -417,13 +433,14 @@ pub struct VerifierConfigBuilder<P: TokenProfileMarker> {
 }
 
 impl<P: TokenProfileMarker> VerifierConfigBuilder<P> {
-    pub fn new(issuer: impl Into<String>, audience: impl Into<String>) -> Self {
+    fn base(issuer: impl Into<String>, audience: impl Into<String>) -> Self {
         Self {
             issuer: issuer.into(),
             audience: audience.into(),
             tenant_claim: DEFAULT_TENANT_CLAIM.to_string(),
             kind_claim: DEFAULT_KIND_CLAIM.to_string(),
             kind_allowlist: HashSet::new(),
+            federated_permission_allowlist: HashSet::new(),
             leeway_secs: DEFAULT_LEEWAY_SECS,
             keys: None,
             retirement_schedule: None,
@@ -476,9 +493,16 @@ impl<P: TokenProfileMarker> VerifierConfigBuilder<P> {
         self
     }
 
-    fn finish(self, require_replay: bool) -> Result<VerifierConfig<P>, ConfigError> {
+    fn finish(
+        self,
+        require_replay: bool,
+        require_federated_permissions: bool,
+    ) -> Result<VerifierConfig<P>, ConfigError> {
         if self.key_source_conflict {
             return Err(ConfigError::ConflictingKeySources);
+        }
+        if require_federated_permissions && self.federated_permission_allowlist.is_empty() {
+            return Err(ConfigError::MissingFederatedPermissions);
         }
         // 纯空白等同无效（trim 后为空 → 运行时误拒所有 token），构造期拒而非静默失败。
         if self.issuer.trim().is_empty() {
@@ -517,6 +541,7 @@ impl<P: TokenProfileMarker> VerifierConfigBuilder<P> {
                 tenant_claim: self.tenant_claim,
                 kind_claim: self.kind_claim,
                 kind_allowlist: self.kind_allowlist,
+                federated_permission_allowlist: self.federated_permission_allowlist,
                 leeway_secs: self.leeway_secs,
                 keys,
                 retirement_schedule: self.retirement_schedule,
@@ -527,8 +552,40 @@ impl<P: TokenProfileMarker> VerifierConfigBuilder<P> {
     }
 }
 
+/// Non-empty, duplicate-free permission universe accepted by one FederatedAccess verifier.
+pub struct FederatedPermissionUniverse(HashSet<vocab::GrantPermission>);
+
+impl FederatedPermissionUniverse {
+    pub fn try_new(
+        permissions: impl IntoIterator<Item = vocab::GrantPermission>,
+    ) -> Result<Self, ConfigError> {
+        let mut universe = HashSet::new();
+        for permission in permissions {
+            if !universe.insert(permission) {
+                return Err(ConfigError::DuplicateFederatedPermission);
+            }
+        }
+        if universe.is_empty() {
+            return Err(ConfigError::MissingFederatedPermissions);
+        }
+        Ok(Self(universe))
+    }
+}
+
+impl VerifierConfigBuilder<RssAccessProfile> {
+    pub fn new(issuer: impl Into<String>, audience: impl Into<String>) -> Self {
+        Self::base(issuer, audience)
+    }
+}
+
+impl VerifierConfigBuilder<ServiceTokenProfile> {
+    pub fn new(issuer: impl Into<String>, audience: impl Into<String>) -> Self {
+        Self::base(issuer, audience)
+    }
+}
+
 macro_rules! impl_access_builder {
-    ($profile:ty) => {
+    ($profile:ty, $require_federated_permissions:expr) => {
         impl VerifierConfigBuilder<$profile> {
             #[must_use]
             pub fn keys_static(mut self, keys: AccessStaticKeySource) -> Self {
@@ -567,16 +624,26 @@ macro_rules! impl_access_builder {
             }
 
             pub fn build(self) -> Result<VerifierConfig<$profile>, ConfigError> {
-                self.finish(false)
+                self.finish(false, $require_federated_permissions)
             }
         }
     };
 }
 
-impl_access_builder!(RssAccessProfile);
-impl_access_builder!(FederatedAccessProfile);
+impl_access_builder!(RssAccessProfile, false);
+impl_access_builder!(FederatedAccessProfile, true);
 
 impl VerifierConfigBuilder<FederatedAccessProfile> {
+    pub fn new(
+        issuer: impl Into<String>,
+        audience: impl Into<String>,
+        permissions: FederatedPermissionUniverse,
+    ) -> Self {
+        let mut builder = Self::base(issuer, audience);
+        builder.federated_permission_allowlist = permissions.0;
+        builder
+    }
+
     /// Admit one closed federated principal kind asserted by this IdP.
     #[must_use]
     pub fn trust_kind(self, kind: impl Into<String>) -> Self {
@@ -606,7 +673,7 @@ impl VerifierConfigBuilder<ServiceTokenProfile> {
     }
 
     pub fn build(self) -> Result<VerifierConfig<ServiceTokenProfile>, ConfigError> {
-        self.finish(true)
+        self.finish(true, false)
     }
 }
 
@@ -915,5 +982,19 @@ mod tests {
             .build()
             .expect("valid config");
         assert!(without.retirement_schedule().is_none());
+    }
+
+    #[test]
+    fn federated_permission_universe_rejects_empty_and_duplicates() {
+        assert!(matches!(
+            FederatedPermissionUniverse::try_new([]),
+            Err(ConfigError::MissingFederatedPermissions)
+        ));
+        let permission =
+            vocab::GrantPermission::route(vocab::RoutePermissionId::SettingsConfigPublish);
+        assert!(matches!(
+            FederatedPermissionUniverse::try_new([permission, permission]),
+            Err(ConfigError::DuplicateFederatedPermission)
+        ));
     }
 }

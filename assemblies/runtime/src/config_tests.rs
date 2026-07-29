@@ -256,11 +256,7 @@ fn runtime_config_serving_event_domain_dlx_and_worker_inputs_share_one_captured_
     );
     assert_eq!(parts.audit_consumer_key.as_bytes(), &[0x42; 32]);
     assert_eq!(
-        parts
-            .domain_modules
-            .settings
-            .into_readiness_interval()
-            .get(),
+        parts.domain_modules.settings.readiness_interval().get(),
         std::time::Duration::from_secs(7)
     );
     let _ = (parts.dlx_worker, parts.distributed_worker);

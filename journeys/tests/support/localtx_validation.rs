@@ -818,8 +818,14 @@ fn test_authenticated(
             tenant.context("RSS user test evidence requires tenant")?,
         ));
     }
+    let permissions = diport::VerifiedFederatedPermissions::new([vocab::GrantPermission::route(
+        vocab::RoutePermissionId::SettingsConfigPublish,
+    )])?;
     Ok(httpserve::Authenticated::new_federated(
-        kind, subject, tenant,
+        kind,
+        subject,
+        tenant,
+        &permissions,
     ))
 }
 

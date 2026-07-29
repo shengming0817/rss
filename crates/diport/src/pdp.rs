@@ -697,6 +697,7 @@ enum VerifiedClaimsProfile {
         subject: String,
         tenant: Option<TenantId>,
         kind: PrincipalKind,
+        permissions: VerifiedFederatedPermissions,
     },
     ServiceToken {
         caller: ServiceCallerDomain,
@@ -717,6 +718,7 @@ pub enum VerifiedClaimsView<'a> {
         subject: &'a str,
         tenant: Option<TenantId>,
         kind: PrincipalKind,
+        permissions: &'a VerifiedFederatedPermissions,
     },
     ServiceToken {
         caller: ServiceCallerDomain,
@@ -734,6 +736,47 @@ pub struct VerifiedClaims {
     profile: VerifiedClaimsProfile,
 }
 
+/// Non-empty, duplicate-free permissions carried by one verified federated token.
+///
+/// Raw strings never cross this boundary. The OIDC adapter must first parse every claim through
+/// [`vocab::GrantPermission`], and the private owned fields prevent consumers from mutating the
+/// verified set after the token has entered the authentication funnel.
+#[derive(Clone)]
+pub struct VerifiedFederatedPermissions {
+    permissions: Box<[vocab::GrantPermission]>,
+}
+
+impl VerifiedFederatedPermissions {
+    pub fn new(
+        permissions: impl IntoIterator<Item = vocab::GrantPermission>,
+    ) -> Result<Self, VerifiedClaimShapeError> {
+        let mut seen = std::collections::HashSet::new();
+        let mut verified = Vec::new();
+        for permission in permissions {
+            if !seen.insert(permission) {
+                return Err(VerifiedClaimShapeError::Invalid);
+            }
+            verified.push(permission);
+        }
+        if verified.is_empty() {
+            return Err(VerifiedClaimShapeError::Invalid);
+        }
+        Ok(Self {
+            permissions: verified.into_boxed_slice(),
+        })
+    }
+
+    pub fn allows_route(&self, permission: vocab::RoutePermissionId) -> bool {
+        self.permissions
+            .iter()
+            .any(|grant| grant.matches_route(permission))
+    }
+
+    pub fn as_slice(&self) -> &[vocab::GrantPermission] {
+        &self.permissions
+    }
+}
+
 impl VerifiedClaims {
     pub fn rss_user(user_id: UserId, tenant: TenantId, grant: VerifiedAccessGrantFacts) -> Self {
         Self {
@@ -749,6 +792,7 @@ impl VerifiedClaims {
         subject: impl Into<String>,
         tenant: Option<TenantId>,
         kind: PrincipalKind,
+        permissions: VerifiedFederatedPermissions,
     ) -> Result<Self, VerifiedClaimShapeError> {
         let subject = subject.into();
         let tenant_shape_valid = match kind {
@@ -765,6 +809,7 @@ impl VerifiedClaims {
                 subject,
                 tenant,
                 kind,
+                permissions,
             },
         })
     }
@@ -790,10 +835,12 @@ impl VerifiedClaims {
                 subject,
                 tenant,
                 kind,
+                permissions,
             } => VerifiedClaimsView::FederatedAccess {
                 subject,
                 tenant: *tenant,
                 kind: *kind,
+                permissions,
             },
             VerifiedClaimsProfile::ServiceToken { caller } => {
                 VerifiedClaimsView::ServiceToken { caller: *caller }
@@ -929,7 +976,7 @@ mod pii_debug {
     //! INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }（同 `signer.rs` 的 `pii_debug`）。
     use super::{
         RawCredential, ServiceTokenTenantBinding, TokenProfile, VerifiedAccessGrantFacts,
-        VerifiedClaims,
+        VerifiedClaims, VerifiedFederatedPermissions,
     };
     use vocab::tenant::TenantId;
 
@@ -999,6 +1046,10 @@ mod pii_debug {
                 TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").expect("canonical tenant"),
             ),
             vocab::PrincipalKind::Admin,
+            VerifiedFederatedPermissions::new([vocab::GrantPermission::route(
+                vocab::RoutePermissionId::SettingsConfigPublish,
+            )])
+            .expect("literal permission set"),
         )
         .expect("federated claims");
         let dbg = format!("{vc:?}");

@@ -30,12 +30,20 @@ test-support = [
 
 [dependencies]
 anyhow = { workspace = true }
+amqp = { path = "../../adapters/amqp", features = ["backend"] }
 authn = { path = "../../crates/authn" }
+aws-credential-types = { workspace = true }
+aws-sdk-s3 = { workspace = true }
+aws-smithy-http-client = { workspace = true }
 axum = { workspace = true }
 assembly-schema = { path = "../../crates/assembly-schema" }
 bootstrap = { path = "../../crates/bootstrap" }
 consistency = { path = "../../crates/consistency" }
+crypto = { package = "crypto-adapter", path = "../../adapters/crypto" }
 diport = { path = "../../crates/diport" }
+distributed = { path = "../../crates/distributed" }
+eventexec = { path = "../../crates/eventexec" }
+eventing-composition = { path = "../../composition/eventing", features = ["settings-consumers"] }
 generated = { path = "../../generated" }
 httpd = { path = "../../adapters/httpd" }
 httpserve = { path = "../../crates/httpserve" }
@@ -46,6 +54,7 @@ prometheus_adapter = { package = "prometheus-adapter", path = "../../adapters/pr
 ] }
 primitives = { path = "../../crates/primitives" }
 ratelimit = { path = "../../adapters/ratelimit" }
+redis = { package = "redis-adapter", path = "../../adapters/redis", features = ["backend"] }
 reqwest = { workspace = true, features = ["rustls-tls-webpki-roots"] }
 runtimeexec = { path = "../../crates/runtimeexec" }
 runctx = { path = "../../crates/runctx" }
@@ -55,6 +64,7 @@ serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 settings = { path = "../../crates/settings", features = ["seed-data"] }
 settings-composition = { path = "../../composition/settings" }
+s3 = { path = "../../adapters/s3", features = ["backend"] }
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-util = { workspace = true }
 toml = { workspace = true }

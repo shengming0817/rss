@@ -12,11 +12,15 @@ use diport::{DynManagedResource, ManagedResource, ShutdownError};
 
 use crate::listeners;
 
-const TOTAL_DRAIN_BUDGET: Duration = Duration::from_secs(20);
+const TOTAL_DRAIN_BUDGET: Duration = Duration::from_secs(60);
 const READINESS_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 pub(crate) fn total_drain_budget() -> anyhow::Result<runtimeexec::TotalDrainBudget> {
     runtimeexec::TotalDrainBudget::new(TOTAL_DRAIN_BUDGET)
+}
+
+pub(crate) const fn total_drain_duration() -> Duration {
+    TOTAL_DRAIN_BUDGET
 }
 
 pub(crate) type ReadyFuture = Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send>>;
@@ -53,29 +57,27 @@ impl runtimeexec::StartupAdapter for ProductionStartup {
             transaction,
         )
         .await?;
-        let (providers, listeners_config, support_probe, provider_bindings) =
-            completed.into_parts();
-        let inventory_seed = compiled_plan.into_inventory_seed(provider_bindings)?;
-        let inventory_seed = match build_metadata {
-            Some(metadata) => inventory_seed.with_build_metadata(metadata),
-            None => inventory_seed,
-        };
+        let (providers, listeners_config, support_probe) = completed.into_parts();
         let (support_name, support_probe) = support_probe.into_parts();
-        transaction
-            .provider_output_mut()
-            .probes
-            .push((support_name, support_probe));
+        transaction.stage_domain_output(bootstrap::DomainModuleResult {
+            probes: vec![(support_name, support_probe)],
+            ..Default::default()
+        });
         let deps = crate::SharedRuntimeDeps::production(
             providers.pg,
             providers.vault,
             providers.settings_key,
-            providers.vault_readiness,
+            providers.settings_readiness,
         );
         let bindings = crate::wire_domains(&deps).await?;
         let (primary, admin, health, request_budget) = listeners_config.into_listener_inputs();
         prepare_assembly(
-            AssemblyStartupInputs::new(
+            AssemblyStartupInputs::production(
                 bindings,
+                providers.eventing,
+                providers.role_closer,
+                compiled_plan,
+                build_metadata,
                 providers.verifier,
                 providers.audit_sink,
                 providers.limiter,
@@ -84,7 +86,7 @@ impl runtimeexec::StartupAdapter for ProductionStartup {
                 admin,
                 health,
                 request_budget,
-                inventory_seed,
+                providers.readiness_startup_timeout,
                 ReadyAction::Log,
             )
             .with_frontend(frontend),
@@ -96,6 +98,7 @@ impl runtimeexec::StartupAdapter for ProductionStartup {
 
 pub(crate) struct AssemblyStartupInputs {
     bindings: Vec<bootstrap::DomainBinding>,
+    provider_activation: ProviderActivation,
     verifier: crate::auth_bridge::FederatedVerifier,
     audit_sink: httpserve::AuditSinkHandle,
     limiter: Arc<ratelimit::GovernorLimiter>,
@@ -105,15 +108,69 @@ pub(crate) struct AssemblyStartupInputs {
     health: std::net::SocketAddr,
     request_budget: Duration,
     ready: ReadyAction,
-    inventory_seed: runtimeexec::inventory::RuntimeInventorySeed,
+    readiness_startup_timeout: Duration,
     frontend: Option<crate::config::ServingFrontendConfig>,
     #[cfg(feature = "test-support")]
     activation_gate: Option<SocketAddr>,
 }
 
+enum ProviderActivation {
+    Production {
+        eventing: crate::eventing::EventingInputs,
+        role_closer: crate::providers::ProviderRoleCloser,
+        plan: crate::plan::SettingsOnlyPlan,
+        build_metadata: Option<runtimeexec::inventory::BuildMetadata>,
+    },
+    #[cfg(feature = "test-support")]
+    Fixture(runtimeexec::inventory::RuntimeInventorySeed),
+}
+
 impl AssemblyStartupInputs {
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn new(
+    pub(crate) fn production(
+        bindings: Vec<bootstrap::DomainBinding>,
+        eventing: crate::eventing::EventingInputs,
+        role_closer: crate::providers::ProviderRoleCloser,
+        plan: crate::plan::SettingsOnlyPlan,
+        build_metadata: Option<runtimeexec::inventory::BuildMetadata>,
+        verifier: crate::auth_bridge::FederatedVerifier,
+        audit_sink: httpserve::AuditSinkHandle,
+        limiter: Arc<ratelimit::GovernorLimiter>,
+        metrics: Arc<dyn diport::MetricsExporter>,
+        primary: std::net::SocketAddr,
+        admin: std::net::SocketAddr,
+        health: std::net::SocketAddr,
+        request_budget: Duration,
+        readiness_startup_timeout: Duration,
+        ready: ReadyAction,
+    ) -> Self {
+        Self {
+            bindings,
+            provider_activation: ProviderActivation::Production {
+                eventing,
+                role_closer,
+                plan,
+                build_metadata,
+            },
+            verifier,
+            audit_sink,
+            limiter,
+            metrics,
+            primary,
+            admin,
+            health,
+            request_budget,
+            ready,
+            readiness_startup_timeout,
+            frontend: None,
+            #[cfg(feature = "test-support")]
+            activation_gate: None,
+        }
+    }
+
+    #[cfg(feature = "test-support")]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn fixture(
         bindings: Vec<bootstrap::DomainBinding>,
         verifier: crate::auth_bridge::FederatedVerifier,
         audit_sink: httpserve::AuditSinkHandle,
@@ -128,6 +185,7 @@ impl AssemblyStartupInputs {
     ) -> Self {
         Self {
             bindings,
+            provider_activation: ProviderActivation::Fixture(inventory_seed),
             verifier,
             audit_sink,
             limiter,
@@ -137,9 +195,8 @@ impl AssemblyStartupInputs {
             health,
             request_budget,
             ready,
-            inventory_seed,
+            readiness_startup_timeout: Duration::from_secs(30),
             frontend: None,
-            #[cfg(feature = "test-support")]
             activation_gate: None,
         }
     }
@@ -174,13 +231,30 @@ pub(crate) async fn prepare_assembly(
         }
     };
     transaction.stage_domain_output(domain_output);
-    crate::validate_nonactivated_settings_subscriber(&mut registry)?;
+    let inventory_seed = match inputs.provider_activation {
+        ProviderActivation::Production {
+            eventing,
+            role_closer,
+            plan,
+            build_metadata,
+        } => {
+            let outputs = crate::eventing::wire(eventing, registry.drain_subscribers())?;
+            let completed_roles = role_closer.finish(outputs, transaction.provider_output_mut())?;
+            let seed = plan.into_inventory_seed(completed_roles)?;
+            match build_metadata {
+                Some(metadata) => seed.with_build_metadata(metadata),
+                None => seed,
+            }
+        }
+        #[cfg(feature = "test-support")]
+        ProviderActivation::Fixture(seed) => seed,
+    };
     let (provider_output, domain_output) = transaction.outputs_mut();
     register_probes(&mut registry, provider_output)?;
     register_probes(&mut registry, domain_output)?;
     let reporter = Arc::new(registry.take_health_reporter());
     let (inventory_publisher, inventory_reader) =
-        runtimeexec::inventory::inventory_channel(inputs.inventory_seed, Arc::clone(&reporter));
+        runtimeexec::inventory::inventory_channel(inventory_seed, Arc::clone(&reporter));
     let framework_routes = crate::inventory::InventoryFrameworkRoutes::new(inventory_reader);
     let (finalized, receipt) = listeners::finalize(
         &mut registry,
@@ -206,8 +280,14 @@ pub(crate) async fn prepare_assembly(
         None => adapter,
     };
     let readiness = receipt.readiness();
-    let ready: ReadyHook =
-        Box::new(move |inventory| Box::pin(inputs.ready.publish(inventory, readiness)));
+    let readiness_startup_timeout = inputs.readiness_startup_timeout;
+    let ready: ReadyHook = Box::new(move |inventory| {
+        Box::pin(
+            inputs
+                .ready
+                .publish(inventory, readiness, readiness_startup_timeout),
+        )
+    });
     Ok(runtimeexec::PreparedLaunch::new(
         adapter, receipt, ready, None,
     ))
@@ -280,9 +360,31 @@ impl ReadyAction {
         self,
         inventory: listeners::ListenerInventory,
         reporter: Arc<bootstrap::HealthReporter>,
+        startup_timeout: Duration,
     ) -> anyhow::Result<()> {
         log_listeners_activated(&inventory);
-        wait_until_healthy(&reporter).await;
+        if tokio::time::timeout(startup_timeout, wait_until_healthy(&reporter))
+            .await
+            .is_err()
+        {
+            let report = reporter.report();
+            for check in report
+                .checks()
+                .iter()
+                .filter(|check| check.status() != primitives::HealthStatus::Healthy)
+            {
+                tracing::error!(
+                    event = "settingsonly.readiness",
+                    component = "settingsonly",
+                    probe = check.name().as_str(),
+                    outcome = check.status().as_label(),
+                    reason = check.detail(),
+                    error_type = "startup_timeout",
+                    "settingsonly readiness probe blocked startup"
+                );
+            }
+            anyhow::bail!("settingsonly readiness startup timed out");
+        }
         log_assembly_ready(&inventory);
         #[cfg(feature = "test-support")]
         self.notify()?;
@@ -372,7 +474,8 @@ mod tests {
             admin: "127.0.0.1:3".parse().expect("admin address"),
             health: "127.0.0.1:2".parse().expect("health address"),
         };
-        let mut ready = tokio::spawn(ReadyAction::Log.publish(inventory, reporter));
+        let mut ready =
+            tokio::spawn(ReadyAction::Log.publish(inventory, reporter, Duration::from_secs(2)));
 
         assert!(
             tokio::time::timeout(Duration::from_millis(30), &mut ready)
@@ -386,5 +489,38 @@ mod tests {
             .expect("healthy aggregate must complete readiness publication")
             .expect("readiness task must not panic")
             .expect("readiness publication must succeed");
+    }
+
+    #[tokio::test]
+    async fn ready_action_fails_closed_with_the_stable_timeout() {
+        let ready = Arc::new(AtomicBool::new(false));
+        let probe_name =
+            primitives::ProbeName::parse("blocked-ready").expect("valid readiness probe name");
+        let mut registry = bootstrap::Registry::new();
+        registry
+            .probe(
+                probe_name.clone(),
+                Box::new(ToggleProbe {
+                    name: probe_name,
+                    ready,
+                }),
+            )
+            .expect("register blocked readiness probe");
+        let error = ReadyAction::Log
+            .publish(
+                listeners::ListenerInventory {
+                    primary: "127.0.0.1:1".parse().expect("primary address"),
+                    admin: "127.0.0.1:3".parse().expect("admin address"),
+                    health: "127.0.0.1:2".parse().expect("health address"),
+                },
+                Arc::new(registry.take_health_reporter()),
+                Duration::from_millis(5),
+            )
+            .await
+            .expect_err("blocked required probe must fail startup");
+        assert_eq!(
+            error.to_string(),
+            "settingsonly readiness startup timed out"
+        );
     }
 }

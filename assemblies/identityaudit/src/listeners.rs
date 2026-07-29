@@ -576,6 +576,7 @@ mod tests {
             tenant_id: Some(tenant),
             principal_kind: vocab::PrincipalKind::User,
             principal_id: "unbound-rss-user".to_string(),
+            federated_permissions: None,
             resource: None,
         };
         assert_eq!(

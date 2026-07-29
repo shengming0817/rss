@@ -402,8 +402,9 @@ fn mint_alg_none(payload: &str) -> String {
 /// Federated superAdmin JWT payload（无需 tenant claim；由 Federated kind allowlist 放行）。
 fn super_admin_payload(exp: i64, iss: &str, aud: &str) -> String {
     format!(
-        r#"{{"sub":"alice","iat":{},"exp":{exp},"iss":"{iss}","aud":"{aud}","token_use":"access","kind":"superAdmin"}}"#,
-        exp - 900
+        r#"{{"sub":"alice","iat":{},"exp":{exp},"iss":"{iss}","aud":"{aud}","token_use":"access","kind":"superAdmin","permissions":["{}"]}}"#,
+        exp - 900,
+        vocab::RoutePermissionId::IdentityPolicyRead.as_str(),
     )
 }
 fn super_admin_jwt(sk: &SigningKey, exp: i64, iss: &str, aud: &str) -> String {
@@ -425,9 +426,10 @@ fn federated_scoped_jwt(kind: &str) -> String {
         r#"{{"alg":"ES256","typ":"at+jwt","kid":"{FEDERATED_KID}"}}"#
     ));
     let payload = format!(
-        r#"{{"sub":"alice","tenant_id":"{TENANT}","kind":"{kind}","iat":{},"exp":{},"iss":"{FEDERATED_ISS}","aud":"{FEDERATED_AUD}","token_use":"access"}}"#,
+        r#"{{"sub":"alice","tenant_id":"{TENANT}","kind":"{kind}","iat":{},"exp":{},"iss":"{FEDERATED_ISS}","aud":"{FEDERATED_AUD}","token_use":"access","permissions":["{}"]}}"#,
         NOW,
         NOW + 900,
+        vocab::RoutePermissionId::IdentityPolicyRead.as_str(),
     );
     let body = B64.encode(payload.as_bytes());
     let signing_input = format!("{header}.{body}");
@@ -466,9 +468,14 @@ fn federated_es256_provider() -> OidcProvider<diport::FederatedAccessProfile> {
         .add_es256_sec1(FEDERATED_KID, &sec1(&sk_federated()))
         .expect("federated keyed ES256 public key")
         .build();
+    let permissions = oidc::FederatedPermissionUniverse::try_new([vocab::GrantPermission::route(
+        vocab::RoutePermissionId::IdentityPolicyRead,
+    )])
+    .expect("non-empty federated permission universe");
     let config = oidc::VerifierConfigBuilder::<diport::FederatedAccessProfile>::new(
         FEDERATED_ISS,
         FEDERATED_AUD,
+        permissions,
     )
     .keys_static(keys)
     .trust_kind("superAdmin")

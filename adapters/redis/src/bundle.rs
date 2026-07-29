@@ -8,10 +8,54 @@ use core::time::Duration;
 use std::sync::Arc;
 
 use consistency::{IdemKey, InboxReceiptContext, InboxStore, LeaseOutcome, LeaseToken, SeenState};
-use deadpool_redis::Pool;
+use deadpool_redis::{Manager, Pool, Runtime};
 use diport::{DynCasStore, DynLockStore, DynManagedResource, ManagedResource, ShutdownError};
 
 use crate::{InvalidClaimTtl, RedisStore, claimer};
+
+/// Explicit private trust anchor for a REDISS connection.
+#[derive(Clone)]
+pub struct RedisPrivateCa(Vec<u8>);
+
+/// Invalid explicit Redis trust anchor. The fixed message does not expose PEM material.
+#[derive(Debug, thiserror::Error)]
+#[error("invalid Redis private CA PEM")]
+pub struct RedisPrivateCaError;
+
+impl RedisPrivateCa {
+    /// Build a non-empty PEM trust anchor. The Redis rustls client performs full certificate
+    /// parsing when the typed connection is assembled.
+    pub fn from_pem(pem: Vec<u8>) -> Result<Self, RedisPrivateCaError> {
+        let text = std::str::from_utf8(&pem).map_err(|_| RedisPrivateCaError)?;
+        if text.trim().is_empty()
+            || !text.contains("-----BEGIN CERTIFICATE-----")
+            || !text.contains("-----END CERTIFICATE-----")
+        {
+            return Err(RedisPrivateCaError);
+        }
+        Ok(Self(pem))
+    }
+}
+
+/// Typed REDISS pool construction failure. Messages are stable and contain no endpoint/PEM data.
+#[derive(Debug, thiserror::Error)]
+pub enum RedisConnectError {
+    #[error("redis TLS client construction failed")]
+    Client,
+    #[error("redis pool construction failed")]
+    Pool,
+}
+
+#[cfg(test)]
+mod private_ca_tests {
+    use super::RedisPrivateCa;
+
+    #[test]
+    fn private_ca_rejects_empty_and_malformed_pem() {
+        assert!(RedisPrivateCa::from_pem(Vec::new()).is_err());
+        assert!(RedisPrivateCa::from_pem(b"not a certificate".to_vec()).is_err());
+    }
+}
 
 /// Redis readiness ping failed. Display is intentionally stable and does not include endpoint data.
 #[derive(Debug, thiserror::Error)]
@@ -25,6 +69,32 @@ pub struct RedisRuntimeDeps {
 }
 
 impl RedisRuntimeDeps {
+    /// Production REDISS assembly path with a required explicit private CA. The custom root store
+    /// is embedded in every connection produced by the pool; no optional CA/default constructor is
+    /// reachable through this funnel.
+    pub fn connect_with_private_ca(
+        endpoint: &secure::RedisEndpoint,
+        ca: RedisPrivateCa,
+    ) -> Result<Self, RedisConnectError> {
+        #[allow(clippy::disallowed_methods)]
+        // reason: sole typed Redis TLS client construction callsite; endpoint is validated/redacted.
+        let client = deadpool_redis::redis::Client::build_with_tls(
+            endpoint.expose(),
+            deadpool_redis::redis::TlsCertificates {
+                client_tls: None,
+                root_cert: Some(ca.0),
+            },
+        )
+        .map_err(|_| RedisConnectError::Client)?;
+        let manager = Manager::new(client.get_connection_info().clone())
+            .map_err(|_| RedisConnectError::Client)?;
+        let pool = Pool::builder(manager)
+            .runtime(Runtime::Tokio1)
+            .build()
+            .map_err(|_| RedisConnectError::Pool)?;
+        Ok(Self::setup(pool))
+    }
+
     /// 唯一公开构造路径：新建 `Arc<RedisStore>`。`RedisStore::new` 为 crate 内可见，外部不能绕过 bundle。
     #[must_use]
     pub fn setup(pool: Pool) -> Self {

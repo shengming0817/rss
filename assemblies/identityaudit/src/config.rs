@@ -1320,7 +1320,7 @@ tenantAuthorityClockSkewSeconds = 60
         let mut source = TestSource::complete(VALID_CONFIG);
         let captured = capture_from(Path::new("ignored"), &mut source).expect("capture");
         assert_eq!(source.document_reads, 1);
-        assert_eq!(source.environment_reads.len(), 18);
+        assert_eq!(source.environment_reads.len(), 19);
         assert!(source.environment_reads.values().all(|reads| *reads == 1));
         assert_eq!(source.environment_reads[FORBIDDEN_SHARED_AMQP_URL_ENV], 1);
         assert!(!format!("{captured:?}").contains(SECRET_SENTINEL));

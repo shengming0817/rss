@@ -36,6 +36,8 @@ struct Claims {
     nbf: Option<i64>,
     iss: String,
     aud: Audience,
+    #[serde(default)]
+    permissions: Option<Vec<String>>,
     #[serde(flatten)]
     extra: serde_json::Map<String, serde_json::Value>,
 }
@@ -170,12 +172,19 @@ fn validate_profile_claims<P: TokenProfileMarker>(
                     return Err(PdpError::InvalidSignature);
                 }
             };
-            VerifiedClaims::federated_access(claims.sub.clone(), tenant, kind).map_err(|_| {
-                log_claim_fail(TelemetryReason::UnsupportedPrincipalKind);
-                PdpError::InvalidSignature
-            })
+            let permissions = validate_federated_permissions(config, claims)?;
+            VerifiedClaims::federated_access(claims.sub.clone(), tenant, kind, permissions).map_err(
+                |_| {
+                    log_claim_fail(TelemetryReason::FederatedPermissionsInvalid);
+                    PdpError::InvalidSignature
+                },
+            )
         }
         TokenProfile::ServiceToken => {
+            if claims.permissions.is_some() {
+                log_claim_fail(TelemetryReason::ServiceKindInvalid);
+                return Err(PdpError::InvalidSignature);
+            }
             if kind.as_deref() != Some("service") {
                 log_claim_fail(TelemetryReason::ServiceKindInvalid);
                 return Err(PdpError::InvalidSignature);
@@ -194,11 +203,45 @@ fn validate_profile_claims<P: TokenProfileMarker>(
     }
 }
 
+fn validate_federated_permissions<P: TokenProfileMarker>(
+    config: &VerifierConfig<P>,
+    claims: &Claims,
+) -> Result<diport::VerifiedFederatedPermissions, PdpError> {
+    let raw_permissions = claims
+        .permissions
+        .as_ref()
+        .filter(|values| !values.is_empty())
+        .ok_or_else(|| {
+            log_claim_fail(TelemetryReason::FederatedPermissionsInvalid);
+            PdpError::InvalidSignature
+        })?;
+    let mut permissions = Vec::with_capacity(raw_permissions.len());
+    for raw in raw_permissions {
+        let permission = vocab::GrantPermission::parse(raw).map_err(|_| {
+            log_claim_fail(TelemetryReason::FederatedPermissionsInvalid);
+            PdpError::InvalidSignature
+        })?;
+        if permission.as_route().is_none() || !config.is_federated_permission_trusted(permission) {
+            log_claim_fail(TelemetryReason::FederatedPermissionsInvalid);
+            return Err(PdpError::Untrusted);
+        }
+        permissions.push(permission);
+    }
+    diport::VerifiedFederatedPermissions::new(permissions).map_err(|_| {
+        log_claim_fail(TelemetryReason::FederatedPermissionsInvalid);
+        PdpError::InvalidSignature
+    })
+}
+
 fn validate_rss_profile_claims(
     claims: &Claims,
     tenant: Option<String>,
     kind: Option<String>,
 ) -> Result<VerifiedClaims, PdpError> {
+    if claims.permissions.is_some() {
+        log_claim_fail(TelemetryReason::RssGrantFactsInvalid);
+        return Err(PdpError::InvalidSignature);
+    }
     validate_rss_time_window(claims)?;
     if kind.as_deref() != Some("user") {
         log_claim_fail(TelemetryReason::RssKindInvalid);
@@ -384,14 +427,22 @@ mod tests {
 
     #[allow(clippy::expect_used)]
     fn minimal_federated_config() -> VerifierConfig<diport::FederatedAccessProfile> {
-        let mut builder =
-            VerifierConfigBuilder::<diport::FederatedAccessProfile>::new("https://iss", "aud")
-                .keys_static(
-                    AccessStaticKeySource::builder()
-                        .add_es256_sec1("test-es256", &valid_es256_sec1())
-                        .expect("key")
-                        .build(),
-                );
+        let permissions =
+            crate::FederatedPermissionUniverse::try_new([vocab::GrantPermission::route(
+                vocab::RoutePermissionId::SettingsConfigPublish,
+            )])
+            .expect("permission universe");
+        let mut builder = VerifierConfigBuilder::<diport::FederatedAccessProfile>::new(
+            "https://iss",
+            "aud",
+            permissions,
+        )
+        .keys_static(
+            AccessStaticKeySource::builder()
+                .add_es256_sec1("test-es256", &valid_es256_sec1())
+                .expect("key")
+                .build(),
+        );
         for kind in ["user", "device", "admin", "superAdmin"] {
             builder = builder.trust_kind(kind);
         }
@@ -452,6 +503,7 @@ mod tests {
                 subject,
                 tenant,
                 kind,
+                ..
             } => (subject, tenant, kind),
             VerifiedClaimsView::RssUser { .. } => {
                 panic!("expected federated access claims, got RSS user")
@@ -499,6 +551,7 @@ mod tests {
             nbf,
             iss: "https://iss".to_string(),
             aud: Audience::One("aud".to_string()),
+            permissions: None,
             extra: serde_json::Map::new(),
         }
     }
@@ -755,6 +808,7 @@ mod tests {
                 let mut payload = valid_rss_payload();
                 payload["sub"] = serde_json::json!(format!("external-{kind_claim}"));
                 payload["kind"] = serde_json::json!(kind_claim);
+                payload["permissions"] = serde_json::json!(["settings.config-publish"]);
                 let fixture = payload.as_object_mut().expect("object fixture");
                 if !scoped {
                     fixture.remove("tenant_id");
@@ -774,6 +828,61 @@ mod tests {
                     assert_eq!(tenant.to_string(), CANON_TENANT);
                 }
             }
+        }
+    }
+
+    #[test]
+    fn federated_permissions_reject_every_non_closed_shape() {
+        let config = minimal_federated_config();
+        let cases = [
+            (None, PdpError::InvalidSignature),
+            (Some(serde_json::json!([])), PdpError::InvalidSignature),
+            (
+                Some(serde_json::json!([
+                    "settings.config-publish",
+                    "settings.config-publish"
+                ])),
+                PdpError::InvalidSignature,
+            ),
+            (
+                Some(serde_json::json!(["settings.unknown"])),
+                PdpError::InvalidSignature,
+            ),
+            (
+                Some(serde_json::json!(["runtime:inventory:read"])),
+                PdpError::Untrusted,
+            ),
+            (
+                Some(serde_json::json!([
+                    "identity:policy:manage:settings.config-publish"
+                ])),
+                PdpError::Untrusted,
+            ),
+        ];
+        for (permissions, expected) in cases {
+            let mut payload = valid_rss_payload();
+            payload["sub"] = serde_json::json!("external-user");
+            payload["kind"] = serde_json::json!("user");
+            for name in ["sid", "jti", "auth_time", "authn_epoch"] {
+                payload
+                    .as_object_mut()
+                    .expect("object fixture")
+                    .remove(name);
+            }
+            match permissions {
+                Some(value) => payload["permissions"] = value,
+                None => {
+                    payload
+                        .as_object_mut()
+                        .expect("object fixture")
+                        .remove("permissions");
+                }
+            }
+            let error = validate_json(&config, &payload).expect_err("shape must fail closed");
+            assert_eq!(
+                std::mem::discriminant(&error),
+                std::mem::discriminant(&expected)
+            );
         }
     }
 }

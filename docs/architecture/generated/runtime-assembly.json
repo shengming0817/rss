@@ -11,14 +11,14 @@
       "path": "assemblies/runtime/assembly.toml",
       "digest": {
         "algorithm": "sha256",
-        "value": "51752fcfebc922aa16a7710769bb5b9adfd20d7f0fc484d9fe06590e28d44e9d"
+        "value": "3cd55bd55650bb13ecb86ffb752432c25209e3e0cae3fa3a0d21799cdb4c846b"
       }
     },
     {
       "path": "assemblies/runtime/src/generated/modules_gen.rs",
       "digest": {
         "algorithm": "sha256",
-        "value": "c502022368b619bfe3ff3486a0f2fa309312ac37ec960dbc53ab1d40cdce4d66"
+        "value": "25f55d92a394850c4688967e2c0337c3ba19348bce42a5b19b6aa1ca25a2d877"
       }
     },
     {
@@ -543,7 +543,17 @@
     },
     {
       "from": "n_f1dbca5fb388baaa413988f8",
+      "to": "n_0bd47314bdfe98b017027a32",
+      "kind": "contributes-output"
+    },
+    {
+      "from": "n_f1dbca5fb388baaa413988f8",
       "to": "n_2cccb5238d48d945bddd07c4",
+      "kind": "contributes-output"
+    },
+    {
+      "from": "n_f1dbca5fb388baaa413988f8",
+      "to": "n_b07dcd04ac2a96bb91f67966",
       "kind": "contributes-output"
     },
     {
@@ -558,7 +568,17 @@
     },
     {
       "from": "n_9c6899a1908cf425a8116055",
+      "to": "n_0bd47314bdfe98b017027a32",
+      "kind": "contributes-output"
+    },
+    {
+      "from": "n_9c6899a1908cf425a8116055",
       "to": "n_2cccb5238d48d945bddd07c4",
+      "kind": "contributes-output"
+    },
+    {
+      "from": "n_9c6899a1908cf425a8116055",
+      "to": "n_b07dcd04ac2a96bb91f67966",
       "kind": "contributes-output"
     },
     {
@@ -573,7 +593,17 @@
     },
     {
       "from": "n_6675fe85c062a3bcb7a3bb64",
+      "to": "n_0bd47314bdfe98b017027a32",
+      "kind": "contributes-output"
+    },
+    {
+      "from": "n_6675fe85c062a3bcb7a3bb64",
       "to": "n_2cccb5238d48d945bddd07c4",
+      "kind": "contributes-output"
+    },
+    {
+      "from": "n_6675fe85c062a3bcb7a3bb64",
+      "to": "n_b07dcd04ac2a96bb91f67966",
       "kind": "contributes-output"
     },
     {
@@ -628,6 +658,11 @@
     },
     {
       "from": "n_5300d802758f3183f772badf",
+      "to": "n_0bd47314bdfe98b017027a32",
+      "kind": "contributes-output"
+    },
+    {
+      "from": "n_5300d802758f3183f772badf",
       "to": "n_2cccb5238d48d945bddd07c4",
       "kind": "contributes-output"
     },
@@ -658,7 +693,17 @@
     },
     {
       "from": "n_fb2fbc8ca89d116b164660ae",
+      "to": "n_0bd47314bdfe98b017027a32",
+      "kind": "contributes-output"
+    },
+    {
+      "from": "n_fb2fbc8ca89d116b164660ae",
       "to": "n_2cccb5238d48d945bddd07c4",
+      "kind": "contributes-output"
+    },
+    {
+      "from": "n_fb2fbc8ca89d116b164660ae",
+      "to": "n_b07dcd04ac2a96bb91f67966",
       "kind": "contributes-output"
     },
     {
@@ -670,6 +715,11 @@
       "from": "n_d954278a62814c4c97d6a2ee",
       "to": "n_f1d77e993c69992a1b2a567b",
       "kind": "declares-provider"
+    },
+    {
+      "from": "n_f1d77e993c69992a1b2a567b",
+      "to": "n_0bd47314bdfe98b017027a32",
+      "kind": "contributes-output"
     },
     {
       "from": "n_f1d77e993c69992a1b2a567b",
@@ -750,6 +800,16 @@
       "from": "n_d954278a62814c4c97d6a2ee",
       "to": "n_03a8af107ef75ec5eeb24e67",
       "kind": "declares-provider"
+    },
+    {
+      "from": "n_03a8af107ef75ec5eeb24e67",
+      "to": "n_0bd47314bdfe98b017027a32",
+      "kind": "contributes-output"
+    },
+    {
+      "from": "n_03a8af107ef75ec5eeb24e67",
+      "to": "n_2cccb5238d48d945bddd07c4",
+      "kind": "contributes-output"
     },
     {
       "from": "n_03a8af107ef75ec5eeb24e67",

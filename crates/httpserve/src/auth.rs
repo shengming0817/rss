@@ -390,6 +390,7 @@ pub struct RouteAuthorizationRequest {
     pub principal_kind: PrincipalKind,
     pub principal_id: String,
     pub resource: Option<RouteResource>,
+    pub federated_permissions: Option<Box<[vocab::GrantPermission]>>,
 }
 
 /// Field mask carried by route authorization output.
@@ -525,6 +526,7 @@ pub async fn authorize_subject_for_permission(
             principal_kind,
             principal_id: principal_id.clone(),
             resource: resource.clone(),
+            federated_permissions: evidence.federated_permissions(),
         })
         .await;
     decision.projection().map(|projection| {
@@ -561,6 +563,7 @@ pub struct Authenticated {
     principal_id: String,
     tenant_id: Option<TenantId>,
     service_caller: Option<vocab::ServiceCallerDomain>,
+    federated_permissions: Option<Box<[vocab::GrantPermission]>>,
 }
 
 /// Caller-supplied fields for an audit event whose principal identity must come from verified
@@ -595,6 +598,7 @@ impl Authenticated {
             principal_id: principal_id.into(),
             tenant_id,
             service_caller: None,
+            federated_permissions: None,
         }
     }
 
@@ -603,6 +607,7 @@ impl Authenticated {
         principal_kind: PrincipalKind,
         principal_id: impl Into<String>,
         tenant_id: Option<TenantId>,
+        permissions: &diport::VerifiedFederatedPermissions,
     ) -> Self {
         Self {
             scheme: RequiredScheme::FederatedAccessToken,
@@ -610,6 +615,7 @@ impl Authenticated {
             principal_id: principal_id.into(),
             tenant_id,
             service_caller: None,
+            federated_permissions: Some(permissions.as_slice().to_vec().into_boxed_slice()),
         }
     }
 
@@ -622,6 +628,7 @@ impl Authenticated {
             principal_id: principal_id.into(),
             tenant_id: Some(tenant_id),
             service_caller: None,
+            federated_permissions: None,
         }
     }
 
@@ -633,6 +640,7 @@ impl Authenticated {
             principal_id: principal_id.into(),
             tenant_id: None,
             service_caller: None,
+            federated_permissions: None,
         }
     }
 
@@ -644,6 +652,7 @@ impl Authenticated {
             principal_id: caller.as_str().to_owned(),
             tenant_id: Some(tenant_id),
             service_caller: Some(caller),
+            federated_permissions: None,
         }
     }
 
@@ -671,6 +680,12 @@ impl Authenticated {
     /// Verified closed service caller, present only for service-token evidence.
     pub(crate) fn service_caller_domain(&self) -> Option<vocab::ServiceCallerDomain> {
         self.service_caller
+    }
+
+    fn federated_permissions(&self) -> Option<Box<[vocab::GrantPermission]>> {
+        self.federated_permissions
+            .as_deref()
+            .map(|permissions| permissions.to_vec().into_boxed_slice())
     }
 
     /// Bind verified principal identity to caller-supplied operation fields without exposing that
@@ -1098,6 +1113,7 @@ async fn authorize_route_permission(
             principal_kind,
             principal_id: principal_id.clone(),
             resource: resource.clone(),
+            federated_permissions: evidence.federated_permissions(),
         })
         .await;
     decision.projection().map(|projection| {
@@ -1129,6 +1145,7 @@ async fn authorize_mtls_route(
         principal_kind: evidence.principal_kind(),
         principal_id,
         resource: None,
+        federated_permissions: evidence.federated_permissions(),
     };
     authorizer.authorize(request).await.projection().is_some()
 }

@@ -6,10 +6,7 @@ pub(super) mod dlx;
 pub(super) mod domain_transport;
 pub(super) mod keyring;
 
-use self::dlx::{
-    DlxLifecycleBootstrapConfig, build_dlx_lifecycle_bootstrap_config_from,
-    verify_dlx_vault_key_capability,
-};
+use self::dlx::{DlxLifecycleBootstrapConfig, build_dlx_lifecycle_bootstrap_config_from};
 use self::domain_transport::{
     DomainTransportConfig, DomainTransportRuntime, topology_label, wire_domain_transport,
 };
@@ -18,6 +15,7 @@ use super::maintenance::wire_service_token_replay_sweeper;
 use crate::SharedRuntimeDeps;
 use crate::config::RuntimeServingConfigParts;
 use crate::infra::pg::{PgRuntimeConfig, PgRuntimeConfigParts};
+use crate::infra::redis::{REDIS_READY_PROBE_NAME, RedisReadyProbe, spawn_redis_readiness_sampler};
 use crate::infra::redis::{RedisRuntimeConfig, build_redis_runtime_deps};
 use crate::infra::s3::{S3RuntimeConfig, S3RuntimeConfigParts, build_s3_runtime_deps};
 use crate::infra::vault::VaultRuntimeConfig;
@@ -45,7 +43,6 @@ struct BuiltInfra {
     wiring_inputs: RuntimeWiringInputs,
     domain_transport: DomainTransportRuntime,
     metrics_exporter: Arc<dyn diport::MetricsExporter>,
-    redis_readiness_period: Duration,
     command_idempotency_keyring: Arc<eventexec::command::CommandIdempotencyKeyring>,
     signing_rotation_probe: Option<crate::infra::signing_rotation::SigningKeyRotationProbe>,
     runtime_service_token: Option<crate::infra::oidc::RuntimeServiceTokenProvider>,
@@ -101,8 +98,8 @@ struct PhaseACarried {
     vault: vault::VaultRuntimeDeps,
     identity_signer: Arc<vault::VaultSigner>,
     settings_config_value_key_name: diport::KeyName,
+    settings_readiness: settings_composition::SettingsProviderReadinessAwaitingPostgres,
     redis: redis::RedisRuntimeDeps,
-    redis_readiness_period: Duration,
     s3: s3::S3RuntimeDeps,
     s3_canary_config: crate::infra::s3::S3CanaryConfig,
     pg_readiness_period: Duration,
@@ -181,8 +178,8 @@ impl<'a> ProvidersBuilt<'a> {
                 vault,
                 identity_signer,
                 settings_config_value_key_name,
+                settings_readiness,
                 redis,
-                redis_readiness_period,
                 s3,
                 s3_canary_config,
                 pg_readiness_period,
@@ -225,6 +222,8 @@ impl<'a> ProvidersBuilt<'a> {
                 })
                 .transpose();
             let pg = pg_owner.handle();
+            let (settings_readiness, settings_pg_output) =
+                settings_readiness.bind_postgres(pg.readiness_handle())?;
             // The unique permit builds both the concrete store and exact probes+workers output
             // from this same verified PostgreSQL handle.
             let revocation_provider = crate::provider_output::BuiltDeviceRevocationProvider::build(
@@ -236,6 +235,9 @@ impl<'a> ProvidersBuilt<'a> {
             let pg_provider_module =
                 crate::provider_output::build_pg_runtime_module(pg_owner, pg_readiness_period);
             *uncommitted_provider_module.get_mut() = pg_provider_module;
+            uncommitted_provider_module
+                .get_mut()
+                .merge(settings_pg_output.into_output());
             tracing::info!(
                 sample_interval_secs = pg_readiness_period.as_secs(),
                 "pg readiness sampler interval configured"
@@ -277,7 +279,7 @@ impl<'a> ProvidersBuilt<'a> {
                 archive_vault_provider,
                 archive_key,
             );
-            let dlx_module =
+            let dlx_outputs =
                 match crate::event_transport::wire_dlx_lifecycle(dlx_lifecycle, dlx_worker) {
                     Ok(module) => module,
                     Err(failure) => {
@@ -288,7 +290,9 @@ impl<'a> ProvidersBuilt<'a> {
                 };
             provider_build
                 .record(crate::provider_output::ProviderOutput::dlx(
-                    dlx_module,
+                    dlx_outputs.lifecycle_repository,
+                    dlx_outputs.archive_store,
+                    dlx_outputs.archive_key_provider,
                     dlx_lifecycle_repository_permit,
                     dlx_archive_store_permit,
                     dlx_archive_key_provider_permit,
@@ -316,6 +320,7 @@ impl<'a> ProvidersBuilt<'a> {
                 vault,
                 identity_signer,
                 settings_config_value_key_name,
+                settings_readiness,
                 domain_transport.dispatch_handle(),
             );
 
@@ -350,7 +355,6 @@ impl<'a> ProvidersBuilt<'a> {
                 wiring_inputs,
                 domain_transport,
                 metrics_exporter,
-                redis_readiness_period,
                 command_idempotency_keyring,
                 signing_rotation_probe,
                 runtime_service_token,
@@ -371,7 +375,6 @@ impl<'a> ProvidersBuilt<'a> {
                 wiring_inputs: built.wiring_inputs,
                 domain_transport: built.domain_transport,
                 metrics_exporter: built.metrics_exporter,
-                redis_readiness_period: built.redis_readiness_period,
                 command_idempotency_keyring: built.command_idempotency_keyring,
                 signing_rotation_probe: built.signing_rotation_probe,
                 runtime_rss_access,
@@ -438,18 +441,46 @@ impl<'a> ProvidersBuilt<'a> {
         let settings_secret_resolver_permit = provider_factories.settings_secret_resolver()?;
         let (vault, identity_signer, settings_config_value_key_name) =
             vault_config.into_runtime().context("setup vault deps")?;
-        let mut vault_module = DomainModuleResult {
-            resources: vault.runtime_resources(),
-            ..DomainModuleResult::default()
-        };
-        vault_module
-            .resources
-            .push(crate::provider_output::identity_signer_resource(
-                Arc::clone(&identity_signer),
-            ));
+        let settings_readiness = settings_composition::SettingsProviderReadiness::new(
+            &vault.for_domain::<vault::caps::Settings>(),
+            settings_config_value_key_name.clone(),
+            domain_modules.settings.readiness_interval(),
+        )
+        .await
+        .context("build settings provider readiness")?;
+        let (settings_readiness, key_output, resolver_output) =
+            settings_readiness.into_vault_parts();
+        let mut vault_resources = vault.runtime_resources().into_iter();
+        let resolver_resource = vault_resources
+            .next()
+            .context("vault omitted settings secret-resolver resource")?;
+        let key_resource = vault_resources
+            .next()
+            .context("vault omitted settings key-provider resource")?;
+        anyhow::ensure!(
+            vault_resources.next().is_none(),
+            "vault exposed an undeclared settings provider resource"
+        );
+        let mut key_module = key_output.into_output();
+        key_module.resources.push(key_resource);
+        let mut resolver_module = resolver_output.into_output();
+        resolver_module.resources.push(resolver_resource);
+        let identity_signer_key = token_profiles
+            .rss_access()
+            .context("active identity signer requires RSS access token profile")?
+            .signing_key_ring()
+            .active()
+            .clone();
+        let identity_signer_module = crate::provider_output::identity_signer_module(
+            Arc::clone(&identity_signer),
+            identity_signer_key,
+        )
+        .await?;
         provider_build
             .record(crate::provider_output::ProviderOutput::vault(
-                vault_module,
+                identity_signer_module,
+                key_module,
+                resolver_module,
                 identity_signer_permit,
                 settings_key_provider_permit,
                 settings_secret_resolver_permit,
@@ -460,11 +491,28 @@ impl<'a> ProvidersBuilt<'a> {
         let (redis, redis_readiness_period) = build_redis_runtime_deps(redis_config)
             .await
             .context("setup redis deps")?;
+        let redis_ready = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let redis_probe_name = primitives::ProbeName::parse(REDIS_READY_PROBE_NAME)
+            .context("parse redis_ready probe name")?;
+        let redis_for_sampler = redis.clone();
+        let redis_worker_ready = Arc::clone(&redis_ready);
+        let redis_readiness_worker: bootstrap::WorkerSpec = Box::new(move |token| {
+            diport::DynManagedResource::new_box(spawn_redis_readiness_sampler(
+                redis_for_sampler.clone(),
+                redis_readiness_period,
+                token,
+                Arc::clone(&redis_worker_ready),
+            ))
+        });
         provider_build
             .record(crate::provider_output::ProviderOutput::redis(
                 DomainModuleResult {
+                    probes: vec![(
+                        redis_probe_name,
+                        Box::new(RedisReadyProbe::new(Arc::clone(&redis_ready))),
+                    )],
                     resources: redis.runtime_resources(),
-                    ..DomainModuleResult::default()
+                    workers: vec![redis_readiness_worker],
                 },
                 distributed_lock_store_permit,
             ))
@@ -531,8 +579,8 @@ impl<'a> ProvidersBuilt<'a> {
                 vault,
                 identity_signer,
                 settings_config_value_key_name,
+                settings_readiness,
                 redis,
-                redis_readiness_period,
                 s3,
                 s3_canary_config,
                 pg_readiness_period,
@@ -583,14 +631,14 @@ impl<'a> ProvidersBuilt<'a> {
             .verify()
             .await
             .context("verify DLX archive S3 WORM capability")?;
-        verify_dlx_vault_key_capability(
+        crate::event_transport::verify_dlx_vault_key_capability(
             &hot_vault_provider,
             hot_key.as_key_name(),
             "dlx-hot-startup",
         )
         .await
         .context("verify DLX hot Vault capability")?;
-        verify_dlx_vault_key_capability(
+        crate::event_transport::verify_dlx_vault_key_capability(
             &archive_vault_provider,
             archive_key_for_preflight.as_key_name(),
             "dlx-archive-startup",

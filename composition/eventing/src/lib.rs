@@ -179,6 +179,40 @@ pub fn bridge_generated_audit_subscriptions(
     )
 }
 
+/// Bridge the exact generated Settings config-version reconciliation subscription.
+///
+/// This entrypoint remains exact when Cargo feature unification also compiles audit consumers:
+/// settings assemblies can activate only the required v1 settings binding and its reconcile
+/// ConsumerTx factory.
+#[cfg(feature = "settings-consumers")]
+pub fn bridge_generated_settings_subscriptions(
+    bindings: Vec<SubscriberBinding>,
+) -> anyhow::Result<Vec<BridgedSubscription>> {
+    let bridged = bridge_subscriptions_with_events_selected(
+        bindings,
+        generated::event::EVENTS,
+        admitted_settings_dispatch,
+    )?;
+    let [subscription] = bridged.as_slice() else {
+        anyhow::bail!(
+            "settings topology must contain exactly one config-version reconciliation subscription"
+        );
+    };
+    anyhow::ensure!(
+        subscription.contract_id() == generated::event::settings_v1::CONTRACT_ID
+            && subscription.topic() == generated::event::settings_v1::TOPIC
+            && subscription.schema_version() == "v1"
+            && subscription.consumer() == "settings"
+            && subscription.group().as_str() == generated::event::settings_v1::TOPIC
+            && subscription.readiness() == SubscriberReadiness::Required
+            && subscription.dispatch_token().dispatch()
+                == SubscriptionDispatchKey::SettingsConfigVersionChangedV1Settings
+            && subscription.dispatch_token().policy() == ExternalEffectPolicy::Reconcile,
+        "generated settings subscription does not match the required config-version reconciliation topology"
+    );
+    Ok(bridged)
+}
+
 #[cfg(feature = "test-support")]
 #[doc(hidden)]
 pub fn bridge_subscriptions_with_events_for_test(
@@ -286,6 +320,18 @@ const fn admitted_audit_dispatch(dispatch: SubscriptionDispatchKey) -> bool {
         | SubscriptionDispatchKey::IdentitySecurityEventV1Audit
         | SubscriptionDispatchKey::IdentitySessionCreatedV1Audit => true,
         SubscriptionDispatchKey::SettingsConfigVersionChangedV1Settings => false,
+    }
+}
+
+#[cfg(feature = "settings-consumers")]
+const fn admitted_settings_dispatch(dispatch: SubscriptionDispatchKey) -> bool {
+    match dispatch {
+        SubscriptionDispatchKey::SettingsConfigVersionChangedV1Settings => true,
+        SubscriptionDispatchKey::IdentityPolicyUpdatedV1Audit
+        | SubscriptionDispatchKey::IdentityRoleAssignedV1Audit
+        | SubscriptionDispatchKey::IdentityRoleRevokedV1Audit
+        | SubscriptionDispatchKey::IdentitySecurityEventV1Audit
+        | SubscriptionDispatchKey::IdentitySessionCreatedV1Audit => false,
     }
 }
 
@@ -731,7 +777,7 @@ mod tests {
     #[cfg(all(feature = "settings-consumers", not(feature = "audit-consumers")))]
     #[test]
     fn settings_only_bridge_requires_exactly_one_settings_binding() -> anyhow::Result<()> {
-        let bridged = bridge_generated_subscriptions(admitted_bindings()?)?;
+        let bridged = bridge_generated_settings_subscriptions(admitted_bindings()?)?;
         let subscription = bridged
             .first()
             .ok_or_else(|| anyhow::anyhow!("settings-only bridge must admit one spec"))?;
@@ -783,6 +829,93 @@ mod tests {
         })?;
         assert!(bridge_generated_audit_subscriptions(settings_only).is_err());
         Ok(())
+    }
+
+    #[cfg(all(feature = "audit-consumers", feature = "settings-consumers"))]
+    #[test]
+    fn settings_bridge_is_exact_under_workspace_feature_unification() -> anyhow::Result<()> {
+        let settings_bindings = bindings_selected_by(|dispatch| {
+            matches!(
+                dispatch,
+                SubscriptionDispatchKey::SettingsConfigVersionChangedV1Settings
+            )
+        })?;
+        let bridged = bridge_generated_settings_subscriptions(settings_bindings)?;
+        let subscription = bridged
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("settings bridge must admit one spec"))?;
+        assert_eq!(bridged.len(), 1);
+        assert_eq!(
+            subscription.contract_id(),
+            "settings.config-version-changed"
+        );
+        assert_eq!(subscription.schema_version(), "v1");
+        assert_eq!(subscription.consumer(), "settings");
+        assert_eq!(
+            subscription.group().as_str(),
+            "settings.config-version-changed"
+        );
+        assert_eq!(subscription.readiness(), SubscriberReadiness::Required);
+        assert_eq!(
+            subscription.dispatch_token().policy(),
+            ExternalEffectPolicy::Reconcile
+        );
+
+        assert!(bridge_generated_settings_subscriptions(Vec::new()).is_err());
+
+        let audit_only = bindings_selected_by(admitted_audit_dispatch)?;
+        assert!(bridge_generated_settings_subscriptions(audit_only).is_err());
+
+        let mut duplicate = bindings_selected_by(|dispatch| {
+            matches!(
+                dispatch,
+                SubscriptionDispatchKey::SettingsConfigVersionChangedV1Settings
+            )
+        })?;
+        duplicate.extend(bindings_selected_by(|dispatch| {
+            matches!(
+                dispatch,
+                SubscriptionDispatchKey::SettingsConfigVersionChangedV1Settings
+            )
+        })?);
+        assert!(bridge_generated_settings_subscriptions(duplicate).is_err());
+
+        let mut wrong_group_registry = bootstrap::Registry::new();
+        let spec = generated::event::settings_v1::SPEC.subscriptions()[0];
+        wrong_group_registry.subscriber(
+            generated::event::settings_v1::SPEC.contract_id(),
+            generated::event::settings_v1::SPEC.topic(),
+            spec.consumer(),
+            ConsumerGroup::parse("settings.wrong-group")?,
+            capability(spec),
+        )?;
+        assert!(
+            bridge_generated_settings_subscriptions(wrong_group_registry.drain_subscribers())
+                .is_err()
+        );
+        Ok(())
+    }
+
+    #[cfg(feature = "settings-consumers")]
+    #[test]
+    fn settings_bridge_rejects_non_reconcile_policy() {
+        let spec = generated::event::settings_v1::SPEC.subscriptions()[0];
+        for policy in [
+            ExternalEffectPolicy::TransactionalOnly,
+            ExternalEffectPolicy::IdempotencyKey,
+            ExternalEffectPolicy::Compensated,
+        ] {
+            assert!(
+                resolve_parts(
+                    spec.dispatch(),
+                    spec.execution(),
+                    spec.effect(),
+                    policy,
+                    capability(spec),
+                )
+                .is_err()
+            );
+        }
     }
 
     #[cfg(feature = "audit-consumers")]

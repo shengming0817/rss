@@ -1193,9 +1193,14 @@ fn runtime_test_provider() -> Arc<OidcProvider<diport::FederatedAccessProfile>> 
         )
         .expect("federated keyed ES256 public key")
         .build();
+    let permissions = oidc::FederatedPermissionUniverse::try_new([vocab::GrantPermission::route(
+        vocab::RoutePermissionId::AuditRead,
+    )])
+    .expect("non-empty federated permission universe");
     let config = oidc::VerifierConfigBuilder::<diport::FederatedAccessProfile>::new(
         "https://issuer.test",
         "rss-test",
+        permissions,
     )
     .keys_static(keys)
     .trust_kind("admin")
@@ -1215,7 +1220,8 @@ fn runtime_test_jwt(kind: &str, tenant: Option<vocab::TenantId>) -> String {
         .map(|tenant| format!(r#","tenant_id":"{tenant}""#))
         .unwrap_or_default();
     let payload = format!(
-        r#"{{"sub":"11111111-2222-4333-8444-555555555555","iat":4102443900,"exp":4102444800,"iss":"https://issuer.test","aud":"rss-test","token_use":"access","kind":"{kind}"{tenant_claim}}}"#
+        r#"{{"sub":"11111111-2222-4333-8444-555555555555","iat":4102443900,"exp":4102444800,"iss":"https://issuer.test","aud":"rss-test","token_use":"access","kind":"{kind}","permissions":["{}"]{tenant_claim}}}"#,
+        vocab::RoutePermissionId::AuditRead.as_str(),
     );
     let body = B64.encode(payload.as_bytes());
     let signing_input = format!("{header}.{body}");
@@ -1362,6 +1368,7 @@ async fn runtime_inventory_admin_uses_rss_user_and_identity_durable_grant_policy
         tenant_id: Some(tenant),
         principal_kind: vocab::PrincipalKind::User,
         principal_id: subject.to_string(),
+        federated_permissions: None,
         resource: None,
     };
     assert_eq!(

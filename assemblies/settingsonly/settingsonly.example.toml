@@ -1,9 +1,12 @@
-# settingsonly schemaVersion=1 sample. Secret values are never stored in this document; export the
-# four fixed RSS_SETTINGSONLY_* secrets before launch.
-schemaVersion = 1
+# settingsonly schemaVersion=2 production sample. Secret values live only in the fixed serving
+# secret bundle; AMQP requires distinct settingsAmqpPublisherUrl/settingsAmqpSubscriberUrl fields,
+# with no single-URL alias or ambient credential fallback.
+schemaVersion = 2
+profile = "production"
+topology = "durable-isolated"
 
 [listeners]
-requestBudgetMs = 30000
+requestBudgetMs = 15000
 
 [listeners.primary]
 bind = "127.0.0.1:8080"
@@ -37,6 +40,18 @@ maxConnections = 10
 username = "rss_settings_reader"
 maxConnections = 10
 
+[postgres.dlxArchiver]
+username = "rss_dlx_archiver"
+maxConnections = 2
+
+[postgres.dlxVerifier]
+username = "rss_dlx_verifier"
+maxConnections = 2
+
+[postgres.dlxPurger]
+username = "rss_dlx_purger"
+maxConnections = 2
+
 [vault]
 addr = "https://vault.example.com:8200"
 caCertPemPath = "/run/rss/vault-ca.pem"
@@ -49,3 +64,34 @@ tenantId = "00000000-0000-4000-8000-000000000147"
 storeId = "vault"
 mount = "secret"
 kvPathPrefix = "tenants/settings"
+
+[eventing]
+amqpCaCertPemPath = "/run/rss/amqp-ca.pem"
+publisherConfirmTimeoutMs = 5000
+
+[redis]
+caCertPemPath = "/run/rss/redis-ca.pem"
+readinessSeconds = 5
+
+[tenantAuthority]
+ttlSeconds = 3600
+clockSkewSeconds = 60
+
+[dlx]
+hotKeyName = "settings-dlx-hot"
+archiveKeyName = "settings-dlx-archive"
+readinessSeconds = 5
+
+[s3]
+endpoint = "https://s3.example.com"
+region = "us-east-1"
+archiveBucket = "rss-settingsonly-dlx"
+forcePathStyle = false
+caCertPemPath = "/run/rss/s3-ca.pem"
+readinessSeconds = 5
+
+[readiness]
+startupTimeoutSeconds = 30
+
+[drain]
+totalSeconds = 60

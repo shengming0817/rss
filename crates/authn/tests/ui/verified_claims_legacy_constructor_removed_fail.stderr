@@ -17,6 +17,7 @@ note: if you're trying to build a new `VerifiedClaims` consider using one of the
   | |         subject: impl Into<String>,
   | |         tenant: Option<TenantId>,
   | |         kind: PrincipalKind,
+  | |         permissions: VerifiedFederatedPermissions,
   | |     ) -> Result<Self, VerifiedClaimShapeError> {
   | |______________________________________________^
 ...

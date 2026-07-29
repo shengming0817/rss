@@ -101,6 +101,7 @@ s3 = S3RuntimeDeps
 vault = VaultRuntimeDeps
 identity_signer = Arc<vault::VaultSigner>
 settings_config_value_key_name = KeyName
+settings_readiness = settings_composition::SettingsReadinessDeps
 domain_transport = Arc<dyn distributed::DomainTransport>
 
 [domainModuleResult.fields]

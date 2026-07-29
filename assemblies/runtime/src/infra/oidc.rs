@@ -402,6 +402,14 @@ fn build_federated_access_provider_from_values<'a>(
         isolation,
         clock,
     } = context;
+    let permissions = || {
+        oidc::FederatedPermissionUniverse::try_new(
+            vocab::RoutePermissionId::ALL
+                .iter()
+                .copied()
+                .map(vocab::GrantPermission::route),
+        )
+    };
     let (builder, readiness) = match isolation {
         Some(isolation) => {
             let jwks = load_isolated_access_jwks(
@@ -413,9 +421,12 @@ fn build_federated_access_provider_from_values<'a>(
                 isolation,
             )?;
             let readiness = jwks.readiness_handle();
-            let builder =
-                oidc::VerifierConfigBuilder::<FederatedAccessProfile>::new(issuer, audience)
-                    .keys_isolated_jwks(jwks);
+            let builder = oidc::VerifierConfigBuilder::<FederatedAccessProfile>::new(
+                issuer,
+                audience,
+                permissions()?,
+            )
+            .keys_isolated_jwks(jwks);
             (builder, readiness)
         }
         None => {
@@ -427,9 +438,12 @@ fn build_federated_access_provider_from_values<'a>(
                 cancellation,
             )?;
             let readiness = jwks.readiness_handle();
-            let builder =
-                oidc::VerifierConfigBuilder::<FederatedAccessProfile>::new(issuer, audience)
-                    .keys_jwks(jwks);
+            let builder = oidc::VerifierConfigBuilder::<FederatedAccessProfile>::new(
+                issuer,
+                audience,
+                permissions()?,
+            )
+            .keys_jwks(jwks);
             (builder, readiness)
         }
     };

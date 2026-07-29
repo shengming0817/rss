@@ -54,4 +54,16 @@ consumer = "eventexec"
 lifecycle = "active"
 durability = "persistent"
 purpose = "same-constructor-distinct-role"
-outputs = ["workers"]
+outputs = ["probes", "resources", "workers"]
+
+[[diportProviders]]
+id = "dlx-hot-key-provider"
+port = "diport::KeyProvider"
+provider = "vault::VaultKeyProvider"
+providerCrate = "vault"
+requiredFeatures = ["backend"]
+consumer = "eventexec"
+lifecycle = "active"
+durability = "persistent"
+purpose = "same-constructor-distinct-hot-role"
+outputs = ["probes", "resources", "workers"]

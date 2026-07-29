@@ -20,7 +20,8 @@ fn main() {
     let _direct_subject = authn::Principal::audit_subject;
     let _direct_caller = authn::Principal::service_caller_domain;
     // R：runtime 组合根中的任意其它函数也不能 mint evidence。
-    let _direct = Authenticated::new_federated(PrincipalKind::User, "subject-1", None);
+    let _direct =
+        Authenticated::new_federated(PrincipalKind::User, "subject-1", None, permissions());
     let _direct_rss = Authenticated::new_rss_user(
         "11111111-2222-4333-8444-555555555555",
         vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").unwrap(),
@@ -38,7 +39,7 @@ mod auth_bridge {
     pub fn allow_evidence() -> Authenticated {
         let _subject = authn::Principal::audit_subject;
         let _caller = authn::Principal::service_caller_domain;
-        Authenticated::new_federated(PrincipalKind::User, "subject-1", None)
+        Authenticated::new_federated(PrincipalKind::User, "subject-1", None, crate::permissions())
     }
 
     pub fn mtls_evidence() -> Authenticated {
@@ -84,10 +85,14 @@ mod nested {
 
     fn allow_evidence() -> Authenticated {
         let _ = authn::Principal::audit_subject;
-        Authenticated::new_federated(PrincipalKind::User, "subject-1", None)
+        Authenticated::new_federated(PrincipalKind::User, "subject-1", None, crate::permissions())
     }
 
     fn verified_service_maintenance_operator_subject() {
         let _ = authn::Principal::service_caller_domain;
     }
+}
+
+fn permissions() -> &'static diport::VerifiedFederatedPermissions {
+    unimplemented!()
 }

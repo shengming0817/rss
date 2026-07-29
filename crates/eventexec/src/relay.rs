@@ -137,6 +137,18 @@ impl WorkerHealth {
         self.0.store(HEALTH_HEALTHY, Ordering::Release);
     }
 
+    /// A standby observation proves that the worker loop is live without proving a recovery from
+    /// an earlier backend failure. It may therefore open only the initial Starting state.
+    #[doc(hidden)]
+    pub fn mark_started(&self) {
+        let _ = self.0.compare_exchange(
+            HEALTH_STARTING,
+            HEALTH_HEALTHY,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+    }
+
     /// claim/relay/sweep 出错，或 relay 业务处置为 Requeue/Reject → Degraded（无条件 store，**非** CAS）。
     ///
     /// 顺序不变式由**构造**保证而非此方法：loop 仅在运行期每轮 tick 据结果二选一调
@@ -590,7 +602,9 @@ async fn sampler_tick<B>(
     }
     if degraded {
         health.mark_degraded();
-    } else if !standby {
+    } else if standby {
+        health.mark_started();
+    } else {
         health.mark_healthy();
     }
 }
@@ -1906,6 +1920,34 @@ mod tests {
             HealthStatus::Degraded,
             "standby must not masquerade as a successful sampling tick"
         );
+    }
+
+    #[tokio::test]
+    async fn sampler_first_standby_opens_only_starting_health() {
+        let starting = Arc::new(WorkerHealth::starting());
+        let metrics = CountingMetrics::new();
+        let mut observed_scopes = super::BacklogScopeState::default();
+        super::sampler_tick(
+            &Arc::new(StandbyBacklog),
+            &[dn("identity")],
+            &mut observed_scopes,
+            &starting,
+            metrics.as_ref(),
+        )
+        .await;
+        assert_eq!(starting.status(), HealthStatus::Healthy);
+
+        let degraded = Arc::new(WorkerHealth::healthy());
+        degraded.mark_degraded();
+        super::sampler_tick(
+            &Arc::new(StandbyBacklog),
+            &[dn("identity")],
+            &mut observed_scopes,
+            &degraded,
+            metrics.as_ref(),
+        )
+        .await;
+        assert_eq!(degraded.status(), HealthStatus::Degraded);
     }
 
     /// sampler 采样 Err → 整轮 Degraded（不发 gauge），干净下一轮自愈（F5）。

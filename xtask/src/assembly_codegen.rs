@@ -696,7 +696,7 @@ fn render_provider_role_batches(
         " {\n\
                      anyhow::bail!(\"__ASSEMBLY__ provider role receipt came from a different exact-join generation\");\n\
                  }\n\
-                 anyhow::ensure!(inventory.probes.len() >= staged[0] && inventory.resources.len() >= staged[1] && inventory.workers.len() >= staged[2], \"__ASSEMBLY__ transaction omits transferred provider lifecycle output\");\n\
+                 anyhow::ensure!(inventory.probes.len() == staged[0] && inventory.resources.len() == staged[1] && inventory.workers.len() == staged[2], \"__ASSEMBLY__ transaction provider lifecycle output differs from exact receipts\");\n\
                  Ok(CompletedProviderRoles { probe_bindings })\n\
              }\n\
          }\n",
@@ -849,6 +849,7 @@ fn validate_provider_role_batch_syntax(items: &[syn::Item], roles: &[String]) ->
     let mut structs = Vec::new();
     let mut impls = Vec::new();
     let mut functions = Vec::new();
+    let mut exact_residual_guard = false;
     for item in items {
         match item {
             syn::Item::Struct(item) => {
@@ -881,6 +882,21 @@ fn validate_provider_role_batch_syntax(items: &[syn::Item], roles: &[String]) ->
                     .get_ident()
                     .map(ToString::to_string)
                     .context("generated provider role impl target 必须是单段类型")?;
+                if target == "ProviderRoleBatches"
+                    && let Some(syn::ImplItem::Fn(finish)) = item.items.iter().find(
+                        |member| matches!(member, syn::ImplItem::Fn(method) if method.sig.ident == "finish"),
+                    )
+                {
+                    let body = compact_tokens(&finish.block);
+                    exact_residual_guard = [
+                        "inventory.probes.len()==staged[0]",
+                        "inventory.resources.len()==staged[1]",
+                        "inventory.workers.len()==staged[2]",
+                    ]
+                    .iter()
+                    .all(|required| body.contains(required))
+                        && !body.contains(">=staged[");
+                }
                 let mut methods = item
                     .items
                     .iter()
@@ -925,6 +941,10 @@ fn validate_provider_role_batch_syntax(items: &[syn::Item], roles: &[String]) ->
     ensure!(
         functions == ["lifecycle_channels", "validate_lifecycle_output"],
         "generated provider role helper 集合漂移"
+    );
+    ensure!(
+        exact_residual_guard,
+        "generated provider role finish 必须逐通道精确拒绝 residual lifecycle output"
     );
     Ok(())
 }
@@ -1113,6 +1133,7 @@ const fn provider_role_variant(role: ProviderRole) -> &'static str {
         ProviderRole::DlxLifecycleRepository => "DlxLifecycleRepository",
         ProviderRole::DlxArchiveStore => "DlxArchiveStore",
         ProviderRole::DlxArchiveKeyProvider => "DlxArchiveKeyProvider",
+        ProviderRole::DlxHotKeyProvider => "DlxHotKeyProvider",
     }
 }
 
@@ -1183,6 +1204,7 @@ const fn factory_variant(factory: ProviderFactorySymbol) -> &'static str {
         ProviderFactorySymbol::EventexecVaultArchiveKeyProvider => {
             "EventexecVaultArchiveKeyProvider"
         }
+        ProviderFactorySymbol::EventexecVaultHotKeyProvider => "EventexecVaultHotKeyProvider",
     }
 }
 
@@ -1974,17 +1996,19 @@ const _: () = assert!(!providers_gen::PROVIDER_CATALOG.is_empty());
             );
         }
         validate_provider_catalog_syntax(&rendered)?;
-
         let dlx = rendered
             .find("ProviderRole::DlxArchiveKeyProvider")
             .context("missing DLX archive key provider")?;
+        let dlx_hot = rendered
+            .find("ProviderRole::DlxHotKeyProvider")
+            .context("missing DLX hot key provider")?;
         let limiter = rendered
             .find("ProviderRole::ListenerRateLimiter")
             .context("missing listener rate limiter")?;
         let settings = rendered
             .find("ProviderRole::SettingsKeyProvider")
             .context("missing settings key provider")?;
-        assert!(dlx < limiter && limiter < settings);
+        assert!(dlx < dlx_hot && dlx_hot < limiter && limiter < settings);
         fs::remove_dir_all(root)?;
         Ok(())
     }
@@ -2001,6 +2025,9 @@ const _: () = assert!(!providers_gen::PROVIDER_CATALOG.is_empty());
             "pub(crate) struct ListenerPdpConstructor",
             "pub(crate) struct ListenerPdpBatch",
             "pub(crate) struct ListenerPdpReceipt",
+            "pub(crate) struct DlxHotKeyProviderConstructor",
+            "pub(crate) struct DlxHotKeyProviderBatch",
+            "pub(crate) struct DlxHotKeyProviderReceipt",
             "pub(crate) fn exact_join(",
             "pub(crate) fn finish(",
         ] {
@@ -2010,9 +2037,35 @@ const _: () = assert!(!providers_gen::PROVIDER_CATALOG.is_empty());
             );
         }
         assert!(rendered.contains("ProviderRole::ListenerPdp"));
+        assert!(rendered.contains("ProviderRole::DlxArchiveKeyProvider"));
+        assert!(rendered.contains("ProviderRole::DlxHotKeyProvider"));
+        assert!(rendered.contains("generated provider role 'dlx-hot-key-provider' is missing"));
+        assert!(rendered.contains("generated provider role '{}' is duplicated"));
         assert!(rendered.contains("ProviderRole::ListenerRateLimiter"));
         assert!(rendered.contains("ProviderRole::SettingsKeyProvider"));
         assert!(rendered.contains("ProviderRole::SettingsSecretResolver"));
+        let compact_rendered = rendered.split_whitespace().collect::<String>();
+        for channel in ["probes", "resources", "workers"] {
+            let exact = format!("inventory.{channel}.len()==staged");
+            assert!(
+                compact_rendered.contains(&exact),
+                "anti-vacuity: generated finish omitted exact {channel} residual guard"
+            );
+            let marker = format!("inventory.{channel}.len()");
+            let start = rendered
+                .find(&marker)
+                .context("missing residual channel marker")?;
+            let operator = rendered[start..]
+                .find("==")
+                .map(|offset| start + offset)
+                .context("missing exact residual operator")?;
+            let mut weakened = rendered.clone();
+            weakened.replace_range(operator..operator + 2, ">=");
+            assert!(
+                validate_provider_catalog_syntax(&weakened).is_err(),
+                "synthetic red: weakened {channel} residual guard was accepted"
+            );
+        }
         Ok(())
     }
 

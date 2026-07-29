@@ -26,10 +26,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use testcontainers::ContainerAsync;
 use testcontainers::ImageExt;
 use testcontainers::core::logs::LogFrame;
-use testcontainers::core::{CmdWaitFor, ExecCommand};
+use testcontainers::core::{CmdWaitFor, ExecCommand, IntoContainerPort, WaitFor};
+use testcontainers::{ContainerAsync, CopyTargetOptions, GenericImage};
 use testcontainers_modules::minio::MinIO;
 use testcontainers_modules::mosquitto::Mosquitto;
 use testcontainers_modules::postgres::Postgres;
@@ -44,6 +44,8 @@ type Result<T> = std::result::Result<T, FixtureError>;
 /// 容器内固定端口（modules 镜像默认暴露端口）。
 const PG_PORT: u16 = 5432;
 const AMQP_PORT: u16 = 5672;
+const AMQPS_PORT: u16 = 5671;
+const REDISS_PORT: u16 = 6379;
 const MQTT_PORT: u16 = 1883;
 const MINIO_PORT: u16 = 9000;
 const MINIO_ACCESS_KEY_ID: &str = "minioadmin";
@@ -745,6 +747,119 @@ pub async fn env_or_redis() -> Result<RedisFixture> {
     })
 }
 
+struct TlsMaterial {
+    ca_pem: String,
+    wrong_ca_pem: String,
+    server_cert_pem: String,
+    server_key_pem: String,
+}
+
+fn tls_material() -> Result<TlsMaterial> {
+    use rcgen::{
+        BasicConstraints, CertificateParams, CertifiedIssuer, ExtendedKeyUsagePurpose, IsCa,
+        KeyPair, SanType,
+    };
+
+    let issuer = |label: &str| -> Result<CertifiedIssuer<'static, KeyPair>> {
+        let mut params = CertificateParams::default();
+        params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, label);
+        Ok(CertifiedIssuer::self_signed(params, KeyPair::generate()?)?)
+    };
+    let ca = issuer("rss-test-private-ca")?;
+    let wrong_ca = issuer("rss-test-wrong-private-ca")?;
+    let server_key = KeyPair::generate()?;
+    let mut server = CertificateParams::default();
+    server.is_ca = IsCa::ExplicitNoCa;
+    server.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+    server.subject_alt_names = vec![
+        SanType::DnsName("localhost".try_into()?),
+        SanType::IpAddress("127.0.0.1".parse()?),
+        SanType::IpAddress("::1".parse()?),
+    ];
+    let server_cert = server.signed_by(&server_key, &ca)?;
+    Ok(TlsMaterial {
+        ca_pem: ca.pem(),
+        wrong_ca_pem: wrong_ca.pem(),
+        server_cert_pem: server_cert.pem(),
+        server_key_pem: server_key.serialize_pem(),
+    })
+}
+
+fn copied_tls_image(
+    image: GenericImage,
+    material: &TlsMaterial,
+) -> testcontainers::ContainerRequest<GenericImage> {
+    image
+        .with_copy_to("/rss-tls/ca.pem", material.ca_pem.as_bytes().to_vec())
+        .with_copy_to(
+            "/rss-tls/server.pem",
+            material.server_cert_pem.as_bytes().to_vec(),
+        )
+        .with_copy_to(
+            // testcontainers archive extraction owns copied files as root, while the official
+            // Redis/RabbitMQ images drop privileges before reading their TLS key.
+            CopyTargetOptions::new("/rss-tls/server-key.pem").with_mode(0o644),
+            material.server_key_pem.as_bytes().to_vec(),
+        )
+}
+
+/// Hermetic Redis TLS fixture. The guard owns the container until drop and exposes only typed
+/// connection/trust material; no ambient TLS environment is consulted.
+pub struct RedisTlsFixture {
+    _container: Box<ContainerAsync<GenericImage>>,
+    url: String,
+    ca_pem: String,
+    wrong_ca_pem: String,
+}
+
+impl RedisTlsFixture {
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+
+    pub fn ca_pem(&self) -> &str {
+        &self.ca_pem
+    }
+
+    pub fn wrong_ca_pem(&self) -> &str {
+        &self.wrong_ca_pem
+    }
+}
+
+pub async fn redis_tls() -> Result<RedisTlsFixture> {
+    let material = tls_material()?;
+    let image = GenericImage::new("redis", "7.4-alpine")
+        .with_exposed_port(REDISS_PORT.tcp())
+        .with_wait_for(WaitFor::message_on_stdout("Ready to accept connections"));
+    let request = copied_tls_image(image, &material).with_cmd([
+        "redis-server",
+        "--port",
+        "0",
+        "--tls-port",
+        "6379",
+        "--tls-cert-file",
+        "/rss-tls/server.pem",
+        "--tls-key-file",
+        "/rss-tls/server-key.pem",
+        "--tls-ca-cert-file",
+        "/rss-tls/ca.pem",
+        "--tls-auth-clients",
+        "no",
+    ]);
+    let container = owned::start(request, ContainerService::Redis).await?;
+    let host = container.get_host().await?;
+    let port = container.get_host_port_ipv4(REDISS_PORT).await?;
+    Ok(RedisTlsFixture {
+        _container: Box::new(container),
+        url: format!("rediss://{host}:{port}"),
+        ca_pem: material.ca_pem,
+        wrong_ca_pem: material.wrong_ca_pem,
+    })
+}
+
 // ── rabbitmq ─────────────────────────────────────────────────────────────---
 
 /// rabbitmq fixture guard：持容器句柄（自起路径）到 `Drop`。**须绑定到测试结束**。
@@ -935,6 +1050,118 @@ pub async fn env_or_rabbitmq() -> Result<RabbitFixture> {
     })
 }
 
+const TLS_VHOST: &str = "rss_acl";
+const TLS_PUBLISHER_USER: &str = "rss_publisher";
+const TLS_PUBLISHER_PASSWORD: &str = "rss-publisher-test-password";
+const TLS_SUBSCRIBER_USER: &str = "rss_subscriber";
+const TLS_SUBSCRIBER_PASSWORD: &str = "rss-subscriber-test-password";
+
+/// Hermetic RabbitMQ TLS fixture with distinct least-privilege publisher/subscriber identities.
+pub struct RabbitTlsFixture {
+    container: Box<ContainerAsync<GenericImage>>,
+    publisher_url: String,
+    subscriber_url: String,
+    ca_pem: String,
+    wrong_ca_pem: String,
+}
+
+impl RabbitTlsFixture {
+    pub fn publisher_url(&self) -> &str {
+        &self.publisher_url
+    }
+
+    pub fn subscriber_url(&self) -> &str {
+        &self.subscriber_url
+    }
+
+    pub fn ca_pem(&self) -> &str {
+        &self.ca_pem
+    }
+
+    pub fn wrong_ca_pem(&self) -> &str {
+        &self.wrong_ca_pem
+    }
+
+    /// Live broker receipt for the publisher ACL: no configure/read authority means it cannot
+    /// declare/consume queues or bind them to an exchange.
+    pub async fn publisher_bind_permission_is_denied(&self) -> Result<bool> {
+        let output = run_rabbitmqctl_output(
+            &self.container,
+            &["list_user_permissions", TLS_PUBLISHER_USER],
+        )
+        .await?;
+        Ok(output.lines().any(|line| {
+            line.contains(TLS_VHOST)
+                && line.split_whitespace().collect::<Vec<_>>()
+                    == [TLS_VHOST, "a^", "^(|rss\\.it\\.)", "a^"]
+        }))
+    }
+}
+
+pub async fn rabbitmq_tls() -> Result<RabbitTlsFixture> {
+    let material = tls_material()?;
+    let config = format!(
+        "listeners.tcp = none\nlisteners.ssl.default = {AMQPS_PORT}\nssl_options.cacertfile = /rss-tls/ca.pem\nssl_options.certfile = /rss-tls/server.pem\nssl_options.keyfile = /rss-tls/server-key.pem\nssl_options.verify = verify_none\nssl_options.fail_if_no_peer_cert = false\nloopback_users.guest = false\n"
+    );
+    let image = GenericImage::new("rabbitmq", "3.13.6-management-alpine")
+        .with_exposed_port(AMQPS_PORT.tcp())
+        .with_wait_for(WaitFor::message_on_stdout("Server startup complete"));
+    let request = copied_tls_image(image, &material)
+        .with_copy_to("/etc/rabbitmq/rabbitmq.conf", config.into_bytes());
+    let container = owned::start(request, ContainerService::RabbitMq).await?;
+    run_rabbitmqctl(&container, &["await_startup"]).await?;
+    run_rabbitmqctl(&container, &["add_vhost", TLS_VHOST]).await?;
+    run_rabbitmqctl(
+        &container,
+        &["add_user", TLS_PUBLISHER_USER, TLS_PUBLISHER_PASSWORD],
+    )
+    .await?;
+    run_rabbitmqctl(
+        &container,
+        &[
+            "set_permissions",
+            "-p",
+            TLS_VHOST,
+            TLS_PUBLISHER_USER,
+            "a^",
+            "^(|rss\\.it\\.)",
+            "a^",
+        ],
+    )
+    .await?;
+    run_rabbitmqctl(
+        &container,
+        &["add_user", TLS_SUBSCRIBER_USER, TLS_SUBSCRIBER_PASSWORD],
+    )
+    .await?;
+    run_rabbitmqctl(
+        &container,
+        &[
+            "set_permissions",
+            "-p",
+            TLS_VHOST,
+            TLS_SUBSCRIBER_USER,
+            "^rss\\.it\\.",
+            "a^",
+            "^rss\\.it\\.",
+        ],
+    )
+    .await?;
+    let host = container.get_host().await?.to_string();
+    let port = container.get_host_port_ipv4(AMQPS_PORT).await?;
+    Ok(RabbitTlsFixture {
+        container: Box::new(container),
+        publisher_url: format!(
+            "amqps://{TLS_PUBLISHER_USER}:{TLS_PUBLISHER_PASSWORD}@{host}:{port}/{TLS_VHOST}"
+        ),
+        subscriber_url: format!(
+            "amqps://{TLS_SUBSCRIBER_USER}:{TLS_SUBSCRIBER_PASSWORD}@{host}:{port}/{TLS_VHOST}"
+        ),
+        ca_pem: material.ca_pem,
+        wrong_ca_pem: material.wrong_ca_pem,
+    })
+}
+
 /// 在运行中的 rabbitmq 容器内建 `vhost` + 给默认 `guest` 用户全权限（per-domain 隔离）。
 async fn create_vhost(container: &ContainerAsync<RabbitMq>, vhost: &str) -> Result<()> {
     run_rabbitmqctl(container, &["await_startup"]).await?;
@@ -955,7 +1182,10 @@ fn amqp_url_with_vhost(base: &str, vhost: &str) -> String {
 /// 容器内执行 `rabbitmqctl <args>`，有界重试（broker 起后 rabbitmqctl 短暂不可用）。
 /// 末次 attempt 失败后不再 sleep（节省约 6s 空等）。
 /// 错误消息含累计约等待时长以便诊断。
-async fn run_rabbitmqctl(container: &ContainerAsync<RabbitMq>, args: &[&str]) -> Result<()> {
+async fn run_rabbitmqctl<I: testcontainers::Image>(
+    container: &ContainerAsync<I>,
+    args: &[&str],
+) -> Result<()> {
     let cmd: Vec<String> = std::iter::once("rabbitmqctl")
         .chain(args.iter().copied())
         .map(str::to_string)
@@ -985,6 +1215,21 @@ async fn run_rabbitmqctl(container: &ContainerAsync<RabbitMq>, args: &[&str]) ->
     Err(anyhow::anyhow!(
         "rabbitmqctl {args:?} 未在 {RABBITMQCTL_MAX_ATTEMPTS} 次（累计约 {total_wait_secs}s）内成功（末次 exit={last:?}）"
     ))
+}
+
+async fn run_rabbitmqctl_output<I: testcontainers::Image>(
+    container: &ContainerAsync<I>,
+    args: &[&str],
+) -> Result<String> {
+    let cmd = std::iter::once("rabbitmqctl")
+        .chain(args.iter().copied())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let mut result = container
+        .exec(ExecCommand::new(cmd).with_cmd_ready_condition(CmdWaitFor::exit_code(0)))
+        .await?;
+    let stdout = result.stdout_to_vec().await?;
+    String::from_utf8(stdout).map_err(Into::into)
 }
 
 // ── mqtt（mosquitto）─────────────────────────────────────────────────────────

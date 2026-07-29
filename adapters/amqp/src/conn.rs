@@ -3,7 +3,10 @@
 use std::sync::Arc;
 
 use lapin::options::ConfirmSelectOptions;
-use lapin::{Channel, Connection, ConnectionProperties};
+use lapin::tcp::{AsyncTcpStream, RustlsConnector, RustlsConnectorConfig};
+use lapin::uri::{AMQPScheme, AMQPUri};
+use lapin::{Channel, Connection, ConnectionProperties, DefaultConnectionBuilder};
+use rustls_pki_types::{CertificateDer, pem::PemObject};
 
 use crate::conn_events::{
     RecoveryConnectResult, RecoveryFailureReason, RecoveryFailureStage, emit_connect_failed,
@@ -35,6 +38,44 @@ enum AmqpConnectErrorSource {
     InvalidPublisherTimeout,
 }
 
+/// Explicit private trust anchor for an AMQPS connection.
+///
+/// The field is private so production composition cannot substitute an empty/default TLS policy.
+#[derive(Clone)]
+pub struct AmqpPrivateCa {
+    connector: RustlsConnector,
+}
+
+/// Invalid explicit AMQPS trust anchor. The message is intentionally fixed and never contains PEM.
+#[derive(Debug, thiserror::Error)]
+#[error("invalid AMQP private CA PEM")]
+pub struct AmqpPrivateCaError;
+
+impl AmqpPrivateCa {
+    /// Build a non-empty PEM trust anchor and an exclusive rustls verifier. The verifier starts
+    /// from an empty root store; WebPKI/platform roots are never appended to this constructor.
+    pub fn from_pem(pem: Vec<u8>) -> Result<Self, AmqpPrivateCaError> {
+        let certificates = CertificateDer::pem_slice_iter(&pem)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| AmqpPrivateCaError)?;
+        if certificates.is_empty() {
+            return Err(AmqpPrivateCaError);
+        }
+        let connector = RustlsConnectorConfig::default()
+            .with_parsable_certificates(certificates)
+            .connector_with_no_client_auth()
+            .map_err(|_| AmqpPrivateCaError)?;
+        Ok(Self { connector })
+    }
+}
+
+#[derive(Clone, Default)]
+pub(crate) enum AmqpTlsTrust {
+    #[default]
+    WebPki,
+    PrivateCa(AmqpPrivateCa),
+}
+
 impl std::fmt::Debug for AmqpConnectError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // reason: 不展开 source（lapin::Error Debug 可能含连接上下文）；{:?} 仅安全摘要（PII 边界）。
@@ -51,7 +92,30 @@ pub(crate) async fn connect(
     name: &str,
     confirm: bool,
 ) -> Result<(Arc<Connection>, Channel), AmqpConnectError> {
-    connect_with_context(endpoint, name, confirm, ConnectContext::Initial).await
+    connect_with_context(
+        endpoint,
+        name,
+        confirm,
+        &AmqpTlsTrust::WebPki,
+        ConnectContext::Initial,
+    )
+    .await
+}
+
+pub(crate) async fn connect_with_private_ca(
+    endpoint: &secure::AmqpEndpoint,
+    name: &str,
+    confirm: bool,
+    ca: &AmqpPrivateCa,
+) -> Result<(Arc<Connection>, Channel), AmqpConnectError> {
+    connect_with_context(
+        endpoint,
+        name,
+        confirm,
+        &AmqpTlsTrust::PrivateCa(ca.clone()),
+        ConnectContext::Initial,
+    )
+    .await
 }
 
 /// RSS-owned publisher replacement entry point. Recovery deliberately uses a different closed
@@ -61,11 +125,13 @@ pub(crate) async fn reconnect_publisher(
     endpoint: &secure::AmqpEndpoint,
     name: &str,
     retiring_generation: u64,
+    trust: &AmqpTlsTrust,
 ) -> Result<(Arc<Connection>, Channel), AmqpConnectError> {
     connect_with_context(
         endpoint,
         name,
         true,
+        trust,
         ConnectContext::Recovery {
             replacement_generation: retiring_generation.saturating_add(1),
         },
@@ -83,6 +149,7 @@ async fn connect_with_context(
     endpoint: &secure::AmqpEndpoint,
     name: &str,
     confirm: bool,
+    trust: &AmqpTlsTrust,
     context: ConnectContext,
 ) -> Result<(Arc<Connection>, Channel), AmqpConnectError> {
     #[allow(clippy::disallowed_methods)]
@@ -91,19 +158,35 @@ async fn connect_with_context(
     // Intentionally keep lapin auto-recovery disabled (`ConnectionProperties::default()` has zero retries and
     // `auto_recover=false`). Publisher transport replacement is RSS-owned and bounded by one absolute deadline;
     // enabling lapin recovery here would create an uncancellable second reconnect owner.
-    let conn = Arc::new(
-        Connection::connect(url, ConnectionProperties::default())
-            .await
-            .map_err(|source| {
-                connect_err(
-                    source,
-                    endpoint,
-                    name,
-                    context,
-                    RecoveryFailureStage::Connect,
-                )
-            })?,
-    );
+    let connection = match trust {
+        AmqpTlsTrust::WebPki => {
+            DefaultConnectionBuilder::new()
+                .map_err(|source| {
+                    connect_err(
+                        source,
+                        endpoint,
+                        name,
+                        context,
+                        RecoveryFailureStage::Connect,
+                    )
+                })?
+                .with_uri_str(url.to_owned())
+                .with_properties(ConnectionProperties::default())
+                .connect()
+                .await
+        }
+        AmqpTlsTrust::PrivateCa(ca) => connect_with_exclusive_private_ca(url, ca).await,
+    }
+    .map_err(|source| {
+        connect_err(
+            source,
+            endpoint,
+            name,
+            context,
+            RecoveryFailureStage::Connect,
+        )
+    })?;
+    let conn = Arc::new(connection);
     let channel = conn.create_channel().await.map_err(|source| {
         connect_err(
             source,
@@ -138,6 +221,41 @@ async fn connect_with_context(
         ),
     }
     Ok((conn, channel))
+}
+
+async fn connect_with_exclusive_private_ca(
+    url: &str,
+    ca: &AmqpPrivateCa,
+) -> lapin::Result<Connection> {
+    let uri = url
+        .parse::<AMQPUri>()
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
+    let runtime = lapin::runtime::default_runtime()?;
+    let connector = ca.connector.clone();
+    Connection::connector(
+        uri,
+        runtime,
+        async move |uri, runtime| {
+            if uri.scheme != AMQPScheme::AMQPS {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "private AMQP trust requires AMQPS",
+                )
+                .into());
+            }
+            let host = uri.authority.host.clone();
+            let address = runtime.to_socket_addrs((host.clone(), uri.authority.port));
+            let stream = AsyncTcpStream::connect(&runtime, address)
+                .await
+                .map_err(lapin::Error::from)?;
+            stream
+                .into_rustls(&connector, &host)
+                .await
+                .map_err(lapin::Error::from)
+        },
+        ConnectionProperties::default(),
+    )
+    .await
 }
 
 fn connect_err(
@@ -177,6 +295,17 @@ fn recovery_failure_reason(error: &lapin::Error) -> RecoveryFailureReason {
         }
         lapin::ErrorKind::MissingHeartbeatError => RecoveryFailureReason::Heartbeat,
         _ => RecoveryFailureReason::Client,
+    }
+}
+
+#[cfg(test)]
+mod private_ca_tests {
+    use super::AmqpPrivateCa;
+
+    #[test]
+    fn private_ca_rejects_empty_and_malformed_pem() {
+        assert!(AmqpPrivateCa::from_pem(Vec::new()).is_err());
+        assert!(AmqpPrivateCa::from_pem(b"not a certificate".to_vec()).is_err());
     }
 }
 

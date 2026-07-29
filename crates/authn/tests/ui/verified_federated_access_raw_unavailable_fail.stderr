@@ -1,0 +1,5 @@
+error[E0599]: no method named `verified_jwt` found for reference `&VerifiedFederatedAccess` in the current scope
+ --> tests/ui/verified_federated_access_raw_unavailable_fail.rs:2:12
+  |
+2 |     access.verified_jwt().raw()
+  |            ^^^^^^^^^^^^ private field, not a method

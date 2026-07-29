@@ -42,6 +42,7 @@ dylint_linting = "6.0.1"
 dylint_testing = "6.0.1"
 # ui fixture 调真 httpserve funnel：lint 按 callee crate 名（httpserve）匹配，本地 stub 无法触发。
 httpserve = { path = "../../crates/httpserve" }
+diport = { path = "../../crates/diport" }
 primitives = { path = "../../crates/primitives" }
 vocab = { path = "../../crates/vocab" }
 

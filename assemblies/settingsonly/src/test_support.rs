@@ -45,6 +45,10 @@ impl diport::Pdp for FixturePdp {
             "settingsonly-fixture",
             Some(tenant),
             vocab::PrincipalKind::User,
+            diport::VerifiedFederatedPermissions::new([vocab::GrantPermission::route(
+                vocab::RoutePermissionId::SettingsConfigPublish,
+            )])
+            .map_err(|_| diport::PdpError::InvalidSignature)?,
         )
         .map_err(|_| diport::PdpError::InvalidSignature)
     }
@@ -112,13 +116,19 @@ impl runtimeexec::StartupAdapter for FixtureStartup {
             ready_notify,
             activation_gate,
         } = self.config;
-        let jwks_name = primitives::ProbeName::parse("federated_access_token_jwks_ready")
-            .context("build fixture JWKS probe name")?;
         let mut provider_output = bootstrap::DomainModuleResult::default();
-        provider_output.probes.push((
-            jwks_name.clone(),
-            Box::new(HealthyProbe { name: jwks_name }),
-        ));
+        for name in [
+            "configs_ready",
+            "keyprovider_ready",
+            "vault_secret_resolver_ready",
+            "federated_access_token_jwks_ready",
+        ] {
+            let name = primitives::ProbeName::parse(name)
+                .context("build fixture provider readiness probe name")?;
+            provider_output
+                .probes
+                .push((name.clone(), Box::new(HealthyProbe { name })));
+        }
         transaction.stage_provider_output(provider_output);
         let bindings = vec![
             settings_composition::test_support::binding()
@@ -130,7 +140,7 @@ impl runtimeexec::StartupAdapter for FixtureStartup {
             .parse()
             .context("build fixture Admin bind")?;
         runtime::prepare_assembly(
-            runtime::AssemblyStartupInputs::new(
+            runtime::AssemblyStartupInputs::fixture(
                 bindings,
                 verifier,
                 httpserve::AuditSinkHandle::new(FixtureAuditSink),

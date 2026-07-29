@@ -26,6 +26,7 @@ tokio-util = { workspace = true }
 # + tracing（redacted 连接日志）。仅 `backend` feature 编译——默认 build / verify 不拉 broker
 # 客户端树（保持轻量，azure 无 CI ⇒ verify 是唯一 gate）。ref: lapin examples/pubsub.rs@main
 lapin = { workspace = true, optional = true }
+rustls-pki-types = { workspace = true, optional = true }
 futures = { workspace = true, optional = true }
 tracing = { workspace = true, optional = true }
 # publisher 的两阶段 await 由单一 Tokio deadline 约束；仅 backend 进入生产依赖面。
@@ -38,7 +39,7 @@ thiserror = { workspace = true, optional = true }
 # （AmqpPublisher / AmqpSubscriber impl 冻结 DI port，body=todo!()），保 ADAPTER-PORT-FREEZE-01 默认绿。
 # 注：默认 build（无 backend）整 crate 无 lapin/tracing 链路——调试 AMQP 须 `--features backend`
 # （+ docker / `RSS_AMQP_TEST_URL` 跑集成测试），否则看不到任何 AMQP 日志。
-backend = ["dep:lapin", "dep:futures", "dep:tracing", "dep:thiserror", "dep:tokio"]
+backend = ["dep:lapin", "dep:rustls-pki-types", "dep:futures", "dep:tracing", "dep:thiserror", "dep:tokio"]
 # Deterministic post-send fault barrier + bounded reconnect readiness for cross-crate integration evidence.
 # Deliberately excludes container fixtures so runtime integration can enable this seam without pulling testcontainers.
 integration-test-support = ["backend"]

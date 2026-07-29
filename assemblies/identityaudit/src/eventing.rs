@@ -130,22 +130,19 @@ fn wire_connected(
         dlx_payload_protector,
         subscriber_resource,
     )?;
-    let (distributed_cas, maintenance_probes) = wire_distributed_maintenance(pg, redis)?;
+    let distributed_cas = wire_distributed_maintenance(pg, redis)?;
     Ok(assemble_role_outputs(
         distributed_cas,
         event_publisher,
         event_subscriber,
-        maintenance_probes,
     ))
 }
 
 fn assemble_role_outputs(
     distributed_cas: DomainModuleResult,
     event_publisher: DomainModuleResult,
-    mut event_subscriber: DomainModuleResult,
-    maintenance_probes: Vec<LifecycleProbe>,
+    event_subscriber: DomainModuleResult,
 ) -> crate::providers::EventingRoleOutputs {
-    event_subscriber.probes.extend(maintenance_probes);
     crate::providers::EventingRoleOutputs {
         distributed_cas,
         event_publisher,
@@ -320,7 +317,7 @@ fn inbox_sweeper_plan(
 fn wire_distributed_maintenance(
     pg: &postgres::PgRuntimeHandle,
     redis: &redis::RedisRuntimeDeps,
-) -> anyhow::Result<(DomainModuleResult, Vec<LifecycleProbe>)> {
+) -> anyhow::Result<DomainModuleResult> {
     let coordinator = distributed::OutboxMaintenanceCoordinator::from_ports(
         redis.infra().lock_store(),
         pg.infra().cas_store(),
@@ -400,13 +397,11 @@ fn wire_distributed_maintenance(
             Box::new(WorkerProbe::new(sweeper_name, sweeper_health)),
         ),
     ];
-    Ok((
-        DomainModuleResult {
-            workers: vec![sampler_worker, sweeper_worker],
-            ..Default::default()
-        },
+    Ok(DomainModuleResult {
         probes,
-    ))
+        workers: vec![sampler_worker, sweeper_worker],
+        ..Default::default()
+    })
 }
 
 fn maintenance_plan() -> anyhow::Result<(
@@ -592,18 +587,20 @@ mod lifecycle_tests {
         let name = primitives::ProbeName::parse("maintenance-test")?;
         let health = Arc::new(WorkerHealth::healthy());
         let outputs = assemble_role_outputs(
+            DomainModuleResult {
+                probes: vec![(
+                    name.clone(),
+                    Box::new(WorkerProbe::new(name.clone(), Arc::clone(&health))),
+                )],
+                ..Default::default()
+            },
             DomainModuleResult::default(),
             DomainModuleResult::default(),
-            DomainModuleResult::default(),
-            vec![(
-                name.clone(),
-                Box::new(WorkerProbe::new(name.clone(), Arc::clone(&health))),
-            )],
         );
-        assert!(outputs.distributed_cas.probes.is_empty());
+        assert_eq!(outputs.distributed_cas.probes.len(), 1);
         assert!(outputs.event_publisher.probes.is_empty());
-        assert_eq!(outputs.event_subscriber.probes.len(), 1);
-        let check = outputs.event_subscriber.probes[0].1.check();
+        assert!(outputs.event_subscriber.probes.is_empty());
+        let check = outputs.distributed_cas.probes[0].1.check();
         assert_eq!(check.name(), &name);
         assert_eq!(check.status(), primitives::HealthStatus::Healthy);
 

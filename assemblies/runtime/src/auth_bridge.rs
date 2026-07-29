@@ -103,9 +103,10 @@ impl ProfileBinding {
 }
 
 struct VerifiedPrincipal {
-    principal: authn::Principal,
+    principal: Arc<authn::Principal>,
     ambient_tenant: Option<TenantId>,
     verified_jwt: Option<Arc<authn::VerifiedJwt>>,
+    verified_federated: Option<Arc<authn::VerifiedFederatedAccess>>,
 }
 
 enum VerifyFailure {
@@ -262,9 +263,10 @@ async fn verify_principal(
                 .map(|(verified, principal)| {
                     let ambient_tenant = principal.tenant();
                     VerifiedPrincipal {
-                        principal,
+                        principal: Arc::new(principal),
                         ambient_tenant,
                         verified_jwt: Some(Arc::new(verified)),
+                        verified_federated: None,
                     }
                 })
                 .map_err(VerifyFailure::Authn)
@@ -273,12 +275,15 @@ async fn verify_principal(
             let pdp = diport::DynPdp::from_ref(provider.as_ref());
             authn::verify_federated_access(&token, pdp)
                 .await
-                .map(|(verified, principal)| {
+                .map(|access| {
+                    let access = Arc::new(access);
+                    let principal = access.principal_arc();
                     let ambient_tenant = principal.tenant();
                     VerifiedPrincipal {
                         principal,
                         ambient_tenant,
-                        verified_jwt: Some(Arc::new(verified)),
+                        verified_jwt: None,
+                        verified_federated: Some(access),
                     }
                 })
                 .map_err(VerifyFailure::Authn)
@@ -291,9 +296,10 @@ async fn verify_principal(
             authn::verify_service_token(&token, tenant_binding, pdp)
                 .await
                 .map(|(_, principal)| VerifiedPrincipal {
-                    principal,
+                    principal: Arc::new(principal),
                     ambient_tenant: Some(tenant),
                     verified_jwt: None,
+                    verified_federated: None,
                 })
                 .map_err(VerifyFailure::Authn)
         }
@@ -306,6 +312,7 @@ enum MintEvidenceOutcome {
         ctx: Option<runctx::AppCtx>,
         principal: Arc<authn::Principal>,
         verified_jwt: Option<Arc<authn::VerifiedJwt>>,
+        verified_federated: Option<Arc<authn::VerifiedFederatedAccess>>,
         current_auth_grant: Option<identity::CurrentAuthGrant>,
     },
     Rejected,
@@ -317,6 +324,7 @@ struct AllowedEvidence {
     ctx: Option<runctx::AppCtx>,
     principal: Arc<authn::Principal>,
     verified_jwt: Option<Arc<authn::VerifiedJwt>>,
+    verified_federated: Option<Arc<authn::VerifiedFederatedAccess>>,
     current_auth_grant: Option<identity::CurrentAuthGrant>,
 }
 
@@ -354,6 +362,7 @@ async fn mint_evidence(
                 ctx: allowed.ctx,
                 principal: allowed.principal,
                 verified_jwt: allowed.verified_jwt,
+                verified_federated: allowed.verified_federated,
                 current_auth_grant: allowed.current_auth_grant,
             }
         }
@@ -405,8 +414,9 @@ fn allow_evidence(
     verified: VerifiedPrincipal,
     current_grant: Option<identity::ValidatedAuthGrant>,
 ) -> Option<AllowedEvidence> {
-    let principal = Arc::new(verified.principal);
+    let principal = verified.principal;
     let verified_jwt = verified.verified_jwt;
+    let verified_federated = verified.verified_federated;
     let kind = principal.kind();
     let tenant = verified.ambient_tenant;
     let (evidence, current_auth_grant) = match (
@@ -430,10 +440,13 @@ fn allow_evidence(
                 Some(current),
             )
         }
-        (RequiredScheme::FederatedAccessToken, None, tenant, None) => (
-            Authenticated::new_federated(kind, principal.audit_subject(), tenant),
-            None,
-        ),
+        (RequiredScheme::FederatedAccessToken, None, tenant, None) => {
+            let permissions = verified_federated.as_ref()?.permissions();
+            (
+                Authenticated::new_federated(kind, principal.audit_subject(), tenant, permissions),
+                None,
+            )
+        }
         _ => return None,
     };
     // `scoped_principal`（闭值 bool，非 PII）：有已认证 tenant source（JWT claim 或 service-token MAC header）
@@ -454,6 +467,7 @@ fn allow_evidence(
         ctx,
         principal,
         verified_jwt,
+        verified_federated,
         current_auth_grant,
     })
 }
@@ -577,6 +591,7 @@ async fn verify(State(binding): State<ProfileBinding>, mut req: Request, next: N
                     ctx,
                     principal,
                     verified_jwt,
+                    verified_federated,
                     current_auth_grant,
                 } => {
                     req.extensions_mut().insert(evidence);
@@ -586,6 +601,9 @@ async fn verify(State(binding): State<ProfileBinding>, mut req: Request, next: N
                     }
                     if let Some(verified_jwt) = verified_jwt {
                         req.extensions_mut().insert(verified_jwt);
+                    }
+                    if let Some(verified_federated) = verified_federated {
+                        req.extensions_mut().insert(verified_federated);
                     }
                     // **scope 不在桥建立**：把 scoped 主体的 AppCtx 经 `PendingScopeCtx` extension 传给内层 enforce，
                     // 由其在 `Require`-Allow（认证路由放行，非 Public opt-out）后建 `runctx::scope`——使 ambient scope
@@ -630,8 +648,9 @@ async fn mint_test_evidence(
                 .await
                 .map(|(verified, principal)| VerifiedPrincipal {
                     ambient_tenant: principal.tenant(),
-                    principal,
+                    principal: Arc::new(principal),
                     verified_jwt: Some(Arc::new(verified)),
+                    verified_federated: None,
                 })
         }
         TestProfileBinding::ServiceToken(provider) => {
@@ -641,9 +660,10 @@ async fn mint_test_evidence(
             authn::verify_service_token(&token, tenant_binding, provider)
                 .await
                 .map(|(_, principal)| VerifiedPrincipal {
-                    principal,
+                    principal: Arc::new(principal),
                     ambient_tenant: Some(tenant),
                     verified_jwt: None,
+                    verified_federated: None,
                 })
         }
     };
@@ -669,6 +689,7 @@ async fn mint_test_evidence(
                 ctx: allowed.ctx,
                 principal: allowed.principal,
                 verified_jwt: allowed.verified_jwt,
+                verified_federated: allowed.verified_federated,
                 current_auth_grant: allowed.current_auth_grant,
             }
         }
@@ -724,6 +745,7 @@ async fn verify_test_profile(
                     ctx,
                     principal,
                     verified_jwt,
+                    verified_federated,
                     current_auth_grant,
                 } => {
                     req.extensions_mut().insert(evidence);
@@ -733,6 +755,9 @@ async fn verify_test_profile(
                     }
                     if let Some(verified_jwt) = verified_jwt {
                         req.extensions_mut().insert(verified_jwt);
+                    }
+                    if let Some(verified_federated) = verified_federated {
+                        req.extensions_mut().insert(verified_federated);
                     }
                     if let Some(ctx) = ctx {
                         req.extensions_mut()

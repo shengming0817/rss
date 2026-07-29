@@ -8,10 +8,10 @@
 //!
 //! ## per-vhost = per-connection（非单 conn 中心化）
 //!
-//! AMQP per-domain 隔离经 **vhost + credential**（per-domain AMQP URL），即 per-vhost = **per-connection**。
+//! AMQP per-domain 隔离经 **vhost + role credential**，即 per-vhost = **per-connection**。
 //! 故 bundle **不**把所有能力塞进单一 `Connection`——一个 [`AmqpRuntimeDeps`] 持**一个域 vhost** 的
-//! publisher + subscriber（各自 `connect` 拿独立连接，沿用现有 per-vhost 行为，无回归）；不同域用不同
-//! `AmqpRuntimeDeps` 实例（不同 vhost URL）。
+//! publisher + subscriber（各自 `connect` 拿独立连接）；生产 private-CA 路径还要求两个不可互换的
+//! role endpoint，避免同一 credential 同时获得 publish/consume 权限。
 //!
 //! ## INVARIANT
 //!
@@ -62,6 +62,28 @@ use crate::conn::AmqpConnectError;
 use crate::publisher::AmqpPublisher;
 use crate::subscriber::AmqpSubscriber;
 
+/// AMQP endpoint carrying only publisher authority. It is intentionally not interchangeable with
+/// [`AmqpSubscriberEndpoint`], so production assembly code must bind each credential to its role.
+pub struct AmqpPublisherEndpoint(secure::AmqpEndpoint);
+
+impl AmqpPublisherEndpoint {
+    #[must_use]
+    pub fn new(endpoint: secure::AmqpEndpoint) -> Self {
+        Self(endpoint)
+    }
+}
+
+/// AMQP endpoint carrying only subscriber authority. It is intentionally not interchangeable with
+/// [`AmqpPublisherEndpoint`], so a subscriber credential cannot be wired into a publisher slot.
+pub struct AmqpSubscriberEndpoint(secure::AmqpEndpoint);
+
+impl AmqpSubscriberEndpoint {
+    #[must_use]
+    pub fn new(endpoint: secure::AmqpEndpoint) -> Self {
+        Self(endpoint)
+    }
+}
+
 async fn connect_second_or_rollback<P, S, E, Second, Rollback, RollbackFuture>(
     first: P,
     second: Second,
@@ -89,7 +111,40 @@ pub struct AmqpRuntimeDeps {
     subscriber: Arc<AmqpSubscriber>,
 }
 
+/// Opaque publisher transport readiness; no raw connection/channel escapes the adapter.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AmqpPublisherReadinessSnapshot(bool);
+
+impl AmqpPublisherReadinessSnapshot {
+    #[must_use]
+    pub const fn is_ready(self) -> bool {
+        self.0
+    }
+}
+
+/// Opaque subscriber transport readiness; readiness requires its connection and every activated
+/// subscription channel to remain connected.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AmqpSubscriberReadinessSnapshot(bool);
+
+impl AmqpSubscriberReadinessSnapshot {
+    #[must_use]
+    pub const fn is_ready(self) -> bool {
+        self.0
+    }
+}
+
 impl AmqpRuntimeDeps {
+    #[must_use]
+    pub fn publisher_readiness(&self) -> AmqpPublisherReadinessSnapshot {
+        AmqpPublisherReadinessSnapshot(self.publisher.readiness_snapshot())
+    }
+
+    #[must_use]
+    pub fn subscriber_readiness(&self) -> AmqpSubscriberReadinessSnapshot {
+        AmqpSubscriberReadinessSnapshot(self.subscriber.readiness_snapshot())
+    }
+
     /// 唯一公开装配路径：从单个 per-domain AMQP URL（`amqp://user:pass@host/vhost`）打开该域 vhost 的
     /// publisher（confirm channel）+ subscriber（per-subscription channel 按需）连接。`name` 派生
     /// `ManagedResource` 可读名（`<name>-pub` / `<name>-sub`）。连接失败经 redaction funnel 记日志，URL
@@ -137,6 +192,58 @@ impl AmqpRuntimeDeps {
         })
     }
 
+    /// Production AMQPS assembly path with distinct publisher/subscriber endpoint capabilities and
+    /// a required, explicitly configured private CA. There is no single-endpoint or default-trust
+    /// production fallback.
+    pub async fn connect_with_private_ca(
+        publisher_endpoint: &AmqpPublisherEndpoint,
+        subscriber_endpoint: &AmqpSubscriberEndpoint,
+        ca: crate::AmqpPrivateCa,
+        name: &str,
+        publish_timeout: Duration,
+    ) -> Result<Self, AmqpConnectError> {
+        let publisher = Arc::new(
+            AmqpPublisher::connect_with_private_ca(
+                &publisher_endpoint.0,
+                format!("{name}-pub"),
+                publish_timeout,
+                &ca,
+            )
+            .await?,
+        );
+        let publisher_name = ManagedResource::name(publisher.as_ref()).to_owned();
+        let (publisher, subscriber) = match connect_second_or_rollback(
+            publisher,
+            AmqpSubscriber::connect_with_private_ca(
+                &subscriber_endpoint.0,
+                format!("{name}-sub"),
+                &ca,
+            ),
+            |publisher: Arc<AmqpPublisher>| async move {
+                ManagedResource::shutdown(publisher.as_ref()).await
+            },
+        )
+        .await
+        {
+            Ok((publisher, subscriber)) => (publisher, Arc::new(subscriber)),
+            Err((primary, cleanup)) => {
+                if let Some(cleanup) = cleanup {
+                    tracing::warn!(
+                        target: "amqp",
+                        resource = publisher_name,
+                        error = %secure::redact_error(&cleanup),
+                        "partial AMQP bundle cleanup failed; preserving subscriber connect error"
+                    );
+                }
+                return Err(primary);
+            }
+        };
+        Ok(Self {
+            publisher,
+            subscriber,
+        })
+    }
+
     /// 派发 framework/global transport 能力句柄 [`AmqpInfraDeps`]——publisher / subscriber 是
     /// provider-agnostic transport infra（非绑单一域 repo），故不进（不存在的）per-domain 句柄。
     #[must_use]
@@ -145,6 +252,14 @@ impl AmqpRuntimeDeps {
             publisher: Arc::clone(&self.publisher),
             subscriber: Arc::clone(&self.subscriber),
         }
+    }
+
+    /// Integration-only access to the typed publisher fault/recovery seam. It does not expose the
+    /// underlying connection, channel, trust roots, or a way to replace the production trust.
+    #[cfg(feature = "integration-test-support")]
+    #[must_use]
+    pub fn publisher_for_integration_test(&self) -> &AmqpPublisher {
+        self.publisher.as_ref()
     }
 
     /// **单源** managed-resource/rollback 派生：组合根
@@ -181,7 +296,8 @@ impl AmqpInfraDeps {
     }
 
     /// 事件订阅句柄（`Box<DynAckableSubscriber>`，注入 `eventexec` consumer）。经 [`SharedAmqpSubscriber`]
-    /// 共享 bundle 的 `Arc<AmqpSubscriber>`——每订阅独立 channel（token cancel 关本订阅 channel）；connection
+    /// 共享 bundle 的 `Arc<AmqpSubscriber>`——每订阅独立 channel（token cancel 等待本订阅
+    /// `basic.cancel-ok`）；connection
     /// 由 runtime_resources guard 关。
     #[must_use]
     pub fn subscriber(&self) -> Box<DynAckableSubscriber<'static>> {
@@ -228,7 +344,7 @@ where
     }
 
     async fn shutdown(&self) -> Result<(), SubscriberError> {
-        // Shared port 不拥有 connection；每个订阅 channel 由调用方 token cancel 收敛，connection 由
+        // Shared port 不拥有 connection；token cancel 只停止订阅的新投递，connection 由
         // AmqpSubscriberGuard（runtime_resources）单源关闭，避免 bundle 派发句柄与 guard double-close。
         Ok(())
     }

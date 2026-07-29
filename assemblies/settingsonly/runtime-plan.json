@@ -1,12 +1,84 @@
 {
   "schemaVersion": 1,
-  "assemblyFingerprint": "sha256:cb9954912ce75357330fc169bafd6ea9b7eb93c8767f6821ff4cb66df8f01acb",
-  "runtimePlanFingerprint": "sha256:118fa46ea59efa03661001861243798b6d28fc4bda1272415a725d4c2d68bbc0",
+  "assemblyFingerprint": "sha256:919c1979759db6bc74720a0712da550e1978c80f66774908ee6a1f8026c5fb2b",
+  "runtimePlanFingerprint": "sha256:7ac70f22270f07660bfdcf8efbf3a48feff00be9c24bbb0a8e30a8252c34f169",
   "providerPlans": [
     {
       "id": "auth-audit-sink",
       "constructor": "postgres::PgAuthAuditSink",
       "outputs": [
+        "probes",
+        "resources",
+        "workers"
+      ]
+    },
+    {
+      "id": "distributed-cas-store",
+      "constructor": "postgres::PgCasStore",
+      "outputs": [
+        "probes",
+        "resources",
+        "workers"
+      ]
+    },
+    {
+      "id": "distributed-lock-store",
+      "constructor": "redis::RedisLockStore",
+      "outputs": [
+        "probes",
+        "resources",
+        "workers"
+      ]
+    },
+    {
+      "id": "dlx-archive-key-provider",
+      "constructor": "vault::VaultKeyProvider",
+      "outputs": [
+        "probes",
+        "resources",
+        "workers"
+      ]
+    },
+    {
+      "id": "dlx-archive-store",
+      "constructor": "s3::VerifiedS3DlxArchiveStore",
+      "outputs": [
+        "probes",
+        "workers"
+      ]
+    },
+    {
+      "id": "dlx-hot-key-provider",
+      "constructor": "vault::VaultKeyProvider",
+      "outputs": [
+        "probes",
+        "resources",
+        "workers"
+      ]
+    },
+    {
+      "id": "dlx-lifecycle-repository",
+      "constructor": "postgres::PgDlxLifecycleRepository",
+      "outputs": [
+        "probes",
+        "resources",
+        "workers"
+      ]
+    },
+    {
+      "id": "event-publisher",
+      "constructor": "amqp::AmqpPublisher",
+      "outputs": [
+        "probes",
+        "resources",
+        "workers"
+      ]
+    },
+    {
+      "id": "event-subscriber",
+      "constructor": "amqp::AmqpSubscriber",
+      "outputs": [
+        "probes",
         "resources",
         "workers"
       ]
@@ -27,14 +99,18 @@
       "id": "settings-key-provider",
       "constructor": "vault::VaultKeyProvider",
       "outputs": [
-        "resources"
+        "probes",
+        "resources",
+        "workers"
       ]
     },
     {
       "id": "settings-secret-resolver",
       "constructor": "vault::VaultSecretResolver",
       "outputs": [
-        "resources"
+        "probes",
+        "resources",
+        "workers"
       ]
     }
   ],

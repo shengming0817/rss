@@ -27,6 +27,8 @@ fn ui() {
     t.compile_fail("tests/ui/rss_access_legacy_principal_removed_fail.rs");
     t.compile_fail("tests/ui/rss_access_issue_input_private_fail.rs");
     t.compile_fail("tests/ui/verified_claims_legacy_constructor_removed_fail.rs");
+    t.compile_fail("tests/ui/verified_federated_access_private_fields_fail.rs");
+    t.compile_fail("tests/ui/verified_federated_access_raw_unavailable_fail.rs");
     t.compile_fail("tests/ui/external_cannot_construct_grant_receipt_fail.rs");
     t.compile_fail("tests/ui/external_cannot_construct_grant_validation_input_fail.rs");
     t.compile_fail("tests/ui/service_caller_string_fail.rs");

@@ -7,7 +7,7 @@ const HELP: &str = r#"Usage: settingsonly-server --config <path>
 Runs the fail-closed Settings deployment closure.
 
 Options:
-  --config <path>  Closed schemaVersion=1 TOML document
+  --config <path>  Closed schemaVersion=2 production TOML document
   -h, --help       Show this help
 
 Image schema: /usr/share/rss/settingsonly/config.schema.json
@@ -16,8 +16,8 @@ Required read-only secret file:
   /var/run/rss/secrets/serving-secret-bundle
 
 Health endpoints: /health/v1/healthz, /health/v1/readyz, /health/v1/metrics
-Primary semantics: missing/invalid credential = 401; valid federated credential = 403
-Admin inventory: GET /api/v1/runtime/inventory (federated Admin/SuperAdmin only)
+Primary permissions: settings.config-publish, settings.config-delete, settings.config-rollback
+Admin inventory: GET /api/v1/runtime/inventory (runtime:inventory:read)
 "#;
 
 enum CliCommand {

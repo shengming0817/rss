@@ -1010,6 +1010,13 @@ pub struct SettingsDomain {
     secret_repo: Arc<DynSecretRepo<'static>>,
     secret_uow: Arc<DynSecretUnitOfWork<'static>>,
     secret_service: Arc<crate::SecretResolveService>,
+    http_surface: SettingsHttpSurface,
+}
+
+#[derive(Clone, Copy)]
+enum SettingsHttpSurface {
+    Full,
+    ConfigCud,
 }
 
 impl SettingsDomain {
@@ -1027,7 +1034,18 @@ impl SettingsDomain {
             secret_repo,
             secret_uow,
             secret_service,
+            http_surface: SettingsHttpSurface::Full,
         }
+    }
+
+    /// Restrict the mounted HTTP surface to the three durable config mutations.
+    ///
+    /// The settingsonly assembly consumes this typed choice because its federated permission
+    /// universe deliberately excludes config reads and secret operations.
+    #[must_use]
+    pub fn config_cud_only(mut self) -> Self {
+        self.http_surface = SettingsHttpSurface::ConfigCud;
+        self
     }
 }
 
@@ -1167,6 +1185,7 @@ impl ::bootstrap::Domain for SettingsDomain {
         let secret_state =
             SecretPublishState::new(Arc::clone(&self.secret_repo), Arc::clone(&self.secret_uow));
         let secret_service = SecretResolveState::new(Arc::clone(&self.secret_service));
+        let http_surface = self.http_surface;
         reg.route_group::<Primary>(SETTINGS_ROUTE_PREFIX, move |rb| {
             let rb = rb.mount(
                 GeneratedPrimaryEndpoint::new_producer(
@@ -1175,6 +1194,23 @@ impl ::bootstrap::Domain for SettingsDomain {
                 )?
                 .with_state(Arc::clone(&config)),
             )?;
+            if matches!(http_surface, SettingsHttpSurface::ConfigCud) {
+                let rb = rb.mount(
+                    GeneratedPrimaryEndpoint::new_producer(
+                        CONFIG_DELETE_PRODUCER,
+                        config_delete_handler,
+                    )?
+                    .with_state(Arc::clone(&config)),
+                )?;
+                let rb = rb.mount(
+                    GeneratedPrimaryEndpoint::new_producer(
+                        CONFIG_ROLLBACK_PRODUCER,
+                        config_rollback_handler,
+                    )?
+                    .with_state(config),
+                )?;
+                return Ok(rb);
+            }
             let rb = rb.mount(
                 GeneratedPrimaryEndpoint::new(CONFIG_GET_HTTP_ROUTE, config_get_handler)?
                     .with_classified_state(config_query),
@@ -3049,6 +3085,27 @@ mod tests {
         assert_eq!(groups[0].1, SETTINGS_ROUTE_PREFIX);
         let finalized = reg.finalize_routes().expect("active routes finalize");
         assert_eq!(finalized.len(), 1, "six routes share one Primary listener");
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn config_cud_surface_mounts_only_the_three_mutation_contracts() {
+        let domain = settings_domain_for_test().config_cud_only();
+        let mut reg = bootstrap::compose(&[&domain]).expect("compose config CUD domain");
+        let finalized = reg.finalize_routes().expect("config CUD routes finalize");
+        let evidence = finalized[0].1.route_evidence();
+        let contracts = evidence
+            .iter()
+            .map(vocab::HttpRouteEvidence::contract_id)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            contracts,
+            [
+                generated::http::settings_v1::CONTRACT_ID,
+                generated::http::settings_v5::CONTRACT_ID,
+                generated::http::settings_v6::CONTRACT_ID,
+            ]
+        );
     }
 
     #[test]

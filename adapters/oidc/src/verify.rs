@@ -64,6 +64,7 @@ pub(crate) enum TelemetryReason {
     EmptySubject,
     InvalidExpiryBoundary,
     KindMissingOrUntrusted,
+    FederatedPermissionsInvalid,
     ScopedPrincipalMissingTenant,
     TenantNotCanonical,
     SuperAdminHasTenant,
@@ -108,6 +109,7 @@ impl TelemetryReason {
             Self::EmptySubject => "empty_subject",
             Self::InvalidExpiryBoundary => "invalid_expiry_boundary",
             Self::KindMissingOrUntrusted => "kind_missing_or_untrusted",
+            Self::FederatedPermissionsInvalid => "federated_permissions_invalid",
             Self::ScopedPrincipalMissingTenant => "scoped_principal_missing_tenant",
             Self::TenantNotCanonical => "tenant_not_canonical",
             Self::SuperAdminHasTenant => "super_admin_has_tenant",
@@ -644,9 +646,15 @@ mod tests {
             .add_es256_sec1("test-es256", &sec1_of(&test_sk2()))
             .expect("federated es256 key")
             .build();
+        let permissions =
+            crate::FederatedPermissionUniverse::try_new([vocab::GrantPermission::route(
+                vocab::RoutePermissionId::SettingsConfigPublish,
+            )])
+            .expect("permission universe");
         let mut builder = VerifierConfigBuilder::<diport::FederatedAccessProfile>::new(
             FEDERATED_ISS,
             FEDERATED_AUD,
+            permissions,
         )
         .keys_static(keys);
         for kind in ["user", "device", "admin", "superAdmin"] {
@@ -709,8 +717,13 @@ mod tests {
         } else {
             format!(r#","sid":"{CANON_SID}","jti":"{CANON_JTI}","auth_time":{iat},"authn_epoch":7"#)
         };
+        let permissions = if iss == FEDERATED_ISS {
+            r#","permissions":["settings.config-publish"]"#
+        } else {
+            ""
+        };
         format!(
-            r#"{{"sub":"{subject}","iat":{iat},"exp":{exp},"token_use":"{token_use}","iss":"{iss}","aud":"{aud}"{kind}{tenant}{grant_facts}{extra}}}"#
+            r#"{{"sub":"{subject}","iat":{iat},"exp":{exp},"token_use":"{token_use}","iss":"{iss}","aud":"{aud}"{kind}{tenant}{grant_facts}{permissions}{extra}}}"#
         )
     }
 
@@ -834,6 +847,7 @@ mod tests {
                 subject,
                 tenant,
                 kind,
+                ..
             } => (subject, tenant, kind),
             diport::VerifiedClaimsView::RssUser { .. } => {
                 panic!("expected federated access claims, got RSS user")
@@ -859,8 +873,13 @@ mod tests {
 
     fn access_lifetime_payload(issuer: &str, audience: &str, lifetime: i64) -> String {
         let exp = NOW.saturating_add(lifetime);
+        let permissions = if issuer == FEDERATED_ISS {
+            r#","permissions":["settings.config-publish"]"#
+        } else {
+            ""
+        };
         format!(
-            r#"{{"sub":"{CANON_USER}","iat":{NOW},"exp":{exp},"token_use":"access","iss":"{issuer}","aud":"{audience}","kind":"user","tenant_id":"{CANON_TENANT}","sid":"{CANON_SID}","jti":"{CANON_JTI}","auth_time":{NOW},"authn_epoch":7}}"#
+            r#"{{"sub":"{CANON_USER}","iat":{NOW},"exp":{exp},"token_use":"access","iss":"{issuer}","aud":"{audience}","kind":"user","tenant_id":"{CANON_TENANT}","sid":"{CANON_SID}","jti":"{CANON_JTI}","auth_time":{NOW},"authn_epoch":7{permissions}}}"#
         )
     }
 
@@ -1057,7 +1076,7 @@ mod tests {
                     String::new()
                 };
                 let body = format!(
-                    r#"{{"sub":"{subject}","iat":{NOW},"exp":{},"token_use":"access","iss":"{FEDERATED_ISS}","aud":"{FEDERATED_AUD}","kind":"{kind_claim}"{tenant}{extensions}}}"#,
+                    r#"{{"sub":"{subject}","iat":{NOW},"exp":{},"token_use":"access","iss":"{FEDERATED_ISS}","aud":"{FEDERATED_AUD}","kind":"{kind_claim}"{tenant}{extensions},"permissions":["settings.config-publish"]}}"#,
                     NOW + 600
                 );
                 let token = mint_es256(&test_sk2(), &body);

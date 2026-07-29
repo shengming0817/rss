@@ -487,6 +487,7 @@ async fn handle_fresh_tx<S, P, H>(
 {
     let message_id = msg.id.as_str().to_owned();
     let consume_span = build_consume_span(meta, &message_id, msg.metadata.get(diport::KEY_TRACE));
+    let terminal = tokio_util::sync::CancellationToken::new();
     tokio::select! {
         biased;
         () = run_tx_handler_loop(
@@ -499,13 +500,43 @@ async fn handle_fresh_tx<S, P, H>(
             key.clone(),
             lease.clone(),
             acker,
+            terminal.clone(),
         )
             .instrument(consume_span) => {}
-        () = renewal_loop(idempotency, meta, &ctx, &key, &lease, lease_cfg, &message_id) => {
+        () = renewal_before_terminal(
+            idempotency,
+            meta,
+            &ctx,
+            &key,
+            &lease,
+            lease_cfg,
+            &message_id,
+            terminal,
+        ) => {
             log_lease_lost(meta, &message_id);
             emit_lease_lost(meta.domain());
             settle(acker, diport::AckAction::Requeue, meta.domain(), &message_id).await;
         }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn renewal_before_terminal<S>(
+    idempotency: &Arc<S>,
+    meta: &ConsumerMeta,
+    ctx: &InboxReceiptContext,
+    key: &IdemKey,
+    lease: &LeaseToken,
+    lease_cfg: LeaseConfig,
+    message_id: &str,
+    terminal: tokio_util::sync::CancellationToken,
+) where
+    S: consistency::InboxStore + Send + Sync + 'static,
+{
+    tokio::select! {
+        biased;
+        () = terminal.cancelled() => std::future::pending().await,
+        () = renewal_loop(idempotency, meta, ctx, key, lease, lease_cfg, message_id) => {}
     }
 }
 
@@ -520,6 +551,7 @@ async fn run_tx_handler_loop<S, P, H>(
     key: IdemKey,
     lease: LeaseToken,
     acker: Option<&diport::DynAcker<'static>>,
+    terminal: tokio_util::sync::CancellationToken,
 ) where
     S: consistency::InboxStore + Send + Sync + 'static,
     P: policy::Policy,
@@ -532,6 +564,10 @@ async fn run_tx_handler_loop<S, P, H>(
             .await
         {
             ConsumerTxOutcome::Committed(_proof) => {
+                // The provider proof means the receipt/domain transaction is durably terminal.
+                // Stop lease fencing before broker settlement: a concurrent extend now observes
+                // `done` as Lost, but must not cancel the Ack authorized by that proof.
+                terminal.cancel();
                 settle(
                     acker,
                     diport::AckAction::Ack,
@@ -553,6 +589,7 @@ async fn run_tx_handler_loop<S, P, H>(
                     attempt,
                     summary,
                     acker,
+                    Some(&terminal),
                 )
                 .await;
                 return;
@@ -732,7 +769,7 @@ fn health_reporting_dlx(
     })
 }
 
-fn spawn_consumer_tx_thread<Fut, M>(
+fn spawn_consumer_tx_task<Fut, M>(
     worker_name: &str,
     health: Arc<eventexec::WorkerHealth>,
     make_body: M,
@@ -742,22 +779,10 @@ where
     Fut: std::future::Future<Output = ()>,
 {
     let worker_name = worker_name.to_owned();
+    let runtime = tokio::runtime::Handle::current();
     std::thread::spawn(move || {
         let _stopped = health.stopped_on_exit();
-        let runtime = match tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-        {
-            Ok(runtime) => runtime,
-            Err(error) => {
-                tracing::error!(
-                    worker = worker_name,
-                    error = %error,
-                    "consumer-tx: worker runtime build failed"
-                );
-                return;
-            }
-        };
+        tracing::debug!(worker = worker_name, "consumer-tx: worker thread started");
         runtime.block_on(make_body());
     })
 }
@@ -785,7 +810,7 @@ where
     let token_run = token.clone();
     let health_run = Arc::clone(&health);
     let dlx = health_reporting_dlx(dlx, Arc::clone(&health), &meta);
-    let handle = spawn_consumer_tx_thread(&name, Arc::clone(&health), move || async move {
+    let handle = spawn_consumer_tx_task(&name, Arc::clone(&health), move || async move {
         match subscriber.subscribe_ackable(topic, token_run.clone()).await {
             Ok(stream) => {
                 health_run.mark_healthy();
@@ -895,6 +920,26 @@ mod tests {
         }
     }
 
+    struct BlockingAckAcker {
+        actions: Arc<Mutex<Vec<AckAction>>>,
+        ack_started: Arc<tokio::sync::Notify>,
+        release_ack: Arc<tokio::sync::Notify>,
+    }
+
+    impl Acker for BlockingAckAcker {
+        async fn settle(&self, action: AckAction) -> Result<(), diport::AckError> {
+            if action == AckAction::Ack {
+                self.ack_started.notify_one();
+                self.release_ack.notified().await;
+            }
+            self.actions
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .push(action);
+            Ok(())
+        }
+    }
+
     struct NoopDlx;
 
     impl DeadLetterStore for NoopDlx {
@@ -995,9 +1040,27 @@ mod tests {
         )])))
     }
 
+    fn blocking_ack_delivery_stream(
+        id: &str,
+        actions: Arc<Mutex<Vec<AckAction>>>,
+        ack_started: Arc<tokio::sync::Notify>,
+        release_ack: Arc<tokio::sync::Notify>,
+    ) -> TestResult<diport::DeliveryStream> {
+        Ok(Box::pin(futures::stream::iter([Delivery::new(
+            message(id)?,
+            DynAcker::new_box(BlockingAckAcker {
+                actions,
+                ack_started,
+                release_ack,
+            }),
+        )])))
+    }
+
     struct TxStore {
         state: SeenState,
         claim_error: Option<EngineErrorKind>,
+        lose_extension: bool,
+        extend_started: Option<Arc<tokio::sync::Notify>>,
         commits: AtomicU32,
         extends: AtomicU32,
     }
@@ -1007,6 +1070,8 @@ mod tests {
             Arc::new(Self {
                 state: SeenState::Fresh,
                 claim_error: None,
+                lose_extension: false,
+                extend_started: None,
                 commits: AtomicU32::new(0),
                 extends: AtomicU32::new(0),
             })
@@ -1016,6 +1081,8 @@ mod tests {
             Arc::new(Self {
                 state: SeenState::Duplicate,
                 claim_error: None,
+                lose_extension: false,
+                extend_started: None,
                 commits: AtomicU32::new(0),
                 extends: AtomicU32::new(0),
             })
@@ -1025,6 +1092,21 @@ mod tests {
             Arc::new(Self {
                 state: SeenState::Fresh,
                 claim_error: Some(kind),
+                lose_extension: false,
+                extend_started: None,
+                commits: AtomicU32::new(0),
+                extends: AtomicU32::new(0),
+            })
+        }
+
+        fn fresh_with_terminal_extension_loss(
+            extend_started: Arc<tokio::sync::Notify>,
+        ) -> Arc<Self> {
+            Arc::new(Self {
+                state: SeenState::Fresh,
+                claim_error: None,
+                lose_extension: true,
+                extend_started: Some(extend_started),
                 commits: AtomicU32::new(0),
                 extends: AtomicU32::new(0),
             })
@@ -1051,7 +1133,15 @@ mod tests {
             _lease: &LeaseToken,
         ) -> Result<LeaseOutcome, EngineError> {
             self.extends.fetch_add(1, Ordering::AcqRel);
-            Ok(LeaseOutcome::Held)
+            if let Some(started) = &self.extend_started {
+                started.notify_one();
+                tokio::task::yield_now().await;
+            }
+            Ok(if self.lose_extension {
+                LeaseOutcome::Lost
+            } else {
+                LeaseOutcome::Held
+            })
         }
 
         async fn commit(
@@ -1120,6 +1210,114 @@ mod tests {
             0,
             "ConsumerTx handler owns inbox done inside its transaction"
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn committed_proof_fences_terminal_lease_loss_until_ack_finishes() -> TestResult {
+        let actions = Arc::new(Mutex::new(Vec::new()));
+        let ack_started = Arc::new(tokio::sync::Notify::new());
+        let release_ack = Arc::new(tokio::sync::Notify::new());
+        let extend_started = Arc::new(tokio::sync::Notify::new());
+        let handler_extend_started = Arc::clone(&extend_started);
+        let store = TxStore::fresh_with_terminal_extension_loss(Arc::clone(&extend_started));
+        let handler = transactional_handler(move |_msg, _ctx, _key, _lease| {
+            let handler_extend_started = Arc::clone(&handler_extend_started);
+            Box::pin(async move {
+                handler_extend_started.notified().await;
+                ConsumerTxOutcome::Committed(TestCommitProof)
+            })
+        });
+        let run = run_consumer_ackable_tx(
+            blocking_ack_delivery_stream(
+                "evt-tx-terminal-ack-race",
+                Arc::clone(&actions),
+                Arc::clone(&ack_started),
+                Arc::clone(&release_ack),
+            )?,
+            Arc::clone(&store),
+            noop_dlx(),
+            meta()?,
+            handler,
+            LeaseConfig::from_ttl(Duration::from_millis(3)),
+        );
+        tokio::pin!(run);
+
+        tokio::select! {
+            () = ack_started.notified() => {}
+            () = &mut run => return Err(std::io::Error::other("run ended before Ack blocked").into()),
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert!(
+            actions
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .is_empty(),
+            "terminal lease loss must not replace the proof-authorized Ack"
+        );
+        release_ack.notify_one();
+        run.await;
+        assert_eq!(
+            *actions.lock().unwrap_or_else(|error| error.into_inner()),
+            vec![AckAction::Ack]
+        );
+        assert!(store.extends.load(Ordering::Acquire) >= 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn dlx_commit_fences_terminal_lease_loss_until_ack_finishes() -> TestResult {
+        let actions = Arc::new(Mutex::new(Vec::new()));
+        let ack_started = Arc::new(tokio::sync::Notify::new());
+        let release_ack = Arc::new(tokio::sync::Notify::new());
+        let extend_started = Arc::new(tokio::sync::Notify::new());
+        let handler_extend_started = Arc::clone(&extend_started);
+        let store = TxStore::fresh_with_terminal_extension_loss(Arc::clone(&extend_started));
+        let writes = Arc::new(AtomicU32::new(0));
+        let handler = transactional_handler(move |_msg, _ctx, _key, _lease| {
+            let handler_extend_started = Arc::clone(&handler_extend_started);
+            Box::pin(async move {
+                handler_extend_started.notified().await;
+                ConsumerTxOutcome::Reject {
+                    summary: "test permanent rejection",
+                }
+            })
+        });
+        let run = run_consumer_ackable_tx(
+            blocking_ack_delivery_stream(
+                "evt-tx-terminal-dlx-race",
+                Arc::clone(&actions),
+                Arc::clone(&ack_started),
+                Arc::clone(&release_ack),
+            )?,
+            Arc::clone(&store),
+            recording_dlx(Arc::clone(&writes)),
+            meta()?,
+            handler,
+            LeaseConfig::from_ttl(Duration::from_millis(3)),
+        );
+        tokio::pin!(run);
+
+        tokio::select! {
+            () = ack_started.notified() => {}
+            () = &mut run => return Err(std::io::Error::other("DLX run ended before Ack blocked").into()),
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert!(
+            actions
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .is_empty(),
+            "durable DLX terminal must retain its proof-authorized Ack"
+        );
+        release_ack.notify_one();
+        run.await;
+        assert_eq!(
+            *actions.lock().unwrap_or_else(|error| error.into_inner()),
+            vec![AckAction::Ack]
+        );
+        assert_eq!(writes.load(Ordering::Acquire), 1);
+        assert_eq!(store.commits.load(Ordering::Acquire), 1);
         Ok(())
     }
 
@@ -1480,6 +1678,25 @@ mod tests {
         )?;
         let cloned = ctx.clone();
         assert_eq!(ctx, cloned);
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn consumer_tx_thread_enters_the_assembly_runtime() -> TestResult {
+        let assembly_runtime = tokio::runtime::Handle::current().id();
+        let (observed_sender, observed_receiver) = tokio::sync::oneshot::channel();
+        let handle = spawn_consumer_tx_task(
+            "consumer-tx-runtime-regression",
+            Arc::new(eventexec::WorkerHealth::starting()),
+            move || async move {
+                let _ = observed_sender.send(tokio::runtime::Handle::current().id());
+            },
+        );
+
+        assert_eq!(observed_receiver.await?, assembly_runtime);
+        tokio::task::spawn_blocking(move || handle.join())
+            .await?
+            .map_err(|_| std::io::Error::other("consumer tx test thread panicked"))?;
         Ok(())
     }
 }
