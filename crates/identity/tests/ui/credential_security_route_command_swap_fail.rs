@@ -1,4 +1,4 @@
-//! INVARIANT: IDENTITY-SECURITY-ROUTE-COMMAND-01 { level = "Hard", exec = "verify", source = "trybuild" }
+//! INVARIANT: IDENTITY-SECURITY-ROUTE-COMMAND-01 { level = "Hard", exec = "test", source = "trybuild" }
 
 use identity::ports::{
     IdentitySecurityLifecycle, LogoutAllCommand, LogoutCurrentProducerReceipt, TenantRepoScope,

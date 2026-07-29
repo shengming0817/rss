@@ -2,7 +2,7 @@
 //! `rss_authplan_callsite` — RSS G0.4 治理 dylint lint：限定 AuthPlan 构造入口仅组合根可调用。
 //! `primitives::authplan::AuthPlan::new` 与 `AuthPlan::none` 仅 assembly / bin crate（组合根）可调用。
 //!
-//! INVARIANT: AUTH-PLAN-MINT-01 { level = "Medium", exec = "verify", source = "dylint" }
+//! INVARIANT: AUTH-PLAN-MINT-01 { level = "Medium", exec = "check", source = "dylint" }
 //!
 //! `AuthPlan` 是 listener 级认证计划，语义上必须由组合根（assembly / bin）装配后通过 bootstrap option
 //! 注入；域 crate 直接 mint AuthPlan 绕过组合根注入语义，可能导致认证方案错配。
@@ -60,7 +60,7 @@ dylint_linting::declare_late_lint! {
     /// `AuthPlan` 是 listener 级认证计划，必须由组合根（assembly / bin crate）装配后经 bootstrap option 注入。
     /// 域 crate 直接 mint AuthPlan 绕过组合根注入语义，可能导致认证方案错配。
     /// runtime-api.md：「域 crate 禁止构造 AuthPlan；组合根经 bootstrap option 注入」。
-    /// INVARIANT: AUTH-PLAN-MINT-01 { level = "Medium", exec = "verify", source = "dylint" }。
+    /// INVARIANT: AUTH-PLAN-MINT-01 { level = "Medium", exec = "check", source = "dylint" }。
     ///
     /// ### Known problems
     /// 仍 intraprocedural：allowlist crate 内 wrapper fn（`pub fn wrap() -> AuthPlan { …new()… }`）被外部

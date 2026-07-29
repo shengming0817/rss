@@ -1,7 +1,7 @@
 #![feature(rustc_private)]
 //! Compiler-resolved runtime environment funnel.
 //!
-//! INVARIANT: RUNTIME-ENV-FUNNEL-HIR-01 { level = "Medium", exec = "verify", source = "dylint", synthetic_red = "ui_runtime", anti_vacuity = "ui_runtime" }
+//! INVARIANT: RUNTIME-ENV-FUNNEL-HIR-01 { level = "Medium", exec = "check", source = "dylint", synthetic_red = "ui_runtime", anti_vacuity = "ui_runtime" }
 //!
 //! The native boundary keeps the concrete process source and generic capture primitive private.
 //! This lint supplies the semantic backstop that source-token scanning cannot provide: it runs

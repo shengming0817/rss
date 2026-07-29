@@ -1,7 +1,7 @@
 //! Static LocalOnly route/state/port effect closure gate.
 //!
-//! INVARIANT: LOCAL-ONLY-EFFECTS-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "forged_observation_provenance_is_rejected", anti_vacuity = "governed_observation_provenance_is_accepted" }.
-//! INVARIANT: LOCAL-ONLY-RECEIPT-COVERAGE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "local_only_receipt_coverage_is_blocking_and_reportable", anti_vacuity = "real_workspace_local_only_receipt_coverage_is_non_vacuous" }.
+//! INVARIANT: LOCAL-ONLY-EFFECTS-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "forged_observation_provenance_is_rejected", anti_vacuity = "governed_observation_provenance_is_accepted" }.
+//! INVARIANT: LOCAL-ONLY-RECEIPT-COVERAGE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "local_only_receipt_coverage_is_blocking_and_reportable", anti_vacuity = "real_workspace_local_only_receipt_coverage_is_non_vacuous" }.
 
 use crate::ReportFormat;
 use crate::contract::DiscoveredContract;

@@ -17,7 +17,7 @@
 //!
 //! 唯一子进程 = `git`，经 [`crate::cmd::external_cmd`] 构造（CMD-FUNNEL-01：`xtask/src` 禁裸 `Command::new`）。
 //!
-//! INVARIANT: COVERAGE-DIFF-FLOOR-01 { level = "Medium", exec = "ci-only", source = "code" }—— diff 可执行新增行聚合覆盖率 < [`DIFF_MIN_PERCENT`] ⇒ ci 非零退出；
+//! INVARIANT: COVERAGE-DIFF-FLOOR-01 { level = "Medium", exec = "release-check", source = "code" }—— diff 可执行新增行聚合覆盖率 < [`DIFF_MIN_PERCENT`] ⇒ ci 非零退出；
 //!   base 不可解析/自引用 ⇒ fail-closed；生产文件缺 lcov 数据且无可度量行 ⇒ fail-closed（非静默 0/0 绿）。
 
 use anyhow::{Context, Result, bail};

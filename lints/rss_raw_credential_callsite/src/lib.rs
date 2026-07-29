@@ -1,7 +1,7 @@
 #![feature(rustc_private)]
 //! `rss_raw_credential_callsite` closes the untrusted-token boxing boundary.
 //!
-//! INVARIANT: RAW-CREDENTIAL-AUTHN-FUNNEL-01 { level = "Medium", exec = "verify", source = "dylint" }
+//! INVARIANT: RAW-CREDENTIAL-AUTHN-FUNNEL-01 { level = "Medium", exec = "check", source = "dylint" }
 //!
 //! `RawCredential` carries the token profile selected by a trusted listener. If arbitrary
 //! production crates can call a constructor, an untrusted token can be relabelled before the typed

@@ -1,6 +1,6 @@
 //! Port effect 分类的编译期契约。
 //!
-//! INVARIANT: PORT-CLASSIFICATION-CLOSED-01 { level = "Hard", exec = "verify", source = "trybuild" }
+//! INVARIANT: PORT-CLASSIFICATION-CLOSED-01 { level = "Hard", exec = "test", source = "trybuild" }
 
 #[test]
 fn port_effect_markers() {

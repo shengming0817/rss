@@ -1,6 +1,6 @@
 //! `repo-scope-guard` —— tenant/row scoped repository port signature guard.
 //!
-//! INVARIANT: TENANCY-REPO-SCOPE-SIGNATURE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::red_method_without_scope_handle_fails_even_when_other_method_has_handle", anti_vacuity = "tests::green_tenant_repo_scope_param_is_allowed" }——
+//! INVARIANT: TENANCY-REPO-SCOPE-SIGNATURE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::red_method_without_scope_handle_fails_even_when_other_method_has_handle", anti_vacuity = "tests::green_tenant_repo_scope_param_is_allowed" }——
 //! tenant-scoped domain repository ports in `settings` / `identity` / `audit` must accept opaque
 //! `TenantRepoScope` / `RowRepoScope` handles, not bare `TenantId`, `RowVisibility`, or `RowScope`.
 //! Admin / maintenance ports keep their own explicit entry points and are not normal repo scope

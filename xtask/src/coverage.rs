@@ -22,9 +22,9 @@
 //! 无 ratchet 例外：所有 STRICT crate 均守默认 90% 行覆盖率下限。历史 `consistency` 85% 例外已随
 //! inbox 行为模型与覆盖率补强移除。
 //!
-//! INVARIANT: COVERAGE-STRICT-FLOOR-01 { level = "Medium", exec = "ci-only", source = "code" }—— Workspace 路径下
+//! INVARIANT: COVERAGE-STRICT-FLOOR-01 { level = "Medium", exec = "release-check", source = "code" }—— Workspace 路径下
 //!   [`STRICT_CRATES`] 任一 crate 行覆盖率 < 其 [`floor_for`] 下限 **或未被测量**（JSON 无其数据 / 0 行）⇒ ci 非零退出。
-//! INVARIANT: COVERAGE-STRICT-CONDITIONAL-01 { level = "Medium", exec = "ci-only", source = "code", synthetic_red = "packages_with_strict_touched_still_evaluates_floor", anti_vacuity = "packages_without_strict_touched_skips_absolute_floor" }—— Packages 路径仅评
+//! INVARIANT: COVERAGE-STRICT-CONDITIONAL-01 { level = "Medium", exec = "release-check", source = "code", synthetic_red = "packages_with_strict_touched_still_evaluates_floor", anti_vacuity = "packages_without_strict_touched_skips_absolute_floor" }—— Packages 路径仅评
 //!   StrictTouched；空交集显式 skip 绝对地板（`floor=skipped`），diffcov 仍强制。
 //!   per-diff 增量门的不变式（COVERAGE-DIFF-FLOOR-01）见 [`crate::diffcov`]。
 //!   空 Packages 不可构造 Hard 证明见 `CoverageScope::packages` / nextest `COVERAGE-SCOPE-NONEMPTY-01`。

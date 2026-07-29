@@ -1,6 +1,6 @@
 //! DLX archive-before-purge 单漏斗守卫。
 //!
-//! INVARIANT: DLX-LIFECYCLE-FUNNEL-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::synthetic_red_rejects_every_bypass_class", anti_vacuity = "tests::canonical_lifecycle_sources_are_accepted" } ——
+//! INVARIANT: DLX-LIFECYCLE-FUNNEL-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::synthetic_red_rejects_every_bypass_class", anti_vacuity = "tests::canonical_lifecycle_sources_are_accepted" } ——
 //! hot DLX 只能经 typed lifecycle repository 与不可删除的 verified WORM provider 归档后清理；旧
 //! retention/env/decoder 与 raw DELETE 不得回流，runtime 必须显式注入独立 PG/S3/Vault provider。
 
@@ -728,8 +728,20 @@ fn required_runtime_source_findings(path: &Path, content: &str) -> Vec<Finding<R
         .collect()
 }
 
+type PgDlxRoleShape<'a> = (
+    &'a str,
+    &'a str,
+    &'a str,
+    &'a str,
+    &'a str,
+    &'a str,
+    &'a str,
+    &'a str,
+    &'a str,
+);
+
 fn required_pg_shapes(file: &syn::File) -> Vec<String> {
-    const ROLES: [(&str, &str, &str, &str, &str, &str, &str, &str, &str); 3] = [
+    const ROLES: [PgDlxRoleShape<'static>; 3] = [
         (
             "dlx_archiver",
             "PG_DLX_ARCHIVER_ROLE_KEYS",
@@ -824,10 +836,7 @@ fn required_pg_shapes(file: &syn::File) -> Vec<String> {
         .collect()
 }
 
-fn exact_pg_dlx_role_mapping(
-    method: &syn::ImplItemFn,
-    roles: &[(&str, &str, &str, &str, &str, &str, &str, &str, &str)],
-) -> bool {
+fn exact_pg_dlx_role_mapping(method: &syn::ImplItemFn, roles: &[PgDlxRoleShape<'_>]) -> bool {
     let snapshot_argument_is_exact = method.sig.inputs.iter().any(|argument| {
         let syn::FnArg::Typed(argument) = argument else {
             return false;

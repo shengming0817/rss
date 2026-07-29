@@ -1,6 +1,6 @@
 //! Cross-SQL/Rust/ops guard for the bounded same-ID outbox delivery funnel.
 //!
-//! INVARIANT: OUTBOX-SAME-ID-WINDOW-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::scan_content_rejects_same_id_funnel_bypasses", anti_vacuity = "tests::scan_content_accepts_complete_same_id_funnel" }——
+//! INVARIANT: OUTBOX-SAME-ID-WINDOW-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::scan_content_rejects_same_id_funnel_bypasses", anti_vacuity = "tests::scan_content_accepts_complete_same_id_funnel" }——
 //! one no-compile gate binds the 0060/0061 schema, private typed policy, closed publish preflight,
 //! expired-resolution evidence/ACL, policy-bound inbox sweep, and executable alert consumer. Each
 //! local mechanism is Hard where the database or Rust type system can enforce it; only the

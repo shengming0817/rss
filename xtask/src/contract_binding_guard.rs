@@ -14,9 +14,9 @@
 //! `SagaStepOutputBinding` 都 fail-fast。
 //! 测试 fixture 与 generated/xtask 不在本扫描范围内。
 //!
-//! INVARIANT: CONTRACT-BINDING-FUNNEL-01 { level = "Medium", exec = "verify", source = "code" }.
-//! INVARIANT: ROUTE-EVIDENCE-PROVENANCE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "contract_binding_guard::tests::scan_sources_covers_nested_examples_and_direct_journey_roots", anti_vacuity = "contract_binding_guard::tests::real_source_roots_cover_workspace_compositions_and_direct_journeys" }.
-//! INVARIANT: PRODUCER-RAW-TRANSPORT-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "contract_binding_guard::tests::flags_raw_transport_in_cross_file_reachable_helper", anti_vacuity = "contract_binding_guard::tests::real_active_producer_providers_have_no_raw_transport" }.
+//! INVARIANT: CONTRACT-BINDING-FUNNEL-01 { level = "Medium", exec = "check", source = "code" }.
+//! INVARIANT: ROUTE-EVIDENCE-PROVENANCE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "contract_binding_guard::tests::scan_sources_covers_nested_examples_and_direct_journey_roots", anti_vacuity = "contract_binding_guard::tests::real_source_roots_cover_workspace_compositions_and_direct_journeys" }.
+//! INVARIANT: PRODUCER-RAW-TRANSPORT-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "contract_binding_guard::tests::flags_raw_transport_in_cross_file_reachable_helper", anti_vacuity = "contract_binding_guard::tests::real_active_producer_providers_have_no_raw_transport" }.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};

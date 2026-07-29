@@ -1,6 +1,6 @@
 //! `pdp-allow-guard` —— crates/bins/assemblies 生产 src 内 `#[allow(rss_pdp_impl_adapter_only)]` 逃生门**计数门**（治理 lint）。
 //!
-//! INVARIANT: PDP-ALLOW-CONFINE-01 { level = "Medium", exec = "verify", source = "code" }（T004.6 / #1198 / ADR-006 §5 信任根二次门）
+//! INVARIANT: PDP-ALLOW-CONFINE-01 { level = "Medium", exec = "check", source = "code" }（T004.6 / #1198 / ADR-006 §5 信任根二次门）
 //!
 //! 背景：dylint `rss_pdp_impl_adapter_only`（PDP-IMPL-ADAPTER-ONLY-01）守「`diport::Pdp` 仅 adapter 可 impl」，
 //! 但其 item-level 逃生门 `#[allow(rss_pdp_impl_adapter_only)] // reason: ...` 可在 bins / assemblies 生产 src 内**抑制**该

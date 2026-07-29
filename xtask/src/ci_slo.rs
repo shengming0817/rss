@@ -1,7 +1,7 @@
 //! Strict CI SLO budget evaluation.
 //!
-//! INVARIANT: CI-SLO-CONFIG-SCHEMA-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "config_rejects_schema_drift_and_incomplete_catalog", anti_vacuity = "ci_slo_config_is_complete_and_has_expected_limits" }.
-//! INVARIANT: CI-SLO-EVALUATION-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "ci_slo_rejects_incomplete_evidence", anti_vacuity = "ci_slo_accepts_complete_evidence_and_renders_golden" }.
+//! INVARIANT: CI-SLO-CONFIG-SCHEMA-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "config_rejects_schema_drift_and_incomplete_catalog", anti_vacuity = "ci_slo_config_is_complete_and_has_expected_limits" }.
+//! INVARIANT: CI-SLO-EVALUATION-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "ci_slo_rejects_incomplete_evidence", anti_vacuity = "ci_slo_accepts_complete_evidence_and_renders_golden" }.
 
 use crate::ci_evidence::{CompilerCacheDiagnostics, ResourceUsage, ValidatedEvidence};
 use crate::ci_lanes::CiJobKey;

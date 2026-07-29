@@ -1,4 +1,4 @@
-//! INVARIANT: AUTH-GRANT-PERSISTED-RECEIPT-01 { level = "Hard", exec = "verify", source = "trybuild" }
+//! INVARIANT: AUTH-GRANT-PERSISTED-RECEIPT-01 { level = "Hard", exec = "test", source = "trybuild" }
 
 use identity::ports::PersistedLoginGrantReceipt;
 

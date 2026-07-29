@@ -28,38 +28,36 @@
 //! `cargo-semver-checks`（轴 A 语义破坏检测）当前所有 crate `publish = false` ⇒ `--workspace` 选 0 包、门
 //! 空转，故本轮不入 ci（public-api --check 已非空转兜轴 A）；待 crate 可发布后 follow-up 接入（见 PR body）。
 //!
-//! INVARIANT: VERIFY-AGGREGATE-01 { level = "Medium", exec = "verify", source = "code" }—— 本地 verify/ci-full 默认 keep-going、显式 fail-fast；远端 typed job 保持 fail-fast；任一门步失败均非零退出。
-//! INVARIANT: VERIFY-TOOL-GATE-01 { level = "Medium", exec = "verify", source = "code" }—— 缺外部工具默认 fail-closed；豁免仅经显式 `--allow-missing-tools`。
-//! INVARIANT: ASSEMBLY-PROVIDERS-VERIFY-GATE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "assembly_provider_codegen_gate_is_typed_once_and_ordered_in_all_aggregate_plans", anti_vacuity = "assembly_codegen::tests::assembly_provider_codegen_generated_provider_catalogs_are_non_empty_and_check_clean" }—— provider catalog drift is an independent typed no-compile gate exactly once between modules drift and AssemblyLock in every aggregate plan.
-//! INVARIANT: ASSEMBLY-RUNTIME-PLAN-VERIFY-GATE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "assembly_runtime_plan_gate_is_typed_once_and_ordered_in_all_aggregate_plans", anti_vacuity = "assembly_runtime_plan::tests::committed_runtime_plans_are_check_clean" }—— committed runtime plans are checked by one typed in-process no-compile gate exactly once between assembly lock and graph checks in every aggregate plan.
-//! INVARIANT: RUNTIME-DYLINT-UI-GATE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "runtime_dylint_ui_gate_is_typed_closed_and_in_aggregate_plans", anti_vacuity = "runtime_dylint_ui_gate_is_typed_closed_and_in_aggregate_plans" }—— runtime Dylint UI carriers run as one typed `cargo test --locked` gate from the fixed `lints` workspace in full verify, compatibility CI, and core prerequisites, while fast remains no-compile.
-//! INVARIANT: L2-ASSURANCE-VERIFY-GATE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "l2_assurance_gate_is_typed_once_and_ordered_in_all_aggregate_plans", anti_vacuity = "l2_assurance::tests::workspace_inventory_is_exact_and_deterministic" }—— L2 assurance drift check is a typed, in-process, no-compile gate present exactly once immediately after codegen in every aggregate plan.
-//! INVARIANT: CI-ADAPTIVE-WORKFLOW-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "split_ci_caller_predicate_green_and_synthetic_red", anti_vacuity = "github_ci_workflow_delegates_to_split_xtask_lanes" }—— GitHub CI workflow
+//! INVARIANT: VERIFY-AGGREGATE-01 { level = "Medium", exec = "check", source = "code" }—— 本地 verify/ci-full 默认 keep-going、显式 fail-fast；远端 typed job 保持 fail-fast；任一门步失败均非零退出。
+//! INVARIANT: VERIFY-TOOL-GATE-01 { level = "Medium", exec = "check", source = "code" }—— 缺外部工具默认 fail-closed；豁免仅经显式 `--allow-missing-tools`。
+//! INVARIANT: ASSEMBLY-PROVIDERS-VERIFY-GATE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "assembly_provider_codegen_gate_is_typed_once_and_ordered_in_all_aggregate_plans", anti_vacuity = "assembly_codegen::tests::assembly_provider_codegen_generated_provider_catalogs_are_non_empty_and_check_clean" }—— provider catalog drift is an independent typed no-compile gate exactly once between modules drift and AssemblyLock in every aggregate plan.
+//! INVARIANT: ASSEMBLY-RUNTIME-PLAN-VERIFY-GATE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "assembly_runtime_plan_gate_is_typed_once_and_ordered_in_all_aggregate_plans", anti_vacuity = "assembly_runtime_plan::tests::committed_runtime_plans_are_check_clean" }—— committed runtime plans are checked by one typed in-process no-compile gate exactly once between assembly lock and graph checks in every aggregate plan.
+//! INVARIANT: RUNTIME-DYLINT-UI-GATE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "runtime_dylint_ui_gate_is_typed_closed_and_in_aggregate_plans", anti_vacuity = "runtime_dylint_ui_gate_is_typed_closed_and_in_aggregate_plans" }—— runtime Dylint UI carriers run as one typed `cargo test --locked` gate from the fixed `lints` workspace in full verify, compatibility CI, and core prerequisites, while fast remains no-compile.
+//! INVARIANT: L2-ASSURANCE-VERIFY-GATE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "l2_assurance_gate_is_typed_once_and_ordered_in_all_aggregate_plans", anti_vacuity = "l2_assurance::tests::workspace_inventory_is_exact_and_deterministic" }—— L2 assurance drift check is a typed, in-process, no-compile gate present exactly once immediately after codegen in every aggregate plan.
+//! INVARIANT: CI-ADAPTIVE-WORKFLOW-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "split_ci_caller_predicate_green_and_synthetic_red", anti_vacuity = "github_ci_workflow_delegates_to_split_xtask_lanes" }—— GitHub CI workflow
 //!   精确委托闭合 xtask job，Meta/Security 并行，Core tests 仅依赖单次 prerequisites；门归属由
 //!   Hard registry 闭集与穷举 dispatch 强制，YAML 拓扑、权限和 literal 委托由 Medium 结构化守卫
 //!   `github_ci_workflow_delegates_to_split_xtask_lanes` 强制。
-//! INVARIANT: CI-RESOURCE-EVIDENCE-01 { level = "Medium", exec = "verify", source = "code" }—— CI / Integration workflow
+//! INVARIANT: CI-RESOURCE-EVIDENCE-01 { level = "Medium", exec = "check", source = "code" }—— CI / Integration workflow
 //!   须按 checkout → start → cache/after-cache → xtask → after-build → cleanup/measure → before-save → explicit save → after-save → artifact 的唯一有序生命周期
 //!   采集资源证据，且在昂贵构建前 fail-closed 检查磁盘预算。该约束无法用 Rust 类型系统
 //!   表达，由结构化 YAML 谓词、synthetic red / anti-vacuity 与脚本 selftest 联合承载。
-//! INVARIANT: CI-CACHE-WRITER-01 { level = "Medium", exec = "verify", source = "code" }—— cache writer 资格必须由
+//! INVARIANT: CI-CACHE-WRITER-01 { level = "Medium", exec = "check", source = "code" }—— cache writer 资格必须由
 //!   workflow 顶层唯一的受保护 trigger 表达式决定，setup、cleanup 与 save 只能消费该单一 env；
 //!   restore/key/evidence/save 顺序由结构谓词、synthetic red 与 committed-file gate fail-closed 承载。
-//! INVARIANT: CI-TOOL-ADAPTER-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "ci_tool_adapter_contract_green_and_synthetic_red", anti_vacuity = "github_ci_tool_adapter_contract_is_closed" }—— lane 工具集只能由机器 catalog 经 adapter 派生；workflow/action 不得复制清单或接收任意工具 input，installer immutable SHA 必须同时绑定 uses 与 cache identity，adapter 与 catalog 内容必须绑定 cache key 与 seal，fresh/cache verify 必须先于 PATH 暴露和 cache save，tool-cache epoch 必须为 v4。
-//! INVARIANT: CI-TEST-PARTITION-MATRIX-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "split_ci_caller_predicate_green_and_synthetic_red", anti_vacuity = "github_ci_workflow_delegates_to_split_xtask_lanes" }—— Core 与 integration partition topology 必须只由 typed planner 的动态 matrix 派生。
-//! INVARIANT: LOCALTX-PROOF-CI-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "split_ci_caller_predicate_green_and_synthetic_red", anti_vacuity = "github_ci_workflow_delegates_to_split_xtask_lanes" }—— same-head planner job 必须原子生成并上传 JSON/Markdown LocalTx proof artifact。
-//! INVARIANT: CI-TEST-EVIDENCE-UPLOAD-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "reusable_rust_lane_guard_rejects_semantic_weakening", anti_vacuity = "github_resource_evidence_workflows_have_lifecycle" }—— evidence 必须 always 上传、唯一命名、精确路径且只保留七天。
-//! INVARIANT: CI-SLO-WORKFLOW-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "reusable_rust_lane_slo_contract_rejects_semantic_weakening", anti_vacuity = "reusable_rust_lane_slo_contract_accepts_committed_workflow" }—— SLO 证据必须先 stage 再 always 上传，最后 always 评估并写入 Job Summary；live disk guard 必须从固定 SLO config 读取阈值并 fail-closed。
-//! INVARIANT: CI-INTEGRATION-SERVICE-LIFECYCLE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "integration_service_lifecycle_predicate_green_and_synthetic_red", anti_vacuity = "github_resource_evidence_workflows_have_lifecycle" }—— Integration lane 必须在 xtask 前建立 exact scope，在失败后有界取证并 always 精确清理；生命周期证据始终归档，服务日志仅失败时归档，且 workflow 禁止任何全局 Docker prune。
-//! INVARIANT: INTEGRATION-CONTAINER-OWNERSHIP-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "integration_container_source_contract_synthetic_red", anti_vacuity = "integration_container_source_contract_accepts_committed_sources" }—— testkit 只能在 owned 模块导入 AsyncRunner/调用 start，fixture、context env、service 与 ownership label 的精确 partition 闭集须和 shell/workflow 同步。
-//! INVARIANT: CI-SELFTEST-TEMP-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "ci_selftest_temp_root_guard_rejects_unsafe_fixtures", anti_vacuity = "committed_ci_selftest_temp_roots_are_atomic" }—— 所有 GitHub shell selftest 必须递归自动发现；可执行源码中的 PID 临时路径与非原子 TMP_ROOT 均 fail-closed，实际 TMP_ROOT 必须以带 `.XXXXXX` 模板的原子 `mktemp -d` 创建独占根目录；注释不能充当合规证据或触发误报。
+//! INVARIANT: CI-TOOL-ADAPTER-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "ci_tool_adapter_contract_green_and_synthetic_red", anti_vacuity = "github_ci_tool_adapter_contract_is_closed" }—— lane 工具集只能由机器 catalog 经 adapter 派生；workflow/action 不得复制清单或接收任意工具 input，installer immutable SHA 必须同时绑定 uses 与 cache identity，adapter 与 catalog 内容必须绑定 cache key 与 seal，fresh/cache verify 必须先于 PATH 暴露和 cache save，tool-cache epoch 必须为 v4。
+//! INVARIANT: CI-TEST-PARTITION-MATRIX-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "split_ci_caller_predicate_green_and_synthetic_red", anti_vacuity = "github_ci_workflow_delegates_to_split_xtask_lanes" }—— Core 与 integration partition topology 必须只由 typed planner 的动态 matrix 派生。
+//! INVARIANT: LOCALTX-PROOF-CI-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "split_ci_caller_predicate_green_and_synthetic_red", anti_vacuity = "github_ci_workflow_delegates_to_split_xtask_lanes" }—— same-head planner job 必须原子生成并上传 JSON/Markdown LocalTx proof artifact。
+//! INVARIANT: CI-TEST-EVIDENCE-UPLOAD-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "reusable_rust_lane_guard_rejects_semantic_weakening", anti_vacuity = "github_resource_evidence_workflows_have_lifecycle" }—— evidence 必须 always 上传、唯一命名、精确路径且只保留七天。
+//! INVARIANT: CI-SLO-WORKFLOW-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "reusable_rust_lane_slo_contract_rejects_semantic_weakening", anti_vacuity = "reusable_rust_lane_slo_contract_accepts_committed_workflow" }—— SLO 证据必须先 stage 再 always 上传，最后 always 评估并写入 Job Summary；live disk guard 必须从固定 SLO config 读取阈值并 fail-closed。
+//! INVARIANT: CI-INTEGRATION-SERVICE-LIFECYCLE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "integration_service_lifecycle_predicate_green_and_synthetic_red", anti_vacuity = "github_resource_evidence_workflows_have_lifecycle" }—— Integration lane 必须在 xtask 前建立 exact scope，在失败后有界取证并 always 精确清理；生命周期证据始终归档，服务日志仅失败时归档，且 workflow 禁止任何全局 Docker prune。
+//! INVARIANT: INTEGRATION-CONTAINER-OWNERSHIP-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "integration_container_source_contract_synthetic_red", anti_vacuity = "integration_container_source_contract_accepts_committed_sources" }—— testkit 只能在 owned 模块导入 AsyncRunner/调用 start，fixture、context env、service 与 ownership label 的精确 partition 闭集须和 shell/workflow 同步。
+//! INVARIANT: CI-SELFTEST-TEMP-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "ci_selftest_temp_root_guard_rejects_unsafe_fixtures", anti_vacuity = "committed_ci_selftest_temp_roots_are_atomic" }—— 所有 GitHub shell selftest 必须递归自动发现；可执行源码中的 PID 临时路径与非原子 TMP_ROOT 均 fail-closed，实际 TMP_ROOT 必须以带 `.XXXXXX` 模板的原子 `mktemp -d` 创建独占根目录；注释不能充当合规证据或触发误报。
 
 use crate::ci_lanes::CiJobKey;
-use crate::ci_lanes::{
-    CiLane, CompatMembership, CompileKind, GateId, REGISTRY, StandaloneReason, ToolRequirement,
-    VerifyMembership,
-};
+use crate::ci_lanes::{CiLane, CompileKind, GateExecutor, GateId, REGISTRY, ToolRequirement};
 use crate::diagnostic::run_check;
+use crate::execution_profiles::{ExecutionProfile, ExecutionUnitSpec};
 use crate::integration_shards::{self, IntegrationShard, Scheduling};
 use crate::workspace_root;
 use crate::{
@@ -768,13 +766,20 @@ fn step_clippy_workspace() -> Step {
         env: &[],
     }
 }
-fn step_nextest() -> Step {
+fn core_test_step(id: GateId) -> Step {
+    let GateExecutor::CoreTest(scope) = id.spec().executor() else {
+        unreachable!("{id:?} must use the typed core-test executor")
+    };
     Step {
-        id: GateId::DefaultNextest,
+        id,
         args: &[],
-        kind: StepKind::Nextest(crate::nextest::CoreTestScope::Workspace),
+        kind: StepKind::Nextest(scope),
         env: &[],
     }
+}
+
+fn step_nextest() -> Step {
+    core_test_step(GateId::DefaultNextest)
 }
 
 /// Prove production password test constructors stay absent in an isolated Cargo feature graph.
@@ -809,95 +814,45 @@ fn step_secure_production_trybuild() -> Step {
 // fail-loud（不可空转）。新增确定性 feature 行为测试的 adapter 在 [`feature_test_steps`] 追加一条（显式清单，
 // 与 coverage STRICT_CRATES 同款机制）。
 fn step_s3_backend_tests() -> Step {
-    Step {
-        id: GateId::S3BackendTests,
-        args: &[],
-        kind: StepKind::Nextest(crate::nextest::CoreTestScope::S3Backend),
-        env: &[],
-    }
+    core_test_step(GateId::S3BackendTests)
 }
 fn step_redis_backend_tests() -> Step {
-    Step {
-        id: GateId::RedisBackendTests,
-        args: &[],
-        kind: StepKind::Nextest(crate::nextest::CoreTestScope::RedisBackend),
-        env: &[],
-    }
+    core_test_step(GateId::RedisBackendTests)
 }
 fn step_oidc_backend_tests() -> Step {
-    Step {
-        id: GateId::OidcBackendTests,
-        args: &[],
-        kind: StepKind::Nextest(crate::nextest::CoreTestScope::OidcBackend),
-        env: &[],
-    }
+    core_test_step(GateId::OidcBackendTests)
 }
 fn step_prometheus_backend_tests() -> Step {
-    Step {
-        id: GateId::PrometheusBackendTests,
-        args: &[],
-        kind: StepKind::Nextest(crate::nextest::CoreTestScope::PrometheusBackend),
-        env: &[],
-    }
+    core_test_step(GateId::PrometheusBackendTests)
 }
 fn step_otel_backend_tests() -> Step {
     // otel OTLP/gRPC trace 导出确定性单测（#1011：InMemorySpanExporter round-trip + observ::MetricLabel→KeyValue
     // 映射 + OtelEndpoint typed 安全边界 + 导出边界脱敏）。`backend` feature 的 `#[cfg(feature)]` 测试模块默认
     // workspace nextest 不编入，按包显式补跑——#1253 让 otel 成为 runtime 生产依赖后，确定性测试须入机器门（同 prometheus 范式）。
-    Step {
-        id: GateId::OtelBackendTests,
-        args: &[],
-        kind: StepKind::Nextest(crate::nextest::CoreTestScope::OtelBackend),
-        env: &[],
-    }
+    core_test_step(GateId::OtelBackendTests)
 }
 fn step_grpc_backend_tests() -> Step {
-    Step {
-        id: GateId::GrpcBackendTests,
-        args: &[],
-        kind: StepKind::Nextest(crate::nextest::CoreTestScope::GrpcBackend),
-        env: &[],
-    }
+    core_test_step(GateId::GrpcBackendTests)
 }
 fn step_vault_backend_tests() -> Step {
     // vault Transit `sign_impl` HTTP 编排层确定性单测（#1179：wiremock loopback mock，4 分支 + percent-encode/
     // header）+ 非 2xx 状态分级（#1180：classify_status 表驱动）。`backend` feature 的 `#[cfg(feature)]` 测试模块
     // 默认 workspace nextest 不编入，按包显式补跑——否则 azure 无 CI 下这些确定性测试不被任何 gate 实跑。
-    Step {
-        id: GateId::VaultBackendTests,
-        args: &[],
-        kind: StepKind::Nextest(crate::nextest::CoreTestScope::VaultBackend),
-        env: &[],
-    }
+    core_test_step(GateId::VaultBackendTests)
 }
 fn step_settingsonly_tests() -> Step {
     // settingsonly 精确 package smoke：workspace / all-features 联合编译不能证明该 assembly 自身的
     // feature 选择图（postgres domain-settings only）。按包显式 nextest，不带 `--no-tests=pass`——
     // 0 选中即漂移 fail-loud。
-    Step {
-        id: GateId::SettingsOnlyTests,
-        args: &[],
-        kind: StepKind::Nextest(crate::nextest::CoreTestScope::SettingsOnly),
-        env: &[],
-    }
+    core_test_step(GateId::SettingsOnlyTests)
 }
 fn step_testkit_container_tests() -> Step {
-    Step {
-        id: GateId::TestkitContainerTests,
-        args: &[],
-        kind: StepKind::Nextest(crate::nextest::CoreTestScope::TestkitContainers),
-        env: &[],
-    }
+    core_test_step(GateId::TestkitContainerTests)
 }
 fn step_identityaudit_tests() -> Step {
     // identityaudit 精确 package smoke：workspace / all-features 联合编译不能证明该 assembly
     // 只组合 identity + audit。非分片执行保持 0 选中 fail-loud；PR hash 分片允许某一半为空。
-    Step {
-        id: GateId::IdentityAuditTests,
-        args: &[],
-        kind: StepKind::Nextest(crate::nextest::CoreTestScope::IdentityAudit),
-        env: &[],
-    }
+    core_test_step(GateId::IdentityAuditTests)
 }
 // ci 专用：build/clippy 升 `--all-features --all-targets`（编译态全覆盖，含 integration-gated 代码——
 // 仅编译不运行 ⇒ 无需 DB/broker）；覆盖率门替 nextest（兼跑 workspace 测试 + basis/engine ≥90%）；
@@ -954,7 +909,8 @@ fn step_public_api() -> Step {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PlanTarget {
+pub(crate) enum PlanProjection {
+    Profile(ExecutionProfile),
     Verify,
     CompatibilityCi,
     Lane(CiLane),
@@ -968,49 +924,75 @@ pub(crate) enum CoreExecution {
     Tests,
 }
 
-fn selected_for(target: PlanTarget, id: GateId) -> bool {
+fn selected_for(target: PlanProjection, id: GateId) -> bool {
     let spec = id.spec();
     match target {
-        PlanTarget::CompatibilityCi => spec.compat() == CompatMembership::Included,
-        PlanTarget::Core(CoreExecution::Full) | PlanTarget::Lane(CiLane::Core) => {
-            spec.belongs_to(CiLane::Core)
-                && spec.compat() != CompatMembership::Standalone(StandaloneReason::VerifyOnly)
+        PlanProjection::Profile(profile) => spec.included_in_profile(profile),
+        PlanProjection::CompatibilityCi => spec.included_in_compatibility_ci(),
+        PlanProjection::Core(CoreExecution::Full) | PlanProjection::Lane(CiLane::Core) => {
+            matches!(
+                spec.executor(),
+                GateExecutor::CorePrerequisite | GateExecutor::CoreTest(_)
+            ) && (spec.included_in_compatibility_ci()
+                || matches!(spec.executor(), GateExecutor::CoreTest(_)))
         }
-        PlanTarget::Core(CoreExecution::Prerequisites) => matches!(
-            id,
-            GateId::BuildAllFeatures
-                | GateId::ClippyAllFeatures
-                | GateId::Dylint
-                | GateId::RuntimeDylintUiTests
-                | GateId::PostgresFeatureMatrix
-                | GateId::SecureProductionTrybuild
-        ),
-        PlanTarget::Core(CoreExecution::Tests) => matches!(
-            id,
-            GateId::DefaultNextest
-                | GateId::S3BackendTests
-                | GateId::RedisBackendTests
-                | GateId::OidcBackendTests
-                | GateId::PrometheusBackendTests
-                | GateId::OtelBackendTests
-                | GateId::GrpcBackendTests
-                | GateId::VaultBackendTests
-                | GateId::SettingsOnlyTests
-                | GateId::TestkitContainerTests
-                | GateId::IdentityAuditTests
-        ),
-        PlanTarget::Lane(lane) => spec.belongs_to(lane),
-        PlanTarget::Verify => spec.verify_membership() == VerifyMembership::Included,
+        PlanProjection::Core(CoreExecution::Prerequisites) => {
+            spec.executor() == GateExecutor::CorePrerequisite && spec.included_in_compatibility_ci()
+        }
+        PlanProjection::Core(CoreExecution::Tests) => {
+            matches!(spec.executor(), GateExecutor::CoreTest(_))
+        }
+        PlanProjection::Lane(lane) => spec.belongs_to(lane),
+        PlanProjection::Verify => [ExecutionProfile::Check, ExecutionProfile::Test]
+            .into_iter()
+            .any(|profile| selected_for(PlanProjection::Profile(profile), id)),
     }
 }
 
-pub(crate) fn plan_for(target: PlanTarget) -> Vec<Step> {
-    let mut plan: Vec<_> = REGISTRY
+pub(crate) fn plan_for(target: PlanProjection) -> Vec<Step> {
+    let profiles: &[ExecutionProfile] = match target {
+        PlanProjection::Profile(ExecutionProfile::Check) => &[ExecutionProfile::Check],
+        PlanProjection::Profile(ExecutionProfile::Test) => &[ExecutionProfile::Test],
+        PlanProjection::Profile(ExecutionProfile::IntegrationCritical) => {
+            &[ExecutionProfile::IntegrationCritical]
+        }
+        PlanProjection::Profile(ExecutionProfile::ReleaseCheck)
+        | PlanProjection::CompatibilityCi
+        | PlanProjection::Core(CoreExecution::Prerequisites)
+        | PlanProjection::Lane(
+            CiLane::Meta
+            | CiLane::CorePrerequisites
+            | CiLane::Security
+            | CiLane::Coverage
+            | CiLane::LocalOnly
+            | CiLane::Nightly
+            | CiLane::Integration,
+        ) => &[ExecutionProfile::ReleaseCheck],
+        PlanProjection::Verify => &[ExecutionProfile::Check, ExecutionProfile::Test],
+        PlanProjection::Core(CoreExecution::Full)
+        | PlanProjection::Core(CoreExecution::Tests)
+        | PlanProjection::Lane(CiLane::Core | CiLane::CoreTests) => {
+            &[ExecutionProfile::ReleaseCheck, ExecutionProfile::Test]
+        }
+    };
+    let candidates = profiles
         .iter()
-        .filter(|spec| selected_for(target, spec.id()))
-        .map(|spec| step_for_id(spec.id()))
-        .collect();
-    if target == PlanTarget::Lane(CiLane::Nightly) {
+        .copied()
+        .flat_map(ExecutionUnitSpec::project)
+        .map(ExecutionUnitSpec::id)
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut plan = ExecutionUnitSpec::all()
+        .filter_map(|unit| match unit {
+            ExecutionUnitSpec::Gate(spec) => Some(spec.id()),
+            ExecutionUnitSpec::Integration(_) => None,
+        })
+        .filter(|id| {
+            candidates.contains(&crate::execution_profiles::ExecutionUnitId::Gate(*id))
+                && selected_for(target, *id)
+        })
+        .map(step_for_id)
+        .collect::<Vec<_>>();
+    if target == PlanProjection::Lane(CiLane::Nightly) {
         plan.sort_by_key(|step| usize::from(step.id == GateId::CargoAudit));
     }
     plan
@@ -1035,7 +1017,7 @@ crate::ci_lanes::gate_catalog!(define_step_dispatch);
 ///
 /// Audit 亦经统一动态 executor 委托（不内联门命令），由 `CI-ADAPTIVE-WORKFLOW-01` 守。
 fn audit_plan() -> Vec<Step> {
-    plan_for(PlanTarget::Lane(CiLane::Nightly))
+    plan_for(PlanProjection::Lane(CiLane::Nightly))
 }
 
 /// docker daemon 是否可达（容器 self-provision 前置；`docker version` 退出 0）。经 [`crate::cmd::external_cmd`]
@@ -1139,7 +1121,7 @@ pub(crate) fn run_nextest_replay(
 
 /// 纯函数：`--fast` 只保留轻量的 repository meta / Cargo builtin metadata gate。
 fn verify_plan(opts: &VerifyOpts) -> Vec<Step> {
-    let plan = plan_for(PlanTarget::Verify);
+    let plan = plan_for(PlanProjection::Verify);
     if opts.fast {
         plan.into_iter()
             .filter(|step| {
@@ -1652,7 +1634,7 @@ pub(crate) fn run_ci(allow_missing_tools: bool, fail_fast: bool) -> Result<()> {
         execution_policy: crate::cmd::ExecutionPolicy::from_fail_fast(fail_fast),
     };
     let root = workspace_root()?;
-    let plan = plan_for(PlanTarget::CompatibilityCi);
+    let plan = plan_for(PlanProjection::CompatibilityCi);
     eprintln!("ci：{} 步（CI lane 超集）", plan.len());
     run_labeled_plan("ci", &plan, &opts, &root)?;
     eprintln!("ci：全部通过");
@@ -1678,9 +1660,9 @@ pub(crate) fn run_lane(
     };
     let root = workspace_root()?;
     let plan = if lane == CiLane::Core {
-        plan_for(PlanTarget::Core(CoreExecution::Full))
+        plan_for(PlanProjection::Core(CoreExecution::Full))
     } else {
-        plan_for(PlanTarget::Lane(lane))
+        plan_for(PlanProjection::Lane(lane))
     };
     let name = lane.command_name();
     eprintln!("{name}：{} 步", plan.len());
@@ -1709,7 +1691,7 @@ pub(crate) fn run_core_execution(
         execution_policy: crate::cmd::ExecutionPolicy::FailFast,
     };
     let root = workspace_root()?;
-    let plan = plan_for(PlanTarget::Core(execution));
+    let plan = plan_for(PlanProjection::Core(execution));
     let name = match execution {
         CoreExecution::Prerequisites => "ci-core-prerequisites",
         CoreExecution::Tests => "ci-core-tests",
@@ -2368,7 +2350,7 @@ mod tests {
 
     #[test]
     fn exact_gate_id_projection_rejects_equal_cardinality_wrong_id() -> anyhow::Result<()> {
-        let plan = plan_for(PlanTarget::CompatibilityCi);
+        let plan = plan_for(PlanProjection::CompatibilityCi);
         let mut wrong_ids = plan.iter().map(|step| step.id).collect::<Vec<_>>();
         let first = wrong_ids
             .first_mut()
@@ -2382,8 +2364,8 @@ mod tests {
 
     #[test]
     fn exact_gate_id_projection_reports_stable_set_differences() -> anyhow::Result<()> {
-        let expected = registry_gate_ids(|spec| spec.compat() == CompatMembership::Included);
-        let mut plan = plan_for(PlanTarget::CompatibilityCi);
+        let expected = registry_gate_ids(|spec| spec.included_in_compatibility_ci());
+        let mut plan = plan_for(PlanProjection::CompatibilityCi);
         plan.retain(|step| step.id != GateId::Fmt);
         let contract = plan
             .iter_mut()
@@ -2581,20 +2563,20 @@ mod tests {
     #[test]
     fn ci_lane_plans_are_registry_derived_and_partitioned() -> anyhow::Result<()> {
         for lane in [CiLane::Meta, CiLane::Security, CiLane::Coverage] {
-            let plan = plan_for(PlanTarget::Lane(lane));
+            let plan = plan_for(PlanProjection::Lane(lane));
             ensure_plan_has_exact_gate_ids(&plan, registry_gate_ids(|spec| spec.belongs_to(lane)))?;
         }
         assert_eq!(
-            labels(&plan_for(PlanTarget::Lane(CiLane::Security))),
+            labels(&plan_for(PlanProjection::Lane(CiLane::Security))),
             ["deny", "audit"],
             "supply-chain checks retain their local execution order"
         );
         assert_eq!(
-            labels(&plan_for(PlanTarget::Lane(CiLane::Coverage))),
+            labels(&plan_for(PlanProjection::Lane(CiLane::Coverage))),
             ["coverage", "public-api"],
             "coverage precedes its public API closeout"
         );
-        let core = labels(&plan_for(PlanTarget::Lane(CiLane::Core)));
+        let core = labels(&plan_for(PlanProjection::Lane(CiLane::Core)));
         assert!(core.contains(&"build"));
         assert_eq!(core.first(), Some(&"postgres-feature-matrix"));
         assert!(core.contains(&"default-test-runner"));
@@ -2603,10 +2585,11 @@ mod tests {
         assert!(!core.contains(&"coverage"));
         assert!(!core.contains(&"integration-compile"));
 
-        let compatibility: std::collections::BTreeSet<_> = plan_for(PlanTarget::CompatibilityCi)
-            .into_iter()
-            .map(|step| step.id)
-            .collect();
+        let compatibility: std::collections::BTreeSet<_> =
+            plan_for(PlanProjection::CompatibilityCi)
+                .into_iter()
+                .map(|step| step.id)
+                .collect();
         let split: Vec<std::collections::BTreeSet<_>> = [
             CiLane::Meta,
             CiLane::Core,
@@ -2615,9 +2598,9 @@ mod tests {
         ]
         .into_iter()
         .map(|lane| {
-            plan_for(PlanTarget::Lane(lane))
+            plan_for(PlanProjection::Lane(lane))
                 .into_iter()
-                .filter(|step| step.id.spec().compat() == CompatMembership::Included)
+                .filter(|step| step.id.spec().included_in_compatibility_ci())
                 .map(|step| step.id)
                 .collect()
         })
@@ -2633,9 +2616,9 @@ mod tests {
 
     #[test]
     fn core_execution_plans_are_disjoint_and_cover_full_core() -> anyhow::Result<()> {
-        let full = plan_for(PlanTarget::Core(CoreExecution::Full));
-        let prerequisites = plan_for(PlanTarget::Core(CoreExecution::Prerequisites));
-        let tests = plan_for(PlanTarget::Core(CoreExecution::Tests));
+        let full = plan_for(PlanProjection::Core(CoreExecution::Full));
+        let prerequisites = plan_for(PlanProjection::Core(CoreExecution::Prerequisites));
+        let tests = plan_for(PlanProjection::Core(CoreExecution::Tests));
         assert!(!prerequisites.is_empty(), "prerequisite anti-vacuity");
         assert!(!tests.is_empty(), "core test anti-vacuity");
         let prereq_ids = prerequisites
@@ -2695,20 +2678,22 @@ mod tests {
             Ok(())
         };
 
-        validate(&plan_for(PlanTarget::Verify))?;
-        validate(&plan_for(PlanTarget::CompatibilityCi))?;
-        validate(&plan_for(PlanTarget::Lane(CiLane::Core)))?;
-        validate(&plan_for(PlanTarget::Core(CoreExecution::Prerequisites)))?;
+        validate(&plan_for(PlanProjection::Verify))?;
+        validate(&plan_for(PlanProjection::CompatibilityCi))?;
+        validate(&plan_for(PlanProjection::Lane(CiLane::Core)))?;
+        validate(&plan_for(PlanProjection::Core(
+            CoreExecution::Prerequisites,
+        )))?;
         assert!(
             verify_plan(&opts(true, false))
                 .iter()
                 .all(|step| step.id != GateId::RuntimeDylintUiTests)
         );
 
-        let mut omitted = plan_for(PlanTarget::Verify);
+        let mut omitted = plan_for(PlanProjection::Verify);
         omitted.retain(|step| step.id != GateId::RuntimeDylintUiTests);
         assert!(validate(&omitted).is_err());
-        let mut weakened = plan_for(PlanTarget::Verify);
+        let mut weakened = plan_for(PlanProjection::Verify);
         weakened
             .iter_mut()
             .find(|step| step.id == GateId::RuntimeDylintUiTests)
@@ -2720,7 +2705,7 @@ mod tests {
 
     #[test]
     fn secure_production_trybuild_gate_is_feature_isolated() -> anyhow::Result<()> {
-        let prerequisites = plan_for(PlanTarget::Core(CoreExecution::Prerequisites));
+        let prerequisites = plan_for(PlanProjection::Core(CoreExecution::Prerequisites));
         let production = prerequisites
             .iter()
             .find(|step| step.id == GateId::SecureProductionTrybuild)
@@ -2745,10 +2730,10 @@ mod tests {
 
     #[test]
     fn ci_lane_compatibility_plan_matches_registry_and_supersedes_nextest() -> anyhow::Result<()> {
-        let plan = plan_for(PlanTarget::CompatibilityCi);
+        let plan = plan_for(PlanProjection::CompatibilityCi);
         ensure_plan_has_exact_gate_ids(
             &plan,
-            registry_gate_ids(|spec| spec.compat() == CompatMembership::Included),
+            registry_gate_ids(|spec| spec.included_in_compatibility_ci()),
         )?;
         assert!(!labels(&plan).contains(&"default-test-runner"));
         Ok(())
@@ -2768,8 +2753,8 @@ mod tests {
         for plan in [
             verify_plan(&opts(false, false)),
             verify_plan(&opts(true, false)),
-            plan_for(PlanTarget::CompatibilityCi),
-            plan_for(PlanTarget::Lane(CiLane::Meta)),
+            plan_for(PlanProjection::CompatibilityCi),
+            plan_for(PlanProjection::Lane(CiLane::Meta)),
         ] {
             assert!(!labels(&plan).contains(&"doc-contracts"));
             assert!(labels(&plan).contains(&"source-semantic-guard"));
@@ -2779,10 +2764,7 @@ mod tests {
     #[test]
     fn verify_plan_matches_registry_membership() -> anyhow::Result<()> {
         let plan = verify_plan(&opts(false, false));
-        ensure_plan_has_exact_gate_ids(
-            &plan,
-            registry_gate_ids(|spec| spec.verify_membership() == VerifyMembership::Included),
-        )?;
+        ensure_plan_has_exact_gate_ids(&plan, registry_gate_ids(|spec| spec.included_in_verify()))?;
         Ok(())
     }
 
@@ -2799,8 +2781,8 @@ mod tests {
         assert_eq!(gate.id.spec().lanes(), [Some(CiLane::LocalOnly), None]);
         assert_eq!(gate.id.spec().tool(), ToolRequirement::Nextest);
         assert_eq!(
-            gate.id.spec().compat(),
-            CompatMembership::Standalone(StandaloneReason::VerifyOnly)
+            gate.id.spec().policy(),
+            crate::ci_lanes::GatePolicy::RequiredEvidence
         );
         assert!(matches!(gate.kind, StepKind::LocalOnlyExecution));
         assert!(
@@ -2845,9 +2827,12 @@ mod tests {
     #[test]
     fn postgres_feature_matrix_is_persistent_compile_gate_but_not_fast() -> anyhow::Result<()> {
         for (name, plan) in [
-            ("verify", plan_for(PlanTarget::Verify)),
-            ("compatibility-ci", plan_for(PlanTarget::CompatibilityCi)),
-            ("ci-core", plan_for(PlanTarget::Lane(CiLane::Core))),
+            ("verify", plan_for(PlanProjection::Verify)),
+            (
+                "compatibility-ci",
+                plan_for(PlanProjection::CompatibilityCi),
+            ),
+            ("ci-core", plan_for(PlanProjection::Lane(CiLane::Core))),
         ] {
             let step = plan
                 .iter()
@@ -2875,8 +2860,8 @@ mod tests {
     #[test]
     fn shipped_feature_guard_is_shared_by_verify_and_ci() {
         for (lane, plan) in [
-            ("verify", plan_for(PlanTarget::Verify)),
-            ("ci", plan_for(PlanTarget::CompatibilityCi)),
+            ("verify", plan_for(PlanProjection::Verify)),
+            ("ci", plan_for(PlanProjection::CompatibilityCi)),
         ] {
             assert!(
                 labels(&plan).contains(&"shipped-feature-guard"),
@@ -2936,10 +2921,10 @@ mod tests {
     #[test]
     fn runtime_root_guard_is_typed_once_and_ordered_in_all_aggregate_plans() -> anyhow::Result<()> {
         for plan in [
-            plan_for(PlanTarget::Verify),
+            plan_for(PlanProjection::Verify),
             verify_plan(&opts(true, false)),
-            plan_for(PlanTarget::Lane(CiLane::Meta)),
-            plan_for(PlanTarget::CompatibilityCi),
+            plan_for(PlanProjection::Lane(CiLane::Meta)),
+            plan_for(PlanProjection::CompatibilityCi),
         ] {
             assert!(runtime_root_guard_membership_is_exact(&plan));
         }
@@ -2972,10 +2957,10 @@ mod tests {
     #[test]
     fn runtime_env_guard_is_typed_once_and_ordered_in_all_aggregate_plans() -> anyhow::Result<()> {
         for plan in [
-            plan_for(PlanTarget::Verify),
+            plan_for(PlanProjection::Verify),
             verify_plan(&opts(true, false)),
-            plan_for(PlanTarget::Lane(CiLane::Meta)),
-            plan_for(PlanTarget::CompatibilityCi),
+            plan_for(PlanProjection::Lane(CiLane::Meta)),
+            plan_for(PlanProjection::CompatibilityCi),
         ] {
             assert!(runtime_env_guard_membership_is_exact(&plan));
         }
@@ -3036,7 +3021,7 @@ mod tests {
     fn fast_plan_keeps_lightweight_meta_and_drops_external_or_compile_gates() -> anyhow::Result<()>
     {
         let plan = verify_plan(&opts(true, false));
-        let expected = plan_for(PlanTarget::Verify)
+        let expected = plan_for(PlanProjection::Verify)
             .into_iter()
             .filter(|step| {
                 !step.needs_compile()
@@ -3067,7 +3052,7 @@ mod tests {
     #[test]
     fn meta_checks_present_in_both_modes() {
         let expected = registry_gate_ids(|spec| {
-            spec.verify_membership() == VerifyMembership::Included
+            spec.included_in_verify()
                 && spec.compile_kind() == CompileKind::NoCompile
                 && spec.id() != GateId::PromtoolRules
                 && matches!(step_for_id(spec.id()).kind, StepKind::Internal(_))
@@ -3091,7 +3076,7 @@ mod tests {
     fn archrules_matrix_is_no_compile_internal_gate_in_fast_and_ci() -> anyhow::Result<()> {
         for (name, plan) in [
             ("fast", verify_plan(&opts(true, false))),
-            ("ci", plan_for(PlanTarget::CompatibilityCi)),
+            ("ci", plan_for(PlanProjection::CompatibilityCi)),
         ] {
             let step = plan
                 .iter()
@@ -3125,12 +3110,8 @@ mod tests {
             let spec = id.spec();
             assert_eq!(spec.lanes(), [Some(CiLane::Meta), None], "{id:?}");
             assert_eq!(spec.compile_kind(), CompileKind::NoCompile, "{id:?}");
-            assert_eq!(
-                spec.verify_membership(),
-                VerifyMembership::Included,
-                "{id:?}"
-            );
-            assert_eq!(spec.compat(), CompatMembership::Included, "{id:?}");
+            assert!(spec.included_in_verify(), "{id:?}");
+            assert!(spec.included_in_compatibility_ci(), "{id:?}");
             assert_eq!(spec.tool(), ToolRequirement::InProcess, "{id:?}");
             assert_eq!(
                 step_for_id(id).kind,
@@ -3140,10 +3121,10 @@ mod tests {
         }
 
         for (name, plan) in [
-            ("full", plan_for(PlanTarget::Verify)),
+            ("full", plan_for(PlanProjection::Verify)),
             ("fast", verify_plan(&opts(true, false))),
-            ("ci-meta", plan_for(PlanTarget::Lane(CiLane::Meta))),
-            ("compatibility", plan_for(PlanTarget::CompatibilityCi)),
+            ("ci-meta", plan_for(PlanProjection::Lane(CiLane::Meta))),
+            ("compatibility", plan_for(PlanProjection::CompatibilityCi)),
         ] {
             let positions = GATES
                 .map(|(id, _)| {
@@ -3167,7 +3148,7 @@ mod tests {
         }
 
         for lane in [CiLane::Core, CiLane::Security, CiLane::Coverage] {
-            let plan = plan_for(PlanTarget::Lane(lane));
+            let plan = plan_for(PlanProjection::Lane(lane));
             for (id, _) in GATES {
                 assert!(
                     plan.iter().all(|step| step.id != id),
@@ -3183,9 +3164,9 @@ mod tests {
     fn assembly_modules_codegen_is_no_compile_internal_gate_after_artifacts_in_all_lanes()
     -> anyhow::Result<()> {
         for (name, plan) in [
-            ("full", plan_for(PlanTarget::Verify)),
+            ("full", plan_for(PlanProjection::Verify)),
             ("fast", verify_plan(&opts(true, false))),
-            ("ci", plan_for(PlanTarget::CompatibilityCi)),
+            ("ci", plan_for(PlanProjection::CompatibilityCi)),
         ] {
             let labels = labels(&plan);
             let validate = labels
@@ -3261,8 +3242,8 @@ mod tests {
         );
         anyhow::ensure!(
             artifact.id.spec().lanes() == [Some(CiLane::Meta), None]
-                && artifact.id.spec().verify_membership() == VerifyMembership::Included
-                && artifact.id.spec().compat() == CompatMembership::Included
+                && artifact.id.spec().included_in_verify()
+                && artifact.id.spec().included_in_compatibility_ci()
                 && artifact.id.spec().tool() == ToolRequirement::InProcess,
             "artifact typed membership drift"
         );
@@ -3273,10 +3254,10 @@ mod tests {
     fn assembly_artifacts_gate_is_typed_once_and_orders_the_assembly_closure() -> anyhow::Result<()>
     {
         for (name, plan) in [
-            ("full", plan_for(PlanTarget::Verify)),
+            ("full", plan_for(PlanProjection::Verify)),
             ("fast", verify_plan(&opts(true, false))),
-            ("ci-meta", plan_for(PlanTarget::Lane(CiLane::Meta))),
-            ("compatibility", plan_for(PlanTarget::CompatibilityCi)),
+            ("ci-meta", plan_for(PlanProjection::Lane(CiLane::Meta))),
+            ("compatibility", plan_for(PlanProjection::CompatibilityCi)),
         ] {
             validate_assembly_artifacts_gate(&plan).with_context(|| format!("{name} plan"))?;
         }
@@ -3332,8 +3313,8 @@ mod tests {
         );
         anyhow::ensure!(
             provider.id.spec().lanes() == [Some(CiLane::Meta), None]
-                && provider.id.spec().verify_membership() == VerifyMembership::Included
-                && provider.id.spec().compat() == CompatMembership::Included
+                && provider.id.spec().included_in_verify()
+                && provider.id.spec().included_in_compatibility_ci()
                 && provider.id.spec().tool() == ToolRequirement::InProcess,
             "provider typed membership drift"
         );
@@ -3360,10 +3341,10 @@ mod tests {
     fn assembly_provider_codegen_gate_is_typed_once_and_ordered_in_all_aggregate_plans()
     -> anyhow::Result<()> {
         for (name, plan) in [
-            ("full", plan_for(PlanTarget::Verify)),
+            ("full", plan_for(PlanProjection::Verify)),
             ("fast", verify_plan(&opts(true, false))),
-            ("ci-meta", plan_for(PlanTarget::Lane(CiLane::Meta))),
-            ("compatibility", plan_for(PlanTarget::CompatibilityCi)),
+            ("ci-meta", plan_for(PlanProjection::Lane(CiLane::Meta))),
+            ("compatibility", plan_for(PlanProjection::CompatibilityCi)),
         ] {
             validate_assembly_provider_codegen_gate(&plan)
                 .with_context(|| format!("{name} plan"))?;
@@ -3408,8 +3389,8 @@ mod tests {
         );
         anyhow::ensure!(
             lock.id.spec().lanes() == [Some(CiLane::Meta), None]
-                && lock.id.spec().verify_membership() == VerifyMembership::Included
-                && lock.id.spec().compat() == CompatMembership::Included
+                && lock.id.spec().included_in_verify()
+                && lock.id.spec().included_in_compatibility_ci()
                 && lock.id.spec().tool() == ToolRequirement::InProcess,
             "lock typed membership drift"
         );
@@ -3447,10 +3428,10 @@ mod tests {
     fn assembly_lock_check_is_typed_once_and_ordered_in_all_aggregate_plans() -> anyhow::Result<()>
     {
         for (name, plan) in [
-            ("full", plan_for(PlanTarget::Verify)),
+            ("full", plan_for(PlanProjection::Verify)),
             ("fast", verify_plan(&opts(true, false))),
-            ("ci-meta", plan_for(PlanTarget::Lane(CiLane::Meta))),
-            ("compatibility", plan_for(PlanTarget::CompatibilityCi)),
+            ("ci-meta", plan_for(PlanProjection::Lane(CiLane::Meta))),
+            ("compatibility", plan_for(PlanProjection::CompatibilityCi)),
         ] {
             validate_assembly_lock_check(&plan).with_context(|| format!("{name} plan"))?;
         }
@@ -3500,8 +3481,8 @@ mod tests {
         );
         anyhow::ensure!(
             gate.id.spec().lanes() == [Some(CiLane::Meta), None]
-                && gate.id.spec().verify_membership() == VerifyMembership::Included
-                && gate.id.spec().compat() == CompatMembership::Included
+                && gate.id.spec().included_in_verify()
+                && gate.id.spec().included_in_compatibility_ci()
                 && gate.id.spec().tool() == ToolRequirement::InProcess,
             "assembly runtime plan typed membership drift"
         );
@@ -3524,10 +3505,10 @@ mod tests {
     fn assembly_runtime_plan_gate_is_typed_once_and_ordered_in_all_aggregate_plans()
     -> anyhow::Result<()> {
         for (name, plan) in [
-            ("verify", plan_for(PlanTarget::Verify)),
+            ("verify", plan_for(PlanProjection::Verify)),
             ("fast", verify_plan(&opts(true, false))),
-            ("ci-meta", plan_for(PlanTarget::Lane(CiLane::Meta))),
-            ("compatibility", plan_for(PlanTarget::CompatibilityCi)),
+            ("ci-meta", plan_for(PlanProjection::Lane(CiLane::Meta))),
+            ("compatibility", plan_for(PlanProjection::CompatibilityCi)),
         ] {
             validate_assembly_runtime_plan_gate(&plan).with_context(|| format!("{name} plan"))?;
         }
@@ -3598,8 +3579,8 @@ mod tests {
         );
         anyhow::ensure!(
             gate.id.spec().lanes() == [Some(CiLane::Meta), None]
-                && gate.id.spec().verify_membership() == VerifyMembership::Included
-                && gate.id.spec().compat() == CompatMembership::Included
+                && gate.id.spec().included_in_verify()
+                && gate.id.spec().included_in_compatibility_ci()
                 && gate.id.spec().tool() == ToolRequirement::InProcess,
             "L2 assurance typed membership drift"
         );
@@ -3621,10 +3602,10 @@ mod tests {
     #[test]
     fn l2_assurance_gate_is_typed_once_and_ordered_in_all_aggregate_plans() -> anyhow::Result<()> {
         for (name, plan) in [
-            ("verify", plan_for(PlanTarget::Verify)),
+            ("verify", plan_for(PlanProjection::Verify)),
             ("fast", verify_plan(&opts(true, false))),
-            ("ci-meta", plan_for(PlanTarget::Lane(CiLane::Meta))),
-            ("compatibility", plan_for(PlanTarget::CompatibilityCi)),
+            ("ci-meta", plan_for(PlanProjection::Lane(CiLane::Meta))),
+            ("compatibility", plan_for(PlanProjection::CompatibilityCi)),
         ] {
             validate_l2_assurance_gate(&plan).with_context(|| format!("{name} plan"))?;
         }
@@ -3713,10 +3694,10 @@ mod tests {
     fn provider_capabilities_gate_is_typed_once_and_ordered_in_all_aggregate_plans()
     -> anyhow::Result<()> {
         for (name, plan) in [
-            ("verify", plan_for(PlanTarget::Verify)),
+            ("verify", plan_for(PlanProjection::Verify)),
             ("fast", verify_plan(&opts(true, false))),
-            ("ci-meta", plan_for(PlanTarget::Lane(CiLane::Meta))),
-            ("compatibility", plan_for(PlanTarget::CompatibilityCi)),
+            ("ci-meta", plan_for(PlanProjection::Lane(CiLane::Meta))),
+            ("compatibility", plan_for(PlanProjection::CompatibilityCi)),
         ] {
             validate_provider_capabilities_gate(&plan).with_context(|| format!("{name} plan"))?;
         }
@@ -3749,9 +3730,9 @@ mod tests {
     fn assembly_graph_is_no_compile_internal_gate_after_modules_in_all_lanes() -> anyhow::Result<()>
     {
         for (name, plan) in [
-            ("full", plan_for(PlanTarget::Verify)),
+            ("full", plan_for(PlanProjection::Verify)),
             ("fast", verify_plan(&opts(true, false))),
-            ("ci", plan_for(PlanTarget::CompatibilityCi)),
+            ("ci", plan_for(PlanProjection::CompatibilityCi)),
         ] {
             let labels = labels(&plan);
             let modules = labels
@@ -3793,7 +3774,7 @@ mod tests {
     -> anyhow::Result<()> {
         for (name, plan) in [
             ("fast", verify_plan(&opts(true, false))),
-            ("ci", plan_for(PlanTarget::CompatibilityCi)),
+            ("ci", plan_for(PlanProjection::CompatibilityCi)),
         ] {
             let labels = labels(&plan);
             let baseline_pos = labels
@@ -4010,7 +3991,7 @@ mod tests {
     /// 非零）经手跑 `cargo xtask verify` 验证——xtask 测试策略不含跑 nightly dylint 的集成测试。
     #[test]
     fn dylint_step_is_fail_closed_via_deny_warnings() -> anyhow::Result<()> {
-        let plan = plan_for(PlanTarget::Verify);
+        let plan = plan_for(PlanProjection::Verify);
         let dylint = plan
             .iter()
             .find(|s| s.label() == "dylint")
@@ -4091,7 +4072,7 @@ mod tests {
     /// ci 的 build/clippy 升 `--all-features --all-targets`（issue 验收：编译态全覆盖）。
     #[test]
     fn ci_build_clippy_use_all_features_all_targets() -> anyhow::Result<()> {
-        let plan = plan_for(PlanTarget::CompatibilityCi);
+        let plan = plan_for(PlanProjection::CompatibilityCi);
         for label in ["build", "clippy"] {
             let step = plan
                 .iter()
@@ -4109,7 +4090,7 @@ mod tests {
     /// ci 用覆盖率门**替** nextest（同跑兼测试），并尾追 public-api（轴 A）；二者皆 ToolGatedInternal。
     #[test]
     fn ci_replaces_nextest_with_coverage_and_adds_public_api() -> anyhow::Result<()> {
-        let plan = plan_for(PlanTarget::CompatibilityCi);
+        let plan = plan_for(PlanProjection::CompatibilityCi);
         assert!(
             !labels(&plan).contains(&"default-test-runner"),
             "ci 不应有独立 nextest 步（已并入 coverage）"
@@ -4147,12 +4128,12 @@ mod tests {
     /// 共享门步在 verify 与 ci 里**逐字相同**（同一构造，不漂移）。Step 派生 PartialEq ⇒ 直接比对。
     #[test]
     fn ci_shares_meta_deny_dylint_with_verify_verbatim() {
-        let v = plan_for(PlanTarget::Verify);
-        let c = plan_for(PlanTarget::CompatibilityCi);
+        let v = plan_for(PlanProjection::Verify);
+        let c = plan_for(PlanProjection::CompatibilityCi);
         let find = |plan: &[Step], id: GateId| plan.iter().find(|s| s.id == id).cloned();
         let shared = registry_gate_ids(|spec| {
-            selected_for(PlanTarget::Verify, spec.id())
-                && selected_for(PlanTarget::CompatibilityCi, spec.id())
+            selected_for(PlanProjection::Verify, spec.id())
+                && selected_for(PlanProjection::CompatibilityCi, spec.id())
         });
         assert!(
             shared.contains(&GateId::CiEntryGuard),
@@ -4252,11 +4233,11 @@ mod tests {
     fn cargo_audit_step_shared_between_ci_and_audit_verbatim() {
         let find = |plan: &[Step]| plan.iter().find(|s| s.label() == "audit").cloned();
         assert_eq!(
-            find(&plan_for(PlanTarget::CompatibilityCi)),
+            find(&plan_for(PlanProjection::CompatibilityCi)),
             find(&audit_plan())
         );
         assert!(
-            find(&plan_for(PlanTarget::CompatibilityCi)).is_some(),
+            find(&plan_for(PlanProjection::CompatibilityCi)).is_some(),
             "CompatibilityCi 须含 audit 步"
         );
     }
@@ -9529,9 +9510,9 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
     #[test]
     fn core_test_plans_include_the_testkit_container_gate() {
         for target in [
-            PlanTarget::Verify,
-            PlanTarget::CompatibilityCi,
-            PlanTarget::Core(CoreExecution::Tests),
+            PlanProjection::Verify,
+            PlanProjection::CompatibilityCi,
+            PlanProjection::Core(CoreExecution::Tests),
         ] {
             let count = labels(&plan_for(target))
                 .into_iter()
@@ -10193,7 +10174,7 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
     /// 故内嵌 nightly 版本）须含钉版 nightly `publicapi::PINNED_NIGHTLY`——**绑 `step_public_api()` 返回的真实
     /// install_hint 字段值**（非 verify.rs 源码全文）：install_hint 回退 rolling `nightly`（或漏随 const bump）
     /// 即 fail，且注释/其它字符串含 pin **不能**误满足（修复源码全文扫描的 anti-vacuity 盲区）。
-    /// INVARIANT: NIGHTLY-PIN-01 { level = "Medium", exec = "verify", source = "code" }.
+    /// INVARIANT: NIGHTLY-PIN-01 { level = "Medium", exec = "check", source = "code" }.
     #[test]
     fn public_api_install_hint_pins_nightly() {
         let pin = crate::publicapi::PINNED_NIGHTLY;

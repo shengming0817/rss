@@ -5,8 +5,8 @@
 //! source closure, and test-binary reachability before rendering the declaration set. The matrix
 //! therefore means `enrolled`, never "this test passed in the current checkout".
 //!
-//! INVARIANT: L2-PROVIDER-CAPABILITY-ENROLLMENT-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "declared_capability_without_behavior_fails|duplicate_unknown_or_wrong_order_enrollment_fails|noop_unrelated_and_decorated_behaviors_fail|testkit_catalog_projection_drift_fails|untracked_invocation_is_outside_canonical_scan|detached_carrier_and_feature_drift_fail_closed|tracked_nonordinary_or_oversized_sources_fail_closed", anti_vacuity = "workspace_provider_capability_wrappers_and_behaviors_are_exact_and_live" }.
-//! INVARIANT: L2-PROVIDER-CAPABILITY-WIRE-01 { level = "Medium", exec = "verify", source = "codegen", golden = "generated/provider-capability-matrix.json", synthetic_red = "check_rejects_missing_tampered_and_crlf_without_writing", anti_vacuity = "render_twice_is_byte_identical" }.
+//! INVARIANT: L2-PROVIDER-CAPABILITY-ENROLLMENT-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "declared_capability_without_behavior_fails|duplicate_unknown_or_wrong_order_enrollment_fails|noop_unrelated_and_decorated_behaviors_fail|testkit_catalog_projection_drift_fails|untracked_invocation_is_outside_canonical_scan|detached_carrier_and_feature_drift_fail_closed|tracked_nonordinary_or_oversized_sources_fail_closed", anti_vacuity = "workspace_provider_capability_wrappers_and_behaviors_are_exact_and_live" }.
+//! INVARIANT: L2-PROVIDER-CAPABILITY-WIRE-01 { level = "Medium", exec = "check", source = "codegen", golden = "generated/provider-capability-matrix.json", synthetic_red = "check_rejects_missing_tampered_and_crlf_without_writing", anti_vacuity = "render_twice_is_byte_identical" }.
 
 use crate::cmd::{ExternalProgram, external_cmd};
 use crate::generated_file;

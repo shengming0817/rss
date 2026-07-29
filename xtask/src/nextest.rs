@@ -3,13 +3,13 @@
 //! INVARIANT: NEXTEST-PROFILE-REGISTRY-01 { level = "Hard", exec = "native-compile", source = "code", native = "NextestProfile closed enum is exhaustive at every profile routing site" }——profile 只能由闭枚举产生。
 //! INVARIANT: NEXTEST-PARTITION-TYPE-01 { level = "Hard", exec = "native-compile", source = "code", native = "HashPartition private fields and validated constructor exclude illegal states" }——hash partition 的非法状态不可构造。
 //! INVARIANT: NEXTEST-EVIDENCE-DTO-01 { level = "Hard", exec = "native-compile", source = "code", native = "Evidence construction requires the closed typed DTO and Outcome enum" }——证据内部状态只能由闭合类型构造。
-//! INVARIANT: NEXTEST-EVIDENCE-SCHEMA-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "evidence_schema_rejects_wire_drift", anti_vacuity = "evidence_schema_matches_golden" }——serde wire 形态由可失败的 committed golden 治理。
-//! INVARIANT: NEXTEST-CONFIG-POLICY-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "config_policy_rejects_retry_override_and_missing_timeout", anti_vacuity = "committed_nextest_config_obeys_policy" }——CI profiles 零重试、JUnit 与 timeout fail-closed。
-//! INVARIANT: NEXTEST-EXECUTION-FUNNEL-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "execution_funnel_rejects_private_capability_api_bypass|local_only_command_rejects_real_nonzero_exit_status", anti_vacuity = "real_nextest_call_sites_use_funnel|localtx_journey_serial_batch_fails_when_compiled_inventory_is_empty" }——xtask 的 nextest 子进程只能经 typed cargo capability 构造，且非零退出码不能生成成功能力。
-//! INVARIANT: NEXTEST-TRYBUILD-SCHEDULING-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "trybuild_inventory_is_bidirectionally_closed|trybuild_inventory_rejects_non_dedicated_sources", anti_vacuity = "workspace_trybuild_inventory_is_non_vacuous_and_closed" }——任何 trybuild 语义引用只能位于专用 integration test target 入口，且与 nextest 单线程 selector 双向闭合；lib/bin/module/macro 间接 carrier 均 fail-closed。
+//! INVARIANT: NEXTEST-EVIDENCE-SCHEMA-01 { level = "Medium", exec = "test", source = "code", synthetic_red = "evidence_schema_rejects_wire_drift", anti_vacuity = "evidence_schema_matches_golden" }——serde wire 形态由可失败的 committed golden 治理。
+//! INVARIANT: NEXTEST-CONFIG-POLICY-01 { level = "Medium", exec = "test", source = "code", synthetic_red = "config_policy_rejects_retry_override_and_missing_timeout", anti_vacuity = "committed_nextest_config_obeys_policy" }——CI profiles 零重试、JUnit 与 timeout fail-closed。
+//! INVARIANT: NEXTEST-EXECUTION-FUNNEL-01 { level = "Medium", exec = "test", source = "code", synthetic_red = "execution_funnel_rejects_private_capability_api_bypass|local_only_command_rejects_real_nonzero_exit_status", anti_vacuity = "real_nextest_call_sites_use_funnel|localtx_journey_serial_batch_fails_when_compiled_inventory_is_empty" }——xtask 的 nextest 子进程只能经 typed cargo capability 构造，且非零退出码不能生成成功能力。
+//! INVARIANT: NEXTEST-TRYBUILD-SCHEDULING-01 { level = "Medium", exec = "test", source = "code", synthetic_red = "trybuild_inventory_is_bidirectionally_closed|trybuild_inventory_rejects_non_dedicated_sources", anti_vacuity = "workspace_trybuild_inventory_is_non_vacuous_and_closed" }——任何 trybuild 语义引用只能位于专用 integration test target 入口，且与 nextest 单线程 selector 双向闭合；lib/bin/module/macro 间接 carrier 均 fail-closed。
 //! INVARIANT: COVERAGE-SCOPE-NONEMPTY-01 { level = "Hard", exec = "native-compile", source = "code", native = "CoverageScope::packages returns None for empty package lists; execution paths only accept CoverageScope" }.
 //! INVARIANT: COVERAGE-ARGV-SCOPE-01 { level = "Hard", exec = "native-compile", source = "code", native = "Packages argv uses -p exclusively; Workspace uses --workspace exclusively" }.
-//! INVARIANT: COVERAGE-REPLAY-SCOPE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "coverage_argv_scope_mutex_packages_vs_workspace", anti_vacuity = "llvm_cov_replay_spec_closes_profile_without_raw_args" }——ReplaySpec::Coverage 必须携带 CoverageScope.
+//! INVARIANT: COVERAGE-REPLAY-SCOPE-01 { level = "Medium", exec = "release-check", source = "code", synthetic_red = "coverage_argv_scope_mutex_packages_vs_workspace", anti_vacuity = "llvm_cov_replay_spec_closes_profile_without_raw_args" }——ReplaySpec::Coverage 必须携带 CoverageScope.
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -268,9 +268,31 @@ pub(crate) enum NextestLane {
     Integration,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub(crate) enum CoreTestScope {
+macro_rules! core_test_scope_catalog {
+    ($($variant:ident),+ $(,)?) => {
+        #[repr(usize)]
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+        #[serde(rename_all = "kebab-case")]
+        pub(crate) enum CoreTestScope {
+            $($variant),+
+        }
+
+        impl CoreTestScope {
+            pub(crate) const COUNT: usize = [$(stringify!($variant)),+].len();
+            pub(crate) const ALL: [Self; Self::COUNT] = [$(Self::$variant),+];
+        }
+
+        const _: () = {
+            let mut index = 0;
+            while index < CoreTestScope::COUNT {
+                assert!(CoreTestScope::ALL[index] as usize == index);
+                index += 1;
+            }
+        };
+    };
+}
+
+core_test_scope_catalog! {
     Workspace,
     S3Backend,
     RedisBackend,
@@ -324,20 +346,6 @@ const IDENTITYAUDIT_COVERAGE_FEATURES: [PackageFeature; 2] = [
 ];
 
 impl CoreTestScope {
-    pub(crate) const ALL: [Self; 11] = [
-        Self::Workspace,
-        Self::S3Backend,
-        Self::RedisBackend,
-        Self::OidcBackend,
-        Self::PrometheusBackend,
-        Self::OtelBackend,
-        Self::GrpcBackend,
-        Self::VaultBackend,
-        Self::SettingsOnly,
-        Self::IdentityAudit,
-        Self::TestkitContainers,
-    ];
-
     /// Package identity for deterministic non-workspace gates. Local CI impact projection uses
     /// this same closed scope registry instead of maintaining a second package/feature table.
     pub(crate) const fn package(self) -> Option<&'static str> {
@@ -2134,6 +2142,37 @@ mod tests {
                 partition
             }
         );
+        Ok(())
+    }
+
+    #[test]
+    fn core_test_scope_catalog_freezes_cardinality_order_and_wire_names() -> Result<()> {
+        assert_eq!(CoreTestScope::ALL.len(), CoreTestScope::COUNT);
+        let wire_names = CoreTestScope::ALL
+            .into_iter()
+            .map(serde_json::to_value)
+            .collect::<serde_json::Result<Vec<_>>>()?;
+        assert_eq!(
+            wire_names,
+            [
+                "workspace",
+                "s3-backend",
+                "redis-backend",
+                "oidc-backend",
+                "prometheus-backend",
+                "otel-backend",
+                "grpc-backend",
+                "vault-backend",
+                "settings-only",
+                "identity-audit",
+                "testkit-containers",
+            ]
+            .map(serde_json::Value::from)
+        );
+        for scope in CoreTestScope::ALL {
+            let encoded = serde_json::to_string(&scope)?;
+            assert_eq!(serde_json::from_str::<CoreTestScope>(&encoded)?, scope);
+        }
         Ok(())
     }
 

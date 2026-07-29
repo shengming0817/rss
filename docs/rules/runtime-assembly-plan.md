@@ -98,7 +98,7 @@ their public API or package model.
 
 ## Security Production Closeout Gate
 
-INVARIANT: SECURITY-PRODUCTION-CLOSEOUT-01 { level = "Medium", exec = "verify", source = "code" }.
+INVARIANT: SECURITY-PRODUCTION-CLOSEOUT-01 { level = "Medium", exec = "check", source = "code" }.
 
 - For `profile = "production"`, `assembly validate` must require active persistent backend providers for `oidc::OidcProvider`, `vault::VaultSigner`, and `vault::VaultKeyProvider`.
 - For `profile = "production"`, every declared provider must be active and persistent except the exact active `GovernorLimiter` replica-local rate limiter. Full runtime additionally requires the persistent PostgreSQL revocation store and Vault secret resolver. Required Cargo features are derived from the closed provider constructor registry rather than duplicated in production policy.

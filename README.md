@@ -10,9 +10,21 @@ RSS 是 GoCell 的 Rust 重写——domain-native 治理 + 惯用扁平 Cargo wo
 
 ## 构建与本地验证
 
-本地和 GitHub Actions 共用同一个 typed `ImpactSet`：本地投影生成 preflight，远端投影从闭合
-`CiJobKey` 派生唯一动态 matrix，再由稳定 `ci gate` 核对计划、聚合结果和 evidence v4 回执。
-当前承载状态与激活条件见 [`docs/ops/202606231530-001-ci-lane.md`](docs/ops/202606231530-001-ci-lane.md)。
+gate、test 与 journey 的主要执行归属统一使用闭合的 canonical `ExecutionProfile`：`check`、`test`、
+`integration-critical`、`release-check`；前三者只选择自己的 primary owner，`release-check` 是全部 owner
+集合的并集，再按 typed subsumption 去重。这里的 subsumption 只消除 catalog 中被另一执行单元完整覆盖的
+执行单元，不是 #1883 尚未实施的测试去重。
+
+diff-adaptive `ImpactSet` 是正交的路径影响模型：它记录直接 package 影响、反向依赖闭包、integration shard、
+治理路径以及 docs/high-impact/unknown-path 状态。本地投影据此运行 fast/meta、反向闭包 check、直接 package
+test/clippy 与治理自测，并将 integration 留为 deferred；远端投影仍通过当前 `CiJobKey` adapter 选择 job。
+`ImpactSet` 当前不投影 stable `ExecutionUnitId`。
+
+当前 live GitHub Actions 尚未切换固定 Job：远端结果仍经兼容适配器投影成闭合 `CiJobKey` / `CiLane` 和
+动态 matrix，再由稳定 `ci gate` 核对计划、聚合结果和 evidence v4 回执。`CiJobKey` / `CiLane` 只描述当前
+workflow dispatch，不再定义 canonical 执行成员。cargo-nextest 的 `ci-core`、`integration`、`fault-matrix`
+等 profile 则只配置 runner 的 timeout、retry、JUnit 与 filter 行为，不等同于 `ExecutionProfile`。
+当前承载状态与迁移边界见 [`docs/ops/202606231530-001-ci-lane.md`](docs/ops/202606231530-001-ci-lane.md)。
 
 ```bash
 make ci                                  # 分析 origin/develop...HEAD 的已提交差异并运行本地 preflight
@@ -42,8 +54,8 @@ build/check/clippy 与 cargo test/nextest 同时启用各自的继续执行参�
 任何 `--only` 成功都只是 partial 诊断结果，不代表完整 CI 通过。远端 `ci run --job` 保持 fail-fast。
 L0/L1 的采用与故障语义分别见
 [`docs/rules/consistency-l0.md`](docs/rules/consistency-l0.md) 与
-[`docs/rules/localtx.md`](docs/rules/localtx.md)；精确 gate 成员与顺序只以 typed registry 和
-`xtask/src/verify.rs` 派生计划为准。
+[`docs/rules/localtx.md`](docs/rules/localtx.md)；精确执行成员由 canonical `ExecutionProfile` 与 typed
+stable-ID registry 派生，`xtask/src/verify.rs` 只负责将该集合投影为具体执行计划。
 
 CI 子命令不保留旧的平铺 lane 入口；空的 `ci` 也会报错。planner、typed executor 与 gate 的接口为：
 

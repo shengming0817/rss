@@ -1,12 +1,12 @@
 //! `pg-tenant-tx-guard` —— Postgres tenant-table raw-pool / TxManager bypass guard.
 //!
-//! INVARIANT: TENANCY-PG-TX-FUNNEL-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::red_core_file_exception_does_not_mask_raw_tenant_access", anti_vacuity = "tests::green_distinct_read_and_write_lanes_accept_their_owned_sql" } —
+//! INVARIANT: TENANCY-PG-TX-FUNNEL-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::red_core_file_exception_does_not_mask_raw_tenant_access", anti_vacuity = "tests::green_distinct_read_and_write_lanes_accept_their_owned_sql" } —
 //! tenant-table production paths must go through
 //! `PgTenantReadPool::{read,read_map}` for independent reads or `PgTenantWritePool` for mutation
 //! transactions. Raw `sqlx::PgPool` / `PgStore` / direct connection / global transaction paths are
 //! allowed only for explicitly named global infrastructure or maintenance exceptions.
 //!
-//! INVARIANT: TENANCY-PG-READ-LANE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::red_tenant_lane_crossovers_are_rejected", anti_vacuity = "tests::anti_vacuity_missing_typed_read_and_write_lane_sites_is_reported" } —
+//! INVARIANT: TENANCY-PG-READ-LANE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::red_tenant_lane_crossovers_are_rejected", anti_vacuity = "tests::anti_vacuity_missing_typed_read_and_write_lane_sites_is_reported" } —
 //! the removed mixed `PgTenantPool` must have zero production occurrences; read helpers exist only
 //! on the typed reader lane, while write/deadline/retry/co-tx helpers exist only on the typed writer
 //! lane. SELECT statements inside a writer transaction remain valid because the enclosing typed
@@ -15,7 +15,7 @@
 //! This guard is a Medium backstop for the Hard typed wrapper in `adapters/postgres/src/cotx/`
 //! and the canonical fact funnels in `outbox.rs` / `outbox_cdc.rs`.
 //!
-//! INVARIANT: LOCALTX-PG-RETRY-PLACEMENT-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::retry_guard_rejects_secret_contract_attribution_bypasses|tests::localtx_deadline_guard_rejects_legacy_missing_forged_and_escaped_tokens|tests::localtx_deadline_observation_guard_rejects_rogue_and_fabricated_stages", anti_vacuity = "tests::retry_guard_real_workspace_contains_all_exact_boundaries|tests::localtx_deadline_guard_real_workspace_closes_mint_and_six_dataflows|tests::localtx_deadline_observation_guard_real_workspace_closes_exact_sink" } —
+//! INVARIANT: LOCALTX-PG-RETRY-PLACEMENT-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::retry_guard_rejects_secret_contract_attribution_bypasses|tests::localtx_deadline_guard_rejects_legacy_missing_forged_and_escaped_tokens|tests::localtx_deadline_observation_guard_rejects_rogue_and_fabricated_stages", anti_vacuity = "tests::retry_guard_real_workspace_contains_all_exact_boundaries|tests::localtx_deadline_guard_real_workspace_closes_mint_and_six_dataflows|tests::localtx_deadline_observation_guard_real_workspace_closes_exact_sink" } —
 //! Postgres retry wrappers are confined to their exact config, secret, and audit
 //! mutation boundaries. Each LocalTx owner must consume its command-carried
 //! generated observation beside `retry_write`; `PgSecretUnitOfWork::publish` is the only settings
@@ -25,7 +25,7 @@
 //! originate from `LocalTxRetryError::deadline_stages`, and backoff exhaustion from the canonical
 //! runner callback.
 //!
-//! INVARIANT: IDENTITY-SECURITY-SQL-OWNER-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::identity_security_sql_owner_gate_rejects_missing_and_extra_sites|tests::refresh_legacy_write_guard_rejects_old_ports_and_application_bypasses", anti_vacuity = "tests::identity_security_sql_owner_gate_accepts_live_workspace|tests::refresh_legacy_write_guard_accepts_live_workspace|producer_assurance::tests::workspace_refresh_writer_callsite_is_exact_and_non_vacuous" } —
+//! INVARIANT: IDENTITY-SECURITY-SQL-OWNER-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::identity_security_sql_owner_gate_rejects_missing_and_extra_sites|tests::refresh_legacy_write_guard_rejects_old_ports_and_application_bypasses", anti_vacuity = "tests::identity_security_sql_owner_gate_accepts_live_workspace|tests::refresh_legacy_write_guard_accepts_live_workspace|producer_assurance::tests::workspace_refresh_writer_callsite_is_exact_and_non_vacuous" } —
 //! password rotation, account status CAS, refresh-family revocation, and auth-grant revocation SQL
 //! have one exact production owner: `identity_security_lifecycle.rs`. The password-change LocalTx
 //! repository/retry seam is removed rather than retained as an alias. Refresh rotation and reuse
@@ -33,12 +33,12 @@
 //! `rotate`/`revoke_lineage`/`close` write port. The sole mutation entry is
 //! `IdentitySecurityLifecycle::execute_refresh` and its producer transaction.
 //!
-//! INVARIANT: IDENTITY-REACTIVATION-ISOLATION-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::identity_reactivation_gate_rejects_producer_outbox_grant_and_family_paths", anti_vacuity = "tests::identity_reactivation_gate_accepts_live_workspace" } —
+//! INVARIANT: IDENTITY-REACTIVATION-ISOLATION-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::identity_reactivation_gate_rejects_producer_outbox_grant_and_family_paths", anti_vacuity = "tests::identity_reactivation_gate_accepts_live_workspace" } —
 //! `execute_reactivation` reaches exactly one typed plain-write lane and the canonical account CAS,
 //! but cannot reach producer/retry-producer, outbox, credential, refresh-family, or auth-grant
 //! mutation paths through its same-file call graph.
 //!
-//! INVARIANT: PG-LOCALTX-QUARANTINE-FUNNEL-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::localtx_quarantine_guard_rejects_bypass_and_escape_classes", anti_vacuity = "tests::localtx_quarantine_guard_real_workspace_closes_exact_sites" } —
+//! INVARIANT: PG-LOCALTX-QUARANTINE-FUNNEL-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::localtx_quarantine_guard_rejects_bypass_and_escape_classes", anti_vacuity = "tests::localtx_quarantine_guard_real_workspace_closes_exact_sites" } —
 //! all four LocalTx entries must flow through one typed execution core that acquires and begins
 //! through the private armed lease, then tail-settles the exact branded transaction once. The core
 //! carries one runner-minted deadline policy through every bounded stage; every non-retrying plain
@@ -48,7 +48,7 @@
 //! it. The lease, wrapper, settlement dataflow, observability, and `close_on_drop` fallback are
 //! closed against conditional, helper, raw, macro, and disarm escapes.
 //!
-//! INVARIANT: TENANCY-SECRET-KEY-MUTATION-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::secret_ref_mutation_guard_rejects_split_or_legacy_owners", anti_vacuity = "tests::secret_ref_mutation_guard_real_workspace_has_exact_capability_sites" } —
+//! INVARIANT: TENANCY-SECRET-KEY-MUTATION-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::secret_ref_mutation_guard_rejects_split_or_legacy_owners", anti_vacuity = "tests::secret_ref_mutation_guard_real_workspace_has_exact_capability_sites" } —
 //! production `secret_refs` mutations are append-only INSERTs confined to the transaction-bound
 //! `key_lock::LockedSecretKey::{cas_insert,append_tombstone}` capability. `SecretRepo` is read-only;
 //! `PgSecretUnitOfWork::{publish,publish_internal,republish}` share one `cas_insert_locked` funnel,
@@ -56,7 +56,7 @@
 //! has one exact mint site: `acquire`, which must bind the stored tenant/key to the transaction
 //! advisory lock before returning the value.
 //!
-//! INVARIANT: OUTBOX-FACT-FUNNEL-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::red_outbox_log_insert_outside_cdc_funnel", anti_vacuity = "tests::green_outbox_log_insert_is_owned_by_cdc_funnel" } —
+//! INVARIANT: OUTBOX-FACT-FUNNEL-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::red_outbox_log_insert_outside_cdc_funnel", anti_vacuity = "tests::green_outbox_log_insert_is_owned_by_cdc_funnel" } —
 //! production `outbox` / `outbox_log` INSERTs are confined to their canonical fingerprint funnels.
 //! It intentionally does not replace `setlocal-funnel`: that guard owns "GUC write literal is
 //! unique"; this guard owns "tenant table SQL cannot be reached through raw pool/TxManager".
@@ -3704,6 +3704,10 @@ fn localtx_deadline_observation_findings(files: &[(String, String)]) -> Vec<Find
     findings
 }
 
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "one closed scanner reports every legacy refresh write shape in a single pass"
+)]
 fn refresh_legacy_write_findings(files: &[(String, String)]) -> Vec<Finding> {
     const FORBIDDEN_TYPES: &[&str] = &[
         "AuthGrantCloseCommand",
@@ -8651,10 +8655,11 @@ async fn revoke_identity_sessions(conn: &mut PgConnection) {
     }
 
     #[test]
-    fn identity_reactivation_gate_accepts_canonical_shape() {
-        let syntax = syn::parse_file(identity_security_sql_green_source()).expect("green syntax");
+    fn identity_reactivation_gate_accepts_canonical_shape() -> anyhow::Result<()> {
+        let syntax = syn::parse_file(identity_security_sql_green_source())?;
         let findings = identity_reactivation_findings("identity_security_lifecycle.rs", &syntax);
         assert!(findings.is_empty(), "{findings:#?}");
+        Ok(())
     }
 
     #[test]
@@ -8674,7 +8679,8 @@ async fn revoke_identity_sessions(conn: &mut PgConnection) {
     }
 
     #[test]
-    fn identity_reactivation_gate_rejects_producer_outbox_grant_and_family_paths() {
+    fn identity_reactivation_gate_rejects_producer_outbox_grant_and_family_paths()
+    -> anyhow::Result<()> {
         for (label, source) in [
             (
                 "producer",
@@ -8698,7 +8704,7 @@ async fn revoke_identity_sessions(conn: &mut PgConnection) {
                 ),
             ),
         ] {
-            let syntax = syn::parse_file(&source).expect("synthetic red syntax");
+            let syntax = syn::parse_file(&source)?;
             let findings =
                 identity_reactivation_findings("identity_security_lifecycle.rs", &syntax);
             assert!(
@@ -8716,7 +8722,7 @@ async fn revoke_identity_sessions(conn: &mut PgConnection) {
                 "apply_account_security_cas(tx.conn()).await; persist(tx.conn()).await",
             )
         );
-        let syntax = syn::parse_file(&neutral_outbox_helper).expect("neutral helper syntax");
+        let syntax = syn::parse_file(&neutral_outbox_helper)?;
         let findings = identity_reactivation_findings("identity_security_lifecycle.rs", &syntax);
         assert!(
             findings
@@ -8724,10 +8730,11 @@ async fn revoke_identity_sessions(conn: &mut PgConnection) {
                 .any(|finding| finding.rule == Rule::IdentityReactivationBypass),
             "neutral helper with direct outbox SQL must be synthetic-red: {findings:#?}"
         );
+        Ok(())
     }
 
     #[test]
-    fn identity_reactivation_gate_rejects_missing_and_extra_plain_writes() {
+    fn identity_reactivation_gate_rejects_missing_and_extra_plain_writes() -> anyhow::Result<()> {
         for source in [
             identity_security_sql_green_source()
                 .replace("self.write_pool.write(", "self.write_pool.read("),
@@ -8736,7 +8743,7 @@ async fn revoke_identity_sessions(conn: &mut PgConnection) {
                 "self.write_pool.write(scope, op, storage).await; self.write_pool.write(",
             ),
         ] {
-            let syntax = syn::parse_file(&source).expect("synthetic red syntax");
+            let syntax = syn::parse_file(&source)?;
             let findings =
                 identity_reactivation_findings("identity_security_lifecycle.rs", &syntax);
             assert!(
@@ -8746,6 +8753,7 @@ async fn revoke_identity_sessions(conn: &mut PgConnection) {
                 "missing/extra reactivation write must be synthetic-red: {findings:#?}"
             );
         }
+        Ok(())
     }
 
     #[test]
@@ -11754,19 +11762,15 @@ pub trait SecretRepoLocal: Send + Sync {
 
     #[test]
     fn retry_guard_rejects_removed_optional_observation_factories() {
-        for (rel, source) in [(
-            "secret_repo.rs",
-            "impl Uow { async fn publish(&self, command: SecretPublishCommand){ let (_, command_observation) = command.into_parts(); let observation = settings::secret_publish_localtx_observation().unwrap(); run_pg_localtx_retry(observation, || async { self.pool.retry_write() }, classify).await; } }",
-        )] {
-            let mut sites = BTreeSet::new();
-            let findings = retry_placement_findings(rel, source, &mut sites);
-            assert!(
-                findings
-                    .iter()
-                    .any(|finding| finding.rule == Rule::RetryPlacement),
-                "removed optional factory syntax must remain synthetic-red: {findings:?}"
-            );
-        }
+        let source = "impl Uow { async fn publish(&self, command: SecretPublishCommand){ let (_, command_observation) = command.into_parts(); let observation = settings::secret_publish_localtx_observation().unwrap(); run_pg_localtx_retry(observation, || async { self.pool.retry_write() }, classify).await; } }";
+        let mut sites = BTreeSet::new();
+        let findings = retry_placement_findings("secret_repo.rs", source, &mut sites);
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == Rule::RetryPlacement),
+            "removed optional factory syntax must remain synthetic-red: {findings:?}"
+        );
     }
 
     #[test]

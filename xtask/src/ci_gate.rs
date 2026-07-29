@@ -1,8 +1,8 @@
 //! Stable aggregate gate for a typed CI impact plan.
 //!
-//! INVARIANT: CI-GATE-RECEIPT-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "gate_rejects_missing_duplicate_and_mismatched_receipts_red", anti_vacuity = "gate_accepts_exact_receipt_set_green" }.
-//! INVARIANT: LOCALTX-REQUIRED-EVIDENCE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "gate_rejects_complete_generic_receipts_without_localtx_required_evidence_red|localtx_required_evidence_disk_red_matrix", anti_vacuity = "gate_accepts_exact_receipt_set_green|successful_run_persists_the_existing_resource_metrics_in_the_envelope" }.
-//! INVARIANT: LOCAL-ONLY-REQUIRED-EVIDENCE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "gate_rejects_complete_generic_receipts_without_localonly_required_evidence_red|localonly_required_evidence_disk_red_matrix", anti_vacuity = "gate_accepts_exact_receipt_set_green|real_workspace_execution_inventory_is_exact_and_non_empty" }.
+//! INVARIANT: CI-GATE-RECEIPT-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "gate_rejects_missing_duplicate_and_mismatched_receipts_red", anti_vacuity = "gate_accepts_exact_receipt_set_green" }.
+//! INVARIANT: LOCALTX-REQUIRED-EVIDENCE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "gate_rejects_complete_generic_receipts_without_localtx_required_evidence_red|localtx_required_evidence_disk_red_matrix", anti_vacuity = "gate_accepts_exact_receipt_set_green|successful_run_persists_the_existing_resource_metrics_in_the_envelope" }.
+//! INVARIANT: LOCAL-ONLY-REQUIRED-EVIDENCE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "gate_rejects_complete_generic_receipts_without_localonly_required_evidence_red|localonly_required_evidence_disk_red_matrix", anti_vacuity = "gate_accepts_exact_receipt_set_green|real_workspace_execution_inventory_is_exact_and_non_empty" }.
 
 use crate::ci_evidence::{MAX_JSON_INTEGER, ValidatedEvidence};
 use crate::ci_identity::CiIdentityKey;

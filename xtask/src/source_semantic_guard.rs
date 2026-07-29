@@ -3,8 +3,8 @@
 //! This gate deliberately scans only `.rs` source files. Human-authored Markdown is outside its
 //! enforcement boundary and is handled by periodic, non-blocking advisory searches.
 //!
-//! INVARIANT: SOURCE-RUSTDOC-SEMANTICS-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::outbox_and_localonly_rustdoc_semantics_reject_legacy_claims", anti_vacuity = "tests::workspace_production_rustdoc_semantics_are_current" } -- production rustdoc must not overstate outbox delivery or restore legacy LocalOnly effect semantics.
-//! INVARIANT: TOKEN-PROFILE-RUSTDOC-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::token_profile_rustdoc_contract_rejects_missing_and_legacy_anchors", anti_vacuity = "tests::workspace_token_profile_rustdoc_contract_is_exact" } -- the four profile trust-chain rustdoc carriers retain their typed provider/binding, claim, authn-funnel, and trusted credential boundaries.
+//! INVARIANT: SOURCE-RUSTDOC-SEMANTICS-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::outbox_and_localonly_rustdoc_semantics_reject_legacy_claims", anti_vacuity = "tests::workspace_production_rustdoc_semantics_are_current" } -- production rustdoc must not overstate outbox delivery or restore legacy LocalOnly effect semantics.
+//! INVARIANT: TOKEN-PROFILE-RUSTDOC-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::token_profile_rustdoc_contract_rejects_missing_and_legacy_anchors", anti_vacuity = "tests::workspace_token_profile_rustdoc_contract_is_exact" } -- the four profile trust-chain rustdoc carriers retain their typed provider/binding, claim, authn-funnel, and trusted credential boundaries.
 
 use std::path::{Path, PathBuf};
 

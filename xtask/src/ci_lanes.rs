@@ -4,7 +4,7 @@
 //! every closed [`GateId`] has exactly one complete [`GateSpec`]. The exhaustive lookup makes any
 //! new variant a compile error first; the const proof then rejects missing, duplicate, mismatched,
 //! or out-of-order entries.
-//! INVARIANT: CI-LANE-PLAN-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "ci_lane_registry_rejects_duplicate_and_missing_red", anti_vacuity = "ci_lane_registry_accepts_canonical_green" } —— lane and
+//! INVARIANT: CI-LANE-PLAN-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "ci_lane_registry_rejects_duplicate_and_missing_red", anti_vacuity = "ci_lane_registry_accepts_canonical_green" } —— lane and
 //! compatibility plans are derived from this registry and guarded by non-vacuous red/green tests.
 //! INVARIANT: CI-SLO-JOB-TYPE-01 { level = "Hard", exec = "native-compile", source = "code", native = "CiJobKey is a closed enum whose ALL catalog and exhaustive mappings admit exactly the reusable workflow job matrix" }.
 //! INVARIANT: CI-IMPACT-CATALOG-01 { level = "Hard", exec = "native-compile", source = "code", native = "ci_job_catalog generates CiJobKey, ALL, workflow identity, artifact identity, and planner matrix fields from one descriptor" }.
@@ -15,8 +15,9 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
 use std::str::FromStr;
 
+use crate::execution_profiles::ExecutionProfile;
 use crate::integration_shards::IntegrationShard;
-use crate::nextest::HashPartition;
+use crate::nextest::{CoreTestScope, HashPartition};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RequiredEvidenceKind {
@@ -421,43 +422,58 @@ pub(crate) enum EvidenceKind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SharedReason {
-    ScheduledAdvisoryBackstop,
+pub(crate) enum GateExecutor {
+    Metadata,
+    CorePrerequisite,
+    CoreTest(CoreTestScope),
+    RequiredEvidence,
+    SupplyChain,
+    Coverage,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum LaneAssignment {
-    Primary(CiLane),
-    Shared {
-        primary: CiLane,
-        secondary: CiLane,
-        reason: SharedReason,
-    },
+pub(crate) enum GatePolicy {
+    OnChange,
+    ReleaseOnChange,
+    ReleaseScheduled,
+    RequiredEvidence,
+    Subsumed(SubsumptionProof),
 }
 
+/// Closed semantic proofs for the only release-check substitutions the catalog admits.
+///
+/// Unlike a raw `GateId` edge, a proof names the execution relationship itself. Its
+/// source and target are exhaustive, and registry validation also checks the executor,
+/// evidence, compile and tool shapes attached to that relationship.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum StandaloneReason {
-    VerifyOnly,
-    ScheduledAdvisory,
+pub(crate) enum SubsumptionProof {
+    AssemblyTestsByCoverage,
+    WorkspaceBuildByAllFeatures,
+    IntegrationCompileByAllFeatures,
+    WorkspaceClippyByAllFeatures,
+    WorkspaceTestsByCoverage,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CompatMembership {
-    Included,
-    SupersededBy(GateId),
-    Standalone(StandaloneReason),
-}
+impl SubsumptionProof {
+    const fn source(self) -> GateId {
+        match self {
+            Self::AssemblyTestsByCoverage => GateId::AssemblyLockProtocolTests,
+            Self::WorkspaceBuildByAllFeatures => GateId::BuildWorkspace,
+            Self::IntegrationCompileByAllFeatures => GateId::IntegrationCompile,
+            Self::WorkspaceClippyByAllFeatures => GateId::ClippyWorkspace,
+            Self::WorkspaceTestsByCoverage => GateId::DefaultNextest,
+        }
+    }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum VerifyMembership {
-    Included,
-    Excluded,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct GateMembership {
-    verify: VerifyMembership,
-    compat: CompatMembership,
+    pub(crate) const fn target(self) -> GateId {
+        match self {
+            Self::AssemblyTestsByCoverage | Self::WorkspaceTestsByCoverage => GateId::Coverage,
+            Self::WorkspaceBuildByAllFeatures | Self::IntegrationCompileByAllFeatures => {
+                GateId::BuildAllFeatures
+            }
+            Self::WorkspaceClippyByAllFeatures => GateId::ClippyAllFeatures,
+        }
+    }
 }
 
 macro_rules! gate_catalog {
@@ -471,7 +487,7 @@ macro_rules! gate_catalog {
                         CompileKind::NoCompile,
                         ToolRequirement::CargoBuiltin(crate::cmd::CargoSubcommand::Fmt),
                         SOURCE,
-                        BOTH_INCLUDED,
+                        GatePolicy::OnChange,
                     )
             ),
             ContractValidate => (step_contract_validate, Some("xtask/src/contract/validate.rs"),
@@ -482,7 +498,7 @@ macro_rules! gate_catalog {
                         CompileKind::NoCompile,
                         INTERNAL,
                         SOURCE,
-                        BOTH_INCLUDED,
+                        GatePolicy::OnChange,
                     )
             ),
             AssemblyValidate => (step_assembly_validate, Some("xtask/src/assembly.rs"),
@@ -493,7 +509,7 @@ macro_rules! gate_catalog {
                         CompileKind::NoCompile,
                         INTERNAL,
                         SOURCE,
-                        BOTH_INCLUDED,
+                        GatePolicy::OnChange,
                     )
             ),
             AssemblyArtifactsCheck => (step_assembly_artifacts_check, Some("xtask/src/assembly_artifacts.rs"),
@@ -504,7 +520,7 @@ macro_rules! gate_catalog {
                         CompileKind::NoCompile,
                         INTERNAL,
                         SOURCE,
-                        BOTH_INCLUDED,
+                        GatePolicy::OnChange,
                     )
             ),
             AssemblyModulesCheck => (step_assembly_modules_check, Some("xtask/src/assembly_codegen.rs"),
@@ -515,7 +531,7 @@ macro_rules! gate_catalog {
                         CompileKind::NoCompile,
                         INTERNAL,
                         SOURCE,
-                        BOTH_INCLUDED,
+                        GatePolicy::OnChange,
                     )
             ),
             AssemblyProvidersCheck => (step_assembly_providers_check, Some("xtask/src/assembly_codegen.rs"),
@@ -526,7 +542,7 @@ macro_rules! gate_catalog {
                         CompileKind::NoCompile,
                         INTERNAL,
                         SOURCE,
-                        BOTH_INCLUDED,
+                        GatePolicy::OnChange,
                     )
             ),
             AssemblyLockCheck => (step_assembly_lock_check, Some("xtask/src/assembly_lock.rs"),
@@ -537,7 +553,7 @@ macro_rules! gate_catalog {
                         CompileKind::NoCompile,
                         INTERNAL,
                         SOURCE,
-                        BOTH_INCLUDED,
+                        GatePolicy::OnChange,
                     )
             ),
             AssemblyRuntimePlanCheck => (step_assembly_runtime_plan_check, Some("xtask/src/assembly_runtime_plan.rs"),
@@ -548,7 +564,7 @@ macro_rules! gate_catalog {
                         CompileKind::NoCompile,
                         INTERNAL,
                         SOURCE,
-                        BOTH_INCLUDED,
+                        GatePolicy::OnChange,
                     )
             ),
             AssemblyGraphCheck => (step_assembly_graph_check, Some("xtask/src/graph.rs"),
@@ -559,7 +575,7 @@ macro_rules! gate_catalog {
                         CompileKind::NoCompile,
                         INTERNAL,
                         SOURCE,
-                        BOTH_INCLUDED,
+                        GatePolicy::OnChange,
                     )
             ),
             ContractBreaking => (step_contract_breaking, Some("xtask/src/contract/breaking.rs"),
@@ -570,7 +586,7 @@ macro_rules! gate_catalog {
                         CompileKind::NoCompile,
                         INTERNAL,
                         SOURCE,
-                        BOTH_INCLUDED,
+                        GatePolicy::OnChange,
                     )
             ),
             LayerDeps => (step_layer_deps, Some("xtask/src/layerdeps.rs"),
@@ -581,7 +597,7 @@ macro_rules! gate_catalog {
                         CompileKind::NoCompile,
                         INTERNAL,
                         SOURCE,
-                        BOTH_INCLUDED,
+                        GatePolicy::OnChange,
                     )
             ),
             ShippedFeatureGuard => (step_shipped_feature_guard, Some("xtask/src/shipped_feature_guard.rs"),
@@ -592,7 +608,7 @@ macro_rules! gate_catalog {
                         CompileKind::NoCompile,
                         INTERNAL,
                         SOURCE,
-                        BOTH_INCLUDED,
+                        GatePolicy::OnChange,
                     )
             ),
             WsDepsDrift => (step_wsdeps_drift, Some("xtask/src/wsdeps.rs"),
@@ -603,7 +619,7 @@ macro_rules! gate_catalog {
                         CompileKind::NoCompile,
                         INTERNAL,
                         SOURCE,
-                        BOTH_INCLUDED,
+                        GatePolicy::OnChange,
                     )
             ),
             SourceSemanticGuard => (step_source_semantic_guard, Some("xtask/src/source_semantic_guard.rs"),
@@ -614,7 +630,7 @@ macro_rules! gate_catalog {
                         CompileKind::NoCompile,
                         INTERNAL,
                         SOURCE,
-                        BOTH_INCLUDED,
+                        GatePolicy::OnChange,
                     )
             ),
             PromtoolRules => (step_promtool_rules, Some("xtask/src/promtool.rs"),
@@ -625,7 +641,7 @@ macro_rules! gate_catalog {
                         CompileKind::NoCompile,
                         INTERNAL,
                         SOURCE,
-                        BOTH_INCLUDED,
+                        GatePolicy::OnChange,
                     )
             ),
             OutboxSameIdGuard => (step_outbox_same_id_guard, Some("xtask/src/outbox_same_id_guard.rs"),
@@ -636,7 +652,7 @@ macro_rules! gate_catalog {
                         CompileKind::NoCompile,
                         INTERNAL,
                         SOURCE,
-                        BOTH_INCLUDED,
+                        GatePolicy::OnChange,
                     )
             ),
             ConsistencyFixtures => (step_consistency_fixtures, Some("xtask/src/consistency_fixtures.rs"),
@@ -647,7 +663,7 @@ macro_rules! gate_catalog {
                         CompileKind::NoCompile,
                         INTERNAL,
                         SOURCE,
-                        BOTH_INCLUDED,
+                        GatePolicy::OnChange,
                     )
             ),
             EventTransportGuard => (step_event_transport_guard, Some("xtask/src/event_transport_guard.rs"),
@@ -658,7 +674,7 @@ macro_rules! gate_catalog {
                         CompileKind::NoCompile,
                         INTERNAL,
                         SOURCE,
-                        BOTH_INCLUDED,
+                        GatePolicy::OnChange,
                     )
             ),
             InboxCutoverGuard => (step_inbox_cutover_guard, Some("xtask/src/inbox_cutover_guard.rs"),
@@ -669,7 +685,7 @@ macro_rules! gate_catalog {
                         CompileKind::NoCompile,
                         INTERNAL,
                         SOURCE,
-                        BOTH_INCLUDED,
+                        GatePolicy::OnChange,
                     )
             ),
             DlxLifecycleFunnel => (step_dlx_lifecycle_funnel, Some("xtask/src/dlx_lifecycle_funnel.rs"),
@@ -680,7 +696,7 @@ macro_rules! gate_catalog {
                         CompileKind::NoCompile,
                         INTERNAL,
                         SOURCE,
-                        BOTH_INCLUDED,
+                        GatePolicy::OnChange,
                     )
             ),
             RuntimeBaseline => (step_runtime_baseline, Some("xtask/src/runtime_baseline.rs"),
@@ -691,7 +707,7 @@ macro_rules! gate_catalog {
                         CompileKind::NoCompile,
                         INTERNAL,
                         SOURCE,
-                        BOTH_INCLUDED,
+                        GatePolicy::OnChange,
                     )
             ),
             RuntimeRootGuard => (step_runtime_root_guard, Some("xtask/src/runtime_root_guard.rs"),
@@ -702,7 +718,7 @@ macro_rules! gate_catalog {
                         CompileKind::NoCompile,
                         INTERNAL,
                         SOURCE,
-                        BOTH_INCLUDED,
+                        GatePolicy::OnChange,
                     )
             ),
             RuntimeEnvGuard => (step_runtime_env_guard, Some("xtask/src/runtime_env_guard.rs"),
@@ -713,7 +729,7 @@ macro_rules! gate_catalog {
                         CompileKind::NoCompile,
                         INTERNAL,
                         SOURCE,
-                        BOTH_INCLUDED,
+                        GatePolicy::OnChange,
                     )
             ),
             RuntimeDepsGuard => (step_runtime_deps_guard, Some("xtask/src/runtime_deps_guard.rs"),
@@ -724,7 +740,7 @@ macro_rules! gate_catalog {
                         CompileKind::NoCompile,
                         INTERNAL,
                         SOURCE,
-                        BOTH_INCLUDED,
+                        GatePolicy::OnChange,
                     )
             ),
             ArchRules => (step_archrules, Some("xtask/src/archrules.rs"),
@@ -735,7 +751,7 @@ macro_rules! gate_catalog {
                         CompileKind::NoCompile,
                         INTERNAL,
                         SOURCE,
-                        BOTH_INCLUDED,
+                        GatePolicy::OnChange,
                     )
             ),
             CodegenCheck => (step_codegen_check, Some("xtask/src/codegen.rs"),
@@ -746,7 +762,7 @@ macro_rules! gate_catalog {
                         CompileKind::NoCompile,
                         INTERNAL,
                         SOURCE,
-                        BOTH_INCLUDED,
+                        GatePolicy::OnChange,
                     )
             ),
             L2AssuranceCheck => (step_l2_assurance_check, Some("xtask/src/l2_assurance.rs"),
@@ -757,7 +773,7 @@ macro_rules! gate_catalog {
                         CompileKind::NoCompile,
                         INTERNAL,
                         SOURCE,
-                        BOTH_INCLUDED,
+                        GatePolicy::OnChange,
                     )
             ),
             ProviderCapabilitiesCheck => (step_provider_capabilities_check, Some("xtask/src/provider_capabilities.rs"),
@@ -768,7 +784,7 @@ macro_rules! gate_catalog {
                         CompileKind::NoCompile,
                         INTERNAL,
                         SOURCE,
-                        BOTH_INCLUDED,
+                        GatePolicy::OnChange,
                     )
             ),
             LocalTxCoverage => (step_localtx_coverage, Some("xtask/src/localtx_coverage.rs"),
@@ -779,7 +795,7 @@ macro_rules! gate_catalog {
                         CompileKind::NoCompile,
                         INTERNAL,
                         SOURCE,
-                        BOTH_INCLUDED,
+                        GatePolicy::OnChange,
                     )
             ),
             LocalOnlyEffects => (step_local_only_effects, Some("xtask/src/consistency_effects.rs"),
@@ -790,7 +806,7 @@ macro_rules! gate_catalog {
                         CompileKind::NoCompile,
                         INTERNAL,
                         SOURCE,
-                        BOTH_INCLUDED,
+                        GatePolicy::OnChange,
                     )
             ),
             LocalOnlyExecution => (step_local_only_execution, Some("xtask/src/localonly_evidence.rs"),
@@ -801,7 +817,7 @@ macro_rules! gate_catalog {
                         CompileKind::Workspace,
                         ToolRequirement::Nextest,
                         EvidenceKind::Test,
-                        VERIFY_ONLY,
+                        GatePolicy::RequiredEvidence,
                     )
             ),
             PdpAllowGuard => (step_pdp_allow_guard, Some("xtask/src/pdpallow.rs"),
@@ -812,7 +828,7 @@ macro_rules! gate_catalog {
                         CompileKind::NoCompile,
                         INTERNAL,
                         SOURCE,
-                        BOTH_INCLUDED,
+                        GatePolicy::OnChange,
                     )
             ),
             ContractBindingGuard => (step_contract_binding_guard, Some("xtask/src/contract_binding_guard.rs"),
@@ -823,7 +839,7 @@ macro_rules! gate_catalog {
                         CompileKind::NoCompile,
                         INTERNAL,
                         SOURCE,
-                        BOTH_INCLUDED,
+                        GatePolicy::OnChange,
                     )
             ),
             SchemaRls => (step_schema_rls_guard, Some("xtask/src/schema_rls.rs"),
@@ -834,7 +850,7 @@ macro_rules! gate_catalog {
                         CompileKind::NoCompile,
                         INTERNAL,
                         SOURCE,
-                        BOTH_INCLUDED,
+                        GatePolicy::OnChange,
                     )
             ),
             SetLocalFunnel => (step_setlocal_funnel, Some("xtask/src/setlocal_funnel.rs"),
@@ -845,7 +861,7 @@ macro_rules! gate_catalog {
                         CompileKind::NoCompile,
                         INTERNAL,
                         SOURCE,
-                        BOTH_INCLUDED,
+                        GatePolicy::OnChange,
                     )
             ),
             PgTenantTxGuard => (step_pg_tenant_tx_guard, Some("xtask/src/pg_tenant_tx_guard.rs"),
@@ -856,7 +872,7 @@ macro_rules! gate_catalog {
                         CompileKind::NoCompile,
                         INTERNAL,
                         SOURCE,
-                        BOTH_INCLUDED,
+                        GatePolicy::OnChange,
                     )
             ),
             RepoScopeGuard => (step_repo_scope_guard, Some("xtask/src/repo_scope_guard.rs"),
@@ -867,7 +883,7 @@ macro_rules! gate_catalog {
                         CompileKind::NoCompile,
                         INTERNAL,
                         SOURCE,
-                        BOTH_INCLUDED,
+                        GatePolicy::OnChange,
                     )
             ),
             TenancyCloseout => (step_tenancy_closeout, Some("xtask/src/tenancy_closeout.rs"),
@@ -878,7 +894,7 @@ macro_rules! gate_catalog {
                         CompileKind::NoCompile,
                         INTERNAL,
                         SOURCE,
-                        BOTH_INCLUDED,
+                        GatePolicy::OnChange,
                     )
             ),
             MigrationsSerial => (step_migrations_serial, Some("xtask/src/migrations.rs"),
@@ -889,7 +905,7 @@ macro_rules! gate_catalog {
                         CompileKind::NoCompile,
                         INTERNAL,
                         SOURCE,
-                        BOTH_INCLUDED,
+                        GatePolicy::OnChange,
                     )
             ),
             CommandSymmetry => (step_command_symmetry, Some("xtask/src/command_symmetry.rs"),
@@ -900,7 +916,7 @@ macro_rules! gate_catalog {
                         CompileKind::NoCompile,
                         INTERNAL,
                         SOURCE,
-                        BOTH_INCLUDED,
+                        GatePolicy::OnChange,
                     )
             ),
             CiEntryGuard => (step_ci_entry_guard, Some("xtask/src/ci_entry_guard.rs"),
@@ -911,7 +927,7 @@ macro_rules! gate_catalog {
                         CompileKind::NoCompile,
                         INTERNAL,
                         SOURCE,
-                        BOTH_INCLUDED,
+                        GatePolicy::OnChange,
                     )
             ),
             ReconcileOutboxCommandGuard => (step_reconcile_outbox_command_guard, Some("xtask/src/reconcile_outbox_command_guard.rs"),
@@ -922,7 +938,7 @@ macro_rules! gate_catalog {
                         CompileKind::NoCompile,
                         INTERNAL,
                         SOURCE,
-                        BOTH_INCLUDED,
+                        GatePolicy::OnChange,
                     )
             ),
             DeferGate => (step_defer_gate, Some("xtask/src/defergate.rs"),
@@ -933,7 +949,7 @@ macro_rules! gate_catalog {
                         CompileKind::NoCompile,
                         INTERNAL,
                         SOURCE,
-                        BOTH_INCLUDED,
+                        GatePolicy::OnChange,
                     )
             ),
             AssemblyLockProtocolTests => (step_assembly_lock_protocol_tests, None,
@@ -944,7 +960,7 @@ macro_rules! gate_catalog {
                         CompileKind::Workspace,
                         ToolRequirement::CargoBuiltin(crate::cmd::CargoSubcommand::Test),
                         EvidenceKind::Test,
-                        VERIFY_ONLY,
+                        GatePolicy::Subsumed(SubsumptionProof::AssemblyTestsByCoverage),
                     )
             ),
             BuildWorkspace => (step_build_workspace, None,
@@ -955,7 +971,7 @@ macro_rules! gate_catalog {
                         CompileKind::Workspace,
                         ToolRequirement::CargoBuiltin(crate::cmd::CargoSubcommand::Build),
                         SOURCE,
-                        VERIFY_ONLY,
+                        GatePolicy::Subsumed(SubsumptionProof::WorkspaceBuildByAllFeatures),
                     )
             ),
             PostgresFeatureMatrix => (step_postgres_feature_matrix, None,
@@ -966,7 +982,7 @@ macro_rules! gate_catalog {
                         CompileKind::Workspace,
                         ToolRequirement::InProcess,
                         EvidenceKind::Test,
-                        BOTH_INCLUDED,
+                        GatePolicy::OnChange,
                     )
             ),
             IntegrationCompile => (step_integration_compile, None,
@@ -977,7 +993,7 @@ macro_rules! gate_catalog {
                         CompileKind::Workspace,
                         ToolRequirement::CargoBuiltin(crate::cmd::CargoSubcommand::Test),
                         EvidenceKind::Test,
-                        VERIFY_ONLY,
+                        GatePolicy::Subsumed(SubsumptionProof::IntegrationCompileByAllFeatures),
                     )
             ),
             ClippyWorkspace => (step_clippy_workspace, None,
@@ -988,7 +1004,7 @@ macro_rules! gate_catalog {
                         CompileKind::Workspace,
                         ToolRequirement::CargoBuiltin(crate::cmd::CargoSubcommand::Clippy),
                         SOURCE,
-                        VERIFY_ONLY,
+                        GatePolicy::Subsumed(SubsumptionProof::WorkspaceClippyByAllFeatures),
                     )
             ),
             BuildAllFeatures => (step_build_all_features, None,
@@ -999,7 +1015,7 @@ macro_rules! gate_catalog {
                         CompileKind::Workspace,
                         ToolRequirement::CargoBuiltin(crate::cmd::CargoSubcommand::Build),
                         SOURCE,
-                        CI_INCLUDED,
+                        GatePolicy::ReleaseOnChange,
                     )
             ),
             ClippyAllFeatures => (step_clippy_all_features, None,
@@ -1010,29 +1026,29 @@ macro_rules! gate_catalog {
                         CompileKind::Workspace,
                         ToolRequirement::CargoBuiltin(crate::cmd::CargoSubcommand::Clippy),
                         SOURCE,
-                        CI_INCLUDED,
+                        GatePolicy::ReleaseOnChange,
                     )
             ),
             Coverage => (step_coverage, Some("xtask/src/coverage.rs"),
                 expensive_gate(
                         GateId::Coverage,
                         "coverage",
-                        CiLane::Coverage,
+                        GateExecutor::Coverage,
                         CompileKind::Workspace,
                         ToolRequirement::CoverageTools,
                         EvidenceKind::Coverage,
-                        CI_INCLUDED,
+                        GatePolicy::ReleaseOnChange,
                     )
             ),
             DefaultNextest => (step_nextest, None,
                 gate(
                         GateId::DefaultNextest,
                         "default-test-runner",
-                        CORE,
+                        GateExecutor::CoreTest(CoreTestScope::Workspace),
                         CompileKind::Workspace,
                         ToolRequirement::Nextest,
                         EvidenceKind::Test,
-                        VERIFY_SUPERSEDED_BY_COVERAGE,
+                        GatePolicy::Subsumed(SubsumptionProof::WorkspaceTestsByCoverage),
                     )
             ),
             SecureProductionTrybuild => (step_secure_production_trybuild, None,
@@ -1043,142 +1059,140 @@ macro_rules! gate_catalog {
                         CompileKind::Workspace,
                         ToolRequirement::CargoBuiltin(crate::cmd::CargoSubcommand::Test),
                         EvidenceKind::Test,
-                        BOTH_INCLUDED,
+                        GatePolicy::OnChange,
                     )
             ),
             S3BackendTests => (step_s3_backend_tests, None,
                 gate(
                         GateId::S3BackendTests,
                         "s3-backend-tests",
-                        CORE,
+                        GateExecutor::CoreTest(CoreTestScope::S3Backend),
                         CompileKind::Workspace,
                         ToolRequirement::Nextest,
                         EvidenceKind::Test,
-                        BOTH_INCLUDED,
+                        GatePolicy::OnChange,
                     )
             ),
             RedisBackendTests => (step_redis_backend_tests, None,
                 gate(
                         GateId::RedisBackendTests,
                         "redis-backend-tests",
-                        CORE,
+                        GateExecutor::CoreTest(CoreTestScope::RedisBackend),
                         CompileKind::Workspace,
                         ToolRequirement::Nextest,
                         EvidenceKind::Test,
-                        BOTH_INCLUDED,
+                        GatePolicy::OnChange,
                     )
             ),
             OidcBackendTests => (step_oidc_backend_tests, None,
                 gate(
                         GateId::OidcBackendTests,
                         "oidc-backend-tests",
-                        CORE,
+                        GateExecutor::CoreTest(CoreTestScope::OidcBackend),
                         CompileKind::Workspace,
                         ToolRequirement::Nextest,
                         EvidenceKind::Test,
-                        BOTH_INCLUDED,
+                        GatePolicy::OnChange,
                     )
             ),
             PrometheusBackendTests => (step_prometheus_backend_tests, None,
                 gate(
                         GateId::PrometheusBackendTests,
                         "prometheus-backend-tests",
-                        CORE,
+                        GateExecutor::CoreTest(CoreTestScope::PrometheusBackend),
                         CompileKind::Workspace,
                         ToolRequirement::Nextest,
                         EvidenceKind::Test,
-                        BOTH_INCLUDED,
+                        GatePolicy::OnChange,
                     )
             ),
             OtelBackendTests => (step_otel_backend_tests, None,
                 gate(
                         GateId::OtelBackendTests,
                         "otel-backend-tests",
-                        CORE,
+                        GateExecutor::CoreTest(CoreTestScope::OtelBackend),
                         CompileKind::Workspace,
                         ToolRequirement::Nextest,
                         EvidenceKind::Test,
-                        BOTH_INCLUDED,
+                        GatePolicy::OnChange,
                     )
             ),
             GrpcBackendTests => (step_grpc_backend_tests, None,
                 gate(
                         GateId::GrpcBackendTests,
                         "grpc-backend-tests",
-                        CORE,
+                        GateExecutor::CoreTest(CoreTestScope::GrpcBackend),
                         CompileKind::Workspace,
                         ToolRequirement::Nextest,
                         EvidenceKind::Test,
-                        BOTH_INCLUDED,
+                        GatePolicy::OnChange,
                     )
             ),
             VaultBackendTests => (step_vault_backend_tests, None,
                 gate(
                         GateId::VaultBackendTests,
                         "vault-backend-tests",
-                        CORE,
+                        GateExecutor::CoreTest(CoreTestScope::VaultBackend),
                         CompileKind::Workspace,
                         ToolRequirement::Nextest,
                         EvidenceKind::Test,
-                        BOTH_INCLUDED,
+                        GatePolicy::OnChange,
                     )
             ),
             SettingsOnlyTests => (step_settingsonly_tests, None,
                 gate(
                         GateId::SettingsOnlyTests,
                         "settingsonly-tests",
-                        CORE,
+                        GateExecutor::CoreTest(CoreTestScope::SettingsOnly),
                         CompileKind::Workspace,
                         ToolRequirement::Nextest,
                         EvidenceKind::Test,
-                        BOTH_INCLUDED,
+                        GatePolicy::OnChange,
                     )
             ),
             IdentityAuditTests => (step_identityaudit_tests, None,
                 gate(
                         GateId::IdentityAuditTests,
                         "identityaudit-tests",
-                        CORE,
+                        GateExecutor::CoreTest(CoreTestScope::IdentityAudit),
                         CompileKind::Workspace,
                         ToolRequirement::Nextest,
                         EvidenceKind::Test,
-                        BOTH_INCLUDED,
+                        GatePolicy::OnChange,
                     )
             ),
             TestkitContainerTests => (step_testkit_container_tests, None,
                 gate(
                         GateId::TestkitContainerTests,
                         "testkit-container-tests",
-                        CORE,
+                        GateExecutor::CoreTest(CoreTestScope::TestkitContainers),
                         CompileKind::Workspace,
                         ToolRequirement::Nextest,
                         EvidenceKind::Test,
-                        BOTH_INCLUDED,
+                        GatePolicy::OnChange,
                     )
             ),
             Deny => (step_deny, None,
                 gate(
                         GateId::Deny,
                         "deny",
-                        CiLane::Security,
+                        GateExecutor::SupplyChain,
                         CompileKind::NoCompile,
                         ToolRequirement::CargoTool {
                             tool: crate::cmd::CargoSubcommand::Deny,
                             install_hint: DENY_HINT,
                         },
                         EvidenceKind::SupplyChain,
-                        BOTH_INCLUDED,
+                        GatePolicy::OnChange,
                     )
             ),
             CargoAudit => (step_cargo_audit, None,
                 GateSpec {
                         id: GateId::CargoAudit,
                         label: "audit",
-                        assignment: LaneAssignment::Shared {
-                            primary: CiLane::Security,
-                            secondary: CiLane::Nightly,
-                            reason: SharedReason::ScheduledAdvisoryBackstop,
-                        },
+                        primary_owner: ExecutionProfile::ReleaseCheck,
+                        executor: GateExecutor::SupplyChain,
+                        policy: GatePolicy::ReleaseOnChange,
                         cost: CostClass::Fast,
                         compile: CompileKind::NoCompile,
                         tool: ToolRequirement::CargoTool {
@@ -1186,8 +1200,6 @@ macro_rules! gate_catalog {
                             install_hint: AUDIT_HINT,
                         },
                         evidence: EvidenceKind::SupplyChain,
-                        verify: VerifyMembership::Excluded,
-                        compat: CompatMembership::Included,
                     }
             ),
             Dylint => (step_dylint, None,
@@ -1201,7 +1213,7 @@ macro_rules! gate_catalog {
                             install_hint: DYLINT_HINT,
                         },
                         SOURCE,
-                        BOTH_INCLUDED,
+                        GatePolicy::OnChange,
                     )
             ),
             RuntimeDylintUiTests => (step_runtime_dylint_ui_tests, None,
@@ -1212,35 +1224,35 @@ macro_rules! gate_catalog {
                         CompileKind::Workspace,
                         ToolRequirement::CargoBuiltin(crate::cmd::CargoSubcommand::Test),
                         EvidenceKind::Test,
-                        BOTH_INCLUDED,
+                        GatePolicy::OnChange,
                     )
             ),
             PublicApi => (step_public_api, Some("xtask/src/publicapi.rs"),
                 expensive_gate(
                         GateId::PublicApi,
                         "public-api",
-                        CiLane::Coverage,
+                        GateExecutor::Coverage,
                         CompileKind::Workspace,
                         ToolRequirement::CargoTool {
                             tool: crate::cmd::CargoSubcommand::PublicApi,
                             install_hint: PUBLIC_API_HINT,
                         },
                         EvidenceKind::PublicApi,
-                        CI_INCLUDED,
+                        GatePolicy::ReleaseOnChange,
                     )
             ),
             DenyAdvisories => (step_deny_advisories, None,
                 gate(
                         GateId::DenyAdvisories,
                         "deny-advisories",
-                        CiLane::Nightly,
+                        GateExecutor::SupplyChain,
                         CompileKind::NoCompile,
                         ToolRequirement::CargoTool {
                             tool: crate::cmd::CargoSubcommand::Deny,
                             install_hint: DENY_HINT,
                         },
                         EvidenceKind::SupplyChain,
-                        NIGHTLY_ONLY,
+                        GatePolicy::ReleaseScheduled,
                     )
             ),
         }
@@ -1258,7 +1270,6 @@ macro_rules! define_gate_ids {
             pub(crate) const ALL: &'static [Self] = &[$(Self::$id),*];
             pub(crate) const COUNT: usize = Self::ALL.len();
 
-            #[cfg(test)]
             pub(crate) fn carrier_file(self) -> Option<&'static str> {
                 match self { $( Self::$id => $carrier, )* }
             }
@@ -1268,7 +1279,7 @@ macro_rules! define_gate_ids {
 gate_catalog!(define_gate_ids);
 
 impl GateId {
-    pub(crate) fn spec(self) -> &'static GateSpec {
+    pub(crate) const fn spec(self) -> &'static GateSpec {
         &REGISTRY[self as usize]
     }
 }
@@ -1277,25 +1288,27 @@ impl GateId {
 pub(crate) struct GateSpec {
     id: GateId,
     label: &'static str,
-    assignment: LaneAssignment,
+    primary_owner: ExecutionProfile,
+    executor: GateExecutor,
+    policy: GatePolicy,
     cost: CostClass,
     compile: CompileKind,
     tool: ToolRequirement,
     evidence: EvidenceKind,
-    verify: VerifyMembership,
-    compat: CompatMembership,
 }
 
 impl GateSpec {
-    pub(crate) fn id(self) -> GateId {
+    pub(crate) const fn id(self) -> GateId {
         self.id
     }
     pub(crate) fn label(self) -> &'static str {
         self.label
     }
-    #[cfg(test)]
-    pub(crate) fn assignment(self) -> LaneAssignment {
-        self.assignment
+    pub(crate) const fn primary_owner(self) -> ExecutionProfile {
+        self.primary_owner
+    }
+    pub(crate) const fn executor(self) -> GateExecutor {
+        self.executor
     }
     #[cfg(test)]
     pub(crate) fn cost(self) -> CostClass {
@@ -1311,18 +1324,43 @@ impl GateSpec {
     pub(crate) fn evidence(self) -> EvidenceKind {
         self.evidence
     }
-    pub(crate) fn verify_membership(self) -> VerifyMembership {
-        self.verify
+    #[cfg(test)]
+    pub(crate) const fn policy(self) -> GatePolicy {
+        self.policy
     }
-    pub(crate) fn compat(self) -> CompatMembership {
-        self.compat
+    pub(crate) const fn included_in_profile(self, profile: ExecutionProfile) -> bool {
+        profile.includes_owner(self.primary_owner())
+            && !(profile as u8 == ExecutionProfile::ReleaseCheck as u8
+                && matches!(self.policy, GatePolicy::Subsumed(_)))
+    }
+    #[cfg(test)]
+    pub(crate) const fn included_in_verify(self) -> bool {
+        matches!(
+            self.primary_owner,
+            ExecutionProfile::Check | ExecutionProfile::Test
+        )
+    }
+    pub(crate) const fn included_in_compatibility_ci(self) -> bool {
+        matches!(
+            self.policy,
+            GatePolicy::OnChange | GatePolicy::ReleaseOnChange
+        )
     }
     pub(crate) fn lanes(self) -> [Option<CiLane>; 2] {
-        match self.assignment {
-            LaneAssignment::Primary(lane) => [Some(lane), None],
-            LaneAssignment::Shared {
-                primary, secondary, ..
-            } => [Some(primary), Some(secondary)],
+        match (self.executor, self.policy) {
+            (GateExecutor::Metadata, _) => [Some(CiLane::Meta), None],
+            (GateExecutor::CorePrerequisite | GateExecutor::CoreTest(_), _) => {
+                [Some(CiLane::Core), None]
+            }
+            (GateExecutor::RequiredEvidence, _) => [Some(CiLane::LocalOnly), None],
+            (GateExecutor::Coverage, _) => [Some(CiLane::Coverage), None],
+            (GateExecutor::SupplyChain, GatePolicy::ReleaseScheduled) => {
+                [Some(CiLane::Nightly), None]
+            }
+            (GateExecutor::SupplyChain, GatePolicy::ReleaseOnChange) => {
+                [Some(CiLane::Security), Some(CiLane::Nightly)]
+            }
+            (GateExecutor::SupplyChain, _) => [Some(CiLane::Security), None],
         }
     }
     pub(crate) fn belongs_to(self, lane: CiLane) -> bool {
@@ -1360,66 +1398,58 @@ const PUBLIC_API_HINT: &str = concat!(
 const fn gate(
     id: GateId,
     label: &'static str,
-    lane: CiLane,
+    executor: GateExecutor,
     compile: CompileKind,
     tool: ToolRequirement,
     evidence: EvidenceKind,
-    membership: GateMembership,
+    policy: GatePolicy,
 ) -> GateSpec {
     let cost = match compile {
         CompileKind::NoCompile => CostClass::Fast,
         CompileKind::Workspace => CostClass::Standard,
     };
+    let primary_owner = match policy {
+        GatePolicy::ReleaseOnChange | GatePolicy::ReleaseScheduled => {
+            ExecutionProfile::ReleaseCheck
+        }
+        GatePolicy::OnChange | GatePolicy::RequiredEvidence | GatePolicy::Subsumed(_) => {
+            match evidence {
+                EvidenceKind::Test => ExecutionProfile::Test,
+                EvidenceKind::Source | EvidenceKind::SupplyChain => ExecutionProfile::Check,
+                EvidenceKind::Coverage | EvidenceKind::PublicApi => ExecutionProfile::ReleaseCheck,
+            }
+        }
+    };
     GateSpec {
         id,
         label,
-        assignment: LaneAssignment::Primary(lane),
+        primary_owner,
+        executor,
+        policy,
         cost,
         compile,
         tool,
         evidence,
-        verify: membership.verify,
-        compat: membership.compat,
     }
 }
 
 const fn expensive_gate(
     id: GateId,
     label: &'static str,
-    lane: CiLane,
+    executor: GateExecutor,
     compile: CompileKind,
     tool: ToolRequirement,
     evidence: EvidenceKind,
-    membership: GateMembership,
+    policy: GatePolicy,
 ) -> GateSpec {
-    let mut spec = gate(id, label, lane, compile, tool, evidence, membership);
+    let mut spec = gate(id, label, executor, compile, tool, evidence, policy);
     spec.cost = CostClass::Expensive;
     spec
 }
 
-const META: CiLane = CiLane::Meta;
-const CORE: CiLane = CiLane::Core;
-const LOCALONLY: CiLane = CiLane::LocalOnly;
-const BOTH_INCLUDED: GateMembership = GateMembership {
-    verify: VerifyMembership::Included,
-    compat: CompatMembership::Included,
-};
-const CI_INCLUDED: GateMembership = GateMembership {
-    verify: VerifyMembership::Excluded,
-    compat: CompatMembership::Included,
-};
-const VERIFY_ONLY: GateMembership = GateMembership {
-    verify: VerifyMembership::Included,
-    compat: CompatMembership::Standalone(StandaloneReason::VerifyOnly),
-};
-const VERIFY_SUPERSEDED_BY_COVERAGE: GateMembership = GateMembership {
-    verify: VerifyMembership::Included,
-    compat: CompatMembership::SupersededBy(GateId::Coverage),
-};
-const NIGHTLY_ONLY: GateMembership = GateMembership {
-    verify: VerifyMembership::Excluded,
-    compat: CompatMembership::Standalone(StandaloneReason::ScheduledAdvisory),
-};
+const META: GateExecutor = GateExecutor::Metadata;
+const CORE: GateExecutor = GateExecutor::CorePrerequisite;
+const LOCALONLY: GateExecutor = GateExecutor::RequiredEvidence;
 const SOURCE: EvidenceKind = EvidenceKind::Source;
 const INTERNAL: ToolRequirement = ToolRequirement::InProcess;
 macro_rules! define_registry {
@@ -1434,6 +1464,7 @@ const fn registry_const_valid() -> bool {
         return false;
     }
     let mut seen = [false; GateId::COUNT];
+    let mut core_test_scope_counts = [0u8; CoreTestScope::COUNT];
     let mut i = 0;
     while i < REGISTRY.len() {
         let spec = REGISTRY[i];
@@ -1455,18 +1486,22 @@ const fn registry_const_valid() -> bool {
                 | EvidenceKind::Coverage
                 | EvidenceKind::PublicApi
         );
-        let verify_classified = matches!(
-            spec.verify,
-            VerifyMembership::Included | VerifyMembership::Excluded
-        );
-        if !cost_valid || !evidence_classified || !verify_classified {
+        if !cost_valid || !evidence_classified || !executor_const_valid(spec) {
             return false;
         }
-        if let CompatMembership::SupersededBy(target) = spec.compat {
-            let target_index = target as usize;
-            if target_index == index
-                || target_index >= REGISTRY.len()
-                || !matches!(REGISTRY[target_index].compat, CompatMembership::Included)
+        if let GateExecutor::CoreTest(scope) = spec.executor {
+            let scope_index = scope as usize;
+            if scope_index >= core_test_scope_counts.len()
+                || core_test_scope_counts[scope_index] != 0
+            {
+                return false;
+            }
+            core_test_scope_counts[scope_index] = 1;
+        }
+        if let GatePolicy::Subsumed(proof) = spec.policy {
+            let target_index = proof.target() as usize;
+            if target_index >= REGISTRY.len()
+                || !subsumption_const_valid(spec, REGISTRY[target_index], proof)
             {
                 return false;
             }
@@ -1474,7 +1509,133 @@ const fn registry_const_valid() -> bool {
         seen[index] = true;
         i += 1;
     }
+    let mut scope_index = 0;
+    while scope_index < core_test_scope_counts.len() {
+        if core_test_scope_counts[scope_index] != 1 {
+            return false;
+        }
+        scope_index += 1;
+    }
     true
+}
+
+const fn subsumption_const_valid(
+    source: GateSpec,
+    target: GateSpec,
+    proof: SubsumptionProof,
+) -> bool {
+    if source.id as usize != proof.source() as usize
+        || target.id as usize != proof.target() as usize
+        || source.compile as u8 != target.compile as u8
+        || !target.included_in_compatibility_ci()
+        || target.primary_owner as u8 != ExecutionProfile::ReleaseCheck as u8
+    {
+        return false;
+    }
+    match proof {
+        SubsumptionProof::AssemblyTestsByCoverage => assembly_coverage_shape(source, target),
+        SubsumptionProof::WorkspaceBuildByAllFeatures => build_all_features_shape(source, target),
+        SubsumptionProof::IntegrationCompileByAllFeatures => {
+            integration_compile_shape(source, target)
+        }
+        SubsumptionProof::WorkspaceClippyByAllFeatures => clippy_all_features_shape(source, target),
+        SubsumptionProof::WorkspaceTestsByCoverage => workspace_coverage_shape(source, target),
+    }
+}
+
+const fn core_prerequisite_with(
+    spec: GateSpec,
+    evidence: EvidenceKind,
+    command: crate::cmd::CargoSubcommand,
+) -> bool {
+    matches!(spec.executor, GateExecutor::CorePrerequisite)
+        && spec.evidence as u8 == evidence as u8
+        && matches!(spec.tool, ToolRequirement::CargoBuiltin(actual) if actual as u8 == command as u8)
+}
+
+const fn coverage_shape(spec: GateSpec) -> bool {
+    matches!(spec.executor, GateExecutor::Coverage)
+        && matches!(spec.evidence, EvidenceKind::Coverage)
+        && matches!(spec.tool, ToolRequirement::CoverageTools)
+}
+
+const fn assembly_coverage_shape(source: GateSpec, target: GateSpec) -> bool {
+    core_prerequisite_with(
+        source,
+        EvidenceKind::Test,
+        crate::cmd::CargoSubcommand::Test,
+    ) && coverage_shape(target)
+}
+
+const fn build_all_features_shape(source: GateSpec, target: GateSpec) -> bool {
+    core_prerequisite_with(
+        source,
+        EvidenceKind::Source,
+        crate::cmd::CargoSubcommand::Build,
+    ) && core_prerequisite_with(
+        target,
+        EvidenceKind::Source,
+        crate::cmd::CargoSubcommand::Build,
+    )
+}
+
+const fn integration_compile_shape(source: GateSpec, target: GateSpec) -> bool {
+    core_prerequisite_with(
+        source,
+        EvidenceKind::Test,
+        crate::cmd::CargoSubcommand::Test,
+    ) && core_prerequisite_with(
+        target,
+        EvidenceKind::Source,
+        crate::cmd::CargoSubcommand::Build,
+    )
+}
+
+const fn clippy_all_features_shape(source: GateSpec, target: GateSpec) -> bool {
+    core_prerequisite_with(
+        source,
+        EvidenceKind::Source,
+        crate::cmd::CargoSubcommand::Clippy,
+    ) && core_prerequisite_with(
+        target,
+        EvidenceKind::Source,
+        crate::cmd::CargoSubcommand::Clippy,
+    )
+}
+
+const fn workspace_coverage_shape(source: GateSpec, target: GateSpec) -> bool {
+    matches!(
+        source.executor,
+        GateExecutor::CoreTest(CoreTestScope::Workspace)
+    ) && matches!(source.evidence, EvidenceKind::Test)
+        && matches!(source.tool, ToolRequirement::Nextest)
+        && coverage_shape(target)
+}
+
+const fn executor_const_valid(spec: GateSpec) -> bool {
+    match spec.executor {
+        GateExecutor::Metadata => {
+            matches!(spec.compile, CompileKind::NoCompile)
+                && spec.primary_owner as u8 == ExecutionProfile::Check as u8
+        }
+        GateExecutor::CoreTest(_) => {
+            matches!(spec.tool, ToolRequirement::Nextest)
+                && matches!(spec.evidence, EvidenceKind::Test)
+                && spec.primary_owner as u8 == ExecutionProfile::Test as u8
+        }
+        GateExecutor::CorePrerequisite => !matches!(spec.tool, ToolRequirement::Nextest),
+        GateExecutor::RequiredEvidence => {
+            matches!(spec.policy, GatePolicy::RequiredEvidence)
+                && spec.primary_owner as u8 == ExecutionProfile::Test as u8
+        }
+        GateExecutor::SupplyChain => matches!(spec.evidence, EvidenceKind::SupplyChain),
+        GateExecutor::Coverage => {
+            matches!(
+                spec.evidence,
+                EvidenceKind::Coverage | EvidenceKind::PublicApi
+            ) && spec.primary_owner as u8 == ExecutionProfile::ReleaseCheck as u8
+        }
+    }
 }
 
 const _: () = assert!(registry_const_valid());
@@ -1485,15 +1646,23 @@ pub(crate) fn validate_registry(registry: &[GateSpec]) -> Result<(), &'static st
         return Err("registry must cover every GateId");
     }
     let mut seen = [false; GateId::COUNT];
+    let mut core_test_scope_counts = [0u8; CoreTestScope::COUNT];
     for spec in registry {
         let index = spec.id as usize;
         if index >= seen.len() || seen[index] {
             return Err("duplicate GateId");
         }
         seen[index] = true;
+        if let GateExecutor::CoreTest(scope) = spec.executor {
+            let scope_index = scope as usize;
+            if scope_index >= core_test_scope_counts.len() {
+                return Err("unknown CoreTestScope");
+            }
+            core_test_scope_counts[scope_index] += 1;
+        }
     }
     for spec in registry {
-        if spec.compat == CompatMembership::Included {
+        if spec.included_in_compatibility_ci() {
             let split_memberships = [
                 CiLane::Meta,
                 CiLane::Core,
@@ -1507,17 +1676,20 @@ pub(crate) fn validate_registry(registry: &[GateSpec]) -> Result<(), &'static st
                 return Err("compatibility gate must belong to exactly one split CI lane");
             }
         }
-        if let CompatMembership::SupersededBy(target) = spec.compat {
-            if target == spec.id {
-                return Err("invalid supersession target");
-            }
-            let Some(target_spec) = registry.iter().find(|candidate| candidate.id == target) else {
+        if let GatePolicy::Subsumed(proof) = spec.policy {
+            let Some(target_spec) = registry
+                .iter()
+                .find(|candidate| candidate.id == proof.target())
+            else {
                 return Err("missing supersession target");
             };
-            if target_spec.compat != CompatMembership::Included {
-                return Err("supersession target must be included in compatibility CI");
+            if !subsumption_const_valid(*spec, *target_spec, proof) {
+                return Err("invalid typed subsumption proof");
             }
         }
+    }
+    if core_test_scope_counts.into_iter().any(|count| count != 1) {
+        return Err("CoreTestScope executor catalog must be exact-once");
     }
     if seen.into_iter().all(|present| present) {
         Ok(())
@@ -1644,16 +1816,8 @@ mod tests {
                 .iter()
                 .all(|spec| spec.id().spec().id() == spec.id())
         );
-        assert!(
-            REGISTRY
-                .iter()
-                .any(|spec| spec.verify_membership() == VerifyMembership::Included)
-        );
-        assert!(
-            REGISTRY
-                .iter()
-                .any(|spec| spec.verify_membership() == VerifyMembership::Excluded)
-        );
+        assert!(REGISTRY.iter().any(|spec| spec.included_in_verify()));
+        assert!(REGISTRY.iter().any(|spec| !spec.included_in_verify()));
         assert!(REGISTRY.iter().all(|spec| matches!(
             (spec.cost(), spec.evidence()),
             (
@@ -1676,7 +1840,52 @@ mod tests {
         );
         assert_eq!(testkit[0].evidence(), EvidenceKind::Test);
         assert!(testkit[0].belongs_to(CiLane::Core));
-        assert_eq!(testkit[0].verify_membership(), VerifyMembership::Included);
+        assert!(testkit[0].included_in_verify());
+        assert_eq!(testkit[0].primary_owner(), ExecutionProfile::Test);
+    }
+
+    #[test]
+    fn canonical_profiles_own_every_gate_and_release_is_the_subsumed_union() {
+        assert!(
+            REGISTRY
+                .iter()
+                .all(|spec| ExecutionProfile::ALL.contains(&spec.primary_owner()))
+        );
+        assert!(REGISTRY.iter().all(|spec| {
+            spec.included_in_profile(ExecutionProfile::ReleaseCheck)
+                || matches!(spec.policy(), GatePolicy::Subsumed(proof) if proof.target().spec().included_in_profile(ExecutionProfile::ReleaseCheck))
+        }));
+        assert!(
+            REGISTRY
+                .iter()
+                .all(|spec| { spec.primary_owner() != ExecutionProfile::IntegrationCritical }),
+            "#1884 owns activation of integration-critical"
+        );
+    }
+
+    #[test]
+    fn core_test_scope_catalog_is_projected_exactly_once() {
+        let scopes = REGISTRY
+            .iter()
+            .filter_map(|spec| match spec.executor() {
+                GateExecutor::CoreTest(scope) => Some(scope),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let unique = scopes
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            unique,
+            CoreTestScope::ALL.into_iter().collect(),
+            "CoreTestScope must be referenced only by the typed unit executor catalog"
+        );
+        assert_eq!(
+            scopes.len(),
+            CoreTestScope::COUNT,
+            "duplicate CoreTestScope executor"
+        );
     }
 
     #[test]
@@ -1702,40 +1911,50 @@ mod tests {
 
     #[test]
     fn ci_lane_registry_rejects_invalid_supersession_relations_red() {
-        let mut self_cycle = REGISTRY.to_vec();
-        self_cycle[GateId::DefaultNextest as usize].compat =
-            CompatMembership::SupersededBy(GateId::DefaultNextest);
-        assert!(validate_registry(&self_cycle).is_err());
+        let mut wrong_source = REGISTRY.to_vec();
+        wrong_source[GateId::DefaultNextest as usize].policy =
+            GatePolicy::Subsumed(SubsumptionProof::WorkspaceBuildByAllFeatures);
+        assert!(validate_registry(&wrong_source).is_err());
 
-        let mut excluded_target = REGISTRY.to_vec();
-        excluded_target[GateId::Coverage as usize].compat =
-            CompatMembership::Standalone(StandaloneReason::VerifyOnly);
-        assert!(validate_registry(&excluded_target).is_err());
+        let mut invalid_target_shape = REGISTRY.to_vec();
+        invalid_target_shape[GateId::Coverage as usize].executor = GateExecutor::CorePrerequisite;
+        assert!(validate_registry(&invalid_target_shape).is_err());
 
-        let mut missing_target = REGISTRY.to_vec();
-        missing_target.pop();
-        missing_target[GateId::DefaultNextest as usize].compat =
-            CompatMembership::SupersededBy(GateId::DenyAdvisories);
-        assert!(validate_registry(&missing_target).is_err());
+        let mut invalid_evidence_shape = REGISTRY.to_vec();
+        invalid_evidence_shape[GateId::AssemblyLockProtocolTests as usize].evidence =
+            EvidenceKind::Source;
+        assert!(validate_registry(&invalid_evidence_shape).is_err());
+
+        let mut invalid_compile_shape = REGISTRY.to_vec();
+        invalid_compile_shape[GateId::AssemblyLockProtocolTests as usize].compile =
+            CompileKind::NoCompile;
+        invalid_compile_shape[GateId::AssemblyLockProtocolTests as usize].cost = CostClass::Fast;
+        assert!(validate_registry(&invalid_compile_shape).is_err());
+    }
+
+    #[test]
+    fn ci_lane_registry_rejects_duplicate_core_test_scope_red() {
+        let mut duplicate_scope = REGISTRY.to_vec();
+        duplicate_scope[GateId::S3BackendTests as usize].executor =
+            GateExecutor::CoreTest(CoreTestScope::Workspace);
+        assert!(validate_registry(&duplicate_scope).is_err());
     }
 
     #[test]
     fn ci_lane_registry_rejects_compat_gate_outside_split_lanes_red() {
-        let invalid_lane = CiLane::Nightly;
         let mut wrong_lane = REGISTRY.to_vec();
-        wrong_lane[GateId::BuildAllFeatures as usize].assignment =
-            LaneAssignment::Primary(invalid_lane);
+        wrong_lane[GateId::BuildAllFeatures as usize].executor = GateExecutor::RequiredEvidence;
         assert!(
             validate_registry(&wrong_lane).is_err(),
-            "compatibility gate assigned to {invalid_lane:?} escaped split-lane validation"
+            "compatibility gate outside the typed split executors escaped validation"
         );
     }
 
     #[test]
-    fn ci_lane_shared_assignments_require_a_closed_reason() {
+    fn scheduled_advisory_projection_is_typed_and_closed() {
         let shared: Vec<_> = REGISTRY
             .iter()
-            .filter(|spec| matches!(spec.assignment(), LaneAssignment::Shared { .. }))
+            .filter(|spec| spec.lanes()[1].is_some())
             .collect();
         assert_eq!(shared.len(), 1);
         assert_eq!(shared[0].id(), GateId::CargoAudit);

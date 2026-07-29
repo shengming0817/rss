@@ -1,6 +1,6 @@
 //! `reconcile-outbox-command-guard` —— durable reconcile command outbox seam guard.
 //!
-//! INVARIANT: RECONCILE-COMMAND-OUTBOX-SEAM-01 { level = "Medium", exec = "verify", source = "code" }——
+//! INVARIANT: RECONCILE-COMMAND-OUTBOX-SEAM-01 { level = "Medium", exec = "check", source = "code" }——
 //! eventexec reconcile scheduler must not directly publish, depend on an emitter, or append raw outbox rows.
 //! Commands may only flow through generated `TypedCommandSpec` → `ReviewedCommand` →
 //! `AttemptScope::record_action_and_enqueue_command`;

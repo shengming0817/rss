@@ -5,7 +5,7 @@
 //! 杜绝攻击者复制 `(ciphertext, stored_aad)` 跨租，用 stored AAD 自洽验签的重放绕过。anti-vacuity：
 //! 若 `open` 接受 `&ProtectionAad` 即编译通过、红例失效。
 //!
-//! INVARIANT: FIELDPROT-AAD-DERIVE-FROM-CTX-01 { level = "Hard", exec = "verify", source = "trybuild" }
+//! INVARIANT: FIELDPROT-AAD-DERIVE-FROM-CTX-01 { level = "Hard", exec = "test", source = "trybuild" }
 //!
 //! 维护提示：`.stderr` 是 rustc 版本敏感的精确诊断快照（措辞/格式随 toolchain 漂移）。bump
 //! `rust-toolchain.toml` 后若本测试 mismatch，跑 `TRYBUILD=overwrite cargo test -p secure --test trybuild`

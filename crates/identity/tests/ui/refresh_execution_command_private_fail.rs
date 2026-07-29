@@ -1,4 +1,4 @@
-//! INVARIANT: REFRESH-COMMAND-SEALED-01 { level = "Hard", exec = "verify", source = "trybuild" }
+//! INVARIANT: REFRESH-COMMAND-SEALED-01 { level = "Hard", exec = "test", source = "trybuild" }
 
 use identity::ports::RefreshExecutionCommand;
 

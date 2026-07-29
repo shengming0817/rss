@@ -1,4 +1,4 @@
-//! compile-fail（#1095，INVARIANT: DIPORT-ASYNC-ARC-SEND-01 { level = "Hard", exec = "verify", source = "trybuild" }）：除显式共享 PDP / replay-store 窄例外外，async DI port 的 dynosaur Send
+//! compile-fail（#1095，INVARIANT: DIPORT-ASYNC-ARC-SEND-01 { level = "Hard", exec = "test", source = "trybuild" }）：除显式共享 PDP / replay-store 窄例外外，async DI port 的 dynosaur Send
 //! 变体 `DynX` 都是 `Send` 但 **非 `Sync`**（`#[trait_variant::make(X: Send)]` 只加 Send），故这些
 //! `Arc<DynX>` 都是 `!Send`——无法被多次调用且在 `tokio::spawn` / Send `'static` future 中消费的 async
 //! 消费者持有。

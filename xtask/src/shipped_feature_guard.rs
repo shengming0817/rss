@@ -7,7 +7,7 @@
 //! production package roots and reports the complete inverse dependency chain when a forbidden
 //! feature is present.
 //!
-//! INVARIANT: ROUTE-MOUNT-SHIPPED-FEATURES-01 { level = "Medium", exec = "verify", source = "code" }.
+//! INVARIANT: ROUTE-MOUNT-SHIPPED-FEATURES-01 { level = "Medium", exec = "check", source = "code" }.
 
 use anyhow::{Context, Result, bail};
 

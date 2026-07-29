@@ -1,7 +1,7 @@
 //! Typed producer and strict consumer for LocalOnly execution exact-set evidence.
 //!
 //! INVARIANT: LOCAL-ONLY-EXECUTION-FUNNEL-01 { level = "Hard", exec = "native-compile", source = "code", native = "LocalOnlyEvidenceRequest::publish requires both the private LocalOnlySuitePassed and VerifiedLocalOnlyExecutionSet capabilities" }.
-//! INVARIANT: LOCAL-ONLY-EXECUTION-EXACTSET-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "execution_exact_set_rejects_missing_extra_duplicate_and_equal_count_wrong_set|raw_marker_schema_and_file_boundary_red_matrix|ordinary_file_read_rejects_path_replacement_after_precheck|nextest_failure_after_all_canonical_markers_blocks_publish_and_cleans_raw_directory", anti_vacuity = "real_workspace_execution_inventory_is_exact_and_non_empty" }.
+//! INVARIANT: LOCAL-ONLY-EXECUTION-EXACTSET-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "execution_exact_set_rejects_missing_extra_duplicate_and_equal_count_wrong_set|raw_marker_schema_and_file_boundary_red_matrix|ordinary_file_read_rejects_path_replacement_after_precheck|nextest_failure_after_all_canonical_markers_blocks_publish_and_cleans_raw_directory", anti_vacuity = "real_workspace_execution_inventory_is_exact_and_non_empty" }.
 //! INVARIANT: LOCAL-ONLY-EXECUTION-WIRE-01 { level = "Hard", exec = "native-compile", source = "code", native = "the private deny_unknown_fields v1 DTO fixes the report field inventory and closed CiJobKey owner" }.
 
 use crate::ci_lanes::CiJobKey;

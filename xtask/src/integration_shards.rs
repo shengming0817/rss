@@ -2,8 +2,8 @@
 //!
 //! INVARIANT: INTEGRATION-SHARD-REGISTRY-01 { level = "Hard", exec = "native-compile", source = "code", native = "catalog macro generates the closed enum, ALL, lookup, resources, and execution units" }.
 //! INVARIANT: INTEGRATION-SHARD-SELECTOR-01 { level = "Hard", exec = "native-compile", source = "code", native = "filtersets render only from typed package/binary/kind execution units" }.
-//! INVARIANT: INTEGRATION-SHARD-COVERAGE-01 { level = "Medium", exec = "integration", source = "code", synthetic_red = "metadata_coverage_rejects_missing_duplicate_and_unknown_targets", anti_vacuity = "workspace_metadata_covers_legacy_integration_targets" }.
-//! INVARIANT: INTEGRATION-SHARD-SCHEDULING-01 { level = "Medium", exec = "integration", source = "code", synthetic_red = "scheduling_plan_rejects_dangerous_target_parallelism|localtx_backend_execution_unit_rejects_missing_duplicate_and_drift", anti_vacuity = "workspace_plan_freezes_resources_and_dangerous_targets|localtx_journeys_form_one_unpartitioned_serial_batch|localtx_backend_execution_unit_is_unique" }.
+//! INVARIANT: INTEGRATION-SHARD-COVERAGE-01 { level = "Medium", exec = "release-check", source = "code", synthetic_red = "metadata_coverage_rejects_missing_duplicate_and_unknown_targets", anti_vacuity = "workspace_metadata_covers_legacy_integration_targets" }.
+//! INVARIANT: INTEGRATION-SHARD-SCHEDULING-01 { level = "Medium", exec = "release-check", source = "code", synthetic_red = "scheduling_plan_rejects_dangerous_target_parallelism|localtx_backend_execution_unit_rejects_missing_duplicate_and_drift", anti_vacuity = "workspace_plan_freezes_resources_and_dangerous_targets|localtx_journeys_form_one_unpartitioned_serial_batch|localtx_backend_execution_unit_is_unique" }.
 
 #[cfg(test)]
 use crate::workspace_root;
@@ -14,6 +14,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::Path;
 use std::str::FromStr;
+
+use crate::execution_profiles::{ExecutionProfile, ExecutionUnitSpec};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Resource {
@@ -58,7 +60,10 @@ impl TargetKind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) struct ExecutionUnit {
+pub(crate) struct IntegrationUnitSpec {
+    pub(crate) id: IntegrationUnitId,
+    pub(crate) shard: IntegrationShard,
+    pub(crate) primary_owner: ExecutionProfile,
     pub(crate) package: &'static str,
     pub(crate) target: &'static str,
     pub(crate) kind: TargetKind,
@@ -127,14 +132,19 @@ impl LocalFeatureScope {
     }
 }
 
-impl ExecutionUnit {
+impl IntegrationUnitSpec {
     const fn new(
+        id: IntegrationUnitId,
+        shard: IntegrationShard,
         package: &'static str,
         target: &'static str,
         kind: TargetKind,
         scheduling: Scheduling,
     ) -> Self {
         Self {
+            id,
+            shard,
+            primary_owner: ExecutionProfile::ReleaseCheck,
             package,
             target,
             kind,
@@ -156,7 +166,7 @@ impl ExecutionUnit {
 pub(crate) struct ShardSpec {
     pub(crate) shard: IntegrationShard,
     pub(crate) resources: &'static [Resource],
-    pub(crate) units: &'static [ExecutionUnit],
+    pub(crate) units: &'static [IntegrationUnitSpec],
     pub(crate) local_feature_scopes: &'static [LocalFeatureScope],
     capabilities: &'static [Capability],
 }
@@ -173,7 +183,7 @@ macro_rules! integration_shard_catalog {
             resources: [$($resource:ident),* $(,)?],
             capabilities: [$($capability:ident),* $(,)?],
             local_feature_scopes: [$($scope:ident),+ $(,)?],
-            units: [$(($package:literal, $target:literal, $kind:ident, $scheduling:ident)),+ $(,)?],
+            units: [$($unit:ident => ($package:literal, $target:literal, $kind:ident, $scheduling:ident)),+ $(,)?],
         },
     )+) => {
         #[repr(usize)]
@@ -181,12 +191,27 @@ macro_rules! integration_shard_catalog {
         #[serde(rename_all = "kebab-case")]
         pub(crate) enum IntegrationShard { $($variant),+ }
 
+        #[repr(usize)]
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        pub(crate) enum IntegrationUnitId { $($($unit),+),+ }
+
+        const INTEGRATION_UNIT_SPECS: &[IntegrationUnitSpec] = &[$($(IntegrationUnitSpec::new(
+            IntegrationUnitId::$unit,
+            IntegrationShard::$variant,
+            $package,
+            $target,
+            TargetKind::$kind,
+            Scheduling::$scheduling,
+        )),+),+];
+
         const SHARD_SPECS: &[ShardSpec] = &[$(ShardSpec {
             shard: IntegrationShard::$variant,
             resources: &[$(Resource::$resource),*],
             capabilities: &[$(Capability::$capability),*],
             local_feature_scopes: &[$(LocalFeatureScope::$scope),+],
-            units: &[$(ExecutionUnit::new(
+            units: &[$(IntegrationUnitSpec::new(
+                IntegrationUnitId::$unit,
+                IntegrationShard::$variant,
                 $package,
                 $target,
                 TargetKind::$kind,
@@ -207,6 +232,14 @@ macro_rules! integration_shard_catalog {
 
             pub(crate) fn requires_docker(self) -> bool {
                 self.spec().capabilities.contains(&Capability::Docker)
+            }
+        }
+
+        impl IntegrationUnitId {
+            pub(crate) const ALL: [Self; [$($(stringify!($unit)),+),+].len()] = [$( $(Self::$unit),+ ),+];
+
+            pub(crate) const fn spec(self) -> &'static IntegrationUnitSpec {
+                &INTEGRATION_UNIT_SPECS[self as usize]
             }
         }
 
@@ -233,17 +266,17 @@ integration_shard_catalog! {
         capabilities: [],
         local_feature_scopes: [Postgres, PostgresMigration, Journeys, Runtime],
         units: [
-            ("postgres", "postgres", Lib, Serial),
-            ("postgres-migration", "postgres_migration", Lib, Serial),
-            ("postgres", "feature_manifest", Test, Parallel),
-            ("postgres", "migration_ops_contract", Test, Parallel),
-            ("postgres", "tx_capability_trybuild", Test, Parallel),
-            ("journeys", "audit_list_tenant_entries_localtx_journey", Test, Serial),
-            ("journeys", "identity_logout_grant_journey", Test, Parallel),
-            ("journeys", "identity_password_security_event_journey", Test, Serial),
-            ("journeys", "identity_refresh_producer_transaction_journey", Test, Serial),
-            ("journeys", "settings_secret_publish_localtx_journey", Test, Serial),
-            ("runtime", "settings_secret_e2e", Test, Serial),
+            PostgresLib => ("postgres", "postgres", Lib, Serial),
+            PostgresMigrationLib => ("postgres-migration", "postgres_migration", Lib, Serial),
+            PostgresFeatureManifest => ("postgres", "feature_manifest", Test, Parallel),
+            PostgresMigrationOpsContract => ("postgres", "migration_ops_contract", Test, Parallel),
+            PostgresTxCapabilityTrybuild => ("postgres", "tx_capability_trybuild", Test, Parallel),
+            AuditListTenantEntriesLocalTxJourney => ("journeys", "audit_list_tenant_entries_localtx_journey", Test, Serial),
+            IdentityLogoutGrantJourney => ("journeys", "identity_logout_grant_journey", Test, Parallel),
+            IdentityPasswordSecurityEventJourney => ("journeys", "identity_password_security_event_journey", Test, Serial),
+            IdentityRefreshProducerTransactionJourney => ("journeys", "identity_refresh_producer_transaction_journey", Test, Serial),
+            SettingsSecretPublishLocalTxJourney => ("journeys", "settings_secret_publish_localtx_journey", Test, Serial),
+            SettingsSecretE2e => ("runtime", "settings_secret_e2e", Test, Serial),
         ],
     },
     EventTransport => {
@@ -252,16 +285,16 @@ integration_shard_catalog! {
         capabilities: [],
         local_feature_scopes: [Amqp, Mqtt, Journeys, Runtime],
         units: [
-            ("amqp", "amqp", Lib, Parallel),
-            ("amqp", "integration", Test, Serial),
-            ("mqtt", "mqtt", Lib, Parallel),
-            ("mqtt", "integration", Test, Serial),
-            ("journeys", "amqp_consumer_at_least_once_journey", Test, Serial),
-            ("journeys", "eventtransport_journey", Test, Parallel),
-            ("journeys", "identity_login_audit_durable_journey", Test, Serial),
-            ("journeys", "identity_login_audit_journey", Test, Parallel),
-            ("journeys", "identityaudit_runtime", Test, Serial),
-            ("runtime", "event_transport_durable_e2e", Test, Serial),
+            AmqpLib => ("amqp", "amqp", Lib, Parallel),
+            AmqpIntegration => ("amqp", "integration", Test, Serial),
+            MqttLib => ("mqtt", "mqtt", Lib, Parallel),
+            MqttIntegration => ("mqtt", "integration", Test, Serial),
+            AmqpConsumerAtLeastOnceJourney => ("journeys", "amqp_consumer_at_least_once_journey", Test, Serial),
+            EventTransportJourney => ("journeys", "eventtransport_journey", Test, Parallel),
+            IdentityLoginAuditDurableJourney => ("journeys", "identity_login_audit_durable_journey", Test, Serial),
+            IdentityLoginAuditJourney => ("journeys", "identity_login_audit_journey", Test, Parallel),
+            IdentityAuditRuntimeJourney => ("journeys", "identityaudit_runtime", Test, Serial),
+            EventTransportDurableE2e => ("runtime", "event_transport_durable_e2e", Test, Serial),
         ],
     },
     RuntimeHttpAuth => {
@@ -270,24 +303,24 @@ integration_shard_catalog! {
         capabilities: [],
         local_feature_scopes: [Journeys, Runtime],
         units: [
-            ("journeys", "security_provider_closeout", Test, Parallel),
-            ("journeys", "settingsonly_runtime", Test, Parallel),
-            ("runtime", "runtime", Lib, Serial),
-            ("runtime", "auth_e2e", Test, Parallel),
-            ("runtime", "auth_bridge_structure", Test, Parallel),
-            ("runtime", "server_budget_structure", Test, Parallel),
-            ("runtime", "configs_ready_e2e", Test, Serial),
-            ("runtime", "domain_execution_plan_trybuild", Test, Parallel),
-            ("runtime", "identity_login_wire_e2e", Test, Serial),
-            ("runtime", "infra_builders_api", Test, Parallel),
-            ("runtime", "listener_plan_trybuild", Test, Parallel),
-            ("runtime", "operator_surface_trybuild", Test, Parallel),
-            ("runtime", "refresh_mint_e2e", Test, Parallel),
-            ("runtime", "key_rotation_e2e", Test, Parallel),
-            ("runtime", "runtime_outputs_trybuild", Test, Parallel),
-            ("runtime", "runtime_serve_e2e", Test, Parallel),
-            ("runtime", "service_token_replay_e2e", Test, Serial),
-            ("runtime", "wire_contract_e2e", Test, Serial),
+            SecurityProviderCloseoutJourney => ("journeys", "security_provider_closeout", Test, Parallel),
+            SettingsOnlyRuntimeJourney => ("journeys", "settingsonly_runtime", Test, Parallel),
+            RuntimeLib => ("runtime", "runtime", Lib, Serial),
+            AuthE2e => ("runtime", "auth_e2e", Test, Parallel),
+            AuthBridgeStructure => ("runtime", "auth_bridge_structure", Test, Parallel),
+            ServerBudgetStructure => ("runtime", "server_budget_structure", Test, Parallel),
+            ConfigsReadyE2e => ("runtime", "configs_ready_e2e", Test, Serial),
+            DomainExecutionPlanTrybuild => ("runtime", "domain_execution_plan_trybuild", Test, Parallel),
+            IdentityLoginWireE2e => ("runtime", "identity_login_wire_e2e", Test, Serial),
+            InfraBuildersApi => ("runtime", "infra_builders_api", Test, Parallel),
+            ListenerPlanTrybuild => ("runtime", "listener_plan_trybuild", Test, Parallel),
+            OperatorSurfaceTrybuild => ("runtime", "operator_surface_trybuild", Test, Parallel),
+            RefreshMintE2e => ("runtime", "refresh_mint_e2e", Test, Parallel),
+            KeyRotationE2e => ("runtime", "key_rotation_e2e", Test, Parallel),
+            RuntimeOutputsTrybuild => ("runtime", "runtime_outputs_trybuild", Test, Parallel),
+            RuntimeServeE2e => ("runtime", "runtime_serve_e2e", Test, Parallel),
+            ServiceTokenReplayE2e => ("runtime", "service_token_replay_e2e", Test, Serial),
+            WireContractE2e => ("runtime", "wire_contract_e2e", Test, Serial),
         ],
     },
     ConsistencyFault => {
@@ -296,16 +329,16 @@ integration_shard_catalog! {
         capabilities: [],
         local_feature_scopes: [Testkit, RedisAdapter, Journeys, JourneysFaultMatrix],
         units: [
-            ("testkit", "testkit", Lib, Serial),
-            ("testkit", "crash_matrix", Test, Parallel),
-            ("testkit", "harness", Test, Parallel),
-            ("testkit", "local_only", Test, Parallel),
-            ("testkit", "postgres_test_login_governance", Test, Serial),
-            ("testkit", "provider_catalog_trybuild", Test, Parallel),
-            ("redis-adapter", "redis", Lib, Parallel),
-            ("redis-adapter", "integration_claimer", Test, Serial),
-            ("journeys", "device_command_ack_timeout_journey", Test, Parallel),
-            ("journeys-fault-matrix", "consistency_fault_matrix_journey", Test, Serial),
+            TestkitLib => ("testkit", "testkit", Lib, Serial),
+            TestkitCrashMatrix => ("testkit", "crash_matrix", Test, Parallel),
+            TestkitHarness => ("testkit", "harness", Test, Parallel),
+            TestkitLocalOnly => ("testkit", "local_only", Test, Parallel),
+            PostgresTestLoginGovernance => ("testkit", "postgres_test_login_governance", Test, Serial),
+            ProviderCatalogTrybuild => ("testkit", "provider_catalog_trybuild", Test, Parallel),
+            RedisAdapterLib => ("redis-adapter", "redis", Lib, Parallel),
+            RedisIntegrationClaimer => ("redis-adapter", "integration_claimer", Test, Serial),
+            DeviceCommandAckTimeoutJourney => ("journeys", "device_command_ack_timeout_journey", Test, Parallel),
+            ConsistencyFaultMatrixJourney => ("journeys-fault-matrix", "consistency_fault_matrix_journey", Test, Serial),
         ],
     },
     CdcProjectionSaga => {
@@ -314,9 +347,9 @@ integration_shard_catalog! {
         capabilities: [],
         local_feature_scopes: [Journeys, Runtime],
         units: [
-            ("journeys", "saga_projection_deps_journey", Test, Parallel),
-            ("journeys", "settings_config_publish_journey", Test, Parallel),
-            ("runtime", "settings_config_publish_durable_e2e", Test, Serial),
+            SagaProjectionDepsJourney => ("journeys", "saga_projection_deps_journey", Test, Parallel),
+            SettingsConfigPublishJourney => ("journeys", "settings_config_publish_journey", Test, Parallel),
+            SettingsConfigPublishDurableE2e => ("runtime", "settings_config_publish_durable_e2e", Test, Serial),
         ],
     },
     ObjectStorage => {
@@ -325,9 +358,9 @@ integration_shard_catalog! {
         capabilities: [],
         local_feature_scopes: [S3],
         units: [
-            ("s3", "s3", Lib, Parallel),
-            ("s3", "dlx_archive_store", Test, Parallel),
-            ("s3", "integration_object_store", Test, Serial),
+            S3Lib => ("s3", "s3", Lib, Parallel),
+            DlxArchiveStore => ("s3", "dlx_archive_store", Test, Parallel),
+            IntegrationObjectStore => ("s3", "integration_object_store", Test, Serial),
         ],
     },
     ProductionRuntime => {
@@ -336,11 +369,74 @@ integration_shard_catalog! {
         capabilities: [Docker],
         local_feature_scopes: [Journeys],
         units: [
-            ("journeys", "two_replica_runtime", Test, Serial),
-            ("journeys", "production_runtime", Test, Parallel),
-            ("journeys", "runtime_inventory", Test, Parallel),
+            TwoReplicaRuntimeJourney => ("journeys", "two_replica_runtime", Test, Serial),
+            ProductionRuntimeJourney => ("journeys", "production_runtime", Test, Parallel),
+            RuntimeInventoryJourney => ("journeys", "runtime_inventory", Test, Parallel),
         ],
     },
+}
+
+fn validate_integration_unit_catalog(
+    specs: &[IntegrationUnitSpec],
+    shard_specs: &[ShardSpec],
+) -> Result<()> {
+    if specs.len() != IntegrationUnitId::ALL.len() {
+        bail!("integration unit catalog must cover every stable ID");
+    }
+    let mut seen = BTreeSet::new();
+    for (index, spec) in specs.iter().enumerate() {
+        if !seen.insert(spec.id) {
+            bail!("integration unit catalog repeats ID {:?}", spec.id);
+        }
+        if spec.id as usize != index || IntegrationUnitId::ALL[index] != spec.id {
+            bail!("integration unit catalog ID/order drift at index {index}");
+        }
+        if spec.primary_owner != ExecutionProfile::ReleaseCheck {
+            bail!(
+                "integration unit {:?} must remain release-check owned until integration-critical activation",
+                spec.id
+            );
+        }
+    }
+
+    let mut shard_owned = BTreeSet::new();
+    for shard_spec in shard_specs {
+        for unit in shard_spec.units {
+            if unit.shard != shard_spec.shard {
+                bail!(
+                    "integration unit {:?} shard identity drift: {:?} != {:?}",
+                    unit.id,
+                    unit.shard,
+                    shard_spec.shard
+                );
+            }
+            if !shard_owned.insert(unit.id) {
+                bail!("integration unit {:?} assigned to multiple shards", unit.id);
+            }
+            let canonical = specs
+                .get(unit.id as usize)
+                .context("integration shard references an unknown stable unit ID")?;
+            if canonical != unit {
+                bail!(
+                    "integration unit {:?} spec drift from stable catalog",
+                    unit.id
+                );
+            }
+        }
+    }
+    if shard_owned != seen {
+        bail!("integration shard membership must exactly cover stable unit IDs");
+    }
+    Ok(())
+}
+
+fn projected_integration_units(
+    profile: ExecutionProfile,
+) -> impl Iterator<Item = &'static IntegrationUnitSpec> {
+    ExecutionUnitSpec::project(profile).filter_map(|unit| match unit {
+        ExecutionUnitSpec::Integration(spec) => Some(spec),
+        ExecutionUnitSpec::Gate(_) => None,
+    })
 }
 
 impl fmt::Display for IntegrationShard {
@@ -403,11 +499,9 @@ pub(crate) fn batches(shard: IntegrationShard) -> Vec<ShardBatch> {
                 .into_iter()
                 .flat_map(move |kind| {
                     let mut by_package = BTreeMap::<_, Vec<_>>::new();
-                    for unit in shard
-                        .spec()
-                        .units
-                        .iter()
+                    for unit in projected_integration_units(ExecutionProfile::ReleaseCheck)
                         .copied()
+                        .filter(|unit| unit.shard == shard)
                         .filter(|unit| unit.scheduling == scheduling && unit.kind == kind)
                     {
                         by_package.entry(unit.package).or_default().push(unit);
@@ -421,7 +515,7 @@ pub(crate) fn batches(shard: IntegrationShard) -> Vec<ShardBatch> {
                             .collect();
                         let filter = units
                             .into_iter()
-                            .map(ExecutionUnit::filter)
+                            .map(IntegrationUnitSpec::filter)
                             .map(|filter| format!("({filter})"))
                             .collect::<Vec<_>>()
                             .join(" or ");
@@ -467,34 +561,38 @@ pub(crate) fn postgres_transaction_journey_execution_batch() -> Result<ShardBatc
     Ok(batch.clone())
 }
 
-fn localtx_backend_execution_unit_from(units: &[ExecutionUnit]) -> Result<ExecutionUnit> {
-    let package = LocalFeatureScope::Postgres.package();
+fn localtx_backend_execution_unit_from(
+    units: &[IntegrationUnitSpec],
+) -> Result<IntegrationUnitSpec> {
+    let expected = *IntegrationUnitId::PostgresLib.spec();
     let matches = units
         .iter()
         .copied()
-        .filter(|unit| {
-            unit.package == package
-                && unit.target == package
-                && unit.kind == TargetKind::Lib
-                && unit.scheduling == Scheduling::Serial
-        })
+        .filter(|unit| unit.id == expected.id)
         .collect::<Vec<_>>();
     let [unit] = matches.as_slice() else {
         bail!(
-            "LocalTx backend evidence must have exactly one postgres-domain Serial library execution unit for the typed Postgres package; found {}",
+            "LocalTx backend evidence must have exactly one stable postgres execution unit; found {}",
             matches.len()
         );
     };
+    if *unit != expected {
+        bail!("LocalTx backend stable execution unit spec drift");
+    }
     Ok(*unit)
 }
 
 /// Resolve the one real-backend carrier executed by the LocalTx required-evidence owner.
-pub(crate) fn localtx_backend_execution_unit() -> Result<ExecutionUnit> {
+pub(crate) fn localtx_backend_execution_unit() -> Result<IntegrationUnitSpec> {
     let shard = IntegrationShard::PostgresDomain;
     if shard.partition_policy() != PartitionPolicy::Unpartitioned {
         bail!("LocalTx backend evidence shard must remain unpartitioned");
     }
-    localtx_backend_execution_unit_from(shard.spec().units)
+    let projected = projected_integration_units(ExecutionProfile::ReleaseCheck)
+        .filter(|unit| unit.shard == shard)
+        .copied()
+        .collect::<Vec<_>>();
+    localtx_backend_execution_unit_from(&projected)
 }
 
 const INTEGRATION_PACKAGES: &[&str] = &[
@@ -512,7 +610,9 @@ const INTEGRATION_PACKAGES: &[&str] = &[
 
 type TargetId = (String, String, String);
 
-fn unique_targets(units: impl IntoIterator<Item = ExecutionUnit>) -> Result<BTreeSet<TargetId>> {
+fn unique_targets(
+    units: impl IntoIterator<Item = IntegrationUnitSpec>,
+) -> Result<BTreeSet<TargetId>> {
     let mut expected = BTreeSet::new();
     for unit in units {
         let id = (
@@ -528,11 +628,7 @@ fn unique_targets(units: impl IntoIterator<Item = ExecutionUnit>) -> Result<BTre
 }
 
 fn expected_targets() -> Result<BTreeSet<TargetId>> {
-    unique_targets(
-        IntegrationShard::ALL
-            .iter()
-            .flat_map(|shard| shard.spec().units.iter().copied()),
-    )
+    unique_targets(projected_integration_units(ExecutionProfile::ReleaseCheck).copied())
 }
 
 fn validate_local_feature_catalog(specs: &[ShardSpec]) -> Result<()> {
@@ -655,6 +751,7 @@ pub(crate) fn validate_metadata(metadata: &Value) -> Result<()> {
 }
 
 pub(crate) fn validate_workspace(root: &Path) -> Result<()> {
+    validate_integration_unit_catalog(INTEGRATION_UNIT_SPECS, SHARD_SPECS)?;
     validate_local_feature_catalog(SHARD_SPECS)?;
     let output = crate::cmd::cargo_cmd(
         crate::cmd::CargoSubcommand::Metadata,
@@ -724,6 +821,45 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn integration_unit_catalog_rejects_missing_duplicate_id_drift_and_owner_drift() -> Result<()> {
+        validate_integration_unit_catalog(INTEGRATION_UNIT_SPECS, SHARD_SPECS)?;
+
+        let missing = &INTEGRATION_UNIT_SPECS[..INTEGRATION_UNIT_SPECS.len() - 1];
+        assert!(validate_integration_unit_catalog(missing, SHARD_SPECS).is_err());
+
+        let mut duplicate = INTEGRATION_UNIT_SPECS.to_vec();
+        duplicate[1] = duplicate[0];
+        assert!(validate_integration_unit_catalog(&duplicate, SHARD_SPECS).is_err());
+
+        let mut id_drift = INTEGRATION_UNIT_SPECS.to_vec();
+        id_drift[0].id = IntegrationUnitId::ALL[1];
+        assert!(validate_integration_unit_catalog(&id_drift, SHARD_SPECS).is_err());
+
+        let mut owner_drift = INTEGRATION_UNIT_SPECS.to_vec();
+        owner_drift[0].primary_owner =
+            crate::execution_profiles::ExecutionProfile::IntegrationCritical;
+        assert!(validate_integration_unit_catalog(&owner_drift, SHARD_SPECS).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn release_check_owns_the_exact_integration_catalog_and_critical_is_inactive() {
+        let release =
+            projected_integration_units(crate::execution_profiles::ExecutionProfile::ReleaseCheck)
+                .map(|spec| spec.id)
+                .collect::<BTreeSet<_>>();
+        let expected = IntegrationUnitId::ALL.into_iter().collect::<BTreeSet<_>>();
+        assert_eq!(release, expected);
+        assert!(
+            projected_integration_units(
+                crate::execution_profiles::ExecutionProfile::IntegrationCritical,
+            )
+            .next()
+            .is_none()
+        );
+    }
+
+    #[test]
     fn shard_names_are_closed_and_round_trip() -> Result<()> {
         let names: Vec<_> = IntegrationShard::ALL
             .iter()
@@ -765,7 +901,9 @@ mod tests {
         missing[IntegrationShard::EventTransport as usize].local_feature_scopes = &[];
         assert!(validate_local_feature_catalog(&missing).is_err());
 
-        const UNKNOWN_UNITS: &[ExecutionUnit] = &[ExecutionUnit::new(
+        const UNKNOWN_UNITS: &[IntegrationUnitSpec] = &[IntegrationUnitSpec::new(
+            IntegrationUnitId::AmqpIntegration,
+            IntegrationShard::EventTransport,
             "new-integration-package",
             "integration",
             TargetKind::Test,
@@ -965,8 +1103,8 @@ mod tests {
         );
     }
 
-    fn metadata_from(targets: &[ExecutionUnit]) -> Value {
-        let mut packages: BTreeMap<&str, Vec<&ExecutionUnit>> = BTreeMap::new();
+    fn metadata_from(targets: &[IntegrationUnitSpec]) -> Value {
+        let mut packages: BTreeMap<&str, Vec<&IntegrationUnitSpec>> = BTreeMap::new();
         for unit in targets {
             packages.entry(unit.package).or_default().push(unit);
         }
@@ -984,7 +1122,7 @@ mod tests {
         })
     }
 
-    fn all_units() -> Vec<ExecutionUnit> {
+    fn all_units() -> Vec<IntegrationUnitSpec> {
         IntegrationShard::ALL
             .iter()
             .flat_map(|shard| shard.spec().units.iter().copied())
@@ -1001,7 +1139,9 @@ mod tests {
         assert!(validate_metadata(&metadata_from(&missing)).is_err());
 
         let mut unknown = units;
-        unknown.push(ExecutionUnit::new(
+        unknown.push(IntegrationUnitSpec::new(
+            IntegrationUnitId::RuntimeInventoryJourney,
+            IntegrationShard::ProductionRuntime,
             "runtime",
             "new_unclassified_target",
             TargetKind::Test,

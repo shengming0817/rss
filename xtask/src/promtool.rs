@@ -1,6 +1,6 @@
 //! Prometheus rule/test gate backed by one digest-pinned official image.
 //!
-//! INVARIANT: PROMTOOL-RULES-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::gate_rejects_missing_runner_bad_version_bad_rules_and_no_consumer", anti_vacuity = "tests::gate_accepts_rules_and_consuming_tests" }——
+//! INVARIANT: PROMTOOL-RULES-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::gate_rejects_missing_runner_bad_version_bad_rules_and_no_consumer", anti_vacuity = "tests::gate_accepts_rules_and_consuming_tests" }——
 //! verify-fast and ci-meta execute the exact promtool version declared in the existing CI tool
 //! catalog. Missing Docker, a catalog mismatch, invalid rules, or a test file without a real
 //! alert-rule consumer fails closed.

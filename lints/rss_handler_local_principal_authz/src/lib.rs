@@ -3,7 +3,7 @@
 //! 直接读取 `Authenticated` tenant / principal kind / self subject 做本地授权，并禁止
 //! 非 allowlist 的 `PrincipalKind::{Admin,SuperAdmin,...}` / role-name 字面量授权分支。
 //!
-//! INVARIANT: HANDLER-LOCAL-PRINCIPAL-AUTHZ-01 { level = "Medium", exec = "verify", source = "dylint" }
+//! INVARIANT: HANDLER-LOCAL-PRINCIPAL-AUTHZ-01 { level = "Medium", exec = "check", source = "dylint" }
 //!
 //! `Authenticated` 是 listener 级认证证据，只能表达「谁通过了入口认证」。域 crate 若直接读取
 //! `tenant_id` / `principal_kind` / `self_scoped_principal_id` 做权限判断，会绕过 primary route gate 的
@@ -100,7 +100,7 @@ dylint_linting::declare_late_lint! {
     /// `Authenticated` 只能表达入口认证结果；tenant、权限、资源、自服务授权必须由 primary route gate 统一完成。
     /// handler/domain 直接读取 tenant/principal/subject 做本地授权，会绕过 `RouteAuthorizer` 和 `AuthorizedSubject`。
     /// 直接比较 principal kind 或 role-name 字面量也会绕过 typed `GrantPermission` / `RoutePermissionId`。
-    /// INVARIANT: HANDLER-LOCAL-PRINCIPAL-AUTHZ-01 { level = "Medium", exec = "verify", source = "dylint" }。
+    /// INVARIANT: HANDLER-LOCAL-PRINCIPAL-AUTHZ-01 { level = "Medium", exec = "check", source = "dylint" }。
     ///
     /// ### Known problems
     /// 仍 intraprocedural：allowlist crate 内 wrapper fn（`pub fn kind(ev: Authenticated) { ev.principal_kind() }`）被外部

@@ -37,15 +37,15 @@ pub(crate) enum Rule {
     InactiveDomainDependencyClosure,
     /// identityaudit 必须保持 #1797 的独立双域 binary/schema/journey/image/production closure。
     ///
-    /// INVARIANT: IDENTITYAUDIT-EXECUTABLE-BOUNDARY-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::identityaudit_executable_boundary_rejects_lib_only_shape", anti_vacuity = "tests::identityaudit_real_executable_artifact_closure_is_complete" } -- #1797 replaces the demo composition proof with one exact executable package and its closed production transport/artifact closure.
+    /// INVARIANT: IDENTITYAUDIT-EXECUTABLE-BOUNDARY-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::identityaudit_executable_boundary_rejects_lib_only_shape", anti_vacuity = "tests::identityaudit_real_executable_artifact_closure_is_complete" } -- #1797 replaces the demo composition proof with one exact executable package and its closed production transport/artifact closure.
     IdentityAuditBoundary,
     /// settingsonly 必须保持 #1796 的独立 binary/schema/精确 journey/image/default-closure 闭包。
     ///
-    /// INVARIANT: SETTINGSONLY-EXECUTABLE-BOUNDARY-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::settingsonly_executable_boundary_rejects_each_incomplete_artifact_fact", anti_vacuity = "tests::settingsonly_real_executable_boundary_is_complete" } -- this target-specific gate closes only the settingsonly artifacts introduced by #1796; the cross-assembly artifact matrix and bijection remain owned by #1798.
+    /// INVARIANT: SETTINGSONLY-EXECUTABLE-BOUNDARY-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::settingsonly_executable_boundary_rejects_each_incomplete_artifact_fact", anti_vacuity = "tests::settingsonly_real_executable_boundary_is_complete" } -- this target-specific gate closes only the settingsonly artifacts introduced by #1796; the cross-assembly artifact matrix and bijection remain owned by #1798.
     SettingsOnlyExecutableBoundary,
     /// settingsonly 必须保持 #1836 的唯一 L2 production/durable-isolated 组装闭包。
     ///
-    /// INVARIANT: SETTINGSONLY-L2-PRODUCTION-CLOSURE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::settingsonly_l2_production_closure_rejects_synthetic_mutations", anti_vacuity = "tests::settingsonly_l2_production_closure_accepts_real_workspace" } -- exact manifest/provider/artifact/config/subscription/auth-funnel facts and the production startup call chain are verified from parsed source; raw JWT reparsing, aliases, function pointers, comments, test-only bait, dead helpers, fallback factories, and nonactivated subscribers are not evidence.
+    /// INVARIANT: SETTINGSONLY-L2-PRODUCTION-CLOSURE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::settingsonly_l2_production_closure_rejects_synthetic_mutations", anti_vacuity = "tests::settingsonly_l2_production_closure_accepts_real_workspace" } -- exact manifest/provider/artifact/config/subscription/auth-funnel facts and the production startup call chain are verified from parsed source; raw JWT reparsing, aliases, function pointers, comments, test-only bait, dead helpers, fallback factories, and nonactivated subscribers are not evidence.
     SettingsOnlyL2ProductionClosure,
     /// assembly manifest 必须声明至少一个 listener。
     EmptyListeners,
@@ -56,12 +56,12 @@ pub(crate) enum Rule {
     /// Provider-to-probe inventory bindings may only be minted by the generated/private
     /// completion receipt funnels.
     ///
-    /// INVARIANT: RUNTIME-INVENTORY-PROVIDER-PROVENANCE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_inventory_provider_binding_rejects_handwritten_production_callsite", anti_vacuity = "tests::runtime_inventory_provider_binding_real_completion_funnels_are_exact" } -- provider IDs and probe names remain coupled to the move-only completion receipts; production assembly code cannot handwrite or alias the raw binding constructor.
+    /// INVARIANT: RUNTIME-INVENTORY-PROVIDER-PROVENANCE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::runtime_inventory_provider_binding_rejects_handwritten_production_callsite", anti_vacuity = "tests::runtime_inventory_provider_binding_real_completion_funnels_are_exact" } -- provider IDs and probe names remain coupled to the move-only completion receipts; production assembly code cannot handwrite or alias the raw binding constructor.
     RuntimeInventoryProviderProvenance,
     /// Listener observations are minted only at the three production launch roots and directly
     /// consume the successfully bound server handle's `local_addr()`.
     ///
-    /// INVARIANT: RUNTIME-INVENTORY-LISTENER-PROVENANCE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_inventory_listener_provenance_rejects_detached_or_aliased_construction", anti_vacuity = "tests::runtime_inventory_listener_provenance_real_launch_roots_are_exact" } -- copied addresses, helper aliases, macros, and extra production minting sites cannot masquerade as actual listener publication.
+    /// INVARIANT: RUNTIME-INVENTORY-LISTENER-PROVENANCE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::runtime_inventory_listener_provenance_rejects_detached_or_aliased_construction", anti_vacuity = "tests::runtime_inventory_listener_provenance_real_launch_roots_are_exact" } -- copied addresses, helper aliases, macros, and extra production minting sites cannot masquerade as actual listener publication.
     RuntimeInventoryListenerProvenance,
     /// assembly manifest 不能空转：至少声明一个 DI provider。
     EmptyDiportProviders,
@@ -83,12 +83,12 @@ pub(crate) enum Rule {
     ActiveProviderFeature,
     /// manifest 声明的 providerCrate 与 xtask provider matrix 锁定的实现 crate 不符。
     ///
-    /// INVARIANT: ASSEMBLY-PROVIDER-CRATE-01 { level = "Medium", exec = "verify", source = "code" }— provider↔providerCrate 绑定由 xtask provider
+    /// INVARIANT: ASSEMBLY-PROVIDER-CRATE-01 { level = "Medium", exec = "check", source = "code" }— provider↔providerCrate 绑定由 xtask provider
     /// matrix 单源锁定；manifest 声明错误 crate 名须被机器拒（Medium，red test 反恒真）。
     ProviderCrateMismatch,
     /// active distributed provider 必须有真实 phase owner 的 consumer 接线证据。
     ///
-    /// INVARIANT: ASSEMBLY-DISTRIBUTED-CONSUMER-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::active_distributed_provider_reordered_comment_or_test_bait_is_rejected", anti_vacuity = "tests::active_distributed_lock_cas_providers_pass" }— only the ordered `InfraBuilt::wire_domains` producer→consumer dataflow in `src/phase/domains.rs` is production evidence.
+    /// INVARIANT: ASSEMBLY-DISTRIBUTED-CONSUMER-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::active_distributed_provider_reordered_comment_or_test_bait_is_rejected", anti_vacuity = "tests::active_distributed_lock_cas_providers_pass" }— only the ordered `InfraBuilt::wire_domains` producer→consumer dataflow in `src/phase/domains.rs` is production evidence.
     ActiveDistributedProviderConsumer,
     /// production security closeout 必须声明 active critical provider。
     ProductionSecurityCriticalProvider,
@@ -98,7 +98,7 @@ pub(crate) enum Rule {
     ProductionSecuritySpiffeCloseout,
     /// production token profiles must each be built and wired on the `run()`-reachable path.
     ///
-    /// INVARIANT: TOKEN-PROFILE-ASSEMBLY-01 { level = "Medium", exec = "verify", source = "code" } —
+    /// INVARIANT: TOKEN-PROFILE-ASSEMBLY-01 { level = "Medium", exec = "check", source = "code" } —
     /// RSS/Federated/Service providers, closed listener bindings, and profile-specific JWKS
     /// resources/probes are structural assembly facts. AST reachability plus mutation fixtures
     /// reject missing and bait-only evidence.
@@ -113,7 +113,7 @@ pub(crate) enum Rule {
     PdpReplayStoreCapability,
     /// domain/topology required capability 必须有 active persistent provider 或 exact Cargo dependency 事实。
     ///
-    /// INVARIANT: ASSEMBLY-REQUIRED-CAPABILITY-01 { level = "Medium", exec = "verify", source = "code" } —
+    /// INVARIANT: ASSEMBLY-REQUIRED-CAPABILITY-01 { level = "Medium", exec = "check", source = "code" } —
     /// domain→capability 静态表由 xtask 单源锁定；assembly 声明 domain/topology 后，缺失能力、draft
     /// provider、ephemeral critical provider 必须被机器拒。anti-vacuity red/green tests 以
     /// `assembly_capabilities_*` 前缀覆盖。
@@ -843,7 +843,7 @@ fn validate_target_domain_closure(
     assembly: &DiscoveredAssembly,
     metadata: &CargoMetadata,
 ) -> Result<Vec<Finding>> {
-    // INVARIANT: ASSEMBLY-DOMAIN-CLOSURE-01 { level = "Medium", exec = "verify", source = "code" } —
+    // INVARIANT: ASSEMBLY-DOMAIN-CLOSURE-01 { level = "Medium", exec = "check", source = "code" } —
     // 每个 assembly.toml 的 active domain 必须是目标 assembly package 当前 target 图中同名、未 rename、
     // 指向同名 workspace domain crate 的直接 normal dependency；inactive domain 不得进入该目标 package 的
     // normal dependency closure。真实 Cargo fixture 覆盖 alias、target cfg、dev/build、optional、
@@ -2006,7 +2006,7 @@ fn validate_assembly(a: &DiscoveredAssembly) -> Vec<Finding> {
 }
 
 fn validate_production_provider_posture(a: &DiscoveredAssembly, findings: &mut Vec<Finding>) {
-    // INVARIANT: ASSEMBLY-PRODUCTION-PROVIDER-POSTURE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::production_provider_posture_rejects_non_active_and_non_governor_ephemeral", anti_vacuity = "tests::production_provider_posture_allows_exact_governor_exception" } — production is a hard ratchet: every declaration is executable and durable except the exact process-local edge limiter.
+    // INVARIANT: ASSEMBLY-PRODUCTION-PROVIDER-POSTURE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::production_provider_posture_rejects_non_active_and_non_governor_ephemeral", anti_vacuity = "tests::production_provider_posture_allows_exact_governor_exception" } — production is a hard ratchet: every declaration is executable and durable except the exact process-local edge limiter.
     let full_runtime = is_runtime_assembly(a);
     if full_runtime && a.manifest.profile != AssemblyProfile::Production {
         findings.push(finding(
@@ -2093,7 +2093,7 @@ fn validate_pdp_replay_store_capability(a: &DiscoveredAssembly, findings: &mut V
 }
 
 fn validate_manifest_intent(a: &DiscoveredAssembly, findings: &mut Vec<Finding>) {
-    // INVARIANT: ASSEMBLY-MANIFEST-INTENT-01 { level = "Medium", exec = "verify", source = "code" } —
+    // INVARIANT: ASSEMBLY-MANIFEST-INTENT-01 { level = "Medium", exec = "check", source = "code" } —
     // assembly manifest intent 字段是静态声明源，必须非空、闭值、去重，并绑定到 assembly 目录名；
     // anti-vacuity red/green tests 覆盖 name/domains/topology/listeners。
     let dir_name = a
@@ -2379,7 +2379,7 @@ fn required_capability_domain_specs() -> &'static [DomainCapabilitySpec] {
 }
 
 fn validate_required_capabilities(a: &DiscoveredAssembly, findings: &mut Vec<Finding>) {
-    // INVARIANT: ASSEMBLY-REQUIRED-CAPABILITY-01 { level = "Medium", exec = "verify", source = "code" } —
+    // INVARIANT: ASSEMBLY-REQUIRED-CAPABILITY-01 { level = "Medium", exec = "check", source = "code" } —
     // assembly.toml 的 domains/topology 声明必须闭合到最小 provider/Cargo capability 事实。此 guard
     // 不改变 runtime 接线，不新增兼容路径；缺失、draft、ephemeral critical 均 fail-closed。
     for domain in &a.manifest.domains {
@@ -4234,7 +4234,7 @@ struct CriticalProviderSpec {
 }
 
 fn validate_production_security_closeout(a: &DiscoveredAssembly, findings: &mut Vec<Finding>) {
-    // INVARIANT: SECURITY-PRODUCTION-CLOSEOUT-01 { level = "Medium", exec = "verify", source = "code" } —
+    // INVARIANT: SECURITY-PRODUCTION-CLOSEOUT-01 { level = "Medium", exec = "check", source = "code" } —
     // Production security providers follow capabilities actually consumed by the manifest. An
     // Identity domain needs signing; authenticated listeners need OIDC; Settings and DLX key
     // consumers need Vault KeyProvider. Subset assemblies must not add dummy providers merely to
@@ -4327,7 +4327,7 @@ fn validate_token_profile_trust_chain(
     evidence: &SecurityCloseoutEvidence,
     findings: &mut Vec<Finding>,
 ) {
-    // INVARIANT: TOKEN-PROFILE-ASSEMBLY-01 { level = "Medium", exec = "verify", source = "code" } —
+    // INVARIANT: TOKEN-PROFILE-ASSEMBLY-01 { level = "Medium", exec = "check", source = "code" } —
     // typed construction alone does not prove that all three exclusive profiles are reachable from
     // the production entrypoint. This gate consumes AST facts only from the free `run()` call graph;
     // comments, strings, dead helpers, and cfg(test) modules cannot satisfy it.
@@ -6642,7 +6642,7 @@ outputs = []
         );
     }
 
-    /// INVARIANT: ASSEMBLY-REQUIRED-CAPABILITY-01 { level = "Medium", exec = "verify", source = "code" } —
+    /// INVARIANT: ASSEMBLY-REQUIRED-CAPABILITY-01 { level = "Medium", exec = "check", source = "code" } —
     /// required capability 表必须显式覆盖每个 workspace domain；新增 domain 不得静默漏管。
     #[test]
     fn assembly_capabilities_table_covers_all_domain_crates() {
@@ -8141,7 +8141,7 @@ audit = { path = "../../crates/audit" }
             .collect()
     }
 
-    /// INVARIANT: IDENTITYAUDIT-EXECUTABLE-BOUNDARY-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::identityaudit_executable_boundary_rejects_lib_only_shape", anti_vacuity = "tests::identityaudit_real_executable_artifact_closure_is_complete" } -- #1797 replaces the demo composition proof with one exact executable package and its closed production transport/artifact closure.
+    /// INVARIANT: IDENTITYAUDIT-EXECUTABLE-BOUNDARY-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::identityaudit_executable_boundary_rejects_lib_only_shape", anti_vacuity = "tests::identityaudit_real_executable_artifact_closure_is_complete" } -- #1797 replaces the demo composition proof with one exact executable package and its closed production transport/artifact closure.
     #[test]
     fn identityaudit_executable_boundary_accepts_exact_targets_and_production_closure() {
         let findings = validate_identityaudit_boundary(
@@ -8457,7 +8457,7 @@ ENTRYPOINT ["/usr/local/bin/server"]
         }
     }
 
-    /// INVARIANT: SETTINGSONLY-EXECUTABLE-BOUNDARY-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::settingsonly_executable_boundary_rejects_each_incomplete_artifact_fact", anti_vacuity = "tests::settingsonly_real_executable_boundary_is_complete" } -- the #1796 target is one lib+bin+artifact-acceptance package whose default normal closure, committed config schema, exact non-ignored lifecycle fixture, and closed named distroless image target are checked without introducing the cross-assembly artifact matrix owned by #1798.
+    /// INVARIANT: SETTINGSONLY-EXECUTABLE-BOUNDARY-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::settingsonly_executable_boundary_rejects_each_incomplete_artifact_fact", anti_vacuity = "tests::settingsonly_real_executable_boundary_is_complete" } -- the #1796 target is one lib+bin+artifact-acceptance package whose default normal closure, committed config schema, exact non-ignored lifecycle fixture, and closed named distroless image target are checked without introducing the cross-assembly artifact matrix owned by #1798.
     #[test]
     fn settingsonly_executable_boundary_rejects_each_incomplete_artifact_fact() {
         let targets = [
@@ -10781,7 +10781,7 @@ redis = { path = "../../adapters/redis", features = ["backend"] }
         Ok(())
     }
 
-    /// INVARIANT: ASSEMBLY-PROVIDER-CRATE-01 { level = "Medium", exec = "verify", source = "code" }— provider↔providerCrate 绑定 red test（anti-vacuity）。
+    /// INVARIANT: ASSEMBLY-PROVIDER-CRATE-01 { level = "Medium", exec = "check", source = "code" }— provider↔providerCrate 绑定 red test（anti-vacuity）。
     /// `ratelimit::GovernorLimiter` 与 `providerCrate = "softca"` 不匹配，active 声明必须被拒。
     #[test]
     fn active_provider_with_wrong_provider_crate_is_rejected() -> anyhow::Result<()> {
@@ -10840,7 +10840,7 @@ softca = { path = "../../adapters/softca" }
         Ok(())
     }
 
-    /// INVARIANT: ASSEMBLY-PROVIDER-CRATE-01 { level = "Medium", exec = "verify", source = "code" }— provider↔providerCrate 绑定正例（non-vacuous green path）。
+    /// INVARIANT: ASSEMBLY-PROVIDER-CRATE-01 { level = "Medium", exec = "check", source = "code" }— provider↔providerCrate 绑定正例（non-vacuous green path）。
     /// `ratelimit::GovernorLimiter` + `providerCrate = "ratelimit"` 正确绑定，不应产生 ProviderCrateMismatch。
     #[test]
     fn active_provider_with_correct_provider_crate_is_allowed() -> anyhow::Result<()> {

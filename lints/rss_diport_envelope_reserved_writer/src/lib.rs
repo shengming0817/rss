@@ -3,7 +3,7 @@
 //! `diport::EnvelopeMetadata::insert_wire_pair`（reserved-capable wire 透传写面）的**调用站点**
 //! 到 adapter / 组合根（adapters/bins/assemblies）+ diport 自身。
 //!
-//! INVARIANT: DIPORT-ENVELOPE-WIRE-WRITER-01 { level = "Medium", exec = "verify", source = "dylint" }
+//! INVARIANT: DIPORT-ENVELOPE-WIRE-WRITER-01 { level = "Medium", exec = "check", source = "dylint" }
 //!
 //! `EnvelopeMetadata` 双写面（见 `crates/diport/src/envelope.rs` 模块 rustdoc）：
 //! - **业务面**（`try_insert`）：reserved key fail-closed 拒——类型层不可表达（Hard）；任意 crate 可调。
@@ -64,7 +64,7 @@ dylint_linting::declare_late_lint! {
     /// subscriber（amqp/mqtt/memory）从 broker header rehydrate 时用（含 reserved key，来源已 sealed）。
     /// 业务 / 域 crate 直接调用可写入 reserved key（`trace`/`correlation`/`principal`/`occurred_at`），
     /// 绕过 `try_insert` 的 Hard 拒 reserved 保护，产生数据污染。
-    /// INVARIANT: DIPORT-ENVELOPE-WIRE-WRITER-01 { level = "Medium", exec = "verify", source = "dylint" }。
+    /// INVARIANT: DIPORT-ENVELOPE-WIRE-WRITER-01 { level = "Medium", exec = "check", source = "dylint" }。
     /// 业务请用 `try_insert`（拒 reserved key，类型层 Hard 边界）。
     ///
     /// ### Known problems

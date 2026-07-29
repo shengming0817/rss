@@ -1,6 +1,6 @@
 //! Canonical local-CI executable entry guard.
 //!
-//! INVARIANT: CI-LOCAL-ENTRY-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::makefile_canonical_targets_are_closed", anti_vacuity = "tests::workspace_makefile_contract_is_closed" } -- the Make targets must remain unique exact recipes backed by the bounded local-CI supervisor. Human-facing Markdown is intentionally not an enforcement carrier.
+//! INVARIANT: CI-LOCAL-ENTRY-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::makefile_canonical_targets_are_closed", anti_vacuity = "tests::workspace_makefile_contract_is_closed" } -- the Make targets must remain unique exact recipes backed by the bounded local-CI supervisor. Human-facing Markdown is intentionally not an enforcement carrier.
 
 use std::fs;
 

@@ -16,7 +16,7 @@
 //!
 //! 正向证据（compile pass）`funnel_pass`：funnel 正确用法编译通过（anti-vacuity——证明上述 fail 非「整个 API 不可用」）。
 //!
-//! INVARIANT: ROUTE-AUTH-FUNNEL-01 · ROUTE-AUTH-FUNNEL-02 · ROUTE-LISTENER-TYPED-01 · ROUTE-ENDPOINT-REQUIRED-01 · ROUTE-MOUNT-NOBYPASS-01 { level = "Hard", exec = "verify", source = "trybuild" }
+//! INVARIANT: ROUTE-AUTH-FUNNEL-01 · ROUTE-AUTH-FUNNEL-02 · ROUTE-LISTENER-TYPED-01 · ROUTE-ENDPOINT-REQUIRED-01 · ROUTE-MOUNT-NOBYPASS-01 { level = "Hard", exec = "test", source = "trybuild" }
 #[test]
 fn ui() {
     let t = trybuild::TestCases::new();

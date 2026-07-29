@@ -1,34 +1,34 @@
 //! runtime event transport source guard.
 //!
-//! INVARIANT: EVENT-TRANSPORT-PG-INBOX-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::scan_content_rejects_missing_pg_bundle_fragment", anti_vacuity = "tests::scan_content_accepts_pg_inbox_bundle" }——
+//! INVARIANT: EVENT-TRANSPORT-PG-INBOX-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::scan_content_rejects_missing_pg_bundle_fragment", anti_vacuity = "tests::scan_content_accepts_pg_inbox_bundle" }——
 //! `assemblies/runtime/src/event_transport.rs` 的 consumer idempotency must come from PG inbox, not Redis,
 //! and production consumer workers must go through the generated-topology bridge.
-//! INVARIANT: EVENT-CONSUMER-EXTERNAL-EFFECT-POLICY-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::scan_content_rejects_consumer_tx_plan_without_external_effect_policy", anti_vacuity = "tests::workspace_eventing_composition_shape_is_closed" }——
+//! INVARIANT: EVENT-CONSUMER-EXTERNAL-EFFECT-POLICY-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::scan_content_rejects_consumer_tx_plan_without_external_effect_policy", anti_vacuity = "tests::workspace_eventing_composition_shape_is_closed" }——
 //! ConsumerTx plan 必须把 generated external-effect policy 纳入闭合 matcher；audit 仅接受
 //! transactional-only，settings refresh 仅接受 reconcile，任何漂移都在启动前 fail-closed。
-//! INVARIANT: EVENT-CONSUMER-RAW-EFFECT-CAPABILITY-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::consumer_policy_guard_rejects_raw_effect_bypass_matrix", anti_vacuity = "tests::consumer_policy_guard_accepts_closed_capability_without_raw_effect" }——
+//! INVARIANT: EVENT-CONSUMER-RAW-EFFECT-CAPABILITY-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::consumer_policy_guard_rejects_raw_effect_bypass_matrix", anti_vacuity = "tests::consumer_policy_guard_accepts_closed_capability_without_raw_effect" }——
 //! policy-bound ConsumerTx handler 的 reachable production call graph 禁止绕过 capability 直接调用
 //! publisher/HTTP/email/MDM/cloud/object-store；direct、function-item/import alias、UFCS、cross-file
 //! helper、macro 与 chained request 均有 synthetic red，歧义 helper resolution fail closed。本 AST guard
 //! 不声称具备编译器 HIR/宏展开完备性，assembly-private handler/runner 与 exact owner activation
 //! 仍是主防线。
-//! INVARIANT: EVENT-PRODUCER-SPEC-PAIR-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::producer_ast_rejects_swapped_specs_without_partition_key", anti_vacuity = "tests::producer_ast_accepts_generated_spec_alias_and_counts_typed_partition_key" }——
+//! INVARIANT: EVENT-PRODUCER-SPEC-PAIR-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::producer_ast_rejects_swapped_specs_without_partition_key", anti_vacuity = "tests::producer_ast_accepts_generated_spec_alias_and_counts_typed_partition_key" }——
 //! every authoring function must use exactly one identical generated SPEC for its EventEntry and
 //! envelope before any fact is admitted to the global topology set.
-//! INVARIANT: OUTBOX-RELAY-CLAIM-CUTOVER-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::outbox_claim_cutover_synthetic_red_rejects_legacy_production_paths", anti_vacuity = "tests::outbox_claim_cutover_accepts_canonical_and_non_production_bait" }——
+//! INVARIANT: OUTBOX-RELAY-CLAIM-CUTOVER-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::outbox_claim_cutover_synthetic_red_rejects_legacy_production_paths", anti_vacuity = "tests::outbox_claim_cutover_accepts_canonical_and_non_production_bait" }——
 //! production outbox relay providers, runtime wiring, eventexec dispatch, and post-cutover SQL must
 //! remain on the single claimed-entry protocol; cross-crate/source-set completeness is enforced by
 //! AST/SQL synthetic-red plus a canonical workspace green fixture.
-//! INVARIANT: OUTBOX-RELAY-BUDGET-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::relay_budget_guard_synthetic_red_breaks_each_carrier", anti_vacuity = "tests::relay_budget_guard_accepts_canonical_workspace" }——
+//! INVARIANT: OUTBOX-RELAY-BUDGET-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::relay_budget_guard_synthetic_red_breaks_each_carrier", anti_vacuity = "tests::relay_budget_guard_accepts_canonical_workspace" }——
 //! runtime typed config、AMQP 单 deadline、Postgres typed watchdog/settlement 与 0064 SQL 签名必须保持
 //! 同一预算能力链；carrier 生产 Rust 禁止回流固定 40/50/60 秒 deadline。
-//! INVARIANT: AMQP-PUBLISH-FAILURE-FUNNEL-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::relay_budget_guard_rejects_amqp_free_helper_and_indirect_return", anti_vacuity = "tests::relay_budget_guard_accepts_canonical_workspace" }——
+//! INVARIANT: AMQP-PUBLISH-FAILURE-FUNNEL-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::relay_budget_guard_rejects_amqp_free_helper_and_indirect_return", anti_vacuity = "tests::relay_budget_guard_accepts_canonical_workspace" }——
 //! production `AmqpPublisher::publish` 的失败必须只进入 adapter-private `handle_publish_failure`；generation
 //! retirement 与三态 `PublisherError` 构造不得回流 publish 本体或被 cfg(test)/dead helper bait 满足。
-//! INVARIANT: AMQP-RSS-RECOVERY-OWNER-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::relay_budget_guard_rejects_amqp_connection_auto_recovery_mutations", anti_vacuity = "tests::relay_budget_guard_accepts_amqp_connection_recovery_owner" }——
+//! INVARIANT: AMQP-RSS-RECOVERY-OWNER-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::relay_budget_guard_rejects_amqp_connection_auto_recovery_mutations", anti_vacuity = "tests::relay_budget_guard_accepts_amqp_connection_recovery_owner" }——
 //! `conn.rs` 只能由 `connect_with_context` 使用 `ConnectionProperties::default()` 建立 Lapin connection；
 //! 禁止 `enable_auto_recover` 或第二条 client-owned recovery path，publisher replacement 只归 RSS owner。
-//! INVARIANT: PG-OUTBOX-SETTLEMENT-FUNNEL-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::settlement_funnel_guard_synthetic_red_rejects_each_raw_function_and_query_path", anti_vacuity = "tests::settlement_funnel_guard_accepts_canonical_workspace" }——
+//! INVARIANT: PG-OUTBOX-SETTLEMENT-FUNNEL-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::settlement_funnel_guard_synthetic_red_rejects_each_raw_function_and_query_path", anti_vacuity = "tests::settlement_funnel_guard_accepts_canonical_workspace" }——
 //! production Rust 只能在私有 `outbox::settlement` 模块执行三个 raw settlement SQL
 //! function；守卫以 Rust AST 中的 executable SQL call argument 识别调用，并要求私有模块持有
 //! 三个 canonical execution witness，避免 comment/const/string bait 形成空门。

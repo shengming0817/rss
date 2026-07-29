@@ -1,5 +1,5 @@
-//! INVARIANT: LOCAL-ONLY-RUNTIME-EFFECTS-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "every_forbidden_effect_has_a_synthetic_red", anti_vacuity = "clean_operation_preserves_output_with_non_zero_baseline" }.
-//! INVARIANT: LOCAL-ONLY-EXECUTION-MARKER-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "forbidden_effect_does_not_write_execution_marker", anti_vacuity = "clean_receipt_writes_strict_execution_marker" }.
+//! INVARIANT: LOCAL-ONLY-RUNTIME-EFFECTS-01 { level = "Medium", exec = "test", source = "code", synthetic_red = "every_forbidden_effect_has_a_synthetic_red", anti_vacuity = "clean_operation_preserves_output_with_non_zero_baseline" }.
+//! INVARIANT: LOCAL-ONLY-EXECUTION-MARKER-01 { level = "Medium", exec = "test", source = "code", synthetic_red = "forbidden_effect_does_not_write_execution_marker", anti_vacuity = "clean_receipt_writes_strict_execution_marker" }.
 //! Integration carrier for the LocalOnly runtime side-effect conformance gate.
 
 mod local_only {

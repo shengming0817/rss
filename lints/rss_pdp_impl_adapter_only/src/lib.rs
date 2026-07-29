@@ -2,7 +2,7 @@
 //! `rss_pdp_impl_adapter_only` — RSS 治理 dylint lint：`diport::Pdp` 验签端口**仅 provider adapter 可
 //! impl**；组合根（`bins` / `assemblies`）与域 / 服务 crate 不得内联 `impl diport::Pdp`（信任根锁）。
 //!
-//! INVARIANT: PDP-IMPL-ADAPTER-ONLY-01 { level = "Medium", exec = "verify", source = "dylint" }（T004.6 / #1198 / ADR-006 §5 安全同批门信任根分线）
+//! INVARIANT: PDP-IMPL-ADAPTER-ONLY-01 { level = "Medium", exec = "check", source = "dylint" }（T004.6 / #1198 / ADR-006 §5 安全同批门信任根分线）
 //!
 //! 背景：`Pdp` 是认证决策的**信任原点**（验签 = 信任原点，authn 的 profile-specific verify funnels
 //! 经其铸 `VerifiedClaims`）。
@@ -60,7 +60,7 @@ dylint_linting::declare_late_lint! {
     /// always-allow `impl Pdp`（恒返回伪 `VerifiedClaims`）即可旁路真验签——`deny.toml` stub wrapper 与既有
     /// impl-site allowlist 都拦不住（ADR-006 §5 安全同批门信任根缺口，`tasks.md:14`）。本 lint 把 `Pdp` 收紧到
     /// **只准 provider adapter 实现**，组合根只能经构造器注入真 adapter（如 `oidc::OidcProvider`）。
-    /// INVARIANT: PDP-IMPL-ADAPTER-ONLY-01 { level = "Medium", exec = "verify", source = "dylint" }。
+    /// INVARIANT: PDP-IMPL-ADAPTER-ONLY-01 { level = "Medium", exec = "check", source = "dylint" }。
     ///
     /// ### Known problems
     /// 仅 `cargo dylint --all`（接 `cargo xtask verify`，`-D warnings` fail-closed）拦；`#[cfg(test)]` 子树默认

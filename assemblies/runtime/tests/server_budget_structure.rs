@@ -1,6 +1,6 @@
 //! Cross-crate structure guard for the complete inbound HTTP server budget.
 //!
-//! INVARIANT: SERVER-REQUEST-BUDGET-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "guard_rejects_partial_or_transport_specific_budget", anti_vacuity = "production_boundary_has_one_mandatory_budget_funnel" }.
+//! INVARIANT: SERVER-REQUEST-BUDGET-01 { level = "Medium", exec = "test", source = "code", synthetic_red = "guard_rejects_partial_or_transport_specific_budget", anti_vacuity = "production_boundary_has_one_mandatory_budget_funnel" }.
 
 fn compact(source: &str) -> String {
     source

@@ -6,7 +6,7 @@
 //! `set_config('rss.tenant_id'` 的空白变体与裸 `SET LOCAL rss.tenant_id =/to` 赋值式（不止裸字面量，F4）；
 //! 放行做**路径精确**匹配（相对 src 根的 `cotx/mod.rs`，嵌套同名 `sub/cotx.rs` 不放行，F4）。
 //!
-//! INVARIANT: TENANCY-SETLOCAL-FUNNEL-01 { level = "Medium", exec = "verify", source = "code" }—— `set_config('rss.tenant_id'` 字面量在
+//! INVARIANT: TENANCY-SETLOCAL-FUNNEL-01 { level = "Medium", exec = "check", source = "code" }—— `set_config('rss.tenant_id'` 字面量在
 //!   生产 postgres adapter 源中只能出现在 `cotx/mod.rs`；任何其他生产文件含此串
 //!   → [`Rule::FunnelEscape`] finding（违反单漏斗）；`cotx/mod.rs` 若完全不含该串
 //!   → [`Rule::FunnelAbsent`] finding（守卫真空化——漏斗被移除或重命名）。

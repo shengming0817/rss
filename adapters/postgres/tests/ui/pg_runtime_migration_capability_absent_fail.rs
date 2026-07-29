@@ -1,4 +1,4 @@
-//! INVARIANT: MIGRATION-CAPABILITY-SEPARATION-01 { level = "Hard", exec = "verify", source = "trybuild" }
+//! INVARIANT: MIGRATION-CAPABILITY-SEPARATION-01 { level = "Hard", exec = "test", source = "trybuild" }
 
 use postgres::{PgConfig, PgRuntimeDeps};
 

@@ -1,9 +1,9 @@
 //! `command-symmetry`：manifest policy-exclusive wrapper 与 command provider 集合治理门。
 //!
-//! INVARIANT: COMMAND-SYMMETRY-01 { level = "Medium", exec = "verify", source = "code", facet = "manifest-policy" }——
+//! INVARIANT: COMMAND-SYMMETRY-01 { level = "Medium", exec = "check", source = "code", facet = "manifest-policy" }——
 //! generated command module 必须按 `CommandJournalPolicy` 只生成 `journal_async` 或 `emit_async`，且始终
 //! 生成 `register_handler`、`CONTRACT_ID`、`TOPIC`、sealed `SPEC`。
-//! INVARIANT: COMMAND-IMPL-ALLOWLIST-01 { level = "Medium", exec = "verify", source = "code", facet = "provider-set", synthetic_red = "tests::rename_glob_and_type_alias_cannot_hide_provider_impl", anti_vacuity = "tests::exact_runtime_and_postgres_impls_are_allowed" }——
+//! INVARIANT: COMMAND-IMPL-ALLOWLIST-01 { level = "Medium", exec = "check", source = "code", facet = "provider-set", synthetic_red = "tests::rename_glob_and_type_alias_cannot_hide_provider_impl", anti_vacuity = "tests::exact_runtime_and_postgres_impls_are_allowed" }——
 //! generated seam 只允许由 eventexec typed dispatcher 实现；provider store impl 与调用点使用 AST 集合
 //! allowlist，解析 rename/glob import 与 type alias，避免别名绕过。
 //!
@@ -603,7 +603,7 @@ fn meta_contains_test(meta: &syn::Meta) -> bool {
 
 #[cfg(test)]
 mod tests {
-    //! INVARIANT: COMMAND-SYMMETRY-01 + COMMAND-IMPL-ALLOWLIST-01 { level = "Medium", exec = "verify", source = "code", facet = "synthetic-proof" }—— synthetic red + anti-vacuity。
+    //! INVARIANT: COMMAND-SYMMETRY-01 + COMMAND-IMPL-ALLOWLIST-01 { level = "Medium", exec = "check", source = "code", facet = "synthetic-proof" }—— synthetic red + anti-vacuity。
 
     use super::*;
 

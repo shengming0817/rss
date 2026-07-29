@@ -1,6 +1,6 @@
 //! `runtime-deps guard` -- `SharedRuntimeDeps` infra-only field guard.
 //!
-//! INVARIANT: WIRING-DEPS-INFRA-ONLY-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::config_file_is_required_and_malformed_toml_fails_closed", anti_vacuity = "tests::real_shared_runtime_deps_currently_passes" }.
+//! INVARIANT: WIRING-DEPS-INFRA-ONLY-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::config_file_is_required_and_malformed_toml_fails_closed", anti_vacuity = "tests::real_shared_runtime_deps_currently_passes" }.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;

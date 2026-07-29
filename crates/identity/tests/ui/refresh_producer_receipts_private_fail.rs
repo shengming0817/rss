@@ -1,4 +1,4 @@
-//! INVARIANT: REFRESH-PRODUCER-RECEIPT-01 { level = "Hard", exec = "verify", source = "trybuild" }
+//! INVARIANT: REFRESH-PRODUCER-RECEIPT-01 { level = "Hard", exec = "test", source = "trybuild" }
 
 use identity::ports::{
     PersistedRefreshRotationReceipt, RefreshCommitAcknowledgement, RefreshProducerReceipt,

@@ -105,6 +105,7 @@ mod diagnostic;
 mod diffcov;
 mod dlx_lifecycle_funnel;
 mod event_transport_guard;
+mod execution_profiles;
 mod generated_file;
 mod graph;
 mod inbox_cutover_guard;

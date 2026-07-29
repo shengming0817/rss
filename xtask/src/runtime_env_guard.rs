@@ -1,4 +1,4 @@
-//! INVARIANT: RUNTIME-ENV-FUNNEL-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::synthetic_red_rejects_ambient_env_bypasses", anti_vacuity = "tests::canonical_inventory_is_the_only_accepted_exception_set" } -- production runtime configuration is captured once through the closed process factory; four named operator-grant readers require an operator-only typed capability and exact caller.
+//! INVARIANT: RUNTIME-ENV-FUNNEL-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::synthetic_red_rejects_ambient_env_bypasses", anti_vacuity = "tests::canonical_inventory_is_the_only_accepted_exception_set" } -- production runtime configuration is captured once through the closed process factory; four named operator-grant readers require an operator-only typed capability and exact caller.
 //!
 //! This fast, no-compile carrier owns the closed catalog, exact capture/grant inventory, and
 //! actionable source diagnostics. Macro expansion and resolved call identity are deliberately not

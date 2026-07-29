@@ -1,6 +1,6 @@
 //! inbox receipt runtime cutover source guard.
 //!
-//! INVARIANT: INBOX-RECEIPTS-CUTOVER-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::scan_rejects_legacy_table_and_const_tokens", anti_vacuity = "tests::scan_accepts_current_receipt_name" }——
+//! INVARIANT: INBOX-RECEIPTS-CUTOVER-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::scan_rejects_legacy_table_and_const_tokens", anti_vacuity = "tests::scan_accepts_current_receipt_name" }——
 //! production sources must use the tenant-scoped receipt table after the cutover; legacy receipt storage names may
 //! remain only in historical migrations and the retirement migration.
 

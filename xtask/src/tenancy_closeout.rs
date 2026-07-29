@@ -1,9 +1,9 @@
 //! `tenancy-closeout` -- tenancy/AuthZ/projection closeout reverse self-check.
 //!
-//! INVARIANT: TENANCY-CLOSEOUT-REVERSE-01 { level = "Medium", exec = "verify", source = "code" } -- final
+//! INVARIANT: TENANCY-CLOSEOUT-REVERSE-01 { level = "Medium", exec = "check", source = "code" } -- final
 //! tenancy governance facts must stay machine-visible in verify/ci membership, dylint registration,
 //! projection wiring, and code/config carriers.
-//! INVARIANT: TENANCY-SERVICE-IDENTITY-SCOPE-01 { level = "Medium", exec = "verify", source = "code" } -- service-token
+//! INVARIANT: TENANCY-SERVICE-IDENTITY-SCOPE-01 { level = "Medium", exec = "check", source = "code" } -- service-token
 //! MAC-bound canonical tenant headers and mTLS/SPIFFE tenantless service identity must remain locked by reverse
 //! closeout anchors.
 
@@ -223,11 +223,11 @@ fn projection_field_count() -> usize {
 }
 
 fn check_verify_ci_membership() -> Vec<Finding> {
-    let full_labels: Vec<_> = crate::verify::plan_for(crate::verify::PlanTarget::Verify)
+    let full_labels: Vec<_> = crate::verify::plan_for(crate::verify::PlanProjection::Verify)
         .iter()
         .map(crate::verify::Step::label)
         .collect();
-    let ci_labels: Vec<_> = crate::verify::plan_for(crate::verify::PlanTarget::CompatibilityCi)
+    let ci_labels: Vec<_> = crate::verify::plan_for(crate::verify::PlanProjection::CompatibilityCi)
         .iter()
         .map(crate::verify::Step::label)
         .collect();

@@ -1,6 +1,6 @@
 //! TxCapability 外部边界编译锁。
 //!
-//! INVARIANT: PG-TX-CAPABILITY-SEAL-01 · PG-OUTBOX-SETTLEMENT-CAPABILITY-01 { level = "Hard", exec = "verify", source = "trybuild" }：
+//! INVARIANT: PG-TX-CAPABILITY-SEAL-01 · PG-OUTBOX-SETTLEMENT-CAPABILITY-01 { level = "Hard", exec = "test", source = "trybuild" }：
 //! 外部 crate 不能构造 / mint postgres 事务能力令牌；只能由 postgres adapter 在真实
 //! `sqlx::Transaction` 内部铸造。LocalTxAttempt mint 密封另由 `cotx::settlement` 的
 //! PG-LOCALTX-SETTLEMENT-01（`pub(super)` + 下列 trybuild）守住；outbox claim 的 monotonic

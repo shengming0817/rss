@@ -16,7 +16,7 @@
 //!   identity / audit 的唯一构造实现分别位于 typed composition crate，settings 同样经独立 composition
 //!   入口。入口只接收 infra parameter object 且返回单域 binding，无参数可塞别域的
 //!   `DomainModuleResult`，故 A 域产物喂进 B 域 wiring 编译期不可表达（type-system 一档载体）。
-//! - **INVARIANT: WIRING-DEPS-INFRA-ONLY-01 { level = "Medium", exec = "verify", source = "code" }（Medium，xtask 字段扫描）**：
+//! - **INVARIANT: WIRING-DEPS-INFRA-ONLY-01 { level = "Medium", exec = "check", source = "code" }（Medium，xtask 字段扫描）**：
 //!   `SharedRuntimeDeps` 字段类型只允许 provider bundle / infra value object 允许列表，以及精确例外
 //!   `Arc<secure::DigestPasswordBlocklist>`、`Arc<dyn distributed::DomainTransport>`、
 //!   `Arc<oidc::OidcProvider>`、`postgres::PgRevocationStore`、`Arc<vault::VaultSigner>`；

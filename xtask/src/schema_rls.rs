@@ -9,13 +9,13 @@
 //! 仅有形同 allow-all 的 policy 亦报错（`PolicyWeak`）。把 `docs/rules/tenancy.md` §RLS
 //! 「RLS policy shape 由 schema guard 检查」从规划落成机器门。
 //!
-//! INVARIANT: TENANCY-RLS-FORCE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::red_all_bare_three_findings", anti_vacuity = "tests::green_all_rls_present" }—— tenant 表（含 tenant_id 列）必须同时具备：
+//! INVARIANT: TENANCY-RLS-FORCE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::red_all_bare_three_findings", anti_vacuity = "tests::green_all_rls_present" }—— tenant 表（含 tenant_id 列）必须同时具备：
 //!   ① `ALTER TABLE <t> ENABLE ROW LEVEL SECURITY`
 //!   ② `ALTER TABLE <t> FORCE ROW LEVEL SECURITY`
 //!   ③ 至少一条 `CREATE POLICY ... ON <t>`，且每条 permissive policy 的 USING/WITH CHECK
 //!      均精确匹配 canonical NULLIF 等值谓词
 //!
-//! INVARIANT: TENANCY-PG-READER-ACL-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::red_tenant_relation_without_reader_select_grant", anti_vacuity = "tests::green_tenant_relation_exact_reader_select_grant" }——
+//! INVARIANT: TENANCY-PG-READER-ACL-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::red_tenant_relation_without_reader_select_grant", anti_vacuity = "tests::green_tenant_relation_exact_reader_select_grant" }——
 //! migration `0067` may dynamically backfill SELECT on the complete pre-existing public tenant
 //! relation set. The backfill evidence must bind the catalog query and an executed GRANT format
 //! call inside the same dollar-quoted DO block and FOR loop. Every later migration that creates a

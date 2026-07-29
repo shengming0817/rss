@@ -4,18 +4,18 @@
 //! producer and fact records have distinct closed evidence types. A producer can only be authored
 //! with contract/generated/execution/fault；fact effect evidence 则由 active subscription 动态发现
 //! registration/plan/handler/executor 四阶段真实 carrier，generated SPEC 不得冒充执行证据。
-//! INVARIANT: L2-ASSURANCE-CONSUMER-POLICY-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::policy_carrier_rejects_dead_helper_bait + tests::policy_carrier_rejects_nested_dead_helper_bait + tests::policy_carrier_rejects_if_false_bait + tests::policy_executor_rejects_symbol_without_worker_edge", anti_vacuity = "tests::workspace_fact_effect_evidence_closes_all_policy_stages" }——
+//! INVARIANT: L2-ASSURANCE-CONSUMER-POLICY-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::policy_carrier_rejects_dead_helper_bait + tests::policy_carrier_rejects_nested_dead_helper_bait + tests::policy_carrier_rejects_if_false_bait + tests::policy_executor_rejects_symbol_without_worker_edge", anti_vacuity = "tests::workspace_fact_effect_evidence_closes_all_policy_stages" }——
 //! active ConsumerTx handler 集合从 generated subscriptions 计算；每条 subscription identity
 //! 必须映射到 registration/plan/handler/executor 的精确 Rust symbol 与闭合调用链，任意死 helper 不得冒充。
-//! INVARIANT: L2-ASSURANCE-WIRE-01 { level = "Hard", exec = "verify", source = "codegen", golden = "generated/l2-assurance.json", synthetic_red = "tests::check_rejects_missing_tampered_and_crlf_without_writing", anti_vacuity = "tests::workspace_inventory_is_exact_and_deterministic" }——
+//! INVARIANT: L2-ASSURANCE-WIRE-01 { level = "Hard", exec = "check", source = "codegen", golden = "generated/l2-assurance.json", synthetic_red = "tests::check_rejects_missing_tampered_and_crlf_without_writing", anti_vacuity = "tests::workspace_inventory_is_exact_and_deterministic" }——
 //! the typed JSON v3 projection and committed golden are byte-for-byte deterministic and reject
 //! missing, tampered, or non-LF output without writing in check mode.
-//! INVARIANT: L2-ASSURANCE-CLOSURE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::exact_set_rejects_equal_size_wrong_identity", anti_vacuity = "tests::workspace_inventory_is_exact_and_deterministic" }——
+//! INVARIANT: L2-ASSURANCE-CLOSURE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::exact_set_rejects_equal_size_wrong_identity", anti_vacuity = "tests::workspace_inventory_is_exact_and_deterministic" }——
 //! active OutboxFact manifests, generated registries, producer execution terminals and named fault
 //! cases are joined bidirectionally; each producer terminal fact set equals manifest `emits`, while
 //! producer/fact non-empty anti-vacuity is enforced by the same typed inventory used to render the
 //! committed assurance artifact; rustdoc does not duplicate live catalog counts.
-//! INVARIANT: L2-ASSURANCE-PATH-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::carrier_paths_reject_escapes_backslashes_and_symlinks", anti_vacuity = "tests::workspace_inventory_is_exact_and_deterministic" }——
+//! INVARIANT: L2-ASSURANCE-PATH-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::carrier_paths_reject_escapes_backslashes_and_symlinks", anti_vacuity = "tests::workspace_inventory_is_exact_and_deterministic" }——
 //! every carrier and the fixed output are real repository-local paths without symlink traversal.
 
 use std::collections::{BTreeMap, BTreeSet};

@@ -1,7 +1,14 @@
 # #1731 Nextest partition 与测试证据
 
-CI 的 nextest 执行统一经过 `xtask` typed 漏斗。`ci-core`、`integration`、`fault-matrix`
-三个 profile 均为零重试；任何 retry override、TOML 调度 selector 或直接 nextest 子进程都会使治理门失败。
+CI 的 nextest 执行统一经过 `xtask` typed 漏斗。本页的 cargo-nextest `profile` 是 runner 配置：它只拥有
+retry、timeout、JUnit、test-group 和必要的 tool filter，不定义 gate、test 或 journey 的主要执行归属。
+跨工具执行成员的唯一规范模型是 canonical `ExecutionProfile`（`check`、`test`、
+`integration-critical`、`release-check`）；xtask 先从该模型选择 typed execution unit，再映射到合适的
+`NextestProfile` 与 invocation 参数。
+
+`ci-core`、`integration`、`fault-matrix` 三个 cargo-nextest profile 均为零重试；任何 retry override、
+TOML 调度 selector 或直接 nextest 子进程都会使治理门失败。#1890 不改变这些 tool profile、partition 或
+当前 workflow topology，也不实施 #1883 的测试去重、#1884 的关键旅程收敛或 #1887 的固定 Job。
 
 ## CI topology
 
@@ -16,7 +23,8 @@ CI 的 nextest 执行统一经过 `xtask` typed 漏斗。`ci-core`、`integratio
 
 每次 invocation 先删除 profile 的 canonical JUnit 临时文件，再把本次结果保存到
 `target/nextest-evidence/<invocation-id>.xml`，并原子写入同名 JSON sidecar。JSON 只包含闭合 lane、shard、
-profile、outcome、JUnit 相对路径、钉定 nextest 版本、source revision 和闭合 `ReplaySpec`；不记录环境变量、服务 URL、
+profile、outcome、JUnit 相对路径、钉定 nextest 版本、source revision 和闭合 `ReplaySpec`；其中 `profile`
+是 cargo-nextest `NextestProfile`，不是 canonical owner。sidecar 不记录环境变量、服务 URL、
 secret 或绝对路径。其中 `junitPath` 以下载后的 artifact 根为基准，固定解析到
 `nextest/<invocation-id>.xml`。setup/编译失败只写 JSON，不伪造 XML；测试失败先保存证据，再传播原失败。
 

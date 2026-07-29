@@ -128,7 +128,7 @@ pub(crate) fn emit_recovery_connect_result(
 
 #[cfg(test)]
 mod cred_redact_tests {
-    //! INVARIANT: EVENTTRANSPORT-CRED-REDACT-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "cred_redact_tests::n1_ok_and_fail_redact_userinfo", anti_vacuity = "cred_redact_tests::b1_no_userinfo_preserves_endpoint" } ——
+    //! INVARIANT: EVENTTRANSPORT-CRED-REDACT-01 { level = "Medium", exec = "test", source = "code", synthetic_red = "cred_redact_tests::n1_ok_and_fail_redact_userinfo", anti_vacuity = "cred_redact_tests::b1_no_userinfo_preserves_endpoint" } ——
     //! mock tracing subscriber 断言 amqp URI userinfo 不出现在任何 event 字段；有 userinfo 时
     //! `endpoint` 必须含 `<redacted>`（防空绿）。非 integration feature。默认 `cargo test -p amqp --lib`
     //! 进 verify nextest；ArchRules `source_file_gate` 精确绑定 verify（#543 F1 最小修；系统性

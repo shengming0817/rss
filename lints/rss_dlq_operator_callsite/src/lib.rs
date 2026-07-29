@@ -1,7 +1,7 @@
 #![feature(rustc_private)]
 //! `rss_dlq_operator_callsite` — RSS operator capability 签发入口治理 dylint。
 //!
-//! INVARIANT: EVENTBUS-DLQ-OPERATOR-CAP-01 { level = "Medium", exec = "verify", source = "dylint" }
+//! INVARIANT: EVENTBUS-DLQ-OPERATOR-CAP-01 { level = "Medium", exec = "check", source = "dylint" }
 //!
 //! Operator capability 的私有字段让构造只能经 `issue_for_authorized_operator()` funnel（上游 Hard），
 //! 但“谁可以调用该 funnel”是跨 crate callsite 约束，类型系统不能表达；本 lint 复用
@@ -50,7 +50,7 @@ dylint_linting::declare_late_lint! {
     /// ### Why is this bad?
     /// DLQ replay/redrive 会恢复 durable payload 或修改 outbox 状态，必须在 admin/PDP 已授权后才可签发
     /// witness。public zero-arg mint 若无 callsite guard，会退化成调用方约定。
-    /// INVARIANT: EVENTBUS-DLQ-OPERATOR-CAP-01 { level = "Medium", exec = "verify", source = "dylint" }。
+    /// INVARIANT: EVENTBUS-DLQ-OPERATOR-CAP-01 { level = "Medium", exec = "check", source = "dylint" }。
     ///
     /// ### Known problems
     /// 仍是 intraprocedural callsite lint；allowlist crate 内 wrapper 若公开给外部调用，需由边界 API 可见性

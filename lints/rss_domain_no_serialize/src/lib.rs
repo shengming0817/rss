@@ -2,7 +2,7 @@
 //! `rss_domain_no_serialize` — RSS G0 治理 dylint lint：domain 实体禁止 derive serde
 //! `Serialize`/`Deserialize`（serde derive 冻结）。
 //!
-//! INVARIANT: SERDE-DOMAIN-FREEZE-01 { level = "Medium", exec = "verify", source = "dylint" }
+//! INVARIANT: SERDE-DOMAIN-FREEZE-01 { level = "Medium", exec = "check", source = "dylint" }
 //!
 //! 「domain 类型不 derive Serialize——只有 contract/DTO/generated 类型可序列化到 wire」
 //! （rust-standards.md §DDD 分层、ai-robust.md serde derive 冻结）。serde 的 derive 对任何
@@ -32,7 +32,7 @@ dylint_linting::declare_late_lint! {
     /// RSS 约束「domain 类型不 derive Serialize——只有 contract/DTO/generated 类型可序列化到 wire」
     /// （rust-standards.md §DDD 分层、ai-robust.md serde derive 冻结）。直接序列化 entity 会把领域内部
     /// 表示泄漏成 wire 契约。serde 的 derive 对任何 crate 自由可用、类型系统无法封闭，故以 dylint
-    /// AST lint 承载（Medium，最强可用载体）。INVARIANT: SERDE-DOMAIN-FREEZE-01 { level = "Medium", exec = "verify", source = "dylint" }。
+    /// AST lint 承载（Medium，最强可用载体）。INVARIANT: SERDE-DOMAIN-FREEZE-01 { level = "Medium", exec = "check", source = "dylint" }。
     ///
     /// ### Known problems
     /// v1 只盯 `#[derive(..)]` 产生的 impl（`#[automatically_derived]`），放行手写 `impl Serialize`

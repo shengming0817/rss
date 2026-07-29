@@ -1,15 +1,15 @@
 //! 契约 schema → committed `generated/` 派生码（typify → prettyplease → rustfmt）。
 //!
-//! INVARIANT: CODEGEN-DRIFT-01 { level = "Medium", exec = "verify", source = "code" }— committed `generated/src/**` 与 `contracts/` 的派生结果字节一致、
+//! INVARIANT: CODEGEN-DRIFT-01 { level = "Medium", exec = "check", source = "code" }— committed `generated/src/**` 与 `contracts/` 的派生结果字节一致、
 //! 且无孤儿文件（删契约残留）。Medium（CI 门，`cargo xtask codegen --check`）。
-//! INVARIANT: EVENT-TOPOLOGY-GENERATED-01 { level = "Hard", exec = "verify", source = "codegen", facet = "single-registry", golden = "generated/src/event/mod.rs", synthetic_red = "codegen::tests::event_partition_strategy_mismatch_rejected", anti_vacuity = "codegen::tests::event_glue_with_subscription_emitted" }
-//! INVARIANT: COMMAND-JOURNAL-GENERATED-01 { level = "Hard", exec = "verify", source = "codegen", facet = "manifest-policy", golden = "generated/src/command/mod.rs", synthetic_red = "codegen::tests::command_missing_policy_is_rejected", anti_vacuity = "codegen::tests::command_glue_with_wrappers_emitted" }
-//! INVARIANT: ROUTE-EVIDENCE-CODEGEN-01 { level = "Hard", exec = "verify", source = "codegen", facet = "manifest-to-generated-atomic-http-route", golden = "generated/src/http/mod.rs", synthetic_red = "codegen::tests::codegen_rejects_active_http_without_effect_profile", anti_vacuity = "codegen::tests::codegen_emits_http_consistency_level_inside_route_evidence" }
-//! INVARIANT: HTTP-PRODUCER-CODEGEN-01 { level = "Hard", exec = "verify", source = "codegen", facet = "manifest-emits-to-generated-producer-binding", golden = "generated/src/http/mod.rs", synthetic_red = "codegen::tests::producer_codegen_rejects_duplicate_emitted_fact", anti_vacuity = "codegen::tests::codegen_emits_typed_http_producer_binding_and_closed_registry" }
-//! INVARIANT: LOCAL-ONLY-RECEIPT-TARGET-01 { level = "Hard", exec = "verify", source = "codegen", facet = "active-http-local-only-marker-registry", golden = "generated/src/http/mod.rs", synthetic_red = "codegen::tests::local_only_receipt_targets_exclude_non_active_and_non_local_only_http", anti_vacuity = "codegen::tests::codegen_emits_local_only_receipt_target" }
-//! INVARIANT: GENERATED-TUPLE-REDACTION-01 { level = "Hard", exec = "verify", source = "codegen", facet = "constrained-scalar-redaction", golden = "generated/src/http/identity_v1.rs", synthetic_red = "codegen::tests::constrained_newtypes_inherit_exact_redaction_policy", anti_vacuity = "codegen::tests::constrained_newtypes_inherit_exact_redaction_policy" }
-//! INVARIANT: DEFERRED-STRING-LENGTH-VALIDATION-01 { level = "Hard", exec = "verify", source = "codegen", facet = "schema-marked-transport-policy-boundary", golden = "generated/src/http/identity_v1.rs", synthetic_red = "codegen::tests::deferred_string_length_marker_rejects_other_validation_keywords", anti_vacuity = "codegen::tests::schema_marker_defers_transport_length_checks" }
-//! INVARIANT: GENERATED-RUSTDOC-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "codegen::tests::owned_event_and_command_seam_templates_document_public_api", anti_vacuity = "codegen::tests::command_glue_with_wrappers_emitted" }—— owned event/command templates require rustdoc on every public item, variant, accessor and associated item.
+//! INVARIANT: EVENT-TOPOLOGY-GENERATED-01 { level = "Hard", exec = "check", source = "codegen", facet = "single-registry", golden = "generated/src/event/mod.rs", synthetic_red = "codegen::tests::event_partition_strategy_mismatch_rejected", anti_vacuity = "codegen::tests::event_glue_with_subscription_emitted" }
+//! INVARIANT: COMMAND-JOURNAL-GENERATED-01 { level = "Hard", exec = "check", source = "codegen", facet = "manifest-policy", golden = "generated/src/command/mod.rs", synthetic_red = "codegen::tests::command_missing_policy_is_rejected", anti_vacuity = "codegen::tests::command_glue_with_wrappers_emitted" }
+//! INVARIANT: ROUTE-EVIDENCE-CODEGEN-01 { level = "Hard", exec = "check", source = "codegen", facet = "manifest-to-generated-atomic-http-route", golden = "generated/src/http/mod.rs", synthetic_red = "codegen::tests::codegen_rejects_active_http_without_effect_profile", anti_vacuity = "codegen::tests::codegen_emits_http_consistency_level_inside_route_evidence" }
+//! INVARIANT: HTTP-PRODUCER-CODEGEN-01 { level = "Hard", exec = "check", source = "codegen", facet = "manifest-emits-to-generated-producer-binding", golden = "generated/src/http/mod.rs", synthetic_red = "codegen::tests::producer_codegen_rejects_duplicate_emitted_fact", anti_vacuity = "codegen::tests::codegen_emits_typed_http_producer_binding_and_closed_registry" }
+//! INVARIANT: LOCAL-ONLY-RECEIPT-TARGET-01 { level = "Hard", exec = "check", source = "codegen", facet = "active-http-local-only-marker-registry", golden = "generated/src/http/mod.rs", synthetic_red = "codegen::tests::local_only_receipt_targets_exclude_non_active_and_non_local_only_http", anti_vacuity = "codegen::tests::codegen_emits_local_only_receipt_target" }
+//! INVARIANT: GENERATED-TUPLE-REDACTION-01 { level = "Hard", exec = "check", source = "codegen", facet = "constrained-scalar-redaction", golden = "generated/src/http/identity_v1.rs", synthetic_red = "codegen::tests::constrained_newtypes_inherit_exact_redaction_policy", anti_vacuity = "codegen::tests::constrained_newtypes_inherit_exact_redaction_policy" }
+//! INVARIANT: DEFERRED-STRING-LENGTH-VALIDATION-01 { level = "Hard", exec = "check", source = "codegen", facet = "schema-marked-transport-policy-boundary", golden = "generated/src/http/identity_v1.rs", synthetic_red = "codegen::tests::deferred_string_length_marker_rejects_other_validation_keywords", anti_vacuity = "codegen::tests::schema_marker_defers_transport_length_checks" }
+//! INVARIANT: GENERATED-RUSTDOC-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "codegen::tests::owned_event_and_command_seam_templates_document_public_api", anti_vacuity = "codegen::tests::command_glue_with_wrappers_emitted" }—— owned event/command templates require rustdoc on every public item, variant, accessor and associated item.
 //! golden = committed 文件 diff（rust-analyzer `ensure_file_contents` 模式）；
 //! anti-vacuity：注入漂移 / 孤儿文件必失（见 `#[cfg(test)]`）。
 //!
@@ -320,10 +320,11 @@ fn render_module_file(
             );
         }
         let body = render_contract_body(c, "super::super::", contracts)?;
-        let generated_regex_lint = body
-            .contains("::regress::Regex")
-            .then_some("#![allow(clippy::unwrap_used)] // reason: typify emits infallible static regex initialization.\n")
-            .unwrap_or_default();
+        let generated_regex_lint = if body.contains("::regress::Regex") {
+            "#![allow(clippy::unwrap_used)] // reason: typify emits infallible static regex initialization.\n"
+        } else {
+            ""
+        };
         out.push_str(&format!(
             "\n/// 端点 `{slug}` 派生契约（源 `{slug}/contract.toml`）。由 `cargo xtask codegen` 派生；勿手改。\npub mod {ident} {{\n{generated_regex_lint}{body}\n}}\n"
         ));
@@ -2008,7 +2009,7 @@ fn serde_rename(field: &syn::Field) -> Option<String> {
 /// `derivable_impls` 判其等价于 `#[derive(Default)]`。committed generated 勿手改（`codegen --check` 守）+
 /// 章程禁 module/crate-level allow ⇒ codegen 注入 **item-level** `#[allow(clippy::derivable_impls)]` 到每个
 /// `impl Default` 块（与 [`strip_sensitive_debug`] 同款 syn 后处理，单源在 codegen，输出由 golden 锁）。
-/// `INVARIANT: CODEGEN-DERIVABLE-DEFAULT-ALLOW-01` { level = "Medium", exec = "verify", source = "code" }。
+/// `INVARIANT: CODEGEN-DERIVABLE-DEFAULT-ALLOW-01` { level = "Medium", exec = "check", source = "code" }。
 fn allow_derivable_default_impls(file: &mut syn::File) {
     for item in &mut file.items {
         let syn::Item::Impl(imp) = item else {
@@ -2032,7 +2033,7 @@ fn allow_derivable_default_impls(file: &mut syn::File) {
 /// 无法感知 const 语义，会误报。章程禁 module-level allow ⇒ codegen 注入 **item-level**
 /// `#[allow(clippy::unwrap_used)]` 到 `defaults` 模块内的每个 `fn`（与 `allow_derivable_default_impls`
 /// 同款 syn 后处理，单源在 codegen，输出由 golden 锁）。
-/// `INVARIANT: CODEGEN-DEFAULTS-UNWRAP-ALLOW-01` { level = "Medium", exec = "verify", source = "code" }。
+/// `INVARIANT: CODEGEN-DEFAULTS-UNWRAP-ALLOW-01` { level = "Medium", exec = "check", source = "code" }。
 fn allow_unwrap_in_defaults_mod(file: &mut syn::File) {
     for item in &mut file.items {
         let syn::Item::Mod(module) = item else {
@@ -4587,7 +4588,7 @@ mod tests {
     ///
     /// anti-vacuity：无 subscriptions 的 draft event 仍生成空 SUBSCRIPTIONS 切片 + CONTRACT_ID / TOPIC（正向对照）。
     ///
-    /// INVARIANT: CONTRACT-BINDING-FUNNEL-01 { level = "Medium", exec = "verify", source = "code" }—— 守 `CONTRACT: ContractBinding` 由 manifest `domain` + `id`
+    /// INVARIANT: CONTRACT-BINDING-FUNNEL-01 { level = "Medium", exec = "check", source = "code" }—— 守 `CONTRACT: ContractBinding` 由 manifest `domain` + `id`
     /// + `version` + declared schema hash 同源派生（domain 取自 manifest 而非 id 前缀），golden 锁。
     #[test]
     fn event_glue_with_subscription_emitted() -> anyhow::Result<()> {
@@ -4759,7 +4760,7 @@ mod tests {
 
     /// event 无 subscriptions（draft）→ SUBSCRIPTIONS 为空切片，CONTRACT_ID / TOPIC 仍存在（anti-vacuity）。
     ///
-    /// INVARIANT: CONTRACT-BINDING-FUNNEL-01 { level = "Medium", exec = "verify", source = "code" }—— draft event 亦发射 `CONTRACT` 绑定常量（正向对照）。
+    /// INVARIANT: CONTRACT-BINDING-FUNNEL-01 { level = "Medium", exec = "check", source = "code" }—— draft event 亦发射 `CONTRACT` 绑定常量（正向对照）。
     #[test]
     fn event_glue_empty_subscriptions_draft() -> anyhow::Result<()> {
         let root = unique_tmp("codegen_glue_empty");
@@ -4951,7 +4952,7 @@ mod tests {
     ///   `#[allow(clippy::derivable_impls)]`。
     /// - 负向控制：`impl SomethingElse for Foo {}` 不被注入该 allow 属性。
     ///
-    /// INVARIANT: CODEGEN-DERIVABLE-DEFAULT-ALLOW-01 { level = "Medium", exec = "verify", source = "code" }（anti-vacuity，Medium）。
+    /// INVARIANT: CODEGEN-DERIVABLE-DEFAULT-ALLOW-01 { level = "Medium", exec = "check", source = "code" }（anti-vacuity，Medium）。
     #[test]
     fn allow_derivable_default_impls_injects_only_default_impls() -> anyhow::Result<()> {
         // 构造包含 impl Default 和 impl SomethingElse 的 syn::File。

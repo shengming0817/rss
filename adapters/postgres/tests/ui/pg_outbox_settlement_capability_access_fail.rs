@@ -1,4 +1,4 @@
-//! INVARIANT: PG-OUTBOX-SETTLEMENT-CAPABILITY-01 { level = "Hard", exec = "verify", source = "trybuild" }
+//! INVARIANT: PG-OUTBOX-SETTLEMENT-CAPABILITY-01 { level = "Hard", exec = "test", source = "trybuild" }
 
 fn main() {
     let _outcome = postgres::outbox::settlement::Settlement::<()>::expired();

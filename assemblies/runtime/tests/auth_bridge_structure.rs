@@ -1,6 +1,6 @@
 //! Production auth bridge must remain genuinely asynchronous.
 //!
-//! INVARIANT: AUTHN-BRIDGE-ASYNC-ONLY-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "async_bridge_guard_rejects_sync_drivers_and_escape_hatches", anti_vacuity = "production_auth_bridge_is_async_only" }.
+//! INVARIANT: AUTHN-BRIDGE-ASYNC-ONLY-01 { level = "Medium", exec = "test", source = "code", synthetic_red = "async_bridge_guard_rejects_sync_drivers_and_escape_hatches", anti_vacuity = "production_auth_bridge_is_async_only" }.
 
 const FORBIDDEN: &[&str] = &[
     "block_on(",

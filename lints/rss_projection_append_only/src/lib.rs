@@ -2,7 +2,7 @@
 //! `rss_projection_append_only` — RSS 治理 dylint lint：projection_events append-only
 //! （AST 拒 DELETE/TRUNCATE 字符串字面量）。
 //!
-//! INVARIANT: PROJECTION-APPEND-ONLY-01 { level = "Medium", exec = "verify", source = "dylint" }
+//! INVARIANT: PROJECTION-APPEND-ONLY-01 { level = "Medium", exec = "check", source = "dylint" }
 //!
 //! `projection_events` 是 append-only CQRS 投影事件日志。禁 DELETE/TRUNCATE——DB 引擎
 //! REVOKE 是 Hard 主守卫（migration 层），本 lint 是 Medium 辅助早拦（编译期 AST 字面量扫描）。
@@ -28,7 +28,7 @@ dylint_linting::declare_late_lint! {
     /// `projection_events` 是 CQRS 投影事件日志——append-only 语义是投影重建正确性的前提。
     /// DELETE/TRUNCATE 会破坏事件完整性，使投影重建产生错误或丢失历史数据。DB 引擎 REVOKE
     /// 是 Hard 主守卫；本 lint 是 Medium 辅助守卫，在编译期（AST 字符串字面量阶段）早拦。
-    /// INVARIANT: PROJECTION-APPEND-ONLY-01 { level = "Medium", exec = "verify", source = "dylint" }。
+    /// INVARIANT: PROJECTION-APPEND-ONLY-01 { level = "Medium", exec = "check", source = "dylint" }。
     ///
     /// ### Known problems
     /// 仅检测字符串字面量，粗匹配（大小写归一 `contains`）：

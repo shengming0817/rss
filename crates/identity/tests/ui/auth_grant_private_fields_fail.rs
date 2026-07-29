@@ -1,4 +1,4 @@
-//! INVARIANT: AUTH-GRANT-STATE-01 { level = "Hard", exec = "verify", source = "trybuild" }
+//! INVARIANT: AUTH-GRANT-STATE-01 { level = "Hard", exec = "test", source = "trybuild" }
 
 use authn::AuthGrant;
 

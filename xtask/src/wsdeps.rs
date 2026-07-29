@@ -4,9 +4,9 @@
 //! 的 resolved 版本满足，或为带注释标注的 inert 前瞻预留」。接入 `cargo xtask verify`
 //! （fail-closed 门）。
 //!
-//! INVARIANT: WSDEPS-DRIFT-01 { level = "Medium", exec = "verify", source = "code" }—— 外部 pin 若其 crate 在 Cargo.lock 中，pin（VersionReq）
+//! INVARIANT: WSDEPS-DRIFT-01 { level = "Medium", exec = "check", source = "code" }—— 外部 pin 若其 crate 在 Cargo.lock 中，pin（VersionReq）
 //!   须被至少一个 locked Version 满足。
-//! INVARIANT: WSDEPS-DRIFT-02 { level = "Medium", exec = "verify", source = "code" }—— 外部 pin 若其 crate 不在 Cargo.lock（纯 inert 前瞻），
+//! INVARIANT: WSDEPS-DRIFT-02 { level = "Medium", exec = "check", source = "code" }—— 外部 pin 若其 crate 不在 Cargo.lock（纯 inert 前瞻），
 //!   须带前瞻标注注释（任一：inert / 前瞻 / forward-reserv / 预留，大小写不敏感）。
 //!
 //! ref: oxidecomputer/omicron dev-tools/xtask/src/check_workspace_deps.rs@main

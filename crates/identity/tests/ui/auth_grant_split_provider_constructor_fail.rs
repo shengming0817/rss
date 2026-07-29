@@ -1,4 +1,4 @@
-//! INVARIANT: AUTH-GRANT-SAME-PROVIDER-01 { level = "Hard", exec = "verify", source = "trybuild" }
+//! INVARIANT: AUTH-GRANT-SAME-PROVIDER-01 { level = "Hard", exec = "test", source = "trybuild" }
 
 use std::sync::Arc;
 use std::time::Duration;

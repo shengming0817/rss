@@ -1,6 +1,6 @@
 # Runtime composition-root monotonic responsibility ratchet.
 #
-# INVARIANT: RUNTIME-ROOT-RATCHET-01 { level = "Medium", exec = "verify", source = "config" }.
+# INVARIANT: RUNTIME-ROOT-RATCHET-01 { level = "Medium", exec = "check", source = "config" }.
 # Every landed revision is also committed to `LANDED_HISTORY` in the guard. Append both ledgers in
 # the same change; deleting or rewriting any earlier entry is forbidden.
 schemaVersion = 1

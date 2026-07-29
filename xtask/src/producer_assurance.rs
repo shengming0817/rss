@@ -1,7 +1,7 @@
 //! Static producer-side L2 execution graph projected from the same generated route markers,
 //! production composition, typed domain ports and Postgres transaction funnel compiled by serving.
 //!
-//! INVARIANT: L2-PRODUCER-EXECUTION-CLOSURE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::postgres_provider_without_producer_tx_is_rejected", anti_vacuity = "l2_assurance::tests::workspace_inventory_is_exact_and_deterministic" }——
+//! INVARIANT: L2-PRODUCER-EXECUTION-CLOSURE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::postgres_provider_without_producer_tx_is_rejected", anti_vacuity = "l2_assurance::tests::workspace_inventory_is_exact_and_deterministic" }——
 //! every active HTTP OutboxFact contract resolves from its exact mounted handler through live
 //! receipt call edges to one typed domain port, its injected Postgres provider, `producer_tx`,
 //! `TxCapability`, canonical append and settlement. Ambiguous, macro-hidden, dead, test-only or

@@ -9,7 +9,7 @@
 //! 正向「外部经 bridge **可** mint」由公开 profile-specific verify API + crate 内 `verify_bridge_tests`
 //! 异步单测保证（async-in-trybuild-pass 需运行期 runtime，不划算）。
 //!
-//! INVARIANT: AUTHN-VERIFIEDJWT-SEAL-01 { level = "Hard", exec = "verify", source = "trybuild" }（生产端闭环）。
+//! INVARIANT: AUTHN-VERIFIEDJWT-SEAL-01 { level = "Hard", exec = "test", source = "trybuild" }（生产端闭环）。
 #[test]
 fn ui() {
     let t = trybuild::TestCases::new();

@@ -1,6 +1,6 @@
 //! Fail-closed evidence for the production Postgres provider injection used by active producers.
 //!
-//! INVARIANT: L2-PRODUCER-PRODUCTION-COMPOSITION-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_phase_owners_reject_missing_reordered_and_bait_wiring", anti_vacuity = "tests::workspace_production_composition_is_exact" }——
+//! INVARIANT: L2-PRODUCER-PRODUCTION-COMPOSITION-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::runtime_phase_owners_reject_missing_reordered_and_bait_wiring", anti_vacuity = "tests::workspace_production_composition_is_exact" }——
 //! the production `wire` functions must inject the exact Postgres lifecycle/UoW binding into the
 //! service constructor that owns each active producer path, and that exact constructor result must
 //! enter the live domain. Merely defining or constructing a correct provider elsewhere is not

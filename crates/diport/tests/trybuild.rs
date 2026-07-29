@@ -8,7 +8,7 @@
 //!   Sync），锁 #1095 注入形态收口决策；PDP 的 Send+Sync 正向证据在 pass fixture。
 //! - fail（pdp-non-sync）：PDP provider 必须 Sync，锁多线程 serving runtime 的共享边界。
 //!
-//! INVARIANT: DIPORT-DYN-COMPAT-01 · DIPORT-UNSAFE-HYGIENE-01 · DIPORT-ASYNC-ARC-SEND-01 { level = "Hard", exec = "verify", source = "trybuild" }
+//! INVARIANT: DIPORT-DYN-COMPAT-01 · DIPORT-UNSAFE-HYGIENE-01 · DIPORT-ASYNC-ARC-SEND-01 { level = "Hard", exec = "test", source = "trybuild" }
 #[test]
 fn ui() {
     let t = trybuild::TestCases::new();

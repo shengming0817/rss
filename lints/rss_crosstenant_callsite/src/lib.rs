@@ -3,7 +3,7 @@
 //! `CrossTenantCapability::issue_for_verified_super_admin()` / `CrossTenantVisibility::authorize()` /
 //! `RowVisibility::new_cross_tenant()` 仅 audit durable-receipt scope mint 函数可调用。
 //!
-//! INVARIANT: TENANCY-CROSSTENANT-CAP-01 { level = "Medium", exec = "verify", source = "dylint" }
+//! INVARIANT: TENANCY-CROSSTENANT-CAP-01 { level = "Medium", exec = "check", source = "dylint" }
 //!
 //! 跨租户可见性是 super-admin 越权面：`CrossTenantCapability` 私有字段（`_seal: ()`）已让**构造**只能经
 //! funnel（type-layer Hard，上游）；但「funnel 只许 audit 在 durable append receipt 后调用」无法跨 crate
@@ -52,7 +52,7 @@ dylint_linting::declare_late_lint! {
     /// ### Why is this bad?
     /// 跨租户可见性是 super-admin 越权面。capability 的**构造**已由 vocab 私有字段封到 funnel（Hard），但
     /// 「funnel 只许 durable receipt 消费点调用」跨 crate 不可真 seal，故由本 exact-function lint承载。
-    /// INVARIANT: TENANCY-CROSSTENANT-CAP-01 { level = "Medium", exec = "verify", source = "dylint" }。
+    /// INVARIANT: TENANCY-CROSSTENANT-CAP-01 { level = "Medium", exec = "check", source = "dylint" }。
     ///
     /// ### Known problems
     /// 仍 intraprocedural；确需在 allowlist 外引用须显式 `#[allow(rss_crosstenant_callsite)]` 并评审。

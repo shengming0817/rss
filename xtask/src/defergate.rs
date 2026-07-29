@@ -1,6 +1,6 @@
 //! `defer-gate` —— governed 高风险路径内**结构化 defer 完整性 + 经典注解**治理门（#1432）。
 //!
-//! INVARIANT: DEFER-GATE-01 { level = "Medium", exec = "verify", source = "code" }—— 在 governed config（根 `deny.toml` / `clippy.toml`）内强制两条：(1) 任一 `DEFER(#<issue>)` 标签须四字段齐全
+//! INVARIANT: DEFER-GATE-01 { level = "Medium", exec = "check", source = "code" }—— 在 governed config（根 `deny.toml` / `clippy.toml`）内强制两条：(1) 任一 `DEFER(#<issue>)` 标签须四字段齐全
 //! 非空——`owner=<..>`、`blocked-by=<#NNNN|trigger:..>`、`closes-when=<..>`（折行式可落在 DEFER 行 + 后续
 //! ≤[`FIELD_WINDOW`] 行注释续行窗口内），ID 须 `#<digits>`，缺即 fail；(2) governed scope 禁用经典注解
 //! `TODO` / `FIXME` / `XXX` / `HACK`（`[:(]` 注解位），须升级为完整 `DEFER(...)` 或删除（DEFER 行本身豁免）。

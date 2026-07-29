@@ -4,7 +4,7 @@ This document governs runtime composition wiring that is too specific for the ge
 
 ## SharedRuntimeDeps Infra-Only Gate
 
-INVARIANT: WIRING-DEPS-INFRA-ONLY-01 { level = "Medium", exec = "verify", source = "code" }.
+INVARIANT: WIRING-DEPS-INFRA-ONLY-01 { level = "Medium", exec = "check", source = "code" }.
 
 - `SharedRuntimeDeps` is an inbound parameter object for shared infrastructure and provider value objects only.
 - Domain service, domain repo, and domain-owned runtime output types must not be added to `SharedRuntimeDeps`; keep domain services inside their `wire_X` function or expose cross-domain behavior only through contracts.

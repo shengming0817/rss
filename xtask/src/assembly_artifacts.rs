@@ -1,8 +1,8 @@
 //! Closed application-artifact inventory for every discovered assembly.
 //!
-//! INVARIANT: ASSEMBLY-ARTIFACT-MATRIX-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::synthetic_red_rejects_incomplete_or_unsafe_rows", anti_vacuity = "tests::real_workspace_matrix_is_exact_and_complete" } -- the schema-v1 lifecycle declaration is an exact bijection with `assemblies/*`; only rows whose Cargo, image, config, health/inventory and journey evidence all validate can become `VerifiedArtifactMatrix` values.
-//! INVARIANT: PRODUCTION-SMOKE-POLICY-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::strict_compose_smoke_policy_rejects_synthetic_mutations_and_binds_the_real_file", anti_vacuity = "tests::strict_compose_smoke_policy_rejects_synthetic_mutations_and_binds_the_real_file" } -- the executable compose journey requires an explicit closed mode, release never permits skip, and only an explicit developer opt-in can emit the unique non-production receipt before Docker execution.
-//! INVARIANT: COMPOSE-RUNTIME-DELIVERY-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::compose_runtime_delivery_rejects_each_synthetic_mutation", anti_vacuity = "tests::compose_runtime_delivery_rejects_each_synthetic_mutation" } -- the developer Compose carrier keeps operator and serving images distinct, grants the serving process enough grace for its application-owned drain budget, and the executable smoke witness proves ordered SIGTERM reception, complete drain, and exit zero.
+//! INVARIANT: ASSEMBLY-ARTIFACT-MATRIX-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::synthetic_red_rejects_incomplete_or_unsafe_rows", anti_vacuity = "tests::real_workspace_matrix_is_exact_and_complete" } -- the schema-v1 lifecycle declaration is an exact bijection with `assemblies/*`; only rows whose Cargo, image, config, health/inventory and journey evidence all validate can become `VerifiedArtifactMatrix` values.
+//! INVARIANT: PRODUCTION-SMOKE-POLICY-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::strict_compose_smoke_policy_rejects_synthetic_mutations_and_binds_the_real_file", anti_vacuity = "tests::strict_compose_smoke_policy_rejects_synthetic_mutations_and_binds_the_real_file" } -- the executable compose journey requires an explicit closed mode, release never permits skip, and only an explicit developer opt-in can emit the unique non-production receipt before Docker execution.
+//! INVARIANT: COMPOSE-RUNTIME-DELIVERY-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::compose_runtime_delivery_rejects_each_synthetic_mutation", anti_vacuity = "tests::compose_runtime_delivery_rejects_each_synthetic_mutation" } -- the developer Compose carrier keeps operator and serving images distinct, grants the serving process enough grace for its application-owned drain budget, and the executable smoke witness proves ordered SIGTERM reception, complete drain, and exit zero.
 
 use anyhow::{Context, Result, bail};
 use assembly_schema::{AssemblyListenerKind, AssemblyManifest};
@@ -511,6 +511,10 @@ fn validate_lifecycle_shape(row: &RawAssembly, findings: &mut Vec<ArtifactFindin
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the validator mirrors the closed supported-artifact schema fields"
+)]
 fn validate_supported(
     root: &Path,
     cargo: &crate::assembly::CargoTargetCatalog,
@@ -1331,10 +1335,10 @@ fn compose_serving_secret_bundle_is_closed(env_source: &str, bundle_source: &str
     ];
     if bundle.len() != required.len()
         || required.iter().any(|key| {
-            !bundle
+            bundle
                 .get(*key)
                 .and_then(serde_json::Value::as_str)
-                .is_some_and(|value| !value.is_empty())
+                .is_none_or(|value| value.is_empty())
         })
     {
         return false;
@@ -2467,6 +2471,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::cognitive_complexity,
+        reason = "one table-driven mutation test proves the complete compose policy closure"
+    )]
     fn strict_compose_smoke_policy_rejects_synthetic_mutations_and_binds_the_real_file()
     -> Result<()> {
         let workspace = crate::workspace_root()?;

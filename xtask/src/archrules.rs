@@ -1,11 +1,11 @@
 //! ArchRules 派生索引：从真实 carrier 的 `INVARIANT:` 锚点反推出 rule → carrier → evidence → gate。
 //!
-//! INVARIANT: ARCHRULES-DERIVED-INDEX-01 { level = "Medium", exec = "verify", source = "code" } —— 本模块只扫描真实 carrier（代码 / 配置 / UI golden /
+//! INVARIANT: ARCHRULES-DERIVED-INDEX-01 { level = "Medium", exec = "check", source = "code" } —— 本模块只扫描真实 carrier（代码 / 配置 / UI golden /
 //! baseline），不引入手写规则目录；文档仅作为 `doc_ref`。
-//! INVARIANT: ARCHRULES-VERIFY-GATE-01 { level = "Medium", exec = "verify", source = "code" } —— [`ArchRules`] 作为 no-compile governance gate 接入 verify/ci，
+//! INVARIANT: ARCHRULES-VERIFY-GATE-01 { level = "Medium", exec = "check", source = "code" } —— [`ArchRules`] 作为 no-compile governance gate 接入 verify/ci，
 //! 缺 carrier / fixture / gate 证据时 fail-closed。
-//! INVARIANT: APPLICATION-DELIVERY-BOUNDARY-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "archrules::tests::application_delivery_boundary_rejects_synthetic_red", anti_vacuity = "archrules::tests::application_delivery_boundary_accepts_real_workspace" } —— application production/default-CI carriers reject repository-owned deployment protocols and Kubernetes delivery projections.
-//! INVARIANT: PERSISTENCE-FUNNEL-MATRIX-01 { level = "Medium", exec = "verify", source = "code", facet = "derived-matrix" } —— 持久化 funnel 固定集合仅引用真实 rule key，强度和证明从 carrier 反向派生。
+//! INVARIANT: APPLICATION-DELIVERY-BOUNDARY-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "archrules::tests::application_delivery_boundary_rejects_synthetic_red", anti_vacuity = "archrules::tests::application_delivery_boundary_accepts_real_workspace" } —— application production/default-CI carriers reject repository-owned deployment protocols and Kubernetes delivery projections.
+//! INVARIANT: PERSISTENCE-FUNNEL-MATRIX-01 { level = "Medium", exec = "check", source = "code", facet = "derived-matrix" } —— 持久化 funnel 固定集合仅引用真实 rule key，强度和证明从 carrier 反向派生。
 
 use crate::diagnostic::{Finding, GovernanceCheck, finding};
 use crate::workspace_root;
@@ -14,6 +14,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::str::FromStr;
+use syn::parse::Parser;
 use syn::visit::Visit;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,7 +57,12 @@ impl GovernanceCheck for ArchRules {
         let root = workspace_root()?;
         let index = build_index(&root)?;
         let mut findings = index.findings;
-        findings.extend(validate_matrix(&root, &index.records, true)?);
+        findings.extend(validate_matrix(
+            &root,
+            &index.records,
+            &index.test_evidence,
+            true,
+        )?);
         findings.extend(application_delivery_boundary_findings(&root)?);
         Ok((
             format!(
@@ -581,6 +588,7 @@ struct RuleRecord {
 struct Index {
     records: Vec<RuleRecord>,
     findings: Vec<Finding<Rule>>,
+    test_evidence: TestEvidenceIndex,
 }
 
 type FacetKey = (String, String, Option<String>);
@@ -624,6 +632,7 @@ pub(crate) fn matrix(action: MatrixAction) -> Result<()> {
     findings.extend(validate_matrix(
         &root,
         &index.records,
+        &index.test_evidence,
         action == MatrixAction::Check,
     )?);
     if !findings.is_empty() {
@@ -710,6 +719,7 @@ fn validate_funnel_catalog(funnels: &[FunnelSpec]) -> Vec<Finding<Rule>> {
 fn validate_matrix(
     root: &Path,
     records: &[RuleRecord],
+    test_evidence: &TestEvidenceIndex,
     check_doc_drift: bool,
 ) -> Result<Vec<Finding<Rule>>> {
     let mut findings = validate_funnel_catalog(FUNNELS);
@@ -736,10 +746,18 @@ fn validate_matrix(
                 continue;
             };
             match record.level {
-                RuleLevel::Hard => validate_hard_evidence(root, funnel.key, record, &mut findings)?,
+                RuleLevel::Hard => {
+                    validate_hard_evidence(root, test_evidence, funnel.key, record, &mut findings)?
+                }
                 RuleLevel::Medium => {
                     has_medium = true;
-                    validate_medium_evidence(root, funnel.key, record, &mut findings)?;
+                    validate_medium_evidence(
+                        root,
+                        test_evidence,
+                        funnel.key,
+                        record,
+                        &mut findings,
+                    )?;
                 }
             }
         }
@@ -787,7 +805,12 @@ fn select_record(records: &[RuleRecord], key: InvariantKey) -> Option<&RuleRecor
         .max_by_key(|record| {
             (
                 usize::from(record.level == RuleLevel::Hard),
-                usize::from(record.exec == ExecutionLevel::Verify),
+                usize::from(
+                    record.exec
+                        == ExecutionLevel::Profile(
+                            crate::execution_profiles::ExecutionProfile::Check,
+                        ),
+                ),
                 usize::from(record.carrier == "xtask"),
             )
         })
@@ -795,6 +818,7 @@ fn select_record(records: &[RuleRecord], key: InvariantKey) -> Option<&RuleRecor
 
 fn validate_hard_evidence(
     root: &Path,
+    test_evidence: &TestEvidenceIndex,
     funnel: &str,
     record: &RuleRecord,
     findings: &mut Vec<Finding<Rule>>,
@@ -807,12 +831,8 @@ fn validate_hard_evidence(
             let red = record.synthetic_red.as_deref();
             let green = record.anti_vacuity.as_deref();
             root.join(golden).is_file()
-                && red.is_some_and(|symbol| {
-                    record_source_has_test_symbol(root, record, symbol).unwrap_or(false)
-                })
-                && green.is_some_and(|symbol| {
-                    record_source_has_test_symbol(root, record, symbol).unwrap_or(false)
-                })
+                && red.is_some_and(|symbol| test_evidence.contains(root, record, symbol))
+                && green.is_some_and(|symbol| test_evidence.contains(root, record, symbol))
         }
         SourceKind::Code | SourceKind::Rustdoc | SourceKind::Trybuild => {
             record
@@ -850,6 +870,7 @@ fn push_matrix_evidence(
 
 fn validate_medium_evidence(
     root: &Path,
+    test_evidence: &TestEvidenceIndex,
     funnel: &str,
     record: &RuleRecord,
     findings: &mut Vec<Finding<Rule>>,
@@ -858,8 +879,8 @@ fn validate_medium_evidence(
     let green = record.anti_vacuity.as_deref();
     let explicitly_bound = red.zip(green).is_some_and(|(red, green)| {
         red != green
-            && record_source_has_test_symbol(root, record, red).unwrap_or(false)
-            && record_source_has_test_symbol(root, record, green).unwrap_or(false)
+            && test_evidence.contains(root, record, red)
+            && test_evidence.contains(root, record, green)
     });
     if !explicitly_bound {
         push_matrix_evidence(
@@ -874,43 +895,756 @@ fn validate_medium_evidence(
     Ok(())
 }
 
-fn record_test_names(root: &Path, record: &RuleRecord) -> Result<Vec<String>> {
-    let relative = record.source.split(':').next().unwrap_or(&record.source);
-    collect_test_names(&root.join(relative))
-}
-
 fn collect_test_names(path: &Path) -> Result<Vec<String>> {
     let text = fs::read_to_string(path)
         .with_context(|| format!("读取 evidence source `{}`", path.display()))?;
     let file = syn::parse_file(&text)
         .with_context(|| format!("解析 evidence source `{}`", path.display()))?;
-    #[derive(Default)]
-    struct Collector(Vec<String>);
-    impl<'ast> Visit<'ast> for Collector {
+    let context = TestCfgContext::for_source(path)?;
+    Ok(collect_test_names_from_file(&file, &context))
+}
+
+#[derive(Debug, Default)]
+struct TestCfgContext {
+    features: BTreeSet<String>,
+}
+
+impl TestCfgContext {
+    fn for_source(path: &Path) -> Result<Self> {
+        let Some(manifest) = path
+            .ancestors()
+            .skip(1)
+            .map(|directory| directory.join("Cargo.toml"))
+            .find(|manifest| manifest.is_file())
+        else {
+            return Ok(Self::default());
+        };
+        let value = parse_toml(&manifest)?;
+        let Some(features) = value.get("features").and_then(toml::Value::as_table) else {
+            return Ok(Self::default());
+        };
+        let mut enabled = BTreeSet::new();
+        let mut pending = features
+            .contains_key("default")
+            .then(|| "default".to_string())
+            .into_iter()
+            .collect::<Vec<_>>();
+        while let Some(raw) = pending.pop() {
+            if raw.starts_with("dep:") || raw.contains("?/") {
+                continue;
+            }
+            let feature = raw.split('/').next().unwrap_or(&raw).to_string();
+            if !enabled.insert(feature.clone()) {
+                continue;
+            }
+            if let Some(children) = features.get(&feature).and_then(toml::Value::as_array) {
+                pending.extend(
+                    children
+                        .iter()
+                        .filter_map(toml::Value::as_str)
+                        .map(str::to_string),
+                );
+            }
+        }
+        Ok(Self { features: enabled })
+    }
+}
+
+fn collect_test_names_from_file(file: &syn::File, context: &TestCfgContext) -> Vec<String> {
+    struct Collector<'a> {
+        module: Vec<String>,
+        names: Vec<String>,
+        disabled: usize,
+        context: &'a TestCfgContext,
+    }
+    impl<'ast> Visit<'ast> for Collector<'_> {
+        fn visit_item_mod(&mut self, node: &'ast syn::ItemMod) {
+            let disabled = !attrs_prove_test_execution(&node.attrs, self.context);
+            self.disabled += usize::from(disabled);
+            self.module.push(node.ident.to_string());
+            if node.content.is_some() {
+                syn::visit::visit_item_mod(self, node);
+            }
+            self.module.pop();
+            self.disabled -= usize::from(disabled);
+        }
+
         fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
             let is_test = node.attrs.iter().any(|attr| {
                 attr.path().segments.last().is_some_and(|segment| {
                     matches!(segment.ident.to_string().as_str(), "test" | "rstest")
                 })
             });
-            if is_test && !node.block.stmts.is_empty() {
-                self.0.push(node.sig.ident.to_string());
+            if self.disabled == 0
+                && is_test
+                && attrs_prove_test_execution(&node.attrs, self.context)
+                && !node.block.stmts.is_empty()
+            {
+                let mut name = self.module.join("::");
+                if !name.is_empty() {
+                    name.push_str("::");
+                }
+                name.push_str(&node.sig.ident.to_string());
+                self.names.push(name);
             }
-            syn::visit::visit_item_fn(self, node);
         }
     }
-    let mut collector = Collector::default();
-    collector.visit_file(&file);
-    collector.0.sort();
-    collector.0.dedup();
-    Ok(collector.0)
+    if !attrs_prove_test_execution(&file.attrs, context) {
+        return Vec::new();
+    }
+    let mut collector = Collector {
+        module: Vec::new(),
+        names: Vec::new(),
+        disabled: 0,
+        context,
+    };
+    collector.visit_file(file);
+    collector.names.sort();
+    collector.names.dedup();
+    collector.names
 }
 
+/// Cached runnable-test inventory used by every matrix evidence query in one
+/// ArchRules build. Cargo module graphs and source ASTs are parsed once, then
+/// red/green lookups are exact set membership checks.
+#[derive(Debug, Default)]
+struct TestEvidenceIndex {
+    symbols_by_source: BTreeMap<PathBuf, BTreeSet<String>>,
+    parse_counts: BTreeMap<PathBuf, usize>,
+}
+
+impl TestEvidenceIndex {
+    fn build(root: &Path, records: &[RuleRecord]) -> Result<Self> {
+        let mut manifests = BTreeSet::new();
+        for record in records {
+            if record.synthetic_red.is_none() && record.anti_vacuity.is_none() {
+                continue;
+            }
+            let relative = record.source.split(':').next().unwrap_or(&record.source);
+            if let Some(manifest) = nearest_package_manifest(root, &root.join(relative)) {
+                manifests.insert(manifest);
+            }
+        }
+
+        let mut asts = SourceAstCache::default();
+        let mut symbols_by_source = BTreeMap::<PathBuf, BTreeSet<String>>::new();
+        for manifest in manifests {
+            let crate_root = manifest.parent().unwrap_or(root);
+            let context = TestCfgContext::for_source(&manifest)?;
+            let mut visited = BTreeSet::new();
+            for target in cargo_target_roots(crate_root, &manifest)? {
+                collect_target_test_symbols(
+                    &target,
+                    Vec::new(),
+                    &mut visited,
+                    &mut asts,
+                    &mut symbols_by_source,
+                    &context,
+                )?;
+            }
+        }
+        Ok(Self {
+            symbols_by_source,
+            parse_counts: asts.parse_counts,
+        })
+    }
+
+    fn contains(&self, root: &Path, record: &RuleRecord, symbol: &str) -> bool {
+        debug_assert!(self.parse_counts.values().all(|count| *count == 1));
+        let relative = record.source.split(':').next().unwrap_or(&record.source);
+        self.symbols_by_source
+            .get(&root.join(relative))
+            .is_some_and(|symbols| symbols.contains(symbol))
+    }
+
+    #[cfg(test)]
+    fn parse_count(&self, path: &Path) -> usize {
+        self.parse_counts.get(path).copied().unwrap_or(0)
+    }
+}
+
+#[cfg(test)]
 fn record_source_has_test_symbol(root: &Path, record: &RuleRecord, symbol: &str) -> Result<bool> {
-    let name = symbol.rsplit("::").next().unwrap_or(symbol);
-    Ok(record_test_names(root, record)?
+    let mut query = record.clone();
+    query.synthetic_red = Some(symbol.to_string());
+    Ok(
+        TestEvidenceIndex::build(root, std::slice::from_ref(&query))?
+            .contains(root, record, symbol),
+    )
+}
+
+#[derive(Default)]
+struct SourceAstCache {
+    files: BTreeMap<PathBuf, std::rc::Rc<syn::File>>,
+    parse_counts: BTreeMap<PathBuf, usize>,
+}
+
+impl SourceAstCache {
+    fn parse(&mut self, path: &Path) -> Result<std::rc::Rc<syn::File>> {
+        if let Some(file) = self.files.get(path) {
+            return Ok(std::rc::Rc::clone(file));
+        }
+        let text = fs::read_to_string(path)
+            .with_context(|| format!("读取 Cargo test module `{}`", path.display()))?;
+        let file = std::rc::Rc::new(
+            syn::parse_file(&text)
+                .with_context(|| format!("解析 Cargo test module `{}`", path.display()))?,
+        );
+        self.files
+            .insert(path.to_path_buf(), std::rc::Rc::clone(&file));
+        *self.parse_counts.entry(path.to_path_buf()).or_default() += 1;
+        Ok(file)
+    }
+}
+
+fn collect_target_test_symbols(
+    module_file: &Path,
+    identity: Vec<String>,
+    visited: &mut BTreeSet<(PathBuf, Vec<String>)>,
+    asts: &mut SourceAstCache,
+    symbols_by_source: &mut BTreeMap<PathBuf, BTreeSet<String>>,
+    context: &TestCfgContext,
+) -> Result<()> {
+    if !visited.insert((module_file.to_path_buf(), identity.clone())) {
+        return Ok(());
+    }
+    let file = asts.parse(module_file)?;
+    if !attrs_prove_test_execution(&file.attrs, context) {
+        return Ok(());
+    }
+    let symbols = symbols_by_source
+        .entry(module_file.to_path_buf())
+        .or_default();
+    for local in collect_test_names_from_file(&file, context) {
+        symbols.insert(local.clone());
+        if !identity.is_empty() {
+            symbols.insert(format!("{}::{local}", identity.join("::")));
+        }
+    }
+    collect_target_test_symbol_items(
+        &module_search_base(module_file),
+        module_file.parent().unwrap_or(Path::new("")),
+        &file.items,
+        identity,
+        visited,
+        asts,
+        symbols_by_source,
+        context,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_target_test_symbol_items(
+    search_base: &Path,
+    path_attr_base: &Path,
+    items: &[syn::Item],
+    identity: Vec<String>,
+    visited: &mut BTreeSet<(PathBuf, Vec<String>)>,
+    asts: &mut SourceAstCache,
+    symbols_by_source: &mut BTreeMap<PathBuf, BTreeSet<String>>,
+    context: &TestCfgContext,
+) -> Result<()> {
+    for item in items {
+        let syn::Item::Mod(module) = item else {
+            continue;
+        };
+        if !attrs_prove_test_execution(&module.attrs, context) {
+            continue;
+        }
+        let mut child_identity = identity.clone();
+        child_identity.push(module.ident.to_string());
+        if let Some((_, child_items)) = &module.content {
+            let inline_base = search_base.join(module.ident.to_string());
+            collect_target_test_symbol_items(
+                &inline_base,
+                &inline_base,
+                child_items,
+                child_identity,
+                visited,
+                asts,
+                symbols_by_source,
+                context,
+            )?;
+        } else {
+            let external = external_module_path(search_base, path_attr_base, module);
+            if external.is_file() {
+                collect_target_test_symbols(
+                    &external,
+                    child_identity,
+                    visited,
+                    asts,
+                    symbols_by_source,
+                    context,
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn attrs_statically_disabled(attrs: &[syn::Attribute]) -> bool {
+    attrs.iter().any(|attr| {
+        attr.path().is_ident("cfg")
+            && attr
+                .meta
+                .require_list()
+                .ok()
+                .and_then(|list| syn::parse2::<syn::Meta>(list.tokens.clone()).ok())
+                .is_some_and(|meta| cfg_truth(&meta) == CfgTruth::False)
+    })
+}
+
+/// Test evidence is valid only when the canonical default test context can
+/// prove that every execution-affecting attribute enables the item. Unknown
+/// conditions and ignored tests fail closed.
+fn attrs_prove_test_execution(attrs: &[syn::Attribute], context: &TestCfgContext) -> bool {
+    attrs
         .iter()
-        .any(|candidate| candidate == name))
+        .all(|attribute| attribute_proves_test_execution(attribute, context))
+}
+
+fn attribute_proves_test_execution(attr: &syn::Attribute, context: &TestCfgContext) -> bool {
+    if attr.path().is_ident("ignore") {
+        return false;
+    }
+    if attr.path().is_ident("cfg") {
+        return attr
+            .meta
+            .require_list()
+            .ok()
+            .and_then(|list| syn::parse2::<syn::Meta>(list.tokens.clone()).ok())
+            .is_some_and(|meta| cfg_truth_for_test(&meta, context) == CfgTruth::True);
+    }
+    if !attr.path().is_ident("cfg_attr") {
+        return true;
+    }
+    let Ok(list) = attr.meta.require_list() else {
+        return false;
+    };
+    let Ok(items) = syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated
+        .parse2(list.tokens.clone())
+    else {
+        return false;
+    };
+    let Some(condition) = items.first() else {
+        return false;
+    };
+    match cfg_truth_for_test(condition, context) {
+        CfgTruth::False => true,
+        CfgTruth::Unknown => false,
+        CfgTruth::True => items
+            .iter()
+            .skip(1)
+            .all(|meta| meta_proves_test_execution(meta, context)),
+    }
+}
+
+fn meta_proves_test_execution(meta: &syn::Meta, context: &TestCfgContext) -> bool {
+    if meta.path().is_ident("ignore") {
+        return false;
+    }
+    if meta.path().is_ident("cfg") {
+        return meta
+            .require_list()
+            .ok()
+            .and_then(|list| syn::parse2::<syn::Meta>(list.tokens.clone()).ok())
+            .is_some_and(|condition| cfg_truth_for_test(&condition, context) == CfgTruth::True);
+    }
+    true
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CfgTruth {
+    True,
+    False,
+    Unknown,
+}
+
+fn cfg_truth_for_test(meta: &syn::Meta, context: &TestCfgContext) -> CfgTruth {
+    match meta {
+        syn::Meta::Path(path) if path.is_ident("test") => CfgTruth::True,
+        syn::Meta::Path(path) if path.is_ident("unix") => truth(cfg!(unix)),
+        syn::Meta::Path(path) if path.is_ident("windows") => truth(cfg!(windows)),
+        syn::Meta::Path(_) => CfgTruth::Unknown,
+        syn::Meta::NameValue(name_value) => {
+            let syn::Expr::Lit(value) = &name_value.value else {
+                return CfgTruth::Unknown;
+            };
+            let syn::Lit::Str(value) = &value.lit else {
+                return CfgTruth::Unknown;
+            };
+            if name_value.path.is_ident("feature") {
+                truth(context.features.contains(&value.value()))
+            } else if name_value.path.is_ident("target_os") {
+                truth(value.value() == std::env::consts::OS)
+            } else if name_value.path.is_ident("target_arch") {
+                truth(value.value() == std::env::consts::ARCH)
+            } else if name_value.path.is_ident("target_family") {
+                truth(
+                    (cfg!(unix) && value.value() == "unix")
+                        || (cfg!(windows) && value.value() == "windows"),
+                )
+            } else {
+                CfgTruth::Unknown
+            }
+        }
+        syn::Meta::List(list) => cfg_list_truth_for_test(list, context),
+    }
+}
+
+fn cfg_list_truth_for_test(list: &syn::MetaList, context: &TestCfgContext) -> CfgTruth {
+    let Ok(items) = syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated
+        .parse2(list.tokens.clone())
+    else {
+        return CfgTruth::Unknown;
+    };
+    let evaluate = |item: &syn::Meta| cfg_truth_for_test(item, context);
+    if list.path.is_ident("all") {
+        if items.iter().any(|item| evaluate(item) == CfgTruth::False) {
+            CfgTruth::False
+        } else if items.iter().all(|item| evaluate(item) == CfgTruth::True) {
+            CfgTruth::True
+        } else {
+            CfgTruth::Unknown
+        }
+    } else if list.path.is_ident("any") {
+        if items.iter().any(|item| evaluate(item) == CfgTruth::True) {
+            CfgTruth::True
+        } else if items.iter().all(|item| evaluate(item) == CfgTruth::False) {
+            CfgTruth::False
+        } else {
+            CfgTruth::Unknown
+        }
+    } else if list.path.is_ident("not") && items.len() == 1 {
+        match evaluate(&items[0]) {
+            CfgTruth::True => CfgTruth::False,
+            CfgTruth::False => CfgTruth::True,
+            CfgTruth::Unknown => CfgTruth::Unknown,
+        }
+    } else {
+        CfgTruth::Unknown
+    }
+}
+
+const fn truth(value: bool) -> CfgTruth {
+    if value {
+        CfgTruth::True
+    } else {
+        CfgTruth::False
+    }
+}
+
+fn cfg_truth(meta: &syn::Meta) -> CfgTruth {
+    match meta {
+        syn::Meta::Path(path) if path.is_ident("test") => CfgTruth::True,
+        syn::Meta::Path(_) | syn::Meta::NameValue(_) => CfgTruth::Unknown,
+        syn::Meta::List(list) => cfg_list_truth(list, cfg_truth),
+    }
+}
+
+fn cfg_list_truth(list: &syn::MetaList, evaluate: fn(&syn::Meta) -> CfgTruth) -> CfgTruth {
+    let Ok(items) = syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated
+        .parse2(list.tokens.clone())
+    else {
+        return CfgTruth::Unknown;
+    };
+    if list.path.is_ident("all") {
+        if items.iter().any(|item| evaluate(item) == CfgTruth::False) {
+            CfgTruth::False
+        } else if items.iter().all(|item| evaluate(item) == CfgTruth::True) {
+            CfgTruth::True
+        } else {
+            CfgTruth::Unknown
+        }
+    } else if list.path.is_ident("any") {
+        if items.iter().any(|item| evaluate(item) == CfgTruth::True) {
+            CfgTruth::True
+        } else if items.iter().all(|item| evaluate(item) == CfgTruth::False) {
+            CfgTruth::False
+        } else {
+            CfgTruth::Unknown
+        }
+    } else if list.path.is_ident("not") && items.len() == 1 {
+        match evaluate(&items[0]) {
+            CfgTruth::True => CfgTruth::False,
+            CfgTruth::False => CfgTruth::True,
+            CfgTruth::Unknown => CfgTruth::Unknown,
+        }
+    } else {
+        CfgTruth::Unknown
+    }
+}
+
+#[cfg(test)]
+fn cargo_target_reaches(root: &Path, path: &Path) -> Result<bool> {
+    let Some(manifest) = nearest_package_manifest(root, path) else {
+        return Ok(false);
+    };
+    let crate_root = manifest.parent().unwrap_or(root);
+    for target in cargo_target_roots(crate_root, &manifest)? {
+        let mut visited = BTreeSet::new();
+        if rust_module_reaches(&target, path, &mut visited)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn cargo_reachable_files(manifest: &Path) -> Result<BTreeSet<PathBuf>> {
+    let crate_root = manifest.parent().unwrap_or(Path::new(""));
+    let mut reachable = BTreeSet::new();
+    for target in cargo_target_roots(crate_root, manifest)? {
+        collect_reachable_modules(&target, &mut reachable)?;
+    }
+    Ok(reachable)
+}
+
+fn collect_reachable_modules(module_file: &Path, reachable: &mut BTreeSet<PathBuf>) -> Result<()> {
+    if !reachable.insert(module_file.to_path_buf()) {
+        return Ok(());
+    }
+    let text = fs::read_to_string(module_file)
+        .with_context(|| format!("读取 Cargo target module `{}`", module_file.display()))?;
+    let file = syn::parse_file(&text)
+        .with_context(|| format!("解析 Cargo target module `{}`", module_file.display()))?;
+    collect_reachable_items(
+        &module_search_base(module_file),
+        module_file.parent().unwrap_or(Path::new("")),
+        &file.items,
+        reachable,
+    )
+}
+
+fn collect_reachable_items(
+    search_base: &Path,
+    path_attr_base: &Path,
+    items: &[syn::Item],
+    reachable: &mut BTreeSet<PathBuf>,
+) -> Result<()> {
+    for item in items {
+        let syn::Item::Mod(module) = item else {
+            continue;
+        };
+        if attrs_statically_disabled(&module.attrs) {
+            continue;
+        }
+        if let Some((_, items)) = &module.content {
+            let inline_base = search_base.join(module.ident.to_string());
+            collect_reachable_items(&inline_base, &inline_base, items, reachable)?;
+        } else {
+            let external = external_module_path(search_base, path_attr_base, module);
+            if external.is_file() {
+                collect_reachable_modules(&external, reachable)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn nearest_package_manifest(root: &Path, path: &Path) -> Option<PathBuf> {
+    let mut current = path.parent()?;
+    loop {
+        let manifest = current.join("Cargo.toml");
+        if manifest.is_file()
+            && parse_toml(&manifest)
+                .ok()
+                .is_some_and(|value| value.get("package").is_some())
+        {
+            return Some(manifest);
+        }
+        if current == root {
+            return None;
+        }
+        current = current.parent()?;
+        if !current.starts_with(root) {
+            return None;
+        }
+    }
+}
+
+fn cargo_target_roots(crate_root: &Path, manifest: &Path) -> Result<BTreeSet<PathBuf>> {
+    let value = parse_toml(manifest)?;
+    let mut roots = BTreeSet::new();
+    let explicit_path = |target: &toml::Value| {
+        target
+            .get("path")
+            .and_then(toml::Value::as_str)
+            .map(|path| crate_root.join(path))
+    };
+
+    if let Some(lib) = value.get("lib") {
+        roots.insert(explicit_path(lib).unwrap_or_else(|| crate_root.join("src/lib.rs")));
+    } else if crate_root.join("src/lib.rs").is_file() {
+        roots.insert(crate_root.join("src/lib.rs"));
+    }
+    for (kind, default_dir) in [
+        ("bin", "src/bin"),
+        ("test", "tests"),
+        ("example", "examples"),
+        ("bench", "benches"),
+    ] {
+        if let Some(targets) = value.get(kind).and_then(toml::Value::as_array) {
+            roots.extend(
+                targets
+                    .iter()
+                    .filter_map(|target| explicit_target_path(crate_root, kind, target)),
+            );
+        }
+        let automatic = value
+            .get("package")
+            .and_then(|package| package.get(format!("auto{kind}s")))
+            .and_then(toml::Value::as_bool)
+            .unwrap_or(true);
+        let dir = crate_root.join(default_dir);
+        if automatic && dir.is_dir() {
+            for entry in fs::read_dir(&dir)? {
+                let path = entry?.path();
+                if path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
+                    roots.insert(path);
+                } else if path.is_dir() && path.join("main.rs").is_file() {
+                    roots.insert(path.join("main.rs"));
+                }
+            }
+        }
+    }
+    if value
+        .get("package")
+        .and_then(|package| package.get("autobins"))
+        .and_then(toml::Value::as_bool)
+        .unwrap_or(true)
+        && crate_root.join("src/main.rs").is_file()
+    {
+        roots.insert(crate_root.join("src/main.rs"));
+    }
+    roots.retain(|path| path.is_file());
+    Ok(roots)
+}
+
+fn explicit_target_path(crate_root: &Path, kind: &str, target: &toml::Value) -> Option<PathBuf> {
+    if let Some(path) = target.get("path").and_then(toml::Value::as_str) {
+        return Some(crate_root.join(path));
+    }
+    let name = target.get("name").and_then(toml::Value::as_str)?;
+    let directory = match kind {
+        "bin" => "src/bin",
+        "test" => "tests",
+        "example" => "examples",
+        "bench" => "benches",
+        _ => return None,
+    };
+    let direct = crate_root.join(directory).join(format!("{name}.rs"));
+    if direct.is_file() {
+        Some(direct)
+    } else {
+        Some(crate_root.join(directory).join(name).join("main.rs"))
+    }
+}
+
+#[cfg(test)]
+fn rust_module_reaches(
+    module_file: &Path,
+    wanted: &Path,
+    visited: &mut BTreeSet<PathBuf>,
+) -> Result<bool> {
+    if module_file == wanted {
+        return Ok(true);
+    }
+    if !visited.insert(module_file.to_path_buf()) {
+        return Ok(false);
+    }
+    let text = fs::read_to_string(module_file)
+        .with_context(|| format!("读取 Cargo target module `{}`", module_file.display()))?;
+    let file = syn::parse_file(&text)
+        .with_context(|| format!("解析 Cargo target module `{}`", module_file.display()))?;
+    reachable_items(
+        &module_search_base(module_file),
+        module_file.parent().unwrap_or(Path::new("")),
+        &file.items,
+        wanted,
+        visited,
+    )
+}
+
+#[cfg(test)]
+fn reachable_items(
+    search_base: &Path,
+    path_attr_base: &Path,
+    items: &[syn::Item],
+    wanted: &Path,
+    visited: &mut BTreeSet<PathBuf>,
+) -> Result<bool> {
+    for item in items {
+        let syn::Item::Mod(module) = item else {
+            continue;
+        };
+        if attrs_statically_disabled(&module.attrs) {
+            continue;
+        }
+        if let Some((_, items)) = &module.content {
+            let inline_base = search_base.join(module.ident.to_string());
+            if reachable_items(&inline_base, &inline_base, items, wanted, visited)? {
+                return Ok(true);
+            }
+            continue;
+        }
+        let external = external_module_path(search_base, path_attr_base, module);
+        if external.is_file() && rust_module_reaches(&external, wanted, visited)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn external_module_path(
+    search_base: &Path,
+    path_attr_base: &Path,
+    module: &syn::ItemMod,
+) -> PathBuf {
+    if let Some(path) = module.attrs.iter().find_map(|attr| {
+        if !attr.path().is_ident("path") {
+            return None;
+        }
+        let syn::Meta::NameValue(value) = &attr.meta else {
+            return None;
+        };
+        let syn::Expr::Lit(expr) = &value.value else {
+            return None;
+        };
+        let syn::Lit::Str(path) = &expr.lit else {
+            return None;
+        };
+        Some(path.value())
+    }) {
+        return lexical_normalize(&path_attr_base.join(path));
+    }
+    let direct = search_base.join(format!("{}.rs", module.ident));
+    if direct.is_file() {
+        direct
+    } else {
+        search_base.join(module.ident.to_string()).join("mod.rs")
+    }
+}
+
+fn lexical_normalize(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            _ => normalized.push(component.as_os_str()),
+        }
+    }
+    normalized
+}
+
+fn module_search_base(module_file: &Path) -> PathBuf {
+    let parent = module_file.parent().unwrap_or(Path::new(""));
+    match module_file.file_name().and_then(|name| name.to_str()) {
+        Some("lib.rs" | "main.rs" | "mod.rs") => parent.to_path_buf(),
+        _ => parent.join(module_file.file_stem().unwrap_or_default()),
+    }
 }
 
 fn render_matrix(records: &[RuleRecord]) -> Result<String> {
@@ -990,21 +1724,21 @@ fn build_index(root: &Path) -> Result<Index> {
     let mut index = Index::default();
     scan_xtask(root, &mut index)?;
     scan_dylint(root, &mut index)?;
-    scan_config(root, &mut index, "deny.toml", "deny", "verify,ci,audit")?;
-    scan_config(root, &mut index, "clippy.toml", "clippy", "verify,ci")?;
+    scan_config(root, &mut index, "deny.toml", "deny", "check")?;
+    scan_config(root, &mut index, "clippy.toml", "clippy", "check")?;
     scan_config(
         root,
         &mut index,
         "xtask/runtime-deps-guard.toml",
         "runtime-deps-config",
-        "verify,ci",
+        "check",
     )?;
     scan_config(
         root,
         &mut index,
         "xtask/runtime-root-ratchet.toml",
         "runtime-root-ratchet-config",
-        "verify,ci",
+        "check",
     )?;
     scan_public_api(root, &mut index)?;
     scan_source_invariants(root, &mut index)?;
@@ -1024,6 +1758,7 @@ fn build_index(root: &Path) -> Result<Index> {
             .then_with(|| a.carrier.cmp(&b.carrier))
             .then_with(|| a.source.cmp(&b.source))
     });
+    index.test_evidence = TestEvidenceIndex::build(root, &index.records)?;
     Ok(index)
 }
 
@@ -1036,8 +1771,15 @@ fn scan_xtask(root: &Path, index: &mut Index) -> Result<()> {
         if scan_record_granular_xtask_invariants(root, index, &path)? {
             continue;
         }
-        let gate = xtask_gate(root, &path);
-        scan_invariant_file(root, index, &path, "xtask", xtask_evidence(&path), gate)?;
+        let gate = xtask_gate(root, &path)?;
+        scan_invariant_file(
+            root,
+            index,
+            &path,
+            "xtask",
+            xtask_evidence(&path),
+            gate.as_deref(),
+        )?;
     }
     Ok(())
 }
@@ -1080,7 +1822,7 @@ fn scan_record_granular_xtask_invariants(
             &found_invariants,
             binding.carrier,
             binding.evidence,
-            Some(binding.gates),
+            Some(binding.binding.token()),
             |rule| binding.matches(rule) && binding.accepts(rule),
         )?;
     }
@@ -1119,17 +1861,18 @@ fn scan_compiler_cache_invariants(root: &Path, index: &mut Index, path: &Path) -
             &compiler_cache_invariants,
             binding.carrier,
             binding.evidence,
-            Some(binding.gates),
+            Some(binding.binding.token()),
             |rule| binding.matches(rule) && binding.accepts(rule),
         )?;
     }
+    let gate = xtask_gate(root, path)?;
     scan_extracted_invariant_rules_filtered(
         root,
         index,
         &found_invariants,
         "xtask",
         xtask_evidence(path),
-        xtask_gate(root, path),
+        gate.as_deref(),
         |rule| !rule.id.starts_with("COMPILER-CACHE-POLICY-"),
     )
 }
@@ -1141,8 +1884,35 @@ struct InvariantCarrierBinding {
     facet: Option<&'static str>,
     carrier: &'static str,
     evidence: &'static str,
-    gates: &'static str,
+    binding: CarrierExecutionBinding,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CarrierExecutionBinding {
+    Unit(crate::execution_profiles::ExecutionUnitId),
+    ManualOptIn,
+    NativeCompile,
+}
+
+impl CarrierExecutionBinding {
+    const fn token(self) -> &'static str {
+        match self {
+            Self::Unit(unit) => unit.primary_owner().as_str(),
+            Self::ManualOptIn => "manual/opt-in",
+            Self::NativeCompile => "native-compile",
+        }
+    }
+}
+
+const CHECK_UNIT_BINDING: CarrierExecutionBinding = CarrierExecutionBinding::Unit(
+    crate::execution_profiles::ExecutionUnitId::Gate(crate::ci_lanes::GateId::ArchRules),
+);
+const TEST_UNIT_BINDING: CarrierExecutionBinding = CarrierExecutionBinding::Unit(
+    crate::execution_profiles::ExecutionUnitId::Gate(crate::ci_lanes::GateId::DefaultNextest),
+);
+const RELEASE_UNIT_BINDING: CarrierExecutionBinding = CarrierExecutionBinding::Unit(
+    crate::execution_profiles::ExecutionUnitId::Gate(crate::ci_lanes::GateId::Coverage),
+);
 
 impl InvariantCarrierBinding {
     fn matches(self, rule: &FoundRule) -> bool {
@@ -1171,7 +1941,7 @@ const CI_LANE_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
         facet: None,
         carrier: "native-hard",
         evidence: "gate_catalog generated closed enum and registry",
-        gates: "native-compile",
+        binding: CarrierExecutionBinding::NativeCompile,
     },
     InvariantCarrierBinding {
         path: "xtask/src/ci_lanes.rs",
@@ -1179,7 +1949,7 @@ const CI_LANE_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
         facet: None,
         carrier: "xtask",
         evidence: "bound synthetic red and anti-vacuity tests",
-        gates: "verify,ci,ci-core,ci-coverage",
+        binding: CHECK_UNIT_BINDING,
     },
     InvariantCarrierBinding {
         path: "xtask/src/ci_lanes.rs",
@@ -1187,7 +1957,7 @@ const CI_LANE_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
         facet: None,
         carrier: "native-hard",
         evidence: "closed exhaustive CI SLO job enum and workflow-parts constructor",
-        gates: "native-compile",
+        binding: CarrierExecutionBinding::NativeCompile,
     },
     InvariantCarrierBinding {
         path: "xtask/src/ci_lanes.rs",
@@ -1195,7 +1965,7 @@ const CI_LANE_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
         facet: None,
         carrier: "native-hard",
         evidence: "ci_job_catalog generated closed enum, matrix identity, and artifact identity",
-        gates: "native-compile",
+        binding: CarrierExecutionBinding::NativeCompile,
     },
     InvariantCarrierBinding {
         path: "xtask/src/ci_lanes.rs",
@@ -1203,7 +1973,7 @@ const CI_LANE_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
         facet: None,
         carrier: "native-hard",
         evidence: "closed required-evidence kind and exact-one-owner const proof",
-        gates: "native-compile",
+        binding: CarrierExecutionBinding::NativeCompile,
     },
 ];
 
@@ -1214,7 +1984,7 @@ const CI_IMPACT_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
         facet: None,
         carrier: "native-hard",
         evidence: "private validated plan constructor over the exact typed job catalog",
-        gates: "native-compile",
+        binding: CarrierExecutionBinding::NativeCompile,
     },
     InvariantCarrierBinding {
         path: "xtask/src/ci_impact.rs",
@@ -1222,7 +1992,7 @@ const CI_IMPACT_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
         facet: None,
         carrier: "xtask",
         evidence: "diff and impact synthetic reds with workspace policy anti-vacuity",
-        gates: "verify,ci,ci-meta,ci-core,ci-security,ci-coverage,audit,integration",
+        binding: CHECK_UNIT_BINDING,
     },
     InvariantCarrierBinding {
         path: "xtask/src/ci_impact.rs",
@@ -1230,7 +2000,7 @@ const CI_IMPACT_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
         facet: None,
         carrier: "native-hard",
         evidence: "private ImpactSet and exhaustive local/remote/coverage projection matches",
-        gates: "native-compile",
+        binding: CarrierExecutionBinding::NativeCompile,
     },
     InvariantCarrierBinding {
         path: "xtask/src/ci_impact.rs",
@@ -1238,7 +2008,7 @@ const CI_IMPACT_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
         facet: None,
         carrier: "xtask",
         evidence: "adaptive-plan owner synthetic reds with required-owner anti-vacuity",
-        gates: "verify,ci,ci-meta,ci-core,ci-security,ci-coverage,audit,integration",
+        binding: CHECK_UNIT_BINDING,
     },
     InvariantCarrierBinding {
         path: "xtask/src/ci_impact.rs",
@@ -1246,7 +2016,7 @@ const CI_IMPACT_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
         facet: None,
         carrier: "native-hard",
         evidence: "CoverageDecision Skip|Scope exhaustively projected from private ImpactSet",
-        gates: "native-compile",
+        binding: CarrierExecutionBinding::NativeCompile,
     },
 ];
 
@@ -1257,7 +2027,7 @@ const CI_GATE_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
         facet: None,
         carrier: "xtask",
         evidence: "receipt identity synthetic reds with exact-set anti-vacuity",
-        gates: "verify,ci,ci-meta,ci-core,ci-security,ci-coverage,audit,integration",
+        binding: CHECK_UNIT_BINDING,
     },
     InvariantCarrierBinding {
         path: "xtask/src/ci_gate.rs",
@@ -1265,7 +2035,7 @@ const CI_GATE_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
         facet: None,
         carrier: "xtask",
         evidence: "LocalTx receipt disk-matrix synthetic reds with exact-set anti-vacuity",
-        gates: "verify,ci,ci-meta,ci-core,ci-security,ci-coverage,audit,integration",
+        binding: CHECK_UNIT_BINDING,
     },
     InvariantCarrierBinding {
         path: "xtask/src/ci_gate.rs",
@@ -1273,7 +2043,7 @@ const CI_GATE_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
         facet: None,
         carrier: "xtask",
         evidence: "LocalOnly report disk-matrix synthetic reds with exact-set anti-vacuity",
-        gates: "verify,ci,ci-meta,ci-core,ci-local-only,ci-security,ci-coverage,audit,integration",
+        binding: CHECK_UNIT_BINDING,
     },
 ];
 
@@ -1284,7 +2054,7 @@ const LOCALTX_COVERAGE_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
         facet: None,
         carrier: "xtask",
         evidence: "workspace inventory synthetic reds with non-empty closure anti-vacuity",
-        gates: "verify,ci,ci-meta",
+        binding: CHECK_UNIT_BINDING,
     },
     InvariantCarrierBinding {
         path: "xtask/src/localtx_coverage.rs",
@@ -1292,7 +2062,7 @@ const LOCALTX_COVERAGE_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
         facet: None,
         carrier: "xtask",
         evidence: "backend profile AST synthetic reds with real-workspace anti-vacuity",
-        gates: "verify,ci,ci-meta",
+        binding: CHECK_UNIT_BINDING,
     },
     InvariantCarrierBinding {
         path: "xtask/src/localtx_coverage.rs",
@@ -1300,7 +2070,7 @@ const LOCALTX_COVERAGE_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
         facet: None,
         carrier: "xtask",
         evidence: "journey inventory synthetic reds with real-workspace anti-vacuity",
-        gates: "verify,ci,ci-meta",
+        binding: CHECK_UNIT_BINDING,
     },
     InvariantCarrierBinding {
         path: "xtask/src/localtx_coverage.rs",
@@ -1308,7 +2078,7 @@ const LOCALTX_COVERAGE_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
         facet: None,
         carrier: "xtask",
         evidence: "carrier/exact-set synthetic reds with canonical workspace anti-vacuity",
-        gates: "integration",
+        binding: RELEASE_UNIT_BINDING,
     },
 ];
 
@@ -1319,7 +2089,7 @@ const LOCALTX_EVIDENCE_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
         facet: None,
         carrier: "native-hard",
         evidence: "private success capabilities and sole receipt publication constructor",
-        gates: "native-compile",
+        binding: CarrierExecutionBinding::NativeCompile,
     },
     InvariantCarrierBinding {
         path: "xtask/src/localtx_evidence.rs",
@@ -1327,7 +2097,7 @@ const LOCALTX_EVIDENCE_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
         facet: None,
         carrier: "native-hard",
         evidence: "closed private receipt DTO and typed fixed wire values",
-        gates: "native-compile",
+        binding: CarrierExecutionBinding::NativeCompile,
     },
 ];
 
@@ -1338,7 +2108,7 @@ const LOCALONLY_EVIDENCE_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
         facet: None,
         carrier: "native-hard",
         evidence: "private suite and exact-set capabilities gate the sole report publisher",
-        gates: "native-compile",
+        binding: CarrierExecutionBinding::NativeCompile,
     },
     InvariantCarrierBinding {
         path: "xtask/src/localonly_evidence.rs",
@@ -1346,7 +2116,7 @@ const LOCALONLY_EVIDENCE_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
         facet: None,
         carrier: "xtask",
         evidence: "marker and set synthetic reds with real workspace non-empty anti-vacuity",
-        gates: "verify,ci-local-only",
+        binding: CHECK_UNIT_BINDING,
     },
     InvariantCarrierBinding {
         path: "xtask/src/localonly_evidence.rs",
@@ -1354,7 +2124,7 @@ const LOCALONLY_EVIDENCE_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
         facet: None,
         carrier: "native-hard",
         evidence: "private deny-unknown-fields v1 DTO and closed typed owner",
-        gates: "native-compile",
+        binding: CarrierExecutionBinding::NativeCompile,
     },
 ];
 
@@ -1365,7 +2135,7 @@ const CI_SLO_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
         facet: None,
         carrier: "xtask",
         evidence: "strict config synthetic reds and committed complete catalog anti-vacuity",
-        gates: "verify,ci,ci-meta,ci-core,ci-security,ci-coverage,audit,integration",
+        binding: CHECK_UNIT_BINDING,
     },
     InvariantCarrierBinding {
         path: "xtask/src/ci_slo.rs",
@@ -1373,7 +2143,7 @@ const CI_SLO_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
         facet: None,
         carrier: "xtask",
         evidence: "strict config and evidence synthetic reds with committed fixture and summary golden",
-        gates: "verify,ci,ci-meta,ci-core,ci-security,ci-coverage,audit,integration",
+        binding: CHECK_UNIT_BINDING,
     },
 ];
 
@@ -1384,7 +2154,7 @@ const INTEGRATION_SHARD_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
         facet: None,
         carrier: "native-hard",
         evidence: "catalog macro generated closed enum, registry, and exhaustive lookup",
-        gates: "native-compile",
+        binding: CarrierExecutionBinding::NativeCompile,
     },
     InvariantCarrierBinding {
         path: "xtask/src/integration_shards.rs",
@@ -1392,7 +2162,7 @@ const INTEGRATION_SHARD_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
         facet: None,
         carrier: "native-hard",
         evidence: "typed execution units are the only filterset construction path",
-        gates: "native-compile",
+        binding: CarrierExecutionBinding::NativeCompile,
     },
     InvariantCarrierBinding {
         path: "xtask/src/integration_shards.rs",
@@ -1400,7 +2170,7 @@ const INTEGRATION_SHARD_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
         facet: None,
         carrier: "xtask",
         evidence: "Cargo metadata closure with synthetic red and real-workspace anti-vacuity",
-        gates: "integration",
+        binding: RELEASE_UNIT_BINDING,
     },
     InvariantCarrierBinding {
         path: "xtask/src/integration_shards.rs",
@@ -1408,7 +2178,7 @@ const INTEGRATION_SHARD_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
         facet: None,
         carrier: "xtask",
         evidence: "exact resource and target scheduling plan with rendered argv proof",
-        gates: "integration",
+        binding: RELEASE_UNIT_BINDING,
     },
 ];
 
@@ -1419,7 +2189,7 @@ const NEXTEST_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
         facet: None,
         carrier: "native-hard",
         evidence: "closed profile enum",
-        gates: "native-compile",
+        binding: CarrierExecutionBinding::NativeCompile,
     },
     InvariantCarrierBinding {
         path: "xtask/src/nextest.rs",
@@ -1427,7 +2197,7 @@ const NEXTEST_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
         facet: None,
         carrier: "native-hard",
         evidence: "validated partition newtype",
-        gates: "native-compile",
+        binding: CarrierExecutionBinding::NativeCompile,
     },
     InvariantCarrierBinding {
         path: "xtask/src/nextest.rs",
@@ -1435,7 +2205,7 @@ const NEXTEST_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
         facet: None,
         carrier: "native-hard",
         evidence: "typed serde DTO and committed golden",
-        gates: "native-compile",
+        binding: CarrierExecutionBinding::NativeCompile,
     },
     InvariantCarrierBinding {
         path: "xtask/src/nextest.rs",
@@ -1443,7 +2213,7 @@ const NEXTEST_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
         facet: None,
         carrier: "xtask",
         evidence: "serde wire synthetic red and committed golden anti-vacuity",
-        gates: "verify,ci-core,integration",
+        binding: TEST_UNIT_BINDING,
     },
     InvariantCarrierBinding {
         path: "xtask/src/nextest.rs",
@@ -1451,7 +2221,7 @@ const NEXTEST_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
         facet: None,
         carrier: "xtask",
         evidence: "parsed config synthetic red and committed anti-vacuity",
-        gates: "verify,ci-core,integration",
+        binding: TEST_UNIT_BINDING,
     },
     InvariantCarrierBinding {
         path: "xtask/src/nextest.rs",
@@ -1459,7 +2229,7 @@ const NEXTEST_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
         facet: None,
         carrier: "xtask",
         evidence: "direct-call synthetic red and production source anti-vacuity",
-        gates: "verify,ci-core,integration",
+        binding: TEST_UNIT_BINDING,
     },
     InvariantCarrierBinding {
         path: "xtask/src/nextest.rs",
@@ -1467,7 +2237,7 @@ const NEXTEST_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
         facet: None,
         carrier: "xtask",
         evidence: "AST plus Cargo metadata exact-set synthetic red and workspace anti-vacuity",
-        gates: "verify,ci-core,integration",
+        binding: TEST_UNIT_BINDING,
     },
     InvariantCarrierBinding {
         path: "xtask/src/nextest.rs",
@@ -1475,7 +2245,7 @@ const NEXTEST_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
         facet: None,
         carrier: "native-hard",
         evidence: "CoverageScope::packages returns None for empty lists; execution accepts only CoverageScope",
-        gates: "native-compile",
+        binding: CarrierExecutionBinding::NativeCompile,
     },
     InvariantCarrierBinding {
         path: "xtask/src/nextest.rs",
@@ -1483,7 +2253,7 @@ const NEXTEST_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
         facet: None,
         carrier: "native-hard",
         evidence: "Packages argv uses -p exclusively; Workspace uses --workspace exclusively",
-        gates: "native-compile",
+        binding: CarrierExecutionBinding::NativeCompile,
     },
     InvariantCarrierBinding {
         path: "xtask/src/nextest.rs",
@@ -1491,7 +2261,7 @@ const NEXTEST_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
         facet: None,
         carrier: "xtask",
         evidence: "coverage argv scope synthetic red with workspace replay anti-vacuity",
-        gates: "verify,ci,ci-coverage",
+        binding: RELEASE_UNIT_BINDING,
     },
 ];
 
@@ -1502,7 +2272,7 @@ const COMPILER_CACHE_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
         facet: None,
         carrier: "native-hard",
         evidence: "closed CompilerCachePolicy enum and private validated constructor",
-        gates: "native-compile",
+        binding: CarrierExecutionBinding::NativeCompile,
     },
     InvariantCarrierBinding {
         path: "xtask/src/cmd.rs",
@@ -1510,7 +2280,7 @@ const COMPILER_CACHE_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
         facet: None,
         carrier: "xtask",
         evidence: "canonical-path/version synthetic red and enabled-policy anti-vacuity",
-        gates: "manual/opt-in",
+        binding: CarrierExecutionBinding::ManualOptIn,
     },
 ];
 
@@ -1521,7 +2291,7 @@ const ASSEMBLY_LOCK_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
         facet: None,
         carrier: "xtask",
         evidence: "repository compiler golden drift with synthetic red and three real locks",
-        gates: "verify,ci,ci-meta",
+        binding: CHECK_UNIT_BINDING,
     },
     InvariantCarrierBinding {
         path: "xtask/src/assembly_lock.rs",
@@ -1529,7 +2299,7 @@ const ASSEMBLY_LOCK_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
         facet: None,
         carrier: "native-hard",
         evidence: "closed safe diagnostic enums and private escaped repository path",
-        gates: "native-compile",
+        binding: CarrierExecutionBinding::NativeCompile,
     },
     InvariantCarrierBinding {
         path: "xtask/src/assembly_lock.rs",
@@ -1537,7 +2307,7 @@ const ASSEMBLY_LOCK_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
         facet: None,
         carrier: "xtask",
         evidence: "effective git attribute synthetic reds and real-lock anti-vacuity",
-        gates: "verify,ci,ci-meta",
+        binding: CHECK_UNIT_BINDING,
     },
     InvariantCarrierBinding {
         path: "xtask/src/assembly_lock.rs",
@@ -1545,7 +2315,7 @@ const ASSEMBLY_LOCK_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
         facet: None,
         carrier: "xtask",
         evidence: "typed exact-once aggregate plan synthetic reds",
-        gates: "verify,ci,ci-meta",
+        binding: CHECK_UNIT_BINDING,
     },
 ];
 
@@ -1556,7 +2326,7 @@ const L2_ASSURANCE_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
         facet: None,
         carrier: "native-hard",
         evidence: "closed private assurance record and complete-evidence construction types",
-        gates: "native-compile",
+        binding: CarrierExecutionBinding::NativeCompile,
     },
     InvariantCarrierBinding {
         path: "xtask/src/l2_assurance.rs",
@@ -1564,7 +2334,7 @@ const L2_ASSURANCE_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
         facet: None,
         carrier: "xtask",
         evidence: "generated handler ID exact-set across registration-plan-handler-executor carriers with non-empty and raw-callsite synthetic reds",
-        gates: "verify,ci,ci-meta",
+        binding: CHECK_UNIT_BINDING,
     },
     InvariantCarrierBinding {
         path: "xtask/src/l2_assurance.rs",
@@ -1572,7 +2342,7 @@ const L2_ASSURANCE_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
         facet: None,
         carrier: "xtask",
         evidence: "typed committed JSON golden with byte-drift synthetic red and real inventory anti-vacuity",
-        gates: "verify,ci,ci-meta",
+        binding: CHECK_UNIT_BINDING,
     },
     InvariantCarrierBinding {
         path: "xtask/src/l2_assurance.rs",
@@ -1580,7 +2350,7 @@ const L2_ASSURANCE_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
         facet: None,
         carrier: "xtask",
         evidence: "generated producer/fact ID bidirectional exact-set with non-empty workspace anti-vacuity",
-        gates: "verify,ci,ci-meta",
+        binding: CHECK_UNIT_BINDING,
     },
     InvariantCarrierBinding {
         path: "xtask/src/l2_assurance.rs",
@@ -1588,7 +2358,7 @@ const L2_ASSURANCE_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
         facet: None,
         carrier: "xtask",
         evidence: "path escape and symlink synthetic red with real repository carriers",
-        gates: "verify,ci,ci-meta",
+        binding: CHECK_UNIT_BINDING,
     },
 ];
 
@@ -1599,7 +2369,7 @@ const PROVIDER_CAPABILITIES_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
         facet: None,
         carrier: "xtask",
         evidence: "exact provider declaration, live runner, owner target, and typed integration shard closure",
-        gates: "verify,ci,ci-meta",
+        binding: CHECK_UNIT_BINDING,
     },
     InvariantCarrierBinding {
         path: "xtask/src/provider_capabilities.rs",
@@ -1607,7 +2377,7 @@ const PROVIDER_CAPABILITIES_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
         facet: None,
         carrier: "xtask",
         evidence: "typed schema v1 capability receipts with raw-byte golden drift and no-write synthetic reds",
-        gates: "verify,ci,ci-meta",
+        binding: CHECK_UNIT_BINDING,
     },
 ];
 
@@ -1618,7 +2388,7 @@ const PRODUCER_ASSURANCE_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
         facet: None,
         carrier: "xtask",
         evidence: "generated producer ID exact-set over mounted-handler transaction closures with non-empty synthetic red",
-        gates: "verify,ci,ci-meta",
+        binding: CHECK_UNIT_BINDING,
     },
 ];
 
@@ -1629,7 +2399,7 @@ const PRODUCTION_COMPOSITION_INVARIANT_BINDINGS: &[InvariantCarrierBinding] =
         facet: None,
         carrier: "xtask",
         evidence: "wrong-injection synthetic reds and exact four-port production composition",
-        gates: "verify,ci,ci-meta",
+        binding: CHECK_UNIT_BINDING,
     }];
 
 fn invariant_key(rule: &FoundRule) -> (String, Option<String>) {
@@ -1766,60 +2536,54 @@ fn scan_public_api(root: &Path, index: &mut Index) -> Result<()> {
         return Ok(());
     }
     let path = root.join("xtask/src/publicapi.rs");
-    let gate = xtask_gate(root, &path);
+    let gate = xtask_gate(root, &path)?;
     scan_invariant_file(
         root,
         index,
         &path,
         "public-api",
         format!("{} baseline", target_crates.len()),
-        gate,
+        gate.as_deref(),
     )
 }
 
 fn scan_source_invariants(root: &Path, index: &mut Index) -> Result<()> {
+    let trybuild = trybuild_fixtures(root)?;
+    let mut reachable_by_manifest = BTreeMap::<PathBuf, BTreeSet<PathBuf>>::new();
     for base in ["crates", "adapters", "assemblies", "bins", "journeys"] {
         let dir = root.join(base);
         if !dir.exists() {
             continue;
         }
         for path in rust_files_under(&dir)? {
-            let path_str = rel(root, &path);
-            if path_str.contains("/tests/ui/") || path_str.contains("/tests/trybuild") {
+            if trybuild.compile_fail.contains(&path)
+                || trybuild.pass.contains(&path)
+                || trybuild.harnesses.contains(&path)
+            {
                 continue;
             }
-            let gate = source_file_gate(&path_str);
-            scan_source_invariant_file(
+            let reachable = if let Some(manifest) = nearest_package_manifest(root, &path) {
+                if !reachable_by_manifest.contains_key(&manifest) {
+                    let files = cargo_reachable_files(&manifest)?;
+                    reachable_by_manifest.insert(manifest.clone(), files);
+                }
+                reachable_by_manifest
+                    .get(&manifest)
+                    .is_some_and(|files| files.contains(&path))
+            } else {
+                false
+            };
+            scan_source_invariant_file_with_reachability(
                 root,
                 index,
                 &path,
                 "native-hard",
                 "source invariant",
-                gate,
+                reachable,
             )?;
         }
     }
     Ok(())
-}
-
-/// Gate tokens for workspace `src` / `tests` invariant carriers.
-///
-/// Most `src/**` carriers stay `manual/opt-in`（路径启发式）。例外：已证明由默认
-/// verify/nextest 执行的 Medium 门（如 AMQP CRED-REDACT），以及 runtime module
-/// 上同时持有 verify + native 的 wiring invariants。系统性「plan→registry」单真源
-/// 见 #1818；此处仅为 #1720/#543 F1 最小精确绑定。
-fn source_file_gate(path_str: &str) -> Option<&'static str> {
-    if path_str == "assemblies/runtime/src/module.rs"
-        || path_str == "adapters/amqp/src/conn_events.rs"
-    {
-        // module.rs: native no-handoff + runtime-deps verify。
-        // conn_events.rs: EVENTTRANSPORT-CRED-REDACT-01 默认 lib test 进 verify nextest。
-        Some("verify,ci,manual/opt-in,native-compile")
-    } else if path_str.contains("/tests/") {
-        Some("verify,ci")
-    } else {
-        Some("manual/opt-in,native-compile")
-    }
 }
 
 fn scan_config(
@@ -1911,7 +2675,7 @@ fn scan_dylint(root: &Path, index: &mut Index) -> Result<()> {
             &lib,
             "dylint",
             lint_name.to_string(),
-            Some("verify,ci"),
+            Some("check"),
         )?;
         if index.records.len() == before {
             index.findings.push(finding(
@@ -2002,11 +2766,9 @@ fn scan_trybuild_and_native(root: &Path, index: &mut Index) -> Result<()> {
             continue;
         }
         for path in rust_files_under(&dir)? {
-            let path_str = rel(root, &path);
-            let has_trybuild_harness = file_contains(&path, "trybuild::TestCases")?;
-            let is_trybuild = path_str.contains("/tests/ui/")
-                || path_str.contains("/tests/trybuild")
-                || has_trybuild_harness;
+            let is_trybuild = fixtures.compile_fail.contains(&path)
+                || fixtures.pass.contains(&path)
+                || fixtures.harnesses.contains(&path);
             let is_compile_fail_doc = !is_trybuild && file_contains(&path, "compile_fail")?;
             if !is_trybuild && !is_compile_fail_doc {
                 continue;
@@ -2017,7 +2779,7 @@ fn scan_trybuild_and_native(root: &Path, index: &mut Index) -> Result<()> {
                 "compile_fail doctest".to_string()
             };
             let gate = if is_trybuild {
-                Some("verify,ci")
+                Some("test")
             } else {
                 Some("native-compile")
             };
@@ -2080,7 +2842,7 @@ fn scan_invariant_file(
     path: &Path,
     carrier: &str,
     evidence: impl Into<String>,
-    gate: Option<&'static str>,
+    gate: Option<&str>,
 ) -> Result<()> {
     scan_invariant_file_filtered(root, index, path, carrier, evidence, gate, |_| true)
 }
@@ -2091,7 +2853,7 @@ fn scan_native_compile_invariant_file(
     path: &Path,
     carrier: &str,
     evidence: impl Into<String>,
-    gate: Option<&'static str>,
+    gate: Option<&str>,
 ) -> Result<()> {
     scan_invariant_file_filtered(root, index, path, carrier, evidence, gate, |rule| {
         rule.metadata
@@ -2106,7 +2868,7 @@ fn scan_invariant_file_filtered(
     path: &Path,
     carrier: &str,
     evidence: impl Into<String>,
-    gate: Option<&'static str>,
+    gate: Option<&str>,
     include_rule: impl FnMut(&FoundRule) -> bool,
 ) -> Result<()> {
     if !path.exists() {
@@ -2165,7 +2927,7 @@ fn scan_extracted_invariant_rules_filtered(
     found_invariants: &[FoundInvariant],
     carrier: &str,
     evidence: impl Into<String>,
-    gate: Option<&'static str>,
+    gate: Option<&str>,
     mut include_rule: impl FnMut(&FoundRule) -> bool,
 ) -> Result<()> {
     let evidence = evidence.into();
@@ -2199,13 +2961,25 @@ fn scan_extracted_invariant_rules_filtered(
     Ok(())
 }
 
+#[cfg(test)]
 fn scan_source_invariant_file(
     root: &Path,
     index: &mut Index,
     path: &Path,
     carrier: &str,
     evidence: impl Into<String>,
-    gate: Option<&'static str>,
+) -> Result<()> {
+    let reachable = cargo_target_reaches(root, path)?;
+    scan_source_invariant_file_with_reachability(root, index, path, carrier, evidence, reachable)
+}
+
+fn scan_source_invariant_file_with_reachability(
+    root: &Path,
+    index: &mut Index,
+    path: &Path,
+    carrier: &str,
+    evidence: impl Into<String>,
+    cargo_reachable: bool,
 ) -> Result<()> {
     if !path.exists() {
         index.findings.push(finding(
@@ -2216,9 +2990,24 @@ fn scan_source_invariant_file(
         return Ok(());
     }
     let evidence = evidence.into();
-    let gate_text = gate.unwrap_or("missing").to_string();
-    let status = if gate.is_some() { "ok" } else { "missing-gate" }.to_string();
     let found_invariants = extract_source_invariants(root, path)?;
+    // Source membership follows typed/stable evidence, never directory names. Native/manual are
+    // intrinsic source carriers; real Rust test symbols enroll the carrier in `test`, while the
+    // cross-file wiring guard is identified by its stable invariant ID.
+    let mut bindings = BTreeSet::from(["manual/opt-in", "native-compile"]);
+    if cargo_reachable && !collect_test_names(path)?.is_empty() {
+        bindings.insert(crate::execution_profiles::ExecutionProfile::Test.as_str());
+    }
+    if found_invariants
+        .iter()
+        .flat_map(|invariant| &invariant.rules)
+        .any(|rule| rule.id == "WIRING-DEPS-INFRA-ONLY-01")
+    {
+        bindings.insert(crate::execution_profiles::ExecutionProfile::Check.as_str());
+    }
+    let gate_text = bindings.into_iter().collect::<Vec<_>>().join(",");
+    let gate = Some(gate_text.as_str());
+    let status = "ok".to_string();
     for found in &found_invariants {
         for invalid in &found.invalid {
             let rule = if invalid.starts_with("metadata-") {
@@ -2259,13 +3048,6 @@ fn scan_source_invariant_file(
                 anti_vacuity: metadata.anti_vacuity.clone(),
             });
         }
-    }
-    if gate.is_none() && !found_invariants.is_empty() {
-        index.findings.push(finding(
-            Rule::MissingGate,
-            rel(root, path),
-            "carrier 缺 gate 证据",
-        ));
     }
     Ok(())
 }
@@ -2451,10 +3233,18 @@ impl RuleLevel {
                         (
                             ExecutionLevel::NativeCompile,
                             SourceKind::Code | SourceKind::Rustdoc
-                        ) | (ExecutionLevel::Verify, SourceKind::Trybuild)
+                        ) | (
+                            ExecutionLevel::Profile(
+                                crate::execution_profiles::ExecutionProfile::Test
+                            ),
+                            SourceKind::Trybuild
+                        )
                     ))
                     || (carrier == "xtask"
-                        && metadata.exec == ExecutionLevel::Verify
+                        && metadata.exec
+                            == ExecutionLevel::Profile(
+                                crate::execution_profiles::ExecutionProfile::Check,
+                            )
                         && metadata.source_kind == SourceKind::Codegen)
             }
         }
@@ -2463,9 +3253,7 @@ impl RuleLevel {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ExecutionLevel {
-    Verify,
-    CiOnly,
-    Integration,
+    Profile(crate::execution_profiles::ExecutionProfile),
     ManualOptIn,
     NativeCompile,
 }
@@ -2473,9 +3261,7 @@ enum ExecutionLevel {
 impl ExecutionLevel {
     fn as_str(self) -> &'static str {
         match self {
-            Self::Verify => "verify",
-            Self::CiOnly => "ci-only",
-            Self::Integration => "integration",
+            Self::Profile(profile) => profile.as_str(),
             Self::ManualOptIn => "manual/opt-in",
             Self::NativeCompile => "native-compile",
         }
@@ -2483,12 +3269,11 @@ impl ExecutionLevel {
 
     fn parse(value: &str) -> Option<Self> {
         match value {
-            "verify" => Some(Self::Verify),
-            "ci-only" => Some(Self::CiOnly),
-            "integration" => Some(Self::Integration),
             "manual/opt-in" => Some(Self::ManualOptIn),
             "native-compile" => Some(Self::NativeCompile),
-            _ => None,
+            _ => crate::execution_profiles::ExecutionProfile::from_str(value)
+                .ok()
+                .map(Self::Profile),
         }
     }
 
@@ -2496,9 +3281,7 @@ impl ExecutionLevel {
         match self {
             Self::NativeCompile => gate_has(gate, "native-compile"),
             Self::ManualOptIn => gate_has(gate, "manual/opt-in"),
-            Self::Verify => gate_has(gate, "verify"),
-            Self::CiOnly => gate_has(gate, "ci"),
-            Self::Integration => gate_has(gate, "integration"),
+            Self::Profile(profile) => gate_has(gate, profile.as_str()),
         }
     }
 }
@@ -2890,321 +3673,74 @@ fn declarative_comment_invariant_rest<'a>(line: &'a str, prefixes: &[&str]) -> O
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum OrchestratorReason {
-    RegistryAndPlanDerivation,
-    PlanExecution,
+enum SupportCarrierBinding {
+    Profile(crate::execution_profiles::ExecutionProfile),
+    ManualOptIn,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SupportReason {
-    SharedGateImplementation,
-    CommandInfrastructure,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum GateDeclarationRole {
-    PlanStep,
-    Orchestrator(OrchestratorReason),
-    Support(SupportReason),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct GateDeclaration {
-    path: &'static str,
-    tokens: &'static str,
-    role: GateDeclarationRole,
-}
-
-const META_TOKENS: &str = "verify,ci,ci-meta";
-const COVERAGE_TOKENS: &str = "ci,ci-coverage";
-const XTASK_GATE_DECLARATIONS: &[GateDeclaration] = &[
-    GateDeclaration {
-        path: "xtask/src/ci_lanes.rs",
-        tokens: "native-compile,verify,ci,ci-meta,ci-core,ci-local-only,ci-security,ci-coverage,audit,integration",
-        role: GateDeclarationRole::Orchestrator(OrchestratorReason::RegistryAndPlanDerivation),
-    },
-    GateDeclaration {
-        path: "xtask/src/integration_shards.rs",
-        tokens: "native-compile,integration",
-        role: GateDeclarationRole::Orchestrator(OrchestratorReason::RegistryAndPlanDerivation),
-    },
-    GateDeclaration {
-        path: "xtask/src/nextest.rs",
-        tokens: "native-compile,verify,ci-core,ci-local-only,integration",
-        role: GateDeclarationRole::Orchestrator(OrchestratorReason::PlanExecution),
-    },
-    GateDeclaration {
-        path: "xtask/src/verify.rs",
-        tokens: "verify,ci,ci-meta,ci-core,ci-local-only,ci-security,ci-coverage,audit,integration",
-        role: GateDeclarationRole::Orchestrator(OrchestratorReason::PlanExecution),
-    },
-    GateDeclaration {
-        path: "xtask/src/archrules.rs",
-        tokens: META_TOKENS,
-        role: GateDeclarationRole::PlanStep,
-    },
-    GateDeclaration {
-        path: "xtask/src/assembly.rs",
-        tokens: META_TOKENS,
-        role: GateDeclarationRole::PlanStep,
-    },
-    GateDeclaration {
-        path: "xtask/src/assembly_artifacts.rs",
-        tokens: META_TOKENS,
-        role: GateDeclarationRole::PlanStep,
-    },
-    GateDeclaration {
-        path: "xtask/src/assembly_codegen.rs",
-        tokens: META_TOKENS,
-        role: GateDeclarationRole::PlanStep,
-    },
-    GateDeclaration {
-        path: "xtask/src/assembly_lock.rs",
-        tokens: "native-compile,verify,ci,ci-meta",
-        role: GateDeclarationRole::PlanStep,
-    },
-    GateDeclaration {
-        path: "xtask/src/graph.rs",
-        tokens: META_TOKENS,
-        role: GateDeclarationRole::PlanStep,
-    },
-    GateDeclaration {
-        path: "xtask/src/codegen.rs",
-        tokens: META_TOKENS,
-        role: GateDeclarationRole::PlanStep,
-    },
-    GateDeclaration {
-        path: "xtask/src/l2_assurance.rs",
-        tokens: "native-compile,verify,ci,ci-meta",
-        role: GateDeclarationRole::PlanStep,
-    },
-    GateDeclaration {
-        path: "xtask/src/provider_capabilities.rs",
-        tokens: META_TOKENS,
-        role: GateDeclarationRole::PlanStep,
-    },
-    GateDeclaration {
-        path: "xtask/src/localtx_coverage.rs",
-        tokens: META_TOKENS,
-        role: GateDeclarationRole::PlanStep,
-    },
-    GateDeclaration {
-        path: "xtask/src/command_symmetry.rs",
-        tokens: META_TOKENS,
-        role: GateDeclarationRole::PlanStep,
-    },
-    GateDeclaration {
-        path: "xtask/src/ci_entry_guard.rs",
-        tokens: META_TOKENS,
-        role: GateDeclarationRole::PlanStep,
-    },
-    GateDeclaration {
-        path: "xtask/src/consistency_effects.rs",
-        tokens: META_TOKENS,
-        role: GateDeclarationRole::PlanStep,
-    },
-    GateDeclaration {
-        path: "xtask/src/localonly_evidence.rs",
-        tokens: "native-compile,verify,ci-local-only",
-        role: GateDeclarationRole::PlanStep,
-    },
-    GateDeclaration {
-        path: "xtask/src/contract_binding_guard.rs",
-        tokens: META_TOKENS,
-        role: GateDeclarationRole::PlanStep,
-    },
-    GateDeclaration {
-        path: "xtask/src/consistency_fixtures.rs",
-        tokens: META_TOKENS,
-        role: GateDeclarationRole::PlanStep,
-    },
-    GateDeclaration {
-        path: "xtask/src/defergate.rs",
-        tokens: META_TOKENS,
-        role: GateDeclarationRole::PlanStep,
-    },
-    GateDeclaration {
-        path: "xtask/src/promtool.rs",
-        tokens: META_TOKENS,
-        role: GateDeclarationRole::PlanStep,
-    },
-    GateDeclaration {
-        path: "xtask/src/outbox_same_id_guard.rs",
-        tokens: META_TOKENS,
-        role: GateDeclarationRole::PlanStep,
-    },
-    GateDeclaration {
-        path: "xtask/src/event_transport_guard.rs",
-        tokens: META_TOKENS,
-        role: GateDeclarationRole::PlanStep,
-    },
-    GateDeclaration {
-        path: "xtask/src/inbox_cutover_guard.rs",
-        tokens: META_TOKENS,
-        role: GateDeclarationRole::PlanStep,
-    },
-    GateDeclaration {
-        path: "xtask/src/dlx_lifecycle_funnel.rs",
-        tokens: META_TOKENS,
-        role: GateDeclarationRole::PlanStep,
-    },
-    GateDeclaration {
-        path: "xtask/src/layerdeps.rs",
-        tokens: META_TOKENS,
-        role: GateDeclarationRole::PlanStep,
-    },
-    GateDeclaration {
-        path: "xtask/src/migrations.rs",
-        tokens: META_TOKENS,
-        role: GateDeclarationRole::PlanStep,
-    },
-    GateDeclaration {
-        path: "xtask/src/pdpallow.rs",
-        tokens: META_TOKENS,
-        role: GateDeclarationRole::PlanStep,
-    },
-    GateDeclaration {
-        path: "xtask/src/pg_tenant_tx_guard.rs",
-        tokens: META_TOKENS,
-        role: GateDeclarationRole::PlanStep,
-    },
-    GateDeclaration {
-        path: "xtask/src/reconcile_outbox_command_guard.rs",
-        tokens: META_TOKENS,
-        role: GateDeclarationRole::PlanStep,
-    },
-    GateDeclaration {
-        path: "xtask/src/repo_scope_guard.rs",
-        tokens: META_TOKENS,
-        role: GateDeclarationRole::PlanStep,
-    },
-    GateDeclaration {
-        path: "xtask/src/runtime_baseline.rs",
-        tokens: META_TOKENS,
-        role: GateDeclarationRole::PlanStep,
-    },
-    GateDeclaration {
-        path: "xtask/src/runtime_root_guard.rs",
-        tokens: META_TOKENS,
-        role: GateDeclarationRole::PlanStep,
-    },
-    GateDeclaration {
-        path: "xtask/src/runtime_env_guard.rs",
-        tokens: META_TOKENS,
-        role: GateDeclarationRole::PlanStep,
-    },
-    GateDeclaration {
-        path: "xtask/src/runtime_deps_guard.rs",
-        tokens: META_TOKENS,
-        role: GateDeclarationRole::PlanStep,
-    },
-    GateDeclaration {
-        path: "xtask/src/schema_rls.rs",
-        tokens: META_TOKENS,
-        role: GateDeclarationRole::PlanStep,
-    },
-    GateDeclaration {
-        path: "xtask/src/setlocal_funnel.rs",
-        tokens: META_TOKENS,
-        role: GateDeclarationRole::PlanStep,
-    },
-    GateDeclaration {
-        path: "xtask/src/shipped_feature_guard.rs",
-        tokens: META_TOKENS,
-        role: GateDeclarationRole::PlanStep,
-    },
-    GateDeclaration {
-        path: "xtask/src/tenancy_closeout.rs",
-        tokens: META_TOKENS,
-        role: GateDeclarationRole::PlanStep,
-    },
-    GateDeclaration {
-        path: "xtask/src/wsdeps.rs",
-        tokens: META_TOKENS,
-        role: GateDeclarationRole::PlanStep,
-    },
-    GateDeclaration {
-        path: "xtask/src/source_semantic_guard.rs",
-        tokens: META_TOKENS,
-        role: GateDeclarationRole::PlanStep,
-    },
-    GateDeclaration {
-        path: "xtask/src/contract/breaking.rs",
-        tokens: META_TOKENS,
-        role: GateDeclarationRole::PlanStep,
-    },
-    GateDeclaration {
-        path: "xtask/src/contract/validate.rs",
-        tokens: META_TOKENS,
-        role: GateDeclarationRole::PlanStep,
-    },
-    GateDeclaration {
-        path: "xtask/src/coverage.rs",
-        tokens: COVERAGE_TOKENS,
-        role: GateDeclarationRole::PlanStep,
-    },
-    GateDeclaration {
-        path: "xtask/src/publicapi.rs",
-        tokens: "ci,ci-coverage,standalone",
-        role: GateDeclarationRole::PlanStep,
-    },
-    GateDeclaration {
-        path: "xtask/src/layers.rs",
-        tokens: META_TOKENS,
-        role: GateDeclarationRole::Support(SupportReason::SharedGateImplementation),
-    },
-    GateDeclaration {
-        path: "xtask/src/src_scan.rs",
-        tokens: META_TOKENS,
-        role: GateDeclarationRole::Support(SupportReason::SharedGateImplementation),
-    },
-    GateDeclaration {
-        path: "xtask/src/contract/manifest.rs",
-        tokens: META_TOKENS,
-        role: GateDeclarationRole::Support(SupportReason::SharedGateImplementation),
-    },
-    GateDeclaration {
-        path: "xtask/src/contract/protection.rs",
-        tokens: META_TOKENS,
-        role: GateDeclarationRole::Support(SupportReason::SharedGateImplementation),
-    },
-    GateDeclaration {
-        path: "xtask/src/contract/redaction.rs",
-        tokens: META_TOKENS,
-        role: GateDeclarationRole::Support(SupportReason::SharedGateImplementation),
-    },
-    GateDeclaration {
-        path: "xtask/src/pathsafe.rs",
-        tokens: META_TOKENS,
-        role: GateDeclarationRole::Support(SupportReason::SharedGateImplementation),
-    },
-    GateDeclaration {
-        path: "xtask/src/diffcov.rs",
-        tokens: COVERAGE_TOKENS,
-        role: GateDeclarationRole::Support(SupportReason::SharedGateImplementation),
-    },
-    GateDeclaration {
-        path: "xtask/src/cmd.rs",
-        tokens: "manual/opt-in",
-        role: GateDeclarationRole::Support(SupportReason::CommandInfrastructure),
-    },
-    GateDeclaration {
-        path: "xtask/src/diagnostic.rs",
-        tokens: "manual/opt-in",
-        role: GateDeclarationRole::Support(SupportReason::CommandInfrastructure),
-    },
+const XTASK_SUPPORT_CARRIERS: &[(&str, SupportCarrierBinding)] = &[
+    (
+        "xtask/src/verify.rs",
+        SupportCarrierBinding::Profile(crate::execution_profiles::ExecutionProfile::Check),
+    ),
+    (
+        "xtask/src/layers.rs",
+        SupportCarrierBinding::Profile(crate::execution_profiles::ExecutionProfile::Check),
+    ),
+    (
+        "xtask/src/src_scan.rs",
+        SupportCarrierBinding::Profile(crate::execution_profiles::ExecutionProfile::Check),
+    ),
+    (
+        "xtask/src/contract/manifest.rs",
+        SupportCarrierBinding::Profile(crate::execution_profiles::ExecutionProfile::Check),
+    ),
+    (
+        "xtask/src/contract/protection.rs",
+        SupportCarrierBinding::Profile(crate::execution_profiles::ExecutionProfile::Check),
+    ),
+    (
+        "xtask/src/contract/redaction.rs",
+        SupportCarrierBinding::Profile(crate::execution_profiles::ExecutionProfile::Check),
+    ),
+    (
+        "xtask/src/pathsafe.rs",
+        SupportCarrierBinding::Profile(crate::execution_profiles::ExecutionProfile::Check),
+    ),
+    (
+        "xtask/src/diffcov.rs",
+        SupportCarrierBinding::Profile(crate::execution_profiles::ExecutionProfile::ReleaseCheck),
+    ),
+    ("xtask/src/cmd.rs", SupportCarrierBinding::ManualOptIn),
+    (
+        "xtask/src/diagnostic.rs",
+        SupportCarrierBinding::ManualOptIn,
+    ),
 ];
 
-fn xtask_gate_declarations() -> &'static [GateDeclaration] {
-    XTASK_GATE_DECLARATIONS
-}
-
-fn xtask_gate(root: &Path, path: &Path) -> Option<&'static str> {
+fn xtask_gate(root: &Path, path: &Path) -> Result<Option<String>> {
     let relative = rel(root, path);
-    xtask_gate_declarations()
+    let mut bindings = BTreeSet::new();
+    for unit in crate::execution_profiles::ExecutionUnitSpec::all() {
+        if let crate::execution_profiles::ExecutionUnitSpec::Gate(gate) = unit
+            && gate.id().carrier_file() == Some(relative.as_str())
+        {
+            bindings.insert(unit.primary_owner().as_str());
+        }
+    }
+    if let Some((_, binding)) = XTASK_SUPPORT_CARRIERS
         .iter()
-        .find(|declaration| declaration.path == relative)
-        .map(|declaration| declaration.tokens)
+        .find(|(carrier, _)| *carrier == relative)
+    {
+        bindings.insert(match binding {
+            SupportCarrierBinding::Profile(profile) => profile.as_str(),
+            SupportCarrierBinding::ManualOptIn => "manual/opt-in",
+        });
+    }
+    if !collect_test_names(path)?.is_empty() {
+        bindings.insert(crate::execution_profiles::ExecutionProfile::Test.as_str());
+    }
+    Ok((!bindings.is_empty()).then(|| bindings.into_iter().collect::<Vec<_>>().join(",")))
 }
 
 fn xtask_evidence(path: &Path) -> String {
@@ -3217,6 +3753,7 @@ fn xtask_evidence(path: &Path) -> String {
 
 #[derive(Debug, Default)]
 struct TrybuildFixtures {
+    harnesses: BTreeSet<PathBuf>,
     compile_fail: BTreeSet<PathBuf>,
     pass: BTreeSet<PathBuf>,
     orphan_stderr: Vec<PathBuf>,
@@ -3230,14 +3767,21 @@ fn trybuild_fixtures(root: &Path) -> Result<TrybuildFixtures> {
             continue;
         }
         for path in rust_files_under(&dir)? {
-            let path_str = rel(root, &path);
-            if !path_str.contains("/tests/") || !file_contains(&path, "trybuild::TestCases")? {
+            if !file_contains(&path, "trybuild::TestCases")?
+                || !cargo_test_target_roots(root, &path)?.contains(&path)
+            {
                 continue;
             }
-            let Some(crate_root) = crate_root_for_test_harness(&path) else {
+            let calls = trybuild_calls(&path)?;
+            if calls.is_empty() {
+                continue;
+            }
+            let Some(manifest) = nearest_package_manifest(root, &path) else {
                 continue;
             };
-            for call in trybuild_calls(&path)? {
+            fixtures.harnesses.insert(path.clone());
+            let crate_root = manifest.parent().unwrap_or(root).to_path_buf();
+            for call in calls {
                 let expanded = expand_trybuild_pattern(&crate_root, &call.pattern)?;
                 match call.kind {
                     TrybuildKind::CompileFail => fixtures.compile_fail.extend(expanded),
@@ -3279,38 +3823,264 @@ struct TrybuildCall {
 fn trybuild_calls(path: &Path) -> Result<Vec<TrybuildCall>> {
     let text = fs::read_to_string(path)
         .with_context(|| format!("读取 trybuild harness `{}`", path.display()))?;
-    let mut calls = Vec::new();
-    for line in text.lines() {
-        for (needle, kind) in [
-            (".compile_fail(\"", TrybuildKind::CompileFail),
-            (".pass(\"", TrybuildKind::Pass),
-        ] {
-            let Some(start) = line.find(needle) else {
-                continue;
-            };
-            let rest = &line[start + needle.len()..];
-            let Some(end) = rest.find('"') else {
-                continue;
-            };
-            calls.push(TrybuildCall {
-                kind,
-                pattern: rest[..end].to_string(),
+    let file = syn::parse_file(&text)
+        .with_context(|| format!("解析 trybuild harness `{}`", path.display()))?;
+    let context = TestCfgContext::for_source(path)?;
+    if !attrs_prove_test_execution(&file.attrs, &context) {
+        return Ok(Vec::new());
+    }
+    struct HarnessCollector<'a> {
+        disabled: usize,
+        calls: Vec<TrybuildCall>,
+        context: &'a TestCfgContext,
+    }
+    impl<'ast> Visit<'ast> for HarnessCollector<'_> {
+        fn visit_item_mod(&mut self, module: &'ast syn::ItemMod) {
+            let disabled = !attrs_prove_test_execution(&module.attrs, self.context);
+            self.disabled += usize::from(disabled);
+            if module.content.is_some() {
+                syn::visit::visit_item_mod(self, module);
+            }
+            self.disabled -= usize::from(disabled);
+        }
+
+        fn visit_item_fn(&mut self, function: &'ast syn::ItemFn) {
+            let is_test = function.attrs.iter().any(|attr| {
+                attr.path().segments.last().is_some_and(|segment| {
+                    matches!(segment.ident.to_string().as_str(), "test" | "rstest")
+                })
             });
+            if self.disabled == 0
+                && is_test
+                && attrs_prove_test_execution(&function.attrs, self.context)
+                && !function.block.stmts.is_empty()
+            {
+                self.calls
+                    .extend(trybuild_calls_in_test(function, self.context));
+            }
         }
     }
-    Ok(calls)
+    let mut collector = HarnessCollector {
+        disabled: 0,
+        calls: Vec::new(),
+        context: &context,
+    };
+    collector.visit_file(&file);
+    Ok(collector.calls)
 }
 
-fn crate_root_for_test_harness(path: &Path) -> Option<PathBuf> {
-    let components: Vec<_> = path.components().collect();
-    let tests_pos = components
-        .iter()
-        .position(|c| c.as_os_str().to_str() == Some("tests"))?;
-    let mut out = PathBuf::new();
-    for component in &components[..tests_pos] {
-        out.push(component.as_os_str());
+fn trybuild_calls_in_test(function: &syn::ItemFn, context: &TestCfgContext) -> Vec<TrybuildCall> {
+    let mut calls = Vec::new();
+    walk_trybuild_block(&function.block, BTreeSet::new(), &mut calls, context);
+    calls
+}
+
+fn walk_trybuild_block(
+    block: &syn::Block,
+    mut constructors: BTreeSet<String>,
+    calls: &mut Vec<TrybuildCall>,
+    context: &TestCfgContext,
+) {
+    for statement in &block.stmts {
+        match statement {
+            syn::Stmt::Local(local) if attrs_prove_test_execution(&local.attrs, context) => {
+                if let Some(init) = &local.init {
+                    collect_trybuild_expr_calls(&init.expr, &constructors, calls, context);
+                }
+                if let syn::Pat::Ident(binding) = &local.pat {
+                    if local
+                        .init
+                        .as_ref()
+                        .is_some_and(|init| is_trybuild_constructor(&init.expr))
+                    {
+                        constructors.insert(binding.ident.to_string());
+                    } else {
+                        constructors.remove(&binding.ident.to_string());
+                    }
+                }
+            }
+            syn::Stmt::Expr(expression, _) if !expr_statically_disabled(expression, context) => {
+                collect_trybuild_expr_calls(expression, &constructors, calls, context);
+            }
+            // Nested items are declarations, not proof that their bodies execute in this test.
+            syn::Stmt::Item(_)
+            | syn::Stmt::Macro(_)
+            | syn::Stmt::Local(_)
+            | syn::Stmt::Expr(_, _) => {}
+        }
     }
-    Some(out)
+}
+
+fn collect_trybuild_expr_calls(
+    expression: &syn::Expr,
+    constructors: &BTreeSet<String>,
+    calls: &mut Vec<TrybuildCall>,
+    context: &TestCfgContext,
+) {
+    struct LiveCalls<'a> {
+        constructors: &'a BTreeSet<String>,
+        calls: &'a mut Vec<TrybuildCall>,
+        context: &'a TestCfgContext,
+    }
+    impl<'ast> Visit<'ast> for LiveCalls<'_> {
+        fn visit_block(&mut self, block: &'ast syn::Block) {
+            walk_trybuild_block(block, self.constructors.clone(), self.calls, self.context);
+        }
+
+        fn visit_item_fn(&mut self, _function: &'ast syn::ItemFn) {}
+
+        fn visit_expr_closure(&mut self, _closure: &'ast syn::ExprClosure) {}
+
+        fn visit_expr_async(&mut self, _async_block: &'ast syn::ExprAsync) {}
+
+        fn visit_expr_const(&mut self, _const_block: &'ast syn::ExprConst) {}
+
+        fn visit_expr_block(&mut self, block: &'ast syn::ExprBlock) {
+            if attrs_prove_test_execution(&block.attrs, self.context) {
+                walk_trybuild_block(
+                    &block.block,
+                    self.constructors.clone(),
+                    self.calls,
+                    self.context,
+                );
+            }
+        }
+
+        fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+            if !attrs_prove_test_execution(&call.attrs, self.context) {
+                return;
+            }
+            let receiver_is_cases = is_trybuild_constructor(&call.receiver)
+                || matches!(call.receiver.as_ref(), syn::Expr::Path(path)
+                    if path.path.get_ident().is_some_and(|ident| self.constructors.contains(&ident.to_string())));
+            let kind = match call.method.to_string().as_str() {
+                "compile_fail" => Some(TrybuildKind::CompileFail),
+                "pass" => Some(TrybuildKind::Pass),
+                _ => None,
+            };
+            if receiver_is_cases
+                && let Some(kind) = kind
+                && let Some(syn::Expr::Lit(argument)) = call.args.first()
+                && let syn::Lit::Str(pattern) = &argument.lit
+            {
+                self.calls.push(TrybuildCall {
+                    kind,
+                    pattern: pattern.value(),
+                });
+            }
+            syn::visit::visit_expr_method_call(self, call);
+        }
+    }
+    if expr_statically_disabled(expression, context) {
+        return;
+    }
+    let mut visitor = LiveCalls {
+        constructors,
+        calls,
+        context,
+    };
+    visitor.visit_expr(expression);
+}
+
+fn expr_statically_disabled(expression: &syn::Expr, context: &TestCfgContext) -> bool {
+    let attrs = match expression {
+        syn::Expr::Array(expr) => &expr.attrs,
+        syn::Expr::Assign(expr) => &expr.attrs,
+        syn::Expr::Async(expr) => &expr.attrs,
+        syn::Expr::Await(expr) => &expr.attrs,
+        syn::Expr::Binary(expr) => &expr.attrs,
+        syn::Expr::Block(expr) => &expr.attrs,
+        syn::Expr::Break(expr) => &expr.attrs,
+        syn::Expr::Call(expr) => &expr.attrs,
+        syn::Expr::Cast(expr) => &expr.attrs,
+        syn::Expr::Closure(expr) => &expr.attrs,
+        syn::Expr::Const(expr) => &expr.attrs,
+        syn::Expr::Continue(expr) => &expr.attrs,
+        syn::Expr::Field(expr) => &expr.attrs,
+        syn::Expr::ForLoop(expr) => &expr.attrs,
+        syn::Expr::Group(expr) => &expr.attrs,
+        syn::Expr::If(expr) => &expr.attrs,
+        syn::Expr::Index(expr) => &expr.attrs,
+        syn::Expr::Infer(expr) => &expr.attrs,
+        syn::Expr::Let(expr) => &expr.attrs,
+        syn::Expr::Lit(expr) => &expr.attrs,
+        syn::Expr::Loop(expr) => &expr.attrs,
+        syn::Expr::Macro(expr) => &expr.attrs,
+        syn::Expr::Match(expr) => &expr.attrs,
+        syn::Expr::MethodCall(expr) => &expr.attrs,
+        syn::Expr::Paren(expr) => &expr.attrs,
+        syn::Expr::Path(expr) => &expr.attrs,
+        syn::Expr::Range(expr) => &expr.attrs,
+        syn::Expr::RawAddr(expr) => &expr.attrs,
+        syn::Expr::Reference(expr) => &expr.attrs,
+        syn::Expr::Repeat(expr) => &expr.attrs,
+        syn::Expr::Return(expr) => &expr.attrs,
+        syn::Expr::Struct(expr) => &expr.attrs,
+        syn::Expr::Try(expr) => &expr.attrs,
+        syn::Expr::TryBlock(expr) => &expr.attrs,
+        syn::Expr::Tuple(expr) => &expr.attrs,
+        syn::Expr::Unary(expr) => &expr.attrs,
+        syn::Expr::Unsafe(expr) => &expr.attrs,
+        syn::Expr::Verbatim(_) => return false,
+        syn::Expr::While(expr) => &expr.attrs,
+        syn::Expr::Yield(expr) => &expr.attrs,
+        _ => return false,
+    };
+    !attrs_prove_test_execution(attrs, context)
+}
+
+fn is_trybuild_constructor(expression: &syn::Expr) -> bool {
+    let syn::Expr::Call(call) = expression else {
+        return false;
+    };
+    let syn::Expr::Path(function) = call.func.as_ref() else {
+        return false;
+    };
+    let segments = function
+        .path
+        .segments
+        .iter()
+        .map(|segment| segment.ident.to_string())
+        .collect::<Vec<_>>();
+    segments.ends_with(&[
+        "trybuild".to_string(),
+        "TestCases".to_string(),
+        "new".to_string(),
+    ])
+}
+
+fn cargo_test_target_roots(root: &Path, path: &Path) -> Result<BTreeSet<PathBuf>> {
+    let Some(manifest) = nearest_package_manifest(root, path) else {
+        return Ok(BTreeSet::new());
+    };
+    let crate_root = manifest.parent().unwrap_or(root);
+    let value = parse_toml(&manifest)?;
+    let mut targets = BTreeSet::new();
+    if let Some(explicit) = value.get("test").and_then(toml::Value::as_array) {
+        for target in explicit {
+            if let Some(target_path) = explicit_target_path(crate_root, "test", target) {
+                targets.insert(target_path);
+            }
+        }
+    }
+    let automatic = value
+        .get("package")
+        .and_then(|package| package.get("autotests"))
+        .and_then(toml::Value::as_bool)
+        .unwrap_or(true);
+    let tests = crate_root.join("tests");
+    if automatic && tests.is_dir() {
+        for entry in fs::read_dir(tests)? {
+            let candidate = entry?.path();
+            if candidate.extension().and_then(|ext| ext.to_str()) == Some("rs") {
+                targets.insert(candidate);
+            } else if candidate.is_dir() && candidate.join("main.rs").is_file() {
+                targets.insert(candidate.join("main.rs"));
+            }
+        }
+    }
+    targets.retain(|target| target.is_file());
+    Ok(targets)
 }
 
 fn expand_trybuild_pattern(crate_root: &Path, pattern: &str) -> Result<Vec<PathBuf>> {
@@ -3581,7 +4351,7 @@ mod tests {
         let file = root.join("xtask/src/demo.rs");
         write(
             &file,
-            "//! INVARIANT: FOO-BAR-01 · BAZ-QUX-02 / BAD-ID-1 { level = \"Medium\", exec = \"verify\", source = \"code\" }\n",
+            "//! INVARIANT: FOO-BAR-01 · BAZ-QUX-02 / BAD-ID-1 { level = \"Medium\", exec = \"check\", source = \"code\" }\n",
         )?;
         let found = extract_invariants(&root, &file)?;
         assert_eq!(rule_ids(&found[0]), vec!["BAZ-QUX-02", "FOO-BAR-01"]);
@@ -3596,7 +4366,7 @@ mod tests {
         let file = root.join("xtask/src/demo.rs");
         write(
             &file,
-            "//! INVARIANT: LAYER-DEPS-ROUTE-FUNNEL-01，ADR-009 { level = \"Medium\", exec = \"verify\", source = \"code\" }\n",
+            "//! INVARIANT: LAYER-DEPS-ROUTE-FUNNEL-01，ADR-009 { level = \"Medium\", exec = \"check\", source = \"code\" }\n",
         )?;
         let found = extract_invariants(&root, &file)?;
         assert_eq!(rule_ids(&found[0]), vec!["LAYER-DEPS-ROUTE-FUNNEL-01"]);
@@ -3611,7 +4381,7 @@ mod tests {
         let file = root.join("lints/rss_demo/src/lib.rs");
         write(
             &file,
-            "//! 上游类型系统保证（INVARIANT: REF-ONLY-01 { level = \"Medium\", exec = \"verify\", source = \"dylint\" }`crates/demo/src/lib.rs`）。\n",
+            "//! 上游类型系统保证（INVARIANT: REF-ONLY-01 { level = \"Medium\", exec = \"check\", source = \"dylint\" }`crates/demo/src/lib.rs`）。\n",
         )?;
         let found = extract_invariants(&root, &file)?;
         assert!(found.is_empty(), "{found:?}");
@@ -3625,7 +4395,7 @@ mod tests {
         let file = root.join("xtask/src/demo.rs");
         write(&file, "//! INVARIANT: DEMO-MISSING-01\n")?;
         let mut index = Index::default();
-        scan_invariant_file(&root, &mut index, &file, "xtask", "demo", Some("verify"))?;
+        scan_invariant_file(&root, &mut index, &file, "xtask", "demo", Some("check"))?;
         assert!(index.records.is_empty());
         assert!(
             index
@@ -3645,7 +4415,7 @@ mod tests {
         let file = root.join("xtask/src/demo.rs");
         write(
             &file,
-            "//! INVARIANT: DEMO-BAD-01 { level = \"Soft\", exec = \"verify\", source = \"code\" }\n",
+            "//! INVARIANT: DEMO-BAD-01 { level = \"Soft\", exec = \"check\", source = \"code\" }\n",
         )?;
         let found = extract_invariants(&root, &file)?;
         assert!(
@@ -3656,7 +4426,7 @@ mod tests {
             found
         );
         let mut index = Index::default();
-        scan_invariant_file(&root, &mut index, &file, "xtask", "demo", Some("verify"))?;
+        scan_invariant_file(&root, &mut index, &file, "xtask", "demo", Some("check"))?;
         assert!(
             index
                 .findings
@@ -3672,7 +4442,7 @@ mod tests {
     #[test]
     fn invariant_parser_preserves_facet_and_codegen_hard_proof() -> Result<()> {
         let metadata = parse_metadata(
-            r#"level = "Hard", exec = "verify", source = "codegen", facet = "producer", golden = "generated/src/event/mod.rs", synthetic_red = "codegen::tests::event_red", anti_vacuity = "codegen::tests::event_green""#,
+            r#"level = "Hard", exec = "check", source = "codegen", facet = "producer", golden = "generated/src/event/mod.rs", synthetic_red = "codegen::tests::event_red", anti_vacuity = "codegen::tests::event_green""#,
         )
         .map_err(anyhow::Error::msg)?;
         assert_eq!(metadata.facet.as_deref(), Some("producer"));
@@ -3697,11 +4467,11 @@ mod tests {
         let file = root.join("xtask/src/demo.rs");
         write(
             &file,
-            "//! INVARIANT: DEMO-CODEGEN-01 { level = \"Hard\", exec = \"verify\", source = \"codegen\", facet = \"wire\", golden = \"generated/demo.rs\", synthetic_red = \"tests::red\", anti_vacuity = \"tests::green\" }\n",
+            "//! INVARIANT: DEMO-CODEGEN-01 { level = \"Hard\", exec = \"check\", source = \"codegen\", facet = \"wire\", golden = \"generated/demo.rs\", synthetic_red = \"tests::red\", anti_vacuity = \"tests::green\" }\n",
         )?;
         write(&root.join("generated/demo.rs"), "// golden\n")?;
         let mut index = Index::default();
-        scan_invariant_file(&root, &mut index, &file, "xtask", "demo", Some("verify"))?;
+        scan_invariant_file(&root, &mut index, &file, "xtask", "demo", Some("check"))?;
         assert!(
             !index
                 .findings
@@ -3720,12 +4490,12 @@ mod tests {
             id: "DEMO-CONFLICT-01".to_string(),
             facet: Some("wire".to_string()),
             level,
-            exec: ExecutionLevel::Verify,
+            exec: ExecutionLevel::Profile(crate::execution_profiles::ExecutionProfile::Check),
             source_kind: SourceKind::Code,
             carrier: "xtask".to_string(),
             source: "xtask/src/demo.rs:1".to_string(),
             evidence: "test".to_string(),
-            gate: "verify".to_string(),
+            gate: "check".to_string(),
             status: "ok".to_string(),
             native: None,
             golden: None,
@@ -3735,6 +4505,7 @@ mod tests {
         let mut index = Index {
             records: vec![record(RuleLevel::Medium), record(RuleLevel::Hard)],
             findings: Vec::new(),
+            test_evidence: TestEvidenceIndex::default(),
         };
         reject_conflicting_facets(&mut index);
         assert!(
@@ -3751,10 +4522,10 @@ mod tests {
         let file = root.join("xtask/src/demo.rs");
         write(
             &file,
-            "//! INVARIANT: DEMO-CI-01 { level = \"Medium\", exec = \"ci-only\", source = \"code\" }\n",
+            "//! INVARIANT: DEMO-CI-01 { level = \"Medium\", exec = \"release-check\", source = \"code\" }\n",
         )?;
         let mut index = Index::default();
-        scan_invariant_file(&root, &mut index, &file, "xtask", "demo", Some("verify"))?;
+        scan_invariant_file(&root, &mut index, &file, "xtask", "demo", Some("check"))?;
         assert!(
             index
                 .findings
@@ -3773,10 +4544,10 @@ mod tests {
         let file = root.join("xtask/src/demo.rs");
         write(
             &file,
-            "//! INVARIANT: DEMO-HARD-01 { level = \"Hard\", exec = \"verify\", source = \"code\" }\n",
+            "//! INVARIANT: DEMO-HARD-01 { level = \"Hard\", exec = \"check\", source = \"code\" }\n",
         )?;
         let mut index = Index::default();
-        scan_invariant_file(&root, &mut index, &file, "xtask", "demo", Some("verify"))?;
+        scan_invariant_file(&root, &mut index, &file, "xtask", "demo", Some("check"))?;
         assert!(
             index
                 .findings
@@ -3798,7 +4569,7 @@ mod tests {
             "//! INVARIANT: DEMO-MANUAL-01 { level = \"Medium\", exec = \"manual/opt-in\", source = \"code\" }\n",
         )?;
         let mut index = Index::default();
-        scan_invariant_file(&root, &mut index, &file, "xtask", "demo", Some("verify"))?;
+        scan_invariant_file(&root, &mut index, &file, "xtask", "demo", Some("check"))?;
         assert!(
             index
                 .findings
@@ -3831,14 +4602,7 @@ mod tests {
             "//! INVARIANT: DEMO-HARD-01 { level = \"Hard\", exec = \"native-compile\", source = \"code\" }\n",
         )?;
         let mut index = Index::default();
-        scan_source_invariant_file(
-            &root,
-            &mut index,
-            &file,
-            "native-hard",
-            "source",
-            Some("standalone"),
-        )?;
+        scan_source_invariant_file(&root, &mut index, &file, "native-hard", "source")?;
         assert!(
             index
                 .findings
@@ -3884,7 +4648,7 @@ members = ["rss_demo", "rss_orphan"]
         )?;
         write(
             &root.join("lints/rss_demo/src/lib.rs"),
-            "//! INVARIANT: DEMO-LINT-01 { level = \"Medium\", exec = \"verify\", source = \"dylint\" }\n",
+            "//! INVARIANT: DEMO-LINT-01 { level = \"Medium\", exec = \"check\", source = \"dylint\" }\n",
         )?;
         write(&root.join("lints/rss_demo/ui/main.rs"), "fn main() {}\n")?;
         let mut index = Index::default();
@@ -3921,7 +4685,7 @@ members = ["rss_demo", "rss_orphan"]
         let file = root.join("assemblies/runtime/src/module.rs");
         write(
             &file,
-            "/// follow-up #1448，落地后再以 `INVARIANT: WIRING-DEPS-INFRA-ONLY-01` 收口。\n",
+            "/// follow-up #1448，落地后再以 `INVARIANT: WIRING-DEPS-INFRA-ONLY-01` 收口。\npub fn carrier() {}\n",
         )?;
         let mut index = Index::default();
         scan_source_invariants(&root, &mut index)?;
@@ -3937,7 +4701,7 @@ members = ["rss_demo", "rss_orphan"]
         let file = root.join("crates/primitives/src/crypto.rs");
         write(
             &file,
-            "/// INVARIANT: CRYPTO-CONST-TIME-01 { level = \"Medium\", exec = \"manual/opt-in\", source = \"code\" } —— 实现必须常数时间。\n",
+            "/// INVARIANT: CRYPTO-CONST-TIME-01 { level = \"Medium\", exec = \"manual/opt-in\", source = \"code\" } —— 实现必须常数时间。\npub fn carrier() {}\n",
         )?;
         let mut index = Index::default();
         scan_source_invariants(&root, &mut index)?;
@@ -3956,7 +4720,7 @@ members = ["rss_demo", "rss_orphan"]
         let file = root.join("crates/primitives/src/crypto.rs");
         write(
             &file,
-            "/// INVARIANT: CRYPTO-CONST-TIME-01 —— Medium 守卫随 crypto W 行为 PR 落地。\n",
+            "/// INVARIANT: CRYPTO-CONST-TIME-01 —— Medium 守卫随 crypto W 行为 PR 落地。\npub fn carrier() {}\n",
         )?;
         let mut index = Index::default();
         scan_source_invariants(&root, &mut index)?;
@@ -3972,7 +4736,7 @@ members = ["rss_demo", "rss_orphan"]
         let file = root.join("crates/primitives/src/crypto.rs");
         write(
             &file,
-            "/// INVARIANT: CRYPTO-CONST-TIME-01 { level = \"Medium\", exec = \"manual/opt-in\", source = \"code\" } —— Medium 守卫随 crypto W 行为 PR 落地。\n",
+            "/// INVARIANT: CRYPTO-CONST-TIME-01 { level = \"Medium\", exec = \"manual/opt-in\", source = \"code\" } —— Medium 守卫随 crypto W 行为 PR 落地。\npub fn carrier() {}\n",
         )?;
         let mut index = Index::default();
         scan_source_invariants(&root, &mut index)?;
@@ -3990,94 +4754,112 @@ members = ["rss_demo", "rss_orphan"]
     }
 
     #[test]
-    fn nested_xtask_contract_modules_have_verify_gate() {
-        let root = Path::new("/repo");
-        assert_eq!(
-            xtask_gate(root, &root.join("xtask/src/contract/validate.rs")),
-            Some("verify,ci,ci-meta")
-        );
-        assert_eq!(
-            xtask_gate(root, &root.join("xtask/src/contract/breaking.rs")),
-            Some("verify,ci,ci-meta")
-        );
-    }
-
-    #[test]
-    fn amqp_cred_redact_carrier_gate_includes_verify() {
-        let gate = source_file_gate("adapters/amqp/src/conn_events.rs").unwrap_or("missing");
+    fn xtask_gate_membership_is_derived_from_the_canonical_gate_catalog() -> Result<()> {
+        let root = crate::workspace_root()?;
+        let mut seen = BTreeSet::new();
+        for gate in crate::ci_lanes::GateId::ALL {
+            let Some(carrier) = gate.carrier_file() else {
+                continue;
+            };
+            let membership = xtask_gate(&root, &root.join(carrier))?
+                .with_context(|| format!("missing typed carrier membership for {carrier}"))?;
+            assert!(
+                gate_has(Some(&membership), gate.spec().primary_owner().as_str()),
+                "{carrier} must project {}: {membership}",
+                gate.spec().primary_owner()
+            );
+            seen.insert(carrier);
+        }
         assert!(
-            gate.split(',').any(|tok| tok.trim() == "verify"),
-            "CRED-REDACT carrier must bind verify: {gate}"
+            !seen.is_empty(),
+            "canonical gate carrier projection is vacuous"
         );
-        assert_eq!(
-            source_file_gate("adapters/amqp/src/conn.rs"),
-            Some("manual/opt-in,native-compile"),
-            "ordinary amqp src stays manual/opt-in"
-        );
+        Ok(())
     }
 
     #[test]
-    #[allow(clippy::expect_used, clippy::unwrap_used)]
-    // reason: 测试 fixture 路径构造；parent 恒存在。
-    fn amqp_cred_redact_verify_exec_binds_on_special_gate() -> Result<()> {
-        let root = unique_tmp("archrules-amqp-cred-verify-green");
-        let file = root.join("adapters/amqp/src/conn_events.rs");
-        fs::create_dir_all(file.parent().unwrap())?;
+    fn source_test_membership_is_path_independent() -> Result<()> {
+        let root = unique_tmp("archrules-source-membership-path-independent");
         write(
-            &file,
-            "//! INVARIANT: EVENTTRANSPORT-CRED-REDACT-01 { level = \"Medium\", exec = \"verify\", source = \"code\", synthetic_red = \"cred_redact_tests::n1_ok_and_fail_redact_userinfo\", anti_vacuity = \"cred_redact_tests::b1_no_userinfo_preserves_endpoint\" } —— green\n",
+            &root.join("crates/demo/Cargo.toml"),
+            "[package]\nname = \"demo\"\nversion = \"0.0.0\"\nedition = \"2024\"\n",
         )?;
-        let mut index = Index::default();
+        write(&root.join("crates/demo/src/lib.rs"), "mod guard;\n")?;
+        let source = "//! INVARIANT: DEMO-TEST-01 { level = \"Medium\", exec = \"test\", source = \"code\", synthetic_red = \"tests::red\", anti_vacuity = \"tests::green\" }\n#[cfg(test)] mod tests { #[test] fn red() { assert!(true); } #[test] fn green() { assert!(true); } }\n";
+        let src = root.join("crates/demo/src/guard.rs");
+        let tests = root.join("crates/demo/tests/guard.rs");
+        write(&src, source)?;
+        write(&tests, source)?;
+        let mut src_index = Index::default();
         scan_source_invariant_file(
             &root,
-            &mut index,
-            &file,
+            &mut src_index,
+            &src,
             "native-hard",
             "source invariant",
-            source_file_gate("adapters/amqp/src/conn_events.rs"),
         )?;
-        assert!(
-            index.findings.is_empty(),
-            "verify exec must bind on special gate: {:?}",
-            index.findings
-        );
-        assert!(
-            index.records.iter().any(
-                |r| r.id == "EVENTTRANSPORT-CRED-REDACT-01" && r.exec == ExecutionLevel::Verify
-            ),
-            "{:?}",
-            index.records
-        );
+        let mut test_index = Index::default();
+        scan_source_invariant_file(
+            &root,
+            &mut test_index,
+            &tests,
+            "native-hard",
+            "source invariant",
+        )?;
+        let src_membership = &src_index.records[0].gate;
+        let test_membership = &test_index.records[0].gate;
+        assert_eq!(src_membership, test_membership);
+        assert!(gate_has(Some(src_membership), "test"));
         fs::remove_dir_all(root)?;
         Ok(())
     }
 
     #[test]
-    #[allow(clippy::expect_used, clippy::unwrap_used)]
-    // reason: 测试 fixture 路径构造；parent 恒存在。
-    fn amqp_cred_redact_verify_exec_rejects_default_src_gate() -> Result<()> {
-        let root = unique_tmp("archrules-amqp-cred-verify-red");
-        let file = root.join("adapters/amqp/src/conn_events.rs");
-        fs::create_dir_all(file.parent().unwrap())?;
+    fn cfg_test_in_src_binds_test_profile_without_a_path_exception() -> Result<()> {
+        let root = unique_tmp("archrules-cfg-test-profile");
+        write(
+            &root.join("adapters/demo/Cargo.toml"),
+            "[package]\nname = \"demo\"\nversion = \"0.0.0\"\nedition = \"2024\"\n",
+        )?;
+        write(&root.join("adapters/demo/src/lib.rs"), "mod conn_events;\n")?;
+        let file = root.join("adapters/demo/src/conn_events.rs");
         write(
             &file,
-            "//! INVARIANT: EVENTTRANSPORT-CRED-REDACT-01 { level = \"Medium\", exec = \"verify\", source = \"code\", synthetic_red = \"cred_redact_tests::n1_ok_and_fail_redact_userinfo\", anti_vacuity = \"cred_redact_tests::b1_no_userinfo_preserves_endpoint\" } —— red\n",
+            "//! INVARIANT: EVENTTRANSPORT-CRED-REDACT-01 { level = \"Medium\", exec = \"test\", source = \"code\", synthetic_red = \"cred_redact_tests::red\", anti_vacuity = \"cred_redact_tests::green\" }\n#[cfg(test)] mod cred_redact_tests { #[test] fn red() { assert!(true); } #[test] fn green() { assert!(true); } }\n",
         )?;
         let mut index = Index::default();
-        scan_source_invariant_file(
-            &root,
-            &mut index,
-            &file,
-            "native-hard",
-            "source invariant",
-            Some("manual/opt-in,native-compile"),
+        scan_source_invariant_file(&root, &mut index, &file, "native-hard", "source invariant")?;
+        assert!(index.findings.is_empty(), "{:?}", index.findings);
+        assert!(index.records.iter().any(|record| {
+            record.id == "EVENTTRANSPORT-CRED-REDACT-01"
+                && record.exec
+                    == ExecutionLevel::Profile(crate::execution_profiles::ExecutionProfile::Test)
+        }));
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn orphan_rust_file_cannot_claim_test_profile() -> Result<()> {
+        let root = unique_tmp("archrules-orphan-source");
+        write(
+            &root.join("crates/demo/Cargo.toml"),
+            "[package]\nname = \"demo\"\nversion = \"0.0.0\"\nedition = \"2024\"\n",
         )?;
+        write(&root.join("crates/demo/src/lib.rs"), "pub fn live() {}\n")?;
+        let orphan = root.join("crates/demo/src/orphan.rs");
+        write(
+            &orphan,
+            "//! INVARIANT: ORPHAN-TEST-01 { level = \"Medium\", exec = \"test\", source = \"code\", synthetic_red = \"tests::red\", anti_vacuity = \"tests::green\" }\n#[cfg(test)] mod tests { #[test] fn red() { assert!(true); } #[test] fn green() { assert!(true); } }\n",
+        )?;
+        let mut index = Index::default();
+        scan_source_invariant_file(&root, &mut index, &orphan, "native-hard", "source")?;
         assert!(
             index
                 .findings
                 .iter()
-                .any(|f| f.rule == Rule::CarrierBindingMismatch),
-            "verify exec must reject default src gate: {:?}",
+                .any(|finding| finding.rule == Rule::CarrierBindingMismatch),
+            "orphan source claimed executable test evidence: {:?}",
             index.findings
         );
         fs::remove_dir_all(root)?;
@@ -4085,157 +4867,198 @@ members = ["rss_demo", "rss_orphan"]
     }
 
     #[test]
-    fn assembly_carrier_has_verify_ci_gate() {
-        // assembly validate 在 verify.rs 的 verify 与 ci step 列表中均运行 ⇒ assembly.rs
-        // 的 INVARIANT 锚点（ASSEMBLY-PROVIDER-CRATE-01）必须登记 `verify,ci` gate，否则
-        // archrules 判 MissingGate（#1572）。gate 字符串 ↔ plan 实际成员的双向绑定由下方
-        // `gate_strings_bound_to_registry_plan_membership` 机器守（review F2 / #1574）。
-        let root = Path::new("/repo");
+    fn cfg_unreachable_and_module_mismatched_test_symbols_fail_closed() -> Result<()> {
+        let root = unique_tmp("archrules-test-symbol-identity");
+        let file = root.join("crates/demo/tests/identity.rs");
+        write(
+            &root.join("crates/demo/Cargo.toml"),
+            "[package]\nname = \"demo\"\nversion = \"0.0.0\"\nedition = \"2024\"\n",
+        )?;
+        write(
+            &file,
+            "#[cfg(any())] #[test] fn unreachable() { assert!(true); }\nmod first { #[test] fn same() { assert!(true); } }\nmod second { #[test] fn same() { assert!(true); } }\n",
+        )?;
         assert_eq!(
-            xtask_gate(root, &root.join("xtask/src/assembly.rs")),
-            Some("verify,ci,ci-meta")
+            collect_test_names(&file)?,
+            ["first::same".to_string(), "second::same".to_string()]
         );
-    }
-
-    #[test]
-    fn local_only_effects_carrier_has_verify_ci_gate() {
-        let root = Path::new("/repo");
-        assert_eq!(
-            xtask_gate(root, &root.join("xtask/src/consistency_effects.rs")),
-            Some("verify,ci,ci-meta")
-        );
-    }
-
-    fn carrier_set_drift(
-        planned: &BTreeSet<String>,
-        declared: &BTreeSet<String>,
-    ) -> (BTreeSet<String>, BTreeSet<String>) {
-        (
-            planned.difference(declared).cloned().collect(),
-            declared.difference(planned).cloned().collect(),
-        )
-    }
-
-    #[test]
-    fn gate_plan_binding_rejects_extra_stale_token_red() {
-        // Simulates deleting the coverage step from every plan while leaving its declaration.
-        let planned = BTreeSet::new();
-        let declared = BTreeSet::from(["xtask/src/coverage.rs".to_string()]);
-        let (missing, extra) = carrier_set_drift(&planned, &declared);
-        assert!(missing.is_empty());
-        assert_eq!(extra, BTreeSet::from(["xtask/src/coverage.rs".to_string()]));
-    }
-
-    #[test]
-    fn gate_declarations_are_enumerable_and_role_classified() {
-        let declarations = xtask_gate_declarations();
-        assert!(!declarations.is_empty());
-        let unique_paths: BTreeSet<_> = declarations
-            .iter()
-            .map(|declaration| declaration.path)
-            .collect();
-        assert_eq!(unique_paths.len(), declarations.len());
-        let role_for = |path: &str| {
-            declarations
-                .iter()
-                .find(|declaration| declaration.path == path)
-                .map(|declaration| declaration.role)
+        let record = RuleRecord {
+            id: "IDENTITY-TEST-01".to_string(),
+            facet: None,
+            level: RuleLevel::Medium,
+            exec: ExecutionLevel::Profile(crate::execution_profiles::ExecutionProfile::Test),
+            source_kind: SourceKind::Code,
+            carrier: "native-hard".to_string(),
+            source: "crates/demo/tests/identity.rs:1".to_string(),
+            evidence: "source".to_string(),
+            gate: "test".to_string(),
+            status: "ok".to_string(),
+            native: None,
+            golden: None,
+            synthetic_red: None,
+            anti_vacuity: None,
         };
-        assert_eq!(
-            role_for("xtask/src/verify.rs"),
-            Some(GateDeclarationRole::Orchestrator(
-                OrchestratorReason::PlanExecution
-            ))
-        );
-        assert_eq!(
-            role_for("xtask/src/ci_lanes.rs"),
-            Some(GateDeclarationRole::Orchestrator(
-                OrchestratorReason::RegistryAndPlanDerivation
-            ))
-        );
-        assert_eq!(
-            role_for("xtask/src/diffcov.rs"),
-            Some(GateDeclarationRole::Support(
-                SupportReason::SharedGateImplementation
-            ))
-        );
-        assert_eq!(
-            role_for("xtask/src/coverage.rs"),
-            Some(GateDeclarationRole::PlanStep)
-        );
+        assert!(!record_source_has_test_symbol(&root, &record, "same")?);
+        assert!(!record_source_has_test_symbol(
+            &root,
+            &record,
+            "unreachable"
+        )?);
+        assert!(record_source_has_test_symbol(
+            &root,
+            &record,
+            "first::same"
+        )?);
+        fs::remove_dir_all(root)?;
+        Ok(())
     }
 
-    /// INVARIANT: ARCHRULES-GATE-PLAN-BIND-01 { level = "Medium", exec = "verify", source = "code" }——
-    /// every real plan's in-process carrier set equals the files declaring that lane token. This
-    /// rejects both missing bindings and stale/extra tokens across aggregate and split lanes.
     #[test]
-    fn gate_strings_bound_to_registry_plan_membership() {
-        let gate_has_lane =
-            |tokens: &str, lane: &str| tokens.split(',').any(|tok| tok.trim() == lane);
-        let plans = [
-            (
-                crate::verify::plan_for(crate::verify::PlanTarget::Verify),
-                "verify",
+    fn ignored_and_unproven_cfg_tests_are_not_executable_evidence() -> Result<()> {
+        let root = unique_tmp("archrules-non-runnable-test-evidence");
+        let file = root.join("crates/demo/tests/evidence.rs");
+        write(
+            &root.join("crates/demo/Cargo.toml"),
+            "[package]\nname = \"demo\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\
+             [features]\ndefault = [\"enabled\"]\nenabled = []\n",
+        )?;
+        write(
+            &file,
+            &format!(
+                "#[test] #[ignore] fn ignored() {{ assert!(true); }}\n\
+                 #[test] #[cfg_attr(all(), ignore)] fn cfg_ignored() {{ assert!(true); }}\n\
+                 #[cfg(feature = \"not-executed\")] #[test] fn feature_disabled() {{ assert!(true); }}\n\
+                 #[cfg(unproven_runner_flag)] #[test] fn unknown_disabled() {{ assert!(true); }}\n\
+                 #[cfg(feature = \"enabled\")] #[test] fn default_enabled() {{ assert!(true); }}\n\
+                 #[cfg(target_os = \"definitely-not-a-target\")] #[test] fn target_disabled() {{ assert!(true); }}\n\
+                 #[cfg(target_os = \"{}\")] #[test] fn target_enabled() {{ assert!(true); }}\n",
+                std::env::consts::OS
             ),
-            (
-                crate::verify::plan_for(crate::verify::PlanTarget::CompatibilityCi),
-                "ci",
-            ),
-            (
-                crate::verify::plan_for(crate::verify::PlanTarget::Lane(
-                    crate::ci_lanes::CiLane::Meta,
-                )),
-                "ci-meta",
-            ),
-            (
-                crate::verify::plan_for(crate::verify::PlanTarget::Lane(
-                    crate::ci_lanes::CiLane::Coverage,
-                )),
-                "ci-coverage",
-            ),
-            (
-                crate::verify::plan_for(crate::verify::PlanTarget::Lane(
-                    crate::ci_lanes::CiLane::Core,
-                )),
-                "ci-core",
-            ),
-            (
-                crate::verify::plan_for(crate::verify::PlanTarget::Lane(
-                    crate::ci_lanes::CiLane::Security,
-                )),
-                "ci-security",
-            ),
-            (
-                crate::verify::plan_for(crate::verify::PlanTarget::Lane(
-                    crate::ci_lanes::CiLane::LocalOnly,
-                )),
-                "ci-local-only",
-            ),
-        ];
-        let mut nonempty_lanes = 0usize;
-        for (plan, lane) in plans {
-            let planned: BTreeSet<String> = plan
-                .iter()
-                .filter_map(|step| step.carrier_file())
-                .map(str::to_string)
-                .collect();
-            let declared: BTreeSet<String> = xtask_gate_declarations()
-                .iter()
-                .filter(|declaration| declaration.role == GateDeclarationRole::PlanStep)
-                .filter(|declaration| gate_has_lane(declaration.tokens, lane))
-                .map(|declaration| declaration.path.to_string())
-                .collect();
-            let (missing, extra) = carrier_set_drift(&planned, &declared);
-            assert!(
-                missing.is_empty() && extra.is_empty(),
-                "`{lane}` carrier binding drift: missing={missing:?}, stale/extra={extra:?}"
-            );
-            nonempty_lanes += usize::from(!planned.is_empty());
-        }
-        assert!(
-            nonempty_lanes >= 2,
-            "真实 carrier lane 未被校验（anti-vacuity）"
+        )?;
+        assert_eq!(
+            collect_test_names(&file)?,
+            ["default_enabled".to_string(), "target_enabled".to_string()],
+            "only default-feature and current-target runnable tests prove execution"
         );
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn nested_constant_cfg_and_inline_external_modules_fail_closed() -> Result<()> {
+        let root = unique_tmp("archrules-nested-cfg-inline-module");
+        write(
+            &root.join("crates/demo/Cargo.toml"),
+            "[package]\nname = \"demo\"\nversion = \"0.0.0\"\nedition = \"2024\"\n",
+        )?;
+        write(
+            &root.join("crates/demo/src/lib.rs"),
+            "mod outer { mod guard; }\n",
+        )?;
+        let guard = root.join("crates/demo/src/outer/guard.rs");
+        write(
+            &guard,
+            "#[cfg(all(any(), feature = \"x\"))] #[test] fn dead_nested() { assert!(true); }\n#[cfg(not(all()))] #[test] fn dead_not_all() { assert!(true); }\n#[cfg(not(any()))] mod tests { #[test] fn live() { assert!(true); } }\n",
+        )?;
+        assert!(cargo_target_reaches(&root, &guard)?);
+        assert_eq!(collect_test_names(&guard)?, ["tests::live".to_string()]);
+        let record = RuleRecord {
+            id: "INLINE-MODULE-01".to_string(),
+            facet: None,
+            level: RuleLevel::Medium,
+            exec: ExecutionLevel::Profile(crate::execution_profiles::ExecutionProfile::Test),
+            source_kind: SourceKind::Code,
+            carrier: "native-hard".to_string(),
+            source: "crates/demo/src/outer/guard.rs:1".to_string(),
+            evidence: "source".to_string(),
+            gate: "test".to_string(),
+            status: "ok".to_string(),
+            native: None,
+            golden: None,
+            synthetic_red: None,
+            anti_vacuity: None,
+        };
+        assert!(record_source_has_test_symbol(
+            &root,
+            &record,
+            "outer::guard::tests::live"
+        )?);
+        assert!(!record_source_has_test_symbol(
+            &root,
+            &record,
+            "dead_nested"
+        )?);
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn path_attribute_uses_source_directory_and_inline_module_directory() -> Result<()> {
+        let root = unique_tmp("archrules-path-attribute-resolution");
+        write(
+            &root.join("journeys/demo/Cargo.toml"),
+            "[package]\nname = \"demo-journey\"\nversion = \"0.0.0\"\nedition = \"2024\"\n",
+        )?;
+        let journey = root.join("journeys/demo/tests/localtx_validation.rs");
+        write(&journey, "#[path = \"../common/mod.rs\"] mod common;\n")?;
+        let common = root.join("journeys/demo/common/mod.rs");
+        write(
+            &common,
+            "#[cfg(test)] mod tests { #[test] fn live() { assert!(true); } }\n",
+        )?;
+        assert!(cargo_target_reaches(&root, &common)?);
+        let journey_record = RuleRecord {
+            id: "PATH-JOURNEY-01".to_string(),
+            facet: None,
+            level: RuleLevel::Medium,
+            exec: ExecutionLevel::Profile(crate::execution_profiles::ExecutionProfile::Test),
+            source_kind: SourceKind::Code,
+            carrier: "native-hard".to_string(),
+            source: "journeys/demo/common/mod.rs:1".to_string(),
+            evidence: "source".to_string(),
+            gate: "test".to_string(),
+            status: "ok".to_string(),
+            native: None,
+            golden: None,
+            synthetic_red: None,
+            anti_vacuity: None,
+        };
+        assert!(record_source_has_test_symbol(
+            &root,
+            &journey_record,
+            "common::tests::live"
+        )?);
+
+        write(
+            &root.join("crates/inline/Cargo.toml"),
+            "[package]\nname = \"inline\"\nversion = \"0.0.0\"\nedition = \"2024\"\n",
+        )?;
+        write(
+            &root.join("crates/inline/src/lib.rs"),
+            "mod outer { #[path = \"custom.rs\"] mod guard; }\n",
+        )?;
+        let inline = root.join("crates/inline/src/outer/custom.rs");
+        write(&inline, "#[test] fn live() { assert!(true); }\n")?;
+        assert!(cargo_target_reaches(&root, &inline)?);
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_execution_tokens_are_rejected_without_aliases() {
+        for legacy in ["verify", "ci-only", "integration"] {
+            assert_eq!(ExecutionLevel::parse(legacy), None, "{legacy}");
+        }
+        for current in [
+            "check",
+            "test",
+            "integration-critical",
+            "release-check",
+            "native-compile",
+            "manual/opt-in",
+        ] {
+            assert!(ExecutionLevel::parse(current).is_some(), "{current}");
+        }
     }
 
     #[test]
@@ -4244,7 +5067,7 @@ members = ["rss_demo", "rss_orphan"]
         let file = root.join("xtask/src/new_guard.rs");
         write(
             &file,
-            "//! INVARIANT: NEW-GUARD-01 { level = \"Medium\", exec = \"verify\", source = \"code\" }\n",
+            "//! INVARIANT: NEW-GUARD-01 { level = \"Medium\", exec = \"check\", source = \"code\" }\n",
         )?;
         let mut index = Index::default();
         scan_xtask(&root, &mut index)?;
@@ -4288,8 +5111,13 @@ members = ["rss_demo", "rss_orphan"]
     fn trybuild_compile_fail_requires_stderr_but_pass_does_not() -> Result<()> {
         let root = unique_tmp("archrules-trybuild-golden");
         write(
+            &root.join("crates/demo/Cargo.toml"),
+            "[package]\nname = \"demo\"\nversion = \"0.0.0\"\nedition = \"2024\"\n",
+        )?;
+        write(
             &root.join("crates/demo/tests/trybuild.rs"),
             r#"
+#[test]
 fn ui() {
     let t = trybuild::TestCases::new();
     t.compile_fail("tests/ui/fail.rs");
@@ -4299,11 +5127,11 @@ fn ui() {
         )?;
         write(
             &root.join("crates/demo/tests/ui/fail.rs"),
-            "//! INVARIANT: TRYBUILD-FAIL-01 { level = \"Hard\", exec = \"verify\", source = \"trybuild\" }\n",
+            "//! INVARIANT: TRYBUILD-FAIL-01 { level = \"Hard\", exec = \"test\", source = \"trybuild\" }\n",
         )?;
         write(
             &root.join("crates/demo/tests/ui/pass.rs"),
-            "//! INVARIANT: TRYBUILD-PASS-01 { level = \"Hard\", exec = \"verify\", source = \"trybuild\" }\n",
+            "//! INVARIANT: TRYBUILD-PASS-01 { level = \"Hard\", exec = \"test\", source = \"trybuild\" }\n",
         )?;
         let mut index = Index::default();
         scan_trybuild_and_native(&root, &mut index)?;
@@ -4320,6 +5148,105 @@ fn ui() {
                 .records
                 .iter()
                 .any(|r| r.id == "TRYBUILD-PASS-01" && r.evidence == "trybuild pass")
+        );
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn unreferenced_trybuild_fixture_is_not_executable_evidence() -> Result<()> {
+        let root = unique_tmp("archrules-trybuild-unreferenced");
+        write(
+            &root.join("crates/demo/Cargo.toml"),
+            "[package]\nname = \"demo\"\nversion = \"0.0.0\"\nedition = \"2024\"\n",
+        )?;
+        write(
+            &root.join("crates/demo/tests/trybuild.rs"),
+            "#[test] fn ui() { let t = trybuild::TestCases::new(); t.pass(\"tests/ui/used.rs\"); }\n",
+        )?;
+        write(
+            &root.join("crates/demo/tests/ui/used.rs"),
+            "//! INVARIANT: TRYBUILD-USED-01 { level = \"Hard\", exec = \"test\", source = \"trybuild\" }\n",
+        )?;
+        write(
+            &root.join("crates/demo/tests/ui/orphan.rs"),
+            "//! INVARIANT: TRYBUILD-ORPHAN-01 { level = \"Hard\", exec = \"test\", source = \"trybuild\" }\n",
+        )?;
+        let fixtures = trybuild_fixtures(&root)?;
+        assert!(
+            fixtures
+                .pass
+                .contains(&root.join("crates/demo/tests/ui/used.rs"))
+        );
+        assert!(
+            !fixtures
+                .pass
+                .contains(&root.join("crates/demo/tests/ui/orphan.rs"))
+        );
+        let mut index = Index::default();
+        scan_source_invariants(&root, &mut index)?;
+        assert!(
+            index.findings.iter().any(|finding| {
+                finding.rule == Rule::CarrierBindingMismatch
+                    && finding.subject.contains("orphan.rs")
+            }),
+            "unreferenced fixture escaped closed membership: {:?}",
+            index.findings
+        );
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn trybuild_harness_requires_live_test_ast_and_explicit_target_default_path() -> Result<()> {
+        let root = unique_tmp("archrules-trybuild-harness-ast");
+        write(
+            &root.join("crates/demo/Cargo.toml"),
+            "[package]\nname = \"demo\"\nversion = \"0.0.0\"\nedition = \"2024\"\nautotests = false\n\n[[test]]\nname = \"trybuild\"\n",
+        )?;
+        let harness = root.join("crates/demo/tests/trybuild.rs");
+        write(
+            &harness,
+            r##"
+// #[test] fn bait() { trybuild::TestCases::new().pass("tests/ui/comment.rs"); }
+const BAIT: &str = "trybuild::TestCases::new().pass(\"tests/ui/string.rs\")";
+fn not_a_test() { trybuild::TestCases::new().pass("tests/ui/non_test.rs"); }
+#[test]
+#[ignore]
+fn ignored() { trybuild::TestCases::new().pass("tests/ui/ignored.rs"); }
+#[test]
+#[cfg_attr(all(), ignore)]
+fn cfg_ignored() { trybuild::TestCases::new().pass("tests/ui/cfg_ignored.rs"); }
+#[cfg(feature = "not-executed")]
+#[test]
+fn feature_disabled() { trybuild::TestCases::new().pass("tests/ui/feature.rs"); }
+#[cfg(all(any(), feature = "x"))]
+#[test]
+fn dead() { trybuild::TestCases::new().pass("tests/ui/dead.rs"); }
+#[test]
+fn live() {
+    let cases = trybuild::TestCases::new();
+    fn nested_bait() {
+        trybuild::TestCases::new().pass("tests/ui/nested.rs");
+    }
+    #[cfg(any())]
+    {
+        cases.pass("tests/ui/dead_block.rs");
+    }
+    cases.pass("tests/ui/live.rs");
+}
+"##,
+        )?;
+        write(&root.join("crates/demo/tests/ui/live.rs"), "fn main() {}\n")?;
+        assert!(cargo_test_target_roots(&root, &harness)?.contains(&harness));
+        let calls = trybuild_calls(&harness)?;
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].pattern, "tests/ui/live.rs");
+        let fixtures = trybuild_fixtures(&root)?;
+        assert_eq!(fixtures.harnesses, BTreeSet::from([harness]));
+        assert_eq!(
+            fixtures.pass,
+            BTreeSet::from([root.join("crates/demo/tests/ui/live.rs")])
         );
         fs::remove_dir_all(root)?;
         Ok(())
@@ -4372,24 +5299,24 @@ members = ["rss_demo"]
         )?;
         write(
             &root.join("deny.toml"),
-            "# INVARIANT: DENY-DEMO-01 { level = \"Medium\", exec = \"verify\", source = \"config\" }\n",
+            "# INVARIANT: DENY-DEMO-01 { level = \"Medium\", exec = \"check\", source = \"config\" }\n",
         )?;
         write(&root.join("clippy.toml"), "# synthetic clippy carrier\n")?;
         write(
             &root.join("xtask/runtime-deps-guard.toml"),
-            "# INVARIANT: RUNTIME-DEPS-CONFIG-DEMO-01 { level = \"Medium\", exec = \"verify\", source = \"config\" }\n",
+            "# INVARIANT: RUNTIME-DEPS-CONFIG-DEMO-01 { level = \"Medium\", exec = \"check\", source = \"config\" }\n",
         )?;
         write(
             &root.join("xtask/runtime-root-ratchet.toml"),
-            "# INVARIANT: RUNTIME-ROOT-CONFIG-DEMO-01 { level = \"Medium\", exec = \"verify\", source = \"config\" }\n",
+            "# INVARIANT: RUNTIME-ROOT-CONFIG-DEMO-01 { level = \"Medium\", exec = \"check\", source = \"config\" }\n",
         )?;
         write(
             &root.join("xtask/src/layerdeps.rs"),
-            "//! INVARIANT: XTASK-DEMO-01 { level = \"Medium\", exec = \"verify\", source = \"code\" }\n",
+            "//! INVARIANT: XTASK-DEMO-01 { level = \"Medium\", exec = \"check\", source = \"code\" }\n",
         )?;
         write(
             &root.join("xtask/src/publicapi.rs"),
-            "//! INVARIANT: PUBLICAPI-DEMO-01 { level = \"Medium\", exec = \"ci-only\", source = \"public-api\" }\n",
+            "//! INVARIANT: PUBLICAPI-DEMO-01 { level = \"Medium\", exec = \"release-check\", source = \"public-api\" }\n",
         )?;
         for krate in crate::publicapi::target_crates(None) {
             write(&root.join(format!("public-api/{krate}.txt")), "demo\n")?;
@@ -4400,7 +5327,7 @@ members = ["rss_demo"]
         )?;
         write(
             &root.join("lints/rss_demo/src/lib.rs"),
-            "//! INVARIANT: LINT-DEMO-01 { level = \"Medium\", exec = \"verify\", source = \"dylint\" }\n",
+            "//! INVARIANT: LINT-DEMO-01 { level = \"Medium\", exec = \"check\", source = \"dylint\" }\n",
         )?;
         write(&root.join("lints/rss_demo/ui/main.rs"), "fn main() {}\n")?;
         write(&root.join("lints/rss_demo/ui/main.stderr"), "error\n")?;
@@ -4624,24 +5551,31 @@ fn real_green_accepted() { assert!(true); }
     fn medium_evidence_must_be_explicitly_bound_to_its_invariant() -> Result<()> {
         let root = unique_tmp("archrules-medium-evidence-binding");
         write(
+            &root.join("xtask/Cargo.toml"),
+            "[package]\nname = \"xtask-demo\"\nversion = \"0.0.0\"\nedition = \"2024\"\n",
+        )?;
+        write(&root.join("xtask/src/main.rs"), "mod demo;\n")?;
+        write(
             &root.join("xtask/src/demo.rs"),
             r#"
+mod tests {
 #[test]
 fn unrelated_red_rejected() { assert!(true); }
 #[test]
 fn unrelated_green_accepted() { assert!(true); }
+}
 "#,
         )?;
         let mut record = RuleRecord {
             id: "DEMO-MEDIUM-01".to_string(),
             facet: None,
             level: RuleLevel::Medium,
-            exec: ExecutionLevel::Verify,
+            exec: ExecutionLevel::Profile(crate::execution_profiles::ExecutionProfile::Check),
             source_kind: SourceKind::Code,
             carrier: "xtask".to_string(),
             source: "xtask/src/demo.rs:1".to_string(),
             evidence: "xtask module demo.rs".to_string(),
-            gate: "verify".to_string(),
+            gate: "check".to_string(),
             status: "ok".to_string(),
             native: None,
             golden: None,
@@ -4649,7 +5583,8 @@ fn unrelated_green_accepted() { assert!(true); }
             anti_vacuity: None,
         };
         let mut findings = Vec::new();
-        validate_medium_evidence(&root, "demo", &record, &mut findings)?;
+        let mut test_evidence = TestEvidenceIndex::build(&root, std::slice::from_ref(&record))?;
+        validate_medium_evidence(&root, &test_evidence, "demo", &record, &mut findings)?;
         assert_eq!(
             findings.len(),
             1,
@@ -4657,12 +5592,56 @@ fn unrelated_green_accepted() { assert!(true); }
         );
         record.synthetic_red = Some("tests::unrelated_red_rejected".to_string());
         record.anti_vacuity = Some("tests::unrelated_green_accepted".to_string());
+        test_evidence = TestEvidenceIndex::build(&root, std::slice::from_ref(&record))?;
         findings.clear();
-        validate_medium_evidence(&root, "demo", &record, &mut findings)?;
+        validate_medium_evidence(&root, &test_evidence, "demo", &record, &mut findings)?;
         assert!(
             findings.is_empty(),
             "显式绑定的真实测试应通过: {findings:?}"
         );
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_evidence_index_parses_each_source_once_for_all_symbol_queries() -> Result<()> {
+        let root = unique_tmp("archrules-test-evidence-cache");
+        write(
+            &root.join("xtask/Cargo.toml"),
+            "[package]\nname = \"xtask-demo\"\nversion = \"0.0.0\"\nedition = \"2024\"\n",
+        )?;
+        write(&root.join("xtask/src/main.rs"), "mod demo;\n")?;
+        let source = root.join("xtask/src/demo.rs");
+        write(
+            &source,
+            "#[cfg(test)] mod tests { #[test] fn red() { assert!(true); } #[test] fn green() { assert!(true); } }\n",
+        )?;
+        let record = RuleRecord {
+            id: "DEMO-CACHE-01".to_string(),
+            facet: None,
+            level: RuleLevel::Medium,
+            exec: ExecutionLevel::Profile(crate::execution_profiles::ExecutionProfile::Check),
+            source_kind: SourceKind::Code,
+            carrier: "xtask".to_string(),
+            source: "xtask/src/demo.rs:1".to_string(),
+            evidence: "source".to_string(),
+            gate: "check".to_string(),
+            status: "ok".to_string(),
+            native: None,
+            golden: None,
+            synthetic_red: Some("demo::tests::red".to_string()),
+            anti_vacuity: Some("demo::tests::green".to_string()),
+        };
+        let mut second = record.clone();
+        second.id = "DEMO-CACHE-02".to_string();
+        let evidence = TestEvidenceIndex::build(&root, &[record.clone(), second])?;
+        assert_eq!(
+            evidence.parse_count(&source),
+            1,
+            "one build must parse a shared evidence source exactly once"
+        );
+        assert!(evidence.contains(&root, &record, "demo::tests::red"));
+        assert!(evidence.contains(&root, &record, "demo::tests::green"));
         fs::remove_dir_all(root)?;
         Ok(())
     }
@@ -4686,9 +5665,7 @@ fn unrelated_green_accepted() { assert!(true); }
             bail!("missing CI-LANE-PLAN-01")
         };
         assert_eq!(plan.carrier, "xtask");
-        assert_eq!(plan.gate, "verify,ci,ci-core,ci-coverage");
-        assert!(!plan.gate.contains("ci-security"));
-        assert!(!plan.gate.contains("integration"));
+        assert_eq!(plan.gate, "check");
 
         let source = crate::workspace_root()?.join("xtask/src/ci_lanes.rs");
         let found = extract_invariants(&crate::workspace_root()?, &source)?;
@@ -4761,10 +5738,7 @@ fn unrelated_green_accepted() { assert!(true); }
             .context("missing CI-SLO-CONFIG-SCHEMA-01")?;
         assert_eq!(config.level, RuleLevel::Medium);
         assert_eq!(config.carrier, "xtask");
-        assert_eq!(
-            config.gate,
-            "verify,ci,ci-meta,ci-core,ci-security,ci-coverage,audit,integration"
-        );
+        assert_eq!(config.gate, "check");
         assert_eq!(
             config.synthetic_red.as_deref(),
             Some("config_rejects_schema_drift_and_incomplete_catalog")
@@ -4783,9 +5757,9 @@ fn unrelated_green_accepted() { assert!(true); }
             "//! INVAR",
             "IANT: CI-LANE-REGISTRY-01 { level = \"Hard\", exec = \"native-compile\", source = \"code\", native = \"closed enum\" }\n",
             "//! INVAR",
-            "IANT: CI-LANE-PLAN-01 { level = \"Medium\", exec = \"verify\", source = \"code\" }\n",
+            "IANT: CI-LANE-PLAN-01 { level = \"Medium\", exec = \"check\", source = \"code\" }\n",
             "//! INVAR",
-            "IANT: CI-LANE-UNREGISTERED-01 { level = \"Medium\", exec = \"verify\", source = \"code\" }\n",
+            "IANT: CI-LANE-UNREGISTERED-01 { level = \"Medium\", exec = \"check\", source = \"code\" }\n",
         ]
         .concat();
         write(&root.join("xtask/src/ci_lanes.rs"), &fixture)?;
@@ -4812,7 +5786,7 @@ fn unrelated_green_accepted() { assert!(true); }
             "//! INVAR",
             "IANT: CI-LANE-REGISTRY-01 { level = \"Hard\", exec = \"native-compile\", source = \"code\", native = \"closed enum\" }\n",
             "//! INVAR",
-            "IANT: CI-LANE-PLAN-01 { level = \"Medium\", exec = \"verify\", source = \"code\" }\n",
+            "IANT: CI-LANE-PLAN-01 { level = \"Medium\", exec = \"check\", source = \"code\" }\n",
         ]
         .concat();
         write(&path, &fixture)?;
@@ -4890,7 +5864,7 @@ fn unrelated_green_accepted() { assert!(true); }
                 &found,
                 binding.carrier,
                 binding.evidence,
-                Some(binding.gates),
+                Some(binding.binding.token()),
                 |rule| binding.matches(rule) && binding.accepts(rule),
             )?;
         }
@@ -4933,7 +5907,7 @@ fn unrelated_green_accepted() { assert!(true); }
                 &found,
                 binding.carrier,
                 binding.evidence,
-                Some(binding.gates),
+                Some(binding.binding.token()),
                 |rule| binding.matches(rule) && binding.accepts(rule),
             )?;
         }
@@ -4994,12 +5968,12 @@ fn real_green() { assert!(true); }
             id: "DEMO-CODEGEN-01".to_string(),
             facet: Some("wire".to_string()),
             level: RuleLevel::Hard,
-            exec: ExecutionLevel::Verify,
+            exec: ExecutionLevel::Profile(crate::execution_profiles::ExecutionProfile::Check),
             source_kind: SourceKind::Codegen,
             carrier: "xtask".to_string(),
             source: "xtask/src/demo.rs:1".to_string(),
             evidence: "codegen".to_string(),
-            gate: "verify".to_string(),
+            gate: "check".to_string(),
             status: "ok".to_string(),
             native: None,
             golden: Some("generated/demo.rs".to_string()),
@@ -5007,7 +5981,8 @@ fn real_green() { assert!(true); }
             anti_vacuity: Some("demo::tests::real_green".to_string()),
         };
         let mut findings = Vec::new();
-        validate_hard_evidence(&root, "demo", &record, &mut findings)?;
+        let test_evidence = TestEvidenceIndex::build(&root, std::slice::from_ref(&record))?;
+        validate_hard_evidence(&root, &test_evidence, "demo", &record, &mut findings)?;
         assert_eq!(
             findings.len(),
             1,

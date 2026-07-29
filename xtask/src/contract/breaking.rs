@@ -11,17 +11,17 @@
 //!   request-property-type-changed / enum-value-removed / became-not-nullable。
 //! ref: getsentry/json-schema-diff@main —— 集合论 permissive/restrictive：type 收紧 = newType 须为 oldType 超集。
 //!
-//! INVARIANT: WIRE-BREAKING-01 { level = "Medium", exec = "verify", source = "code" }—— 9 条规则（FIELD_NO_DELETE / REQUIRED_FIELD_ADDED / FIELD_TYPE_CHANGED /
+//! INVARIANT: WIRE-BREAKING-01 { level = "Medium", exec = "check", source = "code" }—— 9 条规则（FIELD_NO_DELETE / REQUIRED_FIELD_ADDED / FIELD_TYPE_CHANGED /
 //!   FIELD_FORMAT_CHANGED / ENUM_VALUE_DELETED / ADDITIONAL_PROPS_TIGHTENED / NULLABLE_REMOVED /
 //!   REDACTION_POLICY_CHANGED / PROTECTION_POLICY_CHANGED）对 base↔working
 //!   两版 schema 递归 diff，**只报既有字段的删除 / 收紧 / 隐私·保护策略漂移**（新增可选字段不报，向后兼容语义）。
 //!   manifest wire 投影另覆盖 HTTP、L2 topology、subscription 与 lifecycle 降级规则。当前不覆盖
 //!   `oneOf`/`anyOf`/`$ref` 嵌套构造（ADR §8 增量补）。
-//! INVARIANT: WIRE-BREAKING-WINDOW-01 { level = "Medium", exec = "verify", source = "code" }——
+//! INVARIANT: WIRE-BREAKING-WINDOW-01 { level = "Medium", exec = "check", source = "code" }——
 //!   lifecycle 固定分级：active 默认 deny，deprecated warn，draft 跳过；仅下列 consistency/effect
 //!   review 规则固定 warn；active 未携精确 review ack 时 fail-closed，deprecated 仍为非阻断 warn。
 //!   既有契约以 base lifecycle 分级，working 降级不得绕过。
-//! INVARIANT: CONSISTENCY-EFFECT-BREAKING-REVIEW-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "working_rejects_legacy_tokens_and_breaking_preserves_base_identity", anti_vacuity = "effect_reorder_is_clean" }——
+//! INVARIANT: CONSISTENCY-EFFECT-BREAKING-REVIEW-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "working_rejects_legacy_tokens_and_breaking_preserves_base_identity", anti_vacuity = "effect_reorder_is_clean" }——
 //!   LocalOnly 边界与 HTTP effect 集合漂移生成固定 review-only finding；base commit + 排序后的
 //!   rule/subject/detail 派生 SHA-256，Git commit trailer 提供机器确认。其余 breaking 规则仍按 lifecycle
 //!   fail-closed。base/working HTTP effectProfile 均严格投影，缺失、空集或重复值拒绝执行。
