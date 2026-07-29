@@ -5,6 +5,9 @@
 > 本文件是项目最高协作规范（无独立宪法文件）；完整 workspace 结构树 / 分层 / 架构单源见
 > `docs/rules/architecture.md`；其余规则单源见 `docs/rules/`（入口 [`docs/rules/README.md`](docs/rules/README.md)）。
 
+项目能力处置与范围边界的单一事实源见 [`docs/rules/project-scope.md`](docs/rules/project-scope.md)；需求判断、
+方案设计和 review 不得越过其中的 `Freeze` / `External` 边界。
+
 domain-native 治理 + 惯用 Rust workspace 工程底座。只保留稳定的开发规则和架构约束。
 
 ## 工作方式

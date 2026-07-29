@@ -1,6 +1,8 @@
 
 See [CLAUDE.md](./CLAUDE.md)
 
+项目能力处置与范围边界见 [docs/rules/project-scope.md](./docs/rules/project-scope.md)。
+
 使用系统自带git /usr/bin/git
 
 需要用户回答问题、选择方案或批准计划时，优先调用 MCP 工具
