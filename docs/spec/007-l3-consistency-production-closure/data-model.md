@@ -1,0 +1,85 @@
+# L3 logical data identities 与 contract proposal 分流
+
+本文只保留后续 PBI 需要共同遵守的 logical identity、状态关系和安全不变量。所有实体均是 proposal，直到对应 PBI
+把它落到 current contract schema、Rust type、migration 或 generated artifact；本文不规定 SQL 表/列名，也不是
+enforcement carrier。当前 workspace、contract 与一致性语义仍以 [`architecture.md`](../../rules/architecture.md)、
+[`contracts/README.md`](../../../contracts/README.md)、[`eventbus.md`](../../rules/eventbus.md) 和
+[`saga.md`](../../rules/saga.md) 为准。
+
+## Identity inventory
+
+| Logical identity | 最小 identity / 状态 | 不变量 | Canonical PBI |
+|---|---|---|---:|
+| WorkflowDefinition | contract ID/version/schema digest；当前 lifecycle 闭值 | definition 不启动 worker；不在 #1912 增加 `retired` | #1913 |
+| WorkflowActivation | assembly ID + workflow ID；Projection 四态、Saga 两态 | assembly-local、无隐式 default、digest 必须匹配 definition | #1913 |
+| AssemblyWorkflowPlan | assembly generation + closed activation bindings | runtime 只消费 generated plan；global catalog 仅定义 | #1914 |
+| ProjectionInputBinding | projection + source contract/version/schema + assembly generation | capture 只接受 assembly plan 中的 exact binding | #1914 |
+| ProjectionSourceScope | tenant + projection + definition/generation binding | DB capability 在返回 payload 前过滤；serving 无 raw access | #1915/#1916 |
+| ProjectionSourceHighWater | scoped source identity + committed position | 与 capture 同 durable boundary 更新；固定查询次数 | #1916 |
+| ProjectionCheckpoint | tenant + projection + generation + monotonic position + fence | apply 成功后 CAS；失败不 skip；stale writer 被拒绝 | #1917 |
+| ProjectionGeneration | tenant + projection + immutable generation + schema digest + health/state | rebuild 建新 generation，不原地污染 active data；同名 generation 不跨 tenant 共享状态 | #1918/#1919 |
+| SettingsConfigProjectionRowV1 | tenant + generation + config key/version + source identity | metadata-only；禁止 config value/secret/token/raw payload | #1918 |
+| ProjectionDedupeReceipt | tenant + projection + generation + source event | 与 read-model mutation 同事务；same event 只有一个 effect | #1917/#1918 |
+| ProjectionActivePointer | tenant + projection → generation + CAS/fence token | promote/rollback 原子；request 绑定一个 snapshot | #1921 |
+| SagaDefinitionIdentity | contract ID + definition version + schema/step/action digest | instance 创建后固定；有 live instance 时不可退休所需 definition | #1923 |
+| SagaStepIntent | tenant + saga + pinned definition + step + logical effect key | 外部 effect 前 durable；attempt 不得改变同一业务 effect identity | #1925 |
+| SagaStepReceipt | tenant + saga + definition + step + logical effect/idempotency key + protected outcome/reference | 与 intent 共享同一业务 effect identity；same key/same digest 幂等；不同 digest conflict；attempt 只作审计元数据；lease fenced | #1924 |
+| SagaInstanceRecoveryState | pinned definition + journal + receipt + lease epoch + explicit status | unknown 不盲重试；恢复到继续、补偿或 operator-required | #1925 |
+| L3ActivationEvidence | repository HEAD + assembly/workflow/digest + capability/fault/security receipts | exact-set、same-head、无 stale/duplicate/unknown receipt | #1929 |
+
+同一行出现两个 PBI 时，前者拥有通用 primitive/conformance，后者拥有第一个 production adopter；需求的单一
+canonical owner 仍以 [`traceability.md`](traceability.md) 为准。
+
+## State relationships
+
+### Definition 与 activation
+
+```text
+contract definition (draft | active | deprecated)
+        |
+        +-- assembly omitted/disabled -> zero runtime/DB/worker/serving side effects
+        +-- active definition + projection capture-only/shadow/active
+        +-- active definition + saga active
+```
+
+`draft + shadow/active` 非法；Saga 不存在 capture-only/shadow。外部 proposal 的 `retired` lifecycle 不在本 PBI
+加入 current schema。
+
+### Projection apply 与 serving
+
+```text
+scoped source event
+  -> target apply + dedupe receipt (one local transaction)
+  -> checkpoint CAS
+  -> generation caught-up/healthy
+  -> active pointer CAS
+  -> one request binds one generation snapshot
+```
+
+target commit unknown 不推进 checkpoint；重放依赖 target idempotency。rollback 只切 pointer，不删除新 generation。
+Settings v4 不经过该 pointer。
+
+### Saga effect 与恢复
+
+```text
+validate pinned definition + lease epoch
+  -> durable intent + deterministic idempotency key
+  -> execute or probe external effect
+  -> protected receipt + journal transition (atomic visibility)
+  -> continue / compensate / operator-required
+```
+
+uncertain outcome 保留 unknown 并 probe/repair。补偿使用 durable forward receipt 或 generated typed subset，并遵循
+独立 idempotency/receipt/fencing 语义。
+
+## 外部 logical contract proposals 的吸收结果
+
+| 外部 proposal | 保留的 normative intent | 后续机器载体 owner |
+|---|---|---:|
+| Assembly Workflow Activation | closed modes、definition/assembly digest parity、omitted/disabled 零副作用 | #1913/#1914 assembly schema/codegen/runtime plan |
+| Projection Operator/Serving | scoped selector、caught-up/health/schema precondition、CAS promote/rollback、per-request snapshot、无 raw payload | #1921/#1922 typed port/CLI/journey |
+| Saga Step Receipt/Effect | deterministic key、provider idempotency/probe class、protected receipt、unknown outcome、typed compensation | #1923–#1925 contract/codegen/store/executor |
+| L3 Activation Evidence | same-head exact capability/security/fault receipts，billing 不得 active | #1929 existing typed planner/aggregate gate |
+
+字段名、Rust trait 签名、TOML/JSON shape 和 evidence schemaVersion 均由对应 PBI 设计与机器载体决定；外部 Markdown
+示例不冻结 public API，也不允许作为实现通过证据。
