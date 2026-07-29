@@ -307,16 +307,21 @@ async fn login_audit_durable_topology() -> Result<()> {
         // 组装 audit 订阅（contract/topic/group 单源自 generated SPEC.subscriptions()）。
         let mut refresh_identity = None;
         let mut credential_security_grants = None;
+        let mut credential_security_lifecycle = None;
         let login_identity = Arc::new(LoginService::with_seed_credential(
             |accounts| {
                 let services = identity::seed_auth_grant_services(
-                    id.auth_grant_provider(Box::new(FixedClock::at_unix_secs(NOW_SECS))),
+                    id.auth_grant_provider(
+                        Box::new(FixedClock::at_unix_secs(NOW_SECS)),
+                        postgres::identity_pseudonym_keys_for_test(),
+                    ),
                     accounts,
                     || Box::new(FixedClock::at_unix_secs(NOW_SECS)),
                     Duration::from_secs(TTL_SECS),
                 );
                 refresh_identity = Some(services.refresh_service());
                 credential_security_grants = Some(services.lifecycle());
+                credential_security_lifecycle = Some(services.security_lifecycle());
                 services
             },
             Box::new(FixedClock::at_unix_secs(NOW_SECS)),
@@ -328,13 +333,14 @@ async fn login_audit_durable_topology() -> Result<()> {
         )?);
         let refresh_identity = refresh_identity
             .ok_or_else(|| anyhow::anyhow!("seed refresh service was not constructed"))?;
-        let credential_security = Arc::new(CredentialSecurityService::new(
+        let credential_security = Arc::new(CredentialSecurityService::new_with_shared_lifecycle(
             Arc::from(DynCredentialRepo::new_box(id.credential_repo())),
             credential_security_grants
                 .ok_or_else(|| anyhow::anyhow!("seed grant lifecycle was not constructed"))?,
             DynAccountSecurityReadRepo::new_box(id.account_security_repo()),
-            id.identity_security_lifecycle(postgres::identity_pseudonym_keys_for_test()),
-            id.identity_security_lifecycle(postgres::identity_pseudonym_keys_for_test()),
+            credential_security_lifecycle
+                .ok_or_else(|| anyhow::anyhow!("seed security lifecycle was not constructed"))?,
+            id.account_reactivation_lifecycle(postgres::identity_pseudonym_keys_for_test()),
             password_policy(),
             Box::new(FixedClock::at_unix_secs(NOW_SECS)),
         ));
@@ -384,7 +390,10 @@ async fn login_audit_durable_topology() -> Result<()> {
         let login = LoginService::with_seed_credential(
             |accounts| {
                 identity::seed_auth_grant_services(
-                    id.auth_grant_provider(Box::new(FixedClock::at_unix_secs(NOW_SECS))),
+                    id.auth_grant_provider(
+                        Box::new(FixedClock::at_unix_secs(NOW_SECS)),
+                        postgres::identity_pseudonym_keys_for_test(),
+                    ),
                     accounts,
                     || Box::new(FixedClock::at_unix_secs(NOW_SECS)),
                     Duration::from_secs(TTL_SECS),

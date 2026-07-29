@@ -7926,6 +7926,8 @@ pub mod refresh {
         ::vocab::HttpEffectKind::Auth,
         ::vocab::HttpEffectKind::BusinessWrite,
         ::vocab::HttpEffectKind::BusinessTransaction,
+        ::vocab::HttpEffectKind::Outbox,
+        ::vocab::HttpEffectKind::Publish,
     ];
 
     /// HTTP effect profile（闭 effect vocabulary + required field）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
@@ -7935,7 +7937,7 @@ pub mod refresh {
     pub enum RouteMarker {}
 
     /// Typed route binding（metadata + contract identity 单一载体）。由 codegen 派生；勿手改。
-    pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker, ::vocab::http::LocalTx> =
+    pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker, ::vocab::http::OutboxFact> =
         ::vocab::HttpRouteBinding::from_static(
             ::vocab::HttpContractOwner::domain("identity"),
             CONTRACT,
@@ -7950,19 +7952,19 @@ pub mod refresh {
             EFFECT_PROFILE,
         );
 
-    /// Required LocalTx capability evidence derived from `[capabilities.localTx]`.
-    pub const LOCAL_TX: super::super::LocalTxSpec = super::super::LocalTxSpec {
-        boundary: ::vocab::LocalTxBoundary::SingleDomain,
-        tx_model: ::vocab::LocalTxModel::TenantScopedUow,
-        retry: ::vocab::LocalTxRetry::BoundedTransient,
-        commit_unknown: ::vocab::LocalTxCommitUnknown::NotRetryable,
-    };
+    /// Exact emitted event contracts derived from `[capabilities.outbox].emits`.
+    pub const EMITTED_FACTS: &[::vocab::ContractBinding] =
+        &[crate::event::identity_v1::security_event::CONTRACT];
+
+    /// Generated producer binding（route + exact emitted facts 单一载体）。由 codegen 派生；勿手改。
+    pub const PRODUCER: ::vocab::http::HttpProducerBinding<RouteMarker> =
+        ::vocab::http::HttpProducerBinding::from_static(ROUTE, EMITTED_FACTS);
 
     /// HTTP serving metadata（path/method/auth/header 单源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const SPEC: super::super::HttpSpec = super::super::HttpSpec {
         mount_key: "identity_v1::refresh",
         route: ROUTE.evidence(),
-        local_tx: Some(LOCAL_TX),
+        local_tx: None,
         resource_sharing: super::super::HttpResourceSharingSpec {
             mode: ROUTE.evidence().resource_sharing(),
             reason: None,

@@ -1345,7 +1345,7 @@ const IDENTITY_INJECTIONS: &[IdentityInjection] = &[
     },
     IdentityInjection {
         port: ProducerCompositionPort::IdentitySecurityLifecycleLocal,
-        provider_method: "identity_security_lifecycle",
+        provider_method: "auth_grant_provider",
         service_type: "CredentialSecurityService",
         domain_field: "credential_security",
     },
@@ -1494,6 +1494,62 @@ fn collect_identity_wire(
                 "{repo_path}: IdentityDomainDeps.refresh must consume `{refresh}` derived from the same AuthGrantServices binding"
             );
             login
+        } else if injection.port == ProducerCompositionPort::IdentitySecurityLifecycleLocal {
+            let auth_grant_services =
+                ensure_canonical_import(&imports, "identity::AuthGrantServices", repo_path)?;
+            let services =
+                unique_constructor(injection_wire, &auth_grant_services, "from_provider")
+                    .with_context(|| {
+                        format!("{repo_path}: resolve AuthGrantServices::from_provider")
+                    })?;
+            ensure!(
+                services
+                    .call
+                    .args
+                    .iter()
+                    .filter(|argument| simple_expr_ident(argument).as_deref() == Some(&binding))
+                    .count()
+                    == 1,
+                "{repo_path}: AuthGrantServices::from_provider must consume the exact `{binding}` returned by PgDomainDeps::auth_grant_provider"
+            );
+            let constructor = unique_constructor(
+                injection_wire,
+                &service_binding,
+                "new_with_shared_lifecycle",
+            )
+            .with_context(|| {
+                format!(
+                    "{repo_path}: resolve {}::new_with_shared_lifecycle",
+                    injection.service_type
+                )
+            })?;
+            let reactivation = unique_method_result_binding(
+                injection_wire,
+                "pg",
+                "account_reactivation_lifecycle",
+            )
+            .with_context(|| {
+                format!("{repo_path}: resolve PgDomainDeps::account_reactivation_lifecycle binding")
+            })?;
+            ensure!(
+                constructor.call.args.len() == 7
+                    && constructor.call.args.get(3).is_some_and(|argument| {
+                        matches!(peel_expr(argument), Expr::MethodCall(call)
+                            if call.method == "security_lifecycle"
+                                && call.args.is_empty()
+                                && simple_expr_ident(&call.receiver).as_deref()
+                                    == Some(&services.binding))
+                    })
+                    && constructor
+                        .call
+                        .args
+                        .get(4)
+                        .and_then(simple_expr_ident)
+                        .as_deref()
+                        == Some(&reactivation),
+                "{repo_path}: CredentialSecurityService::new_with_shared_lifecycle must consume security_lifecycle() from the exact AuthGrantServices owner plus `{reactivation}` in their exact slots"
+            );
+            constructor
         } else {
             let constructor = unique_constructor(injection_wire, &service_binding, "new")
                 .with_context(|| format!("{repo_path}: resolve {}::new", injection.service_type))?;
@@ -1509,36 +1565,6 @@ fn collect_identity_wire(
                 injection.service_type,
                 injection.provider_method
             );
-            if injection.port == ProducerCompositionPort::IdentitySecurityLifecycleLocal {
-                let reactivation = unique_method_result_binding(
-                    injection_wire,
-                    "pg",
-                    "account_reactivation_lifecycle",
-                )
-                .with_context(|| {
-                    format!(
-                        "{repo_path}: resolve PgDomainDeps::account_reactivation_lifecycle binding"
-                    )
-                })?;
-                ensure!(
-                    constructor.call.args.len() == 7
-                        && constructor
-                            .call
-                            .args
-                            .get(3)
-                            .and_then(simple_expr_ident)
-                            .as_deref()
-                            == Some(&binding)
-                        && constructor
-                            .call
-                            .args
-                            .get(4)
-                            .and_then(simple_expr_ident)
-                            .as_deref()
-                            == Some(&reactivation),
-                    "{repo_path}: CredentialSecurityService::new must keep the exact seven-part credentials/grants/accounts/security-lifecycle/reactivation/password-policy/clock shape and consume `{binding}` plus `{reactivation}` in their exact slots"
-                );
-            }
             constructor
         };
         if matches!(
@@ -1608,7 +1634,13 @@ fn collect_identity_wire(
                     "common_identity_services"
                 }
                 .to_string(),
-                service_constructor: format!("{}::new", injection.service_type),
+                service_constructor: if injection.port
+                    == ProducerCompositionPort::IdentitySecurityLifecycleLocal
+                {
+                    format!("{}::new_with_shared_lifecycle", injection.service_type)
+                } else {
+                    format!("{}::new", injection.service_type)
+                },
                 provider_factory: format!("PgDomainDeps::{}", injection.provider_method),
             },
         );
@@ -2372,7 +2404,10 @@ mod tests {
                 let IdentityModuleDeps {{ pg, pseudonym_keys, .. }} = deps;
                 let credentials = Arc::from(DynCredentialRepo::new_box(pg.credential_repo()));
                 let accounts = DynAccountSecurityReadRepo::new_box(pg.account_security_repo());
-                let provider = pg.auth_grant_provider(boxed_clock(&clock));
+                let provider = pg.auth_grant_provider(
+                    boxed_clock(&clock),
+                    Arc::clone(&pseudonym_keys),
+                );
                 let common = common_identity_services(&pg, &clock);
                 let auth_grants = AuthGrantServices::from_provider(
                     {session_argument},
@@ -2382,16 +2417,14 @@ mod tests {
                     refresh_ttl,
                 );
                 let refresh = auth_grants.refresh_service();
-                let security_lifecycle =
-                    pg.identity_security_lifecycle(Arc::clone(&pseudonym_keys));
                 let account_reactivation_lifecycle =
                     pg.account_reactivation_lifecycle(pseudonym_keys);
                 let password_policy = secure::PasswordPolicy::new(blocklist);
-                let credential_security = Arc::new(CredentialSecurityService::new(
+                let credential_security = Arc::new(CredentialSecurityService::new_with_shared_lifecycle(
                     credentials,
                     auth_grants.lifecycle(),
                     accounts,
-                    security_lifecycle,
+                    auth_grants.security_lifecycle(),
                     account_reactivation_lifecycle,
                     password_policy,
                     boxed_clock(&clock),
@@ -2451,14 +2484,14 @@ mod tests {
         let canonical = identity_wire("provider", "login");
         assert!(
             collect_identity_wire(&canonical, IDENTITY_COMPOSITION).is_ok(),
-            "canonical seven-part credential-security injection must be green"
+            "canonical shared seven-part credential-security injection must be green"
         );
         for (label, source) in [
             (
-                "foreign lifecycle",
+                "foreign provider",
                 canonical.replace(
-                    "pg.identity_security_lifecycle(Arc::clone(&pseudonym_keys));",
-                    "decoy.identity_security_lifecycle(Arc::clone(&pseudonym_keys));",
+                    "let provider = pg.auth_grant_provider(",
+                    "let provider = decoy.auth_grant_provider(",
                 ),
             ),
             (
@@ -2471,8 +2504,8 @@ mod tests {
             (
                 "misplaced lifecycle",
                 canonical.replace(
-                    "                    security_lifecycle,\n                    account_reactivation_lifecycle,",
-                    "                    account_reactivation_lifecycle,\n                    security_lifecycle,",
+                    "                    auth_grants.security_lifecycle(),\n                    account_reactivation_lifecycle,",
+                    "                    account_reactivation_lifecycle,\n                    auth_grants.security_lifecycle(),",
                 ),
             ),
         ] {

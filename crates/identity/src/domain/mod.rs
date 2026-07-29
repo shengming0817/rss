@@ -51,8 +51,8 @@ pub use security_event::{
 // 签名实体，跨 crate 命名）；kind_to_db / kind_from_db 是 PrincipalKind↔text 单源映射（postgres adapter 消费）。
 // 字段私有 + 构造经 pub(crate) funnel / pub hydrate，外部不可伪造（ADR-005 Option 2）。
 pub use refresh::{
-    RefreshRotation, RefreshRotationOutcome, RefreshStatus, RefreshTokenHash, RefreshTokenId,
-    RefreshTokenRecord, RefreshTokenSnapshot,
+    RefreshRotation, RefreshStatus, RefreshTokenHash, RefreshTokenId, RefreshTokenRecord,
+    RefreshTokenSnapshot,
 };
 // reason: pub(crate) re-export 经 facade 暴露域词汇；生产消费方（handler / authz 接线）待 W 阶段，
 // 当前仅 #[cfg(test)] smoke / 子模块测试消费 ⇒ 非 test lib target 视作 unused（ADR-004 C8 遗留期）。
@@ -75,6 +75,7 @@ pub use resource_attr::{
 // （authenticate 返回）是 pub。AccountLockout/BruteForceDecision 供 postgres adapter 在 authenticate
 // transaction 内重建与推进临时暴破锁。
 pub use account::{AccountLockout, AuthOutcome, BruteForceDecision, Credential, LoginIdentifier};
+pub(crate) use account_security::ActiveAccountSecurity;
 pub use account_security::{
     AccountSecurityHydrationError, AccountSecurityMutation, AccountSecuritySnapshot,
     AccountSecurityState, AccountSecurityTransitionError, AccountSecurityVersion, AccountStatus,

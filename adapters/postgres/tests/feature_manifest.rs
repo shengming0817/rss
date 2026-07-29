@@ -146,7 +146,7 @@ fn domain_feature_shared_capability_allowlist_is_closed() {
 }
 
 #[test]
-fn journey_fault_support_is_independent_from_general_test_support()
+fn journey_fault_support_does_not_restore_refresh_store_writes()
 -> Result<(), Box<dyn std::error::Error>> {
     let manifest = manifest()?;
     let features = manifest
@@ -175,23 +175,10 @@ fn journey_fault_support_is_independent_from_general_test_support()
     }
     let bundle = fs::read_to_string(root.join("src/bundle.rs"))?;
     assert!(
-        bundle.contains(
-            "#[cfg(feature = \"journey-fault-support\")]\n    #[must_use]\n    pub fn refresh_token_store_with_commit_unknown_once"
-        ),
-        "the public one-shot constructor must be owned by the narrow journey fault feature"
+        !bundle.contains("refresh_token_store_with_commit_unknown_once"),
+        "journey faults must not restore the deleted refresh writer constructor"
     );
     Ok(())
-}
-
-#[cfg(all(feature = "domain-identity", feature = "journey-fault-support"))]
-#[test]
-fn journey_fault_feature_exposes_only_the_named_refresh_constructor() {
-    let _constructor: fn(
-        &postgres::PgDomainDeps<postgres::caps::Identity>,
-        &str,
-    ) -> postgres::PgRefreshTokenStore = postgres::PgDomainDeps::<
-        postgres::caps::Identity,
-    >::refresh_token_store_with_commit_unknown_once;
 }
 
 #[test]

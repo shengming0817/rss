@@ -22,9 +22,19 @@ use axum::routing::get;
 use base64::Engine as _;
 use base64::engine::general_purpose::{STANDARD as B64_STD, URL_SAFE_NO_PAD as B64_URL};
 use httpserve::{
-    RouteAuthorizationDecision, RouteAuthorizationRequest, RouteAuthorizer,
+    ProducerMarker, RouteAuthorizationDecision, RouteAuthorizationRequest, RouteAuthorizer,
     TestPrimaryRoute as PrimaryRoute, TestRoutePermission as RoutePermission,
     TestRouteResourceScope as RouteResourceScope,
+};
+use identity::ports::{
+    AccountSecurityReadRepo, AccountSecuritySnapshot, AccountSecurityState, AccountStatus,
+    AccountStatusSetCommand, AccountStatusSetProducerReceipt, AuthGrantLifecycle,
+    CredentialSecurityReceipt, IdentityError, IdentitySecurityLifecycle, LoginGrantMutation,
+    LoginProducerReceipt, LogoutAllCommand, LogoutAllProducerReceipt, LogoutCurrentCommand,
+    LogoutCurrentProducerReceipt, PasswordChangeCommand, PasswordChangeProducerReceipt,
+    RefreshExecutionCommand, RefreshExecutionOutcome, RefreshProducerReceipt, RefreshStatus,
+    RefreshTokenHash, RefreshTokenId, RefreshTokenRecord, RefreshTokenSnapshot, RefreshTokenStore,
+    SECURITY_EVENT_CONTRACT, SECURITY_EVENT_FACT, TenantRepoScope,
 };
 use oidc::OidcProvider;
 use p256::ecdsa::{Signature, SigningKey, signature::Signer as _};
@@ -47,6 +57,133 @@ const NOW: i64 = 1_700_000_000;
 const TTL_SECS: u64 = 900;
 /// JOSE `kid` = vault Transit sign key 名（mock 不校验 key 名，仅证 issuer 把 kid 注入 header）。
 const KEY_ID: &str = "rss-jwt-es256";
+const PRESENTED_REFRESH: &str = "runtime-refresh-before-commit";
+
+#[derive(Clone, Copy)]
+enum RefreshSettlement {
+    ReuseContained,
+    Internal,
+    CommitUnknown,
+}
+
+#[derive(Clone)]
+struct RefreshBackend {
+    grant: authn::AuthGrant,
+    record: RefreshTokenRecord,
+    account: AccountSecurityState,
+    settlement: RefreshSettlement,
+}
+
+fn identity_storage_error(message: &'static str) -> IdentityError {
+    IdentityError::Storage(Box::new(std::io::Error::other(message)))
+}
+
+impl RefreshTokenStore for RefreshBackend {
+    async fn find_by_hash(
+        &self,
+        scope: TenantRepoScope,
+        hash: RefreshTokenHash,
+    ) -> Result<Option<RefreshTokenRecord>, IdentityError> {
+        Ok(
+            (scope.tenant() == self.record.tenant() && self.record.token_hash() == &hash)
+                .then(|| self.record.clone()),
+        )
+    }
+}
+
+impl AuthGrantLifecycle for RefreshBackend {
+    async fn persist_login_grant(
+        &self,
+        _receipt: LoginProducerReceipt,
+        _scope: TenantRepoScope,
+        _mutation: LoginGrantMutation,
+        _entry: consistency::EventEntry,
+        _envelope: diport::OutboxEnvelopeParts,
+    ) -> Result<identity::ports::PersistedLoginGrantReceipt, diport::OutboxEmitError> {
+        Err(diport::OutboxEmitError::new(std::io::Error::other(
+            "refresh-only runtime backend",
+        )))
+    }
+
+    async fn find_active(
+        &self,
+        scope: TenantRepoScope,
+        grant_id: authn::AuthGrantId,
+        observed_at: SystemTime,
+    ) -> Result<Option<authn::AuthGrant>, IdentityError> {
+        Ok((scope.tenant() == self.grant.tenant()
+            && self.grant.id() == &grant_id
+            && self.grant.expires_at() > observed_at)
+            .then(|| self.grant.clone()))
+    }
+}
+
+impl AccountSecurityReadRepo for RefreshBackend {
+    async fn find(
+        &self,
+        scope: TenantRepoScope,
+        user_id: ids::UserId,
+    ) -> Result<Option<AccountSecurityState>, IdentityError> {
+        Ok(
+            (scope.tenant() == self.account.tenant() && user_id == self.account.user_id())
+                .then(|| self.account.clone()),
+        )
+    }
+}
+
+impl IdentitySecurityLifecycle for RefreshBackend {
+    async fn execute_refresh(
+        &self,
+        receipt: RefreshProducerReceipt,
+        _scope: TenantRepoScope,
+        _command: RefreshExecutionCommand,
+    ) -> Result<RefreshExecutionOutcome, IdentityError> {
+        let _authorization = receipt
+            .authorize(SECURITY_EVENT_FACT, SECURITY_EVENT_CONTRACT)
+            .ok_or_else(|| identity_storage_error("refresh receipt rejected"))?;
+        match self.settlement {
+            RefreshSettlement::ReuseContained => Ok(RefreshExecutionOutcome::ReuseContained),
+            RefreshSettlement::Internal => Err(identity_storage_error("internal settlement")),
+            RefreshSettlement::CommitUnknown => Err(identity_storage_error("commit unknown")),
+        }
+    }
+
+    async fn execute_password_change(
+        &self,
+        _receipt: PasswordChangeProducerReceipt,
+        _scope: TenantRepoScope,
+        _command: PasswordChangeCommand,
+    ) -> Result<CredentialSecurityReceipt, IdentityError> {
+        Err(identity_storage_error("unsupported password change"))
+    }
+
+    async fn execute_account_status_set(
+        &self,
+        _receipt: AccountStatusSetProducerReceipt,
+        _scope: TenantRepoScope,
+        _command: AccountStatusSetCommand,
+    ) -> Result<CredentialSecurityReceipt, IdentityError> {
+        Err(identity_storage_error("unsupported account status"))
+    }
+
+    async fn execute_logout_current(
+        &self,
+        _receipt: LogoutCurrentProducerReceipt,
+        _scope: TenantRepoScope,
+        _command: LogoutCurrentCommand,
+    ) -> Result<CredentialSecurityReceipt, IdentityError> {
+        Err(identity_storage_error("unsupported logout current"))
+    }
+
+    async fn execute_logout_all(
+        &self,
+        _receipt: LogoutAllProducerReceipt,
+        _scope: TenantRepoScope,
+        _command: LogoutAllCommand,
+    ) -> Result<CredentialSecurityReceipt, IdentityError> {
+        Err(identity_storage_error("unsupported logout all"))
+    }
+}
 
 #[allow(clippy::expect_used)]
 fn test_routes(
@@ -150,6 +287,71 @@ fn vault_jwt_issuer(vault_uri: &str) -> authn::JwtIssuer<diport::RssAccessProfil
         ),
     )
     .expect("jwt issuer config")
+}
+
+#[allow(clippy::expect_used)]
+fn refresh_backend(settlement: RefreshSettlement) -> RefreshBackend {
+    let tenant = vocab::TenantId::parse(TENANT).expect("tenant");
+    let user_id = ids::UserId::parse(USER_ID).expect("user");
+    let epoch = authn::AuthnEpoch::hydrate(5).expect("epoch");
+    let issued_at = UNIX_EPOCH + Duration::from_secs((NOW - 30) as u64);
+    let expires_at = UNIX_EPOCH + Duration::from_secs((NOW + 3_600) as u64);
+    let grant = authn::AuthGrant::new_active(
+        tenant,
+        user_id,
+        UNIX_EPOCH + Duration::from_secs((NOW - 60) as u64),
+        epoch,
+        expires_at,
+        issued_at,
+    )
+    .expect("active grant");
+    let refresh_id = RefreshTokenId::hydrate("aaaaaaaa-0001-4000-8000-000000000001");
+    let record = RefreshTokenRecord::hydrate(RefreshTokenSnapshot {
+        id: refresh_id.clone(),
+        tenant,
+        auth_grant_id: grant.id().clone(),
+        user_id,
+        authn_epoch_at_issue: epoch,
+        auth_grant_status: authn::AuthGrantStatus::Active,
+        token_hash: RefreshTokenHash::hydrate(secure::digest(PRESENTED_REFRESH)),
+        parent_id: None,
+        lineage_id: refresh_id,
+        status: RefreshStatus::Active,
+        issued_at,
+        expires_at,
+    })
+    .expect("active refresh");
+    let account = AccountSecurityState::try_from(AccountSecuritySnapshot {
+        tenant,
+        user_id,
+        status: AccountStatus::Active,
+        authn_epoch: epoch.get(),
+        version: 1,
+        status_changed_at: issued_at,
+        updated_at: issued_at,
+    })
+    .expect("active account");
+    RefreshBackend {
+        grant,
+        record,
+        account,
+        settlement,
+    }
+}
+
+fn refresh_service(
+    vault_uri: &str,
+    settlement: RefreshSettlement,
+) -> Arc<identity::RefreshService<VaultSigner>> {
+    let backend = refresh_backend(settlement);
+    identity::AuthGrantServices::from_provider(
+        backend.clone(),
+        identity::ports::DynAccountSecurityReadRepo::new_box(backend),
+        Arc::new(vault_jwt_issuer(vault_uri)),
+        Box::new(FixedClock(NOW)),
+        Duration::from_secs(TTL_SECS),
+    )
+    .refresh_service()
 }
 
 /// 真 `OidcProvider`（经静态 RSS User-only profile 装配）。
@@ -264,5 +466,56 @@ async fn vault_signed_access_jwt_verifies_via_oidc_bridge() {
         verify_status(&tampered).await,
         StatusCode::UNAUTHORIZED,
         "篡改签名的 JWT 须 401（验签非恒真）"
+    );
+}
+
+#[tokio::test]
+#[allow(clippy::expect_used)]
+async fn refresh_non_acknowledged_settlements_never_release_bearers() {
+    let server = MockServer::start().await;
+    Mock::given(match_method("POST"))
+        .and(body_partial_json(
+            serde_json::json!({ "marshaling_algorithm": "jws" }),
+        ))
+        .respond_with(TransitSignResponder { sk: sk_jwt() })
+        .mount(&server)
+        .await;
+    let tenant = vocab::TenantId::parse(TENANT).expect("tenant");
+
+    // The fake deliberately has no Applied branch: only the PostgreSQL settlement funnel may mint
+    // the commit acknowledgement. The real Applied path is covered by
+    // `identity_login_wire_e2e::wire_identity_two_routers_concurrent_refresh_reuse_closes_security_loop_e2e`.
+    for (label, settlement, replay) in [
+        ("reuse", RefreshSettlement::ReuseContained, true),
+        ("internal", RefreshSettlement::Internal, false),
+        ("commit-unknown", RefreshSettlement::CommitUnknown, false),
+    ] {
+        let result = refresh_service(&server.uri(), settlement)
+            .rotate(
+                ProducerMarker::for_test(generated::http::identity_v1::refresh::PRODUCER)
+                    .into_receipt(),
+                tenant,
+                &authn::RefreshToken::new(PRESENTED_REFRESH),
+            )
+            .await;
+        let error = result.expect_err("non-applied settlement must not release bearer bundle");
+        if replay {
+            assert!(matches!(&error, identity::RefreshError::Replayed));
+        } else {
+            assert!(matches!(&error, identity::RefreshError::Store(_)));
+        }
+        let public_error = error.to_string();
+        assert!(!public_error.contains(PRESENTED_REFRESH), "{label}");
+        assert!(!public_error.contains("eyJ"), "{label}");
+    }
+
+    assert_eq!(
+        server
+            .received_requests()
+            .await
+            .expect("wiremock request log")
+            .len(),
+        3,
+        "every non-acknowledged path mints before settlement but releases no pending secrets"
     );
 }

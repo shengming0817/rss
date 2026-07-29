@@ -29,12 +29,9 @@ use diport::{
     SecretResolver, SecretResolverError,
 };
 use generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesResponse;
-use generated::http::identity_v1::refresh::{IdentityRefreshRequest, IdentityRefreshResponse};
 use generated::http::settings_v2::{SettingsSecretPublishRequest, SettingsSecretPublishResponse};
 use identity::ports::{
     Credential, CredentialRepo, DynAccountSecurityReadRepo, DynCredentialRepo,
-    DynRefreshTokenStore, IdentityError, RefreshRotationMutation, RefreshRotationOutcome,
-    RefreshTokenHash, RefreshTokenId, RefreshTokenRecord, RefreshTokenStore,
     TenantRepoScope as IdentityScope,
 };
 use identity::{
@@ -42,8 +39,8 @@ use identity::{
 };
 use memory::{FixedClock, MemBus, MemEmitter};
 use postgres::{
-    ConfigValueProtections, PgAuditAdminRepo, PgAuthGrantLifecycle, PgConfig, PgCredentialRepo,
-    PgPassword, PgRuntimeDeps, PgSslMode, PgTenantReadConfig, caps,
+    ConfigValueProtections, PgAuditAdminRepo, PgConfig, PgCredentialRepo, PgPassword,
+    PgRuntimeDeps, PgSslMode, PgTenantReadConfig, caps,
 };
 use primitives::{AuthPlan, AuthScheme, ListenerKind, MacKey};
 use serde::Deserialize;
@@ -90,7 +87,6 @@ const SETTINGS_FIXTURE: &str =
     include_str!("../../../fixtures/settings-secret-publish-localtx.toml");
 const AUDIT_TENANT_FIXTURE: &str =
     include_str!("../../../fixtures/audit-list-tenant-entries-localtx.toml");
-const REFRESH_FIXTURE: &str = include_str!("../../../fixtures/identity-refresh-localtx.toml");
 const AUDIT_ROUTE_ACTION: &str = "audit:list-cross-tenant";
 
 #[derive(Debug, Deserialize)]
@@ -533,26 +529,6 @@ async fn send_recorded(
     .await
 }
 
-async fn send_refresh_recorded(
-    router: &axum::Router,
-    body: Vec<u8>,
-    request_id: &str,
-    tenant: TenantId,
-) -> Result<RecordedHttpResult> {
-    send_request_recorded(
-        router,
-        Request::builder()
-            .method(Method::POST)
-            .uri(generated::http::identity_v1::refresh::PATH)
-            .header(header::CONTENT_TYPE, "application/json")
-            .header("x-request-id", request_id)
-            .header("x-tenant-id", tenant.to_string())
-            .body(Body::from(body))?,
-        generated::http::identity_v1::refresh::CONTRACT_ID,
-    )
-    .await
-}
-
 async fn send_audit_recorded(
     router: &axum::Router,
     uri: String,
@@ -968,30 +944,6 @@ async fn secret_snapshot(
     Ok(SecretSnapshot(rows))
 }
 
-#[derive(PartialEq, Eq)]
-struct AuthGrantSnapshot(Vec<bool>);
-
-async fn auth_grant_snapshot(
-    pool: &sqlx::PgPool,
-    tenants: [TenantId; 2],
-    grant_id: &str,
-) -> Result<AuthGrantSnapshot> {
-    let mut rows = Vec::with_capacity(2);
-    for tenant in tenants {
-        let state = sqlx::query_scalar::<_, bool>(
-            "SELECT status = 'active' FROM auth_grants \
-             WHERE tenant_id = $1::uuid AND grant_id = $2",
-        )
-        .bind(tenant.to_string())
-        .bind(grant_id)
-        .fetch_optional(pool)
-        .await?
-        .unwrap_or(false);
-        rows.push(state);
-    }
-    Ok(AuthGrantSnapshot(rows))
-}
-
 async fn seed_credential(
     repo: &PgCredentialRepo,
     tenant: TenantId,
@@ -1338,18 +1290,23 @@ async fn build_identity_authorizer(
     .await?;
     let credentials: Arc<DynCredentialRepo<'static>> =
         Arc::from(DynCredentialRepo::new_box(identity_deps.credential_repo()));
+    let pseudonym_keys = postgres::identity_pseudonym_keys_for_test();
     let auth_grants = seed_auth_grant_services(
-        identity_deps.auth_grant_provider(Box::new(FixedClock::at_unix_secs(NOW_SECS))),
+        identity_deps.auth_grant_provider(
+            Box::new(FixedClock::at_unix_secs(NOW_SECS)),
+            Arc::clone(&pseudonym_keys),
+        ),
         DynAccountSecurityReadRepo::new_box(identity_deps.account_security_repo()),
     );
     let refresh = auth_grants.refresh_service();
     let grants = auth_grants.lifecycle();
-    let credential_security = Arc::new(CredentialSecurityService::new(
+    let security = auth_grants.security_lifecycle();
+    let credential_security = Arc::new(CredentialSecurityService::new_with_shared_lifecycle(
         Arc::clone(&credentials),
         grants,
         DynAccountSecurityReadRepo::new_box(identity_deps.account_security_repo()),
-        identity_deps.identity_security_lifecycle(postgres::identity_pseudonym_keys_for_test()),
-        identity_deps.identity_security_lifecycle(postgres::identity_pseudonym_keys_for_test()),
+        security,
+        identity_deps.account_reactivation_lifecycle(pseudonym_keys),
         common::password_policy(),
         Box::new(FixedClock::at_unix_secs(NOW_SECS)),
     ));
@@ -1362,557 +1319,6 @@ async fn build_identity_authorizer(
     let identity_domain = common::identity_domain(login, refresh, credential_security);
     let mut registry = bootstrap::compose(&[&identity_domain])?;
     Ok(registry.take_primary_authorizer()?)
-}
-
-fn auth_grant_commit_delta(before: &AuthGrantSnapshot, after: &AuthGrantSnapshot) -> Result<u16> {
-    ensure!(
-        before.0.len() == 2 && after.0.len() == 2,
-        "auth-grant snapshot shape drift"
-    );
-    let mut commits = 0_u16;
-    for (old, new) in before.0.iter().zip(&after.0) {
-        ensure!(*old || !*new, "closed auth grant became active");
-        if *old && !new {
-            commits += 1;
-        }
-    }
-    Ok(commits)
-}
-
-pub(crate) struct RefreshCases {
-    pub(crate) happy: JourneyCase,
-    pub(crate) unknown: JourneyCase,
-    pub(crate) malformed: JourneyCase,
-    pub(crate) contention_winner: JourneyCase,
-    pub(crate) contention_loser: JourneyCase,
-    pub(crate) commit_unknown: JourneyCase,
-}
-
-struct RefreshSeed {
-    id: String,
-    secret: String,
-}
-
-impl RefreshSeed {
-    fn unique(secret_sentinel: &str) -> Self {
-        let nonce = Uuid::new_v4();
-        Self {
-            id: nonce.to_string(),
-            secret: format!("{secret_sentinel}-{nonce}"),
-        }
-    }
-
-    fn hash(&self) -> [u8; 32] {
-        secure::digest(&self.secret)
-    }
-}
-
-struct BarrierRefreshStore {
-    inner: Box<DynRefreshTokenStore<'static>>,
-    gated_hash: [u8; 32],
-    barrier: Arc<Barrier>,
-}
-
-/// Test-only owner that keeps the lifecycle and an instrumented refresh view from the same
-/// PostgreSQL runtime dependency bundle consumable through the production composition funnel.
-struct RefreshHarnessProvider {
-    lifecycle: PgAuthGrantLifecycle,
-    refresh: Box<DynRefreshTokenStore<'static>>,
-}
-
-impl AuthGrantProvider for RefreshHarnessProvider {
-    type Lifecycle = PgAuthGrantLifecycle;
-    type RefreshStore = Box<DynRefreshTokenStore<'static>>;
-
-    fn into_auth_grant_parts(self) -> (Self::Lifecycle, Self::RefreshStore) {
-        (self.lifecycle, self.refresh)
-    }
-}
-
-impl RefreshTokenStore for BarrierRefreshStore {
-    async fn find_by_hash(
-        &self,
-        scope: IdentityScope,
-        hash: RefreshTokenHash,
-    ) -> Result<Option<RefreshTokenRecord>, IdentityError> {
-        let gated = hash.as_bytes() == &self.gated_hash;
-        let record = self.inner.find_by_hash(scope, hash).await?;
-        if gated {
-            self.barrier.wait().await;
-        }
-        Ok(record)
-    }
-
-    async fn rotate(
-        &self,
-        scope: IdentityScope,
-        mutation: RefreshRotationMutation,
-    ) -> Result<RefreshRotationOutcome, IdentityError> {
-        self.inner.rotate(scope, mutation).await
-    }
-
-    async fn revoke_lineage(
-        &self,
-        scope: IdentityScope,
-        lineage_id: RefreshTokenId,
-    ) -> Result<(), IdentityError> {
-        self.inner.revoke_lineage(scope, lineage_id).await
-    }
-}
-
-fn seed_auth_grant_services<P>(
-    provider: P,
-    accounts: Box<DynAccountSecurityReadRepo<'static>>,
-) -> AuthGrantServices<SeedSigner>
-where
-    P: AuthGrantProvider,
-{
-    identity::seed_auth_grant_services(
-        provider,
-        accounts,
-        || Box::new(FixedClock::at_unix_secs(NOW_SECS)),
-        Duration::from_secs(TTL_SECS),
-    )
-}
-
-fn refresh_router<P>(
-    deps: &PgRuntimeDeps,
-    provider: P,
-    observed_at: SystemTime,
-) -> Result<axum::Router>
-where
-    P: AuthGrantProvider,
-{
-    let identity_deps = deps.handle().for_domain::<caps::Identity>();
-    let auth_grants = AuthGrantServices::from_provider(
-        provider,
-        DynAccountSecurityReadRepo::new_box(identity_deps.account_security_repo()),
-        Arc::new(authn::JwtIssuer::<diport::RssAccessProfile, _>::new(
-            Arc::new(SeedSigner),
-            Box::new(FixedClock::new(observed_at)),
-            authn::JwtIssuerConfig::rss_access(
-                authn::SigningKeyRing::single(diport::KeyId::new("journey-login-key"))
-                    .expect("non-empty signing key id"),
-                diport::SigningPurpose::new("journey-login-signing"),
-                "https://journey.local",
-                "rss-journey",
-                Duration::from_secs(900),
-            ),
-        )?),
-        Box::new(FixedClock::new(observed_at)),
-        Duration::from_secs(TTL_SECS),
-    );
-    let refresh = auth_grants.refresh_service();
-    let grants = auth_grants.lifecycle();
-    let credential_security = Arc::new(CredentialSecurityService::new(
-        Arc::from(DynCredentialRepo::new_box(identity_deps.credential_repo())),
-        grants,
-        DynAccountSecurityReadRepo::new_box(identity_deps.account_security_repo()),
-        identity_deps.identity_security_lifecycle(postgres::identity_pseudonym_keys_for_test()),
-        identity_deps.identity_security_lifecycle(postgres::identity_pseudonym_keys_for_test()),
-        common::password_policy(),
-        Box::new(FixedClock::new(observed_at)),
-    ));
-    let login = Arc::new(LoginService::new(
-        Arc::from(DynCredentialRepo::new_box(identity_deps.credential_repo())),
-        auth_grants,
-        Box::new(FixedClock::new(observed_at)),
-        Duration::from_secs(TTL_SECS),
-    ));
-    let domain = common::identity_domain(login, refresh, credential_security);
-    finalized_router(&domain, None, None)
-}
-
-async fn database_now(pool: &sqlx::PgPool) -> Result<SystemTime> {
-    let secs =
-        sqlx::query_scalar::<_, i64>("SELECT floor(extract(epoch FROM clock_timestamp()))::bigint")
-            .fetch_one(pool)
-            .await?;
-    Ok(SystemTime::UNIX_EPOCH + Duration::from_secs(u64::try_from(secs)?))
-}
-
-async fn seed_refresh(
-    pool: &sqlx::PgPool,
-    tenant: TenantId,
-    seed: &RefreshSeed,
-    observed_at: SystemTime,
-) -> Result<()> {
-    let observed_secs = observed_at
-        .duration_since(SystemTime::UNIX_EPOCH)?
-        .as_secs();
-    let mut tx = pool.begin().await?;
-    sqlx::query(
-        "INSERT INTO auth_grants \
-         (tenant_id, grant_id, user_id, auth_time, authn_epoch_at_issue, status, \
-          expires_at, created_at, closed_at, close_reason) \
-         VALUES ($1::uuid, $2, $3::uuid, to_timestamp($4), 0, 'active', \
-                 to_timestamp($5), to_timestamp($4), NULL, NULL)",
-    )
-    .bind(tenant.to_string())
-    .bind(&seed.id)
-    .bind(HAPPY_USER)
-    .bind(i64::try_from(observed_secs)?)
-    .bind(i64::try_from(observed_secs + TTL_SECS)?)
-    .execute(&mut *tx)
-    .await?;
-    sqlx::query(
-        "INSERT INTO refresh_tokens \
-         (id, tenant_id, user_id, auth_grant_id, auth_grant_status, token_hash, parent_id, \
-          lineage_id, authn_epoch_at_issue, status, issued_at, expires_at) \
-         VALUES ($1::uuid, $2::uuid, $3::uuid, $1::uuid::text, 'active', $4, NULL, \
-                 $1::uuid, 0, 'active', to_timestamp($5), to_timestamp($6))",
-    )
-    .bind(&seed.id)
-    .bind(tenant.to_string())
-    .bind(HAPPY_USER)
-    .bind(secure::digest(&seed.secret).as_slice())
-    .bind(i64::try_from(observed_secs)?)
-    .bind(i64::try_from(observed_secs + TTL_SECS)?)
-    .execute(&mut *tx)
-    .await?;
-    tx.commit().await?;
-    Ok(())
-}
-
-#[derive(Debug, PartialEq, Eq)]
-struct RefreshLineageSnapshot {
-    old_status: Option<String>,
-    successors: Vec<(String, String, String)>,
-}
-
-async fn refresh_lineage_snapshot(
-    pool: &sqlx::PgPool,
-    tenant: TenantId,
-    old_id: &str,
-) -> Result<RefreshLineageSnapshot> {
-    let old_status = sqlx::query_scalar::<_, String>(
-        "SELECT status FROM refresh_tokens WHERE tenant_id = $1::uuid AND id = $2::uuid",
-    )
-    .bind(tenant.to_string())
-    .bind(old_id)
-    .fetch_optional(pool)
-    .await?;
-    let successors = sqlx::query_as::<_, (String, String, String)>(
-        "SELECT id::text, status, lineage_id::text FROM refresh_tokens \
-         WHERE tenant_id = $1::uuid AND parent_id = $2::uuid ORDER BY id",
-    )
-    .bind(tenant.to_string())
-    .bind(old_id)
-    .fetch_all(pool)
-    .await?;
-    Ok(RefreshLineageSnapshot {
-        old_status,
-        successors,
-    })
-}
-
-async fn refresh_status_by_secret(
-    pool: &sqlx::PgPool,
-    tenant: TenantId,
-    secret: &str,
-) -> Result<Option<String>> {
-    Ok(sqlx::query_scalar::<_, String>(
-        "SELECT status FROM refresh_tokens WHERE tenant_id = $1::uuid AND token_hash = $2",
-    )
-    .bind(tenant.to_string())
-    .bind(secure::digest(secret).as_slice())
-    .fetch_optional(pool)
-    .await?)
-}
-
-async fn refresh_row_count(pool: &sqlx::PgPool, tenant: TenantId) -> Result<i64> {
-    Ok(sqlx::query_scalar::<_, i64>(
-        "SELECT count(*) FROM refresh_tokens WHERE tenant_id = $1::uuid",
-    )
-    .bind(tenant.to_string())
-    .fetch_one(pool)
-    .await?)
-}
-
-fn assert_refresh_accounting(
-    case: &JourneyCase,
-    samples: &[&LocalTxMetrics],
-    expected_committed: u16,
-    expected_commit_unknown: u16,
-) -> Result<()> {
-    assert_active_case_scenario(case)?;
-    let observed = LocalTxMetrics::combine(samples)?;
-    ensure!(observed.attempts == case.attempts, "refresh attempts drift");
-    ensure!(
-        observed.failed_attempts == expected_commit_unknown,
-        "refresh failed-attempt accounting drift"
-    );
-    ensure!(
-        observed.finals == expected_committed + expected_commit_unknown,
-        "refresh final accounting drift"
-    );
-    ensure!(
-        observed.committed == expected_committed
-            && observed.rolled_back == 0
-            && observed.commit_unknown == expected_commit_unknown,
-        "refresh settlement accounting drift"
-    );
-    if let Some(commits) = case.commits {
-        ensure!(
-            commits == expected_committed,
-            "refresh fixture commits drift"
-        );
-    } else {
-        ensure!(
-            expected_commit_unknown == 1,
-            "only commit-unknown may omit commits"
-        );
-    }
-    case.mark_accounting_observed();
-    Ok(())
-}
-
-fn refresh_body(secret: &str) -> Result<Vec<u8>> {
-    Ok(serde_json::to_vec(&IdentityRefreshRequest {
-        refresh_token: secret.to_owned(),
-    })?)
-}
-
-async fn drive_refresh_happy(
-    deps: &PgRuntimeDeps,
-    observation_pool: &sqlx::PgPool,
-    tenant: TenantId,
-    case: &JourneyCase,
-) -> Result<()> {
-    let seed = RefreshSeed::unique("refresh-happy-secret-sentinel");
-    let observed_at = database_now(observation_pool).await?;
-    let provider = deps
-        .handle()
-        .for_domain::<caps::Identity>()
-        .auth_grant_provider(Box::new(FixedClock::new(observed_at)));
-    seed_refresh(observation_pool, tenant, &seed, observed_at).await?;
-    let router = refresh_router(deps, provider, observed_at)?;
-    let response = send_refresh_recorded(
-        &router,
-        refresh_body(&seed.secret)?,
-        "rid-refresh-happy",
-        tenant,
-    )
-    .await?;
-    let decoded: IdentityRefreshResponse = decode_case_success(
-        case,
-        &response.response,
-        "rid-refresh-happy",
-        &case.redact_sentinels,
-    )?;
-    let snapshot = refresh_lineage_snapshot(observation_pool, tenant, &seed.id).await?;
-    ensure!(snapshot.old_status.as_deref() == Some("consumed"));
-    ensure!(snapshot.successors.len() == 1);
-    ensure!(snapshot.successors[0].1 == "active");
-    ensure!(snapshot.successors[0].2 == seed.id);
-    ensure!(
-        refresh_status_by_secret(observation_pool, tenant, &decoded.data.refresh_token).await?
-            == Some("active".to_owned())
-    );
-    assert_refresh_accounting(case, &[&response.localtx], 1, 0)
-}
-
-async fn drive_refresh_rejections(
-    deps: &PgRuntimeDeps,
-    observation_pool: &sqlx::PgPool,
-    tenant: TenantId,
-    unknown: &JourneyCase,
-    malformed: &JourneyCase,
-) -> Result<()> {
-    let before = refresh_row_count(observation_pool, tenant).await?;
-    let observed_at = database_now(observation_pool).await?;
-    let provider = deps
-        .handle()
-        .for_domain::<caps::Identity>()
-        .auth_grant_provider(Box::new(FixedClock::new(observed_at)));
-    let router = refresh_router(deps, provider, observed_at)?;
-    let unknown_secret = format!("refresh-unknown-secret-sentinel-{}", Uuid::new_v4());
-    let unknown_response = send_refresh_recorded(
-        &router,
-        refresh_body(&unknown_secret)?,
-        "rid-refresh-unknown",
-        tenant,
-    )
-    .await?;
-    assert_case_error(
-        unknown,
-        &unknown_response.response,
-        "rid-refresh-unknown",
-        &unknown.redact_sentinels,
-    )?;
-    assert_refresh_accounting(unknown, &[&unknown_response.localtx], 0, 0)?;
-    ensure!(refresh_row_count(observation_pool, tenant).await? == before);
-
-    let malformed_secret = format!("refresh-malformed-secret-sentinel-{}", Uuid::new_v4());
-    let malformed_response = send_refresh_recorded(
-        &router,
-        format!(r#"{{"refreshToken":"{malformed_secret}","extra":true}}"#).into_bytes(),
-        "rid-refresh-malformed",
-        tenant,
-    )
-    .await?;
-    assert_case_error(
-        malformed,
-        &malformed_response.response,
-        "rid-refresh-malformed",
-        &malformed.redact_sentinels,
-    )?;
-    assert_refresh_accounting(malformed, &[&malformed_response.localtx], 0, 0)?;
-    ensure!(refresh_row_count(observation_pool, tenant).await? == before);
-    Ok(())
-}
-
-async fn drive_refresh_contention(
-    deps: &PgRuntimeDeps,
-    observation_pool: &sqlx::PgPool,
-    tenant: TenantId,
-    winner_case: &JourneyCase,
-    loser_case: &JourneyCase,
-) -> Result<()> {
-    let success_status = StatusCode::from_u16(winner_case.http_status)?;
-    let seed = RefreshSeed::unique("refresh-contention-secret-sentinel");
-    let observed_at = database_now(observation_pool).await?;
-    let provider = deps
-        .handle()
-        .for_domain::<caps::Identity>()
-        .auth_grant_provider(Box::new(FixedClock::new(observed_at)));
-    let (lifecycle, store) = provider.into_auth_grant_parts();
-    seed_refresh(observation_pool, tenant, &seed, observed_at).await?;
-    let router = refresh_router(
-        deps,
-        RefreshHarnessProvider {
-            lifecycle,
-            refresh: DynRefreshTokenStore::new_box(BarrierRefreshStore {
-                inner: DynRefreshTokenStore::new_box(store),
-                gated_hash: seed.hash(),
-                barrier: Arc::new(Barrier::new(2)),
-            }),
-        },
-        observed_at,
-    )?;
-    let body = refresh_body(&seed.secret)?;
-    let pair = tokio::time::timeout(Duration::from_secs(15), async {
-        tokio::join!(
-            send_refresh_recorded(&router, body.clone(), "rid-refresh-contention-a", tenant),
-            send_refresh_recorded(&router, body, "rid-refresh-contention-b", tenant),
-        )
-    })
-    .await
-    .context("concurrent refresh exceeded 15 seconds")?;
-    let (a, b) = (pair.0?, pair.1?);
-    let (winner, loser, winner_request_id, loser_request_id) =
-        if a.response.status == success_status {
-            (
-                &a,
-                &b,
-                "rid-refresh-contention-a",
-                "rid-refresh-contention-b",
-            )
-        } else {
-            (
-                &b,
-                &a,
-                "rid-refresh-contention-b",
-                "rid-refresh-contention-a",
-            )
-        };
-    let bundle: IdentityRefreshResponse = decode_success(
-        &winner.response,
-        success_status,
-        winner_request_id,
-        &winner_case.redact_sentinels,
-    )?;
-    winner_case.mark_response_observed();
-    assert_case_error(
-        loser_case,
-        &loser.response,
-        loser_request_id,
-        &loser_case.redact_sentinels,
-    )?;
-    let snapshot = refresh_lineage_snapshot(observation_pool, tenant, &seed.id).await?;
-    ensure!(snapshot.old_status.as_deref() == Some("revoked"));
-    ensure!(snapshot.successors.len() == 1);
-    ensure!(snapshot.successors[0].1 == "revoked");
-    ensure!(snapshot.successors[0].2 == seed.id);
-    ensure!(
-        refresh_status_by_secret(observation_pool, tenant, &bundle.data.refresh_token).await?
-            == Some("revoked".to_owned())
-    );
-    assert_refresh_accounting(winner_case, &[&winner.localtx], 1, 0)?;
-    assert_refresh_accounting(loser_case, &[&loser.localtx], 2, 0)
-}
-
-async fn drive_refresh_commit_unknown(
-    deps: &PgRuntimeDeps,
-    observation_pool: &sqlx::PgPool,
-    tenant: TenantId,
-    case: &JourneyCase,
-) -> Result<()> {
-    let seed = RefreshSeed::unique("refresh-commit-unknown-secret-sentinel");
-    let observed_at = database_now(observation_pool).await?;
-    let identity_deps = deps.handle().for_domain::<caps::Identity>();
-    let provider = identity_deps.auth_grant_provider(Box::new(FixedClock::new(observed_at)));
-    let (lifecycle, _) = provider.into_auth_grant_parts();
-    let store = identity_deps.refresh_token_store_with_commit_unknown_once(&seed.id);
-    seed_refresh(observation_pool, tenant, &seed, observed_at).await?;
-    let router = refresh_router(
-        deps,
-        RefreshHarnessProvider {
-            lifecycle,
-            refresh: DynRefreshTokenStore::new_box(store),
-        },
-        observed_at,
-    )?;
-    let response = send_refresh_recorded(
-        &router,
-        refresh_body(&seed.secret)?,
-        "rid-refresh-commit-unknown",
-        tenant,
-    )
-    .await?;
-    assert_case_error(
-        case,
-        &response.response,
-        "rid-refresh-commit-unknown",
-        &case.redact_sentinels,
-    )?;
-    assert_refresh_accounting(case, &[&response.localtx], 0, 1)?;
-    let snapshot = refresh_lineage_snapshot(observation_pool, tenant, &seed.id).await?;
-    ensure!(snapshot.old_status.as_deref() == Some("consumed"));
-    ensure!(snapshot.successors.len() <= 1);
-    ensure!(
-        snapshot.successors.len() == 1
-            && snapshot.successors[0].1 == "active"
-            && snapshot.successors[0].2 == seed.id,
-        "after-commit seam must leave one durable active successor"
-    );
-    Ok(())
-}
-
-async fn drive_refresh(
-    deps: &PgRuntimeDeps,
-    observation_pool: &sqlx::PgPool,
-    tenant: TenantId,
-    cases: RefreshCases,
-) -> Result<()> {
-    drive_refresh_happy(deps, observation_pool, tenant, &cases.happy).await?;
-    drive_refresh_rejections(
-        deps,
-        observation_pool,
-        tenant,
-        &cases.unknown,
-        &cases.malformed,
-    )
-    .await?;
-    drive_refresh_contention(
-        deps,
-        observation_pool,
-        tenant,
-        &cases.contention_winner,
-        &cases.contention_loser,
-    )
-    .await?;
-    drive_refresh_commit_unknown(deps, observation_pool, tenant, &cases.commit_unknown).await
 }
 
 pub(crate) struct AuditCases {
@@ -2423,29 +1829,6 @@ pub(crate) fn changed_fixture_behavior_is_observably_red() -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn swapped_active_fixture_scenarios_are_observably_red() -> Result<()> {
-    let mut fixture: JourneyFixture = toml::from_str(REFRESH_FIXTURE)?;
-    let happy = fixture
-        .cases
-        .iter()
-        .position(|case| case.id == "identity-refresh-happy")
-        .context("refresh happy fixture case missing")?;
-    let contention = fixture
-        .cases
-        .iter()
-        .position(|case| case.id == "identity-refresh-contention-winner")
-        .context("refresh contention fixture case missing")?;
-    let happy_scenario = fixture.cases[happy].scenario.clone();
-    fixture.cases[happy].scenario = fixture.cases[contention].scenario.clone();
-    fixture.cases[contention].scenario = happy_scenario;
-    ensure!(
-        assert_active_case_scenario(&fixture.cases[happy]).is_err()
-            && assert_active_case_scenario(&fixture.cases[contention]).is_err(),
-        "swapping two active case scenarios must make executable assertions red"
-    );
-    Ok(())
-}
-
 struct LocalTxJourneyRuntime {
     _pg: testkit::PgFixture,
     deps: PgRuntimeDeps,
@@ -2510,24 +1893,6 @@ pub(crate) async fn drive_settings_journey(cases: SettingsCases) -> Result<()> {
         cases,
     )
     .await;
-    runtime.finish(body).await
-}
-
-pub(crate) async fn drive_refresh_journey(cases: RefreshCases) -> Result<()> {
-    let runtime = LocalTxJourneyRuntime::setup().await?;
-    seed_credential(
-        &runtime
-            .deps
-            .handle()
-            .for_domain::<caps::Identity>()
-            .credential_repo(),
-        runtime.tenant_a,
-        ids::UserId::parse(HAPPY_USER)?,
-        "refresh-active-user",
-        IDENTITY_SEED_PASSWORD,
-    )
-    .await?;
-    let body = drive_refresh(&runtime.deps, &runtime.observer, runtime.tenant_a, cases).await;
     runtime.finish(body).await
 }
 

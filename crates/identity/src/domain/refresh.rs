@@ -220,7 +220,10 @@ impl RefreshTokenRecord {
         new_hash: RefreshTokenHash,
         issued_at: SystemTime,
     ) -> Option<RefreshRotation> {
-        if self.auth_grant_status != AuthGrantStatus::Active || issued_at >= self.expires_at {
+        if self.status != RefreshStatus::Active
+            || self.auth_grant_status != AuthGrantStatus::Active
+            || issued_at >= self.expires_at
+        {
             return None;
         }
         let new = Self {
@@ -302,14 +305,6 @@ impl RefreshTokenRecord {
 pub struct RefreshRotation {
     old_id: RefreshTokenId,
     new: RefreshTokenRecord,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RefreshRotationOutcome {
-    Applied,
-    Replay,
-    AccountStale,
-    Expired,
 }
 
 impl RefreshRotation {
@@ -424,6 +419,24 @@ mod tests {
                 )
                 .is_none()
         );
+    }
+
+    #[test]
+    fn terminal_refresh_cannot_prepare_a_rotation() {
+        let record = initial();
+        for status in [RefreshStatus::Consumed, RefreshStatus::Revoked] {
+            assert!(
+                record
+                    .with_status(status)
+                    .begin_rotation(
+                        RefreshTokenId::new(format!("terminal-{status:?}")),
+                        RefreshTokenHash::new([6; 32]),
+                        SystemTime::UNIX_EPOCH + Duration::from_secs(1),
+                    )
+                    .is_none(),
+                "a terminal refresh record must not authorize a child rotation"
+            );
+        }
     }
 
     #[test]

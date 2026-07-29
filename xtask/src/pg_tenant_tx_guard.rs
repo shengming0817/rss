@@ -15,8 +15,8 @@
 //! This guard is a Medium backstop for the Hard typed wrapper in `adapters/postgres/src/cotx/`
 //! and the canonical fact funnels in `outbox.rs` / `outbox_cdc.rs`.
 //!
-//! INVARIANT: LOCALTX-PG-RETRY-PLACEMENT-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::retry_guard_rejects_secret_contract_attribution_bypasses|tests::localtx_deadline_guard_rejects_legacy_missing_forged_and_escaped_tokens|tests::localtx_deadline_observation_guard_rejects_rogue_and_fabricated_stages", anti_vacuity = "tests::retry_guard_real_workspace_contains_all_exact_boundaries|tests::localtx_deadline_guard_real_workspace_closes_mint_and_eight_dataflows|tests::localtx_deadline_observation_guard_real_workspace_closes_exact_sink" } —
-//! Postgres retry wrappers are confined to their exact config, secret, session, refresh, and audit
+//! INVARIANT: LOCALTX-PG-RETRY-PLACEMENT-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::retry_guard_rejects_secret_contract_attribution_bypasses|tests::localtx_deadline_guard_rejects_legacy_missing_forged_and_escaped_tokens|tests::localtx_deadline_observation_guard_rejects_rogue_and_fabricated_stages", anti_vacuity = "tests::retry_guard_real_workspace_contains_all_exact_boundaries|tests::localtx_deadline_guard_real_workspace_closes_mint_and_six_dataflows|tests::localtx_deadline_observation_guard_real_workspace_closes_exact_sink" } —
+//! Postgres retry wrappers are confined to their exact config, secret, and audit
 //! mutation boundaries. Each LocalTx owner must consume its command-carried
 //! generated observation beside `retry_write`; `PgSecretUnitOfWork::publish` is the only settings
 //! secret LocalTx owner;
@@ -25,10 +25,13 @@
 //! originate from `LocalTxRetryError::deadline_stages`, and backoff exhaustion from the canonical
 //! runner callback.
 //!
-//! INVARIANT: IDENTITY-SECURITY-SQL-OWNER-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::identity_security_sql_owner_gate_rejects_missing_and_extra_sites", anti_vacuity = "tests::identity_security_sql_owner_gate_accepts_live_workspace" } —
+//! INVARIANT: IDENTITY-SECURITY-SQL-OWNER-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::identity_security_sql_owner_gate_rejects_missing_and_extra_sites|tests::refresh_legacy_write_guard_rejects_old_ports_and_application_bypasses", anti_vacuity = "tests::identity_security_sql_owner_gate_accepts_live_workspace|tests::refresh_legacy_write_guard_accepts_live_workspace|producer_assurance::tests::workspace_refresh_writer_callsite_is_exact_and_non_vacuous" } —
 //! password rotation, account status CAS, refresh-family revocation, and auth-grant revocation SQL
 //! have one exact production owner: `identity_security_lifecycle.rs`. The password-change LocalTx
-//! repository/retry seam is removed rather than retained as an alias.
+//! repository/retry seam is removed rather than retained as an alias. Refresh rotation and reuse
+//! containment have no LocalTx observation/runner or legacy
+//! `rotate`/`revoke_lineage`/`close` write port. The sole mutation entry is
+//! `IdentitySecurityLifecycle::execute_refresh` and its producer transaction.
 //!
 //! INVARIANT: IDENTITY-REACTIVATION-ISOLATION-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::identity_reactivation_gate_rejects_producer_outbox_grant_and_family_paths", anti_vacuity = "tests::identity_reactivation_gate_accepts_live_workspace" } —
 //! `execute_reactivation` reaches exactly one typed plain-write lane and the canonical account CAS,
@@ -111,6 +114,8 @@ pub(crate) enum Rule {
     IdentitySecuritySqlOwnerBypass,
     /// A required canonical password/account-security SQL site disappeared or was duplicated.
     IdentitySecuritySqlOwnerSitesAbsent,
+    /// A removed refresh/AuthGrant write API recreated a second mutation funnel.
+    IdentityRefreshWriteBypass,
     /// Account reactivation reached producer/outbox/credential/grant/family side effects.
     IdentityReactivationBypass,
     /// The exact non-producing account reactivation write path disappeared.
@@ -166,6 +171,7 @@ impl GovernanceCheck for PgTenantTxGuard {
         findings.extend(identity_security_sql_funnel_findings(&files));
         findings.extend(localtx_required_carriers_missing(&files));
         findings.extend(localtx_deadline_observation_findings(&workspace_files));
+        findings.extend(refresh_legacy_write_findings(&workspace_files));
         let dlx_path = root.join("adapters/postgres/src/dlx_lifecycle.rs");
         let dlx_source = std::fs::read_to_string(&dlx_path)
             .with_context(|| format!("读 {} 失败", dlx_path.display()))?;
@@ -229,7 +235,7 @@ fn producer_funnel_findings(files: &[(String, String)]) -> Vec<Finding> {
 
     const EXPECTED_PRODUCER_CALLS: &[(&str, &str, usize)] = &[
         ("auth_grant_lifecycle.rs", "producer_tx", 1),
-        ("identity_security_lifecycle.rs", "producer_tx", 1),
+        ("identity_security_lifecycle.rs", "producer_tx", 2),
         ("policy_repo.rs", "producer_tx", 3),
         ("role_binding_lifecycle.rs", "producer_tx", 2),
         ("config_repo.rs", "retry_producer_tx", 1),
@@ -636,10 +642,10 @@ fn identity_security_method_callable(self_ty: &str, name: &str) -> String {
 }
 
 fn identity_reactivation_findings(path: &str, syntax: &syn::File) -> Vec<Finding> {
+    const REACTIVATION_OWNER: &str = "PgAccountReactivationLifecycle";
     let callables = identity_security_callables(syntax);
     let constants = sql_string_constants(syntax);
-    let root_key =
-        identity_security_method_callable("PgIdentitySecurityLifecycle", "execute_reactivation");
+    let root_key = identity_security_method_callable(REACTIVATION_OWNER, "execute_reactivation");
     let roots = callables.get(&root_key).cloned().unwrap_or_default();
     let [root] = roots.as_slice() else {
         return vec![finding(
@@ -714,10 +720,11 @@ fn identity_reactivation_findings(path: &str, syntax: &syn::File) -> Vec<Finding
 }
 
 fn identity_reactivation_plain_write_is_exclusive(syntax: &syn::File) -> bool {
+    const REACTIVATION_OWNER: &str = "PgAccountReactivationLifecycle";
     let callables = identity_security_callables(syntax);
     let constants = sql_string_constants(syntax);
     let reactivation =
-        identity_security_method_callable("PgIdentitySecurityLifecycle", "execute_reactivation");
+        identity_security_method_callable(REACTIVATION_OWNER, "execute_reactivation");
     let Some(reactivation) =
         reachable_identity_security_callables(&reactivation, &callables, &constants)
     else {
@@ -2766,8 +2773,6 @@ fn required_retry_site_findings(
             "settings-secret-publish",
             "settings-secret-publish-internal",
             "settings-secret-republish",
-            "identity-session-logout",
-            "identity-refresh-rotate",
             "audit-append",
             "audit-list-tenant-append",
         ]
@@ -3625,10 +3630,6 @@ fn localtx_deadline_observation_findings(files: &[(String, String)]) -> Vec<Find
             && matches!(
                 (site.impl_type.as_deref(), site.receiver.as_str()),
                 (Some("LocalTxObservation<M>"), "self")
-                    | (
-                        Some("identity::ports::AuthGrantCloseObservation"),
-                        "observation"
-                    )
             )
     };
 
@@ -3677,18 +3678,9 @@ fn localtx_deadline_observation_findings(files: &[(String, String)]) -> Vec<Find
                     && site.impl_type.as_deref() == Some("LocalTxObservation<M>")
             })
             .count();
-        let auth_grant_forwarders = emissions
-            .iter()
-            .filter(|site| {
-                is_closed_forwarder(site)
-                    && site.impl_type.as_deref()
-                        == Some("identity::ports::AuthGrantCloseObservation")
-            })
-            .count();
         runner_emissions == 2
             && generic_forwarders == 1
-            && auth_grant_forwarders == 1
-            && emissions.len() == 4
+            && emissions.len() == 3
             && runner.contains(
                 "|attempt,retry_class,settlement,stages|{observation.record_failed_attempt(attempt,retry_class,settlement);forstageinstages.into_iter().flatten(){observation.record_deadline_exceeded(stage);}}",
             )
@@ -3709,6 +3701,134 @@ fn localtx_deadline_observation_findings(files: &[(String, String)]) -> Vec<Find
         ));
     }
 
+    findings
+}
+
+fn refresh_legacy_write_findings(files: &[(String, String)]) -> Vec<Finding> {
+    const FORBIDDEN_TYPES: &[&str] = &[
+        "AuthGrantCloseCommand",
+        "AuthGrantCloseObservation",
+        "RefreshRotationMutation",
+        "RefreshRotationOutcome",
+    ];
+
+    let mut findings = Vec::new();
+    for (rel, source) in files {
+        if rel.contains("/src/")
+            && !rel.starts_with("crates/identity/src/")
+            && !rel.starts_with("adapters/postgres/src/")
+        {
+            continue;
+        }
+        let syntax = match syn::parse_file(source) {
+            Ok(syntax) => syntax,
+            Err(error) => {
+                findings.push(finding(
+                    Rule::IdentityRefreshWriteBypass,
+                    rel,
+                    format!("cannot parse production Rust for refresh write ownership: {error}"),
+                ));
+                continue;
+            }
+        };
+        for item in &syntax.items {
+            match item {
+                syn::Item::Struct(item)
+                    if !attributes_are_test_only(&item.attrs)
+                        && FORBIDDEN_TYPES.contains(&item.ident.to_string().as_str()) =>
+                {
+                    findings.push(finding(
+                        Rule::IdentityRefreshWriteBypass,
+                        format!("{rel}::{}", item.ident),
+                        "removed refresh/AuthGrant write command type must not return",
+                    ));
+                }
+                syn::Item::Enum(item)
+                    if !attributes_are_test_only(&item.attrs)
+                        && FORBIDDEN_TYPES.contains(&item.ident.to_string().as_str()) =>
+                {
+                    findings.push(finding(
+                        Rule::IdentityRefreshWriteBypass,
+                        format!("{rel}::{}", item.ident),
+                        "removed refresh/AuthGrant write outcome type must not return",
+                    ));
+                }
+                syn::Item::Type(item)
+                    if !attributes_are_test_only(&item.attrs)
+                        && FORBIDDEN_TYPES.contains(&item.ident.to_string().as_str()) =>
+                {
+                    findings.push(finding(
+                        Rule::IdentityRefreshWriteBypass,
+                        format!("{rel}::{}", item.ident),
+                        "removed refresh/AuthGrant write alias must not return",
+                    ));
+                }
+                syn::Item::Trait(item) if !attributes_are_test_only(&item.attrs) => {
+                    let trait_name = item.ident.to_string();
+                    for member in &item.items {
+                        let syn::TraitItem::Fn(method) = member else {
+                            continue;
+                        };
+                        if attributes_are_test_only(&method.attrs) {
+                            continue;
+                        }
+                        let forbidden = (trait_name == "RefreshTokenStoreLocal"
+                            && matches!(
+                                method.sig.ident.to_string().as_str(),
+                                "rotate" | "revoke_lineage"
+                            ))
+                            || (trait_name == "AuthGrantLifecycleLocal"
+                                && method.sig.ident == "close");
+                        if forbidden {
+                            findings.push(finding(
+                                Rule::IdentityRefreshWriteBypass,
+                                format!("{rel}::{trait_name}::{}", method.sig.ident),
+                                "legacy write port bypasses IdentitySecurityLifecycle::execute_refresh",
+                            ));
+                        }
+                    }
+                }
+                syn::Item::Impl(item) if !attributes_are_test_only(&item.attrs) => {
+                    let trait_name = item
+                        .trait_
+                        .as_ref()
+                        .and_then(|(_, path, _)| path.segments.last())
+                        .map(|segment| segment.ident.to_string());
+                    let self_type = type_last_ident(&item.self_ty).unwrap_or_default();
+                    for member in &item.items {
+                        let syn::ImplItem::Fn(method) = member else {
+                            continue;
+                        };
+                        if attributes_are_test_only(&method.attrs) {
+                            continue;
+                        }
+                        let method_name = method.sig.ident.to_string();
+                        let forbidden_port = trait_name.as_deref().is_some_and(|trait_name| {
+                            (matches!(trait_name, "RefreshTokenStore" | "RefreshTokenStoreLocal")
+                                && matches!(method_name.as_str(), "rotate" | "revoke_lineage"))
+                                || (matches!(
+                                    trait_name,
+                                    "AuthGrantLifecycle" | "AuthGrantLifecycleLocal"
+                                ) && method_name == "close")
+                        });
+                        let forbidden_service = self_type == "RefreshService"
+                            && matches!(
+                                method_name.as_str(),
+                                "revoke" | "compromise_replayed_grant"
+                            );
+                        if forbidden_port || forbidden_service {
+                            findings.push(finding(
+                                Rule::IdentityRefreshWriteBypass,
+                                format!("{rel}::{self_type}::{method_name}"),
+                                "legacy refresh write entry bypasses the sole security lifecycle producer",
+                            ));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
     findings
 }
 
@@ -3747,8 +3867,6 @@ fn retry_placement_findings(
 
     let allowed = match rel {
         "config_repo.rs" => Some(("commit_authorized", "settings-config-commit")),
-        "auth_grant_lifecycle.rs" => Some(("close", "identity-session-logout")),
-        "refresh_token_store.rs" => Some(("rotate", "identity-refresh-rotate")),
         "audit_repo.rs" => Some(("append", "audit-append")),
         "auth_audit_sink.rs" => Some(("append", "audit-list-tenant-append")),
         _ => None,
@@ -3781,8 +3899,6 @@ fn retry_placement_findings(
     let valid = calls.len() == 1
         && match rel {
             "config_repo.rs" => valid_settings_retry(calls[0]),
-            "auth_grant_lifecycle.rs" => valid_identity_logout_retry(calls[0]),
-            "refresh_token_store.rs" => valid_identity_refresh_retry(calls[0]),
             "audit_repo.rs" => valid_audit_append_retry(calls[0]),
             "auth_audit_sink.rs" => valid_audit_list_tenant_retry(calls[0]),
             _ => false,
@@ -4120,8 +4236,6 @@ struct RetryExprFacts {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CommandEvidence {
-    SessionLogout,
-    RefreshRotation,
     SecretPublish,
     AuditListTenantAppend,
 }
@@ -4373,26 +4487,6 @@ fn valid_settings_retry(call: &RetryCall) -> bool {
         && call.arguments[1].deadline_dataflow
 }
 
-fn valid_identity_logout_retry(call: &RetryCall) -> bool {
-    call.wrapper == Some(RetryWrapper::Local)
-        && call.arguments.len() == 3
-        && call.arguments[0].command_evidence == Some(CommandEvidence::SessionLogout)
-        && call.arguments[1].operation_method.as_deref() == Some("retry_write")
-        && call.arguments[1].scoped_operation_calls == 1
-        && !call.arguments[1].legacy_write
-        && call.arguments[1].deadline_dataflow
-}
-
-fn valid_identity_refresh_retry(call: &RetryCall) -> bool {
-    call.wrapper == Some(RetryWrapper::Local)
-        && call.arguments.len() == 3
-        && call.arguments[0].command_evidence == Some(CommandEvidence::RefreshRotation)
-        && call.arguments[1].operation_method.as_deref() == Some("retry_write")
-        && call.arguments[1].scoped_operation_calls == 1
-        && !call.arguments[1].legacy_write
-        && call.arguments[1].deadline_dataflow
-}
-
 fn valid_audit_append_retry(call: &RetryCall) -> bool {
     call.wrapper == Some(RetryWrapper::Generic)
         && call.arguments.len() == 3
@@ -4477,8 +4571,6 @@ fn typed_command_param(signature: &syn::Signature) -> Option<(String, CommandEvi
         };
         let factory = match path.path.segments.last()?.ident.to_string().as_str() {
             "SecretPublishCommand" => CommandEvidence::SecretPublish,
-            "AuthGrantCloseCommand" => CommandEvidence::SessionLogout,
-            "RefreshRotationMutation" => CommandEvidence::RefreshRotation,
             "AuditListTenantAppend" => CommandEvidence::AuditListTenantAppend,
             _ => return None,
         };
@@ -8416,7 +8508,7 @@ mod tests {
 
     fn identity_security_sql_green_source() -> &'static str {
         r#"
-impl PgIdentitySecurityLifecycle {
+impl PgAccountReactivationLifecycle {
     async fn execute_reactivation(&self) {
         self.write_pool.write(
             scope,
@@ -8719,7 +8811,7 @@ async fn revoke_identity_sessions(conn: &mut PgConnection) {
             ),
             (
                 "identity_security_lifecycle.rs",
-                "async fn execute(pool: P) { pool.producer_tx().await; }",
+                "async fn execute_security(pool: P) { pool.producer_tx().await; } async fn execute_refresh(pool: P) { pool.producer_tx().await; }",
             ),
             (
                 "policy_repo.rs",
@@ -8744,7 +8836,10 @@ impl PgIdentitySecurityLifecycle {
     async fn execute_account_status_set(&self) { self.execute_prepared().await; }
     async fn execute_logout_current(&self) { self.execute_prepared().await; }
     async fn execute_logout_all(&self) { self.execute_prepared().await; }
+    async fn execute_refresh(&self) { self.write_pool.producer_tx().await; }
     async fn execute_prepared(&self) { self.write_pool.producer_tx().await; }
+}
+impl PgAccountReactivationLifecycle {
     async fn execute_reactivation(&self) {
         self.write_pool.write(scope, move |tx| Box::pin(async move {
             apply_account_security_cas(tx.conn()).await
@@ -8793,7 +8888,7 @@ async fn apply_account_security_cas(conn: &mut PgConnection) {
     fn producer_funnel_guard_rejects_reactivation_write_reachable_from_producer() {
         let shared = producer_funnel_identity_reactivation_source().replace(
             "async fn execute_password_change(&self) { self.execute_prepared().await; }",
-            "async fn execute_password_change(&self) { self.execute_reactivation().await; self.execute_prepared().await; }",
+            "async fn execute_password_change(&self) { self.write_pool.write().await; self.execute_prepared().await; }",
         );
         let findings = producer_funnel_findings(&producer_funnel_files_with_identity(&shared));
         assert!(
@@ -11675,22 +11770,61 @@ pub trait SecretRepoLocal: Send + Sync {
     }
 
     #[test]
+    fn refresh_legacy_write_guard_rejects_old_ports_and_application_bypasses() {
+        let decoys = vec![(
+            "crates/identity/src/decoy.rs".to_string(),
+            r#"
+            // struct RefreshRotationMutation;
+            const BAIT: &str = "async fn revoke_lineage";
+            #[cfg(test)]
+            struct AuthGrantCloseCommand;
+            #[cfg(test)]
+            impl RefreshService {
+                async fn compromise_replayed_grant(&self) {}
+            }
+            "#
+            .to_string(),
+        )];
+        assert!(
+            refresh_legacy_write_findings(&decoys).is_empty(),
+            "comments, strings, and cfg(test) items are not production bypass evidence"
+        );
+
+        for source in [
+            "pub struct RefreshRotationMutation;",
+            "pub trait RefreshTokenStoreLocal { async fn rotate(&self); }",
+            "impl RefreshTokenStore for PgStore { async fn revoke_lineage(&self) {} }",
+            "pub trait AuthGrantLifecycleLocal { async fn close(&self); }",
+            "impl RefreshService { async fn compromise_replayed_grant(&self) {} }",
+            "impl RefreshService { async fn revoke(&self) {} }",
+        ] {
+            let files = vec![("synthetic.rs".to_string(), source.to_string())];
+            let findings = refresh_legacy_write_findings(&files);
+            assert!(
+                findings
+                    .iter()
+                    .any(|finding| finding.rule == Rule::IdentityRefreshWriteBypass),
+                "legacy refresh write surface must fail closed: {source}; {findings:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn refresh_legacy_write_guard_accepts_live_workspace() -> Result<()> {
+        let root = crate::workspace_root()?;
+        let files = load_workspace_prod_rs(&root)?;
+        let findings = refresh_legacy_write_findings(&files);
+        assert!(findings.is_empty(), "{findings:?}");
+        Ok(())
+    }
+
+    #[test]
     fn retry_guard_accepts_all_exact_boundaries() {
         let mut sites = BTreeSet::new();
         assert_retry_shape(
             &mut sites,
             "config_repo.rs",
             "impl Uow { async fn commit_authorized(&self){ run_pg_tx_retry(SETTINGS_CONFIG_BOUNDARY, |_attempt, deadline| async { self.pool.retry_producer_tx(scope, deadline) }, classify).await; } }",
-        );
-        assert_retry_shape(
-            &mut sites,
-            "auth_grant_lifecycle.rs",
-            "impl Repo { async fn close(&self, mutation: AuthGrantCloseCommand){ let (_, observation) = mutation.into_parts(); run_pg_localtx_retry(observation, |_attempt, deadline| async { self.pool.retry_write(scope, deadline) }, classify).await; } }",
-        );
-        assert_retry_shape(
-            &mut sites,
-            "refresh_token_store.rs",
-            "impl Repo { async fn rotate(&self, mutation: RefreshRotationMutation){ let (_, observation) = mutation.into_parts(); run_pg_localtx_retry(observation, |_attempt, deadline| async { self.pool.retry_write(scope, deadline) }, classify).await; } }",
         );
         assert_retry_shape(
             &mut sites,
@@ -11708,8 +11842,6 @@ pub trait SecretRepoLocal: Send + Sync {
             BTreeSet::from([
                 "audit-append",
                 "audit-list-tenant-append",
-                "identity-refresh-rotate",
-                "identity-session-logout",
                 "settings-config-commit",
                 "settings-secret-publish",
                 "settings-secret-publish-internal",
@@ -11724,7 +11856,7 @@ pub trait SecretRepoLocal: Send + Sync {
     }
 
     #[test]
-    fn retry_guard_rejects_wrong_refresh_and_audit_boundaries() {
+    fn retry_guard_rejects_removed_refresh_and_wrong_audit_boundaries() {
         for (rel, source) in [
             (
                 "refresh_token_store.rs",
@@ -11779,8 +11911,6 @@ pub trait SecretRepoLocal: Send + Sync {
         assert_eq!(
             sites,
             BTreeSet::from([
-                "identity-refresh-rotate",
-                "identity-session-logout",
                 "audit-append",
                 "audit-list-tenant-append",
                 "settings-config-commit",
@@ -11966,7 +12096,7 @@ async fn run_pg_localtx_retry(observation: LocalTxObservation<M>) {
     }
 
     #[test]
-    fn localtx_deadline_guard_real_workspace_closes_mint_and_eight_dataflows() -> Result<()> {
+    fn localtx_deadline_guard_real_workspace_closes_mint_and_six_dataflows() -> Result<()> {
         let root = crate::workspace_root()?;
         let files = load_prod_rs(&root.join("adapters/postgres/src"))?;
         let mut sites = BTreeSet::new();
@@ -11988,7 +12118,7 @@ async fn run_pg_localtx_retry(observation: LocalTxObservation<M>) {
             findings.extend(retry_placement_findings(rel, &source, &mut sites));
         }
         assert!(findings.is_empty(), "{findings:?}");
-        assert_eq!(sites.len(), 8, "{sites:?}");
+        assert_eq!(sites.len(), 6, "{sites:?}");
 
         let runner = files
             .iter()
@@ -12002,7 +12132,7 @@ async fn run_pg_localtx_retry(observation: LocalTxObservation<M>) {
     }
 
     #[test]
-    fn retry_guard_requires_the_closed_eight_site_set() {
+    fn retry_guard_requires_the_closed_six_site_set() {
         let files = vec![("tx_retry.rs".to_string(), String::new())];
         let findings = required_retry_site_findings(&files, &BTreeSet::new());
         assert_eq!(
@@ -12010,7 +12140,7 @@ async fn run_pg_localtx_retry(observation: LocalTxObservation<M>) {
                 .iter()
                 .filter(|finding| finding.rule == Rule::RetrySitesAbsent)
                 .count(),
-            8,
+            6,
             "{findings:?}"
         );
         assert!(
@@ -12018,11 +12148,6 @@ async fn run_pg_localtx_retry(observation: LocalTxObservation<M>) {
                 .iter()
                 .any(|finding| finding.rule == Rule::RetryPlacement),
             "missing deadline authority must fail closed: {findings:?}"
-        );
-        assert!(
-            findings
-                .iter()
-                .any(|finding| finding.subject == "identity-refresh-rotate")
         );
         assert!(
             findings

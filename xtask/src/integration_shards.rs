@@ -241,7 +241,7 @@ integration_shard_catalog! {
             ("journeys", "audit_list_tenant_entries_localtx_journey", Test, Serial),
             ("journeys", "identity_logout_grant_journey", Test, Parallel),
             ("journeys", "identity_password_security_event_journey", Test, Serial),
-            ("journeys", "identity_refresh_localtx_journey", Test, Serial),
+            ("journeys", "identity_refresh_producer_transaction_journey", Test, Serial),
             ("journeys", "settings_secret_publish_localtx_journey", Test, Serial),
             ("runtime", "settings_secret_e2e", Test, Serial),
         ],
@@ -441,7 +441,7 @@ pub(crate) fn batches(shard: IntegrationShard) -> Vec<ShardBatch> {
 pub(crate) const POSTGRES_TRANSACTION_JOURNEY_TARGETS: &[&str] = &[
     "audit_list_tenant_entries_localtx_journey",
     "identity_password_security_event_journey",
-    "identity_refresh_localtx_journey",
+    "identity_refresh_producer_transaction_journey",
     "settings_secret_publish_localtx_journey",
 ];
 
@@ -806,7 +806,7 @@ mod tests {
             ("postgres-migration", "postgres_migration"),
             ("journeys", "audit_list_tenant_entries_localtx_journey"),
             ("journeys", "identity_password_security_event_journey"),
-            ("journeys", "identity_refresh_localtx_journey"),
+            ("journeys", "identity_refresh_producer_transaction_journey"),
             ("journeys", "settings_secret_publish_localtx_journey"),
             ("runtime", "settings_secret_e2e"),
             ("amqp", "integration"),

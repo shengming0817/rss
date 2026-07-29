@@ -4209,10 +4209,11 @@ pub const generated::http::identity_v1::refresh::CONTRACT: vocab::contract::bind
 pub const generated::http::identity_v1::refresh::CONTRACT_ID: &str
 pub const generated::http::identity_v1::refresh::EFFECTS: &[vocab::http::HttpEffectKind]
 pub const generated::http::identity_v1::refresh::EFFECT_PROFILE: vocab::http::HttpEffectProfile
-pub const generated::http::identity_v1::refresh::LOCAL_TX: generated::http::LocalTxSpec
+pub const generated::http::identity_v1::refresh::EMITTED_FACTS: &[vocab::contract::binding::ContractBinding]
 pub const generated::http::identity_v1::refresh::PATH: &str
+pub const generated::http::identity_v1::refresh::PRODUCER: vocab::http::HttpProducerBinding<generated::http::identity_v1::refresh::RouteMarker>
 pub const generated::http::identity_v1::refresh::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
-pub const generated::http::identity_v1::refresh::ROUTE: vocab::http::HttpRouteBinding<generated::http::identity_v1::refresh::RouteMarker, vocab::http::LocalTx>
+pub const generated::http::identity_v1::refresh::ROUTE: vocab::http::HttpRouteBinding<generated::http::identity_v1::refresh::RouteMarker, vocab::http::OutboxFact>
 pub const generated::http::identity_v1::refresh::SPEC: generated::http::HttpSpec
 pub mod generated::http::identity_v1::roles_assign
 pub mod generated::http::identity_v1::roles_assign::error

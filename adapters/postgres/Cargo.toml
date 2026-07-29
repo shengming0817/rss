@@ -91,7 +91,7 @@ integration = [
 ]
 # 组合根默认单测专用：只开放 lazy pool 的 capability bundle，不连接数据库、不暴露 pool/store。
 test-support = []
-# Active LocalTx journey 专用：只开放 refresh after-commit unknown 的单次、命名 token seam。
+# Journey 专用事务故障 seam；不恢复任何 refresh store 写入能力。
 # 不被通用 test-support 包含，避免 Cargo feature 并集把事务故障注入带入无关测试图。
 journey-fault-support = []
 # N-028 fault matrix typed harness。仅专用 journey crate 启用；不暴露 PgPool/raw SQL。

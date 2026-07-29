@@ -102,11 +102,7 @@ pub const LOCAL_ONLY_SPECS: &[HttpSpec] = &[
 ];
 
 /// Root registry for active LocalTx HTTP specs generated from `consistencyLevel = "LocalTx"`.
-pub const LOCAL_TX_SPECS: &[HttpSpec] = &[
-    audit_v1::list_tenant_entries::SPEC,
-    identity_v1::refresh::SPEC,
-    settings_v2::SPEC,
-];
+pub const LOCAL_TX_SPECS: &[HttpSpec] = &[audit_v1::list_tenant_entries::SPEC, settings_v2::SPEC];
 
 /// Closed registry of every active OutboxFact HTTP producer and its exact generated fact set.
 pub const OUTBOX_PRODUCERS: &[::vocab::http::HttpProducerEvidence] = &[
@@ -118,6 +114,7 @@ pub const OUTBOX_PRODUCERS: &[::vocab::http::HttpProducerEvidence] = &[
     identity_v1::policies_create::PRODUCER.evidence(),
     identity_v1::policies_deactivate::PRODUCER.evidence(),
     identity_v1::policies_update::PRODUCER.evidence(),
+    identity_v1::refresh::PRODUCER.evidence(),
     identity_v1::roles_assign::PRODUCER.evidence(),
     identity_v1::roles_revoke::PRODUCER.evidence(),
     settings_v1::PRODUCER.evidence(),

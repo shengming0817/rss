@@ -11,9 +11,7 @@
 //! 连接配置由 [`crate::test_pg::connect_pg`] 统一管理，不在各测试内分散。
 
 use audit::ports::AuditListTenantAppender as _;
-use authn::{
-    AccountSecurityEventKind, AuthGrant, AuthGrantStatus, AuthnEpoch, GrantSecurityEventKind,
-};
+use authn::{AccountSecurityEventKind, AuthGrant, AuthnEpoch, GrantSecurityEventKind};
 use consistency::{
     BacklogObservation, CommandErrorSummary, CommandJournalOutcome, CommandJournalTerminalSummary,
     CommandResultSummary, ConsumerGroup, ConvergeAction, IdemKey, InboxBacklog, InboxBacklogScope,
@@ -151,6 +149,11 @@ fn identity_scope(tenant: vocab::TenantId) -> identity::ports::TenantRepoScope {
 
 fn login_producer_receipt() -> identity::ports::LoginProducerReceipt {
     httpserve::ProducerMarker::for_test(generated::http::identity_v1::login::PRODUCER)
+        .into_receipt()
+}
+
+fn refresh_producer_receipt() -> identity::ports::RefreshProducerReceipt {
+    httpserve::ProducerMarker::for_test(generated::http::identity_v1::refresh::PRODUCER)
         .into_receipt()
 }
 
@@ -5165,450 +5168,7 @@ async fn localtx_audit_backend_profile_unsafe_settlements() -> TestResult {
     Ok(())
 }
 
-#[derive(Clone)]
-struct RefreshLocalTxCase {
-    tenant: vocab::TenantId,
-    user_id: ids::UserId,
-    grant: AuthGrant,
-    event_id: String,
-    old: identity::ports::RefreshTokenRecord,
-    next: identity::ports::RefreshTokenRecord,
-}
-
-impl RefreshLocalTxCase {
-    #[allow(clippy::unwrap_used)]
-    fn new(tenant: vocab::TenantId) -> Self {
-        let old_id = uuid::Uuid::new_v4().to_string();
-        let issued =
-            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
-        let mut hash = [0_u8; 32];
-        hash[..16].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
-        hash[16..].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
-        let user_id = ids::UserId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
-        let grant = identity::test_support::auth_grant(
-            &uuid::Uuid::new_v4().to_string(),
-            user_id,
-            tenant,
-            issued,
-            AuthnEpoch::ZERO,
-            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(4_000_000_000),
-            issued,
-        );
-        let old = identity::test_support::initial_refresh(
-            &grant,
-            &old_id,
-            hash,
-            issued,
-            grant.expires_at(),
-        );
-        let mut next_hash = [0_u8; 32];
-        next_hash[..16].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
-        next_hash[16..].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
-        let rotation = identity::test_support::refresh_rotation(
-            &old,
-            &uuid::Uuid::new_v4().to_string(),
-            next_hash,
-            issued + std::time::Duration::from_secs(1),
-        );
-        let next = rotation.new_record().clone();
-        Self {
-            tenant,
-            user_id,
-            grant,
-            event_id: unique_event_id("refresh-localtx-seed"),
-            old,
-            next,
-        }
-    }
-
-    fn old_id(&self) -> &str {
-        self.old.id().as_str()
-    }
-
-    fn mutation(&self) -> identity::ports::RefreshRotationMutation {
-        identity::ports::RefreshRotationMutation::for_test(
-            identity::test_support::refresh_rotation(
-                &self.old,
-                self.next.id().as_str(),
-                *self.next.token_hash().as_bytes(),
-                self.next.issued_at(),
-            ),
-        )
-    }
-
-    async fn seed(
-        &self,
-        app: &PgStore,
-        owner: &PgStore,
-    ) -> Result<(), identity::ports::IdentityError> {
-        seed_auth_grant_account(owner, self.tenant, self.user_id)
-            .await
-            .map_err(|error| identity::ports::IdentityError::Storage(Box::new(error)))?;
-        let (mutation, entry, envelope) =
-            auth_grant_login_parts(&self.event_id, self.grant.clone(), self.old.clone());
-        crate::PgAuthGrantLifecycle::new(app, fixed_clock())
-            .persist_login_grant(
-                login_producer_receipt(),
-                identity_scope(self.tenant),
-                mutation,
-                entry,
-                envelope,
-            )
-            .await
-            .map(|_persisted| ())
-            .map_err(|error| {
-                identity::ports::IdentityError::Storage(Box::new(std::io::Error::other(format!(
-                    "seed login grant failed: {error}"
-                ))))
-            })
-    }
-
-    async fn rotate(
-        &self,
-        repo: &crate::PgRefreshTokenStore,
-    ) -> Result<(), identity::ports::IdentityError> {
-        match repo
-            .rotate(identity_scope(self.tenant), self.mutation())
-            .await?
-        {
-            identity::ports::RefreshRotationOutcome::Applied => Ok(()),
-            identity::ports::RefreshRotationOutcome::Replay
-            | identity::ports::RefreshRotationOutcome::AccountStale
-            | identity::ports::RefreshRotationOutcome::Expired => {
-                Err(identity::ports::IdentityError::VersionConflict)
-            }
-        }
-    }
-
-    async fn snapshot(&self, owner: &PgStore) -> Result<(Option<String>, i64), sqlx::Error> {
-        sqlx::query_as(
-            "SELECT (SELECT status FROM refresh_tokens WHERE id = $1::uuid), \
-             (SELECT count(*) FROM refresh_tokens WHERE id = $2::uuid)",
-        )
-        .bind(self.old.id().as_str())
-        .bind(self.next.id().as_str())
-        .fetch_one(&owner.pool)
-        .await
-    }
-
-    async fn durable_writes(
-        &self,
-        owner: &PgStore,
-    ) -> Result<usize, identity::ports::IdentityError> {
-        let (_, count) = self
-            .snapshot(owner)
-            .await
-            .map_err(|error| identity::ports::IdentityError::Storage(Box::new(error)))?;
-        usize::try_from(count)
-            .map_err(|error| identity::ports::IdentityError::Storage(Box::new(error)))
-    }
-}
-
-fn classified_pg_snapshot_error(
-    error: sqlx::Error,
-) -> testkit::localtx::ClassifiedError<sqlx::Error> {
-    testkit::localtx::ClassifiedError::new(testkit::ConformanceErrorCategory::Storage, error)
-}
-
-/// Refresh keeps a separate enrollment so backend probes cannot be inherited from another
-/// contract in the same Rust test function. Every mutating path calls the real rss_app-backed
-/// `PgRefreshTokenStore`; durable snapshots use only the owner connection. Malformed-request and
-/// authorization rejection happen before rotation and are covered only by the route journey.
-#[tokio::test(flavor = "multi_thread")]
-async fn localtx_identity_refresh_backend_profile_commit_and_rollback() -> TestResult {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    const LOCALTX_BACKEND_PROFILE_IDENTITY_REFRESH: ::vocab::HttpRouteBinding<
-        ::generated::http::identity_v1::refresh::RouteMarker,
-        ::vocab::http::LocalTx,
-    > = ::generated::http::identity_v1::refresh::ROUTE;
-    const LOCALTX_BACKEND_PROVIDER_IDENTITY_REFRESH: ::std::marker::PhantomData<(
-        ::generated::http::identity_v1::refresh::RouteMarker,
-        crate::PgRefreshTokenStore,
-    )> = ::std::marker::PhantomData;
-    let _typed_enrollment = LOCALTX_BACKEND_PROFILE_IDENTITY_REFRESH;
-    let _typed_provider = LOCALTX_BACKEND_PROVIDER_IDENTITY_REFRESH;
-
-    let (pg, owner) = connect_pg().await?;
-    owner.run_migrations().await?;
-    let app = connect_pg_rss_app_role(&pg, &owner).await?;
-    let tenant_a = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
-
-    let commit = RefreshLocalTxCase::new(tenant_a);
-    commit.seed(&app, &owner).await?;
-    let commit_repo = crate::PgRefreshTokenStore::from_unverified_for_test(&app);
-    let commit_writes = AtomicUsize::new(0);
-    ::testkit::localtx::assert_commit(::testkit::localtx::CommitCase::new(
-        || async {
-            commit
-                .rotate(&commit_repo)
-                .await
-                .map_err(classified_identity_error)?;
-            commit_writes.fetch_add(1, Ordering::Relaxed);
-            Ok(())
-        },
-        || async {
-            commit
-                .snapshot(&owner)
-                .await
-                .map_err(classified_pg_snapshot_error)
-        },
-        (Some("consumed".to_owned()), 1),
-        || commit_writes.load(Ordering::Relaxed),
-    ))
-    .await?;
-
-    let rollback = RefreshLocalTxCase::new(tenant_a);
-    rollback.seed(&app, &owner).await?;
-    let rollback_repo = crate::PgRefreshTokenStore::from_unverified_for_test(&app)
-        .with_rotation_fault(
-            rollback.old_id(),
-            crate::refresh_token_store::RefreshRotationFault::Permanent,
-            1,
-        );
-    ::testkit::localtx::assert_rollback(::testkit::localtx::RollbackCase::new(
-        || async {
-            rollback
-                .rotate(&rollback_repo)
-                .await
-                .map_err(classified_identity_error)
-        },
-        testkit::ConformanceErrorCategory::Permanent,
-        || async {
-            rollback
-                .snapshot(&owner)
-                .await
-                .map_err(classified_pg_snapshot_error)
-        },
-        (Some("active".to_owned()), 0),
-    ))
-    .await?;
-
-    app.shutdown().await?;
-    owner.shutdown().await?;
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn localtx_identity_refresh_backend_profile_tenant_isolation() -> TestResult {
-    const LOCALTX_BACKEND_PROFILE_IDENTITY_REFRESH: ::vocab::HttpRouteBinding<
-        ::generated::http::identity_v1::refresh::RouteMarker,
-        ::vocab::http::LocalTx,
-    > = ::generated::http::identity_v1::refresh::ROUTE;
-    const LOCALTX_BACKEND_PROVIDER_IDENTITY_REFRESH: ::std::marker::PhantomData<(
-        ::generated::http::identity_v1::refresh::RouteMarker,
-        crate::PgRefreshTokenStore,
-    )> = ::std::marker::PhantomData;
-    let _typed_enrollment = LOCALTX_BACKEND_PROFILE_IDENTITY_REFRESH;
-    let _typed_provider = LOCALTX_BACKEND_PROVIDER_IDENTITY_REFRESH;
-
-    let (pg, owner) = connect_pg().await?;
-    owner.run_migrations().await?;
-    let app = connect_pg_rss_app_role(&pg, &owner).await?;
-    let tenant_a = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
-    let tenant_b = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
-
-    let tenant_case_a = RefreshLocalTxCase::new(tenant_a);
-    let tenant_case_b = RefreshLocalTxCase::new(tenant_b);
-    tenant_case_a.seed(&app, &owner).await?;
-    tenant_case_b.seed(&app, &owner).await?;
-    let tenant_repo = crate::PgRefreshTokenStore::from_unverified_for_test(&app);
-    ::testkit::tenant_conformance::assert_tenant_isolation(
-        tenant_a,
-        tenant_b,
-        |tenant| {
-            let repo = &tenant_repo;
-            let case = if tenant == tenant_a {
-                &tenant_case_a
-            } else {
-                &tenant_case_b
-            };
-            async move { case.rotate(repo).await }
-        },
-        |tenant| {
-            let repo = &tenant_repo;
-            let hash = tenant_case_a.old.token_hash().clone();
-            async move {
-                repo.find_by_hash(identity_scope(tenant), hash)
-                    .await
-                    .map(|record| record.is_some())
-            }
-        },
-        |error| conformance_retry_category(classify_identity_error(error)),
-    )
-    .await?;
-
-    app.shutdown().await?;
-    owner.shutdown().await?;
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn localtx_identity_refresh_backend_profile_retry_policy() -> TestResult {
-    const LOCALTX_BACKEND_PROFILE_IDENTITY_REFRESH: ::vocab::HttpRouteBinding<
-        ::generated::http::identity_v1::refresh::RouteMarker,
-        ::vocab::http::LocalTx,
-    > = ::generated::http::identity_v1::refresh::ROUTE;
-    const LOCALTX_BACKEND_PROVIDER_IDENTITY_REFRESH: ::std::marker::PhantomData<(
-        ::generated::http::identity_v1::refresh::RouteMarker,
-        crate::PgRefreshTokenStore,
-    )> = ::std::marker::PhantomData;
-    let _typed_enrollment = LOCALTX_BACKEND_PROFILE_IDENTITY_REFRESH;
-    let _typed_provider = LOCALTX_BACKEND_PROVIDER_IDENTITY_REFRESH;
-
-    let (pg, owner) = connect_pg().await?;
-    owner.run_migrations().await?;
-    let app = connect_pg_rss_app_role(&pg, &owner).await?;
-    let tenant_a = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
-
-    let retry_success = RefreshLocalTxCase::new(tenant_a);
-    let retry_conflict = RefreshLocalTxCase::new(tenant_a);
-    let retry_permanent = RefreshLocalTxCase::new(tenant_a);
-    let retry_exhaustion = RefreshLocalTxCase::new(tenant_a);
-    for case in [
-        &retry_success,
-        &retry_conflict,
-        &retry_permanent,
-        &retry_exhaustion,
-    ] {
-        case.seed(&app, &owner).await?;
-    }
-    let success_repo = crate::PgRefreshTokenStore::from_unverified_for_test(&app)
-        .with_rotation_fault(
-            retry_success.old_id(),
-            crate::refresh_token_store::RefreshRotationFault::Transient,
-            1,
-        );
-    let conflict_repo = crate::PgRefreshTokenStore::from_unverified_for_test(&app)
-        .with_rotation_fault(
-            retry_conflict.old_id(),
-            crate::refresh_token_store::RefreshRotationFault::Conflict,
-            1,
-        );
-    let permanent_repo = crate::PgRefreshTokenStore::from_unverified_for_test(&app)
-        .with_rotation_fault(
-            retry_permanent.old_id(),
-            crate::refresh_token_store::RefreshRotationFault::Permanent,
-            1,
-        );
-    let exhaustion_repo = crate::PgRefreshTokenStore::from_unverified_for_test(&app)
-        .with_rotation_fault(
-            retry_exhaustion.old_id(),
-            crate::refresh_token_store::RefreshRotationFault::TransientBeforeWrite,
-            3,
-        );
-    let success_probe = success_repo.rotation_attempt_probe();
-    let conflict_probe = conflict_repo.rotation_attempt_probe();
-    let permanent_probe = permanent_repo.rotation_attempt_probe();
-    let exhaustion_probe = exhaustion_repo.rotation_attempt_probe();
-    ::testkit::repo_conformance::assert_retry_boundary_policy(
-        ::testkit::repo_conformance::RetryBoundaryCase::new(
-            ::testkit::repo_conformance::TransientSuccessPath::new(
-                || retry_success.rotate(&success_repo),
-                || success_probe.attempts(retry_success.old_id()),
-                2,
-                || retry_success.durable_writes(&owner),
-            ),
-            ::testkit::repo_conformance::ConflictPath::new(
-                || retry_conflict.rotate(&conflict_repo),
-                || conflict_probe.attempts(retry_conflict.old_id()),
-                || retry_conflict.durable_writes(&owner),
-            ),
-            ::testkit::repo_conformance::PermanentPath::new(
-                || retry_permanent.rotate(&permanent_repo),
-                || permanent_probe.attempts(retry_permanent.old_id()),
-                || retry_permanent.durable_writes(&owner),
-            ),
-            ::testkit::repo_conformance::TransientExhaustionPath::new(
-                || retry_exhaustion.rotate(&exhaustion_repo),
-                || exhaustion_probe.attempts(retry_exhaustion.old_id()),
-                3,
-                || retry_exhaustion.durable_writes(&owner),
-            ),
-        ),
-        |error| conformance_retry_category(classify_identity_error(error)),
-    )
-    .await?;
-
-    app.shutdown().await?;
-    owner.shutdown().await?;
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn localtx_identity_refresh_backend_profile_unsafe_settlements() -> TestResult {
-    const LOCALTX_BACKEND_PROFILE_IDENTITY_REFRESH: ::vocab::HttpRouteBinding<
-        ::generated::http::identity_v1::refresh::RouteMarker,
-        ::vocab::http::LocalTx,
-    > = ::generated::http::identity_v1::refresh::ROUTE;
-    const LOCALTX_BACKEND_PROVIDER_IDENTITY_REFRESH: ::std::marker::PhantomData<(
-        ::generated::http::identity_v1::refresh::RouteMarker,
-        crate::PgRefreshTokenStore,
-    )> = ::std::marker::PhantomData;
-    let _typed_enrollment = LOCALTX_BACKEND_PROFILE_IDENTITY_REFRESH;
-    let _typed_provider = LOCALTX_BACKEND_PROVIDER_IDENTITY_REFRESH;
-
-    let (pg, owner) = connect_pg().await?;
-    owner.run_migrations().await?;
-    let app = connect_pg_rss_app_role(&pg, &owner).await?;
-    let tenant_a = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
-
-    let unknown = RefreshLocalTxCase::new(tenant_a);
-    unknown.seed(&app, &owner).await?;
-    let unknown_repo = crate::PgRefreshTokenStore::from_unverified_for_test(&app)
-        .with_rotation_fault(
-            unknown.old_id(),
-            crate::refresh_token_store::RefreshRotationFault::CommitUnknown,
-            1,
-        );
-    let unknown_probe = unknown_repo.rotation_attempt_probe();
-    ::testkit::localtx::assert_commit_unknown_no_replay(
-        ::testkit::localtx::CommitUnknownCase::new(
-            || async {
-                unknown.rotate(&unknown_repo).await.map_err(|error| {
-                    testkit::localtx::ClassifiedError::new(
-                        testkit::ConformanceErrorCategory::CommitUnknown,
-                        error,
-                    )
-                })
-            },
-            testkit::ConformanceErrorCategory::CommitUnknown,
-            || unknown_probe.attempts(unknown.old_id()),
-        ),
-    )
-    .await?;
-    let rollback_failed = RefreshLocalTxCase::new(tenant_a);
-    rollback_failed.seed(&app, &owner).await?;
-    let rollback_failed_repo = crate::PgRefreshTokenStore::from_unverified_for_test(&app)
-        .with_rotation_fault(
-            rollback_failed.old_id(),
-            crate::refresh_token_store::RefreshRotationFault::RollbackFailed,
-            1,
-        );
-    let rollback_failed_probe = rollback_failed_repo.rotation_attempt_probe();
-    ::testkit::localtx::assert_rollback_failed_no_replay(
-        ::testkit::localtx::RollbackFailedCase::new(
-            || async {
-                rollback_failed
-                    .rotate(&rollback_failed_repo)
-                    .await
-                    .map_err(|error| {
-                        testkit::localtx::ClassifiedError::new(
-                            testkit::ConformanceErrorCategory::RollbackFailed,
-                            error,
-                        )
-                    })
-            },
-            testkit::ConformanceErrorCategory::RollbackFailed,
-            || rollback_failed_probe.attempts(rollback_failed.old_id()),
-        ),
-    )
-    .await?;
-
-    app.shutdown().await?;
-    owner.shutdown().await?;
-    Ok(())
-}
+// Refresh is an OutboxFact producer; its PostgreSQL coverage lives with the AuthGrant security tests below.
 
 /// inbox_receipts claim-or-skip + 多组/租户隔离集成验证（#1118/#1650）。
 ///
@@ -5790,9 +5350,10 @@ async fn credential_security_event_consumer_appends_current_and_all_without_iden
             SeenState::Fresh
         );
         let payload = serde_json::json!({
+            "actor": {"keyId": 1, "kind": "service", "ref": uuid::Uuid::new_v4()},
             "kind": kind,
             "occurredAt": 1_700_000_400_i64 + index,
-            "target": {"kind": target_kind, "ref": target},
+            "target": {"keyId": 1, "kind": target_kind, "ref": target},
             "tenantId": tenant.to_string(),
         });
         assert!(matches!(
@@ -15914,6 +15475,133 @@ async fn auth_grant_sweeper_server_timeout_bounds_child_cascade_lock() -> TestRe
     Ok(())
 }
 
+/// The real refresh producer locks a family before its AuthGrant root. The real sweeper must wait
+/// behind that family without holding the root, so releasing an independently held root can always
+/// linearize both operations without a refresh↔grant deadlock.
+#[tokio::test(flavor = "multi_thread")]
+async fn auth_grant_sweeper_and_refresh_family_use_one_lock_order() -> TestResult {
+    let (pg, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    let refresh_app =
+        connect_pg_rss_app_role_with_limits(&pg, &owner, 1, Duration::from_secs(8)).await?;
+    let sweeper_app =
+        connect_pg_rss_app_role_with_limits(&pg, &owner, 1, Duration::from_secs(8)).await?;
+    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let case = RefreshProducerCase::new(tenant);
+    case.seed(&refresh_app, &owner).await?;
+    sqlx::query(
+        "UPDATE auth_grants SET expires_at = clock_timestamp() - interval '1 second' \
+         WHERE tenant_id = $1::uuid AND grant_id = $2",
+    )
+    .bind(tenant.as_uuid().to_string())
+    .bind(case.grant.id().as_str())
+    .execute(&owner.pool)
+    .await?;
+
+    let mut root_blocker = owner.pool.begin().await?;
+    let root_blocker_backend: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *root_blocker)
+        .await?;
+    sqlx::query(
+        "SELECT grant_id FROM auth_grants \
+         WHERE tenant_id = $1::uuid AND grant_id = $2 FOR UPDATE",
+    )
+    .bind(tenant.as_uuid().to_string())
+    .bind(case.grant.id().as_str())
+    .fetch_one(&mut *root_blocker)
+    .await?;
+
+    let refresh_backend: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&refresh_app.pool)
+        .await?;
+    let sweeper_backend: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&sweeper_app.pool)
+        .await?;
+    let refresh_case = case.clone();
+    let refresh = tokio::spawn(async move {
+        crate::PgIdentitySecurityLifecycle::from_unverified_for_test(&refresh_app)
+            .execute_refresh(
+                refresh_producer_receipt(),
+                identity_scope(tenant),
+                refresh_case.rotation_command(),
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let blockers: Vec<i32> = sqlx::query_scalar("SELECT unnest(pg_blocking_pids($1))")
+                .bind(refresh_backend)
+                .fetch_all(&owner.pool)
+                .await?;
+            if blockers.contains(&root_blocker_backend) {
+                return Ok::<(), sqlx::Error>(());
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .map_err(|_| "refresh producer did not reach the held AuthGrant root")??;
+    let sweep_deadline = crate::AuthGrantSweepDeadline::from_timeout(Duration::from_secs(7))?;
+    let sweep = tokio::spawn(async move {
+        sweeper_app
+            .auth_grant_sweeper()
+            .sweep_expired(sweep_deadline)
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let blockers: Vec<i32> = sqlx::query_scalar("SELECT unnest(pg_blocking_pids($1))")
+                .bind(sweeper_backend)
+                .fetch_all(&owner.pool)
+                .await?;
+            if blockers.contains(&refresh_backend) {
+                return Ok::<(), sqlx::Error>(());
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .map_err(|_| "sweeper did not reach the held refresh-family lock")??;
+
+    root_blocker.rollback().await?;
+    let refresh_outcome = tokio::time::timeout(Duration::from_secs(5), refresh)
+        .await
+        .map_err(|_| "refresh producer did not finish after the root lock was released")???;
+    assert!(matches!(
+        refresh_outcome,
+        identity::ports::RefreshExecutionOutcome::Expired
+    ));
+    let swept = tokio::time::timeout(Duration::from_secs(5), sweep)
+        .await
+        .map_err(|_| "sweeper did not finish after refresh serialization")???;
+    assert_eq!(
+        swept, 1,
+        "the expired grant must be swept after serialization"
+    );
+
+    let remaining: (i64, i64) = sqlx::query_as(
+        "SELECT \
+         (SELECT count(*) FROM auth_grants WHERE tenant_id = $1::uuid AND grant_id = $2), \
+         (SELECT count(*) FROM refresh_tokens WHERE tenant_id = $1::uuid AND auth_grant_id = $2)",
+    )
+    .bind(tenant.as_uuid().to_string())
+    .bind(case.grant.id().as_str())
+    .fetch_one(&owner.pool)
+    .await?;
+    assert_eq!(remaining, (0, 0));
+    let facts: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM outbox WHERE tenant_id = $1::uuid AND contract_id = $2",
+    )
+    .bind(tenant.as_uuid().to_string())
+    .bind(identity::ports::SECURITY_EVENT_CONTRACT.contract_id())
+    .fetch_one(&owner.pool)
+    .await?;
+    assert_eq!(facts, 0, "expiry/sweep serialization must not emit reuse");
+
+    owner.shutdown().await?;
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn auth_grant_sweeper_is_narrow_rss_app_capability() -> TestResult {
     let (pg, owner) = connect_pg().await?;
@@ -15933,7 +15621,111 @@ async fn auth_grant_sweeper_is_narrow_rss_app_capability() -> TestResult {
     assert!(row.2);
     assert!(row.3);
     assert!(!row.4);
-    assert!(row.5.contains("LIMIT 1000") && row.5.contains("SKIP LOCKED"));
+    let (fixed_search_path, execute_grantees): (bool, Vec<String>) = sqlx::query_as(
+        "SELECT p.proconfig = ARRAY['search_path=pg_catalog, pg_temp']::text[], \
+                ARRAY( \
+                    SELECT COALESCE(grantee.rolname, 'PUBLIC') \
+                    FROM aclexplode(COALESCE(p.proacl, acldefault('f', p.proowner))) acl \
+                    LEFT JOIN pg_roles grantee ON grantee.oid = acl.grantee \
+                    WHERE acl.privilege_type = 'EXECUTE' \
+                    ORDER BY COALESCE(grantee.rolname, 'PUBLIC') \
+                ) \
+         FROM pg_proc p \
+         WHERE p.oid = 'rss_sweep_expired_auth_grants()'::regprocedure",
+    )
+    .fetch_one(&owner.pool)
+    .await?;
+    assert!(fixed_search_path, "sweeper search_path must be exact");
+    assert_eq!(
+        execute_grantees,
+        ["rss_app", "rss_auth_grant_maintenance"],
+        "sweeper EXECUTE ACL must contain only the serving role and its NOLOGIN owner"
+    );
+    let refresh_privileges: Vec<String> = sqlx::query_scalar(
+        "SELECT ARRAY( \
+             SELECT acl.privilege_type \
+             FROM pg_class relation, \
+                  LATERAL aclexplode(COALESCE(relation.relacl, acldefault('r', relation.relowner))) acl \
+             JOIN pg_roles grantee ON grantee.oid = acl.grantee \
+             WHERE relation.oid = 'public.refresh_tokens'::regclass \
+               AND grantee.rolname = 'rss_auth_grant_maintenance' \
+             ORDER BY acl.privilege_type \
+         )",
+    )
+    .fetch_one(&owner.pool)
+    .await?;
+    assert_eq!(
+        refresh_privileges,
+        ["DELETE", "SELECT", "UPDATE"],
+        "maintenance refresh-family privileges must be an exact, non-empty set"
+    );
+    let root_privileges: Vec<String> = sqlx::query_scalar(
+        "SELECT ARRAY( \
+             SELECT acl.privilege_type \
+             FROM pg_class relation, \
+                  LATERAL aclexplode(COALESCE(relation.relacl, acldefault('r', relation.relowner))) acl \
+             JOIN pg_roles grantee ON grantee.oid = acl.grantee \
+             WHERE relation.oid = 'public.auth_grants'::regclass \
+               AND grantee.rolname = 'rss_auth_grant_maintenance' \
+             ORDER BY acl.privilege_type \
+         )",
+    )
+    .fetch_one(&owner.pool)
+    .await?;
+    assert_eq!(
+        root_privileges,
+        ["DELETE", "SELECT", "UPDATE"],
+        "maintenance AuthGrant privileges must be an exact, non-empty set"
+    );
+    let capability_is_exact =
+        |search_path: bool, execute: &[String], refresh: &[String], root: &[String]| {
+            search_path
+                && execute == ["rss_app", "rss_auth_grant_maintenance"]
+                && refresh == ["DELETE", "SELECT", "UPDATE"]
+                && root == ["DELETE", "SELECT", "UPDATE"]
+        };
+    assert!(capability_is_exact(
+        fixed_search_path,
+        &execute_grantees,
+        &refresh_privileges,
+        &root_privileges,
+    ));
+    assert!(
+        !capability_is_exact(true, &[], &refresh_privileges, &root_privileges),
+        "an empty ACL must not satisfy the exact capability gate"
+    );
+    let mut extra_grantee = execute_grantees.clone();
+    extra_grantee.push("PUBLIC".to_owned());
+    assert!(
+        !capability_is_exact(true, &extra_grantee, &refresh_privileges, &root_privileges,),
+        "an extra function grantee must fail the exact capability gate"
+    );
+    let mut extra_table_privilege = refresh_privileges.clone();
+    extra_table_privilege.push("INSERT".to_owned());
+    assert!(
+        !capability_is_exact(
+            true,
+            &execute_grantees,
+            &extra_table_privilege,
+            &root_privileges,
+        ),
+        "an extra maintenance table privilege must fail the exact capability gate"
+    );
+    let family_lock = row
+        .5
+        .find("PERFORM refresh.id")
+        .ok_or("sweeper family lock is missing")?;
+    let root_delete = row
+        .5
+        .find("DELETE FROM public.auth_grants")
+        .ok_or("sweeper root delete is missing")?;
+    assert!(
+        row.5.contains("LIMIT 1000")
+            && row.5.contains("ORDER BY refresh.id")
+            && row.5.contains("FOR UPDATE")
+            && family_lock < root_delete,
+        "maintenance capability must lock the ordered family before deleting the root"
+    );
 
     let direct_delete = sqlx::query("DELETE FROM auth_grants")
         .execute(&app.pool)
@@ -19403,18 +19195,9 @@ use std::time::{Duration, SystemTime};
 
 use diport::OutboxEnvelopeParts;
 use identity::ports::{
-    AccountSecuritySnapshot, AuthGrantCloseCommand, AuthGrantLifecycle, AuthGrantValidator,
-    IdentityError, IdentitySecurityLifecycle, LoginGrantMutation, RefreshTokenStore, TenantId,
+    AccountSecuritySnapshot, AuthGrantLifecycle, AuthGrantValidator, IdentityError,
+    IdentitySecurityLifecycle, LoginGrantMutation, RefreshTokenStore, TenantId,
 };
-
-fn classified_identity_error(
-    error: IdentityError,
-) -> testkit::localtx::ClassifiedError<IdentityError> {
-    testkit::localtx::ClassifiedError::new(
-        conformance_retry_category(classify_identity_error(&error)),
-        error,
-    )
-}
 
 async fn seed_auth_grant_account(
     store: &PgStore,
@@ -19437,10 +19220,11 @@ async fn seed_auth_grant_account(
     sqlx::query(
         "INSERT INTO account_security_states \
          (tenant_id, user_id, status, authn_epoch, version, status_changed_at, updated_at) \
-         VALUES ($1::uuid, $2::uuid, 'active', 0, 1, now(), now())",
+         VALUES ($1::uuid, $2::uuid, 'active', 0, 1, to_timestamp($3), to_timestamp($3))",
     )
     .bind(&tenant)
     .bind(&user)
+    .bind(i64::try_from(TEST_OCCURRED_SECS).expect("test timestamp fits PostgreSQL bigint"))
     .execute(&mut *tx)
     .await?;
     tx.commit().await
@@ -19471,6 +19255,108 @@ fn auth_grant_fixture(
         created + Duration::from_secs(3_600),
     );
     (grant, refresh)
+}
+
+#[derive(Clone)]
+struct RefreshProducerCase {
+    tenant: vocab::TenantId,
+    user_id: ids::UserId,
+    grant: AuthGrant,
+    old: identity::ports::RefreshTokenRecord,
+    rotation: identity::ports::RefreshRotation,
+}
+
+impl RefreshProducerCase {
+    #[allow(clippy::expect_used, reason = "generated UUID fixture is canonical")]
+    fn new(tenant: vocab::TenantId) -> Self {
+        let issued = SystemTime::UNIX_EPOCH + Duration::from_secs(TEST_OCCURRED_SECS);
+        let user_id = ids::UserId::parse(&uuid::Uuid::new_v4().to_string())
+            .expect("generated refresh user id must be valid");
+        let grant = identity::test_support::auth_grant(
+            &uuid::Uuid::new_v4().to_string(),
+            user_id,
+            tenant,
+            issued,
+            AuthnEpoch::ZERO,
+            SystemTime::UNIX_EPOCH + Duration::from_secs(4_000_000_000),
+            issued,
+        );
+        let mut old_hash = [0_u8; 32];
+        old_hash[..16].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+        old_hash[16..].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+        let old = identity::test_support::initial_refresh(
+            &grant,
+            &uuid::Uuid::new_v4().to_string(),
+            old_hash,
+            issued,
+            grant.expires_at(),
+        );
+        let mut next_hash = [0_u8; 32];
+        next_hash[..16].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+        next_hash[16..].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+        let rotation = identity::test_support::refresh_rotation(
+            &old,
+            &uuid::Uuid::new_v4().to_string(),
+            next_hash,
+            issued + Duration::from_secs(1),
+        );
+        Self {
+            tenant,
+            user_id,
+            grant,
+            old,
+            rotation,
+        }
+    }
+
+    async fn seed(&self, app: &PgStore, owner: &PgStore) -> Result<(), TestError> {
+        seed_auth_grant_account(owner, self.tenant, self.user_id).await?;
+        let (mutation, entry, envelope) = auth_grant_login_parts(
+            &unique_event_id("refresh-producer-seed"),
+            self.grant.clone(),
+            self.old.clone(),
+        );
+        let _ = crate::PgAuthGrantLifecycle::new(app, fixed_clock())
+            .persist_login_grant(
+                login_producer_receipt(),
+                identity_scope(self.tenant),
+                mutation,
+                entry,
+                envelope,
+            )
+            .await?;
+        Ok(())
+    }
+
+    fn rotation_command(&self) -> identity::ports::RefreshExecutionCommand {
+        identity::test_support::refresh_rotation_command(
+            self.old.clone(),
+            self.grant.clone(),
+            self.rotation.clone(),
+            self.rotation.new_record().issued_at(),
+        )
+    }
+}
+
+async fn refresh_producer_snapshot(
+    owner: &PgStore,
+    case: &RefreshProducerCase,
+) -> Result<(String, i64, i64, i64), sqlx::Error> {
+    sqlx::query_as(
+        "SELECT \
+         (SELECT status FROM auth_grants WHERE tenant_id = $1::uuid AND grant_id = $2), \
+         (SELECT count(*) FROM refresh_tokens \
+          WHERE tenant_id = $1::uuid AND auth_grant_id = $2 AND status = 'active'), \
+         (SELECT count(*) FROM refresh_tokens \
+          WHERE tenant_id = $1::uuid AND auth_grant_id = $2 AND status <> 'revoked'), \
+         (SELECT count(*) FROM outbox \
+          WHERE tenant_id = $1::uuid AND contract_id = $3)",
+    )
+    .bind(case.tenant.as_uuid().to_string())
+    .bind(case.grant.id().as_str())
+    .bind(identity::ports::SECURITY_EVENT_CONTRACT.contract_id())
+    .fetch_one(&owner.pool)
+    .await
 }
 
 struct AuthGrantValidationPdp(diport::VerifiedClaims);
@@ -19606,6 +19492,554 @@ async fn auth_grant_login_commits_root_refresh_and_outbox_together() -> TestResu
         (1, 1, 1)
     );
     store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn refresh_producer_normal_rotation_commits_child_without_security_fact() -> TestResult {
+    let (pg, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    let app = connect_pg_rss_app_role(&pg, &owner).await?;
+    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let case = RefreshProducerCase::new(tenant);
+    case.seed(&app, &owner).await?;
+
+    let outcome = crate::PgIdentitySecurityLifecycle::from_unverified_for_test(&app)
+        .execute_refresh(
+            refresh_producer_receipt(),
+            identity_scope(tenant),
+            case.rotation_command(),
+        )
+        .await?;
+    assert!(matches!(
+        outcome,
+        identity::ports::RefreshExecutionOutcome::Applied(_)
+    ));
+    assert_eq!(
+        refresh_producer_snapshot(&owner, &case).await?,
+        ("active".to_owned(), 1, 2, 0),
+        "normal rotation consumes the source, inserts one active child, and emits no security fact"
+    );
+
+    app.shutdown().await?;
+    owner.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn refresh_rotation_commit_unknown_never_returns_a_persisted_receipt() -> TestResult {
+    let (pg, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    let app = connect_pg_rss_app_role(&pg, &owner).await?;
+    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let case = RefreshProducerCase::new(tenant);
+    case.seed(&app, &owner).await?;
+
+    let unknown = crate::PgIdentitySecurityLifecycle::from_unverified_for_test(&app)
+        .with_fault(crate::identity_security_lifecycle::IdentitySecurityFault::CommitUnknown)
+        .execute_refresh(
+            refresh_producer_receipt(),
+            identity_scope(tenant),
+            case.rotation_command(),
+        )
+        .await;
+    assert!(
+        unknown.is_err(),
+        "a lost commit acknowledgement must not return Applied or its persisted receipt"
+    );
+    assert_eq!(
+        refresh_producer_snapshot(&owner, &case).await?,
+        ("active".to_owned(), 1, 2, 0),
+        "PostgreSQL may have committed the child, but the adapter must expose no releasable receipt"
+    );
+
+    app.shutdown().await?;
+    owner.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn refresh_replay_containment_is_atomic_with_the_winning_rotation() -> TestResult {
+    let (pg, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    let app_a = connect_pg_rss_app_role(&pg, &owner).await?;
+    let app_b = connect_pg_rss_app_role(&pg, &owner).await?;
+    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let case = RefreshProducerCase::new(tenant);
+    case.seed(&app_a, &owner).await?;
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    let lifecycle_a = crate::PgIdentitySecurityLifecycle::from_unverified_for_test(&app_a)
+        .with_start_barrier(std::sync::Arc::clone(&barrier));
+    let lifecycle_b = crate::PgIdentitySecurityLifecycle::from_unverified_for_test(&app_b)
+        .with_start_barrier(barrier);
+
+    let (first, second) = tokio::join!(
+        lifecycle_a.execute_refresh(
+            refresh_producer_receipt(),
+            identity_scope(tenant),
+            case.rotation_command(),
+        ),
+        lifecycle_b.execute_refresh(
+            refresh_producer_receipt(),
+            identity_scope(tenant),
+            case.rotation_command(),
+        ),
+    );
+    let outcomes = [first?, second?];
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| matches!(
+                outcome,
+                identity::ports::RefreshExecutionOutcome::Applied(_)
+            ))
+            .count(),
+        1,
+        "exactly one transaction may acknowledge the rotated bearer"
+    );
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| matches!(
+                outcome,
+                identity::ports::RefreshExecutionOutcome::ReuseContained
+            ))
+            .count(),
+        1,
+        "the CAS loser must contain reuse in its same producer transaction"
+    );
+    assert_eq!(
+        refresh_producer_snapshot(&owner, &case).await?,
+        ("compromised".to_owned(), 0, 0, 1),
+        "reuse must atomically compromise the grant, revoke the family, and append one fact"
+    );
+
+    let reader = crate::PgRefreshTokenStore::from_unverified_for_test(&app_a);
+    let consumed = reader
+        .find_by_hash(identity_scope(tenant), case.old.token_hash().clone())
+        .await?
+        .ok_or("consumed source refresh is missing")?;
+    let repair_evidence = consumed.clone();
+    let repeated = crate::PgIdentitySecurityLifecycle::from_unverified_for_test(&app_a)
+        .execute_refresh(
+            refresh_producer_receipt(),
+            identity_scope(tenant),
+            identity::test_support::refresh_reuse_command(
+                consumed,
+                case.rotation.new_record().issued_at() + Duration::from_secs(1),
+            ),
+        )
+        .await?;
+    assert!(matches!(
+        repeated,
+        identity::ports::RefreshExecutionOutcome::AlreadyContained
+    ));
+    assert_eq!(refresh_producer_snapshot(&owner, &case).await?.3, 1);
+
+    sqlx::query(
+        "ALTER TABLE refresh_tokens \
+         DROP CONSTRAINT refresh_tokens_terminal_grant_requires_revoked",
+    )
+    .execute(&owner.pool)
+    .await?;
+    sqlx::query(
+        "UPDATE refresh_tokens SET status = 'active' \
+         WHERE tenant_id = $1::uuid AND id = $2::uuid",
+    )
+    .bind(tenant.as_uuid().to_string())
+    .bind(case.rotation.new_record().id().as_str())
+    .execute(&owner.pool)
+    .await?;
+    let repaired = crate::PgIdentitySecurityLifecycle::from_unverified_for_test(&app_a)
+        .execute_refresh(
+            refresh_producer_receipt(),
+            identity_scope(tenant),
+            identity::test_support::refresh_reuse_command(
+                repair_evidence,
+                case.rotation.new_record().issued_at() + Duration::from_secs(2),
+            ),
+        )
+        .await?;
+    assert!(matches!(
+        repaired,
+        identity::ports::RefreshExecutionOutcome::AlreadyContained
+    ));
+    assert_eq!(
+        refresh_producer_snapshot(&owner, &case).await?,
+        ("compromised".to_owned(), 0, 0, 1),
+        "already-contained reuse must idempotently repair a non-revoked family without a second fact"
+    );
+
+    app_a.shutdown().await?;
+    app_b.shutdown().await?;
+    owner.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn refresh_reuse_faults_roll_back_family_grant_and_outbox_together() -> TestResult {
+    let (pg, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    let app = connect_pg_rss_app_role(&pg, &owner).await?;
+    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let case = RefreshProducerCase::new(tenant);
+    case.seed(&app, &owner).await?;
+    crate::PgIdentitySecurityLifecycle::from_unverified_for_test(&app)
+        .execute_refresh(
+            refresh_producer_receipt(),
+            identity_scope(tenant),
+            case.rotation_command(),
+        )
+        .await?;
+    let reader = crate::PgRefreshTokenStore::from_unverified_for_test(&app);
+    let consumed = reader
+        .find_by_hash(identity_scope(tenant), case.old.token_hash().clone())
+        .await?
+        .ok_or("consumed source refresh is missing")?;
+    let failed = crate::PgIdentitySecurityLifecycle::from_unverified_for_test(&app)
+        .with_fault(crate::identity_security_lifecycle::IdentitySecurityFault::AfterGrant)
+        .execute_refresh(
+            refresh_producer_receipt(),
+            identity_scope(tenant),
+            identity::test_support::refresh_reuse_command(
+                consumed.clone(),
+                case.rotation.new_record().issued_at() + Duration::from_secs(1),
+            ),
+        )
+        .await;
+    assert!(failed.is_err(), "injected containment fault must fail");
+    assert_eq!(
+        refresh_producer_snapshot(&owner, &case).await?,
+        ("active".to_owned(), 1, 2, 0),
+        "family and grant writes must roll back with the absent fact"
+    );
+
+    let contained = crate::PgIdentitySecurityLifecycle::from_unverified_for_test(&app)
+        .execute_refresh(
+            refresh_producer_receipt(),
+            identity_scope(tenant),
+            identity::test_support::refresh_reuse_command(
+                consumed,
+                case.rotation.new_record().issued_at() + Duration::from_secs(2),
+            ),
+        )
+        .await?;
+    assert!(matches!(
+        contained,
+        identity::ports::RefreshExecutionOutcome::ReuseContained
+    ));
+    assert_eq!(
+        refresh_producer_snapshot(&owner, &case).await?,
+        ("compromised".to_owned(), 0, 0, 1)
+    );
+
+    app.shutdown().await?;
+    owner.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn refresh_rotation_after_family_fault_rolls_back_and_can_retry_cleanly() -> TestResult {
+    let (pg, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    let app = connect_pg_rss_app_role(&pg, &owner).await?;
+    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let case = RefreshProducerCase::new(tenant);
+    case.seed(&app, &owner).await?;
+
+    let failed = crate::PgIdentitySecurityLifecycle::from_unverified_for_test(&app)
+        .with_fault(crate::identity_security_lifecycle::IdentitySecurityFault::AfterFamily)
+        .execute_refresh(
+            refresh_producer_receipt(),
+            identity_scope(tenant),
+            case.rotation_command(),
+        )
+        .await;
+    assert!(
+        failed.is_err(),
+        "fault after consume+insert must reject normal rotation"
+    );
+
+    let rolled_back: (String, String, i64, i64, i64) = sqlx::query_as(
+        "SELECT \
+         (SELECT status FROM auth_grants WHERE tenant_id = $1::uuid AND grant_id = $2), \
+         (SELECT status FROM refresh_tokens WHERE tenant_id = $1::uuid AND id = $3::uuid), \
+         (SELECT count(*) FROM refresh_tokens WHERE tenant_id = $1::uuid AND id = $4::uuid), \
+         (SELECT count(*) FROM outbox WHERE tenant_id = $1::uuid AND contract_id = $5), \
+         (SELECT count(*) FROM projection_events \
+          WHERE metadata ->> 'tenantId' = $1 AND contract_id = $5)",
+    )
+    .bind(tenant.as_uuid().to_string())
+    .bind(case.grant.id().as_str())
+    .bind(case.old.id().as_str())
+    .bind(case.rotation.new_record().id().as_str())
+    .bind(identity::ports::SECURITY_EVENT_CONTRACT.contract_id())
+    .fetch_one(&owner.pool)
+    .await?;
+    assert_eq!(
+        rolled_back,
+        ("active".to_owned(), "active".to_owned(), 0, 0, 0),
+        "AfterFamily must roll back old consume, child insert, and every producer side effect"
+    );
+
+    let retried = crate::PgIdentitySecurityLifecycle::from_unverified_for_test(&app)
+        .execute_refresh(
+            refresh_producer_receipt(),
+            identity_scope(tenant),
+            case.rotation_command(),
+        )
+        .await?;
+    assert!(matches!(
+        retried,
+        identity::ports::RefreshExecutionOutcome::Applied(_)
+    ));
+    let persisted: (String, String, i64, i64, i64) = sqlx::query_as(
+        "SELECT \
+         (SELECT status FROM auth_grants WHERE tenant_id = $1::uuid AND grant_id = $2), \
+         (SELECT status FROM refresh_tokens WHERE tenant_id = $1::uuid AND id = $3::uuid), \
+         (SELECT count(*) FROM refresh_tokens WHERE tenant_id = $1::uuid AND id = $4::uuid), \
+         (SELECT count(*) FROM outbox WHERE tenant_id = $1::uuid AND contract_id = $5), \
+         (SELECT count(*) FROM projection_events \
+          WHERE metadata ->> 'tenantId' = $1 AND contract_id = $5)",
+    )
+    .bind(tenant.as_uuid().to_string())
+    .bind(case.grant.id().as_str())
+    .bind(case.old.id().as_str())
+    .bind(case.rotation.new_record().id().as_str())
+    .bind(identity::ports::SECURITY_EVENT_CONTRACT.contract_id())
+    .fetch_one(&owner.pool)
+    .await?;
+    assert_eq!(
+        persisted,
+        ("active".to_owned(), "consumed".to_owned(), 1, 0, 0),
+        "fault-free retry must apply one child without emitting a security fact"
+    );
+
+    app.shutdown().await?;
+    owner.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn refresh_reuse_fault_matrix_is_all_or_none_and_commit_unknown_has_no_partial_state()
+-> TestResult {
+    use crate::identity_security_lifecycle::IdentitySecurityFault;
+
+    let (pg, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    let app = connect_pg_rss_app_role(&pg, &owner).await?;
+    for fault in [
+        IdentitySecurityFault::AfterFamily,
+        IdentitySecurityFault::AfterGrant,
+        IdentitySecurityFault::AfterProjection,
+        IdentitySecurityFault::OutboxAppend,
+        IdentitySecurityFault::AfterOutboxBeforeCommit,
+    ] {
+        let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+        let case = RefreshProducerCase::new(tenant);
+        case.seed(&app, &owner).await?;
+        crate::PgIdentitySecurityLifecycle::from_unverified_for_test(&app)
+            .execute_refresh(
+                refresh_producer_receipt(),
+                identity_scope(tenant),
+                case.rotation_command(),
+            )
+            .await?;
+        let source = crate::PgRefreshTokenStore::from_unverified_for_test(&app)
+            .find_by_hash(identity_scope(tenant), case.old.token_hash().clone())
+            .await?
+            .ok_or("consumed source refresh is missing")?;
+        let failed = crate::PgIdentitySecurityLifecycle::from_unverified_for_test(&app)
+            .with_fault(fault)
+            .execute_refresh(
+                refresh_producer_receipt(),
+                identity_scope(tenant),
+                identity::test_support::refresh_reuse_command(
+                    source,
+                    case.rotation.new_record().issued_at() + Duration::from_secs(1),
+                ),
+            )
+            .await;
+        assert!(failed.is_err(), "fault stage must reject containment");
+        assert_eq!(
+            refresh_producer_snapshot(&owner, &case).await?,
+            ("active".to_owned(), 1, 2, 0),
+            "fault stage must roll back family, grant, and security fact"
+        );
+        let projections: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM projection_events \
+             WHERE metadata ->> 'tenantId' = $1 AND contract_id = $2",
+        )
+        .bind(tenant.as_uuid().to_string())
+        .bind(identity::ports::SECURITY_EVENT_CONTRACT.contract_id())
+        .fetch_one(&owner.pool)
+        .await?;
+        assert_eq!(
+            projections, 0,
+            "fault stage must roll back the real projection append boundary"
+        );
+    }
+
+    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let case = RefreshProducerCase::new(tenant);
+    case.seed(&app, &owner).await?;
+    crate::PgIdentitySecurityLifecycle::from_unverified_for_test(&app)
+        .execute_refresh(
+            refresh_producer_receipt(),
+            identity_scope(tenant),
+            case.rotation_command(),
+        )
+        .await?;
+    let source = crate::PgRefreshTokenStore::from_unverified_for_test(&app)
+        .find_by_hash(identity_scope(tenant), case.old.token_hash().clone())
+        .await?
+        .ok_or("consumed source refresh is missing")?;
+    let unknown = crate::PgIdentitySecurityLifecycle::from_unverified_for_test(&app)
+        .with_fault(IdentitySecurityFault::CommitUnknown)
+        .execute_refresh(
+            refresh_producer_receipt(),
+            identity_scope(tenant),
+            identity::test_support::refresh_reuse_command(
+                source,
+                case.rotation.new_record().issued_at() + Duration::from_secs(1),
+            ),
+        )
+        .await;
+    assert!(
+        unknown.is_err(),
+        "commit unknown must never acknowledge containment"
+    );
+    let snapshot = refresh_producer_snapshot(&owner, &case).await?;
+    assert!(
+        snapshot == ("active".to_owned(), 1, 2, 0)
+            || snapshot == ("compromised".to_owned(), 0, 0, 1),
+        "commit unknown may settle absent or complete, never partial: {snapshot:?}"
+    );
+
+    app.shutdown().await?;
+    owner.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn refresh_producer_enforces_lineage_root_lifetime_and_family_binding() -> TestResult {
+    let (pg, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    let app = connect_pg_rss_app_role(&pg, &owner).await?;
+    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let root_expired = RefreshProducerCase::new(tenant);
+    root_expired.seed(&app, &owner).await?;
+    crate::PgIdentitySecurityLifecycle::from_unverified_for_test(&app)
+        .execute_refresh(
+            refresh_producer_receipt(),
+            identity_scope(tenant),
+            root_expired.rotation_command(),
+        )
+        .await?;
+    let reader = crate::PgRefreshTokenStore::from_unverified_for_test(&app);
+    let child = reader
+        .find_by_hash(
+            identity_scope(tenant),
+            root_expired.rotation.new_record().token_hash().clone(),
+        )
+        .await?
+        .ok_or("rotated child is missing")?;
+    let mut second_hash = [0_u8; 32];
+    second_hash[..16].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+    second_hash[16..].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+    let second_rotation = identity::test_support::refresh_rotation(
+        &child,
+        &uuid::Uuid::new_v4().to_string(),
+        second_hash,
+        child.issued_at() + Duration::from_secs(1),
+    );
+    let second_command = identity::test_support::refresh_rotation_command(
+        child,
+        root_expired.grant.clone(),
+        second_rotation.clone(),
+        second_rotation.new_record().issued_at(),
+    );
+    sqlx::query(
+        "UPDATE refresh_tokens SET expires_at = clock_timestamp() - interval '1 second' \
+         WHERE tenant_id = $1::uuid AND id = $2::uuid",
+    )
+    .bind(tenant.as_uuid().to_string())
+    .bind(root_expired.old.id().as_str())
+    .execute(&owner.pool)
+    .await?;
+    let expired = crate::PgIdentitySecurityLifecycle::from_unverified_for_test(&app)
+        .execute_refresh(
+            refresh_producer_receipt(),
+            identity_scope(tenant),
+            second_command,
+        )
+        .await?;
+    assert!(matches!(
+        expired,
+        identity::ports::RefreshExecutionOutcome::Expired
+    ));
+    let inserted: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM refresh_tokens WHERE tenant_id = $1::uuid AND id = $2::uuid",
+    )
+    .bind(tenant.as_uuid().to_string())
+    .bind(second_rotation.new_record().id().as_str())
+    .fetch_one(&owner.pool)
+    .await?;
+    assert_eq!(
+        inserted, 0,
+        "expired lineage root must fence the child write"
+    );
+
+    let corrupt_family = RefreshProducerCase::new(tenant);
+    corrupt_family.seed(&app, &owner).await?;
+    crate::PgIdentitySecurityLifecycle::from_unverified_for_test(&app)
+        .execute_refresh(
+            refresh_producer_receipt(),
+            identity_scope(tenant),
+            corrupt_family.rotation_command(),
+        )
+        .await?;
+    let child = reader
+        .find_by_hash(
+            identity_scope(tenant),
+            corrupt_family.rotation.new_record().token_hash().clone(),
+        )
+        .await?
+        .ok_or("rotated child is missing")?;
+    let next_rotation = identity::test_support::refresh_rotation(
+        &child,
+        &uuid::Uuid::new_v4().to_string(),
+        [0xA5; 32],
+        child.issued_at() + Duration::from_secs(1),
+    );
+    let corrupt_command = identity::test_support::refresh_rotation_command(
+        child,
+        corrupt_family.grant.clone(),
+        next_rotation,
+        corrupt_family.rotation.new_record().issued_at() + Duration::from_secs(1),
+    );
+    sqlx::query(
+        "UPDATE refresh_tokens SET lineage_id = $3::uuid \
+         WHERE tenant_id = $1::uuid AND id = $2::uuid",
+    )
+    .bind(tenant.as_uuid().to_string())
+    .bind(corrupt_family.old.id().as_str())
+    .bind(uuid::Uuid::new_v4().to_string())
+    .execute(&owner.pool)
+    .await?;
+    assert!(matches!(
+        crate::PgIdentitySecurityLifecycle::from_unverified_for_test(&app)
+            .execute_refresh(
+                refresh_producer_receipt(),
+                identity_scope(tenant),
+                corrupt_command,
+            )
+            .await,
+        Err(IdentityError::Storage(_))
+    ));
+
+    app.shutdown().await?;
+    owner.shutdown().await?;
     Ok(())
 }
 
@@ -19801,16 +20235,16 @@ async fn auth_grant_validator_fences_every_durable_binding_in_one_port_call() ->
     .execute(&owner.pool)
     .await?;
 
-    let close = grant.clone().close(
-        GrantSecurityEventKind::LogoutCurrent,
+    let logout = identity::test_support::logout_current_command(
+        grant.clone(),
         grant.created_at() + Duration::from_secs(2),
-    )?;
-    lifecycle
-        .close(
-            identity_scope(tenant),
-            AuthGrantCloseCommand::for_test(close),
-        )
-        .await?;
+    );
+    let _ = execute_logout_current_route(
+        &crate::PgIdentitySecurityLifecycle::from_unverified_for_test(&owner),
+        tenant,
+        logout,
+    )
+    .await?;
     assert!(
         !validator
             .is_current(identity_scope(input.tenant()), &input, valid_observation)
@@ -20314,18 +20748,16 @@ async fn auth_grant_serving_role_has_exact_mutation_acl() -> TestResult {
         tx.rollback().await?;
     }
 
-    let close = grant
-        .close(
-            GrantSecurityEventKind::LogoutCurrent,
-            SystemTime::UNIX_EPOCH + Duration::from_secs(TEST_OCCURRED_SECS + 1),
-        )
-        .expect("valid provider close");
-    lifecycle
-        .close(
-            identity_scope(tenant),
-            AuthGrantCloseCommand::for_test(close),
-        )
-        .await?;
+    let logout = identity::test_support::logout_current_command(
+        grant,
+        SystemTime::UNIX_EPOCH + Duration::from_secs(TEST_OCCURRED_SECS + 1),
+    );
+    let _ = execute_logout_current_route(
+        &crate::PgIdentitySecurityLifecycle::from_unverified_for_test(&app),
+        tenant,
+        logout,
+    )
+    .await?;
     let closed: (String, String, String) = sqlx::query_as(
         "SELECT g.status, r.status, r.auth_grant_status \
          FROM auth_grants AS g \
@@ -20352,176 +20784,7 @@ async fn auth_grant_serving_role_has_exact_mutation_acl() -> TestResult {
     Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn auth_grant_close_revokes_refresh_family_before_closing_root() -> TestResult {
-    let (pg, store) = connect_pg().await?;
-    store.run_migrations().await?;
-    let close_app_a =
-        connect_pg_rss_app_role_with_limits(&pg, &store, 1, Duration::from_secs(5)).await?;
-    let close_app_b =
-        connect_pg_rss_app_role_with_limits(&pg, &store, 1, Duration::from_secs(5)).await?;
-    let tenant = test_tenant();
-    let user_id = ids::UserId::parse(&uuid::Uuid::new_v4().to_string())?;
-    seed_auth_grant_account(&store, tenant, user_id).await?;
-    let grant_id = uuid::Uuid::new_v4().to_string();
-    let refresh_id = uuid::Uuid::new_v4().to_string();
-    let event_id = unique_event_id("auth-grant-close");
-    let (grant, refresh) = auth_grant_fixture(tenant, user_id, &grant_id, &refresh_id, [0xE1; 32]);
-    let lifecycle = crate::PgAuthGrantLifecycle::new(&store, fixed_clock());
-    let (mutation, entry, envelope) = auth_grant_login_parts(&event_id, grant.clone(), refresh);
-    let _persisted = lifecycle
-        .persist_login_grant(
-            login_producer_receipt(),
-            identity_scope(tenant),
-            mutation,
-            entry,
-            envelope,
-        )
-        .await?;
-
-    let direct = sqlx::query(
-        "UPDATE auth_grants SET status = 'revoked', closed_at = now(), \
-         close_reason = 'logout_current' WHERE tenant_id = $1::uuid AND grant_id = $2",
-    )
-    .bind(tenant.as_uuid().to_string())
-    .bind(&grant_id)
-    .execute(&store.pool)
-    .await;
-    assert!(
-        direct.is_err(),
-        "database must reject closing a root with a non-revoked refresh family"
-    );
-
-    let close = grant
-        .clone()
-        .close(
-            GrantSecurityEventKind::LogoutCurrent,
-            SystemTime::UNIX_EPOCH + Duration::from_secs(TEST_OCCURRED_SECS + 1),
-        )
-        .expect("valid close");
-    let concurrent_stale_close = grant
-        .close(
-            GrantSecurityEventKind::LogoutCurrent,
-            SystemTime::UNIX_EPOCH + Duration::from_secs(TEST_OCCURRED_SECS + 2),
-        )
-        .expect("valid stale close");
-
-    let backend_pid_a = {
-        let mut conn = close_app_a.pool.acquire().await?;
-        sqlx::query_scalar::<_, i32>("SELECT pg_backend_pid()")
-            .fetch_one(&mut *conn)
-            .await?
-    };
-    let backend_pid_b = {
-        let mut conn = close_app_b.pool.acquire().await?;
-        sqlx::query_scalar::<_, i32>("SELECT pg_backend_pid()")
-            .fetch_one(&mut *conn)
-            .await?
-    };
-    assert_ne!(
-        backend_pid_a, backend_pid_b,
-        "concurrent closes must use independent PostgreSQL sessions"
-    );
-
-    let mut blocker = store.pool.begin().await?;
-    let locked_account: String = sqlx::query_scalar(
-        "SELECT user_id::text FROM account_security_states \
-         WHERE tenant_id = $1::uuid AND user_id = $2::uuid FOR UPDATE",
-    )
-    .bind(tenant.as_uuid().to_string())
-    .bind(user_id.as_uuid().to_string())
-    .fetch_one(&mut *blocker)
-    .await?;
-    assert_eq!(locked_account, user_id.as_uuid().to_string());
-
-    let start = std::sync::Arc::new(tokio::sync::Barrier::new(3));
-    let lifecycle_a = crate::PgAuthGrantLifecycle::new(&close_app_a, fixed_clock());
-    let lifecycle_b = crate::PgAuthGrantLifecycle::new(&close_app_b, fixed_clock());
-    let start_a = std::sync::Arc::clone(&start);
-    let first = tokio::spawn(async move {
-        start_a.wait().await;
-        lifecycle_a
-            .close(
-                identity_scope(tenant),
-                AuthGrantCloseCommand::for_test(close),
-            )
-            .await
-    });
-    let start_b = std::sync::Arc::clone(&start);
-    let second = tokio::spawn(async move {
-        start_b.wait().await;
-        lifecycle_b
-            .close(
-                identity_scope(tenant),
-                AuthGrantCloseCommand::for_test(concurrent_stale_close),
-            )
-            .await
-    });
-    start.wait().await;
-
-    let both_blocked = tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            let blocked: bool = sqlx::query_scalar(
-                "SELECT cardinality(pg_blocking_pids($1)) > 0 \
-                     AND cardinality(pg_blocking_pids($2)) > 0",
-            )
-            .bind(backend_pid_a)
-            .bind(backend_pid_b)
-            .fetch_one(&store.pool)
-            .await?;
-            if blocked {
-                return Ok::<(), sqlx::Error>(());
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await;
-    if !matches!(both_blocked, Ok(Ok(()))) {
-        blocker.rollback().await?;
-        first.abort();
-        second.abort();
-        return Err("both AuthGrant close sessions must wait concurrently on the row lock".into());
-    }
-    blocker.commit().await?;
-    let close_results = [first.await?, second.await?];
-    assert_eq!(
-        close_results.iter().filter(|result| result.is_ok()).count(),
-        1,
-        "exactly one expected snapshot may close the root"
-    );
-    assert_eq!(
-        close_results
-            .iter()
-            .filter(|result| matches!(result, Err(IdentityError::VersionConflict)))
-            .count(),
-        1,
-        "the stale concurrent command must observe a version conflict"
-    );
-
-    let row: (String, Option<String>, String, String) = sqlx::query_as(
-        "SELECT g.status, g.close_reason, r.status, r.auth_grant_status \
-         FROM auth_grants g JOIN refresh_tokens r \
-           ON r.tenant_id = g.tenant_id AND r.auth_grant_id = g.grant_id \
-         WHERE g.tenant_id = $1::uuid AND g.grant_id = $2",
-    )
-    .bind(tenant.as_uuid().to_string())
-    .bind(&grant_id)
-    .fetch_one(&store.pool)
-    .await?;
-    assert_eq!(
-        row,
-        (
-            AuthGrantStatus::Revoked.as_db_str().to_owned(),
-            Some("logout_current".to_owned()),
-            "revoked".to_owned(),
-            "revoked".to_owned(),
-        )
-    );
-    close_app_a.shutdown().await?;
-    close_app_b.shutdown().await?;
-    store.shutdown().await?;
-    Ok(())
-}
+// Grant terminal mutations are covered through PgIdentitySecurityLifecycle; the old close port is deleted.
 
 #[tokio::test(flavor = "multi_thread")]
 async fn password_change_security_event_updates_credential_revokes_sessions_and_appends_one_fact()
@@ -20641,7 +20904,7 @@ async fn password_change_security_event_updates_credential_revokes_sessions_and_
     .await?;
     assert_eq!(facts.len(), 1);
     let payload: serde_json::Value = serde_json::from_slice(&facts[0])?;
-    assert_eq!(payload.as_object().map(serde_json::Map::len), Some(4));
+    assert_eq!(payload.as_object().map(serde_json::Map::len), Some(5));
     assert_eq!(payload["kind"], "passwordChanged");
     assert_eq!(payload["target"]["kind"], "subject");
     assert!(
@@ -20962,8 +21225,9 @@ async fn identity_security_full_snapshot_cas_rejects_timestamp_only_staleness() 
         suspended.clone(),
         suspended.updated_at() + Duration::from_secs(1),
     );
+    let reactivation = crate::PgAccountReactivationLifecycle::from_unverified_for_test(&store);
     assert!(matches!(
-        lifecycle
+        reactivation
             .execute_reactivation(identity_scope(state_tenant), stale_reactivation)
             .await,
         Err(IdentityError::VersionConflict)
@@ -21139,6 +21403,7 @@ async fn account_restriction_and_reactivation_preserve_revocation_epoch_without_
         .await?
         .ok_or("seeded account state missing")?;
     let lifecycle = crate::PgIdentitySecurityLifecycle::from_unverified_for_test(&store);
+    let reactivation = crate::PgAccountReactivationLifecycle::from_unverified_for_test(&store);
     let restrict = identity::test_support::account_status_set_command(
         active.clone(),
         AccountStatus::Suspended,
@@ -21163,7 +21428,7 @@ async fn account_restriction_and_reactivation_preserve_revocation_epoch_without_
         suspended.clone(),
         suspended.updated_at() + Duration::from_secs(1),
     );
-    let active = lifecycle
+    let active = reactivation
         .execute_reactivation(identity_scope(tenant), reactivate)
         .await?;
     assert_eq!(active.status(), AccountStatus::Active);
@@ -21361,7 +21626,7 @@ async fn credential_security_lifecycle_applies_account_cas_and_grant_promotion_a
     .await?;
     assert_eq!(account_security_facts.len(), 1, "stale CAS must not append");
     let payload: serde_json::Value = serde_json::from_slice(&account_security_facts[0])?;
-    assert_eq!(payload.as_object().map(serde_json::Map::len), Some(4));
+    assert_eq!(payload.as_object().map(serde_json::Map::len), Some(5));
     assert!(
         !String::from_utf8_lossy(&account_security_facts[0])
             .contains(&account_user.as_uuid().to_string())
@@ -21734,6 +21999,18 @@ async fn credential_security_lifecycle_rolls_back_before_outbox_and_never_receip
     .fetch_one(&store.pool)
     .await?;
     assert_eq!(after_rollback_facts, 0);
+    let after_rollback_projections: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM projection_events \
+         WHERE metadata ->> 'tenantId' = $1 AND contract_id = $2",
+    )
+    .bind(tenant.as_uuid().to_string())
+    .bind(identity::ports::SECURITY_EVENT_CONTRACT.contract_id())
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(
+        after_rollback_projections, 0,
+        "AfterProjection must execute after the mirror append and roll it back"
+    );
 
     let mismatch = identity::test_support::account_credential_security_command(
         state.clone(),
@@ -21988,146 +22265,7 @@ async fn auth_grant_composite_fk_rejects_every_mismatched_refresh_binding() -> T
     Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn refresh_rotation_final_writer_rejects_expired_source_and_root_without_writes() -> TestResult
-{
-    let (pg, owner) = connect_pg().await?;
-    owner.run_migrations().await?;
-    let app = connect_pg_rss_app_role(&pg, &owner).await?;
-    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
-    let refresh_store = crate::PgRefreshTokenStore::from_unverified_for_test(&app);
-    let expired_at = i64::try_from(TEST_OCCURRED_SECS + 1)?;
-
-    let expired_source = RefreshLocalTxCase::new(tenant);
-    expired_source.seed(&app, &owner).await?;
-    sqlx::query(
-        "UPDATE refresh_tokens SET expires_at = to_timestamp($3) \
-         WHERE tenant_id = $1::uuid AND id = $2::uuid",
-    )
-    .bind(tenant.as_uuid().to_string())
-    .bind(expired_source.old.id().as_str())
-    .bind(expired_at)
-    .execute(&owner.pool)
-    .await?;
-    assert_eq!(
-        refresh_store
-            .rotate(identity_scope(tenant), expired_source.mutation())
-            .await?,
-        identity::ports::RefreshRotationOutcome::Expired,
-        "the final writer must recheck the locked source refresh against the database clock"
-    );
-    assert_eq!(
-        expired_source.snapshot(&owner).await?,
-        (Some("active".to_owned()), 0),
-        "expired source rejection must not consume old or insert new"
-    );
-
-    let expired_root = RefreshLocalTxCase::new(tenant);
-    expired_root.seed(&app, &owner).await?;
-    sqlx::query(
-        "UPDATE auth_grants SET expires_at = to_timestamp($3) \
-         WHERE tenant_id = $1::uuid AND grant_id = $2",
-    )
-    .bind(tenant.as_uuid().to_string())
-    .bind(expired_root.grant.id().as_str())
-    .bind(expired_at)
-    .execute(&owner.pool)
-    .await?;
-    assert_eq!(
-        refresh_store
-            .rotate(identity_scope(tenant), expired_root.mutation())
-            .await?,
-        identity::ports::RefreshRotationOutcome::Expired,
-        "an active but expired AuthGrant must fence rotation in the final writer transaction"
-    );
-    assert_eq!(
-        expired_root.snapshot(&owner).await?,
-        (Some("active".to_owned()), 0),
-        "expired root rejection must not consume old or insert new"
-    );
-
-    app.shutdown().await?;
-    owner.shutdown().await?;
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn refresh_rotation_inherits_auth_grant_binding_and_closed_root_fences_rotation() -> TestResult
-{
-    let (pg, owner) = connect_pg().await?;
-    owner.run_migrations().await?;
-    let app = connect_pg_rss_app_role(&pg, &owner).await?;
-    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
-    let case = RefreshLocalTxCase::new(tenant);
-    case.seed(&app, &owner).await?;
-    let refresh_store = crate::PgRefreshTokenStore::from_unverified_for_test(&app);
-
-    assert_eq!(
-        refresh_store
-            .rotate(identity_scope(tenant), case.mutation())
-            .await?,
-        identity::ports::RefreshRotationOutcome::Applied
-    );
-    let binding: (String, String, i64, String, Option<String>, String) = sqlx::query_as(
-        "SELECT auth_grant_id, user_id::text, authn_epoch_at_issue, auth_grant_status, \
-                parent_id::text, lineage_id::text \
-         FROM refresh_tokens WHERE tenant_id = $1::uuid AND id = $2::uuid",
-    )
-    .bind(tenant.as_uuid().to_string())
-    .bind(case.next.id().as_str())
-    .fetch_one(&owner.pool)
-    .await?;
-    assert_eq!(
-        binding,
-        (
-            case.grant.id().as_str().to_owned(),
-            case.user_id.as_uuid().to_string(),
-            i64::try_from(case.grant.authn_epoch_at_issue().get())?,
-            "active".to_owned(),
-            Some(case.old.id().as_str().to_owned()),
-            case.old.lineage_id().as_str().to_owned(),
-        ),
-        "rotation must inherit the complete AuthGrant binding and lineage"
-    );
-
-    let closed_at = case.grant.created_at() + Duration::from_secs(1);
-    let close = case
-        .grant
-        .clone()
-        .close(GrantSecurityEventKind::LogoutCurrent, closed_at)
-        .expect("fixture close is valid");
-    crate::PgAuthGrantLifecycle::new(&app, fixed_clock())
-        .close(
-            identity_scope(tenant),
-            AuthGrantCloseCommand::for_test(close),
-        )
-        .await?;
-    assert_eq!(
-        refresh_store
-            .rotate(identity_scope(tenant), case.mutation())
-            .await?,
-        identity::ports::RefreshRotationOutcome::AccountStale,
-        "closed AuthGrant must fence refresh before its CAS"
-    );
-    let family: Vec<(String, String)> = sqlx::query_as(
-        "SELECT status, auth_grant_status FROM refresh_tokens \
-         WHERE tenant_id = $1::uuid AND auth_grant_id = $2 ORDER BY id",
-    )
-    .bind(tenant.as_uuid().to_string())
-    .bind(case.grant.id().as_str())
-    .fetch_all(&owner.pool)
-    .await?;
-    assert!(
-        family
-            .iter()
-            .all(|row| row == &("revoked".to_owned(), "revoked".to_owned())),
-        "closing the root must revoke and retag every refresh record: {family:?}"
-    );
-
-    app.shutdown().await?;
-    owner.shutdown().await?;
-    Ok(())
-}
+// Refresh producer rotation, expiry, reuse and binding tests are colocated with AuthGrant login above.
 
 // ── T15–T18: OutboxBacklog::sample_backlog（#1209）────────────────────────────
 //
@@ -24098,6 +24236,153 @@ fn migrations_through(max_version: i64) -> sqlx::migrate::Migrator {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn migration_0079_upgrades_live_sweeper_and_sweeps_preexisting_family() -> TestResult {
+    let (pg, owner) = connect_pg().await?;
+    migrations_through(78).run(&owner.pool).await?;
+    let app = connect_pg_rss_app_role(&pg, &owner).await?;
+    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let case = RefreshProducerCase::new(tenant);
+    case.seed(&app, &owner).await?;
+    sqlx::query(
+        "UPDATE auth_grants SET expires_at = clock_timestamp() - interval '1 second' \
+         WHERE tenant_id = $1::uuid AND grant_id = $2",
+    )
+    .bind(tenant.as_uuid().to_string())
+    .bind(case.grant.id().as_str())
+    .execute(&owner.pool)
+    .await?;
+
+    let predecessor: (i64, String, i64, i64) = sqlx::query_as(
+        "SELECT \
+         (SELECT max(version) FROM _sqlx_migrations), \
+         pg_get_functiondef('rss_sweep_expired_auth_grants()'::regprocedure), \
+         (SELECT count(*) FROM auth_grants WHERE tenant_id = $1::uuid AND grant_id = $2), \
+         (SELECT count(*) FROM refresh_tokens WHERE tenant_id = $1::uuid AND auth_grant_id = $2)",
+    )
+    .bind(tenant.as_uuid().to_string())
+    .bind(case.grant.id().as_str())
+    .fetch_one(&owner.pool)
+    .await?;
+    assert_eq!(predecessor.0, 78);
+    assert!(predecessor.1.contains("FOR UPDATE SKIP LOCKED"));
+    assert_eq!((predecessor.2, predecessor.3), (1, 1));
+
+    sqlx::migrate!("./migrations").run(&owner.pool).await?;
+
+    let ledger: (i64, i64, bool) =
+        sqlx::query_as("SELECT max(version), count(*), bool_and(success) FROM _sqlx_migrations")
+            .fetch_one(&owner.pool)
+            .await?;
+    assert_eq!(ledger, (79, 79, true));
+
+    let function: (String, String, bool, bool, Vec<String>) = sqlx::query_as(
+        "SELECT \
+         pg_get_functiondef(p.oid), \
+         pg_get_userbyid(p.proowner), \
+         p.prosecdef, \
+         p.proconfig = ARRAY['search_path=pg_catalog, pg_temp']::text[], \
+         ARRAY( \
+             SELECT COALESCE(grantee.rolname, 'PUBLIC') \
+             FROM aclexplode(COALESCE(p.proacl, acldefault('f', p.proowner))) acl \
+             LEFT JOIN pg_roles grantee ON grantee.oid = acl.grantee \
+             WHERE acl.privilege_type = 'EXECUTE' \
+             ORDER BY COALESCE(grantee.rolname, 'PUBLIC') \
+         ) \
+         FROM pg_proc p \
+         WHERE p.oid = 'rss_sweep_expired_auth_grants()'::regprocedure",
+    )
+    .fetch_one(&owner.pool)
+    .await?;
+    let normalized_function = function.0.split_whitespace().collect::<Vec<_>>().join(" ");
+    let family_lock = normalized_function
+        .find("FROM public.refresh_tokens AS refresh")
+        .ok_or("upgraded sweeper must lock the refresh family")?;
+    let family_delete = normalized_function
+        .find("DELETE FROM public.refresh_tokens AS refresh")
+        .ok_or("upgraded sweeper must explicitly delete refresh children")?;
+    let root_delete = normalized_function
+        .find("DELETE FROM public.auth_grants AS root")
+        .ok_or("upgraded sweeper must delete the AuthGrant root")?;
+    assert!(family_lock < family_delete && family_delete < root_delete);
+    assert!(normalized_function.contains("ORDER BY refresh.id FOR UPDATE"));
+    assert!(!normalized_function.contains("FOR UPDATE SKIP LOCKED"));
+    assert_eq!(function.1, "rss_auth_grant_maintenance");
+    assert!(function.2, "upgraded sweeper must remain SECURITY DEFINER");
+    assert!(function.3, "upgraded sweeper search_path must remain exact");
+    assert_eq!(
+        function.4,
+        ["rss_app", "rss_auth_grant_maintenance"],
+        "upgraded function must preserve its exact EXECUTE ACL"
+    );
+
+    let table_privileges: Vec<(String, Vec<String>)> = sqlx::query_as(
+        "SELECT relation.relname, ARRAY( \
+             SELECT acl.privilege_type \
+             FROM aclexplode(COALESCE(relation.relacl, acldefault('r', relation.relowner))) acl \
+             JOIN pg_roles grantee ON grantee.oid = acl.grantee \
+             WHERE grantee.rolname = 'rss_auth_grant_maintenance' \
+             ORDER BY acl.privilege_type \
+         ) \
+         FROM pg_class relation \
+         WHERE relation.oid IN ('public.auth_grants'::regclass, 'public.refresh_tokens'::regclass) \
+         ORDER BY relation.relname",
+    )
+    .fetch_all(&owner.pool)
+    .await?;
+    assert_eq!(
+        table_privileges,
+        [
+            (
+                "auth_grants".to_owned(),
+                vec![
+                    "DELETE".to_owned(),
+                    "SELECT".to_owned(),
+                    "UPDATE".to_owned()
+                ],
+            ),
+            (
+                "refresh_tokens".to_owned(),
+                vec![
+                    "DELETE".to_owned(),
+                    "SELECT".to_owned(),
+                    "UPDATE".to_owned()
+                ],
+            ),
+        ],
+        "0079 must leave only the exact family-before-root maintenance capabilities"
+    );
+
+    let retained_before_sweep: (i64, i64) = sqlx::query_as(
+        "SELECT \
+         (SELECT count(*) FROM auth_grants WHERE tenant_id = $1::uuid AND grant_id = $2), \
+         (SELECT count(*) FROM refresh_tokens WHERE tenant_id = $1::uuid AND auth_grant_id = $2)",
+    )
+    .bind(tenant.as_uuid().to_string())
+    .bind(case.grant.id().as_str())
+    .fetch_one(&owner.pool)
+    .await?;
+    assert_eq!(retained_before_sweep, (1, 1));
+    let swept: i64 = sqlx::query_scalar("SELECT rss_sweep_expired_auth_grants()::bigint")
+        .fetch_one(&app.pool)
+        .await?;
+    assert_eq!(swept, 1);
+    let remaining: (i64, i64) = sqlx::query_as(
+        "SELECT \
+         (SELECT count(*) FROM auth_grants WHERE tenant_id = $1::uuid AND grant_id = $2), \
+         (SELECT count(*) FROM refresh_tokens WHERE tenant_id = $1::uuid AND auth_grant_id = $2)",
+    )
+    .bind(tenant.as_uuid().to_string())
+    .bind(case.grant.id().as_str())
+    .fetch_one(&owner.pool)
+    .await?;
+    assert_eq!(remaining, (0, 0));
+
+    app.shutdown().await?;
+    owner.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn migration_0076_drops_unconsumed_credential_security_target_mapping() -> TestResult {
     let (_fixture, store) = connect_pg().await?;
     migrations_through(75).run(&store.pool).await?;
@@ -24137,7 +24422,7 @@ async fn migration_0076_drops_unconsumed_credential_security_target_mapping() ->
     let ledger: i64 = sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations")
         .fetch_one(&store.pool)
         .await?;
-    assert_eq!(ledger, 77);
+    assert_eq!(ledger, 79);
 
     store.shutdown().await?;
     Ok(())
@@ -24219,7 +24504,7 @@ async fn migration_0075_replaces_legacy_session_permission_without_expanding_aut
     let ledger: i64 = sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations")
         .fetch_one(&store.pool)
         .await?;
-    assert_eq!(ledger, 77);
+    assert_eq!(ledger, 79);
     store.shutdown().await?;
     Ok(())
 }

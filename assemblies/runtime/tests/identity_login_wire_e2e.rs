@@ -35,9 +35,9 @@ use generated::http::identity_v1::roles_revoke::SPEC as ROLES_REVOKE_SPEC;
 use generated::http::settings_v1::SPEC as SETTINGS_CONFIG_SPEC;
 use httpserve::ProducerMarker;
 use identity::ports::{
-    AccountSecurityReadRepo as _, AccountStatus, Credential, CredentialRepo as _,
-    DynRoleBindingLifecycle, DynRoleReadRepo, IdentitySecurityLifecycle as _, Role,
-    RoleWriteRepo as _, TenantId, TenantRepoScope,
+    AccountSecurityReadRepo as _, AccountStatus, AuthGrantProvider as _, Credential,
+    CredentialRepo as _, DynRoleBindingLifecycle, DynRoleReadRepo, IdentitySecurityLifecycle as _,
+    Role, RoleWriteRepo as _, TenantId, TenantRepoScope,
 };
 use p256::ecdsa::{Signature, SigningKey, signature::Signer as _};
 use postgres::{PgConfig, PgPassword, PgRuntimeDeps, PgSslMode, PgTenantReadConfig, caps};
@@ -538,6 +538,30 @@ async fn outbox_topic_count(
     Ok(count)
 }
 
+async fn refresh_family_security_snapshot(
+    pool: &PgPool,
+    presented: &str,
+) -> TestResult<(String, Option<String>, i64, bool)> {
+    let row = sqlx::query_as::<_, (String, Option<String>, i64, bool)>(
+        "SELECT grant_root.status, grant_root.close_reason, count(family.id)::bigint, \
+                bool_and(family.status = 'revoked' AND family.auth_grant_status = 'compromised') \
+         FROM refresh_tokens AS presented \
+         JOIN auth_grants AS grant_root \
+           ON grant_root.tenant_id = presented.tenant_id \
+          AND grant_root.grant_id = presented.auth_grant_id \
+         JOIN refresh_tokens AS family \
+           ON family.tenant_id = grant_root.tenant_id \
+          AND family.auth_grant_id = grant_root.grant_id \
+         WHERE presented.tenant_id = $1::uuid AND presented.token_hash = $2 \
+         GROUP BY grant_root.grant_id, grant_root.status, grant_root.close_reason",
+    )
+    .bind(CANON_TENANT)
+    .bind(secure::digest(presented).as_slice())
+    .fetch_one(pool)
+    .await?;
+    Ok(row)
+}
+
 async fn role_binding_count(
     pool: &PgPool,
     role_id: &str,
@@ -736,9 +760,13 @@ async fn wire_identity_logout_current_all_e2e() -> TestResult {
             .find(scope, user_id)
             .await?
             .ok_or("credential save omitted its account-security state")?;
-        let lifecycle = pg
+        let (_, _, lifecycle) = pg
             .for_domain::<caps::Identity>()
-            .identity_security_lifecycle(postgres::identity_pseudonym_keys_for_test());
+            .auth_grant_provider(
+                Box::new(SystemClock),
+                postgres::identity_pseudonym_keys_for_test(),
+            )
+            .into_auth_grant_parts();
         let occurred_at = current.updated_at() + Duration::from_secs(1);
         let command =
             identity::test_support::account_status_set_command(current, next_status, occurred_at);
@@ -1097,6 +1125,203 @@ async fn wire_identity_logout_current_all_e2e() -> TestResult {
             StatusCode::UNAUTHORIZED
         );
     }
+
+    Ok(())
+}
+
+/// 两个独立 runtime/router 共享 PostgreSQL，对同一 bearer 并发 refresh：只能有一个轮换
+/// 响应，CAS loser 必须在同一个 durable security closure 中 compromise grant、撤销完整
+/// family，并 exactly-once 追加 `identity.security-event`。
+#[tokio::test(flavor = "multi_thread")]
+async fn wire_identity_two_routers_concurrent_refresh_reuse_closes_security_loop_e2e() -> TestResult
+{
+    let vault_server = MockServer::start().await;
+    Mock::given(match_method("POST"))
+        .and(body_partial_json(
+            serde_json::json!({ "marshaling_algorithm": "jws" }),
+        ))
+        .respond_with(TransitSignResponder { sk: sk_jwt() })
+        .mount(&vault_server)
+        .await;
+    let vault_uri = vault_server.uri();
+
+    let (fixture, pg_owner) = connect_pg().await?;
+    let observation_pool = assertion_pool(fixture.params()).await?;
+    let pg = pg_owner.handle();
+    let tenant = TenantId::parse(CANON_TENANT)?;
+    pg.for_domain::<caps::Identity>()
+        .credential_repo()
+        .insert(
+            TenantRepoScope::for_test(tenant),
+            Credential::hydrate(
+                LOGIN_USERNAME,
+                ids::UserId::parse(CANON_USER)?,
+                tenant,
+                secure::PasswordHash::for_test(secure::RawPassword::new(PASSWORD.to_owned()))?,
+                1,
+            ),
+        )
+        .await?;
+
+    let vault = VaultRuntimeDeps::new(
+        VaultSecretResolver::new_allow_http(
+            reqwest::Client::new(),
+            vault_uri.clone(),
+            "test-token",
+            Duration::from_secs(5),
+            unused_tenant_store_allowlist()?,
+        )?,
+        VaultKeyProvider::new_allow_http(
+            reqwest::Client::new(),
+            vault_uri.clone(),
+            "test-token",
+            "transit",
+            Duration::from_secs(5),
+        )?,
+    );
+    let redis_fixture = testkit::env_or_redis().await?;
+    let redis = runtime::test_support::build_redis_runtime_deps_from_values(
+        redis_fixture.url().to_string(),
+        Some("true"),
+    )
+    .await?;
+    let s3 = build_s3_runtime_deps_from_values(
+        "http://127.0.0.1:1".to_string(),
+        "rss-test-bucket".to_string(),
+        "access-key".to_string(),
+        "secret-key".to_string(),
+        true,
+        true,
+    )?;
+    let deps = build_shared_runtime_deps(
+        test_password_blocklist(),
+        pg.clone(),
+        redis,
+        s3,
+        vault,
+        identity_signer(&vault_uri)?,
+        diport::KeyName::try_new("settings-config")?,
+        noop_domain_transport(),
+    );
+
+    let mut binding_a = vec![wire_identity_with(&deps, identity_test_values())?];
+    let (mut registry_a, _) = bootstrap::compose_bindings(&mut binding_a)?;
+    let router_a = finalize_rss_listener(
+        &mut registry_a,
+        Arc::new(test_provider()),
+        runtime::test_support::access_grant_validation_service(
+            pg.for_domain::<caps::Identity>().auth_grant_validator(),
+        ),
+        httpserve::AuditSinkHandle::new(TracingAuthAuditSink),
+        Arc::new(SystemClock),
+        assembly_schema::AssemblyListenerKind::Primary,
+    )?
+    .into_router_for_test();
+
+    let mut binding_b = vec![wire_identity_with(&deps, identity_test_values())?];
+    let (mut registry_b, _) = bootstrap::compose_bindings(&mut binding_b)?;
+    let router_b = finalize_rss_listener(
+        &mut registry_b,
+        Arc::new(test_provider()),
+        runtime::test_support::access_grant_validation_service(
+            pg.for_domain::<caps::Identity>().auth_grant_validator(),
+        ),
+        httpserve::AuditSinkHandle::new(TracingAuthAuditSink),
+        Arc::new(SystemClock),
+        assembly_schema::AssemblyListenerKind::Primary,
+    )?
+    .into_router_for_test();
+
+    let initial = login_bundle(&router_a, LOGIN_USERNAME).await?;
+    let presented = initial["data"]["refreshToken"]
+        .as_str()
+        .ok_or("login response missing data.refreshToken")?
+        .to_owned();
+    let facts_before = outbox_topic_count(
+        &observation_pool,
+        "identity",
+        generated::event::identity_v1::security_event::TOPIC,
+    )
+    .await?;
+    let body = serde_json::json!({ "refreshToken": presented }).to_string();
+    let request = |body: String| {
+        Request::builder()
+            .method(Method::POST)
+            .uri(REFRESH_SPEC.route.path())
+            .header(header::CONTENT_TYPE, "application/json")
+            .header("X-Tenant-ID", CANON_TENANT)
+            .body(Body::from(body))
+    };
+    let (response_a, response_b) = tokio::join!(
+        router_a.clone().oneshot(request(body.clone())?),
+        router_b.clone().oneshot(request(body)?),
+    );
+    let response_a = response_a?;
+    let response_b = response_b?;
+    let statuses = [response_a.status(), response_b.status()];
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|status| **status == StatusCode::CREATED)
+            .count(),
+        1,
+        "two independent routers must release at most one rotated bearer; statuses={statuses:?}"
+    );
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|status| **status == StatusCode::UNAUTHORIZED)
+            .count(),
+        1,
+        "the CAS loser must be an indistinguishable replay rejection; statuses={statuses:?}"
+    );
+    let winning_response = if response_a.status() == StatusCode::CREATED {
+        response_a
+    } else {
+        response_b
+    };
+    let winning_body = axum::body::to_bytes(winning_response.into_body(), usize::MAX).await?;
+    let winning_json: serde_json::Value = serde_json::from_slice(&winning_body)?;
+    let winning_access = winning_json["data"]["accessToken"]
+        .as_str()
+        .ok_or("winning refresh response missing data.accessToken")?
+        .to_owned();
+
+    let (grant_status, close_reason, family_count, family_closed) =
+        refresh_family_security_snapshot(&observation_pool, &presented).await?;
+    assert_eq!(grant_status, "compromised");
+    assert_eq!(close_reason.as_deref(), Some("refresh_reuse_detected"));
+    assert_eq!(family_count, 2, "winner must persist exactly one child");
+    assert!(
+        family_closed,
+        "the whole grant-bound refresh family must be revoked and fenced"
+    );
+    assert_eq!(
+        outbox_topic_count(
+            &observation_pool,
+            "identity",
+            generated::event::identity_v1::security_event::TOPIC,
+        )
+        .await?,
+        facts_before + 1,
+        "refresh reuse closure must append exactly one identity.security-event"
+    );
+
+    let fenced = router_a
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(format!("{}?limit=20", ROLES_LIST_SPEC.route.path()))
+                .header(header::AUTHORIZATION, format!("Bearer {winning_access}"))
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(
+        fenced.status(),
+        StatusCode::UNAUTHORIZED,
+        "the winner access token must be rejected by the real durable grant validator after reuse compromises its grant"
+    );
 
     Ok(())
 }

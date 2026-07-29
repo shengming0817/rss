@@ -10,14 +10,11 @@
 //! INVARIANT: PG-LOCALTX-SETTLEMENT-01 { level = "Hard", exec = "native-compile", source = "code", native = "opaque sum type; pub(super) mint under cotx; run_pg_tx_retry consumes LocalTxAttempt only" }
 //! INVARIANT: PG-LOCALTX-QUARANTINE-TYPE-01 { level = "Hard", exec = "native-compile", source = "code", native = "private armed RAII lease borrow-splits its PoolConnection transaction and closed quarantine stage into LocalTxTransaction; only that wrapper's consuming commit/rollback ACK methods can disarm the originating lease" }
 
-#[cfg(any(
-    test,
-    feature = "domain-settings",
-    feature = "domain-identity",
-    feature = "domain-audit"
-))]
+#[cfg(any(test, feature = "domain-settings", feature = "domain-audit"))]
+use consistency::LocalTxDeadlineStage;
+use consistency::LocalTxFinalStatus;
+#[cfg(any(test, feature = "domain-settings", feature = "domain-audit"))]
 use consistency::TxRetryClass;
-use consistency::{LocalTxDeadlineStage, LocalTxFinalStatus};
 use sqlx::{Acquire, PgPool, Postgres, Transaction, pool::PoolConnection};
 
 use crate::tx_retry::{
@@ -59,6 +56,7 @@ impl LocalTxDeadlineEvidence {
         Self::None
     }
 
+    #[cfg(any(test, feature = "domain-settings", feature = "domain-audit"))]
     const fn stages(self) -> [Option<LocalTxDeadlineStage>; 2] {
         match self {
             Self::None => [None, None],
@@ -409,11 +407,7 @@ impl<T, E> LocalTxAttempt<T, E> {
     }
 
     /// Consume settlement evidence at the bounded retry boundary.
-    #[cfg(any(
-        feature = "domain-settings",
-        feature = "domain-identity",
-        feature = "domain-audit"
-    ))]
+    #[cfg(any(feature = "domain-settings", feature = "domain-audit"))]
     pub(crate) fn into_retry_result(
         self,
         classify: impl FnOnce(&E) -> TxRetryClass,
@@ -444,11 +438,7 @@ impl<T, E> LocalTxAttempt<T, E> {
 }
 
 /// Failure shape consumed only by the generic retry engine.
-#[cfg(any(
-    feature = "domain-settings",
-    feature = "domain-identity",
-    feature = "domain-audit"
-))]
+#[cfg(any(feature = "domain-settings", feature = "domain-audit"))]
 #[derive(Debug)]
 pub(crate) struct LocalTxRetryError<E> {
     error: E,
@@ -456,11 +446,7 @@ pub(crate) struct LocalTxRetryError<E> {
     deadline: LocalTxDeadlineEvidence,
 }
 
-#[cfg(any(
-    feature = "domain-settings",
-    feature = "domain-identity",
-    feature = "domain-audit"
-))]
+#[cfg(any(feature = "domain-settings", feature = "domain-audit"))]
 impl<E> LocalTxRetryError<E> {
     /// Settlement-safe retry class.
     pub(crate) fn class(&self) -> TxRetryClass {

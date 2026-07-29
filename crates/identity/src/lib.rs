@@ -54,7 +54,7 @@ pub use domain::{
     CredentialSecurityEvent, CredentialSecurityInitiator, CredentialSecurityReceipt,
     CredentialSecurityTargetKind, CredentialSecurityTargetRef, GrantCredentialSecurityCommand,
     LogoutAllCommand, LogoutCurrentCommand, PasswordChangeCommand, PasswordChangeCommandError,
-    ReactivateAccountCommand, RefreshRotationOutcome,
+    ReactivateAccountCommand,
 };
 pub use ports::AuthGrantProvider;
 
@@ -104,6 +104,7 @@ pub mod test_support {
     }
 
     /// Construct opaque current-grant evidence for downstream integration tests.
+    #[allow(clippy::expect_used)]
     pub fn current_auth_grant(
         grant_id: &str,
         user_id: ids::UserId,
@@ -292,6 +293,40 @@ pub mod test_support {
                 issued_at,
             )
             .expect("test rotation must satisfy source binding and time invariants")
+    }
+
+    /// Build a sealed rotation command for downstream adapter conformance tests.
+    #[allow(clippy::expect_used)]
+    pub fn refresh_rotation_command(
+        source: RefreshTokenRecord,
+        grant: AuthGrant,
+        rotation: crate::ports::RefreshRotation,
+        occurred_at: SystemTime,
+    ) -> crate::ports::RefreshExecutionCommand {
+        let account = AccountSecurityState::try_from(AccountSecuritySnapshot {
+            tenant: source.tenant(),
+            user_id: source.user_id(),
+            status: AccountStatus::Active,
+            authn_epoch: source.issuance_epoch().get(),
+            version: 1,
+            status_changed_at: occurred_at,
+            updated_at: occurred_at,
+        })
+        .expect("test account observation must be valid")
+        .try_into_active()
+        .expect("test account observation must be active");
+        crate::ports::RefreshExecutionCommand::rotate(source, grant, account, rotation, occurred_at)
+            .expect("test refresh rotation command must preserve exact binding")
+    }
+
+    /// Build a sealed reuse-containment command for downstream adapter conformance tests.
+    #[allow(clippy::expect_used)]
+    pub fn refresh_reuse_command(
+        source: RefreshTokenRecord,
+        occurred_at: SystemTime,
+    ) -> crate::ports::RefreshExecutionCommand {
+        crate::ports::RefreshExecutionCommand::contain_reuse(source, occurred_at)
+            .expect("test refresh reuse command requires non-active evidence")
     }
 
     /// Build the generated `identity.session-created` fact carried by a login-grant mutation.

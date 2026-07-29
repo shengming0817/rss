@@ -1,11 +1,10 @@
 //! PostgreSQL authentication-grant lifecycle.
 //!
 //! Login persists the grant root, initial refresh record and session-created outbox fact through
-//! one [`PgTenantWritePool::producer_tx`]. Closing a grant revokes every bound refresh row before
-//! changing root status, which is also required by the database composite FK/CHECK.
+//! one [`PgTenantWritePool::producer_tx`]. Terminal security mutations are exclusively owned by
+//! [`crate::PgIdentitySecurityLifecycle`].
 //!
 //! INVARIANT: AUTH-GRANT-LOGIN-COTX-01 { level = "Hard", exec = "native-compile", source = "code", native = "combined port method plus provider-owned transaction" }.
-//! INVARIANT: AUTH-GRANT-CLOSE-COTX-01 { level = "Hard", exec = "native-compile", source = "code", native = "sealed terminal mutation plus provider-owned transaction" }.
 //!
 //! ref: launchbadge/sqlx sqlx-core/src/transaction.rs@main
 
@@ -18,21 +17,18 @@ use authn::{
 use consistency::EventEntry;
 use diport::{Clock, OutboxEmitError, OutboxEnvelopeParts};
 use identity::ports::{
-    AuthGrantCloseCommand, AuthGrantLifecycle, IdentityError, LoginGrantMutation, RefreshStatus,
-    RefreshTokenRecord, SESSION_CREATED_CONTRACT, TenantRepoScope,
+    AuthGrantLifecycle, IdentityError, LoginGrantMutation, RefreshStatus, RefreshTokenRecord,
+    SESSION_CREATED_CONTRACT, TenantRepoScope,
 };
 use sqlx::Row;
 
 #[cfg(all(test, feature = "integration"))]
-use std::collections::HashMap;
-#[cfg(all(test, feature = "integration"))]
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use crate::cotx::{PgTenantReadPool, PgTenantWritePool, ProducerTxOutcome};
 use crate::outbox::{OutboxEnvelope, epoch_secs_to_time, metadata_with_ambient, unix_secs};
 use crate::pool::{VerifiedPgReadStore, VerifiedPgWriteStore};
 use crate::projection_events::ProjectionWriteRegistry;
-use crate::tx_retry::{classify_identity_error, run_pg_localtx_retry};
 
 #[cfg(all(test, feature = "integration"))]
 use crate::PgStore;
@@ -45,8 +41,6 @@ pub struct PgAuthGrantLifecycle {
     login_fault: Option<(String, AuthGrantLoginFault)>,
     #[cfg(all(test, feature = "integration"))]
     login_lock_gate: Option<AuthGrantLoginLockGate>,
-    #[cfg(all(test, feature = "integration"))]
-    close_faults: Arc<Mutex<AuthGrantCloseFaultState>>,
 }
 
 #[cfg(all(test, feature = "integration"))]
@@ -84,51 +78,6 @@ impl AuthGrantLoginLockGate {
     }
 }
 
-#[cfg(all(test, feature = "integration"))]
-#[derive(Clone, Copy)]
-#[allow(dead_code, reason = "refresh-replay fault seam")]
-pub(crate) enum AuthGrantCloseFault {
-    TransientBeforeWrite,
-    TransientAfterWrite,
-    Permanent,
-    CommitUnknown,
-    RollbackFailed,
-}
-
-#[cfg(all(test, feature = "integration"))]
-#[derive(Clone, Copy)]
-struct AuthGrantCloseFaultPlan {
-    fault: AuthGrantCloseFault,
-    remaining: usize,
-}
-
-#[cfg(all(test, feature = "integration"))]
-#[derive(Default)]
-struct AuthGrantCloseFaultState {
-    plans: HashMap<String, AuthGrantCloseFaultPlan>,
-    attempts: HashMap<String, usize>,
-}
-
-#[cfg(all(test, feature = "integration"))]
-#[allow(dead_code, reason = "refresh-replay fault seam")]
-pub(crate) struct AuthGrantCloseAttemptProbe {
-    state: Arc<Mutex<AuthGrantCloseFaultState>>,
-}
-
-#[cfg(all(test, feature = "integration"))]
-#[allow(dead_code, reason = "refresh-replay fault seam")]
-impl AuthGrantCloseAttemptProbe {
-    pub(crate) fn attempts(&self, grant_id: &str) -> usize {
-        self.state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .attempts
-            .get(grant_id)
-            .copied()
-            .unwrap_or_default()
-    }
-}
-
 impl PgAuthGrantLifecycle {
     #[cfg(all(test, feature = "integration"))]
     pub(crate) fn new(store: &PgStore, clock: Box<dyn Clock>) -> Self {
@@ -138,7 +87,6 @@ impl PgAuthGrantLifecycle {
             clock,
             login_fault: None,
             login_lock_gate: None,
-            close_faults: Arc::new(Mutex::new(AuthGrantCloseFaultState::default())),
         }
     }
 
@@ -156,8 +104,6 @@ impl PgAuthGrantLifecycle {
             login_fault: None,
             #[cfg(all(test, feature = "integration"))]
             login_lock_gate: None,
-            #[cfg(all(test, feature = "integration"))]
-            close_faults: Arc::new(Mutex::new(AuthGrantCloseFaultState::default())),
         }
     }
 
@@ -172,59 +118,6 @@ impl PgAuthGrantLifecycle {
         self.login_lock_gate = Some(gate);
         self
     }
-
-    #[cfg(all(test, feature = "integration"))]
-    #[allow(dead_code, reason = "refresh-replay fault seam")]
-    pub(crate) fn with_close_fault(
-        self,
-        grant_id: &str,
-        fault: AuthGrantCloseFault,
-        remaining: usize,
-    ) -> Self {
-        assert!(remaining > 0, "fault plan must affect at least one attempt");
-        self.close_faults
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .plans
-            .insert(
-                grant_id.to_owned(),
-                AuthGrantCloseFaultPlan { fault, remaining },
-            );
-        self
-    }
-
-    #[cfg(all(test, feature = "integration"))]
-    #[allow(dead_code, reason = "refresh-replay fault seam")]
-    pub(crate) fn close_attempt_probe(&self) -> AuthGrantCloseAttemptProbe {
-        AuthGrantCloseAttemptProbe {
-            state: Arc::clone(&self.close_faults),
-        }
-    }
-}
-
-#[cfg(all(test, feature = "integration"))]
-fn record_close_attempt(state: &Mutex<AuthGrantCloseFaultState>, grant_id: &str) {
-    let mut state = state
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    *state.attempts.entry(grant_id.to_owned()).or_default() += 1;
-}
-
-#[cfg(all(test, feature = "integration"))]
-fn take_close_fault(
-    state: &Mutex<AuthGrantCloseFaultState>,
-    grant_id: &str,
-) -> Option<AuthGrantCloseFault> {
-    let mut state = state
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let plan = state.plans.get_mut(grant_id)?;
-    let fault = plan.fault;
-    plan.remaining -= 1;
-    if plan.remaining == 0 {
-        state.plans.remove(grant_id);
-    }
-    Some(fault)
 }
 
 impl AuthGrantLifecycle for PgAuthGrantLifecycle {
@@ -410,93 +303,6 @@ impl AuthGrantLifecycle for PgAuthGrantLifecycle {
         .map(Some)
         .map_err(|_| corrupt("corrupt auth_grants state"))
     }
-
-    async fn close(
-        &self,
-        scope: TenantRepoScope,
-        command: AuthGrantCloseCommand,
-    ) -> Result<(), IdentityError> {
-        let (mutation, observation) = command.into_parts();
-        let (expected, next) = mutation.into_parts();
-        if next.tenant() != scope.tenant() || next.status() == AuthGrantStatus::Active {
-            return Err(corrupt("auth grant close scope or status mismatch"));
-        }
-        let close_row = GrantCloseCas::try_from((&expected, &next))?;
-        #[cfg(all(test, feature = "integration"))]
-        let grant_id = close_row.grant_id.clone();
-        #[cfg(all(test, feature = "integration"))]
-        let close_faults = Arc::clone(&self.close_faults);
-        run_pg_localtx_retry(
-            observation,
-            |_attempt, deadline| {
-                let close_row = close_row.clone();
-                #[cfg(all(test, feature = "integration"))]
-                let grant_id = grant_id.clone();
-                #[cfg(all(test, feature = "integration"))]
-                let close_faults = Arc::clone(&close_faults);
-                #[cfg(all(test, feature = "integration"))]
-                record_close_attempt(&close_faults, &grant_id);
-                async move {
-                    self.write_pool
-                        .retry_write(
-                            scope,
-                            deadline,
-                            move |tx| {
-                                Box::pin(async move {
-                                    #[cfg(all(test, feature = "integration"))]
-                                    let fault = take_close_fault(&close_faults, &grant_id);
-                                    #[cfg(all(test, feature = "integration"))]
-                                    if matches!(
-                                        fault,
-                                        Some(AuthGrantCloseFault::TransientBeforeWrite)
-                                    ) {
-                                        return Err(storage(sqlx::Error::PoolTimedOut));
-                                    }
-                                    let applied = apply_grant_close_cas(tx.conn(), &close_row)
-                                        .await
-                                        .map_err(storage)?;
-                                    if !applied {
-                                        return Err(IdentityError::VersionConflict);
-                                    }
-                                    #[cfg(all(test, feature = "integration"))]
-                                    if let Some(fault) = fault {
-                                        match fault {
-                                            AuthGrantCloseFault::TransientBeforeWrite => {}
-                                            AuthGrantCloseFault::TransientAfterWrite => {
-                                                return Err(storage(sqlx::Error::PoolTimedOut));
-                                            }
-                                            AuthGrantCloseFault::Permanent => {
-                                                return Err(IdentityError::Storage(Box::new(
-                                                    std::io::Error::other(
-                                                        "injected AuthGrant close failure",
-                                                    ),
-                                                )));
-                                            }
-                                            AuthGrantCloseFault::CommitUnknown => {
-                                                tx.inject_commit_unknown_after_commit()
-                                                    .await
-                                                    .map_err(storage)?;
-                                            }
-                                            AuthGrantCloseFault::RollbackFailed => {
-                                                tx.inject_rollback_failed_after_rollback()
-                                                    .await
-                                                    .map_err(storage)?;
-                                                return Err(storage(sqlx::Error::PoolTimedOut));
-                                            }
-                                        }
-                                    }
-                                    Ok(())
-                                })
-                            },
-                            storage,
-                        )
-                        .await
-                }
-            },
-            classify_identity_error,
-        )
-        .await
-    }
 }
 
 fn validate_login_binding(
@@ -680,6 +486,21 @@ pub(crate) async fn apply_grant_close_cas(
     if account_locked.is_none() {
         return Ok(false);
     }
+
+    sqlx::query(
+        "SELECT id FROM refresh_tokens \
+         WHERE tenant_id = $1::uuid \
+           AND auth_grant_id = $2 \
+           AND user_id = $3::uuid \
+           AND authn_epoch_at_issue = $4 \
+         ORDER BY id FOR UPDATE",
+    )
+    .bind(&close.tenant_uuid)
+    .bind(&close.grant_id)
+    .bind(&close.user_id)
+    .bind(close.epoch)
+    .fetch_all(&mut *conn)
+    .await?;
 
     let closed: Option<String> = sqlx::query_scalar(
         r#"

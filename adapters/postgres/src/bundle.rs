@@ -719,7 +719,7 @@ impl PgRuntimeHandle {
             stores: Arc::clone(&self.stores),
             audit_admin_store: self.audit_admin_store.clone(),
             projection_registry: self.projection_registry,
-            #[cfg(feature = "journey-fault-support")]
+            #[cfg(any(feature = "journey-fault-support", feature = "test-support"))]
             identity_security_start_barrier: None,
             _marker: PhantomData,
         }
@@ -1120,7 +1120,7 @@ pub enum MaintenanceAuditOutcome<'a> {
 use postgres::{PgDomainDeps, caps};
 fn bad(d: PgDomainDeps<caps::Settings>) {
     // E0599：`auth_grant_provider` 不在 `PgDomainDeps<caps::Settings>` 上（仅 identity 句柄有）。
-    let _ = d.auth_grant_provider(unimplemented!());
+    let _ = d.auth_grant_provider(unimplemented!(), unimplemented!());
 }
 ```
 "#
@@ -1140,8 +1140,12 @@ fn settings_ok(
     // Arc：单一 clock 经 settings_bundle 扇出到 read/write 两个 config 实例（见 settings_bundle）。
     let _ = d.settings_bundle(clock, protections);
 }
-fn identity_ok(d: PgDomainDeps<caps::Identity>, clock: Box<dyn diport::Clock>) {
-    let _ = d.auth_grant_provider(clock);
+fn identity_ok(
+    d: PgDomainDeps<caps::Identity>,
+    clock: Box<dyn diport::Clock>,
+    pseudonym_keys: std::sync::Arc<secure::PseudonymKeyRing>,
+) {
+    let _ = d.auth_grant_provider(clock, pseudonym_keys);
 }
 ```
 "#
@@ -1150,7 +1154,7 @@ pub struct PgDomainDeps<D: PgDomain> {
     stores: Arc<PgRuntimeStores>,
     audit_admin_store: Option<VerifiedPgAuditAdminStore>,
     projection_registry: ProjectionWriteRegistry,
-    #[cfg(feature = "journey-fault-support")]
+    #[cfg(any(feature = "journey-fault-support", feature = "test-support"))]
     identity_security_start_barrier: Option<Arc<tokio::sync::Barrier>>,
     _marker: PhantomData<D>,
 }
@@ -1162,7 +1166,7 @@ impl<D: PgDomain> Clone for PgDomainDeps<D> {
             stores: Arc::clone(&self.stores),
             audit_admin_store: self.audit_admin_store.clone(),
             projection_registry: self.projection_registry,
-            #[cfg(feature = "journey-fault-support")]
+            #[cfg(any(feature = "journey-fault-support", feature = "test-support"))]
             identity_security_start_barrier: self.identity_security_start_barrier.clone(),
             _marker: PhantomData,
         }
@@ -1322,7 +1326,7 @@ pub fn identity_pseudonym_keys_for_test() -> std::sync::Arc<secure::PseudonymKey
 #[cfg(feature = "domain-identity")]
 impl PgDomainDeps<caps::Identity> {
     /// Inject a deterministic transaction-start rendezvous for the HTTP concurrency journey.
-    #[cfg(feature = "journey-fault-support")]
+    #[cfg(any(feature = "journey-fault-support", feature = "test-support"))]
     #[must_use]
     pub fn with_identity_security_start_barrier_for_test(
         mut self,
@@ -1340,7 +1344,21 @@ impl PgDomainDeps<caps::Identity> {
 
     /// Single-owner AuthGrant/refresh provider used by login composition.
     #[must_use]
-    pub fn auth_grant_provider(&self, clock: Box<dyn Clock>) -> PgAuthGrantProvider {
+    pub fn auth_grant_provider(
+        &self,
+        clock: Box<dyn Clock>,
+        pseudonym_keys: std::sync::Arc<secure::PseudonymKeyRing>,
+    ) -> PgAuthGrantProvider {
+        let security = PgIdentitySecurityLifecycle::new(
+            self.stores.writer_capability(),
+            self.projection_registry,
+            pseudonym_keys,
+        );
+        #[cfg(any(feature = "journey-fault-support", feature = "test-support"))]
+        let security = match &self.identity_security_start_barrier {
+            Some(barrier) => security.with_start_barrier(Arc::clone(barrier)),
+            None => security,
+        };
         PgAuthGrantProvider::new(
             PgAuthGrantLifecycle::new_with_projection_registry(
                 self.stores.reader_capability(),
@@ -1348,10 +1366,8 @@ impl PgDomainDeps<caps::Identity> {
                 clock,
                 self.projection_registry,
             ),
-            PgRefreshTokenStore::new(
-                self.stores.reader_capability(),
-                self.stores.writer_capability(),
-            ),
+            PgRefreshTokenStore::new(self.stores.reader_capability()),
+            security,
         )
     }
 
@@ -1389,37 +1405,12 @@ impl PgDomainDeps<caps::Identity> {
         crate::PgAccountSecurityRepo::new(self.stores.reader_capability())
     }
 
-    /// Draft credential-security projection + OutboxFact lifecycle.
-    ///
-    /// This constructor does not wire a production producer; callers must already hold the
-    /// domain's sealed command.
-    #[must_use]
-    pub fn identity_security_lifecycle(
-        &self,
-        pseudonym_keys: std::sync::Arc<secure::PseudonymKeyRing>,
-    ) -> PgIdentitySecurityLifecycle {
-        let lifecycle = PgIdentitySecurityLifecycle::new(
-            self.stores.writer_capability(),
-            self.projection_registry,
-            pseudonym_keys,
-        );
-        #[cfg(feature = "journey-fault-support")]
-        if let Some(barrier) = &self.identity_security_start_barrier {
-            return lifecycle.with_start_barrier(Arc::clone(barrier));
-        }
-        lifecycle
-    }
-
     /// Narrow plain-write account reactivation capability.
     #[must_use]
-    pub fn account_reactivation_lifecycle(
-        &self,
-        pseudonym_keys: std::sync::Arc<secure::PseudonymKeyRing>,
-    ) -> PgIdentitySecurityLifecycle {
-        PgIdentitySecurityLifecycle::new(
+    pub fn account_reactivation_lifecycle(&self) -> crate::PgAccountReactivationLifecycle {
+        crate::PgAccountReactivationLifecycle::new(
             self.stores.writer_capability(),
             self.projection_registry,
-            pseudonym_keys,
         )
     }
 
@@ -1470,28 +1461,6 @@ impl PgDomainDeps<caps::Identity> {
             self.stores.writer_capability(),
             clock,
             self.projection_registry,
-        )
-    }
-
-    /// Journey-only refresh store that loses the commit acknowledgement for one named token
-    /// rotation after PostgreSQL accepts the commit.
-    ///
-    /// The narrow seam is absent from default builds and exposes neither generic fault selection
-    /// nor raw transaction/pool access.
-    #[cfg(feature = "journey-fault-support")]
-    #[must_use]
-    pub fn refresh_token_store_with_commit_unknown_once(
-        &self,
-        old_id: &str,
-    ) -> PgRefreshTokenStore {
-        PgRefreshTokenStore::new(
-            self.stores.reader_capability(),
-            self.stores.writer_capability(),
-        )
-        .with_rotation_fault(
-            old_id,
-            crate::refresh_token_store::RefreshRotationFault::CommitUnknown,
-            1,
         )
     }
 }
@@ -2077,7 +2046,7 @@ mod tests {
     #[tokio::test]
     async fn identity_accessors_construct() {
         let i: PgDomainDeps<caps::Identity> = deps().handle().for_domain();
-        let _ = i.auth_grant_provider(Box::new(EpochClock));
+        let _ = i.auth_grant_provider(Box::new(EpochClock), identity_pseudonym_keys_for_test());
         let _ = i.outbox(
             DynPublisher::new_box(StubPublisher),
             relay_budget(),

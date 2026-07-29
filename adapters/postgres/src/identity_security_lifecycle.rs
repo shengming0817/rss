@@ -12,13 +12,19 @@
 //! ref: launchbadge/sqlx sqlx-core/src/transaction.rs@main
 //! ref: ory/fosite handler/oauth2/flow_refresh.go@master
 
-use authn::{AuthGrant, AuthGrantCloseMutation, AuthGrantStatus};
+use authn::{
+    AuthGrant, AuthGrantCloseMutation, AuthGrantStatus, CredentialSecurityEventKind,
+    GrantSecurityEventKind,
+};
 use identity::ports::{
     AccountReactivationLifecycle, AccountSecurityMutation, AccountSecurityState, Credential,
     CredentialSecurityCommand, CredentialSecurityEmissionParts, CredentialSecurityEvent,
     CredentialSecurityReceipt, IdentityError, IdentitySecurityLifecycle,
-    PendingCredentialSecurityCommit, SECURITY_EVENT_CONTRACT, SECURITY_EVENT_FACT, TenantRepoScope,
+    PendingCredentialSecurityCommit, PendingRefreshRotationCommit, RefreshExecutionCommand,
+    RefreshExecutionOutcome, RefreshRotation, RefreshStatus, RefreshTokenRecord,
+    SECURITY_EVENT_CONTRACT, SECURITY_EVENT_FACT, TenantRepoScope,
 };
+use sqlx::Row;
 
 use crate::account_security_repo::status_to_db;
 use crate::auth_grant_lifecycle::{GrantCloseCas, apply_grant_close_cas};
@@ -33,17 +39,56 @@ pub struct PgIdentitySecurityLifecycle {
     pseudonym_keys: std::sync::Arc<secure::PseudonymKeyRing>,
     #[cfg(all(test, feature = "integration"))]
     fault: Option<IdentitySecurityFault>,
-    #[cfg(any(all(test, feature = "integration"), feature = "journey-fault-support"))]
+    #[cfg(any(
+        all(test, feature = "integration"),
+        feature = "journey-fault-support",
+        feature = "test-support"
+    ))]
     start_barrier: Option<std::sync::Arc<IdentitySecurityStartBarrier>>,
 }
 
-#[cfg(any(all(test, feature = "integration"), feature = "journey-fault-support"))]
+/// Narrow PostgreSQL account-reactivation writer.
+///
+/// This type intentionally does not implement [`IdentitySecurityLifecycle`]: production
+/// composition can obtain the refresh/security writer only from the single AuthGrant provider,
+/// while account reactivation receives only its plain-write capability.
+pub struct PgAccountReactivationLifecycle {
+    write_pool: PgTenantWritePool,
+}
+
+impl PgAccountReactivationLifecycle {
+    pub(crate) fn new(
+        writer: &VerifiedPgWriteStore,
+        projection_registry: ProjectionWriteRegistry,
+    ) -> Self {
+        Self {
+            write_pool: PgTenantWritePool::with_projection_registry(writer, projection_registry),
+        }
+    }
+
+    #[cfg(all(test, feature = "integration"))]
+    pub(crate) fn from_unverified_for_test(store: &crate::PgStore) -> Self {
+        Self {
+            write_pool: PgTenantWritePool::from_unverified_for_test(store),
+        }
+    }
+}
+
+#[cfg(any(
+    all(test, feature = "integration"),
+    feature = "journey-fault-support",
+    feature = "test-support"
+))]
 struct IdentitySecurityStartBarrier {
     barrier: std::sync::Arc<tokio::sync::Barrier>,
     remaining: std::sync::atomic::AtomicU8,
 }
 
-#[cfg(any(all(test, feature = "integration"), feature = "journey-fault-support"))]
+#[cfg(any(
+    all(test, feature = "integration"),
+    feature = "journey-fault-support",
+    feature = "test-support"
+))]
 impl IdentitySecurityStartBarrier {
     fn two_requests(barrier: std::sync::Arc<tokio::sync::Barrier>) -> Self {
         Self {
@@ -91,7 +136,11 @@ impl PgIdentitySecurityLifecycle {
             pseudonym_keys,
             #[cfg(all(test, feature = "integration"))]
             fault: None,
-            #[cfg(any(all(test, feature = "integration"), feature = "journey-fault-support"))]
+            #[cfg(any(
+                all(test, feature = "integration"),
+                feature = "journey-fault-support",
+                feature = "test-support"
+            ))]
             start_barrier: None,
         }
     }
@@ -112,7 +161,11 @@ impl PgIdentitySecurityLifecycle {
         self
     }
 
-    #[cfg(any(all(test, feature = "integration"), feature = "journey-fault-support"))]
+    #[cfg(any(
+        all(test, feature = "integration"),
+        feature = "journey-fault-support",
+        feature = "test-support"
+    ))]
     pub(crate) fn with_start_barrier(
         mut self,
         barrier: std::sync::Arc<tokio::sync::Barrier>,
@@ -144,6 +197,126 @@ fn test_pseudonym_keys() -> std::sync::Arc<secure::PseudonymKeyRing> {
 }
 
 impl IdentitySecurityLifecycle for PgIdentitySecurityLifecycle {
+    async fn execute_refresh(
+        &self,
+        receipt: identity::ports::RefreshProducerReceipt,
+        scope: TenantRepoScope,
+        command: RefreshExecutionCommand,
+    ) -> Result<RefreshExecutionOutcome, IdentityError> {
+        let emission = identity::ports::refresh_execution_emission(command, &self.pseudonym_keys)?;
+        let authorization = receipt
+            .authorize(SECURITY_EVENT_FACT, SECURITY_EVENT_CONTRACT)
+            .ok_or_else(|| corrupt("refresh receipt does not authorize security-event"))?;
+        let (command, entry, envelope_parts) = emission.into_parts();
+        let (source, rotation, event, pending) = command.into_parts();
+        validate_refresh_command(scope, &source, rotation.as_ref(), &event)?;
+        let envelope = security_envelope(scope, &event, envelope_parts)?;
+        #[cfg(all(test, feature = "integration"))]
+        let fault = self.fault;
+        #[cfg(not(all(test, feature = "integration")))]
+        let fault = None;
+        #[cfg(any(
+            all(test, feature = "integration"),
+            feature = "journey-fault-support",
+            feature = "test-support"
+        ))]
+        let start_barrier = self.start_barrier.clone();
+
+        metrics::counter!("identity_refresh_producer_attempt_total").increment(1);
+        let (outcome, acknowledgement) = self
+            .write_pool
+            .producer_tx(
+                scope,
+                &entry,
+                &envelope,
+                move |tx| {
+                    Box::pin(async move {
+                        #[cfg(any(
+                            all(test, feature = "integration"),
+                            feature = "journey-fault-support",
+                            feature = "test-support"
+                        ))]
+                        if let Some(start_barrier) = start_barrier {
+                            start_barrier.wait_once().await;
+                        }
+                        let result = apply_refresh_execution(
+                            tx.conn(),
+                            &source,
+                            rotation.as_ref(),
+                            &event,
+                            fault,
+                        )
+                        .await?;
+                        #[cfg(all(test, feature = "integration"))]
+                        let emitted = matches!(result, RefreshMutationResult::ReuseContained(_));
+                        #[cfg(all(test, feature = "integration"))]
+                        if emitted && matches!(fault, Some(IdentitySecurityFault::AfterProjection))
+                        {
+                            tx.inject_failure_after_projection_append()
+                                .await
+                                .map_err(storage)?;
+                        }
+                        #[cfg(all(test, feature = "integration"))]
+                        if emitted && matches!(fault, Some(IdentitySecurityFault::OutboxAppend)) {
+                            sqlx::query(
+                                "ALTER TABLE public.outbox \
+                                 ADD CONSTRAINT refresh_security_outbox_fault \
+                                 CHECK (false) NOT VALID",
+                            )
+                            .execute(tx.conn())
+                            .await
+                            .map_err(storage)?;
+                        }
+                        #[cfg(all(test, feature = "integration"))]
+                        if emitted
+                            && matches!(fault, Some(IdentitySecurityFault::AfterOutboxBeforeCommit))
+                        {
+                            tx.inject_failure_after_outbox_append_before_commit()
+                                .await
+                                .map_err(storage)?;
+                        }
+                        #[cfg(all(test, feature = "integration"))]
+                        if matches!(fault, Some(IdentitySecurityFault::CommitUnknown)) {
+                            tx.inject_commit_unknown_after_commit()
+                                .await
+                                .map_err(storage)?;
+                        }
+                        Ok(match result {
+                            RefreshMutationResult::ReuseContained(durable_mutations) => {
+                                ProducerTxOutcome::Emitted(
+                                    PendingRefreshOutcome::ReuseContained(durable_mutations),
+                                    authorization,
+                                )
+                            }
+                            RefreshMutationResult::Applied => {
+                                ProducerTxOutcome::MutatedWithoutFact(
+                                    PendingRefreshOutcome::Applied(pending, 2),
+                                )
+                            }
+                            RefreshMutationResult::AlreadyContained(durable_mutations) => {
+                                ProducerTxOutcome::MutatedWithoutFact(
+                                    PendingRefreshOutcome::AlreadyContained(durable_mutations),
+                                )
+                            }
+                            RefreshMutationResult::Stale => {
+                                ProducerTxOutcome::MutatedWithoutFact(PendingRefreshOutcome::Stale)
+                            }
+                            RefreshMutationResult::Expired => {
+                                ProducerTxOutcome::MutatedWithoutFact(
+                                    PendingRefreshOutcome::Expired,
+                                )
+                            }
+                        })
+                    })
+                },
+                storage,
+            )
+            .await
+            .into_refresh_commit_result()?;
+        metrics::counter!("identity_refresh_producer_commit_total").increment(1);
+        Ok(outcome.confirm(acknowledgement))
+    }
+
     async fn execute_password_change(
         &self,
         receipt: identity::ports::PasswordChangeProducerReceipt,
@@ -215,7 +388,7 @@ impl IdentitySecurityLifecycle for PgIdentitySecurityLifecycle {
     }
 }
 
-impl AccountReactivationLifecycle for PgIdentitySecurityLifecycle {
+impl AccountReactivationLifecycle for PgAccountReactivationLifecycle {
     async fn execute_reactivation(
         &self,
         scope: TenantRepoScope,
@@ -287,7 +460,11 @@ impl PgIdentitySecurityLifecycle {
         let fault = self.fault;
         #[cfg(not(all(test, feature = "integration")))]
         let fault = None;
-        #[cfg(any(all(test, feature = "integration"), feature = "journey-fault-support"))]
+        #[cfg(any(
+            all(test, feature = "integration"),
+            feature = "journey-fault-support",
+            feature = "test-support"
+        ))]
         let start_barrier = self.start_barrier.clone();
 
         self.write_pool
@@ -299,7 +476,8 @@ impl PgIdentitySecurityLifecycle {
                     Box::pin(async move {
                         #[cfg(any(
                             all(test, feature = "integration"),
-                            feature = "journey-fault-support"
+                            feature = "journey-fault-support",
+                            feature = "test-support"
                         ))]
                         if let Some(start_barrier) = start_barrier {
                             start_barrier.wait_once().await;
@@ -307,9 +485,9 @@ impl PgIdentitySecurityLifecycle {
                         apply_security_mutation(tx.conn(), mutation, fault).await?;
                         #[cfg(all(test, feature = "integration"))]
                         if matches!(fault, Some(IdentitySecurityFault::AfterProjection)) {
-                            return Err(corrupt(
-                                "injected credential security failure after projection",
-                            ));
+                            tx.inject_failure_after_projection_append()
+                                .await
+                                .map_err(storage)?;
                         }
                         #[cfg(all(test, feature = "integration"))]
                         if matches!(fault, Some(IdentitySecurityFault::OutboxAppend)) {
@@ -343,6 +521,389 @@ impl PgIdentitySecurityLifecycle {
             .into_result()
             .map(PendingCredentialSecurityCommit::confirm)
     }
+}
+
+enum RefreshMutationResult {
+    Applied,
+    ReuseContained(u64),
+    AlreadyContained(u64),
+    Stale,
+    Expired,
+}
+
+enum PendingRefreshOutcome {
+    Applied(PendingRefreshRotationCommit, u64),
+    ReuseContained(u64),
+    AlreadyContained(u64),
+    Stale,
+    Expired,
+}
+
+impl PendingRefreshOutcome {
+    fn confirm(
+        self,
+        acknowledgement: identity::ports::RefreshCommitAcknowledgement,
+    ) -> RefreshExecutionOutcome {
+        let durable_mutations = match &self {
+            Self::Applied(_, durable_mutations)
+            | Self::ReuseContained(durable_mutations)
+            | Self::AlreadyContained(durable_mutations) => *durable_mutations,
+            Self::Stale | Self::Expired => 0,
+        };
+        metrics::counter!("identity_refresh_durable_mutations_total").increment(durable_mutations);
+        match self {
+            Self::Applied(pending, _) => {
+                RefreshExecutionOutcome::Applied(pending.confirm(acknowledgement))
+            }
+            Self::ReuseContained(_) => RefreshExecutionOutcome::ReuseContained,
+            Self::AlreadyContained(_) => RefreshExecutionOutcome::AlreadyContained,
+            Self::Stale => RefreshExecutionOutcome::Stale,
+            Self::Expired => RefreshExecutionOutcome::Expired,
+        }
+    }
+}
+
+fn validate_refresh_command(
+    scope: TenantRepoScope,
+    source: &RefreshTokenRecord,
+    rotation: Option<&RefreshRotation>,
+    event: &CredentialSecurityEvent,
+) -> Result<(), IdentityError> {
+    if scope.tenant() != source.tenant()
+        || event.tenant() != source.tenant()
+        || event.user_id() != source.user_id()
+        || event.kind()
+            != CredentialSecurityEventKind::Grant(GrantSecurityEventKind::RefreshReuseDetected)
+    {
+        return Err(corrupt("refresh execution binding mismatch"));
+    }
+    if let Some(rotation) = rotation {
+        let child = rotation.new_record();
+        if rotation.old_id() != source.id()
+            || child.tenant() != source.tenant()
+            || child.auth_grant_id() != source.auth_grant_id()
+            || child.user_id() != source.user_id()
+            || child.issuance_epoch() != source.issuance_epoch()
+            || child.parent_id() != Some(source.id())
+            || child.lineage_id() != source.lineage_id()
+            || child.status() != RefreshStatus::Active
+            || child.auth_grant_status() != AuthGrantStatus::Active
+        {
+            return Err(corrupt("refresh rotation child binding mismatch"));
+        }
+    }
+    Ok(())
+}
+
+fn security_envelope(
+    scope: TenantRepoScope,
+    event: &CredentialSecurityEvent,
+    envelope_parts: diport::OutboxEnvelopeParts,
+) -> Result<OutboxEnvelope, IdentityError> {
+    let (contract, envelope_tenant, subject_id, actor, partition_key, causation_id) =
+        envelope_parts.into_parts();
+    if envelope_tenant != scope.tenant() {
+        return Err(corrupt("credential security envelope tenant mismatch"));
+    }
+    Ok(OutboxEnvelope::new(
+        contract.domain().to_owned(),
+        contract.contract_id().to_owned(),
+        metadata_with_ambient(unix_secs(event.occurred_at()), event.tenant(), contract)
+            .with_subject_id(subject_id)
+            .with_actor(actor),
+    )
+    .with_partition_key_opt(partition_key)
+    .with_causation_id_opt(causation_id))
+}
+
+struct LockedRefreshRow {
+    id: String,
+    user: String,
+    epoch: i64,
+    grant_status: String,
+    token_hash: Vec<u8>,
+    parent: Option<String>,
+    lineage: String,
+    status: String,
+    issued_at_micros: i64,
+    expires_at_micros: i64,
+}
+
+impl LockedRefreshRow {
+    fn from_row(row: sqlx::postgres::PgRow) -> Result<Self, IdentityError> {
+        Ok(Self {
+            id: row.try_get("id").map_err(storage)?,
+            user: row.try_get("user_id").map_err(storage)?,
+            epoch: row.try_get("authn_epoch_at_issue").map_err(storage)?,
+            grant_status: row.try_get("auth_grant_status").map_err(storage)?,
+            token_hash: row.try_get("token_hash").map_err(storage)?,
+            parent: row.try_get("parent_id").map_err(storage)?,
+            lineage: row.try_get("lineage_id").map_err(storage)?,
+            status: row.try_get("status").map_err(storage)?,
+            issued_at_micros: row.try_get("issued_at_micros").map_err(storage)?,
+            expires_at_micros: row.try_get("expires_at_micros").map_err(storage)?,
+        })
+    }
+
+    fn matches_source(&self, source: &RefreshTokenRecord) -> Result<bool, IdentityError> {
+        Ok(self.user == source.user_id().as_uuid().to_string()
+            && self.epoch == persisted_counter(source.issuance_epoch().get(), "refresh epoch")?
+            && self.token_hash.as_slice() == source.token_hash().as_bytes()
+            && self.parent.as_deref() == source.parent_id().map(|id| id.as_str())
+            && self.lineage == source.lineage_id().as_str()
+            && self.issued_at_micros
+                == persisted_time_micros(source.issued_at(), "refresh issued_at")?
+            && self.expires_at_micros
+                == persisted_time_micros(source.expires_at(), "refresh expires_at")?)
+    }
+}
+
+struct LockedGrantRow {
+    user: String,
+    epoch: i64,
+    status: String,
+    expires_at_micros: i64,
+}
+
+async fn apply_refresh_execution(
+    conn: &mut sqlx::PgConnection,
+    source: &RefreshTokenRecord,
+    rotation: Option<&RefreshRotation>,
+    event: &CredentialSecurityEvent,
+    fault: Option<IdentitySecurityFault>,
+) -> Result<RefreshMutationResult, IdentityError> {
+    let tenant = source.tenant().as_uuid().to_string();
+    let user = source.user_id().as_uuid().to_string();
+    let grant_id = source.auth_grant_id().as_str();
+    let expected_epoch = persisted_counter(source.issuance_epoch().get(), "refresh epoch")?;
+
+    let account: Option<(String, i64)> = sqlx::query_as(
+        "SELECT status, authn_epoch FROM account_security_states \
+         WHERE tenant_id = $1::uuid AND user_id = $2::uuid FOR UPDATE",
+    )
+    .bind(&tenant)
+    .bind(&user)
+    .fetch_optional(&mut *conn)
+    .await
+    .map_err(storage)?;
+
+    let family = sqlx::query(
+        "SELECT id::text, user_id::text, authn_epoch_at_issue, auth_grant_status, \
+                token_hash, parent_id::text, lineage_id::text, status, \
+                (extract(epoch from issued_at) * 1000000)::bigint AS issued_at_micros, \
+                (extract(epoch from expires_at) * 1000000)::bigint AS expires_at_micros \
+         FROM refresh_tokens \
+         WHERE tenant_id = $1::uuid AND auth_grant_id = $2 \
+         ORDER BY id FOR UPDATE",
+    )
+    .bind(&tenant)
+    .bind(grant_id)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(storage)?
+    .into_iter()
+    .map(LockedRefreshRow::from_row)
+    .collect::<Result<Vec<_>, _>>()?;
+
+    let grant_row = sqlx::query(
+        "SELECT user_id::text, authn_epoch_at_issue, status, \
+                (extract(epoch from expires_at) * 1000000)::bigint AS expires_at_micros \
+         FROM auth_grants \
+         WHERE tenant_id = $1::uuid AND grant_id = $2 FOR UPDATE",
+    )
+    .bind(&tenant)
+    .bind(grant_id)
+    .fetch_optional(&mut *conn)
+    .await
+    .map_err(storage)?;
+    let Some(grant_row) = grant_row else {
+        return if family.is_empty() {
+            Ok(RefreshMutationResult::Stale)
+        } else {
+            Err(corrupt("refresh family has no AuthGrant root"))
+        };
+    };
+    let grant = LockedGrantRow {
+        user: grant_row.try_get("user_id").map_err(storage)?,
+        epoch: grant_row.try_get("authn_epoch_at_issue").map_err(storage)?,
+        status: grant_row.try_get("status").map_err(storage)?,
+        expires_at_micros: grant_row.try_get("expires_at_micros").map_err(storage)?,
+    };
+    if grant.user != user || grant.epoch != expected_epoch {
+        return Err(corrupt("refresh AuthGrant binding is corrupt"));
+    }
+
+    let database_now_micros: i64 =
+        sqlx::query_scalar("SELECT (extract(epoch from clock_timestamp()) * 1000000)::bigint")
+            .fetch_one(&mut *conn)
+            .await
+            .map_err(storage)?;
+    let Some(presented) = family.iter().find(|row| row.id == source.id().as_str()) else {
+        return Ok(RefreshMutationResult::Stale);
+    };
+    if !presented.matches_source(source)? {
+        return Err(corrupt("refresh source binding is corrupt"));
+    }
+    if family.iter().any(|row| {
+        row.user != user
+            || row.epoch != expected_epoch
+            || row.lineage != source.lineage_id().as_str()
+            || row.grant_status != grant.status
+    }) {
+        return Err(corrupt("refresh family binding is corrupt"));
+    }
+    let mut roots = family
+        .iter()
+        .filter(|row| row.id == row.lineage && row.parent.is_none());
+    let lineage_root = roots
+        .next()
+        .ok_or_else(|| corrupt("refresh family lineage root is missing"))?;
+    if roots.next().is_some() {
+        return Err(corrupt("refresh family has multiple lineage roots"));
+    }
+
+    let authoritative_status = RefreshStatus::from_db_str(&presented.status)
+        .ok_or_else(|| corrupt("refresh source status is corrupt"))?;
+    if authoritative_status != RefreshStatus::Active {
+        return contain_refresh_reuse(
+            conn,
+            &tenant,
+            grant_id,
+            &grant.status,
+            database_now_micros,
+            event,
+            fault,
+        )
+        .await;
+    }
+    let Some(rotation) = rotation else {
+        return Ok(RefreshMutationResult::Stale);
+    };
+    if account
+        .as_ref()
+        .is_none_or(|(status, epoch)| status != "active" || *epoch != expected_epoch)
+        || grant.status != AuthGrantStatus::Active.as_db_str()
+        || presented.grant_status != AuthGrantStatus::Active.as_db_str()
+    {
+        return Ok(RefreshMutationResult::Stale);
+    }
+    let child = rotation.new_record();
+    let child_expires = persisted_time_micros(child.expires_at(), "refresh child expires_at")?;
+    if presented.expires_at_micros <= database_now_micros
+        || lineage_root.expires_at_micros <= database_now_micros
+        || grant.expires_at_micros <= database_now_micros
+        || child_expires > lineage_root.expires_at_micros
+        || child_expires > grant.expires_at_micros
+    {
+        return Ok(RefreshMutationResult::Expired);
+    }
+
+    let consumed = sqlx::query(
+        "UPDATE refresh_tokens SET status = 'consumed' \
+         WHERE tenant_id = $1::uuid AND id = $2::uuid AND status = 'active'",
+    )
+    .bind(&tenant)
+    .bind(source.id().as_str())
+    .execute(&mut *conn)
+    .await
+    .map_err(storage)?;
+    if consumed.rows_affected() != 1 {
+        return Err(corrupt("locked active refresh CAS did not apply"));
+    }
+    insert_rotated_refresh(conn, child).await?;
+    inject_mutation_fault(fault, IdentitySecurityFault::AfterFamily)?;
+    Ok(RefreshMutationResult::Applied)
+}
+
+async fn contain_refresh_reuse(
+    conn: &mut sqlx::PgConnection,
+    tenant: &str,
+    grant_id: &str,
+    grant_status: &str,
+    database_now_micros: i64,
+    _event: &CredentialSecurityEvent,
+    fault: Option<IdentitySecurityFault>,
+) -> Result<RefreshMutationResult, IdentityError> {
+    if grant_status == AuthGrantStatus::Compromised.as_db_str() {
+        let durable_mutations = revoke_exact_refresh_family(conn, tenant, grant_id).await?;
+        inject_mutation_fault(fault, IdentitySecurityFault::AfterFamily)?;
+        return Ok(RefreshMutationResult::AlreadyContained(durable_mutations));
+    }
+    if grant_status != AuthGrantStatus::Active.as_db_str()
+        && grant_status != AuthGrantStatus::Revoked.as_db_str()
+    {
+        return Err(corrupt("refresh AuthGrant status is corrupt"));
+    }
+    let family_mutations = revoke_exact_refresh_family(conn, tenant, grant_id).await?;
+    inject_mutation_fault(fault, IdentitySecurityFault::AfterFamily)?;
+    let changed = sqlx::query(
+        "UPDATE auth_grants \
+         SET status = 'compromised', \
+             closed_at = TIMESTAMPTZ 'epoch' + $3 * INTERVAL '1 microsecond', \
+             close_reason = 'refresh_reuse_detected' \
+         WHERE tenant_id = $1::uuid AND grant_id = $2 \
+           AND status IN ('active', 'revoked')",
+    )
+    .bind(tenant)
+    .bind(grant_id)
+    .bind(database_now_micros)
+    .execute(&mut *conn)
+    .await
+    .map_err(storage)?;
+    if changed.rows_affected() != 1 {
+        return Err(corrupt("locked AuthGrant containment CAS did not apply"));
+    }
+    inject_mutation_fault(fault, IdentitySecurityFault::AfterGrant)?;
+    Ok(RefreshMutationResult::ReuseContained(
+        family_mutations + changed.rows_affected(),
+    ))
+}
+
+async fn revoke_exact_refresh_family(
+    conn: &mut sqlx::PgConnection,
+    tenant: &str,
+    grant_id: &str,
+) -> Result<u64, IdentityError> {
+    let changed = sqlx::query(
+        "UPDATE refresh_tokens SET status = 'revoked' \
+         WHERE tenant_id = $1::uuid AND auth_grant_id = $2 AND status <> 'revoked'",
+    )
+    .bind(tenant)
+    .bind(grant_id)
+    .execute(&mut *conn)
+    .await
+    .map_err(storage)?;
+    Ok(changed.rows_affected())
+}
+
+async fn insert_rotated_refresh(
+    conn: &mut sqlx::PgConnection,
+    record: &RefreshTokenRecord,
+) -> Result<(), IdentityError> {
+    let epoch = persisted_counter(record.issuance_epoch().get(), "refresh child epoch")?;
+    sqlx::query(
+        "INSERT INTO refresh_tokens \
+         (id, tenant_id, auth_grant_id, user_id, authn_epoch_at_issue, \
+          auth_grant_status, token_hash, parent_id, lineage_id, status, issued_at, expires_at) \
+         VALUES ($1::uuid, $2::uuid, $3, $4::uuid, $5, $6, $7, $8::uuid, $9::uuid, $10, \
+                 to_timestamp($11), to_timestamp($12))",
+    )
+    .bind(record.id().as_str())
+    .bind(record.tenant().as_uuid().to_string())
+    .bind(record.auth_grant_id().as_str())
+    .bind(record.user_id().as_uuid().to_string())
+    .bind(epoch)
+    .bind(record.auth_grant_status().as_db_str())
+    .bind(record.token_hash().as_bytes() as &[u8])
+    .bind(record.parent_id().map(|id| id.as_str()))
+    .bind(record.lineage_id().as_str())
+    .bind(record.status().as_db_str())
+    .bind(unix_secs(record.issued_at()))
+    .bind(unix_secs(record.expires_at()))
+    .execute(&mut *conn)
+    .await
+    .map_err(storage)?;
+    Ok(())
 }
 
 struct PreparedSecurityCommand {
@@ -587,6 +1148,21 @@ async fn revoke_refresh_families(
 ) -> Result<(), IdentityError> {
     sqlx::query(
         r#"
+        SELECT refresh.id
+        FROM refresh_tokens AS refresh
+        WHERE refresh.tenant_id = $1::uuid
+          AND refresh.user_id = $2::uuid
+        ORDER BY refresh.auth_grant_id, refresh.id
+        FOR UPDATE
+        "#,
+    )
+    .bind(&state.tenant)
+    .bind(&state.user)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(storage)?;
+    sqlx::query(
+        r#"
         UPDATE refresh_tokens AS refresh
         SET status = 'revoked'
         FROM auth_grants AS root
@@ -614,6 +1190,16 @@ async fn revoke_auth_grants(
     row: &AccountSecurityRow,
 ) -> Result<(), IdentityError> {
     let state = &row.state;
+    sqlx::query(
+        "SELECT grant_id FROM auth_grants \
+         WHERE tenant_id = $1::uuid AND user_id = $2::uuid AND status = 'active' \
+         ORDER BY grant_id FOR UPDATE",
+    )
+    .bind(&state.tenant)
+    .bind(&state.user)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(storage)?;
     sqlx::query(
         r#"
         UPDATE auth_grants

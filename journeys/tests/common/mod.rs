@@ -29,10 +29,10 @@ use identity::ports::{
     LogoutCurrentProducerReceipt, PasswordChangeProducerReceipt, PoliciesCreateProducerReceipt,
     PoliciesDeactivateProducerReceipt, PoliciesUpdateProducerReceipt, Policy, PolicyId,
     PolicyLifecycle, PolicyListResult, PolicyPage, PolicyRepo, PolicyRouteScope, PolicyVersion,
-    ResourceAttributeKey, ResourceAttributeReadRepo, ResourceAttributeResolution,
-    ResourceAttributeResourceId, Role, RoleBinding, RoleBindingLifecycle, RoleBindingReadRepo,
-    RoleId, RoleListResult, RolePage, RoleReadRepo, RolesAssignProducerReceipt,
-    RolesRevokeProducerReceipt, TenantRepoScope,
+    RefreshExecutionCommand, RefreshExecutionOutcome, RefreshProducerReceipt, ResourceAttributeKey,
+    ResourceAttributeReadRepo, ResourceAttributeResolution, ResourceAttributeResourceId, Role,
+    RoleBinding, RoleBindingLifecycle, RoleBindingReadRepo, RoleId, RoleListResult, RolePage,
+    RoleReadRepo, RolesAssignProducerReceipt, RolesRevokeProducerReceipt, TenantRepoScope,
 };
 use identity::{
     AccountSecurityState, AccountStatusSetCommand, CredentialSecurityReceipt,
@@ -554,6 +554,15 @@ impl AccountSecurityReadRepo for FailClosedAccountSecurityReadRepo {
 struct FailClosedIdentitySecurityLifecycle;
 
 impl IdentitySecurityLifecycle for FailClosedIdentitySecurityLifecycle {
+    async fn execute_refresh(
+        &self,
+        _receipt: RefreshProducerReceipt,
+        _scope: TenantRepoScope,
+        _command: RefreshExecutionCommand,
+    ) -> Result<RefreshExecutionOutcome, IdentityError> {
+        Err(unavailable_identity_provider())
+    }
+
     async fn execute_password_change(
         &self,
         _receipt: PasswordChangeProducerReceipt,

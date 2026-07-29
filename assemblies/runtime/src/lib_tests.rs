@@ -772,6 +772,17 @@ impl identity::ports::AccountSecurityReadRepo for UnusedAccountSecurityRepo {
 struct FailingIdentitySecurityLifecycle;
 
 impl identity::ports::IdentitySecurityLifecycle for FailingIdentitySecurityLifecycle {
+    async fn execute_refresh(
+        &self,
+        _receipt: identity::ports::RefreshProducerReceipt,
+        _scope: IdentityTenantRepoScope,
+        _command: identity::ports::RefreshExecutionCommand,
+    ) -> Result<identity::ports::RefreshExecutionOutcome, identity::ports::IdentityError> {
+        Err(identity_storage_error(
+            "runtime test identity security lifecycle must not be called",
+        ))
+    }
+
     async fn execute_password_change(
         &self,
         _receipt: identity::ports::PasswordChangeProducerReceipt,
@@ -854,14 +865,6 @@ impl identity::ports::AuthGrantLifecycle for UnusedAuthGrantProvider {
     ) -> Result<Option<authn::AuthGrant>, identity::ports::IdentityError> {
         Ok(None)
     }
-
-    async fn close(
-        &self,
-        _scope: IdentityTenantRepoScope,
-        _command: identity::ports::AuthGrantCloseCommand,
-    ) -> Result<(), identity::ports::IdentityError> {
-        Ok(())
-    }
 }
 
 impl identity::ports::RefreshTokenStore for UnusedAuthGrantProvider {
@@ -872,23 +875,52 @@ impl identity::ports::RefreshTokenStore for UnusedAuthGrantProvider {
     ) -> Result<Option<identity::ports::RefreshTokenRecord>, identity::ports::IdentityError> {
         Ok(None)
     }
+}
 
-    async fn rotate(
+impl identity::ports::IdentitySecurityLifecycle for UnusedAuthGrantProvider {
+    async fn execute_refresh(
         &self,
+        _receipt: identity::ports::RefreshProducerReceipt,
         _scope: IdentityTenantRepoScope,
-        _mutation: identity::ports::RefreshRotationMutation,
-    ) -> Result<identity::ports::RefreshRotationOutcome, identity::ports::IdentityError> {
-        Err(identity_storage_error(
-            "runtime test refresh store must not be called",
-        ))
+        _command: identity::ports::RefreshExecutionCommand,
+    ) -> Result<identity::ports::RefreshExecutionOutcome, identity::ports::IdentityError> {
+        Err(identity_storage_error("unused refresh lifecycle invoked"))
     }
 
-    async fn revoke_lineage(
+    async fn execute_password_change(
         &self,
+        _receipt: identity::ports::PasswordChangeProducerReceipt,
         _scope: IdentityTenantRepoScope,
-        _lineage_id: identity::ports::RefreshTokenId,
-    ) -> Result<(), identity::ports::IdentityError> {
-        Ok(())
+        _command: identity::ports::PasswordChangeCommand,
+    ) -> Result<identity::ports::CredentialSecurityReceipt, identity::ports::IdentityError> {
+        Err(identity_storage_error("unused security lifecycle invoked"))
+    }
+
+    async fn execute_account_status_set(
+        &self,
+        _receipt: identity::ports::AccountStatusSetProducerReceipt,
+        _scope: IdentityTenantRepoScope,
+        _command: identity::ports::AccountStatusSetCommand,
+    ) -> Result<identity::ports::CredentialSecurityReceipt, identity::ports::IdentityError> {
+        Err(identity_storage_error("unused security lifecycle invoked"))
+    }
+
+    async fn execute_logout_current(
+        &self,
+        _receipt: identity::ports::LogoutCurrentProducerReceipt,
+        _scope: IdentityTenantRepoScope,
+        _command: identity::ports::LogoutCurrentCommand,
+    ) -> Result<identity::ports::CredentialSecurityReceipt, identity::ports::IdentityError> {
+        Err(identity_storage_error("unused security lifecycle invoked"))
+    }
+
+    async fn execute_logout_all(
+        &self,
+        _receipt: identity::ports::LogoutAllProducerReceipt,
+        _scope: IdentityTenantRepoScope,
+        _command: identity::ports::LogoutAllCommand,
+    ) -> Result<identity::ports::CredentialSecurityReceipt, identity::ports::IdentityError> {
+        Err(identity_storage_error("unused security lifecycle invoked"))
     }
 }
 

@@ -1,35 +1,35 @@
 //! Postgres transaction retry classification and boundary metrics.
 
 use std::error::Error;
+#[cfg(any(test, feature = "domain-settings", feature = "domain-audit"))]
 use std::future::Future;
+#[cfg(any(test, feature = "domain-settings", feature = "domain-audit"))]
 use std::hash::{BuildHasher, Hasher};
+#[cfg(any(test, feature = "domain-settings", feature = "domain-audit"))]
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+#[cfg(any(test, feature = "domain-settings", feature = "domain-audit"))]
 use std::sync::{LazyLock, Mutex};
+#[cfg(any(test, feature = "domain-settings", feature = "domain-audit"))]
 use std::time::Duration;
 
 #[cfg(feature = "domain-audit")]
 use audit::ports::AuditError;
+#[cfg(any(test, feature = "domain-settings", feature = "domain-audit"))]
 use consistency::{
-    LocalTxDeadlineStage, LocalTxExecutionBudget, LocalTxFinalStatus, TxRetryBackoff, TxRetryClass,
-    TxRetryFinalStatus, TxRetryPolicy, TxRetryReport, run_tx_retry,
+    LocalTxDeadlineStage, LocalTxExecutionBudget, TxRetryBackoff, TxRetryFinalStatus,
+    TxRetryPolicy, TxRetryReport, run_tx_retry,
 };
+use consistency::{LocalTxFinalStatus, TxRetryClass};
 #[cfg(feature = "domain-identity")]
 use identity::ports::IdentityError;
-#[cfg(any(
-    feature = "domain-settings",
-    feature = "domain-identity",
-    feature = "domain-audit"
-))]
+#[cfg(any(feature = "domain-settings", feature = "domain-audit"))]
 use observ::LocalTxObservation;
 #[cfg(feature = "domain-settings")]
 use settings::ports::{ConfigRepoError, SecretRepoError};
 
+#[cfg(any(test, feature = "domain-settings", feature = "domain-audit"))]
 use crate::cotx::LocalTxAttempt;
-#[cfg(any(
-    feature = "domain-settings",
-    feature = "domain-identity",
-    feature = "domain-audit"
-))]
+#[cfg(any(feature = "domain-settings", feature = "domain-audit"))]
 use crate::cotx::LocalTxRetryError;
 
 /// Absolute monotonic deadlines minted once by the retry runner and shared by every attempt.
@@ -38,6 +38,7 @@ use crate::cotx::LocalTxRetryError;
 /// deadline or manufacture a fresh budget. The transaction funnel receives the token as a
 /// mandatory argument and can only use its stage-specific timeout methods.
 #[derive(Clone, Copy, Debug)]
+#[cfg(any(test, feature = "domain-settings", feature = "domain-audit"))]
 pub(crate) struct LocalTxDeadline {
     operation: tokio::time::Instant,
     final_settlement: tokio::time::Instant,
@@ -51,6 +52,7 @@ macro_rules! deadline_evidence {
         }
 
         impl $name {
+            #[cfg(any(test, feature = "domain-settings", feature = "domain-audit"))]
             const fn mint() -> Self {
                 Self { _sealed: () }
             }
@@ -69,11 +71,23 @@ deadline_evidence!(LocalTxRollbackDeadline);
 pub(crate) enum LocalTxStageResult<T, E, D> {
     Complete(T),
     Failed(E),
-    Deadline { source: Option<E>, evidence: D },
+    #[cfg_attr(
+        not(any(test, feature = "domain-settings", feature = "domain-audit")),
+        allow(
+            dead_code,
+            reason = "deadline branch is absent from plain producer builds"
+        )
+    )]
+    Deadline {
+        source: Option<E>,
+        evidence: D,
+    },
 }
 
+#[cfg(any(test, feature = "domain-settings", feature = "domain-audit"))]
 impl LocalTxDeadline {
     #[allow(clippy::disallowed_methods)]
+    #[cfg(any(test, feature = "domain-settings", feature = "domain-audit"))]
     fn mint(budget: LocalTxExecutionBudget) -> Self {
         let started = tokio::time::Instant::now();
         Self {
@@ -234,6 +248,7 @@ impl LocalTxDeadline {
         (statement_millis, lock_millis)
     }
 
+    #[cfg(any(test, feature = "domain-settings", feature = "domain-audit"))]
     async fn backoff(self, ceiling: Duration) -> TxRetryBackoff {
         #[cfg(all(test, feature = "integration"))]
         let delay = TEST_LOCALTX_BACKOFF_DELAY
@@ -244,6 +259,7 @@ impl LocalTxDeadline {
         self.wait_backoff(delay).await
     }
 
+    #[cfg(any(test, feature = "domain-settings", feature = "domain-audit"))]
     async fn wait_backoff(self, delay: Duration) -> TxRetryBackoff {
         #[allow(clippy::disallowed_methods)]
         let remaining = self
@@ -264,6 +280,7 @@ impl LocalTxDeadline {
     }
 }
 
+#[cfg(any(test, feature = "domain-settings", feature = "domain-audit"))]
 fn is_deadline_derived(error: &(dyn Error + 'static)) -> bool {
     let mut current = Some(error);
     while let Some(source) = current {
@@ -310,6 +327,7 @@ pub(crate) fn localtx_deadline_for_test() -> LocalTxDeadline {
     LocalTxDeadline::mint(LocalTxExecutionBudget::DEFAULT)
 }
 
+#[cfg(any(test, feature = "domain-settings", feature = "domain-audit"))]
 fn localtx_execution_budget() -> LocalTxExecutionBudget {
     #[cfg(all(test, feature = "integration"))]
     if let Ok(budget) = TEST_LOCALTX_EXECUTION_BUDGET.try_with(|budget| *budget) {
@@ -327,8 +345,6 @@ pub(crate) enum PgTxRetryBoundary {
     SettingsConfig,
     #[cfg(feature = "domain-settings")]
     SettingsSecret,
-    #[cfg(feature = "domain-identity")]
-    IdentityRefresh,
     #[cfg(feature = "domain-audit")]
     AuditAppend,
     #[cfg(feature = "domain-audit")]
@@ -344,8 +360,6 @@ impl PgTxRetryBoundary {
             Self::SettingsConfig => "settings.config",
             #[cfg(feature = "domain-settings")]
             Self::SettingsSecret => "settings.secret",
-            #[cfg(feature = "domain-identity")]
-            Self::IdentityRefresh => "identity.refresh",
             #[cfg(feature = "domain-audit")]
             Self::AuditAppend => "audit.append",
             #[cfg(feature = "domain-audit")]
@@ -363,9 +377,6 @@ pub(crate) const SETTINGS_CONFIG_BOUNDARY: PgTxRetryBoundary = PgTxRetryBoundary
 /// Retry boundary for settings secret CAS writes.
 #[cfg(feature = "domain-settings")]
 pub(crate) const SETTINGS_SECRET_BOUNDARY: PgTxRetryBoundary = PgTxRetryBoundary::SettingsSecret;
-/// Retry boundary for identity refresh-token rotation writes.
-#[cfg(feature = "domain-identity")]
-pub(crate) const IDENTITY_REFRESH_BOUNDARY: PgTxRetryBoundary = PgTxRetryBoundary::IdentityRefresh;
 /// Retry boundary for the durable audit append transaction.
 #[cfg(feature = "domain-audit")]
 pub(crate) const AUDIT_APPEND_BOUNDARY: PgTxRetryBoundary = PgTxRetryBoundary::AuditAppend;
@@ -379,6 +390,7 @@ pub(crate) const AUDIT_LIST_TENANT_APPEND_BOUNDARY: PgTxRetryBoundary =
 /// The trait is crate-private, so downstream adapters cannot add arbitrary generated routes.
 /// Callers provide only `LocalTxObservation<M>`; the retry boundary is derived from `M` and cannot
 /// be independently paired.
+#[cfg(any(test, feature = "domain-settings", feature = "domain-audit"))]
 pub(crate) trait PgLocalTxOperation {
     const BOUNDARY: PgTxRetryBoundary;
 }
@@ -388,6 +400,7 @@ pub(crate) trait PgLocalTxOperation {
 /// Most operations carry one generated route marker. Auth-grant close additionally admits the
 /// refresh route because replay compromise executes the same aggregate transaction while retaining
 /// the initiating route's telemetry identity.
+#[cfg(any(test, feature = "domain-settings", feature = "domain-audit"))]
 pub(crate) trait PgLocalTxObservation {
     fn boundary(&self) -> PgTxRetryBoundary;
 
@@ -408,11 +421,7 @@ pub(crate) trait PgLocalTxObservation {
     );
 }
 
-#[cfg(any(
-    feature = "domain-settings",
-    feature = "domain-identity",
-    feature = "domain-audit"
-))]
+#[cfg(any(feature = "domain-settings", feature = "domain-audit"))]
 impl<M> PgLocalTxObservation for LocalTxObservation<M>
 where
     M: PgLocalTxOperation,
@@ -447,54 +456,6 @@ where
 #[cfg(feature = "domain-settings")]
 impl PgLocalTxOperation for settings::ports::SecretPublishRouteMarker {
     const BOUNDARY: PgTxRetryBoundary = SETTINGS_SECRET_BOUNDARY;
-}
-
-#[cfg(feature = "domain-identity")]
-impl PgLocalTxOperation for identity::ports::RefreshRotationRouteMarker {
-    const BOUNDARY: PgTxRetryBoundary = IDENTITY_REFRESH_BOUNDARY;
-}
-
-#[cfg(feature = "domain-identity")]
-impl PgLocalTxObservation for identity::ports::AuthGrantCloseObservation {
-    fn boundary(&self) -> PgTxRetryBoundary {
-        match self {
-            Self::RefreshReplay(_) => {
-                <identity::ports::RefreshRotationRouteMarker as PgLocalTxOperation>::BOUNDARY
-            }
-        }
-    }
-
-    fn record_failed_attempt(
-        &self,
-        attempt: u32,
-        retry_class: TxRetryClass,
-        settlement: Option<LocalTxFinalStatus>,
-    ) {
-        match self {
-            Self::RefreshReplay(observation) => {
-                observation.record_failed_attempt(attempt, retry_class, settlement);
-            }
-        }
-    }
-
-    fn record_deadline_exceeded(&self, stage: LocalTxDeadlineStage) {
-        match self {
-            Self::RefreshReplay(observation) => observation.record_deadline_exceeded(stage),
-        }
-    }
-
-    fn finish(
-        self,
-        attempts: u32,
-        retry_status: TxRetryFinalStatus,
-        settlement: Option<LocalTxFinalStatus>,
-    ) {
-        match self {
-            Self::RefreshReplay(observation) => {
-                observation.finish(attempts, retry_status, settlement);
-            }
-        }
-    }
 }
 
 #[cfg(feature = "domain-audit")]
@@ -599,6 +560,10 @@ pub(crate) fn classify_secret_repo_error(error: &SecretRepoError) -> TxRetryClas
 
 /// Classify identity repository/UoW errors.
 #[cfg(feature = "domain-identity")]
+#[cfg_attr(
+    not(test),
+    allow(dead_code, reason = "integration conformance classifier")
+)]
 pub(crate) fn classify_identity_error(error: &IdentityError) -> TxRetryClass {
     match error {
         IdentityError::VersionConflict => TxRetryClass::Conflict,
@@ -637,11 +602,7 @@ where
 }
 
 /// Run a typed LocalTx Postgres UoW and emit retry and settlement observability.
-#[cfg(any(
-    feature = "domain-settings",
-    feature = "domain-identity",
-    feature = "domain-audit"
-))]
+#[cfg(any(feature = "domain-settings", feature = "domain-audit"))]
 pub(crate) async fn run_pg_localtx_retry<O, T, E, Op, OpFut, Classify>(
     observation: O,
     op: Op,
@@ -672,11 +633,7 @@ where
     result
 }
 
-#[cfg(any(
-    feature = "domain-settings",
-    feature = "domain-identity",
-    feature = "domain-audit"
-))]
+#[cfg(any(feature = "domain-settings", feature = "domain-audit"))]
 async fn run_pg_tx_retry_core<T, E, Op, OpFut, Classify, OnFailed, OnDeadline>(
     boundary: PgTxRetryBoundary,
     mut op: Op,
@@ -760,12 +717,14 @@ where
     )
 }
 
+#[cfg(any(test, feature = "domain-settings", feature = "domain-audit"))]
 static RETRY_JITTER_SEQUENCE: LazyLock<AtomicU64> = LazyLock::new(|| {
     let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
     hasher.write_u32(std::process::id());
     AtomicU64::new(hasher.finish())
 });
 
+#[cfg(any(test, feature = "domain-settings", feature = "domain-audit"))]
 fn full_jitter(ceiling: Duration) -> Duration {
     let sample = RETRY_JITTER_SEQUENCE
         .fetch_add(0x9e37_79b9_7f4a_7c15, Ordering::Relaxed)
@@ -774,6 +733,7 @@ fn full_jitter(ceiling: Duration) -> Duration {
     full_jitter_from_sample(ceiling, sample)
 }
 
+#[cfg(any(test, feature = "domain-settings", feature = "domain-audit"))]
 fn full_jitter_from_sample(ceiling: Duration, sample: u64) -> Duration {
     let max_nanos = u64::try_from(ceiling.as_nanos()).unwrap_or(u64::MAX);
     if max_nanos == 0 {
@@ -782,6 +742,7 @@ fn full_jitter_from_sample(ceiling: Duration, sample: u64) -> Duration {
     Duration::from_nanos(sample % max_nanos.saturating_add(1))
 }
 
+#[cfg(any(test, feature = "domain-settings", feature = "domain-audit"))]
 fn retry_reason(error: &(dyn Error + 'static)) -> &'static str {
     let mut current = Some(error);
     while let Some(source) = current {
@@ -793,6 +754,7 @@ fn retry_reason(error: &(dyn Error + 'static)) -> &'static str {
     "domain"
 }
 
+#[cfg(any(test, feature = "domain-settings", feature = "domain-audit"))]
 fn sqlx_retry_reason(error: &sqlx::Error) -> &'static str {
     match error {
         sqlx::Error::Database(database) => match database.code().as_deref() {
@@ -811,6 +773,7 @@ fn sqlx_retry_reason(error: &sqlx::Error) -> &'static str {
     }
 }
 
+#[cfg(any(test, feature = "domain-settings", feature = "domain-audit"))]
 fn record_attempt(boundary: PgTxRetryBoundary, class: TxRetryClass, reason: &'static str) {
     metrics::counter!(
         "tx_retry_attempts_total",
@@ -866,6 +829,7 @@ pub(crate) fn record_settlement(
     .emit();
 }
 
+#[cfg(any(test, feature = "domain-settings", feature = "domain-audit"))]
 fn record_final(boundary: PgTxRetryBoundary, report: TxRetryReport, reason: &'static str) {
     let boundary = boundary.as_label();
     if report.final_status() == TxRetryFinalStatus::Exhausted {

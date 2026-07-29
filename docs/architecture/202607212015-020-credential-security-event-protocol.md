@@ -35,7 +35,9 @@ Compromised 优先级最高，允许 Revoked 提升为 Compromised，禁止降�
 避免声明策略与真实 mutation 平行漂移。
 
 identity 的账户级和 grant 级命令分别封闭私有字段；生产入口使用不可互换的
-`PasswordChangeCommand`、`AccountStatusSetCommand`、`LogoutCurrentCommand` 与 `LogoutAllCommand`。
+`PasswordChangeCommand`、`AccountStatusSetCommand`、`LogoutCurrentCommand`、`LogoutAllCommand` 与
+`RefreshExecutionCommand`。refresh command 只有由 Active record 派生的 Rotate 和由已存在 non-Active record
+派生的 ContainReuse 两个密封分支。
 构造命令时固定完整 expected snapshot 与 closed target；执行只接受对应 generated route receipt 和精确 command，
 冲突要求调用方读取新状态并重建命令，不能把旧命令重放成成功。domain command 与 PostgreSQL provider 都必须
 保留完整 expected snapshot，不能把 stale command 改写为终态幂等成功。
@@ -50,7 +52,7 @@ identity 的账户级和 grant 级命令分别封闭私有字段；生产入口�
 `ProducerFactAuthorization`；生产 credential-security authorization 只能来自对应 mounted route receipt，
 fact/entry 由 route-specific command 内部事件派生，不接受调用方独立替换。
 不存在零参数 mint、无 receipt 的事件生产入口或 sibling-module 固定 fact token。password-change、
-account-status-set、logout-current 与 logout-all 各自由 mounted generated producer route 铸造精确 receipt；
+account-status-set、logout-current、logout-all 与 refresh 各自由 mounted generated producer route 铸造精确 receipt；
 receipt 只能授权 `identity.security-event` 的 exact fact/contract。authorization 进入同一个 projection +
 OutboxFact 提交漏斗，canonical append 仍不可从漏斗外调用。reactivation 的无事件 CAS 不是 producer 入口。
 
@@ -58,7 +60,8 @@ OutboxFact 提交漏斗，canonical append 仍不可从漏斗外调用。reactiv
 `OutboxFact`；password-change 不再生成 `LOCAL_TX` spec/observation，也不属于 active LocalTx inventory。两条路由
 的数据库 settlement 由 plain producer transaction 的 closed outcome/告警承载，不能套 LocalTx runner 或遥测。
 
-安全事件事务固定锁序为 `credential（仅 password）→ account-security → refresh-family → auth-grant`。
+安全事件事务固定锁序为
+`credential（仅 password）→ account-security → refresh-family → auth-grant → projection/outbox`。
 credential material、账户状态/epoch、refresh family、AuthGrant 和 OutboxFact 必须全成或全败；不触及 credential
 的命令从 account-security 开始，不能反向取得锁。PostgreSQL 的全部路径由一个
 `PgIdentitySecurityLifecycle` 进入同一个 SQLx producer transaction funnel，不再由 `CredentialRepo` 或独立账户
@@ -75,14 +78,14 @@ receipt、不自动重试。#1841 不新增 dedup ledger：线性命令、expect
 `identity.security-event@v1` 已由 #1840 提升为 `active`；actor/target 均携版本化 `keyId` 与独立密钥生成的
 tenant/domain-separated HMAC-SHA256 opaque ref，`occurredAt` 只接受 epoch 后且可由 wire `int64` 表示的时间，
 producer/consumer 对 epoch 前或范围溢出显式返回 typed error。事件其余必填字段为 `kind`、`tenantId`、`occurredAt`，
-字段，`additionalProperties=false`。kind 为上述九个闭值；target 是唯一 tagged object，kind 只有
+字段，`additionalProperties=false`。kind 为上述十个闭值；target 是唯一 tagged object，kind 只有
 `subject | grant`，ref 是随机 opaque UUID。payload 与 transport metadata 不出现 raw subject、grant/session、
 sid/jti、token、password/credential material、email/username 或其他 PII。tenant、target kind、opaque ref 与
 并由同一 sealed command/fact 数据流派生。不存在把 opaque ref 还原为 subject/grant 的生产 port 或数据库表。
 
-`audit.security-event` 以 transactional-only adapter-native consumer 激活；四个 mounted producer route、
+`audit.security-event` 以 transactional-only adapter-native consumer 激活；五个 mounted producer route、
 幂等 audit append、runtime dispatch 与 L2 assurance 已形成闭环。audit 域只从四字段 wire
-消费式构造私有字段的 sealed command，并精确接受九组合法 kind/target：七个 Account kind 只能配 `subject`，
+消费式构造私有字段的 sealed command，并精确接受十组合法 kind/target：八个 Account kind 只能配 `subject`，
 `logoutCurrent` 与 `refreshReuseDetected` 只能配 `grant`；任何 mismatch 都 fail-closed。随机 opaque target ref
 只作为本事件的脱敏 resource correlation。consumer 不读取 identity-owned target mapping，也不把 opaque ref
 还原为 raw subject/grant。激活不增加兼容 shim 或双写。
@@ -94,6 +97,9 @@ sid/jti、token、password/credential material、email/username 或其他 PII。
 - active fact 只携带随机 opaque ref，不携带 raw 用户/会话标识或凭据材料；audit 直接消费脱敏 fact，生产代码
   不提供 reverse-resolution side channel。
 - production 挂载由 runtime E2E、PostgreSQL 故障注入与 L2 assurance 共同证明。
+- refresh 正常轮换使用 conditional producer 的 `NoMutation`，不追加安全事件；只有 reuse 状态转换 winner
+  追加一条 `RefreshReuseDetected`。pending bearer 只能由 commit 后的
+  `PersistedRefreshRotationReceipt` 释放。
 
 ## AI-HARD 载体
 
@@ -102,11 +108,13 @@ sid/jti、token、password/credential material、email/username 或其他 PII。
 | kind、closed target 与可执行 transition 不能分离或由调用方覆盖 | 封闭层级 enum + 私有派生 API | Hard |
 | 外部不能伪造 command、producer authorization 或成功 receipt | 私有字段 + move-only token + sealed trait/constructor | Hard |
 | 安全事件不能建立第二事务/append 漏斗 | 唯一 `producer_tx` + crate-private `TxCapability` | Hard |
-| wire 只有四字段、九 kind、typed opaque target 且拒绝未知字段 | JSON Schema + codegen `deny_unknown_fields` | Hard |
+| wire 只有四字段、十 kind、typed opaque target 且拒绝未知字段 | JSON Schema + codegen `deny_unknown_fields` | Hard |
 | opaque target 不可逆解析 | 无 resolver port、无 mapping relation、无 raw id wire 字段 | Hard + 数据库 Hard |
 | audit consumer 不能旁路 contract 还原 identity target 或替换 fact 字段 | audit-owned sealed command + runtime-baseline forbidden-side-channel gate | Hard + Medium |
 | active topology 不得缺 producer/subscriber/runtime 闭环 | codegen registry + L2 assurance | Hard + Medium |
 | password/status route 不能在无 exact producer receipt 时调用安全 writer | generated route marker + `ProducerAssuranceReceipt` 参数 + provider authorization | Hard |
+| refresh 不能经 store rotate/revoke 或 grant close 形成第二写入口 | 纯 reader store + 唯一 `execute_refresh` + 删除旧 port | Hard |
+| refresh bearer 不能在 commit ACK 前返回 | private pending secrets + persisted receipt typestate | Hard |
 | reactivation 不得产生安全事件或复活 grant/family | 无 producer receipt 的窄 CAS command + 单调终态测试 | Hard + Medium |
 | 合法跨文件 producer_tx 调用集合保持双向闭合 | 全 production AST exact-set guard + extra-file synthetic red/green | Medium |
 | 共事务锁序、回滚、CAS 与 commit-unknown 语义 | PostgreSQL 并发/故障注入测试 | Medium |

@@ -112,7 +112,8 @@ impl PgAuthGrantSweeper {
         self
     }
 
-    /// 删除 `expires_at <= now()` 的 AuthGrant 根，数据库级联删除其 refresh family。
+    /// 删除 `expires_at <= now()` 的 AuthGrant 根：先稳定锁定并显式删除 refresh family，
+    /// 再重新验证 root 已过期并删除 root。
     ///
     /// SQL 固定在迁移函数 `rss_sweep_expired_auth_grants()` 内。
     pub async fn sweep_expired(

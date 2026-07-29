@@ -5,7 +5,7 @@
 //! with contract/generated/execution/fault；fact effect evidence 则由 active subscription 动态发现
 //! registration/plan/handler/executor 四阶段真实 carrier，generated SPEC 不得冒充执行证据。
 //! INVARIANT: L2-ASSURANCE-CONSUMER-POLICY-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::policy_carrier_rejects_dead_helper_bait + tests::policy_carrier_rejects_nested_dead_helper_bait + tests::policy_carrier_rejects_if_false_bait + tests::policy_executor_rejects_symbol_without_worker_edge", anti_vacuity = "tests::workspace_fact_effect_evidence_closes_all_policy_stages" }——
-//! active ConsumerTx handler 数从 generated subscriptions 计算且当前精确为 6；每条 subscription identity
+//! active ConsumerTx handler 集合从 generated subscriptions 计算；每条 subscription identity
 //! 必须映射到 registration/plan/handler/executor 的精确 Rust symbol 与闭合调用链，任意死 helper 不得冒充。
 //! INVARIANT: L2-ASSURANCE-WIRE-01 { level = "Hard", exec = "verify", source = "codegen", golden = "generated/l2-assurance.json", synthetic_red = "tests::check_rejects_missing_tampered_and_crlf_without_writing", anti_vacuity = "tests::workspace_inventory_is_exact_and_deterministic" }——
 //! the typed JSON v3 projection and committed golden are byte-for-byte deterministic and reject
@@ -13,7 +13,8 @@
 //! INVARIANT: L2-ASSURANCE-CLOSURE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::exact_set_rejects_equal_size_wrong_identity", anti_vacuity = "tests::workspace_inventory_is_exact_and_deterministic" }——
 //! active OutboxFact manifests, generated registries, producer execution terminals and named fault
 //! cases are joined bidirectionally; each producer terminal fact set equals manifest `emits`, while
-//! 9 producers and 5 facts are an anti-vacuity floor.
+//! producer/fact anti-vacuity floors are enforced by the same typed inventory used to render the
+//! committed assurance artifact; rustdoc does not duplicate the live counts.
 //! INVARIANT: L2-ASSURANCE-PATH-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::carrier_paths_reject_escapes_backslashes_and_symlinks", anti_vacuity = "tests::workspace_inventory_is_exact_and_deterministic" }——
 //! every carrier and the fixed output are real repository-local paths without symlink traversal.
 
@@ -47,7 +48,7 @@ use crate::{
 
 const OUTPUT: &str = "generated/l2-assurance.json";
 const LF_DECLARATION: &str = "generated/l2-assurance.json text eol=lf";
-const EXPECTED_PRODUCERS: usize = 13;
+const EXPECTED_PRODUCERS: usize = 14;
 const EXPECTED_FACTS: usize = 6;
 const MAX_RUST_CARRIER_BYTES: u64 = 2 * 1024 * 1024;
 
@@ -2761,6 +2762,57 @@ impl DemoProvider {
         assert!(!text.contains("_seed"));
         assert!(!text.contains("/Users/"));
         assert!(!text.contains("schemaHash\": \"HEAD"));
+        Ok(())
+    }
+
+    #[test]
+    fn workspace_refresh_rejects_localtx_and_is_fifth_security_event_producer() -> anyhow::Result<()>
+    {
+        let inventory = build_inventory(&workspace_root()?)?;
+        let security_event_producers = inventory
+            .contracts
+            .iter()
+            .filter_map(|record| match record {
+                AssuranceRecord::Producer(record)
+                    if record
+                        .emitted_facts
+                        .iter()
+                        .any(|fact| fact == "identity.security-event") =>
+                {
+                    Some(record.contract_id.as_str())
+                }
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
+
+        let refresh = inventory
+            .contracts
+            .iter()
+            .find_map(|record| match record {
+                AssuranceRecord::Producer(record) if record.contract_id == "identity.refresh" => {
+                    Some(record)
+                }
+                _ => None,
+            })
+            .context(
+                "identity.refresh must reject LocalTx and enter the closed OutboxFact producer inventory",
+            )?;
+        assert_eq!(
+            refresh.emitted_facts,
+            ["identity.security-event"],
+            "refresh reuse containment must emit only the canonical security fact"
+        );
+        assert_eq!(
+            security_event_producers,
+            BTreeSet::from([
+                "identity.account-status-set",
+                "identity.logout",
+                "identity.logout-all",
+                "identity.password-change",
+                "identity.refresh",
+            ]),
+            "identity.refresh must be the fifth and only new security-event producer"
+        );
         Ok(())
     }
 

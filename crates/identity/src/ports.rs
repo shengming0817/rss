@@ -16,16 +16,16 @@
 
 use std::time::SystemTime;
 
+use crate::domain::ActiveAccountSecurity;
 use authn::{
-    AccessGrantValidationInput, AccountSecurityEventKind, AuthGrant, AuthGrantCloseMutation,
-    AuthGrantId, AuthGrantStatus, CredentialSecurityEventKind, GrantSecurityEventKind,
+    AccessGrantValidationInput, AccountSecurityEventKind, AuthGrant, AuthGrantId, AuthGrantStatus,
+    CredentialSecurityEventKind, GrantSecurityEventKind,
 };
 #[cfg(test)]
 use authn::{AuthGrantSnapshot, AuthnEpoch};
 use consistency::EventEntry;
 use diport::{EnvelopeSubjectId, OpaqueActorId, OutboxActor, OutboxEmitError, OutboxEnvelopeParts};
 use dynosaur::dynosaur;
-use generated::http::identity_v1::refresh::{LOCAL_TX as REFRESH_LOCAL_TX, ROUTE as REFRESH_ROUTE};
 
 // Exact fact bindings cross the domain→adapter port as zero-copy re-exports. Adapters retain the
 // normal Adapter→Domain dependency and cannot introduce an Adapter→Generated layer edge.
@@ -67,11 +67,10 @@ pub use crate::domain::{
     POLICY_ATTR_PRINCIPAL_ID, POLICY_ATTR_PRINCIPAL_KIND, POLICY_ATTR_RESOURCE_ID,
     POLICY_ATTR_TENANT_ID, PasswordChangeCommand, PendingCredentialSecurityCommit, Policy,
     PolicyCondition, PolicyEffect, PolicyId, PolicyObligations, PolicyRouteScope, PolicyRule,
-    PolicyVersion, ReactivateAccountCommand, RefreshRotation, RefreshRotationOutcome,
-    RefreshStatus, RefreshTokenHash, RefreshTokenId, RefreshTokenRecord, RefreshTokenSnapshot,
-    ResourceAttribute, ResourceAttributeKey, ResourceAttributeKeyError,
-    ResourceAttributeResolution, ResourceAttributeResourceId, ResourceAttributeVersion, Role,
-    RoleBinding, RoleId,
+    PolicyVersion, ReactivateAccountCommand, RefreshRotation, RefreshStatus, RefreshTokenHash,
+    RefreshTokenId, RefreshTokenRecord, RefreshTokenSnapshot, ResourceAttribute,
+    ResourceAttributeKey, ResourceAttributeKeyError, ResourceAttributeResolution,
+    ResourceAttributeResourceId, ResourceAttributeVersion, Role, RoleBinding, RoleId,
 };
 pub use vocab::TenantId;
 
@@ -107,6 +106,12 @@ pub struct AccountStatusSetEmission(CredentialSecurityEmission);
 /// Move-only password-change emission retaining the credential CAS command.
 pub struct PasswordChangeEmission {
     command: PasswordChangeCommand,
+    fact: CredentialSecurityFact,
+}
+
+/// Move-only refresh attempt plus the only security fact it may conditionally emit.
+pub struct RefreshExecutionEmission {
+    command: RefreshExecutionCommand,
     fact: CredentialSecurityFact,
 }
 
@@ -173,6 +178,13 @@ impl PasswordChangeEmission {
     }
 }
 
+impl RefreshExecutionEmission {
+    pub fn into_parts(self) -> (RefreshExecutionCommand, EventEntry, OutboxEnvelopeParts) {
+        let (entry, envelope) = self.fact.into_parts();
+        (self.command, entry, envelope)
+    }
+}
+
 /// Consume the exact logout-current command into its only valid generated emission.
 pub fn logout_current_emission(
     command: LogoutCurrentCommand,
@@ -205,6 +217,14 @@ pub fn password_change_emission(
 ) -> Result<PasswordChangeEmission, IdentityError> {
     let fact = credential_security_fact(command.event(), pseudonym_keys)?;
     Ok(PasswordChangeEmission { command, fact })
+}
+
+pub fn refresh_execution_emission(
+    command: RefreshExecutionCommand,
+    pseudonym_keys: &secure::PseudonymKeyRing,
+) -> Result<RefreshExecutionEmission, IdentityError> {
+    let fact = credential_security_fact(command.event(), pseudonym_keys)?;
+    Ok(RefreshExecutionEmission { command, fact })
 }
 
 #[cfg(feature = "test-support")]
@@ -648,12 +668,11 @@ mod credential_security_fact_tests {
     }
 }
 
-/// Generated route marker retained by the refresh rotation LocalTx command.
-pub type RefreshRotationRouteMarker = generated::http::identity_v1::refresh::RouteMarker;
-
 /// `identity.login` request-scoped producer assurance carried into the AuthGrant co-tx funnel.
 pub type LoginProducerReceipt =
     httpserve::ProducerAssuranceReceipt<generated::http::identity_v1::login::RouteMarker>;
+pub type RefreshProducerReceipt =
+    httpserve::ProducerAssuranceReceipt<generated::http::identity_v1::refresh::RouteMarker>;
 pub type PasswordChangeProducerReceipt =
     httpserve::ProducerAssuranceReceipt<generated::http::identity_v1::password_change::RouteMarker>;
 pub type AccountStatusSetProducerReceipt = httpserve::ProducerAssuranceReceipt<
@@ -734,97 +753,127 @@ impl PendingLoginGrantPersistence {
 #[must_use]
 pub struct PersistedLoginGrantReceipt(());
 
-pub struct AuthGrantCloseCommand {
-    mutation: AuthGrantCloseMutation,
-    observation: AuthGrantCloseObservation,
+/// A sealed refresh attempt. The application can create it only after exact grant/account
+/// observations, while the provider still rechecks the authoritative rows in its transaction.
+pub struct RefreshExecutionCommand {
+    source: RefreshTokenRecord,
+    rotation: Option<RefreshRotation>,
+    event: CredentialSecurityEvent,
+    pending: PendingRefreshRotationCommit,
 }
 
-/// Exact generated route evidence carried by an authentication-grant terminal transition.
-///
-/// Logout and refresh replay close the same aggregate through the same provider-owned atomic SQL,
-/// but they remain distinct LocalTx operations for retry telemetry and route governance.
-pub enum AuthGrantCloseObservation {
-    RefreshReplay(observ::LocalTxObservation<RefreshRotationRouteMarker>),
-}
-
-impl AuthGrantCloseCommand {
-    /// Seal a refresh-replay transition from one persisted refresh record and its exact grant.
-    ///
-    /// The record supplies the tenant/user/grant/epoch binding. Callers cannot substitute any of
-    /// those fields independently, and adapters only receive the resulting aggregate mutation.
-    pub(crate) fn from_refresh_replay(
-        record: &RefreshTokenRecord,
+impl RefreshExecutionCommand {
+    pub(crate) fn rotate(
+        source: RefreshTokenRecord,
         grant: AuthGrant,
+        account: ActiveAccountSecurity,
+        rotation: RefreshRotation,
         occurred_at: SystemTime,
     ) -> Option<Self> {
-        if record.tenant() != grant.tenant()
-            || record.auth_grant_id() != grant.id()
-            || record.user_id() != grant.user_id()
-            || record.issuance_epoch() != grant.authn_epoch_at_issue()
-            || record.auth_grant_status() != AuthGrantStatus::Active
+        let child = rotation.new_record();
+        if source.status() != RefreshStatus::Active
+            || source.auth_grant_status() != AuthGrantStatus::Active
+            || grant.status() != AuthGrantStatus::Active
+            || source.tenant() != grant.tenant()
+            || source.tenant() != account.tenant()
+            || source.user_id() != grant.user_id()
+            || source.user_id() != account.user_id()
+            || source.auth_grant_id() != grant.id()
+            || source.issuance_epoch() != grant.authn_epoch_at_issue()
+            || source.issuance_epoch() != account.authn_epoch()
+            || rotation.old_id() != source.id()
+            || child.tenant() != source.tenant()
+            || child.auth_grant_id() != source.auth_grant_id()
+            || child.user_id() != source.user_id()
+            || child.issuance_epoch() != source.issuance_epoch()
+            || child.parent_id() != Some(source.id())
+            || child.lineage_id() != source.lineage_id()
         {
             return None;
         }
-        let mutation = grant
-            .close(GrantSecurityEventKind::RefreshReuseDetected, occurred_at)
-            .ok()?;
+        let event = CredentialSecurityEvent::from_refresh_reuse(&source, occurred_at);
         Some(Self {
-            mutation,
-            observation: AuthGrantCloseObservation::RefreshReplay(observ::LocalTxObservation::new(
-                REFRESH_ROUTE,
-                REFRESH_LOCAL_TX.boundary,
-            )),
+            source,
+            rotation: Some(rotation),
+            event,
+            pending: PendingRefreshRotationCommit(()),
         })
     }
 
-    /// Adapter 消费命令并取得 session key 与精确 route marker evidence。
-    pub fn into_parts(self) -> (AuthGrantCloseMutation, AuthGrantCloseObservation) {
-        (self.mutation, self.observation)
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn for_test(mutation: AuthGrantCloseMutation) -> Self {
-        Self {
-            mutation,
-            observation: AuthGrantCloseObservation::RefreshReplay(observ::LocalTxObservation::new(
-                REFRESH_ROUTE,
-                REFRESH_LOCAL_TX.boundary,
-            )),
+    pub(crate) fn contain_reuse(
+        source: RefreshTokenRecord,
+        occurred_at: SystemTime,
+    ) -> Option<Self> {
+        if source.status() == RefreshStatus::Active {
+            return None;
         }
-    }
-}
-
-/// `identity.refresh` 的不可伪造 CAS 轮换命令。
-///
-/// sealed rotation 与 generated route marker observation 同源封装；adapter 只能消费命令，不能把
-/// refresh 业务参数接到其它 LocalTx contract 或 retry boundary。
-pub struct RefreshRotationMutation {
-    rotation: RefreshRotation,
-    observation: observ::LocalTxObservation<RefreshRotationRouteMarker>,
-}
-
-impl RefreshRotationMutation {
-    pub(crate) fn new(rotation: RefreshRotation) -> Self {
-        Self {
-            rotation,
-            observation: observ::LocalTxObservation::new(REFRESH_ROUTE, REFRESH_LOCAL_TX.boundary),
-        }
+        let event = CredentialSecurityEvent::from_refresh_reuse(&source, occurred_at);
+        Some(Self {
+            source,
+            rotation: None,
+            event,
+            pending: PendingRefreshRotationCommit(()),
+        })
     }
 
-    /// Adapter 消费命令并取得 sealed rotation 与精确 route marker evidence。
+    pub fn event(&self) -> &CredentialSecurityEvent {
+        &self.event
+    }
+
     pub fn into_parts(
         self,
     ) -> (
-        RefreshRotation,
-        observ::LocalTxObservation<RefreshRotationRouteMarker>,
+        RefreshTokenRecord,
+        Option<RefreshRotation>,
+        CredentialSecurityEvent,
+        PendingRefreshRotationCommit,
     ) {
-        (self.rotation, self.observation)
+        (self.source, self.rotation, self.event, self.pending)
     }
+}
 
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn for_test(rotation: RefreshRotation) -> Self {
-        Self::new(rotation)
+/// Linear capability held by a sealed refresh command until its transaction commits.
+#[must_use]
+pub struct PendingRefreshRotationCommit(());
+
+impl PendingRefreshRotationCommit {
+    /// Convert the pending rotation only when the storage settlement funnel supplies its opaque
+    /// commit acknowledgement. Application control flow cannot construct that acknowledgement.
+    pub fn confirm(
+        self,
+        _acknowledgement: RefreshCommitAcknowledgement,
+    ) -> PersistedRefreshRotationReceipt {
+        PersistedRefreshRotationReceipt(())
     }
+}
+
+/// Opaque evidence that the authoritative refresh storage boundary acknowledged its commit.
+///
+/// The constructor is private. Its production mint callsite is also held to an AST exact set by
+/// `producer_assurance`; wrappers, alternate adapters, dead helpers and direct fakes are rejected.
+#[must_use]
+pub struct RefreshCommitAcknowledgement(());
+
+/// Storage-settlement hook used only after a durable refresh commit has been acknowledged.
+///
+/// This is public solely because the PostgreSQL adapter lives in a separate crate. The production
+/// callsite exact-set gate admits only the canonical PostgreSQL settlement carrier.
+#[doc(hidden)]
+pub fn acknowledge_durable_refresh_commit() -> RefreshCommitAcknowledgement {
+    RefreshCommitAcknowledgement(())
+}
+
+/// Unforgeable acknowledgement that a refresh rotation committed.
+#[must_use]
+pub struct PersistedRefreshRotationReceipt(());
+
+/// Closed outcome of the authoritative refresh producer transaction.
+pub enum RefreshExecutionOutcome {
+    Applied(PersistedRefreshRotationReceipt),
+    ReuseContained,
+    AlreadyContained,
+    Stale,
+    Expired,
 }
 
 /// Tenant-scoped repo capability for identity storage ports.
@@ -1243,7 +1292,7 @@ pub trait CredentialRepoLocal: Send + Sync {
     ) -> Result<(), IdentityError>;
 }
 
-/// AuthGrant 生命周期域端口：原子登录持久化、活跃根查询和原子关闭收敛到一个 provider。
+/// AuthGrant 生命周期域端口：原子登录持久化与活跃根查询收敛到一个 provider。
 ///
 /// `persist_login_grant` 是唯一的初始 refresh 写入口。其必填参数同时携带：
 ///
@@ -1255,9 +1304,10 @@ pub trait CredentialRepoLocal: Send + Sync {
 /// `save_grant`、`insert_initial_refresh` 或裸事务句柄，因此 split transaction 从端口形状上不可表达。L2
 /// producer assurance 静态检查 receipt → generated fact → authorization → transaction outcome 的完整能力链。
 ///
-/// `close` 消费由根状态机产生的密封命令；provider 必须先撤销绑定 refresh 族，再关闭根，且两步同事务。
-/// `find_active` 对缺失、终态及跨租户统一返回 `None`。单一 provider 同时实现 lifecycle 与 refresh port，
-/// 避免测试/demo 中出现根与刷新族落入两个互不一致的 store。
+/// `find_active` 对缺失、终态及跨租户统一返回 `None`。所有终态安全 mutation
+/// 只能进入 [`IdentitySecurityLifecycle`]；本端口不提供 close/revoke 写能力。单一 provider
+/// 同时实现 lifecycle 与 refresh port，避免测试/demo 中出现根与刷新族落入两个
+/// 互不一致的 store。
 ///
 /// 公开 [`AuthGrantLifecycle`] 是 Send 变体，[`DynAuthGrantLifecycle`] 是组合根使用的 dyn wrapper。
 /// ref: ADR-019 AuthGrant root
@@ -1287,13 +1337,6 @@ pub trait AuthGrantLifecycleLocal: Send + Sync {
         grant_id: AuthGrantId,
         observed_at: SystemTime,
     ) -> Result<Option<AuthGrant>, IdentityError>;
-
-    /// Revoke the full refresh family and close the grant atomically.
-    async fn close(
-        &self,
-        scope: TenantRepoScope,
-        command: AuthGrantCloseCommand,
-    ) -> Result<(), IdentityError>;
 }
 
 /// Read-only, single-query durable fence for an already cryptographically verified RSS access
@@ -1323,6 +1366,13 @@ pub trait AuthGrantValidatorLocal: Send + Sync {
 #[dynosaur(pub DynIdentitySecurityLifecycle = dyn(box) IdentitySecurityLifecycle, bridge(dyn))]
 #[allow(async_fn_in_trait)]
 pub trait IdentitySecurityLifecycleLocal: Send + Sync {
+    async fn execute_refresh(
+        &self,
+        receipt: RefreshProducerReceipt,
+        scope: TenantRepoScope,
+        command: RefreshExecutionCommand,
+    ) -> Result<RefreshExecutionOutcome, IdentityError>;
+
     async fn execute_password_change(
         &self,
         receipt: PasswordChangeProducerReceipt,
@@ -1368,7 +1418,7 @@ pub trait AccountReactivationLifecycleLocal: Send + Sync {
     ) -> Result<AccountSecurityState, IdentityError>;
 }
 
-/// refresh token 持久化 store DI port（域形；provider 可换：prod postgres / test in-mem）——#1325。
+/// refresh token 只读 store DI port（域形；provider 可换：prod postgres / test in-mem）。
 ///
 /// 公开 [`RefreshTokenStore`] 是 **Send 变体**（adapter `impl RefreshTokenStore for ...`），
 /// [`DynRefreshTokenStore`] 是其 dyn-compatible wrapper（组合根经 `Box<DynRefreshTokenStore>` 注入，ADR-004 C1/C5）。
@@ -1384,13 +1434,11 @@ pub trait AccountReactivationLifecycleLocal: Send + Sync {
 /// `application::RefreshService`（域 / store 不做 crypto）。
 ///
 /// **租户隔离由签名承载（fail-closed，同 `CredentialRepo`/`AuthGrantLifecycle`）**：所有方法接
-/// [`TenantRepoScope`] 做 store scope；跨租 `find_by_hash`→`None`（不泄露存在性）、`rotate`→CAS miss、
-/// `revoke`/`revoke_lineage`→幂等 no-op。
+/// [`TenantRepoScope`] 做 store scope；跨租 `find_by_hash`→`None`（不泄露存在性）。
 ///
-/// **reuse-detection（旧 refresh 一次性 + 失窃检测）**：rotation 经 [`rotate`](RefreshTokenStoreLocal::rotate)
-/// 的**原子 CAS** 保证旧 token 一次性消费；命中已消费 / 已撤销 token（重放）由 application 经
-/// [`AuthGrantLifecycle::close`] 让 provider 在一个事务中 Compromised grant root 并撤销所有
-/// grant-bound refresh records（OAuth refresh rotation 标准）。
+/// **写能力刻意排除**：rotation、reuse containment、grant terminalization 与 outbox append 只能经
+/// [`IdentitySecurityLifecycle::execute_refresh`] 的 producer transaction 完成。reader 持有者在类型层
+/// 无法消费 token、创建 child 或撤销 family。
 ///
 /// ref: ory/fosite handler/oauth2/flow_refresh.go@master（refresh rotation + graceful reuse-detection，概念谱系）
 /// ref: Cockburn Hexagonal Ports&Adapters（repo 归域核心，adapter DIP 实现）
@@ -1408,38 +1456,6 @@ pub trait RefreshTokenStoreLocal: Send + Sync {
         scope: TenantRepoScope,
         hash: RefreshTokenHash,
     ) -> Result<Option<RefreshTokenRecord>, IdentityError>;
-
-    /// **原子 CAS 轮换**：仅当 `rotation.old_id()` 当前 `status == Active` 时，**同一事务**内标其 `Consumed`
-    /// + 插入 `rotation.new_record()`。
-    ///
-    /// 入参是 sealed [`RefreshRotation`] 命令（由源 record `begin_rotation` 派生）——tenant / parent / lineage
-    /// 已从源 record 派生，错位组合类型层不可表达（REFRESH-ROTATE-LINEAGE-01，#284 F2）。store 据
-    /// `rotation.new_record().tenant()` 注入 scope（无独立 `tenant` 入参可错位）。
-    ///
-    /// 返回 [`RefreshRotationOutcome::Applied`] = CAS 命中（old 当时仍 Active，已消费 + 写入 new）；
-    /// [`RefreshRotationOutcome::Replay`] = old 已非 Active（并发轮换 / 重放胜出者已消费它）——
-    /// **不写 new**，由 application 据此经 [`AuthGrantLifecycle::close`] 触发原子 grant/family
-    /// reuse-detection；
-    /// [`RefreshRotationOutcome::AccountStale`] = 最终 writer 事务观察到账号非 Active 或签发 epoch 已过期；
-    /// [`RefreshRotationOutcome::Expired`] = 最终 writer 事务观察到 old refresh 或其 AuthGrant 已过期。
-    /// 两种 fence 结果都让 old 保持未消费且不写 new。
-    /// 旧 refresh 一次性失效在类型层 + 事务 CAS 双重保证（杜绝 TOCTOU 双换）。
-    async fn rotate(
-        &self,
-        scope: TenantRepoScope,
-        mutation: RefreshRotationMutation,
-    ) -> Result<RefreshRotationOutcome, IdentityError>;
-
-    /// **显式 refresh 撤销 primitive**：把 `lineage_id` 家族全部记录置 `Revoked`。幂等（未知 / 跨租 /
-    /// 已撤销均 `Ok` 且 no-op）。
-    ///
-    /// 当前消费方是 [`crate::application::RefreshService::revoke`]；logout/reuse-detection 不走此独立写，
-    /// 而经 [`AuthGrantLifecycle::close`] 由 provider 原子关闭 root 与 grant-bound family。
-    async fn revoke_lineage(
-        &self,
-        scope: TenantRepoScope,
-        lineage_id: RefreshTokenId,
-    ) -> Result<(), IdentityError>;
 }
 
 /// Consumed owner that yields the lifecycle and refresh capabilities of one AuthGrant backend.
@@ -1450,19 +1466,25 @@ pub trait RefreshTokenStoreLocal: Send + Sync {
 pub trait AuthGrantProvider: Send + Sync + 'static {
     type Lifecycle: AuthGrantLifecycle + 'static;
     type RefreshStore: RefreshTokenStore + 'static;
+    type SecurityLifecycle: IdentitySecurityLifecycle + 'static;
 
-    fn into_auth_grant_parts(self) -> (Self::Lifecycle, Self::RefreshStore);
+    fn into_auth_grant_parts(
+        self,
+    ) -> (Self::Lifecycle, Self::RefreshStore, Self::SecurityLifecycle);
 }
 
 impl<T> AuthGrantProvider for T
 where
-    T: AuthGrantLifecycle + RefreshTokenStore + Clone + 'static,
+    T: AuthGrantLifecycle + RefreshTokenStore + IdentitySecurityLifecycle + Clone + 'static,
 {
     type Lifecycle = T;
     type RefreshStore = T;
+    type SecurityLifecycle = T;
 
-    fn into_auth_grant_parts(self) -> (Self::Lifecycle, Self::RefreshStore) {
-        (self.clone(), self)
+    fn into_auth_grant_parts(
+        self,
+    ) -> (Self::Lifecycle, Self::RefreshStore, Self::SecurityLifecycle) {
+        (self.clone(), self.clone(), self)
     }
 }
 
@@ -1595,7 +1617,7 @@ classify_identity_ports! {
     DynAccountSecurityReadRepo => diport::AuthEffect,
     DynAuthGrantValidator => diport::AuthEffect,
     DynCredentialRepo => diport::BusinessWriteEffect,
-    DynRefreshTokenStore => diport::BusinessWriteEffect,
+    DynRefreshTokenStore => diport::AuthEffect,
     DynPolicyLifecycle => diport::OutboxEffect,
     DynRoleBindingLifecycle => diport::OutboxEffect,
     DynAuthGrantLifecycle => diport::OutboxEffect,
@@ -1678,10 +1700,10 @@ mod smoke {
     //! smoke **只构造 Dyn wrapper + 断言 `Send`，不 `.await`**（不触 repo `todo!()`）。async future 的 Send + 跨
     //! `tokio::spawn` 调度由 diport `signer.rs` `mockall_mock_loads_into_dyn_signer` 同范式已证（dynosaur Send 变体保证）。
     use super::{
-        AuthGrant, AuthGrantCloseCommand, AuthGrantId, AuthGrantLifecycle, DynAuthGrantLifecycle,
-        DynRoleReadRepo, EventEntry, IdentityError, LoginGrantMutation, LoginProducerReceipt,
-        OutboxEmitError, OutboxEnvelopeParts, PersistedLoginGrantReceipt, Role, RoleId,
-        RoleReadRepo, TenantRepoScope,
+        AuthGrant, AuthGrantId, AuthGrantLifecycle, DynAuthGrantLifecycle, DynRoleReadRepo,
+        EventEntry, IdentityError, LoginGrantMutation, LoginProducerReceipt, OutboxEmitError,
+        OutboxEnvelopeParts, PersistedLoginGrantReceipt, Role, RoleId, RoleReadRepo,
+        TenantRepoScope,
     };
     use std::sync::Arc;
 
@@ -1774,13 +1796,6 @@ mod smoke {
         ) -> Result<Option<AuthGrant>, IdentityError> {
             todo!()
         }
-        async fn close(
-            &self,
-            _scope: TenantRepoScope,
-            _command: AuthGrantCloseCommand,
-        ) -> Result<(), IdentityError> {
-            todo!()
-        }
     }
 
     // PORT-SHAPE-01：native-AFIT impl 与 mockall mock 均经 `new_box` 装入 dynosaur Send+Sync 变体，
@@ -1838,11 +1853,6 @@ mod smoke {
                 grant_id: AuthGrantId,
                 observed_at: std::time::SystemTime,
             ) -> Result<Option<AuthGrant>, IdentityError>;
-            async fn close(
-                &self,
-                scope: TenantRepoScope,
-                command: AuthGrantCloseCommand,
-            ) -> Result<(), IdentityError>;
         }
     }
 }
@@ -1940,8 +1950,8 @@ mod smoke_refresh {
     //! 故只构造 Dyn wrapper + 断言 `Send + Sync`，**不 `.await`**（真实行为由 `internal::mem::InMemRefreshTokenStore`
     //! + `application::RefreshService` 集成测试覆盖）。
     use super::{
-        DynRefreshTokenStore, IdentityError, RefreshRotationMutation, RefreshTokenHash,
-        RefreshTokenId, RefreshTokenRecord, RefreshTokenStore, TenantRepoScope,
+        DynRefreshTokenStore, IdentityError, RefreshTokenHash, RefreshTokenRecord,
+        RefreshTokenStore, TenantRepoScope,
     };
 
     struct NoopRefreshTokenStore;
@@ -1951,20 +1961,6 @@ mod smoke_refresh {
             _scope: TenantRepoScope,
             _hash: RefreshTokenHash,
         ) -> Result<Option<RefreshTokenRecord>, IdentityError> {
-            todo!()
-        }
-        async fn rotate(
-            &self,
-            _scope: TenantRepoScope,
-            _mutation: RefreshRotationMutation,
-        ) -> Result<crate::RefreshRotationOutcome, IdentityError> {
-            todo!()
-        }
-        async fn revoke_lineage(
-            &self,
-            _scope: TenantRepoScope,
-            _lineage_id: RefreshTokenId,
-        ) -> Result<(), IdentityError> {
             todo!()
         }
     }
@@ -2007,8 +2003,6 @@ mod smoke_refresh {
         TestRefreshTokenStore {}
         impl RefreshTokenStore for TestRefreshTokenStore {
             async fn find_by_hash(&self, scope: TenantRepoScope, hash: RefreshTokenHash) -> Result<Option<RefreshTokenRecord>, IdentityError>;
-            async fn rotate(&self, scope: TenantRepoScope, mutation: RefreshRotationMutation) -> Result<crate::RefreshRotationOutcome, IdentityError>;
-            async fn revoke_lineage(&self, scope: TenantRepoScope, lineage_id: RefreshTokenId) -> Result<(), IdentityError>;
         }
     }
 }

@@ -19,6 +19,8 @@ const DELIVERY_POLICY_PROBE: &str =
     include_str!("../migrations/0077_expose_event_delivery_policy_probe.sql");
 const PROJECTION_INPUT_PROBE: &str =
     include_str!("../migrations/0078_expose_projection_input_generation_probe.sql");
+const AUTH_GRANT_SWEEPER_LOCK_ORDER: &str =
+    include_str!("../migrations/0079_align_auth_grant_sweeper_lock_order.sql");
 const ACCOUNT_SECURITY_CAPACITY_GATE: &str =
     include_str!("../../../docs/ops/0069-account-security-capacity-gate.sh");
 const ACCOUNT_SECURITY_CAPACITY_SELFTEST: &str =
@@ -36,6 +38,7 @@ fn security_definer_probes_trust_only_pg_catalog_and_pg_temp() {
     for (migration, sql) in [
         ("0077", DELIVERY_POLICY_PROBE),
         ("0078", PROJECTION_INPUT_PROBE),
+        ("0079", AUTH_GRANT_SWEEPER_LOCK_ORDER),
     ] {
         assert!(
             sql.contains("SECURITY DEFINER\nSET search_path = pg_catalog, pg_temp"),
@@ -46,6 +49,31 @@ fn security_definer_probes_trust_only_pg_catalog_and_pg_temp() {
             "{migration} must not trust public"
         );
     }
+}
+
+#[test]
+fn auth_grant_sweeper_replacement_locks_and_deletes_family_before_root() {
+    let normalized = AUTH_GRANT_SWEEPER_LOCK_ORDER
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    let family_lock = normalized
+        .find("FROM public.refresh_tokens AS refresh WHERE refresh.tenant_id = candidate.tenant_id")
+        .expect("0079 must lock the exact refresh family");
+    let family_delete = normalized
+        .find("DELETE FROM public.refresh_tokens AS refresh")
+        .expect("0079 must explicitly delete refresh children");
+    let root_delete = normalized
+        .find("DELETE FROM public.auth_grants AS root")
+        .expect("0079 must delete the AuthGrant only after its family");
+
+    assert!(family_lock < family_delete && family_delete < root_delete);
+    assert!(normalized.contains("ORDER BY refresh.id FOR UPDATE"));
+    assert!(
+        normalized.contains("CREATE OR REPLACE FUNCTION public.rss_sweep_expired_auth_grants()")
+    );
+    assert!(!normalized.contains("FOR UPDATE SKIP LOCKED"));
 }
 
 #[test]

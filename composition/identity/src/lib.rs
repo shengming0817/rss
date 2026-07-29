@@ -230,7 +230,8 @@ where
         authn::JwtIssuer::<diport::RssAccessProfile, _>::new(signer, boxed_clock(&clock), jwt)
             .map_err(|error| anyhow::anyhow!("jwt issuer config error: {error}"))?,
     );
-    let auth_grant_provider = pg.auth_grant_provider(boxed_clock(&clock));
+    let auth_grant_provider =
+        pg.auth_grant_provider(boxed_clock(&clock), Arc::clone(&pseudonym_keys));
     let auth_grants = AuthGrantServices::from_provider(
         auth_grant_provider,
         account_security_reads,
@@ -239,14 +240,13 @@ where
         refresh_ttl,
     );
     let refresh = auth_grants.refresh_service();
-    let identity_security_lifecycle = pg.identity_security_lifecycle(Arc::clone(&pseudonym_keys));
-    let account_reactivation_lifecycle = pg.account_reactivation_lifecycle(pseudonym_keys);
+    let account_reactivation_lifecycle = pg.account_reactivation_lifecycle();
     let password_policy = secure::PasswordPolicy::new(blocklist);
-    let credential_security = Arc::new(CredentialSecurityService::new(
+    let credential_security = Arc::new(CredentialSecurityService::new_with_shared_lifecycle(
         Arc::clone(&credentials),
         auth_grants.lifecycle(),
         DynAccountSecurityReadRepo::new_box(pg.account_security_repo()),
-        identity_security_lifecycle,
+        auth_grants.security_lifecycle(),
         account_reactivation_lifecycle,
         password_policy,
         boxed_clock(&clock),

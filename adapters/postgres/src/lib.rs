@@ -156,7 +156,9 @@ pub use dlq::PgDlqStore;
 pub use dlx_lifecycle::{PgDlxArchiveClaim, PgDlxLifecycleRepository, PgDlxLifecycleRuntime};
 pub use emitter::PgEmitter;
 #[cfg(feature = "domain-identity")]
-pub use identity_security_lifecycle::PgIdentitySecurityLifecycle;
+pub use identity_security_lifecycle::{
+    PgAccountReactivationLifecycle, PgIdentitySecurityLifecycle,
+};
 pub use outbox::{PgOutbox, PgOutboxMaintenance};
 pub use outbox_cdc::PgOutboxCdcEmitter;
 #[cfg(feature = "domain-identity")]
@@ -327,6 +329,10 @@ mod smoke {
         _: PhantomData<T>,
     ) {
     }
+    fn assert_account_reactivation_lifecycle<T: identity::ports::AccountReactivationLifecycle>(
+        _: PhantomData<T>,
+    ) {
+    }
     fn assert_inbox_store<T: consistency::InboxStore>(_: PhantomData<T>) {}
     fn assert_inbox_backlog<T: consistency::InboxBacklog>(_: PhantomData<T>) {}
     fn assert_outbox_backlog<T: consistency::OutboxBacklog>(_: PhantomData<T>) {}
@@ -363,6 +369,7 @@ mod smoke {
         // 只检查 trait 满足、不执行 body。
         assert_auth_grant_lifecycle(PhantomData::<super::PgAuthGrantLifecycle>);
         assert_identity_security_lifecycle(PhantomData::<super::PgIdentitySecurityLifecycle>);
+        assert_account_reactivation_lifecycle(PhantomData::<super::PgAccountReactivationLifecycle>);
         // `PgInboxStore: InboxStore + InboxBacklog` 类型级 anti-vacuity edge proof（不构造、不执行 body）。
         assert_inbox_store(PhantomData::<super::PgInboxStore>);
         assert_inbox_backlog(PhantomData::<super::PgInboxStore>);

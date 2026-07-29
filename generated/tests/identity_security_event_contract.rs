@@ -1,7 +1,7 @@
-//! `identity.security-event@v1` draft wire 回归。
+//! `identity.security-event@v1` active wire 回归。
 //!
-//! 契约只冻结安全事件分类、opaque target、租户和发生时间；不得把 raw subject/grant/token
-//! 等关联标识或凭据材料扩进 durable fact。生产接线与订阅不属于 draft。
+//! 契约冻结安全事件分类、pseudonymous actor/target、租户和发生时间；不得把 raw
+//! subject/grant/token 等关联标识或凭据材料扩进 durable fact。
 
 use generated::event::{
     EVENTS,
@@ -12,12 +12,13 @@ use generated::event::{
 };
 use serde_json::{Value, json};
 
-const CASES: [(&str, &str); 9] = [
+const CASES: [(&str, &str); 10] = [
     ("passwordChanged", "subject"),
     ("passwordReset", "subject"),
     ("accountLocked", "subject"),
     ("accountSuspended", "subject"),
     ("accountDeactivated", "subject"),
+    ("accountReactivated", "subject"),
     ("logoutCurrent", "grant"),
     ("logoutAll", "subject"),
     ("refreshReuseDetected", "grant"),
@@ -26,12 +27,18 @@ const CASES: [(&str, &str); 9] = [
 
 #[test]
 #[allow(clippy::expect_used)]
-fn all_nine_kinds_have_their_canonical_opaque_target_and_roundtrip() {
+fn all_ten_kinds_have_their_canonical_opaque_target_and_roundtrip() {
     for (kind_wire, target_kind) in CASES {
         let wire = json!({
             "kind": kind_wire,
+            "actor": {
+                "kind": "service",
+                "keyId": 1,
+                "ref": "507a4927-18d6-4e28-8964-ea4d21ce9e79",
+            },
             "target": {
                 "kind": target_kind,
+                "keyId": 1,
                 "ref": "4c2ca32f-2f92-41ba-a305-8b2bf6f9617a",
             },
             "tenantId": "tenant-a",
@@ -54,20 +61,23 @@ fn unknown_fields_kinds_and_targets_are_rejected() {
     for invalid in [
         json!({
             "kind": "logoutCurrent",
-            "target": {"kind": "grant", "ref": "4c2ca32f-2f92-41ba-a305-8b2bf6f9617a"},
+            "actor": {"kind": "service", "keyId": 1, "ref": "507a4927-18d6-4e28-8964-ea4d21ce9e79"},
+            "target": {"kind": "grant", "keyId": 1, "ref": "4c2ca32f-2f92-41ba-a305-8b2bf6f9617a"},
             "tenantId": "tenant-a",
             "occurredAt": 42,
             "subject": "forbidden",
         }),
         json!({
             "kind": "unknown",
-            "target": {"kind": "grant", "ref": "4c2ca32f-2f92-41ba-a305-8b2bf6f9617a"},
+            "actor": {"kind": "service", "keyId": 1, "ref": "507a4927-18d6-4e28-8964-ea4d21ce9e79"},
+            "target": {"kind": "grant", "keyId": 1, "ref": "4c2ca32f-2f92-41ba-a305-8b2bf6f9617a"},
             "tenantId": "tenant-a",
             "occurredAt": 42,
         }),
         json!({
             "kind": "logoutCurrent",
-            "target": {"kind": "unknown", "ref": "4c2ca32f-2f92-41ba-a305-8b2bf6f9617a"},
+            "actor": {"kind": "service", "keyId": 1, "ref": "507a4927-18d6-4e28-8964-ea4d21ce9e79"},
+            "target": {"kind": "unknown", "keyId": 1, "ref": "4c2ca32f-2f92-41ba-a305-8b2bf6f9617a"},
             "tenantId": "tenant-a",
             "occurredAt": 42,
         }),
@@ -98,7 +108,7 @@ fn schema_surface_is_exact_and_contains_no_sensitive_identifier_fields() {
         .expect("schema properties must be an object");
     let mut names = properties.keys().map(String::as_str).collect::<Vec<_>>();
     names.sort_unstable();
-    assert_eq!(names, ["kind", "occurredAt", "target", "tenantId"]);
+    assert_eq!(names, ["actor", "kind", "occurredAt", "target", "tenantId"]);
     assert_eq!(
         properties.get("kind").and_then(|kind| kind.get("enum")),
         Some(&json!([
@@ -107,12 +117,13 @@ fn schema_surface_is_exact_and_contains_no_sensitive_identifier_fields() {
             "accountLocked",
             "accountSuspended",
             "accountDeactivated",
+            "accountReactivated",
             "logoutCurrent",
             "logoutAll",
             "refreshReuseDetected",
             "credentialDeleted",
         ])),
-        "schema kind enum must be the exact closed nine-value wire set"
+        "schema kind enum must be the exact closed ten-value wire set"
     );
     let target = properties
         .get("target")
@@ -164,6 +175,7 @@ fn opaque_target_debug_redacts_the_correlating_reference() {
         .parse()
         .expect("uuid literal");
     let target = IdentitySecurityEventPayloadTarget {
+        key_id: std::num::NonZeroU64::new(1).expect("non-zero key id"),
         kind: IdentitySecurityEventPayloadTargetKind::Grant,
         ref_: reference,
     };
@@ -178,7 +190,8 @@ fn opaque_target_debug_redacts_the_correlating_reference() {
 }
 
 #[test]
-fn draft_fact_has_no_subscription_and_is_not_in_the_active_registry() {
-    assert!(SPEC.subscriptions().is_empty());
-    assert!(!EVENTS.contains(&SPEC));
+fn active_fact_has_the_required_audit_subscription_and_registry_entry() {
+    assert_eq!(SPEC.subscriptions().len(), 1);
+    assert_eq!(SPEC.subscriptions()[0].consumer(), "audit");
+    assert!(EVENTS.contains(&SPEC));
 }

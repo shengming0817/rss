@@ -851,3 +851,15 @@ PGHOST=127.0.0.1 PGPORT=5432 PGDATABASE=rss PGUSER=rss PGPASSWORD=... \
 `0078` 以 `search_path=pg_catalog, pg_temp`、撤销 `PUBLIC` 执行权的 `SECURITY DEFINER` 窄函数向 `rss_app`
 暴露指定 projection generation 的有序 binding 集合。serving 启动与周期 readiness 对该集合做 exact compare；
 `rss_app` 仍不持有 `projection_input_bindings` 的表级权限，missing/less/more 任一漂移均 fail closed。
+
+### 0079 AuthGrant sweeper 锁序对齐
+
+`0079` 直接替换 `rss_sweep_expired_auth_grants()`，不改变签名、owner、`SECURITY DEFINER`、固定
+`search_path` 或 ACL。旧函数先锁/删 AuthGrant root，再由 FK cascade 取得 refresh child 锁；这与 refresh
+writer 的 `account-security → refresh-family → auth-grant` 顺序相反。新函数先按 `(expires_at, tenant_id,
+grant_id)` 选择候选，再按 refresh id 稳定取得 family 锁并显式删除 children，最后重新验证 root 已过期后
+删除 root。并发 sweeper 或 writer 已处理目标时收敛为零行，不扩大到其他 family。
+
+这是 forward-only、non-rolling hard cutover。旧 binary 停止且连接排空后由唯一 migration runner 应用；
+ledger 到达 `79` 后只启动采用同一锁序的新 binary。若迁移失败且 ledger 未推进，确认事务完整回滚后重试；
+若 ledger 已到 `79`，不得回退旧 binary 或修改历史 migration，只能提交新的前向修复。

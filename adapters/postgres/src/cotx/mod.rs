@@ -38,26 +38,20 @@ use crate::pool::{
     VerifiedPgWriteStore,
 };
 use crate::projection_events::ProjectionWriteRegistry;
+#[cfg(any(feature = "domain-settings", feature = "domain-audit"))]
+use crate::tx_retry::LocalTxDeadline;
 use crate::tx_retry::{
-    LocalTxAcquireDeadline, LocalTxBeginDeadline, LocalTxCommitDeadline, LocalTxDeadline,
-    LocalTxOperationDeadline, LocalTxRollbackDeadline, LocalTxSetupDeadline, LocalTxStageResult,
+    LocalTxAcquireDeadline, LocalTxBeginDeadline, LocalTxCommitDeadline, LocalTxOperationDeadline,
+    LocalTxRollbackDeadline, LocalTxSetupDeadline, LocalTxStageResult,
 };
 #[cfg(feature = "domain-identity")]
 use crate::tx_retry::{OUTBOX_PRODUCER_BOUNDARY, record_settlement};
 
 mod settlement;
 
-#[cfg(any(
-    feature = "domain-settings",
-    feature = "domain-identity",
-    feature = "domain-audit"
-))]
+#[cfg(any(feature = "domain-settings", feature = "domain-audit"))]
 pub(crate) use settlement::{LocalTxAttempt, LocalTxRetryError, commit_unknown};
-#[cfg(not(any(
-    feature = "domain-settings",
-    feature = "domain-identity",
-    feature = "domain-audit"
-)))]
+#[cfg(not(any(feature = "domain-settings", feature = "domain-audit")))]
 pub(crate) use settlement::{LocalTxAttempt, commit_unknown};
 use settlement::{LocalTxConnectionLease, LocalTxTransaction, rollback_failed};
 
@@ -193,10 +187,14 @@ impl ProducerFactAuthorization for IntegrationCredentialSecurityAuthorization {
 /// Field-closed result of an authorized producer business mutation.
 ///
 /// The emitted branch can only carry an unforgeable authorization derived from the exact mounted
-/// producer marker. `NoMutation` is the only branch that reaches settlement without an append.
+/// producer marker. The two fact-free branches preserve the authoritative mutation truth:
+/// `MutatedWithoutFact` commits a business mutation without appending a fact, while `NoMutation`
+/// proves that the business body made no durable change.
 #[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
 pub(crate) enum ProducerTxOutcome<A, T> {
     Emitted(T, A),
+    #[cfg(feature = "domain-identity")]
+    MutatedWithoutFact(T),
     #[cfg(feature = "domain-identity")]
     NoMutation(T),
 }
@@ -219,6 +217,17 @@ impl<T, E> ProducerTxAttempt<T, E> {
     pub(crate) fn into_result(self) -> Result<T, E> {
         record_settlement(OUTBOX_PRODUCER_BOUNDARY, self.attempt.settlement());
         self.attempt.into_result()
+    }
+
+    /// Consume a refresh producer attempt and mint its acknowledgement only from the committed
+    /// branch of the opaque settlement carrier. Unknown commits and rollbacks cannot reach it.
+    pub(crate) fn into_refresh_commit_result(
+        self,
+    ) -> Result<(T, identity::ports::RefreshCommitAcknowledgement), E> {
+        record_settlement(OUTBOX_PRODUCER_BOUNDARY, self.attempt.settlement());
+        self.attempt
+            .into_result()
+            .map(|value| (value, identity::ports::acknowledge_durable_refresh_commit()))
     }
 }
 
@@ -254,7 +263,7 @@ impl<'tx> TxCapability<'tx> {
     /// has accepted the commit. The transaction-local marker is consumed by the settlement funnel;
     /// the default production feature graph cannot construct or trigger it. External journey
     /// access is admitted only through the named store constructor behind `journey-fault-support`.
-    #[cfg(any(all(test, feature = "integration"), feature = "journey-fault-support"))]
+    #[cfg(all(test, feature = "integration"))]
     pub(crate) async fn inject_commit_unknown_after_commit(&mut self) -> Result<(), sqlx::Error> {
         sqlx::query("SELECT set_config('rss.test_commit_unknown_after_commit', '1', true)")
             .execute(&mut *self.conn)
@@ -270,6 +279,18 @@ impl<'tx> TxCapability<'tx> {
         &mut self,
     ) -> Result<(), sqlx::Error> {
         sqlx::query("SELECT set_config('rss.test_fail_after_outbox_append', '1', true)")
+            .execute(&mut *self.conn)
+            .await
+            .map(|_| ())
+    }
+
+    /// Integration-only seam consumed after the projection mirror has been appended. This proves
+    /// rollback at the real projection boundary rather than failing inside the business mutation.
+    #[cfg(all(test, feature = "integration"))]
+    pub(crate) async fn inject_failure_after_projection_append(
+        &mut self,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query("SELECT set_config('rss.test_fail_after_projection_append', '1', true)")
             .execute(&mut *self.conn)
             .await
             .map(|_| ())
@@ -535,11 +556,7 @@ impl<L> PgWritePool<L> {
     }
 
     /// Run a tenant-scoped write transaction with a per-attempt lock wait bound.
-    #[cfg(any(
-        feature = "domain-settings",
-        feature = "domain-identity",
-        feature = "domain-audit"
-    ))]
+    #[cfg(any(feature = "domain-settings", feature = "domain-audit"))]
     pub(crate) async fn retry_write<S, T, F, E>(
         &self,
         scope: S,
@@ -849,6 +866,7 @@ pub(crate) async fn set_local_tenant(
         .map(|_| ())
 }
 
+#[cfg(any(feature = "domain-settings", feature = "domain-audit"))]
 async fn set_local_retry_deadlines(
     conn: &mut PgConnection,
     deadline: LocalTxDeadline,
@@ -894,6 +912,7 @@ where
     .await
 }
 
+#[cfg(any(feature = "domain-settings", feature = "domain-audit"))]
 async fn tenant_scoped_retry_write_inner<T, F, E>(
     pool: &PgPool,
     tenant: TenantId,
@@ -951,6 +970,7 @@ where
 #[derive(Clone, Copy)]
 enum LocalTxExecutionPolicy {
     Plain,
+    #[cfg(any(feature = "domain-settings", feature = "domain-audit"))]
     Deadline(LocalTxDeadline),
 }
 
@@ -964,6 +984,7 @@ impl LocalTxExecutionPolicy {
                 Ok(lease) => LocalTxStageResult::Complete(lease),
                 Err(error) => LocalTxStageResult::Failed(error),
             },
+            #[cfg(any(feature = "domain-settings", feature = "domain-audit"))]
             Self::Deadline(deadline) => {
                 deadline
                     .acquire(LocalTxConnectionLease::acquire(pool))
@@ -981,6 +1002,7 @@ impl LocalTxExecutionPolicy {
                 Ok(tx) => LocalTxStageResult::Complete(tx),
                 Err(error) => LocalTxStageResult::Failed(error),
             },
+            #[cfg(any(feature = "domain-settings", feature = "domain-audit"))]
             Self::Deadline(deadline) => deadline.begin(lease.begin()).await,
         }
     }
@@ -996,6 +1018,7 @@ impl LocalTxExecutionPolicy {
             set_local_tenant(tx.conn(), tenant).await?;
             match self {
                 Self::Plain => set_local_plain_lock_timeout(tx.conn()).await?,
+                #[cfg(any(feature = "domain-settings", feature = "domain-audit"))]
                 Self::Deadline(deadline) => {
                     // Compute immediately before this single round-trip; the following statement in
                     // `execute_local_tx` is the mutation itself.
@@ -1009,6 +1032,7 @@ impl LocalTxExecutionPolicy {
                 Ok(()) => LocalTxStageResult::Complete(()),
                 Err(error) => LocalTxStageResult::Failed(error),
             },
+            #[cfg(any(feature = "domain-settings", feature = "domain-audit"))]
             Self::Deadline(deadline) => deadline.setup(setup).await,
         }
     }
@@ -1026,6 +1050,7 @@ impl LocalTxExecutionPolicy {
                 Ok(value) => LocalTxStageResult::Complete(value),
                 Err(error) => LocalTxStageResult::Failed(error),
             },
+            #[cfg(any(feature = "domain-settings", feature = "domain-audit"))]
             Self::Deadline(deadline) => deadline.operation(future).await,
         }
     }
@@ -1039,6 +1064,7 @@ impl LocalTxExecutionPolicy {
                 Ok(()) => LocalTxStageResult::Complete(()),
                 Err(error) => LocalTxStageResult::Failed(error),
             },
+            #[cfg(any(feature = "domain-settings", feature = "domain-audit"))]
             Self::Deadline(deadline) => deadline.commit(future).await,
         }
     }
@@ -1052,6 +1078,7 @@ impl LocalTxExecutionPolicy {
                 Ok(()) => LocalTxStageResult::Complete(()),
                 Err(error) => LocalTxStageResult::Failed(error),
             },
+            #[cfg(any(feature = "domain-settings", feature = "domain-audit"))]
             Self::Deadline(deadline) => deadline.rollback(future).await,
         }
     }
@@ -1483,6 +1510,18 @@ async fn test_failure_after_outbox_append_requested(tx: &mut TxCapability<'_>) -
 }
 
 #[cfg(all(test, feature = "integration"))]
+async fn test_failure_after_projection_append_requested(tx: &mut TxCapability<'_>) -> bool {
+    sqlx::query_scalar::<_, Option<String>>(
+        "SELECT current_setting('rss.test_fail_after_projection_append', true)",
+    )
+    .fetch_one(tx.conn())
+    .await
+    .ok()
+    .flatten()
+    .is_some_and(|value| value == "1")
+}
+
+#[cfg(all(test, feature = "integration"))]
 async fn test_rollback_failed_after_rollback_requested(tx: &mut TxCapability<'_>) -> bool {
     sqlx::query_scalar::<_, Option<String>>(
         "SELECT current_setting('rss.test_rollback_failed_after_rollback', true)",
@@ -1598,6 +1637,14 @@ where
                 .await
                 .map_err(ProducerTxWriteError::AppendOutbox)?;
             #[cfg(all(test, feature = "integration"))]
+            if test_failure_after_projection_append_requested(tx).await {
+                return Err(ProducerTxWriteError::AppendOutbox(
+                    OutboxAppendError::Storage(sqlx::Error::Protocol(
+                        "injected failure after projection append".to_owned(),
+                    )),
+                ));
+            }
+            #[cfg(all(test, feature = "integration"))]
             if test_failure_after_outbox_append_requested(tx).await {
                 return Err(ProducerTxWriteError::AppendOutbox(
                     OutboxAppendError::Storage(sqlx::Error::Protocol(
@@ -1608,7 +1655,9 @@ where
             Ok(value)
         }
         #[cfg(feature = "domain-identity")]
-        ProducerTxOutcome::NoMutation(value) => Ok(value),
+        ProducerTxOutcome::MutatedWithoutFact(value) | ProducerTxOutcome::NoMutation(value) => {
+            Ok(value)
+        }
     }
 }
 

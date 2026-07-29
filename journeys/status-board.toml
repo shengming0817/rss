@@ -11,15 +11,6 @@ marker = "AUDIT_LIST_TENANT_ENTRIES"
 runner = "journeys/tests/audit_list_tenant_entries_localtx_journey.rs"
 
 [[journeys]]
-id = "identity-refresh-localtx"
-contractId = "identity.refresh"
-txModel = "tenant-scoped-uow"
-spec = "journeys/identity-refresh-localtx-journey.toml"
-fixture = "fixtures/identity-refresh-localtx.toml"
-marker = "IDENTITY_REFRESH"
-runner = "journeys/tests/identity_refresh_localtx_journey.rs"
-
-[[journeys]]
 id = "settings-secret-publish-localtx"
 contractId = "settings.secret-publish"
 txModel = "repo-atomic-cas"

@@ -1,0 +1,64 @@
+schemaVersion = 1
+id = "identity-refresh-producer-transaction"
+contractId = "identity.refresh"
+txModel = "producer-transaction"
+spec = "journeys/identity-refresh-producer-transaction-journey.toml"
+runner = "journeys/tests/identity_refresh_producer_transaction_journey.rs"
+marker = "IDENTITY_REFRESH"
+delegatedEvidence = [
+  "adapters/postgres::refresh_rotation_commit_unknown_never_returns_a_persisted_receipt",
+]
+
+[[cases]]
+id = "identity-refresh-happy-no-event"
+scenario = "rotation-without-security-event"
+httpStatus = 201
+durableMutations = 2
+securityEvents = 0
+settlement = "committed"
+redactSentinels = ["presented-happy-refresh"]
+
+[[cases]]
+id = "identity-refresh-malformed"
+scenario = "failure-zero-effects"
+httpStatus = 400
+durableMutations = 0
+securityEvents = 0
+settlement = "not-started"
+redactSentinels = ["malformed-refresh-sentinel"]
+
+[[cases]]
+id = "identity-refresh-unknown"
+scenario = "failure-zero-effects"
+httpStatus = 401
+durableMutations = 0
+securityEvents = 0
+settlement = "not-started"
+redactSentinels = ["unknown-refresh-secret-sentinel"]
+
+[[cases]]
+id = "identity-refresh-contention-winner"
+scenario = "concurrent-reuse-containment"
+httpStatus = 201
+durableMutations = 2
+securityEvents = 0
+settlement = "committed"
+redactSentinels = ["presented-contention-refresh"]
+
+[[cases]]
+id = "identity-refresh-contention-loser"
+scenario = "concurrent-reuse-containment"
+httpStatus = 401
+durableMutations = 3
+securityEvents = 1
+settlement = "committed"
+redactSentinels = ["presented-contention-refresh"]
+
+[[cases]]
+id = "identity-refresh-commit-unknown"
+scenario = "commit-unknown-without-bearer"
+httpStatus = 500
+durableMutations = 0
+securityEvents = 0
+settlement = "commit-unknown"
+redactSentinels = ["commit-unknown-refresh-secret-sentinel"]

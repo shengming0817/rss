@@ -59,6 +59,18 @@ pub(crate) fn collect(
     root: &Path,
     producers: &BTreeMap<String, &DiscoveredContract>,
 ) -> Result<BTreeMap<String, ProducerExecutionProjection>> {
+    let mut refresh_commit_files = Vec::new();
+    for directory in [
+        "adapters",
+        "assemblies",
+        "bins",
+        "composition",
+        "crates",
+        "examples",
+    ] {
+        refresh_commit_files.extend(production_rs_files(root, &root.join(directory))?);
+    }
+    ensure_exact_refresh_commit_ack_mints(&refresh_commit_files)?;
     let compositions = collect_producer_composition(root)?;
     let transaction_closure = canonical_transaction_closure(root)?;
     let mut by_domain = BTreeMap::<String, Vec<(&String, &DiscoveredContract)>>::new();
@@ -532,6 +544,141 @@ fn exact_method_call_count(block: &syn::Block, method: &str) -> usize {
     let mut calls = Calls { method, count: 0 };
     calls.visit_block(block);
     calls.count
+}
+
+fn refresh_commit_ack_mint_calls(files: &[SourceFile]) -> anyhow::Result<Vec<RustItemProjection>> {
+    let mut calls = Vec::new();
+    for file in files {
+        collect_items(&file.syntax.items, true, &mut |item, production| {
+            if !production {
+                return Ok(());
+            }
+            match item {
+                Item::Impl(item) => {
+                    let Some(owner) = type_last_ident(&item.self_ty) else {
+                        return Ok(());
+                    };
+                    for member in &item.items {
+                        let syn::ImplItem::Fn(method) = member else {
+                            continue;
+                        };
+                        if attrs_are_production(&method.attrs) {
+                            for _ in 0..refresh_commit_ack_references(&method.block) {
+                                calls.push(RustItemProjection {
+                                    repo_path: file.repo_path.clone(),
+                                    symbol: format!("{owner}::{}", method.sig.ident),
+                                });
+                            }
+                        }
+                    }
+                }
+                Item::Fn(function) => {
+                    for _ in 0..refresh_commit_ack_references(&function.block) {
+                        calls.push(RustItemProjection {
+                            repo_path: file.repo_path.clone(),
+                            symbol: function.sig.ident.to_string(),
+                        });
+                    }
+                }
+                _ => {}
+            }
+            Ok(())
+        })?;
+    }
+    calls.sort();
+    Ok(calls)
+}
+
+/// Count every syntactic way production code can name the private commit acknowledgement mint.
+///
+/// This intentionally accepts only the canonical direct path in the exact owner. Function-item
+/// aliases and macro-hidden calls carry no stronger provenance than a second direct mint, so they
+/// enter the exact set as additional evidence and make the gate fail closed.
+fn refresh_commit_ack_references(block: &syn::Block) -> usize {
+    const MINT: &str = "acknowledge_durable_refresh_commit";
+
+    struct Aliases {
+        names: BTreeSet<String>,
+    }
+    impl Visit<'_> for Aliases {
+        fn visit_item_use(&mut self, item: &syn::ItemUse) {
+            fn collect(tree: &syn::UseTree, names: &mut BTreeSet<String>) {
+                match tree {
+                    syn::UseTree::Name(name) if name.ident == MINT => {
+                        names.insert(MINT.to_owned());
+                    }
+                    syn::UseTree::Rename(rename) if rename.ident == MINT => {
+                        names.insert(rename.rename.to_string());
+                    }
+                    syn::UseTree::Path(path) => collect(&path.tree, names),
+                    syn::UseTree::Group(group) => {
+                        for item in &group.items {
+                            collect(item, names);
+                        }
+                    }
+                    syn::UseTree::Name(_) | syn::UseTree::Rename(_) | syn::UseTree::Glob(_) => {}
+                }
+            }
+            collect(&item.tree, &mut self.names);
+        }
+    }
+
+    let mut aliases = Aliases {
+        names: BTreeSet::from([MINT.to_owned()]),
+    };
+    aliases.visit_block(block);
+
+    struct References<'a> {
+        names: &'a BTreeSet<String>,
+        count: usize,
+    }
+    impl Visit<'_> for References<'_> {
+        fn visit_expr_path(&mut self, path: &syn::ExprPath) {
+            if path
+                .path
+                .segments
+                .last()
+                .is_some_and(|segment| self.names.contains(&segment.ident.to_string()))
+            {
+                self.count += 1;
+            }
+            visit::visit_expr_path(self, path);
+        }
+
+        fn visit_macro(&mut self, expression: &syn::Macro) {
+            fn contains_name(stream: proc_macro2::TokenStream, names: &BTreeSet<String>) -> bool {
+                stream.into_iter().any(|token| match token {
+                    proc_macro2::TokenTree::Ident(ident) => names.contains(&ident.to_string()),
+                    proc_macro2::TokenTree::Group(group) => contains_name(group.stream(), names),
+                    proc_macro2::TokenTree::Punct(_) | proc_macro2::TokenTree::Literal(_) => false,
+                })
+            }
+            if contains_name(expression.tokens.clone(), self.names) {
+                self.count += 1;
+            }
+            visit::visit_macro(self, expression);
+        }
+    }
+
+    let mut references = References {
+        names: &aliases.names,
+        count: 0,
+    };
+    references.visit_block(block);
+    references.count
+}
+
+fn ensure_exact_refresh_commit_ack_mints(files: &[SourceFile]) -> anyhow::Result<()> {
+    let actual = refresh_commit_ack_mint_calls(files)?;
+    let expected = vec![RustItemProjection {
+        repo_path: "adapters/postgres/src/cotx/mod.rs".to_string(),
+        symbol: "ProducerTxAttempt::into_refresh_commit_result".to_string(),
+    }];
+    ensure!(
+        actual == expected,
+        "refresh commit acknowledgement mint exact-set drift: expected={expected:?} actual={actual:?}"
+    );
+    Ok(())
 }
 
 fn ensure_exact_production_symbol(
@@ -1143,29 +1290,34 @@ fn provider_settlement_consumer(
     match transaction_method {
         "producer_tx" => {
             struct Consumers {
-                count: usize,
+                methods: Vec<String>,
             }
             impl Visit<'_> for Consumers {
                 fn visit_expr_method_call(&mut self, call: &syn::ExprMethodCall) {
                     if attrs_are_production(&call.attrs)
-                        && call.method == "into_result"
+                        && matches!(
+                            call.method.to_string().as_str(),
+                            "into_result" | "into_refresh_commit_result"
+                        )
                         && expression_chain_has_awaited_method(&call.receiver, "producer_tx")
                     {
-                        self.count += 1;
+                        self.methods.push(call.method.to_string());
                     }
                     visit::visit_expr_method_call(self, call);
                 }
             }
-            let mut consumers = Consumers { count: 0 };
+            let mut consumers = Consumers {
+                methods: Vec::new(),
+            };
             consumers.visit_block(block);
             ensure!(
-                consumers.count == 1,
-                "plain producer transaction must reach exactly one ProducerTxAttempt::into_result consumer, got {}",
-                consumers.count
+                consumers.methods.len() == 1,
+                "plain producer transaction must reach exactly one ProducerTxAttempt settlement consumer, got {:?}",
+                consumers.methods
             );
             Ok(RustItemProjection {
                 repo_path: "adapters/postgres/src/cotx/mod.rs".to_string(),
-                symbol: "ProducerTxAttempt::into_result".to_string(),
+                symbol: format!("ProducerTxAttempt::{}", consumers.methods[0]),
             })
         }
         "retry_producer_tx" => {
@@ -2324,6 +2476,7 @@ fn route_sealed_command_binding(signature: &syn::Signature) -> Option<String> {
                         | "LogoutAllCommand"
                         | "PasswordChangeCommand"
                         | "AccountStatusSetCommand"
+                        | "RefreshExecutionCommand"
                 )
             )
             .then(|| binding.ident.to_string())
@@ -2894,6 +3047,7 @@ mod tests {
             "LogoutAllCommand",
             "PasswordChangeCommand",
             "AccountStatusSetCommand",
+            "RefreshExecutionCommand",
         ] {
             let canonical: syn::ItemFn = syn::parse_str(&format!(
                 "async fn execute(command: identity::ports::{command}) {{ helper(command).await }}"
@@ -3000,6 +3154,7 @@ mod tests {
                 "execute_logout_all",
                 "execute_logout_current",
                 "execute_password_change",
+                "execute_refresh",
             ]),
             "the route-sealed identity-security producer method set must remain exact"
         );
@@ -3022,6 +3177,246 @@ mod tests {
             syn::TraitItem::Fn(method) if method.sig.ident == "execute_reactivation"
         ));
         Ok(())
+    }
+
+    fn refresh_writer_calls(files: &[SourceFile]) -> anyhow::Result<Vec<RustItemProjection>> {
+        let mut calls = BTreeSet::new();
+        for file in files {
+            collect_items(&file.syntax.items, true, &mut |item, production| {
+                if !production {
+                    return Ok(());
+                }
+                match item {
+                    Item::Impl(item) => {
+                        let Some(owner) = type_last_ident(&item.self_ty) else {
+                            return Ok(());
+                        };
+                        for member in &item.items {
+                            let syn::ImplItem::Fn(method) = member else {
+                                continue;
+                            };
+                            if !attrs_are_production(&method.attrs) {
+                                continue;
+                            }
+                            for _ in 0..exact_method_call_count(&method.block, "execute_refresh") {
+                                calls.insert(RustItemProjection {
+                                    repo_path: file.repo_path.clone(),
+                                    symbol: format!("{owner}::{}", method.sig.ident),
+                                });
+                            }
+                        }
+                    }
+                    Item::Fn(function) => {
+                        for _ in 0..exact_method_call_count(&function.block, "execute_refresh") {
+                            calls.insert(RustItemProjection {
+                                repo_path: file.repo_path.clone(),
+                                symbol: function.sig.ident.to_string(),
+                            });
+                        }
+                    }
+                    _ => {}
+                }
+                Ok(())
+            })?;
+        }
+        Ok(calls.into_iter().collect())
+    }
+
+    fn ensure_exact_refresh_writer(files: &[SourceFile]) -> anyhow::Result<()> {
+        let actual = refresh_writer_calls(files)?;
+        let expected = vec![RustItemProjection {
+            repo_path: "crates/identity/src/application/mod.rs".to_string(),
+            symbol: "RefreshService::rotate".to_string(),
+        }];
+        ensure!(
+            actual == expected,
+            "refresh writer callsite exact-set drift: expected={expected:?} actual={actual:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn refresh_commit_ack_mint_exact_set_rejects_fakes_dead_helpers_and_duplicates()
+    -> anyhow::Result<()> {
+        fn canonical() -> anyhow::Result<[SourceFile; 2]> {
+            Ok([
+                SourceFile {
+                    repo_path: "adapters/postgres/src/cotx/mod.rs".into(),
+                    syntax: syn::parse_file(
+                        r#"
+                        impl ProducerTxAttempt {
+                            fn into_refresh_commit_result(self) {
+                                identity::ports::acknowledge_durable_refresh_commit();
+                            }
+                            #[cfg(test)]
+                            fn fake_commit() {
+                                identity::ports::acknowledge_durable_refresh_commit();
+                            }
+                        }
+                        "#,
+                    )?,
+                },
+                SourceFile {
+                    repo_path: "crates/identity/src/internal/mem.rs".into(),
+                    syntax: syn::parse_file(
+                        r#"
+                        impl InMemAuthGrantStore {
+                            fn execute_refresh(&self) {
+                                // acknowledge_durable_refresh_commit();
+                                let bait = "acknowledge_durable_refresh_commit()";
+                                let _ = bait;
+                                crate::ports::acknowledge_durable_refresh_commit();
+                            }
+                        }
+                        "#,
+                    )?,
+                },
+            ])
+        }
+
+        let [postgres, _test_only_memory] = canonical()?;
+        ensure_exact_refresh_commit_ack_mints(&[postgres])?;
+
+        let fake = SourceFile {
+            repo_path: "assemblies/runtime/src/refresh_fake.rs".into(),
+            syntax: syn::parse_file(
+                "fn forge() { identity::ports::acknowledge_durable_refresh_commit(); }",
+            )?,
+        };
+        let [postgres, _test_only_memory] = canonical()?;
+        assert!(
+            ensure_exact_refresh_commit_ack_mints(&[postgres, fake]).is_err(),
+            "a direct production fake must fail the exact set"
+        );
+
+        let duplicate = SourceFile {
+            repo_path: "adapters/postgres/src/cotx/mod.rs".into(),
+            syntax: syn::parse_file(
+                r#"
+                impl ProducerTxAttempt {
+                    fn into_refresh_commit_result(self) {
+                        identity::ports::acknowledge_durable_refresh_commit();
+                        identity::ports::acknowledge_durable_refresh_commit();
+                    }
+                }
+                "#,
+            )?,
+        };
+        assert!(
+            ensure_exact_refresh_commit_ack_mints(&[duplicate]).is_err(),
+            "duplicate acknowledgement minting in the canonical owner must fail"
+        );
+
+        for (name, source) in [
+            (
+                "import-alias",
+                r#"
+                fn forge() {
+                    use identity::ports::acknowledge_durable_refresh_commit as mint;
+                    mint();
+                }
+                "#,
+            ),
+            (
+                "function-item",
+                r#"
+                fn forge() {
+                    let mint = identity::ports::acknowledge_durable_refresh_commit;
+                    mint();
+                }
+                "#,
+            ),
+            (
+                "macro-hidden",
+                r#"
+                fn forge() {
+                    invoke!(identity::ports::acknowledge_durable_refresh_commit);
+                }
+                "#,
+            ),
+        ] {
+            let synthetic = SourceFile {
+                repo_path: format!("assemblies/runtime/src/{name}.rs"),
+                syntax: syn::parse_file(source)?,
+            };
+            let [postgres, _test_only_memory] = canonical()?;
+            assert!(
+                ensure_exact_refresh_commit_ack_mints(&[postgres, synthetic]).is_err(),
+                "{name} acknowledgement mint must fail the production exact set"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn refresh_writer_exact_set_rejects_decoys_dead_helpers_and_extra_files() -> anyhow::Result<()>
+    {
+        let canonical = SourceFile {
+            repo_path: "crates/identity/src/application/mod.rs".into(),
+            syntax: syn::parse_file(
+                r#"
+                impl RefreshService {
+                    async fn rotate(&self) {
+                        // self.lifecycle.execute_refresh(receipt, command).await;
+                        let bait = "self.lifecycle.execute_refresh(receipt, command).await";
+                        let _ = bait;
+                        self.lifecycle.execute_refresh(receipt, command).await;
+                    }
+
+                    #[cfg(test)]
+                    async fn test_only(&self) {
+                        self.lifecycle.execute_refresh(receipt, command).await;
+                    }
+                }
+                "#,
+            )?,
+        };
+        ensure_exact_refresh_writer(std::slice::from_ref(&canonical))?;
+
+        let dead_helper = SourceFile {
+            repo_path: "crates/identity/src/application/mod.rs".into(),
+            syntax: syn::parse_file(
+                r#"
+                impl RefreshService {
+                    async fn rotate(&self) {
+                        self.lifecycle.execute_refresh(receipt, command).await;
+                    }
+                    async fn unused_bypass(&self) {
+                        self.lifecycle.execute_refresh(receipt, command).await;
+                    }
+                }
+                "#,
+            )?,
+        };
+        assert!(
+            ensure_exact_refresh_writer(&[dead_helper]).is_err(),
+            "an unreachable helper must not become acceptable refresh-writer evidence"
+        );
+
+        let extra_file = SourceFile {
+            repo_path: "crates/identity/src/bypass.rs".into(),
+            syntax: syn::parse_file(
+                r#"
+                async fn direct_write(lifecycle: &Lifecycle) {
+                    lifecycle.execute_refresh(receipt, command).await;
+                }
+                "#,
+            )?,
+        };
+        assert!(
+            ensure_exact_refresh_writer(&[canonical, extra_file]).is_err(),
+            "a direct writer from an extra production file must fail the exact set"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn workspace_refresh_writer_callsite_is_exact_and_non_vacuous() -> anyhow::Result<()> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .context("xtask must live below the workspace root")?;
+        let files = production_rs_files(root, &root.join("crates/identity/src"))?;
+        ensure_exact_refresh_writer(&files)
     }
 
     #[test]
@@ -3391,6 +3786,36 @@ mod tests {
             }"#,
         )?;
         assert_eq!(unsafe_no_mutation_count(&optional_row), 0);
+
+        let conditional_refresh: syn::Block = syn::parse_str(
+            r#"{
+                let result = apply_refresh_execution(conn, source).await?;
+                let emitted = matches!(result, RefreshMutationResult::ReuseContained);
+                if emitted {
+                    Ok(ProducerTxOutcome::Emitted(result, authorization))
+                } else {
+                    Ok(ProducerTxOutcome::NoMutation(result))
+                }
+            }"#,
+        )?;
+        assert_eq!(
+            unsafe_no_mutation_count(&conditional_refresh),
+            1,
+            "an opaque business mutation cannot be excused by refresh-specific source shape"
+        );
+
+        let typed_fact_free_mutation: syn::Block = syn::parse_str(
+            r#"{
+                let result = apply_refresh_execution(conn, source).await?;
+                Ok(match result {
+                    RefreshMutationResult::ReuseContained => {
+                        ProducerTxOutcome::Emitted(result, authorization)
+                    }
+                    _ => ProducerTxOutcome::MutatedWithoutFact(result),
+                })
+            }"#,
+        )?;
+        assert_eq!(unsafe_no_mutation_count(&typed_fact_free_mutation), 0);
 
         let unrelated_zero: syn::Block = syn::parse_str(
             r#"{

@@ -34,7 +34,7 @@ const EXPECTED_ACTIVE_SPECS: &[(&str, HttpConsistencyLevel)] = &[
     ("identity.policies-list", HttpConsistencyLevel::LocalOnly),
     ("identity.policies-update", HttpConsistencyLevel::OutboxFact),
     ("identity.profile", HttpConsistencyLevel::LocalOnly),
-    ("identity.refresh", HttpConsistencyLevel::LocalTx),
+    ("identity.refresh", HttpConsistencyLevel::OutboxFact),
     ("identity.roles-assign", HttpConsistencyLevel::OutboxFact),
     ("identity.roles-list", HttpConsistencyLevel::LocalOnly),
     ("identity.roles-revoke", HttpConsistencyLevel::OutboxFact),
@@ -49,7 +49,6 @@ const EXPECTED_ACTIVE_SPECS: &[(&str, HttpConsistencyLevel)] = &[
 
 const EXPECTED_LOCAL_TX_SPECS: &[(&str, LocalTxModel)] = &[
     ("audit.list-tenant-entries", LocalTxModel::TenantScopedUow),
-    ("identity.refresh", LocalTxModel::TenantScopedUow),
     ("settings.secret-publish", LocalTxModel::RepoAtomicCas),
 ];
 

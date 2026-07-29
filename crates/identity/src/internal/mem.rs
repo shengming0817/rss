@@ -1,8 +1,8 @@
 //! in-memory 仓储实现（域内 / 域形 DI port 的 test / seed-login 替身）。
 //!
 //! - [`InMemCredentialRepo`]：`CredentialRepo` 域形 DI port 的 in-mem 替身（哈希凭据 + 锁定态持久化），PR3。
-//! - [`InMemAuthGrantStore`]：同一共享状态实现 `AuthGrantLifecycle` 与 `RefreshTokenStore`，使认证授权根、
-//!   初始刷新记录和后续刷新族在 test / seed-login 路径始终同源。
+//! - [`InMemAuthGrantStore`]：同一共享状态实现 grant 创建/读取、refresh 读取与安全 lifecycle，
+//!   使认证授权根、刷新族和 reuse containment 在 test / seed-login 路径始终同源。
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -14,16 +14,20 @@ use crate::domain::{
 };
 use crate::ports::{AccountSecurityReadRepo, CredentialRepo, TenantRepoScope};
 #[cfg(test)]
-use authn::{AuthGrant, AuthGrantId, AuthGrantStatus};
+use authn::{AuthGrant, AuthGrantId, AuthGrantStatus, GrantSecurityEventKind};
 use vocab::TenantId;
 
-// 认证授权根 in-mem 替身在 test / seed-login 构建启用；单一 Mutex 是原子 login/close/rotate 的事务边界。
+// 认证授权根 in-mem 替身在 test / seed-login 构建启用；单一 Mutex 是原子 login/refresh-security 的事务边界。
 #[cfg(test)]
 use crate::domain::{RefreshStatus, RefreshTokenHash, RefreshTokenId, RefreshTokenRecord};
 #[cfg(test)]
 use crate::ports::{
-    AuthGrantCloseCommand, AuthGrantLifecycle, LoginGrantMutation, RefreshRotationMutation,
-    RefreshTokenStore,
+    AccountStatusSetCommand, AccountStatusSetProducerReceipt, AuthGrantLifecycle,
+    CredentialSecurityReceipt, IdentitySecurityLifecycle, LoginGrantMutation, LogoutAllCommand,
+    LogoutAllProducerReceipt, LogoutCurrentCommand, LogoutCurrentProducerReceipt,
+    PasswordChangeCommand, PasswordChangeProducerReceipt, RefreshExecutionCommand,
+    RefreshExecutionOutcome, RefreshProducerReceipt, RefreshTokenStore, SECURITY_EVENT_CONTRACT,
+    SECURITY_EVENT_FACT,
 };
 #[cfg(test)]
 use consistency::EventEntry;
@@ -283,7 +287,7 @@ impl AccountSecurityReadRepo for InMemCredentialRepo {
 }
 
 // ---------------------------------------------------------------------------
-// InMemAuthGrantStore — unified AuthGrantLifecycle + RefreshTokenStore substitute
+// InMemAuthGrantStore — unified grant/refresh reader + security lifecycle substitute
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
@@ -460,44 +464,191 @@ impl AuthGrantLifecycle for InMemAuthGrantStore {
             })
             .cloned())
     }
+}
 
-    async fn close(
+#[cfg(test)]
+fn refresh_binding_matches(left: &RefreshTokenRecord, right: &RefreshTokenRecord) -> bool {
+    left.id() == right.id()
+        && left.tenant() == right.tenant()
+        && left.auth_grant_id() == right.auth_grant_id()
+        && left.user_id() == right.user_id()
+        && left.issuance_epoch() == right.issuance_epoch()
+        && left.token_hash() == right.token_hash()
+        && left.parent_id() == right.parent_id()
+        && left.lineage_id() == right.lineage_id()
+        && left.issued_at() == right.issued_at()
+        && left.expires_at() == right.expires_at()
+}
+
+#[cfg(test)]
+fn refresh_grant_binding_matches(refresh: &RefreshTokenRecord, grant: &AuthGrant) -> bool {
+    refresh.tenant() == grant.tenant()
+        && refresh.auth_grant_id() == grant.id()
+        && refresh.user_id() == grant.user_id()
+        && refresh.issuance_epoch() == grant.authn_epoch_at_issue()
+        && refresh.expires_at() <= grant.expires_at()
+}
+
+#[cfg(test)]
+impl IdentitySecurityLifecycle for InMemAuthGrantStore {
+    async fn execute_refresh(
         &self,
+        receipt: RefreshProducerReceipt,
         scope: TenantRepoScope,
-        command: AuthGrantCloseCommand,
-    ) -> Result<(), IdentityError> {
-        let (mutation, _observation) = command.into_parts();
-        let (expected, next) = mutation.into_parts();
-        let mut state = recover(&self.inner);
-        let Some(current) = state.grants.get(next.id()) else {
-            return Ok(());
-        };
-        if current.tenant() != scope.tenant() {
-            return Ok(());
-        }
-        if !expected.matches_snapshot(current) {
-            return Err(IdentityError::VersionConflict);
-        }
-        let binding_mismatch = expected.id() != next.id()
-            || expected.tenant() != next.tenant()
-            || expected.user_id() != next.user_id()
-            || expected.authn_epoch_at_issue() != next.authn_epoch_at_issue()
-            || expected.auth_time() != next.auth_time()
-            || expected.created_at() != next.created_at()
-            || expected.expires_at() != next.expires_at();
-        if binding_mismatch || next.status() == AuthGrantStatus::Active {
-            return Err(storage_error("authentication grant close binding mismatch"));
+        command: RefreshExecutionCommand,
+    ) -> Result<RefreshExecutionOutcome, IdentityError> {
+        let _authorization = receipt
+            .authorize(SECURITY_EVENT_FACT, SECURITY_EVENT_CONTRACT)
+            .ok_or_else(|| storage_error("refresh producer does not authorize security-event"))?;
+        let (source, rotation, event, pending) = command.into_parts();
+        if scope.tenant() != source.tenant()
+            || event.kind()
+                != authn::CredentialSecurityEventKind::Grant(
+                    GrantSecurityEventKind::RefreshReuseDetected,
+                )
+            || event.tenant() != source.tenant()
+            || event.user_id() != source.user_id()
+            || event.grant_id() != Some(source.auth_grant_id())
+        {
+            return Ok(RefreshExecutionOutcome::Stale);
         }
 
-        for refresh in state.refresh.values_mut().filter(|record| {
-            record.tenant() == next.tenant() && record.auth_grant_id() == next.id()
-        }) {
-            *refresh = refresh
-                .with_status(RefreshStatus::Revoked)
-                .with_grant_status(next.status());
+        let mut state = recover(&self.inner);
+        let Some(stored) = state.refresh.get(source.id()).cloned() else {
+            return Ok(RefreshExecutionOutcome::Stale);
+        };
+        if !refresh_binding_matches(&stored, &source) {
+            return Ok(RefreshExecutionOutcome::Stale);
         }
-        state.grants.insert(next.id().clone(), next);
-        Ok(())
+        let Some(grant) = state.grants.get(stored.auth_grant_id()).cloned() else {
+            return Ok(RefreshExecutionOutcome::Stale);
+        };
+        if !refresh_grant_binding_matches(&stored, &grant) {
+            return Ok(RefreshExecutionOutcome::Stale);
+        }
+
+        if stored.status() != RefreshStatus::Active {
+            let already_contained = grant.status() == AuthGrantStatus::Compromised;
+            let compromised = if already_contained {
+                grant
+            } else if matches!(
+                grant.status(),
+                AuthGrantStatus::Active | AuthGrantStatus::Revoked
+            ) {
+                let closed_at = event
+                    .occurred_at()
+                    .max(grant.closed_at().unwrap_or(grant.created_at()));
+                grant
+                    .close(GrantSecurityEventKind::RefreshReuseDetected, closed_at)
+                    .map_err(|_| storage_error("refresh reuse grant transition rejected"))?
+                    .next()
+                    .clone()
+            } else {
+                return Ok(RefreshExecutionOutcome::Stale);
+            };
+            for record in state.refresh.values_mut().filter(|record| {
+                record.tenant() == stored.tenant()
+                    && record.auth_grant_id() == stored.auth_grant_id()
+                    && record.lineage_id() == stored.lineage_id()
+            }) {
+                *record = record
+                    .with_status(RefreshStatus::Revoked)
+                    .with_grant_status(AuthGrantStatus::Compromised);
+            }
+            state.grants.insert(compromised.id().clone(), compromised);
+            return Ok(if already_contained {
+                RefreshExecutionOutcome::AlreadyContained
+            } else {
+                RefreshExecutionOutcome::ReuseContained
+            });
+        }
+
+        let Some(rotation) = rotation else {
+            return Ok(RefreshExecutionOutcome::Stale);
+        };
+        if source.status() != RefreshStatus::Active
+            || source.auth_grant_status() != AuthGrantStatus::Active
+            || grant.status() != AuthGrantStatus::Active
+        {
+            return Ok(RefreshExecutionOutcome::Stale);
+        }
+        let new = rotation.new_record().clone();
+        if rotation.old_id() != stored.id()
+            || new.parent_id() != Some(stored.id())
+            || new.lineage_id() != stored.lineage_id()
+            || !refresh_grant_binding_matches(&new, &grant)
+            || new.auth_grant_status() != AuthGrantStatus::Active
+        {
+            return Ok(RefreshExecutionOutcome::Stale);
+        }
+        let decision_time = (*recover(&self.writer_now))
+            .max(event.occurred_at())
+            .max(new.issued_at());
+        if stored.is_expired(decision_time)
+            || grant.expires_at() <= decision_time
+            || new.expires_at() > stored.expires_at()
+        {
+            return Ok(RefreshExecutionOutcome::Expired);
+        }
+        if state.refresh.contains_key(new.id())
+            || state.refresh.values().any(|record| {
+                record.tenant() == new.tenant() && record.token_hash() == new.token_hash()
+            })
+        {
+            return Err(storage_error("refresh rotation target already exists"));
+        }
+        state.refresh.insert(
+            stored.id().clone(),
+            stored.with_status(RefreshStatus::Consumed),
+        );
+        state.refresh.insert(new.id().clone(), new);
+        Ok(RefreshExecutionOutcome::Applied(pending.confirm(
+            crate::ports::acknowledge_durable_refresh_commit(),
+        )))
+    }
+
+    async fn execute_password_change(
+        &self,
+        _receipt: PasswordChangeProducerReceipt,
+        _scope: TenantRepoScope,
+        _command: PasswordChangeCommand,
+    ) -> Result<CredentialSecurityReceipt, IdentityError> {
+        Err(storage_error(
+            "memory grant store does not provide password-change lifecycle",
+        ))
+    }
+
+    async fn execute_account_status_set(
+        &self,
+        _receipt: AccountStatusSetProducerReceipt,
+        _scope: TenantRepoScope,
+        _command: AccountStatusSetCommand,
+    ) -> Result<CredentialSecurityReceipt, IdentityError> {
+        Err(storage_error(
+            "memory grant store does not provide account-status lifecycle",
+        ))
+    }
+
+    async fn execute_logout_current(
+        &self,
+        _receipt: LogoutCurrentProducerReceipt,
+        _scope: TenantRepoScope,
+        _command: LogoutCurrentCommand,
+    ) -> Result<CredentialSecurityReceipt, IdentityError> {
+        Err(storage_error(
+            "memory grant store does not provide logout-current lifecycle",
+        ))
+    }
+
+    async fn execute_logout_all(
+        &self,
+        _receipt: LogoutAllProducerReceipt,
+        _scope: TenantRepoScope,
+        _command: LogoutAllCommand,
+    ) -> Result<CredentialSecurityReceipt, IdentityError> {
+        Err(storage_error(
+            "memory grant store does not provide logout-all lifecycle",
+        ))
     }
 }
 
@@ -1269,88 +1420,6 @@ impl RefreshTokenStore for InMemAuthGrantStore {
             .find(|r| r.tenant() == tenant && r.token_hash() == &hash)
             .cloned())
     }
-
-    async fn rotate(
-        &self,
-        scope: TenantRepoScope,
-        mutation: RefreshRotationMutation,
-    ) -> Result<crate::RefreshRotationOutcome, IdentityError> {
-        let (rotation, _observation) = mutation.into_parts();
-        let old_id = rotation.old_id().clone();
-        let new = rotation.new_record().clone();
-        let tenant = new.tenant();
-        if scope.tenant() != tenant {
-            return Err(storage_error("refresh rotate tenant scope mismatch"));
-        }
-        let mut state = recover(&self.inner);
-        let Some(old) = state.refresh.get(&old_id).cloned() else {
-            return Ok(crate::RefreshRotationOutcome::Replay);
-        };
-        if old.auth_grant_status() != AuthGrantStatus::Active {
-            return Ok(crate::RefreshRotationOutcome::AccountStale);
-        }
-        if old.status() != RefreshStatus::Active {
-            return Ok(crate::RefreshRotationOutcome::Replay);
-        }
-        let decision_time = (*recover(&self.writer_now)).max(new.issued_at());
-        if old.is_expired(decision_time) {
-            return Ok(crate::RefreshRotationOutcome::Expired);
-        }
-        if old.tenant() != tenant
-            || new.parent_id() != Some(old.id())
-            || new.lineage_id() != old.lineage_id()
-            || new.auth_grant_id() != old.auth_grant_id()
-            || new.user_id() != old.user_id()
-            || new.issuance_epoch() != old.issuance_epoch()
-            || new.auth_grant_status() != AuthGrantStatus::Active
-        {
-            return Err(storage_error("refresh rotation binding mismatch"));
-        }
-        let Some(grant) = state.grants.get(old.auth_grant_id()) else {
-            return Err(storage_error("refresh rotation grant is missing"));
-        };
-        if grant.tenant() != tenant
-            || grant.user_id() != old.user_id()
-            || grant.authn_epoch_at_issue() != old.issuance_epoch()
-        {
-            return Err(storage_error("refresh rotation grant binding mismatch"));
-        }
-        if grant.status() != AuthGrantStatus::Active {
-            return Ok(crate::RefreshRotationOutcome::AccountStale);
-        }
-        if grant.expires_at() <= decision_time || new.expires_at() > grant.expires_at() {
-            return Ok(crate::RefreshRotationOutcome::Expired);
-        }
-        if state.refresh.contains_key(new.id())
-            || state.refresh.values().any(|record| {
-                record.tenant() == new.tenant() && record.token_hash() == new.token_hash()
-            })
-        {
-            return Err(storage_error("refresh rotation target already exists"));
-        }
-        state
-            .refresh
-            .insert(old_id, old.with_status(RefreshStatus::Consumed));
-        state.refresh.insert(new.id().clone(), new);
-        Ok(crate::RefreshRotationOutcome::Applied)
-    }
-
-    async fn revoke_lineage(
-        &self,
-        scope: TenantRepoScope,
-        lineage_id: RefreshTokenId,
-    ) -> Result<(), IdentityError> {
-        let tenant = scope.tenant();
-        let mut state = recover(&self.inner);
-        for record in state
-            .refresh
-            .values_mut()
-            .filter(|record| record.lineage_id() == &lineage_id && record.tenant() == tenant)
-        {
-            *record = record.with_status(RefreshStatus::Revoked);
-        }
-        Ok(())
-    }
 }
 
 #[cfg(test)]
@@ -1367,10 +1436,10 @@ mod tests {
         ResourceAttributeResourceId, ResourceAttributeVersion, RoleBinding, RoleId,
     };
     use crate::ports::{
-        AccountSecurityReadRepo, AuthGrantCloseCommand, AuthGrantLifecycle, CredentialRepo,
-        LoginGrantMutation, PolicyLifecycle, PolicyRepo, RefreshTokenStore,
-        ResourceAttributeReadRepo, ResourceAttributeWriteRepo, RoleBindingLifecycle,
-        TenantRepoScope,
+        AccountSecurityReadRepo, AuthGrantLifecycle, CredentialRepo, IdentitySecurityLifecycle,
+        LoginGrantMutation, PolicyLifecycle, PolicyRepo, RefreshExecutionCommand,
+        RefreshExecutionOutcome, RefreshTokenStore, ResourceAttributeReadRepo,
+        ResourceAttributeWriteRepo, RoleBindingLifecycle, TenantRepoScope,
     };
     use authn::{
         AuthGrant, AuthGrantId, AuthGrantSnapshot, AuthGrantStatus, AuthnEpoch,
@@ -1381,7 +1450,7 @@ mod tests {
     use generated::http::identity_v1::{
         login::PRODUCER as LOGIN_PRODUCER, policies_create::PRODUCER as POLICIES_CREATE_PRODUCER,
         policies_deactivate::PRODUCER as POLICIES_DEACTIVATE_PRODUCER,
-        roles_assign::PRODUCER as ROLES_ASSIGN_PRODUCER,
+        refresh::PRODUCER as REFRESH_PRODUCER, roles_assign::PRODUCER as ROLES_ASSIGN_PRODUCER,
         roles_revoke::PRODUCER as ROLES_REVOKE_PRODUCER,
     };
     use httpserve::ProducerMarker;
@@ -1423,6 +1492,10 @@ mod tests {
 
     fn login_receipt() -> crate::ports::LoginProducerReceipt {
         ProducerMarker::for_test(LOGIN_PRODUCER).into_receipt()
+    }
+
+    fn refresh_receipt() -> crate::ports::RefreshProducerReceipt {
+        ProducerMarker::for_test(REFRESH_PRODUCER).into_receipt()
     }
 
     fn policy_create_receipt() -> crate::ports::PoliciesCreateProducerReceipt {
@@ -1514,6 +1587,28 @@ mod tests {
 
     fn login_mutation(grant: AuthGrant, refresh: RefreshTokenRecord) -> LoginGrantMutation {
         LoginGrantMutation::new(grant, refresh)
+    }
+
+    fn rotation_command(
+        source: RefreshTokenRecord,
+        grant: AuthGrant,
+        new_id: &str,
+        new_hash: [u8; 32],
+        now: SystemTime,
+    ) -> RefreshExecutionCommand {
+        let active =
+            AccountSecurityState::initial(source.tenant(), source.user_id(), source.issued_at())
+                .try_into_active()
+                .expect("active account");
+        let rotation = source
+            .begin_rotation(
+                RefreshTokenId::new(new_id),
+                RefreshTokenHash::new(new_hash),
+                now,
+            )
+            .expect("valid rotation");
+        RefreshExecutionCommand::rotate(source, grant, active, rotation, now)
+            .expect("valid refresh command")
     }
 
     fn policy_id(raw: &str) -> PolicyId {
@@ -2468,61 +2563,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lifecycle_close_uses_full_expected_snapshot_and_promotes_compromise() {
-        let repo = InMemAuthGrantStore::new();
-        let ta = tid(TENANT_A);
-        let grant = make_grant("grant-002", ta);
-        let refresh = make_initial(&grant, "refresh-002", [2; 32], RefreshStatus::Active);
-        let _persisted = repo
-            .persist_login_grant(
-                login_receipt(),
-                scope(ta),
-                login_mutation(grant.clone(), refresh),
-                dummy_entry(),
-                dummy_envelope(),
-            )
-            .await
-            .expect("persist ok");
-        let transition = grant
-            .clone()
-            .close(GrantSecurityEventKind::LogoutCurrent, epoch(2_000))
-            .expect("close transition");
-        let revoked = transition.next().clone();
-        let concurrent_stale_transition = grant
-            .close(GrantSecurityEventKind::LogoutCurrent, epoch(2_001))
-            .expect("stale close transition");
-        repo.close(scope(ta), AuthGrantCloseCommand::for_test(transition))
-            .await
-            .expect("close ok");
-        let stale = repo
-            .close(
-                scope(ta),
-                AuthGrantCloseCommand::for_test(concurrent_stale_transition),
-            )
-            .await;
-        assert!(matches!(stale, Err(IdentityError::VersionConflict)));
-
-        let promotion = revoked
-            .close(GrantSecurityEventKind::RefreshReuseDetected, epoch(2_002))
-            .expect("revoked grant may be promoted after refresh reuse");
-        repo.close(scope(ta), AuthGrantCloseCommand::for_test(promotion))
-            .await
-            .expect("current revoked snapshot must promote to compromised");
-        let found = repo
-            .find_active(scope(ta), grant_id("grant-002"), SystemTime::UNIX_EPOCH)
-            .await
-            .expect("find ok");
-        assert!(found.is_none(), "closed grant must not be active");
-        let refresh = repo
-            .find_by_hash(scope(ta), RefreshTokenHash::new([2; 32]))
-            .await
-            .expect("refresh find")
-            .expect("refresh retained for replay detection");
-        assert_eq!(refresh.status(), RefreshStatus::Revoked);
-        assert_eq!(refresh.auth_grant_status(), AuthGrantStatus::Compromised);
-    }
-
-    #[tokio::test]
     async fn lifecycle_cross_tenant_find_returns_none() {
         let repo = InMemAuthGrantStore::new();
         let ta = tid(TENANT_A);
@@ -2598,10 +2638,8 @@ mod tests {
     // Unified refresh behavior
     // ---------------------------------------------------------------------------
 
-    // ── RT M1：rotate CAS miss — old 状态非 Active → Replay，new 不写入 ──────────
-
     #[tokio::test]
-    async fn in_mem_rotate_cas_miss_consumed_status_returns_replay_no_write() {
+    async fn in_mem_refresh_rotation_then_reuse_is_contained_atomically() {
         let store = InMemAuthGrantStore::new();
         let ta = tid(TENANT_A);
         let old_hash = [0x11u8; 32];
@@ -2613,74 +2651,76 @@ mod tests {
             .persist_login_grant(
                 login_receipt(),
                 scope(ta),
-                login_mutation(grant, old_rec.clone()),
+                login_mutation(grant.clone(), old_rec.clone()),
                 dummy_entry(),
                 dummy_envelope(),
             )
             .await
             .expect("persist");
         let issued = epoch(1_001);
-        let first = old_rec
-            .begin_rotation(
-                RefreshTokenId::new("aaaaaaaa-0012-4000-8000-000000000011"),
-                RefreshTokenHash::new([0x10; 32]),
-                issued,
-            )
-            .expect("first rotation");
-        let _persisted = store
-            .rotate(
-                scope(ta),
-                crate::ports::RefreshRotationMutation::for_test(first),
-            )
+        let first = rotation_command(
+            old_rec.clone(),
+            grant.clone(),
+            "aaaaaaaa-0012-4000-8000-000000000011",
+            [0x10; 32],
+            issued,
+        );
+        let first_outcome = store
+            .execute_refresh(refresh_receipt(), scope(ta), first)
             .await
             .expect("first rotate");
-        let rotation = old_rec
-            .begin_rotation(
-                RefreshTokenId::new("aaaaaaaa-0012-4000-8000-000000000012"),
-                RefreshTokenHash::new(new_hash),
-                issued,
-            )
-            .expect("replay rotation");
+        assert!(matches!(first_outcome, RefreshExecutionOutcome::Applied(_)));
+        let rotation = rotation_command(
+            old_rec.clone(),
+            grant,
+            "aaaaaaaa-0012-4000-8000-000000000012",
+            new_hash,
+            issued,
+        );
         let result = store
-            .rotate(
-                scope(ta),
-                crate::ports::RefreshRotationMutation::for_test(rotation),
-            )
+            .execute_refresh(refresh_receipt(), scope(ta), rotation)
             .await
             .expect("rotate ok");
-        assert_eq!(
-            result,
-            crate::RefreshRotationOutcome::Replay,
-            "Consumed 状态 CAS miss 应返回 replay"
-        );
+        assert!(matches!(result, RefreshExecutionOutcome::ReuseContained));
 
-        // new 不应写入
+        // The replay's proposed child is never written.
         let new_found = store
             .find_by_hash(scope(ta), RefreshTokenHash::new(new_hash))
             .await
             .expect("find ok");
         assert!(new_found.is_none(), "CAS miss 时 new 不应写入");
 
-        // old 仍 Consumed（不变）
+        // The winning family and grant are fenced in the same critical section.
         let old_found = store
             .find_by_hash(scope(ta), RefreshTokenHash::new(old_hash))
             .await
             .expect("find ok");
         assert_eq!(
             old_found.expect("old exists").status(),
-            RefreshStatus::Consumed,
-            "old stays consumed"
+            RefreshStatus::Revoked,
+            "reuse containment revokes the whole family"
+        );
+        assert_eq!(
+            store
+                .grant_snapshot(&grant_id("grant-rt-m1"))
+                .expect("grant")
+                .status(),
+            AuthGrantStatus::Compromised
+        );
+        assert!(
+            store
+                .refresh_family_snapshot(&grant_id("grant-rt-m1"))
+                .iter()
+                .all(|record| {
+                    record.status() == RefreshStatus::Revoked
+                        && record.auth_grant_status() == AuthGrantStatus::Compromised
+                }),
+            "reuse containment fences every record in the family"
         );
     }
 
-    // ── RT M2：rotate 一次性 CAS — 同一 Active old 连 rotate 两次 → 首次 Applied、二次 Replay ──
-    //
-    // 注：sealed RefreshRotation（#284 F2）由源 record 派生 tenant，故「跨租 rotate」类型层不可表达
-    // （rotation.new.tenant 恒 = 源 tenant）——跨租隔离已由 find_by_hash 跨租→None（见 in_mem_find...）+
-    // 服务级 R6 覆盖。本测试改测 store 层一次性 CAS（首次消费旧 token 后二次必 miss）。
-
     #[tokio::test]
-    async fn in_mem_rotate_is_one_time_second_rotate_misses() {
+    async fn in_mem_refresh_repeated_reuse_is_already_contained() {
         let store = InMemAuthGrantStore::new();
         let ta = tid(TENANT_A);
         let old_hash = [0x13u8; 32];
@@ -2693,62 +2733,66 @@ mod tests {
             .persist_login_grant(
                 login_receipt(),
                 scope(ta),
-                login_mutation(grant, old_rec.clone()),
+                login_mutation(grant.clone(), old_rec.clone()),
                 dummy_entry(),
                 dummy_envelope(),
             )
             .await
             .expect("persist");
 
-        // 首次 rotate：源 Active → CAS 命中 → Applied（old→Consumed，new 写入）
-        let rotation1 = old_rec
-            .begin_rotation(
-                RefreshTokenId::new("aaaaaaaa-0014-4000-8000-000000000014"),
-                RefreshTokenHash::new(new_hash),
-                issued,
-            )
-            .expect("rotation");
-        assert_eq!(
+        // First rotation consumes the source and persists one child.
+        let rotation1 = rotation_command(
+            old_rec.clone(),
+            grant.clone(),
+            "aaaaaaaa-0014-4000-8000-000000000014",
+            new_hash,
+            issued,
+        );
+        assert!(matches!(
             store
-                .rotate(
-                    scope(ta),
-                    crate::ports::RefreshRotationMutation::for_test(rotation1),
-                )
+                .execute_refresh(refresh_receipt(), scope(ta), rotation1)
                 .await
                 .expect("rotate ok"),
-            crate::RefreshRotationOutcome::Applied,
-            "首次 rotate 应命中 CAS"
-        );
+            RefreshExecutionOutcome::Applied(_)
+        ));
 
-        // 二次 rotate 同一 old（现已 Consumed）→ CAS miss → Replay（一次性）
-        let rotation2 = old_rec
-            .begin_rotation(
-                RefreshTokenId::new("aaaaaaaa-0015-4000-8000-000000000015"),
-                RefreshTokenHash::new([0x15u8; 32]),
-                issued,
-            )
-            .expect("rotation");
-        assert_eq!(
+        // Reuse contains once; subsequent evidence is idempotent.
+        let rotation2 = rotation_command(
+            old_rec.clone(),
+            grant.clone(),
+            "aaaaaaaa-0015-4000-8000-000000000015",
+            [0x15u8; 32],
+            issued,
+        );
+        assert!(matches!(
             store
-                .rotate(
-                    scope(ta),
-                    crate::ports::RefreshRotationMutation::for_test(rotation2),
-                )
+                .execute_refresh(refresh_receipt(), scope(ta), rotation2)
                 .await
-                .expect("rotate ok"),
-            crate::RefreshRotationOutcome::Replay,
-            "二次 rotate 同一 old 应 miss（一次性）"
-        );
+                .expect("contain reuse"),
+            RefreshExecutionOutcome::ReuseContained
+        ));
+        let repeated = RefreshExecutionCommand::contain_reuse(
+            old_rec.with_status(RefreshStatus::Consumed),
+            issued,
+        )
+        .expect("non-active reuse command");
+        assert!(matches!(
+            store
+                .execute_refresh(refresh_receipt(), scope(ta), repeated)
+                .await
+                .expect("repeat containment"),
+            RefreshExecutionOutcome::AlreadyContained
+        ));
 
-        // old 现为 Consumed；二次的 new（0x15）未写入
+        // Neither reuse attempt persists its proposed child.
         let old_found = store
             .find_by_hash(scope(ta), RefreshTokenHash::new(old_hash))
             .await
             .expect("find ok");
         assert_eq!(
             old_found.expect("old exists").status(),
-            RefreshStatus::Consumed,
-            "首次 rotate 后 old 应 Consumed"
+            RefreshStatus::Revoked,
+            "reuse containment revokes old"
         );
         let third_found = store
             .find_by_hash(scope(ta), RefreshTokenHash::new([0x15u8; 32]))
@@ -2780,25 +2824,22 @@ mod tests {
             )
             .await
             .expect("persist");
-        let rotation = old
-            .begin_rotation(
-                RefreshTokenId::new("aaaaaaaa-0032-4000-8000-000000000032"),
-                RefreshTokenHash::new(new_hash),
-                epoch(1_001),
-            )
-            .expect("prepare before expiry");
+        let rotation = rotation_command(
+            old.clone(),
+            grant.clone(),
+            "aaaaaaaa-0032-4000-8000-000000000032",
+            new_hash,
+            epoch(1_001),
+        );
 
         store.set_writer_now(grant.expires_at());
-        assert_eq!(
+        assert!(matches!(
             store
-                .rotate(
-                    scope(tenant),
-                    crate::ports::RefreshRotationMutation::for_test(rotation),
-                )
+                .execute_refresh(refresh_receipt(), scope(tenant), rotation)
                 .await
                 .expect("writer fence"),
-            crate::RefreshRotationOutcome::Expired
-        );
+            RefreshExecutionOutcome::Expired
+        ));
         assert_eq!(
             store
                 .find_by_hash(scope(tenant), RefreshTokenHash::new(old_hash))
@@ -2819,13 +2860,10 @@ mod tests {
         );
     }
 
-    // ── RT M3：revoke_lineage 跨租 no-op — tenant B 调用 → tenant A 记录不变 ─────
-
     #[tokio::test]
-    async fn in_mem_revoke_lineage_cross_tenant_noop() {
+    async fn in_mem_refresh_reuse_promotes_revoked_grant_to_compromised() {
         let store = InMemAuthGrantStore::new();
         let ta = tid(TENANT_A);
-        let tb = tid(TENANT_B);
         let hash_a = [0x15u8; 32];
         let lineage_str = "aaaaaaaa-0015-4000-8000-000000000015";
 
@@ -2835,29 +2873,50 @@ mod tests {
             .persist_login_grant(
                 login_receipt(),
                 scope(ta),
-                login_mutation(grant, rec_a),
+                login_mutation(grant.clone(), rec_a.clone()),
                 dummy_entry(),
                 dummy_envelope(),
             )
             .await
             .expect("persist");
-
-        // tenant B 用相同 lineage_id 调 revoke_lineage → WHERE tenant 不匹配 → no-op
-        store
-            .revoke_lineage(scope(tb), RefreshTokenId::new(lineage_str))
-            .await
-            .expect("revoke_lineage ok");
-
-        // tenant A 的记录仍 Active（未受影响）
+        let revoked = grant
+            .close(GrantSecurityEventKind::LogoutCurrent, epoch(1_001))
+            .expect("revoke")
+            .next()
+            .clone();
+        let revoked_refresh = rec_a
+            .with_status(RefreshStatus::Revoked)
+            .with_grant_status(AuthGrantStatus::Revoked);
+        {
+            let mut state = recover(&store.inner);
+            state.grants.insert(revoked.id().clone(), revoked);
+            state
+                .refresh
+                .insert(revoked_refresh.id().clone(), revoked_refresh.clone());
+        }
+        let command = RefreshExecutionCommand::contain_reuse(revoked_refresh, epoch(1_002))
+            .expect("revoked refresh is reuse evidence");
+        assert!(matches!(
+            store
+                .execute_refresh(refresh_receipt(), scope(ta), command)
+                .await
+                .expect("contain"),
+            RefreshExecutionOutcome::ReuseContained
+        ));
+        assert_eq!(
+            store
+                .grant_snapshot(&grant_id("grant-rt-m3"))
+                .expect("grant")
+                .status(),
+            AuthGrantStatus::Compromised
+        );
         let found = store
             .find_by_hash(scope(ta), RefreshTokenHash::new(hash_a))
             .await
-            .expect("find ok");
-        assert_eq!(
-            found.expect("A exists").status(),
-            RefreshStatus::Active,
-            "跨租 revoke_lineage 不影响 tenant A 的记录"
-        );
+            .expect("find")
+            .expect("refresh");
+        assert_eq!(found.status(), RefreshStatus::Revoked);
+        assert_eq!(found.auth_grant_status(), AuthGrantStatus::Compromised);
     }
 
     // ── RT M4：find_by_hash 跨租 → None（anti-vacuity：同租 → Some）────────────────

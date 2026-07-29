@@ -6,26 +6,38 @@
 
 use identity::ports::AuthGrantProvider;
 
-use crate::{PgAuthGrantLifecycle, PgRefreshTokenStore};
+use crate::{PgAuthGrantLifecycle, PgIdentitySecurityLifecycle, PgRefreshTokenStore};
 
 /// Opaque owner used by [`identity::AuthGrantServices`].
 pub struct PgAuthGrantProvider {
     lifecycle: PgAuthGrantLifecycle,
     refresh: PgRefreshTokenStore,
+    security: PgIdentitySecurityLifecycle,
 }
 
 impl PgAuthGrantProvider {
-    pub(crate) fn new(lifecycle: PgAuthGrantLifecycle, refresh: PgRefreshTokenStore) -> Self {
-        Self { lifecycle, refresh }
+    pub(crate) fn new(
+        lifecycle: PgAuthGrantLifecycle,
+        refresh: PgRefreshTokenStore,
+        security: PgIdentitySecurityLifecycle,
+    ) -> Self {
+        Self {
+            lifecycle,
+            refresh,
+            security,
+        }
     }
 }
 
 impl AuthGrantProvider for PgAuthGrantProvider {
     type Lifecycle = PgAuthGrantLifecycle;
     type RefreshStore = PgRefreshTokenStore;
+    type SecurityLifecycle = PgIdentitySecurityLifecycle;
 
-    fn into_auth_grant_parts(self) -> (Self::Lifecycle, Self::RefreshStore) {
-        (self.lifecycle, self.refresh)
+    fn into_auth_grant_parts(
+        self,
+    ) -> (Self::Lifecycle, Self::RefreshStore, Self::SecurityLifecycle) {
+        (self.lifecycle, self.refresh, self.security)
     }
 }
 

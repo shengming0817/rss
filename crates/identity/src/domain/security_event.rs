@@ -20,8 +20,10 @@ use authn::{
 
 use super::{
     AccountSecurityMutation, AccountSecurityState, AccountSecurityTransitionError, AccountStatus,
-    Credential,
+    Credential, RefreshTokenRecord,
 };
+
+const REFRESH_REUSE_DETECTOR_SUBJECT: &str = "identity.refresh-reuse-detector";
 
 fn transition_account_security(
     kind: AccountSecurityEventKind,
@@ -120,6 +122,14 @@ impl CredentialSecurityInitiator {
             tenant,
             kind,
             subject: subject.into(),
+        }
+    }
+
+    pub(crate) fn refresh_reuse_detector(tenant: TenantId) -> Self {
+        Self {
+            tenant,
+            kind: vocab::PrincipalKind::Service,
+            subject: REFRESH_REUSE_DETECTOR_SUBJECT.to_owned(),
         }
     }
 
@@ -237,6 +247,19 @@ impl CredentialSecurityEvent {
                 grant_id: grant.id().clone(),
             },
             initiator,
+            occurred_at,
+        }
+    }
+
+    pub(crate) fn from_refresh_reuse(record: &RefreshTokenRecord, occurred_at: SystemTime) -> Self {
+        Self {
+            kind: CredentialSecurityEventKind::Grant(GrantSecurityEventKind::RefreshReuseDetected),
+            tenant: record.tenant(),
+            target: CredentialSecurityTarget::Grant {
+                user_id: record.user_id(),
+                grant_id: record.auth_grant_id().clone(),
+            },
+            initiator: CredentialSecurityInitiator::refresh_reuse_detector(record.tenant()),
             occurred_at,
         }
     }

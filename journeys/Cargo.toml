@@ -29,8 +29,8 @@ path = "tests/identity_password_security_event_journey.rs"
 required-features = ["integration"]
 
 [[test]]
-name = "identity_refresh_localtx_journey"
-path = "tests/identity_refresh_localtx_journey.rs"
+name = "identity_refresh_producer_transaction_journey"
+path = "tests/identity_refresh_producer_transaction_journey.rs"
 required-features = ["integration"]
 
 [[test]]

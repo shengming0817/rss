@@ -67,7 +67,7 @@ use ::generated::http::identity_v1::{
     },
     refresh::{
         IdentityRefreshData, IdentityRefreshRequest, IdentityRefreshResponse,
-        ROUTE as REFRESH_HTTP_ROUTE, SPEC as REFRESH_HTTP_SPEC,
+        PRODUCER as REFRESH_PRODUCER, SPEC as REFRESH_HTTP_SPEC,
     },
     roles_assign::{
         IdentityRolesAssignData, IdentityRolesAssignRequest, IdentityRolesAssignResponse,
@@ -135,20 +135,21 @@ use crate::domain::{
     AbacAttribute, AttributeKey, AttributeValue, AuthOutcome, IdentityError, LoginIdentifier,
     POLICY_ATTR_CONTRACT_ID, POLICY_ATTR_PERMISSION, POLICY_ATTR_PRINCIPAL_ID,
     POLICY_ATTR_PRINCIPAL_KIND, POLICY_ATTR_RESOURCE_ID, POLICY_ATTR_TENANT_ID, Policy,
-    PolicyEvaluation, PolicyId, PolicyObligations, PolicyRouteScope, RefreshRotationOutcome,
-    RefreshStatus, RefreshTokenHash, RefreshTokenId, RefreshTokenRecord, ResourceAttributeKey,
+    PolicyEvaluation, PolicyId, PolicyObligations, PolicyRouteScope, RefreshStatus,
+    RefreshTokenHash, RefreshTokenId, RefreshTokenRecord, ResourceAttributeKey,
     ResourceAttributeResolution, ResourceAttributeResourceId, ResourcePolicyAttributeKey, RoleId,
     evaluate_policies_for_tenant,
 };
 use crate::ports::{
     AccountReactivationLifecycle, AccountSecurityReadRepo, AccountStatusSetProducerReceipt,
-    AuthGrantCloseCommand, AuthGrantLifecycle, AuthGrantProvider, CredentialRepo,
-    DynAccountReactivationLifecycle, DynAccountSecurityReadRepo, DynAuthGrantLifecycle,
-    DynCredentialRepo, DynIdentitySecurityLifecycle, DynPolicyRepo, DynResourceAttributeReadRepo,
+    AuthGrantLifecycle, AuthGrantProvider, CredentialRepo, DynAccountReactivationLifecycle,
+    DynAccountSecurityReadRepo, DynAuthGrantLifecycle, DynCredentialRepo,
+    DynIdentitySecurityLifecycle, DynPolicyRepo, DynResourceAttributeReadRepo,
     DynRoleBindingReadRepo, DynRoleReadRepo, IdentitySecurityLifecycle, LoginGrantMutation,
     LoginProducerReceipt, LogoutAllProducerReceipt, LogoutCurrentProducerReceipt, Operator,
-    PasswordChangeProducerReceipt, PersistedLoginGrantReceipt, PolicyPage, PolicyRepo,
-    RefreshRotationMutation, RefreshTokenStore, ResourceAttributeReadRepo, RoleBindingReadRepo,
+    PasswordChangeProducerReceipt, PersistedLoginGrantReceipt, PersistedRefreshRotationReceipt,
+    PolicyPage, PolicyRepo, RefreshExecutionCommand, RefreshExecutionOutcome,
+    RefreshProducerReceipt, RefreshTokenStore, ResourceAttributeReadRepo, RoleBindingReadRepo,
     RolePage, RoleReadRepo, TenantRepoScope,
 };
 #[cfg(test)]
@@ -295,6 +296,7 @@ pub struct LoginService<S> {
 /// independent constructor arguments.
 pub struct AuthGrantServices<S> {
     lifecycle: Arc<DynAuthGrantLifecycle<'static>>,
+    security: Arc<DynIdentitySecurityLifecycle<'static>>,
     refresh: Arc<RefreshService<S>>,
 }
 
@@ -309,17 +311,23 @@ impl<S: diport::Signer + Send + Sync + 'static> AuthGrantServices<S> {
     where
         P: AuthGrantProvider,
     {
-        let (lifecycle, refresh_store) = provider.into_auth_grant_parts();
+        let (lifecycle, refresh_store, security) = provider.into_auth_grant_parts();
         let lifecycle = Arc::from(DynAuthGrantLifecycle::new_box(lifecycle));
+        let security = Arc::from(DynIdentitySecurityLifecycle::new_box(security));
         let refresh = Arc::new(RefreshService::new(
             crate::ports::DynRefreshTokenStore::new_box(refresh_store),
             Arc::clone(&lifecycle),
+            Arc::clone(&security),
             accounts,
             issuer,
             clock,
             refresh_ttl,
         ));
-        Self { lifecycle, refresh }
+        Self {
+            lifecycle,
+            security,
+            refresh,
+        }
     }
 
     pub fn refresh_service(&self) -> Arc<RefreshService<S>> {
@@ -328,6 +336,10 @@ impl<S: diport::Signer + Send + Sync + 'static> AuthGrantServices<S> {
 
     pub fn lifecycle(&self) -> Arc<DynAuthGrantLifecycle<'static>> {
         Arc::clone(&self.lifecycle)
+    }
+
+    pub fn security_lifecycle(&self) -> Arc<DynIdentitySecurityLifecycle<'static>> {
+        Arc::clone(&self.security)
     }
 
     fn into_parts(self) -> (Arc<DynAuthGrantLifecycle<'static>>, Arc<RefreshService<S>>) {
@@ -523,7 +535,7 @@ pub struct CredentialSecurityService {
     credentials: Arc<DynCredentialRepo<'static>>,
     grants: Arc<DynAuthGrantLifecycle<'static>>,
     accounts: Arc<DynAccountSecurityReadRepo<'static>>,
-    lifecycle: Box<DynIdentitySecurityLifecycle<'static>>,
+    lifecycle: Arc<DynIdentitySecurityLifecycle<'static>>,
     reactivation: Box<DynAccountReactivationLifecycle<'static>>,
     password_policy: secure::PasswordPolicy,
     clock: Box<dyn Clock>,
@@ -561,11 +573,34 @@ impl CredentialSecurityService {
         P: IdentitySecurityLifecycle + 'static,
         R: AccountReactivationLifecycle + 'static,
     {
+        Self::new_with_shared_lifecycle(
+            credentials,
+            grants,
+            accounts,
+            Arc::from(DynIdentitySecurityLifecycle::new_box(lifecycle)),
+            reactivation,
+            password_policy,
+            clock,
+        )
+    }
+
+    pub fn new_with_shared_lifecycle<R>(
+        credentials: Arc<DynCredentialRepo<'static>>,
+        grants: Arc<DynAuthGrantLifecycle<'static>>,
+        accounts: Box<DynAccountSecurityReadRepo<'static>>,
+        lifecycle: Arc<DynIdentitySecurityLifecycle<'static>>,
+        reactivation: R,
+        password_policy: secure::PasswordPolicy,
+        clock: Box<dyn Clock>,
+    ) -> Self
+    where
+        R: AccountReactivationLifecycle + 'static,
+    {
         Self {
             credentials,
             grants,
             accounts: Arc::from(accounts),
-            lifecycle: DynIdentitySecurityLifecycle::new_box(lifecycle),
+            lifecycle,
             reactivation: DynAccountReactivationLifecycle::new_box(reactivation),
             password_policy,
             clock,
@@ -892,21 +927,32 @@ impl PendingLoginSecrets {
     }
 }
 
-/// Refresh token 应用服务：签发 / 轮换 / 撤销。必填依赖走构造器位置参（缺失即编译错误）。
+struct PendingRotatedSecrets {
+    bundle: RefreshBundle,
+}
+
+impl PendingRotatedSecrets {
+    fn release(self, _receipt: PersistedRefreshRotationReceipt) -> RefreshBundle {
+        self.bundle
+    }
+}
+
+/// Refresh token 应用服务：验证、签发与原子轮换。必填依赖走构造器位置参（缺失即编译错误）。
 ///
 /// ## rotate 设计决策：mint 先于 CAS（#284 F1）
 ///
-/// `rotate` 先 mint access JWT，**成功后才**执行 `store.rotate`（CAS 原子消费旧 token + 写新 token）。
+/// `rotate` 先 mint access JWT，**成功后才**执行唯一 security lifecycle producer transaction。
 /// 顺序的关键在于**失败语义可恢复**：mint 是可失败步骤（signer 瞬时故障），CAS 提交是不可回滚的副作用。
 /// 若先提交 CAS 再 mint，mint 失败时旧 refresh 已被消费、而新 refresh secret 在错误路径被丢弃——客户端
 /// 既无可用旧 token 也拿不到新 token，被瞬时 mint 故障**永久锁死**。先 mint：mint 失败 ⇒ 旧 refresh 未消费、
 /// 仍 Active，客户端原样重试即可（无锁死、无重放窗口——失败的 mint 未签发任何 access token）。
-/// CAS 在 mint 之后，故「旧 refresh 一次性」仍由 CAS 原子性 + replay 时原子关闭 AuthGrant 并撤销其
-/// grant-bound refresh family 保证。
+/// producer transaction 在 mint 之后，故「旧 refresh 一次性」仍由事务内 CAS + reuse containment 保证；
+/// mint 结果只保存在 pending secrets 中，commit receipt 确认前无法释放给 HTTP 层。
 /// ref: ory/fosite handler/oauth2/flow_refresh.go@master（先生成 token 再事务内 Rotate/Create）。
 pub struct RefreshService<S> {
     store: Box<crate::ports::DynRefreshTokenStore<'static>>,
     lifecycle: Arc<DynAuthGrantLifecycle<'static>>,
+    security: Arc<DynIdentitySecurityLifecycle<'static>>,
     accounts: Box<DynAccountSecurityReadRepo<'static>>,
     issuer: std::sync::Arc<authn::JwtIssuer<diport::RssAccessProfile, S>>,
     clock: Box<dyn diport::Clock>,
@@ -914,41 +960,11 @@ pub struct RefreshService<S> {
 }
 
 impl<S: diport::Signer + Send + Sync + 'static> RefreshService<S> {
-    async fn compromise_replayed_grant(
-        &self,
-        scope: TenantRepoScope,
-        record: &RefreshTokenRecord,
-        known_grant: Option<AuthGrant>,
-        occurred_at: SystemTime,
-    ) -> Result<(), RefreshError> {
-        let grant = match known_grant {
-            Some(grant) => grant,
-            None => {
-                let Some(grant) = self
-                    .lifecycle
-                    .find_active(scope, record.auth_grant_id().clone(), occurred_at)
-                    .await
-                    .map_err(RefreshError::Store)?
-                else {
-                    // Another replay/logout winner already terminalized the root. The security
-                    // objective is satisfied and replay remains an indistinguishable rejection.
-                    return Ok(());
-                };
-                grant
-            }
-        };
-        let command = AuthGrantCloseCommand::from_refresh_replay(record, grant, occurred_at)
-            .ok_or(RefreshError::Invalid)?;
-        self.lifecycle
-            .close(scope, command)
-            .await
-            .map_err(RefreshError::Store)
-    }
-
     /// 组合根构造：account-security reader is mandatory and has no fallback.
     fn new(
         store: Box<crate::ports::DynRefreshTokenStore<'static>>,
         lifecycle: Arc<DynAuthGrantLifecycle<'static>>,
+        security: Arc<DynIdentitySecurityLifecycle<'static>>,
         accounts: Box<DynAccountSecurityReadRepo<'static>>,
         issuer: std::sync::Arc<authn::JwtIssuer<diport::RssAccessProfile, S>>,
         clock: Box<dyn diport::Clock>,
@@ -957,6 +973,7 @@ impl<S: diport::Signer + Send + Sync + 'static> RefreshService<S> {
         Self {
             store,
             lifecycle,
+            security,
             accounts,
             issuer,
             clock,
@@ -1034,17 +1051,16 @@ impl<S: diport::Signer + Send + Sync + 'static> RefreshService<S> {
 
     /// 轮换 refresh token（reuse-detection + 新 access JWT + 新 refresh token）。
     ///
-    /// ## 步骤顺序（参见 struct 级 rustdoc 关于「mint 先于 CAS」的说明）
+    /// ## 步骤顺序（参见 struct 级 rustdoc 关于「mint 先于事务提交」的说明）
     ///
     /// 1. 重算呈递串摘要 → `find_by_hash`（查无 → Invalid）
-    /// 2. 若 status != Active → 重放检测：经 [`AuthGrantLifecycle::close`] 原子 Compromised root +
-    ///    revoke grant-bound refresh family → Replayed
+    /// 2. 若 status != Active → sealed reuse command 经唯一 security lifecycle 原子 compromise root、
+    ///    revoke grant-bound refresh family，并在状态转换 winner 时写一条安全事件
     /// 3. 若 is_expired → Expired
     /// 4. 由源 record `begin_rotation` 派生 sealed [`RefreshRotation`]（tenant/parent/lineage 类型层 Hard 派生）
-    /// 5. mint access JWT（先于 CAS——失败则旧 refresh 未消费、客户端可重试，#284 F1）
-    /// 6. 原子 CAS（store.rotate(rotation)）：若未命中 → 同一 replay close funnel 原子终结 root/family
-    ///    → Replayed
-    /// 7. 返回 RefreshBundle
+    /// 5. mint access JWT（先于事务——失败则旧 refresh 未消费、客户端可重试，#284 F1）
+    /// 6. sealed command 进入 producer transaction；CAS loser 在同一事务内 containment
+    /// 7. 仅 `Applied(PersistedRefreshRotationReceipt)` 可释放 pending bearer 并返回 `RefreshBundle`
     ///
     /// `skip_all`：presented bearer secret 不入 span（PII，observability.md §redaction）。
     #[tracing::instrument(
@@ -1054,6 +1070,7 @@ impl<S: diport::Signer + Send + Sync + 'static> RefreshService<S> {
     )]
     pub async fn rotate(
         &self,
+        receipt: RefreshProducerReceipt,
         tenant: vocab::TenantId,
         presented: &authn::RefreshToken,
     ) -> Result<RefreshBundle, RefreshError> {
@@ -1075,8 +1092,16 @@ impl<S: diport::Signer + Send + Sync + 'static> RefreshService<S> {
         // 2. User-record 重放检测：status != Active ⇒ 原子 compromise 根 + 撤销全 family。
         if rec.status() != RefreshStatus::Active {
             let now = self.clock.now();
-            self.compromise_replayed_grant(tenant_scope, &rec, None, now)
-                .await?;
+            let command =
+                RefreshExecutionCommand::contain_reuse(rec, now).ok_or(RefreshError::Invalid)?;
+            let outcome = self
+                .security
+                .execute_refresh(receipt, tenant_scope, command)
+                .await
+                .map_err(RefreshError::Store)?;
+            if matches!(outcome, RefreshExecutionOutcome::Applied(_)) {
+                return Err(RefreshError::Invalid);
+            }
             tracing::warn!(
                 tenant_id = %tenant,
                 operation = "refresh_replay_detected",
@@ -1122,40 +1147,42 @@ impl<S: diport::Signer + Send + Sync + 'static> RefreshService<S> {
         {
             return Err(RefreshError::Invalid);
         }
+        let access_input = grant
+            .access_issue_input()
+            .map_err(|_| RefreshError::Invalid)?;
         // 4. 由源 record 派生 sealed 轮换命令（tenant/parent/lineage 从源派生，错位类型层不可表达，#284 F2）
         let new_secret = secure::OpaqueToken::generate();
         let new_hash = RefreshTokenHash::new(secure::digest(new_secret.expose()));
         let rotation = rec
             .begin_rotation(RefreshTokenId::generate(), new_hash, now)
             .ok_or(RefreshError::Invalid)?;
-
         // 5. mint access JWT（先于 CAS，#284 F1）：mint 失败 ⇒ 旧 refresh 未消费、客户端可重试、无锁死。
         //    claim source is the current Active account receipt, not caller-selected input.
         let access = self
             .issuer
-            .issue_access(
-                grant
-                    .access_issue_input()
-                    .map_err(|_| RefreshError::Invalid)?,
-            )
+            .issue_access(access_input)
             .await
             .map_err(RefreshError::Mint)?;
+        let command = RefreshExecutionCommand::rotate(rec, grant, active, rotation, now)
+            .ok_or(RefreshError::Invalid)?;
+        let pending = PendingRotatedSecrets {
+            bundle: RefreshBundle {
+                access,
+                refresh: authn::RefreshToken::new(new_secret.expose()),
+            },
+        };
 
-        // 6. 原子 CAS：旧 token 一次性失效（mint 成功后才提交不可回滚的消费）
+        // 6. 原子 CAS/containment：只有 commit receipt 可以释放前面 mint 的 bearer。
         let outcome = self
-            .store
-            .rotate(tenant_scope, RefreshRotationMutation::new(rotation))
+            .security
+            .execute_refresh(receipt, tenant_scope, command)
             .await
             .map_err(RefreshError::Store)?;
         match outcome {
-            RefreshRotationOutcome::Applied => {}
-            RefreshRotationOutcome::AccountStale => return Err(RefreshError::Invalid),
-            RefreshRotationOutcome::Expired => return Err(RefreshError::Expired),
-            RefreshRotationOutcome::Replay => {
-                // 并发双换 / CAS miss ⇒ 同一 replay funnel 原子 compromise 根 + 撤销 family。
-                // 已 mint 的 access 未交付客户端；根关闭也使此前交付的 access 立即过 durable fence。
-                self.compromise_replayed_grant(tenant_scope, &rec, Some(grant), now)
-                    .await?;
+            RefreshExecutionOutcome::Applied(persisted) => return Ok(pending.release(persisted)),
+            RefreshExecutionOutcome::Stale => return Err(RefreshError::Invalid),
+            RefreshExecutionOutcome::Expired => return Err(RefreshError::Expired),
+            RefreshExecutionOutcome::ReuseContained | RefreshExecutionOutcome::AlreadyContained => {
                 tracing::warn!(
                     tenant_id = %tenant,
                     operation = "refresh_replay_detected",
@@ -1164,41 +1191,6 @@ impl<S: diport::Signer + Send + Sync + 'static> RefreshService<S> {
                 return Err(RefreshError::Replayed);
             }
         }
-
-        Ok(RefreshBundle {
-            access,
-            refresh: authn::RefreshToken::new(new_secret.expose()),
-        })
-    }
-
-    /// 撤销（logout）：撤销整条谱系。查无 token 时幂等 Ok（防止信息泄露）。
-    ///
-    /// `skip_all`：presented bearer secret 不入 span（PII，observability.md §redaction）。
-    #[tracing::instrument(
-        skip_all,
-        fields(domain = SESSION_DOMAIN, operation = "refresh_revoke", tenant_id = %tenant),
-        err
-    )]
-    pub async fn revoke(
-        &self,
-        tenant: vocab::TenantId,
-        presented: &authn::RefreshToken,
-    ) -> Result<(), RefreshError> {
-        let tenant_scope = tenant_repo_scope(tenant);
-        let hash = RefreshTokenHash::new(secure::digest(presented.as_str()));
-        if let Some(rec) = self
-            .store
-            .find_by_hash(tenant_scope, hash)
-            .await
-            .map_err(RefreshError::Store)?
-        {
-            self.store
-                .revoke_lineage(tenant_scope, rec.lineage_id().clone())
-                .await
-                .map_err(RefreshError::Store)?;
-        }
-        // reason: 查无 token 时幂等 Ok（logout 不泄露 token 存在性，同 AuthGrantLifecycle::logout）。
-        Ok(())
     }
 }
 
@@ -1364,10 +1356,22 @@ pub(crate) fn login_router_for_test<S: diport::Signer + Send + Sync + 'static>(
 pub(crate) fn refresh_router_for_test<S: diport::Signer + Send + Sync + 'static>(
     service: Arc<RefreshService<S>>,
 ) -> axum::Router {
-    axum::Router::new().route(
-        REFRESH_HTTP_SPEC.route.path(),
-        post(refresh_handler::<S>).with_state(service),
+    let routes = httpserve::UnfinalizedRoutes::empty()
+        .nest_group::<Primary, KernelError>(LOGIN_ROUTE_PREFIX, |router| {
+            Ok(router.mount(
+                GeneratedPrimaryEndpoint::new_producer(REFRESH_PRODUCER, refresh_handler::<S>)?
+                    .with_state(service),
+            )?)
+        })
+        .expect("refresh test route uses generated producer mount");
+    let plan = primitives::AuthPlan::new(
+        ListenerKind::Primary,
+        primitives::AuthScheme::RssAccessToken,
     )
+    .expect("valid Primary access-token plan");
+    httpserve::finalize_primary_auth(routes, plan, Arc::new(PublicRouteTestAuthorizer))
+        .expect("public refresh route finalizes")
+        .into_router_for_test()
 }
 
 async fn login_handler_bytes<S: diport::Signer + Send + Sync + 'static>(
@@ -1404,7 +1408,7 @@ async fn login_handler_bytes<S: diport::Signer + Send + Sync + 'static>(
 }
 
 async fn refresh_handler<S: diport::Signer + Send + Sync + 'static>(
-    _: ContractMarker<::generated::http::identity_v1::refresh::RouteMarker>,
+    marker: ProducerMarker<::generated::http::identity_v1::refresh::RouteMarker>,
     State(service): State<Arc<RefreshService<S>>>,
     req: Request<Body>,
 ) -> Response {
@@ -1413,11 +1417,12 @@ async fn refresh_handler<S: diport::Signer + Send + Sync + 'static>(
         Ok(parts) => parts,
         Err(resp) => return resp,
     };
-    refresh_handler_bytes(service, tenant, body, &request_id).await
+    refresh_handler_bytes(service, marker.into_receipt(), tenant, body, &request_id).await
 }
 
 async fn refresh_handler_bytes<S: diport::Signer + Send + Sync + 'static>(
     service: Arc<RefreshService<S>>,
+    receipt: RefreshProducerReceipt,
     tenant: TenantId,
     body: Bytes,
     request_id: &str,
@@ -1428,7 +1433,7 @@ async fn refresh_handler_bytes<S: diport::Signer + Send + Sync + 'static>(
     };
     let tenant_log = tenant.to_string();
     let presented = authn::RefreshToken::new(request.refresh_token);
-    match service.rotate(tenant, &presented).await {
+    match service.rotate(receipt, tenant, &presented).await {
         Ok(bundle) => {
             let response = IdentityRefreshResponse {
                 data: IdentityRefreshData {
@@ -3490,7 +3495,7 @@ impl<S: diport::Signer + Send + Sync + 'static> ::bootstrap::Domain for Identity
                     .with_state(login),
             )?;
             let rb = rb.mount(
-                GeneratedPrimaryEndpoint::new(REFRESH_HTTP_ROUTE, refresh_handler::<S>)?
+                GeneratedPrimaryEndpoint::new_producer(REFRESH_PRODUCER, refresh_handler::<S>)?
                     .with_state(refresh),
             )?;
             let rb = mount_common_identity_routes(rb, common)?;
@@ -3584,6 +3589,10 @@ mod tests {
         ProducerMarker::for_test(LOGIN_PRODUCER).into_receipt()
     }
 
+    fn refresh_receipt() -> RefreshProducerReceipt {
+        ProducerMarker::for_test(REFRESH_PRODUCER).into_receipt()
+    }
+
     #[derive(Clone, Default)]
     struct EmptyAccountSecurityRead {
         find_calls: Arc<AtomicUsize>,
@@ -3603,6 +3612,15 @@ mod tests {
     struct ConfirmingIdentitySecurityLifecycle;
 
     impl IdentitySecurityLifecycle for ConfirmingIdentitySecurityLifecycle {
+        async fn execute_refresh(
+            &self,
+            _receipt: RefreshProducerReceipt,
+            _scope: TenantRepoScope,
+            _command: RefreshExecutionCommand,
+        ) -> Result<RefreshExecutionOutcome, IdentityError> {
+            Err(provider_unavailable())
+        }
+
         async fn execute_password_change(
             &self,
             _receipt: PasswordChangeProducerReceipt,
@@ -3686,6 +3704,15 @@ mod tests {
     }
 
     impl IdentitySecurityLifecycle for CapturingStatusSetLifecycle {
+        async fn execute_refresh(
+            &self,
+            _receipt: RefreshProducerReceipt,
+            _scope: TenantRepoScope,
+            _command: RefreshExecutionCommand,
+        ) -> Result<RefreshExecutionOutcome, IdentityError> {
+            Err(provider_unavailable())
+        }
+
         async fn execute_password_change(
             &self,
             _receipt: PasswordChangeProducerReceipt,
@@ -3741,6 +3768,15 @@ mod tests {
     }
 
     impl IdentitySecurityLifecycle for ConcurrentWinnerStatusSetLifecycle {
+        async fn execute_refresh(
+            &self,
+            _receipt: RefreshProducerReceipt,
+            _scope: TenantRepoScope,
+            _command: RefreshExecutionCommand,
+        ) -> Result<RefreshExecutionOutcome, IdentityError> {
+            Err(provider_unavailable())
+        }
+
         async fn execute_password_change(
             &self,
             _receipt: PasswordChangeProducerReceipt,
@@ -3806,6 +3842,15 @@ mod tests {
     struct UnavailableIdentitySecurityLifecycle;
 
     impl IdentitySecurityLifecycle for UnavailableIdentitySecurityLifecycle {
+        async fn execute_refresh(
+            &self,
+            _receipt: RefreshProducerReceipt,
+            _scope: TenantRepoScope,
+            _command: RefreshExecutionCommand,
+        ) -> Result<RefreshExecutionOutcome, IdentityError> {
+            Err(provider_unavailable())
+        }
+
         async fn execute_password_change(
             &self,
             _receipt: PasswordChangeProducerReceipt,
@@ -3860,6 +3905,15 @@ mod tests {
     struct ConflictingIdentitySecurityLifecycle;
 
     impl IdentitySecurityLifecycle for ConflictingIdentitySecurityLifecycle {
+        async fn execute_refresh(
+            &self,
+            _receipt: RefreshProducerReceipt,
+            _scope: TenantRepoScope,
+            _command: RefreshExecutionCommand,
+        ) -> Result<RefreshExecutionOutcome, IdentityError> {
+            Err(IdentityError::VersionConflict)
+        }
+
         async fn execute_password_change(
             &self,
             _receipt: PasswordChangeProducerReceipt,
@@ -4347,7 +4401,7 @@ mod tests {
                 credentials: Arc::from(DynCredentialRepo::new_box(accounts.clone())),
                 grants: test_lifecycle(crate::internal::mem::InMemAuthGrantStore::new()),
                 accounts: Arc::from(DynAccountSecurityReadRepo::new_box(accounts)),
-                lifecycle,
+                lifecycle: Arc::from(lifecycle),
                 reactivation: DynAccountReactivationLifecycle::new_box(
                     ConfirmingIdentitySecurityLifecycle,
                 ),
@@ -4713,7 +4767,6 @@ mod tests {
         writes: Arc<Mutex<Vec<(AuthGrant, EventEntry, OutboxEnvelopeParts)>>>,
         inner: crate::internal::mem::InMemAuthGrantStore,
         find_calls: Arc<AtomicUsize>,
-        close_calls: Arc<AtomicUsize>,
     }
     impl AuthGrantLifecycle for CapturingAuthGrantLifecycle {
         async fn persist_login_grant(
@@ -4744,14 +4797,6 @@ mod tests {
             self.find_calls.fetch_add(1, Ordering::SeqCst);
             self.inner.find_active(scope, grant_id, observed_at).await
         }
-        async fn close(
-            &self,
-            scope: TenantRepoScope,
-            command: AuthGrantCloseCommand,
-        ) -> Result<(), IdentityError> {
-            self.close_calls.fetch_add(1, Ordering::SeqCst);
-            self.inner.close(scope, command).await
-        }
     }
 
     impl RefreshTokenStore for CapturingAuthGrantLifecycle {
@@ -4762,21 +4807,52 @@ mod tests {
         ) -> Result<Option<RefreshTokenRecord>, IdentityError> {
             self.inner.find_by_hash(scope, hash).await
         }
+    }
 
-        async fn rotate(
+    impl IdentitySecurityLifecycle for CapturingAuthGrantLifecycle {
+        async fn execute_refresh(
             &self,
+            receipt: RefreshProducerReceipt,
             scope: TenantRepoScope,
-            mutation: RefreshRotationMutation,
-        ) -> Result<RefreshRotationOutcome, IdentityError> {
-            self.inner.rotate(scope, mutation).await
+            command: RefreshExecutionCommand,
+        ) -> Result<RefreshExecutionOutcome, IdentityError> {
+            self.inner.execute_refresh(receipt, scope, command).await
         }
 
-        async fn revoke_lineage(
+        async fn execute_password_change(
             &self,
-            scope: TenantRepoScope,
-            lineage_id: RefreshTokenId,
-        ) -> Result<(), IdentityError> {
-            self.inner.revoke_lineage(scope, lineage_id).await
+            _receipt: PasswordChangeProducerReceipt,
+            _scope: TenantRepoScope,
+            _command: crate::domain::PasswordChangeCommand,
+        ) -> Result<crate::domain::CredentialSecurityReceipt, IdentityError> {
+            Err(provider_unavailable())
+        }
+
+        async fn execute_account_status_set(
+            &self,
+            _receipt: AccountStatusSetProducerReceipt,
+            _scope: TenantRepoScope,
+            _command: crate::domain::AccountStatusSetCommand,
+        ) -> Result<crate::domain::CredentialSecurityReceipt, IdentityError> {
+            Err(provider_unavailable())
+        }
+
+        async fn execute_logout_current(
+            &self,
+            _receipt: LogoutCurrentProducerReceipt,
+            _scope: TenantRepoScope,
+            _command: crate::domain::LogoutCurrentCommand,
+        ) -> Result<crate::domain::CredentialSecurityReceipt, IdentityError> {
+            Err(provider_unavailable())
+        }
+
+        async fn execute_logout_all(
+            &self,
+            _receipt: LogoutAllProducerReceipt,
+            _scope: TenantRepoScope,
+            _command: crate::domain::LogoutAllCommand,
+        ) -> Result<crate::domain::CredentialSecurityReceipt, IdentityError> {
+            Err(provider_unavailable())
         }
     }
 
@@ -9791,6 +9867,217 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Copy)]
+    enum ScriptedRefreshSettlement {
+        ReuseContained,
+        AlreadyContained,
+        Internal,
+        Outbox,
+        CommitUnknown,
+    }
+
+    #[derive(Clone)]
+    struct ScriptedRefreshBackend {
+        record: Option<RefreshTokenRecord>,
+        grant: Option<AuthGrant>,
+        account: Option<AccountSecurityState>,
+        settlement: ScriptedRefreshSettlement,
+    }
+
+    impl RefreshTokenStore for ScriptedRefreshBackend {
+        async fn find_by_hash(
+            &self,
+            _scope: TenantRepoScope,
+            _hash: RefreshTokenHash,
+        ) -> Result<Option<RefreshTokenRecord>, IdentityError> {
+            Ok(self.record.clone())
+        }
+    }
+
+    impl AuthGrantLifecycle for ScriptedRefreshBackend {
+        async fn persist_login_grant(
+            &self,
+            _receipt: LoginProducerReceipt,
+            _scope: TenantRepoScope,
+            _mutation: LoginGrantMutation,
+            _entry: EventEntry,
+            _envelope: OutboxEnvelopeParts,
+        ) -> Result<PersistedLoginGrantReceipt, OutboxEmitError> {
+            Err(OutboxEmitError::new(std::io::Error::other(
+                "refresh response fixture does not persist login grants",
+            )))
+        }
+
+        async fn find_active(
+            &self,
+            _scope: TenantRepoScope,
+            _grant_id: AuthGrantId,
+            _observed_at: SystemTime,
+        ) -> Result<Option<AuthGrant>, IdentityError> {
+            Ok(self.grant.clone())
+        }
+    }
+
+    impl AccountSecurityReadRepo for ScriptedRefreshBackend {
+        async fn find(
+            &self,
+            _scope: TenantRepoScope,
+            _user_id: ids::UserId,
+        ) -> Result<Option<AccountSecurityState>, IdentityError> {
+            Ok(self.account.clone())
+        }
+    }
+
+    impl IdentitySecurityLifecycle for ScriptedRefreshBackend {
+        async fn execute_refresh(
+            &self,
+            _receipt: RefreshProducerReceipt,
+            _scope: TenantRepoScope,
+            _command: RefreshExecutionCommand,
+        ) -> Result<RefreshExecutionOutcome, IdentityError> {
+            match self.settlement {
+                ScriptedRefreshSettlement::ReuseContained => {
+                    Ok(RefreshExecutionOutcome::ReuseContained)
+                }
+                ScriptedRefreshSettlement::AlreadyContained => {
+                    Ok(RefreshExecutionOutcome::AlreadyContained)
+                }
+                ScriptedRefreshSettlement::Internal => Err(IdentityError::ProviderUnavailable(
+                    Box::new(std::io::Error::other("internal refresh provider state")),
+                )),
+                ScriptedRefreshSettlement::Outbox => Err(IdentityError::OutboxFactConflict(
+                    consistency::OutboxFactConflict,
+                )),
+                ScriptedRefreshSettlement::CommitUnknown => Err(IdentityError::Storage(Box::new(
+                    std::io::Error::other("commit acknowledgement unknown"),
+                ))),
+            }
+        }
+
+        async fn execute_password_change(
+            &self,
+            _receipt: PasswordChangeProducerReceipt,
+            _scope: TenantRepoScope,
+            _command: crate::domain::PasswordChangeCommand,
+        ) -> Result<crate::domain::CredentialSecurityReceipt, IdentityError> {
+            Err(provider_unavailable())
+        }
+
+        async fn execute_account_status_set(
+            &self,
+            _receipt: AccountStatusSetProducerReceipt,
+            _scope: TenantRepoScope,
+            _command: crate::domain::AccountStatusSetCommand,
+        ) -> Result<crate::domain::CredentialSecurityReceipt, IdentityError> {
+            Err(provider_unavailable())
+        }
+
+        async fn execute_logout_current(
+            &self,
+            _receipt: LogoutCurrentProducerReceipt,
+            _scope: TenantRepoScope,
+            _command: crate::domain::LogoutCurrentCommand,
+        ) -> Result<crate::domain::CredentialSecurityReceipt, IdentityError> {
+            Err(provider_unavailable())
+        }
+
+        async fn execute_logout_all(
+            &self,
+            _receipt: LogoutAllProducerReceipt,
+            _scope: TenantRepoScope,
+            _command: crate::domain::LogoutAllCommand,
+        ) -> Result<crate::domain::CredentialSecurityReceipt, IdentityError> {
+            Err(provider_unavailable())
+        }
+    }
+
+    #[allow(clippy::expect_used)]
+    fn scripted_refresh_backend(
+        record_status: Option<(RefreshStatus, AuthGrantStatus)>,
+        account_epoch: u64,
+        expired: bool,
+        settlement: ScriptedRefreshSettlement,
+    ) -> ScriptedRefreshBackend {
+        let tenant = tid(CANON_TENANT);
+        let user_id = uid(CANON_USER);
+        let issued_at = SystemTime::UNIX_EPOCH + Duration::from_secs(1_699_999_900);
+        let grant_expires_at = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_003_600);
+        let epoch = authn::AuthnEpoch::hydrate(5).expect("refresh fixture epoch");
+        let grant = AuthGrant::new_active(
+            tenant,
+            user_id,
+            issued_at,
+            epoch,
+            grant_expires_at,
+            issued_at,
+        )
+        .expect("active refresh fixture grant");
+        let record = record_status.map(|(status, auth_grant_status)| {
+            let id = RefreshTokenId::hydrate("aaaaaaaa-0001-4000-8000-000000000001");
+            RefreshTokenRecord::hydrate(RefreshTokenSnapshot {
+                id: id.clone(),
+                tenant,
+                auth_grant_id: grant.id().clone(),
+                user_id,
+                authn_epoch_at_issue: epoch,
+                auth_grant_status,
+                token_hash: RefreshTokenHash::hydrate(secure::digest("presented-refresh")),
+                parent_id: None,
+                lineage_id: id,
+                status,
+                issued_at,
+                expires_at: SystemTime::UNIX_EPOCH
+                    + Duration::from_secs(if expired {
+                        1_699_999_999
+                    } else {
+                        1_700_003_600
+                    }),
+            })
+            .expect("valid scripted refresh record")
+        });
+        let account = AccountSecurityState::try_from(crate::ports::AccountSecuritySnapshot {
+            tenant,
+            user_id,
+            status: crate::ports::AccountStatus::Active,
+            authn_epoch: account_epoch,
+            version: 1,
+            status_changed_at: issued_at,
+            updated_at: issued_at,
+        })
+        .expect("valid scripted account state");
+        ScriptedRefreshBackend::scripted_refresh_backend_parts(record, grant, account, settlement)
+    }
+
+    impl ScriptedRefreshBackend {
+        fn scripted_refresh_backend_parts(
+            record: Option<RefreshTokenRecord>,
+            grant: AuthGrant,
+            account: AccountSecurityState,
+            settlement: ScriptedRefreshSettlement,
+        ) -> Self {
+            Self {
+                record,
+                grant: Some(grant),
+                account: Some(account),
+                settlement,
+            }
+        }
+    }
+
+    fn scripted_refresh_service(
+        backend: ScriptedRefreshBackend,
+    ) -> Arc<RefreshService<TestSigner>> {
+        Arc::new(RefreshService::new(
+            crate::ports::DynRefreshTokenStore::new_box(backend.clone()),
+            Arc::from(DynAuthGrantLifecycle::new_box(backend.clone())),
+            Arc::from(DynIdentitySecurityLifecycle::new_box(backend.clone())),
+            DynAccountSecurityReadRepo::new_box(backend),
+            Arc::new(make_jwt_issuer(make_clock(1_700_000_000))),
+            make_clock(1_700_000_000),
+            Duration::from_secs(3_600),
+        ))
+    }
+
     /// 构造用于 RefreshService 测试的 JwtIssuer（ES256，User kind）。
     #[allow(clippy::expect_used)]
     fn make_jwt_issuer(
@@ -9829,7 +10116,8 @@ mod tests {
         let issuer = make_jwt_issuer(Box::new(FixedClock(clock.now())));
         RefreshService::new(
             crate::ports::DynRefreshTokenStore::new_box(store.clone()),
-            test_lifecycle(store),
+            test_lifecycle(store.clone()),
+            test_security_lifecycle(store),
             accounts,
             std::sync::Arc::new(issuer),
             clock,
@@ -9841,6 +10129,18 @@ mod tests {
         store: crate::internal::mem::InMemAuthGrantStore,
     ) -> Arc<DynAuthGrantLifecycle<'static>> {
         Arc::from(DynAuthGrantLifecycle::new_box(store))
+    }
+
+    fn test_security_lifecycle(
+        store: crate::internal::mem::InMemAuthGrantStore,
+    ) -> Arc<DynIdentitySecurityLifecycle<'static>> {
+        Arc::from(DynIdentitySecurityLifecycle::new_box(store))
+    }
+
+    fn unavailable_security_lifecycle() -> Arc<DynIdentitySecurityLifecycle<'static>> {
+        Arc::from(DynIdentitySecurityLifecycle::new_box(
+            UnavailableIdentitySecurityLifecycle,
+        ))
     }
 
     #[allow(clippy::expect_used)]
@@ -10048,6 +10348,7 @@ mod tests {
         let service = RefreshService::new(
             crate::ports::DynRefreshTokenStore::new_box(store.clone()),
             test_lifecycle(store.clone()),
+            test_security_lifecycle(store.clone()),
             DynAccountSecurityReadRepo::new_box(accounts),
             Arc::new(issuer),
             make_clock(1_700_000_000),
@@ -10159,13 +10460,14 @@ mod tests {
             let service = RefreshService::new(
                 crate::ports::DynRefreshTokenStore::new_box(store.clone()),
                 test_lifecycle(store.clone()),
+                test_security_lifecycle(store.clone()),
                 DynAccountSecurityReadRepo::new_box(accounts),
                 Arc::new(issuer),
                 make_clock(1_700_000_000),
                 Duration::from_secs(3_600),
             );
             assert!(matches!(
-                service.rotate(tenant, &refresh).await,
+                service.rotate(refresh_receipt(), tenant, &refresh).await,
                 Err(RefreshError::Invalid)
             ));
             assert_eq!(
@@ -10247,6 +10549,7 @@ mod tests {
             let service = RefreshService::new(
                 crate::ports::DynRefreshTokenStore::new_box(store.clone()),
                 test_lifecycle(store.clone()),
+                test_security_lifecycle(store.clone()),
                 DynAccountSecurityReadRepo::new_box(ScriptedReader(scripted)),
                 Arc::new(issuer),
                 make_clock(1_700_000_000),
@@ -10302,16 +10605,6 @@ mod tests {
                     scope: TenantRepoScope,
                     hash: RefreshTokenHash,
                 ) -> Result<Option<RefreshTokenRecord>, IdentityError>;
-                async fn rotate(
-                    &self,
-                    scope: TenantRepoScope,
-                    mutation: crate::ports::RefreshRotationMutation,
-                ) -> Result<RefreshRotationOutcome, IdentityError>;
-                async fn revoke_lineage(
-                    &self,
-                    scope: TenantRepoScope,
-                    lineage_id: RefreshTokenId,
-                ) -> Result<(), IdentityError>;
             }
         }
 
@@ -10362,8 +10655,6 @@ mod tests {
                 .expect_find_by_hash()
                 .times(1)
                 .returning(move |_scope, _hash| Ok(Some(record.clone())));
-            store.expect_rotate().times(0);
-            store.expect_revoke_lineage().times(0);
             let issuer = authn::JwtIssuer::<diport::RssAccessProfile, _>::new(
                 Arc::new(PanicSigner),
                 make_clock(1_700_000_000),
@@ -10380,6 +10671,7 @@ mod tests {
             let service = RefreshService::new(
                 crate::ports::DynRefreshTokenStore::new_box(store),
                 lifecycle,
+                unavailable_security_lifecycle(),
                 DynAccountSecurityReadRepo::new_box(accounts),
                 Arc::new(issuer),
                 make_clock(1_700_000_000),
@@ -10388,7 +10680,11 @@ mod tests {
 
             assert!(matches!(
                 service
-                    .rotate(tenant, &authn::RefreshToken::new("presented"))
+                    .rotate(
+                        refresh_receipt(),
+                        tenant,
+                        &authn::RefreshToken::new("presented"),
+                    )
                     .await,
                 Err(RefreshError::Invalid)
             ));
@@ -10444,16 +10740,6 @@ mod tests {
                     scope: TenantRepoScope,
                     hash: RefreshTokenHash,
                 ) -> Result<Option<RefreshTokenRecord>, IdentityError>;
-                async fn rotate(
-                    &self,
-                    scope: TenantRepoScope,
-                    mutation: crate::ports::RefreshRotationMutation,
-                ) -> Result<RefreshRotationOutcome, IdentityError>;
-                async fn revoke_lineage(
-                    &self,
-                    scope: TenantRepoScope,
-                    lineage_id: RefreshTokenId,
-                ) -> Result<(), IdentityError>;
             }
         }
 
@@ -10508,8 +10794,6 @@ mod tests {
                 .expect_find_by_hash()
                 .times(1)
                 .returning(move |_scope, _hash| Ok(Some(record.clone())));
-            store.expect_rotate().times(0);
-            store.expect_revoke_lineage().times(0);
 
             let issuer = authn::JwtIssuer::<diport::RssAccessProfile, _>::new(
                 Arc::new(PanicSigner),
@@ -10527,6 +10811,7 @@ mod tests {
             let service = RefreshService::new(
                 crate::ports::DynRefreshTokenStore::new_box(store),
                 lifecycle,
+                unavailable_security_lifecycle(),
                 DynAccountSecurityReadRepo::new_box(ScriptedReader(scripted.clone())),
                 Arc::new(issuer),
                 make_clock(1_700_000_000),
@@ -10534,7 +10819,11 @@ mod tests {
             );
 
             let result = service
-                .rotate(tenant, &authn::RefreshToken::new("presented"))
+                .rotate(
+                    refresh_receipt(),
+                    tenant,
+                    &authn::RefreshToken::new("presented"),
+                )
                 .await;
             if matches!(scripted, ScriptedRead::Failed) {
                 assert!(matches!(result, Err(RefreshError::Store(_))));
@@ -10581,19 +10870,10 @@ mod tests {
                     GrantRead::Grant(grant) => Ok(Some(grant.clone())),
                 }
             }
-
-            async fn close(
-                &self,
-                _scope: TenantRepoScope,
-                _command: AuthGrantCloseCommand,
-            ) -> Result<(), IdentityError> {
-                unreachable!("grant read fixture never closes")
-            }
         }
 
         struct GateStore {
             record: RefreshTokenRecord,
-            rotate_calls: Arc<AtomicUsize>,
         }
         impl RefreshTokenStore for GateStore {
             async fn find_by_hash(
@@ -10602,23 +10882,6 @@ mod tests {
                 _hash: RefreshTokenHash,
             ) -> Result<Option<RefreshTokenRecord>, IdentityError> {
                 Ok(Some(self.record.clone()))
-            }
-
-            async fn rotate(
-                &self,
-                _scope: TenantRepoScope,
-                _mutation: RefreshRotationMutation,
-            ) -> Result<RefreshRotationOutcome, IdentityError> {
-                self.rotate_calls.fetch_add(1, Ordering::SeqCst);
-                Ok(RefreshRotationOutcome::Applied)
-            }
-
-            async fn revoke_lineage(
-                &self,
-                _scope: TenantRepoScope,
-                _lineage_id: RefreshTokenId,
-            ) -> Result<(), IdentityError> {
-                Ok(())
             }
         }
 
@@ -10698,7 +10961,6 @@ mod tests {
             })
             .expect("valid refresh fixture");
             let sign_calls = Arc::new(AtomicUsize::new(0));
-            let rotate_calls = Arc::new(AtomicUsize::new(0));
             let issuer = authn::JwtIssuer::<diport::RssAccessProfile, _>::new(
                 Arc::new(CountingSigner(Arc::clone(&sign_calls))),
                 make_clock(1_700_000_000),
@@ -10712,11 +10974,9 @@ mod tests {
             )
             .expect("issuer");
             let service = RefreshService::new(
-                crate::ports::DynRefreshTokenStore::new_box(GateStore {
-                    record,
-                    rotate_calls: Arc::clone(&rotate_calls),
-                }),
+                crate::ports::DynRefreshTokenStore::new_box(GateStore { record }),
                 Arc::from(DynAuthGrantLifecycle::new_box(ScriptedLifecycle(read))),
+                unavailable_security_lifecycle(),
                 seeded_account_reader(),
                 Arc::new(issuer),
                 make_clock(1_700_000_000),
@@ -10725,13 +10985,16 @@ mod tests {
 
             assert!(
                 service
-                    .rotate(tenant, &authn::RefreshToken::new("presented"))
+                    .rotate(
+                        refresh_receipt(),
+                        tenant,
+                        &authn::RefreshToken::new("presented"),
+                    )
                     .await
                     .is_err(),
                 "case={case}"
             );
             assert_eq!(sign_calls.load(Ordering::SeqCst), 0, "case={case}");
-            assert_eq!(rotate_calls.load(Ordering::SeqCst), 0, "case={case}");
         }
     }
 
@@ -10753,7 +11016,10 @@ mod tests {
         let initial = issue_test_user_bundle(&svc, &store).await;
         let initial_claims = decode_access_claims(&initial.access);
         let old_rf = initial.refresh;
-        let bundle = svc.rotate(ta, &old_rf).await.expect("rotate ok");
+        let bundle = svc
+            .rotate(refresh_receipt(), ta, &old_rf)
+            .await
+            .expect("rotate ok");
         let rotated_claims = decode_access_claims(&bundle.access);
         assert!(
             !bundle.access.as_str().is_empty(),
@@ -10771,7 +11037,7 @@ mod tests {
 
         // 旧 refresh 再 rotate ⇒ Replayed（重放检测）
         let err = svc
-            .rotate(ta, &old_rf)
+            .rotate(refresh_receipt(), ta, &old_rf)
             .await
             .expect_err("旧 refresh 已消费，应 Replayed");
         assert!(matches!(err, RefreshError::Replayed), "old rotate: {err:?}");
@@ -10816,7 +11082,7 @@ mod tests {
 
         // grant-bound family 原子撤销后，新 refresh 也不可用。
         let err2 = svc
-            .rotate(ta, &bundle.refresh)
+            .rotate(refresh_receipt(), ta, &bundle.refresh)
             .await
             .expect_err("grant-bound family 撤销后新 refresh 也应 Replayed");
         assert!(
@@ -10839,15 +11105,21 @@ mod tests {
         let ta = tid(CANON_TENANT);
 
         let token_a = issue_test_user(&svc, &store).await;
-        let bundle_b = svc.rotate(ta, &token_a).await.expect("A→B ok");
+        let bundle_b = svc
+            .rotate(refresh_receipt(), ta, &token_a)
+            .await
+            .expect("A→B ok");
 
         // 用 A 重放 ⇒ Replayed（A 已 Consumed）+ 原子 Compromised root/revoke family。
-        let err = svc.rotate(ta, &token_a).await.expect_err("replayed A");
+        let err = svc
+            .rotate(refresh_receipt(), ta, &token_a)
+            .await
+            .expect_err("replayed A");
         assert!(matches!(err, RefreshError::Replayed));
 
         // B 也已被级联撤销 ⇒ Replayed
         let err2 = svc
-            .rotate(ta, &bundle_b.refresh)
+            .rotate(refresh_receipt(), ta, &bundle_b.refresh)
             .await
             .expect_err("cascaded B");
         assert!(matches!(err2, RefreshError::Replayed));
@@ -10867,35 +11139,16 @@ mod tests {
         let ta = tid(CANON_TENANT);
 
         let old_rf = issue_test_user(&svc, &store).await;
-        let _bundle = svc.rotate(ta, &old_rf).await.expect("rotate ok");
+        let _bundle = svc
+            .rotate(refresh_receipt(), ta, &old_rf)
+            .await
+            .expect("rotate ok");
 
         // 旧 refresh 已 Consumed，不可再轮换
-        let err = svc.rotate(ta, &old_rf).await.expect_err("old one-shot");
-        assert!(matches!(err, RefreshError::Replayed));
-    }
-
-    // ── 测试 R4：撤销幂等 — revoke 两次均 Ok；revoke 后 rotate ⇒ Replayed ──────
-
-    #[tokio::test]
-    #[allow(clippy::expect_used)]
-    async fn refresh_revoke_idempotent_and_blocks_rotate() {
-        let store = crate::internal::mem::InMemAuthGrantStore::new();
-        let svc = make_refresh_svc(
-            store.clone(),
-            make_clock(1_700_000_000),
-            Duration::from_secs(3_600),
-        );
-        let ta = tid(CANON_TENANT);
-
-        let rf = issue_test_user(&svc, &store).await;
-
-        // 第一次 revoke Ok
-        svc.revoke(ta, &rf).await.expect("revoke 1 ok");
-        // 第二次 revoke 幂等 Ok
-        svc.revoke(ta, &rf).await.expect("revoke 2 idempotent");
-
-        // revoke 后 rotate ⇒ Replayed（token 已 Revoked）
-        let err = svc.rotate(ta, &rf).await.expect_err("revoked rotate");
+        let err = svc
+            .rotate(refresh_receipt(), ta, &old_rf)
+            .await
+            .expect_err("old one-shot");
         assert!(matches!(err, RefreshError::Replayed));
     }
 
@@ -10914,7 +11167,10 @@ mod tests {
 
         // 轮换服务：clock = T+10（token 已过期），ttl 无关（不会到达写新 record 步骤）
         let expire_svc = make_refresh_svc(store, make_clock(1_010), Duration::from_secs(3_600));
-        let err = expire_svc.rotate(ta, &rf).await.expect_err("expired");
+        let err = expire_svc
+            .rotate(refresh_receipt(), ta, &rf)
+            .await
+            .expect_err("expired");
         assert!(matches!(err, RefreshError::Expired), "{err:?}");
     }
 
@@ -10935,11 +11191,16 @@ mod tests {
         let rf = issue_test_user(&svc, &store).await;
 
         // tenant B 用 tenant A 的 token ⇒ find_by_hash 跨租 → None → Invalid
-        let err = svc.rotate(tb, &rf).await.expect_err("cross-tenant");
+        let err = svc
+            .rotate(refresh_receipt(), tb, &rf)
+            .await
+            .expect_err("cross-tenant");
         assert!(matches!(err, RefreshError::Invalid), "{err:?}");
 
         // tenant A 的 token 未被影响（仍可 rotate）
-        svc.rotate(ta, &rf).await.expect("tenant A token intact");
+        svc.rotate(refresh_receipt(), ta, &rf)
+            .await
+            .expect("tenant A token intact");
     }
 
     // ── 测试 R7：Invalid — 未知 token rotate ⇒ Invalid ──────────────────────────
@@ -10952,35 +11213,16 @@ mod tests {
         let ta = tid(CANON_TENANT);
 
         let unknown = authn::RefreshToken::new("this-token-was-never-issued");
-        let err = svc.rotate(ta, &unknown).await.expect_err("unknown token");
+        let err = svc
+            .rotate(refresh_receipt(), ta, &unknown)
+            .await
+            .expect_err("unknown token");
         assert!(matches!(err, RefreshError::Invalid), "{err:?}");
     }
 
-    // ── 测试 R8：revoke 未知 token 幂等 Ok ───────────────────────────────────────
-
     #[tokio::test]
     #[allow(clippy::expect_used)]
-    async fn refresh_revoke_unknown_token_is_idempotent() {
-        let store = crate::internal::mem::InMemAuthGrantStore::new();
-        let svc = make_refresh_svc(store, make_clock(1_700_000_000), Duration::from_secs(3_600));
-        let ta = tid(CANON_TENANT);
-
-        let unknown = authn::RefreshToken::new("this-token-was-never-issued");
-        svc.revoke(ta, &unknown)
-            .await
-            .expect("revoke unknown is idempotent");
-    }
-
-    // ── 测试 R9：CAS-miss 分支 — store.rotate 返回 Replay → 原子 close grant + Replayed ──
-    //
-    // 验证 `rotate` 的步骤 5 if !applied 分支：
-    // ①  provider-owned grant close 终结 root，且不再走独立 `revoke_lineage` 写；
-    // ②  rotate 返回 `Err(RefreshError::Replayed)`。
-    // 用 mockall 控制 store 行为（`find_by_hash` 返回 Active 记录，`rotate` 返回 Replay）。
-
-    #[tokio::test]
-    #[allow(clippy::expect_used)]
-    async fn refresh_rotate_cas_miss_closes_grant_and_returns_replayed() {
+    async fn refresh_rotation_uses_security_lifecycle_not_reader_store() {
         use crate::ports::DynRefreshTokenStore;
 
         mockall::mock! {
@@ -10991,16 +11233,6 @@ mod tests {
                     scope: TenantRepoScope,
                     hash: RefreshTokenHash,
                 ) -> Result<Option<RefreshTokenRecord>, IdentityError>;
-                async fn rotate(
-                    &self,
-                    scope: TenantRepoScope,
-                    mutation: crate::ports::RefreshRotationMutation,
-                ) -> Result<RefreshRotationOutcome, IdentityError>;
-                async fn revoke_lineage(
-                    &self,
-                    scope: TenantRepoScope,
-                    lineage_id: RefreshTokenId,
-                ) -> Result<(), IdentityError>;
             }
         }
 
@@ -11033,16 +11265,10 @@ mod tests {
         mock.expect_find_by_hash()
             .returning(move |_t, _h| Ok(Some(active_rec.clone())));
 
-        // rotate → Replay（CAS miss，步骤 6）
-        mock.expect_rotate()
-            .returning(|_scope, _rotation| Ok(RefreshRotationOutcome::Replay));
-
-        // replay 必须只走 lifecycle.close 的 provider-owned atomic 写，不得双写 lineage。
-        mock.expect_revoke_lineage().times(0);
-
         let svc = RefreshService::new(
             DynRefreshTokenStore::new_box(mock),
             lifecycle,
+            test_security_lifecycle(lifecycle_store.clone()),
             seeded_account_reader(),
             std::sync::Arc::new(make_jwt_issuer(make_clock(1_700_000_000))),
             make_clock(1_700_000_000),
@@ -11050,36 +11276,11 @@ mod tests {
         );
 
         let fake_token = authn::RefreshToken::new("this-causes-cas-miss");
-        let err = svc
-            .rotate(ta, &fake_token)
+        let bundle = svc
+            .rotate(refresh_receipt(), ta, &fake_token)
             .await
-            .expect_err("CAS miss 应返回 Replayed");
-        assert!(matches!(err, RefreshError::Replayed), "CAS miss: {err:?}");
-        assert!(
-            lifecycle_store
-                .find_active(tenant_repo_scope(ta), grant_id("grant-cas-miss"), issued)
-                .await
-                .expect("grant lookup succeeds")
-                .is_none(),
-            "CAS-miss replay must terminalize the grant root"
-        );
-        let grant_id = grant_id("grant-cas-miss");
-        let root = lifecycle_store
-            .grant_snapshot(&grant_id)
-            .expect("grant root remains durably inspectable");
-        assert_eq!(root.status(), AuthGrantStatus::Compromised);
-        assert_eq!(
-            root.close_reason(),
-            Some(CredentialSecurityEventKind::Grant(
-                GrantSecurityEventKind::RefreshReuseDetected
-            ))
-        );
-        let family = lifecycle_store.refresh_family_snapshot(&grant_id);
-        assert_eq!(family.len(), 1);
-        assert!(family.iter().all(|record| {
-            record.status() == RefreshStatus::Revoked
-                && record.auth_grant_status() == AuthGrantStatus::Compromised
-        }));
+            .expect("security lifecycle commits rotation");
+        assert!(!bundle.refresh.as_str().is_empty());
     }
 
     #[tokio::test]
@@ -11095,16 +11296,6 @@ mod tests {
                     scope: TenantRepoScope,
                     hash: RefreshTokenHash,
                 ) -> Result<Option<RefreshTokenRecord>, IdentityError>;
-                async fn rotate(
-                    &self,
-                    scope: TenantRepoScope,
-                    mutation: crate::ports::RefreshRotationMutation,
-                ) -> Result<RefreshRotationOutcome, IdentityError>;
-                async fn revoke_lineage(
-                    &self,
-                    scope: TenantRepoScope,
-                    lineage_id: RefreshTokenId,
-                ) -> Result<(), IdentityError>;
             }
         }
 
@@ -11136,6 +11327,7 @@ mod tests {
         let svc = RefreshService::new(
             DynRefreshTokenStore::new_box(mock),
             test_lifecycle(crate::internal::mem::InMemAuthGrantStore::new()),
+            unavailable_security_lifecycle(),
             seeded_account_reader(),
             std::sync::Arc::new(make_jwt_issuer(make_clock(1_700_000_000))),
             make_clock(1_700_000_000),
@@ -11144,7 +11336,7 @@ mod tests {
 
         let fake_token = authn::RefreshToken::new("this-store-returns-wrong-tenant");
         let err = svc
-            .rotate(request_tenant, &fake_token)
+            .rotate(refresh_receipt(), request_tenant, &fake_token)
             .await
             .expect_err("tenant-mismatched refresh record must fail closed");
         assert!(
@@ -11204,6 +11396,7 @@ mod tests {
         let svc = RefreshService::new(
             crate::ports::DynRefreshTokenStore::new_box(store.clone()),
             test_lifecycle(store.clone()),
+            unavailable_security_lifecycle(),
             seeded_account_reader(),
             std::sync::Arc::new(issuer),
             make_clock(1_700_000_000),
@@ -11212,7 +11405,7 @@ mod tests {
 
         // rotate ⇒ mint 失败（FailingSigner）⇒ Err(Mint)，CAS 从未执行
         let err = svc
-            .rotate(ta, &old_rf)
+            .rotate(refresh_receipt(), ta, &old_rf)
             .await
             .expect_err("mint 失败应返回 Mint 错误");
         assert!(
@@ -11372,7 +11565,7 @@ mod tests {
         {
             const _: ::vocab::HttpRouteBinding<
                 ::generated::http::identity_v1::refresh::RouteMarker,
-                ::vocab::http::LocalTx,
+                ::vocab::http::OutboxFact,
             > = ::generated::http::identity_v1::refresh::ROUTE;
         }
 
@@ -11494,26 +11687,15 @@ mod tests {
                     scope: TenantRepoScope,
                     hash: RefreshTokenHash,
                 ) -> Result<Option<RefreshTokenRecord>, IdentityError>;
-                async fn rotate(
-                    &self,
-                    scope: TenantRepoScope,
-                    mutation: crate::ports::RefreshRotationMutation,
-                ) -> Result<RefreshRotationOutcome, IdentityError>;
-                async fn revoke_lineage(
-                    &self,
-                    scope: TenantRepoScope,
-                    lineage_id: RefreshTokenId,
-                ) -> Result<(), IdentityError>;
             }
         }
 
         let mut store = MockHeaderBoundaryStore::new();
         store.expect_find_by_hash().times(0);
-        store.expect_rotate().times(0);
-        store.expect_revoke_lineage().times(0);
         let svc = Arc::new(RefreshService::new(
             DynRefreshTokenStore::new_box(store),
             test_lifecycle(crate::internal::mem::InMemAuthGrantStore::new()),
+            unavailable_security_lifecycle(),
             seeded_account_reader(),
             Arc::new(make_jwt_issuer(make_clock(1_700_000_000))),
             make_clock(1_700_000_000),
@@ -11613,6 +11795,159 @@ mod tests {
             !env["error"]["requestId"].as_str().unwrap_or("").is_empty(),
             "error.requestId 应存在"
         );
+        Ok(())
+    }
+
+    async fn scripted_refresh_http_response(
+        backend: ScriptedRefreshBackend,
+        request_id: &str,
+    ) -> Result<(StatusCode, serde_json::Value, String), Box<dyn std::error::Error>> {
+        let response = refresh_handler_bytes(
+            scripted_refresh_service(backend),
+            refresh_receipt(),
+            tid(CANON_TENANT),
+            Bytes::from(serde_json::json!({ "refreshToken": "presented-refresh" }).to_string()),
+            request_id,
+        )
+        .await;
+        let status = response.status();
+        let body = to_bytes(response.into_body(), usize::MAX).await?;
+        let text = String::from_utf8(body.to_vec())?;
+        Ok((status, serde_json::from_str(&text)?, text))
+    }
+
+    fn normalize_error_request_id(body: &mut serde_json::Value) {
+        body["error"]["requestId"] = serde_json::Value::String("<request-id>".to_owned());
+    }
+
+    #[tokio::test]
+    async fn refresh_credential_rejections_have_one_indistinguishable_401_body()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let cases = [
+            (
+                "unknown",
+                scripted_refresh_backend(None, 5, false, ScriptedRefreshSettlement::ReuseContained),
+            ),
+            (
+                "expired",
+                scripted_refresh_backend(
+                    Some((RefreshStatus::Active, AuthGrantStatus::Active)),
+                    5,
+                    true,
+                    ScriptedRefreshSettlement::ReuseContained,
+                ),
+            ),
+            (
+                "consumed",
+                scripted_refresh_backend(
+                    Some((RefreshStatus::Consumed, AuthGrantStatus::Active)),
+                    5,
+                    false,
+                    ScriptedRefreshSettlement::ReuseContained,
+                ),
+            ),
+            (
+                "revoked",
+                scripted_refresh_backend(
+                    Some((RefreshStatus::Revoked, AuthGrantStatus::Active)),
+                    5,
+                    false,
+                    ScriptedRefreshSettlement::ReuseContained,
+                ),
+            ),
+            (
+                "epoch-stale",
+                scripted_refresh_backend(
+                    Some((RefreshStatus::Active, AuthGrantStatus::Active)),
+                    6,
+                    false,
+                    ScriptedRefreshSettlement::Internal,
+                ),
+            ),
+            (
+                "already-compromised",
+                scripted_refresh_backend(
+                    Some((RefreshStatus::Revoked, AuthGrantStatus::Compromised)),
+                    5,
+                    false,
+                    ScriptedRefreshSettlement::AlreadyContained,
+                ),
+            ),
+        ];
+        let mut canonical = None;
+        for (index, (label, backend)) in cases.into_iter().enumerate() {
+            let request_id = format!("refresh-reject-{index}");
+            let (status, mut body, text) =
+                scripted_refresh_http_response(backend, &request_id).await?;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "case={label}: {text}");
+            assert_eq!(
+                body["error"]["code"], "ERR_CORE_UNAUTHENTICATED",
+                "case={label}: {text}"
+            );
+            assert_eq!(body["error"]["requestId"], request_id, "case={label}");
+            normalize_error_request_id(&mut body);
+            if let Some(expected) = &canonical {
+                assert_eq!(
+                    &body, expected,
+                    "case={label} must not disclose token state"
+                );
+            } else {
+                canonical = Some(body);
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn refresh_internal_settlements_have_one_generic_500_without_bearers()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let cases = [
+            ("internal", ScriptedRefreshSettlement::Internal),
+            ("outbox", ScriptedRefreshSettlement::Outbox),
+            ("commit-unknown", ScriptedRefreshSettlement::CommitUnknown),
+        ];
+        let mut canonical = None;
+        for (index, (label, settlement)) in cases.into_iter().enumerate() {
+            let backend = scripted_refresh_backend(
+                Some((RefreshStatus::Active, AuthGrantStatus::Active)),
+                5,
+                false,
+                settlement,
+            );
+            let request_id = format!("refresh-internal-{index}");
+            let (status, mut body, text) =
+                scripted_refresh_http_response(backend, &request_id).await?;
+            assert_eq!(
+                status,
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "case={label}: {text}"
+            );
+            assert_eq!(body["error"]["code"], "ERR_CORE_INTERNAL", "case={label}");
+            assert_eq!(body["error"]["requestId"], request_id, "case={label}");
+            for forbidden in [
+                "accessToken",
+                "refreshToken",
+                "presented-refresh",
+                "provider",
+                "outbox",
+                "commit",
+                "compromised",
+            ] {
+                assert!(
+                    !text.contains(forbidden),
+                    "case={label} leaked `{forbidden}` in {text}"
+                );
+            }
+            normalize_error_request_id(&mut body);
+            if let Some(expected) = &canonical {
+                assert_eq!(
+                    &body, expected,
+                    "case={label} must have the generic 500 body"
+                );
+            } else {
+                canonical = Some(body);
+            }
+        }
         Ok(())
     }
 
@@ -11734,7 +12069,7 @@ mod tests {
         // 用 login 回带的 refresh token 轮换 → Ok 证明 login 已落库 store（#1252）
         let rt = authn::RefreshToken::new(resp.data.refresh_token.as_str());
         let bundle = refresh_svc
-            .rotate(ta, &rt)
+            .rotate(refresh_receipt(), ta, &rt)
             .await
             .expect("rotate ok after login（token 已在 store）");
         assert!(!bundle.access.as_str().is_empty(), "rotated access 非空");
