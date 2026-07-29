@@ -97,6 +97,33 @@ impl core::marker::Unpin for assembly_schema::AssemblyLockErrorStage
 impl core::marker::UnsafeUnpin for assembly_schema::AssemblyLockErrorStage
 impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::AssemblyLockErrorStage
 impl core::panic::unwind_safe::UnwindSafe for assembly_schema::AssemblyLockErrorStage
+pub enum assembly_schema::AssemblyManifestSchemaVersion
+pub assembly_schema::AssemblyManifestSchemaVersion::V2
+impl core::clone::Clone for assembly_schema::AssemblyManifestSchemaVersion
+pub fn assembly_schema::AssemblyManifestSchemaVersion::clone(&self) -> assembly_schema::AssemblyManifestSchemaVersion
+impl core::cmp::Eq for assembly_schema::AssemblyManifestSchemaVersion
+impl core::cmp::PartialEq for assembly_schema::AssemblyManifestSchemaVersion
+pub fn assembly_schema::AssemblyManifestSchemaVersion::eq(&self, &assembly_schema::AssemblyManifestSchemaVersion) -> bool
+impl core::convert::From<assembly_schema::AssemblyManifestSchemaVersion> for u32
+pub fn u32::from(assembly_schema::AssemblyManifestSchemaVersion) -> Self
+impl core::convert::TryFrom<u32> for assembly_schema::AssemblyManifestSchemaVersion
+pub type assembly_schema::AssemblyManifestSchemaVersion::Error = &'static str
+pub fn assembly_schema::AssemblyManifestSchemaVersion::try_from(u32) -> core::result::Result<Self, Self::Error>
+impl core::fmt::Debug for assembly_schema::AssemblyManifestSchemaVersion
+pub fn assembly_schema::AssemblyManifestSchemaVersion::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for assembly_schema::AssemblyManifestSchemaVersion
+impl core::marker::StructuralPartialEq for assembly_schema::AssemblyManifestSchemaVersion
+impl serde_core::ser::Serialize for assembly_schema::AssemblyManifestSchemaVersion
+pub fn assembly_schema::AssemblyManifestSchemaVersion::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for assembly_schema::AssemblyManifestSchemaVersion
+pub fn assembly_schema::AssemblyManifestSchemaVersion::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for assembly_schema::AssemblyManifestSchemaVersion
+impl core::marker::Send for assembly_schema::AssemblyManifestSchemaVersion
+impl core::marker::Sync for assembly_schema::AssemblyManifestSchemaVersion
+impl core::marker::Unpin for assembly_schema::AssemblyManifestSchemaVersion
+impl core::marker::UnsafeUnpin for assembly_schema::AssemblyManifestSchemaVersion
+impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::AssemblyManifestSchemaVersion
+impl core::panic::unwind_safe::UnwindSafe for assembly_schema::AssemblyManifestSchemaVersion
 pub enum assembly_schema::AssemblyProfile
 pub assembly_schema::AssemblyProfile::Demo
 pub assembly_schema::AssemblyProfile::Production
@@ -356,6 +383,58 @@ impl core::marker::Unpin for assembly_schema::ManifestValidationError
 impl core::marker::UnsafeUnpin for assembly_schema::ManifestValidationError
 impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::ManifestValidationError
 impl core::panic::unwind_safe::UnwindSafe for assembly_schema::ManifestValidationError
+pub enum assembly_schema::ProjectionActivation
+pub assembly_schema::ProjectionActivation::Active
+pub assembly_schema::ProjectionActivation::CaptureOnly
+pub assembly_schema::ProjectionActivation::Disabled
+pub assembly_schema::ProjectionActivation::Shadow
+impl assembly_schema::ProjectionActivation
+pub const fn assembly_schema::ProjectionActivation::requirements(self) -> &'static [assembly_schema::ProjectionCapabilityRequirement]
+impl core::clone::Clone for assembly_schema::ProjectionActivation
+pub fn assembly_schema::ProjectionActivation::clone(&self) -> assembly_schema::ProjectionActivation
+impl core::cmp::Eq for assembly_schema::ProjectionActivation
+impl core::cmp::PartialEq for assembly_schema::ProjectionActivation
+pub fn assembly_schema::ProjectionActivation::eq(&self, &assembly_schema::ProjectionActivation) -> bool
+impl core::fmt::Debug for assembly_schema::ProjectionActivation
+pub fn assembly_schema::ProjectionActivation::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for assembly_schema::ProjectionActivation
+impl core::marker::StructuralPartialEq for assembly_schema::ProjectionActivation
+impl serde_core::ser::Serialize for assembly_schema::ProjectionActivation
+pub fn assembly_schema::ProjectionActivation::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for assembly_schema::ProjectionActivation
+pub fn assembly_schema::ProjectionActivation::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for assembly_schema::ProjectionActivation
+impl core::marker::Send for assembly_schema::ProjectionActivation
+impl core::marker::Sync for assembly_schema::ProjectionActivation
+impl core::marker::Unpin for assembly_schema::ProjectionActivation
+impl core::marker::UnsafeUnpin for assembly_schema::ProjectionActivation
+impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::ProjectionActivation
+impl core::panic::unwind_safe::UnwindSafe for assembly_schema::ProjectionActivation
+pub enum assembly_schema::ProjectionCapabilityRequirement
+pub assembly_schema::ProjectionCapabilityRequirement::CaptureStore
+pub assembly_schema::ProjectionCapabilityRequirement::CheckpointStore
+pub assembly_schema::ProjectionCapabilityRequirement::DeadLetterStore
+pub assembly_schema::ProjectionCapabilityRequirement::Probe
+pub assembly_schema::ProjectionCapabilityRequirement::Serving
+pub assembly_schema::ProjectionCapabilityRequirement::Source
+pub assembly_schema::ProjectionCapabilityRequirement::Target
+pub assembly_schema::ProjectionCapabilityRequirement::Worker
+impl core::clone::Clone for assembly_schema::ProjectionCapabilityRequirement
+pub fn assembly_schema::ProjectionCapabilityRequirement::clone(&self) -> assembly_schema::ProjectionCapabilityRequirement
+impl core::cmp::Eq for assembly_schema::ProjectionCapabilityRequirement
+impl core::cmp::PartialEq for assembly_schema::ProjectionCapabilityRequirement
+pub fn assembly_schema::ProjectionCapabilityRequirement::eq(&self, &assembly_schema::ProjectionCapabilityRequirement) -> bool
+impl core::fmt::Debug for assembly_schema::ProjectionCapabilityRequirement
+pub fn assembly_schema::ProjectionCapabilityRequirement::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for assembly_schema::ProjectionCapabilityRequirement
+impl core::marker::StructuralPartialEq for assembly_schema::ProjectionCapabilityRequirement
+impl core::marker::Freeze for assembly_schema::ProjectionCapabilityRequirement
+impl core::marker::Send for assembly_schema::ProjectionCapabilityRequirement
+impl core::marker::Sync for assembly_schema::ProjectionCapabilityRequirement
+impl core::marker::Unpin for assembly_schema::ProjectionCapabilityRequirement
+impl core::marker::UnsafeUnpin for assembly_schema::ProjectionCapabilityRequirement
+impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::ProjectionCapabilityRequirement
+impl core::panic::unwind_safe::UnwindSafe for assembly_schema::ProjectionCapabilityRequirement
 #[repr(u8)] pub enum assembly_schema::ProviderConstructor
 pub assembly_schema::ProviderConstructor::AmqpPublisher
 pub assembly_schema::ProviderConstructor::AmqpSubscriber
@@ -494,6 +573,7 @@ pub assembly_schema::ProviderFactorySymbol::EventexecAmqpSubscriber
 pub assembly_schema::ProviderFactorySymbol::EventexecPostgresDlxLifecycleRepository
 pub assembly_schema::ProviderFactorySymbol::EventexecS3DlxArchiveStore
 pub assembly_schema::ProviderFactorySymbol::EventexecVaultArchiveKeyProvider
+pub assembly_schema::ProviderFactorySymbol::EventexecVaultHotKeyProvider
 pub assembly_schema::ProviderFactorySymbol::HttpserveGovernorRateLimiter
 pub assembly_schema::ProviderFactorySymbol::HttpserveOidcPdp
 pub assembly_schema::ProviderFactorySymbol::HttpservePostgresAuthAuditSink
@@ -613,6 +693,7 @@ pub assembly_schema::ProviderRole::DistributedCasStoreAlternative
 pub assembly_schema::ProviderRole::DistributedLockStore
 pub assembly_schema::ProviderRole::DlxArchiveKeyProvider
 pub assembly_schema::ProviderRole::DlxArchiveStore
+pub assembly_schema::ProviderRole::DlxHotKeyProvider
 pub assembly_schema::ProviderRole::DlxLifecycleRepository
 pub assembly_schema::ProviderRole::EventPublisher
 pub assembly_schema::ProviderRole::EventSubscriber
@@ -739,6 +820,91 @@ impl core::marker::Unpin for assembly_schema::RuntimePlanJsonCategory
 impl core::marker::UnsafeUnpin for assembly_schema::RuntimePlanJsonCategory
 impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::RuntimePlanJsonCategory
 impl core::panic::unwind_safe::UnwindSafe for assembly_schema::RuntimePlanJsonCategory
+pub enum assembly_schema::SagaActivation
+pub assembly_schema::SagaActivation::Active
+pub assembly_schema::SagaActivation::Disabled
+impl assembly_schema::SagaActivation
+pub const fn assembly_schema::SagaActivation::requirements(self) -> &'static [assembly_schema::SagaCapabilityRequirement]
+impl core::clone::Clone for assembly_schema::SagaActivation
+pub fn assembly_schema::SagaActivation::clone(&self) -> assembly_schema::SagaActivation
+impl core::cmp::Eq for assembly_schema::SagaActivation
+impl core::cmp::PartialEq for assembly_schema::SagaActivation
+pub fn assembly_schema::SagaActivation::eq(&self, &assembly_schema::SagaActivation) -> bool
+impl core::fmt::Debug for assembly_schema::SagaActivation
+pub fn assembly_schema::SagaActivation::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for assembly_schema::SagaActivation
+impl core::marker::StructuralPartialEq for assembly_schema::SagaActivation
+impl serde_core::ser::Serialize for assembly_schema::SagaActivation
+pub fn assembly_schema::SagaActivation::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for assembly_schema::SagaActivation
+pub fn assembly_schema::SagaActivation::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for assembly_schema::SagaActivation
+impl core::marker::Send for assembly_schema::SagaActivation
+impl core::marker::Sync for assembly_schema::SagaActivation
+impl core::marker::Unpin for assembly_schema::SagaActivation
+impl core::marker::UnsafeUnpin for assembly_schema::SagaActivation
+impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::SagaActivation
+impl core::panic::unwind_safe::UnwindSafe for assembly_schema::SagaActivation
+pub enum assembly_schema::SagaCapabilityRequirement
+pub assembly_schema::SagaCapabilityRequirement::CheckpointStore
+pub assembly_schema::SagaCapabilityRequirement::DeadLetterStore
+pub assembly_schema::SagaCapabilityRequirement::InstanceStore
+pub assembly_schema::SagaCapabilityRequirement::JournalStore
+pub assembly_schema::SagaCapabilityRequirement::LockFencing
+pub assembly_schema::SagaCapabilityRequirement::Probe
+pub assembly_schema::SagaCapabilityRequirement::ReceiptStore
+pub assembly_schema::SagaCapabilityRequirement::TypedActions
+pub assembly_schema::SagaCapabilityRequirement::Worker
+impl core::clone::Clone for assembly_schema::SagaCapabilityRequirement
+pub fn assembly_schema::SagaCapabilityRequirement::clone(&self) -> assembly_schema::SagaCapabilityRequirement
+impl core::cmp::Eq for assembly_schema::SagaCapabilityRequirement
+impl core::cmp::PartialEq for assembly_schema::SagaCapabilityRequirement
+pub fn assembly_schema::SagaCapabilityRequirement::eq(&self, &assembly_schema::SagaCapabilityRequirement) -> bool
+impl core::fmt::Debug for assembly_schema::SagaCapabilityRequirement
+pub fn assembly_schema::SagaCapabilityRequirement::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for assembly_schema::SagaCapabilityRequirement
+impl core::marker::StructuralPartialEq for assembly_schema::SagaCapabilityRequirement
+impl core::marker::Freeze for assembly_schema::SagaCapabilityRequirement
+impl core::marker::Send for assembly_schema::SagaCapabilityRequirement
+impl core::marker::Sync for assembly_schema::SagaCapabilityRequirement
+impl core::marker::Unpin for assembly_schema::SagaCapabilityRequirement
+impl core::marker::UnsafeUnpin for assembly_schema::SagaCapabilityRequirement
+impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::SagaCapabilityRequirement
+impl core::panic::unwind_safe::UnwindSafe for assembly_schema::SagaCapabilityRequirement
+pub enum assembly_schema::WorkflowActivation
+pub assembly_schema::WorkflowActivation::Projection
+pub assembly_schema::WorkflowActivation::Projection::activation: assembly_schema::ProjectionActivation
+pub assembly_schema::WorkflowActivation::Projection::definition_schema_digest: alloc::string::String
+pub assembly_schema::WorkflowActivation::Projection::definition_version: alloc::string::String
+pub assembly_schema::WorkflowActivation::Projection::id: alloc::string::String
+pub assembly_schema::WorkflowActivation::Saga
+pub assembly_schema::WorkflowActivation::Saga::activation: assembly_schema::SagaActivation
+pub assembly_schema::WorkflowActivation::Saga::definition_schema_digest: alloc::string::String
+pub assembly_schema::WorkflowActivation::Saga::definition_version: alloc::string::String
+pub assembly_schema::WorkflowActivation::Saga::id: alloc::string::String
+impl assembly_schema::WorkflowActivation
+pub fn assembly_schema::WorkflowActivation::definition_schema_digest(&self) -> &str
+pub fn assembly_schema::WorkflowActivation::definition_version(&self) -> &str
+pub fn assembly_schema::WorkflowActivation::id(&self) -> &str
+impl core::clone::Clone for assembly_schema::WorkflowActivation
+pub fn assembly_schema::WorkflowActivation::clone(&self) -> assembly_schema::WorkflowActivation
+impl core::cmp::Eq for assembly_schema::WorkflowActivation
+impl core::cmp::PartialEq for assembly_schema::WorkflowActivation
+pub fn assembly_schema::WorkflowActivation::eq(&self, &assembly_schema::WorkflowActivation) -> bool
+impl core::fmt::Debug for assembly_schema::WorkflowActivation
+pub fn assembly_schema::WorkflowActivation::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for assembly_schema::WorkflowActivation
+impl serde_core::ser::Serialize for assembly_schema::WorkflowActivation
+pub fn assembly_schema::WorkflowActivation::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for assembly_schema::WorkflowActivation
+pub fn assembly_schema::WorkflowActivation::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for assembly_schema::WorkflowActivation
+impl core::marker::Send for assembly_schema::WorkflowActivation
+impl core::marker::Sync for assembly_schema::WorkflowActivation
+impl core::marker::Unpin for assembly_schema::WorkflowActivation
+impl core::marker::UnsafeUnpin for assembly_schema::WorkflowActivation
+impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::WorkflowActivation
+impl core::panic::unwind_safe::UnwindSafe for assembly_schema::WorkflowActivation
 pub struct assembly_schema::AssemblyDigests
 impl assembly_schema::AssemblyDigests
 pub fn assembly_schema::AssemblyDigests::contracts(&self) -> &str
@@ -861,10 +1027,12 @@ pub assembly_schema::AssemblyManifest::framework_contracts: alloc::vec::Vec<asse
 pub assembly_schema::AssemblyManifest::listeners: alloc::vec::Vec<assembly_schema::AssemblyListener>
 pub assembly_schema::AssemblyManifest::name: alloc::string::String
 pub assembly_schema::AssemblyManifest::profile: assembly_schema::AssemblyProfile
+pub assembly_schema::AssemblyManifest::schema_version: assembly_schema::AssemblyManifestSchemaVersion
 pub assembly_schema::AssemblyManifest::topology: assembly_schema::AssemblyTopology
+pub assembly_schema::AssemblyManifest::workflow_activations: alloc::vec::Vec<assembly_schema::WorkflowActivation>
 impl assembly_schema::AssemblyManifest
 pub fn assembly_schema::AssemblyManifest::basic_validation_errors(&self) -> alloc::vec::Vec<assembly_schema::ManifestValidationError>
-pub fn assembly_schema::AssemblyManifest::canonicalize_v1(self) -> core::result::Result<assembly_schema::CanonicalAssemblyManifestV1, assembly_schema::AssemblyManifestCanonicalizationError>
+pub fn assembly_schema::AssemblyManifest::canonicalize_v2(self) -> core::result::Result<assembly_schema::CanonicalAssemblyManifestV2, assembly_schema::AssemblyManifestCanonicalizationError>
 pub fn assembly_schema::AssemblyManifest::from_toml_str(&str) -> core::result::Result<Self, toml::de::Error>
 pub fn assembly_schema::AssemblyManifest::validate_basic(&self) -> core::result::Result<(), assembly_schema::ManifestValidationErrors>
 pub fn assembly_schema::AssemblyManifest::validate_graph_evidence(&self) -> core::result::Result<(), assembly_schema::GraphEvidenceValidationErrors>
@@ -901,23 +1069,25 @@ impl core::marker::Unpin for assembly_schema::AssemblyManifestCanonicalizationEr
 impl core::marker::UnsafeUnpin for assembly_schema::AssemblyManifestCanonicalizationError
 impl !core::panic::unwind_safe::RefUnwindSafe for assembly_schema::AssemblyManifestCanonicalizationError
 impl !core::panic::unwind_safe::UnwindSafe for assembly_schema::AssemblyManifestCanonicalizationError
-pub struct assembly_schema::CanonicalAssemblyManifestV1
-impl assembly_schema::CanonicalAssemblyManifestV1
-pub fn assembly_schema::CanonicalAssemblyManifestV1::diport_providers(&self) -> &[assembly_schema::DiportProvider]
-pub fn assembly_schema::CanonicalAssemblyManifestV1::domains(&self) -> &[assembly_schema::AssemblyDomain]
-pub fn assembly_schema::CanonicalAssemblyManifestV1::framework_contracts(&self) -> &[assembly_schema::FrameworkContractMount]
-pub fn assembly_schema::CanonicalAssemblyManifestV1::listeners(&self) -> &[assembly_schema::AssemblyListener]
-pub fn assembly_schema::CanonicalAssemblyManifestV1::manifest_digest(&self) -> &str
-pub fn assembly_schema::CanonicalAssemblyManifestV1::name(&self) -> &str
-pub const fn assembly_schema::CanonicalAssemblyManifestV1::profile(&self) -> assembly_schema::AssemblyProfile
-pub const fn assembly_schema::CanonicalAssemblyManifestV1::topology(&self) -> assembly_schema::AssemblyTopology
-impl core::marker::Freeze for assembly_schema::CanonicalAssemblyManifestV1
-impl core::marker::Send for assembly_schema::CanonicalAssemblyManifestV1
-impl core::marker::Sync for assembly_schema::CanonicalAssemblyManifestV1
-impl core::marker::Unpin for assembly_schema::CanonicalAssemblyManifestV1
-impl core::marker::UnsafeUnpin for assembly_schema::CanonicalAssemblyManifestV1
-impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::CanonicalAssemblyManifestV1
-impl core::panic::unwind_safe::UnwindSafe for assembly_schema::CanonicalAssemblyManifestV1
+pub struct assembly_schema::CanonicalAssemblyManifestV2
+impl assembly_schema::CanonicalAssemblyManifestV2
+pub fn assembly_schema::CanonicalAssemblyManifestV2::diport_providers(&self) -> &[assembly_schema::DiportProvider]
+pub fn assembly_schema::CanonicalAssemblyManifestV2::domains(&self) -> &[assembly_schema::AssemblyDomain]
+pub fn assembly_schema::CanonicalAssemblyManifestV2::framework_contracts(&self) -> &[assembly_schema::FrameworkContractMount]
+pub fn assembly_schema::CanonicalAssemblyManifestV2::listeners(&self) -> &[assembly_schema::AssemblyListener]
+pub fn assembly_schema::CanonicalAssemblyManifestV2::manifest_digest(&self) -> &str
+pub fn assembly_schema::CanonicalAssemblyManifestV2::name(&self) -> &str
+pub const fn assembly_schema::CanonicalAssemblyManifestV2::profile(&self) -> assembly_schema::AssemblyProfile
+pub const fn assembly_schema::CanonicalAssemblyManifestV2::schema_version(&self) -> assembly_schema::AssemblyManifestSchemaVersion
+pub const fn assembly_schema::CanonicalAssemblyManifestV2::topology(&self) -> assembly_schema::AssemblyTopology
+pub fn assembly_schema::CanonicalAssemblyManifestV2::workflow_activations(&self) -> &[assembly_schema::WorkflowActivation]
+impl core::marker::Freeze for assembly_schema::CanonicalAssemblyManifestV2
+impl core::marker::Send for assembly_schema::CanonicalAssemblyManifestV2
+impl core::marker::Sync for assembly_schema::CanonicalAssemblyManifestV2
+impl core::marker::Unpin for assembly_schema::CanonicalAssemblyManifestV2
+impl core::marker::UnsafeUnpin for assembly_schema::CanonicalAssemblyManifestV2
+impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::CanonicalAssemblyManifestV2
+impl core::panic::unwind_safe::UnwindSafe for assembly_schema::CanonicalAssemblyManifestV2
 pub struct assembly_schema::DiportProvider
 pub assembly_schema::DiportProvider::consumer: assembly_schema::ProviderConsumer
 pub assembly_schema::DiportProvider::durability: assembly_schema::ProviderDurability
@@ -963,6 +1133,18 @@ impl core::marker::Unpin for assembly_schema::DomainPlan
 impl core::marker::UnsafeUnpin for assembly_schema::DomainPlan
 impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::DomainPlan
 impl core::panic::unwind_safe::UnwindSafe for assembly_schema::DomainPlan
+pub struct assembly_schema::ExecutableAssemblyLock(_)
+impl assembly_schema::ExecutableAssemblyLock
+pub const fn assembly_schema::ExecutableAssemblyLock::digests(&self) -> &assembly_schema::AssemblyDigests
+pub const fn assembly_schema::ExecutableAssemblyLock::fingerprint(&self) -> &assembly_schema::AssemblyFingerprint
+pub const fn assembly_schema::ExecutableAssemblyLock::identity(&self) -> &assembly_schema::AssemblyIdentity
+impl core::marker::Freeze for assembly_schema::ExecutableAssemblyLock
+impl core::marker::Send for assembly_schema::ExecutableAssemblyLock
+impl core::marker::Sync for assembly_schema::ExecutableAssemblyLock
+impl core::marker::Unpin for assembly_schema::ExecutableAssemblyLock
+impl core::marker::UnsafeUnpin for assembly_schema::ExecutableAssemblyLock
+impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::ExecutableAssemblyLock
+impl core::panic::unwind_safe::UnwindSafe for assembly_schema::ExecutableAssemblyLock
 pub struct assembly_schema::FrameworkContractMount
 pub assembly_schema::FrameworkContractMount::id: alloc::string::String
 pub assembly_schema::FrameworkContractMount::listener: assembly_schema::AssemblyListenerKind
@@ -1050,7 +1232,7 @@ pub const fn assembly_schema::ParsedAssemblyLock::digests(&self) -> &assembly_sc
 pub const fn assembly_schema::ParsedAssemblyLock::fingerprint(&self) -> &assembly_schema::AssemblyFingerprint
 pub fn assembly_schema::ParsedAssemblyLock::from_json_slice(&[u8]) -> core::result::Result<Self, assembly_schema::AssemblyLockError>
 pub const fn assembly_schema::ParsedAssemblyLock::identity(&self) -> &assembly_schema::AssemblyIdentity
-pub fn assembly_schema::ParsedAssemblyLock::verify_repository_v1(self, &std::path::Path, &std::path::Path) -> core::result::Result<assembly_schema::RepositoryVerifiedAssemblyLock, assembly_schema::AssemblyLockError>
+pub fn assembly_schema::ParsedAssemblyLock::verify_repository_v2(self, &std::path::Path, &std::path::Path) -> core::result::Result<assembly_schema::RepositoryVerifiedAssemblyLock, assembly_schema::AssemblyLockError>
 impl core::marker::Freeze for assembly_schema::ParsedAssemblyLock
 impl core::marker::Send for assembly_schema::ParsedAssemblyLock
 impl core::marker::Sync for assembly_schema::ParsedAssemblyLock
@@ -1063,13 +1245,13 @@ impl assembly_schema::ParsedRuntimePlan
 pub const fn assembly_schema::ParsedRuntimePlan::as_plan(&self) -> &assembly_schema::RuntimePlan
 pub const fn assembly_schema::ParsedRuntimePlan::assembly_fingerprint(&self) -> &assembly_schema::AssemblyFingerprint
 pub fn assembly_schema::ParsedRuntimePlan::domain_plans(&self) -> &[assembly_schema::DomainPlan]
-pub fn assembly_schema::ParsedRuntimePlan::from_json_slice(&[u8]) -> core::result::Result<Self, assembly_schema::RuntimePlanError>
-pub fn assembly_schema::ParsedRuntimePlan::from_json_slice_bound(&[u8], &assembly_schema::CanonicalAssemblyManifestV1, &assembly_schema::ParsedAssemblyLock) -> core::result::Result<Self, assembly_schema::RuntimePlanError>
+pub fn assembly_schema::ParsedRuntimePlan::from_json_slice_bound(&[u8], &assembly_schema::CanonicalAssemblyManifestV2, &assembly_schema::ExecutableAssemblyLock) -> core::result::Result<Self, assembly_schema::RuntimePlanError>
 pub fn assembly_schema::ParsedRuntimePlan::listener_plans(&self) -> &[assembly_schema::ListenerPlan]
 pub fn assembly_schema::ParsedRuntimePlan::placement_plans(&self) -> &[assembly_schema::PlacementPlan]
 pub fn assembly_schema::ParsedRuntimePlan::provider_plans(&self) -> &[assembly_schema::ProviderPlan]
 pub const fn assembly_schema::ParsedRuntimePlan::runtime_plan_fingerprint(&self) -> &assembly_schema::RuntimePlanFingerprint
 pub const fn assembly_schema::ParsedRuntimePlan::schema_version(&self) -> u32
+pub fn assembly_schema::ParsedRuntimePlan::workflow_plans(&self) -> &[assembly_schema::WorkflowPlan]
 impl core::fmt::Debug for assembly_schema::ParsedRuntimePlan
 pub fn assembly_schema::ParsedRuntimePlan::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::Freeze for assembly_schema::ParsedRuntimePlan
@@ -1158,10 +1340,11 @@ impl core::panic::unwind_safe::UnwindSafe for assembly_schema::ProviderPlan
 pub struct assembly_schema::RepositoryVerifiedAssemblyLock(_)
 impl assembly_schema::RepositoryVerifiedAssemblyLock
 pub const fn assembly_schema::RepositoryVerifiedAssemblyLock::as_lock(&self) -> &assembly_schema::AssemblyLock
-pub fn assembly_schema::RepositoryVerifiedAssemblyLock::compile_v1(&std::path::Path, &std::path::Path) -> core::result::Result<Self, assembly_schema::AssemblyLockError>
+pub fn assembly_schema::RepositoryVerifiedAssemblyLock::compile_v2(&std::path::Path, &std::path::Path) -> core::result::Result<Self, assembly_schema::AssemblyLockError>
 pub const fn assembly_schema::RepositoryVerifiedAssemblyLock::digests(&self) -> &assembly_schema::AssemblyDigests
 pub const fn assembly_schema::RepositoryVerifiedAssemblyLock::fingerprint(&self) -> &assembly_schema::AssemblyFingerprint
 pub const fn assembly_schema::RepositoryVerifiedAssemblyLock::identity(&self) -> &assembly_schema::AssemblyIdentity
+pub fn assembly_schema::RepositoryVerifiedAssemblyLock::into_executable(self) -> assembly_schema::ExecutableAssemblyLock
 impl serde_core::ser::Serialize for assembly_schema::RepositoryVerifiedAssemblyLock
 pub fn assembly_schema::RepositoryVerifiedAssemblyLock::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
 impl core::marker::Freeze for assembly_schema::RepositoryVerifiedAssemblyLock
@@ -1174,13 +1357,14 @@ impl core::panic::unwind_safe::UnwindSafe for assembly_schema::RepositoryVerifie
 pub struct assembly_schema::RuntimePlan
 impl assembly_schema::RuntimePlan
 pub const fn assembly_schema::RuntimePlan::assembly_fingerprint(&self) -> &assembly_schema::AssemblyFingerprint
-pub fn assembly_schema::RuntimePlan::compile_v1(&assembly_schema::CanonicalAssemblyManifestV1, &assembly_schema::ParsedAssemblyLock, assembly_schema::RuntimePlanV1Input) -> core::result::Result<Self, assembly_schema::RuntimePlanError>
+pub fn assembly_schema::RuntimePlan::compile_v2(&assembly_schema::CanonicalAssemblyManifestV2, &assembly_schema::ExecutableAssemblyLock, assembly_schema::RuntimePlanV2Input) -> core::result::Result<Self, assembly_schema::RuntimePlanError>
 pub fn assembly_schema::RuntimePlan::domain_plans(&self) -> &[assembly_schema::DomainPlan]
 pub fn assembly_schema::RuntimePlan::listener_plans(&self) -> &[assembly_schema::ListenerPlan]
 pub fn assembly_schema::RuntimePlan::placement_plans(&self) -> &[assembly_schema::PlacementPlan]
 pub fn assembly_schema::RuntimePlan::provider_plans(&self) -> &[assembly_schema::ProviderPlan]
 pub const fn assembly_schema::RuntimePlan::runtime_plan_fingerprint(&self) -> &assembly_schema::RuntimePlanFingerprint
 pub const fn assembly_schema::RuntimePlan::schema_version(&self) -> u32
+pub fn assembly_schema::RuntimePlan::workflow_plans(&self) -> &[assembly_schema::WorkflowPlan]
 impl core::fmt::Debug for assembly_schema::RuntimePlan
 pub fn assembly_schema::RuntimePlan::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl schemars::JsonSchema for assembly_schema::RuntimePlan
@@ -1257,23 +1441,36 @@ impl core::marker::Unpin for assembly_schema::RuntimePlanJsonPath
 impl core::marker::UnsafeUnpin for assembly_schema::RuntimePlanJsonPath
 impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::RuntimePlanJsonPath
 impl core::panic::unwind_safe::UnwindSafe for assembly_schema::RuntimePlanJsonPath
-pub struct assembly_schema::RuntimePlanV1Input
-impl assembly_schema::RuntimePlanV1Input
-pub fn assembly_schema::RuntimePlanV1Input::domain(&mut self, assembly_schema::AssemblyDomain)
-pub fn assembly_schema::RuntimePlanV1Input::from_manifest(&assembly_schema::CanonicalAssemblyManifestV1) -> Self
-pub fn assembly_schema::RuntimePlanV1Input::listener(&mut self, assembly_schema::AssemblyListenerKind, assembly_schema::ListenerAuth, alloc::vec::Vec<assembly_schema::AssemblyDomain>)
-pub fn assembly_schema::RuntimePlanV1Input::new() -> Self
-pub fn assembly_schema::RuntimePlanV1Input::placement(&mut self, assembly_schema::AssemblyDomain, impl core::convert::Into<alloc::string::String>)
-pub fn assembly_schema::RuntimePlanV1Input::provider(&mut self, impl core::convert::Into<alloc::string::String>, assembly_schema::ProviderConstructor, alloc::vec::Vec<assembly_schema::LifecycleChannel>)
-impl core::default::Default for assembly_schema::RuntimePlanV1Input
-pub fn assembly_schema::RuntimePlanV1Input::default() -> assembly_schema::RuntimePlanV1Input
-impl core::marker::Freeze for assembly_schema::RuntimePlanV1Input
-impl core::marker::Send for assembly_schema::RuntimePlanV1Input
-impl core::marker::Sync for assembly_schema::RuntimePlanV1Input
-impl core::marker::Unpin for assembly_schema::RuntimePlanV1Input
-impl core::marker::UnsafeUnpin for assembly_schema::RuntimePlanV1Input
-impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::RuntimePlanV1Input
-impl core::panic::unwind_safe::UnwindSafe for assembly_schema::RuntimePlanV1Input
+pub struct assembly_schema::RuntimePlanV2Input
+impl assembly_schema::RuntimePlanV2Input
+pub fn assembly_schema::RuntimePlanV2Input::domain(&mut self, assembly_schema::AssemblyDomain)
+pub fn assembly_schema::RuntimePlanV2Input::from_manifest(&assembly_schema::CanonicalAssemblyManifestV2) -> Self
+pub fn assembly_schema::RuntimePlanV2Input::listener(&mut self, assembly_schema::AssemblyListenerKind, assembly_schema::ListenerAuth, alloc::vec::Vec<assembly_schema::AssemblyDomain>)
+pub fn assembly_schema::RuntimePlanV2Input::new() -> Self
+pub fn assembly_schema::RuntimePlanV2Input::placement(&mut self, assembly_schema::AssemblyDomain, impl core::convert::Into<alloc::string::String>)
+pub fn assembly_schema::RuntimePlanV2Input::provider(&mut self, impl core::convert::Into<alloc::string::String>, assembly_schema::ProviderConstructor, alloc::vec::Vec<assembly_schema::LifecycleChannel>)
+impl core::default::Default for assembly_schema::RuntimePlanV2Input
+pub fn assembly_schema::RuntimePlanV2Input::default() -> assembly_schema::RuntimePlanV2Input
+impl core::marker::Freeze for assembly_schema::RuntimePlanV2Input
+impl core::marker::Send for assembly_schema::RuntimePlanV2Input
+impl core::marker::Sync for assembly_schema::RuntimePlanV2Input
+impl core::marker::Unpin for assembly_schema::RuntimePlanV2Input
+impl core::marker::UnsafeUnpin for assembly_schema::RuntimePlanV2Input
+impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::RuntimePlanV2Input
+impl core::panic::unwind_safe::UnwindSafe for assembly_schema::RuntimePlanV2Input
+pub struct assembly_schema::WorkflowPlan(_)
+impl assembly_schema::WorkflowPlan
+pub const fn assembly_schema::WorkflowPlan::activation(&self) -> &assembly_schema::WorkflowActivation
+pub fn assembly_schema::WorkflowPlan::id(&self) -> &str
+impl serde_core::ser::Serialize for assembly_schema::WorkflowPlan
+pub fn assembly_schema::WorkflowPlan::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl core::marker::Freeze for assembly_schema::WorkflowPlan
+impl core::marker::Send for assembly_schema::WorkflowPlan
+impl core::marker::Sync for assembly_schema::WorkflowPlan
+impl core::marker::Unpin for assembly_schema::WorkflowPlan
+impl core::marker::UnsafeUnpin for assembly_schema::WorkflowPlan
+impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::WorkflowPlan
+impl core::panic::unwind_safe::UnwindSafe for assembly_schema::WorkflowPlan
 pub const assembly_schema::GENERATED_MODULE_OWNERSHIP_MARKER: &str
 pub const assembly_schema::GENERATED_PROVIDER_OWNERSHIP_MARKER: &str
 pub const assembly_schema::REGISTERED_DOMAIN_LABELS: &[&str]

@@ -129,7 +129,7 @@ fn plan_locks(
         let label = SafeRepoPath::for_path(root, &path);
         ensure_lock_output(&path, &label)?;
         let lock =
-            RepositoryVerifiedAssemblyLock::compile_v1(root, target.dir()).map_err(|error| {
+            RepositoryVerifiedAssemblyLock::compile_v2(root, target.dir()).map_err(|error| {
                 CommandError::Compile {
                     path: label.clone(),
                     stage: error.stage(),
@@ -450,7 +450,7 @@ mod tests {
             let bytes = fs::read(target.lock_path())?;
             anyhow::ensure!(!bytes.is_empty(), "committed lock must not be empty");
             ParsedAssemblyLock::from_json_slice(&bytes)?
-                .verify_repository_v1(&root, target.dir())?;
+                .verify_repository_v2(&root, target.dir())?;
         }
         Ok(())
     }
@@ -855,8 +855,8 @@ mod tests {
     fn mutate_manifest(root: &Path) -> anyhow::Result<()> {
         replace(
             &root.join("assemblies/runtime/assembly.toml"),
+            "profile = \"production\"",
             "profile = \"demo\"",
-            "profile = \"test\"",
         )
     }
 
@@ -957,63 +957,13 @@ mod tests {
             for assembly in ["identityaudit", "runtime", "settingsonly"] {
                 let source_dir = source.join("assemblies").join(assembly);
                 let target_dir = root.join("assemblies").join(assembly);
-                fs::create_dir_all(target_dir.join("src/generated"))?;
+                fs::create_dir_all(&target_dir)?;
                 fs::copy(
                     source_dir.join("assembly.toml"),
                     target_dir.join("assembly.toml"),
                 )?;
                 fs::copy(source_dir.join("Cargo.toml"), target_dir.join("Cargo.toml"))?;
-                fs::copy(source_dir.join("src/lib.rs"), target_dir.join("src/lib.rs"))?;
-                if assembly == "identityaudit" {
-                    fs::copy(
-                        source_dir.join("src/runtime.rs"),
-                        target_dir.join("src/runtime.rs"),
-                    )?;
-                    fs::copy(
-                        source_dir.join("src/providers.rs"),
-                        target_dir.join("src/providers.rs"),
-                    )?;
-                }
-                fs::copy(
-                    source_dir.join("src/generated/modules_gen.rs"),
-                    target_dir.join("src/generated/modules_gen.rs"),
-                )?;
-                fs::copy(
-                    source_dir.join("src/generated/providers_gen.rs"),
-                    target_dir.join("src/generated/providers_gen.rs"),
-                )?;
-                if assembly == "runtime" {
-                    fs::create_dir_all(target_dir.join("src/phase"))?;
-                    fs::write(
-                        target_dir.join("src/phase/domains.rs"),
-                        r#"
-pub struct InfraBuilt;
-
-impl InfraBuilt {
-    pub async fn wire_domains(self) {
-        let result = async move {
-            let distributed =
-                crate::distributed_runtime::wire_distributed(&deps, distributed_worker)
-                    .context("wire distributed")?;
-            let event_module = crate::event_transport::wire_event_transport(
-                &deps.pg,
-                distributed,
-                event_subscribers,
-                event_transport,
-                event_worker,
-                audit_consumer_key,
-            )
-            .await
-            .context("wire event transport")?;
-            Ok::<_, anyhow::Error>(event_module)
-        }
-        .await;
-        phase_result(<Self as RuntimePhaseState>::PHASE, result)
-    }
-}
-"#,
-                    )?;
-                }
+                copy_tree(&source_dir.join("src"), &target_dir.join("src"))?;
             }
             fs::write(
                 root.join(".gitattributes"),

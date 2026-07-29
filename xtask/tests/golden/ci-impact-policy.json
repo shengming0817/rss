@@ -6,7 +6,7 @@
     "docs/ops/localtx-alerts.rules.yaml",
     "crates/assembly-schema/schemas/assembly-lock.schema.json",
     "crates/assembly-schema/schemas/runtime-plan.schema.json",
-    "crates/assembly-schema/tests/fixtures/fingerprint-v1-vectors.json"
+    "crates/assembly-schema/tests/fixtures/fingerprint-v2-vectors.json"
   ],
   "pathCases": [
     {

@@ -9,7 +9,7 @@ fn forge(
     runtime_plan_fingerprint: RuntimePlanFingerprint,
 ) -> RuntimePlan {
     RuntimePlan {
-        schema_version: 1,
+        schema_version: 2,
         assembly_fingerprint,
         runtime_plan_fingerprint,
         provider_plans: vec![ProviderPlan {
@@ -35,6 +35,7 @@ fn forge(
             domain: AssemblyDomain::Identity,
             workload: "runtime".to_owned(),
         }],
+        workflow_plans: vec![],
     }
 }
 

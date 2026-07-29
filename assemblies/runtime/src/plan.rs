@@ -8,8 +8,8 @@ mod placement_exec;
 
 use crate::config::SnapshotConfig;
 use assembly_schema::{
-    AssemblyDomain, AssemblyListenerKind, AssemblyManifest, ListenerAuth, ParsedAssemblyLock,
-    RuntimePlan as TypedRuntimePlan, RuntimePlanV1Input,
+    AssemblyDomain, AssemblyListenerKind, AssemblyManifest, ExecutableAssemblyLock, ListenerAuth,
+    ParsedAssemblyLock, RuntimePlan as TypedRuntimePlan, RuntimePlanV2Input,
 };
 use primitives::{AuthScheme, ListenerKind};
 use std::fmt;
@@ -108,17 +108,21 @@ impl RuntimePlan {
     ) -> Result<Self, RuntimePlanError> {
         let manifest = AssemblyManifest::from_toml_str(manifest_toml)
             .map_err(RuntimePlanError::ManifestParse)?
-            .canonicalize_v1()
+            .canonicalize_v2()
             .map_err(RuntimePlanError::ManifestCanonicalization)?;
-        let lock = ParsedAssemblyLock::from_json_slice(assembly_lock_json)
+        let parsed = ParsedAssemblyLock::from_json_slice(assembly_lock_json)
             .map_err(RuntimePlanError::AssemblyLock)?;
+        if assembly_lock_json != BUNDLED_ASSEMBLY_LOCK {
+            return Err(RuntimePlanError::UnattestedAssemblyLock);
+        }
+        let lock = ExecutableAssemblyLock::from_build_attested(parsed);
 
-        let mut input = RuntimePlanV1Input::from_manifest(&manifest);
+        let mut input = RuntimePlanV2Input::from_manifest(&manifest);
         listener::append(&manifest, config, &mut input)?;
         domain::append(&manifest, &mut input);
         placement::append(&manifest, &lock, config, &mut input)?;
 
-        let plan = TypedRuntimePlan::compile_v1(&manifest, &lock, input)
+        let plan = TypedRuntimePlan::compile_v2(&manifest, &lock, input)
             .map_err(RuntimePlanError::Protocol)?;
         Ok(Self {
             plan,
@@ -199,10 +203,12 @@ pub(crate) fn fixture_listener_spec(
 ) -> anyhow::Result<ListenerExecutionSpec> {
     let manifest = AssemblyManifest::from_toml_str(BUNDLED_ASSEMBLY_TOML)
         .map_err(|error| anyhow::anyhow!("parse bundled fixture manifest: {error}"))?
-        .canonicalize_v1()
+        .canonicalize_v2()
         .map_err(|error| anyhow::anyhow!("canonicalize bundled fixture manifest: {error}"))?;
-    let lock = ParsedAssemblyLock::from_json_slice(BUNDLED_ASSEMBLY_LOCK)
-        .map_err(|error| anyhow::anyhow!("parse bundled fixture lock: {error}"))?;
+    let lock = ExecutableAssemblyLock::from_build_attested(
+        ParsedAssemblyLock::from_json_slice(BUNDLED_ASSEMBLY_LOCK)
+            .map_err(|error| anyhow::anyhow!("parse bundled fixture lock: {error}"))?,
+    );
     let parsed = assembly_schema::ParsedRuntimePlan::from_json_slice_bound(
         include_bytes!("../runtime-plan.json"),
         &manifest,
@@ -249,6 +255,8 @@ pub(crate) enum RuntimePlanError {
     ManifestCanonicalization(#[source] assembly_schema::AssemblyManifestCanonicalizationError),
     #[error("parse bundled runtime AssemblyLock failed")]
     AssemblyLock(#[source] assembly_schema::AssemblyLockError),
+    #[error("bundled runtime AssemblyLock is not the build-attested artifact")]
+    UnattestedAssemblyLock,
     #[error(
         "resolve RSS_PRIMARY_TOKEN_PROFILE, RSS_ADMIN_TOKEN_PROFILE, or RSS_INTERNAL_AUTH_SCHEME failed; expected rss-access/federated-access and mtls/service-token"
     )]
@@ -270,11 +278,12 @@ mod tests {
     use super::*;
     use crate::config::test_snapshot;
     use assembly_schema::{
-        AssemblyDomain, AssemblyListenerKind, CanonicalAssemblyManifestV1, DomainLifecyclePhase,
-        ListenerAuth, ProviderLifecycle, RuntimePlanErrorStage,
+        AssemblyDomain, AssemblyListenerKind, CanonicalAssemblyManifestV2, DomainLifecyclePhase,
+        ExecutableAssemblyLock, ListenerAuth, ProviderLifecycle, RuntimePlanErrorStage,
     };
     use std::collections::BTreeMap;
     use std::error::Error as _;
+    use std::path::{Path, PathBuf};
 
     const SECRET_BAIT: &str = "ZZ_RUNTIME_PLAN_SECRET_1788";
     const IDENTITY_AUDIT_ASSEMBLY_LOCK: &[u8] =
@@ -282,7 +291,6 @@ mod tests {
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum Mutation {
-        MissingProvider,
         DuplicateProvider,
         MissingListener,
         DuplicateListener,
@@ -318,31 +326,47 @@ mod tests {
             .expect_err("invalid bundled artifact must fail")
     }
 
-    fn canonical_manifest(source: &str) -> CanonicalAssemblyManifestV1 {
+    fn canonical_manifest(source: &str) -> CanonicalAssemblyManifestV2 {
         AssemblyManifest::from_toml_str(source)
             .expect("manifest")
-            .canonicalize_v1()
+            .canonicalize_v2()
             .expect("canonical manifest")
     }
 
-    fn parsed_lock(source: &[u8]) -> ParsedAssemblyLock {
-        ParsedAssemblyLock::from_json_slice(source).expect("AssemblyLock")
+    fn repository_root() -> &'static Path {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("runtime test repository root")
+    }
+
+    fn assembly_dir(name: &str) -> PathBuf {
+        repository_root().join("assemblies").join(name)
+    }
+
+    fn verified_lock(source: &[u8], assembly: &str) -> ExecutableAssemblyLock {
+        let assembly_dir = assembly_dir(assembly);
+        ParsedAssemblyLock::from_json_slice(source)
+            .expect("AssemblyLock")
+            .verify_repository_v2(repository_root(), &assembly_dir)
+            .expect("repository-verified AssemblyLock")
+            .into_executable()
     }
 
     fn compile_error(
-        manifest: &CanonicalAssemblyManifestV1,
-        lock: &ParsedAssemblyLock,
+        manifest: &CanonicalAssemblyManifestV2,
+        lock: &ExecutableAssemblyLock,
     ) -> assembly_schema::RuntimePlanError {
-        TypedRuntimePlan::compile_v1(manifest, lock, compiler_input(manifest, lock, None))
+        TypedRuntimePlan::compile_v2(manifest, lock, compiler_input(manifest, lock, None))
             .expect_err("mismatched manifest/lock must fail")
     }
 
     fn compiler_input(
-        manifest: &CanonicalAssemblyManifestV1,
-        lock: &ParsedAssemblyLock,
+        manifest: &CanonicalAssemblyManifestV2,
+        lock: &ExecutableAssemblyLock,
         mutation: Option<Mutation>,
-    ) -> RuntimePlanV1Input {
-        let mut input = RuntimePlanV1Input::new();
+    ) -> RuntimePlanV2Input {
+        let mut input = RuntimePlanV2Input::from_manifest(manifest);
         append_candidate_providers(manifest, mutation, &mut input);
         append_candidate_listeners(manifest, mutation, &mut input);
         append_candidate_domains(manifest, mutation, &mut input);
@@ -351,36 +375,30 @@ mod tests {
     }
 
     fn append_candidate_providers(
-        manifest: &CanonicalAssemblyManifestV1,
+        manifest: &CanonicalAssemblyManifestV2,
         mutation: Option<Mutation>,
-        input: &mut RuntimePlanV1Input,
+        input: &mut RuntimePlanV2Input,
     ) {
-        let mut providers = manifest.diport_providers().iter().collect::<Vec<_>>();
-        providers.retain(|provider| provider.lifecycle == ProviderLifecycle::Active);
-        providers.sort_by_key(|provider| provider.id.as_str());
-        for (index, provider) in providers.iter().enumerate() {
-            if index == 0 && mutation == Some(Mutation::MissingProvider) {
-                continue;
-            }
-            input.provider(
-                provider.id.as_str(),
-                provider.provider,
-                provider.outputs.clone(),
-            );
-            if index == 0 && mutation == Some(Mutation::DuplicateProvider) {
-                input.provider(
-                    provider.id.as_str(),
-                    provider.provider,
-                    provider.outputs.clone(),
-                );
-            }
+        if mutation != Some(Mutation::DuplicateProvider) {
+            return;
         }
+        let provider = manifest
+            .diport_providers()
+            .iter()
+            .filter(|provider| provider.lifecycle == ProviderLifecycle::Active)
+            .min_by_key(|provider| provider.id.as_str())
+            .expect("runtime has an active provider");
+        input.provider(
+            provider.id.as_str(),
+            provider.provider,
+            provider.outputs.clone(),
+        );
     }
 
     fn append_candidate_listeners(
-        manifest: &CanonicalAssemblyManifestV1,
+        manifest: &CanonicalAssemblyManifestV2,
         mutation: Option<Mutation>,
-        input: &mut RuntimePlanV1Input,
+        input: &mut RuntimePlanV2Input,
     ) {
         let mut listeners = manifest
             .listeners()
@@ -417,9 +435,9 @@ mod tests {
     }
 
     fn append_candidate_domains(
-        manifest: &CanonicalAssemblyManifestV1,
+        manifest: &CanonicalAssemblyManifestV2,
         mutation: Option<Mutation>,
-        input: &mut RuntimePlanV1Input,
+        input: &mut RuntimePlanV2Input,
     ) {
         for (index, domain) in manifest.domains().iter().enumerate() {
             if index == 0 && mutation == Some(Mutation::MissingDomain) {
@@ -433,10 +451,10 @@ mod tests {
     }
 
     fn append_candidate_placements(
-        manifest: &CanonicalAssemblyManifestV1,
-        lock: &ParsedAssemblyLock,
+        manifest: &CanonicalAssemblyManifestV2,
+        lock: &ExecutableAssemblyLock,
         mutation: Option<Mutation>,
-        input: &mut RuntimePlanV1Input,
+        input: &mut RuntimePlanV2Input,
     ) {
         let mut placements = manifest
             .domains()
@@ -600,7 +618,7 @@ mod tests {
     #[test]
     fn runtime_plan_compiler_rejects_manifest_lock_name_mismatch() {
         let manifest = canonical_manifest(BUNDLED_ASSEMBLY_TOML);
-        let lock = parsed_lock(IDENTITY_AUDIT_ASSEMBLY_LOCK);
+        let lock = verified_lock(IDENTITY_AUDIT_ASSEMBLY_LOCK, "identityaudit");
 
         let error = compile_error(&manifest, &lock);
         assert_eq!(error.stage(), RuntimePlanErrorStage::AssemblyIdentity);
@@ -615,7 +633,7 @@ mod tests {
         let source =
             BUNDLED_ASSEMBLY_TOML.replacen("profile = \"production\"", "profile = \"demo\"", 1);
         let manifest = canonical_manifest(&source);
-        let lock = parsed_lock(BUNDLED_ASSEMBLY_LOCK);
+        let lock = verified_lock(BUNDLED_ASSEMBLY_LOCK, "runtime");
 
         let error = compile_error(&manifest, &lock);
         assert_eq!(error.stage(), RuntimePlanErrorStage::AssemblyIdentity);
@@ -633,7 +651,7 @@ mod tests {
             1,
         );
         let manifest = canonical_manifest(&source);
-        let lock = parsed_lock(BUNDLED_ASSEMBLY_LOCK);
+        let lock = verified_lock(BUNDLED_ASSEMBLY_LOCK, "runtime");
 
         let error = compile_error(&manifest, &lock);
         assert_eq!(error.stage(), RuntimePlanErrorStage::ManifestDigest);
@@ -700,15 +718,13 @@ mod tests {
     fn runtime_plan_compiler_rejects_complete_negative_matrix() {
         let manifest = AssemblyManifest::from_toml_str(BUNDLED_ASSEMBLY_TOML)
             .expect("manifest")
-            .canonicalize_v1()
+            .canonicalize_v2()
             .expect("canonical manifest");
-        let lock =
-            ParsedAssemblyLock::from_json_slice(BUNDLED_ASSEMBLY_LOCK).expect("AssemblyLock");
+        let lock = verified_lock(BUNDLED_ASSEMBLY_LOCK, "runtime");
 
-        TypedRuntimePlan::compile_v1(&manifest, &lock, compiler_input(&manifest, &lock, None))
+        TypedRuntimePlan::compile_v2(&manifest, &lock, compiler_input(&manifest, &lock, None))
             .expect("unmutated candidate facts must compile");
         for mutation in [
-            Mutation::MissingProvider,
             Mutation::DuplicateProvider,
             Mutation::MissingListener,
             Mutation::DuplicateListener,
@@ -722,7 +738,7 @@ mod tests {
             Mutation::ReversePlacements,
         ] {
             assert!(
-                TypedRuntimePlan::compile_v1(
+                TypedRuntimePlan::compile_v2(
                     &manifest,
                     &lock,
                     compiler_input(&manifest, &lock, Some(mutation))

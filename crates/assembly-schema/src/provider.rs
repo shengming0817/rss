@@ -308,7 +308,7 @@ provider_factory_symbols! {
     EventexecVaultHotKeyProvider => "eventexec::vault-hot-key-provider",
 }
 
-/// Closed registry of provider constructors accepted by an AssemblyManifest and RuntimePlan v1.
+/// Closed registry of provider constructors accepted by an AssemblyManifest and RuntimePlan v2.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize, JsonSchema,
 )]
@@ -1243,7 +1243,11 @@ mod tests {
         );
         assert_eq!(
             archive.outputs,
-            &[LifecycleChannel::Probes, LifecycleChannel::Workers]
+            &[
+                LifecycleChannel::Probes,
+                LifecycleChannel::Resources,
+                LifecycleChannel::Workers,
+            ]
         );
         assert_ne!(hot.role, archive.role);
         assert_ne!(hot.factory, archive.factory);

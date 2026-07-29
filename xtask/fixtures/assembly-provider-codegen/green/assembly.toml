@@ -1,8 +1,10 @@
+schemaVersion = 2
 name = "runtime"
 profile = "demo"
 domains = ["identity"]
 topology = "durable-shared"
 frameworkContracts = []
+workflowActivations = []
 
 [[listeners]]
 kind = "primary"
@@ -18,7 +20,7 @@ consumer = "settings"
 lifecycle = "active"
 durability = "persistent"
 purpose = "SECRET_BAIT must never enter generated Rust"
-outputs = ["resources"]
+outputs = ["probes", "resources", "workers"]
 
 [[diportProviders]]
 id = "listener-rate-limiter"

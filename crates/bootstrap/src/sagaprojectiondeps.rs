@@ -1,10 +1,21 @@
-//! sagaprojectiondeps —— topology-gated saga instance/journal + checkpoint 选型（单源策略，零 adapter 依赖）。
+//! sagaprojectiondeps —— activation requirements 之后的 topology-gated backend selector（零 adapter 依赖）。
 //!
-//! 组合根经 [`resolve`] 按 [`Topology`] 单源选型 saga 执行的 durable 后端（instance store + journal +
-//! checkpoint store）：demo 拓扑用进程内 in-mem 替身（`memory::MemSagaInstanceStore` /
+//! 已验证的 assembly workflow plan 先决定 workflow activation 并派生 capability requirements。只有
+//! requirements 需要 saga/projection backend 时，组合根才经 [`resolve`] 按 [`Topology`] 选型 instance
+//! store + journal + checkpoint store：demo 拓扑用进程内 in-mem 替身（`memory::MemSagaInstanceStore` /
 //! `MemSagaJournal` / `MemCheckpointStore` / `MemLockStore`），durable 拓扑用 postgres
 //!（`postgres::PgSagaInstanceStore` / `PgSagaJournal` / `PgCheckpointStore`，共享 DB）+ Redis lock provider。
 //! checkpoint store 由本 resolver 选型、saga（P9）与 projection（P10）**共享**（plan.md 决策 2）。
+//!
+//! # 与 WorkflowActivation 的边界
+//!
+//! Assembly manifest v2 的 `workflowActivations`、AssemblyLock v2 与 RuntimePlan v2 `workflowPlans` 构成
+//! deployment activation 协议链。本 resolver 不读该 plan，不接受 definition lifecycle/activation，也不提供
+//! omitted/disabled 的默认语义；它的成功结果只证明 topology 所需的 backend 配置完整，不证明
+//! workflow 已激活，也不证明 typed actions、receipt/dead-letter store、worker 或 probe 已闭合。
+//!
+//! #1913 只建立上述 v2 协议载体；#1914 负责让 production runtime 在调用本 resolver 前消费
+//! activation requirements。因此本模块不声明 omitted/disabled 已在当前 runtime 路径获得零副作用。
 //!
 //! `Demo` 路径的 in-mem 构造只能在 journeys / xtask 组合根进行（`deny.toml` `memory` wrapper 限定）；
 //! 生产 `bins/server` 的 `Demo` 路径须特殊决策（TOPO-INMEM-SEAL-01）。
@@ -12,7 +23,7 @@
 //! # 为什么 resolver 返回**决策**而非**构造好的 adapter**
 //!
 //! `bootstrap` 是服务层 crate，`deny.toml` + `cargo xtask layer-deps` + cargo 依赖图三道门**禁止
-//! bootstrap 依赖 adapters**（同 [`crate::replaydeps`]）。故本 resolver 是**纯策略函数**：拓扑选型 +
+//! bootstrap 依赖 adapters**（同 [`crate::replaydeps`]）。故本 resolver 是**纯 backend 策略函数**：拓扑选型 +
 //! fail-closed 校验 + 凭据 redaction，返回已校验的 [`ResolvedSagaProjection`] 决策；组合根 `match` 该
 //! 决策再构造具体 adapter（`Demo` → in-mem instance+journal+checkpoint+lock；`Durable` → postgres
 //! instance+journal+checkpoint + Redis lock），
@@ -74,7 +85,7 @@ impl std::fmt::Display for PostgresUrl {
     }
 }
 
-/// sagaprojectiondeps resolver 的 typed 配置。
+/// sagaprojectiondeps backend selector 的 typed 配置。
 ///
 /// 组合根读 env（`RSS_POSTGRES_URL` / `RSS_REDIS_URL`）后填入；[`resolve`] 是纯函数、不读 env、不 I/O
 /// （确定性可测）。
@@ -96,7 +107,7 @@ impl SagaProjectionConfig {
     }
 }
 
-/// 已校验的 saga instance/journal + checkpoint 选型决策。组合根 `match` 本枚举映射到具体 adapter
+/// 已校验的 saga instance/journal + checkpoint backend 选型决策。组合根 `match` 本枚举映射到具体 adapter
 /// （`Demo` → in-mem instance+journal+checkpoint+lock；`Durable` → postgres instance/journal/checkpoint +
 /// Redis lock）。bootstrap 自身不持
 /// adapter 类型。
@@ -130,7 +141,8 @@ pub enum SagaProjectionResolveError {
     MissingRedisUrl,
 }
 
-/// topology-gated saga instance/journal + checkpoint 选型（单源）。**纯函数**：不读 env、不做 I/O、不连 postgres。
+/// activation requirements 之后的 topology-gated saga instance/journal + checkpoint backend 选型。
+/// **纯函数**：不读 env、不做 I/O、不连 postgres。
 ///
 /// - [`Topology::Demo`] → `Ok(`[`ResolvedSagaProjection::Demo`]`)`。
 /// - [`Topology::DurableShared`] | [`Topology::DurableIsolated`] → 需 postgres URL + Redis URL；缺则返回

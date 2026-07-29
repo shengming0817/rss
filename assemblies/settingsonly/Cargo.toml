@@ -8,6 +8,9 @@ publish = false
 [lints]
 workspace = true
 
+[build-dependencies]
+assembly-schema = { path = "../../crates/assembly-schema" }
+
 [lib]
 name = "settingsonly"
 path = "src/lib.rs"

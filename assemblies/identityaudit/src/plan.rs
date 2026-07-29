@@ -2,9 +2,9 @@
 
 use anyhow::Context as _;
 use assembly_schema::{
-    AssemblyDomain, AssemblyListenerKind, AssemblyManifest, AssemblyProfile, AssemblyTopology,
-    CanonicalAssemblyManifestV1, DomainLifecyclePhase, ListenerAuth, ParsedAssemblyLock,
-    RuntimePlan as TypedRuntimePlan, RuntimePlanV1Input,
+    AssemblyDomain, AssemblyIdentity, AssemblyListenerKind, AssemblyManifest, AssemblyProfile,
+    AssemblyTopology, CanonicalAssemblyManifestV2, DomainLifecyclePhase, ExecutableAssemblyLock,
+    ListenerAuth, ParsedAssemblyLock, RuntimePlan as TypedRuntimePlan, RuntimePlanV2Input,
 };
 
 const BUNDLED_ASSEMBLY_TOML: &str = include_str!("../assembly.toml");
@@ -21,12 +21,14 @@ impl IdentityAuditPlan {
     pub(crate) fn bundled() -> anyhow::Result<Self> {
         let manifest = AssemblyManifest::from_toml_str(BUNDLED_ASSEMBLY_TOML)
             .context("parse bundled identityaudit assembly manifest")?
-            .canonicalize_v1()
+            .canonicalize_v2()
             .context("canonicalize bundled identityaudit assembly manifest")?;
-        let lock = ParsedAssemblyLock::from_json_slice(BUNDLED_ASSEMBLY_LOCK)
-            .context("parse bundled identityaudit AssemblyLock")?;
-        validate_manifest(&manifest, &lock)?;
-        let typed = TypedRuntimePlan::compile_v1(&manifest, &lock, compiler_input(&manifest)?)
+        let lock = ExecutableAssemblyLock::from_build_attested(
+            ParsedAssemblyLock::from_json_slice(BUNDLED_ASSEMBLY_LOCK)
+                .context("parse bundled identityaudit AssemblyLock")?,
+        );
+        validate_manifest(&manifest, lock.identity())?;
+        let typed = TypedRuntimePlan::compile_v2(&manifest, &lock, compiler_input(&manifest)?)
             .context("compile bundled identityaudit RuntimePlan")?;
         validate_typed(&typed)?;
         Ok(Self { typed })
@@ -88,8 +90,8 @@ impl IdentityAuditPlan {
 }
 
 fn validate_manifest(
-    manifest: &CanonicalAssemblyManifestV1,
-    lock: &ParsedAssemblyLock,
+    manifest: &CanonicalAssemblyManifestV2,
+    lock_identity: &AssemblyIdentity,
 ) -> anyhow::Result<()> {
     anyhow::ensure!(manifest.name() == ASSEMBLY_NAME, "unexpected assembly name");
     anyhow::ensure!(
@@ -98,8 +100,8 @@ fn validate_manifest(
         "identityaudit requires production + durable-isolated"
     );
     anyhow::ensure!(
-        lock.identity().name() == ASSEMBLY_NAME
-            && lock.identity().profile() == AssemblyProfile::Production,
+        lock_identity.name() == ASSEMBLY_NAME
+            && lock_identity.profile() == AssemblyProfile::Production,
         "identityaudit AssemblyLock identity mismatch"
     );
     anyhow::ensure!(
@@ -139,8 +141,8 @@ fn validate_manifest(
     Ok(())
 }
 
-fn compiler_input(manifest: &CanonicalAssemblyManifestV1) -> anyhow::Result<RuntimePlanV1Input> {
-    let mut input = RuntimePlanV1Input::from_manifest(manifest);
+fn compiler_input(manifest: &CanonicalAssemblyManifestV2) -> anyhow::Result<RuntimePlanV2Input> {
+    let mut input = RuntimePlanV2Input::from_manifest(manifest);
     let mut listeners = manifest.listeners().iter().collect::<Vec<_>>();
     listeners.sort_by_key(|listener| listener.kind.as_str());
     for listener in listeners {
@@ -167,7 +169,7 @@ fn compiler_input(manifest: &CanonicalAssemblyManifestV1) -> anyhow::Result<Runt
 }
 
 fn validate_typed(plan: &TypedRuntimePlan) -> anyhow::Result<()> {
-    anyhow::ensure!(plan.schema_version() == 1, "unexpected RuntimePlan schema");
+    anyhow::ensure!(plan.schema_version() == 2, "unexpected RuntimePlan schema");
     let listeners = plan.listener_plans();
     anyhow::ensure!(
         listeners.len() == 3

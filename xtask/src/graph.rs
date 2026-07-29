@@ -1242,11 +1242,13 @@ mod tests {
 
     fn manifest_named(name: &str, domain: &str, listener: &str, consumer: &str) -> String {
         format!(
-            r#"name = "{name}"
+            r#"schemaVersion = 2
+name = "{name}"
 profile = "demo"
 domains = ["{domain}"]
 topology = "demo"
 frameworkContracts = []
+workflowActivations = []
 [[listeners]]
 kind = "{listener}"
 domains = ["{domain}"]
@@ -1271,7 +1273,7 @@ consumer = "identity"
 lifecycle = "active"
 durability = "persistent"
 purpose = "identity-signing"
-outputs = ["resources"]
+outputs = ["probes", "resources", "workers"]
 
 [[diportProviders]]
 id = "listener-pdp"

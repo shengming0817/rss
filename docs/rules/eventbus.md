@@ -96,14 +96,24 @@ Outbox relay transport 是 **at-least-once**：durable fact 使用稳定 event I
 - resolution 表是 append-only durable evidence；serving role 对该表与函数均无权限。
 - 载体：`INVARIANT: OUTBOX-SAME-ID-WINDOW-01` / `cargo xtask outbox-same-id-guard`。
 
-## 复用层选型（claimer / saga 资源，topology-gated）
+## 复用层选型（claimer / workflow backend，topology-gated）
 
 - outbox 消费幂等 claimer 经 `bootstrap::replaydeps::resolve` 按 `Topology` 单源选型；
   demo/single-pod 用 in-memory，multi-pod 用 Redis-backed，缺 Redis 配置启动期 fail-closed。
 - service-token replay 不属于该 resolver：所有可用 HS256 operator 路径必须显式注入 Postgres durable store，
   不存在 serving、demo 或进程内 fallback。
-- L3 saga 的最小资源集合为 tenant-scoped instance store + append-only journal + checkpoint store +
-  dead-letter store + runtime lock provider，同样按 `Topology` 单源选型。
+- workflow definition lifecycle 与 assembly deployment activation 是两个维度。activation 单源是 assembly
+  manifest v2 的 `workflowActivations`，由 AssemblyLock v2 绑定 repository definition，并原样进入
+  RuntimePlan v2 `workflowPlans`；contract lifecycle、`Topology` 和 backend resolver 均不得提供 activation
+  default 或把 omitted/disabled workflow 推断为 active。
+- active Saga 的完整 requirement 集合为 typed actions + tenant-scoped instance store + append-only journal +
+  receipt store + checkpoint store + dead-letter store + lock/fencing + worker + probe。该集合先由已验证的
+  assembly activation plan 派生，再由组合根闭合；`bootstrap::sagaprojectiondeps::resolve` 只在 requirements
+  已要求 Saga/Projection durable backend 后，按 `Topology` 选择 PostgreSQL instance/journal/checkpoint 与
+  Redis runtime-lock backend。resolver 成功不代表 workflow 已激活，也不证明完整 requirement 集合已闭合。
+- #1913 只建立 manifest/lock/RuntimePlan v2 协议载体；#1914 才把 production registry、DB capture、worker、
+  route、serving 与 inventory 切换为消费该 plan。在切换完成前，不得把上述目标语义登记为已成立的 runtime
+  `INVARIANT:`。
 - saga fail-closed：tenant scope 缺失、lease token/epoch/expiry 不匹配、`(tenant, saga, seq)` 内容冲突、
   lock busy/lost/unavailable，都必须返回 typed interrupted outcome，不触发补偿或 app DLX。
 - Redis lock 不是最终 fencing；Postgres instance lease + journal CAS 才是最终写入围栏。

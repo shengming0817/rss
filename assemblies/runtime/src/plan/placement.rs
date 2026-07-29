@@ -2,13 +2,13 @@ use crate::{
     config::SnapshotConfig,
     plan::{RuntimePlanError, is_kebab_case_workload},
 };
-use assembly_schema::{CanonicalAssemblyManifestV1, ParsedAssemblyLock, RuntimePlanV1Input};
+use assembly_schema::{CanonicalAssemblyManifestV2, ExecutableAssemblyLock, RuntimePlanV2Input};
 
 pub(super) fn append(
-    manifest: &CanonicalAssemblyManifestV1,
-    lock: &ParsedAssemblyLock,
+    manifest: &CanonicalAssemblyManifestV2,
+    lock: &ExecutableAssemblyLock,
     config: SnapshotConfig<'_>,
-    input: &mut RuntimePlanV1Input,
+    input: &mut RuntimePlanV2Input,
 ) -> Result<(), RuntimePlanError> {
     let default_workload = lock.identity().name();
     let mut placements = manifest.domains().to_vec();

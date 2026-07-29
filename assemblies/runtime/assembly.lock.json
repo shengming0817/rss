@@ -1,13 +1,13 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "identity": {
     "name": "runtime",
     "profile": "production"
   },
   "digests": {
-    "manifest": "sha256:fc70df8087e8e230897666640c22e0dbf1c1230a5346433f4b237190763a148a",
-    "generated": "sha256:e0f52193083700813d65abb3c985929ba3277763a6b12f84731439bbac137e23",
-    "contracts": "sha256:8a1af0d88db53980f98d99307655c1e0945f83602308315ffcf630b7acdb1e08"
+    "manifest": "sha256:5d6e9199496d9f8792ff99cfc09ccb5fb09de2a5d42761fdadb0b9157efac612",
+    "generated": "sha256:31478b7dd1c21d4f933246b6e631b598d13b60ff093fc71785e26bf357d4d859",
+    "contracts": "sha256:edec9e6b43ac3ad7a4ecb572503c2c0c797e2662513a468fbf200ac3d62d1db7"
   },
-  "fingerprint": "sha256:3cfd462cd676b64102719ff4e8bbe375b5feb76701f966b2a604f9c65a91cabf"
+  "fingerprint": "sha256:543c817619c73330b1cc03168a86ee219202bf13516e8e195663d43782e76797"
 }

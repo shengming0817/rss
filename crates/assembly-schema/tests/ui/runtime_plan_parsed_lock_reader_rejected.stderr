@@ -1,0 +1,15 @@
+error[E0308]: mismatched types
+ --> tests/ui/runtime_plan_parsed_lock_reader_rejected.rs:4:71
+  |
+4 |     let _ = ParsedRuntimePlan::from_json_slice_bound(bytes, manifest, lock);
+  |             ----------------------------------------                  ^^^^ expected `&ExecutableAssemblyLock`, found `&ParsedAssemblyLock`
+  |             |
+  |             arguments to this function are incorrect
+  |
+  = note: expected reference `&ExecutableAssemblyLock`
+             found reference `&ParsedAssemblyLock`
+note: associated function defined here
+ --> src/runtime_plan.rs
+  |
+  |     pub fn from_json_slice_bound(
+  |            ^^^^^^^^^^^^^^^^^^^^^

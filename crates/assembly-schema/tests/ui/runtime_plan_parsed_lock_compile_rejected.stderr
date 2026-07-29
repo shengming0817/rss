@@ -1,0 +1,15 @@
+error[E0308]: mismatched types
+  --> tests/ui/runtime_plan_parsed_lock_compile_rejected.rs:10:47
+   |
+10 |     let _ = RuntimePlan::compile_v2(manifest, lock, input);
+   |             -----------------------           ^^^^ expected `&ExecutableAssemblyLock`, found `&ParsedAssemblyLock`
+   |             |
+   |             arguments to this function are incorrect
+   |
+   = note: expected reference `&ExecutableAssemblyLock`
+              found reference `&ParsedAssemblyLock`
+note: associated function defined here
+  --> src/runtime_plan.rs
+   |
+   |     pub fn compile_v2(
+   |            ^^^^^^^^^^

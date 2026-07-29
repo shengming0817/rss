@@ -61,7 +61,7 @@ const MACHINE_INPUT_PATHS: &[&str] = &[
     "docs/ops/localtx-alerts.rules.yaml",
     "crates/assembly-schema/schemas/assembly-lock.schema.json",
     "crates/assembly-schema/schemas/runtime-plan.schema.json",
-    "crates/assembly-schema/tests/fixtures/fingerprint-v1-vectors.json",
+    "crates/assembly-schema/tests/fixtures/fingerprint-v2-vectors.json",
 ];
 const POLICY_BEHAVIOR_SPEC: &str = include_str!("../tests/golden/ci-impact-policy.json");
 const HIGH_IMPACT_PATHS: &[&str] = &[
@@ -3458,7 +3458,7 @@ mod tests {
                                             .starts_with("crates/assembly-schema/schemas")
                                         || relative
                                             == Path::new(
-                                                "crates/assembly-schema/tests/fixtures/fingerprint-v1-vectors.json",
+                                                "crates/assembly-schema/tests/fixtures/fingerprint-v2-vectors.json",
                                             ) =>
                                 {
                                     self.inputs

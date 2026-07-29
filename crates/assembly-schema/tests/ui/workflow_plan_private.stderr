@@ -1,0 +1,11 @@
+error[E0423]: cannot initialize a tuple struct which contains private fields
+  --> tests/ui/workflow_plan_private.rs:11:19
+   |
+11 |     let _forged = WorkflowPlan(activation);
+   |                   ^^^^^^^^^^^^
+   |
+note: constructor is not visible here due to private fields
+  --> src/runtime_plan.rs
+   |
+   | pub struct WorkflowPlan(WorkflowActivation);
+   |                         ^^^^^^^^^^^^^^^^^^ private field

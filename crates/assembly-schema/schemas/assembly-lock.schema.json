@@ -5,11 +5,11 @@
   "type": "object", "additionalProperties": false,
   "required": ["schemaVersion", "identity", "digests", "fingerprint"],
   "properties": {
-    "schemaVersion": { "description": "Closed AssemblyLock wire version; readers accept v1 only.", "type": "integer", "const": 1 },
+    "schemaVersion": { "description": "Closed AssemblyLock wire version; readers accept v2 only.", "type": "integer", "const": 2 },
     "identity": { "$ref": "#/definitions/identity" },
     "digests": { "$ref": "#/definitions/digests" },
     "fingerprint": {
-      "description": "sha256: + lowercase SHA-256 of ASCII stage tag rss-assembly-lock-v1, one NUL byte, then RFC 8785 JCS UTF-8 bytes of unsigned {schemaVersion,identity,digests}; this result field is excluded from its own preimage.",
+      "description": "sha256: + lowercase SHA-256 of ASCII stage tag rss-assembly-lock-v2, one NUL byte, then RFC 8785 JCS UTF-8 bytes of unsigned {schemaVersion,identity,digests}; this result field is excluded from its own preimage.",
       "allOf": [{ "$ref": "#/definitions/sha256" }]
     }
   },
@@ -22,9 +22,9 @@
     "digests": {
       "type": "object", "additionalProperties": false, "required": ["manifest", "generated", "contracts"],
       "properties": {
-        "manifest": { "description": "rss-assembly-manifest-v1 + NUL + RFC8785(CanonicalAssemblyManifestV1).", "$ref": "#/definitions/sha256" },
-        "generated": { "description": "rss-assembly-generated-v1 over the non-empty path-sorted generator-owned src/generated file universe; each entry binds repository-relative path to raw-byte SHA-256.", "$ref": "#/definitions/sha256" },
-        "contracts": { "description": "rss-assembly-contracts-v1 over tuple-sorted {domain,id,version,schemaHash,semanticsHash} bindings selected from complete repository discovery; semanticsHash binds the canonical typed runtime semantics of contract.toml.", "$ref": "#/definitions/sha256" }
+        "manifest": { "description": "rss-assembly-manifest-v2 + NUL + RFC8785(CanonicalAssemblyManifestV2).", "$ref": "#/definitions/sha256" },
+        "generated": { "description": "rss-assembly-generated-v2 over the non-empty path-sorted generator-owned src/generated file universe; each entry binds repository-relative path to raw-byte SHA-256.", "$ref": "#/definitions/sha256" },
+        "contracts": { "description": "rss-assembly-contracts-v2 over tuple-sorted {domain,id,version,schemaHash,semanticsHash} bindings selected from complete repository discovery; semanticsHash binds the canonical typed runtime semantics of contract.toml.", "$ref": "#/definitions/sha256" }
       }
     }
   }

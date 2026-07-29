@@ -410,10 +410,17 @@ pub mod test_support {
     pub async fn run_journey(case: JourneyCase) -> anyhow::Result<JourneyResult> {
         let manifest =
             assembly_schema::AssemblyManifest::from_toml_str(include_str!("../assembly.toml"))?
-                .canonicalize_v1()?;
+                .canonicalize_v2()?;
+        let assembly_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let repository_root = assembly_dir
+            .parent()
+            .and_then(std::path::Path::parent)
+            .context("runtime assembly repository root")?;
         let lock = assembly_schema::ParsedAssemblyLock::from_json_slice(include_bytes!(
             "../assembly.lock.json"
-        ))?;
+        ))?
+        .verify_repository_v2(repository_root, assembly_dir)?
+        .into_executable();
         let parsed = assembly_schema::ParsedRuntimePlan::from_json_slice_bound(
             include_bytes!("../runtime-plan.json"),
             &manifest,

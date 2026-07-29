@@ -6,6 +6,7 @@
 //! 声明和 verify 门，避免生产在 dev/demo provider 上静默运行。
 
 use anyhow::{Context, Result, bail};
+use assembly_schema::repository_contract::{discover_contracts, validate_workflow_activations};
 use assembly_schema::{
     AssemblyDomain, AssemblyManifest, AssemblyProfile, AssemblyTopology, DiportPort,
     DiportProvider, ManifestValidationError, ProviderConstructor, ProviderConsumer,
@@ -53,6 +54,8 @@ pub(crate) enum Rule {
     DuplicateListener,
     /// Framework contract declarations must exactly cover active framework-owned contracts.
     FrameworkContractServing,
+    /// Workflow activation must exactly join one repository definition and valid lifecycle.
+    WorkflowActivation,
     /// Provider-to-probe inventory bindings may only be minted by the generated/private
     /// completion receipt funnels.
     ///
@@ -254,6 +257,7 @@ fn regular_file_or_missing(path: &Path) -> Result<bool> {
 
 pub(crate) fn validate_root(root: &Path) -> Result<(usize, Vec<Finding>)> {
     let (assemblies, mut findings) = discover(root)?;
+    findings.extend(validate_workflow_activation_contracts(root, &assemblies)?);
     findings.extend(validate_framework_contracts(root, &assemblies)?);
     findings.extend(validate_runtime_inventory_provider_provenance(
         root,
@@ -273,17 +277,50 @@ pub(crate) fn validate_root(root: &Path) -> Result<(usize, Vec<Finding>)> {
     Ok((assemblies.len(), findings))
 }
 
+fn validate_workflow_activation_contracts(
+    root: &Path,
+    assemblies: &[DiscoveredAssembly],
+) -> Result<Vec<Finding>> {
+    let contracts_dir = root.join("contracts");
+    let contracts = if contracts_dir.exists() {
+        discover_contracts(&contracts_dir).map_err(|error| anyhow::anyhow!(error.to_string()))?
+    } else {
+        Vec::new()
+    };
+    let mut findings = Vec::new();
+    for assembly in assemblies {
+        let canonical = match assembly.manifest.clone().canonicalize_v2() {
+            Ok(canonical) => canonical,
+            Err(_) => continue,
+        };
+        if let Err(error) = validate_workflow_activations(&canonical, &contracts) {
+            findings.push(finding(
+                Rule::WorkflowActivation,
+                &assembly.manifest_label,
+                error.to_string(),
+            ));
+        }
+    }
+    Ok(findings)
+}
+
 fn validate_runtime_inventory_provider_provenance(
     root: &Path,
     assemblies: &[DiscoveredAssembly],
 ) -> Result<Vec<Finding>> {
     let mut findings = Vec::new();
     for assembly in assemblies {
+        let source_root = assembly.dir.join("src");
+        // Manifest-only fixtures intentionally validate declarations without forging a runtime
+        // carrier. Executable-boundary gates own the absence of a production source tree.
+        if !source_root.is_dir() {
+            continue;
+        }
         let mut sources = Vec::new();
-        collect_rust_sources(&assembly.dir.join("src"), &mut sources)?;
+        collect_rust_sources(&source_root, &mut sources)?;
         let mut sanctioned = 0_usize;
         for path in sources {
-            if external_module_is_explicit_test_only(&assembly.dir.join("src"), &path)? {
+            if external_module_is_explicit_test_only(&source_root, &path)? {
                 continue;
             }
             let source = std::fs::read_to_string(&path)?;
@@ -445,6 +482,10 @@ fn validate_runtime_inventory_listener_provenance(
 ) -> Result<Vec<Finding>> {
     let mut findings = Vec::new();
     for assembly in assemblies {
+        let source_root = assembly.dir.join("src");
+        if !source_root.is_dir() {
+            continue;
+        }
         let (allowed_file, expected_calls): (Option<&str>, &[ExpectedListenerObservation]) =
             match assembly.manifest.name.as_str() {
                 "runtime" => (Some("src/launch.rs"), RUNTIME_LISTENER_OBSERVATIONS),
@@ -460,9 +501,9 @@ fn validate_runtime_inventory_listener_provenance(
         let expected_call_count = expected_calls.len();
         let mut valid_calls = 0_usize;
         let mut sources = Vec::new();
-        collect_rust_sources(&assembly.dir.join("src"), &mut sources)?;
+        collect_rust_sources(&source_root, &mut sources)?;
         for path in sources {
-            if external_module_is_explicit_test_only(&assembly.dir.join("src"), &path)? {
+            if external_module_is_explicit_test_only(&source_root, &path)? {
                 continue;
             }
             let source = std::fs::read_to_string(&path)?;
@@ -2910,7 +2951,10 @@ fn validate_identityaudit_boundary(
     closure_packages: &BTreeSet<String>,
 ) -> Vec<Finding> {
     let mut findings = Vec::new();
-    let exact_targets = targets.len() == 3
+    let exact_targets = targets.len() == 4
+        && targets.iter().any(|target| {
+            target.name == "build-script-build" && target.kind.as_slice() == ["custom-build"]
+        })
         && targets
             .iter()
             .any(|target| target.name == "identityaudit" && target.kind.as_slice() == ["lib"])
@@ -2925,7 +2969,7 @@ fn validate_identityaudit_boundary(
             Rule::IdentityAuditBoundary,
             manifest_label,
             format!(
-                "field=package.targets {cargo_label} expected exactly lib `identityaudit`, bin `identityaudit-server`, and binary+image test `identityaudit_artifact_acceptance`"
+                "field=package.targets {cargo_label} expected exactly repository-attestation build script, lib `identityaudit`, bin `identityaudit-server`, and binary+image test `identityaudit_artifact_acceptance`"
             ),
         ));
     }
@@ -3171,7 +3215,10 @@ fn validate_settingsonly_executable_evidence(
 ) -> Vec<Finding> {
     let subject = "assemblies/settingsonly";
     let mut findings = Vec::new();
-    let exact_targets = evidence.targets.len() == 3
+    let exact_targets = evidence.targets.len() == 4
+        && evidence.targets.iter().any(|target| {
+            target.name == "build-script-build" && target.kind.as_slice() == ["custom-build"]
+        })
         && evidence
             .targets
             .iter()
@@ -3186,7 +3233,7 @@ fn validate_settingsonly_executable_evidence(
         findings.push(finding(
             Rule::SettingsOnlyExecutableBoundary,
             subject,
-            "field=package.targets expected exactly lib `settingsonly`, bin `settingsonly-server`, and binary+image test `settingsonly_artifact_acceptance`",
+            "field=package.targets expected exactly repository-attestation build script, lib `settingsonly`, bin `settingsonly-server`, and binary+image test `settingsonly_artifact_acceptance`",
         ));
     }
 
@@ -5986,6 +6033,22 @@ mod tests {
         Ok(())
     }
 
+    fn assert_no_provider_validation_findings(findings: &[Finding]) {
+        assert!(
+            findings.iter().all(|finding| !matches!(
+                finding.rule,
+                Rule::InvalidDiportProvider
+                    | Rule::ActiveProviderDependency
+                    | Rule::ActiveProviderPort
+                    | Rule::ProviderDurabilityMismatch
+                    | Rule::ActiveProviderFeature
+                    | Rule::ProviderCrateMismatch
+                    | Rule::ActiveDistributedProviderConsumer
+            )),
+            "provider validation emitted findings: {findings:?}"
+        );
+    }
+
     fn write_runtime_src(root: &Path, path: &str, text: &str) -> anyhow::Result<()> {
         let file = root.join("assemblies/runtime/src").join(path);
         if let Some(parent) = file.parent() {
@@ -6030,11 +6093,13 @@ impl InfraBuilt {
     fn valid_manifest_with_profile(profile: &str, provider_extra: &str) -> String {
         format!(
             r#"
+schemaVersion = 2
 name = "runtime"
 profile = "{profile}"
 domains = ["contractreg"]
 topology = "demo"
 frameworkContracts = []
+workflowActivations = []
 
 [[listeners]]
 kind = "primary"
@@ -6072,11 +6137,13 @@ outputs = ["probes", "workers"]
 
     fn manifest_with_intent() -> String {
         r#"
+schemaVersion = 2
 name = "runtime"
 profile = "demo"
 domains = ["identity", "settings", "audit"]
 topology = "durable-shared"
 frameworkContracts = []
+workflowActivations = []
 
 [[listeners]]
 kind = "primary"
@@ -6239,11 +6306,13 @@ edition = "2024"
         };
         let mut manifest = format!(
             r#"
+schemaVersion = 2
 name = "runtime"
 profile = "{profile}"
 domains = ["identity", "settings", "audit"]
 topology = "{topology}"
 frameworkContracts = []
+workflowActivations = []
 
 [[listeners]]
 kind = "primary"
@@ -6305,7 +6374,7 @@ consumer = "identity"
 lifecycle = "active"
 durability = "persistent"
 purpose = "jwt-access-token-signing"
-outputs = ["resources"]
+outputs = ["probes", "resources", "workers"]
 "#,
             );
         }
@@ -6322,7 +6391,7 @@ consumer = "settings"
 lifecycle = "active"
 durability = "persistent"
 purpose = "settings-configvalue-at-rest-encryption"
-outputs = ["resources"]
+outputs = ["probes", "resources", "workers"]
 
 [[diportProviders]]
 id = "settings-secret-resolver"
@@ -6334,7 +6403,7 @@ consumer = "settings"
 lifecycle = "active"
 durability = "persistent"
 purpose = "settings-secret-material-resolution"
-outputs = ["resources"]
+outputs = ["probes", "resources", "workers"]
 "#,
             );
         }
@@ -6350,7 +6419,7 @@ consumer = "httpserve"
 lifecycle = "active"
 durability = "persistent"
 purpose = "http-auth-decision-audit"
-outputs = ["resources", "workers"]
+outputs = ["probes", "resources", "workers"]
 "#,
         );
         if profile == "production" {
@@ -6402,7 +6471,7 @@ consumer = "distributed"
 lifecycle = "active"
 durability = "persistent"
 purpose = "distributed-lock-fencing"
-outputs = ["resources"]
+outputs = ["probes", "resources", "workers"]
 
 [[diportProviders]]
 id = "distributed-cas-store"
@@ -6413,7 +6482,7 @@ consumer = "distributed"
 lifecycle = "active"
 durability = "persistent"
 purpose = "distributed-state-cas"
-outputs = ["resources", "workers"]
+outputs = ["probes", "resources", "workers"]
 "#,
             );
         }
@@ -6450,11 +6519,13 @@ amqp = { path = "../../adapters/amqp", features = ["backend"] }
         };
         format!(
             r#"
+schemaVersion = 2
 name = "runtime"
 profile = "{profile}"
 domains = [{rendered_domains}]
 topology = "{topology}"
 frameworkContracts = []
+workflowActivations = []
 {empty_providers}
 
 [[listeners]]
@@ -6500,7 +6571,7 @@ consumer = "identity"
 lifecycle = "active"
 durability = "persistent"
 purpose = "jwt-access-token-signing"
-outputs = []
+outputs = ["probes", "resources", "workers"]
 
 [[diportProviders]]
 id = "settings-key-provider"
@@ -6512,7 +6583,7 @@ consumer = "settings"
 lifecycle = "active"
 durability = "persistent"
 purpose = "settings-configvalue-at-rest-encryption"
-outputs = []
+outputs = ["probes", "resources", "workers"]
 
 [[diportProviders]]
 id = "settings-secret-resolver"
@@ -6524,7 +6595,7 @@ consumer = "settings"
 lifecycle = "active"
 durability = "persistent"
 purpose = "settings-secret-material-resolution"
-outputs = ["resources"]
+outputs = ["probes", "resources", "workers"]
 
 [[diportProviders]]
 id = "listener-pdp"
@@ -6536,7 +6607,7 @@ consumer = "httpserve"
 lifecycle = "active"
 durability = "persistent"
 purpose = "jwt-credential-verification"
-outputs = []
+outputs = ["probes", "resources", "workers"]
 
 [[diportProviders]]
 id = "auth-audit-sink"
@@ -6547,7 +6618,7 @@ consumer = "httpserve"
 lifecycle = "active"
 durability = "persistent"
 purpose = "http-auth-decision-audit"
-outputs = []
+outputs = ["probes", "resources", "workers"]
 "#;
 
     const CAPABILITY_REPLAY_STORE_PROVIDER: &str = r#"
@@ -6582,7 +6653,7 @@ consumer = "eventexec"
 lifecycle = "active"
 durability = "persistent"
 purpose = "outbox event publishing"
-outputs = []
+outputs = ["probes", "resources", "workers"]
 
 [[diportProviders]]
 id = "event-subscriber"
@@ -6594,7 +6665,7 @@ consumer = "eventexec"
 lifecycle = "active"
 durability = "persistent"
 purpose = "manual-ack event subscriber workers"
-outputs = []
+outputs = ["probes", "resources", "workers"]
 "#;
 
     const CAPABILITY_DISTRIBUTED_PROVIDERS: &str = r#"
@@ -6608,7 +6679,7 @@ consumer = "distributed"
 lifecycle = "active"
 durability = "persistent"
 purpose = "distributed-lock-fencing"
-outputs = []
+outputs = ["probes", "resources", "workers"]
 
 [[diportProviders]]
 id = "distributed-cas-store"
@@ -6619,7 +6690,7 @@ consumer = "distributed"
 lifecycle = "active"
 durability = "persistent"
 purpose = "distributed-state-cas"
-outputs = []
+outputs = ["probes", "resources", "workers"]
 "#;
 
     fn required_capability_findings(manifest: &str, cargo: &str) -> anyhow::Result<Vec<Finding>> {
@@ -6795,7 +6866,7 @@ outputs = []
         for (cargo, manifest, domain, capability) in [
             (
                 IDENTITYAUDIT_CARGO.replace(
-                    "postgres = { path = \"../../adapters/postgres\", features = [\"domain-identity\", \"domain-audit\"] }\n",
+                    "postgres = { path = \"../../adapters/postgres\", features = [\"domain-identity\", \"domain-audit\", \"auth-audit-sink\"] }\n",
                     "",
                 ),
                 IDENTITYAUDIT_MANIFEST.to_owned(),
@@ -6804,8 +6875,8 @@ outputs = []
             ),
             (
                 IDENTITYAUDIT_CARGO.replace(
-                    "[\"domain-identity\", \"domain-audit\"]",
-                    "[\"domain-audit\"]",
+                    "[\"domain-identity\", \"domain-audit\", \"auth-audit-sink\"]",
+                    "[\"domain-audit\", \"auth-audit-sink\"]",
                 ),
                 IDENTITYAUDIT_MANIFEST.to_owned(),
                 "identity",
@@ -6813,8 +6884,8 @@ outputs = []
             ),
             (
                 IDENTITYAUDIT_CARGO.replace(
-                    "[\"domain-identity\", \"domain-audit\"]",
-                    "[\"domain-identity\"]",
+                    "[\"domain-identity\", \"domain-audit\", \"auth-audit-sink\"]",
+                    "[\"domain-identity\", \"auth-audit-sink\"]",
                 ),
                 IDENTITYAUDIT_MANIFEST.to_owned(),
                 "audit",
@@ -6900,7 +6971,10 @@ vault = { path = "../../adapters/vault", features = ["backend"] }
     fn assembly_capabilities_settings_requires_domain_feature() -> anyhow::Result<()> {
         let findings = required_capability_findings(
             SETTINGSONLY_MANIFEST,
-            &SETTINGSONLY_CARGO.replace("features = [\"domain-settings\"]", "features = []"),
+            &SETTINGSONLY_CARGO.replace(
+                "features = [\"domain-settings\", \"auth-audit-sink\"]",
+                "features = [\"auth-audit-sink\"]",
+            ),
         )?;
         assert_required_capability(&findings, "settings", "Pg");
         assert!(
@@ -7516,6 +7590,61 @@ durability = "ephemeral-memory""#
     }
 
     #[test]
+    fn workflow_activation_gate_joins_definition_and_rejects_invalid_lifecycle()
+    -> anyhow::Result<()> {
+        let root = unique_tmp("assembly-workflow-activation");
+        let contract_dir = root.join("contracts/http/settings/v3");
+        fs::create_dir_all(&contract_dir)?;
+        write(
+            &contract_dir.join("contract.toml"),
+            include_str!("../../contracts/http/settings/v3/contract.toml"),
+        )?;
+        write(
+            &contract_dir.join("request.schema.json"),
+            include_str!("../../contracts/http/settings/v3/request.schema.json"),
+        )?;
+        write(
+            &contract_dir.join("response.schema.json"),
+            include_str!("../../contracts/http/settings/v3/response.schema.json"),
+        )?;
+        let activation = r#"workflowActivations = [{ mode = "projection", id = "settings.config-projection", definitionVersion = "v3", definitionSchemaDigest = "sha256:3504a1f33b4e2765fff012fd263ed9a317d24cbe200382c364e4220d7bf05baa", activation = "disabled" }]"#;
+        let disabled = manifest_with_intent()
+            .replace("workflowActivations = []", activation)
+            .replacen(
+                "kind = \"primary\"\ndomains = []",
+                "kind = \"primary\"\ndomains = [\"identity\", \"settings\", \"audit\"]",
+                1,
+            );
+        write_assembly(
+            &root,
+            &disabled,
+            "[package]\nname = \"runtime\"\nversion = \"0.0.0\"\n",
+        )?;
+        let (assemblies, _) = discover(&root)?;
+        assert!(validate_workflow_activation_contracts(&root, &assemblies)?.is_empty());
+
+        let shadow = disabled.replace("activation = \"disabled\"", "activation = \"shadow\"");
+        assert_ne!(shadow, disabled);
+        write_assembly(
+            &root,
+            &shadow,
+            "[package]\nname = \"runtime\"\nversion = \"0.0.0\"\n",
+        )?;
+        let (assemblies, _) = discover(&root)?;
+        assert!(matches!(
+            assemblies[0].manifest.workflow_activations.as_slice(),
+            [assembly_schema::WorkflowActivation::Projection {
+                activation: assembly_schema::ProjectionActivation::Shadow,
+                ..
+            }]
+        ));
+        let findings = validate_workflow_activation_contracts(&root, &assemblies)?;
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].rule, Rule::WorkflowActivation);
+        Ok(())
+    }
+
+    #[test]
     fn active_framework_contract_requires_explicit_assembly_declarations() -> anyhow::Result<()> {
         let root = unique_tmp("assembly-framework-contract");
         let contract_dir = root.join("contracts/http/_seed/v1");
@@ -7835,8 +7964,10 @@ fn observations(prepared: Prepared) {
         assert!(
             AssemblyManifest::from_toml_str(
                 r#"
+schemaVersion = 2
 name = "runtime"
 profile = "demo"
+workflowActivations = []
 
 [[diportProviders]]
 id = "device-revocation-store"
@@ -8114,8 +8245,13 @@ audit = { path = "../../crates/audit" }
         Ok(())
     }
 
-    fn identityaudit_executable_targets() -> [MetadataTarget; 3] {
+    fn identityaudit_executable_targets() -> [MetadataTarget; 4] {
         [
+            MetadataTarget {
+                name: "build-script-build".to_owned(),
+                kind: vec!["custom-build".to_owned()],
+                src_path: PathBuf::new(),
+            },
             MetadataTarget {
                 name: "identityaudit".to_owned(),
                 kind: vec!["lib".to_owned()],
@@ -8462,6 +8598,11 @@ ENTRYPOINT ["/usr/local/bin/server"]
     fn settingsonly_executable_boundary_rejects_each_incomplete_artifact_fact() {
         let targets = [
             MetadataTarget {
+                name: "build-script-build".to_owned(),
+                kind: vec!["custom-build".to_owned()],
+                src_path: PathBuf::new(),
+            },
+            MetadataTarget {
                 name: "settingsonly".to_owned(),
                 kind: vec!["lib".to_owned()],
                 src_path: PathBuf::new(),
@@ -8594,6 +8735,11 @@ ENTRYPOINT ["/usr/local/bin/server"]
         let wrong_ports =
             SETTINGSONLY_DOCKER_FIXTURE.replace("EXPOSE 8080 8082 8083", "EXPOSE 8080 8083");
         let targets = [
+            MetadataTarget {
+                name: "build-script-build".to_owned(),
+                kind: vec!["custom-build".to_owned()],
+                src_path: PathBuf::new(),
+            },
             MetadataTarget {
                 name: "settingsonly".to_owned(),
                 kind: vec!["lib".to_owned()],
@@ -9151,11 +9297,13 @@ name = "runtime"
         write_assembly(
             &root,
             r#"
+schemaVersion = 2
 name = "runtime"
 profile = "production"
 domains = ["identity", "settings", "audit"]
 topology = "durable-shared"
 frameworkContracts = []
+workflowActivations = []
 diportProviders = []
 
 [[listeners]]
@@ -10370,11 +10518,13 @@ redis = { path = "../../adapters/redis", features = ["backend"] }
         write_assembly(
             &root,
             r#"
+schemaVersion = 2
 name = "runtime"
 profile = "demo"
 domains = ["contractreg"]
 topology = "demo"
 frameworkContracts = []
+workflowActivations = []
 
 [[listeners]]
 kind = "primary"
@@ -10425,10 +10575,7 @@ ratelimit = { path = "../../adapters/ratelimit" }
         )?;
 
         let (_count, findings) = validate_root(&root)?;
-        assert!(
-            findings.is_empty(),
-            "active ratelimit::GovernorLimiter provider (no required_features) must pass: {findings:?}"
-        );
+        assert_no_provider_validation_findings(&findings);
         Ok(())
     }
 
@@ -10441,11 +10588,13 @@ ratelimit = { path = "../../adapters/ratelimit" }
         write_assembly(
             &root,
             r#"
+schemaVersion = 2
 name = "runtime"
 profile = "demo"
 domains = ["contractreg"]
 topology = "demo"
 frameworkContracts = []
+workflowActivations = []
 
 [[listeners]]
 kind = "primary"
@@ -10473,7 +10622,7 @@ consumer = "distributed"
 lifecycle = "active"
 durability = "persistent"
 purpose = "distributed-lock-fencing"
-outputs = ["resources"]
+outputs = ["probes", "resources", "workers"]
 
 [[diportProviders]]
 id = "distributed-cas-store"
@@ -10484,7 +10633,7 @@ consumer = "distributed"
 lifecycle = "active"
 durability = "persistent"
 purpose = "distributed-state-cas"
-outputs = ["resources", "workers"]
+outputs = ["probes", "resources", "workers"]
 "#,
             r#"[package]
 name = "runtime"
@@ -10526,10 +10675,7 @@ impl InfraBuilt {
         )?;
 
         let (_count, findings) = validate_root(&root)?;
-        assert!(
-            findings.is_empty(),
-            "active distributed Lock/Cas providers (feature + providerCrate bound) must pass: {findings:?}"
-        );
+        assert_no_provider_validation_findings(&findings);
         Ok(())
     }
 
@@ -10601,11 +10747,13 @@ impl InfraBuilt {
         write_assembly(
             &root,
             r#"
+schemaVersion = 2
 name = "runtime"
 profile = "demo"
 domains = ["contractreg"]
 topology = "demo"
 frameworkContracts = []
+workflowActivations = []
 
 [[listeners]]
 kind = "primary"
@@ -10730,11 +10878,13 @@ impl InfraBuilt {
         write_assembly(
             &root,
             r#"
+schemaVersion = 2
 name = "runtime"
 profile = "demo"
 domains = ["contractreg"]
 topology = "demo"
 frameworkContracts = []
+workflowActivations = []
 
 [[listeners]]
 kind = "primary"
@@ -10789,11 +10939,13 @@ redis = { path = "../../adapters/redis", features = ["backend"] }
         write_assembly(
             &root,
             r#"
+schemaVersion = 2
 name = "runtime"
 profile = "demo"
 domains = ["contractreg"]
 topology = "demo"
 frameworkContracts = []
+workflowActivations = []
 
 [[listeners]]
 kind = "primary"
@@ -10848,11 +11000,13 @@ softca = { path = "../../adapters/softca" }
         write_assembly(
             &root,
             r#"
+schemaVersion = 2
 name = "runtime"
 profile = "demo"
 domains = ["contractreg"]
 topology = "demo"
 frameworkContracts = []
+workflowActivations = []
 
 [[listeners]]
 kind = "primary"
@@ -10956,11 +11110,13 @@ name = "runtime"
         };
         format!(
             r#"
+schemaVersion = 2
 name = "runtime"
 profile = "demo"
 domains = ["contractreg"]
 topology = "demo"
 frameworkContracts = []
+workflowActivations = []
 
 [[listeners]]
 kind = "primary"
@@ -11022,7 +11178,7 @@ amqp = { path = "../../adapters/amqp" }
         )?;
 
         let (_count, findings) = validate_root(&root)?;
-        assert!(findings.is_empty(), "{findings:?}");
+        assert_no_provider_validation_findings(&findings);
         Ok(())
     }
 
@@ -11041,7 +11197,7 @@ amqp = { path = "../../adapters/amqp" }
         )?;
 
         let (_count, findings) = validate_root(&root)?;
-        assert!(findings.is_empty(), "{findings:?}");
+        assert_no_provider_validation_findings(&findings);
         Ok(())
     }
 
@@ -11051,11 +11207,13 @@ amqp = { path = "../../adapters/amqp" }
         write_assembly(
             &root,
             r#"
+schemaVersion = 2
 name = "runtime"
 profile = "demo"
 domains = ["contractreg"]
 topology = "demo"
 frameworkContracts = []
+workflowActivations = []
 
 [[listeners]]
 kind = "primary"
@@ -11083,7 +11241,7 @@ consumer = "identity"
 lifecycle = "active"
 durability = "persistent"
 purpose = "jwt-access-token-signing"
-outputs = ["resources"]
+outputs = ["probes", "resources", "workers"]
 "#,
             r#"[package]
 name = "runtime"
@@ -11094,7 +11252,7 @@ vault = { path = "../../adapters/vault", features = ["backend"] }
         )?;
 
         let (_count, findings) = validate_root(&root)?;
-        assert!(findings.is_empty(), "{findings:?}");
+        assert_no_provider_validation_findings(&findings);
         Ok(())
     }
 
@@ -11105,11 +11263,13 @@ vault = { path = "../../adapters/vault", features = ["backend"] }
         write_assembly(
             &root,
             r#"
+schemaVersion = 2
 name = "runtime"
 profile = "demo"
 domains = ["contractreg"]
 topology = "demo"
 frameworkContracts = []
+workflowActivations = []
 
 [[listeners]]
 kind = "primary"
@@ -11137,7 +11297,7 @@ consumer = "settings"
 lifecycle = "active"
 durability = "persistent"
 purpose = "settings-configvalue-at-rest-encryption"
-outputs = ["resources"]
+outputs = ["probes", "resources", "workers"]
 "#,
             r#"[package]
 name = "runtime"
@@ -11148,7 +11308,7 @@ vault = { path = "../../adapters/vault", features = ["backend"] }
         )?;
 
         let (_count, findings) = validate_root(&root)?;
-        assert!(findings.is_empty(), "{findings:?}");
+        assert_no_provider_validation_findings(&findings);
         Ok(())
     }
 
@@ -11158,11 +11318,13 @@ vault = { path = "../../adapters/vault", features = ["backend"] }
         write_assembly(
             &root,
             r#"
+schemaVersion = 2
 name = "runtime"
 profile = "demo"
 domains = ["contractreg"]
 topology = "demo"
 frameworkContracts = []
+workflowActivations = []
 
 [[listeners]]
 kind = "primary"
@@ -11215,7 +11377,7 @@ postgres = { path = "../../adapters/postgres" }
         )?;
 
         let (_count, findings) = validate_root(&root)?;
-        assert!(findings.is_empty(), "{findings:?}");
+        assert_no_provider_validation_findings(&findings);
         Ok(())
     }
 
@@ -11226,11 +11388,13 @@ postgres = { path = "../../adapters/postgres" }
         write_assembly(
             &root,
             r#"
+schemaVersion = 2
 name = "runtime"
 profile = "demo"
 domains = ["contractreg"]
 topology = "demo"
 frameworkContracts = []
+workflowActivations = []
 
 [[listeners]]
 kind = "primary"
@@ -11269,7 +11433,7 @@ s3 = { path = "../../adapters/s3", features = ["backend"] }
         )?;
 
         let (_count, findings) = validate_root(&root)?;
-        assert!(findings.is_empty(), "{findings:?}");
+        assert_no_provider_validation_findings(&findings);
         Ok(())
     }
 

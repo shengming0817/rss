@@ -84,7 +84,7 @@ fn canonicalization_rejects_registry_drift() {
     ] {
         let changed = RUNTIME_MANIFEST.replacen(from, to, 1);
         let manifest = AssemblyManifest::from_toml_str(&changed).expect("typed manifest");
-        let error = match manifest.canonicalize_v1() {
+        let error = match manifest.canonicalize_v2() {
             Ok(_) => panic!("registry drift must fail closed"),
             Err(error) => error.to_string(),
         };
@@ -124,13 +124,13 @@ fn active_revocation_role_cannot_be_demoted_without_a_registry_change() {
         1,
     );
     let manifest = AssemblyManifest::from_toml_str(&changed).expect("typed manifest");
-    assert!(manifest.canonicalize_v1().is_err());
+    assert!(manifest.canonicalize_v2().is_err());
 }
 
 #[test]
 fn active_empty_output_provider_is_a_canonical_registry_fact() {
     let manifest = AssemblyManifest::from_toml_str(RUNTIME_MANIFEST).expect("runtime manifest");
-    let canonical = manifest.canonicalize_v1().expect("canonical manifest");
+    let canonical = manifest.canonicalize_v2().expect("canonical manifest");
     let limiter = canonical
         .diport_providers()
         .iter()

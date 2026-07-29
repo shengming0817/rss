@@ -1,13 +1,13 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "identity": {
     "name": "settingsonly",
     "profile": "production"
   },
   "digests": {
-    "manifest": "sha256:d5a4b8de8f57e53cb47375f49a91d9afed1e6398b0f28ddc94f6ebe003876c76",
-    "generated": "sha256:456a1420ca3b19c7bb175f46f4b8cc148df86e30febd9a3648f88b89e673bed6",
-    "contracts": "sha256:6d434c9d05784a5077636b81ce4da4c4ec84f712f366a5ed5c29181c4551e585"
+    "manifest": "sha256:093a13d5264db48aa3054b530ff6fcfd5f17d2b5f8e72352b7e36e998ad59cb7",
+    "generated": "sha256:43d281ee7bdd5a5af16aa20066c45ade4a4cc749f8309083ca8779fb39681b21",
+    "contracts": "sha256:9014c5b64ef382d96111dce24a234cff2feea2a90ddeb467fa75b548c7ab62c1"
   },
-  "fingerprint": "sha256:919c1979759db6bc74720a0712da550e1978c80f66774908ee6a1f8026c5fb2b"
+  "fingerprint": "sha256:a47c9dc4dd6f9bc36c7c01ec0812662ab10864d15b1de9cb4885761206a08d52"
 }

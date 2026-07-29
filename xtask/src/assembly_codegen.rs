@@ -6,7 +6,7 @@
 
 use anyhow::{Context, Result, bail, ensure};
 use assembly_schema::{
-    AssemblyDomain, AssemblyListenerKind, AssemblyManifest, CanonicalAssemblyManifestV1,
+    AssemblyDomain, AssemblyListenerKind, AssemblyManifest, CanonicalAssemblyManifestV2,
     DiportPort, GENERATED_MODULE_OWNERSHIP_MARKER, GENERATED_PROVIDER_OWNERSHIP_MARKER,
     LifecycleChannel, ProviderConstructor, ProviderConsumer, ProviderDurability,
     ProviderFactorySymbol, ProviderFailurePosture, ProviderLifecycle, ProviderRole, ProviderScope,
@@ -256,8 +256,8 @@ fn plan_target(root: &Path, assembly_dir: &Path, kind: ArtifactKind) -> Result<O
     let source_label = relative_label(root, &manifest_path);
     ensure_safe_source_label(&source_label)?;
     let manifest = parsed
-        .canonicalize_v1()
-        .with_context(|| format!("编译 {source_label} canonical v1 失败"))?;
+        .canonicalize_v2()
+        .with_context(|| format!("编译 {source_label} canonical v2 失败"))?;
     let content = match kind {
         ArtifactKind::Modules => {
             let framework_routes = framework_http_routes(root, &manifest)?;
@@ -505,7 +505,7 @@ fn ensure_owned(path: &Path, bytes: &[u8], kind: ArtifactKind) -> Result<()> {
     Ok(())
 }
 
-fn render_providers(manifest: &CanonicalAssemblyManifestV1, source_label: &str) -> Result<String> {
+fn render_providers(manifest: &CanonicalAssemblyManifestV2, source_label: &str) -> Result<String> {
     let mut providers = manifest
         .diport_providers()
         .iter()
@@ -1243,7 +1243,7 @@ const fn failure_posture_variant(posture: ProviderFailurePosture) -> &'static st
 }
 
 fn render_modules(
-    manifest: &CanonicalAssemblyManifestV1,
+    manifest: &CanonicalAssemblyManifestV2,
     framework_routes: &[(String, AssemblyListenerKind)],
     source_label: &str,
 ) -> Result<String> {
@@ -1334,7 +1334,7 @@ pub(crate) async fn wire_test_domains() -> anyhow::Result<Vec<DomainBinding>> {\
 }
 
 fn render_test_domain_wiring(
-    manifest: &CanonicalAssemblyManifestV1,
+    manifest: &CanonicalAssemblyManifestV2,
     code: &mut String,
 ) -> Result<()> {
     let is_runtime = manifest.name() == "runtime";
@@ -1365,7 +1365,7 @@ fn render_test_domain_wiring(
 
 fn framework_http_routes(
     root: &Path,
-    manifest: &CanonicalAssemblyManifestV1,
+    manifest: &CanonicalAssemblyManifestV2,
 ) -> Result<Vec<(String, AssemblyListenerKind)>> {
     use crate::contract::manifest::{ContractKind, ContractOwner, Lifecycle};
 
@@ -1454,11 +1454,13 @@ mod tests {
 
     fn manifest(domains: &str) -> String {
         format!(
-            r#"name = "runtime"
+            r#"schemaVersion = 2
+name = "runtime"
 profile = "demo"
 domains = [{domains}]
 topology = "durable-shared"
 frameworkContracts = []
+workflowActivations = []
 
 diportProviders = [{RATE_PROVIDER}, {PDP_PROVIDER}]
 
@@ -1568,7 +1570,7 @@ domains = [{domains}]
     #[allow(clippy::cognitive_complexity)] // reason: one golden test intentionally checks the complete generated carrier shape.
     fn render_modules_golden_preserves_manifest_order() -> Result<()> {
         let source = manifest(r#""settings", "identity", "audit""#);
-        let parsed = AssemblyManifest::from_toml_str(&source)?.canonicalize_v1()?;
+        let parsed = AssemblyManifest::from_toml_str(&source)?.canonicalize_v2()?;
         let rendered = render_modules(&parsed, &[], "assemblies/runtime/assembly.toml")?;
         assert!(rendered.starts_with(OWNERSHIP_MARKER));
         assert!(rendered.contains("// Source: assemblies/runtime/assembly.toml"));
@@ -1656,15 +1658,15 @@ domains = [{domains}]
         let first_source = manifest(r#""identity""#);
         let equivalent_source = manifest(r#""identity""#)
             .replace(
-                "name = \"runtime\"\nprofile = \"demo\"\ndomains = [\"identity\"]\ntopology = \"durable-shared\"\nframeworkContracts = []",
-                "frameworkContracts = []\ntopology = \"durable-shared\"\ndomains = [\"identity\"]\nprofile = \"demo\"\nname = \"runtime\"",
+                "schemaVersion = 2\nname = \"runtime\"\nprofile = \"demo\"\ndomains = [\"identity\"]\ntopology = \"durable-shared\"\nframeworkContracts = []\nworkflowActivations = []",
+                "workflowActivations = []\nframeworkContracts = []\ntopology = \"durable-shared\"\ndomains = [\"identity\"]\nprofile = \"demo\"\nname = \"runtime\"\nschemaVersion = 2",
             )
             .replace(
                 &format!("diportProviders = [{RATE_PROVIDER}, {PDP_PROVIDER}]"),
                 &format!("diportProviders = [{PDP_PROVIDER}, {RATE_PROVIDER}]"),
             );
-        let first = AssemblyManifest::from_toml_str(&first_source)?.canonicalize_v1()?;
-        let equivalent = AssemblyManifest::from_toml_str(&equivalent_source)?.canonicalize_v1()?;
+        let first = AssemblyManifest::from_toml_str(&first_source)?.canonicalize_v2()?;
+        let equivalent = AssemblyManifest::from_toml_str(&equivalent_source)?.canonicalize_v2()?;
 
         assert_eq!(first.manifest_digest(), equivalent.manifest_digest());
         assert_eq!(
@@ -1680,7 +1682,7 @@ domains = [{domains}]
             "frameworkContracts = []",
             "frameworkContracts = [{ id = \"framework.status\", listener = \"admin\" }]",
         ) + "\n[[listeners]]\nkind = \"admin\"\ndomains = []\n";
-        let parsed = AssemblyManifest::from_toml_str(&source)?.canonicalize_v1()?;
+        let parsed = AssemblyManifest::from_toml_str(&source)?.canonicalize_v2()?;
         let rendered = render_modules(
             &parsed,
             &[(
@@ -2017,7 +2019,7 @@ const _: () = assert!(!providers_gen::PROVIDER_CATALOG.is_empty());
     fn settingsonly_provider_codegen_emits_sealed_role_batches() -> Result<()> {
         let root = crate::workspace_root()?;
         let source = fs::read_to_string(root.join("assemblies/settingsonly/assembly.toml"))?;
-        let manifest = AssemblyManifest::from_toml_str(&source)?.canonicalize_v1()?;
+        let manifest = AssemblyManifest::from_toml_str(&source)?.canonicalize_v2()?;
         let rendered = render_providers(&manifest, "assemblies/settingsonly/assembly.toml")?;
 
         for required in [
@@ -2073,7 +2075,7 @@ const _: () = assert!(!providers_gen::PROVIDER_CATALOG.is_empty());
     fn identityaudit_provider_role_renderer_names_only_diagnostics() -> Result<()> {
         let root = crate::workspace_root()?;
         let source = fs::read_to_string(root.join("assemblies/identityaudit/assembly.toml"))?;
-        let manifest = AssemblyManifest::from_toml_str(&source)?.canonicalize_v1()?;
+        let manifest = AssemblyManifest::from_toml_str(&source)?.canonicalize_v2()?;
         let mut providers = manifest
             .diport_providers()
             .iter()
@@ -2098,7 +2100,7 @@ const _: () = assert!(!providers_gen::PROVIDER_CATALOG.is_empty());
     -> Result<()> {
         let root = provider_fixture_root("green")?;
         let source = fs::read_to_string(root.join("assemblies/runtime/assembly.toml"))?;
-        let manifest = AssemblyManifest::from_toml_str(&source)?.canonicalize_v1()?;
+        let manifest = AssemblyManifest::from_toml_str(&source)?.canonicalize_v2()?;
         let rendered = render_providers(&manifest, "assemblies/runtime/assembly.toml")?;
 
         assert!(rendered.contains("Some(assembly_schema::ProviderScope::ClusterGlobal)"));
@@ -2168,7 +2170,7 @@ const _: () = assert!(!providers_gen::PROVIDER_CATALOG.is_empty());
     fn assembly_provider_codegen_duplicate_factory_fixture_fails_checked_entry() -> Result<()> {
         let root = provider_fixture_root("duplicate-factory")?;
         let source = fs::read_to_string(root.join("assemblies/runtime/assembly.toml"))?;
-        let manifest = AssemblyManifest::from_toml_str(&source)?.canonicalize_v1()?;
+        let manifest = AssemblyManifest::from_toml_str(&source)?.canonicalize_v2()?;
         let fixture: DuplicateFactoryFixture = toml::from_str(&fs::read_to_string(
             Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("fixtures/assembly-provider-codegen/duplicate-factory/registry.toml"),
@@ -2251,14 +2253,14 @@ const _: () = assert!(!providers_gen::PROVIDER_CATALOG.is_empty());
         let root = provider_fixture_root("green")?;
         let source = fs::read_to_string(root.join("assemblies/runtime/assembly.toml"))?;
         let mut manifest = AssemblyManifest::from_toml_str(&source)?;
-        let canonical = manifest.clone().canonicalize_v1()?;
+        let canonical = manifest.clone().canonicalize_v2()?;
         let first = render_providers(&canonical, "assemblies/runtime/assembly.toml")?;
         manifest.diport_providers.reverse();
         for provider in &mut manifest.diport_providers {
             provider.required_features.reverse();
             provider.outputs.reverse();
         }
-        let reordered = manifest.canonicalize_v1()?;
+        let reordered = manifest.canonicalize_v2()?;
         assert_eq!(
             first,
             render_providers(&reordered, "assemblies/runtime/assembly.toml")?
@@ -2344,7 +2346,7 @@ const _: () = assert!(!providers_gen::PROVIDER_CATALOG.is_empty());
     fn assembly_provider_codegen_closed_ast_rejects_dynamic_or_extra_items() -> Result<()> {
         let root = provider_fixture_root("green")?;
         let source = fs::read_to_string(root.join("assemblies/runtime/assembly.toml"))?;
-        let manifest = AssemblyManifest::from_toml_str(&source)?.canonicalize_v1()?;
+        let manifest = AssemblyManifest::from_toml_str(&source)?.canonicalize_v2()?;
         let rendered = render_providers(&manifest, "assemblies/runtime/assembly.toml")?;
 
         let extra_const =

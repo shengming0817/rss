@@ -1,8 +1,12 @@
+schemaVersion = 2
 name = "identityaudit"
 profile = "production"
 domains = ["identity", "audit"]
 topology = "durable-isolated"
 frameworkContracts = [{ id = "runtime.inventory", listener = "admin" }]
+workflowActivations = [
+    { mode = "projection", id = "audit.session-projection", definitionVersion = "v2", definitionSchemaDigest = "sha256:8750ef9b30912c837637ee30ee712e1572903fdaa59514fd486f2d0ab15fa071", activation = "disabled" },
+]
 
 [[listeners]]
 kind = "primary"

@@ -1,0 +1,24 @@
+error[E0599]: no associated function or constant named `from_json_slice` found for struct `ParsedRuntimePlan` in the current scope
+ --> tests/ui/runtime_plan_unbound_reader_private.rs:4:32
+  |
+4 |     let _ = ParsedRuntimePlan::from_json_slice(b"{}");
+  |                                ^^^^^^^^^^^^^^^ associated function or constant not found in `ParsedRuntimePlan`
+  |
+note: if you're trying to build a new `ParsedRuntimePlan`, consider using `ParsedRuntimePlan::from_json_slice_bound` which returns `Result<ParsedRuntimePlan, RuntimePlanError>`
+ --> src/runtime_plan.rs
+  |
+  | /     pub fn from_json_slice_bound(
+  | |         bytes: &[u8],
+  | |         manifest: &CanonicalAssemblyManifestV2,
+  | |         lock: &ExecutableAssemblyLock,
+  | |     ) -> Result<Self, RuntimePlanError> {
+  | |_______________________________________^
+help: there is an associated function `from_json_slice_bound` with a similar name
+ --> src/runtime_plan.rs
+  |
+  | /     pub fn from_json_slice_bound(
+  | |         bytes: &[u8],
+  | |         manifest: &CanonicalAssemblyManifestV2,
+  | |         lock: &ExecutableAssemblyLock,
+  | |     ) -> Result<Self, RuntimePlanError> {
+  | |_______________________________________^

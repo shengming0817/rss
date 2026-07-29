@@ -3,7 +3,7 @@
 use anyhow::{Context, Result, bail, ensure};
 use assembly_schema::{
     AssemblyListenerKind, AssemblyManifest, ListenerAuth, ParsedAssemblyLock, RuntimePlan,
-    RuntimePlanV1Input,
+    RuntimePlanV2Input,
 };
 use std::fs;
 use std::io;
@@ -66,13 +66,13 @@ fn plan_targets(root: &Path) -> Result<Vec<Target>> {
         if !file_type.is_dir() || !entry.path().join(MANIFEST_NAME).exists() {
             continue;
         }
-        targets.push(plan_target(&entry.path())?);
+        targets.push(plan_target(root, &entry.path())?);
     }
     ensure!(!targets.is_empty(), "runtime-plan assembly target 集合为空");
     Ok(targets)
 }
 
-fn plan_target(assembly_dir: &Path) -> Result<Target> {
+fn plan_target(root: &Path, assembly_dir: &Path) -> Result<Target> {
     let manifest_path = assembly_dir.join(MANIFEST_NAME);
     let lock_path = assembly_dir.join(LOCK_NAME);
     let output_path = assembly_dir.join(OUTPUT_NAME);
@@ -82,8 +82,8 @@ fn plan_target(assembly_dir: &Path) -> Result<Target> {
             .with_context(|| format!("{} 不是 UTF-8", manifest_path.display()))?,
     )
     .with_context(|| format!("解析 {} 失败", manifest_path.display()))?
-    .canonicalize_v1()
-    .with_context(|| format!("编译 {} canonical v1 失败", manifest_path.display()))?;
+    .canonicalize_v2()
+    .with_context(|| format!("编译 {} canonical v2 失败", manifest_path.display()))?;
     let directory_name = assembly_dir
         .file_name()
         .and_then(|name| name.to_str())
@@ -94,9 +94,12 @@ fn plan_target(assembly_dir: &Path) -> Result<Target> {
     );
     let lock_source = read_plain_file(&lock_path)?;
     let lock = ParsedAssemblyLock::from_json_slice(&lock_source)
-        .with_context(|| format!("解析 {} 失败", lock_path.display()))?;
+        .with_context(|| format!("解析 {} 失败", lock_path.display()))?
+        .verify_repository_v2(root, assembly_dir)
+        .with_context(|| format!("repository 验证 {} 失败", lock_path.display()))?
+        .into_executable();
     let input = compiler_input(&manifest)?;
-    let plan = RuntimePlan::compile_v1(&manifest, &lock, input)
+    let plan = RuntimePlan::compile_v2(&manifest, &lock, input)
         .with_context(|| format!("编译 {directory_name} RuntimePlan 失败"))?;
     let mut expected = serde_json::to_vec_pretty(&plan).context("序列化 RuntimePlan 失败")?;
     expected.push(b'\n');
@@ -122,9 +125,9 @@ fn plan_target(assembly_dir: &Path) -> Result<Target> {
 }
 
 fn compiler_input(
-    manifest: &assembly_schema::CanonicalAssemblyManifestV1,
-) -> Result<RuntimePlanV1Input> {
-    let mut input = RuntimePlanV1Input::from_manifest(manifest);
+    manifest: &assembly_schema::CanonicalAssemblyManifestV2,
+) -> Result<RuntimePlanV2Input> {
+    let mut input = RuntimePlanV2Input::from_manifest(manifest);
     let mut listeners = manifest.listeners().iter().collect::<Vec<_>>();
     listeners.sort_by_key(|listener| listener.kind.as_str());
     for listener in listeners {
@@ -193,13 +196,38 @@ fn relative_label(root: &Path, path: &Path) -> String {
 mod tests {
     use super::*;
 
+    fn copy_tree(source: &Path, target: &Path) -> Result<()> {
+        fs::create_dir_all(target)?;
+        for entry in fs::read_dir(source)? {
+            let entry = entry?;
+            let file_type = entry.file_type()?;
+            ensure!(
+                !file_type.is_symlink(),
+                "fixture source must not contain symlinks"
+            );
+            let destination = target.join(entry.file_name());
+            if file_type.is_dir() {
+                copy_tree(&entry.path(), &destination)?;
+            } else if file_type.is_file() {
+                fs::copy(entry.path(), destination)?;
+            }
+        }
+        Ok(())
+    }
+
     fn fixture_root(name: &str) -> Result<PathBuf> {
         let root = crate::testutil::unique_tmp(name);
         let target = root.join("assemblies/settingsonly");
         fs::create_dir_all(&target)?;
-        let workspace = crate::workspace_root()?.join("assemblies/settingsonly");
+        let workspace_root = crate::workspace_root()?;
+        let workspace = workspace_root.join("assemblies/settingsonly");
         fs::copy(workspace.join(MANIFEST_NAME), target.join(MANIFEST_NAME))?;
         fs::copy(workspace.join(LOCK_NAME), target.join(LOCK_NAME))?;
+        copy_tree(
+            &workspace.join("src/generated"),
+            &target.join("src/generated"),
+        )?;
+        copy_tree(&workspace_root.join("contracts"), &root.join("contracts"))?;
         Ok(root)
     }
 

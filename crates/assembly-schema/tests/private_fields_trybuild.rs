@@ -15,4 +15,14 @@ fn runtime_plan_construction_is_sealed() {
     cases.compile_fail("tests/ui/runtime_plan_derived_facts_private.rs");
     cases.compile_fail("tests/ui/runtime_plan_private.rs");
     cases.compile_fail("tests/ui/runtime_plan_fingerprint_private.rs");
+    cases.compile_fail("tests/ui/runtime_plan_fake_lock_proxy_rejected.rs");
+    cases.compile_fail("tests/ui/runtime_plan_parsed_lock_compile_rejected.rs");
+    cases.compile_fail("tests/ui/runtime_plan_parsed_lock_reader_rejected.rs");
+    cases.compile_fail("tests/ui/runtime_plan_unbound_reader_private.rs");
+}
+
+#[test]
+fn workflow_plan_construction_is_sealed() {
+    let cases = trybuild::TestCases::new();
+    cases.compile_fail("tests/ui/workflow_plan_private.rs");
 }

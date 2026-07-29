@@ -52,6 +52,19 @@ saga ADR 和 runbook 中。
 `finish()` 校验 step 数量、顺序、名称和 output schema；缺步、多步或重排均 fail-closed。raw
 `SagaAction` / `SagaActionFactory` 是 `eventexec` 内部 erased primitive，不从 crate root re-export。
 
+## Activation 与 backend selection
+
+- contract lifecycle 只描述 Saga definition；assembly manifest v2 `workflowActivations` 才描述 deployment
+  activation。AssemblyLock v2 校验 definition identity，RuntimePlan v2 `workflowPlans` 携带 assembly-local
+  闭值结果。`Topology`、环境配置和 resolver 均不是 activation/default truth。
+- active Saga 的 requirement 集合固定为 typed actions、instance/journal/receipt/checkpoint/dead-letter store、
+  lock/fencing、worker 与 probe。组合根必须先从已验证 plan 得到 requirements，再按 exact set 闭合能力。
+- `bootstrap::sagaprojectiondeps::resolve` 仅为 requirements 之后的 topology backend selector：它在 demo 与
+  durable PostgreSQL + Redis 之间选择 instance/journal/checkpoint/lock backend，不选择 Saga 是否激活，也不
+  证明 typed action、receipt、dead-letter、worker 或 probe 已存在。
+- #1913 的 v2 协议载体不改变现有 production runtime 行为；#1914 持有 registry/worker/serving 消费切换与
+  omitted/disabled 零副作用证明。在 #1914 完成前，不为该目标状态新增 runtime `INVARIANT:`。
+
 ## 构造器
 
 `eventexec` crate 的 saga 模块（执行器）必填依赖走构造器**必填位置参**（非 `Option` /

@@ -1,8 +1,12 @@
+schemaVersion = 2
 name = "settingsonly"
 profile = "production"
 domains = ["settings"]
 topology = "durable-isolated"
 frameworkContracts = [{ id = "runtime.inventory", listener = "admin" }]
+workflowActivations = [
+    { mode = "projection", id = "settings.config-projection", definitionVersion = "v3", definitionSchemaDigest = "sha256:3504a1f33b4e2765fff012fd263ed9a317d24cbe200382c364e4220d7bf05baa", activation = "disabled" },
+]
 
 [[listeners]]
 kind = "primary"

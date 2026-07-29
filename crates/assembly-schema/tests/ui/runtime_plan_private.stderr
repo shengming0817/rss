@@ -1,9 +1,9 @@
-error[E0451]: fields `schema_version`, `assembly_fingerprint`, `runtime_plan_fingerprint`, `provider_plans`, `listener_plans`, `domain_plans` and `placement_plans` of struct `RuntimePlan` are private
+error[E0451]: fields `schema_version`, `assembly_fingerprint`, `runtime_plan_fingerprint`, `provider_plans`, `listener_plans`, `domain_plans`, `placement_plans` and `workflow_plans` of struct `RuntimePlan` are private
   --> tests/ui/runtime_plan_private.rs:12:9
    |
 11 |     RuntimePlan {
    |     ----------- in this type
-12 |         schema_version: 1,
+12 |         schema_version: 2,
    |         ^^^^^^^^^^^^^^ private field
 13 |         assembly_fingerprint,
    |         ^^^^^^^^^^^^^^^^^^^^ private field
@@ -20,6 +20,9 @@ error[E0451]: fields `schema_version`, `assembly_fingerprint`, `runtime_plan_fin
 ...
 34 |         placement_plans: vec![PlacementPlan {
    |         ^^^^^^^^^^^^^^^ private field
+...
+38 |         workflow_plans: vec![],
+   |         ^^^^^^^^^^^^^^ private field
 
 error[E0451]: fields `id`, `constructor` and `outputs` of struct `ProviderPlan` are private
   --> tests/ui/runtime_plan_private.rs:16:13

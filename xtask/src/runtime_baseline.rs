@@ -16978,11 +16978,13 @@ serde = { workspace = true, features = ["derive"] }
         write(
             &root.join(ASSEMBLY_MANIFEST_PATH),
             r#"
+schemaVersion = 2
 name = "runtime"
 profile = "demo"
 domains = ["settings", "identity", "audit"]
 topology = "durable-shared"
 frameworkContracts = []
+workflowActivations = []
 
 [[listeners]]
 kind = "primary"
@@ -17371,11 +17373,13 @@ fn bypass_runtimeexec_stack(token: tokio_util::sync::CancellationToken) {
         write(
             &root.join(ASSEMBLY_MANIFEST_PATH),
             r#"
+schemaVersion = 2
 name = "runtime"
 profile = "demo"
 domains = ["identity", "settings", "audit"]
 topology = "durable-shared"
 frameworkContracts = []
+workflowActivations = []
 
 [[listeners]]
 kind = "primary"
@@ -17498,11 +17502,13 @@ name = "runtime"
         write(
             &root.join(ASSEMBLY_MANIFEST_PATH),
             r#"
+schemaVersion = 2
 name = "runtime"
 profile = "demo"
 domains = ["identity", "settings", "audit"]
 topology = "durable-shared"
 frameworkContracts = []
+workflowActivations = []
 diportProviders = []
 
 [[listeners]]

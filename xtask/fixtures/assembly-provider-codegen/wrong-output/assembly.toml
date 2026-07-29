@@ -1,8 +1,10 @@
+schemaVersion = 2
 name = "runtime"
 profile = "demo"
 domains = ["identity"]
 topology = "durable-shared"
 frameworkContracts = []
+workflowActivations = []
 
 [[listeners]]
 kind = "primary"

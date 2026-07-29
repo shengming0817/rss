@@ -8,8 +8,8 @@ mod runtime_plan;
 
 pub use lock::{
     AssemblyDigests, AssemblyFingerprint, AssemblyIdentity, AssemblyLock, AssemblyLockError,
-    AssemblyLockErrorStage, GENERATED_MODULE_OWNERSHIP_MARKER, GENERATED_PROVIDER_OWNERSHIP_MARKER,
-    ParsedAssemblyLock, RepositoryVerifiedAssemblyLock,
+    AssemblyLockErrorStage, ExecutableAssemblyLock, GENERATED_MODULE_OWNERSHIP_MARKER,
+    GENERATED_PROVIDER_OWNERSHIP_MARKER, ParsedAssemblyLock, RepositoryVerifiedAssemblyLock,
 };
 pub use provider::{
     DiportPort, DiportProvider, LifecycleChannel, ProviderCapabilityEvidence, ProviderCatalogEntry,
@@ -19,7 +19,7 @@ pub use provider::{
 pub use runtime_plan::{
     DomainLifecyclePhase, DomainPlan, ListenerAuth, ListenerPlan, ParsedRuntimePlan, PlacementPlan,
     ProviderPlan, RuntimePlan, RuntimePlanError, RuntimePlanErrorStage, RuntimePlanFingerprint,
-    RuntimePlanJsonCategory, RuntimePlanJsonPath, RuntimePlanV1Input,
+    RuntimePlanJsonCategory, RuntimePlanJsonPath, RuntimePlanV2Input, WorkflowPlan,
     validate_runtime_plan_json_slice,
 };
 
@@ -31,15 +31,261 @@ use std::fmt;
 pub const REGISTERED_DOMAIN_LABELS: &[&str] =
     &["identity", "settings", "audit", "contractreg", "syshealth"];
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(try_from = "u32", into = "u32")]
+/// Supported wire schema versions for an assembly manifest.
+///
+/// Deserialization is intentionally strict: the v2 reader accepts only the
+/// integer `2` and provides no compatibility path for older manifests.
+pub enum AssemblyManifestSchemaVersion {
+    /// Assembly manifest schema version 2.
+    V2,
+}
+
+impl TryFrom<u32> for AssemblyManifestSchemaVersion {
+    type Error = &'static str;
+
+    fn try_from(value: u32) -> Result<Self, Self::Error> {
+        match value {
+            2 => Ok(Self::V2),
+            _ => Err("assembly manifest schemaVersion must be 2"),
+        }
+    }
+}
+
+impl From<AssemblyManifestSchemaVersion> for u32 {
+    fn from(value: AssemblyManifestSchemaVersion) -> Self {
+        match value {
+            AssemblyManifestSchemaVersion::V2 => 2,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(tag = "mode", rename_all = "kebab-case", deny_unknown_fields)]
+/// A workflow definition pin and its assembly-local activation state.
+///
+/// The tagged `mode` is part of the wire format. Capability requirements are
+/// deliberately absent from the wire and are derived exhaustively from the
+/// mode-specific activation state.
+pub enum WorkflowActivation {
+    /// A projection workflow activation.
+    Projection {
+        /// Repository-unique workflow definition identifier.
+        id: String,
+        /// Exact workflow definition version pinned by this assembly.
+        #[serde(rename = "definitionVersion")]
+        definition_version: String,
+        /// Exact schema digest pinned by this assembly.
+        #[serde(rename = "definitionSchemaDigest")]
+        definition_schema_digest: String,
+        /// Projection-specific activation state.
+        activation: ProjectionActivation,
+    },
+    /// A saga workflow activation.
+    Saga {
+        /// Repository-unique workflow definition identifier.
+        id: String,
+        /// Exact workflow definition version pinned by this assembly.
+        #[serde(rename = "definitionVersion")]
+        definition_version: String,
+        /// Exact schema digest pinned by this assembly.
+        #[serde(rename = "definitionSchemaDigest")]
+        definition_schema_digest: String,
+        /// Saga-specific activation state.
+        activation: SagaActivation,
+    },
+}
+
+impl WorkflowActivation {
+    /// Returns the pinned workflow definition identifier.
+    pub fn id(&self) -> &str {
+        match self {
+            Self::Projection { id, .. } | Self::Saga { id, .. } => id,
+        }
+    }
+
+    /// Returns the exact pinned workflow definition version.
+    pub fn definition_version(&self) -> &str {
+        match self {
+            Self::Projection {
+                definition_version, ..
+            }
+            | Self::Saga {
+                definition_version, ..
+            } => definition_version,
+        }
+    }
+
+    /// Returns the exact pinned workflow definition schema digest.
+    pub fn definition_schema_digest(&self) -> &str {
+        match self {
+            Self::Projection {
+                definition_schema_digest,
+                ..
+            }
+            | Self::Saga {
+                definition_schema_digest,
+                ..
+            } => definition_schema_digest,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+/// Closed activation states for projection workflows.
+///
+/// Repository validation is the single source of truth for lifecycle
+/// compatibility: disabled accepts draft, active, or deprecated definitions;
+/// capture-only accepts draft or active definitions; shadow and active require
+/// an active definition.
+pub enum ProjectionActivation {
+    /// The projection has no runtime capability requirements.
+    Disabled,
+    /// Capture source events without projecting or serving results.
+    CaptureOnly,
+    /// Project captured events without serving the projection as authoritative.
+    Shadow,
+    /// Project and serve the projection as authoritative.
+    Active,
+}
+
+impl ProjectionActivation {
+    /// Returns the complete capability requirements derived for this state.
+    ///
+    /// This exhaustive mapping is the sole source of capability facts; those
+    /// facts are never duplicated in the serialized manifest.
+    pub const fn requirements(self) -> &'static [ProjectionCapabilityRequirement] {
+        match self {
+            Self::Disabled => &[],
+            Self::CaptureOnly => &[
+                ProjectionCapabilityRequirement::Source,
+                ProjectionCapabilityRequirement::CaptureStore,
+            ],
+            Self::Shadow => &[
+                ProjectionCapabilityRequirement::Source,
+                ProjectionCapabilityRequirement::CaptureStore,
+                ProjectionCapabilityRequirement::Target,
+                ProjectionCapabilityRequirement::CheckpointStore,
+                ProjectionCapabilityRequirement::DeadLetterStore,
+                ProjectionCapabilityRequirement::Worker,
+                ProjectionCapabilityRequirement::Probe,
+            ],
+            Self::Active => &[
+                ProjectionCapabilityRequirement::Source,
+                ProjectionCapabilityRequirement::CaptureStore,
+                ProjectionCapabilityRequirement::Target,
+                ProjectionCapabilityRequirement::CheckpointStore,
+                ProjectionCapabilityRequirement::DeadLetterStore,
+                ProjectionCapabilityRequirement::Worker,
+                ProjectionCapabilityRequirement::Probe,
+                ProjectionCapabilityRequirement::Serving,
+            ],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+/// Closed activation states for saga workflows.
+///
+/// Repository validation is the single source of truth for lifecycle
+/// compatibility: disabled accepts draft, active, or deprecated definitions,
+/// while active requires an active definition.
+pub enum SagaActivation {
+    /// The saga has no runtime capability requirements.
+    Disabled,
+    /// Execute the saga with its complete persistence and worker capabilities.
+    Active,
+}
+
+impl SagaActivation {
+    /// Returns the complete capability requirements derived for this state.
+    ///
+    /// This exhaustive mapping is the sole source of capability facts; those
+    /// facts are never duplicated in the serialized manifest.
+    pub const fn requirements(self) -> &'static [SagaCapabilityRequirement] {
+        match self {
+            Self::Disabled => &[],
+            Self::Active => &[
+                SagaCapabilityRequirement::TypedActions,
+                SagaCapabilityRequirement::InstanceStore,
+                SagaCapabilityRequirement::JournalStore,
+                SagaCapabilityRequirement::ReceiptStore,
+                SagaCapabilityRequirement::CheckpointStore,
+                SagaCapabilityRequirement::DeadLetterStore,
+                SagaCapabilityRequirement::LockFencing,
+                SagaCapabilityRequirement::Worker,
+                SagaCapabilityRequirement::Probe,
+            ],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A projection runtime capability derived from its activation state.
+///
+/// Values of this type are derived facts and are not part of the manifest wire
+/// format.
+pub enum ProjectionCapabilityRequirement {
+    /// Source from which projection input events are captured.
+    Source,
+    /// Durable store for captured input events.
+    CaptureStore,
+    /// Projection target receiving materialized results.
+    Target,
+    /// Durable projection progress checkpoint store.
+    CheckpointStore,
+    /// Store for input that cannot be processed successfully.
+    DeadLetterStore,
+    /// Worker that advances the projection.
+    Worker,
+    /// Probe that reports projection health and progress.
+    Probe,
+    /// Serving path that exposes authoritative projection results.
+    Serving,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A saga runtime capability derived from its activation state.
+///
+/// Values of this type are derived facts and are not part of the manifest wire
+/// format.
+pub enum SagaCapabilityRequirement {
+    /// Statically typed actions executed by the saga.
+    TypedActions,
+    /// Durable saga instance state store.
+    InstanceStore,
+    /// Append-only saga journal store.
+    JournalStore,
+    /// Durable action receipt store.
+    ReceiptStore,
+    /// Durable saga progress checkpoint store.
+    CheckpointStore,
+    /// Store for work that cannot be processed successfully.
+    DeadLetterStore,
+    /// Fenced locking that prevents stale workers from committing work.
+    LockFencing,
+    /// Worker that advances saga instances.
+    Worker,
+    /// Probe that reports saga health and progress.
+    Probe,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct AssemblyManifest {
+    #[serde(rename = "schemaVersion")]
+    pub schema_version: AssemblyManifestSchemaVersion,
     pub name: String,
     pub profile: AssemblyProfile,
     pub domains: Vec<AssemblyDomain>,
     pub topology: AssemblyTopology,
     #[serde(rename = "frameworkContracts")]
     pub framework_contracts: Vec<FrameworkContractMount>,
+    #[serde(rename = "workflowActivations")]
+    pub workflow_activations: Vec<WorkflowActivation>,
     pub listeners: Vec<AssemblyListener>,
     #[serde(rename = "diportProviders")]
     pub diport_providers: Vec<DiportProvider>,
@@ -76,6 +322,24 @@ impl AssemblyManifest {
         );
         for mount in &self.framework_contracts {
             ensure_non_empty_string(&mount.id, "frameworkContracts", &mut errors);
+        }
+        ensure_unique(
+            self.workflow_activations.iter().map(WorkflowActivation::id),
+            "workflowActivations.id",
+            &mut errors,
+        );
+        for activation in &self.workflow_activations {
+            ensure_non_empty_string(activation.id(), "workflowActivations.id", &mut errors);
+            ensure_non_empty_string(
+                activation.definition_version(),
+                "workflowActivations.definitionVersion",
+                &mut errors,
+            );
+            if !is_sha256_digest(activation.definition_schema_digest()) {
+                errors.push(ManifestValidationError::Invalid {
+                    field: "workflowActivations.definitionSchemaDigest",
+                });
+            }
         }
         ensure_unique(
             self.listeners.iter().map(|listener| listener.kind),
@@ -174,13 +438,13 @@ impl AssemblyManifest {
         }
     }
 
-    /// Validate and compile this manifest into the sole v1 semantic view.
+    /// Validate and compile this manifest into the sole v2 semantic view.
     ///
     /// Code generation and manifest identity both consume this type, so set-like
     /// declarations cannot drift between their rendered and fingerprinted forms.
-    pub fn canonicalize_v1(
+    pub fn canonicalize_v2(
         self,
-    ) -> Result<CanonicalAssemblyManifestV1, AssemblyManifestCanonicalizationError> {
+    ) -> Result<CanonicalAssemblyManifestV2, AssemblyManifestCanonicalizationError> {
         self.validate_basic().map_err(|source| {
             AssemblyManifestCanonicalizationError(AssemblyManifestCanonicalizationErrorKind::Basic(
                 source,
@@ -195,11 +459,13 @@ impl AssemblyManifest {
         // Intentionally exhaustive: a future source field must fail compilation until its
         // sequence/set semantics are reviewed for both codegen and fingerprinting.
         let AssemblyManifest {
+            schema_version,
             name,
             profile,
             domains,
             topology,
             framework_contracts,
+            mut workflow_activations,
             listeners,
             mut diport_providers,
         } = self;
@@ -209,13 +475,16 @@ impl AssemblyManifest {
             provider.outputs.sort();
         }
         diport_providers.sort_by(|left, right| provider_key(left).cmp(&provider_key(right)));
+        workflow_activations.sort_by(|left, right| left.id().cmp(right.id()));
 
-        let value = CanonicalAssemblyManifestV1Value {
+        let value = CanonicalAssemblyManifestV2Value {
+            schema_version,
             name,
             profile,
             domains,
             topology,
             framework_contracts,
+            workflow_activations,
             listeners,
             diport_providers,
         };
@@ -224,32 +493,38 @@ impl AssemblyManifest {
                 AssemblyManifestCanonicalizationErrorKind::Digest(source),
             )
         })?;
-        Ok(CanonicalAssemblyManifestV1 {
+        Ok(CanonicalAssemblyManifestV2 {
             value,
             manifest_digest,
         })
     }
 }
 
-/// Read-only v1 semantic manifest shared by code generation and AssemblyLock identity.
-pub struct CanonicalAssemblyManifestV1 {
-    value: CanonicalAssemblyManifestV1Value,
+/// Read-only v2 semantic manifest shared by code generation and AssemblyLock identity.
+pub struct CanonicalAssemblyManifestV2 {
+    value: CanonicalAssemblyManifestV2Value,
     manifest_digest: String,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct CanonicalAssemblyManifestV1Value {
+struct CanonicalAssemblyManifestV2Value {
+    schema_version: AssemblyManifestSchemaVersion,
     name: String,
     profile: AssemblyProfile,
     domains: Vec<AssemblyDomain>,
     topology: AssemblyTopology,
     framework_contracts: Vec<FrameworkContractMount>,
+    workflow_activations: Vec<WorkflowActivation>,
     listeners: Vec<AssemblyListener>,
     diport_providers: Vec<DiportProvider>,
 }
 
-impl CanonicalAssemblyManifestV1 {
+impl CanonicalAssemblyManifestV2 {
+    pub const fn schema_version(&self) -> AssemblyManifestSchemaVersion {
+        self.value.schema_version
+    }
+
     pub fn name(&self) -> &str {
         &self.value.name
     }
@@ -270,6 +545,10 @@ impl CanonicalAssemblyManifestV1 {
         &self.value.framework_contracts
     }
 
+    pub fn workflow_activations(&self) -> &[WorkflowActivation] {
+        &self.value.workflow_activations
+    }
+
     pub fn listeners(&self) -> &[AssemblyListener] {
         &self.value.listeners
     }
@@ -283,7 +562,7 @@ impl CanonicalAssemblyManifestV1 {
     }
 }
 
-/// Closed error returned while compiling an AssemblyManifest into its v1 semantic form.
+/// Closed error returned while compiling an AssemblyManifest into its v2 semantic form.
 #[derive(Debug, thiserror::Error)]
 #[error(transparent)]
 pub struct AssemblyManifestCanonicalizationError(AssemblyManifestCanonicalizationErrorKind);
@@ -522,6 +801,15 @@ fn ensure_non_empty_slice<T>(
     }
 }
 
+fn is_sha256_digest(value: &str) -> bool {
+    value.strip_prefix("sha256:").is_some_and(|digest| {
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    })
+}
+
 fn ensure_unique<T>(
     values: impl IntoIterator<Item = T>,
     field: &'static str,
@@ -578,11 +866,13 @@ mod tests {
     use super::*;
 
     const MINIMAL: &str = r#"
+schemaVersion = 2
 name = "runtime"
 profile = "demo"
 domains = ["identity", "settings", "audit"]
 topology = "durable-shared"
 frameworkContracts = []
+workflowActivations = []
 
 [[listeners]]
 kind = "primary"
@@ -605,6 +895,8 @@ outputs = ["resources"]
     fn parses_minimal_manifest() {
         let manifest = AssemblyManifest::from_toml_str(MINIMAL).expect("manifest");
 
+        assert_eq!(manifest.schema_version, AssemblyManifestSchemaVersion::V2);
+        assert!(manifest.workflow_activations.is_empty());
         assert_eq!(manifest.name, "runtime");
         assert_eq!(
             manifest
@@ -629,6 +921,109 @@ outputs = ["resources"]
             [LifecycleChannel::Resources]
         );
         manifest.validate_basic().expect("valid manifest");
+    }
+
+    #[test]
+    fn manifest_v2_requires_closed_schema_version_and_explicit_workflow_activations() {
+        assert!(
+            AssemblyManifest::from_toml_str(&MINIMAL.replace("schemaVersion = 2\n", "")).is_err()
+        );
+        assert!(
+            AssemblyManifest::from_toml_str(
+                &MINIMAL.replace("schemaVersion = 2", "schemaVersion = 1")
+            )
+            .is_err()
+        );
+        assert!(
+            AssemblyManifest::from_toml_str(&MINIMAL.replace("workflowActivations = []\n", ""))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn workflow_activation_modes_are_closed_and_mode_specific() {
+        let projection = MINIMAL.replace(
+            "workflowActivations = []",
+            r#"workflowActivations = [{ mode = "projection", id = "settings.config-projection", definitionVersion = "v3", definitionSchemaDigest = "sha256:3504a1f33b4e2765fff012fd263ed9a317d24cbe200382c364e4220d7bf05baa", activation = "capture-only" }]"#,
+        );
+        let manifest = AssemblyManifest::from_toml_str(&projection).expect("projection activation");
+        assert!(matches!(
+            manifest.workflow_activations.as_slice(),
+            [WorkflowActivation::Projection {
+                activation: ProjectionActivation::CaptureOnly,
+                ..
+            }]
+        ));
+
+        let saga = projection
+            .replace("mode = \"projection\"", "mode = \"saga\"")
+            .replace("activation = \"capture-only\"", "activation = \"active\"");
+        let manifest = AssemblyManifest::from_toml_str(&saga).expect("saga activation");
+        assert!(matches!(
+            manifest.workflow_activations.as_slice(),
+            [WorkflowActivation::Saga {
+                activation: SagaActivation::Active,
+                ..
+            }]
+        ));
+
+        assert!(AssemblyManifest::from_toml_str(&saga.replace("active", "shadow")).is_err());
+        assert!(
+            AssemblyManifest::from_toml_str(&projection.replace("capture-only", "unknown"))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn workflow_capability_requirements_are_exhaustive_derived_facts() {
+        use ProjectionCapabilityRequirement as Projection;
+        use SagaCapabilityRequirement as Saga;
+
+        assert_eq!(ProjectionActivation::Disabled.requirements(), []);
+        assert_eq!(
+            ProjectionActivation::CaptureOnly.requirements(),
+            [Projection::Source, Projection::CaptureStore]
+        );
+        assert_eq!(
+            ProjectionActivation::Shadow.requirements(),
+            [
+                Projection::Source,
+                Projection::CaptureStore,
+                Projection::Target,
+                Projection::CheckpointStore,
+                Projection::DeadLetterStore,
+                Projection::Worker,
+                Projection::Probe,
+            ]
+        );
+        assert_eq!(
+            ProjectionActivation::Active.requirements(),
+            [
+                Projection::Source,
+                Projection::CaptureStore,
+                Projection::Target,
+                Projection::CheckpointStore,
+                Projection::DeadLetterStore,
+                Projection::Worker,
+                Projection::Probe,
+                Projection::Serving,
+            ]
+        );
+        assert_eq!(SagaActivation::Disabled.requirements(), []);
+        assert_eq!(
+            SagaActivation::Active.requirements(),
+            [
+                Saga::TypedActions,
+                Saga::InstanceStore,
+                Saga::JournalStore,
+                Saga::ReceiptStore,
+                Saga::CheckpointStore,
+                Saga::DeadLetterStore,
+                Saga::LockFencing,
+                Saga::Worker,
+                Saga::Probe,
+            ]
+        );
     }
 
     #[test]

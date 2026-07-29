@@ -2,9 +2,9 @@
 
 use anyhow::Context as _;
 use assembly_schema::{
-    AssemblyDomain, AssemblyListenerKind, AssemblyManifest, AssemblyProfile, AssemblyTopology,
-    CanonicalAssemblyManifestV1, DomainLifecyclePhase, ListenerAuth, ParsedAssemblyLock,
-    RuntimePlan as TypedRuntimePlan, RuntimePlanV1Input,
+    AssemblyDomain, AssemblyIdentity, AssemblyListenerKind, AssemblyManifest, AssemblyProfile,
+    AssemblyTopology, CanonicalAssemblyManifestV2, DomainLifecyclePhase, ExecutableAssemblyLock,
+    ListenerAuth, ParsedAssemblyLock, RuntimePlan as TypedRuntimePlan, RuntimePlanV2Input,
 };
 
 const BUNDLED_ASSEMBLY_TOML: &str = include_str!("../assembly.toml");
@@ -24,14 +24,16 @@ impl SettingsOnlyPlan {
     pub(crate) fn bundled() -> anyhow::Result<Self> {
         let manifest = AssemblyManifest::from_toml_str(BUNDLED_ASSEMBLY_TOML)
             .context("parse bundled settingsonly assembly manifest")?
-            .canonicalize_v1()
+            .canonicalize_v2()
             .context("canonicalize bundled settingsonly assembly manifest")?;
-        let lock = ParsedAssemblyLock::from_json_slice(BUNDLED_ASSEMBLY_LOCK)
-            .context("parse bundled settingsonly AssemblyLock")?;
+        let lock = ExecutableAssemblyLock::from_build_attested(
+            ParsedAssemblyLock::from_json_slice(BUNDLED_ASSEMBLY_LOCK)
+                .context("parse bundled settingsonly AssemblyLock")?,
+        );
 
-        validate_manifest_closure(&manifest, &lock)?;
+        validate_manifest_closure(&manifest, lock.identity())?;
         let input = compiler_input(&manifest)?;
-        let typed = TypedRuntimePlan::compile_v1(&manifest, &lock, input)
+        let typed = TypedRuntimePlan::compile_v2(&manifest, &lock, input)
             .context("compile bundled settingsonly RuntimePlan")?;
         validate_typed_closure(&typed)?;
         Ok(Self { typed })
@@ -93,8 +95,8 @@ impl SettingsOnlyPlan {
 }
 
 fn validate_manifest_closure(
-    manifest: &CanonicalAssemblyManifestV1,
-    lock: &ParsedAssemblyLock,
+    manifest: &CanonicalAssemblyManifestV2,
+    lock_identity: &AssemblyIdentity,
 ) -> anyhow::Result<()> {
     anyhow::ensure!(manifest.name() == ASSEMBLY_NAME, "unexpected assembly name");
     anyhow::ensure!(
@@ -109,8 +111,8 @@ fn validate_manifest_closure(
         "settingsonly requires exactly the Admin runtime.inventory framework contract"
     );
     anyhow::ensure!(
-        lock.identity().name() == ASSEMBLY_NAME
-            && lock.identity().profile() == AssemblyProfile::Production,
+        lock_identity.name() == ASSEMBLY_NAME
+            && lock_identity.profile() == AssemblyProfile::Production,
         "settingsonly AssemblyLock identity does not match the closed assembly"
     );
     anyhow::ensure!(
@@ -121,7 +123,7 @@ fn validate_manifest_closure(
     Ok(())
 }
 
-fn validate_manifest_listeners(manifest: &CanonicalAssemblyManifestV1) -> anyhow::Result<()> {
+fn validate_manifest_listeners(manifest: &CanonicalAssemblyManifestV2) -> anyhow::Result<()> {
     anyhow::ensure!(
         manifest.listeners().len() == 3,
         "settingsonly requires exactly Primary, Admin and Health listeners"
@@ -156,8 +158,8 @@ fn validate_manifest_listeners(manifest: &CanonicalAssemblyManifestV1) -> anyhow
     Ok(())
 }
 
-fn compiler_input(manifest: &CanonicalAssemblyManifestV1) -> anyhow::Result<RuntimePlanV1Input> {
-    let mut input = RuntimePlanV1Input::from_manifest(manifest);
+fn compiler_input(manifest: &CanonicalAssemblyManifestV2) -> anyhow::Result<RuntimePlanV2Input> {
+    let mut input = RuntimePlanV2Input::from_manifest(manifest);
 
     let mut listeners = manifest.listeners().iter().collect::<Vec<_>>();
     listeners.sort_by_key(|listener| listener.kind.as_str());
@@ -183,7 +185,7 @@ fn compiler_input(manifest: &CanonicalAssemblyManifestV1) -> anyhow::Result<Runt
 
 fn validate_typed_closure(plan: &TypedRuntimePlan) -> anyhow::Result<()> {
     anyhow::ensure!(
-        plan.schema_version() == 1,
+        plan.schema_version() == 2,
         "settingsonly requires RuntimePlan schema version 1"
     );
     let listeners = plan.listener_plans();
@@ -236,12 +238,13 @@ mod tests {
     fn bundled_manifest_has_the_closed_production_profile() {
         let manifest = AssemblyManifest::from_toml_str(BUNDLED_ASSEMBLY_TOML)
             .expect("bundled manifest")
-            .canonicalize_v1()
+            .canonicalize_v2()
             .expect("canonical bundled manifest");
         let lock = ParsedAssemblyLock::from_json_slice(BUNDLED_ASSEMBLY_LOCK)
             .expect("bundled AssemblyLock");
 
-        validate_manifest_closure(&manifest, &lock).expect("closed settingsonly manifest");
+        validate_manifest_closure(&manifest, lock.identity())
+            .expect("closed settingsonly manifest");
         assert_eq!(manifest.name(), ASSEMBLY_NAME);
         assert_eq!(manifest.profile(), AssemblyProfile::Production);
         assert_eq!(manifest.topology(), AssemblyTopology::DurableIsolated);

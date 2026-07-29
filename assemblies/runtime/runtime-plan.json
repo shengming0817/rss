@@ -1,7 +1,7 @@
 {
-  "schemaVersion": 1,
-  "assemblyFingerprint": "sha256:3cfd462cd676b64102719ff4e8bbe375b5feb76701f966b2a604f9c65a91cabf",
-  "runtimePlanFingerprint": "sha256:5e1d6e81beba832d14f6a87c0e4c3f9d0ee2dd0281891e7a7d67a6cdd417d376",
+  "schemaVersion": 2,
+  "assemblyFingerprint": "sha256:543c817619c73330b1cc03168a86ee219202bf13516e8e195663d43782e76797",
+  "runtimePlanFingerprint": "sha256:4816c7a21c0e0a30ee6f07d8c2d3b18bae6a8371f65879907faab211eddabe4d",
   "providerPlans": [
     {
       "id": "auth-audit-sink",
@@ -207,6 +207,22 @@
     {
       "domain": "settings",
       "workload": "runtime"
+    }
+  ],
+  "workflowPlans": [
+    {
+      "mode": "projection",
+      "id": "audit.session-projection",
+      "definitionVersion": "v2",
+      "definitionSchemaDigest": "sha256:8750ef9b30912c837637ee30ee712e1572903fdaa59514fd486f2d0ab15fa071",
+      "activation": "disabled"
+    },
+    {
+      "mode": "projection",
+      "id": "settings.config-projection",
+      "definitionVersion": "v3",
+      "definitionSchemaDigest": "sha256:3504a1f33b4e2765fff012fd263ed9a317d24cbe200382c364e4220d7bf05baa",
+      "activation": "disabled"
     }
   ]
 }

@@ -8,6 +8,9 @@ publish = false
 [lints]
 workspace = true
 
+[build-dependencies]
+assembly-schema = { path = "../../crates/assembly-schema" }
+
 # 组合根（Root 层）：抽自 bins/rss + bins/server 的共享运行时编排逻辑（#1309 消除 bins 双写）。
 # lib 形态：组合根接线逻辑落 lib（`tests/` 集成测试可达 `runtime::*`）。
 [lib]
