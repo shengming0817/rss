@@ -14,6 +14,28 @@
 
 <!-- 破坏性变更 / migration / wire 契约影响 / 需同步的消费方；无则写「无」 -->
 
+## Production acceptance evidence
+
+<!--
+仅当 PR 新增、扩展、替换或重新声明 T3 production acceptance carrier，或切换 production assembly artifact
+journey 时保留本节；其余 PR 删除整节。逐项对应 issue 中的 evidence plan，语义见
+`docs/rules/project-scope.md` §Production acceptance evidence plan 与 carrier replacement。
+-->
+
+- Evidence plan: `<issue / Evidence ID 列表>`
+- Final HEAD: `<commit SHA>`
+
+### <Evidence ID>
+
+- T1/T2 receipt: `<exact command/target → result → same-head receipt>`
+- T3 incremental proof / production join hazard: `<final-HEAD assertion → 唯一 production-only 失效模式>`
+- Lower-layer gap: `<为何 T1/T2 无法观测该失效模式>`
+- T3 receipt: `<independent selector → result / elapsed time / resources>`
+- Change kind: `<activation | extension-or-redeclaration | replacement>`
+- Candidate first green: `<commit SHA / receipt，早于 activation、owner/assertion 更新或 replacement cutover>`
+- Carrier transition: `<activation：已 activation/register；extension-or-redeclaration：canonical owner/assertion 前 → 后；replacement：old → new canonical selector + 已删 target/harness/script/env；artifact journey replacement 另列 assemblies/artifacts.toml 修改>`
+- Final-head verification: `<变更后的 canonical carrier receipt + ./hack/cargo.sh xtask assembly artifacts check>`
+
 ## Test plan
 
 - [ ] `make ci CI_BASE=<remote>/develop` 10 分钟有界本地通过（只分析已提交差异；重型门 `DEFERRED` 到 nightly/develop，不追加 `make ci-full`）

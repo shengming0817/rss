@@ -72,6 +72,38 @@ readiness 与干净退出，除非二者存在独立生产失效模式。
 | **Security / AuthN / AuthZ / Tenant** | 按 hazard 分布到 T1–T3 | capability/funnel 在 T1，授权拒绝/RLS/真实 verifier 及 adapter TLS/证书校验/拒绝语义在 T2，secret/image/进程边界与 production assembly 的 TLS/CA/config 接线 join hazard 在 T3 |
 | **Observability / Health / Local CI** | 指标/label/选择语义在 T1，真实 probe/lifecycle 在 T3 | T2 只验证 adapter/transport 接缝；CI 是执行载体，不作为 RSS 产品做端到端测试 |
 
+### Production acceptance evidence plan 与 carrier replacement
+
+任何新增、扩展、替换或重新声明 T3 production acceptance carrier，以及切换 production assembly 的
+artifact journey，必须先在 issue 中给出 evidence plan。一致性 L0–L4 与验证层 T1–T3 是正交轴；L3/L4
+语义不会自动使测试成为 T3。
+
+每个独立 evidence item 必须记录：
+
+- 稳定 Evidence ID、production assembly，以及要证明的 invariant 或 join hazard。
+- 唯一 canonical owner、最低充分层，以及精确 executable target/assertion；聚合 receipt 不是第二 owner。
+- T1/T2 前置 target、各自证明的事实，以及在 candidate revision 上的真实执行结果；尚未满足时先记录
+  blocking issue 与必须达成的绿色标准，并在开始 T3 carrier 工作前更新为真实 receipt。
+- T3 新增的 assertion，以及为何该失效模式只能在 production binary/image/process/config/provider
+  组合后观测；“完整覆盖”或“多一道保险”不是提升到 T3 的理由。
+- 可单独选择的 test/filter/subcommand、timeout/预计耗时、外部资源与既有执行频率/profile。
+- 变更类型及其完整 transition：activation 记录 candidate 与 activation/registration 条件；
+  extension-or-redeclaration 记录 canonical owner/assertion 的前后变化与接纳条件；replacement 记录旧
+  carrier、新 candidate、canonical selector 切换条件，以及需同交付删除的 target/harness/script/env。
+
+lower-layer evidence 未列明或未在 candidate revision 真实执行成功时，不得生成、扩展、重新声明或切换 T3
+carrier。skip、未执行、developer/non-production receipt 均不是绿色证据。多个独立 hazard 可共享
+setup，但每个 hazard 必须能单独选择、单独复现并直接定位失败，不得藏在一个不可分辨的测试名后。
+
+`activation` 必须在 candidate 真实通过后才激活或注册；`extension-or-redeclaration` 必须在修改后的
+carrier 真实通过后才把新的 owner/assertion 声明为 canonical。`replacement` 中，新 candidate 真实通过前旧
+carrier 继续是 canonical；通过后，同一交付必须原子完成实际 canonical selector 切换与旧 carrier 删除，
+最终不保留 alias、shim 或长期双路径。只有 artifact journey replacement 才要求切换
+`assemblies/artifacts.toml` 指针；其它 replacement 切换其实际 selector/registry/profile，不虚构 artifact
+matrix 修改。final HEAD 必须重新运行变更后的 canonical carrier 和静态 artifact gate。现有 assembly schema 与
+`assembly artifacts check` 只证明当前 checkout 的闭值 carrier 身份与静态形状，不声称证明运行成功、
+lower-layer 语义或历史切换顺序；后三者是结构化 review evidence，不是 Markdown enforcement carrier。
+
 ### 选择与去重规则
 
 - **最低充分层**：能由类型系统、crate 图、visibility、sealed trait 或 codegen Hard 化的约束，以 T1 静态证明为主；
