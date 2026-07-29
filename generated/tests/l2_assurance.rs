@@ -12,14 +12,60 @@ use l2_assurance_support::*;
 
 const ASSURANCE_JSON: &str = include_str!("../l2-assurance.json");
 
+const REQUIRED_SESSION_CREATED_INBOX_SCENARIOS: [&str; 3] = [
+    "run_inbox_claim_crash_before_commit",
+    "run_inbox_commit_before_ack_crash",
+    "run_inbox_lease_lost_before_commit",
+];
+
 #[test]
 fn committed_l2_assurance_is_closed_and_matches_compiled_registries() {
     let inventory = AssuranceInventory::parse_v3(ASSURANCE_JSON).expect("strict v3 inventory");
 
     assert_eq!(inventory.schema_version, 3);
-    assert_eq!(inventory.producer_count, 9);
-    assert_eq!(inventory.fact_count, 5);
-    assert_eq!(inventory.contracts.len(), 14);
+    assert_exact_ids(
+        "producer inventory/generated specs",
+        http::SPECS
+            .iter()
+            .filter(|spec| spec.route.consistency_level() == HttpConsistencyLevel::OutboxFact)
+            .map(|spec| spec.route.contract_id().to_owned()),
+        inventory
+            .contracts
+            .iter()
+            .filter_map(|record| match record {
+                AssuranceRecord::Producer { contract_id, .. } => Some(contract_id.clone()),
+                AssuranceRecord::Fact { .. } => None,
+            }),
+    )
+    .expect("producer inventory must exactly join generated specs");
+    assert_exact_ids(
+        "producer inventory/generated bindings",
+        http::OUTBOX_PRODUCERS
+            .iter()
+            .map(|producer| producer.route().contract().contract_id().to_owned()),
+        inventory
+            .contracts
+            .iter()
+            .filter_map(|record| match record {
+                AssuranceRecord::Producer { contract_id, .. } => Some(contract_id.clone()),
+                AssuranceRecord::Fact { .. } => None,
+            }),
+    )
+    .expect("producer inventory must exactly join generated bindings");
+    assert_exact_ids(
+        "fact inventory/generated events",
+        event::EVENTS
+            .iter()
+            .map(|spec| spec.contract_id().to_owned()),
+        inventory
+            .contracts
+            .iter()
+            .filter_map(|record| match record {
+                AssuranceRecord::Fact { contract_id, .. } => Some(contract_id.clone()),
+                AssuranceRecord::Producer { .. } => None,
+            }),
+    )
+    .expect("fact inventory must exactly join generated events");
 
     let compiled_producers: BTreeMap<_, _> = http::SPECS
         .iter()
@@ -42,9 +88,7 @@ fn committed_l2_assurance_is_closed_and_matches_compiled_registries() {
             AssuranceRecord::Fact { .. } => None,
         })
         .collect();
-    let compiled_producer_ids: BTreeSet<_> = compiled_producers.keys().copied().collect();
-    assert_eq!(producer_ids, compiled_producer_ids);
-    assert_eq!(producer_ids.len(), compiled_producer_bindings.len());
+    assert!(!producer_ids.is_empty(), "producer projection is empty");
 
     let fact_ids: BTreeSet<_> = inventory
         .contracts
@@ -54,8 +98,7 @@ fn committed_l2_assurance_is_closed_and_matches_compiled_registries() {
             AssuranceRecord::Producer { .. } => None,
         })
         .collect();
-    let compiled_fact_ids: BTreeSet<_> = compiled_facts.keys().copied().collect();
-    assert_eq!(fact_ids, compiled_fact_ids);
+    assert!(!fact_ids.is_empty(), "fact projection is empty");
 
     assert_eq!(producer_ids.len(), inventory.producer_count);
     assert_eq!(fact_ids.len(), inventory.fact_count);
@@ -107,10 +150,11 @@ fn assurance_reader_rejects_v2_and_unknown_fields() {
     assert!(AssuranceInventory::parse_v3(&v2).is_err());
 
     let unknown = ASSURANCE_JSON.replacen(
-        "\"producerCount\": 9",
-        "\"legacyProducerEvidence\": true,\n  \"producerCount\": 9",
+        "\"producerCount\":",
+        "\"legacyProducerEvidence\": true,\n  \"producerCount\":",
         1,
     );
+    assert_ne!(unknown, ASSURANCE_JSON);
     assert!(AssuranceInventory::parse_v3(&unknown).is_err());
 
     let duplicate_schema = ASSURANCE_JSON.replacen(
@@ -119,6 +163,72 @@ fn assurance_reader_rejects_v2_and_unknown_fields() {
         1,
     );
     assert!(AssuranceInventory::parse_v3(&duplicate_schema).is_err());
+}
+
+#[test]
+fn exact_id_join_rejects_wrong_duplicate_missing_and_extra_identities() {
+    let expected = ["identity.one", "identity.two"];
+    for (label, actual) in [
+        ("wrong", vec!["identity.one", "identity.wrong"]),
+        (
+            "duplicate",
+            vec!["identity.one", "identity.two", "identity.two"],
+        ),
+        ("missing", vec!["identity.one"]),
+        (
+            "extra",
+            vec!["identity.one", "identity.two", "identity.extra"],
+        ),
+    ] {
+        assert!(
+            assert_exact_ids(
+                label,
+                expected.into_iter().map(str::to_owned),
+                actual.into_iter().map(str::to_owned),
+            )
+            .is_err(),
+            "{label} identity projection was accepted"
+        );
+    }
+}
+
+#[test]
+fn required_session_created_inbox_scenarios_reject_each_missing_runner_or_fixture() {
+    let carriers = [
+        (CarrierKind::FaultFixture, "inbox-claim-crash-before-commit"),
+        (CarrierKind::FaultFixture, "inbox-commit-before-ack-crash"),
+        (CarrierKind::FaultFixture, "inbox-lease-lost-before-commit"),
+        (
+            CarrierKind::RustSymbol,
+            "run_inbox_claim_crash_before_commit",
+        ),
+        (CarrierKind::RustSymbol, "run_inbox_commit_before_ack_crash"),
+        (
+            CarrierKind::RustSymbol,
+            "run_inbox_lease_lost_before_commit",
+        ),
+    ];
+    assert!(
+        assert_required_inbox_security_scenarios("identity.session-created", carriers.into_iter(),)
+            .is_ok()
+    );
+
+    for runner in REQUIRED_SESSION_CREATED_INBOX_SCENARIOS {
+        let missing_runner = carriers.into_iter().filter(|(_, symbol)| *symbol != runner);
+        let error =
+            assert_required_inbox_security_scenarios("identity.session-created", missing_runner)
+                .expect_err("missing required inbox runner must be rejected");
+        assert!(error.contains(runner), "{error}");
+
+        let fixture = inbox_fixture_id(runner);
+        let missing_fixture = carriers
+            .into_iter()
+            .filter(|(_, symbol)| *symbol != fixture);
+        let error =
+            assert_required_inbox_security_scenarios("identity.session-created", missing_fixture)
+                .expect_err("missing required inbox fixture must be rejected");
+        assert!(error.contains(&fixture), "{error}");
+    }
 }
 
 fn assert_fact_runtime_symbols(evidence: &FactEvidence, expected: &[&str], contract_id: &str) {
@@ -189,18 +299,16 @@ fn assert_producer(
         .map(|binding| binding.contract_id())
         .collect::<Vec<_>>();
     assert_eq!(emitted_facts, &compiled_facts, "{contract_id}");
-    let generated_symbols = evidence
+    let generated_roles = evidence
         .generated
         .carriers
         .iter()
-        .map(|carrier| carrier.symbol.as_str())
-        .collect::<Vec<_>>();
-    assert_eq!(generated_symbols.len(), 2, "{contract_id}");
-    assert!(
-        generated_symbols
-            .iter()
-            .any(|symbol| symbol.ends_with("::PRODUCER")),
-        "{contract_id} lacks generated producer binding"
+        .filter_map(|carrier| carrier.symbol.rsplit("::").next())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        generated_roles,
+        BTreeSet::from(["PRODUCER", "SPEC"]),
+        "{contract_id} generated carrier role projection drift"
     );
     assert_producer_evidence(evidence, contract_id, domain, emitted_facts);
 }
@@ -402,14 +510,11 @@ fn assert_producer_evidence(
             assert_canonical_repo_relative_path(&carrier.path, contract_id);
         }
     }
-    assert_producer_fault(&evidence.fault, contract_id, emitted_facts);
+    assert_producer_fault(evidence, contract_id, emitted_facts);
 }
 
-fn assert_producer_fault(
-    fault: &ProducerFaultEvidence,
-    contract_id: &str,
-    emitted_facts: &[String],
-) {
+fn assert_producer_fault(evidence: &ProducerEvidence, contract_id: &str, emitted_facts: &[String]) {
+    let fault = &evidence.fault;
     assert_eq!(fault.status, FacetStatus::Complete, "{contract_id}");
     assert_eq!(
         fault
@@ -421,10 +526,26 @@ fn assert_producer_fault(
         "{contract_id} fault terminals must equal emitted facts"
     );
     for terminal in &fault.terminals {
+        let execution = evidence
+            .execution
+            .terminals
+            .iter()
+            .find(|execution| execution.fact_id == terminal.fact_id)
+            .unwrap_or_else(|| {
+                panic!(
+                    "{contract_id} fault terminal {} lacks execution terminal",
+                    terminal.fact_id
+                )
+            });
         assert_eq!(
-            terminal.provider_method.path,
-            evidence_provider_path(contract_id),
-            "{contract_id}"
+            terminal.provider_method, execution.provider_method,
+            "{contract_id}/{} provider identity drift",
+            terminal.fact_id
+        );
+        assert_eq!(
+            terminal.transaction, execution.transaction,
+            "{contract_id}/{} transaction identity drift",
+            terminal.fact_id
         );
         assert!(
             matches!(
@@ -453,45 +574,27 @@ fn assert_producer_fault(
             assert_eq!(carrier.path, path, "{contract_id}");
             assert_eq!(carrier.symbol, symbol, "{contract_id}");
         }
-        let expected_consumer = [
-            (
-                "PgWritePool::producer_tx",
-                "adapters/postgres/src/cotx/mod.rs",
-                "ProducerTxAttempt::into_result",
+        assert!(
+            matches!(
+                (
+                    terminal.transaction.symbol.as_str(),
+                    terminal.no_replay.path.as_str(),
+                    terminal.no_replay.symbol.as_str(),
+                ),
+                (
+                    "PgWritePool::producer_tx",
+                    "adapters/postgres/src/cotx/mod.rs",
+                    "ProducerTxAttempt::into_result"
+                        | "ProducerTxAttempt::into_refresh_commit_result",
+                ) | (
+                    "PgWritePool::retry_producer_tx",
+                    "adapters/postgres/src/cotx/settlement.rs",
+                    "LocalTxAttempt::into_retry_result",
+                )
             ),
-            (
-                "PgWritePool::retry_producer_tx",
-                "adapters/postgres/src/cotx/settlement.rs",
-                "LocalTxAttempt::into_retry_result",
-            ),
-        ]
-        .into_iter()
-        .find(|(transaction, _, _)| *transaction == terminal.transaction.symbol.as_str())
-        .map(|(_, path, symbol)| (path, symbol));
-        assert_eq!(
-            expected_consumer,
-            Some((
-                terminal.no_replay.path.as_str(),
-                terminal.no_replay.symbol.as_str(),
-            )),
-            "{contract_id}"
+            "{contract_id} has a non-canonical settlement consumer: {:?}",
+            terminal.no_replay
         );
-    }
-}
-
-fn evidence_provider_path(contract_id: &str) -> &'static str {
-    match contract_id {
-        "identity.login" => "adapters/postgres/src/auth_grant_lifecycle.rs",
-        "identity.policies-create"
-        | "identity.policies-deactivate"
-        | "identity.policies-update" => "adapters/postgres/src/policy_repo.rs",
-        "identity.roles-assign" | "identity.roles-revoke" => {
-            "adapters/postgres/src/role_binding_lifecycle.rs"
-        }
-        "settings.config-delete" | "settings.config-publish" | "settings.config-rollback" => {
-            "adapters/postgres/src/config_repo.rs"
-        }
-        _ => panic!("unexpected producer {contract_id}"),
     }
 }
 
@@ -500,6 +603,15 @@ fn assert_complete_fact_evidence(evidence: &FactEvidence, contract_id: &str) {
         assert_complete_facet(facet, contract_id);
     }
     assert_fault_runner(&evidence.fault, contract_id);
+    assert_required_inbox_security_scenarios(
+        contract_id,
+        evidence
+            .fault
+            .carriers
+            .iter()
+            .map(|carrier| (carrier.kind, carrier.symbol.as_str())),
+    )
+    .unwrap_or_else(|error| panic!("{error}"));
 }
 
 fn assert_complete_facet(facet: &EvidenceFacet, contract_id: &str) {
@@ -525,13 +637,29 @@ fn assert_fault_runner(fault: &EvidenceFacet, contract_id: &str) {
         .iter()
         .filter(|carrier| carrier.kind == CarrierKind::RustSymbol)
         .collect::<Vec<_>>();
-    assert_eq!(
-        runner_carriers
+    assert!(
+        !runner_carriers.is_empty(),
+        "{contract_id} lacks fault runners"
+    );
+    let mut runner_symbols = BTreeSet::new();
+    for carrier in &runner_carriers {
+        assert!(
+            runner_symbols.insert(carrier.symbol.as_str()),
+            "{contract_id} duplicates fault runner {}",
+            carrier.symbol
+        );
+        assert!(
+            carrier.symbol.starts_with("run_") && carrier.symbol != "READY_CASE_RUNNERS",
+            "{contract_id} has non-canonical fault runner {}",
+            carrier.symbol
+        );
+    }
+    assert!(
+        fault
+            .carriers
             .iter()
-            .map(|carrier| carrier.symbol.as_str())
-            .collect::<Vec<_>>(),
-        expected_fault_runners(contract_id),
-        "{contract_id} fault runner carrier drift"
+            .any(|carrier| carrier.kind == CarrierKind::FaultFixture),
+        "{contract_id} lacks named fault fixtures"
     );
     assert!(
         runner_carriers.iter().all(|carrier| {
@@ -541,25 +669,81 @@ fn assert_fault_runner(fault: &EvidenceFacet, contract_id: &str) {
     );
 }
 
-fn expected_fault_runners(contract_id: &str) -> &'static [&'static str] {
-    match contract_id {
-        "identity.policy-updated" | "settings.config-version-changed" => {
-            &["run_outbox_transient_publish_failure"]
-        }
-        "identity.role-assigned" | "identity.role-revoked" => {
-            &["run_outbox_permanent_publish_failure"]
-        }
-        "identity.session-created" => &[
-            "run_inbox_claim_crash_before_commit",
-            "run_inbox_commit_before_ack_crash",
-            "run_inbox_lease_lost_before_commit",
-            "run_outbox_after_publish_before_settle",
-            "run_outbox_confirm_lost_channel_close",
-            "run_outbox_deadline_expired_settle",
-            "run_outbox_stale_contender_settle",
-        ],
-        _ => panic!("unexpected fact {contract_id}"),
+fn assert_required_inbox_security_scenarios<'a>(
+    contract_id: &str,
+    carriers: impl IntoIterator<Item = (CarrierKind, &'a str)>,
+) -> Result<(), String> {
+    if contract_id != "identity.session-created" {
+        return Ok(());
     }
+
+    let carriers = carriers.into_iter().collect::<Vec<_>>();
+    assert_exact_ids(
+        "identity.session-created required inbox security runners",
+        REQUIRED_SESSION_CREATED_INBOX_SCENARIOS
+            .into_iter()
+            .map(str::to_owned),
+        carriers
+            .iter()
+            .filter(|(kind, symbol)| {
+                *kind == CarrierKind::RustSymbol && symbol.starts_with("run_inbox_")
+            })
+            .map(|(_, symbol)| (*symbol).to_owned()),
+    )?;
+
+    let required_fixtures = REQUIRED_SESSION_CREATED_INBOX_SCENARIOS
+        .into_iter()
+        .map(inbox_fixture_id);
+    assert_exact_ids(
+        "identity.session-created required inbox security fixture join",
+        required_fixtures,
+        carriers
+            .iter()
+            .filter(|(kind, symbol)| {
+                *kind == CarrierKind::FaultFixture && symbol.starts_with("inbox-")
+            })
+            .map(|(_, symbol)| (*symbol).to_owned()),
+    )
+}
+
+fn inbox_fixture_id(runner: &str) -> String {
+    runner
+        .strip_prefix("run_")
+        .expect("required runner uses the run_ namespace")
+        .replace('_', "-")
+}
+
+fn assert_exact_ids(
+    label: &str,
+    expected: impl IntoIterator<Item = String>,
+    actual: impl IntoIterator<Item = String>,
+) -> Result<(), String> {
+    let expected = collect_unique_ids(label, "expected", expected)?;
+    let actual = collect_unique_ids(label, "actual", actual)?;
+    if expected == actual {
+        return Ok(());
+    }
+    Err(format!(
+        "{label} identity mismatch: missing={:?} extra={:?}",
+        expected.difference(&actual).collect::<Vec<_>>(),
+        actual.difference(&expected).collect::<Vec<_>>()
+    ))
+}
+
+fn collect_unique_ids(
+    label: &str,
+    side: &str,
+    identities: impl IntoIterator<Item = String>,
+) -> Result<BTreeSet<String>, String> {
+    let mut unique = BTreeSet::new();
+    for identity in identities {
+        if !unique.insert(identity.clone()) {
+            return Err(format!(
+                "{label} {side} contains duplicate identity {identity}"
+            ));
+        }
+    }
+    Ok(unique)
 }
 
 fn assert_strictly_sorted_and_unique<T: Ord + std::fmt::Debug>(values: &[T], owner: &str) {

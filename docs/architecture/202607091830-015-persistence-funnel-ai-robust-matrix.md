@@ -23,4 +23,4 @@
 
 ## Verification
 
-`cargo xtask archrules matrix --check` 校验固定 15 行、#1422–#1442 + #1677/#1678/#1741/#1742/#1743/#1792 精确覆盖、边界非空、无 Soft、Hard carrier 证明、Medium synthetic-red/anti-vacuity 与文档漂移。该检查随 `archrules` 进入 `verify`/`ci`。
+`cargo xtask archrules matrix --check` 校验 source issue stable-ID #1422–#1442 + #1677/#1678/#1741/#1742/#1743/#1792 精确覆盖、key 唯一、边界非空、无 Soft、Hard carrier 证明、Medium synthetic-red/anti-vacuity 与文档漂移。当前行数由 catalog 动态派生：15。该检查随 `archrules` 进入 `verify`/`ci`。

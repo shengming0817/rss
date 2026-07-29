@@ -55,6 +55,11 @@ RSS 的治理机制默认面向 AI co-author。新增约束必须让错误尽量
 （clippy lint 文档、cargo-deny 注释、治理 `#[test]` 模块 rustdoc）、ADR 或代码注释中。
 规则反向索引由 `cargo xtask archrules list` 从真实 carrier 的 `INVARIANT:` 锚点派生；文档只能薄引用，
 不得成为 rule inventory 的事实源。
+
+可变 registry 的完整性必须由稳定 ID 的精确集合关系表达：宏、闭枚举或 codegen registry 是 Hard
+身份源，跨载体投影用 type-aware missing/extra 守卫闭合。全局数量、完整顺序表和散文目录不得作为
+completeness proof；数量只能由身份集合动态输出。固定协议元数、唯一 owner、局部基数和具有执行语义的
+局部相对顺序不属于可变目录 golden，可以继续由相应 Hard/Medium 载体守卫。
 持久化 funnel 的派生证明见
 [`202607091830-015-persistence-funnel-ai-robust-matrix.md`](../architecture/202607091830-015-persistence-funnel-ai-robust-matrix.md)，
 其内容只由 `cargo xtask archrules matrix --write` 生成。

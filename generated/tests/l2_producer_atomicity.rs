@@ -27,7 +27,17 @@ fn all_active_producers_have_one_closed_v3_execution_inventory() {
             AssuranceRecord::Fact { .. } => None,
         })
         .collect::<Vec<_>>();
-    assert_eq!(producers.len(), 9);
+    assert!(!producers.is_empty(), "producer projection is empty");
+    assert_eq!(producers.len(), inventory.producer_count);
+    let producer_ids = producers
+        .iter()
+        .map(|(contract_id, _, _)| contract_id.as_str())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        producer_ids.len(),
+        producers.len(),
+        "producer identities must be unique"
+    );
 
     for (contract_id, emitted_facts, evidence) in producers {
         assert_closed_execution(contract_id, emitted_facts, evidence);
@@ -102,21 +112,23 @@ fn assert_closed_execution(
             fault.rollback_failed.symbol,
             "finish_local_tx_rollback_result"
         );
-        let expected_consumer = [
-            ("PgWritePool::producer_tx", "ProducerTxAttempt::into_result"),
-            (
-                "PgWritePool::retry_producer_tx",
-                "LocalTxAttempt::into_retry_result",
+        assert!(
+            matches!(
+                (
+                    fault.transaction.symbol.as_str(),
+                    fault.no_replay.symbol.as_str(),
+                ),
+                (
+                    "PgWritePool::producer_tx",
+                    "ProducerTxAttempt::into_result"
+                        | "ProducerTxAttempt::into_refresh_commit_result",
+                ) | (
+                    "PgWritePool::retry_producer_tx",
+                    "LocalTxAttempt::into_retry_result",
+                )
             ),
-        ]
-        .into_iter()
-        .find(|(transaction, _)| *transaction == fault.transaction.symbol.as_str())
-        .map(|(_, consumer)| consumer);
-        assert_eq!(
-            expected_consumer,
-            Some(fault.no_replay.symbol.as_str()),
-            "{}",
-            contract_id
+            "{contract_id} has a non-canonical settlement consumer: {:?}",
+            fault.no_replay
         );
     }
 

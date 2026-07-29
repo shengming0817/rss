@@ -1,60 +1,69 @@
-use std::collections::BTreeMap;
-
-use generated::event::EVENTS;
+use generated::event::{EVENTS, SubscriptionEffect, SubscriptionExecution};
 use vocab::ExternalEffectPolicy;
 
-fn policy_wire(policy: ExternalEffectPolicy) -> &'static str {
-    match policy {
-        ExternalEffectPolicy::TransactionalOnly => "transactional-only",
-        ExternalEffectPolicy::IdempotencyKey => "idempotency-key",
-        ExternalEffectPolicy::Reconcile => "reconcile",
-        ExternalEffectPolicy::Compensated => "compensated",
+#[test]
+fn active_l2_subscriptions_close_execution_effect_policy_matrix() {
+    let mut subscription_count = 0;
+    for event in EVENTS {
+        for subscription in event.subscriptions() {
+            subscription_count += 1;
+            let actual = (
+                subscription.execution(),
+                subscription.effect(),
+                subscription.external_effect_policy(),
+            );
+            assert!(
+                matches!(
+                    actual,
+                    (
+                        SubscriptionExecution::AdapterNative,
+                        None,
+                        ExternalEffectPolicy::TransactionalOnly,
+                    ) | (
+                        SubscriptionExecution::DomainEffect,
+                        Some(SubscriptionEffect::SettingsConfigVersionRefresh),
+                        ExternalEffectPolicy::Reconcile,
+                    )
+                ),
+                "subscription {}:{} has invalid execution/effect/external policy relation: {actual:?}",
+                event.contract_id(),
+                subscription.consumer()
+            );
+        }
     }
+    assert!(
+        subscription_count > 0,
+        "active subscriptions must not be empty"
+    );
 }
 
 #[test]
-fn active_l2_subscriptions_expose_exact_external_effect_policies() {
-    let actual = EVENTS
-        .iter()
-        .flat_map(|event| {
-            event.subscriptions().iter().map(|subscription| {
-                (
-                    (
-                        event.contract_id(),
-                        subscription.consumer(),
-                        subscription.group(),
-                    ),
-                    policy_wire(subscription.external_effect_policy()),
-                )
-            })
-        })
-        .collect::<BTreeMap<_, _>>();
-    let expected = BTreeMap::from([
-        (
-            ("identity.policy-updated", "audit", "audit.policy-updated"),
-            "transactional-only",
-        ),
-        (
-            ("identity.role-assigned", "audit", "audit.role-assigned"),
-            "transactional-only",
-        ),
-        (
-            ("identity.role-revoked", "audit", "audit.role-revoked"),
-            "transactional-only",
-        ),
-        (
-            ("identity.session-created", "audit", "audit.session-created"),
-            "transactional-only",
-        ),
-        (
-            (
-                "settings.config-version-changed",
-                "settings",
-                "settings.config-version-changed",
-            ),
-            "reconcile",
-        ),
-    ]);
+fn settings_refresh_keeps_reconcile_policy() {
+    let subscription = generated::event::settings_v1::SPEC.subscriptions()[0];
+    assert_eq!(
+        subscription.execution(),
+        SubscriptionExecution::DomainEffect
+    );
+    assert_eq!(
+        subscription.effect(),
+        Some(SubscriptionEffect::SettingsConfigVersionRefresh)
+    );
+    assert_eq!(
+        subscription.external_effect_policy(),
+        ExternalEffectPolicy::Reconcile
+    );
+}
 
-    assert_eq!(actual, expected);
+#[test]
+fn security_audit_keeps_transactional_only_policy() {
+    let subscription = generated::event::identity_v1::security_event::SPEC.subscriptions()[0];
+    assert_eq!(
+        subscription.execution(),
+        SubscriptionExecution::AdapterNative
+    );
+    assert_eq!(subscription.effect(), None);
+    assert_eq!(
+        subscription.external_effect_policy(),
+        ExternalEffectPolicy::TransactionalOnly
+    );
 }

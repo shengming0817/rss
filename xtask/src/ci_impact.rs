@@ -50,7 +50,8 @@ impl LocalClock for SystemLocalClock {
         end.duration_since(start)
     }
 }
-/// `docs/` 下被测试 `include_str!` 的 **可执行 carrier**：脚本、Prometheus 规则、schema 与 fixture。
+/// 被 Rust `include_str!` / `include_bytes!` 消费的受支持机器输入：`docs/` 下的可执行
+/// carrier，以及 assembly-schema 的公开 schema 与跨实现 fingerprint fixture。
 ///
 /// 面向人的 runbook / checklist / 报告说明不在此列——测试不得断言散文包含某句话
 /// （`docs/rules/README.md` §红线一），因此它们改动时只走 docs-only 快路径。
@@ -570,20 +571,12 @@ impl CiImpactPlan {
                 validate_revision(value, label)?;
             }
         }
-        if self.jobs.len() != CiJobKey::COUNT {
-            bail!(
-                "CI impact plan must contain exactly {} jobs",
-                CiJobKey::COUNT
-            );
-        }
+        validate_job_catalog(&self.jobs)?;
         let recommends_full_catalog = self.jobs.iter().all(|job| job.recommended);
         if !legal_decision(self.policy_mode, self.decision_kind, self.decision_reason) {
             bail!("CI impact plan policy mode, decision kind, and reason are inconsistent");
         }
-        for (decision, expected) in self.jobs.iter().zip(CiJobKey::ALL) {
-            if decision.key != expected {
-                bail!("CI impact plan job catalog is missing, duplicate, or out of order");
-            }
+        for decision in &self.jobs {
             if decision.reasons.is_empty() {
                 bail!("CI impact plan job reason is empty");
             }
@@ -748,6 +741,34 @@ impl CiImpactPlan {
     pub(crate) const fn full_fallback(&self) -> bool {
         self.full_fallback
     }
+}
+
+fn validate_job_catalog(jobs: &[JobDecision]) -> Result<()> {
+    let expected = CiJobKey::ALL.into_iter().collect::<BTreeSet<_>>();
+    let mut actual = BTreeSet::new();
+    for job in jobs {
+        if !actual.insert(job.key) {
+            bail!(
+                "CI impact plan job catalog contains duplicate ID `{}`",
+                job.key.as_str()
+            );
+        }
+    }
+    if actual != expected {
+        let missing = expected
+            .difference(&actual)
+            .map(|job| job.as_str())
+            .collect::<Vec<_>>();
+        let extra = actual
+            .difference(&expected)
+            .map(|job| job.as_str())
+            .collect::<Vec<_>>();
+        bail!("CI impact plan job ID closure drift: missing={missing:?}, extra={extra:?}");
+    }
+    if !jobs.iter().map(|job| job.key).eq(CiJobKey::ALL) {
+        bail!("CI impact plan jobs are not in canonical typed catalog order");
+    }
+    Ok(())
 }
 
 fn legal_decision(mode: PolicyMode, kind: DecisionKind, reason: DecisionReason) -> bool {
@@ -3328,16 +3349,7 @@ mod tests {
     struct PolicyGolden {
         schema_version: u8,
         machine_inputs: Vec<String>,
-        required_evidence_owners: Vec<RequiredEvidenceOwnerGolden>,
         path_cases: Vec<PathCaseGolden>,
-        shadow_matrix: serde_json::Value,
-    }
-
-    #[derive(Debug, PartialEq, Eq, Deserialize)]
-    #[serde(rename_all = "camelCase", deny_unknown_fields)]
-    struct RequiredEvidenceOwnerGolden {
-        job_key: String,
-        evidence_kind: String,
     }
 
     #[derive(Debug, Deserialize)]
@@ -3345,12 +3357,27 @@ mod tests {
     struct PathCaseGolden {
         status: String,
         path: String,
-        full_cause: Option<String>,
-        recommended: Vec<String>,
+        expected: PathExpectationGolden,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+    enum PathExpectationGolden {
+        Selective { jobs: Vec<String> },
+        Full { cause: String },
+    }
+
+    fn parse_policy_golden(source: &str) -> Result<PolicyGolden> {
+        let golden: PolicyGolden =
+            serde_json::from_str(source).context("parse CI impact policy golden")?;
+        if golden.path_cases.is_empty() {
+            bail!("CI impact policy golden pathCases must be non-empty");
+        }
+        Ok(golden)
     }
 
     fn policy_golden() -> Result<PolicyGolden> {
-        serde_json::from_str(POLICY_BEHAVIOR_SPEC).context("parse CI impact policy golden")
+        parse_policy_golden(POLICY_BEHAVIOR_SPEC)
     }
 
     fn full_cause_name(cause: FullCause) -> &'static str {
@@ -3392,11 +3419,11 @@ mod tests {
         Ok(output)
     }
 
-    fn machine_consumed_docs(root: &Path) -> Result<BTreeSet<String>> {
+    fn rust_consumed_machine_inputs(root: &Path) -> Result<BTreeSet<String>> {
         struct IncludeVisitor<'a> {
             root: &'a Path,
             source: &'a Path,
-            docs: BTreeSet<String>,
+            inputs: BTreeSet<String>,
             errors: Vec<String>,
         }
 
@@ -3425,8 +3452,16 @@ mod tests {
                                         )
                                     })
                             }) {
-                                Ok(relative) if relative.starts_with("docs") => {
-                                    self.docs
+                                Ok(relative)
+                                    if relative.starts_with("docs")
+                                        || relative
+                                            .starts_with("crates/assembly-schema/schemas")
+                                        || relative
+                                            == Path::new(
+                                                "crates/assembly-schema/tests/fixtures/fingerprint-v1-vectors.json",
+                                            ) =>
+                                {
+                                    self.inputs
                                         .insert(relative.to_string_lossy().replace('\\', "/"));
                                 }
                                 Ok(_) => {}
@@ -3451,7 +3486,7 @@ mod tests {
         }
 
         let canonical_root = fs::canonicalize(root)?;
-        let mut docs = BTreeSet::new();
+        let mut inputs = BTreeSet::new();
         let mut errors = Vec::new();
         for source in rust_sources(&canonical_root)? {
             let text = fs::read_to_string(&source)
@@ -3459,7 +3494,7 @@ mod tests {
             let mut visitor = IncludeVisitor {
                 root: &canonical_root,
                 source: &source,
-                docs: BTreeSet::new(),
+                inputs: BTreeSet::new(),
                 errors: Vec::new(),
             };
             match syn::parse_file(&text) {
@@ -3472,21 +3507,13 @@ mod tests {
                     ),
                 },
             }
-            docs.append(&mut visitor.docs);
+            inputs.append(&mut visitor.inputs);
             errors.append(&mut visitor.errors);
         }
         if !errors.is_empty() {
             bail!("invalid machine input includes: {}", errors.join("; "));
         }
-        Ok(docs)
-    }
-
-    fn machine_input_mapping_is_exact(
-        discovered: &BTreeSet<String>,
-        configured: &BTreeSet<String>,
-        golden: &BTreeSet<String>,
-    ) -> bool {
-        discovered == configured && configured == golden
+        Ok(inputs)
     }
 
     fn git(root: &Path, args: &[&str]) -> Result<()> {
@@ -4495,27 +4522,14 @@ mod tests {
     }
 
     #[test]
-    fn policy_behavior_and_shadow_matrix_match_independent_golden() -> Result<()> {
+    fn policy_behavior_matches_id_based_golden() -> Result<()> {
         let golden = policy_golden()?;
-        assert_eq!(golden.schema_version, 1);
+        assert_eq!(golden.schema_version, 2);
         assert_eq!(
             golden.machine_inputs,
             MACHINE_INPUT_PATHS
                 .iter()
                 .map(|path| (*path).to_owned())
-                .collect::<Vec<_>>()
-        );
-        assert_eq!(
-            golden.required_evidence_owners,
-            CiJobKey::ALL
-                .into_iter()
-                .filter_map(|job| {
-                    job.required_evidence()
-                        .map(|evidence| RequiredEvidenceOwnerGolden {
-                            job_key: job.as_str().to_owned(),
-                            evidence_kind: evidence.as_str().to_owned(),
-                        })
-                })
                 .collect::<Vec<_>>()
         );
         for case in golden.path_cases {
@@ -4528,12 +4542,19 @@ mod tests {
                 status,
                 path: case.path.clone(),
             }]);
+            let (expected_jobs, expected_cause) = match case.expected {
+                PathExpectationGolden::Selective { jobs } => (jobs, None),
+                PathExpectationGolden::Full { cause } => (
+                    CiJobKey::ALL
+                        .into_iter()
+                        .map(|job| job.as_str().to_owned())
+                        .collect(),
+                    Some(cause),
+                ),
+            };
             assert_eq!(
                 recommendation.selected_names(),
-                case.recommended
-                    .iter()
-                    .map(String::as_str)
-                    .collect::<Vec<_>>(),
+                expected_jobs.iter().map(String::as_str).collect::<Vec<_>>(),
                 "golden recommendation drift for {}",
                 case.path
             );
@@ -4542,22 +4563,81 @@ mod tests {
                     Recommendation::Full(cause) => Some(full_cause_name(cause)),
                     Recommendation::Selective(_) => None,
                 },
-                case.full_cause.as_deref(),
+                expected_cause.as_deref(),
                 "golden decision drift for {}",
                 case.path
             );
         }
+        Ok(())
+    }
 
+    #[test]
+    fn policy_golden_rejects_removed_shadow_matrix_shape() -> Result<()> {
+        let mut old_shape: serde_json::Value = serde_json::from_str(POLICY_BEHAVIOR_SPEC)?;
+        old_shape["shadowMatrix"] = serde_json::json!({ "include": [] });
+        assert!(serde_json::from_value::<PolicyGolden>(old_shape).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn policy_golden_rejects_removed_path_case_shape() -> Result<()> {
+        let mut old_shape: serde_json::Value = serde_json::from_str(POLICY_BEHAVIOR_SPEC)?;
+        let path_case = old_shape["pathCases"][0]
+            .as_object_mut()
+            .context("policy golden path case must be an object")?;
+        path_case.remove("expected");
+        path_case.insert("fullCause".to_owned(), serde_json::Value::Null);
+        path_case.insert("recommended".to_owned(), serde_json::json!(["ci-meta"]));
+        assert!(serde_json::from_value::<PolicyGolden>(old_shape).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn policy_golden_rejects_empty_path_cases() -> Result<()> {
+        let mut empty: serde_json::Value = serde_json::from_str(POLICY_BEHAVIOR_SPEC)?;
+        empty["pathCases"] = serde_json::json!([]);
+        let source = serde_json::to_string(&empty)?;
+        let error = parse_policy_golden(&source)
+            .err()
+            .context("empty pathCases must fail before policy consumption")?;
+        assert_eq!(
+            error.to_string(),
+            "CI impact policy golden pathCases must be non-empty"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn matrix_is_the_canonical_typed_job_descriptor_projection() -> Result<()> {
         let plan = test_plan()?;
-        let mut matrix = serde_json::to_value(plan.matrix())?;
-        let rows = matrix["include"]
-            .as_array_mut()
-            .context("matrix include must be an array")?;
-        for row in rows {
-            row["planDigest"] = "<plan-digest>".into();
-            row["sourceRevision"] = "<source-revision>".into();
+        let matrix = plan.matrix();
+        assert!(
+            matrix
+                .include
+                .iter()
+                .map(|row| row.job_key)
+                .eq(CiJobKey::ALL),
+            "matrix jobKey order must follow the closed typed catalog"
+        );
+        for (row, key) in matrix.include.iter().zip(CiJobKey::ALL) {
+            assert_eq!(row.display_name, key.as_str());
+            assert_eq!(row.lane, key.lane_kind());
+            assert_eq!(row.shard, key.shard());
+            assert_eq!(row.partition, key.partition());
+            assert_eq!(row.partition_label, key.partition_label());
+            assert_eq!(
+                row.required_evidence_target,
+                key.required_evidence_staged_artifact_path()
+            );
         }
-        assert_eq!(matrix, golden.shadow_matrix);
+
+        let serialized = serde_json::to_value(&matrix)?;
+        let first = &serialized["include"][0];
+        assert_eq!(first["jobKey"], CiJobKey::CiMeta.as_str());
+        assert_eq!(first["displayName"], CiJobKey::CiMeta.as_str());
+        assert_eq!(first["lane"], CiJobKey::CiMeta.lane_kind().workflow_name());
+        assert!(first.get("job_key").is_none());
+        assert!(first.get("requiredEvidenceTarget").is_none());
         Ok(())
     }
 
@@ -4579,9 +4659,9 @@ mod tests {
     }
 
     #[test]
-    fn workspace_machine_document_inputs_are_exact_and_mutation_hardened() -> Result<()> {
+    fn workspace_rust_consumed_machine_inputs_are_exact_and_mutation_hardened() -> Result<()> {
         let root = crate::workspace_root()?;
-        let discovered = machine_consumed_docs(&root)?;
+        let discovered = rust_consumed_machine_inputs(&root)?;
         let configured = MACHINE_INPUT_PATHS
             .iter()
             .map(|path| (*path).to_owned())
@@ -4590,32 +4670,29 @@ mod tests {
             .machine_inputs
             .into_iter()
             .collect::<BTreeSet<_>>();
-        assert!(
-            machine_input_mapping_is_exact(&discovered, &configured, &golden),
-            "machine-input exact-set drift: discovered={discovered:?}; configured={configured:?}; golden={golden:?}"
+        assert_eq!(
+            discovered, configured,
+            "machine-input classifier drift from independently discovered Rust includes"
         );
+        assert_eq!(discovered, golden, "machine-input golden drift");
 
-        for path in &configured {
+        for path in &discovered {
             let mut missing = configured.clone();
             assert!(missing.remove(path));
-            assert!(
-                !machine_input_mapping_is_exact(&discovered, &missing, &golden),
+            assert_ne!(
+                discovered, missing,
                 "removing machine-consumed input `{path}` must fail closed"
             );
         }
 
         let mut extra = configured;
         extra.insert("docs/runbooks/not-machine-consumed.md".to_owned());
-        assert!(!machine_input_mapping_is_exact(
-            &discovered,
-            &extra,
-            &golden
-        ));
+        assert_ne!(discovered, extra);
         Ok(())
     }
 
     #[test]
-    fn machine_consumed_docs_discovers_includes_in_expression_fragments() -> Result<()> {
+    fn rust_consumed_machine_inputs_discovers_includes_in_expression_fragments() -> Result<()> {
         let root = crate::testutil::unique_tmp("ci-impact-expression-fragment");
         fs::create_dir_all(root.join("docs"))?;
         fs::create_dir_all(root.join("src"))?;
@@ -4626,20 +4703,21 @@ mod tests {
         )?;
 
         assert_eq!(
-            machine_consumed_docs(&root)?,
+            rust_consumed_machine_inputs(&root)?,
             BTreeSet::from(["docs/machine.json".to_owned()])
         );
         Ok(())
     }
 
     #[test]
-    fn machine_consumed_docs_rejects_invalid_rust_fragments_with_source_path() -> Result<()> {
+    fn rust_consumed_machine_inputs_rejects_invalid_rust_fragments_with_source_path() -> Result<()>
+    {
         let root = crate::testutil::unique_tmp("ci-impact-invalid-fragment");
         fs::create_dir_all(root.join("src"))?;
         let source = root.join("src/invalid.rs");
         fs::write(&source, "let = ;")?;
 
-        let Err(error) = machine_consumed_docs(&root) else {
+        let Err(error) = rust_consumed_machine_inputs(&root) else {
             bail!("invalid Rust must fail closed");
         };
         let error = error.to_string();
@@ -4651,14 +4729,60 @@ mod tests {
     }
 
     #[test]
-    fn plan_roundtrip_rejects_duplicate_catalog_entries() -> Result<()> {
+    fn plan_roundtrip_rejects_wrong_duplicate_missing_and_extra_catalog_entries() -> Result<()> {
         let plan = test_plan()?;
         let source = plan.to_json()?;
         assert_eq!(CiImpactPlan::from_json(&source)?, plan);
 
-        let mut wire: serde_json::Value = serde_json::from_str(&source)?;
-        wire["jobs"][1]["key"] = wire["jobs"][0]["key"].clone();
-        assert!(CiImpactPlan::from_json(&wire.to_string()).is_err());
+        let mut wrong_id: serde_json::Value = serde_json::from_str(&source)?;
+        wrong_id["jobs"][0]["key"] = "not-a-closed-job".into();
+        assert_eq!(
+            wrong_id["jobs"].as_array().map(Vec::len),
+            Some(plan.jobs.len())
+        );
+        let Err(wrong_id_error) = CiImpactPlan::from_json(&wrong_id.to_string()) else {
+            bail!("equal-cardinality wrong CI job ID must fail closed");
+        };
+        let wrong_id_error = format!("{wrong_id_error:#}");
+        assert!(wrong_id_error.contains("unknown CI job key 'not-a-closed-job'"));
+
+        let mut duplicate = plan.clone();
+        duplicate.jobs[1] = duplicate.jobs[0].clone();
+        duplicate.plan_digest = duplicate.compute_digest()?;
+        let Err(duplicate_error) = CiImpactPlan::from_json(&duplicate.to_json()?) else {
+            bail!("duplicate CI job ID must fail closed");
+        };
+        assert_eq!(
+            duplicate_error.to_string(),
+            "CI impact plan job catalog contains duplicate ID `ci-meta`"
+        );
+
+        let mut missing = plan.clone();
+        missing.jobs.retain(|job| {
+            !matches!(
+                job.key,
+                CiJobKey::CiCorePrerequisites | CiJobKey::IntegrationProductionRuntime
+            )
+        });
+        missing.plan_digest = missing.compute_digest()?;
+        let Err(missing_error) = CiImpactPlan::from_json(&missing.to_json()?) else {
+            bail!("missing CI job IDs must fail closed");
+        };
+        assert_eq!(
+            missing_error.to_string(),
+            "CI impact plan job ID closure drift: missing=[\"ci-core-prerequisites\", \"integration/production-runtime\"], extra=[]"
+        );
+
+        let mut extra = plan.clone();
+        extra.jobs.push(extra.jobs[CiJobKey::COUNT - 1].clone());
+        extra.plan_digest = extra.compute_digest()?;
+        let Err(extra_error) = CiImpactPlan::from_json(&extra.to_json()?) else {
+            bail!("extra duplicate CI job ID must fail closed");
+        };
+        assert_eq!(
+            extra_error.to_string(),
+            "CI impact plan job catalog contains duplicate ID `audit`"
+        );
 
         let mut digest_drift: serde_json::Value = serde_json::from_str(&source)?;
         digest_drift["decisionReason"] = serde_json::json!("full-override");
@@ -4696,8 +4820,12 @@ mod tests {
         let owners = CiJobKey::ALL
             .into_iter()
             .filter(|job| job.required_evidence().is_some())
-            .collect::<Vec<_>>();
-        assert_eq!(owners.len(), 2, "required-evidence anti-vacuity");
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            owners,
+            BTreeSet::from([CiJobKey::CiLocalOnly, CiJobKey::IntegrationPostgresDomain,]),
+            "required-evidence ownership must stay bound to stable job IDs"
+        );
         for owner in owners {
             let decision = plan
                 .jobs()

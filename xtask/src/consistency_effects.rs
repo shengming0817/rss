@@ -433,19 +433,62 @@ fn canonical_evidence_for_scope(
 }
 
 fn collect_report(root: &Path) -> Result<ConsistencyReport> {
-    let registry_ids = generated::http::LOCAL_ONLY_SPECS
-        .iter()
-        .map(|spec| spec.route.contract_id())
-        .collect::<BTreeSet<_>>();
-    let filtered_ids = generated::http::SPECS
-        .iter()
-        .filter(|spec| spec.route.consistency_level() == vocab::HttpConsistencyLevel::LocalOnly)
-        .map(|spec| spec.route.contract_id())
-        .collect::<BTreeSet<_>>();
-    if registry_ids != filtered_ids {
-        bail!("generated LOCAL_ONLY_SPECS disagrees with the active HTTP registry");
-    }
+    ensure_exact_contract_ids(
+        "generated LOCAL_ONLY_SPECS/active HTTP registry",
+        generated::http::LOCAL_ONLY_SPECS
+            .iter()
+            .map(|spec| spec.route.contract_id()),
+        generated::http::SPECS
+            .iter()
+            .filter(|spec| spec.route.consistency_level() == vocab::HttpConsistencyLevel::LocalOnly)
+            .map(|spec| spec.route.contract_id()),
+    )?;
     collect_report_with_specs(root, generated::http::SPECS)
+}
+
+fn ensure_exact_contract_ids<'a>(
+    label: &str,
+    expected: impl IntoIterator<Item = &'a str>,
+    actual: impl IntoIterator<Item = &'a str>,
+) -> Result<()> {
+    let expected = expected.into_iter().collect::<Vec<_>>();
+    let actual = actual.into_iter().collect::<Vec<_>>();
+    let expected_ids = expected.iter().copied().collect::<BTreeSet<_>>();
+    let actual_ids = actual.iter().copied().collect::<BTreeSet<_>>();
+    let mut expected_seen = BTreeSet::new();
+    let expected_duplicates = expected
+        .iter()
+        .copied()
+        .filter(|id| !expected_seen.insert(*id))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let mut actual_seen = BTreeSet::new();
+    let actual_duplicates = actual
+        .iter()
+        .copied()
+        .filter(|id| !actual_seen.insert(*id))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    if !expected_duplicates.is_empty() {
+        bail!("{label} expected IDs contain duplicates={expected_duplicates:?}");
+    }
+    if !actual_duplicates.is_empty() {
+        bail!("{label} actual IDs contain duplicates={actual_duplicates:?}");
+    }
+    let missing = expected_ids
+        .difference(&actual_ids)
+        .copied()
+        .collect::<Vec<_>>();
+    let extra = actual_ids
+        .difference(&expected_ids)
+        .copied()
+        .collect::<Vec<_>>();
+    if !missing.is_empty() || !extra.is_empty() {
+        bail!("{label} identity mismatch: missing={missing:?} extra={extra:?}");
+    }
+    Ok(())
 }
 
 fn collect_report_with_specs(
@@ -10351,6 +10394,17 @@ impl ConfigRepo for SettingsConfigGetRepoProbe {
     #[test]
     fn real_workspace_report_consumes_the_generated_active_registry() -> Result<()> {
         let report = collect_report(&crate::workspace_root()?)?;
+        assert!(!generated::http::SPECS.is_empty());
+        ensure_exact_contract_ids(
+            "real workspace consistency report",
+            generated::http::SPECS
+                .iter()
+                .map(|spec| spec.route.contract_id()),
+            report
+                .contracts
+                .iter()
+                .map(|contract| contract.contract_id.as_str()),
+        )?;
         assert_eq!(
             report.active_http_contract_count,
             generated::http::SPECS.len()
@@ -10375,9 +10429,31 @@ impl ConfigRepo for SettingsConfigGetRepoProbe {
     fn real_workspace_local_only_receipt_coverage_is_non_vacuous() -> Result<()> {
         let root = crate::workspace_root()?;
         let report = collect_report(&root)?;
-        assert_eq!(generated::http::LOCAL_ONLY_SPECS.len(), 8);
-        assert_eq!(report.local_only_receipt_coverage.active_count, 8);
-        assert_eq!(report.local_only_receipt_coverage.registered_count, 8);
+        assert!(!generated::http::LOCAL_ONLY_SPECS.is_empty());
+        let registered_ids = report
+            .contracts
+            .iter()
+            .filter(|contract| {
+                contract.source_receipt_registration.status
+                    == SourceReceiptRegistrationStatus::Registered
+            })
+            .map(|contract| contract.contract_id.as_str())
+            .collect::<Vec<_>>();
+        ensure_exact_contract_ids(
+            "real workspace LocalOnly receipt coverage",
+            generated::http::LOCAL_ONLY_SPECS
+                .iter()
+                .map(|spec| spec.route.contract_id()),
+            registered_ids.iter().copied(),
+        )?;
+        assert_eq!(
+            report.local_only_receipt_coverage.active_count,
+            generated::http::LOCAL_ONLY_SPECS.len()
+        );
+        assert_eq!(
+            report.local_only_receipt_coverage.registered_count,
+            generated::http::LOCAL_ONLY_SPECS.len()
+        );
         assert_eq!(report.local_only_receipt_coverage.missing_count, 0);
         assert!(
             report
@@ -10386,32 +10462,81 @@ impl ConfigRepo for SettingsConfigGetRepoProbe {
                 .is_empty()
         );
         assert_eq!(report.status, ReportStatus::Passed);
-        assert_eq!(
-            report
-                .contracts
-                .iter()
-                .filter(|contract| {
-                    contract.source_receipt_registration.status
-                        == SourceReceiptRegistrationStatus::Registered
-                })
-                .map(|contract| contract.contract_id.as_str())
-                .collect::<Vec<_>>(),
-            [
-                "audit.list-entries",
-                "identity.policies-get",
-                "identity.policies-list",
-                "identity.profile",
-                "identity.roles-list",
-                "runtime.inventory",
-                "settings.config-get",
-                "settings.secret-resolve",
-            ]
-        );
         let (summary, findings) = check_root(&root)?;
         assert!(findings.is_empty(), "{findings:#?}");
+        assert!(summary.contains("active LocalOnly HTTP contract(s) checked"));
+        assert!(summary.ends_with("missing: none"));
+        Ok(())
+    }
+
+    #[test]
+    fn exact_contract_id_projection_rejects_missing_extra_duplicate_and_equal_count_wrong_set()
+    -> Result<()> {
+        let canonical = ["audit.list-entries", "identity.profile"];
+        assert!(
+            ensure_exact_contract_ids("synthetic", canonical, canonical).is_ok(),
+            "canonical exact set must pass"
+        );
+        for (label, actual, expected_detail) in [
+            (
+                "missing",
+                vec!["audit.list-entries"],
+                "missing=[\"identity.profile\"] extra=[]",
+            ),
+            (
+                "extra",
+                vec![
+                    "audit.list-entries",
+                    "identity.profile",
+                    "settings.config-get",
+                ],
+                "missing=[] extra=[\"settings.config-get\"]",
+            ),
+            (
+                "equal-count-wrong-set",
+                vec!["audit.list-entries", "settings.config-get"],
+                "missing=[\"identity.profile\"] extra=[\"settings.config-get\"]",
+            ),
+        ] {
+            let error = ensure_exact_contract_ids("synthetic", canonical, actual)
+                .err()
+                .with_context(|| format!("{label}: synthetic identity drift must fail"))?;
+            assert!(
+                error.to_string().contains(expected_detail),
+                "{label}: {error:#}"
+            );
+        }
+        let duplicate_actual = ensure_exact_contract_ids(
+            "synthetic",
+            canonical,
+            [
+                "identity.profile",
+                "audit.list-entries",
+                "identity.profile",
+                "audit.list-entries",
+            ],
+        )
+        .err()
+        .context("duplicate actual identity must fail")?;
         assert_eq!(
-            summary,
-            "7 active LocalOnly HTTP contract(s) checked; source receipts registered 7/7; missing: none"
+            duplicate_actual.to_string(),
+            "synthetic actual IDs contain duplicates=[\"audit.list-entries\", \"identity.profile\"]"
+        );
+        let duplicate_expected = ensure_exact_contract_ids(
+            "synthetic",
+            [
+                "identity.profile",
+                "audit.list-entries",
+                "identity.profile",
+                "audit.list-entries",
+            ],
+            canonical,
+        )
+        .err()
+        .context("duplicate expected identity must fail")?;
+        assert_eq!(
+            duplicate_expected.to_string(),
+            "synthetic expected IDs contain duplicates=[\"audit.list-entries\", \"identity.profile\"]"
         );
         Ok(())
     }
@@ -10610,7 +10735,7 @@ impl ConfigRepo for SettingsConfigGetRepoProbe {
 
     #[test]
     fn framework_receipt_factory_registry_lineage_is_canonical() -> Result<()> {
-        fn find<'a>(items: &'a [syn::Item]) -> Option<&'a syn::ItemFn> {
+        fn find(items: &[syn::Item]) -> Option<&syn::ItemFn> {
             for item in items {
                 match item {
                     syn::Item::Fn(function)
@@ -10636,23 +10761,23 @@ impl ConfigRepo for SettingsConfigGetRepoProbe {
         ))?;
         let factory = find(&syntax.items).context("runtime inventory receipt factory")?;
         assert_eq!(
-            framework_routes_registered_into(&factory.block, "registry"),
-            Some("framework_routes".to_owned()),
+            framework_routes_registered_into(&factory.block, "registry").as_deref(),
+            Some("framework_routes"),
             "generated framework registration must bind the same Registry"
         );
         assert!(
             registry_lineage(&factory.block, "routes").is_some(),
             "framework Registry::new + generated registration must be canonical"
         );
-        let (router, proof) = factory_tail_tuple(&factory.block).expect("factory tail tuple");
+        let (router, proof) = factory_tail_tuple(&factory.block).context("factory tail tuple")?;
         let proof_initializer =
-            unique_direct_initializer(&factory.block, &proof).expect("proof initializer");
+            unique_direct_initializer(&factory.block, &proof).context("proof initializer")?;
         assert!(
             mounted_route_proof(proof_initializer).is_some(),
             "mounted framework proof must be canonical"
         );
         let router_initializer =
-            unique_direct_initializer(&factory.block, &router).expect("router initializer");
+            unique_direct_initializer(&factory.block, &router).context("router initializer")?;
         assert_eq!(
             finalized_router_routes(router_initializer).as_deref(),
             Some("routes"),
@@ -10662,14 +10787,14 @@ impl ConfigRepo for SettingsConfigGetRepoProbe {
             mounted_proof_return_module(&factory.sig.output).is_some(),
             "factory return type must name the generated marker"
         );
-        let lineage = registry_lineage(&factory.block, "routes").expect("registry lineage");
+        let lineage = registry_lineage(&factory.block, "routes").context("registry lineage")?;
         assert!(
             !block_reassigns_any(
                 &factory.block,
                 &[
                     &router,
                     &proof,
-                    &"routes".to_owned(),
+                    "routes",
                     &lineage.finalized,
                     &lineage.domain,
                 ],
@@ -10682,10 +10807,7 @@ impl ConfigRepo for SettingsConfigGetRepoProbe {
             "framework Registry has one exact generated registration mutation"
         );
         assert!(
-            !block_has_mutable_binding(
-                &factory.block,
-                &[&router, &proof, &"routes".to_owned(), &"routes".to_owned()],
-            ),
+            !block_has_mutable_binding(&factory.block, &[&router, &proof, "routes", "routes"],),
             "router, proof, and routes must be immutable"
         );
         assert!(

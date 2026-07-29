@@ -896,20 +896,29 @@ mod tests {
     fn real_workspace_execution_inventory_is_exact_and_non_empty() -> Result<()> {
         let inventory =
             crate::consistency_effects::local_only_execution_inventory(&crate::workspace_root()?)?;
-        assert_eq!(inventory.active_contract_ids.len(), 8);
+        let expected_ids = generated::http::LOCAL_ONLY_SPECS
+            .iter()
+            .map(|spec| spec.route.contract_id().to_owned())
+            .collect::<BTreeSet<_>>();
+        assert!(!expected_ids.is_empty());
+        assert_eq!(inventory.active_contract_ids, expected_ids);
         assert_eq!(
             inventory.active_contract_ids,
             inventory.source_receipt_contract_ids
         );
-        assert_eq!(inventory.tests.len(), 8);
+        let test_ids = inventory
+            .tests
+            .iter()
+            .map(|test| test.contract_id.clone())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(inventory.tests.len(), test_ids.len());
+        assert_eq!(test_ids, inventory.active_contract_ids);
         assert!(inventory.tests.iter().all(|test| test.test_target == "lib"));
-        assert_eq!(
+        assert!(
             inventory
                 .tests
                 .iter()
-                .map(|test| test.package.as_str())
-                .collect::<BTreeSet<_>>(),
-            BTreeSet::from(["audit", "identity", "settings", "settingsonly"])
+                .all(|test| !test.package.is_empty() && !test.test_name.is_empty())
         );
         Ok(())
     }
@@ -942,7 +951,7 @@ mod tests {
             .active_contract_ids
             .into_iter()
             .collect::<Vec<_>>();
-        assert_eq!(canonical.len(), 7);
+        assert!(!canonical.is_empty());
 
         let report_root = crate::testutil::unique_tmp("localonly-nextest-failure");
         fs::create_dir_all(&report_root)?;
@@ -955,7 +964,7 @@ mod tests {
         let result =
             execute_with_suite_runner(&workspace, request, |_root, packages, tests, raw_dir| {
                 assert!(!packages.is_empty());
-                assert_eq!(tests.len(), 7);
+                assert_eq!(tests.len(), canonical.len());
                 for contract_id in &canonical {
                     fs::write(
                         raw_dir.join(format!("{contract_id}.json")),
@@ -978,7 +987,7 @@ mod tests {
         );
         assert!(
             reached_complete_marker_set.get(),
-            "suite seam must fail only after strict 6/6 marker validation"
+            "suite seam must fail only after the complete exact marker set"
         );
         assert!(!output.exists(), "failed suite must not publish a report");
         assert!(

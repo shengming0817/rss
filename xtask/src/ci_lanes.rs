@@ -54,12 +54,14 @@ struct CiJobDescriptor {
 
 macro_rules! ci_job_catalog {
     ($( $variant:ident => ($name:literal, $lane:ident, $shard:expr, $partition:expr, $required_evidence:expr) ),+ $(,)?) => {
+        const CI_JOB_COUNT: usize = [$(stringify!($variant)),+].len();
+
         #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
         pub(crate) enum CiJobKey {
             $( $variant, )+
         }
 
-        const CI_JOB_DESCRIPTORS: [CiJobDescriptor; 17] = [
+        const CI_JOB_DESCRIPTORS: [CiJobDescriptor; CI_JOB_COUNT] = [
             $(CiJobDescriptor {
                 key: CiJobKey::$variant,
                 name: $name,
@@ -71,7 +73,7 @@ macro_rules! ci_job_catalog {
         ];
 
         impl CiJobKey {
-            pub(crate) const ALL: [Self; 17] = [$(Self::$variant),+];
+            pub(crate) const ALL: [Self; CI_JOB_COUNT] = [$(Self::$variant),+];
 
             const fn descriptor(self) -> &'static CiJobDescriptor {
                 match self {
@@ -1248,7 +1250,7 @@ pub(crate) use gate_catalog;
 
 macro_rules! define_gate_ids {
     ($( $id:ident => ($step:ident, $carrier:expr, $spec:expr), )*) => {
-        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
         #[repr(usize)]
         pub(crate) enum GateId { $( $id, )* }
 

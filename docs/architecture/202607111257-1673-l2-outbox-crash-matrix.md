@@ -69,7 +69,8 @@ cargo xtask consistency-fixtures
 `journeys-fault-matrix/tests/consistency_fault_matrix_journey.rs`。每条 ready fixture 都与 generated
 `ContractBinding`、闭合 `CrashFaultSpec` 和具体 `CaseRunnerFn` 同源绑定；runner table 本身就是执行入口，
 不存在第二套 `match` dispatch。L2 assurance 为每条 fixture 记录精确 `run_*` symbol，而不是只记录整张
-runner table。当前 active L2 fact 的 direct ready evidence 已达到 5/5：
+runner table。以下 5/5 是 #1641 落地时的历史快照，仅记录当时的 direct ready
+evidence，不是当前 active L2 fact 的 completeness proof；当前完整性由 generated fact ID exact-set 闭合证明：
 
 | Fact | Direct ready evidence | 真实后端断言 |
 |---|---|---|
@@ -109,7 +110,7 @@ cargo xtask ci run --job integration/consistency-fault
 | 证据 | 能证明 | 不能证明 |
 |---|---|---|
 | 默认 hermetic 测试 | fixture/闭枚举及 status/domain/contract/runner 绑定；公共 relay loop 的 crash 中间态、显式 lease 恢复、fake 重发、最终 settle、未过期对照行保持不变；生产 `publish_request` 对同一 durable event 的 broker identity 不漂移；实际 inbox 纯状态机去重 | PostgreSQL SQL、RLS、真实 tenant/partition scope、真实时钟 TTL、AMQP confirm/channel redelivery、网络结果 |
-| 5/5 direct ready journey | 5 个 active fact 的具名真实 PostgreSQL fault evidence；session-created 另覆盖 post-send/confirm-before-poll connection close、完整 transport generation retirement、同 ID broker duplicate、具体 ConsumerTx mutation=1、stale contender 与 exact deadline fencing | 任意网络分区、进程被 SIGKILL 的所有时点、40s timeout 的每种 broker 结果、broker 集群灾难 |
+| 历史快照：5/5 direct ready journey（非当前 completeness proof） | 当时 5 个 fact 的具名真实 PostgreSQL fault evidence；session-created 另覆盖 post-send/confirm-before-poll connection close、完整 transport generation retirement、同 ID broker duplicate、具体 ConsumerTx mutation=1、stale contender 与 exact deadline fencing | 任意网络分区、进程被 SIGKILL 的所有时点、40s timeout 的每种 broker 结果、broker 集群灾难 |
 | 尚未覆盖 | 40s timeout 的全部 broker 结果组合；跨节点时钟/网络分区组合；broker 集群级故障 | 不得据 #1826 的具名场景宣称 broker exactly-once；timeout 仍须保守按可能已 delivery 处理 |
 
 因此运行期与文档统一采用 at-least-once 术语。任何依赖“CAS 使 broker 至多 publish 一次”的实现或运维

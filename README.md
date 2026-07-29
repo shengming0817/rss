@@ -65,7 +65,8 @@ Postgres batch 成功后生成 `integration/localtx-required.json`；`ci gate` �
 
 `ci-local-only` 是 LocalOnly required-evidence 的唯一 typed owner。它从 static source receipt 的 typed
 inventory 单源派生 package、library test target 与 exact filter；全部 nextest 测试成功且
-active/source/executed 三集合完全相等后，才原子发布唯一 schema v1 报告。当前 anti-vacuity 基线为 6/6/6。
+active/source/executed 三集合完全相等后，才原子发布唯一 schema v1 报告；集合非空作为 anti-vacuity，
+具体数量只由 typed inventory 动态输出。
 `verify --fast` 只证明静态 source receipt，不产生或声称产生运行证据；完整 `verify` 与 `ci-local-only`
 复用同一个 runner。Azure 窄 build validation 的激活与同一 policy RED/GREEN 验收见
 [`docs/ops/202607151200-1815-localonly-execution-evidence.md`](docs/ops/202607151200-1815-localonly-execution-evidence.md)。
@@ -85,7 +86,7 @@ cargo xtask runtime-baseline verify                    # RuntimePlan 四族 live
 cargo xtask runtime-root guard                         # runtime root 单调职责/LOC ratchet
 cargo xtask layer-deps                                 # source-centric 分层依赖 lint
 cargo xtask codegen --check                            # 契约 codegen 漂移门
-./hack/cargo.sh xtask l2-assurance                     # 生成 9 producer + 5 fact 的 L2 assurance inventory
+./hack/cargo.sh xtask l2-assurance                     # 从 active contract 生成 L2 assurance inventory
 ./hack/cargo.sh xtask l2-assurance --check             # 只读检查 committed inventory 的逐字节漂移
 ./hack/cargo.sh xtask provider-capabilities            # 生成 L2 provider conformance enrollment matrix
 ./hack/cargo.sh xtask provider-capabilities --check    # 声明、runner、shard 与 committed matrix 漂移门
@@ -117,8 +118,8 @@ factory symbol 的 wire、Display 与 JSON Schema ID 统一使用显式 `consume
 root 的 compile-link 守卫同时拒绝 crate-level `cfg` 及可递归展开为 `cfg` 的 `cfg_attr`，避免 catalog
 引用与 non-empty 断言被条件编译整体移除。
 
-`generated/l2-assurance.json` 是下游读取 L2 assurance inventory 的唯一 committed artifact；其 9 条
-producer 与 5 条 fact 记录由 active contract、compiled registry、精确 mounted handler、receipt
+`generated/l2-assurance.json` 是下游读取 L2 assurance inventory 的唯一 committed artifact；其中
+producer 与 fact 记录由 active contract、compiled registry、精确 mounted handler、receipt
 execution graph、production composition、Postgres producer transaction closure、subscription
 external-effect policy 和 ready fault evidence 共同派生。该文件只允许由 `l2-assurance` 更新，不手工
 编辑；`--check` 不写文件，并拒绝缺失、篡改、CRLF 或输入漂移。
@@ -161,7 +162,7 @@ Rust AST 精确验证 wrapper→behavior 唯一边、能力专属语义锚点与
 crate-root module/feature 可达性及 typed integration shard 归属。
 矩阵 schema v1 的每条 capability 都携带唯一 `{status: enrolled, carrier}` receipt，不把静态 artifact
 伪装成当前 checkout 的运行结果；只接受
-PostgreSQL 7 项、AMQP 4 项与 S3 3 项共 14 条 enrollment，不读取旧 schema、alias、shim 或双写输出。
+每个 provider 的 enrollment 集合均从 sealed catalog 精确派生，不读取旧 schema、alias、shim 或双写输出。
 
 受控入口只接受以下两种形态；重复 flag、输出路径、兼容别名和其他参数均拒绝：
 

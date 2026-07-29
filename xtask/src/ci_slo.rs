@@ -7,7 +7,7 @@ use crate::ci_evidence::{CompilerCacheDiagnostics, ResourceUsage, ValidatedEvide
 use crate::ci_lanes::CiJobKey;
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
@@ -272,12 +272,21 @@ impl Config {
         for entry in wire.duration_budgets {
             let seconds = entry.max_duration_seconds.get("max_duration_seconds")?;
             if durations.insert(entry.job, seconds).is_some() {
-                bail!("duplicate CI SLO duration job");
+                bail!("duplicate CI SLO duration job `{}`", entry.job.as_str());
             }
         }
-        let configured = durations.keys().copied().collect::<Vec<_>>();
-        if configured != CiJobKey::ALL {
-            bail!("CI SLO duration jobs must exactly cover the closed job catalog");
+        let configured = durations.keys().copied().collect::<BTreeSet<_>>();
+        let expected = CiJobKey::ALL.into_iter().collect::<BTreeSet<_>>();
+        if configured != expected {
+            let missing = expected
+                .difference(&configured)
+                .map(|job| job.as_str())
+                .collect::<Vec<_>>();
+            let extra = configured
+                .difference(&expected)
+                .map(|job| job.as_str())
+                .collect::<Vec<_>>();
+            bail!("CI SLO duration job closure drift: missing={missing:?}, extra={extra:?}");
         }
         Ok(Self { limits, durations })
     }
@@ -287,8 +296,8 @@ impl Config {
     }
 
     #[cfg(test)]
-    fn duration_budget_count(&self) -> usize {
-        self.durations.len()
+    fn duration_job_ids(&self) -> BTreeSet<CiJobKey> {
+        self.durations.keys().copied().collect()
     }
 
     #[cfg(test)]
@@ -844,7 +853,10 @@ mod tests {
     #[test]
     fn ci_slo_config_is_complete_and_has_expected_limits() -> Result<()> {
         let config = Config::parse(CONFIG)?;
-        assert_eq!(config.duration_budget_count(), CiJobKey::COUNT);
+        assert_eq!(
+            config.duration_job_ids(),
+            CiJobKey::ALL.into_iter().collect()
+        );
         assert_eq!(config.limits_gib(), [5, 6, 8, 2, 1]);
         assert_eq!(config.duration_seconds(CiJobKey::CiMeta), 90);
         assert_eq!(config.duration_seconds(CiJobKey::CiCorePrerequisites), 600);
@@ -857,6 +869,10 @@ mod tests {
         );
         assert_eq!(
             config.duration_seconds(CiJobKey::IntegrationObjectStorage),
+            900
+        );
+        assert_eq!(
+            config.duration_seconds(CiJobKey::IntegrationProductionRuntime),
             900
         );
         Ok(())
@@ -921,6 +937,7 @@ mod tests {
 
     #[test]
     fn config_rejects_schema_drift_and_incomplete_catalog() {
+        let production_runtime = "[[duration_budgets]]\njob = \"integration/production-runtime\"\nmax_duration_seconds = 900\n\n";
         for invalid in [
             CONFIG.replacen("schema_version = 2", "schema_version = 3", 1),
             CONFIG.replacen("min_disk_free_gib = 5", "min_disk_free_gib = 0", 1),
@@ -928,15 +945,57 @@ mod tests {
             CONFIG.replacen("max_target_gib = 6", "max_target_gib = 1.5", 1),
             CONFIG.replacen("max_target_gib = 6", "max_target_gib = 6\nextra = 1", 1),
             CONFIG.replacen("job = \"audit\"", "job = \"unknown\"", 1),
-            CONFIG.replacen(
-                "[[duration_budgets]]\njob = \"audit\"\nmax_duration_seconds = 300\n",
-                "",
-                1,
-            ),
+            CONFIG.replacen(production_runtime, "", 1),
             CONFIG.replacen("job = \"audit\"", "job = \"ci-meta\"", 1),
+            format!(
+                "{CONFIG}\n[[duration_budgets]]\njob = \"ci-meta\"\nmax_duration_seconds = 90\n"
+            ),
         ] {
             assert!(Config::parse(&invalid).is_err());
         }
+    }
+
+    #[test]
+    fn config_catalog_errors_use_canonical_sorted_wire_ids() -> Result<()> {
+        let without_two_jobs = CONFIG
+            .replacen(
+                "[[duration_budgets]]\njob = \"ci-core-prerequisites\"\nmax_duration_seconds = 600\n\n",
+                "",
+                1,
+            )
+            .replacen(
+                "[[duration_budgets]]\njob = \"integration/production-runtime\"\nmax_duration_seconds = 900\n\n",
+                "",
+                1,
+            );
+        let Err(missing_error) = Config::parse(&without_two_jobs) else {
+            bail!("missing CI SLO duration jobs must fail closed");
+        };
+        assert_eq!(
+            missing_error.to_string(),
+            "CI SLO duration job closure drift: missing=[\"ci-core-prerequisites\", \"integration/production-runtime\"], extra=[]"
+        );
+
+        let duplicate = format!(
+            "{CONFIG}\n[[duration_budgets]]\njob = \"integration/production-runtime\"\nmax_duration_seconds = 900\n"
+        );
+        let Err(duplicate_error) = Config::parse(&duplicate) else {
+            bail!("duplicate CI SLO duration job must fail closed");
+        };
+        assert_eq!(
+            duplicate_error.to_string(),
+            "duplicate CI SLO duration job `integration/production-runtime`"
+        );
+
+        let unknown = CONFIG.replacen("job = \"audit\"", "job = \"not-a-closed-job\"", 1);
+        let Err(unknown) = Config::parse(&unknown) else {
+            bail!("unknown CI SLO duration job must fail closed");
+        };
+        assert!(
+            format!("{unknown:#}").contains("unknown CI job key 'not-a-closed-job'"),
+            "unknown job diagnostic must preserve the offending wire ID: {unknown:#}"
+        );
+        Ok(())
     }
 
     #[test]

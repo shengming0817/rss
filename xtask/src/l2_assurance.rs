@@ -13,8 +13,8 @@
 //! INVARIANT: L2-ASSURANCE-CLOSURE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::exact_set_rejects_equal_size_wrong_identity", anti_vacuity = "tests::workspace_inventory_is_exact_and_deterministic" }——
 //! active OutboxFact manifests, generated registries, producer execution terminals and named fault
 //! cases are joined bidirectionally; each producer terminal fact set equals manifest `emits`, while
-//! producer/fact anti-vacuity floors are enforced by the same typed inventory used to render the
-//! committed assurance artifact; rustdoc does not duplicate the live counts.
+//! producer/fact non-empty anti-vacuity is enforced by the same typed inventory used to render the
+//! committed assurance artifact; rustdoc does not duplicate live catalog counts.
 //! INVARIANT: L2-ASSURANCE-PATH-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::carrier_paths_reject_escapes_backslashes_and_symlinks", anti_vacuity = "tests::workspace_inventory_is_exact_and_deterministic" }——
 //! every carrier and the fixed output are real repository-local paths without symlink traversal.
 
@@ -48,8 +48,6 @@ use crate::{
 
 const OUTPUT: &str = "generated/l2-assurance.json";
 const LF_DECLARATION: &str = "generated/l2-assurance.json text eol=lf";
-const EXPECTED_PRODUCERS: usize = 14;
-const EXPECTED_FACTS: usize = 6;
 const MAX_RUST_CARRIER_BYTES: u64 = 2 * 1024 * 1024;
 
 /// Generate or raw-byte check the only committed L2 assurance artifact.
@@ -101,14 +99,12 @@ fn build_inventory(root: &Path) -> Result<Inventory> {
 
     let universe = classify_active_l2(&contracts)?;
     ensure!(
-        universe.producers.len() == EXPECTED_PRODUCERS,
-        "active L2 producer anti-vacuity drift: expected {EXPECTED_PRODUCERS}, got {}",
-        universe.producers.len()
+        !universe.producers.is_empty(),
+        "active L2 producer inventory is empty"
     );
     ensure!(
-        universe.facts.len() == EXPECTED_FACTS,
-        "active L2 fact anti-vacuity drift: expected {EXPECTED_FACTS}, got {}",
-        universe.facts.len()
+        !universe.facts.is_empty(),
+        "active L2 fact inventory is empty"
     );
     let emitted_fact_ids = universe
         .producers
@@ -144,7 +140,7 @@ fn build_inventory(root: &Path) -> Result<Inventory> {
     let fault_evidence = fault_evidence_by_fact(root, &contracts, universe.facts.keys())?;
     let producer_closures = producer_assurance::collect(root, &universe.producers)?;
 
-    let mut records = Vec::with_capacity(EXPECTED_PRODUCERS + EXPECTED_FACTS);
+    let mut records = Vec::with_capacity(universe.producers.len() + universe.facts.len());
     for (id, contract) in &universe.producers {
         let spec = http_specs
             .get(id)
@@ -1526,8 +1522,8 @@ fn ensure_exact_ids<'a>(
     expected: impl Iterator<Item = &'a String>,
     actual: impl Iterator<Item = &'a String>,
 ) -> Result<()> {
-    let expected = expected.cloned().collect::<BTreeSet<_>>();
-    let actual = actual.cloned().collect::<BTreeSet<_>>();
+    let expected = collect_unique_ids(label, "expected", expected)?;
+    let actual = collect_unique_ids(label, "actual", actual)?;
     ensure!(
         expected == actual,
         "{label} identity mismatch: missing={:?} extra={:?}",
@@ -1535,6 +1531,21 @@ fn ensure_exact_ids<'a>(
         actual.difference(&expected).collect::<Vec<_>>()
     );
     Ok(())
+}
+
+fn collect_unique_ids<'a>(
+    label: &str,
+    side: &str,
+    values: impl Iterator<Item = &'a String>,
+) -> Result<BTreeSet<String>> {
+    let mut identities = BTreeSet::new();
+    for identity in values {
+        ensure!(
+            identities.insert(identity.clone()),
+            "{label} {side} contains duplicate identity {identity}"
+        );
+    }
+    Ok(identities)
 }
 
 fn repo_label(root: &Path, path: &Path) -> Result<String> {
@@ -2642,6 +2653,26 @@ impl DemoProvider {
     }
 
     #[test]
+    fn exact_set_rejects_duplicate_missing_and_extra_identities() {
+        let expected = ["identity.one".to_string(), "identity.two".to_string()];
+        let duplicate = [
+            "identity.one".to_string(),
+            "identity.two".to_string(),
+            "identity.two".to_string(),
+        ];
+        let missing = ["identity.one".to_string()];
+        let extra = [
+            "identity.one".to_string(),
+            "identity.two".to_string(),
+            "identity.extra".to_string(),
+        ];
+
+        assert!(ensure_exact_ids("duplicate", expected.iter(), duplicate.iter()).is_err());
+        assert!(ensure_exact_ids("missing", expected.iter(), missing.iter()).is_err());
+        assert!(ensure_exact_ids("extra", expected.iter(), extra.iter()).is_err());
+    }
+
+    #[test]
     fn check_rejects_missing_tampered_and_crlf_without_writing() -> anyhow::Result<()> {
         let root = crate::testutil::unique_tmp("l2-assurance-check");
         fs::create_dir_all(&root)?;
@@ -2701,14 +2732,42 @@ impl DemoProvider {
         assert!(error.contains("[Second] two: second detail"), "{error}");
     }
 
+    fn assert_inventory_identity_projection(inventory: &Inventory) {
+        let producer_ids = inventory
+            .contracts
+            .iter()
+            .filter_map(|record| match record {
+                AssuranceRecord::Producer(record) => Some(record.contract_id.as_str()),
+                AssuranceRecord::Fact(_) => None,
+            })
+            .collect::<BTreeSet<_>>();
+        let fact_ids = inventory
+            .contracts
+            .iter()
+            .filter_map(|record| match record {
+                AssuranceRecord::Fact(record) => Some(record.contract_id.as_str()),
+                AssuranceRecord::Producer(_) => None,
+            })
+            .collect::<BTreeSet<_>>();
+        assert!(!producer_ids.is_empty(), "producer projection is empty");
+        assert!(!fact_ids.is_empty(), "fact projection is empty");
+        assert_eq!(inventory.producer_count, producer_ids.len());
+        assert_eq!(inventory.fact_count, fact_ids.len());
+        assert!(producer_ids.is_disjoint(&fact_ids));
+        assert_eq!(
+            producer_ids.union(&fact_ids).count(),
+            inventory.contracts.len(),
+            "record identities must be unique across roles"
+        );
+    }
+
     #[test]
     fn workspace_inventory_is_exact_and_deterministic() -> anyhow::Result<()> {
         let root = workspace_root()?;
         let first = build_inventory(&root)?;
         let first_bytes = render(&first)?;
         let second_bytes = render(&build_inventory(&root)?)?;
-        assert_eq!(first.producer_count, EXPECTED_PRODUCERS);
-        assert_eq!(first.fact_count, EXPECTED_FACTS);
+        assert_inventory_identity_projection(&first);
         let login = first
             .contracts
             .iter()
@@ -2766,7 +2825,7 @@ impl DemoProvider {
     }
 
     #[test]
-    fn workspace_refresh_rejects_localtx_and_is_fifth_security_event_producer() -> anyhow::Result<()>
+    fn workspace_refresh_rejects_localtx_and_joins_security_event_producers() -> anyhow::Result<()>
     {
         let inventory = build_inventory(&workspace_root()?)?;
         let security_event_producers = inventory
@@ -2811,7 +2870,7 @@ impl DemoProvider {
                 "identity.password-change",
                 "identity.refresh",
             ]),
-            "identity.refresh must be the fifth and only new security-event producer"
+            "security-event producer identity set drift"
         );
         Ok(())
     }
@@ -2868,15 +2927,8 @@ impl DemoProvider {
                 AssuranceRecord::Producer(_) => None,
             })
             .collect::<Vec<_>>();
-        let active_handlers = facts
-            .iter()
-            .map(|record| record.subscriptions.len())
-            .sum::<usize>();
-
-        assert_eq!(
-            active_handlers, 5,
-            "active handler count must come from generated fact subscriptions"
-        );
+        assert!(!facts.is_empty(), "active fact projection is empty");
+        let mut subscription_ids = BTreeSet::new();
         for fact in facts {
             let carriers = fact
                 .evidence
@@ -2886,6 +2938,17 @@ impl DemoProvider {
                 .map(|carrier| (carrier.path.0.as_str(), carrier.symbol.as_str()))
                 .collect::<BTreeSet<_>>();
             for subscription in &fact.subscriptions {
+                assert!(
+                    subscription_ids.insert((
+                        fact.contract_id.as_str(),
+                        subscription.consumer.as_str(),
+                        subscription.group.as_str(),
+                    )),
+                    "duplicate active subscription identity: {}/{}/{}",
+                    fact.contract_id,
+                    subscription.consumer,
+                    subscription.group
+                );
                 let registration_path =
                     format!("crates/{}/src/application.rs", subscription.consumer);
                 assert_eq!(
@@ -2934,6 +2997,10 @@ impl DemoProvider {
                 fact.contract_id
             );
         }
+        assert!(
+            !subscription_ids.is_empty(),
+            "active subscription projection is empty"
+        );
         Ok(())
     }
 }

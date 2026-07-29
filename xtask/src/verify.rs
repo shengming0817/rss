@@ -16,7 +16,7 @@
 //! verify 全门 + build/clippy 升 `--all-features --all-targets` + 覆盖率门（`cargo llvm-cov nextest` 替
 //! nextest，强制 basis/engine ≥90%，见 `coverage.rs`）+ `public-api --check`（轴 A，见 `publicapi.rs`）。
 //! `verify` 仍是 **stable-only 本地快门**（不需 nightly / llvm-cov）；`ci full` 只供本地一次性跑全部
-//! CI 门。二者与 GitHub typed 16-job catalog 均经 [`plan_for`] 与 `CiJobKey` Hard 闭集派生，杜绝门集漂移。
+//! CI 门。二者与 GitHub typed job catalog 均经 [`plan_for`] 与 `CiJobKey` Hard 闭集派生，杜绝门集漂移。
 //!
 //! **`cargo xtask ci run --job audit`（[`run_audit`]）= 供应链漏洞定时刷新 lane**（issue #1133，GitHub Actions
 //! `schedule:` 调用入口）：advisory-scoped `cargo deny check advisories` + `cargo audit` 两门
@@ -32,7 +32,7 @@
 //! INVARIANT: VERIFY-TOOL-GATE-01 { level = "Medium", exec = "verify", source = "code" }—— 缺外部工具默认 fail-closed；豁免仅经显式 `--allow-missing-tools`。
 //! INVARIANT: ASSEMBLY-PROVIDERS-VERIFY-GATE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "assembly_provider_codegen_gate_is_typed_once_and_ordered_in_all_aggregate_plans", anti_vacuity = "assembly_codegen::tests::assembly_provider_codegen_generated_provider_catalogs_are_non_empty_and_check_clean" }—— provider catalog drift is an independent typed no-compile gate exactly once between modules drift and AssemblyLock in every aggregate plan.
 //! INVARIANT: ASSEMBLY-RUNTIME-PLAN-VERIFY-GATE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "assembly_runtime_plan_gate_is_typed_once_and_ordered_in_all_aggregate_plans", anti_vacuity = "assembly_runtime_plan::tests::committed_runtime_plans_are_check_clean" }—— committed runtime plans are checked by one typed in-process no-compile gate exactly once between assembly lock and graph checks in every aggregate plan.
-//! INVARIANT: RUNTIME-DYLINT-UI-GATE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "runtime_dylint_ui_gate_is_typed_closed_and_in_aggregate_plans", anti_vacuity = "runtime_dylint_ui_gate_is_typed_closed_and_in_aggregate_plans" }—— the three runtime Dylint UI carriers run as one typed `cargo test --locked` gate from the fixed `lints` workspace in full verify, compatibility CI, and core prerequisites, while fast remains no-compile.
+//! INVARIANT: RUNTIME-DYLINT-UI-GATE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "runtime_dylint_ui_gate_is_typed_closed_and_in_aggregate_plans", anti_vacuity = "runtime_dylint_ui_gate_is_typed_closed_and_in_aggregate_plans" }—— runtime Dylint UI carriers run as one typed `cargo test --locked` gate from the fixed `lints` workspace in full verify, compatibility CI, and core prerequisites, while fast remains no-compile.
 //! INVARIANT: L2-ASSURANCE-VERIFY-GATE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "l2_assurance_gate_is_typed_once_and_ordered_in_all_aggregate_plans", anti_vacuity = "l2_assurance::tests::workspace_inventory_is_exact_and_deterministic" }—— L2 assurance drift check is a typed, in-process, no-compile gate present exactly once immediately after codegen in every aggregate plan.
 //! INVARIANT: CI-ADAPTIVE-WORKFLOW-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "split_ci_caller_predicate_green_and_synthetic_red", anti_vacuity = "github_ci_workflow_delegates_to_split_xtask_lanes" }—— GitHub CI workflow
 //!   精确委托闭合 xtask job，Meta/Security 并行，Core tests 仅依赖单次 prerequisites；门归属由
@@ -49,9 +49,9 @@
 //! INVARIANT: CI-TEST-PARTITION-MATRIX-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "split_ci_caller_predicate_green_and_synthetic_red", anti_vacuity = "github_ci_workflow_delegates_to_split_xtask_lanes" }—— Core 与 integration partition topology 必须只由 typed planner 的动态 matrix 派生。
 //! INVARIANT: LOCALTX-PROOF-CI-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "split_ci_caller_predicate_green_and_synthetic_red", anti_vacuity = "github_ci_workflow_delegates_to_split_xtask_lanes" }—— same-head planner job 必须原子生成并上传 JSON/Markdown LocalTx proof artifact。
 //! INVARIANT: CI-TEST-EVIDENCE-UPLOAD-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "reusable_rust_lane_guard_rejects_semantic_weakening", anti_vacuity = "github_resource_evidence_workflows_have_lifecycle" }—— evidence 必须 always 上传、唯一命名、精确路径且只保留七天。
-//! INVARIANT: CI-SLO-WORKFLOW-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "reusable_rust_lane_slo_contract_rejects_semantic_weakening", anti_vacuity = "reusable_rust_lane_slo_contract_accepts_committed_workflow" }—— SLO 证据必须先 stage 再 always 上传，最后 always 评估并写入 Job Summary；四个 live disk guard 必须从固定 SLO config 读取阈值并 fail-closed。
+//! INVARIANT: CI-SLO-WORKFLOW-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "reusable_rust_lane_slo_contract_rejects_semantic_weakening", anti_vacuity = "reusable_rust_lane_slo_contract_accepts_committed_workflow" }—— SLO 证据必须先 stage 再 always 上传，最后 always 评估并写入 Job Summary；live disk guard 必须从固定 SLO config 读取阈值并 fail-closed。
 //! INVARIANT: CI-INTEGRATION-SERVICE-LIFECYCLE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "integration_service_lifecycle_predicate_green_and_synthetic_red", anti_vacuity = "github_resource_evidence_workflows_have_lifecycle" }—— Integration lane 必须在 xtask 前建立 exact scope，在失败后有界取证并 always 精确清理；生命周期证据始终归档，服务日志仅失败时归档，且 workflow 禁止任何全局 Docker prune。
-//! INVARIANT: INTEGRATION-CONTAINER-OWNERSHIP-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "integration_container_source_contract_synthetic_red", anti_vacuity = "integration_container_source_contract_accepts_committed_sources" }—— testkit 只能在 owned 模块导入 AsyncRunner/调用 start，四类 fixture、四个 context env、四种 service、五个 ownership label 与精确 partition 闭集须和 shell/workflow 同步。
+//! INVARIANT: INTEGRATION-CONTAINER-OWNERSHIP-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "integration_container_source_contract_synthetic_red", anti_vacuity = "integration_container_source_contract_accepts_committed_sources" }—— testkit 只能在 owned 模块导入 AsyncRunner/调用 start，fixture、context env、service 与 ownership label 的精确 partition 闭集须和 shell/workflow 同步。
 //! INVARIANT: CI-SELFTEST-TEMP-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "ci_selftest_temp_root_guard_rejects_unsafe_fixtures", anti_vacuity = "committed_ci_selftest_temp_roots_are_atomic" }—— 所有 GitHub shell selftest 必须递归自动发现；可执行源码中的 PID 临时路径与非原子 TMP_ROOT 均 fail-closed，实际 TMP_ROOT 必须以带 `.XXXXXX` 模板的原子 `mktemp -d` 创建独占根目录；注释不能充当合规证据或触发误报。
 
 use crate::ci_lanes::CiJobKey;
@@ -2301,6 +2301,109 @@ mod tests {
         plan.iter().map(|s| s.label()).collect()
     }
 
+    fn gate_id_set(ids: impl IntoIterator<Item = GateId>) -> std::collections::BTreeSet<GateId> {
+        ids.into_iter().collect()
+    }
+
+    fn exact_gate_id_projection(
+        plan: &[Step],
+        expected: impl IntoIterator<Item = GateId>,
+    ) -> Result<(), String> {
+        let expected = gate_id_set(expected);
+        let actual = gate_id_set(plan.iter().map(|step| step.id));
+        let mut counts = std::collections::BTreeMap::new();
+        for id in plan.iter().map(|step| step.id) {
+            *counts.entry(id).or_insert(0usize) += 1;
+        }
+        let labels = |ids: Vec<GateId>| {
+            let mut labels = ids
+                .into_iter()
+                .map(|id| id.spec().label())
+                .collect::<Vec<_>>();
+            labels.sort_unstable();
+            labels.join(", ")
+        };
+        let missing = labels(expected.difference(&actual).copied().collect());
+        let extra = labels(actual.difference(&expected).copied().collect());
+        let duplicate = labels(
+            counts
+                .into_iter()
+                .filter_map(|(id, count)| (count > 1).then_some(id))
+                .collect(),
+        );
+        if missing.is_empty() && extra.is_empty() && duplicate.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "plan GateId closure drift: missing=[{missing}], extra=[{extra}], duplicate=[{duplicate}]"
+            ))
+        }
+    }
+
+    fn ensure_plan_has_exact_gate_ids(
+        plan: &[Step],
+        expected: impl IntoIterator<Item = GateId>,
+    ) -> anyhow::Result<()> {
+        exact_gate_id_projection(plan, expected).map_err(anyhow::Error::msg)
+    }
+
+    fn registry_gate_ids(
+        predicate: impl Fn(crate::ci_lanes::GateSpec) -> bool,
+    ) -> std::collections::BTreeSet<GateId> {
+        REGISTRY
+            .iter()
+            .copied()
+            .filter(|spec| predicate(*spec))
+            .map(crate::ci_lanes::GateSpec::id)
+            .collect()
+    }
+
+    fn assert_pairwise_disjoint(sets: &[std::collections::BTreeSet<GateId>]) {
+        for (index, set) in sets.iter().enumerate() {
+            for other in &sets[index + 1..] {
+                assert!(set.is_disjoint(other), "split CI lanes must be disjoint");
+            }
+        }
+    }
+
+    #[test]
+    fn exact_gate_id_projection_rejects_equal_cardinality_wrong_id() -> anyhow::Result<()> {
+        let plan = plan_for(PlanTarget::CompatibilityCi);
+        let mut wrong_ids = plan.iter().map(|step| step.id).collect::<Vec<_>>();
+        let first = wrong_ids
+            .first_mut()
+            .context("compatibility plan anti-vacuity")?;
+        *first = GateId::DefaultNextest;
+
+        assert_eq!(wrong_ids.len(), plan.len(), "fixture preserves cardinality");
+        assert!(exact_gate_id_projection(&plan, wrong_ids).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn exact_gate_id_projection_reports_stable_set_differences() -> anyhow::Result<()> {
+        let expected = registry_gate_ids(|spec| spec.compat() == CompatMembership::Included);
+        let mut plan = plan_for(PlanTarget::CompatibilityCi);
+        plan.retain(|step| step.id != GateId::Fmt);
+        let contract = plan
+            .iter_mut()
+            .find(|step| step.id == GateId::ContractValidate)
+            .context("contract gate anti-vacuity")?;
+        contract.id = GateId::DefaultNextest;
+        let duplicate = plan
+            .iter()
+            .find(|step| step.id == GateId::AssemblyValidate)
+            .context("assembly gate anti-vacuity")?
+            .clone();
+        plan.push(duplicate);
+
+        assert_eq!(
+            exact_gate_id_projection(&plan, expected),
+            Err("plan GateId closure drift: missing=[contract-validate, fmt], extra=[default-test-runner], duplicate=[assembly-validate]".to_string())
+        );
+        Ok(())
+    }
+
     #[test]
     fn verify_only_uses_registry_membership_and_canonical_order() -> anyhow::Result<()> {
         let plan = verify_plan(&opts(false, false));
@@ -2476,15 +2579,20 @@ mod tests {
     }
 
     #[test]
-    fn ci_lane_plans_are_registry_derived_and_partitioned() {
-        assert_eq!(labels(&plan_for(PlanTarget::Lane(CiLane::Meta))).len(), 41);
+    fn ci_lane_plans_are_registry_derived_and_partitioned() -> anyhow::Result<()> {
+        for lane in [CiLane::Meta, CiLane::Security, CiLane::Coverage] {
+            let plan = plan_for(PlanTarget::Lane(lane));
+            ensure_plan_has_exact_gate_ids(&plan, registry_gate_ids(|spec| spec.belongs_to(lane)))?;
+        }
         assert_eq!(
             labels(&plan_for(PlanTarget::Lane(CiLane::Security))),
-            vec!["deny", "audit"]
+            ["deny", "audit"],
+            "supply-chain checks retain their local execution order"
         );
         assert_eq!(
             labels(&plan_for(PlanTarget::Lane(CiLane::Coverage))),
-            vec!["coverage", "public-api"]
+            ["coverage", "public-api"],
+            "coverage precedes its public API closeout"
         );
         let core = labels(&plan_for(PlanTarget::Lane(CiLane::Core)));
         assert!(core.contains(&"build"));
@@ -2497,7 +2605,7 @@ mod tests {
 
         let compatibility: std::collections::BTreeSet<_> = plan_for(PlanTarget::CompatibilityCi)
             .into_iter()
-            .map(|step| step.id as usize)
+            .map(|step| step.id)
             .collect();
         let split: Vec<std::collections::BTreeSet<_>> = [
             CiLane::Meta,
@@ -2510,43 +2618,42 @@ mod tests {
             plan_for(PlanTarget::Lane(lane))
                 .into_iter()
                 .filter(|step| step.id.spec().compat() == CompatMembership::Included)
-                .map(|step| step.id as usize)
+                .map(|step| step.id)
                 .collect()
         })
         .collect();
-        for (index, lane) in split.iter().enumerate() {
-            for other in &split[index + 1..] {
-                assert!(lane.is_disjoint(other), "split CI lanes must be disjoint");
-            }
-        }
+        assert_pairwise_disjoint(&split);
         let union: std::collections::BTreeSet<_> = split.into_iter().flatten().collect();
         assert_eq!(
             union, compatibility,
             "split CI lanes must cover compatibility CI"
         );
+        Ok(())
     }
 
     #[test]
-    fn core_execution_plans_are_disjoint_and_cover_full_core() {
+    fn core_execution_plans_are_disjoint_and_cover_full_core() -> anyhow::Result<()> {
         let full = plan_for(PlanTarget::Core(CoreExecution::Full));
         let prerequisites = plan_for(PlanTarget::Core(CoreExecution::Prerequisites));
         let tests = plan_for(PlanTarget::Core(CoreExecution::Tests));
-        assert_eq!(prerequisites.len(), 6);
-        assert_eq!(tests.len(), 11);
+        assert!(!prerequisites.is_empty(), "prerequisite anti-vacuity");
+        assert!(!tests.is_empty(), "core test anti-vacuity");
         let prereq_ids = prerequisites
             .iter()
-            .map(|step| step.id as usize)
+            .map(|step| step.id)
             .collect::<std::collections::BTreeSet<_>>();
         let test_ids = tests
             .iter()
-            .map(|step| step.id as usize)
+            .map(|step| step.id)
             .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(prereq_ids.len(), prerequisites.len());
+        assert_eq!(test_ids.len(), tests.len());
         assert!(prereq_ids.is_disjoint(&test_ids));
         let union = prereq_ids
             .union(&test_ids)
             .copied()
             .collect::<std::collections::BTreeSet<_>>();
-        assert_eq!(union, full.iter().map(|step| step.id as usize).collect());
+        ensure_plan_has_exact_gate_ids(&full, union.iter().copied())?;
         let scopes = tests
             .iter()
             .filter_map(|step| match step.kind {
@@ -2558,6 +2665,7 @@ mod tests {
             scopes,
             crate::nextest::CoreTestScope::ALL.into_iter().collect()
         );
+        Ok(())
     }
 
     #[test]
@@ -2636,14 +2744,14 @@ mod tests {
     }
 
     #[test]
-    fn ci_lane_compatibility_plan_keeps_61_unique_gates_and_supersedes_nextest() {
+    fn ci_lane_compatibility_plan_matches_registry_and_supersedes_nextest() -> anyhow::Result<()> {
         let plan = plan_for(PlanTarget::CompatibilityCi);
-        assert_eq!(plan.len(), 61);
+        ensure_plan_has_exact_gate_ids(
+            &plan,
+            registry_gate_ids(|spec| spec.compat() == CompatMembership::Included),
+        )?;
         assert!(!labels(&plan).contains(&"default-test-runner"));
-        let mut ids: Vec<_> = plan.iter().map(|step| step.id as usize).collect();
-        ids.sort_unstable();
-        ids.dedup();
-        assert_eq!(ids.len(), 61);
+        Ok(())
     }
 
     #[test]
@@ -2669,76 +2777,13 @@ mod tests {
     }
 
     #[test]
-    fn verify_plan_order_and_count() {
+    fn verify_plan_matches_registry_membership() -> anyhow::Result<()> {
         let plan = verify_plan(&opts(false, false));
-        assert_eq!(
-            labels(&plan),
-            vec![
-                "fmt",
-                "contract-validate",
-                "assembly-validate",
-                "assembly-artifacts-check",
-                "assembly-modules-check",
-                "assembly-providers-check",
-                "assembly-lock-check",
-                "assembly-runtime-plan-check",
-                "assembly-graph-check",
-                "contract-breaking",
-                "layer-deps",
-                "shipped-feature-guard",
-                "wsdeps-drift",
-                "source-semantic-guard",
-                "promtool-rules",
-                "outbox-same-id-guard",
-                "consistency-fixtures",
-                "event-transport-guard",
-                "inbox-cutover-guard",
-                "dlx-lifecycle-funnel",
-                "runtime-baseline",
-                "runtime-root-guard",
-                "runtime-env-guard",
-                "runtime-deps-guard",
-                "archrules",
-                "codegen-check",
-                "l2-assurance-check",
-                "provider-capabilities-check",
-                "localtx-coverage",
-                "local-only-effects",
-                "local-only-execution",
-                "pdp-allow-guard",
-                "contract-binding-guard",
-                "schema-rls",
-                "setlocal-funnel",
-                "pg-tenant-tx-guard",
-                "repo-scope-guard",
-                "tenancy-closeout",
-                "migrations-serial",
-                "command-symmetry",
-                "ci-entry-guard",
-                "reconcile-outbox-command-guard",
-                "defer-gate",
-                "assembly-lock-protocol-tests",
-                "build",
-                "postgres-feature-matrix",
-                "integration-compile",
-                "clippy",
-                "default-test-runner",
-                "secure-production-trybuild",
-                "s3-backend-tests",
-                "redis-backend-tests",
-                "oidc-backend-tests",
-                "prometheus-backend-tests",
-                "otel-backend-tests",
-                "grpc-backend-tests",
-                "vault-backend-tests",
-                "settingsonly-tests",
-                "identityaudit-tests",
-                "testkit-container-tests",
-                "deny",
-                "dylint",
-                "runtime-dylint-ui-tests",
-            ]
-        );
+        ensure_plan_has_exact_gate_ids(
+            &plan,
+            registry_gate_ids(|spec| spec.verify_membership() == VerifyMembership::Included),
+        )?;
+        Ok(())
     }
 
     #[test]
@@ -2988,54 +3033,22 @@ mod tests {
 
     /// `--fast` 只保留轻量 no-compile 步，不接 Docker、额外 Cargo 工具或 crate 测试。
     #[test]
-    fn fast_plan_keeps_lightweight_meta_and_drops_external_or_compile_gates() {
+    fn fast_plan_keeps_lightweight_meta_and_drops_external_or_compile_gates() -> anyhow::Result<()>
+    {
         let plan = verify_plan(&opts(true, false));
-        assert_eq!(
-            labels(&plan),
-            vec![
-                "fmt",
-                "contract-validate",
-                "assembly-validate",
-                "assembly-artifacts-check",
-                "assembly-modules-check",
-                "assembly-providers-check",
-                "assembly-lock-check",
-                "assembly-runtime-plan-check",
-                "assembly-graph-check",
-                "contract-breaking",
-                "layer-deps",
-                "shipped-feature-guard",
-                "wsdeps-drift",
-                "source-semantic-guard",
-                "outbox-same-id-guard",
-                "consistency-fixtures",
-                "event-transport-guard",
-                "inbox-cutover-guard",
-                "dlx-lifecycle-funnel",
-                "runtime-baseline",
-                "runtime-root-guard",
-                "runtime-env-guard",
-                "runtime-deps-guard",
-                "archrules",
-                "codegen-check",
-                "l2-assurance-check",
-                "provider-capabilities-check",
-                "localtx-coverage",
-                "local-only-effects",
-                "pdp-allow-guard",
-                "contract-binding-guard",
-                "schema-rls",
-                "setlocal-funnel",
-                "pg-tenant-tx-guard",
-                "repo-scope-guard",
-                "tenancy-closeout",
-                "migrations-serial",
-                "command-symmetry",
-                "ci-entry-guard",
-                "reconcile-outbox-command-guard",
-                "defer-gate"
-            ]
-        );
+        let expected = plan_for(PlanTarget::Verify)
+            .into_iter()
+            .filter(|step| {
+                !step.needs_compile()
+                    && !matches!(
+                        step.id,
+                        GateId::PromtoolRules | GateId::Deny | GateId::AssemblyLockProtocolTests
+                    )
+            })
+            .map(|step| step.id);
+        ensure_plan_has_exact_gate_ids(&plan, expected)?;
+        assert!(!plan.is_empty(), "fast plan anti-vacuity");
+        assert!(plan.iter().all(|step| !step.needs_compile()));
         for dropped in [
             "build",
             "clippy",
@@ -3047,72 +3060,30 @@ mod tests {
         ] {
             assert!(!labels(&plan).contains(&dropped), "fast 不应含 {dropped}");
         }
+        Ok(())
     }
 
-    /// 两种模式共享的轻量 repository meta checks（contract validate / assembly validate / assembly artifacts / contract breaking / layer-deps / wsdeps-drift /
-    /// consistency-fixtures / event-transport-guard / inbox-cutover-guard /
-    /// runtime-baseline / runtime-root-guard / runtime-env-guard / runtime-deps-guard / archrules / codegen / L2 assurance / pdp-allow-guard / contract-binding-guard /
-    /// schema-rls / setlocal-funnel / pg-tenant-tx-guard / repo-scope-guard / tenancy-closeout / migrations-serial / command-symmetry /
-    /// reconcile-outbox-command-guard / defer-gate）在两种模式恒在。
+    /// 两种模式共享的轻量 repository meta checks 在两种模式恒在。
     #[test]
     fn meta_checks_present_in_both_modes() {
+        let expected = registry_gate_ids(|spec| {
+            spec.verify_membership() == VerifyMembership::Included
+                && spec.compile_kind() == CompileKind::NoCompile
+                && spec.id() != GateId::PromtoolRules
+                && matches!(step_for_id(spec.id()).kind, StepKind::Internal(_))
+        });
         for fast in [true, false] {
             let plan = verify_plan(&opts(fast, false));
-            let internals: Vec<_> = plan
+            let internals = plan
                 .iter()
                 .filter(|s| {
                     matches!(s.kind, StepKind::Internal(_))
                         && !s.needs_compile()
                         && s.id != GateId::PromtoolRules
                 })
-                .map(|s| s.label())
-                .collect();
-            assert_eq!(
-                internals,
-                vec![
-                    "contract-validate",
-                    "assembly-validate",
-                    "assembly-artifacts-check",
-                    "assembly-modules-check",
-                    "assembly-providers-check",
-                    "assembly-lock-check",
-                    "assembly-runtime-plan-check",
-                    "assembly-graph-check",
-                    "contract-breaking",
-                    "layer-deps",
-                    "shipped-feature-guard",
-                    "wsdeps-drift",
-                    "source-semantic-guard",
-                    "outbox-same-id-guard",
-                    "consistency-fixtures",
-                    "event-transport-guard",
-                    "inbox-cutover-guard",
-                    "dlx-lifecycle-funnel",
-                    "runtime-baseline",
-                    "runtime-root-guard",
-                    "runtime-env-guard",
-                    "runtime-deps-guard",
-                    "archrules",
-                    "codegen-check",
-                    "l2-assurance-check",
-                    "provider-capabilities-check",
-                    "localtx-coverage",
-                    "local-only-effects",
-                    "pdp-allow-guard",
-                    "contract-binding-guard",
-                    "schema-rls",
-                    "setlocal-funnel",
-                    "pg-tenant-tx-guard",
-                    "repo-scope-guard",
-                    "tenancy-closeout",
-                    "migrations-serial",
-                    "command-symmetry",
-                    "ci-entry-guard",
-                    "reconcile-outbox-command-guard",
-                    "defer-gate"
-                ],
-                "fast={fast}"
-            );
+                .map(|s| s.id)
+                .collect::<std::collections::BTreeSet<_>>();
+            assert_eq!(internals, expected, "fast={fast}");
         }
     }
 
@@ -4117,79 +4088,6 @@ mod tests {
 
     // ---- ci 超集计划（issue #1132）----
 
-    /// CompatibilityCi 顺序与门集（单一事实源；本地兼容聚合顺序）。`audit`（cargo-audit）紧随 `deny` 后
-    /// （issue #1133：供应链漏洞检查进入兼容计划，防御纵深独立于 deny advisories）。
-    #[test]
-    fn compatibility_plan_order_and_count() {
-        assert_eq!(
-            labels(&plan_for(PlanTarget::CompatibilityCi)),
-            vec![
-                "fmt",
-                "contract-validate",
-                "assembly-validate",
-                "assembly-artifacts-check",
-                "assembly-modules-check",
-                "assembly-providers-check",
-                "assembly-lock-check",
-                "assembly-runtime-plan-check",
-                "assembly-graph-check",
-                "contract-breaking",
-                "layer-deps",
-                "shipped-feature-guard",
-                "wsdeps-drift",
-                "source-semantic-guard",
-                "promtool-rules",
-                "outbox-same-id-guard",
-                "consistency-fixtures",
-                "event-transport-guard",
-                "inbox-cutover-guard",
-                "dlx-lifecycle-funnel",
-                "runtime-baseline",
-                "runtime-root-guard",
-                "runtime-env-guard",
-                "runtime-deps-guard",
-                "archrules",
-                "codegen-check",
-                "l2-assurance-check",
-                "provider-capabilities-check",
-                "localtx-coverage",
-                "local-only-effects",
-                "pdp-allow-guard",
-                "contract-binding-guard",
-                "schema-rls",
-                "setlocal-funnel",
-                "pg-tenant-tx-guard",
-                "repo-scope-guard",
-                "tenancy-closeout",
-                "migrations-serial",
-                "command-symmetry",
-                "ci-entry-guard",
-                "reconcile-outbox-command-guard",
-                "defer-gate",
-                "postgres-feature-matrix",
-                "build",
-                "clippy",
-                "coverage",
-                "secure-production-trybuild",
-                "s3-backend-tests",
-                "redis-backend-tests",
-                "oidc-backend-tests",
-                "prometheus-backend-tests",
-                "otel-backend-tests",
-                "grpc-backend-tests",
-                "vault-backend-tests",
-                "settingsonly-tests",
-                "identityaudit-tests",
-                "testkit-container-tests",
-                "deny",
-                "audit",
-                "dylint",
-                "runtime-dylint-ui-tests",
-                "public-api",
-            ]
-        );
-    }
-
     /// ci 的 build/clippy 升 `--all-features --all-targets`（issue 验收：编译态全覆盖）。
     #[test]
     fn ci_build_clippy_use_all_features_all_targets() -> anyhow::Result<()> {
@@ -4251,56 +4149,20 @@ mod tests {
     fn ci_shares_meta_deny_dylint_with_verify_verbatim() {
         let v = plan_for(PlanTarget::Verify);
         let c = plan_for(PlanTarget::CompatibilityCi);
-        let find = |plan: &[Step], label: &str| plan.iter().find(|s| s.label() == label).cloned();
-        for label in [
-            "fmt",
-            "contract-validate",
-            "assembly-validate",
-            "assembly-artifacts-check",
-            "assembly-modules-check",
-            "assembly-providers-check",
-            "assembly-lock-check",
-            "assembly-runtime-plan-check",
-            "assembly-graph-check",
-            "contract-breaking",
-            "layer-deps",
-            "shipped-feature-guard",
-            "wsdeps-drift",
-            "source-semantic-guard",
-            "promtool-rules",
-            "outbox-same-id-guard",
-            "consistency-fixtures",
-            "event-transport-guard",
-            "inbox-cutover-guard",
-            "dlx-lifecycle-funnel",
-            "runtime-baseline",
-            "runtime-root-guard",
-            "runtime-env-guard",
-            "runtime-deps-guard",
-            "archrules",
-            "codegen-check",
-            "l2-assurance-check",
-            "provider-capabilities-check",
-            "localtx-coverage",
-            "local-only-effects",
-            "pdp-allow-guard",
-            "contract-binding-guard",
-            "schema-rls",
-            "setlocal-funnel",
-            "pg-tenant-tx-guard",
-            "repo-scope-guard",
-            "tenancy-closeout",
-            "migrations-serial",
-            "command-symmetry",
-            "reconcile-outbox-command-guard",
-            "defer-gate",
-            "deny",
-            "dylint",
-        ] {
+        let find = |plan: &[Step], id: GateId| plan.iter().find(|s| s.id == id).cloned();
+        let shared = registry_gate_ids(|spec| {
+            selected_for(PlanTarget::Verify, spec.id())
+                && selected_for(PlanTarget::CompatibilityCi, spec.id())
+        });
+        assert!(
+            shared.contains(&GateId::CiEntryGuard),
+            "shared-set anti-vacuity"
+        );
+        for id in shared {
             assert_eq!(
-                find(&v, label),
-                find(&c, label),
-                "共享门步 `{label}` 在 verify/ci 不一致（漂移）"
+                find(&v, id),
+                find(&c, id),
+                "共享门步 `{id:?}` 在 verify/ci 不一致（漂移）"
             );
         }
     }
@@ -4310,7 +4172,7 @@ mod tests {
     /// audit_plan 顺序与门集（单一事实源；scheduled lane 实跑顺序）：advisory-scoped deny + cargo-audit。
     /// 不含 licenses/bans——它们只随 Cargo.lock 变（= 随 PR 变），定时跑无增益；CompatibilityCi 已全查。
     #[test]
-    fn audit_plan_order_and_count() {
+    fn audit_plan_keeps_local_supply_chain_order() {
         assert_eq!(labels(&audit_plan()), vec!["deny-advisories", "audit"]);
     }
 
@@ -6552,28 +6414,6 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
             .collect()
     }
 
-    fn expected_integration_rows() -> Vec<String> {
-        IntegrationShard::ALL
-            .iter()
-            .flat_map(|shard| match shard.partition_policy() {
-                integration_shards::PartitionPolicy::Unpartitioned => vec![format!(
-                    "shard: {}, partition: \"\", partition-label: unpartitioned",
-                    shard.as_str()
-                )],
-                integration_shards::PartitionPolicy::TwoWayHash => {
-                    [("1/2", "1-of-2"), ("2/2", "2-of-2")]
-                        .map(|(partition, label)| {
-                            format!(
-                                "shard: {}, partition: {partition}, partition-label: {label}",
-                                shard.as_str()
-                            )
-                        })
-                        .to_vec()
-                }
-            })
-            .collect()
-    }
-
     fn github_integration_workflow_has_shard_matrix_for(
         yaml: &str,
         expected_shards: &[&str],
@@ -6623,6 +6463,66 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
             .collect()
     }
 
+    fn workflow_call_inputs(yaml: &str) -> Option<std::collections::BTreeMap<String, bool>> {
+        let lines = yaml_indented_code_lines(yaml);
+        let workflow_call = lines
+            .iter()
+            .position(|(indent, line)| *indent == 2 && *line == "workflow_call:")?;
+        let inputs = lines[workflow_call + 1..]
+            .iter()
+            .position(|(indent, line)| *indent == 4 && *line == "inputs:")?
+            + workflow_call
+            + 1;
+        let body = &lines[inputs + 1..];
+        let mut catalog = std::collections::BTreeMap::new();
+        for (offset, (indent, line)) in body.iter().enumerate() {
+            if *indent <= 4 {
+                break;
+            }
+            if *indent != 6 {
+                continue;
+            }
+            let key = line.strip_suffix(':')?;
+            let fields = body[offset + 1..]
+                .iter()
+                .take_while(|(field_indent, _)| *field_indent > 6)
+                .collect::<Vec<_>>();
+            let required = fields
+                .iter()
+                .find_map(|(field_indent, field)| {
+                    (*field_indent == 8)
+                        .then(|| field.strip_prefix("required: "))
+                        .flatten()
+                })?
+                .parse::<bool>()
+                .ok()?;
+            if !fields
+                .iter()
+                .any(|(field_indent, field)| *field_indent == 8 && *field == "type: string")
+                || catalog.insert(key.to_owned(), required).is_some()
+            {
+                return None;
+            }
+        }
+        Some(catalog)
+    }
+
+    fn expected_workflow_call_inputs() -> std::collections::BTreeMap<String, bool> {
+        [
+            ("ci-job-key", true),
+            ("plan-digest", true),
+            ("source-revision", true),
+            ("lane", true),
+            ("shard", false),
+            ("partition", false),
+            ("partition-label", false),
+            ("required-evidence-target", false),
+        ]
+        .into_iter()
+        .map(|(key, required)| (key.to_owned(), required))
+        .collect()
+    }
+
     fn integration_partition_pairs(yaml: &str) -> Option<Vec<String>> {
         let lines = yaml.lines().map(str::trim).collect::<Vec<_>>();
         let start = lines
@@ -6670,7 +6570,10 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
         let green = include_str!("../../.github/workflows/ci.yml");
         assert!(github_integration_workflow_has_shard_matrix(green));
         assert!(integration_matrix_rows(green).is_none());
-        assert_eq!(expected_integration_rows().len(), 8);
+        assert!(
+            !expected_integration_shards().is_empty(),
+            "integration shard anti-vacuity"
+        );
         let mut future_catalog = expected_integration_shards();
         future_catalog.push("future-shard");
         assert!(
@@ -7539,6 +7442,183 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
         shell: &str,
         workflow: &str,
     ) -> bool {
+        fn container_service_wire_ids(source: &str) -> Option<std::collections::BTreeSet<String>> {
+            let file = syn::parse_file(source).ok()?;
+            let service_enums = file
+                .items
+                .iter()
+                .filter_map(|item| match item {
+                    syn::Item::Enum(item) if item.ident == "ContainerService" => Some(item),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            let [service_enum] = service_enums.as_slice() else {
+                return None;
+            };
+            let variants = service_enum
+                .variants
+                .iter()
+                .map(|variant| {
+                    (matches!(variant.fields, syn::Fields::Unit) && variant.discriminant.is_none())
+                        .then(|| variant.ident.to_string())
+                })
+                .collect::<Option<Vec<_>>>()?;
+            let variant_ids = variants
+                .iter()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>();
+            if variant_ids.len() != variants.len() {
+                return None;
+            }
+
+            let name_methods = file
+                .items
+                .iter()
+                .filter_map(|item| match item {
+                    syn::Item::Impl(item)
+                        if item.trait_.is_none()
+                            && matches!(item.self_ty.as_ref(), syn::Type::Path(path)
+                                if path.qself.is_none() && path.path.is_ident("ContainerService")) =>
+                    {
+                        Some(item)
+                    }
+                    _ => None,
+                })
+                .flat_map(|item| item.items.iter())
+                .filter_map(|item| match item {
+                    syn::ImplItem::Fn(method) if method.sig.ident == "name" => Some(method),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            let [name_method] = name_methods.as_slice() else {
+                return None;
+            };
+            let [syn::Stmt::Expr(syn::Expr::Match(name_match), None)] =
+                name_method.block.stmts.as_slice()
+            else {
+                return None;
+            };
+            if !matches!(name_match.expr.as_ref(), syn::Expr::Path(path)
+                if path.qself.is_none() && path.path.is_ident("self"))
+            {
+                return None;
+            }
+
+            let mut mapping = std::collections::BTreeMap::new();
+            let mut wire_ids = std::collections::BTreeSet::new();
+            for arm in &name_match.arms {
+                let syn::Pat::Path(pattern) = &arm.pat else {
+                    return None;
+                };
+                let segments = pattern
+                    .path
+                    .segments
+                    .iter()
+                    .map(|segment| segment.ident.to_string())
+                    .collect::<Vec<_>>();
+                let [self_segment, variant] = segments.as_slice() else {
+                    return None;
+                };
+                let syn::Expr::Lit(value) = arm.body.as_ref() else {
+                    return None;
+                };
+                let syn::Lit::Str(wire_id) = &value.lit else {
+                    return None;
+                };
+                let wire_id = wire_id.value();
+                if self_segment != "Self"
+                    || arm.guard.is_some()
+                    || mapping.insert(variant.clone(), wire_id.clone()).is_some()
+                    || !wire_ids.insert(wire_id)
+                {
+                    return None;
+                }
+            }
+            (mapping.len() == variants.len()
+                && mapping
+                    .keys()
+                    .cloned()
+                    .collect::<std::collections::BTreeSet<_>>()
+                    == variant_ids)
+                .then_some(wire_ids)
+        }
+
+        fn shell_service_wire_ids(
+            label_matcher: &str,
+        ) -> Option<std::collections::BTreeSet<String>> {
+            const JQ_OPEN: &str = "jq -e --arg scope \"$scope\" --arg shard \"$shard\" --arg partition \"$partition\" '";
+            const JQ_CLOSE: &str = "' <<EOF >/dev/null 2>&1";
+            const FIXED_PREFIX: &str = ".[\"io.rss.integration.managed\"] == \"true\" and .[\"io.rss.integration.scope\"] == $scope and .[\"io.rss.integration.shard\"] == $shard and .[\"io.rss.integration.partition\"] == $partition and (";
+            const SERVICE_PREFIX: &str = ".[\"io.rss.integration.service\"] == \"";
+
+            fn without_jq_comment(line: &str) -> Option<String> {
+                let mut output = String::new();
+                let mut quoted = false;
+                let mut escaped = false;
+                for character in line.chars() {
+                    if escaped {
+                        output.push(character);
+                        escaped = false;
+                        continue;
+                    }
+                    match character {
+                        '\\' if quoted => {
+                            output.push(character);
+                            escaped = true;
+                        }
+                        '"' => {
+                            quoted = !quoted;
+                            output.push(character);
+                        }
+                        '#' if !quoted => break,
+                        _ => output.push(character),
+                    }
+                }
+                (!quoted && !escaped).then_some(output)
+            }
+
+            let lines = label_matcher.lines().collect::<Vec<_>>();
+            let jq_open = lines
+                .iter()
+                .enumerate()
+                .filter_map(|(index, line)| (line.trim() == JQ_OPEN).then_some(index))
+                .collect::<Vec<_>>();
+            let jq_close = lines
+                .iter()
+                .enumerate()
+                .filter_map(|(index, line)| (line.trim() == JQ_CLOSE).then_some(index))
+                .collect::<Vec<_>>();
+            let ([open], [close]) = (jq_open.as_slice(), jq_close.as_slice()) else {
+                return None;
+            };
+            if open >= close {
+                return None;
+            }
+            let predicate = lines[open + 1..*close]
+                .iter()
+                .map(|line| without_jq_comment(line).map(|line| line.trim().to_owned()))
+                .collect::<Option<Vec<_>>>()?
+                .into_iter()
+                .filter(|line| !line.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ");
+            let service_predicate = predicate.strip_prefix(FIXED_PREFIX)?.strip_suffix(')')?;
+            let ids = service_predicate
+                .split(" or ")
+                .map(|atom| {
+                    atom.strip_prefix(SERVICE_PREFIX)
+                        .and_then(|tail| tail.strip_suffix('"'))
+                        .filter(|id| !id.is_empty())
+                        .map(str::to_owned)
+                })
+                .collect::<Option<Vec<_>>>()?;
+            let unique = ids
+                .iter()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>();
+            (!ids.is_empty() && ids.len() == unique.len()).then_some(unique)
+        }
+
         fn block<'a>(source: &'a str, start: &str, end: &str) -> Option<&'a str> {
             source
                 .split_once(start)
@@ -7548,13 +7628,6 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
         let exactly_once = |source: &str, needle: &str| source.matches(needle).count() == 1;
 
         let Some(owned) = block(rust, "mod owned {", "\n}\n\n/// postgres") else {
-            return false;
-        };
-        let Some(service_enum) = block(
-            rust,
-            "pub enum ContainerService {",
-            "\n}\n\nimpl ContainerService",
-        ) else {
             return false;
         };
         let Some(service_impl) = block(rust, "impl ContainerService {", "\n}\n\n#[derive(Clone)]")
@@ -7585,23 +7658,9 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
         ) && owned.contains(
             ".into()\n            .with_labels(service.labels(&context))\n            .with_log_consumer(",
         );
-        let services_are_closed = [
-            ("Postgres,", "Self::Postgres => \"postgres\""),
-            ("Redis,", "Self::Redis => \"redis\""),
-            ("RabbitMq,", "Self::RabbitMq => \"rabbitmq\""),
-            ("Mosquitto,", "Self::Mosquitto => \"mosquitto\""),
-            ("Minio,", "Self::Minio => \"minio\""),
-            ("Vault,", "Self::Vault => \"vault\""),
-            ("Server,", "Self::Server => \"server\""),
-        ]
-        .iter()
-        .all(|(variant, arm)| {
-            exactly_once(service_enum, variant) && exactly_once(service_impl, arm)
-        }) && service_enum
-            .lines()
-            .filter(|line| line.trim().ends_with(','))
-            .count()
-            == 7;
+        let services_are_closed = container_service_wire_ids(rust).is_some_and(|rust_ids| {
+            shell_service_wire_ids(label_matcher).is_some_and(|shell_ids| shell_ids == rust_ids)
+        });
         let context_env_is_closed = [
             ("CI_SCOPE_ENV", "RSS_CI_CONTAINER_SCOPE"),
             ("CI_SHARD_ENV", "RSS_CI_INTEGRATION_SHARD"),
@@ -7620,27 +7679,12 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
             ("io.rss.integration.scope", 1),
             ("io.rss.integration.shard", 1),
             ("io.rss.integration.partition", 1),
-            ("io.rss.integration.service", 7),
         ]
         .iter()
         .all(|(label, shell_count)| {
             exactly_once(service_impl, label)
                 && label_matcher.matches(label).count() == *shell_count
-        }) && [
-            "postgres",
-            "redis",
-            "rabbitmq",
-            "mosquitto",
-            "minio",
-            "vault",
-            "server",
-        ]
-        .iter()
-        .all(|service| {
-            label_matcher.contains(&format!(
-                ".[\"io.rss.integration.service\"] == \"{service}\""
-            ))
-        });
+        }) && exactly_once(service_impl, "io.rss.integration.service");
         let partition_contract_is_closed = rust.contains(
             "matches!(value, \"unpartitioned\" | \"1/2\" | \"2/2\")",
         ) && shell.contains(
@@ -8077,7 +8121,6 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
                 ]
                 .iter()
                 .all(|branch| step.run_has_sequence(branch))
-                && step.run.iter().filter(|line| line.ends_with(')')).count() == 8
                 && step.run_has_line("integration)")
                 && step.run_has_line("audit)")
                 && step.run_has_line("*) exit 64 ;;")
@@ -8298,21 +8341,7 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
         lines
             .iter()
             .any(|(indent, line)| *indent == 2 && *line == "workflow_call:")
-            && lines
-                .iter()
-                .filter(|(indent, line)| *indent == 8 && *line == "required: true")
-                .count()
-                == 4
-            && lines
-                .iter()
-                .filter(|(indent, line)| *indent == 8 && *line == "required: false")
-                .count()
-                == 4
-            && lines
-                .iter()
-                .filter(|(indent, line)| *indent == 8 && *line == "type: string")
-                .count()
-                == 8
+            && workflow_call_inputs(yaml) == Some(expected_workflow_call_inputs())
             && lines
                 .iter()
                 .any(|(indent, line)| *indent == 2 && *line == "contents: read")
@@ -9224,6 +9253,23 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
         let rust = std::fs::read_to_string(root.join("crates/testkit/src/containers.rs"))?;
         let shell = std::fs::read_to_string(root.join(".github/scripts/integration-services.sh"))?;
         let workflow = std::fs::read_to_string(root.join(".github/workflows/rss-rust-lane.yml"))?;
+        let shell_comment_bait = shell.replacen(
+            "     .[\"io.rss.integration.service\"] == \"server\")",
+            "     # .[\"io.rss.integration.service\"] == \"nats\" or\n     .[\"io.rss.integration.service\"] == \"server\") # .[\"io.rss.integration.service\"] == \"nats\"",
+            1,
+        );
+        assert_ne!(
+            shell_comment_bait, shell,
+            "comment-bait fixture must mutate jq"
+        );
+        assert!(
+            integration_container_source_contract_is_hardened(
+                &rust,
+                &shell_comment_bait,
+                &workflow,
+            ),
+            "pure and trailing jq comments must not create service identities"
+        );
         let red_cases = [
             (
                 rust.replacen(
@@ -9245,6 +9291,43 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
             ),
             (
                 rust.replacen("    Mosquitto,", "    Nats,", 1),
+                shell.clone(),
+                workflow.clone(),
+            ),
+            (
+                rust.replacen(
+                    "    Server,\n}\n\nimpl ContainerService",
+                    "    Server,\n    Nats,\n}\n\nimpl ContainerService",
+                    1,
+                )
+                .replacen(
+                    "            Self::Server => \"server\",",
+                    "            Self::Server => \"server\",\n            Self::Nats => \"nats\",",
+                    1,
+                ),
+                shell.clone(),
+                workflow.clone(),
+            ),
+            (
+                rust.replacen(
+                    "    Server,\n}\n\nimpl ContainerService",
+                    "    Server,\n    Nats,\n}\n\nimpl ContainerService",
+                    1,
+                )
+                .replacen(
+                    "            Self::Server => \"server\",",
+                    "            Self::Server => \"server\",\n            Self::Nats => \"nats\",",
+                    1,
+                ),
+                shell_comment_bait,
+                workflow.clone(),
+            ),
+            (
+                rust.replacen(
+                    "Self::Server => \"server\"",
+                    "Self::Server => \"vault\"",
+                    1,
+                ),
                 shell.clone(),
                 workflow.clone(),
             ),

@@ -5,63 +5,15 @@
 //! active-only.
 
 use generated::http;
+use std::collections::BTreeSet;
 use vocab::{
     HttpConsistencyLevel, HttpEffectKind, LocalTxBoundary, LocalTxCommitUnknown, LocalTxModel,
     LocalTxRetry,
 };
 
-const EXPECTED_ACTIVE_SPECS: &[(&str, HttpConsistencyLevel)] = &[
-    ("audit.list-entries", HttpConsistencyLevel::LocalOnly),
-    ("audit.list-tenant-entries", HttpConsistencyLevel::LocalTx),
-    (
-        "identity.account-status-get",
-        HttpConsistencyLevel::LocalOnly,
-    ),
-    (
-        "identity.account-status-set",
-        HttpConsistencyLevel::OutboxFact,
-    ),
-    ("identity.login", HttpConsistencyLevel::OutboxFact),
-    ("identity.logout", HttpConsistencyLevel::OutboxFact),
-    ("identity.logout-all", HttpConsistencyLevel::OutboxFact),
-    ("identity.password-change", HttpConsistencyLevel::OutboxFact),
-    ("identity.policies-create", HttpConsistencyLevel::OutboxFact),
-    (
-        "identity.policies-deactivate",
-        HttpConsistencyLevel::OutboxFact,
-    ),
-    ("identity.policies-get", HttpConsistencyLevel::LocalOnly),
-    ("identity.policies-list", HttpConsistencyLevel::LocalOnly),
-    ("identity.policies-update", HttpConsistencyLevel::OutboxFact),
-    ("identity.profile", HttpConsistencyLevel::LocalOnly),
-    ("identity.refresh", HttpConsistencyLevel::OutboxFact),
-    ("identity.roles-assign", HttpConsistencyLevel::OutboxFact),
-    ("identity.roles-list", HttpConsistencyLevel::LocalOnly),
-    ("identity.roles-revoke", HttpConsistencyLevel::OutboxFact),
-    ("runtime.inventory", HttpConsistencyLevel::LocalOnly),
-    ("settings.config-get", HttpConsistencyLevel::LocalOnly),
-    ("settings.config-delete", HttpConsistencyLevel::OutboxFact),
-    ("settings.config-publish", HttpConsistencyLevel::OutboxFact),
-    ("settings.config-rollback", HttpConsistencyLevel::OutboxFact),
-    ("settings.secret-publish", HttpConsistencyLevel::LocalTx),
-    ("settings.secret-resolve", HttpConsistencyLevel::LocalOnly),
-];
-
 const EXPECTED_LOCAL_TX_SPECS: &[(&str, LocalTxModel)] = &[
     ("audit.list-tenant-entries", LocalTxModel::TenantScopedUow),
     ("settings.secret-publish", LocalTxModel::RepoAtomicCas),
-];
-
-const EXPECTED_LOCAL_ONLY_SPECS: &[&str] = &[
-    "audit.list-entries",
-    "identity.account-status-get",
-    "identity.policies-get",
-    "identity.policies-list",
-    "identity.profile",
-    "identity.roles-list",
-    "runtime.inventory",
-    "settings.config-get",
-    "settings.secret-resolve",
 ];
 
 fn active_spec(contract_id: &str) -> Option<&'static http::HttpSpec> {
@@ -70,36 +22,13 @@ fn active_spec(contract_id: &str) -> Option<&'static http::HttpSpec> {
         .find(|spec| spec.route.contract_id() == contract_id)
 }
 
-fn count_in_registry(level: HttpConsistencyLevel) -> usize {
-    http::SPECS
-        .iter()
-        .filter(|spec| spec.route.consistency_level() == level)
-        .count()
-}
-
-fn registry_distribution() -> [(HttpConsistencyLevel, usize); 5] {
-    [
-        (
-            HttpConsistencyLevel::LocalOnly,
-            count_in_registry(HttpConsistencyLevel::LocalOnly),
-        ),
-        (
-            HttpConsistencyLevel::LocalTx,
-            count_in_registry(HttpConsistencyLevel::LocalTx),
-        ),
-        (
-            HttpConsistencyLevel::OutboxFact,
-            count_in_registry(HttpConsistencyLevel::OutboxFact),
-        ),
-        (
-            HttpConsistencyLevel::WorkflowEventual,
-            count_in_registry(HttpConsistencyLevel::WorkflowEventual),
-        ),
-        (
-            HttpConsistencyLevel::DeviceLatent,
-            count_in_registry(HttpConsistencyLevel::DeviceLatent),
-        ),
-    ]
+fn assert_exact_ids(actual: &BTreeSet<&str>, expected: &BTreeSet<&str>, relation: &str) {
+    let missing = expected.difference(actual).copied().collect::<Vec<_>>();
+    let extra = actual.difference(expected).copied().collect::<Vec<_>>();
+    assert!(
+        missing.is_empty() && extra.is_empty(),
+        "{relation}: missing={missing:?}, extra={extra:?}"
+    );
 }
 
 #[test]
@@ -157,7 +86,7 @@ fn local_tx_registry_contains_exact_active_l1_contracts() {
         "every LocalTx registry entry should carry LocalTx evidence"
     );
     let actual = actual.unwrap_or_default();
-    let from_specs: Vec<_> = http::SPECS
+    let from_specs: BTreeSet<_> = http::SPECS
         .iter()
         .filter(|spec| spec.route.consistency_level() == HttpConsistencyLevel::LocalTx)
         .map(|spec| spec.route.contract_id())
@@ -167,13 +96,19 @@ fn local_tx_registry_contains_exact_active_l1_contracts() {
         EXPECTED_LOCAL_TX_SPECS,
         "LOCAL_TX_SPECS should expose the current active L1 contract set"
     );
+    let local_tx_ids = actual
+        .iter()
+        .map(|(contract_id, _)| *contract_id)
+        .collect::<BTreeSet<_>>();
+    assert_exact_ids(
+        &local_tx_ids,
+        &from_specs,
+        "LOCAL_TX_SPECS must be the exact stable-ID projection of active LocalTx HTTP specs",
+    );
     assert_eq!(
-        actual
-            .iter()
-            .map(|(contract_id, _)| *contract_id)
-            .collect::<Vec<_>>(),
-        from_specs,
-        "LOCAL_TX_SPECS should be derived from active LocalTx HTTP specs"
+        local_tx_ids.len(),
+        http::LOCAL_TX_SPECS.len(),
+        "LOCAL_TX_SPECS must not contain duplicates"
     );
     for spec in http::LOCAL_TX_SPECS {
         assert!(
@@ -204,42 +139,29 @@ fn local_tx_registry_contains_exact_active_l1_contracts() {
 
 #[test]
 fn local_only_registry_contains_exact_active_l0_contracts() {
-    let actual: Vec<_> = http::LOCAL_ONLY_SPECS
+    let actual: BTreeSet<_> = http::LOCAL_ONLY_SPECS
         .iter()
         .map(|spec| spec.route.contract_id())
         .collect();
-    let from_specs: Vec<_> = http::SPECS
+    let from_specs: BTreeSet<_> = http::SPECS
         .iter()
         .filter(|spec| spec.route.consistency_level() == HttpConsistencyLevel::LocalOnly)
         .map(|spec| spec.route.contract_id())
         .collect();
 
-    assert_eq!(actual, EXPECTED_LOCAL_ONLY_SPECS);
-    assert_eq!(
-        actual, from_specs,
-        "LOCAL_ONLY_SPECS must be derived from active LocalOnly HTTP specs in stable order"
+    assert_exact_ids(
+        &actual,
+        &from_specs,
+        "LOCAL_ONLY_SPECS must be the exact stable-ID projection of active LocalOnly HTTP specs",
     );
-    let unique: std::collections::BTreeSet<_> = actual.iter().copied().collect();
     assert_eq!(
-        unique.len(),
         actual.len(),
+        http::LOCAL_ONLY_SPECS.len(),
         "LOCAL_ONLY_SPECS must not contain duplicates"
     );
     assert!(http::LOCAL_ONLY_SPECS.iter().all(|spec| {
         spec.route.consistency_level() == HttpConsistencyLevel::LocalOnly && spec.local_tx.is_none()
     }));
-}
-
-#[test]
-fn active_local_only_modules_expose_distinct_conformance_markers() {
-    fn accept_marker<T>() {}
-
-    accept_marker::<http::audit_v1::list_entries::LocalOnlyConformanceMarker>();
-    accept_marker::<http::identity_v1::policies_get::LocalOnlyConformanceMarker>();
-    accept_marker::<http::identity_v1::policies_list::LocalOnlyConformanceMarker>();
-    accept_marker::<http::identity_v1::profile::LocalOnlyConformanceMarker>();
-    accept_marker::<http::identity_v1::roles_list::LocalOnlyConformanceMarker>();
-    accept_marker::<http::settings_v4::LocalOnlyConformanceMarker>();
 }
 
 #[test]
@@ -284,50 +206,18 @@ fn identity_security_routes_expose_outbox_producer_evidence() {
 }
 
 #[test]
-fn active_http_specs_expose_manifest_consistency_levels() {
-    for (contract_id, expected) in EXPECTED_ACTIVE_SPECS {
-        let actual = http::SPECS
-            .iter()
-            .find(|spec| spec.route.contract_id() == *contract_id)
-            .map(|spec| spec.route.consistency_level());
-        assert_eq!(
-            actual,
-            Some(*expected),
-            "active HTTP spec {contract_id} missing or consistency level drifted"
-        );
-    }
-
-    let unexpected: Vec<_> = http::SPECS
-        .iter()
-        .filter(|spec| {
-            !EXPECTED_ACTIVE_SPECS
-                .iter()
-                .any(|(contract_id, _)| *contract_id == spec.route.contract_id())
-        })
-        .map(|spec| spec.route.contract_id())
-        .collect();
+fn active_http_registry_has_unique_stable_ids() {
     assert!(
-        unexpected.is_empty(),
-        "unexpected active HTTP specs in root SPECS: {unexpected:?}"
+        !http::SPECS.is_empty(),
+        "active HTTP registry must not be empty"
     );
-}
-
-#[test]
-fn active_http_registry_keeps_current_consistency_distribution() {
+    let ids = http::SPECS
+        .iter()
+        .map(|spec| spec.route.contract_id())
+        .collect::<BTreeSet<_>>();
     assert_eq!(
+        ids.len(),
         http::SPECS.len(),
-        EXPECTED_ACTIVE_SPECS.len(),
-        "only active HTTP specs enter root SPECS"
-    );
-    assert_eq!(
-        registry_distribution(),
-        [
-            (HttpConsistencyLevel::LocalOnly, 9),
-            (HttpConsistencyLevel::LocalTx, 3),
-            (HttpConsistencyLevel::OutboxFact, 13),
-            (HttpConsistencyLevel::WorkflowEventual, 0),
-            (HttpConsistencyLevel::DeviceLatent, 0),
-        ],
-        "active HTTP consistency distribution drifted; per-contract expectations identify the changed spec"
+        "active HTTP contract IDs must be unique"
     );
 }

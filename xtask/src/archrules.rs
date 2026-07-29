@@ -339,7 +339,6 @@ pub(crate) enum MatrixAction {
 
 const MATRIX_DOC: &str =
     "docs/architecture/202607091830-015-persistence-funnel-ai-robust-matrix.md";
-const EXPECTED_FUNNEL_COUNT: usize = 15;
 const FUNNEL_ISSUE_RANGE_START: u32 = 1422;
 const FUNNEL_ISSUE_RANGE_END: u32 = 1442;
 const ISSUE_PG_RUNTIME_CUTOVER: u32 = 1677;
@@ -641,7 +640,10 @@ pub(crate) fn matrix(action: MatrixAction) -> Result<()> {
             eprintln!("archrules matrix: 已写入 {MATRIX_DOC}");
         }
         MatrixAction::Check => {
-            eprintln!("archrules matrix: {EXPECTED_FUNNEL_COUNT} 行与 committed 文档一致")
+            eprintln!(
+                "archrules matrix: {} 行与 committed 文档一致",
+                FUNNELS.len()
+            )
         }
     }
     Ok(())
@@ -656,38 +658,22 @@ fn expected_issue_partition(range_separator: &str) -> String {
     format!("#{FUNNEL_ISSUE_RANGE_START}{range_separator}#{FUNNEL_ISSUE_RANGE_END} + {extras}")
 }
 
-fn validate_matrix(
-    root: &Path,
-    records: &[RuleRecord],
-    check_doc_drift: bool,
-) -> Result<Vec<Finding<Rule>>> {
-    let mut findings = Vec::new();
-    let mut expected_issues =
-        (FUNNEL_ISSUE_RANGE_START..=FUNNEL_ISSUE_RANGE_END).collect::<BTreeSet<_>>();
-    expected_issues.extend(EXTRA_FUNNEL_ISSUES);
+fn expected_source_issues() -> BTreeSet<u32> {
+    let mut issues = (FUNNEL_ISSUE_RANGE_START..=FUNNEL_ISSUE_RANGE_END).collect::<BTreeSet<_>>();
+    issues.extend(EXTRA_FUNNEL_ISSUES);
+    issues
+}
+
+fn validate_funnel_catalog(funnels: &[FunnelSpec]) -> Vec<Finding<Rule>> {
+    let expected_issues = expected_source_issues();
     let mut actual_issues = BTreeSet::new();
     let mut seen_issues = BTreeSet::new();
     let mut keys = BTreeSet::new();
-    if FUNNELS.len() != EXPECTED_FUNNEL_COUNT {
-        findings.push(finding(
-            Rule::MatrixCoverage,
-            "FUNNELS",
-            format!(
-                "必须恰好 {EXPECTED_FUNNEL_COUNT} 行，实际 {} 行",
-                FUNNELS.len()
-            ),
-        ));
-    }
-    for funnel in FUNNELS {
+    let mut findings = Vec::new();
+
+    for funnel in funnels {
         if !keys.insert(funnel.key) {
             findings.push(finding(Rule::MatrixCoverage, funnel.key, "funnel key 重复"));
-        }
-        if funnel.upstream.is_empty() || funnel.downstream.is_empty() {
-            findings.push(finding(
-                Rule::MatrixMissingBoundary,
-                funnel.key,
-                "upstream/downstream 必须均非空",
-            ));
         }
         for issue in funnel.source_issues {
             actual_issues.insert(*issue);
@@ -698,6 +684,42 @@ fn validate_matrix(
                     format!("来源 issue #{issue} 重复归属"),
                 ));
             }
+        }
+    }
+
+    if actual_issues != expected_issues {
+        findings.push(finding(
+            Rule::MatrixCoverage,
+            "source issues",
+            format!(
+                "来源 issue 并集必须恰为 {}；missing={:?}, extra={:?}",
+                expected_issue_partition(".."),
+                expected_issues
+                    .difference(&actual_issues)
+                    .collect::<Vec<_>>(),
+                actual_issues
+                    .difference(&expected_issues)
+                    .collect::<Vec<_>>()
+            ),
+        ));
+    }
+
+    findings
+}
+
+fn validate_matrix(
+    root: &Path,
+    records: &[RuleRecord],
+    check_doc_drift: bool,
+) -> Result<Vec<Finding<Rule>>> {
+    let mut findings = validate_funnel_catalog(FUNNELS);
+    for funnel in FUNNELS {
+        if funnel.upstream.is_empty() || funnel.downstream.is_empty() {
+            findings.push(finding(
+                Rule::MatrixMissingBoundary,
+                funnel.key,
+                "upstream/downstream 必须均非空",
+            ));
         }
         let mut has_medium = false;
         for key in funnel.upstream.iter().chain(funnel.downstream) {
@@ -742,22 +764,6 @@ fn validate_matrix(
             }
             _ => {}
         }
-    }
-    if actual_issues != expected_issues {
-        findings.push(finding(
-            Rule::MatrixCoverage,
-            "source issues",
-            format!(
-                "来源 issue 并集必须恰为 {}；missing={:?}, extra={:?}",
-                expected_issue_partition(".."),
-                expected_issues
-                    .difference(&actual_issues)
-                    .collect::<Vec<_>>(),
-                actual_issues
-                    .difference(&expected_issues)
-                    .collect::<Vec<_>>()
-            ),
-        ));
     }
     if check_doc_drift && findings.is_empty() {
         let path = root.join(MATRIX_DOC);
@@ -938,8 +944,9 @@ fn render_matrix(records: &[RuleRecord]) -> Result<String> {
     }
     out.push_str(&format!(
         "\n## Verification\n\n\
-`cargo xtask archrules matrix --check` 校验固定 {EXPECTED_FUNNEL_COUNT} 行、{} 精确覆盖、边界非空、无 Soft、Hard carrier 证明、Medium synthetic-red/anti-vacuity 与文档漂移。该检查随 `archrules` 进入 `verify`/`ci`。\n",
-        expected_issue_partition("–")
+`cargo xtask archrules matrix --check` 校验 source issue stable-ID {} 精确覆盖、key 唯一、边界非空、无 Soft、Hard carrier 证明、Medium synthetic-red/anti-vacuity 与文档漂移。当前行数由 catalog 动态派生：{}。该检查随 `archrules` 进入 `verify`/`ci`。\n",
+        expected_issue_partition("–"),
+        FUNNELS.len()
     ));
     Ok(out)
 }
@@ -1338,7 +1345,7 @@ const LOCALONLY_EVIDENCE_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
         id: "LOCAL-ONLY-EXECUTION-EXACTSET-01",
         facet: None,
         carrier: "xtask",
-        evidence: "marker and set synthetic reds with real 6/6 workspace anti-vacuity",
+        evidence: "marker and set synthetic reds with real workspace non-empty anti-vacuity",
         gates: "verify,ci-local-only",
     },
     InvariantCarrierBinding {
@@ -1556,7 +1563,7 @@ const L2_ASSURANCE_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
         id: "L2-ASSURANCE-CONSUMER-POLICY-01",
         facet: None,
         carrier: "xtask",
-        evidence: "active five-handler registration-plan-handler-executor carriers with raw-callsite synthetic reds",
+        evidence: "generated handler ID exact-set across registration-plan-handler-executor carriers with non-empty and raw-callsite synthetic reds",
         gates: "verify,ci,ci-meta",
     },
     InvariantCarrierBinding {
@@ -1572,7 +1579,7 @@ const L2_ASSURANCE_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
         id: "L2-ASSURANCE-CLOSURE-01",
         facet: None,
         carrier: "xtask",
-        evidence: "bidirectional exact-set synthetic red and real 9/5 workspace closure",
+        evidence: "generated producer/fact ID bidirectional exact-set with non-empty workspace anti-vacuity",
         gates: "verify,ci,ci-meta",
     },
     InvariantCarrierBinding {
@@ -1610,7 +1617,7 @@ const PRODUCER_ASSURANCE_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
         id: "L2-PRODUCER-EXECUTION-CLOSURE-01",
         facet: None,
         carrier: "xtask",
-        evidence: "exact mounted-handler call graph synthetic red and real 9-producer transaction closure",
+        evidence: "generated producer ID exact-set over mounted-handler transaction closures with non-empty synthetic red",
         gates: "verify,ci,ci-meta",
     },
 ];
@@ -4414,23 +4421,17 @@ members = ["rss_demo"]
     }
 
     #[test]
-    fn funnel_matrix_has_exact_rows_and_issue_partition() -> Result<()> {
-        assert_eq!(FUNNELS.len(), EXPECTED_FUNNEL_COUNT);
+    fn funnel_matrix_has_exact_source_issue_partition() -> Result<()> {
+        let findings = validate_funnel_catalog(FUNNELS);
+        assert!(findings.is_empty(), "{findings:?}");
         let issues = FUNNELS
             .iter()
             .flat_map(|funnel| funnel.source_issues.iter().copied())
             .collect::<Vec<_>>();
-        let expected_issue_count = (FUNNEL_ISSUE_RANGE_END - FUNNEL_ISSUE_RANGE_START + 1) as usize
-            + EXTRA_FUNNEL_ISSUES.len();
         assert_eq!(
-            issues.len(),
-            expected_issue_count,
-            "每个来源 issue 必须且只能归属一行"
+            issues.iter().copied().collect::<BTreeSet<_>>(),
+            expected_source_issues()
         );
-        let mut expected =
-            (FUNNEL_ISSUE_RANGE_START..=FUNNEL_ISSUE_RANGE_END).collect::<BTreeSet<_>>();
-        expected.extend(EXTRA_FUNNEL_ISSUES);
-        assert_eq!(issues.iter().copied().collect::<BTreeSet<_>>(), expected);
         let pg_runtime = FUNNELS
             .iter()
             .find(|funnel| {
@@ -4509,10 +4510,64 @@ members = ["rss_demo"]
     }
 
     #[test]
+    fn funnel_catalog_rejects_equal_cardinality_wrong_id_duplicate_missing_extra_and_key_drift()
+    -> Result<()> {
+        let base = FUNNELS.to_vec();
+        let single_issue_index = base
+            .iter()
+            .position(|funnel| funnel.source_issues == [1437])
+            .context("fixture needs one stable single-issue funnel")?;
+
+        let mut equal_cardinality_wrong_id = base.clone();
+        equal_cardinality_wrong_id[single_issue_index].source_issues = &[999_999];
+        let findings = validate_funnel_catalog(&equal_cardinality_wrong_id);
+        assert!(findings.iter().any(|finding| {
+            finding.subject == "source issues"
+                && finding.detail.contains("missing=[1437]")
+                && finding.detail.contains("extra=[999999]")
+        }));
+
+        let mut duplicate_issue = base.clone();
+        duplicate_issue[single_issue_index].source_issues = &[1437, 1437];
+        let findings = validate_funnel_catalog(&duplicate_issue);
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.detail == "来源 issue #1437 重复归属")
+        );
+
+        let mut missing_issue = base.clone();
+        missing_issue[single_issue_index].source_issues = &[];
+        let findings = validate_funnel_catalog(&missing_issue);
+        assert!(findings.iter().any(|finding| {
+            finding.subject == "source issues"
+                && finding.detail.contains("missing=[1437]")
+                && finding.detail.contains("extra=[]")
+        }));
+
+        let mut extra_issue = base.clone();
+        extra_issue[single_issue_index].source_issues = &[1437, 999_999];
+        let findings = validate_funnel_catalog(&extra_issue);
+        assert!(findings.iter().any(|finding| {
+            finding.subject == "source issues"
+                && finding.detail.contains("missing=[]")
+                && finding.detail.contains("extra=[999999]")
+        }));
+
+        let mut duplicate_key = base;
+        duplicate_key[1].key = duplicate_key[0].key;
+        let findings = validate_funnel_catalog(&duplicate_key);
+        assert!(findings.iter().any(|finding| {
+            finding.subject == duplicate_key[0].key && finding.detail == "funnel key 重复"
+        }));
+        Ok(())
+    }
+
+    #[test]
     fn funnel_matrix_configuration_is_single_source() {
         let source = include_str!("archrules.rs");
         for scattered in [
-            format!("FUNNELS.len() != {EXPECTED_FUNNEL_COUNT}"),
+            ["EXPECTED_FUNNEL", "_COUNT"].concat(),
             format!("({FUNNEL_ISSUE_RANGE_START}_u32..={FUNNEL_ISSUE_RANGE_END})"),
             format!("expected.extend({EXTRA_FUNNEL_ISSUES:?})"),
             ["EXTRA_FUNNEL_ISSUES", "["].concat(),
@@ -4529,7 +4584,7 @@ members = ["rss_demo"]
         let (summary, findings) = ArchRules.check()?;
         assert!(findings.is_empty(), "{findings:?}");
         assert!(
-            summary.contains(&format!("{EXPECTED_FUNNEL_COUNT} 行持久化 funnel")),
+            summary.contains(&format!("{} 行持久化 funnel", FUNNELS.len())),
             "{summary}"
         );
         matrix(MatrixAction::Check)?;

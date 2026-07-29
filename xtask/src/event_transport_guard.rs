@@ -173,10 +173,12 @@ pub(crate) fn check_root(root: &Path) -> Result<(String, Vec<Finding<Rule>>)> {
     findings.extend(scan_relay_budget_constructor_callsites(
         &claim_cutover_sources,
     ));
-    findings.extend(scan_consumer_external_effect_capabilities(root)?);
+    let (active_handler_count, consumer_policy_findings) =
+        scan_consumer_external_effect_capabilities(root)?;
+    findings.extend(consumer_policy_findings);
     Ok((
         format!(
-            "{EVENTING_COMPOSITION_TARGET} 是 generated topology bridge + ConsumerTx 唯一真源；runtime/identityaudit durable closures 已接共享 factory；active handlers=6，unauthorized external effect callsites=0"
+            "{EVENTING_COMPOSITION_TARGET} 是 generated topology bridge + ConsumerTx 唯一真源；runtime/identityaudit durable closures 已接共享 factory；active handlers={active_handler_count}，unauthorized external effect callsites=0"
         ),
         findings,
     ))
@@ -667,7 +669,7 @@ fn consumer_policy_call_is_traversable(name: &str) -> bool {
     )
 }
 
-fn scan_consumer_external_effect_capabilities(root: &Path) -> Result<Vec<Finding<Rule>>> {
+fn scan_consumer_external_effect_capabilities(root: &Path) -> Result<(usize, Vec<Finding<Rule>>)> {
     let sources = producer_source_files(root)?
         .into_iter()
         .map(|path| {
@@ -690,14 +692,12 @@ fn scan_consumer_external_effect_capabilities(root: &Path) -> Result<Vec<Finding
         .iter()
         .flat_map(|event| event.subscriptions().iter())
         .collect::<Vec<_>>();
-    if active_subscriptions.len() != 6 {
+    let active_handler_count = active_subscriptions.len();
+    if active_subscriptions.is_empty() {
         findings.push(finding(
             Rule::ConsumerExternalEffectCapability,
             "generated::event::EVENTS",
-            format!(
-                "ConsumerTx active handler anti-vacuity drift: expected 6, got {}",
-                active_subscriptions.len()
-            ),
+            "ConsumerTx active handler projection is empty".to_string(),
         ));
     }
     for subscription in active_subscriptions {
@@ -720,7 +720,7 @@ fn scan_consumer_external_effect_capabilities(root: &Path) -> Result<Vec<Finding
             .cmp(&right.subject)
             .then_with(|| left.detail.cmp(&right.detail))
     });
-    Ok(findings)
+    Ok((active_handler_count, findings))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
