@@ -3,7 +3,7 @@
 //! INVARIANT: LOCALTX-COVERAGE-CLOSURE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "missing_route_and_duplicate_marker_are_rejected", anti_vacuity = "green_fixture_closes_every_active_localtx_contract" }.
 //! INVARIANT: LOCALTX-BACKEND-PROFILE-CLOSURE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "active_contract_without_backend_profile_is_rejected|backend_profile_missing_required_probe_is_rejected|unawaited_backend_probe_does_not_count|tenant_contract_cannot_enroll_repo_atomic_probe_set|multiple_backend_profiles_in_one_test_function_are_rejected|backend_profile_non_executable_test_attributes_are_rejected|backend_profile_shadow_constructor_is_rejected|backend_profile_nested_constructor_bait_is_rejected|backend_profile_synthetic_action_is_rejected|backend_profile_observer_binding_does_not_count|backend_profile_bare_provider_reference_is_rejected|backend_profile_free_function_provider_argument_is_rejected|backend_profile_discarded_provider_call_is_rejected|backend_profile_discarded_call_cannot_launder_result|backend_profile_tuple_projection_cannot_launder_result|backend_profile_struct_projection_cannot_launder_result|backend_profile_direct_projection_cannot_launder_result|backend_profile_tail_block_cannot_launder_discarded_call|backend_profile_unpolled_provider_future_is_rejected", anti_vacuity = "single_backend_profile_in_test_function_is_accepted|actual_workspace_has_non_empty_complete_localtx_closure" }.
 //! INVARIANT: LOCALTX-JOURNEY-CLOSURE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "fixture_mutation_requires_exactly_one_match|journey_missing_entry_is_rejected|journey_extra_entry_is_rejected|journey_duplicate_entry_is_rejected|journey_legacy_scope_is_rejected|journey_wrong_tx_model_is_rejected|journey_missing_scenario_is_rejected|journey_non_commit_unknown_case_requires_commits|journey_fake_logout_conflict_is_rejected|journey_missing_board_is_rejected|journey_unknown_board_field_is_rejected|journey_unknown_spec_field_is_rejected|journey_unknown_fixture_field_is_rejected|journey_dangling_spec_is_rejected|journey_spec_metadata_drift_identifies_field_and_values|journey_fixture_metadata_drift_identifies_field_and_values|journey_missing_typed_marker_is_rejected|journey_marker_without_test_attribute_is_rejected|journey_marker_in_unused_closure_is_rejected|journey_ignored_test_is_rejected|journey_cfg_disabled_test_is_rejected|journey_cfg_disabled_ancestor_is_rejected|journey_should_panic_test_is_rejected|journey_return_expression_is_rejected|journey_wrong_route_marker_is_rejected|journey_missing_case_consumption_is_rejected|journey_duplicate_case_consumption_is_rejected|journey_dynamic_case_consumption_is_rejected|journey_case_consumption_in_unused_helper_is_rejected|journey_case_consumption_in_another_test_is_rejected|journey_case_consumption_in_noncanonical_flow_is_rejected|journey_unobserved_case_values_are_rejected|journey_target_must_require_integration|journey_runner_extra_marker_is_rejected|journey_runner_duplicate_marker_is_rejected", anti_vacuity = "journey_green_fixture_closes_active_matrix|journey_markers_may_span_real_tests|journey_entries_may_use_distinct_runners|journey_commit_unknown_case_may_omit_commits|actual_workspace_closes_active_localtx_journeys" }.
-//! INVARIANT: LOCALTX-REQUIRED-EVIDENCE-COUNTS-01 { level = "Medium", exec = "integration", source = "code", synthetic_red = "required_evidence_counts_reject_wrong_carrier_and_distinct_profile_gap|required_evidence_backend_profiles_reject_noncanonical_execution_carriers", anti_vacuity = "actual_workspace_has_verified_localtx_evidence_counts" }.
+//! INVARIANT: LOCALTX-REQUIRED-EVIDENCE-EXACTSET-01 { level = "Medium", exec = "integration", source = "code", synthetic_red = "required_evidence_counts_reject_wrong_carrier_and_distinct_profile_gap|required_evidence_exact_set_rejects_equal_count_wrong_set|required_evidence_backend_profiles_reject_noncanonical_execution_carriers", anti_vacuity = "actual_workspace_has_verified_localtx_evidence_exact_set" }.
 
 use crate::contract::manifest::{
     ConsistencyLevel, ContractKind, ContractOwner, Lifecycle, LocalTxBoundary,
@@ -127,35 +127,45 @@ pub(crate) struct LocalTxProofInventory {
     cargo_targets: Vec<BackendCarrierIdentity>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct VerifiedLocalTxCounts {
-    active_count: usize,
-    journey_count: usize,
-    backend_profile_count: usize,
+/// Private exact-set proof that active LocalTx contracts, journeys, and backend profiles close the
+/// same sorted contract-id set. Construction is confined to required-evidence verification.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct VerifiedLocalTxContractSet {
+    active_contract_ids: Vec<String>,
+    journey_contract_ids: Vec<String>,
+    backend_profile_contract_ids: Vec<String>,
 }
 
-impl VerifiedLocalTxCounts {
-    pub(crate) const EXPECTED: usize = 4;
-
+impl VerifiedLocalTxContractSet {
     #[cfg(test)]
-    pub(crate) const fn for_test() -> Self {
+    pub(crate) fn for_test() -> Self {
+        const IDS: [&str; 2] = [
+            "audit.list-tenant-entries",
+            "settings.secret-publish",
+        ];
+        let ids = IDS.iter().map(|id| (*id).to_owned()).collect::<Vec<_>>();
         Self {
-            active_count: Self::EXPECTED,
-            journey_count: Self::EXPECTED,
-            backend_profile_count: Self::EXPECTED,
+            active_contract_ids: ids.clone(),
+            journey_contract_ids: ids.clone(),
+            backend_profile_contract_ids: ids,
         }
     }
 
-    pub(crate) const fn active_count(self) -> usize {
-        self.active_count
+    pub(crate) fn active_contract_ids(&self) -> &[String] {
+        &self.active_contract_ids
     }
 
-    pub(crate) const fn journey_count(self) -> usize {
-        self.journey_count
+    pub(crate) fn journey_contract_ids(&self) -> &[String] {
+        &self.journey_contract_ids
     }
 
-    pub(crate) const fn backend_profile_count(self) -> usize {
-        self.backend_profile_count
+    pub(crate) fn backend_profile_contract_ids(&self) -> &[String] {
+        &self.backend_profile_contract_ids
+    }
+
+    #[cfg(test)]
+    pub(crate) fn contract_count(&self) -> usize {
+        self.active_contract_ids.len()
     }
 }
 
@@ -780,35 +790,77 @@ fn required_evidence_contract_sets(
     Ok(sets)
 }
 
+pub(crate) fn localtx_exact_set_difference_summary(
+    active: &[String],
+    journeys: &[String],
+    backend_profiles: &[String],
+) -> String {
+    let active = active.iter().map(String::as_str).collect::<BTreeSet<_>>();
+    let journeys = journeys.iter().map(String::as_str).collect::<BTreeSet<_>>();
+    let backend_profiles = backend_profiles
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let missing_from_journeys = active.difference(&journeys).copied().collect::<Vec<_>>();
+    let extra_in_journeys = journeys.difference(&active).copied().collect::<Vec<_>>();
+    let missing_from_backend = active
+        .difference(&backend_profiles)
+        .copied()
+        .collect::<Vec<_>>();
+    let extra_in_backend = backend_profiles
+        .difference(&active)
+        .copied()
+        .collect::<Vec<_>>();
+    format!(
+        "missing_from_journeys={missing_from_journeys:?} extra_in_journeys={extra_in_journeys:?} missing_from_backend={missing_from_backend:?} extra_in_backend={extra_in_backend:?}"
+    )
+}
+
+pub(crate) fn localtx_receipt_inventory_difference_summary(
+    verified_active: &[String],
+    receipt_active: &[String],
+) -> String {
+    let verified = verified_active
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let receipt = receipt_active
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let missing_from_receipt = verified.difference(&receipt).copied().collect::<Vec<_>>();
+    let extra_in_receipt = receipt.difference(&verified).copied().collect::<Vec<_>>();
+    format!("missing_from_receipt={missing_from_receipt:?} extra_in_receipt={extra_in_receipt:?}")
+}
+
+fn verify_required_evidence_sets(
+    sets: RequiredEvidenceContractSets,
+) -> Result<VerifiedLocalTxContractSet> {
+    let active = sets.active.into_iter().collect::<Vec<_>>();
+    let journeys = sets.journeys.into_iter().collect::<Vec<_>>();
+    let backend_profiles = sets.backend_profiles.into_iter().collect::<Vec<_>>();
+    if active.is_empty() || active != journeys || active != backend_profiles {
+        bail!(
+            "LocalTx required evidence active/journey/backend sets are not exact: {}",
+            localtx_exact_set_difference_summary(&active, &journeys, &backend_profiles)
+        );
+    }
+    Ok(VerifiedLocalTxContractSet {
+        active_contract_ids: active,
+        journey_contract_ids: journeys,
+        backend_profile_contract_ids: backend_profiles,
+    })
+}
+
 fn verify_required_evidence_inventory(
     inventory: &LocalTxProofInventory,
     backend_execution: &crate::integration_shards::ExecutionUnit,
-) -> Result<VerifiedLocalTxCounts> {
+) -> Result<VerifiedLocalTxContractSet> {
     let sets = required_evidence_contract_sets(inventory, backend_execution)?;
-    let counts = VerifiedLocalTxCounts {
-        active_count: sets.active.len(),
-        journey_count: sets.journeys.len(),
-        backend_profile_count: sets.backend_profiles.len(),
-    };
-    if counts.active_count != VerifiedLocalTxCounts::EXPECTED
-        || counts.journey_count != VerifiedLocalTxCounts::EXPECTED
-        || counts.backend_profile_count != VerifiedLocalTxCounts::EXPECTED
-    {
-        bail!(
-            "LocalTx required evidence must close exactly {} distinct contracts; active={} {:?}; journeys={} {:?}; backend_profiles={} {:?}",
-            VerifiedLocalTxCounts::EXPECTED,
-            counts.active_count,
-            sets.active,
-            counts.journey_count,
-            sets.journeys,
-            counts.backend_profile_count,
-            sets.backend_profiles,
-        );
-    }
-    Ok(counts)
+    verify_required_evidence_sets(sets)
 }
 
-pub(crate) fn verify_required_evidence_counts(root: &Path) -> Result<VerifiedLocalTxCounts> {
+pub(crate) fn verify_required_evidence_set(root: &Path) -> Result<VerifiedLocalTxContractSet> {
     let inventory = collect_workspace_inventory(root)?;
     let findings = inventory.findings();
     if let Some(first) = findings.first() {
@@ -8705,14 +8757,16 @@ impl ::bootstrap::Domain for Demo {
     }
 
     #[test]
-    fn actual_workspace_has_verified_localtx_evidence_counts() -> anyhow::Result<()> {
-        let counts = verify_required_evidence_counts(&crate::workspace_root()?)?;
-        assert_eq!(counts.active_count(), VerifiedLocalTxCounts::EXPECTED);
-        assert_eq!(counts.journey_count(), VerifiedLocalTxCounts::EXPECTED);
-        assert_eq!(
-            counts.backend_profile_count(),
-            VerifiedLocalTxCounts::EXPECTED
-        );
+    fn actual_workspace_has_verified_localtx_evidence_exact_set() -> anyhow::Result<()> {
+        let verified = verify_required_evidence_set(&crate::workspace_root()?)?;
+        let expected = [
+            "audit.list-tenant-entries",
+            "settings.secret-publish",
+        ];
+        assert_eq!(verified.active_contract_ids(), expected);
+        assert_eq!(verified.journey_contract_ids(), expected);
+        assert_eq!(verified.backend_profile_contract_ids(), expected);
+        assert_eq!(verified.contract_count(), expected.len());
         Ok(())
     }
 
@@ -8743,6 +8797,7 @@ impl ::bootstrap::Domain for Demo {
         assert!(format!("{error:#}").contains("wrong-carrier"));
 
         let mut profile_gap = collect_workspace_inventory(&root)?;
+        let active_len = profile_gap.contracts.len();
         let duplicate = clone_profile(&profile_gap.contracts[0].backend_profiles[0]);
         profile_gap.contracts[0].backend_profiles.push(duplicate);
         profile_gap.contracts[1].backend_profiles.clear();
@@ -8753,13 +8808,64 @@ impl ::bootstrap::Domain for Demo {
             .filter(|profile| profile.complete())
             .count();
         assert_eq!(
-            raw_complete_profiles,
-            VerifiedLocalTxCounts::EXPECTED,
-            "synthetic fixture must preserve a misleading raw profile count"
+            raw_complete_profiles, active_len,
+            "synthetic fixture must preserve a misleading raw profile count equal to active.len()"
         );
         let sets = required_evidence_contract_sets(&profile_gap, &carrier)?;
-        assert_eq!(sets.backend_profiles.len(), 4);
+        assert_ne!(
+            sets.backend_profiles, sets.active,
+            "distinct-contract profile gap must diverge from the active set"
+        );
         assert!(verify_required_evidence_inventory(&profile_gap, &carrier).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn required_evidence_exact_set_rejects_equal_count_wrong_set() -> anyhow::Result<()> {
+        let root = crate::workspace_root()?;
+        let carrier = crate::integration_shards::localtx_backend_execution_unit()?;
+        let inventory = collect_workspace_inventory(&root)?;
+        let mut sets = required_evidence_contract_sets(&inventory, &carrier)?;
+        let original_count = sets.active.len();
+        ensure!(
+            original_count > 0,
+            "workspace LocalTx set must be non-empty"
+        );
+        let replaced = sets.journeys.iter().next().context("journey set")?.clone();
+        sets.journeys.remove(&replaced);
+        sets.journeys
+            .insert("forged.equal-count-wrong-set".to_owned());
+        assert_eq!(sets.journeys.len(), original_count);
+        assert_ne!(sets.journeys, sets.active);
+        let Err(error) = verify_required_evidence_sets(sets) else {
+            bail!("equal-count wrong journey set must fail closed");
+        };
+        assert!(
+            format!("{error:#}").contains("extra_in_journeys=[\"forged.equal-count-wrong-set\"]"),
+            "{error:#}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn required_evidence_exact_set_accepts_synchronized_shrink_without_expected_n()
+    -> anyhow::Result<()> {
+        let root = crate::workspace_root()?;
+        let carrier = crate::integration_shards::localtx_backend_execution_unit()?;
+        let mut inventory = collect_workspace_inventory(&root)?;
+        let original = verify_required_evidence_inventory(&inventory, &carrier)?;
+        ensure!(
+            original.contract_count() > 1,
+            "workspace must have more than one LocalTx contract to shrink"
+        );
+        inventory.contracts.remove(0);
+        let shrunk = verify_required_evidence_inventory(&inventory, &carrier)?;
+        assert_eq!(shrunk.contract_count(), original.contract_count() - 1);
+        assert_eq!(shrunk.active_contract_ids(), shrunk.journey_contract_ids());
+        assert_eq!(
+            shrunk.active_contract_ids(),
+            shrunk.backend_profile_contract_ids()
+        );
         Ok(())
     }
 

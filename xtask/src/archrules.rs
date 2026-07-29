@@ -1297,10 +1297,10 @@ const LOCALTX_COVERAGE_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
     },
     InvariantCarrierBinding {
         path: "xtask/src/localtx_coverage.rs",
-        id: "LOCALTX-REQUIRED-EVIDENCE-COUNTS-01",
+        id: "LOCALTX-REQUIRED-EVIDENCE-EXACTSET-01",
         facet: None,
         carrier: "xtask",
-        evidence: "carrier/count synthetic reds with canonical workspace anti-vacuity",
+        evidence: "carrier/exact-set synthetic reds with canonical workspace anti-vacuity",
         gates: "integration",
     },
 ];

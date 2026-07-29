@@ -1,11 +1,11 @@
 //! Typed producer and strict consumer for the LocalTx required evidence receipt.
 //!
-//! INVARIANT: LOCALTX-REQUIRED-EVIDENCE-FUNNEL-01 { level = "Hard", exec = "native-compile", source = "code", native = "LocalTxEvidenceRequest::publish requires the private PostgresDomainPassed and VerifiedLocalTxCounts capabilities; the receipt wire has one closed owner/outcome/kind" }.
-//! INVARIANT: LOCALTX-REQUIRED-EVIDENCE-WIRE-01 { level = "Hard", exec = "native-compile", source = "code", native = "the private closed receipt DTO fixes the field inventory and typed values; deny_unknown_fields plus a committed v1 serialization golden reject schema drift" }.
+//! INVARIANT: LOCALTX-REQUIRED-EVIDENCE-FUNNEL-01 { level = "Hard", exec = "native-compile", source = "code", native = "LocalTxEvidenceRequest::publish requires the private PostgresDomainPassed and VerifiedLocalTxContractSet capabilities; the receipt wire has one closed owner/outcome/kind" }.
+//! INVARIANT: LOCALTX-REQUIRED-EVIDENCE-WIRE-01 { level = "Hard", exec = "native-compile", source = "code", native = "the private closed receipt DTO fixes the field inventory and typed values; deny_unknown_fields plus a committed v3 serialization golden reject schema drift" }.
 
 use crate::ci_identity::CiIdentityKey;
 use crate::ci_lanes::CiJobKey;
-use crate::localtx_coverage::VerifiedLocalTxCounts;
+use crate::localtx_coverage::VerifiedLocalTxContractSet;
 use crate::verify::PostgresDomainPassed;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -15,8 +15,8 @@ use std::path::{Path, PathBuf};
 
 pub(crate) const FILE_NAME: &str = "localtx-required.json";
 pub(crate) const OWNER: CiJobKey = CiJobKey::IntegrationPostgresDomain;
-const SCHEMA_VERSION: u8 = 1;
-const MAX_RECEIPT_BYTES: u64 = 16 * 1024;
+const SCHEMA_VERSION: u8 = 3;
+const MAX_RECEIPT_BYTES: u64 = 64 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -41,9 +41,7 @@ struct ReceiptWire {
     run_id: String,
     run_attempt: String,
     outcome: EvidenceOutcome,
-    localtx_active_count: usize,
-    localtx_journey_count: usize,
-    localtx_backend_profile_count: usize,
+    localtx_contract_ids: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -142,16 +140,8 @@ impl LocalTxEvidenceRequest {
     pub(crate) fn publish(
         self,
         _passed: PostgresDomainPassed,
-        counts: VerifiedLocalTxCounts,
+        verified: VerifiedLocalTxContractSet,
     ) -> Result<()> {
-        let active_count = counts.active_count();
-        let journey_count = counts.journey_count();
-        let backend_profile_count = counts.backend_profile_count();
-        if [active_count, journey_count, backend_profile_count]
-            != [VerifiedLocalTxCounts::EXPECTED; 3]
-        {
-            bail!("verified LocalTx counts must all equal the required count");
-        }
         let wire = ReceiptWire {
             schema_version: SCHEMA_VERSION,
             evidence_kind: EvidenceKind::LocaltxRequired,
@@ -161,10 +151,10 @@ impl LocalTxEvidenceRequest {
             run_id: self.identity.run_id,
             run_attempt: self.identity.run_attempt,
             outcome: EvidenceOutcome::Success,
-            localtx_active_count: active_count,
-            localtx_journey_count: journey_count,
-            localtx_backend_profile_count: backend_profile_count,
+            // The verified capability already proved active/journey/backend exact equality.
+            localtx_contract_ids: verified.active_contract_ids().to_vec(),
         };
+        validate_wire(&wire)?;
         let mut contents =
             serde_json::to_vec_pretty(&wire).context("serialize LocalTx evidence")?;
         contents.push(b'\n');
@@ -228,17 +218,25 @@ impl ValidatedLocalTxReceipt {
         &self.wire.run_attempt
     }
 
-    pub(crate) const fn active_count(&self) -> usize {
-        self.wire.localtx_active_count
+    pub(crate) fn contract_ids(&self) -> &[String] {
+        &self.wire.localtx_contract_ids
     }
 
-    pub(crate) const fn journey_count(&self) -> usize {
-        self.wire.localtx_journey_count
+    pub(crate) fn contract_count(&self) -> usize {
+        self.wire.localtx_contract_ids.len()
     }
+}
 
-    pub(crate) const fn backend_profile_count(&self) -> usize {
-        self.wire.localtx_backend_profile_count
+fn validate_contract_set(values: &[String]) -> Result<()> {
+    if values.is_empty()
+        || values.windows(2).any(|pair| pair[0] >= pair[1])
+        || values
+            .iter()
+            .any(|value| !consistency::is_canonical_topic_name(value))
+    {
+        bail!("LocalTx evidence contract set is invalid");
     }
+    Ok(())
 }
 
 fn validate_wire(wire: &ReceiptWire) -> Result<()> {
@@ -258,26 +256,13 @@ fn validate_wire(wire: &ReceiptWire) -> Result<()> {
     validate_digest(&wire.plan_digest)?;
     validate_run_component(&wire.run_id, "run ID")?;
     validate_run_component(&wire.run_attempt, "run attempt")?;
-    if [
-        wire.localtx_active_count,
-        wire.localtx_journey_count,
-        wire.localtx_backend_profile_count,
-    ] != [VerifiedLocalTxCounts::EXPECTED; 3]
-    {
-        bail!(
-            "LocalTx evidence counts mismatch: active={} journey={} backend-profile={} expected={}",
-            wire.localtx_active_count,
-            wire.localtx_journey_count,
-            wire.localtx_backend_profile_count,
-            VerifiedLocalTxCounts::EXPECTED,
-        );
-    }
+    validate_contract_set(&wire.localtx_contract_ids)?;
     Ok(())
 }
 
 fn ensure_receipt_size(size: u64) -> Result<()> {
     if size > MAX_RECEIPT_BYTES {
-        bail!("LocalTx evidence receipt exceeds 16 KiB");
+        bail!("LocalTx evidence receipt exceeds 64 KiB");
     }
     Ok(())
 }
@@ -397,6 +382,13 @@ mod tests {
         prepare_request_with(job, output, |name| Ok(values.get(name).cloned()))
     }
 
+    fn golden_ids() -> Vec<String> {
+        vec![
+            "audit.list-tenant-entries".to_owned(),
+            "settings.secret-publish".to_owned(),
+        ]
+    }
+
     fn golden_wire() -> ReceiptWire {
         ReceiptWire {
             schema_version: SCHEMA_VERSION,
@@ -407,22 +399,49 @@ mod tests {
             run_id: "42".to_owned(),
             run_attempt: "3".to_owned(),
             outcome: EvidenceOutcome::Success,
-            localtx_active_count: 5,
-            localtx_journey_count: 5,
-            localtx_backend_profile_count: 5,
+            localtx_contract_ids: golden_ids(),
         }
+    }
+
+    fn wire_with_ids(ids: Vec<String>) -> ReceiptWire {
+        let mut wire = golden_wire();
+        wire.localtx_contract_ids = ids;
+        wire
     }
 
     fn publish_when_ready(
         request: LocalTxEvidenceRequest,
         passed: Result<PostgresDomainPassed>,
-        counts: Result<VerifiedLocalTxCounts>,
+        verified: Result<VerifiedLocalTxContractSet>,
     ) -> Result<()> {
-        request.publish(passed?, counts?)
+        request.publish(passed?, verified?)
+    }
+
+    /// Mirrors the deleted local predicate so tests pin the canonical widening.
+    fn legacy_local_contract_id(value: &str) -> bool {
+        if value.is_empty() || value.len() > 128 || value.contains("--") {
+            return false;
+        }
+        let segments = value.split('.').collect::<Vec<_>>();
+        segments.len() >= 2
+            && segments.iter().all(|segment| {
+                !segment.is_empty()
+                    && segment.bytes().all(|byte| {
+                        byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'
+                    })
+                    && segment
+                        .as_bytes()
+                        .first()
+                        .is_some_and(u8::is_ascii_alphanumeric)
+                    && segment
+                        .as_bytes()
+                        .last()
+                        .is_some_and(u8::is_ascii_alphanumeric)
+            })
     }
 
     #[test]
-    fn receipt_v1_wire_matches_committed_golden() -> Result<()> {
+    fn receipt_v3_wire_matches_committed_golden() -> Result<()> {
         let actual = format!("{}\n", serde_json::to_string_pretty(&golden_wire())?);
         assert_eq!(
             actual,
@@ -442,14 +461,14 @@ mod tests {
         publish_when_ready(
             request,
             Ok(PostgresDomainPassed::for_test()),
-            Ok(VerifiedLocalTxCounts::for_test()),
+            Ok(VerifiedLocalTxContractSet::for_test()),
         )?;
 
         let serialized = fs::read_to_string(&output)?;
         assert_eq!(
             serialized,
             include_str!("../tests/golden/localtx-required-receipt.json"),
-            "the sole producer must emit the committed receipt-v1 wire"
+            "the sole producer must emit the committed receipt-v3 wire"
         );
         let receipt = ValidatedLocalTxReceipt::load(&output)?;
         assert_eq!(receipt.job_key(), OWNER);
@@ -457,12 +476,8 @@ mod tests {
         assert_eq!(receipt.plan_digest(), "c".repeat(64));
         assert_eq!(receipt.run_id(), "42");
         assert_eq!(receipt.run_attempt(), "3");
-        assert_eq!(receipt.active_count(), VerifiedLocalTxCounts::EXPECTED);
-        assert_eq!(receipt.journey_count(), VerifiedLocalTxCounts::EXPECTED);
-        assert_eq!(
-            receipt.backend_profile_count(),
-            VerifiedLocalTxCounts::EXPECTED
-        );
+        assert_eq!(receipt.contract_ids(), golden_ids());
+        assert_eq!(receipt.contract_count(), 2);
         fs::remove_dir_all(root)?;
         Ok(())
     }
@@ -477,7 +492,7 @@ mod tests {
             publish_when_ready(
                 runner_request,
                 Err(anyhow::anyhow!("postgres-domain failed")),
-                Ok(VerifiedLocalTxCounts::for_test()),
+                Ok(VerifiedLocalTxContractSet::for_test()),
             )
             .is_err()
         );
@@ -486,33 +501,32 @@ mod tests {
             "a failed postgres-domain run must not publish evidence"
         );
 
-        let counts_output = root.join("counts/localtx-required.json");
-        let counts_request = request_with(OWNER, Some(&counts_output), &identity())?
-            .context("count verification failure request")?;
+        let set_output = root.join("sets/localtx-required.json");
+        let set_request = request_with(OWNER, Some(&set_output), &identity())?
+            .context("set verification failure request")?;
         assert!(
             publish_when_ready(
-                counts_request,
+                set_request,
                 Ok(PostgresDomainPassed::for_test()),
                 Err(anyhow::anyhow!("LocalTx inventory verification failed")),
             )
             .is_err()
         );
         assert!(
-            !counts_output.exists(),
-            "failed count verification must not publish evidence"
+            !set_output.exists(),
+            "failed set verification must not publish evidence"
         );
         fs::remove_dir_all(root)?;
         Ok(())
     }
 
     #[test]
-    fn parser_rejects_schema_unknown_outcome_counts_and_static_report_bait() -> Result<()> {
+    fn parser_rejects_legacy_schema_invalid_set_unknown_fields_and_count_bait() -> Result<()> {
         let valid = serde_json::to_value(golden_wire())?;
         for (label, mutation) in [
-            ("legacy-schema", ("schemaVersion", serde_json::json!(0))),
+            ("legacy-schema-v2", ("schemaVersion", serde_json::json!(2))),
+            ("legacy-schema-v1", ("schemaVersion", serde_json::json!(1))),
             ("failure", ("outcome", serde_json::json!("failure"))),
-            ("count-four", ("localtxActiveCount", serde_json::json!(4))),
-            ("count-six", ("localtxJourneyCount", serde_json::json!(6))),
         ] {
             let mut value = valid.clone();
             value[mutation.0] = mutation.1;
@@ -521,27 +535,128 @@ mod tests {
                 "{label}"
             );
         }
-        let mut invalid_counts = valid.clone();
-        invalid_counts["localtxActiveCount"] = serde_json::json!(4);
-        invalid_counts["localtxJourneyCount"] = serde_json::json!(6);
-        invalid_counts["localtxBackendProfileCount"] = serde_json::json!(7);
-        let error = match ValidatedLocalTxReceipt::parse(&serde_json::to_string(&invalid_counts)?) {
-            Err(error) => error.to_string(),
-            Ok(_) => bail!("mismatched LocalTx counts must fail"),
-        };
-        assert_eq!(
-            error,
-            "LocalTx evidence counts mismatch: active=4 journey=6 backend-profile=7 expected=5"
-        );
-        let mut unknown = valid;
-        unknown["staticProofInventory"] = serde_json::json!({"active": 5});
+
+        let mut empty = valid.clone();
+        empty["localtxContractIds"] = serde_json::json!([]);
+        assert!(ValidatedLocalTxReceipt::parse(&serde_json::to_string(&empty)?).is_err());
+
+        let mut unsorted = valid.clone();
+        unsorted["localtxContractIds"] = serde_json::json!([
+            "settings.secret-publish",
+            "audit.list-tenant-entries"
+        ]);
+        assert!(ValidatedLocalTxReceipt::parse(&serde_json::to_string(&unsorted)?).is_err());
+
+        let mut duplicate = valid.clone();
+        duplicate["localtxContractIds"] = serde_json::json!([
+            "audit.list-tenant-entries",
+            "audit.list-tenant-entries",
+            "settings.secret-publish"
+        ]);
+        assert!(ValidatedLocalTxReceipt::parse(&serde_json::to_string(&duplicate)?).is_err());
+
+        let mut invalid_id = valid.clone();
+        invalid_id["localtxContractIds"] = serde_json::json!([
+            "audit.list-tenant-entries",
+            "Bad.Case",
+            "settings.secret-publish"
+        ]);
+        assert!(ValidatedLocalTxReceipt::parse(&serde_json::to_string(&invalid_id)?).is_err());
+
+        let mut unknown = valid.clone();
+        unknown["staticProofInventory"] = serde_json::json!({"active": 3});
         assert!(ValidatedLocalTxReceipt::parse(&serde_json::to_string(&unknown)?).is_err());
+
+        let mut legacy_triple = valid.clone();
+        legacy_triple["localtxActiveContractIds"] = serde_json::json!(golden_ids());
+        assert!(
+            ValidatedLocalTxReceipt::parse(&serde_json::to_string(&legacy_triple)?).is_err(),
+            "v2 triple-set fields must be unknown on schema v3"
+        );
+
         assert!(
             ValidatedLocalTxReceipt::parse(
-                r#"{"schemaVersion":1,"activeContracts":5,"journeys":5,"backendProfiles":5}"#
+                r#"{"schemaVersion":1,"evidenceKind":"localtx-required","jobKey":"integration/postgres-domain","sourceRevision":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","planDigest":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","runId":"42","runAttempt":"3","outcome":"success","localtxActiveCount":5,"localtxJourneyCount":5,"localtxBackendProfileCount":5}"#
             )
+            .is_err(),
+            "v1 count bait must not parse as schema v3"
+        );
+        assert!(
+            ValidatedLocalTxReceipt::parse(
+                r#"{"schemaVersion":2,"evidenceKind":"localtx-required","jobKey":"integration/postgres-domain","sourceRevision":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","planDigest":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","runId":"42","runAttempt":"3","outcome":"success","localtxActiveContractIds":["audit.list-tenant-entries"],"localtxJourneyContractIds":["audit.list-tenant-entries"],"localtxBackendProfileContractIds":["audit.list-tenant-entries"]}"#
+            )
+            .is_err(),
+            "v2 triple-set wire must not parse as schema v3"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn validate_accepts_canonical_ids_rejected_by_legacy_local_predicate() -> Result<()> {
+        let single = "foo";
+        let long_segment = format!("a.{}", "b".repeat(130));
+        assert!(consistency::is_canonical_topic_name(single));
+        assert!(consistency::is_canonical_topic_name(&long_segment));
+        assert!(!legacy_local_contract_id(single));
+        assert!(!legacy_local_contract_id(&long_segment));
+
+        let accepted =
+            ValidatedLocalTxReceipt::parse(&serde_json::to_string(&wire_with_ids(vec![
+                long_segment.clone(),
+                single.to_owned(),
+            ]))?)?;
+        assert_eq!(
+            accepted.contract_ids(),
+            &[long_segment.clone(), single.to_owned()]
+        );
+
+        assert!(
+            ValidatedLocalTxReceipt::parse(&serde_json::to_string(&wire_with_ids(vec![
+                "Bad.Case".to_owned()
+            ]))?)
+            .is_err(),
+            "canonical rejections must still fail closed"
+        );
+        assert!(
+            ValidatedLocalTxReceipt::parse(&serde_json::to_string(&wire_with_ids(vec![
+                "a..b".to_owned()
+            ]))?)
             .is_err()
         );
+        Ok(())
+    }
+
+    #[test]
+    fn large_canonical_set_fits_within_64kib_pretty_receipt() -> Result<()> {
+        let ids = (0..48)
+            .map(|index| format!("domain{index:02}.operation-name-{index:02}"))
+            .collect::<Vec<_>>();
+        assert!(ids.len() >= 40);
+        assert!(ids.windows(2).all(|pair| pair[0] < pair[1]));
+        assert!(
+            ids.iter()
+                .all(|id| consistency::is_canonical_topic_name(id))
+        );
+
+        let wire = wire_with_ids(ids.clone());
+        let mut contents = serde_json::to_vec_pretty(&wire)?;
+        contents.push(b'\n');
+        assert!(
+            (contents.len() as u64) <= MAX_RECEIPT_BYTES,
+            "pretty receipt with {} ids is {} bytes; expected ≤ {} (raise inventory sizing or fail message)",
+            ids.len(),
+            contents.len(),
+            MAX_RECEIPT_BYTES
+        );
+        let receipt = ValidatedLocalTxReceipt::parse(std::str::from_utf8(&contents)?)?;
+        assert_eq!(receipt.contract_ids(), ids.as_slice());
+        assert_eq!(receipt.contract_count(), ids.len());
+
+        let oversized = "x".repeat((MAX_RECEIPT_BYTES as usize) + 1);
+        let Err(error) = ValidatedLocalTxReceipt::parse(&oversized) else {
+            bail!("oversized payload must fail closed");
+        };
+        assert!(error.to_string().contains("exceeds 64 KiB"), "{}", error);
         Ok(())
     }
 

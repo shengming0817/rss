@@ -10,6 +10,7 @@ use crate::ci_impact::{CiImpactPlan, DecisionKind, DecisionReason, PolicyMode};
 use crate::ci_lanes::CiJobKey;
 use crate::localonly_evidence::{FILE_NAME as LOCALONLY_FILE_NAME, OWNER as LOCALONLY_OWNER};
 use crate::localonly_evidence::{ValidatedLocalOnlyReport, exact_set_difference_summary};
+use crate::localtx_coverage::localtx_receipt_inventory_difference_summary;
 use crate::localtx_evidence::ValidatedLocalTxReceipt;
 use crate::localtx_evidence::{FILE_NAME as LOCALTX_FILE_NAME, OWNER as LOCALTX_OWNER};
 use anyhow::{Context, Result, bail};
@@ -238,18 +239,14 @@ struct GateEnvelope {
     full_fallback: Option<bool>,
     observed_receipt_count: usize,
     observed_receipt_keys: Vec<CiJobKey>,
-    localtx_active_count: Option<usize>,
-    localtx_journey_count: Option<usize>,
-    localtx_backend_profile_count: Option<usize>,
+    localtx_contract_count: Option<usize>,
     localonly_contract_count: Option<usize>,
     success_metrics: Option<GateMetrics>,
 }
 
 struct GateSuccess {
     metrics: GateMetrics,
-    localtx_active_count: usize,
-    localtx_journey_count: usize,
-    localtx_backend_profile_count: usize,
+    localtx_contract_count: usize,
     localonly_contract_count: usize,
 }
 
@@ -343,9 +340,7 @@ fn run_with_runtime(options: &Options, runtime: &RuntimeIdentity) -> Result<()> 
                 None,
                 Some(success.metrics),
                 Some((
-                    success.localtx_active_count,
-                    success.localtx_journey_count,
-                    success.localtx_backend_profile_count,
+                    success.localtx_contract_count,
                     success.localonly_contract_count,
                 )),
                 None,
@@ -363,7 +358,7 @@ fn run_with_runtime(options: &Options, runtime: &RuntimeIdentity) -> Result<()> 
             }
         };
     let envelope = GateEnvelope {
-        schema_version: 3,
+        schema_version: 4,
         verdict,
         failure_class,
         planner_result: options.planner_result,
@@ -376,10 +371,8 @@ fn run_with_runtime(options: &Options, runtime: &RuntimeIdentity) -> Result<()> 
         full_fallback: plan.as_ref().map(CiImpactPlan::full_fallback),
         observed_receipt_count: receipts.len(),
         observed_receipt_keys: receipts.iter().map(|receipt| receipt.job_key).collect(),
-        localtx_active_count: evidence_counts.map(|counts| counts.0),
-        localtx_journey_count: evidence_counts.map(|counts| counts.1),
-        localtx_backend_profile_count: evidence_counts.map(|counts| counts.2),
-        localonly_contract_count: evidence_counts.map(|counts| counts.3),
+        localtx_contract_count: evidence_counts.map(|counts| counts.0),
+        localonly_contract_count: evidence_counts.map(|counts| counts.1),
         success_metrics,
     };
     persist_envelope(
@@ -598,9 +591,7 @@ fn evaluate_observations(
         .map_err(|error| GateFailure::new(GateFailureClass::MetricsBuild, error))?;
     Ok(GateSuccess {
         metrics,
-        localtx_active_count: localtx.active_count(),
-        localtx_journey_count: localtx.journey_count(),
-        localtx_backend_profile_count: localtx.backend_profile_count(),
+        localtx_contract_count: localtx.contract_count(),
         localonly_contract_count: localonly.active_contract_ids().len(),
     })
 }
@@ -726,13 +717,9 @@ fn render_summary(envelope: &GateEnvelope, execution_revision: Option<&str>) -> 
     if let Some(plan_digest) = &envelope.plan_digest {
         summary.push_str(&format!("- Plan digest: `{plan_digest}`\n"));
     }
-    if let (Some(active), Some(journey), Some(backend)) = (
-        envelope.localtx_active_count,
-        envelope.localtx_journey_count,
-        envelope.localtx_backend_profile_count,
-    ) {
+    if let Some(count) = envelope.localtx_contract_count {
         summary.push_str(&format!(
-            "- LocalTx required evidence: `{active}/{journey}/{backend}`\n"
+            "- LocalTx required evidence: exact-set active/journey/backend = `{count}/{count}/{count}`\n"
         ));
     }
     if let (Some(count), Some(revision)) = (envelope.localonly_contract_count, execution_revision) {
@@ -1018,6 +1005,22 @@ fn evaluate_localtx_required_evidence<'a>(
     }
     if receipt.run_id() != run_id || receipt.run_attempt() != run_attempt {
         bail!("LocalTx evidence run identity mismatch");
+    }
+    let verified =
+        crate::localtx_coverage::verify_required_evidence_set(&crate::workspace_root()?)?;
+    // Fail-closed: compare the single receipt set against each verified carrier even though
+    // VerifiedLocalTxContractSet already proved the three carriers are exact-equal.
+    if receipt.contract_ids() != verified.active_contract_ids()
+        || receipt.contract_ids() != verified.journey_contract_ids()
+        || receipt.contract_ids() != verified.backend_profile_contract_ids()
+    {
+        bail!(
+            "LocalTx evidence does not match the current active/journey/backend inventory: {}",
+            localtx_receipt_inventory_difference_summary(
+                verified.active_contract_ids(),
+                receipt.contract_ids(),
+            )
+        );
     }
     Ok(receipt)
 }
@@ -1332,9 +1335,12 @@ impl GateFixture {
 }
 
 #[cfg(test)]
-fn localtx_receipt_value(plan: &CiImpactPlan) -> serde_json::Value {
-    serde_json::json!({
-        "schemaVersion": 1,
+fn localtx_receipt_value(plan: &CiImpactPlan) -> Result<serde_json::Value> {
+    let verified =
+        crate::localtx_coverage::verify_required_evidence_set(&crate::workspace_root()?)?;
+    let contract_ids = verified.active_contract_ids().to_vec();
+    Ok(serde_json::json!({
+        "schemaVersion": 3,
         "evidenceKind": "localtx-required",
         "jobKey": LOCALTX_OWNER,
         "sourceRevision": plan.execution_revision(),
@@ -1342,10 +1348,8 @@ fn localtx_receipt_value(plan: &CiImpactPlan) -> serde_json::Value {
         "runId": "42",
         "runAttempt": "3",
         "outcome": "success",
-        "localtxActiveCount": 5,
-        "localtxJourneyCount": 5,
-        "localtxBackendProfileCount": 5,
-    })
+        "localtxContractIds": contract_ids,
+    }))
 }
 
 #[cfg(test)]
@@ -1354,7 +1358,7 @@ fn test_localtx_identity(plan: &CiImpactPlan) -> Result<LocalTxReceiptIdentity> 
         artifact: LOCALTX_OWNER.expected_artifact("42", "3"),
         receipt: ValidatedLocalTxReceipt::parse(&serde_json::to_string(&localtx_receipt_value(
             plan,
-        ))?)?,
+        )?)?)?,
     })
 }
 
@@ -1444,7 +1448,7 @@ mod tests {
         artifact: String,
         mutate: impl FnOnce(&mut serde_json::Value),
     ) -> Result<()> {
-        let mut receipt = localtx_receipt_value(plan);
+        let mut receipt = localtx_receipt_value(plan)?;
         mutate(&mut receipt);
         let directory = root.join(artifact).join("integration");
         fs::create_dir_all(&directory)?;
@@ -1631,8 +1635,8 @@ mod tests {
         assert_eq!(metrics.recommended_jobs, 3);
         assert_eq!(metrics.executed_jobs, CiJobKey::COUNT);
         assert_eq!(metrics.skipped_runner_jobs, CiJobKey::COUNT - 3);
-        assert_eq!(metrics.cpu_time_ms, 16_000);
-        assert_eq!(metrics.projected_saved_cpu_time_ms, 13_000);
+        assert_eq!(metrics.cpu_time_ms, 17_000);
+        assert_eq!(metrics.projected_saved_cpu_time_ms, 14_000);
         Ok(())
     }
 
@@ -1846,22 +1850,9 @@ mod tests {
         fs::remove_dir_all(wrong_artifact)?;
 
         for (label, field, value) in [
-            ("schema", "schemaVersion", serde_json::json!(0)),
+            ("schema", "schemaVersion", serde_json::json!(1)),
+            ("legacy-schema-zero", "schemaVersion", serde_json::json!(0)),
             ("outcome", "outcome", serde_json::json!("failure")),
-            ("active-four", "localtxActiveCount", serde_json::json!(4)),
-            ("active-six", "localtxActiveCount", serde_json::json!(6)),
-            ("journey-four", "localtxJourneyCount", serde_json::json!(4)),
-            ("journey-six", "localtxJourneyCount", serde_json::json!(6)),
-            (
-                "backend-four",
-                "localtxBackendProfileCount",
-                serde_json::json!(4),
-            ),
-            (
-                "backend-six",
-                "localtxBackendProfileCount",
-                serde_json::json!(6),
-            ),
             (
                 "stale-source",
                 "sourceRevision",
@@ -1884,11 +1875,58 @@ mod tests {
             fs::remove_dir_all(root)?;
         }
 
+        let equal_count = crate::testutil::unique_tmp("ci-gate-localtx-equal-count-wrong-set");
+        write_exact_receipts(&equal_count, &fixture.plan)?;
+        let path = localtx_path(&equal_count);
+        let mut receipt: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path)?)?;
+        let live = receipt["localtxContractIds"]
+            .as_array()
+            .context("live LocalTx contract set")?
+            .clone();
+        if live.is_empty() {
+            bail!("LocalTx contract set must be non-empty");
+        }
+        let mut wrong = live.clone();
+        let replaced = wrong
+            .pop()
+            .context("LocalTx contract set must contain at least one id")?;
+        wrong.push(serde_json::json!("forged.equal-count-wrong-set"));
+        wrong.sort_by(|left, right| {
+            left.as_str()
+                .unwrap_or_default()
+                .cmp(right.as_str().unwrap_or_default())
+        });
+        receipt["localtxContractIds"] = serde_json::Value::Array(wrong);
+        fs::write(&path, serde_json::to_vec_pretty(&receipt)?)?;
+        let Err(error) = evaluate_disk_fixture(&equal_count, &fixture) else {
+            bail!("wrong LocalTx equal-count set must fail at the gate");
+        };
+        let detail = error.to_string();
+        assert!(
+            detail.contains("does not match the current active/journey/backend inventory"),
+            "{detail}"
+        );
+        assert!(detail.contains("forged.equal-count-wrong-set"), "{detail}");
+        assert!(
+            detail.contains(replaced.as_str().context("replaced LocalTx id")?),
+            "{detail}"
+        );
+        fs::remove_dir_all(equal_count)?;
+
+        let v1_count_bait = crate::testutil::unique_tmp("ci-gate-localtx-v1-count-bait");
+        write_exact_receipts(&v1_count_bait, &fixture.plan)?;
+        fs::write(
+            localtx_path(&v1_count_bait),
+            r#"{"schemaVersion":1,"evidenceKind":"localtx-required","jobKey":"integration/postgres-domain","sourceRevision":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","planDigest":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","runId":"42","runAttempt":"3","outcome":"success","localtxActiveCount":5,"localtxJourneyCount":5,"localtxBackendProfileCount":5}"#,
+        )?;
+        assert!(evaluate_disk_fixture(&v1_count_bait, &fixture).is_err());
+        fs::remove_dir_all(v1_count_bait)?;
+
         let unknown = crate::testutil::unique_tmp("ci-gate-localtx-unknown");
         write_exact_receipts(&unknown, &fixture.plan)?;
         let path = localtx_path(&unknown);
         let mut receipt: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path)?)?;
-        receipt["staticProofInventory"] = serde_json::json!({"active": 5});
+        receipt["staticProofInventory"] = serde_json::json!({"active": 3});
         fs::write(path, serde_json::to_vec_pretty(&receipt)?)?;
         assert!(evaluate_disk_fixture(&unknown, &fixture).is_err());
         fs::remove_dir_all(unknown)?;
@@ -1948,60 +1986,60 @@ mod tests {
                 "source",
                 ("sourceRevision", serde_json::json!("f".repeat(40))),
             ),
-            (
-                "equal-count-wrong-set",
-                (
-                    "allSets",
-                    serde_json::json!([
-                        "audit.list-entries",
-                        "identity.policies-get",
-                        "identity.policies-list",
-                        "identity.profile",
-                        "identity.roles-list",
-                        "settings.config-list",
-                        "settings.secret-resolve"
-                    ]),
-                ),
-            ),
         ] {
             let root = crate::testutil::unique_tmp(&format!("ci-gate-localonly-{label}"));
             write_exact_receipts(&root, &fixture.plan)?;
             let path = localonly_path(&root);
             let mut report: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path)?)?;
-            if mutate.0 == "allSets" {
-                for field in [
-                    "activeContractIds",
-                    "sourceReceiptContractIds",
-                    "executedContractIds",
-                ] {
-                    report[field] = mutate.1.clone();
-                }
-            } else {
-                report[mutate.0] = mutate.1;
-            }
+            report[mutate.0] = mutate.1;
             fs::write(&path, serde_json::to_vec_pretty(&report)?)?;
-            if label == "equal-count-wrong-set" {
-                let parsed = ValidatedLocalOnlyReport::load(&path)?;
-                assert_eq!(parsed.active_contract_ids().len(), 7);
-                assert_eq!(parsed.source_receipt_contract_ids().len(), 7);
-                assert_eq!(parsed.executed_contract_ids().len(), 7);
-            }
-            let result = evaluate_disk_fixture(&root, &fixture);
-            if label == "equal-count-wrong-set" {
-                let Err(error) = result else {
-                    bail!("wrong LocalOnly set must fail at the gate");
-                };
-                assert!(
-                    error.to_string().contains(
-                        "missing_from_source=[] extra_in_source=[] missing_from_executed=[\"settings.config-get\"] extra_in_executed=[\"settings.config-list\"]"
-                    ),
-                    "{error:#}"
-                );
-            } else {
-                assert!(result.is_err(), "{label}");
-            }
+            assert!(evaluate_disk_fixture(&root, &fixture).is_err(), "{label}");
             fs::remove_dir_all(root)?;
         }
+
+        let equal_count = crate::testutil::unique_tmp("ci-gate-localonly-equal-count-wrong-set");
+        write_exact_receipts(&equal_count, &fixture.plan)?;
+        let path = localonly_path(&equal_count);
+        let mut report: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path)?)?;
+        let live = report["activeContractIds"]
+            .as_array()
+            .context("live LocalOnly active set")?
+            .clone();
+        if live.is_empty() {
+            bail!("LocalOnly active set must be non-empty");
+        }
+        let mut wrong = live.clone();
+        let replaced = wrong
+            .pop()
+            .context("LocalOnly active set must contain at least one id")?;
+        wrong.push(serde_json::json!("forged.equal-count-wrong-set"));
+        wrong.sort_by(|left, right| {
+            left.as_str()
+                .unwrap_or_default()
+                .cmp(right.as_str().unwrap_or_default())
+        });
+        for field in [
+            "activeContractIds",
+            "sourceReceiptContractIds",
+            "executedContractIds",
+        ] {
+            report[field] = serde_json::Value::Array(wrong.clone());
+        }
+        fs::write(&path, serde_json::to_vec_pretty(&report)?)?;
+        let parsed = ValidatedLocalOnlyReport::load(&path)?;
+        assert_eq!(parsed.active_contract_ids().len(), live.len());
+        assert_eq!(parsed.source_receipt_contract_ids().len(), live.len());
+        assert_eq!(parsed.executed_contract_ids().len(), live.len());
+        let Err(error) = evaluate_disk_fixture(&equal_count, &fixture) else {
+            bail!("wrong LocalOnly set must fail at the gate");
+        };
+        let detail = error.to_string();
+        assert!(detail.contains("forged.equal-count-wrong-set"), "{detail}");
+        assert!(
+            detail.contains(replaced.as_str().context("replaced LocalOnly id")?),
+            "{detail}"
+        );
+        fs::remove_dir_all(equal_count)?;
 
         let unknown = crate::testutil::unique_tmp("ci-gate-localonly-unknown");
         write_exact_receipts(&unknown, &fixture.plan)?;
@@ -2079,19 +2117,17 @@ mod tests {
         let serialized = fs::read_to_string(&options.metrics_output)?;
         assert_eq!(
             format!("{serialized}\n"),
-            include_str!("../tests/golden/ci-gate-envelope-v3-failure.json"),
-            "failure envelope v3 wire drifted"
+            include_str!("../tests/golden/ci-gate-envelope-v4-failure.json"),
+            "failure envelope v4 wire drifted"
         );
         let metrics: serde_json::Value = serde_json::from_str(&serialized)?;
-        assert_eq!(metrics["schemaVersion"], 3);
+        assert_eq!(metrics["schemaVersion"], 4);
         assert_eq!(metrics["verdict"], "failure");
         assert_eq!(metrics["failureClass"], "planner-result");
         assert_eq!(metrics["plannerResult"], "failure");
         assert_eq!(metrics["matrixResult"], "skipped");
         assert_eq!(metrics["observedReceiptCount"], 0);
-        assert!(metrics["localtxActiveCount"].is_null());
-        assert!(metrics["localtxJourneyCount"].is_null());
-        assert!(metrics["localtxBackendProfileCount"].is_null());
+        assert!(metrics["localtxContractCount"].is_null());
         assert!(metrics["localonlyContractCount"].is_null());
         let summary = fs::read_to_string(
             runtime
@@ -2304,18 +2340,16 @@ mod tests {
         let serialized = fs::read_to_string(&options.metrics_output)?;
         assert_eq!(
             format!("{serialized}\n"),
-            include_str!("../tests/golden/ci-gate-envelope-v3-success.json"),
-            "success envelope v3 wire drifted"
+            include_str!("../tests/golden/ci-gate-envelope-v4-success.json"),
+            "success envelope v4 wire drifted"
         );
         let envelope: serde_json::Value = serde_json::from_str(&serialized)?;
-        assert_eq!(envelope["schemaVersion"], 3);
+        assert_eq!(envelope["schemaVersion"], 4);
         assert_eq!(envelope["verdict"], "success");
         assert!(envelope["failureClass"].is_null());
         assert_eq!(envelope["observedReceiptCount"], CiJobKey::COUNT);
-        assert_eq!(envelope["localtxActiveCount"], 5);
-        assert_eq!(envelope["localtxJourneyCount"], 5);
-        assert_eq!(envelope["localtxBackendProfileCount"], 5);
-        assert_eq!(envelope["localonlyContractCount"], 7);
+        assert_eq!(envelope["localtxContractCount"], 2);
+        assert_eq!(envelope["localonlyContractCount"], 9);
         assert_eq!(envelope["successMetrics"]["executedJobs"], CiJobKey::COUNT);
         assert_eq!(
             envelope["successMetrics"]["recommendedJobs"],
@@ -2333,9 +2367,12 @@ mod tests {
                 .context("success fixture summary path is missing")?,
         )?;
         assert!(summary.contains("Result: `success`"));
-        assert!(summary.contains("LocalTx required evidence: `5/5/5`"));
+        assert!(
+            summary
+                .contains("LocalTx required evidence: exact-set active/journey/backend = `2/2/2`")
+        );
         assert!(summary.contains(&format!(
-            "LocalOnly required evidence: exact-set active/source/executed = `7/7/7` @ `{}`",
+            "LocalOnly required evidence: exact-set active/source/executed = `9/9/9` @ `{}`",
             "e".repeat(40)
         )));
         fs::remove_dir_all(root)?;

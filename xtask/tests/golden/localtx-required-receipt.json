@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 3,
   "evidenceKind": "localtx-required",
   "jobKey": "integration/postgres-domain",
   "sourceRevision": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
@@ -7,7 +7,8 @@
   "runId": "42",
   "runAttempt": "3",
   "outcome": "success",
-  "localtxActiveCount": 5,
-  "localtxJourneyCount": 5,
-  "localtxBackendProfileCount": 5
+  "localtxContractIds": [
+    "audit.list-tenant-entries",
+    "settings.secret-publish"
+  ]
 }

@@ -3,8 +3,9 @@
 ## 代码载体与完成边界
 
 LocalTx 的静态 inventory 由 `verify --fast` / `localtx-coverage` 证明；真实 Postgres 证据只由
-`integration/postgres-domain` 全部 typed batches 成功后生成的 v1 receipt 证明。`ci-gate` 成功 envelope
-必须输出 `localtxActiveCount`、`localtxJourneyCount`、`localtxBackendProfileCount`，三者均为 5。
+`integration/postgres-domain` 全部 typed batches 成功后生成的 v3 receipt 证明。`ci-gate` 成功 envelope
+必须输出 `localtxContractCount`，并要求 receipt 的单一 `localtxContractIds` 集合分别与当前
+active/journey/backend-profile inventory exact equal。
 
 仓库代码与 workflow 合并不等于 active forge 已具备 required merge boundary。当前 Azure 仍是 forge authority，
 GitHub Actions 仍为 Shadow；在下面的 required-check 配置与 RED/GREEN 实证完成前，#1776 保持打开。
@@ -17,7 +18,7 @@ GitHub Actions 仍为 Shadow；在下面的 required-check 配置与 RED/GREEN �
       GitHub Shadow 的可观测状态直接当成 Azure required policy。
 - [ ] 建立缺少 `integration/localtx-required.json`（或使任一 LocalTx journey 失败）的验证 PR，确认 gate 为 RED
       且 PR 不可合入；记录 PR、run、attempt、HEAD SHA、check URL 与失败分类。
-- [ ] 在同一 policy/context 下重跑完整 5/5/5 same-head 验证，确认 gate 为 GREEN 且只在此时允许合入；记录
+- [ ] 在同一 policy/context 下重跑完整 exact-set same-head 验证，确认 gate 为 GREEN 且只在此时允许合入；记录
       PR、run、attempt、HEAD SHA、artifact URL 与成功 envelope。
 - [ ] 核对 required context 的 app identity 与两次验证完全一致，且 rerun attempt 不能复用旧 receipt。
 - [ ] 将上述证据链接回填 #1776；全部完成后再关闭 issue。若平台无法绑定 required check，记录阻塞并保持

@@ -249,10 +249,6 @@ fn local_tx_specs_reuse_required_module_evidence() {
             http::audit_v1::list_tenant_entries::SPEC,
             http::audit_v1::list_tenant_entries::LOCAL_TX,
         ),
-        (
-            http::identity_v1::refresh::SPEC,
-            http::identity_v1::refresh::LOCAL_TX,
-        ),
         (http::settings_v2::SPEC, http::settings_v2::LOCAL_TX),
     ];
 

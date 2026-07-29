@@ -1838,8 +1838,8 @@ pub(crate) fn run_job(job: CiJobKey, required_evidence_output: Option<&Path>) ->
         JobExecution::LocalTxRequired => {
             let passed = run_required_postgres_domain()?;
             if let Some(request) = localtx_evidence {
-                let counts = crate::localtx_coverage::verify_required_evidence_counts(&root)?;
-                request.publish(passed, counts)?;
+                let verified = crate::localtx_coverage::verify_required_evidence_set(&root)?;
+                request.publish(passed, verified)?;
             }
             Ok(())
         }
