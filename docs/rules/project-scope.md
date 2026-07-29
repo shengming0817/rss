@@ -35,6 +35,63 @@ workspace 结构与分层仍以 [`architecture.md`](architecture.md) 为准，�
 [`tenancy.md`](tenancy.md) 与 [`observability.md`](observability.md)。应用运行与生产交付的 owner 边界见
 [`Runtime / Delivery Boundary`](../architecture/202607280820-1873-runtime-delivery-boundary.md)。
 
+## 验证范围矩阵
+
+能力矩阵决定 RSS 拥有什么；验证范围矩阵决定一项能力最深需要证明到哪里。RSS 采用 V 模型的需求—验收、
+架构—集成、设计—组件对应关系，但不为每个测试标签复制一套测试。验证必须选择能够覆盖目标失效模式的最低充分层，
+并以唯一主证明为默认。
+
+| 层 | V 模型对应关系 | 主证明 | 范围所有者 | 默认执行边界 |
+|----|---------------|--------|------------|--------------|
+| **T1 设计与组件证明** | 详细设计 / 实现 ↔ 单元与组件验证 | rustc/Cargo Hard、schema/codegen/golden、表驱动/属性/状态机测试、进程内 component/oneshot | 一个 invariant、crate 或 contract ID | affected PR 默认执行；不得要求真实 production provider 或 binary |
+| **T2 能力与接缝证明** | 架构 / 接口设计 ↔ 集成验证 | consumer contract、port/provider conformance、真实 adapter、migration/RLS、事务原子性/幂等及接缝故障 | 一个 contract seam、port 或实际交付 provider | 受影响能力选择有界 critical target；完整矩阵进入 develop/nightly |
+| **T3 生产组合与验收证明** | 系统需求 / assembly 设计 ↔ 系统与验收验证 | production binary、真实 provider 组合、配置/CA/secret、readiness、关键纵向 journey、restart/drain 与 image smoke | 一个 production assembly 及其未被下层证明的 join hazard | 相关高风险变更定向执行；完整集合进入 production-runtime/nightly/release |
+
+范围基数按 owner 和独立失效模式确定，不按当前数量做 golden：
+
+```text
+T1 = 每个独立 invariant 一个主证明
+T2 = 每个独立 seam × 实际交付 provider
+T3 = 每个 production assembly × 尚未被 T1/T2 证明的 production join hazard
+```
+
+禁止生成 domain × provider × assembly × binary/image × fault 的笛卡尔积。高层验证只证明新增接缝：T2 不重复
+T1 已封闭的纯域语义；T3 不重复 T2 已封闭的 TLS、ACL、migration、WORM、outage 或 provider fault 矩阵。
+完整业务语义只在 production binary 上执行一次，runtime image 只验证 executable、non-root、配置/CA/secret mount、
+readiness 与干净退出，除非二者存在独立生产失效模式。
+
+### 能力与验证深度
+
+| 能力 | 默认责任层 | 提升边界 |
+|------|------------|----------|
+| **Domain Governance** | T1 | 只为类型、crate 图和既有工具无法表达的真实接缝进入 T2；不建设 CI 平台系统测试 |
+| **Contract / Codegen** | T1 + T2 | active contract 可通过所属关键 journey 进入 T3，但不要求每个 contract 独立拥有 production journey |
+| **Runtime Assembly** | T3 | 每个 production assembly 只维护覆盖其独有 join hazard 的最小关键 journey 集合 |
+| **DI Port / Adapter** | T2 | adapter 在 T3 仅作为 assembly 依赖被接线，不重复自身 conformance/fault suite |
+| **Consistency L0–L4** | L0 默认 T1；L1/L2 默认 T2；L3/L4 primitive 默认 T1/T2 | 只有已接纳的 production value stream 或纵向切片进入 T3；draft primitive 不自动获得 production E2E |
+| **Security / AuthN / AuthZ / Tenant** | 按 hazard 分布到 T1–T3 | capability/funnel 在 T1，授权拒绝/RLS/真实 verifier 及 adapter TLS/证书校验/拒绝语义在 T2，secret/image/进程边界与 production assembly 的 TLS/CA/config 接线 join hazard 在 T3 |
+| **Observability / Health / Local CI** | 指标/label/选择语义在 T1，真实 probe/lifecycle 在 T3 | T2 只验证 adapter/transport 接缝；CI 是执行载体，不作为 RSS 产品做端到端测试 |
+
+### 选择与去重规则
+
+- **最低充分层**：能由类型系统、crate 图、visibility、sealed trait 或 codegen Hard 化的约束，以 T1 静态证明为主；
+  不得再用 xtask、integration 和 journey 逐层重复证明。Hard 是 enforcement 强度，不是强制增加 E2E 的测试层级。
+- **运行期必要性**：真实事务、网络、进程、provider 组合、restart 和 drain 无法由编译期证明，可以由 T2/T3
+  的 Medium 测试或 fail-fast guard 承载；不能因其不是 Hard 而删除。
+- **唯一主证明**：每个 invariant 必须有一个 canonical owner。高一层测试必须写明新增的 join hazard；仅以
+  “多一道保险”“完整覆盖”或覆盖率数字为理由的重复测试不进入范围。
+- **状态约束**：`Evolve` 可按风险达到声明的最高层；`Complete` 只补缺失闭环；`Freeze` 保留 canonical regression
+  但不扩展 provider/场景矩阵；`External` 最多验证 RSS 的 contract/port/adapter 边界，不测试外部控制面生命周期。
+- **执行频率**：远端 planner 默认运行 affected T1，并按 capability map 选择有界 T2；T3 只由直接影响 assembly、
+  production 配置/provider/lifecycle 或安全边界的变更定向触发，未知或影响分析失败时 fail-safe full。完整回归、
+  跨 provider conformance、fault/recovery、performance/soak 和供应链时效检查进入 develop/nightly/release。本地
+  `make ci` 保持 10 分钟有界：unknown 忽略并留痕，影响分析失败直接报错，二者均不自动升级 full。
+- **测试标签不是层级**：regression 是选择方式，smoke 是深度，fault/concurrency/security/performance 是场景维度；
+  它们嵌入最低充分层，不各自复制一套 suite。performance 必须绑定明确的生产 SLO；soak 必须绑定生产 SLO，
+  或明确的长时正确性/恢复 hazard，才进入范围。
+- **门预算**：新增测试、runner 或 gate 必须说明替换/合并了哪个既有证明，或证明其失效模式在现有 owner 中不可表达；
+  测试 inventory 和调度从机器事实源派生，本文不维护当前 target、provider、journey 或 job 数量，也不作为 Markdown enforcement carrier。
+
 ## 边界判定
 
 新增 Feature、Epic 或跨能力设计必须回答：
