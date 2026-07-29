@@ -1,0 +1,34 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "IdentityDeviceCertificatePolicyPutResponseProposal",
+  "description": "Draft 200 response proposal. Acceptance records desired state but does not claim device convergence; an identical idempotency replay returns the same data value.",
+  "type": "object",
+  "required": [
+    "data"
+  ],
+  "properties": {
+    "data": {
+      "type": "object",
+      "required": [
+        "acceptedGeneration",
+        "condition"
+      ],
+      "properties": {
+        "acceptedGeneration": {
+          "type": "integer",
+          "format": "int64",
+          "minimum": 1
+        },
+        "condition": {
+          "type": "string",
+          "enum": [
+            "Reconciling",
+            "PendingDevice"
+          ]
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

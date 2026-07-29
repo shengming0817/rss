@@ -1,0 +1,52 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "IdentityDeviceIngressReceiptedEventProposal",
+  "description": "Draft OutboxFact application-receipt payload proposal. Its own stable event ID is carried only by the envelope.",
+  "type": "object",
+  "required": [
+    "ingressEnvelopeId",
+    "deviceId",
+    "outcome",
+    "reason",
+    "committedAt"
+  ],
+  "properties": {
+    "ingressEnvelopeId": {
+      "description": "Correlation to the receipted inbound envelope, not this receipt event's identity.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "deviceId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "outcome": {
+      "type": "string",
+      "enum": [
+        "committed",
+        "duplicate",
+        "stale",
+        "rejected"
+      ]
+    },
+    "reason": {
+      "type": "string",
+      "enum": [
+        "None",
+        "AlreadyCommitted",
+        "GenerationStale",
+        "FenceEpochStale",
+        "DeviceSequenceStale",
+        "NotAccepted",
+        "SchemaRejected",
+        "ProtocolViolation"
+      ]
+    },
+    "committedAt": {
+      "type": "integer",
+      "format": "int64"
+    }
+  },
+  "additionalProperties": false
+}

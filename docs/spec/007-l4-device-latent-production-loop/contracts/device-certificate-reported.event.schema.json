@@ -1,0 +1,56 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "IdentityDeviceCertificateReportedEventProposal",
+  "description": "Draft OutboxFact reported-state payload proposal. The stable event ID is carried only by the envelope.",
+  "type": "object",
+  "required": [
+    "deviceId",
+    "observedGeneration",
+    "fenceEpoch",
+    "deviceSequence",
+    "stateHash",
+    "artifactDigest",
+    "observedAt"
+  ],
+  "properties": {
+    "deviceId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "observedGeneration": {
+      "type": "integer",
+      "format": "int64",
+      "minimum": 1
+    },
+    "fenceEpoch": {
+      "type": "integer",
+      "format": "int64",
+      "minimum": 1
+    },
+    "deviceSequence": {
+      "type": "integer",
+      "format": "int64",
+      "minimum": 0
+    },
+    "stateHash": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "artifactDigest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "expiresAt": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "int64"
+    },
+    "observedAt": {
+      "type": "integer",
+      "format": "int64"
+    }
+  },
+  "additionalProperties": false
+}

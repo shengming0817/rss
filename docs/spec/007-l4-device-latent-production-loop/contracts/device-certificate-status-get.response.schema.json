@@ -1,0 +1,139 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "IdentityDeviceCertificateStatusGetResponseProposal",
+  "description": "Draft LocalOnly status response proposal.",
+  "type": "object",
+  "required": [
+    "data"
+  ],
+  "properties": {
+    "data": {
+      "type": "object",
+      "required": [
+        "desiredGeneration",
+        "observedGeneration",
+        "conditions"
+      ],
+      "properties": {
+        "desiredGeneration": {
+          "type": "integer",
+          "format": "int64",
+          "minimum": 0
+        },
+        "observedGeneration": {
+          "type": "integer",
+          "format": "int64",
+          "minimum": 0
+        },
+        "conditions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/condition"
+          }
+        },
+        "activeCommand": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "required": [
+            "commandId",
+            "generation",
+            "fenceEpoch",
+            "state"
+          ],
+          "properties": {
+            "commandId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "generation": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 1
+            },
+            "fenceEpoch": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 1
+            },
+            "state": {
+              "type": "string",
+              "enum": [
+                "queued",
+                "published",
+                "received"
+              ]
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "definitions": {
+    "condition": {
+      "type": "object",
+      "required": [
+        "type",
+        "status",
+        "reason",
+        "observedGeneration",
+        "lastTransitionAt"
+      ],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "Ready",
+            "Reconciling",
+            "PendingDevice",
+            "Degraded",
+            "Quarantined",
+            "Deleting"
+          ]
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "True",
+            "False",
+            "Unknown"
+          ]
+        },
+        "reason": {
+          "type": "string",
+          "enum": [
+            "DesiredAccepted",
+            "CommandQueued",
+            "AwaitingDevice",
+            "DeviceReported",
+            "StateMatches",
+            "StateDrift",
+            "CommandRejected",
+            "CommandTimedOut",
+            "ProtocolViolation",
+            "QuarantinedByOperator",
+            "DeletionPending",
+            "DeletionComplete",
+            "ArtifactUnavailable",
+            "TransportUnavailable"
+          ]
+        },
+        "observedGeneration": {
+          "type": "integer",
+          "format": "int64",
+          "minimum": 0
+        },
+        "lastTransitionAt": {
+          "type": "integer",
+          "format": "int64"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

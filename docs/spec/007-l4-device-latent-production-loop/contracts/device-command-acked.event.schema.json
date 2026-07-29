@@ -1,0 +1,67 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "IdentityDeviceCommandAckedEventProposal",
+  "description": "Draft OutboxFact payload proposal. The stable event ID is carried only by the envelope; ACK does not assert convergence.",
+  "type": "object",
+  "required": [
+    "deviceId",
+    "commandId",
+    "desiredGeneration",
+    "fenceEpoch",
+    "deviceSequence",
+    "result",
+    "reason",
+    "observedAt"
+  ],
+  "properties": {
+    "deviceId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "commandId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "desiredGeneration": {
+      "type": "integer",
+      "format": "int64",
+      "minimum": 1
+    },
+    "fenceEpoch": {
+      "type": "integer",
+      "format": "int64",
+      "minimum": 1
+    },
+    "deviceSequence": {
+      "type": "integer",
+      "format": "int64",
+      "minimum": 0
+    },
+    "result": {
+      "type": "string",
+      "enum": [
+        "received",
+        "rejected"
+      ]
+    },
+    "reason": {
+      "type": "string",
+      "enum": [
+        "None",
+        "ArtifactUnavailable",
+        "ArtifactDigestMismatch",
+        "PolicyRejected",
+        "GenerationStale",
+        "FenceEpochStale",
+        "MalformedCommand",
+        "DeviceFailure"
+      ]
+    },
+    "observedAt": {
+      "type": "integer",
+      "format": "int64"
+    }
+  },
+  "additionalProperties": false
+}
