@@ -165,10 +165,9 @@ impl ParsedAssemblyLock {
     /// Recompute the complete repository universe and promote only an exact match.
     pub fn verify_repository_v2(
         self,
-        repository_root: &Path,
-        assembly_dir: &Path,
+        manifest: &RepositoryAssemblyManifestV2,
     ) -> Result<RepositoryVerifiedAssemblyLock, AssemblyLockError> {
-        let verified = RepositoryVerifiedAssemblyLock::compile_v2(repository_root, assembly_dir)?;
+        let verified = RepositoryVerifiedAssemblyLock::compile_v2(manifest)?;
         let actual = self.0.fingerprint().as_str();
         let expected = verified.fingerprint().as_str();
         if actual != expected {
@@ -180,6 +179,61 @@ impl ParsedAssemblyLock {
             ));
         }
         Ok(verified)
+    }
+}
+
+/// Opaque canonical manifest discovered from one normalized repository assembly path.
+///
+/// Private fields make it impossible for governance consumers to pair canonical manifest facts
+/// with a different source path or source text.
+#[derive(Clone)]
+pub struct RepositoryAssemblyManifestV2 {
+    canonical: CanonicalAssemblyManifestV2,
+    repository_root: PathBuf,
+    assembly_dir: PathBuf,
+    source_label: String,
+    source_text: String,
+}
+
+impl RepositoryAssemblyManifestV2 {
+    /// Discover, validate, and canonicalize `assemblies/<name>/assembly.toml` exactly once.
+    pub fn discover_v2(
+        repository_root: &Path,
+        assembly_dir: &Path,
+    ) -> Result<Self, AssemblyLockError> {
+        discover_assembly_manifest_v2(repository_root, assembly_dir)
+    }
+
+    pub const fn canonical(&self) -> &CanonicalAssemblyManifestV2 {
+        &self.canonical
+    }
+
+    pub fn assembly_dir(&self) -> &Path {
+        &self.assembly_dir
+    }
+
+    pub fn source_label(&self) -> &str {
+        &self.source_label
+    }
+
+    pub fn source_text(&self) -> &str {
+        &self.source_text
+    }
+
+    fn rediscover_unchanged(&self) -> Result<Self, AssemblyLockError> {
+        let current = discover_assembly_manifest_v2(&self.repository_root, &self.assembly_dir)?;
+        if current.repository_root != self.repository_root
+            || current.assembly_dir != self.assembly_dir
+            || current.source_label != self.source_label
+            || current.source_text.as_bytes() != self.source_text.as_bytes()
+        {
+            return Err(AssemblyLockError::new(
+                AssemblyLockErrorKind::StaleAssemblyManifest {
+                    path: self.assembly_dir.join("assembly.toml"),
+                },
+            ));
+        }
+        Ok(current)
     }
 }
 
@@ -196,17 +250,22 @@ pub struct ExecutableAssemblyLock(AssemblyLock);
 
 impl RepositoryVerifiedAssemblyLock {
     /// Sole production compiler: discovers contracts itself and accepts no raw digest/catalog input.
-    pub fn compile_v2(
-        repository_root: &Path,
-        assembly_dir: &Path,
-    ) -> Result<Self, AssemblyLockError> {
-        let manifest = discover_assembly_manifest_v2(repository_root, assembly_dir)?;
+    pub fn compile_v2(manifest: &RepositoryAssemblyManifestV2) -> Result<Self, AssemblyLockError> {
+        let current = manifest.rediscover_unchanged()?;
+        let repository_root = &current.repository_root;
         let contracts = discover_contracts(&repository_root.join("contracts"))
             .map_err(|error| AssemblyLockError::contract(error.to_string()))?;
-        validate_workflow_activations(&manifest, &contracts)
+        validate_workflow_activations(current.canonical(), &contracts)
             .map_err(|error| AssemblyLockError::contract(error.to_string()))?;
         let catalog = RepositoryContractCatalogV2::discover(repository_root)?;
-        compile_with_catalog_v2(&manifest, repository_root, assembly_dir, &catalog).map(Self)
+        let lock = compile_with_catalog_v2(
+            current.canonical(),
+            repository_root,
+            current.assembly_dir(),
+            &catalog,
+        )?;
+        current.rediscover_unchanged()?;
+        Ok(Self(lock))
     }
 
     pub const fn as_lock(&self) -> &AssemblyLock {
@@ -345,6 +404,8 @@ enum AssemblyLockErrorKind {
     Generated(String),
     #[error("assembly input: {0}")]
     Assembly(String),
+    #[error("assembly manifest changed after repository discovery: {path}")]
+    StaleAssemblyManifest { path: PathBuf },
     #[error("contract catalog: {0}")]
     Contract(String),
     #[error("failed to parse assembly manifest {path}: {source}")]
@@ -365,6 +426,7 @@ impl AssemblyLockError {
         match &self.0 {
             AssemblyLockErrorKind::AssemblyManifestToml { .. }
             | AssemblyLockErrorKind::AssemblyManifestCanonicalization { .. }
+            | AssemblyLockErrorKind::StaleAssemblyManifest { .. }
             | AssemblyLockErrorKind::Assembly(_) => AssemblyLockErrorStage::Manifest,
             AssemblyLockErrorKind::Contract(_) => AssemblyLockErrorStage::ContractCatalog,
             AssemblyLockErrorKind::Generated(_) => AssemblyLockErrorStage::GeneratedUniverse,
@@ -653,7 +715,17 @@ fn repository_label(repository_root: &Path, path: &Path) -> Result<String, Assem
 fn discover_assembly_manifest_v2(
     repository_root: &Path,
     assembly_dir: &Path,
-) -> Result<CanonicalAssemblyManifestV2, AssemblyLockError> {
+) -> Result<RepositoryAssemblyManifestV2, AssemblyLockError> {
+    let canonical_root = fs::canonicalize(repository_root).map_err(io_error(format!(
+        "failed to canonicalize repository root {}",
+        repository_root.display()
+    )))?;
+    if canonical_root != repository_root {
+        return Err(assembly_path(
+            "repository root must be an absolute canonical path without symlink aliases",
+            repository_root,
+        ));
+    }
     let relative = assembly_dir
         .strip_prefix(repository_root)
         .map_err(|_| assembly_path("path escapes repository root", assembly_dir))?;
@@ -705,11 +777,11 @@ fn discover_assembly_manifest_v2(
             &manifest_path,
         ));
     }
-    let source = fs::read_to_string(&manifest_path).map_err(io_error(format!(
+    let source_text = fs::read_to_string(&manifest_path).map_err(io_error(format!(
         "failed to read assembly manifest {}",
         manifest_path.display()
     )))?;
-    let manifest = AssemblyManifest::from_toml_str(&source).map_err(|source| {
+    let manifest = AssemblyManifest::from_toml_str(&source_text).map_err(|source| {
         AssemblyLockError::new(AssemblyLockErrorKind::AssemblyManifestToml {
             path: manifest_path.clone(),
             source,
@@ -717,7 +789,7 @@ fn discover_assembly_manifest_v2(
     })?;
     let canonical = manifest.canonicalize_v2().map_err(|source| {
         AssemblyLockError::new(AssemblyLockErrorKind::AssemblyManifestCanonicalization {
-            path: manifest_path,
+            path: manifest_path.clone(),
             source: Box::new(source),
         })
     })?;
@@ -727,7 +799,19 @@ fn discover_assembly_manifest_v2(
             canonical.name()
         )));
     }
-    Ok(canonical)
+    let source_label = manifest_path
+        .strip_prefix(repository_root)
+        .map_err(|_| assembly_path("manifest path escapes repository root", &manifest_path))?
+        .to_str()
+        .ok_or_else(|| assembly_path("manifest path is not UTF-8", &manifest_path))?
+        .replace('\\', "/");
+    Ok(RepositoryAssemblyManifestV2 {
+        canonical,
+        repository_root: canonical_root,
+        assembly_dir: assembly_dir.to_path_buf(),
+        source_label,
+        source_text,
+    })
 }
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[cfg_attr(test, derive(Debug, Deserialize))]
@@ -1531,6 +1615,8 @@ emits = ["identity.alpha", "identity.beta"]
     #[test]
     fn repository_verified_typestate_binds_discovered_contract_semantics() {
         let root = root("repository-verified");
+        fs::create_dir_all(&root).expect("repository root");
+        let root = fs::canonicalize(root).expect("canonical repository root");
         let assembly = root.join("assemblies/runtime");
         let assembly_source = semantic("semanticToml").replace("$FRAMEWORK", "");
         fs::create_dir_all(&assembly).expect("assembly directory");
@@ -1573,8 +1659,39 @@ payload = "payload.schema.json"
             before_schema_hash,
             "sha256:1498b4f26f706d5bc45ff82b54c338d8a6ab3eba300acd906d420b48fbcaae61"
         );
-        let first =
-            RepositoryVerifiedAssemblyLock::compile_v2(&root, &assembly).expect("verified lock");
+        let source = RepositoryAssemblyManifestV2::discover_v2(&root, &assembly)
+            .expect("repository manifest source");
+        assert_eq!(source.canonical().name(), "runtime");
+        assert_eq!(source.assembly_dir(), assembly);
+        assert_eq!(source.source_label(), "assemblies/runtime/assembly.toml");
+        let first = RepositoryVerifiedAssemblyLock::compile_v2(&source).expect("verified lock");
+        let parsed = ParsedAssemblyLock::from_json_slice(
+            &serde_json::to_vec(&first).expect("verified lock JSON"),
+        )
+        .expect("parsed lock");
+
+        let changed_assembly_source =
+            assembly_source.replace("profile = \"demo\"", "profile = \"production\"");
+        fs::write(assembly.join("assembly.toml"), &changed_assembly_source)
+            .expect("change assembly manifest after discovery");
+        assert_eq!(
+            RepositoryVerifiedAssemblyLock::compile_v2(&source)
+                .err()
+                .expect("stale source must not compile")
+                .stage(),
+            AssemblyLockErrorStage::Manifest
+        );
+        assert_eq!(
+            parsed
+                .verify_repository_v2(&source)
+                .err()
+                .expect("stale source must not verify")
+                .stage(),
+            AssemblyLockErrorStage::Manifest
+        );
+        fs::write(assembly.join("assembly.toml"), &assembly_source)
+            .expect("restore assembly manifest");
+
         let parsed = ParsedAssemblyLock::from_json_slice(
             &serde_json::to_vec(&first).expect("verified lock JSON"),
         )
@@ -1589,13 +1706,17 @@ payload = "payload.schema.json"
         let after_schema_hash = schema_hash(&after_contracts[0]).expect("schema hash");
         assert_eq!(before_schema_hash, after_schema_hash);
 
-        let changed = RepositoryVerifiedAssemblyLock::compile_v2(&root, &assembly)
-            .expect("changed verified lock");
+        let changed =
+            RepositoryVerifiedAssemblyLock::compile_v2(&source).expect("changed verified lock");
         assert_eq!(first.digests().manifest(), changed.digests().manifest());
         assert_eq!(first.digests().generated(), changed.digests().generated());
         assert_ne!(first.digests().contracts(), changed.digests().contracts());
         assert_ne!(first.fingerprint().as_str(), changed.fingerprint().as_str());
-        rejected(parsed.verify_repository_v2(&root, &assembly));
+        rejected(parsed.verify_repository_v2(&source));
+        rejected(RepositoryAssemblyManifestV2::discover_v2(
+            &root.join("assemblies/.."),
+            &assembly,
+        ));
 
         let mismatched = root.join("assemblies/other");
         fs::create_dir_all(&mismatched).expect("mismatched assembly directory");
@@ -1605,7 +1726,7 @@ payload = "payload.schema.json"
             &mismatched.join("src/generated/modules_gen.rs"),
             "pub const MODULES: u8 = 1;",
         );
-        rejected(RepositoryVerifiedAssemblyLock::compile_v2(
+        rejected(RepositoryAssemblyManifestV2::discover_v2(
             &root,
             &mismatched,
         ));
@@ -1618,9 +1739,7 @@ payload = "payload.schema.json"
             &synthetic.join("src/generated/modules_gen.rs"),
             "pub const MODULES: u8 = 1;",
         );
-        rejected(RepositoryVerifiedAssemblyLock::compile_v2(
-            &root, &synthetic,
-        ));
+        rejected(RepositoryAssemblyManifestV2::discover_v2(&root, &synthetic));
         fs::remove_dir_all(root).expect("remove repository");
     }
 

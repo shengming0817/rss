@@ -292,8 +292,17 @@ fn missing_receipt_finding(contract_id: &str) -> Finding {
 }
 
 fn check_root(root: &Path) -> Result<(String, Vec<Finding>)> {
+    let ir = root
+        .join("Cargo.toml")
+        .is_file()
+        .then(|| {
+            crate::assembly_governance::AssemblyGovernanceIr::<crate::assembly_governance::Core>::load(
+                root,
+            )
+        })
+        .transpose()?;
     let discovered = discover_without_absolute_paths(root)?;
-    let (contracts, mut findings) = contracts_and_profile_findings(root, &discovered)?;
+    let (contracts, mut findings) = contracts_and_profile_findings(root, ir.as_ref(), &discovered)?;
     let targets = contracts
         .iter()
         .map(|contract| LocalOnlyReceiptTarget {
@@ -378,11 +387,14 @@ impl ServingScope {
     }
 }
 
-fn serving_scope(root: &Path, route: vocab::HttpRouteEvidence) -> Result<ServingScope> {
+fn serving_scope(
+    ir: &crate::assembly_governance::AssemblyGovernanceIr<crate::assembly_governance::Core>,
+    route: vocab::HttpRouteEvidence,
+) -> Result<ServingScope> {
     match route.owner().domain_name() {
         Some(domain) => Ok(ServingScope::Domain(domain.to_string())),
         None if route.owner().is_framework() => Ok(ServingScope::Framework(
-            framework_serving_assemblies(root, route.contract_id())?,
+            framework_serving_assemblies(ir, route.contract_id())?,
         )),
         None => bail!("generated HTTP route has an unrecognized owner"),
     }
@@ -495,6 +507,18 @@ fn collect_report_with_specs(
     root: &Path,
     specs: &[generated::http::HttpSpec],
 ) -> Result<ConsistencyReport> {
+    let ir =
+        crate::assembly_governance::AssemblyGovernanceIr::<crate::assembly_governance::Core>::load(
+            root,
+        )?;
+    collect_report_with_specs_and_ir(root, &ir, specs)
+}
+
+fn collect_report_with_specs_and_ir(
+    root: &Path,
+    ir: &crate::assembly_governance::AssemblyGovernanceIr<crate::assembly_governance::Core>,
+    specs: &[generated::http::HttpSpec],
+) -> Result<ConsistencyReport> {
     let receipt_targets = specs
         .iter()
         .filter(|spec| spec.route.consistency_level() == vocab::HttpConsistencyLevel::LocalOnly)
@@ -515,7 +539,7 @@ fn collect_report_with_specs(
                 route.contract_id()
             );
         }
-        let scope = serving_scope(root, route)?;
+        let scope = serving_scope(ir, route)?;
         serving_scopes.insert(scope.clone());
         scopes_by_contract.insert(route.contract_id(), scope);
     }
@@ -560,32 +584,22 @@ fn module_path_from_mount_key(mount_key: &str) -> Vec<String> {
     mount_key.split("::").map(ToString::to_string).collect()
 }
 
-fn framework_serving_assemblies(root: &Path, contract_id: &str) -> Result<Vec<String>> {
-    let mut matches = Vec::new();
-    for entry in std::fs::read_dir(root.join("assemblies")).context("read assemblies")? {
-        let entry = entry.context("read assembly entry")?;
-        if !entry
-            .file_type()
-            .context("read assembly entry type")?
-            .is_dir()
-        {
-            continue;
-        }
-        let path = entry.path().join("assembly.toml");
-        if !path.is_file() {
-            continue;
-        }
-        let text = std::fs::read_to_string(&path).context("read assembly manifest")?;
-        let manifest = assembly_schema::AssemblyManifest::from_toml_str(&text)
-            .context("parse assembly manifest")?;
-        if manifest
-            .framework_contracts
-            .iter()
-            .any(|declared| declared.id == contract_id)
-        {
-            matches.push(manifest.name);
-        }
-    }
+fn framework_serving_assemblies(
+    ir: &crate::assembly_governance::AssemblyGovernanceIr<crate::assembly_governance::Core>,
+    contract_id: &str,
+) -> Result<Vec<String>> {
+    let mut matches = ir
+        .assemblies()
+        .iter()
+        .filter(|assembly| {
+            assembly
+                .manifest()
+                .framework_contracts()
+                .iter()
+                .any(|declared| declared.id == contract_id)
+        })
+        .map(|assembly| assembly.manifest().name().to_owned())
+        .collect::<Vec<_>>();
     matches.sort();
     if matches.is_empty() {
         bail!("framework contract `{contract_id}` has no serving assembly");
@@ -945,6 +959,7 @@ fn discover_without_absolute_paths(root: &Path) -> Result<Vec<DiscoveredContract
 
 fn contracts_and_profile_findings(
     root: &Path,
+    ir: Option<&crate::assembly_governance::AssemblyGovernanceIr<crate::assembly_governance::Core>>,
     discovered: &[DiscoveredContract],
 ) -> Result<(Vec<Contract>, Vec<Finding>)> {
     let mut contracts = Vec::new();
@@ -966,9 +981,10 @@ fn contracts_and_profile_findings(
             ContractOwner::Domain(owner) if owner == &manifest.domain => {
                 ServingScope::Domain(owner.clone())
             }
-            ContractOwner::Framework => {
-                ServingScope::Framework(framework_serving_assemblies(root, &manifest.id)?)
-            }
+            ContractOwner::Framework => ServingScope::Framework(framework_serving_assemblies(
+                ir.context("framework contract fixture requires governed assemblies")?,
+                &manifest.id,
+            )?),
             ContractOwner::Domain(_) => bail!(
                 "{subject}: LocalOnly contract `{}` must have its domain as owner",
                 manifest.id
@@ -10703,33 +10719,15 @@ impl ConfigRepo for SettingsConfigGetRepoProbe {
 
     #[test]
     fn framework_serving_assemblies_are_manifest_backed() -> Result<()> {
-        let root = crate::testutil::unique_tmp("framework-serving-assembly");
-        let runtime = root.join("assemblies/runtime");
-        std::fs::create_dir_all(&runtime)?;
-        std::fs::write(
-            runtime.join("assembly.toml"),
-            include_str!("../../assemblies/runtime/assembly.toml").replace(
-                "frameworkContracts = [{ id = \"runtime.inventory\", listener = \"admin\" }]",
-                "frameworkContracts = [{ id = \"framework.status\", listener = \"admin\" }]",
-            ),
-        )?;
+        let root = crate::workspace_root()?;
+        let ir = crate::assembly_governance::AssemblyGovernanceIr::<
+            crate::assembly_governance::Core,
+        >::load(&root)?;
         assert_eq!(
-            framework_serving_assemblies(&root, "framework.status")?,
-            vec!["runtime"]
+            framework_serving_assemblies(&ir, "runtime.inventory")?,
+            vec!["identityaudit", "runtime", "settingsonly"]
         );
-
-        let duplicate = root.join("assemblies/duplicate");
-        std::fs::create_dir_all(&duplicate)?;
-        std::fs::write(
-            duplicate.join("assembly.toml"),
-            std::fs::read_to_string(runtime.join("assembly.toml"))?
-                .replace("name = \"runtime\"", "name = \"duplicate\""),
-        )?;
-        assert_eq!(
-            framework_serving_assemblies(&root, "framework.status")?,
-            vec!["duplicate", "runtime"]
-        );
-        std::fs::remove_dir_all(root)?;
+        assert!(framework_serving_assemblies(&ir, "framework.missing").is_err());
         Ok(())
     }
 

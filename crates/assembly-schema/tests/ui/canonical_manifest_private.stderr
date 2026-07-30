@@ -1,4 +1,4 @@
-error[E0451]: fields `value` and `manifest_digest` of struct `CanonicalAssemblyManifestV2` are private
+error[E0451]: fields `value`, `declaration_ordered_diport_providers` and `manifest_digest` of struct `CanonicalAssemblyManifestV2` are private
  --> tests/ui/canonical_manifest_private.rs:5:9
   |
 4 |     CanonicalAssemblyManifestV2 {
@@ -6,4 +6,4 @@ error[E0451]: fields `value` and `manifest_digest` of struct `CanonicalAssemblyM
 5 |         manifest_digest: String::new(),
   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ private field
 6 |         ..base
-  |           ^^^^ field `value` is private
+  |           ^^^^ fields `value` and `declaration_ordered_diport_providers` are private

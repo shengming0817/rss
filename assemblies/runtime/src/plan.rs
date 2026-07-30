@@ -346,9 +346,14 @@ mod tests {
 
     fn verified_lock(source: &[u8], assembly: &str) -> ExecutableAssemblyLock {
         let assembly_dir = assembly_dir(assembly);
+        let manifest = assembly_schema::RepositoryAssemblyManifestV2::discover_v2(
+            repository_root(),
+            &assembly_dir,
+        )
+        .expect("repository assembly manifest");
         ParsedAssemblyLock::from_json_slice(source)
             .expect("AssemblyLock")
-            .verify_repository_v2(repository_root(), &assembly_dir)
+            .verify_repository_v2(&manifest)
             .expect("repository-verified AssemblyLock")
             .into_executable()
     }

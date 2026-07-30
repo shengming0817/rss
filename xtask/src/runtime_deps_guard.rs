@@ -85,8 +85,15 @@ impl GovernanceCheck for RuntimeDepsGuard {
 /// fails closed so the guard cannot go vacuous.
 fn discover_shared_runtime_deps_paths(root: &Path) -> Result<Vec<std::path::PathBuf>> {
     let mut paths = Vec::new();
-    for assembly_dir in crate::src_scan::member_dirs(&root.join("assemblies"))? {
-        for rs in crate::src_scan::rs_files(&assembly_dir.join("src"))? {
+    let governance = crate::assembly_governance::AssemblyGovernanceIr::<
+        crate::assembly_governance::Core,
+    >::load(root)?;
+    for target in governance.targets() {
+        let source_dir = target.dir().join("src");
+        if !source_dir.is_dir() {
+            continue;
+        }
+        for rs in crate::src_scan::rs_files(&source_dir)? {
             let content = std::fs::read_to_string(&rs)
                 .map_err(|e| anyhow::anyhow!("runtime-deps-guard: read {}: {e}", rs.display()))?;
             if !content.contains(&format!("struct {STRUCT_NAME}")) {

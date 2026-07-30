@@ -102,188 +102,6 @@ pub(super) fn mint(
 }
 
 #[cfg(test)]
-pub(crate) fn render_live_inventory_for_test(
-    runtime_plan: &super::RuntimePlan,
-    local_domains: &[AssemblyDomain],
-    placement: &super::PlacementExecutionPlan,
-    live_domain_names: &[&str],
-    live_listener_bindings: &[bootstrap::DomainListenerBinding],
-) -> anyhow::Result<String> {
-    use assembly_schema::ListenerAuth;
-
-    fn auth_label(auth: ListenerAuth) -> &'static str {
-        match auth {
-            ListenerAuth::NoAuth => "no-auth",
-            ListenerAuth::RssAccessToken => "rss-access-token",
-            ListenerAuth::FederatedAccessToken => "federated-access-token",
-            ListenerAuth::Mtls => "mtls",
-            ListenerAuth::ServiceToken => "service-token",
-        }
-    }
-
-    fn listener_label(listener: primitives::ListenerKind) -> anyhow::Result<&'static str> {
-        match listener {
-            primitives::ListenerKind::Primary => Ok("primary"),
-            primitives::ListenerKind::Internal => Ok("internal"),
-            primitives::ListenerKind::Health => Ok("health"),
-            primitives::ListenerKind::Admin => Ok("admin"),
-            _ => anyhow::bail!("unknown ListenerKind cannot enter live inventory"),
-        }
-    }
-
-    fn write_set(output: &mut String, label: &str, values: Vec<String>) {
-        output.push_str(label);
-        output.push_str("=[");
-        output.push_str(&values.join(","));
-        output.push_str("]\n");
-    }
-
-    let typed = runtime_plan.as_typed();
-    let mut output = String::from("runtime-plan-live-inventory-v1\n");
-    write_set(
-        &mut output,
-        "provider.declared",
-        typed
-            .provider_plans()
-            .iter()
-            .map(|provider| provider.id().to_owned())
-            .collect(),
-    );
-    write_set(
-        &mut output,
-        "provider.active",
-        crate::providers_gen::PROVIDER_CATALOG
-            .iter()
-            .map(|entry| entry.role().as_str().to_owned())
-            .collect(),
-    );
-    write_set(
-        &mut output,
-        "provider.live-consumers",
-        crate::providers_gen::PROVIDER_CATALOG
-            .iter()
-            .map(|entry| {
-                let evidence = entry.evidence();
-                let channels = evidence
-                    .outputs()
-                    .iter()
-                    .map(|channel| channel.as_str())
-                    .collect::<Vec<_>>()
-                    .join("+");
-                format!(
-                    "{}=>{}{{{channels}}}",
-                    entry.role().as_str(),
-                    entry.factory().as_str(),
-                )
-            })
-            .collect(),
-    );
-    write_set(
-        &mut output,
-        "listener.plan",
-        typed
-            .listener_plans()
-            .iter()
-            .map(|listener| {
-                let domains = listener
-                    .domains()
-                    .iter()
-                    .map(|domain| domain.as_str())
-                    .collect::<Vec<_>>()
-                    .join("+");
-                format!(
-                    "{}:{}:{}{{{domains}}}",
-                    listener.id(),
-                    listener.kind().as_str(),
-                    auth_label(listener.auth())
-                )
-            })
-            .collect(),
-    );
-    write_set(
-        &mut output,
-        "listener.generated",
-        crate::modules_gen::DOMAIN_LISTENER_BINDINGS
-            .iter()
-            .map(|binding| {
-                Ok(format!(
-                    "{}:{}",
-                    listener_label(binding.listener)?,
-                    binding.domain
-                ))
-            })
-            .collect::<anyhow::Result<Vec<_>>>()?,
-    );
-    write_set(
-        &mut output,
-        "listener.live",
-        live_listener_bindings
-            .iter()
-            .map(|binding| {
-                Ok(format!(
-                    "{}:{}",
-                    listener_label(binding.listener)?,
-                    binding.domain
-                ))
-            })
-            .collect::<anyhow::Result<Vec<_>>>()?,
-    );
-    write_set(
-        &mut output,
-        "domain.declared",
-        typed
-            .domain_plans()
-            .iter()
-            .map(|domain| domain.id().as_str().to_owned())
-            .collect(),
-    );
-    write_set(
-        &mut output,
-        "domain.local",
-        local_domains
-            .iter()
-            .map(|domain| domain.as_str().to_owned())
-            .collect(),
-    );
-    write_set(
-        &mut output,
-        "domain.live",
-        live_domain_names
-            .iter()
-            .map(|name| (*name).to_owned())
-            .collect(),
-    );
-    write_set(
-        &mut output,
-        "placement.declared",
-        typed
-            .placement_plans()
-            .iter()
-            .map(|placement| format!("{}@{}", placement.domain().as_str(), placement.workload()))
-            .collect(),
-    );
-    write_set(
-        &mut output,
-        "placement.local",
-        placement
-            .placements()
-            .iter()
-            .filter(|spec| spec.is_local())
-            .map(|spec| spec.domain().as_str().to_owned())
-            .collect(),
-    );
-    write_set(
-        &mut output,
-        "placement.remote",
-        placement
-            .remote_domains()
-            .map(|domain| domain.as_str().to_owned())
-            .collect(),
-    );
-    Ok(output)
-}
-
-#[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used)]
 
@@ -291,6 +109,7 @@ mod tests {
     use crate::plan::RuntimePlan;
     use bootstrap::{Domain, DomainBinding, DomainModuleResult, KernelError, Registry};
     use diport::{DynManagedResource, ManagedResource, ShutdownError};
+    use std::collections::BTreeSet;
 
     struct NoopDomain;
 
@@ -322,6 +141,42 @@ mod tests {
 
     fn binding(name: &'static str) -> DomainBinding {
         DomainBinding::new(name, Box::new(NoopDomain), DomainModuleResult::default())
+    }
+
+    fn exact_relation(
+        label: &str,
+        expected: impl IntoIterator<Item = String>,
+        actual: impl IntoIterator<Item = String>,
+    ) -> anyhow::Result<()> {
+        let expected = expected.into_iter().collect::<Vec<_>>();
+        let actual = actual.into_iter().collect::<Vec<_>>();
+        let expected_set = expected.iter().cloned().collect::<BTreeSet<_>>();
+        let actual_set = actual.iter().cloned().collect::<BTreeSet<_>>();
+        anyhow::ensure!(
+            expected.len() == expected_set.len(),
+            "{label} expected relation contains duplicate IDs"
+        );
+        anyhow::ensure!(
+            actual.len() == actual_set.len(),
+            "{label} live relation contains duplicate IDs"
+        );
+        anyhow::ensure!(
+            expected_set == actual_set,
+            "{label} relation drift: missing={:?}, extra={:?}",
+            expected_set.difference(&actual_set).collect::<Vec<_>>(),
+            actual_set.difference(&expected_set).collect::<Vec<_>>()
+        );
+        Ok(())
+    }
+
+    fn listener_label(listener: primitives::ListenerKind) -> &'static str {
+        match listener {
+            primitives::ListenerKind::Primary => "primary",
+            primitives::ListenerKind::Internal => "internal",
+            primitives::ListenerKind::Health => "health",
+            primitives::ListenerKind::Admin => "admin",
+            _ => "unknown",
+        }
     }
 
     fn rollback_binding(name: &'static str) -> DomainBinding {
@@ -467,40 +322,178 @@ mod tests {
         assert_eq!(output.resources[0].name(), "domain-validation-rollback");
     }
 
+    #[test]
+    fn exact_relation_rejects_missing_extra_wrong_id_and_duplicates() {
+        for actual in [
+            vec!["settings".to_owned()],
+            vec![
+                "settings".to_owned(),
+                "audit".to_owned(),
+                "extra".to_owned(),
+            ],
+            vec!["settings".to_owned(), "wrong-id".to_owned()],
+            vec!["settings".to_owned(), "settings".to_owned()],
+        ] {
+            assert!(
+                exact_relation(
+                    "synthetic",
+                    ["settings".to_owned(), "audit".to_owned()],
+                    actual,
+                )
+                .is_err()
+            );
+        }
+    }
+
+    fn assert_relation_mutations(label: &str, expected: Vec<String>, actual: Vec<String>) {
+        exact_relation(label, expected.clone(), actual.clone()).expect("real relation must close");
+
+        let mut missing = actual.clone();
+        missing
+            .pop()
+            .expect("anti-vacuity: relation must be non-empty");
+        assert!(exact_relation(label, expected.clone(), missing).is_err());
+
+        let mut extra = actual.clone();
+        extra.push(format!("{label}-synthetic-extra"));
+        assert!(exact_relation(label, expected.clone(), extra).is_err());
+
+        let mut wrong_id = actual;
+        wrong_id[0] = format!("{label}-synthetic-wrong-id");
+        assert!(exact_relation(label, expected, wrong_id).is_err());
+    }
+
     #[tokio::test]
-    async fn runtime_plan_live_inventory_freezes_complete_plan_to_live_closure() {
+    async fn runtime_plan_live_relations_reject_each_typed_mapping_drift() {
         let snapshot = test_snapshot(&[
             ("RSS_PRIMARY_TOKEN_PROFILE", "rss-access"),
             ("RSS_ADMIN_TOKEN_PROFILE", "rss-access"),
             ("RSS_INTERNAL_AUTH_SCHEME", "mtls"),
         ])
-        .expect("live inventory snapshot");
+        .expect("live relation snapshot");
         let runtime_plan = RuntimePlan::bundled(snapshot.view()).expect("bundled RuntimePlan");
+        let typed = runtime_plan.as_typed();
         let placement = runtime_plan.placement_execution_plan(snapshot.view());
+
+        assert_relation_mutations(
+            "placement",
+            typed
+                .placement_plans()
+                .iter()
+                .map(|spec| format!("{}@{}", spec.domain().as_str(), spec.workload()))
+                .collect(),
+            placement
+                .placements()
+                .iter()
+                .map(|spec| format!("{}@{}", spec.domain().as_str(), spec.workload()))
+                .collect(),
+        );
+
         let domain_execution_plan = runtime_plan.domain_execution_plan(&placement);
-        let local_domains = domain_execution_plan.local_domains().to_vec();
         let live_bindings = crate::modules_gen::wire_test_domains()
             .await
-            .expect("generated live inventory domains build");
+            .expect("generated live domains build");
+        assert_relation_mutations(
+            "domain",
+            domain_execution_plan
+                .local_domains()
+                .iter()
+                .map(|domain| domain.as_str().to_owned())
+                .collect(),
+            live_bindings
+                .iter()
+                .map(|binding| binding.name().to_owned())
+                .collect(),
+        );
+
+        assert_relation_mutations(
+            "listener",
+            typed
+                .listener_plans()
+                .iter()
+                .flat_map(|listener| {
+                    listener.domains().iter().map(move |domain| {
+                        format!("{}:{}", listener.kind().as_str(), domain.as_str())
+                    })
+                })
+                .collect(),
+            crate::modules_gen::DOMAIN_LISTENER_BINDINGS
+                .iter()
+                .map(|binding| format!("{}:{}", listener_label(binding.listener), binding.domain))
+                .collect(),
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_plan_live_closure_matches_typed_relations() {
+        let snapshot = test_snapshot(&[
+            ("RSS_PRIMARY_TOKEN_PROFILE", "rss-access"),
+            ("RSS_ADMIN_TOKEN_PROFILE", "rss-access"),
+            ("RSS_INTERNAL_AUTH_SCHEME", "mtls"),
+        ])
+        .expect("live closure snapshot");
+        let runtime_plan = RuntimePlan::bundled(snapshot.view()).expect("bundled RuntimePlan");
+        let typed = runtime_plan.as_typed();
+        let placement = runtime_plan.placement_execution_plan(snapshot.view());
+        exact_relation(
+            "provider",
+            typed
+                .provider_plans()
+                .iter()
+                .map(|provider| provider.id().to_owned()),
+            crate::providers_gen::PROVIDER_CATALOG
+                .iter()
+                .map(|provider| provider.role().as_str().to_owned()),
+        )
+        .expect("provider declaration/catalog closure");
+        exact_relation(
+            "placement",
+            typed
+                .placement_plans()
+                .iter()
+                .map(|spec| format!("{}@{}", spec.domain().as_str(), spec.workload())),
+            placement
+                .placements()
+                .iter()
+                .map(|spec| format!("{}@{}", spec.domain().as_str(), spec.workload())),
+        )
+        .expect("placement declaration/execution closure");
+        let domain_execution_plan = runtime_plan.domain_execution_plan(&placement);
+        let local_domains = domain_execution_plan
+            .local_domains()
+            .iter()
+            .map(|domain| domain.as_str().to_owned())
+            .collect::<Vec<_>>();
+        let live_bindings = crate::modules_gen::wire_test_domains()
+            .await
+            .expect("generated live domains build");
         let live_domain_names = live_bindings
             .iter()
-            .map(DomainBinding::name)
+            .map(|binding| binding.name().to_owned())
             .collect::<Vec<_>>();
+        exact_relation("domain", local_domains, live_domain_names)
+            .expect("domain local/live closure");
         let validated = domain_execution_plan
             .validate(live_bindings)
             .expect("exact live domain bindings validate");
         let (registry, _) = validated.compose().expect("live domains compose");
-        let actual = super::render_live_inventory_for_test(
-            &runtime_plan,
-            &local_domains,
-            &placement,
-            &live_domain_names,
-            &registry.domain_listener_bindings(),
+        let expected_listeners = typed.listener_plans().iter().flat_map(|listener| {
+            listener
+                .domains()
+                .iter()
+                .map(move |domain| format!("{}:{}", listener.kind().as_str(), domain.as_str()))
+        });
+        exact_relation(
+            "generated listener",
+            expected_listeners,
+            crate::modules_gen::DOMAIN_LISTENER_BINDINGS
+                .iter()
+                .map(|binding| format!("{}:{}", listener_label(binding.listener), binding.domain)),
         )
-        .expect("render live inventory");
-        assert_eq!(
-            actual,
-            include_str!("../../tests/fixtures/runtime-plan-live-inventory-v1.txt")
-        );
+        .expect("listener plan/generated closure");
+        let listener_plan = runtime_plan.listener_execution_plan();
+        let live_listeners = registry.domain_listener_bindings();
+        crate::validate_domain_listener_evidence(&listener_plan, &placement, &live_listeners)
+            .expect("listener generated/live closure");
     }
 }

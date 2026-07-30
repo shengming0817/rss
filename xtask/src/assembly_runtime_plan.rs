@@ -2,13 +2,13 @@
 
 use anyhow::{Context, Result, bail, ensure};
 use assembly_schema::{
-    AssemblyListenerKind, AssemblyManifest, ListenerAuth, ParsedAssemblyLock, RuntimePlan,
-    RuntimePlanV2Input,
+    AssemblyListenerKind, ListenerAuth, ParsedAssemblyLock, RuntimePlan, RuntimePlanV2Input,
 };
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+#[cfg(test)]
 const MANIFEST_NAME: &str = "assembly.toml";
 const LOCK_NAME: &str = "assembly.lock.json";
 const OUTPUT_NAME: &str = "runtime-plan.json";
@@ -51,55 +51,32 @@ fn generate_root(root: &Path, check: bool) -> Result<()> {
 }
 
 fn plan_targets(root: &Path) -> Result<Vec<Target>> {
-    let assemblies = root.join("assemblies");
-    ensure_plain_directory(&assemblies)?;
-    let mut entries = fs::read_dir(&assemblies)
-        .with_context(|| format!("读取 {} 失败", assemblies.display()))?
-        .collect::<io::Result<Vec<_>>>()?;
-    entries.sort_by_key(fs::DirEntry::path);
+    let ir =
+        crate::assembly_governance::AssemblyGovernanceIr::<crate::assembly_governance::Core>::load(
+            root,
+        )?;
     let mut targets = Vec::new();
-    for entry in entries {
-        let file_type = entry
-            .file_type()
-            .with_context(|| format!("读取 {} 类型失败", entry.path().display()))?;
-        ensure!(!file_type.is_symlink(), "assemblies 下禁止符号链接");
-        if !file_type.is_dir() || !entry.path().join(MANIFEST_NAME).exists() {
-            continue;
-        }
-        targets.push(plan_target(root, &entry.path())?);
+    for assembly in ir.assemblies() {
+        targets.push(plan_target(assembly)?);
     }
     ensure!(!targets.is_empty(), "runtime-plan assembly target 集合为空");
     Ok(targets)
 }
 
-fn plan_target(root: &Path, assembly_dir: &Path) -> Result<Target> {
-    let manifest_path = assembly_dir.join(MANIFEST_NAME);
+fn plan_target(assembly: &crate::assembly_governance::GovernedAssembly) -> Result<Target> {
+    let assembly_dir = &assembly.dir();
     let lock_path = assembly_dir.join(LOCK_NAME);
     let output_path = assembly_dir.join(OUTPUT_NAME);
-    let manifest_source = read_plain_file(&manifest_path)?;
-    let manifest = AssemblyManifest::from_toml_str(
-        std::str::from_utf8(&manifest_source)
-            .with_context(|| format!("{} 不是 UTF-8", manifest_path.display()))?,
-    )
-    .with_context(|| format!("解析 {} 失败", manifest_path.display()))?
-    .canonicalize_v2()
-    .with_context(|| format!("编译 {} canonical v2 失败", manifest_path.display()))?;
-    let directory_name = assembly_dir
-        .file_name()
-        .and_then(|name| name.to_str())
-        .context("assembly 目录名不是 UTF-8")?;
-    ensure!(
-        manifest.name() == directory_name,
-        "assembly manifest name 与目录不一致"
-    );
+    let manifest = assembly.manifest();
+    let directory_name = assembly.manifest().name();
     let lock_source = read_plain_file(&lock_path)?;
     let lock = ParsedAssemblyLock::from_json_slice(&lock_source)
         .with_context(|| format!("解析 {} 失败", lock_path.display()))?
-        .verify_repository_v2(root, assembly_dir)
+        .verify_repository_v2(assembly.source())
         .with_context(|| format!("repository 验证 {} 失败", lock_path.display()))?
         .into_executable();
-    let input = compiler_input(&manifest)?;
-    let plan = RuntimePlan::compile_v2(&manifest, &lock, input)
+    let input = compiler_input(manifest)?;
+    let plan = RuntimePlan::compile_v2(manifest, &lock, input)
         .with_context(|| format!("编译 {directory_name} RuntimePlan 失败"))?;
     let mut expected = serde_json::to_vec_pretty(&plan).context("序列化 RuntimePlan 失败")?;
     expected.push(b'\n');
@@ -163,17 +140,6 @@ fn listener_auth(assembly: &str, kind: AssemblyListenerKind) -> Result<ListenerA
     }
 }
 
-fn ensure_plain_directory(path: &Path) -> Result<()> {
-    let metadata = fs::symlink_metadata(path)
-        .with_context(|| format!("读取 {} 元数据失败", path.display()))?;
-    ensure!(
-        metadata.is_dir() && !metadata.file_type().is_symlink(),
-        "{} 必须是无符号链接的目录",
-        path.display()
-    );
-    Ok(())
-}
-
 fn read_plain_file(path: &Path) -> Result<Vec<u8>> {
     let metadata = fs::symlink_metadata(path)
         .with_context(|| format!("读取 {} 元数据失败", path.display()))?;
@@ -222,6 +188,7 @@ mod tests {
         let workspace_root = crate::workspace_root()?;
         let workspace = workspace_root.join("assemblies/settingsonly");
         fs::copy(workspace.join(MANIFEST_NAME), target.join(MANIFEST_NAME))?;
+        fs::copy(workspace.join("Cargo.toml"), target.join("Cargo.toml"))?;
         fs::copy(workspace.join(LOCK_NAME), target.join(LOCK_NAME))?;
         copy_tree(
             &workspace.join("src/generated"),

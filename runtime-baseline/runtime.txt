@@ -4,7 +4,6 @@
 
 [sources]
 cargo = assemblies/runtime/Cargo.toml
-assembly = assemblies/runtime/assembly.toml
 sharedRuntimeDeps = assemblies/runtime/src/module.rs
 domainModuleResult = crates/bootstrap/src/module.rs
 run = assemblies/runtime/src/lib.rs
@@ -67,31 +66,6 @@ uuid = workspace=true; features=[v4]
 vault = path=../../adapters/vault; features=[backend]
 vocab = path=../../crates/vocab
 zeroize = workspace=true
-
-[assembly.intent]
-name = runtime
-profile = production
-topology = durable-shared
-domains = [settings,identity,audit]
-listeners = [primary,internal,admin,health]
-
-[assembly.diportProviders]
-01 | id=device-revocation-store | port=diport::RevocationStore | provider=postgres::PgRevocationStore | providerCrate=postgres | requiredFeatures=[] | consumer=deviceloop | lifecycle=active | durability=persistent | scope=unset | failurePosture=unset | purpose=device-certificate-revocation
-02 | id=event-publisher | port=diport::Publisher | provider=amqp::AmqpPublisher | providerCrate=amqp | requiredFeatures=[backend] | consumer=eventexec | lifecycle=active | durability=persistent | scope=unset | failurePosture=unset | purpose=outbox-relay-amqp-publish
-03 | id=event-subscriber | port=diport::AckableSubscriber | provider=amqp::AmqpSubscriber | providerCrate=amqp | requiredFeatures=[backend] | consumer=eventexec | lifecycle=active | durability=persistent | scope=unset | failurePosture=unset | purpose=event-consume-at-least-once
-04 | id=identity-signer | port=diport::Signer | provider=vault::VaultSigner | providerCrate=vault | requiredFeatures=[backend] | consumer=identity | lifecycle=active | durability=persistent | scope=unset | failurePosture=unset | purpose=jwt-access-token-signing
-05 | id=settings-key-provider | port=diport::KeyProvider | provider=vault::VaultKeyProvider | providerCrate=vault | requiredFeatures=[backend] | consumer=settings | lifecycle=active | durability=persistent | scope=unset | failurePosture=unset | purpose=settings-configvalue-at-rest-encryption
-06 | id=settings-secret-resolver | port=diport::SecretResolver | provider=vault::VaultSecretResolver | providerCrate=vault | requiredFeatures=[backend] | consumer=settings | lifecycle=active | durability=persistent | scope=unset | failurePosture=unset | purpose=settings-secret-material-resolution
-07 | id=listener-pdp | port=diport::Pdp | provider=oidc::OidcProvider | providerCrate=oidc | requiredFeatures=[backend] | consumer=httpserve | lifecycle=active | durability=persistent | scope=unset | failurePosture=unset | purpose=jwt-credential-verification
-08 | id=service-token-replay-store | port=diport::ServiceTokenReplayStore | provider=postgres::PgServiceTokenReplayStore | providerCrate=postgres | requiredFeatures=[] | consumer=oidc | lifecycle=active | durability=persistent | scope=cluster-global | failurePosture=fail-closed | purpose=service-token-atomic-replay-consume
-09 | id=auth-audit-sink | port=diport::AuditSink | provider=postgres::PgAuthAuditSink | providerCrate=postgres | requiredFeatures=[auth-audit-sink] | consumer=httpserve | lifecycle=active | durability=persistent | scope=unset | failurePosture=unset | purpose=http-auth-decision-audit
-10 | id=listener-rate-limiter | port=diport::RateLimiter | provider=ratelimit::GovernorLimiter | providerCrate=ratelimit | requiredFeatures=[] | consumer=httpserve | lifecycle=active | durability=ephemeral-memory | scope=unset | failurePosture=unset | purpose=per-peer-IP request rate limiting (pre-auth, DoS/brute-force 防护)
-11 | id=distributed-lock-store | port=diport::LockStore | provider=redis::RedisLockStore | providerCrate=redis | requiredFeatures=[backend] | consumer=distributed | lifecycle=active | durability=persistent | scope=unset | failurePosture=unset | purpose=distributed-lock-fencing
-12 | id=distributed-cas-store | port=diport::CasStore | provider=postgres::PgCasStore | providerCrate=postgres | requiredFeatures=[] | consumer=distributed | lifecycle=active | durability=persistent | scope=unset | failurePosture=unset | purpose=distributed-state-cas
-13 | id=runtime-object-store | port=diport::ObjectStore | provider=s3::S3Store | providerCrate=s3 | requiredFeatures=[backend] | consumer=runtime | lifecycle=active | durability=persistent | scope=unset | failurePosture=unset | purpose=runtime-s3-readiness-canary
-14 | id=dlx-lifecycle-repository | port=diport::DlxLifecycleRepository | provider=postgres::PgDlxLifecycleRepository | providerCrate=postgres | requiredFeatures=[] | consumer=eventexec | lifecycle=active | durability=persistent | scope=unset | failurePosture=unset | purpose=dead-letter-archive-receipt-purge-reconcile
-15 | id=dlx-archive-store | port=diport::DlxArchiveStore | provider=s3::VerifiedS3DlxArchiveStore | providerCrate=s3 | requiredFeatures=[backend] | consumer=eventexec | lifecycle=active | durability=persistent | scope=unset | failurePosture=unset | purpose=dead-letter-compliance-worm-archive
-16 | id=dlx-archive-key-provider | port=diport::KeyProvider | provider=vault::VaultKeyProvider | providerCrate=vault | requiredFeatures=[backend] | consumer=eventexec | lifecycle=active | durability=persistent | scope=unset | failurePosture=unset | purpose=dead-letter-independent-archive-key-provider
 
 [sharedRuntimeDeps.fields]
 password_blocklist = Arc<secure::DigestPasswordBlocklist>

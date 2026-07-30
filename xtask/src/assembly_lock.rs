@@ -1,9 +1,9 @@
 //! Deterministic committed AssemblyLock generation and drift checking.
 //!
-//! INVARIANT: ASSEMBLY-LOCK-GOLDEN-01 { level = "Hard", exec = "check", source = "codegen", golden = "assemblies/runtime/assembly.lock.json", synthetic_red = "assembly_lock::tests::changed_inputs_drift_expected_targets", anti_vacuity = "assembly_lock::tests::three_committed_locks_are_clean_and_verified" } — the repository-verified compiler is the sole source of committed lock bytes; raw-byte drift fails the aggregate gate.
+//! INVARIANT: ASSEMBLY-LOCK-GOLDEN-01 { level = "Hard", exec = "check", source = "codegen", golden = "assemblies/runtime/assembly.lock.json", synthetic_red = "assembly_lock::tests::changed_inputs_drift_expected_targets", anti_vacuity = "assembly_lock::tests::committed_locks_are_clean_and_repository_verified" } — the repository-verified compiler is the sole source of committed lock bytes; raw-byte drift fails the aggregate gate.
 //! INVARIANT: ASSEMBLY-LOCK-DIAGNOSTIC-01 { level = "Hard", exec = "native-compile", source = "code", native = "closed command error variants carry only fixed stages, escaped repository-relative paths, counts, and io::ErrorKind; no source error or arbitrary detail field is representable" } — invalid manifest/contract/generated contents cannot enter this command's error value.
-//! INVARIANT: ASSEMBLY-LOCK-LF-CHECKOUT-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "generated_file::tests::lf_checkout_rejects_missing_weakened_and_overridden_rules", anti_vacuity = "assembly_lock::tests::three_committed_locks_are_clean_and_verified" } — every lock target has effective `text=set,eol=lf` before byte comparison or generation.
-//! INVARIANT: ASSEMBLY-LOCK-VERIFY-GATE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "assembly_lock_check_is_typed_once_and_ordered_in_all_aggregate_plans", anti_vacuity = "assembly_lock::tests::three_committed_locks_are_clean_and_verified" } — the typed no-compile check occurs exactly once in verify, fast, compatibility CI, and ci-meta between provider catalog drift and graph drift.
+//! INVARIANT: ASSEMBLY-LOCK-LF-CHECKOUT-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "generated_file::tests::lf_checkout_rejects_missing_weakened_and_overridden_rules", anti_vacuity = "assembly_lock::tests::committed_locks_are_clean_and_repository_verified" } — every lock target has effective `text=set,eol=lf` before byte comparison or generation.
+//! INVARIANT: ASSEMBLY-LOCK-VERIFY-GATE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "assembly_lock_check_is_typed_once_and_ordered_in_all_aggregate_plans", anti_vacuity = "assembly_lock::tests::committed_locks_are_clean_and_repository_verified" } — the typed no-compile check occurs exactly once in verify, fast, compatibility CI, and ci-meta between provider catalog drift and graph drift.
 
 use assembly_schema::{AssemblyLockErrorStage, RepositoryVerifiedAssemblyLock};
 use std::fmt;
@@ -25,8 +25,8 @@ pub(crate) fn run(action: AssemblyLockAction) -> anyhow::Result<()> {
 }
 
 fn run_root(root: &Path, action: AssemblyLockAction) -> CommandResult<()> {
-    let targets = preflight(root, action)?;
-    let plan = plan_locks(root, &targets)?;
+    let ir = preflight(root, action)?;
+    let plan = plan_locks(root, &ir)?;
     match action {
         AssemblyLockAction::Generate => generate(plan),
         AssemblyLockAction::Check => check(&plan),
@@ -36,19 +36,25 @@ fn run_root(root: &Path, action: AssemblyLockAction) -> CommandResult<()> {
 fn preflight(
     root: &Path,
     action: AssemblyLockAction,
-) -> CommandResult<Vec<crate::assembly::AssemblyTarget>> {
-    let discovered = crate::assembly::discover_targets(root)
-        .map_err(|_| CommandError::Preflight(PreflightFailure::Discovery))?;
-    let orphans = orphan_locks(root, &discovered)?;
+) -> CommandResult<crate::assembly_governance::AssemblyGovernanceIr<crate::assembly_governance::Core>>
+{
+    use crate::assembly_governance::GovernanceLoadStage;
+
+    let ir = crate::assembly_governance::AssemblyGovernanceIr::<
+        crate::assembly_governance::Core,
+    >::load_staged(root)
+    .map_err(|error| match error.stage() {
+        GovernanceLoadStage::Discovery => {
+            CommandError::Preflight(PreflightFailure::Discovery)
+        }
+        GovernanceLoadStage::EmptyUniverse => CommandError::EmptyUniverse,
+        GovernanceLoadStage::Manifest | GovernanceLoadStage::ProductionRatchet => {
+            CommandError::Preflight(PreflightFailure::AssemblyHardError)
+        }
+    })?;
+    let orphans = orphan_locks(root, ir.targets())?;
     if !orphans.is_empty() {
         return Err(CommandError::Orphans(orphans));
-    }
-    let targets = discovered
-        .into_iter()
-        .filter(crate::assembly::AssemblyTarget::has_manifest)
-        .collect::<Vec<_>>();
-    if targets.is_empty() {
-        return Err(CommandError::EmptyUniverse);
     }
 
     let (_, contract_findings) = crate::contract::validate::validate_root(&root.join("contracts"))
@@ -75,13 +81,15 @@ fn preflight(
         .map_err(|_| CommandError::Preflight(PreflightFailure::ModulesAggregate))?;
     crate::assembly_codegen::check_provider_root(root)
         .map_err(|_| CommandError::Preflight(PreflightFailure::ProvidersAggregate))?;
-    let lock_paths = targets
+    let lock_paths = ir
+        .targets()
         .iter()
+        .filter(|target| target.has_manifest())
         .map(|target| target.lock_path().to_path_buf())
         .collect::<Vec<_>>();
     crate::generated_file::verify_lf_checkout(root, LOCK_LF_RULE, &lock_paths)
         .map_err(CommandError::CheckoutPolicy)?;
-    Ok(targets)
+    Ok(ir)
 }
 
 fn is_settingsonly_lock_runtime_plan_drift(finding: &crate::assembly::Finding) -> bool {
@@ -92,7 +100,7 @@ fn is_settingsonly_lock_runtime_plan_drift(finding: &crate::assembly::Finding) -
 
 fn orphan_locks(
     root: &Path,
-    targets: &[crate::assembly::AssemblyTarget],
+    targets: &[crate::assembly_governance::AssemblyTarget],
 ) -> CommandResult<Vec<SafeRepoPath>> {
     let mut orphans = Vec::new();
     for target in targets.iter().filter(|target| !target.has_manifest()) {
@@ -121,21 +129,21 @@ struct PlannedLock {
 
 fn plan_locks(
     root: &Path,
-    targets: &[crate::assembly::AssemblyTarget],
+    ir: &crate::assembly_governance::AssemblyGovernanceIr<crate::assembly_governance::Core>,
 ) -> CommandResult<Vec<PlannedLock>> {
-    let mut plan = Vec::with_capacity(targets.len());
-    for target in targets {
-        let path = target.lock_path().to_path_buf();
+    let mut plan = Vec::with_capacity(ir.assemblies().len());
+    for assembly in ir.assemblies() {
+        let path = assembly.dir().join("assembly.lock.json");
         let label = SafeRepoPath::for_path(root, &path);
         ensure_lock_output(&path, &label)?;
         let lock =
-            RepositoryVerifiedAssemblyLock::compile_v2(root, target.dir()).map_err(|error| {
+            RepositoryVerifiedAssemblyLock::compile_v2(assembly.source()).map_err(|error| {
                 CommandError::Compile {
                     path: label.clone(),
                     stage: error.stage(),
                 }
             })?;
-        debug_assert_eq!(lock.identity().name(), target.name());
+        debug_assert_eq!(lock.identity().name(), assembly.manifest().name());
         let mut expected =
             serde_json::to_vec_pretty(&lock).map_err(|_| CommandError::Serialize(label.clone()))?;
         expected.push(b'\n');
@@ -432,25 +440,20 @@ mod tests {
     }
 
     #[test]
-    fn three_committed_locks_are_clean_and_verified() -> anyhow::Result<()> {
+    fn committed_locks_are_clean_and_repository_verified() -> anyhow::Result<()> {
         let root = crate::workspace_root()?;
         run_root(&root, AssemblyLockAction::Check)?;
-        let targets = crate::assembly::discover_targets(&root)?
-            .into_iter()
-            .filter(crate::assembly::AssemblyTarget::has_manifest)
-            .collect::<Vec<_>>();
-        assert_eq!(
-            targets
-                .iter()
-                .map(crate::assembly::AssemblyTarget::name)
-                .collect::<Vec<_>>(),
-            ["identityaudit", "runtime", "settingsonly"]
+        let ir = crate::assembly_governance::AssemblyGovernanceIr::<
+            crate::assembly_governance::Core,
+        >::load(&root)?;
+        anyhow::ensure!(
+            !ir.assemblies().is_empty(),
+            "governed lock universe is empty"
         );
-        for target in targets {
-            let bytes = fs::read(target.lock_path())?;
+        for assembly in ir.assemblies() {
+            let bytes = fs::read(assembly.dir().join("assembly.lock.json"))?;
             anyhow::ensure!(!bytes.is_empty(), "committed lock must not be empty");
-            ParsedAssemblyLock::from_json_slice(&bytes)?
-                .verify_repository_v2(&root, target.dir())?;
+            ParsedAssemblyLock::from_json_slice(&bytes)?.verify_repository_v2(assembly.source())?;
         }
         Ok(())
     }
@@ -676,7 +679,7 @@ mod tests {
         let orphan = fixture.root.join("assemblies/removed/assembly.lock.json");
         fs::create_dir_all(orphan.parent().context("orphan parent")?)?;
         fs::write(&orphan, b"reserved\n")?;
-        let targets = crate::assembly::discover_targets(&fixture.root)?;
+        let targets = crate::assembly_governance::discover_targets(&fixture.root)?;
         let found = orphan_locks(&fixture.root, &targets)?;
         assert_eq!(found.len(), 1);
         assert_eq!(fs::read(&orphan)?, b"reserved\n");
@@ -760,7 +763,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_target_universe_is_rejected() -> anyhow::Result<()> {
+    fn empty_target_universe_fails_the_governed_discovery_funnel() -> anyhow::Result<()> {
         let fixture = Fixture::new("empty")?;
         let assemblies = fixture.root.join("assemblies");
         fs::remove_dir_all(&assemblies)?;
@@ -768,6 +771,20 @@ mod tests {
         assert_eq!(
             run_root(&fixture.root, AssemblyLockAction::Check),
             Err(CommandError::EmptyUniverse)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_manifest_is_not_misreported_as_target_discovery() -> anyhow::Result<()> {
+        let fixture = Fixture::new("invalid-manifest-stage")?;
+        fs::write(
+            fixture.root.join("assemblies/runtime/assembly.toml"),
+            "not valid toml = [",
+        )?;
+        assert_eq!(
+            run_root(&fixture.root, AssemblyLockAction::Check),
+            Err(CommandError::Preflight(PreflightFailure::AssemblyHardError))
         );
         Ok(())
     }
@@ -781,6 +798,7 @@ mod tests {
         let outside = fixture.root.join("outside-lock");
         fs::write(&outside, b"outside\n")?;
         let lock = fixture.root.join("assemblies/runtime/assembly.lock.json");
+        fs::remove_file(&lock)?;
         symlink(&outside, &lock)?;
         assert!(fixture_plan(&fixture.root).is_err());
         assert_eq!(fs::read(&outside)?, b"outside\n");
@@ -790,14 +808,14 @@ mod tests {
         let outside = fixture.root.join("outside-assembly");
         fs::rename(&runtime, &outside)?;
         symlink(&outside, &runtime)?;
-        assert!(crate::assembly::discover_targets(&fixture.root).is_err());
+        assert!(crate::assembly_governance::discover_targets(&fixture.root).is_err());
 
         let fixture = Fixture::new("parent-symlink")?;
         let assemblies = fixture.root.join("assemblies");
         let outside = fixture.root.join("outside-assemblies");
         fs::rename(&assemblies, &outside)?;
         symlink(&outside, &assemblies)?;
-        assert!(crate::assembly::discover_targets(&fixture.root).is_err());
+        assert!(crate::assembly_governance::discover_targets(&fixture.root).is_err());
 
         Ok(())
     }
@@ -820,21 +838,24 @@ mod tests {
 
     fn on_disk_locks(root: &Path) -> anyhow::Result<BTreeMap<String, Vec<u8>>> {
         let mut locks = BTreeMap::new();
-        for target in crate::assembly::discover_targets(root)? {
-            if target.has_manifest() {
-                locks.insert(target.name().to_owned(), fs::read(target.lock_path())?);
-            }
+        let ir = crate::assembly_governance::AssemblyGovernanceIr::<
+            crate::assembly_governance::Core,
+        >::load(root)?;
+        for assembly in ir.assemblies() {
+            locks.insert(
+                assembly.manifest().name().to_owned(),
+                fs::read(assembly.dir().join("assembly.lock.json"))?,
+            );
         }
         Ok(locks)
     }
 
     fn fixture_plan(root: &Path) -> CommandResult<Vec<PlannedLock>> {
-        let targets = crate::assembly::discover_targets(root)
-            .map_err(|_| CommandError::Preflight(PreflightFailure::Discovery))?
-            .into_iter()
-            .filter(crate::assembly::AssemblyTarget::has_manifest)
-            .collect::<Vec<_>>();
-        plan_locks(root, &targets)
+        let ir = crate::assembly_governance::AssemblyGovernanceIr::<
+            crate::assembly_governance::Core,
+        >::load(root)
+        .map_err(|_| CommandError::Preflight(PreflightFailure::Discovery))?;
+        plan_locks(root, &ir)
     }
 
     fn generate_fixture(root: &Path) -> anyhow::Result<()> {
@@ -952,18 +973,13 @@ mod tests {
                 FIXTURE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
             ));
             fs::create_dir_all(&root)?;
+            let root = fs::canonicalize(root)?;
             let source = crate::workspace_root()?;
             copy_tree(&source.join("contracts"), &root.join("contracts"))?;
             for assembly in ["identityaudit", "runtime", "settingsonly"] {
                 let source_dir = source.join("assemblies").join(assembly);
                 let target_dir = root.join("assemblies").join(assembly);
-                fs::create_dir_all(&target_dir)?;
-                fs::copy(
-                    source_dir.join("assembly.toml"),
-                    target_dir.join("assembly.toml"),
-                )?;
-                fs::copy(source_dir.join("Cargo.toml"), target_dir.join("Cargo.toml"))?;
-                copy_tree(&source_dir.join("src"), &target_dir.join("src"))?;
+                copy_tree(&source_dir, &target_dir)?;
             }
             fs::write(
                 root.join(".gitattributes"),

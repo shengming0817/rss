@@ -58,7 +58,7 @@ This document governs the runtime assembly optimization series rooted at `docs/s
 - Every direct `assemblies/*` target is classified exactly once in schema-v1 `assemblies/artifacts.toml`; an unknown, omitted, duplicate, or ghost target fails closed. Artifact-matrix versioning is independent of assembly manifest/lock/RuntimePlan v2.
 - A `supported` assembly closes five identities: an exact Cargo binary target, a unique nonroot distroless Docker stage with matching entrypoint, a validated configuration carrier, exact `runtimeexec` Health listener/inventory ownership, and a non-vacuous journey. `runtime` uses the typed environment catalog guarded by the runtime-env gate; `settingsonly` and `identityaudit` use recursively closed Draft-07 JSON schemas.
 - `compile-only` is an explicit lifecycle with a non-empty reason and cannot carry deployable artifact fields. There is no default lifecycle, compatibility alias, fallback reader, report-only mode, or alternate CLI.
-- The production ratchet keeps `identityaudit`, `runtime`, and `settingsonly` permanently `supported`; future assemblies may be introduced as explicit `compile-only` rows, but existing production carriers cannot be downgraded to bypass their semantic gates.
+- The Assembly Governance IR owns the closed production identity ratchet and requires its exact set to remain `supported` with a non-vacuous journey. New non-production targets may be explicit `compile-only` rows, but changing both profile and artifact lifecycle cannot downgrade an existing production carrier.
 - `ASSEMBLY-ARTIFACT-MATRIX-01` in `xtask/src/assembly_artifacts.rs` is the Medium enforcement carrier. It validates application-owned binary, image, configuration, health/inventory, and journey facts and returns only a verified supported-row count; external delivery/release tooling owns every deployment projection. `cargo xtask assembly artifacts check` is the focused gate, and typed verify/CI execute it after manifest validation.
 - Artifact classification is an application validation boundary, not a deployment plan. It is not an input to canonical `AssemblyManifest`, generated modules/providers, AssemblyLock, or RuntimePlan and therefore cannot rotate those identities. Its internal Health inventory is not #1806's authorized public RuntimeInventory, and a supported row is not #1801 production-posture evidence.
 
@@ -115,6 +115,7 @@ INVARIANT: SECURITY-PRODUCTION-CLOSEOUT-01 { level = "Medium", exec = "check", s
 - The baseline must distinguish machine-checkable anchors from explanatory ordering rationale.
 - Runtime wiring drift must fail through an xtask gate before behavior-preserving refactors proceed.
 - Dynamic runtime facts that depend on environment, live providers, generated subscriptions, or topology must be documented as dynamic and not asserted as static baseline facts.
+- Assembly intent and provider facts belong to the Assembly Governance IR and generated plan/catalog gates; the runtime baseline must not render a second copy. Runtime live closure is proved by typed exact-set comparisons over the real wire → validate → compose path, without a text inventory fixture.
 
 ## Validation
 

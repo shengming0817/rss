@@ -638,7 +638,7 @@ pub enum InventoryError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assembly_schema::{AssemblyManifest, ParsedAssemblyLock, ParsedRuntimePlan};
+    use assembly_schema::{ParsedAssemblyLock, ParsedRuntimePlan, RepositoryAssemblyManifestV2};
     use bootstrap::{HealthProbe, Registry};
     use primitives::{HealthCheck, ProbeName};
     use std::error::Error;
@@ -647,28 +647,22 @@ mod tests {
     type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
     fn runtime_plan() -> TestResult<ParsedRuntimePlan> {
-        let manifest = AssemblyManifest::from_toml_str(include_str!(
-            "../../../assemblies/settingsonly/assembly.toml"
-        ))?
-        .canonicalize_v2()?;
+        let repository_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(std::path::Path::parent)
+            .ok_or("runtimeexec repository root")?;
+        let source = RepositoryAssemblyManifestV2::discover_v2(
+            repository_root,
+            &repository_root.join("assemblies/settingsonly"),
+        )?;
         let lock = ParsedAssemblyLock::from_json_slice(include_bytes!(
             "../../../assemblies/settingsonly/assembly.lock.json"
         ))?
-        .verify_repository_v2(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .parent()
-                .and_then(std::path::Path::parent)
-                .ok_or("runtimeexec repository root")?,
-            &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .parent()
-                .and_then(std::path::Path::parent)
-                .ok_or("runtimeexec repository root")?
-                .join("assemblies/settingsonly"),
-        )?
+        .verify_repository_v2(&source)?
         .into_executable();
         Ok(ParsedRuntimePlan::from_json_slice_bound(
             include_bytes!("../../../assemblies/settingsonly/runtime-plan.json"),
-            &manifest,
+            source.canonical(),
             &lock,
         )?)
     }

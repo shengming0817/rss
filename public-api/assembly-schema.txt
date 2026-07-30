@@ -1071,6 +1071,7 @@ impl !core::panic::unwind_safe::RefUnwindSafe for assembly_schema::AssemblyManif
 impl !core::panic::unwind_safe::UnwindSafe for assembly_schema::AssemblyManifestCanonicalizationError
 pub struct assembly_schema::CanonicalAssemblyManifestV2
 impl assembly_schema::CanonicalAssemblyManifestV2
+pub fn assembly_schema::CanonicalAssemblyManifestV2::declaration_ordered_diport_providers(&self) -> &[assembly_schema::DiportProvider]
 pub fn assembly_schema::CanonicalAssemblyManifestV2::diport_providers(&self) -> &[assembly_schema::DiportProvider]
 pub fn assembly_schema::CanonicalAssemblyManifestV2::domains(&self) -> &[assembly_schema::AssemblyDomain]
 pub fn assembly_schema::CanonicalAssemblyManifestV2::framework_contracts(&self) -> &[assembly_schema::FrameworkContractMount]
@@ -1081,6 +1082,8 @@ pub const fn assembly_schema::CanonicalAssemblyManifestV2::profile(&self) -> ass
 pub const fn assembly_schema::CanonicalAssemblyManifestV2::schema_version(&self) -> assembly_schema::AssemblyManifestSchemaVersion
 pub const fn assembly_schema::CanonicalAssemblyManifestV2::topology(&self) -> assembly_schema::AssemblyTopology
 pub fn assembly_schema::CanonicalAssemblyManifestV2::workflow_activations(&self) -> &[assembly_schema::WorkflowActivation]
+impl core::clone::Clone for assembly_schema::CanonicalAssemblyManifestV2
+pub fn assembly_schema::CanonicalAssemblyManifestV2::clone(&self) -> assembly_schema::CanonicalAssemblyManifestV2
 impl core::marker::Freeze for assembly_schema::CanonicalAssemblyManifestV2
 impl core::marker::Send for assembly_schema::CanonicalAssemblyManifestV2
 impl core::marker::Sync for assembly_schema::CanonicalAssemblyManifestV2
@@ -1232,7 +1235,7 @@ pub const fn assembly_schema::ParsedAssemblyLock::digests(&self) -> &assembly_sc
 pub const fn assembly_schema::ParsedAssemblyLock::fingerprint(&self) -> &assembly_schema::AssemblyFingerprint
 pub fn assembly_schema::ParsedAssemblyLock::from_json_slice(&[u8]) -> core::result::Result<Self, assembly_schema::AssemblyLockError>
 pub const fn assembly_schema::ParsedAssemblyLock::identity(&self) -> &assembly_schema::AssemblyIdentity
-pub fn assembly_schema::ParsedAssemblyLock::verify_repository_v2(self, &std::path::Path, &std::path::Path) -> core::result::Result<assembly_schema::RepositoryVerifiedAssemblyLock, assembly_schema::AssemblyLockError>
+pub fn assembly_schema::ParsedAssemblyLock::verify_repository_v2(self, &assembly_schema::RepositoryAssemblyManifestV2) -> core::result::Result<assembly_schema::RepositoryVerifiedAssemblyLock, assembly_schema::AssemblyLockError>
 impl core::marker::Freeze for assembly_schema::ParsedAssemblyLock
 impl core::marker::Send for assembly_schema::ParsedAssemblyLock
 impl core::marker::Sync for assembly_schema::ParsedAssemblyLock
@@ -1337,10 +1340,26 @@ impl core::marker::Unpin for assembly_schema::ProviderPlan
 impl core::marker::UnsafeUnpin for assembly_schema::ProviderPlan
 impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::ProviderPlan
 impl core::panic::unwind_safe::UnwindSafe for assembly_schema::ProviderPlan
+pub struct assembly_schema::RepositoryAssemblyManifestV2
+impl assembly_schema::RepositoryAssemblyManifestV2
+pub fn assembly_schema::RepositoryAssemblyManifestV2::assembly_dir(&self) -> &std::path::Path
+pub const fn assembly_schema::RepositoryAssemblyManifestV2::canonical(&self) -> &assembly_schema::CanonicalAssemblyManifestV2
+pub fn assembly_schema::RepositoryAssemblyManifestV2::discover_v2(&std::path::Path, &std::path::Path) -> core::result::Result<Self, assembly_schema::AssemblyLockError>
+pub fn assembly_schema::RepositoryAssemblyManifestV2::source_label(&self) -> &str
+pub fn assembly_schema::RepositoryAssemblyManifestV2::source_text(&self) -> &str
+impl core::clone::Clone for assembly_schema::RepositoryAssemblyManifestV2
+pub fn assembly_schema::RepositoryAssemblyManifestV2::clone(&self) -> assembly_schema::RepositoryAssemblyManifestV2
+impl core::marker::Freeze for assembly_schema::RepositoryAssemblyManifestV2
+impl core::marker::Send for assembly_schema::RepositoryAssemblyManifestV2
+impl core::marker::Sync for assembly_schema::RepositoryAssemblyManifestV2
+impl core::marker::Unpin for assembly_schema::RepositoryAssemblyManifestV2
+impl core::marker::UnsafeUnpin for assembly_schema::RepositoryAssemblyManifestV2
+impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::RepositoryAssemblyManifestV2
+impl core::panic::unwind_safe::UnwindSafe for assembly_schema::RepositoryAssemblyManifestV2
 pub struct assembly_schema::RepositoryVerifiedAssemblyLock(_)
 impl assembly_schema::RepositoryVerifiedAssemblyLock
 pub const fn assembly_schema::RepositoryVerifiedAssemblyLock::as_lock(&self) -> &assembly_schema::AssemblyLock
-pub fn assembly_schema::RepositoryVerifiedAssemblyLock::compile_v2(&std::path::Path, &std::path::Path) -> core::result::Result<Self, assembly_schema::AssemblyLockError>
+pub fn assembly_schema::RepositoryVerifiedAssemblyLock::compile_v2(&assembly_schema::RepositoryAssemblyManifestV2) -> core::result::Result<Self, assembly_schema::AssemblyLockError>
 pub const fn assembly_schema::RepositoryVerifiedAssemblyLock::digests(&self) -> &assembly_schema::AssemblyDigests
 pub const fn assembly_schema::RepositoryVerifiedAssemblyLock::fingerprint(&self) -> &assembly_schema::AssemblyFingerprint
 pub const fn assembly_schema::RepositoryVerifiedAssemblyLock::identity(&self) -> &assembly_schema::AssemblyIdentity

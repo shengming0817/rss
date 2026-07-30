@@ -1,13 +1,13 @@
 //! Runtime assembly baseline drift gate.
 //!
 //! The baseline locks static repository facts that later `runtime::run()` split PRs must preserve:
-//! runtime Cargo dependencies, assembly DI providers, the shared dependency/result structs, and
+//! runtime Cargo dependencies, the shared dependency/result structs, and
 //! ordered runtime wiring anchors. It intentionally keeps field-inventory drift separate from
 //! `SharedRuntimeDeps` infra-only semantics, which are enforced by `runtime-deps-guard`.
 //!
 //! INVARIANT: RUNTIME-BASELINE-DRIFT-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::runtime_baseline_drift_fails", anti_vacuity = "tests::runtime_baseline_accepts_fixture" } -- `cargo xtask runtime-baseline verify`
 //! compares the generated runtime assembly baseline with the committed `runtime-baseline/runtime.txt`
-//! and fails on missing baseline, content drift, empty dependency/provider inventories, or missing
+//! and fails on missing baseline, content drift, an empty dependency inventory, or missing
 //! required wiring anchors. Synthetic red/green tests cover every failure class.
 //!
 //! INVARIANT: RUNTIME-GENERATED-DOMAINS-LIVE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::runtime_generated_domains_rejects_handwritten_wiring_and_missing_merge", anti_vacuity = "tests::runtime_baseline_accepts_fixture" } -- the runtime phase must consume the committed generated domain list through the plan-owned validator and private `ValidatedDomainBindings` handoff into `compose_bindings`, retain partial bindings on constructor/validation/compose failure, record every output in `ProviderBuild`'s startup transaction, and must not restore per-domain handwritten wiring.
@@ -28,13 +28,14 @@
 //!
 //! INVARIANT: RUNTIME-LISTENER-PLAN-EXECUTION-LIVE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::runtime_listener_plan_execution_rejects_legacy_and_structural_bypasses + tests::runtime_placement_plan_execution_rejects_missing_anchors", anti_vacuity = "tests::runtime_listener_plan_execution_accepts_workspace" } -- across the complete production module graph, AST must expose exactly one RuntimePlan listener projection call, one consuming finalizer and phase call, and one `FinalizedListenerSet` construction expression in their canonical owners with no constructor/trait seam; `ListenerExecutionPlan`, `ListenerExecutionSpec`, `AssembledListener`, and `FinalizedListenerSet` remain exact `pub(crate)` types with inherited-private fields and no public re-export; launch accepts only that set, while raw-value auth assemblers, manual Health append, legacy config auth accessors, public listener/routes modules, and ordinary `Vec<AssembledListener>` launch inputs remain forbidden. PlacementExecutionPlan must mint once and reach outbound transport only through `reject_remote_on_local_listeners` + `from_placement`.
 //!
-//! INVARIANT: RUNTIME-PLAN-LIVE-CLOSURE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::runtime_plan_live_closure_rejects_missing_consumption_and_bait + tests::runtime_plan_live_inventory_artifact_and_test_membership_fail_closed", anti_vacuity = "tests::runtime_plan_live_closure_accepts_workspace + tests::runtime_plan_live_inventory_artifact_and_test_membership_fail_closed" } -- the sole production BuildProvider phase must mint the private, consuming DomainExecutionPlan from RuntimePlan plus PlacementExecutionPlan and carry it linearly through ProvidersBuilt/InfraBuilt. Across the complete production module graph, bootstrap::compose_bindings may appear only as the exact call owned by ValidatedDomainBindings::compose, and crate::modules_gen::wire_domains only as the exact call owned by InfraBuilt::wire_domains; imports, aliases, function-item references, dead helpers, and macro bait fail closed. WireDomains must consume generated bindings through exact validation and the private wrapper, and each generated/validation/composition failure arm must structurally execute failure.into_parts -> drain_binding_outputs -> ProviderBuild::record_domain -> return Err. The aggregate runtime golden freezes complete provider declaration/catalog/output, listener declaration/generated/live, domain declaration/local/live, and placement declaration/local/remote inventories, while AST membership pins its unique renderer and exact live test. Summary `.len()`, comments/strings, dead helpers, macro bait, and test-only decoys cannot satisfy this evidence.
+//! INVARIANT: RUNTIME-PLAN-LIVE-CLOSURE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::runtime_plan_live_closure_rejects_missing_consumption_and_bait", anti_vacuity = "tests::runtime_plan_live_closure_accepts_workspace" } -- the sole production BuildProvider phase must mint the private, consuming DomainExecutionPlan from RuntimePlan plus PlacementExecutionPlan and carry it linearly through ProvidersBuilt/InfraBuilt. Across the complete production module graph, bootstrap::compose_bindings may appear only as the exact call owned by ValidatedDomainBindings::compose, and crate::modules_gen::wire_domains only as the exact call owned by InfraBuilt::wire_domains; imports, aliases, function-item references, dead helpers, and macro bait fail closed. WireDomains must consume generated bindings through exact validation and the private wrapper, and each generated/validation/composition failure arm must structurally execute failure.into_parts -> drain_binding_outputs -> ProviderBuild::record_domain -> return Err. The runtime-owned test executes the real generated wire -> validate -> compose path and compares typed provider, listener, domain, and placement relations as exact sets; no parallel text inventory exists.
 //!
 //! INVARIANT: RUNTIME-SERVICE-TOKEN-REPLAY-LIVE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::runtime_service_token_replay_live_rejects_bait_parallel_paths_and_process_local_guards", anti_vacuity = "tests::runtime_service_token_replay_live_accepts_typed_pg_composition" } -- the only production service-token constructor accepts the closed PostgreSQL replay-owner trait, whose implementation set is exactly `PgRuntimeDeps` plus `PgMaintenanceDeps`. Serving and the five operator paths call that typed constructor directly at their run-reachable sites. Missing calls, extra/dead helpers, macro indirection, test-only evidence, process-local guards, comments, and strings cannot satisfy the inventory.
 //!
 //! INVARIANT: POSTGRES-SETUP-TRANSACTION-LIVE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::postgres_setup_transaction_rejects_missing_live_edges", anti_vacuity = "tests::postgres_setup_transaction_accepts_live_workspace" } -- the unique production `PgRuntimeDeps::connect_serving` must register each constructed pool immediately, mint the revocation capability receipt before constructing the reader, close the migrator after every post-connect outcome, roll back writer/reader partial construction on capability, reader, or audit-admin failure, and commit only after the typed owner holds all serving pools and the receipt. The AST gate pins the live statement/branch structure; helper-only tests, comments, strings, and dead bait cannot satisfy it.
 //! INVARIANT: AUDIT-SECURITY-FACT-BOUNDARY-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::audit_security_fact_boundary_rejects_identity_table_reads", anti_vacuity = "tests::audit_security_fact_boundary_accepts_live_workspace" } -- the transactional audit security-event consumer must decode the generated redacted fact into the audit-owned sealed command and must never query the identity-owned credential-security target mapping relation.
 
+use crate::assembly_governance::{AssemblyGovernanceIr, Core};
 use crate::diagnostic::{Finding, GovernanceCheck, finding};
 use crate::localtx_coverage::attrs_may_be_production;
 use crate::phase_helper_expand::{
@@ -44,7 +45,6 @@ use crate::phase_helper_expand::{
 };
 use crate::workspace_root;
 use anyhow::{Context, Result};
-use assembly_schema::AssemblyManifest;
 use std::collections::{BTreeMap, BTreeSet, VecDeque, btree_map::Entry};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -61,7 +61,6 @@ fn attrs_may_be_default_runtime_production(attrs: &[syn::Attribute]) -> bool {
 
 const BASELINE_PATH: &str = "runtime-baseline/runtime.txt";
 const RUNTIME_CARGO_PATH: &str = "assemblies/runtime/Cargo.toml";
-const ASSEMBLY_MANIFEST_PATH: &str = "assemblies/runtime/assembly.toml";
 const SHARED_RUNTIME_DEPS_PATH: &str = "assemblies/runtime/src/module.rs";
 const BOOTSTRAP_MODULE_PATH: &str = "crates/bootstrap/src/module.rs";
 const RUNTIME_LIB_PATH: &str = "assemblies/runtime/src/lib.rs";
@@ -94,8 +93,6 @@ const RUNTIME_OPERATOR_PATH: &str = "assemblies/runtime/src/operator/mod.rs";
 const RUNTIME_OPERATOR_JWKS_PATH: &str = "assemblies/runtime/src/operator/jwks.rs";
 const RUNTIME_OPERATOR_VAULT_ALLOWLIST_PATH: &str =
     "assemblies/runtime/src/operator/vault_allowlist.rs";
-const RUNTIME_PLAN_LIVE_INVENTORY_PATH: &str =
-    "assemblies/runtime/tests/fixtures/runtime-plan-live-inventory-v1.txt";
 const RUNTIME_OPERATOR_PROJECTION_PATH: &str = "assemblies/runtime/src/operator/projection.rs";
 const RUNTIME_OPERATOR_AUDIT_PATH: &str = "assemblies/runtime/src/operator/audit_ledger.rs";
 const RUNTIME_OPERATOR_DLQ_PATH: &str = "assemblies/runtime/src/operator/dlq.rs";
@@ -117,7 +114,6 @@ pub(crate) enum Rule {
     MissingBaseline,
     Drift,
     EmptyDependencies,
-    EmptyDiportProviders,
     MissingAnchor,
     ForbiddenWiring,
 }
@@ -207,9 +203,15 @@ struct Report {
 }
 
 fn collect_report(root: &Path) -> Result<Report> {
+    let governance = AssemblyGovernanceIr::<Core>::load(root)?;
+    let runtime = governance
+        .assembly("runtime")
+        .context("runtime assembly missing from governance IR")?;
+    collect_report_with_projection(root, runtime.manifest().diport_providers().len())
+}
+
+fn collect_report_with_projection(root: &Path, provider_count: usize) -> Result<Report> {
     let dependencies = runtime_dependencies(root)?;
-    let intent = assembly_intent(root)?;
-    let providers = assembly_providers(root)?;
     let shared_fields = struct_fields(
         root,
         SHARED_RUNTIME_DEPS_PATH,
@@ -225,13 +227,6 @@ fn collect_report(root: &Path) -> Result<Report> {
             Rule::EmptyDependencies,
             RUNTIME_CARGO_PATH,
             "[dependencies] 为空，baseline 退化为空转",
-        ));
-    }
-    if providers.is_empty() {
-        findings.push(finding(
-            Rule::EmptyDiportProviders,
-            ASSEMBLY_MANIFEST_PATH,
-            "[[diportProviders]] 为空，assembly provider inventory 退化为空转",
         ));
     }
     if !domain.merge_present {
@@ -282,21 +277,13 @@ fn collect_report(root: &Path) -> Result<Report> {
     findings.extend(generated_domains_live_findings(root)?);
     findings.extend(provider_outputs_live_findings(root)?);
     findings.extend(event_transport_output_findings(root)?);
-    findings.extend(runtime_plan_live_inventory_findings(root)?);
     findings.extend(runtime_plan_live_closure_findings(root)?);
     findings.extend(listener_plan_execution_findings(root)?);
 
     Ok(Report {
-        rendered: render_baseline(
-            &dependencies,
-            &intent,
-            &providers,
-            &shared_fields,
-            &domain,
-            &anchors,
-        ),
+        rendered: render_baseline(&dependencies, &shared_fields, &domain, &anchors),
         dependencies: dependencies.len(),
-        providers: providers.len(),
+        providers: provider_count,
         shared_fields: shared_fields.len(),
         domain_fields: domain.fields.len(),
         anchors: anchors.len(),
@@ -480,148 +467,6 @@ fn runtime_plan_live_closure_findings(root: &Path) -> Result<Vec<Finding<Rule>>>
         if !accepted {
             findings.push(finding(Rule::ForbiddenWiring, path, detail));
         }
-    }
-    Ok(findings)
-}
-
-const RUNTIME_PLAN_LIVE_INVENTORY_FIELDS: &[&str] = &[
-    "provider.declared",
-    "provider.active",
-    "provider.live-consumers",
-    "listener.plan",
-    "listener.generated",
-    "listener.live",
-    "domain.declared",
-    "domain.local",
-    "domain.live",
-    "placement.declared",
-    "placement.local",
-    "placement.remote",
-];
-
-fn validate_runtime_plan_live_inventory(raw: &str) -> Result<()> {
-    let mut lines = raw.lines();
-    anyhow::ensure!(
-        lines.next() == Some("runtime-plan-live-inventory-v1"),
-        "live inventory schema header drift"
-    );
-    for expected in RUNTIME_PLAN_LIVE_INVENTORY_FIELDS {
-        let line = lines
-            .next()
-            .with_context(|| format!("live inventory field `{expected}` missing"))?;
-        let (field, values) = line
-            .split_once('=')
-            .with_context(|| format!("live inventory field `{expected}` is malformed"))?;
-        anyhow::ensure!(
-            field == *expected,
-            "live inventory field `{expected}` drift"
-        );
-        let values = values
-            .strip_prefix('[')
-            .and_then(|values| values.strip_suffix(']'))
-            .with_context(|| format!("live inventory field `{expected}` lacks closed brackets"))?;
-        let members = if values.is_empty() {
-            Vec::new()
-        } else {
-            values.split(',').collect::<Vec<_>>()
-        };
-        anyhow::ensure!(
-            *expected == "placement.remote" || !members.is_empty(),
-            "live inventory field `{expected}` must be non-empty"
-        );
-        anyhow::ensure!(
-            members
-                .iter()
-                .all(|member| !member.trim().is_empty() && *member == member.trim()),
-            "live inventory field `{expected}` contains an empty or padded member"
-        );
-        let unique = members.iter().copied().collect::<BTreeSet<_>>();
-        anyhow::ensure!(
-            unique.len() == members.len(),
-            "live inventory field `{expected}` contains duplicate members"
-        );
-    }
-    anyhow::ensure!(
-        lines.next().is_none(),
-        "live inventory has unknown trailing fields"
-    );
-    anyhow::ensure!(raw.ends_with('\n'), "live inventory must end with LF");
-    Ok(())
-}
-
-#[derive(Default)]
-struct RuntimePlanLiveInventoryTestInventory {
-    matching_tests: usize,
-    matching_renderers: usize,
-}
-
-impl<'ast> Visit<'ast> for RuntimePlanLiveInventoryTestInventory {
-    fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
-        if item.sig.ident == "render_live_inventory_for_test" {
-            self.matching_renderers += usize::from(
-                item.attrs.iter().any(|attribute| {
-                    attribute.path().is_ident("cfg") && compact_tokens(attribute).contains("test")
-                }) && matches!(item.vis, syn::Visibility::Restricted(_)),
-            );
-        }
-        if item.sig.ident == "runtime_plan_live_inventory_freezes_complete_plan_to_live_closure" {
-            let shape = compact_tokens(&item.block);
-            let tokio_test = item
-                .attrs
-                .iter()
-                .any(|attribute| compact_tokens(attribute).contains("tokio::test"));
-            let exact_fixture = shape
-                .matches(
-                    "include_str!(\"../../tests/fixtures/runtime-plan-live-inventory-v1.txt\")",
-                )
-                .count()
-                == 1;
-            let exact_live_chain = [
-                "crate::modules_gen::wire_test_domains().await",
-                "domain_execution_plan.validate(live_bindings)",
-                "validated.compose()",
-                "super::render_live_inventory_for_test(",
-            ]
-            .into_iter()
-            .all(|anchor| shape.matches(anchor).count() == 1);
-            self.matching_tests += usize::from(tokio_test && exact_fixture && exact_live_chain);
-        }
-        syn::visit::visit_item_fn(self, item);
-    }
-}
-
-fn runtime_plan_live_inventory_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
-    let golden_path = root.join(RUNTIME_PLAN_LIVE_INVENTORY_PATH);
-    let owner_path = root.join(RUNTIME_DOMAIN_EXEC_PATH);
-    if !golden_path.is_file() || !owner_path.is_file() {
-        return Ok(vec![finding(
-            Rule::MissingAnchor,
-            RUNTIME_PLAN_LIVE_INVENTORY_PATH,
-            "runtime plan live inventory golden or canonical test owner is missing",
-        )]);
-    }
-    let raw = fs::read_to_string(&golden_path)
-        .with_context(|| format!("read {}", golden_path.display()))?;
-    let mut findings = Vec::new();
-    if let Err(error) = validate_runtime_plan_live_inventory(&raw) {
-        findings.push(finding(
-            Rule::MissingAnchor,
-            RUNTIME_PLAN_LIVE_INVENTORY_PATH,
-            format!("strict runtime plan live inventory drift: {error:#}"),
-        ));
-    }
-    let owner = parse_rust_file(&owner_path)?;
-    let mut inventory = RuntimePlanLiveInventoryTestInventory::default();
-    inventory.visit_file(&owner);
-    if inventory.matching_tests != 1 || inventory.matching_renderers != 1 {
-        findings.push(finding(
-            Rule::MissingAnchor,
-            RUNTIME_DOMAIN_EXEC_PATH,
-            format!(
-                "live inventory must have one cfg(test) renderer and one canonical tokio execution test consuming generated domains, validation, composition and the exact golden; renderers={}, tests={}",
-                inventory.matching_renderers, inventory.matching_tests
-            ),
-        ));
     }
     Ok(findings)
 }
@@ -15084,82 +14929,6 @@ fn render_toml_value(value: &toml::Value) -> String {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct ProviderEntry {
-    index: usize,
-    id: String,
-    port: String,
-    provider: String,
-    provider_crate: String,
-    required_features: Vec<String>,
-    consumer: String,
-    lifecycle: String,
-    durability: String,
-    scope: String,
-    failure_posture: String,
-    purpose: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct AssemblyIntentEntry {
-    name: String,
-    profile: String,
-    topology: String,
-    domains: Vec<String>,
-    listeners: Vec<String>,
-}
-
-fn assembly_manifest(root: &Path) -> Result<AssemblyManifest> {
-    let path = root.join(ASSEMBLY_MANIFEST_PATH);
-    let text = fs::read_to_string(&path).with_context(|| format!("读 {} 失败", path.display()))?;
-    AssemblyManifest::from_toml_str(&text).with_context(|| format!("解析 {} 失败", path.display()))
-}
-
-fn assembly_intent(root: &Path) -> Result<AssemblyIntentEntry> {
-    let manifest = assembly_manifest(root)?;
-    Ok(AssemblyIntentEntry {
-        name: manifest.name,
-        profile: manifest.profile.as_str().to_string(),
-        topology: manifest.topology.as_str().to_string(),
-        domains: manifest
-            .domains
-            .iter()
-            .map(|domain| domain.as_str().to_string())
-            .collect(),
-        listeners: manifest
-            .listeners
-            .iter()
-            .map(|listener| listener.kind.as_str().to_string())
-            .collect(),
-    })
-}
-
-fn assembly_providers(root: &Path) -> Result<Vec<ProviderEntry>> {
-    let manifest = assembly_manifest(root)?;
-    let mut providers = Vec::new();
-    for (index, provider) in manifest.diport_providers.iter().enumerate() {
-        providers.push(ProviderEntry {
-            index: index + 1,
-            id: provider.id.as_str().to_owned(),
-            port: provider.port.to_string(),
-            provider: provider.provider.to_string(),
-            provider_crate: provider.provider_crate.clone(),
-            required_features: provider.required_features.clone(),
-            consumer: provider.consumer.as_str().to_owned(),
-            lifecycle: provider.lifecycle.to_string(),
-            durability: provider.durability.to_string(),
-            scope: provider
-                .scope
-                .map_or_else(|| "unset".to_owned(), |scope| scope.to_string()),
-            failure_posture: provider
-                .failure_posture
-                .map_or_else(|| "unset".to_owned(), |posture| posture.to_string()),
-            purpose: provider.purpose.clone(),
-        });
-    }
-    Ok(providers)
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 struct FieldEntry {
     name: String,
     ty: String,
@@ -15915,8 +15684,6 @@ fn empty_scope(text: &str) -> AnchorSearchScope<'_> {
 
 fn render_baseline(
     dependencies: &[DependencyEntry],
-    intent: &AssemblyIntentEntry,
-    providers: &[ProviderEntry],
     shared_fields: &[FieldEntry],
     domain: &DomainModuleInventory,
     anchors: &[AnchorEntry],
@@ -15928,10 +15695,6 @@ fn render_baseline(
 
     out.push_str("[sources]\n");
     push_line(&mut out, format_args!("cargo = {RUNTIME_CARGO_PATH}"));
-    push_line(
-        &mut out,
-        format_args!("assembly = {ASSEMBLY_MANIFEST_PATH}"),
-    );
     push_line(
         &mut out,
         format_args!("sharedRuntimeDeps = {SHARED_RUNTIME_DEPS_PATH}"),
@@ -15948,43 +15711,6 @@ fn render_baseline(
     out.push_str("[runtime.dependencies]\n");
     for dep in dependencies {
         push_line(&mut out, format_args!("{} = {}", dep.name, dep.spec));
-    }
-    out.push('\n');
-
-    out.push_str("[assembly.intent]\n");
-    push_line(&mut out, format_args!("name = {}", intent.name));
-    push_line(&mut out, format_args!("profile = {}", intent.profile));
-    push_line(&mut out, format_args!("topology = {}", intent.topology));
-    push_line(
-        &mut out,
-        format_args!("domains = {}", render_string_list(&intent.domains)),
-    );
-    push_line(
-        &mut out,
-        format_args!("listeners = {}", render_string_list(&intent.listeners)),
-    );
-    out.push('\n');
-
-    out.push_str("[assembly.diportProviders]\n");
-    for provider in providers {
-        push_line(
-            &mut out,
-            format_args!(
-                "{:02} | id={} | port={} | provider={} | providerCrate={} | requiredFeatures={} | consumer={} | lifecycle={} | durability={} | scope={} | failurePosture={} | purpose={}",
-                provider.index,
-                provider.id,
-                provider.port,
-                provider.provider,
-                provider.provider_crate,
-                render_feature_list(&provider.required_features),
-                provider.consumer,
-                provider.lifecycle,
-                provider.durability,
-                provider.scope,
-                provider.failure_posture,
-                provider.purpose
-            ),
-        );
     }
     out.push('\n');
 
@@ -16035,18 +15761,6 @@ fn render_baseline(
 fn push_line(out: &mut String, args: std::fmt::Arguments<'_>) {
     out.push_str(&args.to_string());
     out.push('\n');
-}
-
-fn render_feature_list(features: &[String]) -> String {
-    render_string_list(features)
-}
-
-fn render_string_list(items: &[String]) -> String {
-    if items.is_empty() {
-        "[]".to_string()
-    } else {
-        format!("[{}]", items.join(","))
-    }
 }
 
 fn anchor_status(status: &AnchorStatus) -> &str {
@@ -16976,46 +16690,6 @@ serde = { workspace = true, features = ["derive"] }
 "#,
         )?;
         write(
-            &root.join(ASSEMBLY_MANIFEST_PATH),
-            r#"
-schemaVersion = 2
-name = "runtime"
-profile = "demo"
-domains = ["settings", "identity", "audit"]
-topology = "durable-shared"
-frameworkContracts = []
-workflowActivations = []
-
-[[listeners]]
-kind = "primary"
-domains = []
-
-[[listeners]]
-kind = "internal"
-domains = []
-
-[[listeners]]
-kind = "admin"
-domains = []
-
-[[listeners]]
-kind = "health"
-domains = []
-
-[[diportProviders]]
-id = "listener-pdp"
-port = "diport::Pdp"
-provider = "oidc::OidcProvider"
-providerCrate = "oidc"
-requiredFeatures = ["backend"]
-consumer = "httpserve"
-lifecycle = "active"
-durability = "persistent"
-purpose = "jwt-credential-verification"
-outputs = []
-"#,
-        )?;
-        write(
             &root.join(SHARED_RUNTIME_DEPS_PATH),
             r#"
 pub struct SharedRuntimeDeps {
@@ -17053,8 +16727,10 @@ impl DomainModuleResult {
             RUNTIME_LAUNCH_PATH,
             RUNTIMEEXEC_PATH,
             RUNTIME_DOMAIN_EXEC_PATH,
-            RUNTIME_PLAN_LIVE_INVENTORY_PATH,
             POSTGRES_BUNDLE_PATH,
+            POSTGRES_CONSUMER_TX_PATH,
+            POSTGRES_MIGRATION_PATH,
+            POSTGRES_PROJECTION_EVENTS_PATH,
         ] {
             write(&root.join(path), &fs::read_to_string(workspace.join(path))?)?;
         }
@@ -17074,6 +16750,32 @@ impl DomainModuleResult {
             )?;
         }
         Ok(root)
+    }
+
+    fn collect_report(root: &Path) -> Result<Report> {
+        collect_report_with_projection(root, 1)
+    }
+
+    fn check_fixture_root(root: &Path) -> Result<(String, Vec<Finding<Rule>>)> {
+        let report = collect_report(root)?;
+        let mut findings = report.findings;
+        let baseline = root.join(BASELINE_PATH);
+        if !baseline.exists() {
+            findings.push(finding(
+                Rule::MissingBaseline,
+                BASELINE_PATH,
+                "missing fixture baseline",
+            ));
+        } else if normalize_newlines(&fs::read_to_string(&baseline)?)
+            != normalize_newlines(&report.rendered)
+        {
+            findings.push(finding(
+                Rule::Drift,
+                BASELINE_PATH,
+                "fixture baseline drift",
+            ));
+        }
+        Ok(("fixture runtime baseline".to_owned(), findings))
     }
 
     fn runtime_lib_fixture(omit: Option<&str>) -> String {
@@ -17368,52 +17070,6 @@ fn bypass_runtimeexec_stack(token: tokio_util::sync::CancellationToken) {
     }
 
     #[test]
-    fn runtime_baseline_rejects_bad_manifest() -> Result<()> {
-        let root = fixture_root("runtime-baseline-bad-manifest")?;
-        write(
-            &root.join(ASSEMBLY_MANIFEST_PATH),
-            r#"
-schemaVersion = 2
-name = "runtime"
-profile = "demo"
-domains = ["identity", "settings", "audit"]
-topology = "durable-shared"
-frameworkContracts = []
-workflowActivations = []
-
-[[listeners]]
-kind = "primary"
-domains = []
-
-[[listeners]]
-kind = "internal"
-domains = []
-
-[[listeners]]
-kind = "admin"
-domains = []
-
-[[listeners]]
-kind = "health"
-domains = []
-
-[[diportProviders]]
-id = "listener-pdp"
-port = "diport::Pdp"
-provider = "oidc::OidcProvider"
-providerCrate = "oidc"
-consumer = "httpserve"
-lifecycle = "unknown"
-durability = "persistent"
-purpose = "jwt-credential-verification"
-outputs = []
-"#,
-        )?;
-        assert!(collect_report(&root).is_err());
-        Ok(())
-    }
-
-    #[test]
     fn runtime_baseline_renderer_snapshot() -> Result<()> {
         let root = fixture_root("runtime-baseline-render")?;
         let report = collect_report(&root)?;
@@ -17423,7 +17079,6 @@ outputs = []
 
 [sources]
 cargo = assemblies/runtime/Cargo.toml
-assembly = assemblies/runtime/assembly.toml
 sharedRuntimeDeps = assemblies/runtime/src/module.rs
 domainModuleResult = crates/bootstrap/src/module.rs
 run = assemblies/runtime/src/lib.rs
@@ -17440,23 +17095,8 @@ serde = workspace=true; features=[derive]
             "{}",
             report.rendered
         );
-        assert!(report.rendered.contains("[assembly.intent]"));
-        assert!(report.rendered.contains("name = runtime"));
-        assert!(report.rendered.contains("profile = demo"));
-        assert!(report.rendered.contains("topology = durable-shared"));
-        assert!(
-            report
-                .rendered
-                .contains("domains = [settings,identity,audit]")
-        );
-        assert!(
-            report
-                .rendered
-                .contains("listeners = [primary,internal,admin,health]")
-        );
-        assert!(report.rendered.contains(
-            "01 | id=listener-pdp | port=diport::Pdp | provider=oidc::OidcProvider | providerCrate=oidc | requiredFeatures=[backend] | consumer=httpserve | lifecycle=active | durability=persistent | scope=unset | failurePosture=unset | purpose=jwt-credential-verification"
-        ));
+        assert!(!report.rendered.contains("[assembly.intent]"));
+        assert!(!report.rendered.contains("[assembly.diportProviders]"));
         assert!(
             report
                 .rendered
@@ -17474,7 +17114,7 @@ serde = workspace=true; features=[derive]
     #[test]
     fn runtime_baseline_missing_baseline_fails() -> Result<()> {
         let root = fixture_root("runtime-baseline-missing")?;
-        let (_, findings) = check_root(&root)?;
+        let (_, findings) = check_fixture_root(&root)?;
         assert!(findings.iter().any(|f| f.rule == Rule::MissingBaseline));
         Ok(())
     }
@@ -17483,13 +17123,13 @@ serde = workspace=true; features=[derive]
     fn runtime_baseline_drift_fails() -> Result<()> {
         let root = fixture_root("runtime-baseline-drift")?;
         write(&root.join(BASELINE_PATH), "stale\n")?;
-        let (_, findings) = check_root(&root)?;
+        let (_, findings) = check_fixture_root(&root)?;
         assert!(findings.iter().any(|f| f.rule == Rule::Drift));
         Ok(())
     }
 
     #[test]
-    fn runtime_baseline_empty_dependencies_and_providers_fail() -> Result<()> {
+    fn runtime_baseline_empty_dependencies_fail() -> Result<()> {
         let root = fixture_root("runtime-baseline-empty")?;
         write(
             &root.join(RUNTIME_CARGO_PATH),
@@ -17499,47 +17139,12 @@ name = "runtime"
 [dependencies]
 "#,
         )?;
-        write(
-            &root.join(ASSEMBLY_MANIFEST_PATH),
-            r#"
-schemaVersion = 2
-name = "runtime"
-profile = "demo"
-domains = ["identity", "settings", "audit"]
-topology = "durable-shared"
-frameworkContracts = []
-workflowActivations = []
-diportProviders = []
-
-[[listeners]]
-kind = "primary"
-domains = []
-
-[[listeners]]
-kind = "internal"
-domains = []
-
-[[listeners]]
-kind = "admin"
-domains = []
-
-[[listeners]]
-kind = "health"
-domains = []
-"#,
-        )?;
         let report = collect_report(&root)?;
         assert!(
             report
                 .findings
                 .iter()
                 .any(|f| f.rule == Rule::EmptyDependencies)
-        );
-        assert!(
-            report
-                .findings
-                .iter()
-                .any(|f| f.rule == Rule::EmptyDiportProviders)
         );
         Ok(())
     }
@@ -21021,48 +20626,7 @@ impl DomainModuleResult {
             let relative = source.strip_prefix(workspace)?;
             write(&root.join(relative), &fs::read_to_string(&source)?)?;
         }
-        write(
-            &root.join(RUNTIME_PLAN_LIVE_INVENTORY_PATH),
-            &fs::read_to_string(workspace.join(RUNTIME_PLAN_LIVE_INVENTORY_PATH))?,
-        )?;
         Ok(root)
-    }
-
-    #[test]
-    fn runtime_plan_live_inventory_artifact_and_test_membership_fail_closed() -> Result<()> {
-        let root = runtime_plan_live_closure_fixture("runtime-plan-live-inventory-membership")?;
-        assert!(runtime_plan_live_inventory_findings(&root)?.is_empty());
-
-        fs::remove_file(root.join(RUNTIME_PLAN_LIVE_INVENTORY_PATH))?;
-        assert!(!runtime_plan_live_inventory_findings(&root)?.is_empty());
-
-        let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .context("xtask workspace root")?;
-        write(
-            &root.join(RUNTIME_PLAN_LIVE_INVENTORY_PATH),
-            &fs::read_to_string(workspace.join(RUNTIME_PLAN_LIVE_INVENTORY_PATH))?,
-        )?;
-        let owner = root.join(RUNTIME_DOMAIN_EXEC_PATH);
-        let source = fs::read_to_string(&owner)?;
-        write(
-            &owner,
-            &source.replacen(
-                "runtime_plan_live_inventory_freezes_complete_plan_to_live_closure",
-                "removed_live_inventory_test",
-                1,
-            ),
-        )?;
-        assert!(!runtime_plan_live_inventory_findings(&root)?.is_empty());
-
-        write(&owner, &source)?;
-        let golden = fs::read_to_string(root.join(RUNTIME_PLAN_LIVE_INVENTORY_PATH))?;
-        write(
-            &root.join(RUNTIME_PLAN_LIVE_INVENTORY_PATH),
-            &golden.replacen("domain.live=", "domain.live-renamed=", 1),
-        )?;
-        assert!(!runtime_plan_live_inventory_findings(&root)?.is_empty());
-        Ok(())
     }
 
     #[test]

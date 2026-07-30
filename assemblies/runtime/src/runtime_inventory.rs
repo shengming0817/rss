@@ -416,10 +416,14 @@ pub mod test_support {
             .parent()
             .and_then(std::path::Path::parent)
             .context("runtime assembly repository root")?;
+        let repository_manifest = assembly_schema::RepositoryAssemblyManifestV2::discover_v2(
+            repository_root,
+            assembly_dir,
+        )?;
         let lock = assembly_schema::ParsedAssemblyLock::from_json_slice(include_bytes!(
             "../assembly.lock.json"
         ))?
-        .verify_repository_v2(repository_root, assembly_dir)?
+        .verify_repository_v2(&repository_manifest)?
         .into_executable();
         let parsed = assembly_schema::ParsedRuntimePlan::from_json_slice_bound(
             include_bytes!("../runtime-plan.json"),

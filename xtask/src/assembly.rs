@@ -6,11 +6,13 @@
 //! 声明和 verify 门，避免生产在 dev/demo provider 上静默运行。
 
 use anyhow::{Context, Result, bail};
+#[cfg(test)]
+use assembly_schema::AssemblyManifest;
 use assembly_schema::repository_contract::{discover_contracts, validate_workflow_activations};
 use assembly_schema::{
-    AssemblyDomain, AssemblyManifest, AssemblyProfile, AssemblyTopology, DiportPort,
-    DiportProvider, ManifestValidationError, ProviderConstructor, ProviderConsumer,
-    ProviderDurability, ProviderFailurePosture, ProviderLifecycle, ProviderScope,
+    AssemblyDomain, AssemblyProfile, AssemblyTopology, CanonicalAssemblyManifestV2, DiportPort,
+    DiportProvider, ProviderConstructor, ProviderConsumer, ProviderDurability,
+    ProviderFailurePosture, ProviderLifecycle, ProviderScope,
 };
 use quote::ToTokens as _;
 use serde::Deserialize;
@@ -18,6 +20,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
+use crate::assembly_governance::{
+    AssemblyGovernanceIr, Core, GovernedAssembly, ProductionAssembly,
+};
 use crate::diagnostic::{self, GovernanceCheck, finding};
 
 pub(crate) type Finding = diagnostic::Finding<Rule>;
@@ -26,12 +31,6 @@ pub(crate) type Finding = diagnostic::Finding<Rule>;
 pub(crate) enum Rule {
     /// `assemblies/*/Cargo.toml` 必须有同目录 `assembly.toml`。
     MissingManifest,
-    /// manifest `name` 必须非空且匹配 assembly 目录名。
-    ManifestNameMismatch,
-    /// assembly manifest 必须声明至少一个 domain。
-    EmptyDomains,
-    /// assembly manifest 中 `domains` 不得重复。
-    DuplicateDomain,
     /// manifest 声明的 active domain 必须是 assembly crate 的直接 normal dependency。
     ActiveDomainDependency,
     /// 未声明 domain 不得进入 assembly normal dependency closure。
@@ -48,10 +47,6 @@ pub(crate) enum Rule {
     ///
     /// INVARIANT: SETTINGSONLY-L2-PRODUCTION-CLOSURE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::settingsonly_l2_production_closure_rejects_synthetic_mutations", anti_vacuity = "tests::settingsonly_l2_production_closure_accepts_real_workspace" } -- exact manifest/provider/artifact/config/subscription/auth-funnel facts and the production startup call chain are verified from parsed source; raw JWT reparsing, aliases, function pointers, comments, test-only bait, dead helpers, fallback factories, and nonactivated subscribers are not evidence.
     SettingsOnlyL2ProductionClosure,
-    /// assembly manifest 必须声明至少一个 listener。
-    EmptyListeners,
-    /// assembly manifest 中 `listeners` 不得重复。
-    DuplicateListener,
     /// Framework contract declarations must exactly cover active framework-owned contracts.
     FrameworkContractServing,
     /// Workflow activation must exactly join one repository definition and valid lifecycle.
@@ -66,12 +61,6 @@ pub(crate) enum Rule {
     ///
     /// INVARIANT: RUNTIME-INVENTORY-LISTENER-PROVENANCE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::runtime_inventory_listener_provenance_rejects_detached_or_aliased_construction", anti_vacuity = "tests::runtime_inventory_listener_provenance_real_launch_roots_are_exact" } -- copied addresses, helper aliases, macros, and extra production minting sites cannot masquerade as actual listener publication.
     RuntimeInventoryListenerProvenance,
-    /// assembly manifest 不能空转：至少声明一个 DI provider。
-    EmptyDiportProviders,
-    /// assembly manifest 中 `diportProviders` 不得重复。
-    DuplicateDiportProvider,
-    /// assembly manifest 中 provider 字段不得为空。
-    InvalidDiportProvider,
     /// production `diport::RevocationStore` provider 必须持久。
     RevocationDurability,
     /// production provider 必须 active 且持久；仅 exact active GovernorLimiter 可为进程内临时态。
@@ -134,124 +123,9 @@ impl GovernanceCheck for AssemblyValidate {
 
     fn check(&self) -> Result<(String, Vec<Finding>)> {
         let root = crate::workspace_root()?;
+        crate::assembly_governance::validate_source_funnel(&root)?;
         let (count, findings) = validate_root(&root)?;
         Ok((format!("{count} assembly 声明全部通过"), findings))
-    }
-}
-
-struct DiscoveredAssembly {
-    dir: PathBuf,
-    cargo_path: PathBuf,
-    manifest_label: String,
-    cargo_label: String,
-    manifest_src: String,
-    manifest: AssemblyManifest,
-    cargo_toml: toml::Value,
-}
-
-/// A normalized direct child of `assemblies/`; fields stay private so callers cannot pair an
-/// assembly name with a different repository path.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct AssemblyTarget {
-    name: String,
-    dir: PathBuf,
-    lock_path: PathBuf,
-    has_manifest: bool,
-    has_cargo_manifest: bool,
-}
-
-impl AssemblyTarget {
-    pub(crate) fn name(&self) -> &str {
-        &self.name
-    }
-
-    pub(crate) fn dir(&self) -> &Path {
-        &self.dir
-    }
-
-    pub(crate) fn cargo_path(&self) -> PathBuf {
-        self.dir.join("Cargo.toml")
-    }
-
-    pub(crate) fn lock_path(&self) -> &Path {
-        &self.lock_path
-    }
-
-    pub(crate) const fn has_manifest(&self) -> bool {
-        self.has_manifest
-    }
-
-    const fn has_cargo_manifest(&self) -> bool {
-        self.has_cargo_manifest
-    }
-}
-
-/// Discover the shared assembly target universe without following repository-controlled links.
-pub(crate) fn discover_targets(root: &Path) -> Result<Vec<AssemblyTarget>> {
-    let assemblies_root = root.join("assemblies");
-    let metadata = match std::fs::symlink_metadata(&assemblies_root) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => {
-            return Err(error).with_context(|| format!("检查 {} 失败", assemblies_root.display()));
-        }
-    };
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        bail!("assemblies 根必须是真实目录")
-    }
-
-    let mut entries = std::fs::read_dir(&assemblies_root)
-        .with_context(|| format!("读 assembly 目录 {} 失败", assemblies_root.display()))?
-        .collect::<Result<Vec<_>, _>>()
-        .context("遍历 assembly 目录失败")?;
-    entries.sort_by_key(std::fs::DirEntry::file_name);
-
-    let mut targets = Vec::new();
-    for entry in entries {
-        let file_type = entry
-            .file_type()
-            .context("检查 assembly direct child 类型失败")?;
-        if file_type.is_symlink() {
-            bail!("assemblies direct child 禁止符号链接")
-        }
-        if !file_type.is_dir() {
-            continue;
-        }
-        let name = assembly_name(entry.file_name())?;
-        let dir = entry.path();
-        let expected = root.join("assemblies").join(&name);
-        if dir != expected {
-            bail!("assembly 目录必须是规范 direct child")
-        }
-        let lock_path = dir.join("assembly.lock.json");
-        let has_manifest = regular_file_or_missing(&dir.join("assembly.toml"))?;
-        let has_cargo_manifest = regular_file_or_missing(&dir.join("Cargo.toml"))?;
-        targets.push(AssemblyTarget {
-            name,
-            dir,
-            lock_path,
-            has_manifest,
-            has_cargo_manifest,
-        });
-    }
-    Ok(targets)
-}
-
-fn assembly_name(file_name: std::ffi::OsString) -> Result<String> {
-    file_name
-        .into_string()
-        .map_err(|_| anyhow::anyhow!("assembly 目录名必须是 UTF-8"))
-}
-
-fn regular_file_or_missing(path: &Path) -> Result<bool> {
-    match std::fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_symlink() => {
-            bail!("assembly input 禁止符号链接")
-        }
-        Ok(metadata) if metadata.is_file() => Ok(true),
-        Ok(_) => bail!("assembly input 必须是普通文件"),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(error).with_context(|| "检查 assembly input 失败"),
     }
 }
 
@@ -279,7 +153,7 @@ pub(crate) fn validate_root(root: &Path) -> Result<(usize, Vec<Finding>)> {
 
 fn validate_workflow_activation_contracts(
     root: &Path,
-    assemblies: &[DiscoveredAssembly],
+    assemblies: &[GovernedAssembly],
 ) -> Result<Vec<Finding>> {
     let contracts_dir = root.join("contracts");
     let contracts = if contracts_dir.exists() {
@@ -289,14 +163,10 @@ fn validate_workflow_activation_contracts(
     };
     let mut findings = Vec::new();
     for assembly in assemblies {
-        let canonical = match assembly.manifest.clone().canonicalize_v2() {
-            Ok(canonical) => canonical,
-            Err(_) => continue,
-        };
-        if let Err(error) = validate_workflow_activations(&canonical, &contracts) {
+        if let Err(error) = validate_workflow_activations(assembly.manifest(), &contracts) {
             findings.push(finding(
                 Rule::WorkflowActivation,
-                &assembly.manifest_label,
+                assembly.manifest_label(),
                 error.to_string(),
             ));
         }
@@ -306,11 +176,11 @@ fn validate_workflow_activation_contracts(
 
 fn validate_runtime_inventory_provider_provenance(
     root: &Path,
-    assemblies: &[DiscoveredAssembly],
+    assemblies: &[GovernedAssembly],
 ) -> Result<Vec<Finding>> {
     let mut findings = Vec::new();
     for assembly in assemblies {
-        let source_root = assembly.dir.join("src");
+        let source_root = assembly.dir().join("src");
         // Manifest-only fixtures intentionally validate declarations without forging a runtime
         // carrier. Executable-boundary gates own the absence of a production source tree.
         if !source_root.is_dir() {
@@ -336,10 +206,10 @@ fn validate_runtime_inventory_provider_provenance(
                 continue;
             }
             let relative = path
-                .strip_prefix(&assembly.dir)
+                .strip_prefix(assembly.dir())
                 .unwrap_or(path.as_path())
                 .to_string_lossy();
-            let allowed = match assembly.manifest.name.as_str() {
+            let allowed = match assembly.manifest().name() {
                 "runtime" => relative == "src/provider_output.rs",
                 "settingsonly" | "identityaudit" => relative == "src/generated/providers_gen.rs",
                 _ => false,
@@ -361,13 +231,13 @@ fn validate_runtime_inventory_provider_provenance(
             }
         }
         if matches!(
-            assembly.manifest.name.as_str(),
+            assembly.manifest().name(),
             "runtime" | "settingsonly" | "identityaudit"
         ) && sanctioned != 1
         {
             findings.push(finding(
                 Rule::RuntimeInventoryProviderProvenance,
-                &assembly.manifest_label,
+                assembly.manifest_label(),
                 format!(
                     "runtime inventory provider binding requires exactly one sanctioned completion funnel, found {sanctioned}"
                 ),
@@ -478,20 +348,20 @@ fn path_segments(path: &syn::Path) -> Vec<String> {
 
 fn validate_runtime_inventory_listener_provenance(
     root: &Path,
-    assemblies: &[DiscoveredAssembly],
+    assemblies: &[GovernedAssembly],
 ) -> Result<Vec<Finding>> {
     let mut findings = Vec::new();
     for assembly in assemblies {
-        let source_root = assembly.dir.join("src");
+        let source_root = assembly.dir().join("src");
         if !source_root.is_dir() {
             continue;
         }
         let (allowed_file, expected_calls): (Option<&str>, &[ExpectedListenerObservation]) =
-            match assembly.manifest.name.as_str() {
+            match assembly.manifest().name() {
                 "runtime" => (Some("src/launch.rs"), RUNTIME_LISTENER_OBSERVATIONS),
                 "settingsonly" | "identityaudit" => (
                     Some("src/listeners.rs"),
-                    match assembly.manifest.name.as_str() {
+                    match assembly.manifest().name() {
                         "settingsonly" => SETTINGSONLY_LISTENER_OBSERVATIONS,
                         _ => IDENTITYAUDIT_LISTENER_OBSERVATIONS,
                     },
@@ -514,7 +384,7 @@ fn validate_runtime_inventory_listener_provenance(
                 continue;
             }
             let relative = path
-                .strip_prefix(&assembly.dir)
+                .strip_prefix(assembly.dir())
                 .unwrap_or(path.as_path())
                 .to_string_lossy();
             let exact_funnel = allowed_file.is_some_and(|allowed| relative == allowed)
@@ -537,7 +407,7 @@ fn validate_runtime_inventory_listener_provenance(
         if allowed_file.is_some() && valid_calls != expected_call_count {
             findings.push(finding(
                 Rule::RuntimeInventoryListenerProvenance,
-                &assembly.manifest_label,
+                assembly.manifest_label(),
                 format!(
                     "runtime listener inventory requires {expected_call_count} exact id/kind/auth/bound observation constructors, found {valid_calls}"
                 ),
@@ -765,12 +635,10 @@ fn token_key(tokens: &impl quote::ToTokens) -> String {
 pub(crate) fn artifact_boundary_findings(root: &Path) -> Result<Vec<Finding>> {
     let (assemblies, mut findings) = discover(root)?;
     let metadata = load_workspace_metadata(root)?;
-    for assembly in assemblies.iter().filter(|assembly| {
-        matches!(
-            assembly.manifest.name.as_str(),
-            "identityaudit" | "settingsonly"
-        )
-    }) {
+    for assembly in assemblies
+        .iter()
+        .filter(|assembly| matches!(assembly.manifest().name(), "identityaudit" | "settingsonly"))
+    {
         if let Some(metadata) = &metadata {
             findings.extend(validate_target_domain_closure(root, assembly, metadata)?);
         }
@@ -790,7 +658,7 @@ pub(crate) fn artifact_boundary_findings(root: &Path) -> Result<Vec<Finding>> {
 
 fn validate_framework_contracts(
     root: &Path,
-    assemblies: &[DiscoveredAssembly],
+    assemblies: &[GovernedAssembly],
 ) -> Result<Vec<Finding>> {
     use crate::contract::manifest::{ContractOwner, Lifecycle};
 
@@ -802,26 +670,26 @@ fn validate_framework_contracts(
     let mut declarations: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
     let mut findings = Vec::new();
     for assembly in assemblies {
-        for mount in &assembly.manifest.framework_contracts {
+        for mount in assembly.manifest().framework_contracts() {
             let contract_id = &mount.id;
             declarations
                 .entry(contract_id)
                 .or_default()
-                .push(&assembly.manifest_label);
+                .push(assembly.manifest_label());
             match by_id.get(contract_id.as_str()) {
                 Some(contract)
                     if contract.manifest.lifecycle == Lifecycle::Active
                         && contract.manifest.owner == ContractOwner::Framework => {}
                 Some(_) => findings.push(finding(
                     Rule::FrameworkContractServing,
-                    &assembly.manifest_label,
+                    assembly.manifest_label(),
                     format!(
                         "frameworkContracts entry `{contract_id}` must reference an active framework-owned contract"
                     ),
                 )),
                 None => findings.push(finding(
                     Rule::FrameworkContractServing,
-                    &assembly.manifest_label,
+                    assembly.manifest_label(),
                     format!("frameworkContracts entry `{contract_id}` is unknown"),
                 )),
             }
@@ -850,38 +718,34 @@ fn validate_framework_contracts(
 }
 
 /// 对单个目标执行与 aggregate gate 相同的完整验证，不读取其它 assembly。
+#[cfg(test)]
 pub(crate) fn validate_target(root: &Path, name: &str) -> Result<Vec<Finding>> {
-    let assembly = load_target(root, &root.join("assemblies").join(name))?;
-    let mut findings = validate_assembly(&assembly);
+    let ir = AssemblyGovernanceIr::<Core>::load_target(root, name)?
+        .with_context(|| format!("assembly `{name}` 不存在"))?;
+    let assembly = ir
+        .assembly(name)
+        .with_context(|| format!("assembly `{name}` 不存在"))?;
+    validate_governed_target(root, assembly)
+}
+
+/// Validate an assembly already selected by the governance owner.
+///
+/// Callers that already hold a Core IR must use this entry point so target-scoped
+/// operations do not rediscover the repository or rerun the global production ratchet.
+pub(crate) fn validate_governed_target(
+    root: &Path,
+    assembly: &GovernedAssembly,
+) -> Result<Vec<Finding>> {
+    let mut findings = validate_assembly(assembly);
     if let Some(metadata) = load_workspace_metadata(root)? {
-        findings.extend(validate_target_domain_closure(root, &assembly, &metadata)?);
+        findings.extend(validate_target_domain_closure(root, assembly, &metadata)?);
     }
     Ok(findings)
 }
 
-fn load_target(root: &Path, dir: &Path) -> Result<DiscoveredAssembly> {
-    let manifest_path = dir.join("assembly.toml");
-    let cargo_path = dir.join("Cargo.toml");
-    let manifest_src = std::fs::read_to_string(&manifest_path)
-        .with_context(|| format!("读 {} 失败", manifest_path.display()))?;
-    let cargo_src = std::fs::read_to_string(&cargo_path)
-        .with_context(|| format!("读 {} 失败", cargo_path.display()))?;
-    Ok(DiscoveredAssembly {
-        dir: dir.to_path_buf(),
-        cargo_path: cargo_path.clone(),
-        manifest_label: rel_label(root, &manifest_path),
-        cargo_label: rel_label(root, &cargo_path),
-        manifest: AssemblyManifest::from_toml_str(&manifest_src)
-            .with_context(|| format!("解析 {} 失败", manifest_path.display()))?,
-        cargo_toml: toml::from_str(&cargo_src)
-            .with_context(|| format!("解析 {} 失败", cargo_path.display()))?,
-        manifest_src,
-    })
-}
-
 fn validate_target_domain_closure(
     root: &Path,
-    assembly: &DiscoveredAssembly,
+    assembly: &GovernedAssembly,
     metadata: &CargoMetadata,
 ) -> Result<Vec<Finding>> {
     // INVARIANT: ASSEMBLY-DOMAIN-CLOSURE-01 { level = "Medium", exec = "check", source = "code" } —
@@ -889,11 +753,11 @@ fn validate_target_domain_closure(
     // 指向同名 workspace domain crate 的直接 normal dependency；inactive domain 不得进入该目标 package 的
     // normal dependency closure。真实 Cargo fixture 覆盖 alias、target cfg、dev/build、optional、
     // direct/transitive red case。
-    let package = package_by_manifest(metadata, &assembly.cargo_path).with_context(|| {
+    let package = package_by_manifest(metadata, assembly.cargo_path()).with_context(|| {
         format!(
             "{} 未出现在 cargo metadata packages 中；manifest_path={}",
-            assembly.cargo_label,
-            assembly.cargo_path.display()
+            assembly.cargo_label(),
+            assembly.cargo_path().display()
         )
     })?;
     let declared_direct_domains = direct_normal_domain_deps(root, metadata, package)?;
@@ -904,19 +768,19 @@ fn validate_target_domain_closure(
         .collect();
     let closure_domains = cargo_tree_domains(root, assembly, metadata, None)?;
     let mut findings = validate_domain_sets(assembly, direct_domains, closure_domains)?;
-    if assembly.manifest.name == "identityaudit" {
+    if assembly.manifest().name() == "identityaudit" {
         let (closure_packages, test_support_enabled) =
             cargo_tree_default_normal_evidence(root, assembly, metadata)?;
         findings.extend(validate_identityaudit_boundary(
-            &assembly.manifest_label,
-            &assembly.cargo_label,
+            assembly.manifest_label(),
+            assembly.cargo_label(),
             &package.targets,
             &closure_packages,
         ));
         let schema_is_closed =
-            identityaudit_schema_is_closed(&assembly.dir.join("config.schema.json"))?;
+            identityaudit_schema_is_closed(&assembly.dir().join("config.schema.json"))?;
         let sample_is_regular_file =
-            is_regular_file_without_symlink(&assembly.dir.join("identityaudit.example.toml"))?;
+            is_regular_file_without_symlink(&assembly.dir().join("identityaudit.example.toml"))?;
         let artifact_acceptance = identityaudit_artifact_acceptance_evidence(root)?;
         let (journey_target_declared, required_journey_test_declared) =
             identityaudit_journey_evidence(root)?;
@@ -936,13 +800,13 @@ fn validate_target_domain_closure(
             },
         ));
     }
-    if assembly.manifest.name == "settingsonly" {
+    if assembly.manifest().name() == "settingsonly" {
         let (closure_packages, test_support_enabled) =
             cargo_tree_default_normal_evidence(root, assembly, metadata)?;
         let schema_is_regular_file =
-            is_regular_file_without_symlink(&assembly.dir.join("config.schema.json"))?;
+            is_regular_file_without_symlink(&assembly.dir().join("config.schema.json"))?;
         let sample_is_regular_file =
-            is_regular_file_without_symlink(&assembly.dir.join("settingsonly.example.toml"))?;
+            is_regular_file_without_symlink(&assembly.dir().join("settingsonly.example.toml"))?;
         let artifact_acceptance = settingsonly_artifact_acceptance_evidence(root)?;
         let (journey_target_declared, required_journey_test_declared) =
             settingsonly_journey_evidence(root)?;
@@ -974,7 +838,7 @@ fn validate_target_domain_closure(
 
 #[derive(Clone)]
 struct SettingsOnlyL2Evidence {
-    manifest: AssemblyManifest,
+    manifest: CanonicalAssemblyManifestV2,
     cargo_toml: toml::Value,
     closure_packages: BTreeSet<String>,
     providers_gen: String,
@@ -995,7 +859,7 @@ struct SettingsOnlyL2Evidence {
 
 fn load_settingsonly_l2_evidence(
     root: &Path,
-    assembly: &DiscoveredAssembly,
+    assembly: &GovernedAssembly,
     closure_packages: &BTreeSet<String>,
 ) -> Result<SettingsOnlyL2Evidence> {
     let read = |path: &Path| -> Result<String> {
@@ -1007,30 +871,30 @@ fn load_settingsonly_l2_evidence(
             .with_context(|| format!("parse settingsonly L2 evidence {}", path.display()))
     };
     Ok(SettingsOnlyL2Evidence {
-        manifest: assembly.manifest.clone(),
-        cargo_toml: assembly.cargo_toml.clone(),
+        manifest: assembly.manifest().clone(),
+        cargo_toml: assembly.cargo_toml().clone(),
         closure_packages: closure_packages.clone(),
-        providers_gen: read(&assembly.dir.join("src/generated/providers_gen.rs"))?,
-        modules_gen: read(&assembly.dir.join("src/generated/modules_gen.rs"))?,
-        lock: read_json(&assembly.dir.join("assembly.lock.json"))?,
-        runtime_plan: read_json(&assembly.dir.join("runtime-plan.json"))?,
-        config_schema: read_json(&assembly.dir.join("config.schema.json"))?,
-        config_sample: toml::from_str(&read(&assembly.dir.join("settingsonly.example.toml"))?)
+        providers_gen: read(&assembly.dir().join("src/generated/providers_gen.rs"))?,
+        modules_gen: read(&assembly.dir().join("src/generated/modules_gen.rs"))?,
+        lock: read_json(&assembly.dir().join("assembly.lock.json"))?,
+        runtime_plan: read_json(&assembly.dir().join("runtime-plan.json"))?,
+        config_schema: read_json(&assembly.dir().join("config.schema.json"))?,
+        config_sample: toml::from_str(&read(&assembly.dir().join("settingsonly.example.toml"))?)
             .context("parse settingsonly v2 sample")?,
-        lib_rs: read(&assembly.dir.join("src/lib.rs"))?,
-        runtime_rs: read(&assembly.dir.join("src/runtime.rs"))?,
-        eventing_rs: read(&assembly.dir.join("src/eventing.rs"))?,
+        lib_rs: read(&assembly.dir().join("src/lib.rs"))?,
+        runtime_rs: read(&assembly.dir().join("src/runtime.rs"))?,
+        eventing_rs: read(&assembly.dir().join("src/eventing.rs"))?,
         bridge_rs: read(&root.join("composition/eventing/src/lib.rs"))?,
-        auth_bridge_rs: read(&assembly.dir.join("src/auth_bridge.rs"))?,
-        providers_rs: read(&assembly.dir.join("src/providers.rs"))?,
-        config_rs: read(&assembly.dir.join("src/config.rs"))?,
-        dlx_rs: read(&assembly.dir.join("src/dlx.rs"))?,
+        auth_bridge_rs: read(&assembly.dir().join("src/auth_bridge.rs"))?,
+        providers_rs: read(&assembly.dir().join("src/providers.rs"))?,
+        config_rs: read(&assembly.dir().join("src/config.rs"))?,
+        dlx_rs: read(&assembly.dir().join("src/dlx.rs"))?,
     })
 }
 
 fn validate_settingsonly_l2_production_closure(
     root: &Path,
-    assembly: &DiscoveredAssembly,
+    assembly: &GovernedAssembly,
     closure_packages: &BTreeSet<String>,
 ) -> Result<Vec<Finding>> {
     let evidence = load_settingsonly_l2_evidence(root, assembly, closure_packages)?;
@@ -1044,62 +908,6 @@ fn l2_finding(field: &str, message: impl Into<String>) -> Finding {
         format!("field={field} {}", message.into()),
     )
 }
-
-const SETTINGSONLY_L2_PROVIDER_FACTS: &[(&str, &str, &[&str])] = &[
-    (
-        "auth-audit-sink",
-        "persistent",
-        &["probes", "resources", "workers"],
-    ),
-    (
-        "distributed-cas-store",
-        "persistent",
-        &["probes", "resources", "workers"],
-    ),
-    (
-        "distributed-lock-store",
-        "persistent",
-        &["probes", "resources", "workers"],
-    ),
-    (
-        "dlx-archive-key-provider",
-        "persistent",
-        &["probes", "resources", "workers"],
-    ),
-    ("dlx-archive-store", "persistent", &["probes", "workers"]),
-    (
-        "dlx-hot-key-provider",
-        "persistent",
-        &["probes", "resources", "workers"],
-    ),
-    (
-        "dlx-lifecycle-repository",
-        "persistent",
-        &["probes", "resources", "workers"],
-    ),
-    (
-        "event-publisher",
-        "persistent",
-        &["probes", "resources", "workers"],
-    ),
-    (
-        "event-subscriber",
-        "persistent",
-        &["probes", "resources", "workers"],
-    ),
-    ("listener-pdp", "persistent", &["resources"]),
-    ("listener-rate-limiter", "ephemeral-memory", &[]),
-    (
-        "settings-key-provider",
-        "persistent",
-        &["probes", "resources", "workers"],
-    ),
-    (
-        "settings-secret-resolver",
-        "persistent",
-        &["probes", "resources", "workers"],
-    ),
-];
 
 fn production_item_tokens(source: &str, name: &str) -> Option<String> {
     let file = syn::parse_file(source).ok()?;
@@ -1432,9 +1240,9 @@ fn validate_settingsonly_l2_evidence(evidence: &SettingsOnlyL2Evidence) -> Vec<F
             "requires one private VerifiedFederatedAccess-consuming wrapper and only its minimal evidence/principal/tenant projections; full access extension insertion, raw JWT parse/reparse, aliases, function pointers, and cfg(test) bait are forbidden",
         ));
     }
-    if evidence.manifest.profile != AssemblyProfile::Production
-        || evidence.manifest.topology != AssemblyTopology::DurableIsolated
-        || evidence.manifest.domains != [AssemblyDomain::Settings]
+    if evidence.manifest.profile() != AssemblyProfile::Production
+        || evidence.manifest.topology() != AssemblyTopology::DurableIsolated
+        || evidence.manifest.domains() != [AssemblyDomain::Settings]
     {
         findings.push(l2_finding(
             "manifest",
@@ -1444,7 +1252,7 @@ fn validate_settingsonly_l2_evidence(evidence: &SettingsOnlyL2Evidence) -> Vec<F
 
     let actual_provider_facts = evidence
         .manifest
-        .diport_providers
+        .diport_providers()
         .iter()
         .map(|provider| {
             let mut outputs = provider
@@ -1456,19 +1264,17 @@ fn validate_settingsonly_l2_evidence(evidence: &SettingsOnlyL2Evidence) -> Vec<F
             (provider.id.as_str(), provider.durability.as_str(), outputs)
         })
         .collect::<BTreeSet<_>>();
-    let expected_provider_facts = SETTINGSONLY_L2_PROVIDER_FACTS
-        .iter()
-        .map(|(id, durability, outputs)| (*id, *durability, outputs.to_vec()))
-        .collect::<BTreeSet<_>>();
-    if actual_provider_facts != expected_provider_facts
-        || evidence.manifest.diport_providers.len() != SETTINGSONLY_L2_PROVIDER_FACTS.len()
+    if evidence.manifest.diport_providers().len() != actual_provider_facts.len()
         || evidence
             .manifest
-            .diport_providers
+            .diport_providers()
             .iter()
             .any(|provider| provider.lifecycle != ProviderLifecycle::Active)
     {
-        findings.push(l2_finding("providers", "requires exactly 13 active roles with exact durability and lifecycle outputs; missing, extra, draft, or ephemeral durable providers are forbidden"));
+        findings.push(l2_finding(
+            "providers",
+            "settingsonly manifest provider facts must be unique and active; duplicate or draft providers are forbidden",
+        ));
     }
 
     let expected_closure = SETTINGSONLY_ALLOWED_NORMAL_WORKSPACE_PACKAGES
@@ -1496,7 +1302,7 @@ fn validate_settingsonly_l2_evidence(evidence: &SettingsOnlyL2Evidence) -> Vec<F
 
     let provider_catalog = production_item_tokens(&evidence.providers_gen, "PROVIDER_CATALOG");
     let generated_roles_ok = provider_catalog.as_ref().is_some_and(|tokens| {
-        SETTINGSONLY_L2_PROVIDER_FACTS
+        actual_provider_facts
             .iter()
             .all(|(id, durability, outputs)| {
                 let role = format!("ProviderRole::{}", upper_camel_kebab(id));
@@ -1520,7 +1326,8 @@ fn validate_settingsonly_l2_evidence(evidence: &SettingsOnlyL2Evidence) -> Vec<F
                     && entry.matches("LifecycleChannel::").count() == outputs.len()
                     && outputs.iter().all(|output| entry.contains(output))
             })
-            && tokens.matches("ProviderCatalogEntry::checked").count() == 13
+            && tokens.matches("ProviderCatalogEntry::checked").count()
+                == actual_provider_facts.len()
     });
     let generated_modules_ok = production_item_tokens(&evidence.modules_gen, "wire_domains")
         .is_some_and(|tokens| {
@@ -1576,14 +1383,22 @@ fn validate_settingsonly_l2_evidence(evidence: &SettingsOnlyL2Evidence) -> Vec<F
                 })
                 .collect::<BTreeSet<_>>()
         });
-    let expected_plan = SETTINGSONLY_L2_PROVIDER_FACTS
+    let plan_count = evidence
+        .runtime_plan
+        .pointer("/providerPlans")
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::len);
+    let expected_plan = actual_provider_facts
         .iter()
-        .map(|(id, _, outputs)| (*id, outputs.to_vec()))
+        .map(|(id, _, outputs)| (*id, outputs.clone()))
         .collect::<BTreeSet<_>>();
-    if !lock_ok || plan_facts.as_ref() != Some(&expected_plan) {
+    if !lock_ok
+        || plan_facts.as_ref() != Some(&expected_plan)
+        || plan_count != Some(expected_plan.len())
+    {
         findings.push(l2_finding(
             "lock-runtime-plan",
-            "committed lock and runtime plan must bind the exact 13-role manifest closure",
+            "committed lock and runtime plan must bind the exact manifest provider closure",
         ));
     }
 
@@ -1891,10 +1706,10 @@ fn validate_settingsonly_l2_evidence(evidence: &SettingsOnlyL2Evidence) -> Vec<F
     findings
 }
 
-fn discover(root: &Path) -> Result<(Vec<DiscoveredAssembly>, Vec<Finding>)> {
-    let mut assemblies = Vec::new();
+fn discover(root: &Path) -> Result<(Vec<GovernedAssembly>, Vec<Finding>)> {
+    let ir = AssemblyGovernanceIr::<Core>::load(root)?;
     let mut findings = Vec::new();
-    for target in discover_targets(root)? {
+    for target in ir.targets() {
         let cargo_path = target.cargo_path();
         if !target.has_manifest() {
             if target.has_cargo_manifest() {
@@ -1916,25 +1731,26 @@ fn discover(root: &Path) -> Result<(Vec<DiscoveredAssembly>, Vec<Finding>)> {
             }
             continue;
         }
-        assemblies.push(load_target(root, target.dir())?);
     }
-    Ok((assemblies, findings))
+    Ok((ir.assemblies().to_vec(), findings))
 }
 
-fn validate_assembly(a: &DiscoveredAssembly) -> Vec<Finding> {
+fn validate_assembly(a: &GovernedAssembly) -> Vec<Finding> {
     let mut findings = Vec::new();
-    validate_manifest_intent(a, &mut findings);
     validate_identityaudit_manifest_boundary(a, &mut findings);
-    validate_production_provider_posture(a, &mut findings);
+    if let Some(production) = a.production() {
+        validate_production_provider_posture(production, &mut findings);
+        validate_production_security_closeout(production, &mut findings);
+    }
 
-    for (index, provider) in a.manifest.diport_providers.iter().enumerate() {
+    for (index, provider) in a.manifest().diport_providers().iter().enumerate() {
         let source = format!(
             "{}:{}",
-            a.manifest_label,
-            provider_table_line(&a.manifest_src, index)
+            a.manifest_label(),
+            provider_table_line(a.source_text(), index)
         );
         let subject = format!("{source} {}", provider.provider);
-        if a.manifest.profile == AssemblyProfile::Production
+        if a.manifest().profile() == AssemblyProfile::Production
             && provider.port == DiportPort::RevocationStore
             && provider.durability != ProviderDurability::Persistent
         {
@@ -1946,14 +1762,15 @@ fn validate_assembly(a: &DiscoveredAssembly) -> Vec<Finding> {
         }
 
         if provider.lifecycle == ProviderLifecycle::Active
-            && dependency_features(&a.cargo_toml, &provider.provider_crate).is_none()
+            && dependency_features(a.cargo_toml(), &provider.provider_crate).is_none()
         {
             findings.push(finding(
                 Rule::ActiveProviderDependency,
                 &subject,
                 format!(
                     "field=providerCrate active providerCrate `{}` 必须出现在 {} [dependencies]",
-                    provider.provider_crate, a.cargo_label
+                    provider.provider_crate,
+                    a.cargo_label()
                 ),
             ));
         }
@@ -2000,7 +1817,7 @@ fn validate_assembly(a: &DiscoveredAssembly) -> Vec<Finding> {
 
             let required_features = required_features(provider);
             if let Some(actual_features) =
-                dependency_features(&a.cargo_toml, &provider.provider_crate)
+                dependency_features(a.cargo_toml(), &provider.provider_crate)
             {
                 let missing: Vec<_> = required_features
                     .iter()
@@ -2016,14 +1833,14 @@ fn validate_assembly(a: &DiscoveredAssembly) -> Vec<Finding> {
                             provider.provider,
                             provider.port,
                             missing,
-                            a.cargo_label,
+                            a.cargo_label(),
                             provider.provider_crate
                         ),
                     ));
                 }
             }
 
-            if a.manifest.name == "runtime"
+            if a.manifest().name() == "runtime"
                 && is_active_distributed_provider(provider)
                 && !has_distributed_consumer_evidence(a)
             {
@@ -2037,31 +1854,13 @@ fn validate_assembly(a: &DiscoveredAssembly) -> Vec<Finding> {
     }
     validate_required_capabilities(a, &mut findings);
     validate_pdp_replay_store_capability(a, &mut findings);
-    // Production provider/JWKS closeout is semantic and applies independent of assembly name.
-    // Internal mTLS and the three-profile trust chain are required only when the manifest actually
-    // declares an Internal listener; subset production assemblies must not inherit that topology.
-    if a.manifest.profile == AssemblyProfile::Production {
-        validate_production_security_closeout(a, &mut findings);
-    }
     findings
 }
 
-fn validate_production_provider_posture(a: &DiscoveredAssembly, findings: &mut Vec<Finding>) {
+fn validate_production_provider_posture(a: ProductionAssembly<'_>, findings: &mut Vec<Finding>) {
     // INVARIANT: ASSEMBLY-PRODUCTION-PROVIDER-POSTURE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::production_provider_posture_rejects_non_active_and_non_governor_ephemeral", anti_vacuity = "tests::production_provider_posture_allows_exact_governor_exception" } — production is a hard ratchet: every declaration is executable and durable except the exact process-local edge limiter.
-    let full_runtime = is_runtime_assembly(a);
-    if full_runtime && a.manifest.profile != AssemblyProfile::Production {
-        findings.push(finding(
-            Rule::ProductionProviderPosture,
-            &a.manifest_label,
-            "field=profile runtime assembly 必须 profile=production；不提供 demo downgrade",
-        ));
-    }
-
-    if a.manifest.profile != AssemblyProfile::Production {
-        return;
-    }
-
-    for provider in &a.manifest.diport_providers {
+    let full_runtime = is_runtime_assembly(&a);
+    for provider in a.manifest().diport_providers() {
         let exact_governor = provider.lifecycle == ProviderLifecycle::Active
             && provider.provider == ProviderConstructor::RatelimitGovernorLimiter
             && provider.port == DiportPort::RateLimiter
@@ -2073,7 +1872,7 @@ fn validate_production_provider_posture(a: &DiscoveredAssembly, findings: &mut V
         {
             findings.push(finding(
                 Rule::ProductionProviderPosture,
-                &a.manifest_label,
+                a.manifest_label(),
                 format!(
                     "field=diportProviders profile=production provider={} 必须 lifecycle=active 且 durability=persistent；仅 exact active ratelimit::GovernorLimiter 可为 ephemeral-memory；actual lifecycle={} durability={}",
                     provider.provider, provider.lifecycle, provider.durability
@@ -2084,34 +1883,34 @@ fn validate_production_provider_posture(a: &DiscoveredAssembly, findings: &mut V
 
     if full_runtime
         && !has_active_persistent_provider(
-            a,
+            &a,
             ProviderConstructor::PostgresRevocationStore,
             "deviceloop",
         )
     {
         findings.push(finding(
             Rule::ProductionProviderPosture,
-            &a.manifest_label,
+            a.manifest_label(),
             "field=diportProviders runtime production requires exact active persistent postgres::PgRevocationStore for deviceloop",
         ));
     }
 }
 
-fn is_runtime_assembly(a: &DiscoveredAssembly) -> bool {
-    a.manifest.name == "runtime"
+fn is_runtime_assembly(a: &GovernedAssembly) -> bool {
+    a.manifest().name() == "runtime"
 }
 
-fn validate_pdp_replay_store_capability(a: &DiscoveredAssembly, findings: &mut Vec<Finding>) {
-    let has_active_pdp = a.manifest.diport_providers.iter().any(|provider| {
+fn validate_pdp_replay_store_capability(a: &GovernedAssembly, findings: &mut Vec<Finding>) {
+    let has_active_pdp = a.manifest().diport_providers().iter().any(|provider| {
         provider.port == DiportPort::Pdp && provider.lifecycle == ProviderLifecycle::Active
     });
-    if a.manifest.name != "runtime" || !has_active_pdp {
+    if a.manifest().name() != "runtime" || !has_active_pdp {
         return;
     }
 
     let provider = ProviderConstructor::PostgresServiceTokenReplayStore;
     let consumer = "oidc";
-    let has_required_posture = a.manifest.diport_providers.iter().any(|candidate| {
+    let has_required_posture = a.manifest().diport_providers().iter().any(|candidate| {
         candidate.provider == provider
             && candidate.consumer.as_str() == consumer
             && candidate.lifecycle == ProviderLifecycle::Active
@@ -2122,7 +1921,7 @@ fn validate_pdp_replay_store_capability(a: &DiscoveredAssembly, findings: &mut V
     if !has_required_posture {
         findings.push(finding(
             Rule::PdpReplayStoreCapability,
-            &a.manifest_label,
+            a.manifest_label(),
             format!(
                 "field=diportProviders capability=PdpReplayStore expected active persistent cluster-global fail-closed `{provider}` for `{}` providerCrate `{}` consumer `{consumer}`; actual={}",
                 provider.port(),
@@ -2130,135 +1929,6 @@ fn validate_pdp_replay_store_capability(a: &DiscoveredAssembly, findings: &mut V
                 provider_actual(a, provider, consumer)
             ),
         ));
-    }
-}
-
-fn validate_manifest_intent(a: &DiscoveredAssembly, findings: &mut Vec<Finding>) {
-    // INVARIANT: ASSEMBLY-MANIFEST-INTENT-01 { level = "Medium", exec = "check", source = "code" } —
-    // assembly manifest intent 字段是静态声明源，必须非空、闭值、去重，并绑定到 assembly 目录名；
-    // anti-vacuity red/green tests 覆盖 name/domains/topology/listeners。
-    let dir_name = a
-        .dir
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("");
-    for error in a.manifest.basic_validation_errors() {
-        push_manifest_validation_finding(a, error, findings);
-    }
-
-    if !a.manifest.name.trim().is_empty() && a.manifest.name != dir_name {
-        findings.push(finding(
-            Rule::ManifestNameMismatch,
-            &a.manifest_label,
-            format!(
-                "field=name 必须非空且等于 assembly 目录名 `{dir_name}`；实际 `{}`",
-                a.manifest.name
-            ),
-        ));
-    }
-}
-
-fn push_manifest_validation_finding(
-    a: &DiscoveredAssembly,
-    error: ManifestValidationError,
-    findings: &mut Vec<Finding>,
-) {
-    match error {
-        ManifestValidationError::Empty { field: "name" } => {
-            findings.push(finding(
-                Rule::ManifestNameMismatch,
-                &a.manifest_label,
-                "field=name 必须非空且等于 assembly 目录名",
-            ));
-        }
-        ManifestValidationError::Empty { field: "domains" } => {
-            findings.push(finding(
-                Rule::EmptyDomains,
-                &a.manifest_label,
-                "field=domains 至少声明一个 domain，避免 assembly intent 空转通过",
-            ));
-        }
-        ManifestValidationError::Duplicate { field: "domains" } => {
-            findings.push(finding(
-                Rule::DuplicateDomain,
-                &a.manifest_label,
-                "field=domains domain 重复声明",
-            ));
-        }
-        ManifestValidationError::Empty { field: "listeners" } => {
-            findings.push(finding(
-                Rule::EmptyListeners,
-                &a.manifest_label,
-                "field=listeners 至少声明一个 listener，避免 assembly listener surface 空转通过",
-            ));
-        }
-        ManifestValidationError::Duplicate { field: "listeners" } => {
-            findings.push(finding(
-                Rule::DuplicateListener,
-                &a.manifest_label,
-                "field=listeners listener 重复声明",
-            ));
-        }
-        ManifestValidationError::Empty {
-            field: "frameworkContracts",
-        } => findings.push(finding(
-            Rule::FrameworkContractServing,
-            &a.manifest_label,
-            "field=frameworkContracts entries must not be empty",
-        )),
-        ManifestValidationError::Duplicate {
-            field: "frameworkContracts",
-        } => findings.push(finding(
-            Rule::FrameworkContractServing,
-            &a.manifest_label,
-            "field=frameworkContracts contains a duplicate contract id",
-        )),
-        ManifestValidationError::Empty {
-            field: "diportProviders",
-        } => {
-            findings.push(finding(
-                Rule::EmptyDiportProviders,
-                &a.manifest_label,
-                "field=diportProviders 至少声明一个 provider，避免 assembly fact source 空转通过",
-            ));
-        }
-        ManifestValidationError::Duplicate {
-            field: "diportProviders",
-        } => {
-            findings.push(finding(
-                Rule::DuplicateDiportProvider,
-                &a.manifest_label,
-                "field=diportProviders provider 声明重复",
-            ));
-        }
-        ManifestValidationError::Empty { field } if field.starts_with("diportProviders.") => {
-            findings.push(finding(
-                Rule::InvalidDiportProvider,
-                &a.manifest_label,
-                format!("field={field} must not be empty"),
-            ));
-        }
-        ManifestValidationError::Empty { field } | ManifestValidationError::Duplicate { field } => {
-            findings.push(finding(
-                Rule::InvalidDiportProvider,
-                &a.manifest_label,
-                format!("field={field} invalid assembly manifest declaration"),
-            ));
-        }
-        ManifestValidationError::Invalid { field } => {
-            findings.push(finding(
-                Rule::InvalidDiportProvider,
-                &a.manifest_label,
-                format!("field={field} invalid assembly manifest declaration"),
-            ));
-        }
-        error @ ManifestValidationError::ProviderRegistryMismatch { .. } => {
-            findings.push(finding(
-                Rule::InvalidDiportProvider,
-                &a.manifest_label,
-                error.to_string(),
-            ));
-        }
     }
 }
 
@@ -2419,11 +2089,11 @@ fn required_capability_domain_specs() -> &'static [DomainCapabilitySpec] {
     REQUIRED_CAPABILITY_DOMAINS
 }
 
-fn validate_required_capabilities(a: &DiscoveredAssembly, findings: &mut Vec<Finding>) {
+fn validate_required_capabilities(a: &GovernedAssembly, findings: &mut Vec<Finding>) {
     // INVARIANT: ASSEMBLY-REQUIRED-CAPABILITY-01 { level = "Medium", exec = "check", source = "code" } —
     // assembly.toml 的 domains/topology 声明必须闭合到最小 provider/Cargo capability 事实。此 guard
     // 不改变 runtime 接线，不新增兼容路径；缺失、draft、ephemeral critical 均 fail-closed。
-    for domain in &a.manifest.domains {
+    for domain in a.manifest().domains() {
         let domain = domain.as_str();
         let Some(spec) = REQUIRED_CAPABILITY_DOMAINS
             .iter()
@@ -2431,7 +2101,7 @@ fn validate_required_capabilities(a: &DiscoveredAssembly, findings: &mut Vec<Fin
         else {
             findings.push(finding(
                 Rule::RequiredCapability,
-                &a.manifest_label,
+                a.manifest_label(),
                 format!(
                     "field=domains domain={domain} capability=DomainCapabilityTable expected domain present in xtask required capability table; actual=missing-domain-spec"
                 ),
@@ -2451,7 +2121,7 @@ fn validate_required_capabilities(a: &DiscoveredAssembly, findings: &mut Vec<Fin
 }
 
 fn validate_required_capability(
-    a: &DiscoveredAssembly,
+    a: &GovernedAssembly,
     domain: &str,
     spec: &RequiredCapabilitySpec,
     findings: &mut Vec<Finding>,
@@ -2460,13 +2130,13 @@ fn validate_required_capability(
         RequiredCapabilityExpectation::CargoDependency {
             dependency,
             required_features,
-        } => match dependency_features(&a.cargo_toml, dependency) {
+        } => match dependency_features(a.cargo_toml(), dependency) {
             None => findings.push(finding(
                 Rule::RequiredCapability,
-                &a.cargo_label,
+                a.cargo_label(),
                 format!(
                     "field=dependencies domain={domain} capability={} expected exact [dependencies].{dependency} in {}; actual=missing-dependency",
-                    spec.capability, a.cargo_label
+                    spec.capability, a.cargo_label()
                 ),
             )),
             Some(features)
@@ -2476,7 +2146,7 @@ fn validate_required_capability(
             {
                 findings.push(finding(
                     Rule::RequiredCapability,
-                    &a.cargo_label,
+                    a.cargo_label(),
                     format!(
                         "field=dependencies domain={domain} capability={} expected [dependencies].{dependency} features {:?}; actual={features:?}",
                         spec.capability, required_features
@@ -2492,7 +2162,7 @@ fn validate_required_capability(
             if !has_active_persistent_provider(a, provider, consumer) {
                 findings.push(finding(
                     Rule::RequiredCapability,
-                    &a.manifest_label,
+                    a.manifest_label(),
                     format!(
                         "field=diportProviders domain={domain} capability={} expected active persistent `{provider}` for `{}` providerCrate `{}` consumer `{consumer}`; actual={}",
                         spec.capability,
@@ -2506,20 +2176,20 @@ fn validate_required_capability(
     }
 }
 
-fn requires_distributed_capabilities(a: &DiscoveredAssembly) -> bool {
-    a.manifest.profile == AssemblyProfile::Production
+fn requires_distributed_capabilities(a: &GovernedAssembly) -> bool {
+    a.manifest().profile() == AssemblyProfile::Production
         || matches!(
-            a.manifest.topology,
+            a.manifest().topology(),
             AssemblyTopology::DurableShared | AssemblyTopology::DurableIsolated
         )
 }
 
 fn has_active_persistent_provider(
-    a: &DiscoveredAssembly,
+    a: &GovernedAssembly,
     provider: ProviderConstructor,
     consumer: &str,
 ) -> bool {
-    a.manifest.diport_providers.iter().any(|candidate| {
+    a.manifest().diport_providers().iter().any(|candidate| {
         candidate.lifecycle == ProviderLifecycle::Active
             && candidate.durability == ProviderDurability::Persistent
             && candidate.port == provider.port()
@@ -2529,14 +2199,10 @@ fn has_active_persistent_provider(
     })
 }
 
-fn provider_actual(
-    a: &DiscoveredAssembly,
-    provider: ProviderConstructor,
-    consumer: &str,
-) -> String {
+fn provider_actual(a: &GovernedAssembly, provider: ProviderConstructor, consumer: &str) -> String {
     let actual = a
-        .manifest
-        .diport_providers
+        .manifest()
+        .diport_providers()
         .iter()
         .filter(|candidate| {
             candidate.port == provider.port()
@@ -2759,11 +2425,11 @@ fn cargo_metadata_args(manifest_arg: &str) -> [&str; 6] {
 
 fn cargo_tree_stdout(
     root: &Path,
-    assembly: &DiscoveredAssembly,
+    assembly: &GovernedAssembly,
     depth: Option<usize>,
     all_features: bool,
 ) -> Result<String> {
-    let manifest = assembly.cargo_path.display().to_string();
+    let manifest = assembly.cargo_path().display().to_string();
     let depth_value = depth.map(|value| value.to_string());
     let mut args = vec![
         "tree",
@@ -2791,22 +2457,22 @@ fn cargo_tree_stdout(
     .stdout(Stdio::piped())
     .stderr(Stdio::piped())
     .output()
-    .with_context(|| format!("执行 cargo tree 失败：{}", assembly.cargo_label))?;
+    .with_context(|| format!("执行 cargo tree 失败：{}", assembly.cargo_label()))?;
     if !output.status.success() {
         bail!(
             "cargo tree 失败（{}）：{}",
-            assembly.cargo_label,
+            assembly.cargo_label(),
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
 
     String::from_utf8(output.stdout)
-        .with_context(|| format!("cargo tree 输出不是 UTF-8：{}", assembly.cargo_label))
+        .with_context(|| format!("cargo tree 输出不是 UTF-8：{}", assembly.cargo_label()))
 }
 
 fn cargo_tree_domains(
     root: &Path,
-    assembly: &DiscoveredAssembly,
+    assembly: &GovernedAssembly,
     metadata: &CargoMetadata,
     depth: Option<usize>,
 ) -> Result<BTreeSet<String>> {
@@ -2836,7 +2502,7 @@ fn cargo_tree_domains(
 
 fn cargo_tree_default_normal_evidence(
     root: &Path,
-    assembly: &DiscoveredAssembly,
+    assembly: &GovernedAssembly,
     metadata: &CargoMetadata,
 ) -> Result<(BTreeSet<String>, bool)> {
     let stdout = cargo_tree_stdout(root, assembly, None, false)?;
@@ -2905,13 +2571,13 @@ fn direct_normal_domain_deps(
 }
 
 fn validate_domain_sets(
-    a: &DiscoveredAssembly,
+    a: &GovernedAssembly,
     direct_domains: BTreeSet<String>,
     closure_domains: BTreeSet<String>,
 ) -> Result<Vec<Finding>> {
     let manifest_domains: BTreeSet<&str> = a
-        .manifest
-        .domains
+        .manifest()
+        .domains()
         .iter()
         .map(AssemblyDomain::as_str)
         .collect();
@@ -2920,10 +2586,10 @@ fn validate_domain_sets(
         if !direct_domains.contains(*domain) {
             findings.push(finding(
                 Rule::ActiveDomainDependency,
-                &a.manifest_label,
+                a.manifest_label(),
                 format!(
                     "field=domains domain `{domain}` 必须在 {} [dependencies] 中以同名 normal dependency 直接依赖同名 workspace domain crate；dev/build/alias/package rename/crates.io 同名包均不满足",
-                    a.cargo_label
+                    a.cargo_label()
                 ),
             ));
         }
@@ -2933,10 +2599,10 @@ fn validate_domain_sets(
         if !manifest_domains.contains(domain.as_str()) {
             findings.push(finding(
                 Rule::InactiveDomainDependencyClosure,
-                &a.cargo_label,
+                a.cargo_label(),
                 format!(
                     "field=domains inactive domain `{domain}` 出现在 assembly normal dependency closure；必须加入 {} domains 或移除/拆分该 normal 依赖",
-                    a.manifest_label
+                    a.manifest_label()
                 ),
             ));
         }
@@ -3009,13 +2675,13 @@ fn validate_identityaudit_boundary(
     findings
 }
 
-fn validate_identityaudit_manifest_boundary(a: &DiscoveredAssembly, findings: &mut Vec<Finding>) {
-    if a.manifest.name != "identityaudit" {
+fn validate_identityaudit_manifest_boundary(a: &GovernedAssembly, findings: &mut Vec<Finding>) {
+    if a.manifest().name() != "identityaudit" {
         return;
     }
     let listeners = a
-        .manifest
-        .listeners
+        .manifest()
+        .listeners()
         .iter()
         .map(|listener| {
             (
@@ -3033,17 +2699,17 @@ fn validate_identityaudit_manifest_boundary(a: &DiscoveredAssembly, findings: &m
         ("admin", vec!["audit"]),
         ("health", Vec::new()),
     ];
-    if a.manifest.profile != AssemblyProfile::Production
-        || a.manifest.topology != AssemblyTopology::DurableIsolated
+    if a.manifest().profile() != AssemblyProfile::Production
+        || a.manifest().topology() != AssemblyTopology::DurableIsolated
         || listeners != expected_listeners
     {
         findings.push(finding(
             Rule::IdentityAuditBoundary,
-            &a.manifest_label,
+            a.manifest_label(),
             format!(
                 "field=profile/topology/listeners identityaudit requires profile=production, topology=durable-isolated, and exact Primary(identity)+Admin(audit)+Health(empty); actual profile={} topology={} listeners={listeners:?}",
-                a.manifest.profile.as_str(),
-                a.manifest.topology.as_str(),
+                a.manifest().profile().as_str(),
+                a.manifest().topology().as_str(),
             ),
         ));
     }
@@ -4277,100 +3943,104 @@ fn workspace_package_layer(
 struct CriticalProviderSpec {
     gate: &'static str,
     provider: ProviderConstructor,
-    required: fn(&DiscoveredAssembly) -> bool,
+    required: fn(&GovernedAssembly) -> bool,
 }
 
-fn validate_production_security_closeout(a: &DiscoveredAssembly, findings: &mut Vec<Finding>) {
+fn validate_production_security_closeout(a: ProductionAssembly<'_>, findings: &mut Vec<Finding>) {
     // INVARIANT: SECURITY-PRODUCTION-CLOSEOUT-01 { level = "Medium", exec = "check", source = "code" } —
     // Production security providers follow capabilities actually consumed by the manifest. An
     // Identity domain needs signing; authenticated listeners need OIDC; Settings and DLX key
     // consumers need Vault KeyProvider. Subset assemblies must not add dummy providers merely to
     // satisfy a full-runtime checklist.
-    const CRITICAL_PROVIDERS: &[CriticalProviderSpec] = &[
-        CriticalProviderSpec {
-            gate: "oidc-pdp",
-            provider: ProviderConstructor::OidcProvider,
-            required: |assembly| {
-                assembly
-                    .manifest
-                    .listeners
-                    .iter()
-                    .any(|listener| listener.kind != assembly_schema::AssemblyListenerKind::Health)
-            },
-        },
-        CriticalProviderSpec {
-            gate: "vault-signer",
-            provider: ProviderConstructor::VaultSigner,
-            required: |assembly| {
-                assembly
-                    .manifest
-                    .domains
-                    .contains(&assembly_schema::AssemblyDomain::Identity)
-            },
-        },
-        CriticalProviderSpec {
-            gate: "vault-keyprovider",
-            provider: ProviderConstructor::VaultKeyProvider,
-            required: |assembly| {
-                assembly
-                    .manifest
-                    .domains
-                    .contains(&assembly_schema::AssemblyDomain::Settings)
-                    || assembly.manifest.diport_providers.iter().any(|provider| {
-                        provider.port == DiportPort::KeyProvider
-                            || matches!(
-                                provider.port,
-                                DiportPort::DlxArchiveStore | DiportPort::DlxLifecycleRepository
-                            )
+    const CRITICAL_PROVIDERS: &[CriticalProviderSpec] =
+        &[
+            CriticalProviderSpec {
+                gate: "oidc-pdp",
+                provider: ProviderConstructor::OidcProvider,
+                required: |assembly| {
+                    assembly.manifest().listeners().iter().any(|listener| {
+                        listener.kind != assembly_schema::AssemblyListenerKind::Health
                     })
+                },
             },
-        },
-    ];
+            CriticalProviderSpec {
+                gate: "vault-signer",
+                provider: ProviderConstructor::VaultSigner,
+                required: |assembly| {
+                    assembly
+                        .manifest()
+                        .domains()
+                        .contains(&assembly_schema::AssemblyDomain::Identity)
+                },
+            },
+            CriticalProviderSpec {
+                gate: "vault-keyprovider",
+                provider: ProviderConstructor::VaultKeyProvider,
+                required: |assembly| {
+                    assembly
+                        .manifest()
+                        .domains()
+                        .contains(&assembly_schema::AssemblyDomain::Settings)
+                        || assembly
+                            .manifest()
+                            .diport_providers()
+                            .iter()
+                            .any(|provider| {
+                                provider.port == DiportPort::KeyProvider
+                                    || matches!(
+                                        provider.port,
+                                        DiportPort::DlxArchiveStore
+                                            | DiportPort::DlxLifecycleRepository
+                                    )
+                            })
+                },
+            },
+        ];
 
     for spec in CRITICAL_PROVIDERS {
-        if (spec.required)(a) && !has_active_persistent_backend_provider(a, spec) {
+        if (spec.required)(&a) && !has_active_persistent_backend_provider(&a, spec) {
             findings.push(finding(
                 Rule::ProductionSecurityCriticalProvider,
-                &a.manifest_label,
+                a.manifest_label(),
                 format!(
                     "field=diportProviders profile=production gate={} 必须声明 active persistent `{}` for `{}`，且 {} [dependencies].{} 必须启用 backend feature",
                     spec.gate,
                     spec.provider,
                     spec.provider.port(),
-                    a.cargo_label,
+                    a.cargo_label(),
                     spec.provider.provider_crate()
                 ),
             ));
         }
     }
 
-    let evidence = security_closeout_evidence_from_sources(&a.dir).unwrap_or_default();
+    let evidence = security_closeout_evidence_from_sources(a.dir()).unwrap_or_default();
     if !evidence.has_jwks_closeout() {
         findings.push(finding(
             Rule::ProductionSecurityJwksCloseout,
-            &a.manifest_label,
+            a.manifest_label(),
             "source=rust-ast-run-reachable profile=production gate=jwks 必须在 run() 或 typed StartupAdapter::prepare 可达路径有 profile-specific JwksKeySource::load_and_watch + typed VerifierConfigBuilder::keys_jwks + verifier managed resource + profile-specific JWKS readiness probe 注册证据",
         ));
     }
     let owns_internal_listener = a
-        .manifest
-        .listeners
+        .manifest()
+        .listeners()
         .iter()
         .any(|listener| listener.kind == assembly_schema::AssemblyListenerKind::Internal);
     if owns_internal_listener && !evidence.has_spiffe_closeout() {
         findings.push(finding(
             Rule::ProductionSecuritySpiffeCloseout,
-            &a.manifest_label,
+            a.manifest_label(),
             "source=rust-ast-run-reachable profile=production gate=spiffe-mtls 必须在 run() 可达路径有 MtlsServerConfig::from_spire + DomainHttpTransport::from_spire + domain_transport_ready probe 证据，且不得保留 Internal service-token migration env 常量",
         ));
     }
     if owns_internal_listener {
-        validate_token_profile_trust_chain(a, &evidence, findings);
+        validate_token_profile_trust_chain(&a, &evidence, findings);
     }
 }
 
 fn validate_token_profile_trust_chain(
-    a: &DiscoveredAssembly,
+    a: &GovernedAssembly,
     evidence: &SecurityCloseoutEvidence,
     findings: &mut Vec<Finding>,
 ) {
@@ -4449,7 +4119,7 @@ fn validate_token_profile_trust_chain(
     if !missing.is_empty() {
         findings.push(finding(
             Rule::TokenProfileTrustChain,
-            &a.manifest_label,
+            a.manifest_label(),
             format!(
                 "source=rust-ast-run-reachable profile=production token profile trust chain incomplete; missing={missing:?}"
             ),
@@ -4458,37 +4128,37 @@ fn validate_token_profile_trust_chain(
     if evidence.legacy_token_surface {
         findings.push(finding(
             Rule::TokenProfileLegacySurface,
-            &a.manifest_label,
+            a.manifest_label(),
             "source=production-rust legacy/generic token env, shared OIDC provider/probe, or old collapse helper is forbidden",
         ));
     }
     if evidence.mixed_key_provider {
         findings.push(finding(
             Rule::TokenProfileKeyIsolation,
-            &a.manifest_label,
+            a.manifest_label(),
             "source=rust-ast production assembly must not use generic StaticKeySource, `.keys(...)`, or combine ES256 and HS256 key APIs",
         ));
     }
     if evidence.split_scheme_provider_binding {
         findings.push(finding(
             Rule::TokenProfileBinding,
-            &a.manifest_label,
+            a.manifest_label(),
             "source=rust-ast provider and scheme/profile must be carried by one ProfileBinding; apply_verify_bridge accepts exactly (routes, binding)",
         ));
     }
 }
 
 fn has_active_persistent_backend_provider(
-    a: &DiscoveredAssembly,
+    a: &GovernedAssembly,
     spec: &CriticalProviderSpec,
 ) -> bool {
-    a.manifest.diport_providers.iter().any(|provider| {
+    a.manifest().diport_providers().iter().any(|provider| {
         provider.lifecycle == ProviderLifecycle::Active
             && provider.durability == ProviderDurability::Persistent
             && provider.port == spec.provider.port()
             && provider.provider == spec.provider
             && provider.provider_crate == spec.provider.provider_crate()
-            && dependency_features(&a.cargo_toml, spec.provider.provider_crate())
+            && dependency_features(a.cargo_toml(), spec.provider.provider_crate())
                 .is_some_and(|features| features.contains("backend"))
     })
 }
@@ -4499,8 +4169,8 @@ fn is_active_distributed_provider(provider: &DiportProvider) -> bool {
         && matches!(provider.port, DiportPort::Lock | DiportPort::Cas)
 }
 
-fn has_distributed_consumer_evidence(a: &DiscoveredAssembly) -> bool {
-    distributed_consumer_evidence_from_sources(&a.dir).unwrap_or(false)
+fn has_distributed_consumer_evidence(a: &GovernedAssembly) -> bool {
+    distributed_consumer_evidence_from_sources(a.dir()).unwrap_or(false)
 }
 
 fn distributed_consumer_evidence_from_sources(dir: &Path) -> Result<bool> {
@@ -6013,11 +5683,16 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn assembly_lock_discovery_rejects_non_utf8_name() {
+    fn assembly_lock_discovery_rejects_non_utf8_name() -> anyhow::Result<()> {
         use std::os::unix::ffi::OsStringExt;
 
+        let root = unique_tmp("assembly-non-utf8-name");
+        fs::create_dir_all(root.join("assemblies"))?;
         let invalid = std::ffi::OsString::from_vec(vec![b'n', b'a', b'm', b'e', 0xff]);
-        assert!(assembly_name(invalid).is_err());
+        fs::create_dir(root.join("assemblies").join(invalid))?;
+        assert!(crate::assembly_governance::discover_targets(&root).is_err());
+        fs::remove_dir_all(root)?;
+        Ok(())
     }
 
     fn write(path: &Path, text: &str) -> anyhow::Result<()> {
@@ -6037,8 +5712,7 @@ mod tests {
         assert!(
             findings.iter().all(|finding| !matches!(
                 finding.rule,
-                Rule::InvalidDiportProvider
-                    | Rule::ActiveProviderDependency
+                Rule::ActiveProviderDependency
                     | Rule::ActiveProviderPort
                     | Rule::ProviderDurabilityMismatch
                     | Rule::ActiveProviderFeature
@@ -7632,7 +7306,7 @@ durability = "ephemeral-memory""#
         )?;
         let (assemblies, _) = discover(&root)?;
         assert!(matches!(
-            assemblies[0].manifest.workflow_activations.as_slice(),
+            assemblies[0].manifest().workflow_activations(),
             [assembly_schema::WorkflowActivation::Projection {
                 activation: assembly_schema::ProjectionActivation::Shadow,
                 ..
@@ -7894,8 +7568,8 @@ mod tests {
         let root = unique_tmp("inventory-listener-production-validator");
         write_assembly(
             &root,
-            &manifest_with_intent().replace("name = \"runtime\"", "name = \"settingsonly\""),
-            "[package]\nname = \"settingsonly\"\nversion = \"0.0.0\"\n",
+            &manifest_with_intent(),
+            "[package]\nname = \"runtime\"\nversion = \"0.0.0\"\n",
         )?;
         let source_dir = root.join("assemblies/runtime/src");
         fs::create_dir_all(&source_dir)?;
@@ -7909,10 +7583,7 @@ fn observations(prepared: Prepared) {
 }
 "#,
         )?;
-        // write_assembly uses the runtime directory; adjust the discovered manifest identity while
-        // keeping this compact synthetic repository structurally valid.
-        let (mut assemblies, _) = discover(&root)?;
-        assemblies[0].manifest.name = "settingsonly".to_owned();
+        let (assemblies, _) = discover(&root)?;
         let findings = validate_runtime_inventory_listener_provenance(&root, &assemblies)?;
         assert!(
             findings
@@ -7993,50 +7664,6 @@ outputs = ["probes", "workers"]
             )
             .is_err()
         );
-    }
-
-    #[test]
-    fn assembly_manifest_validate_rejects_empty_domains() -> anyhow::Result<()> {
-        let root = unique_tmp("assembly-empty-domains");
-        write_assembly(
-            &root,
-            &manifest_with_intent().replace(
-                r#"domains = ["identity", "settings", "audit"]"#,
-                "domains = []",
-            ),
-            r#"[package]
-name = "runtime"
-"#,
-        )?;
-
-        let (_count, findings) = validate_root(&root)?;
-        assert!(
-            findings.iter().any(|f| f.rule == Rule::EmptyDomains),
-            "empty domains must be rejected: {findings:?}"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn assembly_manifest_validate_rejects_duplicate_domains() -> anyhow::Result<()> {
-        let root = unique_tmp("assembly-duplicate-domains");
-        write_assembly(
-            &root,
-            &manifest_with_intent().replace(
-                r#"domains = ["identity", "settings", "audit"]"#,
-                r#"domains = ["identity", "settings", "identity"]"#,
-            ),
-            r#"[package]
-name = "runtime"
-"#,
-        )?;
-
-        let (_count, findings) = validate_root(&root)?;
-        assert!(
-            findings.iter().any(|f| f.rule == Rule::DuplicateDomain),
-            "duplicate domains must be rejected: {findings:?}"
-        );
-        Ok(())
     }
 
     #[test]
@@ -8227,19 +7854,16 @@ audit = { path = "../../crates/audit" }
             "real workspace discovery should be clean: {discovery_findings:?}"
         );
         let metadata = load_workspace_metadata(&root)?.context("real workspace has Cargo.toml")?;
-        assert_eq!(
-            assemblies
-                .iter()
-                .map(|assembly| assembly.manifest.name.as_str())
-                .collect::<Vec<_>>(),
-            ["identityaudit", "runtime", "settingsonly"]
+        assert!(
+            !assemblies.is_empty(),
+            "real workspace must govern assemblies"
         );
         for assembly in &assemblies {
             let findings = validate_target_domain_closure(&root, assembly, &metadata)?;
             assert!(
                 findings.is_empty(),
                 "{} target closure findings: {findings:?}",
-                assembly.manifest.name
+                assembly.manifest().name()
             );
         }
         Ok(())
@@ -8319,16 +7943,12 @@ audit = { path = "../../crates/audit" }
         let demo_manifest = IDENTITYAUDIT_MANIFEST
             .replace("profile = \"production\"", "profile = \"demo\"")
             .replace("topology = \"durable-isolated\"", "topology = \"demo\"");
-        let manifest = AssemblyManifest::from_toml_str(&demo_manifest)?;
-        let assembly = DiscoveredAssembly {
-            dir: PathBuf::from("assemblies/identityaudit"),
-            cargo_path: PathBuf::from("assemblies/identityaudit/Cargo.toml"),
-            manifest_label: "assemblies/identityaudit/assembly.toml".to_owned(),
-            cargo_label: "assemblies/identityaudit/Cargo.toml".to_owned(),
-            manifest_src: demo_manifest,
-            manifest,
-            cargo_toml: toml::from_str(IDENTITYAUDIT_CARGO)?,
-        };
+        let root = unique_tmp("identityaudit-demo-boundary");
+        let dir = root.join("assemblies/identityaudit");
+        fs::create_dir_all(&dir)?;
+        write(&dir.join("assembly.toml"), &demo_manifest)?;
+        write(&dir.join("Cargo.toml"), IDENTITYAUDIT_CARGO)?;
+        let assembly = GovernedAssembly::fixture(&root, &dir)?;
         let findings = validate_assembly(&assembly);
         assert!(
             findings.iter().any(|finding| {
@@ -8338,6 +7958,7 @@ audit = { path = "../../crates/audit" }
             }),
             "demo identityaudit must fail the production executable boundary: {findings:?}"
         );
+        fs::remove_dir_all(root)?;
         Ok(())
     }
 
@@ -8349,15 +7970,12 @@ audit = { path = "../../crates/audit" }
         let production_manifest = IDENTITYAUDIT_MANIFEST
             .replace("profile = \"demo\"", "profile = \"production\"")
             .replace("topology = \"demo\"", "topology = \"durable-isolated\"");
-        let assembly = DiscoveredAssembly {
-            dir: PathBuf::from("assemblies/identityaudit"),
-            cargo_path: PathBuf::from("assemblies/identityaudit/Cargo.toml"),
-            manifest_label: "assemblies/identityaudit/assembly.toml".to_owned(),
-            cargo_label: "assemblies/identityaudit/Cargo.toml".to_owned(),
-            manifest_src: production_manifest.clone(),
-            manifest: AssemblyManifest::from_toml_str(&production_manifest)?,
-            cargo_toml: toml::from_str(IDENTITYAUDIT_CARGO)?,
-        };
+        let root = unique_tmp("identityaudit-production-boundary");
+        let dir = root.join("assemblies/identityaudit");
+        fs::create_dir_all(&dir)?;
+        write(&dir.join("assembly.toml"), &production_manifest)?;
+        write(&dir.join("Cargo.toml"), IDENTITYAUDIT_CARGO)?;
+        let assembly = GovernedAssembly::fixture(&root, &dir)?;
         let findings = validate_assembly(&assembly);
         assert!(
             findings.iter().all(|finding| !matches!(
@@ -8368,6 +7986,7 @@ audit = { path = "../../crates/audit" }
             )),
             "identityaudit must use semantic production gates without full-runtime closeout: {findings:?}"
         );
+        fs::remove_dir_all(root)?;
         Ok(())
     }
 
@@ -8939,11 +8558,13 @@ ENTRYPOINT ["/usr/local/bin/server"]
 
     fn real_settingsonly_l2_evidence() -> anyhow::Result<SettingsOnlyL2Evidence> {
         let root = crate::workspace_root()?;
-        let assembly = load_target(&root, &root.join("assemblies/settingsonly"))?;
+        let ir = AssemblyGovernanceIr::<Core>::load(&root)?;
+        let assembly = ir
+            .assembly("settingsonly")
+            .context("settingsonly governance projection")?;
         let metadata = load_workspace_metadata(&root)?.context("workspace cargo metadata")?;
-        let (closure_packages, _) =
-            cargo_tree_default_normal_evidence(&root, &assembly, &metadata)?;
-        load_settingsonly_l2_evidence(&root, &assembly, &closure_packages)
+        let (closure_packages, _) = cargo_tree_default_normal_evidence(&root, assembly, &metadata)?;
+        load_settingsonly_l2_evidence(&root, assembly, &closure_packages)
     }
 
     #[test]
@@ -8964,29 +8585,48 @@ ENTRYPOINT ["/usr/local/bin/server"]
 
         let mut cases: Vec<(&str, SettingsOnlyL2Evidence)> = Vec::new();
 
-        let mut demo = baseline.clone();
-        demo.manifest.profile = AssemblyProfile::Demo;
-        cases.push(("demo topology", demo));
-
         let mut missing = baseline.clone();
-        missing.manifest.diport_providers.pop();
+        missing
+            .runtime_plan
+            .get_mut("providerPlans")
+            .and_then(serde_json::Value::as_array_mut)
+            .context("providerPlans fixture")?
+            .pop();
         cases.push(("missing provider", missing));
 
         let mut extra = baseline.clone();
-        extra
-            .manifest
-            .diport_providers
-            .push(extra.manifest.diport_providers[0].clone());
+        let plans = extra
+            .runtime_plan
+            .get_mut("providerPlans")
+            .and_then(serde_json::Value::as_array_mut)
+            .context("providerPlans fixture")?;
+        plans.push(plans[0].clone());
         cases.push(("extra provider", extra));
 
-        let mut ephemeral = baseline.clone();
-        ephemeral
-            .manifest
-            .diport_providers
+        let mut equal_count_substitution = baseline.clone();
+        let substituted = equal_count_substitution
+            .runtime_plan
+            .get_mut("providerPlans")
+            .and_then(serde_json::Value::as_array_mut)
+            .context("providerPlans fixture")?
             .iter_mut()
-            .find(|provider| provider.id.as_str() == "event-subscriber")
-            .context("subscriber fixture")?
-            .durability = ProviderDurability::EphemeralMemory;
+            .find(|provider| {
+                provider.get("id").and_then(serde_json::Value::as_str)
+                    == Some("distributed-cas-store")
+            })
+            .context("distributed CAS fixture")?;
+        substituted["id"] = serde_json::json!("distributed-cas-store-alternative");
+        cases.push((
+            "equal-count provider substitution",
+            equal_count_substitution,
+        ));
+
+        let mut ephemeral = baseline.clone();
+        ephemeral.providers_gen = ephemeral.providers_gen.replacen(
+            "ProviderDurability::Persistent",
+            "ProviderDurability::EphemeralMemory",
+            1,
+        );
         cases.push(("ephemeral durable provider", ephemeral));
 
         let mut cargo_fallback = baseline.clone();
@@ -9192,85 +8832,6 @@ ENTRYPOINT ["/usr/local/bin/server"]
     }
 
     #[test]
-    fn assembly_manifest_validate_rejects_empty_listeners() -> anyhow::Result<()> {
-        let root = unique_tmp("assembly-empty-listeners");
-        let manifest = manifest_with_intent().replace(
-            r#"
-[[listeners]]
-kind = "primary"
-domains = []
-
-[[listeners]]
-kind = "internal"
-domains = []
-
-[[listeners]]
-kind = "admin"
-domains = []
-
-[[listeners]]
-kind = "health"
-domains = []
-"#,
-            "listeners = []\n",
-        );
-        write_assembly(
-            &root,
-            &manifest,
-            r#"[package]
-name = "runtime"
-"#,
-        )?;
-
-        let (_count, findings) = validate_root(&root)?;
-        assert!(
-            findings.iter().any(|f| f.rule == Rule::EmptyListeners),
-            "empty listeners must be rejected: {findings:?}"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn assembly_manifest_validate_rejects_duplicate_listeners() -> anyhow::Result<()> {
-        let root = unique_tmp("assembly-duplicate-listeners");
-        write_assembly(
-            &root,
-            &manifest_with_intent().replace("kind = \"internal\"", "kind = \"primary\""),
-            r#"[package]
-name = "runtime"
-"#,
-        )?;
-
-        let (_count, findings) = validate_root(&root)?;
-        assert!(
-            findings.iter().any(|f| f.rule == Rule::DuplicateListener),
-            "duplicate listeners must be rejected: {findings:?}"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn assembly_manifest_validate_rejects_name_mismatch() -> anyhow::Result<()> {
-        let root = unique_tmp("assembly-name-mismatch");
-        write_assembly(
-            &root,
-            &manifest_with_intent().replace("name = \"runtime\"", "name = \"other\""),
-            r#"[package]
-name = "runtime"
-"#,
-        )?;
-
-        let (_count, findings) = validate_root(&root)?;
-        assert!(
-            findings
-                .iter()
-                .any(|f| f.rule == Rule::ManifestNameMismatch),
-            "manifest name must match assembly directory: {findings:?}"
-        );
-        Ok(())
-    }
-
-    #[test]
     fn assembly_crate_without_manifest_is_rejected() -> anyhow::Result<()> {
         let root = unique_tmp("assembly-missing-manifest");
         let dir = root.join("assemblies/runtime");
@@ -9287,52 +8848,6 @@ name = "runtime"
         assert!(
             findings.iter().any(|f| f.rule == Rule::MissingManifest),
             "assembly crate without assembly.toml must be rejected: {findings:?}"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn manifest_without_diport_providers_is_rejected() -> anyhow::Result<()> {
-        let root = unique_tmp("assembly-empty-providers");
-        write_assembly(
-            &root,
-            r#"
-schemaVersion = 2
-name = "runtime"
-profile = "production"
-domains = ["identity", "settings", "audit"]
-topology = "durable-shared"
-frameworkContracts = []
-workflowActivations = []
-diportProviders = []
-
-[[listeners]]
-kind = "primary"
-domains = []
-
-[[listeners]]
-kind = "internal"
-domains = []
-
-[[listeners]]
-kind = "admin"
-domains = []
-
-[[listeners]]
-kind = "health"
-domains = []
-"#,
-            r#"[package]
-name = "runtime"
-"#,
-        )?;
-
-        let (_count, findings) = validate_root(&root)?;
-        assert!(
-            findings
-                .iter()
-                .any(|f| f.rule == Rule::EmptyDiportProviders),
-            "empty diportProviders must be rejected: {findings:?}"
         );
         Ok(())
     }
@@ -10475,44 +9990,6 @@ postgres = { path = "../../adapters/postgres" }
     }
 
     #[test]
-    fn draft_only_provider_cannot_be_activated_even_with_dependency() -> anyhow::Result<()> {
-        let root = unique_tmp("assembly-draft-only-provider-active");
-        let manifest = manifest_with_intent()
-            .replace(
-                "device-revocation-store",
-                "distributed-cas-store-alternative",
-            )
-            .replace("diport::RevocationStore", "diport::CasStore")
-            .replace("postgres::PgRevocationStore", "redis::RedisCasStore")
-            .replace("providerCrate = \"postgres\"", "providerCrate = \"redis\"")
-            .replace("requiredFeatures = []", "requiredFeatures = [\"backend\"]")
-            .replace("consumer = \"deviceloop\"", "consumer = \"distributed\"")
-            .replace(
-                "outputs = [\"probes\", \"workers\"]",
-                "outputs = [\"resources\"]",
-            );
-        write_assembly(
-            &root,
-            &manifest,
-            r#"[package]
-name = "runtime"
-
-[dependencies]
-redis = { path = "../../adapters/redis", features = ["backend"] }
-"#,
-        )?;
-
-        let (_count, findings) = validate_root(&root)?;
-        assert!(
-            findings.iter().any(|finding| {
-                finding.rule == Rule::InvalidDiportProvider && finding.detail.contains("lifecycle")
-            }),
-            "draft-only role must reject active lifecycle before downstream consumption: {findings:?}"
-        );
-        Ok(())
-    }
-
-    #[test]
     fn active_rate_limiter_provider_passes() -> anyhow::Result<()> {
         let root = unique_tmp("assembly-rate-limiter-active");
         write_assembly(
@@ -11053,55 +10530,9 @@ ratelimit = { path = "../../adapters/ratelimit" }
         Ok(())
     }
 
-    #[test]
-    fn demo_draft_ephemeral_revocation_provider_is_rejected_by_canonical_registry()
-    -> anyhow::Result<()> {
-        let root = unique_tmp("assembly-draft-ephemeral");
-        write_assembly(
-            &root,
-            &valid_manifest_with_profile(
-                "demo",
-                r#"lifecycle = "draft"
-durability = "ephemeral-memory""#,
-            ),
-            r#"[package]
-name = "runtime"
-"#,
-        )?;
+    // ---- #1251 eventbus typed transport providers ----
 
-        let (_count, findings) = validate_root(&root)?;
-        assert_eq!(
-            findings
-                .iter()
-                .filter(|finding| finding.rule == Rule::InvalidDiportProvider)
-                .count(),
-            2,
-            "canonical lifecycle and durability must both fail closed: {findings:?}"
-        );
-        assert!(
-            findings.iter().any(|finding| {
-                finding.detail.contains("field=diportProviders.lifecycle")
-                    && finding.detail.contains("expected=active actual=draft")
-            }),
-            "canonical lifecycle mismatch missing: {findings:?}"
-        );
-        assert!(
-            findings.iter().any(|finding| {
-                finding.detail.contains("field=diportProviders.durability")
-                    && finding
-                        .detail
-                        .contains("expected=persistent actual=ephemeral-memory")
-            }),
-            "canonical durability mismatch missing: {findings:?}"
-        );
-        Ok(())
-    }
-
-    // ---- #1251 eventbus 真传输 provider（diport::Publisher / diport::AckableSubscriber）----
-
-    /// demo-profile manifest，单条 amqp transport provider（topology-gated durable 选型）。
     #[allow(clippy::panic)]
-    // reason: closed test helper rejects accidental non-AMQP fixture input at the call site.
     fn amqp_manifest(provider: &str, port: &str, lifecycle: &str, durability: &str) -> String {
         let role = match provider {
             "amqp::AmqpPublisher" => "event-publisher",
@@ -11145,7 +10576,7 @@ lifecycle = "{lifecycle}"
 durability = "{durability}"
 purpose = "eventbus-transport"
 outputs = ["probes", "resources", "workers"]
-"#
+"#,
         )
     }
 
@@ -11461,29 +10892,6 @@ s3 = { path = "../../adapters/s3", features = ["backend"] }
     }
 
     #[test]
-    fn amqp_subscriber_declared_ephemeral_durability_mismatch() -> anyhow::Result<()> {
-        let root = unique_tmp("assembly-amqp-subscriber-durability");
-        write_assembly(
-            &root,
-            &amqp_manifest(
-                "amqp::AmqpSubscriber",
-                "diport::AckableSubscriber",
-                "active",
-                "ephemeral-memory",
-            ),
-            CARGO_AMQP_BACKEND,
-        )?;
-        let (_count, findings) = validate_root(&root)?;
-        assert!(
-            findings.iter().any(|f| {
-                f.rule == Rule::InvalidDiportProvider && f.detail.contains("durability")
-            }),
-            "closed subscriber role must reject ephemeral durability before downstream consumption: {findings:?}"
-        );
-        Ok(())
-    }
-
-    #[test]
     fn amqp_publisher_active_without_backend_feature_rejected() -> anyhow::Result<()> {
         let root = unique_tmp("assembly-amqp-publisher-no-backend");
         write_assembly(
@@ -11502,53 +10910,6 @@ s3 = { path = "../../adapters/s3", features = ["backend"] }
                 .iter()
                 .any(|f| f.rule == Rule::ActiveProviderFeature),
             "active amqp publisher without backend feature must be rejected: {findings:?}"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn amqp_publisher_declared_ephemeral_durability_mismatch() -> anyhow::Result<()> {
-        let root = unique_tmp("assembly-amqp-publisher-durability");
-        write_assembly(
-            &root,
-            &amqp_manifest(
-                "amqp::AmqpPublisher",
-                "diport::Publisher",
-                "active",
-                "ephemeral-memory",
-            ),
-            CARGO_AMQP_BACKEND,
-        )?;
-        let (_count, findings) = validate_root(&root)?;
-        assert!(
-            findings.iter().any(|f| {
-                f.rule == Rule::InvalidDiportProvider && f.detail.contains("durability")
-            }),
-            "closed publisher role must reject ephemeral durability before downstream consumption: {findings:?}"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn amqp_provider_declared_on_wrong_port_rejected() -> anyhow::Result<()> {
-        // amqp::AmqpPublisher 声明在 AckableSubscriber 端口上 ⇒ typed metadata 不匹配 ⇒ ActiveProviderPort。
-        let root = unique_tmp("assembly-amqp-wrong-port");
-        write_assembly(
-            &root,
-            &amqp_manifest(
-                "amqp::AmqpPublisher",
-                "diport::AckableSubscriber",
-                "active",
-                "persistent",
-            ),
-            CARGO_AMQP_BACKEND,
-        )?;
-        let (_count, findings) = validate_root(&root)?;
-        assert!(
-            findings
-                .iter()
-                .any(|f| f.rule == Rule::InvalidDiportProvider && f.detail.contains("port")),
-            "closed publisher role must reject the subscriber port before downstream consumption: {findings:?}"
         );
         Ok(())
     }

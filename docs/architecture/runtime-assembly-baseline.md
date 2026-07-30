@@ -14,8 +14,8 @@ cargo xtask runtime-baseline verify
 
 The complete static inventory is machine-owned by
 [`runtime-baseline/runtime.txt`](../../runtime-baseline/runtime.txt). Its
-`[runtime.dependencies]`, `[assembly.diportProviders]`, `[sharedRuntimeDeps.fields]`,
-`[domainModuleResult.fields]`, and `[runtime.run.orderedAnchors]` sections are the source of truth;
+`[runtime.dependencies]`, `[sharedRuntimeDeps.fields]`, `[domainModuleResult.fields]`, and
+`[runtime.run.orderedAnchors]` sections are the source of truth;
 this document only explains the architectural meaning of those facts.
 
 Dynamic state is not asserted by this gate: environment variables, live provider health,
@@ -47,23 +47,20 @@ and only the launch phase may consume `Finalized` and transfer lifecycle ownersh
 `runtimeexec` `ShutdownStack` owner. The exact production calls and ordering are intentionally not
 repeated here; see `[runtime.run.orderedAnchors]` in the machine baseline.
 
-## Provider Inventory
+## Governance And Live Closure
 
-The exact DI declarations, including lifecycle and durability metadata, live in
-`[assembly.diportProviders]` in the machine baseline and are derived from `assembly.toml`.
-`cargo xtask assembly validate` checks every closed role against the private provider registry.
+Assembly intent and provider declarations are owned by the repository Assembly Governance IR,
+not repeated in the runtime baseline. `cargo xtask assembly validate` checks every closed role
+against the private provider registry.
 Each assembly also compiles an internal, active-only `providers_gen.rs` catalog whose const checked
 entries bind the role to its canonical factory/capability evidence;
 `cargo xtask assembly generate-providers --check` is its independent drift gate.
 This catalog does not construct instances or read configuration/secrets, and it is not a fallback
 for the current `modules_gen.rs` live output carrier. #1792 owns live dispatch and bypass removal.
-`runtime-baseline verify` prevents later runtime-root movement from silently changing the derived
-inventory.
-
-The aggregate live inventory freezes all four plan families together: provider declarations,
-generated active catalog, and consumed outputs; listener declarations and generated/live
-membership; domain declarations, local projection, and live bindings; placement declarations and
-local/remote projections. This is one closure proof, not four summary counts.
+The runtime-owned closure test executes the real generated wire → validate → compose path, then
+compares provider, listener, domain, and placement relations through typed exact-set differences.
+Missing, extra, duplicate, or wrong IDs fail directly; there is no renderer, parser, text fixture,
+or second inventory format.
 
 ## Shared Inputs And Module Outputs
 
@@ -131,7 +128,7 @@ provider resources, with tracing flushed last. Exact registration anchors and th
 
 - `runtime-baseline/runtime.txt` is missing
 - regenerated baseline text differs from the committed file
-- runtime dependencies or assembly providers are empty
+- runtime dependencies are empty
 - the exact outer `runtime::run()` owner, sole `run_startup() → phase::execute` entry, typed
   transition chain, phase-owner anchors, runtimeexec handoff, or full-adapter anchors are missing
   or out of order

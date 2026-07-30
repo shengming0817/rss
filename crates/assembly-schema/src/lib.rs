@@ -9,7 +9,8 @@ mod runtime_plan;
 pub use lock::{
     AssemblyDigests, AssemblyFingerprint, AssemblyIdentity, AssemblyLock, AssemblyLockError,
     AssemblyLockErrorStage, ExecutableAssemblyLock, GENERATED_MODULE_OWNERSHIP_MARKER,
-    GENERATED_PROVIDER_OWNERSHIP_MARKER, ParsedAssemblyLock, RepositoryVerifiedAssemblyLock,
+    GENERATED_PROVIDER_OWNERSHIP_MARKER, ParsedAssemblyLock, RepositoryAssemblyManifestV2,
+    RepositoryVerifiedAssemblyLock,
 };
 pub use provider::{
     DiportPort, DiportProvider, LifecycleChannel, ProviderCapabilityEvidence, ProviderCatalogEntry,
@@ -469,6 +470,7 @@ impl AssemblyManifest {
             listeners,
             mut diport_providers,
         } = self;
+        let declaration_ordered_diport_providers = diport_providers.clone();
 
         for provider in &mut diport_providers {
             provider.required_features.sort();
@@ -495,18 +497,21 @@ impl AssemblyManifest {
         })?;
         Ok(CanonicalAssemblyManifestV2 {
             value,
+            declaration_ordered_diport_providers,
             manifest_digest,
         })
     }
 }
 
 /// Read-only v2 semantic manifest shared by code generation and AssemblyLock identity.
+#[derive(Clone)]
 pub struct CanonicalAssemblyManifestV2 {
     value: CanonicalAssemblyManifestV2Value,
+    declaration_ordered_diport_providers: Vec<DiportProvider>,
     manifest_digest: String,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CanonicalAssemblyManifestV2Value {
     schema_version: AssemblyManifestSchemaVersion,
@@ -555,6 +560,15 @@ impl CanonicalAssemblyManifestV2 {
 
     pub fn diport_providers(&self) -> &[DiportProvider] {
         &self.value.diport_providers
+    }
+
+    /// Validated provider declarations in source order for byte-stable presentation artifacts.
+    ///
+    /// Semantic consumers must use [`Self::diport_providers`], whose set-like fields are
+    /// canonicalized and sorted. This projection exists only where declaration order is part of
+    /// an established rendered format.
+    pub fn declaration_ordered_diport_providers(&self) -> &[DiportProvider] {
+        &self.declaration_ordered_diport_providers
     }
 
     pub fn manifest_digest(&self) -> &str {

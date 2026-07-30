@@ -96,9 +96,14 @@ fn repository_verified_lock(name: &str, bytes: &[u8]) -> ExecutableAssemblyLock 
         .parent()
         .and_then(std::path::Path::parent)
         .expect("repository root");
+    let source = assembly_schema::RepositoryAssemblyManifestV2::discover_v2(
+        root,
+        &root.join("assemblies").join(name),
+    )
+    .expect("repository assembly manifest");
     ParsedAssemblyLock::from_json_slice(bytes)
         .expect("parsed AssemblyLock")
-        .verify_repository_v2(root, &root.join("assemblies").join(name))
+        .verify_repository_v2(&source)
         .expect("repository-verified AssemblyLock")
         .into_executable()
 }

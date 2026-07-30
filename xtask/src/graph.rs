@@ -3,7 +3,6 @@
 
 use crate::contract::manifest::{ContractKind, Lifecycle};
 use anyhow::{Context, Result, bail};
-use assembly_schema::AssemblyManifest;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -339,33 +338,25 @@ impl ModelBuilder {
 
 fn build_model(root: &Path, assembly_name: &str) -> Result<GraphModel> {
     validate_name(assembly_name)?;
-    let manifest_path = root
-        .join("assemblies")
-        .join(assembly_name)
-        .join("assembly.toml");
-    ensure_no_symlinks(root, &manifest_path)?;
-    let text = fs::read_to_string(&manifest_path)
-        .with_context(|| format!("读取 {} 失败", manifest_path.display()))?;
-    let manifest = AssemblyManifest::from_toml_str(&text)
-        .with_context(|| format!("解析 {} 失败", manifest_path.display()))?;
-    manifest
-        .validate_basic()
-        .context("assembly manifest basic validation failed")?;
-    manifest
-        .validate_graph_evidence()
-        .context("assembly manifest graph evidence validation failed")?;
-    if manifest.name != assembly_name {
-        bail!("assembly 路径名与 manifest name 不一致");
-    }
-    crate::assembly_codegen::check_target(root, assembly_name)
+    let ir = crate::assembly_governance::AssemblyGovernanceIr::<
+        crate::assembly_governance::Core,
+    >::load_target(root, assembly_name)?
+    .with_context(|| format!("assembly `{assembly_name}` is not governed"))?;
+    let assembly = ir
+        .assembly(assembly_name)
+        .with_context(|| format!("assembly `{assembly_name}` is not governed"))?;
+    let manifest = assembly.manifest();
+    crate::assembly_codegen::check_governed_target(root, assembly)
         .context("modules_gen carrier 与 manifest 漂移")?;
-    let assembly_findings = crate::assembly::validate_target(root, assembly_name)?;
-    reject_findings("assembly graph target validation", &assembly_findings)?;
+    if root.join("Cargo.toml").is_file() {
+        let assembly_findings = crate::assembly::validate_governed_target(root, assembly)?;
+        reject_findings("assembly graph target validation", &assembly_findings)?;
+    }
     let (_, findings) = crate::contract::validate::validate_root(&root.join("contracts"))?;
     reject_findings("assembly graph contract source validation", &findings)?;
 
     let domains: BTreeSet<_> = manifest
-        .domains
+        .domains()
         .iter()
         .map(|d| d.as_str().to_string())
         .collect();
@@ -377,11 +368,11 @@ fn build_model(root: &Path, assembly_name: &str) -> Result<GraphModel> {
         true,
         None,
     )?;
-    for domain in &manifest.domains {
+    for domain in manifest.domains() {
         let id = builder.endpoint(domain.as_str())?;
         builder.edge(&assembly_id, &id, EdgeKind::Contains);
     }
-    for listener in &manifest.listeners {
+    for listener in manifest.listeners() {
         let id = builder.node(
             format!("listener:{}", listener.kind.as_str()),
             NodeKind::ListenerSurface,
@@ -427,7 +418,7 @@ fn build_model(root: &Path, assembly_name: &str) -> Result<GraphModel> {
     for channel in [&probes, &resources, &workers] {
         builder.edge(&output, channel, EdgeKind::ShapeIncludes);
     }
-    for provider in &manifest.diport_providers {
+    for provider in manifest.declaration_ordered_diport_providers() {
         let consumer_name = provider.consumer.as_str();
         let details = ProviderDetails {
             port: provider.port.as_str().into(),
@@ -450,7 +441,7 @@ fn build_model(root: &Path, assembly_name: &str) -> Result<GraphModel> {
             true,
             Some(NodeDetails::Provider(details)),
         )?;
-        let consumer = if consumer_name == manifest.name.as_str() {
+        let consumer = if consumer_name == manifest.name() {
             assembly_id.clone()
         } else if domains.contains(consumer_name) {
             builder.endpoint(consumer_name)?
@@ -479,7 +470,7 @@ fn build_model(root: &Path, assembly_name: &str) -> Result<GraphModel> {
         "assemblies/{assembly_name}/src/generated/modules_gen.rs"
     ));
     let mut sources = vec![
-        source_record(root, &manifest_path)?,
+        source_record_content(assembly.source_label(), assembly.source_text().as_bytes()),
         source_record(root, &modules_path)?,
     ];
     for contract in crate::contract::discover(&root.join("contracts"))? {
@@ -524,9 +515,9 @@ fn build_model(root: &Path, assembly_name: &str) -> Result<GraphModel> {
         schema_version: 1,
         generated_by: GENERATED_BY,
         assembly: AssemblyMetadata {
-            name: manifest.name,
-            profile: manifest.profile.as_str().into(),
-            topology: manifest.topology.as_str().into(),
+            name: manifest.name().to_owned(),
+            profile: manifest.profile().as_str().into(),
+            topology: manifest.topology().as_str().into(),
         },
         sources,
         nodes: builder.nodes,
@@ -623,18 +614,22 @@ fn canonical_id(key: &str) -> String {
 fn source_record(root: &Path, path: &Path) -> Result<SourceRecord> {
     ensure_no_symlinks(root, path)?;
     let bytes = fs::read(path).with_context(|| format!("读取 graph source {}", path.display()))?;
-    let digest = Sha256::digest(&bytes);
+    Ok(source_record_content(&relative(root, path)?, &bytes))
+}
+
+fn source_record_content(path: &str, bytes: &[u8]) -> SourceRecord {
+    let digest = Sha256::digest(bytes);
     let mut value = String::new();
     for byte in digest {
         value.push_str(&format!("{byte:02x}"));
     }
-    Ok(SourceRecord {
-        path: relative(root, path)?,
+    SourceRecord {
+        path: path.to_owned(),
         digest: SourceDigest {
             algorithm: DigestAlgorithm::Sha256,
             value,
         },
-    })
+    }
 }
 
 fn reject_findings<R: std::fmt::Debug>(
@@ -1123,19 +1118,23 @@ mod tests {
     }
 
     #[test]
+    fn target_graph_does_not_load_unrelated_assembly_sources() -> anyhow::Result<()> {
+        let root = fixture_root("assembly-graph-target-scope")?;
+        write_fixture(&root)?;
+        crate::assembly_codegen::generate_root(&root, false)?;
+        std::fs::write(
+            root.join("assemblies/identityaudit/assembly.toml"),
+            "unrelated invalid manifest = [",
+        )?;
+        build_model(&root, "runtime")?;
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
     fn non_launch_assembly_only_declares_output_shape() -> anyhow::Result<()> {
         let root = fixture_root("assembly-graph-non-launch")?;
         write_fixture(&root)?;
-        let runtime = root.join("assemblies/runtime");
-        let target = root.join("assemblies/settingsonly");
-        std::fs::rename(&runtime, &target)?;
-        for file in ["assembly.toml", "Cargo.toml"] {
-            let path = target.join(file);
-            std::fs::write(
-                &path,
-                std::fs::read_to_string(&path)?.replace("runtime", "settingsonly"),
-            )?;
-        }
         crate::assembly_codegen::generate_root(&root, false)?;
         let rendered = render_mermaid(&build_model(&root, "settingsonly")?)?;
         assert!(!rendered.contains("produces") && !rendered.contains(" live"));
@@ -1212,9 +1211,40 @@ mod tests {
 
     fn fixture_root(name: &str) -> anyhow::Result<std::path::PathBuf> {
         let root = crate::testutil::unique_tmp(name);
-        std::fs::create_dir_all(root.join("assemblies/runtime"))?;
+        let workspace = crate::workspace_root()?;
+        for name in ["identityaudit", "runtime", "settingsonly"] {
+            let target = root.join("assemblies").join(name);
+            std::fs::create_dir_all(&target)?;
+            std::fs::copy(
+                workspace.join("assemblies").join(name).join("Cargo.toml"),
+                target.join("Cargo.toml"),
+            )?;
+            if name != "runtime" {
+                std::fs::copy(
+                    workspace
+                        .join("assemblies")
+                        .join(name)
+                        .join("assembly.toml"),
+                    target.join("assembly.toml"),
+                )?;
+            }
+        }
         std::fs::create_dir_all(root.join("contracts/event/identity/v1/created"))?;
-        Ok(root)
+        let inventory = root.join("contracts/http/runtime/v1/inventory");
+        std::fs::create_dir_all(&inventory)?;
+        for file in [
+            "contract.toml",
+            "request.schema.json",
+            "response.schema.json",
+        ] {
+            std::fs::copy(
+                workspace
+                    .join("contracts/http/runtime/v1/inventory")
+                    .join(file),
+                inventory.join(file),
+            )?;
+        }
+        Ok(std::fs::canonicalize(root)?)
     }
 
     fn assert_declared_shape(model: &GraphModel) -> anyhow::Result<()> {

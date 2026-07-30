@@ -1307,18 +1307,19 @@ outputs = ["resources"]
 
     #[test]
     fn manifest_bound_reader_rejects_self_consistent_extra_provider() -> anyhow::Result<()> {
-        let manifest = AssemblyManifest::from_toml_str(include_str!(
-            "../../../assemblies/runtime/assembly.toml"
-        ))?
-        .canonicalize_v2()?;
         let repository_root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .and_then(Path::parent)
             .context("repository root")?;
+        let source = crate::RepositoryAssemblyManifestV2::discover_v2(
+            repository_root,
+            &repository_root.join("assemblies/runtime"),
+        )?;
+        let manifest = source.canonical();
         let lock = crate::ParsedAssemblyLock::from_json_slice(include_bytes!(
             "../../../assemblies/runtime/assembly.lock.json"
         ))?
-        .verify_repository_v2(repository_root, &repository_root.join("assemblies/runtime"))?
+        .verify_repository_v2(&source)?
         .into_executable();
         let candidate = parse_unbound_runtime_plan(include_bytes!(
             "../../../assemblies/runtime/runtime-plan.json"
@@ -1348,7 +1349,7 @@ outputs = ["resources"]
         let bytes = serde_json::to_vec(&forged)?;
 
         validate_runtime_plan_json_slice(&bytes)?;
-        let error = match ParsedRuntimePlan::from_json_slice_bound(&bytes, &manifest, &lock) {
+        let error = match ParsedRuntimePlan::from_json_slice_bound(&bytes, manifest, &lock) {
             Ok(_) => anyhow::bail!("manifest-bound reader accepted an extra provider"),
             Err(error) => error,
         };

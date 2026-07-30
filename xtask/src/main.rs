@@ -81,6 +81,7 @@ mod archrules;
 mod assembly;
 mod assembly_artifacts;
 mod assembly_codegen;
+mod assembly_governance;
 mod assembly_lock;
 mod assembly_runtime_plan;
 mod cdc_config;

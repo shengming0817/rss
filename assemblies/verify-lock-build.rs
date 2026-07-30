@@ -1,4 +1,4 @@
-use assembly_schema::ParsedAssemblyLock;
+use assembly_schema::{ParsedAssemblyLock, RepositoryAssemblyManifestV2};
 use std::path::PathBuf;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -26,7 +26,8 @@ fn verify_bundled_lock() -> Result<(), Box<dyn std::error::Error>> {
         repository_root.join("contracts").display()
     );
 
+    let manifest = RepositoryAssemblyManifestV2::discover_v2(repository_root, &assembly_dir)?;
     ParsedAssemblyLock::from_json_slice(&std::fs::read(lock_path)?)?
-        .verify_repository_v2(repository_root, &assembly_dir)?;
+        .verify_repository_v2(&manifest)?;
     Ok(())
 }

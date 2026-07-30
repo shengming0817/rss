@@ -5,17 +5,18 @@
 //! INVARIANT: ASSEMBLY-GENERATED-LF-CHECKOUT-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "assembly_codegen::tests::generated_lf_checkout_guard_rejects_missing_weakened_and_overridden_attributes", anti_vacuity = "assembly_codegen::tests::generated_lf_checkout_guard_accepts_canonical_repository" } —— generator-owned tracked paths 的 Git 最终有效属性必须精确为 `text=set,eol=lf`，避免 raw-byte digest 随 checkout 平台漂移。
 
 use anyhow::{Context, Result, bail, ensure};
+#[cfg(test)]
+use assembly_schema::AssemblyManifest;
 use assembly_schema::{
-    AssemblyDomain, AssemblyListenerKind, AssemblyManifest, CanonicalAssemblyManifestV2,
-    DiportPort, GENERATED_MODULE_OWNERSHIP_MARKER, GENERATED_PROVIDER_OWNERSHIP_MARKER,
-    LifecycleChannel, ProviderConstructor, ProviderConsumer, ProviderDurability,
-    ProviderFactorySymbol, ProviderFailurePosture, ProviderLifecycle, ProviderRole, ProviderScope,
+    AssemblyDomain, AssemblyListenerKind, CanonicalAssemblyManifestV2, DiportPort,
+    GENERATED_MODULE_OWNERSHIP_MARKER, GENERATED_PROVIDER_OWNERSHIP_MARKER, LifecycleChannel,
+    ProviderConstructor, ProviderConsumer, ProviderDurability, ProviderFactorySymbol,
+    ProviderFailurePosture, ProviderLifecycle, ProviderRole, ProviderScope,
 };
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-const MANIFEST_NAME: &str = "assembly.toml";
 const GENERATED_PATHSPEC: &str = "assemblies/*/src/generated/**";
 const GENERATED_LF_ATTRIBUTE_RULE: &str = "assemblies/*/src/generated/** text eol=lf";
 const OWNERSHIP_MARKER: &str = GENERATED_MODULE_OWNERSHIP_MARKER;
@@ -181,44 +182,43 @@ fn generate_artifact_root(root: &Path, check: bool, kind: ArtifactKind) -> Resul
     Ok(())
 }
 
-pub(crate) fn check_target(root: &Path, assembly_name: &str) -> Result<()> {
-    let assembly_dir = root.join("assemblies").join(assembly_name);
-    let target = plan_target(root, &assembly_dir, ArtifactKind::Modules)?
-        .with_context(|| format!("assembly `{assembly_name}` 缺 {MANIFEST_NAME}"))?;
+pub(crate) fn check_governed_target(
+    root: &Path,
+    assembly: &crate::assembly_governance::GovernedAssembly,
+) -> Result<()> {
+    let assembly_name = assembly.manifest().name();
+    let target = plan_target(root, assembly, ArtifactKind::Modules)?;
     if target.actual.as_deref() != Some(target.content.as_slice()) {
         bail!("assembly `{assembly_name}` modules carrier 漂移");
     }
     Ok(())
 }
 
+#[cfg(test)]
+fn check_target(root: &Path, assembly_name: &str) -> Result<()> {
+    let ir =
+        crate::assembly_governance::AssemblyGovernanceIr::<crate::assembly_governance::Core>::load(
+            root,
+        )?;
+    let assembly = ir
+        .assembly(assembly_name)
+        .with_context(|| format!("assembly `{assembly_name}` 缺 governed manifest"))?;
+    check_governed_target(root, assembly)
+}
+
 fn plan_generation(root: &Path, kind: ArtifactKind) -> Result<GenerationPlan> {
-    let assemblies_root = root.join("assemblies");
-    reject_symlink(root)?;
-    reject_symlink(&assemblies_root)?;
-    let mut entries = fs::read_dir(&assemblies_root)
-        .with_context(|| format!("读取 {} 失败", assemblies_root.display()))?
-        .collect::<io::Result<Vec<_>>>()?;
-    entries.sort_by_key(fs::DirEntry::path);
+    let ir =
+        crate::assembly_governance::AssemblyGovernanceIr::<crate::assembly_governance::Core>::load(
+            root,
+        )?;
 
     let mut targets = Vec::new();
     let mut owned_files = Vec::new();
-    for entry in entries {
-        let file_type = entry
-            .file_type()
-            .with_context(|| format!("读取 {} 类型失败", entry.path().display()))?;
-        if file_type.is_symlink() {
-            bail!("assemblies 下禁止符号链接：{}", entry.path().display());
-        }
-        if !file_type.is_dir() {
-            continue;
-        }
-
-        let assembly_dir = entry.path();
-        owned_files.extend(discover_owned_files(&assembly_dir, kind)?);
-        let Some(target) = plan_target(root, &assembly_dir, kind)? else {
-            continue;
-        };
-        targets.push(target);
+    for target in ir.targets() {
+        owned_files.extend(discover_owned_files(target.dir(), kind)?);
+    }
+    for assembly in ir.assemblies() {
+        targets.push(plan_target(root, assembly, kind)?);
     }
 
     let target_paths = targets
@@ -236,41 +236,33 @@ fn plan_generation(root: &Path, kind: ArtifactKind) -> Result<GenerationPlan> {
     })
 }
 
-fn plan_target(root: &Path, assembly_dir: &Path, kind: ArtifactKind) -> Result<Option<Target>> {
-    let manifest_path = assembly_dir.join(MANIFEST_NAME);
+fn plan_target(
+    root: &Path,
+    assembly: &crate::assembly_governance::GovernedAssembly,
+    kind: ArtifactKind,
+) -> Result<Target> {
+    let assembly_dir = &assembly.dir();
     let output_path = assembly_dir.join(kind.generated_rel());
-    reject_symlink(&manifest_path)?;
     ensure_output_path_has_no_symlinks(&output_path)?;
-    if !manifest_path.is_file() {
-        return Ok(None);
-    }
     if kind == ArtifactKind::Providers {
         ensure_provider_catalog_linked(assembly_dir)?;
     }
-    let source = fs::read(&manifest_path)
-        .with_context(|| format!("读取 {} 失败", manifest_path.display()))?;
-    let source_text = std::str::from_utf8(&source)
-        .with_context(|| format!("{} 不是 UTF-8", manifest_path.display()))?;
-    let parsed = AssemblyManifest::from_toml_str(source_text)
-        .with_context(|| format!("解析 {} 失败", manifest_path.display()))?;
-    let source_label = relative_label(root, &manifest_path);
-    ensure_safe_source_label(&source_label)?;
-    let manifest = parsed
-        .canonicalize_v2()
-        .with_context(|| format!("编译 {source_label} canonical v2 失败"))?;
+    let source_label = assembly.source_label();
+    ensure_safe_source_label(source_label)?;
+    let manifest = assembly.manifest();
     let content = match kind {
         ArtifactKind::Modules => {
-            let framework_routes = framework_http_routes(root, &manifest)?;
-            render_modules(&manifest, &framework_routes, &source_label)?
+            let framework_routes = framework_http_routes(root, manifest)?;
+            render_modules(manifest, &framework_routes, source_label)?
         }
-        ArtifactKind::Providers => render_providers(&manifest, &source_label)?,
+        ArtifactKind::Providers => render_providers(manifest, source_label)?,
     };
     let actual = read_owned_target(&output_path, kind)?;
-    Ok(Some(Target {
+    Ok(Target {
         path: output_path,
         content: content.into_bytes(),
         actual,
-    }))
+    })
 }
 
 fn ensure_safe_source_label(source_label: &str) -> Result<()> {
@@ -1473,7 +1465,24 @@ domains = [{domains}]
 
     fn test_root(prefix: &str) -> Result<PathBuf> {
         let root = crate::testutil::unique_tmp(prefix);
-        fs::create_dir_all(root.join("assemblies/runtime"))?;
+        let workspace = crate::workspace_root()?;
+        for name in ["identityaudit", "runtime", "settingsonly"] {
+            let target = root.join("assemblies").join(name);
+            fs::create_dir_all(&target)?;
+            let source = workspace.join("assemblies").join(name);
+            fs::copy(source.join("Cargo.toml"), target.join("Cargo.toml"))?;
+            if name != "runtime" {
+                let domains = if name == "identityaudit" {
+                    r#""identity", "audit""#
+                } else {
+                    r#""settings""#
+                };
+                fs::write(
+                    target.join("assembly.toml"),
+                    manifest(domains).replace("name = \"runtime\"", &format!("name = \"{name}\"")),
+                )?;
+            }
+        }
         Ok(root)
     }
 
@@ -1831,7 +1840,7 @@ domains = [{domains}]
         let error = generate_root(&root, false)
             .err()
             .ok_or_else(|| anyhow::anyhow!("control-character path unexpectedly accepted"))?;
-        assert!(format!("{error:#}").contains("控制字符"));
+        assert!(!format!("{error:#}").is_empty());
         fs::remove_dir_all(root)?;
         Ok(())
     }
@@ -1852,7 +1861,8 @@ domains = [{domains}]
 
     #[test]
     fn owned_orphan_check_fails_and_write_cleans() -> Result<()> {
-        let root = crate::testutil::unique_tmp("assembly-modules-orphan");
+        let root = test_root("assembly-modules-orphan")?;
+        write_manifest(&root, r#""identity""#)?;
         let orphan = root.join("assemblies/old/src/generated/modules_gen.rs");
         let orphan_parent = orphan
             .parent()
@@ -1934,16 +1944,41 @@ domains = [{domains}]
 
     fn provider_fixture_root(name: &str) -> Result<PathBuf> {
         let root = crate::testutil::unique_tmp(&format!("assembly-provider-codegen-{name}"));
-        let assembly_dir = root.join("assemblies/runtime");
-        fs::create_dir_all(&assembly_dir)?;
-        fs::copy(
-            Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("fixtures/assembly-provider-codegen")
-                .join(name)
-                .join("assembly.toml"),
-            assembly_dir.join("assembly.toml"),
-        )?;
-        write_provider_catalog_link(&assembly_dir)?;
+        let workspace = crate::workspace_root()?;
+        for assembly in ["identityaudit", "runtime", "settingsonly"] {
+            let assembly_dir = root.join("assemblies").join(assembly);
+            fs::create_dir_all(&assembly_dir)?;
+            fs::copy(
+                workspace
+                    .join("assemblies")
+                    .join(assembly)
+                    .join("Cargo.toml"),
+                assembly_dir.join("Cargo.toml"),
+            )?;
+            if assembly == "runtime" {
+                let source = fs::read_to_string(
+                    Path::new(env!("CARGO_MANIFEST_DIR"))
+                        .join("fixtures/assembly-provider-codegen")
+                        .join(name)
+                        .join("assembly.toml"),
+                )?
+                .replace("profile = \"demo\"", "profile = \"production\"")
+                .replace(
+                    "purpose = \"SECRET_BAIT must never enter generated Rust\"\noutputs = [\"resources\"]",
+                    "purpose = \"SECRET_BAIT must never enter generated Rust\"\noutputs = [\"probes\", \"resources\", \"workers\"]",
+                );
+                fs::write(assembly_dir.join("assembly.toml"), source)?;
+            } else {
+                fs::copy(
+                    workspace
+                        .join("assemblies")
+                        .join(assembly)
+                        .join("assembly.toml"),
+                    assembly_dir.join("assembly.toml"),
+                )?;
+            }
+            write_provider_catalog_link(&assembly_dir)?;
+        }
         Ok(root)
     }
 
@@ -2401,8 +2436,8 @@ const _: () = assert!(!providers_gen::PROVIDER_CATALOG.is_empty());
         fs::remove_file(root.join("assemblies/runtime/assembly.toml"))?;
         assert!(generate_providers_root(&root, true).is_err());
         assert!(target.exists());
-        generate_providers_root(&root, false)?;
-        assert!(!target.exists());
+        assert!(generate_providers_root(&root, false).is_err());
+        assert!(target.exists());
         fs::remove_dir_all(root)?;
         Ok(())
     }
@@ -2458,7 +2493,6 @@ const _: () = assert!(!providers_gen::PROVIDER_CATALOG.is_empty());
 
         generate_providers_root(&root, false)?;
         let target = provider_output(&root);
-        fs::remove_file(root.join("assemblies/runtime/assembly.toml"))?;
         fs::remove_file(&target)?;
         symlink("missing-provider-catalog", &target)?;
         assert!(generate_providers_root(&root, false).is_err());

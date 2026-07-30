@@ -53,7 +53,6 @@ const REQUIRED_RUNTIME_SOURCES: &[&str] = &[
     "assemblies/runtime/src/infra/pg.rs",
     "assemblies/runtime/src/infra/s3.rs",
     "assemblies/runtime/src/event_transport.rs",
-    "assemblies/runtime/assembly.toml",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,6 +85,10 @@ impl GovernanceCheck for DlxLifecycleFunnel {
 }
 
 fn scan_workspace(root: &Path) -> Result<Vec<Finding<Rule>>> {
+    let ir =
+        crate::assembly_governance::AssemblyGovernanceIr::<crate::assembly_governance::Core>::load(
+            root,
+        )?;
     let mut findings = Vec::new();
     for rel in collect_production_sources(root)? {
         let content = std::fs::read_to_string(root.join(&rel))
@@ -107,6 +110,17 @@ fn scan_workspace(root: &Path) -> Result<Vec<Finding<Rule>>> {
                 return Err(err).with_context(|| format!("dlx-lifecycle-funnel: read {rel}"));
             }
         }
+    }
+    match ir.assembly("runtime") {
+        Some(assembly) => findings.extend(required_assembly_provider_findings(
+            Path::new(assembly.source_label()),
+            assembly.source_text(),
+        )),
+        None => findings.push(finding(
+            Rule::MissingRuntimeProvider,
+            "runtime".to_string(),
+            "DLX lifecycle 必需 runtime assembly 缺失".to_string(),
+        )),
     }
     findings.extend(runtime_phase_funnel_findings(root)?);
     Ok(findings)
@@ -674,11 +688,6 @@ fn required_runtime_source_findings(path: &Path, content: &str) -> Vec<Finding<R
     const PG: &str = "assemblies/runtime/src/infra/pg.rs";
     const S3: &str = "assemblies/runtime/src/infra/s3.rs";
     const EVENT_TRANSPORT: &str = "assemblies/runtime/src/event_transport.rs";
-    const ASSEMBLY: &str = "assemblies/runtime/assembly.toml";
-
-    if path == Path::new(ASSEMBLY) {
-        return required_assembly_provider_findings(path, content);
-    }
     let file = match syn::parse_file(content) {
         Ok(file) => file,
         Err(error) => {
@@ -2069,11 +2078,14 @@ pub(crate) async fn build_s3_dlx_archive_store(
             .is_empty()
         );
         assert!(
-            !required_runtime_source_findings(Path::new("assemblies/runtime/assembly.toml"), "[[",)
-                .is_empty()
+            !required_assembly_provider_findings(
+                Path::new("assemblies/runtime/assembly.toml"),
+                "[[",
+            )
+            .is_empty()
         );
         assert_eq!(
-            required_runtime_source_findings(
+            required_assembly_provider_findings(
                 Path::new("assemblies/runtime/assembly.toml"),
                 "diportProviders = []",
             )
