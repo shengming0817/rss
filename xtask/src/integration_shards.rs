@@ -327,7 +327,7 @@ integration_shard_catalog! {
         name: "consistency-fault",
         resources: [Postgres, Redis, Amqp],
         capabilities: [],
-        local_feature_scopes: [Testkit, RedisAdapter, Journeys, JourneysFaultMatrix],
+        local_feature_scopes: [Testkit, RedisAdapter, JourneysFaultMatrix],
         units: [
             TestkitLib => ("testkit", "testkit", Lib, Serial),
             TestkitCrashMatrix => ("testkit", "crash_matrix", Test, Parallel),
@@ -337,7 +337,6 @@ integration_shard_catalog! {
             ProviderCatalogTrybuild => ("testkit", "provider_catalog_trybuild", Test, Parallel),
             RedisAdapterLib => ("redis-adapter", "redis", Lib, Parallel),
             RedisIntegrationClaimer => ("redis-adapter", "integration_claimer", Test, Serial),
-            DeviceCommandAckTimeoutJourney => ("journeys", "device_command_ack_timeout_journey", Test, Parallel),
             ConsistencyFaultMatrixJourney => ("journeys-fault-matrix", "consistency_fault_matrix_journey", Test, Serial),
         ],
     },
@@ -1037,8 +1036,16 @@ mod tests {
 
     #[test]
     fn redis_shard_owns_one_real_testkit_container_lifecycle_target() {
-        let matches = IntegrationShard::ConsistencyFault
-            .spec()
+        let spec = IntegrationShard::ConsistencyFault.spec();
+        assert_eq!(
+            spec.local_feature_scopes,
+            &[
+                LocalFeatureScope::Testkit,
+                LocalFeatureScope::RedisAdapter,
+                LocalFeatureScope::JourneysFaultMatrix,
+            ]
+        );
+        let matches = spec
             .units
             .iter()
             .filter(|unit| {

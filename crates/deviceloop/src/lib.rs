@@ -10,14 +10,39 @@
 //! 分层：服务层（依赖基础 + 引擎 + `diport`；不依赖域 / adapters）。
 
 pub mod command;
+pub mod condition;
+pub mod generation;
+pub mod policy;
 
 use std::net::IpAddr;
 use std::time::{Duration, SystemTime};
 
 pub use command::{
-    DeviceAck, DeviceAckId, DeviceCommandDecision, DeviceCommandError, DeviceCommandId,
-    DeviceCommandScope, DeviceCommandSnapshot, DeviceCommandState, DeviceConvergenceResult,
-    DeviceDispatchIntent, DevicePresence, DeviceReconcileTransition,
+    CommandProgressRestore, CommandProgressSnapshot, CommandRestoreCommon, CommandSnapshotCommon,
+    CommandTransitionOutcome, CommandVersion, DeviceCommandError, DeviceCommandId,
+    DeviceCommandRestore, DeviceCommandScope, DeviceCommandSnapshot, DeviceCommandSnapshotView,
+    DeviceCommandState, DeviceCommandStatus, DeviceCommandTransition, DeviceCommandTransitionError,
+};
+pub use condition::{
+    ConditionRestoreError, ConditionStatus, DegradedCondition, DegradedConditionRestore,
+    DegradedConditionSnapshot, DegradedReason, DeletingCondition, DeletingConditionRestore,
+    DeletingConditionSnapshot, DeletingReason, DeviceCondition, DeviceConditionKind,
+    DeviceConditionRestore, DeviceConditionSnapshot, NotReadyStatus, PendingDeviceCondition,
+    PendingDeviceConditionRestore, PendingDeviceConditionSnapshot, PendingDeviceReason,
+    QuarantinedCondition, QuarantinedConditionRestore, QuarantinedConditionSnapshot,
+    QuarantinedReason, ReadyCondition, ReadyConditionRestore, ReadyConditionSnapshot, ReadyReason,
+    ReconcilingCondition, ReconcilingConditionRestore, ReconcilingConditionSnapshot,
+    ReconcilingReason,
+};
+pub use generation::{
+    CurrentFence, CurrentFenceReportRestore, DesiredAdvanceError, DesiredGeneration,
+    FenceCoordinate, FenceEpoch, GenerationRestore, GenerationRestoreError, GenerationSnapshot,
+    GenerationTracker, InvalidGenerationCoordinate, MatchingReportedState, NewerGeneration,
+    ObservedGeneration, ObservedHighWaterRestore, ReportOutcome,
+};
+pub use policy::{
+    CertificatePolicyDurations, CertificatePolicyError, CertificateRenewBeforeSeconds,
+    CertificateValiditySeconds,
 };
 
 // 证书生命周期 API 以 `diport::CertScope`（tenant + device）为第一等输入——租户边界 correct-by-construction

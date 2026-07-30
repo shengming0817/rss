@@ -1,112 +1,73 @@
-//! Device command L4 state machine.
+//! Provider-neutral device-command state machine.
 //!
-//! The model stays provider-agnostic: it returns dispatch intent with a stable key, and composition
-//! roots decide how to bridge that intent into contract-backed command transport.
-//! ref: kube-rs kube-runtime/src/controller/mod.rs@main
-//! ref: mdeloof/statig statig/src/lib.rs@main
+//! The state machine consumes authority evidence minted by [`crate::generation`]. Transport,
+//! persistence, retries, and metrics stay outside this domain model.
+//! ref: kube-rs@b60b81c88d37ab1f1f0d1ff7d42ab0ca268b4221
+//! ref: statig@3780eecdbcf4326051c38676d592c6c2b4a3bab5
 
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 use ids::DeviceId;
 use vocab::TenantId;
 
-/// Device command state-machine error.
+use crate::generation::{CurrentFence, FenceCoordinate, MatchingReportedState, NewerGeneration};
+
+const MAX_COMMAND_ID_BYTES: usize = 256;
+
+/// Device-command validation or transition error.
 #[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum DeviceCommandError {
-    /// Opaque command/ack id is empty, blank, or contains control characters.
+    /// The command id is blank, too long, or contains a control character.
     #[error("device command id is not canonical")]
     InvalidId,
-    /// Transition was requested from a state that does not allow it.
-    #[error("device command state does not allow the transition")]
-    InvalidState,
-    /// Transition input belongs to another command.
-    #[error("device command id does not match")]
-    CommandMismatch,
-    /// Transition input belongs to another tenant/device scope.
-    #[error("device command scope does not match")]
-    ScopeMismatch,
-    /// Ack timeout must be non-zero.
-    #[error("device command ack timeout must be non-zero")]
-    InvalidTimeout,
-    /// Deadline overflowed `SystemTime`.
-    #[error("device command deadline overflowed")]
-    DeadlineOverflow,
-    /// Command timestamps are not monotonic.
+    /// A timestamp violates the state's monotonic ordering.
     #[error("device command timestamps are not monotonic")]
     InvalidTimestampOrder,
+    /// The deadline is not later than the queue time.
+    #[error("device command deadline must be later than queue time")]
+    InvalidDeadline,
+    /// Timeout was requested before the command deadline.
+    #[error("device command deadline has not elapsed")]
+    DeadlineNotElapsed,
+    /// Authority evidence belongs to another generation or fence.
+    #[error("device command authority does not match")]
+    AuthorityMismatch,
+    /// The persisted command version is outside the positive database range.
+    #[error("device command version is outside 1..=i64::MAX")]
+    InvalidVersion,
+    /// The persisted state's fields do not satisfy that state's invariants.
+    #[error("device command snapshot is invalid")]
+    InvalidSnapshot,
+    /// The command version cannot advance further.
+    #[error("device command version overflowed")]
+    VersionOverflow,
 }
 
-/// Stable device command id.
+/// Bounded, provider-neutral command identifier.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DeviceCommandId(String);
 
 impl DeviceCommandId {
-    /// Parse a stable command id through the single public funnel.
+    /// Validate an opaque command identifier.
     pub fn parse(raw: &str) -> Result<Self, DeviceCommandError> {
-        parse_opaque_id(raw).map(Self)
-    }
-
-    /// Borrow the canonical command id.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-/// Stable device ack id.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct DeviceAckId(String);
-
-impl DeviceAckId {
-    /// Parse a stable ack id through the single public funnel.
-    pub fn parse(raw: &str) -> Result<Self, DeviceCommandError> {
-        parse_opaque_id(raw).map(Self)
-    }
-
-    /// Borrow the canonical ack id.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-fn parse_opaque_id(raw: &str) -> Result<String, DeviceCommandError> {
-    if raw.is_empty() || raw.trim().is_empty() || raw.chars().any(char::is_control) {
-        return Err(DeviceCommandError::InvalidId);
-    }
-    Ok(raw.to_string())
-}
-
-/// Device connectivity observed by the L4 loop.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum DevicePresence {
-    /// Device is currently reachable.
-    Online,
-    /// Device is currently unreachable; command dispatch must wait.
-    Offline,
-}
-
-/// Terminal convergence result label.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum DeviceConvergenceResult {
-    /// Command was acknowledged by the device.
-    Acked,
-    /// Command exceeded its ack deadline.
-    TimedOut,
-}
-
-impl DeviceConvergenceResult {
-    /// Stable low-cardinality label.
-    pub fn as_label(self) -> &'static str {
-        match self {
-            Self::Acked => "acked",
-            Self::TimedOut => "timed_out",
+        if raw.is_empty()
+            || raw.trim().is_empty()
+            || raw.len() > MAX_COMMAND_ID_BYTES
+            || raw.chars().any(char::is_control)
+        {
+            return Err(DeviceCommandError::InvalidId);
         }
+        Ok(Self(raw.to_owned()))
+    }
+
+    /// Borrow the validated identifier.
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
 }
 
-/// Tenant/device scope for a command lifecycle.
+/// Tenant/device scope for one command lifecycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct DeviceCommandScope {
     tenant: TenantId,
@@ -114,998 +75,1853 @@ pub struct DeviceCommandScope {
 }
 
 impl DeviceCommandScope {
-    /// Build a command scope from already-validated tenant and device ids.
+    /// Build a scope from validated identifiers.
     pub fn new(tenant: TenantId, device: DeviceId) -> Self {
         Self { tenant, device }
     }
 
-    /// Tenant that owns the command.
+    /// Owning tenant.
     pub fn tenant(&self) -> TenantId {
         self.tenant
     }
 
-    /// Device that owns the command.
+    /// Target device.
     pub fn device(&self) -> DeviceId {
         self.device
     }
 }
 
-/// Provider-agnostic command dispatch intent.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DeviceDispatchIntent {
-    scope: DeviceCommandScope,
-    command_id: DeviceCommandId,
-    stable_dispatch_key: String,
-}
+/// Positive optimistic version of a command snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct CommandVersion(i64);
 
-impl DeviceDispatchIntent {
-    fn new(scope: DeviceCommandScope, command_id: DeviceCommandId) -> Self {
-        let tenant = scope.tenant().to_string();
-        let device = scope.device().as_uuid().hyphenated().to_string();
-        let command = command_id.as_str();
-        let stable_dispatch_key = format!(
-            "devicecmd:v1:t{}:{tenant}:d{}:{device}:c{}:{command}",
-            tenant.len(),
-            device.len(),
-            command.len()
-        );
-        Self {
-            scope,
-            command_id,
-            stable_dispatch_key,
+impl CommandVersion {
+    /// First persisted version.
+    pub const FIRST: Self = Self(1);
+
+    /// Restore a checked positive version.
+    pub fn restore(raw: i64) -> Result<Self, DeviceCommandError> {
+        if raw < 1 {
+            return Err(DeviceCommandError::InvalidVersion);
         }
+        Ok(Self(raw))
     }
 
-    /// Target tenant/device scope.
-    pub fn scope(&self) -> DeviceCommandScope {
-        self.scope
+    /// Database representation.
+    pub fn get(self) -> i64 {
+        self.0
     }
 
-    /// Target device id.
-    pub fn device_id(&self) -> DeviceId {
-        self.scope.device()
-    }
-
-    /// Target command id.
-    pub fn command_id(&self) -> &DeviceCommandId {
-        &self.command_id
-    }
-
-    /// Stable idempotency key for lower command outbox layers.
-    pub fn stable_dispatch_key(&self) -> &str {
-        &self.stable_dispatch_key
+    fn next(self) -> Result<Self, DeviceCommandError> {
+        self.0
+            .checked_add(1)
+            .map(Self)
+            .ok_or(DeviceCommandError::VersionOverflow)
     }
 }
 
-/// Device ack observed by the L4 loop.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DeviceAck {
-    scope: DeviceCommandScope,
-    command_id: DeviceCommandId,
-    ack_id: DeviceAckId,
-    observed_at: SystemTime,
+/// Closed command-state vocabulary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DeviceCommandStatus {
+    /// Accepted for dispatch.
+    Queued,
+    /// Published to a transport.
+    Published,
+    /// Receipt acknowledged by the device.
+    Received,
+    /// Matching reported state was observed.
+    Applied,
+    /// The device rejected the command.
+    Rejected,
+    /// The deadline elapsed.
+    TimedOut,
+    /// A newer desired generation replaced the command.
+    Superseded,
+    /// The command was cancelled by its owner.
+    Cancelled,
 }
 
-impl DeviceAck {
-    /// Build an ack from already-validated scope and ids.
-    pub fn new(
-        scope: DeviceCommandScope,
-        command_id: DeviceCommandId,
-        ack_id: DeviceAckId,
-        observed_at: SystemTime,
-    ) -> Self {
-        Self {
-            scope,
-            command_id,
-            ack_id,
-            observed_at,
-        }
-    }
+impl DeviceCommandStatus {
+    /// Exhaustive state set.
+    pub const ALL: [Self; 8] = [
+        Self::Queued,
+        Self::Published,
+        Self::Received,
+        Self::Applied,
+        Self::Rejected,
+        Self::TimedOut,
+        Self::Superseded,
+        Self::Cancelled,
+    ];
 
-    /// Tenant/device scope this ack belongs to.
-    pub fn scope(&self) -> DeviceCommandScope {
-        self.scope
-    }
-
-    /// Command id this ack belongs to.
-    pub fn command_id(&self) -> &DeviceCommandId {
-        &self.command_id
-    }
-
-    /// Ack id.
-    pub fn ack_id(&self) -> &DeviceAckId {
-        &self.ack_id
-    }
-
-    /// Observation time supplied by the caller's injected clock boundary.
-    pub fn observed_at(&self) -> SystemTime {
-        self.observed_at
-    }
-}
-
-/// Device command lifecycle.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DeviceCommandState {
-    inner: DeviceCommandStateKind,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum DeviceCommandStateKind {
-    Pending {
-        scope: DeviceCommandScope,
-        command_id: DeviceCommandId,
-        queued_at: SystemTime,
-    },
-    Sent {
-        scope: DeviceCommandScope,
-        command_id: DeviceCommandId,
-        dispatch_key: String,
-        queued_at: SystemTime,
-        sent_at: SystemTime,
-        ack_deadline: SystemTime,
-    },
-    Acked {
-        scope: DeviceCommandScope,
-        command_id: DeviceCommandId,
-        ack_id: DeviceAckId,
-        queued_at: SystemTime,
-        sent_at: SystemTime,
-        acked_at: SystemTime,
-        convergence_lag: Duration,
-    },
-    TimedOut {
-        scope: DeviceCommandScope,
-        command_id: DeviceCommandId,
-        queued_at: SystemTime,
-        sent_at: SystemTime,
-        timed_out_at: SystemTime,
-        convergence_lag: Duration,
-    },
-}
-
-/// Read-only command state view for callers that need to branch by lifecycle phase.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum DeviceCommandSnapshot<'a> {
-    /// Command exists but has not been dispatched to the device.
-    Pending {
-        scope: DeviceCommandScope,
-        command_id: &'a DeviceCommandId,
-        queued_at: SystemTime,
-    },
-    /// Command was dispatched and is awaiting an ack.
-    Sent {
-        scope: DeviceCommandScope,
-        command_id: &'a DeviceCommandId,
-        dispatch_key: &'a str,
-        queued_at: SystemTime,
-        sent_at: SystemTime,
-        ack_deadline: SystemTime,
-    },
-    /// Command reached terminal acked state.
-    Acked {
-        scope: DeviceCommandScope,
-        command_id: &'a DeviceCommandId,
-        ack_id: &'a DeviceAckId,
-        queued_at: SystemTime,
-        sent_at: SystemTime,
-        acked_at: SystemTime,
-        convergence_lag: Duration,
-    },
-    /// Command reached terminal timed-out state.
-    TimedOut {
-        scope: DeviceCommandScope,
-        command_id: &'a DeviceCommandId,
-        queued_at: SystemTime,
-        sent_at: SystemTime,
-        timed_out_at: SystemTime,
-        convergence_lag: Duration,
-    },
-}
-
-impl DeviceCommandSnapshot<'_> {
-    /// Terminal convergence lag when this snapshot represents a terminal state.
-    pub fn convergence_lag(self) -> Option<Duration> {
+    /// Stable low-cardinality label.
+    pub const fn as_label(self) -> &'static str {
         match self {
-            Self::Acked {
-                convergence_lag, ..
-            }
-            | Self::TimedOut {
-                convergence_lag, ..
-            } => Some(convergence_lag),
-            Self::Pending { .. } | Self::Sent { .. } => None,
+            Self::Queued => "queued",
+            Self::Published => "published",
+            Self::Received => "received",
+            Self::Applied => "applied",
+            Self::Rejected => "rejected",
+            Self::TimedOut => "timed_out",
+            Self::Superseded => "superseded",
+            Self::Cancelled => "cancelled",
         }
+    }
+
+    /// Whether this state absorbs every later event.
+    pub const fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Applied | Self::Rejected | Self::TimedOut | Self::Superseded | Self::Cancelled
+        )
     }
 }
 
-impl DeviceCommandState {
-    /// Construct a pending command from a scope, validated id, and queue timestamp.
-    pub fn pending(
-        scope: DeviceCommandScope,
-        command_id: DeviceCommandId,
-        queued_at: SystemTime,
-    ) -> Self {
-        Self {
-            inner: DeviceCommandStateKind::Pending {
-                scope,
-                command_id,
-                queued_at,
-            },
-        }
-    }
-
-    /// Current tenant/device scope.
-    pub fn scope(&self) -> DeviceCommandScope {
-        match &self.inner {
-            DeviceCommandStateKind::Pending { scope, .. }
-            | DeviceCommandStateKind::Sent { scope, .. }
-            | DeviceCommandStateKind::Acked { scope, .. }
-            | DeviceCommandStateKind::TimedOut { scope, .. } => *scope,
-        }
-    }
-
-    /// Current command id.
-    pub fn command_id(&self) -> &DeviceCommandId {
-        match &self.inner {
-            DeviceCommandStateKind::Pending { command_id, .. }
-            | DeviceCommandStateKind::Sent { command_id, .. }
-            | DeviceCommandStateKind::Acked { command_id, .. }
-            | DeviceCommandStateKind::TimedOut { command_id, .. } => command_id,
-        }
-    }
-
-    /// Read-only snapshot of the lifecycle state.
-    pub fn snapshot(&self) -> DeviceCommandSnapshot<'_> {
-        match &self.inner {
-            DeviceCommandStateKind::Pending {
-                scope,
-                command_id,
-                queued_at,
-            } => DeviceCommandSnapshot::Pending {
-                scope: *scope,
-                command_id,
-                queued_at: *queued_at,
-            },
-            DeviceCommandStateKind::Sent {
-                scope,
-                command_id,
-                dispatch_key,
-                queued_at,
-                sent_at,
-                ack_deadline,
-            } => DeviceCommandSnapshot::Sent {
-                scope: *scope,
-                command_id,
-                dispatch_key,
-                queued_at: *queued_at,
-                sent_at: *sent_at,
-                ack_deadline: *ack_deadline,
-            },
-            DeviceCommandStateKind::Acked {
-                scope,
-                command_id,
-                ack_id,
-                queued_at,
-                sent_at,
-                acked_at,
-                convergence_lag,
-            } => DeviceCommandSnapshot::Acked {
-                scope: *scope,
-                command_id,
-                ack_id,
-                queued_at: *queued_at,
-                sent_at: *sent_at,
-                acked_at: *acked_at,
-                convergence_lag: *convergence_lag,
-            },
-            DeviceCommandStateKind::TimedOut {
-                scope,
-                command_id,
-                queued_at,
-                sent_at,
-                timed_out_at,
-                convergence_lag,
-            } => DeviceCommandSnapshot::TimedOut {
-                scope: *scope,
-                command_id,
-                queued_at: *queued_at,
-                sent_at: *sent_at,
-                timed_out_at: *timed_out_at,
-                convergence_lag: *convergence_lag,
-            },
-        }
-    }
-
-    /// Terminal convergence lag when available.
-    pub fn convergence_lag(&self) -> Option<Duration> {
-        match &self.inner {
-            DeviceCommandStateKind::Acked {
-                convergence_lag, ..
-            }
-            | DeviceCommandStateKind::TimedOut {
-                convergence_lag, ..
-            } => Some(*convergence_lag),
-            DeviceCommandStateKind::Pending { .. } | DeviceCommandStateKind::Sent { .. } => None,
-        }
-    }
-
-    /// Reconcile the current state against device presence and current time.
-    pub fn reconcile(
-        &self,
-        presence: DevicePresence,
-        now: SystemTime,
-    ) -> DeviceReconcileTransition {
-        match &self.inner {
-            DeviceCommandStateKind::Acked { .. } | DeviceCommandStateKind::TimedOut { .. } => {
-                DeviceReconcileTransition::new(self.clone(), DeviceCommandDecision::Noop)
-            }
-            DeviceCommandStateKind::Pending { .. } if presence == DevicePresence::Offline => {
-                DeviceReconcileTransition::new(self.clone(), DeviceCommandDecision::AwaitOnline)
-            }
-            DeviceCommandStateKind::Pending {
-                scope, command_id, ..
-            } => {
-                let intent = DeviceDispatchIntent::new(*scope, command_id.clone());
-                DeviceReconcileTransition::new(
-                    self.clone(),
-                    DeviceCommandDecision::Dispatch(intent),
-                )
-            }
-            DeviceCommandStateKind::Sent {
-                scope,
-                command_id,
-                queued_at,
-                sent_at,
-                ack_deadline,
-                ..
-            } if now >= *ack_deadline => match terminal_lag(now, *queued_at, *sent_at) {
-                Ok(lag) => {
-                    let state = timed_out_state(*scope, command_id, *queued_at, *sent_at, now, lag);
-                    DeviceReconcileTransition::new(state, DeviceCommandDecision::TimedOut { lag })
-                }
-                Err(DeviceCommandError::InvalidTimestampOrder) => DeviceReconcileTransition::new(
-                    self.clone(),
-                    DeviceCommandDecision::InvalidTimeOrder,
-                ),
-                Err(error) => unreachable!("terminal lag cannot fail with {error:?}"),
-            },
-            DeviceCommandStateKind::Sent { .. } if presence == DevicePresence::Offline => {
-                DeviceReconcileTransition::new(self.clone(), DeviceCommandDecision::AwaitOnline)
-            }
-            DeviceCommandStateKind::Sent { .. } => {
-                DeviceReconcileTransition::new(self.clone(), DeviceCommandDecision::AwaitAck)
-            }
-        }
-    }
-
-    /// Mark a pending command as dispatched with a computed ack deadline.
-    pub fn mark_dispatched(
-        &self,
-        intent: &DeviceDispatchIntent,
-        sent_at: SystemTime,
-        ack_timeout: Duration,
-    ) -> Result<Self, DeviceCommandError> {
-        if ack_timeout.is_zero() {
-            return Err(DeviceCommandError::InvalidTimeout);
-        }
-        let DeviceCommandStateKind::Pending {
-            scope,
-            command_id,
-            queued_at,
-        } = &self.inner
-        else {
-            return Err(DeviceCommandError::InvalidState);
-        };
-        ensure_not_before(sent_at, *queued_at)?;
-        if *scope != intent.scope() {
-            return Err(DeviceCommandError::ScopeMismatch);
-        }
-        if command_id != intent.command_id() {
-            return Err(DeviceCommandError::CommandMismatch);
-        }
-        let ack_deadline = sent_at
-            .checked_add(ack_timeout)
-            .ok_or(DeviceCommandError::DeadlineOverflow)?;
-        Ok(Self {
-            inner: DeviceCommandStateKind::Sent {
-                scope: *scope,
-                command_id: command_id.clone(),
-                dispatch_key: intent.stable_dispatch_key().to_string(),
-                queued_at: *queued_at,
-                sent_at,
-                ack_deadline,
-            },
-        })
-    }
-
-    /// Apply an ack event.
-    pub fn observe_ack(
-        &self,
-        ack: DeviceAck,
-    ) -> Result<DeviceReconcileTransition, DeviceCommandError> {
-        if self.scope() != ack.scope() {
-            return Err(DeviceCommandError::ScopeMismatch);
-        }
-        if self.command_id() != ack.command_id() {
-            return Err(DeviceCommandError::CommandMismatch);
-        }
-        match &self.inner {
-            DeviceCommandStateKind::Sent {
-                scope,
-                command_id,
-                queued_at,
-                sent_at,
-                ack_deadline,
-                ..
-            } if ack.observed_at() >= *ack_deadline => {
-                let lag = terminal_lag(ack.observed_at(), *queued_at, *sent_at)?;
-                let state = timed_out_state(
-                    *scope,
-                    command_id,
-                    *queued_at,
-                    *sent_at,
-                    ack.observed_at(),
-                    lag,
-                );
-                Ok(DeviceReconcileTransition::new(
-                    state,
-                    DeviceCommandDecision::TimedOut { lag },
-                ))
-            }
-            DeviceCommandStateKind::Sent {
-                scope,
-                command_id,
-                queued_at,
-                sent_at,
-                ..
-            } => {
-                let lag = terminal_lag(ack.observed_at(), *queued_at, *sent_at)?;
-                let state = Self {
-                    inner: DeviceCommandStateKind::Acked {
-                        scope: *scope,
-                        command_id: command_id.clone(),
-                        queued_at: *queued_at,
-                        sent_at: *sent_at,
-                        ack_id: ack.ack_id().clone(),
-                        acked_at: ack.observed_at(),
-                        convergence_lag: lag,
-                    },
-                };
-                Ok(DeviceReconcileTransition::new(
-                    state,
-                    DeviceCommandDecision::Acked { lag },
-                ))
-            }
-            DeviceCommandStateKind::Acked {
-                queued_at,
-                sent_at,
-                acked_at,
-                ..
-            } => {
-                let _ = terminal_lag(*acked_at, *queued_at, *sent_at)?;
-                ensure_not_before(ack.observed_at(), *sent_at)?;
-                Ok(DeviceReconcileTransition::new(
-                    self.clone(),
-                    DeviceCommandDecision::DuplicateAck,
-                ))
-            }
-            DeviceCommandStateKind::TimedOut {
-                queued_at,
-                sent_at,
-                timed_out_at,
-                ..
-            } => {
-                let _ = terminal_lag(*timed_out_at, *queued_at, *sent_at)?;
-                ensure_not_before(ack.observed_at(), *sent_at)?;
-                Ok(DeviceReconcileTransition::new(
-                    self.clone(),
-                    DeviceCommandDecision::LateAck,
-                ))
-            }
-            DeviceCommandStateKind::Pending { .. } => Err(DeviceCommandError::InvalidState),
-        }
-    }
+/// Classification of a transition attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandTransitionOutcome {
+    /// The state and version advanced.
+    Advanced,
+    /// The same event was already reflected by the state.
+    Duplicate,
+    /// A terminal state absorbed the event.
+    Late,
+    /// The event requires an earlier protocol step.
+    OutOfOrder,
 }
 
-/// Reconcile decision.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum DeviceCommandDecision {
-    /// Dispatch should be enqueued by the composition root.
-    Dispatch(DeviceDispatchIntent),
-    /// Command is waiting for device ack.
-    AwaitAck,
-    /// Device is offline; retry when the device is online.
-    AwaitOnline,
-    /// Ack completed the command.
-    Acked { lag: Duration },
-    /// Command timed out before an ack was observed.
-    TimedOut { lag: Duration },
-    /// Ack arrived after the command had already timed out; state is unchanged.
-    LateAck,
-    /// Ack was already applied; state is unchanged.
-    DuplicateAck,
-    /// Timestamps violated the command lifecycle ordering; state is unchanged.
-    InvalidTimeOrder,
-    /// Terminal state needs no further action.
-    Noop,
-}
-
-/// Reconcile transition result.
-#[must_use = "inspect the transition decision or consume it with finalize/into_dispatch_intent"]
+/// Result that always returns ownership of the command state.
 #[derive(Debug, PartialEq, Eq)]
-pub struct DeviceReconcileTransition {
+pub struct DeviceCommandTransition {
     state: DeviceCommandState,
-    decision: DeviceCommandDecision,
+    outcome: CommandTransitionOutcome,
 }
 
-impl DeviceReconcileTransition {
-    fn new(state: DeviceCommandState, decision: DeviceCommandDecision) -> Self {
-        Self { state, decision }
+impl DeviceCommandTransition {
+    /// Transition classification.
+    pub fn outcome(&self) -> CommandTransitionOutcome {
+        self.outcome
     }
 
-    /// Read-only view of the resulting state.
-    pub fn state(&self) -> DeviceCommandSnapshot<'_> {
-        self.state.snapshot()
-    }
-
-    /// Decision for the caller.
-    pub fn decision(&self) -> &DeviceCommandDecision {
-        &self.decision
-    }
-
-    /// Consume and return the dispatch intent if this transition decided to dispatch.
-    pub fn into_dispatch_intent(self) -> Option<DeviceDispatchIntent> {
-        match self.decision {
-            DeviceCommandDecision::Dispatch(intent) => Some(intent),
-            DeviceCommandDecision::AwaitAck
-            | DeviceCommandDecision::AwaitOnline
-            | DeviceCommandDecision::Acked { .. }
-            | DeviceCommandDecision::TimedOut { .. }
-            | DeviceCommandDecision::LateAck
-            | DeviceCommandDecision::DuplicateAck
-            | DeviceCommandDecision::InvalidTimeOrder
-            | DeviceCommandDecision::Noop => None,
-        }
-    }
-
-    /// Consume the transition, record terminal convergence lag once, and return the resulting state.
-    pub fn finalize(self) -> DeviceCommandState {
-        match self.decision {
-            DeviceCommandDecision::Acked { lag } => {
-                record_device_command_convergence_lag(DeviceConvergenceResult::Acked, lag);
-            }
-            DeviceCommandDecision::TimedOut { lag } => {
-                record_device_command_convergence_lag(DeviceConvergenceResult::TimedOut, lag);
-            }
-            DeviceCommandDecision::Dispatch(_)
-            | DeviceCommandDecision::AwaitAck
-            | DeviceCommandDecision::AwaitOnline
-            | DeviceCommandDecision::LateAck
-            | DeviceCommandDecision::DuplicateAck
-            | DeviceCommandDecision::InvalidTimeOrder
-            | DeviceCommandDecision::Noop => {}
-        }
+    /// Consume the result and recover the state.
+    pub fn into_state(self) -> DeviceCommandState {
         self.state
     }
 }
 
-/// Emit device command convergence lag. Labels are closed and low-cardinality.
-fn record_device_command_convergence_lag(result: DeviceConvergenceResult, lag: Duration) {
-    metrics::histogram!(
-        "device_command_convergence_lag_seconds",
-        "result" => result.as_label()
-    )
-    .record(lag.as_secs_f64());
+/// A rejected transition attempt that returns ownership of the unchanged state.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[error("{error}")]
+pub struct DeviceCommandTransitionError {
+    state: Box<DeviceCommandState>,
+    #[source]
+    error: DeviceCommandError,
 }
 
-fn terminal_lag(
-    terminal_at: SystemTime,
-    queued_at: SystemTime,
-    sent_at: SystemTime,
-) -> Result<Duration, DeviceCommandError> {
-    ensure_not_before(sent_at, queued_at)?;
-    ensure_not_before(terminal_at, sent_at)?;
-    duration_since_checked(terminal_at, queued_at)
+impl DeviceCommandTransitionError {
+    /// Validation error that rejected the transition.
+    pub fn error(&self) -> &DeviceCommandError {
+        &self.error
+    }
+
+    /// Recover the unchanged command state.
+    pub fn into_state(self) -> DeviceCommandState {
+        *self.state
+    }
 }
 
-fn ensure_not_before(later: SystemTime, earlier: SystemTime) -> Result<(), DeviceCommandError> {
-    duration_since_checked(later, earlier).map(|_| ())
+/// Runtime command state with no nullable cross-state payload.
+#[derive(Debug, PartialEq, Eq)]
+pub struct DeviceCommandState {
+    inner: CommandState,
 }
 
-fn duration_since_checked(
-    later: SystemTime,
-    earlier: SystemTime,
-) -> Result<Duration, DeviceCommandError> {
-    later
-        .duration_since(earlier)
-        .map_err(|_| DeviceCommandError::InvalidTimestampOrder)
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CommandState {
+    Queued(Base),
+    Published(Published),
+    Received(Received),
+    Applied(Terminal),
+    Rejected(Terminal),
+    TimedOut(Terminal),
+    Superseded(Terminal),
+    Cancelled(Terminal),
 }
 
-fn timed_out_state(
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Base {
     scope: DeviceCommandScope,
-    command_id: &DeviceCommandId,
+    command_id: DeviceCommandId,
+    coordinate: FenceCoordinate,
+    deadline: SystemTime,
+    version: CommandVersion,
     queued_at: SystemTime,
-    sent_at: SystemTime,
-    timed_out_at: SystemTime,
-    convergence_lag: Duration,
-) -> DeviceCommandState {
-    DeviceCommandState {
-        inner: DeviceCommandStateKind::TimedOut {
-            scope,
-            command_id: command_id.clone(),
-            queued_at,
-            sent_at,
-            timed_out_at,
-            convergence_lag,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Published {
+    base: Base,
+    published_at: SystemTime,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Received {
+    published: Published,
+    received_at: SystemTime,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Terminal {
+    base: Base,
+    progress: CommandProgress,
+    terminal_at: SystemTime,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CommandProgress {
+    Queued,
+    Published {
+        published_at: SystemTime,
+    },
+    Received {
+        published_at: SystemTime,
+        received_at: SystemTime,
+    },
+}
+
+impl DeviceCommandState {
+    /// Queue a command under the tracker's current generation and fence.
+    pub fn queue(
+        command_id: DeviceCommandId,
+        authority: CurrentFence,
+        queued_at: SystemTime,
+        deadline: SystemTime,
+    ) -> Result<Self, DeviceCommandError> {
+        if deadline <= queued_at {
+            return Err(DeviceCommandError::InvalidDeadline);
+        }
+        Ok(Self {
+            inner: CommandState::Queued(Base {
+                scope: authority.scope(),
+                command_id,
+                coordinate: authority.coordinate(),
+                deadline,
+                version: CommandVersion::FIRST,
+                queued_at,
+            }),
+        })
+    }
+
+    /// Current closed state.
+    pub fn status(&self) -> DeviceCommandStatus {
+        match self.inner {
+            CommandState::Queued(_) => DeviceCommandStatus::Queued,
+            CommandState::Published(_) => DeviceCommandStatus::Published,
+            CommandState::Received(_) => DeviceCommandStatus::Received,
+            CommandState::Applied(_) => DeviceCommandStatus::Applied,
+            CommandState::Rejected(_) => DeviceCommandStatus::Rejected,
+            CommandState::TimedOut(_) => DeviceCommandStatus::TimedOut,
+            CommandState::Superseded(_) => DeviceCommandStatus::Superseded,
+            CommandState::Cancelled(_) => DeviceCommandStatus::Cancelled,
+        }
+    }
+
+    /// Current optimistic version.
+    pub fn version(&self) -> CommandVersion {
+        self.base().version
+    }
+
+    /// Tenant/device scope.
+    pub fn scope(&self) -> DeviceCommandScope {
+        self.base().scope
+    }
+
+    /// Command identifier.
+    pub fn command_id(&self) -> &DeviceCommandId {
+        &self.base().command_id
+    }
+
+    /// Generation/fence coordinate bound to the command.
+    pub fn coordinate(&self) -> FenceCoordinate {
+        self.base().coordinate
+    }
+
+    /// Publish a queued command. Publication never implies device receipt or application.
+    pub fn publish(
+        self,
+        authority: CurrentFence,
+        at: SystemTime,
+    ) -> Result<DeviceCommandTransition, DeviceCommandTransitionError> {
+        self.attempt(|state| state.publish_checked(authority, at))
+    }
+
+    fn publish_checked(
+        self,
+        authority: CurrentFence,
+        at: SystemTime,
+    ) -> Result<DeviceCommandTransition, DeviceCommandError> {
+        self.require_current(&authority)?;
+        match self.inner {
+            CommandState::Queued(mut base) => {
+                require_at_or_after(at, base.queued_at)?;
+                base.version = base.version.next()?;
+                Ok(advanced(CommandState::Published(Published {
+                    base,
+                    published_at: at,
+                })))
+            }
+            CommandState::Published(state) => Ok(noop(
+                CommandState::Published(state),
+                CommandTransitionOutcome::Duplicate,
+            )),
+            terminal if is_terminal(&terminal) => {
+                Ok(noop(terminal, CommandTransitionOutcome::Late))
+            }
+            other => Ok(noop(other, CommandTransitionOutcome::OutOfOrder)),
+        }
+    }
+
+    /// Record transport/device receipt. An ACK only reaches `Received`.
+    pub fn ack_received(
+        self,
+        authority: CurrentFence,
+        at: SystemTime,
+    ) -> Result<DeviceCommandTransition, DeviceCommandTransitionError> {
+        self.attempt(|state| state.ack_received_checked(authority, at))
+    }
+
+    fn ack_received_checked(
+        self,
+        authority: CurrentFence,
+        at: SystemTime,
+    ) -> Result<DeviceCommandTransition, DeviceCommandError> {
+        self.require_current(&authority)?;
+        match self.inner {
+            CommandState::Published(mut published) => {
+                require_at_or_after(at, published.published_at)?;
+                published.base.version = published.base.version.next()?;
+                Ok(advanced(CommandState::Received(Received {
+                    published,
+                    received_at: at,
+                })))
+            }
+            CommandState::Received(state) => Ok(noop(
+                CommandState::Received(state),
+                CommandTransitionOutcome::Duplicate,
+            )),
+            CommandState::Queued(state) => Ok(noop(
+                CommandState::Queued(state),
+                CommandTransitionOutcome::OutOfOrder,
+            )),
+            terminal => Ok(noop(terminal, CommandTransitionOutcome::Late)),
+        }
+    }
+
+    /// Record rejection after publication.
+    pub fn reject(
+        self,
+        authority: CurrentFence,
+        at: SystemTime,
+    ) -> Result<DeviceCommandTransition, DeviceCommandTransitionError> {
+        self.attempt(|state| state.reject_checked(authority, at))
+    }
+
+    fn reject_checked(
+        self,
+        authority: CurrentFence,
+        at: SystemTime,
+    ) -> Result<DeviceCommandTransition, DeviceCommandError> {
+        self.require_current(&authority)?;
+        match self.inner {
+            CommandState::Published(mut published) => {
+                require_at_or_after(at, published.published_at)?;
+                published.base.version = published.base.version.next()?;
+                Ok(advanced(CommandState::Rejected(Terminal {
+                    base: published.base,
+                    progress: CommandProgress::Published {
+                        published_at: published.published_at,
+                    },
+                    terminal_at: at,
+                })))
+            }
+            CommandState::Rejected(state) => Ok(noop(
+                CommandState::Rejected(state),
+                CommandTransitionOutcome::Duplicate,
+            )),
+            CommandState::Queued(state) => Ok(noop(
+                CommandState::Queued(state),
+                CommandTransitionOutcome::OutOfOrder,
+            )),
+            other => Ok(noop(other, CommandTransitionOutcome::Late)),
+        }
+    }
+
+    /// Apply only after receipt and exact matching reported state.
+    ///
+    /// An ACK fence is deliberately not application evidence:
+    ///
+    /// ```compile_fail
+    /// use std::time::SystemTime;
+    /// use deviceloop::{CurrentFence, DeviceCommandState};
+    ///
+    /// fn ack_cannot_apply(state: DeviceCommandState, ack: CurrentFence) {
+    ///     let _ = state.apply(ack, SystemTime::UNIX_EPOCH);
+    /// }
+    /// ```
+    pub fn apply(
+        self,
+        evidence: MatchingReportedState,
+        at: SystemTime,
+    ) -> Result<DeviceCommandTransition, DeviceCommandTransitionError> {
+        self.attempt(|state| state.apply_checked(evidence, at))
+    }
+
+    fn apply_checked(
+        self,
+        evidence: MatchingReportedState,
+        at: SystemTime,
+    ) -> Result<DeviceCommandTransition, DeviceCommandError> {
+        if self.scope() != evidence.scope() || self.coordinate() != evidence.coordinate() {
+            return Err(DeviceCommandError::AuthorityMismatch);
+        }
+        match self.inner {
+            CommandState::Received(mut received) => {
+                require_at_or_after(at, received.received_at)?;
+                received.published.base.version = received.published.base.version.next()?;
+                Ok(advanced(CommandState::Applied(Terminal {
+                    base: received.published.base,
+                    progress: CommandProgress::Received {
+                        published_at: received.published.published_at,
+                        received_at: received.received_at,
+                    },
+                    terminal_at: at,
+                })))
+            }
+            CommandState::Applied(state) => Ok(noop(
+                CommandState::Applied(state),
+                CommandTransitionOutcome::Duplicate,
+            )),
+            CommandState::Queued(state) => Ok(noop(
+                CommandState::Queued(state),
+                CommandTransitionOutcome::OutOfOrder,
+            )),
+            CommandState::Published(state) => Ok(noop(
+                CommandState::Published(state),
+                CommandTransitionOutcome::OutOfOrder,
+            )),
+            other => Ok(noop(other, CommandTransitionOutcome::Late)),
+        }
+    }
+
+    /// Time out a nonterminal command after its deadline.
+    pub fn timeout(
+        self,
+        authority: CurrentFence,
+        at: SystemTime,
+    ) -> Result<DeviceCommandTransition, DeviceCommandTransitionError> {
+        self.attempt(|state| state.timeout_checked(authority, at))
+    }
+
+    fn timeout_checked(
+        self,
+        authority: CurrentFence,
+        at: SystemTime,
+    ) -> Result<DeviceCommandTransition, DeviceCommandError> {
+        self.require_current(&authority)?;
+        if self.status().is_terminal() {
+            return Ok(if self.status() == DeviceCommandStatus::TimedOut {
+                noop(self.inner, CommandTransitionOutcome::Duplicate)
+            } else {
+                noop(self.inner, CommandTransitionOutcome::Late)
+            });
+        }
+        if at < self.base().deadline {
+            return Err(DeviceCommandError::DeadlineNotElapsed);
+        }
+        let terminal = terminal_from(self.inner, at, true)?;
+        Ok(advanced(CommandState::TimedOut(terminal)))
+    }
+
+    /// Cancel a nonterminal command under its current fence.
+    pub fn cancel(
+        self,
+        authority: CurrentFence,
+        at: SystemTime,
+    ) -> Result<DeviceCommandTransition, DeviceCommandTransitionError> {
+        self.attempt(|state| state.cancel_checked(authority, at))
+    }
+
+    fn cancel_checked(
+        self,
+        authority: CurrentFence,
+        at: SystemTime,
+    ) -> Result<DeviceCommandTransition, DeviceCommandError> {
+        self.require_current(&authority)?;
+        if self.status().is_terminal() {
+            return Ok(if self.status() == DeviceCommandStatus::Cancelled {
+                noop(self.inner, CommandTransitionOutcome::Duplicate)
+            } else {
+                noop(self.inner, CommandTransitionOutcome::Late)
+            });
+        }
+        let terminal = terminal_from(self.inner, at, false)?;
+        Ok(advanced(CommandState::Cancelled(terminal)))
+    }
+
+    /// Supersede a nonterminal command only with evidence of a newer generation.
+    pub fn supersede(
+        self,
+        evidence: NewerGeneration,
+        at: SystemTime,
+    ) -> Result<DeviceCommandTransition, DeviceCommandTransitionError> {
+        self.attempt(|state| state.supersede_checked(evidence, at))
+    }
+
+    fn supersede_checked(
+        self,
+        evidence: NewerGeneration,
+        at: SystemTime,
+    ) -> Result<DeviceCommandTransition, DeviceCommandError> {
+        if self.scope() != evidence.scope()
+            || self.coordinate() != evidence.previous_coordinate()
+            || evidence.coordinate().generation() <= self.coordinate().generation()
+        {
+            return Err(DeviceCommandError::AuthorityMismatch);
+        }
+        if self.status().is_terminal() {
+            return Ok(if self.status() == DeviceCommandStatus::Superseded {
+                noop(self.inner, CommandTransitionOutcome::Duplicate)
+            } else {
+                noop(self.inner, CommandTransitionOutcome::Late)
+            });
+        }
+        let terminal = terminal_from(self.inner, at, false)?;
+        Ok(advanced(CommandState::Superseded(terminal)))
+    }
+
+    /// Produce an owned, state-specific persistence snapshot.
+    pub fn snapshot(&self) -> DeviceCommandSnapshot {
+        DeviceCommandSnapshot {
+            inner: match &self.inner {
+                CommandState::Queued(v) => CommandSnapshot::Queued(v.clone()),
+                CommandState::Published(v) => CommandSnapshot::Published(v.clone()),
+                CommandState::Received(v) => CommandSnapshot::Received(v.clone()),
+                CommandState::Applied(v) => CommandSnapshot::Applied(v.clone()),
+                CommandState::Rejected(v) => CommandSnapshot::Rejected(v.clone()),
+                CommandState::TimedOut(v) => CommandSnapshot::TimedOut(v.clone()),
+                CommandState::Superseded(v) => CommandSnapshot::Superseded(v.clone()),
+                CommandState::Cancelled(v) => CommandSnapshot::Cancelled(v.clone()),
+            },
+        }
+    }
+
+    /// Restore without replaying entry actions, reading a clock, or emitting side effects.
+    pub fn restore(input: DeviceCommandRestore) -> Result<Self, DeviceCommandError> {
+        let inner = match input.inner {
+            CommandSnapshot::Queued(v) => CommandState::Queued(v),
+            CommandSnapshot::Published(v) => CommandState::Published(v),
+            CommandSnapshot::Received(v) => CommandState::Received(v),
+            CommandSnapshot::Applied(v) => CommandState::Applied(v),
+            CommandSnapshot::Rejected(v) => CommandState::Rejected(v),
+            CommandSnapshot::TimedOut(v) => CommandState::TimedOut(v),
+            CommandSnapshot::Superseded(v) => CommandState::Superseded(v),
+            CommandSnapshot::Cancelled(v) => CommandState::Cancelled(v),
+        };
+        validate_state(&inner)?;
+        Ok(Self { inner })
+    }
+
+    fn base(&self) -> &Base {
+        base_of(&self.inner)
+    }
+
+    fn require_current(&self, authority: &CurrentFence) -> Result<(), DeviceCommandError> {
+        if self.scope() == authority.scope() && self.coordinate() == authority.coordinate() {
+            Ok(())
+        } else {
+            Err(DeviceCommandError::AuthorityMismatch)
+        }
+    }
+
+    fn attempt(
+        self,
+        operation: impl FnOnce(Self) -> Result<DeviceCommandTransition, DeviceCommandError>,
+    ) -> Result<DeviceCommandTransition, DeviceCommandTransitionError> {
+        let retained = Self {
+            inner: self.inner.clone(),
+        };
+        operation(self).map_err(|error| DeviceCommandTransitionError {
+            state: Box::new(retained),
+            error,
+        })
+    }
+}
+
+/// Opaque owned persistence snapshot whose payload is state-specific.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceCommandSnapshot {
+    inner: CommandSnapshot,
+}
+
+impl DeviceCommandSnapshot {
+    /// Borrow an exhaustive state-specific projection for persistence.
+    pub fn view(&self) -> DeviceCommandSnapshotView<'_> {
+        match &self.inner {
+            CommandSnapshot::Queued(base) => DeviceCommandSnapshotView::Queued {
+                common: CommandSnapshotCommon(base),
+            },
+            CommandSnapshot::Published(value) => DeviceCommandSnapshotView::Published {
+                common: CommandSnapshotCommon(&value.base),
+                published_at: value.published_at,
+            },
+            CommandSnapshot::Received(value) => DeviceCommandSnapshotView::Received {
+                common: CommandSnapshotCommon(&value.published.base),
+                published_at: value.published.published_at,
+                received_at: value.received_at,
+            },
+            CommandSnapshot::Applied(value) => {
+                let CommandProgress::Received {
+                    published_at,
+                    received_at,
+                } = value.progress
+                else {
+                    unreachable!("validated Applied snapshots have Received progress")
+                };
+                DeviceCommandSnapshotView::Applied {
+                    common: CommandSnapshotCommon(&value.base),
+                    published_at,
+                    received_at,
+                    applied_at: value.terminal_at,
+                }
+            }
+            CommandSnapshot::Rejected(value) => {
+                let CommandProgress::Published { published_at } = value.progress else {
+                    unreachable!("validated Rejected snapshots have Published progress")
+                };
+                DeviceCommandSnapshotView::Rejected {
+                    common: CommandSnapshotCommon(&value.base),
+                    published_at,
+                    rejected_at: value.terminal_at,
+                }
+            }
+            CommandSnapshot::TimedOut(value) => DeviceCommandSnapshotView::TimedOut {
+                common: CommandSnapshotCommon(&value.base),
+                progress: CommandProgressSnapshot::from(&value.progress),
+                timed_out_at: value.terminal_at,
+            },
+            CommandSnapshot::Superseded(value) => DeviceCommandSnapshotView::Superseded {
+                common: CommandSnapshotCommon(&value.base),
+                progress: CommandProgressSnapshot::from(&value.progress),
+                superseded_at: value.terminal_at,
+            },
+            CommandSnapshot::Cancelled(value) => DeviceCommandSnapshotView::Cancelled {
+                common: CommandSnapshotCommon(&value.base),
+                progress: CommandProgressSnapshot::from(&value.progress),
+                cancelled_at: value.terminal_at,
+            },
+        }
+    }
+}
+
+/// Common checked fields shared by every state-specific snapshot projection.
+#[derive(Debug, Clone, Copy)]
+pub struct CommandSnapshotCommon<'a>(&'a Base);
+
+impl<'a> CommandSnapshotCommon<'a> {
+    /// Tenant/device scope.
+    pub fn scope(self) -> DeviceCommandScope {
+        self.0.scope
+    }
+
+    /// Command identifier.
+    pub fn command_id(self) -> &'a DeviceCommandId {
+        &self.0.command_id
+    }
+
+    /// Generation/fence coordinate.
+    pub fn coordinate(self) -> FenceCoordinate {
+        self.0.coordinate
+    }
+
+    /// Command deadline.
+    pub fn deadline(self) -> SystemTime {
+        self.0.deadline
+    }
+
+    /// Checked optimistic version.
+    pub fn version(self) -> CommandVersion {
+        self.0.version
+    }
+
+    /// Server queue timestamp.
+    pub fn queued_at(self) -> SystemTime {
+        self.0.queued_at
+    }
+}
+
+/// Progress reached before a terminal event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandProgressSnapshot {
+    /// Terminal transition originated in `Queued`.
+    Queued,
+    /// Terminal transition originated in `Published`.
+    Published {
+        /// Server publication time.
+        published_at: SystemTime,
+    },
+    /// Terminal transition originated in `Received`.
+    Received {
+        /// Server publication time.
+        published_at: SystemTime,
+        /// Server receipt time.
+        received_at: SystemTime,
+    },
+}
+
+impl From<&CommandProgress> for CommandProgressSnapshot {
+    fn from(value: &CommandProgress) -> Self {
+        match *value {
+            CommandProgress::Queued => Self::Queued,
+            CommandProgress::Published { published_at } => Self::Published { published_at },
+            CommandProgress::Received {
+                published_at,
+                received_at,
+            } => Self::Received {
+                published_at,
+                received_at,
+            },
+        }
+    }
+}
+
+/// Exhaustive borrowed persistence projection with no nullable cross-state fields.
+#[derive(Debug, Clone, Copy)]
+pub enum DeviceCommandSnapshotView<'a> {
+    /// Queued snapshot fields.
+    Queued {
+        /// Fields shared by every state.
+        common: CommandSnapshotCommon<'a>,
+    },
+    /// Published snapshot fields.
+    Published {
+        /// Fields shared by every state.
+        common: CommandSnapshotCommon<'a>,
+        /// Server publication time.
+        published_at: SystemTime,
+    },
+    /// Received snapshot fields.
+    Received {
+        /// Fields shared by every state.
+        common: CommandSnapshotCommon<'a>,
+        /// Server publication time.
+        published_at: SystemTime,
+        /// Server receipt time.
+        received_at: SystemTime,
+    },
+    /// Applied snapshot fields.
+    Applied {
+        /// Fields shared by every state.
+        common: CommandSnapshotCommon<'a>,
+        /// Server publication time.
+        published_at: SystemTime,
+        /// Server receipt time.
+        received_at: SystemTime,
+        /// Server application-observation time.
+        applied_at: SystemTime,
+    },
+    /// Rejected snapshot fields.
+    Rejected {
+        /// Fields shared by every state.
+        common: CommandSnapshotCommon<'a>,
+        /// Server publication time.
+        published_at: SystemTime,
+        /// Server rejection time.
+        rejected_at: SystemTime,
+    },
+    /// Timed-out snapshot fields.
+    TimedOut {
+        /// Fields shared by every state.
+        common: CommandSnapshotCommon<'a>,
+        /// Progress reached before timeout.
+        progress: CommandProgressSnapshot,
+        /// Server timeout time.
+        timed_out_at: SystemTime,
+    },
+    /// Superseded snapshot fields.
+    Superseded {
+        /// Fields shared by every state.
+        common: CommandSnapshotCommon<'a>,
+        /// Progress reached before supersession.
+        progress: CommandProgressSnapshot,
+        /// Server supersession time.
+        superseded_at: SystemTime,
+    },
+    /// Cancelled snapshot fields.
+    Cancelled {
+        /// Fields shared by every state.
+        common: CommandSnapshotCommon<'a>,
+        /// Progress reached before cancellation.
+        progress: CommandProgressSnapshot,
+        /// Server cancellation time.
+        cancelled_at: SystemTime,
+    },
+}
+
+/// Checked common input accepted by state-specific restore constructors.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandRestoreCommon {
+    base: Base,
+}
+
+impl CommandRestoreCommon {
+    /// Assemble common persisted fields; cross-field validation happens in `restore`.
+    pub fn new(
+        scope: DeviceCommandScope,
+        command_id: DeviceCommandId,
+        coordinate: FenceCoordinate,
+        deadline: SystemTime,
+        version: CommandVersion,
+        queued_at: SystemTime,
+    ) -> Self {
+        Self {
+            base: Base {
+                scope,
+                command_id,
+                coordinate,
+                deadline,
+                version,
+                queued_at,
+            },
+        }
+    }
+}
+
+/// State-specific progress input for terminal restore carriers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandProgressRestore {
+    progress: CommandProgress,
+}
+
+impl CommandProgressRestore {
+    /// Restore terminal progress originating from `Queued`.
+    pub fn queued() -> Self {
+        Self {
+            progress: CommandProgress::Queued,
+        }
+    }
+
+    /// Restore terminal progress originating from `Published`.
+    pub fn published(published_at: SystemTime) -> Self {
+        Self {
+            progress: CommandProgress::Published { published_at },
+        }
+    }
+
+    /// Restore terminal progress originating from `Received`.
+    pub fn received(published_at: SystemTime, received_at: SystemTime) -> Self {
+        Self {
+            progress: CommandProgress::Received {
+                published_at,
+                received_at,
+            },
+        }
+    }
+}
+
+/// Untrusted, state-specific persistence input consumed by the restore funnel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceCommandRestore {
+    inner: CommandSnapshot,
+}
+
+impl DeviceCommandRestore {
+    /// Build raw queued-state restore input.
+    pub fn queued(common: CommandRestoreCommon) -> Self {
+        Self {
+            inner: CommandSnapshot::Queued(common.base),
+        }
+    }
+
+    /// Build raw published-state restore input.
+    pub fn published(common: CommandRestoreCommon, published_at: SystemTime) -> Self {
+        Self {
+            inner: CommandSnapshot::Published(Published {
+                base: common.base,
+                published_at,
+            }),
+        }
+    }
+
+    /// Build raw received-state restore input.
+    pub fn received(
+        common: CommandRestoreCommon,
+        published_at: SystemTime,
+        received_at: SystemTime,
+    ) -> Self {
+        Self {
+            inner: CommandSnapshot::Received(Received {
+                published: Published {
+                    base: common.base,
+                    published_at,
+                },
+                received_at,
+            }),
+        }
+    }
+
+    /// Build raw applied-state restore input.
+    pub fn applied(
+        common: CommandRestoreCommon,
+        published_at: SystemTime,
+        received_at: SystemTime,
+        applied_at: SystemTime,
+    ) -> Self {
+        Self {
+            inner: CommandSnapshot::Applied(Terminal {
+                base: common.base,
+                progress: CommandProgress::Received {
+                    published_at,
+                    received_at,
+                },
+                terminal_at: applied_at,
+            }),
+        }
+    }
+
+    /// Build raw rejected-state restore input.
+    pub fn rejected(
+        common: CommandRestoreCommon,
+        published_at: SystemTime,
+        rejected_at: SystemTime,
+    ) -> Self {
+        Self {
+            inner: CommandSnapshot::Rejected(Terminal {
+                base: common.base,
+                progress: CommandProgress::Published { published_at },
+                terminal_at: rejected_at,
+            }),
+        }
+    }
+
+    /// Build raw timed-out-state restore input.
+    pub fn timed_out(
+        common: CommandRestoreCommon,
+        progress: CommandProgressRestore,
+        timed_out_at: SystemTime,
+    ) -> Self {
+        terminal_restore(common, progress, timed_out_at, CommandSnapshot::TimedOut)
+    }
+
+    /// Build raw superseded-state restore input.
+    pub fn superseded(
+        common: CommandRestoreCommon,
+        progress: CommandProgressRestore,
+        superseded_at: SystemTime,
+    ) -> Self {
+        terminal_restore(common, progress, superseded_at, CommandSnapshot::Superseded)
+    }
+
+    /// Build raw cancelled-state restore input.
+    pub fn cancelled(
+        common: CommandRestoreCommon,
+        progress: CommandProgressRestore,
+        cancelled_at: SystemTime,
+    ) -> Self {
+        terminal_restore(common, progress, cancelled_at, CommandSnapshot::Cancelled)
+    }
+}
+
+impl From<DeviceCommandSnapshot> for DeviceCommandRestore {
+    fn from(snapshot: DeviceCommandSnapshot) -> Self {
+        Self {
+            inner: snapshot.inner,
+        }
+    }
+}
+
+fn terminal_restore(
+    common: CommandRestoreCommon,
+    progress: CommandProgressRestore,
+    terminal_at: SystemTime,
+    wrap: fn(Terminal) -> CommandSnapshot,
+) -> DeviceCommandRestore {
+    DeviceCommandRestore {
+        inner: wrap(Terminal {
+            base: common.base,
+            progress: progress.progress,
+            terminal_at,
+        }),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CommandSnapshot {
+    Queued(Base),
+    Published(Published),
+    Received(Received),
+    Applied(Terminal),
+    Rejected(Terminal),
+    TimedOut(Terminal),
+    Superseded(Terminal),
+    Cancelled(Terminal),
+}
+
+fn advanced(inner: CommandState) -> DeviceCommandTransition {
+    DeviceCommandTransition {
+        state: DeviceCommandState { inner },
+        outcome: CommandTransitionOutcome::Advanced,
+    }
+}
+
+fn noop(inner: CommandState, outcome: CommandTransitionOutcome) -> DeviceCommandTransition {
+    DeviceCommandTransition {
+        state: DeviceCommandState { inner },
+        outcome,
+    }
+}
+
+fn base_of(state: &CommandState) -> &Base {
+    match state {
+        CommandState::Queued(v) => v,
+        CommandState::Published(v) => &v.base,
+        CommandState::Received(v) => &v.published.base,
+        CommandState::Applied(v)
+        | CommandState::Rejected(v)
+        | CommandState::TimedOut(v)
+        | CommandState::Superseded(v)
+        | CommandState::Cancelled(v) => &v.base,
+    }
+}
+
+fn is_terminal(state: &CommandState) -> bool {
+    matches!(
+        state,
+        CommandState::Applied(_)
+            | CommandState::Rejected(_)
+            | CommandState::TimedOut(_)
+            | CommandState::Superseded(_)
+            | CommandState::Cancelled(_)
+    )
+}
+
+fn terminal_from(
+    state: CommandState,
+    at: SystemTime,
+    deadline_checked: bool,
+) -> Result<Terminal, DeviceCommandError> {
+    let (mut base, progress, lower_bound) = match state {
+        CommandState::Queued(base) => {
+            let queued_at = base.queued_at;
+            (base, CommandProgress::Queued, queued_at)
+        }
+        CommandState::Published(published) => {
+            let lower = published.published_at;
+            (
+                published.base,
+                CommandProgress::Published {
+                    published_at: lower,
+                },
+                lower,
+            )
+        }
+        CommandState::Received(received) => {
+            let lower = received.received_at;
+            (
+                received.published.base,
+                CommandProgress::Received {
+                    published_at: received.published.published_at,
+                    received_at: lower,
+                },
+                lower,
+            )
+        }
+        _ => return Err(DeviceCommandError::InvalidSnapshot),
+    };
+    require_at_or_after(at, lower_bound)?;
+    if deadline_checked && at < base.deadline {
+        return Err(DeviceCommandError::DeadlineNotElapsed);
+    }
+    base.version = base.version.next()?;
+    Ok(Terminal {
+        base,
+        progress,
+        terminal_at: at,
+    })
+}
+
+fn validate_state(state: &CommandState) -> Result<(), DeviceCommandError> {
+    let base = base_of(state);
+    CommandVersion::restore(base.version.get())?;
+    let expected_version = match state {
+        CommandState::Queued(_) => 1,
+        CommandState::Published(_) => 2,
+        CommandState::Received(_) | CommandState::Rejected(_) => 3,
+        CommandState::Applied(_) => 4,
+        CommandState::TimedOut(value)
+        | CommandState::Superseded(value)
+        | CommandState::Cancelled(value) => match value.progress {
+            CommandProgress::Queued => 2,
+            CommandProgress::Published { .. } => 3,
+            CommandProgress::Received { .. } => 4,
         },
+    };
+    if base.version.get() != expected_version {
+        return Err(DeviceCommandError::InvalidSnapshot);
+    }
+    if base.deadline <= base.queued_at {
+        return Err(DeviceCommandError::InvalidSnapshot);
+    }
+    match state {
+        CommandState::Queued(_) => Ok(()),
+        CommandState::Published(v) => require_at_or_after(v.published_at, v.base.queued_at),
+        CommandState::Received(v) => {
+            require_at_or_after(v.published.published_at, v.published.base.queued_at)?;
+            require_at_or_after(v.received_at, v.published.published_at)
+        }
+        CommandState::Applied(v) => {
+            validate_terminal(v, Some(DeviceCommandStatus::Received), false)
+        }
+        CommandState::Rejected(v) => {
+            validate_terminal(v, Some(DeviceCommandStatus::Published), false)
+        }
+        CommandState::TimedOut(v) => validate_terminal(v, None, true),
+        CommandState::Superseded(v) | CommandState::Cancelled(v) => {
+            validate_terminal(v, None, false)
+        }
+    }
+    .map_err(|_| DeviceCommandError::InvalidSnapshot)
+}
+
+fn validate_terminal(
+    value: &Terminal,
+    required_progress: Option<DeviceCommandStatus>,
+    deadline_required: bool,
+) -> Result<(), DeviceCommandError> {
+    let (actual_progress, lower) = match value.progress {
+        CommandProgress::Queued => (DeviceCommandStatus::Queued, value.base.queued_at),
+        CommandProgress::Published { published_at } => {
+            require_at_or_after(published_at, value.base.queued_at)?;
+            (DeviceCommandStatus::Published, published_at)
+        }
+        CommandProgress::Received {
+            published_at,
+            received_at,
+        } => {
+            require_at_or_after(published_at, value.base.queued_at)?;
+            require_at_or_after(received_at, published_at)?;
+            (DeviceCommandStatus::Received, received_at)
+        }
+    };
+    if required_progress.is_some_and(|required| required != actual_progress) {
+        return Err(DeviceCommandError::InvalidSnapshot);
+    }
+    require_at_or_after(value.terminal_at, lower)?;
+    if deadline_required && value.terminal_at < value.base.deadline {
+        return Err(DeviceCommandError::InvalidSnapshot);
+    }
+    Ok(())
+}
+
+fn require_at_or_after(at: SystemTime, lower: SystemTime) -> Result<(), DeviceCommandError> {
+    if at < lower {
+        Err(DeviceCommandError::InvalidTimestampOrder)
+    } else {
+        Ok(())
     }
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use std::time::{Duration, SystemTime};
 
-    use ids::DeviceId;
-    use metrics_exporter_prometheus::PrometheusBuilder;
-    use vocab::TenantId;
+    use super::*;
+    use crate::generation::{DesiredGeneration, FenceEpoch, GenerationTracker};
 
-    use super::{
-        DeviceAck, DeviceAckId, DeviceCommandDecision, DeviceCommandError, DeviceCommandId,
-        DeviceCommandScope, DeviceCommandSnapshot, DeviceCommandState, DeviceDispatchIntent,
-        DevicePresence, DeviceReconcileTransition,
-    };
-
-    const TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
-    const OTHER_TENANT: &str = "9b6f0c8d-0de4-4d1b-bfa9-297f77fb9a90";
-    const DEVICE: &str = "550e8400-e29b-41d4-a716-446655440000";
-    type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
-
-    #[allow(clippy::expect_used)]
-    fn tenant_id(raw: &str) -> TenantId {
-        TenantId::parse(raw).expect("canonical tenant id")
-    }
-
-    #[allow(clippy::expect_used)]
-    fn device_id() -> DeviceId {
-        DeviceId::parse(DEVICE).expect("canonical device id")
+    fn time(second: u64) -> SystemTime {
+        SystemTime::UNIX_EPOCH + Duration::from_secs(second)
     }
 
     fn scope() -> DeviceCommandScope {
-        DeviceCommandScope::new(tenant_id(TENANT), device_id())
+        DeviceCommandScope::new(
+            TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").expect("tenant"),
+            DeviceId::parse("550e8400-e29b-41d4-a716-446655440000").expect("device"),
+        )
     }
 
     fn other_scope() -> DeviceCommandScope {
-        DeviceCommandScope::new(tenant_id(OTHER_TENANT), device_id())
+        DeviceCommandScope::new(
+            TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").expect("tenant"),
+            DeviceId::parse("7e4b30e8-58f3-4b7f-a1ef-d5cc60dd18d4").expect("device"),
+        )
     }
 
-    #[allow(clippy::expect_used)]
-    fn command_id(raw: &str) -> DeviceCommandId {
-        DeviceCommandId::parse(raw).expect("valid command id")
+    fn tracker() -> GenerationTracker<&'static str> {
+        GenerationTracker::new(
+            scope(),
+            DesiredGeneration::try_new(1).expect("generation"),
+            "on",
+            FenceEpoch::try_new(1).expect("epoch"),
+        )
     }
 
-    #[allow(clippy::expect_used)]
-    fn ack_id(raw: &str) -> DeviceAckId {
-        DeviceAckId::parse(raw).expect("valid ack id")
+    fn queued(tracker: &GenerationTracker<&'static str>) -> DeviceCommandState {
+        DeviceCommandState::queue(
+            DeviceCommandId::parse("rotate-cert").expect("id"),
+            tracker.current_fence(),
+            time(10),
+            time(20),
+        )
+        .expect("queue")
     }
 
-    fn t(secs: u64) -> SystemTime {
-        SystemTime::UNIX_EPOCH + Duration::from_secs(secs)
+    fn published(tracker: &GenerationTracker<&'static str>) -> DeviceCommandState {
+        queued(tracker)
+            .publish(tracker.current_fence(), time(11))
+            .expect("publish")
+            .into_state()
     }
 
-    fn require_dispatch(
-        transition: &DeviceReconcileTransition,
-    ) -> TestResult<DeviceDispatchIntent> {
-        match transition.decision() {
-            DeviceCommandDecision::Dispatch(intent) => Ok(intent.clone()),
-            other => Err(std::io::Error::other(format!("expected dispatch, got {other:?}")).into()),
+    fn received(tracker: &GenerationTracker<&'static str>) -> DeviceCommandState {
+        published(tracker)
+            .ack_received(tracker.current_fence(), time(12))
+            .expect("receive")
+            .into_state()
+    }
+
+    fn assert_advanced(transition: DeviceCommandTransition, expected: DeviceCommandStatus) {
+        assert_eq!(transition.outcome(), CommandTransitionOutcome::Advanced);
+        assert_eq!(transition.into_state().status(), expected);
+    }
+
+    #[derive(Clone, Copy)]
+    enum TestEvent {
+        Publish,
+        Ack,
+        Reject,
+        Apply,
+        Timeout,
+        Supersede,
+        Cancel,
+    }
+
+    const EVENTS: [TestEvent; 7] = [
+        TestEvent::Publish,
+        TestEvent::Ack,
+        TestEvent::Reject,
+        TestEvent::Apply,
+        TestEvent::Timeout,
+        TestEvent::Supersede,
+        TestEvent::Cancel,
+    ];
+
+    fn snapshot_common(snapshot: &DeviceCommandSnapshot) -> CommandSnapshotCommon<'_> {
+        match snapshot.view() {
+            DeviceCommandSnapshotView::Queued { common }
+            | DeviceCommandSnapshotView::Published { common, .. }
+            | DeviceCommandSnapshotView::Received { common, .. }
+            | DeviceCommandSnapshotView::Applied { common, .. }
+            | DeviceCommandSnapshotView::Rejected { common, .. }
+            | DeviceCommandSnapshotView::TimedOut { common, .. }
+            | DeviceCommandSnapshotView::Superseded { common, .. }
+            | DeviceCommandSnapshotView::Cancelled { common, .. } => common,
+        }
+    }
+
+    fn attempt_event(
+        snapshot: &DeviceCommandSnapshot,
+        event: TestEvent,
+        authority_scope: DeviceCommandScope,
+    ) -> Result<DeviceCommandTransition, DeviceCommandTransitionError> {
+        let common = snapshot_common(snapshot);
+        let mut authority = GenerationTracker::new(
+            authority_scope,
+            common.coordinate().generation(),
+            "on",
+            common.coordinate().epoch(),
+        );
+        let state = DeviceCommandState::restore(snapshot.clone().into()).expect("restore fixture");
+        match event {
+            TestEvent::Publish => state.publish(authority.current_fence(), time(30)),
+            TestEvent::Ack => state.ack_received(authority.current_fence(), time(30)),
+            TestEvent::Reject => state.reject(authority.current_fence(), time(30)),
+            TestEvent::Apply => {
+                let evidence = authority
+                    .report(
+                        crate::generation::ObservedGeneration::try_new(
+                            common.coordinate().generation().get(),
+                        )
+                        .expect("observed"),
+                        common.coordinate().epoch(),
+                        "on",
+                    )
+                    .into_matching()
+                    .expect("matching");
+                state.apply(evidence, time(30))
+            }
+            TestEvent::Timeout => state.timeout(authority.current_fence(), time(30)),
+            TestEvent::Supersede => {
+                let evidence = authority
+                    .advance_desired(
+                        DesiredGeneration::try_new(common.coordinate().generation().get() + 1)
+                            .expect("new generation"),
+                        "off",
+                        FenceEpoch::try_new(common.coordinate().epoch().get() + 1)
+                            .expect("new epoch"),
+                    )
+                    .expect("advance");
+                state.supersede(evidence, time(30))
+            }
+            TestEvent::Cancel => state.cancel(authority.current_fence(), time(30)),
+        }
+    }
+
+    fn all_state_snapshots() -> Vec<(DeviceCommandStatus, DeviceCommandSnapshot)> {
+        let authority = tracker();
+        let queued_state = queued(&authority);
+        let published_state = published(&authority);
+        let received_state = received(&authority);
+        let rejected_state = published(&authority)
+            .reject(authority.current_fence(), time(12))
+            .expect("reject")
+            .into_state();
+        let timed_out_state = queued(&authority)
+            .timeout(authority.current_fence(), time(20))
+            .expect("timeout")
+            .into_state();
+        let cancelled_state = received(&authority)
+            .cancel(authority.current_fence(), time(13))
+            .expect("cancel")
+            .into_state();
+
+        let mut matching_authority = tracker();
+        let matching = matching_authority
+            .report(
+                crate::generation::ObservedGeneration::try_new(1).expect("observed"),
+                FenceEpoch::try_new(1).expect("epoch"),
+                "on",
+            )
+            .into_matching()
+            .expect("matching");
+        let applied_state = received(&matching_authority)
+            .apply(matching, time(13))
+            .expect("apply")
+            .into_state();
+
+        let mut newer = tracker();
+        let supersede_candidate = published(&newer);
+        let evidence = newer
+            .advance_desired(
+                DesiredGeneration::try_new(2).expect("generation"),
+                "off",
+                FenceEpoch::try_new(2).expect("epoch"),
+            )
+            .expect("advance");
+        let superseded_state = supersede_candidate
+            .supersede(evidence, time(12))
+            .expect("supersede")
+            .into_state();
+
+        [
+            queued_state,
+            published_state,
+            received_state,
+            applied_state,
+            rejected_state,
+            timed_out_state,
+            superseded_state,
+            cancelled_state,
+        ]
+        .into_iter()
+        .map(|state| (state.status(), state.snapshot()))
+        .collect()
+    }
+
+    fn restore_common(version: i64) -> CommandRestoreCommon {
+        let authority = tracker();
+        CommandRestoreCommon::new(
+            scope(),
+            DeviceCommandId::parse("restore-test").expect("id"),
+            authority.fence_coordinate(),
+            time(20),
+            CommandVersion::restore(version).expect("version"),
+            time(10),
+        )
+    }
+
+    fn restore_common_with_deadline(version: i64, deadline: SystemTime) -> CommandRestoreCommon {
+        let authority = tracker();
+        CommandRestoreCommon::new(
+            scope(),
+            DeviceCommandId::parse("restore-test").expect("id"),
+            authority.fence_coordinate(),
+            deadline,
+            CommandVersion::restore(version).expect("version"),
+            time(10),
+        )
+    }
+
+    #[test]
+    fn status_vocabulary_is_exact_and_closed() {
+        assert_eq!(DeviceCommandStatus::ALL.len(), 8);
+        assert_eq!(DeviceCommandStatus::Applied.as_label(), "applied");
+        assert!(!DeviceCommandStatus::Received.is_terminal());
+        assert!(DeviceCommandStatus::Rejected.is_terminal());
+    }
+
+    #[test]
+    fn ids_are_bounded_and_canonical() {
+        assert!(DeviceCommandId::parse("").is_err());
+        assert!(DeviceCommandId::parse("  ").is_err());
+        assert!(DeviceCommandId::parse("bad\n").is_err());
+        assert!(DeviceCommandId::parse(&"x".repeat(257)).is_err());
+        assert!(DeviceCommandId::parse(&"x".repeat(256)).is_ok());
+        assert_eq!(
+            CommandVersion::restore(0),
+            Err(DeviceCommandError::InvalidVersion)
+        );
+        assert_eq!(
+            CommandVersion::restore(-1),
+            Err(DeviceCommandError::InvalidVersion)
+        );
+        assert_eq!(
+            CommandVersion::restore(i64::MAX).expect("checked").get(),
+            i64::MAX
+        );
+    }
+
+    #[test]
+    fn ack_and_matching_report_are_separate_steps() {
+        let mut authority = tracker();
+        let queued = queued(&authority);
+        let published = queued
+            .publish(authority.current_fence(), time(11))
+            .expect("publish")
+            .into_state();
+        let received = published
+            .ack_received(authority.current_fence(), time(12))
+            .expect("ack")
+            .into_state();
+        assert_eq!(received.status(), DeviceCommandStatus::Received);
+        let matching = authority
+            .report(
+                crate::generation::ObservedGeneration::try_new(1).expect("observed"),
+                FenceEpoch::try_new(1).expect("epoch"),
+                "on",
+            )
+            .into_matching()
+            .expect("matching report");
+        let applied = received
+            .apply(matching, time(13))
+            .expect("apply")
+            .into_state();
+        assert_eq!(applied.status(), DeviceCommandStatus::Applied);
+    }
+
+    #[test]
+    fn report_before_ack_is_an_exact_noop() {
+        let mut authority = tracker();
+        let matching = authority
+            .report(
+                crate::generation::ObservedGeneration::try_new(1).expect("observed"),
+                FenceEpoch::try_new(1).expect("epoch"),
+                "on",
+            )
+            .into_matching()
+            .expect("matching report");
+        let queued = queued(&authority);
+        let before = queued.snapshot();
+        let transition = queued.apply(matching, time(11)).expect("no-op");
+        assert_eq!(transition.outcome(), CommandTransitionOutcome::OutOfOrder);
+        assert_eq!(transition.into_state().snapshot(), before);
+    }
+
+    #[test]
+    fn duplicate_late_and_timeout_preserve_or_advance_version_exactly() {
+        let authority = tracker();
+        let queued = queued(&authority);
+        let published = queued
+            .publish(authority.current_fence(), time(11))
+            .expect("publish")
+            .into_state();
+        assert_eq!(published.version().get(), 2);
+        let before = published.snapshot();
+        let duplicate = published
+            .publish(authority.current_fence(), time(19))
+            .expect("duplicate");
+        assert_eq!(duplicate.outcome(), CommandTransitionOutcome::Duplicate);
+        assert_eq!(duplicate.into_state().snapshot(), before);
+
+        let published = DeviceCommandState::restore(before.into()).expect("restore");
+        let rejected_attempt = published
+            .timeout(authority.current_fence(), time(19))
+            .expect_err("deadline has not elapsed");
+        assert_eq!(
+            rejected_attempt.error(),
+            &DeviceCommandError::DeadlineNotElapsed
+        );
+        let published = rejected_attempt.into_state();
+        let timed_out = published
+            .timeout(authority.current_fence(), time(20))
+            .expect("timeout")
+            .into_state();
+        assert_eq!(timed_out.version().get(), 3);
+        let terminal_snapshot = timed_out.snapshot();
+        let late = timed_out
+            .cancel(authority.current_fence(), time(21))
+            .expect("late");
+        assert_eq!(late.outcome(), CommandTransitionOutcome::Late);
+        assert_eq!(late.into_state().snapshot(), terminal_snapshot);
+    }
+
+    #[test]
+    fn snapshot_roundtrips_each_legal_state_and_restore_fails_closed() {
+        let authority = tracker();
+        let queued_state = queued(&authority);
+        let published_state = published(&authority);
+        let received_state = received(&authority);
+        let rejected_state = published(&authority)
+            .reject(authority.current_fence(), time(12))
+            .expect("rejected")
+            .into_state();
+        let timed_out_state = received(&authority)
+            .timeout(authority.current_fence(), time(20))
+            .expect("timeout")
+            .into_state();
+        let cancelled_state = received(&authority)
+            .cancel(authority.current_fence(), time(13))
+            .expect("cancel")
+            .into_state();
+
+        let mut matching_authority = tracker();
+        let matching = matching_authority
+            .report(
+                crate::generation::ObservedGeneration::try_new(1).expect("observed"),
+                FenceEpoch::try_new(1).expect("epoch"),
+                "on",
+            )
+            .into_matching()
+            .expect("matching");
+        let applied_state = received(&matching_authority)
+            .apply(matching, time(13))
+            .expect("apply")
+            .into_state();
+
+        let mut newer = tracker();
+        let supersede_candidate = queued(&newer);
+        let newer_evidence = newer
+            .advance_desired(
+                DesiredGeneration::try_new(2).expect("generation"),
+                "off",
+                FenceEpoch::try_new(2).expect("epoch"),
+            )
+            .expect("advance");
+        let superseded_state = supersede_candidate
+            .supersede(newer_evidence, time(11))
+            .expect("supersede")
+            .into_state();
+
+        for state in [
+            &queued_state,
+            &published_state,
+            &received_state,
+            &applied_state,
+            &rejected_state,
+            &timed_out_state,
+            &superseded_state,
+            &cancelled_state,
+        ] {
+            let snapshot = state.snapshot();
+            let restored = DeviceCommandState::restore(snapshot.clone().into()).expect("restore");
+            assert_eq!(restored.snapshot(), snapshot);
+        }
+
+        let mut invalid = DeviceCommandState::restore(cancelled_state.snapshot().into())
+            .expect("restore")
+            .snapshot();
+        if let CommandSnapshot::Cancelled(value) = &mut invalid.inner {
+            value.terminal_at = time(1);
+        }
+        assert_eq!(
+            DeviceCommandState::restore(invalid.into()),
+            Err(DeviceCommandError::InvalidSnapshot)
+        );
+    }
+
+    #[test]
+    fn raw_restore_rejects_unreachable_versions_and_invalid_time_relations() {
+        let invalid = [
+            DeviceCommandRestore::queued(restore_common_with_deadline(1, time(10))),
+            DeviceCommandRestore::queued(restore_common(2)),
+            DeviceCommandRestore::published(restore_common(1), time(11)),
+            DeviceCommandRestore::received(restore_common(3), time(12), time(11)),
+            DeviceCommandRestore::applied(restore_common(4), time(11), time(13), time(12)),
+            DeviceCommandRestore::rejected(restore_common(3), time(12), time(11)),
+            DeviceCommandRestore::timed_out(
+                restore_common(2),
+                CommandProgressRestore::queued(),
+                time(19),
+            ),
+            DeviceCommandRestore::timed_out(
+                restore_common(3),
+                CommandProgressRestore::received(time(11), time(12)),
+                time(20),
+            ),
+            DeviceCommandRestore::superseded(
+                restore_common(3),
+                CommandProgressRestore::received(time(11), time(12)),
+                time(13),
+            ),
+            DeviceCommandRestore::cancelled(
+                restore_common(3),
+                CommandProgressRestore::published(time(12)),
+                time(11),
+            ),
+            DeviceCommandRestore::cancelled(
+                restore_common(2),
+                CommandProgressRestore::published(time(11)),
+                time(12),
+            ),
+        ];
+        for input in invalid {
+            assert_eq!(
+                DeviceCommandState::restore(input),
+                Err(DeviceCommandError::InvalidSnapshot)
+            );
         }
     }
 
     #[test]
-    fn command_and_ack_ids_reject_empty_blank_and_control_chars() {
-        assert!(DeviceCommandId::parse("").is_err());
-        assert!(DeviceCommandId::parse("   ").is_err());
-        assert!(DeviceCommandId::parse("cmd\n1").is_err());
-        assert_eq!(command_id("cmd-1").as_str(), "cmd-1");
-
-        assert!(DeviceAckId::parse("").is_err());
-        assert!(DeviceAckId::parse("   ").is_err());
-        assert!(DeviceAckId::parse("ack\r1").is_err());
-        assert_eq!(ack_id("ack-1").as_str(), "ack-1");
-    }
-
-    #[test]
-    fn pending_online_dispatches_stable_intent() -> TestResult {
-        let state = DeviceCommandState::pending(scope(), command_id("cmd-1"), t(10));
-
-        let transition = state.reconcile(DevicePresence::Online, t(11));
-
-        let intent = require_dispatch(&transition)?;
-        assert_eq!(intent.scope(), scope());
-        assert_eq!(intent.command_id().as_str(), "cmd-1");
-        assert_eq!(
-            intent.stable_dispatch_key(),
-            "devicecmd:v1:t36:f47ac10b-58cc-4372-a567-0e02b2c3d479:d36:550e8400-e29b-41d4-a716-446655440000:c5:cmd-1"
-        );
-        assert_eq!(transition.state(), state.snapshot());
-        Ok(())
-    }
-
-    #[test]
-    fn sent_before_deadline_awaits_ack() -> TestResult {
-        let state = DeviceCommandState::pending(scope(), command_id("cmd-1"), t(10));
-        let transition = state.reconcile(DevicePresence::Online, t(11));
-        let intent = require_dispatch(&transition)?;
-        let sent = state.mark_dispatched(&intent, t(11), Duration::from_secs(30))?;
-
-        let transition = sent.reconcile(DevicePresence::Online, t(40));
-
-        assert_eq!(transition.decision(), &DeviceCommandDecision::AwaitAck);
-        assert_eq!(transition.state(), sent.snapshot());
-        Ok(())
-    }
-
-    #[test]
-    fn sent_after_deadline_times_out() -> TestResult {
-        let state = DeviceCommandState::pending(scope(), command_id("cmd-1"), t(10));
-        let transition = state.reconcile(DevicePresence::Online, t(11));
-        let intent = require_dispatch(&transition)?;
-        let sent = state.mark_dispatched(&intent, t(11), Duration::from_secs(30))?;
-
-        let transition = sent.reconcile(DevicePresence::Online, t(42));
-
-        assert_eq!(
-            transition.decision(),
-            &DeviceCommandDecision::TimedOut {
-                lag: Duration::from_secs(32)
-            }
-        );
-        assert!(matches!(
-            transition.state(),
-            DeviceCommandSnapshot::TimedOut { .. }
-        ));
-        assert_eq!(
-            transition.state().convergence_lag(),
-            Some(Duration::from_secs(32))
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn sent_offline_after_deadline_times_out() -> TestResult {
-        let state = DeviceCommandState::pending(scope(), command_id("cmd-1"), t(10));
-        let transition = state.reconcile(DevicePresence::Online, t(11));
-        let intent = require_dispatch(&transition)?;
-        let sent = state.mark_dispatched(&intent, t(11), Duration::from_secs(30))?;
-
-        let transition = sent.reconcile(DevicePresence::Offline, t(42));
-
-        assert_eq!(
-            transition.decision(),
-            &DeviceCommandDecision::TimedOut {
-                lag: Duration::from_secs(32)
-            }
-        );
-        assert!(matches!(
-            transition.state(),
-            DeviceCommandSnapshot::TimedOut { .. }
-        ));
-        Ok(())
-    }
-
-    #[test]
-    fn ack_success_and_duplicate_ack_are_idempotent() -> TestResult {
-        let state = DeviceCommandState::pending(scope(), command_id("cmd-1"), t(10));
-        let transition = state.reconcile(DevicePresence::Online, t(11));
-        let intent = require_dispatch(&transition)?;
-        let sent = state.mark_dispatched(&intent, t(11), Duration::from_secs(30))?;
-        let ack = DeviceAck::new(scope(), command_id("cmd-1"), ack_id("ack-1"), t(17));
-
-        let first = sent.observe_ack(ack.clone())?;
-        assert_eq!(
-            first.decision(),
-            &DeviceCommandDecision::Acked {
-                lag: Duration::from_secs(7)
-            }
-        );
-        assert!(matches!(first.state(), DeviceCommandSnapshot::Acked { .. }));
-
-        let first_state = first.finalize();
-        let duplicate = first_state.observe_ack(ack)?;
-        assert_eq!(duplicate.decision(), &DeviceCommandDecision::DuplicateAck);
-        assert_eq!(duplicate.state(), first_state.snapshot());
-        Ok(())
-    }
-
-    #[test]
-    fn ack_with_same_command_id_but_different_scope_is_rejected() -> TestResult {
-        let state = DeviceCommandState::pending(scope(), command_id("cmd-1"), t(10));
-        let transition = state.reconcile(DevicePresence::Online, t(11));
-        let intent = require_dispatch(&transition)?;
-        let sent = state.mark_dispatched(&intent, t(11), Duration::from_secs(30))?;
-
-        let observed = sent.observe_ack(DeviceAck::new(
-            other_scope(),
-            command_id("cmd-1"),
-            ack_id("ack-wrong-scope"),
-            t(17),
-        ));
-
-        let Err(error) = observed else {
-            return Err(std::io::Error::other(
-                "same command id in another scope must not complete this command",
+    fn newer_generation_is_required_for_supersede() {
+        let mut authority = tracker();
+        let queued = queued(&authority);
+        let evidence = authority
+            .advance_desired(
+                DesiredGeneration::try_new(2).expect("generation"),
+                "off",
+                FenceEpoch::try_new(2).expect("epoch"),
             )
-            .into());
-        };
-        assert_eq!(error, DeviceCommandError::ScopeMismatch);
-        Ok(())
+            .expect("advance");
+        let superseded = queued
+            .supersede(evidence, time(11))
+            .expect("supersede")
+            .into_state();
+        assert_eq!(superseded.status(), DeviceCommandStatus::Superseded);
     }
 
     #[test]
-    fn late_ack_after_deadline_times_out_instead_of_ack() -> TestResult {
-        let state = DeviceCommandState::pending(scope(), command_id("cmd-1"), t(10));
-        let transition = state.reconcile(DevicePresence::Online, t(11));
-        let intent = require_dispatch(&transition)?;
-        let sent = state.mark_dispatched(&intent, t(11), Duration::from_secs(30))?;
-
-        let late = sent.observe_ack(DeviceAck::new(
-            scope(),
-            command_id("cmd-1"),
-            ack_id("ack-1"),
-            t(42),
-        ))?;
-
-        assert_eq!(
-            late.decision(),
-            &DeviceCommandDecision::TimedOut {
-                lag: Duration::from_secs(32)
-            }
+    fn every_declared_nonterminal_edge_advances() {
+        let authority = tracker();
+        assert_advanced(
+            queued(&authority)
+                .timeout(authority.current_fence(), time(20))
+                .expect("queued timeout"),
+            DeviceCommandStatus::TimedOut,
         );
-        assert!(matches!(
-            late.state(),
-            DeviceCommandSnapshot::TimedOut { .. }
-        ));
-        Ok(())
+        assert_advanced(
+            queued(&authority)
+                .cancel(authority.current_fence(), time(11))
+                .expect("queued cancel"),
+            DeviceCommandStatus::Cancelled,
+        );
+        assert_advanced(
+            published(&authority)
+                .reject(authority.current_fence(), time(12))
+                .expect("published reject"),
+            DeviceCommandStatus::Rejected,
+        );
+        assert_advanced(
+            published(&authority)
+                .timeout(authority.current_fence(), time(20))
+                .expect("published timeout"),
+            DeviceCommandStatus::TimedOut,
+        );
+        assert_advanced(
+            published(&authority)
+                .cancel(authority.current_fence(), time(12))
+                .expect("published cancel"),
+            DeviceCommandStatus::Cancelled,
+        );
+        assert_advanced(
+            received(&authority)
+                .timeout(authority.current_fence(), time(20))
+                .expect("received timeout"),
+            DeviceCommandStatus::TimedOut,
+        );
+        assert_advanced(
+            received(&authority)
+                .cancel(authority.current_fence(), time(13))
+                .expect("received cancel"),
+            DeviceCommandStatus::Cancelled,
+        );
+
+        for source in [
+            DeviceCommandStatus::Queued,
+            DeviceCommandStatus::Published,
+            DeviceCommandStatus::Received,
+        ] {
+            let mut authority = tracker();
+            let state = match source {
+                DeviceCommandStatus::Queued => queued(&authority),
+                DeviceCommandStatus::Published => published(&authority),
+                DeviceCommandStatus::Received => received(&authority),
+                _ => unreachable!("test source is nonterminal"),
+            };
+            let evidence = authority
+                .advance_desired(
+                    DesiredGeneration::try_new(2).expect("generation"),
+                    "off",
+                    FenceEpoch::try_new(2).expect("epoch"),
+                )
+                .expect("advance");
+            assert_advanced(
+                state.supersede(evidence, time(13)).expect("supersede"),
+                DeviceCommandStatus::Superseded,
+            );
+        }
     }
 
     #[test]
-    fn persisted_timeout_late_ack_is_explicit_and_state_preserving() -> TestResult {
-        let state = DeviceCommandState::pending(scope(), command_id("cmd-1"), t(10));
-        let transition = state.reconcile(DevicePresence::Online, t(11));
-        let intent = require_dispatch(&transition)?;
-        let sent = state.mark_dispatched(&intent, t(11), Duration::from_secs(30))?;
-        let timed_out = sent.reconcile(DevicePresence::Online, t(42)).finalize();
-
-        let late = timed_out.observe_ack(DeviceAck::new(
-            scope(),
-            command_id("cmd-1"),
-            ack_id("late-ack"),
-            t(50),
-        ));
-
-        let late = late?;
-        assert_eq!(late.decision(), &DeviceCommandDecision::LateAck);
-        assert_eq!(late.state(), timed_out.snapshot());
-        Ok(())
-    }
-
-    #[test]
-    fn ack_before_queued_time_is_rejected_instead_of_zero_lag() -> TestResult {
-        let state = DeviceCommandState::pending(scope(), command_id("cmd-1"), t(10));
-        let transition = state.reconcile(DevicePresence::Online, t(11));
-        let intent = require_dispatch(&transition)?;
-        let sent = state.mark_dispatched(&intent, t(11), Duration::from_secs(30))?;
-
-        let observed = sent.observe_ack(DeviceAck::new(
-            scope(),
-            command_id("cmd-1"),
-            ack_id("ack-before-queue"),
-            t(9),
-        ));
-
-        let Err(error) = observed else {
-            return Err(std::io::Error::other(
-                "ack before queued_at must not be recorded as zero lag",
+    fn every_terminal_state_absorbs_late_events_without_version_change() {
+        let mut matching_authority = tracker();
+        let matching = matching_authority
+            .report(
+                crate::generation::ObservedGeneration::try_new(1).expect("observed"),
+                FenceEpoch::try_new(1).expect("epoch"),
+                "on",
             )
-            .into());
-        };
-        assert_eq!(error, DeviceCommandError::InvalidTimestampOrder);
-        Ok(())
+            .into_matching()
+            .expect("matching");
+        let applied = received(&matching_authority)
+            .apply(matching, time(13))
+            .expect("apply")
+            .into_state();
+
+        let authority = tracker();
+        let rejected = published(&authority)
+            .reject(authority.current_fence(), time(12))
+            .expect("reject")
+            .into_state();
+        let timed_out = queued(&authority)
+            .timeout(authority.current_fence(), time(20))
+            .expect("timeout")
+            .into_state();
+        let cancelled = queued(&authority)
+            .cancel(authority.current_fence(), time(11))
+            .expect("cancel")
+            .into_state();
+        let mut newer = tracker();
+        let superseded = queued(&newer)
+            .supersede(
+                newer
+                    .advance_desired(
+                        DesiredGeneration::try_new(2).expect("generation"),
+                        "off",
+                        FenceEpoch::try_new(2).expect("epoch"),
+                    )
+                    .expect("advance"),
+                time(11),
+            )
+            .expect("supersede")
+            .into_state();
+
+        for terminal in [applied, rejected, timed_out, superseded, cancelled] {
+            let expected = terminal.snapshot();
+            let late = terminal
+                .publish(authority.current_fence(), time(30))
+                .expect("terminal absorbs");
+            assert_eq!(late.outcome(), CommandTransitionOutcome::Late);
+            assert_eq!(late.into_state().snapshot(), expected);
+        }
     }
 
     #[test]
-    fn invalid_sent_time_order_does_not_emit_zero_lag_timeout() {
-        let invalid_sent = DeviceCommandState {
-            inner: super::DeviceCommandStateKind::Sent {
-                scope: scope(),
-                command_id: command_id("cmd-1"),
-                dispatch_key: "dispatch".to_string(),
-                queued_at: t(20),
-                sent_at: t(1),
-                ack_deadline: t(5),
-            },
-        };
+    fn state_event_matrix_is_exhaustive_and_versioned() {
+        use CommandTransitionOutcome::{Advanced, Duplicate, Late, OutOfOrder};
 
-        let transition = invalid_sent.reconcile(DevicePresence::Online, t(6));
+        let expected = [
+            [
+                Advanced, OutOfOrder, OutOfOrder, OutOfOrder, Advanced, Advanced, Advanced,
+            ],
+            [
+                Duplicate, Advanced, Advanced, OutOfOrder, Advanced, Advanced, Advanced,
+            ],
+            [
+                OutOfOrder, Duplicate, Late, Advanced, Advanced, Advanced, Advanced,
+            ],
+            [Late, Late, Late, Duplicate, Late, Late, Late],
+            [Late, Late, Duplicate, Late, Late, Late, Late],
+            [Late, Late, Late, Late, Duplicate, Late, Late],
+            [Late, Late, Late, Late, Late, Duplicate, Late],
+            [Late, Late, Late, Late, Late, Late, Duplicate],
+        ];
+        let target_status = [
+            DeviceCommandStatus::Published,
+            DeviceCommandStatus::Received,
+            DeviceCommandStatus::Rejected,
+            DeviceCommandStatus::Applied,
+            DeviceCommandStatus::TimedOut,
+            DeviceCommandStatus::Superseded,
+            DeviceCommandStatus::Cancelled,
+        ];
 
+        let states = all_state_snapshots();
         assert_eq!(
-            transition.decision(),
-            &DeviceCommandDecision::InvalidTimeOrder
+            states.iter().map(|(status, _)| *status).collect::<Vec<_>>(),
+            DeviceCommandStatus::ALL
         );
-        assert_eq!(transition.state(), invalid_sent.snapshot());
+        for (state_index, (source_status, snapshot)) in states.iter().enumerate() {
+            let before_version = snapshot_common(snapshot).version().get();
+            for (event_index, event) in EVENTS.into_iter().enumerate() {
+                let transition =
+                    attempt_event(snapshot, event, scope()).expect("matching authority");
+                assert_eq!(
+                    transition.outcome(),
+                    expected[state_index][event_index],
+                    "state={source_status:?} event={event_index}"
+                );
+                let result = transition.into_state();
+                if expected[state_index][event_index] == Advanced {
+                    assert_eq!(result.status(), target_status[event_index]);
+                    assert_eq!(result.version().get(), before_version + 1);
+                } else {
+                    assert_eq!(result.snapshot(), snapshot.clone());
+                }
+            }
+        }
     }
 
     #[test]
-    fn terminal_states_ignore_presence() -> TestResult {
-        let state = DeviceCommandState::pending(scope(), command_id("cmd-1"), t(10));
-        let transition = state.reconcile(DevicePresence::Online, t(11));
-        let intent = require_dispatch(&transition)?;
-        let sent = state.mark_dispatched(&intent, t(11), Duration::from_secs(30))?;
-        let acked = sent
-            .observe_ack(DeviceAck::new(
-                scope(),
-                command_id("cmd-1"),
-                ack_id("ack-1"),
-                t(17),
-            ))?
-            .finalize();
-
-        assert_eq!(
-            acked.reconcile(DevicePresence::Offline, t(18)).decision(),
-            &DeviceCommandDecision::Noop
-        );
-
-        let timed_out = sent.reconcile(DevicePresence::Online, t(42)).finalize();
-        assert_eq!(
-            timed_out
-                .reconcile(DevicePresence::Offline, t(43))
-                .decision(),
-            &DeviceCommandDecision::Noop
-        );
-        Ok(())
+    fn every_state_event_rejects_cross_scope_authority_without_mutation() {
+        for (status, snapshot) in all_state_snapshots() {
+            for (event_index, event) in EVENTS.into_iter().enumerate() {
+                let failure = attempt_event(&snapshot, event, other_scope())
+                    .expect_err("cross-scope evidence must fail");
+                assert_eq!(
+                    failure.error(),
+                    &DeviceCommandError::AuthorityMismatch,
+                    "state={status:?} event={event_index}"
+                );
+                assert_eq!(failure.into_state().snapshot(), snapshot);
+            }
+        }
     }
 
     #[test]
-    fn offline_reconcile_waits_and_online_reuses_stable_key() -> TestResult {
-        let state = DeviceCommandState::pending(scope(), command_id("cmd-1"), t(10));
-
-        let offline = state.reconcile(DevicePresence::Offline, t(12));
-        assert_eq!(offline.decision(), &DeviceCommandDecision::AwaitOnline);
-        assert_eq!(offline.state(), state.snapshot());
-
-        let offline_state = offline.finalize();
-        let online = offline_state.reconcile(DevicePresence::Online, t(20));
-        let intent = require_dispatch(&online)?;
-
-        assert_eq!(
-            intent.stable_dispatch_key(),
-            "devicecmd:v1:t36:f47ac10b-58cc-4372-a567-0e02b2c3d479:d36:550e8400-e29b-41d4-a716-446655440000:c5:cmd-1"
+    fn mismatched_authority_cannot_mutate_command() {
+        let authority = tracker();
+        let command = queued(&authority);
+        let before = command.snapshot();
+        let other = GenerationTracker::new(
+            scope(),
+            DesiredGeneration::try_new(1).expect("generation"),
+            "on",
+            FenceEpoch::try_new(2).expect("epoch"),
         );
-        Ok(())
-    }
-
-    #[test]
-    fn convergence_lag_metric_uses_result_label_only() -> TestResult {
-        let recorder = PrometheusBuilder::new().build_recorder();
-        let state = DeviceCommandState::pending(scope(), command_id("cmd-1"), t(10));
-        let transition = state.reconcile(DevicePresence::Online, t(11));
-        let intent = require_dispatch(&transition)?;
-        let sent = state.mark_dispatched(&intent, t(11), Duration::from_secs(30))?;
-        let timeout = sent.reconcile(DevicePresence::Online, t(42));
-
-        metrics::with_local_recorder(&recorder, || {
-            let _state = timeout.finalize();
-        });
-
-        let rendered = recorder.handle().render();
-        assert!(
-            rendered.contains("device_command_convergence_lag_seconds"),
-            "{rendered}"
-        );
-        assert!(rendered.contains("result=\"timed_out\""), "{rendered}");
-        assert!(!rendered.contains(DEVICE), "{rendered}");
-        assert!(!rendered.contains("cmd-1"), "{rendered}");
-        Ok(())
+        let rejected = command
+            .publish(other.current_fence(), time(11))
+            .expect_err("mismatched fence");
+        assert_eq!(rejected.error(), &DeviceCommandError::AuthorityMismatch);
+        assert_eq!(rejected.into_state().snapshot(), before);
     }
 }

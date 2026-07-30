@@ -23,7 +23,7 @@ Dashboard 不是 enforcement carrier。metric 名、label 闭值集、PII 边界
   `automatic|redrive`. Do not merge both metrics into one phase selector.
 - Forbidden label sources: payload, error text, partition key, topic when not already a metric
   label, subject, actor, request input, handler error, event id, dead-letter id, saga id, step name,
-  device id, command id, ack id, dispatch key, raw broker metadata, lease token, deadline/timestamp,
+  device id, command id, raw broker metadata, lease token, deadline/timestamp,
   secret or URL credential.
 
 ## Panels
@@ -72,7 +72,6 @@ before #1683 / #1684, treat the panel as deployment-local and keep it out of the
 |---|---|---|
 | DLQ redrive outcome | `dlq_redrive_total{tenant_id,kind,outcome}` is an operator mutation counter. A one-shot `rss dlq` process does not provide a stable Prometheus scrape target; long-term evidence is `dlq.maintenance` audit/log plus relay/consumer metrics. | Omitted from the shared `/health/v1/metrics` dashboard. A deployment-local recorder panel may exist outside this contract. |
 | Reconcile results | `reconcile_total{result}` is emitted by the `eventexec` reconcile worker library when an owning runtime wires that worker with a recorder. | Omitted until the server/runtime assembly exposes a reconcile worker metric on its Health listener. |
-| Device command convergence | `device_command_convergence_lag_seconds{result}` is emitted by the `deviceloop` L4 journey carrier. | Omitted until an owning runtime or probe exposes the journey metric as a stable server scrape target. |
 
 ## Drilldown Links
 

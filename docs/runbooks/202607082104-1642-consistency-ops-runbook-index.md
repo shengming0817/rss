@@ -20,7 +20,7 @@ redrive 权限均引用已有 Hard / Medium carrier。若某模块尚无 runtime
 | LocalOnly proof / receipt coverage | `docs/runbooks/202607141556-1771-local-only-proof.md` | schema v4 fail-closed source registry; no runtime metric | none | not applicable | not applicable | generated active LocalOnly registry + opaque success receipt (Hard upstream), xtask provenance/exact-set scan (Medium downstream); see `docs/rules/consistency-l0.md` |
 | Projection | `docs/runbooks/202607080828-1638-projection-replay-shadow-swap.md` | runtime metric `not currently exported` (#1684) | none for projection runtime metric | checklist marks gap #1684 | no replay to outbox; projection DLX is diagnostic | `ProjectionSelector`, `ProjectionVersion`, serial witness, projection DLX store |
 | Reconcile | this index | library emit site exists; server runtime scrape not currently wired | no dedicated rule file yet | omitted from shared checklist until runtime wired | not applicable | `ReconcileResultLabel`, `Builder::new(Tenancy, Trigger, ...)`, durable attempt result tables |
-| DeviceLatent command | this index | L4 journey emit site exists; server runtime scrape not currently wired | no dedicated rule file yet | omitted from shared checklist until runtime wired | not applicable | `DeviceConvergenceResult`, `DeviceReconcileTransition::finalize`, typed tenant/device scope |
+| DeviceLatent command convergence | this index | `not currently exported` (#1905) | none until #1905 supplies the runtime metric | omitted from shared checklist until #1905 | no operator replay surface in #1893 | `DeviceCommandStatus`, `DeviceCommandTransition`, generation/fence evidence; runtime observability is owned by #1905 |
 
 ## Outbox Relay / Backlog
 
@@ -225,25 +225,3 @@ On-call flow when the owning runtime wires this worker:
 Carrier summary: `ReconcileResultLabel` is the single metric label source. `Builder::new` requires
 `Tenancy` and `Trigger` as position parameters, and durable attempt results are stored separately
 from action-local `recorded` rows.
-
-## DeviceLatent Command
-
-Device command convergence is the L4 long-latency path for command ack / timeout closure. The metric
-carrier exists in the `deviceloop` journey path, but #1642 does not claim a stable server scrape
-surface for it.
-
-Journey / deployment-local signals:
-
-- `device_command_convergence_lag_seconds{result="acked"}`
-- `device_command_convergence_lag_seconds{result="timed_out"}`
-
-On-call flow when the owning runtime or probe exposes this metric:
-
-1. Compare `acked` and `timed_out` histograms against the command SLA for the deployment.
-2. If `timed_out` increases, check device presence, dispatch queue health, and command outbox
-   delivery before treating it as a device firmware issue.
-3. Duplicate ack and offline reconcile paths should remain terminal-safe; inspect the journey
-   evidence from the owning test if behavior changes.
-
-Carrier summary: `DeviceConvergenceResult` is a closed label set. Tenant, device id, command id,
-ack id, dispatch key, payload, error text and offline reason are not metric labels.

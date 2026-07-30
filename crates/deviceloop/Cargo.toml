@@ -18,7 +18,3 @@ consistency = { path = "../consistency" }
 primitives = { path = "../primitives" }
 diport = { path = "../diport" }
 thiserror = { workspace = true }
-metrics = { workspace = true }
-
-[dev-dependencies]
-metrics-exporter-prometheus = { workspace = true }
