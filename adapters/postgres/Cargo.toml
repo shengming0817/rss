@@ -35,6 +35,10 @@ authn = { path = "../../crates/authn" }
 # adapter→域 DIP 内向边（Option 2/ADR-005；经 deny.toml identity wrapper + allows(Adapter,Domain) 放行）。
 # PgRoleRepo impl identity::ports::RoleRepo（roles 表 + tenant scope，#1250）——真实 impl（替换原 #[cfg(test)] RoleRepoEdgeProof）。
 identity = { path = "../../crates/identity", optional = true }
+# Device-certificate persistence lowers the canonical policy/condition vocabulary owned by the
+# DeviceLatent service. Keep the edge behind the identity domain feature so inactive adapters do not
+# acquire the service API.
+deviceloop = { path = "../../crates/deviceloop", optional = true }
 # adapter→域 DIP 内向边（Option 2/ADR-005；经 deny.toml audit wrapper + allows(Adapter,Domain) 放行）。
 # PgAuditRepo impl audit read/write ports（append-only per-tenant keyed-HMAC chain + RLS，#1230）——真实 impl。
 audit = { path = "../../crates/audit", optional = true }
@@ -77,7 +81,7 @@ anyhow = { workspace = true, optional = true }
 [features]
 default = []
 domain-settings = ["dep:settings", "dep:httpserve", "dep:observ"]
-domain-identity = ["dep:identity", "dep:httpserve", "dep:observ"]
+domain-identity = ["dep:identity", "dep:deviceloop", "dep:httpserve", "dep:observ"]
 domain-audit = ["dep:audit", "dep:observ"]
 auth-audit-sink = []
 # 需真实 postgres 的集成测试门控（azure 无 CI；feature 关闭时 src/integration_tests.rs 不编译，verify 永远绿）。

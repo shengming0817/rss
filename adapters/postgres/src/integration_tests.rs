@@ -35860,3 +35860,875 @@ async fn ta14_audit_hydrate_row_unknown_actor_kind_returns_storage() -> TestResu
     store.shutdown().await?;
     Ok(())
 }
+
+// ── Device certificate desired/reported/condition authority (#1896) ──────────────
+
+fn device_certificate_policy_hash(
+    validity_seconds: i32,
+    renew_before_seconds: i32,
+    client_auth: bool,
+    server_auth: bool,
+    sans: &[String],
+) -> Vec<u8> {
+    use deviceloop::CertificatePolicy;
+    use sha2::{Digest as _, Sha256};
+
+    let key_usages = [
+        client_auth.then_some("clientAuth"),
+        server_auth.then_some("serverAuth"),
+    ]
+    .into_iter()
+    .flatten()
+    .map(str::to_owned)
+    .collect::<Vec<_>>();
+    let policy = CertificatePolicy::restore(
+        validity_seconds as u64,
+        renew_before_seconds as u64,
+        key_usages,
+        sans.to_vec(),
+    )
+    .expect("test policy must be accepted by the production domain constructor");
+    Sha256::digest(policy.canonical_bytes()).to_vec()
+}
+
+async fn insert_device_certificate_desired(
+    store: &PgStore,
+    tenant: &str,
+    device: &str,
+    client_auth: bool,
+    server_auth: bool,
+    sans: &[String],
+) -> Result<sqlx::postgres::PgQueryResult, sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO device_certificate_desired_states ( \
+             tenant_id, device_id, generation, validity_seconds, renew_before_seconds, \
+             client_auth, server_auth, sans \
+         ) VALUES ($1::uuid, $2::uuid, 1, 3600, 600, $3, $4, $5)",
+    )
+    .bind(tenant)
+    .bind(device)
+    .bind(client_auth)
+    .bind(server_auth)
+    .bind(sans)
+    .execute(&store.pool)
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn migration_0081_upgrades_0080_and_creates_only_certificate_state_tables() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    run_migrations_through(&store, 80).await?;
+    let before: i64 = sqlx::query_scalar(
+        "SELECT count(*)::bigint FROM pg_catalog.pg_class AS c \
+         JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace \
+         WHERE n.nspname = 'public' AND c.relname LIKE 'device_certificate_%'",
+    )
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(before, 0, "0080 must not contain #1896 state relations");
+
+    store.run_migrations().await?;
+    let relations: Vec<String> = sqlx::query_scalar(
+        "SELECT c.relname FROM pg_catalog.pg_class AS c \
+         JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace \
+         WHERE n.nspname = 'public' AND c.relkind = 'r' \
+           AND c.relname LIKE 'device_certificate_%' ORDER BY c.relname",
+    )
+    .fetch_all(&store.pool)
+    .await?;
+    assert_eq!(
+        relations,
+        vec![
+            "device_certificate_conditions".to_owned(),
+            "device_certificate_desired_states".to_owned(),
+            "device_certificate_reported_states".to_owned(),
+        ],
+        "0081 must not pre-create target, command, receipt, operation, or wake state"
+    );
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn device_certificate_schema_rls_and_acl_are_closed() -> TestResult {
+    let (pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+
+    let tables: Vec<(String, bool, bool)> = sqlx::query_as(
+        "SELECT c.relname, c.relrowsecurity, c.relforcerowsecurity \
+         FROM pg_catalog.pg_class AS c \
+         JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace \
+         WHERE n.nspname = 'public' \
+           AND c.relname IN ( \
+             'device_certificate_desired_states', \
+             'device_certificate_reported_states', \
+             'device_certificate_conditions' \
+           ) \
+         ORDER BY c.relname",
+    )
+    .fetch_all(&store.pool)
+    .await?;
+    assert_eq!(
+        tables,
+        vec![
+            ("device_certificate_conditions".to_owned(), true, true),
+            ("device_certificate_desired_states".to_owned(), true, true),
+            ("device_certificate_reported_states".to_owned(), true, true),
+        ],
+        "all device-certificate state tables must exist with ENABLE+FORCE RLS"
+    );
+
+    let policies: Vec<(String, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT tablename, qual, with_check \
+         FROM pg_catalog.pg_policies \
+         WHERE schemaname = 'public' \
+           AND tablename IN ( \
+             'device_certificate_desired_states', \
+             'device_certificate_reported_states', \
+             'device_certificate_conditions' \
+           ) \
+           AND policyname = 'tenant_isolation' \
+         ORDER BY tablename",
+    )
+    .fetch_all(&store.pool)
+    .await?;
+    assert_eq!(
+        policies.len(),
+        3,
+        "each tenant relation needs one canonical policy"
+    );
+    for (table, using, with_check) in policies {
+        for clause in [using, with_check] {
+            let clause = clause.ok_or_else(|| {
+                std::io::Error::other(format!("{table} tenant policy is incomplete"))
+            })?;
+            assert!(
+                clause.contains("NULLIF(current_setting('rss.tenant_id'::text, true), ''::text)"),
+                "{table} must fail closed through the canonical tenant GUC: {clause}"
+            );
+        }
+    }
+
+    let desired_columns: Vec<String> = sqlx::query_scalar(
+        "SELECT a.attname FROM pg_catalog.pg_attribute AS a \
+         WHERE a.attrelid = 'public.device_certificate_desired_states'::regclass \
+           AND a.attnum > 0 AND NOT a.attisdropped ORDER BY a.attnum",
+    )
+    .fetch_all(&store.pool)
+    .await?;
+    assert_eq!(
+        desired_columns,
+        vec![
+            "tenant_id",
+            "device_id",
+            "generation",
+            "policy_hash",
+            "validity_seconds",
+            "renew_before_seconds",
+            "client_auth",
+            "server_auth",
+            "sans",
+            "created_at",
+            "updated_at",
+        ],
+        "desired state must not persist a fence epoch or open-text key usages"
+    );
+
+    let privileges: Vec<(String, bool, bool, bool, bool, bool, bool, bool)> = sqlx::query_as(
+        "SELECT table_name, \
+                has_table_privilege('rss_app', format('public.%I', table_name), 'SELECT'), \
+                has_table_privilege('rss_app', format('public.%I', table_name), 'INSERT'), \
+                has_table_privilege('rss_app', format('public.%I', table_name), 'UPDATE'), \
+                has_table_privilege('rss_app', format('public.%I', table_name), 'DELETE'), \
+                has_table_privilege('rss_app_read', format('public.%I', table_name), 'SELECT'), \
+                has_table_privilege('rss_app_read', format('public.%I', table_name), 'INSERT'), \
+                has_table_privilege('rss_app_read', format('public.%I', table_name), 'UPDATE') \
+         FROM unnest(ARRAY[ \
+             'device_certificate_desired_states', \
+             'device_certificate_reported_states', \
+             'device_certificate_conditions' \
+         ]) AS table_name \
+         ORDER BY table_name",
+    )
+    .fetch_all(&store.pool)
+    .await?;
+    assert_eq!(privileges.len(), 3);
+    for (
+        table,
+        writer_select,
+        writer_insert,
+        writer_update,
+        writer_delete,
+        reader_select,
+        reader_insert,
+        reader_update,
+    ) in privileges
+    {
+        assert!(writer_select, "rss_app must read {table}");
+        assert!(
+            !writer_insert && !writer_update,
+            "rss_app must have column-level mutations only on {table}"
+        );
+        assert!(!writer_delete, "rss_app must not DELETE {table}");
+        assert!(reader_select, "rss_app_read must read {table}");
+        assert!(
+            !reader_insert && !reader_update,
+            "rss_app_read must be read-only on {table}"
+        );
+    }
+
+    let writer_columns: Vec<(String, String, bool, bool)> = sqlx::query_as(
+        "SELECT c.relname, a.attname, \
+                has_column_privilege('rss_app', c.oid, a.attnum, 'INSERT'), \
+                has_column_privilege('rss_app', c.oid, a.attnum, 'UPDATE') \
+         FROM pg_catalog.pg_class AS c \
+         JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace \
+         JOIN pg_catalog.pg_attribute AS a ON a.attrelid = c.oid \
+         WHERE n.nspname = 'public' \
+           AND c.relname IN ('device_certificate_desired_states', \
+                             'device_certificate_reported_states', \
+                             'device_certificate_conditions') \
+           AND a.attnum > 0 AND NOT a.attisdropped \
+         ORDER BY c.relname, a.attnum",
+    )
+    .fetch_all(&store.pool)
+    .await?;
+    for (table, column, can_insert, can_update) in writer_columns {
+        let expected_insert = match table.as_str() {
+            "device_certificate_desired_states" => matches!(
+                column.as_str(),
+                "tenant_id"
+                    | "device_id"
+                    | "generation"
+                    | "validity_seconds"
+                    | "renew_before_seconds"
+                    | "client_auth"
+                    | "server_auth"
+                    | "sans"
+            ),
+            "device_certificate_reported_states" => column != "received_at",
+            "device_certificate_conditions" => column != "last_transition_at",
+            _ => false,
+        };
+        let expected_update = match table.as_str() {
+            "device_certificate_desired_states" => matches!(
+                column.as_str(),
+                "generation"
+                    | "validity_seconds"
+                    | "renew_before_seconds"
+                    | "client_auth"
+                    | "server_auth"
+                    | "sans"
+            ),
+            "device_certificate_reported_states" => matches!(
+                column.as_str(),
+                "observed_generation"
+                    | "fence_epoch"
+                    | "state_hash"
+                    | "artifact_digest"
+                    | "report_envelope_id"
+                    | "device_sequence"
+                    | "expires_at"
+                    | "device_observed_at"
+            ),
+            "device_certificate_conditions" => {
+                matches!(column.as_str(), "status" | "reason" | "observed_generation")
+            }
+            _ => false,
+        };
+        assert_eq!(
+            can_insert, expected_insert,
+            "unexpected INSERT ACL on {table}.{column}"
+        );
+        assert_eq!(
+            can_update, expected_update,
+            "unexpected UPDATE ACL on {table}.{column}"
+        );
+    }
+
+    let closed_constraints: String = sqlx::query_scalar(
+        "SELECT string_agg(pg_catalog.pg_get_constraintdef(oid), E'\\n' ORDER BY conname) \
+         FROM pg_catalog.pg_constraint \
+         WHERE conrelid IN ( \
+             'device_certificate_desired_states'::regclass, \
+             'device_certificate_reported_states'::regclass, \
+             'device_certificate_conditions'::regclass \
+         )",
+    )
+    .fetch_one(&store.pool)
+    .await?;
+    for invariant in [
+        "generation > 0",
+        "observed_generation > 0",
+        "renew_before_seconds < validity_seconds",
+        "client_auth OR server_auth",
+        "octet_length(policy_hash) = 32",
+        "octet_length(state_hash) = 32",
+        "octet_length(artifact_digest) = 32",
+        "condition_type",
+        "Ready",
+        "QuarantinedByOperator",
+    ] {
+        assert!(
+            closed_constraints.contains(invariant),
+            "missing device-certificate DB invariant `{invariant}` in:\n{closed_constraints}"
+        );
+    }
+
+    let functions: Vec<(String, Vec<String>, bool, bool)> = sqlx::query_as(
+        "SELECT p.proname, p.proconfig, \
+                has_function_privilege('rss_app', p.oid, 'EXECUTE'), \
+                has_function_privilege('rss_app_read', p.oid, 'EXECUTE') \
+         FROM pg_catalog.pg_proc AS p \
+         JOIN pg_catalog.pg_namespace AS n ON n.oid = p.pronamespace \
+         WHERE n.nspname = 'public' AND p.proname LIKE 'rss_device_certificate_%' \
+         ORDER BY p.proname",
+    )
+    .fetch_all(&store.pool)
+    .await?;
+    assert_eq!(functions.len(), 3);
+    for (function, config, writer_execute, reader_execute) in functions {
+        assert_eq!(config, vec!["search_path=pg_catalog, pg_temp"]);
+        assert!(
+            !writer_execute && !reader_execute,
+            "{function} execute ACL is too broad"
+        );
+    }
+
+    let tenant = uuid::Uuid::new_v4().to_string();
+    let other_tenant = uuid::Uuid::new_v4().to_string();
+    let device = uuid::Uuid::new_v4().to_string();
+    let other_device = uuid::Uuid::new_v4().to_string();
+    let sans = vec![
+        "device.example".to_owned(),
+        "spiffe://rss/device".to_owned(),
+    ];
+    insert_device_certificate_desired(&store, &other_tenant, &other_device, true, true, &sans)
+        .await?;
+
+    let app = connect_pg_rss_app_role(&pg, &store).await?;
+    let mut tx = app.pool.begin().await?;
+    sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+        .bind(&tenant)
+        .execute(&mut *tx)
+        .await?;
+    let row: (Vec<u8>, i64, i64) = sqlx::query_as(
+        "INSERT INTO device_certificate_desired_states ( \
+             tenant_id, device_id, generation, validity_seconds, renew_before_seconds, \
+             client_auth, server_auth, sans \
+         ) VALUES ($1::uuid, $2::uuid, 1, 3600, 600, true, true, $3) \
+         RETURNING policy_hash, \
+             (extract(epoch FROM created_at) * 1000000)::bigint, \
+             (extract(epoch FROM updated_at) * 1000000)::bigint",
+    )
+    .bind(&tenant)
+    .bind(&device)
+    .bind(&sans)
+    .fetch_one(&mut *tx)
+    .await?;
+    assert_eq!(
+        row.0,
+        device_certificate_policy_hash(3600, 600, true, true, &sans)
+    );
+    assert_eq!(row.1, row.2);
+    let visible: i64 =
+        sqlx::query_scalar("SELECT count(*)::bigint FROM device_certificate_desired_states")
+            .fetch_one(&mut *tx)
+            .await?;
+    assert_eq!(visible, 1, "RLS must hide the other tenant");
+    tx.commit().await?;
+
+    let mut denied = app.pool.begin().await?;
+    sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+        .bind(&tenant)
+        .execute(&mut *denied)
+        .await?;
+    let explicit_server_state = sqlx::query(
+        "INSERT INTO device_certificate_desired_states ( \
+             tenant_id, device_id, generation, policy_hash, validity_seconds, \
+             renew_before_seconds, client_auth, server_auth, sans, created_at, updated_at \
+         ) VALUES ($1::uuid, gen_random_uuid(), 1, $2, 3600, 600, true, true, $3, now(), now())",
+    )
+    .bind(&tenant)
+    .bind(vec![0_u8; 32])
+    .bind(&sans)
+    .execute(&mut *denied)
+    .await;
+    assert!(
+        explicit_server_state.is_err(),
+        "rss_app must not write policy hash or timestamps"
+    );
+    denied.rollback().await?;
+
+    let without_tenant: i64 =
+        sqlx::query_scalar("SELECT count(*)::bigint FROM device_certificate_desired_states")
+            .fetch_one(&app.pool)
+            .await?;
+    assert_eq!(without_tenant, 0, "missing tenant context must fail closed");
+
+    app.shutdown().await?;
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn device_certificate_database_guards_reject_regression_and_open_conditions() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let tenant = uuid::Uuid::new_v4().to_string();
+    let device = uuid::Uuid::new_v4().to_string();
+    let sans = vec![
+        "device.example".to_owned(),
+        "spiffe://rss/device".to_owned(),
+    ];
+
+    insert_device_certificate_desired(&store, &tenant, &device, true, true, &sans).await?;
+    let initial: (i64, Vec<u8>, i64, i64) = sqlx::query_as(
+        "SELECT generation, policy_hash, \
+                (extract(epoch FROM created_at) * 1000000)::bigint, \
+                (extract(epoch FROM updated_at) * 1000000)::bigint \
+         FROM device_certificate_desired_states \
+         WHERE tenant_id = $1::uuid AND device_id = $2::uuid",
+    )
+    .bind(&tenant)
+    .bind(&device)
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(
+        initial.1,
+        device_certificate_policy_hash(3600, 600, true, true, &sans)
+    );
+    assert_eq!(initial.2, initial.3);
+
+    for (case, client_auth, server_auth, policy_sans) in [
+        ("client auth", true, false, Vec::<String>::new()),
+        (
+            "server auth",
+            false,
+            true,
+            vec!["server.example".to_owned()],
+        ),
+        (
+            "both usages and sorted SANs",
+            true,
+            true,
+            vec![
+                "device.example".to_owned(),
+                "spiffe://rss/device".to_owned(),
+            ],
+        ),
+    ] {
+        let policy_device = uuid::Uuid::new_v4().to_string();
+        insert_device_certificate_desired(
+            &store,
+            &tenant,
+            &policy_device,
+            client_auth,
+            server_auth,
+            &policy_sans,
+        )
+        .await?;
+        let stored_hash: Vec<u8> = sqlx::query_scalar(
+            "SELECT policy_hash FROM device_certificate_desired_states \
+             WHERE tenant_id = $1::uuid AND device_id = $2::uuid",
+        )
+        .bind(&tenant)
+        .bind(&policy_device)
+        .fetch_one(&store.pool)
+        .await?;
+        assert_eq!(
+            stored_hash,
+            device_certificate_policy_hash(3600, 600, client_auth, server_auth, &policy_sans,),
+            "database and production domain canonical encoders diverged for {case}"
+        );
+    }
+
+    let generation_gap = sqlx::query(
+        "UPDATE device_certificate_desired_states SET generation = 3 \
+         WHERE tenant_id = $1::uuid AND device_id = $2::uuid",
+    )
+    .bind(&tenant)
+    .bind(&device)
+    .execute(&store.pool)
+    .await;
+    assert!(
+        generation_gap.is_err(),
+        "desired generation must advance exactly once"
+    );
+    let after_gap: (i64, Vec<u8>, i64) = sqlx::query_as(
+        "SELECT generation, policy_hash, \
+                (extract(epoch FROM updated_at) * 1000000)::bigint \
+         FROM device_certificate_desired_states \
+         WHERE tenant_id = $1::uuid AND device_id = $2::uuid",
+    )
+    .bind(&tenant)
+    .bind(&device)
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(after_gap, (initial.0, initial.1.clone(), initial.3));
+
+    let invalid_policies = vec![
+        ("empty usages", false, false, Vec::<String>::new()),
+        ("empty SAN", true, false, vec![String::new()]),
+        ("untrimmed SAN", true, false, vec![" device".to_owned()]),
+        (
+            "unicode untrimmed SAN",
+            true,
+            false,
+            vec!["device\u{00a0}".to_owned()],
+        ),
+        (
+            "control SAN",
+            true,
+            false,
+            vec!["device\u{0085}".to_owned()],
+        ),
+        (
+            "SAN order",
+            true,
+            false,
+            vec!["z.example".to_owned(), "a.example".to_owned()],
+        ),
+        (
+            "duplicate SAN",
+            true,
+            false,
+            vec!["a.example".to_owned(), "a.example".to_owned()],
+        ),
+        ("long SAN", true, false, vec!["a".repeat(254)]),
+        (
+            "too many SANs",
+            true,
+            false,
+            (0..33).map(|index| format!("{index:02}.example")).collect(),
+        ),
+    ];
+    for (case, client_auth, server_auth, invalid_sans) in invalid_policies {
+        let invalid_device = uuid::Uuid::new_v4().to_string();
+        let result = insert_device_certificate_desired(
+            &store,
+            &tenant,
+            &invalid_device,
+            client_auth,
+            server_auth,
+            &invalid_sans,
+        )
+        .await;
+        assert!(result.is_err(), "{case} must fail closed");
+        let count: i64 = sqlx::query_scalar(
+            "SELECT count(*)::bigint FROM device_certificate_desired_states \
+             WHERE tenant_id = $1::uuid AND device_id = $2::uuid",
+        )
+        .bind(&tenant)
+        .bind(&invalid_device)
+        .fetch_one(&store.pool)
+        .await?;
+        assert_eq!(count, 0, "rejected {case} must be zero-write");
+    }
+
+    let changed_sans = vec!["new.example".to_owned()];
+    sqlx::query(
+        "UPDATE device_certificate_desired_states \
+         SET generation = 2, sans = $3 \
+         WHERE tenant_id = $1::uuid AND device_id = $2::uuid",
+    )
+    .bind(&tenant)
+    .bind(&device)
+    .bind(&changed_sans)
+    .execute(&store.pool)
+    .await?;
+    let changed_hash: Vec<u8> = sqlx::query_scalar(
+        "SELECT policy_hash FROM device_certificate_desired_states \
+         WHERE tenant_id = $1::uuid AND device_id = $2::uuid",
+    )
+    .bind(&tenant)
+    .bind(&device)
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(
+        changed_hash,
+        device_certificate_policy_hash(3600, 600, true, true, &changed_sans),
+        "database trigger must be the unique canonical policy-hash writer"
+    );
+
+    sqlx::query(
+        "INSERT INTO device_certificate_reported_states ( \
+             tenant_id, device_id, observed_generation, fence_epoch, state_hash, \
+             artifact_digest, report_envelope_id, device_sequence \
+         ) VALUES ($1::uuid, $2::uuid, 1, 7, $3, $4, 'report-1', 1)",
+    )
+    .bind(&tenant)
+    .bind(&device)
+    .bind(vec![0x31_u8; 32])
+    .bind(vec![0x41_u8; 32])
+    .execute(&store.pool)
+    .await?;
+    sqlx::query(
+        "UPDATE device_certificate_reported_states \
+         SET observed_generation = 2, state_hash = $3, artifact_digest = $4, \
+             report_envelope_id = 'report-2', device_sequence = 2 \
+         WHERE tenant_id = $1::uuid AND device_id = $2::uuid",
+    )
+    .bind(&tenant)
+    .bind(&device)
+    .bind(vec![0x32_u8; 32])
+    .bind(vec![0x42_u8; 32])
+    .execute(&store.pool)
+    .await?;
+    let reported_before: (i64, i64, Vec<u8>, Vec<u8>, String, i64, i64) = sqlx::query_as(
+        "SELECT observed_generation, fence_epoch, state_hash, artifact_digest, \
+                    report_envelope_id, device_sequence, \
+                    (extract(epoch from received_at) * 1000000)::bigint \
+             FROM device_certificate_reported_states \
+             WHERE tenant_id = $1::uuid AND device_id = $2::uuid",
+    )
+    .bind(&tenant)
+    .bind(&device)
+    .fetch_one(&store.pool)
+    .await?;
+
+    let duplicate = sqlx::query(
+        "UPDATE device_certificate_reported_states \
+         SET observed_generation = 2, fence_epoch = 7, state_hash = $3, \
+             artifact_digest = $4, report_envelope_id = 'report-2', device_sequence = 2 \
+         WHERE tenant_id = $1::uuid AND device_id = $2::uuid",
+    )
+    .bind(&tenant)
+    .bind(&device)
+    .bind(vec![0x32_u8; 32])
+    .bind(vec![0x42_u8; 32])
+    .execute(&store.pool)
+    .await?;
+    assert_eq!(
+        duplicate.rows_affected(),
+        0,
+        "exact duplicate reports must be no-op"
+    );
+
+    for (case, state_hash, artifact_digest, envelope) in [
+        (
+            "state hash conflict",
+            vec![0x33_u8; 32],
+            vec![0x42_u8; 32],
+            "report-2",
+        ),
+        (
+            "artifact digest conflict",
+            vec![0x32_u8; 32],
+            vec![0x43_u8; 32],
+            "report-2",
+        ),
+        (
+            "envelope conflict",
+            vec![0x32_u8; 32],
+            vec![0x42_u8; 32],
+            "report-conflict",
+        ),
+    ] {
+        let rejected = sqlx::query(
+            "UPDATE device_certificate_reported_states \
+             SET observed_generation = 2, state_hash = $3, artifact_digest = $4, \
+                 report_envelope_id = $5, device_sequence = 3 \
+             WHERE tenant_id = $1::uuid AND device_id = $2::uuid",
+        )
+        .bind(&tenant)
+        .bind(&device)
+        .bind(state_hash)
+        .bind(artifact_digest)
+        .bind(envelope)
+        .execute(&store.pool)
+        .await;
+        assert!(rejected.is_err(), "{case} must fail closed");
+        let reported_after: (i64, i64, Vec<u8>, Vec<u8>, String, i64, i64) = sqlx::query_as(
+            "SELECT observed_generation, fence_epoch, state_hash, artifact_digest, \
+                    report_envelope_id, device_sequence, \
+                    (extract(epoch from received_at) * 1000000)::bigint \
+             FROM device_certificate_reported_states \
+             WHERE tenant_id = $1::uuid AND device_id = $2::uuid",
+        )
+        .bind(&tenant)
+        .bind(&device)
+        .fetch_one(&store.pool)
+        .await?;
+        assert_eq!(
+            reported_after, reported_before,
+            "rejected {case} must preserve the complete reported row"
+        );
+    }
+
+    for (case, observed, sequence, envelope) in [
+        ("generation regression", 1_i64, 3_i64, "report-stale"),
+        ("ahead of desired", 3_i64, 3_i64, "report-ahead"),
+    ] {
+        let rejected = sqlx::query(
+            "UPDATE device_certificate_reported_states \
+             SET observed_generation = $3, state_hash = $4, artifact_digest = $5, \
+                 report_envelope_id = $6, device_sequence = $7 \
+             WHERE tenant_id = $1::uuid AND device_id = $2::uuid",
+        )
+        .bind(&tenant)
+        .bind(&device)
+        .bind(observed)
+        .bind(vec![0x33_u8; 32])
+        .bind(vec![0x43_u8; 32])
+        .bind(envelope)
+        .bind(sequence)
+        .execute(&store.pool)
+        .await;
+        assert!(rejected.is_err(), "{case} must fail closed");
+        let reported_after: (i64, i64, Vec<u8>, Vec<u8>, String, i64, i64) = sqlx::query_as(
+            "SELECT observed_generation, fence_epoch, state_hash, artifact_digest, \
+                        report_envelope_id, device_sequence, \
+                        (extract(epoch from received_at) * 1000000)::bigint \
+                 FROM device_certificate_reported_states \
+                 WHERE tenant_id = $1::uuid AND device_id = $2::uuid",
+        )
+        .bind(&tenant)
+        .bind(&device)
+        .fetch_one(&store.pool)
+        .await?;
+        assert_eq!(
+            reported_after, reported_before,
+            "rejected {case} must be zero-write"
+        );
+    }
+
+    for (case, epoch, envelope, sequence) in [
+        ("non-positive epoch", 0_i64, "report-epoch", 3_i64),
+        ("untrimmed envelope", 8_i64, " report", 3_i64),
+        (
+            "non-breaking-space envelope",
+            8_i64,
+            "report\u{00a0}",
+            3_i64,
+        ),
+        ("unicode-space envelope", 8_i64, "\u{2000}report", 3_i64),
+        ("C0 control envelope", 8_i64, "report\n", 3_i64),
+        ("C1 control envelope", 8_i64, "report\u{0085}id", 3_i64),
+        ("negative sequence", 8_i64, "report-sequence", -1_i64),
+    ] {
+        let invalid_device = uuid::Uuid::new_v4().to_string();
+        insert_device_certificate_desired(&store, &tenant, &invalid_device, true, false, &[])
+            .await?;
+        let rejected = sqlx::query(
+            "INSERT INTO device_certificate_reported_states ( \
+                 tenant_id, device_id, observed_generation, fence_epoch, state_hash, \
+                 artifact_digest, report_envelope_id, device_sequence \
+             ) VALUES ($1::uuid, $2::uuid, 1, $3, $4, $5, $6, $7)",
+        )
+        .bind(&tenant)
+        .bind(&invalid_device)
+        .bind(epoch)
+        .bind(vec![0x51_u8; 32])
+        .bind(vec![0x61_u8; 32])
+        .bind(envelope)
+        .bind(sequence)
+        .execute(&store.pool)
+        .await;
+        assert!(rejected.is_err(), "{case} must fail closed");
+        let count: i64 = sqlx::query_scalar(
+            "SELECT count(*)::bigint FROM device_certificate_reported_states \
+             WHERE tenant_id = $1::uuid AND device_id = $2::uuid",
+        )
+        .bind(&tenant)
+        .bind(&invalid_device)
+        .fetch_one(&store.pool)
+        .await?;
+        assert_eq!(count, 0, "rejected {case} must be zero-write");
+    }
+
+    sqlx::query(
+        "INSERT INTO device_certificate_conditions ( \
+             tenant_id, device_id, condition_type, status, reason, observed_generation \
+         ) VALUES ($1::uuid, $2::uuid, 'Reconciling', 'True', 'DeviceReported', 2)",
+    )
+    .bind(&tenant)
+    .bind(&device)
+    .execute(&store.pool)
+    .await?;
+    let transition_before: i64 = sqlx::query_scalar(
+        "SELECT (extract(epoch FROM last_transition_at) * 1000000)::bigint \
+         FROM device_certificate_conditions \
+         WHERE tenant_id = $1::uuid AND device_id = $2::uuid \
+           AND condition_type = 'Reconciling'",
+    )
+    .bind(&tenant)
+    .bind(&device)
+    .fetch_one(&store.pool)
+    .await?;
+    let duplicate_condition = sqlx::query(
+        "UPDATE device_certificate_conditions \
+         SET status = 'True', reason = 'DeviceReported', observed_generation = 2 \
+         WHERE tenant_id = $1::uuid AND device_id = $2::uuid \
+           AND condition_type = 'Reconciling'",
+    )
+    .bind(&tenant)
+    .bind(&device)
+    .execute(&store.pool)
+    .await?;
+    assert_eq!(duplicate_condition.rows_affected(), 0);
+    let transition_after: i64 = sqlx::query_scalar(
+        "SELECT (extract(epoch FROM last_transition_at) * 1000000)::bigint \
+         FROM device_certificate_conditions \
+         WHERE tenant_id = $1::uuid AND device_id = $2::uuid \
+           AND condition_type = 'Reconciling'",
+    )
+    .bind(&tenant)
+    .bind(&device)
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(
+        transition_after, transition_before,
+        "duplicate condition must preserve transition time"
+    );
+
+    for (condition_type, status, reason) in [
+        ("Ready", "True", "StateMatches"),
+        ("Ready", "False", "QuarantinedByOperator"),
+        ("FutureCondition", "Unknown", "AwaitingDevice"),
+    ] {
+        let invalid = sqlx::query(
+            "INSERT INTO device_certificate_conditions ( \
+                 tenant_id, device_id, condition_type, status, reason, observed_generation \
+             ) VALUES ($1::uuid, $2::uuid, $3, $4, $5, 2)",
+        )
+        .bind(&tenant)
+        .bind(&device)
+        .bind(condition_type)
+        .bind(status)
+        .bind(reason)
+        .execute(&store.pool)
+        .await;
+        assert!(
+            invalid.is_err(),
+            "invalid condition tuple {condition_type}/{status}/{reason} must fail closed"
+        );
+    }
+
+    let ahead = sqlx::query(
+        "INSERT INTO device_certificate_conditions ( \
+             tenant_id, device_id, condition_type, status, reason, observed_generation \
+         ) VALUES ($1::uuid, $2::uuid, 'PendingDevice', 'True', 'AwaitingDevice', 3)",
+    )
+    .bind(&tenant)
+    .bind(&device)
+    .execute(&store.pool)
+    .await;
+    assert!(
+        ahead.is_err(),
+        "condition observation must not exceed desired generation"
+    );
+    let ahead_count: i64 = sqlx::query_scalar(
+        "SELECT count(*)::bigint FROM device_certificate_conditions \
+         WHERE tenant_id = $1::uuid AND device_id = $2::uuid \
+           AND condition_type = 'PendingDevice'",
+    )
+    .bind(&tenant)
+    .bind(&device)
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(ahead_count, 0, "rejected condition must be zero-write");
+
+    store.shutdown().await?;
+    Ok(())
+}

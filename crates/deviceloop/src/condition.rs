@@ -387,6 +387,272 @@ condition_payload!(
     DeletingReason
 );
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ConditionStateData<S, R> {
+    status: S,
+    reason: R,
+    observed_generation: Option<ObservedGeneration>,
+}
+
+macro_rules! condition_state_payload {
+    ($(#[$meta:meta])* $name:ident, $status:ty, $reason:ty) => {
+        $(#[$meta])*
+        #[derive(Debug, Clone, PartialEq, Eq)]
+        pub struct $name(ConditionStateData<$status, $reason>);
+
+        impl $name {
+            /// Return the closed status.
+            #[must_use]
+            pub const fn status(&self) -> $status { self.0.status }
+
+            /// Return the kind-specific reason.
+            #[must_use]
+            pub const fn reason(&self) -> $reason { self.0.reason }
+
+            /// Return the optional reported generation coordinate.
+            #[must_use]
+            pub const fn observed_generation(&self) -> Option<ObservedGeneration> {
+                self.0.observed_generation
+            }
+        }
+    };
+}
+
+condition_state_payload!(
+    /// Timestamp-free desired state for a `Ready` condition.
+    ReadyConditionState,
+    NotReadyStatus,
+    ReadyReason
+);
+condition_state_payload!(
+    /// Timestamp-free desired state for a `Reconciling` condition.
+    ReconcilingConditionState,
+    ConditionStatus,
+    ReconcilingReason
+);
+condition_state_payload!(
+    /// Timestamp-free desired state for a `PendingDevice` condition.
+    PendingDeviceConditionState,
+    ConditionStatus,
+    PendingDeviceReason
+);
+condition_state_payload!(
+    /// Timestamp-free desired state for a `Degraded` condition.
+    DegradedConditionState,
+    ConditionStatus,
+    DegradedReason
+);
+condition_state_payload!(
+    /// Timestamp-free desired state for a `Quarantined` condition.
+    QuarantinedConditionState,
+    ConditionStatus,
+    QuarantinedReason
+);
+condition_state_payload!(
+    /// Timestamp-free desired state for a `Deleting` condition.
+    DeletingConditionState,
+    ConditionStatus,
+    DeletingReason
+);
+
+/// Closed condition mutation state. Server transition time is deliberately absent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeviceConditionState {
+    /// Readiness cannot be set to true before complete readiness evidence exists.
+    Ready(ReadyConditionState),
+    /// Reconciliation state.
+    Reconciling(ReconcilingConditionState),
+    /// Waiting-on-device state.
+    PendingDevice(PendingDeviceConditionState),
+    /// Degradation state.
+    Degraded(DegradedConditionState),
+    /// Quarantine state.
+    Quarantined(QuarantinedConditionState),
+    /// Deletion state.
+    Deleting(DeletingConditionState),
+}
+
+impl DeviceConditionState {
+    /// Construct a not-ready state without accepting a timestamp.
+    #[must_use]
+    pub fn ready(
+        status: NotReadyStatus,
+        reason: ReadyReason,
+        observed_generation: Option<ObservedGeneration>,
+    ) -> Self {
+        Self::Ready(ReadyConditionState(ConditionStateData {
+            status,
+            reason,
+            observed_generation,
+        }))
+    }
+
+    /// Construct a reconciliation state.
+    #[must_use]
+    pub fn reconciling(
+        status: ConditionStatus,
+        reason: ReconcilingReason,
+        observed_generation: Option<ObservedGeneration>,
+    ) -> Self {
+        Self::Reconciling(ReconcilingConditionState(ConditionStateData {
+            status,
+            reason,
+            observed_generation,
+        }))
+    }
+
+    /// Construct a waiting-on-device state.
+    #[must_use]
+    pub fn pending_device(
+        status: ConditionStatus,
+        reason: PendingDeviceReason,
+        observed_generation: Option<ObservedGeneration>,
+    ) -> Self {
+        Self::PendingDevice(PendingDeviceConditionState(ConditionStateData {
+            status,
+            reason,
+            observed_generation,
+        }))
+    }
+
+    /// Construct a degradation state.
+    #[must_use]
+    pub fn degraded(
+        status: ConditionStatus,
+        reason: DegradedReason,
+        observed_generation: Option<ObservedGeneration>,
+    ) -> Self {
+        Self::Degraded(DegradedConditionState(ConditionStateData {
+            status,
+            reason,
+            observed_generation,
+        }))
+    }
+
+    /// Construct a quarantine state.
+    #[must_use]
+    pub fn quarantined(
+        status: ConditionStatus,
+        reason: QuarantinedReason,
+        observed_generation: Option<ObservedGeneration>,
+    ) -> Self {
+        Self::Quarantined(QuarantinedConditionState(ConditionStateData {
+            status,
+            reason,
+            observed_generation,
+        }))
+    }
+
+    /// Construct a deletion state.
+    #[must_use]
+    pub fn deleting(
+        status: ConditionStatus,
+        reason: DeletingReason,
+        observed_generation: Option<ObservedGeneration>,
+    ) -> Self {
+        Self::Deleting(DeletingConditionState(ConditionStateData {
+            status,
+            reason,
+            observed_generation,
+        }))
+    }
+
+    /// Closed condition kind.
+    #[must_use]
+    pub const fn kind(&self) -> DeviceConditionKind {
+        match self {
+            Self::Ready(_) => DeviceConditionKind::Ready,
+            Self::Reconciling(_) => DeviceConditionKind::Reconciling,
+            Self::PendingDevice(_) => DeviceConditionKind::PendingDevice,
+            Self::Degraded(_) => DeviceConditionKind::Degraded,
+            Self::Quarantined(_) => DeviceConditionKind::Quarantined,
+            Self::Deleting(_) => DeviceConditionKind::Deleting,
+        }
+    }
+
+    /// Stable status label for persistence lowering.
+    #[must_use]
+    pub const fn status_label(&self) -> &'static str {
+        match self {
+            Self::Ready(value) => value.status().as_label(),
+            Self::Reconciling(value) => value.status().as_label(),
+            Self::PendingDevice(value) => value.status().as_label(),
+            Self::Degraded(value) => value.status().as_label(),
+            Self::Quarantined(value) => value.status().as_label(),
+            Self::Deleting(value) => value.status().as_label(),
+        }
+    }
+
+    /// Stable kind-specific reason label for persistence lowering.
+    #[must_use]
+    pub const fn reason_label(&self) -> &'static str {
+        match self {
+            Self::Ready(value) => value.reason().as_label(),
+            Self::Reconciling(value) => value.reason().as_label(),
+            Self::PendingDevice(value) => value.reason().as_label(),
+            Self::Degraded(value) => value.reason().as_label(),
+            Self::Quarantined(value) => value.reason().as_label(),
+            Self::Deleting(value) => value.reason().as_label(),
+        }
+    }
+
+    /// Optional observed generation represented by this state.
+    #[must_use]
+    pub const fn observed_generation(&self) -> Option<ObservedGeneration> {
+        match self {
+            Self::Ready(value) => value.observed_generation(),
+            Self::Reconciling(value) => value.observed_generation(),
+            Self::PendingDevice(value) => value.observed_generation(),
+            Self::Degraded(value) => value.observed_generation(),
+            Self::Quarantined(value) => value.observed_generation(),
+            Self::Deleting(value) => value.observed_generation(),
+        }
+    }
+
+    /// Combine semantic state with the authoritative server transition time.
+    #[must_use]
+    pub fn at(self, last_transition_time: SystemTime) -> DeviceCondition {
+        match self {
+            Self::Ready(value) => DeviceCondition::ready(
+                value.status(),
+                value.reason(),
+                value.observed_generation(),
+                last_transition_time,
+            ),
+            Self::Reconciling(value) => DeviceCondition::reconciling(
+                value.status(),
+                value.reason(),
+                value.observed_generation(),
+                last_transition_time,
+            ),
+            Self::PendingDevice(value) => DeviceCondition::pending_device(
+                value.status(),
+                value.reason(),
+                value.observed_generation(),
+                last_transition_time,
+            ),
+            Self::Degraded(value) => DeviceCondition::degraded(
+                value.status(),
+                value.reason(),
+                value.observed_generation(),
+                last_transition_time,
+            ),
+            Self::Quarantined(value) => DeviceCondition::quarantined(
+                value.status(),
+                value.reason(),
+                value.observed_generation(),
+                last_transition_time,
+            ),
+            Self::Deleting(value) => DeviceCondition::deleting(
+                value.status(),
+                value.reason(),
+                value.observed_generation(),
+                last_transition_time,
+            ),
+        }
+    }
+}
+
 /// A condition whose variant statically selects the permitted reason set.
 ///
 /// `Ready=True` is intentionally not expressible:
@@ -928,6 +1194,65 @@ pub enum DeviceConditionRestore {
 }
 
 impl DeviceConditionRestore {
+    /// Restore one persisted row through the owner-controlled closed label vocabulary.
+    ///
+    /// This is the sole string-to-domain funnel for condition persistence. Kind-specific reason
+    /// parsing prevents cross-kind reason reuse, and `Ready=True` is rejected before an invalid
+    /// restore value can escape.
+    pub fn from_persisted_labels(
+        kind: &str,
+        status: &str,
+        reason: &str,
+        observed_generation: Option<ObservedGeneration>,
+        last_transition_time: SystemTime,
+    ) -> Result<Self, ConditionRestoreError> {
+        let status = parse_condition_status(status)?;
+        match kind {
+            "Ready" => {
+                if status == ConditionStatus::True {
+                    return Err(ConditionRestoreError::ReadyTrueForbidden);
+                }
+                Ok(Self::ready(
+                    status,
+                    parse_ready_reason(reason)?,
+                    observed_generation,
+                    last_transition_time,
+                ))
+            }
+            "Reconciling" => Ok(Self::reconciling(
+                status,
+                parse_reconciling_reason(reason)?,
+                observed_generation,
+                last_transition_time,
+            )),
+            "PendingDevice" => Ok(Self::pending_device(
+                status,
+                parse_pending_device_reason(reason)?,
+                observed_generation,
+                last_transition_time,
+            )),
+            "Degraded" => Ok(Self::degraded(
+                status,
+                parse_degraded_reason(reason)?,
+                observed_generation,
+                last_transition_time,
+            )),
+            "Quarantined" => Ok(Self::quarantined(
+                status,
+                parse_quarantined_reason(reason)?,
+                observed_generation,
+                last_transition_time,
+            )),
+            "Deleting" => Ok(Self::deleting(
+                status,
+                parse_deleting_reason(reason)?,
+                observed_generation,
+                last_transition_time,
+            )),
+            _ => Err(ConditionRestoreError::InvalidKind),
+        }
+    }
+
     /// Construct raw `Ready` restore input. Validation is deferred to [`DeviceCondition::restore`].
     #[must_use]
     pub fn ready(
@@ -1025,6 +1350,76 @@ impl DeviceConditionRestore {
     }
 }
 
+fn parse_condition_status(raw: &str) -> Result<ConditionStatus, ConditionRestoreError> {
+    match raw {
+        "True" => Ok(ConditionStatus::True),
+        "False" => Ok(ConditionStatus::False),
+        "Unknown" => Ok(ConditionStatus::Unknown),
+        _ => Err(ConditionRestoreError::InvalidStatus),
+    }
+}
+
+fn parse_ready_reason(raw: &str) -> Result<ReadyReason, ConditionRestoreError> {
+    match raw {
+        "StateMatches" => Ok(ReadyReason::StateMatches),
+        "StateDrift" => Ok(ReadyReason::StateDrift),
+        "AwaitingDevice" => Ok(ReadyReason::AwaitingDevice),
+        "CommandRejected" => Ok(ReadyReason::CommandRejected),
+        "CommandTimedOut" => Ok(ReadyReason::CommandTimedOut),
+        "ProtocolViolation" => Ok(ReadyReason::ProtocolViolation),
+        "ArtifactUnavailable" => Ok(ReadyReason::ArtifactUnavailable),
+        "TransportUnavailable" => Ok(ReadyReason::TransportUnavailable),
+        _ => Err(ConditionRestoreError::InvalidReason),
+    }
+}
+
+fn parse_reconciling_reason(raw: &str) -> Result<ReconcilingReason, ConditionRestoreError> {
+    match raw {
+        "DesiredAccepted" => Ok(ReconcilingReason::DesiredAccepted),
+        "CommandQueued" => Ok(ReconcilingReason::CommandQueued),
+        "DeviceReported" => Ok(ReconcilingReason::DeviceReported),
+        "StateDrift" => Ok(ReconcilingReason::StateDrift),
+        _ => Err(ConditionRestoreError::InvalidReason),
+    }
+}
+
+fn parse_pending_device_reason(raw: &str) -> Result<PendingDeviceReason, ConditionRestoreError> {
+    match raw {
+        "CommandQueued" => Ok(PendingDeviceReason::CommandQueued),
+        "AwaitingDevice" => Ok(PendingDeviceReason::AwaitingDevice),
+        "CommandTimedOut" => Ok(PendingDeviceReason::CommandTimedOut),
+        "TransportUnavailable" => Ok(PendingDeviceReason::TransportUnavailable),
+        _ => Err(ConditionRestoreError::InvalidReason),
+    }
+}
+
+fn parse_degraded_reason(raw: &str) -> Result<DegradedReason, ConditionRestoreError> {
+    match raw {
+        "CommandRejected" => Ok(DegradedReason::CommandRejected),
+        "CommandTimedOut" => Ok(DegradedReason::CommandTimedOut),
+        "ProtocolViolation" => Ok(DegradedReason::ProtocolViolation),
+        "ArtifactUnavailable" => Ok(DegradedReason::ArtifactUnavailable),
+        "TransportUnavailable" => Ok(DegradedReason::TransportUnavailable),
+        _ => Err(ConditionRestoreError::InvalidReason),
+    }
+}
+
+fn parse_quarantined_reason(raw: &str) -> Result<QuarantinedReason, ConditionRestoreError> {
+    match raw {
+        "ProtocolViolation" => Ok(QuarantinedReason::ProtocolViolation),
+        "QuarantinedByOperator" => Ok(QuarantinedReason::QuarantinedByOperator),
+        _ => Err(ConditionRestoreError::InvalidReason),
+    }
+}
+
+fn parse_deleting_reason(raw: &str) -> Result<DeletingReason, ConditionRestoreError> {
+    match raw {
+        "DeletionPending" => Ok(DeletingReason::DeletionPending),
+        "DeletionComplete" => Ok(DeletingReason::DeletionComplete),
+        _ => Err(ConditionRestoreError::InvalidReason),
+    }
+}
+
 impl From<DeviceConditionSnapshot> for DeviceConditionRestore {
     fn from(snapshot: DeviceConditionSnapshot) -> Self {
         match snapshot {
@@ -1071,6 +1466,15 @@ impl From<DeviceConditionSnapshot> for DeviceConditionRestore {
 /// Failure to validate untrusted persisted condition state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum ConditionRestoreError {
+    /// Persisted kind was outside the closed condition set.
+    #[error("persisted condition kind is invalid")]
+    InvalidKind,
+    /// Persisted status was outside the closed condition set.
+    #[error("persisted condition status is invalid")]
+    InvalidStatus,
+    /// Persisted reason was not valid for its condition kind.
+    #[error("persisted condition reason is invalid for its kind")]
+    InvalidReason,
     /// Raw state claimed `Ready=True` without the complete readiness proof.
     #[error("Ready=True is not restorable before the complete readiness proof exists")]
     ReadyTrueForbidden,
@@ -1244,6 +1648,87 @@ mod tests {
             assert_eq!(restored, condition);
             assert_eq!(restored.snapshot(), snapshot);
         }
+    }
+
+    fn assert_persisted_labels_round_trip(state: DeviceConditionState) {
+        let restored = DeviceConditionRestore::from_persisted_labels(
+            state.kind().as_label(),
+            state.status_label(),
+            state.reason_label(),
+            state.observed_generation(),
+            AT,
+        )
+        .expect("closed labels must restore");
+        assert_eq!(
+            DeviceCondition::restore(restored).expect("legal labels must form a condition"),
+            state.at(AT)
+        );
+    }
+
+    #[test]
+    fn persisted_label_funnel_round_trips_the_complete_legal_matrix() {
+        let observed = Some(ObservedGeneration::try_new(7).expect("positive generation"));
+        for status in NotReadyStatus::ALL {
+            for reason in ReadyReason::ALL {
+                assert_persisted_labels_round_trip(DeviceConditionState::ready(
+                    status, reason, observed,
+                ));
+            }
+        }
+        for status in ConditionStatus::ALL {
+            for reason in ReconcilingReason::ALL {
+                assert_persisted_labels_round_trip(DeviceConditionState::reconciling(
+                    status, reason, observed,
+                ));
+            }
+            for reason in PendingDeviceReason::ALL {
+                assert_persisted_labels_round_trip(DeviceConditionState::pending_device(
+                    status, reason, observed,
+                ));
+            }
+            for reason in DegradedReason::ALL {
+                assert_persisted_labels_round_trip(DeviceConditionState::degraded(
+                    status, reason, observed,
+                ));
+            }
+            for reason in QuarantinedReason::ALL {
+                assert_persisted_labels_round_trip(DeviceConditionState::quarantined(
+                    status, reason, observed,
+                ));
+            }
+            for reason in DeletingReason::ALL {
+                assert_persisted_labels_round_trip(DeviceConditionState::deleting(
+                    status, reason, observed,
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn persisted_label_funnel_rejects_unknown_and_cross_kind_values() {
+        let restore = |kind, status, reason| {
+            DeviceConditionRestore::from_persisted_labels(kind, status, reason, None, AT)
+        };
+        assert_eq!(
+            restore("Other", "False", "StateDrift"),
+            Err(ConditionRestoreError::InvalidKind)
+        );
+        assert_eq!(
+            restore("Ready", "Invalid", "StateDrift"),
+            Err(ConditionRestoreError::InvalidStatus)
+        );
+        assert_eq!(
+            restore("Ready", "False", "DesiredAccepted"),
+            Err(ConditionRestoreError::InvalidReason)
+        );
+        assert_eq!(
+            restore("Reconciling", "False", "ProtocolViolation"),
+            Err(ConditionRestoreError::InvalidReason)
+        );
+        assert_eq!(
+            restore("Ready", "True", "StateMatches"),
+            Err(ConditionRestoreError::ReadyTrueForbidden)
+        );
     }
 
     #[test]

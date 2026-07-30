@@ -27,6 +27,22 @@ use consistency::EventEntry;
 use diport::{EnvelopeSubjectId, OpaqueActorId, OutboxActor, OutboxEmitError, OutboxEnvelopeParts};
 use dynosaur::dynosaur;
 
+/// Narrow public façade for the identity-owned device-certificate persistence port.
+///
+/// The feature implementation remains private; adapters can name only the exact sealed inputs,
+/// restored snapshots, closed outcomes, and repository traits required to implement the port.
+pub mod device_certificate {
+    pub use crate::device_certificate::{
+        ArtifactDigest, ConditionStateBatch, ConditionUpsertOutcome, DesiredCasOutcome,
+        DesiredStateCas, DesiredStateRestore, DesiredStateSnapshot, DeviceCertificateError,
+        DeviceCertificateRepository, DeviceCertificateRepositoryError,
+        DeviceCertificateRepositoryLocal, DeviceCertificateScope, DeviceCertificateStateSnapshot,
+        DeviceSequence, DynDeviceCertificateRepository, ExpectedGeneration, PolicyHash,
+        ReportEnvelopeId, ReportedStateHash, ReportedStateRestore, ReportedStateSnapshot,
+        ReportedStateWrite, ReportedWriteOutcome,
+    };
+}
+
 // Exact fact bindings cross the domain→adapter port as zero-copy re-exports. Adapters retain the
 // normal Adapter→Domain dependency and cannot introduce an Adapter→Generated layer edge.
 pub use generated::event::identity_v1::policy_updated::CONTRACT as POLICY_UPDATED_CONTRACT;

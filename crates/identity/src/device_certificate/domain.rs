@@ -1,0 +1,854 @@
+//! Validated identity-owned device-certificate persistence values.
+//!
+//! `deviceloop` owns certificate policy and condition vocabulary. This module binds those closed
+//! values to authenticated tenant/device persistence coordinates without creating a second
+//! generation/fence authority.
+
+use std::time::SystemTime;
+
+use deviceloop::{
+    CertificatePolicy, DesiredGeneration, DeviceCondition, DeviceConditionKind,
+    DeviceConditionRestore, DeviceConditionSnapshot, DeviceConditionState, FenceEpoch,
+    ObservedGeneration,
+};
+use ids::DeviceId;
+use vocab::TenantId;
+
+const DIGEST_PREFIX: &str = "sha256:";
+const DIGEST_BYTES: usize = 32;
+const DIGEST_HEX_LEN: usize = DIGEST_BYTES * 2;
+const MAX_REPORT_ENVELOPE_ID_BYTES: usize = 256;
+const MAX_SIGNED_COORDINATE: u64 = i64::MAX as u64;
+
+/// A malformed device-certificate persistence value or restored aggregate.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum DeviceCertificateError {
+    /// Expected generation must fit the nonnegative signed database range.
+    #[error("expected generation must be in 0..=i64::MAX")]
+    InvalidExpectedGeneration,
+    /// The desired generation cannot advance beyond the database maximum.
+    #[error("desired generation cannot advance beyond i64::MAX")]
+    GenerationExhausted,
+    /// A semantic SHA-256 digest was not canonical.
+    #[error("SHA-256 digest is not canonical")]
+    InvalidDigest,
+    /// A report envelope identity was empty, unbounded, padded, or contained control bytes.
+    #[error("report envelope id is invalid")]
+    InvalidReportEnvelopeId,
+    /// Device sequence must fit the nonnegative signed database range.
+    #[error("device sequence must be in 0..=i64::MAX")]
+    InvalidDeviceSequence,
+    /// Server-owned desired timestamps were not monotonic.
+    #[error("desired-state timestamps are not monotonic")]
+    InvalidTimestampOrder,
+    /// Persisted reported state existed without authoritative desired state.
+    #[error("reported state cannot exist without desired state")]
+    ReportedWithoutDesired,
+    /// Persisted reported state exceeded desired generation.
+    #[error("reported generation cannot exceed desired generation")]
+    ReportedAheadOfDesired,
+    /// A condition batch contained the same condition kind more than once.
+    #[error("condition state batch contains a duplicate kind")]
+    DuplicateConditionKind,
+    /// A condition referenced a generation beyond desired state.
+    #[error("condition observed generation cannot exceed desired generation")]
+    ConditionAheadOfDesired,
+    /// Persisted generation coordinates were invalid.
+    #[error(transparent)]
+    InvalidGeneration(#[from] deviceloop::InvalidGenerationCoordinate),
+    /// Persisted certificate policy violated the canonical DeviceLatent vocabulary.
+    #[error(transparent)]
+    InvalidPolicy(#[from] deviceloop::CertificatePolicyError),
+    /// Persisted condition state violated the closed condition vocabulary.
+    #[error(transparent)]
+    InvalidCondition(#[from] deviceloop::ConditionRestoreError),
+    /// Persisted storage values fell outside the closed representation.
+    #[error("persisted device-certificate value is invalid")]
+    InvalidPersistedValue,
+}
+
+/// Tenant/device capability for device-certificate repository access.
+///
+/// Fields and the production constructor are crate-private, so storage scope cannot be minted from
+/// caller-controlled body data.
+///
+/// ```compile_fail
+/// use identity::ports::device_certificate::DeviceCertificateScope;
+/// use ids::DeviceId;
+/// use vocab::TenantId;
+/// fn forge(tenant: TenantId, device: DeviceId) {
+///     let _ = DeviceCertificateScope { tenant, device, seal: () };
+/// }
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DeviceCertificateScope {
+    tenant: TenantId,
+    device: DeviceId,
+    seal: (),
+}
+
+impl DeviceCertificateScope {
+    #[allow(dead_code)]
+    pub(crate) fn from_authorized(tenant: TenantId, device: DeviceId) -> Self {
+        Self {
+            tenant,
+            device,
+            seal: (),
+        }
+    }
+
+    /// Owning tenant used for RLS lowering.
+    #[must_use]
+    pub const fn tenant(&self) -> TenantId {
+        self.tenant
+    }
+
+    /// Authorized path device.
+    #[must_use]
+    pub const fn device(&self) -> DeviceId {
+        self.device
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    /// Test-only scope constructor for adapter conformance.
+    #[must_use]
+    pub fn for_test(tenant: TenantId, device: DeviceId) -> Self {
+        Self::from_authorized(tenant, device)
+    }
+}
+
+/// Nonnegative generation supplied to desired-state compare-and-swap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ExpectedGeneration(u64);
+
+impl ExpectedGeneration {
+    /// Validate request input. Zero is reserved for an absent desired row.
+    pub fn try_new(raw: u64) -> Result<Self, DeviceCertificateError> {
+        (raw <= MAX_SIGNED_COORDINATE)
+            .then_some(Self(raw))
+            .ok_or(DeviceCertificateError::InvalidExpectedGeneration)
+    }
+
+    /// Restore a signed database value.
+    pub fn restore(raw: i64) -> Result<Self, DeviceCertificateError> {
+        u64::try_from(raw)
+            .map_err(|_| DeviceCertificateError::InvalidExpectedGeneration)
+            .and_then(Self::try_new)
+    }
+
+    /// Database/request representation.
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+
+    /// Derive the only desired generation valid for this expectation.
+    pub fn next(self) -> Result<DesiredGeneration, DeviceCertificateError> {
+        let next = self
+            .0
+            .checked_add(1)
+            .filter(|value| *value <= MAX_SIGNED_COORDINATE)
+            .ok_or(DeviceCertificateError::GenerationExhausted)?;
+        DesiredGeneration::try_new(next).map_err(DeviceCertificateError::from)
+    }
+}
+
+fn parse_digest(raw: &str) -> Result<[u8; DIGEST_BYTES], DeviceCertificateError> {
+    let Some(hex) = raw.strip_prefix(DIGEST_PREFIX) else {
+        return Err(DeviceCertificateError::InvalidDigest);
+    };
+    if hex.len() != DIGEST_HEX_LEN
+        || !hex
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(DeviceCertificateError::InvalidDigest);
+    }
+    let mut bytes = [0_u8; DIGEST_BYTES];
+    for (index, pair) in hex.as_bytes().chunks_exact(2).enumerate() {
+        bytes[index] = (hex_nibble(pair[0]) << 4) | hex_nibble(pair[1]);
+    }
+    Ok(bytes)
+}
+
+const fn hex_nibble(byte: u8) -> u8 {
+    match byte {
+        b'0'..=b'9' => byte - b'0',
+        b'a'..=b'f' => byte - b'a' + 10,
+        _ => 0,
+    }
+}
+
+fn restore_digest(bytes: &[u8]) -> Result<[u8; DIGEST_BYTES], DeviceCertificateError> {
+    bytes
+        .try_into()
+        .map_err(|_| DeviceCertificateError::InvalidDigest)
+}
+
+macro_rules! semantic_digest {
+    ($(#[$meta:meta])* $name:ident) => {
+        $(#[$meta])*
+        #[derive(Clone, PartialEq, Eq, Hash)]
+        pub struct $name([u8; DIGEST_BYTES]);
+
+        impl std::fmt::Debug for $name {
+            fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str(concat!(stringify!($name), "(<sha256>)"))
+            }
+        }
+
+        impl $name {
+            /// Parse the canonical `sha256:<lowercase-hex>` boundary representation.
+            pub fn parse(raw: &str) -> Result<Self, DeviceCertificateError> {
+                parse_digest(raw).map(Self)
+            }
+
+            /// Restore the exact 32-byte persistence representation.
+            pub fn restore(bytes: &[u8]) -> Result<Self, DeviceCertificateError> {
+                restore_digest(bytes).map(Self)
+            }
+
+            /// Borrow bytes for provider binding.
+            #[must_use]
+            pub const fn as_bytes(&self) -> &[u8; DIGEST_BYTES] {
+                &self.0
+            }
+        }
+    };
+}
+
+semantic_digest!(
+    /// Database-owned digest of the canonical desired certificate policy.
+    PolicyHash
+);
+semantic_digest!(
+    /// Digest of the public certificate state reported by a device.
+    ReportedStateHash
+);
+semantic_digest!(
+    /// Digest of the public certificate artifact reported by a device.
+    ArtifactDigest
+);
+
+/// Stable identity of a reported-state envelope.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ReportEnvelopeId(String);
+
+impl ReportEnvelopeId {
+    /// Parse a bounded canonical envelope identity.
+    pub fn parse(raw: &str) -> Result<Self, DeviceCertificateError> {
+        if raw.is_empty()
+            || raw.trim() != raw
+            || raw.len() > MAX_REPORT_ENVELOPE_ID_BYTES
+            || raw.chars().any(char::is_control)
+        {
+            return Err(DeviceCertificateError::InvalidReportEnvelopeId);
+        }
+        Ok(Self(raw.to_owned()))
+    }
+
+    /// Borrow the persistence value.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Nonnegative device-provided report sequence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DeviceSequence(u64);
+
+impl DeviceSequence {
+    /// Validate report input.
+    pub fn try_new(raw: u64) -> Result<Self, DeviceCertificateError> {
+        (raw <= MAX_SIGNED_COORDINATE)
+            .then_some(Self(raw))
+            .ok_or(DeviceCertificateError::InvalidDeviceSequence)
+    }
+
+    /// Restore a signed database value.
+    pub fn restore(raw: i64) -> Result<Self, DeviceCertificateError> {
+        u64::try_from(raw)
+            .map_err(|_| DeviceCertificateError::InvalidDeviceSequence)
+            .and_then(Self::try_new)
+    }
+
+    /// Database/wire representation.
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+/// Sealed desired-state CAS input. Policy hash and server time are deliberately absent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DesiredStateCas {
+    scope: DeviceCertificateScope,
+    expected_generation: ExpectedGeneration,
+    policy: CertificatePolicy,
+}
+
+impl DesiredStateCas {
+    #[allow(dead_code)]
+    pub(crate) fn from_authorized(
+        scope: DeviceCertificateScope,
+        expected_generation: ExpectedGeneration,
+        policy: CertificatePolicy,
+    ) -> Result<Self, DeviceCertificateError> {
+        expected_generation.next()?;
+        Ok(Self {
+            scope,
+            expected_generation,
+            policy,
+        })
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    /// Test-only constructor for downstream adapter conformance.
+    pub fn for_test(
+        scope: DeviceCertificateScope,
+        expected_generation: ExpectedGeneration,
+        policy: CertificatePolicy,
+    ) -> Result<Self, DeviceCertificateError> {
+        Self::from_authorized(scope, expected_generation, policy)
+    }
+
+    /// Tenant/device persistence scope.
+    #[must_use]
+    pub const fn scope(&self) -> DeviceCertificateScope {
+        self.scope
+    }
+
+    /// Expected current generation.
+    #[must_use]
+    pub const fn expected_generation(&self) -> ExpectedGeneration {
+        self.expected_generation
+    }
+
+    /// Strictly newer generation derived from the expectation.
+    pub fn next_generation(&self) -> Result<DesiredGeneration, DeviceCertificateError> {
+        self.expected_generation.next()
+    }
+
+    /// Canonical desired policy. No independent hash can be supplied.
+    #[must_use]
+    pub const fn policy(&self) -> &CertificatePolicy {
+        &self.policy
+    }
+}
+
+/// Raw desired row accepted only by [`DesiredStateSnapshot::restore`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DesiredStateRestore {
+    generation: u64,
+    policy_hash: PolicyHash,
+    policy: CertificatePolicy,
+    created_at: SystemTime,
+    updated_at: SystemTime,
+}
+
+impl DesiredStateRestore {
+    /// Assemble raw database values for the restore funnel.
+    #[must_use]
+    pub fn new(
+        generation: u64,
+        policy_hash: PolicyHash,
+        policy: CertificatePolicy,
+        created_at: SystemTime,
+        updated_at: SystemTime,
+    ) -> Self {
+        Self {
+            generation,
+            policy_hash,
+            policy,
+            created_at,
+            updated_at,
+        }
+    }
+}
+
+/// Always-valid desired persistence snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DesiredStateSnapshot {
+    generation: DesiredGeneration,
+    policy_hash: PolicyHash,
+    policy: CertificatePolicy,
+    created_at: SystemTime,
+    updated_at: SystemTime,
+}
+
+impl DesiredStateSnapshot {
+    /// Validate one raw desired row.
+    pub fn restore(input: DesiredStateRestore) -> Result<Self, DeviceCertificateError> {
+        if input.updated_at < input.created_at {
+            return Err(DeviceCertificateError::InvalidTimestampOrder);
+        }
+        Ok(Self {
+            generation: DesiredGeneration::try_new(input.generation)?,
+            policy_hash: input.policy_hash,
+            policy: input.policy,
+            created_at: input.created_at,
+            updated_at: input.updated_at,
+        })
+    }
+
+    /// Desired high-water generation.
+    #[must_use]
+    pub const fn generation(&self) -> DesiredGeneration {
+        self.generation
+    }
+
+    /// Database-generated policy hash.
+    #[must_use]
+    pub const fn policy_hash(&self) -> &PolicyHash {
+        &self.policy_hash
+    }
+
+    /// Canonical desired policy.
+    #[must_use]
+    pub const fn policy(&self) -> &CertificatePolicy {
+        &self.policy
+    }
+
+    /// Database creation time.
+    #[must_use]
+    pub const fn created_at(&self) -> SystemTime {
+        self.created_at
+    }
+
+    /// Database update time.
+    #[must_use]
+    pub const fn updated_at(&self) -> SystemTime {
+        self.updated_at
+    }
+}
+
+/// Sealed reported-state high-water mutation input.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReportedStateWrite {
+    scope: DeviceCertificateScope,
+    observed_generation: ObservedGeneration,
+    fence_epoch: FenceEpoch,
+    state_hash: ReportedStateHash,
+    artifact_digest: ArtifactDigest,
+    report_envelope_id: ReportEnvelopeId,
+    device_sequence: DeviceSequence,
+    expires_at: Option<SystemTime>,
+    device_observed_at: Option<SystemTime>,
+}
+
+impl ReportedStateWrite {
+    #[allow(clippy::too_many_arguments, dead_code)]
+    pub(crate) fn from_authenticated_report(
+        scope: DeviceCertificateScope,
+        observed_generation: ObservedGeneration,
+        fence_epoch: FenceEpoch,
+        state_hash: ReportedStateHash,
+        artifact_digest: ArtifactDigest,
+        report_envelope_id: ReportEnvelopeId,
+        device_sequence: DeviceSequence,
+        expires_at: Option<SystemTime>,
+        device_observed_at: Option<SystemTime>,
+    ) -> Self {
+        Self {
+            scope,
+            observed_generation,
+            fence_epoch,
+            state_hash,
+            artifact_digest,
+            report_envelope_id,
+            device_sequence,
+            expires_at,
+            device_observed_at,
+        }
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    /// Test-only constructor for adapter conformance.
+    #[allow(clippy::too_many_arguments)]
+    pub fn for_test(
+        scope: DeviceCertificateScope,
+        observed_generation: ObservedGeneration,
+        fence_epoch: FenceEpoch,
+        state_hash: ReportedStateHash,
+        artifact_digest: ArtifactDigest,
+        report_envelope_id: ReportEnvelopeId,
+        device_sequence: DeviceSequence,
+        expires_at: Option<SystemTime>,
+        device_observed_at: Option<SystemTime>,
+    ) -> Self {
+        Self::from_authenticated_report(
+            scope,
+            observed_generation,
+            fence_epoch,
+            state_hash,
+            artifact_digest,
+            report_envelope_id,
+            device_sequence,
+            expires_at,
+            device_observed_at,
+        )
+    }
+
+    /// Tenant/device persistence scope.
+    #[must_use]
+    pub const fn scope(&self) -> DeviceCertificateScope {
+        self.scope
+    }
+
+    /// Positive observed generation.
+    #[must_use]
+    pub const fn observed_generation(&self) -> ObservedGeneration {
+        self.observed_generation
+    }
+
+    /// Positive report epoch, recorded but not validated as current by this repository.
+    #[must_use]
+    pub const fn fence_epoch(&self) -> FenceEpoch {
+        self.fence_epoch
+    }
+
+    /// Reported public-state digest.
+    #[must_use]
+    pub const fn state_hash(&self) -> &ReportedStateHash {
+        &self.state_hash
+    }
+
+    /// Reported public artifact digest.
+    #[must_use]
+    pub const fn artifact_digest(&self) -> &ArtifactDigest {
+        &self.artifact_digest
+    }
+
+    /// Stable report envelope identity.
+    #[must_use]
+    pub const fn report_envelope_id(&self) -> &ReportEnvelopeId {
+        &self.report_envelope_id
+    }
+
+    /// Device sequence high-water candidate.
+    #[must_use]
+    pub const fn device_sequence(&self) -> DeviceSequence {
+        self.device_sequence
+    }
+
+    /// Informative observed expiry.
+    #[must_use]
+    pub const fn expires_at(&self) -> Option<SystemTime> {
+        self.expires_at
+    }
+
+    /// Informative device clock value.
+    #[must_use]
+    pub const fn device_observed_at(&self) -> Option<SystemTime> {
+        self.device_observed_at
+    }
+}
+
+/// Raw reported row accepted only by [`ReportedStateSnapshot::restore`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReportedStateRestore {
+    observed_generation: u64,
+    fence_epoch: u64,
+    state_hash: ReportedStateHash,
+    artifact_digest: ArtifactDigest,
+    report_envelope_id: ReportEnvelopeId,
+    device_sequence: DeviceSequence,
+    expires_at: Option<SystemTime>,
+    device_observed_at: Option<SystemTime>,
+    received_at: SystemTime,
+}
+
+impl ReportedStateRestore {
+    /// Assemble raw database values for the restore funnel.
+    #[allow(clippy::too_many_arguments)]
+    #[must_use]
+    pub fn new(
+        observed_generation: u64,
+        fence_epoch: u64,
+        state_hash: ReportedStateHash,
+        artifact_digest: ArtifactDigest,
+        report_envelope_id: ReportEnvelopeId,
+        device_sequence: DeviceSequence,
+        expires_at: Option<SystemTime>,
+        device_observed_at: Option<SystemTime>,
+        received_at: SystemTime,
+    ) -> Self {
+        Self {
+            observed_generation,
+            fence_epoch,
+            state_hash,
+            artifact_digest,
+            report_envelope_id,
+            device_sequence,
+            expires_at,
+            device_observed_at,
+            received_at,
+        }
+    }
+}
+
+/// Always-valid positive reported high-water snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReportedStateSnapshot {
+    observed_generation: ObservedGeneration,
+    fence_epoch: FenceEpoch,
+    state_hash: ReportedStateHash,
+    artifact_digest: ArtifactDigest,
+    report_envelope_id: ReportEnvelopeId,
+    device_sequence: DeviceSequence,
+    expires_at: Option<SystemTime>,
+    device_observed_at: Option<SystemTime>,
+    received_at: SystemTime,
+}
+
+impl ReportedStateSnapshot {
+    /// Validate one raw reported row.
+    pub fn restore(input: ReportedStateRestore) -> Result<Self, DeviceCertificateError> {
+        Ok(Self {
+            observed_generation: ObservedGeneration::try_new(input.observed_generation)?,
+            fence_epoch: FenceEpoch::try_new(input.fence_epoch)?,
+            state_hash: input.state_hash,
+            artifact_digest: input.artifact_digest,
+            report_envelope_id: input.report_envelope_id,
+            device_sequence: input.device_sequence,
+            expires_at: input.expires_at,
+            device_observed_at: input.device_observed_at,
+            received_at: input.received_at,
+        })
+    }
+
+    /// Positive observed generation.
+    #[must_use]
+    pub const fn observed_generation(&self) -> ObservedGeneration {
+        self.observed_generation
+    }
+
+    /// Report-carried epoch.
+    #[must_use]
+    pub const fn fence_epoch(&self) -> FenceEpoch {
+        self.fence_epoch
+    }
+
+    /// Reported public-state digest.
+    #[must_use]
+    pub const fn state_hash(&self) -> &ReportedStateHash {
+        &self.state_hash
+    }
+
+    /// Reported public artifact digest.
+    #[must_use]
+    pub const fn artifact_digest(&self) -> &ArtifactDigest {
+        &self.artifact_digest
+    }
+
+    /// Stable report envelope identity.
+    #[must_use]
+    pub const fn report_envelope_id(&self) -> &ReportEnvelopeId {
+        &self.report_envelope_id
+    }
+
+    /// Accepted device sequence.
+    #[must_use]
+    pub const fn device_sequence(&self) -> DeviceSequence {
+        self.device_sequence
+    }
+
+    /// Informative observed expiry.
+    #[must_use]
+    pub const fn expires_at(&self) -> Option<SystemTime> {
+        self.expires_at
+    }
+
+    /// Informative device observation time.
+    #[must_use]
+    pub const fn device_observed_at(&self) -> Option<SystemTime> {
+        self.device_observed_at
+    }
+
+    /// Authoritative database receive time.
+    #[must_use]
+    pub const fn received_at(&self) -> SystemTime {
+        self.received_at
+    }
+}
+
+/// Duplicate-free, canonically ordered timestamp-free condition mutations.
+///
+/// Production callers cannot mint a batch directly; an authorized identity use case must perform
+/// that step inside this crate.
+///
+/// ```compile_fail
+/// use identity::ports::device_certificate::ConditionStateBatch;
+///
+/// let _ = ConditionStateBatch::new(Vec::new());
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConditionStateBatch(Vec<DeviceConditionState>);
+
+impl ConditionStateBatch {
+    /// Validate one mutation batch without accepting transition timestamps.
+    #[allow(dead_code)]
+    pub(crate) fn new(
+        mut states: Vec<DeviceConditionState>,
+    ) -> Result<Self, DeviceCertificateError> {
+        states.sort_by_key(|state| condition_rank(state.kind()));
+        if states
+            .windows(2)
+            .any(|pair| pair[0].kind() == pair[1].kind())
+        {
+            return Err(DeviceCertificateError::DuplicateConditionKind);
+        }
+        Ok(Self(states))
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    /// Test-only constructor for downstream adapter conformance.
+    pub fn for_test(states: Vec<DeviceConditionState>) -> Result<Self, DeviceCertificateError> {
+        Self::new(states)
+    }
+
+    /// Borrow canonical condition states.
+    #[must_use]
+    pub fn states(&self) -> &[DeviceConditionState] {
+        &self.0
+    }
+
+    /// Consume for adapter lowering.
+    #[must_use]
+    pub fn into_states(self) -> Vec<DeviceConditionState> {
+        self.0
+    }
+}
+
+fn condition_rank(kind: DeviceConditionKind) -> usize {
+    DeviceConditionKind::ALL
+        .iter()
+        .position(|candidate| *candidate == kind)
+        .unwrap_or(DeviceConditionKind::ALL.len())
+}
+
+fn snapshot_observed_generation(snapshot: &DeviceConditionSnapshot) -> Option<ObservedGeneration> {
+    match snapshot {
+        DeviceConditionSnapshot::Ready(value) => value.observed_generation(),
+        DeviceConditionSnapshot::Reconciling(value) => value.observed_generation(),
+        DeviceConditionSnapshot::PendingDevice(value) => value.observed_generation(),
+        DeviceConditionSnapshot::Degraded(value) => value.observed_generation(),
+        DeviceConditionSnapshot::Quarantined(value) => value.observed_generation(),
+        DeviceConditionSnapshot::Deleting(value) => value.observed_generation(),
+    }
+}
+
+/// Complete validated persistence snapshot. It carries no current-fence or readiness evidence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceCertificateStateSnapshot {
+    scope: DeviceCertificateScope,
+    desired: DesiredStateSnapshot,
+    reported: Option<ReportedStateSnapshot>,
+    conditions: Vec<DeviceConditionSnapshot>,
+}
+
+impl DeviceCertificateStateSnapshot {
+    /// Restore all rows while preserving storage-level generation invariants.
+    pub fn restore(
+        scope: DeviceCertificateScope,
+        desired: DesiredStateRestore,
+        reported: Option<ReportedStateRestore>,
+        conditions: Vec<DeviceConditionRestore>,
+    ) -> Result<Self, DeviceCertificateError> {
+        let desired = DesiredStateSnapshot::restore(desired)?;
+        let reported = reported.map(ReportedStateSnapshot::restore).transpose()?;
+        if reported
+            .as_ref()
+            .is_some_and(|value| value.observed_generation().get() > desired.generation().get())
+        {
+            return Err(DeviceCertificateError::ReportedAheadOfDesired);
+        }
+        let mut conditions = conditions
+            .into_iter()
+            .map(DeviceCondition::restore)
+            .map(|value| value.map(|condition| condition.snapshot()))
+            .collect::<Result<Vec<_>, _>>()?;
+        conditions.sort_by_key(|condition| condition_rank(condition.kind()));
+        if conditions
+            .windows(2)
+            .any(|pair| pair[0].kind() == pair[1].kind())
+        {
+            return Err(DeviceCertificateError::DuplicateConditionKind);
+        }
+        if conditions.iter().any(|condition| {
+            snapshot_observed_generation(condition)
+                .is_some_and(|generation| generation.get() > desired.generation().get())
+        }) {
+            return Err(DeviceCertificateError::ConditionAheadOfDesired);
+        }
+        Ok(Self {
+            scope,
+            desired,
+            reported,
+            conditions,
+        })
+    }
+
+    /// Tenant/device persistence scope.
+    #[must_use]
+    pub const fn scope(&self) -> DeviceCertificateScope {
+        self.scope
+    }
+
+    /// Desired snapshot.
+    #[must_use]
+    pub const fn desired(&self) -> &DesiredStateSnapshot {
+        &self.desired
+    }
+
+    /// Optional positive reported high-water.
+    #[must_use]
+    pub const fn reported(&self) -> Option<&ReportedStateSnapshot> {
+        self.reported.as_ref()
+    }
+
+    /// Canonically ordered current conditions.
+    #[must_use]
+    pub fn conditions(&self) -> &[DeviceConditionSnapshot] {
+        &self.conditions
+    }
+}
+
+/// Closed storage result of a reported high-water attempt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReportedWriteOutcome {
+    /// The reported high-water advanced.
+    Applied(ReportedStateSnapshot),
+    /// No desired row exists for this tenant/device.
+    MissingDesired,
+    /// The observed generation was below current reported high-water.
+    StaleGeneration,
+    /// The observed generation exceeded desired state.
+    AheadOfDesired,
+    /// The same generation repeated the complete persisted report payload.
+    Duplicate,
+    /// The same generation carried any different report payload field.
+    StateConflict,
+    /// A newer generation did not advance the device sequence.
+    StaleSequence,
+}
+
+/// Closed storage result of one condition-state batch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConditionUpsertOutcome {
+    /// The batch was accepted; returned snapshots contain database transition times.
+    Applied(Vec<DeviceConditionSnapshot>),
+    /// No desired row exists for this tenant/device.
+    MissingDesired,
+    /// At least one condition referenced a generation beyond desired state.
+    AheadOfDesired,
+}
+
+/// Compile-time proof that independently meaningful digests cannot be swapped.
+///
+/// ```compile_fail
+/// use identity::ports::device_certificate::{ArtifactDigest, ReportedStateHash};
+/// fn wrong(artifact: ArtifactDigest) -> ReportedStateHash { artifact }
+/// ```
+const _: () = ();

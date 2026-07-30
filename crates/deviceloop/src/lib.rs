@@ -25,13 +25,15 @@ pub use command::{
 };
 pub use condition::{
     ConditionRestoreError, ConditionStatus, DegradedCondition, DegradedConditionRestore,
-    DegradedConditionSnapshot, DegradedReason, DeletingCondition, DeletingConditionRestore,
-    DeletingConditionSnapshot, DeletingReason, DeviceCondition, DeviceConditionKind,
-    DeviceConditionRestore, DeviceConditionSnapshot, NotReadyStatus, PendingDeviceCondition,
-    PendingDeviceConditionRestore, PendingDeviceConditionSnapshot, PendingDeviceReason,
+    DegradedConditionSnapshot, DegradedConditionState, DegradedReason, DeletingCondition,
+    DeletingConditionRestore, DeletingConditionSnapshot, DeletingConditionState, DeletingReason,
+    DeviceCondition, DeviceConditionKind, DeviceConditionRestore, DeviceConditionSnapshot,
+    DeviceConditionState, NotReadyStatus, PendingDeviceCondition, PendingDeviceConditionRestore,
+    PendingDeviceConditionSnapshot, PendingDeviceConditionState, PendingDeviceReason,
     QuarantinedCondition, QuarantinedConditionRestore, QuarantinedConditionSnapshot,
-    QuarantinedReason, ReadyCondition, ReadyConditionRestore, ReadyConditionSnapshot, ReadyReason,
-    ReconcilingCondition, ReconcilingConditionRestore, ReconcilingConditionSnapshot,
+    QuarantinedConditionState, QuarantinedReason, ReadyCondition, ReadyConditionRestore,
+    ReadyConditionSnapshot, ReadyConditionState, ReadyReason, ReconcilingCondition,
+    ReconcilingConditionRestore, ReconcilingConditionSnapshot, ReconcilingConditionState,
     ReconcilingReason,
 };
 pub use generation::{
@@ -41,8 +43,8 @@ pub use generation::{
     ObservedGeneration, ObservedHighWaterRestore, ReportOutcome,
 };
 pub use policy::{
-    CertificatePolicyDurations, CertificatePolicyError, CertificateRenewBeforeSeconds,
-    CertificateValiditySeconds,
+    CertificateKeyUsage, CertificatePolicy, CertificatePolicyDurations, CertificatePolicyError,
+    CertificateRenewBeforeSeconds, CertificateSan, CertificateValiditySeconds,
 };
 
 // 证书生命周期 API 以 `diport::CertScope`（tenant + device）为第一等输入——租户边界 correct-by-construction

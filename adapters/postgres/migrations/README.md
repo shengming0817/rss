@@ -863,3 +863,33 @@ grant_id)` 选择候选，再按 refresh id 稳定取得 family 锁并显式删�
 这是 forward-only、non-rolling hard cutover。旧 binary 停止且连接排空后由唯一 migration runner 应用；
 ledger 到达 `79` 后只启动采用同一锁序的新 binary。若迁移失败且 ledger 未推进，确认事务完整回滚后重试；
 若 ledger 已到 `79`，不得回退旧 binary 或修改历史 migration，只能提交新的前向修复。
+
+### 0081 设备证书 desired/reported/condition 权威状态
+
+`0081` 新建 `device_certificate_desired_states`、`device_certificate_reported_states` 与
+`device_certificate_conditions` 三张 tenant/device-scoped 表。它们只承载 #1896 的单调
+desired generation、reported high-water 和闭值 condition；command、ingress receipt、幂等 operation
+与 scheduler wake 由后续 owner 在同一 tenant transaction 中组合，本 migration 不提前建表或
+双写。
+
+desired 只持久化 generation 与 canonical policy，不保存 fence epoch；closed key usage 以
+`client_auth`/`server_auth` 两个 `NOT NULL` boolean 表达并要求至少一个为真，杜绝开放文本值与排序漂移。
+`sans` 必须按 `C` collation 严格排序且唯一，并同时受数量、非空、字符长度、Unicode trim 与控制字符
+约束。固定 `search_path=pg_catalog, pg_temp` 的数据库 trigger 按 `clientAuth`、`serverAuth` 顺序以
+唯一 framing 计算 `policy_hash`，并由 PostgreSQL server time 生成全部权威时间；serving role 对 hash
+与时间列零写权限。
+
+reported 只接受正 fence epoch，并把 `(observed_generation, device_sequence)` 作为同时严格递增的
+高水位；观测 generation 不得超前当前 desired，精确重复为零写入且保留 `received_at`。condition
+使用 type/status/reason 闭矩阵，拒绝 `Ready=True` 与超前观测，精确重复同样保留 transition time。
+初始 reported 状态仍是无行，不持久化 generation zero。
+
+三表同 migration 开启并强制 RLS，使用 canonical `rss.tenant_id` policy。`rss_app_read` 只获
+`SELECT`；`rss_app` 只获 `SELECT` 和精确 mutation 列的 `INSERT`/`UPDATE`，没有 table-level
+`INSERT`、`UPDATE`、`DELETE`、`TRUNCATE`、`REFERENCES` 或 `TRIGGER`。
+
+这是 additive、forward-only 切换：唯一 migration runner 在 saga definition identity 的 `0080` 后把
+ledger 从 `80` 推进到 `81`，通过
+schema/RLS/ACL 与真实 PostgreSQL 行为探针后才启动新 binary。失败且 ledger 未推进时修正
+前置条件后重跑；ledger 已为 `81` 时不得修改 `0081` 或写 down migration，只能新建前向
+修复 migration。

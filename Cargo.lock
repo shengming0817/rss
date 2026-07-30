@@ -4311,6 +4311,7 @@ dependencies = [
  "base64",
  "bootstrap",
  "consistency",
+ "deviceloop",
  "diagctx",
  "diport",
  "eventexec",

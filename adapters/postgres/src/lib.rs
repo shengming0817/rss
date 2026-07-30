@@ -56,6 +56,8 @@ mod credential_repo;
 mod dead_letter;
 mod dead_letter_payload;
 mod delivery_policy;
+#[cfg(feature = "domain-identity")]
+mod device_certificate;
 mod dlq;
 mod dlx_lifecycle;
 mod emitter;
@@ -153,6 +155,8 @@ pub use consumer_tx::{PgConsumerTxOutcome, PgConsumerTxRequeue};
 pub use credential_repo::PgCredentialRepo;
 pub use dead_letter::PgDeadLetterStore;
 pub use dead_letter_payload::DlxPayloadProtector;
+#[cfg(feature = "domain-identity")]
+pub use device_certificate::PgDeviceCertificateRepository;
 pub use dlq::PgDlqStore;
 pub use dlx_lifecycle::{PgDlxArchiveClaim, PgDlxLifecycleRepository, PgDlxLifecycleRuntime};
 pub use emitter::PgEmitter;

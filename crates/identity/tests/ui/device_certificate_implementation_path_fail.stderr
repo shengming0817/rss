@@ -1,0 +1,11 @@
+error[E0603]: module `device_certificate` is private
+ --> tests/ui/device_certificate_implementation_path_fail.rs:1:15
+  |
+1 | use identity::device_certificate::DeviceCertificateScope;
+  |               ^^^^^^^^^^^^^^^^^^ private module
+  |
+note: the module `device_certificate` is defined here
+ --> src/lib.rs
+  |
+  | mod device_certificate;
+  | ^^^^^^^^^^^^^^^^^^^^^^

@@ -115,6 +115,13 @@ impl TenantScopeHandle for identity::ports::TenantRepoScope {
     }
 }
 
+#[cfg(feature = "domain-identity")]
+impl TenantScopeHandle for identity::ports::device_certificate::DeviceCertificateScope {
+    fn tenant(self) -> TenantId {
+        identity::ports::device_certificate::DeviceCertificateScope::tenant(&self)
+    }
+}
+
 #[cfg(feature = "domain-audit")]
 impl TenantScopeHandle for audit::ports::TenantRepoScope {
     fn tenant(self) -> TenantId {
@@ -419,6 +426,23 @@ impl<L> PgReadPool<L> {
     {
         let tenant = scope.tenant();
         tenant_scoped_read_map(&self.pool, tenant, read, map_storage).await
+    }
+
+    /// Run a multi-statement tenant read against one repeatable, read-only PostgreSQL snapshot.
+    pub(crate) async fn repeatable_read_map<S, T, F, E>(
+        &self,
+        scope: S,
+        read: F,
+        map_storage: impl Fn(sqlx::Error) -> E + Send,
+    ) -> Result<T, E>
+    where
+        S: TenantScopeHandle,
+        F: for<'c> FnOnce(&'c mut PgConnection) -> BoxFuture<'c, Result<T, E>> + Send,
+        E: Send,
+        T: Send,
+    {
+        let tenant = scope.tenant();
+        tenant_scoped_repeatable_read_map(&self.pool, tenant, read, map_storage).await
     }
 }
 
@@ -830,6 +854,40 @@ where
     }
 }
 
+/// Tenant-scoped multi-statement read with one stable PostgreSQL snapshot.
+pub(crate) async fn tenant_scoped_repeatable_read_map<T, F, E>(
+    pool: &PgPool,
+    tenant: TenantId,
+    read: F,
+    map_storage: impl Fn(sqlx::Error) -> E + Send,
+) -> Result<T, E>
+where
+    F: for<'c> FnOnce(&'c mut PgConnection) -> BoxFuture<'c, Result<T, E>> + Send,
+    E: Send,
+    T: Send,
+{
+    let mut tx = begin_tenant_repeatable_read(pool, tenant)
+        .await
+        .map_err(&map_storage)?;
+    match read(&mut tx).await {
+        Ok(value) => {
+            tx.commit().await.map_err(map_storage)?;
+            Ok(value)
+        }
+        Err(error) => {
+            if let Err(rollback) = tx.rollback().await {
+                tracing::warn!(
+                    target: "postgres",
+                    tenant_id = %tenant,
+                    error = %secure::redact_error(&rollback),
+                    "tenant_scoped_repeatable_read_map: rollback failed after read error"
+                );
+            }
+            Err(error)
+        }
+    }
+}
+
 /// Open the shared read-lane transaction skeleton atomically as PostgreSQL `READ ONLY` before
 /// executing the first tenant-scoped statement.
 ///
@@ -840,6 +898,17 @@ async fn begin_tenant_read(
     tenant: TenantId,
 ) -> Result<Transaction<'static, Postgres>, sqlx::Error> {
     let mut tx = pool.begin_with("BEGIN READ ONLY").await?;
+    set_local_tenant(&mut tx, tenant).await?;
+    Ok(tx)
+}
+
+async fn begin_tenant_repeatable_read(
+    pool: &PgPool,
+    tenant: TenantId,
+) -> Result<Transaction<'static, Postgres>, sqlx::Error> {
+    let mut tx = pool
+        .begin_with("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        .await?;
     set_local_tenant(&mut tx, tenant).await?;
     Ok(tx)
 }
