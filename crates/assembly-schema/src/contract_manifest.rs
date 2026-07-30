@@ -107,6 +107,7 @@ impl ContractManifest {
     /// （DRY 单源：R5 存在性 + R6 防逃逸统一消费 schema 文件完整性，含 saga step 引用）。
     pub fn declared_schema_files(&self) -> Vec<&str> {
         let mut files = self.schemas.declared_files();
+        files.extend(self.schemas.responses.values().map(String::as_str));
         if let Some(saga) = &self.saga {
             files.extend(saga.steps.iter().map(|s| s.output_schema.as_str()));
         }
@@ -317,12 +318,36 @@ pub enum WorkflowRequirement {
 pub struct DeviceLatentCapability {
     #[serde(rename = "loop")]
     pub loop_kind: DeviceLatentLoop,
+    pub profile: DeviceLatentProfile,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum DeviceLatentLoop {
     Reconcile,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(tag = "resourceKind", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum DeviceLatentProfile {
+    DeviceCertificate { links: DeviceCertificateLinks },
+}
+
+impl DeviceLatentProfile {
+    pub fn resource_kind(&self) -> &'static str {
+        match self {
+            Self::DeviceCertificate { .. } => "device-certificate",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct DeviceCertificateLinks {
+    pub command: String,
+    pub ack_event: String,
+    pub reported_event: String,
+    pub ingress_receipt_event: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -416,6 +441,8 @@ pub struct Schemas {
     pub response: Option<String>,
     #[serde(default)]
     pub payload: Option<String>,
+    #[serde(default)]
+    pub responses: BTreeMap<HttpStatusCode, String>,
 }
 
 impl Schemas {
@@ -429,6 +456,78 @@ impl Schemas {
         .into_iter()
         .flatten()
         .collect()
+    }
+
+    pub fn response(&self, success_status: u16) -> Option<&str> {
+        let status = HttpStatusCode::new(success_status);
+        self.responses
+            .get(&status)
+            .map(String::as_str)
+            .or(self.response.as_deref())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+pub struct HttpStatusCode(u16);
+
+impl HttpStatusCode {
+    pub const fn new(value: u16) -> Self {
+        assert!(
+            value >= 100 && value <= 599,
+            "HTTP status must be in 100..=599"
+        );
+        Self(value)
+    }
+
+    pub const fn get(self) -> u16 {
+        self.0
+    }
+}
+
+impl std::fmt::Display for HttpStatusCode {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl<'de> Deserialize<'de> for HttpStatusCode {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct Visitor;
+
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = HttpStatusCode;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("an HTTP status in 100..=599")
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                let value = value.parse::<u16>().map_err(E::custom)?;
+                if !(100..=599).contains(&value) {
+                    return Err(E::custom("HTTP status must be in 100..=599"));
+                }
+                Ok(HttpStatusCode::new(value))
+            }
+
+            fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                let value = u16::try_from(value).map_err(E::custom)?;
+                if !(100..=599).contains(&value) {
+                    return Err(E::custom("HTTP status must be in 100..=599"));
+                }
+                Ok(HttpStatusCode::new(value))
+            }
+        }
+
+        deserializer.deserialize_any(Visitor)
     }
 }
 
@@ -891,6 +990,76 @@ mod tests {
     }
 
     #[test]
+    fn http_responses_are_indexed_by_status_code() -> anyhow::Result<()> {
+        let manifest = r#"
+            id = "seed.echo"
+            kind = "http"
+            domain = "_seed"
+            version = "v1"
+            owner = "_framework"
+            consistencyLevel = "LocalOnly"
+            lifecycle = "draft"
+            path = "/api/v1/_seed/echo"
+            method = "POST"
+
+            [schemas]
+            request = "request.schema.json"
+
+            [schemas.responses]
+            200 = "response.schema.json"
+            404 = "not-found.schema.json"
+            409 = "conflict.schema.json"
+
+            [endpoints.http]
+            successStatus = 200
+            idempotency = "idempotent"
+        "#;
+
+        let parsed = ContractManifest::from_toml_str(manifest)?;
+        assert_eq!(parsed.schemas.response(200), Some("response.schema.json"));
+        assert_eq!(parsed.schemas.response(404), Some("not-found.schema.json"));
+        for invalid in [99, 600] {
+            let invalid = manifest.replace("200 =", &format!("{invalid} ="));
+            assert!(ContractManifest::from_toml_str(&invalid).is_err());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn device_latent_uses_a_resource_tagged_profile() {
+        let tagged = r#"
+            id = "identity.device-certificate-policy-put"
+            kind = "http"
+            domain = "identity"
+            version = "v2"
+            owner = "identity"
+            consistencyLevel = "DeviceLatent"
+            lifecycle = "draft"
+
+            [capabilities.deviceLatent]
+            loop = "reconcile"
+
+            [capabilities.deviceLatent.profile]
+            resourceKind = "device-certificate"
+
+            [capabilities.deviceLatent.profile.links]
+            command = "identity.apply-device-certificate"
+            ackEvent = "identity.device-command-acked"
+            reportedEvent = "identity.device-certificate-reported"
+            ingressReceiptEvent = "identity.device-ingress-receipted"
+        "#;
+        assert!(ContractManifest::from_toml_str(tagged).is_ok());
+
+        let flat = tagged
+            .replace("[capabilities.deviceLatent.profile]\n", "")
+            .replace(
+                "[capabilities.deviceLatent.profile.links]",
+                "[capabilities.deviceLatent.links]",
+            );
+        assert!(ContractManifest::from_toml_str(&flat).is_err());
+    }
+
+    #[test]
     fn parses_event_with_topic_delivery() -> anyhow::Result<()> {
         let m = ContractManifest::from_toml_str(VALID_EVENT)?;
         assert_eq!(m.kind, ContractKind::Event);
@@ -979,6 +1148,15 @@ mod tests {
             [capabilities.deviceLatent]
             loop = "reconcile"
 
+            [capabilities.deviceLatent.profile]
+            resourceKind = "device-certificate"
+
+            [capabilities.deviceLatent.profile.links]
+            command = "identity.apply-device-certificate"
+            ackEvent = "identity.device-command-acked"
+            reportedEvent = "identity.device-certificate-reported"
+            ingressReceiptEvent = "identity.device-ingress-receipted"
+
             [effectProfile]
             effects = ["auth", "read", "cross-tenant-audit"]
 
@@ -996,6 +1174,95 @@ mod tests {
         assert_device_reconcile_capability(&m)?;
         assert_effect_profile(&m);
         Ok(())
+    }
+
+    #[test]
+    fn device_latent_capability_rejects_missing_required_metadata() {
+        let valid = device_latent_manifest();
+        let missing_cases = [
+            valid.replace("            resourceKind = \"device-certificate\"\n", ""),
+            valid.replace(
+                concat!(
+                    "            [capabilities.deviceLatent.profile]\n",
+                    "            resourceKind = \"device-certificate\"\n",
+                    "\n",
+                    "            [capabilities.deviceLatent.profile.links]\n",
+                    "            command = \"identity.apply-device-certificate\"\n",
+                    "            ackEvent = \"identity.device-command-acked\"\n",
+                    "            reportedEvent = \"identity.device-certificate-reported\"\n",
+                    "            ingressReceiptEvent = \"identity.device-ingress-receipted\"\n",
+                ),
+                "",
+            ),
+            valid.replace(
+                "            command = \"identity.apply-device-certificate\"\n",
+                "",
+            ),
+            valid.replace(
+                "            ackEvent = \"identity.device-command-acked\"\n",
+                "",
+            ),
+            valid.replace(
+                "            reportedEvent = \"identity.device-certificate-reported\"\n",
+                "",
+            ),
+            valid.replace(
+                "            ingressReceiptEvent = \"identity.device-ingress-receipted\"\n",
+                "",
+            ),
+        ];
+
+        for manifest in missing_cases {
+            assert!(ContractManifest::from_toml_str(&manifest).is_err());
+        }
+    }
+
+    #[test]
+    fn device_latent_capability_rejects_unknown_fields_and_resource_kind() {
+        let valid = device_latent_manifest();
+        let invalid_cases = [
+            valid.replace(
+                "            resourceKind = \"device-certificate\"",
+                "            resourceKind = \"unknown-resource\"",
+            ),
+            valid.replace(
+                "            loop = \"reconcile\"",
+                concat!(
+                    "            loop = \"reconcile\"\n",
+                    "            unknownCapabilityField = \"value\"",
+                ),
+            ),
+            valid.replace(
+                "            command = \"identity.apply-device-certificate\"",
+                concat!(
+                    "            command = \"identity.apply-device-certificate\"\n",
+                    "            unknownLinkField = \"identity.unknown\"",
+                ),
+            ),
+        ];
+
+        for manifest in invalid_cases {
+            assert!(ContractManifest::from_toml_str(&manifest).is_err());
+        }
+    }
+
+    fn device_latent_manifest() -> String {
+        format!(
+            r#"{VALID_HTTP}
+
+            [capabilities.deviceLatent]
+            loop = "reconcile"
+
+            [capabilities.deviceLatent.profile]
+            resourceKind = "device-certificate"
+
+            [capabilities.deviceLatent.profile.links]
+            command = "identity.apply-device-certificate"
+            ackEvent = "identity.device-command-acked"
+            reportedEvent = "identity.device-certificate-reported"
+            ingressReceiptEvent = "identity.device-ingress-receipted"
+        "#
+        )
     }
 
     #[test]
@@ -1066,6 +1333,15 @@ mod tests {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("deviceLatent capability should parse"))?;
         assert_eq!(device.loop_kind, DeviceLatentLoop::Reconcile);
+        assert_eq!(device.profile.resource_kind(), "device-certificate");
+        let DeviceLatentProfile::DeviceCertificate { links } = &device.profile;
+        assert_eq!(links.command, "identity.apply-device-certificate");
+        assert_eq!(links.ack_event, "identity.device-command-acked");
+        assert_eq!(links.reported_event, "identity.device-certificate-reported");
+        assert_eq!(
+            links.ingress_receipt_event,
+            "identity.device-ingress-receipted"
+        );
         let reconcile = m
             .reconcile
             .as_ref()
@@ -1379,6 +1655,7 @@ mod tests {
             request: Some("request.schema.json".to_string()),
             response: Some("response.schema.json".to_string()),
             payload: None,
+            responses: BTreeMap::new(),
         };
         assert_eq!(
             s.declared_files(),
@@ -1389,6 +1666,7 @@ mod tests {
             request: None,
             response: None,
             payload: Some("payload.schema.json".to_string()),
+            responses: BTreeMap::new(),
         };
         assert_eq!(s2.declared_files(), vec!["payload.schema.json"]);
 

@@ -1,0 +1,35 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "IdentityDeviceCertificatePolicyPutResponse",
+  "description": "A 200 response records desired state but does not claim device convergence; an identical idempotency replay returns the same data value.",
+  "type": "object",
+  "required": [
+    "data"
+  ],
+  "properties": {
+    "data": {
+      "title": "IdentityDeviceCertificatePolicyPutData",
+      "type": "object",
+      "required": [
+        "acceptedGeneration",
+        "condition"
+      ],
+      "properties": {
+        "acceptedGeneration": {
+          "type": "integer",
+          "format": "int64",
+          "minimum": 1
+        },
+        "condition": {
+          "type": "string",
+          "enum": [
+            "Reconciling",
+            "PendingDevice"
+          ]
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

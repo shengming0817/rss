@@ -419,13 +419,21 @@ pub assembly_schema::ProjectionCapabilityRequirement::Serving
 pub assembly_schema::ProjectionCapabilityRequirement::Source
 pub assembly_schema::ProjectionCapabilityRequirement::Target
 pub assembly_schema::ProjectionCapabilityRequirement::Worker
+impl assembly_schema::ProjectionCapabilityRequirement
+pub const fn assembly_schema::ProjectionCapabilityRequirement::as_str(self) -> &'static str
 impl core::clone::Clone for assembly_schema::ProjectionCapabilityRequirement
 pub fn assembly_schema::ProjectionCapabilityRequirement::clone(&self) -> assembly_schema::ProjectionCapabilityRequirement
 impl core::cmp::Eq for assembly_schema::ProjectionCapabilityRequirement
+impl core::cmp::Ord for assembly_schema::ProjectionCapabilityRequirement
+pub fn assembly_schema::ProjectionCapabilityRequirement::cmp(&self, &assembly_schema::ProjectionCapabilityRequirement) -> core::cmp::Ordering
 impl core::cmp::PartialEq for assembly_schema::ProjectionCapabilityRequirement
 pub fn assembly_schema::ProjectionCapabilityRequirement::eq(&self, &assembly_schema::ProjectionCapabilityRequirement) -> bool
+impl core::cmp::PartialOrd for assembly_schema::ProjectionCapabilityRequirement
+pub fn assembly_schema::ProjectionCapabilityRequirement::partial_cmp(&self, &assembly_schema::ProjectionCapabilityRequirement) -> core::option::Option<core::cmp::Ordering>
 impl core::fmt::Debug for assembly_schema::ProjectionCapabilityRequirement
 pub fn assembly_schema::ProjectionCapabilityRequirement::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for assembly_schema::ProjectionCapabilityRequirement
+pub fn assembly_schema::ProjectionCapabilityRequirement::hash<__H: core::hash::Hasher>(&self, &mut __H)
 impl core::marker::Copy for assembly_schema::ProjectionCapabilityRequirement
 impl core::marker::StructuralPartialEq for assembly_schema::ProjectionCapabilityRequirement
 impl core::marker::Freeze for assembly_schema::ProjectionCapabilityRequirement
@@ -855,13 +863,21 @@ pub assembly_schema::SagaCapabilityRequirement::Probe
 pub assembly_schema::SagaCapabilityRequirement::ReceiptStore
 pub assembly_schema::SagaCapabilityRequirement::TypedActions
 pub assembly_schema::SagaCapabilityRequirement::Worker
+impl assembly_schema::SagaCapabilityRequirement
+pub const fn assembly_schema::SagaCapabilityRequirement::as_str(self) -> &'static str
 impl core::clone::Clone for assembly_schema::SagaCapabilityRequirement
 pub fn assembly_schema::SagaCapabilityRequirement::clone(&self) -> assembly_schema::SagaCapabilityRequirement
 impl core::cmp::Eq for assembly_schema::SagaCapabilityRequirement
+impl core::cmp::Ord for assembly_schema::SagaCapabilityRequirement
+pub fn assembly_schema::SagaCapabilityRequirement::cmp(&self, &assembly_schema::SagaCapabilityRequirement) -> core::cmp::Ordering
 impl core::cmp::PartialEq for assembly_schema::SagaCapabilityRequirement
 pub fn assembly_schema::SagaCapabilityRequirement::eq(&self, &assembly_schema::SagaCapabilityRequirement) -> bool
+impl core::cmp::PartialOrd for assembly_schema::SagaCapabilityRequirement
+pub fn assembly_schema::SagaCapabilityRequirement::partial_cmp(&self, &assembly_schema::SagaCapabilityRequirement) -> core::option::Option<core::cmp::Ordering>
 impl core::fmt::Debug for assembly_schema::SagaCapabilityRequirement
 pub fn assembly_schema::SagaCapabilityRequirement::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for assembly_schema::SagaCapabilityRequirement
+pub fn assembly_schema::SagaCapabilityRequirement::hash<__H: core::hash::Hasher>(&self, &mut __H)
 impl core::marker::Copy for assembly_schema::SagaCapabilityRequirement
 impl core::marker::StructuralPartialEq for assembly_schema::SagaCapabilityRequirement
 impl core::marker::Freeze for assembly_schema::SagaCapabilityRequirement

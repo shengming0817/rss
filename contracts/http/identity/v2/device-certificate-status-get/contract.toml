@@ -1,0 +1,26 @@
+# Read tenant-scoped desired and reported certificate status without contacting the device.
+id = "identity.device-certificate-status-get"
+kind = "http"
+domain = "identity"
+version = "v2"
+owner = "identity"
+consistencyLevel = "LocalOnly"
+lifecycle = "draft"
+path = "/api/v2/identity/devices/{deviceId}/certificate-status"
+method = "GET"
+
+[schemas]
+request = "request.schema.json"
+response = "response.schema.json"
+
+[endpoints.http]
+successStatus = 200
+idempotency = "idempotent"
+resource = "deviceId"
+
+[endpoints.http.auth]
+mode = "permission"
+permission = "identity:device-certificate-status:read"
+
+[effectProfile]
+effects = ["auth", "read"]

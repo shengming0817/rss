@@ -74,6 +74,8 @@ pub enum RoutePermissionId {
     IdentityPolicyRead,
     IdentityPolicyUpdate,
     IdentityPolicyDeactivate,
+    IdentityDeviceCertificatePolicyWrite,
+    IdentityDeviceCertificateStatusRead,
     RuntimeInventoryRead,
     SettingsConfigPublish,
     SettingsConfigGet,
@@ -106,6 +108,8 @@ impl RoutePermissionId {
         Self::IdentityPolicyRead,
         Self::IdentityPolicyUpdate,
         Self::IdentityPolicyDeactivate,
+        Self::IdentityDeviceCertificatePolicyWrite,
+        Self::IdentityDeviceCertificateStatusRead,
         Self::RuntimeInventoryRead,
         Self::SettingsConfigPublish,
         Self::SettingsConfigGet,
@@ -138,6 +142,12 @@ impl RoutePermissionId {
             "identity:policy:read" => Ok(Self::IdentityPolicyRead),
             "identity:policy:update" => Ok(Self::IdentityPolicyUpdate),
             "identity:policy:deactivate" => Ok(Self::IdentityPolicyDeactivate),
+            "identity:device-certificate-policy:write" => {
+                Ok(Self::IdentityDeviceCertificatePolicyWrite)
+            }
+            "identity:device-certificate-status:read" => {
+                Ok(Self::IdentityDeviceCertificateStatusRead)
+            }
             "runtime:inventory:read" => Ok(Self::RuntimeInventoryRead),
             "settings.config-publish" => Ok(Self::SettingsConfigPublish),
             "settings.config-get" => Ok(Self::SettingsConfigGet),
@@ -172,6 +182,10 @@ impl RoutePermissionId {
             Self::IdentityPolicyRead => "identity:policy:read",
             Self::IdentityPolicyUpdate => "identity:policy:update",
             Self::IdentityPolicyDeactivate => "identity:policy:deactivate",
+            Self::IdentityDeviceCertificatePolicyWrite => {
+                "identity:device-certificate-policy:write"
+            }
+            Self::IdentityDeviceCertificateStatusRead => "identity:device-certificate-status:read",
             Self::RuntimeInventoryRead => "runtime:inventory:read",
             Self::SettingsConfigPublish => "settings.config-publish",
             Self::SettingsConfigGet => "settings.config-get",
@@ -205,6 +219,8 @@ impl RoutePermissionId {
             Self::IdentityPolicyRead => "IdentityPolicyRead",
             Self::IdentityPolicyUpdate => "IdentityPolicyUpdate",
             Self::IdentityPolicyDeactivate => "IdentityPolicyDeactivate",
+            Self::IdentityDeviceCertificatePolicyWrite => "IdentityDeviceCertificatePolicyWrite",
+            Self::IdentityDeviceCertificateStatusRead => "IdentityDeviceCertificateStatusRead",
             Self::RuntimeInventoryRead => "RuntimeInventoryRead",
             Self::SettingsConfigPublish => "SettingsConfigPublish",
             Self::SettingsConfigGet => "SettingsConfigGet",
@@ -427,6 +443,14 @@ mod tests {
                 RoutePermissionId::IdentityPolicyDeactivate,
             ),
             (
+                "identity:device-certificate-policy:write",
+                RoutePermissionId::IdentityDeviceCertificatePolicyWrite,
+            ),
+            (
+                "identity:device-certificate-status:read",
+                RoutePermissionId::IdentityDeviceCertificateStatusRead,
+            ),
+            (
                 "runtime:inventory:read",
                 RoutePermissionId::RuntimeInventoryRead,
             ),
@@ -465,6 +489,20 @@ mod tests {
             RoutePermissionId::RuntimeInventoryRead.variant_name(),
             "RuntimeInventoryRead"
         );
+        for (permission, variant_name) in [
+            (
+                RoutePermissionId::IdentityDeviceCertificatePolicyWrite,
+                "IdentityDeviceCertificatePolicyWrite",
+            ),
+            (
+                RoutePermissionId::IdentityDeviceCertificateStatusRead,
+                "IdentityDeviceCertificateStatusRead",
+            ),
+        ] {
+            assert!(RoutePermissionId::ALL.contains(&permission));
+            assert_eq!(permission.variant_name(), variant_name);
+            assert_eq!(permission.to_string(), permission.as_str());
+        }
     }
 
     #[test]

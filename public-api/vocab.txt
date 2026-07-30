@@ -94,6 +94,8 @@ pub vocab::authz::RoutePermissionId::AuditFieldTenantId
 pub vocab::authz::RoutePermissionId::AuditRead
 pub vocab::authz::RoutePermissionId::IdentityAccountSecurityRead
 pub vocab::authz::RoutePermissionId::IdentityAccountSecurityWrite
+pub vocab::authz::RoutePermissionId::IdentityDeviceCertificatePolicyWrite
+pub vocab::authz::RoutePermissionId::IdentityDeviceCertificateStatusRead
 pub vocab::authz::RoutePermissionId::IdentityPolicyCreate
 pub vocab::authz::RoutePermissionId::IdentityPolicyDeactivate
 pub vocab::authz::RoutePermissionId::IdentityPolicyRead
@@ -1741,6 +1743,8 @@ pub vocab::RoutePermissionId::AuditFieldTenantId
 pub vocab::RoutePermissionId::AuditRead
 pub vocab::RoutePermissionId::IdentityAccountSecurityRead
 pub vocab::RoutePermissionId::IdentityAccountSecurityWrite
+pub vocab::RoutePermissionId::IdentityDeviceCertificatePolicyWrite
+pub vocab::RoutePermissionId::IdentityDeviceCertificateStatusRead
 pub vocab::RoutePermissionId::IdentityPolicyCreate
 pub vocab::RoutePermissionId::IdentityPolicyDeactivate
 pub vocab::RoutePermissionId::IdentityPolicyRead

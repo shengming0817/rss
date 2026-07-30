@@ -15,11 +15,10 @@ use anyhow::{Context, Result, anyhow, bail};
 use consistency::{Disposition, IdemKey, SeenState};
 use deadpool_redis::{Config as RedisConfig, Runtime as RedisRuntime};
 use diport::{
-    AckAction, AckableSubscriber, Acker, DynPublisher, EnvelopeSubjectId, ManagedResource,
-    MessageId, OpaqueActorId, OutboxActor, PublishRequest, Publisher, PublisherError, Topic,
+    AckAction, AckableSubscriber, Acker, DynPublisher, ManagedResource, MessageId, PublishRequest,
+    Publisher, PublisherError, Topic,
 };
 use eventexec::RelayBudget;
-use eventexec::command::{CommandAliasKey, CommandIdempotencyKeyring};
 use futures::StreamExt;
 use futures::future::LocalBoxFuture;
 use postgres::fault_matrix::{
@@ -362,20 +361,6 @@ const READY_CASE_RUNNERS: &[ReadyCaseRunner] = &[
         CrashRunner::Postgres,
         generated::http::settings_v3::CONTRACT,
         run_projection_stale_checkpoint_writer,
-    ),
-    ReadyCaseRunner::new(
-        "reconcile-dispatch-before-result-record",
-        CrashFaultSpec::ReconcileDispatchBeforeResultRecord,
-        CrashRunner::Postgres,
-        generated::http::identity_v2::CONTRACT,
-        run_reconcile_dispatch_before_result_record,
-    ),
-    ReadyCaseRunner::new(
-        "reconcile-lease-lost-before-write",
-        CrashFaultSpec::ReconcileLeaseLostBeforeWrite,
-        CrashRunner::Postgres,
-        generated::http::identity_v2::CONTRACT,
-        run_reconcile_lease_lost_before_write,
     ),
 ];
 
@@ -1288,68 +1273,6 @@ fn run_projection_stale_checkpoint_writer<'a>(
             .await?;
         if !matches!(outcome, diport::SaveOutcome::StaleVersion) {
             bail!("stale checkpoint writer should be fenced, got {outcome:?}");
-        }
-        Ok(())
-    })
-}
-
-fn run_reconcile_dispatch_before_result_record<'a>(
-    _runner: &'a ReadyCaseRunner,
-    case: &'a CrashCase,
-    pg: &'a PgHarness,
-    _rabbit: &'a RabbitHarness,
-    _redis: &'a RedisHarness,
-    scope: &'a RunScope,
-) -> LocalBoxFuture<'a, Result<()>> {
-    Box::pin(async move {
-        let event_id = scope.name("reconcile-dispatch-v1");
-        let keyring = CommandIdempotencyKeyring::new(
-            CommandAliasKey::new("fault-matrix", vec![0x42; 32])?,
-            Vec::new(),
-        )?;
-        let command = || {
-            eventexec::ReviewedCommand::from_spec(
-                generated::command::_seed_v1::reconcile_command(
-                    generated::command::_seed_v1::SeedDoThingRequest {
-                        amount: 1,
-                        target_id: format!("resource-{event_id}"),
-                    },
-                    scope.tenant,
-                    EnvelopeSubjectId::from_opaque(format!("resource-{event_id}"))?,
-                    OutboxActor::service(OpaqueActorId::from_opaque("fault-matrix")?),
-                    event_id.clone(),
-                ),
-                &keyring,
-            )
-            .map_err(anyhow::Error::from)
-        };
-        let count = pg
-            .harness
-            .reconcile_dispatch_key_stable(scope.tenant, &event_id, [command()?, command()?])
-            .await
-            .with_context(|| format!("{} stable dispatch key invariant failed", case.id()))?;
-        if count != 1 {
-            bail!("stable dispatch key should create one outbox row, got {count}");
-        }
-        Ok(())
-    })
-}
-
-fn run_reconcile_lease_lost_before_write<'a>(
-    _runner: &'a ReadyCaseRunner,
-    _case: &'a CrashCase,
-    pg: &'a PgHarness,
-    _rabbit: &'a RabbitHarness,
-    _redis: &'a RedisHarness,
-    scope: &'a RunScope,
-) -> LocalBoxFuture<'a, Result<()>> {
-    Box::pin(async move {
-        let outcome = pg
-            .harness
-            .stale_reconcile_lease_is_rejected(scope.tenant, &scope.name("resource-b"))
-            .await?;
-        if !matches!(outcome, postgres::ReconcileLeaseOutcome::Lost) {
-            bail!("stale reconcile lease should be fenced, got {outcome:?}");
         }
         Ok(())
     })

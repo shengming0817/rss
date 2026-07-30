@@ -24,6 +24,15 @@ L4 device-latent 契约必须同时声明 `consistencyLevel = "DeviceLatent"`、
 [capabilities.deviceLatent]
 loop = "reconcile"
 
+[capabilities.deviceLatent.profile]
+resourceKind = "device-certificate"
+
+[capabilities.deviceLatent.profile.links]
+command = "identity.apply-device-certificate"
+ackEvent = "identity.device-command-acked"
+reportedEvent = "identity.device-certificate-reported"
+ingressReceiptEvent = "identity.device-ingress-receipted"
+
 [reconcile]
 tenancy = "tenant-scoped"
 trigger = "interval"
@@ -31,9 +40,13 @@ fencing = "required"
 lateMessagePolicy = "idempotent"
 ```
 
-`[capabilities.deviceLatent]` 是 L4 typed capability evidence；`[reconcile]` 是该能力的治理参数面，由
-`cargo xtask contract validate` R22 强制。L3 `WorkflowEventual` contract（saga / projection）不得声明
-`[reconcile]`，也不需要 reconcile block。
+`assembly-schema` 将通用 `loop` envelope 与 resource-specific tagged profile 分开解析；profile 的
+`resourceKind` 是闭枚举，`device-certificate` variant 要求 nested `links` 四字段齐全。缺字段、未知字段或
+未知 resource kind 在进入 validator 前即拒绝。`[capabilities.deviceLatent]` 是 L4 typed capability evidence，
+`[reconcile]` 是该能力的治理参数面，二者与 `DeviceLatent` 的组合由
+`cargo xtask contract validate` R22 强制。R25 再把设备证书 HTTP 契约对绑定到精确的
+`resourceKind = "device-certificate"`、四个 linked contract ID 及其 lifecycle 闭包。L3
+`WorkflowEventual` contract（saga / projection）不得声明 `[reconcile]`，也不需要 reconcile block。
 
 ## Desired / Actual / Diff / Converge 模型
 

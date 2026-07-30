@@ -7,13 +7,13 @@
 //! `ci-integration --shard consistency-fault` lane.
 //!
 //! INVARIANT: CONSISTENCY-CRASH-FIXTURE-01 { level = "Medium", exec = "check", source = "code" } -- consistency crash fixture ids must be unique and fixtures must parse as the closed TOML DSL.
-//! INVARIANT: CONSISTENCY-FAULT-MATRIX-01 { level = "Medium", exec = "check", source = "code" } -- N-028 ready cases must cover all consistency mechanisms and each ready fixture must have a real journey runner mapping.
+//! INVARIANT: CONSISTENCY-FAULT-MATRIX-01 { level = "Medium", exec = "check", source = "code" } -- N-028 ready cases must cover every consistency mechanism with a non-draft contract; each ready DeviceLatent fixture must bind a non-draft contract, and every ready fixture must have a real journey runner mapping.
 //! INVARIANT: CONSISTENCY-FAULT-EVIDENCE-01 { level = "Medium", exec = "check", source = "code" } -- ready L2 evidence is exported only after full fixture, contract, generated-binding, runner, filesystem-safety, and anti-vacuity validation succeeds.
 //! INVARIANT: CONSISTENCY-FAULT-RUNNER-SYMBOL-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::red_runner_symbol_must_be_canonical_run_function_path", anti_vacuity = "tests::real_critical_l2_ga_cases_bind_exact_specs_contracts_and_runner_symbols" } -- every ready case binds a canonical top-level `run_*` function that becomes its exact assurance carrier.
 //! INVARIANT: CONSISTENCY-FAULT-TYPED-SEAM-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::red_direct_sqlx_dependency_is_rejected + tests::red_package_aliased_sqlx_dependency_is_rejected_in_every_dependency_table + tests::red_critical_runner_fake_receiver_cannot_supply_provider_capability + tests::red_critical_runner_fake_publisher_and_direct_sql_remain_rejected", anti_vacuity = "tests::green_real_tree_has_required_ready_fixtures + tests::real_critical_l2_ga_cases_bind_exact_specs_contracts_and_runner_symbols" } -- critical runner constructors require sealed provider/conformance output types, assurance consumes the same exact typed runner registration, and the verifier rejects direct or aliased sqlx dependencies, raw SQL, and fake publishers.
 
 use crate::contract::DiscoveredContract;
-use crate::contract::manifest::{ConsistencyLevel, ContractOwner};
+use crate::contract::manifest::{ConsistencyLevel, ContractOwner, Lifecycle};
 use crate::diagnostic::{self, GovernanceCheck, finding};
 use anyhow::Result;
 use std::collections::{BTreeMap, BTreeSet};
@@ -317,6 +317,7 @@ struct RunnerContract {
 struct ContractEntry {
     owner_domain: String,
     consistency_level: ConsistencyLevel,
+    lifecycle: Lifecycle,
     generated_contract: String,
 }
 
@@ -502,6 +503,7 @@ fn validate_root_with_contracts(
         &dir,
         scan.ready_count,
         &scan.ready_by_mechanism,
+        &contracts,
     );
 
     let summary = format!(
@@ -815,6 +817,7 @@ fn add_ready_coverage_findings(
     dir: &Path,
     ready_count: usize,
     ready_by_mechanism: &BTreeMap<CrashMechanism, usize>,
+    contracts: &BTreeMap<String, ContractEntry>,
 ) {
     if ready_count < MIN_READY_CASES {
         findings.push(finding(
@@ -830,6 +833,17 @@ fn add_ready_coverage_findings(
         CrashMechanism::Projection,
         CrashMechanism::Reconcile,
     ] {
+        let consistency_level = match mechanism {
+            CrashMechanism::Outbox | CrashMechanism::Inbox => ConsistencyLevel::OutboxFact,
+            CrashMechanism::Saga | CrashMechanism::Projection => ConsistencyLevel::WorkflowEventual,
+            CrashMechanism::Reconcile => ConsistencyLevel::DeviceLatent,
+        };
+        if !contracts.values().any(|contract| {
+            contract.lifecycle != Lifecycle::Draft
+                && contract.consistency_level == consistency_level
+        }) {
+            continue;
+        }
         let count = ready_by_mechanism.get(&mechanism).copied().unwrap_or(0);
         if count < MIN_READY_PER_MECHANISM {
             findings.push(finding(
@@ -932,6 +946,7 @@ fn contract_index(
                 ContractEntry {
                     owner_domain,
                     consistency_level,
+                    lifecycle: manifest.lifecycle,
                     generated_contract,
                 },
             )
@@ -1087,6 +1102,19 @@ fn validate_runner_contract(
                 runner.runner,
                 runner.fault_spec,
                 runner.fault_spec.expected_runner()
+            ),
+        ));
+    }
+    if let Some(contract) = contract
+        && contract.lifecycle == Lifecycle::Draft
+        && contract.consistency_level == ConsistencyLevel::DeviceLatent
+    {
+        findings.push(finding(
+            Rule::RunnerMismatch,
+            rel_path,
+            format!(
+                "ready fixture `{}` cannot bind draft contract `{}`",
+                fixture.id, fixture.contract_id
             ),
         ));
     }
@@ -1832,6 +1860,46 @@ const READY_CASE_RUNNERS: &[ReadyCaseRunner] = &[
         let (_, findings) = check_root(&root);
         assert!(findings.iter().any(|f| f.rule == Rule::ReadyCount));
         assert!(findings.iter().any(|f| f.rule == Rule::MechanismCoverage));
+        Ok(())
+    }
+
+    #[test]
+    fn red_ready_fixture_cannot_bind_draft_contract() -> Result<()> {
+        let root = temp_root("ready-draft-contract")?;
+        let contract = root.join("contracts/event/identity/v1/session-created/contract.toml");
+        fs::write(
+            &contract,
+            fs::read_to_string(&contract)?
+                .replace("lifecycle = \"active\"", "lifecycle = \"draft\"")
+                .replace(
+                    "consistencyLevel = \"OutboxFact\"",
+                    "consistencyLevel = \"DeviceLatent\"",
+                ),
+        )?;
+        write_fixture(
+            &root,
+            "ready-draft-contract",
+            &VALID
+                .replace("level = \"L2\"", "level = \"L4\"")
+                .replace("mechanism = \"outbox\"", "mechanism = \"reconcile\"")
+                .replace(
+                    "crashPoint = \"after-publish-before-settle\"",
+                    "crashPoint = \"after-dispatch-before-result-record\"",
+                )
+                .replace(
+                    "expectedInvariant = \"outbox-publish-settled-once\"",
+                    "expectedInvariant = \"reconcile-dispatch-key-stable\"",
+                )
+                .replace("runner = \"postgres-rabbitmq\"", "runner = \"postgres\""),
+        )?;
+
+        let (_, findings) = check_root(&root);
+        assert!(
+            findings.iter().any(|finding| {
+                finding.rule == Rule::RunnerMismatch && finding.detail.contains("draft contract")
+            }),
+            "draft contract supplied ready execution evidence: {findings:?}"
+        );
         Ok(())
     }
 

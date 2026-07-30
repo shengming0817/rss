@@ -39,6 +39,10 @@
 //! 在 draft/active/deprecated 全 lifecycle 都须引用同 domain 中存在的 L2 event；active producer 还要求目标
 //! active 且有 subscriber readiness。L3 只接受当前 manifest 能表达的 workflow 证据；L4 还要求
 //! device-latent evidence + `[reconcile]` block。
+//! INVARIANT: CONTRACT-DEVICE-CERTIFICATE-HTTP-CLOSURE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::r25_device_certificate_policy_route_auth_and_consistency_are_exact", anti_vacuity = "tests::r25_device_certificate_draft_pair_is_anti_vacuity_green" }—
+//! 设备证书 desired-state/status HTTP 契约族的 identity/route/auth/schema/L4 metadata/links 由 R25
+//! 精确闭合；draft linked target 若存在必须 kind/consistency 正确，source active 则四 target
+//! 必须全存在且 active。
 //! Medium（CI 门）；每条规则配 synthetic red case（见 `#[cfg(test)]`），
 //! anti-vacuity：全合法绿用例必过、各红用例必失。
 //! Hard 类型层部分（字段集冻结、枚举解析拒绝、`u64` 非负、嵌套 `deny_unknown_fields`）见 `manifest.rs`
@@ -56,6 +60,7 @@
 //!   → R11 ActiveDeliverySupported → R13 SchemaTitle → R16 SchemaRedaction → R17 SchemaProtection
 //!   → R14 ActiveSubscriber → R20 SlugSyntax
 //!   跨契约（validate_cross，需全局视图）：R12 DuplicateId → R21 SlugMixing → R22 ConsistencyCapability
+//!   → R25 DeviceCertificateHttpClosure
 
 use anyhow::{Context as _, Result};
 use std::collections::{BTreeMap, BTreeSet};
@@ -64,11 +69,13 @@ use syn::visit::Visit;
 
 use super::manifest::{
     Capabilities, ConsistencyLevel, ContractKind, ContractManifest, ContractOwner, Delivery,
-    ExternalEffectPolicy, FIELD_COMMAND, FIELD_DELIVERY, FIELD_EFFECT_PROFILE,
-    FIELD_ENDPOINTS_HTTP_AUTH, FIELD_ENDPOINTS_HTTP_HEADERS, FIELD_ENDPOINTS_HTTP_PROJECTION,
-    FIELD_ENDPOINTS_HTTP_RESOURCE_SHARING, FIELD_METHOD, FIELD_PATH, FIELD_RECONCILE, FIELD_SAGA,
-    FIELD_SUBSCRIPTIONS, FIELD_TOPIC, HttpAuth, HttpAuthMode, HttpEndpoint, HttpHeaderMode,
-    HttpMethod, HttpResourceSharingMode, Lifecycle, LocalTxBoundary, LocalTxCommitUnknown,
+    DeviceLatentFencing, DeviceLatentLateMessagePolicy, DeviceLatentLoop, DeviceLatentProfile,
+    DeviceLatentTenancy, DeviceLatentTrigger, ExternalEffectPolicy, FIELD_COMMAND, FIELD_DELIVERY,
+    FIELD_EFFECT_PROFILE, FIELD_ENDPOINTS_HTTP_AUTH, FIELD_ENDPOINTS_HTTP_HEADERS,
+    FIELD_ENDPOINTS_HTTP_PROJECTION, FIELD_ENDPOINTS_HTTP_RESOURCE_SHARING, FIELD_METHOD,
+    FIELD_PATH, FIELD_RECONCILE, FIELD_SAGA, FIELD_SUBSCRIPTIONS, FIELD_TOPIC, HttpAuth,
+    HttpAuthMode, HttpEndpoint, HttpHeaderMode, HttpIdempotency, HttpMethod,
+    HttpResourceSharingMode, HttpStatusCode, Lifecycle, LocalTxBoundary, LocalTxCommitUnknown,
     LocalTxModel, LocalTxRetry, OutboxAtomicity, OutboxRole, SCHEMA_KEY_PAYLOAD,
     SCHEMA_KEY_REQUEST, SCHEMA_KEY_RESPONSE, SubscriptionEffect, SubscriptionExecution,
     WorkflowMode, WorkflowOrdering, WorkflowRequirement,
@@ -104,6 +111,20 @@ const CAP_WORKFLOW_FIELD_SCOPE: &str = "capabilities.workflow.field-scope";
 const CAP_CAPABILITY_SCOPE: &str = "capability-scope";
 const CAP_EFFECT_PROFILE_EFFECTS: &str = "effectProfile.effects";
 const RUNTIME_EVENT_TRANSPORT_RS: &str = "assemblies/runtime/src/event_transport.rs";
+
+const R25_POLICY_ID: &str = "identity.device-certificate-policy-put";
+const R25_STATUS_ID: &str = "identity.device-certificate-status-get";
+const R25_LEGACY_ID: &str = "identity.reconcile-loop";
+const R25_POLICY_PATH: &str = "/api/v2/identity/devices/{deviceId}/certificate-policy";
+const R25_STATUS_PATH: &str = "/api/v2/identity/devices/{deviceId}/certificate-status";
+const R25_POLICY_PERMISSION: vocab::RoutePermissionId =
+    vocab::RoutePermissionId::IdentityDeviceCertificatePolicyWrite;
+const R25_STATUS_PERMISSION: vocab::RoutePermissionId =
+    vocab::RoutePermissionId::IdentityDeviceCertificateStatusRead;
+const R25_COMMAND_ID: &str = "identity.apply-device-certificate";
+const R25_ACK_EVENT_ID: &str = "identity.device-command-acked";
+const R25_REPORTED_EVENT_ID: &str = "identity.device-certificate-reported";
+const R25_INGRESS_RECEIPT_EVENT_ID: &str = "identity.device-ingress-receipted";
 
 /// 被违反的规则（供测试精确断言）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -201,6 +222,13 @@ pub(crate) enum Rule {
     /// INVARIANT: CONTRACT-CONSISTENCY-CAPABILITY-01 { level = "Medium", exec = "check", source = "code" }— 一致性等级不能只停留在字符串枚举；
     /// 必须有闭值 typed 能力证据，禁止跨等级 stray capability，防 L2/L3/L4 语义虚开。
     ConsistencyCapability,
+    /// R25：设备证书 HTTP desired-state/status 契约族必须闭合 route/auth、typed response status、
+    /// 安全负约束、L4 profile 及 linked command/events；DTO 字段集合由 JSON Schema/codegen 单源拥有。
+    /// 旧 `identity.reconcile-loop` 不得与新契约并存。
+    ///
+    /// draft policy 允许 linked target 尚未落盘，但若已存在则 kind/consistency 必须正确；
+    /// active policy 要求四个 target 全部存在且 active。
+    DeviceCertificateHttpClosure,
     /// HTTP success status、subscription execution/effect 组合及 identity 集合必须良构且无重复，
     /// 方可进入 codegen/runtime。
     ManifestWireMetadata,
@@ -264,7 +292,531 @@ fn validate_cross(contracts: &[DiscoveredContract]) -> Vec<Finding> {
     let mut out = rule_duplicate_id(contracts);
     out.extend(rule_slug_mixing(contracts));
     out.extend(rule_consistency_capability(contracts));
+    out.extend(rule_device_certificate_http_closure(contracts));
     out
+}
+
+/// R25：`identity.device-certificate-policy-put` 与
+/// `identity.device-certificate-status-get` 的 HTTP/L4 闭包。
+fn rule_device_certificate_http_closure(contracts: &[DiscoveredContract]) -> Vec<Finding> {
+    let by_id: BTreeMap<&str, &DiscoveredContract> = contracts
+        .iter()
+        .map(|contract| (contract.manifest.id.as_str(), contract))
+        .collect();
+    let mut out = Vec::new();
+
+    if let Some(legacy) = by_id.get(R25_LEGACY_ID) {
+        out.push(r25_finding(
+            legacy,
+            format!(
+                "旧 contract id={R25_LEGACY_ID} 已被 {R25_POLICY_ID} + {R25_STATUS_ID} 直接替换，禁止 alias/shim 或并存"
+            ),
+        ));
+    }
+
+    for carrier in contracts.iter().filter(|contract| {
+        contract.manifest.id != R25_POLICY_ID
+            && contract.manifest.consistency_level == ConsistencyLevel::DeviceLatent
+            && contract
+                .manifest
+                .capabilities
+                .device_latent
+                .as_ref()
+                .is_some_and(|capability| {
+                    matches!(
+                        &capability.profile,
+                        DeviceLatentProfile::DeviceCertificate { .. }
+                    )
+                })
+    }) {
+        out.push(r25_finding(
+            carrier,
+            format!(
+                "DeviceLatent resourceKind=device-certificate 只允许 canonical contract id={R25_POLICY_ID}，实为 id={}",
+                carrier.manifest.id
+            ),
+        ));
+    }
+
+    let policy = by_id.get(R25_POLICY_ID).copied();
+    let status = by_id.get(R25_STATUS_ID).copied();
+    match policy {
+        Some(policy) => out.extend(rule_device_certificate_policy(policy)),
+        None => out.push(finding(
+            Rule::DeviceCertificateHttpClosure,
+            "http/identity/v2",
+            format!("required contract id={R25_POLICY_ID} 缺失"),
+        )),
+    }
+    match status {
+        Some(status) => out.extend(rule_device_certificate_status(status)),
+        None => out.push(finding(
+            Rule::DeviceCertificateHttpClosure,
+            "http/identity/v2",
+            format!("required contract id={R25_STATUS_ID} 缺失"),
+        )),
+    }
+
+    if let Some(policy) = policy {
+        let targets = [
+            (R25_COMMAND_ID, ContractKind::Command),
+            (R25_ACK_EVENT_ID, ContractKind::Event),
+            (R25_REPORTED_EVENT_ID, ContractKind::Event),
+            (R25_INGRESS_RECEIPT_EVENT_ID, ContractKind::Event),
+        ];
+        for (target_id, expected_kind) in targets {
+            let Some(target) = by_id.get(target_id).copied() else {
+                if policy.manifest.lifecycle == Lifecycle::Active {
+                    out.push(r25_finding(
+                        policy,
+                        format!(
+                            "active source contract id={R25_POLICY_ID} 的 linked target id={target_id} 必须存在且 lifecycle=active"
+                        ),
+                    ));
+                }
+                continue;
+            };
+            if target.manifest.kind != expected_kind {
+                out.push(r25_linked_target_finding(
+                    policy,
+                    target,
+                    format!(
+                        "必须 kind={}，实为 kind={}",
+                        expected_kind.as_dir(),
+                        target.manifest.kind.as_dir()
+                    ),
+                ));
+            }
+            if target.manifest.consistency_level != ConsistencyLevel::OutboxFact {
+                out.push(r25_linked_target_finding(
+                    policy,
+                    target,
+                    format!(
+                        "必须 consistencyLevel=OutboxFact，实为 {:?}",
+                        target.manifest.consistency_level
+                    ),
+                ));
+            }
+            if target.manifest.domain != "identity" {
+                out.push(r25_linked_target_finding(
+                    policy,
+                    target,
+                    format!(
+                        "必须 target domain=identity，实为 domain={:?}",
+                        target.manifest.domain
+                    ),
+                ));
+            }
+            if !matches!(&target.manifest.owner, ContractOwner::Domain(owner) if owner == "identity")
+            {
+                out.push(r25_linked_target_finding(
+                    policy,
+                    target,
+                    format!(
+                        "必须 target owner=identity，实为 owner={:?}",
+                        target.manifest.owner
+                    ),
+                ));
+            }
+            if policy.manifest.lifecycle == Lifecycle::Active
+                && target.manifest.lifecycle != Lifecycle::Active
+            {
+                out.push(r25_linked_target_finding(
+                    policy,
+                    target,
+                    format!(
+                        "必须 lifecycle=active（active source），实为 {:?}",
+                        target.manifest.lifecycle
+                    ),
+                ));
+            }
+        }
+    }
+    out
+}
+
+fn rule_device_certificate_policy(c: &DiscoveredContract) -> Vec<Finding> {
+    let mut out = rule_device_certificate_http_surface(
+        c,
+        ConsistencyLevel::DeviceLatent,
+        HttpMethod::Put,
+        R25_POLICY_PATH,
+        R25_POLICY_PERMISSION,
+    );
+    let m = &c.manifest;
+    let label = contract_label(c);
+
+    if let Some((schema_file, request)) =
+        r25_read_schema(c, R25_POLICY_ID, SCHEMA_KEY_REQUEST, &mut out)
+    {
+        if request
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+            .is_some_and(|properties| {
+                properties.contains_key("tenantId") || properties.contains_key("deviceId")
+            })
+        {
+            out.push(r25_finding(
+                c,
+                format!(
+                    "contract id={R25_POLICY_ID} {schema_file} request root 禁止 tenantId/deviceId；tenant 来自认证上下文且 deviceId 来自 path"
+                ),
+            ));
+        }
+        for (pointer, property, annotation, expected) in [
+            (
+                "/properties/idempotencyKey",
+                "idempotencyKey",
+                "x-redaction",
+                "internal",
+            ),
+            (
+                "/properties/policy/properties/keyUsages",
+                "keyUsages",
+                "x-redaction",
+                "internal",
+            ),
+            (
+                "/properties/policy/properties/sans",
+                "sans",
+                "x-pii",
+                "generic",
+            ),
+            (
+                "/properties/policy/properties/sans",
+                "sans",
+                "x-redaction",
+                "drop",
+            ),
+        ] {
+            r25_validate_schema_annotation(
+                c,
+                R25_POLICY_ID,
+                &schema_file,
+                &request,
+                pointer,
+                property,
+                annotation,
+                expected,
+                &mut out,
+            );
+        }
+    }
+
+    let _ = r25_read_schema(c, R25_POLICY_ID, SCHEMA_KEY_RESPONSE, &mut out);
+
+    let expected_responses = BTreeSet::from([200, 404, 409]);
+    let actual_responses: BTreeSet<u16> = m
+        .schemas
+        .responses
+        .keys()
+        .copied()
+        .map(HttpStatusCode::get)
+        .collect();
+    if actual_responses != expected_responses {
+        out.push(r25_finding(
+            c,
+            format!(
+                "contract id={R25_POLICY_ID} typed response status 必须精确等于 {expected_responses:?}，实为 {actual_responses:?}"
+            ),
+        ));
+    }
+
+    let Some(device_latent) = &m.capabilities.device_latent else {
+        out.push(finding(
+            Rule::DeviceCertificateHttpClosure,
+            label,
+            format!(
+                "contract id={R25_POLICY_ID} 必须声明 capabilities.deviceLatent profile resourceKind/links"
+            ),
+        ));
+        return out;
+    };
+    if device_latent.loop_kind != DeviceLatentLoop::Reconcile
+        || !matches!(
+            &device_latent.profile,
+            DeviceLatentProfile::DeviceCertificate { .. }
+        )
+    {
+        out.push(finding(
+            Rule::DeviceCertificateHttpClosure,
+            label.clone(),
+            format!(
+                "contract id={R25_POLICY_ID} capabilities.deviceLatent 必须 loop=reconcile + resourceKind=device-certificate"
+            ),
+        ));
+    }
+    let DeviceLatentProfile::DeviceCertificate { links } = &device_latent.profile;
+    for (field, actual, expected) in [
+        ("command", links.command.as_str(), R25_COMMAND_ID),
+        ("ackEvent", links.ack_event.as_str(), R25_ACK_EVENT_ID),
+        (
+            "reportedEvent",
+            links.reported_event.as_str(),
+            R25_REPORTED_EVENT_ID,
+        ),
+        (
+            "ingressReceiptEvent",
+            links.ingress_receipt_event.as_str(),
+            R25_INGRESS_RECEIPT_EVENT_ID,
+        ),
+    ] {
+        if actual != expected {
+            out.push(finding(
+                Rule::DeviceCertificateHttpClosure,
+                label.clone(),
+                format!(
+                    "contract id={R25_POLICY_ID} capabilities.deviceLatent.profile.links.{field} 必须精确等于 {expected:?}，实为 {actual:?}"
+                ),
+            ));
+        }
+    }
+    match &m.reconcile {
+        Some(reconcile)
+            if reconcile.tenancy == DeviceLatentTenancy::TenantScoped
+                && reconcile.trigger == DeviceLatentTrigger::Interval
+                && reconcile.fencing == DeviceLatentFencing::Required
+                && reconcile.late_message_policy == DeviceLatentLateMessagePolicy::Idempotent => {}
+        _ => out.push(finding(
+            Rule::DeviceCertificateHttpClosure,
+            label,
+            format!(
+                "contract id={R25_POLICY_ID} [reconcile] 必须 tenancy=tenant-scoped + trigger=interval + fencing=required + lateMessagePolicy=idempotent"
+            ),
+        )),
+    }
+    out
+}
+
+fn rule_device_certificate_status(c: &DiscoveredContract) -> Vec<Finding> {
+    let mut out = rule_device_certificate_http_surface(
+        c,
+        ConsistencyLevel::LocalOnly,
+        HttpMethod::Get,
+        R25_STATUS_PATH,
+        R25_STATUS_PERMISSION,
+    );
+    let _ = r25_read_schema(c, R25_STATUS_ID, SCHEMA_KEY_REQUEST, &mut out);
+    if let Some((schema_file, response)) =
+        r25_read_schema(c, R25_STATUS_ID, SCHEMA_KEY_RESPONSE, &mut out)
+    {
+        if response
+            .pointer("/properties/data/properties/activeCommand/properties")
+            .and_then(serde_json::Value::as_object)
+            .is_some_and(|properties| properties.contains_key("payload"))
+        {
+            out.push(r25_finding(
+                c,
+                format!(
+                    "contract id={R25_STATUS_ID} {schema_file} activeCommand 禁止 payload，仅允许 payload-free summary"
+                ),
+            ));
+        }
+        r25_validate_schema_annotation(
+            c,
+            R25_STATUS_ID,
+            &schema_file,
+            &response,
+            "/properties/data/properties/activeCommand/properties/commandId",
+            "commandId",
+            "x-redaction",
+            "internal",
+            &mut out,
+        );
+    }
+    out
+}
+
+fn r25_read_schema(
+    c: &DiscoveredContract,
+    contract_id: &str,
+    schema_role: &str,
+    out: &mut Vec<Finding>,
+) -> Option<(String, serde_json::Value)> {
+    let schema_file = match schema_role {
+        SCHEMA_KEY_REQUEST => c.manifest.schemas.request.as_deref(),
+        SCHEMA_KEY_RESPONSE => c
+            .manifest
+            .endpoints
+            .as_ref()
+            .and_then(|endpoints| endpoints.http.as_ref())
+            .and_then(|http| c.manifest.schemas.response(http.success_status)),
+        _ => None,
+    };
+    let Some(schema_file) = schema_file else {
+        out.push(r25_finding(
+            c,
+            format!("contract id={contract_id} 必须声明非空 {schema_role} schema"),
+        ));
+        return None;
+    };
+    let path = c.dir.join(schema_file);
+    let value = match std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+    {
+        Some(value) => value,
+        None => {
+            out.push(r25_finding(
+                c,
+                format!("contract id={contract_id} {schema_file} 必须是可读取的 JSON Schema"),
+            ));
+            return None;
+        }
+    };
+    Some((schema_file.to_string(), value))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn r25_validate_schema_annotation(
+    c: &DiscoveredContract,
+    contract_id: &str,
+    schema_file: &str,
+    schema: &serde_json::Value,
+    pointer: &str,
+    property: &str,
+    annotation: &str,
+    expected: &str,
+    out: &mut Vec<Finding>,
+) {
+    let actual = schema
+        .pointer(pointer)
+        .and_then(|node| node.get(annotation))
+        .and_then(serde_json::Value::as_str);
+    if actual != Some(expected) {
+        out.push(r25_finding(
+            c,
+            format!(
+                "contract id={contract_id} {schema_file} {property} {annotation}={expected} 必填，实为 {actual:?}"
+            ),
+        ));
+    }
+}
+
+fn rule_device_certificate_http_surface(
+    c: &DiscoveredContract,
+    consistency: ConsistencyLevel,
+    method: HttpMethod,
+    path: &str,
+    permission: vocab::RoutePermissionId,
+) -> Vec<Finding> {
+    let m = &c.manifest;
+    let label = contract_label(c);
+    let mut out = Vec::new();
+    let expected_id = if consistency == ConsistencyLevel::DeviceLatent {
+        R25_POLICY_ID
+    } else {
+        R25_STATUS_ID
+    };
+    let mut reject = |detail: String| {
+        out.push(finding(
+            Rule::DeviceCertificateHttpClosure,
+            label.clone(),
+            format!("contract id={expected_id} {detail}"),
+        ));
+    };
+
+    if m.kind != ContractKind::Http {
+        reject(format!("must kind=http，实为 kind={}", m.kind.as_dir()));
+    }
+    if m.domain != "identity" || m.version != "v2" {
+        reject(format!(
+            "必须 domain=identity + version=v2，实为 domain={} version={}",
+            m.domain, m.version
+        ));
+    }
+    if !matches!(&m.owner, ContractOwner::Domain(owner) if owner == "identity") {
+        reject(format!("must owner=identity，实为 owner={:?}", m.owner));
+    }
+    if m.consistency_level != consistency {
+        reject(format!(
+            "必须 consistencyLevel={consistency:?}，实为 {:?}",
+            m.consistency_level
+        ));
+    }
+    if m.method != Some(method) {
+        reject(format!(
+            "必须 method={}，实为 {:?}",
+            method.as_wire(),
+            m.method
+        ));
+    }
+    if m.path.as_deref() != Some(path) {
+        reject(format!("必须 path={path:?}，实为 {:?}", m.path.as_deref()));
+    }
+    let Some(http) = m
+        .endpoints
+        .as_ref()
+        .and_then(|endpoints| endpoints.http.as_ref())
+    else {
+        reject("必须声明 endpoints.http route/auth metadata".to_string());
+        return out;
+    };
+    if http.success_status != 200 {
+        reject(format!(
+            "endpoints.http 必须 successStatus=200，实为 {}",
+            http.success_status
+        ));
+    }
+    if http.idempotency != HttpIdempotency::Idempotent {
+        reject(format!(
+            "endpoints.http 必须 idempotency=idempotent，实为 {:?}",
+            http.idempotency
+        ));
+    }
+    if http.resource.as_deref() != Some("deviceId")
+        || http.self_scoped
+        || http.resource_sharing.is_some()
+    {
+        reject(format!(
+            "endpoints.http 必须 resource=deviceId + selfScoped=false + resourceSharing 未声明，实为 resource={:?} selfScoped={} resourceSharing={:?}",
+            http.resource, http.self_scoped, http.resource_sharing
+        ));
+    }
+    let permission_literal = permission.as_str();
+    if !r25_http_auth_matches(http.auth.as_ref(), permission) {
+        reject(format!(
+            "endpoints.http.auth 必须 mode=permission + permission={permission_literal:?}（可由 vocab::RoutePermissionId parse）+ 无 reason，实为 {auth:?}",
+            auth = http.auth.as_ref()
+        ));
+    }
+    out
+}
+
+fn r25_http_auth_matches(auth: Option<&HttpAuth>, permission: vocab::RoutePermissionId) -> bool {
+    let Some(auth) = auth else {
+        return false;
+    };
+    let Some(actual) = auth.permission.as_deref() else {
+        return false;
+    };
+    auth.mode == HttpAuthMode::Permission
+        && actual == permission.as_str()
+        && vocab::RoutePermissionId::parse(actual) == Ok(permission)
+        && auth.reason.is_none()
+}
+
+fn r25_finding(c: &DiscoveredContract, detail: String) -> Finding {
+    finding(
+        Rule::DeviceCertificateHttpClosure,
+        contract_label(c),
+        detail,
+    )
+}
+
+fn r25_linked_target_finding(
+    source: &DiscoveredContract,
+    target: &DiscoveredContract,
+    detail: String,
+) -> Finding {
+    finding(
+        Rule::DeviceCertificateHttpClosure,
+        contract_label(target),
+        format!(
+            "source contract id={} linked target id={} {detail}",
+            source.manifest.id, target.manifest.id
+        ),
+    )
 }
 
 fn read_runtime_relay_wiring(root: &Path) -> Result<RuntimeRelayWiring> {
@@ -1067,16 +1619,32 @@ fn rule_manifest_wire_metadata(m: &ContractManifest, label: &str) -> Vec<Finding
         .endpoints
         .as_ref()
         .and_then(|endpoints| endpoints.http.as_ref())
-        && !(200..=299).contains(&http.success_status)
     {
-        out.push(finding(
-            Rule::ManifestWireMetadata,
-            label,
-            format!(
-                "endpoints.http.successStatus 必须位于 200..=299，实为 {}",
-                http.success_status
-            ),
-        ));
+        if !(200..=299).contains(&http.success_status) {
+            out.push(finding(
+                Rule::ManifestWireMetadata,
+                label,
+                format!(
+                    "endpoints.http.successStatus 必须位于 200..=299，实为 {}",
+                    http.success_status
+                ),
+            ));
+        }
+        if !m.schemas.responses.is_empty()
+            && !m
+                .schemas
+                .responses
+                .contains_key(&HttpStatusCode::new(http.success_status))
+        {
+            out.push(finding(
+                Rule::ManifestWireMetadata,
+                label,
+                format!(
+                    "schemas.responses 必须包含 successStatus={} 的 typed schema",
+                    http.success_status
+                ),
+            ));
+        }
     }
 
     let mut subscription_identities = BTreeSet::new();
@@ -1248,10 +1816,15 @@ fn rule_path_match(c: &DiscoveredContract, label: &str) -> Option<Finding> {
 /// R4：kind→schema 形态一致。返回缺失的必需 schema 声明（可多条）。
 fn rule_schema_shape(m: &ContractManifest, label: &str) -> Vec<Finding> {
     let s = &m.schemas;
+    let http_success_response = s.response.is_some()
+        || m.endpoints
+            .as_ref()
+            .and_then(|endpoints| endpoints.http.as_ref())
+            .is_some_and(|http| s.response(http.success_status).is_some());
     let required: &[(&str, bool)] = match m.kind {
         ContractKind::Http => &[
             (SCHEMA_KEY_REQUEST, s.request.is_some()),
-            (SCHEMA_KEY_RESPONSE, s.response.is_some()),
+            (SCHEMA_KEY_RESPONSE, http_success_response),
         ],
         ContractKind::Event | ContractKind::Saga => &[(SCHEMA_KEY_PAYLOAD, s.payload.is_some())],
         ContractKind::Command => &[(SCHEMA_KEY_REQUEST, s.request.is_some())],
@@ -1946,7 +2519,12 @@ fn rule_http_projection_response_coverage(c: &DiscoveredContract, label: &str) -
     {
         return Vec::new();
     }
-    let Some(response) = m.schemas.response.as_deref() else {
+    let Some(response) = m
+        .endpoints
+        .as_ref()
+        .and_then(|endpoints| endpoints.http.as_ref())
+        .and_then(|http| m.schemas.response(http.success_status))
+    else {
         return Vec::new();
     };
     if pathsafe::is_unsafe_segment(response) {
@@ -2246,11 +2824,7 @@ fn rule_schema_title(c: &DiscoveredContract, label: &str) -> Vec<Finding> {
 fn collect_contract_titles(c: &DiscoveredContract) -> (Vec<(String, String)>, Vec<String>) {
     let mut titles = Vec::new();
     let mut missing_root = Vec::new();
-    let schema_files = if c.manifest.kind == ContractKind::Saga {
-        c.manifest.declared_schema_files()
-    } else {
-        c.manifest.schemas.declared_files()
-    };
+    let schema_files = c.manifest.declared_schema_files();
     for file in schema_files {
         if pathsafe::is_unsafe_segment(file) {
             // 防御性 fail-safe：含路径分量的文件名由 R6 报；R13 不主动 `join` 读它（不依赖
@@ -2439,14 +3013,15 @@ fn is_domain_name(s: &str) -> bool {
 mod tests {
     use super::*;
     use crate::contract::manifest::{
-        Capabilities, CompensationOrder, Delivery, DeviceLatentCapability, DeviceLatentFencing,
-        DeviceLatentLateMessagePolicy, DeviceLatentLoop, DeviceLatentTenancy, DeviceLatentTrigger,
-        EffectKind, EffectProfile, Endpoints, ExternalEffectPolicy, HttpAuth, HttpAuthMode,
-        HttpEndpoint, HttpHeaderMode, HttpIdempotency, HttpMethod, HttpProjection,
-        HttpProjectionField, HttpProjectionFieldName, HttpResourceSharing, HttpResourceSharingMode,
-        Lifecycle, LocalTxCapability, OutboxCapability, PartitionKeyStrategy, ReconcileBlock,
-        SagaBlock, SagaStep, Schemas, SubscriberReadiness, Subscription, SubscriptionEffect,
-        SubscriptionExecution, SubscriptionTopology, WorkflowCapability,
+        Capabilities, CompensationOrder, Delivery, DeviceCertificateLinks, DeviceLatentCapability,
+        DeviceLatentFencing, DeviceLatentLateMessagePolicy, DeviceLatentLoop, DeviceLatentProfile,
+        DeviceLatentTenancy, DeviceLatentTrigger, EffectKind, EffectProfile, Endpoints,
+        ExternalEffectPolicy, HttpAuth, HttpAuthMode, HttpEndpoint, HttpHeaderMode,
+        HttpIdempotency, HttpMethod, HttpProjection, HttpProjectionField, HttpProjectionFieldName,
+        HttpResourceSharing, HttpResourceSharingMode, Lifecycle, LocalTxCapability,
+        OutboxCapability, PartitionKeyStrategy, ReconcileBlock, SagaBlock, SagaStep, Schemas,
+        SubscriberReadiness, Subscription, SubscriptionEffect, SubscriptionExecution,
+        SubscriptionTopology, WorkflowCapability,
     };
     use crate::testutil::unique_tmp;
     use rstest::rstest;
@@ -2651,6 +3226,7 @@ mod tests {
             request: Some("request.schema.json".to_string()),
             response: Some("response.schema.json".to_string()),
             payload: None,
+            responses: BTreeMap::new(),
         }
     }
 
@@ -2758,6 +3334,14 @@ mod tests {
         Capabilities {
             device_latent: Some(DeviceLatentCapability {
                 loop_kind: DeviceLatentLoop::Reconcile,
+                profile: DeviceLatentProfile::DeviceCertificate {
+                    links: DeviceCertificateLinks {
+                        command: "identity.apply-device-certificate".to_string(),
+                        ack_event: "identity.device-command-acked".to_string(),
+                        reported_event: "identity.device-certificate-reported".to_string(),
+                        ingress_receipt_event: "identity.device-ingress-receipted".to_string(),
+                    },
+                },
             }),
             ..Capabilities::default()
         }
@@ -5986,6 +6570,682 @@ mod tests {
         ];
         let findings = rule_consistency_capability(&contracts);
         assert!(findings.is_empty(), "{findings:?}");
+    }
+
+    // ── R25 DeviceCertificateHttpClosure ──────────────────────────────
+
+    const DEVICE_CERT_POLICY_ID: &str = "identity.device-certificate-policy-put";
+    const DEVICE_CERT_STATUS_ID: &str = "identity.device-certificate-status-get";
+    const DEVICE_CERT_POLICY_PATH: &str = "/api/v2/identity/devices/{deviceId}/certificate-policy";
+    const DEVICE_CERT_STATUS_PATH: &str = "/api/v2/identity/devices/{deviceId}/certificate-status";
+    const DEVICE_CERT_POLICY_PERMISSION: &str =
+        vocab::RoutePermissionId::IdentityDeviceCertificatePolicyWrite.as_str();
+    const DEVICE_CERT_STATUS_PERMISSION: &str =
+        vocab::RoutePermissionId::IdentityDeviceCertificateStatusRead.as_str();
+
+    fn assert_r25_detail(findings: &[Finding], detail: &str) {
+        assert!(
+            findings.iter().any(|finding| {
+                finding.rule == Rule::DeviceCertificateHttpClosure
+                    && finding.detail.contains(detail)
+            }),
+            "expected R25 finding containing {detail:?}; got {findings:?}"
+        );
+    }
+
+    fn assert_r25_subject_detail(findings: &[Finding], subject: &str, detail: &str) {
+        assert!(
+            findings.iter().any(|finding| {
+                finding.rule == Rule::DeviceCertificateHttpClosure
+                    && finding.subject == subject
+                    && finding.detail.contains(detail)
+            }),
+            "expected R25 finding subject={subject:?} containing {detail:?}; got {findings:?}"
+        );
+    }
+
+    fn device_certificate_endpoint(permission: &str) -> Endpoints {
+        Endpoints {
+            http: Some(HttpEndpoint {
+                success_status: 200,
+                idempotency: HttpIdempotency::Idempotent,
+                auth: Some(HttpAuth {
+                    mode: HttpAuthMode::Permission,
+                    reason: None,
+                    permission: Some(permission.to_string()),
+                }),
+                resource: Some("deviceId".to_string()),
+                self_scoped: false,
+                resource_sharing: None,
+                headers: BTreeMap::new(),
+                projection: None,
+            }),
+        }
+    }
+
+    fn device_certificate_http_pair(
+        policy_lifecycle: Lifecycle,
+    ) -> anyhow::Result<(Vec<DiscoveredContract>, PathBuf)> {
+        let root = unique_tmp("validate-r25");
+        let policy_dir = root.join("device-certificate-policy-put");
+        let status_dir = root.join("device-certificate-status-get");
+        std::fs::create_dir_all(&policy_dir)?;
+        std::fs::create_dir_all(&status_dir)?;
+        std::fs::write(
+            policy_dir.join("request.schema.json"),
+            include_str!(
+                "../../../contracts/http/identity/v2/device-certificate-policy-put/request.schema.json"
+            ),
+        )?;
+        std::fs::write(
+            policy_dir.join("response.schema.json"),
+            include_str!(
+                "../../../contracts/http/identity/v2/device-certificate-policy-put/response.schema.json"
+            ),
+        )?;
+        std::fs::write(
+            status_dir.join("request.schema.json"),
+            include_str!(
+                "../../../contracts/http/identity/v2/device-certificate-status-get/request.schema.json"
+            ),
+        )?;
+        std::fs::write(
+            status_dir.join("response.schema.json"),
+            include_str!(
+                "../../../contracts/http/identity/v2/device-certificate-status-get/response.schema.json"
+            ),
+        )?;
+
+        let mut policy = manifest(
+            ContractKind::Http,
+            ConsistencyLevel::DeviceLatent,
+            ContractOwner::Domain("identity".to_string()),
+            http_schemas(),
+        );
+        policy.id = DEVICE_CERT_POLICY_ID.to_string();
+        policy.domain = "identity".to_string();
+        policy.version = "v2".to_string();
+        policy.lifecycle = policy_lifecycle;
+        policy.path = Some(DEVICE_CERT_POLICY_PATH.to_string());
+        policy.method = Some(HttpMethod::Put);
+        policy.endpoints = Some(device_certificate_endpoint(DEVICE_CERT_POLICY_PERMISSION));
+        policy.schemas.response = None;
+        policy.schemas.responses = BTreeMap::from([
+            (HttpStatusCode::new(200), "response.schema.json".to_string()),
+            (HttpStatusCode::new(404), "response.schema.json".to_string()),
+            (HttpStatusCode::new(409), "response.schema.json".to_string()),
+        ]);
+        policy.capabilities = device_latent_capability();
+        policy.reconcile = Some(valid_reconcile_block());
+        policy.effect_profile = effect_profile(&[
+            EffectKind::Auth,
+            EffectKind::BusinessWrite,
+            EffectKind::BusinessTransaction,
+            EffectKind::Reconcile,
+        ]);
+        let mut policy = discovered(policy, policy_dir);
+        policy.slug = Some("device-certificate-policy-put".to_string());
+
+        let mut status = manifest(
+            ContractKind::Http,
+            ConsistencyLevel::LocalOnly,
+            ContractOwner::Domain("identity".to_string()),
+            http_schemas(),
+        );
+        status.id = DEVICE_CERT_STATUS_ID.to_string();
+        status.domain = "identity".to_string();
+        status.version = "v2".to_string();
+        status.lifecycle = policy_lifecycle;
+        status.path = Some(DEVICE_CERT_STATUS_PATH.to_string());
+        status.method = Some(HttpMethod::Get);
+        status.endpoints = Some(device_certificate_endpoint(DEVICE_CERT_STATUS_PERMISSION));
+        status.effect_profile =
+            effect_profile(&[EffectKind::Auth, EffectKind::Read, EffectKind::Projection]);
+        let mut status = discovered(status, status_dir);
+        status.slug = Some("device-certificate-status-get".to_string());
+
+        Ok((vec![policy, status], root))
+    }
+
+    fn device_certificate_target(
+        id: &str,
+        kind: ContractKind,
+        lifecycle: Lifecycle,
+    ) -> DiscoveredContract {
+        let schemas = match kind {
+            ContractKind::Command => Schemas {
+                request: Some("request.schema.json".to_string()),
+                ..Schemas::default()
+            },
+            _ => payload_schemas(),
+        };
+        let mut target = manifest(
+            kind,
+            ConsistencyLevel::OutboxFact,
+            ContractOwner::Domain("identity".to_string()),
+            schemas,
+        );
+        target.id = id.to_string();
+        target.domain = "identity".to_string();
+        target.lifecycle = lifecycle;
+        discovered(target, PathBuf::from(format!("/target/{id}")))
+    }
+
+    fn append_device_certificate_targets(
+        contracts: &mut Vec<DiscoveredContract>,
+        lifecycle: Lifecycle,
+    ) {
+        contracts.extend([
+            device_certificate_target(
+                "identity.apply-device-certificate",
+                ContractKind::Command,
+                lifecycle,
+            ),
+            device_certificate_target(
+                "identity.device-command-acked",
+                ContractKind::Event,
+                lifecycle,
+            ),
+            device_certificate_target(
+                "identity.device-certificate-reported",
+                ContractKind::Event,
+                lifecycle,
+            ),
+            device_certificate_target(
+                "identity.device-ingress-receipted",
+                ContractKind::Event,
+                lifecycle,
+            ),
+        ]);
+    }
+
+    fn r25_schema_value(
+        contract: &DiscoveredContract,
+        schema_file: &str,
+    ) -> anyhow::Result<serde_json::Value> {
+        let path = contract.dir.join(schema_file);
+        let text = std::fs::read_to_string(&path)
+            .with_context(|| format!("读取 R25 测试 schema {}", path.display()))?;
+        serde_json::from_str(&text)
+            .with_context(|| format!("解析 R25 测试 schema {}", path.display()))
+    }
+
+    fn write_r25_schema_value(
+        contract: &DiscoveredContract,
+        schema_file: &str,
+        value: &serde_json::Value,
+    ) -> anyhow::Result<()> {
+        let path = contract.dir.join(schema_file);
+        let bytes = serde_json::to_vec_pretty(value).context("序列化 R25 测试 schema")?;
+        std::fs::write(&path, bytes)
+            .with_context(|| format!("写入 R25 测试 schema {}", path.display()))
+    }
+
+    fn r25_schema_object_mut<'a>(
+        schema: &'a mut serde_json::Value,
+        pointer: &str,
+    ) -> anyhow::Result<&'a mut serde_json::Map<String, serde_json::Value>> {
+        schema
+            .pointer_mut(pointer)
+            .and_then(serde_json::Value::as_object_mut)
+            .with_context(|| format!("R25 测试 schema pointer {pointer:?} 必须指向 object"))
+    }
+
+    #[test]
+    fn r25_device_certificate_http_pair_is_required_and_legacy_id_is_forbidden() {
+        let findings = rule_device_certificate_http_closure(&[]);
+        assert_r25_detail(&findings, DEVICE_CERT_POLICY_ID);
+        assert_r25_detail(&findings, DEVICE_CERT_STATUS_ID);
+
+        let mut legacy = manifest(
+            ContractKind::Http,
+            ConsistencyLevel::DeviceLatent,
+            ContractOwner::Domain("identity".to_string()),
+            http_schemas(),
+        );
+        legacy.id = "identity.reconcile-loop".to_string();
+        let findings =
+            rule_device_certificate_http_closure(&[discovered(legacy, PathBuf::from("/legacy"))]);
+        assert_r25_detail(&findings, "identity.reconcile-loop");
+    }
+
+    #[test]
+    fn r25_device_certificate_draft_pair_is_anti_vacuity_green() -> anyhow::Result<()> {
+        assert_eq!(
+            vocab::RoutePermissionId::parse(DEVICE_CERT_POLICY_PERMISSION),
+            Ok(vocab::RoutePermissionId::IdentityDeviceCertificatePolicyWrite)
+        );
+        assert_eq!(
+            vocab::RoutePermissionId::parse(DEVICE_CERT_STATUS_PERMISSION),
+            Ok(vocab::RoutePermissionId::IdentityDeviceCertificateStatusRead)
+        );
+        let (contracts, root) = device_certificate_http_pair(Lifecycle::Draft)?;
+        let findings = rule_device_certificate_http_closure(&contracts);
+        std::fs::remove_dir_all(root)?;
+        assert!(findings.is_empty(), "{findings:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn r25_policy_request_schema_enforces_security_metadata() -> anyhow::Result<()> {
+        let (contracts, root) = device_certificate_http_pair(Lifecycle::Draft)?;
+        let original = r25_schema_value(&contracts[0], "request.schema.json")?;
+
+        let mut invalid = original.clone();
+        r25_schema_object_mut(&mut invalid, "/properties")?.insert(
+            "tenantId".to_string(),
+            serde_json::json!({"type": "string"}),
+        );
+        write_r25_schema_value(&contracts[0], "request.schema.json", &invalid)?;
+        assert_r25_detail(
+            &rule_device_certificate_http_closure(&contracts),
+            "tenantId/deviceId",
+        );
+
+        for (pointer, annotation, wrong, detail) in [
+            (
+                "/properties/idempotencyKey",
+                "x-redaction",
+                "drop",
+                "idempotencyKey x-redaction=internal",
+            ),
+            (
+                "/properties/policy/properties/keyUsages",
+                "x-redaction",
+                "drop",
+                "keyUsages x-redaction=internal",
+            ),
+            (
+                "/properties/policy/properties/sans",
+                "x-pii",
+                "none",
+                "sans x-pii=generic",
+            ),
+            (
+                "/properties/policy/properties/sans",
+                "x-redaction",
+                "internal",
+                "sans x-redaction=drop",
+            ),
+        ] {
+            let mut invalid = original.clone();
+            r25_schema_object_mut(&mut invalid, pointer)?.insert(
+                annotation.to_string(),
+                serde_json::Value::String(wrong.to_string()),
+            );
+            write_r25_schema_value(&contracts[0], "request.schema.json", &invalid)?;
+            assert_r25_detail(&rule_device_certificate_http_closure(&contracts), detail);
+        }
+
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn r25_policy_response_schema_shape_is_owned_by_json_schema() -> anyhow::Result<()> {
+        let (contracts, root) = device_certificate_http_pair(Lifecycle::Draft)?;
+        let mut extended = r25_schema_value(&contracts[0], "response.schema.json")?;
+        r25_schema_object_mut(&mut extended, "/properties/data")?
+            .get_mut("properties")
+            .and_then(serde_json::Value::as_object_mut)
+            .context("R25 policy response properties")?
+            .insert(
+                "completed".to_string(),
+                serde_json::json!({"type": "boolean"}),
+            );
+        write_r25_schema_value(&contracts[0], "response.schema.json", &extended)?;
+
+        let findings = rule_device_certificate_http_closure(&contracts);
+        assert!(
+            findings.iter().all(|finding| {
+                !finding.detail.contains("properties")
+                    && !finding.detail.contains("additionalProperties")
+            }),
+            "R25 must not mirror JSON Schema field sets: {findings:?}"
+        );
+
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn r25_status_response_schema_enforces_payload_free_summary() -> anyhow::Result<()> {
+        let (contracts, root) = device_certificate_http_pair(Lifecycle::Draft)?;
+        let original = r25_schema_value(&contracts[1], "response.schema.json")?;
+
+        let mut invalid = original.clone();
+        r25_schema_object_mut(
+            &mut invalid,
+            "/properties/data/properties/activeCommand/properties",
+        )?
+        .insert("payload".to_string(), serde_json::json!({"type": "string"}));
+        write_r25_schema_value(&contracts[1], "response.schema.json", &invalid)?;
+        assert_r25_detail(
+            &rule_device_certificate_http_closure(&contracts),
+            "activeCommand 禁止 payload",
+        );
+
+        let mut invalid = original;
+        r25_schema_object_mut(
+            &mut invalid,
+            "/properties/data/properties/activeCommand/properties/commandId",
+        )?
+        .remove("x-redaction");
+        write_r25_schema_value(&contracts[1], "response.schema.json", &invalid)?;
+        assert_r25_detail(
+            &rule_device_certificate_http_closure(&contracts),
+            "commandId x-redaction=internal",
+        );
+
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn r25_device_certificate_policy_route_auth_and_consistency_are_exact() -> anyhow::Result<()> {
+        let (contracts, root) = device_certificate_http_pair(Lifecycle::Draft)?;
+
+        let mut invalid = contracts.clone();
+        invalid[0].manifest.kind = ContractKind::Event;
+        assert_r25_detail(&rule_device_certificate_http_closure(&invalid), "kind=http");
+
+        let mut invalid = contracts.clone();
+        invalid[0].manifest.consistency_level = ConsistencyLevel::LocalOnly;
+        assert_r25_detail(
+            &rule_device_certificate_http_closure(&invalid),
+            "consistencyLevel=DeviceLatent",
+        );
+
+        let mut invalid = contracts.clone();
+        invalid[0].manifest.method = Some(HttpMethod::Get);
+        assert_r25_detail(
+            &rule_device_certificate_http_closure(&invalid),
+            "method=PUT",
+        );
+
+        let mut invalid = contracts.clone();
+        invalid[0].manifest.path = Some("/api/v2/identity/devices/{deviceId}".to_string());
+        assert_r25_detail(
+            &rule_device_certificate_http_closure(&invalid),
+            DEVICE_CERT_POLICY_PATH,
+        );
+
+        let mut invalid = contracts.clone();
+        invalid[0]
+            .manifest
+            .endpoints
+            .as_mut()
+            .and_then(|endpoints| endpoints.http.as_mut())
+            .context("R25 policy endpoint fixture")?
+            .resource = Some("tenantId".to_string());
+        assert_r25_detail(
+            &rule_device_certificate_http_closure(&invalid),
+            "resource=deviceId",
+        );
+
+        // 合法但更宽的已登记权限也必须失败，防止仅做“属于目录”校验。
+        let mut invalid = contracts.clone();
+        invalid[0]
+            .manifest
+            .endpoints
+            .as_mut()
+            .and_then(|endpoints| endpoints.http.as_mut())
+            .and_then(|http| http.auth.as_mut())
+            .context("R25 policy auth fixture")?
+            .permission = Some("identity:policy:deactivate".to_string());
+        assert_r25_detail(
+            &rule_device_certificate_http_closure(&invalid),
+            DEVICE_CERT_POLICY_PERMISSION,
+        );
+
+        let mut invalid = contracts.clone();
+        let http = invalid[0]
+            .manifest
+            .endpoints
+            .as_mut()
+            .and_then(|endpoints| endpoints.http.as_mut())
+            .context("R25 policy endpoint fixture")?;
+        http.success_status = 201;
+        http.idempotency = HttpIdempotency::NonIdempotent;
+        let findings = rule_device_certificate_http_closure(&invalid);
+        assert_r25_detail(&findings, "successStatus=200");
+        assert_r25_detail(&findings, "idempotency=idempotent");
+
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn r25_device_certificate_policy_requires_exact_l4_metadata() -> anyhow::Result<()> {
+        let (contracts, root) = device_certificate_http_pair(Lifecycle::Draft)?;
+
+        let mut invalid = contracts.clone();
+        invalid[0].manifest.capabilities.device_latent = None;
+        assert_r25_detail(
+            &rule_device_certificate_http_closure(&invalid),
+            "capabilities.deviceLatent",
+        );
+
+        for (field, expected) in [
+            ("command", R25_COMMAND_ID),
+            ("ackEvent", R25_ACK_EVENT_ID),
+            ("reportedEvent", R25_REPORTED_EVENT_ID),
+            ("ingressReceiptEvent", R25_INGRESS_RECEIPT_EVENT_ID),
+        ] {
+            let mut invalid = contracts.clone();
+            let profile = &mut invalid[0]
+                .manifest
+                .capabilities
+                .device_latent
+                .as_mut()
+                .context("R25 DeviceLatent fixture")?
+                .profile;
+            let DeviceLatentProfile::DeviceCertificate { links } = profile;
+            match field {
+                "command" => links.command = "identity.wrong-command".to_string(),
+                "ackEvent" => links.ack_event = "identity.wrong-ack".to_string(),
+                "reportedEvent" => links.reported_event = "identity.wrong-report".to_string(),
+                "ingressReceiptEvent" => {
+                    links.ingress_receipt_event = "identity.wrong-receipt".to_string()
+                }
+                _ => unreachable!("closed R25 link field"),
+            }
+            assert_r25_detail(&rule_device_certificate_http_closure(&invalid), expected);
+        }
+
+        let mut invalid = contracts.clone();
+        invalid[0].manifest.reconcile = None;
+        assert_r25_detail(
+            &rule_device_certificate_http_closure(&invalid),
+            "[reconcile]",
+        );
+
+        let mut invalid = contracts.clone();
+        invalid[0]
+            .manifest
+            .reconcile
+            .as_mut()
+            .context("R25 reconcile fixture")?
+            .tenancy = DeviceLatentTenancy::SingleTenant;
+        assert_r25_detail(
+            &rule_device_certificate_http_closure(&invalid),
+            "tenancy=tenant-scoped",
+        );
+
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn r25_device_certificate_status_route_auth_and_consistency_are_exact() -> anyhow::Result<()> {
+        let (contracts, root) = device_certificate_http_pair(Lifecycle::Draft)?;
+
+        let mut invalid = contracts.clone();
+        invalid[1].manifest.consistency_level = ConsistencyLevel::DeviceLatent;
+        assert_r25_detail(
+            &rule_device_certificate_http_closure(&invalid),
+            "consistencyLevel=LocalOnly",
+        );
+
+        let mut invalid = contracts.clone();
+        invalid[1].manifest.method = Some(HttpMethod::Put);
+        assert_r25_detail(
+            &rule_device_certificate_http_closure(&invalid),
+            "method=GET",
+        );
+
+        let mut invalid = contracts.clone();
+        invalid[1].manifest.path = Some("/api/v2/identity/devices/{deviceId}".to_string());
+        assert_r25_detail(
+            &rule_device_certificate_http_closure(&invalid),
+            DEVICE_CERT_STATUS_PATH,
+        );
+
+        let mut invalid = contracts.clone();
+        invalid[1]
+            .manifest
+            .endpoints
+            .as_mut()
+            .and_then(|endpoints| endpoints.http.as_mut())
+            .and_then(|http| http.auth.as_mut())
+            .context("R25 status auth fixture")?
+            .permission = Some("identity:policy:read".to_string());
+        assert_r25_detail(
+            &rule_device_certificate_http_closure(&invalid),
+            DEVICE_CERT_STATUS_PERMISSION,
+        );
+
+        let mut invalid = contracts.clone();
+        let http = invalid[1]
+            .manifest
+            .endpoints
+            .as_mut()
+            .and_then(|endpoints| endpoints.http.as_mut())
+            .context("R25 status endpoint fixture")?;
+        http.resource = Some("tenantId".to_string());
+        http.success_status = 204;
+        http.idempotency = HttpIdempotency::NonIdempotent;
+        let findings = rule_device_certificate_http_closure(&invalid);
+        assert_r25_detail(&findings, "resource=deviceId");
+        assert_r25_detail(&findings, "successStatus=200");
+        assert_r25_detail(&findings, "idempotency=idempotent");
+
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn r25_device_certificate_links_validate_present_targets_for_draft() -> anyhow::Result<()> {
+        let (mut contracts, root) = device_certificate_http_pair(Lifecycle::Draft)?;
+        contracts.push(device_certificate_target(
+            "identity.apply-device-certificate",
+            ContractKind::Event,
+            Lifecycle::Draft,
+        ));
+        assert_r25_detail(
+            &rule_device_certificate_http_closure(&contracts),
+            "identity.apply-device-certificate 必须 kind=command",
+        );
+
+        contracts.pop();
+        let mut wrong_consistency = device_certificate_target(
+            "identity.device-command-acked",
+            ContractKind::Event,
+            Lifecycle::Draft,
+        );
+        wrong_consistency.manifest.consistency_level = ConsistencyLevel::LocalOnly;
+        contracts.push(wrong_consistency);
+        assert_r25_detail(
+            &rule_device_certificate_http_closure(&contracts),
+            "identity.device-command-acked 必须 consistencyLevel=OutboxFact",
+        );
+
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn r25_present_link_target_reports_target_and_requires_identity_ownership() -> anyhow::Result<()>
+    {
+        let (mut contracts, root) = device_certificate_http_pair(Lifecycle::Draft)?;
+        let mut target =
+            device_certificate_target(R25_COMMAND_ID, ContractKind::Command, Lifecycle::Draft);
+        let target_subject = contract_label(&target);
+        target.manifest.domain = "settings".to_string();
+        contracts.push(target);
+        let findings = rule_device_certificate_http_closure(&contracts);
+        assert_r25_subject_detail(&findings, &target_subject, "source contract id=");
+        assert_r25_subject_detail(&findings, &target_subject, "target domain=identity");
+
+        contracts.pop();
+        let mut target =
+            device_certificate_target(R25_COMMAND_ID, ContractKind::Command, Lifecycle::Draft);
+        let target_subject = contract_label(&target);
+        target.manifest.owner = ContractOwner::Domain("settings".to_string());
+        contracts.push(target);
+        assert_r25_subject_detail(
+            &rule_device_certificate_http_closure(&contracts),
+            &target_subject,
+            "target owner=identity",
+        );
+
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn r25_missing_link_target_stays_on_source_subject() -> anyhow::Result<()> {
+        let (contracts, root) = device_certificate_http_pair(Lifecycle::Active)?;
+        let source_subject = contract_label(&contracts[0]);
+        assert_r25_subject_detail(
+            &rule_device_certificate_http_closure(&contracts),
+            &source_subject,
+            "linked target id=identity.apply-device-certificate 必须存在",
+        );
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn r25_device_certificate_resource_rejects_distinct_alias_carrier() -> anyhow::Result<()> {
+        let (mut contracts, root) = device_certificate_http_pair(Lifecycle::Draft)?;
+        let mut alias = contracts[0].clone();
+        alias.manifest.id = "identity.device-certificate-policy-alias".to_string();
+        alias.slug = Some("device-certificate-policy-alias".to_string());
+        let alias_subject = contract_label(&alias);
+        contracts.push(alias);
+
+        assert_r25_subject_detail(
+            &rule_device_certificate_http_closure(&contracts),
+            &alias_subject,
+            "只允许 canonical contract id=identity.device-certificate-policy-put",
+        );
+
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn r25_active_device_certificate_policy_requires_four_active_targets() -> anyhow::Result<()> {
+        let (mut contracts, root) = device_certificate_http_pair(Lifecycle::Active)?;
+        assert_r25_detail(
+            &rule_device_certificate_http_closure(&contracts),
+            "identity.apply-device-certificate 必须存在",
+        );
+
+        append_device_certificate_targets(&mut contracts, Lifecycle::Draft);
+        assert_r25_detail(
+            &rule_device_certificate_http_closure(&contracts),
+            "identity.device-certificate-reported 必须 lifecycle=active",
+        );
+
+        for target in &mut contracts[2..] {
+            target.manifest.lifecycle = Lifecycle::Active;
+        }
+        let findings = rule_device_certificate_http_closure(&contracts);
+        std::fs::remove_dir_all(root)?;
+        assert!(findings.is_empty(), "{findings:?}");
+        Ok(())
     }
 
     // ── R13 SchemaTitle（per-contract，读 declared schema 文件）──────────────

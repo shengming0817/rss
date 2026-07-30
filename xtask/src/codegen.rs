@@ -6,6 +6,7 @@
 //! INVARIANT: COMMAND-JOURNAL-GENERATED-01 { level = "Hard", exec = "check", source = "codegen", facet = "manifest-policy", golden = "generated/src/command/mod.rs", synthetic_red = "codegen::tests::command_missing_policy_is_rejected", anti_vacuity = "codegen::tests::command_glue_with_wrappers_emitted" }
 //! INVARIANT: ROUTE-EVIDENCE-CODEGEN-01 { level = "Hard", exec = "check", source = "codegen", facet = "manifest-to-generated-atomic-http-route", golden = "generated/src/http/mod.rs", synthetic_red = "codegen::tests::codegen_rejects_active_http_without_effect_profile", anti_vacuity = "codegen::tests::codegen_emits_http_consistency_level_inside_route_evidence" }
 //! INVARIANT: HTTP-PRODUCER-CODEGEN-01 { level = "Hard", exec = "check", source = "codegen", facet = "manifest-emits-to-generated-producer-binding", golden = "generated/src/http/mod.rs", synthetic_red = "codegen::tests::producer_codegen_rejects_duplicate_emitted_fact", anti_vacuity = "codegen::tests::codegen_emits_typed_http_producer_binding_and_closed_registry" }
+//! INVARIANT: HTTP-RESPONSE-BINDING-01 { level = "Hard", exec = "check", source = "codegen", facet = "status-indexed-response-schema-to-generated-type-binding", golden = "generated/src/http/identity_v2.rs", synthetic_red = "assembly_schema::contract_manifest::tests::http_responses_are_indexed_by_status_code", anti_vacuity = "codegen::tests::codegen_binds_each_typed_http_response_to_its_status" }
 //! INVARIANT: LOCAL-ONLY-RECEIPT-TARGET-01 { level = "Hard", exec = "check", source = "codegen", facet = "active-http-local-only-marker-registry", golden = "generated/src/http/mod.rs", synthetic_red = "codegen::tests::local_only_receipt_targets_exclude_non_active_and_non_local_only_http", anti_vacuity = "codegen::tests::codegen_emits_local_only_receipt_target" }
 //! INVARIANT: GENERATED-TUPLE-REDACTION-01 { level = "Hard", exec = "check", source = "codegen", facet = "constrained-scalar-redaction", golden = "generated/src/http/identity_v1.rs", synthetic_red = "codegen::tests::constrained_newtypes_inherit_exact_redaction_policy", anti_vacuity = "codegen::tests::constrained_newtypes_inherit_exact_redaction_policy" }
 //! INVARIANT: DEFERRED-STRING-LENGTH-VALIDATION-01 { level = "Hard", exec = "check", source = "codegen", facet = "schema-marked-transport-policy-boundary", golden = "generated/src/http/identity_v1.rs", synthetic_red = "codegen::tests::deferred_string_length_marker_rejects_other_validation_keywords", anti_vacuity = "codegen::tests::schema_marker_defers_transport_length_checks" }
@@ -427,11 +428,7 @@ fn render_contract_body(
     let mut redaction_policies: StructPolicies = BTreeMap::new();
     let mut protection_policies: StructProtectionPolicies = BTreeMap::new();
     let mut deferred_string_lengths: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    let schema_files = if c.manifest.kind == ContractKind::Saga {
-        c.manifest.declared_schema_files()
-    } else {
-        c.manifest.schemas.declared_files()
-    };
+    let schema_files = c.manifest.declared_schema_files();
     for schema_file in schema_files {
         // 防御性安全校验：schema 文件名须为纯文件名，防 `../` 路径逃逸（codegen 可独立于 validate 运行）。
         validate_schema_filename(schema_file)
@@ -666,6 +663,7 @@ pub const CONTRACT: ::vocab::ContractBinding =
     ::vocab::ContractBinding::from_static("{domain}", "{contract_id}", "{version}", "{schema_hash}");
 "#
     );
+    out.push_str(&render_http_response_bindings(c, sup)?);
     if c.manifest.lifecycle != Lifecycle::Active {
         return Ok(out);
     }
@@ -875,6 +873,49 @@ pub const SPEC: {sup}HttpSpec = {sup}HttpSpec {{
         method = method.as_wire(),
     ));
     Ok(out)
+}
+
+fn render_http_response_bindings(c: &DiscoveredContract, sup: &str) -> Result<String> {
+    if c.manifest.schemas.responses.is_empty() {
+        return Ok(String::new());
+    }
+
+    let mut implementations = Vec::with_capacity(c.manifest.schemas.responses.len());
+    let mut specs = Vec::with_capacity(c.manifest.schemas.responses.len());
+    for (status, schema_file) in &c.manifest.schemas.responses {
+        validate_schema_filename(schema_file).with_context(|| {
+            format!(
+                "契约 {}/{}/{} 的 response {status} schema 文件名不安全: {schema_file}",
+                c.manifest.kind.as_dir(),
+                c.manifest.domain,
+                c.manifest.version,
+            )
+        })?;
+        let response_ty = schema_root_type_name(c, schema_file, "HTTP response schema")?;
+        implementations.push(format!(
+            r#"
+impl {sup}HttpResponseBinding for {response_ty} {{
+    const CONTRACT: ::vocab::ContractBinding = CONTRACT;
+    const STATUS: u16 = {status};
+    const SCHEMA: &'static str = "{schema_file}";
+}}
+"#
+        ));
+        specs.push(format!(
+            "    {sup}HttpResponseSpec {{ status: {status}, schema: \"{schema_file}\" }}"
+        ));
+    }
+    let specs = specs.join(",\n");
+    Ok(format!(
+        r#"
+{}
+/// Known HTTP responses, indexed by status in `contract.toml`.
+pub const RESPONSES: &[{sup}HttpResponseSpec] = &[
+{specs}
+];
+"#,
+        implementations.join("")
+    ))
 }
 
 fn render_http_consistency_level(level: ConsistencyLevel) -> &'static str {
@@ -2183,6 +2224,20 @@ impl SubscriptionSpec {
 "#;
 
 const HTTP_SPEC_DEF: &str = r#"
+/// Type-level binding between a generated response DTO and its contract status.
+pub trait HttpResponseBinding {
+    const CONTRACT: ::vocab::ContractBinding;
+    const STATUS: u16;
+    const SCHEMA: &'static str;
+}
+
+/// Erased response metadata for documentation and runtime registries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HttpResponseSpec {
+    pub status: u16,
+    pub schema: &'static str,
+}
+
 /// HTTP serving metadata generated from `contract.toml`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HttpSpec {
@@ -3119,6 +3174,41 @@ mod tests {
         Ok(())
     }
 
+    fn seed_http_with_typed_responses(root: &Path) -> Result<()> {
+        seed_http(root)?;
+        let dir = root.join("contracts/http/_seed/v1");
+        std::fs::write(
+            dir.join("contract.toml"),
+            concat!(
+                "id = \"seed.echo\"\n",
+                "kind = \"http\"\n",
+                "domain = \"_seed\"\n",
+                "version = \"v1\"\n",
+                "owner = \"_framework\"\n",
+                "consistencyLevel = \"LocalOnly\"\n",
+                "lifecycle = \"draft\"\n",
+                "[schemas]\n",
+                "request = \"request.schema.json\"\n",
+                "[schemas.responses]\n",
+                "200 = \"response.schema.json\"\n",
+                "404 = \"not-found.schema.json\"\n",
+                "409 = \"conflict.schema.json\"\n",
+            ),
+        )?;
+        for (file, title) in [
+            ("not-found.schema.json", "SeedEchoNotFoundResponse"),
+            ("conflict.schema.json", "SeedEchoConflictResponse"),
+        ] {
+            std::fs::write(
+                dir.join(file),
+                format!(
+                    "{{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"title\":\"{title}\",\"type\":\"object\",\"properties\":{{}},\"additionalProperties\":false}}"
+                ),
+            )?;
+        }
+        Ok(())
+    }
+
     fn write_seed_active_http(root: &Path, endpoints_http: &str) -> Result<()> {
         write_seed_active_http_contract(
             root,
@@ -4008,6 +4098,39 @@ mod tests {
                 "wire semantics must not create a parallel HttpSpec field: {removed}"
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn codegen_binds_each_typed_http_response_to_its_status() -> anyhow::Result<()> {
+        let root = unique_tmp("codegen-http-responses");
+        seed_http_with_typed_responses(&root)?;
+        let gen_src = root.join("generated/src");
+        generate(&root.join("contracts"), &gen_src, false)?;
+        let rendered = std::fs::read_to_string(gen_src.join("http/_seed_v1.rs"))?;
+        let root_mod = std::fs::read_to_string(gen_src.join("http/mod.rs"))?;
+        let _ = std::fs::remove_dir_all(&root);
+
+        for needle in [
+            "impl super::HttpResponseBinding for SeedEchoResponse",
+            "impl super::HttpResponseBinding for SeedEchoNotFoundResponse",
+            "impl super::HttpResponseBinding for SeedEchoConflictResponse",
+            "const STATUS: u16 = 200",
+            "const STATUS: u16 = 404",
+            "const STATUS: u16 = 409",
+            "pub const RESPONSES: &[super::HttpResponseSpec]",
+        ] {
+            assert_generated_contains(
+                &rendered,
+                needle,
+                "typed response binding must preserve status-to-schema identity",
+            );
+        }
+        assert_generated_contains(
+            &root_mod,
+            "pub trait HttpResponseBinding",
+            "generated clients and servers need a common typed response seam",
+        );
         Ok(())
     }
 

@@ -1,0 +1,48 @@
+# Accept a tenant-scoped desired certificate policy without claiming device convergence.
+id = "identity.device-certificate-policy-put"
+kind = "http"
+domain = "identity"
+version = "v2"
+owner = "identity"
+consistencyLevel = "DeviceLatent"
+lifecycle = "draft"
+path = "/api/v2/identity/devices/{deviceId}/certificate-policy"
+method = "PUT"
+
+[schemas]
+request = "request.schema.json"
+
+[schemas.responses]
+200 = "response.schema.json"
+404 = "not-found.response.schema.json"
+409 = "conflict.response.schema.json"
+
+[endpoints.http]
+successStatus = 200
+idempotency = "idempotent"
+resource = "deviceId"
+
+[endpoints.http.auth]
+mode = "permission"
+permission = "identity:device-certificate-policy:write"
+
+[effectProfile]
+effects = ["auth", "business-write", "business-transaction", "reconcile", "worker"]
+
+[capabilities.deviceLatent]
+loop = "reconcile"
+
+[capabilities.deviceLatent.profile]
+resourceKind = "device-certificate"
+
+[capabilities.deviceLatent.profile.links]
+command = "identity.apply-device-certificate"
+ackEvent = "identity.device-command-acked"
+reportedEvent = "identity.device-certificate-reported"
+ingressReceiptEvent = "identity.device-ingress-receipted"
+
+[reconcile]
+tenancy = "tenant-scoped"
+trigger = "interval"
+fencing = "required"
+lateMessagePolicy = "idempotent"

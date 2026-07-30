@@ -15,8 +15,8 @@
 //!   FIELD_FORMAT_CHANGED / ENUM_VALUE_DELETED / ADDITIONAL_PROPS_TIGHTENED / NULLABLE_REMOVED /
 //!   REDACTION_POLICY_CHANGED / PROTECTION_POLICY_CHANGED）对 base↔working
 //!   两版 schema 递归 diff，**只报既有字段的删除 / 收紧 / 隐私·保护策略漂移**（新增可选字段不报，向后兼容语义）。
-//!   manifest wire 投影另覆盖 HTTP、L2 topology、subscription 与 lifecycle 降级规则。当前不覆盖
-//!   `oneOf`/`anyOf`/`$ref` 嵌套构造（ADR §8 增量补）。
+//!   manifest wire 投影另覆盖 HTTP、L2 topology、L4 DeviceLatent topology、subscription 与
+//!   lifecycle 降级规则。当前不覆盖 `oneOf`/`anyOf`/`$ref` 嵌套构造（ADR §8 增量补）。
 //! INVARIANT: WIRE-BREAKING-WINDOW-01 { level = "Medium", exec = "check", source = "code" }——
 //!   lifecycle 固定分级：active 默认 deny，deprecated warn，draft 跳过；仅下列 consistency/effect
 //!   review 规则固定 warn；active 未携精确 review ack 时 fail-closed，deprecated 仍为非阻断 warn。
@@ -40,10 +40,11 @@ use sha2::{Digest, Sha256};
 
 use super::discover;
 use super::manifest::{
-    ConsistencyLevel, ContractKind, ContractManifest, Delivery, EffectKind, EffectProfile,
-    ExternalEffectPolicy, HttpAuthMode, HttpIdempotency, HttpMethod, HttpResourceSharingMode,
-    Lifecycle, OutboxAtomicity, OutboxRole, PartitionKeyStrategy, SubscriberReadiness,
-    SubscriptionEffect, SubscriptionExecution,
+    ConsistencyLevel, ContractKind, ContractManifest, Delivery, DeviceLatentLoop,
+    DeviceLatentProfile, EffectKind, EffectProfile, ExternalEffectPolicy, HttpAuthMode,
+    HttpIdempotency, HttpMethod, HttpResourceSharingMode, HttpStatusCode, Lifecycle,
+    OutboxAtomicity, OutboxRole, PartitionKeyStrategy, SubscriberReadiness, SubscriptionEffect,
+    SubscriptionExecution,
 };
 use super::protection;
 use super::redaction;
@@ -101,6 +102,8 @@ pub(crate) enum BreakingRule {
     OutboxRoleChanged,
     OutboxAtomicityChanged,
     OutboxEmitsChanged,
+    DeviceLatentResourceKindChanged,
+    DeviceLatentLinkChanged,
     SubscriptionSetChanged,
     SubscriptionConsumerChanged,
     SubscriptionGroupChanged,
@@ -153,6 +156,8 @@ impl BreakingRule {
             BreakingRule::OutboxRoleChanged => "OUTBOX_ROLE_CHANGED",
             BreakingRule::OutboxAtomicityChanged => "OUTBOX_ATOMICITY_CHANGED",
             BreakingRule::OutboxEmitsChanged => "OUTBOX_EMITS_CHANGED",
+            BreakingRule::DeviceLatentResourceKindChanged => "DEVICE_LATENT_RESOURCE_KIND_CHANGED",
+            BreakingRule::DeviceLatentLinkChanged => "DEVICE_LATENT_LINK_CHANGED",
             BreakingRule::SubscriptionSetChanged => "SUBSCRIPTION_SET_CHANGED",
             BreakingRule::SubscriptionConsumerChanged => "SUBSCRIPTION_CONSUMER_CHANGED",
             BreakingRule::SubscriptionGroupChanged => "SUBSCRIPTION_GROUP_CHANGED",
@@ -652,6 +657,7 @@ pub(crate) struct ManifestProjection {
     consistency: Option<String>,
     effects: BTreeSet<EffectIdentity>,
     outbox: Option<OutboxProjection>,
+    device_latent: Option<DeviceLatentProjection>,
     subscriptions: BTreeSet<SubscriptionProjection>,
 }
 
@@ -724,6 +730,7 @@ struct HttpWireProjection {
     path: Option<String>,
     method: Option<String>,
     success_status: Option<u16>,
+    response_statuses: BTreeSet<u16>,
     auth: Option<AuthProjection>,
     auth_scope: AuthScopeProjection,
     resource_sharing: String,
@@ -747,6 +754,15 @@ struct OutboxProjection {
     role: String,
     atomicity: Option<String>,
     emits: BTreeSet<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DeviceLatentProjection {
+    resource_kind: String,
+    command: String,
+    ack_event: String,
+    reported_event: String,
+    ingress_receipt_event: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -814,6 +830,14 @@ pub(crate) fn compare_manifests(
                 &a.success_status,
                 &b.success_status,
             );
+            if a.response_statuses != b.response_statuses {
+                out.push(changed(
+                    BreakingRule::HttpStatusCodeChanged,
+                    "schemas.responses",
+                    &a.response_statuses,
+                    &b.response_statuses,
+                ));
+            }
             compare_optional(
                 &mut out,
                 BreakingRule::IdempotencyLevelChanged,
@@ -911,6 +935,7 @@ pub(crate) fn compare_manifests(
     compare_consistency(&mut out, &old.consistency, &new.consistency);
     compare_effects(&mut out, &old.effects, &new.effects);
     compare_outbox(&mut out, &old.outbox, &new.outbox);
+    compare_device_latent(&mut out, &old.device_latent, &new.device_latent);
     compare_subscriptions(&mut out, &old.subscriptions, &new.subscriptions);
     out
 }
@@ -1008,6 +1033,51 @@ fn compare_outbox(
             &a.emits,
             &b.emits,
         ));
+    }
+}
+
+fn compare_device_latent(
+    out: &mut Vec<RawBreak>,
+    old: &Option<DeviceLatentProjection>,
+    new: &Option<DeviceLatentProjection>,
+) {
+    let Some(old) = old else { return };
+    let new = new.as_ref();
+    for (rule, pointer, old_value, new_value) in [
+        (
+            BreakingRule::DeviceLatentResourceKindChanged,
+            "capabilities.deviceLatent.profile.resourceKind",
+            old.resource_kind.as_str(),
+            new.map(|value| value.resource_kind.as_str()),
+        ),
+        (
+            BreakingRule::DeviceLatentLinkChanged,
+            "capabilities.deviceLatent.profile.links.command",
+            old.command.as_str(),
+            new.map(|value| value.command.as_str()),
+        ),
+        (
+            BreakingRule::DeviceLatentLinkChanged,
+            "capabilities.deviceLatent.profile.links.ackEvent",
+            old.ack_event.as_str(),
+            new.map(|value| value.ack_event.as_str()),
+        ),
+        (
+            BreakingRule::DeviceLatentLinkChanged,
+            "capabilities.deviceLatent.profile.links.reportedEvent",
+            old.reported_event.as_str(),
+            new.map(|value| value.reported_event.as_str()),
+        ),
+        (
+            BreakingRule::DeviceLatentLinkChanged,
+            "capabilities.deviceLatent.profile.links.ingressReceiptEvent",
+            old.ingress_receipt_event.as_str(),
+            new.map(|value| value.ingress_receipt_event.as_str()),
+        ),
+    ] {
+        if new_value != Some(old_value) {
+            out.push(changed(rule, pointer, &Some(old_value), &new_value));
+        }
     }
 }
 
@@ -1663,6 +1733,13 @@ fn slot_files(m: &ContractManifest) -> Vec<(String, String, SchemaDirection)> {
             v.push((slot.to_string(), f.to_string(), direction));
         }
     }
+    v.extend(m.schemas.responses.iter().map(|(status, file)| {
+        (
+            format!("response:{status}"),
+            file.clone(),
+            SchemaDirection::Output,
+        )
+    }));
     if let Some(saga) = &m.saga {
         for s in &saga.steps {
             v.push((
@@ -1710,6 +1787,16 @@ struct BaseContractManifest {
     schemas: BaseSchemas,
     #[serde(default)]
     saga: Option<BaseSagaBlock>,
+}
+
+/// Draft base contracts are outside the breaking window. Read only their stable identity before
+/// the strict active/deprecated projection so incomplete historical draft carriers cannot make the
+/// supposedly skipped lifecycle block the gate.
+#[derive(Debug, Deserialize)]
+struct BaseContractHeader {
+    id: String,
+    version: String,
+    lifecycle: Lifecycle,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1818,6 +1905,8 @@ struct BaseHttpAuth {
 struct BaseCapabilities {
     #[serde(default)]
     outbox: Option<BaseOutbox>,
+    #[serde(default, rename = "deviceLatent")]
+    device_latent: Option<BaseDeviceLatentCapability>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1827,6 +1916,29 @@ struct BaseOutbox {
     atomicity: Option<OutboxAtomicity>,
     #[serde(default)]
     emits: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct BaseDeviceLatentCapability {
+    #[serde(rename = "loop")]
+    _loop_kind: DeviceLatentLoop,
+    profile: BaseDeviceLatentProfile,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "resourceKind", rename_all = "kebab-case", deny_unknown_fields)]
+enum BaseDeviceLatentProfile {
+    DeviceCertificate { links: BaseDeviceLatentLinks },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct BaseDeviceLatentLinks {
+    command: String,
+    ack_event: String,
+    reported_event: String,
+    ingress_receipt_event: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1857,6 +1969,8 @@ struct BaseSchemas {
     response: Option<String>,
     #[serde(default)]
     payload: Option<String>,
+    #[serde(default)]
+    responses: BTreeMap<HttpStatusCode, String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1899,6 +2013,13 @@ fn base_slot_files(m: &BaseContractManifest) -> Vec<(String, String, SchemaDirec
             v.push((slot.to_string(), f.to_string(), direction));
         }
     }
+    v.extend(m.schemas.responses.iter().map(|(status, file)| {
+        (
+            format!("response:{status}"),
+            file.clone(),
+            SchemaDirection::Output,
+        )
+    }));
     if let Some(saga) = &m.saga {
         for s in &saga.steps {
             v.push((
@@ -1920,6 +2041,16 @@ fn manifest_projection(m: &ContractManifest) -> Result<ManifestProjection> {
             path: m.path.clone(),
             method: m.method.map(http_method).map(str::to_string),
             success_status: Some(h.success_status),
+            response_statuses: if m.schemas.responses.is_empty() {
+                BTreeSet::from([h.success_status])
+            } else {
+                m.schemas
+                    .responses
+                    .keys()
+                    .copied()
+                    .map(HttpStatusCode::get)
+                    .collect()
+            },
             auth: h.auth.as_ref().map(|a| AuthProjection {
                 mode: auth_mode(a.mode).to_string(),
                 permission: a.permission.clone(),
@@ -1947,6 +2078,19 @@ fn manifest_projection(m: &ContractManifest) -> Result<ManifestProjection> {
             atomicity: o.atomicity.map(outbox_atomicity).map(str::to_string),
             emits: o.emits.iter().cloned().collect(),
         }),
+        device_latent: m
+            .capabilities
+            .device_latent
+            .as_ref()
+            .map(|device| match &device.profile {
+                DeviceLatentProfile::DeviceCertificate { links } => DeviceLatentProjection {
+                    resource_kind: device.profile.resource_kind().to_string(),
+                    command: links.command.clone(),
+                    ack_event: links.ack_event.clone(),
+                    reported_event: links.reported_event.clone(),
+                    ingress_receipt_event: links.ingress_receipt_event.clone(),
+                },
+            }),
         subscriptions: m
             .subscriptions
             .iter()
@@ -1973,6 +2117,16 @@ fn base_manifest_projection(m: &BaseContractManifest) -> Result<ManifestProjecti
             path: m.path.clone(),
             method: m.method.map(http_method).map(str::to_string),
             success_status: h.success_status,
+            response_statuses: if m.schemas.responses.is_empty() {
+                h.success_status.into_iter().collect()
+            } else {
+                m.schemas
+                    .responses
+                    .keys()
+                    .copied()
+                    .map(HttpStatusCode::get)
+                    .collect()
+            },
             auth: h.auth.as_ref().map(|a| AuthProjection {
                 mode: auth_mode(a.mode).to_string(),
                 permission: a.permission.clone(),
@@ -2000,6 +2154,19 @@ fn base_manifest_projection(m: &BaseContractManifest) -> Result<ManifestProjecti
             atomicity: o.atomicity.map(outbox_atomicity).map(str::to_string),
             emits: o.emits.iter().cloned().collect(),
         }),
+        device_latent: m
+            .capabilities
+            .device_latent
+            .as_ref()
+            .map(|device| match &device.profile {
+                BaseDeviceLatentProfile::DeviceCertificate { links } => DeviceLatentProjection {
+                    resource_kind: "device-certificate".to_string(),
+                    command: links.command.clone(),
+                    ack_event: links.ack_event.clone(),
+                    reported_event: links.reported_event.clone(),
+                    ingress_receipt_event: links.ingress_receipt_event.clone(),
+                },
+            }),
         subscriptions: m
             .subscriptions
             .iter()
@@ -2197,38 +2364,64 @@ fn base_sides(root: &Path, against: &str) -> Result<Vec<ContractSide>> {
             read_text_at_ref(root, against, &manifest_rel),
             format!("base 已枚举 manifest `{manifest_rel}` 但路径不存在，fail-closed"),
         )?;
-        let manifest = toml::from_str::<BaseContractManifest>(&text)
-            .map_err(|e| anyhow::anyhow!("解析 base {manifest_rel} 失败: {e}"))?;
-        let Some(label) = label_from_manifest_path(&manifest_rel) else {
-            continue; // 非 contracts/{kind}/{domain}/{version}/contract.toml 形态
-        };
-        let Some(dir_rel) = manifest_rel.strip_suffix("/contract.toml") else {
-            continue;
-        };
-        let mut slots = BTreeMap::new();
-        for (slot, file, direction) in base_slot_files(&manifest) {
-            let schema_rel = format!("{dir_rel}/{file}");
-            let schema_text = require_git_text(
-                read_text_at_ref(root, against, &schema_rel),
-                format!("base manifest 引用 schema `{schema_rel}` 不存在，fail-closed"),
-            )?;
-            let v = serde_json::from_str(&schema_text)
-                .map_err(|e| anyhow::anyhow!("解析 base schema {schema_rel} 失败: {e}"))?;
-            slots.insert(slot, (direction, v));
+        if let Some(side) = base_contract_side(root, against, &manifest_rel, &text)? {
+            sides.push(side);
         }
-        sides.push(ContractSide {
-            identity: ContractIdentity {
-                id: manifest.id.clone(),
-                version: manifest.version.clone(),
-            },
-            label,
-            lifecycle: manifest.lifecycle,
-            slots,
-            manifest: base_manifest_projection(&manifest)
-                .with_context(|| format!("project base contract {against}:{manifest_rel}"))?,
-        });
     }
     Ok(sides)
+}
+
+fn base_contract_side(
+    root: &Path,
+    against: &str,
+    manifest_rel: &str,
+    text: &str,
+) -> Result<Option<ContractSide>> {
+    let Some(label) = label_from_manifest_path(manifest_rel) else {
+        return Ok(None); // 非 contracts/{kind}/{domain}/{version}/contract.toml 形态
+    };
+    let header = toml::from_str::<BaseContractHeader>(text)
+        .map_err(|e| anyhow::anyhow!("解析 base {manifest_rel} header 失败: {e}"))?;
+    if !is_checked(header.lifecycle) {
+        return Ok(Some(ContractSide {
+            identity: ContractIdentity {
+                id: header.id,
+                version: header.version,
+            },
+            label,
+            lifecycle: header.lifecycle,
+            slots: BTreeMap::new(),
+            manifest: ManifestProjection::default(),
+        }));
+    }
+
+    let manifest = toml::from_str::<BaseContractManifest>(text)
+        .map_err(|e| anyhow::anyhow!("解析 base {manifest_rel} 失败: {e}"))?;
+    let Some(dir_rel) = manifest_rel.strip_suffix("/contract.toml") else {
+        return Ok(None);
+    };
+    let mut slots = BTreeMap::new();
+    for (slot, file, direction) in base_slot_files(&manifest) {
+        let schema_rel = format!("{dir_rel}/{file}");
+        let schema_text = require_git_text(
+            read_text_at_ref(root, against, &schema_rel),
+            format!("base manifest 引用 schema `{schema_rel}` 不存在，fail-closed"),
+        )?;
+        let v = serde_json::from_str(&schema_text)
+            .map_err(|e| anyhow::anyhow!("解析 base schema {schema_rel} 失败: {e}"))?;
+        slots.insert(slot, (direction, v));
+    }
+    Ok(Some(ContractSide {
+        identity: ContractIdentity {
+            id: manifest.id.clone(),
+            version: manifest.version.clone(),
+        },
+        label,
+        lifecycle: manifest.lifecycle,
+        slots,
+        manifest: base_manifest_projection(&manifest)
+            .with_context(|| format!("project base contract {against}:{manifest_rel}"))?,
+    }))
 }
 
 /// `git ls-tree -r --name-only {ref} -- contracts/` 列 base 侧所有 `contract.toml` 路径。
@@ -3221,6 +3414,7 @@ lifecycle = "active"
                 path: Some("/api/v1/identity/profile".into()),
                 method: Some("GET".into()),
                 success_status: Some(200),
+                response_statuses: BTreeSet::from([200]),
                 auth: Some(AuthProjection {
                     mode: "permission".into(),
                     permission: Some("identity:read".into()),
@@ -3250,6 +3444,17 @@ lifecycle = "active"
                 effect: None,
                 external_effect_policy: "transactional-only".into(),
             }]),
+            device_latent: None,
+        }
+    }
+
+    fn device_latent_projection() -> DeviceLatentProjection {
+        DeviceLatentProjection {
+            resource_kind: "device-certificate".into(),
+            command: "identity.apply-device-certificate".into(),
+            ack_event: "identity.device-command-acked".into(),
+            reported_event: "identity.device-certificate-reported".into(),
+            ingress_receipt_event: "identity.device-ingress-receipted".into(),
         }
     }
 
@@ -3859,6 +4064,18 @@ effects = []
             vec![BreakingRule::HttpStatusCodeChanged]
         );
 
+        let mut responses = old.clone();
+        responses
+            .http
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("missing HTTP fixture"))?
+            .response_statuses
+            .insert(409);
+        assert_eq!(
+            manifest_rules(&old, &responses),
+            vec![BreakingRule::HttpStatusCodeChanged]
+        );
+
         let mut auth = old.clone();
         auth.http
             .as_mut()
@@ -3880,6 +4097,195 @@ effects = []
             manifest_rules(&old, &idempotency),
             vec![BreakingRule::IdempotencyLevelChanged]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn device_latent_manifest_projection_is_strict_and_matches_both_sides() -> anyhow::Result<()> {
+        let manifest = r#"
+id = "identity.device-certificate"
+kind = "http"
+domain = "identity"
+version = "v1"
+owner = "identity"
+consistencyLevel = "DeviceLatent"
+lifecycle = "active"
+
+[effectProfile]
+effects = ["reconcile"]
+
+[capabilities.deviceLatent]
+loop = "reconcile"
+
+[capabilities.deviceLatent.profile]
+resourceKind = "device-certificate"
+
+[capabilities.deviceLatent.profile.links]
+command = "identity.apply-device-certificate"
+ackEvent = "identity.device-command-acked"
+reportedEvent = "identity.device-certificate-reported"
+ingressReceiptEvent = "identity.device-ingress-receipted"
+"#;
+        let working = ContractManifest::from_toml_str(manifest)?;
+        let base: BaseContractManifest = toml::from_str(manifest)?;
+        assert_eq!(
+            manifest_projection(&working)?.device_latent,
+            Some(device_latent_projection())
+        );
+        assert_eq!(
+            base_manifest_projection(&base)?.device_latent,
+            Some(device_latent_projection()),
+            "historical/base and strict working parsers must project one closed identity"
+        );
+
+        for invalid in [
+            manifest.replace(
+                "resourceKind = \"device-certificate\"",
+                "resourceKind = \"unknown-resource\"",
+            ),
+            manifest.replace(
+                "command = \"identity.apply-device-certificate\"\n",
+                "",
+            ),
+            manifest.replace(
+                "resourceKind = \"device-certificate\"",
+                "resourceKind = \"device-certificate\"\nunknownProfileField = \"value\"",
+            ),
+            manifest.replace(
+                "command = \"identity.apply-device-certificate\"",
+                "command = \"identity.apply-device-certificate\"\nunknownLinkField = \"identity.unknown\"",
+            ),
+        ] {
+            assert!(
+                ContractManifest::from_toml_str(&invalid).is_err(),
+                "working parser must fail closed for malformed DeviceLatent metadata"
+            );
+            assert!(
+                toml::from_str::<BaseContractManifest>(&invalid).is_err(),
+                "base parser must fail closed for malformed DeviceLatent metadata"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn device_latent_drift_is_field_stable_and_lifecycle_aware() -> anyhow::Result<()> {
+        let mut old = full_projection();
+        old.device_latent = Some(device_latent_projection());
+
+        let cases = [
+            (
+                "resourceKind",
+                BreakingRule::DeviceLatentResourceKindChanged,
+                "capabilities.deviceLatent.profile.resourceKind",
+            ),
+            (
+                "command",
+                BreakingRule::DeviceLatentLinkChanged,
+                "capabilities.deviceLatent.profile.links.command",
+            ),
+            (
+                "ackEvent",
+                BreakingRule::DeviceLatentLinkChanged,
+                "capabilities.deviceLatent.profile.links.ackEvent",
+            ),
+            (
+                "reportedEvent",
+                BreakingRule::DeviceLatentLinkChanged,
+                "capabilities.deviceLatent.profile.links.reportedEvent",
+            ),
+            (
+                "ingressReceiptEvent",
+                BreakingRule::DeviceLatentLinkChanged,
+                "capabilities.deviceLatent.profile.links.ingressReceiptEvent",
+            ),
+        ];
+
+        for (field, expected_rule, expected_pointer) in cases {
+            let mut new = old.clone();
+            let projected = new
+                .device_latent
+                .as_mut()
+                .context("DeviceLatent fixture must exist")?;
+            match field {
+                "resourceKind" => projected.resource_kind = "changed-resource".into(),
+                "command" => projected.command = "identity.changed-command".into(),
+                "ackEvent" => projected.ack_event = "identity.changed-ack".into(),
+                "reportedEvent" => projected.reported_event = "identity.changed-reported".into(),
+                "ingressReceiptEvent" => {
+                    projected.ingress_receipt_event = "identity.changed-ingress".into();
+                }
+                _ => unreachable!("closed test table"),
+            }
+
+            let breaks = compare_manifests(&old, &new);
+            assert_eq!(breaks.len(), 1, "{field} drift must yield one finding");
+            assert_eq!(breaks[0].rule, expected_rule);
+            assert_eq!(breaks[0].pointer, expected_pointer);
+
+            let active = evaluate(&[manifest_diff(Lifecycle::Active, old.clone(), new.clone())]);
+            assert!(active.any_deny, "active {field} drift must deny");
+            assert_eq!(active.findings[0].disposition, Disposition::Deny);
+
+            let deprecated = evaluate(&[manifest_diff(Lifecycle::Deprecated, old.clone(), new)]);
+            assert!(!deprecated.any_deny, "deprecated {field} drift only warns");
+            assert_eq!(deprecated.findings[0].disposition, Disposition::Warn);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn device_latent_unchanged_is_green_and_draft_drift_is_skipped() -> anyhow::Result<()> {
+        let mut old = full_projection();
+        old.device_latent = Some(device_latent_projection());
+        assert!(compare_manifests(&old, &old).is_empty());
+
+        let mut changed = old.clone();
+        changed
+            .device_latent
+            .as_mut()
+            .context("DeviceLatent fixture must exist")?
+            .command = "identity.changed-command".into();
+        assert!(
+            evaluate(&[manifest_diff(Lifecycle::Draft, old, changed)])
+                .findings
+                .is_empty(),
+            "base lifecycle=draft must skip the entire breaking projection"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn base_draft_device_latent_skips_breaking_projection() -> anyhow::Result<()> {
+        let historical = r#"
+id = "identity.reconcile-loop"
+kind = "http"
+version = "v2"
+lifecycle = "draft"
+
+[capabilities.deviceLatent]
+loop = "reconcile"
+
+[capabilities.deviceLatent.profile]
+resourceKind = "device-certificate"
+
+[capabilities.deviceLatent.profile.links]
+command = "identity.apply-device-certificate"
+ackEvent = "identity.device-command-acked"
+reportedEvent = "identity.device-certificate-reported"
+ingressReceiptEvent = "identity.device-ingress-receipted"
+"#;
+        let side = base_contract_side(
+            Path::new("/base-draft-must-not-read-git"),
+            "origin/develop",
+            "contracts/http/identity/v2/contract.toml",
+            historical,
+        )?
+        .context("valid contract path must produce a base side")?;
+        assert_eq!(side.lifecycle, Lifecycle::Draft);
+        assert!(side.slots.is_empty());
+        assert_eq!(side.manifest, ManifestProjection::default());
+
         Ok(())
     }
 
@@ -4422,5 +4828,13 @@ effects = ["read"]
         );
         assert_eq!(BreakingRule::EffectAdded.id(), "EFFECT_ADDED");
         assert_eq!(BreakingRule::EffectRemoved.id(), "EFFECT_REMOVED");
+        assert_eq!(
+            BreakingRule::DeviceLatentResourceKindChanged.id(),
+            "DEVICE_LATENT_RESOURCE_KIND_CHANGED"
+        );
+        assert_eq!(
+            BreakingRule::DeviceLatentLinkChanged.id(),
+            "DEVICE_LATENT_LINK_CHANGED"
+        );
     }
 }

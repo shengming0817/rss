@@ -77,9 +77,12 @@ schema 以 contract + logical slot 取并集递归比较；删除整个契约或
 所有 HTTP manifest 必须声明 `successStatus = <200..299>` 与
 `idempotency = "idempotent" | "non-idempotent"`。serde 拒未知值，codegen 将它们经 typed
 `HttpRouteBinding → HttpRouteEvidence` 单一漏斗传递；不引入 `auth.required` 双真源。
+已知多响应 operation 通过 `[schemas.responses]` 按状态码声明 schema；codegen 为每个响应 DTO 派生
+`HttpResponseBinding`，breaking gate 以状态码 slot 比较响应 schema，并把状态集合漂移归入
+`HTTP_STATUS_CODE_CHANGED`。
 
-当前 4 个 draft HTTP（`seed.echo`、`audit.session-projection`、`identity.reconcile-loop`、
-`settings.config-projection`）的 `successStatus = 200` 仅是非 serving 声明，不构成运行时承诺；
+当前 5 个 draft HTTP（`seed.echo`、`audit.session-projection`、`identity.device-certificate-policy-put`、
+`identity.device-certificate-status-get`、`settings.config-projection`）的 `successStatus = 200` 仅是非 serving 声明，不构成运行时承诺；
 转 active 前必须与实际 handler 对齐。
 
 ### 3.3 L2 manifest
