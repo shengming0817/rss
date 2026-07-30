@@ -313,8 +313,11 @@ impl Principal {
 
     /// 由已验证 service-token subject 派生（funnel 固定 `kind=Service`，跨租户 `tenant=None`）。
     ///
-    /// fail-closed：空 subject → [`AuthnError::PrincipalInvalid`]（验签后派生失败，F2 / #1275 review F1，与
-    /// verified profile factory 同款非空不变式）。信任原点 = verifier：subject 取自验签产物
+    /// fail-closed 与 typed [`vocab::ServiceCallerDomain`] 对齐：空 `sub` 在 OIDC claims 闸以
+    /// `EmptySubject` 拒绝，不进入本函数；本函数只经 [`vocab::ServiceCallerDomain::from_subject`]
+    /// 做 closed-set 映射——miss（未知 / 非闭集 caller）→ [`AuthnError::PrincipalInvalid`]。
+    /// wrong-shape claims（非 `ServiceToken` 视图）由 [`Self::from_verified_service_token`] 同款拒为
+    /// `PrincipalInvalid`。信任原点 = verifier：subject 取自验签产物
     /// [`diport::VerifiedClaimsView::ServiceToken`]，service token 的 kind / tenant claim 不参与
     /// （service 主体恒跨租户）。
     fn service_from_subject(subject: &str) -> Result<Self, AuthnError> {
@@ -487,6 +490,13 @@ pub use crosstenant::{
 ///
 /// authn 只签发无 visibility 的 [`CrossTenantAuditGrant`]；裸 callback 与 audit sink 不再属于本 API。
 /// All-scope 三步唯一在 audit durable receipt 消费点执行，并由 `rss_crosstenant_callsite` 精确函数门守护。
+///
+/// # Deny / ledger 边界（#1288）
+///
+/// grant API **仅**在 Success 路径规范化审计事件（`AuditOutcome::Success`）；deny 侧 ledger
+/// （谁被拒、为何被拒）是调用方（audit 域）责任，不经本 API 回写，也不再注入 `AuditSink`。
+/// [`CrossTenantGrantError::NotSuperAdmin`] 是 defense-in-depth 资格不变式（非 super-admin 绝不 mint
+/// grant），**不是**「未审计的 403」语义——调用方须自行记录 deny 后再对外映射 HTTP 状态。
 mod crosstenant {
     use super::Principal;
     use vocab::PrincipalKind;
@@ -1451,8 +1461,10 @@ mod cross_tenant_audit_grant_tests {
         assert_eq!(event.correlation_id.as_deref(), Some("corr-9"));
     }
 
+    /// INVARIANT (#1288): non-super-admin → `Err(NotSuperAdmin)` and **no** grant/event is produced.
+    /// Defense-in-depth 资格闸；deny ledger 由调用方（audit 域）负责，本 API 不回写 deny 事件。
     #[test]
-    fn grant_rejects_non_super_admin() {
+    fn grant_denied_when_not_super_admin_tripwire() {
         let tid = tenant();
         for kind in [
             PrincipalKind::User,
@@ -1463,12 +1475,15 @@ mod cross_tenant_audit_grant_tests {
         ] {
             let principal = Principal::for_test(kind, "subject-x", Some(tid));
             let ctx = runctx::test_support::app_ctx(tid, "subject-x");
-            let result = principal
-                .cross_tenant_audit_grant(&ctx, &TestClock(SystemTime::UNIX_EPOCH), &audit_ctx())
-                .map(|_| ());
+            // 保留完整 Result：Ok 即意味着 mint 了 CrossTenantAuditGrant（含规范化 Success 事件）。
+            let result = principal.cross_tenant_audit_grant(
+                &ctx,
+                &TestClock(SystemTime::UNIX_EPOCH),
+                &audit_ctx(),
+            );
             assert!(
-                matches!(result, Err(CrossTenantGrantError::NotSuperAdmin)),
-                "kind={kind:?} must be rejected: {result:?}"
+                matches!(&result, Err(CrossTenantGrantError::NotSuperAdmin)),
+                "INVARIANT: kind={kind:?} → NotSuperAdmin；Err 路径 ⇒ 无 grant/event 可消费（Ok 即 mint）"
             );
         }
     }
@@ -1549,6 +1564,9 @@ mod jwt_parse_tests {
 mod principal_derive_tests {
     //! `from_verified_jwt`（claims→Principal 映射）+ `from_verified_service_token`（funnel 固定 Service）。
     //! 信任边界：函数信任入参已被上游 verifier 验签（本轮不做 crypto 验签）。
+    //! Service fail-closed tripwire（#1306）：federated 空 subject 在 claims factory 即拒；
+    //! typed `ServiceCallerDomain` 无法 stub 空 ServiceToken subject，wrong-claims-shape →
+    //! `PrincipalInvalid` 作 untrusted-kind 代理。
     use super::{
         AccessToken, AuthnError, Principal, PrincipalKind, VerifiedJwt, VerifiedServiceToken,
     };
@@ -1660,34 +1678,20 @@ mod principal_derive_tests {
         );
     }
 
+    /// Tripwire (#1306)：federated 空 subject 在 claims factory 即拒；service-token funnel 对
+    /// wrong-shape（federated 塞进 service 载体）→ `PrincipalInvalid`——绝不 mint。
+    ///
+    /// `VerifiedClaims::service_token` 以 `ServiceCallerDomain` 类型化，无法 stub「开放 / 空 subject
+    /// 的 Ok(ServiceToken)」；wrong-shape 是唯一可表达的 untrusted-kind 代理（勿与空 subject 守卫重复）。
     #[test]
     #[allow(clippy::expect_used)]
-    fn service_token_funnel_rejects_subject_outside_closed_caller_domains() {
-        let token = VerifiedServiceToken::seal(
-            AccessToken::new("opaque"),
-            VerifiedClaims::federated_access(
-                "arbitrary-service",
-                Some(TenantId::parse(CANON).expect("tenant")),
-                PrincipalKind::User,
-                permissions(),
-            )
-            .expect("federated claims"),
-        );
-        assert!(matches!(
-            Principal::from_verified_service_token(&token),
-            Err(AuthnError::PrincipalInvalid)
-        ));
-    }
-
-    #[test]
-    #[allow(clippy::expect_used)]
-    fn rejects_empty_subject_both_funnels() {
-        // F2：验签产物即便 subject 为空（adapter 绕过旧 decode_claims 非空检查），也绝不 mint 空主体。
+    fn federated_empty_subject_and_service_wrong_shape_tripwire() {
         assert!(
             VerifiedClaims::federated_access("", None, PrincipalKind::SuperAdmin, permissions(),)
-                .is_err()
+                .is_err(),
+            "federated empty subject must fail closed at claims factory"
         );
-        let empty_svc = VerifiedServiceToken::seal(
+        let wrong_shape = VerifiedServiceToken::seal(
             AccessToken::new("opaque"),
             VerifiedClaims::federated_access(
                 "not-service",
@@ -1697,10 +1701,13 @@ mod principal_derive_tests {
             )
             .expect("federated"),
         );
-        assert!(matches!(
-            Principal::from_verified_service_token(&empty_svc),
-            Err(AuthnError::PrincipalInvalid)
-        ));
+        assert!(
+            matches!(
+                Principal::from_verified_service_token(&wrong_shape),
+                Err(AuthnError::PrincipalInvalid)
+            ),
+            "service funnel wrong-shape must never mint Service principal"
+        );
     }
 }
 
@@ -1795,6 +1802,8 @@ mod verify_bridge_tests {
     //! authn-owned verify→mint bridge（#1158）：`Pdp` 验签 ok → seal `VerifiedJwt` / `VerifiedServiceToken`
     //! 并从**验签产物 `VerifiedClaims`** 派生 `Principal`（验签 = 信任原点）；验签 fail → `AuthnError`，
     //! 绝不 seal / 派生（fail-closed，verify 先于 seal 的顺序由 `?`-链保证）。
+    //! Service-token tripwires（#1306）：PDP Err 映射 never-mint；non-ServiceToken claims →
+    //! `PrincipalInvalid`（wrong-profile 代理不可 stub 的空 ServiceToken subject）。
     use super::{
         AuthnError, PrincipalKind, test_jwt, verify_federated_access, verify_rss_access,
         verify_service_token,
@@ -2048,7 +2057,8 @@ mod verify_bridge_tests {
         ));
     }
 
-    /// service-token：funnel 固定 `kind=Service`，`subject` 取自 `VerifiedClaims`（raw 可不透明）。
+    /// service-token happy / anti-vacuity：验签 ok + ServiceToken claims → mint `kind=Service`。
+    /// 与下方 fail-closed tripwire 成对，防止「永远 Err」的空洞守卫。
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn verify_service_token_ok_fixes_service_kind() {
@@ -2063,9 +2073,9 @@ mod verify_bridge_tests {
         assert!(format!("{vs:?}").contains("redacted"));
     }
 
-    /// fail-closed：四个 `PdpError` 变体均 never `Ok` / seal，并与 access 路径一一对齐。
+    /// Tripwire (#1306)：四个 `PdpError` 变体均 never `Ok` / seal，并与 access 路径一一对齐。
     #[tokio::test]
-    async fn verify_service_token_pdp_failure_maps_error_and_never_mints() {
+    async fn verify_service_token_pdp_err_mapping_never_mints_tripwire() {
         for (perr, want) in [
             (PdpError::InvalidSignature, AuthnError::TokenInvalid),
             (PdpError::Expired, AuthnError::TokenExpired),
@@ -2084,21 +2094,39 @@ mod verify_bridge_tests {
         }
     }
 
-    /// F2（bridge 端到端）：verifier 验签 ok 但返回**空 subject** → fail-closed `PrincipalInvalid`（验签后派生
-    /// 失败，非签名失败），绝不 mint。#1275 review F1：此路不得记 `signature_invalid`。
+    /// Tripwire (#1306)：PDP 验签「ok」但返回非 ServiceToken claims → `PrincipalInvalid`，绝不 mint。
+    ///
+    /// `VerifiedClaims::service_token` typed on `ServiceCallerDomain`——无法 stub 空 subject 的
+    /// `Ok(ServiceToken)`；wrong-profile（RssUser / FederatedAccess）是 bridge 端 untrusted-kind 代理。
     #[tokio::test]
-    async fn verify_rejects_wrong_profile_shape_from_verifier() {
+    async fn verify_service_token_denied_when_non_service_claims_tripwire() {
+        let pdp_rss = boxed(Ok(rss_claims()));
+        assert!(
+            matches!(
+                verify_service_token("opaque", service_binding(), &pdp_rss).await,
+                Err(AuthnError::PrincipalInvalid)
+            ),
+            "RssUser claims on service funnel must never mint"
+        );
+        let pdp_fed = boxed(Ok(federated_claims("user", PrincipalKind::User)));
+        assert!(
+            matches!(
+                verify_service_token("opaque", service_binding(), &pdp_fed).await,
+                Err(AuthnError::PrincipalInvalid)
+            ),
+            "FederatedAccess claims on service funnel must never mint"
+        );
+    }
+
+    /// Tripwire：access funnel 拒绝 wrong-profile claims（PDP ok 但形态不匹配 → `PrincipalInvalid`）。
+    #[tokio::test]
+    async fn verify_rss_access_denied_when_wrong_profile_shape_tripwire() {
         let raw = test_jwt(
             r#"{"sub":"x","tenant":"f47ac10b-58cc-4372-a567-0e02b2c3d479","kind":"user"}"#,
         );
         let pdp = boxed(Ok(federated_claims("user", PrincipalKind::User)));
         assert!(matches!(
             verify_rss_access(&raw, &pdp).await,
-            Err(AuthnError::PrincipalInvalid)
-        ));
-        let pdp_svc = boxed(Ok(rss_claims()));
-        assert!(matches!(
-            verify_service_token("opaque", service_binding(), &pdp_svc).await,
             Err(AuthnError::PrincipalInvalid)
         ));
     }

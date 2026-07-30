@@ -719,6 +719,12 @@ fn log_cross_tenant_audit_append_failure(
     );
 }
 
+/// Target-bound durable `Failure{reason:"forbidden"}` for a final cross-tenant deny.
+///
+/// AUDIT-CROSS-TENANT-DENY-BEFORE-GRANT-01 ledger write (canonical anchor on
+/// [`audited_forbidden_response`]). Ownership: audit domain handler only. authn
+/// `cross_tenant_audit_grant` never appends denial; httpserve coarse route Deny is a
+/// separate `http_route` Failure path.
 async fn record_cross_tenant_denial<S>(
     deps: &TargetAuditReadDeps<S>,
     authenticated: &httpserve::Authenticated,
@@ -747,6 +753,11 @@ where
         .await
 }
 
+/// Final cross-tenant deny → durable Failure then HTTP 403 (append fail → 500).
+///
+/// INVARIANT: AUDIT-CROSS-TENANT-DENY-BEFORE-GRANT-01 { level = "Medium", exec = "test", source = "code", synthetic_red = "tests::target_tenant_permission_deny_before_grant_writes_durable_failure", anti_vacuity = "tests::target_tenant_non_super_admin_deny_before_grant_writes_durable_failure" }
+/// Deny-before-grant: both non-SuperAdmin and permission Forbidden branches call this
+/// **before** [`audited_cross_tenant_scope`] / grant Success.
 async fn audited_forbidden_response<S>(
     deps: &TargetAuditReadDeps<S>,
     authenticated: Option<&httpserve::Authenticated>,
@@ -766,6 +777,12 @@ where
     httpserve::error::forbidden(&request.request_id)
 }
 
+/// Grant path only: SuperAdmin → durable Success append → sealed read scope.
+///
+/// AUDIT-CROSS-TENANT-DENY-BEFORE-GRANT-01: caller must already have audited final
+/// deny branches via [`audited_forbidden_response`]. Reaching
+/// [`authn::CrossTenantGrantError::NotSuperAdmin`] here is an invariant break → 500
+/// (never an unaudited 403). authn grant owns Success only; no denial ledger.
 async fn audited_cross_tenant_scope<S>(
     deps: &TargetAuditReadDeps<S>,
     principal: &Arc<authn::Principal>,
@@ -787,8 +804,8 @@ where
     .map_err(|_| httpserve::error::internal_error(&request.request_id))?;
     let grant = match principal.cross_tenant_audit_grant(&ctx, deps.audit_clock.as_ref(), &audit) {
         Ok(grant) => grant,
-        // Caller has already checked SuperAdmin and audited both final deny branches. Reaching a
-        // different authn verdict here is an internal invariant failure, never an unaudited 403.
+        // Deny-before-grant already audited both final deny branches. Reaching NotSuperAdmin
+        // (or any other grant Err) here is an internal invariant failure, never an unaudited 403.
         Err(authn::CrossTenantGrantError::NotSuperAdmin) => {
             return Err(httpserve::error::internal_error(&request.request_id));
         }
@@ -837,6 +854,14 @@ async fn list_target_page(
     }
 }
 
+/// Target-tenant audit list: deny-before-grant then grant Success append then read.
+///
+/// AUDIT-CROSS-TENANT-DENY-BEFORE-GRANT-01: non-SuperAdmin and permission Forbidden →
+/// [`audited_forbidden_response`] (target-bound durable Failure) **before**
+/// [`audited_cross_tenant_scope`]. Only verified SuperAdmin with route permission
+/// reaches grant/Success. Identity-less early 403 (`principal=None`) does not enter this
+/// ledger path — closed by
+/// `tests::target_tenant_identity_less_403_has_empty_deny_ledger` (empty RecordingAuditSink).
 async fn list_entries_target_tenant<S>(
     deps: TargetAuditReadDeps<S>,
     principal: Option<Arc<authn::Principal>>,
@@ -3413,16 +3438,23 @@ mod tests {
         assert_eq!(json["error"]["code"], "ERR_CORE_NOT_IMPLEMENTED");
     }
 
+    /// Tripwire: permission Forbidden must durable-append Failure before grant/Success.
+    ///
+    /// AUDIT-CROSS-TENANT-DENY-BEFORE-GRANT-01 synthetic_red — deleting
+    /// [`audited_forbidden_response`] on the permission branch or swapping to grant-first
+    /// fails this lock (no Success event; exact Failure reason).
     #[tokio::test]
     #[allow(clippy::expect_used)]
-    async fn target_tenant_read_denies_before_success_audit() {
+    async fn target_tenant_permission_deny_before_grant_writes_durable_failure() {
         let repo = repo();
         let principal = principal(vocab::PrincipalKind::SuperAdmin, None);
         let sink = RecordingAuditSink::ok();
+        let admin = CountingAdminRepo::default();
+        let list_calls = admin.list_calls();
 
         let (status, body) = get_target_entries_with_sink_and_authorizer(
-            repo.clone(),
-            Some(admin_repo(repo)),
+            repo,
+            Some(admin.boxed()),
             Some(principal),
             sink.clone(),
             Some(denying_authorizer()),
@@ -3432,8 +3464,17 @@ mod tests {
         .await;
 
         assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(
+            list_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "permission deny must stop before admin read / grant Success"
+        );
         let events = sink.events();
-        assert_eq!(events.len(), 1, "final denial must be durably audited");
+        assert_eq!(
+            events.len(),
+            1,
+            "permission deny must write exactly one durable Failure before grant"
+        );
         let event = &events[0];
         assert_eq!(event.principal_id, CANON_SUBJECT);
         assert_eq!(event.principal_kind, vocab::PrincipalKind::SuperAdmin);
@@ -3441,22 +3482,29 @@ mod tests {
             event.tenant_id,
             Some(vocab::TenantId::parse(CANON_TENANT).expect("tenant"))
         );
+        assert_eq!(event.resource_kind, RESOURCE_KIND_AUDIT_ENTRIES);
         assert_eq!(event.resource_id, CANON_TENANT);
+        assert_eq!(event.action, ACTION_AUDIT_LIST_CROSS_TENANT);
         assert_eq!(event.request_id.as_deref(), Some("rid-test"));
         assert_eq!(event.correlation_id.as_deref(), Some("rid-test"));
         assert_eq!(
             event.outcome,
             diport::AuditOutcome::Failure {
-                reason: "forbidden"
+                reason: AUDIT_FORBIDDEN_REASON
             }
         );
         let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
         assert_eq!(json["error"]["code"], "ERR_CORE_FORBIDDEN");
     }
 
+    /// Tripwire: non-SuperAdmin final deny must durable-append Failure before grant.
+    ///
+    /// AUDIT-CROSS-TENANT-DENY-BEFORE-GRANT-01 anti_vacuity — deleting
+    /// [`audited_forbidden_response`] on the kind branch or falling through to
+    /// [`audited_cross_tenant_scope`] fails this lock (admin read stays 0; Failure only).
     #[tokio::test]
     #[allow(clippy::expect_used)]
-    async fn target_tenant_non_super_admin_denial_is_durably_audited() {
+    async fn target_tenant_non_super_admin_deny_before_grant_writes_durable_failure() {
         let repo = repo();
         let tenant = vocab::TenantId::parse(CANON_TENANT).expect("tenant");
         let principal = principal(vocab::PrincipalKind::Admin, Some(tenant));
@@ -3475,18 +3523,67 @@ mod tests {
         .await;
 
         assert_eq!(status, StatusCode::FORBIDDEN);
-        assert_eq!(list_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(
+            list_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "non-SuperAdmin deny must stop before admin read / grant Success"
+        );
         let events = sink.events();
-        assert_eq!(events.len(), 1, "non-SuperAdmin denial must be audited");
+        assert_eq!(
+            events.len(),
+            1,
+            "non-SuperAdmin deny must write exactly one durable Failure before grant"
+        );
         assert_eq!(events[0].principal_id, CANON_SUBJECT);
         assert_eq!(events[0].principal_kind, vocab::PrincipalKind::Admin);
         assert_eq!(events[0].tenant_id, Some(tenant));
+        assert_eq!(events[0].resource_kind, RESOURCE_KIND_AUDIT_ENTRIES);
+        assert_eq!(events[0].resource_id, CANON_TENANT);
+        assert_eq!(events[0].action, ACTION_AUDIT_LIST_CROSS_TENANT);
         assert_eq!(
             events[0].outcome,
             diport::AuditOutcome::Failure {
-                reason: "forbidden"
+                reason: AUDIT_FORBIDDEN_REASON
             }
         );
+    }
+
+    /// Tripwire: identity-less early 403 must leave the durable deny ledger empty.
+    ///
+    /// Complements AUDIT-CROSS-TENANT-DENY-BEFORE-GRANT-01: authenticated final denies
+    /// append target-bound Failure; `principal=None` returns 403 **without** calling
+    /// [`audited_forbidden_response`] / [`record_cross_tenant_denial`]. Routing the early
+    /// branch into those helpers (or writing any sink event) fails this lock.
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn target_tenant_identity_less_403_has_empty_deny_ledger() {
+        let repo = repo();
+        let sink = RecordingAuditSink::ok();
+        let admin = CountingAdminRepo::default();
+        let list_calls = admin.list_calls();
+
+        let (status, body) = get_target_entries_with_sink(
+            repo,
+            Some(admin.boxed()),
+            None,
+            sink.clone(),
+            CANON_TENANT,
+            "",
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(
+            list_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "identity-less 403 must stop before admin read"
+        );
+        assert!(
+            sink.events().is_empty(),
+            "identity-less early 403 must not write durable deny ledger"
+        );
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(json["error"]["code"], "ERR_CORE_FORBIDDEN");
     }
 
     #[tokio::test]

@@ -30,3 +30,43 @@ impl ServiceCallerDomain {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::ServiceCallerDomain;
+
+    // INVARIANT: from_subject is fail-closed — only the closed allowlist maps to Some;
+    // empty and unknown subjects must return None; the canonical operator subject must
+    // map (anti-vacuity) so a broken match arm cannot silently pass.
+    #[test]
+    fn from_subject_fail_closed_tripwire() {
+        let cases: &[(&str, Option<ServiceCallerDomain>)] = &[
+            ("", None),
+            ("unknown-caller", None),
+            (
+                "rss-maintenance-operator",
+                Some(ServiceCallerDomain::MaintenanceOperator),
+            ),
+        ];
+
+        for &(subject, expected) in cases {
+            assert_eq!(
+                ServiceCallerDomain::from_subject(subject),
+                expected,
+                "subject={subject:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn from_subject_denied_when_empty_or_unknown() {
+        // INVARIANT: empty / unknown subjects are never admitted.
+        for subject in ["", " ", "rss-internal", "RSS-MAINTENANCE-OPERATOR"] {
+            assert_eq!(
+                ServiceCallerDomain::from_subject(subject),
+                None,
+                "subject={subject:?} must be denied"
+            );
+        }
+    }
+}

@@ -182,7 +182,7 @@ fn validate_profile_claims<P: TokenProfileMarker>(
         }
         TokenProfile::ServiceToken => {
             if claims.permissions.is_some() {
-                log_claim_fail(TelemetryReason::ServiceKindInvalid);
+                log_claim_fail(TelemetryReason::ServicePermissionsForbidden);
                 return Err(PdpError::InvalidSignature);
             }
             if kind.as_deref() != Some("service") {
@@ -193,9 +193,11 @@ fn validate_profile_claims<P: TokenProfileMarker>(
                 log_claim_fail(TelemetryReason::ServiceTenantClaimForbidden);
                 return Err(PdpError::InvalidSignature);
             }
+            // Empty sub already rejected upstream as EmptySubject; non-empty unknown
+            // callers are a distinct closed-set miss (not an empty subject).
             let caller =
                 vocab::ServiceCallerDomain::from_subject(&claims.sub).ok_or_else(|| {
-                    log_claim_fail(TelemetryReason::EmptySubject);
+                    log_claim_fail(TelemetryReason::ServiceSubjectUnknown);
                     PdpError::InvalidSignature
                 })?;
             Ok(VerifiedClaims::service_token(caller))

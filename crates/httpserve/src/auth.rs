@@ -1508,6 +1508,55 @@ mod tests {
         ));
     }
 
+    // INVARIANT: service-route authz requires typed `service_caller` on evidence — matching
+    // contract + PrincipalKind::Service alone is insufficient. With a singleton
+    // `ServiceCallerDomain`, this locks *missing* domain / non-token Service peers, not
+    // `allows()==false` for a distinct domain variant. Anti-vacuity: typed allowlisted
+    // MaintenanceOperator + matching contract must still allow.
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn authorize_service_route_denied_when_typed_caller_domain_missing() {
+        let tenant = TenantId::parse(TEST_TENANT).expect("tenant fixture");
+        let meta = RouteMeta {
+            evidence: TEST_EVIDENCE,
+            method: Method::GET,
+        };
+        let policy = crate::ServiceCallerPolicy::exact(
+            TEST_CONTRACT,
+            vocab::ServiceCallerDomain::MaintenanceOperator,
+        );
+
+        let with_typed_domain =
+            Authenticated::new_service(tenant, vocab::ServiceCallerDomain::MaintenanceOperator);
+        assert!(
+            authorize_service_route(&meta, &with_typed_domain, Some(policy)),
+            "typed allowlisted caller + matching contract must allow (anti-vacuity)"
+        );
+        assert!(
+            policy.allows(vocab::ServiceCallerDomain::MaintenanceOperator),
+            "ServiceCallerPolicy::allows must admit the exact policy domain (anti-vacuity)"
+        );
+
+        // ServiceToken scheme + Service kind, but `service_caller` absent on evidence → deny.
+        let missing_domain = Authenticated::new(
+            RequiredScheme::ServiceToken,
+            PrincipalKind::Service,
+            vocab::ServiceCallerDomain::MaintenanceOperator.as_str(),
+            Some(tenant),
+        );
+        assert!(
+            !authorize_service_route(&meta, &missing_domain, Some(policy)),
+            "Service evidence lacking typed caller domain must deny"
+        );
+
+        // mTLS Service peer is PrincipalKind::Service but carries no service-token domain.
+        let mtls_peer = Authenticated::new_mtls("mtls-peer");
+        assert!(
+            !authorize_service_route(&meta, &mtls_peer, Some(policy)),
+            "mTLS Service peer must not satisfy service-token caller allowlist"
+        );
+    }
+
     fn bearer_headers(value: axum::http::HeaderValue) -> HeaderMap {
         let mut headers = HeaderMap::new();
         headers.insert(header::AUTHORIZATION, value);

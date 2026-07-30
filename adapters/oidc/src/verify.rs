@@ -70,6 +70,8 @@ pub(crate) enum TelemetryReason {
     SuperAdminHasTenant,
     UnsupportedPrincipalKind,
     ServiceKindInvalid,
+    ServicePermissionsForbidden,
+    ServiceSubjectUnknown,
     ServiceTenantClaimForbidden,
     RssKindInvalid,
     RssSubjectNotCanonical,
@@ -115,6 +117,8 @@ impl TelemetryReason {
             Self::SuperAdminHasTenant => "super_admin_has_tenant",
             Self::UnsupportedPrincipalKind => "unsupported_principal_kind",
             Self::ServiceKindInvalid => "service_kind_invalid",
+            Self::ServicePermissionsForbidden => "service_permissions_forbidden",
+            Self::ServiceSubjectUnknown => "service_subject_unknown",
             Self::ServiceTenantClaimForbidden => "service_tenant_claim_forbidden",
             Self::RssKindInvalid => "rss_kind_invalid",
             Self::RssSubjectNotCanonical => "rss_subject_not_canonical",
@@ -1341,9 +1345,28 @@ mod tests {
         assert!(matches!(r, Err(PdpError::Untrusted)), "got {r:?}");
     }
 
+    // ── Service-token fail-closed relaxation-axis tripwires (#1306) ─────────────
+    // INVARIANT: each relaxation axis below must reject; happy path
+    // `valid_hs256_service_token_maps_claims` is the anti-vacuity lock so a broken
+    // reject-all cannot silently pass the suite.
+
+    /// Custom service-token payload (bypasses `payload()` kind/token_use coupling).
+    fn service_token_payload(sub: &str, kind: &str, jti: Option<&str>) -> String {
+        let exp = NOW + 300;
+        let iat = NOW;
+        let jti_field = match jti {
+            Some(jti) => format!(r#","jti":"{jti}""#),
+            None => String::new(),
+        };
+        format!(
+            r#"{{"sub":"{sub}","iat":{iat},"exp":{exp},"token_use":"service","iss":"{ISS}","aud":"{AUD}","kind":"{kind}"{jti_field}}}"#
+        )
+    }
+
     #[test]
-    fn service_token_scheme_es256_token_confusion_rejected() {
-        // 反向：ES256 token 走 service-token 路径 → 路径隔离闸拒。
+    fn service_token_alg_confusion_es256_tripwire() {
+        // Fail-closed lock: ES256 token on service-token path must not pass the
+        // alg-key path isolation gate (OIDC-ALG-KEYPATH-01).
         let token = mint_es256(&test_sk(), &payload(NOW + 600, ISS, AUD, ""));
         let r = verify_credential(
             &hs256_config(),
@@ -1353,7 +1376,7 @@ mod tests {
         assert!(matches!(r, Err(PdpError::Untrusted)), "got {r:?}");
     }
 
-    // ── 验收场景 ⑥ 有效 service_token HS256 → Ok ────────────────────────────────
+    // ── 验收场景 ⑥ 有效 service_token HS256 → Ok（anti-vacuity for tripwires）──
     #[test]
     fn valid_hs256_service_token_maps_claims() {
         let token = mint_hs256_bound(
@@ -1404,7 +1427,157 @@ mod tests {
     }
 
     #[test]
-    fn hs256_service_token_wrong_tenant_binding_rejected() {
+    fn service_token_denied_when_kind_not_service() {
+        // Fail-closed lock: kind must be exactly "service"; user/admin must not
+        // be admitted on the service-token path even with a valid MAC + sub.
+        let caller = vocab::ServiceCallerDomain::MaintenanceOperator.as_str();
+        for kind in ["user", "admin"] {
+            let token = mint_hs256_bound(
+                HS_SECRET,
+                &service_token_payload(caller, kind, Some(&format!("nonce-kind-{kind}"))),
+                CANON_TENANT,
+            );
+            let r = verify_credential(
+                &hs256_config(),
+                &FixedClock(NOW),
+                &RawCredential::service_token(token, tenant_binding(CANON_TENANT)),
+            );
+            assert!(
+                matches!(r, Err(PdpError::InvalidSignature)),
+                "kind={kind} must fail closed: {r:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn service_token_missing_kind_tripwire() {
+        // Fail-closed lock: absent kind must not default into service admission.
+        let caller = vocab::ServiceCallerDomain::MaintenanceOperator.as_str();
+        let body = format!(
+            r#"{{"sub":"{caller}","iat":{NOW},"exp":{},"token_use":"service","iss":"{ISS}","aud":"{AUD}","jti":"nonce-missing-kind"}}"#,
+            NOW + 300
+        );
+        let token = mint_hs256_bound(HS_SECRET, &body, CANON_TENANT);
+        let r = verify_credential(
+            &hs256_config(),
+            &FixedClock(NOW),
+            &RawCredential::service_token(token, tenant_binding(CANON_TENANT)),
+        );
+        assert!(matches!(r, Err(PdpError::InvalidSignature)), "got {r:?}");
+    }
+
+    #[test]
+    fn service_token_permissions_claim_tripwire() {
+        // Fail-closed lock: service tokens must not carry federated permissions.
+        capture::install();
+        capture::reset();
+        let token = mint_hs256_bound(
+            HS_SECRET,
+            &payload(
+                NOW + 600,
+                ISS,
+                AUD,
+                r#","kind":"service","jti":"nonce-permissions","permissions":["settings.config-publish"]"#,
+            ),
+            CANON_TENANT,
+        );
+        let r = verify_credential(
+            &hs256_config(),
+            &FixedClock(NOW),
+            &RawCredential::service_token(token, tenant_binding(CANON_TENANT)),
+        );
+        assert!(matches!(r, Err(PdpError::InvalidSignature)), "got {r:?}");
+        let logs = capture::captured();
+        assert!(
+            logs.contains("service_permissions_forbidden"),
+            "permissions claim must emit service_permissions_forbidden: {logs}"
+        );
+        assert!(
+            !logs.contains("service_kind_invalid"),
+            "permissions claim must not emit service_kind_invalid: {logs}"
+        );
+    }
+
+    #[test]
+    fn service_token_tenant_claim_present_tripwire() {
+        // Fail-closed lock: tenant must come only from MAC binding, never payload.
+        let token = mint_hs256_bound(
+            HS_SECRET,
+            &payload(
+                NOW + 600,
+                ISS,
+                AUD,
+                &format!(
+                    r#","kind":"service","jti":"nonce-tenant-claim","tenant_id":"{CANON_TENANT}""#
+                ),
+            ),
+            CANON_TENANT,
+        );
+        let r = verify_credential(
+            &hs256_config(),
+            &FixedClock(NOW),
+            &RawCredential::service_token(token, tenant_binding(CANON_TENANT)),
+        );
+        assert!(matches!(r, Err(PdpError::InvalidSignature)), "got {r:?}");
+    }
+
+    #[test]
+    fn service_token_denied_when_sub_empty() {
+        // Fail-closed lock: empty sub must never mint a ServiceCallerDomain.
+        capture::install();
+        capture::reset();
+        let token = mint_hs256_bound(
+            HS_SECRET,
+            &service_token_payload("", "service", Some("nonce-empty-sub")),
+            CANON_TENANT,
+        );
+        let r = verify_credential(
+            &hs256_config(),
+            &FixedClock(NOW),
+            &RawCredential::service_token(token, tenant_binding(CANON_TENANT)),
+        );
+        assert!(matches!(r, Err(PdpError::InvalidSignature)), "got {r:?}");
+        let logs = capture::captured();
+        assert!(
+            logs.contains("empty_subject"),
+            "empty sub must emit empty_subject: {logs}"
+        );
+        assert!(
+            !logs.contains("service_subject_unknown"),
+            "empty sub must not emit service_subject_unknown: {logs}"
+        );
+    }
+
+    #[test]
+    fn service_token_denied_when_sub_unknown() {
+        // Fail-closed lock: sub outside ServiceCallerDomain closed set must reject.
+        capture::install();
+        capture::reset();
+        let token = mint_hs256_bound(
+            HS_SECRET,
+            &service_token_payload("unknown-caller", "service", Some("nonce-unknown-sub")),
+            CANON_TENANT,
+        );
+        let r = verify_credential(
+            &hs256_config(),
+            &FixedClock(NOW),
+            &RawCredential::service_token(token, tenant_binding(CANON_TENANT)),
+        );
+        assert!(matches!(r, Err(PdpError::InvalidSignature)), "got {r:?}");
+        let logs = capture::captured();
+        assert!(
+            logs.contains("service_subject_unknown"),
+            "unknown non-empty sub must emit service_subject_unknown: {logs}"
+        );
+        assert!(
+            !logs.contains("empty_subject"),
+            "unknown non-empty sub must not emit empty_subject: {logs}"
+        );
+    }
+
+    #[test]
+    fn service_token_wrong_tenant_binding_tripwire() {
+        // Fail-closed lock: MAC is tenant-bound; wrong binding must not verify.
         let token = mint_hs256_bound(
             HS_SECRET,
             &payload(
@@ -1424,7 +1597,9 @@ mod tests {
     }
 
     #[test]
-    fn legacy_unbound_hs256_service_token_rejected() {
+    fn service_token_legacy_unbound_mac_tripwire() {
+        // Fail-closed lock: legacy unbound HS256 (MAC over signing_input only)
+        // must not verify against a tenant-bound verifier.
         let token = mint_hs256(
             HS_SECRET,
             &payload(
@@ -1443,7 +1618,8 @@ mod tests {
     }
 
     #[test]
-    fn hs256_service_token_missing_kid_rejected() {
+    fn service_token_missing_kid_tripwire() {
+        // Fail-closed lock: missing kid must not blind-scan HS256 secrets.
         let token = mint_hs256_bound_without_kid(
             HS_SECRET,
             &payload(
@@ -1463,7 +1639,8 @@ mod tests {
     }
 
     #[test]
-    fn hs256_service_token_unknown_kid_rejected() {
+    fn service_token_unknown_kid_tripwire() {
+        // Fail-closed lock: unknown kid → no candidate → Untrusted.
         let token = mint_hs256_bound_with_kid(
             HS_SECRET,
             "unknown-kid",
@@ -1484,7 +1661,8 @@ mod tests {
     }
 
     #[test]
-    fn hs256_service_token_missing_jti_rejected() {
+    fn service_token_missing_jti_tripwire() {
+        // Fail-closed lock: service token requires non-empty jti for replay scope.
         let token = mint_hs256_bound(
             HS_SECRET,
             &payload(NOW + 600, ISS, AUD, r#","kind":"service""#),
@@ -1499,7 +1677,8 @@ mod tests {
     }
 
     #[test]
-    fn hs256_service_token_duplicate_jti_rejected() {
+    fn service_token_duplicate_jti_tripwire() {
+        // Fail-closed lock: replay store must reject a second use of the same jti.
         let config = hs256_config();
         let token = mint_hs256_bound(
             HS_SECRET,
@@ -1618,7 +1797,8 @@ mod tests {
 
     #[test]
     #[allow(clippy::unwrap_used)]
-    fn hs256_tampered_rejected() {
+    fn service_token_tampered_mac_tripwire() {
+        // Fail-closed lock: tampered MAC tag must not verify.
         let token = mint_hs256_bound(
             HS_SECRET,
             &payload(

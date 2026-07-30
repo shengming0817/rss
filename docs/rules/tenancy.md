@@ -38,6 +38,14 @@
   不接受全租户或 namespace flag——schema 无 namespace 列，接受会让调用方误以为存在该隔离维度。
   start / finish 必须写审计事件。
 
+| owner | ledger / outcome |
+|-------|------------------|
+| authn `cross_tenant_audit_grant` | grant / Success only；`NotSuperAdmin` → `Err`，不写 ledger |
+| audit domain handler | **authenticated** final cross-tenant deny → target-bound durable `Failure`（deny-before-grant）；identity-less early 403 不入该 ledger |
+| httpserve authz | coarse route Deny → `http_route` Failure |
+
+> 上表仅为所有权索引；闭包证据是 audit crate 的 Medium tripwire 测试（`AUDIT-CROSS-TENANT-DENY-BEFORE-GRANT-01` 认证后 deny-before-grant；`target_tenant_identity_less_403_has_empty_deny_ledger` 锁 identity-less early 403 空 deny ledger），文档不是唯一载体。
+
 ## Tenant source（认证通道，非 request body）
 
 tenant scope 只能来自声明过且已认证的入口：listener-fixed verified tenant claim，或 service-token
