@@ -125,10 +125,14 @@ impl ConfigReadTx<'_> {
     }
 }
 
-/// Settings mutation surface. The caller chooses a domain mutation, not an SQL variant.
-#[cfg(feature = "domain-settings")]
+/// Non-interchangeable settings mutation capability minted only by config producer runners.
+///
+/// The type itself stays feature-ungated so L2 rust-type carriers can name it; operation
+/// methods remain behind `domain-settings`.
 pub(crate) struct ConfigWriteTx<'tx> {
+    #[cfg_attr(not(feature = "domain-settings"), allow(dead_code))]
     conn: &'tx mut PgConnection,
+    #[cfg_attr(not(feature = "domain-settings"), allow(dead_code))]
     tenant: vocab::TenantId,
 }
 

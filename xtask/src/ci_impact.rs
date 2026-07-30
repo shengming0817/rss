@@ -2493,11 +2493,17 @@ fn package_operation_args(
         bail!("ci local selective operation has an empty package set");
     }
     let mut owned = vec!["--locked".to_owned()];
-    if matches!(
-        operation,
-        LocalCargoOperation::Check | LocalCargoOperation::Clippy
-    ) {
-        owned.push("--all-targets".to_owned());
+    // Check uses lib+bins only: `--all-targets` plus multi-package reverse closure can
+    // activate `testkit`'s `containers` cfg without linking optional deps (feature-unification
+    // interaction with integration-gated test targets). Clippy keeps `--all-targets` for lint
+    // coverage; integration feature matrices stay on the deferred nightly/develop lane.
+    match operation {
+        LocalCargoOperation::Check => {
+            owned.push("--lib".to_owned());
+            owned.push("--bins".to_owned());
+        }
+        LocalCargoOperation::Clippy => owned.push("--all-targets".to_owned()),
+        LocalCargoOperation::Test => {}
     }
     for package in packages {
         owned.push("-p".to_owned());
@@ -4195,7 +4201,7 @@ mod tests {
                 &packages,
                 ExecutionPolicy::KeepGoing
             )?,
-            ["--locked", "--all-targets", "-p", "leaf", "--keep-going"]
+            ["--locked", "--lib", "--bins", "-p", "leaf", "--keep-going"]
         );
         assert_eq!(
             package_operation_args(

@@ -43,6 +43,10 @@ fn expected_domain_feature_members(domain: &str) -> BTreeSet<String> {
     if matches!(domain, "settings" | "identity") {
         expected.insert("dep:httpserve".to_owned());
     }
+    if domain == "identity" {
+        // Device-certificate persistence vocabulary lives behind domain-identity.
+        expected.insert("dep:deviceloop".to_owned());
+    }
     expected
 }
 
@@ -125,6 +129,7 @@ fn domain_feature_shared_capability_allowlist_is_closed() {
     assert_eq!(
         expected_domain_feature_members("identity"),
         BTreeSet::from([
+            "dep:deviceloop".to_owned(),
             "dep:httpserve".to_owned(),
             "dep:identity".to_owned(),
             "dep:observ".to_owned(),
@@ -156,8 +161,8 @@ fn journey_fault_support_does_not_restore_refresh_store_writes()
 
     assert_eq!(
         feature_set(features, "test-support")?,
-        BTreeSet::new(),
-        "general test support must not activate journey transaction faults"
+        BTreeSet::from(["eventexec/test-support".to_owned()]),
+        "general test support may forward eventexec fixtures but must not activate journey transaction faults"
     );
     assert_eq!(
         feature_set(features, "journey-fault-support")?,

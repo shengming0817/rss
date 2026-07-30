@@ -1,8 +1,12 @@
 //! `DeadLetterStore` —— 死信持久化 DI port（可替换：prod postgres / test in-mem）。
 //!
 //! 消费方在重试预算耗尽后调用 `write_dead_letter` 持久化死信记录，供运维巡检 / 重放。
-//! `DeadLetterRecord.tenant` 是 DLX RLS scope 的 typed 锚点；`original_payload` 是原始消息字节，
-//! **完整存入** `dead_letter.original_entry` 供重放 / 巡检（无 DB 侧脱敏）；PII 保留策略属后续治理（backlog 跟踪）。
+//! `DeadLetterRecord.tenant` 是 DLX RLS scope 的 typed 锚点；`original_payload` 是 port 层交付的
+//! **完整原始消息字节**（经 [`RedactedBytes`] 持有；Debug 脱敏），供 adapter 写入——
+//! port 语义是 raw bytes 交接，不做 at-rest 加密。
+//! 持久化机密性由实现负责：生产 `PgDeadLetterStore` 必须经 `KeyProvider` 将 payload 与
+//! persisted metadata 封为 encrypted `replay_capsule`（见 `docs/rules/eventbus.md` §DLX 与幂等）；
+//! 明文仅允许 test / memory 替身。
 //! Debug 输出一律隐藏（INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }）。
 
 use dynosaur::dynosaur;

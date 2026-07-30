@@ -1511,10 +1511,14 @@ mod tests {
             .context("test Vault rewrap")?;
         assert!(rewrapped.ciphertext().starts_with(b"vault:v1:"));
 
-        let signer_worker =
-            (products.signer_readiness_worker)(tokio_util::sync::CancellationToken::new());
-        let dlx_worker =
-            (products.dlx_readiness_worker)(tokio_util::sync::CancellationToken::new());
+        let token = tokio_util::sync::CancellationToken::new();
+        let spawn = |worker: bootstrap::WorkerSpec| match worker {
+            bootstrap::WorkerSpec::PhaseOne(make) | bootstrap::WorkerSpec::Deferred(make) => {
+                make(token.clone())
+            }
+        };
+        let signer_worker = spawn(products.signer_readiness_worker);
+        let dlx_worker = spawn(products.dlx_readiness_worker);
         tokio::time::sleep(Duration::from_millis(20)).await;
         signer_worker.shutdown().await?;
         dlx_worker.shutdown().await?;

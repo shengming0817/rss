@@ -168,7 +168,7 @@ pub(crate) fn collect(
                         provider_method: provider.provider_method.clone(),
                         production_composition: production_composition.clone(),
                         transaction: provider.transaction.clone(),
-                        capability: transaction_closure.capability.clone(),
+                        capability: producer_capability_projection(&provider.transaction)?,
                         append: transaction_closure.append.clone(),
                         settlement: transaction_closure.settlement.clone(),
                         rollback: transaction_closure.rollback.clone(),
@@ -235,7 +235,6 @@ struct PostgresTerminal {
 
 #[derive(Debug, Clone)]
 struct CanonicalTransactionClosure {
-    capability: RustItemProjection,
     append: RustItemProjection,
     settlement: RustItemProjection,
     rollback: RustItemProjection,
@@ -425,6 +424,8 @@ fn canonical_transaction_closure(root: &Path) -> Result<CanonicalTransactionClos
     let outbox = SourceFile::read(root, &root.join("adapters/postgres/src/outbox.rs"))?;
     ensure_exact_production_symbol(&cotx, "TenantTx", None)?;
     ensure_exact_production_symbol(&cotx, "ServingWriteLane", None)?;
+    ensure_exact_production_symbol(&identity, "IdentityTx", None)?;
+    ensure_exact_production_symbol(&settings_audit, "ConfigWriteTx", None)?;
     ensure_exact_production_symbol(&cotx, "finish_local_tx", None)?;
     ensure_exact_production_symbol(&outbox, "append_outbox_with_projection", None)?;
     for method in ["producer_tx", "retry_producer_tx"] {
@@ -458,10 +459,6 @@ fn canonical_transaction_closure(root: &Path) -> Result<CanonicalTransactionClos
         retry.repo_path
     );
     Ok(CanonicalTransactionClosure {
-        capability: RustItemProjection {
-            repo_path: identity.repo_path,
-            symbol: "IdentityTx".to_string(),
-        },
         append: RustItemProjection {
             repo_path: outbox.repo_path,
             symbol: "append_outbox_with_projection".to_string(),
@@ -483,6 +480,33 @@ fn canonical_transaction_closure(root: &Path) -> Result<CanonicalTransactionClos
             symbol: "finish_local_tx_rollback_result".to_string(),
         },
     })
+}
+
+fn producer_capability_projection(transaction: &RustItemProjection) -> Result<RustItemProjection> {
+    match (transaction.repo_path.as_str(), transaction.symbol.as_str()) {
+        ("adapters/postgres/src/cotx/identity.rs", "TenantDb::identity_producer_tx") => {
+            Ok(RustItemProjection {
+                repo_path: "adapters/postgres/src/cotx/identity.rs".to_string(),
+                symbol: "IdentityTx".to_string(),
+            })
+        }
+        ("adapters/postgres/src/cotx/settings_audit.rs", "TenantDb::retry_config_producer_tx") => {
+            Ok(RustItemProjection {
+                repo_path: "adapters/postgres/src/cotx/settings_audit.rs".to_string(),
+                symbol: "ConfigWriteTx".to_string(),
+            })
+        }
+        (
+            "adapters/postgres/src/cotx/mod.rs",
+            "TenantDb::producer_tx" | "TenantDb::retry_producer_tx",
+        ) => Ok(RustItemProjection {
+            repo_path: "adapters/postgres/src/cotx/mod.rs".to_string(),
+            symbol: "TenantTx".to_string(),
+        }),
+        (path, symbol) => bail!(
+            "unknown producer transaction funnel `{path}::{symbol}`; cannot project concern capability"
+        ),
+    }
 }
 
 fn ensure_exact_serving_write_producer_method(

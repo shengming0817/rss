@@ -2325,8 +2325,8 @@
               },
               "capability": {
                 "kind": "rust-type",
-                "path": "adapters/postgres/src/cotx/identity.rs",
-                "symbol": "IdentityTx"
+                "path": "adapters/postgres/src/cotx/settings_audit.rs",
+                "symbol": "ConfigWriteTx"
               },
               "append": {
                 "kind": "rust-symbol",
@@ -2484,8 +2484,8 @@
               },
               "capability": {
                 "kind": "rust-type",
-                "path": "adapters/postgres/src/cotx/identity.rs",
-                "symbol": "IdentityTx"
+                "path": "adapters/postgres/src/cotx/settings_audit.rs",
+                "symbol": "ConfigWriteTx"
               },
               "append": {
                 "kind": "rust-symbol",
@@ -2638,8 +2638,8 @@
               },
               "capability": {
                 "kind": "rust-type",
-                "path": "adapters/postgres/src/cotx/identity.rs",
-                "symbol": "IdentityTx"
+                "path": "adapters/postgres/src/cotx/settings_audit.rs",
+                "symbol": "ConfigWriteTx"
               },
               "append": {
                 "kind": "rust-symbol",

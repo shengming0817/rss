@@ -8,6 +8,9 @@
 //! `TenantDb<ServingWriteLane>::producer_tx` 注入租户事务后传入能力令牌，全局 outbox-only infra
 //! 路径也必须先显式打开事务并由 postgres adapter 铸造令牌——类型系统天然阻止无事务直接调用。
 //!
+//! **生产 INSERT funnel** 由 `cotx/eventing.rs` 的 `outbox_insert_generated` /
+//! `outbox_insert_replayed` 持有；本文件只做 relay / settlement / retention。
+//!
 //! **CAS fencing**：`claim_batch` 在数据库内原子选择并铸造 token/deadline；settle 同时精确匹配二者且
 //! 拒绝过期租约。CAS 只围栏 durable 状态写回，不提供 broker exactly-once。
 //!
@@ -932,7 +935,8 @@ impl OutboxAppendError {
 ///
 /// replay 的原始 dead_letter 行只保存 wire 侧字符串字段，无法重建 generated `ContractBinding`；
 /// 但 #1622 已要求 replay fail-closed 解析 schema header 后写入物理列。该结构把 replay 专用写入仍收口到
-/// `outbox.rs` + [`TenantTx`]，避免在 operator 路径散落第二份 `INSERT INTO outbox`。
+/// `cotx/eventing.rs` 的 `outbox_insert_replayed` funnel，避免在 operator 路径散落第二份
+/// `INSERT INTO outbox`。
 pub(crate) struct ReplayedOutboxAppend {
     pub(crate) event_id: String,
     pub(crate) tenant: vocab::TenantId,
@@ -3701,7 +3705,9 @@ mod tests {
     #[allow(clippy::expect_used)]
     // reason: static source-contract test must fail loudly when a production INSERT loses its fingerprint terminator.
     fn production_outbox_inserts_supply_fact_columns_only() {
-        let source = include_str!("outbox.rs");
+        // Production INSERT funnels live in cotx/eventing.rs (generated + replayed).
+        // fault_matrix / integration_tests seed INSERTs are out of scope for this scan.
+        let source = include_str!("cotx/eventing.rs");
         let insert_start = ["INSERT INTO ", "outbox ("].concat();
         let insert_end = ["RETURNING fact_", "fingerprint"].concat();
         let blocks: Vec<&str> = source

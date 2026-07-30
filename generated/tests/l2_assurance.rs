@@ -487,6 +487,9 @@ fn assert_producer_evidence(
                 ) | (
                     "adapters/postgres/src/cotx/settings_audit.rs",
                     "TenantDb::retry_config_producer_tx",
+                ) | (
+                    "adapters/postgres/src/cotx/identity.rs",
+                    "TenantDb::identity_producer_tx",
                 )
             ),
             "{contract_id} transaction must use the only producer funnel"
@@ -496,9 +499,30 @@ fn assert_producer_evidence(
             CarrierKind::RustType,
             "{contract_id}"
         );
-        assert_eq!(
-            terminal.capability.symbol, "TenantTx<'_, ServingWriteLane>",
-            "{contract_id}"
+        assert!(
+            matches!(
+                (
+                    terminal.transaction.symbol.as_str(),
+                    terminal.capability.path.as_str(),
+                    terminal.capability.symbol.as_str(),
+                ),
+                (
+                    "TenantDb::identity_producer_tx",
+                    "adapters/postgres/src/cotx/identity.rs",
+                    "IdentityTx",
+                ) | (
+                    "TenantDb::retry_config_producer_tx",
+                    "adapters/postgres/src/cotx/settings_audit.rs",
+                    "ConfigWriteTx",
+                ) | (
+                    "TenantDb::producer_tx" | "TenantDb::retry_producer_tx",
+                    "adapters/postgres/src/cotx/mod.rs",
+                    "TenantTx",
+                )
+            ),
+            "{contract_id} capability must match transaction funnel: transaction={:?} capability={:?}",
+            terminal.transaction,
+            terminal.capability
         );
         assert_eq!(
             terminal.append.symbol, "append_outbox_with_projection",
@@ -572,6 +596,9 @@ fn assert_producer_fault(evidence: &ProducerEvidence, contract_id: &str, emitted
                 ) | (
                     "adapters/postgres/src/cotx/settings_audit.rs",
                     "TenantDb::retry_config_producer_tx",
+                ) | (
+                    "adapters/postgres/src/cotx/identity.rs",
+                    "TenantDb::identity_producer_tx",
                 )
             ),
             "{contract_id}"
@@ -604,7 +631,7 @@ fn assert_producer_fault(evidence: &ProducerEvidence, contract_id: &str, emitted
                     terminal.no_replay.symbol.as_str(),
                 ),
                 (
-                    "TenantDb::producer_tx",
+                    "TenantDb::producer_tx" | "TenantDb::identity_producer_tx",
                     "adapters/postgres/src/cotx/mod.rs",
                     "ProducerTxAttempt::into_result"
                         | "ProducerTxAttempt::into_refresh_commit_result",
