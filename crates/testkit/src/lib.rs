@@ -126,6 +126,7 @@ pub use containers::{
 // Provider-neutral eventing taxonomy/assertions are dependency-free and intentionally available
 // without the container feature. Real provider runners remain integration-gated in each adapter.
 pub mod eventing_conformance;
+pub mod projection_conformance;
 
 // tenant-scope repository conformance 骨架（#1437 PERSIST-016 种子；#1426 在此扩展全套 repo conformance）。
 // 仅 `containers` feature（其唯一消费方是启用 containers 的 adapter 集成测试）；不增 default public-api 面。

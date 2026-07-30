@@ -64,7 +64,8 @@ pub use outbox::{
     StoredOutboxEntryError, StoredOutboxTopic, is_canonical_topic_name,
 };
 pub use projection::{
-    Lsn, PartitionSerialDelivery, ProjectionApplyOutcome, ProjectionBatchLimit,
+    Lsn, PartitionSerialDelivery, ProjectionApplyError, ProjectionApplyErrorKind,
+    ProjectionApplyErrorReason, ProjectionApplyOutcome, ProjectionBatchLimit,
     ProjectionBatchLimitError, ProjectionCheckpoint, ProjectionCheckpointError,
     ProjectionDeadLetter, ProjectionDeadLetterReason, ProjectionEvent, ProjectionEventMetadata,
     ProjectionEventRecord, ProjectionEventSource, Projector, SerialInOrder, SerialInOrderGuarantor,

@@ -1,0 +1,62 @@
+error[E0277]: `?` couldn't convert the error to `ProjectionConformanceError`
+  --> tests/ui/projection_target_wrong_behavior_output_fail.rs:5:1
+   |
+ 5 | / testkit::projection_target_conformance! {
+ 6 | |     cases: {
+ 7 | |         atomic_apply => { atomic_apply => behavior },
+ 8 | |         same_fact_duplicate => { same_fact_duplicate => behavior },
+...  |
+16 | | }
+   | | ^
+   | | |
+   | |_this can't be annotated with `?` because it has type `Result<_, ()>`
+   |   the trait `From<()>` is not implemented for `ProjectionConformanceError`
+   |
+   = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trait
+   = note: this error originates in the macro `testkit::projection_target_conformance` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0308]: mismatched types
+  --> tests/ui/projection_target_wrong_behavior_output_fail.rs:5:1
+   |
+ 5 | / testkit::projection_target_conformance! {
+ 6 | |     cases: {
+ 7 | |         atomic_apply => { atomic_apply => behavior },
+ 8 | |         same_fact_duplicate => { same_fact_duplicate => behavior },
+...  |
+16 | | }
+   | | ^
+   | | |
+   | |_expected `&ProjectionObservation`, found `&()`
+   |   arguments to this function are incorrect
+   |
+   = note: expected reference `&ProjectionObservation`
+              found reference `&()`
+note: function defined here
+  --> src/projection_conformance.rs
+   |
+   | pub fn verify_projection_case(
+   |        ^^^^^^^^^^^^^^^^^^^^^^
+   = note: this error originates in the macro `testkit::projection_target_conformance` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0271]: expected `impl Future<Output = Result<(), ()>>` to be a future that resolves to `Result<ProjectionObservation, ProjectionConformanceError>`, but it resolves to `Result<(), ()>`
+  --> tests/ui/projection_target_wrong_behavior_output_fail.rs:5:1
+   |
+ 5 | / testkit::projection_target_conformance! {
+ 6 | |     cases: {
+ 7 | |         atomic_apply => { atomic_apply => behavior },
+ 8 | |         same_fact_duplicate => { same_fact_duplicate => behavior },
+...  |
+16 | | }
+   | |_^ expected `Result<ProjectionObservation, ...>`, found `Result<(), ()>`
+   |
+   = note: expected enum `Result<ProjectionObservation, ProjectionConformanceError>`
+              found enum `Result<(), ()>`
+note: required by a bound in `testkit::projection_conformance::__catalog::assert_behavior`
+  --> src/projection_conformance.rs
+   |
+   |     pub fn assert_behavior<Behavior, BehaviorFuture>(_behavior: Behavior)
+   |            --------------- required by a bound in this function
+...
+   |                 Output = Result<super::ProjectionObservation, super::ProjectionConformanceError>,
+   |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `assert_behavior`
+   = note: this error originates in the macro `testkit::projection_target_conformance` (in Nightly builds, run with -Z macro-backtrace for more info)

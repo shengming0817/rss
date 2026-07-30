@@ -7,9 +7,9 @@ use std::time::Duration;
 
 use consistency::outbox::EventTopic;
 use consistency::{
-    EngineError, Lsn, PartitionSerialDelivery, ProjectionApplyOutcome, ProjectionBatchLimit,
-    ProjectionEvent, ProjectionEventMetadata, ProjectionEventRecord, ProjectionEventSource,
-    Projector,
+    EngineError, Lsn, PartitionSerialDelivery, ProjectionApplyError, ProjectionApplyOutcome,
+    ProjectionBatchLimit, ProjectionEvent, ProjectionEventMetadata, ProjectionEventRecord,
+    ProjectionEventSource, Projector,
 };
 use diport::{
     Checkpoint, CheckpointId, CheckpointOwner, CheckpointStoreError, CheckpointVersion,
@@ -89,7 +89,7 @@ impl Projector for IdempotentProjector {
     async fn apply<E: ProjectionEvent>(
         &self,
         event: &E,
-    ) -> Result<ProjectionApplyOutcome, EngineError> {
+    ) -> Result<ProjectionApplyOutcome, ProjectionApplyError> {
         let lsn = event.lsn().get();
         self.attempts
             .lock()

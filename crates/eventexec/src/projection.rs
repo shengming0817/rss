@@ -16,6 +16,9 @@
 //! - **Transient** 错误：建议 caller 限速重试，下轮从 checkpoint 续投（幂等重投 no-op）。
 //! - **Permanent / Invariant** 错误：写入统一 DLQ 后停在 poison lsn；默认不自动 skip，须人工介入。
 //! - **SkipPermanentAfterDlx**：显式 policy 仅可在 `Permanent` DLQ 写成功后把 checkpoint 推过该 poison。
+//! - **CommitUnknown**：不写 poison DLQ、不自动 skip，checkpoint 不越过失败事件；worker 降级等待后
+//!   自动重放同一事实，由 target receipt 收敛为 `Duplicate`。
+//! - **RollbackFailed**：事务状态无法确认，worker 停止，禁止自动重试或推进 checkpoint。
 //! - **OutOfOrder**：写入统一 DLQ 后停批，不把 checkpoint 推过乱序 poison lsn。
 //! - **checkpoint 读失败**：fail-closed（[`ProjectionStop::CheckpointUnread`]）——**不** apply 任何事件、
 //!   **不**降级为空 baseline 盲目重放；checkpoint 是恢复坐标，读失败让 caller 退避 / 报警 / 重试。
@@ -27,16 +30,18 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use consistency::{
-    EngineErrorKind, Lsn, ProjectionApplyOutcome, ProjectionBatchLimit, ProjectionDeadLetterReason,
-    ProjectionEvent, ProjectionEventMetadata, ProjectionEventRecord, ProjectionEventSource,
-    Projector, SerialInOrderGuarantor,
+    EngineErrorKind, Lsn, ProjectionApplyError, ProjectionApplyErrorKind,
+    ProjectionApplyErrorReason, ProjectionApplyOutcome, ProjectionBatchLimit,
+    ProjectionDeadLetterReason, ProjectionEvent, ProjectionEventMetadata, ProjectionEventRecord,
+    ProjectionEventSource, Projector, SerialInOrderGuarantor,
 };
 use diport::{
     CheckpointId, CheckpointOwner, CheckpointVersion, DeadLetterProvenance, DeadLetterRecord,
     DeadLetterStore, DeadLetterSummary, EnvelopeMetadata, KEY_SCHEMA_HASH, KEY_SCHEMA_VERSION,
-    KEY_TENANT_AUTHORITY, KEY_TENANT_ID, OwnerCheckpointStore, SaveOutcome,
+    KEY_TENANT_AUTHORITY, KEY_TENANT_ID, OwnerCheckpointStore, RedactedSource, SaveOutcome,
 };
 use futures::future::BoxFuture;
+use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
 use vocab::ProjectionInputBinding;
 
@@ -48,6 +53,10 @@ const SUMMARY_PROJECTION_APPLY_PERMANENT: DeadLetterSummary =
     DeadLetterSummary::new("projection apply permanent");
 const SUMMARY_PROJECTION_APPLY_INVARIANT: DeadLetterSummary =
     DeadLetterSummary::new("projection apply invariant");
+const SUMMARY_PROJECTION_APPLY_CONFLICT: DeadLetterSummary =
+    DeadLetterSummary::new("projection apply conflict");
+const SUMMARY_PROJECTION_APPLY_OUT_OF_ORDER: DeadLetterSummary =
+    DeadLetterSummary::new("projection apply out of order");
 const SUMMARY_PROJECTION_OUT_OF_ORDER: DeadLetterSummary =
     DeadLetterSummary::new("projection out of order");
 const SUMMARY_PROJECTION_POISON: DeadLetterSummary = DeadLetterSummary::new("projection poison");
@@ -345,20 +354,377 @@ impl ProjectionActivePointer {
     }
 }
 
-/// Replay target port. Runtime registers concrete read-model targets keyed by generated projection
-/// workflow ids; tests use fakes.
-pub trait ProjectionReplayTarget: Send + Sync {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectionTargetStoreOutcome {
+    /// mutation 与 receipt 已在同一事务首次提交。
+    Applied,
+    /// 同一 key 与 digest 的 receipt 已存在；必须在 persistent ordering 检查之前返回。
+    Duplicate,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectionTargetStoreErrorKind {
+    /// 同一 dedupe key 已对应不同 fact digest，禁止覆盖既有事实。
+    Conflict,
+    /// receipt 未命中且 LSN 低于 persistent high-water。
+    OutOfOrder,
+    /// 事务未提交且可安全重试。
+    Transient,
+    /// 事务已确认回滚的永久失败。
+    Permanent,
+    /// commit 可能成功但 ACK 丢失；重放须依 receipt 收敛。
+    CommitUnknown,
+    /// 无法确认事务已回滚；禁止自动 skip 或推进 checkpoint。
+    RollbackFailed,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("projection target store apply failed")]
+pub struct ProjectionTargetStoreError {
+    kind: ProjectionTargetStoreErrorKind,
+    #[source]
+    source: RedactedSource,
+}
+
+impl ProjectionTargetStoreError {
+    /// 从闭值 kind 与 provider cause 构造错误；cause 被类型层脱敏边界封存。
+    pub fn new<E>(kind: ProjectionTargetStoreErrorKind, source: E) -> Self
+    where
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        Self {
+            kind,
+            source: RedactedSource::new(source),
+        }
+    }
+
+    /// 返回 store 原始失败分类。
+    pub const fn kind(&self) -> ProjectionTargetStoreErrorKind {
+        self.kind
+    }
+}
+
+/// 原子 receipt 的稳定去重键。字段私有，只能由 conforming funnel 创建。
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ProjectionDedupeKey {
+    tenant: vocab::TenantId,
+    projection: ProjectionId,
+    generation: ProjectionVersion,
+    event_id: String,
+}
+
+impl ProjectionDedupeKey {
+    /// target tenant。
+    pub fn tenant(&self) -> vocab::TenantId {
+        self.tenant
+    }
+
+    /// projection workflow id。
+    pub fn projection(&self) -> &ProjectionId {
+        &self.projection
+    }
+
+    /// target generation/shadow version。
+    pub fn generation(&self) -> &ProjectionVersion {
+        &self.generation
+    }
+
+    /// source event stable id。
+    pub fn event_id(&self) -> &str {
+        &self.event_id
+    }
+}
+
+/// Store 可消费的唯一 validated input。所有字段私有，production source 无法直接构造。
+#[derive(Clone)]
+pub struct ValidatedProjectionApply {
+    key: ProjectionDedupeKey,
+    lsn: Lsn,
+    topic: consistency::EventTopic,
+    payload: Vec<u8>,
+    metadata: ProjectionEventMetadata,
+    fact_digest: [u8; 32],
+}
+
+impl ValidatedProjectionApply {
+    /// 稳定 receipt key。
+    pub fn key(&self) -> &ProjectionDedupeKey {
+        &self.key
+    }
+
+    /// source journal LSN。
+    pub fn lsn(&self) -> Lsn {
+        self.lsn
+    }
+
+    /// exact-bound topic。
+    pub fn topic(&self) -> &consistency::EventTopic {
+        &self.topic
+    }
+
+    /// encoded business payload。
+    pub fn payload(&self) -> &[u8] {
+        &self.payload
+    }
+
+    /// validated source envelope metadata。
+    pub fn metadata(&self) -> &ProjectionEventMetadata {
+        &self.metadata
+    }
+
+    /// canonical stable fact digest；同 key 不同 digest 必须返回 Conflict。
+    pub fn fact_digest(&self) -> &[u8; 32] {
+        &self.fact_digest
+    }
+}
+
+impl fmt::Debug for ValidatedProjectionApply {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ValidatedProjectionApply")
+            .field("key", &self.key)
+            .field("lsn", &self.lsn)
+            .field("topic", &self.topic)
+            .field("payload", &"<redacted>")
+            .field("payload_len", &self.payload.len())
+            .field("metadata", &self.metadata)
+            .field("fact_digest", &"<redacted>")
+            .finish()
+    }
+}
+
+/// Adapter 唯一 SPI。mutation 与 receipt 必须由这一个调用在同一事务内原子完成。
+///
+/// 实现必须按 receipt duplicate/conflict → persistent ordering → mutation+receipt transaction 的顺序
+/// 处理。`CommitUnknown` 不得谎报 rollback；`RollbackFailed` 不得自动重试。每个 production impl 必须
+/// 通过 `testkit::projection_target_conformance!` 完整 enrollment，`runtime-baseline verify` 会拒绝旁路。
+pub trait ProjectionTargetStore: Send + Sync + 'static {
+    /// 原子 apply validated fact；不得拆成独立 mutation 与 receipt 调用。
+    fn apply<'a>(
+        &'a self,
+        input: &'a ValidatedProjectionApply,
+    ) -> BoxFuture<'a, Result<ProjectionTargetStoreOutcome, ProjectionTargetStoreError>>;
+}
+
+mod target_sealed {
+    pub trait Sealed {}
+}
+
+/// Runtime target façade。sealed 后唯一实现形态是 [`ConformingProjectionTarget`].
+pub trait ProjectionTarget: target_sealed::Sealed + Send + Sync {
+    /// wrapper 绑定的 projection id。
+    fn projection(&self) -> &ProjectionId;
+
+    /// wrapper 的 exact generated input binding set。
+    fn bindings(&self) -> &[ProjectionInputBinding];
+
+    /// 分类并 apply 单条 raw projection event。
     fn apply<'a>(
         &'a self,
         selector: &'a ProjectionSelector,
         event: ProjectionEventRecord,
-    ) -> BoxFuture<'a, Result<(), consistency::EngineError>>;
+    ) -> BoxFuture<'a, Result<ProjectionApplyOutcome, ProjectionApplyError>>;
+}
+
+/// raw event 到 store input 的 canonical typed/private funnel。
+pub struct ConformingProjectionTarget<S> {
+    projection: ProjectionId,
+    bindings: Vec<ProjectionInputBinding>,
+    store: Arc<S>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+/// Canonical target 构造失败；任何错误都不得产生可注册 target。
+pub enum ProjectionTargetConfigError {
+    /// target 没有任何 generated input binding。
+    #[error("projection target bindings must not be empty")]
+    EmptyBindings,
+    /// 至少一个 binding 的 projection id 与 target 不同。
+    #[error("projection target binding belongs to another projection")]
+    ProjectionMismatch,
+    /// exact binding set 内存在重复项。
+    #[error("projection target binding is duplicated")]
+    DuplicateBinding,
+}
+
+impl<S: ProjectionTargetStore> ConformingProjectionTarget<S> {
+    /// 构造 exact-bound target；空、错绑或重复 binding 均 fail-closed。
+    pub fn new(
+        projection: ProjectionId,
+        bindings: Vec<ProjectionInputBinding>,
+        store: Arc<S>,
+    ) -> Result<Self, ProjectionTargetConfigError> {
+        if bindings.is_empty() {
+            return Err(ProjectionTargetConfigError::EmptyBindings);
+        }
+        if bindings
+            .iter()
+            .any(|binding| binding.projection_id() != projection.as_str())
+        {
+            return Err(ProjectionTargetConfigError::ProjectionMismatch);
+        }
+        if bindings
+            .iter()
+            .enumerate()
+            .any(|(index, binding)| bindings[..index].contains(binding))
+        {
+            return Err(ProjectionTargetConfigError::DuplicateBinding);
+        }
+        Ok(Self {
+            projection,
+            bindings,
+            store,
+        })
+    }
+
+    fn validate(
+        &self,
+        selector: &ProjectionSelector,
+        event: ProjectionEventRecord,
+    ) -> Result<Option<ValidatedProjectionApply>, ProjectionApplyError> {
+        if selector.projection() != &self.projection
+            || event.metadata().tenant() != selector.tenant()
+        {
+            return Err(ProjectionApplyError::new(
+                ProjectionApplyErrorKind::Invariant,
+            ));
+        }
+        let exact = self.bindings.iter().any(|binding| {
+            binding.domain() == event.metadata().domain()
+                && binding.contract_id() == event.metadata().contract_id()
+                && binding.version() == event.metadata().contract_version()
+                && binding.schema_hash() == event.metadata().schema_hash()
+                && binding.topic() == event.topic().as_str()
+        });
+        if !exact {
+            let known_identity = self.bindings.iter().any(|binding| {
+                binding.contract_id() == event.metadata().contract_id()
+                    || binding.topic() == event.topic().as_str()
+            });
+            return if known_identity {
+                Err(ProjectionApplyError::new(
+                    ProjectionApplyErrorKind::Invariant,
+                ))
+            } else {
+                Ok(None)
+            };
+        }
+
+        let key = ProjectionDedupeKey {
+            tenant: selector.tenant(),
+            projection: selector.projection().clone(),
+            generation: selector.version().clone(),
+            event_id: event.metadata().event_id().to_string(),
+        };
+        let fact_digest = projection_fact_digest(selector, &event)?;
+        Ok(Some(ValidatedProjectionApply {
+            key,
+            lsn: event.lsn(),
+            topic: event.topic().clone(),
+            payload: event.payload().to_vec(),
+            metadata: event.metadata().clone(),
+            fact_digest,
+        }))
+    }
+}
+
+fn projection_fact_digest(
+    selector: &ProjectionSelector,
+    event: &ProjectionEventRecord,
+) -> Result<[u8; 32], ProjectionApplyError> {
+    let mut digest = Sha256::new();
+    let tenant = selector.tenant().to_string();
+    for bytes in [
+        tenant.as_bytes(),
+        selector.projection().as_str().as_bytes(),
+        selector.version().as_str().as_bytes(),
+        event.metadata().event_id().as_bytes(),
+        event.metadata().domain().as_bytes(),
+        event.metadata().contract_id().as_bytes(),
+        event.metadata().contract_version().as_bytes(),
+        event.metadata().schema_hash().as_bytes(),
+        event.topic().as_str().as_bytes(),
+        event.payload(),
+    ] {
+        digest.update((bytes.len() as u64).to_be_bytes());
+        digest.update(bytes);
+    }
+    let metadata_json = serde_json_canonicalizer::to_vec(event.metadata().metadata_json())
+        .map_err(|_| ProjectionApplyError::new(ProjectionApplyErrorKind::Invariant))?;
+    for optional in [
+        Some(metadata_json.as_slice()),
+        event.metadata().partition_key().map(str::as_bytes),
+        event.metadata().causation_id().map(str::as_bytes),
+    ] {
+        match optional {
+            Some(bytes) => {
+                digest.update([1]);
+                digest.update((bytes.len() as u64).to_be_bytes());
+                digest.update(bytes);
+            }
+            None => digest.update([0]),
+        }
+    }
+    Ok(digest.finalize().into())
+}
+
+impl<S: ProjectionTargetStore> target_sealed::Sealed for ConformingProjectionTarget<S> {}
+
+impl<S: ProjectionTargetStore> ProjectionTarget for ConformingProjectionTarget<S> {
+    fn projection(&self) -> &ProjectionId {
+        &self.projection
+    }
+
+    fn bindings(&self) -> &[ProjectionInputBinding] {
+        &self.bindings
+    }
+
+    fn apply<'a>(
+        &'a self,
+        selector: &'a ProjectionSelector,
+        event: ProjectionEventRecord,
+    ) -> BoxFuture<'a, Result<ProjectionApplyOutcome, ProjectionApplyError>> {
+        Box::pin(async move {
+            let Some(input) = self.validate(selector, event)? else {
+                return Ok(ProjectionApplyOutcome::Filtered);
+            };
+            self.store
+                .apply(&input)
+                .await
+                .map(|outcome| match outcome {
+                    ProjectionTargetStoreOutcome::Applied => ProjectionApplyOutcome::Applied,
+                    ProjectionTargetStoreOutcome::Duplicate => ProjectionApplyOutcome::Duplicate,
+                })
+                .map_err(|error| {
+                    let reason = match error.kind() {
+                        ProjectionTargetStoreErrorKind::Conflict => {
+                            ProjectionApplyErrorReason::Conflict
+                        }
+                        ProjectionTargetStoreErrorKind::OutOfOrder => {
+                            ProjectionApplyErrorReason::OutOfOrder
+                        }
+                        ProjectionTargetStoreErrorKind::Transient => {
+                            ProjectionApplyErrorReason::Transient
+                        }
+                        ProjectionTargetStoreErrorKind::Permanent => {
+                            ProjectionApplyErrorReason::Permanent
+                        }
+                        ProjectionTargetStoreErrorKind::CommitUnknown => {
+                            ProjectionApplyErrorReason::CommitUnknown
+                        }
+                        ProjectionTargetStoreErrorKind::RollbackFailed => {
+                            ProjectionApplyErrorReason::RollbackFailed
+                        }
+                    };
+                    ProjectionApplyError::from_reason(reason)
+                })
+        })
+    }
 }
 
 /// Projection targets selected by the sealed assembly runtime plan.
 pub struct ProjectionTargetRegistry {
     planned: BTreeMap<ProjectionId, Vec<ProjectionInputBinding>>,
-    targets: BTreeMap<ProjectionId, Arc<dyn ProjectionReplayTarget>>,
+    targets: BTreeMap<ProjectionId, Arc<dyn ProjectionTarget>>,
 }
 
 impl ProjectionTargetRegistry {
@@ -366,13 +732,18 @@ impl ProjectionTargetRegistry {
     /// inputs provide definition metadata only and cannot activate a projection by themselves.
     pub fn from_view(
         view: crate::ProjectionTargetView<'_>,
-    ) -> Result<Self, ProjectionSelectorError> {
+    ) -> Result<Self, ProjectionRegistryError> {
         let mut planned = BTreeMap::new();
         let mut targets = BTreeMap::new();
         for entry in view.entries() {
-            let projection = ProjectionId::parse(entry.workflow().id())?;
+            let projection = ProjectionId::parse(entry.workflow().id())
+                .map_err(|source| ProjectionRegistryError::InvalidProjectionId { source })?;
+            let target = entry.target();
+            if target.projection() != &projection || target.bindings() != entry.bindings() {
+                return Err(ProjectionRegistryError::TargetIdentityMismatch { projection });
+            }
             planned.insert(projection.clone(), entry.bindings().to_vec());
-            targets.insert(projection, entry.replay_target());
+            targets.insert(projection, target);
         }
         Ok(Self { planned, targets })
     }
@@ -402,7 +773,7 @@ impl ProjectionTargetRegistry {
     fn register_target_for_test(
         &mut self,
         projection: ProjectionId,
-        target: Arc<dyn ProjectionReplayTarget>,
+        target: Arc<dyn ProjectionTarget>,
     ) -> Result<(), ProjectionRegistryError> {
         if !self.planned.contains_key(&projection) {
             return Err(ProjectionRegistryError::UnknownProjection { projection });
@@ -420,7 +791,7 @@ impl ProjectionTargetRegistry {
     pub fn target(
         &self,
         projection: &ProjectionId,
-    ) -> Result<Arc<dyn ProjectionReplayTarget>, ProjectionRegistryError> {
+    ) -> Result<Arc<dyn ProjectionTarget>, ProjectionRegistryError> {
         if !self.planned.contains_key(projection) {
             return Err(ProjectionRegistryError::UnknownProjection {
                 projection: projection.clone(),
@@ -459,6 +830,15 @@ impl ProjectionTargetRegistry {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum ProjectionRegistryError {
+    #[error("assembly-plan projection id is invalid")]
+    InvalidProjectionId {
+        #[source]
+        source: ProjectionSelectorError,
+    },
+    #[error(
+        "assembly-plan projection target identity does not match its generated bindings: {projection}"
+    )]
+    TargetIdentityMismatch { projection: ProjectionId },
     #[error("unknown projection target: {projection}")]
     UnknownProjection { projection: ProjectionId },
     #[error("assembly-plan projection target has no runtime target: {projection}")]
@@ -469,55 +849,29 @@ pub enum ProjectionRegistryError {
 
 /// Projector adapter that filters generated projection inputs and writes only matching events to
 /// the selected shadow target.
-pub struct ProjectionReplayProjector {
+pub struct ProjectionProjector {
     selector: ProjectionSelector,
-    bindings: Vec<ProjectionInputBinding>,
-    target: Arc<dyn ProjectionReplayTarget>,
+    target: Arc<dyn ProjectionTarget>,
 }
 
-impl ProjectionReplayProjector {
-    pub fn new(
-        selector: ProjectionSelector,
-        bindings: Vec<ProjectionInputBinding>,
-        target: Arc<dyn ProjectionReplayTarget>,
-    ) -> Self {
-        Self {
-            selector,
-            bindings,
-            target,
-        }
-    }
-
-    fn matches<E: ProjectionEvent>(&self, event: &E) -> bool {
-        if event.metadata().tenant() != self.selector.tenant() {
-            return false;
-        }
-        self.bindings.iter().any(|binding| {
-            binding.domain() == event.metadata().domain()
-                && binding.contract_id() == event.metadata().contract_id()
-                && binding.version() == event.metadata().contract_version()
-                && binding.schema_hash() == event.metadata().schema_hash()
-                && binding.topic() == event.topic().as_str()
-        })
+impl ProjectionProjector {
+    pub fn new(selector: ProjectionSelector, target: Arc<dyn ProjectionTarget>) -> Self {
+        Self { selector, target }
     }
 }
 
-impl Projector for ProjectionReplayProjector {
+impl Projector for ProjectionProjector {
     async fn apply<E: ProjectionEvent>(
         &self,
         event: &E,
-    ) -> Result<ProjectionApplyOutcome, consistency::EngineError> {
-        if !self.matches(event) {
-            return Ok(ProjectionApplyOutcome::Filtered);
-        }
+    ) -> Result<ProjectionApplyOutcome, ProjectionApplyError> {
         let record = ProjectionEventRecord::with_metadata(
             event.lsn(),
             event.topic().clone(),
             event.payload().to_vec(),
             event.metadata().clone(),
         );
-        self.target.apply(&self.selector, record).await?;
-        Ok(ProjectionApplyOutcome::Applied)
+        self.target.apply(&self.selector, record).await
     }
 }
 
@@ -526,10 +880,12 @@ impl Projector for ProjectionReplayProjector {
 /// 单次 [`ProjectionHarness::run`] 的执行结果。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectionRun {
-    /// 本轮从 source 扫描并处理到结论的事件数（含 filtered/skipped/applied，不含未处理尾部）。
+    /// 本轮从 source 扫描并处理到结论的事件数（含 filtered/skipped/applied/duplicate，不含未处理尾部）。
     pub scanned: usize,
     /// 本轮成功写入投影目标的事件数（不含 filtered / skipped / failed）。
     pub applied: usize,
+    /// 本轮由 target 确认为同一稳定事实已提交的事件数。
+    pub duplicates: usize,
     /// 本轮属于同一 source stream 但不匹配当前投影 selector 的事件数。
     pub filtered: usize,
     /// 本轮跳过的事件数（lsn ≤ checkpoint baseline，或显式 poison skip）。
@@ -556,8 +912,10 @@ pub enum ProjectionStop {
     ApplyFailed {
         /// 失败事件的 lsn。
         failed_at: Lsn,
-        /// 引擎错误种类。
-        kind: EngineErrorKind,
+        /// projection apply 错误种类。
+        kind: ProjectionApplyErrorKind,
+        /// 可安全记录的精确 target failure reason。
+        reason: ProjectionApplyErrorReason,
     },
     /// 事件 lsn 非升序——**release 也 fail-closed** 停批（`failed_at` = 首个乱序事件 lsn）。
     ///
@@ -584,7 +942,7 @@ pub enum ProjectionStop {
         /// 被跳过的 poison lsn。
         skipped_at: Lsn,
         /// 被跳过的错误分类（当前只允许 `Permanent`）。
-        kind: EngineErrorKind,
+        kind: ProjectionApplyErrorKind,
     },
     /// projection event source 读取失败。
     SourceReadFailed {
@@ -663,6 +1021,7 @@ where
             return ProjectionRun {
                 scanned: 0,
                 applied: 0,
+                duplicates: 0,
                 filtered: 0,
                 skipped: 0,
                 dead_lettered: 0,
@@ -695,6 +1054,7 @@ where
         let result = ProjectionRun {
             scanned: progress.scanned,
             applied: progress.applied,
+            duplicates: progress.duplicates,
             filtered: progress.filtered,
             skipped: progress.skipped
                 + usize::from(matches!(stop, ProjectionStop::PoisonSkipped { .. })),
@@ -707,6 +1067,7 @@ where
             projection_id = self.projection_id.as_str(),
             scanned = result.scanned,
             applied = result.applied,
+            duplicates = result.duplicates,
             filtered = result.filtered,
             skipped = result.skipped,
             dead_lettered = result.dead_lettered,
@@ -721,7 +1082,7 @@ where
         progress: &BatchProgress,
         baseline: Option<Lsn>,
         version: CheckpointVersion,
-        skipped_poison: Option<(Lsn, EngineErrorKind)>,
+        skipped_poison: Option<(Lsn, ProjectionApplyErrorKind)>,
     ) -> Advance {
         if progress.dead_letter_write_failed.is_some() || progress.out_of_order.is_some() {
             return Advance::NoChange;
@@ -801,14 +1162,18 @@ where
                     progress.applied += 1;
                     progress.high_water = Some(lsn);
                 }
+                Ok(ProjectionApplyOutcome::Duplicate) => {
+                    progress.duplicates += 1;
+                    progress.high_water = Some(lsn);
+                }
                 Ok(ProjectionApplyOutcome::Filtered) => {
                     progress.filtered += 1;
                     progress.high_water = Some(lsn);
                 }
                 Err(e) => {
-                    self.log_apply_failed(lsn, e.kind(), event.topic().as_str());
+                    self.log_apply_failed(lsn, e.kind(), e.reason(), event.topic().as_str());
                     if let Some(reason) =
-                        ProjectionDeadLetterReason::from_engine_error_kind(e.kind())
+                        ProjectionDeadLetterReason::from_apply_error_reason(e.reason())
                     {
                         if self
                             .write_projection_dead_letter(event, reason)
@@ -820,7 +1185,7 @@ where
                         }
                         progress.dead_lettered += 1;
                     }
-                    progress.failure = Some((lsn, e.kind()));
+                    progress.failure = Some((lsn, e.kind(), e.reason()));
                     break;
                 }
             }
@@ -839,12 +1204,19 @@ where
     }
 
     /// 结构化 warn：apply 失败致 fail-closed 停批（仅元数据，无 payload/PII）。
-    fn log_apply_failed(&self, lsn: Lsn, kind: EngineErrorKind, topic: &str) {
+    fn log_apply_failed(
+        &self,
+        lsn: Lsn,
+        kind: ProjectionApplyErrorKind,
+        reason: ProjectionApplyErrorReason,
+        topic: &str,
+    ) {
         tracing::warn!(
             owner = self.owner.as_str(),
             projection_id = self.projection_id.as_str(),
             lsn = lsn.get(),
             kind = ?kind,
+            reason = reason.as_label(),
             topic = topic,
             "projection: apply failed, stopping batch"
         );
@@ -948,13 +1320,14 @@ enum Advance {
 struct BatchProgress {
     scanned: usize,
     applied: usize,
+    duplicates: usize,
     filtered: usize,
     skipped: usize,
     dead_lettered: usize,
     /// 已成功 apply 的最高 lsn（None = 无任何新 apply）。
     high_water: Option<Lsn>,
     /// 第一个失败位点（lsn, kind）；None = 全批成功。
-    failure: Option<(Lsn, EngineErrorKind)>,
+    failure: Option<(Lsn, ProjectionApplyErrorKind, ProjectionApplyErrorReason)>,
     /// 首个乱序事件 lsn（release fail-closed）；None = 顺序合法。与 `failure` 互斥（break 于首个命中）。
     out_of_order: Option<Lsn>,
     /// projection DLQ 写失败的 poison lsn；命中后不推进 checkpoint。
@@ -964,10 +1337,10 @@ struct BatchProgress {
 /// 把 advance 结论 + failure + 乱序停因组合成对外 `ProjectionStop`。
 fn stop_of(
     advance: Advance,
-    failure: Option<(Lsn, EngineErrorKind)>,
+    failure: Option<(Lsn, ProjectionApplyErrorKind, ProjectionApplyErrorReason)>,
     out_of_order: Option<Lsn>,
     dead_letter_write_failed: Option<Lsn>,
-    skipped_poison: Option<(Lsn, EngineErrorKind)>,
+    skipped_poison: Option<(Lsn, ProjectionApplyErrorKind)>,
 ) -> ProjectionStop {
     if let Some(failed_at) = dead_letter_write_failed {
         return ProjectionStop::DeadLetterUnsaved { failed_at };
@@ -982,7 +1355,11 @@ fn stop_of(
             }
             match (out_of_order, failure) {
                 (Some(failed_at), _) => ProjectionStop::OutOfOrder { failed_at },
-                (None, Some((failed_at, kind))) => ProjectionStop::ApplyFailed { failed_at, kind },
+                (None, Some((failed_at, kind, reason))) => ProjectionStop::ApplyFailed {
+                    failed_at,
+                    kind,
+                    reason,
+                },
                 (None, None) => ProjectionStop::Completed,
             }
         }
@@ -990,14 +1367,14 @@ fn stop_of(
 }
 
 fn skipped_poison(
-    failure: &Option<(Lsn, EngineErrorKind)>,
+    failure: &Option<(Lsn, ProjectionApplyErrorKind, ProjectionApplyErrorReason)>,
     policy: ProjectionPoisonPolicy,
-) -> Option<(Lsn, EngineErrorKind)> {
+) -> Option<(Lsn, ProjectionApplyErrorKind)> {
     match (policy, failure) {
         (
             ProjectionPoisonPolicy::SkipPermanentAfterDlx,
-            Some((failed_at, EngineErrorKind::Permanent)),
-        ) => Some((*failed_at, EngineErrorKind::Permanent)),
+            Some((failed_at, ProjectionApplyErrorKind::Permanent, _)),
+        ) => Some((*failed_at, ProjectionApplyErrorKind::Permanent)),
         _ => None,
     }
 }
@@ -1020,6 +1397,7 @@ where
         return ProjectionRun {
             scanned: 0,
             applied: 0,
+            duplicates: 0,
             filtered: 0,
             skipped: 0,
             dead_lettered: 0,
@@ -1046,6 +1424,7 @@ where
             return ProjectionRun {
                 scanned: 0,
                 applied: 0,
+                duplicates: 0,
                 filtered: 0,
                 skipped: 0,
                 dead_lettered: 0,
@@ -1115,7 +1494,7 @@ fn projection_loop_action(
         }
         ProjectionStop::PoisonSkipped { .. } => ProjectionLoopAction::ContinueNow,
         ProjectionStop::ApplyFailed {
-            kind: EngineErrorKind::Transient,
+            kind: ProjectionApplyErrorKind::Transient | ProjectionApplyErrorKind::CommitUnknown,
             ..
         }
         | ProjectionStop::CheckpointUnread
@@ -1179,6 +1558,8 @@ fn projection_dead_letter_summary(reason: ProjectionDeadLetterReason) -> DeadLet
     match reason {
         ProjectionDeadLetterReason::ApplyPermanent => SUMMARY_PROJECTION_APPLY_PERMANENT,
         ProjectionDeadLetterReason::ApplyInvariant => SUMMARY_PROJECTION_APPLY_INVARIANT,
+        ProjectionDeadLetterReason::ApplyConflict => SUMMARY_PROJECTION_APPLY_CONFLICT,
+        ProjectionDeadLetterReason::ApplyOutOfOrder => SUMMARY_PROJECTION_APPLY_OUT_OF_ORDER,
         ProjectionDeadLetterReason::OutOfOrder => SUMMARY_PROJECTION_OUT_OF_ORDER,
         _ => SUMMARY_PROJECTION_POISON,
     }
@@ -1252,15 +1633,16 @@ fn projection_metadata_value(value: &serde_json::Value) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     use std::time::Duration;
 
     use consistency::outbox::EventTopic;
     use consistency::{
-        EngineError, EngineErrorKind, Lsn, ProjectionApplyOutcome, ProjectionBatchLimit,
-        ProjectionEvent, ProjectionEventMetadata, ProjectionEventRecord, ProjectionEventSource,
-        Projector,
+        EngineError, EngineErrorKind, Lsn, ProjectionApplyError, ProjectionApplyErrorKind,
+        ProjectionApplyErrorReason, ProjectionApplyOutcome, ProjectionBatchLimit, ProjectionEvent,
+        ProjectionEventMetadata, ProjectionEventRecord, ProjectionEventSource, Projector,
     };
     use diport::{
         Checkpoint, CheckpointId, CheckpointOwner, CheckpointStoreError, CheckpointVersion,
@@ -1268,16 +1650,20 @@ mod tests {
         KEY_SCHEMA_VERSION, KEY_TENANT_AUTHORITY, KEY_TENANT_ID, OwnerCheckpointStore, SaveOutcome,
     };
     use primitives::healthz::HealthStatus;
+    use tokio_util::sync::CancellationToken;
 
     use crate::relay::WorkerHealth;
     use consistency::PartitionSerialDelivery;
 
     use super::{
-        ProjectionActivePointer, ProjectionHarness, ProjectionId, ProjectionLoopAction,
-        ProjectionPoisonPolicy, ProjectionRegistryError, ProjectionReplayProjector,
-        ProjectionReplayTarget, ProjectionRun, ProjectionRunnerConfig, ProjectionSelector,
-        ProjectionStop, ProjectionTargetRegistry, ProjectionVersion, projection_loop_action,
-        projection_runner_once, record_projection_health,
+        ConformingProjectionTarget, ProjectionActivePointer, ProjectionHarness, ProjectionId,
+        ProjectionLoopAction, ProjectionPoisonPolicy, ProjectionProjector, ProjectionRegistryError,
+        ProjectionRun, ProjectionRunnerConfig, ProjectionSelector, ProjectionStop,
+        ProjectionTarget, ProjectionTargetConfigError, ProjectionTargetRegistry,
+        ProjectionTargetStore, ProjectionTargetStoreError, ProjectionTargetStoreErrorKind,
+        ProjectionTargetStoreOutcome, ProjectionVersion, ValidatedProjectionApply,
+        projection_loop_action, projection_runner_loop, projection_runner_once,
+        record_projection_health,
     };
 
     type HarnessParts = (
@@ -1448,6 +1834,63 @@ mod tests {
         }
     }
 
+    struct CommitUnknownReplaySource {
+        event: ProjectionEventRecord,
+        token: CancellationToken,
+        health: Arc<WorkerHealth>,
+        baselines: Arc<Mutex<Vec<Option<u64>>>>,
+        saw_degraded_retry: Arc<AtomicBool>,
+    }
+
+    impl PartitionSerialDelivery for CommitUnknownReplaySource {}
+
+    impl ProjectionEventSource for CommitUnknownReplaySource {
+        async fn read_from(
+            &self,
+            after: Option<Lsn>,
+            _limit: ProjectionBatchLimit,
+        ) -> Result<Vec<ProjectionEventRecord>, EngineError> {
+            let mut baselines = self
+                .baselines
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            baselines.push(after.map(|lsn| lsn.get()));
+            let call = baselines.len();
+            drop(baselines);
+            if call == 2 {
+                self.saw_degraded_retry.store(
+                    self.health.status() == HealthStatus::Degraded,
+                    Ordering::Release,
+                );
+            }
+            if after.is_some() {
+                self.token.cancel();
+                Ok(vec![])
+            } else {
+                Ok(vec![self.event.clone()])
+            }
+        }
+    }
+
+    struct CommitUnknownThenDuplicate {
+        attempts: Arc<AtomicUsize>,
+    }
+
+    impl Projector for CommitUnknownThenDuplicate {
+        async fn apply<E: ProjectionEvent>(
+            &self,
+            _event: &E,
+        ) -> Result<ProjectionApplyOutcome, ProjectionApplyError> {
+            if self.attempts.fetch_add(1, Ordering::AcqRel) == 0 {
+                Err(ProjectionApplyError::new(
+                    ProjectionApplyErrorKind::CommitUnknown,
+                ))
+            } else {
+                Ok(ProjectionApplyOutcome::Duplicate)
+            }
+        }
+    }
+
     #[allow(clippy::expect_used)]
     fn runner_config(policy: ProjectionPoisonPolicy) -> ProjectionRunnerConfig {
         ProjectionRunnerConfig::new(
@@ -1471,31 +1914,45 @@ mod tests {
         )];
 
     #[derive(Default)]
-    struct RecordingReplayTarget {
+    struct RecordingTargetStore {
         applied: Mutex<Vec<u64>>,
+        digests: Mutex<Vec<[u8; 32]>>,
     }
 
-    impl RecordingReplayTarget {
+    impl RecordingTargetStore {
         fn applied_lsns(&self) -> Vec<u64> {
             self.applied
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .clone()
         }
+
+        fn digests(&self) -> Vec<[u8; 32]> {
+            self.digests
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .clone()
+        }
     }
 
-    impl ProjectionReplayTarget for RecordingReplayTarget {
+    impl ProjectionTargetStore for RecordingTargetStore {
         fn apply<'a>(
             &'a self,
-            _selector: &'a ProjectionSelector,
-            event: ProjectionEventRecord,
-        ) -> futures::future::BoxFuture<'a, Result<(), EngineError>> {
+            input: &'a ValidatedProjectionApply,
+        ) -> futures::future::BoxFuture<
+            'a,
+            Result<ProjectionTargetStoreOutcome, ProjectionTargetStoreError>,
+        > {
             Box::pin(async move {
                 self.applied
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .push(event.lsn().get());
-                Ok(())
+                    .push(input.lsn().get());
+                self.digests
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .push(*input.fact_digest());
+                Ok(ProjectionTargetStoreOutcome::Applied)
             })
         }
     }
@@ -1510,6 +1967,18 @@ mod tests {
         )
     }
 
+    #[allow(clippy::expect_used)]
+    fn conforming_target(store: Arc<RecordingTargetStore>) -> Arc<dyn ProjectionTarget> {
+        Arc::new(
+            ConformingProjectionTarget::new(
+                ProjectionId::parse("audit.session-projection").expect("valid projection"),
+                TEST_PROJECTION_INPUTS.to_vec(),
+                store,
+            )
+            .expect("canonical target binding"),
+        )
+    }
+
     #[test]
     fn projection_selector_rejects_noncanonical_ids() {
         assert!(ProjectionId::parse("").is_err());
@@ -1517,6 +1986,73 @@ mod tests {
         assert!(ProjectionId::parse("audit/session").is_err());
         assert!(ProjectionVersion::parse("v2").is_ok());
         assert!(ProjectionVersion::parse("v 2").is_err());
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn conforming_target_rejects_empty_mismatched_and_duplicate_bindings() {
+        let projection = ProjectionId::parse("audit.session-projection").expect("valid projection");
+        let store = Arc::new(RecordingTargetStore::default());
+        assert!(matches!(
+            ConformingProjectionTarget::new(projection.clone(), vec![], Arc::clone(&store)),
+            Err(ProjectionTargetConfigError::EmptyBindings)
+        ));
+        let wrong = vocab::ProjectionInputBinding::from_static(
+            "other.projection",
+            "identity",
+            "identity.session-created",
+            "v1",
+            TEST_SCHEMA_HASH,
+            "identity.session.created",
+        );
+        assert!(matches!(
+            ConformingProjectionTarget::new(projection.clone(), vec![wrong], Arc::clone(&store)),
+            Err(ProjectionTargetConfigError::ProjectionMismatch)
+        ));
+        let binding = TEST_PROJECTION_INPUTS[0];
+        assert!(matches!(
+            ConformingProjectionTarget::new(projection, vec![binding, binding], store),
+            Err(ProjectionTargetConfigError::DuplicateBinding)
+        ));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn fact_digest_covers_canonical_metadata_partition_and_causation() {
+        let selector = projection_selector("v2");
+        let store = Arc::new(RecordingTargetStore::default());
+        let target = conforming_target(Arc::clone(&store));
+        let metadata = |tier: &str, partition: &str, cause: &str| {
+            ProjectionEventMetadata::new(
+                vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
+                    .expect("canonical tenant"),
+                "same-event",
+                "identity",
+                "identity.session-created",
+                "v1",
+                TEST_SCHEMA_HASH,
+                serde_json::json!({"tier": tier, "tenantId": "f47ac10b-58cc-4372-a567-0e02b2c3d479"}),
+                Some(partition.to_string()),
+                Some(cause.to_string()),
+            )
+        };
+        for (lsn, tier, partition, cause) in
+            [(1, "gold", "p-1", "c-1"), (2, "silver", "p-2", "c-2")]
+        {
+            let event = ProjectionEventRecord::with_metadata(
+                Lsn::new(lsn),
+                EventTopic::parse("identity.session.created").expect("canonical topic"),
+                b"same-payload".to_vec(),
+                metadata(tier, partition, cause),
+            );
+            assert!(matches!(
+                target.apply(&selector, event).await,
+                Ok(ProjectionApplyOutcome::Applied)
+            ));
+        }
+        let digests = store.digests();
+        assert_eq!(digests.len(), 2);
+        assert_ne!(digests[0], digests[1]);
     }
 
     #[test]
@@ -1532,16 +2068,14 @@ mod tests {
         ));
 
         let projection = ProjectionId::parse("audit.session-projection")?;
-        registry.register_target_for_test(
-            projection.clone(),
-            Arc::new(RecordingReplayTarget::default()),
-        )?;
+        let first_store = Arc::new(RecordingTargetStore::default());
+        registry.register_target_for_test(projection.clone(), conforming_target(first_store))?;
         assert!(registry.validate_coverage().is_ok());
         assert!(registry.target(&projection).is_ok());
         assert!(matches!(
             registry.register_target_for_test(
                 projection.clone(),
-                Arc::new(RecordingReplayTarget::default())
+                conforming_target(Arc::new(RecordingTargetStore::default()))
             ),
             Err(ProjectionRegistryError::DuplicateProjection { .. })
         ));
@@ -1579,14 +2113,12 @@ mod tests {
             TEST_PROJECTION_INPUTS,
         )
         .expect("plan-selected fixtures valid");
-        let target = Arc::new(RecordingReplayTarget::default());
+        let store = Arc::new(RecordingTargetStore::default());
+        let target = conforming_target(Arc::clone(&store));
         registry
             .register_target_for_test(selector.projection().clone(), target.clone())
             .expect("known projection");
         registry.validate_coverage().expect("covered");
-        let bindings = registry
-            .bindings_for(selector.projection())
-            .expect("bindings present");
 
         let matching = projection_record_with(
             1,
@@ -1623,11 +2155,11 @@ mod tests {
         );
         let wrong_contract = projection_record_with(
             4,
-            "identity.session.created",
+            "billing.invoice.paid",
             projection_metadata_for(
                 "f47ac10b-58cc-4372-a567-0e02b2c3d479",
-                "identity",
-                "identity.role-assigned",
+                "billing",
+                "billing.invoice-paid",
                 "v1",
                 TEST_SCHEMA_HASH,
             ),
@@ -1665,22 +2197,47 @@ mod tests {
                 TEST_SCHEMA_HASH,
             ),
         );
-        let source = FakeProjectionSource::new(vec![
-            matching,
+        for drift in [
             wrong_tenant,
             wrong_domain,
-            wrong_contract,
             wrong_version,
             wrong_schema_hash,
             wrong_topic,
-        ]);
+        ] {
+            let source = FakeProjectionSource::new(vec![drift]);
+            let checkpoint = Arc::new(FakeCheckpointStore::empty());
+            let harness = ProjectionHarness::new(
+                Arc::new(ProjectionProjector::new(
+                    selector.clone(),
+                    Arc::clone(&target),
+                )),
+                Arc::clone(&checkpoint),
+                selector.shadow_checkpoint_owner(),
+                selector.shadow_checkpoint_id(),
+                Arc::new(FakeDeadLetterStore::new()),
+                consistency::SerialInOrder::from_source(&source),
+            );
+            let result = projection_runner_once(
+                &source,
+                &harness,
+                runner_config(ProjectionPoisonPolicy::Isolate),
+            )
+            .await;
+            assert!(matches!(
+                result.stop,
+                ProjectionStop::ApplyFailed {
+                    kind: ProjectionApplyErrorKind::Invariant,
+                    reason: ProjectionApplyErrorReason::Invariant,
+                    ..
+                }
+            ));
+            assert!(checkpoint.current().is_none());
+            assert!(store.applied_lsns().is_empty());
+        }
+        let source = FakeProjectionSource::new(vec![matching, wrong_contract]);
         let checkpoint = Arc::new(FakeCheckpointStore::empty());
         let harness = ProjectionHarness::new(
-            Arc::new(ProjectionReplayProjector::new(
-                selector.clone(),
-                bindings,
-                target.clone(),
-            )),
+            Arc::new(ProjectionProjector::new(selector.clone(), target)),
             Arc::clone(&checkpoint),
             selector.shadow_checkpoint_owner(),
             selector.shadow_checkpoint_id(),
@@ -1696,14 +2253,14 @@ mod tests {
         .await;
 
         assert_eq!(result.stop, ProjectionStop::Completed);
-        assert_eq!(result.scanned, 7);
+        assert_eq!(result.scanned, 2);
         assert_eq!(result.applied, 1);
-        assert_eq!(result.filtered, 6);
+        assert_eq!(result.filtered, 1);
         assert_eq!(result.skipped, 0);
-        assert_eq!(target.applied_lsns(), vec![1]);
+        assert_eq!(store.applied_lsns(), vec![1]);
         assert_eq!(
             checkpoint.current().map(|checkpoint| checkpoint.offset),
-            Some(Lsn::new(7)),
+            Some(Lsn::new(4)),
             "shadow checkpoint must advance through replay high-water even when target skips nonmatching events"
         );
     }
@@ -1719,13 +2276,11 @@ mod tests {
             TEST_PROJECTION_INPUTS,
         )
         .expect("plan-selected fixtures valid");
-        let target = Arc::new(RecordingReplayTarget::default());
+        let store = Arc::new(RecordingTargetStore::default());
+        let target = conforming_target(Arc::clone(&store));
         registry
             .register_target_for_test(shadow_v2.projection().clone(), target.clone())
             .expect("known projection");
-        let bindings = registry
-            .bindings_for(shadow_v2.projection())
-            .expect("bindings present");
 
         let event = projection_record_with(
             11,
@@ -1741,11 +2296,7 @@ mod tests {
         let source = FakeProjectionSource::new(vec![event]);
         let checkpoint = Arc::new(FakeCheckpointStore::empty());
         let harness = ProjectionHarness::new(
-            Arc::new(ProjectionReplayProjector::new(
-                shadow_v2.clone(),
-                bindings,
-                target.clone(),
-            )),
+            Arc::new(ProjectionProjector::new(shadow_v2.clone(), target)),
             Arc::clone(&checkpoint),
             shadow_v2.shadow_checkpoint_owner(),
             shadow_v2.shadow_checkpoint_id(),
@@ -1764,7 +2315,7 @@ mod tests {
         assert_eq!(result.scanned, 1);
         assert_eq!(result.applied, 1);
         assert_eq!(result.filtered, 0);
-        assert_eq!(target.applied_lsns(), vec![11]);
+        assert_eq!(store.applied_lsns(), vec![11]);
         assert_eq!(active.version().as_str(), "v1", "replay must not promote");
         let shadow_high_water = checkpoint
             .current()
@@ -1784,7 +2335,7 @@ mod tests {
     struct RecordingProjector {
         applied: Arc<Mutex<Vec<u64>>>,
         /// 命中 `(lsn, kind)` 时返回 Err；None = 全成功。
-        fail_at: Option<(u64, EngineErrorKind)>,
+        fail_at: Option<(u64, ProjectionApplyErrorKind)>,
     }
 
     impl RecordingProjector {
@@ -1794,7 +2345,7 @@ mod tests {
                 fail_at: None,
             }
         }
-        fn failing_at(lsn: u64, kind: EngineErrorKind) -> Self {
+        fn failing_at(lsn: u64, kind: ProjectionApplyErrorKind) -> Self {
             Self {
                 applied: Arc::new(Mutex::new(vec![])),
                 fail_at: Some((lsn, kind)),
@@ -1813,11 +2364,11 @@ mod tests {
         async fn apply<E: ProjectionEvent>(
             &self,
             event: &E,
-        ) -> Result<ProjectionApplyOutcome, EngineError> {
+        ) -> Result<ProjectionApplyOutcome, ProjectionApplyError> {
             let lsn = event.lsn().get();
             // if-let chain 消除嵌套 if（collapsible_if 修复）。
             if let Some((_, kind)) = self.fail_at.filter(|&(fl, _)| fl == lsn) {
-                return Err(EngineError::new(kind));
+                return Err(ProjectionApplyError::new(kind));
             }
             self.applied
                 .lock()
@@ -2147,6 +2698,7 @@ mod tests {
             ProjectionRun {
                 scanned: 0,
                 applied: 0,
+                duplicates: 0,
                 filtered: 0,
                 skipped: 0,
                 dead_lettered: 0,
@@ -2162,7 +2714,7 @@ mod tests {
     #[tokio::test]
     async fn transient_failure_stops_keeps_prefix() {
         let (h, p, c, d) = harness(
-            RecordingProjector::failing_at(3, EngineErrorKind::Transient),
+            RecordingProjector::failing_at(3, ProjectionApplyErrorKind::Transient),
             FakeCheckpointStore::empty(),
         );
         let events = evs(1, 5);
@@ -2173,7 +2725,8 @@ mod tests {
             result.stop,
             ProjectionStop::ApplyFailed {
                 failed_at: Lsn::new(3),
-                kind: EngineErrorKind::Transient,
+                kind: ProjectionApplyErrorKind::Transient,
+                reason: ProjectionApplyErrorReason::Transient,
             }
         );
 
@@ -2193,7 +2746,7 @@ mod tests {
     #[tokio::test]
     async fn permanent_failure_writes_projection_dlx_and_stops_without_auto_skip() {
         let (h, _p, c, d) = harness(
-            RecordingProjector::failing_at(3, EngineErrorKind::Permanent),
+            RecordingProjector::failing_at(3, ProjectionApplyErrorKind::Permanent),
             FakeCheckpointStore::empty(),
         );
         let result = h.run(&evs(1, 5)).await;
@@ -2202,7 +2755,8 @@ mod tests {
             result.stop,
             ProjectionStop::ApplyFailed {
                 failed_at: Lsn::new(3),
-                kind: EngineErrorKind::Permanent,
+                kind: ProjectionApplyErrorKind::Permanent,
+                reason: ProjectionApplyErrorReason::Permanent,
             }
         );
         let ckpt = c.current().expect("prefix checkpoint should be saved");
@@ -2216,7 +2770,8 @@ mod tests {
             rerun.stop,
             ProjectionStop::ApplyFailed {
                 failed_at: Lsn::new(3),
-                kind: EngineErrorKind::Permanent,
+                kind: ProjectionApplyErrorKind::Permanent,
+                reason: ProjectionApplyErrorReason::Permanent,
             }
         );
         assert_eq!(
@@ -2230,7 +2785,7 @@ mod tests {
     #[tokio::test]
     async fn invariant_failure_writes_projection_dlx_and_stops() {
         let (h, _p, _c, d) = harness(
-            RecordingProjector::failing_at(3, EngineErrorKind::Invariant),
+            RecordingProjector::failing_at(3, ProjectionApplyErrorKind::Invariant),
             FakeCheckpointStore::empty(),
         );
         let result = h.run(&evs(1, 5)).await;
@@ -2239,7 +2794,8 @@ mod tests {
             result.stop,
             ProjectionStop::ApplyFailed {
                 failed_at: Lsn::new(3),
-                kind: EngineErrorKind::Invariant,
+                kind: ProjectionApplyErrorKind::Invariant,
+                reason: ProjectionApplyErrorReason::Invariant,
             }
         );
         let records = d.records();
@@ -2251,7 +2807,7 @@ mod tests {
     #[tokio::test]
     async fn projection_dlx_write_failure_does_not_advance_checkpoint() {
         let (h, _p, c, _d) = harness_with_dlx(
-            RecordingProjector::failing_at(3, EngineErrorKind::Permanent),
+            RecordingProjector::failing_at(3, ProjectionApplyErrorKind::Permanent),
             FakeCheckpointStore::empty(),
             FakeDeadLetterStore::fail_write(),
         );
@@ -2274,7 +2830,7 @@ mod tests {
     #[tokio::test]
     async fn first_event_fails_no_checkpoint_write() {
         let (h, _p, c, _d) = harness(
-            RecordingProjector::failing_at(1, EngineErrorKind::Transient),
+            RecordingProjector::failing_at(1, ProjectionApplyErrorKind::Transient),
             FakeCheckpointStore::empty(),
         );
         let result = h.run(&evs(1, 3)).await;
@@ -2479,7 +3035,7 @@ mod tests {
     #[tokio::test]
     async fn apply_failure_during_fence_reports_fenced() {
         let (h, p, _c, _d) = harness(
-            RecordingProjector::failing_at(3, EngineErrorKind::Transient),
+            RecordingProjector::failing_at(3, ProjectionApplyErrorKind::Transient),
             FakeCheckpointStore::force_stale(),
         );
         let result = h.run(&evs(1, 5)).await;
@@ -2500,7 +3056,7 @@ mod tests {
     #[tokio::test]
     async fn apply_failure_during_unsaved_reports_unsaved() {
         let (h, p, _c, _d) = harness(
-            RecordingProjector::failing_at(3, EngineErrorKind::Transient),
+            RecordingProjector::failing_at(3, ProjectionApplyErrorKind::Transient),
             FakeCheckpointStore::fail_save(),
         );
         let result = h.run(&evs(1, 5)).await;
@@ -2641,6 +3197,117 @@ mod tests {
         assert!(c.current().is_none());
     }
 
+    #[test]
+    fn commit_unknown_waits_but_rollback_failed_stops() {
+        let failed = |kind, reason| ProjectionRun {
+            scanned: 1,
+            applied: 0,
+            duplicates: 0,
+            filtered: 0,
+            skipped: 0,
+            dead_lettered: 0,
+            stop: ProjectionStop::ApplyFailed {
+                failed_at: Lsn::new(1),
+                kind,
+                reason,
+            },
+        };
+        assert_eq!(
+            projection_loop_action(
+                &failed(
+                    ProjectionApplyErrorKind::CommitUnknown,
+                    ProjectionApplyErrorReason::CommitUnknown,
+                ),
+                ProjectionBatchLimit::MAX,
+            ),
+            ProjectionLoopAction::Wait
+        );
+        assert_eq!(
+            projection_loop_action(
+                &failed(
+                    ProjectionApplyErrorKind::RollbackFailed,
+                    ProjectionApplyErrorReason::RollbackFailed,
+                ),
+                ProjectionBatchLimit::MAX,
+            ),
+            ProjectionLoopAction::Stop
+        );
+    }
+
+    #[allow(clippy::expect_used)]
+    #[tokio::test]
+    async fn worker_loop_replays_commit_unknown_while_degraded_until_duplicate() {
+        let token = CancellationToken::new();
+        let health = Arc::new(WorkerHealth::healthy());
+        let baselines = Arc::new(Mutex::new(vec![]));
+        let saw_degraded_retry = Arc::new(AtomicBool::new(false));
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let source = CommitUnknownReplaySource {
+            event: projection_record(1),
+            token: token.clone(),
+            health: Arc::clone(&health),
+            baselines: Arc::clone(&baselines),
+            saw_degraded_retry: Arc::clone(&saw_degraded_retry),
+        };
+        let serial = consistency::SerialInOrder::from_source(&source);
+        let checkpoint = Arc::new(FakeCheckpointStore::empty());
+        let harness = ProjectionHarness::new(
+            Arc::new(CommitUnknownThenDuplicate {
+                attempts: Arc::clone(&attempts),
+            }),
+            Arc::clone(&checkpoint),
+            CheckpointOwner::new("commit-unknown-loop"),
+            CheckpointId::new("commit-unknown-loop"),
+            Arc::new(FakeDeadLetterStore::new()),
+            serial,
+        );
+
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            projection_runner_loop(
+                source,
+                harness,
+                runner_config(ProjectionPoisonPolicy::Isolate),
+                token,
+                health,
+            ),
+        )
+        .await
+        .expect("worker loop must converge and cancel");
+
+        assert!(saw_degraded_retry.load(Ordering::Acquire));
+        assert_eq!(attempts.load(Ordering::Acquire), 2);
+        assert_eq!(
+            baselines
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .as_slice(),
+            &[None, None, Some(1)]
+        );
+        assert_eq!(
+            checkpoint.current().map(|current| current.offset),
+            Some(Lsn::new(1))
+        );
+    }
+
+    #[test]
+    fn target_store_error_redacts_provider_cause_chain() {
+        let error = ProjectionTargetStoreError::new(
+            ProjectionTargetStoreErrorKind::Transient,
+            std::io::Error::other("postgres://admin:hunter2@db.internal/projection"),
+        );
+        assert_eq!(error.to_string(), "projection target store apply failed");
+        let debug = format!("{error:?}");
+        assert!(!debug.contains("hunter2") && !debug.contains("postgres://"));
+        assert!(debug.contains("RedactedSource(<redacted>)"));
+        let source = std::error::Error::source(&error).expect("redacted source must be retained");
+        assert_eq!(source.to_string(), "<redacted>");
+        assert!(
+            source.source().is_none(),
+            "raw provider cause must be sealed"
+        );
+    }
+
     #[tokio::test]
     async fn source_read_permanent_or_invariant_stops() {
         for kind in [EngineErrorKind::Permanent, EngineErrorKind::Invariant] {
@@ -2664,7 +3331,7 @@ mod tests {
     async fn skip_policy_advances_permanent_poison_after_dlx() {
         let source = FakeProjectionSource::new(projection_records(1, 5));
         let (h, p, c, d) = harness(
-            RecordingProjector::failing_at(3, EngineErrorKind::Permanent),
+            RecordingProjector::failing_at(3, ProjectionApplyErrorKind::Permanent),
             FakeCheckpointStore::empty(),
         );
 
@@ -2679,7 +3346,7 @@ mod tests {
             result.stop,
             ProjectionStop::PoisonSkipped {
                 skipped_at: Lsn::new(3),
-                kind: EngineErrorKind::Permanent,
+                kind: ProjectionApplyErrorKind::Permanent,
             }
         );
         assert_eq!(result.applied, 2);
@@ -2714,7 +3381,7 @@ mod tests {
     async fn skip_policy_does_not_skip_invariant() {
         let source = FakeProjectionSource::new(projection_records(1, 5));
         let (h, _p, c, d) = harness(
-            RecordingProjector::failing_at(3, EngineErrorKind::Invariant),
+            RecordingProjector::failing_at(3, ProjectionApplyErrorKind::Invariant),
             FakeCheckpointStore::empty(),
         );
 
@@ -2729,7 +3396,8 @@ mod tests {
             result.stop,
             ProjectionStop::ApplyFailed {
                 failed_at: Lsn::new(3),
-                kind: EngineErrorKind::Invariant,
+                kind: ProjectionApplyErrorKind::Invariant,
+                reason: ProjectionApplyErrorReason::Invariant,
             }
         );
         assert_eq!(c.current().map(|cp| cp.offset), Some(Lsn::new(2)));
@@ -2791,7 +3459,7 @@ mod tests {
             ),
         );
         let (h, _p, _c, d) = harness(
-            RecordingProjector::failing_at(7, EngineErrorKind::Permanent),
+            RecordingProjector::failing_at(7, ProjectionApplyErrorKind::Permanent),
             FakeCheckpointStore::empty(),
         );
 
@@ -2801,7 +3469,8 @@ mod tests {
             result.stop,
             ProjectionStop::ApplyFailed {
                 failed_at: Lsn::new(7),
-                kind: EngineErrorKind::Permanent
+                kind: ProjectionApplyErrorKind::Permanent,
+                reason: ProjectionApplyErrorReason::Permanent,
             }
         );
         let record = d
@@ -2825,7 +3494,7 @@ mod tests {
     async fn skip_policy_dlx_write_failure_keeps_poison_unskipped() {
         let source = FakeProjectionSource::new(projection_records(1, 5));
         let (h, _p, c, _d) = harness_with_dlx(
-            RecordingProjector::failing_at(3, EngineErrorKind::Permanent),
+            RecordingProjector::failing_at(3, ProjectionApplyErrorKind::Permanent),
             FakeCheckpointStore::empty(),
             FakeDeadLetterStore::fail_write(),
         );

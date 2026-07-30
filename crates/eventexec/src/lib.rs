@@ -88,11 +88,14 @@ pub use reconcile::{
 
 pub mod projection;
 pub use projection::{
-    PROJECTION_WORKER_PROBE, ProjectionActivePointer, ProjectionHarness, ProjectionId,
-    ProjectionPoisonPolicy, ProjectionRegistryError, ProjectionReplayProjector,
-    ProjectionReplayTarget, ProjectionRun, ProjectionRunnerConfig, ProjectionRunnerConfigError,
-    ProjectionSelector, ProjectionSelectorError, ProjectionStop, ProjectionTargetRegistry,
-    ProjectionVersion, projection_runner_loop, projection_runner_once, spawn_projection_worker,
+    ConformingProjectionTarget, PROJECTION_WORKER_PROBE, ProjectionActivePointer,
+    ProjectionDedupeKey, ProjectionHarness, ProjectionId, ProjectionPoisonPolicy,
+    ProjectionProjector, ProjectionRegistryError, ProjectionRun, ProjectionRunnerConfig,
+    ProjectionRunnerConfigError, ProjectionSelector, ProjectionSelectorError, ProjectionStop,
+    ProjectionTarget, ProjectionTargetConfigError, ProjectionTargetRegistry, ProjectionTargetStore,
+    ProjectionTargetStoreError, ProjectionTargetStoreErrorKind, ProjectionTargetStoreOutcome,
+    ProjectionVersion, ValidatedProjectionApply, projection_runner_loop, projection_runner_once,
+    spawn_projection_worker,
 };
 
 mod workflow_runtime;

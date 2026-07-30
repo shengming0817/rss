@@ -1182,7 +1182,7 @@ fn collect_target_test_symbol_items(
     Ok(())
 }
 
-fn attrs_statically_disabled(attrs: &[syn::Attribute]) -> bool {
+pub(crate) fn attrs_statically_disabled(attrs: &[syn::Attribute]) -> bool {
     attrs.iter().any(|attr| {
         attr.path().is_ident("cfg")
             && attr
@@ -1399,6 +1399,110 @@ fn cargo_reachable_files(manifest: &Path) -> Result<BTreeSet<PathBuf>> {
     Ok(reachable)
 }
 
+/// Canonical Cargo target classification shared by source-governance checks.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) enum CargoTargetClass {
+    Lib,
+    Bin,
+    Test,
+    Example,
+    Bench,
+}
+
+impl CargoTargetClass {
+    pub(crate) const fn is_production_scan(self) -> bool {
+        !matches!(self, Self::Test)
+    }
+}
+
+/// One Cargo-declared or Cargo-auto-discovered target root.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) struct CargoTargetRoot {
+    pub(crate) path: PathBuf,
+    pub(crate) class: CargoTargetClass,
+}
+
+/// Returns the same closed target inventory used by archrules reachability, including custom and
+/// automatic lib/bin/test/example/bench targets and their `auto*` switches.
+pub(crate) fn cargo_target_inventory(
+    crate_root: &Path,
+    manifest: &Path,
+) -> Result<BTreeSet<CargoTargetRoot>> {
+    let value = parse_toml(manifest)?;
+    let mut roots = BTreeSet::new();
+    let explicit_path = |target: &toml::Value| {
+        target
+            .get("path")
+            .and_then(toml::Value::as_str)
+            .map(|path| crate_root.join(path))
+    };
+
+    if let Some(lib) = value.get("lib") {
+        roots.insert(CargoTargetRoot {
+            path: explicit_path(lib).unwrap_or_else(|| crate_root.join("src/lib.rs")),
+            class: CargoTargetClass::Lib,
+        });
+    } else if crate_root.join("src/lib.rs").is_file() {
+        roots.insert(CargoTargetRoot {
+            path: crate_root.join("src/lib.rs"),
+            class: CargoTargetClass::Lib,
+        });
+    }
+    for (kind, default_dir, class) in [
+        ("bin", "src/bin", CargoTargetClass::Bin),
+        ("test", "tests", CargoTargetClass::Test),
+        ("example", "examples", CargoTargetClass::Example),
+        ("bench", "benches", CargoTargetClass::Bench),
+    ] {
+        if let Some(targets) = value.get(kind).and_then(toml::Value::as_array) {
+            roots.extend(targets.iter().filter_map(|target| {
+                explicit_target_path(crate_root, kind, target)
+                    .map(|path| CargoTargetRoot { path, class })
+            }));
+        }
+        let automatic = value
+            .get("package")
+            .and_then(|package| package.get(format!("auto{kind}s")))
+            .and_then(toml::Value::as_bool)
+            .unwrap_or(true);
+        let dir = crate_root.join(default_dir);
+        if automatic && dir.is_dir() {
+            for entry in fs::read_dir(&dir)? {
+                let path = entry?.path();
+                if path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
+                    roots.insert(CargoTargetRoot { path, class });
+                } else if path.is_dir() && path.join("main.rs").is_file() {
+                    roots.insert(CargoTargetRoot {
+                        path: path.join("main.rs"),
+                        class,
+                    });
+                }
+            }
+        }
+    }
+    if value
+        .get("package")
+        .and_then(|package| package.get("autobins"))
+        .and_then(toml::Value::as_bool)
+        .unwrap_or(true)
+        && crate_root.join("src/main.rs").is_file()
+    {
+        roots.insert(CargoTargetRoot {
+            path: crate_root.join("src/main.rs"),
+            class: CargoTargetClass::Bin,
+        });
+    }
+    roots.retain(|target| target.path.is_file());
+    Ok(roots)
+}
+
+/// Resolves the complete Rust module closure for one canonical Cargo target root.
+pub(crate) fn cargo_target_reachable_files(target: &CargoTargetRoot) -> Result<BTreeSet<PathBuf>> {
+    let mut reachable = BTreeSet::new();
+    collect_reachable_modules(&target.path, &mut reachable)?;
+    Ok(reachable)
+}
+
 fn collect_reachable_modules(module_file: &Path, reachable: &mut BTreeSet<PathBuf>) -> Result<()> {
     if !reachable.insert(module_file.to_path_buf()) {
         return Ok(());
@@ -1463,61 +1567,10 @@ fn nearest_package_manifest(root: &Path, path: &Path) -> Option<PathBuf> {
 }
 
 fn cargo_target_roots(crate_root: &Path, manifest: &Path) -> Result<BTreeSet<PathBuf>> {
-    let value = parse_toml(manifest)?;
-    let mut roots = BTreeSet::new();
-    let explicit_path = |target: &toml::Value| {
-        target
-            .get("path")
-            .and_then(toml::Value::as_str)
-            .map(|path| crate_root.join(path))
-    };
-
-    if let Some(lib) = value.get("lib") {
-        roots.insert(explicit_path(lib).unwrap_or_else(|| crate_root.join("src/lib.rs")));
-    } else if crate_root.join("src/lib.rs").is_file() {
-        roots.insert(crate_root.join("src/lib.rs"));
-    }
-    for (kind, default_dir) in [
-        ("bin", "src/bin"),
-        ("test", "tests"),
-        ("example", "examples"),
-        ("bench", "benches"),
-    ] {
-        if let Some(targets) = value.get(kind).and_then(toml::Value::as_array) {
-            roots.extend(
-                targets
-                    .iter()
-                    .filter_map(|target| explicit_target_path(crate_root, kind, target)),
-            );
-        }
-        let automatic = value
-            .get("package")
-            .and_then(|package| package.get(format!("auto{kind}s")))
-            .and_then(toml::Value::as_bool)
-            .unwrap_or(true);
-        let dir = crate_root.join(default_dir);
-        if automatic && dir.is_dir() {
-            for entry in fs::read_dir(&dir)? {
-                let path = entry?.path();
-                if path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
-                    roots.insert(path);
-                } else if path.is_dir() && path.join("main.rs").is_file() {
-                    roots.insert(path.join("main.rs"));
-                }
-            }
-        }
-    }
-    if value
-        .get("package")
-        .and_then(|package| package.get("autobins"))
-        .and_then(toml::Value::as_bool)
-        .unwrap_or(true)
-        && crate_root.join("src/main.rs").is_file()
-    {
-        roots.insert(crate_root.join("src/main.rs"));
-    }
-    roots.retain(|path| path.is_file());
-    Ok(roots)
+    Ok(cargo_target_inventory(crate_root, manifest)?
+        .into_iter()
+        .map(|target| target.path)
+        .collect())
 }
 
 fn explicit_target_path(crate_root: &Path, kind: &str, target: &toml::Value) -> Option<PathBuf> {

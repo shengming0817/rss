@@ -33,6 +33,10 @@ fn projection_ui() {
     t.compile_fail("tests/ui/projection_missing_guarantor_fail.rs");
     // 第 5 参传非 SerialInOrderGuarantor 类型 `()` → E0277（bound load-bearing anti-vacuity）。
     t.compile_fail("tests/ui/projection_non_serial_guarantor_fail.rs");
+    // validated store input 字段私有，只能由 canonical target funnel 构造。
+    t.compile_fail("tests/ui/projection_validated_input_forge_fail.rs");
+    // runtime target trait sealed，外部只能实现 ProjectionTargetStore SPI。
+    t.compile_fail("tests/ui/projection_external_target_impl_fail.rs");
 }
 
 #[test]

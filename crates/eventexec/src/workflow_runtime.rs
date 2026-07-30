@@ -12,7 +12,7 @@ use diport::{DynManagedResource, SagaWorkerIdentity};
 use tokio_util::sync::CancellationToken;
 use vocab::{ContractBinding, ProjectionInputBinding, SagaContractBinding};
 
-use crate::{ProjectionReplayTarget, WorkerHealth};
+use crate::{ProjectionTarget, WorkerHealth};
 
 mod sealed {
     pub trait ProjectionRuntimeFactory {}
@@ -28,7 +28,7 @@ trait ProjectionCapturePort: Send + Sync {
 /// Complete shadow/active Projection runtime factory. The factory owns the checkpoint, dead-letter,
 /// worker and probe dependencies and exposes the exact replay target used by the operator.
 pub trait ProjectionRuntimeFactory: sealed::ProjectionRuntimeFactory + Send + Sync {
-    fn target(&self) -> Arc<dyn ProjectionReplayTarget>;
+    fn target(&self) -> Arc<dyn ProjectionTarget>;
     fn spawn(
         &self,
         token: CancellationToken,
@@ -274,8 +274,8 @@ impl ProjectionTargetEntry<'_> {
     pub fn bindings(&self) -> &[ProjectionInputBinding] {
         &self.target.inputs
     }
-    pub fn replay_target(&self) -> Arc<dyn ProjectionReplayTarget> {
-        Arc::clone(&self.target.replay_target)
+    pub fn target(&self) -> Arc<dyn ProjectionTarget> {
+        Arc::clone(&self.target.target)
     }
     pub fn runtime_factory(&self) -> &Arc<dyn ProjectionRuntimeFactory> {
         &self.target.runtime
@@ -290,7 +290,7 @@ struct SelectedProjectionTarget {
     workflow: ActivatedWorkflow,
     inputs: Vec<ProjectionInputBinding>,
     runtime: Arc<dyn ProjectionRuntimeFactory>,
-    replay_target: Arc<dyn ProjectionReplayTarget>,
+    target: Arc<dyn ProjectionTarget>,
     _serving: Option<Arc<dyn ProjectionServingPort>>,
 }
 
@@ -497,12 +497,12 @@ fn compile_activations(
                             capability: "projection-runtime-factory",
                         });
                     };
-                    let replay_target = runtime.target();
+                    let target = runtime.target();
                     selected_targets.push(SelectedProjectionTarget {
                         workflow: observation.clone(),
                         inputs,
                         runtime,
-                        replay_target,
+                        target,
                         _serving: bundle.serving,
                     });
                 }
@@ -762,23 +762,44 @@ mod tests {
         }
     }
 
-    struct ReplayTarget;
-    impl ProjectionReplayTarget for ReplayTarget {
+    struct NoopProjectionStore;
+    impl crate::ProjectionTargetStore for NoopProjectionStore {
         fn apply<'a>(
             &'a self,
-            _selector: &'a crate::ProjectionSelector,
-            _event: consistency::ProjectionEventRecord,
-        ) -> BoxFuture<'a, Result<(), consistency::EngineError>> {
-            Box::pin(async { Ok(()) })
+            _input: &'a crate::ValidatedProjectionApply,
+        ) -> BoxFuture<
+            'a,
+            Result<crate::ProjectionTargetStoreOutcome, crate::ProjectionTargetStoreError>,
+        > {
+            Box::pin(async { Ok(crate::ProjectionTargetStoreOutcome::Applied) })
         }
     }
 
+    fn projection_target() -> Arc<dyn ProjectionTarget> {
+        let definition = generated::event::PROJECTION_DEFINITIONS[0];
+        let projection = crate::ProjectionId::parse(definition.contract_id())
+            .expect("generated projection id is canonical");
+        let bindings = generated::event::PROJECTION_INPUTS
+            .iter()
+            .filter(|input| input.projection_id() == definition.contract_id())
+            .cloned()
+            .collect();
+        Arc::new(
+            crate::ConformingProjectionTarget::new(
+                projection,
+                bindings,
+                Arc::new(NoopProjectionStore),
+            )
+            .expect("generated target binding is canonical"),
+        )
+    }
+
     struct ProjectionFactory {
-        target: Arc<dyn ProjectionReplayTarget>,
+        target: Arc<dyn ProjectionTarget>,
     }
     impl sealed::ProjectionRuntimeFactory for ProjectionFactory {}
     impl ProjectionRuntimeFactory for ProjectionFactory {
-        fn target(&self) -> Arc<dyn ProjectionReplayTarget> {
+        fn target(&self) -> Arc<dyn ProjectionTarget> {
             Arc::clone(&self.target)
         }
         fn spawn(
@@ -818,7 +839,7 @@ mod tests {
         let definition = generated::event::PROJECTION_DEFINITIONS[0];
         let capture = Arc::new(CapturePort);
         let runtime = Arc::new(ProjectionFactory {
-            target: Arc::new(ReplayTarget),
+            target: projection_target(),
         });
         let bundle = match mode {
             ProjectionActivation::Disabled | ProjectionActivation::CaptureOnly => {
@@ -1148,7 +1169,7 @@ mod tests {
     fn target_view_borrows_the_catalog_selected_implementation() -> Result<(), WorkflowRuntimeError>
     {
         let definition = generated::event::PROJECTION_DEFINITIONS[0];
-        let target: Arc<dyn ProjectionReplayTarget> = Arc::new(ReplayTarget);
+        let target = projection_target();
         let runtime = Arc::new(ProjectionFactory {
             target: Arc::clone(&target),
         });
@@ -1167,7 +1188,7 @@ mod tests {
             .entries()
             .next()
             .expect("selected target")
-            .replay_target();
+            .target();
         assert!(Arc::ptr_eq(&selected, &target));
         Ok(())
     }

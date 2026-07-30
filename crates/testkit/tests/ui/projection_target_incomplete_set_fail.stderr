@@ -1,0 +1,30 @@
+error[E0277]: the trait bound `(testkit::projection_conformance::__catalog::AtomicApply, testkit::projection_conformance::__catalog::SameFactDuplicate, testkit::projection_conformance::__catalog::SameKeyConflict, testkit::projection_conformance::__catalog::PersistentOutOfOrder, testkit::projection_conformance::__catalog::IdentityMismatch, testkit::projection_conformance::__catalog::ConfirmedRollback, testkit::projection_conformance::__catalog::CommitUnknownReplay): testkit::projection_conformance::__catalog::CompleteSet` is not satisfied
+  --> tests/ui/projection_target_incomplete_set_fail.rs:7:1
+   |
+ 7 | / testkit::projection_target_conformance! {
+ 8 | |     cases: {
+ 9 | |         atomic_apply => { atomic_apply => behavior },
+10 | |         same_fact_duplicate => { same_fact_duplicate => behavior },
+...  |
+17 | | }
+   | |_^ unsatisfied trait bound
+   |
+   = help: the trait `testkit::projection_conformance::__catalog::private::SealedCompleteSet` is not implemented for `(testkit::projection_conformance::__catalog::AtomicApply, testkit::projection_conformance::__catalog::SameFactDuplicate, testkit::projection_conformance::__catalog::SameKeyConflict, testkit::projection_conformance::__catalog::PersistentOutOfOrder, testkit::projection_conformance::__catalog::IdentityMismatch, testkit::projection_conformance::__catalog::ConfirmedRollback, testkit::projection_conformance::__catalog::CommitUnknownReplay)`
+help: the trait `testkit::projection_conformance::__catalog::private::SealedCompleteSet` is implemented for `(testkit::projection_conformance::__catalog::AtomicApply, testkit::projection_conformance::__catalog::SameFactDuplicate, testkit::projection_conformance::__catalog::SameKeyConflict, testkit::projection_conformance::__catalog::PersistentOutOfOrder, testkit::projection_conformance::__catalog::IdentityMismatch, testkit::projection_conformance::__catalog::ConfirmedRollback, testkit::projection_conformance::__catalog::CommitUnknownReplay, testkit::projection_conformance::__catalog::RollbackFailed)`
+  --> src/projection_conformance.rs
+   |
+   | /         impl SealedCompleteSet
+   | |             for (
+   | |                 super::AtomicApply,
+   | |                 super::SameFactDuplicate,
+...  |
+   | |                 super::RollbackFailed,
+   | |             )
+   | |_____________^
+   = note: required for `(testkit::projection_conformance::__catalog::AtomicApply, testkit::projection_conformance::__catalog::SameFactDuplicate, testkit::projection_conformance::__catalog::SameKeyConflict, testkit::projection_conformance::__catalog::PersistentOutOfOrder, testkit::projection_conformance::__catalog::IdentityMismatch, testkit::projection_conformance::__catalog::ConfirmedRollback, testkit::projection_conformance::__catalog::CommitUnknownReplay)` to implement `testkit::projection_conformance::__catalog::CompleteSet`
+note: required by a bound in `testkit::projection_conformance::__catalog::assert_complete`
+  --> src/projection_conformance.rs
+   |
+   |     pub fn assert_complete<Set: CompleteSet>() {}
+   |                                 ^^^^^^^^^^^ required by this bound in `assert_complete`
+   = note: this error originates in the macro `testkit::projection_target_conformance` (in Nightly builds, run with -Z macro-backtrace for more info)

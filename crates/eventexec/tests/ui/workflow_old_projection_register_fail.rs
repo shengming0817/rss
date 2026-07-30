@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
-use eventexec::{ProjectionId, ProjectionReplayTarget, ProjectionTargetRegistry};
+use eventexec::{ProjectionId, ProjectionTarget, ProjectionTargetRegistry};
 
 fn old_register(
     registry: &mut ProjectionTargetRegistry,
     projection: ProjectionId,
-    target: Arc<dyn ProjectionReplayTarget>,
+    target: Arc<dyn ProjectionTarget>,
 ) {
     registry.register_target(projection, target).unwrap();
 }

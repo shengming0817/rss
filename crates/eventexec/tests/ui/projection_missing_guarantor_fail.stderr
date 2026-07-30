@@ -1,14 +1,14 @@
 error[E0061]: this function takes 6 arguments but 5 arguments were supplied
-  --> tests/ui/projection_missing_guarantor_fail.rs:56:14
+  --> tests/ui/projection_missing_guarantor_fail.rs:59:14
    |
-56 |       let _h = ProjectionHarness::new(
+59 |       let _h = ProjectionHarness::new(
    |  ______________^^^^^^^^^^^^^^^^^^^^^^-
-57 | |         Arc::new(NoopProjector),
-58 | |         Arc::new(NoopCheckpoint),
-59 | |         CheckpointOwner::new("owner"),
-60 | |         CheckpointId::new("proj"),
-61 | |         Arc::new(NoopDlx),
-62 | |     );
+60 | |         Arc::new(NoopProjector),
+61 | |         Arc::new(NoopCheckpoint),
+62 | |         CheckpointOwner::new("owner"),
+63 | |         CheckpointId::new("proj"),
+64 | |         Arc::new(NoopDlx),
+65 | |     );
    | |_____- argument #6 is missing
    |
 note: associated function defined here
@@ -18,9 +18,9 @@ note: associated function defined here
    |            ^^^
 help: provide the argument
    |
-56 |     let _h = ProjectionHarness::new(
+59 |     let _h = ProjectionHarness::new(
 ...
-61 |         Arc::new(NoopDlx),
-62 ~         /* _guarantor */,
-63 ~     );
+64 |         Arc::new(NoopDlx),
+65 ~         /* _guarantor */,
+66 ~     );
    |

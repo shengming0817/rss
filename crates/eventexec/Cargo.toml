@@ -34,6 +34,7 @@ secure = { path = "../secure" }
 # producer 侧 command::emit_async 仍收已编码 Vec<u8>（编码在组合根 bridge），emit 路径不经 eventexec serde。
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+serde_json_canonicalizer = { workspace = true }
 # tenant authority token uses compact base64url segments.
 base64 = { workspace = true }
 # WorkerHealth 三态聚合（HealthStatus/ProbeName）。

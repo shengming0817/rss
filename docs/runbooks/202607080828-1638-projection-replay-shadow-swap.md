@@ -42,7 +42,7 @@ rss projections replay \
   --batch-size 1000
 ```
 
-预期：输出 `operation=replay ... scanned=<n> matched=<n> applied=<n> filtered=<n> skipped=<n> dlq=<n> stop=completed failed_at_lsn=none skipped_at_lsn=none kind=none`。`filtered` 是同一 source stream 中不匹配当前 selector 的事件；它们不写 read-model target，但会推进 shadow checkpoint。Replay 会循环读取批次直到最后一批小于 `--batch-size` 或遇到非 completed stop；Replay 不写 `distributed_cas` active pointer，因此线上 active version 不变。
+预期：输出 `operation=replay ... scanned=<n> matched=<n> applied=<n> duplicates=<n> filtered=<n> skipped=<n> dlq=<n> stop=completed failed_at_lsn=none skipped_at_lsn=none kind=none reason=none`。其中 `matched = applied + duplicates`；`duplicates` 是 target 已提交且 receipt 与稳定事实 digest 一致的重放，业务效果不会重复创建。`filtered` 是同一 source stream 中真正不匹配当前 selector 的事件；它们不写 read-model target，但会推进 shadow checkpoint。Replay 会循环读取批次直到最后一批小于 `--batch-size` 或遇到非 completed stop；Replay 不写 `distributed_cas` active pointer，因此线上 active version 不变。
 
 ## Check Active Pointer
 
@@ -131,12 +131,14 @@ rss projections swap \
 - `build assembly-plan projection target registry` / `validate assembly-plan projection target registry coverage`：部署 artifact 的 sealed RuntimePlan 与 binary typed capability 不一致；修正 assembly plan 或 capability wiring 后重新构建并部署。该错误在 PostgreSQL/Vault 初始化前终止。
 - `projection is not activated by the assembly plan`：selector 对应的 workflow 被 omitted/disabled，或 identity/mode/version/schema digest 不匹配。核对部署的 RuntimePlan 并激活精确 workflow；`status`、`replay`、`swap` 均不会绕过此检查，且在 provider 初始化前终止。
 - `projection target is not activated by the assembly plan`：workflow 已声明但 sealed plan 没有签发匹配 target；核对 shadow/active activation 与完整 typed runtime capability，重新构建并部署，不得从 generated definition ledger 手工补注册。
-- `projection is not generated for this runtime` / `projection target is not replayable by this runtime` / `projection target is not swappable by this runtime` / `projection input bindings are not generated for this runtime`：已选择 workflow 的 generated definition、inputs 或 target capability 与命令不一致；修正 codegen 输入或 assembly capability 后整体重新部署，不得使用 unsupported marker 或 raw registry fallback。
+- `projection is not generated for this runtime` / `projection target is not replayable by this runtime` / `projection target is not swappable by this runtime`：已选择 workflow 的 generated definition、inputs 或 target capability 与命令不一致；修正 codegen 输入或 assembly capability 后整体重新部署，不得使用 unsupported marker 或 raw registry fallback。
 - `projection shadow checkpoint is missing`：先成功 replay 目标 version，再 swap。
 - `projection shadow checkpoint is behind source high-water`：目标 shadow version 尚未追到 source 尾部；重新 replay 到 `selected_shadow_high_water_lsn == source_high_water_lsn` 后再 swap。
 - `projection active pointer precondition failed`：当前 active 与命令声明不一致；执行 `status` 后按实际版本重新决定。
 - `projection active pointer CAS conflict`：并发 promote 或 stale token；执行 `status` 后人工复核。
-- `stop=apply_failed`：检查 `kind`；`transient` 可在依赖恢复后重跑 replay，`permanent`/`invariant` 先查 `dead_letter` 中 projection DLQ 记录并修正 projector 或数据。
+- `stop=apply_failed`：同时检查 `kind` 与 `reason`。`transient` 可在依赖恢复后重跑 replay；`permanent`/`invariant` 先查 `dead_letter` 中 projection DLQ 记录，`reason=conflict` 表示同一 dedupe key 对应不同事实，`reason=out_of_order` 表示未见过的事件低于 target 持久 high-water，二者都必须修正数据或 store 后再继续。
+- `kind=commit_unknown reason=commit_unknown`：事务可能已经提交但 ACK 丢失；checkpoint 不会推进，也不会写 poison DLQ。禁止 swap，以完全相同的 selector 与事实重跑 replay；正确 target 应返回 `Duplicate`，最终只保留一个业务效果和一个 receipt。
+- `kind=rollback_failed reason=rollback_failed`：回滚结果无法确认；checkpoint 不推进且不写 poison DLQ。禁止自动 skip 或盲目重试，先核实 provider 事务状态并恢复可判定性，再以同一事实重放收敛。
 - `stop=out_of_order`：source 顺序不满足 projection serial witness；禁止 swap，升级排查 projection_events 读取顺序和数据完整性。
 - `stop=fenced`：有并发 replay 推进同一 shadow checkpoint；重新 `status` 后只保留一个 operator 继续。
 - `stop=checkpoint_unsaved`：target apply 可能已生效但 checkpoint 未保存；确认 target 幂等后重跑 replay。

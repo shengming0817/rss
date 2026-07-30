@@ -3,7 +3,9 @@ use std::sync::{Arc, Mutex};
 
 use audit::ports::AuditLedgerVerifyReport;
 use base64::Engine as _;
-use consistency::{EngineErrorKind, IdemKey, ProjectionBatchLimit};
+use consistency::{
+    IdemKey, ProjectionApplyErrorKind, ProjectionApplyErrorReason, ProjectionBatchLimit,
+};
 use eventexec::{
     AuthorizedDlqOperatorReceipt, DeadLetterId, DlqCursor, DlqEntrySummary, DlqError,
     DlqInspectRequest, DlqInspectTarget, DlqListQuery, DlqRedriveOutcome, DlqRedriveRequest,
@@ -939,11 +941,13 @@ fn projection_replay_cli_fields_are_stable_and_loop_continues_only_on_full_compl
 -> anyhow::Result<()> {
     let fields = projection_stop_cli_fields(&ProjectionStop::ApplyFailed {
         failed_at: consistency::Lsn::new(42),
-        kind: EngineErrorKind::Transient,
+        kind: ProjectionApplyErrorKind::Transient,
+        reason: ProjectionApplyErrorReason::Transient,
     });
     assert_eq!(fields.stop, "apply_failed");
     assert_eq!(fields.failed_at_lsn, Some(consistency::Lsn::new(42)));
     assert_eq!(fields.kind, Some("transient"));
+    assert_eq!(fields.reason, Some("transient"));
 
     let batch_limit = ProjectionBatchLimit::new(10)?;
     assert!(projection_replay_batch_is_full(10, batch_limit));

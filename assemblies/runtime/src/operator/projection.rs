@@ -5,9 +5,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context as _;
-use consistency::{EngineErrorKind, ProjectionBatchLimit, SerialInOrder};
+use consistency::{
+    EngineErrorKind, ProjectionApplyErrorKind, ProjectionApplyErrorReason, ProjectionBatchLimit,
+    SerialInOrder,
+};
 use eventexec::{
-    ProjectionHarness, ProjectionId, ProjectionReplayProjector, ProjectionSelector, ProjectionStop,
+    ProjectionHarness, ProjectionId, ProjectionProjector, ProjectionSelector, ProjectionStop,
     ProjectionTargetRegistry, ProjectionTargetView, ProjectionVersion, projection_runner_once,
 };
 use postgres::{
@@ -538,6 +541,7 @@ pub(super) struct ProjectionStopCliFields {
     pub(super) failed_at_lsn: Option<consistency::Lsn>,
     pub(super) skipped_at_lsn: Option<consistency::Lsn>,
     pub(super) kind: Option<&'static str>,
+    pub(super) reason: Option<&'static str>,
 }
 
 pub(super) fn projection_engine_kind_cli(kind: EngineErrorKind) -> &'static str {
@@ -549,6 +553,20 @@ pub(super) fn projection_engine_kind_cli(kind: EngineErrorKind) -> &'static str 
     }
 }
 
+pub(super) fn projection_apply_kind_cli(kind: ProjectionApplyErrorKind) -> &'static str {
+    match kind {
+        ProjectionApplyErrorKind::Transient => "transient",
+        ProjectionApplyErrorKind::Permanent => "permanent",
+        ProjectionApplyErrorKind::Invariant => "invariant",
+        ProjectionApplyErrorKind::CommitUnknown => "commit_unknown",
+        ProjectionApplyErrorKind::RollbackFailed => "rollback_failed",
+    }
+}
+
+pub(super) fn projection_apply_reason_cli(reason: ProjectionApplyErrorReason) -> &'static str {
+    reason.as_label()
+}
+
 pub(super) fn projection_stop_cli_fields(stop: &ProjectionStop) -> ProjectionStopCliFields {
     match stop {
         ProjectionStop::Completed => ProjectionStopCliFields {
@@ -556,60 +574,74 @@ pub(super) fn projection_stop_cli_fields(stop: &ProjectionStop) -> ProjectionSto
             failed_at_lsn: None,
             skipped_at_lsn: None,
             kind: None,
+            reason: None,
         },
-        ProjectionStop::ApplyFailed { failed_at, kind } => ProjectionStopCliFields {
+        ProjectionStop::ApplyFailed {
+            failed_at,
+            kind,
+            reason,
+        } => ProjectionStopCliFields {
             stop: "apply_failed",
             failed_at_lsn: Some(*failed_at),
             skipped_at_lsn: None,
-            kind: Some(projection_engine_kind_cli(*kind)),
+            kind: Some(projection_apply_kind_cli(*kind)),
+            reason: Some(projection_apply_reason_cli(*reason)),
         },
         ProjectionStop::OutOfOrder { failed_at } => ProjectionStopCliFields {
             stop: "out_of_order",
             failed_at_lsn: Some(*failed_at),
             skipped_at_lsn: None,
             kind: None,
+            reason: None,
         },
         ProjectionStop::Fenced => ProjectionStopCliFields {
             stop: "fenced",
             failed_at_lsn: None,
             skipped_at_lsn: None,
             kind: None,
+            reason: None,
         },
         ProjectionStop::CheckpointUnsaved => ProjectionStopCliFields {
             stop: "checkpoint_unsaved",
             failed_at_lsn: None,
             skipped_at_lsn: None,
             kind: None,
+            reason: None,
         },
         ProjectionStop::DeadLetterUnsaved { failed_at } => ProjectionStopCliFields {
             stop: "dead_letter_unsaved",
             failed_at_lsn: Some(*failed_at),
             skipped_at_lsn: None,
             kind: None,
+            reason: None,
         },
         ProjectionStop::PoisonSkipped { skipped_at, kind } => ProjectionStopCliFields {
             stop: "poison_skipped",
             failed_at_lsn: None,
             skipped_at_lsn: Some(*skipped_at),
-            kind: Some(projection_engine_kind_cli(*kind)),
+            kind: Some(projection_apply_kind_cli(*kind)),
+            reason: Some("permanent"),
         },
         ProjectionStop::SourceReadFailed { kind } => ProjectionStopCliFields {
             stop: "source_read_failed",
             failed_at_lsn: None,
             skipped_at_lsn: None,
             kind: Some(projection_engine_kind_cli(*kind)),
+            reason: None,
         },
         ProjectionStop::CheckpointUnread => ProjectionStopCliFields {
             stop: "checkpoint_unread",
             failed_at_lsn: None,
             skipped_at_lsn: None,
             kind: None,
+            reason: None,
         },
         _ => ProjectionStopCliFields {
             stop: "unknown",
             failed_at_lsn: None,
             skipped_at_lsn: None,
             kind: None,
+            reason: None,
         },
     }
 }
@@ -625,6 +657,7 @@ pub(super) fn projection_replay_batch_is_full(
 pub(super) struct ProjectionReplayCliRun {
     scanned: usize,
     applied: usize,
+    duplicates: usize,
     filtered: usize,
     skipped: usize,
     dead_lettered: usize,
@@ -704,14 +737,11 @@ pub(super) async fn run_projection_replay(
     let target = registry
         .target(selector.projection())
         .context("projection target is not replayable by this runtime")?;
-    let bindings = registry
-        .bindings_for(selector.projection())
-        .context("projection input bindings are not generated for this runtime")?;
     let (source, checkpoint, dead_letter) = pg
         .projection_replay_stores(receipt, selector, dlx_payload_protector)?
         .into_parts()?;
     let witness = SerialInOrder::from_source(&source);
-    let projector = ProjectionReplayProjector::new(selector.clone(), bindings, target);
+    let projector = ProjectionProjector::new(selector.clone(), target);
     let harness = ProjectionHarness::new(
         Arc::new(projector),
         Arc::new(checkpoint),
@@ -727,6 +757,7 @@ pub(super) async fn run_projection_replay(
     )?;
     let mut scanned = 0usize;
     let mut applied = 0usize;
+    let mut duplicates = 0usize;
     let mut filtered = 0usize;
     let mut skipped = 0usize;
     let mut dead_lettered = 0usize;
@@ -734,6 +765,7 @@ pub(super) async fn run_projection_replay(
         let run = projection_runner_once(&source, &harness, config).await;
         scanned = scanned.saturating_add(run.scanned);
         applied = applied.saturating_add(run.applied);
+        duplicates = duplicates.saturating_add(run.duplicates);
         filtered = filtered.saturating_add(run.filtered);
         skipped = skipped.saturating_add(run.skipped);
         dead_lettered = dead_lettered.saturating_add(run.dead_lettered);
@@ -745,6 +777,7 @@ pub(super) async fn run_projection_replay(
         return Ok(ProjectionReplayCliRun {
             scanned,
             applied,
+            duplicates,
             filtered,
             skipped,
             dead_lettered,
@@ -788,28 +821,31 @@ pub(super) async fn run_projection_command_inner(
             .await?;
             let stop = projection_stop_cli_fields(&run.stop);
             println!(
-                "operation=replay tenant={} projection={} version={} scanned={} matched={} applied={} filtered={} skipped={} dlq={} stop={} failed_at_lsn={} skipped_at_lsn={} kind={}",
+                "operation=replay tenant={} projection={} version={} scanned={} matched={} applied={} duplicates={} filtered={} skipped={} dlq={} stop={} failed_at_lsn={} skipped_at_lsn={} kind={} reason={}",
                 parsed.selector.tenant(),
                 parsed.selector.projection().as_str(),
                 parsed.selector.version().as_str(),
                 run.scanned,
+                run.applied.saturating_add(run.duplicates),
                 run.applied,
-                run.applied,
+                run.duplicates,
                 run.filtered,
                 run.skipped,
                 run.dead_lettered,
                 stop.stop,
                 format_optional_lsn(stop.failed_at_lsn),
                 format_optional_lsn(stop.skipped_at_lsn),
-                format_optional_engine_kind(stop.kind)
+                format_optional_engine_kind(stop.kind),
+                format_optional_engine_kind(stop.reason)
             );
             anyhow::ensure!(
                 matches!(run.stop, ProjectionStop::Completed),
-                "projection replay stopped before completion: stop={} failed_at_lsn={} skipped_at_lsn={} kind={}",
+                "projection replay stopped before completion: stop={} failed_at_lsn={} skipped_at_lsn={} kind={} reason={}",
                 stop.stop,
                 format_optional_lsn(stop.failed_at_lsn),
                 format_optional_lsn(stop.skipped_at_lsn),
-                format_optional_engine_kind(stop.kind)
+                format_optional_engine_kind(stop.kind),
+                format_optional_engine_kind(stop.reason)
             );
             Ok(())
         }

@@ -127,6 +127,7 @@ mod phase_helper_expand;
 mod postgres_feature_matrix;
 mod producer_assurance;
 mod production_composition;
+mod projection_target_enrollment;
 mod promtool;
 mod provider_capabilities;
 mod publicapi;

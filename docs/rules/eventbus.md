@@ -282,19 +282,38 @@ outbox 行带表级单调 `seq`（应用不可写、允许 gap）+ 可空 `parti
 ## Projection
 
 - projection consumer 必须 wire durable projection harness，投影事件载体使用统一 trait。
+- **Target canonical owner**：`eventexec::ConformingProjectionTarget<S>` 是 sealed
+  `ProjectionTarget` 的唯一实现形态；adapter 只能实现 `ProjectionTargetStore` 的单一原子 `apply` SPI。
+  mutation 与 receipt 不得拆成两个调用，raw event 必须先经过 tenant、projection generation、source
+  contract/version/schema/topic 的精确 binding 分类，再生成字段私有的 `ValidatedProjectionApply`、
+  `ProjectionDedupeKey` 与稳定 fact digest。旧 target/projector/accessor 不保留兼容路径。
+- exact binding 命中才调用 store；真正无关 contract 返回 `Filtered`，tenant 或已知 binding identity
+  漂移必须 fail-closed。store 必须先查 receipt duplicate/conflict，再检查持久 high-water ordering，使
+  checkpoint 丢失后的已提交旧事实返回 `Duplicate`，而未见过的低 LSN 返回 `OutOfOrder`。
+- **Ordering 职责切分**：target store 守跨批、跨重启的 persistent ordering；harness 只守当前输入 batch
+  的 LSN 升序及 checkpoint 前缀，二者不可互相替代。
 - **串行有序门禁**：harness 构造必填 DLQ store 与一枚串行有序 witness，非串行投递路径拿不到 witness，
   编译期即挂不上 projection。witness 只能由声明串行有序的 source 铸造，铸造资格由 dylint allowlist 守。
 - outbox 派生投影的 durable journal 只由 outbox writer funnel 写入，且仅当 outbox 行新插入并命中 generated
   projection registry 时才在同一事务内镜像。registry 不提供 raw string topic 注册 API。
 - journal 读写只经固定 `SECURITY DEFINER` 函数；serving role 只拿函数 EXECUTE，不持表级 DML 权限。
   append 函数要求参数与同事务可见 outbox row 完全匹配，防止直接 SQL 绕过 Rust funnel。
-- harness 默认对 `Permanent` / `Invariant` / `OutOfOrder` 写 DLQ 后停当前 projection，不自动 skip；
-  `Transient` 不写 DLQ；DLQ 写失败不推进 checkpoint。
+- harness 对 `Applied` / `Duplicate` / `Filtered` 均可推进 checkpoint；任何错误均不越过失败事件。
+  `Permanent` / `Invariant` 可写 DLQ 后停当前 projection，`Transient` 不写 DLQ；`CommitUnknown` 与
+  `RollbackFailed` 明确禁止 poison DLQ、自动 skip 或 checkpoint 推进。DLQ 写失败不推进 checkpoint。
 - 只有显式 poison policy 才允许跳过 `Permanent`，且必须先写 DLQ 成功再用 checkpoint CAS 推进；
   `Invariant` / `OutOfOrder` 不允许自动 skip。checkpoint 保存必须拒绝 offset regression。
 - append-only 主守卫是 serving role 的引擎权限与固定函数面（Hard）；代码层字面量与直接 callsite
   另由 verify guard（Medium）补强。
-- 载体：`INVARIANT: PROJECTION-SERIAL-WITNESS-01` / `PARTITION-SERIAL-IMPL-ALLOWLIST-01`。
+- `testkit::projection_conformance` 是唯一 canonical suite owner，exact-set 固定 atomic apply、duplicate、
+  conflict、persistent out-of-order、identity mismatch、confirmed rollback、commit-unknown replay、
+  rollback-failed。typed/private input funnel、sealed target 与 macro exact-set 是 Hard；production AST
+  enrollment 及真实事务/故障事实是 Medium。当前无 production target 时，runtime baseline 必须同时证明
+  所有 production assembly 的 Projection activation 为 disabled。
+- reference carrier 只证明 canonical contract 与强制 enrollment 机制，不等同于 PostgreSQL production
+  acceptance；真实 store 仍须用同一 conformance enrollment 证明其事务与故障事实。
+- 载体：`INVARIANT: PROJECTION-SERIAL-WITNESS-01` / `PARTITION-SERIAL-IMPL-ALLOWLIST-01` /
+  `PROJECTION-TARGET-CONFORMANCE-01`。
 
 ## 命名与 payload
 

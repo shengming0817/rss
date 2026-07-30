@@ -4,7 +4,7 @@
 //! `Projector` 是 L3 引擎策略 trait（native AFIT，apply 单事件到读模型）。
 //! ref: oxidecomputer/steno（saga journal 事件源对标）+ eventbus.md §Projection（双写 journal 接缝）。
 
-use crate::error::{EngineError, EngineErrorKind};
+use crate::error::EngineError;
 use crate::outbox::EventTopic;
 use vocab::TenantId;
 
@@ -306,8 +306,127 @@ pub trait ProjectionEvent {
 pub enum ProjectionApplyOutcome {
     /// 事件匹配当前投影目标并已写入目标 read-model。
     Applied,
+    /// 同一稳定事实已由目标原子提交；业务效果与 receipt 均未重复创建。
+    Duplicate,
     /// 事件属于同一 source stream，但不属于当前投影 selector；checkpoint 仍可推进。
     Filtered,
+}
+
+/// 投影 apply 的闭值错误分类。
+///
+/// `CommitUnknown` 与 `RollbackFailed` 明确表达事务结果不确定性：它们既不能进入 poison DLQ，
+/// 也不能被 harness 自动跳过或推进 checkpoint。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectionApplyErrorKind {
+    /// 后端暂时不可用，可在不推进 checkpoint 的前提下重试。
+    Transient,
+    /// 已确认的永久业务失败，可由显式 poison policy 处置。
+    Permanent,
+    /// target identity、binding 或 ordering 不变量被破坏。
+    Invariant,
+    /// 原子提交可能已成功，但确认 ACK 丢失，必须以同一事实重放判定。
+    CommitUnknown,
+    /// 事务回滚未能得到确认，禁止自动重试、skip 或 dead-letter。
+    RollbackFailed,
+}
+
+impl ProjectionApplyErrorKind {
+    /// 稳定、低基数且不含运行期数据的错误消息。
+    pub const fn message(self) -> &'static str {
+        match self {
+            Self::Transient => "transient projection apply error",
+            Self::Permanent => "permanent projection apply error",
+            Self::Invariant => "projection apply invariant violated",
+            Self::CommitUnknown => "projection apply commit outcome unknown",
+            Self::RollbackFailed => "projection apply rollback failed",
+        }
+    }
+}
+
+/// 投影失败的精确、低基数原因。
+///
+/// [`ProjectionApplyErrorKind`] 决定重试/结算控制流；本类型保留 store 的 conflict 与 persistent
+/// ordering 事实，供 DLQ、CLI 与 conformance 在不暴露 provider message 的前提下诊断根因。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectionApplyErrorReason {
+    /// 后端暂时不可用。
+    Transient,
+    /// 已确认的永久业务失败。
+    Permanent,
+    /// target identity 或 binding 不变量被破坏。
+    Invariant,
+    /// 同一 dedupe key 已绑定到不同事实。
+    Conflict,
+    /// 未见过的事件低于 target 持久 high-water。
+    OutOfOrder,
+    /// 原子提交可能成功，但确认 ACK 丢失。
+    CommitUnknown,
+    /// 事务回滚未得到确认。
+    RollbackFailed,
+}
+
+impl ProjectionApplyErrorReason {
+    /// 返回控制流使用的闭值错误分类。
+    pub const fn kind(self) -> ProjectionApplyErrorKind {
+        match self {
+            Self::Transient => ProjectionApplyErrorKind::Transient,
+            Self::Permanent => ProjectionApplyErrorKind::Permanent,
+            Self::Invariant | Self::Conflict | Self::OutOfOrder => {
+                ProjectionApplyErrorKind::Invariant
+            }
+            Self::CommitUnknown => ProjectionApplyErrorKind::CommitUnknown,
+            Self::RollbackFailed => ProjectionApplyErrorKind::RollbackFailed,
+        }
+    }
+
+    /// 返回供日志、CLI 与测试使用的稳定低基数标签。
+    pub const fn as_label(self) -> &'static str {
+        match self {
+            Self::Transient => "transient",
+            Self::Permanent => "permanent",
+            Self::Invariant => "invariant",
+            Self::Conflict => "conflict",
+            Self::OutOfOrder => "out_of_order",
+            Self::CommitUnknown => "commit_unknown",
+            Self::RollbackFailed => "rollback_failed",
+        }
+    }
+}
+
+/// projection 专属 apply 错误；字段私有，避免恢复宽泛 `EngineError` 通道。
+#[derive(Debug, thiserror::Error)]
+#[error("{}", .reason.kind().message())]
+pub struct ProjectionApplyError {
+    reason: ProjectionApplyErrorReason,
+}
+
+impl ProjectionApplyError {
+    /// 从闭值 kind 构造错误。
+    pub const fn new(kind: ProjectionApplyErrorKind) -> Self {
+        let reason = match kind {
+            ProjectionApplyErrorKind::Transient => ProjectionApplyErrorReason::Transient,
+            ProjectionApplyErrorKind::Permanent => ProjectionApplyErrorReason::Permanent,
+            ProjectionApplyErrorKind::Invariant => ProjectionApplyErrorReason::Invariant,
+            ProjectionApplyErrorKind::CommitUnknown => ProjectionApplyErrorReason::CommitUnknown,
+            ProjectionApplyErrorKind::RollbackFailed => ProjectionApplyErrorReason::RollbackFailed,
+        };
+        Self { reason }
+    }
+
+    /// 从精确、低基数原因构造错误。
+    pub const fn from_reason(reason: ProjectionApplyErrorReason) -> Self {
+        Self { reason }
+    }
+
+    /// 返回闭值错误分类。
+    pub const fn kind(&self) -> ProjectionApplyErrorKind {
+        self.reason.kind()
+    }
+
+    /// 返回精确、低基数错误原因。
+    pub const fn reason(&self) -> ProjectionApplyErrorReason {
+        self.reason
+    }
 }
 
 #[allow(async_fn_in_trait)]
@@ -317,7 +436,7 @@ pub trait Projector {
     async fn apply<E: ProjectionEvent>(
         &self,
         event: &E,
-    ) -> Result<ProjectionApplyOutcome, EngineError>;
+    ) -> Result<ProjectionApplyOutcome, ProjectionApplyError>;
 }
 
 /// 投影 checkpoint（已成功 apply 的最高 LSN）。
@@ -374,17 +493,25 @@ pub enum ProjectionDeadLetterReason {
     ApplyPermanent,
     /// projector 破坏引擎不变量，需要人工修复或跳过。
     ApplyInvariant,
+    /// 同一 dedupe key 对应不同稳定事实。
+    ApplyConflict,
+    /// 未见过的低 LSN 违反 target persistent ordering。
+    ApplyOutOfOrder,
     /// 事件源交付乱序，不能安全继续投影。
     OutOfOrder,
 }
 
 impl ProjectionDeadLetterReason {
     /// 从 apply 错误分类映射到 projection DLX 原因；瞬态错误不进 projection dead-letter。
-    pub fn from_engine_error_kind(kind: EngineErrorKind) -> Option<Self> {
-        match kind {
-            EngineErrorKind::Transient => None,
-            EngineErrorKind::Permanent => Some(Self::ApplyPermanent),
-            EngineErrorKind::Invariant => Some(Self::ApplyInvariant),
+    pub fn from_apply_error_reason(reason: ProjectionApplyErrorReason) -> Option<Self> {
+        match reason {
+            ProjectionApplyErrorReason::Transient
+            | ProjectionApplyErrorReason::CommitUnknown
+            | ProjectionApplyErrorReason::RollbackFailed => None,
+            ProjectionApplyErrorReason::Permanent => Some(Self::ApplyPermanent),
+            ProjectionApplyErrorReason::Invariant => Some(Self::ApplyInvariant),
+            ProjectionApplyErrorReason::Conflict => Some(Self::ApplyConflict),
+            ProjectionApplyErrorReason::OutOfOrder => Some(Self::ApplyOutOfOrder),
         }
     }
 
@@ -393,6 +520,8 @@ impl ProjectionDeadLetterReason {
         match self {
             Self::ApplyPermanent => "apply_permanent",
             Self::ApplyInvariant => "apply_invariant",
+            Self::ApplyConflict => "apply_conflict",
+            Self::ApplyOutOfOrder => "apply_out_of_order",
             Self::OutOfOrder => "out_of_order",
         }
     }
@@ -504,13 +633,13 @@ impl SerialInOrder {
 
 #[cfg(test)]
 mod tests {
-    use crate::EngineErrorKind;
     use crate::outbox::EventTopic;
 
     use super::{
-        Lsn, ProjectionBatchLimit, ProjectionBatchLimitError, ProjectionCheckpoint,
-        ProjectionCheckpointError, ProjectionDeadLetter, ProjectionDeadLetterReason,
-        ProjectionEventMetadata, ProjectionEventRecord,
+        Lsn, ProjectionApplyError, ProjectionApplyErrorKind, ProjectionApplyErrorReason,
+        ProjectionApplyOutcome, ProjectionBatchLimit, ProjectionBatchLimitError,
+        ProjectionCheckpoint, ProjectionCheckpointError, ProjectionDeadLetter,
+        ProjectionDeadLetterReason, ProjectionEventMetadata, ProjectionEventRecord,
     };
 
     #[allow(clippy::expect_used)]
@@ -636,21 +765,89 @@ mod tests {
     #[test]
     fn projection_dead_letter_reason_maps_poison_errors_only() {
         assert_eq!(
-            ProjectionDeadLetterReason::from_engine_error_kind(EngineErrorKind::Transient),
+            ProjectionDeadLetterReason::from_apply_error_reason(
+                ProjectionApplyErrorReason::Transient
+            ),
             None
         );
         assert_eq!(
-            ProjectionDeadLetterReason::from_engine_error_kind(EngineErrorKind::Permanent),
+            ProjectionDeadLetterReason::from_apply_error_reason(
+                ProjectionApplyErrorReason::Permanent
+            ),
             Some(ProjectionDeadLetterReason::ApplyPermanent)
         );
         assert_eq!(
-            ProjectionDeadLetterReason::from_engine_error_kind(EngineErrorKind::Invariant),
+            ProjectionDeadLetterReason::from_apply_error_reason(
+                ProjectionApplyErrorReason::Invariant
+            ),
             Some(ProjectionDeadLetterReason::ApplyInvariant)
+        );
+        assert_eq!(
+            ProjectionDeadLetterReason::from_apply_error_reason(
+                ProjectionApplyErrorReason::CommitUnknown
+            ),
+            None
+        );
+        assert_eq!(
+            ProjectionDeadLetterReason::from_apply_error_reason(
+                ProjectionApplyErrorReason::RollbackFailed
+            ),
+            None
+        );
+        assert_eq!(
+            ProjectionDeadLetterReason::from_apply_error_reason(
+                ProjectionApplyErrorReason::Conflict
+            ),
+            Some(ProjectionDeadLetterReason::ApplyConflict)
+        );
+        assert_eq!(
+            ProjectionDeadLetterReason::from_apply_error_reason(
+                ProjectionApplyErrorReason::OutOfOrder
+            ),
+            Some(ProjectionDeadLetterReason::ApplyOutOfOrder)
         );
         assert_eq!(
             ProjectionDeadLetterReason::OutOfOrder.as_label(),
             "out_of_order"
         );
+    }
+
+    #[test]
+    fn projection_apply_contract_is_closed_and_stable() {
+        let outcomes = [
+            ProjectionApplyOutcome::Applied,
+            ProjectionApplyOutcome::Duplicate,
+            ProjectionApplyOutcome::Filtered,
+        ];
+        assert_eq!(outcomes.len(), 3);
+
+        let cases = [
+            (
+                ProjectionApplyErrorKind::Transient,
+                "transient projection apply error",
+            ),
+            (
+                ProjectionApplyErrorKind::Permanent,
+                "permanent projection apply error",
+            ),
+            (
+                ProjectionApplyErrorKind::Invariant,
+                "projection apply invariant violated",
+            ),
+            (
+                ProjectionApplyErrorKind::CommitUnknown,
+                "projection apply commit outcome unknown",
+            ),
+            (
+                ProjectionApplyErrorKind::RollbackFailed,
+                "projection apply rollback failed",
+            ),
+        ];
+        for (kind, message) in cases {
+            let error = ProjectionApplyError::new(kind);
+            assert_eq!(error.kind(), kind);
+            assert_eq!(error.to_string(), message);
+        }
     }
 
     #[test]

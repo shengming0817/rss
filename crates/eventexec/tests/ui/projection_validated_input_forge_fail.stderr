@@ -1,0 +1,17 @@
+error[E0451]: fields `key`, `lsn`, `topic`, `payload`, `metadata` and `fact_digest` of struct `ValidatedProjectionApply` are private
+  --> tests/ui/projection_validated_input_forge_fail.rs:10:9
+   |
+ 9 |     ValidatedProjectionApply {
+   |     ------------------------ in this type
+10 |         key,
+   |         ^^^ private field
+11 |         lsn: Lsn::new(1),
+   |         ^^^ private field
+12 |         topic,
+   |         ^^^^^ private field
+13 |         payload: Vec::new(),
+   |         ^^^^^^^ private field
+14 |         metadata,
+   |         ^^^^^^^^ private field
+15 |         fact_digest: [0; 32],
+   |         ^^^^^^^^^^^ private field

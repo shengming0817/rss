@@ -1,0 +1,24 @@
+error[E0277]: the trait bound `RogueTarget: eventexec::projection::target_sealed::Sealed` is not satisfied
+ --> tests/ui/projection_external_target_impl_fail.rs:8:27
+  |
+8 | impl ProjectionTarget for RogueTarget {
+  |                           ^^^^^^^^^^^ unsatisfied trait bound
+  |
+help: the trait `eventexec::projection::target_sealed::Sealed` is not implemented for `RogueTarget`
+ --> tests/ui/projection_external_target_impl_fail.rs:6:1
+  |
+6 | struct RogueTarget;
+  | ^^^^^^^^^^^^^^^^^^
+help: the trait `eventexec::projection::target_sealed::Sealed` is implemented for `ConformingProjectionTarget<S>`
+ --> src/projection.rs
+  |
+  | impl<S: ProjectionTargetStore> target_sealed::Sealed for ConformingProjectionTarget<S> {}
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: required by a bound in `ProjectionTarget`
+ --> src/projection.rs
+  |
+  | pub trait ProjectionTarget: target_sealed::Sealed + Send + Sync {
+  |                             ^^^^^^^^^^^^^^^^^^^^^ required by this bound in `ProjectionTarget`
+  = note: `ProjectionTarget` is a "sealed trait", because to implement it you also need to implement `eventexec::projection::target_sealed::Sealed`, which is not accessible; this is usually done to force you to use one of the provided types that already implement it
+  = help: the following type implements the trait:
+            eventexec::ConformingProjectionTarget<S>
