@@ -28,4 +28,10 @@ fn escape_hatch_example() {
     md.insert_wire_pair("trace", "xyz");
 }
 
+// Dead-code / string bait must not satisfy the lint vacuously.
+#[allow(dead_code)]
+fn string_bait() {
+    let _ = "insert_wire_pair";
+}
+
 fn main() {}

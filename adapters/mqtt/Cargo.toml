@@ -13,41 +13,29 @@ workspace = true
 [dependencies]
 vocab = { path = "../../crates/vocab" }
 ids = { path = "../../crates/ids" }
-secure = { path = "../../crates/secure" }
-support = { path = "../../crates/support" }
-runctx = { path = "../../crates/runctx" }
-consistency = { path = "../../crates/consistency" }
-primitives = { path = "../../crates/primitives" }
-# 实现 diport 已冻 DI port trait（Publisher + Subscriber + ManagedResource，native AFIT）。
+base64 = { workspace = true }
+ring = { workspace = true }
+rustls = { workspace = true, features = ["std"] }
+rustls-pki-types = { workspace = true }
+url = { workspace = true }
+x509-parser = { workspace = true }
+# The session is a single managed resource; it intentionally does not implement raw-topic ports.
 diport = { path = "../../crates/diport" }
-# Subscriber::subscribe 签名需 CancellationToken（fallback + 真实 impl 都用），取消即流终止 / driver 关停。
+# Production MQTT v5 I/O is always compiled; the explicit rustls config installs the ring provider.
+# ref: bytebeamio/rumqtt rumqttc/examples/async_manual_acks_v5.rs@main
+rumqttc = { workspace = true, features = ["use-rustls-no-provider"] }
+tokio = { workspace = true, features = ["rt", "macros", "time", "sync"] }
 tokio-util = { workspace = true }
-# 真实 broker I/O：rumqttc（MQTT v5 client）+ futures（mpsc ReceiverStream 适配 take_until）+ tokio
-# （driver task 泵 EventLoop——rumqttc 须调用方持续 poll 才收发）+ tracing（redacted 连接日志）。仅
-# `integration` feature 编译——默认 build / verify 不拉 broker 客户端树（azure 无 CI ⇒ verify 是唯一 gate）。
-# ref: bytebeamio/rumqtt rumqttc/examples/asyncpubsub.rs@main
-rumqttc = { workspace = true, optional = true }
-futures = { workspace = true, optional = true }
-tokio = { workspace = true, optional = true, features = ["rt", "macros", "time", "sync"] }
-tracing = { workspace = true, optional = true }
-# MqttConnectError typed 错误（thiserror 枚举，PII 边界 Display）——仅 integration build。
-thiserror = { workspace = true, optional = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
 
 [features]
-# 真实 MQTT broker I/O（rumqttc v5）。无此 feature 时 adapter 退化为 sealed-marker 签名冻结壳
-# （MqttPublisher / MqttSubscriber impl 冻结 DI port，body=todo!()），保 ADAPTER-PORT-FREEZE 默认绿。
-# 注：默认 build（无 integration）整 crate 无 rumqttc/tracing 链路——调试 MQTT 须 `--features integration`
-# （+ docker / `RSS_MQTT_TEST_URL` 跑集成测试），否则看不到任何 MQTT 日志。
-# testkit/containers 经此传递激活 testcontainers（self-provision mosquitto，无需手工预置）。
-integration = ["dep:rumqttc", "dep:futures", "dep:tokio", "dep:tracing", "dep:thiserror", "testkit/containers"]
+# Production MQTT is always compiled. This feature gates only the Docker-backed broker tests.
+broker-tests = ["testkit/containers"]
 
 [dev-dependencies]
-# 集成测试 #[tokio::test]（仅 feature=integration 下编译执行）；time = 防挂的有界超时。
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "time", "sync"] }
-futures = { workspace = true }
-tokio-util = { workspace = true }
-# 集成测试用 anyhow（FixtureError = anyhow::Error，ok_or_else 等需要 anyhow! 宏）。
 anyhow = { workspace = true }
-# 集成测试容器 fixture（#1137）：testcontainers self-provision mosquitto（经 testkit/containers，仅
-# integration feature 下激活；testkit 是 Service 层 test-support 库，只准 dev-dep 消费，LAYER-DEPS-08）。
 testkit = { path = "../../crates/testkit" }
+rcgen = { workspace = true }
+static_assertions = { workspace = true }

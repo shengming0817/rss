@@ -198,12 +198,12 @@ deadpool-redis = { version = "0.23", default-features = false, features = ["rt_t
 # 不启 native-tls / openssl / rustls--aws_lc_rs；deny.toml 兜住 provider 漂移。
 # ref: amqp-rs/lapin Cargo.toml@71d01e2cc3e3221496d11ffcf1f4aaf41532fb9d
 lapin = { version = "4", default-features = false, features = ["default-runtime", "rustls--ring", "rustls-webpki-roots-certs"] }
-# MQTT broker I/O（adapters/mqtt，#1010，仅 `integration` feature 编译）。MQTT v5（`rumqttc::v5`）——
-# publish 经 `PublishProperties.correlation_data` 携带 event_id、订阅侧读回填入 `Message.id`，与 amqp
-# `message_id` 传播对称，保跨进程「至少一次 + 幂等」去重。default-features=false 关 TLS：rumqttc 的
-# use-rustls / use-native-tls 后端会拉 ring / aws-lc-sys（license 不在 deny.toml allow-list，cargo-deny
-# 连 optional 树也校验）⇒ 本 PR 仅明文 `mqtt://`（local mosquitto 集成测试够用）；生产 mqtts/mTLS
-# （依赖 softca）= follow-up。对标 gocell mqtt adapter@paho.mqtt.rust。ref: bytebeamio/rumqtt rumqttc/examples/asyncpubsub.rs@main
+# MQTT broker I/O（adapters/mqtt）：生产路径始终编译 MQTT v5（`rumqttc::v5`）+ `mqtts://` mTLS
+# （adapter 侧 `use-rustls-no-provider` + ring）。publish 经 `PublishProperties.correlation_data`
+# 携带 event_id、订阅侧读回填入 `Message.id`，与 amqp `message_id` 传播对称。workspace 默认
+# `default-features=false`；TLS feature 仅由 adapters/mqtt 显式启用。Docker 真 broker 集成测试
+# 走 `broker-tests` feature（非明文 `mqtt://`）。对标 gocell mqtt adapter@paho.mqtt.rust。
+# ref: bytebeamio/rumqtt rumqttc/examples/async_manual_acks_v5.rs@main
 rumqttc = { version = "0.25", default-features = false }
 # 对象存储 provider（adapters/s3，#1011/#1164）：AWS 官方 SDK，对标 gocell s3.ObjectUploader@aws-sdk-go-v2。
 # default-features=false 关默认 HTTPS client；生产 HTTPS connector 由 runtime 组合根显式注入 rustls+ring
@@ -266,6 +266,7 @@ tracing-opentelemetry = "0.33"
 # 不手写 authority split（防 `http://localhost@evil` userinfo 伪装 host 绕过）。已在树（idna 等传递依赖）。
 # ref: servo/rust-url url/src/lib.rs（Url::host/username/password）
 url = "2"
+x509-parser = "0.18"
 # 指标 facade + Prometheus 后端（adapters/prometheus，#1011）。Rust 可观测 facade 选 `metrics` crate（冻结
 # 迁移决策 gocell-rust-crate-mapping.md：slog+otel+prometheus → tracing+tracing-opentelemetry+metrics facade）；
 # 发射点经 `metrics::counter!` 全局 facade，adapter 持 PrometheusHandle 渲染 exposition。

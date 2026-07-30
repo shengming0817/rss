@@ -26,7 +26,7 @@ Run the one-time, non-committed specification smoke for file inventory, requirem
   trace_ids=$(mktemp)
   trap 'rm -f "$spec_ids" "$trace_ids"' EXIT HUP INT TERM
 
-  test "$(find "$spec_dir" -type f | wc -l | tr -d ' ')" -eq 18
+  test "$(find "$spec_dir" -type f | wc -l | tr -d ' ')" -eq 19
   test -f docs/architecture/202607291724-022-l4-device-latent-production-loop.md
 
   rg -o '^- \*\*(N?FR-[0-9]{3}):' "$spec_dir/spec.md" |
@@ -68,6 +68,9 @@ These existing canonical commands validate live repository contracts and generat
 ```sh
 cargo xtask contract validate
 cargo xtask codegen --check
+
+# #1902 standalone broker T2: always hermetic Docker, no RSS_MQTT_TEST_URL fallback
+./hack/cargo.sh test -p mqtt --features broker-tests --test integration
 ```
 
 ## Commands introduced by later PBIs
@@ -78,7 +81,8 @@ The following are placeholders for delivery discoverability, not commands that e
 # #1896/#1897/#1898/#1900, after their PostgreSQL conformance targets exist
 cargo nextest run -E 'test(device_certificate)'
 
-# #1902/#1908, after the secured MQTT conformance/fault targets exist
+# #1908 only, after its broker/backpressure plus durable-ingress join target exists;
+# reuse #1902's command above for standalone transport/session/authentication evidence
 cargo nextest run -E 'test(mqtt)'
 
 # #1904/#1906, after the draft pilot and simulator journey target exists

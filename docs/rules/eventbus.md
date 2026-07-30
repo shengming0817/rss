@@ -24,6 +24,40 @@
 - broker header / MQTT user property 中的 `tenantId` 不是授权凭据；消费侧写 app DLX 前只信任
   relay 签发的 `tenantAuthority`。
 
+## Device MQTTS session 与认证边界
+
+- MQTT production adapter 默认编译且只有一个 `MqttSession`：一枚稳定 RSS client identity、一个
+  rumqttc eventloop/driver、一个 persistent broker session 和一个 typed exact topic policy。不存在明文
+  `mqtt://`、随机 client ID、独立 publisher/subscriber driver、无 broker feature 时的 fallback，或 raw-topic port。
+- 构造必须同时提供纯 authority `mqtts://host[:port]`、CA/client certificate/private key、与 client
+  certificate CN 精确相等的稳定 client ID、broker assertion Ed25519 public key、非空设备 scope policy、
+  `60s..=7d` session expiry 和严格递增 credential revision；任一缺失或非法均 fail-closed。连接固定
+  `clean_start=false`，只有 `session_present=false` 才重建全部 exact QoS1 subscription。
+- 每个设备 scope 只生成三条主题：
+  `rss/v1/{tenant}/{device}/{generation}/downlink/identity.commands.apply-device-certificate`、
+  `.../uplink/identity.device-command-acked` 和
+  `.../uplink/identity.device-certificate-reported`。`tenant` / `device` 必须是 canonical UUID，generation
+  必须大于零；policy 拒绝空集、同 tenant/device 重复项、wildcard 与调用方字符串拼接入口。Broker ACL
+  与 subscription 必须从同一 exact policy 派生。
+- 设备 client certificate 必须含唯一 URI SAN
+  `urn:rss:mqtt-device:v1:{tenant}:{device}:{generation}`。正式 Mosquitto v5 message plugin 只从
+  `mosquitto_client_certificate` 取得 peer certificate，校验 SAN 与 exact uplink topic，并拒绝 client
+  自带的 `rss.authn.v1.*` user properties；随后用 broker-only Ed25519 private key 绑定 principal、topic、
+  correlation data、SHA-256 payload digest、QoS 与 retain，签入 v1 assertion。RSS 只持 public verification
+  key；payload、topic 或普通 user property 都不能构造、覆盖或降级 authenticated principal。
+- 入站固定 manual ACK。只有 assertion 验签、当前 scope/generation 匹配并进入有界 delivery queue 后才产生
+  不可复制的 `AuthenticatedDeviceDelivery`，且只有消费该 delivery 的一次性 capability 才能发 PUBACK。
+  验签失败、scope 漂移、stale generation、队列饱和或 session degraded 均不得提前 PUBACK。
+- 下行 `send_command` 返回的 `BrokerAccepted` 只证明 broker PUBACK，即 **BrokerAccepted**；它不是设备 ACK、
+  durable RSS ingress 或 application receipt。durable commit 后的 application receipt 由 #1903 ingress
+  transaction outcome 唯一产生，broker/session 与 ingress 的断连、饱和 join hazard 归 #1908，生产 assembly
+  provider closure/readiness/drain 归 #1910。
+- credential reload 只接受同一稳定 client ID、完整本地可验证 material 和更高 revision；在有界 deadline 内
+  切换，candidate 失败则回滚 last-good credentials。`MqttReadiness` 只暴露闭合状态、`session_present` 与
+  revision，不暴露 endpoint、certificate、private key 或 payload。
+- MQTT T2 只使用 hermetic Docker fixture 构建正式 plugin image；不读取 `RSS_MQTT_TEST_URL`，也不接受外部
+  URL 替代 fixture 的 PKI、ACL、persistence 或 assertion 证明。
+
 ## 标准 Envelope Header
 
 broker-visible header 闭集：`tenantId`、`schemaVersion`、`schemaHash`、`occurredAt`、

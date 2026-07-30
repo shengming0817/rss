@@ -28,6 +28,14 @@ testcontainers 与 production-runtime Compose 容器附加：
 部分 context 会 fail-closed。external fixture 环境变量的空字符串视为未配置，显式非空但不完整的
 Postgres 五元组仍直接报错。
 
+Mosquitto 是闭合例外：MQTT T2 不读取 `RSS_MQTT_TEST_URL`，而是经 testcontainers
+`GenericBuildableImage` 从 `adapters/mqtt/mosquitto-plugin/Dockerfile` 构建 exact image。该 image 固定
+MQTTS、mutual client certificate、persistence、exact ACL 与正式 v5 message plugin；fixture 生成测试
+CA、RSS 两代同 client-ID credential、current/stale/cross-tenant/wrong-CA/no-certificate device credential
+和 broker Ed25519 signing key。Rust fixture 只能暴露 assertion public key，private signing key 只安装在
+owned broker container 内且不得进入 Debug、日志或 artifact。stop/start/restart 均复用同一 owned
+container 与 persistence volume，不能用新 anonymous broker 冒充 session restart。
+
 xtask 结束后的顺序固定为：`collect` 先把 xtask 的四值终态写入 evidence，并仅在 `failure` 时生成日志归档；
 随后独立 `snapshot` 记录 cleanup-before 可用空间，最后 `always()` 精确清理并记录 cleanup-after 可用空间，
 再生成通用 after-build CI evidence。失败归档在两次磁盘测量前已经存在，因此其保留占用同时计入 before/after，
@@ -95,3 +103,5 @@ integration-only 条件和步骤顺序，fake-Docker selftest 覆盖跨 scope ca
 扫描或删除其它 run 遗留的 testcontainers 资源。
 
 ref: testcontainers/testcontainers-rs testcontainers/src/core/containers/async_container.rs@2c96733fd42aed77105f4003e0fe98f59c644848
+
+ref: testcontainers/testcontainers-rs testcontainers/src/buildables/generic.rs@0.27.3

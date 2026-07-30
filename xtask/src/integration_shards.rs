@@ -123,11 +123,11 @@ impl LocalFeatureScope {
 
     pub(crate) const fn feature(self) -> &'static str {
         match self {
+            Self::Mqtt => "broker-tests",
             Self::Postgres
             | Self::PostgresMigration
             | Self::RedisAdapter
             | Self::Amqp
-            | Self::Mqtt
             | Self::Journeys
             | Self::Runtime
             | Self::Testkit
@@ -135,6 +135,14 @@ impl LocalFeatureScope {
             | Self::S3
             | Self::SettingsOnly => "integration",
         }
+    }
+
+    /// Resolve the Cargo feature for an integration batch package. Catalog packages are bijective
+    /// with [`LocalFeatureScope::ALL`] (validated by `validate_local_feature_catalog`).
+    pub(crate) fn for_package(package: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|scope| scope.package() == package)
     }
 }
 
@@ -493,6 +501,8 @@ pub(crate) struct ShardBatch {
     pub(crate) scheduling: Scheduling,
     pub(crate) kind: TargetKind,
     pub(crate) package: &'static str,
+    /// Cargo feature resolved from [`LocalFeatureScope`] for `package` (e.g. mqtt → `broker-tests`).
+    pub(crate) feature: &'static str,
     pub(crate) targets: Vec<&'static str>,
     pub(crate) filter: String,
 }
@@ -513,7 +523,8 @@ pub(crate) fn batches(shard: IntegrationShard) -> Vec<ShardBatch> {
                     {
                         by_package.entry(unit.package).or_default().push(unit);
                     }
-                    by_package.into_iter().map(move |(package, units)| {
+                    by_package.into_iter().filter_map(move |(package, units)| {
+                        let feature = LocalFeatureScope::for_package(package)?.feature();
                         let targets = units
                             .iter()
                             .map(|unit| unit.target)
@@ -526,13 +537,14 @@ pub(crate) fn batches(shard: IntegrationShard) -> Vec<ShardBatch> {
                             .map(|filter| format!("({filter})"))
                             .collect::<Vec<_>>()
                             .join(" or ");
-                        ShardBatch {
+                        Some(ShardBatch {
                             scheduling,
                             kind,
                             package,
+                            feature,
                             targets,
                             filter,
-                        }
+                        })
                     })
                 })
         })
@@ -802,7 +814,9 @@ pub(crate) fn external_resource_present(resource: Resource) -> bool {
         }
         Resource::Redis => nonempty("REDIS_TEST_URL"),
         Resource::Amqp => nonempty("RSS_AMQP_TEST_URL"),
-        Resource::Mqtt => nonempty("RSS_MQTT_TEST_URL"),
+        // The MQTT T2 always self-provisions the exact mTLS/plugin image; a URL-only external
+        // broker cannot prove the fixture's PKI, ACL or assertion contract.
+        Resource::Mqtt => false,
         Resource::ObjectStorage => false,
         Resource::Vault => false,
     }
@@ -893,11 +907,15 @@ mod tests {
     #[test]
     fn local_feature_scope_catalog_is_non_vacuous_and_rejects_omissions() -> Result<()> {
         assert_eq!(LocalFeatureScope::ALL.len(), INTEGRATION_PACKAGES.len());
-        assert!(
-            LocalFeatureScope::ALL
-                .into_iter()
-                .all(|scope| scope.feature() == "integration")
-        );
+        assert_eq!(LocalFeatureScope::Mqtt.feature(), "broker-tests");
+        assert!(LocalFeatureScope::ALL.into_iter().all(|scope| {
+            scope.feature()
+                == if scope == LocalFeatureScope::Mqtt {
+                    "broker-tests"
+                } else {
+                    "integration"
+                }
+        }));
         validate_local_feature_catalog(SHARD_SPECS)?;
 
         let mut missing = SHARD_SPECS.to_vec();

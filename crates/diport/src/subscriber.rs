@@ -44,6 +44,10 @@ impl MessageId {
 /// （`Debug` 恒 `<redacted>`、经 `as_bytes` 受控读取），故 struct `derive(Debug)` 即安全；`id`（路由）可观测；
 /// `metadata` 经 [`EnvelopeMetadata`] 自身 Debug（subjectId / principal 脱敏）。
 ///
+/// MQTT device identity is **not** carried here: broker-verified device credentials live on
+/// `mqtt::AuthenticatedDeviceDelivery` only. Wire `KEY_PRINCIPAL` metadata remains forgeable text and
+/// must never be treated as a sealed device principal.
+///
 /// INVARIANT: DIPORT-DTO-BYTES-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }（payload 脱敏由 `RedactedBytes` 类型保证，回归见 `pii_debug` 单测）。
 #[derive(Debug, Clone)]
 pub struct Message {

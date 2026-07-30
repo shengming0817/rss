@@ -83,12 +83,12 @@ This document groups executable work by implementation PBI. Requirements are own
 
 ## #1902 — Production MQTT security and sessions
 
-- [ ] Require sealed mutual-TLS, CA, client credential, stable identity, session, and bounded reconnect configuration.
-- [ ] Have the TLS verifier mint the only sealed `(tenant, device, credentialGeneration)` principal; reject stale credentials or payload/topic attempts to override that principal.
-- [ ] Bind per-device topics and ACL coordinates through generated/typed values.
-- [ ] Expose certificate, connection, and persistent-session readiness without leaking credentials.
-- [ ] Preserve broker acknowledgement as transport acceptance only.
-- [ ] Prove wrong credentials, wrong ACL, certificate rotation/revocation, persistent reconnect, and redaction with a real broker.
+- [x] Require sealed mutual-TLS, CA, client credential, stable identity, session, and bounded reconnect configuration.
+- [x] Have the TLS verifier mint the only sealed `(tenant, device, credentialGeneration)` principal; reject stale credentials or payload/topic attempts to override that principal.
+- [x] Bind per-device topics and ACL coordinates through generated/typed values.
+- [x] Expose certificate, connection, and persistent-session readiness without leaking credentials.
+- [x] Preserve broker acknowledgement as transport acceptance only.
+- [x] Prove wrong credentials, wrong ACL, certificate rotation/revocation, persistent reconnect, and redaction with a real broker.
 
 ## #1903 — Durable device ingress and application receipts
 

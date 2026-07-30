@@ -3735,21 +3735,23 @@ name = "mqtt"
 version = "0.0.0"
 dependencies = [
  "anyhow",
- "consistency",
+ "base64",
  "diport",
- "futures",
  "ids",
- "primitives",
+ "rcgen",
+ "ring",
  "rumqttc",
- "runctx",
- "secure",
- "support",
+ "rustls",
+ "rustls-pki-types",
+ "static_assertions",
  "testkit",
  "thiserror",
  "tokio",
  "tokio-util",
  "tracing",
+ "url",
  "vocab",
+ "x509-parser",
 ]
 
 [[package]]
@@ -5044,8 +5046,12 @@ dependencies = [
  "flume 0.11.1",
  "futures-util",
  "log",
+ "rustls-native-certs",
+ "rustls-pemfile",
+ "rustls-webpki 0.102.8",
  "thiserror",
  "tokio",
+ "tokio-rustls",
  "tokio-stream",
  "tokio-util",
 ]
@@ -5208,7 +5214,7 @@ dependencies = [
  "once_cell",
  "ring",
  "rustls-pki-types",
- "rustls-webpki",
+ "rustls-webpki 0.103.13",
  "subtle",
  "zeroize",
 ]
@@ -5224,7 +5230,7 @@ dependencies = [
  "log",
  "rustls",
  "rustls-pki-types",
- "rustls-webpki",
+ "rustls-webpki 0.103.13",
  "webpki-root-certs",
 ]
 
@@ -5241,6 +5247,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustls-pemfile"
+version = "2.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dce314e5fee3f39953d46bb63bb8a46d40c2f8fb7cc5a3b6cab2bde9721d6e50"
+dependencies = [
+ "rustls-pki-types",
+]
+
+[[package]]
 name = "rustls-pki-types"
 version = "1.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5248,6 +5263,17 @@ checksum = "30a7197ae7eb376e574fe940d068c30fe0462554a3ddbe4eca7838e049c937a9"
 dependencies = [
  "web-time",
  "zeroize",
+]
+
+[[package]]
+name = "rustls-webpki"
+version = "0.102.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "64ca1bc8749bd4cf37b5ce386cc146580777b4e8572c7b97baf22c83f444bee9"
+dependencies = [
+ "ring",
+ "rustls-pki-types",
+ "untrusted",
 ]
 
 [[package]]

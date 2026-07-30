@@ -26,8 +26,8 @@ Proof tiers follow the repository [verification scope matrix](../../rules/projec
 | FR-018 | #1898 | T2 — durable schedule restart and lost-notification repair test |
 | FR-019 | #1899 | T1 — scheduler bounded-concurrency and single-target-executor component test |
 | FR-020 | #1900 | T2 — lease-CAS/action/command-outbox transaction test |
-| FR-021 | #1902 | T2 — real-broker mutual-TLS, stable-session, and typed-ACL conformance |
-| FR-022 | #1902 | T2 — broker-ack versus application-state transport seam test |
+| FR-021 | #1902 | T2 — hermetic Mosquitto mutual-TLS, stable `clean_start=false` session/restart, manual-ACK and exact typed topic/ACL conformance |
+| FR-022 | #1902 | T1/T2 — non-copyable `BrokerAccepted` surface plus broker PUBACK proof that cannot mint device ACK, durable ingress or application receipt |
 | FR-023 | #1903 | T2 — missing stable envelope identity fail-closed ingress test |
 | FR-024 | #1903 | T2 — commit-before-application-receipt crash test |
 | FR-025 | #1903 | T2 — saturation/pre-commit failure and replay-repair test |
@@ -47,7 +47,7 @@ Proof tiers follow the repository [verification scope matrix](../../rules/projec
 | FR-039 | #1903 | T2 — public receipt non-oracle equivalence plus authorized internal-audit detail test |
 | FR-040 | #1893 | T1 — reported-state constructor/transition synthetic red rejecting generation zero |
 | FR-041 | #1895 | T1 — report schema/validator synthetic red rejecting `observedGeneration: 0` |
-| FR-042 | #1902 | T2 — credential-derived sealed mTLS principal, payload non-override, mismatch, and stale-generation broker tests |
+| FR-042 | #1902 | T2 — Mosquitto peer-certificate URI-SAN principal plus Ed25519 assertion proof rejecting reserved-property/payload override, topic mismatch and stale generation |
 | NFR-001 | #1903 | T2 — duplicate/replay conformance proving at-least-once plus idempotency |
 | NFR-002 | #1899 | T1 — slow-target isolation under bounded scheduler concurrency |
 | NFR-003 | #1899 | T1 — validated finite configuration and deterministic retry/drain component tests |
@@ -60,8 +60,16 @@ Proof tiers follow the repository [verification scope matrix](../../rules/projec
 | NFR-010 | #1910 | T3 — production assembly dependency type and prohibited-provider substitution rejection |
 | NFR-011 | #1906 | T2 — canonical offline/reconnect/newest-command/ACK/report/post-commit-receipt journey join proof |
 | NFR-012 | #1907 | T2 — exact PG join-hazard table mapping each cross-boundary failure to one observable assertion |
-| NFR-013 | #1908 | T2 — exact MQTT join-hazard table mapping each broker/backpressure/ingress failure to one observable assertion |
+| NFR-013 | #1908 | T2 — exact cross-boundary MQTT join-hazard table mapping broker/backpressure plus durable-ingress failures to one observable assertion, reusing rather than duplicating #1902/#1903 component proofs |
 
 ## Exact-set rule
 
 This table contains every FR/NFR declared in [spec.md](./spec.md) exactly once. The one-time specification smoke derives both sets dynamically rather than encoding a count; it is not a repository enforcement mechanism.
+
+## MQTT proof boundary
+
+#1902 closes the standalone MQTTS/mTLS, peer-certificate assertion, exact ACL/topic, persistent-session,
+manual-ACK, readiness and credential-reload behavior. #1903 begins only after an authenticated delivery exists
+and owns durable ingress plus post-commit application receipt. #1908 owns only independent joins that require
+both those capabilities, while #1910 owns the production assembly's required-provider activation/readiness/drain
+proof. A broker PUBACK is `BrokerAccepted`; none of these assignments permits treating it as an application receipt.

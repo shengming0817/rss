@@ -30,7 +30,6 @@ use testcontainers::ImageExt;
 use testcontainers::core::logs::LogFrame;
 use testcontainers::core::{CmdWaitFor, ExecCommand, IntoContainerPort, WaitFor};
 use testcontainers::{ContainerAsync, CopyTargetOptions, GenericImage};
-use testcontainers_modules::mosquitto::Mosquitto;
 use testcontainers_modules::postgres::Postgres;
 use testcontainers_modules::rabbitmq::RabbitMq;
 use testcontainers_modules::redis::{REDIS_PORT, Redis};
@@ -47,7 +46,7 @@ const VAULT_PORT: u16 = 8200;
 const AMQP_PORT: u16 = 5672;
 const AMQPS_PORT: u16 = 5671;
 const REDISS_PORT: u16 = 6379;
-const MQTT_PORT: u16 = 1883;
+const MQTTS_PORT: u16 = 8883;
 const MINIO_PORT: u16 = 9000;
 const VAULT_IMAGE: &str = "hashicorp/vault";
 const VAULT_IMAGE_TAG: &str = "1.17.6";
@@ -495,8 +494,24 @@ mod owned {
         BoundedFileLogConsumer, CiContainerContext, ContainerAsync, ContainerService, ImageExt,
         Result,
     };
+    use testcontainers::runners::AsyncBuilder;
     use testcontainers::runners::AsyncRunner;
-    use testcontainers::{ContainerRequest, Image};
+    use testcontainers::{ContainerRequest, GenericBuildableImage, GenericImage, Image};
+
+    pub(super) async fn build_mosquitto_mtls_image() -> Result<GenericImage> {
+        Ok(
+            GenericBuildableImage::new("rss-mosquitto-mtls-fixture", "2.0.22-v4")
+                .with_dockerfile_string(include_str!(
+                    "../../../adapters/mqtt/mosquitto-plugin/Dockerfile"
+                ))
+                .with_data(
+                    include_str!("../../../adapters/mqtt/mosquitto-plugin/plugin.c"),
+                    "plugin.c",
+                )
+                .build_image()
+                .await?,
+        )
+    }
 
     pub(super) async fn start<I, T>(
         image: T,
@@ -1594,63 +1609,654 @@ fn bounded_redacted_command_output(mut bytes: Vec<u8>) -> String {
     output
 }
 
-// ── mqtt（mosquitto）─────────────────────────────────────────────────────────
+// ── mqtt（Mosquitto mTLS + assertion plugin）─────────────────────────────────
 
-/// mqtt fixture guard：持容器句柄（自起路径）到 `Drop` + `mqtt://` base URL。**须绑定到测试结束**。
-///
-/// MQTT **无 vhost**（不同于 rabbitmq）——跨域隔离经 per-domain broker 凭据 + broker 侧 ACL（operator
-/// provision），非命名空间段。故 fixture 只回 base broker URL（无 `vhost_url`），比 [`RabbitFixture`] 简单。
-pub struct MqttFixture {
-    _container: Option<Box<ContainerAsync<Mosquitto>>>,
-    url: String,
+const MQTT_TENANT: &str = "11111111-1111-4111-8111-111111111111";
+const MQTT_CROSS_TENANT: &str = "33333333-3333-4333-8333-333333333333";
+const MQTT_DEVICE: &str = "22222222-2222-4222-8222-222222222222";
+const MQTT_CURRENT_GENERATION: u64 = 2;
+const MQTT_STALE_GENERATION: u64 = 1;
+const MQTT_RSS_CLIENT_ID: &str = "rss-mqtt-adapter";
+const MQTT_UPLINK_CONTRACTS: &[&str] = &[
+    "identity.device-command-acked",
+    "identity.device-certificate-reported",
+];
+const MQTT_DOWNLINK_CONTRACT: &str = "identity.commands.apply-device-certificate";
+const MQTT_DEVICE_CURRENT_SERIAL: u64 = 2002;
+const MQTT_DEVICE_STALE_SERIAL: u64 = 2001;
+const MQTT_DEVICE_CROSS_SERIAL: u64 = 3002;
+const MQTT_RSS_A_SERIAL: u64 = 1001;
+const MQTT_RSS_B_SERIAL: u64 = 1002;
+const MOSQUITTO_READY_STDOUT: &str = "mosquitto version 2.0.22 running";
+
+/// Client-side MQTT trust and identity material. PEM fields are intentionally absent from Debug.
+#[derive(Clone)]
+pub struct MqttFixtureTlsPem {
+    ca_pem: String,
+    certificate_pem: Option<String>,
+    private_key_pem: Option<String>,
 }
 
-impl MqttFixture {
-    /// `mqtt://host:port` 连接 URL（明文；mosquitto fixture 镜像 anonymous，无凭据段）。
+impl MqttFixtureTlsPem {
+    pub fn ca_pem(&self) -> &str {
+        &self.ca_pem
+    }
+
+    pub fn certificate_pem(&self) -> Option<&str> {
+        self.certificate_pem.as_deref()
+    }
+
+    pub fn private_key_pem(&self) -> Option<&str> {
+        self.private_key_pem.as_deref()
+    }
+}
+
+impl std::fmt::Debug for MqttFixtureTlsPem {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("MqttFixtureTlsPem")
+            .field("ca", &"<redacted>")
+            .field(
+                "certificate",
+                &self.certificate_pem.as_ref().map(|_| "<redacted>"),
+            )
+            .field(
+                "private_key",
+                &self.private_key_pem.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
+}
+
+/// One closed credential case minted by [`mosquitto_mtls`].
+#[derive(Clone)]
+pub struct MqttCredential {
+    revision: u64,
+    stable_client_id: String,
+    tls: MqttFixtureTlsPem,
+}
+
+impl MqttCredential {
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    pub fn stable_client_id(&self) -> &str {
+        &self.stable_client_id
+    }
+
+    pub fn tls(&self) -> &MqttFixtureTlsPem {
+        &self.tls
+    }
+}
+
+impl std::fmt::Debug for MqttCredential {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("MqttCredential")
+            .field("revision", &self.revision)
+            .field("stable_client_id", &self.stable_client_id)
+            .field("tls", &self.tls)
+            .finish()
+    }
+}
+
+struct MqttGeneratedMaterial {
+    ca_pem: String,
+    server_certificate_pem: String,
+    server_private_key_pem: String,
+    assertion_signing_key_pem: String,
+    assertion_public_key: [u8; 32],
+    empty_crl_pem: String,
+    revoked_device_current_crl_pem: String,
+    acl: String,
+    rss_a: MqttCredential,
+    rss_b: MqttCredential,
+    device_current: MqttCredential,
+    device_stale: MqttCredential,
+    device_cross_tenant: MqttCredential,
+    device_wrong_ca: MqttCredential,
+    device_no_certificate: MqttCredential,
+}
+
+/// Hermetic Mosquitto mTLS fixture. It owns the broker and exposes only client material plus the
+/// Ed25519 verification key; the signing key is copied into the broker and then discarded.
+pub struct MqttMtlsFixture {
+    container: Box<ContainerAsync<GenericImage>>,
+    url: String,
+    assertion_public_key: [u8; 32],
+    empty_crl_pem: String,
+    revoked_device_current_crl_pem: String,
+    broker_bundle: MqttBrokerBundle,
+    rss_a: MqttCredential,
+    rss_b: MqttCredential,
+    device_current: MqttCredential,
+    device_stale: MqttCredential,
+    device_cross_tenant: MqttCredential,
+    device_wrong_ca: MqttCredential,
+    device_no_certificate: MqttCredential,
+}
+
+#[derive(Clone)]
+struct MqttBrokerBundle {
+    ca_pem: String,
+    server_certificate_pem: String,
+    server_private_key_pem: String,
+    assertion_signing_key_pem: String,
+    acl: String,
+}
+
+impl MqttMtlsFixture {
     pub fn url(&self) -> &str {
         &self.url
     }
+
+    pub fn broker_assertion_public_key(&self) -> &[u8; 32] {
+        &self.assertion_public_key
+    }
+
+    pub fn rss_a(&self) -> &MqttCredential {
+        &self.rss_a
+    }
+
+    pub fn rss_b(&self) -> &MqttCredential {
+        &self.rss_b
+    }
+
+    pub fn device_current(&self) -> &MqttCredential {
+        &self.device_current
+    }
+
+    pub fn device_stale(&self) -> &MqttCredential {
+        &self.device_stale
+    }
+
+    pub fn device_cross_tenant(&self) -> &MqttCredential {
+        &self.device_cross_tenant
+    }
+
+    pub fn device_wrong_ca(&self) -> &MqttCredential {
+        &self.device_wrong_ca
+    }
+
+    pub fn device_no_certificate(&self) -> &MqttCredential {
+        &self.device_no_certificate
+    }
+
+    pub async fn stop(&mut self) -> Result<()> {
+        self.container.stop_with_timeout(Some(10)).await?;
+        Ok(())
+    }
+
+    pub async fn start(&mut self) -> Result<()> {
+        let prior_stdout_len = self
+            .container
+            .stdout_to_vec()
+            .await
+            .map(|bytes| bytes.len())
+            .unwrap_or(0);
+        self.container.start().await?;
+        let host = self.container.get_host().await?;
+        let port = self.container.get_host_port_ipv4(MQTTS_PORT).await?;
+        self.url = format!("mqtts://{host}:{port}");
+        self.wait_broker_ready(BrokerReadyMode::FreshStart { prior_stdout_len })
+            .await
+    }
+
+    /// Freeze the broker process without changing published ports. Used to prove session
+    /// readiness recovery across transport loss on a stable endpoint.
+    pub async fn pause(&mut self) -> Result<()> {
+        self.container.pause().await?;
+        Ok(())
+    }
+
+    pub async fn unpause(&mut self) -> Result<()> {
+        self.container.unpause().await?;
+        // Process continues; readiness marker was logged at initial bring-up and is not re-emitted.
+        self.wait_broker_ready(BrokerReadyMode::Resume).await
+    }
+
+    fn broker_socket(&self) -> Result<String> {
+        let endpoint = url::Url::parse(&self.url)
+            .map_err(|error| anyhow::anyhow!("fixture URL must stay mqtts: {error}"))?;
+        let host = endpoint
+            .host_str()
+            .ok_or_else(|| anyhow::anyhow!("fixture URL missing host"))?;
+        let port = endpoint
+            .port()
+            .ok_or_else(|| anyhow::anyhow!("fixture URL missing port"))?;
+        Ok(format!("{host}:{port}"))
+    }
+
+    /// Wait until the broker accepts TCP *and* has logged the same readiness marker used at
+    /// initial `WaitFor` start. TCP alone is insufficient after restart because the listener can
+    /// race ahead of mosquitto finishing plugin/TLS bring-up.
+    async fn wait_broker_ready(&self, mode: BrokerReadyMode) -> Result<()> {
+        let socket = self.broker_socket()?;
+        for _ in 0..40 {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            if tokio::net::TcpStream::connect(&socket).await.is_err() {
+                continue;
+            }
+            let stdout = self.container.stdout_to_vec().await.unwrap_or_default();
+            let haystack = match mode {
+                BrokerReadyMode::FreshStart { prior_stdout_len } => {
+                    stdout.get(prior_stdout_len..).unwrap_or(stdout.as_slice())
+                }
+                BrokerReadyMode::Resume => stdout.as_slice(),
+            };
+            if String::from_utf8_lossy(haystack).contains(MOSQUITTO_READY_STDOUT) {
+                return Ok(());
+            }
+        }
+        Err(anyhow::anyhow!(
+            "mosquitto container did not become ready (TCP + `{MOSQUITTO_READY_STDOUT}`)"
+        ))
+    }
+
+    pub async fn restart(&mut self) -> Result<()> {
+        self.stop().await?;
+        self.start().await
+    }
+
+    /// Rebind the broker with a CRL that revokes `device_current` while leaving RSS B valid.
+    pub async fn revoke_device_current_and_rebind(mut self) -> Result<Self> {
+        self.stop().await?;
+        drop(self.container);
+        let started = start_mosquitto_mtls_container(
+            &self.broker_bundle,
+            &self.revoked_device_current_crl_pem,
+        )
+        .await?;
+        Ok(Self {
+            container: started.container,
+            url: started.url,
+            assertion_public_key: self.assertion_public_key,
+            empty_crl_pem: self.empty_crl_pem,
+            revoked_device_current_crl_pem: self.revoked_device_current_crl_pem,
+            broker_bundle: self.broker_bundle,
+            rss_a: self.rss_a,
+            rss_b: self.rss_b,
+            device_current: self.device_current,
+            device_stale: self.device_stale,
+            device_cross_tenant: self.device_cross_tenant,
+            device_wrong_ca: self.device_wrong_ca,
+            device_no_certificate: self.device_no_certificate,
+        })
+    }
 }
 
-/// 校验 MQTT test URL scheme（须 `mqtt://`——明文，adapter v1 仅支持明文；`mqtts://` / 非 mqtt 协议拒绝）。
-///
-/// 对齐 [`validate_amqp_base_url`] 的对称 scheme 校验：防 `RSS_MQTT_TEST_URL` 误设非 mqtt 协议在集成测试
-/// 中产生难诊断的连接错误。
-fn validate_mqtt_url(url: &str) -> Result<()> {
-    if url.strip_prefix("mqtt://").is_none() {
-        return Err(anyhow::anyhow!(
-            "RSS_MQTT_TEST_URL 须以 mqtt:// 开头（adapter v1 仅明文 MQTT），实际: {url}"
+fn mqtt_base64url(input: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut output = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let first = chunk[0];
+        let second = chunk.get(1).copied().unwrap_or(0);
+        let third = chunk.get(2).copied().unwrap_or(0);
+        output.push(char::from(ALPHABET[(first >> 2) as usize]));
+        output.push(char::from(
+            ALPHABET[(((first & 0x03) << 4) | (second >> 4)) as usize],
+        ));
+        if chunk.len() >= 2 {
+            output.push(char::from(
+                ALPHABET[(((second & 0x0f) << 2) | (third >> 6)) as usize],
+            ));
+        }
+        if chunk.len() == 3 {
+            output.push(char::from(ALPHABET[(third & 0x3f) as usize]));
+        }
+    }
+    output
+}
+
+fn mqtt_device_client_id(tenant_byte: u8) -> String {
+    let mut identity = [0_u8; 32];
+    identity[..16].fill(tenant_byte);
+    identity[16..].fill(0x22);
+    mqtt_base64url(&identity)
+}
+
+fn mqtt_principal(tenant: &str, generation: u64) -> String {
+    format!("urn:rss:mqtt-device:v1:{tenant}:{MQTT_DEVICE}:{generation}")
+}
+
+fn mqtt_client_material(
+    issuer: &rcgen::CertifiedIssuer<'_, rcgen::KeyPair>,
+    ca_pem: &str,
+    stable_client_id: &str,
+    principal: Option<&str>,
+    serial: u64,
+) -> Result<MqttFixtureTlsPem> {
+    use rcgen::{CertificateParams, ExtendedKeyUsagePurpose, IsCa, KeyPair, SanType, SerialNumber};
+
+    let key = KeyPair::generate()?;
+    let mut params = CertificateParams::default();
+    params.is_ca = IsCa::ExplicitNoCa;
+    params.serial_number = Some(SerialNumber::from(serial));
+    params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+    params
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, stable_client_id);
+    if let Some(principal) = principal {
+        params.subject_alt_names = vec![SanType::URI(principal.try_into()?)];
+    }
+    let certificate = params.signed_by(&key, issuer)?;
+    Ok(MqttFixtureTlsPem {
+        ca_pem: ca_pem.to_owned(),
+        certificate_pem: Some(certificate.pem()),
+        private_key_pem: Some(key.serialize_pem()),
+    })
+}
+
+fn mqtt_sign_crl(
+    issuer: &rcgen::CertifiedIssuer<'_, rcgen::KeyPair>,
+    revoked_serials: &[u64],
+    crl_number: u64,
+) -> Result<String> {
+    use rcgen::{
+        CertificateRevocationListParams, KeyIdMethod, RevocationReason, RevokedCertParams,
+        SerialNumber, date_time_ymd,
+    };
+
+    let revoked_certs = revoked_serials
+        .iter()
+        .map(|serial| RevokedCertParams {
+            serial_number: SerialNumber::from(*serial),
+            revocation_time: date_time_ymd(2026, 1, 1),
+            reason_code: Some(RevocationReason::KeyCompromise),
+            invalidity_date: None,
+        })
+        .collect();
+    let crl = CertificateRevocationListParams {
+        this_update: date_time_ymd(2026, 1, 1),
+        next_update: date_time_ymd(2030, 1, 1),
+        crl_number: SerialNumber::from(crl_number),
+        issuing_distribution_point: None,
+        revoked_certs,
+        key_identifier_method: KeyIdMethod::Sha256,
+    }
+    .signed_by(issuer)?;
+    Ok(crl.pem()?)
+}
+
+fn mqtt_generated_material() -> Result<MqttGeneratedMaterial> {
+    use rcgen::{
+        BasicConstraints, CertificateParams, CertifiedIssuer, ExtendedKeyUsagePurpose, IsCa,
+        KeyPair, KeyUsagePurpose, PKCS_ED25519, SanType, SerialNumber,
+    };
+
+    let issuer = |label: &str| -> Result<CertifiedIssuer<'static, KeyPair>> {
+        let mut params = CertificateParams::default();
+        params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        params.key_usages = vec![
+            KeyUsagePurpose::KeyCertSign,
+            KeyUsagePurpose::DigitalSignature,
+            KeyUsagePurpose::CrlSign,
+        ];
+        params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, label);
+        Ok(CertifiedIssuer::self_signed(params, KeyPair::generate()?)?)
+    };
+    let ca = issuer("rss-mqtt-test-ca")?;
+    let wrong_ca = issuer("rss-mqtt-test-wrong-ca")?;
+    let ca_pem = ca.pem();
+
+    let server_key = KeyPair::generate()?;
+    let mut server = CertificateParams::default();
+    server.is_ca = IsCa::ExplicitNoCa;
+    server.serial_number = Some(SerialNumber::from(1u64));
+    server.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+    server.subject_alt_names = vec![
+        SanType::DnsName("localhost".try_into()?),
+        SanType::IpAddress("127.0.0.1".parse()?),
+        SanType::IpAddress("::1".parse()?),
+    ];
+    let server_certificate = server.signed_by(&server_key, &ca)?;
+
+    let primary_client_id = mqtt_device_client_id(0x11);
+    let cross_client_id = mqtt_device_client_id(0x33);
+    let current_principal = mqtt_principal(MQTT_TENANT, MQTT_CURRENT_GENERATION);
+    let stale_principal = mqtt_principal(MQTT_TENANT, MQTT_STALE_GENERATION);
+    let cross_principal = mqtt_principal(MQTT_CROSS_TENANT, MQTT_CURRENT_GENERATION);
+
+    let credential = |revision, stable_client_id: &str, tls| MqttCredential {
+        revision,
+        stable_client_id: stable_client_id.to_owned(),
+        tls,
+    };
+    let rss_a = credential(
+        1,
+        MQTT_RSS_CLIENT_ID,
+        mqtt_client_material(&ca, &ca_pem, MQTT_RSS_CLIENT_ID, None, MQTT_RSS_A_SERIAL)?,
+    );
+    let rss_b = credential(
+        2,
+        MQTT_RSS_CLIENT_ID,
+        mqtt_client_material(&ca, &ca_pem, MQTT_RSS_CLIENT_ID, None, MQTT_RSS_B_SERIAL)?,
+    );
+    let device_current = credential(
+        MQTT_CURRENT_GENERATION,
+        &primary_client_id,
+        mqtt_client_material(
+            &ca,
+            &ca_pem,
+            &primary_client_id,
+            Some(&current_principal),
+            MQTT_DEVICE_CURRENT_SERIAL,
+        )?,
+    );
+    let device_stale = credential(
+        MQTT_STALE_GENERATION,
+        &primary_client_id,
+        mqtt_client_material(
+            &ca,
+            &ca_pem,
+            &primary_client_id,
+            Some(&stale_principal),
+            MQTT_DEVICE_STALE_SERIAL,
+        )?,
+    );
+    let device_cross_tenant = credential(
+        MQTT_CURRENT_GENERATION,
+        &cross_client_id,
+        mqtt_client_material(
+            &ca,
+            &ca_pem,
+            &cross_client_id,
+            Some(&cross_principal),
+            MQTT_DEVICE_CROSS_SERIAL,
+        )?,
+    );
+    let device_wrong_ca = credential(
+        MQTT_CURRENT_GENERATION,
+        &primary_client_id,
+        mqtt_client_material(
+            &wrong_ca,
+            &ca_pem,
+            &primary_client_id,
+            Some(&current_principal),
+            MQTT_DEVICE_CURRENT_SERIAL,
+        )?,
+    );
+    let device_no_certificate = credential(
+        MQTT_CURRENT_GENERATION,
+        &primary_client_id,
+        MqttFixtureTlsPem {
+            ca_pem: ca_pem.clone(),
+            certificate_pem: None,
+            private_key_pem: None,
+        },
+    );
+
+    let assertion_key = KeyPair::generate_for(&PKCS_ED25519)?;
+    let assertion_public_key = assertion_key
+        .public_key_raw()
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("Ed25519 public key must be exactly 32 bytes"))?;
+    let empty_crl_pem = mqtt_sign_crl(&ca, &[], 1)?;
+    let revoked_device_current_crl_pem = mqtt_sign_crl(&ca, &[MQTT_DEVICE_CURRENT_SERIAL], 2)?;
+    let acl = mqtt_exact_acl(&primary_client_id, &cross_client_id);
+    Ok(MqttGeneratedMaterial {
+        ca_pem,
+        server_certificate_pem: server_certificate.pem(),
+        server_private_key_pem: server_key.serialize_pem(),
+        assertion_signing_key_pem: assertion_key.serialize_pem(),
+        assertion_public_key,
+        empty_crl_pem,
+        revoked_device_current_crl_pem,
+        acl,
+        rss_a,
+        rss_b,
+        device_current,
+        device_stale,
+        device_cross_tenant,
+        device_wrong_ca,
+        device_no_certificate,
+    })
+}
+
+fn mqtt_exact_acl(primary_client_id: &str, cross_client_id: &str) -> String {
+    let mut acl = format!("user {MQTT_RSS_CLIENT_ID}\n");
+    for generation in [MQTT_STALE_GENERATION, MQTT_CURRENT_GENERATION] {
+        acl.push_str(&format!(
+            "topic write rss/v1/{MQTT_TENANT}/{MQTT_DEVICE}/{generation}/downlink/{MQTT_DOWNLINK_CONTRACT}\n"
+        ));
+        for contract in MQTT_UPLINK_CONTRACTS {
+            acl.push_str(&format!(
+                "topic read rss/v1/{MQTT_TENANT}/{MQTT_DEVICE}/{generation}/uplink/{contract}\n"
+            ));
+        }
+    }
+    acl.push_str(&format!("\nuser {primary_client_id}\n"));
+    for generation in [MQTT_STALE_GENERATION, MQTT_CURRENT_GENERATION] {
+        acl.push_str(&format!(
+            "topic read rss/v1/{MQTT_TENANT}/{MQTT_DEVICE}/{generation}/downlink/{MQTT_DOWNLINK_CONTRACT}\n"
+        ));
+        for contract in MQTT_UPLINK_CONTRACTS {
+            acl.push_str(&format!(
+                "topic write rss/v1/{MQTT_TENANT}/{MQTT_DEVICE}/{generation}/uplink/{contract}\n"
+            ));
+        }
+    }
+    acl.push_str(&format!("\nuser {cross_client_id}\n"));
+    acl.push_str(&format!(
+        "topic read rss/v1/{MQTT_CROSS_TENANT}/{MQTT_DEVICE}/{MQTT_CURRENT_GENERATION}/downlink/{MQTT_DOWNLINK_CONTRACT}\n"
+    ));
+    for contract in MQTT_UPLINK_CONTRACTS {
+        acl.push_str(&format!(
+            "topic write rss/v1/{MQTT_CROSS_TENANT}/{MQTT_DEVICE}/{MQTT_CURRENT_GENERATION}/uplink/{contract}\n"
         ));
     }
-    Ok(())
+    acl
 }
 
-/// **默认起容器（fail-closed 安全语义）**。仅当 `RSS_MQTT_TEST_URL` 非空时走外部 broker 路径。
-///
-/// 自起路径用 `testcontainers_modules::mosquitto::Mosquitto`（`eclipse-mosquitto`，anonymous，1883）。
-/// 外部路径：`RSS_MQTT_TEST_URL` 须为 `mqtt://` base URL（caller 负责 broker 可达 / 鉴权）。
-///
-/// # Example
-///
-/// ```ignore
-/// let mqtt = testkit::env_or_mosquitto().await?;
-/// // mqtt.url() 返回 "mqtt://host:port"
-/// ```
-pub async fn env_or_mosquitto() -> Result<MqttFixture> {
-    if let Some(url) = process_external_value("RSS_MQTT_TEST_URL")? {
-        validate_mqtt_url(&url)?;
-        return Ok(MqttFixture {
-            _container: None,
-            url,
-        });
-    }
-    let container = owned::start(Mosquitto::default(), ContainerService::Mosquitto).await?;
-    let host = container.get_host().await?.to_string();
-    let port = container.get_host_port_ipv4(MQTT_PORT).await?;
-    let url = format!("mqtt://{host}:{port}");
-    Ok(MqttFixture {
-        _container: Some(Box::new(container)),
-        url,
+fn mqtt_broker_config() -> &'static str {
+    "per_listener_settings true\
+\nlistener 8883\
+\nprotocol mqtt\
+\nallow_anonymous false\
+\ncafile /mosquitto/config/ca.pem\
+\ncertfile /mosquitto/config/server.pem\
+\nkeyfile /mosquitto/config/server-key.pem\
+\ncrlfile /mosquitto/config/ca.crl\
+\nrequire_certificate true\
+\nuse_identity_as_username true\
+\nuse_username_as_clientid true\
+\ntls_version tlsv1.3\
+\nacl_file /mosquitto/config/acl\
+\npersistence true\
+\npersistence_location /mosquitto/data/\
+\nautosave_interval 1\
+\nautosave_on_changes true\
+\nplugin /usr/lib/rss_mqtt_authn.so\
+\nplugin_opt_signing_key /mosquitto/config/assertion-key.pem\
+\nlog_dest stdout\
+\nlog_type all\
+\nconnection_messages true\n"
+}
+
+struct StartedMosquittoMtls {
+    container: Box<ContainerAsync<GenericImage>>,
+    url: String,
+}
+
+#[derive(Clone, Copy)]
+enum BrokerReadyMode {
+    /// After stop/start: only accept a readiness marker emitted in the new log suffix.
+    FreshStart { prior_stdout_len: usize },
+    /// After unpause: process continues; historical readiness marker + TCP is sufficient.
+    Resume,
+}
+
+async fn start_mosquitto_mtls_container(
+    bundle: &MqttBrokerBundle,
+    crl_pem: &str,
+) -> Result<StartedMosquittoMtls> {
+    let image = owned::build_mosquitto_mtls_image()
+        .await?
+        .with_exposed_port(MQTTS_PORT.tcp())
+        .with_wait_for(WaitFor::message_on_stdout(MOSQUITTO_READY_STDOUT));
+    let request = image
+        .with_copy_to(
+            "/mosquitto/config/mosquitto.conf",
+            mqtt_broker_config().as_bytes().to_vec(),
+        )
+        .with_copy_to("/mosquitto/config/acl", bundle.acl.as_bytes().to_vec())
+        .with_copy_to(
+            "/mosquitto/config/ca.pem",
+            bundle.ca_pem.as_bytes().to_vec(),
+        )
+        .with_copy_to("/mosquitto/config/ca.crl", crl_pem.as_bytes().to_vec())
+        .with_copy_to(
+            "/mosquitto/config/server.pem",
+            bundle.server_certificate_pem.as_bytes().to_vec(),
+        )
+        .with_copy_to(
+            CopyTargetOptions::new("/mosquitto/config/server-key.pem").with_mode(0o600),
+            bundle.server_private_key_pem.as_bytes().to_vec(),
+        )
+        .with_copy_to(
+            CopyTargetOptions::new("/mosquitto/config/assertion-key.pem").with_mode(0o600),
+            bundle.assertion_signing_key_pem.as_bytes().to_vec(),
+        )
+        .with_cmd(["mosquitto", "-c", "/mosquitto/config/mosquitto.conf"]);
+    let container = owned::start(request, ContainerService::Mosquitto).await?;
+    let host = container.get_host().await?;
+    let port = container.get_host_port_ipv4(MQTTS_PORT).await?;
+    Ok(StartedMosquittoMtls {
+        container: Box::new(container),
+        url: format!("mqtts://{host}:{port}"),
+    })
+}
+
+/// Starts the one production-shaped MQTT test broker. There is deliberately no environment URL
+/// fallback and no plaintext listener: T2 always exercises the same mTLS/plugin/ACL boundary.
+pub async fn mosquitto_mtls() -> Result<MqttMtlsFixture> {
+    let material = mqtt_generated_material()?;
+    let broker_bundle = MqttBrokerBundle {
+        ca_pem: material.ca_pem,
+        server_certificate_pem: material.server_certificate_pem,
+        server_private_key_pem: material.server_private_key_pem,
+        assertion_signing_key_pem: material.assertion_signing_key_pem,
+        acl: material.acl,
+    };
+    let started = start_mosquitto_mtls_container(&broker_bundle, &material.empty_crl_pem).await?;
+
+    Ok(MqttMtlsFixture {
+        container: started.container,
+        url: started.url,
+        assertion_public_key: material.assertion_public_key,
+        empty_crl_pem: material.empty_crl_pem,
+        revoked_device_current_crl_pem: material.revoked_device_current_crl_pem,
+        broker_bundle,
+        rss_a: material.rss_a,
+        rss_b: material.rss_b,
+        device_current: material.device_current,
+        device_stale: material.device_stale,
+        device_cross_tenant: material.device_cross_tenant,
+        device_wrong_ca: material.device_wrong_ca,
+        device_no_certificate: material.device_no_certificate,
     })
 }
 
@@ -2548,14 +3154,13 @@ mod tests {
     }
 
     /// Empty external-service variables are absence, never an opt-in. This pure decision
-    /// test covers all four resolvers without starting Docker.
+    /// test covers resolvers without starting Docker. MQTT has no external URL resolver.
     #[test]
     fn empty_external_environment_values_select_self_provision() {
         for key in [
             "RSS_TEST_ALLOW_EXTERNAL_POSTGRES",
             "REDIS_TEST_URL",
             "RSS_AMQP_TEST_URL",
-            "RSS_MQTT_TEST_URL",
         ] {
             assert_eq!(
                 non_empty_external_value(lookup(&[(key, "")]), key)
@@ -2673,24 +3278,6 @@ mod tests {
         assert!(!strict_test_db_name("testdb"), "testdb 须拒");
         // 拒：test 在前但以 _prod 结尾
         assert!(!strict_test_db_name("test_prod"), "test_prod 须拒");
-    }
-
-    /// validate_mqtt_url：mqtt:// 通过；非 mqtt 协议（http/mqtts）拒绝。
-    #[test]
-    fn validate_mqtt_url_table() {
-        assert!(validate_mqtt_url("mqtt://h:1883").is_ok(), "mqtt:// 须通");
-        assert!(
-            validate_mqtt_url("mqtt://user:pass@h:1883").is_ok(),
-            "含凭据 mqtt:// 须通"
-        );
-        assert!(
-            validate_mqtt_url("mqtts://h:8883").is_err(),
-            "mqtts:// 须拒（adapter v1 仅明文）"
-        );
-        assert!(
-            validate_mqtt_url("http://h:1883").is_err(),
-            "非 mqtt 协议须拒"
-        );
     }
 
     /// validate_amqp_base_url：base URL（无 vhost）通过；含非空 vhost 段报错。

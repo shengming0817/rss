@@ -107,20 +107,20 @@ mod conformance_error_category_tests {
     }
 }
 
-// 容器 fixture（#1137，仅 `containers` feature）：legacy `env_or_*` resolver 覆盖
-// postgres/redis/rabbitmq/mqtt；hermetic TLS guard 覆盖 postgres/redis/rabbitmq/MinIO/Vault。
+// 容器 fixture（#1137，仅 `containers` feature）：legacy `env_or_*` resolver 仅覆盖
+// postgres/redis/rabbitmq；MQTT 与其它安全敏感 provider 使用 hermetic TLS guard。
 // 供 adapter 集成测试 + journeys durable journey 经 [dev-dependencies] 消费。零内部 workspace 依赖（只回
 // typed 连接坐标与信任材料，不构造 adapter 类型）。default 构建 / 契约 harness 消费方不拉 testcontainers 树。
 #[cfg(feature = "containers")]
 mod containers;
 #[cfg(feature = "containers")]
 pub use containers::{
-    ContainerService, FixtureError, MinioCredentials, MinioTlsFixture, MqttFixture, PgConnParams,
-    PgFixture, PgTlsFixture, PostgresTestLogin, RabbitFixture, RabbitTlsFixture, RedisFixture,
-    RedisTlsFixture, VaultTlsFixture, env_or_mosquitto, env_or_postgres, env_or_rabbitmq,
-    env_or_redis, integration_container_labels, minio_tls_archive, postgres_tls,
-    provision_postgres_test_logins, provision_postgres_test_logins_with_private_ca, rabbitmq_tls,
-    redis_tls, vault_tls,
+    ContainerService, FixtureError, MinioCredentials, MinioTlsFixture, MqttCredential,
+    MqttFixtureTlsPem, MqttMtlsFixture, PgConnParams, PgFixture, PgTlsFixture, PostgresTestLogin,
+    RabbitFixture, RabbitTlsFixture, RedisFixture, RedisTlsFixture, VaultTlsFixture,
+    env_or_postgres, env_or_rabbitmq, env_or_redis, integration_container_labels,
+    minio_tls_archive, mosquitto_mtls, postgres_tls, provision_postgres_test_logins,
+    provision_postgres_test_logins_with_private_ca, rabbitmq_tls, redis_tls, vault_tls,
 };
 
 // Provider-neutral eventing taxonomy/assertions are dependency-free and intentionally available

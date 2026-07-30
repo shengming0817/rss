@@ -1246,7 +1246,7 @@ fn integration_batch_args(
 
     let mut args = vec![
         "--features".to_owned(),
-        "integration".to_owned(),
+        batch.feature.to_owned(),
         if allow_empty_partition {
             "--no-tests=pass".to_owned()
         } else {

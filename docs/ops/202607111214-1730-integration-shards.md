@@ -30,7 +30,7 @@ serial，再跑 parallel。`.config/nextest.toml` 不承载 integration shard �
 | Shard | 所需资源 | Serial targets | Parallel targets |
 |-------|----------|----------------|------------------|
 | `postgres-domain` | Postgres | `postgres:postgres` (lib)、`postgres-migration:postgres_migration` (lib)、`journeys:audit_list_tenant_entries_localtx_journey`、`journeys:identity_password_security_event_journey`、`journeys:settings_secret_publish_localtx_journey`、`runtime:settings_secret_e2e` | `postgres:feature_manifest`、`postgres:migration_ops_contract`、`postgres:tenant_transaction_trybuild`、`journeys:identity_logout_grant_journey` |
-| `event-transport` | Postgres、Redis、AMQP、MQTT | `amqp:integration`、`mqtt:integration`、`journeys:amqp_consumer_at_least_once_journey`、`journeys:identity_login_audit_durable_journey`、`runtime:event_transport_durable_e2e` | `amqp:amqp` (lib)、`mqtt:mqtt` (lib)、`journeys:eventtransport_journey`、`journeys:identity_login_audit_journey` |
+| `event-transport` | Postgres、Redis、AMQP、MQTT（Docker-only） | `amqp:integration`、`mqtt:integration`（`mqtt/broker-tests`）、`journeys:amqp_consumer_at_least_once_journey`、`journeys:identity_login_audit_durable_journey`、`runtime:event_transport_durable_e2e` | `amqp:amqp` (lib)、`mqtt:mqtt` (lib)、`journeys:eventtransport_journey`、`journeys:identity_login_audit_journey` |
 | `runtime-http-auth` | Postgres、Redis | `runtime:runtime` (lib)、`runtime:configs_ready_e2e`、`runtime:identity_login_wire_e2e`、`runtime:service_token_replay_e2e`、`runtime:wire_contract_e2e` | `runtime:auth_e2e`、`runtime:infra_builders_api`、`runtime:refresh_mint_e2e`、`runtime:key_rotation_e2e`、`runtime:runtime_outputs_trybuild`、`runtime:runtime_serve_e2e` |
 | `consistency-fault` | Postgres、Redis、AMQP | `redis-adapter:integration_claimer`、`journeys-fault-matrix:consistency_fault_matrix_journey` | `redis-adapter:redis` (lib)、`testkit:provider_catalog_trybuild` |
 | `cdc-projection-saga` | Postgres | `runtime:settings_config_publish_durable_e2e` | `journeys:saga_projection_deps_journey`、`journeys:settings_config_publish_journey` |
@@ -47,14 +47,16 @@ OutboxFact 的 `identity_logout_grant_journey` 由 Parallel batch 调度。各 b
 
 ## 资源解析
 
-缺少 shard 所需的任一外部资源时才要求 Docker，以 testcontainers self-provision；无关资源不阻塞该 shard。
-外部资源的就绪判据为：
+缺少 shard 所需的任一可替代外部资源时才要求 Docker，以 testcontainers self-provision；无关资源不阻塞该
+shard。MQTT 是显式例外：其 T2 必须同时证明 fixture-owned PKI、exact ACL、正式 broker plugin、persistence
+和 restart，故 `event-transport` 运行 MQTT target 时始终要求 Docker，外部 URL 不能替代。其余外部资源的
+就绪判据为：
 
 - Postgres：非空 `RSS_TEST_ALLOW_EXTERNAL_POSTGRES`，且 `PGHOST`、`PGPORT`、`PGDATABASE`、
   `PGUSER`、`PGPASSWORD` 五项均非空。
 - Redis：非空 `REDIS_TEST_URL`。
 - AMQP：非空 `RSS_AMQP_TEST_URL`。
-- MQTT：非空 `RSS_MQTT_TEST_URL`。
+- MQTT：不接受外部资源输入；`RSS_MQTT_TEST_URL` 不再是配置面，测试始终使用 hermetic MQTTS fixture。
 - Object storage：不接受外部资源输入；`object-storage` shard 始终使用 testkit 自建的 hermetic TLS MinIO。
 
 例如 `postgres-domain` 不要求 Redis、AMQP 或 MQTT；`consistency-fault` 不要求 MQTT。外部 AMQP
@@ -76,7 +78,19 @@ selector 的闭合映射由代码 gate 证明，本文不承担 enforcement。�
 `integration/production-runtime` 的 900 秒 SLO 预算和 develop/nightly 路由；本次 carrier 替换不新增 workflow、
 scheduler 或 CI 路径。
 
+MQTT production code 默认编译；`broker-tests` 只打开 Docker-backed T2，不控制 runtime 实现。typed shard
+catalog 为 `mqtt:integration` 精确启用 `mqtt/broker-tests`，其它 package 继续使用各自的 `integration`
+feature；缺 feature、改回通用 feature 或恢复 URL fallback 都会造成 catalog/behavior drift。
+
 ## 本地运行与故障定位
+
+MQTT broker T2 的唯一直接复现命令是：
+
+```bash
+./hack/cargo.sh test -p mqtt --features broker-tests --test integration
+```
+
+该命令构建并启动 repository Dockerfile 所定义的 Mosquitto mTLS/plugin fixture，不读取外部 broker URL。
 
 精确复现 GitHub 九行 matrix：
 

@@ -3,7 +3,7 @@ name = "rss_diport_envelope_reserved_writer"
 version = "0.0.0"
 edition = "2024"
 publish = false
-description = "RSS 治理：diport::EnvelopeMetadata::insert_wire_pair（reserved-capable wire 透传写面）仅 adapter（adapters/）/ 组合根（bins/assemblies）可调（callsite allowlist，INVARIANT DIPORT-ENVELOPE-WIRE-WRITER-01）"
+description = "RSS 治理：diport EnvelopeMetadata::insert_wire_pair callsite allowlist（adapters/bins/assemblies）；INVARIANT DIPORT-ENVELOPE-WIRE-WRITER-01"
 
 [lib]
 crate-type = ["cdylib", "rlib"]   # rlib 供 [[example]] ui fixture 链接（ui_test_example 经此暴露 dev-dep diport）

@@ -743,7 +743,7 @@ fn step_integration_compile() -> Step {
             "-p",
             "runtime",
             "--features",
-            "integration",
+            "integration,mqtt/broker-tests",
             "--no-run",
         ],
         kind: StepKind::Cargo,
@@ -3837,6 +3837,20 @@ mod tests {
                     .map(|pair| pair[1].as_str())
                     .collect();
                 assert_eq!(selected_packages, [batch.package]);
+                let expected_feature =
+                    integration_shards::LocalFeatureScope::for_package(batch.package)
+                        .expect("batch package maps to LocalFeatureScope")
+                        .feature();
+                assert_eq!(batch.feature, expected_feature);
+                assert!(
+                    args.windows(2)
+                        .any(|pair| pair[0] == "--features" && pair[1] == expected_feature),
+                    "package {} must enable feature {expected_feature}, args={args:?}",
+                    batch.package
+                );
+                if batch.package == integration_shards::LocalFeatureScope::Mqtt.package() {
+                    assert_eq!(expected_feature, "broker-tests");
+                }
                 match batch.kind {
                     integration_shards::TargetKind::Lib => {
                         assert!(args.iter().any(|arg| arg == "--lib"));
