@@ -49,9 +49,10 @@ RSS `{ exp, nbf, iat, iss, aud, sub, tenant_id, kind=user, sid, jti, auth_time, 
 
 ### `Authenticated`（放行证据 extension）
 - 基础级类型，**零 authn 依赖**；私有字段固定 `scheme`、`principal_kind`、subject 与 tenant。
-  生产 constructor 按 `new_rss_user` / `new_federated` / `new_service` / `new_mtls` 闭合；RSS 额外
-  必须携 opaque `CurrentAuthGrant`。constructor callsite 由 `rss_authenticated_callsite` DefId dylint 限精确
-  runtime wrapper（AUTH-EVIDENCE-MINT-01）。
+  生产 constructor 按 `new_rss_user` / `new_federated` / `new_service` / `new_mtls` 闭合，且首参须
+  `authmint::AuthenticatedMint`。AUTH-EVIDENCE-MINT-01：**Hard** = capability token + deny.toml
+  wrappers；**Medium** = `rss_authenticated_callsite` exact mint allowlist + proof-consuming
+  （assembly 内 defense-in-depth）。RSS 路径另须携 opaque `CurrentAuthGrant`（见下不变式）。
 - enforce 层对 `Require(required)` 路由：request extension 携 `Authenticated`、其 `principal_kind` 非 `Anonymous`、**且 `scheme()` exact-match `required`** → 放行；无证据 / `Anonymous` / 方案不匹配（如 Jwt 证据撞 `Require(Mtls)`）→ fail-closed 401（AUTH-EVIDENCE-REQUIRE-01，杜绝 scheme 混淆）。
 - **不引** `authn::Principal`（避免跨层依赖）；组合根桥接把 Principal + 验证的 scheme 降维成 `Authenticated`。
 
@@ -87,7 +88,11 @@ RSS `{ exp, nbf, iat, iss, aud, sub, tenant_id, kind=user, sid, jti, auth_time, 
 - **VerifiedClaims 仅 Pdp 验签后按 profile-specific shape mint**（ADR-006 ①；RSS quartet 由 claim matrix 回归）：不存在通用 `new`。
 - **Principal 仅经 from_verified_*(&newtype) 派生**（ADR-006 ②，Hard：`VerifiedJwt` `pub(crate) seal`）。
 - **Box<DynPdp> 注入必填**（Hard：构造器位置参，缺失即编译错）。
-- **Authenticated 缺失 / scheme 不匹配 / RSS 缺 current marker → fail-closed 401**（私有字段与
-  profile-specific shape = **Hard/类型层**；enforce 默认拒 + exact-match = **Medium**；constructors 与
-  current marker 仅精确组合根 wrapper = **Medium** DefId callsite dylint）。
+- **Authenticated 缺失 / scheme 不匹配 → fail-closed 401**（私有字段与 profile-specific shape =
+  **Hard/类型层**；enforce 默认拒 + exact-match = **Medium**）。
+- **Authenticated 生产 mint（AUTH-EVIDENCE-MINT-01）**：须 `authmint::AuthenticatedMint` =
+  **Hard**（token + deny.toml wrappers）；exact mint allowlist + proof-consuming =
+  **Medium**（`rss_authenticated_callsite` dylint，assembly 内 defense-in-depth）。
+- **`CurrentAuthGrant` / current marker**：仅精确组合根 wrapper 可调 = **Medium** DefId callsite
+  dylint（与 Authenticated mint Hard/Medium 分述，勿粘连）。
 - **stub Pdp 不入生产 bin**（Medium：deny.toml adapter wrapper + dev-dep 隔离）。

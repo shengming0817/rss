@@ -54,7 +54,9 @@ dylint_linting = "6.0.1"
 dylint_testing = "6.0.1"
 # ui fixture 调真 httpserve funnel：lint 按 callee crate 名（httpserve）匹配，本地 stub 无法触发。
 # vocab 供 PrincipalKind、primitives 供 RequiredScheme 实参。
+# authmint：UI 须传入 Hard capability token（lints 独立 workspace，不受根 deny.toml wrappers 约束）。
 httpserve = { path = "../../crates/httpserve" }
+authmint = { path = "../../crates/authmint" }
 authn = { path = "../../crates/authn" }
 identity = { path = "../../crates/identity" }
 ids = { path = "../../crates/ids" }

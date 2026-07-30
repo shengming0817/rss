@@ -626,6 +626,7 @@ mod tests {
         let permissions =
             diport::VerifiedFederatedPermissions::new([vocab::GrantPermission::route(permission)])?;
         let authenticated = httpserve::Authenticated::new_federated(
+            authmint::AuthenticatedMint::capability(),
             kind,
             "inventory-operator",
             tenant,

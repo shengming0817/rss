@@ -156,7 +156,11 @@ fn allow_evidence(
         return None;
     }
     Some((
-        Authenticated::new_rss_user(principal.audit_subject(), tenant),
+        Authenticated::new_rss_user(
+            authmint::AuthenticatedMint::capability(),
+            principal.audit_subject(),
+            tenant,
+        ),
         current,
     ))
 }

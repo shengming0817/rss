@@ -33,8 +33,12 @@
 //!   失败记 `authz.decision=deny` + 九个固定 `authz.deny_reason` 标签（见 [`deny_reason`]）+ `AuthnError`
 //!   变体；**绝不**记 token / subject / claims。
 //!
-//! `Authenticated::new` callsite 由 `rss_authenticated_callsite` dylint 限组合根
-//! （`server`/`rss`/`runtime` 在 allowlist；runtime = assemblies/runtime 组合根）。
+//! `Authenticated` production mint：
+//! - **Hard**：`authmint::AuthenticatedMint` + deny.toml wrappers（AUTH-EVIDENCE-MINT-01）——本桥持
+//!   capability 并调用 profile-specific constructors。
+//! - **Medium**：`rss_authenticated_callsite` exact mint allowlist + proof-consuming——仅本文件列明的
+//!   `auth_bridge::{allow_evidence,mtls_evidence}` 可 mint（assembly 内 defense-in-depth）。
+//! Principal 降维 accessor callsite 同由该 lint 限组合根 verification wrapper（AUTHN-FUNNEL-CALLSITE-01）。
 //!
 //! ref: tower-rs/tower-http tower-http/src/auth/async_require_authorization.rs@main
 //!   （`AsyncAuthorizeRequest::authorize` → `request.extensions_mut().insert(principal)` 后透传 next 的范式）。
@@ -425,9 +429,10 @@ fn allow_evidence(
         tenant,
         current_grant,
     ) {
-        (RequiredScheme::ServiceToken, Some(caller), Some(tenant), None) => {
-            (Authenticated::new_service(tenant, caller), None)
-        }
+        (RequiredScheme::ServiceToken, Some(caller), Some(tenant), None) => (
+            Authenticated::new_service(authmint::AuthenticatedMint::capability(), tenant, caller),
+            None,
+        ),
         (RequiredScheme::RssAccessToken, None, Some(tenant), Some(current))
             if kind == PrincipalKind::User =>
         {
@@ -436,14 +441,24 @@ fn allow_evidence(
                 return None;
             }
             (
-                Authenticated::new_rss_user(principal.audit_subject(), tenant),
+                Authenticated::new_rss_user(
+                    authmint::AuthenticatedMint::capability(),
+                    principal.audit_subject(),
+                    tenant,
+                ),
                 Some(current),
             )
         }
         (RequiredScheme::FederatedAccessToken, None, tenant, None) => {
             let permissions = verified_federated.as_ref()?.permissions();
             (
-                Authenticated::new_federated(kind, principal.audit_subject(), tenant, permissions),
+                Authenticated::new_federated(
+                    authmint::AuthenticatedMint::capability(),
+                    kind,
+                    principal.audit_subject(),
+                    tenant,
+                    permissions,
+                ),
                 None,
             )
         }
@@ -481,7 +496,10 @@ fn mtls_evidence(req: &Request) -> Option<Authenticated> {
         scoped_principal = false,
         "verify-bridge-mtls"
     );
-    Some(Authenticated::new_mtls(peer.spiffe_id().as_str()))
+    Some(Authenticated::new_mtls(
+        authmint::AuthenticatedMint::capability(),
+        peer.spiffe_id().as_str(),
+    ))
 }
 
 /// 验签失败 deny 埋点（`AuthnError` 变体 + 闭值 `authz.deny_reason`，脱敏）。

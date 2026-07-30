@@ -813,7 +813,7 @@ fn test_authenticated(
     tenant: Option<TenantId>,
 ) -> Result<httpserve::Authenticated> {
     if kind == PrincipalKind::User {
-        return Ok(httpserve::Authenticated::new_rss_user(
+        return Ok(httpserve::Authenticated::new_rss_user_for_test(
             subject,
             tenant.context("RSS user test evidence requires tenant")?,
         ));
@@ -821,7 +821,7 @@ fn test_authenticated(
     let permissions = diport::VerifiedFederatedPermissions::new([vocab::GrantPermission::route(
         vocab::RoutePermissionId::SettingsConfigPublish,
     )])?;
-    Ok(httpserve::Authenticated::new_federated(
+    Ok(httpserve::Authenticated::new_federated_for_test(
         kind,
         subject,
         tenant,

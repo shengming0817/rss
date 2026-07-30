@@ -18,9 +18,10 @@
 //! httpserve 自身不构造、不验签（finalize_auth 签名冻结，无 verifier 参）；本 crate 单独 merge 无注入方 →
 //! 所有 Require 路由仍 401，零端点放开（Medium，单测 + tests/runtime.rs 集成测试守）。
 //!
-//! INVARIANT: AUTH-EVIDENCE-MINT-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }—— [`Authenticated`] 私有字段使非法 shape 不可表示；
-//! profile-specific constructors 的精确组合根来源另由 Medium
-//! `rss_authenticated_callsite` DefId callsite dylint 封闭，杜绝域 crate 伪造证据绕过 enforce。
+//! INVARIANT: AUTH-EVIDENCE-MINT-01 { level = "Hard", exec = "native-compile", source = "code", native = "capability token + crate graph" }—— [`Authenticated`] 私有字段使非法 shape 不可表示；
+//! production profile-specific constructors 要求 [`authmint::AuthenticatedMint`]（组合根经 deny.toml wrappers 持有）；
+//! Medium exact mint allowlist + proof-consuming 由 `rss_authenticated_callsite` 守（assembly 内 defense-in-depth；
+//! 同 lint 另守 Principal accessor / AuthGrant / JWT / ConfigValue，AUTHN-FUNNEL-CALLSITE-01）。
 //!
 //! tower readiness 契约：call 使用的 inner 实例必须是 poll_ready 的实例。
 //! 采用 clone-replace 模式：call 入口 clone 一份新实例用于放行分支，原 self.inner
@@ -548,8 +549,10 @@ pub async fn authorize_subject_for_permission(
 /// [`diport::AuditEvent`]，不得写入普通 tracing / Debug / metrics label。httpserve 仍不依赖 authn：组合根验签桥
 /// 负责把 `authn::Principal` 降维成本类型。`scheme` 用 [`RequiredScheme`]（非 `AuthScheme`）：类型层杜绝
 /// 「`NoAuth` 证据」自相矛盾——无认证不产证据。私有字段 + profile-specific constructors 构造 funnel：
-/// 外部可命名 / 收发、不可篡字段；production callsite 由 `rss_authenticated_callsite` dylint 限精确组合根 wrapper
-/// （AUTH-EVIDENCE-MINT-01）。**不 derive `Serialize`**（内部证据，非 wire 类型）。
+/// 外部可命名 / 收发、不可篡字段；production mint 须持 [`authmint::AuthenticatedMint`]（AUTH-EVIDENCE-MINT-01 Hard：
+/// token + deny.toml wrappers 限制持有方为 httpserve 与 assembly 组合根）+ Medium exact mint allowlist /
+/// proof-consuming（`rss_authenticated_callsite`，assembly 内 defense-in-depth）。
+/// **不 derive `Serialize`**（内部证据，非 wire 类型）。
 ///
 /// 注入方（验签桥）由组合根外层 `.layer()` 装配，本 crate 不构造（与 `AuthPlan` 同治理姿态：域 crate 不构造、
 /// 组合根注入）；对标 tower-http `AsyncAuthorizeRequest::authorize` 内 `request.extensions_mut().insert(principal)`
@@ -602,8 +605,42 @@ impl Authenticated {
         }
     }
 
+    /// Test-only federated evidence with verified permissions（journeys 等不得依赖 `authmint`）。
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn new_federated_for_test(
+        principal_kind: PrincipalKind,
+        principal_id: impl Into<String>,
+        tenant_id: Option<TenantId>,
+        permissions: &diport::VerifiedFederatedPermissions,
+    ) -> Self {
+        Self {
+            scheme: RequiredScheme::FederatedAccessToken,
+            principal_kind,
+            principal_id: principal_id.into(),
+            tenant_id,
+            service_caller: None,
+            federated_permissions: Some(permissions.as_slice().to_vec().into_boxed_slice()),
+        }
+    }
+
+    /// Test-only RSS User evidence with forced tenant（journeys 等不得依赖 `authmint`）。
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn new_rss_user_for_test(principal_id: impl Into<String>, tenant_id: TenantId) -> Self {
+        Self {
+            scheme: RequiredScheme::RssAccessToken,
+            principal_kind: PrincipalKind::User,
+            principal_id: principal_id.into(),
+            tenant_id: Some(tenant_id),
+            service_caller: None,
+            federated_permissions: None,
+        }
+    }
+
     /// Construct federated access evidence.
+    ///
+    /// Requires [`authmint::AuthenticatedMint`] (AUTH-EVIDENCE-MINT-01 Hard).
     pub fn new_federated(
+        _mint: authmint::AuthenticatedMint,
         principal_kind: PrincipalKind,
         principal_id: impl Into<String>,
         tenant_id: Option<TenantId>,
@@ -621,7 +658,13 @@ impl Authenticated {
 
     /// Construct local RSS User authentication evidence after durable grant validation.
     /// Grant correlation remains in identity-owned request evidence.
-    pub fn new_rss_user(principal_id: impl Into<String>, tenant_id: TenantId) -> Self {
+    ///
+    /// Requires [`authmint::AuthenticatedMint`] (AUTH-EVIDENCE-MINT-01 Hard).
+    pub fn new_rss_user(
+        _mint: authmint::AuthenticatedMint,
+        principal_id: impl Into<String>,
+        tenant_id: TenantId,
+    ) -> Self {
         Self {
             scheme: RequiredScheme::RssAccessToken,
             principal_kind: PrincipalKind::User,
@@ -633,7 +676,9 @@ impl Authenticated {
     }
 
     /// Construct mTLS transport evidence for a verified service peer.
-    pub fn new_mtls(principal_id: impl Into<String>) -> Self {
+    ///
+    /// Requires [`authmint::AuthenticatedMint`] (AUTH-EVIDENCE-MINT-01 Hard).
+    pub fn new_mtls(_mint: authmint::AuthenticatedMint, principal_id: impl Into<String>) -> Self {
         Self {
             scheme: RequiredScheme::Mtls,
             principal_kind: PrincipalKind::Service,
@@ -645,7 +690,13 @@ impl Authenticated {
     }
 
     /// Construct service-token evidence with its verified closed caller domain.
-    pub fn new_service(tenant_id: TenantId, caller: vocab::ServiceCallerDomain) -> Self {
+    ///
+    /// Requires [`authmint::AuthenticatedMint`] (AUTH-EVIDENCE-MINT-01 Hard).
+    pub fn new_service(
+        _mint: authmint::AuthenticatedMint,
+        tenant_id: TenantId,
+        caller: vocab::ServiceCallerDomain,
+    ) -> Self {
         Self {
             scheme: RequiredScheme::ServiceToken,
             principal_kind: PrincipalKind::Service,
@@ -1483,8 +1534,11 @@ mod tests {
     #[allow(clippy::expect_used)]
     fn service_route_authorization_binds_verified_caller_to_exact_contract() {
         let tenant = TenantId::parse(TEST_TENANT).expect("tenant fixture");
-        let evidence =
-            Authenticated::new_service(tenant, vocab::ServiceCallerDomain::MaintenanceOperator);
+        let evidence = Authenticated::new_service(
+            authmint::AuthenticatedMint::capability(),
+            tenant,
+            vocab::ServiceCallerDomain::MaintenanceOperator,
+        );
         let meta = RouteMeta {
             evidence: TEST_EVIDENCE,
             method: Method::GET,

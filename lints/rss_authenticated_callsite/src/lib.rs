@@ -1,27 +1,22 @@
 #![feature(rustc_private)]
-//! `rss_authenticated_callsite` — RSS 治理 dylint lint：限定认证证据、审计 subject 与 verified
-//! maintenance capability funnel 仅组合根可调用。
-//! `httpserve::Authenticated` profile-specific constructors 与
-//! `authn::Principal::{audit_subject,service_caller_domain}` 与
-//! `postgres::ConfigValueMaintenanceCapability::from_verified_service_caller` 仅 assembly / bin crate
-//! （组合根）可调用。DLQ verified subject 由专用 `rss_dlq_operator_callsite` 守护。
+//! `rss_authenticated_callsite` — RSS 治理 dylint lint：限定认证证据 mint、Principal 降维 accessor、
+//! AuthGrant/RSS issue、settingsonly raw JWT reparse 与 verified maintenance capability 仅组合根
+//! verification wrapper 可调用。DLQ verified subject 由专用 `rss_dlq_operator_callsite` 守护。
 //!
 //! INVARIANT: AUTH-EVIDENCE-MINT-01 { level = "Medium", exec = "check", source = "dylint" }
+//! —— Medium exact mint allowlist + proof-consuming（assembly 内 defense-in-depth）。Hard 半段见
+//! `authmint` / `httpserve`（capability token + deny.toml wrappers）。
+//! INVARIANT: AUTHN-FUNNEL-CALLSITE-01 { level = "Medium", exec = "check", source = "dylint" }
+//! —— Principal accessor / AuthGrant·RSS issue / settingsonly JWT / ConfigValue capability 同闸。
 //!
 //! `Authenticated` 是 enforce 层放行 `Require` 路由的认证证据（INVARIANT AUTH-EVIDENCE-REQUIRE-01）：
-//! 请求携该 extension 即放行。它必须由组合根（assembly / bin）的验签桥在凭据校验通过后经外层 `.layer()`
-//! 注入；域 crate 若直接调用任一 `Authenticated` 构造 funnel 并注入 extension 即可伪造证据绕过鉴权。
-//!
-//! 与 `rss_authplan_callsite`（AUTH-PLAN-MINT-01）同治理姿态：`AuthPlan` 是 listener 级认证计划、
-//! `Authenticated` 是 per-request 认证证据，二者均为安全敏感 mint，均限组合根构造。`Authenticated` 字段私有
-//! （外部无法 struct-literal 伪造），构造入口闭集为 profile-specific constructors；
-//! AuthGrant/RSS issue 生产链亦按 callee DefId + caller impl ADT 的完整
-//! DefPath 同闸闭合 funnel；caller 的 crate/type/method 短名不足以证明它是 canonical service。
+//! 请求携该 extension 即放行。生产构造须持 Hard token；本 Medium lint 再守「仅精确验签桥 + 消费 proof」。
 //!
 //! 上下游强度（ai-robust.md §审查要求「Funnel 类约束分别说明上游 / 下游」）：
-//! - 上游（构造守卫）：`Authenticated` 字段私有，外部 crate 仅能经构造入口闭集合法构造——类型层私有字段已封
-//!   struct literal，但 runtime 验签桥跨 crate，故 profile-specific constructors 经同一 callsite lint 约束。
-//! - 下游（使用守卫）：`Authenticated` 可 Clone 传递，使用侧无需 mint——mint 点即唯一约束面。
+//! - 上游 Hard：`authmint` token + deny.toml wrappers——域 / journeys 不可依赖 authmint，无法命名 capability。
+//! - 下游 Medium（本 lint）：即便 assembly 持有 token，仍只能在列明 exact wrapper 内 mint，且须消费
+//!   已验证 proof（防 assembly 内旁路铸证）。
+//! - 使用侧：`Authenticated` 可 Clone 传递，无需再 mint。
 //!
 //! 判定四步：① callee crate 名；② item 名属于对应闭集；③ parent 是 Impl；
 //! ④ impl self 类型的 adt 名 == "Authenticated"（self-ty 检查，杜绝 `Vec::new` 等同名 fn 误报）。
@@ -111,13 +106,14 @@ const ALLOWED_CONFIG_VALUE_CAPABILITY_FUNCTION: (&str, &str) = (
 
 dylint_linting::declare_late_lint! {
     /// ### What it does
-    /// 标记未授权 caller 对 evidence / AuthGrant / RSS issue funnel 的**任意 path 引用**（直接
-    /// call、函数项别名、fn-pointer 强转——凡解析到对应 assoc fn DefId）。
+    /// 标记未授权 caller 对 Authenticated mint / Principal accessor / AuthGrant / JWT / ConfigValue
+    /// funnel 的**任意 path 引用**（直接 call、函数项别名、fn-pointer 强转——凡解析到对应 assoc fn DefId）。
     ///
     /// ### Why is this bad?
-    /// `Authenticated` 是 enforce 层放行 `Require` 路由的认证证据，必须由组合根（assembly / bin crate）的验签桥
-    /// 在凭据校验通过后构造并经外层 `.layer()` 注入。域 crate 直接 mint `Authenticated` 可伪造证据绕过鉴权。
-    /// INVARIANT: AUTH-EVIDENCE-MINT-01 { level = "Medium", exec = "check", source = "dylint" }（与 AUTH-PLAN-MINT-01 同治理姿态）。
+    /// `Authenticated` 是 enforce 层放行证据：Hard（`authmint` token + deny）只回答谁可持有 mint 能力；
+    /// 本 Medium exact allowlist + proof-consuming 防 assembly 内旁路铸证。Principal 降维与 AuthGrant/RSS
+    /// issue / JWT reparse / ConfigValue capability 同闸。见 crate rustdoc 的 AUTH-EVIDENCE-MINT-01 /
+    /// AUTHN-FUNNEL-CALLSITE-01 锚点。
     ///
     /// ### Known problems
     /// 仍 intraprocedural：allowlist crate 内 wrapper fn 被外部调用会**跨函数**洗白（跟踪 #1085）。
@@ -128,15 +124,17 @@ dylint_linting::declare_late_lint! {
     /// ```ignore
     /// // 域 crate（非组合根）：
     /// let ev = httpserve::Authenticated::new_federated(
+    ///     authmint::AuthenticatedMint::capability(),
     ///     vocab::PrincipalKind::User,
     ///     "subject-1",
     ///     None,
-    /// ); // 触发
+    ///     permissions,
+    /// ); // 触发（且域 crate 通常编不过 Hard token）
     /// ```
-    /// Use instead: 在 assembly / bin crate 的组合根验签桥中构造 `Authenticated`，经外层 `.layer()` 注入。
+    /// Use instead: 在列明的组合根 `auth_bridge` 精确验签桥中构造 `Authenticated`，经外层 `.layer()` 注入。
     pub RSS_AUTHENTICATED_CALLSITE,
     Warn,
-    "Authenticated 证据构造仅限组合根 crate（assembly / bin）（callsite-allowlist，INVARIANT AUTH-EVIDENCE-MINT-01)"
+    "Authenticated mint / Principal·AuthGrant·JWT·ConfigValue funnel 仅限组合根 verification wrapper（AUTH-EVIDENCE-MINT-01 Medium + AUTHN-FUNNEL-CALLSITE-01）"
 }
 
 impl<'tcx> LateLintPass<'tcx> for RssAuthenticatedCallsite {
@@ -244,18 +242,30 @@ fn is_settingsonly_raw_jwt_reparse_did(cx: &LateContext<'_>, did: DefId) -> bool
 }
 
 fn authenticated_mint_help(cx: &LateContext<'_>) -> &'static str {
-    if cx.tcx.crate_name(LOCAL_CRATE).as_str() == "identityaudit" {
-        "仅在 identityaudit `auth_bridge::allow_evidence` 精确 proof-consuming 验签桥中构造 RSS Authenticated evidence；其它位置不得 mint evidence"
-    } else {
-        "仅在 runtime `auth_bridge::{allow_evidence,mtls_evidence}` 的精确验签桥函数中构造 Authenticated；其它 runtime 代码同样不得 mint evidence"
+    match cx.tcx.crate_name(LOCAL_CRATE).as_str() {
+        "identityaudit" => {
+            "仅在 identityaudit `auth_bridge::allow_evidence` 精确 proof-consuming 验签桥中构造 RSS Authenticated evidence；其它位置不得 mint evidence"
+        }
+        "settingsonly" => {
+            "仅在 settingsonly `auth_bridge::federated_evidence` 精确 proof-consuming 验签桥中构造 Authenticated；其它位置不得 mint evidence"
+        }
+        _ => {
+            "仅在 runtime `auth_bridge::{allow_evidence,mtls_evidence}` 的精确验签桥函数中构造 Authenticated；其它 runtime 代码同样不得 mint evidence"
+        }
     }
 }
 
 fn principal_accessor_help(cx: &LateContext<'_>) -> &'static str {
-    if cx.tcx.crate_name(LOCAL_CRATE).as_str() == "identityaudit" {
-        "仅在 identityaudit `auth_bridge::allow_evidence` proof-consuming wrapper 中读取 Principal 身份；其它位置不得降维 verified Principal"
-    } else {
-        "仅在列明的 runtime verification wrapper 中读取 Principal 身份；其它 runtime 代码同样不得把 verified Principal 降维为可转传值"
+    match cx.tcx.crate_name(LOCAL_CRATE).as_str() {
+        "identityaudit" => {
+            "仅在 identityaudit `auth_bridge::allow_evidence` proof-consuming wrapper 中读取 Principal 身份；其它位置不得降维 verified Principal"
+        }
+        "settingsonly" => {
+            "仅在 settingsonly `auth_bridge::federated_evidence` proof-consuming wrapper 中读取 Principal 身份；其它位置不得降维 verified Principal"
+        }
+        _ => {
+            "仅在列明的 runtime verification wrapper 中读取 Principal 身份；其它 runtime 代码同样不得把 verified Principal 降维为可转传值"
+        }
     }
 }
 

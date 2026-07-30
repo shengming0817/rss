@@ -427,6 +427,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "authmint"
+version = "0.0.0"
+
+[[package]]
 name = "authn"
 version = "0.0.0"
 dependencies = [
@@ -2778,6 +2782,7 @@ checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
 name = "httpserve"
 version = "0.0.0"
 dependencies = [
+ "authmint",
  "axum",
  "diagctx",
  "diport",
@@ -3108,6 +3113,7 @@ dependencies = [
  "assembly-schema",
  "audit",
  "audit-composition",
+ "authmint",
  "authn",
  "axum",
  "base64",
@@ -5076,6 +5082,7 @@ dependencies = [
  "assembly-schema",
  "audit",
  "audit-composition",
+ "authmint",
  "authn",
  "aws-config",
  "aws-credential-types",
@@ -5759,6 +5766,7 @@ dependencies = [
  "amqp",
  "anyhow",
  "assembly-schema",
+ "authmint",
  "authn",
  "aws-sdk-s3",
  "axum",

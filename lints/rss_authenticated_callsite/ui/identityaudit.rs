@@ -16,7 +16,11 @@ mod auth_bridge {
     ) -> Authenticated {
         let current = validated.into_current_auth_grant().unwrap();
         let _ = (current, principal);
-        Authenticated::new_rss_user(principal.audit_subject(), tenant)
+        Authenticated::new_rss_user(
+            authmint::AuthenticatedMint::capability(),
+            principal.audit_subject(),
+            tenant,
+        )
     }
 
     // Synthetic red: moving the evidence mint away from the exact allow funnel must fail closed.
@@ -27,7 +31,11 @@ mod auth_bridge {
     ) -> Authenticated {
         let current = validated.into_current_auth_grant().unwrap();
         let _ = current;
-        Authenticated::new_rss_user(principal.audit_subject(), tenant)
+        Authenticated::new_rss_user(
+            authmint::AuthenticatedMint::capability(),
+            principal.audit_subject(),
+            tenant,
+        )
     }
 }
 

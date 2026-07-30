@@ -5,12 +5,11 @@ use primitives::RequiredScheme;
 use vocab::PrincipalKind;
 
 fn main() {
-    let auth = Authenticated::new_federated(
-        // RSS construction now requires sealed current-grant evidence; this fixture tests getters.
+    let auth = Authenticated::new(
+        RequiredScheme::FederatedAccessToken,
         PrincipalKind::User,
         "user-1",
         None,
-        permissions(),
     );
     let _kind = auth.principal_kind();
     let _subject = auth.self_scoped_principal_id();
@@ -30,8 +29,4 @@ fn main() {
     if matches!(auth.principal_kind(), PrincipalKind::SuperAdmin) {
         let _ = "route gate matches branch";
     }
-}
-
-fn permissions() -> &'static diport::VerifiedFederatedPermissions {
-    unimplemented!()
 }

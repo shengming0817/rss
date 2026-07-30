@@ -1,0 +1,16 @@
+pub mod authmint
+pub struct authmint::AuthenticatedMint(_)
+impl authmint::AuthenticatedMint
+pub const fn authmint::AuthenticatedMint::capability() -> Self
+impl core::clone::Clone for authmint::AuthenticatedMint
+pub fn authmint::AuthenticatedMint::clone(&self) -> authmint::AuthenticatedMint
+impl core::fmt::Debug for authmint::AuthenticatedMint
+pub fn authmint::AuthenticatedMint::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for authmint::AuthenticatedMint
+impl core::marker::Freeze for authmint::AuthenticatedMint
+impl core::marker::Send for authmint::AuthenticatedMint
+impl core::marker::Sync for authmint::AuthenticatedMint
+impl core::marker::Unpin for authmint::AuthenticatedMint
+impl core::marker::UnsafeUnpin for authmint::AuthenticatedMint
+impl core::panic::unwind_safe::RefUnwindSafe for authmint::AuthenticatedMint
+impl core::panic::unwind_safe::UnwindSafe for authmint::AuthenticatedMint

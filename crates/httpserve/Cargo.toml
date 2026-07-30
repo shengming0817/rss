@@ -25,6 +25,8 @@ diagctx = { path = "../diagctx" }       # correlation 诊断信道，service→b
 runctx = { path = "../runctx" }
 # Auth decision audit sink / injected clock（finalize_auth_with_audit）。
 diport = { path = "../diport" }
+# AUTH-EVIDENCE-MINT-01：production Authenticated::new_* 需要 authmint capability token（不 re-export）。
+authmint = { path = "../authmint" }
 # HTTP runtime（生态对标 axum + tower，不自造中间件 trait）
 axum = { workspace = true }
 http-body-util = { workspace = true }  # Limited：stream-level 字节硬顶（#1106 FIX-1，body-limit 中间件）

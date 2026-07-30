@@ -21,12 +21,11 @@ impl LocalContext {
 }
 
 fn main() {
-    let auth = Authenticated::new_federated(
-        // RSS construction now requires sealed current-grant evidence; this fixture tests getters.
+    let auth = Authenticated::new(
+        RequiredScheme::FederatedAccessToken,
         PrincipalKind::User,
         "user-1",
         None,
-        permissions(),
     );
     let _tenant = auth.tenant_id();
     let _kind = auth.principal_kind();
@@ -69,10 +68,6 @@ fn main() {
     }
 
     allowed_by_attr(&auth);
-}
-
-fn permissions() -> &'static diport::VerifiedFederatedPermissions {
-    unimplemented!()
 }
 
 #[allow(rss_handler_local_principal_authz)] // reason: UI fixture verifies item-level escape hatch

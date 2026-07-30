@@ -59,10 +59,15 @@ pub(crate) fn apply(
     routes.layer(middleware::from_fn_with_state(verifier, verify_request))
 }
 
-/// The single settingsonly evidence mint. The caller lint permits this exact path only.
+/// The single settingsonly evidence mint.
+///
+/// Hard：须持 `authmint::AuthenticatedMint`（deny.toml wrappers 限制持有方）。
+/// Medium：`rss_authenticated_callsite` 仅允许本精确 path，且须消费
+/// [`authn::VerifiedFederatedAccess`]（proof-consuming defense-in-depth）。
 fn federated_evidence(access: &authn::VerifiedFederatedAccess) -> Authenticated {
     let principal = access.principal();
     Authenticated::new_federated(
+        authmint::AuthenticatedMint::capability(),
         principal.kind(),
         principal.audit_subject(),
         principal.tenant(),

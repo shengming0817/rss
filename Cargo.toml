@@ -13,6 +13,8 @@ members = [
   "crates/support",
   "crates/runctx",
   "crates/diagctx",
+  # Authenticated production evidence mint capability（AUTH-EVIDENCE-MINT-01 Hard token）
+  "crates/authmint",
   "crates/assembly-schema",
   # 引擎 / 原语（依赖基础）
   "crates/consistency",

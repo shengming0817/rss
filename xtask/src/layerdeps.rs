@@ -46,6 +46,9 @@
 //! INVARIANT: RUNTIMEEXEC-LAYER-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::runtimeexec_wrapper_widened_to_bin_red|tests::runtimeexec_wrapper_missing_assembly_red", anti_vacuity = "tests::runtimeexec_wrapper_exact_green" }——
 //!   `runtimeexec` target wrapper 必须恰为 runtime/settingsonly/identityaudit 三个 assembly，禁止 bins、composition、
 //!   journeys 与 xtask 直接依赖；该特殊 wrapper 不得被一般 Domain/Adapter/Generated stale 逻辑误判。
+//! INVARIANT: AUTHMINT-LAYER-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::authmint_wrapper_widened_to_bin_red|tests::authmint_wrapper_missing_consumer_red", anti_vacuity = "tests::authmint_wrapper_exact_green" }——
+//!   `authmint` target wrapper 必须恰为 httpserve + runtime/settingsonly/identityaudit；域 / journeys 不得持有
+//!   Authenticated production mint capability（AUTH-EVIDENCE-MINT-01 Hard 的 deny.toml 半段）。
 //! INVARIANT: RUNTIMEEXEC-DEPS-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::runtimeexec_direct_dependencies_extra_internal_and_external_red|tests::runtimeexec_direct_dependencies_package_alias_red", anti_vacuity = "tests::runtimeexec_direct_dependencies_allowlist_green|tests::real_workspace_green" }——
 //!   `runtimeexec` shipped direct dependency 只准内部 assembly-schema/authn/bootstrap/diport/eventexec/primitives/secure 与外部
 //!   anyhow/serde/serde_json/thiserror/tokio/tokio-util/tracing/zeroize；
@@ -423,6 +426,9 @@ const EXTERNAL_CONFINEMENT_WRAPPERS: &[(&str, &[&str])] = &[
 
 const RUNTIMEEXEC_CRATE: &str = "runtimeexec";
 const RUNTIMEEXEC_ALLOWED_WRAPPERS: &[&str] = &["runtime", "settingsonly", "identityaudit"];
+const AUTHMINT_CRATE: &str = "authmint";
+const AUTHMINT_ALLOWED_WRAPPERS: &[&str] =
+    &["httpserve", "runtime", "settingsonly", "identityaudit"];
 const RUNTIMEEXEC_INTERNAL_SHIPPED_DEPS: &[&str] = &[
     "assembly-schema",
     "authn",
@@ -449,7 +455,7 @@ const POSTGRES_MIGRATION_OPERATOR_ROOT: &str = "rss";
 /// 正向：每个 Domain/Adapter/Generated 成员须有 ban entry 且 wrappers ⊇ 所需消费者
 /// （Domain/Adapter ⊇ 全部组合根；Generated ⊇ 全部域 + 组合根）。
 /// 反向：① 每条带 wrappers 的 ban 须对应现存 Domain/Adapter/Generated 成员（无 stale），
-/// **例外** [`EXTERNAL_CONFINEMENT_WRAPPERS`]（外部 crate 收敛）与 RuntimeExec 精确 target wrapper，均单独校验；
+/// **例外** [`EXTERNAL_CONFINEMENT_WRAPPERS`]（外部 crate 收敛）与 RuntimeExec / authmint 精确 target wrapper，均单独校验；
 /// ② wrappers 中每个消费者须是 `layers::allows` 允许依赖被 ban crate 的层（防过宽 wrapper 开洞,
 /// 如把某服务塞进域的 wrappers）；**②补强（ADR-005）**：`adapter→域` wrapper 须有**真实 source edge**
 /// （adapter 实际依赖该域 crate）——否则「层级允许 adapter→域」会被误当「任意 adapter 可进任意域 wrapper」
@@ -458,7 +464,7 @@ const POSTGRES_MIGRATION_OPERATOR_ROOT: &str = "rss";
 /// `pub(crate)` 不外泄）；「仅 adapter 可 impl」的完整 implementer-allowlist 仍待 #1060。与 `check_layers`
 /// 的 AdapterScope/SiblingDomain 互为两条 Medium 防线，须同绿。
 /// 成员所需的 wrapper 消费者集（正向覆盖）：Domain/Adapter ⊇ 全组合根、Generated ⊇ 全域 + 组合根；
-/// 非这三层返回 `None`（跳过；RuntimeExec 由 [`check_runtimeexec_wrapper_coverage`] 单独精确校验）。dev/test adapter（[`layers::is_dev_adapter`]）正向只要 dev 组合根
+/// 非这三层返回 `None`（跳过；RuntimeExec / authmint 由精确 target wrapper 校验单独覆盖）。dev/test adapter（[`layers::is_dev_adapter`]）正向只要 dev 组合根
 /// （[`layers::DEV_ADAPTER_ROOTS`]，LAYER-DEPS-07）——生产 bin 不在 required。
 fn required_consumers<'a>(
     layer: Option<Layer>,
@@ -549,6 +555,7 @@ pub(crate) fn check_wrappers(
         .collect();
 
     let mut findings = check_runtimeexec_wrapper_coverage(members, bans);
+    findings.extend(check_authmint_wrapper_coverage(members, bans));
     findings.extend(check_postgres_migration_operator_confinement(
         members, bans, edges,
     ));
@@ -591,6 +598,7 @@ pub(crate) fn check_wrappers(
             .iter()
             .any(|(ext, _)| *ext == b.crate_name.as_str())
             || b.crate_name == RUNTIMEEXEC_CRATE
+            || b.crate_name == AUTHMINT_CRATE
         {
             continue;
         }
@@ -770,6 +778,86 @@ pub(crate) fn check_runtimeexec_wrapper_coverage(
                     RUNTIMEEXEC_CRATE,
                     format!(
                         "runtimeexec wrapper 必须与批准 assembly 集合相等：多列 {extra:?} / 欠列 {missing:?}"
+                    ),
+                ));
+            }
+        }
+    }
+    findings
+}
+
+/// `authmint` 是独立 Basis capability token：wrapper 只准 httpserve（构造面）+ 三个 assembly 验签桥。
+/// 集合相等同时拒绝过宽（域/journeys）和漏项；批准项自身必须匹配精确路径与层。
+pub(crate) fn check_authmint_wrapper_coverage(
+    members: &[Member],
+    bans: &[BanEntry],
+) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    let target = members.iter().find(|m| m.name == AUTHMINT_CRATE);
+    let ban = bans.iter().find(|b| b.crate_name == AUTHMINT_CRATE);
+    if target.is_none() && ban.is_none() {
+        return findings;
+    }
+    if !matches!(target.map(|m| m.layer), Some(Some(Layer::Basis)))
+        || target.is_some_and(|m| m.path != "crates/authmint")
+    {
+        findings.push(finding(
+            Rule::WrapperCoverage,
+            AUTHMINT_CRATE,
+            "authmint wrapper target 不是已分类的 Basis workspace 成员 `crates/authmint`",
+        ));
+        return findings;
+    }
+
+    for allowed in AUTHMINT_ALLOWED_WRAPPERS {
+        match members.iter().find(|m| m.name == *allowed) {
+            Some(m) if *allowed == "httpserve" => {
+                if !(m.layer == Some(Layer::Service) && m.path == "crates/httpserve") {
+                    findings.push(finding(
+                        Rule::WrapperCoverage,
+                        AUTHMINT_CRATE,
+                        format!(
+                            "authmint 批准消费者 `httpserve` 必须是 `crates/httpserve` Service，实际为 `{}` / {:?}",
+                            m.path, m.layer
+                        ),
+                    ));
+                }
+            }
+            Some(m)
+                if m.layer == Some(Layer::Root) && m.path == format!("assemblies/{allowed}") => {}
+            Some(m) => findings.push(finding(
+                Rule::WrapperCoverage,
+                AUTHMINT_CRATE,
+                format!(
+                    "authmint 批准消费者 `{allowed}` 必须是 `assemblies/{allowed}` Root，实际为 `{}` / {:?}",
+                    m.path, m.layer
+                ),
+            )),
+            None => findings.push(finding(
+                Rule::WrapperCoverage,
+                AUTHMINT_CRATE,
+                format!("authmint 批准消费者 `{allowed}` 不是 workspace 成员"),
+            )),
+        }
+    }
+
+    match ban {
+        None => findings.push(finding(
+            Rule::WrapperCoverage,
+            AUTHMINT_CRATE,
+            "deny.toml 缺 authmint target wrapper",
+        )),
+        Some(ban) => {
+            let have: BTreeSet<&str> = ban.wrappers.iter().map(String::as_str).collect();
+            let want: BTreeSet<&str> = AUTHMINT_ALLOWED_WRAPPERS.iter().copied().collect();
+            if have != want {
+                let extra: Vec<&str> = have.difference(&want).copied().collect();
+                let missing: Vec<&str> = want.difference(&have).copied().collect();
+                findings.push(finding(
+                    Rule::WrapperCoverage,
+                    AUTHMINT_CRATE,
+                    format!(
+                        "authmint wrapper 必须与批准消费者集合相等：多列 {extra:?} / 欠列 {missing:?}"
                     ),
                 ));
             }
@@ -2065,6 +2153,58 @@ identity_alias = { package = "identity", version = "1", features = ["test-suppor
         assert_eq!(findings.len(), 1, "{findings:?}");
         assert_eq!(findings[0].rule, Rule::WrapperCoverage);
         assert_eq!(findings[0].subject, "runtimeexec");
+    }
+
+    fn authmint_fixture_members() -> Vec<Member> {
+        vec![
+            m("authmint", "crates/authmint", Some(Layer::Basis)),
+            m("httpserve", "crates/httpserve", Some(Layer::Service)),
+            m("runtime", "assemblies/runtime", Some(Layer::Root)),
+            m("settingsonly", "assemblies/settingsonly", Some(Layer::Root)),
+            m(
+                "identityaudit",
+                "assemblies/identityaudit",
+                Some(Layer::Root),
+            ),
+            m("server", "bins/server", Some(Layer::Root)),
+            m("identity", "crates/identity", Some(Layer::Domain)),
+        ]
+    }
+
+    #[test]
+    fn authmint_wrapper_exact_green() {
+        let bans = vec![ban(
+            "authmint",
+            &["httpserve", "runtime", "settingsonly", "identityaudit"],
+        )];
+        assert!(check_authmint_wrapper_coverage(&authmint_fixture_members(), &bans).is_empty());
+    }
+
+    #[test]
+    fn authmint_wrapper_widened_to_bin_red() {
+        let bans = vec![ban(
+            "authmint",
+            &[
+                "httpserve",
+                "runtime",
+                "settingsonly",
+                "identityaudit",
+                "server",
+            ],
+        )];
+        let findings = check_authmint_wrapper_coverage(&authmint_fixture_members(), &bans);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].rule, Rule::WrapperCoverage);
+        assert_eq!(findings[0].subject, "authmint");
+    }
+
+    #[test]
+    fn authmint_wrapper_missing_consumer_red() {
+        let bans = vec![ban("authmint", &["httpserve", "runtime", "settingsonly"])];
+        let findings = check_authmint_wrapper_coverage(&authmint_fixture_members(), &bans);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].rule, Rule::WrapperCoverage);
+        assert_eq!(findings[0].subject, "authmint");
     }
 
     fn runtime_dep(key: &str, is_workspace_internal: bool) -> ShippedDep {

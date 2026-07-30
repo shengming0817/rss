@@ -1,8 +1,9 @@
 // rss_authenticated_callsite UI fixture（allowed caller）。example target 名 `runtime` ⇒
 // `runtime` 是 #1309 后的唯一组合根，但 Authenticated mint 仍只允许
-// `auth_bridge::{allow_evidence,mtls_evidence}` 两个精确 wrapper。
+// `auth_bridge::{allow_evidence,mtls_evidence}` 两个精确 wrapper（AUTH-EVIDENCE-MINT-01 Medium）。
+// Hard token 经 `authmint::AuthenticatedMint::capability()` 传入 production constructors。
 // Principal accessor 无诊断；Authenticated main direct / nested same-name 产生 golden 诊断。
-// 须用真 httpserve / vocab / primitives（dev-dep）；UI 测试只编译查诊断、不运行。
+// 须用真 httpserve / vocab / primitives / authmint（dev-dep）；UI 测试只编译查诊断、不运行。
 #![allow(unused)]
 
 use httpserve::Authenticated;
@@ -20,13 +21,20 @@ fn main() {
     let _direct_subject = authn::Principal::audit_subject;
     let _direct_caller = authn::Principal::service_caller_domain;
     // R：runtime 组合根中的任意其它函数也不能 mint evidence。
-    let _direct =
-        Authenticated::new_federated(PrincipalKind::User, "subject-1", None, permissions());
+    let _direct = Authenticated::new_federated(
+        authmint::AuthenticatedMint::capability(),
+        PrincipalKind::User,
+        "subject-1",
+        None,
+        permissions(),
+    );
     let _direct_rss = Authenticated::new_rss_user(
+        authmint::AuthenticatedMint::capability(),
         "11111111-2222-4333-8444-555555555555",
         vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").unwrap(),
     );
     let _direct_service = Authenticated::new_service(
+        authmint::AuthenticatedMint::capability(),
         vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").unwrap(),
         vocab::ServiceCallerDomain::MaintenanceOperator,
     );
@@ -39,11 +47,17 @@ mod auth_bridge {
     pub fn allow_evidence() -> Authenticated {
         let _subject = authn::Principal::audit_subject;
         let _caller = authn::Principal::service_caller_domain;
-        Authenticated::new_federated(PrincipalKind::User, "subject-1", None, crate::permissions())
+        Authenticated::new_federated(
+            authmint::AuthenticatedMint::capability(),
+            PrincipalKind::User,
+            "subject-1",
+            None,
+            crate::permissions(),
+        )
     }
 
     pub fn mtls_evidence() -> Authenticated {
-        Authenticated::new_mtls("mtls-peer")
+        Authenticated::new_mtls(authmint::AuthenticatedMint::capability(), "mtls-peer")
     }
 }
 
@@ -85,7 +99,13 @@ mod nested {
 
     fn allow_evidence() -> Authenticated {
         let _ = authn::Principal::audit_subject;
-        Authenticated::new_federated(PrincipalKind::User, "subject-1", None, crate::permissions())
+        Authenticated::new_federated(
+            authmint::AuthenticatedMint::capability(),
+            PrincipalKind::User,
+            "subject-1",
+            None,
+            crate::permissions(),
+        )
     }
 
     fn verified_service_maintenance_operator_subject() {

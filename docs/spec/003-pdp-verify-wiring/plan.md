@@ -47,8 +47,10 @@
 - **AI-robust 三档**（每条新约束标级）：
   - 安全同批门：`Box<DynPdp>` 注入构造器必填参（**Hard**，缺失即编译错）+ 测试 stub adapter crate 不入生产依赖图（`deny.toml` adapter wrapper，**Medium**）+ fail-closed 缺省（**Hard**）+ **bins 生产 `impl Pdp` governance 守卫（Medium，PR-C/T004.6 交付，评审 F1 升级，不 defer）**——见 §决策 3.3。
   - 放行接缝：httpserve own `Authenticated` typed extension——私有字段与 profile-specific shape =
-    **Hard/类型层**；enforce 默认拒 = **Medium**；profile-specific constructors 及 `CurrentAuthGrant`
-    mint 仅精确组合根 wrapper 可调（`rss_authenticated_callsite` DefId dylint，**Medium**）。
+    **Hard/类型层**；enforce 默认拒 = **Medium**；生产 constructors 须 `authmint::AuthenticatedMint`
+    （AUTH-EVIDENCE-MINT-01 **Hard** token + deny）+ exact mint allowlist / proof-consuming
+    （同 lint **Medium**）；`CurrentAuthGrant` mint 仅精确组合根 wrapper 可调
+    （`rss_authenticated_callsite` DefId dylint，**Medium**，与 Authenticated mint 分述）。
   - alg 白名单 + alg-key 一致：adapter 内 `#[non_exhaustive]` enum-match（类型穷尽）+ 表驱动负用例（**Medium**）。
   - JWKS key-source 完整性：远程 JWKS 经 TLS/pinning/签名 JWKS，禁裸 plain-HTTP（评审 F2）；不可得则退静态 key（**Medium**：构造期拒明文 + deny 甄别）。
   - 类型层不变式不回归（VerifiedClaims 闭合 profile shape、verified newtype 仅由验签 funnel seal、from_verified_* 收 newtype）：既有 **Hard**（private tagged storage + `pub(crate) seal` + 入参类型），本 feature 加回归断言守。

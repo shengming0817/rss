@@ -20,13 +20,15 @@
 /// `secure` ⇒ sanctioned 前向边 `secure → securederive`（proc-macro 是编译期纯工具，出边全是外部 crate
 /// syn/quote/proc-macro2，无内部边可违 [`allows`]）。
 ///
-/// `diagctx`（诊断 context 信道）是**独立根**（[`ISOLATED_BASIS_CRATES`]）：任何涉及 diagctx 的 base 内边
+/// `diagctx`（诊断 context 信道）与 `authmint`（Authenticated production mint capability）是**独立根**
+/// （[`ISOLATED_BASIS_CRATES`]）：任何涉及这些 crate 的 base 内边
 /// （双向）均不 sanction，由 `cargo xtask layer-deps`（Medium，BASE-INTRADAG-01）守；Hard 化（dylint 禁 authz
 /// crate import diagctx）见 follow-up #1400。
 pub(crate) const BASIS_CRATES: &[&str] = &[
     "assembly-schema",
     "postgres-migration-inventory",
     "diagctx",
+    "authmint",
     "vocab",
     "ids",
     "securederive",
@@ -36,8 +38,9 @@ pub(crate) const BASIS_CRATES: &[&str] = &[
 ];
 
 /// 独立根基础 crate：任何涉及这些 crate 的 intra-base 边（双向）均不 sanction。
-/// `diagctx` 是独立根——不应被任何 base crate 依赖，也不依赖任何 base crate。
-pub(crate) const ISOLATED_BASIS_CRATES: &[&str] = &["diagctx"];
+/// `diagctx` 是诊断独立根；`authmint` 是 Authenticated production mint capability 独立根
+/// （deny.toml wrappers 另收窄持有方）。
+pub(crate) const ISOLATED_BASIS_CRATES: &[&str] = &["diagctx", "authmint"];
 /// 引擎 / 原语层（依赖基础）。
 ///
 /// `tracewire`（#1224）是 W3C traceparent capture/restore 单源（唯一新 otel 落点）：domain-neutral 纯 infra、
@@ -211,7 +214,7 @@ pub(crate) fn allows(from: Layer, to: Layer) -> bool {
 /// [`allows`]「基础同层横向一律禁」的**唯一**例外；`layerdeps::check_layers` 在 `!allows(Basis,Basis)`
 /// 时叠加本判定。fail-closed：只放行 DAG 严格前向边。
 ///
-/// [`ISOLATED_BASIS_CRATES`] 中的 crate（如 `diagctx`）是独立根：任何涉及它的 base 内边（双向）均
+/// [`ISOLATED_BASIS_CRATES`] 中的 crate（如 `diagctx` / `authmint`）是独立根：任何涉及它的 base 内边（双向）均
 /// 不 sanction，在 rank 比较之前优先拦截（防止 `X → diagctx` 被高 rank 误放行）。
 pub(crate) fn basis_intra_dag_allows(from_crate: &str, to_crate: &str) -> bool {
     // 独立根：双向均不 sanction，优先于 rank 比较。
@@ -280,6 +283,7 @@ mod tests {
     #[case("vocab", "crates/vocab", Some(Layer::Basis))]
     #[case("runctx", "crates/runctx", Some(Layer::Basis))]
     #[case("diagctx", "crates/diagctx", Some(Layer::Basis))]
+    #[case("authmint", "crates/authmint", Some(Layer::Basis))]
     #[case("consistency", "crates/consistency", Some(Layer::Engine))]
     #[case("diport", "crates/diport", Some(Layer::DiPort))]
     #[case("httpserve", "crates/httpserve", Some(Layer::Service))]
@@ -375,6 +379,11 @@ mod tests {
     #[case("vocab", "diagctx", false)]
     #[case("diagctx", "vocab", false)]
     #[case("diagctx", "runctx", false)]
+    // authmint 独立根：与 diagctx 对称的 anti-vacuity（AUTH-EVIDENCE-MINT-01 Hard 半段）。
+    #[case("runctx", "authmint", false)]
+    #[case("vocab", "authmint", false)]
+    #[case("authmint", "vocab", false)]
+    #[case("authmint", "runctx", false)]
     fn basis_intra_dag_allows_forward_only(
         #[case] from: &str,
         #[case] to: &str,

@@ -44,6 +44,7 @@ eventexec = { path = "../../crates/eventexec" }
 eventing-composition = { path = "../../composition/eventing", features = ["settings-consumers"] }
 generated = { path = "../../generated" }
 httpd = { path = "../../adapters/httpd" }
+authmint = { path = "../../crates/authmint" }
 httpserve = { path = "../../crates/httpserve" }
 oidc = { path = "../../adapters/oidc", features = ["backend"] }
 postgres = { path = "../../adapters/postgres", features = ["domain-settings", "auth-audit-sink"] }

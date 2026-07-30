@@ -3,6 +3,11 @@
 //! 负向证据（trybuild compile_fail）——锁住「错误不可表达」：
 //! - `cannot_bind_unfinalized`：`UnfinalizedRoutes` 无 `into_make_service`（无 public bindable 出口，ROUTE-AUTH-FUNNEL-01）。
 //! - `cannot_mint_authenticated`：`AuthenticatedRoutes::new` 是 `pub(crate)`，外部 crate 无法 mint（ROUTE-AUTH-FUNNEL-02）。
+//! - `cannot_mint_authenticated_evidence`：production `Authenticated::new_*` 需要 `authmint::AuthenticatedMint`，
+//!   缺 mint 首参即 compile_fail（AUTH-EVIDENCE-MINT-01 Hard；本例锁 `new_mtls` arity）。
+//! - `cannot_name_authmint_capability`：`AuthenticatedMint` 字段私有，不可 `AuthenticatedMint(())` 伪造
+//!   （trybuild 继承 httpserve 的 authmint dep，故用 sealed 构造面代替 E0433；无 dep 半段由 deny.toml wrappers）。
+//! - `cannot_mint_authenticated_rss_user`：`new_rss_user` 同样缺 mint 首参即 compile_fail。
 //! - `nonprimary_cannot_mount_primary`：Primary endpoint 不能挂到 Internal/Admin/Health（ROUTE-LISTENER-TYPED-01）。
 //! - `primary_cannot_mount_nonprimary`：普通 endpoint 不能挂到 Primary（ROUTE-LISTENER-TYPED-01）。
 //! - `cannot_construct_listener_router`：`ListenerRouter::new` 是 `pub(crate)`，外部无法直接构造（无 raw-bypass）。
@@ -26,6 +31,9 @@ fn ui() {
     t.pass("tests/ui/producer_funnel_pass.rs");
     t.compile_fail("tests/ui/cannot_bind_unfinalized.rs");
     t.compile_fail("tests/ui/cannot_mint_authenticated.rs");
+    t.compile_fail("tests/ui/cannot_mint_authenticated_evidence.rs");
+    t.compile_fail("tests/ui/cannot_name_authmint_capability.rs");
+    t.compile_fail("tests/ui/cannot_mint_authenticated_rss_user.rs");
     t.compile_fail("tests/ui/nonprimary_cannot_mount_primary.rs");
     t.compile_fail("tests/ui/internal_service_route_requires_policy.rs");
     t.compile_fail("tests/ui/primary_cannot_mount_nonprimary.rs");

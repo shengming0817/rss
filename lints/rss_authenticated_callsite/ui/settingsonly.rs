@@ -6,6 +6,7 @@ mod auth_bridge {
 
     pub fn federated_evidence(access: &VerifiedFederatedAccess) -> Authenticated {
         Authenticated::new_federated(
+            authmint::AuthenticatedMint::capability(),
             access.principal().kind(),
             access.principal().audit_subject(),
             access.principal().tenant(),
@@ -18,6 +19,7 @@ mod auth_bridge {
         permissions: &diport::VerifiedFederatedPermissions,
     ) -> Authenticated {
         Authenticated::new_federated(
+            authmint::AuthenticatedMint::capability(),
             principal.kind(),
             principal.audit_subject(),
             principal.tenant(),

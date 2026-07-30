@@ -171,6 +171,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
+name = "authmint"
+version = "0.0.0"
+
+[[package]]
 name = "authn"
 version = "0.0.0"
 dependencies = [
@@ -1119,6 +1123,7 @@ checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
 name = "httpserve"
 version = "0.0.0"
 dependencies = [
+ "authmint",
  "axum",
  "diagctx",
  "diport",
@@ -1979,6 +1984,7 @@ dependencies = [
 name = "rss_authenticated_callsite"
 version = "0.0.0"
 dependencies = [
+ "authmint",
  "authn",
  "clippy_utils",
  "diport",

@@ -16,6 +16,7 @@ anyhow = workspace=true
 assembly-schema = path=../../crates/assembly-schema
 audit = path=../../crates/audit
 audit-composition = path=../../composition/audit
+authmint = path=../../crates/authmint
 authn = path=../../crates/authn
 aws-config = workspace=true
 aws-credential-types = workspace=true

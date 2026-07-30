@@ -287,13 +287,14 @@ mod tests {
 
     #[test]
     fn target_crates_counts_and_curated_exact_set() {
-        // basis = assembly-schema/diagctx/vocab/ids/postgres-migration-inventory/secure/support/runctx（proc-macro securederive 经 is_proc_macro 排除）。
-        assert_eq!(target_crates(Some(Layer::Basis)).len(), 8);
+        // basis = assembly-schema/diagctx/authmint/vocab/ids/postgres-migration-inventory/secure/support/runctx（proc-macro securederive 经 is_proc_macro 排除）。
+        assert_eq!(target_crates(Some(Layer::Basis)).len(), 9);
         // engine = consistency/primitives/tracewire（#1224 新增 traceparent capture/restore 单源，轴 A SemVer 面）。
         assert_eq!(target_crates(Some(Layer::Engine)).len(), 3);
-        // None = basis(8) + engine(3) + curated extras(authn/diport/generated/runtimeexec=4) 全集。
-        assert_eq!(target_crates(None).len(), 15);
+        // None = basis(9) + engine(3) + curated extras(authn/diport/generated/runtimeexec=4) 全集。
+        assert_eq!(target_crates(None).len(), 16);
         assert!(target_crates(Some(Layer::Basis)).contains(&"assembly-schema"));
+        assert!(target_crates(Some(Layer::Basis)).contains(&"authmint"));
         assert!(target_crates(Some(Layer::Basis)).contains(&"vocab"));
         assert!(target_crates(Some(Layer::Engine)).contains(&"primitives"));
         assert!(target_crates(Some(Layer::Engine)).contains(&"tracewire"));

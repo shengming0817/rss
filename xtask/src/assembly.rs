@@ -2722,6 +2722,7 @@ const IDENTITYAUDIT_ALLOWED_NORMAL_WORKSPACE_PACKAGES: &[&str] = &[
     "assembly-schema",
     "audit",
     "audit-composition",
+    "authmint",
     "authn",
     "bootstrap",
     "consistency",
@@ -2829,6 +2830,7 @@ fn validate_identityaudit_executable_evidence(
 const SETTINGSONLY_ALLOWED_NORMAL_WORKSPACE_PACKAGES: &[&str] = &[
     "amqp",
     "assembly-schema",
+    "authmint",
     "authn",
     "bootstrap",
     "consistency",

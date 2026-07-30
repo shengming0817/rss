@@ -50,6 +50,7 @@ eventexec = { path = "../../crates/eventexec" }
 eventing-composition = { path = "../../composition/eventing", features = ["audit-consumers"] }
 generated = { path = "../../generated" }
 httpd = { path = "../../adapters/httpd" }
+authmint = { path = "../../crates/authmint" }
 httpserve = { path = "../../crates/httpserve" }
 identity = { path = "../../crates/identity" }
 ids = { path = "../../crates/ids", optional = true }
