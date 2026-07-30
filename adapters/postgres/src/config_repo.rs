@@ -31,13 +31,14 @@ use httpserve::ProducerAuthorization;
 use secure::{DerivedAad, Plaintext, ProtectionContext};
 use settings::ports::{
     CONFIG_VERSION_CHANGED_CONTRACT, ConfigDeleteReceipt, ConfigEntry, ConfigHead, ConfigMutation,
-    ConfigPublishReceipt, ConfigRepo, ConfigRepoError, ConfigRollbackReceipt, ConfigTombstone,
-    ConfigUnitOfWork, SettingKey, TenantId, TenantRepoScope,
+    ConfigPublishReceipt, ConfigRepo, ConfigRepoError, ConfigRollbackReceipt, ConfigUnitOfWork,
+    SettingKey, TenantId, TenantRepoScope,
 };
-use sqlx::{Executor, Postgres, Row};
+use sqlx::Row;
 
 use crate::PgStore;
-use crate::cotx::{PgTenantReadPool, PgTenantWritePool, ProducerTxOutcome};
+use crate::cotx::settings_audit::{ConfigProducerRequest, EncodedConfigValue};
+use crate::cotx::{ProducerTxOutcome, ServingReadLane, ServingWriteLane, TenantDb};
 use crate::outbox::{OutboxEnvelope, metadata_with_ambient, unix_secs};
 use crate::pool::{VerifiedPgReadStore, VerifiedPgWriteStore};
 use crate::projection_events::ProjectionWriteRegistry;
@@ -64,8 +65,8 @@ static CONFIG_RETRY_FAIL_TARGET: Mutex<Option<&'static str>> = Mutex::new(None);
 /// occurred_at 的构造点）。用 `Arc`（非 `Box`，区别于 [`crate::PgEmitter`] / [`crate::PgAuthGrantLifecycle`]）：
 /// settings bundle 以**单一**注入 clock 经 `Arc::clone` 扇出到 read/write 两个实例（PERSIST-003，#1424）。
 pub struct PgConfigRepo {
-    read_pool: PgTenantReadPool,
-    write_pool: PgTenantWritePool,
+    read_pool: TenantDb<ServingReadLane>,
+    write_pool: TenantDb<ServingWriteLane>,
     clock: Arc<dyn Clock>,
     protection: ConfigValueProtection,
 }
@@ -318,8 +319,8 @@ impl PgConfigRepo {
         protection: ConfigValueProtection,
     ) -> Self {
         Self {
-            read_pool: PgTenantReadPool::from_unverified_for_test(store),
-            write_pool: PgTenantWritePool::from_unverified_for_test(store),
+            read_pool: TenantDb::<ServingReadLane>::from_unverified_for_test(store),
+            write_pool: TenantDb::<ServingWriteLane>::from_unverified_for_test(store),
             clock,
             protection,
         }
@@ -333,8 +334,11 @@ impl PgConfigRepo {
         projection_registry: ProjectionWriteRegistry,
     ) -> Self {
         Self {
-            read_pool: PgTenantReadPool::new(reader),
-            write_pool: PgTenantWritePool::with_projection_registry(writer, projection_registry),
+            read_pool: TenantDb::<ServingReadLane>::new(reader),
+            write_pool: TenantDb::<ServingWriteLane>::with_projection_registry(
+                writer,
+                projection_registry,
+            ),
             clock,
             protection,
         }
@@ -343,14 +347,6 @@ impl PgConfigRepo {
 
 const CONFIG_VALUE_FIELD: &str = "settings.config.value";
 const CONFIG_VALUE_PROTECTION_SCHEME: i32 = 1;
-
-#[derive(Clone)]
-struct EncodedConfigValue {
-    value: Option<String>,
-    protection_scheme: i32,
-    value_enc: Option<Vec<u8>>,
-    key_id: Option<String>,
-}
 
 /// sqlx 错误 → 域 storage 错误（装箱保留 source；域 crate 不依赖 sqlx，故在 adapter 边界收口）。
 fn storage(e: sqlx::Error) -> ConfigRepoError {
@@ -464,15 +460,6 @@ fn tenant_param(tenant: TenantId) -> String {
     tenant.as_uuid().to_string()
 }
 
-/// u64 版本号 → wire i64（绑 `bigint` 列）。
-///
-/// reason: 版本号实践中从 1 单调递增、远不及 `i64::MAX`（2^63 次写在系统生命周期内不可达）；溢出收口
-/// `i64::MAX` 而非 panic——`cas_insert` 的 CAS WHERE 永不成立 → `VersionConflict`、`find_version` 不匹配任何
-/// 行 → `None`，均 fail-closed（与 `application::wire_version` 同语义，边界收口一致）。
-fn version_param(v: u64) -> i64 {
-    i64::try_from(v).unwrap_or(i64::MAX)
-}
-
 fn config_value_aad(tenant: TenantId, key: &SettingKey) -> Result<DerivedAad, ConfigRepoError> {
     ProtectionContext::authenticated_request(
         tenant,
@@ -579,105 +566,6 @@ impl PgConfigRepo {
         let value = self.decode_value(tenant, &key, row).await?;
         let version = u64::try_from(version).map_err(|e| ConfigRepoError::Storage(Box::new(e)))?;
         Ok(ConfigEntry::hydrate(key, value, tenant, version))
-    }
-}
-
-/// CAS 追加新版本（泛型 executor：`&PgPool`（plain save）/ `&mut PgConnection`（co-tx 事务内）共用一条语句）。
-///
-/// 新版本须 = 当前最高 + 1（首版 = 1），否则 0 行 affected → `VersionConflict`；并发同版本写经 PK
-/// unique violation(23505) 亦 → `VersionConflict`（另一写者已占该版本）；其余 sqlx 错误 → `Storage`。
-async fn cas_insert<'e, E>(
-    executor: E,
-    tenant: TenantId,
-    entry: &ConfigEntry,
-    encoded: &EncodedConfigValue,
-) -> Result<(), ConfigRepoError>
-where
-    E: Executor<'e, Database = Postgres>,
-{
-    let result = sqlx::query(
-        r#"
-        INSERT INTO config_entries (
-            tenant_id, config_key, version, value, protection_scheme, value_enc, key_id
-        )
-        SELECT $1::uuid, $2, $3, $4, $5, $6, $7
-        WHERE $3 = 1 + COALESCE(
-            (SELECT max(version) FROM config_entries WHERE tenant_id = $1::uuid AND config_key = $2),
-            0
-        )
-        "#,
-    )
-    .bind(tenant_param(tenant))
-    .bind(entry.key().as_str())
-    .bind(version_param(entry.version()))
-    .bind(encoded.value.as_deref())
-    .bind(encoded.protection_scheme)
-    .bind(encoded.value_enc.as_deref())
-    .bind(encoded.key_id.as_deref())
-    .execute(executor)
-    .await;
-    match result {
-        Ok(done) if done.rows_affected() == 1 => Ok(()),
-        // 0 行：版本号非「当前最高 + 1」（陈旧 / 重复）——乐观并发写冲突。
-        Ok(_) => Err(ConfigRepoError::VersionConflict),
-        // 并发同版本写：PK (tenant, key, version) unique violation ⇒ 另一写者已占该版本 ⇒ 冲突。
-        Err(e)
-            if e.as_database_error()
-                .is_some_and(|db| db.is_unique_violation()) =>
-        {
-            Err(ConfigRepoError::VersionConflict)
-        }
-        Err(e) => Err(storage(e)),
-    }
-}
-
-async fn cas_insert_tombstone<'e, E>(
-    executor: E,
-    tenant: TenantId,
-    tombstone: &ConfigTombstone,
-    encoded: &EncodedConfigValue,
-) -> Result<(), ConfigRepoError>
-where
-    E: Executor<'e, Database = Postgres>,
-{
-    let result = sqlx::query(
-        r#"
-        INSERT INTO config_entries (
-            tenant_id, config_key, version, value, deleted, protection_scheme, value_enc, key_id
-        )
-        SELECT $1::uuid, $2, $3, $4, true, $5, $6, $7
-        WHERE $3 = 1 + COALESCE(
-            (SELECT max(version) FROM config_entries WHERE tenant_id = $1::uuid AND config_key = $2),
-            0
-        )
-          AND COALESCE(
-            (SELECT NOT deleted FROM config_entries
-             WHERE tenant_id = $1::uuid AND config_key = $2
-             ORDER BY version DESC LIMIT 1),
-            false
-          )
-        "#,
-    )
-    .bind(tenant_param(tenant))
-    .bind(tombstone.key().as_str())
-    .bind(version_param(tombstone.version()))
-    .bind(encoded.value.as_deref())
-    .bind(encoded.protection_scheme)
-    .bind(encoded.value_enc.as_deref())
-    .bind(encoded.key_id.as_deref())
-    .execute(executor)
-    .await;
-    match result {
-        Ok(done) if done.rows_affected() == 1 => Ok(()),
-        Ok(_) => Err(ConfigRepoError::VersionConflict),
-        Err(error)
-            if error
-                .as_database_error()
-                .is_some_and(|db| db.is_unique_violation()) =>
-        {
-            Err(ConfigRepoError::VersionConflict)
-        }
-        Err(error) => Err(storage(error)),
     }
 }
 
@@ -1152,28 +1040,12 @@ impl ConfigRepo for PgConfigRepo {
         // 经 tenant_scoped_read 注入 SET LOCAL，与 0009 迁移的 RLS policy current_setting 对齐（#1298）。
         // 活跃值 = 最高版本行且非 tombstone（latest 为 tombstone ⇒ 已删 None）。
         // 读闭包内仅 SQL fetch 返回 Option<PgRow>（owned，不借连接）；hydrate_active 在 tx 外执行。
-        let tenant_uuid = tenant_param(tenant);
-        let key_str = key.as_str().to_owned();
-        let tenant_uuid_q = tenant_uuid.clone();
+        let key = key.clone();
 
         let row = self
             .read_pool
-            .read(scope, move |conn| {
-                Box::pin(async move {
-                    sqlx::query(
-                        r#"
-                        SELECT config_key, value, version, deleted, protection_scheme, value_enc, key_id
-                        FROM config_entries
-                        WHERE tenant_id = $1::uuid AND config_key = $2
-                        ORDER BY version DESC
-                        LIMIT 1
-                        "#,
-                    )
-                    .bind(tenant_uuid_q)
-                    .bind(key_str)
-                    .fetch_optional(&mut *conn)
-                    .await
-                })
+            .config_read(scope, move |mut tx| {
+                Box::pin(async move { tx.find_latest(&key).await })
             })
             .await
             .map_err(storage)?;
@@ -1189,28 +1061,12 @@ impl ConfigRepo for PgConfigRepo {
         let tenant = scope.tenant();
         // 经 tenant_scoped_read 注入 SET LOCAL，与 0009 迁移的 RLS policy current_setting 对齐（#1298）。
         // 读闭包内仅 SQL fetch 返回 Option<PgRow>（owned）；hydrate_active 在 tx 外执行。
-        let tenant_uuid = tenant_param(tenant);
-        let key_str = key.as_str().to_owned();
-        let tenant_uuid_q = tenant_uuid.clone();
-        let version_i = version_param(version);
+        let key = key.clone();
 
         let row = self
             .read_pool
-            .read(scope, move |conn| {
-                Box::pin(async move {
-                    sqlx::query(
-                        r#"
-                        SELECT config_key, value, version, deleted, protection_scheme, value_enc, key_id
-                        FROM config_entries
-                        WHERE tenant_id = $1::uuid AND config_key = $2 AND version = $3
-                        "#,
-                    )
-                    .bind(tenant_uuid_q)
-                    .bind(key_str)
-                    .bind(version_i)
-                    .fetch_optional(&mut *conn)
-                    .await
-                })
+            .config_read(scope, move |mut tx| {
+                Box::pin(async move { tx.find_version(&key, version).await })
             })
             .await
             .map_err(storage)?;
@@ -1222,30 +1078,17 @@ impl ConfigRepo for PgConfigRepo {
         scope: TenantRepoScope,
         key: &SettingKey,
     ) -> Result<Option<ConfigHead>, ConfigRepoError> {
-        let tenant = scope.tenant();
         // 经 tenant_scoped_read 注入 SET LOCAL，与 0009 迁移的 RLS policy current_setting 对齐（#1298）。
         // 真实最高版本（含 tombstone）；max() 对空集返 NULL（fetch_one 恒一行）。
         // rss_app 角色下 RLS 过滤后 max() 仅对当前 tenant 行计算（否则无 SET LOCAL 时 rss_app 下所有行不可见
         // → max() 返 NULL，后续版本序列断裂）——此为 tenant_scoped_read 覆盖 latest_version 的关键理由。
-        let tenant_uuid = tenant_param(tenant);
-        let key_str = key.as_str().to_owned();
-        let tenant_uuid_q = tenant_uuid.clone();
+        let key = key.clone();
 
         let row: Option<(i64, bool)> = self
             .read_pool
-            .read(scope, move |conn| {
-                Box::pin(async move {
-                    sqlx::query_as(
-                        "SELECT version, deleted FROM config_entries WHERE tenant_id = $1::uuid AND config_key = $2 ORDER BY version DESC LIMIT 1",
-                    )
-                    .bind(tenant_uuid_q)
-                    .bind(key_str)
-                    .fetch_optional(&mut *conn)
-                    .await
-                })
-            })
-        .await
-        .map_err(storage)?;
+            .config_head(scope, key)
+            .await
+            .map_err(storage)?;
         row.map(|(version, deleted)| {
             let version =
                 u64::try_from(version).map_err(|e| ConfigRepoError::Storage(Box::new(e)))?;
@@ -1313,28 +1156,13 @@ impl PgConfigRepo {
                 record_config_retry_attempt(mutation.key());
                 async move {
                     self.write_pool
-                        .retry_producer_tx(
+                        .retry_config_producer_tx(
                             scope,
                             deadline,
-                            &outbox_entry,
-                            &env,
-                            move |conn| {
+                            ConfigProducerRequest::new(&outbox_entry, &env),
+                            move |mut tx| {
                                 Box::pin(async move {
-                                    match &mutation {
-                                        ConfigMutation::Put(entry) => {
-                                            cas_insert(conn.conn(), tenant, entry, &encoded)
-                                                .await?;
-                                        }
-                                        ConfigMutation::Delete(tombstone) => {
-                                            cas_insert_tombstone(
-                                                conn.conn(),
-                                                tenant,
-                                                tombstone,
-                                                &encoded,
-                                            )
-                                            .await?;
-                                        }
-                                    }
+                                    tx.apply_mutation(&mutation, &encoded).await?;
                                     #[cfg(all(test, feature = "integration"))]
                                     maybe_fail_config_retry(mutation.key())?;
                                     Ok(ProducerTxOutcome::Emitted((), authorization))

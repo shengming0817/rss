@@ -1,16 +1,15 @@
 //! postgres — RSS workspace crate（eventexec 持久化基座；P3/#1116）。See docs/rules/architecture.md.
 //!
-//! sealed-marker [`PgStore`] 持 `sqlx::PgPool`（`pub(crate)`），提供连接池（`connect`）、事务运行器
-//! （`run_global_transaction`）与只读 schema ledger 验证；迁移执行只存在于 operator-only
-//! `postgres-migration` crate。外部经 [`PgRuntimeDeps::connect_serving`] 构造；并 impl
+//! sealed-marker [`PgStore`] 持 `sqlx::PgPool`（`pub(crate)`），提供连接池（`connect`）与只读
+//! schema ledger 验证；迁移执行只存在于 operator-only `postgres-migration` crate。外部经
+//! [`PgRuntimeDeps::connect_serving`] 构造；并 impl
 //! `diport::ManagedResource`（关池接入 `bootstrap::ShutdownStack` 逆序编排）。
 //!
 //! port 来源两类：provider-agnostic 基建 port 来自 `diport`（`ManagedResource`…）；**域形** repo port 来自
-//! 所属域 crate（`identity::ports::RoleReadRepo`…，Option 2/ADR-005）。事务运行器是**普通 inherent 方法**
-//! （非 dynosaur DI port）——签名暴露 crate-private `TxCapability`，该令牌只能由 postgres
-//! adapter 从 live `sqlx::Transaction` 铸造；裸 `sqlx::PgConnection` 只在 capability 生命周期内经 `conn()`
-//! 借出。放 provider-agnostic 的 `diport` 会破坏其不变式（#1116 决策 1）；且为 `pub(crate)`（未做 tenant
-//! scope 的事务 capability 非公开 API，review F2）。
+//! 所属域 crate（`identity::ports::RoleReadRepo`…，Option 2/ADR-005）。tenant repository 只持 sealed
+//! `TenantDb` exact lane，closure 只获得 tenant-bound `TenantTx` 的 closed store-operation façade，
+//! 无法取得 raw pool / connection / executor 或 commit/rollback 生命周期；生产侧非租户事务由各
+//! owner 的窄 funnel 承载。物理 PostgreSQL transaction capability 不进入 provider-neutral 层。
 //!
 //! adapter→域 DIP 内向边（postgres 依赖 identity、impl 其 `RoleReadRepo`，经 deny.toml identity wrapper +
 //! `allows(Adapter,Domain)` 放行；adapter 仍不被域依赖）由生产 [`PgRoleRepo`]（impl
@@ -93,7 +92,6 @@ mod schema_ledger;
 #[cfg(feature = "domain-settings")]
 mod secret_repo;
 mod service_token_replay;
-mod tx;
 #[cfg_attr(
     not(any(
         feature = "domain-settings",
@@ -103,6 +101,45 @@ mod tx;
     allow(dead_code, unused_imports)
 )]
 mod tx_retry;
+
+/// Integration-only compile-proof surface over the real transaction type identities.
+#[cfg(feature = "integration")]
+#[doc(hidden)]
+pub mod tx_boundary_proof {
+    use futures::future::BoxFuture;
+
+    pub use crate::cotx::eventing::OutboxTx;
+    pub use crate::cotx::identity::{IdentityTx, IdentityWrite};
+    pub use crate::cotx::reconcile::ReconcileTx;
+    pub use crate::cotx::{
+        AuditAdminReadLane, MaintenanceReadLane, MaintenanceWriteLane, ServingReadLane,
+        ServingWriteLane, TenantDb, TenantTx,
+    };
+
+    pub fn require_serving_write_tx(_: &mut TenantTx<'_, ServingWriteLane>) {}
+
+    pub fn require_maintenance_write_tx(_: &mut TenantTx<'_, MaintenanceWriteLane>) {}
+
+    pub fn serving_identity_write<'borrow, 'cap, 'tx>(
+        tx: &'borrow mut IdentityTx<'cap, 'tx, ServingWriteLane>,
+    ) -> IdentityWrite<'borrow, 'tx> {
+        tx.identity()
+    }
+
+    pub fn require_identity_write(_: &mut IdentityWrite<'_, '_>) {}
+
+    pub fn require_identity_operation<F>(_: F)
+    where
+        F: for<'borrow, 'tx> FnOnce(
+            IdentityTx<'borrow, 'tx, ServingWriteLane>,
+        ) -> BoxFuture<'borrow, Result<(), ()>>,
+    {
+    }
+
+    pub fn outbox_operation(_: &mut OutboxTx<'_>) {}
+
+    pub fn reconcile_operation(_: &mut ReconcileTx<'_, ServingWriteLane>) {}
+}
 
 #[cfg(any(test, feature = "test-support", feature = "fault-matrix-test-support"))]
 mod test_migration {
@@ -186,10 +223,10 @@ pub use auth_grant_sweeper::{AuthGrantSweepDeadline, PgAuthGrantSweeper};
 pub use auth_grant_validator::PgAuthGrantValidator;
 pub use projection_events::{PgProjectionEvents, ProjectionEventsError};
 pub use reconcile::{
-    PgReconcileStore, ReconcileActionErrorKind, ReconcileAttemptInsert,
-    ReconcileAttemptResultInsert, ReconcileAttemptTrigger, ReconcileKeyError, ReconcileLease,
-    ReconcileLeaseOutcome, ReconcileLedgerId, ReconcileStoreError, ReconcileTarget,
-    ReconcileTargetKey,
+    PgMaintenanceReconcileStore, PgReconcileStore, ReconcileActionErrorKind,
+    ReconcileAttemptInsert, ReconcileAttemptResultInsert, ReconcileAttemptTrigger,
+    ReconcileKeyError, ReconcileLease, ReconcileLeaseOutcome, ReconcileLedgerId,
+    ReconcileStoreError, ReconcileTarget, ReconcileTargetKey,
 };
 #[cfg(feature = "domain-identity")]
 pub use refresh_token_store::PgRefreshTokenStore;

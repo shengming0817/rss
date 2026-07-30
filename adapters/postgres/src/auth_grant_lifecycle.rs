@@ -1,7 +1,7 @@
 //! PostgreSQL authentication-grant lifecycle.
 //!
 //! Login persists the grant root, initial refresh record and session-created outbox fact through
-//! one [`PgTenantWritePool::producer_tx`]. Terminal security mutations are exclusively owned by
+//! one [`TenantDb::<ServingWriteLane>::producer_tx`]. Terminal security mutations are exclusively owned by
 //! [`crate::PgIdentitySecurityLifecycle`].
 //!
 //! INVARIANT: AUTH-GRANT-LOGIN-COTX-01 { level = "Hard", exec = "native-compile", source = "code", native = "combined port method plus provider-owned transaction" }.
@@ -20,12 +20,11 @@ use identity::ports::{
     AuthGrantLifecycle, IdentityError, LoginGrantMutation, RefreshStatus, RefreshTokenRecord,
     SESSION_CREATED_CONTRACT, TenantRepoScope,
 };
-use sqlx::Row;
-
 #[cfg(all(test, feature = "integration"))]
 use std::sync::Arc;
 
-use crate::cotx::{PgTenantReadPool, PgTenantWritePool, ProducerTxOutcome};
+use crate::cotx::identity::IdentityTx;
+use crate::cotx::{ProducerTxOutcome, ServingReadLane, ServingWriteLane, TenantDb};
 use crate::outbox::{OutboxEnvelope, epoch_secs_to_time, metadata_with_ambient, unix_secs};
 use crate::pool::{VerifiedPgReadStore, VerifiedPgWriteStore};
 use crate::projection_events::ProjectionWriteRegistry;
@@ -34,13 +33,25 @@ use crate::projection_events::ProjectionWriteRegistry;
 use crate::PgStore;
 
 pub struct PgAuthGrantLifecycle {
-    read_pool: PgTenantReadPool,
-    write_pool: PgTenantWritePool,
+    read_pool: TenantDb<ServingReadLane>,
+    write_pool: TenantDb<ServingWriteLane>,
     clock: Box<dyn Clock>,
     #[cfg(all(test, feature = "integration"))]
     login_fault: Option<(String, AuthGrantLoginFault)>,
     #[cfg(all(test, feature = "integration"))]
     login_lock_gate: Option<AuthGrantLoginLockGate>,
+}
+
+#[derive(sqlx::FromRow)]
+pub(crate) struct AuthGrantRow {
+    pub(crate) user_id: String,
+    pub(crate) auth_time: i64,
+    pub(crate) authn_epoch_at_issue: i64,
+    pub(crate) status: String,
+    pub(crate) expires_at: i64,
+    pub(crate) created_at: i64,
+    pub(crate) closed_at: Option<i64>,
+    pub(crate) close_reason: Option<String>,
 }
 
 #[cfg(all(test, feature = "integration"))]
@@ -82,8 +93,8 @@ impl PgAuthGrantLifecycle {
     #[cfg(all(test, feature = "integration"))]
     pub(crate) fn new(store: &PgStore, clock: Box<dyn Clock>) -> Self {
         Self {
-            read_pool: PgTenantReadPool::from_unverified_for_test(store),
-            write_pool: PgTenantWritePool::from_unverified_for_test(store),
+            read_pool: TenantDb::<ServingReadLane>::from_unverified_for_test(store),
+            write_pool: TenantDb::<ServingWriteLane>::from_unverified_for_test(store),
             clock,
             login_fault: None,
             login_lock_gate: None,
@@ -97,8 +108,11 @@ impl PgAuthGrantLifecycle {
         projection_registry: ProjectionWriteRegistry,
     ) -> Self {
         Self {
-            read_pool: PgTenantReadPool::new(reader),
-            write_pool: PgTenantWritePool::with_projection_registry(writer, projection_registry),
+            read_pool: TenantDb::<ServingReadLane>::new(reader),
+            write_pool: TenantDb::<ServingWriteLane>::with_projection_registry(
+                writer,
+                projection_registry,
+            ),
             clock,
             #[cfg(all(test, feature = "integration"))]
             login_fault: None,
@@ -155,13 +169,13 @@ impl AuthGrantLifecycle for PgAuthGrantLifecycle {
         let login_lock_gate = self.login_lock_gate.clone();
 
         self.write_pool
-            .producer_tx(
+            .identity_producer_tx(
                 scope,
                 &entry,
                 &env,
-                move |tx| {
+                move |mut tx| {
                     Box::pin(async move {
-                        let account_matches = lock_active_login_account(tx.conn(), &grant)
+                        let account_matches = lock_active_login_account(&mut tx, &grant)
                             .await
                             .map_err(OutboxEmitError::new)?;
                         if !account_matches {
@@ -173,7 +187,7 @@ impl AuthGrantLifecycle for PgAuthGrantLifecycle {
                         if let Some(gate) = login_lock_gate {
                             gate.pause_after_lock().await;
                         }
-                        write_auth_grant(tx.conn(), &grant)
+                        write_auth_grant(&mut tx, &grant)
                             .await
                             .map_err(OutboxEmitError::new)?;
                         #[cfg(all(test, feature = "integration"))]
@@ -182,7 +196,7 @@ impl AuthGrantLifecycle for PgAuthGrantLifecycle {
                                 "injected failure after AuthGrant write",
                             )));
                         }
-                        write_initial_refresh(tx.conn(), &initial_refresh)
+                        write_initial_refresh(&mut tx, &initial_refresh)
                             .await
                             .map_err(OutboxEmitError::new)?;
                         #[cfg(all(test, feature = "integration"))]
@@ -223,35 +237,15 @@ impl AuthGrantLifecycle for PgAuthGrantLifecycle {
         observed_at: SystemTime,
     ) -> Result<Option<AuthGrant>, IdentityError> {
         let tenant = scope.tenant();
-        let tenant_uuid = tenant.as_uuid().to_string();
         let grant_id_raw = grant_id.as_str().to_owned();
-        let grant_id_query = grant_id_raw.clone();
+        let grant_id_query = grant_id.clone();
         let row = self
             .read_pool
-            .read(scope, move |conn| {
+            .identity_read(scope, move |mut conn| {
                 Box::pin(async move {
-                    sqlx::query(
-                        r#"
-                        SELECT user_id::text,
-                               extract(epoch from auth_time)::bigint AS auth_time,
-                               authn_epoch_at_issue,
-                               status,
-                               extract(epoch from expires_at)::bigint AS expires_at,
-                               extract(epoch from created_at)::bigint AS created_at,
-                               extract(epoch from closed_at)::bigint AS closed_at,
-                               close_reason
-                        FROM auth_grants
-                        WHERE tenant_id = $1::uuid
-                          AND grant_id = $2
-                          AND status = 'active'
-                          AND expires_at > to_timestamp($3)
-                        "#,
-                    )
-                    .bind(tenant_uuid)
-                    .bind(grant_id_query)
-                    .bind(unix_secs(observed_at))
-                    .fetch_optional(&mut *conn)
-                    .await
+                    conn.identity()
+                        .active_auth_grant_row(&grant_id_query, observed_at)
+                        .await
                 })
             })
             .await
@@ -259,23 +253,15 @@ impl AuthGrantLifecycle for PgAuthGrantLifecycle {
         let Some(row) = row else {
             return Ok(None);
         };
-        let user_raw: String = row.try_get("user_id").map_err(storage)?;
-        let auth_time: i64 = row.try_get("auth_time").map_err(storage)?;
-        let epoch: i64 = row.try_get("authn_epoch_at_issue").map_err(storage)?;
-        let status_raw: String = row.try_get("status").map_err(storage)?;
-        let expires_at: i64 = row.try_get("expires_at").map_err(storage)?;
-        let created_at: i64 = row.try_get("created_at").map_err(storage)?;
-        let closed_at: Option<i64> = row.try_get("closed_at").map_err(storage)?;
-        let close_reason_raw: Option<String> = row.try_get("close_reason").map_err(storage)?;
         let user_id =
-            ids::UserId::parse(&user_raw).map_err(|_| corrupt("corrupt auth_grants.user_id"))?;
-        let epoch = u64::try_from(epoch)
+            ids::UserId::parse(&row.user_id).map_err(|_| corrupt("corrupt auth_grants.user_id"))?;
+        let epoch = u64::try_from(row.authn_epoch_at_issue)
             .ok()
             .and_then(|value| AuthnEpoch::hydrate(value).ok())
             .ok_or_else(|| corrupt("corrupt auth_grants.authn_epoch_at_issue"))?;
-        let status = AuthGrantStatus::from_db_str(&status_raw)
+        let status = AuthGrantStatus::from_db_str(&row.status)
             .ok_or_else(|| corrupt("corrupt auth_grants.status"))?;
-        let close_reason = match close_reason_raw {
+        let close_reason = match row.close_reason {
             None => None,
             Some(raw) => Some(
                 CredentialSecurityEventKind::from_db_str(&raw)
@@ -288,12 +274,12 @@ impl AuthGrantLifecycle for PgAuthGrantLifecycle {
             id: grant_id,
             tenant,
             user_id,
-            auth_time: epoch_secs_to_time(auth_time),
+            auth_time: epoch_secs_to_time(row.auth_time),
             authn_epoch_at_issue: epoch,
             status,
-            expires_at: epoch_secs_to_time(expires_at),
-            created_at: epoch_secs_to_time(created_at),
-            closed_at: closed_at.map(epoch_secs_to_time),
+            expires_at: epoch_secs_to_time(row.expires_at),
+            created_at: epoch_secs_to_time(row.created_at),
+            closed_at: row.closed_at.map(epoch_secs_to_time),
             close_reason,
         })
         .map(Some)
@@ -327,106 +313,38 @@ fn validate_login_binding(
 }
 
 async fn lock_active_login_account(
-    conn: &mut sqlx::PgConnection,
+    conn: &mut IdentityTx<'_, '_, ServingWriteLane>,
     grant: &AuthGrant,
 ) -> Result<bool, sqlx::Error> {
-    let expected_epoch = i64::try_from(grant.authn_epoch_at_issue().get())
-        .map_err(|_| sqlx::Error::Protocol("auth grant epoch exceeds bigint".to_owned()))?;
-    let state: Option<(String, i64)> = sqlx::query_as(
-        r#"
-        SELECT status, authn_epoch
-        FROM account_security_states
-        WHERE tenant_id = $1::uuid
-          AND user_id = $2::uuid
-        FOR UPDATE
-        "#,
-    )
-    .bind(grant.tenant().as_uuid().to_string())
-    .bind(grant.user_id().as_uuid().to_string())
-    .fetch_optional(&mut *conn)
-    .await?;
-    Ok(matches!(state, Some((status, epoch)) if status == "active" && epoch == expected_epoch))
+    conn.identity().lock_active_login_account(grant).await
 }
 
 async fn write_auth_grant(
-    conn: &mut sqlx::PgConnection,
+    conn: &mut IdentityTx<'_, '_, ServingWriteLane>,
     grant: &AuthGrant,
 ) -> Result<(), sqlx::Error> {
-    let epoch = i64::try_from(grant.authn_epoch_at_issue().get())
-        .map_err(|_| sqlx::Error::Protocol("auth grant epoch exceeds bigint".to_owned()))?;
-    sqlx::query(
-        r#"
-        INSERT INTO auth_grants (
-            tenant_id, grant_id, user_id, auth_time, authn_epoch_at_issue,
-            status, expires_at, created_at, closed_at, close_reason
-        )
-        VALUES (
-            $1::uuid, $2, $3::uuid, to_timestamp($4), $5,
-            $6, to_timestamp($7), to_timestamp($8), NULL, NULL
-        )
-        "#,
-    )
-    .bind(grant.tenant().as_uuid().to_string())
-    .bind(grant.id().as_str())
-    .bind(grant.user_id().as_uuid().to_string())
-    .bind(unix_secs(grant.auth_time()))
-    .bind(epoch)
-    .bind(grant.status().as_db_str())
-    .bind(unix_secs(grant.expires_at()))
-    .bind(unix_secs(grant.created_at()))
-    .execute(conn)
-    .await
-    .map(|_| ())
+    conn.identity().insert_auth_grant(grant).await
 }
 
 async fn write_initial_refresh(
-    conn: &mut sqlx::PgConnection,
+    conn: &mut IdentityTx<'_, '_, ServingWriteLane>,
     record: &RefreshTokenRecord,
 ) -> Result<(), sqlx::Error> {
-    let epoch = i64::try_from(record.issuance_epoch().get())
-        .map_err(|_| sqlx::Error::Protocol("refresh epoch exceeds bigint".to_owned()))?;
-    sqlx::query(
-        r#"
-        INSERT INTO refresh_tokens (
-            id, tenant_id, auth_grant_id, user_id, authn_epoch_at_issue,
-            auth_grant_status, token_hash, parent_id, lineage_id, status,
-            issued_at, expires_at
-        )
-        VALUES (
-            $1::uuid, $2::uuid, $3, $4::uuid, $5,
-            $6, $7, NULL, $8::uuid, $9,
-            to_timestamp($10), to_timestamp($11)
-        )
-        "#,
-    )
-    .bind(record.id().as_str())
-    .bind(record.tenant().as_uuid().to_string())
-    .bind(record.auth_grant_id().as_str())
-    .bind(record.user_id().as_uuid().to_string())
-    .bind(epoch)
-    .bind(record.auth_grant_status().as_db_str())
-    .bind(record.token_hash().as_bytes() as &[u8])
-    .bind(record.lineage_id().as_str())
-    .bind(record.status().as_db_str())
-    .bind(unix_secs(record.issued_at()))
-    .bind(unix_secs(record.expires_at()))
-    .execute(conn)
-    .await
-    .map(|_| ())
+    conn.identity().insert_initial_refresh(record).await
 }
 
 #[derive(Clone)]
 pub(crate) struct GrantCloseCas {
-    tenant_uuid: String,
-    grant_id: String,
-    user_id: String,
-    epoch: i64,
-    expected_status: &'static str,
-    expected_closed_at: Option<i64>,
-    expected_reason: Option<&'static str>,
-    next_status: &'static str,
-    closed_at: i64,
-    reason: &'static str,
+    pub(crate) tenant: vocab::TenantId,
+    pub(crate) grant_id: String,
+    pub(crate) user_id: String,
+    pub(crate) epoch: i64,
+    pub(crate) expected_status: &'static str,
+    pub(crate) expected_closed_at: Option<i64>,
+    pub(crate) expected_reason: Option<&'static str>,
+    pub(crate) next_status: &'static str,
+    pub(crate) closed_at: i64,
+    pub(crate) reason: &'static str,
 }
 
 impl TryFrom<(&AuthGrant, &AuthGrant)> for GrantCloseCas {
@@ -441,7 +359,7 @@ impl TryFrom<(&AuthGrant, &AuthGrant)> for GrantCloseCas {
             return Err(corrupt("auth grant close mutation identity mismatch"));
         }
         Ok(Self {
-            tenant_uuid: next.tenant().as_uuid().to_string(),
+            tenant: next.tenant(),
             grant_id: next.id().as_str().to_owned(),
             user_id: next.user_id().as_uuid().to_string(),
             epoch: i64::try_from(next.authn_epoch_at_issue().get())
@@ -463,86 +381,10 @@ impl TryFrom<(&AuthGrant, &AuthGrant)> for GrantCloseCas {
 }
 
 pub(crate) async fn apply_grant_close_cas(
-    conn: &mut sqlx::PgConnection,
+    conn: &mut IdentityTx<'_, '_, ServingWriteLane>,
     close: &GrantCloseCas,
 ) -> Result<bool, sqlx::Error> {
-    let account_locked: Option<i32> = sqlx::query_scalar(
-        r#"
-        SELECT 1
-        FROM account_security_states
-        WHERE tenant_id = $1::uuid
-          AND user_id = $2::uuid
-        FOR UPDATE
-        "#,
-    )
-    .bind(&close.tenant_uuid)
-    .bind(&close.user_id)
-    .fetch_optional(&mut *conn)
-    .await?;
-    if account_locked.is_none() {
-        return Ok(false);
-    }
-
-    sqlx::query(
-        "SELECT id FROM refresh_tokens \
-         WHERE tenant_id = $1::uuid \
-           AND auth_grant_id = $2 \
-           AND user_id = $3::uuid \
-           AND authn_epoch_at_issue = $4 \
-         ORDER BY id FOR UPDATE",
-    )
-    .bind(&close.tenant_uuid)
-    .bind(&close.grant_id)
-    .bind(&close.user_id)
-    .bind(close.epoch)
-    .fetch_all(&mut *conn)
-    .await?;
-
-    let closed: Option<String> = sqlx::query_scalar(
-        r#"
-        WITH revoked AS (
-            UPDATE refresh_tokens
-            SET status = 'revoked'
-            WHERE tenant_id = $1::uuid
-              AND auth_grant_id = $2
-              AND user_id = $3::uuid
-              AND authn_epoch_at_issue = $4
-              AND auth_grant_status = $8
-              AND status <> 'revoked'
-            RETURNING 1
-        )
-        UPDATE auth_grants
-        SET status = $5,
-            closed_at = to_timestamp($6),
-            close_reason = $7
-        WHERE tenant_id = $1::uuid
-          AND grant_id = $2
-          AND user_id = $3::uuid
-          AND authn_epoch_at_issue = $4
-          AND status = $8
-          AND closed_at IS NOT DISTINCT FROM to_timestamp($9)
-          AND close_reason IS NOT DISTINCT FROM $10
-          AND (SELECT count(*) FROM revoked) >= 0
-        RETURNING grant_id
-        "#,
-    )
-    .bind(&close.tenant_uuid)
-    .bind(&close.grant_id)
-    .bind(&close.user_id)
-    .bind(close.epoch)
-    .bind(close.next_status)
-    .bind(close.closed_at)
-    .bind(close.reason)
-    .bind(close.expected_status)
-    .bind(close.expected_closed_at)
-    .bind(close.expected_reason)
-    .fetch_optional(&mut *conn)
-    .await?;
-    if closed.as_deref() == Some(close.grant_id.as_str()) {
-        return Ok(true);
-    }
-
-    Ok(false)
+    conn.identity().close_auth_grant_cas(close).await
 }
 
 fn storage(error: sqlx::Error) -> IdentityError {

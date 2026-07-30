@@ -10,7 +10,8 @@
 //! `VersionConflict`）；骨架自身产生的 sqlx
 //! 错误（begin / SET LOCAL / `append_outbox` / commit）经调用方传入的 `map_storage: Fn(sqlx::Error)->E` 收敛进
 //! 同一 `E`——**不**要求 `E: From<sqlx::Error>`（域错误 `ConfigRepoError` 不依赖 sqlx，无法 impl `From`）。
-//! 这正是不直接复用 `PgStore::run_global_transaction`（要求 `E: From<sqlx::Error>`）的原因。
+//! 这正是不使用通用全局事务 runner（要求 `E: From<sqlx::Error>`）的原因；该 runner 只保留给
+//! crate 内 integration fixture，生产 tenant 路径无法取得它。
 //!
 //! # INVARIANT: OUTBOX-COTX-CONFIG-01 { level = "Medium", exec = "manual/opt-in", source = "code" }
 //!
@@ -47,7 +48,14 @@ use crate::tx_retry::{
 #[cfg(feature = "domain-identity")]
 use crate::tx_retry::{OUTBOX_PRODUCER_BOUNDARY, record_settlement};
 
+pub(crate) mod eventing;
+pub(crate) mod identity;
+pub(crate) mod reconcile;
+#[cfg(any(feature = "domain-settings", feature = "domain-audit"))]
+pub(crate) mod settings_audit;
 mod settlement;
+#[cfg(all(test, feature = "integration"))]
+pub(crate) mod test_proof;
 
 #[cfg(any(feature = "domain-settings", feature = "domain-audit"))]
 pub(crate) use settlement::{LocalTxAttempt, LocalTxRetryError, commit_unknown};
@@ -109,16 +117,16 @@ impl TenantScopeHandle for settings::ports::TenantRepoScope {
 }
 
 #[cfg(feature = "domain-identity")]
-impl TenantScopeHandle for identity::ports::TenantRepoScope {
+impl TenantScopeHandle for ::identity::ports::TenantRepoScope {
     fn tenant(self) -> TenantId {
-        identity::ports::TenantRepoScope::tenant(&self)
+        ::identity::ports::TenantRepoScope::tenant(&self)
     }
 }
 
 #[cfg(feature = "domain-identity")]
-impl TenantScopeHandle for identity::ports::device_certificate::DeviceCertificateScope {
+impl TenantScopeHandle for ::identity::ports::device_certificate::DeviceCertificateScope {
     fn tenant(self) -> TenantId {
-        identity::ports::device_certificate::DeviceCertificateScope::tenant(&self)
+        ::identity::ports::device_certificate::DeviceCertificateScope::tenant(&self)
     }
 }
 
@@ -150,7 +158,7 @@ mod producer_fact_authorization_seal {
     pub(crate) trait Sealed {}
 }
 
-/// Crate-closed authorization for the exact generated fact appended by [`producer_tx`](PgTenantWritePool::producer_tx).
+/// Crate-closed authorization for the exact generated fact appended by the serving-write producer funnel.
 ///
 /// Production HTTP routes obtain this capability from their mounted producer receipt; no domain
 /// command can independently mint an active fact authorization.
@@ -187,7 +195,7 @@ impl producer_fact_authorization_seal::Sealed for IntegrationCredentialSecurityA
 #[cfg(all(test, feature = "domain-identity", feature = "integration"))]
 impl ProducerFactAuthorization for IntegrationCredentialSecurityAuthorization {
     fn fact(&self) -> vocab::EventFactBinding {
-        identity::ports::SECURITY_EVENT_FACT
+        ::identity::ports::SECURITY_EVENT_FACT
     }
 }
 
@@ -230,42 +238,88 @@ impl<T, E> ProducerTxAttempt<T, E> {
     /// branch of the opaque settlement carrier. Unknown commits and rollbacks cannot reach it.
     pub(crate) fn into_refresh_commit_result(
         self,
-    ) -> Result<(T, identity::ports::RefreshCommitAcknowledgement), E> {
+    ) -> Result<(T, ::identity::ports::RefreshCommitAcknowledgement), E> {
         record_settlement(OUTBOX_PRODUCER_BOUNDARY, self.attempt.settlement());
-        self.attempt
-            .into_result()
-            .map(|value| (value, identity::ports::acknowledge_durable_refresh_commit()))
+        self.attempt.into_result().map(|value| {
+            (
+                value,
+                ::identity::ports::acknowledge_durable_refresh_commit(),
+            )
+        })
     }
 }
 
-/// Postgres 事务能力令牌。
-///
-/// 只有本 crate 能从 live [`sqlx::Transaction`] 铸造本类型；外部 crate 无法构造、无法从
-/// [`PgPool`] / [`PgConnection`] mint。`append_outbox` 只接受本令牌，确保 outbox 双写入口不能被裸连接调用。
-///
-/// `ref: sqlx sqlx-core/src/transaction.rs@v0.8.6`（`Transaction` 从 `begin` 到 `commit`/`rollback` 持有连接，
-/// 并通过 `DerefMut` 借出底层 connection）。
-///
-/// # INVARIANT: PG-TX-CAPABILITY-SEAL-01 { level = "Hard", exec = "native-compile", source = "code", native = "type boundary and trybuild UI" }
-pub(crate) struct TxCapability<'tx> {
-    conn: &'tx mut PgConnection,
-    _seal: (),
+#[doc(hidden)]
+pub mod tenant_lane_seal {
+    pub trait Sealed {}
 }
 
-impl<'tx> TxCapability<'tx> {
-    /// 从真实 `sqlx::Transaction` 铸造事务能力令牌。
-    pub(crate) fn from_transaction(tx: &'tx mut Transaction<'_, Postgres>) -> Self {
+/// Exact, closed PostgreSQL tenant lane brand.
+pub trait TenantLane: tenant_lane_seal::Sealed + Clone + Send + Sync + 'static {}
+
+pub trait ReadLane: TenantLane {}
+pub trait WriteLane: TenantLane {}
+
+#[derive(Clone, Copy)]
+pub struct ServingReadLane;
+#[derive(Clone, Copy)]
+pub struct AuditAdminReadLane;
+#[derive(Clone, Copy)]
+pub struct MaintenanceReadLane;
+#[derive(Clone)]
+pub struct ServingWriteLane {
+    projection_registry: ProjectionWriteRegistry,
+}
+#[derive(Clone, Copy)]
+pub struct MaintenanceWriteLane;
+
+impl tenant_lane_seal::Sealed for ServingReadLane {}
+impl tenant_lane_seal::Sealed for AuditAdminReadLane {}
+impl tenant_lane_seal::Sealed for MaintenanceReadLane {}
+impl tenant_lane_seal::Sealed for ServingWriteLane {}
+impl tenant_lane_seal::Sealed for MaintenanceWriteLane {}
+
+impl TenantLane for ServingReadLane {}
+impl TenantLane for AuditAdminReadLane {}
+impl TenantLane for MaintenanceReadLane {}
+impl TenantLane for ServingWriteLane {}
+impl TenantLane for MaintenanceWriteLane {}
+
+impl ReadLane for ServingReadLane {}
+impl ReadLane for AuditAdminReadLane {}
+impl ReadLane for MaintenanceReadLane {}
+impl WriteLane for ServingWriteLane {}
+impl WriteLane for MaintenanceWriteLane {}
+
+/// Tenant-branded store view of one live PostgreSQL transaction.
+///
+/// The private mint is called only after `SET LOCAL rss.tenant_id` succeeds. Callers can invoke
+/// only the closed, lane-specific façade methods defined by this crate; they cannot recover a
+/// [`PgConnection`], execute arbitrary SQL, begin a nested transaction, or settle the transaction.
+/// Commit/rollback remain owned by the read/write lifecycle funnels.
+///
+/// # INVARIANT: POSTGRES-TX-TYPE-01 { level = "Hard", exec = "native-compile", source = "code", native = "private mint, branded tenant identity, HRTB borrow, and no raw connection or settlement projection" }
+pub struct TenantTx<'tx, L: TenantLane> {
+    conn: &'tx mut PgConnection,
+    tenant: TenantId,
+    _lane: std::marker::PhantomData<fn() -> L>,
+}
+
+impl<'tx, L: TenantLane> TenantTx<'tx, L> {
+    fn from_bound_connection(conn: &'tx mut PgConnection, tenant: TenantId) -> Self {
         Self {
-            conn: &mut **tx,
-            _seal: (),
+            conn,
+            tenant,
+            _lane: std::marker::PhantomData,
         }
     }
 
-    /// 借出事务内连接供 adapter 内 SQL helper 使用。
-    pub(crate) fn conn(&mut self) -> &mut PgConnection {
-        self.conn
+    pub fn tenant(&self) -> TenantId {
+        self.tenant
     }
+}
 
+impl TenantTx<'_, ServingWriteLane> {
     /// Integration-only seam that simulates losing the commit acknowledgement after PostgreSQL
     /// has accepted the commit. The transaction-local marker is consumed by the settlement funnel;
     /// the default production feature graph cannot construct or trigger it. External journey
@@ -302,62 +356,28 @@ impl<'tx> TxCapability<'tx> {
             .await
             .map(|_| ())
     }
-
-    /// Integration-only seam that performs a real rollback and then simulates losing its
-    /// acknowledgement. The settlement funnel consumes the transaction-local marker and reports
-    /// `RollbackFailed`, which must never be replayed.
-    #[cfg(all(test, feature = "integration"))]
-    pub(crate) async fn inject_rollback_failed_after_rollback(
-        &mut self,
-    ) -> Result<(), sqlx::Error> {
-        sqlx::query("SELECT set_config('rss.test_rollback_failed_after_rollback', '1', true)")
-            .execute(&mut *self.conn)
-            .await
-            .map(|_| ())
-    }
-
-    /// Integration-only seam that leaves rollback without an acknowledgement until the caller's
-    /// timeout cancels the LocalTx future. The armed connection lease must quarantine the backend.
-    #[cfg(all(test, feature = "integration"))]
-    pub(crate) async fn inject_rollback_timeout(&mut self) -> Result<(), sqlx::Error> {
-        sqlx::query("SELECT set_config('rss.test_rollback_timeout', '1', true)")
-            .execute(&mut *self.conn)
-            .await
-            .map(|_| ())
-    }
 }
 
-/// Tenant-scoped PostgreSQL read capability.
+/// Tenant-scoped PostgreSQL database capability.
 ///
-/// The capability exposes only `read`/`read_map`; durable mutation methods are absent. Production
-/// construction requires a verified reader store, while the raw-store source exists only under
-/// `cfg(test)` for database integration tests.
+/// `L` is a sealed read/write and serving/maintenance lane. Production construction requires the
+/// matching verified store. The capability never exposes its raw pool, and its transactions yield
+/// only tenant-branded [`TenantTx`] values.
 ///
 /// # INVARIANT: TENANCY-PG-TX-FUNNEL-01 { level = "Medium", exec = "manual/opt-in", source = "code" }
 ///
 /// `cargo xtask pg-tenant-tx-guard` is the Medium backstop for raw-pool and lane crossover drift.
 #[derive(Clone)]
-pub(crate) struct PgReadPool<L> {
+pub struct TenantDb<L: TenantLane> {
     pool: PgPool,
-    _lane: std::marker::PhantomData<fn() -> L>,
+    lane: L,
 }
 
-#[derive(Clone, Copy)]
-pub(crate) enum ServingReadLane {}
-#[allow(dead_code)]
-pub(crate) enum AuditAdminReadLane {}
-pub(crate) enum MaintenanceReadLane {}
-
-pub(crate) type PgTenantReadPool = PgReadPool<ServingReadLane>;
-#[allow(dead_code)]
-pub(crate) type PgAuditAdminReadPool = PgReadPool<AuditAdminReadLane>;
-pub(crate) type PgMaintenanceReadPool = PgReadPool<MaintenanceReadLane>;
-
-impl PgReadPool<ServingReadLane> {
+impl TenantDb<ServingReadLane> {
     pub(crate) fn new(store: &VerifiedPgReadStore) -> Self {
         Self {
             pool: store.pool().clone(),
-            _lane: std::marker::PhantomData,
+            lane: ServingReadLane,
         }
     }
 
@@ -366,17 +386,17 @@ impl PgReadPool<ServingReadLane> {
     pub(crate) fn from_unverified_for_test(store: &crate::PgStore) -> Self {
         Self {
             pool: store.pool.clone(),
-            _lane: std::marker::PhantomData,
+            lane: ServingReadLane,
         }
     }
 }
 
-impl PgReadPool<AuditAdminReadLane> {
+impl TenantDb<AuditAdminReadLane> {
     #[allow(dead_code)]
     pub(crate) fn new_admin(store: &VerifiedPgAuditAdminStore) -> Self {
         Self {
             pool: store.pool().clone(),
-            _lane: std::marker::PhantomData,
+            lane: AuditAdminReadLane,
         }
     }
 
@@ -385,34 +405,35 @@ impl PgReadPool<AuditAdminReadLane> {
     pub(crate) fn from_unverified_for_test(store: &crate::PgStore) -> Self {
         Self {
             pool: store.pool.clone(),
-            _lane: std::marker::PhantomData,
+            lane: AuditAdminReadLane,
         }
     }
 }
 
-impl PgReadPool<MaintenanceReadLane> {
+impl TenantDb<MaintenanceReadLane> {
     pub(crate) fn new_maintenance(store: &VerifiedPgMaintenanceStore) -> Self {
         Self {
             pool: store.pool().clone(),
-            _lane: std::marker::PhantomData,
+            lane: MaintenanceReadLane,
         }
     }
 }
 
-impl<L> PgReadPool<L> {
+impl<L: ReadLane> TenantDb<L> {
     /// Run a tenant-scoped read transaction.
-    pub(crate) async fn read<S, T, F>(&self, scope: S, read: F) -> Result<T, sqlx::Error>
+    async fn read<S, T, F>(&self, scope: S, read: F) -> Result<T, sqlx::Error>
     where
         S: TenantScopeHandle,
-        F: for<'c> FnOnce(&'c mut PgConnection) -> BoxFuture<'c, Result<T, sqlx::Error>> + Send,
+        F: for<'c, 'tx> FnOnce(&'c mut TenantTx<'tx, L>) -> BoxFuture<'c, Result<T, sqlx::Error>>
+            + Send,
         T: Send,
     {
         let tenant = scope.tenant();
-        tenant_scoped_read(&self.pool, tenant, read).await
+        tenant_scoped_read::<L, _, _>(&self.pool, tenant, read).await
     }
 
     /// Run a tenant-scoped read transaction whose closure can return domain errors.
-    pub(crate) async fn read_map<S, T, F, E>(
+    async fn read_map<S, T, F, E>(
         &self,
         scope: S,
         read: F,
@@ -420,16 +441,17 @@ impl<L> PgReadPool<L> {
     ) -> Result<T, E>
     where
         S: TenantScopeHandle,
-        F: for<'c> FnOnce(&'c mut PgConnection) -> BoxFuture<'c, Result<T, E>> + Send,
+        F: for<'c, 'tx> FnOnce(&'c mut TenantTx<'tx, L>) -> BoxFuture<'c, Result<T, E>> + Send,
         E: Send,
         T: Send,
     {
         let tenant = scope.tenant();
-        tenant_scoped_read_map(&self.pool, tenant, read, map_storage).await
+        tenant_scoped_read_map::<L, _, _, _>(&self.pool, tenant, read, map_storage).await
     }
 
     /// Run a multi-statement tenant read against one repeatable, read-only PostgreSQL snapshot.
-    pub(crate) async fn repeatable_read_map<S, T, F, E>(
+    #[cfg(feature = "domain-identity")]
+    async fn repeatable_read_map<S, T, F, E>(
         &self,
         scope: S,
         read: F,
@@ -437,40 +459,22 @@ impl<L> PgReadPool<L> {
     ) -> Result<T, E>
     where
         S: TenantScopeHandle,
-        F: for<'c> FnOnce(&'c mut PgConnection) -> BoxFuture<'c, Result<T, E>> + Send,
+        F: for<'c, 'tx> FnOnce(&'c mut TenantTx<'tx, L>) -> BoxFuture<'c, Result<T, E>> + Send,
         E: Send,
         T: Send,
     {
         let tenant = scope.tenant();
-        tenant_scoped_repeatable_read_map(&self.pool, tenant, read, map_storage).await
+        tenant_scoped_repeatable_read_map::<L, _, _, _>(&self.pool, tenant, read, map_storage).await
     }
 }
 
-/// Tenant-scoped PostgreSQL write capability.
-///
-/// Read helpers are deliberately absent: independent reads must be wired through
-/// [`PgTenantReadPool`]. SELECT statements required inside a write/CAS/co-transaction remain
-/// available through the transaction capability supplied to the write closure.
-#[derive(Clone)]
-pub(crate) struct PgWritePool<L> {
-    pool: PgPool,
-    projection_registry: ProjectionWriteRegistry,
-    _lane: std::marker::PhantomData<fn() -> L>,
-}
-
-#[derive(Clone, Copy)]
-pub(crate) enum ServingWriteLane {}
-pub(crate) enum MaintenanceWriteLane {}
-
-pub(crate) type PgTenantWritePool = PgWritePool<ServingWriteLane>;
-pub(crate) type PgMaintenanceWritePool = PgWritePool<MaintenanceWriteLane>;
-
-impl PgWritePool<ServingWriteLane> {
+impl TenantDb<ServingWriteLane> {
     pub(crate) fn new(store: &VerifiedPgWriteStore) -> Self {
         Self {
             pool: store.pool().clone(),
-            projection_registry: ProjectionWriteRegistry::empty(),
-            _lane: std::marker::PhantomData,
+            lane: ServingWriteLane {
+                projection_registry: ProjectionWriteRegistry::empty(),
+            },
         }
     }
 
@@ -480,8 +484,9 @@ impl PgWritePool<ServingWriteLane> {
     ) -> Self {
         Self {
             pool: store.pool().clone(),
-            projection_registry,
-            _lane: std::marker::PhantomData,
+            lane: ServingWriteLane {
+                projection_registry,
+            },
         }
     }
 
@@ -489,8 +494,8 @@ impl PgWritePool<ServingWriteLane> {
     ///
     /// This is deliberately narrower than a generic writer-side read API: only the private
     /// startup receipt can select this lane, so independent repositories cannot bypass
-    /// [`PgTenantReadPool`].
-    pub(crate) async fn revocation_read<S, T, F, E>(
+    /// the exact serving-read [`TenantDb`] lane.
+    async fn revocation_read<S, T, F, E>(
         &self,
         _receipt: &crate::revocation::RevocationCapabilityReceipt,
         scope: S,
@@ -499,7 +504,10 @@ impl PgWritePool<ServingWriteLane> {
     ) -> Result<T, E>
     where
         S: TenantScopeHandle,
-        F: for<'c, 'tx> FnOnce(&'c mut TxCapability<'tx>) -> BoxFuture<'c, Result<T, E>> + Send,
+        F: for<'c, 'tx> FnOnce(
+                &'c mut TenantTx<'tx, ServingWriteLane>,
+            ) -> BoxFuture<'c, Result<T, E>>
+            + Send,
         E: std::error::Error + Send + Sync + 'static,
         T: Send,
     {
@@ -511,29 +519,38 @@ impl PgWritePool<ServingWriteLane> {
     pub(crate) fn from_unverified_for_test(store: &crate::PgStore) -> Self {
         Self {
             pool: store.pool.clone(),
-            projection_registry: ProjectionWriteRegistry::empty(),
-            _lane: std::marker::PhantomData,
+            lane: ServingWriteLane {
+                projection_registry: ProjectionWriteRegistry::empty(),
+            },
+        }
+    }
+
+    #[cfg(all(test, feature = "integration"))]
+    pub(crate) fn from_unverified_with_projection_registry_for_test(
+        store: &crate::PgStore,
+        projection_registry: ProjectionWriteRegistry,
+    ) -> Self {
+        Self {
+            pool: store.pool.clone(),
+            lane: ServingWriteLane {
+                projection_registry,
+            },
         }
     }
 }
 
-impl PgWritePool<MaintenanceWriteLane> {
+impl TenantDb<MaintenanceWriteLane> {
     pub(crate) fn new_maintenance(store: &VerifiedPgMaintenanceStore) -> Self {
         Self {
             pool: store.pool().clone(),
-            projection_registry: ProjectionWriteRegistry::empty(),
-            _lane: std::marker::PhantomData,
+            lane: MaintenanceWriteLane,
         }
     }
 }
 
-impl<L> PgWritePool<L> {
-    pub(crate) fn projection_registry(&self) -> ProjectionWriteRegistry {
-        self.projection_registry.clone()
-    }
-
+impl<L: WriteLane> TenantDb<L> {
     /// Run a tenant-scoped write transaction.
-    pub(crate) async fn write<S, T, F, E>(
+    async fn write<S, T, F, E>(
         &self,
         scope: S,
         write: F,
@@ -541,12 +558,12 @@ impl<L> PgWritePool<L> {
     ) -> Result<T, E>
     where
         S: TenantScopeHandle,
-        F: for<'c, 'tx> FnOnce(&'c mut TxCapability<'tx>) -> BoxFuture<'c, Result<T, E>> + Send,
+        F: for<'c, 'tx> FnOnce(&'c mut TenantTx<'tx, L>) -> BoxFuture<'c, Result<T, E>> + Send,
         E: std::error::Error + Send + Sync + 'static,
         T: Send,
     {
         let tenant = scope.tenant();
-        tenant_scoped_write_inner(&self.pool, tenant, write, map_storage)
+        tenant_scoped_write_inner::<L, _, _, _>(&self.pool, tenant, write, map_storage)
             .await
             .into_result()
     }
@@ -554,7 +571,7 @@ impl<L> PgWritePool<L> {
     /// Run one tenant-scoped transaction before an absolute deadline. The connection is owned by
     /// this operation so a client-side timeout can poison it instead of returning an executor with
     /// an unknown PostgreSQL backend state to the idle pool.
-    pub(crate) async fn deadline_write<S, T, F, E>(
+    async fn deadline_write<S, T, F, E>(
         &self,
         scope: S,
         deadline: Instant,
@@ -564,13 +581,13 @@ impl<L> PgWritePool<L> {
     ) -> Result<T, E>
     where
         S: TenantScopeHandle,
-        F: for<'c> FnOnce(&'c mut PgConnection) -> BoxFuture<'c, Result<T, E>> + Send,
+        F: for<'c, 'tx> FnOnce(&'c mut TenantTx<'tx, L>) -> BoxFuture<'c, Result<T, E>> + Send,
         E: Send,
         T: Send,
     {
-        deadline_transaction(
+        deadline_tenant_transaction::<L, _, _, _>(
             &self.pool,
-            Some(scope.tenant()),
+            scope.tenant(),
             deadline,
             write,
             map_storage,
@@ -581,7 +598,7 @@ impl<L> PgWritePool<L> {
 
     /// Run a tenant-scoped write transaction with a per-attempt lock wait bound.
     #[cfg(any(feature = "domain-settings", feature = "domain-audit"))]
-    pub(crate) async fn retry_write<S, T, F, E>(
+    async fn retry_write<S, T, F, E>(
         &self,
         scope: S,
         deadline: LocalTxDeadline,
@@ -590,12 +607,25 @@ impl<L> PgWritePool<L> {
     ) -> LocalTxAttempt<T, E>
     where
         S: TenantScopeHandle,
-        F: for<'c, 'tx> FnOnce(&'c mut TxCapability<'tx>) -> BoxFuture<'c, Result<T, E>> + Send,
+        F: for<'c, 'tx> FnOnce(&'c mut TenantTx<'tx, L>) -> BoxFuture<'c, Result<T, E>> + Send,
         E: std::error::Error + Send + Sync + 'static,
         T: Send,
     {
         let tenant = scope.tenant();
-        tenant_scoped_retry_write_inner(&self.pool, tenant, deadline, write, map_storage).await
+        tenant_scoped_retry_write_inner::<L, _, _, _>(
+            &self.pool,
+            tenant,
+            deadline,
+            write,
+            map_storage,
+        )
+        .await
+    }
+}
+
+impl TenantDb<ServingWriteLane> {
+    pub(crate) fn projection_registry(&self) -> ProjectionWriteRegistry {
+        self.lane.projection_registry.clone()
     }
 
     /// Run one authorized generated-fact mutation through the only transaction funnel.
@@ -603,7 +633,7 @@ impl<L> PgWritePool<L> {
     /// Authorization is supplied by either an HTTP mounted-producer receipt or a
     /// credential-security sealed command's move-only proof.
     #[cfg(feature = "domain-identity")]
-    pub(crate) async fn producer_tx<S, A, T, F, E>(
+    async fn producer_tx<S, A, T, F, E>(
         &self,
         scope: S,
         entry: &EventEntry,
@@ -614,7 +644,7 @@ impl<L> PgWritePool<L> {
     where
         S: TenantScopeHandle,
         F: for<'c, 'tx> FnOnce(
-                &'c mut TxCapability<'tx>,
+                &'c mut TenantTx<'tx, ServingWriteLane>,
             ) -> BoxFuture<'c, Result<ProducerTxOutcome<A, T>, E>>
             + Send,
         E: MapOutboxAppendError + std::error::Error + Send + Sync + 'static,
@@ -625,7 +655,7 @@ impl<L> PgWritePool<L> {
         ProducerTxAttempt::new(
             producer_tx_inner(
                 &self.pool,
-                self.projection_registry.clone(),
+                self.lane.projection_registry.clone(),
                 ProducerTxWrite { tenant, entry, env },
                 LocalTxExecutionPolicy::Plain,
                 business_write,
@@ -640,7 +670,7 @@ impl<L> PgWritePool<L> {
     /// Authorization is supplied by an HTTP mounted-producer receipt; credential-security uses
     /// the non-retrying [`Self::producer_tx`] path with its command-derived move-only proof.
     #[cfg(feature = "domain-settings")]
-    pub(crate) async fn retry_producer_tx<S, A, T, F, E>(
+    async fn retry_producer_tx<S, A, T, F, E>(
         &self,
         scope: S,
         deadline: LocalTxDeadline,
@@ -652,7 +682,7 @@ impl<L> PgWritePool<L> {
     where
         S: TenantScopeHandle,
         F: for<'c, 'tx> FnOnce(
-                &'c mut TxCapability<'tx>,
+                &'c mut TenantTx<'tx, ServingWriteLane>,
             ) -> BoxFuture<'c, Result<ProducerTxOutcome<A, T>, E>>
             + Send,
         E: MapOutboxAppendError + std::error::Error + Send + Sync + 'static,
@@ -662,7 +692,7 @@ impl<L> PgWritePool<L> {
         let tenant = scope.tenant();
         producer_tx_inner(
             &self.pool,
-            self.projection_registry.clone(),
+            self.lane.projection_registry.clone(),
             ProducerTxWrite { tenant, entry, env },
             LocalTxExecutionPolicy::Deadline(deadline),
             business_write,
@@ -689,12 +719,11 @@ where
     E: Send,
     T: Send,
 {
-    deadline_transaction(pool, None, deadline, operation, map_storage, map_timeout).await
+    deadline_global_transaction_inner(pool, deadline, operation, map_storage, map_timeout).await
 }
 
-async fn deadline_transaction<T, F, E>(
+async fn deadline_global_transaction_inner<T, F, E>(
     pool: &PgPool,
-    tenant: Option<TenantId>,
     deadline: Instant,
     operation: F,
     map_storage: impl Fn(sqlx::Error) -> E + Send + Sync,
@@ -716,12 +745,60 @@ where
         set_local_deadline_timeouts(&mut tx, deadline)
             .await
             .map_err(&map_storage)?;
-        if let Some(tenant) = tenant {
-            set_local_tenant(&mut tx, tenant)
-                .await
-                .map_err(&map_storage)?;
-        }
         let result = operation(&mut tx).await;
+        match result {
+            Ok(value) => {
+                tx.commit().await.map_err(&map_storage)?;
+                Ok(value)
+            }
+            Err(error) => {
+                let _ = tx.rollback().await;
+                Err(error)
+            }
+        }
+    };
+
+    match tokio::time::timeout_at(deadline, transaction).await {
+        Ok(result) => result,
+        Err(_) => {
+            connection.close_on_drop();
+            Err(map_timeout())
+        }
+    }
+}
+
+async fn deadline_tenant_transaction<L, T, F, E>(
+    pool: &PgPool,
+    tenant: TenantId,
+    deadline: Instant,
+    operation: F,
+    map_storage: impl Fn(sqlx::Error) -> E + Send + Sync,
+    map_timeout: impl Fn() -> E + Send + Sync,
+) -> Result<T, E>
+where
+    L: WriteLane,
+    F: for<'c, 'tx> FnOnce(&'c mut TenantTx<'tx, L>) -> BoxFuture<'c, Result<T, E>> + Send,
+    E: Send,
+    T: Send,
+{
+    let mut connection = match tokio::time::timeout_at(deadline, pool.acquire()).await {
+        Ok(Ok(connection)) => connection,
+        Ok(Err(error)) => return Err(map_storage(error)),
+        Err(_) => return Err(map_timeout()),
+    };
+
+    let transaction = async {
+        let mut tx = connection.begin().await.map_err(&map_storage)?;
+        set_local_deadline_timeouts(&mut tx, deadline)
+            .await
+            .map_err(&map_storage)?;
+        set_local_tenant(&mut tx, tenant)
+            .await
+            .map_err(&map_storage)?;
+        let result = {
+            let mut tenant_tx = TenantTx::from_bound_connection(&mut tx, tenant);
+            operation(&mut tenant_tx).await
+        };
         match result {
             Ok(value) => {
                 tx.commit().await.map_err(&map_storage)?;
@@ -767,7 +844,7 @@ async fn set_local_deadline_timeouts(
 
 /// tenant-scoped 只读事务：`BEGIN READ ONLY` → SET LOCAL `rss.tenant_id` → 读闭包 → commit。
 ///
-/// 与写侧 [`PgTenantWritePool::producer_tx`]（producer write + outbox）对称，是读路径的 RLS policy
+/// 与写侧 serving-write `TenantDb::producer_tx`（producer write + outbox）对称，是读路径的 RLS policy
 /// `current_setting('rss.tenant_id', true)` 锚点（#1298）。读闭包仅做 SQL fetch 返回 owned 原始值
 /// （`Option<PgRow>` / 标量 / tuple），hydrate（域类型转换 / 域错误映射）在 tx 外执行，保持域错误
 /// 语义不变且不依赖 sqlx。失败时 rollback（不覆盖原错误）。
@@ -780,17 +857,22 @@ async fn set_local_deadline_timeouts(
 ///
 /// 所有独立 tenant relation 读取经此 helper 注入 SET LOCAL，并由显式事务属性拒绝 durable DML。
 /// 生产连接同时使用 `rss_app_read` 的默认只读与精确 SELECT ACL；三层防线彼此独立。
-pub(crate) async fn tenant_scoped_read<T, F>(
+pub(crate) async fn tenant_scoped_read<L, T, F>(
     pool: &PgPool,
     tenant: TenantId,
     read: F,
 ) -> Result<T, sqlx::Error>
 where
-    F: for<'c> FnOnce(&'c mut PgConnection) -> BoxFuture<'c, Result<T, sqlx::Error>> + Send,
+    F: for<'c, 'tx> FnOnce(&'c mut TenantTx<'tx, L>) -> BoxFuture<'c, Result<T, sqlx::Error>>
+        + Send,
+    L: ReadLane,
     T: Send,
 {
-    let mut tx = begin_tenant_read(pool, tenant).await?;
-    let result = read(&mut tx).await;
+    let mut tx = begin_tenant_read::<L>(pool, tenant).await?;
+    let result = {
+        let mut tenant_tx = tx.tenant_tx();
+        read(&mut tenant_tx).await
+    };
     // 读事务：成功 commit（RLS fail-closed 时 `read` 已 Err）；失败 rollback（warn 定位，不覆盖原错误）。
     match result {
         Ok(v) => {
@@ -813,21 +895,26 @@ where
 
 /// tenant-scoped read variant for closures that return domain errors while storage errors
 /// still flow through `map_storage`.
-pub(crate) async fn tenant_scoped_read_map<T, F, E>(
+pub(crate) async fn tenant_scoped_read_map<L, T, F, E>(
     pool: &PgPool,
     tenant: TenantId,
     read: F,
     map_storage: impl Fn(sqlx::Error) -> E + Send,
 ) -> Result<T, E>
 where
-    F: for<'c> FnOnce(&'c mut PgConnection) -> BoxFuture<'c, Result<T, E>> + Send,
+    L: ReadLane,
+    F: for<'c, 'tx> FnOnce(&'c mut TenantTx<'tx, L>) -> BoxFuture<'c, Result<T, E>> + Send,
     E: Send,
     T: Send,
 {
-    let mut tx = begin_tenant_read(pool, tenant)
+    let mut tx = begin_tenant_read::<L>(pool, tenant)
         .await
         .map_err(&map_storage)?;
-    match read(&mut tx).await {
+    let result = {
+        let mut tenant_tx = tx.tenant_tx();
+        read(&mut tenant_tx).await
+    };
+    match result {
         Ok(v) => {
             tx.commit().await.map_err(|e| {
                 tracing::warn!(
@@ -855,21 +942,27 @@ where
 }
 
 /// Tenant-scoped multi-statement read with one stable PostgreSQL snapshot.
-pub(crate) async fn tenant_scoped_repeatable_read_map<T, F, E>(
+#[cfg(feature = "domain-identity")]
+pub(crate) async fn tenant_scoped_repeatable_read_map<L, T, F, E>(
     pool: &PgPool,
     tenant: TenantId,
     read: F,
     map_storage: impl Fn(sqlx::Error) -> E + Send,
 ) -> Result<T, E>
 where
-    F: for<'c> FnOnce(&'c mut PgConnection) -> BoxFuture<'c, Result<T, E>> + Send,
+    L: ReadLane,
+    F: for<'c, 'tx> FnOnce(&'c mut TenantTx<'tx, L>) -> BoxFuture<'c, Result<T, E>> + Send,
     E: Send,
     T: Send,
 {
-    let mut tx = begin_tenant_repeatable_read(pool, tenant)
+    let mut tx = begin_tenant_repeatable_read::<L>(pool, tenant)
         .await
         .map_err(&map_storage)?;
-    match read(&mut tx).await {
+    let result = {
+        let mut tenant_tx = tx.tenant_tx();
+        read(&mut tenant_tx).await
+    };
+    match result {
         Ok(value) => {
             tx.commit().await.map_err(map_storage)?;
             Ok(value)
@@ -893,28 +986,57 @@ where
 ///
 /// `ref: sqlx sqlx-core/src/pool/mod.rs@v0.8.6` — `Pool::begin_with` owns the acquired connection
 /// and sends the custom top-level `BEGIN` through SQLx's transaction manager.
-async fn begin_tenant_read(
+async fn begin_tenant_read<L: ReadLane>(
     pool: &PgPool,
     tenant: TenantId,
-) -> Result<Transaction<'static, Postgres>, sqlx::Error> {
+) -> Result<TenantReadTransaction<L>, sqlx::Error> {
     let mut tx = pool.begin_with("BEGIN READ ONLY").await?;
     set_local_tenant(&mut tx, tenant).await?;
-    Ok(tx)
+    Ok(TenantReadTransaction {
+        transaction: tx,
+        tenant,
+        _lane: std::marker::PhantomData,
+    })
 }
 
-async fn begin_tenant_repeatable_read(
+struct TenantReadTransaction<L: ReadLane> {
+    transaction: Transaction<'static, Postgres>,
+    tenant: TenantId,
+    _lane: std::marker::PhantomData<fn() -> L>,
+}
+
+impl<L: ReadLane> TenantReadTransaction<L> {
+    fn tenant_tx(&mut self) -> TenantTx<'_, L> {
+        TenantTx::from_bound_connection(&mut self.transaction, self.tenant)
+    }
+
+    async fn commit(self) -> Result<(), sqlx::Error> {
+        self.transaction.commit().await
+    }
+
+    async fn rollback(self) -> Result<(), sqlx::Error> {
+        self.transaction.rollback().await
+    }
+}
+
+#[cfg(feature = "domain-identity")]
+async fn begin_tenant_repeatable_read<L: ReadLane>(
     pool: &PgPool,
     tenant: TenantId,
-) -> Result<Transaction<'static, Postgres>, sqlx::Error> {
+) -> Result<TenantReadTransaction<L>, sqlx::Error> {
     let mut tx = pool
         .begin_with("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
         .await?;
     set_local_tenant(&mut tx, tenant).await?;
-    Ok(tx)
+    Ok(TenantReadTransaction {
+        transaction: tx,
+        tenant,
+        _lane: std::marker::PhantomData,
+    })
 }
 
 /// 在事务内注入 tenant scope（SET LOCAL `rss.tenant_id`，参数化绑定防注入；tenancy.md §RLS 与 PG scope）。
-/// producer 写（[`PgTenantWritePool::producer_tx`]）与 plain tenant-scoped 写
+/// producer 写（serving-write `TenantDb::producer_tx`）与 plain tenant-scoped 写
 /// 共享，保证所有 postgres 写路径经统一 SET LOCAL 收口（未来 RLS policy 的 current_setting 锚点，不留绕过面）。
 ///
 /// # INVARIANT: TENANCY-SETLOCAL-FUNNEL-01 { level = "Medium", exec = "manual/opt-in", source = "code" }
@@ -959,14 +1081,15 @@ async fn set_local_plain_lock_timeout(conn: &mut PgConnection) -> Result<(), sql
         .map(|_| ())
 }
 
-async fn tenant_scoped_write_inner<T, F, E>(
+async fn tenant_scoped_write_inner<L, T, F, E>(
     pool: &PgPool,
     tenant: TenantId,
     write: F,
     map_storage: impl Fn(sqlx::Error) -> E + Send,
 ) -> LocalTxAttempt<T, E>
 where
-    F: for<'c, 'tx> FnOnce(&'c mut TxCapability<'tx>) -> BoxFuture<'c, Result<T, E>> + Send,
+    L: WriteLane,
+    F: for<'c, 'tx> FnOnce(&'c mut TenantTx<'tx, L>) -> BoxFuture<'c, Result<T, E>> + Send,
     E: std::error::Error + Send + Sync + 'static,
     T: Send,
 {
@@ -982,7 +1105,7 @@ where
 }
 
 #[cfg(any(feature = "domain-settings", feature = "domain-audit"))]
-async fn tenant_scoped_retry_write_inner<T, F, E>(
+async fn tenant_scoped_retry_write_inner<L, T, F, E>(
     pool: &PgPool,
     tenant: TenantId,
     deadline: LocalTxDeadline,
@@ -990,7 +1113,8 @@ async fn tenant_scoped_retry_write_inner<T, F, E>(
     map_storage: impl Fn(sqlx::Error) -> E + Send,
 ) -> LocalTxAttempt<T, E>
 where
-    F: for<'c, 'tx> FnOnce(&'c mut TxCapability<'tx>) -> BoxFuture<'c, Result<T, E>> + Send,
+    L: WriteLane,
+    F: for<'c, 'tx> FnOnce(&'c mut TenantTx<'tx, L>) -> BoxFuture<'c, Result<T, E>> + Send,
     E: std::error::Error + Send + Sync + 'static,
     T: Send,
 {
@@ -1018,7 +1142,7 @@ async fn producer_tx_inner<A, T, F, E>(
 ) -> LocalTxAttempt<T, E>
 where
     F: for<'c, 'tx> FnOnce(
-            &'c mut TxCapability<'tx>,
+            &'c mut TenantTx<'tx, ServingWriteLane>,
         ) -> BoxFuture<'c, Result<ProducerTxOutcome<A, T>, E>>
         + Send,
     E: MapOutboxAppendError + std::error::Error + Send + Sync + 'static,
@@ -1076,29 +1200,29 @@ impl LocalTxExecutionPolicy {
         }
     }
 
-    async fn setup(
+    async fn setup<'tx, L: WriteLane>(
         self,
-        tx: &mut TxCapability<'_>,
+        conn: &'tx mut PgConnection,
         tenant: TenantId,
-    ) -> LocalTxStageResult<(), sqlx::Error, LocalTxSetupDeadline> {
+    ) -> LocalTxStageResult<TenantTx<'tx, L>, sqlx::Error, LocalTxSetupDeadline> {
         let setup = async {
             #[cfg(all(test, feature = "integration"))]
             pause_localtx_stage_for_test(LocalTxTestPauseStage::Setup).await;
-            set_local_tenant(tx.conn(), tenant).await?;
+            set_local_tenant(&mut *conn, tenant).await?;
             match self {
-                Self::Plain => set_local_plain_lock_timeout(tx.conn()).await?,
+                Self::Plain => set_local_plain_lock_timeout(&mut *conn).await?,
                 #[cfg(any(feature = "domain-settings", feature = "domain-audit"))]
                 Self::Deadline(deadline) => {
                     // Compute immediately before this single round-trip; the following statement in
                     // `execute_local_tx` is the mutation itself.
-                    set_local_retry_deadlines(tx.conn(), deadline).await?;
+                    set_local_retry_deadlines(&mut *conn, deadline).await?;
                 }
             }
-            Ok(())
+            Ok(TenantTx::from_bound_connection(conn, tenant))
         };
         match self {
             Self::Plain => match setup.await {
-                Ok(()) => LocalTxStageResult::Complete(()),
+                Ok(tx) => LocalTxStageResult::Complete(tx),
                 Err(error) => LocalTxStageResult::Failed(error),
             },
             #[cfg(any(feature = "domain-settings", feature = "domain-audit"))]
@@ -1160,19 +1284,20 @@ enum LocalTxBodyResult<T, E> {
     OperationDeadline(E, LocalTxOperationDeadline),
 }
 
-trait LocalTxOperation<T, E>: Send {
-    fn execute<'c, 'tx>(self, tx: &'c mut TxCapability<'tx>) -> BoxFuture<'c, Result<T, E>>
+trait LocalTxOperation<L: WriteLane, T, E>: Send {
+    fn execute<'c, 'tx>(self, tx: &'c mut TenantTx<'tx, L>) -> BoxFuture<'c, Result<T, E>>
     where
         Self: 'c;
 }
 
 struct PlainLocalTxOperation<F>(F);
 
-impl<T, E, F> LocalTxOperation<T, E> for PlainLocalTxOperation<F>
+impl<L, T, E, F> LocalTxOperation<L, T, E> for PlainLocalTxOperation<F>
 where
-    F: for<'c, 'tx> FnOnce(&'c mut TxCapability<'tx>) -> BoxFuture<'c, Result<T, E>> + Send,
+    L: WriteLane,
+    F: for<'c, 'tx> FnOnce(&'c mut TenantTx<'tx, L>) -> BoxFuture<'c, Result<T, E>> + Send,
 {
-    fn execute<'c, 'tx>(self, tx: &'c mut TxCapability<'tx>) -> BoxFuture<'c, Result<T, E>>
+    fn execute<'c, 'tx>(self, tx: &'c mut TenantTx<'tx, L>) -> BoxFuture<'c, Result<T, E>>
     where
         Self: 'c,
     {
@@ -1188,11 +1313,11 @@ struct ProducerLocalTxOperation<'a, F> {
 }
 
 #[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
-impl<'a, A, T, F, E> LocalTxOperation<T, ProducerTxWriteError<E>>
+impl<'a, A, T, F, E> LocalTxOperation<ServingWriteLane, T, ProducerTxWriteError<E>>
     for ProducerLocalTxOperation<'a, F>
 where
     F: for<'c, 'tx> FnOnce(
-            &'c mut TxCapability<'tx>,
+            &'c mut TenantTx<'tx, ServingWriteLane>,
         ) -> BoxFuture<'c, Result<ProducerTxOutcome<A, T>, E>>
         + Send,
     E: std::error::Error + Send + Sync + 'static,
@@ -1201,7 +1326,7 @@ where
 {
     fn execute<'c, 'tx>(
         self,
-        tx: &'c mut TxCapability<'tx>,
+        tx: &'c mut TenantTx<'tx, ServingWriteLane>,
     ) -> BoxFuture<'c, Result<T, ProducerTxWriteError<E>>>
     where
         Self: 'c,
@@ -1209,7 +1334,6 @@ where
         Box::pin(complete_producer_write(
             tx,
             self.projection_registry.clone(),
-            self.write.tenant,
             self.write.entry,
             self.write.env,
             self.business_write,
@@ -1224,7 +1348,7 @@ enum LocalTxPrimaryDeadline {
 }
 
 /// The only tenant mutation transaction core.
-async fn execute_local_tx<T, O, E>(
+async fn execute_local_tx<L, T, O, E>(
     pool: &PgPool,
     tenant: TenantId,
     policy: LocalTxExecutionPolicy,
@@ -1233,7 +1357,8 @@ async fn execute_local_tx<T, O, E>(
     operation: &'static str,
 ) -> LocalTxAttempt<T, E>
 where
-    O: LocalTxOperation<T, E>,
+    L: WriteLane,
+    O: LocalTxOperation<L, T, E>,
     E: std::error::Error + Send + Sync + 'static,
     T: Send,
 {
@@ -1262,14 +1387,10 @@ where
         }
     };
 
-    let setup_result = {
-        let mut tx_cap = tx.capability();
-        policy.setup(&mut tx_cap, tenant).await
-    };
+    let setup_result = policy.setup::<L>(tx.connection(), tenant).await;
     let body_result = match setup_result {
-        LocalTxStageResult::Complete(()) => {
-            let mut tx_cap = tx.capability();
-            match policy.operation(write.execute(&mut tx_cap)).await {
+        LocalTxStageResult::Complete(mut tenant_tx) => {
+            match policy.operation(write.execute(&mut tenant_tx)).await {
                 LocalTxStageResult::Complete(value) => LocalTxBodyResult::Success(value),
                 LocalTxStageResult::Failed(error) => LocalTxBodyResult::Failed(error),
                 LocalTxStageResult::Deadline { source, evidence } => {
@@ -1300,7 +1421,7 @@ async fn execute_producer_local_tx<A, T, F, E>(
 ) -> LocalTxAttempt<T, E>
 where
     F: for<'c, 'tx> FnOnce(
-            &'c mut TxCapability<'tx>,
+            &'c mut TenantTx<'tx, ServingWriteLane>,
         ) -> BoxFuture<'c, Result<ProducerTxOutcome<A, T>, E>>
         + Send,
     E: MapOutboxAppendError + std::error::Error + Send + Sync + 'static,
@@ -1388,8 +1509,8 @@ async fn commit_local_tx<T, E>(
     let mut tx = tx;
     #[cfg(any(all(test, feature = "integration"), feature = "journey-fault-support"))]
     let inject_commit_unknown = {
-        let mut tx_cap = tx.capability();
-        test_commit_unknown_after_commit_requested(&mut tx_cap).await
+        let mut tenant_tx = TenantTx::from_bound_connection(tx.connection(), tenant);
+        test_commit_unknown_after_commit_requested(&mut tenant_tx).await
     };
     #[cfg(any(all(test, feature = "integration"), feature = "journey-fault-support"))]
     let commit_result = if inject_commit_unknown {
@@ -1432,7 +1553,7 @@ async fn rollback_local_tx<T, E>(
 where
     E: std::error::Error + Send + Sync + 'static,
 {
-    let rollback_result = run_local_tx_rollback(tx, policy).await;
+    let rollback_result = run_local_tx_rollback(tx, tenant, policy).await;
     match rollback_result {
         LocalTxStageResult::Complete(()) => match primary {
             None => LocalTxAttempt::rolled_back(error),
@@ -1470,19 +1591,24 @@ where
 
 async fn run_local_tx_rollback(
     tx: LocalTxTransaction<'_>,
+    #[allow(
+        unused_variables,
+        reason = "used by integration-only rollback fault injection"
+    )]
+    tenant: TenantId,
     policy: LocalTxExecutionPolicy,
 ) -> LocalTxStageResult<(), sqlx::Error, LocalTxRollbackDeadline> {
     #[allow(unused_mut)]
     let mut tx = tx;
     #[cfg(all(test, feature = "integration"))]
     let inject_rollback_timeout = {
-        let mut tx_cap = tx.capability();
-        test_rollback_timeout_requested(&mut tx_cap).await
+        let mut tenant_tx = TenantTx::from_bound_connection(tx.connection(), tenant);
+        test_rollback_timeout_requested(&mut tenant_tx).await
     };
     #[cfg(all(test, feature = "integration"))]
     let inject_rollback_failed = {
-        let mut tx_cap = tx.capability();
-        test_rollback_failed_after_rollback_requested(&mut tx_cap).await
+        let mut tenant_tx = TenantTx::from_bound_connection(tx.connection(), tenant);
+        test_rollback_failed_after_rollback_requested(&mut tenant_tx).await
     };
     #[cfg(all(test, feature = "integration"))]
     if inject_rollback_timeout {
@@ -1555,11 +1681,13 @@ pub(crate) async fn wait_for_rollback_timeout_for_test() {
 }
 
 #[cfg(any(all(test, feature = "integration"), feature = "journey-fault-support"))]
-async fn test_commit_unknown_after_commit_requested(tx: &mut TxCapability<'_>) -> bool {
+async fn test_commit_unknown_after_commit_requested(
+    tx: &mut TenantTx<'_, ServingWriteLane>,
+) -> bool {
     sqlx::query_scalar::<_, Option<String>>(
         "SELECT current_setting('rss.test_commit_unknown_after_commit', true)",
     )
-    .fetch_one(tx.conn())
+    .fetch_one(&mut *tx.conn)
     .await
     .ok()
     .flatten()
@@ -1567,11 +1695,13 @@ async fn test_commit_unknown_after_commit_requested(tx: &mut TxCapability<'_>) -
 }
 
 #[cfg(all(test, feature = "integration"))]
-async fn test_failure_after_outbox_append_requested(tx: &mut TxCapability<'_>) -> bool {
+async fn test_failure_after_outbox_append_requested(
+    tx: &mut TenantTx<'_, ServingWriteLane>,
+) -> bool {
     sqlx::query_scalar::<_, Option<String>>(
         "SELECT current_setting('rss.test_fail_after_outbox_append', true)",
     )
-    .fetch_one(tx.conn())
+    .fetch_one(&mut *tx.conn)
     .await
     .ok()
     .flatten()
@@ -1579,11 +1709,13 @@ async fn test_failure_after_outbox_append_requested(tx: &mut TxCapability<'_>) -
 }
 
 #[cfg(all(test, feature = "integration"))]
-async fn test_failure_after_projection_append_requested(tx: &mut TxCapability<'_>) -> bool {
+async fn test_failure_after_projection_append_requested(
+    tx: &mut TenantTx<'_, ServingWriteLane>,
+) -> bool {
     sqlx::query_scalar::<_, Option<String>>(
         "SELECT current_setting('rss.test_fail_after_projection_append', true)",
     )
-    .fetch_one(tx.conn())
+    .fetch_one(&mut *tx.conn)
     .await
     .ok()
     .flatten()
@@ -1591,11 +1723,13 @@ async fn test_failure_after_projection_append_requested(tx: &mut TxCapability<'_
 }
 
 #[cfg(all(test, feature = "integration"))]
-async fn test_rollback_failed_after_rollback_requested(tx: &mut TxCapability<'_>) -> bool {
+async fn test_rollback_failed_after_rollback_requested(
+    tx: &mut TenantTx<'_, ServingWriteLane>,
+) -> bool {
     sqlx::query_scalar::<_, Option<String>>(
         "SELECT current_setting('rss.test_rollback_failed_after_rollback', true)",
     )
-    .fetch_one(tx.conn())
+    .fetch_one(&mut *tx.conn)
     .await
     .ok()
     .flatten()
@@ -1603,11 +1737,11 @@ async fn test_rollback_failed_after_rollback_requested(tx: &mut TxCapability<'_>
 }
 
 #[cfg(all(test, feature = "integration"))]
-async fn test_rollback_timeout_requested(tx: &mut TxCapability<'_>) -> bool {
+async fn test_rollback_timeout_requested(tx: &mut TenantTx<'_, ServingWriteLane>) -> bool {
     sqlx::query_scalar::<_, Option<String>>(
         "SELECT current_setting('rss.test_rollback_timeout', true)",
     )
-    .fetch_one(tx.conn())
+    .fetch_one(&mut *tx.conn)
     .await
     .ok()
     .flatten()
@@ -1669,22 +1803,21 @@ where
 
 #[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
 async fn complete_producer_write<A, T, F, E>(
-    tx: &mut TxCapability<'_>,
+    tx: &mut TenantTx<'_, ServingWriteLane>,
     projection_registry: ProjectionWriteRegistry,
-    tenant: TenantId,
     entry: &EventEntry,
     env: &OutboxEnvelope,
     business_write: F,
 ) -> Result<T, ProducerTxWriteError<E>>
 where
     F: for<'c, 'tx> FnOnce(
-            &'c mut TxCapability<'tx>,
+            &'c mut TenantTx<'tx, ServingWriteLane>,
         ) -> BoxFuture<'c, Result<ProducerTxOutcome<A, T>, E>>
         + Send,
     E: std::error::Error + 'static,
     A: ProducerFactAuthorization,
 {
-    if env.tenant() != tenant {
+    if env.tenant() != tx.tenant() {
         return Err(ProducerTxWriteError::TenantMismatch(
             sqlx::Error::AnyDriverError(Box::new(OutboxTenantMismatch)),
         ));
@@ -1700,9 +1833,13 @@ where
                     sqlx::Error::AnyDriverError(Box::new(ProducerAuthorizationMismatch)),
                 ));
             }
-            let _outcome = append_outbox_with_projection(tx, entry, env, &projection_registry)
-                .await
-                .map_err(ProducerTxWriteError::AppendOutbox)?;
+            let _outcome = {
+                let mut outbox =
+                    eventing::EventingTx::<ServingWriteLane, eventing::OutboxConcern>::from_raw(tx);
+                append_outbox_with_projection(&mut outbox, entry, env, &projection_registry)
+                    .await
+                    .map_err(ProducerTxWriteError::AppendOutbox)?
+            };
             #[cfg(all(test, feature = "integration"))]
             if test_failure_after_projection_append_requested(tx).await {
                 return Err(ProducerTxWriteError::AppendOutbox(
@@ -1766,7 +1903,7 @@ impl MapOutboxAppendError for settings::ports::ConfigRepoError {
 }
 
 #[cfg(feature = "domain-identity")]
-impl MapOutboxAppendError for identity::ports::IdentityError {
+impl MapOutboxAppendError for ::identity::ports::IdentityError {
     fn from_outbox_append(error: OutboxAppendError) -> Self {
         match error {
             OutboxAppendError::Conflict(conflict) => Self::OutboxFactConflict(conflict),
@@ -1880,22 +2017,24 @@ fn log_producer_tx_domain_error(entry: &EventEntry, env: &OutboxEnvelope, stage:
 }
 
 #[cfg(test)]
-mod tx_capability_tests {
+mod transaction_boundary_tests {
     use consistency::LocalTxFinalStatus;
 
-    use super::{Postgres, Transaction, TxCapability, finish_local_tx_commit_result};
+    use super::{
+        ServingReadLane, ServingWriteLane, TenantDb, TenantTx, finish_local_tx_commit_result,
+    };
 
     #[cfg(feature = "domain-identity")]
     #[test]
     fn identity_outbox_append_unavailable_remains_retryable_to_http_boundary() {
         use super::MapOutboxAppendError as _;
 
-        let error = identity::ports::IdentityError::from_outbox_append(
+        let error = ::identity::ports::IdentityError::from_outbox_append(
             crate::outbox::OutboxAppendError::Storage(sqlx::Error::PoolTimedOut),
         );
         assert!(matches!(
             error,
-            identity::ports::IdentityError::ProviderUnavailable(_)
+            ::identity::ports::IdentityError::ProviderUnavailable(_)
         ));
     }
 
@@ -1905,14 +2044,17 @@ mod tx_capability_tests {
     }
 
     #[test]
-    fn tx_capability_mint_signature_is_crate_private() {
-        fn mint_from_sqlx_transaction<'tx, 'p>(
-            tx: &'tx mut Transaction<'p, Postgres>,
-        ) -> TxCapability<'tx> {
-            TxCapability::from_transaction(tx)
+    fn tenant_db_tx_safe_surface_is_available() {
+        fn read_db(_: &TenantDb<ServingReadLane>) {}
+        fn write_db(_: &TenantDb<ServingWriteLane>) {}
+        fn read_tx(tx: &TenantTx<'_, ServingReadLane>) -> vocab::TenantId {
+            tx.tenant()
+        }
+        fn write_tx(tx: &TenantTx<'_, ServingWriteLane>) -> vocab::TenantId {
+            tx.tenant()
         }
 
-        let _ = mint_from_sqlx_transaction;
+        let _ = (read_db, write_db, read_tx, write_tx);
     }
 
     #[test]
@@ -1998,7 +2140,7 @@ mod tx_capability_tests {
         use settings::ports::ConfigRepoError;
         use sqlx::postgres::PgPoolOptions;
 
-        use super::PgTenantWritePool;
+        use super::{ServingWriteLane, TenantDb};
         use crate::outbox::{OutboxEnvelope, OutboxMetadata};
         let tenant = tenant()?;
         let pool = PgPoolOptions::new()
@@ -2006,7 +2148,7 @@ mod tx_capability_tests {
             .connect_lazy("postgres://127.0.0.1:1/rss")
             .map_err(|error| error.to_string())?;
         let store = crate::PgStore { pool };
-        let scoped = PgTenantWritePool::from_unverified_for_test(&store);
+        let scoped = TenantDb::<ServingWriteLane>::from_unverified_for_test(&store);
         let map_storage = |error: sqlx::Error| ConfigRepoError::Storage(Box::new(error));
 
         let plain = scoped

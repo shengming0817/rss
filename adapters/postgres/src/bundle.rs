@@ -74,6 +74,7 @@ use crate::PgAuthAuditSink;
 use crate::PgOutbox;
 #[cfg(feature = "domain-audit")]
 use crate::consumer_tx::PgAuditConsumerTx;
+use crate::cotx::eventing::DlqReplayProjection;
 use crate::delivery_policy::EventDeliveryPolicy;
 use crate::pool::{PgRuntimeStores, VerifiedPgAuditAdminStore, VerifiedPgMaintenanceStore};
 use crate::projection_events::{ProjectionCaptureRegistration, ProjectionWriteRegistry};
@@ -86,10 +87,10 @@ use crate::{
 use crate::{
     DlxPayloadProtector, PgAuthGrantSweeper, PgCheckpointStore, PgCommandJournal, PgConfig,
     PgDbReadiness, PgDeadLetterStore, PgDlqStore, PgEmitter, PgError, PgInboxStore, PgInboxSweeper,
-    PgOutboxCdcEmitter, PgOutboxMaintenance, PgProjectionControl, PgProjectionEvents,
-    PgReadinessSampler, PgReconcileStore, PgRevocationStore, PgRevocationSweeper,
-    PgSagaInstanceStore, PgSagaJournal, PgServiceTokenReplayStore, PgServiceTokenReplaySweeper,
-    PgStore, PgStoreGuard, PgTenantReadConfig,
+    PgMaintenanceReconcileStore, PgOutboxCdcEmitter, PgOutboxMaintenance, PgProjectionControl,
+    PgProjectionEvents, PgReadinessSampler, PgReconcileStore, PgRevocationStore,
+    PgRevocationSweeper, PgSagaInstanceStore, PgSagaJournal, PgServiceTokenReplayStore,
+    PgServiceTokenReplaySweeper, PgStore, PgStoreGuard, PgTenantReadConfig,
 };
 #[cfg(feature = "domain-audit")]
 use crate::{PgAuditAdminRepo, PgAuditRepo};
@@ -1055,8 +1056,8 @@ impl PgMaintenanceDeps {
 
     /// Tenant-scoped reconcile target operator store.
     #[must_use]
-    pub fn reconcile_store(&self) -> PgReconcileStore {
-        PgReconcileStore::new_maintenance(&self.store)
+    pub fn reconcile_store(&self) -> PgMaintenanceReconcileStore {
+        PgMaintenanceReconcileStore::new(&self.store)
     }
 
     /// Durable audit record for per-tenant audit ledger verification jobs.
@@ -1130,10 +1131,10 @@ impl PgMaintenanceDeps {
         payload_protector: DlxPayloadProtector,
         projection_capture: eventexec::ProjectionCaptureView<'_>,
     ) -> PgDlqStore {
-        PgDlqStore::with_projection_registry_maintenance(
+        PgDlqStore::with_replay_projection_maintenance(
             &self.store,
             payload_protector,
-            ProjectionWriteRegistry::from_capture(projection_capture),
+            DlqReplayProjection::from_capture(projection_capture),
         )
     }
 
@@ -1148,10 +1149,10 @@ impl PgMaintenanceDeps {
         payload_protector: DlxPayloadProtector,
         projection_inputs: &[vocab::ProjectionInputBinding],
     ) -> PgDlqStore {
-        PgDlqStore::with_projection_registry_maintenance(
+        PgDlqStore::with_replay_projection_maintenance(
             &self.store,
             payload_protector,
-            ProjectionWriteRegistry::from_selected(projection_inputs),
+            DlqReplayProjection::from_selected(projection_inputs),
         )
     }
 
@@ -1834,10 +1835,7 @@ impl PgInfraDeps {
     /// 本 accessor 只暴露最小 PG schema API，不启动 reconcile runtime worker，也不新增 engine/domain trait。
     #[must_use]
     pub fn reconcile(&self) -> PgReconcileStore {
-        PgReconcileStore::new(
-            self.stores.reader_capability(),
-            self.stores.writer_capability(),
-        )
+        PgReconcileStore::new(self.stores.writer_capability())
     }
 
     /// command journal foundation store（schema-level capability，#1441）。

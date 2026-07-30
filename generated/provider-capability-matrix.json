@@ -34,7 +34,7 @@
               "path": "adapters/postgres/src/integration_tests.rs",
               "symbol": "outbox_append_distinguishes_same_fact_from_conflict",
               "behavior": "outbox_append_distinguishes_same_fact_from_conflict_behavior",
-              "behaviorSha256": "sha256:dd412630e69b3a662fd2882ce8762056b102836c017669d1153dfcb6a2088c10",
+              "behaviorSha256": "sha256:3623e38cb8523ff99322c8c09de2f81b5a19e5dc9dc394e6f60a26a96e023de3",
               "shard": "postgres-domain"
             }
           }
@@ -50,7 +50,7 @@
               "path": "adapters/postgres/src/integration_tests.rs",
               "symbol": "t9_settle_rejects_stale_lease_token",
               "behavior": "settle_rejects_stale_lease_token_behavior",
-              "behaviorSha256": "sha256:b89118e9821e8b1e5e58145bb81c0dafcb4151042c5f6221e32a949c5b1c32fe",
+              "behaviorSha256": "sha256:251a742e9f611c42eb1dff3e508b6313a22b09eccc65b48327117f31313e259c",
               "shard": "postgres-domain"
             }
           }
@@ -66,7 +66,7 @@
               "path": "adapters/postgres/src/integration_tests.rs",
               "symbol": "insufficient_preflight_budget_never_calls_publisher",
               "behavior": "insufficient_preflight_budget_never_calls_publisher_behavior",
-              "behaviorSha256": "sha256:11759d27bbf139af1e33fb2dd857323ec8cc61804f4d88b5e0577fa00ff670af",
+              "behaviorSha256": "sha256:15129b52b4fac829fbf86b0a30993e9df14f5a6d41e5d9ae2725646a90875ea5",
               "shard": "postgres-domain"
             }
           }
@@ -98,7 +98,7 @@
               "path": "adapters/postgres/src/integration_tests.rs",
               "symbol": "t4b_relay_ambiguous_retries_with_the_original_event_id",
               "behavior": "relay_ambiguous_retries_with_original_event_id_behavior",
-              "behaviorSha256": "sha256:6c6f5f25250086b84227a1755aaac15491b67f2f73e9d9407725531099d7d261",
+              "behaviorSha256": "sha256:97aafbaeb4192bd07161a5f1a757b6cbaf7eb4cfa03b1a82e5999b441715a0ed",
               "shard": "postgres-domain"
             }
           }

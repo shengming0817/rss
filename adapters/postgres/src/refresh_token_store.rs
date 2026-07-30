@@ -12,35 +12,47 @@
 
 use std::time::{Duration, SystemTime};
 
+use crate::cotx::{ServingReadLane, TenantDb};
+use crate::pool::VerifiedPgReadStore;
 use authn::{AuthGrantId, AuthGrantStatus, AuthnEpoch};
 use identity::ports::{
     IdentityError, RefreshStatus, RefreshTokenHash, RefreshTokenId, RefreshTokenRecord,
     RefreshTokenSnapshot, RefreshTokenStore, TenantRepoScope,
 };
-use sqlx::Row;
-
-use crate::cotx::PgTenantReadPool;
-use crate::pool::VerifiedPgReadStore;
 
 /// refresh token 持久化 PostgreSQL adapter（impl [`RefreshTokenStore`]，#1325）。
 ///
 /// 仅由已验证 reader capability 构造（同 [`crate::PgRoleRepo`]）。
 pub struct PgRefreshTokenStore {
-    read_pool: PgTenantReadPool,
+    read_pool: TenantDb<ServingReadLane>,
+}
+
+#[derive(sqlx::FromRow)]
+pub(crate) struct RefreshTokenRow {
+    pub(crate) id: String,
+    pub(crate) auth_grant_id: String,
+    pub(crate) user_id: String,
+    pub(crate) auth_grant_status: String,
+    pub(crate) parent_id: Option<String>,
+    pub(crate) lineage_id: String,
+    pub(crate) authn_epoch_at_issue: i64,
+    pub(crate) status: String,
+    pub(crate) issued_at: i64,
+    pub(crate) expires_at: i64,
 }
 
 impl PgRefreshTokenStore {
     /// `pub(crate)`（#1423，PG-BUNDLE-FUNNEL-01）：经 [`crate::PgDomainDeps`]`<caps::Identity>::refresh_token_store` 收口。
     pub(crate) fn new(reader: &VerifiedPgReadStore) -> Self {
         Self {
-            read_pool: PgTenantReadPool::new(reader),
+            read_pool: TenantDb::<ServingReadLane>::new(reader),
         }
     }
 
     #[cfg(all(test, feature = "integration"))]
     pub(crate) fn from_unverified_for_test(store: &crate::PgStore) -> Self {
         Self {
-            read_pool: PgTenantReadPool::from_unverified_for_test(store),
+            read_pool: TenantDb::<ServingReadLane>::from_unverified_for_test(store),
         }
     }
 }
@@ -66,91 +78,36 @@ impl RefreshTokenStore for PgRefreshTokenStore {
         hash: RefreshTokenHash,
     ) -> Result<Option<RefreshTokenRecord>, IdentityError> {
         let tenant = scope.tenant();
-        let tenant_uuid = tenant.as_uuid().to_string();
-        let tenant_uuid_q = tenant_uuid.clone();
         let hash_bytes = *hash.as_bytes();
 
         let raw = self
             .read_pool
-            .read(scope, move |conn| {
-                Box::pin(async move {
-                    let row = sqlx::query(
-                        r#"
-                    SELECT id::text, auth_grant_id, user_id::text, authn_epoch_at_issue,
-                           auth_grant_status, parent_id::text, lineage_id::text, status,
-                           extract(epoch from issued_at)::bigint AS issued_at,
-                           extract(epoch from expires_at)::bigint AS expires_at
-                    FROM refresh_tokens
-                    WHERE tenant_id = $1::uuid AND token_hash = $2
-                    "#,
-                    )
-                    .bind(&tenant_uuid_q)
-                    .bind(&hash_bytes as &[u8])
-                    .fetch_optional(&mut *conn)
-                    .await?;
-                    match row {
-                        None => Ok(None),
-                        Some(r) => {
-                            let id: String = r.try_get("id")?;
-                            let auth_grant_id: String = r.try_get("auth_grant_id")?;
-                            let user_id: String = r.try_get("user_id")?;
-                            let auth_grant_status: String = r.try_get("auth_grant_status")?;
-                            let parent_id: Option<String> = r.try_get("parent_id")?;
-                            let lineage_id: String = r.try_get("lineage_id")?;
-                            let issuance_epoch: i64 = r.try_get("authn_epoch_at_issue")?;
-                            let status_str: String = r.try_get("status")?;
-                            let issued_secs: i64 = r.try_get("issued_at")?;
-                            let expires_secs: i64 = r.try_get("expires_at")?;
-                            Ok(Some((
-                                id,
-                                auth_grant_id,
-                                user_id,
-                                auth_grant_status,
-                                parent_id,
-                                lineage_id,
-                                issuance_epoch,
-                                status_str,
-                                issued_secs,
-                                expires_secs,
-                            )))
-                        }
-                    }
-                })
+            .identity_read(scope, move |mut conn| {
+                Box::pin(async move { conn.identity().refresh_token_by_hash(&hash).await })
             })
             .await
             .map_err(storage)?;
 
         match raw {
             None => Ok(None),
-            Some((
-                id,
-                auth_grant_id,
-                user_id,
-                auth_grant_status,
-                parent_id,
-                lineage_id,
-                issuance_epoch,
-                status_str,
-                issued_secs,
-                expires_secs,
-            )) => {
-                let user_id = ids::UserId::parse(&user_id).map_err(|_| {
+            Some(row) => {
+                let user_id = ids::UserId::parse(&row.user_id).map_err(|_| {
                     IdentityError::Storage(Box::<dyn std::error::Error + Send + Sync>::from(
                         "corrupt refresh_tokens.user_id",
                     ))
                 })?;
-                let auth_grant_status = AuthGrantStatus::from_db_str(&auth_grant_status)
+                let auth_grant_status = AuthGrantStatus::from_db_str(&row.auth_grant_status)
                     .ok_or_else(|| {
                         IdentityError::Storage(Box::<dyn std::error::Error + Send + Sync>::from(
                             "corrupt refresh_tokens.auth_grant_status",
                         ))
                     })?;
-                let status = RefreshStatus::from_db_str(&status_str).ok_or_else(|| {
+                let status = RefreshStatus::from_db_str(&row.status).ok_or_else(|| {
                     IdentityError::Storage(Box::<dyn std::error::Error + Send + Sync>::from(
                         "corrupt refresh_tokens.status",
                     ))
                 })?;
-                let issuance_epoch = u64::try_from(issuance_epoch)
+                let issuance_epoch = u64::try_from(row.authn_epoch_at_issue)
                     .map_err(|_| {
                         IdentityError::Storage(Box::new(std::io::Error::other(
                             "negative refresh issuance epoch",
@@ -160,21 +117,21 @@ impl RefreshTokenStore for PgRefreshTokenStore {
                         AuthnEpoch::hydrate(epoch)
                             .map_err(|error| IdentityError::Storage(Box::new(error)))
                     })?;
-                let auth_grant_id = AuthGrantId::hydrate(auth_grant_id)
+                let auth_grant_id = AuthGrantId::hydrate(row.auth_grant_id)
                     .map_err(|error| IdentityError::Storage(Box::new(error)))?;
                 RefreshTokenRecord::hydrate(RefreshTokenSnapshot {
-                    id: RefreshTokenId::hydrate(id),
+                    id: RefreshTokenId::hydrate(row.id),
                     tenant,
                     auth_grant_id,
                     user_id,
                     authn_epoch_at_issue: issuance_epoch,
                     auth_grant_status,
                     token_hash: RefreshTokenHash::hydrate(hash_bytes),
-                    parent_id: parent_id.map(RefreshTokenId::hydrate),
-                    lineage_id: RefreshTokenId::hydrate(lineage_id),
+                    parent_id: row.parent_id.map(RefreshTokenId::hydrate),
+                    lineage_id: RefreshTokenId::hydrate(row.lineage_id),
                     status,
-                    issued_at: epoch_secs_to_time(issued_secs),
-                    expires_at: epoch_secs_to_time(expires_secs),
+                    issued_at: epoch_secs_to_time(row.issued_at),
+                    expires_at: epoch_secs_to_time(row.expires_at),
                 })
                 .map(Some)
                 .ok_or_else(|| {

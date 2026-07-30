@@ -8,40 +8,40 @@ use std::time::SystemTime;
 use authn::AccessGrantValidationInput;
 use identity::ports::{AuthGrantValidator, IdentityError, TenantRepoScope};
 
-use crate::cotx::PgTenantReadPool;
+use crate::cotx::{ServingReadLane, TenantDb};
 use crate::outbox::unix_secs;
 use crate::pool::VerifiedPgReadStore;
 
 /// Read-only PostgreSQL implementation of the durable RSS access-token fence.
 pub struct PgAuthGrantValidator {
-    pool: PgTenantReadPool,
+    pool: TenantDb<ServingReadLane>,
 }
 
 impl PgAuthGrantValidator {
     pub(crate) fn new(reader: &VerifiedPgReadStore) -> Self {
         Self {
-            pool: PgTenantReadPool::new(reader),
+            pool: TenantDb::<ServingReadLane>::new(reader),
         }
     }
 
     #[cfg(all(test, feature = "integration"))]
     pub(crate) fn from_unverified_for_test(store: &crate::PgStore) -> Self {
         Self {
-            pool: PgTenantReadPool::from_unverified_for_test(store),
+            pool: TenantDb::<ServingReadLane>::from_unverified_for_test(store),
         }
     }
 }
 
 #[derive(sqlx::FromRow)]
-struct ValidationRow {
-    grant_user_matches: bool,
-    grant_auth_time: i64,
-    grant_epoch: i64,
-    grant_status: String,
-    grant_expires_at: i64,
-    account_user_matches: Option<bool>,
-    account_status: Option<String>,
-    account_epoch: Option<i64>,
+pub(crate) struct ValidationRow {
+    pub(crate) grant_user_matches: bool,
+    pub(crate) grant_auth_time: i64,
+    pub(crate) grant_epoch: i64,
+    pub(crate) grant_status: String,
+    pub(crate) grant_expires_at: i64,
+    pub(crate) account_user_matches: Option<bool>,
+    pub(crate) account_status: Option<String>,
+    pub(crate) account_epoch: Option<i64>,
 }
 
 fn storage(error: impl std::error::Error + Send + Sync + 'static) -> IdentityError {
@@ -94,38 +94,16 @@ impl AuthGrantValidator for PgAuthGrantValidator {
         let expected_epoch = i64::try_from(input.authn_epoch().get())
             .map_err(|_| corruption("authentication epoch exceeds persistence boundary"))?;
         let observed_at = unix_secs(observed_at);
-        let tenant = scope.tenant();
-        let tenant_sql = tenant.as_uuid().to_string();
-        let grant_id = input.grant_id().as_str().to_owned();
-        let user_id = input.user_id().as_uuid().to_string();
+        let grant_id = input.grant_id().clone();
+        let user_id = input.user_id();
 
         let row = self
             .pool
-            .read(scope, move |conn| {
+            .identity_read(scope, move |mut conn| {
                 Box::pin(async move {
-                    sqlx::query_as::<_, ValidationRow>(
-                        r#"
-                        SELECT g.user_id = $3::uuid AS grant_user_matches,
-                               extract(epoch from g.auth_time)::bigint AS grant_auth_time,
-                               g.authn_epoch_at_issue AS grant_epoch,
-                               g.status AS grant_status,
-                               extract(epoch from g.expires_at)::bigint AS grant_expires_at,
-                               s.user_id = $3::uuid AS account_user_matches,
-                               s.status AS account_status,
-                               s.authn_epoch AS account_epoch
-                        FROM auth_grants AS g
-                        LEFT JOIN account_security_states AS s
-                          ON s.tenant_id = g.tenant_id
-                         AND s.user_id = g.user_id
-                        WHERE g.tenant_id = $1::uuid
-                          AND g.grant_id = $2
-                        "#,
-                    )
-                    .bind(tenant_sql)
-                    .bind(grant_id)
-                    .bind(user_id)
-                    .fetch_optional(conn)
-                    .await
+                    conn.identity()
+                        .auth_grant_validation_row(&grant_id, &user_id)
+                        .await
                 })
             })
             .await

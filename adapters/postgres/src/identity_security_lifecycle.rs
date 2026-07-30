@@ -13,7 +13,7 @@
 //! ref: ory/fosite handler/oauth2/flow_refresh.go@master
 
 use authn::{
-    AuthGrant, AuthGrantCloseMutation, AuthGrantStatus, CredentialSecurityEventKind,
+    AuthGrant, AuthGrantCloseMutation, AuthGrantId, AuthGrantStatus, CredentialSecurityEventKind,
     GrantSecurityEventKind,
 };
 use identity::ports::{
@@ -28,14 +28,15 @@ use sqlx::Row;
 
 use crate::account_security_repo::status_to_db;
 use crate::auth_grant_lifecycle::{GrantCloseCas, apply_grant_close_cas};
-use crate::cotx::{PgTenantWritePool, ProducerFactAuthorization, ProducerTxOutcome};
+use crate::cotx::identity::IdentityTx;
+use crate::cotx::{ProducerFactAuthorization, ProducerTxOutcome, ServingWriteLane, TenantDb};
 use crate::outbox::{OutboxEnvelope, metadata_with_ambient, unix_secs};
 use crate::pool::VerifiedPgWriteStore;
 use crate::projection_events::ProjectionWriteRegistry;
 
 /// Durable provider for the active credential-security event protocol.
 pub struct PgIdentitySecurityLifecycle {
-    write_pool: PgTenantWritePool,
+    write_pool: TenantDb<ServingWriteLane>,
     pseudonym_keys: std::sync::Arc<secure::PseudonymKeyRing>,
     #[cfg(all(test, feature = "integration"))]
     fault: Option<IdentitySecurityFault>,
@@ -53,7 +54,7 @@ pub struct PgIdentitySecurityLifecycle {
 /// composition can obtain the refresh/security writer only from the single AuthGrant provider,
 /// while account reactivation receives only its plain-write capability.
 pub struct PgAccountReactivationLifecycle {
-    write_pool: PgTenantWritePool,
+    write_pool: TenantDb<ServingWriteLane>,
 }
 
 impl PgAccountReactivationLifecycle {
@@ -62,14 +63,17 @@ impl PgAccountReactivationLifecycle {
         projection_registry: ProjectionWriteRegistry,
     ) -> Self {
         Self {
-            write_pool: PgTenantWritePool::with_projection_registry(writer, projection_registry),
+            write_pool: TenantDb::<ServingWriteLane>::with_projection_registry(
+                writer,
+                projection_registry,
+            ),
         }
     }
 
     #[cfg(all(test, feature = "integration"))]
     pub(crate) fn from_unverified_for_test(store: &crate::PgStore) -> Self {
         Self {
-            write_pool: PgTenantWritePool::from_unverified_for_test(store),
+            write_pool: TenantDb::<ServingWriteLane>::from_unverified_for_test(store),
         }
     }
 }
@@ -132,7 +136,10 @@ impl PgIdentitySecurityLifecycle {
         pseudonym_keys: std::sync::Arc<secure::PseudonymKeyRing>,
     ) -> Self {
         Self {
-            write_pool: PgTenantWritePool::with_projection_registry(writer, projection_registry),
+            write_pool: TenantDb::<ServingWriteLane>::with_projection_registry(
+                writer,
+                projection_registry,
+            ),
             pseudonym_keys,
             #[cfg(all(test, feature = "integration"))]
             fault: None,
@@ -148,7 +155,7 @@ impl PgIdentitySecurityLifecycle {
     #[cfg(all(test, feature = "integration"))]
     pub(crate) fn from_unverified_for_test(store: &crate::PgStore) -> Self {
         Self {
-            write_pool: PgTenantWritePool::from_unverified_for_test(store),
+            write_pool: TenantDb::<ServingWriteLane>::from_unverified_for_test(store),
             pseudonym_keys: test_pseudonym_keys(),
             fault: None,
             start_barrier: None,
@@ -227,11 +234,11 @@ impl IdentitySecurityLifecycle for PgIdentitySecurityLifecycle {
         metrics::counter!("identity_refresh_producer_attempt_total").increment(1);
         let (outcome, acknowledgement) = self
             .write_pool
-            .producer_tx(
+            .identity_producer_tx(
                 scope,
                 &entry,
                 &envelope,
-                move |tx| {
+                move |mut tx| {
                     Box::pin(async move {
                         #[cfg(any(
                             all(test, feature = "integration"),
@@ -242,7 +249,7 @@ impl IdentitySecurityLifecycle for PgIdentitySecurityLifecycle {
                             start_barrier.wait_once().await;
                         }
                         let result = apply_refresh_execution(
-                            tx.conn(),
+                            &mut tx,
                             &source,
                             rotation.as_ref(),
                             &event,
@@ -260,14 +267,12 @@ impl IdentitySecurityLifecycle for PgIdentitySecurityLifecycle {
                         }
                         #[cfg(all(test, feature = "integration"))]
                         if emitted && matches!(fault, Some(IdentitySecurityFault::OutboxAppend)) {
-                            sqlx::query(
-                                "ALTER TABLE public.outbox \
-                                 ADD CONSTRAINT refresh_security_outbox_fault \
-                                 CHECK (false) NOT VALID",
-                            )
-                            .execute(tx.conn())
-                            .await
-                            .map_err(storage)?;
+                            tx.identity()
+                                .force_identity_outbox_failure(
+                                    crate::cotx::identity::IdentityOutboxFault::RefreshSecurity,
+                                )
+                                .await
+                                .map_err(storage)?;
                         }
                         #[cfg(all(test, feature = "integration"))]
                         if emitted
@@ -403,9 +408,9 @@ impl AccountReactivationLifecycle for PgAccountReactivationLifecycle {
         let (expected, next) = command.into_mutation().into_parts();
         let row = AccountStateCasRow::from_states(expected, next.clone())?;
         self.write_pool
-            .write(
+            .identity_write(
                 scope,
-                move |tx| Box::pin(async move { apply_account_state_cas(tx.conn(), &row).await }),
+                move |mut tx| Box::pin(async move { apply_account_state_cas(&mut tx, &row).await }),
                 storage,
             )
             .await?;
@@ -475,11 +480,11 @@ impl PgIdentitySecurityLifecycle {
         let start_barrier = self.start_barrier.clone();
 
         self.write_pool
-            .producer_tx(
+            .identity_producer_tx(
                 scope,
                 &entry,
                 &envelope,
-                move |tx| {
+                move |mut tx| {
                     Box::pin(async move {
                         #[cfg(any(
                             all(test, feature = "integration"),
@@ -489,7 +494,7 @@ impl PgIdentitySecurityLifecycle {
                         if let Some(start_barrier) = start_barrier {
                             start_barrier.wait_once().await;
                         }
-                        apply_security_mutation(tx.conn(), mutation, fault).await?;
+                        apply_security_mutation(&mut tx, mutation, fault).await?;
                         #[cfg(all(test, feature = "integration"))]
                         if matches!(fault, Some(IdentitySecurityFault::AfterProjection)) {
                             tx.inject_failure_after_projection_append()
@@ -498,14 +503,12 @@ impl PgIdentitySecurityLifecycle {
                         }
                         #[cfg(all(test, feature = "integration"))]
                         if matches!(fault, Some(IdentitySecurityFault::OutboxAppend)) {
-                            sqlx::query(
-                                "ALTER TABLE public.outbox \
-                                 ADD CONSTRAINT credential_security_outbox_fault \
-                                 CHECK (false) NOT VALID",
-                            )
-                            .execute(tx.conn())
-                            .await
-                            .map_err(storage)?;
+                            tx.identity()
+                                .force_identity_outbox_failure(
+                                    crate::cotx::identity::IdentityOutboxFault::CredentialSecurity,
+                                )
+                                .await
+                                .map_err(storage)?;
                         }
                         #[cfg(all(test, feature = "integration"))]
                         if matches!(fault, Some(IdentitySecurityFault::AfterOutboxBeforeCommit)) {
@@ -530,7 +533,7 @@ impl PgIdentitySecurityLifecycle {
     }
 }
 
-enum RefreshMutationResult {
+pub(crate) enum RefreshMutationResult {
     Applied,
     ReuseContained(u64),
     AlreadyContained(u64),
@@ -623,21 +626,21 @@ fn security_envelope(
     .with_causation_id_opt(causation_id))
 }
 
-struct LockedRefreshRow {
-    id: String,
-    user: String,
-    epoch: i64,
-    grant_status: String,
-    token_hash: Vec<u8>,
-    parent: Option<String>,
-    lineage: String,
-    status: String,
-    issued_at_micros: i64,
-    expires_at_micros: i64,
+pub(crate) struct LockedRefreshRow {
+    pub(crate) id: String,
+    pub(crate) user: String,
+    pub(crate) epoch: i64,
+    pub(crate) grant_status: String,
+    pub(crate) token_hash: Vec<u8>,
+    pub(crate) parent: Option<String>,
+    pub(crate) lineage: String,
+    pub(crate) status: String,
+    pub(crate) issued_at_micros: i64,
+    pub(crate) expires_at_micros: i64,
 }
 
 impl LockedRefreshRow {
-    fn from_row(row: sqlx::postgres::PgRow) -> Result<Self, IdentityError> {
+    pub(crate) fn from_row(row: sqlx::postgres::PgRow) -> Result<Self, IdentityError> {
         Ok(Self {
             id: row.try_get("id").map_err(storage)?,
             user: row.try_get("user_id").map_err(storage)?,
@@ -665,86 +668,43 @@ impl LockedRefreshRow {
     }
 }
 
-struct LockedGrantRow {
-    user: String,
-    epoch: i64,
-    status: String,
-    expires_at_micros: i64,
+pub(crate) struct LockedGrantRow {
+    pub(crate) user: String,
+    pub(crate) epoch: i64,
+    pub(crate) status: String,
+    pub(crate) expires_at_micros: i64,
 }
 
 async fn apply_refresh_execution(
-    conn: &mut sqlx::PgConnection,
+    conn: &mut IdentityTx<'_, '_, ServingWriteLane>,
     source: &RefreshTokenRecord,
     rotation: Option<&RefreshRotation>,
     event: &CredentialSecurityEvent,
     fault: Option<IdentitySecurityFault>,
 ) -> Result<RefreshMutationResult, IdentityError> {
-    let tenant = source.tenant().as_uuid().to_string();
     let user = source.user_id().as_uuid().to_string();
-    let grant_id = source.auth_grant_id().as_str();
+    let grant_id = source.auth_grant_id();
     let expected_epoch = persisted_counter(source.issuance_epoch().get(), "refresh epoch")?;
 
-    let account: Option<(String, i64)> = sqlx::query_as(
-        "SELECT status, authn_epoch FROM account_security_states \
-         WHERE tenant_id = $1::uuid AND user_id = $2::uuid FOR UPDATE",
-    )
-    .bind(&tenant)
-    .bind(&user)
-    .fetch_optional(&mut *conn)
-    .await
-    .map_err(storage)?;
+    let account = conn
+        .identity()
+        .lock_refresh_account(&source.user_id())
+        .await?;
 
-    let family = sqlx::query(
-        "SELECT id::text, user_id::text, authn_epoch_at_issue, auth_grant_status, \
-                token_hash, parent_id::text, lineage_id::text, status, \
-                (extract(epoch from issued_at) * 1000000)::bigint AS issued_at_micros, \
-                (extract(epoch from expires_at) * 1000000)::bigint AS expires_at_micros \
-         FROM refresh_tokens \
-         WHERE tenant_id = $1::uuid AND auth_grant_id = $2 \
-         ORDER BY id FOR UPDATE",
-    )
-    .bind(&tenant)
-    .bind(grant_id)
-    .fetch_all(&mut *conn)
-    .await
-    .map_err(storage)?
-    .into_iter()
-    .map(LockedRefreshRow::from_row)
-    .collect::<Result<Vec<_>, _>>()?;
+    let family = conn.identity().lock_refresh_family(grant_id).await?;
 
-    let grant_row = sqlx::query(
-        "SELECT user_id::text, authn_epoch_at_issue, status, \
-                (extract(epoch from expires_at) * 1000000)::bigint AS expires_at_micros \
-         FROM auth_grants \
-         WHERE tenant_id = $1::uuid AND grant_id = $2 FOR UPDATE",
-    )
-    .bind(&tenant)
-    .bind(grant_id)
-    .fetch_optional(&mut *conn)
-    .await
-    .map_err(storage)?;
-    let Some(grant_row) = grant_row else {
+    let Some(grant) = conn.identity().lock_refresh_grant(grant_id).await? else {
         return if family.is_empty() {
             Ok(RefreshMutationResult::Stale)
         } else {
             Err(corrupt("refresh family has no AuthGrant root"))
         };
     };
-    let grant = LockedGrantRow {
-        user: grant_row.try_get("user_id").map_err(storage)?,
-        epoch: grant_row.try_get("authn_epoch_at_issue").map_err(storage)?,
-        status: grant_row.try_get("status").map_err(storage)?,
-        expires_at_micros: grant_row.try_get("expires_at_micros").map_err(storage)?,
-    };
     if grant.user != user || grant.epoch != expected_epoch {
         return Err(corrupt("refresh AuthGrant binding is corrupt"));
     }
 
-    let database_now_micros: i64 =
-        sqlx::query_scalar("SELECT (extract(epoch from clock_timestamp()) * 1000000)::bigint")
-            .fetch_one(&mut *conn)
-            .await
-            .map_err(storage)?;
+    let database_now_micros = conn.identity().database_now_micros().await?;
     let Some(presented) = family.iter().find(|row| row.id == source.id().as_str()) else {
         return Ok(RefreshMutationResult::Stale);
     };
@@ -774,7 +734,6 @@ async fn apply_refresh_execution(
     if authoritative_status != RefreshStatus::Active {
         return contain_refresh_reuse(
             conn,
-            &tenant,
             grant_id,
             &grant.status,
             database_now_micros,
@@ -805,16 +764,8 @@ async fn apply_refresh_execution(
         return Ok(RefreshMutationResult::Expired);
     }
 
-    let consumed = sqlx::query(
-        "UPDATE refresh_tokens SET status = 'consumed' \
-         WHERE tenant_id = $1::uuid AND id = $2::uuid AND status = 'active'",
-    )
-    .bind(&tenant)
-    .bind(source.id().as_str())
-    .execute(&mut *conn)
-    .await
-    .map_err(storage)?;
-    if consumed.rows_affected() != 1 {
+    let consumed = conn.identity().consume_active_refresh(source.id()).await?;
+    if consumed != 1 {
         return Err(corrupt("locked active refresh CAS did not apply"));
     }
     insert_rotated_refresh(conn, child).await?;
@@ -823,16 +774,15 @@ async fn apply_refresh_execution(
 }
 
 async fn contain_refresh_reuse(
-    conn: &mut sqlx::PgConnection,
-    tenant: &str,
-    grant_id: &str,
+    conn: &mut IdentityTx<'_, '_, ServingWriteLane>,
+    grant_id: &AuthGrantId,
     grant_status: &str,
     database_now_micros: i64,
     _event: &CredentialSecurityEvent,
     fault: Option<IdentitySecurityFault>,
 ) -> Result<RefreshMutationResult, IdentityError> {
     if grant_status == AuthGrantStatus::Compromised.as_db_str() {
-        let durable_mutations = revoke_exact_refresh_family(conn, tenant, grant_id).await?;
+        let durable_mutations = revoke_exact_refresh_family(conn, grant_id).await?;
         inject_mutation_fault(fault, IdentitySecurityFault::AfterFamily)?;
         return Ok(RefreshMutationResult::AlreadyContained(durable_mutations));
     }
@@ -841,76 +791,33 @@ async fn contain_refresh_reuse(
     {
         return Err(corrupt("refresh AuthGrant status is corrupt"));
     }
-    let family_mutations = revoke_exact_refresh_family(conn, tenant, grant_id).await?;
+    let family_mutations = revoke_exact_refresh_family(conn, grant_id).await?;
     inject_mutation_fault(fault, IdentitySecurityFault::AfterFamily)?;
-    let changed = sqlx::query(
-        "UPDATE auth_grants \
-         SET status = 'compromised', \
-             closed_at = TIMESTAMPTZ 'epoch' + $3 * INTERVAL '1 microsecond', \
-             close_reason = 'refresh_reuse_detected' \
-         WHERE tenant_id = $1::uuid AND grant_id = $2 \
-           AND status IN ('active', 'revoked')",
-    )
-    .bind(tenant)
-    .bind(grant_id)
-    .bind(database_now_micros)
-    .execute(&mut *conn)
-    .await
-    .map_err(storage)?;
-    if changed.rows_affected() != 1 {
+    let changed = conn
+        .identity()
+        .mark_refresh_grant_compromised(grant_id, database_now_micros)
+        .await?;
+    if changed != 1 {
         return Err(corrupt("locked AuthGrant containment CAS did not apply"));
     }
     inject_mutation_fault(fault, IdentitySecurityFault::AfterGrant)?;
     Ok(RefreshMutationResult::ReuseContained(
-        family_mutations + changed.rows_affected(),
+        family_mutations + changed,
     ))
 }
 
 async fn revoke_exact_refresh_family(
-    conn: &mut sqlx::PgConnection,
-    tenant: &str,
-    grant_id: &str,
+    conn: &mut IdentityTx<'_, '_, ServingWriteLane>,
+    grant_id: &AuthGrantId,
 ) -> Result<u64, IdentityError> {
-    let changed = sqlx::query(
-        "UPDATE refresh_tokens SET status = 'revoked' \
-         WHERE tenant_id = $1::uuid AND auth_grant_id = $2 AND status <> 'revoked'",
-    )
-    .bind(tenant)
-    .bind(grant_id)
-    .execute(&mut *conn)
-    .await
-    .map_err(storage)?;
-    Ok(changed.rows_affected())
+    conn.identity().revoke_exact_refresh_family(grant_id).await
 }
 
 async fn insert_rotated_refresh(
-    conn: &mut sqlx::PgConnection,
+    conn: &mut IdentityTx<'_, '_, ServingWriteLane>,
     record: &RefreshTokenRecord,
 ) -> Result<(), IdentityError> {
-    let epoch = persisted_counter(record.issuance_epoch().get(), "refresh child epoch")?;
-    sqlx::query(
-        "INSERT INTO refresh_tokens \
-         (id, tenant_id, auth_grant_id, user_id, authn_epoch_at_issue, \
-          auth_grant_status, token_hash, parent_id, lineage_id, status, issued_at, expires_at) \
-         VALUES ($1::uuid, $2::uuid, $3, $4::uuid, $5, $6, $7, $8::uuid, $9::uuid, $10, \
-                 to_timestamp($11), to_timestamp($12))",
-    )
-    .bind(record.id().as_str())
-    .bind(record.tenant().as_uuid().to_string())
-    .bind(record.auth_grant_id().as_str())
-    .bind(record.user_id().as_uuid().to_string())
-    .bind(epoch)
-    .bind(record.auth_grant_status().as_db_str())
-    .bind(record.token_hash().as_bytes() as &[u8])
-    .bind(record.parent_id().map(|id| id.as_str()))
-    .bind(record.lineage_id().as_str())
-    .bind(record.status().as_db_str())
-    .bind(unix_secs(record.issued_at()))
-    .bind(unix_secs(record.expires_at()))
-    .execute(&mut *conn)
-    .await
-    .map_err(storage)?;
-    Ok(())
+    conn.identity().insert_rotated_refresh(record).await
 }
 
 struct PreparedSecurityCommand {
@@ -954,7 +861,7 @@ impl TryFrom<CredentialSecurityEmissionParts> for PreparedSecurityCommand {
     }
 }
 
-enum SecurityMutation {
+pub(crate) enum SecurityMutation {
     Account(AccountSecurityRow),
     Grant(GrantCloseCas),
     Password {
@@ -964,7 +871,7 @@ enum SecurityMutation {
 }
 
 async fn apply_security_mutation(
-    conn: &mut sqlx::PgConnection,
+    conn: &mut IdentityTx<'_, '_, ServingWriteLane>,
     mutation: SecurityMutation,
     fault: Option<IdentitySecurityFault>,
 ) -> Result<(), IdentityError> {
@@ -988,14 +895,14 @@ async fn apply_security_mutation(
     }
 }
 
-struct CredentialCasRow {
-    tenant: String,
-    user: String,
-    login: String,
-    expected_hash: String,
-    expected_version: i64,
-    next_hash: String,
-    next_version: i64,
+pub(crate) struct CredentialCasRow {
+    pub(crate) tenant: vocab::TenantId,
+    pub(crate) user: String,
+    pub(crate) login: String,
+    pub(crate) expected_hash: String,
+    pub(crate) expected_version: i64,
+    pub(crate) next_hash: String,
+    pub(crate) next_version: i64,
 }
 
 impl TryFrom<(&Credential, &Credential, &CredentialSecurityEvent)> for CredentialCasRow {
@@ -1014,7 +921,7 @@ impl TryFrom<(&Credential, &Credential, &CredentialSecurityEvent)> for Credentia
             return Err(corrupt("password credential mutation mismatch"));
         }
         Ok(Self {
-            tenant: event.tenant().as_uuid().to_string(),
+            tenant: event.tenant(),
             user: event.user_id().as_uuid().to_string(),
             login: expected.login().as_str().to_owned(),
             expected_hash: expected.password_hash().as_str().to_owned(),
@@ -1026,57 +933,35 @@ impl TryFrom<(&Credential, &Credential, &CredentialSecurityEvent)> for Credentia
 }
 
 async fn apply_credential_cas(
-    conn: &mut sqlx::PgConnection,
+    conn: &mut IdentityTx<'_, '_, ServingWriteLane>,
     row: &CredentialCasRow,
 ) -> Result<(), IdentityError> {
-    let changed = sqlx::query(
-        r#"
-        UPDATE credentials
-        SET password_hash = $5,
-            version = $6
-        WHERE tenant_id = $1::uuid
-          AND user_id = $2::uuid
-          AND login = $3
-          AND password_hash = $4
-          AND version = $7
-        "#,
-    )
-    .bind(&row.tenant)
-    .bind(&row.user)
-    .bind(&row.login)
-    .bind(&row.expected_hash)
-    .bind(&row.next_hash)
-    .bind(row.next_version)
-    .bind(row.expected_version)
-    .execute(&mut *conn)
-    .await
-    .map_err(storage)?;
-    if changed.rows_affected() == 1 {
+    if conn.identity().apply_credential_cas(row).await? {
         Ok(())
     } else {
         Err(IdentityError::VersionConflict)
     }
 }
 
-struct AccountSecurityRow {
-    state: AccountStateCasRow,
-    occurred_at: i64,
-    reason: &'static str,
+pub(crate) struct AccountSecurityRow {
+    pub(crate) state: AccountStateCasRow,
+    pub(crate) occurred_at: i64,
+    pub(crate) reason: &'static str,
 }
 
-struct AccountStateCasRow {
-    tenant: String,
-    user: String,
-    expected_status: &'static str,
-    expected_epoch: i64,
-    expected_version: i64,
-    expected_status_changed_at_micros: i64,
-    expected_updated_at_micros: i64,
-    next_status: &'static str,
-    next_epoch: i64,
-    next_version: i64,
-    status_changed_at_micros: i64,
-    updated_at_micros: i64,
+pub(crate) struct AccountStateCasRow {
+    pub(crate) tenant: vocab::TenantId,
+    pub(crate) user: String,
+    pub(crate) expected_status: &'static str,
+    pub(crate) expected_epoch: i64,
+    pub(crate) expected_version: i64,
+    pub(crate) expected_status_changed_at_micros: i64,
+    pub(crate) expected_updated_at_micros: i64,
+    pub(crate) next_status: &'static str,
+    pub(crate) next_epoch: i64,
+    pub(crate) next_version: i64,
+    pub(crate) status_changed_at_micros: i64,
+    pub(crate) updated_at_micros: i64,
 }
 
 impl TryFrom<(AccountSecurityMutation, &CredentialSecurityEvent)> for AccountSecurityRow {
@@ -1110,7 +995,7 @@ impl AccountStateCasRow {
             return Err(corrupt("account security mutation identity mismatch"));
         }
         Ok(Self {
-            tenant: expected.tenant().as_uuid().to_string(),
+            tenant: expected.tenant(),
             user: expected.user_id().as_uuid().to_string(),
             expected_status: status_to_db(expected.status()),
             expected_epoch: persisted_counter(expected.authn_epoch().get(), "expected epoch")?,
@@ -1136,7 +1021,7 @@ impl AccountStateCasRow {
 }
 
 async fn apply_account_security(
-    conn: &mut sqlx::PgConnection,
+    conn: &mut IdentityTx<'_, '_, ServingWriteLane>,
     row: &AccountSecurityRow,
     fault: Option<IdentitySecurityFault>,
 ) -> Result<(), IdentityError> {
@@ -1151,82 +1036,19 @@ async fn apply_account_security(
 }
 
 async fn revoke_refresh_families(
-    conn: &mut sqlx::PgConnection,
+    conn: &mut IdentityTx<'_, '_, ServingWriteLane>,
     state: &AccountStateCasRow,
 ) -> Result<(), IdentityError> {
-    sqlx::query(
-        r#"
-        SELECT refresh.id
-        FROM refresh_tokens AS refresh
-        WHERE refresh.tenant_id = $1::uuid
-          AND refresh.user_id = $2::uuid
-        ORDER BY refresh.auth_grant_id, refresh.id
-        FOR UPDATE
-        "#,
-    )
-    .bind(&state.tenant)
-    .bind(&state.user)
-    .fetch_all(&mut *conn)
-    .await
-    .map_err(storage)?;
-    sqlx::query(
-        r#"
-        UPDATE refresh_tokens AS refresh
-        SET status = 'revoked'
-        FROM auth_grants AS root
-        WHERE root.tenant_id = $1::uuid
-          AND root.user_id = $2::uuid
-          AND root.status = 'active'
-          AND refresh.tenant_id = root.tenant_id
-          AND refresh.auth_grant_id = root.grant_id
-          AND refresh.user_id = root.user_id
-          AND refresh.authn_epoch_at_issue = root.authn_epoch_at_issue
-          AND refresh.auth_grant_status = root.status
-          AND refresh.status <> 'revoked'
-        "#,
-    )
-    .bind(&state.tenant)
-    .bind(&state.user)
-    .execute(&mut *conn)
-    .await
-    .map_err(storage)?;
-    Ok(())
+    conn.identity()
+        .revoke_refresh_families_for_account(state)
+        .await
 }
 
 async fn revoke_auth_grants(
-    conn: &mut sqlx::PgConnection,
+    conn: &mut IdentityTx<'_, '_, ServingWriteLane>,
     row: &AccountSecurityRow,
 ) -> Result<(), IdentityError> {
-    let state = &row.state;
-    sqlx::query(
-        "SELECT grant_id FROM auth_grants \
-         WHERE tenant_id = $1::uuid AND user_id = $2::uuid AND status = 'active' \
-         ORDER BY grant_id FOR UPDATE",
-    )
-    .bind(&state.tenant)
-    .bind(&state.user)
-    .fetch_all(&mut *conn)
-    .await
-    .map_err(storage)?;
-    sqlx::query(
-        r#"
-        UPDATE auth_grants
-        SET status = 'revoked',
-            closed_at = to_timestamp($3),
-            close_reason = $4
-        WHERE tenant_id = $1::uuid
-          AND user_id = $2::uuid
-          AND status = 'active'
-        "#,
-    )
-    .bind(&state.tenant)
-    .bind(&state.user)
-    .bind(row.occurred_at)
-    .bind(row.reason)
-    .execute(&mut *conn)
-    .await
-    .map_err(storage)?;
-    Ok(())
+    conn.identity().revoke_auth_grants_for_account(row).await
 }
 
 fn inject_mutation_fault(
@@ -1241,42 +1063,10 @@ fn inject_mutation_fault(
 }
 
 async fn apply_account_state_cas(
-    conn: &mut sqlx::PgConnection,
+    conn: &mut IdentityTx<'_, '_, ServingWriteLane>,
     row: &AccountStateCasRow,
 ) -> Result<(), IdentityError> {
-    let changed = sqlx::query(
-        r#"
-        UPDATE account_security_states
-        SET status = $3,
-            authn_epoch = $4,
-            version = $5,
-            status_changed_at = TIMESTAMPTZ 'epoch' + $6 * INTERVAL '1 microsecond',
-            updated_at = TIMESTAMPTZ 'epoch' + $7 * INTERVAL '1 microsecond'
-        WHERE tenant_id = $1::uuid
-          AND user_id = $2::uuid
-          AND status = $8
-          AND authn_epoch = $9
-          AND version = $10
-          AND status_changed_at = TIMESTAMPTZ 'epoch' + $11 * INTERVAL '1 microsecond'
-          AND updated_at = TIMESTAMPTZ 'epoch' + $12 * INTERVAL '1 microsecond'
-        "#,
-    )
-    .bind(&row.tenant)
-    .bind(&row.user)
-    .bind(row.next_status)
-    .bind(row.next_epoch)
-    .bind(row.next_version)
-    .bind(row.status_changed_at_micros)
-    .bind(row.updated_at_micros)
-    .bind(row.expected_status)
-    .bind(row.expected_epoch)
-    .bind(row.expected_version)
-    .bind(row.expected_status_changed_at_micros)
-    .bind(row.expected_updated_at_micros)
-    .execute(&mut *conn)
-    .await
-    .map_err(storage)?;
-    if changed.rows_affected() != 1 {
+    if !conn.identity().apply_account_state_cas(row).await? {
         return Err(IdentityError::VersionConflict);
     }
     Ok(())

@@ -18,7 +18,7 @@ use eventexec::event::{ReviewedEvent, ReviewedEventWriter};
 
 #[cfg(all(test, feature = "integration"))]
 use crate::PgStore;
-use crate::cotx::{PgTenantWritePool, infra_tenant_scope};
+use crate::cotx::{ServingWriteLane, TenantDb, infra_tenant_scope};
 use crate::outbox::{
     OutboxAppendError, OutboxEnvelope, append_outbox_with_projection, metadata_with_ambient,
     unix_secs,
@@ -28,14 +28,14 @@ use crate::projection_events::ProjectionWriteRegistry;
 
 /// PostgreSQL durable outbox writer for sealed [`ReviewedEvent`] capabilities.
 ///
-/// 经 [`PgTenantWritePool`] 持有 tenant-scoped write funnel；不暴露裸 pool / begin 出口。
+/// 经 exact serving-write [`TenantDb`] 持有 tenant-scoped write funnel；不暴露裸 pool / begin 出口。
 ///
 /// **时间源**：`clock` 是注入的 [`Clock`]（必填构造器位置参，缺失即编译错误——rust-standards §工程护栏），
 /// 仅用于 envelope `occurred_at`。与 [`crate::PgOutbox`] 刻意用 SQL `now()` 的 lease/retry 谓词（多实例需单一、
 /// 无跨进程偏移的时间源）**不同**：那是 relay 端时间，本 emitter 的 `occurred_at` 是 producer 端事件发生时刻，
 /// 故注入 `Clock`（#1129）。
 pub struct PgEmitter {
-    pool: PgTenantWritePool,
+    pool: TenantDb<ServingWriteLane>,
     clock: Box<dyn Clock>,
 }
 
@@ -48,7 +48,7 @@ impl PgEmitter {
     #[cfg(all(test, feature = "integration"))]
     pub(crate) fn new(store: &PgStore, clock: Box<dyn Clock>) -> Self {
         Self {
-            pool: PgTenantWritePool::from_unverified_for_test(store),
+            pool: TenantDb::<ServingWriteLane>::from_unverified_for_test(store),
             clock,
         }
     }
@@ -59,7 +59,10 @@ impl PgEmitter {
         projection_registry: ProjectionWriteRegistry,
     ) -> Self {
         Self {
-            pool: PgTenantWritePool::with_projection_registry(store, projection_registry),
+            pool: TenantDb::<ServingWriteLane>::with_projection_registry(
+                store,
+                projection_registry,
+            ),
             clock,
         }
     }
@@ -85,14 +88,14 @@ impl ReviewedEventWriter for PgEmitter {
         )
         .with_partition_key_opt(partition_key)
         .with_causation_id_opt(causation_id);
-        // durable 写入事务内执行；事务打开、SET LOCAL、commit_unknown 与 rollback 统一由 PgTenantWritePool::write 承载。
+        // durable 写入事务内执行；事务打开、SET LOCAL、commit_unknown 与 rollback 统一由 exact serving-write funnel 承载。
         let projection_registry = self.pool.projection_registry();
         self.pool
-            .write(
+            .outbox_write(
                 infra_tenant_scope(env.tenant()),
-                move |tx| {
+                move |mut tx| {
                     Box::pin(async move {
-                        append_outbox_with_projection(tx, &entry, &env, &projection_registry)
+                        append_outbox_with_projection(&mut tx, &entry, &env, &projection_registry)
                             .await
                             .map(|_| ())
                             .map_err(OutboxAppendError::into_observed_emit_error)

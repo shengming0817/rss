@@ -2227,7 +2227,7 @@ fn expr_is_infra_call(expr: &syn::Expr) -> bool {
 
 const EVENTEXEC_RELAY_PATH: &str = "crates/eventexec/src/relay.rs";
 const POSTGRES_OUTBOX_PATH: &str = "adapters/postgres/src/outbox.rs";
-const POSTGRES_OUTBOX_SETTLEMENT_PATH: &str = "adapters/postgres/src/outbox/settlement.rs";
+const POSTGRES_OUTBOX_SETTLEMENT_PATH: &str = "adapters/postgres/src/cotx/eventing.rs";
 const OUTBOX_SETTLEMENT_RAW_FUNCTIONS: &[&str] = &[
     "rss_outbox_settle_published",
     "rss_outbox_settle_retry",
@@ -4249,7 +4249,7 @@ fn scan_relay_budget_live_seams(sources: &BTreeMap<&Path, &str>) -> Vec<Finding<
                     None,
                     "execute_published",
                     &[
-                        "tenant_pool.deadline_write(infra_tenant_scope(tenant), deadline",
+                        "tenant_pool.outbox_deadline_write(infra_tenant_scope(tenant), deadline",
                         "map_outer_timeout(PHASE, relay_budget)",
                     ][..],
                 ),
@@ -4257,7 +4257,7 @@ fn scan_relay_budget_live_seams(sources: &BTreeMap<&Path, &str>) -> Vec<Finding<
                     None,
                     "execute_retry",
                     &[
-                        "tenant_pool.deadline_write(infra_tenant_scope(tenant), deadline",
+                        "tenant_pool.outbox_deadline_write(infra_tenant_scope(tenant), deadline",
                         "map_outer_timeout(PHASE, relay_budget)",
                     ][..],
                 ),
@@ -4266,7 +4266,7 @@ fn scan_relay_budget_live_seams(sources: &BTreeMap<&Path, &str>) -> Vec<Finding<
                     "execute_dlx",
                     &[
                         "deadline_or_expired(claimed, relay_budget",
-                        "deadline_write(infra_tenant_scope(tenant), deadline",
+                        "outbox_deadline_write(infra_tenant_scope(tenant), deadline",
                         "map_outer_timeout(phase, relay_budget)",
                     ][..],
                 ),
@@ -4845,6 +4845,20 @@ fn scan_outbox_claim_cutover_sources(sources: &[(PathBuf, String)]) -> Vec<Findi
     findings
 }
 
+fn macro_ident_words(tokens: &proc_macro2::TokenStream) -> Vec<String> {
+    let mut words = Vec::new();
+    for token in tokens.clone() {
+        match token {
+            proc_macro2::TokenTree::Group(group) => {
+                words.extend(macro_ident_words(&group.stream()));
+            }
+            proc_macro2::TokenTree::Ident(ident) => words.push(ident.to_string()),
+            proc_macro2::TokenTree::Punct(_) | proc_macro2::TokenTree::Literal(_) => {}
+        }
+    }
+    words
+}
+
 #[derive(Default)]
 struct OutboxClaimRustVisitor {
     path: PathBuf,
@@ -5029,17 +5043,18 @@ impl OutboxClaimRustVisitor {
         }
     }
 
-    fn tokens_mention_relay_impl(&self, tokens: &str) -> bool {
-        let mentions_relay = tokens
-            .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
-            .any(|word| {
-                word == "OutboxRelay"
-                    || self
-                        .relay_trait_names
-                        .get(&self.module_path)
-                        .is_some_and(|names| names.contains(word))
-            });
-        mentions_relay && tokens.split_whitespace().any(|token| token == "impl")
+    fn tokens_mention_relay_impl(&self, tokens: &proc_macro2::TokenStream) -> bool {
+        let words = macro_ident_words(tokens);
+        words.iter().enumerate().any(|(index, word)| {
+            let is_relay = word == "OutboxRelay"
+                || self
+                    .relay_trait_names
+                    .get(&self.module_path)
+                    .is_some_and(|names| names.contains(word));
+            is_relay
+                && words.get(index + 1).is_some_and(|next| next == "for")
+                && words[..index].iter().any(|prior| prior == "impl")
+        })
     }
 
     fn inspect_relay_macro(&mut self, node: &syn::Macro) {
@@ -5056,7 +5071,7 @@ impl OutboxClaimRustVisitor {
         };
         let local = self.lookup_local_macro(&macro_name);
         if local == Some(true)
-            || self.tokens_mention_relay_impl(&node.tokens.to_string())
+            || self.tokens_mention_relay_impl(&node.tokens)
             || (local.is_none()
                 && macro_name.to_ascii_lowercase().contains("impl")
                 && self.module_imports_relay_trait())
@@ -5795,12 +5810,12 @@ fn collect_local_macro_defs(
             let Some(name) = &node.ident else {
                 return;
             };
-            let tokens = node.mac.tokens.to_string();
-            let mentions_relay = tokens
-                .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
-                .any(|word| word == "OutboxRelay" || self.relay_names.contains(word));
-            let generates =
-                mentions_relay && tokens.split_whitespace().any(|token| token == "impl");
+            let words = macro_ident_words(&node.mac.tokens);
+            let generates = words.iter().enumerate().any(|(index, word)| {
+                (word == "OutboxRelay" || self.relay_names.contains(word))
+                    && words.get(index + 1).is_some_and(|next| next == "for")
+                    && words[..index].iter().any(|prior| prior == "impl")
+            });
             self.defs
                 .entry(self.scope.clone())
                 .or_default()
@@ -7214,6 +7229,7 @@ mod tests {
                     SubscriptionDispatchKey::IdentityPolicyUpdatedV1Audit
                     | SubscriptionDispatchKey::IdentityRoleAssignedV1Audit
                     | SubscriptionDispatchKey::IdentityRoleRevokedV1Audit
+                    | SubscriptionDispatchKey::IdentitySecurityEventV1Audit
                     | SubscriptionDispatchKey::IdentitySessionCreatedV1Audit =>
                         AuditConsumerFactory::new(pg, audit_key).worker(token, inputs),
                     SubscriptionDispatchKey::SettingsConfigVersionChangedV1Settings =>
@@ -9230,8 +9246,8 @@ $do$;
         let mut sources = load_outbox_claim_cutover_sources(&root).expect("workspace sources");
         let (_, settlement) = sources
             .iter_mut()
-            .find(|(path, _)| path == Path::new("adapters/postgres/src/outbox/settlement.rs"))
-            .expect("private settlement module");
+            .find(|(path, _)| path == Path::new(POSTGRES_OUTBOX_SETTLEMENT_PATH))
+            .expect("closed settlement SQL façade");
         assert!(settlement.contains("rss_outbox_settle_published"));
         let unknown_family = settlement.replacen(
             "SELECT rss_outbox_settle_published($1, $2::uuid, $3)::text",
@@ -9503,27 +9519,27 @@ $do$;
             RelayBudgetRedCase::replace(
                 "postgres scalar settlement deadline carrier",
                 "adapters/postgres/src/outbox/settlement.rs",
-                "tenant_pool\n            .deadline_write(",
+                "tenant_pool\n            .outbox_deadline_write(",
                 "pool\n            .deadline_global_transaction(",
                 &[
                     (
                         "adapters/postgres/src/outbox/settlement.rs",
-                        "OUTBOX-RELAY-BUDGET-01 live seam `execute_published` 未消费 canonical typed budget/deadline: [\"tenant_pool.deadline_write(infra_tenant_scope(tenant),deadline\"]",
+                        "OUTBOX-RELAY-BUDGET-01 live seam `execute_published` 未消费 canonical typed budget/deadline: [\"tenant_pool.outbox_deadline_write(infra_tenant_scope(tenant),deadline\"]",
                     ),
                     (
                         "adapters/postgres/src/outbox/settlement.rs",
-                        "OUTBOX-RELAY-BUDGET-01 live seam `execute_retry` 未消费 canonical typed budget/deadline: [\"tenant_pool.deadline_write(infra_tenant_scope(tenant),deadline\"]",
+                        "OUTBOX-RELAY-BUDGET-01 live seam `execute_retry` 未消费 canonical typed budget/deadline: [\"tenant_pool.outbox_deadline_write(infra_tenant_scope(tenant),deadline\"]",
                     ),
                 ],
             ),
             RelayBudgetRedCase::replace(
                 "postgres DLX settlement deadline carrier",
                 "adapters/postgres/src/outbox/settlement.rs",
-                "tenant_pool\n        .deadline_write(",
+                "tenant_pool\n        .outbox_deadline_write(",
                 "pool\n        .deadline_global_transaction(",
                 &[(
                     "adapters/postgres/src/outbox/settlement.rs",
-                    "OUTBOX-RELAY-BUDGET-01 live seam `execute_dlx` 未消费 canonical typed budget/deadline: [\"deadline_write(infra_tenant_scope(tenant),deadline\"]",
+                    "OUTBOX-RELAY-BUDGET-01 live seam `execute_dlx` 未消费 canonical typed budget/deadline: [\"outbox_deadline_write(infra_tenant_scope(tenant),deadline\"]",
                 )],
             ),
             RelayBudgetRedCase::replace(

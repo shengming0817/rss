@@ -47,8 +47,10 @@ PostgreSQL adapter 只有两条显式模式，二者不得 fallback 或双写：
 - HTTP producer 的每个 `emits` 必须引用存在的 event fact，且 fact `domain` 必须与 producer `domain` 相等。
   该约束覆盖全 lifecycle，draft / deprecated 不是跨域 emits 的豁免。
 - active producer 另要求目标 fact 也 active 且至少声明一个订阅。
-- active HTTP producer 的持久化只有一个事务 funnel：业务 closure 经同一个 `&mut TxCapability` 写业务行
-  并返回 typed outcome，由 funnel 校验 authorization、envelope contract 与 entry fact 后 canonical append。
+- active HTTP producer 的持久化只有一个内核事务 funnel：私有
+  `TenantDb<ServingWriteLane>::producer_tx` 铸造原始事务；生产调用方只经
+  `identity_producer_tx` / `retry_config_producer_tx` 等 concern-specific runner 接收不可互换的 capability，
+  写业务行并返回 typed outcome。内核校验 authorization、envelope contract 与 entry fact 后 canonical append。
   generic entry 构造不具 generated fact provenance，不得进入 active producer 的 emitted 分支。
 - 不存在旧 producer co-transaction API、provider `.write()` + append、publisher 补发或兼容双写。
 - 载体：`cargo xtask contract validate` R22；producer evidence 为 `generated/l2-assurance.json`。
@@ -129,7 +131,8 @@ Outbox relay transport 是 **at-least-once**：durable fact 使用稳定 event I
   error kind 必须经 PII-safe summary 流到 DLX funnel，不在结果边界静默丢弃。
 - durable PG runtime 必须使用 ConsumerTx：Fresh claim 后在同一 tenant-scoped 事务内完成业务写、
   outgoing append 与 inbox mark processed，commit 成功后才 broker Ack。旧 non-tx ackable spawn 不受支持。
-- ConsumerTx handler 由 postgres adapter 构造，外部 crate 不得构造或逃逸 `TxCapability`。
+- ConsumerTx handler 由 postgres adapter 构造，外部 crate 不得构造或逃逸
+  `ConsumerTx`，也不能取得 `TenantTx<ServingWriteLane>`、raw connection 或通用 executor。
   handler、outcome、runner 与 worker spawn 归 runtime assembly 私有。
 - 长驻 `!Send` event worker 的 OS thread、current-thread Tokio runtime、driver、build failure、health 与
   completion 统一归 `eventexec` typed dedicated-runtime factory；assembly 只提供业务 future，确需保留

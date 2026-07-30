@@ -145,7 +145,8 @@ JSON v3 的紧凑 wire 约定如下；v2 不再读取或双写：
 - producer `evidence` 只含 `contract`、`generated`、`execution`、`fault`；不再携带 v2 的
   `runtime/effect` 泛化 bag。`execution` 固定记录 generated route、精确 mounted handler 及按 fact
   排序的 terminals；每个 terminal 记录 domain call path、`Trait::method` port、`Type::method`
-  provider、production `wire` 注入、`producer_tx`、`TxCapability`、canonical append 与 settlement。
+  provider、production `wire` 注入、`TenantDb::producer_tx`、exact-lane `TenantTx`、canonical append 与
+  settlement。
   terminal fact 集必须与该 producer 的 `emittedFacts` 精确相等。producer `fault` 同样按 fact terminal
   记录 provider/transaction、rollback、commit-unknown、rollback-failed 与生产 no-replay carrier，
   不复用 consumer/relay fixture 冒充 producer settlement 证据。

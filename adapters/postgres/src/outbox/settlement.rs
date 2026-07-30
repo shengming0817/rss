@@ -12,10 +12,14 @@ use eventexec::RelayBudget;
 use crate::dead_letter_payload::ProtectedDlxCapsule;
 
 use super::{
-    DLX_REPLAY_CAPSULE_ENCODING, DeadLetterSource, DlxPayloadContext, DlxPayloadProtector,
-    PgClaimedOutboxEntry, PgTenantWritePool, RelayPublishFailure, SameIdDeliveryPhase,
-    infra_tenant_scope, metadata_json_with_relay_failure, parse_tenant_id,
+    DeadLetterSource, DlxPayloadContext, DlxPayloadProtector, PgClaimedOutboxEntry,
+    RelayPublishFailure, SameIdDeliveryPhase, infra_tenant_scope, metadata_json_with_relay_failure,
+    parse_tenant_id,
 };
+use crate::cotx::eventing::{
+    MarkDlxRow, OutboxSettlementFence, OutboxSettlementMutation, OutboxTx, RelayDeadLetterInsert,
+};
+use crate::cotx::{ServingWriteLane, TenantDb};
 
 #[derive(Debug)]
 pub(super) enum Settlement<T> {
@@ -265,7 +269,7 @@ fn select_deadline(
 }
 
 pub(super) async fn published(
-    tenant_pool: &PgTenantWritePool,
+    tenant_pool: &TenantDb<ServingWriteLane>,
     claimed: &PgClaimedOutboxEntry,
     relay_budget: RelayBudget,
 ) -> Result<Settlement<()>, EngineError> {
@@ -283,7 +287,7 @@ pub(super) async fn published(
 }
 
 pub(super) async fn retry(
-    tenant_pool: &PgTenantWritePool,
+    tenant_pool: &TenantDb<ServingWriteLane>,
     claimed: &PgClaimedOutboxEntry,
     relay_budget: RelayBudget,
 ) -> Result<Settlement<()>, EngineError> {
@@ -301,7 +305,7 @@ pub(super) async fn retry(
 }
 
 async fn execute_published(
-    tenant_pool: &PgTenantWritePool,
+    tenant_pool: &TenantDb<ServingWriteLane>,
     claimed: &PgClaimedOutboxEntry,
     relay_budget: RelayBudget,
     deadline: tokio::time::Instant,
@@ -313,20 +317,22 @@ async fn execute_published(
     let lease_deadline_epoch_micros = claimed.lease_deadline_epoch_micros();
     SettlementAttempt::from_result(
         tenant_pool
-            .deadline_write(
+            .outbox_deadline_write(
                 infra_tenant_scope(tenant),
                 deadline,
-                move |connection| {
+                move |mut connection| {
                     Box::pin(async move {
-                        let raw: String = sqlx::query_scalar(
-                            "SELECT rss_outbox_settle_published($1, $2::uuid, $3)::text",
-                        )
-                        .bind(event_id)
-                        .bind(lease_token)
-                        .bind(lease_deadline_epoch_micros)
-                        .fetch_one(connection)
-                        .await
-                        .map_err(|error| map_storage_error(error, PHASE))?;
+                        let raw = connection
+                            .outbox_settle_delivery(
+                                OutboxSettlementFence {
+                                    event_id: &event_id,
+                                    lease_token: &lease_token,
+                                    lease_deadline_epoch_micros,
+                                },
+                                OutboxSettlementMutation::Published,
+                            )
+                            .await
+                            .map_err(|error| map_storage_error(error, PHASE))?;
                         parse_outcome(&raw)
                     })
                 },
@@ -338,7 +344,7 @@ async fn execute_published(
 }
 
 async fn execute_retry(
-    tenant_pool: &PgTenantWritePool,
+    tenant_pool: &TenantDb<ServingWriteLane>,
     claimed: &PgClaimedOutboxEntry,
     relay_budget: RelayBudget,
     deadline: tokio::time::Instant,
@@ -350,20 +356,22 @@ async fn execute_retry(
     let lease_deadline_epoch_micros = claimed.lease_deadline_epoch_micros();
     SettlementAttempt::from_result(
         tenant_pool
-            .deadline_write(
+            .outbox_deadline_write(
                 infra_tenant_scope(tenant),
                 deadline,
-                move |connection| {
+                move |mut connection| {
                     Box::pin(async move {
-                        let raw: String = sqlx::query_scalar(
-                            "SELECT rss_outbox_settle_retry($1, $2::uuid, $3)::text",
-                        )
-                        .bind(event_id)
-                        .bind(lease_token)
-                        .bind(lease_deadline_epoch_micros)
-                        .fetch_one(connection)
-                        .await
-                        .map_err(|error| map_storage_error(error, PHASE))?;
+                        let raw = connection
+                            .outbox_settle_delivery(
+                                OutboxSettlementFence {
+                                    event_id: &event_id,
+                                    lease_token: &lease_token,
+                                    lease_deadline_epoch_micros,
+                                },
+                                OutboxSettlementMutation::Retry,
+                            )
+                            .await
+                            .map_err(|error| map_storage_error(error, PHASE))?;
                         parse_outcome(&raw)
                     })
                 },
@@ -375,7 +383,7 @@ async fn execute_retry(
 }
 
 pub(super) async fn ordinary_dlx(
-    tenant_pool: &PgTenantWritePool,
+    tenant_pool: &TenantDb<ServingWriteLane>,
     payload_protector: &DlxPayloadProtector,
     tenant: vocab::TenantId,
     claimed: &PgClaimedOutboxEntry,
@@ -401,7 +409,7 @@ pub(super) async fn ordinary_dlx(
 }
 
 pub(super) async fn same_id_expiry_dlx(
-    tenant_pool: &PgTenantWritePool,
+    tenant_pool: &TenantDb<ServingWriteLane>,
     payload_protector: &DlxPayloadProtector,
     tenant: vocab::TenantId,
     claimed: &PgClaimedOutboxEntry,
@@ -433,21 +441,8 @@ struct DlxInput<'a> {
     relay_failure_reason: Option<&'static str>,
 }
 
-type MarkDlxRow = (
-    String,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<Vec<u8>>,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<i32>,
-);
-
 async fn execute_dlx(
-    tenant_pool: &PgTenantWritePool,
+    tenant_pool: &TenantDb<ServingWriteLane>,
     payload_protector: &DlxPayloadProtector,
     input: DlxInput<'_>,
     relay_budget: RelayBudget,
@@ -468,28 +463,23 @@ async fn execute_dlx(
     let lease_token = claimed.lease_token().to_owned();
     let lease_deadline_epoch_micros = claimed.lease_deadline_epoch_micros();
     let outcome = tenant_pool
-        .deadline_write(
+        .outbox_deadline_write(
             infra_tenant_scope(tenant),
             deadline,
-            move |connection| {
+            move |mut connection| {
                 let payload_protector = payload_protector.clone();
                 Box::pin(async move {
-                    let row: MarkDlxRow = sqlx::query_as(
-                        r#"
-                        SELECT settlement_outcome::text, tenant_id, domain, contract_id, topic,
-                               payload, metadata, contract_version, schema_hash, retry_count
-                        FROM rss_outbox_mark_dlx($1, $2::uuid, $3)
-                        "#,
-                    )
-                    .bind(&event_id)
-                    .bind(&lease_token)
-                    .bind(lease_deadline_epoch_micros)
-                    .fetch_one(&mut *connection)
-                    .await
-                    .map_err(|error| map_storage_error(error, phase))?;
+                    let row = connection
+                        .outbox_mark_dlx(OutboxSettlementFence {
+                            event_id: &event_id,
+                            lease_token: &lease_token,
+                            lease_deadline_epoch_micros,
+                        })
+                        .await
+                        .map_err(|error| map_storage_error(error, phase))?;
                     settle_dlx_row(
                         row,
-                        connection,
+                        &mut connection,
                         DlxRowContext {
                             payload_protector: &payload_protector,
                             phase,
@@ -571,63 +561,54 @@ fn decode_dlx_row(
     row: MarkDlxRow,
     expected_tenant: vocab::TenantId,
 ) -> Result<Settlement<SettledDlxRow>, SettlementAttemptError> {
-    let (
-        raw_outcome,
-        tenant_id,
-        domain,
-        contract_id,
-        topic,
-        payload,
-        metadata_json,
-        contract_version,
-        schema_hash,
-        authoritative_retry_count,
-    ) = row;
-    match parse_outcome(&raw_outcome)? {
+    match parse_outcome(&row.settlement_outcome)? {
         Settlement::Expired(_) => ensure_empty_dlx_row(
             [
-                tenant_id.as_ref(),
-                domain.as_ref(),
-                contract_id.as_ref(),
-                topic.as_ref(),
-                metadata_json.as_ref(),
-                contract_version.as_ref(),
-                schema_hash.as_ref(),
+                row.tenant_id.as_ref(),
+                row.domain.as_ref(),
+                row.contract_id.as_ref(),
+                row.topic.as_ref(),
+                row.metadata_json.as_ref(),
+                row.contract_version.as_ref(),
+                row.schema_hash.as_ref(),
             ],
-            payload.as_ref(),
-            authoritative_retry_count.as_ref(),
+            row.payload.as_ref(),
+            row.retry_count.as_ref(),
             Settlement::expired(),
         ),
         Settlement::LostLease(_) => ensure_empty_dlx_row(
             [
-                tenant_id.as_ref(),
-                domain.as_ref(),
-                contract_id.as_ref(),
-                topic.as_ref(),
-                metadata_json.as_ref(),
-                contract_version.as_ref(),
-                schema_hash.as_ref(),
+                row.tenant_id.as_ref(),
+                row.domain.as_ref(),
+                row.contract_id.as_ref(),
+                row.topic.as_ref(),
+                row.metadata_json.as_ref(),
+                row.contract_version.as_ref(),
+                row.schema_hash.as_ref(),
             ],
-            payload.as_ref(),
-            authoritative_retry_count.as_ref(),
+            row.payload.as_ref(),
+            row.retry_count.as_ref(),
             Settlement::lost_lease(),
         ),
         Settlement::Settled((), _) => {
-            let tenant_id = tenant_id.ok_or(SettlementAttemptError::Invariant)?;
+            let tenant_id = row.tenant_id.ok_or(SettlementAttemptError::Invariant)?;
             let row_tenant =
                 parse_tenant_id(&tenant_id).map_err(|_| SettlementAttemptError::Invariant)?;
             if row_tenant != expected_tenant {
                 return Err(SettlementAttemptError::Invariant);
             }
             Ok(Settlement::settled(SettledDlxRow {
-                domain: domain.ok_or(SettlementAttemptError::Invariant)?,
-                contract_id: contract_id.ok_or(SettlementAttemptError::Invariant)?,
-                topic: topic.ok_or(SettlementAttemptError::Invariant)?,
-                payload: payload.ok_or(SettlementAttemptError::Invariant)?,
-                metadata_json: metadata_json.ok_or(SettlementAttemptError::Invariant)?,
-                contract_version: contract_version.ok_or(SettlementAttemptError::Invariant)?,
-                schema_hash: schema_hash.ok_or(SettlementAttemptError::Invariant)?,
-                authoritative_retry_count: authoritative_retry_count
+                domain: row.domain.ok_or(SettlementAttemptError::Invariant)?,
+                contract_id: row.contract_id.ok_or(SettlementAttemptError::Invariant)?,
+                topic: row.topic.ok_or(SettlementAttemptError::Invariant)?,
+                payload: row.payload.ok_or(SettlementAttemptError::Invariant)?,
+                metadata_json: row.metadata_json.ok_or(SettlementAttemptError::Invariant)?,
+                contract_version: row
+                    .contract_version
+                    .ok_or(SettlementAttemptError::Invariant)?,
+                schema_hash: row.schema_hash.ok_or(SettlementAttemptError::Invariant)?,
+                authoritative_retry_count: row
+                    .retry_count
                     .ok_or(SettlementAttemptError::Invariant)?,
             }))
         }
@@ -636,7 +617,7 @@ fn decode_dlx_row(
 
 async fn settle_dlx_row(
     row: MarkDlxRow,
-    connection: &mut sqlx::PgConnection,
+    connection: &mut OutboxTx<'_>,
     context: DlxRowContext<'_>,
 ) -> Result<Settlement<i32>, SettlementAttemptError> {
     let DlxRowContext {
@@ -659,33 +640,18 @@ async fn settle_dlx_row(
                 row,
             )
             .await?;
-            sqlx::query(
-                r#"
-                INSERT INTO dead_letter
-                    (tenant_id, message_id, producer_domain, consumer_domain,
-                     contract_id, topic, consumer_group,
-                     replay_capsule, replay_capsule_key_ref, payload_len,
-                     replay_capsule_encoding, metadata_digest,
-                     error_summary, num_attempts, source_kind)
-                VALUES ($1::uuid, $2, $3, NULL, $4, $5, NULL, $6, $7, $8, $9, $10, $11, $12, $13)
-                "#,
-            )
-            .bind(tenant.to_string())
-            .bind(event_id)
-            .bind(row.domain)
-            .bind(row.contract_id)
-            .bind(row.topic)
-            .bind(sqlx::types::Json(protected.replay_capsule()))
-            .bind(protected.key_ref())
-            .bind(protected.payload_len())
-            .bind(DLX_REPLAY_CAPSULE_ENCODING)
-            .bind(protected.metadata_digest())
-            .bind(error_summary)
-            .bind(row.authoritative_retry_count)
-            .bind(DeadLetterSource::OutboxRelay.as_str())
-            .execute(connection)
-            .await
-            .map_err(|error| map_storage_error(error, phase))?;
+            connection
+                .dead_letter_insert_relay(RelayDeadLetterInsert {
+                    event_id,
+                    domain: &row.domain,
+                    contract_id: &row.contract_id,
+                    topic: &row.topic,
+                    protected: &protected,
+                    error_summary,
+                    retry_count: row.authoritative_retry_count,
+                })
+                .await
+                .map_err(|error| map_storage_error(error, phase))?;
             Ok(Settlement::settled(row.authoritative_retry_count))
         }
     }
@@ -747,33 +713,33 @@ mod tests {
     }
 
     fn empty_dlx_row(outcome: &str) -> MarkDlxRow {
-        (
-            outcome.to_owned(),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
+        MarkDlxRow {
+            settlement_outcome: outcome.to_owned(),
+            tenant_id: None,
+            domain: None,
+            contract_id: None,
+            topic: None,
+            payload: None,
+            metadata_json: None,
+            contract_version: None,
+            schema_hash: None,
+            retry_count: None,
+        }
     }
 
     fn settled_dlx_row() -> MarkDlxRow {
-        (
-            "settled".to_owned(),
-            Some(TENANT.to_owned()),
-            Some("identity".to_owned()),
-            Some("identity.session-created".to_owned()),
-            Some("identity.session-created".to_owned()),
-            Some(b"settlement-payload".to_vec()),
-            Some("{}".to_owned()),
-            Some("v1".to_owned()),
-            Some(HASH.to_owned()),
-            Some(2),
-        )
+        MarkDlxRow {
+            settlement_outcome: "settled".to_owned(),
+            tenant_id: Some(TENANT.to_owned()),
+            domain: Some("identity".to_owned()),
+            contract_id: Some("identity.session-created".to_owned()),
+            topic: Some("identity.session-created".to_owned()),
+            payload: Some(b"settlement-payload".to_vec()),
+            metadata_json: Some("{}".to_owned()),
+            contract_version: Some("v1".to_owned()),
+            schema_hash: Some(HASH.to_owned()),
+            retry_count: Some(2),
+        }
     }
 
     #[allow(clippy::expect_used)]
@@ -805,7 +771,7 @@ mod tests {
     }
 
     #[allow(clippy::expect_used)]
-    fn lazy_tenant_pool() -> crate::cotx::PgTenantWritePool {
+    fn lazy_tenant_pool() -> crate::cotx::TenantDb<crate::cotx::ServingWriteLane> {
         let options = sqlx::postgres::PgConnectOptions::new()
             .host("127.0.0.1")
             .port(1)
@@ -816,10 +782,12 @@ mod tests {
             .max_connections(1)
             .acquire_timeout(Duration::from_millis(1))
             .connect_lazy_with(options);
-        crate::cotx::PgTenantWritePool::from_unverified_for_test(&crate::PgStore { pool })
+        crate::cotx::TenantDb::<crate::cotx::ServingWriteLane>::from_unverified_for_test(
+            &crate::PgStore { pool },
+        )
     }
 
-    async fn closed_tenant_pool() -> crate::cotx::PgTenantWritePool {
+    async fn closed_tenant_pool() -> crate::cotx::TenantDb<crate::cotx::ServingWriteLane> {
         let options = sqlx::postgres::PgConnectOptions::new()
             .host("127.0.0.1")
             .port(1)
@@ -830,9 +798,9 @@ mod tests {
             .max_connections(1)
             .connect_lazy_with(options);
         let tenant_pool =
-            crate::cotx::PgTenantWritePool::from_unverified_for_test(&crate::PgStore {
-                pool: pool.clone(),
-            });
+            crate::cotx::TenantDb::<crate::cotx::ServingWriteLane>::from_unverified_for_test(
+                &crate::PgStore { pool: pool.clone() },
+            );
         pool.close().await;
         tenant_pool
     }
@@ -1055,23 +1023,23 @@ mod tests {
         assert_eq!(row.authoritative_retry_count, 2);
 
         let mut partial_expired = empty_dlx_row("expired");
-        partial_expired.2 = Some("identity".to_owned());
+        partial_expired.domain = Some("identity".to_owned());
         assert!(decode_dlx_row(partial_expired, tenant()).is_err());
 
         let mut partial_lost = empty_dlx_row("lost_lease");
-        partial_lost.5 = Some(Vec::new());
+        partial_lost.payload = Some(Vec::new());
         assert!(decode_dlx_row(partial_lost, tenant()).is_err());
 
         let mut missing = settled_dlx_row();
-        missing.8 = None;
+        missing.schema_hash = None;
         assert!(decode_dlx_row(missing, tenant()).is_err());
 
         let mut wrong_tenant = settled_dlx_row();
-        wrong_tenant.1 = Some("11111111-1111-4111-8111-111111111111".to_owned());
+        wrong_tenant.tenant_id = Some("11111111-1111-4111-8111-111111111111".to_owned());
         assert!(decode_dlx_row(wrong_tenant, tenant()).is_err());
 
         let mut invalid_tenant = settled_dlx_row();
-        invalid_tenant.1 = Some("not-a-tenant".to_owned());
+        invalid_tenant.tenant_id = Some("not-a-tenant".to_owned());
         assert!(decode_dlx_row(invalid_tenant, tenant()).is_err());
 
         assert!(decode_dlx_row(empty_dlx_row("unknown"), tenant()).is_err());

@@ -3,9 +3,8 @@
 use consistency::idempotency::IdemKey;
 use consistency::outbox::{OutboxPayload, StoredOutboxEntry};
 use consistency::{
-    CommandErrorSummary, CommandJournalOutcome, CommandJournalStatus,
-    CommandJournalTerminalSummary, CommandRequestFingerprint, CommandResultSummary,
-    OutboxAppendOutcome,
+    CommandErrorSummary, CommandJournalOutcome, CommandJournalTerminalSummary,
+    CommandRequestFingerprint, CommandResultSummary, OutboxAppendOutcome,
 };
 use diport::Clock;
 use eventexec::command::{
@@ -16,7 +15,8 @@ use futures::future::BoxFuture;
 
 #[cfg(all(test, feature = "integration"))]
 use crate::PgStore;
-use crate::cotx::{PgTenantWritePool, TxCapability, infra_tenant_scope};
+use crate::cotx::eventing::{CommandAliasClaim, CommandAliasKey, CommandTerminalUpdate, CommandTx};
+use crate::cotx::{ServingWriteLane, TenantDb, infra_tenant_scope};
 use crate::outbox::{
     OutboxAppendError, OutboxEnvelope, append_outbox, metadata_with_ambient, unix_secs,
 };
@@ -26,7 +26,7 @@ use crate::pool::VerifiedPgWriteStore;
 impl PgStore {
     pub(crate) fn command_journal(&self, clock: Box<dyn Clock>) -> PgCommandJournal {
         PgCommandJournal {
-            pool: PgTenantWritePool::from_unverified_for_test(self),
+            pool: TenantDb::<ServingWriteLane>::from_unverified_for_test(self),
             clock,
         }
     }
@@ -34,7 +34,7 @@ impl PgStore {
 
 /// Postgres command journal and direct-dispatch store.
 pub struct PgCommandJournal {
-    pool: PgTenantWritePool,
+    pool: TenantDb<ServingWriteLane>,
     clock: Box<dyn Clock>,
 }
 
@@ -46,7 +46,7 @@ pub(crate) struct PreparedCommand {
 impl PgCommandJournal {
     pub(crate) fn new(store: &VerifiedPgWriteStore, clock: Box<dyn Clock>) -> Self {
         Self {
-            pool: PgTenantWritePool::new(store),
+            pool: TenantDb::<ServingWriteLane>::new(store),
             clock,
         }
     }
@@ -58,7 +58,7 @@ impl PgCommandJournal {
     ) -> Result<CommandJournalOutcome, CommandStoreError>
     where
         F: for<'c, 'tx> FnOnce(
-                &'c mut TxCapability<'tx>,
+                &'c mut CommandTx<'tx>,
             ) -> BoxFuture<
                 'c,
                 Result<CommandJournalTerminalSummary, CommandStoreError>,
@@ -82,26 +82,24 @@ impl PgCommandJournal {
         .with_causation_id_opt(causation_id);
 
         self.pool
-            .write(
+            .command_write(
                 infra_tenant_scope(tenant),
-                move |tx| {
+                move |mut tx| {
                     Box::pin(async move {
-                        let prepared = prepare_command(tx, tenant, intent).await?;
-                        if !insert_journal_claim(tx, tenant, &prepared, &env).await? {
+                        let prepared = prepare_command(&mut tx, intent).await?;
+                        if !insert_journal_claim(&mut tx, &prepared, &env).await? {
                             return duplicate_outcome(
-                                tx,
-                                tenant,
+                                &mut tx,
                                 prepared.entry.idem_key().as_str(),
                                 &prepared.fingerprint,
                             )
                             .await;
                         }
-                        match business_write(tx).await? {
+                        match business_write(&mut tx).await? {
                             CommandJournalTerminalSummary::Completed(result_summary) => {
-                                append_or_match(tx, &prepared.entry, &env).await?;
+                                append_or_match(&mut tx, &prepared.entry, &env).await?;
                                 mark_completed(
-                                    tx,
-                                    tenant,
+                                    &mut tx,
                                     prepared.entry.idem_key().as_str(),
                                     result_summary,
                                 )
@@ -109,8 +107,7 @@ impl PgCommandJournal {
                             }
                             CommandJournalTerminalSummary::Failed(error_summary) => {
                                 mark_failed(
-                                    tx,
-                                    tenant,
+                                    &mut tx,
                                     prepared.entry.idem_key().as_str(),
                                     error_summary,
                                 )
@@ -162,12 +159,12 @@ impl CommandDispatchStore for PgCommandJournal {
         .with_partition_key_opt(partition_key)
         .with_causation_id_opt(causation_id);
         self.pool
-            .write(
+            .command_write(
                 infra_tenant_scope(tenant),
-                move |tx| {
+                move |mut tx| {
                     Box::pin(async move {
-                        let prepared = prepare_command(tx, tenant, intent).await?;
-                        append_or_match(tx, &prepared.entry, &env).await
+                        let prepared = prepare_command(&mut tx, intent).await?;
+                        append_or_match(&mut tx, &prepared.entry, &env).await
                     })
                 },
                 map_sqlx_error,
@@ -177,12 +174,11 @@ impl CommandDispatchStore for PgCommandJournal {
 }
 
 pub(crate) async fn prepare_command(
-    tx: &mut TxCapability<'_>,
-    tenant: vocab::TenantId,
+    tx: &mut CommandTx<'_>,
     intent: ReviewedCommandIntent,
 ) -> Result<PreparedCommand, CommandStoreError> {
     let (topic, payload, aliases, fingerprint) = intent.into_parts();
-    let command_id = claim_command_identity(tx, tenant, topic, aliases).await?;
+    let command_id = claim_command_identity(tx, topic, aliases).await?;
     let idem_key = IdemKey::parse(&command_id)
         .map_err(|_| CommandStoreError::internal(CommandCanonicalIdInvalid))?;
     let entry = StoredOutboxEntry::hydrate(
@@ -195,8 +191,7 @@ pub(crate) async fn prepare_command(
 }
 
 async fn claim_command_identity(
-    tx: &mut TxCapability<'_>,
-    tenant: vocab::TenantId,
+    tx: &mut CommandTx<'_>,
     topic: &str,
     aliases: CommandAliasProbeSet,
 ) -> Result<String, CommandStoreError> {
@@ -216,22 +211,17 @@ async fn claim_command_identity(
         return Err(CommandStoreError::internal(CommandAliasInvalid));
     }
 
-    let tenant_id = tenant.to_string();
     let mut canonical: Option<String> = None;
     for (key_id, digest) in &probes {
-        let row: Option<(String,)> = sqlx::query_as(
-            "SELECT command_id FROM command_idempotency_aliases \
-             WHERE tenant_id = $1::uuid AND topic = $2 AND key_id = $3 \
-               AND alias_digest = $4",
-        )
-        .bind(&tenant_id)
-        .bind(topic)
-        .bind(key_id)
-        .bind(digest)
-        .fetch_optional(tx.conn())
-        .await
-        .map_err(map_sqlx_error)?;
-        if let Some((found,)) = row {
+        let row = tx
+            .command_find_alias(CommandAliasKey {
+                topic,
+                key_id,
+                digest,
+            })
+            .await
+            .map_err(map_sqlx_error)?;
+        if let Some(found) = row {
             match &canonical {
                 Some(expected) if expected != &found => {
                     return Err(CommandStoreError::conflict(CommandAliasDiverged));
@@ -244,31 +234,17 @@ async fn claim_command_identity(
 
     let mut canonical = canonical.unwrap_or_else(random_command_id);
     for (index, (key_id, digest)) in probes.iter().enumerate() {
-        sqlx::query(
-            "INSERT INTO command_idempotency_aliases \
-             (tenant_id, topic, key_id, alias_digest, command_id) \
-             VALUES ($1::uuid, $2, $3, $4, $5) ON CONFLICT DO NOTHING",
-        )
-        .bind(&tenant_id)
-        .bind(topic)
-        .bind(key_id)
-        .bind(digest)
-        .bind(&canonical)
-        .execute(tx.conn())
-        .await
-        .map_err(map_sqlx_error)?;
-        let (persisted,): (String,) = sqlx::query_as(
-            "SELECT command_id FROM command_idempotency_aliases \
-             WHERE tenant_id = $1::uuid AND topic = $2 AND key_id = $3 \
-               AND alias_digest = $4",
-        )
-        .bind(&tenant_id)
-        .bind(topic)
-        .bind(key_id)
-        .bind(digest)
-        .fetch_one(tx.conn())
-        .await
-        .map_err(map_sqlx_error)?;
+        let persisted = tx
+            .command_claim_alias(CommandAliasClaim {
+                key: CommandAliasKey {
+                    topic,
+                    key_id,
+                    digest,
+                },
+                command_id: &canonical,
+            })
+            .await
+            .map_err(map_sqlx_error)?;
         if persisted != canonical {
             if index == 0 {
                 canonical = persisted;
@@ -285,63 +261,40 @@ fn random_command_id() -> String {
 }
 
 async fn insert_journal_claim(
-    tx: &mut TxCapability<'_>,
-    tenant: vocab::TenantId,
+    tx: &mut CommandTx<'_>,
     prepared: &PreparedCommand,
     env: &OutboxEnvelope,
 ) -> Result<bool, CommandStoreError> {
-    let result = sqlx::query(
-        "INSERT INTO command_journal \
-         (tenant_id, command_id, topic, contract_id, contract_version, schema_hash, \
-          request_fingerprint, outbox_event_id, status, attempt, trace, correlation_id) \
-         VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,$2,$8,1,$9,$10) \
-         ON CONFLICT (tenant_id, command_id) DO NOTHING",
-    )
-    .bind(tenant.to_string())
-    .bind(prepared.entry.idem_key().as_str())
-    .bind(prepared.entry.topic().as_str())
-    .bind(env.contract_id())
-    .bind(env.contract_version())
-    .bind(env.schema_hash())
-    .bind(prepared.fingerprint.as_str())
-    .bind(CommandJournalStatus::InFlight.as_label())
-    .bind(tracewire::capture())
-    .bind(diagctx::correlation().map(|id| id.as_str().to_string()))
-    .execute(tx.conn())
-    .await
-    .map_err(map_sqlx_error)?;
-    Ok(result.rows_affected() == 1)
+    tx.command_insert_journal_claim(prepared, env)
+        .await
+        .map_err(map_sqlx_error)
 }
 
 async fn duplicate_outcome(
-    tx: &mut TxCapability<'_>,
-    tenant: vocab::TenantId,
+    tx: &mut CommandTx<'_>,
     command_id: &str,
     fingerprint: &CommandRequestFingerprint,
 ) -> Result<CommandJournalOutcome, CommandStoreError> {
-    let row: Option<(String, String, Option<String>, Option<String>)> = sqlx::query_as(
-        "SELECT status, request_fingerprint, result_summary, error_summary \
-         FROM command_journal WHERE tenant_id=$1::uuid AND command_id=$2 FOR UPDATE",
-    )
-    .bind(tenant.to_string())
-    .bind(command_id)
-    .fetch_optional(tx.conn())
-    .await
-    .map_err(map_sqlx_error)?;
-    let Some((status, persisted, result, error)) = row else {
+    let Some(row) = tx
+        .command_load_journal_for_update(command_id)
+        .await
+        .map_err(map_sqlx_error)?
+    else {
         return Err(CommandStoreError::internal(CommandJournalMissingDuplicate));
     };
-    if persisted != fingerprint.as_str() {
+    if row.request_fingerprint != fingerprint.as_str() {
         return Ok(CommandJournalOutcome::Conflict);
     }
-    match status.as_str() {
+    match row.status.as_str() {
         "in_flight" => Ok(CommandJournalOutcome::AlreadyInFlight),
-        "completed" => result
+        "completed" => row
+            .result_summary
             .as_deref()
             .and_then(CommandResultSummary::parse_persisted)
             .map(CommandJournalOutcome::AlreadyCompleted)
             .ok_or_else(|| CommandStoreError::internal(CommandJournalUnknownSummary)),
-        "failed" => error
+        "failed" => row
+            .error_summary
             .as_deref()
             .and_then(CommandErrorSummary::parse_persisted)
             .map(CommandJournalOutcome::AlreadyFailed)
@@ -351,7 +304,7 @@ async fn duplicate_outcome(
 }
 
 async fn append_or_match(
-    tx: &mut TxCapability<'_>,
+    tx: &mut CommandTx<'_>,
     entry: &StoredOutboxEntry,
     env: &OutboxEnvelope,
 ) -> Result<(), CommandStoreError> {
@@ -364,18 +317,18 @@ async fn append_or_match(
 }
 
 async fn mark_completed(
-    tx: &mut TxCapability<'_>,
-    tenant: vocab::TenantId,
+    tx: &mut CommandTx<'_>,
     command_id: &str,
     result_summary: CommandResultSummary,
 ) -> Result<(), CommandStoreError> {
-    let result = sqlx::query(
-        "UPDATE command_journal SET status=$3,result_summary=$4,error_summary=NULL,updated_at=now() \
-         WHERE tenant_id=$1::uuid AND command_id=$2 AND status='in_flight'",
-    ).bind(tenant.to_string()).bind(command_id)
-        .bind(CommandJournalStatus::Completed.as_label()).bind(result_summary.as_str())
-        .execute(tx.conn()).await.map_err(map_sqlx_error)?;
-    if result.rows_affected() == 1 {
+    if tx
+        .command_settle_journal(
+            command_id,
+            CommandTerminalUpdate::Completed(&result_summary),
+        )
+        .await
+        .map_err(map_sqlx_error)?
+    {
         Ok(())
     } else {
         Err(CommandStoreError::internal(CommandJournalStatusRace))
@@ -383,18 +336,15 @@ async fn mark_completed(
 }
 
 async fn mark_failed(
-    tx: &mut TxCapability<'_>,
-    tenant: vocab::TenantId,
+    tx: &mut CommandTx<'_>,
     command_id: &str,
     error_summary: CommandErrorSummary,
 ) -> Result<(), CommandStoreError> {
-    let result = sqlx::query(
-        "UPDATE command_journal SET status=$3,result_summary=NULL,error_summary=$4,updated_at=now() \
-         WHERE tenant_id=$1::uuid AND command_id=$2 AND status='in_flight'",
-    ).bind(tenant.to_string()).bind(command_id)
-        .bind(CommandJournalStatus::Failed.as_label()).bind(error_summary.as_str())
-        .execute(tx.conn()).await.map_err(map_sqlx_error)?;
-    if result.rows_affected() == 1 {
+    if tx
+        .command_settle_journal(command_id, CommandTerminalUpdate::Failed(&error_summary))
+        .await
+        .map_err(map_sqlx_error)?
+    {
         Ok(())
     } else {
         Err(CommandStoreError::internal(CommandJournalStatusRace))

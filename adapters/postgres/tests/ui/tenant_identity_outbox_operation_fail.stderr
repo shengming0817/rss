@@ -1,0 +1,15 @@
+error[E0308]: mismatched types
+ --> tests/ui/tenant_identity_outbox_operation_fail.rs:8:22
+  |
+8 |     outbox_operation(&mut tx);
+  |     ---------------- ^^^^^^^ expected `&mut EventingTx<'_, ..., ...>`, found `&mut IdentityTx<'_, '_, ...>`
+  |     |
+  |     arguments to this function are incorrect
+  |
+  = note: expected mutable reference `&mut postgres::cotx::eventing::EventingTx<'_, postgres::tx_boundary_proof::ServingWriteLane, postgres::cotx::eventing::OutboxConcern>`
+             found mutable reference `&mut postgres::tx_boundary_proof::IdentityTx<'_, '_, postgres::tx_boundary_proof::ServingWriteLane>`
+note: function defined here
+ --> src/lib.rs
+  |
+  |     pub fn outbox_operation(_: &mut OutboxTx<'_>) {}
+  |            ^^^^^^^^^^^^^^^^

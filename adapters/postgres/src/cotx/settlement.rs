@@ -142,8 +142,8 @@ pub(super) struct LocalTxTransaction<'lease> {
 }
 
 impl LocalTxTransaction<'_> {
-    pub(super) fn capability(&mut self) -> super::TxCapability<'_> {
-        super::TxCapability::from_transaction(&mut self.transaction)
+    pub(super) fn connection(&mut self) -> &mut sqlx::PgConnection {
+        &mut self.transaction
     }
 
     pub(super) async fn commit(self) -> Result<(), sqlx::Error> {

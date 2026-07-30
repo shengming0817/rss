@@ -16,32 +16,32 @@ use sqlx::Row;
 
 #[cfg(all(test, feature = "integration"))]
 use crate::PgStore;
-use crate::cotx::{PgTenantReadPool, PgTenantWritePool, ProducerTxOutcome};
+use crate::cotx::{ProducerTxOutcome, ServingReadLane, ServingWriteLane, TenantDb};
 use crate::outbox::{OutboxEnvelope, epoch_secs_to_time, metadata_with_ambient, unix_secs};
 use crate::pool::{VerifiedPgReadStore, VerifiedPgWriteStore};
 use crate::projection_events::ProjectionWriteRegistry;
 
 pub struct PgPolicyRepo {
-    pool: PgTenantReadPool,
+    pool: TenantDb<ServingReadLane>,
 }
 
 impl PgPolicyRepo {
     pub(crate) fn new(reader: &VerifiedPgReadStore) -> Self {
         Self {
-            pool: PgTenantReadPool::new(reader),
+            pool: TenantDb::<ServingReadLane>::new(reader),
         }
     }
 
     #[cfg(all(test, feature = "integration"))]
     pub(crate) fn from_unverified_for_test(store: &PgStore) -> Self {
         Self {
-            pool: PgTenantReadPool::from_unverified_for_test(store),
+            pool: TenantDb::<ServingReadLane>::from_unverified_for_test(store),
         }
     }
 }
 
 pub struct PgPolicyLifecycle {
-    pool: PgTenantWritePool,
+    pool: TenantDb<ServingWriteLane>,
     clock: Box<dyn Clock>,
 }
 
@@ -49,7 +49,7 @@ impl PgPolicyLifecycle {
     #[cfg(all(test, feature = "integration"))]
     pub(crate) fn new(store: &PgStore, clock: Box<dyn Clock>) -> Self {
         Self {
-            pool: PgTenantWritePool::from_unverified_for_test(store),
+            pool: TenantDb::<ServingWriteLane>::from_unverified_for_test(store),
             clock,
         }
     }
@@ -60,7 +60,10 @@ impl PgPolicyLifecycle {
         projection_registry: ProjectionWriteRegistry,
     ) -> Self {
         Self {
-            pool: PgTenantWritePool::with_projection_registry(writer, projection_registry),
+            pool: TenantDb::<ServingWriteLane>::with_projection_registry(
+                writer,
+                projection_registry,
+            ),
             clock,
         }
     }
@@ -96,14 +99,6 @@ fn producer_authorization_storage_error(path: &'static str) -> IdentityError {
     storage_boxed(std::io::Error::other(format!(
         "{path}: producer receipt does not authorize outbox envelope contract"
     )))
-}
-
-fn tenant_param(tenant: TenantId) -> String {
-    tenant.as_uuid().to_string()
-}
-
-fn version_param(version: PolicyVersion) -> Result<i32, IdentityError> {
-    i32::try_from(version.get()).map_err(|_| IdentityError::InvalidPolicy)
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -319,7 +314,7 @@ fn decode_rules(raw: &str) -> Result<Vec<PolicyRule>, IdentityError> {
 }
 
 #[derive(Debug)]
-struct RawPolicy {
+pub(crate) struct RawPolicy {
     id: String,
     version: i32,
     contract_id: String,
@@ -350,30 +345,11 @@ impl PolicyRepo for PgPolicyRepo {
         id: PolicyId,
     ) -> Result<Option<Policy>, IdentityError> {
         let tenant = tenant_scope.tenant();
-        let tenant_uuid = tenant_param(tenant);
-        let id_str = id.as_str().to_string();
+        let query_id = id.clone();
         let raw: Option<RawPolicy> = self
             .pool
-            .read(tenant_scope, move |conn| {
-                Box::pin(async move {
-                    let row = sqlx::query(
-                        r#"
-                        SELECT id, version, contract_id, permission,
-                               extract(epoch from effective_from)::bigint AS effective_from,
-                               extract(epoch from effective_until)::bigint AS effective_until,
-                               rules::text AS rules_json
-                        FROM abac_policies
-                        WHERE tenant_id = $1::uuid
-                          AND id = $2
-                          AND deleted_at IS NULL
-                        "#,
-                    )
-                    .bind(tenant_uuid)
-                    .bind(id_str)
-                    .fetch_optional(&mut *conn)
-                    .await?;
-                    row.map(row_to_raw).transpose()
-                })
+            .identity_read(tenant_scope, move |mut conn| {
+                Box::pin(async move { conn.identity().policy_row(&query_id).await })
             })
             .await
             .map_err(storage)?;
@@ -386,36 +362,16 @@ impl PolicyRepo for PgPolicyRepo {
         page: PolicyPage,
     ) -> Result<PolicyListResult, IdentityError> {
         let tenant = tenant_scope.tenant();
-        let tenant_uuid = tenant_param(tenant);
         let limit = usize::from(page.limit.get());
         let fetch_limit = i64::try_from(limit.saturating_add(1)).map_err(storage_boxed)?;
-        let after = page.after.map(|id| id.as_str().to_string());
+        let after = page.after;
         let raw: Vec<RawPolicy> = self
             .pool
-            .read(tenant_scope, move |conn| {
+            .identity_read(tenant_scope, move |mut conn| {
                 Box::pin(async move {
-                    let rows = sqlx::query(
-                        r#"
-                        SELECT id, version, contract_id, permission,
-                               extract(epoch from effective_from)::bigint AS effective_from,
-                               extract(epoch from effective_until)::bigint AS effective_until,
-                               rules::text AS rules_json
-                        FROM abac_policies
-                        WHERE tenant_id = $1::uuid
-                          AND ($2::text IS NULL OR id > $2)
-                          AND deleted_at IS NULL
-                        ORDER BY id ASC
-                        LIMIT $3
-                        "#,
-                    )
-                    .bind(tenant_uuid)
-                    .bind(after)
-                    .bind(fetch_limit)
-                    .fetch_all(&mut *conn)
-                    .await?;
-                    rows.into_iter()
-                        .map(row_to_raw)
-                        .collect::<Result<Vec<RawPolicy>, sqlx::Error>>()
+                    conn.identity()
+                        .active_policy_rows(after.as_ref(), fetch_limit)
+                        .await
                 })
             })
             .await
@@ -436,37 +392,14 @@ impl PolicyRepo for PgPolicyRepo {
         at: SystemTime,
     ) -> Result<Vec<Policy>, IdentityError> {
         let tenant = tenant_scope.tenant();
-        let tenant_uuid = tenant_param(tenant);
-        let at_secs = unix_secs(at);
+        let query_scope = scope.clone();
         let raw: Vec<RawPolicy> = self
             .pool
-            .read(tenant_scope, move |conn| {
+            .identity_read(tenant_scope, move |mut conn| {
                 Box::pin(async move {
-                    let rows = sqlx::query(
-                        r#"
-                        SELECT id, version, contract_id, permission,
-                               extract(epoch from effective_from)::bigint AS effective_from,
-                               extract(epoch from effective_until)::bigint AS effective_until,
-                               rules::text AS rules_json
-                        FROM abac_policies
-                        WHERE tenant_id = $1::uuid
-                          AND contract_id = $2
-                          AND permission = $3
-                          AND effective_from <= to_timestamp($4)
-                          AND (effective_until IS NULL OR effective_until > to_timestamp($4))
-                          AND deleted_at IS NULL
-                        ORDER BY id ASC
-                        "#,
-                    )
-                    .bind(tenant_uuid)
-                    .bind(scope.contract_id().to_string())
-                    .bind(scope.permission().as_str().to_string())
-                    .bind(at_secs)
-                    .fetch_all(&mut *conn)
-                    .await?;
-                    rows.into_iter()
-                        .map(row_to_raw)
-                        .collect::<Result<Vec<RawPolicy>, sqlx::Error>>()
+                    conn.identity()
+                        .effective_policy_rows(&query_scope, at)
+                        .await
                 })
             })
             .await
@@ -495,52 +428,26 @@ impl PolicyLifecycle for PgPolicyLifecycle {
         if env_tenant != tenant {
             return Err(IdentityError::InvalidPolicy);
         }
-        let tenant_uuid = tenant_param(tenant);
         let rules_json = encode_rules(&policy)?;
-        let id = policy.id().as_str().to_string();
-        let version = version_param(policy.version())?;
-        let contract_id = policy.route_scope().contract_id().to_string();
-        let permission = policy.route_scope().permission().as_str().to_string();
-        let effective_from = unix_secs(policy.effective_from());
-        let effective_until = policy.effective_until().map(unix_secs);
+        let persisted_policy = policy.clone();
         let inserted = self
             .pool
-            .producer_tx(
+            .identity_producer_tx(
                 tenant_scope,
                 &entry,
                 &env,
-                move |conn| {
+                move |mut conn| {
                     Box::pin(async move {
-                        sqlx::query(
-                            r#"
-                            INSERT INTO abac_policies
-                                (tenant_id, id, version, contract_id, permission,
-                                 effective_from, effective_until, rules)
-                            VALUES
-                                ($1::uuid, $2, $3, $4, $5,
-                                 to_timestamp($6), to_timestamp($7), $8::jsonb)
-                            ON CONFLICT (tenant_id, id) DO NOTHING
-                            "#,
-                        )
-                        .bind(&tenant_uuid)
-                        .bind(&id)
-                        .bind(version)
-                        .bind(&contract_id)
-                        .bind(&permission)
-                        .bind(effective_from)
-                        .bind(effective_until)
-                        .bind(rules_json)
-                        .execute(conn.conn())
-                        .await
-                        .map_err(storage)
-                        .and_then(|r| {
-                            let rows = r.rows_affected();
-                            if rows > 0 {
-                                Ok(rows)
-                            } else {
-                                Err(IdentityError::PolicyAlreadyExists)
-                            }
-                        })?;
+                        conn.identity()
+                            .create_policy(&persisted_policy, &rules_json)
+                            .await
+                            .and_then(|rows| {
+                                if rows > 0 {
+                                    Ok(rows)
+                                } else {
+                                    Err(IdentityError::PolicyAlreadyExists)
+                                }
+                            })?;
                         let authorization = receipt
                             .authorize(generated_fact, POLICY_UPDATED_CONTRACT)
                             .ok_or_else(|| {
@@ -575,48 +482,19 @@ impl PolicyLifecycle for PgPolicyLifecycle {
         if env_tenant != tenant {
             return Err(IdentityError::InvalidPolicy);
         }
-        let tenant_uuid = tenant_param(tenant);
         let rules_json = encode_rules(&policy)?;
-        let expected_version = version_param(expected)?;
         let (raw, exists): (Option<RawPolicy>, bool) = self
             .pool
-            .producer_tx(
+            .identity_producer_tx(
                 tenant_scope,
                 &entry,
                 &env,
-                move |conn| {
+                move |mut conn| {
                     Box::pin(async move {
-                        let row = sqlx::query(
-                            r#"
-                            UPDATE abac_policies
-                            SET version = version + 1,
-                                contract_id = $4,
-                                permission = $5,
-                                effective_from = to_timestamp($6),
-                                effective_until = to_timestamp($7),
-                                rules = $8::jsonb,
-                                updated_at = now()
-                            WHERE tenant_id = $1::uuid
-                              AND id = $2
-                              AND version = $3
-                              AND deleted_at IS NULL
-                            RETURNING id, version, contract_id, permission,
-                                      extract(epoch from effective_from)::bigint AS effective_from,
-                                      extract(epoch from effective_until)::bigint AS effective_until,
-                                      rules::text AS rules_json
-                            "#,
-                        )
-                        .bind(&tenant_uuid)
-                        .bind(policy.id().as_str())
-                        .bind(expected_version)
-                        .bind(policy.route_scope().contract_id())
-                        .bind(policy.route_scope().permission().as_str())
-                        .bind(unix_secs(policy.effective_from()))
-                        .bind(policy.effective_until().map(unix_secs))
-                        .bind(rules_json)
-                        .fetch_optional(conn.conn())
-                        .await
-                        .map_err(storage)?;
+                        let (row, exists) = conn
+                            .identity()
+                            .update_policy(&policy, expected, &rules_json)
+                            .await?;
                         let authorization = if row.is_some() {
                             let authorization = receipt
                                 .authorize(generated_fact, POLICY_UPDATED_CONTRACT)
@@ -627,23 +505,9 @@ impl PolicyLifecycle for PgPolicyLifecycle {
                         } else {
                             None
                         };
-                        let exists = if row.is_none() {
-                            sqlx::query_scalar::<_, bool>(
-                                "SELECT EXISTS (SELECT 1 FROM abac_policies WHERE tenant_id = $1::uuid AND id = $2 AND deleted_at IS NULL)",
-                            )
-                            .bind(&tenant_uuid)
-                            .bind(policy.id().as_str())
-                            .fetch_one(conn.conn())
-                            .await
-                            .map_err(storage)?
-                        } else {
-                            false
-                        };
-                        let value = (row.map(row_to_raw).transpose().map_err(storage)?, exists);
+                        let value = (row, exists);
                         Ok(match authorization {
-                            Some(authorization) => {
-                                ProducerTxOutcome::Emitted(value, authorization)
-                            }
+                            Some(authorization) => ProducerTxOutcome::Emitted(value, authorization),
                             None => ProducerTxOutcome::NoMutation(value),
                         })
                     })
@@ -680,36 +544,16 @@ impl PolicyLifecycle for PgPolicyLifecycle {
         if env_tenant != tenant {
             return Err(IdentityError::InvalidPolicy);
         }
-        let tenant_uuid = tenant_param(tenant);
-        let id_str = id.as_str().to_string();
-        let expected_version = version_param(expected)?;
         let (deleted, exists) = self
             .pool
-            .producer_tx(
+            .identity_producer_tx(
                 tenant_scope,
                 &entry,
                 &env,
-                move |conn| {
+                move |mut conn| {
                     Box::pin(async move {
-                        let rows = sqlx::query(
-                            r#"
-                            UPDATE abac_policies
-                            SET version = version + 1,
-                                deleted_at = now(),
-                                updated_at = now()
-                            WHERE tenant_id = $1::uuid
-                              AND id = $2
-                              AND version = $3
-                              AND deleted_at IS NULL
-                            "#,
-                        )
-                        .bind(&tenant_uuid)
-                        .bind(&id_str)
-                        .bind(expected_version)
-                        .execute(conn.conn())
-                        .await
-                        .map_err(storage)
-                        .map(|r| r.rows_affected())?;
+                        let (rows, exists) =
+                            conn.identity().deactivate_policy(&id, expected).await?;
                         let authorization = if rows > 0 {
                             let authorization = receipt
                                 .authorize(generated_fact, POLICY_UPDATED_CONTRACT)
@@ -720,23 +564,9 @@ impl PolicyLifecycle for PgPolicyLifecycle {
                         } else {
                             None
                         };
-                        let exists = if rows == 0 {
-                            sqlx::query_scalar::<_, bool>(
-                                "SELECT EXISTS (SELECT 1 FROM abac_policies WHERE tenant_id = $1::uuid AND id = $2 AND deleted_at IS NULL)",
-                            )
-                            .bind(&tenant_uuid)
-                            .bind(&id_str)
-                            .fetch_one(conn.conn())
-                            .await
-                            .map_err(storage)?
-                        } else {
-                            false
-                        };
                         let value = (rows, exists);
                         Ok(match authorization {
-                            Some(authorization) => {
-                                ProducerTxOutcome::Emitted(value, authorization)
-                            }
+                            Some(authorization) => ProducerTxOutcome::Emitted(value, authorization),
                             None => ProducerTxOutcome::NoMutation(value),
                         })
                     })
@@ -756,7 +586,7 @@ impl PolicyLifecycle for PgPolicyLifecycle {
     }
 }
 
-fn row_to_raw(row: sqlx::postgres::PgRow) -> Result<RawPolicy, sqlx::Error> {
+pub(crate) fn row_to_raw(row: sqlx::postgres::PgRow) -> Result<RawPolicy, sqlx::Error> {
     Ok(RawPolicy {
         id: row.try_get("id")?,
         version: row.try_get("version")?,

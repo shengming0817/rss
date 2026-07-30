@@ -136,7 +136,7 @@ Option 2 不 foreclose Option 3（per-域 `{domain}-model` crate）。任一条�
 | 域 repo 签名实体 `pub` 但不可伪造 | **Hard（可见性 + 类型）** | 类型 `pub`、字段私有、构造器 `pub(crate)` funnel——外部无构造路径 |
 | dynosaur/trait-variant 收敛白名单（DIPORT-MACRO-CONFINE-01′） | **Medium（cargo-deny + xtask）** | `deny.toml` wrappers + `xtask EXTERNAL_CONFINEMENT_WRAPPERS`（白名单越层 + 正向覆盖 + 集合相等，红 case anti-vacuity） |
 | 域形 port dyn-compatible + 必填注入 | **Hard（编译器/类型）** | 非 dyn-safe → `Box<DynX>` 编不过；构造器必填位置参（继承 ADR-003 C1/C5，PORT-SHAPE smoke 机器锁） |
-| co-tx UoW：业务写 + outbox append 同一事务、不可拆解（OUTBOX-COTX-SESSION-01，§9 amendment #1192） | **Hard（类型层）+ Medium（adapter same-tx anti-vacuity）** | combined 方法 `persist_session_and_emit`——域无 tx 句柄、无半提交 API（Hard：split-tx 不可表达）；adapter 单事务接线（`run_global_transaction` + `append_outbox` `&mut PgConnection`-only）由集成测试 t11(commit 两行皆在)↔t12(rollback 两行皆无) anti-vacuity 守（Medium） |
+| co-tx UoW：业务写 + outbox append 同一事务、不可拆解（OUTBOX-COTX-SESSION-01，§9 amendment #1192） | **Hard（类型层）+ Medium（adapter same-tx anti-vacuity）** | combined 方法 `persist_session_and_emit`——域无 tx 句柄、无半提交 API（Hard：split-tx 不可表达）；adapter 单事务接线（closed exact-lane façade `TenantDb<ServingWriteLane>::producer_tx` 仅私有铸造 `TenantTx<ServingWriteLane>`，并在同一事务内执行业务写 + canonical append）由集成测试 t11(commit 两行皆在)↔t12(rollback 两行皆无) anti-vacuity 守（Medium） |
 
 无 Soft 新增 enforcement。
 
@@ -181,7 +181,7 @@ Option 2 不 foreclose Option 3（per-域 `{domain}-model` crate）。任一条�
 
 `SessionUnitOfWork` 与 `RoleRepo`（§3）同构：域形 port 定义于 `identity::ports`、`adapter→域` DIP 内向边、dynosaur Send 变体、`Box<DynX>` 必填注入。**唯一新增维度**是 port 形态——`RoleRepo` 是 `find/save` 普通仓储，`SessionUnitOfWork` 是 **combined-method Unit-of-Work**：单方法 `persist_session_and_emit(session, entry, envelope)` 把业务实体持久化 + outbox append 收进 adapter 独占的单事务。这是 §3 范式内的细化，不引入新归属轴。
 
-> 为何 combined 方法而非「`SessionRepo::save` + `OutboxEmitter::emit` 两调用」或 closure-UoW：拆两个 provider-agnostic 端口，域无法把二者绑同一事务（端口签名不容 `&mut PgConnection`，否则 `ports`→adapter 反向耦合）；closure-UoW 把事务句柄回传给域，重开 split-tx 洞且泄漏 provider 类型。combined 方法把事务边界完全收进 adapter。
+> 为何 combined 方法而非「`SessionRepo::save` + `OutboxEmitter::emit` 两调用」或 closure-UoW：拆两个 provider-agnostic 端口，域无法把二者绑同一事务（端口签名不容 `TenantTx<ServingWriteLane>` 这类 adapter-owned exact-lane capability，否则 `ports`→adapter 反向耦合）；closure-UoW 把事务句柄回传给域，重开 split-tx 洞且泄漏 provider 类型。combined 方法把事务边界完全收进 adapter。
 
 ### 9.2 §8.1 同步点清单的实际执行（identity 非「首次」）
 
@@ -191,7 +191,7 @@ identity 在 RoleRepo 落地时已完成 §8.1 步骤 2/4/5（dynosaur/trait-var
 
 | 新威胁 | 缓解 / 评级 | 安全模型是否退化 |
 |--------|------------|------------------|
-| UoW impl 把业务写与 outbox append 拆进**不同事务**（两次 `run_global_transaction` / 各自 `begin`），defeat co-tx 原子性 | **INVARIANT OUTBOX-COTX-SESSION-01**：①域侧 **Hard**——combined 方法是唯一 session-写 API（无 `persist`/`emit` 分调），返回 `Result<(),E>` 不漏 tx 句柄，域无半开事务可拆；②adapter 侧 **Medium**——单事务接线（`run_global_transaction` 独占 begin/commit/rollback、`append_outbox` `&mut PgConnection`-only 复用 OUTBOX-ATOMIC-IDEM-01）由集成测试 t11(commit 两行皆在)↔t12(rollback 两行皆无) anti-vacuity 守 | **否（不退化）**：§2.4 `adapter→域` 边 + §2.5 dynosaur 白名单对 `identity` 已覆盖；新增第二域形 port 不加新 crate-graph 风险，`memory`→`identity` 边经既有 LAYER-DEPS-06 反向②（真实 source edge）守。仅**扩展**威胁矩阵，不冲突既有结论 |
+| UoW impl 把业务写与 outbox append 拆进**不同事务**（两次 closed exact-lane transaction façade / 各自 `begin`），defeat co-tx 原子性 | **INVARIANT OUTBOX-COTX-SESSION-01**：①域侧 **Hard**——combined 方法是唯一 session-写 API（无 `persist`/`emit` 分调），返回 `Result<(),E>` 不漏 tx 句柄，域无半开事务可拆；②adapter 侧 **Medium**——`TenantDb<ServingWriteLane>::producer_tx` 独占 begin/tenant setup/commit/rollback，仅在 closed concern façade 内私有铸造 `TenantTx<ServingWriteLane>`，业务写与 canonical outbox append 共用该 exact-lane transaction（复用 OUTBOX-ATOMIC-IDEM-01），并由集成测试 t11(commit 两行皆在)↔t12(rollback 两行皆无) anti-vacuity 守 | **否（不退化）**：§2.4 `adapter→域` 边 + §2.5 dynosaur 白名单对 `identity` 已覆盖；新增第二域形 port 不加新 crate-graph 风险，`memory`→`identity` 边经既有 LAYER-DEPS-06 反向②（真实 source edge）守。仅**扩展**威胁矩阵，不冲突既有结论 |
 
 `OUTBOX-COTX-SESSION-01` 是 `OUTBOX-ATOMIC-IDEM-01`（守裸 `append_outbox` 在事务内）的 **sibling**（守 session 行 + outbox 行 both-or-neither），非其重载；emit-only `PgEmitter` 与 co-tx `PgSessionLifecycle` 复用同一 `append_outbox` 接缝，两路并存（前者用于无 co-located 业务写的 OutboxFact 事件）。
 

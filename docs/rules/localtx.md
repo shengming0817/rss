@@ -108,8 +108,13 @@ ref: sqlx sqlx-core/src/pool/connection.rs@bab1b022bd56a64f9a08b46b36b97c5cff19d
 
 - attempt 状态是 crate-private opaque 和式类型，非法的 result/status 组合在类型层不可表达（Hard）。
   生产 mint 构造器只对 settlement funnel 可见，兄弟模块只能消费。
-- write pool 是 tenant scope 与 write transaction capability 的唯一入口。每次 attempt 内先显式 acquire
-  连接并立即装入默认 armed 的 lease；调用方不能构造 wrapper、取得 pooled connection 或跨 attempt 复用授权。
+- sealed `TenantDb<ServingWriteLane>` 是 serving tenant scope 与 write transaction capability 的唯一入口；
+  maintenance 使用互不兼容的 `TenantDb<MaintenanceWriteLane>`。每次 attempt 内先显式 acquire 连接并立即
+  装入默认 armed 的 lease；完成 tenant GUC/timeout setup 后才私有铸造
+  `TenantTx<ServingWriteLane>` 或 `TenantTx<MaintenanceWriteLane>`，随后只向 closure 交付
+  `IdentityTx`、`SecretTx`、`EventingTx<Concern>`、`ReconcileTx` 等不可互换的 concern capability。
+  调用方不能取得通用 `TenantTx`，也不能构造 wrapper、取得 pooled connection / 通用 executor、
+  结算 transaction 或跨 attempt 复用授权。
 - 只有 commit/rollback 收到明确 ACK，消费式方法才可解除 lease；取消、timeout、未结算与结算失败一律保持
   armed，Drop 时物理关闭连接，不得依赖驱动的 queued rollback 恢复后复用。
 - 取消路径没有结算证据，**不得伪造 final status**。

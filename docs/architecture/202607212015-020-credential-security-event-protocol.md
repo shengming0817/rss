@@ -48,7 +48,8 @@ identity 的账户级和 grant 级命令分别封闭私有字段；生产入口�
 
 ### 唯一事务漏斗与锁序
 
-不新增 identity 专用事务入口。现有 PostgreSQL `producer_tx` 接受 crate-private sealed
+PostgreSQL 对 identity 暴露唯一的 concern-specific `identity_producer_tx`；它委托私有内核
+`producer_tx`，后者接受 crate-private sealed
 `ProducerFactAuthorization`；生产 credential-security authorization 只能来自对应 mounted route receipt，
 fact/entry 由 route-specific command 内部事件派生，不接受调用方独立替换。
 不存在零参数 mint、无 receipt 的事件生产入口或 sibling-module 固定 fact token。password-change、
@@ -107,7 +108,7 @@ sid/jti、token、password/credential material、email/username 或其他 PII。
 |---|---|---|
 | kind、closed target 与可执行 transition 不能分离或由调用方覆盖 | 封闭层级 enum + 私有派生 API | Hard |
 | 外部不能伪造 command、producer authorization 或成功 receipt | 私有字段 + move-only token + sealed trait/constructor | Hard |
-| 安全事件不能建立第二事务/append 漏斗 | 唯一 `producer_tx` + crate-private `TxCapability` | Hard |
+| 安全事件不能建立第二事务/append 漏斗 | 唯一 `identity_producer_tx` + private core `producer_tx` + 非互换 `IdentityTx` capability | Hard |
 | wire 只有四字段、十 kind、typed opaque target 且拒绝未知字段 | JSON Schema + codegen `deny_unknown_fields` | Hard |
 | opaque target 不可逆解析 | 无 resolver port、无 mapping relation、无 raw id wire 字段 | Hard + 数据库 Hard |
 | audit consumer 不能旁路 contract 还原 identity target 或替换 fact 字段 | audit-owned sealed command + runtime-baseline forbidden-side-channel gate | Hard + Medium |

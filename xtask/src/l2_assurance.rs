@@ -683,7 +683,7 @@ fn complete_producer_evidence(
                 )?,
                 capability: Carrier::new(
                     root,
-                    CarrierKind::RustSymbol,
+                    CarrierKind::RustType,
                     &terminal.capability.repo_path,
                     &terminal.capability.symbol,
                 )?,
@@ -1463,10 +1463,7 @@ fn reachable_calls_in_expr(expression: &syn::Expr) -> Vec<ReachableCall> {
     visitor.calls
 }
 
-fn visit_returned_sanctioned_closure(
-    expression: &syn::Expr,
-    visitor: &mut ReachableCallVisitor,
-) {
+fn visit_returned_sanctioned_closure(expression: &syn::Expr, visitor: &mut ReachableCallVisitor) {
     let syn::Expr::Call(call) = expression else {
         return;
     };
@@ -2033,8 +2030,10 @@ impl Carrier {
             "carrier symbol contains control character"
         );
         let path = RepoRelativePath::new(root, path)?;
-        if kind == CarrierKind::RustSymbol {
-            validate_rust_symbol(root, &path.0, symbol)?;
+        match kind {
+            CarrierKind::RustSymbol => validate_rust_symbol(root, &path.0, symbol)?,
+            CarrierKind::RustType => validate_rust_type(root, &path.0, symbol)?,
+            CarrierKind::Manifest | CarrierKind::FaultFixture => {}
         }
         Ok(Self {
             kind,
@@ -2046,6 +2045,76 @@ impl Carrier {
     fn sort_key(&self) -> (&str, &str, CarrierKind) {
         (&self.path.0, &self.symbol, self.kind)
     }
+}
+
+fn validate_rust_type(root: &Path, repo_path: &str, symbol: &str) -> Result<()> {
+    ensure!(
+        !repo_path.starts_with("generated/src/"),
+        "generated carriers must use fully-qualified Rust symbols rather than source-local types"
+    );
+    let ty = syn::parse_str::<syn::Type>(symbol)
+        .with_context(|| format!("Rust type carrier `{symbol}` is malformed"))?;
+    let names = rust_type_item_names(&ty)?;
+    ensure!(
+        !names.is_empty(),
+        "Rust type carrier `{symbol}` names no source item"
+    );
+    let source_path = root.join(repo_path);
+    let source = generated_file::read_stable_utf8_file(
+        &source_path,
+        MAX_RUST_CARRIER_BYTES,
+        "Rust type carrier",
+    )?;
+    let syntax = syn::parse_file(&source)
+        .with_context(|| format!("cannot parse Rust type carrier {}", source_path.display()))?;
+    for name in names {
+        validate_non_generated_rust_symbol(&syntax.items, &[name.as_str()]).with_context(|| {
+            format!(
+                "Rust type carrier `{symbol}` component `{name}` does not name one exact production item in {repo_path}"
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn rust_type_item_names(ty: &syn::Type) -> Result<BTreeSet<String>> {
+    fn collect(ty: &syn::Type, names: &mut BTreeSet<String>) -> Result<()> {
+        let syn::Type::Path(path) = ty else {
+            bail!("Rust type carrier permits only named path types")
+        };
+        ensure!(
+            path.qself.is_none(),
+            "Rust type carrier cannot use qualified self"
+        );
+        let segment = path
+            .path
+            .segments
+            .last()
+            .context("Rust type carrier path is empty")?;
+        names.insert(segment.ident.to_string());
+        match &segment.arguments {
+            syn::PathArguments::None => {}
+            syn::PathArguments::AngleBracketed(arguments) => {
+                for argument in &arguments.args {
+                    match argument {
+                        syn::GenericArgument::Lifetime(_) => {}
+                        syn::GenericArgument::Type(ty) => collect(ty, names)?,
+                        _ => bail!(
+                            "Rust type carrier generic arguments may contain only lifetimes and named types"
+                        ),
+                    }
+                }
+            }
+            syn::PathArguments::Parenthesized(_) => {
+                bail!("Rust type carrier cannot use function-trait syntax")
+            }
+        }
+        Ok(())
+    }
+
+    let mut names = BTreeSet::new();
+    collect(ty, &mut names)?;
+    Ok(names)
 }
 
 fn validate_rust_symbol(root: &Path, repo_path: &str, symbol: &str) -> Result<()> {
@@ -2246,6 +2315,7 @@ fn item_is_conditionally_compiled(item: &syn::Item) -> bool {
 enum CarrierKind {
     Manifest,
     RustSymbol,
+    RustType,
     FaultFixture,
 }
 

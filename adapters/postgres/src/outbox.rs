@@ -3,9 +3,9 @@
 //! [`PgOutbox`] impl [`consistency::OutboxRelay`] / [`consistency::RetentionSweeper`]——两个 native
 //! AFIT trait（泛型静态分发，非 dyn，不引 dynosaur）。
 //!
-//! **`append_outbox`**（`pub(crate)` free fn，收 `&mut TxCapability`）是 L1 原子性的编译期硬约束：
+//! **`append_outbox`**（`pub(crate)` free fn，收 `&mut TenantTx`）是 L1 原子性的编译期硬约束：
 //! 只能在已有事务内调用，不能脱离事务双写；tenant-scoped 业务写经
-//! `PgTenantWritePool::producer_tx` 注入租户事务后传入能力令牌，全局 outbox-only infra
+//! `TenantDb<ServingWriteLane>::producer_tx` 注入租户事务后传入能力令牌，全局 outbox-only infra
 //! 路径也必须先显式打开事务并由 postgres adapter 铸造令牌——类型系统天然阻止无事务直接调用。
 //!
 //! **CAS fencing**：`claim_batch` 在数据库内原子选择并铸造 token/deadline；settle 同时精确匹配二者且
@@ -41,21 +41,16 @@ use eventexec::{RelayBudget, TenantAuthority, TenantAuthorityBinding};
 use sqlx::Row;
 
 use crate::PgStore;
+use crate::cotx::eventing::{EventingTx, GeneratedOutboxConcern};
 use crate::cotx::{
-    PgTenantWritePool, TxCapability, deadline_global_transaction, infra_tenant_scope,
-    io_deadline_after,
+    ServingWriteLane, TenantDb, deadline_global_transaction, infra_tenant_scope, io_deadline_after,
 };
-use crate::dead_letter_payload::{
-    DLX_REPLAY_CAPSULE_ENCODING, DlxPayloadContext, DlxPayloadProtector, SensitiveJson,
-};
+use crate::dead_letter_payload::{DlxPayloadContext, DlxPayloadProtector};
 #[cfg(feature = "fault-matrix-test-support")]
 use crate::pool::PgRuntimeStores;
 #[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
 use crate::pool::VerifiedPgWriteStore;
-use crate::projection_events::{
-    ProjectionWriteRegistry, append_projection_event_if_bound,
-    append_replayed_projection_event_if_bound,
-};
+use crate::projection_events::{ProjectionWriteRegistry, append_projection_event_if_bound};
 
 mod settlement;
 
@@ -78,7 +73,6 @@ pub(crate) const STATUS_PUBLISHING: &str = "publishing";
 // reason(dead_code): see STATUS_PUBLISHING.
 #[allow(dead_code)]
 pub(crate) const STATUS_PUBLISHED: &str = "published";
-pub(crate) const STATUS_DLX: &str = "dlx";
 #[cfg(test)]
 pub(crate) const STATUS_ABANDONED: &str = "abandoned";
 const OUTBOX_RELAY_DLX_SUMMARY: &str = "outbox relay publish failed";
@@ -938,7 +932,7 @@ impl OutboxAppendError {
 ///
 /// replay 的原始 dead_letter 行只保存 wire 侧字符串字段，无法重建 generated `ContractBinding`；
 /// 但 #1622 已要求 replay fail-closed 解析 schema header 后写入物理列。该结构把 replay 专用写入仍收口到
-/// `outbox.rs` + [`TxCapability`]，避免在 operator 路径散落第二份 `INSERT INTO outbox`。
+/// `outbox.rs` + [`TenantTx`]，避免在 operator 路径散落第二份 `INSERT INTO outbox`。
 pub(crate) struct ReplayedOutboxAppend {
     pub(crate) event_id: String,
     pub(crate) tenant: vocab::TenantId,
@@ -954,7 +948,7 @@ pub(crate) struct ReplayedOutboxAppend {
 
 /// 在事务内向 outbox 双写一条 entry（L1 原子性硬约束）。
 ///
-/// **`pub(crate)`，收 `&mut TxCapability`**——类型系统保证只能经 postgres adapter 从 live
+/// **`pub(crate)`，收 `&mut TenantTx`**——类型系统保证只能经 postgres adapter 从 live
 /// `sqlx::Transaction` 铸造后调用；裸 `PgPool` / `PgConnection` 无法调用本入口。
 ///
 /// ON CONFLICT (event_id) DO NOTHING：同 idem_key 的 entry 已在表中时幂等跳过（不报错）。
@@ -962,10 +956,10 @@ pub(crate) struct ReplayedOutboxAppend {
 ///
 /// # INVARIANT: OUTBOX-ATOMIC-IDEM-01 { level = "Medium", exec = "manual/opt-in", source = "code" }
 ///
-/// outbox 双写必须在业务事务内原子执行——active producer 须经 `PgTenantWritePool::producer_tx`
-/// 或同等 postgres 事务 funnel 传入 `TxCapability`；裸 `PgPool::acquire()` / `PgConnection` 无法调用（Hard）。
+/// outbox 双写必须在业务事务内原子执行——active producer 须经 `TenantDb<ServingWriteLane>` 的
+/// concern-specific transaction funnel 传入 `EventingTx`；裸 `PgPool::acquire()` / `PgConnection` 无法调用（Hard）。
 // 生产 caller：`PgEmitter::write`（impl `eventexec::event::ReviewedEventWriter`）在事务内调用——域 crate 不直接 import 本
-// adapter（域→adapter 反向依赖被 deny.toml 禁），域侧只经 `OutboxEmitter` port 触发该 durable 写路径（T008/#1100）。
+// adapter（域→adapter 反向依赖被 deny.toml 禁），域侧只经 sealed reviewed-event writer 触发该 durable 写路径（T008/#1100）。
 pub(crate) trait OutboxWriteEntry {
     fn topic_str(&self) -> &str;
     fn event_id(&self) -> &str;
@@ -1006,8 +1000,8 @@ impl OutboxWriteEntry for StoredOutboxEntry {
 /// own adjacent construction because its payload and metadata remain zeroize-on-drop all the way
 /// to the SQL bind boundary rather than being copied into ordinary envelope buffers.
 pub(crate) struct CanonicalOutboxFact<'a> {
+    tenant: vocab::TenantId,
     event_id: &'a str,
-    tenant_id: String,
     domain: &'a str,
     topic: &'a str,
     contract_id: &'a str,
@@ -1042,8 +1036,8 @@ impl<'a> CanonicalOutboxFact<'a> {
         )
         .fingerprint();
         Self {
+            tenant: env.tenant(),
             event_id: entry.event_id(),
-            tenant_id,
             domain: env.domain(),
             topic: entry.topic_str(),
             contract_id: env.contract_id(),
@@ -1057,12 +1051,12 @@ impl<'a> CanonicalOutboxFact<'a> {
         }
     }
 
-    pub(crate) fn event_id(&self) -> &str {
-        self.event_id
+    pub(crate) fn tenant(&self) -> vocab::TenantId {
+        self.tenant
     }
 
-    pub(crate) fn tenant_id(&self) -> &str {
-        &self.tenant_id
+    pub(crate) fn event_id(&self) -> &str {
+        self.event_id
     }
 
     pub(crate) fn domain(&self) -> &str {
@@ -1106,42 +1100,19 @@ impl<'a> CanonicalOutboxFact<'a> {
     }
 }
 
-pub(crate) async fn append_outbox<E: OutboxWriteEntry>(
-    tx: &mut TxCapability<'_>,
+pub(crate) async fn append_outbox<E: OutboxWriteEntry, C: GeneratedOutboxConcern>(
+    tx: &mut EventingTx<'_, ServingWriteLane, C>,
     entry: &E,
     env: &OutboxEnvelope,
 ) -> Result<OutboxAppendOutcome, OutboxAppendError> {
     let fact = CanonicalOutboxFact::from_entry_env(entry, env);
-    let inserted = sqlx::query_scalar::<_, Vec<u8>>(
-        r#"
-        INSERT INTO outbox (
-            event_id, tenant_id, domain, topic, contract_id, contract_version, schema_hash,
-            payload, metadata, partition_key, causation_id
-        )
-        VALUES ($1, $2::uuid, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11)
-        ON CONFLICT (event_id) DO NOTHING
-        RETURNING fact_fingerprint
-        "#,
-    )
-    .bind(fact.event_id())
-    .bind(fact.tenant_id())
-    .bind(fact.domain())
-    .bind(fact.topic())
-    .bind(fact.contract_id())
-    .bind(fact.contract_version())
-    .bind(fact.schema_hash())
-    .bind(fact.payload())
-    .bind(fact.metadata_json())
-    .bind(fact.partition_key())
-    .bind(fact.causation_id())
-    .fetch_optional(tx.conn())
-    .await?;
+    let inserted = tx.outbox_insert_generated(&fact).await?;
     classify_append(tx, fact.event_id(), fact.fingerprint(), inserted).await
 }
 
 /// Append outbox and mirror to projection_events only for newly inserted generated-bound facts.
-pub(crate) async fn append_outbox_with_projection(
-    tx: &mut TxCapability<'_>,
+pub(crate) async fn append_outbox_with_projection<C: GeneratedOutboxConcern>(
+    tx: &mut EventingTx<'_, ServingWriteLane, C>,
     entry: &EventEntry,
     env: &OutboxEnvelope,
     projection_registry: &ProjectionWriteRegistry,
@@ -1156,81 +1127,8 @@ pub(crate) async fn append_outbox_with_projection(
     Ok(outcome)
 }
 
-/// 在事务内 replay 一条 dead-letter 消息为新的 outbox 行。
-///
-/// 与 [`append_outbox`] 共用 canonical fingerprint 语义；返回 `Inserted` / `SameFact`，
-/// 异事实的同 event id 以 typed conflict 失败。
-pub(crate) async fn append_replayed_outbox(
-    tx: &mut TxCapability<'_>,
-    replay: &ReplayedOutboxAppend,
-) -> Result<OutboxAppendOutcome, OutboxAppendError> {
-    let metadata = SensitiveJson::new(
-        serde_json::from_slice::<serde_json::Value>(replay.metadata_json.expose())
-            .map_err(|_| OutboxAppendError::InvalidIdentity)?,
-    );
-    if !metadata.expose().is_object() {
-        return Err(OutboxAppendError::InvalidIdentity);
-    }
-    let metadata_json = std::str::from_utf8(replay.metadata_json.expose())
-        .map_err(|_| OutboxAppendError::InvalidIdentity)?;
-    let tenant_id = replay.tenant.to_string();
-    let fingerprint = OutboxFactIdentity::new(
-        &replay.event_id,
-        &tenant_id,
-        &replay.domain,
-        &replay.topic,
-        &replay.contract_id,
-        &replay.contract_version,
-        &replay.schema_hash,
-        replay.payload.expose(),
-        None,
-        replay.causation_id.as_deref(),
-        metadata.expose(),
-    )
-    .fingerprint();
-    let inserted = sqlx::query_scalar::<_, Vec<u8>>(
-        r#"
-        INSERT INTO outbox (
-            event_id, tenant_id, domain, topic, contract_id, contract_version, schema_hash,
-            payload, metadata, partition_key, causation_id
-        )
-        VALUES ($1, $2::uuid, $3, $4, $5, $6, $7, $8, $9::jsonb, NULL, $10)
-        ON CONFLICT (event_id) DO NOTHING
-        RETURNING fact_fingerprint
-        "#,
-    )
-    .bind(&replay.event_id)
-    .bind(&tenant_id)
-    .bind(&replay.domain)
-    .bind(&replay.topic)
-    .bind(&replay.contract_id)
-    .bind(&replay.contract_version)
-    .bind(&replay.schema_hash)
-    .bind(replay.payload.expose())
-    .bind(metadata_json)
-    .bind(replay.causation_id.as_deref())
-    .fetch_optional(tx.conn())
-    .await?;
-    classify_append(tx, &replay.event_id, fingerprint, inserted).await
-}
-
-pub(crate) async fn append_replayed_outbox_with_projection(
-    tx: &mut TxCapability<'_>,
-    replay: ReplayedOutboxAppend,
-    projection_registry: &ProjectionWriteRegistry,
-) -> Result<OutboxAppendOutcome, OutboxAppendError> {
-    let outcome = append_replayed_outbox(tx, &replay).await?;
-    match outcome {
-        OutboxAppendOutcome::Inserted => {
-            append_replayed_projection_event_if_bound(tx, &replay, projection_registry).await?;
-        }
-        OutboxAppendOutcome::SameFact => {}
-    }
-    Ok(outcome)
-}
-
-async fn classify_append(
-    tx: &mut TxCapability<'_>,
+async fn classify_append<C: GeneratedOutboxConcern>(
+    tx: &mut EventingTx<'_, ServingWriteLane, C>,
     event_id: &str,
     expected: OutboxFactFingerprint,
     inserted: Option<Vec<u8>>,
@@ -1242,11 +1140,7 @@ async fn classify_append(
         );
     }
 
-    let stored =
-        sqlx::query_scalar::<_, Vec<u8>>("SELECT fact_fingerprint FROM outbox WHERE event_id = $1")
-            .bind(event_id)
-            .fetch_optional(tx.conn())
-            .await?;
+    let stored = tx.outbox_load_fingerprint(event_id).await?;
     classify_append_fingerprint(
         expected,
         AppendFingerprintObservation::Existing(stored.as_deref()),
@@ -1288,7 +1182,7 @@ pub(crate) fn classify_append_fingerprint(
 /// rust-standards `Clock` 构造器位置参规则的有意例外（clippy `disallowed_methods` 不覆盖 SQL `now()`）。
 pub struct PgOutbox {
     pool: sqlx::PgPool,
-    tenant_pool: PgTenantWritePool,
+    tenant_pool: TenantDb<ServingWriteLane>,
     provider: Arc<OutboxProviderIdentity>,
     publisher: Box<DynPublisher<'static>>,
     relay_budget: RelayBudget,
@@ -1308,7 +1202,7 @@ impl PgOutbox {
     ) -> Self {
         Self {
             pool: store.pool.clone(),
-            tenant_pool: PgTenantWritePool::from_unverified_for_test(store),
+            tenant_pool: TenantDb::<ServingWriteLane>::from_unverified_for_test(store),
             provider: Arc::new(OutboxProviderIdentity { domain }),
             publisher,
             relay_budget,
@@ -1334,7 +1228,7 @@ impl PgOutbox {
     ) -> Self {
         Self {
             pool: store.pool().clone(),
-            tenant_pool: PgTenantWritePool::new(store),
+            tenant_pool: TenantDb::<ServingWriteLane>::new(store),
             provider: Arc::new(OutboxProviderIdentity { domain }),
             publisher,
             relay_budget,
@@ -2519,9 +2413,9 @@ mod tests {
         AppendFingerprintObservation, CanonicalOutboxFact, ClaimHydrationError, ClaimedOutboxRow,
         MAX_PUBLISH_ATTEMPTS, OUTBOX_CLAIM_BATCH_MAX, OutboxAppendError, OutboxEnvelope,
         OutboxLease, OutboxLeaseError, OutboxMetadata, OutboxWriteEntry, PublishPreflight,
-        RelayEnvelopeValidationReason, RelayPublishFailure, STATUS_ABANDONED, STATUS_DLX,
-        STATUS_PENDING, STATUS_PUBLISHED, STATUS_PUBLISHING, apply_schema_headers_from_columns,
-        backoff_seconds, classify_append_fingerprint, dlx_decision, hydrate_claimed_outbox_row,
+        RelayEnvelopeValidationReason, RelayPublishFailure, STATUS_ABANDONED, STATUS_PENDING,
+        STATUS_PUBLISHED, STATUS_PUBLISHING, apply_schema_headers_from_columns, backoff_seconds,
+        classify_append_fingerprint, dlx_decision, hydrate_claimed_outbox_row,
         hydrate_envelope_metadata, metadata_with_ambient, publish_request,
         record_relay_envelope_validation_failure, unix_secs, validate_publish_request_envelope,
         with_publisher_watchdog,
@@ -3303,7 +3197,7 @@ mod tests {
             STATUS_PENDING,
             STATUS_PUBLISHING,
             STATUS_PUBLISHED,
-            STATUS_DLX,
+            "dlx",
             STATUS_ABANDONED,
         ];
         const_values.sort_unstable();
@@ -3328,12 +3222,7 @@ mod tests {
             3,
             "0031 definer SQL must use the Rust lease TTL constant everywhere"
         );
-        for status in [
-            STATUS_PENDING,
-            STATUS_PUBLISHING,
-            STATUS_PUBLISHED,
-            STATUS_DLX,
-        ] {
+        for status in [STATUS_PENDING, STATUS_PUBLISHING, STATUS_PUBLISHED, "dlx"] {
             assert!(
                 MIGRATION.contains(&format!("'{status}'")),
                 "0031 definer SQL must reference status literal {status}"

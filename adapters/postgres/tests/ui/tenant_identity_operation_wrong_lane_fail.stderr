@@ -1,0 +1,15 @@
+error[E0308]: mismatched types
+ --> tests/ui/tenant_identity_operation_wrong_lane_fail.rs:4:36
+  |
+4 |     let _ = serving_identity_write(&mut tx);
+  |             ---------------------- ^^^^^^^ expected `ServingWriteLane`, found `MaintenanceWriteLane`
+  |             |
+  |             arguments to this function are incorrect
+  |
+  = note: expected mutable reference `&mut postgres::tx_boundary_proof::IdentityTx<'_, '_, postgres::tx_boundary_proof::ServingWriteLane>`
+             found mutable reference `&mut postgres::tx_boundary_proof::IdentityTx<'_, '_, postgres::tx_boundary_proof::MaintenanceWriteLane>`
+note: function defined here
+ --> src/lib.rs
+  |
+  |     pub fn serving_identity_write<'borrow, 'cap, 'tx>(
+  |            ^^^^^^^^^^^^^^^^^^^^^^

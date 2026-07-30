@@ -50,7 +50,7 @@ settings = { path = "../../crates/settings", optional = true }
 httpserve = { path = "../../crates/httpserve", optional = true }
 # eventexec 持久化基座（#1116）：连接池 / 事务 / Migrator。features migrate+macros 在 workspace.dependencies 声明。
 sqlx = { workspace = true }
-# run_global_transaction 闭包返回 BoxFuture（HRTB 绕过异步闭包借用规则）。
+# closed exact-lane transaction façade 的 HRTB operation 闭包返回 BoxFuture。
 futures = { workspace = true }
 # 连接 / 迁移成功的结构化日志。
 tracing = { workspace = true }
@@ -129,5 +129,5 @@ audit = { path = "../../crates/audit", features = ["test-support"] }
 # 集成测试容器 fixture（#1137）：testcontainers self-provision postgres（经 testkit/containers，
 # 仅 integration feature 下激活；testkit 是 Service 层 test-support 库，只准 dev-dep 消费（LAYER-DEPS-08 check_test_support_confinement，dev-dep 边不入 shipped 分层图）。
 testkit = { path = "../../crates/testkit" }
-# TxCapability 的外部构造 / mint 旁路编译期负向证明（#1617）。
+# Exact-lane TenantTx 的构造、lifecycle、executor 与 lane-crossing 编译期负向证明。
 trybuild = { workspace = true }

@@ -11,28 +11,28 @@ use identity::ports::{
 };
 use sqlx::Row;
 
-use crate::cotx::{PgTenantReadPool, PgTenantWritePool};
+use crate::cotx::{ServingReadLane, ServingWriteLane, TenantDb};
 use crate::outbox::{epoch_secs_to_time, unix_secs};
 use crate::pool::{VerifiedPgReadStore, VerifiedPgWriteStore};
 
 pub struct PgResourceAttributeRepo {
-    read_pool: PgTenantReadPool,
-    write_pool: PgTenantWritePool,
+    read_pool: TenantDb<ServingReadLane>,
+    write_pool: TenantDb<ServingWriteLane>,
 }
 
 impl PgResourceAttributeRepo {
     pub(crate) fn new(reader: &VerifiedPgReadStore, writer: &VerifiedPgWriteStore) -> Self {
         Self {
-            read_pool: PgTenantReadPool::new(reader),
-            write_pool: PgTenantWritePool::new(writer),
+            read_pool: TenantDb::<ServingReadLane>::new(reader),
+            write_pool: TenantDb::<ServingWriteLane>::new(writer),
         }
     }
 
     #[cfg(all(test, feature = "integration"))]
     pub(crate) fn from_unverified_for_test(store: &crate::PgStore) -> Self {
         Self {
-            read_pool: PgTenantReadPool::from_unverified_for_test(store),
-            write_pool: PgTenantWritePool::from_unverified_for_test(store),
+            read_pool: TenantDb::<ServingReadLane>::from_unverified_for_test(store),
+            write_pool: TenantDb::<ServingWriteLane>::from_unverified_for_test(store),
         }
     }
 }
@@ -41,16 +41,8 @@ fn storage(e: sqlx::Error) -> IdentityError {
     IdentityError::Storage(Box::new(e))
 }
 
-fn tenant_param(tenant: TenantId) -> String {
-    tenant.as_uuid().to_string()
-}
-
-fn version_param(version: ResourceAttributeVersion) -> Result<i32, IdentityError> {
-    i32::try_from(version.get()).map_err(|_| IdentityError::InvalidPolicy)
-}
-
 #[derive(Debug)]
-struct RawResourceAttribute {
+pub(crate) struct RawResourceAttribute {
     key: String,
     value: String,
     version: i32,
@@ -59,7 +51,7 @@ struct RawResourceAttribute {
     deleted: bool,
 }
 
-fn row_to_raw(row: sqlx::postgres::PgRow) -> Result<RawResourceAttribute, sqlx::Error> {
+pub(crate) fn row_to_raw(row: sqlx::postgres::PgRow) -> Result<RawResourceAttribute, sqlx::Error> {
     Ok(RawResourceAttribute {
         key: row.try_get("attribute_key")?,
         value: row.try_get("attribute_value")?,
@@ -108,43 +100,16 @@ impl ResourceAttributeReadRepo for PgResourceAttributeRepo {
         if required_keys.is_empty() {
             return Ok(ResourceAttributeResolution::Known(Vec::new()));
         }
-        let tenant_uuid = tenant_param(tenant);
-        let contract_id = scope.contract_id().to_string();
-        let permission = scope.permission().as_str().to_string();
-        let resource_id_str = resource_id.as_str().to_string();
-        let key_params = required_keys
-            .iter()
-            .map(|key| key.as_str().to_string())
-            .collect::<Vec<_>>();
+        let query_scope = scope.clone();
+        let query_resource = resource_id.clone();
+        let query_keys = required_keys.clone();
         let rows: Vec<RawResourceAttribute> = self
             .read_pool
-            .read(tenant_scope, move |conn| {
+            .identity_read(tenant_scope, move |mut conn| {
                 Box::pin(async move {
-                    let rows = sqlx::query(
-                        r#"
-                        SELECT attribute_key, attribute_value, version,
-                               extract(epoch from effective_from)::bigint AS effective_from,
-                               extract(epoch from effective_until)::bigint AS effective_until,
-                               deleted_at IS NOT NULL AS deleted
-                        FROM resource_attributes
-                        WHERE tenant_id = $1::uuid
-                          AND contract_id = $2
-                          AND permission = $3
-                          AND resource_id = $4::uuid
-                          AND attribute_key = ANY($5::text[])
-                          AND deleted_at IS NULL
-                        "#,
-                    )
-                    .bind(tenant_uuid)
-                    .bind(contract_id)
-                    .bind(permission)
-                    .bind(resource_id_str)
-                    .bind(key_params)
-                    .fetch_all(&mut *conn)
-                    .await?;
-                    rows.into_iter()
-                        .map(row_to_raw)
-                        .collect::<Result<Vec<_>, sqlx::Error>>()
+                    conn.identity()
+                        .resource_attribute_rows(&query_scope, &query_resource, &query_keys)
+                        .await
                 })
             })
             .await
@@ -184,111 +149,21 @@ impl ResourceAttributeWriteRepo for PgResourceAttributeRepo {
         if attribute.tenant() != tenant {
             return Err(IdentityError::InvalidPolicy);
         }
-        let tenant_uuid = tenant_param(tenant);
-        let contract_id = attribute.route_scope().contract_id().to_string();
-        let permission = attribute.route_scope().permission().as_str().to_string();
-        let resource_id = attribute.resource_id().as_str().to_string();
-        let key = attribute.key().as_str().to_string();
-        let value = attribute.value().as_str().to_string();
-        let effective_from = unix_secs(attribute.effective_from());
-        let effective_until = attribute.effective_until().map(unix_secs);
-        let raw: Option<RawResourceAttribute> = match expected {
-            None => {
-                if attribute.version() != ResourceAttributeVersion::first() {
-                    return Err(IdentityError::InvalidPolicy);
-                }
-                let version = version_param(ResourceAttributeVersion::first())?;
-                self.write_pool
-                    .write(
-                        tenant_scope,
-                        move |conn| {
-                            Box::pin(async move {
-                                let row = sqlx::query(
-                                    r#"
-                                    INSERT INTO resource_attributes
-                                        (tenant_id, contract_id, permission, resource_id,
-                                         attribute_key, attribute_value, version,
-                                         effective_from, effective_until)
-                                    VALUES
-                                        ($1::uuid, $2, $3, $4::uuid,
-                                         $5, $6, $7,
-                                         to_timestamp($8), to_timestamp($9))
-                                    ON CONFLICT (tenant_id, contract_id, permission, resource_id, attribute_key)
-                                        DO NOTHING
-                                    RETURNING attribute_key, attribute_value, version,
-                                              extract(epoch from effective_from)::bigint AS effective_from,
-                                              extract(epoch from effective_until)::bigint AS effective_until,
-                                              deleted_at IS NOT NULL AS deleted
-                                    "#,
-                                )
-                                .bind(&tenant_uuid)
-                                .bind(&contract_id)
-                                .bind(&permission)
-                                .bind(&resource_id)
-                                .bind(&key)
-                                .bind(&value)
-                                .bind(version)
-                                .bind(effective_from)
-                                .bind(effective_until)
-                                .fetch_optional(conn.conn())
-                                .await
-                                .map_err(storage)?;
-                                row.map(row_to_raw).transpose().map_err(storage)
-                            })
-                        },
-                        storage,
-                    )
-                    .await?
-            }
-            Some(expected) => {
-                let expected_version = version_param(expected)?;
-                self.write_pool
-                    .write(
-                        tenant_scope,
-                        move |conn| {
-                            Box::pin(async move {
-                                let row = sqlx::query(
-                                    r#"
-                                    UPDATE resource_attributes
-                                    SET attribute_value = $6,
-                                        version = version + 1,
-                                        effective_from = to_timestamp($7),
-                                        effective_until = to_timestamp($8),
-                                        deleted_at = NULL,
-                                        updated_at = now()
-                                    WHERE tenant_id = $1::uuid
-                                      AND contract_id = $2
-                                      AND permission = $3
-                                      AND resource_id = $4::uuid
-                                      AND attribute_key = $5
-                                      AND version = $9
-                                      AND deleted_at IS NULL
-                                    RETURNING attribute_key, attribute_value, version,
-                                              extract(epoch from effective_from)::bigint AS effective_from,
-                                              extract(epoch from effective_until)::bigint AS effective_until,
-                                              deleted_at IS NOT NULL AS deleted
-                                    "#,
-                                )
-                                .bind(&tenant_uuid)
-                                .bind(&contract_id)
-                                .bind(&permission)
-                                .bind(&resource_id)
-                                .bind(&key)
-                                .bind(&value)
-                                .bind(effective_from)
-                                .bind(effective_until)
-                                .bind(expected_version)
-                                .fetch_optional(conn.conn())
-                                .await
-                                .map_err(storage)?;
-                                row.map(row_to_raw).transpose().map_err(storage)
-                            })
-                        },
-                        storage,
-                    )
-                    .await?
-            }
-        };
+        let persisted_attribute = attribute.clone();
+        let raw: Option<RawResourceAttribute> = self
+            .write_pool
+            .identity_write(
+                tenant_scope,
+                move |mut conn| {
+                    Box::pin(async move {
+                        conn.identity()
+                            .upsert_resource_attribute(&persisted_attribute, expected)
+                            .await
+                    })
+                },
+                storage,
+            )
+            .await?;
         let raw = raw.ok_or(IdentityError::VersionConflict)?;
         hydrate_attribute(
             tenant,
@@ -306,74 +181,23 @@ impl ResourceAttributeWriteRepo for PgResourceAttributeRepo {
         key: ResourceAttributeKey,
         expected: ResourceAttributeVersion,
     ) -> Result<bool, IdentityError> {
-        let tenant = tenant_scope.tenant();
-        let tenant_uuid = tenant_param(tenant);
-        let contract_id = scope.contract_id().to_string();
-        let permission = scope.permission().as_str().to_string();
-        let resource_id_str = resource_id.as_str().to_string();
-        let key_str = key.as_str().to_string();
-        let expected_version = version_param(expected)?;
+        let query_scope = scope.clone();
+        let query_resource = resource_id.clone();
+        let query_key = key.clone();
         let outcome = self
             .write_pool
-            .write(
+            .identity_write(
                 tenant_scope,
-                move |conn| {
+                move |mut conn| {
                     Box::pin(async move {
-                        let updated = sqlx::query(
-                            r#"
-                            UPDATE resource_attributes
-                            SET version = version + 1,
-                                deleted_at = now(),
-                                updated_at = now()
-                            WHERE tenant_id = $1::uuid
-                              AND contract_id = $2
-                              AND permission = $3
-                              AND resource_id = $4::uuid
-                              AND attribute_key = $5
-                              AND version = $6
-                              AND deleted_at IS NULL
-                            "#,
-                        )
-                        .bind(&tenant_uuid)
-                        .bind(&contract_id)
-                        .bind(&permission)
-                        .bind(&resource_id_str)
-                        .bind(&key_str)
-                        .bind(expected_version)
-                        .execute(conn.conn())
-                        .await
-                        .map_err(storage)?
-                        .rows_affected();
-                        if updated > 0 {
-                            return Ok(ExpireOutcome::Expired);
-                        }
-                        let active_exists: bool = sqlx::query_scalar(
-                            r#"
-                            SELECT EXISTS(
-                                SELECT 1
-                                FROM resource_attributes
-                                WHERE tenant_id = $1::uuid
-                                  AND contract_id = $2
-                                  AND permission = $3
-                                  AND resource_id = $4::uuid
-                                  AND attribute_key = $5
-                                  AND deleted_at IS NULL
+                        conn.identity()
+                            .expire_resource_attribute(
+                                &query_scope,
+                                &query_resource,
+                                &query_key,
+                                expected,
                             )
-                            "#,
-                        )
-                        .bind(&tenant_uuid)
-                        .bind(&contract_id)
-                        .bind(&permission)
-                        .bind(&resource_id_str)
-                        .bind(&key_str)
-                        .fetch_one(conn.conn())
-                        .await
-                        .map_err(storage)?;
-                        if active_exists {
-                            Ok(ExpireOutcome::VersionConflict)
-                        } else {
-                            Ok(ExpireOutcome::Missing)
-                        }
+                            .await
                     })
                 },
                 storage,
@@ -387,7 +211,7 @@ impl ResourceAttributeWriteRepo for PgResourceAttributeRepo {
     }
 }
 
-enum ExpireOutcome {
+pub(crate) enum ExpireOutcome {
     Expired,
     Missing,
     VersionConflict,

@@ -286,5 +286,6 @@ pub(crate) struct EvidenceCarrier {
 pub(crate) enum CarrierKind {
     Manifest,
     RustSymbol,
+    RustType,
     FaultFixture,
 }

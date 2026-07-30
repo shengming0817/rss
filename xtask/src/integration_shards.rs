@@ -276,7 +276,7 @@ integration_shard_catalog! {
             PostgresMigrationLib => ("postgres-migration", "postgres_migration", Lib, Serial),
             PostgresFeatureManifest => ("postgres", "feature_manifest", Test, Parallel),
             PostgresMigrationOpsContract => ("postgres", "migration_ops_contract", Test, Parallel),
-            PostgresTxCapabilityTrybuild => ("postgres", "tx_capability_trybuild", Test, Parallel),
+            PostgresTenantTransactionTrybuild => ("postgres", "tenant_transaction_trybuild", Test, Parallel),
             AuditListTenantEntriesLocalTxJourney => ("journeys", "audit_list_tenant_entries_localtx_journey", Test, Serial),
             IdentityLogoutGrantJourney => ("journeys", "identity_logout_grant_journey", Test, Parallel),
             IdentityPasswordSecurityEventJourney => ("journeys", "identity_password_security_event_journey", Test, Serial),

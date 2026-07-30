@@ -229,15 +229,6 @@ const INFRA_TENANT_SCOPE_ALLOWED_CALLS: &[(&str, &str)] = &[
     ("adapters/postgres/src/inbox.rs", "release"),
     ("adapters/postgres/src/inbox.rs", "sample_inbox_backlog"),
     ("adapters/postgres/src/inbox.rs", "try_claim"),
-    // Direct infrastructure-lane probes; exact test names prevent a file-wide bypass.
-    (
-        "adapters/postgres/src/integration_tests.rs",
-        "tenant_reader_role_is_exact_and_forced_read_write_is_denied",
-    ),
-    (
-        "adapters/postgres/src/integration_tests.rs",
-        "tenant_scoped_read_enforces_read_only",
-    ),
     (
         "adapters/postgres/src/outbox/settlement.rs",
         "execute_published",
@@ -252,21 +243,6 @@ const INFRA_TENANT_SCOPE_ALLOWED_CALLS: &[(&str, &str)] = &[
         "adapters/postgres/src/revocation.rs",
         "verify_revocation_capability",
     ),
-    ("adapters/postgres/src/reconcile.rs", "acquire_lease"),
-    ("adapters/postgres/src/reconcile.rs", "append_attempt"),
-    (
-        "adapters/postgres/src/reconcile.rs",
-        "append_attempt_result",
-    ),
-    ("adapters/postgres/src/reconcile.rs", "cas_lease"),
-    ("adapters/postgres/src/reconcile.rs", "claim_due_targets"),
-    ("adapters/postgres/src/reconcile.rs", "inspect_target"),
-    (
-        "adapters/postgres/src/reconcile.rs",
-        "record_action_and_enqueue_command",
-    ),
-    ("adapters/postgres/src/reconcile.rs", "update_target_status"),
-    ("adapters/postgres/src/reconcile.rs", "upsert_target"),
     ("adapters/postgres/src/saga.rs", "acquire_lease"),
     ("adapters/postgres/src/saga.rs", "append"),
     ("adapters/postgres/src/saga.rs", "cas_lease"),
@@ -754,34 +730,11 @@ mod tests {
                 "async fn list_runnable() { infra_tenant_scope(tenant); }".to_string(),
             ),
             (
-                "adapters/postgres/src/reconcile.rs".to_string(),
-                "async fn inspect_target() { infra_tenant_scope(tenant); }".to_string(),
-            ),
-            (
-                "adapters/postgres/src/dlq.rs".to_string(),
-                "async fn resolve_expired_outbox() { infra_tenant_scope(tenant); }".to_string(),
-            ),
-            (
                 "adapters/postgres/src/revocation.rs".to_string(),
                 "async fn verify_revocation_capability() { infra_tenant_scope(tenant); }"
                     .to_string(),
             ),
         ];
-        let (_, findings) = scan_infra_tenant_scope(&files);
-        assert!(findings.is_empty(), "{findings:?}");
-    }
-
-    #[test]
-    fn green_infra_tenant_scope_allowed_for_reader_boundary_tests() {
-        let files = vec![(
-            "adapters/postgres/src/integration_tests.rs".to_string(),
-            "async fn tenant_scoped_read_enforces_read_only() { infra_tenant_scope(tenant); }\n\
-             async fn tenant_reader_role_is_exact_and_forced_read_write_is_denied() {\n\
-                 infra_tenant_scope(tenant);\n\
-                 infra_tenant_scope(other_tenant);\n\
-             }"
-            .to_string(),
-        )];
         let (_, findings) = scan_infra_tenant_scope(&files);
         assert!(findings.is_empty(), "{findings:?}");
     }
@@ -797,6 +750,29 @@ mod tests {
             findings
                 .iter()
                 .any(|finding| finding.rule == Rule::InfraTenantScopeCallsiteNotAllowed),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn red_infra_tenant_scope_rejected_in_concern_owned_funnels() {
+        let files = vec![
+            (
+                "adapters/postgres/src/reconcile.rs".to_string(),
+                "async fn inspect_target() { infra_tenant_scope(tenant); }".to_string(),
+            ),
+            (
+                "adapters/postgres/src/dlq.rs".to_string(),
+                "async fn resolve_expired_outbox() { infra_tenant_scope(tenant); }".to_string(),
+            ),
+        ];
+        let (_, findings) = scan_infra_tenant_scope(&files);
+        assert_eq!(
+            findings
+                .iter()
+                .filter(|finding| finding.rule == Rule::InfraTenantScopeCallsiteNotAllowed)
+                .count(),
+            2,
             "{findings:?}"
         );
     }

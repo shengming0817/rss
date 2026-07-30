@@ -21,7 +21,8 @@ use diport::{
 
 #[cfg(all(test, feature = "integration"))]
 use crate::PgStore;
-use crate::cotx::{PgTenantReadPool, PgTenantWritePool, infra_tenant_scope};
+use crate::cotx::eventing::{SagaLeaseMutation, SagaRunnableRow};
+use crate::cotx::{ServingReadLane, ServingWriteLane, TenantDb, infra_tenant_scope};
 use crate::pool::{VerifiedPgReadStore, VerifiedPgWriteStore};
 use crate::saga_candidates::PgSagaCandidateSource;
 
@@ -29,15 +30,15 @@ const HOLDER_ID_MAX_BYTES: usize = 256;
 
 /// PostgreSQL saga instance store.
 pub struct PgSagaInstanceStore {
-    read_pool: PgTenantReadPool,
-    write_pool: PgTenantWritePool,
+    read_pool: TenantDb<ServingReadLane>,
+    write_pool: TenantDb<ServingWriteLane>,
     candidate_source: PgSagaCandidateSource,
 }
 
 /// PostgreSQL saga journal adapter.
 pub struct PgSagaJournal {
-    read_pool: PgTenantReadPool,
-    write_pool: PgTenantWritePool,
+    read_pool: TenantDb<ServingReadLane>,
+    write_pool: TenantDb<ServingWriteLane>,
 }
 
 #[cfg(all(test, feature = "integration"))]
@@ -45,8 +46,8 @@ impl PgStore {
     /// Construct the tenant-scoped saga instance store.
     pub(crate) fn saga_instance_store(&self) -> PgSagaInstanceStore {
         PgSagaInstanceStore {
-            read_pool: PgTenantReadPool::from_unverified_for_test(self),
-            write_pool: PgTenantWritePool::from_unverified_for_test(self),
+            read_pool: TenantDb::<ServingReadLane>::from_unverified_for_test(self),
+            write_pool: TenantDb::<ServingWriteLane>::from_unverified_for_test(self),
             candidate_source: PgSagaCandidateSource::from_unverified_for_test(self),
         }
     }
@@ -54,8 +55,8 @@ impl PgStore {
     /// Construct the tenant-scoped saga journal.
     pub(crate) fn saga_journal(&self) -> PgSagaJournal {
         PgSagaJournal {
-            read_pool: PgTenantReadPool::from_unverified_for_test(self),
-            write_pool: PgTenantWritePool::from_unverified_for_test(self),
+            read_pool: TenantDb::<ServingReadLane>::from_unverified_for_test(self),
+            write_pool: TenantDb::<ServingWriteLane>::from_unverified_for_test(self),
         }
     }
 }
@@ -63,8 +64,8 @@ impl PgStore {
 impl PgSagaInstanceStore {
     pub(crate) fn new(reader: &VerifiedPgReadStore, writer: &VerifiedPgWriteStore) -> Self {
         Self {
-            read_pool: PgTenantReadPool::new(reader),
-            write_pool: PgTenantWritePool::new(writer),
+            read_pool: TenantDb::<ServingReadLane>::new(reader),
+            write_pool: TenantDb::<ServingWriteLane>::new(writer),
             candidate_source: PgSagaCandidateSource::new(writer),
         }
     }
@@ -73,8 +74,8 @@ impl PgSagaInstanceStore {
 impl PgSagaJournal {
     pub(crate) fn new(reader: &VerifiedPgReadStore, writer: &VerifiedPgWriteStore) -> Self {
         Self {
-            read_pool: PgTenantReadPool::new(reader),
-            write_pool: PgTenantWritePool::new(writer),
+            read_pool: TenantDb::<ServingReadLane>::new(reader),
+            write_pool: TenantDb::<ServingWriteLane>::new(writer),
         }
     }
 }
@@ -86,59 +87,30 @@ impl SagaInstanceStore for PgSagaInstanceStore {
     ) -> Result<SagaInstanceRecord, SagaInstanceStoreError> {
         let fields = RegistrationFields::from(registration);
         self.write_pool
-            .write(
+            .saga_write(
                 infra_tenant_scope(fields.instance.tenant()),
-                move |tx| {
+                move |mut tx| {
                     Box::pin(async move {
-                        sqlx::query(
-                            r#"
-                            INSERT INTO saga_instances
-                                (tenant_id, saga_id, owner, contract_id, definition_version,
-                                 definition_schema_digest, action_registry_generation)
-                            VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7)
-                            ON CONFLICT (tenant_id, saga_id) DO NOTHING
-                            "#,
-                        )
-                        .bind(&fields.tenant_id)
-                        .bind(&fields.saga_id)
-                        .bind(&fields.owner)
-                        .bind(&fields.contract_id)
-                        .bind(&fields.definition_version)
-                        .bind(&fields.definition_schema_digest)
-                        .bind(&fields.action_registry_generation)
-                        .execute(tx.conn())
-                        .await
-                        .map_err(SagaInstanceStoreError::new)?;
-
-                        let row: (String, String, String, String, String, String) = sqlx::query_as(
-                            r#"
-                            SELECT owner, contract_id, definition_version,
-                                   definition_schema_digest, action_registry_generation, status
-                            FROM saga_instances
-                            WHERE tenant_id = $1::uuid
-                              AND saga_id = $2::uuid
-                            "#,
-                        )
-                        .bind(&fields.tenant_id)
-                        .bind(&fields.saga_id)
-                        .fetch_one(tx.conn())
-                        .await
-                        .map_err(SagaInstanceStoreError::new)?;
-
-                        let (owner, contract_id, version, schema_digest, action_generation, status) = row;
-                        let identity = parse_worker_identity(&owner, &contract_id)?;
+                        tx.saga_register_instance(&fields)
+                            .await
+                            .map_err(SagaInstanceStoreError::new)?;
+                        let row = tx
+                            .saga_load_instance(&InstanceFields::from(fields.instance))
+                            .await
+                            .map_err(SagaInstanceStoreError::new)?;
+                        let identity = parse_worker_identity(&row.owner, &row.contract_id)?;
                         let definition = parse_definition_identity(
-                            &contract_id,
-                            &version,
-                            &schema_digest,
-                            &action_generation,
+                            &row.contract_id,
+                            &row.definition_version,
+                            &row.definition_schema_digest,
+                            &row.action_registry_generation,
                         )?;
                         if identity != fields.identity || definition != fields.definition {
                             return Err(SagaInstanceStoreError::identity_conflict(InvariantError(
                                 "saga instance definition identity conflict",
                             )));
                         }
-                        let status = parse_instance_status(&status)?;
+                        let status = parse_instance_status(&row.status)?;
                         SagaInstanceRecord::new(fields.instance, status, identity, definition)
                             .map_err(SagaInstanceStoreError::new)
                     })
@@ -154,51 +126,26 @@ impl SagaInstanceStore for PgSagaInstanceStore {
     ) -> Result<Option<SagaInstanceRecord>, SagaInstanceStoreError> {
         let fields = InstanceFields::from(*instance);
         self.read_pool
-            .read_map(
+            .saga_read_map(
                 infra_tenant_scope(fields.instance.tenant()),
-                move |conn| {
+                move |mut conn| {
                     Box::pin(async move {
-                        let row: Option<(String, String, String, String, String, String)> =
-                            sqlx::query_as(
-                                r#"
-                            SELECT owner, contract_id, definition_version,
-                                   definition_schema_digest, action_registry_generation, status
-                            FROM saga_instances
-                            WHERE tenant_id = $1::uuid
-                              AND saga_id = $2::uuid
-                            "#,
-                            )
-                            .bind(&fields.tenant_id)
-                            .bind(&fields.saga_id)
-                            .fetch_optional(conn)
+                        let row = conn
+                            .saga_get_instance(&fields)
                             .await
                             .map_err(SagaInstanceStoreError::new)?;
-                        row.map(
-                            |(
-                                owner,
-                                contract_id,
-                                version,
-                                schema_digest,
-                                action_generation,
-                                status,
-                            )| {
-                                let identity = parse_worker_identity(&owner, &contract_id)?;
-                                let definition = parse_definition_identity(
-                                    &contract_id,
-                                    &version,
-                                    &schema_digest,
-                                    &action_generation,
-                                )?;
-                                let status = parse_instance_status(&status)?;
-                                SagaInstanceRecord::new(
-                                    fields.instance,
-                                    status,
-                                    identity,
-                                    definition,
-                                )
+                        row.map(|row| {
+                            let identity = parse_worker_identity(&row.owner, &row.contract_id)?;
+                            let definition = parse_definition_identity(
+                                &row.contract_id,
+                                &row.definition_version,
+                                &row.definition_schema_digest,
+                                &row.action_registry_generation,
+                            )?;
+                            let status = parse_instance_status(&row.status)?;
+                            SagaInstanceRecord::new(fields.instance, status, identity, definition)
                                 .map_err(SagaInstanceStoreError::new)
-                            },
-                        )
+                        })
                         .transpose()
                     })
                 },
@@ -218,39 +165,16 @@ impl SagaInstanceStore for PgSagaInstanceStore {
         let holder_id = holder_id.to_string();
         let ttl_secs = duration_secs(ttl).map_err(SagaInstanceStoreError::new)?;
         self.write_pool
-            .write(
+            .saga_write(
                 infra_tenant_scope(fields.instance.tenant()),
-                move |tx| {
+                move |mut tx| {
                     Box::pin(async move {
-                        let row: Option<(String, i64)> = sqlx::query_as(
-                            r#"
-                            UPDATE saga_instances
-                            SET status = 'running',
-                                lease_token = gen_random_uuid(),
-                                holder_id = $3,
-                                epoch = epoch + 1,
-                                acquired_at = now(),
-                                expires_at = now() + make_interval(secs => $4),
-                                heartbeat_at = now(),
-                                updated_at = now()
-                            WHERE tenant_id = $1::uuid
-                              AND saga_id = $2::uuid
-                              AND (
-                                    lease_token IS NULL
-                                 OR expires_at <= now()
-                              )
-                            RETURNING lease_token::text, epoch
-                            "#,
-                        )
-                        .bind(&fields.tenant_id)
-                        .bind(&fields.saga_id)
-                        .bind(&holder_id)
-                        .bind(ttl_secs)
-                        .fetch_optional(tx.conn())
-                        .await
-                        .map_err(SagaInstanceStoreError::new)?;
-                        row.map(|(token, epoch)| {
-                            lease_from_row(fields.instance, holder_id, token, epoch)
+                        let row = tx
+                            .saga_acquire_lease(&fields, &holder_id, ttl_secs)
+                            .await
+                            .map_err(SagaInstanceStoreError::new)?;
+                        row.map(|row| {
+                            lease_from_row(fields.instance, holder_id, row.lease_token, row.epoch)
                                 .map_err(SagaInstanceStoreError::new)
                         })
                         .transpose()
@@ -291,63 +215,20 @@ impl SagaInstanceStore for PgSagaInstanceStore {
         tenant: vocab::TenantId,
         limit: NonZeroUsize,
     ) -> Result<Vec<SagaRunnableInstance>, SagaInstanceStoreError> {
-        let tenant_id = tenant.to_string();
         let owner = identity.owner().to_string();
         let contract_id = identity.contract_id().as_str().to_string();
         let limit = i64::try_from(limit.get()).map_err(SagaInstanceStoreError::new)?;
         self.read_pool
-            .read_map(
+            .saga_read_map(
                 infra_tenant_scope(tenant),
-                move |conn| {
+                move |mut conn| {
                     Box::pin(async move {
-                        let rows: Vec<(String, String, String, String, String, String, String)> =
-                            sqlx::query_as(
-                                r#"
-                            SELECT saga_id::text, status, owner, contract_id, definition_version,
-                                   definition_schema_digest, action_registry_generation
-                            FROM saga_instances
-                            WHERE tenant_id = $1::uuid
-                              AND owner = $2
-                              AND contract_id = $3
-                              AND status IN ('ready', 'running', 'compensating')
-                              AND (
-                                    lease_token IS NULL
-                                 OR expires_at <= now()
-                              )
-                            ORDER BY updated_at, saga_id
-                            LIMIT $4
-                            "#,
-                            )
-                            .bind(&tenant_id)
-                            .bind(&owner)
-                            .bind(&contract_id)
-                            .bind(limit)
-                            .fetch_all(conn)
+                        let rows = conn
+                            .saga_list_runnable(&owner, &contract_id, limit)
                             .await
                             .map_err(SagaInstanceStoreError::new)?;
                         rows.into_iter()
-                            .map(
-                                |(
-                                    saga_id,
-                                    status,
-                                    owner,
-                                    contract_id,
-                                    version,
-                                    schema_digest,
-                                    action_generation,
-                                )| {
-                                    runnable_from_row(
-                                        tenant,
-                                        &saga_id,
-                                        &status,
-                                        &owner,
-                                        &contract_id,
-                                        &version,
-                                        &schema_digest,
-                                        &action_generation,
-                                    )
-                                },
-                            )
+                            .map(|row| runnable_from_row(tenant, row))
                             .collect()
                     })
                 },
@@ -380,77 +261,22 @@ impl PgSagaInstanceStore {
     ) -> Result<SagaLeaseOutcome, SagaInstanceStoreError> {
         let fields = LeaseFields::from(lease).map_err(SagaInstanceStoreError::new)?;
         self.write_pool
-            .write(
+            .saga_write(
                 infra_tenant_scope(fields.instance.tenant()),
-                move |tx| {
+                move |mut tx| {
                     Box::pin(async move {
-                        let result = if let Some(ttl_secs) = extend_ttl_secs {
-                            sqlx::query(
-                                r#"
-                                UPDATE saga_instances
-                                SET expires_at = now() + make_interval(secs => $5),
-                                    heartbeat_at = now(),
-                                    updated_at = now()
-                                WHERE tenant_id = $1::uuid
-                                  AND saga_id = $2::uuid
-                                  AND lease_token = $3::uuid
-                                  AND epoch = $4
-                                  AND expires_at > now()
-                                "#,
-                            )
-                            .bind(&fields.tenant_id)
-                            .bind(&fields.saga_id)
-                            .bind(&fields.lease_token)
-                            .bind(fields.epoch)
-                            .bind(ttl_secs)
-                            .execute(tx.conn())
-                            .await
+                        let mutation = if let Some(ttl_secs) = extend_ttl_secs {
+                            SagaLeaseMutation::Extend { ttl_secs }
                         } else if mark_status == Some("release") {
-                            sqlx::query(
-                                r#"
-                                UPDATE saga_instances
-                                SET lease_token = NULL,
-                                    holder_id = NULL,
-                                    acquired_at = NULL,
-                                    expires_at = NULL,
-                                    heartbeat_at = NULL,
-                                    updated_at = now()
-                                WHERE tenant_id = $1::uuid
-                                  AND saga_id = $2::uuid
-                                  AND lease_token = $3::uuid
-                                  AND epoch = $4
-                                  AND expires_at > now()
-                                "#,
-                            )
-                            .bind(&fields.tenant_id)
-                            .bind(&fields.saga_id)
-                            .bind(&fields.lease_token)
-                            .bind(fields.epoch)
-                            .execute(tx.conn())
-                            .await
+                            SagaLeaseMutation::Release
                         } else {
-                            sqlx::query(
-                                r#"
-                                UPDATE saga_instances
-                                SET status = $5,
-                                    updated_at = now()
-                                WHERE tenant_id = $1::uuid
-                                  AND saga_id = $2::uuid
-                                  AND lease_token = $3::uuid
-                                  AND epoch = $4
-                                  AND expires_at > now()
-                                "#,
-                            )
-                            .bind(&fields.tenant_id)
-                            .bind(&fields.saga_id)
-                            .bind(&fields.lease_token)
-                            .bind(fields.epoch)
-                            .bind(mark_status.unwrap_or("running"))
-                            .execute(tx.conn())
+                            SagaLeaseMutation::MarkStatus(mark_status.unwrap_or("running"))
+                        };
+                        let held = tx
+                            .saga_cas_lease(&fields, mutation)
                             .await
-                        }
-                        .map_err(SagaInstanceStoreError::new)?;
-                        Ok(if result.rows_affected() == 1 {
+                            .map_err(SagaInstanceStoreError::new)?;
+                        Ok(if held {
                             SagaLeaseOutcome::Held
                         } else {
                             SagaLeaseOutcome::Lost
@@ -472,86 +298,41 @@ impl SagaJournal for PgSagaJournal {
         let fields = LeaseFields::from(lease).map_err(SagaJournalError::new)?;
         let entry_fields = JournalEntryFields::from(entry)?;
         self.write_pool
-            .write(
+            .saga_write(
                 infra_tenant_scope(fields.instance.tenant()),
-                move |tx| {
+                move |mut tx| {
                     Box::pin(async move {
-                        let inserted: Option<(i32,)> = sqlx::query_as(
-                            r#"
-                            INSERT INTO saga_journal
-                                (tenant_id, saga_id, seq, step_name, status, error_summary)
-                            SELECT $1::uuid, $2::uuid, $5, $6, $7, $8
-                            FROM saga_instances
-                            WHERE tenant_id = $1::uuid
-                              AND saga_id = $2::uuid
-                              AND lease_token = $3::uuid
-                              AND epoch = $4
-                              AND expires_at > clock_timestamp()
-                            FOR UPDATE
-                            ON CONFLICT (tenant_id, saga_id, seq) DO NOTHING
-                            RETURNING 1
-                            "#,
-                        )
-                        .bind(&fields.tenant_id)
-                        .bind(&fields.saga_id)
-                        .bind(&fields.lease_token)
-                        .bind(fields.epoch)
-                        .bind(entry_fields.seq)
-                        .bind(&entry_fields.step_name)
-                        .bind(&entry_fields.status)
-                        .bind(entry_fields.error_summary.as_deref())
-                        .fetch_optional(tx.conn())
-                        .await
-                        .map_err(SagaJournalError::new)?;
-                        if inserted.is_some() {
+                        if tx
+                            .saga_insert_journal(&fields, &entry_fields)
+                            .await
+                            .map_err(SagaJournalError::new)?
+                        {
                             return Ok(SagaJournalAppendOutcome::Appended);
                         }
 
-                        let lease_held: Option<(i32,)> = sqlx::query_as(
-                            r#"
-                            SELECT 1
-                            FROM saga_instances
-                            WHERE tenant_id = $1::uuid
-                              AND saga_id = $2::uuid
-                              AND lease_token = $3::uuid
-                              AND epoch = $4
-                              AND expires_at > clock_timestamp()
-                            FOR UPDATE
-                            "#,
-                        )
-                        .bind(&fields.tenant_id)
-                        .bind(&fields.saga_id)
-                        .bind(&fields.lease_token)
-                        .bind(fields.epoch)
-                        .fetch_optional(tx.conn())
-                        .await
-                        .map_err(SagaJournalError::new)?;
-                        if lease_held.is_none() {
+                        if !tx
+                            .saga_lease_is_held(&fields)
+                            .await
+                            .map_err(SagaJournalError::new)?
+                        {
                             return Ok(SagaJournalAppendOutcome::LeaseLost);
                         }
 
-                        let existing: Option<(String, String, Option<String>)> = sqlx::query_as(
-                            r#"
-                            SELECT step_name, status, error_summary
-                            FROM saga_journal
-                            WHERE tenant_id = $1::uuid
-                              AND saga_id = $2::uuid
-                              AND seq = $3
-                            "#,
-                        )
-                        .bind(&fields.tenant_id)
-                        .bind(&fields.saga_id)
-                        .bind(entry_fields.seq)
-                        .fetch_optional(tx.conn())
-                        .await
-                        .map_err(SagaJournalError::new)?;
+                        let existing = tx
+                            .saga_load_journal_entry(
+                                &InstanceFields::from(fields.instance),
+                                entry_fields.seq,
+                            )
+                            .await
+                            .map_err(SagaJournalError::new)?;
 
-                        let Some((step_name, status, error_summary)) = existing else {
+                        let Some(existing) = existing else {
                             return Ok(SagaJournalAppendOutcome::AppendConflict);
                         };
-                        if step_name == entry_fields.step_name
-                            && status == entry_fields.status
-                            && error_summary.as_deref() == entry_fields.error_summary.as_deref()
+                        if existing.step_name == entry_fields.step_name
+                            && existing.status == entry_fields.status
+                            && existing.error_summary.as_deref()
+                                == entry_fields.error_summary.as_deref()
                         {
                             Ok(SagaJournalAppendOutcome::IdempotentDuplicate)
                         } else {
@@ -570,34 +351,24 @@ impl SagaJournal for PgSagaJournal {
     ) -> Result<Vec<SagaJournalRecord>, SagaJournalError> {
         let fields = InstanceFields::from(*instance);
         self.read_pool
-            .read_map(
+            .saga_read_map(
                 infra_tenant_scope(fields.instance.tenant()),
-                move |conn| {
+                move |mut conn| {
                     Box::pin(async move {
-                        let rows: Vec<(i64, String, String)> = sqlx::query_as(
-                            r#"
-                            SELECT seq, step_name, status
-                            FROM saga_journal
-                            WHERE tenant_id = $1::uuid
-                              AND saga_id = $2::uuid
-                            ORDER BY seq ASC
-                            "#,
-                        )
-                        .bind(&fields.tenant_id)
-                        .bind(&fields.saga_id)
-                        .fetch_all(conn)
-                        .await
-                        .map_err(SagaJournalError::new)?;
+                        let rows = conn
+                            .saga_read_journal(&fields)
+                            .await
+                            .map_err(SagaJournalError::new)?;
                         rows.into_iter()
-                            .map(|(seq_i64, step_str, status_str)| {
-                                let seq = u64::try_from(seq_i64).map_err(SagaJournalError::new)?;
-                                let step_name = StepName::parse(&step_str).map_err(|_| {
+                            .map(|row| {
+                                let seq = u64::try_from(row.seq).map_err(SagaJournalError::new)?;
+                                let step_name = StepName::parse(&row.step_name).map_err(|_| {
                                     SagaJournalError::new(InvariantError(
                                         "invalid step_name in saga_journal",
                                     ))
                                 })?;
                                 let status =
-                                    SagaJournalStatus::parse(&status_str).ok_or_else(|| {
+                                    SagaJournalStatus::parse(&row.status).ok_or_else(|| {
                                         SagaJournalError::new(InvariantError(
                                             "invalid status in saga_journal",
                                         ))
@@ -617,17 +388,16 @@ impl SagaJournal for PgSagaJournal {
     }
 }
 
-struct RegistrationFields {
-    instance: SagaInstanceRef,
-    tenant_id: String,
-    saga_id: String,
-    owner: String,
-    contract_id: String,
-    identity: SagaWorkerIdentity,
-    definition: SagaDefinitionIdentity,
-    definition_version: String,
-    definition_schema_digest: String,
-    action_registry_generation: String,
+pub(crate) struct RegistrationFields {
+    pub(crate) instance: SagaInstanceRef,
+    pub(crate) saga_id: String,
+    pub(crate) owner: String,
+    pub(crate) contract_id: String,
+    pub(crate) identity: SagaWorkerIdentity,
+    pub(crate) definition: SagaDefinitionIdentity,
+    pub(crate) definition_version: String,
+    pub(crate) definition_schema_digest: String,
+    pub(crate) action_registry_generation: String,
 }
 
 impl From<SagaInstanceRegistration> for RegistrationFields {
@@ -637,7 +407,6 @@ impl From<SagaInstanceRegistration> for RegistrationFields {
         let identity = registration.identity().clone();
         Self {
             instance,
-            tenant_id: instance.tenant().to_string(),
             saga_id: instance.saga_id().as_uuid().to_string(),
             owner: identity.owner().to_string(),
             contract_id: identity.contract_id().as_str().to_string(),
@@ -651,35 +420,31 @@ impl From<SagaInstanceRegistration> for RegistrationFields {
 }
 
 #[derive(Clone)]
-struct InstanceFields {
-    instance: SagaInstanceRef,
-    tenant_id: String,
-    saga_id: String,
+pub(crate) struct InstanceFields {
+    pub(crate) instance: SagaInstanceRef,
+    pub(crate) saga_id: String,
 }
 
 impl From<SagaInstanceRef> for InstanceFields {
     fn from(instance: SagaInstanceRef) -> Self {
         Self {
             instance,
-            tenant_id: instance.tenant().to_string(),
             saga_id: instance.saga_id().as_uuid().to_string(),
         }
     }
 }
 
-struct LeaseFields {
-    instance: SagaInstanceRef,
-    tenant_id: String,
-    saga_id: String,
-    lease_token: String,
-    epoch: i64,
+pub(crate) struct LeaseFields {
+    pub(crate) instance: SagaInstanceRef,
+    pub(crate) saga_id: String,
+    pub(crate) lease_token: String,
+    pub(crate) epoch: i64,
 }
 
 impl LeaseFields {
     fn from(lease: &SagaLease) -> Result<Self, InvariantError> {
         Ok(Self {
             instance: lease.instance(),
-            tenant_id: lease.instance().tenant().to_string(),
             saga_id: lease.instance().saga_id().as_uuid().to_string(),
             lease_token: lease.lease_token().to_string(),
             epoch: i64::try_from(lease.epoch())
@@ -688,11 +453,11 @@ impl LeaseFields {
     }
 }
 
-struct JournalEntryFields {
-    seq: i64,
-    step_name: String,
-    status: String,
-    error_summary: Option<String>,
+pub(crate) struct JournalEntryFields {
+    pub(crate) seq: i64,
+    pub(crate) step_name: String,
+    pub(crate) status: String,
+    pub(crate) error_summary: Option<String>,
 }
 
 impl JournalEntryFields {
@@ -729,22 +494,20 @@ fn parse_instance_status(raw: &str) -> Result<SagaInstanceStatus, SagaInstanceSt
 
 fn runnable_from_row(
     tenant: vocab::TenantId,
-    saga_id: &str,
-    status: &str,
-    owner: &str,
-    contract_id: &str,
-    version: &str,
-    schema_digest: &str,
-    action_generation: &str,
+    row: SagaRunnableRow,
 ) -> Result<SagaRunnableInstance, SagaInstanceStoreError> {
-    let saga_id = uuid::Uuid::parse_str(saga_id)
+    let saga_id = uuid::Uuid::parse_str(&row.saga_id)
         .map(SagaId::new)
         .map_err(SagaInstanceStoreError::new)?;
     let instance = SagaInstanceRef::new(tenant, saga_id).map_err(SagaInstanceStoreError::new)?;
-    let status = parse_instance_status(status)?;
-    let identity = parse_worker_identity(owner, contract_id)?;
-    let definition =
-        parse_definition_identity(contract_id, version, schema_digest, action_generation)?;
+    let status = parse_instance_status(&row.status)?;
+    let identity = parse_worker_identity(&row.owner, &row.contract_id)?;
+    let definition = parse_definition_identity(
+        &row.contract_id,
+        &row.definition_version,
+        &row.definition_schema_digest,
+        &row.action_registry_generation,
+    )?;
     SagaRunnableInstance::new(instance, status, identity, definition)
         .map_err(SagaInstanceStoreError::new)
 }

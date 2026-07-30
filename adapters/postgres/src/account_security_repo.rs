@@ -1,6 +1,6 @@
 //! PostgreSQL account-security state adapter.
 
-use crate::cotx::PgTenantReadPool;
+use crate::cotx::{ServingReadLane, TenantDb};
 use crate::pool::VerifiedPgReadStore;
 use identity::ports::{
     AccountSecurityReadRepo, AccountSecuritySnapshot, AccountSecurityState, AccountStatus,
@@ -9,7 +9,7 @@ use identity::ports::{
 
 /// PostgreSQL read model for authentication gates.
 pub struct PgAccountSecurityRepo {
-    read_pool: PgTenantReadPool,
+    read_pool: TenantDb<ServingReadLane>,
 }
 
 impl Clone for PgAccountSecurityRepo {
@@ -23,24 +23,20 @@ impl Clone for PgAccountSecurityRepo {
 impl PgAccountSecurityRepo {
     pub(crate) fn new(reader: &VerifiedPgReadStore) -> Self {
         Self {
-            read_pool: PgTenantReadPool::new(reader),
+            read_pool: TenantDb::<ServingReadLane>::new(reader),
         }
     }
 
     #[cfg(all(test, feature = "integration"))]
     pub(crate) fn from_unverified_for_test(store: &crate::PgStore) -> Self {
         Self {
-            read_pool: PgTenantReadPool::from_unverified_for_test(store),
+            read_pool: TenantDb::<ServingReadLane>::from_unverified_for_test(store),
         }
     }
 }
 
 fn storage(error: impl std::error::Error + Send + Sync + 'static) -> IdentityError {
     crate::tx_retry::identity_storage_error(error)
-}
-
-fn tenant_param(tenant: TenantId) -> String {
-    tenant.as_uuid().to_string()
 }
 
 pub(crate) fn status_from_db(raw: &str) -> Result<AccountStatus, IdentityError> {
@@ -108,29 +104,6 @@ pub(crate) fn hydrate_security(
     .map_err(storage)
 }
 
-async fn fetch_row(
-    conn: &mut sqlx::PgConnection,
-    tenant: &str,
-    user: &str,
-) -> Result<Option<SecurityRow>, sqlx::Error> {
-    sqlx::query_as::<_, SecurityRow>(
-        r#"
-        SELECT status,
-               authn_epoch,
-               version,
-               (extract(epoch from status_changed_at) * 1000000)::bigint
-                   AS status_changed_at_micros,
-               (extract(epoch from updated_at) * 1000000)::bigint AS updated_at_micros
-        FROM account_security_states
-        WHERE tenant_id = $1::uuid AND user_id = $2::uuid
-        "#,
-    )
-    .bind(tenant)
-    .bind(user)
-    .fetch_optional(conn)
-    .await
-}
-
 impl AccountSecurityReadRepo for PgAccountSecurityRepo {
     async fn find(
         &self,
@@ -138,12 +111,11 @@ impl AccountSecurityReadRepo for PgAccountSecurityRepo {
         user_id: ids::UserId,
     ) -> Result<Option<AccountSecurityState>, IdentityError> {
         let tenant = scope.tenant();
-        let tenant_sql = tenant_param(tenant);
-        let user_sql = user_id.as_uuid().to_string();
+        let query_user = user_id;
         let raw = self
             .read_pool
-            .read(scope, move |conn| {
-                Box::pin(async move { fetch_row(conn, &tenant_sql, &user_sql).await })
+            .identity_read(scope, move |mut conn| {
+                Box::pin(async move { conn.identity().account_security_row(&query_user).await })
             })
             .await
             .map_err(storage)?;

@@ -12,14 +12,14 @@ use identity::ports::{
 
 #[cfg(all(test, feature = "integration"))]
 use crate::PgStore;
-use crate::cotx::{PgTenantWritePool, ProducerTxOutcome};
+use crate::cotx::{ProducerTxOutcome, ServingWriteLane, TenantDb};
 use crate::outbox::{OutboxEnvelope, metadata_with_ambient, unix_secs};
 use crate::pool::VerifiedPgWriteStore;
 use crate::projection_events::ProjectionWriteRegistry;
 
 /// PostgreSQL 角色绑定生命周期 adapter。
 pub struct PgRoleBindingLifecycle {
-    pool: PgTenantWritePool,
+    pool: TenantDb<ServingWriteLane>,
     clock: Box<dyn Clock>,
 }
 
@@ -28,7 +28,7 @@ impl PgRoleBindingLifecycle {
     #[cfg(all(test, feature = "integration"))]
     pub(crate) fn new(store: &PgStore, clock: Box<dyn Clock>) -> Self {
         Self {
-            pool: PgTenantWritePool::from_unverified_for_test(store),
+            pool: TenantDb::<ServingWriteLane>::from_unverified_for_test(store),
             clock,
         }
     }
@@ -39,7 +39,10 @@ impl PgRoleBindingLifecycle {
         projection_registry: ProjectionWriteRegistry,
     ) -> Self {
         Self {
-            pool: PgTenantWritePool::with_projection_registry(writer, projection_registry),
+            pool: TenantDb::<ServingWriteLane>::with_projection_registry(
+                writer,
+                projection_registry,
+            ),
             clock,
         }
     }
@@ -83,27 +86,17 @@ impl RoleBindingLifecycle for PgRoleBindingLifecycle {
             )));
         }
         self.pool
-            .producer_tx(
+            .identity_producer_tx(
                 scope,
                 &entry,
                 &env,
-                move |conn| {
+                move |mut conn| {
                     Box::pin(async move {
-                        sqlx::query(
-                            r#"
-                            INSERT INTO role_bindings (tenant_id, role_id, subject)
-                            VALUES ($1::uuid, $2, $3)
-                            ON CONFLICT (tenant_id, role_id, subject) DO UPDATE
-                            SET assigned_at = now()
-                            "#,
-                        )
-                        .bind(binding.tenant().as_uuid().to_string())
-                        .bind(binding.role_id().as_str())
-                        .bind(binding.subject())
-                        .execute(conn.conn())
-                        .await
-                        .map_err(OutboxEmitError::new)
-                        .map(|_| ())?;
+                        conn.identity()
+                            .upsert_role_binding(&binding)
+                            .await
+                            .map_err(OutboxEmitError::new)
+                            ?;
                         let authorization = receipt
                             .authorize(generated_fact, ROLE_ASSIGNED_CONTRACT)
                             .ok_or_else(|| {
@@ -137,28 +130,19 @@ impl RoleBindingLifecycle for PgRoleBindingLifecycle {
                 "role binding revoke co-tx: envelope tenant does not match requested tenant",
             )));
         }
-        let tenant_uuid = tenant.as_uuid().to_string();
         self.pool
-            .producer_tx(
+            .identity_producer_tx(
                 scope,
                 &entry,
                 &env,
-                move |conn| {
+                move |mut conn| {
                     Box::pin(async move {
-                        let deleted = sqlx::query(
-                            r#"
-                            DELETE FROM role_bindings
-                            WHERE tenant_id = $1::uuid AND role_id = $2 AND subject = $3
-                            "#,
-                        )
-                        .bind(&tenant_uuid)
-                        .bind(role_id.as_str())
-                        .bind(&subject)
-                        .execute(conn.conn())
-                        .await
-                        .map_err(OutboxEmitError::new)?
-                        .rows_affected();
-                        if deleted == 0 {
+                        let deleted = conn
+                            .identity()
+                            .delete_role_binding(&role_id, &subject)
+                            .await
+                            .map_err(OutboxEmitError::new)?;
+                        if !deleted {
                             return Ok(ProducerTxOutcome::NoMutation(false));
                         }
                         let authorization = receipt

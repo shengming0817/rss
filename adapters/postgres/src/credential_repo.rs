@@ -36,13 +36,13 @@ use std::time::SystemTime;
 
 use identity::ports::{
     AccountLockout, AccountStatus, AuthOutcome, BruteForceDecision, Credential, CredentialRepo,
-    IdentityError, LoginIdentifier, TenantId, TenantRepoScope,
+    IdentityError, LoginIdentifier, TenantRepoScope,
 };
-use sqlx::{PgConnection, Row};
 
 use crate::account_security_repo::SecurityRow;
-use crate::cotx::{PgTenantReadPool, PgTenantWritePool};
-use crate::outbox::{epoch_secs_to_time, unix_secs};
+use crate::cotx::identity::IdentityTx;
+use crate::cotx::{ServingReadLane, ServingWriteLane, TenantDb};
+use crate::outbox::epoch_secs_to_time;
 use crate::pool::{VerifiedPgReadStore, VerifiedPgWriteStore};
 
 /// identity 凭据仓储的 PostgreSQL adapter。
@@ -51,8 +51,8 @@ use crate::pool::{VerifiedPgReadStore, VerifiedPgWriteStore};
 /// 不持 `Clock`：authenticate 的 `now` 由调用方（`LoginService`，经注入 `Clock`）传入
 /// （域类型不持 clock，rust-standards §工程护栏；时间判定全经入参 `now`）。
 pub struct PgCredentialRepo {
-    read_pool: PgTenantReadPool,
-    write_pool: PgTenantWritePool,
+    read_pool: TenantDb<ServingReadLane>,
+    write_pool: TenantDb<ServingWriteLane>,
     #[cfg(all(test, feature = "integration"))]
     authenticate_post_write_faults: Arc<Mutex<HashSet<String>>>,
 }
@@ -63,8 +63,8 @@ impl PgCredentialRepo {
     /// `pub(crate)`（#1423，PG-BUNDLE-FUNNEL-01）：经 [`crate::PgDomainDeps`]`<caps::Identity>::credential_repo` 收口。
     pub(crate) fn new(reader: &VerifiedPgReadStore, writer: &VerifiedPgWriteStore) -> Self {
         Self {
-            read_pool: PgTenantReadPool::new(reader),
-            write_pool: PgTenantWritePool::new(writer),
+            read_pool: TenantDb::<ServingReadLane>::new(reader),
+            write_pool: TenantDb::<ServingWriteLane>::new(writer),
             #[cfg(all(test, feature = "integration"))]
             authenticate_post_write_faults: Arc::new(Mutex::new(HashSet::new())),
         }
@@ -73,8 +73,8 @@ impl PgCredentialRepo {
     #[cfg(all(test, feature = "integration"))]
     pub(crate) fn from_unverified_for_test(store: &crate::PgStore) -> Self {
         Self {
-            read_pool: PgTenantReadPool::from_unverified_for_test(store),
-            write_pool: PgTenantWritePool::from_unverified_for_test(store),
+            read_pool: TenantDb::<ServingReadLane>::from_unverified_for_test(store),
+            write_pool: TenantDb::<ServingWriteLane>::from_unverified_for_test(store),
             authenticate_post_write_faults: Arc::new(Mutex::new(HashSet::new())),
         }
     }
@@ -104,11 +104,6 @@ fn take_authenticate_post_write_fault(state: &Mutex<HashSet<String>>, login: &st
         .remove(login)
 }
 
-/// `TenantId` → SQL bind 参数（stringify UUID 绑 `$N::uuid` server-side cast；不给 sqlx 加 uuid feature）。
-fn tenant_param(tenant: TenantId) -> String {
-    tenant.as_uuid().to_string()
-}
-
 /// 由持久化三列重建 [`AccountLockout`]：窗口列 NULL（从未失败）→ `new(now)`，否则 `from_parts`（策略阈值留域）。
 fn rebuild_lockout(
     failure_count: i64,
@@ -129,43 +124,25 @@ fn rebuild_lockout(
 
 /// 清除锁定态（成功登录原子清零失败计数 + 解锁；同 in-mem `lockouts.remove`）。
 async fn clear_lockout(
-    tx: &mut PgConnection,
-    tenant_uuid: &str,
+    tx: &mut IdentityTx<'_, '_, ServingWriteLane>,
     login: &str,
 ) -> Result<(), IdentityError> {
-    sqlx::query(
-        "UPDATE credentials SET failure_count = 0, lockout_window_start = NULL, locked_until = NULL \
-         WHERE tenant_id = $1::uuid AND login = $2",
-    )
-    .bind(tenant_uuid)
-    .bind(login)
-    .execute(&mut *tx)
-    .await
-    .map_err(storage)?;
-    Ok(())
+    tx.identity()
+        .clear_credential_lockout(login)
+        .await
+        .map_err(storage)
 }
 
 /// 回写锁定态三列（`to_timestamp($n)`；`locked_until` None → NULL bind → to_timestamp(NULL)=NULL）。
 async fn write_lockout(
-    tx: &mut PgConnection,
-    tenant_uuid: &str,
+    tx: &mut IdentityTx<'_, '_, ServingWriteLane>,
     login: &str,
     lockout: &AccountLockout,
 ) -> Result<(), IdentityError> {
-    sqlx::query(
-        "UPDATE credentials \
-         SET failure_count = $3, lockout_window_start = to_timestamp($4), locked_until = to_timestamp($5) \
-         WHERE tenant_id = $1::uuid AND login = $2",
-    )
-    .bind(tenant_uuid)
-    .bind(login)
-    .bind(i64::from(lockout.failure_count()))
-    .bind(unix_secs(lockout.window_start()))
-    .bind(lockout.locked_until().map(unix_secs))
-    .execute(&mut *tx)
-    .await
-    .map_err(storage)?;
-    Ok(())
+    tx.identity()
+        .write_credential_lockout(login, lockout)
+        .await
+        .map_err(storage)
 }
 
 impl CredentialRepo for PgCredentialRepo {
@@ -175,38 +152,14 @@ impl CredentialRepo for PgCredentialRepo {
         user_id: ids::UserId,
     ) -> Result<Option<Credential>, IdentityError> {
         let tenant = scope.tenant();
-        let tenant_uuid = tenant_param(tenant);
-        let user_uuid = user_id.as_uuid().to_string();
-        let tenant_uuid_q = tenant_uuid.clone();
-        let user_uuid_q = user_uuid.clone();
+        let query_user = user_id;
 
         // 经 tenant_scoped_read 注入 SET LOCAL（与 0009 RLS policy current_setting 锚点对齐）；读闭包仅 fetch +
         // try_get 返回 owned 原始值，hydrate（PHC 复核 / Credential 重建）在 tx 外（域错误不依赖 sqlx）。
         let raw = self
             .read_pool
-            .read(scope, move |conn| {
-                Box::pin(async move {
-                    let row = sqlx::query(
-                        r#"
-                    SELECT login, password_hash, version
-                    FROM credentials
-                    WHERE tenant_id = $1::uuid AND user_id = $2::uuid
-                    "#,
-                    )
-                    .bind(tenant_uuid_q)
-                    .bind(user_uuid_q)
-                    .fetch_optional(&mut *conn)
-                    .await?;
-                    match row {
-                        None => Ok(None),
-                        Some(r) => {
-                            let login: String = r.try_get("login")?;
-                            let password_hash: String = r.try_get("password_hash")?;
-                            let version: i64 = r.try_get("version")?;
-                            Ok(Some((login, password_hash, version)))
-                        }
-                    }
-                })
+            .identity_read(scope, move |mut conn| {
+                Box::pin(async move { conn.identity().credential_by_user(&query_user).await })
             })
             .await
             .map_err(storage)?;
@@ -237,24 +190,16 @@ impl CredentialRepo for PgCredentialRepo {
         candidate: secure::RawPassword,
         now: SystemTime,
     ) -> Result<AuthOutcome, IdentityError> {
-        let tenant = scope.tenant();
-        let tenant_uuid = tenant_param(tenant);
         let login_str = login.as_str().to_owned();
         #[cfg(all(test, feature = "integration"))]
         let authenticate_post_write_faults = Arc::clone(&self.authenticate_post_write_faults);
         self.write_pool
-            .write(
+            .identity_write(
                 scope,
-                move |conn| {
+                move |mut conn| {
                     Box::pin(async move {
-                        let outcome = authenticate_in_tx(
-                            conn.conn(),
-                            &tenant_uuid,
-                            &login_str,
-                            candidate,
-                            now,
-                        )
-                        .await?;
+                        let outcome =
+                            authenticate_in_tx(&mut conn, &login_str, candidate, now).await?;
                         #[cfg(all(test, feature = "integration"))]
                         if take_authenticate_post_write_fault(
                             &authenticate_post_write_faults,
@@ -283,15 +228,10 @@ impl CredentialRepo for PgCredentialRepo {
                 "credential insert tenant scope mismatch",
             ))));
         }
-        let tenant_uuid = tenant_param(tenant);
         self.write_pool
-            .write(
+            .identity_write(
                 scope,
-                move |conn| {
-                    Box::pin(
-                        async move { insert_in_tx(conn.conn(), &tenant_uuid, &credential).await },
-                    )
-                },
+                move |mut conn| Box::pin(async move { insert_in_tx(&mut conn, &credential).await }),
                 storage,
             )
             .await
@@ -299,19 +239,18 @@ impl CredentialRepo for PgCredentialRepo {
 }
 
 /// 行类型：已知主体 SELECT FOR UPDATE 读出（user_id PHC + 锁定三列）；未知主体 → None。
-type AuthRow = (String, String, i64, Option<i64>, Option<i64>);
+pub(crate) type AuthRow = (String, String, i64, Option<i64>, Option<i64>);
 
 /// authenticate 事务体（SET LOCAL → 单行 FOR UPDATE → 有界 KDF 验签 → 原子分流；#1277 F1+F2+F3）。
 pub(crate) async fn authenticate_in_tx(
-    tx: &mut PgConnection,
-    tenant_uuid: &str,
+    tx: &mut IdentityTx<'_, '_, ServingWriteLane>,
     login: &str,
     candidate: secure::RawPassword,
     now: SystemTime,
 ) -> Result<AuthOutcome, IdentityError> {
-    let found = auth_row(tx, tenant_uuid, login).await?;
+    let found = auth_row(tx, login).await?;
     let security = match &found {
-        Some((user_id, ..)) => security_row_for_update(tx, tenant_uuid, user_id).await?,
+        Some((user_id, ..)) => security_row_for_update(tx, user_id).await?,
         None => None,
     };
     // PHC parse（已知主体）。损坏 PHC = 存储完整性问题 → fail-closed `Storage`，但**先跑当前档 KDF 再早退**：
@@ -334,8 +273,7 @@ pub(crate) async fn authenticate_in_tx(
         (Some((user_id, ..)), Some(row)) => {
             let user_id = ids::UserId::parse(user_id)
                 .map_err(|error| IdentityError::Storage(Box::new(error)))?;
-            let tenant = TenantId::parse(tenant_uuid)
-                .map_err(|error| IdentityError::Storage(Box::new(error)))?;
+            let tenant = tx.tenant();
             Some(crate::account_security_repo::hydrate_security(
                 tenant, user_id, row,
             )?)
@@ -362,7 +300,7 @@ pub(crate) async fn authenticate_in_tx(
             })?;
             let mut lockout = rebuild_lockout(failure_count, window, until, now);
             if lockout.try_lazy_unlock(now) {
-                write_lockout(tx, tenant_uuid, login, &lockout).await?;
+                write_lockout(tx, login, &lockout).await?;
             }
             if state.status() != AccountStatus::Active || lockout.is_locked(now) {
                 return Ok(AuthOutcome::RejectedKnown);
@@ -370,14 +308,14 @@ pub(crate) async fn authenticate_in_tx(
             match verification {
                 secure::PasswordVerification::Verified(receipt) => {
                     if let Some(replacement) = receipt.upgraded_hash() {
-                        replace_password_hash(tx, tenant_uuid, login, &replacement).await?;
+                        replace_password_hash(tx, login, &replacement).await?;
                     }
-                    clear_lockout(tx, tenant_uuid, login).await?;
+                    clear_lockout(tx, login).await?;
                     Ok(AuthOutcome::Authenticated(state))
                 }
                 secure::PasswordVerification::Invalid => {
                     let _decision: BruteForceDecision = lockout.record_failure(now);
-                    write_lockout(tx, tenant_uuid, login, &lockout).await?;
+                    write_lockout(tx, login, &lockout).await?;
                     Ok(AuthOutcome::RejectedKnown)
                 }
             }
@@ -393,120 +331,46 @@ pub(crate) async fn authenticate_in_tx(
 /// Replace only the PHC maintenance field while preserving the business credential version.
 /// The caller holds the credential row lock and the enclosing transaction also clears lockout.
 async fn replace_password_hash(
-    tx: &mut PgConnection,
-    tenant_uuid: &str,
+    tx: &mut IdentityTx<'_, '_, ServingWriteLane>,
     login: &str,
     replacement: &secure::PasswordHash,
 ) -> Result<(), IdentityError> {
-    sqlx::query(
-        "UPDATE credentials SET password_hash = $3 \
-         WHERE tenant_id = $1::uuid AND login = $2",
-    )
-    .bind(tenant_uuid)
-    .bind(login)
-    .bind(replacement.as_str())
-    .execute(&mut *tx)
-    .await
-    .map_err(storage)?;
-    Ok(())
+    tx.identity()
+        .replace_credential_password_hash(login, replacement)
+        .await
+        .map_err(storage)
 }
 
 /// 单行 FOR UPDATE 读凭据 + 锁定三列（已知主体）；未知主体 0 行 → None（不建锁，F2）。
 async fn auth_row(
-    tx: &mut PgConnection,
-    tenant_uuid: &str,
+    tx: &mut IdentityTx<'_, '_, ServingWriteLane>,
     login: &str,
 ) -> Result<Option<AuthRow>, IdentityError> {
-    let row = sqlx::query(
-        r#"
-        SELECT user_id::text AS user_id,
-               password_hash,
-               failure_count,
-               extract(epoch from lockout_window_start)::bigint AS lockout_window_start,
-               extract(epoch from locked_until)::bigint AS locked_until
-        FROM credentials
-        WHERE tenant_id = $1::uuid AND login = $2
-        FOR UPDATE
-        "#,
-    )
-    .bind(tenant_uuid)
-    .bind(login)
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(storage)?;
-    match row {
-        None => Ok(None),
-        Some(r) => {
-            let user_id: String = r.try_get("user_id").map_err(storage)?;
-            let phc: String = r.try_get("password_hash").map_err(storage)?;
-            let failure_count: i64 = r.try_get("failure_count").map_err(storage)?;
-            let window: Option<i64> = r.try_get("lockout_window_start").map_err(storage)?;
-            let until: Option<i64> = r.try_get("locked_until").map_err(storage)?;
-            Ok(Some((user_id, phc, failure_count, window, until)))
-        }
-    }
+    tx.identity()
+        .lock_credential_auth_row(login)
+        .await
+        .map_err(storage)
 }
 
 /// The second and final row lock in authentication's fixed
 /// `credentials -> account_security_states` order.
 async fn security_row_for_update(
-    tx: &mut PgConnection,
-    tenant_uuid: &str,
+    tx: &mut IdentityTx<'_, '_, ServingWriteLane>,
     user_id: &str,
 ) -> Result<Option<SecurityRow>, IdentityError> {
-    sqlx::query_as::<_, SecurityRow>(
-        r#"
-        SELECT status,
-               authn_epoch,
-               version,
-               (extract(epoch from status_changed_at) * 1000000)::bigint
-                   AS status_changed_at_micros,
-               (extract(epoch from updated_at) * 1000000)::bigint AS updated_at_micros
-        FROM account_security_states
-        WHERE tenant_id = $1::uuid AND user_id = $2::uuid
-        FOR UPDATE
-        "#,
-    )
-    .bind(tenant_uuid)
-    .bind(user_id)
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(storage)
+    tx.identity()
+        .lock_account_security_row(user_id)
+        .await
+        .map_err(storage)
 }
 
 /// Insert credential and its mandatory initial account-security row in one transaction.
 async fn insert_in_tx(
-    tx: &mut PgConnection,
-    tenant_uuid: &str,
+    tx: &mut IdentityTx<'_, '_, ServingWriteLane>,
     credential: &Credential,
 ) -> Result<(), IdentityError> {
-    sqlx::query(
-        r#"
-        INSERT INTO credentials (tenant_id, user_id, login, password_hash, version)
-        VALUES ($1::uuid, $2::uuid, $3, $4, $5)
-        "#,
-    )
-    .bind(tenant_uuid)
-    .bind(credential.user_id().as_uuid().to_string())
-    .bind(credential.login().as_str())
-    .bind(credential.password_hash().as_str())
-    .bind(i64::from(credential.version()))
-    .execute(&mut *tx)
-    .await
-    .map_err(storage)?;
-    sqlx::query(
-        r#"
-        INSERT INTO account_security_states (
-            tenant_id, user_id, status, authn_epoch, version,
-            status_changed_at, updated_at
-        )
-        VALUES ($1::uuid, $2::uuid, 'active', 0, 1, clock_timestamp(), clock_timestamp())
-        "#,
-    )
-    .bind(tenant_uuid)
-    .bind(credential.user_id().as_uuid().to_string())
-    .execute(&mut *tx)
-    .await
-    .map_err(storage)?;
-    Ok(())
+    tx.identity()
+        .insert_credential_with_security(credential)
+        .await
+        .map_err(storage)
 }

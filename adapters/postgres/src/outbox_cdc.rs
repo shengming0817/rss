@@ -19,7 +19,8 @@ use futures::future::BoxFuture;
 
 #[cfg(all(test, feature = "integration"))]
 use crate::PgStore;
-use crate::cotx::{PgTenantWritePool, TxCapability, infra_tenant_scope};
+use crate::cotx::eventing::OutboxTx;
+use crate::cotx::{ServingWriteLane, TenantDb, infra_tenant_scope};
 use crate::outbox::{
     AppendFingerprintObservation, CanonicalOutboxFact, OutboxAppendError, OutboxEnvelope,
     classify_append_fingerprint, metadata_with_ambient, unix_secs,
@@ -30,7 +31,7 @@ use crate::pool::VerifiedPgWriteStore;
 ///
 /// This adapter is explicit opt-in and does not write to the relay `outbox` table.
 pub struct PgOutboxCdcEmitter {
-    pool: PgTenantWritePool,
+    pool: TenantDb<ServingWriteLane>,
     clock: Box<dyn Clock>,
 }
 
@@ -39,14 +40,14 @@ impl PgOutboxCdcEmitter {
     #[cfg(all(test, feature = "integration"))]
     pub(crate) fn new(store: &PgStore, clock: Box<dyn Clock>) -> Self {
         Self {
-            pool: PgTenantWritePool::from_unverified_for_test(store),
+            pool: TenantDb::<ServingWriteLane>::from_unverified_for_test(store),
             clock,
         }
     }
 
     pub(crate) fn new_with_store(store: &VerifiedPgWriteStore, clock: Box<dyn Clock>) -> Self {
         Self {
-            pool: PgTenantWritePool::new(store),
+            pool: TenantDb::<ServingWriteLane>::new(store),
             clock,
         }
     }
@@ -68,11 +69,11 @@ impl ReviewedEventWriter for PgOutboxCdcEmitter {
         .with_partition_key_opt(partition_key)
         .with_causation_id_opt(causation_id);
         self.pool
-            .write(
+            .outbox_write(
                 infra_tenant_scope(env.tenant()),
-                move |tx| {
+                move |mut tx| {
                     Box::pin(async move {
-                        append_outbox_log(tx, &entry, &env, &aggregate_id)
+                        append_outbox_log(&mut tx, &entry, &env, &aggregate_id)
                             .await
                             .map(|_| ())
                             .map_err(OutboxAppendError::into_observed_emit_error)
@@ -126,42 +127,21 @@ impl OutboxLogRecord {
 }
 
 pub(crate) async fn append_outbox_log(
-    tx: &mut TxCapability<'_>,
+    tx: &mut OutboxTx<'_>,
     entry: &EventEntry,
     env: &OutboxEnvelope,
     aggregate_id: &str,
 ) -> Result<OutboxAppendOutcome, OutboxAppendError> {
+    if tx.tenant() != env.tenant() {
+        return Err(OutboxAppendError::InvalidIdentity);
+    }
     let fact = CanonicalOutboxFact::from_entry_env(entry, env);
-    let inserted = sqlx::query_scalar::<_, Vec<u8>>(
-        r#"
-        INSERT INTO outbox_log (
-            event_id, tenant_id, aggregate_type, aggregate_id, topic, contract_id,
-            contract_version, schema_hash, payload, metadata, causation_id, partition_key
-        )
-        VALUES ($1, $2::uuid, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12)
-        ON CONFLICT (event_id) DO NOTHING
-        RETURNING fact_fingerprint
-        "#,
-    )
-    .bind(fact.event_id())
-    .bind(fact.tenant_id())
-    .bind(fact.domain())
-    .bind(aggregate_id)
-    .bind(fact.topic())
-    .bind(fact.contract_id())
-    .bind(fact.contract_version())
-    .bind(fact.schema_hash())
-    .bind(fact.payload())
-    .bind(fact.metadata_json())
-    .bind(fact.causation_id())
-    .bind(fact.partition_key())
-    .fetch_optional(tx.conn())
-    .await?;
+    let inserted = tx.outbox_log_insert(&fact, aggregate_id).await?;
     classify_log_append(tx, fact.event_id(), fact.fingerprint(), inserted).await
 }
 
 async fn classify_log_append(
-    tx: &mut TxCapability<'_>,
+    tx: &mut OutboxTx<'_>,
     event_id: &str,
     expected: OutboxFactFingerprint,
     inserted: Option<Vec<u8>>,
@@ -172,12 +152,7 @@ async fn classify_log_append(
             AppendFingerprintObservation::Inserted(stored),
         );
     }
-    let stored = sqlx::query_scalar::<_, Vec<u8>>(
-        "SELECT fact_fingerprint FROM outbox_log WHERE event_id = $1",
-    )
-    .bind(event_id)
-    .fetch_optional(tx.conn())
-    .await?;
+    let stored = tx.outbox_log_load_fingerprint(event_id).await?;
     classify_append_fingerprint(
         expected,
         AppendFingerprintObservation::Existing(stored.as_deref()),

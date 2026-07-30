@@ -19,9 +19,10 @@ use anyhow::{anyhow, bail};
 use consistency::{
     CompensationOutcome, ConsumerGroup, ConvergeAction, Disposition, EngineError, EngineErrorKind,
     EventTopic, IdemKey, InboxReceiptContext, InboxStore, LeaseOutcome, LeaseToken, Lsn,
-    OutboxRelay, PartitionSerialDelivery, ProjectionApplyOutcome, ProjectionEvent,
-    ProjectionEventMetadata, ProjectionEventRecord, Projector, SagaDefinitionIdentity, SagaId,
-    SagaInstanceRef, SagaJournalAppendRecord, SeenState, SerialInOrder, StepName,
+    OutboxRelay, PartitionSerialDelivery, ProjectionApplyError, ProjectionApplyErrorKind,
+    ProjectionApplyOutcome, ProjectionEvent, ProjectionEventMetadata, ProjectionEventRecord,
+    Projector, SagaDefinitionIdentity, SagaId, SagaInstanceRef, SagaJournalAppendRecord, SeenState,
+    SerialInOrder, StepName,
 };
 use diport::{
     Checkpoint, CheckpointId, CheckpointOwner, CheckpointStoreError, CheckpointVersion,
@@ -1866,12 +1867,12 @@ impl Projector for FaultMatrixProjectionProjector {
     async fn apply<E: ProjectionEvent>(
         &self,
         event: &E,
-    ) -> Result<ProjectionApplyOutcome, EngineError> {
+    ) -> Result<ProjectionApplyOutcome, ProjectionApplyError> {
         self.apply_calls.fetch_add(1, Ordering::SeqCst);
         let mut applied = self
             .applied_lsn
             .lock()
-            .map_err(|_| EngineError::new(EngineErrorKind::Invariant))?;
+            .map_err(|_| ProjectionApplyError::new(ProjectionApplyErrorKind::Invariant))?;
         applied.insert(event.lsn().get());
         Ok(ProjectionApplyOutcome::Applied)
     }

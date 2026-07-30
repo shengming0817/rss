@@ -1,10 +1,10 @@
 //! Static producer-side L2 execution graph projected from the same generated route markers,
 //! production composition, typed domain ports and Postgres transaction funnel compiled by serving.
 //!
-//! INVARIANT: L2-PRODUCER-EXECUTION-CLOSURE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::postgres_provider_without_producer_tx_is_rejected", anti_vacuity = "l2_assurance::tests::workspace_inventory_is_exact_and_deterministic" }——
+//! INVARIANT: L2-PRODUCER-EXECUTION-CLOSURE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::postgres_provider_without_producer_tx_is_rejected|tests::producer_transaction_signature_rejects_wrong_lane", anti_vacuity = "l2_assurance::tests::workspace_inventory_is_exact_and_deterministic" }——
 //! every active HTTP OutboxFact contract resolves from its exact mounted handler through live
 //! receipt call edges to one typed domain port, its injected Postgres provider, `producer_tx`,
-//! `TxCapability`, canonical append and settlement. Ambiguous, macro-hidden, dead, test-only or
+//! exact-lane `TenantTx`, canonical append and settlement. Ambiguous, macro-hidden, dead, test-only or
 //! missing edges fail closed, and terminal facts equal manifest `emits`.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -414,16 +414,41 @@ fn composition_port(method: &TraitMethod) -> Result<ProducerCompositionPort> {
 
 fn canonical_transaction_closure(root: &Path) -> Result<CanonicalTransactionClosure> {
     let cotx = SourceFile::read(root, &root.join("adapters/postgres/src/cotx/mod.rs"))?;
+    let settings_audit = SourceFile::read(
+        root,
+        &root.join("adapters/postgres/src/cotx/settings_audit.rs"),
+    )?;
+    let identity = SourceFile::read(root, &root.join("adapters/postgres/src/cotx/identity.rs"))?;
     let settlement =
         SourceFile::read(root, &root.join("adapters/postgres/src/cotx/settlement.rs"))?;
     let retry = SourceFile::read(root, &root.join("adapters/postgres/src/tx_retry.rs"))?;
     let outbox = SourceFile::read(root, &root.join("adapters/postgres/src/outbox.rs"))?;
-    ensure_exact_production_symbol(&cotx, "TxCapability", None)?;
+    ensure_exact_production_symbol(&cotx, "TenantTx", None)?;
+    ensure_exact_production_symbol(&cotx, "ServingWriteLane", None)?;
     ensure_exact_production_symbol(&cotx, "finish_local_tx", None)?;
     ensure_exact_production_symbol(&outbox, "append_outbox_with_projection", None)?;
     for method in ["producer_tx", "retry_producer_tx"] {
-        ensure_exact_production_symbol(&cotx, "PgWritePool", Some(method))?;
+        ensure_exact_serving_write_producer_method(&cotx, method, Some("business_write"))?;
     }
+    ensure_exact_serving_write_producer_method(&identity, "identity_producer_tx", None)?;
+    let identity_producer =
+        unique_production_impl_method_block(&identity, "TenantDb", "identity_producer_tx")?;
+    ensure!(
+        exact_method_call_count(identity_producer, "producer_tx") == 1,
+        "{}::TenantDb::identity_producer_tx must delegate exactly once to producer_tx",
+        identity.repo_path
+    );
+    ensure_exact_serving_write_producer_method(&settings_audit, "retry_config_producer_tx", None)?;
+    let config_retry = unique_production_impl_method_block(
+        &settings_audit,
+        "TenantDb",
+        "retry_config_producer_tx",
+    )?;
+    ensure!(
+        exact_method_call_count(config_retry, "retry_producer_tx") == 1,
+        "{}::TenantDb::retry_config_producer_tx must delegate exactly once to retry_producer_tx",
+        settings_audit.repo_path
+    );
     ensure_canonical_settlement_graph(&cotx)?;
     ensure_exact_production_symbol(&settlement, "LocalTxAttempt", Some("into_retry_result"))?;
     let retry_core = unique_production_function_block(&retry, "run_pg_tx_retry_core")?;
@@ -434,8 +459,8 @@ fn canonical_transaction_closure(root: &Path) -> Result<CanonicalTransactionClos
     );
     Ok(CanonicalTransactionClosure {
         capability: RustItemProjection {
-            repo_path: cotx.repo_path.clone(),
-            symbol: "TxCapability".to_string(),
+            repo_path: identity.repo_path,
+            symbol: "IdentityTx".to_string(),
         },
         append: RustItemProjection {
             repo_path: outbox.repo_path,
@@ -458,6 +483,158 @@ fn canonical_transaction_closure(root: &Path) -> Result<CanonicalTransactionClos
             symbol: "finish_local_tx_rollback_result".to_string(),
         },
     })
+}
+
+fn ensure_exact_serving_write_producer_method(
+    file: &SourceFile,
+    method: &str,
+    callback_binding: Option<&str>,
+) -> Result<()> {
+    let (self_ty, function) = unique_production_impl_method(file, "TenantDb", method)?;
+    ensure!(
+        exact_type_application(self_ty, "TenantDb", &["ServingWriteLane"]),
+        "{}::TenantDb::{method} must be owned by exact TenantDb<ServingWriteLane>",
+        file.repo_path
+    );
+    if let Some(callback_binding) = callback_binding {
+        ensure!(
+            exact_serving_write_callback(&function.sig, callback_binding),
+            "{}::TenantDb::{method} `{callback_binding}` must be an HRTB FnOnce over &mut TenantTx<'_, ServingWriteLane>",
+            file.repo_path
+        );
+    }
+    Ok(())
+}
+
+fn exact_type_application(ty: &Type, owner: &str, arguments: &[&str]) -> bool {
+    let Type::Path(path) = ty else { return false };
+    let Some(segment) = path.path.segments.last() else {
+        return false;
+    };
+    if segment.ident != owner {
+        return false;
+    }
+    let syn::PathArguments::AngleBracketed(actual) = &segment.arguments else {
+        return false;
+    };
+    actual.args.len() == arguments.len()
+        && actual
+            .args
+            .iter()
+            .zip(arguments)
+            .all(|(argument, expected)| {
+                matches!(
+                    argument,
+                    GenericArgument::Type(Type::Path(path))
+                        if path.qself.is_none()
+                            && path.path.segments.last().is_some_and(|segment| {
+                                segment.ident == *expected
+                                    && matches!(segment.arguments, syn::PathArguments::None)
+                            })
+                )
+            })
+}
+
+fn exact_serving_write_callback(signature: &syn::Signature, binding: &str) -> bool {
+    let Some(generic) = signature.inputs.iter().find_map(|argument| match argument {
+        FnArg::Typed(argument)
+            if matches!(argument.pat.as_ref(), syn::Pat::Ident(ident) if ident.ident == binding) =>
+        {
+            type_last_ident(&argument.ty)
+        }
+        FnArg::Receiver(_) | FnArg::Typed(_) => None,
+    }) else {
+        return false;
+    };
+    let Some(where_clause) = &signature.generics.where_clause else {
+        return false;
+    };
+    let callbacks = where_clause
+        .predicates
+        .iter()
+        .filter_map(|predicate| match predicate {
+            syn::WherePredicate::Type(predicate)
+                if type_last_ident(&predicate.bounded_ty).as_deref() == Some(generic.as_str()) =>
+            {
+                Some(predicate)
+            }
+            _ => None,
+        })
+        .flat_map(|predicate| {
+            predicate.bounds.iter().filter_map(|bound| match bound {
+                syn::TypeParamBound::Trait(bound)
+                    if bound
+                        .path
+                        .segments
+                        .last()
+                        .is_some_and(|segment| segment.ident == "FnOnce") =>
+                {
+                    bound.path.segments.last().map(|callback| (bound, callback))
+                }
+                _ => None,
+            })
+        })
+        .collect::<Vec<_>>();
+    let [(bound, callback)] = callbacks.as_slice() else {
+        return false;
+    };
+    let Some(lifetimes) = &bound.lifetimes else {
+        return false;
+    };
+    let declared_lifetimes = lifetimes
+        .lifetimes
+        .iter()
+        .filter_map(|parameter| match parameter {
+            syn::GenericParam::Lifetime(lifetime) => Some(lifetime.lifetime.ident.to_string()),
+            syn::GenericParam::Type(_) | syn::GenericParam::Const(_) => None,
+        })
+        .collect::<BTreeSet<_>>();
+    if declared_lifetimes.len() != 2 {
+        return false;
+    }
+    let syn::PathArguments::Parenthesized(arguments) = &callback.arguments else {
+        return false;
+    };
+    let [Type::Reference(reference)] = arguments.inputs.iter().collect::<Vec<_>>().as_slice()
+    else {
+        return false;
+    };
+    let (Some(reference_lifetime), Some(transaction_lifetime)) = (
+        reference.lifetime.as_ref(),
+        serving_write_transaction_lifetime(&reference.elem),
+    ) else {
+        return false;
+    };
+    reference.mutability.is_some()
+        && reference_lifetime.ident != transaction_lifetime.ident
+        && declared_lifetimes
+            == BTreeSet::from([
+                reference_lifetime.ident.to_string(),
+                transaction_lifetime.ident.to_string(),
+            ])
+}
+
+fn serving_write_transaction_lifetime(ty: &Type) -> Option<&syn::Lifetime> {
+    let Type::Path(path) = ty else { return None };
+    let segment = path.path.segments.last()?;
+    let syn::PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+        return None;
+    };
+    let Some(GenericArgument::Lifetime(lifetime)) = arguments.args.first() else {
+        return None;
+    };
+    (segment.ident == "TenantTx"
+        && arguments.args.len() == 2
+        && matches!(
+            arguments.args.iter().nth(1),
+            Some(GenericArgument::Type(Type::Path(path)))
+                if path.qself.is_none()
+                    && path.path.segments.last().is_some_and(|segment| {
+                        segment.ident == "ServingWriteLane"
+                            && matches!(segment.arguments, syn::PathArguments::None)
+                    })
+        ))
+    .then_some(lifetime)
 }
 
 fn ensure_canonical_settlement_graph(cotx: &SourceFile) -> Result<()> {
@@ -506,6 +683,53 @@ fn unique_production_function_block<'a>(
         )
     };
     Ok(block)
+}
+
+fn unique_production_impl_method_block<'a>(
+    file: &'a SourceFile,
+    owner: &str,
+    method: &str,
+) -> Result<&'a syn::Block> {
+    unique_production_impl_method(file, owner, method).map(|(_, function)| &function.block)
+}
+
+fn unique_production_impl_method<'a>(
+    file: &'a SourceFile,
+    owner: &str,
+    method: &str,
+) -> Result<(&'a Type, &'a syn::ImplItemFn)> {
+    let methods = file
+        .syntax
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Impl(item)
+                if type_last_ident(&item.self_ty).as_deref() == Some(owner)
+                    && attrs_are_production(&item.attrs) =>
+            {
+                Some(item)
+            }
+            _ => None,
+        })
+        .flat_map(|item| {
+            item.items.iter().filter_map(move |member| match member {
+                syn::ImplItem::Fn(function)
+                    if function.sig.ident == method && attrs_are_production(&function.attrs) =>
+                {
+                    Some((item.self_ty.as_ref(), function))
+                }
+                _ => None,
+            })
+        })
+        .collect::<Vec<_>>();
+    let [found] = methods.as_slice() else {
+        bail!(
+            "{} must contain one exact production method `{owner}::{method}`, got {}",
+            file.repo_path,
+            methods.len()
+        )
+    };
+    Ok(*found)
 }
 
 fn exact_call_count(block: &syn::Block, callee: &str) -> usize {
@@ -874,10 +1098,7 @@ fn collect_postgres_terminals(
                                 fact_id: fact_id.clone(),
                                 port_method: canonical_port.clone(),
                                 provider_method: provider_method.clone(),
-                                transaction: RustItemProjection {
-                                    repo_path: "adapters/postgres/src/cotx/mod.rs".to_string(),
-                                    symbol: format!("PgWritePool::{transaction_method}"),
-                                },
+                                transaction: producer_transaction_projection(&transaction_method),
                                 no_replay: no_replay.clone(),
                             });
                     }
@@ -1283,23 +1504,39 @@ fn provider_transaction_path(
     Ok((transaction, true, consumer))
 }
 
+fn producer_transaction_projection(method: &str) -> RustItemProjection {
+    let repo_path = match method {
+        "retry_config_producer_tx" => "adapters/postgres/src/cotx/settings_audit.rs",
+        "identity_producer_tx" => "adapters/postgres/src/cotx/identity.rs",
+        _ => "adapters/postgres/src/cotx/mod.rs",
+    };
+    RustItemProjection {
+        repo_path: repo_path.to_string(),
+        symbol: format!("TenantDb::{method}"),
+    }
+}
+
 fn provider_settlement_consumer(
     block: &syn::Block,
     transaction_method: &str,
 ) -> Result<RustItemProjection> {
     match transaction_method {
-        "producer_tx" => {
-            struct Consumers {
+        "producer_tx" | "identity_producer_tx" => {
+            struct Consumers<'a> {
                 methods: Vec<String>,
+                transaction_method: &'a str,
             }
-            impl Visit<'_> for Consumers {
+            impl Visit<'_> for Consumers<'_> {
                 fn visit_expr_method_call(&mut self, call: &syn::ExprMethodCall) {
                     if attrs_are_production(&call.attrs)
                         && matches!(
                             call.method.to_string().as_str(),
                             "into_result" | "into_refresh_commit_result"
                         )
-                        && expression_chain_has_awaited_method(&call.receiver, "producer_tx")
+                        && expression_chain_has_awaited_method(
+                            &call.receiver,
+                            self.transaction_method,
+                        )
                     {
                         self.methods.push(call.method.to_string());
                     }
@@ -1308,6 +1545,7 @@ fn provider_settlement_consumer(
             }
             let mut consumers = Consumers {
                 methods: Vec::new(),
+                transaction_method,
             };
             consumers.visit_block(block);
             ensure!(
@@ -1320,7 +1558,7 @@ fn provider_settlement_consumer(
                 symbol: format!("ProducerTxAttempt::{}", consumers.methods[0]),
             })
         }
-        "retry_producer_tx" => {
+        "retry_producer_tx" | "retry_config_producer_tx" => {
             ensure!(
                 exact_call_count(block, "run_pg_tx_retry") == 1,
                 "retry producer transaction must be owned by one run_pg_tx_retry boundary"
@@ -1396,13 +1634,20 @@ fn closed_transaction_calls(
                 syn::Expr::MethodCall(call)
                     if matches!(
                         call.method.to_string().as_str(),
-                        "producer_tx" | "retry_producer_tx"
+                        "producer_tx"
+                            | "identity_producer_tx"
+                            | "retry_producer_tx"
+                            | "retry_config_producer_tx"
                     ) =>
                 {
-                    let is_live_consumer = (call.method == "producer_tx"
-                        && self.executed_callback_depth == 0)
-                        || (call.method == "retry_producer_tx"
-                            && self.executed_callback_depth == 1);
+                    let is_live_consumer = (matches!(
+                        call.method.to_string().as_str(),
+                        "producer_tx" | "identity_producer_tx"
+                    ) && self.executed_callback_depth == 0)
+                        || (matches!(
+                            call.method.to_string().as_str(),
+                            "retry_producer_tx" | "retry_config_producer_tx"
+                        ) && self.executed_callback_depth == 1);
                     if is_live_consumer
                         && transaction_closes_authorization(call, &self.authorization_bindings)
                     {
@@ -1690,7 +1935,7 @@ fn opaque_business_await_count(block: &syn::Block) -> usize {
                 syn::Expr::MethodCall(call)
                     if matches!(
                         call.method.to_string().as_str(),
-                        "producer_tx" | "retry_producer_tx"
+                        "producer_tx" | "identity_producer_tx" | "retry_producer_tx"
                     ) =>
                 {
                     true
@@ -1700,7 +1945,10 @@ fn opaque_business_await_count(block: &syn::Block) -> usize {
                 {
                     true
                 }
-                expression => sql_query_expression(expression),
+                expression => {
+                    sql_query_expression(expression)
+                        || closed_facade_mutation_result(expression).is_some()
+                }
             };
             if !allowed {
                 self.count += 1;
@@ -1725,7 +1973,10 @@ fn sql_mutation_await_count(block: &syn::Block) -> usize {
     }
     impl Visit<'_> for MutationAwaits {
         fn visit_expr_await(&mut self, expression: &syn::ExprAwait) {
-            if attrs_are_production(&expression.attrs) && sql_mutation_query(&expression.base) {
+            if attrs_are_production(&expression.attrs)
+                && (sql_mutation_query(&expression.base)
+                    || closed_facade_mutation_result(&expression.base).is_some())
+            {
                 self.count += 1;
             }
             visit::visit_expr_await(self, expression);
@@ -1780,6 +2031,13 @@ fn sql_query_expression(expression: &syn::Expr) -> bool {
 enum SqlMutationOutcome {
     RowsAffected,
     OptionalRow,
+    AffectedBool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClosedFacadeMutationResult {
+    Single(SqlMutationOutcome),
+    TupleFirst(SqlMutationOutcome),
 }
 
 fn sql_mutation_outcomes(block: &syn::Block) -> BTreeMap<String, SqlMutationOutcome> {
@@ -1791,11 +2049,29 @@ fn sql_mutation_outcomes(block: &syn::Block) -> BTreeMap<String, SqlMutationOutc
             if !attrs_are_production(&local.attrs) {
                 return;
             }
-            if let syn::Pat::Ident(binding) = &local.pat
-                && let Some(initializer) = &local.init
-                && let Some(outcome) = sql_mutation_outcome(&initializer.expr)
-            {
-                self.outcomes.insert(binding.ident.to_string(), outcome);
+            if let Some(initializer) = &local.init {
+                match &local.pat {
+                    syn::Pat::Ident(binding) => {
+                        let outcome = sql_mutation_outcome(&initializer.expr).or_else(|| {
+                            match closed_facade_mutation_result(&initializer.expr) {
+                                Some(ClosedFacadeMutationResult::Single(outcome)) => Some(outcome),
+                                _ => None,
+                            }
+                        });
+                        if let Some(outcome) = outcome {
+                            self.outcomes.insert(binding.ident.to_string(), outcome);
+                        }
+                    }
+                    syn::Pat::Tuple(tuple) => {
+                        if let Some(ClosedFacadeMutationResult::TupleFirst(outcome)) =
+                            closed_facade_mutation_result(&initializer.expr)
+                            && let Some(syn::Pat::Ident(binding)) = tuple.elems.first()
+                        {
+                            self.outcomes.insert(binding.ident.to_string(), outcome);
+                        }
+                    }
+                    _ => {}
+                }
             }
             visit::visit_local(self, local);
         }
@@ -1816,6 +2092,47 @@ fn sql_mutation_outcome(expression: &syn::Expr) -> Option<SqlMutationOutcome> {
         Some(SqlMutationOutcome::RowsAffected)
     } else {
         None
+    }
+}
+
+fn closed_facade_mutation_result(expression: &syn::Expr) -> Option<ClosedFacadeMutationResult> {
+    match expression {
+        syn::Expr::Try(expression) => closed_facade_mutation_result(&expression.expr),
+        syn::Expr::Await(expression) if attrs_are_production(&expression.attrs) => {
+            closed_facade_mutation_result(&expression.base)
+        }
+        syn::Expr::Paren(expression) => closed_facade_mutation_result(&expression.expr),
+        syn::Expr::Group(expression) => closed_facade_mutation_result(&expression.expr),
+        syn::Expr::MethodCall(call)
+            if attrs_are_production(&call.attrs)
+                && matches!(
+                    call.method.to_string().as_str(),
+                    "map" | "map_err" | "and_then"
+                ) =>
+        {
+            closed_facade_mutation_result(&call.receiver)
+        }
+        syn::Expr::MethodCall(call) if attrs_are_production(&call.attrs) => {
+            let syn::Expr::MethodCall(facade) = call.receiver.as_ref() else {
+                return None;
+            };
+            if facade.method != "identity" || !facade.args.is_empty() {
+                return None;
+            }
+            match call.method.to_string().as_str() {
+                "update_policy" => Some(ClosedFacadeMutationResult::TupleFirst(
+                    SqlMutationOutcome::OptionalRow,
+                )),
+                "deactivate_policy" => Some(ClosedFacadeMutationResult::TupleFirst(
+                    SqlMutationOutcome::RowsAffected,
+                )),
+                "delete_role_binding" => Some(ClosedFacadeMutationResult::Single(
+                    SqlMutationOutcome::AffectedBool,
+                )),
+                _ => None,
+            }
+        }
+        _ => None,
     }
 }
 
@@ -2018,6 +2335,11 @@ fn mutation_present_condition(
                 SqlMutationOutcome::RowsAffected,
             )
         }
+        syn::Expr::Path(_) => expr_ident_with_outcome(
+            expression,
+            mutation_outcomes,
+            SqlMutationOutcome::AffectedBool,
+        ),
         _ => false,
     }
 }
@@ -2026,16 +2348,23 @@ fn mutation_absent_condition(
     expression: &syn::Expr,
     mutation_outcomes: &BTreeMap<String, SqlMutationOutcome>,
 ) -> bool {
-    matches!(
-        expression,
-        syn::Expr::Binary(binary)
-            if matches!(binary.op, syn::BinOp::Eq(_))
-                && binary_ident_zero_with_outcome(
-                    binary,
-                    mutation_outcomes,
-                    SqlMutationOutcome::RowsAffected,
-                )
-    )
+    match expression {
+        syn::Expr::Binary(binary) if matches!(binary.op, syn::BinOp::Eq(_)) => {
+            binary_ident_zero_with_outcome(
+                binary,
+                mutation_outcomes,
+                SqlMutationOutcome::RowsAffected,
+            )
+        }
+        syn::Expr::Unary(unary) if matches!(unary.op, syn::UnOp::Not(_)) => {
+            expr_ident_with_outcome(
+                &unary.expr,
+                mutation_outcomes,
+                SqlMutationOutcome::AffectedBool,
+            )
+        }
+        _ => false,
+    }
 }
 
 fn binary_ident_zero_with_outcome(
@@ -3414,6 +3743,52 @@ mod tests {
     }
 
     #[test]
+    fn producer_transaction_signature_rejects_wrong_lane() -> anyhow::Result<()> {
+        fn source(receiver_lane: &str, callback_lane: &str) -> anyhow::Result<SourceFile> {
+            Ok(SourceFile {
+                repo_path: "adapters/postgres/src/cotx/mod.rs".into(),
+                syntax: syn::parse_file(&format!(
+                    r#"
+                    impl TenantDb<{receiver_lane}> {{
+                        async fn producer_tx<F>(&self, business_write: F)
+                        where
+                            F: for<'c, 'tx> FnOnce(
+                                    &'c mut TenantTx<'tx, {callback_lane}>,
+                                ) -> BoxFuture<'c, Result<(), Error>>
+                                + Send,
+                        {{}}
+                    }}
+                    "#
+                ))?,
+            })
+        }
+
+        let canonical = source("ServingWriteLane", "ServingWriteLane")?;
+        ensure_exact_serving_write_producer_method(
+            &canonical,
+            "producer_tx",
+            Some("business_write"),
+        )?;
+
+        for (case, receiver_lane, callback_lane) in [
+            ("wrong receiver", "MaintenanceWriteLane", "ServingWriteLane"),
+            ("wrong callback", "ServingWriteLane", "MaintenanceWriteLane"),
+        ] {
+            let wrong_lane = source(receiver_lane, callback_lane)?;
+            assert!(
+                ensure_exact_serving_write_producer_method(
+                    &wrong_lane,
+                    "producer_tx",
+                    Some("business_write"),
+                )
+                .is_err(),
+                "{case} must fail the exact ServingWriteLane signature"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn postgres_provider_without_producer_tx_is_rejected() -> anyhow::Result<()> {
         let domain = syn::parse_file(
             r#"
@@ -3622,6 +3997,34 @@ mod tests {
             "retry_producer_tx"
         );
 
+        let config_retry_helper: syn::Block = syn::parse_str(
+            r#"{
+                run_pg_tx_retry(
+                    BOUNDARY,
+                    |_attempt, deadline| {
+                        async move {
+                            self.pool.retry_config_producer_tx(
+                                scope,
+                                deadline,
+                                &entry,
+                                &env,
+                                move |conn| Box::pin(async move {
+                                    write_business(conn).await?;
+                                    Ok(ProducerTxOutcome::Emitted((), authorization))
+                                }),
+                                storage,
+                            ).await
+                        }
+                    },
+                    classify,
+                ).await
+            }"#,
+        )?;
+        assert_eq!(
+            provider_transaction_path(&config_retry_helper, &authorization, &[])?.0,
+            "retry_config_producer_tx"
+        );
+
         let unrelated_retry_runner: syn::Block = syn::parse_str(
             r#"{
                 self.pool.retry_producer_tx(
@@ -3780,6 +4183,61 @@ mod tests {
             }"#,
         )?;
         assert_eq!(unsafe_no_mutation_count(&optional_row), 0);
+
+        let closed_optional_facade: syn::Block = syn::parse_str(
+            r#"{
+                let (row, exists) = conn.identity().update_policy(policy).await?;
+                let authorization = if row.is_some() {
+                    Some(receipt.authorize(generated_fact, EXACT_FACT).unwrap())
+                } else {
+                    None
+                };
+                Ok(match authorization {
+                    Some(authorization) => ProducerTxOutcome::Emitted((row, exists), authorization),
+                    None => ProducerTxOutcome::NoMutation((row, exists)),
+                })
+            }"#,
+        )?;
+        assert_eq!(unsafe_no_mutation_count(&closed_optional_facade), 0);
+
+        let closed_rows_facade: syn::Block = syn::parse_str(
+            r#"{
+                let (rows, exists) = conn.identity().deactivate_policy(id).await?;
+                let authorization = if rows > 0 {
+                    Some(receipt.authorize(generated_fact, EXACT_FACT).unwrap())
+                } else {
+                    None
+                };
+                Ok(match authorization {
+                    Some(authorization) => ProducerTxOutcome::Emitted((rows, exists), authorization),
+                    None => ProducerTxOutcome::NoMutation((rows, exists)),
+                })
+            }"#,
+        )?;
+        assert_eq!(unsafe_no_mutation_count(&closed_rows_facade), 0);
+
+        let closed_bool_facade: syn::Block = syn::parse_str(
+            r#"{
+                let deleted = conn.identity().delete_role_binding(id).await.map_err(storage)?;
+                if !deleted {
+                    return Ok(ProducerTxOutcome::NoMutation(false));
+                }
+                Ok(ProducerTxOutcome::Emitted(true, authorization))
+            }"#,
+        )?;
+        assert_eq!(unsafe_no_mutation_count(&closed_bool_facade), 0);
+
+        let wrong_facade: syn::Block = syn::parse_str(
+            r#"{
+                let (row, exists) = conn.impostor().update_policy(policy).await?;
+                let authorization = if row.is_some() { Some(authorization) } else { None };
+                Ok(match authorization {
+                    Some(authorization) => ProducerTxOutcome::Emitted((row, exists), authorization),
+                    None => ProducerTxOutcome::NoMutation((row, exists)),
+                })
+            }"#,
+        )?;
+        assert_eq!(unsafe_no_mutation_count(&wrong_facade), 1);
 
         let conditional_refresh: syn::Block = syn::parse_str(
             r#"{

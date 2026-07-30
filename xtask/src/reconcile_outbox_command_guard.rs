@@ -1,10 +1,12 @@
 //! `reconcile-outbox-command-guard` —— durable reconcile command outbox seam guard.
 //!
-//! INVARIANT: RECONCILE-COMMAND-OUTBOX-SEAM-01 { level = "Medium", exec = "check", source = "code" }——
+//! INVARIANT: RECONCILE-COMMAND-OUTBOX-SEAM-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::rejects_repository_without_closed_facade_call|tests::rejects_facade_with_split_or_reordered_writes|tests::rejects_string_and_comment_bait", anti_vacuity = "tests::real_workspace_has_repository_to_closed_facade_transaction_topology" }——
 //! eventexec reconcile scheduler must not directly publish, depend on an emitter, or append raw outbox rows.
 //! Commands may only flow through generated `TypedCommandSpec` → `ReviewedCommand` →
 //! `AttemptScope::record_action_and_enqueue_command`;
-//! the Postgres adapter may call `append_outbox` only inside the transactional implementation of that seam.
+//! the Postgres repository must enter one exact-lane transaction and call the closed
+//! `ReconcileTx::reconcile_enqueue_command` façade. That façade alone owns the ordered lease CAS,
+//! `reconcile_actions` INSERT, and outbox append in the same physical transaction.
 
 use std::ops::Range;
 use std::path::Path;
@@ -36,6 +38,7 @@ impl GovernanceCheck for ReconcileOutboxCommandGuard {
         let root = workspace_root()?;
         let scheduler = root.join("crates/eventexec/src/reconcile.rs");
         let pg_adapter = root.join("adapters/postgres/src/reconcile.rs");
+        let cotx_facade = root.join("adapters/postgres/src/cotx/reconcile.rs");
         let scheduler_content = std::fs::read_to_string(&scheduler).with_context(|| {
             format!(
                 "reconcile-outbox-command-guard: read {}",
@@ -48,6 +51,12 @@ impl GovernanceCheck for ReconcileOutboxCommandGuard {
                 pg_adapter.display()
             )
         })?;
+        let cotx_content = std::fs::read_to_string(&cotx_facade).with_context(|| {
+            format!(
+                "reconcile-outbox-command-guard: read {}",
+                cotx_facade.display()
+            )
+        })?;
 
         let mut findings = Vec::new();
         findings.extend(scan_scheduler_content(
@@ -57,6 +66,10 @@ impl GovernanceCheck for ReconcileOutboxCommandGuard {
         findings.extend(scan_pg_adapter_content(
             Path::new("adapters/postgres/src/reconcile.rs"),
             &pg_content,
+        ));
+        findings.extend(scan_cotx_facade_content(
+            Path::new("adapters/postgres/src/cotx/reconcile.rs"),
+            &cotx_content,
         ));
         Ok((
             "reconcile scheduler command writes stay behind the typed transactional outbox seam"
@@ -141,11 +154,8 @@ fn scan_scheduler_content(path: &Path, content: &str) -> Vec<Finding<Rule>> {
 
 fn scan_pg_adapter_content(path: &Path, content: &str) -> Vec<Finding<Rule>> {
     let stripped = strip_comments(content);
-    let proof_content = strip_comments_preserve_strings(content);
-    let seam_range = function_body_range(&stripped, "record_action_and_enqueue_command");
     let mut findings = Vec::new();
-    let mut line_start = 0_usize;
-    for (line_no, line) in stripped.split_inclusive('\n').enumerate() {
+    for (line_no, line) in stripped.lines().enumerate() {
         if line.contains(".publish(")
             || line.contains(".emit(")
             || line.contains("Publisher")
@@ -159,25 +169,13 @@ fn scan_pg_adapter_content(path: &Path, content: &str) -> Vec<Finding<Rule>> {
                 "postgres reconcile adapter must not publish directly; it may only append the durable outbox row",
             ));
         }
-        if line.contains("append_outbox_with_projection(") {
+        if line.contains("append_outbox_with_projection(") || line.contains("append_outbox(") {
             findings.push(finding(
                 Rule::BareOutboxAppend,
                 format!("{}:{}", path.display(), line_no + 1),
-                "reconcile command seam must not mirror to projection_events",
+                "repository must not append outbox or projection rows directly; call the closed reconcile façade",
             ));
         }
-        if line.contains("append_outbox(")
-            && !seam_range
-                .as_ref()
-                .is_some_and(|range| range.contains(&line_start))
-        {
-            findings.push(finding(
-                Rule::BareOutboxAppend,
-                format!("{}:{}", path.display(), line_no + 1),
-                "append_outbox is allowed only inside record_action_and_enqueue_command",
-            ));
-        }
-        line_start = line_start.saturating_add(line.len());
     }
 
     for token in [
@@ -195,16 +193,61 @@ fn scan_pg_adapter_content(path: &Path, content: &str) -> Vec<Finding<Rule>> {
         }
     }
 
-    match function_body(&proof_content, "record_action_and_enqueue_command") {
+    let structure = mask_source(content, true);
+    match function_body(&structure, "record_action_and_enqueue_command") {
         Some(function)
-            if transactional_write_body(function)
-                .is_some_and(has_ordered_transactional_seam_tokens)
+            if transactional_write_body(function).is_some_and(|transaction| {
+                transaction.contains("tx.reconcile_enqueue_command(ReconcileEnqueue {")
+                    && transaction.matches("reconcile_enqueue_command(").count() == 1
+            })
+                && !function.contains("sqlx::")
+                && !function.contains("append_outbox(")
+                && !function.contains(".conn")
+                && function.contains("CommittedActionOutcome::FactConflictQuarantined")
                 && function.contains("ReconcileScheduleError::fact_conflict") => {}
         Some(_) | None => findings.push(finding(
             Rule::MissingTransactionalSeam,
             path.display().to_string(),
-            "record_action_and_enqueue_command must CAS the lease, append reconcile_actions, and append outbox in one transaction",
+            "record_action_and_enqueue_command must enter one exact-lane write transaction and call tx.reconcile_enqueue_command exactly once; raw SQL/executor access is forbidden",
         )),
+    }
+    findings
+}
+
+fn scan_cotx_facade_content(path: &Path, content: &str) -> Vec<Finding<Rule>> {
+    let structure = mask_source(content, true);
+    let proof = mask_source(content, false);
+    let seam_range = function_body_range(&structure, "reconcile_enqueue_command");
+    let mut findings = Vec::new();
+
+    for (offset, _) in structure.match_indices("append_outbox(") {
+        if !seam_range
+            .as_ref()
+            .is_some_and(|range| range.contains(&offset))
+        {
+            findings.push(finding(
+                Rule::BareOutboxAppend,
+                path.display().to_string(),
+                "append_outbox is allowed only inside ReconcileTx::reconcile_enqueue_command",
+            ));
+        }
+    }
+
+    // Exact-lane ownership is proven by locating the method inside the serving-write impl body;
+    // the three-step topology is then checked inside the method's own extracted body.
+    let exact_lane_owner = braced_body_after(&structure, "impl ReconcileTx<'_, ServingWriteLane>")
+        .is_some_and(|body| body.contains("fn reconcile_enqueue_command"))
+        && !structure.contains("impl_reconcile_enqueue_command!");
+    if !exact_lane_owner
+        || !function_body(&structure, "reconcile_enqueue_command")
+            .zip(function_body(&proof, "reconcile_enqueue_command"))
+            .is_some_and(|(structure, proof)| has_ordered_facade_steps(structure, proof))
+    {
+        findings.push(finding(
+            Rule::MissingTransactionalSeam,
+            path.display().to_string(),
+            "ReconcileTx<ServingWriteLane>::reconcile_enqueue_command must own ordered lease CAS, reconcile_actions INSERT, and append_outbox in one closed transaction façade, including fact-conflict quarantine",
+        ));
     }
     findings
 }
@@ -221,27 +264,56 @@ fn function_body_range(content: &str, name: &str) -> Option<Range<usize>> {
     braced_range(content, start + open_rel)
 }
 
+fn braced_body_after<'a>(content: &'a str, header: &str) -> Option<&'a str> {
+    let start = content.find(header)?;
+    let open = start + content[start..].find('{')?;
+    content.get(braced_range(content, open)?)
+}
+
 fn transactional_write_body(content: &str) -> Option<&str> {
-    let write = content.find(".write(")?;
-    let closure = write + content[write..].find("|tx|")?;
+    let write = content.find(".reconcile_write(")?;
+    let closure = write + content[write..].find("|mut tx|")?;
     let open = closure + content[closure..].find('{')?;
     let range = braced_range(content, open)?;
     content.get(range)
 }
 
-fn has_ordered_transactional_seam_tokens(content: &str) -> bool {
-    let Some(lock) = content.find("lock_held_lease(tx,") else {
+fn has_ordered_facade_steps(structure: &str, proof: &str) -> bool {
+    let Some(lock) = structure.find(".reconcile_lock_held_lease(&enqueue.fence)") else {
         return false;
     };
-    let Some(action_rel) = content[lock..].find("INSERT INTO reconcile_actions") else {
+    let Some(action) = sqlx_query_containing(proof, "INSERT INTO reconcile_actions") else {
         return false;
     };
-    let action = lock + action_rel;
-    content[action..].contains("append_outbox(tx,")
-        && content.contains("begin_reconcile_command_savepoint(tx)")
-        && content.contains("rollback_reconcile_command_savepoint(tx)")
-        && content.contains("status = 'disabled'")
-        && content.contains("CommittedActionOutcome::FactConflictQuarantined")
+    let Some(append) =
+        structure.find("append_outbox(&mut outbox, &prepared.entry, enqueue.envelope)")
+    else {
+        return false;
+    };
+    lock < action
+        && action < append
+        && structure.contains("prepare_command(&mut command, enqueue.intent)")
+        && proof.contains("SAVEPOINT reconcile_command_write")
+        && proof.contains("ROLLBACK TO SAVEPOINT reconcile_command_write")
+        && proof.contains("RELEASE SAVEPOINT reconcile_command_write")
+        && proof.contains("SET status = 'disabled'")
+        && structure.contains("CommittedActionOutcome::FactConflictQuarantined")
+}
+
+fn sqlx_query_containing(content: &str, required_sql: &str) -> Option<usize> {
+    content
+        .match_indices("sqlx::query(")
+        .find_map(|(start, _)| {
+            let tail = &content[start..];
+            let execute = tail.find(".execute(&mut *self.conn)")?;
+            let next_query = tail["sqlx::query(".len()..]
+                .find("sqlx::query(")
+                .map(|next| next + "sqlx::query(".len());
+            if next_query.is_some_and(|next| next < execute) {
+                return None;
+            }
+            tail[..execute].contains(required_sql).then_some(start)
+        })
 }
 
 fn braced_range(content: &str, open: usize) -> Option<Range<usize>> {
@@ -261,14 +333,17 @@ fn braced_range(content: &str, open: usize) -> Option<Range<usize>> {
     None
 }
 
-fn strip_comments_preserve_strings(src: &str) -> String {
+/// Masks comments and, when requested, string literals while preserving byte offsets.
+///
+/// Structural proof therefore cannot be satisfied by comments or string bait, while the parallel
+/// SQL proof can inspect the literal owned by an actual `sqlx::query` call at the same offsets.
+fn mask_source(src: &str, mask_strings: bool) -> String {
     #[derive(PartialEq)]
     enum State {
         Code,
         LineComment,
         BlockComment,
         String,
-        Char,
     }
 
     let mut out = String::with_capacity(src.len());
@@ -278,20 +353,18 @@ fn strip_comments_preserve_strings(src: &str) -> String {
         match state {
             State::Code => match ch {
                 '/' if chars.peek() == Some(&'/') => {
+                    out.push_str("  ");
                     chars.next();
                     state = State::LineComment;
                 }
                 '/' if chars.peek() == Some(&'*') => {
+                    out.push_str("  ");
                     chars.next();
                     state = State::BlockComment;
                 }
                 '"' => {
                     state = State::String;
-                    out.push(ch);
-                }
-                '\'' => {
-                    state = State::Char;
-                    out.push(ch);
+                    push_masked(&mut out, ch, mask_strings);
                 }
                 _ => out.push(ch),
             },
@@ -299,33 +372,28 @@ fn strip_comments_preserve_strings(src: &str) -> String {
                 if ch == '\n' {
                     state = State::Code;
                     out.push('\n');
+                } else {
+                    push_masked(&mut out, ch, true);
                 }
             }
             State::BlockComment => {
                 if ch == '*' && chars.peek() == Some(&'/') {
+                    out.push_str("  ");
                     chars.next();
                     state = State::Code;
                 } else if ch == '\n' {
                     out.push('\n');
+                } else {
+                    push_masked(&mut out, ch, true);
                 }
             }
             State::String => {
-                out.push(ch);
+                push_masked(&mut out, ch, mask_strings);
                 if ch == '\\' {
                     if let Some(escaped) = chars.next() {
-                        out.push(escaped);
+                        push_masked(&mut out, escaped, mask_strings);
                     }
                 } else if ch == '"' {
-                    state = State::Code;
-                }
-            }
-            State::Char => {
-                out.push(ch);
-                if ch == '\\' {
-                    if let Some(escaped) = chars.next() {
-                        out.push(escaped);
-                    }
-                } else if ch == '\'' {
                     state = State::Code;
                 }
             }
@@ -334,9 +402,66 @@ fn strip_comments_preserve_strings(src: &str) -> String {
     out
 }
 
+fn push_masked(out: &mut String, ch: char, mask: bool) {
+    if mask && ch != '\n' {
+        out.extend(std::iter::repeat_n(' ', ch.len_utf8()));
+    } else {
+        out.push(ch);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const GREEN_REPOSITORY: &str = r#"
+        impl ReconcileScheduleStore for PgReconcileStore {
+            async fn record_action_and_enqueue_command(&self) {
+                let committed = self.write.reconcile_write(tenant, move |mut tx| {
+                    Box::pin(async move {
+                        tx.reconcile_enqueue_command(ReconcileEnqueue {
+                            attempt_id: &attempt_id,
+                            fence,
+                            action_kind,
+                            intent,
+                            envelope: &env,
+                        }).await
+                    })
+                }).await?;
+                match committed {
+                    CommittedActionOutcome::FactConflictQuarantined => {
+                        Err(ReconcileScheduleError::fact_conflict(conflict))
+                    }
+                    _ => Ok(()),
+                }
+            }
+        }
+    "#;
+
+    const GREEN_FACADE: &str = r#"
+        impl ReconcileTx<'_, ServingWriteLane> {
+            pub(crate) async fn reconcile_enqueue_command(&mut self, enqueue: ReconcileEnqueue<'_>) {
+                if !self.reconcile_lock_held_lease(&enqueue.fence).await? {
+                    return Ok(CommittedActionOutcome::Lost);
+                }
+                sqlx::query("SAVEPOINT reconcile_command_write")
+                    .execute(&mut *self.conn).await?;
+                let mut command = CommandTx::from_parts(&mut *self.conn, self.tenant);
+                let prepared = prepare_command(&mut command, enqueue.intent).await?;
+                sqlx::query("INSERT INTO reconcile_actions (tenant_id) VALUES ($1)")
+                    .execute(&mut *self.conn).await?;
+                let mut outbox = OutboxTx::from_parts(&mut *self.conn, self.tenant);
+                append_outbox(&mut outbox, &prepared.entry, enqueue.envelope).await?;
+                sqlx::query("ROLLBACK TO SAVEPOINT reconcile_command_write")
+                    .execute(&mut *self.conn).await?;
+                sqlx::query("RELEASE SAVEPOINT reconcile_command_write")
+                    .execute(&mut *self.conn).await?;
+                sqlx::query("UPDATE reconcile_targets SET status = 'disabled'")
+                    .execute(&mut *self.conn).await?;
+                Ok(CommittedActionOutcome::FactConflictQuarantined)
+            }
+        }
+    "#;
 
     #[test]
     fn reconcile_outbox_command_guard_flags_direct_publisher_and_append() {
@@ -374,27 +499,15 @@ mod tests {
         );
         let pg_findings = scan_pg_adapter_content(
             Path::new("adapters/postgres/src/reconcile.rs"),
-            r#"
-            impl ReconcileScheduleStore for PgReconcileStore {
-                pub async fn record_action_and_enqueue_command(&self) {
-                    self.pool.write(tenant, move |tx| {
-                        Box::pin(async move {
-                            let held = lock_held_lease(tx, tenant, target, token, epoch).await?;
-                            begin_reconcile_command_savepoint(tx).await?;
-                            sqlx::query("INSERT INTO reconcile_actions (tenant_id) VALUES ($1)");
-                            append_outbox(tx, &entry, &env).await?;
-                            rollback_reconcile_command_savepoint(tx).await?;
-                            sqlx::query("UPDATE reconcile_targets SET status = 'disabled'");
-                            Ok(CommittedActionOutcome::FactConflictQuarantined)
-                            ReconcileScheduleError::fact_conflict(reason)
-                        })
-                    });
-                }
-            }
-            "#,
+            GREEN_REPOSITORY,
+        );
+        let facade_findings = scan_cotx_facade_content(
+            Path::new("adapters/postgres/src/cotx/reconcile.rs"),
+            GREEN_FACADE,
         );
         assert!(scheduler_findings.is_empty(), "{scheduler_findings:?}");
         assert!(pg_findings.is_empty(), "{pg_findings:?}");
+        assert!(facade_findings.is_empty(), "{facade_findings:?}");
     }
 
     #[test]
@@ -548,5 +661,115 @@ mod tests {
                 .iter()
                 .any(|f| f.rule == Rule::MissingTransactionalSeam)
         );
+    }
+
+    #[test]
+    fn rejects_repository_without_closed_facade_call() {
+        let source = GREEN_REPOSITORY.replace(
+            "tx.reconcile_enqueue_command(ReconcileEnqueue {",
+            "other.enqueue(ReconcileEnqueue {",
+        );
+        let findings =
+            scan_pg_adapter_content(Path::new("adapters/postgres/src/reconcile.rs"), &source);
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == Rule::MissingTransactionalSeam),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_facade_with_split_or_reordered_writes() {
+        let missing_action = GREEN_FACADE.replace(
+            "INSERT INTO reconcile_actions (tenant_id) VALUES ($1)",
+            "SELECT 1",
+        );
+        let reordered = GREEN_FACADE
+            .replacen(
+                "INSERT INTO reconcile_actions (tenant_id) VALUES ($1)",
+                "SELECT 1",
+                1,
+            )
+            .replace(
+                "append_outbox(&mut outbox, &prepared.entry, enqueue.envelope).await?;",
+                "append_outbox(&mut outbox, &prepared.entry, enqueue.envelope).await?;\n                // action is intentionally moved after outbox\n                sqlx::query(\"INSERT INTO reconcile_actions (tenant_id) VALUES ($1)\")\n                    .execute(&mut *self.conn).await?;",
+            );
+        let wrong_lane = GREEN_FACADE.replace("ServingWriteLane", "MaintenanceWriteLane");
+        for source in [
+            missing_action.as_str(),
+            reordered.as_str(),
+            wrong_lane.as_str(),
+        ] {
+            let findings = scan_cotx_facade_content(
+                Path::new("adapters/postgres/src/cotx/reconcile.rs"),
+                source,
+            );
+            assert!(
+                findings
+                    .iter()
+                    .any(|finding| finding.rule == Rule::MissingTransactionalSeam),
+                "{findings:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_string_and_comment_bait() {
+        let findings = scan_cotx_facade_content(
+            Path::new("adapters/postgres/src/cotx/reconcile.rs"),
+            r#"
+            impl TenantTx<'_, ServingWriteLane> {
+                async fn reconcile_enqueue_command(&mut self) {
+                    let bait = "self.reconcile_lock_held_lease(&enqueue.fence) \
+                        prepare_command(self, enqueue.intent) \
+                        append_outbox(self, &prepared.entry, enqueue.envelope) \
+                        INSERT INTO reconcile_actions SAVEPOINT reconcile_command_write \
+                        ROLLBACK TO SAVEPOINT reconcile_command_write \
+                        RELEASE SAVEPOINT reconcile_command_write SET status = 'disabled' \
+                        CommittedActionOutcome::FactConflictQuarantined";
+                    // self.reconcile_lock_held_lease(&enqueue.fence)
+                    // append_outbox(self, &prepared.entry, enqueue.envelope)
+                }
+            }
+            "#,
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == Rule::MissingTransactionalSeam),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn real_workspace_has_repository_to_closed_facade_transaction_topology() -> anyhow::Result<()> {
+        let root = workspace_root()?;
+        let repository = std::fs::read_to_string(root.join("adapters/postgres/src/reconcile.rs"))?;
+        let facade = std::fs::read_to_string(root.join("adapters/postgres/src/cotx/reconcile.rs"))?;
+        let facade_structure = mask_source(&facade, true);
+        let facade_proof = mask_source(&facade, false);
+        let facade_structure_body = function_body(&facade_structure, "reconcile_enqueue_command")
+            .expect("real façade method must exist");
+        let facade_proof_body = function_body(&facade_proof, "reconcile_enqueue_command")
+            .expect("real façade SQL body must exist");
+        assert!(
+            braced_body_after(&facade_structure, "impl ReconcileTx<'_, ServingWriteLane>")
+                .is_some_and(|body| body.contains("fn reconcile_enqueue_command")),
+            "real façade must belong to the exact serving-write lane"
+        );
+        assert!(
+            has_ordered_facade_steps(facade_structure_body, facade_proof_body),
+            "real façade must retain ordered CAS/action/outbox topology"
+        );
+        let repository_findings =
+            scan_pg_adapter_content(Path::new("adapters/postgres/src/reconcile.rs"), &repository);
+        let facade_findings = scan_cotx_facade_content(
+            Path::new("adapters/postgres/src/cotx/reconcile.rs"),
+            &facade,
+        );
+        assert!(repository_findings.is_empty(), "{repository_findings:?}");
+        assert!(facade_findings.is_empty(), "{facade_findings:?}");
+        Ok(())
     }
 }

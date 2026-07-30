@@ -7,7 +7,9 @@ use super::projection::{
 };
 use anyhow::Context as _;
 use eventexec::{OperatorReconcileCapability, ReconcileOperatorStore, ReconcileTargetSummary};
-use postgres::{MaintenanceAuditOutcome, PgMaintenanceDeps, PgReconcileStore, PgRuntimeDeps};
+use postgres::{
+    MaintenanceAuditOutcome, PgMaintenanceDeps, PgMaintenanceReconcileStore, PgRuntimeDeps,
+};
 
 use crate::infra::pg::build_pg_migrator_config;
 use crate::phase::{OperatorRuntimeCapability, OperatorRuntimeInputs};
@@ -208,7 +210,7 @@ pub(super) fn reconcile_summary_json(summary: &ReconcileTargetSummary) -> anyhow
 }
 
 pub(super) async fn execute_reconcile_target_command(
-    store: &PgReconcileStore,
+    store: &PgMaintenanceReconcileStore,
     parsed: &ReconcileTargetCliArgs,
     capability: OperatorReconcileCapability,
 ) -> anyhow::Result<ReconcileTargetSummary> {

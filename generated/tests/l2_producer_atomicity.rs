@@ -4,7 +4,9 @@ use std::collections::BTreeSet;
 
 #[path = "support/l2_assurance.rs"]
 mod l2_assurance_support;
-use l2_assurance_support::{AssuranceInventory, AssuranceRecord, FacetStatus, ProducerEvidence};
+use l2_assurance_support::{
+    AssuranceInventory, AssuranceRecord, CarrierKind, FacetStatus, ProducerEvidence,
+};
 
 const ASSURANCE_JSON: &str = include_str!("../l2-assurance.json");
 
@@ -105,7 +107,19 @@ fn assert_closed_execution(
             fault.provider_method.path,
             evidence.execution.terminals[0].provider_method.path
         );
-        assert_eq!(fault.transaction.path, "adapters/postgres/src/cotx/mod.rs");
+        assert!(matches!(
+            (
+                fault.transaction.path.as_str(),
+                fault.transaction.symbol.as_str(),
+            ),
+            (
+                "adapters/postgres/src/cotx/mod.rs",
+                "TenantDb::producer_tx" | "TenantDb::retry_producer_tx",
+            ) | (
+                "adapters/postgres/src/cotx/settings_audit.rs",
+                "TenantDb::retry_config_producer_tx",
+            )
+        ));
         assert_eq!(fault.rollback.symbol, "rollback_local_tx");
         assert_eq!(fault.commit_unknown.symbol, "finish_local_tx_commit_result");
         assert_eq!(
@@ -119,11 +133,14 @@ fn assert_closed_execution(
                     fault.no_replay.symbol.as_str(),
                 ),
                 (
-                    "PgWritePool::producer_tx",
+                    "TenantDb::producer_tx",
                     "ProducerTxAttempt::into_result"
                         | "ProducerTxAttempt::into_refresh_commit_result",
                 ) | (
-                    "PgWritePool::retry_producer_tx",
+                    "TenantDb::retry_producer_tx",
+                    "LocalTxAttempt::into_retry_result",
+                ) | (
+                    "TenantDb::retry_config_producer_tx",
                     "LocalTxAttempt::into_retry_result",
                 )
             ),
@@ -143,7 +160,15 @@ fn assert_closed_execution(
                 && terminal.provider_method.symbol.contains("::"),
             "{contract_id}"
         );
-        assert_eq!(terminal.capability.symbol, "TxCapability", "{contract_id}");
+        assert_eq!(
+            terminal.capability.kind,
+            CarrierKind::RustType,
+            "{contract_id}"
+        );
+        assert_eq!(
+            terminal.capability.symbol, "TenantTx<'_, ServingWriteLane>",
+            "{contract_id}"
+        );
         assert_eq!(
             terminal.append.symbol, "append_outbox_with_projection",
             "{contract_id}"
@@ -154,8 +179,17 @@ fn assert_closed_execution(
         );
         assert!(
             matches!(
-                terminal.transaction.symbol.as_str(),
-                "PgWritePool::producer_tx" | "PgWritePool::retry_producer_tx"
+                (
+                    terminal.transaction.path.as_str(),
+                    terminal.transaction.symbol.as_str(),
+                ),
+                (
+                    "adapters/postgres/src/cotx/mod.rs",
+                    "TenantDb::producer_tx" | "TenantDb::retry_producer_tx",
+                ) | (
+                    "adapters/postgres/src/cotx/settings_audit.rs",
+                    "TenantDb::retry_config_producer_tx",
+                )
             ),
             "{contract_id}"
         );

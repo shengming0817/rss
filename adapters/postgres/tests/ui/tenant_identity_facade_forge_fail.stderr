@@ -1,0 +1,5 @@
+error[E0451]: field `tx` of struct `postgres::tx_boundary_proof::IdentityWrite` is private
+ --> tests/ui/tenant_identity_facade_forge_fail.rs:4:29
+  |
+4 |     let _ = IdentityWrite { tx };
+  |                             ^^ private field

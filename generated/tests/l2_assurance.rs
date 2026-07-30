@@ -475,18 +475,31 @@ fn assert_producer_evidence(
                 && !terminal.production_composition.provider_factory.is_empty(),
             "{contract_id} production composition is incomplete"
         );
-        assert_eq!(
-            terminal.transaction.path, "adapters/postgres/src/cotx/mod.rs",
-            "{contract_id}"
-        );
         assert!(
             matches!(
-                terminal.transaction.symbol.as_str(),
-                "PgWritePool::producer_tx" | "PgWritePool::retry_producer_tx"
+                (
+                    terminal.transaction.path.as_str(),
+                    terminal.transaction.symbol.as_str(),
+                ),
+                (
+                    "adapters/postgres/src/cotx/mod.rs",
+                    "TenantDb::producer_tx" | "TenantDb::retry_producer_tx",
+                ) | (
+                    "adapters/postgres/src/cotx/settings_audit.rs",
+                    "TenantDb::retry_config_producer_tx",
+                )
             ),
             "{contract_id} transaction must use the only producer funnel"
         );
-        assert_eq!(terminal.capability.symbol, "TxCapability", "{contract_id}");
+        assert_eq!(
+            terminal.capability.kind,
+            CarrierKind::RustType,
+            "{contract_id}"
+        );
+        assert_eq!(
+            terminal.capability.symbol, "TenantTx<'_, ServingWriteLane>",
+            "{contract_id}"
+        );
         assert_eq!(
             terminal.append.symbol, "append_outbox_with_projection",
             "{contract_id}"
@@ -549,8 +562,17 @@ fn assert_producer_fault(evidence: &ProducerEvidence, contract_id: &str, emitted
         );
         assert!(
             matches!(
-                terminal.transaction.symbol.as_str(),
-                "PgWritePool::producer_tx" | "PgWritePool::retry_producer_tx"
+                (
+                    terminal.transaction.path.as_str(),
+                    terminal.transaction.symbol.as_str(),
+                ),
+                (
+                    "adapters/postgres/src/cotx/mod.rs",
+                    "TenantDb::producer_tx" | "TenantDb::retry_producer_tx",
+                ) | (
+                    "adapters/postgres/src/cotx/settings_audit.rs",
+                    "TenantDb::retry_config_producer_tx",
+                )
             ),
             "{contract_id}"
         );
@@ -582,12 +604,16 @@ fn assert_producer_fault(evidence: &ProducerEvidence, contract_id: &str, emitted
                     terminal.no_replay.symbol.as_str(),
                 ),
                 (
-                    "PgWritePool::producer_tx",
+                    "TenantDb::producer_tx",
                     "adapters/postgres/src/cotx/mod.rs",
                     "ProducerTxAttempt::into_result"
                         | "ProducerTxAttempt::into_refresh_commit_result",
                 ) | (
-                    "PgWritePool::retry_producer_tx",
+                    "TenantDb::retry_producer_tx",
+                    "adapters/postgres/src/cotx/settlement.rs",
+                    "LocalTxAttempt::into_retry_result",
+                ) | (
+                    "TenantDb::retry_config_producer_tx",
                     "adapters/postgres/src/cotx/settlement.rs",
                     "LocalTxAttempt::into_retry_result",
                 )

@@ -1,7 +1,7 @@
 //! PostgreSQL projection_events adapter（append-only changelog 源，#1122/#1628）。
 //!
 //! 写路径没有 naked `PgPool` / `PgConnection` append API。生产 outbox 持久化在同一事务内拿
-//! [`crate::cotx::TxCapability`] 调 [`append_projection_event_if_bound`]，该 helper 仅在 outbox `event_id`
+//! [`crate::cotx::eventing::EventingTx`] 调 [`append_projection_event_if_bound`]，该 helper 仅在 outbox `event_id`
 //! 新插入且 `(contract_id, version, schema_hash, topic)` 命中 generated [`ProjectionWriteRegistry`] 时，
 //! 调用 DB 固定 `rss_append_projection_event(...)` 函数写入 projection journal。
 //!
@@ -38,8 +38,9 @@ use sqlx::PgPool;
 use vocab::ProjectionInputBinding;
 
 use crate::PgStore;
-use crate::cotx::TxCapability;
-use crate::outbox::{OutboxEnvelope, ReplayedOutboxAppend};
+use crate::cotx::ServingWriteLane;
+use crate::cotx::eventing::{EventingTx, GeneratedOutboxConcern};
+use crate::outbox::OutboxEnvelope;
 
 /// PostgreSQL projection_events adapter（append-only changelog 源）。
 ///
@@ -272,10 +273,10 @@ pub(crate) fn projection_input_generation(bindings: &[ProjectionInputBinding]) -
 
 /// Mirror an inserted outbox fact when the compiled assembly workflow selection binds it.
 ///
-/// This function accepts only [`TxCapability`], so it can run solely inside the same transaction as
+/// This function accepts only [`TenantTx`], so it can run solely inside the same transaction as
 /// the outbox insert. It intentionally returns `Ok(None)` for unbound facts.
-pub(crate) async fn append_projection_event_if_bound(
-    tx: &mut TxCapability<'_>,
+pub(crate) async fn append_projection_event_if_bound<C: GeneratedOutboxConcern>(
+    tx: &mut EventingTx<'_, ServingWriteLane, C>,
     entry: &consistency::EventEntry,
     env: &OutboxEnvelope,
     registry: &ProjectionWriteRegistry,
@@ -291,9 +292,8 @@ pub(crate) async fn append_projection_event_if_bound(
 
     let aggregate_id = env.partition_key().unwrap_or(entry.idem_key().as_str());
     let metadata_json = env.metadata_json();
-    append_projection_event(
-        tx,
-        ProjectionAppend {
+    let id = tx
+        .projection_append(ProjectionAppend {
             event_id: entry.idem_key().as_str(),
             domain: env.domain(),
             aggregate_id,
@@ -306,93 +306,25 @@ pub(crate) async fn append_projection_event_if_bound(
             metadata_json: &metadata_json,
             partition_key: env.partition_key(),
             causation_id: env.causation_id(),
-        },
-    )
-    .await
-    .map(Some)
-}
-
-pub(crate) async fn append_replayed_projection_event_if_bound(
-    tx: &mut TxCapability<'_>,
-    replay: &ReplayedOutboxAppend,
-    registry: &ProjectionWriteRegistry,
-) -> Result<Option<Lsn>, sqlx::Error> {
-    if !registry.is_bound(
-        &replay.contract_id,
-        &replay.contract_version,
-        &replay.schema_hash,
-        &replay.topic,
-    ) {
-        return Ok(None);
-    }
-
-    let metadata_json = std::str::from_utf8(replay.metadata_json.expose())
-        .map_err(|error| sqlx::Error::Decode(Box::new(error)))?;
-
-    append_projection_event(
-        tx,
-        ProjectionAppend {
-            event_id: &replay.event_id,
-            domain: &replay.domain,
-            aggregate_id: &replay.event_id,
-            topic: &replay.topic,
-            payload: replay.payload.expose(),
-            correlation_id: replay.causation_id.as_deref(),
-            contract_id: &replay.contract_id,
-            contract_version: &replay.contract_version,
-            schema_hash: &replay.schema_hash,
-            metadata_json,
-            partition_key: None,
-            causation_id: replay.causation_id.as_deref(),
-        },
-    )
-    .await
-    .map(Some)
-}
-
-struct ProjectionAppend<'a> {
-    event_id: &'a str,
-    domain: &'a str,
-    aggregate_id: &'a str,
-    topic: &'a str,
-    payload: &'a [u8],
-    correlation_id: Option<&'a str>,
-    contract_id: &'a str,
-    contract_version: &'a str,
-    schema_hash: &'a str,
-    metadata_json: &'a str,
-    partition_key: Option<&'a str>,
-    causation_id: Option<&'a str>,
-}
-
-async fn append_projection_event(
-    tx: &mut TxCapability<'_>,
-    append: ProjectionAppend<'_>,
-) -> Result<Lsn, sqlx::Error> {
-    let (id,): (i64,) = sqlx::query_as(
-        r#"
-        SELECT rss_append_projection_event(
-            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12
-        )
-        "#,
-    )
-    .bind(append.event_id)
-    .bind(append.domain)
-    .bind(append.aggregate_id)
-    .bind(append.topic)
-    .bind(append.payload)
-    .bind(append.correlation_id)
-    .bind(append.contract_id)
-    .bind(append.contract_version)
-    .bind(append.schema_hash)
-    .bind(append.metadata_json)
-    .bind(append.partition_key)
-    .bind(append.causation_id)
-    .fetch_one(tx.conn())
-    .await?;
-
+        })
+        .await?;
     let lsn = u64::try_from(id).map_err(|err| sqlx::Error::Decode(Box::new(err)))?;
-    Ok(Lsn::new(lsn))
+    Ok(Some(Lsn::new(lsn)))
+}
+
+pub(crate) struct ProjectionAppend<'a> {
+    pub(crate) event_id: &'a str,
+    pub(crate) domain: &'a str,
+    pub(crate) aggregate_id: &'a str,
+    pub(crate) topic: &'a str,
+    pub(crate) payload: &'a [u8],
+    pub(crate) correlation_id: Option<&'a str>,
+    pub(crate) contract_id: &'a str,
+    pub(crate) contract_version: &'a str,
+    pub(crate) schema_hash: &'a str,
+    pub(crate) metadata_json: &'a str,
+    pub(crate) partition_key: Option<&'a str>,
+    pub(crate) causation_id: Option<&'a str>,
 }
 
 impl PgProjectionEvents {

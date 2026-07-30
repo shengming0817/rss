@@ -22,10 +22,32 @@ use identity::ports::device_certificate::{
 };
 use sqlx::PgConnection;
 
-use crate::cotx::{PgTenantReadPool, PgTenantWritePool};
+use crate::cotx::{ServingReadLane, ServingWriteLane, TenantDb};
 use crate::pool::{VerifiedPgReadStore, VerifiedPgWriteStore};
 
 type RepoError = DeviceCertificateRepositoryError;
+
+/// Read-only device-certificate authority within one tenant-bound transaction.
+pub(crate) struct DeviceCertificateReadTx<'tx> {
+    conn: &'tx mut PgConnection,
+}
+
+impl<'tx> DeviceCertificateReadTx<'tx> {
+    pub(crate) fn new(conn: &'tx mut PgConnection) -> Self {
+        Self { conn }
+    }
+}
+
+/// Mutable device-certificate authority within one tenant-bound transaction.
+pub(crate) struct DeviceCertificateWriteTx<'tx> {
+    conn: &'tx mut PgConnection,
+}
+
+impl<'tx> DeviceCertificateWriteTx<'tx> {
+    pub(crate) fn new(conn: &'tx mut PgConnection) -> Self {
+        Self { conn }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RepositoryOperation {
@@ -48,8 +70,8 @@ impl RepositoryOperation {
 
 /// Tenant-scoped PostgreSQL implementation of the device-certificate persistence port.
 pub struct PgDeviceCertificateRepository {
-    read_pool: PgTenantReadPool,
-    write_pool: PgTenantWritePool,
+    read_pool: TenantDb<ServingReadLane>,
+    write_pool: TenantDb<ServingWriteLane>,
     #[cfg(all(test, feature = "integration"))]
     fail_after_desired_write: bool,
     #[cfg(all(test, feature = "integration"))]
@@ -66,8 +88,8 @@ impl PgDeviceCertificateRepository {
     /// Construct from serving capabilities verified by the runtime bundle.
     pub(crate) fn new(reader: &VerifiedPgReadStore, writer: &VerifiedPgWriteStore) -> Self {
         Self {
-            read_pool: PgTenantReadPool::new(reader),
-            write_pool: PgTenantWritePool::new(writer),
+            read_pool: TenantDb::<ServingReadLane>::new(reader),
+            write_pool: TenantDb::<ServingWriteLane>::new(writer),
             #[cfg(all(test, feature = "integration"))]
             fail_after_desired_write: false,
             #[cfg(all(test, feature = "integration"))]
@@ -78,8 +100,8 @@ impl PgDeviceCertificateRepository {
     #[cfg(all(test, feature = "integration"))]
     pub(crate) fn from_unverified_for_test(store: &crate::PgStore) -> Self {
         Self {
-            read_pool: PgTenantReadPool::from_unverified_for_test(store),
-            write_pool: PgTenantWritePool::from_unverified_for_test(store),
+            read_pool: TenantDb::<ServingReadLane>::from_unverified_for_test(store),
+            write_pool: TenantDb::<ServingWriteLane>::from_unverified_for_test(store),
             fail_after_desired_write: false,
             load_snapshot_hook: None,
         }
@@ -91,8 +113,8 @@ impl PgDeviceCertificateRepository {
         writer: &crate::PgStore,
     ) -> Self {
         Self {
-            read_pool: PgTenantReadPool::from_unverified_for_test(reader),
-            write_pool: PgTenantWritePool::from_unverified_for_test(writer),
+            read_pool: TenantDb::<ServingReadLane>::from_unverified_for_test(reader),
+            write_pool: TenantDb::<ServingWriteLane>::from_unverified_for_test(writer),
             fail_after_desired_write: false,
             load_snapshot_hook: None,
         }
@@ -404,11 +426,7 @@ fn reported_payload_equal(
             == optional_time_to_epoch_micros(input.device_observed_at())?)
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn compare_and_swap_desired_in_tx(
-    conn: &mut PgConnection,
-    tenant: &str,
-    device: &str,
+struct DesiredWriteParams {
     expected: i64,
     next: i64,
     validity: i32,
@@ -416,8 +434,15 @@ async fn compare_and_swap_desired_in_tx(
     client_auth: bool,
     server_auth: bool,
     sans: Vec<String>,
+}
+
+async fn compare_and_swap_desired_in_tx(
+    conn: &mut PgConnection,
+    tenant: &str,
+    device: &str,
+    params: DesiredWriteParams,
 ) -> Result<DesiredCasOutcome, RepoError> {
-    let row = if expected == 0 {
+    let row = if params.expected == 0 {
         sqlx::query_as::<_, DesiredRow>(
             "INSERT INTO device_certificate_desired_states \
              (tenant_id, device_id, generation, validity_seconds, renew_before_seconds, \
@@ -431,12 +456,12 @@ async fn compare_and_swap_desired_in_tx(
         )
         .bind(tenant)
         .bind(device)
-        .bind(next)
-        .bind(validity)
-        .bind(renew_before)
-        .bind(client_auth)
-        .bind(server_auth)
-        .bind(sans)
+        .bind(params.next)
+        .bind(params.validity)
+        .bind(params.renew_before)
+        .bind(params.client_auth)
+        .bind(params.server_auth)
+        .bind(params.sans)
         .fetch_optional(&mut *conn)
         .await
         .map_err(storage)?
@@ -453,13 +478,13 @@ async fn compare_and_swap_desired_in_tx(
         )
         .bind(tenant)
         .bind(device)
-        .bind(next)
-        .bind(validity)
-        .bind(renew_before)
-        .bind(client_auth)
-        .bind(server_auth)
-        .bind(sans)
-        .bind(expected)
+        .bind(params.next)
+        .bind(params.validity)
+        .bind(params.renew_before)
+        .bind(params.client_auth)
+        .bind(params.server_auth)
+        .bind(params.sans)
+        .bind(params.expected)
         .fetch_optional(&mut *conn)
         .await
         .map_err(storage)?
@@ -482,6 +507,132 @@ async fn compare_and_swap_desired_in_tx(
     Ok(DesiredCasOutcome::Conflict {
         actual: ExpectedGeneration::restore(actual).map_err(corrupt)?,
     })
+}
+
+impl DeviceCertificateReadTx<'_> {
+    async fn desired(
+        &mut self,
+        tenant: &str,
+        device: &str,
+    ) -> Result<Option<DesiredRow>, RepoError> {
+        select_desired(self.conn, tenant, device).await
+    }
+
+    async fn reported(
+        &mut self,
+        tenant: &str,
+        device: &str,
+    ) -> Result<Option<ReportedRow>, RepoError> {
+        select_reported(self.conn, tenant, device, false).await
+    }
+
+    async fn conditions(
+        &mut self,
+        tenant: &str,
+        device: &str,
+    ) -> Result<Vec<DeviceConditionRestore>, RepoError> {
+        select_conditions(self.conn, tenant, device).await
+    }
+}
+
+impl DeviceCertificateWriteTx<'_> {
+    async fn compare_and_swap_desired(
+        &mut self,
+        tenant: &str,
+        device: &str,
+        params: DesiredWriteParams,
+    ) -> Result<DesiredCasOutcome, RepoError> {
+        compare_and_swap_desired_in_tx(self.conn, tenant, device, params).await
+    }
+
+    async fn desired_generation_for_update(
+        &mut self,
+        tenant: &str,
+        device: &str,
+    ) -> Result<Option<i64>, RepoError> {
+        select_desired_for_update(self.conn, tenant, device).await
+    }
+
+    async fn reported_for_update(
+        &mut self,
+        tenant: &str,
+        device: &str,
+    ) -> Result<Option<ReportedRow>, RepoError> {
+        select_reported(self.conn, tenant, device, true).await
+    }
+
+    async fn upsert_reported(
+        &mut self,
+        tenant: &str,
+        device: &str,
+        input: &ReportedStateWrite,
+        observed: i64,
+    ) -> Result<ReportedRow, RepoError> {
+        let expires = optional_time_to_epoch_micros(input.expires_at())?;
+        let observed_at = optional_time_to_epoch_micros(input.device_observed_at())?;
+        sqlx::query_as::<_, ReportedRow>(
+            "INSERT INTO device_certificate_reported_states \
+             (tenant_id, device_id, observed_generation, fence_epoch, state_hash, \
+              artifact_digest, report_envelope_id, device_sequence, expires_at, \
+              device_observed_at) \
+             VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8, \
+                     TIMESTAMPTZ 'epoch' + $9::bigint * INTERVAL '1 microsecond', \
+                     TIMESTAMPTZ 'epoch' + $10::bigint * INTERVAL '1 microsecond') \
+             ON CONFLICT (tenant_id, device_id) DO UPDATE SET \
+                observed_generation = EXCLUDED.observed_generation, \
+                fence_epoch = EXCLUDED.fence_epoch, state_hash = EXCLUDED.state_hash, \
+                artifact_digest = EXCLUDED.artifact_digest, \
+                report_envelope_id = EXCLUDED.report_envelope_id, \
+                device_sequence = EXCLUDED.device_sequence, expires_at = EXCLUDED.expires_at, \
+                device_observed_at = EXCLUDED.device_observed_at \
+             RETURNING observed_generation, fence_epoch, state_hash, \
+             artifact_digest, report_envelope_id, device_sequence, \
+             floor(extract(epoch FROM expires_at) * 1000000)::bigint \
+             AS expires_at_micros, \
+             floor(extract(epoch FROM device_observed_at) * 1000000)::bigint \
+             AS device_observed_at_micros, \
+             floor(extract(epoch FROM received_at) * 1000000)::bigint \
+             AS received_at_micros",
+        )
+        .bind(tenant)
+        .bind(device)
+        .bind(observed)
+        .bind(to_i64(input.fence_epoch().get())?)
+        .bind(input.state_hash().as_bytes().as_slice())
+        .bind(input.artifact_digest().as_bytes().as_slice())
+        .bind(input.report_envelope_id().as_str())
+        .bind(to_i64(input.device_sequence().get())?)
+        .bind(expires)
+        .bind(observed_at)
+        .fetch_one(&mut *self.conn)
+        .await
+        .map_err(storage)
+    }
+
+    async fn upsert_condition(
+        &mut self,
+        tenant: &str,
+        device: &str,
+        state: DeviceConditionState,
+    ) -> Result<(), RepoError> {
+        upsert_condition(self.conn, tenant, device, state).await
+    }
+
+    async fn conditions(
+        &mut self,
+        tenant: &str,
+        device: &str,
+    ) -> Result<Vec<DeviceConditionRestore>, RepoError> {
+        select_conditions(self.conn, tenant, device).await
+    }
+
+    async fn desired(
+        &mut self,
+        tenant: &str,
+        device: &str,
+    ) -> Result<Option<DesiredRow>, RepoError> {
+        select_desired(self.conn, tenant, device).await
+    }
 }
 
 impl DeviceCertificateRepository for PgDeviceCertificateRepository {
@@ -507,23 +658,27 @@ impl DeviceCertificateRepository for PgDeviceCertificateRepository {
         #[cfg(all(test, feature = "integration"))]
         let fail_after_desired_write = self.fail_after_desired_write;
         self.write_pool
-            .write(
+            .identity_write(
                 scope,
-                move |tx| {
+                move |mut tx| {
                     Box::pin(async move {
-                        let outcome = compare_and_swap_desired_in_tx(
-                            tx.conn(),
-                            &tenant,
-                            &device,
-                            expected,
-                            next,
-                            validity,
-                            renew_before,
-                            client_auth,
-                            server_auth,
-                            sans,
-                        )
-                        .await?;
+                        let mut identity = tx.identity();
+                        let mut tx = identity.device_certificates();
+                        let outcome = tx
+                            .compare_and_swap_desired(
+                                &tenant,
+                                &device,
+                                DesiredWriteParams {
+                                    expected,
+                                    next,
+                                    validity,
+                                    renew_before,
+                                    client_auth,
+                                    server_auth,
+                                    sans,
+                                },
+                            )
+                            .await?;
                         #[cfg(all(test, feature = "integration"))]
                         if fail_after_desired_write
                             && matches!(outcome, DesiredCasOutcome::Applied(_))
@@ -556,12 +711,14 @@ impl DeviceCertificateRepository for PgDeviceCertificateRepository {
         let tenant = tenant_param(scope);
         let device = device_param(scope);
         self.write_pool
-            .write(
+            .identity_write(
                 scope,
-                move |tx| {
+                move |mut tx| {
                     Box::pin(async move {
+                        let mut identity = tx.identity();
+                        let mut tx = identity.device_certificates();
                         let Some(desired_generation) =
-                            select_desired_for_update(tx.conn(), &tenant, &device).await?
+                            tx.desired_generation_for_update(&tenant, &device).await?
                         else {
                             return Ok(ReportedWriteOutcome::MissingDesired);
                         };
@@ -569,7 +726,7 @@ impl DeviceCertificateRepository for PgDeviceCertificateRepository {
                         if observed > desired_generation {
                             return Ok(ReportedWriteOutcome::AheadOfDesired);
                         }
-                        let current = select_reported(tx.conn(), &tenant, &device, true).await?;
+                        let current = tx.reported_for_update(&tenant, &device).await?;
                         if let Some(row) = &current {
                             if observed < row.observed_generation {
                                 return Ok(ReportedWriteOutcome::StaleGeneration);
@@ -585,46 +742,9 @@ impl DeviceCertificateRepository for PgDeviceCertificateRepository {
                                 return Ok(ReportedWriteOutcome::StaleSequence);
                             }
                         }
-                        let expires = optional_time_to_epoch_micros(input.expires_at())?;
-                        let observed_at =
-                            optional_time_to_epoch_micros(input.device_observed_at())?;
-                        let row = sqlx::query_as::<_, ReportedRow>(
-                            "INSERT INTO device_certificate_reported_states \
-                             (tenant_id, device_id, observed_generation, fence_epoch, state_hash, \
-                              artifact_digest, report_envelope_id, device_sequence, expires_at, \
-                              device_observed_at) \
-                             VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8, \
-                                     TIMESTAMPTZ 'epoch' + $9::bigint * INTERVAL '1 microsecond', \
-                                     TIMESTAMPTZ 'epoch' + $10::bigint * INTERVAL '1 microsecond') \
-                             ON CONFLICT (tenant_id, device_id) DO UPDATE SET \
-                                observed_generation = EXCLUDED.observed_generation, \
-                                fence_epoch = EXCLUDED.fence_epoch, state_hash = EXCLUDED.state_hash, \
-                                artifact_digest = EXCLUDED.artifact_digest, \
-                                report_envelope_id = EXCLUDED.report_envelope_id, \
-                                device_sequence = EXCLUDED.device_sequence, expires_at = EXCLUDED.expires_at, \
-                                device_observed_at = EXCLUDED.device_observed_at \
-                             RETURNING observed_generation, fence_epoch, state_hash, \
-                             artifact_digest, report_envelope_id, device_sequence, \
-                             floor(extract(epoch FROM expires_at) * 1000000)::bigint \
-                             AS expires_at_micros, \
-                             floor(extract(epoch FROM device_observed_at) * 1000000)::bigint \
-                             AS device_observed_at_micros, \
-                             floor(extract(epoch FROM received_at) * 1000000)::bigint \
-                             AS received_at_micros",
-                        )
-                        .bind(&tenant)
-                        .bind(&device)
-                        .bind(observed)
-                        .bind(to_i64(input.fence_epoch().get())?)
-                        .bind(input.state_hash().as_bytes().as_slice())
-                        .bind(input.artifact_digest().as_bytes().as_slice())
-                        .bind(input.report_envelope_id().as_str())
-                        .bind(to_i64(input.device_sequence().get())?)
-                        .bind(expires)
-                        .bind(observed_at)
-                        .fetch_one(tx.conn())
-                        .await
-                        .map_err(storage)?;
+                        let row = tx
+                            .upsert_reported(&tenant, &device, &input, observed)
+                            .await?;
                         Ok(ReportedWriteOutcome::Applied(
                             ReportedStateSnapshot::restore(restore_reported(row)?)
                                 .map_err(corrupt)?,
@@ -652,12 +772,14 @@ impl DeviceCertificateRepository for PgDeviceCertificateRepository {
         let tenant = tenant_param(scope);
         let device = device_param(scope);
         self.write_pool
-            .write(
+            .identity_write(
                 scope,
-                move |tx| {
+                move |mut tx| {
                     Box::pin(async move {
+                        let mut identity = tx.identity();
+                        let mut tx = identity.device_certificates();
                         let Some(desired_generation) =
-                            select_desired_for_update(tx.conn(), &tenant, &device).await?
+                            tx.desired_generation_for_update(&tenant, &device).await?
                         else {
                             return Ok(ConditionUpsertOutcome::MissingDesired);
                         };
@@ -669,14 +791,12 @@ impl DeviceCertificateRepository for PgDeviceCertificateRepository {
                             return Ok(ConditionUpsertOutcome::AheadOfDesired);
                         }
                         for state in conditions.into_states() {
-                            upsert_condition(tx.conn(), &tenant, &device, state).await?;
+                            tx.upsert_condition(&tenant, &device, state).await?;
                         }
-                        let restored = select_conditions(tx.conn(), &tenant, &device).await?;
-                        let desired = select_desired(tx.conn(), &tenant, &device)
-                            .await?
-                            .ok_or_else(|| {
-                                corrupt(DeviceCertificateError::InvalidPersistedValue)
-                            })?;
+                        let restored = tx.conditions(&tenant, &device).await?;
+                        let desired = tx.desired(&tenant, &device).await?.ok_or_else(|| {
+                            corrupt(DeviceCertificateError::InvalidPersistedValue)
+                        })?;
                         let snapshot = DeviceCertificateStateSnapshot::restore(
                             scope,
                             restore_desired(desired)?,
@@ -711,11 +831,13 @@ impl DeviceCertificateRepository for PgDeviceCertificateRepository {
         #[cfg(all(test, feature = "integration"))]
         let load_snapshot_hook = self.load_snapshot_hook.clone();
         self.read_pool
-            .repeatable_read_map(
+            .identity_repeatable_read_map(
                 scope,
-                move |conn| {
+                move |mut tx| {
                     Box::pin(async move {
-                        let Some(desired) = select_desired(conn, &tenant, &device).await? else {
+                        let mut identity = tx.identity();
+                        let mut tx = identity.device_certificates();
+                        let Some(desired) = tx.desired(&tenant, &device).await? else {
                             return Ok(None);
                         };
                         #[cfg(all(test, feature = "integration"))]
@@ -723,11 +845,12 @@ impl DeviceCertificateRepository for PgDeviceCertificateRepository {
                             hook.desired_loaded.notify_one();
                             hook.resume.notified().await;
                         }
-                        let reported = select_reported(conn, &tenant, &device, false)
+                        let reported = tx
+                            .reported(&tenant, &device)
                             .await?
                             .map(restore_reported)
                             .transpose()?;
-                        let conditions = select_conditions(conn, &tenant, &device).await?;
+                        let conditions = tx.conditions(&tenant, &device).await?;
                         DeviceCertificateStateSnapshot::restore(
                             scope,
                             restore_desired(desired)?,

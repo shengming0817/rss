@@ -1,0 +1,27 @@
+error[E0521]: borrowed data escapes outside of closure
+ --> tests/ui/tenant_tx_hrtb_escape_fail.rs:7:18
+  |
+6 |     require_identity_operation(|tx| Box::pin(async move {
+  |                                 --
+  |                                 |
+  |                                 `tx` is a reference that is only valid in the closure body
+  |                                 has type `postgres::tx_boundary_proof::IdentityTx<'1, '_, postgres::tx_boundary_proof::ServingWriteLane>`
+7 |         unsafe { ESCAPED = Some(tx); }
+  |                  ^^^^^^^^^^^^^^^^^^
+  |                  |
+  |                  `tx` escapes the closure body here
+  |                  assignment requires that `'1` must outlive `'static`
+
+error[E0521]: borrowed data escapes outside of closure
+ --> tests/ui/tenant_tx_hrtb_escape_fail.rs:7:18
+  |
+6 |     require_identity_operation(|tx| Box::pin(async move {
+  |                                 --
+  |                                 |
+  |                                 `tx` is a reference that is only valid in the closure body
+  |                                 has type `postgres::tx_boundary_proof::IdentityTx<'_, '2, postgres::tx_boundary_proof::ServingWriteLane>`
+7 |         unsafe { ESCAPED = Some(tx); }
+  |                  ^^^^^^^^^^^^^^^^^^
+  |                  |
+  |                  `tx` escapes the closure body here
+  |                  assignment requires that `'2` must outlive `'static`

@@ -88,13 +88,17 @@ SPIFFE-ID 只证明 workload service principal，经 exact allow-set 与 `RouteA
 ## RLS 与 PG scope
 
 - PG tenant scope 使用 `SET LOCAL` 注入当前事务。
-- tenant-scoped repository 不持有 raw `sqlx::PgPool` / `PgStore`，只持有所需的 opaque
-  `PgTenantReadPool` / `PgTenantWritePool`；普通 repo 入口只能接收本地 `TenantRepoScope` / `RowRepoScope`，
+- tenant-scoped repository 不持有 raw `sqlx::PgPool` / `PgStore`，只持有所需的 exact sealed lane：
+  `TenantDb<ServingReadLane>`、`TenantDb<ServingWriteLane>` 或命名的 admin / maintenance lane；普通 repo
+  入口只能接收本地 `TenantRepoScope` / `RowRepoScope`，
   不能接收裸 `TenantId`、`RowVisibility`、`RowScope` 或 `ScopedTenant`。
 - 独立查询只经 read pool；mutation、deadline、retry 与 co-tx 只经 write pool。
   reader 必须原子发送 `BEGIN READ ONLY` 后再 `SET LOCAL`；写事务内部为 CAS/锁定所需的 SELECT 仍属同一 writer transaction。
-- 两类 capability 均不暴露 `begin`、`acquire`、raw pool/store 或 `Executor`，绕过类型入口直接借连接
-  或走 global transaction 必须 fail-fast。
+- `TenantDb` 不暴露 `begin`、`acquire`、raw pool/store 或通用 executor。完成 `SET LOCAL` 后才由 funnel
+  私有铸造 `TenantTx<ServingReadLane>`、`TenantTx<ServingWriteLane>` 或对应的 admin / maintenance lane；
+  通用事务只在 `cotx` 内核可见，repository closure 仅收到 lane + concern 双重封闭的 capability，
+  不能恢复 `PgConnection`、提交任意 SQL、开启嵌套事务或调用 commit/rollback。exact lane 与 DB
+  read-only/ACL/RLS 共同约束可执行操作；绕过类型入口直接借连接或走 global transaction 必须 fail-fast。
 - 含 `tenant_id` 列的表必须有 `ENABLE ROW LEVEL SECURITY` + `FORCE ROW LEVEL SECURITY` + tenant-isolation
   policy；缺失即门红。新增 tenant relation 必须在同一 migration 显式授予 reader SELECT，
   reader DML 与 `ALTER DEFAULT PRIVILEGES` 一律门红。
@@ -115,8 +119,9 @@ SPIFFE-ID 只证明 workload service principal，经 exact allow-set 与 `RouteA
 ### 各 durable 表的 tenant 约束
 
 - **append-only 版本表**（如 `secret_refs`）：`rss_app` 仅 `SELECT, INSERT`，DB CHECK 拒绝直接
-  `UPDATE/DELETE`，删除只允许追加 tombstone。Hard 载体是私有 key-lock capability——唯一构造器在当前
-  `TxCapability` 上按 canonical 坐标取 advisory lock，CAS 与 tombstone 只能消费该 capability 内的坐标。
+  `UPDATE/DELETE`，删除只允许追加 tombstone。Hard 载体是 `SecretTx<ServingWriteLane>` 上封闭的
+  `SecretWrite::lock_key` façade；它按 canonical 坐标取得 advisory lock 并返回私有 `LockedSecretKey`，
+  CAS 与 tombstone 只能消费该 capability 内的坐标。
   载体：`TENANCY-SECRET-KEY-MUTATION-01`（`cargo xtask pg-tenant-tx-guard`）。
 - **outbox**：`tenant_id` 与 metadata `tenantId` 同源落库并受 RLS 约束。emit-only 与 co-tx 路径都必须先
   `SET LOCAL`，co-tx 拒绝 envelope tenant 与事务 tenant 不一致。head-of-partition gating 按
@@ -152,11 +157,13 @@ tenant repo 也无法直接调用 raw pool 的 transaction / connection API。
 载体：`INVARIANT: TENANCY-SETLOCAL-FUNNEL-01`（`cargo xtask setlocal-funnel`）。
 
 **raw-pool / TxManager bypass 守卫**：`INVARIANT: TENANCY-PG-TX-FUNNEL-01` 由两层承载。
-Hard 层是互不可换的 read / write pool——tenant 表 adapter 按行为只存所需 capability，混合 repo 显式存两者，
-不保留已删除混合 pool 的 alias 或兼容构造器。Medium backstop 从迁移派生 tenant 表集合并扫描生产 SQL site，
+Hard 层是 sealed `TenantDb<ServingReadLane>` / `TenantDb<ServingWriteLane>` 及对应的 admin / maintenance lane，
+与其 private-mint `TenantTx<Lane>`——tenant 表 adapter 按行为只存
+所需 exact lane，closure 只能取得一个不可互换的 concern capability；混合 repo 显式存多个精确 lane，
+不保留已删除 pool alias、access brand、通用 executor 或兼容构造器。Medium backstop 从迁移派生 tenant 表集合并扫描生产 SQL site，
 禁止 tenant 表 SQL 经 raw `begin` / `acquire` / pool executor / 全局事务访问，并带 anti-vacuity 与 stale
 allowlist 测试。写事务内 SELECT 由 writer capability 所有，不被误判为独立读。
-载体：`TENANCY-PG-READ-LANE-01`（`cargo xtask pg-tenant-tx-guard`）。
+载体：`TENANCY-PG-TX-FUNNEL-01`（`cargo xtask pg-tenant-tx-guard`）。
 
 **repo scope 签名守卫**：禁止普通 tenant/row-scoped repo 方法重新引入裸 `TenantId`、`RowVisibility`、
 `RowScope` 或 `ScopedTenant` 参数；admin / maintenance 专用 port 保持独立入口。

@@ -33,7 +33,8 @@ use consistency::{
 use sqlx::{PgPool, Row};
 
 use crate::PgStore;
-use crate::cotx::{PgTenantReadPool, PgTenantWritePool, TxCapability, infra_tenant_scope};
+use crate::cotx::eventing::{EventingTx, InboxOperationConcern};
+use crate::cotx::{ServingReadLane, ServingWriteLane, TenantDb, infra_tenant_scope};
 use crate::delivery_policy::EventDeliveryPolicy;
 use crate::pool::{VerifiedPgReadStore, VerifiedPgWriteStore};
 
@@ -46,8 +47,8 @@ pub const INBOX_LEASE_TTL_SECONDS: i64 = 60;
 ///
 /// 私有字段分别持 typed read/write capability；tenant 表访问必须经对应 scope funnel。
 pub struct PgInboxStore {
-    read_pool: PgTenantReadPool,
-    write_pool: PgTenantWritePool,
+    read_pool: TenantDb<ServingReadLane>,
+    write_pool: TenantDb<ServingWriteLane>,
 }
 
 #[cfg(all(test, feature = "integration"))]
@@ -57,8 +58,8 @@ impl PgStore {
     /// `pub(crate)`（#1423，PG-BUNDLE-FUNNEL-01）：经 [`crate::PgDomainDeps`]`<caps::Identity>::inbox` 收口。
     pub(crate) fn inbox(&self) -> PgInboxStore {
         PgInboxStore {
-            read_pool: PgTenantReadPool::from_unverified_for_test(self),
-            write_pool: PgTenantWritePool::from_unverified_for_test(self),
+            read_pool: TenantDb::<ServingReadLane>::from_unverified_for_test(self),
+            write_pool: TenantDb::<ServingWriteLane>::from_unverified_for_test(self),
         }
     }
 }
@@ -66,8 +67,8 @@ impl PgStore {
 impl PgInboxStore {
     pub(crate) fn new(reader: &VerifiedPgReadStore, writer: &VerifiedPgWriteStore) -> Self {
         Self {
-            read_pool: PgTenantReadPool::new(reader),
-            write_pool: PgTenantWritePool::new(writer),
+            read_pool: TenantDb::<ServingReadLane>::new(reader),
+            write_pool: TenantDb::<ServingWriteLane>::new(writer),
         }
     }
 
@@ -89,31 +90,16 @@ impl InboxBacklog for PgInboxStore {
 }
 
 async fn sample_inbox_backlog(
-    pool: &PgTenantReadPool,
+    pool: &TenantDb<ServingReadLane>,
     scope: &InboxBacklogScope,
 ) -> Result<BacklogSample, EngineError> {
     let tenant = scope.tenant_id();
     let group = scope.consumer_group().as_str().to_string();
-    let (depth, oldest_age_seconds): (i64, i64) = pool
-        .read(infra_tenant_scope(tenant), move |conn| {
+    let sample = pool
+        .inbox_read(infra_tenant_scope(tenant), move |mut conn| {
             Box::pin(async move {
-                sqlx::query_as(
-                    r#"
-                    SELECT
-                      count(*)::bigint,
-                      COALESCE(EXTRACT(EPOCH FROM now() - MIN(claimed_at))::bigint, 0)
-                    FROM inbox_receipts
-                    WHERE tenant_id = $1::uuid
-                      AND consumer_group = $2
-                      AND status = 'claimed'
-                      AND claimed_at <= now() - make_interval(secs => $3)
-                    "#,
-                )
-                .bind(tenant.to_string())
-                .bind(&group)
-                .bind(INBOX_LEASE_TTL_SECONDS)
-                .fetch_one(conn)
-                .await
+                conn.inbox_sample_backlog(&group, INBOX_LEASE_TTL_SECONDS)
+                    .await
             })
         })
         .await
@@ -122,8 +108,9 @@ async fn sample_inbox_backlog(
             EngineError::new(EngineErrorKind::Transient)
         })?;
 
-    let depth = u64::try_from(depth).map_err(|_| EngineError::new(EngineErrorKind::Invariant))?;
-    let oldest_age_seconds = u64::try_from(oldest_age_seconds.max(0))
+    let depth =
+        u64::try_from(sample.depth).map_err(|_| EngineError::new(EngineErrorKind::Invariant))?;
+    let oldest_age_seconds = u64::try_from(sample.oldest_age_seconds.max(0))
         .map_err(|_| EngineError::new(EngineErrorKind::Invariant))?;
     Ok(BacklogSample::new(depth, oldest_age_seconds))
 }
@@ -181,17 +168,16 @@ impl RetentionSweeper for PgInboxSweeper {
 }
 
 #[derive(Clone)]
-struct ReceiptFields {
-    tenant: vocab::TenantId,
-    tenant_id: String,
-    consumer_group: String,
-    domain: String,
-    topic: String,
-    contract_id: String,
-    contract_version: String,
-    schema_hash: String,
-    trace: Option<String>,
-    correlation_id: Option<String>,
+pub(crate) struct ReceiptFields {
+    pub(crate) tenant: vocab::TenantId,
+    pub(crate) consumer_group: String,
+    pub(crate) domain: String,
+    pub(crate) topic: String,
+    pub(crate) contract_id: String,
+    pub(crate) contract_version: String,
+    pub(crate) schema_hash: String,
+    pub(crate) trace: Option<String>,
+    pub(crate) correlation_id: Option<String>,
 }
 
 impl ReceiptFields {
@@ -199,7 +185,6 @@ impl ReceiptFields {
         let tenant = ctx.tenant_id();
         Self {
             tenant,
-            tenant_id: tenant.to_string(),
             consumer_group: ctx.consumer_group().as_str().to_string(),
             domain: ctx.domain().to_string(),
             topic: ctx.topic().to_string(),
@@ -209,14 +194,6 @@ impl ReceiptFields {
             trace: ctx.trace().map(str::to_string),
             correlation_id: ctx.correlation_id().map(str::to_string),
         }
-    }
-
-    fn matches_identity(&self, row: &(String, String, String, String, String, String)) -> bool {
-        row.0 == self.domain
-            && row.1 == self.topic
-            && row.2 == self.contract_id
-            && row.3 == self.contract_version
-            && row.4 == self.schema_hash
     }
 }
 
@@ -233,10 +210,10 @@ fn inbox_db_error(operation: &'static str, error: sqlx::Error) -> EngineError {
 /// Mark a claimed inbox receipt as done inside an existing tenant-scoped transaction.
 ///
 /// This is the ConsumerTx commit leg: callers must execute business writes and outbox appends on
-/// the same [`TxCapability`] before calling this helper, then commit the surrounding transaction.
+/// the same [`TenantTx`] before calling this helper, then commit the surrounding transaction.
 #[cfg(any(feature = "domain-settings", feature = "domain-audit"))]
-pub(crate) async fn commit_in_tx(
-    tx: &mut TxCapability<'_>,
+pub(crate) async fn commit_in_tx<C: InboxOperationConcern>(
+    tx: &mut EventingTx<'_, ServingWriteLane, C>,
     ctx: &InboxReceiptContext,
     key: &IdemKey,
     lease: &LeaseToken,
@@ -253,32 +230,18 @@ pub(crate) async fn commit_in_tx(
 }
 
 async fn commit_fields_in_tx(
-    tx: &mut TxCapability<'_>,
+    tx: &mut EventingTx<'_, ServingWriteLane, impl InboxOperationConcern>,
     fields: &ReceiptFields,
     key: &str,
     lease: &str,
     operation: &'static str,
 ) -> Result<LeaseOutcome, EngineError> {
-    let result = sqlx::query(
-        r#"
-        UPDATE inbox_receipts
-        SET status = 'done', committed_at = now(), updated_at = now()
-        WHERE tenant_id = $1::uuid
-          AND event_id = $2
-          AND consumer_group = $3
-          AND lease_token = $4::uuid
-          AND status = 'claimed'
-        "#,
-    )
-    .bind(&fields.tenant_id)
-    .bind(key)
-    .bind(&fields.consumer_group)
-    .bind(lease)
-    .execute(tx.conn())
-    .await
-    .map_err(|e| inbox_db_error(operation, e))?;
+    let held = tx
+        .inbox_commit_receipt(fields, key, lease)
+        .await
+        .map_err(|e| inbox_db_error(operation, e))?;
 
-    Ok(if result.rows_affected() == 1 {
+    Ok(if held {
         LeaseOutcome::Held
     } else {
         LeaseOutcome::Lost
@@ -302,83 +265,38 @@ impl InboxStore for PgInboxStore {
         let key = key.as_str().to_string();
         let lease = lease.as_str().to_string();
         self.write_pool
-            .write(
+            .inbox_write(
                 infra_tenant_scope(fields.tenant),
-                move |tx| {
+                move |mut tx| {
                     let fields = fields.clone();
                     let key = key.clone();
                     let lease = lease.clone();
                     Box::pin(async move {
-                        let row: Option<(String,)> = sqlx::query_as(
-                            r#"
-                            INSERT INTO inbox_receipts
-                                (tenant_id, event_id, consumer_group, domain, topic, contract_id,
-                                 contract_version, schema_hash, trace, correlation_id, status,
-                                 lease_token, receive_count, claimed_at, updated_at)
-                            VALUES
-                                ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'claimed',
-                                 $11::uuid, 1, now(), now())
-                            ON CONFLICT (tenant_id, event_id, consumer_group) DO UPDATE
-                              SET status = 'claimed',
-                                  lease_token = $11::uuid,
-                                  claimed_at = now(),
-                                  updated_at = now(),
-                                  receive_count = inbox_receipts.receive_count + 1
-                              WHERE inbox_receipts.status = 'claimed'
-                                AND inbox_receipts.claimed_at <= now() - make_interval(secs => $12)
-                                AND inbox_receipts.domain = $4
-                                AND inbox_receipts.topic = $5
-                                AND inbox_receipts.contract_id = $6
-                                AND inbox_receipts.contract_version = $7
-                                AND inbox_receipts.schema_hash = $8
-                            RETURNING lease_token::text
-                            "#,
-                        )
-                        .bind(&fields.tenant_id)
-                        .bind(&key)
-                        .bind(&fields.consumer_group)
-                        .bind(&fields.domain)
-                        .bind(&fields.topic)
-                        .bind(&fields.contract_id)
-                        .bind(&fields.contract_version)
-                        .bind(&fields.schema_hash)
-                        .bind(fields.trace.as_deref())
-                        .bind(fields.correlation_id.as_deref())
-                        .bind(&lease)
-                        .bind(INBOX_LEASE_TTL_SECONDS)
-                        .fetch_optional(tx.conn())
-                        .await
-                        .map_err(|e| inbox_db_error("inbox_try_claim", e))?;
+                        let claimed = tx
+                            .inbox_claim_receipt(&fields, &key, &lease, INBOX_LEASE_TTL_SECONDS)
+                            .await
+                            .map_err(|e| inbox_db_error("inbox_try_claim", e))?;
 
-                        if row.is_some() {
+                        if claimed {
                             return Ok(SeenState::Fresh);
                         }
 
-                        let existing: Option<(String, String, String, String, String, String)> =
-                            sqlx::query_as(
-                                r#"
-                                SELECT domain, topic, contract_id, contract_version, schema_hash, status
-                                FROM inbox_receipts
-                                WHERE tenant_id = $1::uuid
-                                  AND event_id = $2
-                                  AND consumer_group = $3
-                                "#,
-                            )
-                            .bind(&fields.tenant_id)
-                            .bind(&key)
-                            .bind(&fields.consumer_group)
-                            .fetch_optional(tx.conn())
+                        let existing = tx
+                            .inbox_load_identity(&fields, &key)
                             .await
                             .map_err(|e| inbox_db_error("inbox_try_claim_conflict_read", e))?;
 
-                        if existing
-                            .as_ref()
-                            .is_some_and(|row| !fields.matches_identity(row))
-                        {
+                        if existing.as_ref().is_some_and(|row| {
+                            row.domain != fields.domain
+                                || row.topic != fields.topic
+                                || row.contract_id != fields.contract_id
+                                || row.contract_version != fields.contract_version
+                                || row.schema_hash != fields.schema_hash
+                        }) {
                             return Err(EngineError::new(EngineErrorKind::Invariant));
                         }
 
-                        match existing.as_ref().map(|row| row.5.as_str()) {
+                        match existing.as_ref().map(|row| row.status.as_str()) {
                             Some("done") => Ok(SeenState::Duplicate),
                             Some("claimed") => Ok(SeenState::InProgress),
                             None => Err(EngineError::new(EngineErrorKind::Transient)),
@@ -407,33 +325,19 @@ impl InboxStore for PgInboxStore {
         let key = key.as_str().to_string();
         let lease = lease.as_str().to_string();
         self.write_pool
-            .write(
+            .inbox_write(
                 infra_tenant_scope(fields.tenant),
-                move |tx| {
+                move |mut tx| {
                     let fields = fields.clone();
                     let key = key.clone();
                     let lease = lease.clone();
                     Box::pin(async move {
-                        let result = sqlx::query(
-                            r#"
-                            UPDATE inbox_receipts
-                            SET claimed_at = now(), updated_at = now()
-                            WHERE tenant_id = $1::uuid
-                              AND event_id = $2
-                              AND consumer_group = $3
-                              AND lease_token = $4::uuid
-                              AND status = 'claimed'
-                            "#,
-                        )
-                        .bind(&fields.tenant_id)
-                        .bind(&key)
-                        .bind(&fields.consumer_group)
-                        .bind(&lease)
-                        .execute(tx.conn())
-                        .await
-                        .map_err(|e| inbox_db_error("inbox_extend", e))?;
+                        let held = tx
+                            .inbox_extend_receipt(&fields, &key, &lease)
+                            .await
+                            .map_err(|e| inbox_db_error("inbox_extend", e))?;
 
-                        Ok(if result.rows_affected() == 1 {
+                        Ok(if held {
                             LeaseOutcome::Held
                         } else {
                             LeaseOutcome::Lost
@@ -461,14 +365,14 @@ impl InboxStore for PgInboxStore {
         let key = key.as_str().to_string();
         let lease = lease.as_str().to_string();
         self.write_pool
-            .write(
+            .inbox_write(
                 infra_tenant_scope(fields.tenant),
-                move |tx| {
+                move |mut tx| {
                     let fields = fields.clone();
                     let key = key.clone();
                     let lease = lease.clone();
                     Box::pin(async move {
-                        commit_fields_in_tx(tx, &fields, &key, &lease, "inbox_commit").await
+                        commit_fields_in_tx(&mut tx, &fields, &key, &lease, "inbox_commit").await
                     })
                 },
                 |e| inbox_db_error("inbox_commit_tx", e),
@@ -492,31 +396,16 @@ impl InboxStore for PgInboxStore {
         let key = key.as_str().to_string();
         let lease = lease.as_str().to_string();
         self.write_pool
-            .write(
+            .inbox_write(
                 infra_tenant_scope(fields.tenant),
-                move |tx| {
+                move |mut tx| {
                     let fields = fields.clone();
                     let key = key.clone();
                     let lease = lease.clone();
                     Box::pin(async move {
-                        sqlx::query(
-                            r#"
-                            DELETE FROM inbox_receipts
-                            WHERE tenant_id = $1::uuid
-                              AND event_id = $2
-                              AND consumer_group = $3
-                              AND lease_token = $4::uuid
-                              AND status = 'claimed'
-                            "#,
-                        )
-                        .bind(&fields.tenant_id)
-                        .bind(&key)
-                        .bind(&fields.consumer_group)
-                        .bind(&lease)
-                        .execute(tx.conn())
-                        .await
-                        .map_err(|e| inbox_db_error("inbox_release", e))?;
-                        Ok(())
+                        tx.inbox_release_receipt(&fields, &key, &lease)
+                            .await
+                            .map_err(|e| inbox_db_error("inbox_release", e))
                     })
                 },
                 |e| inbox_db_error("inbox_release_tx", e),

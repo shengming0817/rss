@@ -18,7 +18,9 @@ use diport::{AuditEvent, AuditOutcome, AuditSink, AuditSinkError};
 #[cfg(all(test, feature = "integration"))]
 use crate::PgStore;
 #[cfg(feature = "domain-audit")]
-use crate::cotx::PgTenantWritePool;
+use crate::cotx::settings_audit::EncodedAuditEvent;
+#[cfg(feature = "domain-audit")]
+use crate::cotx::{ServingWriteLane, TenantDb};
 use crate::pool::VerifiedPgWriteStore;
 #[cfg(feature = "domain-audit")]
 use crate::tx_retry::{classify_sqlx_error, run_pg_localtx_retry};
@@ -34,7 +36,7 @@ const INSERT_AUTH_AUDIT_EVENT: &str = "INSERT INTO auth_audit_events \
 pub struct PgAuthAuditSink {
     global_pool: sqlx::PgPool,
     #[cfg(feature = "domain-audit")]
-    pool: PgTenantWritePool,
+    pool: TenantDb<ServingWriteLane>,
     #[cfg(all(test, feature = "integration"))]
     append_faults: Arc<Mutex<AuthAuditAppendFaultState>>,
 }
@@ -86,7 +88,7 @@ impl PgAuthAuditSink {
         Self {
             global_pool: store.pool().clone(),
             #[cfg(feature = "domain-audit")]
-            pool: PgTenantWritePool::new(store),
+            pool: TenantDb::<ServingWriteLane>::new(store),
             #[cfg(all(test, feature = "integration"))]
             append_faults: Arc::new(Mutex::new(AuthAuditAppendFaultState::default())),
         }
@@ -97,7 +99,7 @@ impl PgAuthAuditSink {
         Self {
             global_pool: store.pool.clone(),
             #[cfg(feature = "domain-audit")]
-            pool: PgTenantWritePool::from_unverified_for_test(store),
+            pool: TenantDb::<ServingWriteLane>::from_unverified_for_test(store),
             #[cfg(all(test, feature = "integration"))]
             append_faults: Arc::new(Mutex::new(AuthAuditAppendFaultState::default())),
         }
@@ -159,6 +161,7 @@ fn take_append_fault_if(
     Some(fault)
 }
 
+#[cfg(not(feature = "domain-audit"))]
 #[derive(Clone)]
 struct EncodedAuditEvent {
     occurred_at_secs: i64,
@@ -301,10 +304,10 @@ impl AuditListTenantAppender for PgAuthAuditSink {
                 record_append_attempt(&append_faults, &tenant);
                 async move {
                     self.pool
-                        .retry_write(
+                        .retry_auth_audit_write(
                             scope,
                             deadline,
-                            move |tx| {
+                            move |mut tx| {
                                 Box::pin(async move {
                                     #[cfg(all(test, feature = "integration"))]
                                     if take_append_fault_if(&append_faults, &tenant, |fault| {
@@ -314,9 +317,7 @@ impl AuditListTenantAppender for PgAuthAuditSink {
                                     {
                                         return Err(sqlx::Error::PoolTimedOut);
                                     }
-                                    insert_auth_audit_event_query(event)
-                                        .execute(tx.conn())
-                                        .await?;
+                                    tx.append_event(event).await?;
                                     #[cfg(all(test, feature = "integration"))]
                                     if let Some(fault) =
                                         take_append_fault_if(&append_faults, &tenant, |fault| {

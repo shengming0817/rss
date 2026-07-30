@@ -1,7 +1,7 @@
 //! PostgreSQL ConsumerTx handlers.
 //!
 //! These handlers are the durable consumer path for generated subscriptions. They keep
-//! `TxCapability` sealed inside this crate: runtime chooses a handler, but cannot construct or
+//! `TenantTx` sealed inside this crate: runtime chooses a handler, but cannot construct or
 //! escape transaction capability values.
 
 use std::sync::Arc;
@@ -19,8 +19,8 @@ use consistency::{EngineErrorKind, IdemKey, InboxReceiptContext, LeaseToken};
 use primitives::MacVerifier;
 
 #[cfg(feature = "domain-audit")]
-use crate::audit_repo::{advisory_lock_key, append_in_tx, tenant_str};
-use crate::cotx::{PgTenantWritePool, infra_tenant_scope};
+use crate::cotx::settings_audit::audit_write_tx;
+use crate::cotx::{ServingWriteLane, TenantDb, infra_tenant_scope};
 use crate::inbox::commit_in_tx;
 use crate::pool::VerifiedPgWriteStore;
 
@@ -94,7 +94,7 @@ impl PgConsumerTxRequeue {
 #[cfg(feature = "domain-audit")]
 /// Postgres-backed ConsumerTx audit handler.
 pub struct PgAuditConsumerTx<M: MacVerifier> {
-    pool: PgTenantWritePool,
+    pool: TenantDb<ServingWriteLane>,
     hasher: Arc<AuditChainHasher<M>>,
     kind: AuditEventKind,
 }
@@ -139,7 +139,7 @@ where
         kind: AuditEventKind,
     ) -> Self {
         Self {
-            pool: PgTenantWritePool::new(store),
+            pool: TenantDb::<ServingWriteLane>::new(store),
             hasher: Arc::new(hasher),
             kind,
         }
@@ -194,18 +194,17 @@ where
         lease: LeaseToken,
     ) -> Result<(), PgConsumerTxError> {
         let tenant = record.tenant;
-        let tenant_uuid = tenant_str(tenant);
-        let lock_key = advisory_lock_key(tenant);
         let hasher = Arc::clone(&self.hasher);
         self.pool
-            .write(
+            .consumer_write(
                 infra_tenant_scope(tenant),
-                move |tx| {
+                move |mut tx| {
                     Box::pin(async move {
-                        append_in_tx(tx.conn(), &tenant_uuid, lock_key, &record, &hasher)
+                        audit_write_tx(&mut tx)
+                            .append(&record, &hasher)
                             .await
                             .map_err(PgConsumerTxError::Audit)?;
-                        match commit_in_tx(tx, &ctx, &key, &lease)
+                        match commit_in_tx(&mut tx, &ctx, &key, &lease)
                             .await
                             .map_err(PgConsumerTxError::Inbox)?
                         {
@@ -261,7 +260,7 @@ where
 #[cfg(feature = "domain-settings")]
 /// Postgres-backed ConsumerTx handler for settings config-version-changed.
 pub struct PgSettingsConsumerTx {
-    pool: PgTenantWritePool,
+    pool: TenantDb<ServingWriteLane>,
     reconciler: Arc<settings::ConfigVersionReconciler>,
 }
 
@@ -272,7 +271,7 @@ impl PgSettingsConsumerTx {
         reconciler: Arc<settings::ConfigVersionReconciler>,
     ) -> Self {
         Self {
-            pool: PgTenantWritePool::new(store),
+            pool: TenantDb::<ServingWriteLane>::new(store),
             reconciler,
         }
     }
@@ -302,11 +301,11 @@ impl PgSettingsConsumerTx {
         lease: LeaseToken,
     ) -> Result<(), PgConsumerTxError> {
         self.pool
-            .write(
+            .consumer_write(
                 infra_tenant_scope(ctx.tenant_id()),
-                move |tx| {
+                move |mut tx| {
                     Box::pin(async move {
-                        match commit_in_tx(tx, &ctx, &key, &lease)
+                        match commit_in_tx(&mut tx, &ctx, &key, &lease)
                             .await
                             .map_err(PgConsumerTxError::Inbox)?
                         {

@@ -1,7 +1,7 @@
 //! postgres adapter 集成测试（crate-internal；需真实 postgres，`integration` feature 门控；#1116 review F2/F5/F6）。
 //!
-//! crate-internal（非 `tests/`）以行使 `pub(crate)` 的 [`crate::PgStore::run_global_transaction`]（裸事务非公开
-//! API，review F2）。容器经 `testkit::env_or_postgres()` self-provision（testcontainers，#1137）——无需手工预置。
+//! crate-internal（非 `tests/`）；global fixture setup 可使用本文件局部的 raw SQL transaction helper，
+//! tenant production operations 必须经过真实 exact-lane `TenantDb` funnel。
 //! **外部 PG 路径（快速本地迭代）**：须设 `RSS_TEST_ALLOW_EXTERNAL_POSTGRES`（显式 opt-in）+
 //! 5 元组 `PGHOST`/`PGPORT`/`PGDATABASE`/`PGUSER`/`PGPASSWORD`；`PGDATABASE` 须以 `_test` 结尾或 `== "test"`
 //! （严格库名，单源校验在 testkit）。需 docker（容器路径）。跑 `cargo nextest run -p postgres --features integration`。
@@ -40,6 +40,68 @@ use crate::{
 // 全 `?` 无跨界转换（避免 Box<dyn Error+Send+Sync> → Box<dyn Error> 的 ? 转换 papercut）。
 type TestError = Box<dyn std::error::Error + Send + Sync>;
 type TestResult = Result<(), TestError>;
+
+/// Integration-only tenant authority. This module is compiled only behind the test/integration
+/// boundary, and the private carrier cannot be imported by production adapters.
+#[derive(Clone, Copy)]
+struct IntegrationTenantScope {
+    tenant: vocab::TenantId,
+    _seal: (),
+}
+
+impl crate::cotx::TenantScopeHandle for IntegrationTenantScope {
+    fn tenant(self) -> vocab::TenantId {
+        self.tenant
+    }
+}
+
+fn integration_tenant_scope(tenant: vocab::TenantId) -> IntegrationTenantScope {
+    IntegrationTenantScope { tenant, _seal: () }
+}
+
+impl PgStore {
+    /// Test-fixture-only raw transaction for global setup and observation.
+    async fn raw_fixture_transaction<F, T, E>(&self, operation: F) -> Result<T, E>
+    where
+        F: for<'c> FnOnce(&'c mut sqlx::PgConnection) -> BoxFuture<'c, Result<T, E>> + Send,
+        E: From<sqlx::Error> + Send,
+        T: Send,
+    {
+        let mut transaction = self.pool.begin().await.map_err(E::from)?;
+        let result = operation(&mut transaction).await;
+        match result {
+            Ok(value) => {
+                transaction.commit().await.map_err(E::from)?;
+                Ok(value)
+            }
+            Err(error) => {
+                let _ = transaction.rollback().await;
+                Err(error)
+            }
+        }
+    }
+
+    /// Test-only serving write funnel for eventing facts. The closure receives only the exact
+    /// serving-write transaction surface, matching production construction and tenant scoping.
+    async fn serving_write_fixture<F, T, E>(
+        &self,
+        tenant: vocab::TenantId,
+        operation: F,
+    ) -> Result<T, E>
+    where
+        F: for<'c, 'tx> FnOnce(
+                &'c mut crate::cotx::eventing::OutboxTx<'tx>,
+            ) -> BoxFuture<'c, Result<T, E>>
+            + Send
+            + 'static,
+        E: From<sqlx::Error> + std::error::Error + Send + Sync + 'static,
+        T: Send,
+    {
+        crate::cotx::TenantDb::<crate::cotx::ServingWriteLane>::from_unverified_for_test(self)
+            .test_write(integration_tenant_scope(tenant), operation, E::from)
+            .await
+    }
+}
 
 testkit::provider_conformance_catalog! {
     provider: postgres,
@@ -1124,6 +1186,59 @@ async fn assert_revocation_capability_drift(
             );
         }
     }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn revocation_facade_rejects_scope_mismatch_before_querying_revocation_table() -> TestResult {
+    let (pg, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    let app = connect_pg_rss_app_role(&pg, &owner).await?;
+    let transaction_scope = unique_revocation_scope();
+    let mismatched_scope = diport::CertScope::new(
+        vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?,
+        transaction_scope.device(),
+    );
+    let serial = revocation_serial(&[0x18, 0x82, 0x01]);
+    let scoped =
+        crate::cotx::TenantDb::<crate::cotx::ServingWriteLane>::from_unverified_for_test(&app);
+
+    // An ACCESS EXCLUSIVE lock is the SQL-execution sentinel: any query against the revocation
+    // table would remain blocked until this transaction is released. A scope mismatch must be
+    // rejected by the direct façade before reaching that table.
+    let mut table_blocker = owner.pool.begin().await?;
+    sqlx::query("LOCK TABLE public.certificate_revocations IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *table_blocker)
+        .await?;
+    let observed = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        scoped.revocation_write(
+            transaction_scope,
+            move |mut tx| {
+                Box::pin(async move {
+                    tx.revocations()
+                        .is_certificate_revoked(mismatched_scope, serial)
+                        .await
+                })
+            },
+            crate::revocation::storage_error,
+        ),
+    )
+    .await;
+    table_blocker.rollback().await?;
+
+    let result = observed.map_err(|_| {
+        std::io::Error::other(
+            "revocation scope mismatch queried its table instead of failing before façade SQL",
+        )
+    })?;
+    assert!(
+        result.is_err(),
+        "a direct revocation façade call must fail closed on tenant scope mismatch"
+    );
+
+    app.shutdown().await?;
+    owner.shutdown().await?;
     Ok(())
 }
 
@@ -3677,7 +3792,7 @@ async fn rss_app_serving_pool_enforces_tenant_ab_isolation() -> TestResult {
 /// Tenant-scoped read transactions must be physically read-only, even when the underlying
 /// fixture connection is an owner that could otherwise mutate the tenant relation.
 #[tokio::test(flavor = "multi_thread")]
-async fn tenant_scoped_read_enforces_read_only() -> TestResult {
+async fn tenant_db_binds_identity_and_read_lifecycle() -> TestResult {
     const ORIGINAL_NAME: &str = "tenant-read-original";
     const ATTEMPTED_NAME: &str = "tenant-read-mutated";
 
@@ -3694,28 +3809,24 @@ async fn tenant_scoped_read_enforces_read_only() -> TestResult {
         .execute(&store.pool)
         .await?;
 
-    let tenant_pool = crate::cotx::PgTenantReadPool::from_unverified_for_test(&store);
-    let scope = crate::cotx::infra_tenant_scope(tenant);
+    let tenant_pool =
+        crate::cotx::TenantDb::<crate::cotx::ServingReadLane>::from_unverified_for_test(&store);
+    let scope = integration_tenant_scope(tenant);
     let transaction_read_only: String = tenant_pool
-        .read(scope, |connection| {
+        .test_read(scope, |mut connection| {
             Box::pin(async move {
-                sqlx::query_scalar("SHOW transaction_read_only")
-                    .fetch_one(connection)
-                    .await
+                assert_eq!(connection.tenant(), tenant);
+                connection.test_transaction_read_only().await
             })
         })
         .await?;
 
     let update_role_id = role_id.clone();
-    let update_tenant_id = tenant_id.clone();
     let update_result = tenant_pool
-        .read(scope, move |connection| {
+        .test_read(scope, move |mut connection| {
             Box::pin(async move {
-                sqlx::query("UPDATE roles SET name = $1 WHERE id = $2 AND tenant_id = $3::uuid")
-                    .bind(ATTEMPTED_NAME)
-                    .bind(&update_role_id)
-                    .bind(&update_tenant_id)
-                    .execute(connection)
+                connection
+                    .test_attempt_role_update(&update_role_id, ATTEMPTED_NAME)
                     .await
             })
         })
@@ -3726,30 +3837,25 @@ async fn tenant_scoped_read_enforces_read_only() -> TestResult {
     };
 
     let mapped_transaction_read_only: String = tenant_pool
-        .read_map(
+        .test_read_map(
             scope,
-            |connection| {
+            |mut connection| {
                 Box::pin(async move {
-                    sqlx::query_scalar("SHOW transaction_read_only")
-                        .fetch_one(connection)
-                        .await
+                    assert_eq!(connection.tenant(), tenant);
+                    connection.test_transaction_read_only().await
                 })
             },
             |error| error,
         )
         .await?;
     let mapped_role_id = role_id.clone();
-    let mapped_tenant_id = tenant_id.clone();
     let mapped_update_result = tenant_pool
-        .read_map(
+        .test_read_map(
             scope,
-            move |connection| {
+            move |mut connection| {
                 Box::pin(async move {
-                    sqlx::query("UPDATE roles SET name = $1 WHERE id = $2 AND tenant_id = $3::uuid")
-                        .bind(ATTEMPTED_NAME)
-                        .bind(&mapped_role_id)
-                        .bind(&mapped_tenant_id)
-                        .execute(connection)
+                    connection
+                        .test_attempt_role_update(&mapped_role_id, ATTEMPTED_NAME)
                         .await
                 })
             },
@@ -3805,7 +3911,7 @@ async fn tenant_reader_role_is_exact_and_forced_read_write_is_denied() -> TestRe
     let reader_config = rss_app_read_config(&pg, &owner).await?;
     let verified_reader = PgStore::connect_verified_read(&reader_config).await?;
     let reader_store = verified_reader.store_arc();
-    let read_pool = crate::cotx::PgTenantReadPool::new(&verified_reader);
+    let read_pool = crate::cotx::TenantDb::<crate::cotx::ServingReadLane>::new(&verified_reader);
     let writer_keeps_temporary: bool = sqlx::query_scalar(
         "SELECT has_database_privilege('rss_app', current_database(), 'TEMPORARY')",
     )
@@ -3818,31 +3924,15 @@ async fn tenant_reader_role_is_exact_and_forced_read_write_is_denied() -> TestRe
 
     let reader_role = role_id.clone();
     let tenant_a_count: i64 = read_pool
-        .read(
-            crate::cotx::infra_tenant_scope(tenant_a),
-            move |connection| {
-                Box::pin(async move {
-                    sqlx::query_scalar("SELECT count(*) FROM roles WHERE id = $1")
-                        .bind(&reader_role)
-                        .fetch_one(connection)
-                        .await
-                })
-            },
-        )
+        .test_read(integration_tenant_scope(tenant_a), move |mut connection| {
+            Box::pin(async move { connection.test_role_count(&reader_role).await })
+        })
         .await?;
     let reader_role = role_id.clone();
     let tenant_b_count: i64 = read_pool
-        .read(
-            crate::cotx::infra_tenant_scope(tenant_b),
-            move |connection| {
-                Box::pin(async move {
-                    sqlx::query_scalar("SELECT count(*) FROM roles WHERE id = $1")
-                        .bind(&reader_role)
-                        .fetch_one(connection)
-                        .await
-                })
-            },
-        )
+        .test_read(integration_tenant_scope(tenant_b), move |mut connection| {
+            Box::pin(async move { connection.test_role_count(&reader_role).await })
+        })
         .await?;
     assert_eq!(tenant_a_count, 1, "reader must see its own tenant row");
     assert_eq!(tenant_b_count, 0, "reader RLS must hide another tenant row");
@@ -4814,16 +4904,16 @@ async fn transaction_commit_persists_and_rollback_discards() -> TestResult {
 
     // setup：干净表 + 1 行，commit（committed 数据对所有池连接可见）。
     store
-        .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+        .raw_fixture_transaction::<_, _, sqlx::Error>(|cap| {
             Box::pin(async move {
                 sqlx::query("DROP TABLE IF EXISTS rss_tx_probe")
-                    .execute(cap.conn())
+                    .execute(&mut *cap)
                     .await?;
                 sqlx::query("CREATE TABLE rss_tx_probe (id int)")
-                    .execute(cap.conn())
+                    .execute(&mut *cap)
                     .await?;
                 sqlx::query("INSERT INTO rss_tx_probe (id) VALUES (1)")
-                    .execute(cap.conn())
+                    .execute(&mut *cap)
                     .await?;
                 Ok(())
             }) as BoxFuture<'_, Result<(), sqlx::Error>>
@@ -4831,12 +4921,12 @@ async fn transaction_commit_persists_and_rollback_discards() -> TestResult {
         .await?;
     assert_eq!(probe_count(&store).await?, 1);
 
-    // rollback 路径：插入后强制 Err → run_global_transaction 回滚。
+    // rollback 路径：插入后强制 Err → fixture_transaction 回滚。
     let rolled_back = store
-        .run_global_transaction::<_, (), sqlx::Error>(|cap| {
+        .raw_fixture_transaction::<_, (), sqlx::Error>(|cap| {
             Box::pin(async move {
                 sqlx::query("INSERT INTO rss_tx_probe (id) VALUES (2)")
-                    .execute(cap.conn())
+                    .execute(&mut *cap)
                     .await?;
                 Err(sqlx::Error::RowNotFound)
             }) as BoxFuture<'_, Result<(), sqlx::Error>>
@@ -4847,10 +4937,10 @@ async fn transaction_commit_persists_and_rollback_discards() -> TestResult {
 
     // commit 路径：插入后 Ok → 持久化。
     store
-        .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+        .raw_fixture_transaction::<_, _, sqlx::Error>(|cap| {
             Box::pin(async move {
                 sqlx::query("INSERT INTO rss_tx_probe (id) VALUES (3)")
-                    .execute(cap.conn())
+                    .execute(&mut *cap)
                     .await?;
                 Ok(())
             }) as BoxFuture<'_, Result<(), sqlx::Error>>
@@ -4860,10 +4950,10 @@ async fn transaction_commit_persists_and_rollback_discards() -> TestResult {
 
     // cleanup
     store
-        .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+        .raw_fixture_transaction::<_, _, sqlx::Error>(|cap| {
             Box::pin(async move {
                 sqlx::query("DROP TABLE rss_tx_probe")
-                    .execute(cap.conn())
+                    .execute(&mut *cap)
                     .await?;
                 Ok(())
             }) as BoxFuture<'_, Result<(), sqlx::Error>>
@@ -4970,6 +5060,64 @@ async fn auth_audit_snapshot(
             .await
             .map_err(AuditLocalTxProfileError::storage)?;
     usize::try_from(count).map_err(AuditLocalTxProfileError::storage)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn auth_audit_facade_rejects_embedded_tenant_mismatch_without_writing() -> TestResult {
+    let (pg, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    let app = connect_pg_rss_app_role(&pg, &owner).await?;
+    let transaction_tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let embedded_tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let (scope, _, _) = audit_list_tenant_command(transaction_tenant).into_parts();
+    let principal_id = format!("auth-audit-mismatch-{}", uuid::Uuid::new_v4());
+    let event = crate::cotx::settings_audit::EncodedAuditEvent {
+        occurred_at_secs: i64::try_from(TEST_OCCURRED_SECS)?,
+        occurred_at_nanos: 0,
+        principal_id: principal_id.clone(),
+        principal_kind: "super_admin",
+        tenant_context: Some(embedded_tenant.as_uuid().to_string()),
+        resource_kind: "audit_entries",
+        resource_id: embedded_tenant.as_uuid().to_string(),
+        action: "audit:list-cross-tenant",
+        outcome: "success",
+        failure_reason: None,
+        request_id: None,
+        correlation_id: None,
+    };
+    let scoped =
+        crate::cotx::TenantDb::<crate::cotx::ServingWriteLane>::from_unverified_for_test(&app);
+
+    let result: Result<(), sqlx::Error> = scoped
+        .retry_auth_audit_write(
+            scope,
+            crate::tx_retry::localtx_deadline_for_test(),
+            move |mut tx| Box::pin(async move { tx.append_event(event).await }),
+            |error| error,
+        )
+        .await
+        .into_result();
+    let error = result.expect_err("embedded audit tenant mismatch must fail closed");
+    assert!(
+        error
+            .to_string()
+            .contains("auth audit event tenant does not match transaction tenant"),
+        "unexpected mismatch error: {error}"
+    );
+
+    let durable_rows: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM auth_audit_events WHERE principal_id = $1")
+            .bind(principal_id)
+            .fetch_one(&owner.pool)
+            .await?;
+    assert_eq!(
+        durable_rows, 0,
+        "an embedded tenant mismatch must not write an auth audit row under either tenant"
+    );
+
+    app.shutdown().await?;
+    owner.shutdown().await?;
+    Ok(())
 }
 
 async fn poll_with_local_recorder<R, F>(recorder: &R, future: F) -> F::Output
@@ -6419,9 +6567,7 @@ async fn command_journal_records_business_marker_and_outbox_atomically() -> Test
         .command_journal(fixed_clock())
         .record_command_with_business_write(command, move |tx| {
             Box::pin(async move {
-                sqlx::query("INSERT INTO command_journal_test_markers (marker) VALUES ($1)")
-                    .bind(marker_for_write)
-                    .execute(tx.conn())
+                tx.command_insert_test_marker(&marker_for_write)
                     .await
                     .map_err(CommandStoreError::internal)?;
                 Ok(CommandJournalTerminalSummary::Completed(
@@ -6530,9 +6676,7 @@ async fn command_journal_business_error_rolls_back_journal_marker_and_outbox() -
         .command_journal(fixed_clock())
         .record_command_with_business_write(command, move |tx| {
             Box::pin(async move {
-                sqlx::query("INSERT INTO command_journal_test_markers (marker) VALUES ($1)")
-                    .bind(marker_for_write)
-                    .execute(tx.conn())
+                tx.command_insert_test_marker(&marker_for_write)
                     .await
                     .map_err(CommandStoreError::internal)?;
                 Err(CommandStoreError::internal(std::io::Error::other(
@@ -6620,9 +6764,7 @@ async fn command_journal_outbox_conflict_rolls_back_journal_and_marker() -> Test
         .command_journal(fixed_clock())
         .record_command_with_business_write(command, move |tx| {
             Box::pin(async move {
-                sqlx::query("INSERT INTO command_journal_test_markers (marker) VALUES ($1)")
-                    .bind(marker_for_write)
-                    .execute(tx.conn())
+                tx.command_insert_test_marker(&marker_for_write)
                     .await
                     .map_err(CommandStoreError::internal)?;
                 Ok(CommandJournalTerminalSummary::Completed(
@@ -6667,9 +6809,7 @@ async fn command_journal_duplicate_replays_completed_summary_without_business_wr
             .command_journal(fixed_clock())
             .record_command_with_business_write(first, move |tx| {
                 Box::pin(async move {
-                    sqlx::query("INSERT INTO command_journal_test_markers (marker) VALUES ($1)")
-                        .bind(first_marker_for_write)
-                        .execute(tx.conn())
+                    tx.command_insert_test_marker(&first_marker_for_write)
                         .await
                         .map_err(CommandStoreError::internal)?;
                     Ok(CommandJournalTerminalSummary::Completed(
@@ -6690,9 +6830,7 @@ async fn command_journal_duplicate_replays_completed_summary_without_business_wr
         .command_journal(fixed_clock())
         .record_command_with_business_write(second, move |tx| {
             Box::pin(async move {
-                sqlx::query("INSERT INTO command_journal_test_markers (marker) VALUES ($1)")
-                    .bind(second_marker_for_write)
-                    .execute(tx.conn())
+                tx.command_insert_test_marker(&second_marker_for_write)
                     .await
                     .map_err(CommandStoreError::internal)?;
                 Ok(CommandJournalTerminalSummary::Completed(
@@ -6871,9 +7009,7 @@ async fn command_journal_duplicate_replays_failed_summary_without_business_write
         .command_journal(fixed_clock())
         .record_command_with_business_write(second, move |tx| {
             Box::pin(async move {
-                sqlx::query("INSERT INTO command_journal_test_markers (marker) VALUES ($1)")
-                    .bind(marker_for_write)
-                    .execute(tx.conn())
+                tx.command_insert_test_marker(&marker_for_write)
                     .await
                     .map_err(CommandStoreError::internal)?;
                 Ok(CommandJournalTerminalSummary::Completed(
@@ -6926,9 +7062,7 @@ async fn command_journal_same_key_different_fingerprint_conflicts() -> TestResul
         .command_journal(fixed_clock())
         .record_command_with_business_write(conflicting, move |tx| {
             Box::pin(async move {
-                sqlx::query("INSERT INTO command_journal_test_markers (marker) VALUES ($1)")
-                    .bind(marker_for_write)
-                    .execute(tx.conn())
+                tx.command_insert_test_marker(&marker_for_write)
                     .await
                     .map_err(CommandStoreError::internal)?;
                 Ok(CommandJournalTerminalSummary::Completed(
@@ -8408,9 +8542,14 @@ async fn reconcile_scheduler_rejects_same_scoped_key_with_different_payload() ->
         "fact conflict quarantine must persistently disable automatic reclaim"
     );
 
+    let maintenance = crate::PgMaintenanceReconcileStore::new(
+        &crate::pool::VerifiedPgMaintenanceStore::from_maintenance_store(Arc::new(PgStore {
+            pool: store.pool.clone(),
+        })),
+    );
     let capability = OperatorReconcileCapability::issue_for_authorized_operator();
     let inspected = ReconcileOperatorStore::inspect_target(
-        &reconcile,
+        &maintenance,
         tenant,
         attempt.target().target_id(),
         capability,
@@ -8425,14 +8564,14 @@ async fn reconcile_scheduler_rejects_same_scoped_key_with_different_payload() ->
     let wrong_tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     for result in [
         ReconcileOperatorStore::inspect_target(
-            &reconcile,
+            &maintenance,
             wrong_tenant,
             attempt.target().target_id(),
             capability,
         )
         .await,
         ReconcileOperatorStore::resume_target(
-            &reconcile,
+            &maintenance,
             wrong_tenant,
             attempt.target().target_id(),
             capability,
@@ -8450,7 +8589,7 @@ async fn reconcile_scheduler_rejects_same_scoped_key_with_different_payload() ->
     }
 
     let resumed = ReconcileOperatorStore::resume_target(
-        &reconcile,
+        &maintenance,
         tenant,
         attempt.target().target_id(),
         capability,
@@ -8693,10 +8832,10 @@ async fn reconcile_scheduler_target_pause_resume_missing_target_fails_closed() -
 /// 在独立事务内读 `rss_tx_probe` 行数（committed 数据跨池连接可见）。
 async fn probe_count(store: &PgStore) -> Result<i64, sqlx::Error> {
     store
-        .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+        .raw_fixture_transaction::<_, _, sqlx::Error>(|cap| {
             Box::pin(async move {
                 let row: (i64,) = sqlx::query_as("SELECT count(*) FROM rss_tx_probe")
-                    .fetch_one(cap.conn())
+                    .fetch_one(&mut *cap)
                     .await?;
                 Ok(row.0)
             }) as BoxFuture<'_, Result<i64, sqlx::Error>>
@@ -8750,6 +8889,10 @@ static OUTBOX_SWEEP_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::cons
 
 fn test_append_error(_: OutboxAppendError) -> sqlx::Error {
     sqlx::Error::Protocol("outbox append test failed".to_string())
+}
+
+fn eventing_test_db(store: &PgStore) -> crate::cotx::TenantDb<crate::cotx::ServingWriteLane> {
+    crate::cotx::TenantDb::<crate::cotx::ServingWriteLane>::from_unverified_for_test(store)
 }
 
 /// setup 阶段：应用 migration（含 outbox 表）。**不**全表 DELETE——每个 outbox 用例按唯一 `event_id`
@@ -8988,16 +9131,20 @@ async fn fault_matrix_exact_claim_does_not_mutate_other_eligible_rows() -> TestR
     for event_id in [&other_id, &target_id] {
         let entry = make_entry(event_id);
         let domain = domain.clone();
-        store
-            .run_global_transaction::<_, _, sqlx::Error>(|cap| {
-                Box::pin(async move {
-                    let _outcome =
-                        append_outbox(cap, &entry, &make_test_env(&domain, "contract-1"))
-                            .await
-                            .map_err(test_append_error)?;
-                    Ok(())
-                }) as BoxFuture<'_, Result<(), sqlx::Error>>
-            })
+        eventing_test_db(&store)
+            .test_write(
+                integration_tenant_scope(test_tenant()),
+                |cap| {
+                    Box::pin(async move {
+                        let _outcome =
+                            append_outbox(cap, &entry, &make_test_env(&domain, "contract-1"))
+                                .await
+                                .map_err(test_append_error)?;
+                        Ok(())
+                    }) as BoxFuture<'_, Result<(), sqlx::Error>>
+                },
+                std::convert::identity,
+            )
             .await?;
     }
 
@@ -9128,10 +9275,12 @@ async fn seed_conflicting_outbox_fact(
         OutboxMetadata::new(0, tenant, test_contract())
             .with_subject_id(subject_id("conflict-seed")),
     );
-    let outcome = store
-        .run_global_transaction::<_, _, OutboxAppendError>(|cap| {
-            Box::pin(async move { append_outbox(cap, &entry, &env).await })
-        })
+    let outcome = eventing_test_db(store)
+        .test_write(
+            integration_tenant_scope(tenant),
+            |cap| Box::pin(async move { append_outbox(cap, &entry, &env).await }),
+            OutboxAppendError::from,
+        )
         .await?;
     assert_eq!(outcome, OutboxAppendOutcome::Inserted);
     let (payload, fingerprint): (Vec<u8>, Vec<u8>) =
@@ -9183,18 +9332,22 @@ async fn outbox_append_distinguishes_same_fact_from_conflict_behavior() -> TestR
             .with_correlation("correlation-b"),
     );
 
-    let first = store
-        .run_global_transaction::<_, _, OutboxAppendError>(|cap| {
-            Box::pin(async move { append_outbox(cap, &entry, &first_env).await })
-        })
+    let first = eventing_test_db(&store)
+        .test_write(
+            integration_tenant_scope(test_tenant()),
+            |cap| Box::pin(async move { append_outbox(cap, &entry, &first_env).await }),
+            OutboxAppendError::from,
+        )
         .await?;
     assert_eq!(first, OutboxAppendOutcome::Inserted);
 
     let retry_entry = make_entry(&event_id);
-    let retry = store
-        .run_global_transaction::<_, _, OutboxAppendError>(|cap| {
-            Box::pin(async move { append_outbox(cap, &retry_entry, &retried_env).await })
-        })
+    let retry = eventing_test_db(&store)
+        .test_write(
+            integration_tenant_scope(test_tenant()),
+            |cap| Box::pin(async move { append_outbox(cap, &retry_entry, &retried_env).await }),
+            OutboxAppendError::from,
+        )
         .await?;
     assert_eq!(retry, OutboxAppendOutcome::SameFact);
 
@@ -9209,10 +9362,14 @@ async fn outbox_append_distinguishes_same_fact_from_conflict_behavior() -> TestR
         OutboxMetadata::new(3, test_tenant(), test_contract())
             .with_subject_id(subject_id("stable-subject")),
     );
-    let conflict = store
-        .run_global_transaction::<_, _, OutboxAppendError>(|cap| {
-            Box::pin(async move { append_outbox(cap, &conflicting_entry, &conflict_env).await })
-        })
+    let conflict = eventing_test_db(&store)
+        .test_write(
+            integration_tenant_scope(test_tenant()),
+            move |cap| {
+                Box::pin(async move { append_outbox(cap, &conflicting_entry, &conflict_env).await })
+            },
+            OutboxAppendError::from,
+        )
         .await;
     assert!(matches!(conflict, Err(OutboxAppendError::Conflict(_))));
     assert_eq!(
@@ -9249,18 +9406,38 @@ async fn concurrent_outbox_append_serializes_same_fact_and_conflict() -> TestRes
     let projection_registry_a =
         crate::projection_events::ProjectionWriteRegistry::from_selected(TEST_PROJECTION_INPUTS);
     let projection_registry_b = projection_registry_a.clone();
-    let same_a = store.run_global_transaction::<_, _, OutboxAppendError>(|cap| {
-        Box::pin(async move {
-            append_outbox_with_projection(cap, &same_entry_a, &same_env_a, &projection_registry_a)
+    let same_db_a = eventing_test_db(&store);
+    let same_db_b = eventing_test_db(&store);
+    let same_a = same_db_a.test_write(
+        integration_tenant_scope(test_tenant()),
+        |cap| {
+            Box::pin(async move {
+                append_outbox_with_projection(
+                    cap,
+                    &same_entry_a,
+                    &same_env_a,
+                    &projection_registry_a,
+                )
                 .await
-        })
-    });
-    let same_b = store.run_global_transaction::<_, _, OutboxAppendError>(|cap| {
-        Box::pin(async move {
-            append_outbox_with_projection(cap, &same_entry_b, &same_env_b, &projection_registry_b)
+            })
+        },
+        OutboxAppendError::from,
+    );
+    let same_b = same_db_b.test_write(
+        integration_tenant_scope(test_tenant()),
+        |cap| {
+            Box::pin(async move {
+                append_outbox_with_projection(
+                    cap,
+                    &same_entry_b,
+                    &same_env_b,
+                    &projection_registry_b,
+                )
                 .await
-        })
-    });
+            })
+        },
+        OutboxAppendError::from,
+    );
     let (same_a, same_b) = tokio::join!(same_a, same_b);
     let same_outcomes = [same_a?, same_b?];
     assert_eq!(
@@ -9295,12 +9472,18 @@ async fn concurrent_outbox_append_serializes_same_fact_and_conflict() -> TestRes
     );
     let conflict_env_a = make_test_env("identity", "identity.session-created");
     let conflict_env_b = conflict_env_a.clone();
-    let conflict_a = store.run_global_transaction::<_, _, OutboxAppendError>(|cap| {
-        Box::pin(async move { append_outbox(cap, &conflict_entry_a, &conflict_env_a).await })
-    });
-    let conflict_b = store.run_global_transaction::<_, _, OutboxAppendError>(|cap| {
-        Box::pin(async move { append_outbox(cap, &conflict_entry_b, &conflict_env_b).await })
-    });
+    let conflict_db_a = eventing_test_db(&store);
+    let conflict_db_b = eventing_test_db(&store);
+    let conflict_a = conflict_db_a.test_write(
+        integration_tenant_scope(test_tenant()),
+        |cap| Box::pin(async move { append_outbox(cap, &conflict_entry_a, &conflict_env_a).await }),
+        OutboxAppendError::from,
+    );
+    let conflict_b = conflict_db_b.test_write(
+        integration_tenant_scope(test_tenant()),
+        |cap| Box::pin(async move { append_outbox(cap, &conflict_entry_b, &conflict_env_b).await }),
+        OutboxAppendError::from,
+    );
     let (conflict_a, conflict_b) = tokio::join!(conflict_a, conflict_b);
     let inserted = usize::from(matches!(
         conflict_a.as_ref(),
@@ -9333,16 +9516,26 @@ async fn concurrent_cdc_append_serializes_same_fact_and_typed_conflict() -> Test
     let same_entry_b = same_entry_a.clone();
     let same_env_a = make_test_env("identity", "identity.session-created");
     let same_env_b = same_env_a.clone();
-    let same_a = store.run_global_transaction::<_, _, OutboxAppendError>(|cap| {
-        Box::pin(async move {
-            append_outbox_log(cap, &same_entry_a, &same_env_a, "aggregate-same").await
-        })
-    });
-    let same_b = store.run_global_transaction::<_, _, OutboxAppendError>(|cap| {
-        Box::pin(async move {
-            append_outbox_log(cap, &same_entry_b, &same_env_b, "aggregate-same").await
-        })
-    });
+    let same_db_a = eventing_test_db(&store);
+    let same_db_b = eventing_test_db(&store);
+    let same_a = same_db_a.test_write(
+        integration_tenant_scope(test_tenant()),
+        |cap| {
+            Box::pin(async move {
+                append_outbox_log(cap, &same_entry_a, &same_env_a, "aggregate-same").await
+            })
+        },
+        OutboxAppendError::from,
+    );
+    let same_b = same_db_b.test_write(
+        integration_tenant_scope(test_tenant()),
+        |cap| {
+            Box::pin(async move {
+                append_outbox_log(cap, &same_entry_b, &same_env_b, "aggregate-same").await
+            })
+        },
+        OutboxAppendError::from,
+    );
     let (same_a, same_b) = tokio::join!(same_a, same_b);
     let same_outcomes = [same_a?, same_b?];
     assert_eq!(
@@ -9382,28 +9575,38 @@ async fn concurrent_cdc_append_serializes_same_fact_and_typed_conflict() -> Test
     );
     let conflict_env_a = make_test_env("identity", "identity.session-created");
     let conflict_env_b = conflict_env_a.clone();
-    let conflict_a = store.run_global_transaction::<_, _, OutboxAppendError>(|cap| {
-        Box::pin(async move {
-            append_outbox_log(
-                cap,
-                &conflict_entry_a,
-                &conflict_env_a,
-                "aggregate-conflict",
-            )
-            .await
-        })
-    });
-    let conflict_b = store.run_global_transaction::<_, _, OutboxAppendError>(|cap| {
-        Box::pin(async move {
-            append_outbox_log(
-                cap,
-                &conflict_entry_b,
-                &conflict_env_b,
-                "aggregate-conflict",
-            )
-            .await
-        })
-    });
+    let conflict_db_a = eventing_test_db(&store);
+    let conflict_db_b = eventing_test_db(&store);
+    let conflict_a = conflict_db_a.test_write(
+        integration_tenant_scope(test_tenant()),
+        |cap| {
+            Box::pin(async move {
+                append_outbox_log(
+                    cap,
+                    &conflict_entry_a,
+                    &conflict_env_a,
+                    "aggregate-conflict",
+                )
+                .await
+            })
+        },
+        OutboxAppendError::from,
+    );
+    let conflict_b = conflict_db_b.test_write(
+        integration_tenant_scope(test_tenant()),
+        |cap| {
+            Box::pin(async move {
+                append_outbox_log(
+                    cap,
+                    &conflict_entry_b,
+                    &conflict_env_b,
+                    "aggregate-conflict",
+                )
+                .await
+            })
+        },
+        OutboxAppendError::from,
+    );
     let (conflict_a, conflict_b) = tokio::join!(conflict_a, conflict_b);
     assert_eq!(
         usize::from(matches!(
@@ -9445,12 +9648,16 @@ async fn concurrent_cdc_append_serializes_same_fact_and_typed_conflict() -> Test
         OutboxPayload::from_reviewed_event_bytes(retry_payload),
     );
     let retry_env = make_test_env("identity", "identity.session-created");
-    let retry = store
-        .run_global_transaction::<_, _, OutboxAppendError>(|cap| {
-            Box::pin(async move {
-                append_outbox_log(cap, &retry_entry, &retry_env, "aggregate-conflict").await
-            })
-        })
+    let retry = eventing_test_db(&store)
+        .test_write(
+            integration_tenant_scope(test_tenant()),
+            move |cap| {
+                Box::pin(async move {
+                    append_outbox_log(cap, &retry_entry, &retry_env, "aggregate-conflict").await
+                })
+            },
+            OutboxAppendError::from,
+        )
         .await;
     assert!(matches!(retry, Err(OutboxAppendError::Conflict(_))));
     let after: (i64, Vec<u8>, Vec<u8>) = sqlx::query_as(
@@ -9574,36 +9781,40 @@ async fn projection_writer_funnel_mirrors_only_generated_bound_insert_once() -> 
         vocab::ContractBinding::from_static("test", "projection.bound", "v2", TEST_SCHEMA_HASH),
     );
 
-    store
-        .run_global_transaction::<_, _, sqlx::Error>(|cap| {
-            let bound_entry = bound_entry.clone();
-            let unbound_entry = unbound_entry.clone();
-            let bound_env = bound_env.clone();
-            let unbound_env = unbound_env.clone();
-            Box::pin(async move {
-                let _outcome =
-                    append_outbox_with_projection(cap, &bound_entry, &bound_env, &registry)
-                        .await
-                        .map_err(test_append_error)?;
-                let _outcome =
-                    append_outbox_with_projection(cap, &bound_entry, &bound_env, &registry)
-                        .await
-                        .map_err(test_append_error)?;
-                let _outcome =
-                    append_outbox_with_projection(cap, &unbound_entry, &unbound_env, &registry)
-                        .await
-                        .map_err(test_append_error)?;
-                let _outcome = append_outbox_with_projection(
-                    cap,
-                    &schema_mismatch_entry,
-                    &schema_mismatch_env,
-                    &registry,
-                )
-                .await
-                .map_err(test_append_error)?;
-                Ok(())
-            }) as BoxFuture<'_, Result<(), sqlx::Error>>
-        })
+    eventing_test_db(&store)
+        .test_write(
+            integration_tenant_scope(test_tenant()),
+            move |cap| {
+                let bound_entry = bound_entry.clone();
+                let unbound_entry = unbound_entry.clone();
+                let bound_env = bound_env.clone();
+                let unbound_env = unbound_env.clone();
+                Box::pin(async move {
+                    let _outcome =
+                        append_outbox_with_projection(cap, &bound_entry, &bound_env, &registry)
+                            .await
+                            .map_err(test_append_error)?;
+                    let _outcome =
+                        append_outbox_with_projection(cap, &bound_entry, &bound_env, &registry)
+                            .await
+                            .map_err(test_append_error)?;
+                    let _outcome =
+                        append_outbox_with_projection(cap, &unbound_entry, &unbound_env, &registry)
+                            .await
+                            .map_err(test_append_error)?;
+                    let _outcome = append_outbox_with_projection(
+                        cap,
+                        &schema_mismatch_entry,
+                        &schema_mismatch_env,
+                        &registry,
+                    )
+                    .await
+                    .map_err(test_append_error)?;
+                    Ok(())
+                }) as BoxFuture<'_, Result<(), sqlx::Error>>
+            },
+            std::convert::identity,
+        )
         .await?;
 
     let projection_rows: Vec<(String, String, String, String, String)> = sqlx::query_as(
@@ -9700,7 +9911,6 @@ async fn projection_writer_runtime_setup_mirrors_reviewed_generated_event() -> T
 
 #[tokio::test(flavor = "multi_thread")]
 async fn projection_writer_funnel_serializes_lsn_with_commit_order() -> TestResult {
-    use crate::cotx::TxCapability;
     use crate::projection_events::ProjectionWriteRegistry;
 
     let (_pg, store) = connect_pg().await?;
@@ -9716,41 +9926,55 @@ async fn projection_writer_funnel_serializes_lsn_with_commit_order() -> TestResu
     let first_env = make_test_env(&domain, "projection.bound");
     let second_env = make_test_env(&domain, "projection.bound");
 
-    let pool_a = store.pool.clone();
-    let pool_b = store.pool.clone();
+    let db_a = eventing_test_db(&store);
+    let db_b = eventing_test_db(&store);
     let (first_appended_tx, first_appended_rx) = tokio::sync::oneshot::channel();
     let (release_first_tx, release_first_rx) = tokio::sync::oneshot::channel();
     let (second_started_tx, second_started_rx) = tokio::sync::oneshot::channel();
 
     let first = tokio::spawn(async move {
-        let mut tx = pool_a.begin().await?;
-        let mut cap = TxCapability::from_transaction(&mut tx);
-        let _outcome =
-            append_outbox_with_projection(&mut cap, &first_entry, &first_env, &first_registry)
-                .await
-                .map_err(test_append_error)?;
-        let _ = first_appended_tx.send(());
-        release_first_rx.await.map_err(|err| {
-            Box::new(std::io::Error::other(format!(
-                "release channel closed: {err}"
-            ))) as Box<dyn std::error::Error + Send + Sync>
-        })?;
-        tx.commit().await?;
-        Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+        db_a.test_write(
+            integration_tenant_scope(test_tenant()),
+            move |tx| {
+                Box::pin(async move {
+                    let _outcome = append_outbox_with_projection(
+                        tx,
+                        &first_entry,
+                        &first_env,
+                        &first_registry,
+                    )
+                    .await
+                    .map_err(test_append_error)?;
+                    let _ = first_appended_tx.send(());
+                    release_first_rx
+                        .await
+                        .map_err(|err| sqlx::Error::Protocol(err.to_string()))?;
+                    Ok(())
+                })
+            },
+            std::convert::identity,
+        )
+        .await
     });
 
     first_appended_rx.await?;
 
     let second = tokio::spawn(async move {
-        let mut tx = pool_b.begin().await?;
-        let mut cap = TxCapability::from_transaction(&mut tx);
-        let _ = second_started_tx.send(());
-        let _outcome =
-            append_outbox_with_projection(&mut cap, &second_entry, &second_env, &registry)
-                .await
-                .map_err(test_append_error)?;
-        tx.commit().await?;
-        Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+        db_b.test_write(
+            integration_tenant_scope(test_tenant()),
+            move |tx| {
+                Box::pin(async move {
+                    let _ = second_started_tx.send(());
+                    let _outcome =
+                        append_outbox_with_projection(tx, &second_entry, &second_env, &registry)
+                            .await
+                            .map_err(test_append_error)?;
+                    Ok(())
+                })
+            },
+            std::convert::identity,
+        )
+        .await
     });
     let mut second = second;
 
@@ -9898,22 +10122,26 @@ async fn projection_events_runtime_uses_fixed_functions_not_direct_table_privile
     let unbound_entry = make_entry(&unbound_event_id);
     let unbound_env = make_test_env("test", "projection.unbound");
     let unbound_metadata = unbound_env.metadata_json();
-    store
-        .run_global_transaction::<_, _, sqlx::Error>(|cap| {
-            let entry = entry.clone();
-            let env = env.clone();
-            let unbound_entry = unbound_entry.clone();
-            let unbound_env = unbound_env.clone();
-            Box::pin(async move {
-                let _outcome = append_outbox(cap, &entry, &env)
-                    .await
-                    .map_err(test_append_error)?;
-                let _outcome = append_outbox(cap, &unbound_entry, &unbound_env)
-                    .await
-                    .map_err(test_append_error)?;
-                Ok(())
-            }) as BoxFuture<'_, Result<(), sqlx::Error>>
-        })
+    eventing_test_db(&store)
+        .test_write(
+            integration_tenant_scope(test_tenant()),
+            move |cap| {
+                let entry = entry.clone();
+                let env = env.clone();
+                let unbound_entry = unbound_entry.clone();
+                let unbound_env = unbound_env.clone();
+                Box::pin(async move {
+                    let _outcome = append_outbox(cap, &entry, &env)
+                        .await
+                        .map_err(test_append_error)?;
+                    let _outcome = append_outbox(cap, &unbound_entry, &unbound_env)
+                        .await
+                        .map_err(test_append_error)?;
+                    Ok(())
+                }) as BoxFuture<'_, Result<(), sqlx::Error>>
+            },
+            std::convert::identity,
+        )
         .await?;
 
     let (lsn,): (i64,) = sqlx::query_as(
@@ -10636,17 +10864,21 @@ async fn conf_seed_pending(
     event_id: String,
     domain: String,
 ) -> Result<(), String> {
-    store
-        .run_global_transaction::<_, _, sqlx::Error>(|cap| {
-            let entry = make_entry(&event_id);
-            let env = make_test_env(&domain, "eventing-conf");
-            Box::pin(async move {
-                let _outcome = append_outbox(cap, &entry, &env)
-                    .await
-                    .map_err(test_append_error)?;
-                Ok(())
-            }) as BoxFuture<'_, Result<(), sqlx::Error>>
-        })
+    eventing_test_db(store)
+        .test_write(
+            integration_tenant_scope(test_tenant()),
+            move |cap| {
+                let entry = make_entry(&event_id);
+                let env = make_test_env(&domain, "eventing-conf");
+                Box::pin(async move {
+                    let _outcome = append_outbox(cap, &entry, &env)
+                        .await
+                        .map_err(test_append_error)?;
+                    Ok(())
+                }) as BoxFuture<'_, Result<(), sqlx::Error>>
+            },
+            std::convert::identity,
+        )
         .await
         .map_err(|e| format!("{e:?}"))
 }
@@ -10767,7 +10999,7 @@ fn conf_outbox_status(status: &str) -> Result<eventconf::OutboxStatus, String> {
         crate::outbox::STATUS_PENDING => Ok(eventconf::OutboxStatus::Pending),
         crate::outbox::STATUS_PUBLISHING => Ok(eventconf::OutboxStatus::Publishing),
         crate::outbox::STATUS_PUBLISHED => Ok(eventconf::OutboxStatus::Published),
-        crate::outbox::STATUS_DLX => Ok(eventconf::OutboxStatus::Dlx),
+        "dlx" => Ok(eventconf::OutboxStatus::Dlx),
         other => Err(format!("unknown outbox status {other:?}")),
     }
 }
@@ -10926,26 +11158,37 @@ async fn outbox_relay_and_cdc_envelope_parity_conformance() -> TestResult {
         EnvelopeCausationId::from_opaque("cause-parity-1645").unwrap(),
     ));
 
-    store
-        .run_global_transaction::<_, _, sqlx::Error>(|cap| {
-            let entry = entry.clone();
-            let env = env.clone();
-            Box::pin(async move {
-                let _outcome = append_outbox(cap, &entry, &env)
-                    .await
-                    .map_err(test_append_error)?;
-                Ok(())
-            }) as BoxFuture<'_, Result<(), sqlx::Error>>
-        })
+    let relay_entry = entry.clone();
+    let relay_env = env.clone();
+    eventing_test_db(&store)
+        .test_write(
+            integration_tenant_scope(tenant),
+            move |cap| {
+                let entry = relay_entry.clone();
+                let env = relay_env.clone();
+                Box::pin(async move {
+                    let _outcome = append_outbox(cap, &entry, &env)
+                        .await
+                        .map_err(test_append_error)?;
+                    Ok(())
+                }) as BoxFuture<'_, Result<(), sqlx::Error>>
+            },
+            std::convert::identity,
+        )
         .await?;
 
-    let mut tx = store.pool.begin().await?;
-    crate::cotx::set_local_tenant(&mut tx, tenant).await?;
-    {
-        let mut cap = crate::cotx::TxCapability::from_transaction(&mut tx);
-        let _outcome = append_outbox_log(&mut cap, &entry, &env, subject).await?;
-    }
-    tx.commit().await?;
+    eventing_test_db(&store)
+        .test_write(
+            integration_tenant_scope(tenant),
+            move |tx| {
+                Box::pin(async move {
+                    let _outcome = append_outbox_log(tx, &entry, &env, subject).await?;
+                    Ok(())
+                })
+            },
+            OutboxAppendError::from,
+        )
+        .await?;
 
     let (relay_fingerprint, cdc_fingerprint): (Vec<u8>, Vec<u8>) = sqlx::query_as(
         "SELECT o.fact_fingerprint, l.fact_fingerprint \
@@ -11773,16 +12016,17 @@ async fn t1_rollback_leaves_no_outbox_entry() -> TestResult {
     let event_id = unique_event_id("t1");
     let entry = make_entry(&event_id);
     let env = make_envelope("t1-domain", &event_id);
+    let event_id_for_write = event_id.clone();
 
     // 事务内 append_outbox，然后返回 Err → 回滚。
     let result = store
-        .run_global_transaction::<_, (), sqlx::Error>(|cap| {
+        .serving_write_fixture::<_, (), sqlx::Error>(test_tenant(), move |cap| {
             let entry = entry.clone();
             let env = OutboxEnvelope::new(
                 env.domain().to_string(),
                 env.contract_id().to_string(),
                 OutboxMetadata::new(0, test_tenant(), test_contract())
-                    .with_subject_id(subject_id(event_id.as_str())),
+                    .with_subject_id(subject_id(event_id_for_write.as_str())),
             );
             Box::pin(async move {
                 let _outcome = append_outbox(cap, &entry, &env)
@@ -11819,16 +12063,17 @@ async fn t2_commit_creates_exactly_one_pending_row() -> TestResult {
     let event_id = unique_event_id("t2");
     let entry = make_entry(&event_id);
     let env = make_envelope("t2-domain", &event_id);
+    let event_id_for_write = event_id.clone();
 
     // 事务内 append_outbox + Ok → commit。
     store
-        .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+        .serving_write_fixture::<_, _, sqlx::Error>(test_tenant(), move |cap| {
             let entry = entry.clone();
             let env = OutboxEnvelope::new(
                 env.domain().to_string(),
                 env.contract_id().to_string(),
                 OutboxMetadata::new(0, test_tenant(), test_contract())
-                    .with_subject_id(subject_id(event_id.as_str())),
+                    .with_subject_id(subject_id(event_id_for_write.as_str())),
             );
             Box::pin(async move {
                 let _outcome = append_outbox(cap, &entry, &env)
@@ -11871,7 +12116,7 @@ async fn t3_relay_ok_publishes_and_acks() -> TestResult {
 
     // seed: 1 行 pending。
     store
-        .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+        .serving_write_fixture::<_, _, sqlx::Error>(test_tenant(), move |cap| {
             let entry = entry.clone();
             let env = OutboxEnvelope::new(
                 env.domain().to_string(),
@@ -11922,7 +12167,7 @@ async fn t4_relay_err_requeues_with_retry_after() -> TestResult {
 
     // seed: 1 行 pending，retry_count=0。
     store
-        .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+        .serving_write_fixture::<_, _, sqlx::Error>(test_tenant(), move |cap| {
             let entry = entry.clone();
             let env = OutboxEnvelope::new(
                 "t4_domain".to_string(),
@@ -11994,7 +12239,7 @@ async fn relay_ambiguous_retries_with_original_event_id_behavior() -> TestResult
     let event_id = unique_event_id("t4b-ambiguous");
     let entry = make_entry(&event_id);
     store
-        .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+        .serving_write_fixture::<_, _, sqlx::Error>(test_tenant(), move |cap| {
             let entry = entry.clone();
             let env = OutboxEnvelope::new(
                 "t4b_ambiguous_domain".to_string(),
@@ -12062,7 +12307,7 @@ async fn t5_relay_err_at_budget_exhaustion_dlxes() -> TestResult {
 
     // seed: 1 行 pending，手动置 retry_count=MAX-1。
     store
-        .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+        .serving_write_fixture::<_, _, sqlx::Error>(test_tenant(), move |cap| {
             let entry = entry.clone();
             let env = OutboxEnvelope::new(
                 "t5_domain".to_string(),
@@ -12124,7 +12369,7 @@ async fn t5b_relay_permanent_err_dlxes_on_first_attempt() -> TestResult {
 
     // seed: 1 行 pending，retry_count 保持默认 0（首投）。
     store
-        .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+        .serving_write_fixture::<_, _, sqlx::Error>(test_tenant(), move |cap| {
             let entry = entry.clone();
             let env = OutboxEnvelope::new(
                 "t5b_domain".to_string(),
@@ -12185,7 +12430,7 @@ async fn t6_crash_recovery_stale_lease_redelivered() -> TestResult {
 
     // seed: 1 行，手动置为 status='publishing' 且 lease_until 已过期（模拟崩溃残留）。
     store
-        .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+        .serving_write_fixture::<_, _, sqlx::Error>(test_tenant(), move |cap| {
             let entry = entry.clone();
             let env = make_test_env("crash_domain", "c");
             Box::pin(async move {
@@ -12215,7 +12460,7 @@ async fn t6_crash_recovery_stale_lease_redelivered() -> TestResult {
     let other_id = unique_event_id("t6-other");
     let other_entry = make_entry(&other_id);
     store
-        .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+        .serving_write_fixture::<_, _, sqlx::Error>(test_tenant(), move |cap| {
             let entry = other_entry.clone();
             Box::pin(async move {
                 let _outcome = append_outbox(cap, &entry, &make_test_env("other_domain", "c"))
@@ -12292,7 +12537,7 @@ async fn t7_concurrent_relay_publishes_at_most_once() -> TestResult {
 
     // seed 1 行 pending。
     store
-        .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+        .serving_write_fixture::<_, _, sqlx::Error>(test_tenant(), move |cap| {
             let entry = entry.clone();
             let env = make_test_env("t7_domain", "c");
             Box::pin(async move {
@@ -12363,7 +12608,7 @@ async fn t7b_atomic_claim_uses_independent_database_connections() -> TestResult 
     let entry = make_entry(&event_id);
     let env = make_test_env(&domain, "concurrent.claim");
     store
-        .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+        .serving_write_fixture::<_, _, sqlx::Error>(test_tenant(), move |cap| {
             Box::pin(async move {
                 let _outcome = append_outbox(cap, &entry, &env)
                     .await
@@ -12471,7 +12716,7 @@ async fn relay_rejects_claim_from_another_provider_instance() -> TestResult {
     let entry = make_entry(&event_id);
     let env = make_test_env(&domain, "provider.provenance");
     store
-        .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+        .serving_write_fixture::<_, _, sqlx::Error>(test_tenant(), move |cap| {
             Box::pin(async move {
                 let _outcome = append_outbox(cap, &entry, &env)
                     .await
@@ -12518,7 +12763,7 @@ async fn lease_publish_preflight_requires_full_publish_budget() -> TestResult {
     let entry = make_entry(&event_id);
     let env = make_test_env(&domain, "publish.budget");
     store
-        .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+        .serving_write_fixture::<_, _, sqlx::Error>(test_tenant(), move |cap| {
             Box::pin(async move {
                 let _outcome = append_outbox(cap, &entry, &env)
                     .await
@@ -12641,7 +12886,7 @@ async fn relay_budget_sql_boundary_is_fail_closed_and_claim_uses_configured_ttl(
     let maximum_entry = make_entry(&maximum_event_id);
     let maximum_env = make_test_env(&maximum_domain, "maximum.relay.budget");
     store
-        .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+        .serving_write_fixture::<_, _, sqlx::Error>(test_tenant(), move |cap| {
             Box::pin(async move {
                 let _ = append_outbox(cap, &maximum_entry, &maximum_env)
                     .await
@@ -12696,7 +12941,7 @@ async fn relay_budget_sql_boundary_is_fail_closed_and_claim_uses_configured_ttl(
     let entry = make_entry(&event_id);
     let env = make_test_env(&domain, "configured.lease");
     store
-        .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+        .serving_write_fixture::<_, _, sqlx::Error>(test_tenant(), move |cap| {
             Box::pin(async move {
                 let _ = append_outbox(cap, &entry, &env)
                     .await
@@ -12741,7 +12986,7 @@ async fn insufficient_preflight_budget_never_calls_publisher_behavior() -> TestR
     let entry = make_entry(&event_id);
     let env = make_test_env(&domain, "preflight.no-broker");
     store
-        .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+        .serving_write_fixture::<_, _, sqlx::Error>(test_tenant(), move |cap| {
             Box::pin(async move {
                 let _ = append_outbox(cap, &entry, &env)
                     .await
@@ -12785,7 +13030,7 @@ async fn preflight_pool_starvation_expires_inside_safety_margin_without_publishi
     let entry = make_entry(&event_id);
     let env = make_test_env(&domain, "preflight.starvation");
     owner
-        .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+        .serving_write_fixture::<_, _, sqlx::Error>(test_tenant(), move |cap| {
             Box::pin(async move {
                 let _ = append_outbox(cap, &entry, &env)
                     .await
@@ -13022,19 +13267,20 @@ async fn localtx_assert_backend_quarantined(
 }
 
 async fn run_localtx_deadline_write<T, F>(
-    scoped: &crate::cotx::PgTenantWritePool,
+    scoped: &crate::cotx::TenantDb<ServingWriteLane>,
     tenant: vocab::TenantId,
     budget: consistency::LocalTxExecutionBudget,
     write: F,
 ) -> (Result<T, settings::ports::ConfigRepoError>, usize)
 where
     F: for<'c, 'tx> FnOnce(
-            &'c mut crate::cotx::TxCapability<'tx>,
+            &'c mut crate::cotx::eventing::OutboxTx<'tx>,
         ) -> futures::future::BoxFuture<
             'c,
             Result<T, settings::ports::ConfigRepoError>,
         > + Clone
-        + Send,
+        + Send
+        + 'static,
     T: Send,
 {
     use std::sync::{
@@ -13053,7 +13299,7 @@ where
             observation,
             |_attempt, deadline| {
                 attempts_for_runner.fetch_add(1, Ordering::SeqCst);
-                scoped.retry_write(
+                scoped.test_retry_write(
                     settings::ports::TenantRepoScope::for_test(tenant),
                     deadline,
                     write.clone(),
@@ -13114,7 +13360,7 @@ async fn localtx_deadline_real_postgres_fault_matrix() -> TestResult {
     owner.run_migrations().await?;
     let app = connect_pg_rss_app_role_with_limits(&pg, &owner, 1, Duration::from_secs(7)).await?;
     let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
-    let scoped = crate::cotx::PgTenantWritePool::from_unverified_for_test(&app);
+    let scoped = crate::cotx::TenantDb::<ServingWriteLane>::from_unverified_for_test(&app);
     let budget =
         LocalTxExecutionBudget::new(Duration::from_millis(300), Duration::from_millis(100))?;
     let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
@@ -13210,7 +13456,6 @@ async fn localtx_deadline_real_postgres_fault_matrix() -> TestResult {
                 let lock_timeout_out = std::sync::Arc::clone(&lock_timeout_ms);
                 let key = format!("localtx-deadline-operation-{}", uuid::Uuid::new_v4());
                 let key_for_write = key.clone();
-                let tenant_for_write = tenant.to_string();
                 let before = localtx_deadline_stage_count(&handle, LocalTxDeadlineStage::Operation);
                 let final_before =
                     localtx_final_status_count(&handle, LocalTxFinalStatus::RolledBack);
@@ -13220,37 +13465,21 @@ async fn localtx_deadline_real_postgres_fault_matrix() -> TestResult {
                     let statement_timeout_out = std::sync::Arc::clone(&statement_timeout_out);
                     let lock_timeout_out = std::sync::Arc::clone(&lock_timeout_out);
                     let key = key_for_write.clone();
-                    let tenant = tenant_for_write.clone();
                     Box::pin(async move {
-                        let pid = sqlx::query_scalar("SELECT pg_backend_pid()")
-                            .fetch_one(tx.conn())
-                            .await
+                        let pid = tx.test_backend_pid().await
                             .map_err(|error| ConfigRepoError::Storage(Box::new(error)))?;
                         pid_out.store(pid, Ordering::SeqCst);
-                        let (statement_ms, lock_ms): (i32, i32) = sqlx::query_as(
-                            "SELECT \
-                               (EXTRACT(EPOCH FROM current_setting('statement_timeout')::interval) * 1000)::int, \
-                               (EXTRACT(EPOCH FROM current_setting('lock_timeout')::interval) * 1000)::int",
-                        )
-                        .fetch_one(tx.conn())
-                        .await
+                        let (statement_ms, lock_ms) = tx
+                            .test_local_timeouts()
+                            .await
                         .map_err(|error| ConfigRepoError::Storage(Box::new(error)))?;
                         statement_timeout_out.store(statement_ms, Ordering::SeqCst);
                         lock_timeout_out.store(lock_ms, Ordering::SeqCst);
-                        sqlx::query(
-                            "INSERT INTO config_entries \
-                                 (tenant_id, config_key, version, value, protection_scheme) \
-                                 VALUES ($1::uuid, $2, 1, 'pending', 0)",
-                        )
-                        .bind(tenant)
-                        .bind(key)
-                        .execute(tx.conn())
+                        tx.test_insert_config(&key, "pending")
                         .await
                         .map_err(|error| ConfigRepoError::Storage(Box::new(error)))?;
-                        sqlx::query("SELECT pg_sleep(1)")
-                            .execute(tx.conn())
+                        tx.test_sleep_one_second()
                             .await
-                            .map(|_| ())
                             .map_err(|error| ConfigRepoError::Storage(Box::new(error)))
                     })
                 })
@@ -13304,9 +13533,7 @@ async fn localtx_deadline_real_postgres_fault_matrix() -> TestResult {
                     run_localtx_deadline_write(&scoped, tenant, budget, move |tx| {
                         let pid_out = std::sync::Arc::clone(&pid_out);
                         Box::pin(async move {
-                            let pid = sqlx::query_scalar("SELECT pg_backend_pid()")
-                                .fetch_one(tx.conn())
-                                .await
+                            let pid = tx.test_backend_pid().await
                                 .map_err(|error| ConfigRepoError::Storage(Box::new(error)))?;
                             pid_out.store(pid, Ordering::SeqCst);
                             Err::<(), _>(ConfigRepoError::Storage(Box::new(
@@ -13346,9 +13573,7 @@ async fn localtx_deadline_real_postgres_fault_matrix() -> TestResult {
                     run_localtx_deadline_write(&scoped, tenant, budget, move |tx| {
                         let pid_out = std::sync::Arc::clone(&pid_out);
                         Box::pin(async move {
-                            let pid = sqlx::query_scalar("SELECT pg_backend_pid()")
-                                .fetch_one(tx.conn())
-                                .await
+                            let pid = tx.test_backend_pid().await
                                 .map_err(|error| ConfigRepoError::Storage(Box::new(error)))?;
                             pid_out.store(pid, Ordering::SeqCst);
                             Ok(())
@@ -13385,9 +13610,7 @@ async fn localtx_deadline_real_postgres_fault_matrix() -> TestResult {
                 let (rollback, attempts) = run_localtx_deadline_write(&scoped, tenant, budget, move |tx| {
                     let pid_out = std::sync::Arc::clone(&pid_out);
                     Box::pin(async move {
-                        let pid = sqlx::query_scalar("SELECT pg_backend_pid()")
-                            .fetch_one(tx.conn())
-                            .await
+                        let pid = tx.test_backend_pid().await
                             .map_err(|error| ConfigRepoError::Storage(Box::new(error)))?;
                         pid_out.store(pid, Ordering::SeqCst);
                         tx.inject_rollback_timeout()
@@ -13431,13 +13654,7 @@ async fn localtx_deadline_real_postgres_fault_matrix() -> TestResult {
                     cap_budget,
                     |tx| {
                         Box::pin(async move {
-                            sqlx::query_as::<_, (i32, i32)>(
-                                "SELECT \
-                                   (EXTRACT(EPOCH FROM current_setting('statement_timeout')::interval) * 1000)::int, \
-                                   (EXTRACT(EPOCH FROM current_setting('lock_timeout')::interval) * 1000)::int",
-                            )
-                            .fetch_one(tx.conn())
-                            .await
+                            tx.test_local_timeouts().await
                             .map_err(|error| ConfigRepoError::Storage(Box::new(error)))
                         })
                     },
@@ -13495,16 +13712,15 @@ async fn localtx_settlement_connection_policy() -> TestResult {
     owner.run_migrations().await?;
     let app = connect_pg_rss_app_role_with_limits(&pg, &owner, 1, Duration::from_secs(7)).await?;
     let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
-    let scoped = crate::cotx::PgTenantWritePool::from_unverified_for_test(&app);
+    let scoped = crate::cotx::TenantDb::<ServingWriteLane>::from_unverified_for_test(&app);
 
     let committed = scoped
-        .retry_write(
+        .test_retry_write(
             TenantRepoScope::for_test(tenant),
             crate::tx_retry::localtx_deadline_for_test(),
             |tx| {
                 Box::pin(async move {
-                    sqlx::query_scalar("SELECT pg_backend_pid()")
-                        .fetch_one(tx.conn())
+                    tx.test_backend_pid()
                         .await
                         .map_err(|error| ConfigRepoError::Storage(Box::new(error)))
                 })
@@ -13521,27 +13737,19 @@ async fn localtx_settlement_connection_policy() -> TestResult {
     let tenant_a_id = tenant.to_string();
     let tenant_b_id = tenant_b.to_string();
     let key_for_a = isolation_key.clone();
-    let tenant_a_for_insert = tenant_a_id.clone();
     let tenant_a_pid = scoped
-        .retry_write(
+        .test_retry_write(
             TenantRepoScope::for_test(tenant),
             crate::tx_retry::localtx_deadline_for_test(),
             move |tx| {
                 Box::pin(async move {
-                    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-                        .fetch_one(tx.conn())
+                    let pid: i32 = tx
+                        .test_backend_pid()
                         .await
                         .map_err(|error| ConfigRepoError::Storage(Box::new(error)))?;
-                    sqlx::query(
-                        "INSERT INTO config_entries \
-                         (tenant_id, config_key, version, value, protection_scheme) \
-                         VALUES ($1::uuid, $2, 1, 'value-a', 0)",
-                    )
-                    .bind(&tenant_a_for_insert)
-                    .bind(&key_for_a)
-                    .execute(tx.conn())
-                    .await
-                    .map_err(|error| ConfigRepoError::Storage(Box::new(error)))?;
+                    tx.test_insert_config(&key_for_a, "value-a")
+                        .await
+                        .map_err(|error| ConfigRepoError::Storage(Box::new(error)))?;
                     Ok(pid)
                 })
             },
@@ -13551,34 +13759,23 @@ async fn localtx_settlement_connection_policy() -> TestResult {
         .into_result()?;
 
     let key_for_b = isolation_key.clone();
-    let tenant_b_for_insert = tenant_b_id.clone();
     let (tenant_b_pid, tenant_b_visible_before_insert) = scoped
-        .retry_write(
+        .test_retry_write(
             TenantRepoScope::for_test(tenant_b),
             crate::tx_retry::localtx_deadline_for_test(),
             move |tx| {
                 Box::pin(async move {
-                    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-                        .fetch_one(tx.conn())
+                    let pid: i32 = tx
+                        .test_backend_pid()
                         .await
                         .map_err(|error| ConfigRepoError::Storage(Box::new(error)))?;
-                    let visible: i64 = sqlx::query_scalar(
-                        "SELECT count(*) FROM config_entries WHERE config_key = $1 AND version = 1",
-                    )
-                    .bind(&key_for_b)
-                    .fetch_one(tx.conn())
-                    .await
-                    .map_err(|error| ConfigRepoError::Storage(Box::new(error)))?;
-                    sqlx::query(
-                        "INSERT INTO config_entries \
-                         (tenant_id, config_key, version, value, protection_scheme) \
-                         VALUES ($1::uuid, $2, 1, 'value-b', 0)",
-                    )
-                    .bind(&tenant_b_for_insert)
-                    .bind(&key_for_b)
-                    .execute(tx.conn())
-                    .await
-                    .map_err(|error| ConfigRepoError::Storage(Box::new(error)))?;
+                    let visible = tx
+                        .test_config_count(&key_for_b)
+                        .await
+                        .map_err(|error| ConfigRepoError::Storage(Box::new(error)))?;
+                    tx.test_insert_config(&key_for_b, "value-b")
+                        .await
+                        .map_err(|error| ConfigRepoError::Storage(Box::new(error)))?;
                     Ok((pid, visible))
                 })
             },
@@ -13593,22 +13790,19 @@ async fn localtx_settlement_connection_policy() -> TestResult {
 
     let key_for_a = isolation_key.clone();
     let (tenant_a_return_pid, tenant_a_values) = scoped
-        .retry_write(
+        .test_retry_write(
             TenantRepoScope::for_test(tenant),
             crate::tx_retry::localtx_deadline_for_test(),
             move |tx| {
                 Box::pin(async move {
-                    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-                        .fetch_one(tx.conn())
+                    let pid: i32 = tx
+                        .test_backend_pid()
                         .await
                         .map_err(|error| ConfigRepoError::Storage(Box::new(error)))?;
-                    let values: Vec<String> = sqlx::query_scalar(
-                        "SELECT value FROM config_entries WHERE config_key = $1 ORDER BY value",
-                    )
-                    .bind(&key_for_a)
-                    .fetch_all(tx.conn())
-                    .await
-                    .map_err(|error| ConfigRepoError::Storage(Box::new(error)))?;
+                    let values = tx
+                        .test_config_values(&key_for_a)
+                        .await
+                        .map_err(|error| ConfigRepoError::Storage(Box::new(error)))?;
                     Ok((pid, values))
                 })
             },
@@ -13640,13 +13834,13 @@ async fn localtx_settlement_connection_policy() -> TestResult {
     let rolled_back_pid = Arc::new(AtomicI32::new(0));
     let operation_pid = Arc::clone(&rolled_back_pid);
     let rolled_back = scoped
-        .retry_write(
+        .test_retry_write(
             TenantRepoScope::for_test(tenant),
             crate::tx_retry::localtx_deadline_for_test(),
             move |tx| {
                 Box::pin(async move {
-                    let pid = sqlx::query_scalar("SELECT pg_backend_pid()")
-                        .fetch_one(tx.conn())
+                    let pid = tx
+                        .test_backend_pid()
                         .await
                         .map_err(|error| ConfigRepoError::Storage(Box::new(error)))?;
                     operation_pid.store(pid, Ordering::SeqCst);
@@ -13677,14 +13871,14 @@ async fn localtx_settlement_connection_policy() -> TestResult {
     let operation_attempts = Arc::clone(&attempts);
 
     let attempt = scoped
-        .retry_write(
+        .test_retry_write(
             TenantRepoScope::for_test(tenant),
             crate::tx_retry::localtx_deadline_for_test(),
             move |tx| {
                 Box::pin(async move {
                     operation_attempts.fetch_add(1, Ordering::SeqCst);
-                    let pid = sqlx::query_scalar("SELECT pg_backend_pid()")
-                        .fetch_one(tx.conn())
+                    let pid = tx
+                        .test_backend_pid()
                         .await
                         .map_err(|error| ConfigRepoError::Storage(Box::new(error)))?;
                     operation_pid.store(pid, Ordering::SeqCst);
@@ -13713,14 +13907,14 @@ async fn localtx_settlement_connection_policy() -> TestResult {
     let operation_pid = Arc::clone(&backend_pid);
     let operation_attempts = Arc::clone(&attempts);
     let attempt = scoped
-        .retry_write(
+        .test_retry_write(
             TenantRepoScope::for_test(tenant),
             crate::tx_retry::localtx_deadline_for_test(),
             move |tx| {
                 Box::pin(async move {
                     operation_attempts.fetch_add(1, Ordering::SeqCst);
-                    let pid = sqlx::query_scalar("SELECT pg_backend_pid()")
-                        .fetch_one(tx.conn())
+                    let pid = tx
+                        .test_backend_pid()
                         .await
                         .map_err(|error| ConfigRepoError::Storage(Box::new(error)))?;
                     operation_pid.store(pid, Ordering::SeqCst);
@@ -13755,17 +13949,18 @@ async fn localtx_settlement_connection_policy() -> TestResult {
     let operation_pid = Arc::clone(&backend_pid);
     let operation_attempts = Arc::clone(&attempts);
     let (body_entered_tx, body_entered_rx) = tokio::sync::oneshot::channel();
-    let cancellation_scoped = crate::cotx::PgTenantWritePool::from_unverified_for_test(&app);
+    let cancellation_scoped =
+        crate::cotx::TenantDb::<ServingWriteLane>::from_unverified_for_test(&app);
     let cancelled = tokio::spawn(async move {
         cancellation_scoped
-            .retry_write(
+            .test_retry_write(
                 TenantRepoScope::for_test(tenant),
                 crate::tx_retry::localtx_deadline_for_test(),
                 move |tx| {
                     Box::pin(async move {
                         operation_attempts.fetch_add(1, Ordering::SeqCst);
-                        let pid = sqlx::query_scalar("SELECT pg_backend_pid()")
-                            .fetch_one(tx.conn())
+                        let pid = tx
+                            .test_backend_pid()
                             .await
                             .map_err(|error| ConfigRepoError::Storage(Box::new(error)))?;
                         operation_pid.store(pid, Ordering::SeqCst);
@@ -13794,16 +13989,16 @@ async fn localtx_settlement_connection_policy() -> TestResult {
 
     let backend_pid = Arc::new(AtomicI32::new(0));
     let operation_pid = Arc::clone(&backend_pid);
-    let panic_scoped = crate::cotx::PgTenantWritePool::from_unverified_for_test(&app);
+    let panic_scoped = crate::cotx::TenantDb::<ServingWriteLane>::from_unverified_for_test(&app);
     let panicked = tokio::spawn(async move {
         panic_scoped
-            .retry_write(
+            .test_retry_write(
                 TenantRepoScope::for_test(tenant),
                 crate::tx_retry::localtx_deadline_for_test(),
                 move |tx| {
                     Box::pin(async move {
-                        let pid = sqlx::query_scalar("SELECT pg_backend_pid()")
-                            .fetch_one(tx.conn())
+                        let pid = tx
+                            .test_backend_pid()
                             .await
                             .map_err(|error| ConfigRepoError::Storage(Box::new(error)))?;
                         operation_pid.store(pid, Ordering::SeqCst);
@@ -13834,17 +14029,17 @@ async fn localtx_settlement_connection_policy() -> TestResult {
     let operation_pid = Arc::clone(&backend_pid);
     let operation_attempts = Arc::clone(&attempts);
     let rollback_timeout_seam = crate::cotx::lock_rollback_timeout_seam_for_test().await;
-    let rollback_scoped = crate::cotx::PgTenantWritePool::from_unverified_for_test(&app);
+    let rollback_scoped = crate::cotx::TenantDb::<ServingWriteLane>::from_unverified_for_test(&app);
     let rollback_timeout = tokio::spawn(async move {
         rollback_scoped
-            .retry_write(
+            .test_retry_write(
                 TenantRepoScope::for_test(tenant),
                 crate::tx_retry::localtx_deadline_for_test(),
                 move |tx| {
                     Box::pin(async move {
                         operation_attempts.fetch_add(1, Ordering::SeqCst);
-                        let pid = sqlx::query_scalar("SELECT pg_backend_pid()")
-                            .fetch_one(tx.conn())
+                        let pid = tx
+                            .test_backend_pid()
                             .await
                             .map_err(|error| ConfigRepoError::Storage(Box::new(error)))?;
                         operation_pid.store(pid, Ordering::SeqCst);
@@ -13898,15 +14093,15 @@ async fn localtx_settlement_connection_policy() -> TestResult {
         )
         .ok_or_else(|| std::io::Error::other("config producer authorization missing"))?;
     let attempt = scoped
-        .retry_producer_tx(
+        .test_retry_producer_tx(
             settings_scope(tenant),
             crate::tx_retry::localtx_deadline_for_test(),
             &entry,
             &env,
             move |tx| {
                 Box::pin(async move {
-                    let pid = sqlx::query_scalar("SELECT pg_backend_pid()")
-                        .fetch_one(tx.conn())
+                    let pid = tx
+                        .test_backend_pid()
                         .await
                         .map_err(|error| ConfigRepoError::Storage(Box::new(error)))?;
                     operation_pid.store(pid, Ordering::SeqCst);
@@ -13942,15 +14137,15 @@ async fn localtx_settlement_connection_policy() -> TestResult {
         )
         .ok_or_else(|| std::io::Error::other("config producer authorization missing"))?;
     let attempt = scoped
-        .retry_producer_tx(
+        .test_retry_producer_tx(
             settings_scope(tenant),
             crate::tx_retry::localtx_deadline_for_test(),
             &entry,
             &env,
             move |tx| {
                 Box::pin(async move {
-                    let pid = sqlx::query_scalar("SELECT pg_backend_pid()")
-                        .fetch_one(tx.conn())
+                    let pid = tx
+                        .test_backend_pid()
                         .await
                         .map_err(|error| ConfigRepoError::Storage(Box::new(error)))?;
                     operation_pid.store(pid, Ordering::SeqCst);
@@ -13994,7 +14189,7 @@ async fn t8_sweep_removes_old_published_keeps_dlx() -> TestResult {
     let delayed_event = unique_event_id("t8-delayed-publish");
     let delayed_entry = make_entry(&delayed_event);
     store
-        .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+        .serving_write_fixture::<_, _, sqlx::Error>(test_tenant(), move |cap| {
             let delayed_entry = delayed_entry.clone();
             Box::pin(async move {
                 let _outcome =
@@ -14039,7 +14234,7 @@ async fn t8_sweep_removes_old_published_keeps_dlx() -> TestResult {
         let entry_c = (*entry).clone();
         let env_id_c = env_id.to_string();
         store
-            .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+            .serving_write_fixture::<_, _, sqlx::Error>(test_tenant(), move |cap| {
                 Box::pin(async move {
                     let env = make_test_env("sweep_domain", "c");
                     let _outcome = append_outbox(cap, &entry_c, &env)
@@ -14065,7 +14260,7 @@ async fn t8_sweep_removes_old_published_keeps_dlx() -> TestResult {
         let entry_c = make_entry(eid);
         let eid_c = eid.to_string();
         store
-            .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+            .serving_write_fixture::<_, _, sqlx::Error>(test_tenant(), move |cap| {
                 Box::pin(async move {
                     let _outcome =
                         append_outbox(cap, &entry_c, &make_test_env("sweep_domain", "c"))
@@ -14088,7 +14283,7 @@ async fn t8_sweep_removes_old_published_keeps_dlx() -> TestResult {
     ] {
         let entry = make_entry(event_id);
         store
-            .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+            .serving_write_fixture::<_, _, sqlx::Error>(test_tenant(), move |cap| {
                 Box::pin(async move {
                     let _outcome = append_outbox(cap, &entry, &make_test_env("sweep_domain", "c"))
                         .await
@@ -15439,9 +15634,10 @@ async fn t_outbox_published_sweep_deletes_1001_rows_in_two_stable_batches() -> T
     let entry = make_entry(&seed_id);
     let envelope = make_test_env(&domain, "bounded.sweep");
     let outcome = store
-        .run_global_transaction::<_, _, crate::outbox::OutboxAppendError>(|cap| {
-            Box::pin(async move { append_outbox(cap, &entry, &envelope).await })
-        })
+        .serving_write_fixture::<_, _, crate::outbox::OutboxAppendError>(
+            test_tenant(),
+            move |cap| Box::pin(async move { append_outbox(cap, &entry, &envelope).await }),
+        )
         .await?;
     assert_eq!(outcome, consistency::OutboxAppendOutcome::Inserted);
 
@@ -16074,10 +16270,8 @@ async fn t_dead_letter_replay_inserts_new_outbox_id() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     setup_outbox(&store).await?;
     let dl = store.dead_letter(test_dlx_payload_protector());
-    let dlq = store.dlq_with_projection_registry(
-        test_dlx_payload_protector(),
-        crate::projection_events::ProjectionWriteRegistry::from_selected(TEST_PROJECTION_INPUTS),
-    );
+    let dlq =
+        store.dlq_with_projection_bindings(test_dlx_payload_protector(), TEST_PROJECTION_INPUTS);
     let domain = unique_domain("dlq-replay");
     let tenant = vocab::TenantId::parse(COTX_TENANT_A).unwrap();
     let message_id = unique_event_id("consumer-msg");
@@ -16506,11 +16700,12 @@ async fn t_outbox_dlx_registers_dead_letter_and_redrive_is_tenant_scoped() -> Te
     let event_id = unique_event_id("outbox-dlx");
     let partition_key = PartitionKey::parse("outbox-dlx-partition").unwrap();
     let entry = make_entry(&event_id);
+    let seed_domain = domain.clone();
 
     store
-        .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+        .serving_write_fixture::<_, _, sqlx::Error>(test_tenant(), move |cap| {
             let entry = entry.clone();
-            let env = make_test_env(&domain, "contract-dlq")
+            let env = make_test_env(&seed_domain, "contract-dlq")
                 .with_partition_key_opt(Some(partition_key.clone()));
             Box::pin(async move {
                 let _outcome = append_outbox(cap, &entry, &env)
@@ -16556,10 +16751,8 @@ async fn t_outbox_dlx_registers_dead_letter_and_redrive_is_tenant_scoped() -> Te
         .execute(&store.pool)
         .await?;
 
-    let dlq = store.dlq_with_projection_registry(
-        test_dlx_payload_protector(),
-        crate::projection_events::ProjectionWriteRegistry::from_selected(TEST_PROJECTION_INPUTS),
-    );
+    let dlq =
+        store.dlq_with_projection_bindings(test_dlx_payload_protector(), TEST_PROJECTION_INPUTS);
     let cap = OperatorDlqCapability::issue_for_authorized_operator();
     let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
     let metrics_handle = recorder.handle();
@@ -16576,9 +16769,10 @@ async fn t_outbox_dlx_registers_dead_letter_and_redrive_is_tenant_scoped() -> Te
 
     let older_event_id = unique_event_id("outbox-dlx-older-terminal");
     let older_entry = make_entry(&older_event_id);
+    let older_domain = domain.clone();
     store
-        .run_global_transaction::<_, _, sqlx::Error>(|cap| {
-            let env = make_test_env(&domain, "contract-dlq");
+        .serving_write_fixture::<_, _, sqlx::Error>(test_tenant(), move |cap| {
+            let env = make_test_env(&older_domain, "contract-dlq");
             Box::pin(async move {
                 let _outcome = append_outbox(cap, &older_entry, &env)
                     .await
@@ -16589,7 +16783,7 @@ async fn t_outbox_dlx_registers_dead_letter_and_redrive_is_tenant_scoped() -> Te
         .await?;
     for (id, dlx_epoch, updated_epoch) in [
         (&event_id, 1_700_000_200_i64, 1_700_000_000_i64),
-        (&older_event_id, 1_700_000_100_i64, 1_700_000_300_i64),
+        (&older_event_id, 1_700_000_200_i64, 1_700_000_300_i64),
     ] {
         sqlx::query(
             "UPDATE outbox \
@@ -16646,8 +16840,8 @@ async fn t_outbox_dlx_registers_dead_letter_and_redrive_is_tenant_scoped() -> Te
     assert_eq!(continuation.data()[0].id(), older_event_id);
     assert_eq!(
         continuation.data()[0].last_attempt_epoch_secs(),
-        1_700_000_100,
-        "cursor predicate must use the same dlx_at key as display and ordering"
+        1_700_000_200,
+        "same-second cursor pagination must neither omit nor repeat outbox DLQ rows"
     );
 
     let event_key = IdemKey::parse(&event_id).unwrap();
@@ -16708,7 +16902,7 @@ async fn t_outbox_dlx_registers_dead_letter_and_redrive_is_tenant_scoped() -> Te
     .bind(&event_id)
     .fetch_one(&store.pool)
     .await?;
-    assert_eq!(status_after_wrong.0, STATUS_DLX);
+    assert_eq!(status_after_wrong.0, "dlx");
     assert!(status_after_wrong.1);
     assert!(status_after_wrong.2);
 
@@ -16795,7 +16989,7 @@ async fn seed_outbox_dlx(store: &PgStore, domain: &str, event_id: &str) -> TestR
     let entry = make_entry(event_id);
     let env = make_test_env(domain, "same-id-window");
     store
-        .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+        .serving_write_fixture::<_, _, sqlx::Error>(test_tenant(), move |cap| {
             Box::pin(async move {
                 let _outcome = append_outbox(cap, &entry, &env)
                     .await
@@ -16838,7 +17032,7 @@ async fn same_id_automatic_deadline_is_frozen_and_expiry_never_calls_broker() ->
     let entry = make_entry(&event_id);
     let env = make_test_env(&domain, "same-id-automatic");
     store
-        .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+        .serving_write_fixture::<_, _, sqlx::Error>(test_tenant(), move |cap| {
             Box::pin(async move {
                 let _outcome = append_outbox(cap, &entry, &env)
                     .await
@@ -17158,7 +17352,7 @@ async fn same_id_first_dlx_deadline_uses_both_exact_least_branches() -> TestResu
         let entry = make_entry(&event_id);
         let env = make_test_env(&domain, "same-id-least");
         store
-            .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+            .serving_write_fixture::<_, _, sqlx::Error>(test_tenant(), move |cap| {
                 Box::pin(async move {
                     let _outcome = append_outbox(cap, &entry, &env)
                         .await
@@ -17235,7 +17429,7 @@ async fn expired_outbox_accepted_gap_resolution_is_terminal_audited_and_unblocks
         let env = make_test_env(&domain, "expired-resolution")
             .with_partition_key_opt(Some(partition.clone()));
         store
-            .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+            .serving_write_fixture::<_, _, sqlx::Error>(test_tenant(), move |cap| {
                 Box::pin(async move {
                     let _outcome = append_outbox(cap, &entry, &env)
                         .await
@@ -17420,7 +17614,7 @@ async fn expired_outbox_compensation_requires_published_causation_and_resolution
             causation_id.map(|value| EnvelopeCausationId::from_opaque(value).unwrap()),
         );
         store
-            .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+            .serving_write_fixture::<_, _, sqlx::Error>(test_tenant(), move |cap| {
                 Box::pin(async move {
                     let _outcome = append_outbox(cap, &entry, &env)
                         .await
@@ -17571,7 +17765,7 @@ async fn settle_rejects_stale_lease_token_behavior() -> TestResult {
 
     // seed 1 行 pending。
     store
-        .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+        .serving_write_fixture::<_, _, sqlx::Error>(test_tenant(), move |cap| {
             let entry = entry.clone();
             Box::pin(async move {
                 let _outcome = append_outbox(cap, &entry, &make_test_env("t9_domain", "c"))
@@ -17671,7 +17865,7 @@ async fn t9b_settle_rejects_expired_current_lease_before_reclaim() -> TestResult
     let event_id = unique_event_id("t9b");
     let entry = make_entry(&event_id);
     store
-        .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+        .serving_write_fixture::<_, _, sqlx::Error>(test_tenant(), move |cap| {
             Box::pin(async move {
                 let _outcome =
                     append_outbox(cap, &entry, &make_test_env("t9b_domain", "strict-expiry"))
@@ -17730,7 +17924,7 @@ async fn t9c_each_settle_rejects_token_and_deadline_mismatch_independently() -> 
         let entry = make_entry(event_id);
         let env = make_test_env(&unique_domain(&format!("t9c-{index}")), "lease.fencing");
         store
-            .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+            .serving_write_fixture::<_, _, sqlx::Error>(test_tenant(), move |cap| {
                 Box::pin(async move {
                     let _outcome = append_outbox(cap, &entry, &env)
                         .await
@@ -17863,7 +18057,7 @@ async fn t9d_each_settle_takes_expiry_clock_after_row_lock() -> TestResult {
             "settle.lock.clock",
         );
         store
-            .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+            .serving_write_fixture::<_, _, sqlx::Error>(test_tenant(), move |cap| {
                 Box::pin(async move {
                     let _outcome = append_outbox(cap, &entry, &env)
                         .await
@@ -18008,7 +18202,7 @@ async fn t9e_relay_settle_timeout_preserves_state_and_same_id_reclaim_converges(
     let entry = make_entry(&event_id);
     let env = make_test_env(&domain, "settle.timeout");
     store
-        .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+        .serving_write_fixture::<_, _, sqlx::Error>(test_tenant(), move |cap| {
             Box::pin(async move {
                 let _outcome = append_outbox(cap, &entry, &env)
                     .await
@@ -18116,7 +18310,7 @@ async fn t9e_published_settle_pool_wait_is_bounded_and_preserves_state() -> Test
     let entry = make_entry(&event_id);
     let env = make_test_env(&domain, "settle.pool.wait");
     owner
-        .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+        .serving_write_fixture::<_, _, sqlx::Error>(test_tenant(), move |cap| {
             Box::pin(async move {
                 let _outcome = append_outbox(cap, &entry, &env)
                     .await
@@ -18200,7 +18394,7 @@ async fn t9e_expired_settlement_preflight_performs_no_pool_io() -> TestResult {
     let entry = make_entry(&event_id);
     let env = make_test_env(&domain, "settle.preflight.no.io");
     owner
-        .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+        .serving_write_fixture::<_, _, sqlx::Error>(test_tenant(), move |cap| {
             Box::pin(async move {
                 let _outcome = append_outbox(cap, &entry, &env)
                     .await
@@ -18285,7 +18479,7 @@ async fn assert_published_settlement_failure_metric(
     let entry = make_entry(&event_id);
     let env = make_test_env(&domain, "settle.typed.failure");
     store
-        .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+        .serving_write_fixture::<_, _, sqlx::Error>(test_tenant(), move |cap| {
             Box::pin(async move {
                 let _outcome = append_outbox(cap, &entry, &env)
                     .await
@@ -18459,7 +18653,7 @@ async fn seed_timed_out_settle_entry(
     let entry = make_entry(&event_id);
     let env = make_test_env(&domain, "settle.timeout.outcome");
     store
-        .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+        .serving_write_fixture::<_, _, sqlx::Error>(test_tenant(), move |cap| {
             Box::pin(async move {
                 let _outcome = append_outbox(cap, &entry, &env)
                     .await
@@ -18842,17 +19036,7 @@ async fn assert_timed_out_settle_convergence(
         }
         TimedOutSettlePath::OrdinaryDlx | TimedOutSettlePath::SameIdExpiryDlx => {
             assert_eq!(disposition, Disposition::Reject);
-            assert_eq!(
-                converged,
-                (
-                    crate::outbox::STATUS_DLX.to_string(),
-                    1,
-                    false,
-                    true,
-                    true,
-                    true
-                )
-            );
+            assert_eq!(converged, ("dlx".to_string(), 1, false, true, true, true));
             assert_eq!(dead_letters_after, 1, "DLX must be inserted exactly once");
         }
     }
@@ -18943,7 +19127,7 @@ async fn t9e_relay_rejects_lost_lease_before_publish() -> TestResult {
         let entry = make_entry(event_id);
         let env = make_test_env(domain, "lost.lease");
         store
-            .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+            .serving_write_fixture::<_, _, sqlx::Error>(test_tenant(), move |cap| {
                 Box::pin(async move {
                     let _outcome = append_outbox(cap, &entry, &env)
                         .await
@@ -19006,7 +19190,7 @@ async fn generated_fingerprint_allows_real_claim_settle_and_redrive() -> TestRes
     for event_id in [&settled_id, &dlx_id] {
         let entry = make_entry(event_id);
         store
-            .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+            .serving_write_fixture::<_, _, sqlx::Error>(test_tenant(), move |cap| {
                 Box::pin(async move {
                     let _outcome =
                         append_outbox(cap, &entry, &make_test_env("generated_permission", "event"))
@@ -22645,10 +22829,12 @@ async fn t15b_sample_backlog_observed_scope_without_backlog_returns_zero() -> Te
 
     let domain = unique_domain("t15b-domain");
     let event_id = unique_event_id("t15b-published");
+    let event_id_for_write = event_id.clone();
+    let domain_for_write = domain.clone();
     store
-        .run_global_transaction::<_, _, sqlx::Error>(|cap| {
-            let entry = make_entry(&event_id);
-            let env = make_test_env(&domain, "metrics.zero");
+        .serving_write_fixture::<_, _, sqlx::Error>(test_tenant(), move |cap| {
+            let entry = make_entry(&event_id_for_write);
+            let env = make_test_env(&domain_for_write, "metrics.zero");
             Box::pin(async move {
                 let _outcome = append_outbox(cap, &entry, &env)
                     .await
@@ -22702,7 +22888,7 @@ async fn t15b_backlog_returns_exact_multi_tenant_contract_map() -> TestResult {
             let entry = make_entry(&event_id);
             let env = make_test_env_for_tenant(&domain, contract_id, tenant);
             store
-                .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+                .serving_write_fixture::<_, _, sqlx::Error>(tenant, move |cap| {
                     Box::pin(async move {
                         let _outcome = append_outbox(cap, &entry, &env)
                             .await
@@ -22755,7 +22941,7 @@ async fn t15c_claim_batch_rolls_back_invalid_persisted_contract_id() -> TestResu
         let entry = make_entry(event_id);
         let env = make_test_env(&domain, "metrics.valid");
         store
-            .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+            .serving_write_fixture::<_, _, sqlx::Error>(test_tenant(), move |cap| {
                 Box::pin(async move {
                     let _outcome = append_outbox(cap, &entry, &env)
                         .await
@@ -22840,7 +23026,6 @@ async fn t16_sample_backlog_counts_only_pending_rows() -> TestResult {
 
     // per-run 唯一 domain：sample_backlog 按 domain 聚合，跨轮持久库须唯一防旧行计入（#1194 review F1）。
     let domain = unique_domain("t16-domain");
-    let domain = domain.as_str();
 
     // seed：1 pending + 1 published + 1 dlx + 1 publishing。
     for (prefix, target_status) in [
@@ -22851,10 +23036,11 @@ async fn t16_sample_backlog_counts_only_pending_rows() -> TestResult {
     ] {
         let eid = unique_event_id(prefix);
         let entry = make_entry(&eid);
+        let domain_for_write = domain.clone();
         store
-            .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+            .serving_write_fixture::<_, _, sqlx::Error>(test_tenant(), move |cap| {
                 let entry = entry.clone();
-                let env = make_test_env(domain, "c");
+                let env = make_test_env(&domain_for_write, "c");
                 Box::pin(async move {
                     let _outcome = append_outbox(cap, &entry, &env)
                         .await
@@ -22869,7 +23055,7 @@ async fn t16_sample_backlog_counts_only_pending_rows() -> TestResult {
     }
 
     let outbox = make_pg_outbox(&store, || Ok(()));
-    let samples = active_backlog(outbox.sample_backlog(domain).await?)?;
+    let samples = active_backlog(outbox.sample_backlog(&domain).await?)?;
     let sample = summarize_backlog(&samples);
 
     assert_eq!(sample.depth(), 1, "仅 pending 行计入 depth，应为 1");
@@ -22888,14 +23074,14 @@ async fn t17_sample_backlog_age_tracks_oldest_pending() -> TestResult {
 
     // per-run 唯一 domain：sample_backlog 按 domain 聚合，跨轮持久库须唯一防旧行计入（#1194 review F1）。
     let domain = unique_domain("t17-domain");
-    let domain = domain.as_str();
 
     // 先插"新" pending 行（created_at = now()）。
     let new_id = unique_event_id("t17-new");
+    let new_domain = domain.clone();
     store
-        .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+        .serving_write_fixture::<_, _, sqlx::Error>(test_tenant(), move |cap| {
             let entry = make_entry(&new_id);
-            let env = make_test_env(domain, "c");
+            let env = make_test_env(&new_domain, "c");
             Box::pin(async move {
                 let _outcome = append_outbox(cap, &entry, &env)
                     .await
@@ -22907,10 +23093,12 @@ async fn t17_sample_backlog_age_tracks_oldest_pending() -> TestResult {
 
     // 插"旧" pending 行，并把 created_at 回拨 10s（模拟 10 秒前写入）。
     let old_id = unique_event_id("t17-old");
+    let old_id_for_write = old_id.clone();
+    let old_domain = domain.clone();
     store
-        .run_global_transaction::<_, _, sqlx::Error>(|cap| {
-            let entry = make_entry(&old_id);
-            let env = make_test_env(domain, "c");
+        .serving_write_fixture::<_, _, sqlx::Error>(test_tenant(), move |cap| {
+            let entry = make_entry(&old_id_for_write);
+            let env = make_test_env(&old_domain, "c");
             Box::pin(async move {
                 let _outcome = append_outbox(cap, &entry, &env)
                     .await
@@ -22927,7 +23115,7 @@ async fn t17_sample_backlog_age_tracks_oldest_pending() -> TestResult {
     .await?;
 
     let outbox = make_pg_outbox(&store, || Ok(()));
-    let samples = active_backlog(outbox.sample_backlog(domain).await?)?;
+    let samples = active_backlog(outbox.sample_backlog(&domain).await?)?;
     let sample = summarize_backlog(&samples);
 
     assert_eq!(sample.depth(), 2, "两条 pending 行");
@@ -22956,14 +23144,14 @@ async fn t18_sample_backlog_excludes_future_retry_after() -> TestResult {
 
     // per-run 唯一 domain：sample_backlog 按 domain 聚合，跨轮持久库须唯一防旧行计入（#1194 review F1）。
     let domain = unique_domain("t18-domain");
-    let domain = domain.as_str();
 
     // seed：1 到期 pending（retry_after IS NULL）+ 1 未到期 pending（retry_after = now()+3600）。
     let due_id = unique_event_id("t18-due");
+    let due_domain = domain.clone();
     store
-        .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+        .serving_write_fixture::<_, _, sqlx::Error>(test_tenant(), move |cap| {
             let entry = make_entry(&due_id);
-            let env = make_test_env(domain, "c");
+            let env = make_test_env(&due_domain, "c");
             Box::pin(async move {
                 let _outcome = append_outbox(cap, &entry, &env)
                     .await
@@ -22974,10 +23162,12 @@ async fn t18_sample_backlog_excludes_future_retry_after() -> TestResult {
         .await?;
 
     let future_id = unique_event_id("t18-future");
+    let future_id_for_write = future_id.clone();
+    let future_domain = domain.clone();
     store
-        .run_global_transaction::<_, _, sqlx::Error>(|cap| {
-            let entry = make_entry(&future_id);
-            let env = make_test_env(domain, "c");
+        .serving_write_fixture::<_, _, sqlx::Error>(test_tenant(), move |cap| {
+            let entry = make_entry(&future_id_for_write);
+            let env = make_test_env(&future_domain, "c");
             Box::pin(async move {
                 let _outcome = append_outbox(cap, &entry, &env)
                     .await
@@ -22995,7 +23185,7 @@ async fn t18_sample_backlog_excludes_future_retry_after() -> TestResult {
     .await?;
 
     let outbox = make_pg_outbox(&store, || Ok(()));
-    let samples = active_backlog(outbox.sample_backlog(domain).await?)?;
+    let samples = active_backlog(outbox.sample_backlog(&domain).await?)?;
     let sample = summarize_backlog(&samples);
 
     // 仅 due_id（retry_after IS NULL）计入；future_id（retry_after > now()）排除。
@@ -23018,17 +23208,17 @@ async fn t19_sample_backlog_counts_stale_publishing() -> TestResult {
 
     // per-run 唯一 domain：sample_backlog 按 domain 聚合，跨轮持久库须唯一防旧行计入（#1194 review F1）。
     let domain = unique_domain("t19-domain");
-    let domain = domain.as_str();
     let lease_ttl = test_relay_lease_ttl_seconds();
 
     // seed 两行 publishing：stale（lease_until 已过期）+ fresh（lease_until 在将来）。
     for (prefix, stale) in [("t19-stale", true), ("t19-fresh", false)] {
         let eid = unique_event_id(prefix);
         let entry = make_entry(&eid);
+        let domain_for_write = domain.clone();
         store
-            .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+            .serving_write_fixture::<_, _, sqlx::Error>(test_tenant(), move |cap| {
                 let entry = entry.clone();
-                let env = make_test_env(domain, "c");
+                let env = make_test_env(&domain_for_write, "c");
                 Box::pin(async move {
                     let _outcome = append_outbox(cap, &entry, &env)
                         .await
@@ -23061,7 +23251,7 @@ async fn t19_sample_backlog_counts_stale_publishing() -> TestResult {
     }
 
     let outbox = make_pg_outbox(&store, || Ok(()));
-    let samples = active_backlog(outbox.sample_backlog(domain).await?)?;
+    let samples = active_backlog(outbox.sample_backlog(&domain).await?)?;
     let sample = summarize_backlog(&samples);
 
     // 仅 stale publishing 计入（fresh 行 lease 有效、属正常 in-flight 排除）。
@@ -23090,7 +23280,7 @@ async fn t19_sample_backlog_counts_stale_publishing() -> TestResult {
 // t28: crash recovery 保持 partition 顺序（stale publishing 头 gate 后继）
 // t29: sample_backlog 计入 gated 后继（backlog claim-only by design）
 
-use crate::outbox::{STATUS_DLX, STATUS_PENDING};
+use crate::outbox::STATUS_PENDING;
 
 /// t24：append 3 行（同 domain，无 partition）→ SELECT seq 严格递增、互异、非空；
 /// 尝试 INSERT 显式写 seq 被 GENERATED ALWAYS 拒（应用不可伪造）。
@@ -23113,7 +23303,7 @@ async fn t24_seq_monotonic_and_app_cannot_forge() -> TestResult {
         let entry = make_entry(eid);
         let env = make_test_env(&domain, "c");
         store
-            .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+            .serving_write_fixture::<_, _, sqlx::Error>(test_tenant(), move |cap| {
                 let entry = entry.clone();
                 Box::pin(async move {
                     let _outcome = append_outbox(cap, &entry, &env)
@@ -23200,7 +23390,7 @@ async fn t25_partition_serial_in_order() -> TestResult {
         let entry = make_entry(eid);
         let env = make_test_env(&domain, "c").with_partition_key_opt(Some(key.clone()));
         store
-            .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+            .serving_write_fixture::<_, _, sqlx::Error>(test_tenant(), move |cap| {
                 let entry = entry.clone();
                 Box::pin(async move {
                     let _outcome = append_outbox(cap, &entry, &env)
@@ -23298,7 +23488,7 @@ async fn t26_cross_partition_and_null_parallel() -> TestResult {
         let entry = make_entry(&p1_id);
         let env = make_test_env(&domain, "c").with_partition_key_opt(Some(p1_key));
         store
-            .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+            .serving_write_fixture::<_, _, sqlx::Error>(test_tenant(), move |cap| {
                 let entry = entry.clone();
                 Box::pin(async move {
                     let _outcome = append_outbox(cap, &entry, &env)
@@ -23314,7 +23504,7 @@ async fn t26_cross_partition_and_null_parallel() -> TestResult {
         let entry = make_entry(&p2_id);
         let env = make_test_env(&domain, "c").with_partition_key_opt(Some(p2_key));
         store
-            .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+            .serving_write_fixture::<_, _, sqlx::Error>(test_tenant(), move |cap| {
                 let entry = entry.clone();
                 Box::pin(async move {
                     let _outcome = append_outbox(cap, &entry, &env)
@@ -23330,7 +23520,7 @@ async fn t26_cross_partition_and_null_parallel() -> TestResult {
         let entry = make_entry(nid);
         let env = make_test_env(&domain, "c");
         store
-            .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+            .serving_write_fixture::<_, _, sqlx::Error>(test_tenant(), move |cap| {
                 let entry = entry.clone();
                 Box::pin(async move {
                     let _outcome = append_outbox(cap, &entry, &env)
@@ -23402,7 +23592,7 @@ async fn t27_dlx_head_blocks_then_unblocks() -> TestResult {
         let entry = make_entry(eid);
         let env = make_test_env(&domain, "c").with_partition_key_opt(Some(key.clone()));
         store
-            .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+            .serving_write_fixture::<_, _, sqlx::Error>(test_tenant(), move |cap| {
                 let entry = entry.clone();
                 Box::pin(async move {
                     let _outcome = append_outbox(cap, &entry, &env)
@@ -23415,7 +23605,7 @@ async fn t27_dlx_head_blocks_then_unblocks() -> TestResult {
     }
 
     // 强制 H → dlx（直接 UPDATE status）。
-    set_outbox_terminal_for_test(&store, &h_id, STATUS_DLX, 0).await?;
+    set_outbox_terminal_for_test(&store, &h_id, "dlx", 0).await?;
 
     // claim → 该 partition 空（H 在 dlx，S2 被 gate）。
     let outbox = make_pg_outbox_for_domain(
@@ -23439,7 +23629,7 @@ async fn t27_dlx_head_blocks_then_unblocks() -> TestResult {
         let entry = make_entry(eid);
         let env = make_test_env(&domain, "c"); // no partition
         store
-            .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+            .serving_write_fixture::<_, _, sqlx::Error>(test_tenant(), move |cap| {
                 let entry = entry.clone();
                 Box::pin(async move {
                     let _outcome = append_outbox(cap, &entry, &env)
@@ -23450,7 +23640,7 @@ async fn t27_dlx_head_blocks_then_unblocks() -> TestResult {
             })
             .await?;
     }
-    set_outbox_terminal_for_test(&store, &null_dlx_id, STATUS_DLX, 0).await?;
+    set_outbox_terminal_for_test(&store, &null_dlx_id, "dlx", 0).await?;
 
     let after_null_dlx = outbox.claim_batch(10).await?;
     assert!(
@@ -23521,7 +23711,7 @@ async fn t27b_outbox_cross_tenant_partition_dlx_does_not_block() -> TestResult {
         let env = make_test_env_for_tenant(&domain, "c", tenant)
             .with_partition_key_opt(Some(key.clone()));
         store
-            .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+            .serving_write_fixture::<_, _, sqlx::Error>(tenant, move |cap| {
                 let entry = entry.clone();
                 Box::pin(async move {
                     let _outcome = append_outbox(cap, &entry, &env)
@@ -23533,7 +23723,7 @@ async fn t27b_outbox_cross_tenant_partition_dlx_does_not_block() -> TestResult {
             .await?;
     }
 
-    set_outbox_terminal_for_test(&store, &a_head, STATUS_DLX, 0).await?;
+    set_outbox_terminal_for_test(&store, &a_head, "dlx", 0).await?;
 
     let outbox = make_pg_outbox_for_domain(
         &store,
@@ -23839,7 +24029,7 @@ async fn outbox_terminal_timestamp_checks_reject_invalid_state_combinations() ->
         let event_id = unique_event_id(suffix);
         let entry = make_entry(&event_id);
         store
-            .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+            .serving_write_fixture::<_, _, sqlx::Error>(test_tenant(), move |cap| {
                 Box::pin(async move {
                     let _outcome =
                         append_outbox(cap, &entry, &make_test_env("terminal-check", "event"))
@@ -23900,7 +24090,7 @@ async fn outbox_terminal_timestamp_checks_reject_invalid_state_combinations() ->
         let event_id = unique_event_id(suffix);
         let entry = make_entry(&event_id);
         store
-            .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+            .serving_write_fixture::<_, _, sqlx::Error>(test_tenant(), move |cap| {
                 Box::pin(async move {
                     let _outcome =
                         append_outbox(cap, &entry, &make_test_env("terminal-check", "event"))
@@ -24372,7 +24562,7 @@ async fn outbox_same_id_checks_reject_each_invalid_state_without_mutation() -> T
     let entry = make_entry(&event_id);
     let env = make_test_env("same_id_check", "test.contract");
     store
-        .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+        .serving_write_fixture::<_, _, sqlx::Error>(test_tenant(), move |cap| {
             Box::pin(async move {
                 let _outcome = append_outbox(cap, &entry, &env)
                     .await
@@ -25130,7 +25320,7 @@ async fn migration_0066_upgrades_0065_without_mutating_claimed_rows() -> TestRes
     let entry = make_entry(&event_id);
     let env = make_test_env("migration_0066_upgrade", "migration.settlement");
     store
-        .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+        .serving_write_fixture::<_, _, sqlx::Error>(test_tenant(), move |cap| {
             Box::pin(async move {
                 let _outcome = append_outbox(cap, &entry, &env)
                     .await
@@ -25417,7 +25607,7 @@ async fn migration_0060_upgrades_0059_and_expires_all_historical_same_id_paths()
         let entry = make_entry(event_id);
         let env = make_test_env("migration_0060_upgrade", "migration.same-id");
         store
-            .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+            .serving_write_fixture::<_, _, sqlx::Error>(test_tenant(), move |cap| {
                 Box::pin(async move {
                     let _outcome = append_outbox(cap, &entry, &env)
                         .await
@@ -25535,7 +25725,7 @@ async fn migration_0057_upgrades_real_through_0056_database() -> TestResult {
         let entry = make_entry(event_id);
         let env = make_test_env("migration_0057_upgrade", "migration.outbox");
         store
-            .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+            .serving_write_fixture::<_, _, sqlx::Error>(test_tenant(), move |cap| {
                 Box::pin(async move {
                     let _outcome = append_outbox(cap, &entry, &env)
                         .await
@@ -25752,7 +25942,7 @@ async fn migration_0057_rejects_0056_publishing_row_without_token() -> TestResul
     let entry = make_entry(&event_id);
     let env = make_test_env("migration_0057_reject", "migration.outbox");
     store
-        .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+        .serving_write_fixture::<_, _, sqlx::Error>(test_tenant(), move |cap| {
             Box::pin(async move {
                 let _outcome = append_outbox(cap, &entry, &env)
                     .await
@@ -26070,7 +26260,7 @@ async fn outbox_rss_app_uses_fixed_functions_not_direct_global_dml() -> TestResu
     let entry = make_entry(&event_id);
     let env = make_test_env("outbox-perm", "c");
     store
-        .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+        .serving_write_fixture::<_, _, sqlx::Error>(test_tenant(), move |cap| {
             let entry = entry.clone();
             Box::pin(async move {
                 let _outcome = append_outbox(cap, &entry, &env)
@@ -26328,7 +26518,7 @@ async fn t28_crash_recovery_preserves_partition_order() -> TestResult {
         let entry = make_entry(eid);
         let env = make_test_env(&domain, "c").with_partition_key_opt(Some(key.clone()));
         store
-            .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+            .serving_write_fixture::<_, _, sqlx::Error>(test_tenant(), move |cap| {
                 let entry = entry.clone();
                 Box::pin(async move {
                     let _outcome = append_outbox(cap, &entry, &env)
@@ -26408,7 +26598,7 @@ async fn t29_sample_backlog_counts_gated_successors() -> TestResult {
         let entry = make_entry(eid);
         let env = make_test_env(&domain, "c").with_partition_key_opt(Some(key.clone()));
         store
-            .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+            .serving_write_fixture::<_, _, sqlx::Error>(test_tenant(), move |cap| {
                 let entry = entry.clone();
                 Box::pin(async move {
                     let _outcome = append_outbox(cap, &entry, &env)
@@ -26477,7 +26667,7 @@ async fn t29_sample_backlog_counts_gated_successors() -> TestResult {
         let entry = make_entry(eid);
         let env = make_test_env(&dlx_domain, "c").with_partition_key_opt(Some(dlx_key.clone()));
         store
-            .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+            .serving_write_fixture::<_, _, sqlx::Error>(test_tenant(), move |cap| {
                 let entry = entry.clone();
                 Box::pin(async move {
                     let _outcome = append_outbox(cap, &entry, &env)
@@ -26488,7 +26678,7 @@ async fn t29_sample_backlog_counts_gated_successors() -> TestResult {
             })
             .await?;
     }
-    set_outbox_terminal_for_test(&store, &dlx_ids[0], STATUS_DLX, 0).await?;
+    set_outbox_terminal_for_test(&store, &dlx_ids[0], "dlx", 0).await?;
 
     let dlx_outbox = make_pg_outbox_for_domain(
         &store,
@@ -26559,7 +26749,7 @@ use settings::ports::{
 use crate::config_repo::{
     arm_config_retry_failpoint, arm_config_retry_permanent_failpoint, config_retry_attempts,
 };
-use crate::cotx::PgTenantWritePool;
+use crate::cotx::{ServingWriteLane, TenantDb};
 use crate::tx_retry::{classify_config_repo_error, classify_identity_error};
 use crate::{
     ConfigValueMaintenanceCapability, ConfigValueMaintenanceOperation,
@@ -26607,6 +26797,23 @@ fn config_entry(key: &str, value: &str, version: u64) -> ConfigEntry {
 #[allow(clippy::unwrap_used)]
 fn config_entry_for(tenant: TenantId, key: &str, value: &str, version: u64) -> ConfigEntry {
     ConfigEntry::hydrate(SettingKey::parse(key).unwrap(), value, tenant, version)
+}
+
+fn encrypted_config_fixture(
+    key: &str,
+) -> (
+    ConfigMutation,
+    crate::cotx::settings_audit::EncodedConfigValue,
+) {
+    (
+        ConfigMutation::Put(config_entry(key, "encrypted-fixture", 1)),
+        crate::cotx::settings_audit::EncodedConfigValue {
+            value: None,
+            protection_scheme: 1,
+            value_enc: Some(b"ciphertext".to_vec()),
+            key_id: Some("settings-config:1".to_owned()),
+        },
+    )
 }
 
 struct AadBoundKeyProvider;
@@ -28295,6 +28502,166 @@ async fn tc5d_config_delete_cotx_is_both_or_neither() -> TestResult {
     Ok(())
 }
 
+/// Embedded tenant carriers are rejected before issuing their operation SQL. The transaction is
+/// first placed in the aborted state: any attempted SQL would return SQLSTATE 25P02 instead of the
+/// typed carrier mismatch below.
+#[tokio::test(flavor = "multi_thread")]
+async fn eventing_facade_rejects_embedded_tenant_mismatch_before_sql() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let tenant_a = vocab::TenantId::parse(COTX_TENANT_A)?;
+    let tenant_b = vocab::TenantId::parse(COTX_TENANT_B)?;
+    let event_id = unique_event_id("inbox-embedded-tenant-mismatch");
+    let observed_event_id = event_id.clone();
+    let saga_id = uuid::Uuid::new_v4();
+    let observed_saga_id = saga_id.to_string();
+    let saga_instance =
+        consistency::SagaInstanceRef::new(tenant_b, consistency::SagaId::new(saga_id))?;
+    let registration =
+        crate::saga::RegistrationFields::from(diport::SagaInstanceRegistration::new(
+            saga_instance,
+            diport::SagaWorkerIdentity::new(
+                "embedded-tenant-mismatch",
+                diport::SagaContractId::parse("test.saga")?,
+            )?,
+            consistency::SagaDefinitionIdentity::new(
+                "test.saga",
+                "v1",
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            )?,
+        )?);
+    let instance = crate::saga::InstanceFields {
+        instance: saga_instance,
+        saga_id: observed_saga_id.clone(),
+    };
+    let lease = crate::saga::LeaseFields {
+        instance: saga_instance,
+        saga_id: observed_saga_id.clone(),
+        lease_token: uuid::Uuid::new_v4().to_string(),
+        epoch: 1,
+    };
+    let journal = crate::saga::JournalEntryFields {
+        seq: 1,
+        step_name: "embedded-tenant-mismatch".to_string(),
+        status: "completed".to_string(),
+        error_summary: None,
+    };
+    let fields = crate::inbox::ReceiptFields {
+        tenant: tenant_b,
+        consumer_group: "embedded-tenant-mismatch".to_string(),
+        domain: "test".to_string(),
+        topic: "test.event".to_string(),
+        contract_id: "test.event".to_string(),
+        contract_version: "1.0.0".to_string(),
+        schema_hash: "sha256:test".to_string(),
+        trace: None,
+        correlation_id: None,
+    };
+    let result = store
+        .serving_write_fixture::<_, (), sqlx::Error>(tenant_a, move |tx| {
+            Box::pin(async move {
+                let abort = tx
+                    .test_abort_transaction()
+                    .await
+                    .expect_err("division by zero must abort the backend transaction");
+                assert_eq!(
+                    abort
+                        .as_database_error()
+                        .and_then(|error| error.code())
+                        .as_deref(),
+                    Some("22012")
+                );
+
+                for error in [
+                    tx.inbox_claim_receipt(&fields, &event_id, COTX_TENANT_B, 30)
+                        .await
+                        .expect_err("claim must reject the embedded tenant"),
+                    match tx.inbox_load_identity(&fields, &event_id).await {
+                        Err(error) => error,
+                        Ok(_) => panic!("identity load must reject the embedded tenant"),
+                    },
+                    tx.inbox_extend_receipt(&fields, &event_id, COTX_TENANT_B)
+                        .await
+                        .expect_err("extend must reject the embedded tenant"),
+                    tx.inbox_commit_receipt(&fields, &event_id, COTX_TENANT_B)
+                        .await
+                        .expect_err("commit must reject the embedded tenant"),
+                    tx.inbox_release_receipt(&fields, &event_id, COTX_TENANT_B)
+                        .await
+                        .expect_err("release must reject the embedded tenant"),
+                ] {
+                    assert!(
+                        error.to_string().contains("inbox receipt tenant"),
+                        "mismatch must be returned before SQL, got {error}"
+                    );
+                }
+
+                for error in [
+                    tx.saga_register_instance(&registration)
+                        .await
+                        .expect_err("registration must reject the embedded tenant"),
+                    tx.saga_load_instance(&instance)
+                        .await
+                        .expect_err("status load must reject the embedded tenant"),
+                    match tx.saga_acquire_lease(&instance, "holder", 30).await {
+                        Err(error) => error,
+                        Ok(_) => panic!("lease acquisition must reject the embedded tenant"),
+                    },
+                    tx.saga_cas_lease(&lease, crate::cotx::eventing::SagaLeaseMutation::Release)
+                        .await
+                        .expect_err("lease mutation must reject the embedded tenant"),
+                    tx.saga_insert_journal(&lease, &journal)
+                        .await
+                        .expect_err("journal insert must reject the embedded tenant"),
+                    tx.saga_lease_is_held(&lease)
+                        .await
+                        .expect_err("lease check must reject the embedded tenant"),
+                    match tx.saga_load_journal_entry(&instance, 1).await {
+                        Err(error) => error,
+                        Ok(_) => panic!("journal load must reject the embedded tenant"),
+                    },
+                ] {
+                    assert!(
+                        error.to_string().contains("saga ")
+                            && error
+                                .to_string()
+                                .contains("tenant does not match tenant transaction"),
+                        "mismatch must be returned before SQL, got {error}"
+                    );
+                }
+
+                Err(sqlx::Error::Protocol(
+                    "intentional rollback after mismatch proof".to_string(),
+                ))
+            }) as BoxFuture<'_, Result<(), sqlx::Error>>
+        })
+        .await;
+    assert!(result.is_err(), "proof transaction must roll back");
+
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM inbox_receipts WHERE event_id = $1 AND consumer_group = $2",
+    )
+    .bind(&observed_event_id)
+    .bind("embedded-tenant-mismatch")
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(count, 0, "tenant mismatch must not write an inbox receipt");
+
+    let saga_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM saga_instances WHERE saga_id = $1::uuid")
+            .bind(&observed_saga_id)
+            .fetch_one(&store.pool)
+            .await?;
+    assert_eq!(
+        saga_count, 0,
+        "tenant mismatch must not write a saga instance"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
 /// Rollback must restore a historical value as a new active version and append exactly one
 /// rolledBack fact in the same transaction. A stale version must append neither side.
 #[tokio::test(flavor = "multi_thread")]
@@ -28538,28 +28905,18 @@ async fn tc6_config_cotx_business_failure_rolls_back_both() -> TestResult {
         OutboxMetadata::new(0, test_tenant(), test_contract())
             .with_subject_id(subject_id("app.rollback")),
     );
-    let tenant_pool = PgTenantWritePool::from_unverified_for_test(&store);
+    let tenant_pool = TenantDb::<ServingWriteLane>::from_unverified_for_test(&store);
+    let (mutation, encoded) = encrypted_config_fixture("app.rollback");
 
     // 业务写：真插一行 config（成功）后强制 Err（模拟「配置写后、后续步骤失败」= emit/commit 失败等价物）。
     let result = tenant_pool
-        .producer_tx(settings_scope(tenant),
-            &entry,
-            &env,
-            move |conn| {
+        .retry_config_producer_tx(
+            settings_scope(tenant),
+            crate::tx_retry::localtx_deadline_for_test(),
+            crate::cotx::settings_audit::ConfigProducerRequest::new(&entry, &env),
+            move |mut conn| {
                 Box::pin(async move {
-                    sqlx::query(
-                        "INSERT INTO config_entries (
-                             tenant_id, config_key, version, value, protection_scheme, value_enc, key_id
-                         ) VALUES ($1::uuid, $2, $3, NULL, 1, $4, $5)",
-                    )
-                    .bind(CONFIG_TENANT)
-                    .bind("app.rollback")
-                    .bind(1_i64)
-                    .bind(&b"ciphertext"[..])
-                    .bind("settings-config:1")
-                    .execute(conn.conn())
-                    .await
-                    .map_err(|e| ConfigRepoError::Storage(Box::new(e)))?;
+                    conn.apply_mutation(&mutation, &encoded).await?;
                     Err::<
                         crate::cotx::ProducerTxOutcome<
                             httpserve::ProducerAuthorization<
@@ -28630,25 +28987,15 @@ async fn producer_fact_binding_mismatch_rolls_back_business_write() -> TestResul
         )
         .ok_or_else(|| std::io::Error::other("config producer authorization missing"))?;
 
-    let result = PgTenantWritePool::from_unverified_for_test(&store)
-        .producer_tx(
+    let (mutation, encoded) = encrypted_config_fixture("app.fact-binding-mismatch");
+    let result = TenantDb::<ServingWriteLane>::from_unverified_for_test(&store)
+        .retry_config_producer_tx(
             settings_scope(tenant),
-            &entry,
-            &env,
-            move |tx| {
+            crate::tx_retry::localtx_deadline_for_test(),
+            crate::cotx::settings_audit::ConfigProducerRequest::new(&entry, &env),
+            move |mut tx| {
                 Box::pin(async move {
-                    sqlx::query(
-                        "INSERT INTO config_entries (
-                             tenant_id, config_key, version, value, protection_scheme, value_enc, key_id
-                         ) VALUES ($1::uuid, $2, 1, NULL, 1, $3, $4)",
-                    )
-                    .bind(CONFIG_TENANT)
-                    .bind("app.fact-binding-mismatch")
-                    .bind(&b"ciphertext"[..])
-                    .bind("settings-config:1")
-                    .execute(tx.conn())
-                    .await
-                    .map_err(|error| ConfigRepoError::Storage(Box::new(error)))?;
+                    tx.apply_mutation(&mutation, &encoded).await?;
                     Ok(crate::cotx::ProducerTxOutcome::Emitted((), authorization))
                 })
             },
@@ -28787,7 +29134,7 @@ async fn tc7b_config_cotx_conformance() -> TestResult {
     let ok_event = unique_event_id("cfg-tc7b-ok");
     let rollback_event = unique_event_id("cfg-tc7b-rollback");
     let conflict_event = unique_event_id("cfg-tc7b-conflict");
-    let tenant_pool = PgTenantWritePool::from_unverified_for_test(&store);
+    let tenant_pool = TenantDb::<ServingWriteLane>::from_unverified_for_test(&store);
 
     repo.test_put(
         settings_scope(tenant),
@@ -28799,16 +29146,16 @@ async fn tc7b_config_cotx_conformance() -> TestResult {
         testkit::repo_conformance::CotxCase {
             action: || async {
                 repo.commit_publish(
-    settings::config_publish_receipt_for_test(),
-    settings_scope(tenant),
-    ConfigMutation::Put(config_entry("app.cotx-ok", "v1", 1)),
-    reviewed_generated_event::<generated::event::settings_v1::Contract>(
-        config_outbox_entry(&ok_event),
-        config_envelope("app.cotx-ok"),
-    )
-    .await
-    .map_err(ConfigRepoError::Storage)?,
-)
+                    settings::config_publish_receipt_for_test(),
+                    settings_scope(tenant),
+                    ConfigMutation::Put(config_entry("app.cotx-ok", "v1", 1)),
+                    reviewed_generated_event::<generated::event::settings_v1::Contract>(
+                        config_outbox_entry(&ok_event),
+                        config_envelope("app.cotx-ok"),
+                    )
+                    .await
+                    .map_err(ConfigRepoError::Storage)?,
+                )
                 .await
             },
             business_exists: || async {
@@ -28819,12 +29166,11 @@ async fn tc7b_config_cotx_conformance() -> TestResult {
                     .map(|entry| entry.is_some_and(|entry| entry.value() == "v1"))
             },
             outbox_exists: || async {
-                let cnt: (i64,) =
-                    sqlx::query_as("SELECT count(*) FROM outbox WHERE event_id = $1")
-                        .bind(&ok_event)
-                        .fetch_one(&store.pool)
-                        .await
-                        .map_err(|e| ConfigRepoError::Storage(Box::new(e)))?;
+                let cnt: (i64,) = sqlx::query_as("SELECT count(*) FROM outbox WHERE event_id = $1")
+                    .bind(&ok_event)
+                    .fetch_one(&store.pool)
+                    .await
+                    .map_err(|e| ConfigRepoError::Storage(Box::new(e)))?;
                 Ok::<bool, ConfigRepoError>(cnt.0 == 1)
             },
         },
@@ -28837,25 +29183,15 @@ async fn tc7b_config_cotx_conformance() -> TestResult {
                     OutboxMetadata::new(0, test_tenant(), test_contract())
                         .with_subject_id(subject_id("app.cotx-rollback")),
                 );
+                let (mutation, encoded) = encrypted_config_fixture("app.cotx-rollback");
                 tenant_pool
-                    .producer_tx(settings_scope(tenant),
-                        &entry,
-                        &env,
-                        move |conn| {
+                    .retry_config_producer_tx(
+                        settings_scope(tenant),
+                        crate::tx_retry::localtx_deadline_for_test(),
+                        crate::cotx::settings_audit::ConfigProducerRequest::new(&entry, &env),
+                        move |mut conn| {
                             Box::pin(async move {
-                                sqlx::query(
-                                    "INSERT INTO config_entries (
-                                         tenant_id, config_key, version, value, protection_scheme, value_enc, key_id
-                                     ) VALUES ($1::uuid, $2, $3, NULL, 1, $4, $5)",
-                                )
-                                .bind(CONFIG_TENANT)
-                                .bind("app.cotx-rollback")
-                                .bind(1_i64)
-                                .bind(&b"ciphertext"[..])
-                                .bind("settings-config:1")
-                                .execute(conn.conn())
-                                .await
-                                .map_err(|e| ConfigRepoError::Storage(Box::new(e)))?;
+                                conn.apply_mutation(&mutation, &encoded).await?;
                                 Err::<
                                     crate::cotx::ProducerTxOutcome<
                                         httpserve::ProducerAuthorization<
@@ -28882,28 +29218,27 @@ async fn tc7b_config_cotx_conformance() -> TestResult {
                 Ok::<bool, ConfigRepoError>(cnt.0 == 1)
             },
             outbox_exists: || async {
-                let cnt: (i64,) =
-                    sqlx::query_as("SELECT count(*) FROM outbox WHERE event_id = $1")
-                        .bind(&rollback_event)
-                        .fetch_one(&store.pool)
-                        .await
-                        .map_err(|e| ConfigRepoError::Storage(Box::new(e)))?;
+                let cnt: (i64,) = sqlx::query_as("SELECT count(*) FROM outbox WHERE event_id = $1")
+                    .bind(&rollback_event)
+                    .fetch_one(&store.pool)
+                    .await
+                    .map_err(|e| ConfigRepoError::Storage(Box::new(e)))?;
                 Ok::<bool, ConfigRepoError>(cnt.0 == 1)
             },
         },
         testkit::repo_conformance::CotxCase {
             action: || async {
                 repo.commit_publish(
-    settings::config_publish_receipt_for_test(),
-    settings_scope(tenant),
-    ConfigMutation::Put(config_entry("app.cotx-conflict", "stale", 1)),
-    reviewed_generated_event::<generated::event::settings_v1::Contract>(
-        config_outbox_entry(&conflict_event),
-        config_envelope("app.cotx-conflict"),
-    )
-    .await
-    .map_err(ConfigRepoError::Storage)?,
-)
+                    settings::config_publish_receipt_for_test(),
+                    settings_scope(tenant),
+                    ConfigMutation::Put(config_entry("app.cotx-conflict", "stale", 1)),
+                    reviewed_generated_event::<generated::event::settings_v1::Contract>(
+                        config_outbox_entry(&conflict_event),
+                        config_envelope("app.cotx-conflict"),
+                    )
+                    .await
+                    .map_err(ConfigRepoError::Storage)?,
+                )
                 .await
             },
             business_exists: || async {
@@ -28914,12 +29249,11 @@ async fn tc7b_config_cotx_conformance() -> TestResult {
                     .map(|entry| entry.is_some_and(|entry| entry.value() == "stale"))
             },
             outbox_exists: || async {
-                let cnt: (i64,) =
-                    sqlx::query_as("SELECT count(*) FROM outbox WHERE event_id = $1")
-                        .bind(&conflict_event)
-                        .fetch_one(&store.pool)
-                        .await
-                        .map_err(|e| ConfigRepoError::Storage(Box::new(e)))?;
+                let cnt: (i64,) = sqlx::query_as("SELECT count(*) FROM outbox WHERE event_id = $1")
+                    .bind(&conflict_event)
+                    .fetch_one(&store.pool)
+                    .await
+                    .map_err(|e| ConfigRepoError::Storage(Box::new(e)))?;
                 Ok::<bool, ConfigRepoError>(cnt.0 == 1)
             },
         },
@@ -31432,7 +31766,17 @@ async fn policy_repo_cotx_rolls_back_policy_and_outbox() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
     let tenant = role_tenant(ROLE_TENANT_A)?;
-    let tenant_pool = PgTenantWritePool::from_unverified_for_test(&store);
+    let tenant_pool = TenantDb::<ServingWriteLane>::from_unverified_for_test(&store);
+    let policy = policy_fixture(
+        "policy-cotx-rollback",
+        tenant,
+        1,
+        10,
+        None,
+        PolicyEffect::Allow,
+        PolicyObligations::empty(),
+    )?;
+    let rules_json = principal_kind_rule_json(r#"{"kind":"eq","value":"admin"}"#);
     let event_id = unique_event_id("policy-cotx-rollback");
     let (entry, _) = policy_lifecycle_event_with_id(
         tenant,
@@ -31449,24 +31793,16 @@ async fn policy_repo_cotx_rolls_back_policy_and_outbox() -> TestResult {
     );
 
     let result = tenant_pool
-        .producer_tx(identity_scope(tenant),
+        .identity_producer_tx(
+            identity_scope(tenant),
             &entry,
             &env,
-            move |conn| {
+            move |mut conn| {
                 Box::pin(async move {
-                    sqlx::query(
-                        "INSERT INTO abac_policies \
-                         (tenant_id, id, version, contract_id, permission, effective_from, effective_until, rules) \
-                         VALUES ($1::uuid, $2, 1, $3, $4, to_timestamp(10), NULL, $5::jsonb)",
-                    )
-                    .bind(ROLE_TENANT_A)
-                    .bind("policy-cotx-rollback")
-                    .bind(POLICY_CONTRACT_ID)
-                    .bind(POLICY_PERMISSION)
-                    .bind(principal_kind_rule_json(r#"{"kind":"eq","value":"admin"}"#))
-                    .execute(conn.conn())
-                    .await
-                    .map_err(|e| IdentityError::Storage(Box::new(e)))?;
+                    let inserted = conn.identity().create_policy(&policy, &rules_json).await?;
+                    if inserted != 1 {
+                        return Err(IdentityError::PolicyAlreadyExists);
+                    }
                     Err::<
                         crate::cotx::ProducerTxOutcome<
                             httpserve::ProducerAuthorization<
@@ -33580,30 +33916,55 @@ async fn credential_authentication_missing_security_state_is_storage_error() -> 
         )
         .await?;
 
-    let mut tx = store.pool.begin().await?;
-    sqlx::query("SET CONSTRAINTS credentials_account_security_state_fk DEFERRED")
-        .execute(&mut *tx)
+    // Fixture-only corruption: disable FK triggers only for this owner transaction, commit the
+    // invalid row pair, then drive the real serving-write repository path below.
+    store
+        .raw_fixture_transaction::<_, _, sqlx::Error>(|connection| {
+            Box::pin(async move {
+                sqlx::query("SET LOCAL session_replication_role = 'replica'")
+                    .execute(&mut *connection)
+                    .await?;
+                sqlx::query(
+                    "DELETE FROM account_security_states \
+                     WHERE tenant_id = $1::uuid AND user_id = $2::uuid",
+                )
+                .bind(CRED_TENANT_A)
+                .bind(CRED_USER_ALICE)
+                .execute(&mut *connection)
+                .await?;
+                Ok(())
+            })
+        })
         .await?;
-    sqlx::query(
-        "DELETE FROM account_security_states WHERE tenant_id = $1::uuid AND user_id = $2::uuid",
-    )
-    .bind(CRED_TENANT_A)
-    .bind(CRED_USER_ALICE)
-    .execute(&mut *tx)
-    .await?;
-    let result = crate::credential_repo::authenticate_in_tx(
-        &mut tx,
-        CRED_TENANT_A,
-        "alice",
-        raw_password("correct"),
-        cred_epoch(1_700_000_002),
-    )
-    .await;
+
+    let result = credentials
+        .authenticate(
+            identity_scope(tenant),
+            login_id("alice"),
+            raw_password("correct"),
+            cred_epoch(1_700_000_002),
+        )
+        .await;
+
+    store
+        .raw_fixture_transaction::<_, _, sqlx::Error>(|connection| {
+            Box::pin(async move {
+                sqlx::query(
+                    "DELETE FROM credentials \
+                     WHERE tenant_id = $1::uuid AND user_id = $2::uuid",
+                )
+                .bind(CRED_TENANT_A)
+                .bind(CRED_USER_ALICE)
+                .execute(&mut *connection)
+                .await?;
+                Ok(())
+            })
+        })
+        .await?;
     assert!(matches!(
         result,
         Err(identity::ports::IdentityError::Storage(_))
     ));
-    tx.rollback().await?;
     store.shutdown().await?;
     Ok(())
 }

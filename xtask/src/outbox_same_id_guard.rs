@@ -152,12 +152,26 @@ const CARRIERS: &[Carrier] = &[
     },
     Carrier {
         path: "adapters/postgres/src/dlq.rs",
-        purpose: "typed expired resolution executes only through tenant transaction",
+        purpose: "DLQ operation routes expired resolution through both exact tenant lanes",
         anchors: &[
-            "resolve_expired_outbox",
-            "SELECT rss_outbox_resolve_expired(",
+            "async fn resolve_expired_outbox(",
+            "dlq_tenant_scope(tenant)",
+            "conn.dlq_resolve_expired_outbox(DlqExpiredResolution {",
             "OutboxExpiredResolutionOutcome::Resolved",
             "OutboxExpiredResolutionOutcome::EvidenceRejected",
+        ],
+    },
+    Carrier {
+        path: "adapters/postgres/src/cotx/eventing.rs",
+        purpose: "closed DLQ façade owns the canonical expired-resolution SQL and tenant bind",
+        anchors: &[
+            "pub(crate) struct DlqExpiredResolution<'a>",
+            "pub(crate) async fn dlq_resolve_expired_outbox(",
+            "input: DlqExpiredResolution<'_>",
+            "SELECT rss_outbox_resolve_expired($1, $2::uuid, $3, $4, $5, $6)",
+            ".bind(self.tenant.to_string())",
+            "impl_dlq_write!(ServingWriteLane);",
+            "impl_dlq_write!(MaintenanceWriteLane);",
         ],
     },
     Carrier {
@@ -346,7 +360,112 @@ fn scan_sources(sources: &BTreeMap<&str, String>) -> Vec<Finding<Rule>> {
             ));
         }
     }
+    scan_expired_resolution_topology(sources, &mut findings);
     findings
+}
+
+const DLQ_PATH: &str = "adapters/postgres/src/dlq.rs";
+const EVENTING_FACADE_PATH: &str = "adapters/postgres/src/cotx/eventing.rs";
+const RESOLUTION_SQL: &str = "SELECT rss_outbox_resolve_expired($1, $2::uuid, $3, $4, $5, $6)";
+
+fn scan_expired_resolution_topology(
+    sources: &BTreeMap<&str, String>,
+    findings: &mut Vec<Finding<Rule>>,
+) {
+    if let Some(source) = sources.get(EVENTING_FACADE_PATH) {
+        let signature = "pub(crate) async fn dlq_resolve_expired_outbox(";
+        let body = rust_item_body(source, signature);
+        let owner = rust_item_body(source, "macro_rules! impl_dlq_write");
+        let scoped = body.is_some_and(|body| {
+            [
+                "input: DlqExpiredResolution<'_>",
+                RESOLUTION_SQL,
+                ".bind(input.event_id)",
+                ".bind(self.tenant.to_string())",
+                ".bind(input.kind)",
+                ".bind(input.change_ticket)",
+                ".bind(input.operator_subject)",
+                ".bind(input.evidence_event_id)",
+                ".fetch_one(&mut *self.conn)",
+            ]
+            .iter()
+            .all(|anchor| body.contains(anchor))
+        });
+        if !scoped
+            || !owner
+                .is_some_and(|owner| owner.contains(signature) && owner.contains(RESOLUTION_SQL))
+            || source.matches(signature).count() != 1
+            || source.matches(RESOLUTION_SQL).count() != 1
+        {
+            findings.push(finding(
+                Rule::MissingSemanticAnchor,
+                EVENTING_FACADE_PATH,
+                "expired-resolution canonical SQL/binds必须由唯一 closed façade方法拥有",
+            ));
+        }
+    }
+
+    if let Some(source) = sources.get(DLQ_PATH) {
+        let signature = "async fn resolve_expired_outbox(";
+        let body = rust_item_body(source, signature);
+        let call = "conn.dlq_resolve_expired_outbox(DlqExpiredResolution {";
+        let sequence = [
+            "DlqLane::Serving { write, .. }",
+            call,
+            "DlqLane::Maintenance { write, .. }",
+            call,
+            "Ok(1) => Ok(OutboxExpiredResolutionOutcome::Resolved)",
+            "Ok(-2) => Ok(OutboxExpiredResolutionOutcome::EvidenceRejected)",
+        ];
+        let scoped = body.is_some_and(|body| {
+            body.matches(call).count() == 2
+                && body.matches("dlq_tenant_scope(tenant)").count() == 2
+                && body.matches("DlqExpiredResolution {").count() == 2
+                && contains_in_order(body, &sequence)
+        });
+        if source.contains("rss_outbox_resolve_expired(")
+            || source.matches(signature).count() != 1
+            || source.matches(call).count() != 2
+            || !scoped
+        {
+            findings.push(finding(
+                Rule::MissingSemanticAnchor,
+                DLQ_PATH,
+                "expired-resolution必须由 DLQ operation 经 serving/maintenance tenant lane 调用 closed façade，repo不得拥有 SQL",
+            ));
+        }
+    }
+}
+
+fn rust_item_body<'a>(source: &'a str, signature: &str) -> Option<&'a str> {
+    let signature_start = source.find(signature)?;
+    let open_offset = source[signature_start..].find('{')?;
+    let open = signature_start + open_offset;
+    let mut depth = 0_u32;
+    for (offset, byte) in source.as_bytes()[open..].iter().enumerate() {
+        match byte {
+            b'{' => depth += 1,
+            b'}' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return source.get(signature_start..=open + offset);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn contains_in_order(content: &str, sequence: &[&str]) -> bool {
+    let mut cursor = 0;
+    sequence.iter().all(|anchor| {
+        let Some(offset) = content[cursor..].find(anchor) else {
+            return false;
+        };
+        cursor += offset + anchor.len();
+        true
+    })
 }
 
 #[cfg(test)]
@@ -354,10 +473,77 @@ mod tests {
     use super::*;
 
     fn complete_sources() -> BTreeMap<&'static str, String> {
-        CARRIERS
+        let mut sources: BTreeMap<_, _> = CARRIERS
             .iter()
             .map(|carrier| (carrier.path, carrier.anchors.join("\n")))
-            .collect()
+            .collect();
+        sources.insert(
+            EVENTING_FACADE_PATH,
+            r#"
+pub(crate) struct DlqExpiredResolution<'a> { event_id: &'a str }
+macro_rules! impl_dlq_write {
+    ($lane:ty) => {
+        impl TenantTx<'_, $lane> {
+            pub(crate) async fn dlq_resolve_expired_outbox(
+                &mut self,
+                input: DlqExpiredResolution<'_>,
+            ) -> Result<i64, sqlx::Error> {
+                sqlx::query_scalar(
+                    "SELECT rss_outbox_resolve_expired($1, $2::uuid, $3, $4, $5, $6)"
+                )
+                .bind(input.event_id)
+                .bind(self.tenant.to_string())
+                .bind(input.kind)
+                .bind(input.change_ticket)
+                .bind(input.operator_subject)
+                .bind(input.evidence_event_id)
+                .fetch_one(&mut *self.conn)
+                .await
+            }
+        }
+    };
+}
+impl_dlq_write!(ServingWriteLane);
+impl_dlq_write!(MaintenanceWriteLane);
+"#
+            .to_owned(),
+        );
+        sources.insert(
+            DLQ_PATH,
+            r#"
+async fn resolve_expired_outbox(
+    &self,
+    request: OutboxExpiredResolutionRequest,
+) -> Result<OutboxExpiredResolutionOutcome, DlqError> {
+    let tenant = request.tenant();
+    let result = match &self.lane {
+        DlqLane::Serving { write, .. } => write.write(
+            dlq_tenant_scope(tenant),
+            move |conn| Box::pin(async move {
+                conn.dlq_resolve_expired_outbox(DlqExpiredResolution {
+                    event_id: &event_id,
+                }).await
+            }),
+        ).await,
+        DlqLane::Maintenance { write, .. } => write.write(
+            dlq_tenant_scope(tenant),
+            move |conn| Box::pin(async move {
+                conn.dlq_resolve_expired_outbox(DlqExpiredResolution {
+                    event_id: &event_id,
+                }).await
+            }),
+        ).await,
+    };
+    match result {
+        Ok(1) => Ok(OutboxExpiredResolutionOutcome::Resolved),
+        Ok(-2) => Ok(OutboxExpiredResolutionOutcome::EvidenceRejected),
+        _ => Ok(OutboxExpiredResolutionOutcome::NotFound),
+    }
+}
+"#
+            .to_owned(),
+        );
+        sources
     }
 
     #[test]
@@ -394,6 +580,60 @@ mod tests {
     fn scan_content_accepts_complete_same_id_funnel() {
         let findings = scan_sources(&complete_sources());
         assert!(findings.is_empty(), "{findings:#?}");
+    }
+
+    #[test]
+    fn scan_rejects_expired_resolution_sql_moved_outside_closed_facade() {
+        let mut sources = complete_sources();
+        let content = sources
+            .get_mut(EVENTING_FACADE_PATH)
+            .expect("eventing façade fixture carrier");
+        *content = content.replace(RESOLUTION_SQL, "moved-resolution-sql");
+        content.push_str(&format!(
+            "\nfn unrelated_sql_owner() {{ /* {RESOLUTION_SQL} */ }}"
+        ));
+
+        let findings = scan_sources(&sources);
+        assert!(
+            findings
+                .iter()
+                .any(|finding| { finding.subject == EVENTING_FACADE_PATH }),
+            "moving resolution SQL outside the closed façade must be red"
+        );
+    }
+
+    #[test]
+    fn scan_rejects_expired_resolution_call_moved_outside_dlq_operation() {
+        const CALL: &str = "conn.dlq_resolve_expired_outbox(DlqExpiredResolution {";
+        let mut sources = complete_sources();
+        let content = sources
+            .get_mut("adapters/postgres/src/dlq.rs")
+            .expect("DLQ fixture carrier");
+        *content = content.replace(CALL, "conn.unrelated_operation(DlqExpiredResolution {");
+        content.push_str(&format!("\nfn unrelated_call_owner() {{ /* {CALL} */ }}"));
+
+        let findings = scan_sources(&sources);
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.subject == "adapters/postgres/src/dlq.rs"),
+            "moving the façade call outside the DLQ operation must be red"
+        );
+    }
+
+    #[test]
+    fn scan_rejects_expired_resolution_sql_restored_to_dlq_repo() {
+        let mut sources = complete_sources();
+        sources
+            .get_mut(DLQ_PATH)
+            .expect("DLQ fixture carrier")
+            .push_str(&format!("\nfn raw_repo_sql() {{ /* {RESOLUTION_SQL} */ }}"));
+
+        let findings = scan_sources(&sources);
+        assert!(
+            findings.iter().any(|finding| finding.subject == DLQ_PATH),
+            "restoring expired-resolution SQL to the repository must be red"
+        );
     }
 
     #[test]

@@ -1257,7 +1257,7 @@ fn behavior_spec(provider: ProviderId, capability: CapabilityId) -> BehaviorSpec
         },
         (ProviderId::Postgres, CapabilityId::Conflict) => BehaviorSpec {
             path: "outbox_append_distinguishes_same_fact_from_conflict_behavior",
-            operation_anchor: "run_global_transaction",
+            operation_anchor: "eventing_test_db(&store).test_write",
             assertion_anchor: Some("OutboxAppendError::Conflict"),
             trusted_assertion_call: None,
         },

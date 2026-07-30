@@ -27,14 +27,13 @@ use settings::ports::{
     SecretEntry, SecretInternalPublishCommand, SecretKey, SecretPublishCommand, SecretRepo,
     SecretRepoError, SecretRepublishCommand, SecretUnitOfWork, StoreId, TenantId, TenantRepoScope,
 };
-use sqlx::Row;
-
 #[cfg(all(test, feature = "integration"))]
 use std::collections::HashMap;
 #[cfg(all(test, feature = "integration"))]
 use std::sync::{Arc, LazyLock, Mutex};
 
-use crate::cotx::{PgTenantReadPool, PgTenantWritePool, TxCapability};
+use crate::cotx::identity::SecretTx;
+use crate::cotx::{ServingReadLane, ServingWriteLane, TenantDb};
 use crate::pool::{VerifiedPgReadStore, VerifiedPgWriteStore};
 use crate::tx_retry::{
     SETTINGS_SECRET_BOUNDARY, classify_secret_repo_error, run_pg_localtx_retry, run_pg_tx_retry,
@@ -46,7 +45,7 @@ use crate::tx_retry::{
 ///
 /// 仅由已验证 reader capability 构造；本类型不暴露写能力。
 pub struct PgSecretRepo {
-    pool: PgTenantReadPool,
+    pool: TenantDb<ServingReadLane>,
 }
 
 impl PgSecretRepo {
@@ -55,7 +54,7 @@ impl PgSecretRepo {
     /// `pub(crate)`（#1423，PG-BUNDLE-FUNNEL-01）：经 [`crate::PgDomainDeps`]`<caps::Settings>::secret_repo` 收口。
     pub(crate) fn new(reader: &VerifiedPgReadStore) -> Self {
         Self {
-            pool: PgTenantReadPool::new(reader),
+            pool: TenantDb::<ServingReadLane>::new(reader),
         }
     }
 }
@@ -64,7 +63,7 @@ impl PgSecretRepo {
 impl crate::PgStore {
     pub(crate) fn secret_repo(&self) -> PgSecretRepo {
         PgSecretRepo {
-            pool: PgTenantReadPool::from_unverified_for_test(self),
+            pool: TenantDb::<ServingReadLane>::from_unverified_for_test(self),
         }
     }
 }
@@ -74,7 +73,7 @@ impl crate::PgStore {
 /// HTTP publish 必须携带 settings 域铸造的 typed LocalTx observation；内部 publish / republish
 /// 使用 generic repository retry，不冒充 HTTP contract。三个 active-row 写入口共享同一个私有 CAS body。
 pub struct PgSecretUnitOfWork {
-    pool: PgTenantWritePool,
+    pool: TenantDb<ServingWriteLane>,
 }
 
 impl PgSecretUnitOfWork {
@@ -83,14 +82,14 @@ impl PgSecretUnitOfWork {
     /// `pub(crate)`：仅经 [`crate::PgDomainDeps`]`<caps::Settings>::settings_bundle` 收口。
     pub(crate) fn new(writer: &VerifiedPgWriteStore) -> Self {
         Self {
-            pool: PgTenantWritePool::new(writer),
+            pool: TenantDb::<ServingWriteLane>::new(writer),
         }
     }
 
     #[cfg(all(test, feature = "integration"))]
     pub(crate) fn from_unverified_for_test(store: &crate::PgStore) -> Self {
         Self {
-            pool: PgTenantWritePool::from_unverified_for_test(store),
+            pool: TenantDb::<ServingWriteLane>::from_unverified_for_test(store),
         }
     }
 
@@ -113,14 +112,14 @@ impl PgSecretUnitOfWork {
     /// operation entries. This method owns the only active-row mutation body so their lock and CAS
     /// behavior cannot drift.
     async fn cas_insert_locked(
-        tx: &mut TxCapability<'_>,
-        tenant: TenantId,
+        tx: &mut SecretTx<'_, '_, ServingWriteLane>,
         entry: SecretEntry,
     ) -> Result<(), SecretRepoError> {
         let key = entry.key().clone();
         #[cfg(all(test, feature = "integration"))]
         note_secret_save_attempt(key.as_str());
-        LockedSecretKey::acquire(tx, tenant, &key)
+        tx.secrets()
+            .lock_key(&key)
             .await?
             .cas_insert(&entry)
             .await?;
@@ -144,19 +143,10 @@ fn storage(e: sqlx::Error) -> SecretRepoError {
     SecretRepoError::Storage(Box::new(e))
 }
 
-/// `TenantId` → SQL bind 参数（stringify UUID，绑 `$N::uuid` server-side cast；同 config_repo 范式）。
-fn tenant_param(tenant: TenantId) -> String {
-    tenant.as_uuid().to_string()
-}
-
 /// u64 版本号 → wire i64（绑 `bigint` 列）。
 ///
 /// reason: 版本号从 1 单调递增，实践中远不及 `i64::MAX`；溢出收口 `i64::MAX` 而非 panic——CAS WHERE 永不
 /// 成立 → `VersionConflict`、`find_version` 不匹配任何行 → `None`，均 fail-closed（同 config_repo）。
-fn version_param(v: u64) -> i64 {
-    i64::try_from(v).unwrap_or(i64::MAX)
-}
-
 /// Decode an optional database version without turning corrupt negative values into "not found".
 fn decode_optional_version(value: Option<i64>) -> Result<Option<u64>, SecretRepoError> {
     value
@@ -172,26 +162,28 @@ fn decode_optional_version(value: Option<i64>) -> Result<Option<u64>, SecretRepo
 /// - `store_id` 经 `StoreId::parse` 复核（同上）。
 /// - `version` i64 → u64（负值不可能：CAS 从 1 单调递增）。
 /// - `ref_version` Option<String>（NULL → None）。
-fn hydrate_row(
-    tenant: TenantId,
-    row: &sqlx::postgres::PgRow,
-) -> Result<SecretEntry, SecretRepoError> {
-    let key_str: String = row.try_get("secret_key").map_err(storage)?;
-    let store_id_str: String = row.try_get("store_id").map_err(storage)?;
-    let ref_key: String = row.try_get("ref_key").map_err(storage)?;
-    let ref_version: Option<String> = row.try_get("ref_version").map_err(storage)?;
-    let version: i64 = row.try_get("version").map_err(storage)?;
+#[derive(sqlx::FromRow)]
+pub(crate) struct SecretRow {
+    pub(crate) secret_key: String,
+    pub(crate) store_id: String,
+    pub(crate) ref_key: String,
+    pub(crate) ref_version: Option<String>,
+    pub(crate) version: i64,
+    pub(crate) deleted: bool,
+}
 
-    let key = SecretKey::parse(&key_str).map_err(|e| SecretRepoError::Storage(Box::new(e)))?;
+fn hydrate_row(tenant: TenantId, row: &SecretRow) -> Result<SecretEntry, SecretRepoError> {
+    let key =
+        SecretKey::parse(&row.secret_key).map_err(|e| SecretRepoError::Storage(Box::new(e)))?;
     let store_id =
-        StoreId::parse(&store_id_str).map_err(|e| SecretRepoError::Storage(Box::new(e)))?;
-    let version = u64::try_from(version).map_err(|e| SecretRepoError::Storage(Box::new(e)))?;
+        StoreId::parse(&row.store_id).map_err(|e| SecretRepoError::Storage(Box::new(e)))?;
+    let version = u64::try_from(row.version).map_err(|e| SecretRepoError::Storage(Box::new(e)))?;
 
     Ok(SecretEntry::hydrate(
         key,
         store_id,
-        ref_key,
-        ref_version,
+        row.ref_key.clone(),
+        row.ref_version.clone(),
         tenant,
         version,
     ))
@@ -200,13 +192,12 @@ fn hydrate_row(
 /// row（含 `deleted` 列）→ 活跃 `SecretEntry`：tombstone（`deleted=true`）⇒ 视为已删 `None`；否则 hydrate。
 fn hydrate_active(
     tenant: TenantId,
-    row: Option<sqlx::postgres::PgRow>,
+    row: Option<SecretRow>,
 ) -> Result<Option<SecretEntry>, SecretRepoError> {
     match row {
         None => Ok(None),
         Some(r) => {
-            let deleted: bool = r.try_get("deleted").map_err(storage)?;
-            if deleted {
+            if r.deleted {
                 Ok(None)
             } else {
                 Ok(Some(hydrate_row(tenant, &r)?))
@@ -214,114 +205,6 @@ fn hydrate_active(
         }
     }
 }
-
-/// Transaction-bound capability for one canonical `(tenant, secret_key)` mutation stream.
-///
-/// The private fields live in this child module, so the parent cannot construct a capability
-/// without first acquiring the transaction-scoped advisory lock. Both append operations consume
-/// this capability and bind the stored coordinate, making a key-A lock/key-B write unrepresentable.
-mod key_lock {
-    use super::*;
-
-    pub(super) struct LockedSecretKey<'cap, 'tx> {
-        tx: &'cap mut TxCapability<'tx>,
-        tenant: TenantId,
-        tenant_uuid: String,
-        key: String,
-    }
-
-    impl<'cap, 'tx> LockedSecretKey<'cap, 'tx> {
-        pub(super) async fn acquire(
-            tx: &'cap mut TxCapability<'tx>,
-            tenant: TenantId,
-            key: &SecretKey,
-        ) -> Result<Self, SecretRepoError> {
-            let tenant_uuid = tenant_param(tenant);
-            let key = key.as_str().to_owned();
-            #[cfg(all(test, feature = "integration"))]
-            wait_at_secret_key_lock_rendezvous(&key).await;
-            sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1 || chr(31) || $2, 0))")
-                .bind(&tenant_uuid)
-                .bind(&key)
-                .execute(tx.conn())
-                .await
-                .map_err(storage)?;
-            Ok(Self {
-                tx,
-                tenant,
-                tenant_uuid,
-                key,
-            })
-        }
-
-        /// Append one active version after the key lock has serialized the max-version check.
-        pub(super) async fn cas_insert(self, entry: &SecretEntry) -> Result<(), SecretRepoError> {
-            if entry.tenant() != self.tenant || entry.key().as_str() != self.key {
-                return Err(SecretRepoError::Storage(Box::new(std::io::Error::other(
-                    "locked secret coordinate does not match entry",
-                ))));
-            }
-            let result = sqlx::query(
-                r#"
-                INSERT INTO secret_refs (tenant_id, secret_key, version, store_id, ref_key, ref_version)
-                SELECT $1::uuid, $2, $3, $4, $5, $6
-                WHERE $3 = 1 + COALESCE(
-                    (SELECT max(version) FROM secret_refs
-                     WHERE tenant_id = $1::uuid AND secret_key = $2),
-                    0
-                )
-                "#,
-            )
-            .bind(&self.tenant_uuid)
-            .bind(&self.key)
-            .bind(version_param(entry.version()))
-            .bind(entry.secret_ref().store_id().as_str())
-            .bind(entry.secret_ref().ref_key())
-            .bind(entry.secret_ref().ref_version())
-            .execute(self.tx.conn())
-            .await;
-
-            match result {
-                Ok(done) if done.rows_affected() == 1 => Ok(()),
-                Ok(_) => Err(SecretRepoError::VersionConflict),
-                Err(error)
-                    if error
-                        .as_database_error()
-                        .is_some_and(|database| database.is_unique_violation()) =>
-                {
-                    Err(SecretRepoError::VersionConflict)
-                }
-                Err(error) => Err(storage(error)),
-            }
-        }
-
-        /// Append a tombstone only when the current head is active.
-        pub(super) async fn append_tombstone(self) -> Result<(), SecretRepoError> {
-            sqlx::query(
-                r#"
-                INSERT INTO secret_refs
-                    (tenant_id, secret_key, version, store_id, ref_key, ref_version, deleted)
-                SELECT $1::uuid, $2, 1 + COALESCE(max(version), 0), '', '', NULL, true
-                FROM secret_refs
-                WHERE tenant_id = $1::uuid AND secret_key = $2
-                HAVING NOT COALESCE(
-                    (SELECT deleted FROM secret_refs
-                     WHERE tenant_id = $1::uuid AND secret_key = $2
-                     ORDER BY version DESC LIMIT 1),
-                    true)
-                "#,
-            )
-            .bind(&self.tenant_uuid)
-            .bind(&self.key)
-            .execute(self.tx.conn())
-            .await
-            .map_err(storage)
-            .map(|_| ())
-        }
-    }
-}
-
-use key_lock::LockedSecretKey;
 
 #[cfg(all(test, feature = "integration"))]
 #[derive(Clone, Copy)]
@@ -434,7 +317,7 @@ pub(crate) fn rendezvous_secret_key_lock_attempts(key: &SecretKey, parties: usiz
 }
 
 #[cfg(all(test, feature = "integration"))]
-async fn wait_at_secret_key_lock_rendezvous(key: &str) {
+pub(crate) async fn wait_at_secret_key_lock_rendezvous(key: &str) {
     let barrier = KEY_LOCK_RENDEZVOUS
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -467,28 +350,12 @@ impl SecretRepo for PgSecretRepo {
         // 经 tenant_scoped_read 注入 SET LOCAL，与 0009 迁移的 RLS policy current_setting 对齐（#1298）。
         // 活跃值 = 最高版本行且非 tombstone（latest 为 tombstone ⇒ 已删 None）。
         // 读闭包内仅 SQL fetch 返回 Option<PgRow>（owned，不借连接）；hydrate_active 在 tx 外执行。
-        let tenant_uuid = tenant_param(tenant);
-        let key_str = key.as_str().to_owned();
-        let tenant_uuid_q = tenant_uuid.clone();
+        let query_key = key.clone();
 
         let row = self
             .pool
-            .read(scope, move |conn| {
-                Box::pin(async move {
-                    sqlx::query(
-                        r#"
-                    SELECT secret_key, store_id, ref_key, ref_version, version, deleted
-                    FROM secret_refs
-                    WHERE tenant_id = $1::uuid AND secret_key = $2
-                    ORDER BY version DESC
-                    LIMIT 1
-                    "#,
-                    )
-                    .bind(tenant_uuid_q)
-                    .bind(key_str)
-                    .fetch_optional(&mut *conn)
-                    .await
-                })
+            .secret_read(scope, move |mut conn| {
+                Box::pin(async move { conn.secrets().find(&query_key).await })
             })
             .await
             .map_err(storage)?;
@@ -504,28 +371,12 @@ impl SecretRepo for PgSecretRepo {
         let tenant = scope.tenant();
         // 经 tenant_scoped_read 注入 SET LOCAL，与 0009 迁移的 RLS policy current_setting 对齐（#1298）。
         // 读闭包内仅 SQL fetch 返回 Option<PgRow>（owned）；hydrate_active 在 tx 外执行。
-        let tenant_uuid = tenant_param(tenant);
-        let key_str = key.as_str().to_owned();
-        let tenant_uuid_q = tenant_uuid.clone();
-        let version_i = version_param(version);
+        let query_key = key.clone();
 
         let row = self
             .pool
-            .read(scope, move |conn| {
-                Box::pin(async move {
-                    sqlx::query(
-                        r#"
-                    SELECT secret_key, store_id, ref_key, ref_version, version, deleted
-                    FROM secret_refs
-                    WHERE tenant_id = $1::uuid AND secret_key = $2 AND version = $3
-                    "#,
-                    )
-                    .bind(tenant_uuid_q)
-                    .bind(key_str)
-                    .bind(version_i)
-                    .fetch_optional(&mut *conn)
-                    .await
-                })
+            .secret_read(scope, move |mut conn| {
+                Box::pin(async move { conn.secrets().find_version(&query_key, version).await })
             })
             .await
             .map_err(storage)?;
@@ -537,30 +388,19 @@ impl SecretRepo for PgSecretRepo {
         scope: TenantRepoScope,
         key: &SecretKey,
     ) -> Result<Option<u64>, SecretRepoError> {
-        let tenant = scope.tenant();
         // 经 tenant_scoped_read 注入 SET LOCAL，与 0009 迁移的 RLS policy current_setting 对齐（#1298）。
         // 真实最高版本（含 tombstone）；max() 对空集返 NULL（fetch_one 恒一行）。
         // rss_app 角色下 RLS 过滤后 max() 仅对当前 tenant 行计算（否则无 SET LOCAL 时 rss_app 下所有行不可见
         // → max() 返 NULL，后续版本序列断裂）——此为 tenant_scoped_read 覆盖 latest_version 的关键理由。
-        let tenant_uuid = tenant_param(tenant);
-        let key_str = key.as_str().to_owned();
-        let tenant_uuid_q = tenant_uuid.clone();
+        let query_key = key.clone();
 
-        let (mv,): (Option<i64>,) = self
+        let mv: Option<i64> = self
             .pool
-            .read(scope, move |conn| {
-                Box::pin(async move {
-                    sqlx::query_as(
-                        "SELECT max(version) FROM secret_refs WHERE tenant_id = $1::uuid AND secret_key = $2",
-                    )
-                    .bind(tenant_uuid_q)
-                    .bind(key_str)
-                    .fetch_one(&mut *conn)
-                    .await
-                })
+            .secret_read(scope, move |mut conn| {
+                Box::pin(async move { conn.secrets().latest_version(&query_key).await })
             })
-        .await
-        .map_err(storage)?;
+            .await
+            .map_err(storage)?;
         decode_optional_version(mv)
     }
 }
@@ -573,17 +413,20 @@ impl SecretUnitOfWork for PgSecretUnitOfWork {
     ) -> Result<(), SecretRepoError> {
         let (entry, observation) = command.into_parts();
         Self::validate_entry_scope(scope, &entry)?;
-        let tenant = scope.tenant();
         run_pg_localtx_retry(
             observation,
             |_attempt, deadline| {
                 let entry = entry.clone();
                 async move {
                     self.pool
-                        .retry_write(
+                        .retry_secret_write(
                             scope,
                             deadline,
-                            move |tx| Box::pin(Self::cas_insert_locked(tx, tenant, entry)),
+                            move |mut tx| {
+                                Box::pin(
+                                    async move { Self::cas_insert_locked(&mut tx, entry).await },
+                                )
+                            },
                             storage,
                         )
                         .await
@@ -601,17 +444,20 @@ impl SecretUnitOfWork for PgSecretUnitOfWork {
     ) -> Result<(), SecretRepoError> {
         let entry = command.into_entry();
         Self::validate_entry_scope(scope, &entry)?;
-        let tenant = scope.tenant();
         run_pg_tx_retry(
             SETTINGS_SECRET_BOUNDARY,
             |_attempt, deadline| {
                 let entry = entry.clone();
                 async move {
                     self.pool
-                        .retry_write(
+                        .retry_secret_write(
                             scope,
                             deadline,
-                            move |tx| Box::pin(Self::cas_insert_locked(tx, tenant, entry)),
+                            move |mut tx| {
+                                Box::pin(
+                                    async move { Self::cas_insert_locked(&mut tx, entry).await },
+                                )
+                            },
                             storage,
                         )
                         .await
@@ -629,17 +475,20 @@ impl SecretUnitOfWork for PgSecretUnitOfWork {
     ) -> Result<(), SecretRepoError> {
         let entry = command.into_entry();
         Self::validate_entry_scope(scope, &entry)?;
-        let tenant = scope.tenant();
         run_pg_tx_retry(
             SETTINGS_SECRET_BOUNDARY,
             |_attempt, deadline| {
                 let entry = entry.clone();
                 async move {
                     self.pool
-                        .retry_write(
+                        .retry_secret_write(
                             scope,
                             deadline,
-                            move |tx| Box::pin(Self::cas_insert_locked(tx, tenant, entry)),
+                            move |mut tx| {
+                                Box::pin(
+                                    async move { Self::cas_insert_locked(&mut tx, entry).await },
+                                )
+                            },
                             storage,
                         )
                         .await
@@ -651,18 +500,14 @@ impl SecretUnitOfWork for PgSecretUnitOfWork {
     }
 
     async fn delete(&self, scope: TenantRepoScope, key: &SecretKey) -> Result<(), SecretRepoError> {
-        let tenant = scope.tenant();
         let key = key.clone();
         self.pool
-            .write(
+            .secret_write(
                 scope,
-                move |tx| {
-                    Box::pin(async move {
-                        LockedSecretKey::acquire(tx, tenant, &key)
-                            .await?
-                            .append_tombstone()
-                            .await
-                    })
+                move |mut tx| {
+                    Box::pin(
+                        async move { tx.secrets().lock_key(&key).await?.append_tombstone().await },
+                    )
                 },
                 storage,
             )

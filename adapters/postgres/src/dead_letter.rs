@@ -7,20 +7,14 @@
 //! `replay_capsule` contains only ciphertext. Payload, persisted replay metadata, and provenance
 //! are serialized once and encrypted with v3 AAD; no v1/v2 decoder or plaintext fallback exists.
 
+#[cfg(all(test, feature = "integration"))]
+use crate::PgStore;
+use crate::cotx::{MaintenanceWriteLane, ServingWriteLane, TenantDb, infra_tenant_scope};
+use crate::dead_letter_payload::{DlxPayloadContext, DlxPayloadProtector};
+use crate::pool::{VerifiedPgMaintenanceStore, VerifiedPgWriteStore};
 use diport::{
     DeadLetterRecord, DeadLetterStore, DeadLetterStoreError, EnvelopeMetadata, KEY_TENANT_AUTHORITY,
 };
-use futures::future::BoxFuture;
-
-#[cfg(all(test, feature = "integration"))]
-use crate::PgStore;
-use crate::cotx::{
-    InfraTenantScope, PgMaintenanceWritePool, PgTenantWritePool, TxCapability, infra_tenant_scope,
-};
-use crate::dead_letter_payload::{
-    DLX_REPLAY_CAPSULE_ENCODING, DlxPayloadContext, DlxPayloadProtector,
-};
-use crate::pool::{VerifiedPgMaintenanceStore, VerifiedPgWriteStore};
 
 /// Tenant-scoped HOT dead-letter writer.
 pub struct PgDeadLetterStore {
@@ -29,34 +23,17 @@ pub struct PgDeadLetterStore {
 }
 
 enum DeadLetterLane {
-    Serving(PgTenantWritePool),
-    Maintenance(PgMaintenanceWritePool),
-}
-
-impl DeadLetterLane {
-    async fn write<T, F, E>(
-        &self,
-        scope: InfraTenantScope,
-        write: F,
-        map_storage: impl Fn(sqlx::Error) -> E + Send,
-    ) -> Result<T, E>
-    where
-        F: for<'c, 'tx> FnOnce(&'c mut TxCapability<'tx>) -> BoxFuture<'c, Result<T, E>> + Send,
-        E: std::error::Error + Send + Sync + 'static,
-        T: Send,
-    {
-        match self {
-            Self::Serving(pool) => pool.write(scope, write, map_storage).await,
-            Self::Maintenance(pool) => pool.write(scope, write, map_storage).await,
-        }
-    }
+    Serving(TenantDb<ServingWriteLane>),
+    Maintenance(TenantDb<MaintenanceWriteLane>),
 }
 
 #[cfg(all(test, feature = "integration"))]
 impl PgStore {
     pub(crate) fn dead_letter(&self, payload_protector: DlxPayloadProtector) -> PgDeadLetterStore {
         PgDeadLetterStore {
-            lane: DeadLetterLane::Serving(PgTenantWritePool::from_unverified_for_test(self)),
+            lane: DeadLetterLane::Serving(TenantDb::<ServingWriteLane>::from_unverified_for_test(
+                self,
+            )),
             payload_protector,
         }
     }
@@ -68,7 +45,7 @@ impl PgDeadLetterStore {
         payload_protector: DlxPayloadProtector,
     ) -> Self {
         Self {
-            lane: DeadLetterLane::Serving(PgTenantWritePool::new(writer)),
+            lane: DeadLetterLane::Serving(TenantDb::<ServingWriteLane>::new(writer)),
             payload_protector,
         }
     }
@@ -78,7 +55,9 @@ impl PgDeadLetterStore {
         payload_protector: DlxPayloadProtector,
     ) -> Self {
         Self {
-            lane: DeadLetterLane::Maintenance(PgMaintenanceWritePool::new_maintenance(store)),
+            lane: DeadLetterLane::Maintenance(TenantDb::<MaintenanceWriteLane>::new_maintenance(
+                store,
+            )),
             payload_protector,
         }
     }
@@ -110,49 +89,36 @@ impl DeadLetterStore for PgDeadLetterStore {
             .await
             .map_err(DeadLetterStoreError::new)?;
 
-        self.lane
-            .write(
-                infra_tenant_scope(record.tenant()),
-                move |conn| {
-                    Box::pin(async move {
-                        sqlx::query(
-                            r#"
-                            INSERT INTO dead_letter
-                                (tenant_id, message_id, producer_domain, consumer_domain,
-                                 contract_id, topic, consumer_group,
-                                 replay_capsule, replay_capsule_key_ref, payload_len,
-                                 replay_capsule_encoding, metadata_digest,
-                                 error_summary, num_attempts, source_kind)
-                            VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
-                            ON CONFLICT (tenant_id, source_kind, consumer_group, message_id)
-                            WHERE source_kind = 'projection'
-                            DO NOTHING
-                            "#,
-                        )
-                        .bind(record.tenant().to_string())
-                        .bind(record.message_id())
-                        .bind(record.producer_domain())
-                        .bind(record.consumer_domain())
-                        .bind(record.contract_id())
-                        .bind(record.topic())
-                        .bind(record.consumer_group())
-                        .bind(sqlx::types::Json(protected.replay_capsule()))
-                        .bind(protected.key_ref())
-                        .bind(protected.payload_len())
-                        .bind(DLX_REPLAY_CAPSULE_ENCODING)
-                        .bind(protected.metadata_digest())
-                        .bind(record.error_summary())
-                        .bind(i32::try_from(record.num_attempts()).unwrap_or(i32::MAX))
-                        .bind(source_kind)
-                        .execute(conn.conn())
-                        .await
-                        .map_err(DeadLetterStoreError::new)
-                        .map(|_| ())
-                    })
-                },
-                DeadLetterStoreError::new,
-            )
-            .await
+        match &self.lane {
+            DeadLetterLane::Serving(pool) => {
+                pool.dlq_write(
+                    infra_tenant_scope(record.tenant()),
+                    move |mut tx| {
+                        Box::pin(async move {
+                            tx.dead_letter_insert_projection(&record, &protected)
+                                .await
+                                .map_err(DeadLetterStoreError::new)
+                        })
+                    },
+                    DeadLetterStoreError::new,
+                )
+                .await
+            }
+            DeadLetterLane::Maintenance(pool) => {
+                pool.dlq_write(
+                    infra_tenant_scope(record.tenant()),
+                    move |mut tx| {
+                        Box::pin(async move {
+                            tx.dead_letter_insert_projection(&record, &protected)
+                                .await
+                                .map_err(DeadLetterStoreError::new)
+                        })
+                    },
+                    DeadLetterStoreError::new,
+                )
+                .await
+            }
+        }
     }
 
     async fn shutdown(&self) -> Result<(), DeadLetterStoreError> {

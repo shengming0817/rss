@@ -96,13 +96,13 @@
               },
               "transaction": {
                 "kind": "rust-symbol",
-                "path": "adapters/postgres/src/cotx/mod.rs",
-                "symbol": "PgWritePool::producer_tx"
+                "path": "adapters/postgres/src/cotx/identity.rs",
+                "symbol": "TenantDb::identity_producer_tx"
               },
               "capability": {
-                "kind": "rust-symbol",
-                "path": "adapters/postgres/src/cotx/mod.rs",
-                "symbol": "TxCapability"
+                "kind": "rust-type",
+                "path": "adapters/postgres/src/cotx/identity.rs",
+                "symbol": "IdentityTx"
               },
               "append": {
                 "kind": "rust-symbol",
@@ -129,8 +129,8 @@
               },
               "transaction": {
                 "kind": "rust-symbol",
-                "path": "adapters/postgres/src/cotx/mod.rs",
-                "symbol": "PgWritePool::producer_tx"
+                "path": "adapters/postgres/src/cotx/identity.rs",
+                "symbol": "TenantDb::identity_producer_tx"
               },
               "rollback": {
                 "kind": "rust-symbol",
@@ -255,13 +255,13 @@
               },
               "transaction": {
                 "kind": "rust-symbol",
-                "path": "adapters/postgres/src/cotx/mod.rs",
-                "symbol": "PgWritePool::producer_tx"
+                "path": "adapters/postgres/src/cotx/identity.rs",
+                "symbol": "TenantDb::identity_producer_tx"
               },
               "capability": {
-                "kind": "rust-symbol",
-                "path": "adapters/postgres/src/cotx/mod.rs",
-                "symbol": "TxCapability"
+                "kind": "rust-type",
+                "path": "adapters/postgres/src/cotx/identity.rs",
+                "symbol": "IdentityTx"
               },
               "append": {
                 "kind": "rust-symbol",
@@ -288,8 +288,8 @@
               },
               "transaction": {
                 "kind": "rust-symbol",
-                "path": "adapters/postgres/src/cotx/mod.rs",
-                "symbol": "PgWritePool::producer_tx"
+                "path": "adapters/postgres/src/cotx/identity.rs",
+                "symbol": "TenantDb::identity_producer_tx"
               },
               "rollback": {
                 "kind": "rust-symbol",
@@ -409,13 +409,13 @@
               },
               "transaction": {
                 "kind": "rust-symbol",
-                "path": "adapters/postgres/src/cotx/mod.rs",
-                "symbol": "PgWritePool::producer_tx"
+                "path": "adapters/postgres/src/cotx/identity.rs",
+                "symbol": "TenantDb::identity_producer_tx"
               },
               "capability": {
-                "kind": "rust-symbol",
-                "path": "adapters/postgres/src/cotx/mod.rs",
-                "symbol": "TxCapability"
+                "kind": "rust-type",
+                "path": "adapters/postgres/src/cotx/identity.rs",
+                "symbol": "IdentityTx"
               },
               "append": {
                 "kind": "rust-symbol",
@@ -442,8 +442,8 @@
               },
               "transaction": {
                 "kind": "rust-symbol",
-                "path": "adapters/postgres/src/cotx/mod.rs",
-                "symbol": "PgWritePool::producer_tx"
+                "path": "adapters/postgres/src/cotx/identity.rs",
+                "symbol": "TenantDb::identity_producer_tx"
               },
               "rollback": {
                 "kind": "rust-symbol",
@@ -563,13 +563,13 @@
               },
               "transaction": {
                 "kind": "rust-symbol",
-                "path": "adapters/postgres/src/cotx/mod.rs",
-                "symbol": "PgWritePool::producer_tx"
+                "path": "adapters/postgres/src/cotx/identity.rs",
+                "symbol": "TenantDb::identity_producer_tx"
               },
               "capability": {
-                "kind": "rust-symbol",
-                "path": "adapters/postgres/src/cotx/mod.rs",
-                "symbol": "TxCapability"
+                "kind": "rust-type",
+                "path": "adapters/postgres/src/cotx/identity.rs",
+                "symbol": "IdentityTx"
               },
               "append": {
                 "kind": "rust-symbol",
@@ -596,8 +596,8 @@
               },
               "transaction": {
                 "kind": "rust-symbol",
-                "path": "adapters/postgres/src/cotx/mod.rs",
-                "symbol": "PgWritePool::producer_tx"
+                "path": "adapters/postgres/src/cotx/identity.rs",
+                "symbol": "TenantDb::identity_producer_tx"
               },
               "rollback": {
                 "kind": "rust-symbol",
@@ -717,13 +717,13 @@
               },
               "transaction": {
                 "kind": "rust-symbol",
-                "path": "adapters/postgres/src/cotx/mod.rs",
-                "symbol": "PgWritePool::producer_tx"
+                "path": "adapters/postgres/src/cotx/identity.rs",
+                "symbol": "TenantDb::identity_producer_tx"
               },
               "capability": {
-                "kind": "rust-symbol",
-                "path": "adapters/postgres/src/cotx/mod.rs",
-                "symbol": "TxCapability"
+                "kind": "rust-type",
+                "path": "adapters/postgres/src/cotx/identity.rs",
+                "symbol": "IdentityTx"
               },
               "append": {
                 "kind": "rust-symbol",
@@ -750,8 +750,8 @@
               },
               "transaction": {
                 "kind": "rust-symbol",
-                "path": "adapters/postgres/src/cotx/mod.rs",
-                "symbol": "PgWritePool::producer_tx"
+                "path": "adapters/postgres/src/cotx/identity.rs",
+                "symbol": "TenantDb::identity_producer_tx"
               },
               "rollback": {
                 "kind": "rust-symbol",
@@ -871,13 +871,13 @@
               },
               "transaction": {
                 "kind": "rust-symbol",
-                "path": "adapters/postgres/src/cotx/mod.rs",
-                "symbol": "PgWritePool::producer_tx"
+                "path": "adapters/postgres/src/cotx/identity.rs",
+                "symbol": "TenantDb::identity_producer_tx"
               },
               "capability": {
-                "kind": "rust-symbol",
-                "path": "adapters/postgres/src/cotx/mod.rs",
-                "symbol": "TxCapability"
+                "kind": "rust-type",
+                "path": "adapters/postgres/src/cotx/identity.rs",
+                "symbol": "IdentityTx"
               },
               "append": {
                 "kind": "rust-symbol",
@@ -904,8 +904,8 @@
               },
               "transaction": {
                 "kind": "rust-symbol",
-                "path": "adapters/postgres/src/cotx/mod.rs",
-                "symbol": "PgWritePool::producer_tx"
+                "path": "adapters/postgres/src/cotx/identity.rs",
+                "symbol": "TenantDb::identity_producer_tx"
               },
               "rollback": {
                 "kind": "rust-symbol",
@@ -1025,13 +1025,13 @@
               },
               "transaction": {
                 "kind": "rust-symbol",
-                "path": "adapters/postgres/src/cotx/mod.rs",
-                "symbol": "PgWritePool::producer_tx"
+                "path": "adapters/postgres/src/cotx/identity.rs",
+                "symbol": "TenantDb::identity_producer_tx"
               },
               "capability": {
-                "kind": "rust-symbol",
-                "path": "adapters/postgres/src/cotx/mod.rs",
-                "symbol": "TxCapability"
+                "kind": "rust-type",
+                "path": "adapters/postgres/src/cotx/identity.rs",
+                "symbol": "IdentityTx"
               },
               "append": {
                 "kind": "rust-symbol",
@@ -1058,8 +1058,8 @@
               },
               "transaction": {
                 "kind": "rust-symbol",
-                "path": "adapters/postgres/src/cotx/mod.rs",
-                "symbol": "PgWritePool::producer_tx"
+                "path": "adapters/postgres/src/cotx/identity.rs",
+                "symbol": "TenantDb::identity_producer_tx"
               },
               "rollback": {
                 "kind": "rust-symbol",
@@ -1179,13 +1179,13 @@
               },
               "transaction": {
                 "kind": "rust-symbol",
-                "path": "adapters/postgres/src/cotx/mod.rs",
-                "symbol": "PgWritePool::producer_tx"
+                "path": "adapters/postgres/src/cotx/identity.rs",
+                "symbol": "TenantDb::identity_producer_tx"
               },
               "capability": {
-                "kind": "rust-symbol",
-                "path": "adapters/postgres/src/cotx/mod.rs",
-                "symbol": "TxCapability"
+                "kind": "rust-type",
+                "path": "adapters/postgres/src/cotx/identity.rs",
+                "symbol": "IdentityTx"
               },
               "append": {
                 "kind": "rust-symbol",
@@ -1212,8 +1212,8 @@
               },
               "transaction": {
                 "kind": "rust-symbol",
-                "path": "adapters/postgres/src/cotx/mod.rs",
-                "symbol": "PgWritePool::producer_tx"
+                "path": "adapters/postgres/src/cotx/identity.rs",
+                "symbol": "TenantDb::identity_producer_tx"
               },
               "rollback": {
                 "kind": "rust-symbol",
@@ -1430,13 +1430,13 @@
               },
               "transaction": {
                 "kind": "rust-symbol",
-                "path": "adapters/postgres/src/cotx/mod.rs",
-                "symbol": "PgWritePool::producer_tx"
+                "path": "adapters/postgres/src/cotx/identity.rs",
+                "symbol": "TenantDb::identity_producer_tx"
               },
               "capability": {
-                "kind": "rust-symbol",
-                "path": "adapters/postgres/src/cotx/mod.rs",
-                "symbol": "TxCapability"
+                "kind": "rust-type",
+                "path": "adapters/postgres/src/cotx/identity.rs",
+                "symbol": "IdentityTx"
               },
               "append": {
                 "kind": "rust-symbol",
@@ -1463,8 +1463,8 @@
               },
               "transaction": {
                 "kind": "rust-symbol",
-                "path": "adapters/postgres/src/cotx/mod.rs",
-                "symbol": "PgWritePool::producer_tx"
+                "path": "adapters/postgres/src/cotx/identity.rs",
+                "symbol": "TenantDb::identity_producer_tx"
               },
               "rollback": {
                 "kind": "rust-symbol",
@@ -1768,13 +1768,13 @@
               },
               "transaction": {
                 "kind": "rust-symbol",
-                "path": "adapters/postgres/src/cotx/mod.rs",
-                "symbol": "PgWritePool::producer_tx"
+                "path": "adapters/postgres/src/cotx/identity.rs",
+                "symbol": "TenantDb::identity_producer_tx"
               },
               "capability": {
-                "kind": "rust-symbol",
-                "path": "adapters/postgres/src/cotx/mod.rs",
-                "symbol": "TxCapability"
+                "kind": "rust-type",
+                "path": "adapters/postgres/src/cotx/identity.rs",
+                "symbol": "IdentityTx"
               },
               "append": {
                 "kind": "rust-symbol",
@@ -1801,8 +1801,8 @@
               },
               "transaction": {
                 "kind": "rust-symbol",
-                "path": "adapters/postgres/src/cotx/mod.rs",
-                "symbol": "PgWritePool::producer_tx"
+                "path": "adapters/postgres/src/cotx/identity.rs",
+                "symbol": "TenantDb::identity_producer_tx"
               },
               "rollback": {
                 "kind": "rust-symbol",
@@ -1922,13 +1922,13 @@
               },
               "transaction": {
                 "kind": "rust-symbol",
-                "path": "adapters/postgres/src/cotx/mod.rs",
-                "symbol": "PgWritePool::producer_tx"
+                "path": "adapters/postgres/src/cotx/identity.rs",
+                "symbol": "TenantDb::identity_producer_tx"
               },
               "capability": {
-                "kind": "rust-symbol",
-                "path": "adapters/postgres/src/cotx/mod.rs",
-                "symbol": "TxCapability"
+                "kind": "rust-type",
+                "path": "adapters/postgres/src/cotx/identity.rs",
+                "symbol": "IdentityTx"
               },
               "append": {
                 "kind": "rust-symbol",
@@ -1955,8 +1955,8 @@
               },
               "transaction": {
                 "kind": "rust-symbol",
-                "path": "adapters/postgres/src/cotx/mod.rs",
-                "symbol": "PgWritePool::producer_tx"
+                "path": "adapters/postgres/src/cotx/identity.rs",
+                "symbol": "TenantDb::identity_producer_tx"
               },
               "rollback": {
                 "kind": "rust-symbol",
@@ -2320,13 +2320,13 @@
               },
               "transaction": {
                 "kind": "rust-symbol",
-                "path": "adapters/postgres/src/cotx/mod.rs",
-                "symbol": "PgWritePool::retry_producer_tx"
+                "path": "adapters/postgres/src/cotx/settings_audit.rs",
+                "symbol": "TenantDb::retry_config_producer_tx"
               },
               "capability": {
-                "kind": "rust-symbol",
-                "path": "adapters/postgres/src/cotx/mod.rs",
-                "symbol": "TxCapability"
+                "kind": "rust-type",
+                "path": "adapters/postgres/src/cotx/identity.rs",
+                "symbol": "IdentityTx"
               },
               "append": {
                 "kind": "rust-symbol",
@@ -2353,8 +2353,8 @@
               },
               "transaction": {
                 "kind": "rust-symbol",
-                "path": "adapters/postgres/src/cotx/mod.rs",
-                "symbol": "PgWritePool::retry_producer_tx"
+                "path": "adapters/postgres/src/cotx/settings_audit.rs",
+                "symbol": "TenantDb::retry_config_producer_tx"
               },
               "rollback": {
                 "kind": "rust-symbol",
@@ -2479,13 +2479,13 @@
               },
               "transaction": {
                 "kind": "rust-symbol",
-                "path": "adapters/postgres/src/cotx/mod.rs",
-                "symbol": "PgWritePool::retry_producer_tx"
+                "path": "adapters/postgres/src/cotx/settings_audit.rs",
+                "symbol": "TenantDb::retry_config_producer_tx"
               },
               "capability": {
-                "kind": "rust-symbol",
-                "path": "adapters/postgres/src/cotx/mod.rs",
-                "symbol": "TxCapability"
+                "kind": "rust-type",
+                "path": "adapters/postgres/src/cotx/identity.rs",
+                "symbol": "IdentityTx"
               },
               "append": {
                 "kind": "rust-symbol",
@@ -2512,8 +2512,8 @@
               },
               "transaction": {
                 "kind": "rust-symbol",
-                "path": "adapters/postgres/src/cotx/mod.rs",
-                "symbol": "PgWritePool::retry_producer_tx"
+                "path": "adapters/postgres/src/cotx/settings_audit.rs",
+                "symbol": "TenantDb::retry_config_producer_tx"
               },
               "rollback": {
                 "kind": "rust-symbol",
@@ -2633,13 +2633,13 @@
               },
               "transaction": {
                 "kind": "rust-symbol",
-                "path": "adapters/postgres/src/cotx/mod.rs",
-                "symbol": "PgWritePool::retry_producer_tx"
+                "path": "adapters/postgres/src/cotx/settings_audit.rs",
+                "symbol": "TenantDb::retry_config_producer_tx"
               },
               "capability": {
-                "kind": "rust-symbol",
-                "path": "adapters/postgres/src/cotx/mod.rs",
-                "symbol": "TxCapability"
+                "kind": "rust-type",
+                "path": "adapters/postgres/src/cotx/identity.rs",
+                "symbol": "IdentityTx"
               },
               "append": {
                 "kind": "rust-symbol",
@@ -2666,8 +2666,8 @@
               },
               "transaction": {
                 "kind": "rust-symbol",
-                "path": "adapters/postgres/src/cotx/mod.rs",
-                "symbol": "PgWritePool::retry_producer_tx"
+                "path": "adapters/postgres/src/cotx/settings_audit.rs",
+                "symbol": "TenantDb::retry_config_producer_tx"
               },
               "rollback": {
                 "kind": "rust-symbol",

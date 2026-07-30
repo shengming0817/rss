@@ -38,6 +38,7 @@ use crate::workspace_root;
 const DIRECT_SCAN_ROOTS: &[&str] = &["journeys", "journeys-fault-matrix"];
 const EXCLUDED_WORKSPACE_PACKAGES: &[&str] = &["generated", "xtask"];
 const PROJECTION_EVENTS_WRAPPER: &str = "adapters/postgres/src/projection_events.rs";
+const PROJECTION_EVENTING_CAPABILITY: &str = "adapters/postgres/src/cotx/eventing.rs";
 const PROJECTION_DB_FUNCTIONS: &[&str] =
     &["rss_append_projection_event", "rss_read_projection_events"];
 const ACTIVE_PRODUCER_PROVIDER_FILES: &[&str] = &[
@@ -609,6 +610,7 @@ fn is_binding_definition_file(path: &Path) -> bool {
 
 fn is_projection_events_wrapper(path: &Path) -> bool {
     path == Path::new(PROJECTION_EVENTS_WRAPPER)
+        || path == Path::new(PROJECTION_EVENTING_CAPABILITY)
 }
 
 fn is_active_producer_provider(path: &Path) -> bool {
@@ -724,7 +726,7 @@ impl<'ast> Visit<'ast> for BindingVisitor<'_> {
             self.findings.push(finding(
                 Rule::ProjectionDbFunctionCallsite,
                 self.path.display().to_string(),
-                "生产代码不得直接调用 projection DB fixed function；请经 postgres projection_events wrapper",
+                "生产代码不得直接调用 projection DB fixed function；请经 postgres projection_events 或 typed eventing capability wrapper",
             ));
         }
         visit::visit_expr(self, node);
@@ -1940,6 +1942,11 @@ mod tests {
         assert!(
             findings.is_empty(),
             "projection_events wrapper is the sanctioned DB function callsite: {findings:?}"
+        );
+        let findings = scan_file(Path::new(PROJECTION_EVENTING_CAPABILITY), src)?;
+        assert!(
+            findings.is_empty(),
+            "typed eventing capability is the sanctioned projection append callsite: {findings:?}"
         );
         Ok(())
     }

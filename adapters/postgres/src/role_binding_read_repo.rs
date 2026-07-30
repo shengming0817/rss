@@ -5,25 +5,25 @@
 
 use identity::ports::{IdentityError, RoleBinding, RoleBindingReadRepo, TenantRepoScope};
 
-use crate::cotx::PgTenantReadPool;
+use crate::cotx::{ServingReadLane, TenantDb};
 use crate::pool::VerifiedPgReadStore;
 
 /// PostgreSQL 角色绑定只读仓储。
 pub struct PgRoleBindingReadRepo {
-    pool: PgTenantReadPool,
+    pool: TenantDb<ServingReadLane>,
 }
 
 impl PgRoleBindingReadRepo {
     pub(crate) fn new(reader: &VerifiedPgReadStore) -> Self {
         Self {
-            pool: PgTenantReadPool::new(reader),
+            pool: TenantDb::<ServingReadLane>::new(reader),
         }
     }
 
     #[cfg(all(test, feature = "integration"))]
     pub(crate) fn from_unverified_for_test(store: &crate::PgStore) -> Self {
         Self {
-            pool: PgTenantReadPool::from_unverified_for_test(store),
+            pool: TenantDb::<ServingReadLane>::from_unverified_for_test(store),
         }
     }
 }
@@ -37,18 +37,8 @@ impl RoleBindingReadRepo for PgRoleBindingReadRepo {
         let tenant = scope.tenant();
         let rows: Vec<(String, String)> = self
             .pool
-            .read(scope, move |conn| {
-                Box::pin(async move {
-                    sqlx::query_as(
-                        "SELECT role_id, subject FROM role_bindings \
-                         WHERE tenant_id = $1::uuid AND subject = $2 \
-                         ORDER BY role_id ASC",
-                    )
-                    .bind(tenant.as_uuid().to_string())
-                    .bind(&subject)
-                    .fetch_all(conn)
-                    .await
-                })
+            .identity_read(scope, move |mut conn| {
+                Box::pin(async move { conn.identity().role_binding_rows(&subject).await })
             })
             .await
             .map_err(|error| IdentityError::Storage(Box::new(error)))?;
