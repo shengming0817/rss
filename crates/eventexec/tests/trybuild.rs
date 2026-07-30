@@ -57,8 +57,14 @@ fn typed_saga_ui() {
     t.pass("tests/ui/typed_saga_wrapper_pass.rs");
     // 漏 compensate required method → 编译错（Hard compensation requirement）。
     t.compile_fail("tests/ui/typed_saga_missing_compensation_fail.rs");
-    // builder 必须接收 generated SagaContractBinding；漏参即编译错。
+    // Definition 泛型必须来自 generated marker，不能由 raw spec 推断。
     t.compile_fail("tests/ui/typed_saga_missing_spec_fail.rs");
+    t.compile_fail("tests/ui/typed_saga_finish_before_end_fail.rs");
+    t.compile_fail("tests/ui/typed_saga_extra_step_fail.rs");
+    t.compile_fail("tests/ui/typed_saga_reordered_step_fail.rs");
+    t.compile_fail("tests/ui/typed_saga_cross_definition_step_fail.rs");
+    t.compile_fail("tests/ui/typed_saga_wrong_receipt_fail.rs");
+    t.compile_fail("tests/ui/typed_saga_sealed_marker_fail.rs");
 }
 
 #[test]

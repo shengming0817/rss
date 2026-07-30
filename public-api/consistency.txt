@@ -1757,6 +1757,50 @@ impl core::marker::Unpin for consistency::saga::CompensationOutcome
 impl core::marker::UnsafeUnpin for consistency::saga::CompensationOutcome
 impl core::panic::unwind_safe::RefUnwindSafe for consistency::saga::CompensationOutcome
 impl core::panic::unwind_safe::UnwindSafe for consistency::saga::CompensationOutcome
+#[non_exhaustive] pub enum consistency::saga::SagaContractIdError
+pub consistency::saga::SagaContractIdError::Empty
+pub consistency::saga::SagaContractIdError::Format
+impl core::clone::Clone for consistency::saga::SagaContractIdError
+pub fn consistency::saga::SagaContractIdError::clone(&self) -> consistency::saga::SagaContractIdError
+impl core::cmp::Eq for consistency::saga::SagaContractIdError
+impl core::cmp::PartialEq for consistency::saga::SagaContractIdError
+pub fn consistency::saga::SagaContractIdError::eq(&self, &consistency::saga::SagaContractIdError) -> bool
+impl core::error::Error for consistency::saga::SagaContractIdError
+impl core::fmt::Debug for consistency::saga::SagaContractIdError
+pub fn consistency::saga::SagaContractIdError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for consistency::saga::SagaContractIdError
+pub fn consistency::saga::SagaContractIdError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for consistency::saga::SagaContractIdError
+impl core::marker::Freeze for consistency::saga::SagaContractIdError
+impl core::marker::Send for consistency::saga::SagaContractIdError
+impl core::marker::Sync for consistency::saga::SagaContractIdError
+impl core::marker::Unpin for consistency::saga::SagaContractIdError
+impl core::marker::UnsafeUnpin for consistency::saga::SagaContractIdError
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::saga::SagaContractIdError
+impl core::panic::unwind_safe::UnwindSafe for consistency::saga::SagaContractIdError
+#[non_exhaustive] pub enum consistency::saga::SagaDefinitionIdentityError
+pub consistency::saga::SagaDefinitionIdentityError::ActionRegistryGeneration
+pub consistency::saga::SagaDefinitionIdentityError::ContractId
+pub consistency::saga::SagaDefinitionIdentityError::SchemaDigest
+pub consistency::saga::SagaDefinitionIdentityError::Version
+impl core::clone::Clone for consistency::saga::SagaDefinitionIdentityError
+pub fn consistency::saga::SagaDefinitionIdentityError::clone(&self) -> consistency::saga::SagaDefinitionIdentityError
+impl core::cmp::Eq for consistency::saga::SagaDefinitionIdentityError
+impl core::cmp::PartialEq for consistency::saga::SagaDefinitionIdentityError
+pub fn consistency::saga::SagaDefinitionIdentityError::eq(&self, &consistency::saga::SagaDefinitionIdentityError) -> bool
+impl core::error::Error for consistency::saga::SagaDefinitionIdentityError
+impl core::fmt::Debug for consistency::saga::SagaDefinitionIdentityError
+pub fn consistency::saga::SagaDefinitionIdentityError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for consistency::saga::SagaDefinitionIdentityError
+pub fn consistency::saga::SagaDefinitionIdentityError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for consistency::saga::SagaDefinitionIdentityError
+impl core::marker::Freeze for consistency::saga::SagaDefinitionIdentityError
+impl core::marker::Send for consistency::saga::SagaDefinitionIdentityError
+impl core::marker::Sync for consistency::saga::SagaDefinitionIdentityError
+impl core::marker::Unpin for consistency::saga::SagaDefinitionIdentityError
+impl core::marker::UnsafeUnpin for consistency::saga::SagaDefinitionIdentityError
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::saga::SagaDefinitionIdentityError
+impl core::panic::unwind_safe::UnwindSafe for consistency::saga::SagaDefinitionIdentityError
 #[non_exhaustive] pub enum consistency::saga::SagaDurableStatus
 pub consistency::saga::SagaDurableStatus::Compensated
 pub consistency::saga::SagaDurableStatus::Compensating
@@ -1783,6 +1827,26 @@ impl core::marker::Unpin for consistency::saga::SagaDurableStatus
 impl core::marker::UnsafeUnpin for consistency::saga::SagaDurableStatus
 impl core::panic::unwind_safe::RefUnwindSafe for consistency::saga::SagaDurableStatus
 impl core::panic::unwind_safe::UnwindSafe for consistency::saga::SagaDurableStatus
+#[non_exhaustive] pub enum consistency::saga::SagaInstanceRecordError
+pub consistency::saga::SagaInstanceRecordError::DefinitionContractMismatch
+impl core::clone::Clone for consistency::saga::SagaInstanceRecordError
+pub fn consistency::saga::SagaInstanceRecordError::clone(&self) -> consistency::saga::SagaInstanceRecordError
+impl core::cmp::Eq for consistency::saga::SagaInstanceRecordError
+impl core::cmp::PartialEq for consistency::saga::SagaInstanceRecordError
+pub fn consistency::saga::SagaInstanceRecordError::eq(&self, &consistency::saga::SagaInstanceRecordError) -> bool
+impl core::error::Error for consistency::saga::SagaInstanceRecordError
+impl core::fmt::Debug for consistency::saga::SagaInstanceRecordError
+pub fn consistency::saga::SagaInstanceRecordError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for consistency::saga::SagaInstanceRecordError
+pub fn consistency::saga::SagaInstanceRecordError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for consistency::saga::SagaInstanceRecordError
+impl core::marker::Freeze for consistency::saga::SagaInstanceRecordError
+impl core::marker::Send for consistency::saga::SagaInstanceRecordError
+impl core::marker::Sync for consistency::saga::SagaInstanceRecordError
+impl core::marker::Unpin for consistency::saga::SagaInstanceRecordError
+impl core::marker::UnsafeUnpin for consistency::saga::SagaInstanceRecordError
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::saga::SagaInstanceRecordError
+impl core::panic::unwind_safe::UnwindSafe for consistency::saga::SagaInstanceRecordError
 #[non_exhaustive] pub enum consistency::saga::SagaInstanceRefError
 pub consistency::saga::SagaInstanceRefError::NilSagaId
 impl core::clone::Clone for consistency::saga::SagaInstanceRefError
@@ -1837,10 +1901,12 @@ pub consistency::saga::SagaInterruption::InstanceDegraded
 pub consistency::saga::SagaInterruption::JournalConflict
 pub consistency::saga::SagaInterruption::LeaseBusy
 pub consistency::saga::SagaInterruption::LeaseLost
+pub consistency::saga::SagaInterruption::ReceiptUnavailable
 pub consistency::saga::SagaInterruption::RuntimeLockBusy
 pub consistency::saga::SagaInterruption::RuntimeLockLost
 pub consistency::saga::SagaInterruption::RuntimeLockUnavailable
 pub consistency::saga::SagaInterruption::StoreUnavailable
+pub consistency::saga::SagaInterruption::UnsupportedDefinition
 impl consistency::saga::SagaInterruption
 pub const fn consistency::saga::SagaInterruption::as_label(self) -> &'static str
 impl core::clone::Clone for consistency::saga::SagaInterruption
@@ -2025,6 +2091,26 @@ impl core::marker::Unpin for consistency::saga::SagaReplayDecision
 impl core::marker::UnsafeUnpin for consistency::saga::SagaReplayDecision
 impl core::panic::unwind_safe::RefUnwindSafe for consistency::saga::SagaReplayDecision
 impl core::panic::unwind_safe::UnwindSafe for consistency::saga::SagaReplayDecision
+#[non_exhaustive] pub enum consistency::saga::SagaWorkerIdentityError
+pub consistency::saga::SagaWorkerIdentityError::EmptyOwner
+impl core::clone::Clone for consistency::saga::SagaWorkerIdentityError
+pub fn consistency::saga::SagaWorkerIdentityError::clone(&self) -> consistency::saga::SagaWorkerIdentityError
+impl core::cmp::Eq for consistency::saga::SagaWorkerIdentityError
+impl core::cmp::PartialEq for consistency::saga::SagaWorkerIdentityError
+pub fn consistency::saga::SagaWorkerIdentityError::eq(&self, &consistency::saga::SagaWorkerIdentityError) -> bool
+impl core::error::Error for consistency::saga::SagaWorkerIdentityError
+impl core::fmt::Debug for consistency::saga::SagaWorkerIdentityError
+pub fn consistency::saga::SagaWorkerIdentityError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for consistency::saga::SagaWorkerIdentityError
+pub fn consistency::saga::SagaWorkerIdentityError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for consistency::saga::SagaWorkerIdentityError
+impl core::marker::Freeze for consistency::saga::SagaWorkerIdentityError
+impl core::marker::Send for consistency::saga::SagaWorkerIdentityError
+impl core::marker::Sync for consistency::saga::SagaWorkerIdentityError
+impl core::marker::Unpin for consistency::saga::SagaWorkerIdentityError
+impl core::marker::UnsafeUnpin for consistency::saga::SagaWorkerIdentityError
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::saga::SagaWorkerIdentityError
+impl core::panic::unwind_safe::UnwindSafe for consistency::saga::SagaWorkerIdentityError
 #[non_exhaustive] pub enum consistency::saga::StepNameError
 pub consistency::saga::StepNameError::Empty
 pub consistency::saga::StepNameError::NotIdent
@@ -2040,6 +2126,27 @@ impl core::marker::Unpin for consistency::saga::StepNameError
 impl core::marker::UnsafeUnpin for consistency::saga::StepNameError
 impl core::panic::unwind_safe::RefUnwindSafe for consistency::saga::StepNameError
 impl core::panic::unwind_safe::UnwindSafe for consistency::saga::StepNameError
+pub struct consistency::saga::SagaContractId(_)
+impl consistency::saga::SagaContractId
+pub fn consistency::saga::SagaContractId::as_str(&self) -> &str
+pub fn consistency::saga::SagaContractId::parse(&str) -> core::result::Result<Self, consistency::saga::SagaContractIdError>
+impl core::clone::Clone for consistency::saga::SagaContractId
+pub fn consistency::saga::SagaContractId::clone(&self) -> consistency::saga::SagaContractId
+impl core::cmp::Eq for consistency::saga::SagaContractId
+impl core::cmp::PartialEq for consistency::saga::SagaContractId
+pub fn consistency::saga::SagaContractId::eq(&self, &consistency::saga::SagaContractId) -> bool
+impl core::fmt::Debug for consistency::saga::SagaContractId
+pub fn consistency::saga::SagaContractId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for consistency::saga::SagaContractId
+pub fn consistency::saga::SagaContractId::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for consistency::saga::SagaContractId
+impl core::marker::Freeze for consistency::saga::SagaContractId
+impl core::marker::Send for consistency::saga::SagaContractId
+impl core::marker::Sync for consistency::saga::SagaContractId
+impl core::marker::Unpin for consistency::saga::SagaContractId
+impl core::marker::UnsafeUnpin for consistency::saga::SagaContractId
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::saga::SagaContractId
+impl core::panic::unwind_safe::UnwindSafe for consistency::saga::SagaContractId
 pub struct consistency::saga::SagaDefinition
 impl consistency::saga::SagaDefinition
 pub fn consistency::saga::SagaDefinition::from_step_names<'a>(impl core::iter::traits::collect::IntoIterator<Item = &'a str>) -> core::result::Result<Self, consistency::saga::SagaModelError>
@@ -2062,6 +2169,31 @@ impl core::marker::Unpin for consistency::saga::SagaDefinition
 impl core::marker::UnsafeUnpin for consistency::saga::SagaDefinition
 impl core::panic::unwind_safe::RefUnwindSafe for consistency::saga::SagaDefinition
 impl core::panic::unwind_safe::UnwindSafe for consistency::saga::SagaDefinition
+pub struct consistency::saga::SagaDefinitionIdentity
+impl consistency::saga::SagaDefinitionIdentity
+pub fn consistency::saga::SagaDefinitionIdentity::action_registry_generation(&self) -> &str
+pub fn consistency::saga::SagaDefinitionIdentity::contract_id(&self) -> &str
+pub fn consistency::saga::SagaDefinitionIdentity::from_binding(vocab::contract::binding::SagaContractBinding) -> Self
+pub fn consistency::saga::SagaDefinitionIdentity::new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> core::result::Result<Self, consistency::saga::SagaDefinitionIdentityError>
+pub fn consistency::saga::SagaDefinitionIdentity::schema_digest(&self) -> &str
+pub fn consistency::saga::SagaDefinitionIdentity::version(&self) -> &str
+impl core::clone::Clone for consistency::saga::SagaDefinitionIdentity
+pub fn consistency::saga::SagaDefinitionIdentity::clone(&self) -> consistency::saga::SagaDefinitionIdentity
+impl core::cmp::Eq for consistency::saga::SagaDefinitionIdentity
+impl core::cmp::PartialEq for consistency::saga::SagaDefinitionIdentity
+pub fn consistency::saga::SagaDefinitionIdentity::eq(&self, &consistency::saga::SagaDefinitionIdentity) -> bool
+impl core::fmt::Debug for consistency::saga::SagaDefinitionIdentity
+pub fn consistency::saga::SagaDefinitionIdentity::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for consistency::saga::SagaDefinitionIdentity
+pub fn consistency::saga::SagaDefinitionIdentity::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for consistency::saga::SagaDefinitionIdentity
+impl core::marker::Freeze for consistency::saga::SagaDefinitionIdentity
+impl core::marker::Send for consistency::saga::SagaDefinitionIdentity
+impl core::marker::Sync for consistency::saga::SagaDefinitionIdentity
+impl core::marker::Unpin for consistency::saga::SagaDefinitionIdentity
+impl core::marker::UnsafeUnpin for consistency::saga::SagaDefinitionIdentity
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::saga::SagaDefinitionIdentity
+impl core::panic::unwind_safe::UnwindSafe for consistency::saga::SagaDefinitionIdentity
 pub struct consistency::saga::SagaId(_)
 impl consistency::saga::SagaId
 pub fn consistency::saga::SagaId::as_uuid(&self) -> uuid::Uuid
@@ -2086,8 +2218,10 @@ impl core::panic::unwind_safe::RefUnwindSafe for consistency::saga::SagaId
 impl core::panic::unwind_safe::UnwindSafe for consistency::saga::SagaId
 pub struct consistency::saga::SagaInstanceRecord
 impl consistency::saga::SagaInstanceRecord
+pub fn consistency::saga::SagaInstanceRecord::definition(&self) -> &consistency::saga::SagaDefinitionIdentity
+pub fn consistency::saga::SagaInstanceRecord::identity(&self) -> &consistency::saga::SagaWorkerIdentity
 pub fn consistency::saga::SagaInstanceRecord::instance(&self) -> consistency::saga::SagaInstanceRef
-pub fn consistency::saga::SagaInstanceRecord::new(consistency::saga::SagaInstanceRef, consistency::saga::SagaInstanceStatus) -> Self
+pub fn consistency::saga::SagaInstanceRecord::new(consistency::saga::SagaInstanceRef, consistency::saga::SagaInstanceStatus, consistency::saga::SagaWorkerIdentity, consistency::saga::SagaDefinitionIdentity) -> core::result::Result<Self, consistency::saga::SagaInstanceRecordError>
 pub fn consistency::saga::SagaInstanceRecord::status(&self) -> consistency::saga::SagaInstanceStatus
 impl core::clone::Clone for consistency::saga::SagaInstanceRecord
 pub fn consistency::saga::SagaInstanceRecord::clone(&self) -> consistency::saga::SagaInstanceRecord
@@ -2096,7 +2230,6 @@ impl core::cmp::PartialEq for consistency::saga::SagaInstanceRecord
 pub fn consistency::saga::SagaInstanceRecord::eq(&self, &consistency::saga::SagaInstanceRecord) -> bool
 impl core::fmt::Debug for consistency::saga::SagaInstanceRecord
 pub fn consistency::saga::SagaInstanceRecord::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Copy for consistency::saga::SagaInstanceRecord
 impl core::marker::StructuralPartialEq for consistency::saga::SagaInstanceRecord
 impl core::marker::Freeze for consistency::saga::SagaInstanceRecord
 impl core::marker::Send for consistency::saga::SagaInstanceRecord
@@ -2197,28 +2330,28 @@ impl core::marker::Unpin for consistency::saga::SagaLease
 impl core::marker::UnsafeUnpin for consistency::saga::SagaLease
 impl core::panic::unwind_safe::RefUnwindSafe for consistency::saga::SagaLease
 impl core::panic::unwind_safe::UnwindSafe for consistency::saga::SagaLease
-pub struct consistency::saga::SagaStepCtx
-impl consistency::saga::SagaStepCtx
-pub fn consistency::saga::SagaStepCtx::instance(&self) -> consistency::saga::SagaInstanceRef
-pub fn consistency::saga::SagaStepCtx::new(consistency::saga::SagaInstanceRef, consistency::saga::StepName) -> Self
-pub fn consistency::saga::SagaStepCtx::saga_id(&self) -> consistency::saga::SagaId
-pub fn consistency::saga::SagaStepCtx::step_name(&self) -> &consistency::saga::StepName
-pub fn consistency::saga::SagaStepCtx::tenant(&self) -> vocab::tenant::TenantId
-impl core::clone::Clone for consistency::saga::SagaStepCtx
-pub fn consistency::saga::SagaStepCtx::clone(&self) -> consistency::saga::SagaStepCtx
-impl core::cmp::Eq for consistency::saga::SagaStepCtx
-impl core::cmp::PartialEq for consistency::saga::SagaStepCtx
-pub fn consistency::saga::SagaStepCtx::eq(&self, &consistency::saga::SagaStepCtx) -> bool
-impl core::fmt::Debug for consistency::saga::SagaStepCtx
-pub fn consistency::saga::SagaStepCtx::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::StructuralPartialEq for consistency::saga::SagaStepCtx
-impl core::marker::Freeze for consistency::saga::SagaStepCtx
-impl core::marker::Send for consistency::saga::SagaStepCtx
-impl core::marker::Sync for consistency::saga::SagaStepCtx
-impl core::marker::Unpin for consistency::saga::SagaStepCtx
-impl core::marker::UnsafeUnpin for consistency::saga::SagaStepCtx
-impl core::panic::unwind_safe::RefUnwindSafe for consistency::saga::SagaStepCtx
-impl core::panic::unwind_safe::UnwindSafe for consistency::saga::SagaStepCtx
+pub struct consistency::saga::SagaWorkerIdentity
+impl consistency::saga::SagaWorkerIdentity
+pub fn consistency::saga::SagaWorkerIdentity::contract_id(&self) -> &consistency::saga::SagaContractId
+pub fn consistency::saga::SagaWorkerIdentity::new(impl core::convert::Into<alloc::string::String>, consistency::saga::SagaContractId) -> core::result::Result<Self, consistency::saga::SagaWorkerIdentityError>
+pub fn consistency::saga::SagaWorkerIdentity::owner(&self) -> &str
+impl core::clone::Clone for consistency::saga::SagaWorkerIdentity
+pub fn consistency::saga::SagaWorkerIdentity::clone(&self) -> consistency::saga::SagaWorkerIdentity
+impl core::cmp::Eq for consistency::saga::SagaWorkerIdentity
+impl core::cmp::PartialEq for consistency::saga::SagaWorkerIdentity
+pub fn consistency::saga::SagaWorkerIdentity::eq(&self, &consistency::saga::SagaWorkerIdentity) -> bool
+impl core::fmt::Debug for consistency::saga::SagaWorkerIdentity
+pub fn consistency::saga::SagaWorkerIdentity::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for consistency::saga::SagaWorkerIdentity
+pub fn consistency::saga::SagaWorkerIdentity::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for consistency::saga::SagaWorkerIdentity
+impl core::marker::Freeze for consistency::saga::SagaWorkerIdentity
+impl core::marker::Send for consistency::saga::SagaWorkerIdentity
+impl core::marker::Sync for consistency::saga::SagaWorkerIdentity
+impl core::marker::Unpin for consistency::saga::SagaWorkerIdentity
+impl core::marker::UnsafeUnpin for consistency::saga::SagaWorkerIdentity
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::saga::SagaWorkerIdentity
+impl core::panic::unwind_safe::UnwindSafe for consistency::saga::SagaWorkerIdentity
 pub struct consistency::saga::StepName(_)
 impl consistency::saga::StepName
 pub fn consistency::saga::StepName::as_str(&self) -> &str
@@ -2240,11 +2373,6 @@ impl core::marker::Unpin for consistency::saga::StepName
 impl core::marker::UnsafeUnpin for consistency::saga::StepName
 impl core::panic::unwind_safe::RefUnwindSafe for consistency::saga::StepName
 impl core::panic::unwind_safe::UnwindSafe for consistency::saga::StepName
-pub trait consistency::saga::SagaStep: core::marker::Send + core::marker::Sync
-pub type consistency::saga::SagaStep::Output: vocab::contract::binding::SagaStepOutputBinding + core::marker::Send + 'static
-pub const consistency::saga::SagaStep::BINDING: vocab::contract::binding::SagaStepBinding
-pub fn consistency::saga::SagaStep::compensate(&self, consistency::saga::SagaStepCtx) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::CompensationOutcome, consistency::error::EngineError>> + core::marker::Send
-pub fn consistency::saga::SagaStep::execute(&self, consistency::saga::SagaStepCtx) -> impl core::future::future::Future<Output = core::result::Result<Self::Output, consistency::error::EngineError>> + core::marker::Send
 pub mod consistency::tx_retry
 pub enum consistency::tx_retry::TxRetryBackoff
 pub consistency::tx_retry::TxRetryBackoff::Continue
@@ -3130,6 +3258,50 @@ impl core::marker::Unpin for consistency::reconcile::ReconcileResultLabel
 impl core::marker::UnsafeUnpin for consistency::reconcile::ReconcileResultLabel
 impl core::panic::unwind_safe::RefUnwindSafe for consistency::reconcile::ReconcileResultLabel
 impl core::panic::unwind_safe::UnwindSafe for consistency::reconcile::ReconcileResultLabel
+#[non_exhaustive] pub enum consistency::SagaContractIdError
+pub consistency::SagaContractIdError::Empty
+pub consistency::SagaContractIdError::Format
+impl core::clone::Clone for consistency::saga::SagaContractIdError
+pub fn consistency::saga::SagaContractIdError::clone(&self) -> consistency::saga::SagaContractIdError
+impl core::cmp::Eq for consistency::saga::SagaContractIdError
+impl core::cmp::PartialEq for consistency::saga::SagaContractIdError
+pub fn consistency::saga::SagaContractIdError::eq(&self, &consistency::saga::SagaContractIdError) -> bool
+impl core::error::Error for consistency::saga::SagaContractIdError
+impl core::fmt::Debug for consistency::saga::SagaContractIdError
+pub fn consistency::saga::SagaContractIdError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for consistency::saga::SagaContractIdError
+pub fn consistency::saga::SagaContractIdError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for consistency::saga::SagaContractIdError
+impl core::marker::Freeze for consistency::saga::SagaContractIdError
+impl core::marker::Send for consistency::saga::SagaContractIdError
+impl core::marker::Sync for consistency::saga::SagaContractIdError
+impl core::marker::Unpin for consistency::saga::SagaContractIdError
+impl core::marker::UnsafeUnpin for consistency::saga::SagaContractIdError
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::saga::SagaContractIdError
+impl core::panic::unwind_safe::UnwindSafe for consistency::saga::SagaContractIdError
+#[non_exhaustive] pub enum consistency::SagaDefinitionIdentityError
+pub consistency::SagaDefinitionIdentityError::ActionRegistryGeneration
+pub consistency::SagaDefinitionIdentityError::ContractId
+pub consistency::SagaDefinitionIdentityError::SchemaDigest
+pub consistency::SagaDefinitionIdentityError::Version
+impl core::clone::Clone for consistency::saga::SagaDefinitionIdentityError
+pub fn consistency::saga::SagaDefinitionIdentityError::clone(&self) -> consistency::saga::SagaDefinitionIdentityError
+impl core::cmp::Eq for consistency::saga::SagaDefinitionIdentityError
+impl core::cmp::PartialEq for consistency::saga::SagaDefinitionIdentityError
+pub fn consistency::saga::SagaDefinitionIdentityError::eq(&self, &consistency::saga::SagaDefinitionIdentityError) -> bool
+impl core::error::Error for consistency::saga::SagaDefinitionIdentityError
+impl core::fmt::Debug for consistency::saga::SagaDefinitionIdentityError
+pub fn consistency::saga::SagaDefinitionIdentityError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for consistency::saga::SagaDefinitionIdentityError
+pub fn consistency::saga::SagaDefinitionIdentityError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for consistency::saga::SagaDefinitionIdentityError
+impl core::marker::Freeze for consistency::saga::SagaDefinitionIdentityError
+impl core::marker::Send for consistency::saga::SagaDefinitionIdentityError
+impl core::marker::Sync for consistency::saga::SagaDefinitionIdentityError
+impl core::marker::Unpin for consistency::saga::SagaDefinitionIdentityError
+impl core::marker::UnsafeUnpin for consistency::saga::SagaDefinitionIdentityError
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::saga::SagaDefinitionIdentityError
+impl core::panic::unwind_safe::UnwindSafe for consistency::saga::SagaDefinitionIdentityError
 #[non_exhaustive] pub enum consistency::SagaDurableStatus
 pub consistency::SagaDurableStatus::Compensated
 pub consistency::SagaDurableStatus::Compensating
@@ -3156,6 +3328,26 @@ impl core::marker::Unpin for consistency::saga::SagaDurableStatus
 impl core::marker::UnsafeUnpin for consistency::saga::SagaDurableStatus
 impl core::panic::unwind_safe::RefUnwindSafe for consistency::saga::SagaDurableStatus
 impl core::panic::unwind_safe::UnwindSafe for consistency::saga::SagaDurableStatus
+#[non_exhaustive] pub enum consistency::SagaInstanceRecordError
+pub consistency::SagaInstanceRecordError::DefinitionContractMismatch
+impl core::clone::Clone for consistency::saga::SagaInstanceRecordError
+pub fn consistency::saga::SagaInstanceRecordError::clone(&self) -> consistency::saga::SagaInstanceRecordError
+impl core::cmp::Eq for consistency::saga::SagaInstanceRecordError
+impl core::cmp::PartialEq for consistency::saga::SagaInstanceRecordError
+pub fn consistency::saga::SagaInstanceRecordError::eq(&self, &consistency::saga::SagaInstanceRecordError) -> bool
+impl core::error::Error for consistency::saga::SagaInstanceRecordError
+impl core::fmt::Debug for consistency::saga::SagaInstanceRecordError
+pub fn consistency::saga::SagaInstanceRecordError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for consistency::saga::SagaInstanceRecordError
+pub fn consistency::saga::SagaInstanceRecordError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for consistency::saga::SagaInstanceRecordError
+impl core::marker::Freeze for consistency::saga::SagaInstanceRecordError
+impl core::marker::Send for consistency::saga::SagaInstanceRecordError
+impl core::marker::Sync for consistency::saga::SagaInstanceRecordError
+impl core::marker::Unpin for consistency::saga::SagaInstanceRecordError
+impl core::marker::UnsafeUnpin for consistency::saga::SagaInstanceRecordError
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::saga::SagaInstanceRecordError
+impl core::panic::unwind_safe::UnwindSafe for consistency::saga::SagaInstanceRecordError
 #[non_exhaustive] pub enum consistency::SagaInstanceRefError
 pub consistency::SagaInstanceRefError::NilSagaId
 impl core::clone::Clone for consistency::saga::SagaInstanceRefError
@@ -3210,10 +3402,12 @@ pub consistency::SagaInterruption::InstanceDegraded
 pub consistency::SagaInterruption::JournalConflict
 pub consistency::SagaInterruption::LeaseBusy
 pub consistency::SagaInterruption::LeaseLost
+pub consistency::SagaInterruption::ReceiptUnavailable
 pub consistency::SagaInterruption::RuntimeLockBusy
 pub consistency::SagaInterruption::RuntimeLockLost
 pub consistency::SagaInterruption::RuntimeLockUnavailable
 pub consistency::SagaInterruption::StoreUnavailable
+pub consistency::SagaInterruption::UnsupportedDefinition
 impl consistency::saga::SagaInterruption
 pub const fn consistency::saga::SagaInterruption::as_label(self) -> &'static str
 impl core::clone::Clone for consistency::saga::SagaInterruption
@@ -3398,6 +3592,26 @@ impl core::marker::Unpin for consistency::saga::SagaReplayDecision
 impl core::marker::UnsafeUnpin for consistency::saga::SagaReplayDecision
 impl core::panic::unwind_safe::RefUnwindSafe for consistency::saga::SagaReplayDecision
 impl core::panic::unwind_safe::UnwindSafe for consistency::saga::SagaReplayDecision
+#[non_exhaustive] pub enum consistency::SagaWorkerIdentityError
+pub consistency::SagaWorkerIdentityError::EmptyOwner
+impl core::clone::Clone for consistency::saga::SagaWorkerIdentityError
+pub fn consistency::saga::SagaWorkerIdentityError::clone(&self) -> consistency::saga::SagaWorkerIdentityError
+impl core::cmp::Eq for consistency::saga::SagaWorkerIdentityError
+impl core::cmp::PartialEq for consistency::saga::SagaWorkerIdentityError
+pub fn consistency::saga::SagaWorkerIdentityError::eq(&self, &consistency::saga::SagaWorkerIdentityError) -> bool
+impl core::error::Error for consistency::saga::SagaWorkerIdentityError
+impl core::fmt::Debug for consistency::saga::SagaWorkerIdentityError
+pub fn consistency::saga::SagaWorkerIdentityError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for consistency::saga::SagaWorkerIdentityError
+pub fn consistency::saga::SagaWorkerIdentityError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for consistency::saga::SagaWorkerIdentityError
+impl core::marker::Freeze for consistency::saga::SagaWorkerIdentityError
+impl core::marker::Send for consistency::saga::SagaWorkerIdentityError
+impl core::marker::Sync for consistency::saga::SagaWorkerIdentityError
+impl core::marker::Unpin for consistency::saga::SagaWorkerIdentityError
+impl core::marker::UnsafeUnpin for consistency::saga::SagaWorkerIdentityError
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::saga::SagaWorkerIdentityError
+impl core::panic::unwind_safe::UnwindSafe for consistency::saga::SagaWorkerIdentityError
 #[non_exhaustive] pub enum consistency::SeenState
 pub consistency::SeenState::Duplicate
 pub consistency::SeenState::Fresh
@@ -4400,6 +4614,27 @@ impl core::marker::Unpin for consistency::reconcile::Request
 impl core::marker::UnsafeUnpin for consistency::reconcile::Request
 impl core::panic::unwind_safe::RefUnwindSafe for consistency::reconcile::Request
 impl core::panic::unwind_safe::UnwindSafe for consistency::reconcile::Request
+pub struct consistency::SagaContractId(_)
+impl consistency::saga::SagaContractId
+pub fn consistency::saga::SagaContractId::as_str(&self) -> &str
+pub fn consistency::saga::SagaContractId::parse(&str) -> core::result::Result<Self, consistency::saga::SagaContractIdError>
+impl core::clone::Clone for consistency::saga::SagaContractId
+pub fn consistency::saga::SagaContractId::clone(&self) -> consistency::saga::SagaContractId
+impl core::cmp::Eq for consistency::saga::SagaContractId
+impl core::cmp::PartialEq for consistency::saga::SagaContractId
+pub fn consistency::saga::SagaContractId::eq(&self, &consistency::saga::SagaContractId) -> bool
+impl core::fmt::Debug for consistency::saga::SagaContractId
+pub fn consistency::saga::SagaContractId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for consistency::saga::SagaContractId
+pub fn consistency::saga::SagaContractId::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for consistency::saga::SagaContractId
+impl core::marker::Freeze for consistency::saga::SagaContractId
+impl core::marker::Send for consistency::saga::SagaContractId
+impl core::marker::Sync for consistency::saga::SagaContractId
+impl core::marker::Unpin for consistency::saga::SagaContractId
+impl core::marker::UnsafeUnpin for consistency::saga::SagaContractId
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::saga::SagaContractId
+impl core::panic::unwind_safe::UnwindSafe for consistency::saga::SagaContractId
 pub struct consistency::SagaDefinition
 impl consistency::saga::SagaDefinition
 pub fn consistency::saga::SagaDefinition::from_step_names<'a>(impl core::iter::traits::collect::IntoIterator<Item = &'a str>) -> core::result::Result<Self, consistency::saga::SagaModelError>
@@ -4422,6 +4657,31 @@ impl core::marker::Unpin for consistency::saga::SagaDefinition
 impl core::marker::UnsafeUnpin for consistency::saga::SagaDefinition
 impl core::panic::unwind_safe::RefUnwindSafe for consistency::saga::SagaDefinition
 impl core::panic::unwind_safe::UnwindSafe for consistency::saga::SagaDefinition
+pub struct consistency::SagaDefinitionIdentity
+impl consistency::saga::SagaDefinitionIdentity
+pub fn consistency::saga::SagaDefinitionIdentity::action_registry_generation(&self) -> &str
+pub fn consistency::saga::SagaDefinitionIdentity::contract_id(&self) -> &str
+pub fn consistency::saga::SagaDefinitionIdentity::from_binding(vocab::contract::binding::SagaContractBinding) -> Self
+pub fn consistency::saga::SagaDefinitionIdentity::new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> core::result::Result<Self, consistency::saga::SagaDefinitionIdentityError>
+pub fn consistency::saga::SagaDefinitionIdentity::schema_digest(&self) -> &str
+pub fn consistency::saga::SagaDefinitionIdentity::version(&self) -> &str
+impl core::clone::Clone for consistency::saga::SagaDefinitionIdentity
+pub fn consistency::saga::SagaDefinitionIdentity::clone(&self) -> consistency::saga::SagaDefinitionIdentity
+impl core::cmp::Eq for consistency::saga::SagaDefinitionIdentity
+impl core::cmp::PartialEq for consistency::saga::SagaDefinitionIdentity
+pub fn consistency::saga::SagaDefinitionIdentity::eq(&self, &consistency::saga::SagaDefinitionIdentity) -> bool
+impl core::fmt::Debug for consistency::saga::SagaDefinitionIdentity
+pub fn consistency::saga::SagaDefinitionIdentity::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for consistency::saga::SagaDefinitionIdentity
+pub fn consistency::saga::SagaDefinitionIdentity::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for consistency::saga::SagaDefinitionIdentity
+impl core::marker::Freeze for consistency::saga::SagaDefinitionIdentity
+impl core::marker::Send for consistency::saga::SagaDefinitionIdentity
+impl core::marker::Sync for consistency::saga::SagaDefinitionIdentity
+impl core::marker::Unpin for consistency::saga::SagaDefinitionIdentity
+impl core::marker::UnsafeUnpin for consistency::saga::SagaDefinitionIdentity
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::saga::SagaDefinitionIdentity
+impl core::panic::unwind_safe::UnwindSafe for consistency::saga::SagaDefinitionIdentity
 pub struct consistency::SagaId(_)
 impl consistency::saga::SagaId
 pub fn consistency::saga::SagaId::as_uuid(&self) -> uuid::Uuid
@@ -4446,8 +4706,10 @@ impl core::panic::unwind_safe::RefUnwindSafe for consistency::saga::SagaId
 impl core::panic::unwind_safe::UnwindSafe for consistency::saga::SagaId
 pub struct consistency::SagaInstanceRecord
 impl consistency::saga::SagaInstanceRecord
+pub fn consistency::saga::SagaInstanceRecord::definition(&self) -> &consistency::saga::SagaDefinitionIdentity
+pub fn consistency::saga::SagaInstanceRecord::identity(&self) -> &consistency::saga::SagaWorkerIdentity
 pub fn consistency::saga::SagaInstanceRecord::instance(&self) -> consistency::saga::SagaInstanceRef
-pub fn consistency::saga::SagaInstanceRecord::new(consistency::saga::SagaInstanceRef, consistency::saga::SagaInstanceStatus) -> Self
+pub fn consistency::saga::SagaInstanceRecord::new(consistency::saga::SagaInstanceRef, consistency::saga::SagaInstanceStatus, consistency::saga::SagaWorkerIdentity, consistency::saga::SagaDefinitionIdentity) -> core::result::Result<Self, consistency::saga::SagaInstanceRecordError>
 pub fn consistency::saga::SagaInstanceRecord::status(&self) -> consistency::saga::SagaInstanceStatus
 impl core::clone::Clone for consistency::saga::SagaInstanceRecord
 pub fn consistency::saga::SagaInstanceRecord::clone(&self) -> consistency::saga::SagaInstanceRecord
@@ -4456,7 +4718,6 @@ impl core::cmp::PartialEq for consistency::saga::SagaInstanceRecord
 pub fn consistency::saga::SagaInstanceRecord::eq(&self, &consistency::saga::SagaInstanceRecord) -> bool
 impl core::fmt::Debug for consistency::saga::SagaInstanceRecord
 pub fn consistency::saga::SagaInstanceRecord::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Copy for consistency::saga::SagaInstanceRecord
 impl core::marker::StructuralPartialEq for consistency::saga::SagaInstanceRecord
 impl core::marker::Freeze for consistency::saga::SagaInstanceRecord
 impl core::marker::Send for consistency::saga::SagaInstanceRecord
@@ -4557,28 +4818,28 @@ impl core::marker::Unpin for consistency::saga::SagaLease
 impl core::marker::UnsafeUnpin for consistency::saga::SagaLease
 impl core::panic::unwind_safe::RefUnwindSafe for consistency::saga::SagaLease
 impl core::panic::unwind_safe::UnwindSafe for consistency::saga::SagaLease
-pub struct consistency::SagaStepCtx
-impl consistency::saga::SagaStepCtx
-pub fn consistency::saga::SagaStepCtx::instance(&self) -> consistency::saga::SagaInstanceRef
-pub fn consistency::saga::SagaStepCtx::new(consistency::saga::SagaInstanceRef, consistency::saga::StepName) -> Self
-pub fn consistency::saga::SagaStepCtx::saga_id(&self) -> consistency::saga::SagaId
-pub fn consistency::saga::SagaStepCtx::step_name(&self) -> &consistency::saga::StepName
-pub fn consistency::saga::SagaStepCtx::tenant(&self) -> vocab::tenant::TenantId
-impl core::clone::Clone for consistency::saga::SagaStepCtx
-pub fn consistency::saga::SagaStepCtx::clone(&self) -> consistency::saga::SagaStepCtx
-impl core::cmp::Eq for consistency::saga::SagaStepCtx
-impl core::cmp::PartialEq for consistency::saga::SagaStepCtx
-pub fn consistency::saga::SagaStepCtx::eq(&self, &consistency::saga::SagaStepCtx) -> bool
-impl core::fmt::Debug for consistency::saga::SagaStepCtx
-pub fn consistency::saga::SagaStepCtx::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::StructuralPartialEq for consistency::saga::SagaStepCtx
-impl core::marker::Freeze for consistency::saga::SagaStepCtx
-impl core::marker::Send for consistency::saga::SagaStepCtx
-impl core::marker::Sync for consistency::saga::SagaStepCtx
-impl core::marker::Unpin for consistency::saga::SagaStepCtx
-impl core::marker::UnsafeUnpin for consistency::saga::SagaStepCtx
-impl core::panic::unwind_safe::RefUnwindSafe for consistency::saga::SagaStepCtx
-impl core::panic::unwind_safe::UnwindSafe for consistency::saga::SagaStepCtx
+pub struct consistency::SagaWorkerIdentity
+impl consistency::saga::SagaWorkerIdentity
+pub fn consistency::saga::SagaWorkerIdentity::contract_id(&self) -> &consistency::saga::SagaContractId
+pub fn consistency::saga::SagaWorkerIdentity::new(impl core::convert::Into<alloc::string::String>, consistency::saga::SagaContractId) -> core::result::Result<Self, consistency::saga::SagaWorkerIdentityError>
+pub fn consistency::saga::SagaWorkerIdentity::owner(&self) -> &str
+impl core::clone::Clone for consistency::saga::SagaWorkerIdentity
+pub fn consistency::saga::SagaWorkerIdentity::clone(&self) -> consistency::saga::SagaWorkerIdentity
+impl core::cmp::Eq for consistency::saga::SagaWorkerIdentity
+impl core::cmp::PartialEq for consistency::saga::SagaWorkerIdentity
+pub fn consistency::saga::SagaWorkerIdentity::eq(&self, &consistency::saga::SagaWorkerIdentity) -> bool
+impl core::fmt::Debug for consistency::saga::SagaWorkerIdentity
+pub fn consistency::saga::SagaWorkerIdentity::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for consistency::saga::SagaWorkerIdentity
+pub fn consistency::saga::SagaWorkerIdentity::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for consistency::saga::SagaWorkerIdentity
+impl core::marker::Freeze for consistency::saga::SagaWorkerIdentity
+impl core::marker::Send for consistency::saga::SagaWorkerIdentity
+impl core::marker::Sync for consistency::saga::SagaWorkerIdentity
+impl core::marker::Unpin for consistency::saga::SagaWorkerIdentity
+impl core::marker::UnsafeUnpin for consistency::saga::SagaWorkerIdentity
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::saga::SagaWorkerIdentity
+impl core::panic::unwind_safe::UnwindSafe for consistency::saga::SagaWorkerIdentity
 pub struct consistency::SerialInOrder(_)
 impl consistency::projection::SerialInOrder
 pub fn consistency::projection::SerialInOrder::from_source<S: consistency::projection::PartitionSerialDelivery>(&S) -> Self
@@ -4734,11 +4995,6 @@ pub trait consistency::Reconciler
 pub async fn consistency::Reconciler::reconcile(&self, &consistency::reconcile::Context, consistency::reconcile::Request) -> core::result::Result<consistency::reconcile::Outcome, consistency::reconcile::ReconcileError>
 pub trait consistency::RetentionSweeper
 pub async fn consistency::RetentionSweeper::sweep(&self, u64) -> core::result::Result<u64, consistency::error::EngineError>
-pub trait consistency::SagaStep: core::marker::Send + core::marker::Sync
-pub type consistency::SagaStep::Output: vocab::contract::binding::SagaStepOutputBinding + core::marker::Send + 'static
-pub const consistency::SagaStep::BINDING: vocab::contract::binding::SagaStepBinding
-pub fn consistency::SagaStep::compensate(&self, consistency::saga::SagaStepCtx) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::CompensationOutcome, consistency::error::EngineError>> + core::marker::Send
-pub fn consistency::SagaStep::execute(&self, consistency::saga::SagaStepCtx) -> impl core::future::future::Future<Output = core::result::Result<Self::Output, consistency::error::EngineError>> + core::marker::Send
 pub trait consistency::SerialInOrderGuarantor: consistency::projection::sealed::Sealed + core::marker::Copy
 impl consistency::projection::SerialInOrderGuarantor for consistency::projection::SerialInOrder
 pub fn consistency::is_canonical_topic_name(&str) -> bool

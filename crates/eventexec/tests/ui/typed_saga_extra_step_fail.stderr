@@ -1,0 +1,20 @@
+error[E0599]: the method `register` exists for struct `TypedSagaActionFactoryBuilder<generated::saga::billing_v1::Definition, generated::saga::billing_v1::End>`, but its trait bounds were not satisfied
+  --> tests/ui/typed_saga_extra_step_fail.rs:10:10
+   |
+ 7 |       let _ = TypedSagaActionFactory::<Definition>::builder()
+   |  _____________-
+ 8 | |         .register::<common::Reserve, _>(|| common::Reserve)
+ 9 | |         .register::<common::Capture, _>(|| common::Capture)
+10 | |         .register::<common::Capture, _>(|| common::Capture);
+   | |         -^^^^^^^^ method cannot be called due to unsatisfied trait bounds
+   | |_________|
+   |
+   |
+  ::: $WORKSPACE/generated/src/saga/billing_v1.rs
+   |
+   |   pub struct End;
+   |   -------------- doesn't satisfy `_: Step<Definition>` or `generated::saga::billing_v1::End: StepMarker`
+   |
+   = note: the following trait bounds were not satisfied:
+           `generated::saga::billing_v1::End: generated::saga::Step<generated::saga::billing_v1::Definition>`
+           `generated::saga::billing_v1::End: StepMarker`

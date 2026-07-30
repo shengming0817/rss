@@ -7,8 +7,8 @@
 //!
 //! per-kind 字段（#1035）：http 的 `path`/`method`、event 的 `topic`/`delivery`、saga 的 `[saga]` block
 //! 是 per-kind 可选字段（缺省 `None`，按 kind × lifecycle 由 `validate.rs` R8 报必填）。「坏值不可表达」
-//! 尽量上移类型层（Hard）：`HttpMethod`/`Delivery`/`CompensationOrder` 枚举解析拒非法 variant、saga
-//! `retryMillis`/`timeoutMillis` 用 `u64` 使「负 duration」不可表达、嵌套结构 `deny_unknown_fields`。
+//! 尽量上移类型层（Hard）：`HttpMethod`/`Delivery`/Saga policy 枚举解析拒非法 variant、saga
+//! duration 用 `u64` 使「负 duration」不可表达、嵌套结构 `deny_unknown_fields`。
 //!
 //! event 订阅声明（#1120/#1822）：`[[subscriptions]]` 声明 event 契约的 consumer 域、consumer group
 //! 与非可选 closed `externalEffectPolicy`，由 codegen 派生 typed `SubscriptionSpec`，供 bootstrap 接线消费
@@ -103,13 +103,13 @@ impl ContractManifest {
         toml::from_str(text)
     }
 
-    /// 全部已声明的 schema 文件名 = `[schemas]` 声明 ∪ 各 saga step `outputSchema`
+    /// 全部已声明的 schema 文件名 = `[schemas]` 声明 ∪ 各 saga step `receiptSchema`
     /// （DRY 单源：R5 存在性 + R6 防逃逸统一消费 schema 文件完整性，含 saga step 引用）。
     pub fn declared_schema_files(&self) -> Vec<&str> {
         let mut files = self.schemas.declared_files();
         files.extend(self.schemas.responses.values().map(String::as_str));
         if let Some(saga) = &self.saga {
-            files.extend(saga.steps.iter().map(|s| s.output_schema.as_str()));
+            files.extend(saga.steps.iter().map(|s| s.receipt_schema.as_str()));
         }
         files
     }
@@ -787,25 +787,74 @@ pub enum CompensationOrder {
 
 /// saga 专属 block（saga 契约 per-kind 字段，TOML `[saga]` 表）。
 ///
-/// `retryMillis`/`timeoutMillis` 用 `u64` ⇒「负 duration」不可表达（Hard）；`compensationOrder`
-/// 用单 variant 枚举 ⇒ 仅 `reverse`（Hard）。内部良构（≥1 step、step name 合法唯一、outputSchema 非空）
-/// 由 validate R10 守（运行期，Medium）；step `outputSchema` 文件完整性经 [`ContractManifest::declared_schema_files`]
+/// duration 用 `u64` ⇒「负 duration」不可表达（Hard）；闭合枚举拒绝未知执行语义。
+/// 内部良构（≥1 step、step name 合法唯一、receipt/effect scope 非空、retry budget 有效）
+/// 由 validate R10 守（运行期，Medium）；step `receiptSchema` 文件完整性经 [`ContractManifest::declared_schema_files`]
 /// 复用 R5/R6。
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct SagaBlock {
     pub steps: Vec<SagaStep>,
     pub compensation_order: CompensationOrder,
-    pub retry_millis: u64,
-    pub timeout_millis: u64,
+    pub retry: SagaRetryPolicy,
 }
 
-/// saga 单步：`name`（可生成唯一 Rust 标识符，R10 守）+ `outputSchema`（输出 schema 文件名）。
+/// Saga retry budget 与 backoff policy。所有字段必填，不提供默认。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct SagaRetryPolicy {
+    pub max_attempts: u32,
+    pub time_budget_millis: u64,
+    pub backoff: SagaBackoff,
+    pub initial_backoff_millis: u64,
+    pub max_backoff_millis: u64,
+    pub jitter: SagaJitter,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SagaBackoff {
+    Fixed,
+    Exponential,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SagaJitter {
+    None,
+    Full,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SagaIdempotencyClass {
+    DeterministicKey,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SagaCompensationInput {
+    Receipt,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SagaRetryClass {
+    Never,
+    Transient,
+}
+
+/// saga 单步的完整执行语义。
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct SagaStep {
     pub name: String,
-    pub output_schema: String,
+    pub receipt_schema: String,
+    pub effect_scope: String,
+    pub compensation_effect_scope: String,
+    pub idempotency_class: SagaIdempotencyClass,
+    pub compensation_input: SagaCompensationInput,
+    pub retry_class: SagaRetryClass,
 }
 
 /// event 订阅声明（#1120/#1438）——TOML `[[subscriptions]]` 数组元素。
@@ -930,12 +979,17 @@ mod tests {
         payload = "payload.schema.json"
         [saga]
         compensationOrder = "reverse"
-        retryMillis = 5000
-        timeoutMillis = 30000
         steps = [
-            { name = "reserve_funds", outputSchema = "reserve.schema.json" },
-            { name = "capture", outputSchema = "capture.schema.json" },
+            { name = "reserve_funds", receiptSchema = "reserve.schema.json", effectScope = "billing.reserve", compensationEffectScope = "billing.release", idempotencyClass = "deterministic-key", compensationInput = "receipt", retryClass = "transient" },
+            { name = "capture", receiptSchema = "capture.schema.json", effectScope = "billing.capture", compensationEffectScope = "billing.refund", idempotencyClass = "deterministic-key", compensationInput = "receipt", retryClass = "never" },
         ]
+        [saga.retry]
+        maxAttempts = 3
+        timeBudgetMillis = 30000
+        backoff = "exponential"
+        initialBackoffMillis = 100
+        maxBackoffMillis = 5000
+        jitter = "full"
     "#;
 
     #[test]
@@ -1097,6 +1151,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::cognitive_complexity)] // contract field matrix is intentionally asserted in one anti-drift test.
     fn parses_saga_block() -> anyhow::Result<()> {
         let m = ContractManifest::from_toml_str(VALID_SAGA)?;
         assert_eq!(m.kind, ContractKind::Saga);
@@ -1105,12 +1160,25 @@ mod tests {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("saga block 应解析"))?;
         assert_eq!(saga.compensation_order, CompensationOrder::Reverse);
-        assert_eq!(saga.retry_millis, 5000);
-        assert_eq!(saga.timeout_millis, 30000);
+        assert_eq!(saga.retry.max_attempts, 3);
+        assert_eq!(saga.retry.time_budget_millis, 30000);
+        assert_eq!(saga.retry.backoff, SagaBackoff::Exponential);
+        assert_eq!(saga.retry.jitter, SagaJitter::Full);
         assert_eq!(saga.steps.len(), 2);
         assert_eq!(saga.steps[0].name, "reserve_funds");
-        assert_eq!(saga.steps[0].output_schema, "reserve.schema.json");
-        // saga step outputSchema 进入聚合器（供 R5/R6）。
+        assert_eq!(saga.steps[0].receipt_schema, "reserve.schema.json");
+        assert_eq!(saga.steps[0].effect_scope, "billing.reserve");
+        assert_eq!(saga.steps[0].compensation_effect_scope, "billing.release");
+        assert_eq!(
+            saga.steps[0].idempotency_class,
+            SagaIdempotencyClass::DeterministicKey
+        );
+        assert_eq!(
+            saga.steps[0].compensation_input,
+            SagaCompensationInput::Receipt
+        );
+        assert_eq!(saga.steps[0].retry_class, SagaRetryClass::Transient);
+        // saga step receiptSchema 进入聚合器（供 R5/R6）。
         assert_eq!(
             m.declared_schema_files(),
             vec![
@@ -1587,15 +1655,83 @@ mod tests {
     #[test]
     fn rejects_unknown_saga_field() {
         // SagaBlock deny_unknown_fields：未知子键解析即 Err（Hard）。
-        let toml = VALID_SAGA.replace("retryMillis = 5000", "retryMillis = 5000\nbogus = 1");
+        let toml = VALID_SAGA.replace(
+            "compensationOrder = \"reverse\"",
+            "compensationOrder = \"reverse\"\nbogus = 1",
+        );
         assert!(ContractManifest::from_toml_str(&toml).is_err());
     }
 
     #[test]
-    fn rejects_negative_retry_millis() {
+    fn rejects_zero_attempts_at_validation_boundary() -> anyhow::Result<()> {
+        let toml = VALID_SAGA.replace("maxAttempts = 3", "maxAttempts = 0");
+        let manifest = ContractManifest::from_toml_str(&toml)?;
+        let saga = manifest
+            .saga
+            .ok_or_else(|| anyhow::anyhow!("parsed saga manifest lost [saga]"))?;
+        assert_eq!(saga.retry.max_attempts, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_negative_time_budget_millis() {
         // u64 字段：负值不可表达（Hard，类型层）。
-        let toml = VALID_SAGA.replace("retryMillis = 5000", "retryMillis = -1");
+        let toml = VALID_SAGA.replace("timeBudgetMillis = 30000", "timeBudgetMillis = -1");
         assert!(ContractManifest::from_toml_str(&toml).is_err());
+    }
+
+    #[test]
+    fn rejects_removed_saga_manifest_fields() {
+        for legacy in [
+            "retryMillis = 5000",
+            "timeoutMillis = 30000",
+            "outputSchema = \"reserve.schema.json\"",
+        ] {
+            let mut toml = VALID_SAGA.to_string();
+            if legacy.starts_with("outputSchema") {
+                toml = toml.replace("receiptSchema = \"reserve.schema.json\"", legacy);
+            } else {
+                toml = toml.replace(
+                    "compensationOrder = \"reverse\"",
+                    &format!("compensationOrder = \"reverse\"\n{legacy}"),
+                );
+            }
+            assert!(
+                ContractManifest::from_toml_str(&toml).is_err(),
+                "legacy field must fail closed: {legacy}"
+            );
+        }
+    }
+
+    #[test]
+    fn saga_execution_semantics_are_all_required_and_closed() {
+        for fragment in [
+            "receiptSchema = \"reserve.schema.json\", ",
+            "effectScope = \"billing.reserve\", ",
+            "compensationEffectScope = \"billing.release\", ",
+            "idempotencyClass = \"deterministic-key\", ",
+            "compensationInput = \"receipt\", ",
+            "retryClass = \"transient\" ",
+            "maxAttempts = 3\n",
+            "timeBudgetMillis = 30000\n",
+            "backoff = \"exponential\"\n",
+            "initialBackoffMillis = 100\n",
+            "maxBackoffMillis = 5000\n",
+            "jitter = \"full\"\n",
+        ] {
+            let missing = VALID_SAGA.replacen(fragment, "", 1);
+            assert!(
+                ContractManifest::from_toml_str(&missing).is_err(),
+                "missing required Saga semantic must fail: {fragment:?}"
+            );
+        }
+        for (from, to) in [
+            ("retryClass = \"transient\"", "retryClass = \"sometimes\""),
+            ("backoff = \"exponential\"", "backoff = \"linear\""),
+            ("jitter = \"full\"", "jitter = \"partial\""),
+        ] {
+            assert!(ContractManifest::from_toml_str(&VALID_SAGA.replace(from, to)).is_err());
+        }
     }
 
     #[test]

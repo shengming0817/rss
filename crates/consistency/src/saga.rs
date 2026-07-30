@@ -1,17 +1,16 @@
 //! Saga 编排接缝（L3）—— do/undo 前向动作 + 逆序补偿。
 //!
-//! `SagaStep` 是 L3 引擎策略 trait（native AFIT：`execute` 前向 + `compensate` 补偿）；step name /
-//! outcome 是纯类型。**compensation order 只能 reverse**（saga.md §Governance）——逆序由执行器
-//! （eventexec saga executor）持栈驱动，consistency 只冻接缝形态。
+//! 本模块冻结 Saga 的 durable identity、journal/replay 纯模型与 step name；业务 authoring 只经
+//! `eventexec::SagaStep<GeneratedStepMarker>`，由 generated receipt 与 definition 专属 typestate
+//! 约束。**compensation order 只能 reverse**（saga.md §Governance）——逆序由 eventexec executor
+//! 持栈驱动，consistency 不再暴露平行 step authoring trait。
 //! ref: oxidecomputer/steno src/saga_action_generic.rs@main（`Action::do_it`/`undo_it`/`name` 对标；
 //! RSS 拒其 `ActionData: Serialize+DeserializeOwned` bound（ADR-004 C6）、用 native AFIT 替 BoxFuture）。
 //! ref: oxidecomputer/steno src/saga_log.rs@main（durable journal event → load status replay；RSS
-//! 偏离其 serde output 持久化，journal record 不承载 step output）。
+//! 偏离其 serde output 持久化，journal record 不承载 generated receipt；durable receipt 另有专属边界）。
 
 use std::collections::{HashMap, HashSet};
-use std::future::Future;
-
-use vocab::{SagaStepBinding, SagaStepOutputBinding, TenantId};
+use vocab::TenantId;
 
 /// saga step 名 newtype（私有字段；可生成 Rust 标识符且唯一 —— saga.md §Governance）。
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -107,6 +106,188 @@ pub struct SagaInstanceRef {
     saga_id: SagaId,
 }
 
+/// Durable, exact identity of one generated saga definition.
+///
+/// The schema digest and action generation are deliberately separate: the former identifies the
+/// JSON schema bundle, while the latter identifies ordered executable semantics and retry policy.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SagaDefinitionIdentity {
+    contract_id: String,
+    version: String,
+    schema_digest: String,
+    action_registry_generation: String,
+}
+
+/// Canonical Saga contract id shared by durable identity and worker discovery.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SagaContractId(String);
+
+/// Invalid Saga contract id.
+#[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SagaContractIdError {
+    /// Contract id was empty.
+    #[error("saga contract id is empty")]
+    Empty,
+    /// Contract id does not use canonical dotted grammar.
+    #[error("saga contract id is not a canonical dotted name")]
+    Format,
+}
+
+impl SagaContractId {
+    /// Parse a generated Saga contract id.
+    pub fn parse(raw: &str) -> Result<Self, SagaContractIdError> {
+        if raw.is_empty() {
+            return Err(SagaContractIdError::Empty);
+        }
+        if !is_canonical_dotted(raw) {
+            return Err(SagaContractIdError::Format);
+        }
+        Ok(Self(raw.to_string()))
+    }
+
+    /// Borrow the canonical contract id string.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Complete durable Saga owner identity: owner + contract id.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SagaWorkerIdentity {
+    owner: String,
+    contract_id: SagaContractId,
+}
+
+/// Invalid Saga worker identity.
+#[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SagaWorkerIdentityError {
+    /// Owner was empty or blank.
+    #[error("saga worker owner is empty")]
+    EmptyOwner,
+}
+
+impl SagaWorkerIdentity {
+    /// Build a validated Saga worker identity.
+    pub fn new(
+        owner: impl Into<String>,
+        contract_id: SagaContractId,
+    ) -> Result<Self, SagaWorkerIdentityError> {
+        let owner = owner.into();
+        if owner.trim().is_empty() {
+            return Err(SagaWorkerIdentityError::EmptyOwner);
+        }
+        Ok(Self { owner, contract_id })
+    }
+
+    /// Saga owner/domain.
+    pub fn owner(&self) -> &str {
+        &self.owner
+    }
+
+    /// Saga contract id.
+    pub fn contract_id(&self) -> &SagaContractId {
+        &self.contract_id
+    }
+}
+
+/// Invalid durable saga definition identity.
+#[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SagaDefinitionIdentityError {
+    #[error("saga contract id is invalid")]
+    ContractId,
+    #[error("saga definition version is invalid")]
+    Version,
+    #[error("saga schema digest is invalid")]
+    SchemaDigest,
+    #[error("saga action registry generation is invalid")]
+    ActionRegistryGeneration,
+}
+
+impl SagaDefinitionIdentity {
+    /// Construct a validated identity read from a generated definition or durable store.
+    pub fn new(
+        contract_id: impl Into<String>,
+        version: impl Into<String>,
+        schema_digest: impl Into<String>,
+        action_registry_generation: impl Into<String>,
+    ) -> Result<Self, SagaDefinitionIdentityError> {
+        let contract_id = contract_id.into();
+        let version = version.into();
+        let schema_digest = schema_digest.into();
+        let action_registry_generation = action_registry_generation.into();
+        if !is_canonical_dotted(&contract_id) {
+            return Err(SagaDefinitionIdentityError::ContractId);
+        }
+        if !is_version(&version) {
+            return Err(SagaDefinitionIdentityError::Version);
+        }
+        if !is_sha256_digest(&schema_digest) {
+            return Err(SagaDefinitionIdentityError::SchemaDigest);
+        }
+        if !is_sha256_digest(&action_registry_generation) {
+            return Err(SagaDefinitionIdentityError::ActionRegistryGeneration);
+        }
+        Ok(Self {
+            contract_id,
+            version,
+            schema_digest,
+            action_registry_generation,
+        })
+    }
+
+    /// Copy an exact generated static identity into its durable owned representation.
+    pub fn from_binding(binding: vocab::SagaContractBinding) -> Self {
+        Self {
+            contract_id: binding.contract_id().to_string(),
+            version: binding.version().to_string(),
+            schema_digest: binding.schema_hash().to_string(),
+            action_registry_generation: binding.action_registry_generation().to_string(),
+        }
+    }
+
+    pub fn contract_id(&self) -> &str {
+        &self.contract_id
+    }
+    pub fn version(&self) -> &str {
+        &self.version
+    }
+    pub fn schema_digest(&self) -> &str {
+        &self.schema_digest
+    }
+    pub fn action_registry_generation(&self) -> &str {
+        &self.action_registry_generation
+    }
+}
+
+fn is_canonical_dotted(raw: &str) -> bool {
+    !raw.is_empty()
+        && raw.split('.').all(|segment| {
+            matches!(segment.bytes().next(), Some(byte) if byte.is_ascii_lowercase())
+                && segment
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        })
+}
+
+fn is_version(raw: &str) -> bool {
+    raw.strip_prefix('v').is_some_and(|digits| {
+        matches!(digits.bytes().next(), Some(byte) if byte.is_ascii_digit() && byte != b'0')
+            && digits.bytes().all(|byte| byte.is_ascii_digit())
+    })
+}
+
+fn is_sha256_digest(raw: &str) -> bool {
+    raw.strip_prefix("sha256:").is_some_and(|hex| {
+        hex.len() == 64
+            && hex
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    })
+}
+
 /// `SagaInstanceRef` parse/validation error.
 #[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -198,16 +379,40 @@ impl SagaInstanceStatus {
 }
 
 /// Durable saga instance row visible to tailers/executors.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SagaInstanceRecord {
     instance: SagaInstanceRef,
     status: SagaInstanceStatus,
+    identity: SagaWorkerIdentity,
+    definition: SagaDefinitionIdentity,
+}
+
+/// Invalid durable Saga instance record.
+#[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SagaInstanceRecordError {
+    /// Worker contract and pinned definition contract differ.
+    #[error("saga worker contract does not match pinned definition")]
+    DefinitionContractMismatch,
 }
 
 impl SagaInstanceRecord {
     /// Build an instance row value.
-    pub fn new(instance: SagaInstanceRef, status: SagaInstanceStatus) -> Self {
-        Self { instance, status }
+    pub fn new(
+        instance: SagaInstanceRef,
+        status: SagaInstanceStatus,
+        identity: SagaWorkerIdentity,
+        definition: SagaDefinitionIdentity,
+    ) -> Result<Self, SagaInstanceRecordError> {
+        if identity.contract_id().as_str() != definition.contract_id() {
+            return Err(SagaInstanceRecordError::DefinitionContractMismatch);
+        }
+        Ok(Self {
+            instance,
+            status,
+            identity,
+            definition,
+        })
     }
 
     /// Instance identity.
@@ -218,6 +423,16 @@ impl SagaInstanceRecord {
     /// Current durable instance status.
     pub fn status(&self) -> SagaInstanceStatus {
         self.status
+    }
+
+    /// Exact owner + contract identity pinned when the instance was registered.
+    pub fn identity(&self) -> &SagaWorkerIdentity {
+        &self.identity
+    }
+
+    /// Exact definition pinned when the instance was registered.
+    pub fn definition(&self) -> &SagaDefinitionIdentity {
+        &self.definition
     }
 }
 
@@ -349,6 +564,10 @@ pub enum SagaInterruption {
     AlreadyStarted,
     /// Durable instance status is degraded and requires manual intervention.
     InstanceDegraded,
+    /// Pinned definition identity is not present in the immutable runtime registry.
+    UnsupportedDefinition,
+    /// Durable recovery requires a receipt that is not yet persisted (#1924).
+    ReceiptUnavailable,
 }
 
 impl SagaInterruption {
@@ -365,6 +584,8 @@ impl SagaInterruption {
             Self::StoreUnavailable => "store_unavailable",
             Self::AlreadyStarted => "already_started",
             Self::InstanceDegraded => "instance_degraded",
+            Self::UnsupportedDefinition => "unsupported_definition",
+            Self::ReceiptUnavailable => "receipt_unavailable",
         }
     }
 }
@@ -508,7 +729,7 @@ impl SagaDefinition {
 /// 一条 saga durable journal append record。
 ///
 /// 写入路径类型与 read/replay 类型分离：append record 的 `Failed` 必须携静态安全摘要，避免 read 路径构造出的
-/// 无摘要 `Failed` 被误传回 append port。record 不承载 step output，避免 durable journal 成为 PII 载体；执行器
+/// 无摘要 `Failed` 被误传回 append port。record 不承载 generated receipt，避免 durable journal 成为 PII 载体；执行器
 /// 需要的末步 output 只保留在 `run` 内存路径。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SagaJournalAppendRecord {
@@ -524,7 +745,7 @@ impl SagaJournalAppendRecord {
         Self::new(seq, step_name, SagaJournalStatus::Executing, None)
     }
 
-    /// 前向完成 record。step output 不进入 durable journal。
+    /// 前向完成 record。generated receipt 不进入 durable journal。
     pub fn completed(seq: u64, step_name: StepName) -> Self {
         Self::new(seq, step_name, SagaJournalStatus::Completed, None)
     }
@@ -1014,79 +1235,16 @@ pub enum CompensationOutcome {
     Failed,
 }
 
-/// Typed saga step execution context.
-///
-/// The runtime owns journal/checkpoint handles; step code receives only tenant-scoped identity and
-/// the validated generated step name.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SagaStepCtx {
-    instance: SagaInstanceRef,
-    step_name: StepName,
-}
-
-impl SagaStepCtx {
-    /// Build a typed step context from the executor-owned saga instance and generated step name.
-    pub fn new(instance: SagaInstanceRef, step_name: StepName) -> Self {
-        Self {
-            instance,
-            step_name,
-        }
-    }
-
-    /// Tenant-scoped saga instance.
-    pub fn instance(&self) -> SagaInstanceRef {
-        self.instance
-    }
-
-    /// Tenant boundary.
-    pub fn tenant(&self) -> TenantId {
-        self.instance.tenant()
-    }
-
-    /// Saga id.
-    pub fn saga_id(&self) -> SagaId {
-        self.instance.saga_id()
-    }
-
-    /// Current generated step name.
-    pub fn step_name(&self) -> &StepName {
-        &self.step_name
-    }
-}
-
-/// Saga step 策略（L3 引擎策略 trait，native AFIT）。
-///
-/// `BINDING` 是 generated step metadata 单源；`execute` 前向动作返回 typed output，由 service runtime
-/// wrapper 编码成既有 executor action bytes，**不**进入 durable journal。`compensate` 是必填逆操作；
-/// 缺 compensation 即编译失败。RPITIT `impl Future + Send` 保持 native 静态分发且可被 runtime 包进
-/// `BoxFuture`。
-pub trait SagaStep: Send + Sync {
-    /// Generated step binding from the saga contract.
-    const BINDING: SagaStepBinding;
-
-    /// Typed step output. Runtime wrapper serializes it for the existing erased action interface.
-    type Output: SagaStepOutputBinding + Send + 'static;
-
-    /// Forward execution for this step.
-    fn execute(
-        &self,
-        ctx: SagaStepCtx,
-    ) -> impl Future<Output = Result<Self::Output, crate::error::EngineError>> + Send;
-
-    /// Compensation for this step. Called in reverse order for completed steps only.
-    fn compensate(
-        &self,
-        ctx: SagaStepCtx,
-    ) -> impl Future<Output = Result<CompensationOutcome, crate::error::EngineError>> + Send;
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        SagaDefinition, SagaDurableStatus, SagaId, SagaInstanceRef, SagaInstanceRefError,
-        SagaJournalAppendRecord, SagaJournalRecord, SagaJournalStatus, SagaLease, SagaLeaseError,
-        SagaModelError, SagaReplayDecision, StepName, StepNameError,
+        SagaContractId, SagaDefinition, SagaDefinitionIdentity, SagaDefinitionIdentityError,
+        SagaDurableStatus, SagaId, SagaInstanceRecord, SagaInstanceRecordError, SagaInstanceRef,
+        SagaInstanceRefError, SagaInstanceStatus, SagaJournalAppendRecord, SagaJournalRecord,
+        SagaJournalStatus, SagaLease, SagaLeaseError, SagaModelError, SagaReplayDecision,
+        SagaWorkerIdentity, StepName, StepNameError,
     };
+    use vocab::TenantId;
 
     #[allow(clippy::unwrap_used)]
     fn step(raw: &str) -> StepName {
@@ -1103,6 +1261,63 @@ mod tests {
         let raw = uuid::Uuid::from_u128(0x1627);
         let id = SagaId::new(raw);
         assert_eq!(id.as_uuid(), raw);
+    }
+
+    #[test]
+    fn saga_definition_identity_requires_canonical_positive_version() {
+        const DIGEST: &str =
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        const GENERATION: &str =
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+        assert!(SagaDefinitionIdentity::new("billing.checkout", "v1", DIGEST, GENERATION).is_ok());
+        assert!(SagaDefinitionIdentity::new("billing.checkout", "v42", DIGEST, GENERATION).is_ok());
+        for version in ["v0", "v00", "v01", "v", "1"] {
+            assert_eq!(
+                SagaDefinitionIdentity::new("billing.checkout", version, DIGEST, GENERATION),
+                Err(SagaDefinitionIdentityError::Version),
+                "version {version:?} must be rejected before persistence"
+            );
+        }
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn saga_instance_record_requires_and_exposes_complete_worker_identity() {
+        const DIGEST: &str =
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        const GENERATION: &str =
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let tenant = TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").unwrap();
+        let instance =
+            SagaInstanceRef::new(tenant, SagaId::new(uuid::Uuid::from_u128(1923))).unwrap();
+        let identity = SagaWorkerIdentity::new(
+            "billing",
+            SagaContractId::parse("billing.checkout").unwrap(),
+        )
+        .unwrap();
+        let definition =
+            SagaDefinitionIdentity::new("billing.checkout", "v1", DIGEST, GENERATION).unwrap();
+        let record = SagaInstanceRecord::new(
+            instance,
+            SagaInstanceStatus::Ready,
+            identity.clone(),
+            definition,
+        )
+        .unwrap();
+        assert_eq!(record.identity(), &identity);
+
+        let wrong_definition =
+            SagaDefinitionIdentity::new("billing.refund", "v1", DIGEST, GENERATION).unwrap();
+        assert_eq!(
+            SagaInstanceRecord::new(
+                instance,
+                SagaInstanceStatus::Ready,
+                identity,
+                wrong_definition,
+            ),
+            Err(SagaInstanceRecordError::DefinitionContractMismatch)
+        );
     }
 
     #[test]

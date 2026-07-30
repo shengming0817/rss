@@ -6,13 +6,16 @@ use bootstrap::Topology;
 use bootstrap::sagaprojectiondeps::{
     PostgresUrl, ResolvedSagaProjection, SagaProjectionConfig, SagaProjectionResolveError, resolve,
 };
-use consistency::{CompensationOutcome, EngineError, SagaInstanceRef, SagaStep, SagaStepCtx};
+use consistency::{CompensationOutcome, EngineError, SagaInstanceRef};
 use diport::CheckpointOwner;
 use eventexec::{
-    SagaExecStatus, SagaExecutor, SagaExecutorConfig, SagaExecutorDeps, SagaExecutorImpl, SagaId,
-    SagaOutcome, SagaRuntimeLock, SagaTailer, TypedSagaActionFactory,
+    SagaCompensationContext, SagaDefinitionRegistry, SagaExecStatus, SagaExecutor,
+    SagaExecutorConfig, SagaExecutorDeps, SagaExecutorImpl, SagaForwardContext, SagaId,
+    SagaOutcome, SagaRuntimeLock, SagaStep, SagaTailer, TypedSagaActionFactory,
 };
-use generated::saga::billing_v1::{BillingCaptureResult, BillingReserveFundsResult};
+use generated::saga::billing_v1::{
+    BillingCaptureReceipt, BillingReserveFundsReceipt, CaptureStep, Definition, ReserveFundsStep,
+};
 use memory::{MemCheckpointStore, MemDeadLetterStore, MemLockStore, MemSagaInstanceStore};
 
 const TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
@@ -32,18 +35,21 @@ struct DemoHarness {
 #[derive(Debug)]
 struct DemoReserveFundsStep;
 
-impl SagaStep for DemoReserveFundsStep {
-    const BINDING: vocab::SagaStepBinding = generated::saga::billing_v1::STEP_0;
-
-    type Output = BillingReserveFundsResult;
-
-    async fn execute(&self, ctx: SagaStepCtx) -> Result<Self::Output, EngineError> {
-        Ok(BillingReserveFundsResult {
+impl SagaStep<ReserveFundsStep> for DemoReserveFundsStep {
+    async fn execute(
+        &self,
+        ctx: SagaForwardContext,
+    ) -> Result<BillingReserveFundsReceipt, EngineError> {
+        Ok(BillingReserveFundsReceipt {
             reservation_id: format!("{}:reserve_funds", ctx.saga_id().as_uuid()),
         })
     }
 
-    async fn compensate(&self, _ctx: SagaStepCtx) -> Result<CompensationOutcome, EngineError> {
+    async fn compensate(
+        &self,
+        _ctx: SagaCompensationContext,
+        _receipt: BillingReserveFundsReceipt,
+    ) -> Result<CompensationOutcome, EngineError> {
         Ok(CompensationOutcome::Compensated)
     }
 }
@@ -51,18 +57,18 @@ impl SagaStep for DemoReserveFundsStep {
 #[derive(Debug)]
 struct DemoCaptureStep;
 
-impl SagaStep for DemoCaptureStep {
-    const BINDING: vocab::SagaStepBinding = generated::saga::billing_v1::STEP_1;
-
-    type Output = BillingCaptureResult;
-
-    async fn execute(&self, ctx: SagaStepCtx) -> Result<Self::Output, EngineError> {
-        Ok(BillingCaptureResult {
+impl SagaStep<CaptureStep> for DemoCaptureStep {
+    async fn execute(&self, ctx: SagaForwardContext) -> Result<BillingCaptureReceipt, EngineError> {
+        Ok(BillingCaptureReceipt {
             capture_id: format!("{}:capture", ctx.saga_id().as_uuid()),
         })
     }
 
-    async fn compensate(&self, _ctx: SagaStepCtx) -> Result<CompensationOutcome, EngineError> {
+    async fn compensate(
+        &self,
+        _ctx: SagaCompensationContext,
+        _receipt: BillingCaptureReceipt,
+    ) -> Result<CompensationOutcome, EngineError> {
         Ok(CompensationOutcome::Compensated)
     }
 }
@@ -76,26 +82,29 @@ fn demo_harness() -> Result<DemoHarness> {
             let checkpoint = Arc::new(MemCheckpointStore::new());
             let dead_letter = Arc::new(MemDeadLetterStore::new());
             let runtime_lock = SagaRuntimeLock::new(MemLockStore::new());
-            let mut factory = TypedSagaActionFactory::builder(generated::saga::billing_v1::SPEC);
-            factory.register_step::<DemoReserveFundsStep, _>(|| DemoReserveFundsStep)?;
-            factory.register_step::<DemoCaptureStep, _>(|| DemoCaptureStep)?;
-            let factory = factory.finish()?;
+            let factory = TypedSagaActionFactory::<Definition>::builder()
+                .register::<DemoReserveFundsStep, _>(|| DemoReserveFundsStep)
+                .register::<DemoCaptureStep, _>(|| DemoCaptureStep)
+                .finish();
             let config = SagaExecutorConfig::from_typed_factory(
                 CheckpointOwner::new("billing"),
                 "journey-runner",
                 Duration::from_secs(30),
                 &factory,
             )?;
+            let registry = SagaDefinitionRegistry::builder()
+                .register(factory)?
+                .finish();
             let deps = SagaExecutorDeps::new(
                 journal,
                 instances,
                 checkpoint,
                 Arc::clone(&dead_letter),
-                factory,
+                registry,
                 runtime_lock,
             );
             Ok(DemoHarness {
-                exec: SagaExecutorImpl::new(deps, config),
+                exec: SagaExecutorImpl::new(deps, config)?,
                 dead_letter,
             })
         }
@@ -116,7 +125,13 @@ async fn demo_resolver_yields_memory_saga_executor_roundtrip() -> Result<()> {
     let harness = demo_harness()?;
     let instance = instance()?;
 
-    let outcome = harness.exec.run(instance).await;
+    let outcome = harness
+        .exec
+        .run(
+            instance,
+            consistency::SagaDefinitionIdentity::from_binding(generated::saga::billing_v1::SPEC),
+        )
+        .await;
 
     assert!(
         matches!(outcome, SagaOutcome::Succeeded { .. }),

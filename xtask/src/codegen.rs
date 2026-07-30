@@ -32,7 +32,8 @@ use crate::contract::manifest::{
     CommandJournalPolicy, ConsistencyLevel, ContractKind, ContractOwner, EffectKind,
     ExternalEffectPolicy, HttpAuthMode, HttpHeaderMode, HttpIdempotency, HttpResourceSharingMode,
     Lifecycle, LocalTxBoundary, LocalTxCommitUnknown, LocalTxModel, LocalTxRetry, OutboxRole,
-    SubscriptionEffect, SubscriptionExecution, WorkflowMode,
+    SagaBackoff, SagaJitter, SagaRetryClass, SubscriptionEffect, SubscriptionExecution,
+    WorkflowMode,
 };
 use crate::contract::protection::{self, AadDim, AtRest, ProtectionMode, StructProtectionPolicies};
 use crate::contract::redaction::{self, FieldPolicy, PiiKind, Sensitivity, StructPolicies};
@@ -523,6 +524,7 @@ fn render_saga_glue(c: &DiscoveredContract, sup: &str) -> Result<String> {
     let contract_id = &c.manifest.id;
     let version = &c.manifest.version;
     let schema_hash = schema_hash(c)?;
+    let action_registry_generation = saga_action_registry_generation(saga);
     for (field, value) in [
         ("domain", domain.as_str()),
         ("id", contract_id.as_str()),
@@ -545,14 +547,28 @@ fn render_saga_glue(c: &DiscoveredContract, sup: &str) -> Result<String> {
             c.manifest.version,
         );
     }
-    let retry_millis = saga.retry_millis;
-    let timeout_millis = saga.timeout_millis;
+    let retry = saga.retry;
+    let backoff = match retry.backoff {
+        SagaBackoff::Fixed => "Fixed",
+        SagaBackoff::Exponential => "Exponential",
+    };
+    let jitter = match retry.jitter {
+        SagaJitter::None => "None",
+        SagaJitter::Full => "Full",
+    };
     let mut step_consts = Vec::new();
     let mut step_entries = Vec::new();
+    let mut cursor_impls = Vec::new();
+    let mut cursor_types = Vec::new();
     for (idx, step) in saga.steps.iter().enumerate() {
         for (field, value) in [
             ("saga step name", step.name.as_str()),
-            ("saga step outputSchema", step.output_schema.as_str()),
+            ("saga step receiptSchema", step.receipt_schema.as_str()),
+            ("saga step effectScope", step.effect_scope.as_str()),
+            (
+                "saga step compensationEffectScope",
+                step.compensation_effect_scope.as_str(),
+            ),
         ] {
             if !is_safe_codegen_string(value) {
                 bail!(
@@ -563,30 +579,61 @@ fn render_saga_glue(c: &DiscoveredContract, sup: &str) -> Result<String> {
                 );
             }
         }
-        validate_schema_filename(&step.output_schema).with_context(|| {
+        validate_schema_filename(&step.receipt_schema).with_context(|| {
             format!(
-                "契约 {}/{}/{} 的 saga step outputSchema 不安全: {}",
+                "契约 {}/{}/{} 的 saga step receiptSchema 不安全: {}",
                 c.manifest.kind.as_dir(),
                 c.manifest.domain,
                 c.manifest.version,
-                step.output_schema
+                step.receipt_schema
             )
         })?;
         let const_name = format!("STEP_{idx}");
-        let output_ty = schema_root_type_name(c, &step.output_schema, "saga step outputSchema")?;
+        let receipt_ty = schema_root_type_name(c, &step.receipt_schema, "saga step receiptSchema")?;
+        let cursor_ty = format!("{}Step", producer_domain_variant(&step.name)?);
+        let retry_class = match step.retry_class {
+            SagaRetryClass::Never => "Never",
+            SagaRetryClass::Transient => "Transient",
+        };
         step_consts.push(format!(
             r#"
 /// Saga step `{}` binding generated from `[saga].steps[{idx}]`.
 pub const {const_name}: ::vocab::SagaStepBinding =
-    ::vocab::SagaStepBinding::from_static(CONTRACT, "{}", "{}");
+    ::vocab::SagaStepBinding::from_static(CONTRACT, "{}", "{}", "{}", "{}", ::vocab::SagaRetryClass::{retry_class});
+"#,
+            step.name,
+            step.name,
+            step.receipt_schema,
+            step.effect_scope,
+            step.compensation_effect_scope,
+        ));
+        cursor_types.push((cursor_ty, receipt_ty, const_name.clone()));
+        step_entries.push(const_name);
+    }
+    for (idx, (cursor_ty, receipt_ty, const_name)) in cursor_types.iter().enumerate() {
+        let next_ty = cursor_types
+            .get(idx + 1)
+            .map_or("End", |(next, _, _)| next.as_str());
+        cursor_impls.push(format!(
+            r#"
+/// Generated typestate cursor for this ordered Saga step.
+#[derive(Debug, Clone, Copy)]
+pub struct {cursor_ty};
 
-impl ::vocab::SagaStepOutputBinding for {output_ty} {{
+impl {sup}sealed::StepMarker for {cursor_ty} {{}}
+impl {sup}StepMarker for {cursor_ty} {{
+    type Receipt = {receipt_ty};
     const BINDING: ::vocab::SagaStepBinding = {const_name};
 }}
-"#,
-            step.name, step.name, step.output_schema
+impl {sup}sealed::Step<Definition> for {cursor_ty} {{}}
+impl {sup}Step<Definition> for {cursor_ty} {{
+    type Next = {next_ty};
+}}
+
+impl {sup}sealed::Receipt<{cursor_ty}> for {receipt_ty} {{}}
+impl {sup}Receipt<{cursor_ty}> for {receipt_ty} {{}}
+"#
         ));
-        step_entries.push(const_name);
     }
     let steps_body = if step_entries.is_empty() {
         String::new()
@@ -594,6 +641,11 @@ impl ::vocab::SagaStepOutputBinding for {output_ty} {{
         format!("\n{},\n", step_entries.join(",\n"))
     };
     let step_consts = step_consts.join("");
+    let cursor_impls = cursor_impls.join("");
+    let first_cursor = cursor_types
+        .first()
+        .map(|(cursor, _, _)| cursor.as_str())
+        .context("saga 至少须有一个 step（codegen fail-closed）")?;
     Ok(format!(
         r#"
 /// Saga 契约 ID（`contract.toml` `id` 字段，单一事实源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
@@ -603,17 +655,95 @@ pub const CONTRACT_ID: &str = "{contract_id}";
 pub const CONTRACT: ::vocab::ContractBinding =
     ::vocab::ContractBinding::from_static("{domain}", "{contract_id}", "{version}", "{schema_hash}");
 
-/// Saga runtime policy spec（来自 `[saga].retryMillis` / `[saga].timeoutMillis`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+/// Ordered action semantics generation, domain-separated and length-prefixed before SHA-256.
+pub const ACTION_REGISTRY_GENERATION: &str = "{action_registry_generation}";
+
+/// Saga runtime retry policy. 由 `cargo xtask codegen` 从 manifest 派生；勿手改。
 pub const POLICY: ::vocab::SagaRuntimePolicySpec =
-    ::vocab::SagaRuntimePolicySpec::from_millis({retry_millis}, {timeout_millis});
+    ::vocab::SagaRuntimePolicySpec::from_static(
+        {max_attempts},
+        {time_budget_millis},
+        ::vocab::SagaBackoff::{backoff},
+        {initial_backoff_millis},
+        {max_backoff_millis},
+        ::vocab::SagaJitter::{jitter},
+    );
 {step_consts}
 /// Ordered saga step bindings generated from `[saga].steps`.
 pub const STEPS: &[::vocab::SagaStepBinding] = &[{steps_body}];
 
 /// Saga contract spec（契约绑定 + runtime policy spec + ordered steps）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
-pub const SPEC: {sup}SagaSpec = {sup}SagaSpec::from_parts(CONTRACT, POLICY, STEPS);
-"#
+pub const SPEC: {sup}SagaSpec =
+    {sup}SagaSpec::from_parts(CONTRACT, POLICY, STEPS, ACTION_REGISTRY_GENERATION);
+
+/// Sealed generated definition marker for this exact Saga identity.
+#[derive(Debug, Clone, Copy)]
+pub struct Definition;
+
+impl {sup}sealed::Definition for Definition {{}}
+impl {sup}Definition for Definition {{
+    type Start = {first_cursor};
+    const SPEC: {sup}SagaSpec = self::SPEC;
+}}
+{cursor_impls}
+/// Terminal typestate cursor; only this cursor can finish factory construction.
+#[derive(Debug, Clone, Copy)]
+pub struct End;
+
+impl {sup}sealed::End<Definition> for End {{}}
+impl {sup}End<Definition> for End {{}}
+"#,
+        max_attempts = retry.max_attempts,
+        time_budget_millis = retry.time_budget_millis,
+        initial_backoff_millis = retry.initial_backoff_millis,
+        max_backoff_millis = retry.max_backoff_millis,
     ))
+}
+
+fn saga_action_registry_generation(saga: &crate::contract::manifest::SagaBlock) -> String {
+    fn field(hasher: &mut Sha256, value: &str) {
+        hasher.update((value.len() as u64).to_be_bytes());
+        hasher.update(value.as_bytes());
+    }
+
+    let mut hasher = Sha256::new();
+    field(&mut hasher, "rss:saga-action-registry:v1");
+    field(&mut hasher, "reverse");
+    field(&mut hasher, &saga.retry.max_attempts.to_string());
+    field(&mut hasher, &saga.retry.time_budget_millis.to_string());
+    field(
+        &mut hasher,
+        match saga.retry.backoff {
+            SagaBackoff::Fixed => "fixed",
+            SagaBackoff::Exponential => "exponential",
+        },
+    );
+    field(&mut hasher, &saga.retry.initial_backoff_millis.to_string());
+    field(&mut hasher, &saga.retry.max_backoff_millis.to_string());
+    field(
+        &mut hasher,
+        match saga.retry.jitter {
+            SagaJitter::None => "none",
+            SagaJitter::Full => "full",
+        },
+    );
+    field(&mut hasher, &saga.steps.len().to_string());
+    for step in &saga.steps {
+        field(&mut hasher, &step.name);
+        field(&mut hasher, &step.receipt_schema);
+        field(&mut hasher, &step.effect_scope);
+        field(&mut hasher, &step.compensation_effect_scope);
+        field(&mut hasher, "deterministic-key");
+        field(&mut hasher, "receipt");
+        field(
+            &mut hasher,
+            match step.retry_class {
+                SagaRetryClass::Never => "never",
+                SagaRetryClass::Transient => "transient",
+            },
+        );
+    }
+    format!("sha256:{}", lower_hex(&hasher.finalize()))
 }
 
 fn render_http_glue(
@@ -2288,6 +2418,42 @@ pub enum HttpHeaderMode {
 const SAGA_SPEC_DEF: &str = r#"
 /// Saga contract metadata generated from `contract.toml`.
 pub type SagaSpec = ::vocab::SagaContractBinding;
+
+pub(crate) mod sealed {
+    pub trait Definition {}
+    pub trait StepMarker {}
+    pub trait Step<D: super::Definition> {}
+    pub trait Receipt<S: super::StepMarker> {}
+    pub trait End<D: super::Definition> {}
+}
+
+/// Sealed marker for one exact generated Saga definition.
+pub trait Definition: sealed::Definition + Sized {
+    /// First cursor in the generated ordered step chain.
+    type Start: Step<Self>;
+    /// Complete pinned identity and execution semantics.
+    const SPEC: SagaSpec;
+}
+
+/// Definition-independent sealed marker used by the authoring `SagaStep<Marker>` trait.
+pub trait StepMarker: sealed::StepMarker + Sized {
+    /// The only receipt DTO accepted for this step.
+    type Receipt: Receipt<Self>;
+    /// Complete generated step binding.
+    const BINDING: ::vocab::SagaStepBinding;
+}
+
+/// One cursor in a definition-specific ordered typestate chain.
+pub trait Step<D: Definition>: StepMarker + sealed::Step<D> {
+    /// Next cursor; either another `Step<D>` or the generated terminal `End<D>`.
+    type Next;
+}
+
+/// Sealed association between a generated receipt DTO and its owning step marker.
+pub trait Receipt<S: StepMarker>: sealed::Receipt<S> {}
+
+/// Sealed terminal cursor. Factory `finish()` is only available in this state.
+pub trait End<D: Definition>: sealed::End<D> {}
 "#;
 
 /// command kind mod.rs 特化：定义 policy-exclusive `CommandEmit` / `CommandJournal` 与
@@ -3322,7 +3488,7 @@ mod tests {
         Ok(())
     }
 
-    /// 在 `root/contracts/saga/billing/v1` 落一个最小 saga 契约（payload + step output schemas）。
+    /// 在 `root/contracts/saga/billing/v1` 落一个最小 Saga 契约（payload + generated receipt schemas）。
     fn seed_saga(root: &Path) -> Result<()> {
         let dir = root.join("contracts/saga/billing/v1");
         std::fs::create_dir_all(&dir)?;
@@ -3340,17 +3506,22 @@ mod tests {
                 "payload = \"payload.schema.json\"\n",
                 "[saga]\n",
                 "compensationOrder = \"reverse\"\n",
-                "retryMillis = 5000\n",
-                "timeoutMillis = 30000\n",
                 "steps = [\n",
-                "  { name = \"reserve_funds\", outputSchema = \"reserve.schema.json\" },\n",
-                "  { name = \"capture\", outputSchema = \"capture.schema.json\" },\n",
+                "  { name = \"reserve_funds\", receiptSchema = \"reserve.schema.json\", effectScope = \"billing.reserve\", compensationEffectScope = \"billing.release\", idempotencyClass = \"deterministic-key\", compensationInput = \"receipt\", retryClass = \"transient\" },\n",
+                "  { name = \"capture\", receiptSchema = \"capture.schema.json\", effectScope = \"billing.capture\", compensationEffectScope = \"billing.refund\", idempotencyClass = \"deterministic-key\", compensationInput = \"receipt\", retryClass = \"never\" },\n",
                 "]\n",
+                "[saga.retry]\n",
+                "maxAttempts = 3\n",
+                "timeBudgetMillis = 30000\n",
+                "backoff = \"exponential\"\n",
+                "initialBackoffMillis = 100\n",
+                "maxBackoffMillis = 5000\n",
+                "jitter = \"full\"\n",
             ),
         )?;
         let payload = "{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"title\":\"BillingCheckoutPayload\",\"type\":\"object\",\"required\":[\"checkoutId\"],\"properties\":{\"checkoutId\":{\"type\":\"string\"}},\"additionalProperties\":false}";
-        let reserve = "{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"title\":\"ReserveFundsOutput\",\"type\":\"object\",\"required\":[\"reserved\"],\"properties\":{\"reserved\":{\"type\":\"boolean\"}},\"additionalProperties\":false}";
-        let capture = "{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"title\":\"CaptureOutput\",\"type\":\"object\",\"required\":[\"captured\"],\"properties\":{\"captured\":{\"type\":\"boolean\"}},\"additionalProperties\":false}";
+        let reserve = "{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"title\":\"ReserveFundsReceipt\",\"type\":\"object\",\"required\":[\"reserved\"],\"properties\":{\"reserved\":{\"type\":\"boolean\"}},\"additionalProperties\":false}";
+        let capture = "{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"title\":\"CaptureReceipt\",\"type\":\"object\",\"required\":[\"captured\"],\"properties\":{\"captured\":{\"type\":\"boolean\"}},\"additionalProperties\":false}";
         std::fs::write(dir.join("payload.schema.json"), payload)?;
         std::fs::write(dir.join("reserve.schema.json"), reserve)?;
         std::fs::write(dir.join("capture.schema.json"), capture)?;
@@ -4918,27 +5089,31 @@ mod tests {
             "缺 CONTRACT binding:\n{rendered}"
         );
         assert!(
-            rendered.contains("::vocab::SagaRuntimePolicySpec::from_millis(5000, 30000)"),
+            rendered.contains("::vocab::SagaRuntimePolicySpec::from_static(")
+                && rendered.contains("::vocab::SagaBackoff::Exponential")
+                && rendered.contains("::vocab::SagaJitter::Full"),
             "缺 saga runtime policy spec:\n{rendered}"
         );
         assert!(
-            rendered.contains("pub struct ReserveFundsOutput")
-                && rendered.contains("pub struct CaptureOutput"),
-            "缺 saga step output DTO:\n{rendered}"
+            rendered.contains("pub struct ReserveFundsReceipt")
+                && rendered.contains("pub struct CaptureReceipt"),
+            "缺 saga step receipt DTO:\n{rendered}"
         );
         assert!(
-            rendered.contains("impl ::vocab::SagaStepOutputBinding for ReserveFundsOutput")
-                && rendered.contains("impl ::vocab::SagaStepOutputBinding for CaptureOutput"),
-            "缺 saga step output DTO binding marker:\n{rendered}"
+            rendered.contains("impl super::Receipt<ReserveFundsStep> for ReserveFundsReceipt")
+                && rendered.contains("impl super::Receipt<CaptureStep> for CaptureReceipt")
+                && rendered.contains("impl super::Step<Definition> for ReserveFundsStep")
+                && rendered.contains("type Next = CaptureStep;")
+                && rendered.contains("type Next = End;"),
+            "缺 sealed receipt/typestate marker:\n{rendered}"
         );
         assert!(
-            rendered.contains(
-                r#"pub const STEP_0: ::vocab::SagaStepBinding =
-    ::vocab::SagaStepBinding::from_static(CONTRACT, "reserve_funds", "reserve.schema.json");"#
-            ) && rendered.contains(
-                r#"pub const STEP_1: ::vocab::SagaStepBinding =
-    ::vocab::SagaStepBinding::from_static(CONTRACT, "capture", "capture.schema.json");"#
-            ),
+            rendered.contains(r#""reserve_funds","#)
+                && rendered.contains(r#""reserve.schema.json","#)
+                && rendered.contains(r#""billing.reserve","#)
+                && rendered.contains(r#""billing.release","#)
+                && rendered.contains("::vocab::SagaRetryClass::Transient")
+                && rendered.contains("::vocab::SagaRetryClass::Never"),
             "缺 saga step binding constants:\n{rendered}"
         );
         assert!(
@@ -4947,7 +5122,7 @@ mod tests {
         );
         assert!(
             rendered.contains(
-                "pub const SPEC: super::SagaSpec = super::SagaSpec::from_parts(CONTRACT, POLICY, STEPS);"
+                "super::SagaSpec::from_parts(CONTRACT, POLICY, STEPS, ACTION_REGISTRY_GENERATION);"
             ),
             "缺 SagaSpec 常量:\n{rendered}"
         );
@@ -4956,9 +5131,101 @@ mod tests {
             "saga/mod.rs 缺 SagaSpec type alias:\n{mod_rs}"
         );
         assert!(
+            rendered.contains("pub const ACTION_REGISTRY_GENERATION: &str =\n    \"sha256:")
+                && rendered.contains("pub struct Definition;")
+                && rendered.contains("impl super::End<Definition> for End"),
+            "缺 action generation / definition seal:\n{rendered}"
+        );
+        assert!(
+            mod_rs.contains("pub trait StepMarker: sealed::StepMarker")
+                && mod_rs.contains("pub trait Definition: sealed::Definition")
+                && mod_rs.contains("pub trait End<D: Definition>: sealed::End<D>"),
+            "saga/mod.rs 缺 sealed marker API:\n{mod_rs}"
+        );
+        assert!(
             mod_rs.contains("pub const SPECS: &[SagaSpec]") && mod_rs.contains("billing_v1::SPEC"),
             "saga/mod.rs 缺完整 definition catalog:\n{mod_rs}"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn saga_action_generation_covers_every_ordered_execution_semantic() -> anyhow::Result<()> {
+        let root = unique_tmp("codegen_saga_generation");
+        seed_saga(&root)?;
+        let contracts = discover(&root.join("contracts"))?;
+        let saga = contracts
+            .first()
+            .and_then(|contract| contract.manifest.saga.as_ref())
+            .ok_or_else(|| anyhow::anyhow!("seed saga was not discovered"))?;
+        let baseline = saga_action_registry_generation(saga);
+        assert_eq!(
+            baseline,
+            "sha256:87da7dd4d4738e9ae0bf54d36d999949f7da89200278f425261a857afeaed62e"
+        );
+
+        let mut variants = Vec::new();
+        let mut changed = saga.clone();
+        changed.retry.max_attempts += 1;
+        variants.push(changed);
+        let mut changed = saga.clone();
+        changed.retry.time_budget_millis += 1;
+        variants.push(changed);
+        let mut changed = saga.clone();
+        changed.retry.backoff = SagaBackoff::Fixed;
+        variants.push(changed);
+        let mut changed = saga.clone();
+        changed.retry.initial_backoff_millis += 1;
+        variants.push(changed);
+        let mut changed = saga.clone();
+        changed.retry.max_backoff_millis += 1;
+        variants.push(changed);
+        let mut changed = saga.clone();
+        changed.retry.jitter = SagaJitter::None;
+        variants.push(changed);
+        let mut changed = saga.clone();
+        changed.steps.swap(0, 1);
+        variants.push(changed);
+        for mutate in [
+            |s: &mut crate::contract::manifest::SagaStep| s.name.push('x'),
+            |s: &mut crate::contract::manifest::SagaStep| s.receipt_schema.push('x'),
+            |s: &mut crate::contract::manifest::SagaStep| s.effect_scope.push('x'),
+            |s: &mut crate::contract::manifest::SagaStep| s.compensation_effect_scope.push('x'),
+        ] {
+            let mut changed = saga.clone();
+            mutate(&mut changed.steps[0]);
+            variants.push(changed);
+        }
+        let mut changed = saga.clone();
+        changed.steps[0].retry_class = SagaRetryClass::Never;
+        variants.push(changed);
+
+        for changed in variants {
+            assert_ne!(baseline, saga_action_registry_generation(&changed));
+        }
+
+        let manifest_path = root.join("contracts/saga/billing/v1/contract.toml");
+        let source = std::fs::read_to_string(&manifest_path)?;
+        let reordered = source.replace(
+            "maxAttempts = 3\ntimeBudgetMillis = 30000\nbackoff = \"exponential\"",
+            "backoff = \"exponential\"\ntimeBudgetMillis = 30000\nmaxAttempts = 3",
+        );
+        assert_ne!(
+            source, reordered,
+            "anti-vacuity: fixture retry keys must be reordered"
+        );
+        let parsed = crate::contract::manifest::ContractManifest::from_toml_str(&reordered)?;
+        assert_eq!(
+            baseline,
+            saga_action_registry_generation(
+                parsed
+                    .saga
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("reordered manifest lost [saga]"))?,
+            ),
+            "TOML key order is authoring syntax, not execution semantics"
+        );
+        let _ = std::fs::remove_dir_all(&root);
         Ok(())
     }
 

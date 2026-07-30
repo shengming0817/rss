@@ -24437,6 +24437,57 @@ fn migrations_through(max_version: i64) -> sqlx::migrate::Migrator {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn migration_0080_rejects_unpinned_legacy_saga_instances() -> TestResult {
+    let (_pg, owner) = connect_pg().await?;
+    migrations_through(79).run(&owner.pool).await?;
+    let tenant = uuid::Uuid::new_v4();
+    let saga_id = uuid::Uuid::new_v4();
+    let mut tx = owner.pool.begin().await?;
+    sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+        .bind(tenant.to_string())
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query(
+        "INSERT INTO saga_instances (tenant_id, saga_id, owner, contract_id) \
+         VALUES ($1::uuid, $2::uuid, 'billing', 'billing.checkout')",
+    )
+    .bind(tenant.to_string())
+    .bind(saga_id.to_string())
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+
+    let error = match sqlx::migrate!("./migrations").run(&owner.pool).await {
+        Ok(()) => {
+            return Err(std::io::Error::other(
+                "legacy rows without exact identity passed migration 0080",
+            )
+            .into());
+        }
+        Err(error) => error,
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("cannot pin exact saga definition identity"),
+        "unexpected migration failure: {error}"
+    );
+    let identity_columns: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM information_schema.columns \
+         WHERE table_schema = 'public' AND table_name = 'saga_instances' \
+           AND column_name IN ('definition_version', 'definition_schema_digest', \
+                               'action_registry_generation')",
+    )
+    .fetch_one(&owner.pool)
+    .await?;
+    assert_eq!(
+        identity_columns, 0,
+        "failed migration must roll back every new column"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn migration_0079_upgrades_live_sweeper_and_sweeps_preexisting_family() -> TestResult {
     let (pg, owner) = connect_pg().await?;
     migrations_through(78).run(&owner.pool).await?;

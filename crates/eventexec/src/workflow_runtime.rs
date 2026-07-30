@@ -46,6 +46,8 @@ trait ProjectionServingPort: Send + Sync {
 /// exact selected implementation.
 pub trait SagaRuntimeFactory: sealed::SagaRuntimeFactory + Send + Sync {
     fn identity(&self) -> &SagaWorkerIdentity;
+    /// Exact generated definition owned by this runtime factory.
+    fn definition(&self) -> &consistency::SagaDefinitionIdentity;
     fn spawn(
         &self,
         token: CancellationToken,
@@ -730,6 +732,8 @@ fn validate_saga_bundle(
     if bundle.definition != definition
         || identity.owner() != definition.domain()
         || identity.contract_id().as_str() != definition.contract_id()
+        || bundle.runtime.definition()
+            != &consistency::SagaDefinitionIdentity::from_binding(definition)
     {
         return Err(WorkflowRuntimeError::CapabilityIdentityMismatch {
             workflow: id.to_owned(),
@@ -820,11 +824,15 @@ mod tests {
 
     struct SagaFactory {
         identity: SagaWorkerIdentity,
+        definition: consistency::SagaDefinitionIdentity,
     }
     impl sealed::SagaRuntimeFactory for SagaFactory {}
     impl SagaRuntimeFactory for SagaFactory {
         fn identity(&self) -> &SagaWorkerIdentity {
             &self.identity
+        }
+        fn definition(&self) -> &consistency::SagaDefinitionIdentity {
+            &self.definition
         }
         fn spawn(
             &self,
@@ -874,7 +882,10 @@ mod tests {
         catalog
             .insert_saga(SagaCapabilityBundle::active(
                 definition,
-                Arc::new(SagaFactory { identity }),
+                Arc::new(SagaFactory {
+                    identity,
+                    definition: consistency::SagaDefinitionIdentity::from_binding(definition),
+                }),
             ))
             .expect("unique test saga");
         catalog
@@ -1143,6 +1154,7 @@ mod tests {
                 saga_definition,
                 Arc::new(SagaFactory {
                     identity: wrong_identity,
+                    definition: consistency::SagaDefinitionIdentity::from_binding(saga_definition),
                 }),
             )),
             Err(WorkflowRuntimeError::DuplicateCapabilityWorkflow { .. })
@@ -1229,6 +1241,7 @@ mod tests {
                 generated_saga,
                 Arc::new(SagaFactory {
                     identity: wrong_identity,
+                    definition: consistency::SagaDefinitionIdentity::from_binding(generated_saga),
                 }),
             ))
             .expect("unique wrong saga capability");

@@ -1206,9 +1206,9 @@ fn run_saga_compensation_interrupted<'a>(
                 redis.deps.infra().lock_store_handle(),
             )
             .await?;
-        if probe.reserve_compensation_count() != 1 || probe.charge_compensation_count() != 1 {
+        if probe.reserve_compensation_count() != 0 || probe.charge_compensation_count() != 0 {
             bail!(
-                "saga compensation resume should undo charge and reserve once, got reserve={} charge={}",
+                "saga compensation resume without durable receipts must not fabricate compensation input, got reserve={} charge={}",
                 probe.reserve_compensation_count(),
                 probe.charge_compensation_count()
             );

@@ -28,7 +28,7 @@
 |---|---|---|
 | Settings v3 Projection | [`contracts/http/settings/v3/contract.toml`](../../../contracts/http/settings/v3/contract.toml) 仍为 `draft` | 缺口仍成立；#1913–#1921 逐步闭合，#1912 不改 lifecycle |
 | Settings v4 authoritative | [`contracts/http/settings/v4/contract.toml`](../../../contracts/http/settings/v4/contract.toml) 为 active LocalOnly | 作为不变 oracle，由 #1921 持有 regression |
-| Billing Saga | [`contracts/saga/billing/v1/contract.toml`](../../../contracts/saga/billing/v1/contract.toml) 仍为 draft | generated/test fixture 可保留；无 production activation，产品 billing 属 External |
+| Billing Saga | [`contracts/saga/billing/v1/contract.toml`](../../../contracts/saga/billing/v1/contract.toml) 仍为 draft | #1923 只更新完整 receipt/retry/identity fixture；production assembly/runtime view/DB row/worker/probe/route 继续 omitted，产品 billing 属 External |
 | Projection definition catalog | [`generated/src/event/mod.rs`](../../../generated/src/event/mod.rs) 保留由 codegen 派生的 definition/input ledger | #1914 已以 sealed workflow plan 将 definition 与 deployment activation 分离；production 下游不直接消费 raw catalog |
 | Assembly 基础 | [`runtime-assembly-plan.md`](../../rules/runtime-assembly-plan.md) 与现有 assembly schema/codegen 已建立 typed plan/lock/catalog | 外部 overlay 的旧 runtime-root 坐标作废；WorkflowActivation 必须扩展现有单源，不另建 runtime truth |
 | Blanket unsupported | #1914 删除 production `mark_all_generated_unsupported()` 与 `UnsupportedProjection` 分支 | 缺少 selected target 直接 fail-closed，不再以 blanket marker 伪装闭合 |
@@ -37,8 +37,9 @@
 | High-water | [`projection_control.rs`](../../../adapters/postgres/src/projection_control.rs) 当前仍通过分页读取求尾部 | 缺口仍成立；#1916 持有固定查询次数元数据 |
 | Projection operator | [`projection replay/shadow/swap runbook`](../../runbooks/202607080828-1638-projection-replay-shadow-swap.md) 已存在 status/replay/swap | #1922 复用既有 surface，只补 pause/resume、SLO、容量与缺失语义 |
 | Projection worker | [`crates/eventexec/src/projection.rs`](../../../crates/eventexec/src/projection.rs) 有 primitive，但无 production assembly lifecycle owner | 缺口仍成立；#1920 持有唯一 T3 lifecycle/join 证明 |
-| Saga worker | [`assemblies/runtime/src/saga_runtime.rs`](../../../assemblies/runtime/src/saga_runtime.rs) 的 billing 接线只在 test module | 不得误称 billing active；#1923–#1926 闭合 platform safety |
-| Saga receipt/version | [`docs/rules/saga.md`](../../rules/saga.md) 仍只描述当前 policy/typed wrapper/worker primitive | 外部 receipt、unknown outcome、definition pinning 要求仍成立，由 #1923–#1925 分流到机器载体 |
+| Saga worker | production assembly/runtime view 不包含 billing Saga | 不得误称 billing active；#1923 守 fixture 与零 production adoption，#1926 闭合 production capability startup |
+| Saga definition/version | [`docs/rules/saga.md`](../../rules/saga.md) 定义完整 pinned identity、sealed generated typestate、闭合 retry 与 exact registry/resume | #1923 将 identity 固定到 instance store；unknown identity fail-closed，无 latest/fallback/legacy 路径 |
+| Saga durable receipt/recovery | #1923 仅在同次 run 内持有 typed receipt；崩溃后 receipt 缺失明确 fail-closed | protected durable receipt store 与 receipt+journal 原子提交仍归 #1924；unknown outcome、probe/repair 与 durable resume 仍归 #1925 |
 | L3 fault evidence | 现有 fault journey 没有覆盖 spec 的 Projection/Saga 独立 hazard 集 | #1927/#1928 各持有唯一 T3 fault owner，不做笛卡尔积 |
 | CI/验证范围 | [`project-scope.md`](../../rules/project-scope.md) 已新增 T1/T2/T3 最低充分验证矩阵；CI inventory 由 typed registry 派生 | 外部静态 lane/case/required-check 清单作废；#1929 只合并既有 planner/gate |
 | Delivery semantics | [`eventbus.md`](../../rules/eventbus.md) 只承诺 at-least-once；active contract 也由 code gate 拒绝 unsupported delivery | “no exactly-once”解释为无 active/runtime 保证，不删除 draft/deprecated 前瞻 enum |
@@ -55,7 +56,7 @@
 | same-head GitHub required check 已可用 | 改为条件式：active forge 具备完整 CI 后启用；当前 Azure 只有窄 LocalOnly carrier | #1929 |
 | LOC/Markdown/case-count blocking gate | 拒绝；只保留设计拆分与 review 信号 | #1912；[`project-scope.md`](../../rules/project-scope.md) |
 | 全局 commit-order lock 立即删除 | 拒绝；容量越阈值后才触发 X01 | #1922 / Epic #1911 Trigger |
-| 激活 billing 证明 Saga production-ready | 拒绝；billing 是 External 产品事实，fixture 不是 adopter | #1923/#1926 |
+| 激活 billing 证明 Saga production-ready | 拒绝；billing 是 External 产品事实，fixture 不是 adopter | #1923（fixture/零 production adoption）/#1926（production capability closure） |
 | exactly-once execution/delivery 声明 | 拒绝；只承诺 at-least-once 与 scoped idempotent business effects | [`eventbus.md`](../../rules/eventbus.md)、#1925 |
 
 ## 外部 spec/research/data-model/contract 的吸收分流
@@ -64,7 +65,8 @@
 - research 的 R1–R13 按上表裁决；SpecKit 版本/feature pointer 不属于 L3 runtime requirement，未并入。
 - data model 只吸收 identity/state/invariant proposal，见 [`data-model.md`](data-model.md)；精确 SQL/schema 由后续 PBI 的
   migration 与 typed schema 持有。
-- `workflow-activation` proposal 归 #1913/#1914，operator proposal 归 #1922，Saga receipt/effect proposal归
-  #1923–#1925，activation evidence proposal 归 #1929；Markdown contract 不作为 enforcement carrier。
+- `workflow-activation` proposal 归 #1913/#1914，operator proposal 归 #1922，Saga definition identity、
+  typed receipt authoring、idempotency key 与 retry policy 归 #1923，durable receipt store/atomic journal 归 #1924，
+  unknown-outcome/durable recovery 归 #1925，activation evidence 归 #1929；Markdown contract 不作为 enforcement carrier。
 - 外部 142 tasks、GitHub issue/import scripts 和旧 PR roadmap 已由 Azure Epic #1911 与 PBI #1912–#1929 取代，
   不复制进仓库。

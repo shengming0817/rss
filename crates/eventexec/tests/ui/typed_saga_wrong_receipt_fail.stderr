@@ -1,0 +1,27 @@
+error[E0271]: expected `impl Future<Output = Result<BillingCaptureReceipt, EngineError>>` to be a future that resolves to `Result<BillingReserveFundsReceipt, EngineError>`, but it resolves to `Result<BillingCaptureReceipt, EngineError>`
+ --> tests/ui/typed_saga_wrong_receipt_fail.rs:9:55
+  |
+9 |     async fn execute(&self, _: SagaForwardContext) -> Result<BillingCaptureReceipt, EngineError> {
+  |                                                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `Result<BillingReserveFundsReceipt, ...>`, found `Result<BillingCaptureReceipt, ...>`
+  |
+  = note: expected enum `Result<BillingReserveFundsReceipt, EngineError>`
+             found enum `Result<BillingCaptureReceipt, EngineError>`
+note: required by a bound in `SagaStep::execute::{anon_assoc#0}`
+ --> src/saga.rs
+  |
+  |     ) -> impl Future<Output = Result<M::Receipt, EngineError>> + Send;
+  |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `SagaStep::execute::{anon_assoc#0}`
+
+error[E0053]: method `compensate` has an incompatible type for trait
+  --> tests/ui/typed_saga_wrong_receipt_fail.rs:15:12
+   |
+15 |         _: BillingCaptureReceipt,
+   |            ^^^^^^^^^^^^^^^^^^^^^ expected `BillingReserveFundsReceipt`, found `BillingCaptureReceipt`
+   |
+   = note: expected signature `fn(&WrongReceipt, SagaCompensationContext, BillingReserveFundsReceipt) -> impl Future<Output = Result<CompensationOutcome, EngineError>>`
+              found signature `fn(&WrongReceipt, SagaCompensationContext, BillingCaptureReceipt) -> impl Future<Output = Result<CompensationOutcome, EngineError>>`
+help: change the parameter type to match the trait
+   |
+15 -         _: BillingCaptureReceipt,
+15 +         _: BillingReserveFundsReceipt,
+   |

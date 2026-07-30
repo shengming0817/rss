@@ -2,10 +2,12 @@
 //!
 //! # 派发范式（ADR-003 §2 / ADR-004 C1）
 //!
-//! 本 crate 冻结的是**引擎策略 trait**（L0–L4 一致性等级）：`InboxStore`/`OutboxRelay`/`SagaStep`/
+//! 本 crate 冻结的是**引擎策略 trait**（L0–L4 一致性等级）：`InboxStore`/`OutboxRelay`/
 //! `Reconciler`/`Projector` 一律 **native AFIT**（trait 内直接 `async fn`）+ **泛型静态分发**
 //! （消费方 `fn run<S: Trait>(s: &S)`，零开销、零 box）——**不引 dynosaur、不引 async-trait**。
 //! native AFIT trait 不 object-safe，故全 crate 禁 `Box<dyn Trait>`：消费方一律泛型 `<S: Trait>`。
+//! Saga authoring 已收口到 `eventexec::SagaStep<GeneratedStepMarker>`；本 crate 只拥有其 durable
+//! identity、journal/replay 纯模型，避免平行 factory/runtime contract。
 //!
 //! 这些是引擎侧策略接缝，**非** DI 注入 infra port（provider-可换的 Store/Publisher/Clock 走 dynosaur，
 //! 归未来 `diport` crate，不在本 crate）。错误用本地 [`EngineError`]（thiserror，message `&'static str`
@@ -75,11 +77,13 @@ pub use reconcile::{
     Outcome, ReconcileDiff, ReconcileError, ReconcileResultLabel, Reconciler, Request,
 };
 pub use saga::{
-    CompensationOutcome, SagaDefinition, SagaDurableStatus, SagaId, SagaInstanceRecord,
-    SagaInstanceRef, SagaInstanceRefError, SagaInstanceStatus, SagaInterruption,
-    SagaJournalAppendOutcome, SagaJournalAppendRecord, SagaJournalRecord, SagaJournalStatus,
-    SagaLease, SagaLeaseError, SagaLeaseOutcome, SagaModelError, SagaOutcome, SagaReplayDecision,
-    SagaStep, SagaStepCtx, StepName, StepNameError,
+    CompensationOutcome, SagaContractId, SagaContractIdError, SagaDefinition,
+    SagaDefinitionIdentity, SagaDefinitionIdentityError, SagaDurableStatus, SagaId,
+    SagaInstanceRecord, SagaInstanceRecordError, SagaInstanceRef, SagaInstanceRefError,
+    SagaInstanceStatus, SagaInterruption, SagaJournalAppendOutcome, SagaJournalAppendRecord,
+    SagaJournalRecord, SagaJournalStatus, SagaLease, SagaLeaseError, SagaLeaseOutcome,
+    SagaModelError, SagaOutcome, SagaReplayDecision, SagaWorkerIdentity, SagaWorkerIdentityError,
+    StepName, StepNameError,
 };
 pub use tx_retry::{
     TxRetryBackoff, TxRetryClass, TxRetryFinalStatus, TxRetryPolicy, TxRetryPolicyError,
@@ -119,7 +123,6 @@ mod static_dispatch_smoke {
         SerialInOrderGuarantor,
     };
     use super::reconcile::Reconciler;
-    use super::saga::SagaStep;
 
     // 每个 driver 接受泛型 `&S`（非 `Box<dyn>`）——证明 native AFIT trait 可泛型静态分发消费。
     // 函数体空：仅约束类型成立（编译期），不构造实例、不调 async（避免 todo!() panic）。
@@ -134,8 +137,6 @@ mod static_dispatch_smoke {
     fn _drives_sweeper<S: RetentionSweeper>(_s: &S) {}
     #[allow(dead_code)] // reason: 同上，证 OutboxBacklog 采样端口可泛型静态分发消费。
     fn _drives_backlog<B: OutboxBacklog>(_b: &B) {}
-    #[allow(dead_code)] // reason: 同上。
-    fn _drives_saga<S: SagaStep>(_s: &S) {}
     #[allow(dead_code)] // reason: 同上。
     fn _drives_reconciler<R: Reconciler>(_r: &R) {}
     #[allow(dead_code)] // reason: 同上。

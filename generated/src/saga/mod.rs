@@ -2,6 +2,42 @@
 
 /// Saga contract metadata generated from `contract.toml`.
 pub type SagaSpec = ::vocab::SagaContractBinding;
+
+pub(crate) mod sealed {
+    pub trait Definition {}
+    pub trait StepMarker {}
+    pub trait Step<D: super::Definition> {}
+    pub trait Receipt<S: super::StepMarker> {}
+    pub trait End<D: super::Definition> {}
+}
+
+/// Sealed marker for one exact generated Saga definition.
+pub trait Definition: sealed::Definition + Sized {
+    /// First cursor in the generated ordered step chain.
+    type Start: Step<Self>;
+    /// Complete pinned identity and execution semantics.
+    const SPEC: SagaSpec;
+}
+
+/// Definition-independent sealed marker used by the authoring `SagaStep<Marker>` trait.
+pub trait StepMarker: sealed::StepMarker + Sized {
+    /// The only receipt DTO accepted for this step.
+    type Receipt: Receipt<Self>;
+    /// Complete generated step binding.
+    const BINDING: ::vocab::SagaStepBinding;
+}
+
+/// One cursor in a definition-specific ordered typestate chain.
+pub trait Step<D: Definition>: StepMarker + sealed::Step<D> {
+    /// Next cursor; either another `Step<D>` or the generated terminal `End<D>`.
+    type Next;
+}
+
+/// Sealed association between a generated receipt DTO and its owning step marker.
+pub trait Receipt<S: StepMarker>: sealed::Receipt<S> {}
+
+/// Sealed terminal cursor. Factory `finish()` is only available in this state.
+pub trait End<D: Definition>: sealed::End<D> {}
 pub mod billing_v1;
 
 /// Complete repository Saga definition catalog.

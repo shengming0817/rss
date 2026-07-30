@@ -18,6 +18,10 @@
 
 新增可选响应字段可以留在当前版本。新增必填请求字段必须升级版本。
 
+Saga definition 的执行语义不按“新增可选字段”处理。step 顺序、receipt schema、effect scope、
+compensation effect scope、idempotency/compensation/retry class 或 retry policy 的任何变化都会形成新的
+`ACTION_REGISTRY_GENERATION`；破坏式演进必须新建版本目录和新 contract ID，并完整保留旧 identity。
+
 ## 轴 A / 轴 B 边界
 
 RSS 当前没有外部 Rust API 调用方，因此轴 A（库 crate 公开 API 与 authoring schema）
@@ -45,6 +49,17 @@ intentional breaking authorization 与 review ack 正交：前者只授权 finge
 INVARIANT: CONSISTENCY-EFFECT-BREAKING-REVIEW-01（Hard 闭枚举/fingerprint 内核 + Medium Git/verify 门；
 carrier 在 `xtask/src/contract/breaking.rs`）。active 默认 deny；固定三条 review rule 只有在精确确认存在时
 保持 warn，未确认 fail-closed；无 flag、环境变量、日期窗口或自由文本豁免。
+
+## Saga definition 保留与 resume
+
+Saga instance 固定 contract ID、definition version、schema digest 和 action registry generation。
+start 使用 assembly 选择的精确 identity，resume 使用 instance 持久化的精确 identity；unknown identity
+必须 fail-closed，禁止回退 latest、相似 schema 或当前 registry 成员。
+
+registry 不提供 remove/retire API。即使 definition 已 deprecated，在 durable、跨副本 retirement proof
+carrier 能证明不存在需要该 identity 的 instance 之前也必须保留；删除 Saga definition 是 breaking deny，
+不能用 alias、shim、双读或默认绑定“当前版本”绕过。该规则不表示已具备 durable receipt recovery；receipt
+store 与原子 journal 提交归 #1924，unknown-outcome 与 durable resume 归 #1925。
 
 ## 内部 API
 

@@ -8,93 +8,33 @@ use std::time::Duration;
 
 use dynosaur::dynosaur;
 
+pub use consistency::{
+    SagaContractId, SagaContractIdError, SagaWorkerIdentity, SagaWorkerIdentityError,
+};
 use consistency::{
-    SagaInstanceRecord, SagaInstanceRef, SagaInstanceStatus, SagaLease, SagaLeaseOutcome,
+    SagaDefinitionIdentity, SagaInstanceRecord, SagaInstanceRef, SagaInstanceStatus, SagaLease,
+    SagaLeaseOutcome,
 };
 
 use crate::redacted::RedactedSource;
-
-/// Saga contract id newtype used by worker discovery and instance registration.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct SagaContractId(String);
-
-/// Saga contract id parse error.
-#[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum SagaContractIdError {
-    /// Contract id was empty.
-    #[error("saga contract id is empty")]
-    Empty,
-    /// Contract id does not use canonical dotted grammar.
-    #[error("saga contract id is not a canonical dotted name")]
-    Format,
-}
-
-impl SagaContractId {
-    /// Parse a generated saga contract id.
-    pub fn parse(raw: &str) -> Result<Self, SagaContractIdError> {
-        if raw.is_empty() {
-            return Err(SagaContractIdError::Empty);
-        }
-        if !is_canonical_dotted(raw) {
-            return Err(SagaContractIdError::Format);
-        }
-        Ok(Self(raw.to_string()))
-    }
-
-    /// Borrow the canonical contract id string.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-/// Saga worker identity: owner + contract id, constructed once and passed through worker/store
-/// APIs as a single value so the two strings cannot drift independently.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct SagaWorkerIdentity {
-    owner: String,
-    contract_id: SagaContractId,
-}
-
-/// Saga worker identity validation error.
-#[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum SagaWorkerIdentityError {
-    /// Owner was empty or blank.
-    #[error("saga worker owner is empty")]
-    EmptyOwner,
-}
-
-impl SagaWorkerIdentity {
-    /// Build a validated saga worker identity.
-    pub fn new(
-        owner: impl Into<String>,
-        contract_id: SagaContractId,
-    ) -> Result<Self, SagaWorkerIdentityError> {
-        let owner = owner.into();
-        if owner.trim().is_empty() {
-            return Err(SagaWorkerIdentityError::EmptyOwner);
-        }
-        Ok(Self { owner, contract_id })
-    }
-
-    /// Saga owner/domain.
-    pub fn owner(&self) -> &str {
-        &self.owner
-    }
-
-    /// Saga contract id.
-    pub fn contract_id(&self) -> &SagaContractId {
-        &self.contract_id
-    }
-}
 
 /// saga instance store operation failed.
 #[derive(Debug, thiserror::Error)]
 #[error("saga instance store operation failed")]
 pub struct SagaInstanceStoreError {
+    kind: SagaInstanceStoreErrorKind,
     #[source]
     source: RedactedSource,
+}
+
+/// Stable classification for saga instance store failures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SagaInstanceStoreErrorKind {
+    /// The requested instance UUID is already pinned to another owner or definition identity.
+    IdentityConflict,
+    /// Adapter/backend failure whose details remain redacted.
+    Backend,
 }
 
 impl SagaInstanceStoreError {
@@ -104,8 +44,25 @@ impl SagaInstanceStoreError {
         E: std::error::Error + Send + Sync + 'static,
     {
         Self {
+            kind: SagaInstanceStoreErrorKind::Backend,
             source: RedactedSource::new(source),
         }
+    }
+
+    /// Construct the fail-closed conflict returned when an existing row has another identity.
+    pub fn identity_conflict<E>(source: E) -> Self
+    where
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        Self {
+            kind: SagaInstanceStoreErrorKind::IdentityConflict,
+            source: RedactedSource::new(source),
+        }
+    }
+
+    /// Stable error classification without exposing adapter details.
+    pub fn kind(&self) -> SagaInstanceStoreErrorKind {
+        self.kind
     }
 }
 
@@ -114,12 +71,33 @@ impl SagaInstanceStoreError {
 pub struct SagaInstanceRegistration {
     instance: SagaInstanceRef,
     identity: SagaWorkerIdentity,
+    definition: SagaDefinitionIdentity,
+}
+
+/// Invalid saga instance registration.
+#[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SagaInstanceRegistrationError {
+    /// Worker contract and pinned definition contract differ.
+    #[error("saga worker contract does not match pinned definition")]
+    DefinitionContractMismatch,
 }
 
 impl SagaInstanceRegistration {
     /// Build a validated registration request.
-    pub fn new(instance: SagaInstanceRef, identity: SagaWorkerIdentity) -> Self {
-        Self { instance, identity }
+    pub fn new(
+        instance: SagaInstanceRef,
+        identity: SagaWorkerIdentity,
+        definition: SagaDefinitionIdentity,
+    ) -> Result<Self, SagaInstanceRegistrationError> {
+        if identity.contract_id().as_str() != definition.contract_id() {
+            return Err(SagaInstanceRegistrationError::DefinitionContractMismatch);
+        }
+        Ok(Self {
+            instance,
+            identity,
+            definition,
+        })
     }
 
     /// Tenant-scoped instance identity.
@@ -141,13 +119,20 @@ impl SagaInstanceRegistration {
     pub fn contract_id(&self) -> &str {
         self.identity.contract_id().as_str()
     }
+
+    /// Exact generated definition pinned for the lifetime of this instance.
+    pub fn definition(&self) -> &SagaDefinitionIdentity {
+        &self.definition
+    }
 }
 
 /// Runnable saga instance returned by worker discovery.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SagaRunnableInstance {
     instance: SagaInstanceRef,
     status: SagaInstanceStatus,
+    identity: SagaWorkerIdentity,
+    definition: SagaDefinitionIdentity,
 }
 
 /// Runnable instance validation error.
@@ -157,6 +142,9 @@ pub enum SagaRunnableInstanceError {
     /// Terminal or degraded statuses must not enter worker discovery.
     #[error("saga instance status is not runnable")]
     NotRunnable,
+    /// Worker contract and pinned definition contract differ.
+    #[error("saga worker contract does not match pinned definition")]
+    DefinitionContractMismatch,
 }
 
 impl SagaRunnableInstance {
@@ -164,11 +152,21 @@ impl SagaRunnableInstance {
     pub fn new(
         instance: SagaInstanceRef,
         status: SagaInstanceStatus,
+        identity: SagaWorkerIdentity,
+        definition: SagaDefinitionIdentity,
     ) -> Result<Self, SagaRunnableInstanceError> {
         if !is_runnable_status(status) {
             return Err(SagaRunnableInstanceError::NotRunnable);
         }
-        Ok(Self { instance, status })
+        if identity.contract_id().as_str() != definition.contract_id() {
+            return Err(SagaRunnableInstanceError::DefinitionContractMismatch);
+        }
+        Ok(Self {
+            instance,
+            status,
+            identity,
+            definition,
+        })
     }
 
     /// Tenant-scoped instance identity.
@@ -180,6 +178,16 @@ impl SagaRunnableInstance {
     pub fn status(&self) -> SagaInstanceStatus {
         self.status
     }
+
+    /// Exact owner + contract identity pinned for this instance.
+    pub fn identity(&self) -> &SagaWorkerIdentity {
+        &self.identity
+    }
+
+    /// Exact pinned definition to use for resume.
+    pub fn definition(&self) -> &SagaDefinitionIdentity {
+        &self.definition
+    }
 }
 
 /// saga instance store DI port.
@@ -188,8 +196,9 @@ impl SagaRunnableInstance {
 #[allow(async_fn_in_trait)]
 // reason: Send variant + dynosaur wrapper follow the async DI port pattern documented in lib.rs.
 pub trait SagaInstanceStoreLocal {
-    /// Register an instance if absent. Implementations must not overwrite owner/contract for an
-    /// existing instance.
+    /// Register an instance if absent. An existing instance is idempotent only when owner and the
+    /// complete definition identity match exactly; otherwise implementations return
+    /// [`SagaInstanceStoreErrorKind::IdentityConflict`].
     async fn register(
         &self,
         registration: SagaInstanceRegistration,
@@ -262,16 +271,6 @@ fn is_runnable_status(status: SagaInstanceStatus) -> bool {
     )
 }
 
-fn is_canonical_dotted(s: &str) -> bool {
-    !s.is_empty()
-        && s.split('.').all(|seg| {
-            matches!(seg.bytes().next(), Some(b) if b.is_ascii_lowercase())
-                && seg
-                    .bytes()
-                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-        })
-}
-
 #[cfg(test)]
 mod smoke {
     use super::{
@@ -280,8 +279,8 @@ mod smoke {
         SagaWorkerIdentity,
     };
     use consistency::{
-        SagaId, SagaInstanceRecord, SagaInstanceRef, SagaInstanceStatus, SagaLease,
-        SagaLeaseOutcome,
+        SagaDefinitionIdentity, SagaId, SagaInstanceRecord, SagaInstanceRef, SagaInstanceStatus,
+        SagaLease, SagaLeaseOutcome,
     };
     use std::num::NonZeroUsize;
     use std::time::Duration;
@@ -294,10 +293,13 @@ mod smoke {
             &self,
             registration: SagaInstanceRegistration,
         ) -> Result<SagaInstanceRecord, SagaInstanceStoreError> {
-            Ok(SagaInstanceRecord::new(
+            SagaInstanceRecord::new(
                 registration.instance(),
                 SagaInstanceStatus::Ready,
-            ))
+                registration.identity().clone(),
+                registration.definition().clone(),
+            )
+            .map_err(SagaInstanceStoreError::new)
         }
 
         async fn get(
@@ -377,7 +379,15 @@ mod smoke {
             SagaContractId::parse("billing.checkout").unwrap(),
         )
         .unwrap();
-        let registration = SagaInstanceRegistration::new(instance, identity.clone());
+        let definition = SagaDefinitionIdentity::new(
+            "billing.checkout",
+            "v1",
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        )
+        .unwrap();
+        let registration =
+            SagaInstanceRegistration::new(instance, identity.clone(), definition).unwrap();
         let joined = tokio::spawn(async move {
             store.register(registration).await.is_ok()
                 && store.get(&instance).await.is_ok()
@@ -423,11 +433,32 @@ mod smoke {
         );
         assert!(SagaContractId::parse("billing checkout").is_err());
     }
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn registration_rejects_worker_definition_contract_drift() {
+        let tenant = TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").unwrap();
+        let instance =
+            SagaInstanceRef::new(tenant, SagaId::new(uuid::Uuid::from_u128(1632))).unwrap();
+        let worker = SagaWorkerIdentity::new(
+            "billing",
+            SagaContractId::parse("billing.checkout").unwrap(),
+        )
+        .unwrap();
+        let definition = SagaDefinitionIdentity::new(
+            "billing.refund",
+            "v1",
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        )
+        .unwrap();
+        assert!(SagaInstanceRegistration::new(instance, worker, definition).is_err());
+    }
 }
 
 #[cfg(test)]
 mod error_redaction {
-    use super::SagaInstanceStoreError;
+    use super::{SagaInstanceStoreError, SagaInstanceStoreErrorKind};
 
     #[test]
     fn error_debug_redacts_source() {
@@ -439,5 +470,14 @@ mod error_redaction {
             !rendered.contains("hunter2") && !rendered.contains("postgres://"),
             "Debug 泄漏 source: {rendered}"
         );
+        assert_eq!(err.kind(), SagaInstanceStoreErrorKind::Backend);
+    }
+
+    #[test]
+    fn identity_conflict_preserves_only_the_typed_kind() {
+        let secret = std::io::Error::other("definition secret");
+        let err = SagaInstanceStoreError::identity_conflict(secret);
+        assert_eq!(err.kind(), SagaInstanceStoreErrorKind::IdentityConflict);
+        assert!(!format!("{err:?}").contains("definition secret"));
     }
 }

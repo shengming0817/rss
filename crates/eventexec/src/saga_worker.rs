@@ -185,23 +185,21 @@ async fn saga_worker_loop<T, S, E>(
 {
     let _stopped_guard = health.stopped_on_exit();
     let mut ticker = tokio::time::interval(config.poll_interval());
+    let mut health_projection = SagaWorkerHealthProjection::default();
     loop {
         tokio::select! {
             biased;
             () = token.cancelled() => break,
             _ = ticker.tick() => {
-                match saga_worker_tick(
+                let tick = saga_worker_tick(
                     &identity,
                     tenant_source.as_ref(),
                     instance_store.as_ref(),
                     executor.as_ref(),
                     config,
                 )
-                .await
-                {
-                    SagaWorkerTick::Clean => health.mark_healthy(),
-                    SagaWorkerTick::Degraded => health.mark_degraded(),
-                }
+                .await;
+                health_projection.apply(tick, &health);
             }
         }
     }
@@ -210,15 +208,34 @@ async fn saga_worker_loop<T, S, E>(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SagaWorkerTick {
     Clean,
-    Degraded,
+    TransientDegraded,
+    PermanentDegraded,
 }
 
 impl SagaWorkerTick {
     fn worse(self, other: Self) -> Self {
-        if self == Self::Degraded || other == Self::Degraded {
-            Self::Degraded
+        match (self, other) {
+            (Self::PermanentDegraded, _) | (_, Self::PermanentDegraded) => Self::PermanentDegraded,
+            (Self::TransientDegraded, _) | (_, Self::TransientDegraded) => Self::TransientDegraded,
+            (Self::Clean, Self::Clean) => Self::Clean,
+        }
+    }
+}
+
+#[derive(Default)]
+struct SagaWorkerHealthProjection {
+    permanently_degraded: bool,
+}
+
+impl SagaWorkerHealthProjection {
+    fn apply(&mut self, tick: SagaWorkerTick, health: &WorkerHealth) {
+        if tick == SagaWorkerTick::PermanentDegraded {
+            self.permanently_degraded = true;
+        }
+        if self.permanently_degraded || tick == SagaWorkerTick::TransientDegraded {
+            health.mark_degraded();
         } else {
-            Self::Clean
+            health.mark_healthy();
         }
     }
 }
@@ -242,7 +259,7 @@ where
         Ok(tenants) => tenants,
         Err(error) => {
             warn_worker_source_error(identity, "tenant_source", &error);
-            return SagaWorkerTick::Degraded;
+            return SagaWorkerTick::TransientDegraded;
         }
     };
     let mut tick = SagaWorkerTick::Clean;
@@ -279,46 +296,81 @@ where
         Ok(rows) => rows,
         Err(error) => {
             warn_worker_source_error(identity, "instance_store", &error);
-            return SagaWorkerTick::Degraded;
+            return SagaWorkerTick::TransientDegraded;
         }
     };
     let mut tick = SagaWorkerTick::Clean;
     for row in rows {
-        tick = tick.worse(run_one(row, executor).await);
+        tick = tick.worse(run_one(identity, row, executor).await);
     }
     tick
 }
 
-async fn run_one<E>(row: SagaRunnableInstance, executor: &E) -> SagaWorkerTick
+async fn run_one<E>(
+    expected_identity: &SagaWorkerIdentity,
+    row: SagaRunnableInstance,
+    executor: &E,
+) -> SagaWorkerTick
 where
     E: SagaExecutor + Send + Sync,
 {
+    if row.identity() != expected_identity {
+        return SagaWorkerTick::PermanentDegraded;
+    }
+    let instance = row.instance();
+    let definition = row.definition().clone();
     let outcome = match row.status() {
-        SagaInstanceStatus::Ready => executor.run(row.instance()).await,
+        SagaInstanceStatus::Ready => executor.run(instance, definition.clone()).await,
         SagaInstanceStatus::Running | SagaInstanceStatus::Compensating => {
-            executor.resume(row.instance()).await
+            executor.resume(instance, definition.clone()).await
         }
-        _ => return SagaWorkerTick::Degraded,
+        _ => return SagaWorkerTick::PermanentDegraded,
     };
-    classify_outcome(outcome)
+    let tick = classify_outcome(outcome);
+    if tick != SagaWorkerTick::Clean {
+        tracing::warn!(
+            tenant_id = %instance.tenant(),
+            saga_id = %instance.saga_id().as_uuid(),
+            contract_id = definition.contract_id(),
+            definition_version = definition.version(),
+            schema_digest = definition.schema_digest(),
+            action_generation = definition.action_registry_generation(),
+            degradation = ?tick,
+            "saga worker instance degraded"
+        );
+    }
+    tick
 }
 
 fn classify_outcome(outcome: SagaOutcome) -> SagaWorkerTick {
     match outcome {
-        SagaOutcome::Interrupted { reason } if interruption_degrades(reason) => {
-            SagaWorkerTick::Degraded
+        SagaOutcome::Failed { error, .. } if error.degrades_worker_permanently() => {
+            SagaWorkerTick::PermanentDegraded
+        }
+        SagaOutcome::Interrupted { reason } if interruption_permanently_degrades(reason) => {
+            SagaWorkerTick::PermanentDegraded
+        }
+        SagaOutcome::Interrupted { reason } if interruption_transiently_degrades(reason) => {
+            SagaWorkerTick::TransientDegraded
         }
         _ => SagaWorkerTick::Clean,
     }
 }
 
-fn interruption_degrades(reason: SagaInterruption) -> bool {
+fn interruption_permanently_degrades(reason: SagaInterruption) -> bool {
     matches!(
         reason,
-        SagaInterruption::RuntimeLockUnavailable
-            | SagaInterruption::StoreUnavailable
-            | SagaInterruption::JournalConflict
+        SagaInterruption::JournalConflict
             | SagaInterruption::InstanceDegraded
+            | SagaInterruption::UnsupportedDefinition
+            | SagaInterruption::ReceiptUnavailable
+    )
+}
+
+fn interruption_transiently_degrades(reason: SagaInterruption) -> bool {
+    matches!(
+        reason,
+        SagaInterruption::RuntimeLockUnavailable | SagaInterruption::StoreUnavailable
     )
 }
 
@@ -418,10 +470,13 @@ mod tests {
             &self,
             registration: SagaInstanceRegistration,
         ) -> Result<SagaInstanceRecord, SagaInstanceStoreError> {
-            Ok(SagaInstanceRecord::new(
+            SagaInstanceRecord::new(
                 registration.instance(),
                 SagaInstanceStatus::Ready,
-            ))
+                registration.identity().clone(),
+                registration.definition().clone(),
+            )
+            .map_err(SagaInstanceStoreError::new)
         }
 
         async fn get(
@@ -484,7 +539,13 @@ mod tests {
 
     struct FakeExecutor {
         outcomes: Mutex<VecDeque<SagaOutcome>>,
-        calls: Mutex<Vec<(&'static str, SagaInstanceRef)>>,
+        calls: Mutex<
+            Vec<(
+                &'static str,
+                SagaInstanceRef,
+                consistency::SagaDefinitionIdentity,
+            )>,
+        >,
     }
 
     impl FakeExecutor {
@@ -495,17 +556,27 @@ mod tests {
             }
         }
 
-        fn calls(&self) -> Vec<(&'static str, SagaInstanceRef)> {
+        fn calls(
+            &self,
+        ) -> Vec<(
+            &'static str,
+            SagaInstanceRef,
+            consistency::SagaDefinitionIdentity,
+        )> {
             self.calls.lock().unwrap_or_else(|e| e.into_inner()).clone()
         }
     }
 
     impl SagaExecutor for FakeExecutor {
-        fn run(&self, instance: SagaInstanceRef) -> BoxFuture<'static, SagaOutcome> {
+        fn run(
+            &self,
+            instance: SagaInstanceRef,
+            definition: consistency::SagaDefinitionIdentity,
+        ) -> BoxFuture<'static, SagaOutcome> {
             self.calls
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .push(("run", instance));
+                .push(("run", instance, definition));
             let outcome = self
                 .outcomes
                 .lock()
@@ -515,11 +586,15 @@ mod tests {
             Box::pin(async move { outcome })
         }
 
-        fn resume(&self, instance: SagaInstanceRef) -> BoxFuture<'static, SagaOutcome> {
+        fn resume(
+            &self,
+            instance: SagaInstanceRef,
+            definition: consistency::SagaDefinitionIdentity,
+        ) -> BoxFuture<'static, SagaOutcome> {
             self.calls
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .push(("resume", instance));
+                .push(("resume", instance, definition));
             let outcome = self
                 .outcomes
                 .lock()
@@ -554,9 +629,17 @@ mod tests {
     async fn tick_runs_ready_and_resumes_running_instances() {
         let tenant = tenant();
         let ready = runnable(tenant, 1, SagaInstanceStatus::Ready);
-        let running = runnable(tenant, 2, SagaInstanceStatus::Running);
+        let old_definition = consistency::SagaDefinitionIdentity::new(
+            "billing.checkout",
+            "v2",
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        )
+        .unwrap();
+        let running =
+            runnable_with_definition(tenant, 2, SagaInstanceStatus::Running, old_definition);
         let source = FakeTenantSource::with_tenants(vec![tenant]);
-        let store = FakeInstanceStore::with_rows(vec![ready, running]);
+        let store = FakeInstanceStore::with_rows(vec![ready.clone(), running.clone()]);
         let executor = FakeExecutor::new(vec![
             SagaOutcome::Succeeded { output: Vec::new() },
             SagaOutcome::Interrupted {
@@ -577,7 +660,10 @@ mod tests {
         );
         assert_eq!(
             executor.calls(),
-            vec![("run", ready.instance()), ("resume", running.instance())]
+            vec![
+                ("run", ready.instance(), ready.definition().clone()),
+                ("resume", running.instance(), running.definition().clone()),
+            ]
         );
     }
 
@@ -594,7 +680,7 @@ mod tests {
                 SagaWorkerConfig::default(),
             )
             .await,
-            SagaWorkerTick::Degraded
+            SagaWorkerTick::TransientDegraded
         );
     }
 
@@ -617,8 +703,70 @@ mod tests {
                 SagaWorkerConfig::default(),
             )
             .await,
-            SagaWorkerTick::Degraded
+            SagaWorkerTick::TransientDegraded
         );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::unwrap_used)]
+    async fn foreign_owner_runnable_is_rejected_before_executor_dispatch() {
+        let tenant = tenant();
+        let foreign = SagaWorkerIdentity::new(
+            "foreign-owner",
+            SagaContractId::parse("billing.checkout").unwrap(),
+        )
+        .unwrap();
+        let instance = SagaInstanceRef::new(tenant, SagaId::new(uuid::Uuid::from_u128(9))).unwrap();
+        let row = SagaRunnableInstance::new(
+            instance,
+            SagaInstanceStatus::Ready,
+            foreign,
+            consistency::SagaDefinitionIdentity::from_binding(generated::saga::billing_v1::SPEC),
+        )
+        .unwrap();
+        let source = FakeTenantSource::with_tenants(vec![tenant]);
+        let store = FakeInstanceStore::with_rows(vec![row]);
+        let executor = FakeExecutor::new(Vec::new());
+
+        assert_eq!(
+            saga_worker_tick(
+                &identity(),
+                &source,
+                &store,
+                &executor,
+                SagaWorkerConfig::default(),
+            )
+            .await,
+            SagaWorkerTick::PermanentDegraded
+        );
+        assert!(executor.calls().is_empty());
+    }
+
+    #[test]
+    fn unknown_outcome_and_ownership_loss_are_permanent_degradation() {
+        for error in [
+            crate::SagaActionError::OutcomeUnknown,
+            crate::SagaActionError::OwnershipLost,
+        ] {
+            assert_eq!(
+                classify_outcome(SagaOutcome::Failed {
+                    failed_node: "reserve_funds".to_string(),
+                    error,
+                }),
+                SagaWorkerTick::PermanentDegraded
+            );
+        }
+    }
+
+    #[test]
+    fn permanent_degradation_survives_a_later_empty_clean_tick() {
+        let health = WorkerHealth::starting();
+        let mut projection = SagaWorkerHealthProjection::default();
+
+        projection.apply(SagaWorkerTick::PermanentDegraded, &health);
+        assert_eq!(health.status(), HealthStatus::Degraded);
+        projection.apply(SagaWorkerTick::Clean, &health);
+        assert_eq!(health.status(), HealthStatus::Degraded);
     }
 
     #[tokio::test(start_paused = true)]
@@ -662,8 +810,23 @@ mod tests {
         id: u128,
         status: SagaInstanceStatus,
     ) -> SagaRunnableInstance {
+        runnable_with_definition(
+            tenant,
+            id,
+            status,
+            consistency::SagaDefinitionIdentity::from_binding(generated::saga::billing_v1::SPEC),
+        )
+    }
+
+    #[allow(clippy::unwrap_used)]
+    fn runnable_with_definition(
+        tenant: vocab::TenantId,
+        id: u128,
+        status: SagaInstanceStatus,
+        definition: consistency::SagaDefinitionIdentity,
+    ) -> SagaRunnableInstance {
         let instance =
             SagaInstanceRef::new(tenant, SagaId::new(uuid::Uuid::from_u128(id))).unwrap();
-        SagaRunnableInstance::new(instance, status).unwrap()
+        SagaRunnableInstance::new(instance, status, identity(), definition).unwrap()
     }
 }

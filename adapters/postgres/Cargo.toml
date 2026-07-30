@@ -97,6 +97,7 @@ journey-fault-support = []
 # N-028 fault matrix typed harness。仅专用 journey crate 启用；不暴露 PgPool/raw SQL。
 fault-matrix-test-support = [
     "dep:anyhow",
+    "eventexec/test-support",
     "dep:identity",
     "identity/fault-matrix-test-support",
 ]

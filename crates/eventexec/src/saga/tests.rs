@@ -11,15 +11,11 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
 
 use super::{
-    SagaAction, SagaActionCtx, SagaActionError, SagaActionFactory, SagaCommand, SagaExecStatus,
-    SagaExecutor, SagaExecutorConfig, SagaExecutorDeps, SagaExecutorImpl, SagaOutcome, SagaPolicy,
-    SagaRuntimeLock, SagaTailer, TypedSagaActionFactory, TypedSagaFactoryError,
-    is_saga_action_retryable,
+    SagaAction, SagaActionCtx, SagaActionError, SagaActionFactory, SagaActionReceipt, SagaCommand,
+    SagaDefinitionRegistry, SagaExecStatus, SagaExecutor, SagaExecutorConfig, SagaExecutorDeps,
+    SagaExecutorImpl, SagaOutcome, SagaPolicy, SagaRuntimeLock, SagaTailer,
 };
-use consistency::{
-    CompensationOutcome, EngineError, EngineErrorKind, Lsn, SagaJournalAppendRecord,
-    SagaJournalRecord, SagaJournalStatus, SagaStep, SagaStepCtx, StepName,
-};
+use consistency::{Lsn, SagaJournalAppendRecord, SagaJournalRecord, SagaJournalStatus, StepName};
 use consistency::{
     SagaId, SagaInstanceRecord, SagaInstanceRef, SagaInstanceStatus, SagaInterruption,
     SagaJournalAppendOutcome, SagaLease, SagaLeaseOutcome,
@@ -27,9 +23,9 @@ use consistency::{
 use diport::{
     Checkpoint, CheckpointId, CheckpointOwner, CheckpointStoreError, CheckpointVersion,
     DeadLetterRecord, DeadLetterStore, DeadLetterStoreError, LockAcquireOutcome, LockRenewOutcome,
-    LockStore, LockStoreError, LockStoreKey, OwnerCheckpointStore, SagaInstanceRegistration,
-    SagaInstanceStore, SagaInstanceStoreError, SagaJournal, SagaJournalError, SagaRunnableInstance,
-    SagaWorkerIdentity, SaveOutcome,
+    LockStore, LockStoreError, LockStoreKey, OwnerCheckpointStore, SagaContractId,
+    SagaInstanceRegistration, SagaInstanceStore, SagaInstanceStoreError, SagaJournal,
+    SagaJournalError, SagaRunnableInstance, SagaWorkerIdentity, SaveOutcome,
 };
 use futures::future::BoxFuture;
 use std::sync::Arc;
@@ -62,6 +58,15 @@ fn checkpoint_id_str() -> String {
     format!("{}:{}", TENANT, saga_id().as_uuid())
 }
 
+fn definition_identity() -> consistency::SagaDefinitionIdentity {
+    consistency::SagaDefinitionIdentity::from_binding(generated::saga::billing_v1::SPEC)
+}
+
+#[allow(clippy::unwrap_used)]
+fn worker_identity() -> SagaWorkerIdentity {
+    SagaWorkerIdentity::new(OWNER, SagaContractId::parse(CONTRACT).unwrap()).unwrap()
+}
+
 // ── FakeAction ────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
@@ -71,6 +76,9 @@ struct FakeAction {
     undo_count: Arc<AtomicU32>,
     do_behavior: FakeBehavior,
     undo_behavior: FakeBehavior,
+    retry_class: vocab::SagaRetryClass,
+    binding: Option<vocab::SagaStepBinding>,
+    observed_keys: Option<Arc<Mutex<Vec<String>>>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -78,6 +86,7 @@ enum FakeBehavior {
     Succeed,
     Fail,
     SerializeFail,
+    PostEffectSerializeFail,
     FailTimes(u32),
     Hang,
 }
@@ -92,27 +101,60 @@ impl SagaAction for FakeAction {
     fn name(&self) -> &str {
         &self.name
     }
-    fn do_it(&self, _ctx: SagaActionCtx) -> BoxFuture<'static, Result<Vec<u8>, SagaActionError>> {
+    fn retry_class(&self) -> vocab::SagaRetryClass {
+        self.retry_class
+    }
+    fn binding(&self) -> Option<vocab::SagaStepBinding> {
+        self.binding
+    }
+    fn do_it(
+        &self,
+        ctx: SagaActionCtx,
+    ) -> BoxFuture<'static, Result<SagaActionReceipt, SagaActionError>> {
         let count = self.do_count.clone();
         let behavior = self.do_behavior;
         let name = self.name.clone();
+        let observed_keys = self.observed_keys.clone();
+        let idempotency_key = ctx.idempotency_key.to_hex();
         Box::pin(async move {
+            if let Some(keys) = observed_keys {
+                keys.lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .push(idempotency_key);
+            }
             let attempt = count.fetch_add(1, Ordering::SeqCst) + 1;
             match behavior {
-                FakeBehavior::Succeed => Ok(format!("{name}-out").into_bytes()),
+                FakeBehavior::Succeed => {
+                    let output = format!("{name}-out").into_bytes();
+                    Ok(SagaActionReceipt::new(output.clone(), output))
+                }
                 FakeBehavior::Fail => Err(SagaActionError::ActionFailed),
                 FakeBehavior::SerializeFail => Err(SagaActionError::SerializeFailed),
+                FakeBehavior::PostEffectSerializeFail => {
+                    let receipt = format!("{name}-typed-receipt").into_bytes();
+                    Ok(SagaActionReceipt::post_effect_failure(
+                        SagaActionError::InvariantViolation,
+                        receipt,
+                    ))
+                }
                 FakeBehavior::FailTimes(failures) if attempt <= failures => {
                     Err(SagaActionError::ActionFailed)
                 }
-                FakeBehavior::FailTimes(_) => Ok(format!("{name}-out").into_bytes()),
+                FakeBehavior::FailTimes(_) => {
+                    let output = format!("{name}-out").into_bytes();
+                    Ok(SagaActionReceipt::new(output.clone(), output))
+                }
                 FakeBehavior::Hang => {
-                    std::future::pending::<Result<Vec<u8>, SagaActionError>>().await
+                    std::future::pending::<Result<SagaActionReceipt, SagaActionError>>().await
                 }
             }
         })
     }
-    fn undo_it(&self, _ctx: SagaActionCtx) -> BoxFuture<'static, Result<(), SagaActionError>> {
+    fn undo_it(
+        &self,
+        _ctx: SagaActionCtx,
+        _receipt: Arc<dyn std::any::Any + Send + Sync>,
+    ) -> BoxFuture<'static, Result<(), SagaActionError>> {
         let count = self.undo_count.clone();
         let behavior = self.undo_behavior;
         Box::pin(async move {
@@ -120,7 +162,9 @@ impl SagaAction for FakeAction {
             match behavior {
                 FakeBehavior::Succeed => Ok(()),
                 FakeBehavior::Fail => Err(SagaActionError::ActionFailed),
-                FakeBehavior::SerializeFail => Err(SagaActionError::SerializeFailed),
+                FakeBehavior::SerializeFail | FakeBehavior::PostEffectSerializeFail => {
+                    Err(SagaActionError::SerializeFailed)
+                }
                 FakeBehavior::FailTimes(failures) if attempt <= failures => {
                     Err(SagaActionError::ActionFailed)
                 }
@@ -153,6 +197,9 @@ struct StepSpec {
     name: String,
     do_behavior: FakeBehavior,
     undo_behavior: FakeBehavior,
+    retry_class: vocab::SagaRetryClass,
+    binding: Option<vocab::SagaStepBinding>,
+    observed_keys: Option<Arc<Mutex<Vec<String>>>>,
     counts: Counts,
 }
 
@@ -184,9 +231,26 @@ impl FakeFactory {
     }
 
     fn behaviors(specs: &[(&str, FakeBehavior, FakeBehavior)]) -> (Arc<Self>, Vec<Counts>) {
+        let specs = specs
+            .iter()
+            .map(|(name, do_behavior, undo_behavior)| {
+                (
+                    *name,
+                    *do_behavior,
+                    *undo_behavior,
+                    vocab::SagaRetryClass::Transient,
+                )
+            })
+            .collect::<Vec<_>>();
+        Self::behaviors_with_retry_class(&specs)
+    }
+
+    fn behaviors_with_retry_class(
+        specs: &[(&str, FakeBehavior, FakeBehavior, vocab::SagaRetryClass)],
+    ) -> (Arc<Self>, Vec<Counts>) {
         let mut steps = Vec::new();
         let mut counts = Vec::new();
-        for (name, do_behavior, undo_behavior) in specs {
+        for (name, do_behavior, undo_behavior, retry_class) in specs {
             let c = Counts {
                 do_count: Arc::new(AtomicU32::new(0)),
                 undo_count: Arc::new(AtomicU32::new(0)),
@@ -196,10 +260,35 @@ impl FakeFactory {
                 name: (*name).to_string(),
                 do_behavior: *do_behavior,
                 undo_behavior: *undo_behavior,
+                retry_class: *retry_class,
+                binding: None,
+                observed_keys: None,
                 counts: c,
             });
         }
         (Arc::new(Self { steps }), counts)
+    }
+
+    fn retry_key_probe() -> (Arc<Self>, Vec<Counts>, Arc<Mutex<Vec<String>>>) {
+        let observed_keys = Arc::new(Mutex::new(Vec::new()));
+        let counts = Counts {
+            do_count: Arc::new(AtomicU32::new(0)),
+            undo_count: Arc::new(AtomicU32::new(0)),
+        };
+        let step = StepSpec {
+            name: generated::saga::billing_v1::STEP_0.name().to_string(),
+            do_behavior: FakeBehavior::FailTimes(2),
+            undo_behavior: FakeBehavior::Succeed,
+            retry_class: vocab::SagaRetryClass::Transient,
+            binding: Some(generated::saga::billing_v1::STEP_0),
+            observed_keys: Some(Arc::clone(&observed_keys)),
+            counts: counts.clone(),
+        };
+        (
+            Arc::new(Self { steps: vec![step] }),
+            vec![counts],
+            observed_keys,
+        )
     }
 }
 
@@ -214,6 +303,9 @@ impl SagaActionFactory for FakeFactory {
                     undo_count: s.counts.undo_count.clone(),
                     do_behavior: s.do_behavior,
                     undo_behavior: s.undo_behavior,
+                    retry_class: s.retry_class,
+                    binding: s.binding,
+                    observed_keys: s.observed_keys.clone(),
                 }) as Box<dyn SagaAction>
             })
             .collect()
@@ -435,6 +527,8 @@ impl DeadLetterStore for FakeDeadLetterStore {
 #[derive(Default)]
 struct FakeInstanceStore {
     registered: Mutex<HashMap<SagaInstanceRef, SagaInstanceStatus>>,
+    definitions: Mutex<HashMap<SagaInstanceRef, consistency::SagaDefinitionIdentity>>,
+    identities: Mutex<HashMap<SagaInstanceRef, SagaWorkerIdentity>>,
     lease_lost: std::sync::atomic::AtomicBool,
     lose_after_extensions: AtomicU32,
     extensions: AtomicU32,
@@ -461,6 +555,18 @@ impl FakeInstanceStore {
     }
 
     #[allow(clippy::unwrap_used)]
+    fn seed_definition(
+        &self,
+        instance: SagaInstanceRef,
+        definition: consistency::SagaDefinitionIdentity,
+    ) {
+        self.definitions
+            .lock()
+            .unwrap()
+            .insert(instance, definition);
+    }
+
+    #[allow(clippy::unwrap_used)]
     fn status(&self, instance: SagaInstanceRef) -> Option<SagaInstanceStatus> {
         self.registered.lock().unwrap().get(&instance).copied()
     }
@@ -476,11 +582,50 @@ impl SagaInstanceStore for FakeInstanceStore {
         &self,
         registration: SagaInstanceRegistration,
     ) -> Result<SagaInstanceRecord, SagaInstanceStoreError> {
+        let existing_identity = self
+            .identities
+            .lock()
+            .unwrap()
+            .get(&registration.instance())
+            .cloned();
+        let existing_definition = self
+            .definitions
+            .lock()
+            .unwrap()
+            .get(&registration.instance())
+            .cloned();
+        if existing_identity
+            .as_ref()
+            .is_some_and(|identity| identity != registration.identity())
+            || existing_definition
+                .as_ref()
+                .is_some_and(|definition| definition != registration.definition())
+        {
+            return Err(SagaInstanceStoreError::identity_conflict(
+                std::io::Error::other("synthetic identity conflict"),
+            ));
+        }
         let mut rows = self.registered.lock().unwrap();
         let status = *rows
             .entry(registration.instance())
             .or_insert(SagaInstanceStatus::Ready);
-        Ok(SagaInstanceRecord::new(registration.instance(), status))
+        self.definitions
+            .lock()
+            .unwrap()
+            .entry(registration.instance())
+            .or_insert_with(|| registration.definition().clone());
+        self.identities
+            .lock()
+            .unwrap()
+            .entry(registration.instance())
+            .or_insert_with(|| registration.identity().clone());
+        SagaInstanceRecord::new(
+            registration.instance(),
+            status,
+            registration.identity().clone(),
+            registration.definition().clone(),
+        )
+        .map_err(SagaInstanceStoreError::new)
     }
 
     #[allow(clippy::unwrap_used)]
@@ -488,13 +633,25 @@ impl SagaInstanceStore for FakeInstanceStore {
         &self,
         instance: &SagaInstanceRef,
     ) -> Result<Option<SagaInstanceRecord>, SagaInstanceStoreError> {
-        Ok(self
-            .registered
+        let status = self.registered.lock().unwrap().get(instance).copied();
+        let definition = self
+            .definitions
             .lock()
             .unwrap()
             .get(instance)
-            .copied()
-            .map(|status| SagaInstanceRecord::new(*instance, status)))
+            .cloned()
+            .unwrap_or_else(definition_identity);
+        let identity = self
+            .identities
+            .lock()
+            .unwrap()
+            .get(instance)
+            .cloned()
+            .unwrap_or_else(worker_identity);
+        status
+            .map(|status| SagaInstanceRecord::new(*instance, status, identity, definition))
+            .transpose()
+            .map_err(SagaInstanceStoreError::new)
     }
 
     #[allow(clippy::unwrap_used)]
@@ -572,7 +729,23 @@ impl SagaInstanceStore for FakeInstanceStore {
                     )
             })
             .take(limit.get())
-            .map(|(instance, status)| SagaRunnableInstance::new(*instance, *status).unwrap())
+            .map(|(instance, status)| {
+                let identity = self
+                    .identities
+                    .lock()
+                    .unwrap()
+                    .get(instance)
+                    .cloned()
+                    .unwrap_or_else(worker_identity);
+                let definition = self
+                    .definitions
+                    .lock()
+                    .unwrap()
+                    .get(instance)
+                    .cloned()
+                    .unwrap_or_else(definition_identity);
+                SagaRunnableInstance::new(*instance, *status, identity, definition).unwrap()
+            })
             .collect())
     }
 
@@ -734,11 +907,35 @@ type Exec =
 
 #[allow(clippy::panic)] // reason: 测试常量策略，失败表示 helper 输入写错
 fn policy_from_millis(retry_millis: u64, timeout_millis: u64) -> SagaPolicy {
-    let spec = vocab::SagaRuntimePolicySpec::from_millis(retry_millis, timeout_millis);
+    let spec = vocab::SagaRuntimePolicySpec::from_static(
+        if retry_millis == 0 { 1 } else { 1_000 },
+        if timeout_millis == 0 {
+            30_000
+        } else {
+            timeout_millis
+        },
+        vocab::SagaBackoff::Fixed,
+        retry_millis,
+        retry_millis,
+        vocab::SagaJitter::None,
+    );
     match SagaPolicy::try_from(spec) {
         Ok(policy) => policy,
         Err(err) => panic!("invalid test saga policy: {err}"),
     }
+}
+
+#[allow(clippy::expect_used)] // reason: table-driven tests provide statically valid policy values
+fn policy_with_max_attempts(max_attempts: u32) -> SagaPolicy {
+    SagaPolicy::try_from(vocab::SagaRuntimePolicySpec::from_static(
+        max_attempts,
+        30_000,
+        vocab::SagaBackoff::Fixed,
+        0,
+        0,
+        vocab::SagaJitter::None,
+    ))
+    .expect("valid synthetic saga policy")
 }
 
 fn disabled_policy() -> SagaPolicy {
@@ -747,15 +944,14 @@ fn disabled_policy() -> SagaPolicy {
 
 #[allow(clippy::expect_used)] // reason: 测试常量必须能构造合法 executor config
 fn executor_config_with_policy_and_lease_ttl(
-    policy: SagaPolicy,
+    _policy: SagaPolicy,
     lease_ttl: Duration,
 ) -> SagaExecutorConfig {
     SagaExecutorConfig::new(
         CheckpointOwner::new(OWNER),
-        CONTRACT,
+        generated::saga::billing_v1::SPEC,
         "runner-a",
         lease_ttl,
-        policy,
     )
     .expect("valid test saga executor config")
 }
@@ -763,584 +959,16 @@ fn executor_config_with_policy_and_lease_ttl(
 #[test]
 #[allow(clippy::expect_used)] // reason: invalid generated spec is the assertion failure
 fn executor_config_from_contract_spec_derives_contract_and_policy() {
-    const CONTRACT_BINDING: vocab::ContractBinding = vocab::ContractBinding::from_static(
-        OWNER,
-        CONTRACT,
-        "v1",
-        "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-    );
-    const POLICY_SPEC: vocab::SagaRuntimePolicySpec =
-        vocab::SagaRuntimePolicySpec::from_millis(5000, 30000);
-    const STEPS: &[vocab::SagaStepBinding] = &[vocab::SagaStepBinding::from_static(
-        CONTRACT_BINDING,
-        "step1",
-        "step1.schema.json",
-    )];
-    const SPEC: vocab::SagaContractBinding =
-        vocab::SagaContractBinding::from_parts(CONTRACT_BINDING, POLICY_SPEC, STEPS);
-
     let config = SagaExecutorConfig::from_contract_spec(
         CheckpointOwner::new(OWNER),
         "runner-a",
         Duration::from_secs(30),
-        SPEC,
+        generated::saga::billing_v1::SPEC,
     )
     .expect("generated test spec is valid");
 
     assert_eq!(config.identity().contract_id().as_str(), CONTRACT);
-    assert!(matches!(config.policy, SagaPolicy::Bounded(_)));
-}
-
-const TYPED_CONTRACT: vocab::ContractBinding = vocab::ContractBinding::from_static(
-    OWNER,
-    CONTRACT,
-    "v1",
-    "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-);
-const TYPED_STEP_RESERVE: vocab::SagaStepBinding =
-    vocab::SagaStepBinding::from_static(TYPED_CONTRACT, "reserve_funds", "reserve.schema.json");
-const TYPED_STEP_CAPTURE: vocab::SagaStepBinding =
-    vocab::SagaStepBinding::from_static(TYPED_CONTRACT, "capture", "capture.schema.json");
-const TYPED_STEPS_ONE: &[vocab::SagaStepBinding] = &[TYPED_STEP_RESERVE];
-const TYPED_STEPS_TWO: &[vocab::SagaStepBinding] = &[TYPED_STEP_RESERVE, TYPED_STEP_CAPTURE];
-const TYPED_POLICY: vocab::SagaRuntimePolicySpec = vocab::SagaRuntimePolicySpec::from_millis(0, 0);
-const TYPED_SPEC_ONE: vocab::SagaContractBinding =
-    vocab::SagaContractBinding::from_parts(TYPED_CONTRACT, TYPED_POLICY, TYPED_STEPS_ONE);
-const TYPED_SPEC_TWO: vocab::SagaContractBinding =
-    vocab::SagaContractBinding::from_parts(TYPED_CONTRACT, TYPED_POLICY, TYPED_STEPS_TWO);
-const OTHER_TYPED_CONTRACT: vocab::ContractBinding = vocab::ContractBinding::from_static(
-    "orders",
-    "orders.checkout",
-    "v1",
-    "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
-);
-const OTHER_TYPED_STEP_RESERVE: vocab::SagaStepBinding = vocab::SagaStepBinding::from_static(
-    OTHER_TYPED_CONTRACT,
-    "reserve_funds",
-    "reserve.schema.json",
-);
-
-#[derive(Debug, serde::Serialize)]
-struct TypedReserveOutput {
-    step: &'static str,
-    saga_id: String,
-}
-
-impl vocab::SagaStepOutputBinding for TypedReserveOutput {
-    const BINDING: vocab::SagaStepBinding = TYPED_STEP_RESERVE;
-}
-
-#[derive(Debug, serde::Serialize)]
-struct TypedCaptureOutput {
-    step: &'static str,
-    saga_id: String,
-}
-
-impl vocab::SagaStepOutputBinding for TypedCaptureOutput {
-    const BINDING: vocab::SagaStepBinding = TYPED_STEP_CAPTURE;
-}
-
-#[derive(Debug)]
-struct TypedReserveStep {
-    execute_count: Arc<AtomicU32>,
-    compensate_count: Arc<AtomicU32>,
-    execute_error: Option<EngineErrorKind>,
-    compensate_failed: bool,
-}
-
-impl SagaStep for TypedReserveStep {
-    const BINDING: vocab::SagaStepBinding = TYPED_STEP_RESERVE;
-
-    type Output = TypedReserveOutput;
-
-    async fn execute(&self, ctx: SagaStepCtx) -> Result<Self::Output, EngineError> {
-        let count = self.execute_count.clone();
-        let execute_error = self.execute_error;
-        count.fetch_add(1, Ordering::SeqCst);
-        if let Some(kind) = execute_error {
-            return Err(EngineError::new(kind));
-        }
-        Ok(TypedReserveOutput {
-            step: "reserve_funds",
-            saga_id: ctx.saga_id().as_uuid().to_string(),
-        })
-    }
-
-    async fn compensate(&self, _ctx: SagaStepCtx) -> Result<CompensationOutcome, EngineError> {
-        let count = self.compensate_count.clone();
-        let compensate_failed = self.compensate_failed;
-        count.fetch_add(1, Ordering::SeqCst);
-        if compensate_failed {
-            Ok(CompensationOutcome::Failed)
-        } else {
-            Ok(CompensationOutcome::Compensated)
-        }
-    }
-}
-
-#[derive(Debug)]
-struct TypedCaptureStep;
-
-impl SagaStep for TypedCaptureStep {
-    const BINDING: vocab::SagaStepBinding = TYPED_STEP_CAPTURE;
-
-    type Output = TypedCaptureOutput;
-
-    async fn execute(&self, ctx: SagaStepCtx) -> Result<Self::Output, EngineError> {
-        Ok(TypedCaptureOutput {
-            step: "capture",
-            saga_id: ctx.saga_id().as_uuid().to_string(),
-        })
-    }
-
-    async fn compensate(&self, _ctx: SagaStepCtx) -> Result<CompensationOutcome, EngineError> {
-        Ok(CompensationOutcome::Compensated)
-    }
-}
-
-#[derive(Debug)]
-struct TypedFailingCaptureStep;
-
-impl SagaStep for TypedFailingCaptureStep {
-    const BINDING: vocab::SagaStepBinding = TYPED_STEP_CAPTURE;
-
-    type Output = TypedCaptureOutput;
-
-    async fn execute(&self, _ctx: SagaStepCtx) -> Result<Self::Output, EngineError> {
-        Err(EngineError::new(EngineErrorKind::Transient))
-    }
-
-    async fn compensate(&self, _ctx: SagaStepCtx) -> Result<CompensationOutcome, EngineError> {
-        Ok(CompensationOutcome::Compensated)
-    }
-}
-
-struct FailingSerialize;
-
-impl vocab::SagaStepOutputBinding for FailingSerialize {
-    const BINDING: vocab::SagaStepBinding = TYPED_STEP_RESERVE;
-}
-
-impl serde::Serialize for FailingSerialize {
-    fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        Err(serde::ser::Error::custom("intentional serialize failure"))
-    }
-}
-
-#[derive(Debug)]
-struct SerializeFailStep;
-
-impl SagaStep for SerializeFailStep {
-    const BINDING: vocab::SagaStepBinding = TYPED_STEP_RESERVE;
-
-    type Output = FailingSerialize;
-
-    async fn execute(&self, _ctx: SagaStepCtx) -> Result<Self::Output, EngineError> {
-        Ok(FailingSerialize)
-    }
-
-    async fn compensate(&self, _ctx: SagaStepCtx) -> Result<CompensationOutcome, EngineError> {
-        Ok(CompensationOutcome::Compensated)
-    }
-}
-
-#[derive(Debug)]
-struct CountingSerializeFailStep {
-    compensate_count: Arc<AtomicU32>,
-}
-
-impl SagaStep for CountingSerializeFailStep {
-    const BINDING: vocab::SagaStepBinding = TYPED_STEP_RESERVE;
-
-    type Output = FailingSerialize;
-
-    async fn execute(&self, _ctx: SagaStepCtx) -> Result<Self::Output, EngineError> {
-        Ok(FailingSerialize)
-    }
-
-    async fn compensate(&self, _ctx: SagaStepCtx) -> Result<CompensationOutcome, EngineError> {
-        self.compensate_count.fetch_add(1, Ordering::SeqCst);
-        Ok(CompensationOutcome::Compensated)
-    }
-}
-
-#[derive(Debug, serde::Serialize)]
-struct WrongStepOutput;
-
-impl vocab::SagaStepOutputBinding for WrongStepOutput {
-    const BINDING: vocab::SagaStepBinding = TYPED_STEP_CAPTURE;
-}
-
-#[derive(Debug, serde::Serialize)]
-struct OtherContractReserveOutput;
-
-impl vocab::SagaStepOutputBinding for OtherContractReserveOutput {
-    const BINDING: vocab::SagaStepBinding = OTHER_TYPED_STEP_RESERVE;
-}
-
-#[derive(Debug)]
-struct WrongOutputReserveStep;
-
-impl SagaStep for WrongOutputReserveStep {
-    const BINDING: vocab::SagaStepBinding = TYPED_STEP_RESERVE;
-
-    type Output = WrongStepOutput;
-
-    async fn execute(&self, _ctx: SagaStepCtx) -> Result<Self::Output, EngineError> {
-        Ok(WrongStepOutput)
-    }
-
-    async fn compensate(&self, _ctx: SagaStepCtx) -> Result<CompensationOutcome, EngineError> {
-        Ok(CompensationOutcome::Compensated)
-    }
-}
-
-#[derive(Debug)]
-struct OtherContractReserveStep;
-
-impl SagaStep for OtherContractReserveStep {
-    const BINDING: vocab::SagaStepBinding = OTHER_TYPED_STEP_RESERVE;
-
-    type Output = OtherContractReserveOutput;
-
-    async fn execute(&self, _ctx: SagaStepCtx) -> Result<Self::Output, EngineError> {
-        Ok(OtherContractReserveOutput)
-    }
-
-    async fn compensate(&self, _ctx: SagaStepCtx) -> Result<CompensationOutcome, EngineError> {
-        Ok(CompensationOutcome::Compensated)
-    }
-}
-
-#[tokio::test]
-#[allow(clippy::expect_used)] // reason: typed wrapper regression test setup
-async fn typed_saga_action_wraps_execute_compensate_and_serializes_output() {
-    let execute_count = Arc::new(AtomicU32::new(0));
-    let compensate_count = Arc::new(AtomicU32::new(0));
-    let mut builder = TypedSagaActionFactory::builder(TYPED_SPEC_ONE);
-    builder
-        .register_step::<TypedReserveStep, _>({
-            let execute_count = execute_count.clone();
-            let compensate_count = compensate_count.clone();
-            move || TypedReserveStep {
-                execute_count: execute_count.clone(),
-                compensate_count: compensate_count.clone(),
-                execute_error: None,
-                compensate_failed: false,
-            }
-        })
-        .expect("register typed step");
-    let factory = builder.finish().expect("typed factory");
-    let actions = factory.build();
-    assert_eq!(actions.len(), 1);
-
-    let output = actions[0]
-        .do_it(SagaActionCtx::new(instance(), "reserve_funds"))
-        .await
-        .expect("typed execute succeeds");
-    let json: serde_json::Value = serde_json::from_slice(&output).expect("json output");
-    assert_eq!(json["step"], "reserve_funds");
-    assert_eq!(execute_count.load(Ordering::SeqCst), 1);
-
-    actions[0]
-        .undo_it(SagaActionCtx::new(instance(), "reserve_funds"))
-        .await
-        .expect("typed compensate succeeds");
-    assert_eq!(compensate_count.load(Ordering::SeqCst), 1);
-}
-
-#[tokio::test]
-#[allow(clippy::expect_used)] // reason: typed wrapper regression test setup
-async fn typed_saga_action_maps_engine_errors_and_serialization_failures() {
-    let mut transient = TypedSagaActionFactory::builder(TYPED_SPEC_ONE);
-    transient
-        .register_step::<TypedReserveStep, _>(|| TypedReserveStep {
-            execute_count: Arc::new(AtomicU32::new(0)),
-            compensate_count: Arc::new(AtomicU32::new(0)),
-            execute_error: Some(EngineErrorKind::Transient),
-            compensate_failed: false,
-        })
-        .expect("register transient step");
-    let transient_factory = transient.finish().expect("factory");
-    let transient_actions = transient_factory.build();
-    let err = transient_actions[0]
-        .do_it(SagaActionCtx::new(instance(), "reserve_funds"))
-        .await
-        .expect_err("transient should fail action");
-    assert!(matches!(err, SagaActionError::ActionFailed));
-    assert!(is_saga_action_retryable(&err));
-
-    let mut permanent = TypedSagaActionFactory::builder(TYPED_SPEC_ONE);
-    permanent
-        .register_step::<TypedReserveStep, _>(|| TypedReserveStep {
-            execute_count: Arc::new(AtomicU32::new(0)),
-            compensate_count: Arc::new(AtomicU32::new(0)),
-            execute_error: Some(EngineErrorKind::Permanent),
-            compensate_failed: false,
-        })
-        .expect("register permanent step");
-    let permanent_factory = permanent.finish().expect("factory");
-    let permanent_actions = permanent_factory.build();
-    let err = permanent_actions[0]
-        .do_it(SagaActionCtx::new(instance(), "reserve_funds"))
-        .await
-        .expect_err("permanent should fail action");
-    assert!(matches!(err, SagaActionError::NonRetryableActionFailed));
-    assert!(!is_saga_action_retryable(&err));
-
-    let mut serialize = TypedSagaActionFactory::builder(TYPED_SPEC_ONE);
-    serialize
-        .register_step::<SerializeFailStep, _>(|| SerializeFailStep)
-        .expect("register serialize step");
-    let serialize_factory = serialize.finish().expect("factory");
-    let serialize_actions = serialize_factory.build();
-    let err = serialize_actions[0]
-        .do_it(SagaActionCtx::new(instance(), "reserve_funds"))
-        .await
-        .expect_err("serialization should fail action");
-    assert!(matches!(err, SagaActionError::SerializeFailed));
-    assert!(!is_saga_action_retryable(&err));
-}
-
-#[tokio::test]
-#[allow(clippy::expect_used)] // reason: typed executor regression test setup
-async fn typed_saga_output_serialize_failure_compensates_current_step() {
-    let compensate_count = Arc::new(AtomicU32::new(0));
-    let mut builder = TypedSagaActionFactory::builder(TYPED_SPEC_ONE);
-    builder
-        .register_step::<CountingSerializeFailStep, _>({
-            let compensate_count = compensate_count.clone();
-            move || CountingSerializeFailStep {
-                compensate_count: compensate_count.clone(),
-            }
-        })
-        .expect("register serialize-failing step");
-    let factory = builder.finish().expect("typed factory");
-    let journal = Arc::new(FakeJournal::default());
-    let cp = Arc::new(FakeCheckpointStore::default());
-    let dlx = Arc::new(FakeDeadLetterStore::default());
-    let exec = SagaExecutorImpl::new(
-        SagaExecutorDeps::new(
-            journal.clone(),
-            ready_instance_store(),
-            cp,
-            dlx,
-            factory,
-            runtime_lock(),
-        ),
-        executor_config_with_policy_and_lease_ttl(disabled_policy(), Duration::from_secs(30)),
-    );
-
-    let outcome = exec.run(instance()).await;
-
-    assert!(
-        matches!(
-            outcome,
-            SagaOutcome::Failed {
-                error: SagaActionError::SerializeFailed,
-                ..
-            }
-        ),
-        "output serialization must fail the saga: {outcome:?}"
-    );
-    assert_eq!(
-        compensate_count.load(Ordering::SeqCst),
-        1,
-        "post-execute serialization failure must compensate the current step"
-    );
-    let log = journal.log();
-    assert_eq!(
-        log,
-        vec![
-            ("reserve_funds".to_string(), SagaJournalStatus::Executing),
-            ("reserve_funds".to_string(), SagaJournalStatus::Compensating),
-            ("reserve_funds".to_string(), SagaJournalStatus::Compensated),
-        ],
-        "serialization failure must persist compensation intent before completion"
-    );
-}
-
-#[tokio::test]
-#[allow(clippy::expect_used)] // reason: typed executor regression test setup
-#[allow(clippy::panic)] // reason: explicit outcome branch assertion
-async fn typed_saga_compensation_failed_writes_failed_journal_and_dead_letter() {
-    let execute_count = Arc::new(AtomicU32::new(0));
-    let compensate_count = Arc::new(AtomicU32::new(0));
-    let mut builder = TypedSagaActionFactory::builder(TYPED_SPEC_TWO);
-    builder
-        .register_step::<TypedReserveStep, _>({
-            let execute_count = execute_count.clone();
-            let compensate_count = compensate_count.clone();
-            move || TypedReserveStep {
-                execute_count: execute_count.clone(),
-                compensate_count: compensate_count.clone(),
-                execute_error: None,
-                compensate_failed: true,
-            }
-        })
-        .expect("register reserve step");
-    builder
-        .register_step::<TypedFailingCaptureStep, _>(|| TypedFailingCaptureStep)
-        .expect("register failing capture step");
-    let factory = builder.finish().expect("typed factory");
-    let journal = Arc::new(FakeJournal::default());
-    let cp = Arc::new(FakeCheckpointStore::default());
-    let dlx = Arc::new(FakeDeadLetterStore::default());
-    let exec = SagaExecutorImpl::new(
-        SagaExecutorDeps::new(
-            journal.clone(),
-            ready_instance_store(),
-            cp,
-            dlx.clone(),
-            factory,
-            runtime_lock(),
-        ),
-        executor_config_with_policy_and_lease_ttl(disabled_policy(), Duration::from_secs(30)),
-    );
-
-    let outcome = exec.run(instance()).await;
-
-    match outcome {
-        SagaOutcome::Failed { failed_node, error } => {
-            assert_eq!(failed_node, "reserve_funds");
-            assert!(matches!(error, SagaActionError::NonRetryableActionFailed));
-        }
-        other => panic!("expected typed compensation failure, got {other:?}"),
-    }
-    assert_eq!(execute_count.load(Ordering::SeqCst), 1);
-    assert_eq!(compensate_count.load(Ordering::SeqCst), 1);
-    let log = journal.log();
-    assert!(
-        log.contains(&("reserve_funds".to_string(), SagaJournalStatus::Failed)),
-        "typed compensation failure must write Failed journal row: {log:?}"
-    );
-    let records = dlx.records();
-    assert_eq!(
-        records.len(),
-        1,
-        "typed compensation failure must write DLX"
-    );
-    let payload = &records[0].5;
-    assert!(
-        payload.contains("capture"),
-        "DLX payload must keep original forward failure step: {payload}"
-    );
-    assert!(
-        payload.contains("reserve_funds"),
-        "DLX payload must keep failed compensation step: {payload}"
-    );
-}
-
-#[test]
-#[allow(clippy::expect_used)] // reason: typed factory regression test setup
-fn typed_saga_factory_finish_rejects_missing_extra_and_reordered_steps() {
-    let missing = TypedSagaActionFactory::builder(TYPED_SPEC_ONE).finish();
-    assert!(matches!(
-        missing,
-        Err(TypedSagaFactoryError::StepCountMismatch {
-            expected: 1,
-            actual: 0
-        })
-    ));
-
-    let mut extra = TypedSagaActionFactory::builder(TYPED_SPEC_ONE);
-    extra
-        .register_step::<TypedReserveStep, _>(|| TypedReserveStep {
-            execute_count: Arc::new(AtomicU32::new(0)),
-            compensate_count: Arc::new(AtomicU32::new(0)),
-            execute_error: None,
-            compensate_failed: false,
-        })
-        .expect("register reserve");
-    extra
-        .register_step::<TypedCaptureStep, _>(|| TypedCaptureStep)
-        .expect("register capture");
-    let extra = extra.finish();
-    assert!(matches!(
-        extra,
-        Err(TypedSagaFactoryError::StepCountMismatch {
-            expected: 1,
-            actual: 2
-        })
-    ));
-
-    let mut reordered = TypedSagaActionFactory::builder(TYPED_SPEC_TWO);
-    reordered
-        .register_step::<TypedCaptureStep, _>(|| TypedCaptureStep)
-        .expect("register capture first");
-    reordered
-        .register_step::<TypedReserveStep, _>(|| TypedReserveStep {
-            execute_count: Arc::new(AtomicU32::new(0)),
-            compensate_count: Arc::new(AtomicU32::new(0)),
-            execute_error: None,
-            compensate_failed: false,
-        })
-        .expect("register reserve second");
-    let reordered = reordered.finish();
-    assert!(matches!(
-        reordered,
-        Err(TypedSagaFactoryError::StepBindingMismatch { index: 0, .. })
-    ));
-
-    let mut wrong_output = TypedSagaActionFactory::builder(TYPED_SPEC_ONE);
-    let err = wrong_output
-        .register_step::<WrongOutputReserveStep, _>(|| WrongOutputReserveStep)
-        .expect_err("wrong output binding must fail registration");
-    assert!(matches!(
-        err,
-        TypedSagaFactoryError::StepOutputBindingMismatch { .. }
-    ));
-}
-
-#[test]
-#[allow(clippy::expect_used)] // reason: typed factory regression test setup
-fn typed_saga_factory_rejects_cross_contract_step_binding() {
-    assert_ne!(OTHER_TYPED_CONTRACT, TYPED_CONTRACT);
-
-    let mut builder = TypedSagaActionFactory::builder(TYPED_SPEC_ONE);
-    builder
-        .register_step::<OtherContractReserveStep, _>(|| OtherContractReserveStep)
-        .expect("register same-shaped foreign step");
-
-    assert!(matches!(
-        builder.finish(),
-        Err(TypedSagaFactoryError::StepBindingMismatch { index: 0, .. })
-    ));
-}
-
-#[test]
-fn typed_saga_factory_error_display_includes_diagnostic_context() {
-    let count = TypedSagaFactoryError::StepCountMismatch {
-        expected: 1,
-        actual: 2,
-    }
-    .to_string();
-    assert!(count.contains("expected=1"), "{count}");
-    assert!(count.contains("actual=2"), "{count}");
-
-    let binding = TypedSagaFactoryError::StepBindingMismatch {
-        index: 0,
-        expected: Box::new(TYPED_STEP_RESERVE),
-        actual: Box::new(TYPED_STEP_CAPTURE),
-    }
-    .to_string();
-    assert!(binding.contains("index=0"), "{binding}");
-    assert!(binding.contains("reserve_funds"), "{binding}");
-    assert!(binding.contains("capture.schema.json"), "{binding}");
-
-    let output = TypedSagaFactoryError::StepOutputBindingMismatch {
-        step: Box::new(TYPED_STEP_RESERVE),
-        output: Box::new(TYPED_STEP_CAPTURE),
-    }
-    .to_string();
-    assert!(output.contains("reserve.schema.json"), "{output}");
-    assert!(output.contains("capture.schema.json"), "{output}");
-
-    let invalid = TypedSagaFactoryError::InvalidStepName { name: "not-valid!" }.to_string();
-    assert!(invalid.contains("not-valid!"), "{invalid}");
+    assert_eq!(config.definition(), &definition_identity());
 }
 
 fn ready_instance_store() -> Arc<FakeInstanceStore> {
@@ -1394,6 +1022,7 @@ where
     )
 }
 
+#[allow(clippy::expect_used)]
 fn executor_with_store_options<J>(
     journal: Arc<J>,
     instance_store: Arc<FakeInstanceStore>,
@@ -1412,10 +1041,12 @@ where
             cp,
             dlx,
             factory,
+            options.policy,
             options.runtime_lock,
         ),
         executor_config_with_policy_and_lease_ttl(options.policy, options.lease_ttl),
     )
+    .expect("test definition is registered")
 }
 
 fn executor_with_store_policy_and_lease_ttl<J>(
@@ -1638,7 +1269,7 @@ async fn run_three_steps_all_succeed_journal_order() {
     let (factory, counts) = FakeFactory::linear(&["step1", "step2", "step3"]);
     let exec = executor(journal.clone(), cp.clone(), dlx.clone(), factory);
 
-    let outcome = exec.run(instance()).await;
+    let outcome = exec.run(instance(), definition_identity()).await;
 
     assert!(
         matches!(outcome, SagaOutcome::Succeeded { .. }),
@@ -1687,7 +1318,7 @@ async fn runtime_lock_busy_interrupts_before_instance_registration_or_journal() 
         ExecOptions::new(disabled_policy(), Duration::from_secs(30), runtime_lock),
     );
 
-    let outcome = exec.run(instance()).await;
+    let outcome = exec.run(instance(), definition_identity()).await;
 
     assert!(
         matches!(
@@ -1730,7 +1361,7 @@ async fn runtime_lock_acquire_error_interrupts_without_journal() {
         ExecOptions::new(disabled_policy(), Duration::from_secs(30), runtime_lock),
     );
 
-    let outcome = exec.run(instance()).await;
+    let outcome = exec.run(instance(), definition_identity()).await;
 
     assert!(
         matches!(
@@ -1769,12 +1400,18 @@ async fn runtime_lock_allows_different_saga_keys_to_enter_provider_concurrently(
 
     let first = {
         let exec = Arc::clone(&exec);
-        tokio::spawn(async move { exec.run(instance_with_id(0x1121)).await })
+        tokio::spawn(async move {
+            exec.run(instance_with_id(0x1121), definition_identity())
+                .await
+        })
     };
     lock_store.wait_first_acquire_entered().await;
     let second = {
         let exec = Arc::clone(&exec);
-        tokio::spawn(async move { exec.run(instance_with_id(0x1122)).await })
+        tokio::spawn(async move {
+            exec.run(instance_with_id(0x1122), definition_identity())
+                .await
+        })
     };
     tokio::time::sleep(Duration::from_millis(10)).await;
 
@@ -1806,7 +1443,7 @@ async fn runtime_lock_released_after_success() {
         ExecOptions::new(disabled_policy(), Duration::from_secs(30), runtime_lock),
     );
 
-    let outcome = exec.run(instance()).await;
+    let outcome = exec.run(instance(), definition_identity()).await;
 
     assert!(
         matches!(outcome, SagaOutcome::Succeeded { .. }),
@@ -1835,7 +1472,7 @@ fn runtime_lock_busy_logs_context_fields() {
             ExecOptions::new(disabled_policy(), Duration::from_secs(30), runtime_lock),
         );
 
-        let outcome = exec.run(instance()).await;
+        let outcome = exec.run(instance(), definition_identity()).await;
         assert!(matches!(
             outcome,
             SagaOutcome::Interrupted {
@@ -1886,9 +1523,12 @@ async fn runtime_lock_lost_interrupts_in_flight_action_and_releases_best_effort(
         ExecOptions::new(disabled_policy(), Duration::from_millis(10), runtime_lock),
     );
 
-    let outcome = tokio::time::timeout(Duration::from_millis(50), exec.run(instance()))
-        .await
-        .expect("runtime lock loss must interrupt a hanging action");
+    let outcome = tokio::time::timeout(
+        Duration::from_millis(50),
+        exec.run(instance(), definition_identity()),
+    )
+    .await
+    .expect("runtime lock loss must interrupt a hanging action");
 
     assert!(
         matches!(
@@ -1941,7 +1581,7 @@ fn runtime_lock_release_failure_logs_context_fields() {
             ExecOptions::new(disabled_policy(), Duration::from_secs(30), runtime_lock),
         );
 
-        let outcome = exec.run(instance()).await;
+        let outcome = exec.run(instance(), definition_identity()).await;
         assert!(matches!(outcome, SagaOutcome::Succeeded { .. }));
     });
 
@@ -1987,9 +1627,12 @@ async fn runtime_lock_renew_error_interrupts_as_unavailable_and_releases_best_ef
         ExecOptions::new(disabled_policy(), Duration::from_millis(10), runtime_lock),
     );
 
-    let outcome = tokio::time::timeout(Duration::from_millis(50), exec.run(instance()))
-        .await
-        .expect("runtime lock renewal error must interrupt a hanging action");
+    let outcome = tokio::time::timeout(
+        Duration::from_millis(50),
+        exec.run(instance(), definition_identity()),
+    )
+    .await
+    .expect("runtime lock renewal error must interrupt a hanging action");
 
     assert!(
         matches!(
@@ -2033,7 +1676,7 @@ async fn step2_failure_reverse_compensates_step1_only() {
     ]);
     let exec = executor(journal.clone(), cp.clone(), dlx.clone(), factory);
 
-    let outcome = exec.run(instance()).await;
+    let outcome = exec.run(instance(), definition_identity()).await;
 
     match outcome {
         SagaOutcome::Failed { failed_node, .. } => assert_eq!(failed_node, "step2"),
@@ -2068,6 +1711,44 @@ async fn step2_failure_reverse_compensates_step1_only() {
     );
 }
 
+#[tokio::test]
+async fn post_effect_serialization_failure_uses_same_run_typed_receipt_for_compensation() {
+    let journal = Arc::new(FakeJournal::default());
+    let store = ready_instance_store();
+    let cp = Arc::new(FakeCheckpointStore::default());
+    let dlx = Arc::new(FakeDeadLetterStore::default());
+    let (factory, counts) = FakeFactory::behaviors(&[(
+        "step1",
+        FakeBehavior::PostEffectSerializeFail,
+        FakeBehavior::Succeed,
+    )]);
+    let exec = executor_with_store(journal.clone(), store, cp, dlx, factory);
+
+    let outcome = exec.run(instance(), definition_identity()).await;
+
+    assert!(
+        matches!(
+            outcome,
+            SagaOutcome::Failed {
+                error: SagaActionError::InvariantViolation,
+                ..
+            }
+        ),
+        "post-effect invariant must be reported after compensation: {outcome:?}"
+    );
+    assert_eq!(counts[0].dos(), 1);
+    assert_eq!(
+        counts[0].undos(),
+        1,
+        "same-run typed receipt must be retained"
+    );
+    assert!(
+        journal
+            .log()
+            .contains(&("step1".to_string(), SagaJournalStatus::Compensated))
+    );
+}
+
 // ── T009.1 #3：从 step2 checkpoint resume → 跳过 step1 ──────────────────────────
 
 #[tokio::test]
@@ -2082,33 +1763,378 @@ async fn resume_from_step2_checkpoint_skips_step1() {
     let (factory, counts) = FakeFactory::linear(&["step1", "step2", "step3"]);
     let exec = executor(journal.clone(), cp.clone(), dlx.clone(), factory);
 
-    let outcome = exec.resume(instance()).await;
+    let outcome = exec.resume(instance(), definition_identity()).await;
 
     assert!(
-        matches!(outcome, SagaOutcome::Succeeded { .. }),
+        matches!(
+            outcome,
+            SagaOutcome::Interrupted {
+                reason: SagaInterruption::ReceiptUnavailable
+            }
+        ),
         "{outcome:?}"
     );
-    // step1 不再执行（已完成）；step2/step3 续跑。
+    // 崩溃前完成的 step1 没有 durable receipt；#1924 前不得继续任何后续 effect。
     assert_eq!(counts[0].dos(), 0, "step1 应被跳过");
-    assert_eq!(counts[1].dos(), 1, "step2 应续跑");
-    assert_eq!(counts[2].dos(), 1, "step3 应续跑");
-    // 续跑后 journal 含 step2/step3 完成，checkpoint 推进到 3。
-    use SagaJournalStatus::Completed;
+    assert_eq!(counts[1].dos(), 0, "receipt 缺失时 step2 不得执行");
+    assert_eq!(counts[2].dos(), 0, "receipt 缺失时 step3 不得执行");
     let log = journal.log();
-    assert!(log.contains(&("step2".to_string(), Completed)));
-    assert!(log.contains(&("step3".to_string(), Completed)));
-    assert_eq!(cp.offset(&checkpoint_id_str()), Some(3));
+    assert!(
+        !log.iter()
+            .any(|(step, _)| step == "step2" || step == "step3")
+    );
+    assert_eq!(cp.offset(&checkpoint_id_str()), Some(1));
 }
 
 // ── #1651：runtime retry/timeout policy ───────────────────────────────────────
 
 #[test]
-fn saga_policy_rejects_retry_without_timeout() {
-    let spec = vocab::SagaRuntimePolicySpec::from_millis(5, 0);
+fn saga_policy_rejects_zero_time_budget() {
+    let spec = vocab::SagaRuntimePolicySpec::from_static(
+        2,
+        0,
+        vocab::SagaBackoff::Fixed,
+        5,
+        5,
+        vocab::SagaJitter::None,
+    );
     assert!(
         SagaPolicy::try_from(spec).is_err(),
-        "retryMillis > 0 with timeoutMillis = 0 must be invalid"
+        "zero time budget must be invalid"
     );
+}
+
+#[test]
+fn saga_idempotency_key_is_stable_phase_scoped_and_redacted() {
+    let definition = definition_identity();
+    let forward = super::SagaIdempotencyKey::derive(
+        instance(),
+        &definition,
+        generated::saga::billing_v1::STEP_0,
+        super::SagaActionPhase::Forward,
+    );
+    let repeated = super::SagaIdempotencyKey::derive(
+        instance(),
+        &definition,
+        generated::saga::billing_v1::STEP_0,
+        super::SagaActionPhase::Forward,
+    );
+    let compensation = super::SagaIdempotencyKey::derive(
+        instance(),
+        &definition,
+        generated::saga::billing_v1::STEP_0,
+        super::SagaActionPhase::Compensation,
+    );
+    assert_eq!(forward, repeated);
+    assert_ne!(forward, compensation);
+    assert_eq!(
+        forward.to_hex(),
+        "81073854e3aaf07ca4383210de3d8ee75423db9bcf47b3c9f000293bad8e312f"
+    );
+    assert!(!format!("{forward:?}").contains(&forward.to_hex()));
+}
+
+#[test]
+#[allow(clippy::expect_used)] // reason: synthetic vectors must be structurally valid
+fn saga_idempotency_key_changes_for_every_effect_identity_dimension() {
+    const OTHER_SCHEMA: &str =
+        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const OTHER_GENERATION: &str =
+        "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let definition = definition_identity();
+    let step = generated::saga::billing_v1::STEP_0;
+    let base = super::SagaIdempotencyKey::derive(
+        instance(),
+        &definition,
+        step,
+        super::SagaActionPhase::Forward,
+    );
+    let other_tenant = vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d480")
+        .expect("valid alternate tenant");
+    let tenant_instance =
+        SagaInstanceRef::new(other_tenant, saga_id()).expect("valid alternate-tenant instance");
+
+    let identity_variants = [
+        consistency::SagaDefinitionIdentity::new(
+            "billing.checkout-alt",
+            definition.version(),
+            definition.schema_digest(),
+            definition.action_registry_generation(),
+        )
+        .expect("valid alternate contract identity"),
+        consistency::SagaDefinitionIdentity::new(
+            definition.contract_id(),
+            "v999",
+            definition.schema_digest(),
+            definition.action_registry_generation(),
+        )
+        .expect("valid alternate version identity"),
+        consistency::SagaDefinitionIdentity::new(
+            definition.contract_id(),
+            definition.version(),
+            OTHER_SCHEMA,
+            definition.action_registry_generation(),
+        )
+        .expect("valid alternate schema identity"),
+        consistency::SagaDefinitionIdentity::new(
+            definition.contract_id(),
+            definition.version(),
+            definition.schema_digest(),
+            OTHER_GENERATION,
+        )
+        .expect("valid alternate action identity"),
+    ];
+    for changed in identity_variants {
+        assert_ne!(
+            base,
+            super::SagaIdempotencyKey::derive(
+                instance(),
+                &changed,
+                step,
+                super::SagaActionPhase::Forward,
+            ),
+            "every pinned definition component must affect the key"
+        );
+    }
+
+    let changed_step = vocab::SagaStepBinding::from_static(
+        generated::saga::billing_v1::CONTRACT,
+        "reserve_funds_alt",
+        step.receipt_schema(),
+        step.effect_scope(),
+        step.compensation_effect_scope(),
+        step.retry_class(),
+    );
+    let changed_forward_scope = vocab::SagaStepBinding::from_static(
+        generated::saga::billing_v1::CONTRACT,
+        step.name(),
+        step.receipt_schema(),
+        "billing.reserve-funds-alt",
+        step.compensation_effect_scope(),
+        step.retry_class(),
+    );
+    let changed_compensation_scope = vocab::SagaStepBinding::from_static(
+        generated::saga::billing_v1::CONTRACT,
+        step.name(),
+        step.receipt_schema(),
+        step.effect_scope(),
+        "billing.release-funds-alt",
+        step.retry_class(),
+    );
+    for changed in [changed_step, changed_forward_scope] {
+        assert_ne!(
+            base,
+            super::SagaIdempotencyKey::derive(
+                instance(),
+                &definition,
+                changed,
+                super::SagaActionPhase::Forward,
+            )
+        );
+    }
+    assert_ne!(
+        base,
+        super::SagaIdempotencyKey::derive(
+            tenant_instance,
+            &definition,
+            step,
+            super::SagaActionPhase::Forward,
+        )
+    );
+    assert_ne!(
+        base,
+        super::SagaIdempotencyKey::derive(
+            instance_with_id(0x1122),
+            &definition,
+            step,
+            super::SagaActionPhase::Forward,
+        )
+    );
+
+    let compensation = super::SagaIdempotencyKey::derive(
+        instance(),
+        &definition,
+        step,
+        super::SagaActionPhase::Compensation,
+    );
+    assert_ne!(base, compensation, "phase must affect the key");
+    assert_ne!(
+        compensation,
+        super::SagaIdempotencyKey::derive(
+            instance(),
+            &definition,
+            changed_compensation_scope,
+            super::SagaActionPhase::Compensation,
+        ),
+        "phase-specific compensation scope must affect the key"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn saga_idempotency_key_is_constant_across_retry_attempts() {
+    let journal = Arc::new(FakeJournal::default());
+    let cp = Arc::new(FakeCheckpointStore::default());
+    let dlx = Arc::new(FakeDeadLetterStore::default());
+    let (factory, counts, observed_keys) = FakeFactory::retry_key_probe();
+    let exec = executor_with_policy(journal, cp, dlx, factory, policy_with_max_attempts(3));
+
+    let outcome = exec.run(instance(), definition_identity()).await;
+
+    assert!(
+        matches!(outcome, SagaOutcome::Succeeded { .. }),
+        "{outcome:?}"
+    );
+    assert_eq!(counts[0].dos(), 3);
+    let keys = observed_keys
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    assert_eq!(keys.len(), 3);
+    assert!(keys.iter().all(|key| key == &keys[0]));
+}
+
+#[test]
+fn saga_failure_classification_is_closed_and_engine_invariant_stays_invariant() {
+    use super::SagaFailureClass;
+
+    for (error, expected) in [
+        (SagaActionError::ActionFailed, SagaFailureClass::Transient),
+        (
+            SagaActionError::NonRetryableActionFailed,
+            SagaFailureClass::Permanent,
+        ),
+        (
+            SagaActionError::InvariantViolation,
+            SagaFailureClass::Invariant,
+        ),
+        (
+            SagaActionError::OutcomeUnknown,
+            SagaFailureClass::OutcomeUnknown,
+        ),
+        (
+            SagaActionError::OwnershipLost,
+            SagaFailureClass::OwnershipLost,
+        ),
+    ] {
+        assert_eq!(error.classification(), expected);
+    }
+    let mapped = super::engine_error_to_action_error(consistency::EngineError::new(
+        consistency::EngineErrorKind::Invariant,
+    ));
+    assert!(matches!(mapped, SagaActionError::InvariantViolation));
+    assert_eq!(mapped.classification(), SagaFailureClass::Invariant);
+}
+
+#[tokio::test(start_paused = true)]
+async fn saga_retry_attempt_cap_includes_first_call_and_never_class_disables_retry() {
+    for (max_attempts, expected_calls) in [(1, 1), (3, 3)] {
+        let journal = Arc::new(FakeJournal::default());
+        let cp = Arc::new(FakeCheckpointStore::default());
+        let dlx = Arc::new(FakeDeadLetterStore::default());
+        let (factory, counts) =
+            FakeFactory::behaviors(&[("step1", FakeBehavior::Fail, FakeBehavior::Succeed)]);
+        let exec = executor_with_policy(
+            journal,
+            cp,
+            dlx,
+            factory,
+            policy_with_max_attempts(max_attempts),
+        );
+
+        let outcome = exec.run(instance(), definition_identity()).await;
+
+        assert!(matches!(outcome, SagaOutcome::Failed { .. }), "{outcome:?}");
+        assert_eq!(
+            counts[0].dos(),
+            expected_calls,
+            "maxAttempts includes the first call"
+        );
+    }
+
+    let journal = Arc::new(FakeJournal::default());
+    let cp = Arc::new(FakeCheckpointStore::default());
+    let dlx = Arc::new(FakeDeadLetterStore::default());
+    let (factory, counts) = FakeFactory::behaviors_with_retry_class(&[(
+        "step1",
+        FakeBehavior::FailTimes(1),
+        FakeBehavior::Succeed,
+        vocab::SagaRetryClass::Never,
+    )]);
+    let exec = executor_with_policy(journal, cp, dlx, factory, policy_with_max_attempts(3));
+
+    let outcome = exec.run(instance(), definition_identity()).await;
+
+    assert!(matches!(outcome, SagaOutcome::Failed { .. }), "{outcome:?}");
+    assert_eq!(
+        counts[0].dos(),
+        1,
+        "Never steps must not retry transient errors"
+    );
+}
+
+#[test]
+#[allow(clippy::expect_used)]
+fn saga_policy_backoff_saturates_and_full_jitter_stays_inclusive() {
+    let exponential = SagaPolicy::try_from(vocab::SagaRuntimePolicySpec::from_static(
+        u32::MAX,
+        u64::MAX,
+        vocab::SagaBackoff::Exponential,
+        u64::MAX,
+        u64::MAX,
+        vocab::SagaJitter::None,
+    ))
+    .expect("valid saturated policy");
+    assert_eq!(
+        exponential.delay_for(u32::MAX, 0),
+        Duration::from_millis(u64::MAX)
+    );
+
+    let jitter = SagaPolicy::try_from(vocab::SagaRuntimePolicySpec::from_static(
+        2,
+        100,
+        vocab::SagaBackoff::Fixed,
+        10,
+        10,
+        vocab::SagaJitter::Full,
+    ))
+    .expect("valid jitter policy");
+    assert!(jitter.delay_for(1, u64::MAX) <= Duration::from_millis(10));
+}
+
+#[test]
+fn retry_entropy_test_seam_is_deterministic_but_attempt_scoped() {
+    let first = super::saga_retry_entropy(
+        instance(),
+        "reserve_funds",
+        super::SagaActionPhase::Forward,
+        1,
+    );
+    assert_eq!(
+        first,
+        super::saga_retry_entropy(
+            instance(),
+            "reserve_funds",
+            super::SagaActionPhase::Forward,
+            1,
+        )
+    );
+    assert_ne!(
+        first,
+        super::saga_retry_entropy(
+            instance(),
+            "reserve_funds",
+            super::SagaActionPhase::Forward,
+            2,
+        )
+    );
+}
+
+#[test]
+fn registry_error_preserves_invalid_policy_kind() {
+    let error = super::SagaDefinitionRegistryError::from(super::SagaPolicyError::ZeroAttempts);
+    assert!(matches!(
+        error,
+        super::SagaDefinitionRegistryError::InvalidPolicy(super::SagaPolicyError::ZeroAttempts)
+    ));
 }
 
 #[tokio::test(start_paused = true)]
@@ -2126,7 +2152,7 @@ async fn policy_retries_forward_action_until_success_within_budget() {
         policy_from_millis(5, 50),
     );
 
-    let outcome = exec.run(instance()).await;
+    let outcome = exec.run(instance(), definition_identity()).await;
 
     assert!(
         matches!(outcome, SagaOutcome::Succeeded { .. }),
@@ -2148,7 +2174,7 @@ async fn policy_retries_forward_action_until_success_within_budget() {
 
 #[tokio::test(start_paused = true)]
 #[allow(clippy::panic)] // reason: 测试断言分支，item-level carve-out
-async fn policy_forward_timeout_compensates_completed_prefix() {
+async fn policy_forward_timeout_fails_closed_without_compensating_prefix() {
     let journal = Arc::new(FakeJournal::default());
     let cp = Arc::new(FakeCheckpointStore::default());
     let dlx = Arc::new(FakeDeadLetterStore::default());
@@ -2157,15 +2183,17 @@ async fn policy_forward_timeout_compensates_completed_prefix() {
         ("step2", FakeBehavior::Hang, FakeBehavior::Succeed),
         ("step3", FakeBehavior::Succeed, FakeBehavior::Succeed),
     ]);
-    let exec = executor_with_policy(
+    let store = ready_instance_store();
+    let exec = executor_with_store_and_policy(
         journal.clone(),
+        store.clone(),
         cp,
         dlx.clone(),
         factory,
         policy_from_millis(0, 10),
     );
 
-    let outcome = exec.run(instance()).await;
+    let outcome = exec.run(instance(), definition_identity()).await;
 
     match outcome {
         SagaOutcome::Failed { failed_node, error } => {
@@ -2178,7 +2206,11 @@ async fn policy_forward_timeout_compensates_completed_prefix() {
         other => panic!("expected Failed, got {other:?}"),
     }
     assert_eq!(counts[0].dos(), 1);
-    assert_eq!(counts[0].undos(), 1, "completed prefix must be compensated");
+    assert_eq!(
+        counts[0].undos(),
+        0,
+        "unknown outcome must not trigger compensation"
+    );
     assert_eq!(counts[1].dos(), 1);
     assert_eq!(
         counts[2].dos(),
@@ -2190,16 +2222,18 @@ async fn policy_forward_timeout_compensates_completed_prefix() {
         "forward timeout alone must not DLX"
     );
     assert!(
-        journal
-            .log()
-            .contains(&("step1".to_string(), SagaJournalStatus::Compensated)),
-        "step1 compensation completion must be journaled"
+        !journal.log().iter().any(|(_, status)| matches!(
+            status,
+            SagaJournalStatus::Compensating | SagaJournalStatus::Compensated
+        )),
+        "unknown outcome must not write compensation journal rows"
     );
+    assert_eq!(store.status(instance()), Some(SagaInstanceStatus::Degraded));
 }
 
 #[tokio::test(start_paused = true)]
 #[allow(clippy::panic)] // reason: 测试断言分支，item-level carve-out
-async fn policy_retry_budget_exhaustion_compensates_completed_prefix() {
+async fn policy_time_budget_exhaustion_fails_closed() {
     let journal = Arc::new(FakeJournal::default());
     let cp = Arc::new(FakeCheckpointStore::default());
     let dlx = Arc::new(FakeDeadLetterStore::default());
@@ -2207,9 +2241,17 @@ async fn policy_retry_budget_exhaustion_compensates_completed_prefix() {
         ("step1", FakeBehavior::Succeed, FakeBehavior::Succeed),
         ("step2", FakeBehavior::Fail, FakeBehavior::Succeed),
     ]);
-    let exec = executor_with_policy(journal, cp, dlx.clone(), factory, policy_from_millis(5, 12));
+    let store = ready_instance_store();
+    let exec = executor_with_store_and_policy(
+        journal,
+        store.clone(),
+        cp,
+        dlx.clone(),
+        factory,
+        policy_from_millis(5, 12),
+    );
 
-    let outcome = exec.run(instance()).await;
+    let outcome = exec.run(instance(), definition_identity()).await;
 
     match outcome {
         SagaOutcome::Failed { failed_node, error } => {
@@ -2225,8 +2267,13 @@ async fn policy_retry_budget_exhaustion_compensates_completed_prefix() {
         counts[1].dos() > 1,
         "step2 should retry before budget expires"
     );
-    assert_eq!(counts[0].undos(), 1, "completed prefix must be compensated");
+    assert_eq!(
+        counts[0].undos(),
+        0,
+        "unknown outcome must not be compensated"
+    );
     assert!(dlx.records().is_empty());
+    assert_eq!(store.status(instance()), Some(SagaInstanceStatus::Degraded));
 }
 
 #[tokio::test(start_paused = true)]
@@ -2247,7 +2294,7 @@ async fn policy_retries_compensation_action_until_success_within_budget() {
         policy_from_millis(5, 50),
     );
 
-    let outcome = exec.run(instance()).await;
+    let outcome = exec.run(instance(), definition_identity()).await;
 
     match outcome {
         SagaOutcome::Failed { failed_node, error } => {
@@ -2281,7 +2328,7 @@ async fn policy_retries_compensation_action_until_success_within_budget() {
 
 #[tokio::test(start_paused = true)]
 #[allow(clippy::panic)] // reason: 测试断言分支，item-level carve-out
-async fn policy_compensation_timeout_writes_dead_letter() {
+async fn policy_compensation_timeout_fails_closed_without_dead_letter() {
     let journal = Arc::new(FakeJournal::default());
     let cp = Arc::new(FakeCheckpointStore::default());
     let dlx = Arc::new(FakeDeadLetterStore::default());
@@ -2289,15 +2336,17 @@ async fn policy_compensation_timeout_writes_dead_letter() {
         ("step1", FakeBehavior::Succeed, FakeBehavior::Hang),
         ("step2", FakeBehavior::SerializeFail, FakeBehavior::Succeed),
     ]);
-    let exec = executor_with_policy(
+    let store = ready_instance_store();
+    let exec = executor_with_store_and_policy(
         journal.clone(),
+        store.clone(),
         cp,
         dlx.clone(),
         factory,
         policy_from_millis(0, 10),
     );
 
-    let outcome = exec.run(instance()).await;
+    let outcome = exec.run(instance(), definition_identity()).await;
 
     match outcome {
         SagaOutcome::Failed { failed_node, error } => {
@@ -2310,13 +2359,17 @@ async fn policy_compensation_timeout_writes_dead_letter() {
         other => panic!("expected Failed, got {other:?}"),
     }
     assert_eq!(counts[0].undos(), 1, "hung compensation is attempted once");
-    assert_eq!(dlx.records().len(), 1, "compensation timeout must DLX");
     assert!(
-        journal
+        dlx.records().is_empty(),
+        "unknown compensation outcome must not DLX"
+    );
+    assert!(
+        !journal
             .log()
             .contains(&("step1".to_string(), SagaJournalStatus::Failed)),
-        "compensation timeout must write Failed journal row"
+        "unknown compensation outcome must not assert a known Failed result"
     );
+    assert_eq!(store.status(instance()), Some(SagaInstanceStatus::Degraded));
 }
 
 #[tokio::test(start_paused = true)]
@@ -2338,7 +2391,7 @@ async fn policy_renews_lease_during_forward_action_and_interrupts_on_loss() {
         Duration::from_millis(10),
     );
 
-    let outcome = exec.run(instance()).await;
+    let outcome = exec.run(instance(), definition_identity()).await;
 
     assert!(
         matches!(
@@ -2389,9 +2442,12 @@ async fn disabled_policy_renews_lease_during_forward_action_and_interrupts_on_lo
         Duration::from_millis(10),
     );
 
-    let outcome = tokio::time::timeout(Duration::from_millis(50), exec.run(instance()))
-        .await
-        .expect("disabled policy must stop when in-phase lease renewal is lost");
+    let outcome = tokio::time::timeout(
+        Duration::from_millis(50),
+        exec.run(instance(), definition_identity()),
+    )
+    .await
+    .expect("disabled policy must stop when in-phase lease renewal is lost");
 
     assert!(
         matches!(
@@ -2438,9 +2494,12 @@ async fn disabled_policy_renews_lease_during_compensation_action_and_interrupts_
         Duration::from_millis(10),
     );
 
-    let outcome = tokio::time::timeout(Duration::from_millis(50), exec.run(instance()))
-        .await
-        .expect("disabled compensation must stop when in-phase lease renewal is lost");
+    let outcome = tokio::time::timeout(
+        Duration::from_millis(50),
+        exec.run(instance(), definition_identity()),
+    )
+    .await
+    .expect("disabled compensation must stop when in-phase lease renewal is lost");
 
     assert!(
         matches!(
@@ -2476,7 +2535,7 @@ fn policy_forward_timeout_logs_structured_warning() {
             FakeFactory::behaviors(&[("step1", FakeBehavior::Hang, FakeBehavior::Succeed)]);
         let exec = executor_with_policy(journal, cp, dlx, factory, policy_from_millis(0, 10));
 
-        let outcome = exec.run(instance()).await;
+        let outcome = exec.run(instance(), definition_identity()).await;
         assert!(
             matches!(
                 outcome,
@@ -2519,13 +2578,13 @@ fn policy_forward_timeout_logs_structured_warning() {
         timeout.get("step_timeout_ms").map(String::as_str),
         Some("10")
     );
-    assert_eq!(timeout.get("retry_delay_ms").map(String::as_str), Some("0"));
+    assert_eq!(timeout.get("max_attempts").map(String::as_str), Some("1"));
 }
 
 #[test]
 #[allow(clippy::expect_used)] // reason: missing event is the assertion failure
-fn policy_retry_warning_logs_error_kind() {
-    let events = capture_tracing_events(tracing::Level::WARN, true, || async {
+fn policy_retry_debug_logs_error_kind_without_warning_amplification() {
+    let events = capture_tracing_events(tracing::Level::DEBUG, true, || async {
         let journal = Arc::new(FakeJournal::default());
         let cp = Arc::new(FakeCheckpointStore::default());
         let dlx = Arc::new(FakeDeadLetterStore::default());
@@ -2533,7 +2592,7 @@ fn policy_retry_warning_logs_error_kind() {
             FakeFactory::behaviors(&[("step1", FakeBehavior::FailTimes(1), FakeBehavior::Succeed)]);
         let exec = executor_with_policy(journal, cp, dlx, factory, policy_from_millis(1, 20));
 
-        let outcome = exec.run(instance()).await;
+        let outcome = exec.run(instance(), definition_identity()).await;
         assert!(
             matches!(outcome, SagaOutcome::Succeeded { .. }),
             "test must drive one retry then success: {outcome:?}"
@@ -2547,7 +2606,7 @@ fn policy_retry_warning_logs_error_kind() {
                 .get("message")
                 .is_some_and(|message| message.contains("saga: action failed, retrying"))
         })
-        .expect("action retry warning event must be captured");
+        .expect("action retry debug event must be captured");
     assert_eq!(retry.get("phase").map(String::as_str), Some("forward"));
     assert_eq!(
         retry.get("error_kind").map(String::as_str),
@@ -2569,7 +2628,7 @@ fn policy_non_retryable_warning_logs_not_retrying() {
         )]);
         let exec = executor_with_policy(journal, cp, dlx, factory, policy_from_millis(1, 20));
 
-        let outcome = exec.run(instance()).await;
+        let outcome = exec.run(instance(), definition_identity()).await;
         assert!(
             matches!(
                 outcome,
@@ -2620,7 +2679,7 @@ async fn compensation_failure_writes_dead_letter() {
     let exec = executor(journal.clone(), cp.clone(), dlx.clone(), factory);
     // step1 do ok / undo FAILS；step2 do FAILS → 触发对 step1 的补偿，补偿失败 → dead-letter。
 
-    let outcome = exec.run(instance()).await;
+    let outcome = exec.run(instance(), definition_identity()).await;
 
     match outcome {
         // failed_node = 补偿失败的步（step1），非原始前向失败步（step2）——见 compensate() 语义。
@@ -2686,7 +2745,7 @@ fn compensation_failure_emits_dead_letter_metric() {
                 FakeFactory::steps(&[("step1", false, true), ("step2", true, false)]);
             let exec = executor(journal, cp, dlx, factory);
 
-            let outcome = exec.run(instance()).await;
+            let outcome = exec.run(instance(), definition_identity()).await;
             assert!(
                 matches!(outcome, SagaOutcome::Failed { .. }),
                 "test must drive compensation DLX: {outcome:?}"
@@ -2719,7 +2778,7 @@ fn compensation_dead_letter_write_error_logs_fields() {
             FakeFactory::steps(&[("step1", false, true), ("step2", true, false)]);
         let exec = executor(journal, cp, dlx, factory);
 
-        let outcome = exec.run(instance()).await;
+        let outcome = exec.run(instance(), definition_identity()).await;
         assert!(
             matches!(outcome, SagaOutcome::Failed { .. }),
             "test must drive compensation DLX write error: {outcome:?}"
@@ -2766,7 +2825,7 @@ fn compensation_dead_letter_write_error_emits_metric() {
                 FakeFactory::steps(&[("step1", false, true), ("step2", true, false)]);
             let exec = executor(journal, cp, dlx, factory);
 
-            let outcome = exec.run(instance()).await;
+            let outcome = exec.run(instance(), definition_identity()).await;
             assert!(
                 matches!(outcome, SagaOutcome::Failed { .. }),
                 "test must drive compensation DLX write error: {outcome:?}"
@@ -2794,7 +2853,7 @@ async fn resume_ready_instance_with_empty_journal_runs_from_step_zero() {
     // executor(...) seed Ready 实例行；空 journal 表示 first append 前崩溃，不是 unknown saga。
     let exec = executor(journal.clone(), cp, dlx, factory);
 
-    let outcome = exec.resume(instance()).await;
+    let outcome = exec.resume(instance(), definition_identity()).await;
 
     assert!(
         matches!(outcome, SagaOutcome::Succeeded { .. }),
@@ -2840,7 +2899,7 @@ async fn run_with_executing_append_failure_fails_closed() {
         factory,
     );
 
-    let outcome = exec.run(instance()).await;
+    let outcome = exec.run(instance(), definition_identity()).await;
 
     assert!(
         matches!(outcome, SagaOutcome::Failed { .. }),
@@ -2861,7 +2920,7 @@ async fn run_returns_interrupted_when_lease_busy() {
     let (factory, counts) = FakeFactory::linear(&["step1"]);
     let exec = executor_with_store(journal, instance_store, cp, dlx, factory);
 
-    let outcome = exec.run(instance()).await;
+    let outcome = exec.run(instance(), definition_identity()).await;
 
     assert!(
         matches!(
@@ -2884,7 +2943,7 @@ async fn run_terminal_releases_lease_and_rejects_restart() {
     let (factory, counts) = FakeFactory::linear(&["step1"]);
     let exec = executor_with_store(journal, store.clone(), cp, dlx, factory);
 
-    let outcome = exec.run(instance()).await;
+    let outcome = exec.run(instance(), definition_identity()).await;
     assert!(
         matches!(outcome, SagaOutcome::Succeeded { .. }),
         "{outcome:?}"
@@ -2899,12 +2958,12 @@ async fn run_terminal_releases_lease_and_rejects_restart() {
         "terminal success must release lease"
     );
 
-    let resumed = exec.resume(instance()).await;
+    let resumed = exec.resume(instance(), definition_identity()).await;
     assert!(
         matches!(resumed, SagaOutcome::Succeeded { .. }),
         "terminal resume should not wait for old TTL: {resumed:?}"
     );
-    let restarted = exec.run(instance()).await;
+    let restarted = exec.run(instance(), definition_identity()).await;
     assert!(
         matches!(
             restarted,
@@ -2926,13 +2985,211 @@ async fn resume_unknown_instance_does_not_register() {
     let (factory, _counts) = FakeFactory::linear(&["step1"]);
     let exec = executor_with_store(journal, store.clone(), cp, dlx, factory);
 
-    let outcome = exec.resume(instance()).await;
+    let outcome = exec.resume(instance(), definition_identity()).await;
 
     assert!(matches!(outcome, SagaOutcome::Failed { .. }), "{outcome:?}");
     assert_eq!(
         store.status(instance()),
         None,
         "resume of unknown instance must not create saga_instances row"
+    );
+}
+
+#[tokio::test]
+#[allow(clippy::expect_used)]
+async fn resume_unknown_pinned_definition_fails_closed_without_running_actions() {
+    const OTHER_SCHEMA: &str =
+        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const OTHER_GENERATION: &str =
+        "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+    let selected = definition_identity();
+    let unsupported = [
+        (
+            "version",
+            consistency::SagaDefinitionIdentity::new(
+                CONTRACT,
+                "v999",
+                selected.schema_digest(),
+                selected.action_registry_generation(),
+            )
+            .expect("synthetic unsupported version is structurally valid"),
+        ),
+        (
+            "schema",
+            consistency::SagaDefinitionIdentity::new(
+                CONTRACT,
+                selected.version(),
+                OTHER_SCHEMA,
+                selected.action_registry_generation(),
+            )
+            .expect("synthetic unsupported schema is structurally valid"),
+        ),
+        (
+            "action generation",
+            consistency::SagaDefinitionIdentity::new(
+                CONTRACT,
+                selected.version(),
+                selected.schema_digest(),
+                OTHER_GENERATION,
+            )
+            .expect("synthetic unsupported action generation is structurally valid"),
+        ),
+    ];
+
+    for (dimension, pinned) in unsupported {
+        let journal = Arc::new(FakeJournal::default());
+        let store = Arc::new(FakeInstanceStore::default());
+        store.seed_status(instance(), SagaInstanceStatus::Ready);
+        store.seed_definition(instance(), pinned);
+        let cp = Arc::new(FakeCheckpointStore::default());
+        let dlx = Arc::new(FakeDeadLetterStore::default());
+        let (factory, counts) = FakeFactory::linear(&["step1"]);
+        let exec = executor_with_store(journal, store.clone(), cp, dlx, factory);
+
+        let outcome = exec.resume(instance(), selected.clone()).await;
+
+        assert!(
+            matches!(
+                outcome,
+                SagaOutcome::Interrupted {
+                    reason: SagaInterruption::UnsupportedDefinition
+                }
+            ),
+            "unknown pinned {dimension} must fail closed: {outcome:?}"
+        );
+        assert_eq!(counts[0].dos(), 0, "unsupported {dimension} must not run");
+        assert_eq!(
+            counts[0].undos(),
+            0,
+            "unsupported {dimension} must not compensate"
+        );
+        assert_eq!(store.status(instance()), Some(SagaInstanceStatus::Degraded));
+    }
+}
+
+#[tokio::test]
+#[allow(clippy::unwrap_used)]
+async fn resume_registered_old_definition_uses_its_exact_factory_and_policy() {
+    let journal = Arc::new(FakeJournal::default());
+    let store = Arc::new(FakeInstanceStore::default());
+    let cp = Arc::new(FakeCheckpointStore::default());
+    let dlx = Arc::new(FakeDeadLetterStore::default());
+    let old_definition = consistency::SagaDefinitionIdentity::new(
+        CONTRACT,
+        "v2",
+        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    )
+    .unwrap();
+    let registration = SagaInstanceRegistration::new(
+        instance(),
+        SagaWorkerIdentity::new("billing", SagaContractId::parse(CONTRACT).unwrap()).unwrap(),
+        old_definition.clone(),
+    )
+    .unwrap();
+    store.register(registration).await.unwrap();
+    store.seed_status(instance(), SagaInstanceStatus::Running);
+
+    let (selected_factory, selected_counts) = FakeFactory::linear(&["step1"]);
+    let (old_factory, old_counts) = FakeFactory::linear(&["step1"]);
+    let registry = SagaDefinitionRegistry::from_erased(
+        definition_identity(),
+        selected_factory,
+        disabled_policy(),
+    )
+    .with_erased(old_definition.clone(), old_factory, disabled_policy());
+    let deps = SagaExecutorDeps::new(journal, store, cp, dlx, registry, runtime_lock());
+    let exec = SagaExecutorImpl::new(
+        deps,
+        executor_config_with_policy_and_lease_ttl(disabled_policy(), Duration::from_secs(30)),
+    )
+    .unwrap();
+
+    let outcome = exec.resume(instance(), old_definition).await;
+
+    assert!(
+        matches!(outcome, SagaOutcome::Succeeded { .. }),
+        "{outcome:?}"
+    );
+    assert_eq!(
+        old_counts[0].dos(),
+        1,
+        "old definition factory must execute"
+    );
+    assert_eq!(
+        selected_counts[0].dos(),
+        0,
+        "selected start factory must not leak into resume"
+    );
+}
+
+#[tokio::test]
+#[allow(clippy::unwrap_used)]
+async fn run_existing_ready_validates_owner_through_typed_registration_conflict() {
+    let journal = Arc::new(FakeJournal::default());
+    let store = Arc::new(FakeInstanceStore::default());
+    let foreign_registration = SagaInstanceRegistration::new(
+        instance(),
+        SagaWorkerIdentity::new("foreign-owner", SagaContractId::parse(CONTRACT).unwrap()).unwrap(),
+        definition_identity(),
+    )
+    .unwrap();
+    store.register(foreign_registration).await.unwrap();
+    let cp = Arc::new(FakeCheckpointStore::default());
+    let dlx = Arc::new(FakeDeadLetterStore::default());
+    let (factory, counts) = FakeFactory::linear(&["step1"]);
+    let exec = executor_with_store(journal, store, cp, dlx, factory);
+
+    let outcome = exec.run(instance(), definition_identity()).await;
+
+    assert!(
+        matches!(
+            outcome,
+            SagaOutcome::Interrupted {
+                reason: SagaInterruption::UnsupportedDefinition
+            }
+        ),
+        "owner conflict must fail closed: {outcome:?}"
+    );
+    assert_eq!(counts[0].dos(), 0);
+}
+
+#[tokio::test]
+#[allow(clippy::unwrap_used)]
+async fn resume_rejects_foreign_owner_with_same_contract_and_definition() {
+    let journal = Arc::new(FakeJournal::default());
+    let store = Arc::new(FakeInstanceStore::default());
+    let foreign_registration = SagaInstanceRegistration::new(
+        instance(),
+        SagaWorkerIdentity::new("foreign-owner", SagaContractId::parse(CONTRACT).unwrap()).unwrap(),
+        definition_identity(),
+    )
+    .unwrap();
+    store.register(foreign_registration).await.unwrap();
+    store.seed_status(instance(), SagaInstanceStatus::Running);
+    let (factory, counts) = FakeFactory::linear(&["step1"]);
+    let exec = executor_with_store(
+        journal,
+        store.clone(),
+        Arc::new(FakeCheckpointStore::default()),
+        Arc::new(FakeDeadLetterStore::default()),
+        factory,
+    );
+
+    let outcome = exec.resume(instance(), definition_identity()).await;
+
+    assert!(matches!(
+        outcome,
+        SagaOutcome::Interrupted {
+            reason: SagaInterruption::UnsupportedDefinition
+        }
+    ));
+    assert_eq!(counts[0].dos(), 0);
+    assert_eq!(counts[0].undos(), 0);
+    assert_eq!(
+        store.status(instance()),
+        Some(SagaInstanceStatus::Running),
+        "foreign owner must not mutate the durable row"
     );
 }
 
@@ -2947,7 +3204,7 @@ async fn executing_append_conflict_interrupts_and_marks_degraded() {
     let (factory, counts) = FakeFactory::linear(&["step1"]);
     let exec = executor_with_store(journal, store.clone(), cp, dlx, factory);
 
-    let outcome = exec.run(instance()).await;
+    let outcome = exec.run(instance(), definition_identity()).await;
 
     assert!(
         matches!(
@@ -2976,14 +3233,14 @@ async fn resume_append_conflict_interrupts_and_marks_degraded() {
     let journal = Arc::new(FakeJournalFailing::conflict_on_status(
         SagaJournalStatus::Executing,
     ));
-    journal.inner.seed(0, "step1", SagaJournalStatus::Completed);
+    journal.inner.seed(0, "step1", SagaJournalStatus::Executing);
     let store = ready_instance_store();
     let cp = Arc::new(FakeCheckpointStore::default());
     let dlx = Arc::new(FakeDeadLetterStore::default());
     let (factory, counts) = FakeFactory::linear(&["step1", "step2"]);
     let exec = executor_with_store(journal, store.clone(), cp, dlx, factory);
 
-    let outcome = exec.resume(instance()).await;
+    let outcome = exec.resume(instance(), definition_identity()).await;
 
     assert!(
         matches!(
@@ -2994,7 +3251,7 @@ async fn resume_append_conflict_interrupts_and_marks_degraded() {
         ),
         "resume append conflict must be non-business interruption: {outcome:?}"
     );
-    assert_eq!(counts[0].dos(), 0, "completed step must stay skipped");
+    assert_eq!(counts[0].dos(), 0, "conflicted executing step must not run");
     assert_eq!(
         counts[1].dos(),
         0,
@@ -3020,7 +3277,7 @@ async fn run_with_completed_append_failure_compensates_current_step() {
         factory,
     );
 
-    let outcome = exec.run(instance()).await;
+    let outcome = exec.run(instance(), definition_identity()).await;
 
     assert!(
         matches!(outcome, SagaOutcome::Failed { .. }),
@@ -3059,7 +3316,7 @@ async fn run_with_completed_append_failure_compensates_current_step() {
         Some(SagaExecStatus::Done),
         "Executing -> Compensated journal must replay as terminal compensated"
     );
-    let replay_outcome = resume_exec.resume(instance()).await;
+    let replay_outcome = resume_exec.resume(instance(), definition_identity()).await;
     assert!(
         matches!(replay_outcome, SagaOutcome::Failed { .. }),
         "compensated saga resumes as terminal failed outcome: {replay_outcome:?}"
@@ -3092,7 +3349,7 @@ async fn run_with_compensating_append_failure_stops_before_undo() {
         factory,
     );
 
-    let outcome = exec.run(instance()).await;
+    let outcome = exec.run(instance(), definition_identity()).await;
 
     assert!(
         matches!(outcome, SagaOutcome::Failed { .. }),
@@ -3129,7 +3386,7 @@ async fn run_with_failed_append_failure_does_not_deadletter() {
         factory,
     );
 
-    let outcome = exec.run(instance()).await;
+    let outcome = exec.run(instance(), definition_identity()).await;
 
     assert!(
         matches!(outcome, SagaOutcome::Failed { .. }),
@@ -3158,7 +3415,7 @@ async fn run_with_compensated_append_failure_marks_terminal_failed() {
         factory,
     );
 
-    let outcome = exec.run(instance()).await;
+    let outcome = exec.run(instance(), definition_identity()).await;
 
     assert!(matches!(outcome, SagaOutcome::Failed { .. }), "{outcome:?}");
     assert_eq!(counts[0].undos(), 1, "补偿动作已成功执行一次");
@@ -3187,7 +3444,7 @@ async fn run_with_compensated_append_failure_marks_terminal_failed() {
         resume_exec.status(instance()).await,
         Some(SagaExecStatus::Done)
     );
-    let replay_outcome = resume_exec.resume(instance()).await;
+    let replay_outcome = resume_exec.resume(instance(), definition_identity()).await;
     assert!(
         matches!(replay_outcome, SagaOutcome::Failed { .. }),
         "{replay_outcome:?}"
@@ -3212,7 +3469,7 @@ async fn run_stops_on_checkpoint_fence() {
     let (factory, counts) = FakeFactory::linear(&["step1", "step2"]);
     let exec = executor(journal, cp, dlx, factory);
 
-    let outcome = exec.run(instance()).await;
+    let outcome = exec.run(instance(), definition_identity()).await;
 
     assert!(
         matches!(outcome, SagaOutcome::Failed { .. }),
@@ -3235,7 +3492,7 @@ async fn run_fails_fast_on_duplicate_action_names() {
     let (factory, counts) = FakeFactory::linear(&["step1", "step1"]);
     let exec = executor(journal.clone(), cp, dlx, factory);
 
-    let outcome = exec.run(instance()).await;
+    let outcome = exec.run(instance(), definition_identity()).await;
 
     match outcome {
         SagaOutcome::Failed { failed_node, error } => {
@@ -3263,7 +3520,7 @@ async fn resume_fails_on_unknown_journal_step() {
     let (factory, counts) = FakeFactory::linear(&["step1", "step2"]);
     let exec = executor(journal, cp, dlx, factory);
 
-    let outcome = exec.resume(instance()).await;
+    let outcome = exec.resume(instance(), definition_identity()).await;
 
     match outcome {
         SagaOutcome::Failed { failed_node, .. } => assert_eq!(failed_node, "ghoststep"),
@@ -3283,7 +3540,7 @@ async fn resume_retries_step_with_only_executing_journal_record() {
     let (factory, counts) = FakeFactory::linear(&["step1", "step2"]);
     let exec = executor(journal.clone(), cp, dlx, factory);
 
-    let outcome = exec.resume(instance()).await;
+    let outcome = exec.resume(instance(), definition_identity()).await;
 
     assert!(
         matches!(outcome, SagaOutcome::Succeeded { .. }),
@@ -3304,7 +3561,7 @@ async fn resume_retries_step_with_only_executing_journal_record() {
 }
 
 #[tokio::test]
-async fn resume_compensates_post_effect_failure_intent_without_rerunning_forward() {
+async fn resume_post_effect_failure_without_receipt_fails_closed() {
     let journal = Arc::new(FakeJournal::default());
     journal.seed(0, "step1", SagaJournalStatus::Executing);
     journal.seed(1, "step1", SagaJournalStatus::Compensating);
@@ -3313,14 +3570,23 @@ async fn resume_compensates_post_effect_failure_intent_without_rerunning_forward
     let (factory, counts) = FakeFactory::linear(&["step1", "step2"]);
     let exec = executor(journal.clone(), cp, dlx, factory);
 
-    let outcome = exec.resume(instance()).await;
+    let outcome = exec.resume(instance(), definition_identity()).await;
 
     assert!(
-        matches!(outcome, SagaOutcome::Failed { .. }),
-        "post-effect compensation intent should resume compensation: {outcome:?}"
+        matches!(
+            outcome,
+            SagaOutcome::Interrupted {
+                reason: SagaInterruption::ReceiptUnavailable
+            }
+        ),
+        "missing durable receipt must fail closed: {outcome:?}"
     );
     assert_eq!(counts[0].dos(), 0, "step1 forward must not rerun");
-    assert_eq!(counts[0].undos(), 1, "step1 compensation must resume");
+    assert_eq!(
+        counts[0].undos(),
+        0,
+        "step1 must not compensate without its receipt"
+    );
     assert_eq!(counts[1].dos(), 0, "later steps must not run");
     assert_eq!(counts[1].undos(), 0, "later steps were never completed");
     assert_eq!(
@@ -3329,7 +3595,6 @@ async fn resume_compensates_post_effect_failure_intent_without_rerunning_forward
             ("step1".to_string(), SagaJournalStatus::Executing),
             ("step1".to_string(), SagaJournalStatus::Compensating),
             ("step1".to_string(), SagaJournalStatus::Compensating),
-            ("step1".to_string(), SagaJournalStatus::Compensated),
         ]
     );
 }
@@ -3337,7 +3602,7 @@ async fn resume_compensates_post_effect_failure_intent_without_rerunning_forward
 // ── F8：从补偿中崩溃恢复 —— 续补偿剩余已完成步 ─────────────────────────────────────
 
 #[tokio::test]
-async fn resume_continues_compensation_after_crash() {
+async fn resume_compensation_without_receipts_fails_closed() {
     let journal = Arc::new(FakeJournal::default());
     // step1/step2 均已完成，step2 补偿中崩溃（Compensating 无 Compensated）。
     journal.seed(0, "step1", SagaJournalStatus::Completed);
@@ -3348,18 +3613,26 @@ async fn resume_continues_compensation_after_crash() {
     let (factory, counts) = FakeFactory::linear(&["step1", "step2"]);
     let exec = executor(journal, cp, dlx, factory);
 
-    let outcome = exec.resume(instance()).await;
+    let outcome = exec.resume(instance(), definition_identity()).await;
 
     // 续补偿：逆序对 step2、step1 调 undo_it；终态 Failed（补偿后）。
-    assert!(matches!(outcome, SagaOutcome::Failed { .. }), "{outcome:?}");
-    assert_eq!(counts[0].undos(), 1, "step1 应被补偿");
-    assert_eq!(counts[1].undos(), 1, "step2 应续补偿");
+    assert!(
+        matches!(
+            outcome,
+            SagaOutcome::Interrupted {
+                reason: SagaInterruption::ReceiptUnavailable
+            }
+        ),
+        "{outcome:?}"
+    );
+    assert_eq!(counts[0].undos(), 0, "receipt 缺失时不得补偿 step1");
+    assert_eq!(counts[1].undos(), 0, "receipt 缺失时不得补偿 step2");
     assert_eq!(counts[0].dos(), 0, "补偿恢复不重跑前向");
     assert_eq!(counts[1].dos(), 0, "补偿恢复不重跑前向");
 }
 
 #[tokio::test]
-async fn resume_compensation_failure_deadletter_keeps_forward_failed_step() {
+async fn resume_compensation_missing_receipt_does_not_deadletter_or_execute() {
     let journal = Arc::new(FakeJournal::default());
     journal.seed(0, "step1", SagaJournalStatus::Completed);
     journal.seed(1, "step2", SagaJournalStatus::Executing);
@@ -3369,20 +3642,19 @@ async fn resume_compensation_failure_deadletter_keeps_forward_failed_step() {
     let (factory, _counts) = FakeFactory::steps(&[("step1", false, true), ("step2", false, false)]);
     let exec = executor(journal, cp, dlx.clone(), factory);
 
-    let outcome = exec.resume(instance()).await;
+    let outcome = exec.resume(instance(), definition_identity()).await;
 
-    assert!(matches!(outcome, SagaOutcome::Failed { .. }), "{outcome:?}");
+    assert!(
+        matches!(
+            outcome,
+            SagaOutcome::Interrupted {
+                reason: SagaInterruption::ReceiptUnavailable
+            }
+        ),
+        "{outcome:?}"
+    );
     let records = dlx.records();
-    assert_eq!(records.len(), 1, "补偿恢复失败应写一条 DLX");
-    let payload = &records[0].5;
-    assert!(
-        payload.contains("step2"),
-        "DLX payload 应保留原始 forward 失败步: {payload}"
-    );
-    assert!(
-        !payload.contains("<unknown-saga>"),
-        "DLX payload 不应退化成 UNKNOWN_SAGA: {payload}"
-    );
+    assert!(records.is_empty(), "receipt 缺失不是业务失败，不得写 DLX");
 }
 
 // ── F8：已 dead-letter（Failed 行）的 saga resume → 终态直返，不重跑 ─────────────────
@@ -3397,7 +3669,7 @@ async fn resume_terminal_failed_does_not_rerun() {
     let (factory, counts) = FakeFactory::linear(&["step1", "step2"]);
     let exec = executor(journal, cp, dlx.clone(), factory);
 
-    let outcome = exec.resume(instance()).await;
+    let outcome = exec.resume(instance(), definition_identity()).await;
 
     assert!(matches!(outcome, SagaOutcome::Failed { .. }), "{outcome:?}");
     // 终态：既不前向也不补偿。
@@ -3419,7 +3691,7 @@ async fn resume_terminal_compensated_does_not_rerun_or_deadletter() {
     let (factory, counts) = FakeFactory::linear(&["step1"]);
     let exec = executor(journal, cp, dlx.clone(), factory);
 
-    let outcome = exec.resume(instance()).await;
+    let outcome = exec.resume(instance(), definition_identity()).await;
 
     assert!(matches!(outcome, SagaOutcome::Failed { .. }), "{outcome:?}");
     assert_eq!(counts[0].dos(), 0);
@@ -3490,7 +3762,7 @@ fn compensation_failure_logs_fields() {
             let (factory, _counts) =
                 FakeFactory::steps(&[("step1", false, true), ("step2", true, false)]);
             let exec = executor(journal, cp, dlx, factory);
-            let _ = exec.run(instance()).await;
+            let _ = exec.run(instance(), definition_identity()).await;
         });
         tracing::callsite::rebuild_interest_cache();
     });
@@ -3644,6 +3916,34 @@ async fn status_reports_degraded_from_instance_status_without_journal() {
     let journal = Arc::new(FakeJournal::default());
     let store = ready_instance_store();
     store.seed_status(instance(), SagaInstanceStatus::Degraded);
+    let (factory, _counts) = FakeFactory::linear(&["step1"]);
+    let exec = executor_with_store(
+        journal,
+        store,
+        Arc::new(FakeCheckpointStore::default()),
+        Arc::new(FakeDeadLetterStore::default()),
+        factory,
+    );
+
+    assert_eq!(
+        exec.status(instance()).await,
+        Some(SagaExecStatus::Degraded)
+    );
+}
+
+#[tokio::test]
+#[allow(clippy::expect_used)]
+async fn status_reports_degraded_when_durable_definition_is_absent_from_registry() {
+    let journal = Arc::new(FakeJournal::default());
+    let store = ready_instance_store();
+    let unknown = consistency::SagaDefinitionIdentity::new(
+        CONTRACT,
+        "v999",
+        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    )
+    .expect("valid unknown definition");
+    store.seed_definition(instance(), unknown);
     let (factory, _counts) = FakeFactory::linear(&["step1"]);
     let exec = executor_with_store(
         journal,

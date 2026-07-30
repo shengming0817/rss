@@ -164,6 +164,69 @@ impl core::panic::unwind_safe::UnwindSafe for vocab::authz::Action
 pub const vocab::authz::POLICY_MANAGE_PERMISSION_PREFIX: &str
 pub mod vocab::contract
 pub mod vocab::contract::binding
+pub enum vocab::contract::binding::SagaBackoff
+pub vocab::contract::binding::SagaBackoff::Exponential
+pub vocab::contract::binding::SagaBackoff::Fixed
+impl core::clone::Clone for vocab::contract::binding::SagaBackoff
+pub fn vocab::contract::binding::SagaBackoff::clone(&self) -> vocab::contract::binding::SagaBackoff
+impl core::cmp::Eq for vocab::contract::binding::SagaBackoff
+impl core::cmp::PartialEq for vocab::contract::binding::SagaBackoff
+pub fn vocab::contract::binding::SagaBackoff::eq(&self, &vocab::contract::binding::SagaBackoff) -> bool
+impl core::fmt::Debug for vocab::contract::binding::SagaBackoff
+pub fn vocab::contract::binding::SagaBackoff::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for vocab::contract::binding::SagaBackoff
+pub fn vocab::contract::binding::SagaBackoff::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for vocab::contract::binding::SagaBackoff
+impl core::marker::StructuralPartialEq for vocab::contract::binding::SagaBackoff
+impl core::marker::Freeze for vocab::contract::binding::SagaBackoff
+impl core::marker::Send for vocab::contract::binding::SagaBackoff
+impl core::marker::Sync for vocab::contract::binding::SagaBackoff
+impl core::marker::Unpin for vocab::contract::binding::SagaBackoff
+impl core::marker::UnsafeUnpin for vocab::contract::binding::SagaBackoff
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::contract::binding::SagaBackoff
+impl core::panic::unwind_safe::UnwindSafe for vocab::contract::binding::SagaBackoff
+pub enum vocab::contract::binding::SagaJitter
+pub vocab::contract::binding::SagaJitter::Full
+pub vocab::contract::binding::SagaJitter::None
+impl core::clone::Clone for vocab::contract::binding::SagaJitter
+pub fn vocab::contract::binding::SagaJitter::clone(&self) -> vocab::contract::binding::SagaJitter
+impl core::cmp::Eq for vocab::contract::binding::SagaJitter
+impl core::cmp::PartialEq for vocab::contract::binding::SagaJitter
+pub fn vocab::contract::binding::SagaJitter::eq(&self, &vocab::contract::binding::SagaJitter) -> bool
+impl core::fmt::Debug for vocab::contract::binding::SagaJitter
+pub fn vocab::contract::binding::SagaJitter::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for vocab::contract::binding::SagaJitter
+pub fn vocab::contract::binding::SagaJitter::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for vocab::contract::binding::SagaJitter
+impl core::marker::StructuralPartialEq for vocab::contract::binding::SagaJitter
+impl core::marker::Freeze for vocab::contract::binding::SagaJitter
+impl core::marker::Send for vocab::contract::binding::SagaJitter
+impl core::marker::Sync for vocab::contract::binding::SagaJitter
+impl core::marker::Unpin for vocab::contract::binding::SagaJitter
+impl core::marker::UnsafeUnpin for vocab::contract::binding::SagaJitter
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::contract::binding::SagaJitter
+impl core::panic::unwind_safe::UnwindSafe for vocab::contract::binding::SagaJitter
+pub enum vocab::contract::binding::SagaRetryClass
+pub vocab::contract::binding::SagaRetryClass::Never
+pub vocab::contract::binding::SagaRetryClass::Transient
+impl core::clone::Clone for vocab::contract::binding::SagaRetryClass
+pub fn vocab::contract::binding::SagaRetryClass::clone(&self) -> vocab::contract::binding::SagaRetryClass
+impl core::cmp::Eq for vocab::contract::binding::SagaRetryClass
+impl core::cmp::PartialEq for vocab::contract::binding::SagaRetryClass
+pub fn vocab::contract::binding::SagaRetryClass::eq(&self, &vocab::contract::binding::SagaRetryClass) -> bool
+impl core::fmt::Debug for vocab::contract::binding::SagaRetryClass
+pub fn vocab::contract::binding::SagaRetryClass::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for vocab::contract::binding::SagaRetryClass
+pub fn vocab::contract::binding::SagaRetryClass::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for vocab::contract::binding::SagaRetryClass
+impl core::marker::StructuralPartialEq for vocab::contract::binding::SagaRetryClass
+impl core::marker::Freeze for vocab::contract::binding::SagaRetryClass
+impl core::marker::Send for vocab::contract::binding::SagaRetryClass
+impl core::marker::Sync for vocab::contract::binding::SagaRetryClass
+impl core::marker::Unpin for vocab::contract::binding::SagaRetryClass
+impl core::marker::UnsafeUnpin for vocab::contract::binding::SagaRetryClass
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::contract::binding::SagaRetryClass
+impl core::panic::unwind_safe::UnwindSafe for vocab::contract::binding::SagaRetryClass
 pub struct vocab::contract::binding::ContractBinding
 impl vocab::contract::binding::ContractBinding
 pub const fn vocab::contract::binding::ContractBinding::contract_id(&self) -> &'static str
@@ -236,10 +299,11 @@ impl core::panic::unwind_safe::RefUnwindSafe for vocab::contract::binding::Proje
 impl core::panic::unwind_safe::UnwindSafe for vocab::contract::binding::ProjectionInputBinding
 pub struct vocab::contract::binding::SagaContractBinding
 impl vocab::contract::binding::SagaContractBinding
+pub const fn vocab::contract::binding::SagaContractBinding::action_registry_generation(&self) -> &'static str
 pub const fn vocab::contract::binding::SagaContractBinding::contract(&self) -> vocab::contract::binding::ContractBinding
 pub const fn vocab::contract::binding::SagaContractBinding::contract_id(&self) -> &'static str
 pub const fn vocab::contract::binding::SagaContractBinding::domain(&self) -> &'static str
-pub const fn vocab::contract::binding::SagaContractBinding::from_parts(vocab::contract::binding::ContractBinding, vocab::contract::binding::SagaRuntimePolicySpec, &'static [vocab::contract::binding::SagaStepBinding]) -> Self
+pub const fn vocab::contract::binding::SagaContractBinding::from_parts(vocab::contract::binding::ContractBinding, vocab::contract::binding::SagaRuntimePolicySpec, &'static [vocab::contract::binding::SagaStepBinding], &'static str) -> Self
 pub const fn vocab::contract::binding::SagaContractBinding::policy(&self) -> vocab::contract::binding::SagaRuntimePolicySpec
 pub const fn vocab::contract::binding::SagaContractBinding::schema_hash(&self) -> &'static str
 pub const fn vocab::contract::binding::SagaContractBinding::steps(&self) -> &'static [vocab::contract::binding::SagaStepBinding]
@@ -262,9 +326,13 @@ impl core::panic::unwind_safe::RefUnwindSafe for vocab::contract::binding::SagaC
 impl core::panic::unwind_safe::UnwindSafe for vocab::contract::binding::SagaContractBinding
 pub struct vocab::contract::binding::SagaRuntimePolicySpec
 impl vocab::contract::binding::SagaRuntimePolicySpec
-pub const fn vocab::contract::binding::SagaRuntimePolicySpec::from_millis(u64, u64) -> Self
-pub const fn vocab::contract::binding::SagaRuntimePolicySpec::retry_millis(&self) -> u64
-pub const fn vocab::contract::binding::SagaRuntimePolicySpec::timeout_millis(&self) -> u64
+pub const fn vocab::contract::binding::SagaRuntimePolicySpec::backoff(&self) -> vocab::contract::binding::SagaBackoff
+pub const fn vocab::contract::binding::SagaRuntimePolicySpec::from_static(u32, u64, vocab::contract::binding::SagaBackoff, u64, u64, vocab::contract::binding::SagaJitter) -> Self
+pub const fn vocab::contract::binding::SagaRuntimePolicySpec::initial_backoff_millis(&self) -> u64
+pub const fn vocab::contract::binding::SagaRuntimePolicySpec::jitter(&self) -> vocab::contract::binding::SagaJitter
+pub const fn vocab::contract::binding::SagaRuntimePolicySpec::max_attempts(&self) -> u32
+pub const fn vocab::contract::binding::SagaRuntimePolicySpec::max_backoff_millis(&self) -> u64
+pub const fn vocab::contract::binding::SagaRuntimePolicySpec::time_budget_millis(&self) -> u64
 impl core::clone::Clone for vocab::contract::binding::SagaRuntimePolicySpec
 pub fn vocab::contract::binding::SagaRuntimePolicySpec::clone(&self) -> vocab::contract::binding::SagaRuntimePolicySpec
 impl core::cmp::Eq for vocab::contract::binding::SagaRuntimePolicySpec
@@ -283,12 +351,15 @@ impl core::panic::unwind_safe::RefUnwindSafe for vocab::contract::binding::SagaR
 impl core::panic::unwind_safe::UnwindSafe for vocab::contract::binding::SagaRuntimePolicySpec
 pub struct vocab::contract::binding::SagaStepBinding
 impl vocab::contract::binding::SagaStepBinding
+pub const fn vocab::contract::binding::SagaStepBinding::compensation_effect_scope(&self) -> &'static str
 pub const fn vocab::contract::binding::SagaStepBinding::contract(&self) -> vocab::contract::binding::ContractBinding
 pub const fn vocab::contract::binding::SagaStepBinding::contract_id(&self) -> &'static str
 pub const fn vocab::contract::binding::SagaStepBinding::domain(&self) -> &'static str
-pub const fn vocab::contract::binding::SagaStepBinding::from_static(vocab::contract::binding::ContractBinding, &'static str, &'static str) -> Self
+pub const fn vocab::contract::binding::SagaStepBinding::effect_scope(&self) -> &'static str
+pub const fn vocab::contract::binding::SagaStepBinding::from_static(vocab::contract::binding::ContractBinding, &'static str, &'static str, &'static str, &'static str, vocab::contract::binding::SagaRetryClass) -> Self
 pub const fn vocab::contract::binding::SagaStepBinding::name(&self) -> &'static str
-pub const fn vocab::contract::binding::SagaStepBinding::output_schema(&self) -> &'static str
+pub const fn vocab::contract::binding::SagaStepBinding::receipt_schema(&self) -> &'static str
+pub const fn vocab::contract::binding::SagaStepBinding::retry_class(&self) -> vocab::contract::binding::SagaRetryClass
 pub const fn vocab::contract::binding::SagaStepBinding::schema_hash(&self) -> &'static str
 pub const fn vocab::contract::binding::SagaStepBinding::version(&self) -> &'static str
 impl core::clone::Clone for vocab::contract::binding::SagaStepBinding
@@ -309,8 +380,6 @@ impl core::panic::unwind_safe::RefUnwindSafe for vocab::contract::binding::SagaS
 impl core::panic::unwind_safe::UnwindSafe for vocab::contract::binding::SagaStepBinding
 pub trait vocab::contract::binding::GeneratedEventPayload
 pub const vocab::contract::binding::GeneratedEventPayload::FACT: vocab::contract::binding::EventFactBinding
-pub trait vocab::contract::binding::SagaStepOutputBinding
-pub const vocab::contract::binding::SagaStepOutputBinding::BINDING: vocab::contract::binding::SagaStepBinding
 pub mod vocab::contract::owner
 #[non_exhaustive] pub enum vocab::contract::owner::DomainNameError
 pub vocab::contract::owner::DomainNameError::Empty
@@ -1814,6 +1883,69 @@ impl core::marker::Unpin for vocab::tenant::RowScope
 impl core::marker::UnsafeUnpin for vocab::tenant::RowScope
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::tenant::RowScope
 impl core::panic::unwind_safe::UnwindSafe for vocab::tenant::RowScope
+pub enum vocab::SagaBackoff
+pub vocab::SagaBackoff::Exponential
+pub vocab::SagaBackoff::Fixed
+impl core::clone::Clone for vocab::contract::binding::SagaBackoff
+pub fn vocab::contract::binding::SagaBackoff::clone(&self) -> vocab::contract::binding::SagaBackoff
+impl core::cmp::Eq for vocab::contract::binding::SagaBackoff
+impl core::cmp::PartialEq for vocab::contract::binding::SagaBackoff
+pub fn vocab::contract::binding::SagaBackoff::eq(&self, &vocab::contract::binding::SagaBackoff) -> bool
+impl core::fmt::Debug for vocab::contract::binding::SagaBackoff
+pub fn vocab::contract::binding::SagaBackoff::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for vocab::contract::binding::SagaBackoff
+pub fn vocab::contract::binding::SagaBackoff::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for vocab::contract::binding::SagaBackoff
+impl core::marker::StructuralPartialEq for vocab::contract::binding::SagaBackoff
+impl core::marker::Freeze for vocab::contract::binding::SagaBackoff
+impl core::marker::Send for vocab::contract::binding::SagaBackoff
+impl core::marker::Sync for vocab::contract::binding::SagaBackoff
+impl core::marker::Unpin for vocab::contract::binding::SagaBackoff
+impl core::marker::UnsafeUnpin for vocab::contract::binding::SagaBackoff
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::contract::binding::SagaBackoff
+impl core::panic::unwind_safe::UnwindSafe for vocab::contract::binding::SagaBackoff
+pub enum vocab::SagaJitter
+pub vocab::SagaJitter::Full
+pub vocab::SagaJitter::None
+impl core::clone::Clone for vocab::contract::binding::SagaJitter
+pub fn vocab::contract::binding::SagaJitter::clone(&self) -> vocab::contract::binding::SagaJitter
+impl core::cmp::Eq for vocab::contract::binding::SagaJitter
+impl core::cmp::PartialEq for vocab::contract::binding::SagaJitter
+pub fn vocab::contract::binding::SagaJitter::eq(&self, &vocab::contract::binding::SagaJitter) -> bool
+impl core::fmt::Debug for vocab::contract::binding::SagaJitter
+pub fn vocab::contract::binding::SagaJitter::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for vocab::contract::binding::SagaJitter
+pub fn vocab::contract::binding::SagaJitter::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for vocab::contract::binding::SagaJitter
+impl core::marker::StructuralPartialEq for vocab::contract::binding::SagaJitter
+impl core::marker::Freeze for vocab::contract::binding::SagaJitter
+impl core::marker::Send for vocab::contract::binding::SagaJitter
+impl core::marker::Sync for vocab::contract::binding::SagaJitter
+impl core::marker::Unpin for vocab::contract::binding::SagaJitter
+impl core::marker::UnsafeUnpin for vocab::contract::binding::SagaJitter
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::contract::binding::SagaJitter
+impl core::panic::unwind_safe::UnwindSafe for vocab::contract::binding::SagaJitter
+pub enum vocab::SagaRetryClass
+pub vocab::SagaRetryClass::Never
+pub vocab::SagaRetryClass::Transient
+impl core::clone::Clone for vocab::contract::binding::SagaRetryClass
+pub fn vocab::contract::binding::SagaRetryClass::clone(&self) -> vocab::contract::binding::SagaRetryClass
+impl core::cmp::Eq for vocab::contract::binding::SagaRetryClass
+impl core::cmp::PartialEq for vocab::contract::binding::SagaRetryClass
+pub fn vocab::contract::binding::SagaRetryClass::eq(&self, &vocab::contract::binding::SagaRetryClass) -> bool
+impl core::fmt::Debug for vocab::contract::binding::SagaRetryClass
+pub fn vocab::contract::binding::SagaRetryClass::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for vocab::contract::binding::SagaRetryClass
+pub fn vocab::contract::binding::SagaRetryClass::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for vocab::contract::binding::SagaRetryClass
+impl core::marker::StructuralPartialEq for vocab::contract::binding::SagaRetryClass
+impl core::marker::Freeze for vocab::contract::binding::SagaRetryClass
+impl core::marker::Send for vocab::contract::binding::SagaRetryClass
+impl core::marker::Sync for vocab::contract::binding::SagaRetryClass
+impl core::marker::Unpin for vocab::contract::binding::SagaRetryClass
+impl core::marker::UnsafeUnpin for vocab::contract::binding::SagaRetryClass
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::contract::binding::SagaRetryClass
+impl core::panic::unwind_safe::UnwindSafe for vocab::contract::binding::SagaRetryClass
 #[non_exhaustive] pub enum vocab::ScopedTenant
 pub vocab::ScopedTenant::Device
 pub vocab::ScopedTenant::SelfOnly
@@ -2248,10 +2380,11 @@ impl core::panic::unwind_safe::RefUnwindSafe for vocab::tenant::RowVisibility
 impl core::panic::unwind_safe::UnwindSafe for vocab::tenant::RowVisibility
 pub struct vocab::SagaContractBinding
 impl vocab::contract::binding::SagaContractBinding
+pub const fn vocab::contract::binding::SagaContractBinding::action_registry_generation(&self) -> &'static str
 pub const fn vocab::contract::binding::SagaContractBinding::contract(&self) -> vocab::contract::binding::ContractBinding
 pub const fn vocab::contract::binding::SagaContractBinding::contract_id(&self) -> &'static str
 pub const fn vocab::contract::binding::SagaContractBinding::domain(&self) -> &'static str
-pub const fn vocab::contract::binding::SagaContractBinding::from_parts(vocab::contract::binding::ContractBinding, vocab::contract::binding::SagaRuntimePolicySpec, &'static [vocab::contract::binding::SagaStepBinding]) -> Self
+pub const fn vocab::contract::binding::SagaContractBinding::from_parts(vocab::contract::binding::ContractBinding, vocab::contract::binding::SagaRuntimePolicySpec, &'static [vocab::contract::binding::SagaStepBinding], &'static str) -> Self
 pub const fn vocab::contract::binding::SagaContractBinding::policy(&self) -> vocab::contract::binding::SagaRuntimePolicySpec
 pub const fn vocab::contract::binding::SagaContractBinding::schema_hash(&self) -> &'static str
 pub const fn vocab::contract::binding::SagaContractBinding::steps(&self) -> &'static [vocab::contract::binding::SagaStepBinding]
@@ -2274,9 +2407,13 @@ impl core::panic::unwind_safe::RefUnwindSafe for vocab::contract::binding::SagaC
 impl core::panic::unwind_safe::UnwindSafe for vocab::contract::binding::SagaContractBinding
 pub struct vocab::SagaRuntimePolicySpec
 impl vocab::contract::binding::SagaRuntimePolicySpec
-pub const fn vocab::contract::binding::SagaRuntimePolicySpec::from_millis(u64, u64) -> Self
-pub const fn vocab::contract::binding::SagaRuntimePolicySpec::retry_millis(&self) -> u64
-pub const fn vocab::contract::binding::SagaRuntimePolicySpec::timeout_millis(&self) -> u64
+pub const fn vocab::contract::binding::SagaRuntimePolicySpec::backoff(&self) -> vocab::contract::binding::SagaBackoff
+pub const fn vocab::contract::binding::SagaRuntimePolicySpec::from_static(u32, u64, vocab::contract::binding::SagaBackoff, u64, u64, vocab::contract::binding::SagaJitter) -> Self
+pub const fn vocab::contract::binding::SagaRuntimePolicySpec::initial_backoff_millis(&self) -> u64
+pub const fn vocab::contract::binding::SagaRuntimePolicySpec::jitter(&self) -> vocab::contract::binding::SagaJitter
+pub const fn vocab::contract::binding::SagaRuntimePolicySpec::max_attempts(&self) -> u32
+pub const fn vocab::contract::binding::SagaRuntimePolicySpec::max_backoff_millis(&self) -> u64
+pub const fn vocab::contract::binding::SagaRuntimePolicySpec::time_budget_millis(&self) -> u64
 impl core::clone::Clone for vocab::contract::binding::SagaRuntimePolicySpec
 pub fn vocab::contract::binding::SagaRuntimePolicySpec::clone(&self) -> vocab::contract::binding::SagaRuntimePolicySpec
 impl core::cmp::Eq for vocab::contract::binding::SagaRuntimePolicySpec
@@ -2295,12 +2432,15 @@ impl core::panic::unwind_safe::RefUnwindSafe for vocab::contract::binding::SagaR
 impl core::panic::unwind_safe::UnwindSafe for vocab::contract::binding::SagaRuntimePolicySpec
 pub struct vocab::SagaStepBinding
 impl vocab::contract::binding::SagaStepBinding
+pub const fn vocab::contract::binding::SagaStepBinding::compensation_effect_scope(&self) -> &'static str
 pub const fn vocab::contract::binding::SagaStepBinding::contract(&self) -> vocab::contract::binding::ContractBinding
 pub const fn vocab::contract::binding::SagaStepBinding::contract_id(&self) -> &'static str
 pub const fn vocab::contract::binding::SagaStepBinding::domain(&self) -> &'static str
-pub const fn vocab::contract::binding::SagaStepBinding::from_static(vocab::contract::binding::ContractBinding, &'static str, &'static str) -> Self
+pub const fn vocab::contract::binding::SagaStepBinding::effect_scope(&self) -> &'static str
+pub const fn vocab::contract::binding::SagaStepBinding::from_static(vocab::contract::binding::ContractBinding, &'static str, &'static str, &'static str, &'static str, vocab::contract::binding::SagaRetryClass) -> Self
 pub const fn vocab::contract::binding::SagaStepBinding::name(&self) -> &'static str
-pub const fn vocab::contract::binding::SagaStepBinding::output_schema(&self) -> &'static str
+pub const fn vocab::contract::binding::SagaStepBinding::receipt_schema(&self) -> &'static str
+pub const fn vocab::contract::binding::SagaStepBinding::retry_class(&self) -> vocab::contract::binding::SagaRetryClass
 pub const fn vocab::contract::binding::SagaStepBinding::schema_hash(&self) -> &'static str
 pub const fn vocab::contract::binding::SagaStepBinding::version(&self) -> &'static str
 impl core::clone::Clone for vocab::contract::binding::SagaStepBinding
@@ -2388,5 +2528,3 @@ pub const vocab::IDENTITY_PROFILE_TENANT_ID_FIELD_OBLIGATION: &str
 pub const vocab::POLICY_MANAGE_PERMISSION_PREFIX: &str
 pub trait vocab::GeneratedEventPayload
 pub const vocab::GeneratedEventPayload::FACT: vocab::contract::binding::EventFactBinding
-pub trait vocab::SagaStepOutputBinding
-pub const vocab::SagaStepOutputBinding::BINDING: vocab::contract::binding::SagaStepBinding

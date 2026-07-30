@@ -1,18 +1,18 @@
 //! 契约元数据校验（规则集见下方执行顺序 + `Rule` 枚举单源）——`cargo xtask contract validate`。
 //!
-//! INVARIANT: CONTRACT-FANOUT-01 { level = "Medium", exec = "check", source = "code" }— schema 引用完整性 + kind→形态一致（R4/R5，含 saga step `outputSchema`）。
+//! INVARIANT: CONTRACT-FANOUT-01 { level = "Medium", exec = "check", source = "code" }— schema 引用完整性 + kind→形态一致（R4/R5，含 saga step `receiptSchema`）。
 //! INVARIANT: CONTRACT-FREEZE-01 { level = "Medium", exec = "check", source = "code" }（运行期部分）— 跨字段不变式（R1 saga⇒L3 / R2 framework⇒http|event）、
 //! 路径↔字段一致（R3）、authoring 标识符语法（R7：domain/version/id/owner 在拼进派生路径 / module 名前先收口）、
 //! per-kind 字段（#1035）的 active 发布接线必填（R8）/ 跨 kind 卫生（R9）/ saga block 结构语义（R10）/
 //! active event 投递语义可兑现性（R11）。
 //! INVARIANT: SAGA-CONTRACT-01 { level = "Medium", exec = "check", source = "code" }— kind:saga 契约治理（docs/rules/saga.md §Governance）= R1（saga ⇒
 //! consistencyLevel WorkflowEventual/L3）+ R10（非空 `[saga]` block：≥1 step、step name 合法非关键字 Rust
-//! 标识符且唯一、每步 outputSchema 非空；retry/timeout 非负 + compensationOrder=reverse 由 manifest.rs
+//! 标识符且唯一、每步 receiptSchema/effect scope 非空；retry budget/backoff 由 manifest.rs + R10
 //! 类型层 Hard 守）。负用例见 R1/R10 synthetic reds；正用例 = `contracts/saga/billing` 经 validate 全过
 //! （Medium，CI 门，#1121）。
 //! INVARIANT: CONTRACT-IDUNIQ-01 { level = "Medium", exec = "check", source = "code" }— contract `id` 跨契约全局唯一（R12，`validate_cross` 跨契约扫描；
 //! 依据 api-versioning.md：破坏式 wire 变更新建版本目录 **且** 新 contract ID ⇒ id 是全局注册标识，须唯一）。
-//! INVARIANT: CONTRACT-TITLE-01 { level = "Medium", exec = "check", source = "code" }— declared schema（喂 codegen TypeSpace 的 request/response/payload；saga 另含 step outputSchema）的
+//! INVARIANT: CONTRACT-TITLE-01 { level = "Medium", exec = "check", source = "code" }— declared schema（喂 codegen TypeSpace 的 request/response/payload；saga 另含 step receiptSchema）的
 //! root 须有 string `title`（缺则 typify `add_root_schema` 返回 `Ok(None)`、根类型静默丢失），且全部
 //! （含嵌套）title 须 PascalCase + **契约内**唯一（R13；title→typify Rust 类型名）。契约内重复 / 缺 root
 //! title **未必**被 codegen 兜底（前者可能被合并 / 类型歧义、后者直接丢根类型，均非 compile error、非
@@ -150,7 +150,7 @@ pub(crate) enum Rule {
     /// R9：per-kind 字段只允许出现在匹配 kind（错配 silently-ignored，须拒）。
     PerKindFieldScope,
     /// R10：`kind=saga` ⇒ 须有非空 `[saga]` block（无条件）+ block 内部良构（≥1 step、step name 合法
-    /// 唯一、outputSchema 非空）。
+    /// 唯一、receiptSchema/effect scope 非空、retry budget 良构）。
     SagaBlock,
     /// R11：`lifecycle=active` 的 event 只能声明当前可兑现的投递语义（仅 `at-least-once`）；
     /// `at-most-once`/`exactly-once` 当前 broker 链路无运行时保证，能力落地前限 draft/deprecated。
@@ -1842,7 +1842,7 @@ fn rule_schema_shape(m: &ContractManifest, label: &str) -> Vec<Finding> {
         .collect()
 }
 
-/// R5：声明的每个 schema 文件须存在（含 saga step `outputSchema`，经 `declared_schema_files()` 聚合）。
+/// R5：声明的每个 schema 文件须存在（含 saga step `receiptSchema`，经 `declared_schema_files()` 聚合）。
 fn rule_schema_files_exist(c: &DiscoveredContract, label: &str) -> Vec<Finding> {
     c.manifest
         .declared_schema_files()
@@ -1859,7 +1859,7 @@ fn rule_schema_files_exist(c: &DiscoveredContract, label: &str) -> Vec<Finding> 
 }
 
 /// R6：schema 文件名须为纯文件名（不含 `/`、`\`、`..` 分量或绝对路径），防路径逃逸。
-/// 防逃逸判定单源见 `crate::pathsafe`（codegen 写盘守卫同源）；含 saga step `outputSchema`。
+/// 防逃逸判定单源见 `crate::pathsafe`（codegen 写盘守卫同源）；含 saga step `receiptSchema`。
 fn rule_unsafe_schema_path(m: &ContractManifest, label: &str) -> Vec<Finding> {
     m.declared_schema_files()
         .into_iter()
@@ -1894,7 +1894,10 @@ fn rule_ident_syntax(m: &ContractManifest, label: &str) -> Vec<Finding> {
         out.push(finding(
             Rule::IdentSyntax,
             label,
-            format!("version 非法：须 v{{N}}（如 v1），实为 {:?}", m.version),
+            format!(
+                "version 非法：须无前导零的正整数 v{{N}}（如 v1），实为 {:?}",
+                m.version
+            ),
         ));
     }
     if !is_dotted_id(&m.id) {
@@ -2656,8 +2659,8 @@ fn response_path_exists(schema: &serde_json::Value, path: &str) -> bool {
 
 /// R10：saga 契约的 `[saga]` block 结构语义（saga.md governance，**无条件、不论 lifecycle**）：
 /// `kind=saga` ⇒ 须有非空 block；block 存在即查良构——≥1 step、step name 合法非关键字 Rust 标识符
-/// （`syn`，拒 raw `r#`）且唯一、outputSchema 非空。retry/timeout 非负与 compensationOrder 取值由
-/// `manifest.rs` 类型层守（Hard），R10 不重复；step outputSchema 文件完整性由 R5/R6 经
+/// （`syn`，拒 raw `r#`）且唯一，receiptSchema/effect scope 非空；retry budget 不为零且 backoff 不倒置。
+/// 闭合 policy 枚举与 duration 非负由 `manifest.rs` 类型层守（Hard）；step receiptSchema 文件完整性由 R5/R6 经
 /// `declared_schema_files()` 覆盖。非-saga kind 误带 `[saga]` 由 R9 拒（本规则只校验 block 内部）。
 fn rule_saga_block(m: &ContractManifest, label: &str) -> Vec<Finding> {
     let Some(saga) = &m.saga else {
@@ -2678,6 +2681,27 @@ fn rule_saga_block(m: &ContractManifest, label: &str) -> Vec<Finding> {
             Rule::SagaBlock,
             label,
             "saga block 须至少声明一个 step".to_string(),
+        ));
+    }
+    if saga.retry.max_attempts == 0 {
+        out.push(finding(
+            Rule::SagaBlock,
+            label,
+            "saga.retry.maxAttempts 须大于 0（含首次调用）".to_string(),
+        ));
+    }
+    if saga.retry.time_budget_millis == 0 {
+        out.push(finding(
+            Rule::SagaBlock,
+            label,
+            "saga.retry.timeBudgetMillis 须大于 0".to_string(),
+        ));
+    }
+    if saga.retry.initial_backoff_millis > saga.retry.max_backoff_millis {
+        out.push(finding(
+            Rule::SagaBlock,
+            label,
+            "saga.retry.initialBackoffMillis 不得大于 maxBackoffMillis".to_string(),
         ));
     }
     let mut seen = BTreeSet::new();
@@ -2701,12 +2725,27 @@ fn rule_saga_block(m: &ContractManifest, label: &str) -> Vec<Finding> {
                 format!("saga step name 重复: {name:?}"),
             ));
         }
-        if step.output_schema.is_empty() {
+        if step.receipt_schema.is_empty() {
             out.push(finding(
                 Rule::SagaBlock,
                 label,
-                format!("saga step {name:?} 的 outputSchema 不可为空"),
+                format!("saga step {name:?} 的 receiptSchema 不可为空"),
             ));
+        }
+        for (field, value) in [
+            ("effectScope", step.effect_scope.as_str()),
+            (
+                "compensationEffectScope",
+                step.compensation_effect_scope.as_str(),
+            ),
+        ] {
+            if value.is_empty() {
+                out.push(finding(
+                    Rule::SagaBlock,
+                    label,
+                    format!("saga step {name:?} 的 {field} 不可为空"),
+                ));
+            }
         }
     }
     out
@@ -2756,13 +2795,13 @@ fn rule_active_subscriber(m: &ContractManifest, label: &str) -> Option<Finding> 
 }
 
 /// R13：每个喂 codegen TypeSpace 的 declared schema（`[schemas]` request/response/payload；saga 另含 step
-/// outputSchema）的 `title`
+/// receiptSchema）的 `title`
 /// 须 PascalCase 且**契约内**唯一（INVARIANT: CONTRACT-TITLE-01 { level = "Medium", exec = "check", source = "code" }）。title 是 typify 生成的 Rust 类型名
 /// （顶层 + 嵌套对象都成类型）：非 PascalCase 产生非惯用类型名；契约内重复（一契约的全部 declared schema
 /// 喂同一 TypeSpace）产生类型冲突。
 ///
 /// schema 文件口径**严格对齐 codegen** `render_contract_body`：saga 用
-/// [`super::manifest::ContractManifest::declared_schema_files`]（payload + step outputSchema），其它 kind 用
+/// [`super::manifest::ContractManifest::declared_schema_files`]（payload + step receiptSchema），其它 kind 用
 /// `Schemas::declared_files()`。
 /// reason: 校验口径锚定「实际生成类型的那批 schema」，勿误把两个 accessor 统一。
 ///
@@ -2889,7 +2928,7 @@ fn collect_schema_titles(schema: &serde_json::Value, out: &mut Vec<String>) {
 }
 
 /// R16：字段级 redaction 扩展校验。按 manifest 声明的完整 schema slot 扫描，
-/// 包含 request/response/payload 与 saga step output schema。
+/// 包含 request/response/payload 与 Saga generated receipt schema。
 fn rule_schema_redaction(c: &DiscoveredContract, label: &str) -> Vec<Finding> {
     let mut out = Vec::new();
     for file in c.manifest.declared_schema_files() {
@@ -2976,9 +3015,14 @@ fn is_safe_segment(s: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
 }
 
-/// 版本段：`v{N}`，N 为非空数字串。
+/// Canonical 版本段：`v{N}`，N 为无前导零的正整数。
 fn is_version(s: &str) -> bool {
-    matches!(s.strip_prefix('v'), Some(n) if !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+    matches!(
+        s.strip_prefix('v'),
+        Some(n)
+            if matches!(n.bytes().next(), Some(b) if b.is_ascii_digit() && b != b'0')
+                && n.bytes().all(|b| b.is_ascii_digit())
+    )
 }
 
 /// 嵌套端点 slug 段：非空、首字符 `a-z`、余 `[a-z0-9_-]`、无首尾连字符（kebab）。slug 经 `-`→`_`
@@ -3019,9 +3063,10 @@ mod tests {
         ExternalEffectPolicy, HttpAuth, HttpAuthMode, HttpEndpoint, HttpHeaderMode,
         HttpIdempotency, HttpMethod, HttpProjection, HttpProjectionField, HttpProjectionFieldName,
         HttpResourceSharing, HttpResourceSharingMode, Lifecycle, LocalTxCapability,
-        OutboxCapability, PartitionKeyStrategy, ReconcileBlock, SagaBlock, SagaStep, Schemas,
-        SubscriberReadiness, Subscription, SubscriptionEffect, SubscriptionExecution,
-        SubscriptionTopology, WorkflowCapability,
+        OutboxCapability, PartitionKeyStrategy, ReconcileBlock, SagaBackoff, SagaBlock,
+        SagaCompensationInput, SagaIdempotencyClass, SagaJitter, SagaRetryClass, SagaRetryPolicy,
+        SagaStep, Schemas, SubscriberReadiness, Subscription, SubscriptionEffect,
+        SubscriptionExecution, SubscriptionTopology, WorkflowCapability,
     };
     use crate::testutil::unique_tmp;
     use rstest::rstest;
@@ -3356,16 +3401,27 @@ mod tests {
         }
     }
 
-    /// 合法 saga block（1 step、reverse、非负 duration）——R10 绿基线，红用例在其上变异。
+    /// 合法 saga block（1 step、reverse、完整执行语义）——R10 绿基线，红用例在其上变异。
     fn valid_saga_block() -> SagaBlock {
         SagaBlock {
             steps: vec![SagaStep {
                 name: "reserve_funds".to_string(),
-                output_schema: "reserve.schema.json".to_string(),
+                receipt_schema: "reserve.schema.json".to_string(),
+                effect_scope: "billing.reserve".to_string(),
+                compensation_effect_scope: "billing.release".to_string(),
+                idempotency_class: SagaIdempotencyClass::DeterministicKey,
+                compensation_input: SagaCompensationInput::Receipt,
+                retry_class: SagaRetryClass::Transient,
             }],
             compensation_order: CompensationOrder::Reverse,
-            retry_millis: 1000,
-            timeout_millis: 5000,
+            retry: SagaRetryPolicy {
+                max_attempts: 3,
+                time_budget_millis: 5000,
+                backoff: SagaBackoff::Fixed,
+                initial_backoff_millis: 1000,
+                max_backoff_millis: 1000,
+                jitter: SagaJitter::None,
+            },
         }
     }
 
@@ -3792,6 +3848,9 @@ mod tests {
     #[case("9x", "v1", "seed.echo")] // domain 数字开头
     #[case("_seed", "1", "seed.echo")] // version 非 v{N}
     #[case("_seed", "v", "seed.echo")] // version 缺数字
+    #[case("_seed", "v0", "seed.echo")] // version 必须为正整数
+    #[case("_seed", "v00", "seed.echo")] // version 禁止零与前导零
+    #[case("_seed", "v01", "seed.echo")] // version 禁止前导零
     #[case("_seed", "v1", "Seed.Echo")] // id 大写
     #[case("_seed", "v1", "")] // id 空
     #[case("_seed", "v1", "seed.")] // id 尾段空
@@ -5339,7 +5398,12 @@ mod tests {
         let mut b = valid_saga_block();
         b.steps.push(SagaStep {
             name: "reserve_funds".to_string(), // 与首 step 重名
-            output_schema: "other.schema.json".to_string(),
+            receipt_schema: "other.schema.json".to_string(),
+            effect_scope: "billing.other".to_string(),
+            compensation_effect_scope: "billing.undo_other".to_string(),
+            idempotency_class: SagaIdempotencyClass::DeterministicKey,
+            compensation_input: SagaCompensationInput::Receipt,
+            retry_class: SagaRetryClass::Never,
         });
         let findings = rule_saga_block(&saga_manifest(Some(b)), "x");
         assert!(findings.iter().any(|f| f.rule == Rule::SagaBlock));
@@ -5362,24 +5426,68 @@ mod tests {
     }
 
     #[test]
-    fn r10_saga_empty_output_schema_rejected() {
+    fn r10_saga_empty_receipt_schema_rejected() {
         let mut b = valid_saga_block();
-        b.steps[0].output_schema = String::new();
+        b.steps[0].receipt_schema = String::new();
         let findings = rule_saga_block(&saga_manifest(Some(b)), "x");
         assert!(findings.iter().any(|f| f.rule == Rule::SagaBlock));
     }
 
     #[test]
+    fn r10_saga_retry_budget_and_backoff_are_fail_closed() {
+        let mut zero_attempts = valid_saga_block();
+        zero_attempts.retry.max_attempts = 0;
+        assert!(
+            rule_saga_block(&saga_manifest(Some(zero_attempts)), "x")
+                .iter()
+                .any(|finding| finding.detail.contains("maxAttempts"))
+        );
+
+        let mut zero_budget = valid_saga_block();
+        zero_budget.retry.time_budget_millis = 0;
+        assert!(
+            rule_saga_block(&saga_manifest(Some(zero_budget)), "x")
+                .iter()
+                .any(|finding| finding.detail.contains("timeBudgetMillis"))
+        );
+
+        let mut inverted = valid_saga_block();
+        inverted.retry.initial_backoff_millis = 1001;
+        assert!(
+            rule_saga_block(&saga_manifest(Some(inverted)), "x")
+                .iter()
+                .any(|finding| finding.detail.contains("maxBackoffMillis"))
+        );
+    }
+
+    #[test]
+    fn r10_saga_effect_scopes_are_required() {
+        for compensation in [false, true] {
+            let mut block = valid_saga_block();
+            if compensation {
+                block.steps[0].compensation_effect_scope.clear();
+            } else {
+                block.steps[0].effect_scope.clear();
+            }
+            assert!(
+                rule_saga_block(&saga_manifest(Some(block)), "x")
+                    .iter()
+                    .any(|finding| finding.detail.contains("Scope"))
+            );
+        }
+    }
+
+    #[test]
     fn r10_multiple_violations_each_reported() {
-        // 同一 step 多重违规（非法 ident + 空 outputSchema）各报一条，互不吞没。
+        // 同一 step 多重违规（非法 ident + 空 receiptSchema）各报一条，互不吞没。
         let mut b = valid_saga_block();
         b.steps[0].name = "9bad".to_string();
-        b.steps[0].output_schema = String::new();
+        b.steps[0].receipt_schema = String::new();
         let findings = rule_saga_block(&saga_manifest(Some(b)), "x");
         assert_eq!(
             findings.len(),
             2,
-            "非法 ident + 空 outputSchema 应各报一条，实得 {findings:?}"
+            "非法 ident + 空 receiptSchema 应各报一条，实得 {findings:?}"
         );
         assert!(findings.iter().all(|f| f.rule == Rule::SagaBlock));
     }
@@ -5570,7 +5678,7 @@ mod tests {
         );
     }
 
-    // ── R5/R6 扩展：saga step outputSchema 纳入 schema 文件完整性 ──────────
+    // ── R5/R6 扩展：saga step receiptSchema 纳入 schema 文件完整性 ──────────
 
     #[test]
     fn r5_saga_step_schema_missing_detected() -> anyhow::Result<()> {
@@ -5588,7 +5696,7 @@ mod tests {
     #[test]
     fn r6_saga_step_unsafe_schema_rejected() {
         let mut b = valid_saga_block();
-        b.steps[0].output_schema = "../evil.schema.json".to_string();
+        b.steps[0].receipt_schema = "../evil.schema.json".to_string();
         let findings = rule_unsafe_schema_path(&saga_manifest(Some(b)), "x");
         assert!(findings.iter().any(|f| f.rule == Rule::UnsafeSchemaPath));
     }
@@ -7269,7 +7377,7 @@ mod tests {
         Ok((discovered(m, dir.clone()), dir))
     }
 
-    /// 写一个 saga 契约目录（payload + reserve step output schema 内容自定），返回 (DiscoveredContract, dir)。
+    /// 写一个 Saga 契约目录（payload + reserve generated receipt schema 内容自定），返回 (DiscoveredContract, dir)。
     /// 调用方负责 `remove_dir_all` 清理。
     fn saga_contract_with_schemas(
         payload: &str,
@@ -7540,7 +7648,7 @@ mod tests {
     }
 
     #[test]
-    fn r13_saga_step_output_missing_root_title_detected() -> anyhow::Result<()> {
+    fn r13_saga_step_receipt_missing_root_title_detected() -> anyhow::Result<()> {
         let (c, dir) = saga_contract_with_schemas(
             r#"{"title":"BillingCheckoutSagaPayload"}"#,
             r#"{"type":"object","properties":{"reservationId":{"type":"string"}}}"#,
@@ -7553,13 +7661,13 @@ mod tests {
                     && f.detail.contains("root title")
                     && f.detail.contains("reserve.schema.json")
             }),
-            "saga step outputSchema 缺 root title 须报 SchemaTitle: {findings:?}"
+            "saga step receiptSchema 缺 root title 须报 SchemaTitle: {findings:?}"
         );
         Ok(())
     }
 
     #[test]
-    fn r13_saga_step_output_non_pascal_title_detected() -> anyhow::Result<()> {
+    fn r13_saga_step_receipt_non_pascal_title_detected() -> anyhow::Result<()> {
         let (c, dir) = saga_contract_with_schemas(
             r#"{"title":"BillingCheckoutSagaPayload"}"#,
             r#"{"title":"reserve_output","type":"object"}"#,
@@ -7572,13 +7680,13 @@ mod tests {
                     && f.detail.contains("reserve_output")
                     && f.detail.contains("reserve.schema.json")
             }),
-            "saga step outputSchema 非 PascalCase title 须报 SchemaTitle: {findings:?}"
+            "saga step receiptSchema 非 PascalCase title 须报 SchemaTitle: {findings:?}"
         );
         Ok(())
     }
 
     #[test]
-    fn r13_saga_step_output_duplicate_title_detected() -> anyhow::Result<()> {
+    fn r13_saga_step_receipt_duplicate_title_detected() -> anyhow::Result<()> {
         let (c, dir) = saga_contract_with_schemas(r#"{"title":"Dup"}"#, r#"{"title":"Dup"}"#)?;
         let findings = rule_schema_title(&c, "x");
         let _ = std::fs::remove_dir_all(&dir);
@@ -7588,7 +7696,7 @@ mod tests {
                     && f.detail.contains("契约内重复")
                     && f.detail.contains("reserve.schema.json")
             }),
-            "saga payload + step outputSchema 重复 title 须报 SchemaTitle: {findings:?}"
+            "saga payload + step receiptSchema 重复 title 须报 SchemaTitle: {findings:?}"
         );
         Ok(())
     }
@@ -7704,7 +7812,7 @@ mod tests {
     }
 
     #[test]
-    fn r16_rejects_saga_step_output_schema_redaction_violations() -> anyhow::Result<()> {
+    fn r16_rejects_saga_step_receipt_schema_redaction_violations() -> anyhow::Result<()> {
         let dir = unique_tmp("validate");
         std::fs::create_dir_all(&dir)?;
         std::fs::write(
@@ -7730,7 +7838,7 @@ mod tests {
                     && f.detail.contains("reserve.schema.json")
                     && f.detail.contains("sessionId")
             }),
-            "saga step outputSchema redaction violations must be checked: {findings:?}"
+            "saga step receiptSchema redaction violations must be checked: {findings:?}"
         );
         Ok(())
     }

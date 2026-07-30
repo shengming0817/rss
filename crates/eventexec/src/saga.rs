@@ -1,12 +1,12 @@
 //! saga 执行与编排 —— 接缝类型 + 执行器实现（runtime lock gate + 前向 append journal + 失败逆序补偿 + checkpoint resume）。
 //!
-//! 两个 step 抽象的关系（reviewer 常问）：
+//! Typed authoring 与 erased runtime 的关系：
 //! - [`SagaAction`]（本模块，object-safe `BoxFuture`）= **erased 运行时动作栈**——执行器
 //!   ([`SagaExecutorImpl`]) 驱动 [`SagaActionFactory`] 产出的 `Vec<Box<dyn SagaAction>>`，前向
 //!   `do_it` / 逆序 `undo_it`。
-//! - `consistency::saga::SagaStep`（native AFIT，`execute`/`compensate`）= **typed authoring / codegen
-//!   目标** trait。外部组合根只注册 typed step factory；[`TypedSagaActionFactory`] 在构造期校验 generated
-//!   saga spec 的 step 数量、顺序、名称与 output schema，再擦除成内部 [`SagaAction`]。
+//! - [`SagaStep<generated::saga::StepMarker>`] = **typed authoring** trait。generated receipt DTO 与
+//!   definition-specific typestate cursor 在编译期强制 step 数量、顺序、归属与 receipt 配对，再擦除成
+//!   内部 [`SagaAction`]。
 //!
 //! resume 真正崩溃恢复：journal 只存 step 名，执行器经注入的 typed factory（saga 模板，对标
 //! steno saga template registry）按声明序重物化整个 action 序，再据 journal 已完成前缀跳过、续跑或续补偿。
@@ -17,6 +17,8 @@
 //! ref: oxidecomputer/steno src/saga_action_generic.rs@main（`Action::do_it`/`undo_it`/`name` + 逆序补偿）。
 //! ref: oxidecomputer/steno src/saga_log.rs@main（journal event replay 到 load status）。
 
+use std::any::Any;
+use std::collections::HashMap;
 use std::future::Future;
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -24,24 +26,148 @@ use std::time::Duration;
 
 use futures::future::BoxFuture;
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 
 use consistency::{
     CompensationOutcome, EngineError, EngineErrorKind, Lsn, SagaDefinition, SagaDurableStatus,
     SagaInstanceRef, SagaInstanceStatus, SagaJournalAppendOutcome, SagaJournalAppendRecord,
-    SagaJournalRecord, SagaLease, SagaLeaseOutcome, SagaModelError, SagaReplayDecision, SagaStep,
-    SagaStepCtx, StepName,
+    SagaJournalRecord, SagaLease, SagaLeaseOutcome, SagaModelError, SagaReplayDecision, StepName,
 };
 use diport::{
     CheckpointId, CheckpointOwner, CheckpointVersion, DeadLetterProvenance, DeadLetterRecord,
     DeadLetterStore, DeadLetterSummary, EnvelopeMetadata, LockAcquireOutcome, LockRenewOutcome,
     LockStoreError, LockStoreKey, OwnerCheckpointStore, SagaContractId, SagaInstanceRegistration,
-    SagaInstanceStore, SagaJournal, SagaWorkerIdentity, SaveOutcome,
+    SagaInstanceStore, SagaInstanceStoreErrorKind, SagaJournal, SagaWorkerIdentity, SaveOutcome,
 };
 
 /// saga 实例标识（uuid newtype）。模型单源在 `consistency::saga`，本模块 re-export 供域 / 组合根经
 /// `eventexec::SagaId` 命名。
 pub use consistency::SagaId;
 pub use consistency::SagaInterruption;
+
+/// Executor-minted idempotency key for exactly one saga effect.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct SagaIdempotencyKey([u8; 32]);
+
+impl std::fmt::Debug for SagaIdempotencyKey {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("SagaIdempotencyKey(<redacted>)")
+    }
+}
+
+impl SagaIdempotencyKey {
+    fn derive(
+        instance: SagaInstanceRef,
+        definition: &consistency::SagaDefinitionIdentity,
+        step: vocab::SagaStepBinding,
+        phase: SagaActionPhase,
+    ) -> Self {
+        let tenant = instance.tenant().to_string();
+        let saga_id = instance.saga_id().as_uuid();
+        let scope = match phase {
+            SagaActionPhase::Forward => step.effect_scope(),
+            SagaActionPhase::Compensation => step.compensation_effect_scope(),
+        };
+        let mut hash = Sha256::new();
+        hash.update(b"rss.saga.idempotency-key.v1");
+        for bytes in [
+            tenant.as_bytes(),
+            saga_id.as_bytes(),
+            definition.contract_id().as_bytes(),
+            definition.version().as_bytes(),
+            definition.schema_digest().as_bytes(),
+            definition.action_registry_generation().as_bytes(),
+            step.name().as_bytes(),
+            phase.as_str().as_bytes(),
+            scope.as_bytes(),
+        ] {
+            hash.update((bytes.len() as u64).to_be_bytes());
+            hash.update(bytes);
+        }
+        Self(hash.finalize().into())
+    }
+
+    /// Stable lowercase hexadecimal representation for an external effect request header.
+    pub fn to_hex(&self) -> String {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut output = String::with_capacity(64);
+        for byte in self.0 {
+            output.push(HEX[(byte >> 4) as usize] as char);
+            output.push(HEX[(byte & 0x0f) as usize] as char);
+        }
+        output
+    }
+}
+
+/// Forward action context. Only the executor can construct it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SagaForwardContext {
+    instance: SagaInstanceRef,
+    step_name: StepName,
+    idempotency_key: SagaIdempotencyKey,
+}
+
+/// Compensation action context. Its distinct type prevents phase/key mixups.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SagaCompensationContext {
+    instance: SagaInstanceRef,
+    step_name: StepName,
+    idempotency_key: SagaIdempotencyKey,
+}
+
+impl SagaForwardContext {
+    /// Saga instance receiving the forward effect.
+    pub fn instance(&self) -> SagaInstanceRef {
+        self.instance
+    }
+
+    /// Tenant owning the saga instance.
+    pub fn tenant(&self) -> vocab::TenantId {
+        self.instance.tenant()
+    }
+
+    /// Durable saga identifier.
+    pub fn saga_id(&self) -> SagaId {
+        self.instance.saga_id()
+    }
+
+    /// Generated step name for this effect.
+    pub fn step_name(&self) -> &StepName {
+        &self.step_name
+    }
+
+    /// Stable retry-independent key for the forward effect.
+    pub fn idempotency_key(&self) -> &SagaIdempotencyKey {
+        &self.idempotency_key
+    }
+}
+
+impl SagaCompensationContext {
+    /// Saga instance receiving the compensation effect.
+    pub fn instance(&self) -> SagaInstanceRef {
+        self.instance
+    }
+
+    /// Tenant owning the saga instance.
+    pub fn tenant(&self) -> vocab::TenantId {
+        self.instance.tenant()
+    }
+
+    /// Durable saga identifier.
+    pub fn saga_id(&self) -> SagaId {
+        self.instance.saga_id()
+    }
+
+    /// Generated step name for this compensation.
+    pub fn step_name(&self) -> &StepName {
+        &self.step_name
+    }
+
+    /// Stable retry-independent key for the compensation effect.
+    pub fn idempotency_key(&self) -> &SagaIdempotencyKey {
+        &self.idempotency_key
+    }
+}
 
 // ── 冻结接缝类型（do/undo 动作 + 结论 + 命令 + 执行状态）─────────────────────────
 
@@ -50,8 +176,9 @@ pub use consistency::SagaInterruption;
 pub(crate) struct SagaActionCtx {
     instance: SagaInstanceRef,
     #[allow(dead_code)]
-    // reason: erased action tests inspect node identity; typed runtime uses SagaStepCtx
+    // reason: erased action tests inspect node identity; typed runtime uses phase-specific contexts
     node_name: String,
+    idempotency_key: SagaIdempotencyKey,
 }
 
 impl SagaActionCtx {
@@ -60,12 +187,26 @@ impl SagaActionCtx {
         Self {
             instance,
             node_name: node_name.into(),
+            idempotency_key: SagaIdempotencyKey([0; 32]),
         }
     }
 
-    /// 所属 tenant-scoped saga 实例。
-    pub fn instance(&self) -> SagaInstanceRef {
+    #[cfg(test)]
+    fn instance(&self) -> SagaInstanceRef {
         self.instance
+    }
+
+    fn for_action(
+        instance: SagaInstanceRef,
+        definition: &consistency::SagaDefinitionIdentity,
+        binding: vocab::SagaStepBinding,
+        phase: SagaActionPhase,
+    ) -> Self {
+        Self {
+            instance,
+            node_name: binding.name().to_string(),
+            idempotency_key: SagaIdempotencyKey::derive(instance, definition, binding, phase),
+        }
     }
 
     /// 所属租户。
@@ -88,25 +229,61 @@ impl SagaActionCtx {
 }
 
 /// saga 动作（erased runtime primitive；外部代码经 [`TypedSagaActionFactory`] 注册 typed
-/// [`consistency::SagaStep`]，不直接实现本 trait）。
+/// [`SagaStep`]，不直接实现本 trait）。
 ///
 /// 对标 steno `Action`：`do_it` 前向（返回输出字节），`undo_it` 补偿（幂等，逆序调用）。
 pub(crate) trait SagaAction: std::fmt::Debug + Send + Sync {
     /// step 名（须为合法 Rust 标识符；执行器据此落 journal + resume 时由 factory 重物化）。
     fn name(&self) -> &str;
 
-    /// 前向执行；`Ok(output)` 完成（output 仅作为 run 路径末步结果，不进入 durable journal）。
-    fn do_it(&self, ctx: SagaActionCtx) -> BoxFuture<'static, Result<Vec<u8>, SagaActionError>>;
-
-    /// Whether this action's failed `do_it` means forward side effects already ran and must be
-    /// compensated. Erased test actions default to fail-before-complete; typed actions use this for
-    /// post-execute output serialization failures.
-    fn failed_after_forward_effect(&self, _error: &SagaActionError) -> bool {
-        false
+    /// Retry permission sealed into the generated step binding.
+    fn retry_class(&self) -> vocab::SagaRetryClass {
+        vocab::SagaRetryClass::Never
     }
 
+    fn binding(&self) -> Option<vocab::SagaStepBinding> {
+        None
+    }
+
+    /// 前向执行；`Ok(output)` 完成（output 仅作为 run 路径末步结果，不进入 durable journal）。
+    fn do_it(
+        &self,
+        ctx: SagaActionCtx,
+    ) -> BoxFuture<'static, Result<SagaActionReceipt, SagaActionError>>;
+
     /// 补偿（撤销 `do_it` 副作用）；仅对**已完成**步逆序调用。
-    fn undo_it(&self, ctx: SagaActionCtx) -> BoxFuture<'static, Result<(), SagaActionError>>;
+    fn undo_it(
+        &self,
+        ctx: SagaActionCtx,
+        receipt: Arc<dyn Any + Send + Sync>,
+    ) -> BoxFuture<'static, Result<(), SagaActionError>>;
+}
+
+pub(crate) struct SagaActionReceipt {
+    output: Result<Vec<u8>, SagaActionError>,
+    value: Arc<dyn Any + Send + Sync>,
+}
+
+impl SagaActionReceipt {
+    fn new<R>(output: Vec<u8>, value: R) -> Self
+    where
+        R: Any + Send + Sync + 'static,
+    {
+        Self {
+            output: Ok(output),
+            value: Arc::new(value),
+        }
+    }
+
+    fn post_effect_failure<R>(error: SagaActionError, value: R) -> Self
+    where
+        R: Any + Send + Sync + 'static,
+    {
+        Self {
+            output: Err(error),
+            value: Arc::new(value),
+        }
+    }
 }
 
 /// saga 执行结论。
@@ -174,6 +351,9 @@ pub enum SagaActionError {
     /// Non-retryable action failure.
     #[error("non-retryable action failed")]
     NonRetryableActionFailed,
+    /// Authoring or generated runtime invariant was violated.
+    #[error("action invariant violated")]
+    InvariantViolation,
     /// 输出 / 标识序列化失败（含 step 名非法标识符）。
     #[error("serialize failed")]
     SerializeFailed,
@@ -183,6 +363,22 @@ pub enum SagaActionError {
     /// 动作超过 saga runtime policy 的单 phase 总预算。
     #[error("action timed out")]
     ActionTimedOut,
+    /// The action may have committed but no trustworthy receipt was observed.
+    #[error("action outcome is unknown")]
+    OutcomeUnknown,
+    /// Lease/ownership was lost while the action was in flight.
+    #[error("action ownership was lost")]
+    OwnershipLost,
+}
+
+/// Closed saga failure classification. New error paths must select one class explicitly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SagaFailureClass {
+    Transient,
+    Permanent,
+    Invariant,
+    OutcomeUnknown,
+    OwnershipLost,
 }
 
 impl SagaActionError {
@@ -190,197 +386,247 @@ impl SagaActionError {
         match self {
             Self::ActionFailed => "action_failed",
             Self::NonRetryableActionFailed => "non_retryable_action_failed",
+            Self::InvariantViolation => "invariant_violation",
             Self::SerializeFailed => "serialize_failed",
             Self::SubsagaCreateFailed => "subsaga_create_failed",
             Self::ActionTimedOut => "action_timed_out",
+            Self::OutcomeUnknown => "outcome_unknown",
+            Self::OwnershipLost => "ownership_lost",
         }
     }
-}
 
-/// Error constructing a typed saga action factory from generated contract metadata.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[non_exhaustive]
-pub enum TypedSagaFactoryError {
-    /// Generated step name failed runtime `StepName` validation.
-    #[error("typed saga step name is invalid: name={name:?}")]
-    InvalidStepName { name: &'static str },
-    /// Registered typed steps do not match the generated contract step count.
-    #[error(
-        "typed saga step count does not match generated contract: expected={expected} actual={actual}"
-    )]
-    StepCountMismatch { expected: usize, actual: usize },
-    /// Registered typed step binding differs from the generated ordered binding.
-    #[error(
-        "typed saga step binding does not match generated contract: index={index} expected={expected:?} actual={actual:?}"
-    )]
-    StepBindingMismatch {
-        index: usize,
-        expected: Box<vocab::SagaStepBinding>,
-        actual: Box<vocab::SagaStepBinding>,
-    },
-    /// Registered typed step output DTO binding differs from the step binding.
-    #[error(
-        "typed saga step output binding does not match step binding: step={step:?} output={output:?}"
-    )]
-    StepOutputBindingMismatch {
-        step: Box<vocab::SagaStepBinding>,
-        output: Box<vocab::SagaStepBinding>,
-    },
-}
-
-/// Typed saga action factory consumed by [`SagaExecutorDeps::new`].
-///
-/// It is built from one generated [`vocab::SagaContractBinding`] and typed
-/// [`consistency::SagaStep`] factories. `finish` validates exact step count/order/contract/name/schema
-/// before any executor can be constructed.
-pub struct TypedSagaActionFactory {
-    spec: vocab::SagaContractBinding,
-    steps: Vec<Box<dyn TypedSagaStepSlot>>,
-}
-
-impl TypedSagaActionFactory {
-    /// Start building a typed saga action factory from generated saga contract metadata.
-    pub fn builder(spec: vocab::SagaContractBinding) -> TypedSagaActionFactoryBuilder {
-        TypedSagaActionFactoryBuilder::new(spec)
+    fn classification(&self) -> SagaFailureClass {
+        match self {
+            Self::ActionFailed => SagaFailureClass::Transient,
+            Self::ActionTimedOut => SagaFailureClass::OutcomeUnknown,
+            Self::NonRetryableActionFailed | Self::SubsagaCreateFailed => {
+                SagaFailureClass::Permanent
+            }
+            Self::SerializeFailed | Self::InvariantViolation => SagaFailureClass::Invariant,
+            Self::OutcomeUnknown => SagaFailureClass::OutcomeUnknown,
+            Self::OwnershipLost => SagaFailureClass::OwnershipLost,
+        }
     }
 
-    /// Generated saga contract binding used to build this typed factory.
+    pub(crate) fn degrades_worker_permanently(&self) -> bool {
+        matches!(
+            self.classification(),
+            SagaFailureClass::OutcomeUnknown | SagaFailureClass::OwnershipLost
+        )
+    }
+}
+
+/// Authoring seam tied to exactly one generated step marker and its receipt DTO.
+///
+/// Each implementation is statically bound to one generated marker `M`; the marker fixes the step
+/// order, retry permission and sole legal receipt DTO. The executor retries only transient errors
+/// when that generated step declares `retryClass = "transient"`. A successful receipt is retained
+/// in memory for same-run compensation; crash recovery without a protected durable receipt fails
+/// closed until the receipt-store carrier exists.
+pub trait SagaStep<M>: Send + Sync
+where
+    M: generated::saga::StepMarker,
+{
+    /// Execute the forward effect once for the supplied attempt.
+    ///
+    /// The context contains the executor-minted, attempt-independent idempotency key. Implementors
+    /// must pass it to the external effect. Returning `Ok` proves the generated receipt belongs to
+    /// this exact step; error classification controls whether the executor may retry.
+    fn execute(
+        &self,
+        context: SagaForwardContext,
+    ) -> impl Future<Output = Result<M::Receipt, EngineError>> + Send;
+
+    /// Compensate a previously successful forward effect using its exact typed receipt.
+    ///
+    /// Compensation has a distinct context and idempotency key. `Compensated` is the only success
+    /// outcome; `Failed` is terminal and enters the Saga failure/dead-letter path.
+    fn compensate(
+        &self,
+        context: SagaCompensationContext,
+        receipt: M::Receipt,
+    ) -> impl Future<Output = Result<CompensationOutcome, EngineError>> + Send;
+}
+
+/// Complete action factory for one exact generated definition.
+pub struct TypedSagaActionFactory<D: generated::saga::Definition> {
+    spec: vocab::SagaContractBinding,
+    steps: Vec<Box<dyn TypedSagaStepSlot>>,
+    marker: PhantomData<fn() -> D>,
+}
+
+impl<D: generated::saga::Definition> TypedSagaActionFactory<D> {
+    /// Start registration at the definition's generated first-step cursor.
+    ///
+    /// No raw spec is accepted: identity, policy and ordered cursors come solely from `D`.
+    pub fn builder() -> TypedSagaActionFactoryBuilder<D, D::Start> {
+        TypedSagaActionFactoryBuilder {
+            steps: Vec::new(),
+            marker: PhantomData,
+        }
+    }
+
     #[must_use]
+    /// Return the complete generated binding sealed into this factory.
     pub fn spec(&self) -> vocab::SagaContractBinding {
         self.spec
     }
 }
 
-/// Builder for [`TypedSagaActionFactory`].
-pub struct TypedSagaActionFactoryBuilder {
-    spec: vocab::SagaContractBinding,
+/// Definition-specific typestate builder. Its cursor is advanced only by the generated next step.
+pub struct TypedSagaActionFactoryBuilder<D, C>
+where
+    D: generated::saga::Definition,
+{
     steps: Vec<Box<dyn TypedSagaStepSlot>>,
+    marker: PhantomData<fn() -> (D, C)>,
 }
 
-impl TypedSagaActionFactoryBuilder {
-    /// Create a builder tied to one generated saga contract binding.
-    pub fn new(spec: vocab::SagaContractBinding) -> Self {
-        Self {
-            spec,
-            steps: Vec::new(),
-        }
-    }
-
-    /// Register one typed step factory in generated contract order.
-    pub fn register_step<S, F>(&mut self, factory: F) -> Result<(), TypedSagaFactoryError>
+impl<D, C> TypedSagaActionFactoryBuilder<D, C>
+where
+    D: generated::saga::Definition,
+    C: generated::saga::Step<D> + 'static,
+    C::Receipt: Serialize + Clone + Send + Sync + 'static,
+{
+    /// Register exactly the current generated cursor and advance to its generated successor.
+    ///
+    /// The consumed builder prevents omission, duplication and reordering. `S` must return and
+    /// compensate with `C`'s receipt, so cross-definition steps and wrong receipts do not compile.
+    pub fn register<S, F>(mut self, factory: F) -> TypedSagaActionFactoryBuilder<D, C::Next>
     where
-        S: SagaStep + std::fmt::Debug + Send + Sync + 'static,
-        S::Output: Serialize + Send + 'static,
+        S: SagaStep<C> + std::fmt::Debug + Send + Sync + 'static,
         F: Fn() -> S + Send + Sync + 'static,
     {
-        let step_name = parse_binding_name(S::BINDING)?;
-        let output_binding = <S::Output as vocab::SagaStepOutputBinding>::BINDING;
-        if output_binding != S::BINDING {
-            return Err(TypedSagaFactoryError::StepOutputBindingMismatch {
-                step: Box::new(S::BINDING),
-                output: Box::new(output_binding),
-            });
-        }
-        self.steps.push(Box::new(RegisteredSagaStep::<S, F> {
+        self.steps.push(Box::new(RegisteredSagaStep::<S, F, C> {
             factory,
-            step_name,
-            _marker: PhantomData,
+            marker: PhantomData,
         }));
-        Ok(())
-    }
-
-    /// Validate exact generated step parity and produce a runtime factory.
-    pub fn finish(self) -> Result<TypedSagaActionFactory, TypedSagaFactoryError> {
-        let expected = self.spec.steps();
-        if expected.len() != self.steps.len() {
-            return Err(TypedSagaFactoryError::StepCountMismatch {
-                expected: expected.len(),
-                actual: self.steps.len(),
-            });
-        }
-        for (index, (expected, actual)) in expected.iter().zip(&self.steps).enumerate() {
-            let actual = actual.binding();
-            if *expected != actual {
-                return Err(TypedSagaFactoryError::StepBindingMismatch {
-                    index,
-                    expected: Box::new(*expected),
-                    actual: Box::new(actual),
-                });
-            }
-        }
-        Ok(TypedSagaActionFactory {
-            spec: self.spec,
+        TypedSagaActionFactoryBuilder {
             steps: self.steps,
-        })
+            marker: PhantomData,
+        }
+    }
+}
+
+impl<D, C> TypedSagaActionFactoryBuilder<D, C>
+where
+    D: generated::saga::Definition,
+    C: generated::saga::End<D>,
+{
+    /// Finish only after the generated `End` cursor has been reached.
+    ///
+    /// Calling this before every declared step is registered is a compile-time error.
+    pub fn finish(self) -> TypedSagaActionFactory<D> {
+        TypedSagaActionFactory {
+            spec: D::SPEC,
+            steps: self.steps,
+            marker: PhantomData,
+        }
     }
 }
 
 trait TypedSagaStepSlot: Send + Sync {
-    fn binding(&self) -> vocab::SagaStepBinding;
     fn build_action(&self) -> Box<dyn SagaAction>;
 }
 
-struct RegisteredSagaStep<S, F> {
+struct RegisteredSagaStep<S, F, M> {
     factory: F,
-    step_name: StepName,
-    _marker: PhantomData<fn() -> S>,
+    marker: PhantomData<fn() -> (S, M)>,
 }
 
-impl<S, F> TypedSagaStepSlot for RegisteredSagaStep<S, F>
+impl<S, F, M> TypedSagaStepSlot for RegisteredSagaStep<S, F, M>
 where
-    S: SagaStep + std::fmt::Debug + Send + Sync + 'static,
-    S::Output: Serialize + Send + 'static,
+    M: generated::saga::StepMarker + 'static,
+    M::Receipt: Serialize + Clone + Send + Sync + 'static,
+    S: SagaStep<M> + std::fmt::Debug + Send + Sync + 'static,
     F: Fn() -> S + Send + Sync + 'static,
 {
-    fn binding(&self) -> vocab::SagaStepBinding {
-        S::BINDING
-    }
-
     fn build_action(&self) -> Box<dyn SagaAction> {
-        Box::new(TypedSagaStepAction {
+        Box::new(TypedSagaStepAction::<S, M> {
             step: Arc::new((self.factory)()),
-            step_name: self.step_name.clone(),
+            marker: PhantomData,
         })
     }
 }
 
-#[derive(Debug)]
-struct TypedSagaStepAction<S> {
+struct TypedSagaStepAction<S, M> {
     step: Arc<S>,
-    step_name: StepName,
+    marker: PhantomData<fn() -> M>,
 }
 
-impl<S> SagaAction for TypedSagaStepAction<S>
+impl<S: std::fmt::Debug, M> std::fmt::Debug for TypedSagaStepAction<S, M> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TypedSagaStepAction")
+            .field("step", &self.step)
+            .finish()
+    }
+}
+
+impl<S, M> SagaAction for TypedSagaStepAction<S, M>
 where
-    S: SagaStep + std::fmt::Debug + Send + Sync + 'static,
-    S::Output: Serialize + Send + 'static,
+    M: generated::saga::StepMarker + 'static,
+    M::Receipt: Serialize + Clone + Send + Sync + 'static,
+    S: SagaStep<M> + std::fmt::Debug + Send + Sync + 'static,
 {
     fn name(&self) -> &str {
-        self.step_name.as_str()
+        M::BINDING.name()
+    }
+    fn retry_class(&self) -> vocab::SagaRetryClass {
+        M::BINDING.retry_class()
+    }
+    fn binding(&self) -> Option<vocab::SagaStepBinding> {
+        Some(M::BINDING)
     }
 
-    fn do_it(&self, ctx: SagaActionCtx) -> BoxFuture<'static, Result<Vec<u8>, SagaActionError>> {
+    fn do_it(
+        &self,
+        ctx: SagaActionCtx,
+    ) -> BoxFuture<'static, Result<SagaActionReceipt, SagaActionError>> {
         let step = self.step.clone();
-        let step_name = self.step_name.clone();
+        let Ok(step_name) = StepName::parse(M::BINDING.name()) else {
+            return Box::pin(async { Err(SagaActionError::SerializeFailed) });
+        };
+        let context = SagaForwardContext {
+            instance: ctx.instance,
+            step_name,
+            idempotency_key: ctx.idempotency_key,
+        };
         Box::pin(async move {
-            let output = step
-                .execute(SagaStepCtx::new(ctx.instance(), step_name))
+            let receipt = step
+                .execute(context)
                 .await
                 .map_err(engine_error_to_action_error)?;
-            serde_json::to_vec(&output).map_err(|_| SagaActionError::SerializeFailed)
+            match serde_json::to_vec(&receipt) {
+                Ok(output) => Ok(SagaActionReceipt::new(output, receipt)),
+                Err(_) => Ok(SagaActionReceipt::post_effect_failure(
+                    SagaActionError::InvariantViolation,
+                    receipt,
+                )),
+            }
         })
     }
 
-    fn failed_after_forward_effect(&self, error: &SagaActionError) -> bool {
-        matches!(error, SagaActionError::SerializeFailed)
-    }
-
-    fn undo_it(&self, ctx: SagaActionCtx) -> BoxFuture<'static, Result<(), SagaActionError>> {
+    fn undo_it(
+        &self,
+        ctx: SagaActionCtx,
+        receipt: Arc<dyn Any + Send + Sync>,
+    ) -> BoxFuture<'static, Result<(), SagaActionError>> {
         let step = self.step.clone();
-        let step_name = self.step_name.clone();
+        let Some(receipt) = receipt.downcast_ref::<M::Receipt>().cloned() else {
+            return Box::pin(async { Err(SagaActionError::SerializeFailed) });
+        };
+        let Ok(step_name) = StepName::parse(M::BINDING.name()) else {
+            return Box::pin(async { Err(SagaActionError::SerializeFailed) });
+        };
+        let context = SagaCompensationContext {
+            instance: ctx.instance,
+            step_name,
+            idempotency_key: ctx.idempotency_key,
+        };
         Box::pin(async move {
             match step
-                .compensate(SagaStepCtx::new(ctx.instance(), step_name))
+                .compensate(context, receipt)
                 .await
                 .map_err(engine_error_to_action_error)?
             {
@@ -392,19 +638,12 @@ where
     }
 }
 
-fn parse_binding_name(binding: vocab::SagaStepBinding) -> Result<StepName, TypedSagaFactoryError> {
-    StepName::parse(binding.name()).map_err(|_| TypedSagaFactoryError::InvalidStepName {
-        name: binding.name(),
-    })
-}
-
 fn engine_error_to_action_error(error: EngineError) -> SagaActionError {
     match error.kind() {
         EngineErrorKind::Transient => SagaActionError::ActionFailed,
-        EngineErrorKind::Permanent | EngineErrorKind::Invariant => {
-            SagaActionError::NonRetryableActionFailed
-        }
-        _ => SagaActionError::NonRetryableActionFailed,
+        EngineErrorKind::Permanent => SagaActionError::NonRetryableActionFailed,
+        EngineErrorKind::Invariant => SagaActionError::InvariantViolation,
+        _ => SagaActionError::InvariantViolation,
     }
 }
 
@@ -413,31 +652,29 @@ fn engine_error_to_action_error(error: EngineError) -> SagaActionError {
 /// Construction is intentionally funneled through `TryFrom<SagaRuntimePolicySpec>`: contract glue
 /// exposes raw millisecond specs, while the executor only accepts validated runtime states.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum SagaPolicy {
-    /// Retry and timeout are disabled (`retryMillis = 0`, `timeoutMillis = 0`).
-    Disabled,
-    /// One step phase has a total timeout budget, and may have fixed-delay retry.
-    Bounded(SagaBoundedPolicy),
+pub(crate) struct SagaPolicy {
+    max_attempts: u32,
+    time_budget: Duration,
+    backoff: vocab::SagaBackoff,
+    initial_backoff: Duration,
+    max_backoff: Duration,
+    jitter: vocab::SagaJitter,
 }
 
-/// Sealed bounded saga policy state.
-///
-/// Fields stay private and there is no public raw-`Duration` constructor; the only production
-/// boundary is `TryFrom<vocab::SagaRuntimePolicySpec>`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SagaBoundedPolicy {
-    retry_delay: Option<Duration>,
-    step_timeout: Duration,
-}
-
-impl SagaBoundedPolicy {
-    fn retry_delay(self) -> Option<Duration> {
-        self.retry_delay
-    }
-
-    fn step_timeout(self) -> Duration {
-        self.step_timeout
+impl SagaPolicy {
+    fn delay_for(self, retry_number: u32, entropy: u64) -> Duration {
+        let exponent = retry_number.saturating_sub(1).min(63);
+        let initial = self.initial_backoff.as_millis();
+        let raw = match self.backoff {
+            vocab::SagaBackoff::Fixed => initial,
+            vocab::SagaBackoff::Exponential => initial.saturating_mul(1_u128 << exponent),
+        };
+        let capped = raw.min(self.max_backoff.as_millis()).min(u64::MAX as u128) as u64;
+        let millis = match self.jitter {
+            vocab::SagaJitter::None => capped,
+            vocab::SagaJitter::Full => entropy % capped.saturating_add(1),
+        };
+        Duration::from_millis(millis)
     }
 }
 
@@ -445,27 +682,35 @@ impl SagaBoundedPolicy {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum SagaPolicyError {
-    /// Retry without a timeout budget can run forever.
-    #[error("saga retry policy requires timeout budget")]
-    RetryWithoutTimeout,
+    #[error("saga maxAttempts must include at least the initial attempt")]
+    ZeroAttempts,
+    #[error("saga time budget must be positive")]
+    ZeroTimeBudget,
+    #[error("saga initial backoff exceeds maximum backoff")]
+    BackoffInverted,
 }
 
 impl TryFrom<vocab::SagaRuntimePolicySpec> for SagaPolicy {
     type Error = SagaPolicyError;
 
     fn try_from(spec: vocab::SagaRuntimePolicySpec) -> Result<Self, Self::Error> {
-        match (spec.retry_millis(), spec.timeout_millis()) {
-            (0, 0) => Ok(Self::Disabled),
-            (_, 0) => Err(SagaPolicyError::RetryWithoutTimeout),
-            (0, timeout_millis) => Ok(Self::Bounded(SagaBoundedPolicy {
-                retry_delay: None,
-                step_timeout: Duration::from_millis(timeout_millis),
-            })),
-            (retry_millis, timeout_millis) => Ok(Self::Bounded(SagaBoundedPolicy {
-                retry_delay: Some(Duration::from_millis(retry_millis)),
-                step_timeout: Duration::from_millis(timeout_millis),
-            })),
+        if spec.max_attempts() == 0 {
+            return Err(SagaPolicyError::ZeroAttempts);
         }
+        if spec.time_budget_millis() == 0 {
+            return Err(SagaPolicyError::ZeroTimeBudget);
+        }
+        if spec.initial_backoff_millis() > spec.max_backoff_millis() {
+            return Err(SagaPolicyError::BackoffInverted);
+        }
+        Ok(Self {
+            max_attempts: spec.max_attempts(),
+            time_budget: Duration::from_millis(spec.time_budget_millis()),
+            backoff: spec.backoff(),
+            initial_backoff: Duration::from_millis(spec.initial_backoff_millis()),
+            max_backoff: Duration::from_millis(spec.max_backoff_millis()),
+            jitter: spec.jitter(),
+        })
     }
 }
 
@@ -474,13 +719,21 @@ impl TryFrom<vocab::SagaRuntimePolicySpec> for SagaPolicy {
 /// Saga 执行器接缝：驱动 [`SagaAction`] 栈（前向执行 + 失败逆序补偿）。对标 steno SEC。
 pub trait SagaExecutor: Send + Sync {
     /// 执行 saga：注册 instance、获取 lease，然后经注入的 [`SagaActionFactory`] 顺序驱动动作。
-    fn run(&self, instance: SagaInstanceRef) -> BoxFuture<'static, SagaOutcome>;
+    fn run(
+        &self,
+        instance: SagaInstanceRef,
+        definition: consistency::SagaDefinitionIdentity,
+    ) -> BoxFuture<'static, SagaOutcome>;
 
     /// 从 journal 恢复（crash recovery；经注入 [`SagaActionFactory`] 重物化 action 序续跑 / 续补偿）。
     ///
     /// resume 终态成功时 [`SagaOutcome::Succeeded`]`.output` 恒为空字节——journal `read` 不回传
     /// output；末步 output 仅 `run` 路径可信。consumer 不得依赖 resume 的 output 字节。
-    fn resume(&self, instance: SagaInstanceRef) -> BoxFuture<'static, SagaOutcome>;
+    fn resume(
+        &self,
+        instance: SagaInstanceRef,
+        listed_definition: consistency::SagaDefinitionIdentity,
+    ) -> BoxFuture<'static, SagaOutcome>;
 }
 
 /// Saga 进度跟踪接缝：查询执行状态。对标 steno saga status。
@@ -772,11 +1025,122 @@ pub(crate) trait SagaActionFactory: Send + Sync {
     fn build(&self) -> Vec<Box<dyn SagaAction>>;
 }
 
-impl SagaActionFactory for TypedSagaActionFactory {
+impl<D: generated::saga::Definition> SagaActionFactory for TypedSagaActionFactory<D> {
     fn build(&self) -> Vec<Box<dyn SagaAction>> {
         self.steps.iter().map(|step| step.build_action()).collect()
     }
 }
+
+/// Immutable exact map of generated definition identities to complete typed factories.
+#[derive(Clone)]
+pub struct SagaDefinitionRegistry {
+    definitions: Arc<HashMap<consistency::SagaDefinitionIdentity, SagaDefinitionRuntime>>,
+}
+
+#[derive(Clone)]
+struct SagaDefinitionRuntime {
+    factory: Arc<dyn SagaActionFactory>,
+    policy: SagaPolicy,
+}
+
+impl SagaDefinitionRegistry {
+    /// Start an immutable registry assembly.
+    pub fn builder() -> SagaDefinitionRegistryBuilder {
+        SagaDefinitionRegistryBuilder {
+            definitions: HashMap::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn contains(&self, identity: &consistency::SagaDefinitionIdentity) -> bool {
+        self.definitions.contains_key(identity)
+    }
+
+    fn resolve(
+        &self,
+        identity: &consistency::SagaDefinitionIdentity,
+    ) -> Option<SagaDefinitionRuntime> {
+        self.definitions.get(identity).cloned()
+    }
+
+    #[cfg(test)]
+    fn from_erased(
+        identity: consistency::SagaDefinitionIdentity,
+        factory: Arc<dyn SagaActionFactory>,
+        policy: SagaPolicy,
+    ) -> Self {
+        Self {
+            definitions: Arc::new(HashMap::from([(
+                identity,
+                SagaDefinitionRuntime { factory, policy },
+            )])),
+        }
+    }
+
+    #[cfg(test)]
+    fn with_erased(
+        mut self,
+        identity: consistency::SagaDefinitionIdentity,
+        factory: Arc<dyn SagaActionFactory>,
+        policy: SagaPolicy,
+    ) -> Self {
+        Arc::make_mut(&mut self.definitions)
+            .insert(identity, SagaDefinitionRuntime { factory, policy });
+        self
+    }
+}
+
+/// Assembly-time builder; no mutation or retirement API exists after `finish`.
+pub struct SagaDefinitionRegistryBuilder {
+    definitions: HashMap<consistency::SagaDefinitionIdentity, SagaDefinitionRuntime>,
+}
+
+/// Invalid immutable Saga definition registry assembly.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum SagaDefinitionRegistryError {
+    /// The same complete generated identity was registered more than once.
+    #[error("duplicate saga definition identity")]
+    DuplicateIdentity,
+    /// Generated retry policy is structurally invalid.
+    #[error("invalid generated saga retry policy")]
+    InvalidPolicy(#[from] SagaPolicyError),
+}
+
+impl SagaDefinitionRegistryBuilder {
+    /// Register one complete typed factory under its generated exact identity.
+    pub fn register<D>(
+        mut self,
+        factory: TypedSagaActionFactory<D>,
+    ) -> Result<Self, SagaDefinitionRegistryError>
+    where
+        D: generated::saga::Definition + 'static,
+    {
+        let spec = factory.spec();
+        let identity = consistency::SagaDefinitionIdentity::from_binding(spec);
+        let policy = SagaPolicy::try_from(spec.policy())?;
+        let runtime = SagaDefinitionRuntime {
+            factory: Arc::new(factory),
+            policy,
+        };
+        if self.definitions.insert(identity, runtime).is_some() {
+            return Err(SagaDefinitionRegistryError::DuplicateIdentity);
+        }
+        Ok(self)
+    }
+
+    #[must_use]
+    /// Seal the registry. The resulting map has no mutation or retirement API.
+    pub fn finish(self) -> SagaDefinitionRegistry {
+        SagaDefinitionRegistry {
+            definitions: Arc::new(self.definitions),
+        }
+    }
+}
+
+/// The assembly-selected exact definition is absent from the immutable registry.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("selected saga definition is not registered")]
+pub struct SagaDefinitionRegistryLookupError;
 
 /// 补偿失败安全摘要（`&'static str` const literal；进 journal `Failed` 行 + DLX 摘要 + tracing，不携 runtime
 /// 数据，INVARIANT: DIPORT-DLX-SUMMARY-STATIC-01 { level = "Medium", exec = "manual/opt-in", source = "code" }）。
@@ -793,21 +1157,21 @@ const UNKNOWN_SAGA: &str = "<unknown-saga>";
 /// `Arc<S>`（`run`/`resume` 返回 `'static` future，须 clone 句柄进 future；对齐 diport 注入形态表
 /// spawn/Send-'static 行）。
 ///
-/// `kind:saga` 契约声明的 `retryMillis`/`timeoutMillis` 先经 generated
+/// `kind:saga` 契约声明的完整 retry policy 先经 generated
 /// [`vocab::SagaRuntimePolicySpec`] 暴露，再由组合根转成 [`SagaPolicy`] 注入 executor。执行器仅接受已验证
-/// runtime policy：`do_it` / `undo_it` 都被同一总预算 + 固定退避策略包住。
+/// runtime policy：forward/compensation 都被同一 attempt/time 双预算与声明的退避策略约束。
 pub struct SagaExecutorImpl<J, C, D, S> {
     journal: Arc<J>,
     instance_store: Arc<S>,
     checkpoint: Arc<C>,
     dead_letter: Arc<D>,
-    factory: Arc<dyn SagaActionFactory>,
+    registry: SagaDefinitionRegistry,
     runtime_lock: SagaRuntimeLock,
     owner: CheckpointOwner,
     identity: SagaWorkerIdentity,
+    definition: consistency::SagaDefinitionIdentity,
     holder_id: String,
     lease_ttl: Duration,
-    policy: SagaPolicy,
 }
 
 /// Saga executor durable dependencies.
@@ -816,17 +1180,18 @@ pub struct SagaExecutorDeps<J, C, D, S> {
     instance_store: Arc<S>,
     checkpoint: Arc<C>,
     dead_letter: Arc<D>,
-    factory: Arc<dyn SagaActionFactory>,
+    registry: SagaDefinitionRegistry,
     runtime_lock: SagaRuntimeLock,
 }
 
 impl<J, C, D, S> SagaExecutorDeps<J, C, D, S> {
+    /// Install the complete immutable registry. Selection is joined with config in executor construction.
     pub fn new(
         journal: Arc<J>,
         instance_store: Arc<S>,
         checkpoint: Arc<C>,
         dead_letter: Arc<D>,
-        factory: TypedSagaActionFactory,
+        registry: SagaDefinitionRegistry,
         runtime_lock: SagaRuntimeLock,
     ) -> Self {
         Self {
@@ -834,7 +1199,7 @@ impl<J, C, D, S> SagaExecutorDeps<J, C, D, S> {
             instance_store,
             checkpoint,
             dead_letter,
-            factory: Arc::new(factory),
+            registry,
             runtime_lock,
         }
     }
@@ -846,14 +1211,20 @@ impl<J, C, D, S> SagaExecutorDeps<J, C, D, S> {
         checkpoint: Arc<C>,
         dead_letter: Arc<D>,
         factory: Arc<dyn SagaActionFactory>,
+        policy: SagaPolicy,
         runtime_lock: SagaRuntimeLock,
     ) -> Self {
+        let registry = SagaDefinitionRegistry::from_erased(
+            consistency::SagaDefinitionIdentity::from_binding(generated::saga::billing_v1::SPEC),
+            factory,
+            policy,
+        );
         Self {
             journal,
             instance_store,
             checkpoint,
             dead_letter,
-            factory,
+            registry,
             runtime_lock,
         }
     }
@@ -863,18 +1234,15 @@ impl<J, C, D, S> SagaExecutorDeps<J, C, D, S> {
 pub struct SagaExecutorConfig {
     owner: CheckpointOwner,
     identity: SagaWorkerIdentity,
+    definition: consistency::SagaDefinitionIdentity,
     holder_id: String,
     lease_ttl: Duration,
-    policy: SagaPolicy,
 }
 
 /// Error constructing [`SagaExecutorConfig`].
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum SagaExecutorConfigError {
-    /// Generated saga policy was invalid.
-    #[error(transparent)]
-    Policy(#[from] SagaPolicyError),
     /// Generated contract id was invalid.
     #[error(transparent)]
     ContractId(#[from] diport::SagaContractIdError),
@@ -888,11 +1256,11 @@ impl SagaExecutorConfig {
     ///
     /// Runtime composition receives one object for action registration and derives contract id and
     /// policy from it, so the executor config cannot drift to a different saga contract.
-    pub fn from_typed_factory(
+    pub fn from_typed_factory<D: generated::saga::Definition>(
         owner: CheckpointOwner,
         holder_id: impl Into<String>,
         lease_ttl: Duration,
-        factory: &TypedSagaActionFactory,
+        factory: &TypedSagaActionFactory<D>,
     ) -> Result<Self, SagaExecutorConfigError> {
         Self::from_contract_spec(owner, holder_id, lease_ttl, factory.spec())
     }
@@ -903,26 +1271,23 @@ impl SagaExecutorConfig {
         lease_ttl: Duration,
         spec: vocab::SagaContractBinding,
     ) -> Result<Self, SagaExecutorConfigError> {
-        let policy = SagaPolicy::try_from(spec.policy())?;
-        Self::new(owner, spec.contract_id(), holder_id, lease_ttl, policy)
+        Self::new(owner, spec, holder_id, lease_ttl)
     }
 
     fn new(
         owner: CheckpointOwner,
-        contract_id: impl Into<String>,
+        spec: vocab::SagaContractBinding,
         holder_id: impl Into<String>,
         lease_ttl: Duration,
-        policy: SagaPolicy,
     ) -> Result<Self, SagaExecutorConfigError> {
-        let contract_id = contract_id.into();
-        let contract_id = SagaContractId::parse(&contract_id)?;
+        let contract_id = SagaContractId::parse(spec.contract_id())?;
         let identity = SagaWorkerIdentity::new(owner.as_str(), contract_id)?;
         Ok(Self {
             owner,
             identity,
+            definition: consistency::SagaDefinitionIdentity::from_binding(spec),
             holder_id: holder_id.into(),
             lease_ttl,
-            policy,
         })
     }
 
@@ -940,6 +1305,11 @@ impl SagaExecutorConfig {
     pub fn lease_ttl(&self) -> Duration {
         self.lease_ttl
     }
+
+    /// Complete generated definition identity selected by assembly.
+    pub fn definition(&self) -> &consistency::SagaDefinitionIdentity {
+        &self.definition
+    }
 }
 
 impl<J, C, D, S> SagaExecutorImpl<J, C, D, S>
@@ -953,20 +1323,26 @@ where
     ///
     /// `config.owner` = DLX domain（如 `"billing"`）；`config.contract_id` = 契约 id（如
     /// `"billing.checkout"`）。二者同进 DLX 记录（SC-006），勿传反。
-    pub fn new(deps: SagaExecutorDeps<J, C, D, S>, config: SagaExecutorConfig) -> Self {
-        Self {
+    pub fn new(
+        deps: SagaExecutorDeps<J, C, D, S>,
+        config: SagaExecutorConfig,
+    ) -> Result<Self, SagaDefinitionRegistryLookupError> {
+        if deps.registry.resolve(&config.definition).is_none() {
+            return Err(SagaDefinitionRegistryLookupError);
+        }
+        Ok(Self {
             journal: deps.journal,
             instance_store: deps.instance_store,
             checkpoint: deps.checkpoint,
             dead_letter: deps.dead_letter,
-            factory: deps.factory,
+            registry: deps.registry,
             runtime_lock: deps.runtime_lock,
             owner: config.owner,
             identity: config.identity,
+            definition: config.definition,
             holder_id: config.holder_id,
             lease_ttl: config.lease_ttl,
-            policy: config.policy,
-        }
+        })
     }
 }
 
@@ -977,19 +1353,63 @@ where
     D: DeadLetterStore + Send + Sync + 'static,
     S: SagaInstanceStore + Send + Sync + 'static,
 {
-    fn run(&self, instance: SagaInstanceRef) -> BoxFuture<'static, SagaOutcome> {
+    fn run(
+        &self,
+        instance: SagaInstanceRef,
+        requested_definition: consistency::SagaDefinitionIdentity,
+    ) -> BoxFuture<'static, SagaOutcome> {
         let journal = self.journal.clone();
         let instance_store = self.instance_store.clone();
         let checkpoint = self.checkpoint.clone();
         let dead_letter = self.dead_letter.clone();
         let owner = self.owner.clone();
         let identity = self.identity.clone();
+        let selected_definition = self.definition.clone();
         let holder_id = self.holder_id.clone();
         let lease_ttl = self.lease_ttl;
-        let policy = self.policy;
-        let factory = self.factory.clone();
+        let registry = self.registry.clone();
         let runtime_lock = self.runtime_lock.clone();
         Box::pin(async move {
+            let durable_row = match instance_store.get(&instance).await {
+                Ok(row) => row,
+                Err(_) => {
+                    return SagaOutcome::Interrupted {
+                        reason: SagaInterruption::StoreUnavailable,
+                    };
+                }
+            };
+            let definition = match durable_row.as_ref() {
+                Some(row)
+                    if row.identity() == &identity && row.definition() == &requested_definition =>
+                {
+                    requested_definition
+                }
+                Some(_) => {
+                    return SagaOutcome::Interrupted {
+                        reason: SagaInterruption::UnsupportedDefinition,
+                    };
+                }
+                None if requested_definition == selected_definition => requested_definition,
+                None => {
+                    return SagaOutcome::Interrupted {
+                        reason: SagaInterruption::UnsupportedDefinition,
+                    };
+                }
+            };
+            let Some(runtime) = registry.resolve(&definition) else {
+                if durable_row.is_some() {
+                    mark_instance_degraded_best_effort(
+                        &*instance_store,
+                        instance,
+                        &holder_id,
+                        lease_ttl,
+                    )
+                    .await;
+                }
+                return SagaOutcome::Interrupted {
+                    reason: SagaInterruption::UnsupportedDefinition,
+                };
+            };
             let grant = match runtime_lock
                 .acquire(instance, identity.contract_id().as_str(), "run", lease_ttl)
                 .await
@@ -998,7 +1418,7 @@ where
                 Err(reason) => return SagaOutcome::Interrupted { reason },
             };
             run_with_runtime_lock(grant, async move {
-                let actions = factory.build();
+                let actions = runtime.factory.build();
                 if let Err(err) = definition_from_actions(&actions) {
                     let failed_node = model_error_node(&err);
                     tracing::error!(
@@ -1016,6 +1436,7 @@ where
                     &*instance_store,
                     instance,
                     identity.clone(),
+                    definition.clone(),
                     &holder_id,
                     lease_ttl,
                 )
@@ -1031,10 +1452,11 @@ where
                     dead_letter: &*dead_letter,
                     owner: &owner,
                     contract_id: identity.contract_id().as_str(),
+                    definition: &definition,
                     instance,
                     lease,
                     lease_ttl,
-                    policy,
+                    policy: runtime.policy,
                     checkpoint_id: saga_checkpoint_id(instance),
                 };
                 ctx.run_forward(&actions, 0, Cursor::new()).await
@@ -1043,7 +1465,11 @@ where
         })
     }
 
-    fn resume(&self, instance: SagaInstanceRef) -> BoxFuture<'static, SagaOutcome> {
+    fn resume(
+        &self,
+        instance: SagaInstanceRef,
+        listed_definition: consistency::SagaDefinitionIdentity,
+    ) -> BoxFuture<'static, SagaOutcome> {
         let journal = self.journal.clone();
         let instance_store = self.instance_store.clone();
         let checkpoint = self.checkpoint.clone();
@@ -1052,10 +1478,43 @@ where
         let identity = self.identity.clone();
         let holder_id = self.holder_id.clone();
         let lease_ttl = self.lease_ttl;
-        let policy = self.policy;
-        let factory = self.factory.clone();
+        let registry = self.registry.clone();
         let runtime_lock = self.runtime_lock.clone();
         Box::pin(async move {
+            let row = match instance_store.get(&instance).await {
+                Ok(Some(row)) => row,
+                Ok(None) => return unknown_saga_outcome(),
+                Err(_) => {
+                    return SagaOutcome::Interrupted {
+                        reason: SagaInterruption::StoreUnavailable,
+                    };
+                }
+            };
+            let definition = row.definition().clone();
+            if row.identity() != &identity {
+                return SagaOutcome::Interrupted {
+                    reason: SagaInterruption::UnsupportedDefinition,
+                };
+            }
+            if listed_definition != definition {
+                tracing::warn!(
+                    tenant_id = %instance.tenant(),
+                    saga_id = %instance.saga_id().as_uuid(),
+                    "saga: runnable listing identity changed before resume; durable identity wins"
+                );
+            }
+            let Some(runtime) = registry.resolve(&definition) else {
+                mark_instance_degraded_best_effort(
+                    &*instance_store,
+                    instance,
+                    &holder_id,
+                    lease_ttl,
+                )
+                .await;
+                return SagaOutcome::Interrupted {
+                    reason: SagaInterruption::UnsupportedDefinition,
+                };
+            };
             let grant = match runtime_lock
                 .acquire(
                     instance,
@@ -1069,20 +1528,26 @@ where
                 Err(reason) => return SagaOutcome::Interrupted { reason },
             };
             run_with_runtime_lock(grant, async move {
-                let actions = factory.build();
-                let lease =
-                    match acquire_resume_lease(&*instance_store, instance, &holder_id, lease_ttl)
-                        .await
-                    {
-                        ResumeLeaseDecision::Acquired(lease) => lease,
-                        ResumeLeaseDecision::Unknown => return unknown_saga_outcome(),
-                        ResumeLeaseDecision::Terminal(status) => {
-                            return outcome_from_instance_status(status);
-                        }
-                        ResumeLeaseDecision::Interrupted(reason) => {
-                            return SagaOutcome::Interrupted { reason };
-                        }
-                    };
+                let actions = runtime.factory.build();
+                let lease = match acquire_resume_lease(
+                    &*instance_store,
+                    instance,
+                    &identity,
+                    &definition,
+                    &holder_id,
+                    lease_ttl,
+                )
+                .await
+                {
+                    ResumeLeaseDecision::Acquired(lease) => lease,
+                    ResumeLeaseDecision::Unknown => return unknown_saga_outcome(),
+                    ResumeLeaseDecision::Terminal(status) => {
+                        return outcome_from_instance_status(status);
+                    }
+                    ResumeLeaseDecision::Interrupted(reason) => {
+                        return SagaOutcome::Interrupted { reason };
+                    }
+                };
                 let ctx = ExecCtx {
                     journal: &*journal,
                     instance_store: &*instance_store,
@@ -1090,10 +1555,11 @@ where
                     dead_letter: &*dead_letter,
                     owner: &owner,
                     contract_id: identity.contract_id().as_str(),
+                    definition: &definition,
                     instance,
                     lease,
                     lease_ttl,
-                    policy,
+                    policy: runtime.policy,
                     checkpoint_id: saga_checkpoint_id(instance),
                 };
                 ctx.resume(&actions).await
@@ -1113,9 +1579,20 @@ where
     fn status(&self, instance: SagaInstanceRef) -> BoxFuture<'static, Option<SagaExecStatus>> {
         let journal = self.journal.clone();
         let instance_store = self.instance_store.clone();
-        let factory = self.factory.clone();
+        let registry = self.registry.clone();
+        let selected_definition = self.definition.clone();
+        let selected_identity = self.identity.clone();
         Box::pin(async move {
-            let actions = factory.build();
+            let definition = match instance_store.get(&instance).await {
+                Ok(Some(row)) if row.identity() == &selected_identity => row.definition().clone(),
+                Ok(Some(_)) => return Some(SagaExecStatus::Degraded),
+                Ok(None) => selected_definition,
+                Err(_) => return Some(SagaExecStatus::Degraded),
+            };
+            let Some(runtime) = registry.resolve(&definition) else {
+                return Some(SagaExecStatus::Degraded);
+            };
+            let actions = runtime.factory.build();
             status_of(&*journal, &*instance_store, instance, &actions).await
         })
     }
@@ -1125,32 +1602,51 @@ async fn acquire_run_lease<S>(
     store: &S,
     instance: SagaInstanceRef,
     identity: SagaWorkerIdentity,
+    definition: consistency::SagaDefinitionIdentity,
     holder_id: &str,
     lease_ttl: Duration,
 ) -> Result<SagaLease, SagaInterruption>
 where
     S: SagaInstanceStore,
 {
-    match store.get(&instance).await {
-        Ok(Some(row)) => match row.status() {
-            SagaInstanceStatus::Ready => {}
-            SagaInstanceStatus::Degraded => return Err(SagaInterruption::InstanceDegraded),
-            _ => return Err(SagaInterruption::AlreadyStarted),
-        },
-        Ok(None) => {
-            let registration = SagaInstanceRegistration::new(instance, identity);
-            store
-                .register(registration)
-                .await
-                .map_err(|_| SagaInterruption::StoreUnavailable)?;
+    let registration =
+        SagaInstanceRegistration::new(instance, identity.clone(), definition.clone())
+            .map_err(|_| SagaInterruption::UnsupportedDefinition)?;
+    let row = store.register(registration).await.map_err(|error| {
+        if error.kind() == SagaInstanceStoreErrorKind::IdentityConflict {
+            SagaInterruption::UnsupportedDefinition
+        } else {
+            SagaInterruption::StoreUnavailable
         }
-        Err(_) => return Err(SagaInterruption::StoreUnavailable),
+    })?;
+    match row.status() {
+        SagaInstanceStatus::Ready
+            if row.identity() == &identity && row.definition() == &definition => {}
+        SagaInstanceStatus::Ready => return Err(SagaInterruption::UnsupportedDefinition),
+        SagaInstanceStatus::Degraded => return Err(SagaInterruption::InstanceDegraded),
+        _ => return Err(SagaInterruption::AlreadyStarted),
     }
     store
         .acquire_lease(&instance, holder_id, lease_ttl)
         .await
         .map_err(|_| SagaInterruption::StoreUnavailable)?
         .ok_or(SagaInterruption::LeaseBusy)
+}
+
+async fn mark_instance_degraded_best_effort<S>(
+    store: &S,
+    instance: SagaInstanceRef,
+    holder_id: &str,
+    lease_ttl: Duration,
+) where
+    S: SagaInstanceStore,
+{
+    if let Ok(Some(lease)) = store.acquire_lease(&instance, holder_id, lease_ttl).await {
+        let _ = store
+            .mark_status(&lease, SagaInstanceStatus::Degraded)
+            .await;
+        let _ = store.release_lease(&lease).await;
+    }
 }
 
 enum ResumeLeaseDecision {
@@ -1163,6 +1659,8 @@ enum ResumeLeaseDecision {
 async fn acquire_resume_lease<S>(
     store: &S,
     instance: SagaInstanceRef,
+    identity: &SagaWorkerIdentity,
+    definition: &consistency::SagaDefinitionIdentity,
     holder_id: &str,
     lease_ttl: Duration,
 ) -> ResumeLeaseDecision
@@ -1174,6 +1672,18 @@ where
         Ok(None) => return ResumeLeaseDecision::Unknown,
         Err(_) => return ResumeLeaseDecision::Interrupted(SagaInterruption::StoreUnavailable),
     };
+    if row.identity() != identity {
+        return ResumeLeaseDecision::Interrupted(SagaInterruption::UnsupportedDefinition);
+    }
+    if row.definition() != definition {
+        if let Ok(Some(lease)) = store.acquire_lease(&instance, holder_id, lease_ttl).await {
+            let _ = store
+                .mark_status(&lease, SagaInstanceStatus::Degraded)
+                .await;
+            let _ = store.release_lease(&lease).await;
+        }
+        return ResumeLeaseDecision::Interrupted(SagaInterruption::UnsupportedDefinition);
+    }
     match row.status() {
         SagaInstanceStatus::Succeeded
         | SagaInstanceStatus::Compensated
@@ -1207,8 +1717,27 @@ fn saga_checkpoint_id(instance: SagaInstanceRef) -> CheckpointId {
 /// 前向游标：journal append 序号 + 已完成步栈（index + StepName）+ 末步输出。
 struct Cursor {
     seq: u64,
-    completed: Vec<(usize, StepName)>,
+    completed: Vec<CompletedStep>,
     last_output: Option<Vec<u8>>,
+}
+
+#[derive(Clone)]
+struct CompletedStep {
+    index: usize,
+    name: StepName,
+    receipt: Option<Arc<dyn Any + Send + Sync>>,
+}
+
+struct ForwardStep<'a> {
+    actions: &'a [Box<dyn SagaAction>],
+    index: usize,
+}
+
+struct ForwardReceiptContext<'a> {
+    index: usize,
+    step: StepName,
+    seq: u64,
+    action_name: &'a str,
 }
 
 impl Cursor {
@@ -1228,6 +1757,7 @@ struct ExecCtx<'a, J, C, D, S> {
     dead_letter: &'a D,
     owner: &'a CheckpointOwner,
     contract_id: &'a str,
+    definition: &'a consistency::SagaDefinitionIdentity,
     instance: SagaInstanceRef,
     lease: SagaLease,
     lease_ttl: Duration,
@@ -1250,15 +1780,51 @@ impl SagaActionPhase {
     }
 }
 
-fn is_saga_action_retryable(err: &SagaActionError) -> bool {
-    !matches!(
-        err,
-        SagaActionError::SerializeFailed | SagaActionError::NonRetryableActionFailed
-    )
-}
-
 fn duration_millis_u64(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+#[cfg(not(test))]
+fn saga_retry_entropy(
+    _instance: SagaInstanceRef,
+    _action_name: &str,
+    _phase: SagaActionPhase,
+    _attempt: u32,
+) -> u64 {
+    let bytes = *uuid::Uuid::new_v4().as_bytes();
+    u64::from_be_bytes([
+        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+    ])
+}
+
+/// Deterministic entropy is a unit-test seam only. Production samples fresh OS-backed UUID
+/// randomness for every retry so replicas and lease takeovers cannot synchronize their jitter.
+#[cfg(test)]
+fn saga_retry_entropy(
+    instance: SagaInstanceRef,
+    action_name: &str,
+    phase: SagaActionPhase,
+    attempt: u32,
+) -> u64 {
+    let mut hash = Sha256::new();
+    hash.update(b"rss.saga.retry-entropy.v1");
+    let tenant = instance.tenant().to_string();
+    let saga_id = instance.saga_id().as_uuid();
+    let attempt_bytes = attempt.to_be_bytes();
+    for bytes in [
+        tenant.as_bytes(),
+        saga_id.as_bytes(),
+        action_name.as_bytes(),
+        phase.as_str().as_bytes(),
+        &attempt_bytes,
+    ] {
+        hash.update((bytes.len() as u64).to_be_bytes());
+        hash.update(bytes);
+    }
+    let digest = hash.finalize();
+    u64::from_be_bytes([
+        digest[0], digest[1], digest[2], digest[3], digest[4], digest[5], digest[6], digest[7],
+    ])
 }
 
 fn lease_renewal_delay(lease_ttl: Duration) -> Duration {
@@ -1466,58 +2032,88 @@ where
         );
     }
 
-    async fn run_forward_action(&self, action: &dyn SagaAction) -> Result<Vec<u8>, SagaPhaseError> {
-        self.run_action_with_policy(action.name(), SagaActionPhase::Forward, || {
-            let ctx = SagaActionCtx::new(self.instance, action.name());
-            action.do_it(ctx)
-        })
+    async fn run_forward_action(
+        &self,
+        action: &dyn SagaAction,
+    ) -> Result<SagaActionReceipt, SagaPhaseError> {
+        self.run_action_with_policy(
+            action.name(),
+            action.retry_class(),
+            SagaActionPhase::Forward,
+            || {
+                let ctx = action.binding().map_or_else(
+                    || SagaActionCtx::new(self.instance, action.name()),
+                    |binding| {
+                        SagaActionCtx::for_action(
+                            self.instance,
+                            self.definition,
+                            binding,
+                            SagaActionPhase::Forward,
+                        )
+                    },
+                );
+                action.do_it(ctx)
+            },
+        )
         .await
     }
 
-    async fn run_compensation_action(&self, action: &dyn SagaAction) -> Result<(), SagaPhaseError> {
-        self.run_action_with_policy(action.name(), SagaActionPhase::Compensation, || {
-            let ctx = SagaActionCtx::new(self.instance, action.name());
-            action.undo_it(ctx)
-        })
+    async fn run_compensation_action(
+        &self,
+        action: &dyn SagaAction,
+        receipt: Arc<dyn Any + Send + Sync>,
+    ) -> Result<(), SagaPhaseError> {
+        self.run_action_with_policy(
+            action.name(),
+            action.retry_class(),
+            SagaActionPhase::Compensation,
+            || {
+                let ctx = action.binding().map_or_else(
+                    || SagaActionCtx::new(self.instance, action.name()),
+                    |binding| {
+                        SagaActionCtx::for_action(
+                            self.instance,
+                            self.definition,
+                            binding,
+                            SagaActionPhase::Compensation,
+                        )
+                    },
+                );
+                action.undo_it(ctx, receipt.clone())
+            },
+        )
         .await
     }
 
     async fn run_action_with_policy<T, Op>(
         &self,
         action_name: &str,
+        retry_class: vocab::SagaRetryClass,
         phase: SagaActionPhase,
         mut op: Op,
     ) -> Result<T, SagaPhaseError>
     where
         Op: FnMut() -> BoxFuture<'static, Result<T, SagaActionError>>,
     {
-        match self.policy {
-            SagaPolicy::Disabled => self
-                .run_action_until_done_or_lease_lost(action_name, phase, op())
-                .await
-                .map_err(SagaPhaseError::Interrupted)?
-                .map_err(SagaPhaseError::Action),
-            SagaPolicy::Bounded(policy) => {
-                self.run_bounded_action(action_name, phase, policy, &mut op)
-                    .await
-            }
-        }
+        self.run_bounded_action(action_name, retry_class, phase, self.policy, &mut op)
+            .await
     }
 
     async fn run_bounded_action<T, Op>(
         &self,
         action_name: &str,
+        retry_class: vocab::SagaRetryClass,
         phase: SagaActionPhase,
-        policy: SagaBoundedPolicy,
+        policy: SagaPolicy,
         op: &mut Op,
     ) -> Result<T, SagaPhaseError>
     where
         Op: FnMut() -> BoxFuture<'static, Result<T, SagaActionError>>,
     {
-        let action = self.retry_action(action_name, phase, policy.retry_delay(), op);
+        let action = self.retry_action(action_name, retry_class, phase, policy, op);
         let result_or_interruption =
             self.run_action_until_done_or_lease_lost(action_name, phase, action);
-        match tokio::time::timeout(policy.step_timeout(), result_or_interruption).await {
+        match tokio::time::timeout(policy.time_budget, result_or_interruption).await {
             Ok(Ok(result)) => result.map_err(SagaPhaseError::Action),
             Ok(Err(interruption)) => Err(SagaPhaseError::Interrupted(interruption)),
             Err(_) => {
@@ -1562,8 +2158,9 @@ where
     async fn retry_action<T, Op>(
         &self,
         action_name: &str,
+        retry_class: vocab::SagaRetryClass,
         phase: SagaActionPhase,
-        retry_delay: Option<Duration>,
+        policy: SagaPolicy,
         op: &mut Op,
     ) -> Result<T, SagaActionError>
     where
@@ -1573,16 +2170,21 @@ where
         loop {
             match op().await {
                 Ok(output) => return Ok(output),
-                Err(err) if !is_saga_action_retryable(&err) => {
+                Err(err)
+                    if err.classification() != SagaFailureClass::Transient
+                        || retry_class != vocab::SagaRetryClass::Transient =>
+                {
                     self.warn_action_not_retrying(action_name, phase, attempt, err.as_label());
                     return Err(err);
                 }
                 Err(err) => {
-                    let Some(delay) = retry_delay else {
+                    if attempt >= policy.max_attempts {
                         self.warn_action_not_retrying(action_name, phase, attempt, err.as_label());
                         return Err(err);
-                    };
-                    self.warn_action_retry(action_name, phase, attempt, delay, err.as_label());
+                    }
+                    let entropy = saga_retry_entropy(self.instance, action_name, phase, attempt);
+                    let delay = policy.delay_for(attempt, entropy);
+                    self.debug_action_retry(action_name, phase, attempt, delay, err.as_label());
                     tokio::time::sleep(delay).await;
                     attempt = attempt.saturating_add(1);
                 }
@@ -1590,14 +2192,8 @@ where
         }
     }
 
-    fn warn_action_timeout(
-        &self,
-        action_name: &str,
-        phase: SagaActionPhase,
-        policy: SagaBoundedPolicy,
-    ) {
-        let step_timeout_ms = duration_millis_u64(policy.step_timeout());
-        let retry_delay_ms = policy.retry_delay().map(duration_millis_u64).unwrap_or(0);
+    fn warn_action_timeout(&self, action_name: &str, phase: SagaActionPhase, policy: SagaPolicy) {
+        let step_timeout_ms = duration_millis_u64(policy.time_budget);
         tracing::warn!(
             tenant_id = %self.instance.tenant(),
             saga_id = %self.instance.saga_id().as_uuid(),
@@ -1605,7 +2201,7 @@ where
             step_name = action_name,
             phase = phase.as_str(),
             step_timeout_ms,
-            retry_delay_ms,
+            max_attempts = policy.max_attempts,
             "saga: action timed out"
         );
     }
@@ -1621,7 +2217,7 @@ where
         );
     }
 
-    fn warn_action_retry(
+    fn debug_action_retry(
         &self,
         action_name: &str,
         phase: SagaActionPhase,
@@ -1630,7 +2226,7 @@ where
         error_kind: &'static str,
     ) {
         let retry_delay_ms = duration_millis_u64(retry_delay);
-        tracing::warn!(
+        tracing::debug!(
             tenant_id = %self.instance.tenant(),
             saga_id = %self.instance.saga_id().as_uuid(),
             contract_id = self.contract_id,
@@ -1669,83 +2265,148 @@ where
         start: usize,
         mut cursor: Cursor,
     ) -> SagaOutcome {
-        for (i, action) in actions.iter().enumerate().skip(start) {
-            let action = action.as_ref();
-            if !self.refresh_lease().await {
-                return Self::interrupted(SagaInterruption::LeaseLost);
-            }
-            let Ok(step) = StepName::parse(action.name()) else {
-                // step 名非法标识符 = Invariant（动作未受治理约束）：fail-fast，不 journal。
-                return SagaOutcome::Failed {
-                    failed_node: action.name().to_string(),
-                    error: SagaActionError::SerializeFailed,
-                };
-            };
-            // F1：Executing append fail-closed —— 写失败则**不执行副作用**（无 journal 无法 durable 恢复）。
-            if let Err(failure) = self
-                .append(SagaJournalAppendRecord::executing(cursor.seq, step.clone()))
+        for index in start..actions.len() {
+            if let Err(outcome) = self
+                .run_forward_step(ForwardStep { actions, index }, &mut cursor)
                 .await
             {
-                return self.append_failure_outcome(failure, action.name());
-            }
-            cursor.seq += 1;
-            let output = match self.run_forward_action(action).await {
-                Ok(o) => o,
-                Err(SagaPhaseError::Action(err)) => {
-                    if action.failed_after_forward_effect(&err) {
-                        return self
-                            .compensate_after_forward_effect(
-                                actions,
-                                &cursor.completed,
-                                (i, step),
-                                cursor.seq,
-                                action.name(),
-                                err,
-                            )
-                            .await;
-                    }
-                    return self
-                        .compensate(actions, &cursor.completed, cursor.seq, action.name(), err)
-                        .await;
-                }
-                Err(SagaPhaseError::Interrupted(reason)) => return Self::interrupted(reason),
-            };
-            // 副作用已发生：先入已完成栈（含本步），再写 Completed；写失败 ⇒ 补偿含本步在内的栈（F1）。
-            cursor.completed.push((i, step.clone()));
-            let completed_result = self
-                .append(SagaJournalAppendRecord::completed(cursor.seq, step))
-                .await;
-            cursor.seq += 1;
-            if let Err(failure) = completed_result {
-                if matches!(
-                    failure,
-                    AppendFailure::LeaseLost | AppendFailure::JournalConflict
-                ) {
-                    return self.append_failure_outcome(failure, action.name());
-                }
-                return self
-                    .compensate(
-                        actions,
-                        &cursor.completed,
-                        cursor.seq,
-                        action.name(),
-                        SagaActionError::ActionFailed,
-                    )
-                    .await;
-            }
-            cursor.last_output = Some(output);
-            // F2：checkpoint fence —— StaleVersion 表并发执行器已接管 ⇒ 停跑。
-            if !self.advance_checkpoint(Lsn::new(i as u64 + 1)).await {
-                return SagaOutcome::Failed {
-                    failed_node: action.name().to_string(),
-                    error: SagaActionError::ActionFailed,
-                };
+                return outcome;
             }
         }
         self.mark_status_and_release_best_effort(SagaInstanceStatus::Succeeded)
             .await;
         SagaOutcome::Succeeded {
             output: cursor.last_output.unwrap_or_default(),
+        }
+    }
+
+    async fn run_forward_step(
+        &self,
+        forward: ForwardStep<'_>,
+        cursor: &mut Cursor,
+    ) -> Result<(), SagaOutcome> {
+        let action = forward.actions[forward.index].as_ref();
+        if !self.refresh_lease().await {
+            return Err(Self::interrupted(SagaInterruption::LeaseLost));
+        }
+        let Ok(step) = StepName::parse(action.name()) else {
+            // step 名非法标识符 = Invariant（动作未受治理约束）：fail-fast，不 journal。
+            return Err(SagaOutcome::Failed {
+                failed_node: action.name().to_string(),
+                error: SagaActionError::SerializeFailed,
+            });
+        };
+        // F1：Executing append fail-closed —— 写失败则**不执行副作用**（无 journal 无法 durable 恢复）。
+        if let Err(failure) = self
+            .append(SagaJournalAppendRecord::executing(cursor.seq, step.clone()))
+            .await
+        {
+            return Err(self.append_failure_outcome(failure, action.name()));
+        }
+        cursor.seq += 1;
+        let receipt = match self.run_forward_action(action).await {
+            Ok(o) => o,
+            Err(SagaPhaseError::Action(err)) => {
+                if err.classification() == SagaFailureClass::OutcomeUnknown {
+                    self.mark_status_and_release_best_effort(SagaInstanceStatus::Degraded)
+                        .await;
+                    return Err(SagaOutcome::Failed {
+                        failed_node: action.name().to_string(),
+                        error: err,
+                    });
+                }
+                return Err(self
+                    .compensate(
+                        forward.actions,
+                        &cursor.completed,
+                        cursor.seq,
+                        action.name(),
+                        err,
+                    )
+                    .await);
+            }
+            Err(SagaPhaseError::Interrupted(reason)) => {
+                return Err(Self::interrupted(reason));
+            }
+        };
+        let (output, completed_step) = match self
+            .accept_forward_receipt(
+                forward.actions,
+                &cursor.completed,
+                receipt,
+                ForwardReceiptContext {
+                    index: forward.index,
+                    step: step.clone(),
+                    seq: cursor.seq,
+                    action_name: action.name(),
+                },
+            )
+            .await
+        {
+            Ok(accepted) => accepted,
+            Err(outcome) => return Err(outcome),
+        };
+        // 副作用已发生：先入已完成栈（含本步），再写 Completed；写失败 ⇒ 补偿含本步在内的栈（F1）。
+        cursor.completed.push(completed_step);
+        let completed_result = self
+            .append(SagaJournalAppendRecord::completed(cursor.seq, step))
+            .await;
+        cursor.seq += 1;
+        if let Err(failure) = completed_result {
+            if matches!(
+                failure,
+                AppendFailure::LeaseLost | AppendFailure::JournalConflict
+            ) {
+                return Err(self.append_failure_outcome(failure, action.name()));
+            }
+            return Err(self
+                .compensate(
+                    forward.actions,
+                    &cursor.completed,
+                    cursor.seq,
+                    action.name(),
+                    SagaActionError::ActionFailed,
+                )
+                .await);
+        }
+        cursor.last_output = Some(output);
+        // F2：checkpoint fence —— StaleVersion 表并发执行器已接管 ⇒ 停跑。
+        if !self
+            .advance_checkpoint(Lsn::new(forward.index as u64 + 1))
+            .await
+        {
+            return Err(SagaOutcome::Failed {
+                failed_node: action.name().to_string(),
+                error: SagaActionError::ActionFailed,
+            });
+        }
+        Ok(())
+    }
+
+    async fn accept_forward_receipt(
+        &self,
+        actions: &[Box<dyn SagaAction>],
+        completed: &[CompletedStep],
+        receipt: SagaActionReceipt,
+        forward: ForwardReceiptContext<'_>,
+    ) -> Result<(Vec<u8>, CompletedStep), SagaOutcome> {
+        let completed_step = CompletedStep {
+            index: forward.index,
+            name: forward.step,
+            receipt: Some(receipt.value),
+        };
+        match receipt.output {
+            Ok(output) => Ok((output, completed_step)),
+            Err(error) => Err(self
+                .compensate_after_forward_effect(
+                    actions,
+                    completed,
+                    completed_step,
+                    forward.seq,
+                    forward.action_name,
+                    error,
+                )
+                .await),
         }
     }
 
@@ -1756,7 +2417,7 @@ where
     async fn compensate(
         &self,
         actions: &[Box<dyn SagaAction>],
-        completed: &[(usize, StepName)],
+        completed: &[CompletedStep],
         seq: u64,
         failed_node: &str,
         original_error: SagaActionError,
@@ -1772,13 +2433,17 @@ where
     async fn compensate_after_forward_effect(
         &self,
         actions: &[Box<dyn SagaAction>],
-        completed: &[(usize, StepName)],
-        current: (usize, StepName),
+        completed: &[CompletedStep],
+        current: CompletedStep,
         seq: u64,
         failed_node: &str,
         original_error: SagaActionError,
     ) -> SagaOutcome {
-        let (current_idx, current_step) = current;
+        let CompletedStep {
+            index: current_idx,
+            name: current_step,
+            receipt,
+        } = current;
         if !self.refresh_lease().await {
             return Self::interrupted(SagaInterruption::LeaseLost);
         }
@@ -1793,7 +2458,7 @@ where
         }
         let action = actions[current_idx].as_ref();
         let next_seq = match self
-            .compensate_step_after_intent(action, &current_step, seq + 1, failed_node)
+            .compensate_step_after_intent(action, &current_step, receipt, seq + 1, failed_node)
             .await
         {
             Ok(next_seq) => next_seq,
@@ -1809,14 +2474,23 @@ where
     async fn compensate_pending(
         &self,
         actions: &[Box<dyn SagaAction>],
-        pending: &[(usize, StepName)],
+        pending: &[CompletedStep],
         mut seq: u64,
         failed_node: &str,
         original_error: SagaActionError,
     ) -> SagaOutcome {
-        for (i, step) in pending {
-            let action = actions[*i].as_ref();
-            seq = match self.compensate_step(action, step, seq, failed_node).await {
+        for completed in pending {
+            let action = actions[completed.index].as_ref();
+            seq = match self
+                .compensate_step(
+                    action,
+                    &completed.name,
+                    completed.receipt.clone(),
+                    seq,
+                    failed_node,
+                )
+                .await
+            {
                 Ok(next_seq) => next_seq,
                 Err(outcome) => return outcome,
             };
@@ -1833,6 +2507,7 @@ where
         &self,
         action: &dyn SagaAction,
         step: &StepName,
+        receipt: Option<Arc<dyn Any + Send + Sync>>,
         seq: u64,
         failed_node: &str,
     ) -> Result<u64, SagaOutcome> {
@@ -1845,7 +2520,7 @@ where
         {
             return Err(self.append_failure_outcome(failure, failed_node));
         }
-        self.compensate_step_after_intent(action, step, seq + 1, failed_node)
+        self.compensate_step_after_intent(action, step, receipt, seq + 1, failed_node)
             .await
     }
 
@@ -1853,16 +2528,34 @@ where
         &self,
         action: &dyn SagaAction,
         step: &StepName,
+        receipt: Option<Arc<dyn Any + Send + Sync>>,
         seq: u64,
         failed_node: &str,
     ) -> Result<u64, SagaOutcome> {
         if !self.refresh_lease().await {
             return Err(Self::interrupted(SagaInterruption::LeaseLost));
         }
-        match self.run_compensation_action(action).await {
+        let Some(receipt) = receipt else {
+            self.mark_status_and_release_best_effort(SagaInstanceStatus::Degraded)
+                .await;
+            return Err(SagaOutcome::Interrupted {
+                reason: SagaInterruption::ReceiptUnavailable,
+            });
+        };
+        match self.run_compensation_action(action, receipt).await {
             Ok(()) => {
                 self.finish_compensation_success(action, step, seq, failed_node)
                     .await
+            }
+            Err(SagaPhaseError::Action(undo_err))
+                if undo_err.classification() == SagaFailureClass::OutcomeUnknown =>
+            {
+                self.mark_status_and_release_best_effort(SagaInstanceStatus::Degraded)
+                    .await;
+                Err(SagaOutcome::Failed {
+                    failed_node: action.name().to_string(),
+                    error: undo_err,
+                })
             }
             Err(SagaPhaseError::Action(undo_err)) => Err(self
                 .finish_compensation_failure(action, step, seq, failed_node, undo_err)
@@ -2126,6 +2819,21 @@ where
                 next_seq,
                 completed,
             } => {
+                if !completed.is_empty() {
+                    self.mark_status_and_release_best_effort(SagaInstanceStatus::Degraded)
+                        .await;
+                    return SagaOutcome::Interrupted {
+                        reason: SagaInterruption::ReceiptUnavailable,
+                    };
+                }
+                let completed = completed
+                    .into_iter()
+                    .map(|(index, name)| CompletedStep {
+                        index,
+                        name,
+                        receipt: None,
+                    })
+                    .collect();
                 self.run_forward(
                     actions,
                     start,
@@ -2143,6 +2851,14 @@ where
                 failed_step,
             } => {
                 let failed_node = failed_step.as_ref().map_or(UNKNOWN_SAGA, StepName::as_str);
+                let pending = pending
+                    .into_iter()
+                    .map(|(index, name)| CompletedStep {
+                        index,
+                        name,
+                        receipt: None,
+                    })
+                    .collect::<Vec<_>>();
                 self.compensate_pending(
                     actions,
                     &pending,

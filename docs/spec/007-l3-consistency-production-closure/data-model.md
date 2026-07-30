@@ -21,7 +21,7 @@ enforcement carrier。当前 workspace、contract 与一致性语义仍以 [`arc
 | SettingsConfigProjectionRowV1 | tenant + generation + config key/version + source identity | metadata-only；禁止 config value/secret/token/raw payload | #1918 |
 | ProjectionDedupeReceipt | tenant + projection + generation + source event | 与 read-model mutation 同事务；same event 只有一个 effect | #1917/#1918 |
 | ProjectionActivePointer | tenant + projection → generation + CAS/fence token | promote/rollback 原子；request 绑定一个 snapshot | #1921 |
-| SagaDefinitionIdentity | contract ID + definition version + schema/step/action digest | instance 创建后固定；有 live instance 时不可退休所需 definition | #1923 |
+| SagaDefinitionIdentity | contract ID + definition version + schema digest + action registry generation | instance 创建时完整固定；start/resume 精确解析，unknown identity 无 fallback；registry 不提供 retire/remove | #1923 |
 | SagaStepIntent | tenant + saga + pinned definition + step + logical effect key | 外部 effect 前 durable；attempt 不得改变同一业务 effect identity | #1925 |
 | SagaStepReceipt | tenant + saga + definition + step + logical effect/idempotency key + protected outcome/reference | 与 intent 共享同一业务 effect identity；same key/same digest 幂等；不同 digest conflict；attempt 只作审计元数据；lease fenced | #1924 |
 | SagaInstanceRecoveryState | pinned definition + journal + receipt + lease epoch + explicit status | unknown 不盲重试；恢复到继续、补偿或 operator-required | #1925 |
@@ -61,6 +61,9 @@ Settings v4 不经过该 pointer。
 
 ### Saga effect 与恢复
 
+#1923 先闭合 definition identity 与同次 run typed receipt；下图中的 durable intent/receipt/atomic visibility
+不是 #1923 已交付能力，分别由 #1924/#1925 兑现。崩溃后 receipt 缺失必须 fail-closed，不能重算 action。
+
 ```text
 validate pinned definition + lease epoch
   -> durable intent + deterministic idempotency key
@@ -69,8 +72,8 @@ validate pinned definition + lease epoch
   -> continue / compensate / operator-required
 ```
 
-uncertain outcome 保留 unknown 并 probe/repair。补偿使用 durable forward receipt 或 generated typed subset，并遵循
-独立 idempotency/receipt/fencing 语义。
+uncertain outcome 保留 unknown 并 probe/repair。补偿使用 durable forward receipt，并遵循独立
+idempotency/receipt/fencing 语义；generated typed receipt 决定合法输入类型，但不替代 durable store。
 
 ## 外部 logical contract proposals 的吸收结果
 
@@ -78,7 +81,8 @@ uncertain outcome 保留 unknown 并 probe/repair。补偿使用 durable forward
 |---|---|---:|
 | Assembly Workflow Activation | closed modes、definition/assembly digest parity、omitted/disabled 零副作用 | #1913/#1914 assembly schema/codegen/runtime plan |
 | Projection Operator/Serving | scoped selector、caught-up/health/schema precondition、CAS promote/rollback、per-request snapshot、无 raw payload | #1921/#1922 typed port/CLI/journey |
-| Saga Step Receipt/Effect | deterministic key、provider idempotency/probe class、protected receipt、unknown outcome、typed compensation | #1923–#1925 contract/codegen/store/executor |
+| Saga Definition/Step Authoring | exact pinned identity、deterministic key、sealed typed receipt/compensation、闭合 retry | #1923 contract/codegen/registry/instance store/executor |
+| Saga Durable Receipt/Recovery | protected receipt、receipt+journal atomicity、unknown outcome、probe/repair 与 crash resume | #1924/#1925 store/executor |
 | L3 Activation Evidence | same-head exact capability/security/fault receipts，billing 不得 active | #1929 existing typed planner/aggregate gate |
 
 字段名、Rust trait 签名、TOML/JSON shape 和 evidence schemaVersion 均由对应 PBI 设计与机器载体决定；外部 Markdown

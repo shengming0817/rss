@@ -798,6 +798,21 @@ impl core::marker::Unpin for authn::SpiffeId
 impl core::marker::UnsafeUnpin for authn::SpiffeId
 impl core::panic::unwind_safe::RefUnwindSafe for authn::SpiffeId
 impl core::panic::unwind_safe::UnwindSafe for authn::SpiffeId
+pub struct authn::VerifiedFederatedAccess
+impl authn::VerifiedFederatedAccess
+pub fn authn::VerifiedFederatedAccess::allows_route(&self, vocab::authz::RoutePermissionId) -> bool
+pub fn authn::VerifiedFederatedAccess::permissions(&self) -> &diport::pdp::VerifiedFederatedPermissions
+pub fn authn::VerifiedFederatedAccess::principal(&self) -> &authn::Principal
+pub fn authn::VerifiedFederatedAccess::principal_arc(&self) -> alloc::sync::Arc<authn::Principal>
+impl core::fmt::Debug for authn::VerifiedFederatedAccess
+pub fn authn::VerifiedFederatedAccess::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for authn::VerifiedFederatedAccess
+impl core::marker::Send for authn::VerifiedFederatedAccess
+impl core::marker::Sync for authn::VerifiedFederatedAccess
+impl core::marker::Unpin for authn::VerifiedFederatedAccess
+impl core::marker::UnsafeUnpin for authn::VerifiedFederatedAccess
+impl core::panic::unwind_safe::RefUnwindSafe for authn::VerifiedFederatedAccess
+impl core::panic::unwind_safe::UnwindSafe for authn::VerifiedFederatedAccess
 pub struct authn::VerifiedGrantReceipt<'a>
 impl authn::VerifiedGrantReceipt<'_>
 pub fn authn::VerifiedGrantReceipt<'_>::auth_time_unix_secs(&self) -> u64
@@ -854,7 +869,7 @@ impl core::marker::UnsafeUnpin for authn::VerifiedServiceToken
 impl core::panic::unwind_safe::RefUnwindSafe for authn::VerifiedServiceToken
 impl core::panic::unwind_safe::UnwindSafe for authn::VerifiedServiceToken
 pub fn authn::app_ctx(alloc::sync::Arc<authn::Principal>) -> core::option::Option<runctx::ctx::AppCtx>
-pub async fn authn::verify_federated_access(&str, &diport::pdp::__dynosaur_macro_dynpdp::DynPdp<'_>) -> core::result::Result<(authn::VerifiedJwt, authn::Principal), authn::AuthnError>
+pub async fn authn::verify_federated_access(&str, &diport::pdp::__dynosaur_macro_dynpdp::DynPdp<'_>) -> core::result::Result<authn::VerifiedFederatedAccess, authn::AuthnError>
 pub fn authn::verify_mtls_peer(authn::SpiffeId, &authn::MtlsAllowSet) -> core::result::Result<authn::VerifiedMtlsPeer, authn::MtlsIdentityError>
 pub async fn authn::verify_rss_access(&str, &diport::pdp::__dynosaur_macro_dynpdp::DynPdp<'_>) -> core::result::Result<(authn::VerifiedJwt, authn::Principal), authn::AuthnError>
 pub async fn authn::verify_service_token(&str, diport::pdp::ServiceTokenTenantBinding, &diport::pdp::__dynosaur_macro_dynpdp::DynPdp<'_>) -> core::result::Result<(authn::VerifiedServiceToken, authn::Principal), authn::AuthnError>

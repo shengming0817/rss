@@ -25,13 +25,13 @@ pub mod error {
         }
     }
 }
-///`BillingCaptureResult`
+///`BillingCaptureReceipt`
 ///
 /// <details><summary>JSON schema</summary>
 ///
 /// ```json
 ///{
-///  "title": "BillingCaptureResult",
+///  "title": "BillingCaptureReceipt",
 ///  "type": "object",
 ///  "required": [
 ///    "captureId"
@@ -47,7 +47,7 @@ pub mod error {
 /// </details>
 #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
 #[serde(deny_unknown_fields)]
-pub struct BillingCaptureResult {
+pub struct BillingCaptureReceipt {
     #[serde(rename = "captureId")]
     #[redact(sensitivity = public)]
     pub capture_id: ::std::string::String,
@@ -93,13 +93,13 @@ pub struct BillingCheckoutSagaPayload {
     #[redact(sensitivity = public)]
     pub order_id: ::std::string::String,
 }
-///`BillingReserveFundsResult`
+///`BillingReserveFundsReceipt`
 ///
 /// <details><summary>JSON schema</summary>
 ///
 /// ```json
 ///{
-///  "title": "BillingReserveFundsResult",
+///  "title": "BillingReserveFundsReceipt",
 ///  "type": "object",
 ///  "required": [
 ///    "reservationId"
@@ -115,7 +115,7 @@ pub struct BillingCheckoutSagaPayload {
 /// </details>
 #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
 #[serde(deny_unknown_fields)]
-pub struct BillingReserveFundsResult {
+pub struct BillingReserveFundsReceipt {
     #[serde(rename = "reservationId")]
     #[redact(sensitivity = public)]
     pub reservation_id: ::std::string::String,
@@ -129,31 +129,97 @@ pub const CONTRACT: ::vocab::ContractBinding = ::vocab::ContractBinding::from_st
     "billing",
     "billing.checkout",
     "v1",
-    "sha256:2196dede9f6ebd39904f753bc7bae7a79d603768018aa9fc4a50f448d23b0e77",
+    "sha256:8a8e76b9e08da0ef26fc30cf3a2577dea607b3024396c66afdaf5f65b3bfe7ae",
 );
 
-/// Saga runtime policy spec（来自 `[saga].retryMillis` / `[saga].timeoutMillis`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
-pub const POLICY: ::vocab::SagaRuntimePolicySpec =
-    ::vocab::SagaRuntimePolicySpec::from_millis(5000, 30000);
+/// Ordered action semantics generation, domain-separated and length-prefixed before SHA-256.
+pub const ACTION_REGISTRY_GENERATION: &str =
+    "sha256:5864c7f09f7fb5f0c8e5f36a727bb2b1ef3d185150d0fea992b04ef41b572733";
+
+/// Saga runtime retry policy. 由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+pub const POLICY: ::vocab::SagaRuntimePolicySpec = ::vocab::SagaRuntimePolicySpec::from_static(
+    3,
+    30000,
+    ::vocab::SagaBackoff::Exponential,
+    100,
+    5000,
+    ::vocab::SagaJitter::Full,
+);
 
 /// Saga step `reserve_funds` binding generated from `[saga].steps[0]`.
-pub const STEP_0: ::vocab::SagaStepBinding =
-    ::vocab::SagaStepBinding::from_static(CONTRACT, "reserve_funds", "reserve.schema.json");
-
-impl ::vocab::SagaStepOutputBinding for BillingReserveFundsResult {
-    const BINDING: ::vocab::SagaStepBinding = STEP_0;
-}
+pub const STEP_0: ::vocab::SagaStepBinding = ::vocab::SagaStepBinding::from_static(
+    CONTRACT,
+    "reserve_funds",
+    "reserve.schema.json",
+    "billing.reserve-funds",
+    "billing.release-funds",
+    ::vocab::SagaRetryClass::Transient,
+);
 
 /// Saga step `capture` binding generated from `[saga].steps[1]`.
-pub const STEP_1: ::vocab::SagaStepBinding =
-    ::vocab::SagaStepBinding::from_static(CONTRACT, "capture", "capture.schema.json");
-
-impl ::vocab::SagaStepOutputBinding for BillingCaptureResult {
-    const BINDING: ::vocab::SagaStepBinding = STEP_1;
-}
+pub const STEP_1: ::vocab::SagaStepBinding = ::vocab::SagaStepBinding::from_static(
+    CONTRACT,
+    "capture",
+    "capture.schema.json",
+    "billing.capture",
+    "billing.refund",
+    ::vocab::SagaRetryClass::Never,
+);
 
 /// Ordered saga step bindings generated from `[saga].steps`.
 pub const STEPS: &[::vocab::SagaStepBinding] = &[STEP_0, STEP_1];
 
 /// Saga contract spec（契约绑定 + runtime policy spec + ordered steps）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
-pub const SPEC: super::SagaSpec = super::SagaSpec::from_parts(CONTRACT, POLICY, STEPS);
+pub const SPEC: super::SagaSpec =
+    super::SagaSpec::from_parts(CONTRACT, POLICY, STEPS, ACTION_REGISTRY_GENERATION);
+
+/// Sealed generated definition marker for this exact Saga identity.
+#[derive(Debug, Clone, Copy)]
+pub struct Definition;
+
+impl super::sealed::Definition for Definition {}
+impl super::Definition for Definition {
+    type Start = ReserveFundsStep;
+    const SPEC: super::SagaSpec = self::SPEC;
+}
+
+/// Generated typestate cursor for this ordered Saga step.
+#[derive(Debug, Clone, Copy)]
+pub struct ReserveFundsStep;
+
+impl super::sealed::StepMarker for ReserveFundsStep {}
+impl super::StepMarker for ReserveFundsStep {
+    type Receipt = BillingReserveFundsReceipt;
+    const BINDING: ::vocab::SagaStepBinding = STEP_0;
+}
+impl super::sealed::Step<Definition> for ReserveFundsStep {}
+impl super::Step<Definition> for ReserveFundsStep {
+    type Next = CaptureStep;
+}
+
+impl super::sealed::Receipt<ReserveFundsStep> for BillingReserveFundsReceipt {}
+impl super::Receipt<ReserveFundsStep> for BillingReserveFundsReceipt {}
+
+/// Generated typestate cursor for this ordered Saga step.
+#[derive(Debug, Clone, Copy)]
+pub struct CaptureStep;
+
+impl super::sealed::StepMarker for CaptureStep {}
+impl super::StepMarker for CaptureStep {
+    type Receipt = BillingCaptureReceipt;
+    const BINDING: ::vocab::SagaStepBinding = STEP_1;
+}
+impl super::sealed::Step<Definition> for CaptureStep {}
+impl super::Step<Definition> for CaptureStep {
+    type Next = End;
+}
+
+impl super::sealed::Receipt<CaptureStep> for BillingCaptureReceipt {}
+impl super::Receipt<CaptureStep> for BillingCaptureReceipt {}
+
+/// Terminal typestate cursor; only this cursor can finish factory construction.
+#[derive(Debug, Clone, Copy)]
+pub struct End;
+
+impl super::sealed::End<Definition> for End {}
+impl super::End<Definition> for End {}

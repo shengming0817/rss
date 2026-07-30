@@ -1189,6 +1189,7 @@ pub(crate) struct ContractDiff {
     /// 契约 label `{kind}/{domain}/{version}`。
     pub(crate) label: String,
     pub(crate) lifecycle: Lifecycle,
+    pub(crate) kind: ContractKind,
     /// working tree lifecycle；与 base 分级值分开保留，用于显式识别降级。
     pub(crate) working_lifecycle: Option<Lifecycle>,
     pub(crate) schemas: Vec<SchemaVersions>,
@@ -1228,6 +1229,7 @@ pub(crate) struct ContractSide {
     /// 人读诊断 label，保留来源路径形态。
     pub(crate) label: String,
     pub(crate) lifecycle: Lifecycle,
+    pub(crate) kind: ContractKind,
     pub(crate) slots: BTreeMap<String, (SchemaDirection, Value)>,
     pub(crate) manifest: ManifestProjection,
 }
@@ -1262,6 +1264,19 @@ pub(crate) fn plan_diffs(
         let lifecycle = match b.or(w) {
             Some(s) => s.lifecycle,
             None => continue,
+        };
+        let kind = match (b, w) {
+            (Some(base), Some(working)) if base.kind != working.kind => {
+                bail!(
+                    "contract breaking: contract identity `{}@{}` kind 由 {:?} 变为 {:?}",
+                    identity.id,
+                    identity.version,
+                    base.kind,
+                    working.kind
+                );
+            }
+            (Some(side), _) | (_, Some(side)) => side.kind,
+            (None, None) => continue,
         };
         let label = w
             .or(b)
@@ -1306,6 +1321,7 @@ pub(crate) fn plan_diffs(
         diffs.push(ContractDiff {
             label,
             lifecycle,
+            kind,
             working_lifecycle: w.map(|s| s.lifecycle),
             schemas,
             manifest: ManifestVersions {
@@ -1352,6 +1368,17 @@ pub(crate) struct EvalResult {
 pub(crate) fn evaluate(contracts: &[ContractDiff]) -> EvalResult {
     let mut result = EvalResult::default();
     for c in contracts {
+        let removed_saga_definition = c.removed && c.kind == ContractKind::Saga;
+        if removed_saga_definition {
+            push_finding(
+                &mut result,
+                c.lifecycle,
+                Disposition::Deny,
+                BreakingRule::ContractRemoved,
+                c.label.clone(),
+                "Saga definition 删除被拒绝；durable 跨副本 retirement proof carrier 落地前只能 deprecated 并保留".to_string(),
+            );
+        }
         if !is_checked(c.lifecycle) {
             continue; // draft：seed/前瞻原地演进豁免（WIRE-BREAKING-WINDOW-01）
         }
@@ -1368,7 +1395,7 @@ pub(crate) fn evaluate(contracts: &[ContractDiff]) -> EvalResult {
                 format!("active 契约 lifecycle 降级为 {working:?}"),
             );
         }
-        if c.removed {
+        if c.removed && !removed_saga_definition {
             push_finding(
                 &mut result,
                 c.lifecycle,
@@ -1744,7 +1771,7 @@ fn slot_files(m: &ContractManifest) -> Vec<(String, String, SchemaDirection)> {
         for s in &saga.steps {
             v.push((
                 format!("saga:{}", s.name),
-                s.output_schema.clone(),
+                s.receipt_schema.clone(),
                 SchemaDirection::Output,
             ));
         }
@@ -1795,6 +1822,7 @@ struct BaseContractManifest {
 #[derive(Debug, Deserialize)]
 struct BaseContractHeader {
     id: String,
+    kind: ContractKind,
     version: String,
     lifecycle: Lifecycle,
 }
@@ -1980,11 +2008,46 @@ struct BaseSagaBlock {
     steps: Vec<BaseSagaStep>,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug)]
 struct BaseSagaStep {
     name: String,
-    output_schema: String,
+    schema: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BaseSagaStepWire {
+    name: String,
+    #[serde(default)]
+    receipt_schema: Option<String>,
+    #[serde(default)]
+    output_schema: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for BaseSagaStep {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = BaseSagaStepWire::deserialize(deserializer)?;
+        let schema = match (wire.receipt_schema, wire.output_schema) {
+            (Some(schema), None) | (None, Some(schema)) => schema,
+            (None, None) => {
+                return Err(serde::de::Error::custom(
+                    "historical saga step requires exactly one of receiptSchema or outputSchema",
+                ));
+            }
+            (Some(_), Some(_)) => {
+                return Err(serde::de::Error::custom(
+                    "historical saga step must not declare both receiptSchema and outputSchema",
+                ));
+            }
+        };
+        Ok(Self {
+            name: wire.name,
+            schema,
+        })
+    }
 }
 
 /// Base refs may carry an older authoring schema. Wire-breaking only needs
@@ -2024,7 +2087,7 @@ fn base_slot_files(m: &BaseContractManifest) -> Vec<(String, String, SchemaDirec
         for s in &saga.steps {
             v.push((
                 format!("saga:{}", s.name),
-                s.output_schema.clone(),
+                s.schema.clone(),
                 SchemaDirection::Output,
             ));
         }
@@ -2344,6 +2407,7 @@ fn working_sides(contracts_root: &Path) -> Result<Vec<ContractSide>> {
             identity,
             label,
             lifecycle: c.manifest.lifecycle,
+            kind: c.manifest.kind,
             slots,
             manifest: manifest_projection(&c.manifest).with_context(|| {
                 format!(
@@ -2390,6 +2454,7 @@ fn base_contract_side(
             },
             label,
             lifecycle: header.lifecycle,
+            kind: header.kind,
             slots: BTreeMap::new(),
             manifest: ManifestProjection::default(),
         }));
@@ -2418,6 +2483,7 @@ fn base_contract_side(
         },
         label,
         lifecycle: manifest.lifecycle,
+        kind: manifest.kind,
         slots,
         manifest: base_manifest_projection(&manifest)
             .with_context(|| format!("project base contract {against}:{manifest_rel}"))?,
@@ -2864,6 +2930,7 @@ mod tests {
         ContractDiff {
             label: label.to_string(),
             lifecycle,
+            kind: ContractKind::Http,
             working_lifecycle: Some(lifecycle),
             schemas: vec![SchemaVersions {
                 file: "request.schema.json".to_string(),
@@ -2930,6 +2997,7 @@ mod tests {
         let c = ContractDiff {
             label: "http/identity/v2".to_string(),
             lifecycle: Lifecycle::Active,
+            kind: ContractKind::Http,
             working_lifecycle: Some(Lifecycle::Active),
             schemas: vec![SchemaVersions {
                 file: "request.schema.json".to_string(),
@@ -2972,6 +3040,12 @@ mod tests {
             },
             label: label.to_string(),
             lifecycle,
+            kind: match label.split('/').next() {
+                Some("saga") => ContractKind::Saga,
+                Some("event") => ContractKind::Event,
+                Some("command") => ContractKind::Command,
+                _ => ContractKind::Http,
+            },
             slots: slots
                 .iter()
                 .map(|(k, v)| {
@@ -3083,6 +3157,43 @@ steps = [
                     SchemaDirection::Output
                 ),
             ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn base_saga_step_reader_accepts_each_historical_generation_but_rejects_ambiguity()
+    -> anyhow::Result<()> {
+        let current = r#"
+name = "reserve_funds"
+receiptSchema = "reserve.schema.json"
+effectScope = "billing.reserve"
+compensationEffectScope = "billing.release"
+idempotencyClass = "deterministic-key"
+compensationInput = "receipt"
+retryClass = "transient"
+"#;
+        let current: BaseSagaStep = toml::from_str(current)?;
+        assert_eq!(current.schema, "reserve.schema.json");
+
+        let legacy: BaseSagaStep = toml::from_str(
+            r#"
+name = "reserve_funds"
+outputSchema = "reserve.schema.json"
+"#,
+        )?;
+        assert_eq!(legacy.schema, "reserve.schema.json");
+
+        let ambiguous = toml::from_str::<BaseSagaStep>(
+            r#"
+name = "reserve_funds"
+receiptSchema = "new.schema.json"
+outputSchema = "old.schema.json"
+"#,
+        );
+        assert!(
+            ambiguous.is_err(),
+            "declaring both historical schema fields must fail closed"
         );
         Ok(())
     }
@@ -3231,6 +3342,74 @@ lifecycle = "active"
                 .any(|f| f.rule == BreakingRule::ContractRemoved)
         );
         assert!(r.any_deny);
+        Ok(())
+    }
+
+    #[test]
+    fn deleted_draft_saga_definition_is_always_denied() -> anyhow::Result<()> {
+        let base = vec![side(
+            "saga/billing/v1",
+            Lifecycle::Draft,
+            &[
+                (
+                    "payload",
+                    json!({"properties": {"orderId": {"type":"string"}}}),
+                ),
+                (
+                    "saga:reserve_funds",
+                    json!({"properties": {"reservationId": {"type":"string"}}}),
+                ),
+            ],
+        )];
+        let result = evaluate(&plan_diffs(&base, &[])?);
+        assert!(
+            result.any_deny,
+            "Saga definition deletion must ignore the draft wire window"
+        );
+        assert_eq!(
+            result.findings.len(),
+            1,
+            "dedicated retirement precondition finding expected"
+        );
+        assert_eq!(result.findings[0].rule, BreakingRule::ContractRemoved);
+        Ok(())
+    }
+
+    #[test]
+    fn real_base_reader_keeps_draft_saga_deletion_gate_non_empty() -> anyhow::Result<()> {
+        let side = base_contract_side(
+            Path::new("."),
+            "unused-base",
+            "contracts/saga/billing/v1/contract.toml",
+            r#"
+id = "billing.checkout"
+kind = "saga"
+version = "v1"
+lifecycle = "draft"
+
+[saga]
+steps = [
+    { name = "reserve_funds", receiptSchema = "reserve.schema.json" },
+]
+"#,
+        )?
+        .ok_or_else(|| anyhow::anyhow!("canonical base manifest path must be discovered"))?;
+        assert_eq!(side.kind, ContractKind::Saga);
+        assert!(
+            side.slots.is_empty(),
+            "draft base reader intentionally avoids schema IO"
+        );
+
+        let result = evaluate(&plan_diffs(&[side], &[])?);
+        assert!(result.any_deny);
+        assert!(
+            result
+                .findings
+                .iter()
+                .any(|finding| finding.rule == BreakingRule::ContractRemoved),
+            "typed kind must make the real base-reader deletion finding non-empty: {:?}",
+            result.findings
+        );
         Ok(())
     }
 
@@ -3466,6 +3645,7 @@ lifecycle = "active"
         ContractDiff {
             label: "http/identity/v1".to_string(),
             lifecycle,
+            kind: ContractKind::Http,
             working_lifecycle: Some(lifecycle),
             schemas: Vec::new(),
             manifest: ManifestVersions {

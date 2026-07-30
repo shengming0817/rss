@@ -104,7 +104,7 @@
 ### T009 [P] [US7] P9 · saga executor + tailer + journal + 逆序补偿 + checkpoint store
 **触及**: `crates/eventexec/src/saga.rs` · `adapters/postgres/src/{saga,checkpoint}.rs`+migration · `crates/diport/src/checkpoint_store.rs` · `crates/bootstrap/src/sagaprojectiondeps.rs` · `contracts/saga/` · `xtask`(saga governance) · **等级**: L3 · **blocked-by**: T002,T003,T007 · **并行**: 与 T011/T012 并行（T010 依赖本 PR 的 checkpoint）。
 
-- [ ] T009.1 [US7] 先写测试：3-step 全成→journal 顺序；step2 返回失败→逆序 compensate 已完成前缀 step1；从 step2 checkpoint resume→跳过 step1；kind:saga governance 正/负；runtime policy 覆盖 forward retry/timeout、预算耗尽、compensation retry/timeout —— FAIL
+- [ ] T009.1 [US7] 先写测试：3-step 全成→journal 顺序；step2 返回失败→逆序 compensate 已完成前缀 step1；从 step2 checkpoint resume→跳过 step1；kind:saga governance 正/负；runtime policy 覆盖 attempt/time 双预算、fixed/exponential cap、none/full jitter、五类闭合 classification 与补偿预算耗尽 —— FAIL
 - [ ] T009.2 [US7] `OwnerCheckpointStore`(diport) + postgres checkpoint 表（CAS version）—— **P10 复用**
 - [ ] T009.3 [US7] postgres saga_journal 表 + reader/append
 - [ ] T009.4 [US7] `eventexec/saga.rs`：SagaId/SagaActionCtx body + SagaExecutor run/resume（前向 append + 失败逆序补偿，补偿失败→saga dead-letter）+ SagaTailer status

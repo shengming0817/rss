@@ -25,14 +25,13 @@
 ## 2. saga 契约 kind（P9）
 
 新增 `contracts/saga/<domain>/v1/`：
-- `contract.toml`：`kind="saga"`、`consistencyLevel="WorkflowEventual"`(L3)、非空 `[saga]` block（TOML 键 **camelCase**，`deny_unknown_fields`）：`steps=[{name, outputSchema}...]`（≥1）+ `compensationOrder="reverse"` + `retryMillis`/`timeoutMillis`（`u64` 毫秒，**block 级、非 per-step**）。完整形态见 `xtask` 解析测试 `VALID_SAGA` 与 `contracts/README.md` §[saga]。
-- codegen 派生 step output DTO、`STEP_*`、ordered `STEPS`、`CONTRACT_ID` / `CONTRACT` / `POLICY` / `SPEC`；`POLICY` 是 `vocab::SagaRuntimePolicySpec`，`SPEC` 同源携带 contract + policy + steps。
-- runtime policy 语义：`retryMillis=0 && timeoutMillis=0` 禁用；`retryMillis>0 && timeoutMillis=0` 非法；`timeoutMillis>0` 是单 step phase 总预算（覆盖 do/undo，各自包含重试与 backoff）；`retryMillis>0` 是固定 backoff，重试由总预算约束。
-- step `outputSchema` 引用 `*.schema.json`，并进入 typify 生成对应 output DTO。
-- 组合根经 `eventexec::TypedSagaActionFactory::builder(SPEC)` 按 `STEPS` 顺序注册 typed `consistency::SagaStep` factory；`finish()` 校验 step 数量、顺序、名称和 output schema。raw erased action glue 不作为公开 API。
+- `contract.toml`：`kind="saga"`、`consistencyLevel="WorkflowEventual"`(L3)、非空 `[saga]` 与 `[saga.retry]`（TOML 键 **camelCase**，`deny_unknown_fields`）。有序 step 必填 `name`、`receiptSchema`、forward/compensation effect scope、deterministic-key idempotency、receipt compensation input 与闭值 retry class；retry 必填 attempt/time 双预算、fixed/exponential backoff、初值/上限与 none/full jitter。
+- codegen 派生唯一 receipt DTO、sealed definition/step/receipt marker、definition 专属 typestate cursor、完整 policy 与域分离/长度前缀 SHA-256 `ACTION_REGISTRY_GENERATION`。
+- runtime 只有显式 `Transient` 且 step 允许时重试；attempt budget 包含首次调用，time budget 覆盖 action/backoff，backoff 饱和且 jitter entropy 可测试。
+- 组合根经 `eventexec::TypedSagaActionFactory<Definition>::builder()` 注册 typed `eventexec::SagaStep<GeneratedStepMarker>`；注册消费 cursor，只有 `End` 有 `finish()`。wrong receipt、漏步、多步、重排或跨 definition step 均编译失败。
 
 **治理**（xtask，SAGA-CONTRACT-01，对齐 saga.md §Governance）：
-- 非空 saga block + ≥1 step；step name = 合法 Rust 标识符且唯一；每步声明 output schema；compensation order 仅 reverse；consistencyLevel=L3；retry/timeout 合法非负 duration。
+- 非空 saga/retry block + ≥1 step；step name = 合法 Rust 标识符且唯一；每步完整声明 receipt/effect/idempotency/compensation/retry 语义；compensation order 仅 reverse；consistencyLevel=L3；attempt/time/backoff/jitter 良构。
 - 正/负 synthetic 用例（anti-vacuity）。
 
 ## 既有契约影响

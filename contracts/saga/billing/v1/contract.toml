@@ -16,12 +16,18 @@ payload = "payload.schema.json"
 
 [saga]
 compensationOrder = "reverse"
-retryMillis = 5000
-timeoutMillis = 30000
 steps = [
-    { name = "reserve_funds", outputSchema = "reserve.schema.json" },
-    { name = "capture", outputSchema = "capture.schema.json" },
+    { name = "reserve_funds", receiptSchema = "reserve.schema.json", effectScope = "billing.reserve-funds", compensationEffectScope = "billing.release-funds", idempotencyClass = "deterministic-key", compensationInput = "receipt", retryClass = "transient" },
+    { name = "capture", receiptSchema = "capture.schema.json", effectScope = "billing.capture", compensationEffectScope = "billing.refund", idempotencyClass = "deterministic-key", compensationInput = "receipt", retryClass = "never" },
 ]
+
+[saga.retry]
+maxAttempts = 3
+timeBudgetMillis = 30000
+backoff = "exponential"
+initialBackoffMillis = 100
+maxBackoffMillis = 5000
+jitter = "full"
 
 [capabilities.workflow]
 mode = "saga"

@@ -108,13 +108,21 @@ pub use workflow_runtime::{
 
 pub mod saga;
 pub use saga::{
-    SagaActionError, SagaExecStatus, SagaExecutor, SagaExecutorConfig, SagaExecutorConfigError,
-    SagaExecutorDeps, SagaExecutorImpl, SagaId, SagaInterruption, SagaOutcome, SagaPolicy,
-    SagaPolicyError, SagaRuntimeLock, SagaTailer, TypedSagaActionFactory,
-    TypedSagaActionFactoryBuilder, TypedSagaFactoryError,
+    SagaActionError, SagaCompensationContext, SagaDefinitionRegistry,
+    SagaDefinitionRegistryBuilder, SagaDefinitionRegistryError, SagaDefinitionRegistryLookupError,
+    SagaExecStatus, SagaExecutor, SagaExecutorConfig, SagaExecutorConfigError, SagaExecutorDeps,
+    SagaExecutorImpl, SagaForwardContext, SagaId, SagaIdempotencyKey, SagaInterruption,
+    SagaOutcome, SagaPolicyError, SagaRuntimeLock, SagaStep, SagaTailer, TypedSagaActionFactory,
+    TypedSagaActionFactoryBuilder,
 };
 
 pub mod saga_worker;
+
+/// Generated saga fixtures exposed only to non-shipped integration harnesses.
+#[cfg(feature = "test-support")]
+pub mod saga_test_support {
+    pub use generated::saga::billing_v1;
+}
 pub use saga_worker::{
     SAGA_EXECUTOR_PROBE, SagaWorker, SagaWorkerConfig, saga_executor_probe_name, spawn_saga_worker,
 };

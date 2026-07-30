@@ -1,0 +1,13 @@
+error[E0599]: the method `finish` exists for struct `TypedSagaActionFactoryBuilder<generated::saga::billing_v1::Definition, ReserveFundsStep>`, but its trait bounds were not satisfied
+ --> tests/ui/typed_saga_finish_before_end_fail.rs:5:61
+  |
+5 |     let _ = TypedSagaActionFactory::<Definition>::builder().finish();
+  |                                                             ^^^^^^ method cannot be called due to unsatisfied trait bounds
+  |
+ ::: $WORKSPACE/generated/src/saga/billing_v1.rs
+  |
+  | pub struct ReserveFundsStep;
+  | --------------------------- doesn't satisfy `_: End<Definition>`
+  |
+  = note: the following trait bounds were not satisfied:
+          `ReserveFundsStep: generated::saga::End<generated::saga::billing_v1::Definition>`

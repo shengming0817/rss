@@ -198,37 +198,88 @@ impl ProjectionInputBinding {
     }
 }
 
-/// Saga runtime policy spec generated from `[saga].retryMillis` / `[saga].timeoutMillis`.
-///
-/// This is the contract-facing representation only: raw millisecond values stay in `vocab` so
-/// generated contract glue can expose them without depending on runtime crates. Runtime validation
-/// and interpretation live at the `eventexec::saga::SagaPolicy` conversion boundary.
+/// Contract-declared retry backoff algorithm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SagaBackoff {
+    /// Constant delay between attempts.
+    Fixed,
+    /// Doubling delay, saturated at the declared maximum.
+    Exponential,
+}
+
+/// Contract-declared retry jitter algorithm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SagaJitter {
+    /// No jitter.
+    None,
+    /// Uniform deterministic jitter in the full `[0, delay]` interval.
+    Full,
+}
+
+/// Closed retry permission for one saga step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SagaRetryClass {
+    /// Never retry this step.
+    Never,
+    /// Retry only failures classified as transient.
+    Transient,
+}
+
+/// Generated retry policy. Every field is mandatory in a saga manifest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SagaRuntimePolicySpec {
-    retry_millis: u64,
-    timeout_millis: u64,
+    max_attempts: u32,
+    time_budget_millis: u64,
+    backoff: SagaBackoff,
+    initial_backoff_millis: u64,
+    max_backoff_millis: u64,
+    jitter: SagaJitter,
 }
 
 impl SagaRuntimePolicySpec {
-    /// Construct a generated saga runtime policy spec from static manifest literals.
+    /// Construct a generated policy from manifest-derived fields.
     #[must_use]
-    pub const fn from_millis(retry_millis: u64, timeout_millis: u64) -> Self {
+    pub const fn from_static(
+        max_attempts: u32,
+        time_budget_millis: u64,
+        backoff: SagaBackoff,
+        initial_backoff_millis: u64,
+        max_backoff_millis: u64,
+        jitter: SagaJitter,
+    ) -> Self {
         Self {
-            retry_millis,
-            timeout_millis,
+            max_attempts,
+            time_budget_millis,
+            backoff,
+            initial_backoff_millis,
+            max_backoff_millis,
+            jitter,
         }
     }
 
-    /// Fixed retry delay in milliseconds. `0` means retry is disabled.
     #[must_use]
-    pub const fn retry_millis(&self) -> u64 {
-        self.retry_millis
+    pub const fn max_attempts(&self) -> u32 {
+        self.max_attempts
     }
-
-    /// Total timeout budget for one saga step phase in milliseconds. `0` means timeout is disabled.
     #[must_use]
-    pub const fn timeout_millis(&self) -> u64 {
-        self.timeout_millis
+    pub const fn time_budget_millis(&self) -> u64 {
+        self.time_budget_millis
+    }
+    #[must_use]
+    pub const fn backoff(&self) -> SagaBackoff {
+        self.backoff
+    }
+    #[must_use]
+    pub const fn initial_backoff_millis(&self) -> u64 {
+        self.initial_backoff_millis
+    }
+    #[must_use]
+    pub const fn max_backoff_millis(&self) -> u64 {
+        self.max_backoff_millis
+    }
+    #[must_use]
+    pub const fn jitter(&self) -> SagaJitter {
+        self.jitter
     }
 }
 
@@ -240,7 +291,10 @@ impl SagaRuntimePolicySpec {
 pub struct SagaStepBinding {
     contract: ContractBinding,
     name: &'static str,
-    output_schema: &'static str,
+    receipt_schema: &'static str,
+    effect_scope: &'static str,
+    compensation_effect_scope: &'static str,
+    retry_class: SagaRetryClass,
 }
 
 impl SagaStepBinding {
@@ -249,12 +303,18 @@ impl SagaStepBinding {
     pub const fn from_static(
         contract: ContractBinding,
         name: &'static str,
-        output_schema: &'static str,
+        receipt_schema: &'static str,
+        effect_scope: &'static str,
+        compensation_effect_scope: &'static str,
+        retry_class: SagaRetryClass,
     ) -> Self {
         Self {
             contract,
             name,
-            output_schema,
+            receipt_schema,
+            effect_scope,
+            compensation_effect_scope,
+            retry_class,
         }
     }
 
@@ -294,21 +354,24 @@ impl SagaStepBinding {
         self.name
     }
 
-    /// Step output schema file from `contract.toml`.
+    /// Step receipt schema file from `contract.toml`.
     #[must_use]
-    pub const fn output_schema(&self) -> &'static str {
-        self.output_schema
+    pub const fn receipt_schema(&self) -> &'static str {
+        self.receipt_schema
     }
-}
 
-/// Marker generated for the DTO that corresponds to one saga step output schema.
-///
-/// Production implementations are emitted by contract codegen next to the DTO. Runtime registration
-/// compares this binding against the step's generated binding, so a typed step cannot silently
-/// return another step's output DTO.
-pub trait SagaStepOutputBinding {
-    /// Generated saga step binding for this output DTO.
-    const BINDING: SagaStepBinding;
+    #[must_use]
+    pub const fn effect_scope(&self) -> &'static str {
+        self.effect_scope
+    }
+    #[must_use]
+    pub const fn compensation_effect_scope(&self) -> &'static str {
+        self.compensation_effect_scope
+    }
+    #[must_use]
+    pub const fn retry_class(&self) -> SagaRetryClass {
+        self.retry_class
+    }
 }
 
 /// Saga contract binding generated from a saga `contract.toml`.
@@ -321,6 +384,7 @@ pub struct SagaContractBinding {
     contract: ContractBinding,
     policy: SagaRuntimePolicySpec,
     steps: &'static [SagaStepBinding],
+    action_registry_generation: &'static str,
 }
 
 impl SagaContractBinding {
@@ -330,11 +394,13 @@ impl SagaContractBinding {
         contract: ContractBinding,
         policy: SagaRuntimePolicySpec,
         steps: &'static [SagaStepBinding],
+        action_registry_generation: &'static str,
     ) -> Self {
         Self {
             contract,
             policy,
             steps,
+            action_registry_generation,
         }
     }
 
@@ -379,11 +445,20 @@ impl SagaContractBinding {
     pub const fn schema_hash(&self) -> &'static str {
         self.contract.schema_hash()
     }
+
+    /// Digest of all ordered execution semantics, distinct from the schema bundle digest.
+    #[must_use]
+    pub const fn action_registry_generation(&self) -> &'static str {
+        self.action_registry_generation
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ContractBinding, SagaContractBinding, SagaRuntimePolicySpec, SagaStepBinding};
+    use super::{
+        ContractBinding, SagaBackoff, SagaContractBinding, SagaJitter, SagaRetryClass,
+        SagaRuntimePolicySpec, SagaStepBinding,
+    };
 
     const HASH: &str = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
@@ -437,27 +512,55 @@ mod tests {
     }
 
     #[test]
-    fn saga_runtime_policy_spec_exposes_millis_verbatim() {
-        let disabled = SagaRuntimePolicySpec::from_millis(0, 0);
-        assert_eq!(disabled.retry_millis(), 0);
-        assert_eq!(disabled.timeout_millis(), 0);
-
-        const BOUNDED: SagaRuntimePolicySpec = SagaRuntimePolicySpec::from_millis(5000, 30000);
-        assert_eq!(BOUNDED.retry_millis(), 5000);
-        assert_eq!(BOUNDED.timeout_millis(), 30000);
+    fn saga_runtime_policy_spec_exposes_complete_policy_verbatim() {
+        const POLICY: SagaRuntimePolicySpec = SagaRuntimePolicySpec::from_static(
+            3,
+            30_000,
+            SagaBackoff::Exponential,
+            100,
+            5_000,
+            SagaJitter::Full,
+        );
+        assert_eq!(POLICY.max_attempts(), 3);
+        assert_eq!(POLICY.time_budget_millis(), 30_000);
+        assert_eq!(POLICY.backoff(), SagaBackoff::Exponential);
+        assert_eq!(POLICY.initial_backoff_millis(), 100);
+        assert_eq!(POLICY.max_backoff_millis(), 5_000);
+        assert_eq!(POLICY.jitter(), SagaJitter::Full);
     }
 
     #[test]
     fn saga_contract_binding_keeps_contract_and_policy_atomic() {
         const CONTRACT: ContractBinding =
             ContractBinding::from_static("billing", "billing.checkout", "v1", HASH);
-        const POLICY: SagaRuntimePolicySpec = SagaRuntimePolicySpec::from_millis(5000, 30000);
+        const POLICY: SagaRuntimePolicySpec = SagaRuntimePolicySpec::from_static(
+            3,
+            30_000,
+            SagaBackoff::Fixed,
+            100,
+            5_000,
+            SagaJitter::None,
+        );
         const STEPS: &[SagaStepBinding] = &[
-            SagaStepBinding::from_static(CONTRACT, "reserve_funds", "reserve.schema.json"),
-            SagaStepBinding::from_static(CONTRACT, "capture", "capture.schema.json"),
+            SagaStepBinding::from_static(
+                CONTRACT,
+                "reserve_funds",
+                "reserve.schema.json",
+                "billing.reserve-funds",
+                "billing.release-funds",
+                SagaRetryClass::Transient,
+            ),
+            SagaStepBinding::from_static(
+                CONTRACT,
+                "capture",
+                "capture.schema.json",
+                "billing.capture",
+                "billing.refund",
+                SagaRetryClass::Never,
+            ),
         ];
         const BINDING: SagaContractBinding =
-            SagaContractBinding::from_parts(CONTRACT, POLICY, STEPS);
+            SagaContractBinding::from_parts(CONTRACT, POLICY, STEPS, HASH);
 
         assert_eq!(BINDING.steps()[0].contract(), CONTRACT);
         assert_eq!(BINDING.steps()[0].contract_id(), "billing.checkout");
@@ -469,7 +572,8 @@ mod tests {
         assert_eq!(BINDING.policy(), POLICY);
         assert_eq!(BINDING.steps(), STEPS);
         assert_eq!(BINDING.steps()[0].name(), "reserve_funds");
-        assert_eq!(BINDING.steps()[0].output_schema(), "reserve.schema.json");
+        assert_eq!(BINDING.steps()[0].receipt_schema(), "reserve.schema.json");
+        assert_eq!(BINDING.action_registry_generation(), HASH);
     }
 
     #[test]

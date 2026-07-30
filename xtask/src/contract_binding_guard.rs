@@ -9,9 +9,9 @@
 //! `GeneratedEventPayload` 同理只允许 codegen owner 实现；生产 crate 手写 impl（含 alias / glob import）
 //! 会让任意 payload 自签 contract/topic，故本 guard 一并 fail-fast。
 //! `ProjectionInputBinding` 的正确生产来源是 `generated::event::PROJECTION_INPUTS`；saga binding / policy /
-//! output marker 的正确生产来源是 `generated::saga::*::{SPEC,STEPS,STEP_*}` 和 generated output DTO。本 guard 把残余面
-//! 收口为 Medium：扫描生产 Rust AST，任何非测试代码直接调用 generated binding constructor 或手写
-//! `SagaStepOutputBinding` 都 fail-fast。
+//! receipt/typestate marker 的正确生产来源是 `generated::saga::*::{SPEC,STEPS,STEP_*}` 和 sealed generated receipt DTO。本 guard 把残余面
+//! 收口为 Medium：扫描生产 Rust AST，任何非测试代码直接调用 generated binding constructor 都
+//! fail-fast。
 //! 测试 fixture 与 generated/xtask 不在本扫描范围内。
 //!
 //! INVARIANT: CONTRACT-BINDING-FUNNEL-01 { level = "Medium", exec = "check", source = "code" }.
@@ -40,8 +40,6 @@ use crate::workspace_root;
 const DIRECT_SCAN_ROOTS: &[&str] = &["journeys", "journeys-fault-matrix"];
 const EXCLUDED_WORKSPACE_PACKAGES: &[&str] = &["generated", "xtask"];
 const PROJECTION_EVENTS_WRAPPER: &str = "adapters/postgres/src/projection_events.rs";
-const SAGA_BINDING_TEST_SUPPORT_FILES: &[&str] =
-    &["adapters/postgres/src/fault_matrix/saga_fixture.rs"];
 const PROJECTION_DB_FUNCTIONS: &[&str] =
     &["rss_append_projection_event", "rss_read_projection_events"];
 const ACTIVE_PRODUCER_PROVIDER_FILES: &[&str] = &[
@@ -64,8 +62,6 @@ pub(crate) enum Rule {
     BareFromStatic,
     /// 生产代码手写 generated event payload marker，伪造 codegen provenance。
     GeneratedEventPayloadImpl,
-    /// 生产代码手写 saga output DTO marker，绕过 generated output DTO。
-    SagaStepOutputBindingImpl,
     /// 生产代码绕过 sanctioned projection_events wrapper 直接调用 DB fixed function。
     ProjectionDbFunctionCallsite,
     /// active HTTP producer provider 引用 raw publisher/emitter transport。
@@ -214,7 +210,6 @@ fn scan_file(path: &Path, content: &str) -> Result<Vec<Finding<Rule>>> {
     let mut visitor = BindingVisitor {
         path,
         binding_aliases: aliases.binding_constructors,
-        saga_output_binding_aliases: aliases.saga_output_binding_traits,
         generated_event_payload_aliases: aliases.generated_event_payload_traits,
         raw_transport_aliases,
         guard_raw_transport: is_active_producer_provider(path),
@@ -302,7 +297,6 @@ fn scan_reachable_raw_transport_helpers(
         let mut visitor = BindingVisitor {
             path: &node.path,
             binding_aliases: BindingConstructorAliases::new(),
-            saga_output_binding_aliases: BTreeSet::new(),
             generated_event_payload_aliases: BTreeSet::new(),
             raw_transport_aliases: aliases,
             guard_raw_transport: true,
@@ -645,7 +639,6 @@ fn expr_contains_projection_db_function(expr: &Expr) -> bool {
 struct BindingVisitor<'a> {
     path: &'a Path,
     binding_aliases: BindingConstructorAliases,
-    saga_output_binding_aliases: BTreeSet<String>,
     generated_event_payload_aliases: BTreeSet<String>,
     raw_transport_aliases: BTreeSet<String>,
     guard_raw_transport: bool,
@@ -675,10 +668,7 @@ impl<'ast> Visit<'ast> for BindingVisitor<'_> {
     }
 
     fn visit_expr_path(&mut self, node: &'ast ExprPath) {
-        if self.in_test == 0
-            && !is_saga_binding_test_support_file(self.path)
-            && is_binding_constructor_path(node, &self.binding_aliases)
-        {
+        if self.in_test == 0 && is_binding_constructor_path(node, &self.binding_aliases) {
             self.findings.push(finding(
                 Rule::BareFromStatic,
                 self.path.display().to_string(),
@@ -735,16 +725,6 @@ impl<'ast> Visit<'ast> for BindingVisitor<'_> {
 
     fn visit_item_impl(&mut self, node: &'ast ItemImpl) {
         self.with_test_scope(is_test_like(&node.attrs), |this| {
-            if this.in_test == 0
-                && !is_saga_binding_test_support_file(this.path)
-                && is_saga_step_output_binding_impl(node, &this.saga_output_binding_aliases)
-            {
-                this.findings.push(finding(
-                    Rule::SagaStepOutputBindingImpl,
-                    this.path.display().to_string(),
-                    "生产代码不得手写 `SagaStepOutputBinding`；请使用 generated saga output DTO",
-                ));
-            }
             if this.in_test == 0 && is_trait_impl(node, &this.generated_event_payload_aliases) {
                 this.findings.push(finding(
                     Rule::GeneratedEventPayloadImpl,
@@ -835,7 +815,6 @@ fn item_attrs(item: &Item) -> &[Attribute] {
 
 struct AliasCollector {
     binding_constructors: BindingConstructorAliases,
-    saga_output_binding_traits: BTreeSet<String>,
     generated_event_payload_traits: BTreeSet<String>,
 }
 
@@ -844,7 +823,6 @@ impl<'ast> Visit<'ast> for AliasCollector {
         collect_use_tree_aliases(
             &node.tree,
             &mut self.binding_constructors,
-            &mut self.saga_output_binding_traits,
             &mut self.generated_event_payload_traits,
         );
         visit::visit_item_use(self, node);
@@ -864,7 +842,6 @@ impl<'ast> Visit<'ast> for AliasCollector {
 
 struct SourceAliases {
     binding_constructors: BindingConstructorAliases,
-    saga_output_binding_traits: BTreeSet<String>,
     generated_event_payload_traits: BTreeSet<String>,
 }
 
@@ -915,17 +892,14 @@ fn collect_contract_binding_aliases(file: &syn::File) -> SourceAliases {
         "SagaContractBinding",
         "SagaContractBinding",
     );
-    let saga_output_binding_traits = BTreeSet::from(["SagaStepOutputBinding".to_string()]);
     let generated_event_payload_traits = BTreeSet::from(["GeneratedEventPayload".to_string()]);
     let mut collector = AliasCollector {
         binding_constructors,
-        saga_output_binding_traits,
         generated_event_payload_traits,
     };
     collector.visit_file(file);
     SourceAliases {
         binding_constructors: collector.binding_constructors,
-        saga_output_binding_traits: collector.saga_output_binding_traits,
         generated_event_payload_traits: collector.generated_event_payload_traits,
     }
 }
@@ -1073,24 +1047,16 @@ type BindingConstructorAliases = BTreeMap<String, BTreeSet<&'static str>>;
 fn collect_use_tree_aliases(
     tree: &UseTree,
     aliases: &mut BindingConstructorAliases,
-    output_binding_aliases: &mut BTreeSet<String>,
     generated_event_payload_aliases: &mut BTreeSet<String>,
 ) {
     match tree {
         UseTree::Path(path) => {
-            collect_use_tree_aliases(
-                &path.tree,
-                aliases,
-                output_binding_aliases,
-                generated_event_payload_aliases,
-            );
+            collect_use_tree_aliases(&path.tree, aliases, generated_event_payload_aliases);
         }
         UseTree::Name(name) => {
             let ident = name.ident.to_string();
             insert_binding_alias(aliases, &ident, &ident);
-            if ident == "SagaStepOutputBinding" {
-                output_binding_aliases.insert(ident);
-            } else if ident == "GeneratedEventPayload" {
+            if ident == "GeneratedEventPayload" {
                 generated_event_payload_aliases.insert(ident);
             }
         }
@@ -1100,20 +1066,13 @@ fn collect_use_tree_aliases(
                 &rename.rename.to_string(),
                 &rename.ident.to_string(),
             );
-            if rename.ident == "SagaStepOutputBinding" {
-                output_binding_aliases.insert(rename.rename.to_string());
-            } else if rename.ident == "GeneratedEventPayload" {
+            if rename.ident == "GeneratedEventPayload" {
                 generated_event_payload_aliases.insert(rename.rename.to_string());
             }
         }
         UseTree::Group(group) => {
             for tree in &group.items {
-                collect_use_tree_aliases(
-                    tree,
-                    aliases,
-                    output_binding_aliases,
-                    generated_event_payload_aliases,
-                );
+                collect_use_tree_aliases(tree, aliases, generated_event_payload_aliases);
             }
         }
         _ => {}
@@ -1145,7 +1104,7 @@ fn binding_constructor_methods(type_name: &str) -> Option<&'static [&'static str
         | "HttpProducerBinding"
         | "ProjectionInputBinding"
         | "SagaStepBinding" => Some(&["from_static"]),
-        "SagaRuntimePolicySpec" => Some(&["from_millis"]),
+        "SagaRuntimePolicySpec" => Some(&["from_static"]),
         "SagaContractBinding" => Some(&["from_parts"]),
         _ => None,
     }
@@ -1186,10 +1145,6 @@ fn type_path_last_ident(ty: &Type) -> Option<String> {
     }
 }
 
-fn is_saga_step_output_binding_impl(node: &ItemImpl, aliases: &BTreeSet<String>) -> bool {
-    is_trait_impl(node, aliases)
-}
-
 fn is_trait_impl(node: &ItemImpl, aliases: &BTreeSet<String>) -> bool {
     let Some((_, path, _)) = &node.trait_ else {
         return false;
@@ -1197,12 +1152,6 @@ fn is_trait_impl(node: &ItemImpl, aliases: &BTreeSet<String>) -> bool {
     path.segments
         .last()
         .is_some_and(|seg| aliases.contains(&seg.ident.to_string()))
-}
-
-fn is_saga_binding_test_support_file(path: &Path) -> bool {
-    SAGA_BINDING_TEST_SUPPORT_FILES
-        .iter()
-        .any(|allowed| path == Path::new(allowed))
 }
 
 fn is_test_like(attrs: &[Attribute]) -> bool {
@@ -1653,6 +1602,9 @@ mod tests {
                     generated::saga::billing_v1::CONTRACT,
                     "reserve_funds",
                     "reserve.schema.json",
+                    "billing.reserve",
+                    "billing.release",
+                    vocab::SagaRetryClass::Transient,
                 );
             }
         "#;
@@ -1663,12 +1615,19 @@ mod tests {
     }
 
     #[test]
-    fn flags_prod_saga_policy_from_millis_call() -> anyhow::Result<()> {
+    fn flags_prod_saga_policy_from_static_call() -> anyhow::Result<()> {
         let src = r#"
             use vocab::SagaRuntimePolicySpec as Policy;
 
             fn mint() {
-                let _ = Policy::from_millis(5000, 30000);
+                let _ = Policy::from_static(
+                    3,
+                    30000,
+                    vocab::SagaBackoff::Exponential,
+                    100,
+                    5000,
+                    vocab::SagaJitter::Full,
+                );
             }
         "#;
         let findings = scan_file(Path::new("crates/x/src/lib.rs"), src)?;
@@ -1687,44 +1646,12 @@ mod tests {
                 policy: vocab::SagaRuntimePolicySpec,
                 steps: &'static [vocab::SagaStepBinding],
             ) {
-                let _ = Spec::from_parts(contract, policy, steps);
+                let _ = Spec::from_parts(contract, policy, steps, "sha256:0123");
             }
         "#;
         let findings = scan_file(Path::new("crates/x/src/lib.rs"), src)?;
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].rule, Rule::BareFromStatic);
-        Ok(())
-    }
-
-    #[test]
-    fn flags_prod_saga_output_marker_impl() -> anyhow::Result<()> {
-        let src = r#"
-            struct Output;
-
-            impl vocab::SagaStepOutputBinding for Output {
-                const BINDING: vocab::SagaStepBinding = generated::saga::billing_v1::STEP_0;
-            }
-        "#;
-        let findings = scan_file(Path::new("crates/x/src/lib.rs"), src)?;
-        assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].rule, Rule::SagaStepOutputBindingImpl);
-        Ok(())
-    }
-
-    #[test]
-    fn flags_prod_saga_output_marker_impl_alias() -> anyhow::Result<()> {
-        let src = r#"
-            use vocab::SagaStepOutputBinding as Marker;
-
-            struct Output;
-
-            impl Marker for Output {
-                const BINDING: vocab::SagaStepBinding = generated::saga::billing_v1::STEP_0;
-            }
-        "#;
-        let findings = scan_file(Path::new("crates/x/src/lib.rs"), src)?;
-        assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].rule, Rule::SagaStepOutputBindingImpl);
         Ok(())
     }
 
@@ -1738,51 +1665,10 @@ mod tests {
                     "reserve.schema.json",
                 );
 
-            struct Output;
-
-            impl vocab::SagaStepOutputBinding for Output {
-                const BINDING: vocab::SagaStepBinding = STEP;
-            }
         "#;
         let findings = scan_file(Path::new("adapters/postgres/src/fault_matrix.rs"), src)?;
-        assert_eq!(
-            findings.len(),
-            2,
-            "feature-gated public fault_matrix.rs must still be scanned: {findings:?}"
-        );
+        assert_eq!(findings.len(), 1);
         assert!(findings.iter().any(|f| f.rule == Rule::BareFromStatic));
-        assert!(
-            findings
-                .iter()
-                .any(|f| f.rule == Rule::SagaStepOutputBindingImpl)
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn allows_dedicated_saga_fixture_binding_mint() -> anyhow::Result<()> {
-        let src = r#"
-            const STEP: vocab::SagaStepBinding =
-                vocab::SagaStepBinding::from_static(
-                    generated::saga::billing_v1::CONTRACT,
-                    "reserve_funds",
-                    "reserve.schema.json",
-                );
-
-            struct Output;
-
-            impl vocab::SagaStepOutputBinding for Output {
-                const BINDING: vocab::SagaStepBinding = STEP;
-            }
-        "#;
-        let findings = scan_file(
-            Path::new("adapters/postgres/src/fault_matrix/saga_fixture.rs"),
-            src,
-        )?;
-        assert!(
-            findings.is_empty(),
-            "only the dedicated fault-matrix saga fixture file may hand-author typed saga bindings: {findings:?}"
-        );
         Ok(())
     }
 

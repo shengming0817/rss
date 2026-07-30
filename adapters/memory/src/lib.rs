@@ -27,6 +27,8 @@ use consistency::{
     SagaJournalAppendOutcome, SagaJournalAppendRecord, SagaJournalRecord, SagaLease,
     SagaLeaseOutcome, SeenState,
 };
+#[cfg(test)]
+use identity::ports::RefreshTokenSnapshot;
 
 use authn::{AuthGrant, AuthGrantId, AuthGrantStatus};
 use diport::{
@@ -1125,8 +1127,8 @@ impl LockStore for MemLockStore {
 #[derive(Clone)]
 struct MemSagaInstanceState {
     status: SagaInstanceStatus,
-    owner: String,
-    contract_id: String,
+    identity: SagaWorkerIdentity,
+    definition: consistency::SagaDefinitionIdentity,
     holder_id: Option<String>,
     lease_token: Option<uuid::Uuid>,
     epoch: u64,
@@ -1134,9 +1136,17 @@ struct MemSagaInstanceState {
 }
 
 impl MemSagaInstanceState {
-    fn record(&self, instance: SagaInstanceRef) -> SagaInstanceRecord {
-        let _ = (&self.owner, &self.contract_id);
-        SagaInstanceRecord::new(instance, self.status)
+    fn record(
+        &self,
+        instance: SagaInstanceRef,
+    ) -> Result<SagaInstanceRecord, SagaInstanceStoreError> {
+        SagaInstanceRecord::new(
+            instance,
+            self.status,
+            self.identity.clone(),
+            self.definition.clone(),
+        )
+        .map_err(SagaInstanceStoreError::new)
     }
 
     fn lease_is_free(&self, now: SystemTime) -> bool {
@@ -1201,16 +1211,26 @@ impl SagaInstanceStore for MemSagaInstanceStore {
             .instances
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        if let Some(state) = g.get(&key) {
+            if state.identity != *registration.identity()
+                || state.definition != *registration.definition()
+            {
+                return Err(SagaInstanceStoreError::identity_conflict(MemSagaInvariant(
+                    "saga instance definition identity conflict",
+                )));
+            }
+            return state.record(instance);
+        }
         let state = g.entry(key).or_insert_with(|| MemSagaInstanceState {
             status: SagaInstanceStatus::Ready,
-            owner: registration.owner().to_string(),
-            contract_id: registration.contract_id().to_string(),
+            identity: registration.identity().clone(),
+            definition: registration.definition().clone(),
             holder_id: None,
             lease_token: None,
             epoch: 0,
             expires_at: None,
         });
-        Ok(state.record(instance))
+        state.record(instance)
     }
 
     async fn get(
@@ -1222,8 +1242,9 @@ impl SagaInstanceStore for MemSagaInstanceStore {
             .instances
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        Ok(g.get(&saga_instance_key(*instance))
-            .map(|state| state.record(*instance)))
+        g.get(&saga_instance_key(*instance))
+            .map(|state| state.record(*instance))
+            .transpose()
     }
 
     async fn acquire_lease(
@@ -1340,18 +1361,19 @@ impl SagaInstanceStore for MemSagaInstanceStore {
             if rows.len() >= limit.get() {
                 break;
             }
-            if row_tenant != &tenant_key
-                || state.owner != identity.owner()
-                || state.contract_id != identity.contract_id().as_str()
-                || !state.is_runnable(now)
-            {
+            if row_tenant != &tenant_key || state.identity != *identity || !state.is_runnable(now) {
                 continue;
             }
             let instance = SagaInstanceRef::new(tenant, consistency::SagaId::new(*saga_id))
                 .map_err(SagaInstanceStoreError::new)?;
             rows.push(
-                SagaRunnableInstance::new(instance, state.status)
-                    .map_err(SagaInstanceStoreError::new)?,
+                SagaRunnableInstance::new(
+                    instance,
+                    state.status,
+                    state.identity.clone(),
+                    state.definition.clone(),
+                )
+                .map_err(SagaInstanceStoreError::new)?,
             );
         }
         rows.sort_by_key(|row| row.instance().saga_id().as_uuid());
@@ -1381,8 +1403,7 @@ impl SagaTenantSource for MemSagaInstanceStore {
             if tenants.len() >= limit.get() {
                 break;
             }
-            if state.owner != identity.owner()
-                || state.contract_id != identity.contract_id().as_str()
+            if state.identity != *identity
                 || !state.is_runnable(now)
                 || !seen.insert(tenant.clone())
             {
@@ -1741,8 +1762,16 @@ mod tests {
         .unwrap()
     }
 
+    #[allow(clippy::unwrap_used)]
     fn saga_registration(instance: SagaInstanceRef, contract_id: &str) -> SagaInstanceRegistration {
-        SagaInstanceRegistration::new(instance, saga_identity(contract_id))
+        let definition = consistency::SagaDefinitionIdentity::new(
+            contract_id,
+            "v1",
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        )
+        .unwrap();
+        SagaInstanceRegistration::new(instance, saga_identity(contract_id), definition).unwrap()
     }
 
     #[derive(Default)]
@@ -3440,6 +3469,53 @@ mod tests {
 
         let record = store.register(registration).await.unwrap();
         assert_eq!(record.status(), SagaInstanceStatus::Ready);
+        assert_eq!(record.identity().owner(), "billing");
+        assert_eq!(record.identity().contract_id().as_str(), "billing.checkout");
+        assert_eq!(record.definition().version(), "v1");
+        let duplicate = store
+            .register(saga_registration(instance, "billing.checkout"))
+            .await
+            .unwrap();
+        assert_eq!(duplicate.definition(), record.definition());
+        assert_eq!(duplicate.identity(), record.identity());
+        let fetched = store.get(&instance).await.unwrap().unwrap();
+        assert_eq!(fetched.identity(), record.identity());
+        assert_eq!(fetched.definition(), record.definition());
+
+        let foreign_owner = SagaInstanceRegistration::new(
+            instance,
+            SagaWorkerIdentity::new(
+                "foreign-billing",
+                diport::SagaContractId::parse("billing.checkout").unwrap(),
+            )
+            .unwrap(),
+            record.definition().clone(),
+        )
+        .unwrap();
+        let foreign_owner_error = store.register(foreign_owner).await.unwrap_err();
+        assert_eq!(
+            foreign_owner_error.kind(),
+            diport::SagaInstanceStoreErrorKind::IdentityConflict
+        );
+
+        let conflicting_definition = consistency::SagaDefinitionIdentity::new(
+            "billing.checkout",
+            "v2",
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        )
+        .unwrap();
+        let conflicting = SagaInstanceRegistration::new(
+            instance,
+            saga_identity("billing.checkout"),
+            conflicting_definition,
+        )
+        .unwrap();
+        let error = store.register(conflicting).await.unwrap_err();
+        assert_eq!(
+            error.kind(),
+            diport::SagaInstanceStoreErrorKind::IdentityConflict
+        );
 
         let lease = store
             .acquire_lease(&instance, "runner-a", Duration::from_secs(30))
@@ -3562,6 +3638,12 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![runnable_instance]
         );
+        let runnable = store
+            .list_runnable(&identity, tenant, NonZeroUsize::new(8).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(runnable[0].definition().version(), "v1");
+        assert_eq!(runnable[0].identity(), &identity);
 
         let lease = store
             .acquire_lease(&runnable_instance, "runner-a", Duration::from_secs(30))

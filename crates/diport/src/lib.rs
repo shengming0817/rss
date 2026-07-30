@@ -198,7 +198,8 @@ pub use revocation_store::{
 };
 pub use saga_instance_store::{
     DynSagaInstanceStore, DynSagaTenantSource, SagaContractId, SagaContractIdError,
-    SagaInstanceRegistration, SagaInstanceStore, SagaInstanceStoreError, SagaRunnableInstance,
+    SagaInstanceRegistration, SagaInstanceRegistrationError, SagaInstanceStore,
+    SagaInstanceStoreError, SagaInstanceStoreErrorKind, SagaRunnableInstance,
     SagaRunnableInstanceError, SagaTenantSource, SagaWorkerIdentity, SagaWorkerIdentityError,
 };
 pub use saga_journal::{DynSagaJournal, SagaJournal, SagaJournalError};

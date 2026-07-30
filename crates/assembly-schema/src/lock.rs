@@ -1556,15 +1556,25 @@ consistencyLevel = "WorkflowEventual"
 lifecycle = "active"
 [saga]
 compensationOrder = "reverse"
-retryMillis = 5000
-timeoutMillis = 30000
-steps = [{ name = "reserve", outputSchema = "reserve.schema.json" }]
+steps = [{ name = "reserve", receiptSchema = "reserve.schema.json", effectScope = "billing.reserve", compensationEffectScope = "billing.release", idempotencyClass = "deterministic-key", compensationInput = "receipt", retryClass = "transient" }]
+[saga.retry]
+maxAttempts = 3
+timeBudgetMillis = 30000
+backoff = "fixed"
+initialBackoffMillis = 5000
+maxBackoffMillis = 5000
+jitter = "none"
 "#,
         )
         .expect("saga contract");
         let mut policy = saga.clone();
         policy.saga.as_mut().expect("saga").compensation_order = CompensationOrder::Reverse;
-        policy.saga.as_mut().expect("saga").retry_millis = 6000;
+        policy
+            .saga
+            .as_mut()
+            .expect("saga")
+            .retry
+            .initial_backoff_millis = 6000;
         assert_ne!(
             runtime_semantics_hash_v2(&saga).expect("saga semantics"),
             runtime_semantics_hash_v2(&policy).expect("changed saga semantics")

@@ -94,6 +94,11 @@
 - **FR-039**：`billing.checkout` 在真实 domain/provider/assembly adoption 前必须保持 draft 且未激活。
 - **FR-040**：production Rustdoc、API 与运维文档不得声明 active/runtime exactly-once Saga execution。
 
+#1923 对 FR-036 的 resume 只要求按持久化完整 identity 精确解析旧 definition；同次 run 的 generated typed
+receipt 可用于补偿，但崩溃后 receipt 缺失必须 fail-closed。FR-031–FR-033 的 durable receipt/atomicity 由
+#1924 实现，FR-034/FR-035 的 durable recovery/unknown-outcome 由 #1925 实现，不允许用“当前 definition”
+fallback 或重跑 action 假装跨崩溃恢复。
+
 ### Evidence 与 CI
 
 - **FR-041**：Projection 真实后端证明必须覆盖其独立 commit-unknown、pointer race、rollback、cross-tenant 与 multi-worker hazard。

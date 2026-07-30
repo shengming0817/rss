@@ -1,56 +1,81 @@
 # Saga 引擎规则
 
-本文件只保留当前行为约束。完整盲区、符号清单、评级证明写在
-`xtask`（saga 不变量校验）、`consistency` crate 的 governance 模块（saga 规则）、
-saga ADR 和 runbook 中。
+本文件只保留当前行为约束。完整盲区、符号清单、评级证明写在 `xtask` 的 saga 不变量校验、
+generated 类型、`eventexec` runtime、saga ADR 和 runbook 中；Markdown 不是 enforcement carrier。
 
 ## 架构语义
 
-使用 saga 编排意味着 L3；L3 不等价于 saga。投影型、CQRS 型最终一致可以是 L3
+使用 saga 编排意味着 L3；L3 不等价于 saga。投影型、CQRS 型最终一致可以是 L3，
 但不使用 saga 引擎。
 
 ## Governance
 
 `kind: saga` contract 必须：
 
-- 有非空 `saga:` block。
-- 至少一个 step。
+- 有非空 `[saga]` 与 `[saga.retry]` block，且至少一个 step。
 - step name 可生成 Rust 标识符且唯一。
-- 每个 step 声明 output schema ref。
-- compensation order 只能是 reverse。
-- consistency level 为 L3。
-- retry 和 timeout 是合法非负 duration；字段为 block 级策略，不是 per-step。
+- 每个 step 声明 `receiptSchema`、`effectScope`、`compensationEffectScope`、
+  `idempotencyClass = "deterministic-key"`、`compensationInput = "receipt"` 和闭值
+  `retryClass = "never" | "transient"`。
+- `compensationOrder` 只能是 `reverse`，consistency level 必须为 L3。
+- retry 完整声明 `maxAttempts`、`timeBudgetMillis`、闭值 `backoff`、
+  `initialBackoffMillis`、`maxBackoffMillis` 和闭值 `jitter`；`maxAttempts` 包含首次调用，
+  backoff 上限不得小于初值。
 
-编排逻辑落在域 crate 的 saga 模块；其 `kind: saga` 契约的 `consistencyLevel` 必须为 L3。
+不存在 optional、pure 或 legacy step 分支；`outputSchema`、`retryMillis` 和 `timeoutMillis` 不再是合法字段。
+编排逻辑落在域 crate 的 saga 模块。
 
 ## Runtime policy
 
-`cargo xtask codegen` 从 `[saga].retryMillis` / `[saga].timeoutMillis` 派生
-`vocab::SagaRuntimePolicySpec`；生成的 `SPEC` 同时携带 contract、policy 和 ordered `STEPS`。
-组合根从同一个 `SPEC` 构造 `SagaExecutorConfig` 和 `TypedSagaActionFactory`。
+`cargo xtask codegen` 从完整 `[saga.retry]` 派生闭合 retry policy。attempt budget 与 time budget
+同时生效；time budget 覆盖 action 和 backoff。fixed/exponential backoff 使用饱和计算，full jitter
+使用 runtime 提供的 entropy；确定性 entropy 只用于可复现测试。
 
-- `retryMillis = 0` 且 `timeoutMillis = 0`：禁用 retry/timeout，动作直接 await。
-- `retryMillis > 0` 且 `timeoutMillis = 0`：非法，`SagaPolicy::try_from` 拒绝。
-- `timeoutMillis > 0`：一个 step phase 的总预算，覆盖一次 `do_it` 或一次 `undo_it`，包含所有重试与 backoff。
-- `retryMillis > 0`：固定 retry backoff；重试上限由总预算约束，不另设 `maxAttempts`。
-- `SerializeFailed` 不重试。
-- 前向 timeout / 预算耗尽触发既有逆序补偿；补偿 timeout / 预算耗尽走既有 saga dead-letter 路径。
+action failure 必须显式分类为 `Transient | Permanent | Invariant | OutcomeUnknown | OwnershipLost`。
+只有 `Transient` 且当前 generated step 声明 `retryClass = "transient"` 才可重试；没有默认 retry
+分支。`OutcomeUnknown` 与 `OwnershipLost` 均 fail-closed，不能伪装成普通 transient。前向预算耗尽
+进入逆序补偿；补偿预算耗尽进入 dead-letter 路径。
+
+## Definition identity 与精确解析
+
+Saga definition identity 是 contract ID、definition version、schema digest 与
+`ACTION_REGISTRY_GENERATION` 的完整四元组。action generation 使用域分离、长度前缀 SHA-256，覆盖
+完整 retry policy 与有序 step 的全部执行语义；TOML key 排序不改变结果，任一执行语义变化必须改变结果。
+
+- start 只能使用 assembly 选择的精确 identity；resume 只能读取 instance 已固定的 identity 后精确解析。
+- instance 注册与存储必须携带完整 identity；同一 tenant/Saga UUID 使用不同 identity 注册时返回 typed conflict。
+- unknown version、schema digest 或 action generation 返回明确 unsupported/degraded 结果；禁止回退 latest、
+  相似 definition 或当前 contract。
+- registry 是 generated identity 到 typed factory 的 immutable exact map，不提供 remove/retire API。
+- Saga definition 的破坏式演进使用新版本目录和新 contract ID；旧 definition 必须保留。durable、跨副本
+  retirement proof carrier 落地前只能 deprecated，不能删除。
 
 ## Typed step wrapper
 
-`cargo xtask codegen` 对 saga payload 和每个 step `outputSchema` 生成 DTO，同时生成
-`STEP_*: vocab::SagaStepBinding`、`STEPS` 和 `SPEC = SagaSpec::from_parts(CONTRACT, POLICY, STEPS)`。
+`cargo xtask codegen` 对 saga payload 和每个 step `receiptSchema` 生成唯一 receipt DTO，并独占生成
+sealed definition/step/receipt marker、definition 专属 typestate cursor 链、完整 step binding/policy、
+action generation 与稳定 registry metadata。
 
-业务实现 `consistency::SagaStep`：
+业务实现 `eventexec::SagaStep<GeneratedStepMarker>`：
 
-- `BINDING` 必须指向生成的 step binding。
-- `Output` 是该 step 的 typed output DTO；`eventexec` wrapper 负责序列化为 runtime `Vec<u8>`。
-- `compensate(ctx)` 是必填 trait method；缺失即编译失败。
-- `execute` 返回 `EngineErrorKind::Transient` 时映射为可重试 action error；`Permanent` / `Invariant` 映射为非重试 action failure。
+- `execute` 只能返回该 marker 唯一合法的 generated receipt DTO；
+- `compensate` 必须接收同一 typed receipt；
+- forward/compensation context 是不同 phase 类型，构造器保持 crate-private；
+- wrong receipt、跨 definition step 或手工实现 sealed marker 均编译失败。
 
-外部组合根只能通过 `eventexec::TypedSagaActionFactory::builder(SPEC)` 按生成顺序注册 typed step factory。
-`finish()` 校验 step 数量、顺序、名称和 output schema；缺步、多步或重排均 fail-closed。raw
-`SagaAction` / `SagaActionFactory` 是 `eventexec` 内部 erased primitive，不从 crate root re-export。
+外部组合根只能通过 `eventexec::TypedSagaActionFactory<Definition>::builder()` 构造 factory。
+每次 `register` 消费当前 cursor 并返回下一 cursor，只有 generated `End` 状态存在 `finish()`；漏步、
+多步、重排和提前 finish 均编译失败，不保留运行期 mismatch 分支。raw erased action primitive 保持内部实现细节。
+
+## Idempotency 与 receipt 边界
+
+executor 是 opaque `SagaIdempotencyKey` 的唯一构造者；key 由 tenant、Saga UUID、完整 pinned
+definition、step、phase-specific effect scope 派生，attempt 不参与，因此同一 effect 的所有 retry
+共享同一 key。Debug 不得泄露 key material。
+
+#1923 只在同次 run 内保留 typed forward receipt 供补偿。崩溃后缺少 durable receipt 时必须明确
+fail-closed，不得重算 action，也不得宣称 durable recovery：受保护 receipt store 与 receipt+journal
+原子提交由 #1924 提供，unknown-outcome 与 durable resume/recovery 由 #1925 提供。
 
 ## Activation 与 backend selection
 
@@ -68,24 +93,28 @@ saga ADR 和 runbook 中。
 
 ## 构造器
 
-`eventexec` crate 的 saga 模块（执行器）必填依赖走构造器**必填位置参**（非 `Option` /
-trait 对象），缺失即编译错误。`SagaExecutorDeps::new` 必须接收 `TypedSagaActionFactory`，禁止外部注入
-raw erased factory。`SagaExecutorConfig` 必须从同一 generated `SPEC` 派生 `SagaWorkerIdentity`
-（owner + `SagaContractId`）和 `SagaPolicy`，禁止无策略 constructor、builder option 或兼容 shim。
+`eventexec` crate 的 saga 模块必填依赖走构造器必填位置参（非 `Option`/trait 对象），缺失即编译错误。
+`SagaExecutorDeps::new` 必须接收 typed registry/factory，禁止外部注入 raw erased factory。
+`SagaExecutorConfig` 必须从同一 generated definition 派生完整 identity 和 retry policy，禁止 raw spec、
+无策略 constructor、builder option 或兼容 shim。
 
 ## Worker runtime
 
 saga background worker 是生产运行形态，不替代 direct executor primitive：
 
-- worker identity 必须是 `SagaWorkerIdentity`，禁止在组合根分别传裸 owner / contract id。
+- runnable listing 必须返回 instance 固定的完整 definition identity；worker 禁止从裸 owner/contract id
+  猜测 definition。
 - worker 只做 polling/orchestration：`SagaTenantSource` 返回候选 tenant，`SagaInstanceStore::list_runnable`
   在 tenant scope 下列 `Ready` / `Running` / `Compensating` 且 lease 空闲或过期的 instance。
 - worker 对 `Ready` 调 `run`，对 `Running` / `Compensating` 调 `resume`；正确性仍由 runtime lock +
   instance lease CAS + journal CAS 保证，listing 只是 advisory。
 - readyz probe 名从 identity 单源派生：`saga_executor:<owner>__<contract_slug>`，不带 `_ready`。
 - 无 live saga contract/factory registration 时不得注册假 worker 或假 probe。
-- health 语义：无任务 / 成功 / 业务失败但已 durable 记录为 Healthy；tenant source、store、journal、DLX
+- health 语义：无任务/成功/业务失败但已 durable 记录为 Healthy；tenant source、store、journal、DLX
   等基础设施错误为 Degraded；worker 停止或 panic 为 Unhealthy。
+
+`billing.checkout` 只允许作为 draft generated/test fixture。production assembly、runtime view、DB instance、
+worker、probe 和 route 必须保持 omitted；不得新增 billing crate/provider 或以 fixture 宣称 production capability。
 
 ## 参考
 
