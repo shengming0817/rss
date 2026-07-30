@@ -32,7 +32,8 @@
 //!
 //! INVARIANT: RUNTIME-SERVICE-TOKEN-REPLAY-LIVE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::runtime_service_token_replay_live_rejects_bait_parallel_paths_and_process_local_guards", anti_vacuity = "tests::runtime_service_token_replay_live_accepts_typed_pg_composition" } -- the only production service-token constructor accepts the closed PostgreSQL replay-owner trait, whose implementation set is exactly `PgRuntimeDeps` plus `PgMaintenanceDeps`. Serving and the five operator paths call that typed constructor directly at their run-reachable sites. Missing calls, extra/dead helpers, macro indirection, test-only evidence, process-local guards, comments, and strings cannot satisfy the inventory.
 //!
-//! INVARIANT: POSTGRES-SETUP-TRANSACTION-LIVE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::postgres_setup_transaction_rejects_missing_live_edges", anti_vacuity = "tests::postgres_setup_transaction_accepts_live_workspace" } -- the unique production `PgRuntimeDeps::connect_serving` must register each constructed pool immediately, mint the revocation capability receipt before constructing the reader, close the migrator after every post-connect outcome, roll back writer/reader partial construction on capability, reader, or audit-admin failure, and commit only after the typed owner holds all serving pools and the receipt. The AST gate pins the live statement/branch structure; helper-only tests, comments, strings, and dead bait cannot satisfy it.
+//! INVARIANT: POSTGRES-SETUP-TRANSACTION-LIVE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::postgres_setup_transaction_rejects_missing_live_edges", anti_vacuity = "tests::postgres_setup_transaction_accepts_live_workspace" } -- the unique production `PgRuntimeDeps::connect_serving` must register each constructed pool immediately, validate only the optional plan-selected projection capture registration, mint the revocation capability receipt before constructing the reader, roll back writer/reader partial construction on capability, reader, or audit-admin failure, and commit only after the typed owner holds all serving pools, immutable capture selection, and the receipt. Disabled capture performs no generation validation. The AST gate pins the live statement/branch structure; helper-only tests, comments, strings, and dead bait cannot satisfy it.
+//! INVARIANT: WORKFLOW-RUNTIME-PLAN-FUNNEL-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::workflow_runtime_plan_funnel_rejects_missing_views_raw_catalog_and_unsupported", anti_vacuity = "tests::workflow_runtime_plan_funnel_accepts_live_workspace" } -- all three assemblies compile one private `WorkflowRuntimePlan` before provider construction. PostgreSQL capture, Projection target/operator/DLQ, Saga worker, and runtime inventory accept only the corresponding borrowed plan view; inventory also rejects an activated-workflow view whose sealed source RuntimePlan fingerprint differs from the inventory RuntimePlan. Production assembly/runtime sources cannot consume raw generated workflow catalogs or revive blanket unsupported state; missing carriers and compliant-looking comments/strings fail closed.
 //! INVARIANT: AUDIT-SECURITY-FACT-BOUNDARY-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::audit_security_fact_boundary_rejects_identity_table_reads", anti_vacuity = "tests::audit_security_fact_boundary_accepts_live_workspace" } -- the transactional audit security-event consumer must decode the generated redacted fact into the audit-owned sealed command and must never query the identity-owned credential-security target mapping relation.
 
 use crate::assembly_governance::{AssemblyGovernanceIr, Core};
@@ -108,6 +109,15 @@ const POSTGRES_BUNDLE_PATH: &str = "adapters/postgres/src/bundle.rs";
 const POSTGRES_MIGRATION_PATH: &str = "adapters/postgres-migration/src/lib.rs";
 const POSTGRES_PROJECTION_EVENTS_PATH: &str = "adapters/postgres/src/projection_events.rs";
 const POSTGRES_CONSUMER_TX_PATH: &str = "adapters/postgres/src/consumer_tx.rs";
+const EVENTEXEC_WORKFLOW_RUNTIME_PATH: &str = "crates/eventexec/src/workflow_runtime.rs";
+const RUNTIMEEXEC_INVENTORY_PATH: &str = "crates/runtimeexec/src/inventory.rs";
+const IDENTITYAUDIT_PLAN_PATH: &str = "assemblies/identityaudit/src/plan.rs";
+const IDENTITYAUDIT_PROVIDERS_PATH: &str = "assemblies/identityaudit/src/providers.rs";
+const IDENTITYAUDIT_RUNTIME_PATH: &str = "assemblies/identityaudit/src/runtime.rs";
+const SETTINGSONLY_PLAN_PATH: &str = "assemblies/settingsonly/src/plan.rs";
+const SETTINGSONLY_PROVIDERS_PATH: &str = "assemblies/settingsonly/src/providers.rs";
+const SETTINGSONLY_RUNTIME_PATH: &str = "assemblies/settingsonly/src/runtime.rs";
+const RUNTIME_SAGA_PATH: &str = "assemblies/runtime/src/saga_runtime.rs";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Rule {
@@ -273,6 +283,7 @@ fn collect_report_with_projection(root: &Path, provider_count: usize) -> Result<
     findings.extend(runtime_launch_kernel_owner_findings(root)?);
     findings.extend(runtime_service_token_replay_live_findings(root)?);
     findings.extend(postgres_setup_transaction_live_findings(root)?);
+    findings.extend(workflow_runtime_plan_funnel_findings(root)?);
     findings.extend(audit_security_fact_boundary_findings(root)?);
     findings.extend(generated_domains_live_findings(root)?);
     findings.extend(provider_outputs_live_findings(root)?);
@@ -2633,7 +2644,7 @@ fn pg_setup_uses_named_parts(
     let Some(audit_admin) = bindings.get("audit_admin") else {
         return false;
     };
-    call.args.len() == 5
+    call.args.len() == 4
         && call
             .args
             .first()
@@ -2648,6 +2659,11 @@ fn pg_setup_uses_named_parts(
             .iter()
             .nth(2)
             .is_some_and(|arg| method_on_binding(arg, "as_ref", audit_admin))
+        && call
+            .args
+            .iter()
+            .nth(3)
+            .is_some_and(|arg| compact_tokens(arg) == "projection_capture")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Default)]
@@ -7189,12 +7205,23 @@ fn pg_operator_runtime_struct_is_exact(file: &syn::File, name: &str) -> bool {
     let syn::Fields::Named(fields) = &item.fields else {
         return false;
     };
-    fields.named.len() == 2
+    let dlq = name == "ProductionDlqControlRuntime";
+    fields.named.len() == if dlq { 3 } else { 2 }
         && fields.named.iter().any(|field| {
             field.ident.as_ref().is_some_and(|ident| ident == "config")
                 && type_last_ident(&field.ty).is_some_and(|ident| ident == "SnapshotConfig")
                 && matches!(field.vis, syn::Visibility::Inherited)
         })
+        && (!dlq
+            || fields.named.iter().any(|field| {
+                field
+                    .ident
+                    .as_ref()
+                    .is_some_and(|ident| ident == "projection_capture")
+                    && type_last_ident(&field.ty)
+                        .is_some_and(|ident| ident == "ProjectionCaptureView")
+                    && matches!(field.vis, syn::Visibility::Inherited)
+            }))
         && fields.named.iter().any(|field| {
             field
                 .ident
@@ -7249,9 +7276,10 @@ impl<'a> PgOperatorWrapperFlow<'a> {
     }
 
     fn runtime_struct_is_canonical(&self, runtime: &syn::ExprStruct) -> bool {
+        let dlq = self.runtime_type == "ProductionDlqControlRuntime";
         is_exact_syn_path(&runtime.path, &[self.runtime_type])
             && runtime.rest.is_none()
-            && runtime.fields.len() == 2
+            && runtime.fields.len() == if dlq { 3 } else { 2 }
             && runtime.fields.iter().any(|field| {
                 matches!(&field.member, syn::Member::Named(member) if member == "config")
                     && pg_source_expr_is_canonical(
@@ -7266,7 +7294,10 @@ impl<'a> PgOperatorWrapperFlow<'a> {
                         if call.method == "operator_capability"
                             && call.args.is_empty()
                             && is_exact_ident_path(&call.receiver, self.runtime_inputs))
-            })
+            }) && (!dlq || runtime.fields.iter().any(|field| {
+            matches!(&field.member, syn::Member::Named(member) if member == "projection_capture")
+                && compact_tokens(&field.expr) == "plan.workflow_runtime().projection_capture()"
+        }))
     }
 
     fn call_is_canonical(&self, call: &syn::ExprCall) -> bool {
@@ -7299,8 +7330,13 @@ impl<'a> PgOperatorWrapperFlow<'a> {
     }
 
     fn is_exact(&self) -> bool {
-        self.config_calls == 1
-            && self.canonical_config_calls == 1
+        let expected_config_calls = if self.runtime_type == "ProductionDlqControlRuntime" {
+            2
+        } else {
+            1
+        };
+        self.config_calls == expected_config_calls
+            && self.canonical_config_calls == expected_config_calls
             && self.operator_capability_calls == 1
             && self.runtime_structs == 1
             && self.canonical_runtime_structs == 1
@@ -13479,9 +13515,535 @@ fn postgres_setup_transaction_live_findings(root: &Path) -> Result<Vec<Finding<R
         Rule::ForbiddenWiring,
         POSTGRES_BUNDLE_PATH,
         format!(
-            "serving 必须只校验 generated projection generation 且禁止注册；production migrator 必须在迁移验证后登记 exact generated bindings；serving setup 失败 await rollback，成功 owner 后唯一 commit；serving_canonical={serving_canonical} migrator_canonical={migrator_canonical} serving_api_closed={serving_api_closed}"
+            "serving 必须只校验 plan-selected projection capture 且 disabled 不访问 generation；production migrator 仍登记 definition ledger；serving setup 失败 await rollback，成功 owner 后唯一 commit；serving_canonical={serving_canonical} migrator_canonical={migrator_canonical} serving_api_closed={serving_api_closed}"
         ),
     )])
+}
+
+fn workflow_runtime_plan_funnel_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
+    let workflow_scope_present = [
+        EVENTEXEC_WORKFLOW_RUNTIME_PATH,
+        IDENTITYAUDIT_PLAN_PATH,
+        SETTINGSONLY_PLAN_PATH,
+    ]
+    .into_iter()
+    .any(|path| root.join(path).exists());
+    if !workflow_scope_present {
+        return Ok(Vec::new());
+    }
+    let required = [
+        EVENTEXEC_WORKFLOW_RUNTIME_PATH,
+        RUNTIME_PLAN_PATH,
+        IDENTITYAUDIT_PLAN_PATH,
+        SETTINGSONLY_PLAN_PATH,
+        POSTGRES_BUNDLE_PATH,
+        POSTGRES_PROJECTION_EVENTS_PATH,
+        RUNTIME_OPERATOR_PROJECTION_PATH,
+        RUNTIME_OPERATOR_DLQ_PATH,
+        RUNTIME_SAGA_PATH,
+        RUNTIMEEXEC_INVENTORY_PATH,
+        RUNTIME_PHASE_INFRA_PATH,
+        RUNTIME_PHASE_FINALIZE_PATH,
+        IDENTITYAUDIT_PROVIDERS_PATH,
+        IDENTITYAUDIT_RUNTIME_PATH,
+        SETTINGSONLY_PROVIDERS_PATH,
+        SETTINGSONLY_RUNTIME_PATH,
+    ];
+    let mut findings = Vec::new();
+    let mut files = BTreeMap::new();
+    for path in required {
+        let absolute = root.join(path);
+        match fs::read_to_string(&absolute) {
+            Ok(source) => match syn::parse_file(&source) {
+                Ok(file) => {
+                    files.insert(path, file);
+                }
+                Err(error) => findings.push(finding(
+                    Rule::ForbiddenWiring,
+                    path,
+                    format!("workflow runtime funnel carrier is not valid Rust: {error}"),
+                )),
+            },
+            Err(error) => findings.push(finding(
+                Rule::MissingAnchor,
+                path,
+                format!("workflow runtime funnel carrier missing: {error}"),
+            )),
+        }
+    }
+
+    if files.len() == required.len() && !workflow_runtime_carrier_shapes_are_canonical(&files) {
+        findings.push(finding(
+            Rule::ForbiddenWiring,
+            EVENTEXEC_WORKFLOW_RUNTIME_PATH,
+            "workflow runtime plan/view fields, protected signatures, or live view consumption drifted",
+        ));
+    }
+    findings.extend(workflow_runtime_production_bypass_findings(root)?);
+    Ok(findings)
+}
+
+fn workflow_runtime_carrier_shapes_are_canonical(files: &BTreeMap<&str, syn::File>) -> bool {
+    let workflow = &files[EVENTEXEC_WORKFLOW_RUNTIME_PATH];
+    let projection = &files[RUNTIME_OPERATOR_PROJECTION_PATH];
+    let saga = &files[RUNTIME_SAGA_PATH];
+    let postgres = &files[POSTGRES_BUNDLE_PATH];
+    let inventory = &files[RUNTIMEEXEC_INVENTORY_PATH];
+    workflow_runtime_types_are_sealed(workflow)
+        && plan_compiles_workflows(
+            &files[RUNTIME_PLAN_PATH],
+            "RuntimePlan",
+            "from_bundled_artifacts",
+        )
+        && plan_compiles_workflows(
+            &files[IDENTITYAUDIT_PLAN_PATH],
+            "IdentityAuditPlan",
+            "bundled",
+        )
+        && plan_compiles_workflows(
+            &files[SETTINGSONLY_PLAN_PATH],
+            "SettingsOnlyPlan",
+            "bundled",
+        )
+        && protected_method_parameter(
+            postgres,
+            "PgRuntimeDeps",
+            "connect_serving",
+            3,
+            "projection_capture",
+            "eventexec::ProjectionCaptureView<'_>",
+            "ProjectionCaptureRegistration::from_capture(projection_capture)",
+        )
+        && protected_function_parameter(
+            projection,
+            "build_projection_target_registry",
+            0,
+            "view",
+            "ProjectionTargetView<'_>",
+            "ProjectionTargetRegistry::from_view(view)",
+        )
+        && protected_function_parameter(
+            saga,
+            "wire_saga_worker",
+            0,
+            "runtime",
+            "SagaRuntimeView<'_>",
+            "runtime.entries()",
+        )
+        && protected_method_parameter(
+            inventory,
+            "RuntimeInventorySeed",
+            "from_runtime_plan",
+            1,
+            "activated_workflows",
+            "eventexec::ActivatedWorkflowsView<'_>",
+            "activated_workflows.workflows()",
+        )
+        && production_method_body_contains(
+            inventory,
+            "from_runtime_plan",
+            "activated_workflows.source_runtime_plan_fingerprint()",
+        )
+        && production_method_body_contains(
+            inventory,
+            "from_runtime_plan",
+            "runtime.runtime_plan_fingerprint().as_str()",
+        )
+        && private_struct_field(
+            &files[RUNTIME_OPERATOR_DLQ_PATH],
+            "ProductionDlqControlRuntime",
+            "projection_capture",
+            "ProjectionCaptureView<'a>",
+        )
+        && production_method_body_contains(
+            &files[IDENTITYAUDIT_RUNTIME_PATH],
+            "prepare",
+            "plan.workflow_runtime().projection_capture()",
+        )
+        && production_method_body_contains(
+            &files[SETTINGSONLY_RUNTIME_PATH],
+            "prepare",
+            "compiled_plan.workflow_runtime().projection_capture()",
+        )
+        && production_method_body_contains(
+            &files[RUNTIME_OPERATOR_PROJECTION_PATH],
+            "build_registry",
+            "plan.workflow_runtime().projection_targets()",
+        )
+        && production_function_body_contains(
+            &files[RUNTIME_OPERATOR_DLQ_PATH],
+            "run_dlq_control_command",
+            "plan.workflow_runtime().projection_capture()",
+        )
+        && production_method_body_contains(
+            &files[RUNTIME_PHASE_INFRA_PATH],
+            "build_infra",
+            "context.runtime_plan.workflow_runtime().projection_capture()",
+        )
+        && production_method_body_contains(
+            &files[RUNTIME_PHASE_FINALIZE_PATH],
+            "finalize",
+            ".workflow_runtime().activated_workflows()",
+        )
+}
+
+fn workflow_runtime_types_are_sealed(file: &syn::File) -> bool {
+    [
+        "WorkflowRuntimePlan",
+        "ProjectionCaptureView",
+        "ProjectionTargetView",
+        "SagaRuntimeView",
+        "ActivatedWorkflowsView",
+    ]
+    .into_iter()
+    .all(|name| {
+        let structs = file
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                syn::Item::Struct(item)
+                    if item.ident == name && attrs_may_be_production(&item.attrs) =>
+                {
+                    Some(item)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        matches!(structs.as_slice(), [item]
+            if matches!(&item.fields, syn::Fields::Named(fields)
+                if !fields.named.is_empty()
+                    && fields.named.iter().all(|field| matches!(field.vis, syn::Visibility::Inherited))))
+    })
+}
+
+fn plan_compiles_workflows(file: &syn::File, owner: &str, method: &str) -> bool {
+    unique_production_inherent_method(file, owner, method).is_some_and(|method| {
+        live_block_contains(&method.block, "eventexec::WorkflowRuntimePlan::compile")
+            && private_struct_field(
+                file,
+                owner,
+                "workflow_runtime",
+                "eventexec::WorkflowRuntimePlan",
+            )
+    })
+}
+
+fn private_struct_field(file: &syn::File, owner: &str, field: &str, ty: &str) -> bool {
+    file.items.iter().any(|item| {
+        let syn::Item::Struct(item) = item else {
+            return false;
+        };
+        item.ident == owner
+            && attrs_may_be_production(&item.attrs)
+            && matches!(&item.fields, syn::Fields::Named(fields)
+            if fields.named.iter().any(|candidate| {
+                candidate.ident.as_ref().is_some_and(|ident| ident == field)
+                    && matches!(candidate.vis, syn::Visibility::Inherited)
+                    && compact_tokens(&candidate.ty) == ty
+            }))
+    })
+}
+
+fn protected_method_parameter(
+    file: &syn::File,
+    owner: &str,
+    method: &str,
+    index: usize,
+    name: &str,
+    ty: &str,
+    consumption: &str,
+) -> bool {
+    unique_production_inherent_method(file, owner, method).is_some_and(|method| {
+        exact_named_typed_input(&method.sig, index, name, ty)
+            && live_block_contains(&method.block, consumption)
+    })
+}
+
+fn protected_function_parameter(
+    file: &syn::File,
+    function: &str,
+    index: usize,
+    name: &str,
+    ty: &str,
+    consumption: &str,
+) -> bool {
+    unique_production_function(file, function).is_some_and(|function| {
+        exact_named_typed_input(&function.sig, index, name, ty)
+            && live_block_contains(&function.block, consumption)
+    })
+}
+
+fn production_method_body_contains(file: &syn::File, method: &str, expected: &str) -> bool {
+    let methods = production_impl_methods_named(file, method);
+    matches!(methods.as_slice(), [method] if live_block_contains(&method.block, expected))
+}
+
+fn production_function_body_contains(file: &syn::File, function: &str, expected: &str) -> bool {
+    unique_production_function(file, function)
+        .is_some_and(|function| live_block_contains(&function.block, expected))
+}
+
+fn live_block_contains(block: &syn::Block, expected: &str) -> bool {
+    let mut visitor = LiveConsumptionVisitor {
+        expected,
+        found: false,
+    };
+    visitor.visit_block(block);
+    visitor.found
+}
+
+struct LiveConsumptionVisitor<'a> {
+    expected: &'a str,
+    found: bool,
+}
+
+impl<'ast> Visit<'ast> for LiveConsumptionVisitor<'_> {
+    fn visit_expr_call(&mut self, expression: &'ast syn::ExprCall) {
+        self.found |= live_expression_matches(expression, self.expected);
+        if let Some(closure) = invoked_closure(&expression.func) {
+            self.visit_expr(&closure.body);
+            for argument in &expression.args {
+                self.visit_expr(argument);
+            }
+        } else {
+            syn::visit::visit_expr_call(self, expression);
+        }
+    }
+
+    fn visit_expr_method_call(&mut self, expression: &'ast syn::ExprMethodCall) {
+        self.found |= live_expression_matches(expression, self.expected);
+        syn::visit::visit_expr_method_call(self, expression);
+    }
+
+    fn visit_expr_closure(&mut self, _expression: &'ast syn::ExprClosure) {}
+
+    fn visit_expr_async(&mut self, _expression: &'ast syn::ExprAsync) {}
+
+    fn visit_expr_await(&mut self, expression: &'ast syn::ExprAwait) {
+        if let Some(async_expression) = invoked_async(&expression.base) {
+            self.visit_block(&async_expression.block);
+        } else {
+            self.visit_expr(&expression.base);
+        }
+    }
+
+    fn visit_local(&mut self, local: &'ast syn::Local) {
+        if let Some(initializer) = &local.init
+            && matches!(
+                &*initializer.expr,
+                syn::Expr::Closure(_) | syn::Expr::Async(_)
+            )
+        {
+            return;
+        }
+        syn::visit::visit_local(self, local);
+    }
+
+    fn visit_expr_const(&mut self, _expression: &'ast syn::ExprConst) {}
+
+    fn visit_expr_if(&mut self, expression: &'ast syn::ExprIf) {
+        self.visit_expr(&expression.cond);
+    }
+
+    fn visit_expr_match(&mut self, expression: &'ast syn::ExprMatch) {
+        self.visit_expr(&expression.expr);
+    }
+
+    fn visit_expr_while(&mut self, expression: &'ast syn::ExprWhile) {
+        self.visit_expr(&expression.cond);
+    }
+
+    fn visit_expr_for_loop(&mut self, expression: &'ast syn::ExprForLoop) {
+        self.visit_expr(&expression.expr);
+    }
+
+    fn visit_expr_loop(&mut self, _expression: &'ast syn::ExprLoop) {}
+}
+
+fn invoked_closure(expression: &syn::Expr) -> Option<&syn::ExprClosure> {
+    match expression {
+        syn::Expr::Closure(closure) => Some(closure),
+        syn::Expr::Paren(paren) => invoked_closure(&paren.expr),
+        syn::Expr::Group(group) => invoked_closure(&group.expr),
+        _ => None,
+    }
+}
+
+fn invoked_async(expression: &syn::Expr) -> Option<&syn::ExprAsync> {
+    match expression {
+        syn::Expr::Async(expression) => Some(expression),
+        syn::Expr::Paren(paren) => invoked_async(&paren.expr),
+        syn::Expr::Group(group) => invoked_async(&group.expr),
+        _ => None,
+    }
+}
+
+fn live_expression_matches(expression: impl quote::ToTokens, expected: &str) -> bool {
+    let actual = compact_tokens(&expression);
+    if expected.starts_with('.') {
+        actual.ends_with(expected)
+    } else {
+        actual.starts_with(expected)
+    }
+}
+
+fn workflow_runtime_production_bypass_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
+    let mut sources = Vec::new();
+    for directory in [
+        "crates/eventexec/src",
+        "crates/runtimeexec/src",
+        "adapters/postgres/src",
+        "assemblies/runtime/src",
+        "assemblies/identityaudit/src",
+        "assemblies/settingsonly/src",
+    ] {
+        let absolute = root.join(directory);
+        if absolute.exists() {
+            collect_rust_sources(&absolute, &mut sources)?;
+        }
+    }
+    let production = production_module_sources(&sources)?;
+    let mut findings = Vec::new();
+    for source in production {
+        let relative = source
+            .strip_prefix(root)
+            .unwrap_or(&source)
+            .to_string_lossy()
+            .replace('\\', "/");
+        let file = parse_rust_file(&source)?;
+        let mut visitor = WorkflowRuntimeBypassVisitor {
+            allow_raw_catalog: relative == EVENTEXEC_WORKFLOW_RUNTIME_PATH,
+            violations: BTreeSet::new(),
+        };
+        visitor.visit_file(&file);
+        for violation in visitor.violations {
+            findings.push(finding(
+                Rule::ForbiddenWiring,
+                relative.clone(),
+                format!("production workflow runtime bypass is forbidden: `{violation}`"),
+            ));
+        }
+    }
+    Ok(findings)
+}
+
+struct WorkflowRuntimeBypassVisitor {
+    allow_raw_catalog: bool,
+    violations: BTreeSet<String>,
+}
+
+impl WorkflowRuntimeBypassVisitor {
+    fn record_path(&mut self, path: &syn::Path) {
+        let Some(last) = path
+            .segments
+            .last()
+            .map(|segment| segment.ident.to_string())
+        else {
+            return;
+        };
+        if (!self.allow_raw_catalog && workflow_raw_catalog_ident(&last))
+            || workflow_unsupported_ident(&last)
+        {
+            self.violations.insert(last);
+        }
+    }
+}
+
+impl<'ast> Visit<'ast> for WorkflowRuntimeBypassVisitor {
+    fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
+        if attrs_may_be_default_runtime_production(&item.attrs) {
+            syn::visit::visit_item_mod(self, item);
+        }
+    }
+
+    fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
+        if attrs_may_be_default_runtime_production(&item.attrs) {
+            syn::visit::visit_item_fn(self, item);
+        }
+    }
+
+    fn visit_item_impl(&mut self, item: &'ast syn::ItemImpl) {
+        if attrs_may_be_default_runtime_production(&item.attrs) {
+            syn::visit::visit_item_impl(self, item);
+        }
+    }
+
+    fn visit_impl_item_fn(&mut self, item: &'ast syn::ImplItemFn) {
+        if attrs_may_be_default_runtime_production(&item.attrs) {
+            syn::visit::visit_impl_item_fn(self, item);
+        }
+    }
+
+    fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
+        if !attrs_may_be_default_runtime_production(&item.attrs) {
+            return;
+        }
+        record_workflow_use_tree(&item.tree, self.allow_raw_catalog, &mut self.violations);
+        syn::visit::visit_item_use(self, item);
+    }
+
+    fn visit_path(&mut self, path: &'ast syn::Path) {
+        self.record_path(path);
+        syn::visit::visit_path(self, path);
+    }
+
+    fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+        let method = call.method.to_string();
+        if workflow_unsupported_ident(&method) {
+            self.violations.insert(method);
+        }
+        syn::visit::visit_expr_method_call(self, call);
+    }
+}
+
+fn record_workflow_use_tree(
+    tree: &syn::UseTree,
+    allow_raw_catalog: bool,
+    violations: &mut BTreeSet<String>,
+) {
+    match tree {
+        syn::UseTree::Path(path) => {
+            record_workflow_use_tree(&path.tree, allow_raw_catalog, violations);
+        }
+        syn::UseTree::Name(name) => {
+            record_workflow_use_ident(&name.ident.to_string(), allow_raw_catalog, violations);
+        }
+        syn::UseTree::Rename(rename) => {
+            record_workflow_use_ident(&rename.ident.to_string(), allow_raw_catalog, violations);
+        }
+        syn::UseTree::Group(group) => {
+            for tree in &group.items {
+                record_workflow_use_tree(tree, allow_raw_catalog, violations);
+            }
+        }
+        syn::UseTree::Glob(_) => {}
+    }
+}
+
+fn record_workflow_use_ident(
+    ident: &str,
+    allow_raw_catalog: bool,
+    violations: &mut BTreeSet<String>,
+) {
+    if (!allow_raw_catalog && workflow_raw_catalog_ident(ident))
+        || workflow_unsupported_ident(ident)
+    {
+        violations.insert(ident.to_owned());
+    }
+}
+
+fn workflow_raw_catalog_ident(ident: &str) -> bool {
+    matches!(
+        ident,
+        "PROJECTION_INPUTS" | "PROJECTION_INPUT_GENERATION" | "PROJECTION_DEFINITIONS"
+    )
+}
+
+fn workflow_unsupported_ident(ident: &str) -> bool {
+    matches!(
+        ident,
+        "mark_all_generated_unsupported" | "UnsupportedProjection"
+    )
 }
 
 fn migration_projection_registration_is_canonical(file: &syn::File) -> bool {
@@ -13553,7 +14115,7 @@ fn audit_security_fact_boundary_findings(root: &Path) -> Result<Vec<Finding<Rule
 
 fn postgres_setup_transaction_is_canonical(block: &syn::Block) -> bool {
     let statements = block.stmts.as_slice();
-    if statements.len() != 14 {
+    if statements.len() != 15 {
         return false;
     }
     let Some(serving_transaction) =
@@ -13571,23 +14133,28 @@ fn postgres_setup_transaction_is_canonical(block: &syn::Block) -> bool {
     else {
         return false;
     };
-    let Some(revocation_receipt) =
-        exact_local_initializer(&statements[6], "revocation_receipt", false)
+    let Some(projection_validation) =
+        exact_local_initializer(&statements[5], "projection_validation", false)
     else {
         return false;
     };
-    let Some(reader) = exact_local_initializer(&statements[7], "reader", false) else {
+    let Some(revocation_receipt) =
+        exact_local_initializer(&statements[7], "revocation_receipt", false)
+    else {
         return false;
     };
-    let Some(stores) = exact_local_initializer(&statements[9], "stores", false) else {
+    let Some(reader) = exact_local_initializer(&statements[8], "reader", false) else {
+        return false;
+    };
+    let Some(stores) = exact_local_initializer(&statements[10], "stores", false) else {
         return false;
     };
     let Some(audit_admin_store) =
-        exact_local_initializer(&statements[10], "audit_admin_store", false)
+        exact_local_initializer(&statements[11], "audit_admin_store", false)
     else {
         return false;
     };
-    let Some(owner) = exact_local_initializer(&statements[11], "owner", false) else {
+    let Some(owner) = exact_local_initializer(&statements[12], "owner", false) else {
         return false;
     };
 
@@ -13601,11 +14168,12 @@ fn postgres_setup_transaction_is_canonical(block: &syn::Block) -> bool {
         )
         && compact_tokens(writer_store) == "writer.store_arc()"
         && preloaded_delivery_policy_match_is_canonical(delivery_policy)
-        && projection_binding_validation_is_canonical(&statements[5])
+        && projection_validation_is_canonical(projection_validation)
+        && projection_binding_failure_is_canonical(&statements[6])
         && revocation_receipt_is_canonical(revocation_receipt)
         && reader_connect_is_canonical(reader)
         && exact_register_statement(
-            &statements[8],
+            &statements[9],
             "serving_transaction",
             "reader.store_arc()",
             "postgres-reader",
@@ -13613,8 +14181,8 @@ fn postgres_setup_transaction_is_canonical(block: &syn::Block) -> bool {
         && compact_tokens(stores) == "Arc::new(PgRuntimeStores::new(writer,reader))"
         && audit_connect_is_canonical(audit_admin_store)
         && postgres_runtime_owner_is_canonical(owner)
-        && exact_method_statement(&statements[12], "serving_transaction", "commit", &[])
-        && exact_path_call_statement(&statements[13], "Ok", &["owner"])
+        && exact_method_statement(&statements[13], "serving_transaction", "commit", &[])
+        && exact_path_call_statement(&statements[14], "Ok", &["owner"])
 }
 
 fn preloaded_delivery_policy_match_is_canonical(expression: &syn::Expr) -> bool {
@@ -13649,15 +14217,19 @@ fn fallible_serving_match_is_canonical(
         && returned_failure_close_is_exact(&match_.arms[1].body)
 }
 
-fn projection_binding_validation_is_canonical(statement: &syn::Stmt) -> bool {
+fn projection_validation_is_canonical(expression: &syn::Expr) -> bool {
+    compact_tokens(expression)
+        == "matchprojection_capture.as_ref(){Some(capture)=>writer_store.validate_projection_capture_registration(capture).await.map_err(PgError::ProjectionBindings),None=>Ok(()),}"
+}
+
+fn projection_binding_failure_is_canonical(statement: &syn::Stmt) -> bool {
     let Some(expression) = expression_statement(statement) else {
         return false;
     };
     let syn::Expr::If(outer) = transparent_expr(expression) else {
         return false;
     };
-    compact_tokens(&outer.cond)
-        == "letErr(primary)=writer_store.validate_registered_projection_input_generation(projection_generation,projection_inputs,).await.map_err(PgError::ProjectionBindings)"
+    compact_tokens(&outer.cond) == "letErr(primary)=projection_validation"
         && outer.else_branch.is_none()
         && matches!(outer.then_branch.stmts.as_slice(), [syn::Stmt::Expr(expr, Some(_))]
             if returned_failure_close_is_exact(expr))
@@ -13927,16 +14499,18 @@ fn postgres_runtime_owner_is_canonical(expression: &syn::Expr) -> bool {
             "audit_admin_store".to_owned(),
             "delivery_policy".to_owned(),
             "projection_registry".to_owned(),
-            "projection_generation".to_owned(),
-            "projection_inputs".to_owned(),
+            "projection_capture".to_owned(),
             "readiness".to_owned(),
             "rls_ready".to_owned(),
         ])
         && exact_field("stores", "stores")
         && exact_field("revocation_receipt", "revocation_receipt")
         && exact_field("audit_admin_store", "audit_admin_store")
-        && exact_field("projection_generation", "projection_generation")
-        && exact_field("projection_inputs", "projection_inputs")
+        && exact_field("projection_capture", "projection_capture")
+        && exact_field(
+            "projection_registry",
+            "projection_capture.as_ref().map_or_else(ProjectionWriteRegistry::empty,|capture|capture.registry())",
+        )
 }
 
 fn parse_rust_file(path: &Path) -> Result<syn::File> {
@@ -15869,6 +16443,171 @@ mod tests {
         Ok(root)
     }
 
+    fn workflow_runtime_funnel_fixture(name: &str) -> Result<PathBuf> {
+        let root = unique_tmp(name);
+        let workspace = workspace_root()?;
+        for path in [
+            EVENTEXEC_WORKFLOW_RUNTIME_PATH,
+            RUNTIME_PLAN_PATH,
+            IDENTITYAUDIT_PLAN_PATH,
+            SETTINGSONLY_PLAN_PATH,
+            POSTGRES_BUNDLE_PATH,
+            POSTGRES_PROJECTION_EVENTS_PATH,
+            RUNTIME_OPERATOR_PROJECTION_PATH,
+            RUNTIME_OPERATOR_DLQ_PATH,
+            RUNTIME_SAGA_PATH,
+            RUNTIMEEXEC_INVENTORY_PATH,
+            RUNTIME_PHASE_INFRA_PATH,
+            RUNTIME_PHASE_FINALIZE_PATH,
+            IDENTITYAUDIT_PROVIDERS_PATH,
+            IDENTITYAUDIT_RUNTIME_PATH,
+            SETTINGSONLY_PROVIDERS_PATH,
+            SETTINGSONLY_RUNTIME_PATH,
+        ] {
+            write(&root.join(path), &fs::read_to_string(workspace.join(path))?)?;
+        }
+        Ok(root)
+    }
+
+    #[test]
+    fn workflow_runtime_plan_funnel_accepts_live_workspace() -> Result<()> {
+        assert_eq!(
+            workflow_runtime_plan_funnel_findings(&workspace_root()?)?,
+            Vec::<Finding<Rule>>::new()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn workflow_runtime_plan_funnel_rejects_missing_views_raw_catalog_and_unsupported() -> Result<()>
+    {
+        let missing_core = workflow_runtime_funnel_fixture("workflow-runtime-missing-core")?;
+        fs::remove_file(missing_core.join(EVENTEXEC_WORKFLOW_RUNTIME_PATH))?;
+        assert!(
+            !workflow_runtime_plan_funnel_findings(&missing_core)?.is_empty(),
+            "deleting the sole workflow compiler carrier must fail closed"
+        );
+
+        let missing = workflow_runtime_funnel_fixture("workflow-runtime-missing-view")?;
+        let target = missing.join(RUNTIME_SAGA_PATH);
+        let source = fs::read_to_string(&target)?;
+        write(
+            &target,
+            &source.replace("SagaRuntimeView", "LegacySagaRuntime"),
+        )?;
+        assert!(!workflow_runtime_plan_funnel_findings(&missing)?.is_empty());
+
+        let raw = workflow_runtime_funnel_fixture("workflow-runtime-raw-catalog")?;
+        let target = raw.join(RUNTIME_PHASE_INFRA_PATH);
+        let source = fs::read_to_string(&target)?;
+        write(
+            &target,
+            &format!("{source}\nfn bypass() {{ let _ = generated::event::PROJECTION_INPUTS; }}\n"),
+        )?;
+        assert!(!workflow_runtime_plan_funnel_findings(&raw)?.is_empty());
+
+        let aliased_raw = workflow_runtime_funnel_fixture("workflow-runtime-aliased-raw")?;
+        let target = aliased_raw.join(POSTGRES_PROJECTION_EVENTS_PATH);
+        let source = fs::read_to_string(&target)?;
+        write(
+            &target,
+            &format!(
+                "{source}\nfn live_catalog_bypass() {{ use generated::event::PROJECTION_INPUTS as RAW; let _ = RAW; }}\n"
+            ),
+        )?;
+        assert!(
+            !workflow_runtime_plan_funnel_findings(&aliased_raw)?.is_empty(),
+            "an aliased raw catalog import in a production carrier must fail closed"
+        );
+
+        let raw_parameter = workflow_runtime_funnel_fixture("workflow-runtime-raw-parameter")?;
+        let target = raw_parameter.join(POSTGRES_BUNDLE_PATH);
+        let source = fs::read_to_string(&target)?.replace(
+            "pub async fn connect_serving(\n        serving_config: &PgConfig,\n        tenant_read_config: &PgTenantReadConfig,\n        audit_admin_config: Option<&PgConfig>,\n        projection_capture: eventexec::ProjectionCaptureView<'_>,",
+            "pub async fn connect_serving(\n        serving_config: &PgConfig,\n        tenant_read_config: &PgTenantReadConfig,\n        audit_admin_config: Option<&PgConfig>,\n        projection_capture: &[vocab::ProjectionInputBinding],",
+        );
+        write(&target, &source)?;
+        assert!(
+            !workflow_runtime_plan_funnel_findings(&raw_parameter)?.is_empty(),
+            "the serving API must accept only the sealed projection capture view"
+        );
+
+        let unsupported = workflow_runtime_funnel_fixture("workflow-runtime-unsupported")?;
+        let target = unsupported.join(RUNTIME_OPERATOR_PROJECTION_PATH);
+        let source = fs::read_to_string(&target)?;
+        write(
+            &target,
+            &format!(
+                "{source}\nfn bypass(registry: &mut Registry) {{ registry.mark_all_generated_unsupported(); }}\n"
+            ),
+        )?;
+        assert!(!workflow_runtime_plan_funnel_findings(&unsupported)?.is_empty());
+
+        let bait = workflow_runtime_funnel_fixture("workflow-runtime-comment-bait")?;
+        let target = bait.join(RUNTIME_SAGA_PATH);
+        let source = fs::read_to_string(&target)?.replace("SagaRuntimeView", "LegacySagaRuntime");
+        write(
+            &target,
+            &format!("{source}\n// SagaRuntimeView\nconst BAIT: &str = \"SagaRuntimeView\";\n"),
+        )?;
+        assert!(!workflow_runtime_plan_funnel_findings(&bait)?.is_empty());
+
+        let dead_bait = workflow_runtime_funnel_fixture("workflow-runtime-dead-bait")?;
+        let target = dead_bait.join(RUNTIME_SAGA_PATH);
+        let source = fs::read_to_string(&target)?.replace(
+            "runtime: SagaRuntimeView<'_>,",
+            "runtime: LegacySagaRuntime<'_>,",
+        );
+        write(
+            &target,
+            &format!(
+                "{source}\nfn dead_bait(runtime: SagaRuntimeView<'_>) {{ let _ = runtime; }}\n"
+            ),
+        )?;
+        assert!(
+            !workflow_runtime_plan_funnel_findings(&dead_bait)?.is_empty(),
+            "an unrelated dead function cannot replace the protected saga signature"
+        );
+
+        let dead_branch = workflow_runtime_funnel_fixture("workflow-runtime-dead-branch")?;
+        let target = dead_branch.join(RUNTIME_SAGA_PATH);
+        let source = fs::read_to_string(&target)?.replace(
+            "for entry in runtime.entries() {",
+            "if false { let _ = runtime.entries(); }\n    for entry in std::iter::empty::<eventexec::SagaRuntimeEntry<'_>>() {",
+        );
+        write(&target, &source)?;
+        assert!(
+            !workflow_runtime_plan_funnel_findings(&dead_branch)?.is_empty(),
+            "a dead branch cannot satisfy the protected live view consumption"
+        );
+
+        let dead_closure = workflow_runtime_funnel_fixture("workflow-runtime-dead-closure")?;
+        let target = dead_closure.join(RUNTIME_SAGA_PATH);
+        let source = fs::read_to_string(&target)?.replace(
+            "for entry in runtime.entries() {",
+            "let _dead = || { runtime.entries() };\n    let _dead_async = async { runtime.entries() };\n    let _nested_async = Some(async { runtime.entries() });\n    drop(async { runtime.entries() });\n    let _dead_if = if false { Some(runtime.entries()) } else { None };\n    while false { let _ = runtime.entries(); }\n    for _never in std::iter::empty::<()>() { let _ = runtime.entries(); }\n    for entry in std::iter::empty::<eventexec::SagaRuntimeEntry<'_>>() {",
+        );
+        write(&target, &source)?;
+        assert!(
+            !workflow_runtime_plan_funnel_findings(&dead_closure)?.is_empty(),
+            "closure and async-block bait cannot satisfy live view consumption"
+        );
+
+        let mismatched_inventory =
+            workflow_runtime_funnel_fixture("workflow-runtime-mismatched-inventory")?;
+        let target = mismatched_inventory.join(RUNTIMEEXEC_INVENTORY_PATH);
+        let source = fs::read_to_string(&target)?.replace(
+            "activated_workflows.source_runtime_plan_fingerprint()",
+            "runtime.runtime_plan_fingerprint().as_str()",
+        );
+        write(&target, &source)?;
+        assert!(
+            !workflow_runtime_plan_funnel_findings(&mismatched_inventory)?.is_empty(),
+            "inventory must prove its activated workflow view came from the same RuntimePlan"
+        );
+        Ok(())
+    }
+
     #[test]
     fn postgres_setup_transaction_accepts_live_workspace() -> Result<()> {
         let root = postgres_setup_fixture("postgres-setup-transaction-live")?;
@@ -15881,13 +16620,13 @@ mod tests {
     }
 
     #[test]
-    fn postgres_setup_transaction_uses_database_projection_validation_guard() -> Result<()> {
+    fn postgres_setup_transaction_uses_plan_selected_projection_validation_guard() -> Result<()> {
         let source = fs::read_to_string(workspace_root()?.join(POSTGRES_BUNDLE_PATH))?;
         assert!(
             source.contains(
-                "if let Err(primary) = writer_store\n            .validate_registered_projection_input_generation"
+                "match projection_capture.as_ref() {\n            Some(capture) => writer_store\n                .validate_projection_capture_registration(capture)"
             ),
-            "serving projection validation failure must use the exact database registry guard"
+            "serving projection validation must be conditional on the plan-selected capture"
         );
         Ok(())
     }
@@ -15936,8 +16675,8 @@ mod tests {
             ),
             (
                 "projection validation missing",
-                "validate_registered_projection_input_generation(\n                projection_generation,\n                projection_inputs,\n            )",
-                "missing_registered_projection_input_generation(\n                projection_generation,\n                projection_inputs,\n            )",
+                "validate_projection_capture_registration(capture)",
+                "missing_projection_capture_registration(capture)",
                 0,
             ),
             (

@@ -52,6 +52,7 @@ impl runtimeexec::StartupAdapter for ProductionStartup {
         let (config, secrets, build_metadata, frontend) = self.captured.into_runtime_inputs();
         let completed = crate::providers::build(
             compiled_plan.provider_build()?,
+            compiled_plan.workflow_runtime().projection_capture(),
             config,
             secrets,
             transaction,

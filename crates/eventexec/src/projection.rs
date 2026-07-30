@@ -21,7 +21,7 @@
 //!   **不**降级为空 baseline 盲目重放；checkpoint 是恢复坐标，读失败让 caller 退避 / 报警 / 重试。
 //! - **checkpoint 写失败**：apply 已生效（[`ProjectionStop::CheckpointUnsaved`]），幂等可重跑、不丢数据。
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -353,78 +353,74 @@ pub trait ProjectionReplayTarget: Send + Sync {
     ) -> BoxFuture<'a, Result<(), consistency::EngineError>>;
 }
 
-/// Generated projection registry + explicit target/unsupported coverage.
+/// Projection targets selected by the sealed assembly runtime plan.
 pub struct ProjectionTargetRegistry {
-    generated: BTreeMap<ProjectionId, Vec<&'static ProjectionInputBinding>>,
+    planned: BTreeMap<ProjectionId, Vec<ProjectionInputBinding>>,
     targets: BTreeMap<ProjectionId, Arc<dyn ProjectionReplayTarget>>,
-    unsupported: BTreeSet<ProjectionId>,
 }
 
 impl ProjectionTargetRegistry {
-    pub fn from_generated(
-        inputs: &'static [ProjectionInputBinding],
+    /// Build the exact target registry exposed by the assembly plan. Repository-wide generated
+    /// inputs provide definition metadata only and cannot activate a projection by themselves.
+    pub fn from_view(
+        view: crate::ProjectionTargetView<'_>,
     ) -> Result<Self, ProjectionSelectorError> {
-        let mut generated: BTreeMap<ProjectionId, Vec<&'static ProjectionInputBinding>> =
-            BTreeMap::new();
-        for input in inputs {
-            let projection = ProjectionId::parse(input.projection_id())?;
-            generated.entry(projection).or_default().push(input);
+        let mut planned = BTreeMap::new();
+        let mut targets = BTreeMap::new();
+        for entry in view.entries() {
+            let projection = ProjectionId::parse(entry.workflow().id())?;
+            planned.insert(projection.clone(), entry.bindings().to_vec());
+            targets.insert(projection, entry.replay_target());
+        }
+        Ok(Self { planned, targets })
+    }
+
+    #[cfg(test)]
+    fn from_projection_ids<'a>(
+        projection_ids: impl IntoIterator<Item = &'a str>,
+        inputs: &'a [ProjectionInputBinding],
+    ) -> Result<Self, ProjectionSelectorError> {
+        let mut planned = BTreeMap::new();
+        for id in projection_ids {
+            let projection = ProjectionId::parse(id)?;
+            let bindings = inputs
+                .iter()
+                .filter(|input| input.projection_id() == id)
+                .cloned()
+                .collect();
+            planned.insert(projection, bindings);
         }
         Ok(Self {
-            generated,
+            planned,
             targets: BTreeMap::new(),
-            unsupported: BTreeSet::new(),
         })
     }
 
-    pub fn register_target(
+    #[cfg(test)]
+    fn register_target_for_test(
         &mut self,
         projection: ProjectionId,
         target: Arc<dyn ProjectionReplayTarget>,
     ) -> Result<(), ProjectionRegistryError> {
-        if !self.generated.contains_key(&projection) {
+        if !self.planned.contains_key(&projection) {
             return Err(ProjectionRegistryError::UnknownProjection { projection });
         }
-        self.unsupported.remove(&projection);
-        self.targets.insert(projection, target);
-        Ok(())
-    }
-
-    pub fn mark_unsupported(
-        &mut self,
-        projection: ProjectionId,
-    ) -> Result<(), ProjectionRegistryError> {
-        if !self.generated.contains_key(&projection) {
-            return Err(ProjectionRegistryError::UnknownProjection { projection });
+        if self.targets.insert(projection.clone(), target).is_some() {
+            return Err(ProjectionRegistryError::DuplicateProjection { projection });
         }
-        self.targets.remove(&projection);
-        self.unsupported.insert(projection);
         Ok(())
-    }
-
-    pub fn mark_all_generated_unsupported(&mut self) {
-        self.unsupported.extend(self.generated.keys().cloned());
     }
 
     pub fn is_empty(&self) -> bool {
-        self.generated.is_empty()
-    }
-
-    pub fn has_registered_targets(&self) -> bool {
-        !self.targets.is_empty()
+        self.planned.is_empty()
     }
 
     pub fn target(
         &self,
         projection: &ProjectionId,
     ) -> Result<Arc<dyn ProjectionReplayTarget>, ProjectionRegistryError> {
-        if !self.generated.contains_key(projection) {
+        if !self.planned.contains_key(projection) {
             return Err(ProjectionRegistryError::UnknownProjection {
-                projection: projection.clone(),
-            });
-        }
-        if self.unsupported.contains(projection) {
-            return Err(ProjectionRegistryError::UnsupportedProjection {
                 projection: projection.clone(),
             });
         }
@@ -438,8 +434,8 @@ impl ProjectionTargetRegistry {
     pub fn bindings_for(
         &self,
         projection: &ProjectionId,
-    ) -> Result<Vec<&'static ProjectionInputBinding>, ProjectionRegistryError> {
-        self.generated.get(projection).cloned().ok_or_else(|| {
+    ) -> Result<Vec<ProjectionInputBinding>, ProjectionRegistryError> {
+        self.planned.get(projection).cloned().ok_or_else(|| {
             ProjectionRegistryError::UnknownProjection {
                 projection: projection.clone(),
             }
@@ -447,21 +443,11 @@ impl ProjectionTargetRegistry {
     }
 
     pub fn validate_coverage(&self) -> Result<(), ProjectionRegistryError> {
-        for projection in self.generated.keys() {
-            let has_target = self.targets.contains_key(projection);
-            let unsupported = self.unsupported.contains(projection);
-            match (has_target, unsupported) {
-                (true, true) => {
-                    return Err(ProjectionRegistryError::AmbiguousProjection {
-                        projection: projection.clone(),
-                    });
-                }
-                (false, false) => {
-                    return Err(ProjectionRegistryError::UncoveredProjection {
-                        projection: projection.clone(),
-                    });
-                }
-                _ => {}
+        for projection in self.planned.keys() {
+            if !self.targets.contains_key(projection) {
+                return Err(ProjectionRegistryError::UncoveredProjection {
+                    projection: projection.clone(),
+                });
             }
         }
         Ok(())
@@ -473,30 +459,24 @@ impl ProjectionTargetRegistry {
 pub enum ProjectionRegistryError {
     #[error("unknown projection target: {projection}")]
     UnknownProjection { projection: ProjectionId },
-    #[error("projection target is not supported by this runtime: {projection}")]
-    UnsupportedProjection { projection: ProjectionId },
-    #[error(
-        "generated projection target has no runtime target or unsupported marker: {projection}"
-    )]
+    #[error("assembly-plan projection target has no runtime target: {projection}")]
     UncoveredProjection { projection: ProjectionId },
-    #[error(
-        "generated projection target has both runtime target and unsupported marker: {projection}"
-    )]
-    AmbiguousProjection { projection: ProjectionId },
+    #[error("assembly-plan projection target is duplicated: {projection}")]
+    DuplicateProjection { projection: ProjectionId },
 }
 
 /// Projector adapter that filters generated projection inputs and writes only matching events to
 /// the selected shadow target.
 pub struct ProjectionReplayProjector {
     selector: ProjectionSelector,
-    bindings: Vec<&'static ProjectionInputBinding>,
+    bindings: Vec<ProjectionInputBinding>,
     target: Arc<dyn ProjectionReplayTarget>,
 }
 
 impl ProjectionReplayProjector {
     pub fn new(
         selector: ProjectionSelector,
-        bindings: Vec<&'static ProjectionInputBinding>,
+        bindings: Vec<ProjectionInputBinding>,
         target: Arc<dyn ProjectionReplayTarget>,
     ) -> Self {
         Self {
@@ -1622,28 +1602,31 @@ mod tests {
     }
 
     #[test]
-    fn projection_registry_coverage_requires_target_or_unsupported_marker()
+    fn projection_registry_coverage_requires_target_for_each_plan_selected_projection()
     -> Result<(), Box<dyn std::error::Error>> {
-        let mut registry = ProjectionTargetRegistry::from_generated(TEST_PROJECTION_INPUTS)?;
+        let mut registry = ProjectionTargetRegistry::from_projection_ids(
+            ["audit.session-projection"],
+            TEST_PROJECTION_INPUTS,
+        )?;
         assert!(matches!(
             registry.validate_coverage(),
             Err(ProjectionRegistryError::UncoveredProjection { .. })
         ));
 
         let projection = ProjectionId::parse("audit.session-projection")?;
-        registry.mark_unsupported(projection.clone())?;
-        assert!(registry.validate_coverage().is_ok());
-        assert!(matches!(
-            registry.target(&projection),
-            Err(ProjectionRegistryError::UnsupportedProjection { .. })
-        ));
-
-        registry.register_target(
+        registry.register_target_for_test(
             projection.clone(),
             Arc::new(RecordingReplayTarget::default()),
         )?;
         assert!(registry.validate_coverage().is_ok());
         assert!(registry.target(&projection).is_ok());
+        assert!(matches!(
+            registry.register_target_for_test(
+                projection.clone(),
+                Arc::new(RecordingReplayTarget::default())
+            ),
+            Err(ProjectionRegistryError::DuplicateProjection { .. })
+        ));
 
         let unknown = ProjectionId::parse("unknown.projection")?;
         assert!(matches!(
@@ -1653,15 +1636,34 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn projection_registry_excludes_global_definitions_not_selected_by_plan()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let registry = ProjectionTargetRegistry::from_projection_ids(
+            std::iter::empty::<&str>(),
+            TEST_PROJECTION_INPUTS,
+        )?;
+        assert!(registry.is_empty());
+        assert!(registry.validate_coverage().is_ok());
+        assert!(matches!(
+            registry.bindings_for(&ProjectionId::parse("audit.session-projection")?),
+            Err(ProjectionRegistryError::UnknownProjection { .. })
+        ));
+        Ok(())
+    }
+
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn replay_projector_filters_generated_projection_inputs_and_advances_shadow_checkpoint() {
         let selector = projection_selector("v2");
-        let mut registry = ProjectionTargetRegistry::from_generated(TEST_PROJECTION_INPUTS)
-            .expect("generated fixtures valid");
+        let mut registry = ProjectionTargetRegistry::from_projection_ids(
+            ["audit.session-projection"],
+            TEST_PROJECTION_INPUTS,
+        )
+        .expect("plan-selected fixtures valid");
         let target = Arc::new(RecordingReplayTarget::default());
         registry
-            .register_target(selector.projection().clone(), target.clone())
+            .register_target_for_test(selector.projection().clone(), target.clone())
             .expect("known projection");
         registry.validate_coverage().expect("covered");
         let bindings = registry
@@ -1794,11 +1796,14 @@ mod tests {
         let active_v1 = projection_selector("v1");
         let shadow_v2 = projection_selector("v2");
         let mut active = ProjectionActivePointer::new(&active_v1, Some(Lsn::new(10)));
-        let mut registry = ProjectionTargetRegistry::from_generated(TEST_PROJECTION_INPUTS)
-            .expect("generated fixtures valid");
+        let mut registry = ProjectionTargetRegistry::from_projection_ids(
+            ["audit.session-projection"],
+            TEST_PROJECTION_INPUTS,
+        )
+        .expect("plan-selected fixtures valid");
         let target = Arc::new(RecordingReplayTarget::default());
         registry
-            .register_target(shadow_v2.projection().clone(), target.clone())
+            .register_target_for_test(shadow_v2.projection().clone(), target.clone())
             .expect("known projection");
         let bindings = registry
             .bindings_for(shadow_v2.projection())

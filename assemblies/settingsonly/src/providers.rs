@@ -118,6 +118,7 @@ impl ProviderRoleCloser {
 
 pub(crate) async fn build(
     mut roles: crate::providers_gen::ProviderRoleBatches,
+    projection_capture: eventexec::ProjectionCaptureView<'_>,
     config: config::SettingsOnlyConfig,
     secrets: config::ResolvedSecrets,
     transaction: &mut runtimeexec::StartupTransaction<'_>,
@@ -150,7 +151,7 @@ pub(crate) async fn build(
         dlx_verifier,
         dlx_purger,
         readiness: pg_readiness,
-    } = build_postgres(postgres, &secrets).await?;
+    } = build_postgres(postgres, &secrets, projection_capture).await?;
     let pg_handle = pg.handle();
     let (pg_resources, pg_sampler) = pg.into_runtime_parts(pg_readiness);
     let mut pg_activations = Vec::new();
@@ -834,6 +835,7 @@ struct PostgresBuild {
 async fn build_postgres(
     config: config::PostgresConfig,
     secrets: &config::ProductionSecretMaterial,
+    projection_capture: eventexec::ProjectionCaptureView<'_>,
 ) -> anyhow::Result<PostgresBuild> {
     let config::PostgresInputs {
         connection,
@@ -890,15 +892,10 @@ async fn build_postgres(
         secrets.pg_dlx_purger_password.to_string(),
         dlx_purger_max,
     );
-    let owner = postgres::PgRuntimeDeps::connect_serving(
-        &serving,
-        &reader,
-        None,
-        generated::event::PROJECTION_INPUT_GENERATION,
-        generated::event::PROJECTION_INPUTS,
-    )
-    .await
-    .context("connect settingsonly postgres serving pools")?;
+    let owner =
+        postgres::PgRuntimeDeps::connect_serving(&serving, &reader, None, projection_capture)
+            .await
+            .context("connect settingsonly postgres serving pools")?;
     Ok(PostgresBuild {
         owner,
         dlx_archiver,

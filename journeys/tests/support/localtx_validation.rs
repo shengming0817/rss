@@ -1852,13 +1852,13 @@ impl LocalTxJourneyRuntime {
         let app = app_login.config(pg.params());
         let tenant_read = PgTenantReadConfig::new(tenant_read_login.config(pg.params()));
         let audit_admin = audit_admin_login.config(pg.params());
+        let workflow = eventexec::WorkflowRuntimePlan::disabled_fixture();
         let deps = PgRuntimeDeps::setup_test_fixture(
             &owner,
             &app,
             &tenant_read,
             Some(&audit_admin),
-            generated::event::PROJECTION_INPUT_GENERATION,
-            generated::event::PROJECTION_INPUTS,
+            workflow.projection_capture(),
         )
         .await?;
         let observer = observation_pool(pg.params()).await?;

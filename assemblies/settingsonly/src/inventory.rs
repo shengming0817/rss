@@ -94,6 +94,11 @@ fn response_from_snapshot(
 ) -> anyhow::Result<wire::RuntimeInventoryResponse> {
     Ok(wire::RuntimeInventoryResponse {
         data: wire::RuntimeInventoryData {
+            activated_workflows: snapshot
+                .activated_workflows()
+                .iter()
+                .map(activated_workflow_to_wire)
+                .collect::<anyhow::Result<_>>()?,
             schema_version: i64::from(snapshot.schema_version()),
             assembly_fingerprint: snapshot
                 .assembly_fingerprint()
@@ -140,6 +145,53 @@ fn response_from_snapshot(
                 .collect::<anyhow::Result<_>>()?,
         },
     })
+}
+
+fn activated_workflow_to_wire(
+    workflow: &model::ActivatedWorkflowObservation,
+) -> anyhow::Result<wire::RuntimeActivatedWorkflow> {
+    match workflow.activation() {
+        model::InventoryWorkflowActivation::Projection(activation) => Ok(
+            wire::RuntimeActivatedWorkflow::Projection(wire::RuntimeActivatedProjection {
+                activation: match activation {
+                    model::InventoryProjectionActivation::CaptureOnly => {
+                        wire::RuntimeActivatedProjectionActivation::CaptureOnly
+                    }
+                    model::InventoryProjectionActivation::Shadow => {
+                        wire::RuntimeActivatedProjectionActivation::Shadow
+                    }
+                    model::InventoryProjectionActivation::Active => {
+                        wire::RuntimeActivatedProjectionActivation::Active
+                    }
+                },
+                definition_schema_digest: workflow
+                    .definition_schema_digest()
+                    .parse()
+                    .context("convert workflow definition schema digest")?,
+                definition_version: workflow
+                    .definition_version()
+                    .parse()
+                    .context("convert workflow definition version")?,
+                id: workflow.id().parse().context("convert workflow id")?,
+                mode: wire::RuntimeActivatedProjectionMode::Projection,
+            }),
+        ),
+        model::InventoryWorkflowActivation::Saga(model::InventorySagaActivation::Active) => Ok(
+            wire::RuntimeActivatedWorkflow::Saga(wire::RuntimeActivatedSaga {
+                activation: wire::RuntimeActivatedSagaActivation::Active,
+                definition_schema_digest: workflow
+                    .definition_schema_digest()
+                    .parse()
+                    .context("convert workflow definition schema digest")?,
+                definition_version: workflow
+                    .definition_version()
+                    .parse()
+                    .context("convert workflow definition version")?,
+                id: workflow.id().parse().context("convert workflow id")?,
+                mode: wire::RuntimeActivatedSagaMode::Saga,
+            }),
+        ),
+    }
 }
 
 fn listener_to_wire(
@@ -643,6 +695,7 @@ mod tests {
         let (reader, _) = published_inventory_routes()?;
         let response = response_from_snapshot(&reader.read()?)?;
         assert_eq!(response.data.schema_version, 1);
+        assert!(response.data.activated_workflows.is_empty());
         assert_eq!(response.data.domains, [wire::RuntimeDomain::Settings]);
         assert_eq!(response.data.listeners.len(), 3);
         assert_eq!(
@@ -650,6 +703,8 @@ mod tests {
             crate::providers_gen::PROVIDER_CATALOG.len()
         );
         assert_eq!(response.data.placements.len(), 1);
+        let encoded = serde_json::to_value(response)?;
+        assert_eq!(encoded["data"]["activatedWorkflows"], serde_json::json!([]));
         Ok(())
     }
 

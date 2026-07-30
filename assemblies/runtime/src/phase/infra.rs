@@ -136,6 +136,7 @@ impl<'a> ProvidersBuilt<'a> {
         let mut uncommitted_provider_module = UncommittedModule::new(PG_MODULE_COMMITTED_ONCE);
         let result = async {
             let config = context.config();
+            let projection_capture = context.runtime_plan.workflow_runtime().projection_capture();
             let PhaseAPrepared {
                 pg_setup,
                 carried,
@@ -155,7 +156,13 @@ impl<'a> ProvidersBuilt<'a> {
             // bounded through the rss binary.
             let (pg_owner, verified) = after_required_preflight(
                 Self::phase_a_run_dlx_preflight(dlx_preflight),
-                |verified| Self::phase_b_setup_postgres_after_preflight(pg_setup, verified),
+                |verified| {
+                    Self::phase_b_setup_postgres_after_preflight(
+                        pg_setup,
+                        verified,
+                        projection_capture,
+                    )
+                },
             )
             .await?;
             let PhaseADlxVerified {
@@ -654,7 +661,10 @@ impl<'a> ProvidersBuilt<'a> {
         })
     }
 
-    async fn phase_b_setup_postgres(inputs: PhaseBSetupInputs) -> anyhow::Result<PgRuntimeDeps> {
+    async fn phase_b_setup_postgres(
+        inputs: PhaseBSetupInputs,
+        projection_capture: eventexec::ProjectionCaptureView<'_>,
+    ) -> anyhow::Result<PgRuntimeDeps> {
         // Serving startup is non-destructive and accepts no migration capability.
         let PhaseBSetupInputs {
             app_pg_config,
@@ -665,8 +675,7 @@ impl<'a> ProvidersBuilt<'a> {
             &app_pg_config,
             &tenant_read_pg_config,
             audit_admin_config.as_ref(),
-            generated::event::PROJECTION_INPUT_GENERATION,
-            generated::event::PROJECTION_INPUTS,
+            projection_capture,
         )
         .await
         .context("connect postgres serving deps after DLX capability preflight")
@@ -675,8 +684,9 @@ impl<'a> ProvidersBuilt<'a> {
     async fn phase_b_setup_postgres_after_preflight(
         inputs: PhaseBSetupInputs,
         verified: PhaseADlxVerified,
+        projection_capture: eventexec::ProjectionCaptureView<'_>,
     ) -> anyhow::Result<(PgRuntimeDeps, PhaseADlxVerified)> {
-        let pg = Self::phase_b_setup_postgres(inputs).await?;
+        let pg = Self::phase_b_setup_postgres(inputs, projection_capture).await?;
         Ok((pg, verified))
     }
 }

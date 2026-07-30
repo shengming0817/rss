@@ -1,0 +1,35 @@
+error[E0451]: fields `source_runtime_plan_fingerprint`, `projection_inputs`, `_projection_captures`, `projection_targets`, `sagas` and `activated` of struct `WorkflowRuntimePlan` are private
+  --> tests/ui/workflow_plan_forge_fail.rs:5:9
+   |
+ 4 |     let _forged = WorkflowRuntimePlan {
+   |                   ------------------- in this type
+ 5 |         source_runtime_plan_fingerprint: "forged".to_owned(),
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ private field
+ 6 |         projection_inputs: Vec::new(),
+   |         ^^^^^^^^^^^^^^^^^ private field
+ 7 |         _projection_captures: Vec::new(),
+   |         ^^^^^^^^^^^^^^^^^^^^ private field
+ 8 |         projection_targets: Vec::new(),
+   |         ^^^^^^^^^^^^^^^^^^ private field
+ 9 |         sagas: Vec::new(),
+   |         ^^^^^ private field
+10 |         activated: Vec::new(),
+   |         ^^^^^^^^^ private field
+
+error: type `eventexec::workflow_runtime::SelectedProjectionCapture` is private
+ --> tests/ui/workflow_plan_forge_fail.rs:7:31
+  |
+7 |         _projection_captures: Vec::new(),
+  |                               ^^^^^^^^^^ private type
+
+error: type `eventexec::workflow_runtime::SelectedProjectionTarget` is private
+ --> tests/ui/workflow_plan_forge_fail.rs:8:29
+  |
+8 |         projection_targets: Vec::new(),
+  |                             ^^^^^^^^^^ private type
+
+error: type `eventexec::workflow_runtime::ActivatedSaga` is private
+ --> tests/ui/workflow_plan_forge_fail.rs:9:16
+  |
+9 |         sagas: Vec::new(),
+  |                ^^^^^^^^^^ private type

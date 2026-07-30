@@ -45,8 +45,14 @@ impl runtimeexec::StartupAdapter for ProductionStartup {
     > {
         let plan = crate::plan::IdentityAuditPlan::bundled()?;
         let (config, secrets, build_metadata, frontend) = self.captured.into_runtime_inputs();
-        let build =
-            crate::providers::build(plan.provider_build()?, config, secrets, transaction).await?;
+        let build = crate::providers::build(
+            plan.provider_build()?,
+            plan.workflow_runtime().projection_capture(),
+            config,
+            secrets,
+            transaction,
+        )
+        .await?;
         let crate::providers::BuildResult {
             providers,
             listeners: listeners_config,

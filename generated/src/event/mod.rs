@@ -183,10 +183,29 @@ pub const EVENTS: &[EventSpec] = &[
     settings_v1::SPEC,
 ];
 
+/// Complete repository Projection definition catalog.
+///
+/// Presence here never activates a workflow; [`eventexec`](https://docs.rs/eventexec) performs the
+/// only production join with a sealed assembly runtime plan before exposing runtime views.
+pub const PROJECTION_DEFINITIONS: &[::vocab::ContractBinding] = &[
+    ::vocab::ContractBinding::from_static(
+        "audit",
+        "audit.session-projection",
+        "v2",
+        "sha256:8750ef9b30912c837637ee30ee712e1572903fdaa59514fd486f2d0ab15fa071",
+    ),
+    ::vocab::ContractBinding::from_static(
+        "settings",
+        "settings.config-projection",
+        "v3",
+        "sha256:3504a1f33b4e2765fff012fd263ed9a317d24cbe200382c364e4220d7bf05baa",
+    ),
+];
+
 /// Root projection input registry aggregated from `[capabilities.workflow].inputs`.
 ///
-/// Postgres projection writers consume this static registry to decide which outbox facts are also
-/// mirrored into `projection_events`. Runtime code must not enumerate projection topics by hand.
+/// This is repository definition metadata, not deployment activation. Runtime capture first joins
+/// it with the sealed assembly workflow plan and must not consume this catalog directly.
 pub const PROJECTION_INPUT_GENERATION: &str =
     "sha256:c6789652a2531938d416f1097e997fddc6ff74a81e3a636038107ef05162f895";
 

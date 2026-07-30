@@ -62,8 +62,9 @@ saga ADR 和 runbook 中。
 - `bootstrap::sagaprojectiondeps::resolve` 仅为 requirements 之后的 topology backend selector：它在 demo 与
   durable PostgreSQL + Redis 之间选择 instance/journal/checkpoint/lock backend，不选择 Saga 是否激活，也不
   证明 typed action、receipt、dead-letter、worker 或 probe 已存在。
-- #1913 的 v2 协议载体不改变现有 production runtime 行为；#1914 持有 registry/worker/serving 消费切换与
-  omitted/disabled 零副作用证明。在 #1914 完成前，不为该目标状态新增 runtime `INVARIANT:`。
+- production Saga registry/worker 只能消费 sealed `WorkflowRuntimePlan` 借出的 `SagaRuntimeView`；generated
+  definition 存在不等于 activation。omitted/disabled Saga 不得注册 action、store、worker 或 probe，active
+  Saga 缺少任一 requirement 必须在 provider 初始化前 fail-closed。
 
 ## 构造器
 

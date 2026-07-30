@@ -90,6 +90,14 @@ pub use projection::{
     spawn_projection_worker,
 };
 
+mod workflow_runtime;
+pub use workflow_runtime::{
+    ActivatedWorkflow, ActivatedWorkflowActivation, ActivatedWorkflowsView, ProjectionCaptureView,
+    ProjectionRuntimeFactory, ProjectionTargetEntry, ProjectionTargetView, SagaRuntimeEntry,
+    SagaRuntimeFactory, SagaRuntimeView, WorkflowCapabilityCatalog, WorkflowRuntimeError,
+    WorkflowRuntimePlan,
+};
+
 pub mod saga;
 pub use saga::{
     SagaActionError, SagaExecStatus, SagaExecutor, SagaExecutorConfig, SagaExecutorConfigError,

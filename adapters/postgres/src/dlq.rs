@@ -265,7 +265,7 @@ impl DlqStore for PgDlqStore {
             DlqReplayCapability::Enabled {
                 payload_protector,
                 projection_registry,
-            } => (payload_protector.clone(), *projection_registry),
+            } => (payload_protector.clone(), projection_registry.clone()),
             DlqReplayCapability::Disabled => {
                 let err = DlqError::PayloadKeyUnavailable;
                 record_dlq_mutation_error(tenant, DlqMutationKind::DeadLetterReplay, &err);

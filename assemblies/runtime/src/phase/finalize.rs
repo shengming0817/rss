@@ -50,6 +50,10 @@ impl<'a> DomainsWired<'a> {
             );
             let seed = runtimeexec::inventory::RuntimeInventorySeed::from_runtime_plan(
                 context.runtime_plan.as_typed(),
+                context
+                    .runtime_plan
+                    .workflow_runtime()
+                    .activated_workflows(),
                 provider_build
                     .take_inventory_receipt()
                     .context("consume provider inventory completion receipt")?

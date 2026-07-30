@@ -25,6 +25,7 @@ pub(crate) use placement_exec::{PlacementExecutionSpec, PlacementMode};
 /// Runtime-owned entrypoint around the shared, sealed protocol value.
 pub struct RuntimePlan {
     plan: TypedRuntimePlan,
+    workflow_runtime: eventexec::WorkflowRuntimePlan,
     assembly_identity: String,
 }
 
@@ -124,14 +125,24 @@ impl RuntimePlan {
 
         let plan = TypedRuntimePlan::compile_v2(&manifest, &lock, input)
             .map_err(RuntimePlanError::Protocol)?;
+        let workflow_runtime = eventexec::WorkflowRuntimePlan::compile(
+            &plan,
+            eventexec::WorkflowCapabilityCatalog::empty(),
+        )
+        .map_err(RuntimePlanError::WorkflowRuntime)?;
         Ok(Self {
             plan,
+            workflow_runtime,
             assembly_identity: lock.identity().name().to_owned(),
         })
     }
 
     pub const fn as_typed(&self) -> &TypedRuntimePlan {
         &self.plan
+    }
+
+    pub(crate) const fn workflow_runtime(&self) -> &eventexec::WorkflowRuntimePlan {
+        &self.workflow_runtime
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
@@ -268,6 +279,8 @@ pub(crate) enum RuntimePlanError {
     },
     #[error("compile bundled RuntimePlan protocol failed: {0}")]
     Protocol(#[source] assembly_schema::RuntimePlanError),
+    #[error("compile bundled workflow runtime plan failed: {0}")]
+    WorkflowRuntime(#[source] eventexec::WorkflowRuntimeError),
 }
 
 #[cfg(test)]

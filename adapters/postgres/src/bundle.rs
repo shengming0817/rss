@@ -76,7 +76,7 @@ use crate::PgOutbox;
 use crate::consumer_tx::PgAuditConsumerTx;
 use crate::delivery_policy::EventDeliveryPolicy;
 use crate::pool::{PgRuntimeStores, VerifiedPgAuditAdminStore, VerifiedPgMaintenanceStore};
-use crate::projection_events::ProjectionWriteRegistry;
+use crate::projection_events::{ProjectionCaptureRegistration, ProjectionWriteRegistry};
 use crate::revocation::RevocationCapabilityReceipt;
 #[cfg(feature = "domain-settings")]
 use crate::{
@@ -179,8 +179,7 @@ pub struct PgRuntimeHandle {
     audit_admin_store: Option<VerifiedPgAuditAdminStore>,
     delivery_policy: EventDeliveryPolicy,
     projection_registry: ProjectionWriteRegistry,
-    projection_generation: &'static str,
-    projection_inputs: &'static [vocab::ProjectionInputBinding],
+    projection_capture: Option<ProjectionCaptureRegistration>,
     readiness: Arc<PgDbReadiness>,
     rls_ready: Arc<AtomicBool>,
 }
@@ -191,8 +190,7 @@ pub struct PgRuntimeHandle {
 pub struct PgReadinessSamplerFactory {
     writer_store: Arc<PgStore>,
     reader_store: Arc<PgStore>,
-    projection_generation: &'static str,
-    projection_inputs: &'static [vocab::ProjectionInputBinding],
+    projection_capture: Option<ProjectionCaptureRegistration>,
     readiness: Arc<PgDbReadiness>,
     period: Duration,
 }
@@ -397,8 +395,7 @@ impl PgReadinessSamplerFactory {
         let handle = tokio::spawn(crate::readiness::pg_readiness_sampling_loop(
             self.writer_store,
             self.reader_store,
-            self.projection_generation,
-            self.projection_inputs,
+            self.projection_capture,
             self.period,
             token.clone(),
             Arc::clone(&self.readiness),
@@ -464,8 +461,47 @@ impl PgRuntimeDeps {
         serving_config: &PgConfig,
         tenant_read_config: &PgTenantReadConfig,
         audit_admin_config: Option<&PgConfig>,
+        projection_capture: eventexec::ProjectionCaptureView<'_>,
+    ) -> Result<Self, PgError> {
+        let projection_capture = ProjectionCaptureRegistration::from_capture(projection_capture);
+        Self::setup_test_fixture_inner(
+            migrator_config,
+            serving_config,
+            tenant_read_config,
+            audit_admin_config,
+            projection_capture,
+        )
+        .await
+    }
+
+    #[cfg(all(test, feature = "integration"))]
+    pub(crate) async fn setup_test_fixture_with_projection_bindings(
+        migrator_config: &PgConfig,
+        serving_config: &PgConfig,
+        tenant_read_config: &PgTenantReadConfig,
+        audit_admin_config: Option<&PgConfig>,
         projection_generation: &'static str,
-        projection_inputs: &'static [vocab::ProjectionInputBinding],
+        projection_inputs: &[vocab::ProjectionInputBinding],
+    ) -> Result<Self, PgError> {
+        let projection_capture =
+            ProjectionCaptureRegistration::from_selected(projection_generation, projection_inputs);
+        Self::setup_test_fixture_inner(
+            migrator_config,
+            serving_config,
+            tenant_read_config,
+            audit_admin_config,
+            projection_capture,
+        )
+        .await
+    }
+
+    #[cfg(any(test, feature = "test-support", feature = "fault-matrix-test-support"))]
+    async fn setup_test_fixture_inner(
+        migrator_config: &PgConfig,
+        serving_config: &PgConfig,
+        tenant_read_config: &PgTenantReadConfig,
+        audit_admin_config: Option<&PgConfig>,
+        projection_capture: Option<ProjectionCaptureRegistration>,
     ) -> Result<Self, PgError> {
         let migrator = PgStore::connect(migrator_config).await?;
         let migration = migrator.run_migrations().await;
@@ -474,17 +510,18 @@ impl PgRuntimeDeps {
             return Err(error);
         }
         let delivery_policy = migrator.load_event_delivery_policy().await?;
-        migrator
-            .register_projection_input_bindings(projection_generation, projection_inputs)
-            .await
-            .map_err(PgError::ProjectionBindings)?;
+        if let Some(capture) = projection_capture.as_ref() {
+            migrator
+                .register_projection_input_bindings(capture.generation(), capture.bindings())
+                .await
+                .map_err(PgError::ProjectionBindings)?;
+        }
         let _ = migrator.shutdown().await;
         Self::connect_serving_inner(
             serving_config,
             tenant_read_config,
             audit_admin_config,
-            projection_generation,
-            projection_inputs,
+            projection_capture,
             Some(delivery_policy),
         )
         .await
@@ -509,15 +546,34 @@ impl PgRuntimeDeps {
         serving_config: &PgConfig,
         tenant_read_config: &PgTenantReadConfig,
         audit_admin_config: Option<&PgConfig>,
-        projection_generation: &'static str,
-        projection_inputs: &'static [vocab::ProjectionInputBinding],
+        projection_capture: eventexec::ProjectionCaptureView<'_>,
     ) -> Result<Self, PgError> {
+        let projection_capture = ProjectionCaptureRegistration::from_capture(projection_capture);
         Self::connect_serving_inner(
             serving_config,
             tenant_read_config,
             audit_admin_config,
-            projection_generation,
-            projection_inputs,
+            projection_capture,
+            None,
+        )
+        .await
+    }
+
+    #[cfg(all(test, feature = "integration"))]
+    pub(crate) async fn connect_serving_with_projection_bindings(
+        serving_config: &PgConfig,
+        tenant_read_config: &PgTenantReadConfig,
+        audit_admin_config: Option<&PgConfig>,
+        projection_generation: &'static str,
+        projection_inputs: &[vocab::ProjectionInputBinding],
+    ) -> Result<Self, PgError> {
+        let projection_capture =
+            ProjectionCaptureRegistration::from_selected(projection_generation, projection_inputs);
+        Self::connect_serving_inner(
+            serving_config,
+            tenant_read_config,
+            audit_admin_config,
+            projection_capture,
             None,
         )
         .await
@@ -527,8 +583,7 @@ impl PgRuntimeDeps {
         serving_config: &PgConfig,
         tenant_read_config: &PgTenantReadConfig,
         audit_admin_config: Option<&PgConfig>,
-        projection_generation: &'static str,
-        projection_inputs: &'static [vocab::ProjectionInputBinding],
+        projection_capture: Option<ProjectionCaptureRegistration>,
         preloaded_delivery_policy: Option<EventDeliveryPolicy>,
     ) -> Result<Self, PgError> {
         let mut serving_transaction = PgSetupTransaction::new();
@@ -545,14 +600,14 @@ impl PgRuntimeDeps {
                 Err(primary) => return serving_transaction.close(Err(primary)).await,
             },
         };
-        if let Err(primary) = writer_store
-            .validate_registered_projection_input_generation(
-                projection_generation,
-                projection_inputs,
-            )
-            .await
-            .map_err(PgError::ProjectionBindings)
-        {
+        let projection_validation = match projection_capture.as_ref() {
+            Some(capture) => writer_store
+                .validate_projection_capture_registration(capture)
+                .await
+                .map_err(PgError::ProjectionBindings),
+            None => Ok(()),
+        };
+        if let Err(primary) = projection_validation {
             return serving_transaction.close(Err(primary)).await;
         }
         let revocation_receipt = match writer.verify_revocation_capability().await {
@@ -588,9 +643,10 @@ impl PgRuntimeDeps {
                 revocation_receipt,
                 audit_admin_store,
                 delivery_policy,
-                projection_registry: ProjectionWriteRegistry::from_generated(projection_inputs),
-                projection_generation,
-                projection_inputs,
+                projection_registry: projection_capture
+                    .as_ref()
+                    .map_or_else(ProjectionWriteRegistry::empty, |capture| capture.registry()),
+                projection_capture,
                 readiness: Arc::new(PgDbReadiness::new()),
                 rls_ready: Arc::new(AtomicBool::new(true)),
             },
@@ -661,8 +717,7 @@ impl PgRuntimeDeps {
             audit_admin_store,
             delivery_policy: _,
             projection_registry: _,
-            projection_generation,
-            projection_inputs,
+            projection_capture,
             readiness,
             rls_ready: _,
         } = self.handle;
@@ -686,8 +741,7 @@ impl PgRuntimeDeps {
             PgReadinessSamplerFactory {
                 writer_store,
                 reader_store,
-                projection_generation,
-                projection_inputs,
+                projection_capture,
                 readiness,
                 period,
             },
@@ -718,7 +772,7 @@ impl PgRuntimeHandle {
         PgDomainDeps {
             stores: Arc::clone(&self.stores),
             audit_admin_store: self.audit_admin_store.clone(),
-            projection_registry: self.projection_registry,
+            projection_registry: self.projection_registry.clone(),
             #[cfg(any(feature = "journey-fault-support", feature = "test-support"))]
             identity_security_start_barrier: None,
             _marker: PhantomData,
@@ -732,7 +786,7 @@ impl PgRuntimeHandle {
         PgInfraDeps {
             stores: Arc::clone(&self.stores),
             revocation_receipt: self.revocation_receipt.clone(),
-            projection_registry: self.projection_registry,
+            projection_registry: self.projection_registry.clone(),
             delivery_policy: self.delivery_policy,
         }
     }
@@ -781,8 +835,7 @@ impl PgRuntimeHandle {
             audit_admin_store: None,
             delivery_policy: EventDeliveryPolicy::release(),
             projection_registry: ProjectionWriteRegistry::empty(),
-            projection_generation: "",
-            projection_inputs: &[],
+            projection_capture: None,
             readiness: Arc::new(PgDbReadiness::new()),
             rls_ready: Arc::new(AtomicBool::new(true)),
         }
@@ -831,8 +884,7 @@ impl PgRuntimeDeps {
                     .map(VerifiedPgAuditAdminStore::from_unverified_for_test),
                 delivery_policy: EventDeliveryPolicy::release(),
                 projection_registry: ProjectionWriteRegistry::empty(),
-                projection_generation: "",
-                projection_inputs: &[],
+                projection_capture: None,
                 readiness: Arc::new(PgDbReadiness::new()),
                 rls_ready: Arc::new(AtomicBool::new(true)),
             },
@@ -858,8 +910,7 @@ impl PgRuntimeHandle {
             audit_admin_store: None,
             delivery_policy: EventDeliveryPolicy::release(),
             projection_registry: ProjectionWriteRegistry::empty(),
-            projection_generation: "",
-            projection_inputs: &[],
+            projection_capture: None,
             readiness: Arc::new(PgDbReadiness::new()),
             rls_ready: Arc::new(AtomicBool::new(true)),
         }
@@ -1075,12 +1126,30 @@ impl PgMaintenanceDeps {
     pub fn dlq_store(
         &self,
         payload_protector: DlxPayloadProtector,
-        projection_inputs: &'static [vocab::ProjectionInputBinding],
+        projection_capture: eventexec::ProjectionCaptureView<'_>,
     ) -> PgDlqStore {
         PgDlqStore::with_projection_registry_maintenance(
             &self.store,
             payload_protector,
-            ProjectionWriteRegistry::from_generated(projection_inputs),
+            ProjectionWriteRegistry::from_capture(projection_capture),
+        )
+    }
+
+    #[cfg(all(
+        test,
+        feature = "domain-settings",
+        feature = "domain-identity",
+        feature = "domain-audit"
+    ))]
+    fn dlq_store_with_projection_bindings_for_test(
+        &self,
+        payload_protector: DlxPayloadProtector,
+        projection_inputs: &[vocab::ProjectionInputBinding],
+    ) -> PgDlqStore {
+        PgDlqStore::with_projection_registry_maintenance(
+            &self.store,
+            payload_protector,
+            ProjectionWriteRegistry::from_selected(projection_inputs),
         )
     }
 
@@ -1165,7 +1234,7 @@ impl<D: PgDomain> Clone for PgDomainDeps<D> {
         Self {
             stores: Arc::clone(&self.stores),
             audit_admin_store: self.audit_admin_store.clone(),
-            projection_registry: self.projection_registry,
+            projection_registry: self.projection_registry.clone(),
             #[cfg(any(feature = "journey-fault-support", feature = "test-support"))]
             identity_security_start_barrier: self.identity_security_start_barrier.clone(),
             _marker: PhantomData,
@@ -1198,14 +1267,14 @@ impl PgDomainDeps<caps::Settings> {
                 self.stores.writer_capability(),
                 Arc::clone(&clock),
                 config_read_protection,
-                self.projection_registry,
+                self.projection_registry.clone(),
             )),
             config_uow: DynConfigUnitOfWork::new_box(PgConfigRepo::new_with_projection_registry(
                 self.stores.reader_capability(),
                 self.stores.writer_capability(),
                 clock,
                 config_write_protection,
-                self.projection_registry,
+                self.projection_registry.clone(),
             )),
             secret_repo: DynSecretRepo::new_box(PgSecretRepo::new(self.stores.reader_capability())),
             secret_uow: DynSecretUnitOfWork::new_box(PgSecretUnitOfWork::new(
@@ -1351,7 +1420,7 @@ impl PgDomainDeps<caps::Identity> {
     ) -> PgAuthGrantProvider {
         let security = PgIdentitySecurityLifecycle::new(
             self.stores.writer_capability(),
-            self.projection_registry,
+            self.projection_registry.clone(),
             pseudonym_keys,
         );
         #[cfg(any(feature = "journey-fault-support", feature = "test-support"))]
@@ -1364,7 +1433,7 @@ impl PgDomainDeps<caps::Identity> {
                 self.stores.reader_capability(),
                 self.stores.writer_capability(),
                 clock,
-                self.projection_registry,
+                self.projection_registry.clone(),
             ),
             PgRefreshTokenStore::new(self.stores.reader_capability()),
             security,
@@ -1410,7 +1479,7 @@ impl PgDomainDeps<caps::Identity> {
     pub fn account_reactivation_lifecycle(&self) -> crate::PgAccountReactivationLifecycle {
         crate::PgAccountReactivationLifecycle::new(
             self.stores.writer_capability(),
-            self.projection_registry,
+            self.projection_registry.clone(),
         )
     }
 
@@ -1450,7 +1519,7 @@ impl PgDomainDeps<caps::Identity> {
         PgPolicyLifecycle::new_with_projection_registry(
             self.stores.writer_capability(),
             clock,
-            self.projection_registry,
+            self.projection_registry.clone(),
         )
     }
 
@@ -1460,7 +1529,7 @@ impl PgDomainDeps<caps::Identity> {
         PgRoleBindingLifecycle::new_with_projection_registry(
             self.stores.writer_capability(),
             clock,
-            self.projection_registry,
+            self.projection_registry.clone(),
         )
     }
 }
@@ -1661,7 +1730,7 @@ impl PgInfraDeps {
         PgEmitter::new_with_projection_registry(
             self.stores.writer_capability(),
             clock,
-            self.projection_registry,
+            self.projection_registry.clone(),
         )
     }
 
@@ -2175,7 +2244,10 @@ mod tests {
         let (_events, _checkpoint, _dead_letter) = deps
             .projection_replay_stores(&receipt, &selector, payload_protector())?
             .into_parts()?;
-        let _ = deps.dlq_store(payload_protector(), generated::event::PROJECTION_INPUTS);
+        let _ = deps.dlq_store_with_projection_bindings_for_test(
+            payload_protector(),
+            generated::event::PROJECTION_INPUTS,
+        );
         let _ = deps.dlq_store_without_payload_replay();
         Ok(())
     }

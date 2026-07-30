@@ -23,7 +23,7 @@
 //! INVARIANT: LAYER-DEPS-02 { level = "Medium", exec = "check", source = "code" }—— 兄弟域互斥（跨域只经 contract）。
 //! INVARIANT: LAYER-DEPS-03 { level = "Medium", exec = "check", source = "code" }—— adapter 仅组合根注入（不被域 / 服务依赖）。
 //! INVARIANT: LAYER-DEPS-04 { level = "Medium", exec = "check", source = "code" }—— generated 仅域 + 组合根，以及精确 `eventexec → generated`
-//!   command seam 依赖；其它 Service→Generated 仍禁。
+//!   command/workflow sealed runtime seam 依赖；其它 Service→Generated 仍禁。
 //! INVARIANT: LAYER-DEPS-05 { level = "Medium", exec = "check", source = "code" }—— 每个 workspace 成员必落唯一分层（anti-drift：新增 crate 须登记层）。
 //! INVARIANT: LAYER-DEPS-06 { level = "Medium", exec = "check", source = "code" }—— deny.toml 分层 wrappers ⟷ 源分类一致（守 `LAYER-WRAP-01` 漂移）。
 //! INVARIANT: LAYER-DEPS-07 { level = "Medium", exec = "check", source = "code" }—— 含 path 的本地依赖须解析到现存 workspace 成员；逃逸 / 非成员
@@ -44,7 +44,7 @@
 //!   `runtimeexec` target wrapper 必须恰为 runtime/settingsonly/identityaudit 三个 assembly，禁止 bins、composition、
 //!   journeys 与 xtask 直接依赖；该特殊 wrapper 不得被一般 Domain/Adapter/Generated stale 逻辑误判。
 //! INVARIANT: RUNTIMEEXEC-DEPS-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::runtimeexec_direct_dependencies_extra_internal_and_external_red|tests::runtimeexec_direct_dependencies_package_alias_red", anti_vacuity = "tests::runtimeexec_direct_dependencies_allowlist_green|tests::real_workspace_green" }——
-//!   `runtimeexec` shipped direct dependency 只准内部 assembly-schema/authn/bootstrap/diport/primitives/secure 与外部
+//!   `runtimeexec` shipped direct dependency 只准内部 assembly-schema/authn/bootstrap/diport/eventexec/primitives/secure 与外部
 //!   anyhow/serde/serde_json/thiserror/tokio/tokio-util/tracing/zeroize；
 //!   `[dev-dependencies]` 不入扫描。
 //! `LAYER-DEPS-PROVIDER-BOOTSTRAP-01` 的精确 deny 与元数据单源见 `layers.rs`；本 lint 在通用允许矩阵
@@ -200,14 +200,14 @@ pub(crate) fn check_layers(members: &[Member], edges: &[Edge]) -> Vec<Finding> {
         };
         // 基础同层横向默认禁，唯一例外 = intra-base DAG 前向边（BASE-INTRADAG-01，如 runctx → vocab）；
         // Service 同层横向默认禁，唯一例外 = 受控 bootstrap → httpserve 路由类型边（LAYER-DEPS-ROUTE-FUNNEL-01，ADR-009）。
-        // Service→Generated 默认禁；唯一例外 = eventexec 实现 generated command sealed seam。
+        // Service→Generated 默认禁；唯一例外 = eventexec 实现 generated command/workflow sealed seam。
         let provider_bootstrap_forbidden =
             layers::provider_adapter_bootstrap_forbidden(&edge.from, &edge.to);
         if provider_bootstrap_forbidden
             || (!layers::allows(from, to)
                 && !layers::basis_intra_dag_allows(&edge.from, &edge.to)
                 && !layers::route_funnel_allows(&edge.from, &edge.to)
-                && !layers::command_generated_seam_allows(&edge.from, &edge.to))
+                && !layers::eventexec_generated_seam_allows(&edge.from, &edge.to))
         {
             let reason = if provider_bootstrap_forbidden {
                 "违反 Redis/S3/Vault provider output 边界（禁止 adapter → bootstrap）".to_string()
@@ -258,6 +258,7 @@ const RUNTIMEEXEC_INTERNAL_SHIPPED_DEPS: &[&str] = &[
     "authn",
     "bootstrap",
     "diport",
+    "eventexec",
     "primitives",
     "secure",
 ];
@@ -323,7 +324,7 @@ fn required_consumers<'a>(
                     services
                         .iter()
                         .copied()
-                        .filter(|service| layers::command_generated_seam_allows(service, name)),
+                        .filter(|service| layers::eventexec_generated_seam_allows(service, name)),
                 )
                 .collect(),
         ),
@@ -444,7 +445,7 @@ pub(crate) fn check_wrappers(
             match layer_of.get(w.as_str()) {
                 Some(&wl)
                     if layers::allows(wl, banned)
-                        || layers::command_generated_seam_allows(w, &b.crate_name)
+                        || layers::eventexec_generated_seam_allows(w, &b.crate_name)
                         || layers::generated_dev_wrapper_allows(w, &b.crate_name) =>
                 {
                     // ②补强（ADR-005）：adapter→域 wrapper 须有真实 source edge（adapter 实际依赖该域），
@@ -1648,7 +1649,7 @@ identity_alias = { package = "identity", version = "1", features = ["test-suppor
     }
 
     #[test]
-    fn check_layers_green_eventexec_to_generated_command_seam() {
+    fn check_layers_green_eventexec_to_generated_command_workflow_seam() {
         let members = vec![
             m("eventexec", "crates/eventexec", Some(Layer::Service)),
             m("generated", "generated", Some(Layer::Generated)),
@@ -1850,6 +1851,7 @@ identity_alias = { package = "identity", version = "1", features = ["test-suppor
             e("runtimeexec", "authn"),
             e("runtimeexec", "bootstrap"),
             e("runtimeexec", "diport"),
+            e("runtimeexec", "eventexec"),
             e("runtimeexec", "primitives"),
             e("runtimeexec", "secure"),
         ];
@@ -1858,6 +1860,7 @@ identity_alias = { package = "identity", version = "1", features = ["test-suppor
             runtime_dep("authn", true),
             runtime_dep("bootstrap", true),
             runtime_dep("diport", true),
+            runtime_dep("eventexec", true),
             runtime_dep("primitives", true),
             runtime_dep("secure", true),
             runtime_dep("anyhow", false),

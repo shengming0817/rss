@@ -99,6 +99,7 @@ impl ProviderRoleCloser {
 
 pub(crate) async fn build(
     mut roles: crate::providers_gen::ProviderRoleBatches,
+    projection_capture: eventexec::ProjectionCaptureView<'_>,
     config: config::IdentityAuditConfig,
     secrets: config::ResolvedSecrets,
     transaction: &mut runtimeexec::StartupTransaction<'_>,
@@ -140,6 +141,7 @@ pub(crate) async fn build(
         writer_password,
         reader_password,
         audit_admin_password,
+        projection_capture,
     )
     .await?;
     let pg = pg_owner.handle();
@@ -327,6 +329,7 @@ async fn build_postgres(
     writer_password: zeroize::Zeroizing<String>,
     reader_password: zeroize::Zeroizing<String>,
     audit_admin_password: zeroize::Zeroizing<String>,
+    projection_capture: eventexec::ProjectionCaptureView<'_>,
 ) -> anyhow::Result<postgres::PgRuntimeDeps> {
     let (serving, reader, audit_admin) = postgres_setup_configs(
         config,
@@ -338,8 +341,7 @@ async fn build_postgres(
         &serving,
         &reader,
         Some(&audit_admin),
-        generated::event::PROJECTION_INPUT_GENERATION,
-        generated::event::PROJECTION_INPUTS,
+        projection_capture,
     )
     .await
     .context("setup identityaudit Postgres")?;

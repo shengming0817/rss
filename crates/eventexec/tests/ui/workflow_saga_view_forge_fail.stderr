@@ -1,0 +1,11 @@
+error[E0451]: field `sagas` of struct `SagaRuntimeView` is private
+ --> tests/ui/workflow_saga_view_forge_fail.rs:4:37
+  |
+4 |     let _forged = SagaRuntimeView { sagas: &[] };
+  |                                     ^^^^^ private field
+
+error: type `eventexec::workflow_runtime::ActivatedSaga` is private
+ --> tests/ui/workflow_saga_view_forge_fail.rs:4:44
+  |
+4 |     let _forged = SagaRuntimeView { sagas: &[] };
+  |                                            ^^^ private type

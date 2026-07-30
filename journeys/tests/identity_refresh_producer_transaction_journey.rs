@@ -224,13 +224,13 @@ async fn production_postgres() -> TestResult<(testkit::PgFixture, PgRuntimeDeps)
     .await?;
     let tenant_read =
         PgTenantReadConfig::new(pg_config(params, TEST_READ_ROLE, TEST_READ_PASSWORD));
+    let workflow = eventexec::WorkflowRuntimePlan::disabled_fixture();
     let deps = PgRuntimeDeps::setup_test_fixture(
         &pg_config(params, &params.username, &params.password),
         &pg_config(params, TEST_APP_ROLE, TEST_APP_PASSWORD),
         &tenant_read,
         None,
-        generated::event::PROJECTION_INPUT_GENERATION,
-        generated::event::PROJECTION_INPUTS,
+        workflow.projection_capture(),
     )
     .await?;
     Ok((fixture, deps))

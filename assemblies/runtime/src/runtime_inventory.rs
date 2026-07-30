@@ -33,6 +33,7 @@ impl RuntimeInventoryRoutes {
             .collect::<Result<Vec<_>, _>>()?;
         let seed = model::RuntimeInventorySeed::from_runtime_plan(
             plan.as_typed(),
+            plan.workflow_runtime().activated_workflows(),
             provider_bindings,
             plan.placement_execution_plan(config)
                 .inventory_observations()?,
@@ -92,6 +93,11 @@ fn to_wire(
 ) -> Result<wire::RuntimeInventoryResponse, ()> {
     Ok(wire::RuntimeInventoryResponse {
         data: wire::RuntimeInventoryData {
+            activated_workflows: snapshot
+                .activated_workflows()
+                .iter()
+                .map(activated_workflow_to_wire)
+                .collect::<Result<_, _>>()?,
             assembly_fingerprint: parse(snapshot.assembly_fingerprint())?,
             build_metadata: snapshot
                 .build_metadata()
@@ -141,6 +147,41 @@ fn to_wire(
             schema_version: i64::from(snapshot.schema_version()),
         },
     })
+}
+
+fn activated_workflow_to_wire(
+    workflow: &model::ActivatedWorkflowObservation,
+) -> Result<wire::RuntimeActivatedWorkflow, ()> {
+    match workflow.activation() {
+        model::InventoryWorkflowActivation::Projection(activation) => Ok(
+            wire::RuntimeActivatedWorkflow::Projection(wire::RuntimeActivatedProjection {
+                activation: match activation {
+                    model::InventoryProjectionActivation::CaptureOnly => {
+                        wire::RuntimeActivatedProjectionActivation::CaptureOnly
+                    }
+                    model::InventoryProjectionActivation::Shadow => {
+                        wire::RuntimeActivatedProjectionActivation::Shadow
+                    }
+                    model::InventoryProjectionActivation::Active => {
+                        wire::RuntimeActivatedProjectionActivation::Active
+                    }
+                },
+                definition_schema_digest: parse(workflow.definition_schema_digest())?,
+                definition_version: parse(workflow.definition_version())?,
+                id: parse(workflow.id())?,
+                mode: wire::RuntimeActivatedProjectionMode::Projection,
+            }),
+        ),
+        model::InventoryWorkflowActivation::Saga(model::InventorySagaActivation::Active) => Ok(
+            wire::RuntimeActivatedWorkflow::Saga(wire::RuntimeActivatedSaga {
+                activation: wire::RuntimeActivatedSagaActivation::Active,
+                definition_schema_digest: parse(workflow.definition_schema_digest())?,
+                definition_version: parse(workflow.definition_version())?,
+                id: parse(workflow.id())?,
+                mode: wire::RuntimeActivatedSagaMode::Saga,
+            }),
+        ),
+    }
 }
 
 fn listener_to_wire(
@@ -431,6 +472,10 @@ pub mod test_support {
             &lock,
         )?;
         let plan = parsed.as_plan();
+        let workflow_runtime = eventexec::WorkflowRuntimePlan::compile(
+            plan,
+            eventexec::WorkflowCapabilityCatalog::empty(),
+        )?;
         let (probe_name, reporter) = journey_probe_chain(case)?;
         let bindings = plan
             .provider_plans()
@@ -446,11 +491,16 @@ pub mod test_support {
                 model::PlacementObservation::local(placement.domain(), placement.workload())
             })
             .collect();
-        let seed = model::RuntimeInventorySeed::from_runtime_plan(plan, bindings, placements)?
-            .with_build_metadata(model::BuildMetadata::parse(
-                &"a".repeat(40),
-                &format!("sha256:{}", "b".repeat(64)),
-            )?);
+        let seed = model::RuntimeInventorySeed::from_runtime_plan(
+            plan,
+            workflow_runtime.activated_workflows(),
+            bindings,
+            placements,
+        )?
+        .with_build_metadata(model::BuildMetadata::parse(
+            &"a".repeat(40),
+            &format!("sha256:{}", "b".repeat(64)),
+        )?);
         let (publisher, reader) = model::inventory_channel(seed, reporter);
         let mut registry = bootstrap::Registry::new();
         crate::modules_gen::register_framework_routes(

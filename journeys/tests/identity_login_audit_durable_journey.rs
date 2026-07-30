@@ -272,13 +272,13 @@ async fn login_audit_durable_topology() -> Result<()> {
         RSS_APP_READ_PASSWORD,
     ));
     // test-only fixture owns migration setup; serving APIs cannot reach migration capability.
+    let workflow = eventexec::WorkflowRuntimePlan::disabled_fixture();
     let deps = PgRuntimeDeps::setup_test_fixture(
         &owner_config,
         &app_config,
         &tenant_read_config,
         None,
-        generated::event::PROJECTION_INPUT_GENERATION,
-        generated::event::PROJECTION_INPUTS,
+        workflow.projection_capture(),
     )
     .await?;
     let body_result: Result<()> = async {

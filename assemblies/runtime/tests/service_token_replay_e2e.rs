@@ -127,13 +127,13 @@ async fn cleanup_replay_keys(pool: &PgPool, ids: &ReplayRoundIds) -> TestResult 
 
 async fn setup_runtime_pg(p: &testkit::PgConnParams) -> TestResult<PgRuntimeDeps> {
     let read = PgTenantReadConfig::new(pg_config(p, TEST_READ_ROLE, TEST_READ_PASSWORD));
+    let workflow = eventexec::WorkflowRuntimePlan::disabled_fixture();
     Ok(PgRuntimeDeps::setup_test_fixture(
         &pg_config(p, &p.username, &p.password),
         &pg_config(p, TEST_APP_ROLE, TEST_APP_PASSWORD),
         &read,
         None,
-        generated::event::PROJECTION_INPUT_GENERATION,
-        generated::event::PROJECTION_INPUTS,
+        workflow.projection_capture(),
     )
     .await?)
 }

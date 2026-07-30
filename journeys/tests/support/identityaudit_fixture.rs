@@ -38,6 +38,7 @@ const READY_PATH: &str = "/health/v1/readyz";
 const BINARY_OVERRIDE_ENV: &str = "RSS_IDENTITYAUDIT_TEST_BINARY";
 const AUDIT_CHAIN_KEY: [u8; 32] = *b"identityaudit-audit-chain-key-01";
 const TENANT_AUTHORITY_KEY: [u8; 32] = *b"identityaudit-tenant-auth-key-01";
+const IDENTITY_PSEUDONYM_KEY: [u8; 32] = [0x31; 32];
 
 static FIXTURE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -160,12 +161,17 @@ fn literal_loopback_url(raw: String) -> anyhow::Result<String> {
 
 pub struct LoginReceipt {
     session_id: String,
+    access_token: String,
 }
 
 impl LoginReceipt {
     #[must_use]
     pub fn session_id(&self) -> &str {
         &self.session_id
+    }
+
+    fn access_token(&self) -> &str {
+        &self.access_token
     }
 }
 
@@ -676,7 +682,44 @@ impl RuntimeFixture {
             "authenticated self-profile probe must succeed, got {}",
             auth_probe.status()
         );
-        Ok(LoginReceipt { session_id })
+        Ok(LoginReceipt {
+            session_id,
+            access_token: access_token.to_owned(),
+        })
+    }
+
+    pub async fn readiness_report(&self) -> anyhow::Result<serde_json::Value> {
+        let response = self
+            .client
+            .get(format!("http://{}{READY_PATH}", self.health))
+            .send()
+            .await
+            .context("request IdentityAudit readiness report")?;
+        let status = response.status();
+        let body = response.text().await.context("read readiness report")?;
+        ensure!(status == StatusCode::OK, "readyz returned {status}: {body}");
+        serde_json::from_str(&body).context("decode IdentityAudit readiness report")
+    }
+
+    pub async fn runtime_inventory(
+        &self,
+        login: &LoginReceipt,
+    ) -> anyhow::Result<serde_json::Value> {
+        let response = self
+            .client
+            .get(format!("http://{}/api/v1/runtime/inventory", self.admin))
+            .bearer_auth(login.access_token())
+            .send()
+            .await
+            .context("request IdentityAudit runtime inventory")?;
+        let status = response.status();
+        let body = response.text().await.context("read runtime inventory")?;
+        ensure!(
+            status == StatusCode::OK,
+            "runtime inventory returned {status}: {body}; {}",
+            self.logs.diagnostics()
+        );
+        serde_json::from_str(&body).context("decode IdentityAudit runtime inventory")
     }
 
     pub fn send_sigterm(&mut self) -> anyhow::Result<()> {
@@ -786,6 +829,7 @@ impl ServingSecretBundle {
             "redisUrl": providers.redis_url,
             "auditChainKey": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(AUDIT_CHAIN_KEY),
             "tenantAuthorityKey": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(TENANT_AUTHORITY_KEY),
+            "identityPseudonymKey": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(IDENTITY_PSEUDONYM_KEY),
         });
         serde_json::to_writer(&mut file, &document).context("write secret bundle")?;
         file.sync_all().context("sync secret bundle")?;

@@ -7,7 +7,8 @@ use eventexec::{
     AuthorizedDlqOperatorReceipt, DeadLetterId, DlqCursor, DlqEntrySummary, DlqInspectRequest,
     DlqInspectTarget, DlqListQuery, DlqRedriveOutcome, DlqRedriveRequest, DlqReplayRequest,
     DlqStore, OperatorDlqCapability, OutboxExpiredResolutionKind, OutboxExpiredResolutionOutcome,
-    OutboxExpiredResolutionRequest, OutboxResolutionChangeTicket, VerifiedOperatorSubject,
+    OutboxExpiredResolutionRequest, OutboxResolutionChangeTicket, ProjectionCaptureView,
+    VerifiedOperatorSubject,
 };
 use postgres::{MaintenanceAuditOutcome, PgDlqStore, PgMaintenanceDeps, PgRuntimeDeps};
 
@@ -1005,6 +1006,7 @@ pub(super) trait DlqControlRuntime {
 pub(super) struct ProductionDlqControlRuntime<'a> {
     config: SnapshotConfig<'a>,
     operator: OperatorRuntimeCapability<'a>,
+    projection_capture: ProjectionCaptureView<'a>,
 }
 
 impl DlqControlRuntime for ProductionDlqControlRuntime<'_> {
@@ -1074,7 +1076,7 @@ impl DlqControlRuntime for ProductionDlqControlRuntime<'_> {
         if command.requires_payload_protector() {
             let dlx_payload_protector = event_transport::build_dlx_payload_protector(self.config)
                 .context("build DLQ payload protector")?;
-            Ok(session.dlq_store(dlx_payload_protector, generated::event::PROJECTION_INPUTS))
+            Ok(session.dlq_store(dlx_payload_protector, self.projection_capture))
         } else {
             Ok(session.dlq_store_without_payload_replay())
         }
@@ -1167,9 +1169,12 @@ pub async fn run_dlq_control_command(
     args: &[String],
     runtime_inputs: &OperatorRuntimeInputs,
 ) -> anyhow::Result<()> {
+    let plan = crate::plan::RuntimePlan::bundled(runtime_inputs.config())
+        .context("compile bundled runtime plan for DLQ operator")?;
     let runtime = ProductionDlqControlRuntime {
         config: runtime_inputs.config(),
         operator: runtime_inputs.operator_capability(),
+        projection_capture: plan.workflow_runtime().projection_capture(),
     };
     run_dlq_control_command_with_runtime(args, &runtime).await
 }

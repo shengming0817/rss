@@ -20,6 +20,29 @@ use identityaudit_fixture::{FixtureProviders, LoginReceipt, RuntimeFixture};
 const USER_ID: &str = "00000000-0000-4000-8000-000000000197";
 const WAIT_TIMEOUT: Duration = Duration::from_secs(20);
 
+fn assert_no_workflow_readiness_probes(report: &serde_json::Value) -> Result<()> {
+    let checks = report
+        .get("checks")
+        .and_then(serde_json::Value::as_array)
+        .context("identityaudit readiness report must contain a checks array")?;
+    let names = checks
+        .iter()
+        .map(|check| {
+            check
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .context("identityaudit readiness check must contain a string name")
+        })
+        .collect::<Result<Vec<_>>>()?;
+    ensure!(
+        names
+            .iter()
+            .all(|name| !name.starts_with("projection") && !name.starts_with("saga")),
+        "disabled workflows registered readiness probes: {names:?}"
+    );
+    Ok(())
+}
+
 fn owner_options(params: &testkit::PgConnParams) -> PgConnectOptions {
     PgConnectOptions::new()
         .host(&params.host)
@@ -66,18 +89,35 @@ async fn seed_login(pool: &PgPool) -> Result<()> {
     Ok(())
 }
 
-async fn register_projection_inputs(pool: &PgPool) -> Result<()> {
-    for binding in generated::event::PROJECTION_INPUTS {
-        sqlx::query("SELECT rss_register_projection_input_binding($1, $2, $3, $4, $5)")
-            .bind(generated::event::PROJECTION_INPUT_GENERATION)
-            .bind(binding.contract_id())
-            .bind(binding.version())
-            .bind(binding.schema_hash())
-            .bind(binding.topic())
-            .execute(pool)
-            .await
-            .context("register IdentityAudit projection input")?;
-    }
+async fn seed_runtime_inventory_grant(pool: &PgPool) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO roles (tenant_id, id, name, permissions) \
+         VALUES ($1::uuid, 'identityaudit-runtime-inventory-reader', \
+                 'IdentityAudit runtime inventory reader', \
+                 ARRAY['runtime:inventory:read']::text[])",
+    )
+    .bind(identityaudit_fixture::tenant())
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO role_bindings (tenant_id, role_id, subject) \
+         VALUES ($1::uuid, 'identityaudit-runtime-inventory-reader', $2)",
+    )
+    .bind(identityaudit_fixture::tenant())
+    .bind(USER_ID)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn assert_no_projection_capture(pool: &PgPool) -> Result<()> {
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM projection_events")
+        .fetch_one(pool)
+        .await?;
+    ensure!(
+        count == 0,
+        "disabled IdentityAudit captured {count} projection events"
+    );
     Ok(())
 }
 
@@ -204,7 +244,7 @@ async fn identityaudit_login_audit_ready_sigterm_drain() -> Result<()> {
         .run(&pool)
         .await
         .context("migrate IdentityAudit journey database")?;
-    register_projection_inputs(&pool).await?;
+    seed_runtime_inventory_grant(&pool).await?;
     let amqp = rabbit.vhost_url("rss_identity").await?;
     let providers = FixtureProviders::new(
         postgres.params().host.clone(),
@@ -220,6 +260,16 @@ async fn identityaudit_login_audit_ready_sigterm_drain() -> Result<()> {
     let login = runtime.login().await?;
     wait_for_auth_audit(&pool).await?;
     wait_for_session_created_hash_chain(&pool, &login).await?;
+    assert_no_projection_capture(&pool).await?;
+
+    let readiness = runtime.readiness_report().await?;
+    assert_no_workflow_readiness_probes(&readiness)?;
+    let inventory = runtime.runtime_inventory(&login).await?;
+    ensure!(
+        inventory.pointer("/data/activatedWorkflows")
+            == Some(&serde_json::Value::Array(Vec::new())),
+        "identityaudit activated unexpected workflows: {inventory}"
+    );
 
     runtime.send_sigterm()?;
     runtime.wait_for_drain().await?;

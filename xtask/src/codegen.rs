@@ -244,8 +244,12 @@ fn render_all(contracts: &[DiscoveredContract]) -> Result<Vec<(PathBuf, String)>
         if *mod_kind == ModKind::Event {
             mod_rs.push_str(&render_event_dispatch_keys(contracts)?);
             mod_rs.push_str(&render_event_root_subscriptions(contracts)?);
+            mod_rs.push_str(&render_event_root_projection_definitions(contracts)?);
             mod_rs.push_str(&render_event_root_projection_inputs(contracts)?);
             mod_rs.push_str(&render_event_root_producer_domains(contracts)?);
+        }
+        if *mod_kind == ModKind::Saga {
+            mod_rs.push_str(&render_saga_root_specs(contracts)?);
         }
         files.push((PathBuf::from(kind_dir).join("mod.rs"), mod_rs));
     }
@@ -2645,12 +2649,85 @@ fn render_event_root_projection_inputs(contracts: &[DiscoveredContract]) -> Resu
         r#"
 /// Root projection input registry aggregated from `[capabilities.workflow].inputs`.
 ///
-/// Postgres projection writers consume this static registry to decide which outbox facts are also
-/// mirrored into `projection_events`. Runtime code must not enumerate projection topics by hand.
+/// This is repository definition metadata, not deployment activation. Runtime capture first joins
+/// it with the sealed assembly workflow plan and must not consume this catalog directly.
 pub const PROJECTION_INPUT_GENERATION: &str = "{generation}";
 
 /// Projection bindings that belong to [`PROJECTION_INPUT_GENERATION`].
 pub const PROJECTION_INPUTS: &[::vocab::ProjectionInputBinding] = &[{body}];
+"#
+    ))
+}
+
+fn render_event_root_projection_definitions(contracts: &[DiscoveredContract]) -> Result<String> {
+    let mut projections = contracts
+        .iter()
+        .filter(|contract| {
+            contract
+                .manifest
+                .capabilities
+                .workflow
+                .as_ref()
+                .is_some_and(|workflow| workflow.mode == WorkflowMode::Projection)
+        })
+        .collect::<Vec<_>>();
+    projections.sort_by_key(|contract| contract.manifest.id.as_str());
+    let entries = projections
+        .into_iter()
+        .map(|contract| {
+            Ok(format!(
+                "    ::vocab::ContractBinding::from_static({}, {}, {}, {})",
+                rust_string_lit(&contract.manifest.domain),
+                rust_string_lit(&contract.manifest.id),
+                rust_string_lit(&contract.manifest.version),
+                rust_string_lit(&schema_hash(contract)?)
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let body = if entries.is_empty() {
+        String::new()
+    } else {
+        format!("\n{},\n", entries.join(",\n"))
+    };
+    Ok(format!(
+        r#"
+/// Complete repository Projection definition catalog.
+///
+/// Presence here never activates a workflow; [`eventexec`](https://docs.rs/eventexec) performs the
+/// only production join with a sealed assembly runtime plan before exposing runtime views.
+pub const PROJECTION_DEFINITIONS: &[::vocab::ContractBinding] = &[{body}];
+"#
+    ))
+}
+
+fn render_saga_root_specs(contracts: &[DiscoveredContract]) -> Result<String> {
+    let mut sagas = contracts
+        .iter()
+        .filter(|contract| contract.manifest.kind == ContractKind::Saga)
+        .collect::<Vec<_>>();
+    sagas.sort_by_key(|contract| contract.manifest.id.as_str());
+    let entries = sagas
+        .into_iter()
+        .map(|contract| {
+            let module = module_name(&contract.manifest.domain, &contract.manifest.version);
+            match contract.slug.as_deref() {
+                Some(slug) => Ok(format!("    {module}::{}::SPEC", slug_module_ident(slug)?)),
+                None => Ok(format!("    {module}::SPEC")),
+            }
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let body = if entries.is_empty() {
+        String::new()
+    } else {
+        format!("\n{},\n", entries.join(",\n"))
+    };
+    Ok(format!(
+        r#"
+/// Complete repository Saga definition catalog.
+///
+/// Draft and inactive definitions remain visible for identity validation but never imply runtime
+/// action, store, worker, or probe activation.
+pub const SPECS: &[SagaSpec] = &[{body}];
 "#
     ))
 }
@@ -4755,6 +4832,10 @@ mod tests {
             mod_rs.contains("pub type SagaSpec = ::vocab::SagaContractBinding;"),
             "saga/mod.rs 缺 SagaSpec type alias:\n{mod_rs}"
         );
+        assert!(
+            mod_rs.contains("pub const SPECS: &[SagaSpec]") && mod_rs.contains("billing_v1::SPEC"),
+            "saga/mod.rs 缺完整 definition catalog:\n{mod_rs}"
+        );
         Ok(())
     }
 
@@ -4810,6 +4891,11 @@ mod tests {
         assert!(
             mod_rs.contains("pub const PROJECTION_INPUTS: &[::vocab::ProjectionInputBinding]"),
             "event/mod.rs 缺 projection input root registry:\n{mod_rs}"
+        );
+        assert!(
+            mod_rs.contains("pub const PROJECTION_DEFINITIONS: &[::vocab::ContractBinding]")
+                && mod_rs.contains(r#""audit.seed-projection""#),
+            "event/mod.rs 缺 projection definition root registry:\n{mod_rs}"
         );
         assert!(
             mod_rs.contains("pub const PROJECTION_INPUT_GENERATION: &str =")

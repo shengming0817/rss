@@ -187,6 +187,51 @@ pub struct ProviderProbeBinding {
     probe_names: Vec<ProbeName>,
 }
 
+/// A workflow activation copied from the sealed workflow runtime plan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActivatedWorkflowObservation {
+    id: String,
+    definition_version: String,
+    definition_schema_digest: String,
+    activation: InventoryWorkflowActivation,
+}
+
+impl ActivatedWorkflowObservation {
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    pub fn definition_version(&self) -> &str {
+        &self.definition_version
+    }
+
+    pub fn definition_schema_digest(&self) -> &str {
+        &self.definition_schema_digest
+    }
+
+    pub const fn activation(&self) -> InventoryWorkflowActivation {
+        self.activation
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InventoryWorkflowActivation {
+    Projection(InventoryProjectionActivation),
+    Saga(InventorySagaActivation),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InventoryProjectionActivation {
+    CaptureOnly,
+    Shadow,
+    Active,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InventorySagaActivation {
+    Active,
+}
+
 impl ProviderProbeBinding {
     pub fn new(
         provider_id: impl Into<String>,
@@ -304,6 +349,7 @@ pub struct RuntimeInventorySeed {
     build_metadata: Option<BuildMetadata>,
     runtime_plan_fingerprint: String,
     domains: Vec<AssemblyDomain>,
+    activated_workflows: Vec<ActivatedWorkflowObservation>,
     listeners: Vec<ExpectedListener>,
     provider_bindings: Vec<ProviderProbeBinding>,
     placements: Vec<PlacementObservation>,
@@ -319,9 +365,53 @@ struct ExpectedListener {
 impl RuntimeInventorySeed {
     pub fn from_runtime_plan(
         runtime: &RuntimePlan,
+        activated_workflows: eventexec::ActivatedWorkflowsView<'_>,
         mut provider_bindings: Vec<ProviderProbeBinding>,
         mut placements: Vec<PlacementObservation>,
     ) -> Result<Self, InventoryError> {
+        if activated_workflows.source_runtime_plan_fingerprint()
+            != runtime.runtime_plan_fingerprint().as_str()
+        {
+            return Err(InventoryError::WorkflowPlanSource);
+        }
+        let activated_workflows = activated_workflows
+            .workflows()
+            .iter()
+            .map(|workflow| {
+                let activation = match workflow.activation() {
+                    eventexec::ActivatedWorkflowActivation::Projection(
+                        assembly_schema::ProjectionActivation::CaptureOnly,
+                    ) => InventoryWorkflowActivation::Projection(
+                        InventoryProjectionActivation::CaptureOnly,
+                    ),
+                    eventexec::ActivatedWorkflowActivation::Projection(
+                        assembly_schema::ProjectionActivation::Shadow,
+                    ) => InventoryWorkflowActivation::Projection(
+                        InventoryProjectionActivation::Shadow,
+                    ),
+                    eventexec::ActivatedWorkflowActivation::Projection(
+                        assembly_schema::ProjectionActivation::Active,
+                    ) => InventoryWorkflowActivation::Projection(
+                        InventoryProjectionActivation::Active,
+                    ),
+                    eventexec::ActivatedWorkflowActivation::Saga(
+                        assembly_schema::SagaActivation::Active,
+                    ) => InventoryWorkflowActivation::Saga(InventorySagaActivation::Active),
+                    eventexec::ActivatedWorkflowActivation::Projection(
+                        assembly_schema::ProjectionActivation::Disabled,
+                    )
+                    | eventexec::ActivatedWorkflowActivation::Saga(
+                        assembly_schema::SagaActivation::Disabled,
+                    ) => return Err(InventoryError::ActivatedWorkflow),
+                };
+                Ok(ActivatedWorkflowObservation {
+                    id: workflow.id().to_owned(),
+                    definition_version: workflow.definition_version().to_owned(),
+                    definition_schema_digest: workflow.definition_schema_digest().to_owned(),
+                    activation,
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         provider_bindings.sort_by(|left, right| left.provider_id.cmp(&right.provider_id));
         let expected_providers = runtime
             .provider_plans()
@@ -365,6 +455,7 @@ impl RuntimeInventorySeed {
                 .iter()
                 .map(|domain| domain.id())
                 .collect(),
+            activated_workflows,
             listeners: runtime
                 .listener_plans()
                 .iter()
@@ -416,6 +507,7 @@ pub struct RuntimeInventorySnapshot {
     build_metadata: Option<BuildMetadata>,
     runtime_plan_fingerprint: String,
     domains: Vec<AssemblyDomain>,
+    activated_workflows: Vec<ActivatedWorkflowObservation>,
     listeners: Vec<BoundListenerObservation>,
     provider_posture: Vec<ProviderPosture>,
     placements: Vec<PlacementObservation>,
@@ -436,6 +528,9 @@ impl RuntimeInventorySnapshot {
     }
     pub fn domains(&self) -> &[AssemblyDomain] {
         &self.domains
+    }
+    pub fn activated_workflows(&self) -> &[ActivatedWorkflowObservation] {
+        &self.activated_workflows
     }
     pub fn listeners(&self) -> &[BoundListenerObservation] {
         &self.listeners
@@ -588,6 +683,7 @@ impl InventoryReader {
             build_metadata: self.0.seed.build_metadata.clone(),
             runtime_plan_fingerprint: self.0.seed.runtime_plan_fingerprint.clone(),
             domains: self.0.seed.domains.clone(),
+            activated_workflows: self.0.seed.activated_workflows.clone(),
             listeners: listeners.clone(),
             provider_posture,
             placements,
@@ -623,6 +719,10 @@ pub enum InventoryError {
     BuildMetadata,
     #[error("runtime inventory provider binding is invalid")]
     ProviderBinding,
+    #[error("runtime inventory activated workflow is invalid")]
+    ActivatedWorkflow,
+    #[error("runtime inventory activated workflows came from another runtime plan")]
+    WorkflowPlanSource,
     #[error("runtime inventory listener binding is invalid")]
     ListenerBinding,
     #[error("runtime inventory placement is invalid")]
@@ -663,6 +763,40 @@ mod tests {
         Ok(ParsedRuntimePlan::from_json_slice_bound(
             include_bytes!("../../../assemblies/settingsonly/runtime-plan.json"),
             source.canonical(),
+            &lock,
+        )?)
+    }
+
+    fn workflow_runtime(runtime: &ParsedRuntimePlan) -> TestResult<eventexec::WorkflowRuntimePlan> {
+        Ok(eventexec::WorkflowRuntimePlan::compile(
+            runtime.as_plan(),
+            eventexec::WorkflowCapabilityCatalog::empty(),
+        )?)
+    }
+
+    fn identityaudit_runtime_plan() -> TestResult<ParsedRuntimePlan> {
+        let manifest = AssemblyManifest::from_toml_str(include_str!(
+            "../../../assemblies/identityaudit/assembly.toml"
+        ))?
+        .canonicalize_v2()?;
+        let lock = ParsedAssemblyLock::from_json_slice(include_bytes!(
+            "../../../assemblies/identityaudit/assembly.lock.json"
+        ))?
+        .verify_repository_v2(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .and_then(std::path::Path::parent)
+                .ok_or("runtimeexec repository root")?,
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .and_then(std::path::Path::parent)
+                .ok_or("runtimeexec repository root")?
+                .join("assemblies/identityaudit"),
+        )?
+        .into_executable();
+        Ok(ParsedRuntimePlan::from_json_slice_bound(
+            include_bytes!("../../../assemblies/identityaudit/runtime-plan.json"),
+            &manifest,
             &lock,
         )?)
     }
@@ -728,13 +862,17 @@ mod tests {
             .iter()
             .map(|placement| PlacementObservation::local(placement.domain(), placement.workload()))
             .collect();
-        Ok(
-            RuntimeInventorySeed::from_runtime_plan(runtime.as_plan(), providers, placements)?
-                .with_build_metadata(BuildMetadata::parse(
-                    &"a".repeat(40),
-                    &format!("sha256:{}", "b".repeat(64)),
-                )?),
-        )
+        let workflow_runtime = workflow_runtime(runtime)?;
+        Ok(RuntimeInventorySeed::from_runtime_plan(
+            runtime.as_plan(),
+            workflow_runtime.activated_workflows(),
+            providers,
+            placements,
+        )?
+        .with_build_metadata(BuildMetadata::parse(
+            &"a".repeat(40),
+            &format!("sha256:{}", "b".repeat(64)),
+        )?))
     }
 
     #[test]
@@ -968,6 +1106,7 @@ mod tests {
     fn inventory_provider_bindings_require_exact_ids_and_allow_explicit_shared_probes() -> TestResult
     {
         let runtime = runtime_plan()?;
+        let workflow_runtime = workflow_runtime(&runtime)?;
         let placements = || {
             runtime
                 .placement_plans()
@@ -986,6 +1125,7 @@ mod tests {
         assert_eq!(
             RuntimeInventorySeed::from_runtime_plan(
                 runtime.as_plan(),
+                workflow_runtime.activated_workflows(),
                 bindings.clone(),
                 placements(),
             )
@@ -996,14 +1136,24 @@ mod tests {
         duplicate.push(missing.clone());
         duplicate.push(missing.clone());
         assert_eq!(
-            RuntimeInventorySeed::from_runtime_plan(runtime.as_plan(), duplicate, placements())
-                .err(),
+            RuntimeInventorySeed::from_runtime_plan(
+                runtime.as_plan(),
+                workflow_runtime.activated_workflows(),
+                duplicate,
+                placements(),
+            )
+            .err(),
             Some(InventoryError::ProviderBinding)
         );
         bindings.push(ProviderProbeBinding::new("unknown-provider", Vec::new())?);
         assert_eq!(
-            RuntimeInventorySeed::from_runtime_plan(runtime.as_plan(), bindings, placements())
-                .err(),
+            RuntimeInventorySeed::from_runtime_plan(
+                runtime.as_plan(),
+                workflow_runtime.activated_workflows(),
+                bindings,
+                placements(),
+            )
+            .err(),
             Some(InventoryError::ProviderBinding)
         );
 
@@ -1013,13 +1163,19 @@ mod tests {
             .iter()
             .map(|provider| ProviderProbeBinding::new(provider.id(), vec![shared.clone()]))
             .collect::<Result<Vec<_>, _>>()?;
-        RuntimeInventorySeed::from_runtime_plan(runtime.as_plan(), exact, placements())?;
+        RuntimeInventorySeed::from_runtime_plan(
+            runtime.as_plan(),
+            workflow_runtime.activated_workflows(),
+            exact,
+            placements(),
+        )?;
         Ok(())
     }
 
     #[test]
     fn inventory_reader_is_unavailable_before_exact_listener_publication() -> TestResult {
         let runtime = runtime_plan()?;
+        let workflow_runtime = workflow_runtime(&runtime)?;
         let providers = runtime
             .provider_plans()
             .iter()
@@ -1030,8 +1186,12 @@ mod tests {
             .iter()
             .map(|placement| PlacementObservation::local(placement.domain(), placement.workload()))
             .collect();
-        let seed =
-            RuntimeInventorySeed::from_runtime_plan(runtime.as_plan(), providers, placements)?;
+        let seed = RuntimeInventorySeed::from_runtime_plan(
+            runtime.as_plan(),
+            workflow_runtime.activated_workflows(),
+            providers,
+            placements,
+        )?;
         let (publisher, reader) = inventory_channel(seed, reporter(HealthStatus::Healthy)?);
         assert!(matches!(reader.read(), Err(InventoryError::Unavailable)));
         let listeners = exact_listeners(&runtime)?;
@@ -1042,6 +1202,62 @@ mod tests {
         assert_eq!(
             snapshot.provider_posture().len(),
             runtime.provider_plans().len()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn inventory_copies_the_sealed_activated_workflow_view() -> TestResult {
+        let runtime = runtime_plan()?;
+        let workflow_runtime = workflow_runtime(&runtime)?;
+        let providers = runtime
+            .provider_plans()
+            .iter()
+            .map(|provider| ProviderProbeBinding::new(provider.id(), Vec::new()))
+            .collect::<Result<Vec<_>, _>>()?;
+        let placements = runtime
+            .placement_plans()
+            .iter()
+            .map(|placement| PlacementObservation::local(placement.domain(), placement.workload()))
+            .collect();
+        let seed = RuntimeInventorySeed::from_runtime_plan(
+            runtime.as_plan(),
+            workflow_runtime.activated_workflows(),
+            providers,
+            placements,
+        )?;
+        let (publisher, reader) = inventory_channel(seed, reporter(HealthStatus::Healthy)?);
+        publisher.publish(exact_listeners(&runtime)?)?;
+
+        assert!(reader.read()?.activated_workflows().is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn inventory_rejects_activated_workflows_from_another_runtime_plan() -> TestResult {
+        let runtime = runtime_plan()?;
+        let other_runtime = identityaudit_runtime_plan()?;
+        let other_workflows = workflow_runtime(&other_runtime)?;
+        let providers = runtime
+            .provider_plans()
+            .iter()
+            .map(|provider| ProviderProbeBinding::new(provider.id(), Vec::new()))
+            .collect::<Result<Vec<_>, _>>()?;
+        let placements = runtime
+            .placement_plans()
+            .iter()
+            .map(|placement| PlacementObservation::local(placement.domain(), placement.workload()))
+            .collect();
+
+        assert!(
+            RuntimeInventorySeed::from_runtime_plan(
+                runtime.as_plan(),
+                other_workflows.activated_workflows(),
+                providers,
+                placements,
+            )
+            .is_err(),
+            "inventory must reject activated workflows compiled from another runtime plan"
         );
         Ok(())
     }

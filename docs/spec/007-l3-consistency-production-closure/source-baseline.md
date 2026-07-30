@@ -29,9 +29,9 @@
 | Settings v3 Projection | [`contracts/http/settings/v3/contract.toml`](../../../contracts/http/settings/v3/contract.toml) 仍为 `draft` | 缺口仍成立；#1913–#1921 逐步闭合，#1912 不改 lifecycle |
 | Settings v4 authoritative | [`contracts/http/settings/v4/contract.toml`](../../../contracts/http/settings/v4/contract.toml) 为 active LocalOnly | 作为不变 oracle，由 #1921 持有 regression |
 | Billing Saga | [`contracts/saga/billing/v1/contract.toml`](../../../contracts/saga/billing/v1/contract.toml) 仍为 draft | generated/test fixture 可保留；无 production activation，产品 billing 属 External |
-| Projection definition catalog | [`generated/src/event/mod.rs`](../../../generated/src/event/mod.rs) 仍包含 draft Projection inputs | definition 不能继续隐式等同 activation；#1913/#1914 持有 cutover |
+| Projection definition catalog | [`generated/src/event/mod.rs`](../../../generated/src/event/mod.rs) 保留由 codegen 派生的 definition/input ledger | #1914 已以 sealed workflow plan 将 definition 与 deployment activation 分离；production 下游不直接消费 raw catalog |
 | Assembly 基础 | [`runtime-assembly-plan.md`](../../rules/runtime-assembly-plan.md) 与现有 assembly schema/codegen 已建立 typed plan/lock/catalog | 外部 overlay 的旧 runtime-root 坐标作废；WorkflowActivation 必须扩展现有单源，不另建 runtime truth |
-| Blanket unsupported | [`assemblies/runtime/src/operator/projection.rs`](../../../assemblies/runtime/src/operator/projection.rs) 仍在 production builder 调用 `mark_all_generated_unsupported()` | 缺口仍成立但位置已移动；#1914 删除 production escape hatch |
+| Blanket unsupported | #1914 删除 production `mark_all_generated_unsupported()` 与 `UnsupportedProjection` 分支 | 缺少 selected target 直接 fail-closed，不再以 blanket marker 伪装闭合 |
 | Generation binding | [`0054_generation_bound_projection_registry.sql`](../../../adapters/postgres/migrations/0054_generation_bound_projection_registry.sql) 已在 snapshot 前存在；[`0078_expose_projection_input_generation_probe.sql`](../../../adapters/postgres/migrations/0078_expose_projection_input_generation_probe.sql) 不在 Git 比较锚中 | 后续 source/serving 设计必须复用当前两者，不能按旧 overlay 重建平行 registry |
 | Projection source scope | [`projection_events.rs`](../../../adapters/postgres/src/projection_events.rs) 仍未形成 tenant/projection/binding-scoped production reader | 缺口仍成立；#1915/#1916 持有 capability 与 DB-side filtering |
 | High-water | [`projection_control.rs`](../../../adapters/postgres/src/projection_control.rs) 当前仍通过分页读取求尾部 | 缺口仍成立；#1916 持有固定查询次数元数据 |

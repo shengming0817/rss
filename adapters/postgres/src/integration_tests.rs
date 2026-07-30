@@ -559,7 +559,7 @@ async fn setup_runtime_deps_with_projection_inputs(
         TEST_READ_ROLE,
         TEST_READ_PASSWORD,
     ));
-    let deps = PgRuntimeDeps::setup_test_fixture(
+    let deps = PgRuntimeDeps::setup_test_fixture_with_projection_bindings(
         &owner_config,
         &runtime_pg_config(p, TEST_APP_ROLE, TEST_APP_PASSWORD),
         &tenant_read_config,
@@ -873,7 +873,7 @@ async fn connect_test_projection_runtime(
     generation: &'static str,
     bindings: &'static [vocab::ProjectionInputBinding],
 ) -> Result<PgRuntimeDeps, PgError> {
-    PgRuntimeDeps::connect_serving(
+    PgRuntimeDeps::connect_serving_with_projection_bindings(
         &runtime_pg_config(params, TEST_APP_ROLE, TEST_APP_PASSWORD),
         &crate::pool::PgTenantReadConfig::new(runtime_pg_config(
             params,
@@ -888,8 +888,10 @@ async fn connect_test_projection_runtime(
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn serving_rejects_missing_less_and_more_projection_generation_rows() -> TestResult {
-    static EXACT_INPUTS: &[vocab::ProjectionInputBinding] = &[
+async fn serving_requires_selected_projection_inputs_but_allows_other_catalog_rows() -> TestResult {
+    type CatalogRow<'a> = (&'a str, &'a str, &'a str, &'a str);
+
+    static GLOBAL_INPUTS: &[vocab::ProjectionInputBinding] = &[
         vocab::ProjectionInputBinding::from_static(
             "test-projection-a",
             "test",
@@ -907,11 +909,20 @@ async fn serving_rejects_missing_less_and_more_projection_generation_rows() -> T
             "test.event-b",
         ),
     ];
+    static SELECTED_INPUTS: &[vocab::ProjectionInputBinding] =
+        &[vocab::ProjectionInputBinding::from_static(
+            "test-projection-a",
+            "test",
+            "projection.bound-a",
+            "v1",
+            TEST_SCHEMA_HASH,
+            "test.event-a",
+        )];
     let (fixture, owner) = connect_pg().await?;
     provision_runtime_logins(fixture.params()).await?;
     owner.run_migrations().await?;
     let generation: &'static str = Box::leak(
-        crate::projection_events::projection_input_generation(EXACT_INPUTS).into_boxed_str(),
+        crate::projection_events::projection_input_generation(GLOBAL_INPUTS).into_boxed_str(),
     );
     let exact = [
         ("projection.bound-a", "v1", TEST_SCHEMA_HASH, "test.event-a"),
@@ -919,17 +930,16 @@ async fn serving_rejects_missing_less_and_more_projection_generation_rows() -> T
     ];
     replace_test_projection_generation(&owner, generation, &exact).await?;
     let exact_runtime =
-        connect_test_projection_runtime(fixture.params(), generation, EXACT_INPUTS).await?;
+        connect_test_projection_runtime(fixture.params(), generation, SELECTED_INPUTS).await?;
     shutdown_runtime_deps(exact_runtime).await?;
 
-    let cases: [(&str, &[(&str, &str, &str, &str)]); 3] = [
-        ("missing", &[]),
+    let allowed_catalogs: [(&str, &[CatalogRow<'_>]); 2] = [
         (
-            "less",
+            "selected-only",
             &[("projection.bound-a", "v1", TEST_SCHEMA_HASH, "test.event-a")],
         ),
         (
-            "more",
+            "global-plus-unrelated",
             &[
                 ("projection.bound-a", "v1", TEST_SCHEMA_HASH, "test.event-a"),
                 ("projection.bound-b", "v1", TEST_SCHEMA_HASH, "test.event-b"),
@@ -942,21 +952,29 @@ async fn serving_rejects_missing_less_and_more_projection_generation_rows() -> T
             ],
         ),
     ];
-    let mut accepted_drift = Vec::new();
-    for (label, rows) in cases {
+    for (label, rows) in allowed_catalogs {
         replace_test_projection_generation(&owner, generation, rows).await?;
-        match connect_test_projection_runtime(fixture.params(), generation, EXACT_INPUTS).await {
-            Ok(runtime) => {
-                accepted_drift.push(label);
-                shutdown_runtime_deps(runtime).await?;
-            }
-            Err(PgError::ProjectionBindings(_)) => {}
-            Err(error) => return Err(format!("{label} returned unrelated error: {error}").into()),
-        }
+        let runtime =
+            connect_test_projection_runtime(fixture.params(), generation, SELECTED_INPUTS)
+                .await
+                .map_err(|error| {
+                    format!("{label} rejected selected catalog membership: {error}")
+                })?;
+        shutdown_runtime_deps(runtime).await?;
     }
+
+    replace_test_projection_generation(
+        &owner,
+        generation,
+        &[("projection.bound-b", "v1", TEST_SCHEMA_HASH, "test.event-b")],
+    )
+    .await?;
     assert!(
-        accepted_drift.is_empty(),
-        "serving accepted non-exact projection generations: {accepted_drift:?}"
+        matches!(
+            connect_test_projection_runtime(fixture.params(), generation, SELECTED_INPUTS).await,
+            Err(PgError::ProjectionBindings(_))
+        ),
+        "serving must reject a generation that omits a selected input"
     );
     owner.shutdown().await?;
     Ok(())
@@ -1066,7 +1084,7 @@ async fn assert_revocation_capability_drift(
     sqlx::raw_sql(case.mutate_sql)
         .execute(&mutator.pool)
         .await?;
-    let setup = PgRuntimeDeps::setup_test_fixture(
+    let setup = PgRuntimeDeps::setup_test_fixture_with_projection_bindings(
         owner_config,
         serving_config,
         tenant_read_config,
@@ -1247,7 +1265,7 @@ async fn revocation_store_commit_failure_is_redacted_rolled_back_and_quarantined
     let verdict: TestResult = async {
         let mutator = PgStore::connect(&owner_config).await?;
         mutator.run_migrations().await?;
-        let deps = PgRuntimeDeps::setup_test_fixture(
+        let deps = PgRuntimeDeps::setup_test_fixture_with_projection_bindings(
             &owner_config,
             &serving_config,
             &tenant_read_config,
@@ -1419,7 +1437,7 @@ async fn revocation_store_survives_full_runtime_pool_rebuild() -> TestResult {
         TEST_READ_ROLE,
         TEST_READ_PASSWORD,
     ));
-    let rebuilt = PgRuntimeDeps::setup_test_fixture(
+    let rebuilt = PgRuntimeDeps::setup_test_fixture_with_projection_bindings(
         &owner_config,
         &runtime_pg_config(p, TEST_APP_ROLE, TEST_APP_PASSWORD),
         &tenant_read_config,
@@ -1458,7 +1476,7 @@ async fn revocation_store_ignores_search_path_shadow_table_and_function() -> Tes
         let mutator = PgStore::connect(&owner_config).await?;
         mutator.run_migrations().await?;
 
-        let deps = PgRuntimeDeps::setup_test_fixture(
+        let deps = PgRuntimeDeps::setup_test_fixture_with_projection_bindings(
             &owner_config,
             &serving_config,
             &tenant_read_config,
@@ -1689,7 +1707,7 @@ async fn revocation_startup_capability_gate_rejects_rls_acl_role_and_function_dr
         )
         .execute(&mutator.pool)
         .await?;
-        let policy_drift = PgRuntimeDeps::setup_test_fixture(
+        let policy_drift = PgRuntimeDeps::setup_test_fixture_with_projection_bindings(
             &owner_config,
             &serving_config,
             &tenant_read_config,
@@ -1716,7 +1734,7 @@ async fn revocation_startup_capability_gate_rejects_rls_acl_role_and_function_dr
         sqlx::query("ALTER TABLE certificate_revocations DISABLE ROW LEVEL SECURITY")
             .execute(&mutator.pool)
             .await?;
-        let rls_drift = PgRuntimeDeps::setup_test_fixture(
+        let rls_drift = PgRuntimeDeps::setup_test_fixture_with_projection_bindings(
             &owner_config,
             &serving_config,
             &tenant_read_config,
@@ -1736,7 +1754,7 @@ async fn revocation_startup_capability_gate_rejects_rls_acl_role_and_function_dr
         sqlx::query("GRANT UPDATE ON certificate_revocations TO rss_app")
             .execute(&mutator.pool)
             .await?;
-        let acl_drift = PgRuntimeDeps::setup_test_fixture(
+        let acl_drift = PgRuntimeDeps::setup_test_fixture_with_projection_bindings(
             &owner_config,
             &serving_config,
             &tenant_read_config,
@@ -1759,7 +1777,7 @@ async fn revocation_startup_capability_gate_rejects_rls_acl_role_and_function_dr
         sqlx::query("ALTER ROLE rss_revocation_maintenance INHERIT")
             .execute(&mutator.pool)
             .await?;
-        let role_drift = PgRuntimeDeps::setup_test_fixture(
+        let role_drift = PgRuntimeDeps::setup_test_fixture_with_projection_bindings(
             &owner_config,
             &serving_config,
             &tenant_read_config,
@@ -1779,7 +1797,7 @@ async fn revocation_startup_capability_gate_rejects_rls_acl_role_and_function_dr
         sqlx::query("GRANT CREATE ON SCHEMA public TO rss_revocation_maintenance")
             .execute(&mutator.pool)
             .await?;
-        let schema_acl_drift = PgRuntimeDeps::setup_test_fixture(
+        let schema_acl_drift = PgRuntimeDeps::setup_test_fixture_with_projection_bindings(
             &owner_config,
             &serving_config,
             &tenant_read_config,
@@ -1808,7 +1826,7 @@ async fn revocation_startup_capability_gate_rejects_rls_acl_role_and_function_dr
         )
         .execute(&mutator.pool)
         .await?;
-        let extra_relation_acl = PgRuntimeDeps::setup_test_fixture(
+        let extra_relation_acl = PgRuntimeDeps::setup_test_fixture_with_projection_bindings(
             &owner_config,
             &serving_config,
             &tenant_read_config,
@@ -1843,7 +1861,7 @@ async fn revocation_startup_capability_gate_rejects_rls_acl_role_and_function_dr
         )
         .execute(&mutator.pool)
         .await?;
-        let extra_function_acl = PgRuntimeDeps::setup_test_fixture(
+        let extra_function_acl = PgRuntimeDeps::setup_test_fixture_with_projection_bindings(
             &owner_config,
             &serving_config,
             &tenant_read_config,
@@ -1869,7 +1887,7 @@ async fn revocation_startup_capability_gate_rejects_rls_acl_role_and_function_dr
         )
         .execute(&mutator.pool)
         .await?;
-        let function_drift = PgRuntimeDeps::setup_test_fixture(
+        let function_drift = PgRuntimeDeps::setup_test_fixture_with_projection_bindings(
             &owner_config,
             &serving_config,
             &tenant_read_config,
@@ -1904,7 +1922,7 @@ async fn revocation_startup_capability_gate_rejects_rls_acl_role_and_function_dr
         )
         .execute(&mutator.pool)
         .await?;
-        let function_body_drift = PgRuntimeDeps::setup_test_fixture(
+        let function_body_drift = PgRuntimeDeps::setup_test_fixture_with_projection_bindings(
             &owner_config,
             &serving_config,
             &tenant_read_config,
@@ -2769,7 +2787,7 @@ async fn public_setup_funnels_reject_missing_and_drifted_delivery_policy() -> Te
         mutator.shutdown().await?;
 
         let tenant_read_config = crate::pool::PgTenantReadConfig::new(config.clone());
-        let runtime_missing = PgRuntimeDeps::setup_test_fixture(
+        let runtime_missing = PgRuntimeDeps::setup_test_fixture_with_projection_bindings(
             &config,
             &config,
             &tenant_read_config,
@@ -2806,7 +2824,7 @@ async fn public_setup_funnels_reject_missing_and_drifted_delivery_policy() -> Te
         .await?;
         mutator.shutdown().await?;
 
-        let runtime_drift = PgRuntimeDeps::setup_test_fixture(
+        let runtime_drift = PgRuntimeDeps::setup_test_fixture_with_projection_bindings(
             &config,
             &config,
             &tenant_read_config,
@@ -9080,8 +9098,8 @@ async fn concurrent_outbox_append_serializes_same_fact_and_conflict() -> TestRes
     let same_env_a = make_test_env("test", "projection.bound");
     let same_env_b = same_env_a.clone();
     let projection_registry_a =
-        crate::projection_events::ProjectionWriteRegistry::from_generated(TEST_PROJECTION_INPUTS);
-    let projection_registry_b = projection_registry_a;
+        crate::projection_events::ProjectionWriteRegistry::from_selected(TEST_PROJECTION_INPUTS);
+    let projection_registry_b = projection_registry_a.clone();
     let same_a = store.run_global_transaction::<_, _, OutboxAppendError>(|cap| {
         Box::pin(async move {
             append_outbox_with_projection(cap, &same_entry_a, &same_env_a, &projection_registry_a)
@@ -9391,7 +9409,7 @@ async fn projection_writer_funnel_mirrors_only_generated_bound_insert_once() -> 
     let (_pg, store) = connect_pg().await?;
     setup_outbox(&store).await?;
 
-    let registry = ProjectionWriteRegistry::from_generated(TEST_PROJECTION_INPUTS);
+    let registry = ProjectionWriteRegistry::from_selected(TEST_PROJECTION_INPUTS);
     let domain = unique_domain("projection-funnel");
     let bound_event_id = unique_event_id("projection-bound");
     let unbound_event_id = unique_event_id("projection-unbound");
@@ -9565,7 +9583,8 @@ async fn projection_writer_funnel_serializes_lsn_with_commit_order() -> TestResu
     let (_pg, store) = connect_pg().await?;
     setup_outbox(&store).await?;
 
-    let registry = ProjectionWriteRegistry::from_generated(TEST_PROJECTION_INPUTS);
+    let registry = ProjectionWriteRegistry::from_selected(TEST_PROJECTION_INPUTS);
+    let first_registry = registry.clone();
     let domain = unique_domain("projection-order");
     let first_event_id = unique_event_id("projection-order-first");
     let second_event_id = unique_event_id("projection-order-second");
@@ -9583,9 +9602,10 @@ async fn projection_writer_funnel_serializes_lsn_with_commit_order() -> TestResu
     let first = tokio::spawn(async move {
         let mut tx = pool_a.begin().await?;
         let mut cap = TxCapability::from_transaction(&mut tx);
-        let _outcome = append_outbox_with_projection(&mut cap, &first_entry, &first_env, &registry)
-            .await
-            .map_err(test_append_error)?;
+        let _outcome =
+            append_outbox_with_projection(&mut cap, &first_entry, &first_env, &first_registry)
+                .await
+                .map_err(test_append_error)?;
         let _ = first_appended_tx.send(());
         release_first_rx.await.map_err(|err| {
             Box::new(std::io::Error::other(format!(
@@ -15933,7 +15953,7 @@ async fn t_dead_letter_replay_inserts_new_outbox_id() -> TestResult {
     let dl = store.dead_letter(test_dlx_payload_protector());
     let dlq = store.dlq_with_projection_registry(
         test_dlx_payload_protector(),
-        crate::projection_events::ProjectionWriteRegistry::from_generated(TEST_PROJECTION_INPUTS),
+        crate::projection_events::ProjectionWriteRegistry::from_selected(TEST_PROJECTION_INPUTS),
     );
     let domain = unique_domain("dlq-replay");
     let tenant = vocab::TenantId::parse(COTX_TENANT_A).unwrap();
@@ -16415,7 +16435,7 @@ async fn t_outbox_dlx_registers_dead_letter_and_redrive_is_tenant_scoped() -> Te
 
     let dlq = store.dlq_with_projection_registry(
         test_dlx_payload_protector(),
-        crate::projection_events::ProjectionWriteRegistry::from_generated(TEST_PROJECTION_INPUTS),
+        crate::projection_events::ProjectionWriteRegistry::from_selected(TEST_PROJECTION_INPUTS),
     );
     let cap = OperatorDlqCapability::issue_for_authorized_operator();
     let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
@@ -33013,8 +33033,7 @@ async fn sampling_loop_marks_ready_with_live_db() -> TestResult {
     let handle = tokio::spawn(pg_readiness_sampling_loop(
         Arc::clone(&store),
         Arc::clone(&store),
-        EMPTY_PROJECTION_INPUT_GENERATION,
-        &[],
+        None,
         Duration::from_millis(50),
         token.clone(),
         Arc::clone(&health),
@@ -33063,8 +33082,7 @@ async fn sampling_loop_marks_down_when_reader_pool_is_closed() -> TestResult {
     let handle = tokio::spawn(pg_readiness_sampling_loop(
         Arc::clone(&writer),
         reader,
-        EMPTY_PROJECTION_INPUT_GENERATION,
-        &[],
+        None,
         Duration::from_millis(50),
         token.clone(),
         Arc::clone(&health),

@@ -18,6 +18,7 @@ const INVENTORY_CONTRACT: &str = "runtime.inventory";
 /// The field is private so no caller can construct or substitute a partially validated plan.
 pub(crate) struct SettingsOnlyPlan {
     typed: TypedRuntimePlan,
+    workflow_runtime: eventexec::WorkflowRuntimePlan,
 }
 
 impl SettingsOnlyPlan {
@@ -36,12 +37,24 @@ impl SettingsOnlyPlan {
         let typed = TypedRuntimePlan::compile_v2(&manifest, &lock, input)
             .context("compile bundled settingsonly RuntimePlan")?;
         validate_typed_closure(&typed)?;
-        Ok(Self { typed })
+        let workflow_runtime = eventexec::WorkflowRuntimePlan::compile(
+            &typed,
+            eventexec::WorkflowCapabilityCatalog::empty(),
+        )
+        .context("compile bundled settingsonly workflow runtime plan")?;
+        Ok(Self {
+            typed,
+            workflow_runtime,
+        })
     }
 
     #[cfg(test)]
     pub(crate) const fn as_typed(&self) -> &TypedRuntimePlan {
         &self.typed
+    }
+
+    pub(crate) const fn workflow_runtime(&self) -> &eventexec::WorkflowRuntimePlan {
+        &self.workflow_runtime
     }
 
     pub(crate) fn provider_build(
@@ -87,6 +100,7 @@ impl SettingsOnlyPlan {
             .collect();
         runtimeexec::inventory::RuntimeInventorySeed::from_runtime_plan(
             &self.typed,
+            self.workflow_runtime.activated_workflows(),
             provider_bindings,
             placements,
         )

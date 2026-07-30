@@ -142,8 +142,7 @@ fn log_readiness_transition(
 pub(crate) async fn pg_readiness_sampling_loop(
     writer_store: Arc<PgStore>,
     reader_store: Arc<PgStore>,
-    projection_generation: &'static str,
-    projection_inputs: &'static [vocab::ProjectionInputBinding],
+    projection_capture: Option<crate::projection_events::ProjectionCaptureRegistration>,
     period: Duration,
     token: CancellationToken,
     health: Arc<PgDbReadiness>,
@@ -160,20 +159,27 @@ pub(crate) async fn pg_readiness_sampling_loop(
                     writer_store.probe_db_liveness(),
                     reader_store.probe_db_liveness(),
                 );
-                let registry = sample_projection_registry_readiness(
-                    writer,
-                    &writer_store,
-                    projection_generation,
-                    projection_inputs,
-                    last_registry,
-                ).await;
-                let cur = worst_readiness(worst_readiness(writer, reader), registry);
+                let registry = match projection_capture.as_ref() {
+                    Some(capture) => Some(sample_projection_registry_readiness(
+                        writer,
+                        &writer_store,
+                        capture,
+                        last_registry,
+                    ).await),
+                    None => None,
+                };
+                let cur = registry.map_or_else(
+                    || worst_readiness(writer, reader),
+                    |registry| worst_readiness(worst_readiness(writer, reader), registry),
+                );
                 log_readiness_transition(writer, reader, last);
-                if let Some(transition) = projection_registry_transition(registry, last_registry) {
-                    log_projection_registry_transition(transition);
+                if let Some(registry) = registry {
+                    if let Some(transition) = projection_registry_transition(registry, last_registry) {
+                        log_projection_registry_transition(transition);
+                    }
+                    last_registry = Some(registry);
                 }
                 last = Some((writer, reader));
-                last_registry = Some(registry);
                 health.mark(cur);
             }
         }
@@ -183,8 +189,7 @@ pub(crate) async fn pg_readiness_sampling_loop(
 async fn sample_projection_registry_readiness(
     writer: PoolReadiness,
     writer_store: &PgStore,
-    projection_generation: &'static str,
-    projection_inputs: &'static [vocab::ProjectionInputBinding],
+    capture: &crate::projection_events::ProjectionCaptureRegistration,
     last_registry: Option<PoolReadiness>,
 ) -> PoolReadiness {
     if writer != PoolReadiness::Ready {
@@ -194,7 +199,7 @@ async fn sample_projection_registry_readiness(
     }
     match tokio::time::timeout(
         PROJECTION_REGISTRY_PROBE_TIMEOUT,
-        writer_store.projection_input_generation_is_exact(projection_generation, projection_inputs),
+        writer_store.projection_input_generation_contains(capture.generation(), capture.bindings()),
     )
     .await
     {
@@ -236,14 +241,14 @@ fn log_projection_registry_transition(transition: ProjectionRegistryTransition) 
 fn log_projection_registry_degraded() {
     tracing::warn!(
         target: "postgres",
-        "postgres readiness degraded: projection input generation is not exact"
+        "postgres readiness degraded: selected projection inputs are absent from the generation"
     );
 }
 
 fn log_projection_registry_recovered() {
     tracing::info!(
         target: "postgres",
-        "postgres readiness recovered: projection input generation is exact"
+        "postgres readiness recovered: selected projection inputs belong to the generation"
     );
 }
 
@@ -490,8 +495,7 @@ mod tests {
         let handle = tokio::spawn(pg_readiness_sampling_loop(
             Arc::clone(&store),
             Arc::clone(&store),
-            "",
-            &[],
+            None,
             Duration::from_millis(100),
             token.clone(),
             Arc::clone(&health),
@@ -519,8 +523,7 @@ mod tests {
         let handle = tokio::spawn(pg_readiness_sampling_loop(
             Arc::clone(&store),
             Arc::clone(&store),
-            "",
-            &[],
+            None,
             Duration::from_secs(3600), // 长 period，不会自然 tick（测取消路径）
             token.clone(),
             Arc::clone(&health),
@@ -542,8 +545,7 @@ mod tests {
         let handle = tokio::spawn(pg_readiness_sampling_loop(
             Arc::clone(&store),
             Arc::clone(&store),
-            "",
-            &[],
+            None,
             Duration::from_secs(3600),
             token.clone(),
             Arc::clone(&health),
@@ -567,8 +569,7 @@ mod tests {
         let handle = tokio::spawn(pg_readiness_sampling_loop(
             Arc::clone(&store),
             Arc::clone(&store),
-            "",
-            &[],
+            None,
             Duration::from_secs(3600),
             token.clone(),
             Arc::clone(&health),

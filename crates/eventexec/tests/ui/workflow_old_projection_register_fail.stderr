@@ -1,0 +1,5 @@
+error[E0599]: no method named `register_target` found for mutable reference `&mut ProjectionTargetRegistry` in the current scope
+  --> tests/ui/workflow_old_projection_register_fail.rs:10:14
+   |
+10 |     registry.register_target(projection, target).unwrap();
+   |              ^^^^^^^^^^^^^^^ method not found in `&mut ProjectionTargetRegistry`

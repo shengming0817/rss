@@ -25,11 +25,14 @@
 //!
 //! ref: adapters/postgres/src/saga.rs（tenant-scoped append-only journal 范式）。
 
+use std::sync::Arc;
+
 use consistency::{
     EngineError, EngineErrorKind, EventTopic, Lsn, PartitionSerialDelivery, ProjectionBatchLimit,
     ProjectionEventMetadata, ProjectionEventRecord, ProjectionEventSource,
 };
 use diport::RedactedSource;
+#[cfg(test)]
 use sha2::{Digest as _, Sha256};
 use sqlx::PgPool;
 use vocab::ProjectionInputBinding;
@@ -46,23 +49,37 @@ pub struct PgProjectionEvents {
     pool: PgPool,
 }
 
-/// Generated projection writer registry.
+/// Immutable projection writer registry selected by the compiled assembly workflow plan.
 ///
-/// Constructed only from `generated::event::PROJECTION_INPUTS` (or test fixtures) and consumed by
-/// postgres writer funnels to decide whether an inserted outbox fact is mirrored into
-/// `projection_events`. There is no API to add raw `(contract_id, topic)` pairs.
-#[derive(Clone, Copy, Debug)]
+/// The registry owns its bindings so no caller can mutate the serving selection after startup.
+/// There is no production API to add raw `(contract_id, topic)` pairs.
+#[derive(Clone, Debug, Default)]
 pub(crate) struct ProjectionWriteRegistry {
-    bindings: &'static [ProjectionInputBinding],
+    bindings: Arc<[ProjectionInputBinding]>,
 }
 
 impl ProjectionWriteRegistry {
-    pub(crate) const fn from_generated(bindings: &'static [ProjectionInputBinding]) -> Self {
-        Self { bindings }
+    pub(crate) fn from_capture(capture: eventexec::ProjectionCaptureView<'_>) -> Self {
+        Self::owned(capture.bindings())
     }
 
-    pub(crate) const fn empty() -> Self {
-        Self { bindings: &[] }
+    #[cfg(test)]
+    pub(crate) fn from_selected(bindings: &[ProjectionInputBinding]) -> Self {
+        Self::owned(bindings)
+    }
+
+    fn owned(bindings: &[ProjectionInputBinding]) -> Self {
+        Self {
+            bindings: Arc::from(bindings),
+        }
+    }
+
+    pub(crate) fn empty() -> Self {
+        Self::default()
+    }
+
+    pub(crate) fn bindings(&self) -> &[ProjectionInputBinding] {
+        &self.bindings
     }
 
     pub(crate) fn is_bound(
@@ -78,6 +95,46 @@ impl ProjectionWriteRegistry {
                 && binding.schema_hash() == schema_hash
                 && binding.topic() == topic
         })
+    }
+}
+
+/// Active PostgreSQL projection-capture selection, including the global catalog generation it
+/// must be a member of. Disabled workflow plans are represented by `None` at carrier boundaries.
+#[derive(Clone, Debug)]
+pub(crate) struct ProjectionCaptureRegistration {
+    generation: &'static str,
+    registry: ProjectionWriteRegistry,
+}
+
+impl ProjectionCaptureRegistration {
+    pub(crate) fn from_capture(capture: eventexec::ProjectionCaptureView<'_>) -> Option<Self> {
+        capture.generation().map(|generation| Self {
+            generation,
+            registry: ProjectionWriteRegistry::from_capture(capture),
+        })
+    }
+
+    #[cfg(all(test, feature = "integration"))]
+    pub(crate) fn from_selected(
+        generation: &'static str,
+        bindings: &[ProjectionInputBinding],
+    ) -> Option<Self> {
+        (!bindings.is_empty()).then(|| Self {
+            generation,
+            registry: ProjectionWriteRegistry::from_selected(bindings),
+        })
+    }
+
+    pub(crate) fn generation(&self) -> &'static str {
+        self.generation
+    }
+
+    pub(crate) fn bindings(&self) -> &[ProjectionInputBinding] {
+        self.registry.bindings()
+    }
+
+    pub(crate) fn registry(&self) -> ProjectionWriteRegistry {
+        self.registry.clone()
     }
 }
 
@@ -98,10 +155,10 @@ impl PgStore {
     #[cfg(any(test, feature = "test-support", feature = "fault-matrix-test-support"))]
     pub(crate) async fn register_projection_input_bindings(
         &self,
-        generation: &'static str,
-        bindings: &'static [ProjectionInputBinding],
+        generation: &str,
+        bindings: &[ProjectionInputBinding],
     ) -> Result<(), sqlx::Error> {
-        validate_projection_input_generation(generation, bindings)?;
+        validate_projection_input_generation_label(generation)?;
         let mut tx = self.pool.begin().await?;
         for binding in bindings {
             sqlx::query(
@@ -120,24 +177,26 @@ impl PgStore {
         tx.commit().await
     }
 
-    /// Compare one generated projection generation with the migration-owned DB registry.
+    /// Verify that every workflow-selected input belongs to the migration-owned global catalog.
     ///
     /// The serving role reaches the table only through the fixed-shape
-    /// `rss_read_projection_input_generation` SECURITY DEFINER function. Missing, partial and extra
-    /// rows all return `Ok(false)`; probe failures remain errors so startup/readiness fail closed.
-    pub(crate) async fn projection_input_generation_is_exact(
+    /// `rss_read_projection_input_generation` SECURITY DEFINER function. Missing selected rows
+    /// return `Ok(false)` while unrelated global rows are allowed; probe failures remain errors so
+    /// startup/readiness fail closed.
+    pub(crate) async fn projection_input_generation_contains(
         &self,
-        generation: &'static str,
-        bindings: &'static [ProjectionInputBinding],
+        generation: &str,
+        bindings: &[ProjectionInputBinding],
     ) -> Result<bool, sqlx::Error> {
-        validate_projection_input_generation(generation, bindings)?;
-        let actual: Vec<(String, String, String, String)> = sqlx::query_as(
+        validate_projection_input_generation_label(generation)?;
+        let mut actual: Vec<(String, String, String, String)> = sqlx::query_as(
             "SELECT contract_id, contract_version, schema_hash, topic \
              FROM public.rss_read_projection_input_generation($1)",
         )
         .bind(generation)
         .fetch_all(&self.pool)
         .await?;
+        actual.sort_unstable();
         let mut expected = bindings
             .iter()
             .map(|binding| {
@@ -150,42 +209,43 @@ impl PgStore {
             })
             .collect::<Vec<_>>();
         expected.sort_unstable();
-        Ok(actual == expected)
+        expected.dedup();
+        Ok(expected
+            .iter()
+            .all(|binding| actual.binary_search(binding).is_ok()))
     }
 
-    pub(crate) async fn validate_registered_projection_input_generation(
+    pub(crate) async fn validate_projection_capture_registration(
         &self,
-        generation: &'static str,
-        bindings: &'static [ProjectionInputBinding],
+        capture: &ProjectionCaptureRegistration,
     ) -> Result<(), sqlx::Error> {
         if self
-            .projection_input_generation_is_exact(generation, bindings)
+            .projection_input_generation_contains(capture.generation(), capture.bindings())
             .await?
         {
             Ok(())
         } else {
             Err(sqlx::Error::Protocol(
-                "database projection input generation does not exactly match generated bindings"
-                    .into(),
+                "selected projection inputs are not members of the database generation".into(),
             ))
         }
     }
 }
 
-pub(crate) fn validate_projection_input_generation(
-    generation: &'static str,
-    bindings: &'static [ProjectionInputBinding],
-) -> Result<(), sqlx::Error> {
-    let expected = projection_input_generation(bindings);
-    if generation == expected {
+fn validate_projection_input_generation_label(generation: &str) -> Result<(), sqlx::Error> {
+    let digest = generation.strip_prefix("sha256:");
+    if digest.is_some_and(|digest| {
+        digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+    }) {
         Ok(())
     } else {
         Err(sqlx::Error::Protocol(
-            "generated projection input generation does not match binding set".into(),
+            "projection input generation is not a sha256 digest".into(),
         ))
     }
 }
 
+#[cfg(test)]
 pub(crate) fn projection_input_generation(bindings: &[ProjectionInputBinding]) -> String {
     let mut tuples = bindings
         .iter()
@@ -210,7 +270,7 @@ pub(crate) fn projection_input_generation(bindings: &[ProjectionInputBinding]) -
     format!("sha256:{:x}", digest.finalize())
 }
 
-/// Mirror an inserted outbox fact into projection_events when generated workflow metadata binds it.
+/// Mirror an inserted outbox fact when the compiled assembly workflow selection binds it.
 ///
 /// This function accepts only [`TxCapability`], so it can run solely inside the same transaction as
 /// the outbox insert. It intentionally returns `Ok(None)` for unbound facts.
@@ -612,5 +672,24 @@ mod smoke {
             forward,
             super::projection_input_generation(&[changed_topic, B])
         );
+    }
+
+    #[test]
+    fn projection_write_registry_owns_the_selected_bindings() {
+        const HASH: &str =
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let mut selected = vec![vocab::ProjectionInputBinding::from_static(
+            "projection-a",
+            "owner",
+            "owner.contract-a",
+            "v1",
+            HASH,
+            "owner.fact-a",
+        )];
+        let registry = super::ProjectionWriteRegistry::from_selected(&selected);
+
+        selected.clear();
+
+        assert!(registry.is_bound("owner.contract-a", "v1", HASH, "owner.fact-a"));
     }
 }

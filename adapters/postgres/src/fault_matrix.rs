@@ -480,8 +480,7 @@ impl PgFaultMatrixHarness {
         config: PgFaultMatrixConfig,
         logins: PgFaultMatrixLoginCredentials,
         relay_budget: RelayBudget,
-        projection_generation: &'static str,
-        projection_inputs: &'static [vocab::ProjectionInputBinding],
+        projection_capture: eventexec::ProjectionCaptureView<'_>,
     ) -> FaultMatrixResult<Self> {
         let migrator = pg_config(
             &config.host,
@@ -509,8 +508,7 @@ impl PgFaultMatrixHarness {
             &serving,
             &tenant_read,
             None,
-            projection_generation,
-            projection_inputs,
+            projection_capture,
         )
         .await?;
         let owner_pool = owner_pool(&config).await?;

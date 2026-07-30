@@ -29,6 +29,725 @@ pub mod inventory {
             }
         }
     }
+    ///`RuntimeActivatedProjection`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "RuntimeActivatedProjection",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "activation",
+    ///    "definitionSchemaDigest",
+    ///    "definitionVersion",
+    ///    "id",
+    ///    "mode"
+    ///  ],
+    ///  "properties": {
+    ///    "activation": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "capture-only",
+    ///        "shadow",
+    ///        "active"
+    ///      ]
+    ///    },
+    ///    "definitionSchemaDigest": {
+    ///      "$ref": "#/definitions/Sha256Fingerprint"
+    ///    },
+    ///    "definitionVersion": {
+    ///      "type": "string",
+    ///      "pattern": "^v[0-9]+$"
+    ///    },
+    ///    "id": {
+    ///      "type": "string",
+    ///      "minLength": 1
+    ///    },
+    ///    "mode": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "projection"
+    ///      ]
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct RuntimeActivatedProjection {
+        #[redact(sensitivity = public)]
+        pub activation: RuntimeActivatedProjectionActivation,
+        #[serde(rename = "definitionSchemaDigest")]
+        #[redact(sensitivity = public)]
+        pub definition_schema_digest: Sha256Fingerprint,
+        #[serde(rename = "definitionVersion")]
+        #[redact(sensitivity = public)]
+        pub definition_version: RuntimeActivatedProjectionDefinitionVersion,
+        #[redact(sensitivity = public)]
+        pub id: RuntimeActivatedProjectionId,
+        #[redact(sensitivity = public)]
+        pub mode: RuntimeActivatedProjectionMode,
+    }
+    ///`RuntimeActivatedProjectionActivation`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "capture-only",
+    ///    "shadow",
+    ///    "active"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum RuntimeActivatedProjectionActivation {
+        #[serde(rename = "capture-only")]
+        CaptureOnly,
+        #[serde(rename = "shadow")]
+        Shadow,
+        #[serde(rename = "active")]
+        Active,
+    }
+    impl ::std::fmt::Display for RuntimeActivatedProjectionActivation {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::CaptureOnly => f.write_str("capture-only"),
+                Self::Shadow => f.write_str("shadow"),
+                Self::Active => f.write_str("active"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for RuntimeActivatedProjectionActivation {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "capture-only" => Ok(Self::CaptureOnly),
+                "shadow" => Ok(Self::Shadow),
+                "active" => Ok(Self::Active),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for RuntimeActivatedProjectionActivation {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String> for RuntimeActivatedProjectionActivation {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String> for RuntimeActivatedProjectionActivation {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`RuntimeActivatedProjectionDefinitionVersion`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "pattern": "^v[0-9]+$"
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Serialize, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, ::secure::Redact)]
+    #[serde(transparent)]
+    pub struct RuntimeActivatedProjectionDefinitionVersion(
+        #[redact(sensitivity = public)] ::std::string::String,
+    );
+    impl ::std::ops::Deref for RuntimeActivatedProjectionDefinitionVersion {
+        type Target = ::std::string::String;
+        fn deref(&self) -> &::std::string::String {
+            &self.0
+        }
+    }
+    impl ::std::convert::From<RuntimeActivatedProjectionDefinitionVersion> for ::std::string::String {
+        fn from(value: RuntimeActivatedProjectionDefinitionVersion) -> Self {
+            value.0
+        }
+    }
+    impl ::std::str::FromStr for RuntimeActivatedProjectionDefinitionVersion {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            static PATTERN: ::std::sync::LazyLock<::regress::Regex> =
+                ::std::sync::LazyLock::new(|| ::regress::Regex::new("^v[0-9]+$").unwrap());
+            if PATTERN.find(value).is_none() {
+                return Err("doesn't match pattern \"^v[0-9]+$\"".into());
+            }
+            Ok(Self(value.to_string()))
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for RuntimeActivatedProjectionDefinitionVersion {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for RuntimeActivatedProjectionDefinitionVersion
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for RuntimeActivatedProjectionDefinitionVersion
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl<'de> ::serde::Deserialize<'de> for RuntimeActivatedProjectionDefinitionVersion {
+        fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
+        where
+            D: ::serde::Deserializer<'de>,
+        {
+            ::std::string::String::deserialize(deserializer)?
+                .parse()
+                .map_err(|e: self::error::ConversionError| {
+                    <D::Error as ::serde::de::Error>::custom(e.to_string())
+                })
+        }
+    }
+    ///`RuntimeActivatedProjectionId`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "minLength": 1
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Serialize, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, ::secure::Redact)]
+    #[serde(transparent)]
+    pub struct RuntimeActivatedProjectionId(#[redact(sensitivity = public)] ::std::string::String);
+    impl ::std::ops::Deref for RuntimeActivatedProjectionId {
+        type Target = ::std::string::String;
+        fn deref(&self) -> &::std::string::String {
+            &self.0
+        }
+    }
+    impl ::std::convert::From<RuntimeActivatedProjectionId> for ::std::string::String {
+        fn from(value: RuntimeActivatedProjectionId) -> Self {
+            value.0
+        }
+    }
+    impl ::std::str::FromStr for RuntimeActivatedProjectionId {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            if value.chars().count() < 1usize {
+                return Err("shorter than 1 characters".into());
+            }
+            Ok(Self(value.to_string()))
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for RuntimeActivatedProjectionId {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String> for RuntimeActivatedProjectionId {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String> for RuntimeActivatedProjectionId {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl<'de> ::serde::Deserialize<'de> for RuntimeActivatedProjectionId {
+        fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
+        where
+            D: ::serde::Deserializer<'de>,
+        {
+            ::std::string::String::deserialize(deserializer)?
+                .parse()
+                .map_err(|e: self::error::ConversionError| {
+                    <D::Error as ::serde::de::Error>::custom(e.to_string())
+                })
+        }
+    }
+    ///`RuntimeActivatedProjectionMode`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "projection"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum RuntimeActivatedProjectionMode {
+        #[serde(rename = "projection")]
+        Projection,
+    }
+    impl ::std::fmt::Display for RuntimeActivatedProjectionMode {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Projection => f.write_str("projection"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for RuntimeActivatedProjectionMode {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "projection" => Ok(Self::Projection),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for RuntimeActivatedProjectionMode {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String> for RuntimeActivatedProjectionMode {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String> for RuntimeActivatedProjectionMode {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`RuntimeActivatedSaga`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "RuntimeActivatedSaga",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "activation",
+    ///    "definitionSchemaDigest",
+    ///    "definitionVersion",
+    ///    "id",
+    ///    "mode"
+    ///  ],
+    ///  "properties": {
+    ///    "activation": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "active"
+    ///      ]
+    ///    },
+    ///    "definitionSchemaDigest": {
+    ///      "$ref": "#/definitions/Sha256Fingerprint"
+    ///    },
+    ///    "definitionVersion": {
+    ///      "type": "string",
+    ///      "pattern": "^v[0-9]+$"
+    ///    },
+    ///    "id": {
+    ///      "type": "string",
+    ///      "minLength": 1
+    ///    },
+    ///    "mode": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "saga"
+    ///      ]
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct RuntimeActivatedSaga {
+        #[redact(sensitivity = public)]
+        pub activation: RuntimeActivatedSagaActivation,
+        #[serde(rename = "definitionSchemaDigest")]
+        #[redact(sensitivity = public)]
+        pub definition_schema_digest: Sha256Fingerprint,
+        #[serde(rename = "definitionVersion")]
+        #[redact(sensitivity = public)]
+        pub definition_version: RuntimeActivatedSagaDefinitionVersion,
+        #[redact(sensitivity = public)]
+        pub id: RuntimeActivatedSagaId,
+        #[redact(sensitivity = public)]
+        pub mode: RuntimeActivatedSagaMode,
+    }
+    ///`RuntimeActivatedSagaActivation`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "active"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum RuntimeActivatedSagaActivation {
+        #[serde(rename = "active")]
+        Active,
+    }
+    impl ::std::fmt::Display for RuntimeActivatedSagaActivation {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Active => f.write_str("active"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for RuntimeActivatedSagaActivation {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "active" => Ok(Self::Active),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for RuntimeActivatedSagaActivation {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String> for RuntimeActivatedSagaActivation {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String> for RuntimeActivatedSagaActivation {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`RuntimeActivatedSagaDefinitionVersion`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "pattern": "^v[0-9]+$"
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Serialize, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, ::secure::Redact)]
+    #[serde(transparent)]
+    pub struct RuntimeActivatedSagaDefinitionVersion(
+        #[redact(sensitivity = public)] ::std::string::String,
+    );
+    impl ::std::ops::Deref for RuntimeActivatedSagaDefinitionVersion {
+        type Target = ::std::string::String;
+        fn deref(&self) -> &::std::string::String {
+            &self.0
+        }
+    }
+    impl ::std::convert::From<RuntimeActivatedSagaDefinitionVersion> for ::std::string::String {
+        fn from(value: RuntimeActivatedSagaDefinitionVersion) -> Self {
+            value.0
+        }
+    }
+    impl ::std::str::FromStr for RuntimeActivatedSagaDefinitionVersion {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            static PATTERN: ::std::sync::LazyLock<::regress::Regex> =
+                ::std::sync::LazyLock::new(|| ::regress::Regex::new("^v[0-9]+$").unwrap());
+            if PATTERN.find(value).is_none() {
+                return Err("doesn't match pattern \"^v[0-9]+$\"".into());
+            }
+            Ok(Self(value.to_string()))
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for RuntimeActivatedSagaDefinitionVersion {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String> for RuntimeActivatedSagaDefinitionVersion {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String> for RuntimeActivatedSagaDefinitionVersion {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl<'de> ::serde::Deserialize<'de> for RuntimeActivatedSagaDefinitionVersion {
+        fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
+        where
+            D: ::serde::Deserializer<'de>,
+        {
+            ::std::string::String::deserialize(deserializer)?
+                .parse()
+                .map_err(|e: self::error::ConversionError| {
+                    <D::Error as ::serde::de::Error>::custom(e.to_string())
+                })
+        }
+    }
+    ///`RuntimeActivatedSagaId`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "minLength": 1
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Serialize, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, ::secure::Redact)]
+    #[serde(transparent)]
+    pub struct RuntimeActivatedSagaId(#[redact(sensitivity = public)] ::std::string::String);
+    impl ::std::ops::Deref for RuntimeActivatedSagaId {
+        type Target = ::std::string::String;
+        fn deref(&self) -> &::std::string::String {
+            &self.0
+        }
+    }
+    impl ::std::convert::From<RuntimeActivatedSagaId> for ::std::string::String {
+        fn from(value: RuntimeActivatedSagaId) -> Self {
+            value.0
+        }
+    }
+    impl ::std::str::FromStr for RuntimeActivatedSagaId {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            if value.chars().count() < 1usize {
+                return Err("shorter than 1 characters".into());
+            }
+            Ok(Self(value.to_string()))
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for RuntimeActivatedSagaId {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String> for RuntimeActivatedSagaId {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String> for RuntimeActivatedSagaId {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl<'de> ::serde::Deserialize<'de> for RuntimeActivatedSagaId {
+        fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
+        where
+            D: ::serde::Deserializer<'de>,
+        {
+            ::std::string::String::deserialize(deserializer)?
+                .parse()
+                .map_err(|e: self::error::ConversionError| {
+                    <D::Error as ::serde::de::Error>::custom(e.to_string())
+                })
+        }
+    }
+    ///`RuntimeActivatedSagaMode`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "saga"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum RuntimeActivatedSagaMode {
+        #[serde(rename = "saga")]
+        Saga,
+    }
+    impl ::std::fmt::Display for RuntimeActivatedSagaMode {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Saga => f.write_str("saga"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for RuntimeActivatedSagaMode {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "saga" => Ok(Self::Saga),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for RuntimeActivatedSagaMode {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String> for RuntimeActivatedSagaMode {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String> for RuntimeActivatedSagaMode {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///A sealed non-disabled workflow activation.
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "RuntimeActivatedWorkflow",
+    ///  "description": "A sealed non-disabled workflow activation.",
+    ///  "oneOf": [
+    ///    {
+    ///      "$ref": "#/definitions/RuntimeActivatedProjection"
+    ///    },
+    ///    {
+    ///      "$ref": "#/definitions/RuntimeActivatedSaga"
+    ///    }
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+    #[serde(untagged)]
+    pub enum RuntimeActivatedWorkflow {
+        Projection(RuntimeActivatedProjection),
+        Saga(RuntimeActivatedSaga),
+    }
+    impl ::std::convert::From<RuntimeActivatedProjection> for RuntimeActivatedWorkflow {
+        fn from(value: RuntimeActivatedProjection) -> Self {
+            Self::Projection(value)
+        }
+    }
+    impl ::std::convert::From<RuntimeActivatedSaga> for RuntimeActivatedWorkflow {
+        fn from(value: RuntimeActivatedSaga) -> Self {
+            Self::Saga(value)
+        }
+    }
     ///`RuntimeAuthScheme`
     ///
     /// <details><summary>JSON schema</summary>
@@ -322,6 +1041,7 @@ pub mod inventory {
     ///  "title": "RuntimeInventoryData",
     ///  "type": "object",
     ///  "required": [
+    ///    "activatedWorkflows",
     ///    "assemblyFingerprint",
     ///    "domains",
     ///    "listeners",
@@ -331,6 +1051,14 @@ pub mod inventory {
     ///    "schemaVersion"
     ///  ],
     ///  "properties": {
+    ///    "activatedWorkflows": {
+    ///      "description": "The sealed non-disabled workflow set in stable runtime-plan order.",
+    ///      "type": "array",
+    ///      "items": {
+    ///        "$ref": "#/definitions/RuntimeActivatedWorkflow"
+    ///      },
+    ///      "uniqueItems": true
+    ///    },
     ///    "assemblyFingerprint": {
     ///      "$ref": "#/definitions/Sha256Fingerprint"
     ///    },
@@ -385,6 +1113,10 @@ pub mod inventory {
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
     #[serde(deny_unknown_fields)]
     pub struct RuntimeInventoryData {
+        ///The sealed non-disabled workflow set in stable runtime-plan order.
+        #[serde(rename = "activatedWorkflows")]
+        #[redact(sensitivity = public)]
+        pub activated_workflows: Vec<RuntimeActivatedWorkflow>,
         #[serde(rename = "assemblyFingerprint")]
         #[redact(sensitivity = public)]
         pub assembly_fingerprint: Sha256Fingerprint,
@@ -452,6 +1184,7 @@ pub mod inventory {
     ///      "title": "RuntimeInventoryData",
     ///      "type": "object",
     ///      "required": [
+    ///        "activatedWorkflows",
     ///        "assemblyFingerprint",
     ///        "domains",
     ///        "listeners",
@@ -461,6 +1194,14 @@ pub mod inventory {
     ///        "schemaVersion"
     ///      ],
     ///      "properties": {
+    ///        "activatedWorkflows": {
+    ///          "description": "The sealed non-disabled workflow set in stable runtime-plan order.",
+    ///          "type": "array",
+    ///          "items": {
+    ///            "$ref": "#/definitions/RuntimeActivatedWorkflow"
+    ///          },
+    ///          "uniqueItems": true
+    ///        },
     ///        "assemblyFingerprint": {
     ///          "$ref": "#/definitions/Sha256Fingerprint"
     ///        },
@@ -1535,7 +2276,7 @@ pub mod inventory {
         "runtime",
         "runtime.inventory",
         "v1",
-        "sha256:eae1ebf118cb3cabe0bb92931b0b3542ae863d3a24f16d7d677aa11ddf4260c5",
+        "sha256:f3f9c32443f10c2449a3df547a62f0a84297e2c6f2382f66deb661f7d51e09bb",
     );
 
     /// 业务绝对 HTTP path（来自 `contract.toml` `path`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。

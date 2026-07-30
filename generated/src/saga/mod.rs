@@ -3,3 +3,9 @@
 /// Saga contract metadata generated from `contract.toml`.
 pub type SagaSpec = ::vocab::SagaContractBinding;
 pub mod billing_v1;
+
+/// Complete repository Saga definition catalog.
+///
+/// Draft and inactive definitions remain visible for identity validation but never imply runtime
+/// action, store, worker, or probe activation.
+pub const SPECS: &[SagaSpec] = &[billing_v1::SPEC];

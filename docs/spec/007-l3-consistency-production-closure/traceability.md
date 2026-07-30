@@ -12,7 +12,7 @@
 | FR-003 | Saga activation 闭值 | #1913 | T1 assembly manifest parser/schema red-green |
 | FR-004 | omitted/disabled 零副作用 | #1914 | T3 omitted/disabled assembly runtime、DB capture、worker、route、serving 零副作用 journey |
 | FR-005 | draft+active fail-closed | #1913 | T1 lifecycle×activation validation |
-| FR-006 | Projection capability coverage | #1914 | T3 production startup missing-capability journey |
+| FR-006 | Projection capability coverage | #1920 | T3 production startup missing-capability journey；#1914 提供 T1 exact-set startup compiler 前置 |
 | FR-007 | Saga capability coverage | #1926 | T3 production startup exact resource-closure missing-capability journey |
 | FR-008 | definition catalog 不决定部署 | #1914 | T1 assembly-plan-only construction guard |
 | FR-009 | 删除 production blanket unsupported | #1914 | T1 production registry construction guard |

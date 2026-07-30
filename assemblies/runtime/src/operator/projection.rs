@@ -8,7 +8,7 @@ use anyhow::Context as _;
 use consistency::{EngineErrorKind, ProjectionBatchLimit, SerialInOrder};
 use eventexec::{
     ProjectionHarness, ProjectionId, ProjectionReplayProjector, ProjectionSelector, ProjectionStop,
-    ProjectionTargetRegistry, ProjectionVersion, projection_runner_once,
+    ProjectionTargetRegistry, ProjectionTargetView, ProjectionVersion, projection_runner_once,
 };
 use postgres::{
     MaintenanceAuditOutcome, PgMaintenanceDeps, PgRuntimeDeps, ProjectionPointerPrecondition,
@@ -279,18 +279,14 @@ pub(super) fn parse_projection_args(args: &[String]) -> anyhow::Result<Projectio
     })
 }
 
-pub(super) fn build_projection_target_registry() -> anyhow::Result<ProjectionTargetRegistry> {
-    let mut registry =
-        ProjectionTargetRegistry::from_generated(generated::event::PROJECTION_INPUTS)
-            .context("build generated projection target registry")?;
-    anyhow::ensure!(
-        !registry.is_empty(),
-        "no generated projection inputs compiled into this runtime"
-    );
-    registry.mark_all_generated_unsupported();
+pub(super) fn build_projection_target_registry(
+    view: ProjectionTargetView<'_>,
+) -> anyhow::Result<ProjectionTargetRegistry> {
+    let registry = ProjectionTargetRegistry::from_view(view)
+        .context("build assembly-plan projection target registry")?;
     registry
         .validate_coverage()
-        .context("validate generated projection target registry coverage")?;
+        .context("validate assembly-plan projection target registry coverage")?;
     Ok(registry)
 }
 
@@ -305,13 +301,15 @@ pub(super) fn projection_command_requires_registered_target(
 
 pub(super) fn ensure_projection_command_supported_by_registry(
     registry: &ProjectionTargetRegistry,
-    command: &ProjectionCliCommand,
+    parsed: &ProjectionCliArgs,
 ) -> anyhow::Result<()> {
-    if projection_command_requires_registered_target(command) {
-        anyhow::ensure!(
-            registry.has_registered_targets(),
-            "no registered projection targets compiled into this runtime"
-        );
+    registry
+        .bindings_for(parsed.selector.projection())
+        .context("projection is not activated by the assembly plan")?;
+    if projection_command_requires_registered_target(&parsed.command) {
+        registry
+            .target(parsed.selector.projection())
+            .context("projection target is not activated by the assembly plan")?;
     }
     Ok(())
 }
@@ -821,8 +819,15 @@ pub(super) async fn run_projection_command_inner(
 #[allow(async_fn_in_trait)]
 pub(super) trait ProjectionControlRuntime {
     type Session;
+    type Registry;
 
-    fn build_registry(&self) -> anyhow::Result<ProjectionTargetRegistry>;
+    fn build_registry(&self) -> anyhow::Result<Self::Registry>;
+
+    fn ensure_command_supported(
+        &self,
+        registry: &Self::Registry,
+        parsed: &ProjectionCliArgs,
+    ) -> anyhow::Result<()>;
 
     async fn connect_maintenance(&self) -> anyhow::Result<Self::Session>;
 
@@ -845,7 +850,7 @@ pub(super) trait ProjectionControlRuntime {
     async fn run_projection_command(
         &self,
         session: &Self::Session,
-        registry: &ProjectionTargetRegistry,
+        registry: &Self::Registry,
         parsed: &ProjectionCliArgs,
         receipt: &authn::ProjectionMaintenanceReceipt,
     ) -> anyhow::Result<()>;
@@ -860,9 +865,20 @@ pub(super) struct ProductionProjectionControlRuntime<'a> {
 
 impl ProjectionControlRuntime for ProductionProjectionControlRuntime<'_> {
     type Session = PgMaintenanceDeps;
+    type Registry = ProjectionTargetRegistry;
 
     fn build_registry(&self) -> anyhow::Result<ProjectionTargetRegistry> {
-        build_projection_target_registry()
+        let plan = crate::plan::RuntimePlan::bundled(self.config)
+            .context("compile bundled runtime plan for projection operator")?;
+        build_projection_target_registry(plan.workflow_runtime().projection_targets())
+    }
+
+    fn ensure_command_supported(
+        &self,
+        registry: &Self::Registry,
+        parsed: &ProjectionCliArgs,
+    ) -> anyhow::Result<()> {
+        ensure_projection_command_supported_by_registry(registry, parsed)
     }
 
     async fn connect_maintenance(&self) -> anyhow::Result<Self::Session> {
@@ -955,7 +971,7 @@ where
 {
     let parsed = parse_projection_args(args)?;
     let registry = runtime.build_registry()?;
-    ensure_projection_command_supported_by_registry(&registry, &parsed.command)?;
+    runtime.ensure_command_supported(&registry, &parsed)?;
     let resource_id = projection_command_resource_id(&parsed);
     let session = runtime.connect_maintenance().await?;
     let start_action = format!("projection.{}.start", parsed.command.action().as_str());

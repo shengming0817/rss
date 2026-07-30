@@ -39,3 +39,9 @@ fn tx_capability_ui() {
     t.compile_fail("tests/ui/consumer_tx_commit_proof_substitute_fail.rs");
     t.pass("tests/ui/pg_public_funnels_pass.rs");
 }
+
+#[test]
+fn workflow_projection_raw_signature_is_absent() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/ui/pg_runtime_projection_raw_signature_fail.rs");
+}

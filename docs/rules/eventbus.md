@@ -111,9 +111,10 @@ Outbox relay transport 是 **at-least-once**：durable fact 使用稳定 event I
   assembly activation plan 派生，再由组合根闭合；`bootstrap::sagaprojectiondeps::resolve` 只在 requirements
   已要求 Saga/Projection durable backend 后，按 `Topology` 选择 PostgreSQL instance/journal/checkpoint 与
   Redis runtime-lock backend。resolver 成功不代表 workflow 已激活，也不证明完整 requirement 集合已闭合。
-- #1913 只建立 manifest/lock/RuntimePlan v2 协议载体；#1914 才把 production registry、DB capture、worker、
-  route、serving 与 inventory 切换为消费该 plan。在切换完成前，不得把上述目标语义登记为已成立的 runtime
-  `INVARIANT:`。
+- `eventexec::WorkflowRuntimePlan` 是 production workflow activation 的唯一执行入口：它将 sealed
+  RuntimePlan 与 generated definition、typed capability catalog 精确 join，并只向 PostgreSQL capture、
+  operator/DLQ、Saga 与 runtime inventory 发放不可外部构造的借用视图。omitted/disabled 不得创建 registry、
+  store、worker、route 或 probe；global definition catalog 只能由该 compiler 读取，不能直接驱动 production。
 - saga fail-closed：tenant scope 缺失、lease token/epoch/expiry 不匹配、`(tenant, saga, seq)` 内容冲突、
   lock busy/lost/unavailable，都必须返回 typed interrupted outcome，不触发补偿或 app DLX。
 - Redis lock 不是最终 fencing；Postgres instance lease + journal CAS 才是最终写入围栏。

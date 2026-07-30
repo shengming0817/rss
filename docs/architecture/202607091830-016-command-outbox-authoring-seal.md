@@ -25,7 +25,8 @@ event 与 command 使用两条互不转换的写入路径：
   `JournaledCommandDispatcher<S: CommandJournalStore>`。dispatcher 在 crate 内构造
   `ReviewedCommandDispatch` / `ReviewedCommandJournal`；外部无法构造 reviewed DTO。
 - 分层图只增加精确 `eventexec → generated` 编译边，使 eventexec 能实现 generated seam；
-  `command_generated_seam_allows` 不接受其它 Service→Generated、反向或同层变体。
+  该边现由 command + workflow 共用的 `eventexec_generated_seam_allows` 守卫，仍不接受其它
+  Service→Generated、反向或同层变体。
 - provider 只能通过 reviewed DTO 的只读 accessor 或消费式 `into_parts` 落库。event `OutboxEmitter` 不接受
   command authoring 类型。
 - raw idempotency key 只能进入 eventexec-owned keyed blind-index keyring；provider 只收到 sealed

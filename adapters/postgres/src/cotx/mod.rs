@@ -505,7 +505,7 @@ impl PgWritePool<MaintenanceWriteLane> {
 
 impl<L> PgWritePool<L> {
     pub(crate) fn projection_registry(&self) -> ProjectionWriteRegistry {
-        self.projection_registry
+        self.projection_registry.clone()
     }
 
     /// Run a tenant-scoped write transaction.
@@ -601,7 +601,7 @@ impl<L> PgWritePool<L> {
         ProducerTxAttempt::new(
             producer_tx_inner(
                 &self.pool,
-                self.projection_registry,
+                self.projection_registry.clone(),
                 ProducerTxWrite { tenant, entry, env },
                 LocalTxExecutionPolicy::Plain,
                 business_write,
@@ -638,7 +638,7 @@ impl<L> PgWritePool<L> {
         let tenant = scope.tenant();
         producer_tx_inner(
             &self.pool,
-            self.projection_registry,
+            self.projection_registry.clone(),
             ProducerTxWrite { tenant, entry, env },
             LocalTxExecutionPolicy::Deadline(deadline),
             business_write,
@@ -1139,7 +1139,7 @@ where
     {
         Box::pin(complete_producer_write(
             tx,
-            self.projection_registry,
+            self.projection_registry.clone(),
             self.write.tenant,
             self.write.entry,
             self.write.env,

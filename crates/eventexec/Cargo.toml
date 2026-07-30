@@ -5,10 +5,15 @@ edition.workspace = true
 rust-version.workspace = true
 publish = false
 
+[features]
+default = []
+test-support = []
+
 [lints]
 workspace = true
 
 [dependencies]
+assembly-schema = { path = "../assembly-schema" }
 # Subscriber DI port + Message 原语迁 diport（#1075）；本 crate 消费 diport::Message（HandlerFn/ConsumerFn 入参）。
 diport = { path = "../diport" }
 # reconcile harness 经 vocab::Epoch 传递 lease epoch（Context::epoch / LeaseToken.epoch 同源，#1123）。

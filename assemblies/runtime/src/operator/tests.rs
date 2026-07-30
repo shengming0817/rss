@@ -8,8 +8,7 @@ use eventexec::{
     AuthorizedDlqOperatorReceipt, DeadLetterId, DlqCursor, DlqEntrySummary, DlqError,
     DlqInspectRequest, DlqInspectTarget, DlqListQuery, DlqRedriveOutcome, DlqRedriveRequest,
     DlqReplayRequest, DlqStore, OutboxExpiredResolutionKind, OutboxExpiredResolutionOutcome,
-    OutboxExpiredResolutionRequest, ProjectionId, ProjectionSelector, ProjectionStop,
-    ProjectionTargetRegistry, VerifiedOperatorSubject,
+    OutboxExpiredResolutionRequest, ProjectionStop, VerifiedOperatorSubject,
 };
 use postgres::{MaintenanceAuditOutcome, ProjectionPointerPrecondition};
 
@@ -50,33 +49,11 @@ fn args(parts: &[&str]) -> Vec<String> {
     parts.iter().map(|part| (*part).to_string()).collect()
 }
 
-static PROJECTION_REGISTRY_FIXTURE_INPUTS: &[vocab::ProjectionInputBinding] =
-    &[vocab::ProjectionInputBinding::from_static(
-        "audit.session-projection",
-        "identity",
-        "identity.session-created",
-        "v1",
-        "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-        "identity.session.created",
-    )];
-
 const PROJECTION_FIXTURE_OPERATOR_TENANT: &str = "00000000-0000-4000-8000-000000000001";
 const PROJECTION_FIXTURE_TENANT: &str = "00000000-0000-4000-8000-000000000002";
 const PROJECTION_FIXTURE_ID: &str = "audit.session-projection";
 const PROJECTION_FIXTURE_VERSION: &str = "v2";
 const PROJECTION_FIXTURE_OPERATOR: &str = "rss-maintenance-operator";
-
-struct NoopProjectionReplayTarget;
-
-impl eventexec::ProjectionReplayTarget for NoopProjectionReplayTarget {
-    fn apply<'a>(
-        &'a self,
-        _selector: &'a ProjectionSelector,
-        _event: consistency::ProjectionEventRecord,
-    ) -> futures::future::BoxFuture<'a, Result<(), consistency::EngineError>> {
-        Box::pin(async { Ok(()) })
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum FakeProjectionAuditOutcome {
@@ -210,20 +187,22 @@ fn fake_projection_receipt(
 
 impl ProjectionControlRuntime for FakeProjectionControlRuntime {
     type Session = ();
+    type Registry = bool;
 
-    fn build_registry(&self) -> anyhow::Result<ProjectionTargetRegistry> {
-        let mut registry =
-            ProjectionTargetRegistry::from_generated(PROJECTION_REGISTRY_FIXTURE_INPUTS)?;
-        if self.target_registered {
-            registry.register_target(
-                ProjectionId::parse(PROJECTION_FIXTURE_ID)?,
-                Arc::new(NoopProjectionReplayTarget),
-            )?;
-        } else {
-            registry.mark_all_generated_unsupported();
-        }
-        registry.validate_coverage()?;
-        Ok(registry)
+    fn build_registry(&self) -> anyhow::Result<Self::Registry> {
+        Ok(self.target_registered)
+    }
+
+    fn ensure_command_supported(
+        &self,
+        registry: &Self::Registry,
+        _parsed: &ProjectionCliArgs,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            *registry,
+            "projection is not activated by the assembly plan"
+        );
+        Ok(())
     }
 
     async fn connect_maintenance(&self) -> anyhow::Result<Self::Session> {
@@ -287,14 +266,14 @@ impl ProjectionControlRuntime for FakeProjectionControlRuntime {
     async fn run_projection_command(
         &self,
         _session: &Self::Session,
-        registry: &ProjectionTargetRegistry,
+        registry: &Self::Registry,
         parsed: &ProjectionCliArgs,
         receipt: &authn::ProjectionMaintenanceReceipt,
     ) -> anyhow::Result<()> {
         let record = FakeProjectionCommandRecord {
             action: parsed.command.action(),
             operator_subject: receipt.operator_caller().as_str().to_owned(),
-            registry_has_targets: registry.has_registered_targets(),
+            registry_has_targets: *registry,
         };
         match self.commands.lock() {
             Ok(mut records) => records.push(record),
@@ -838,30 +817,21 @@ fn projection_args_fail_closed_on_missing_invalid_or_unknown_flags() {
 }
 
 #[test]
-fn projection_registry_covers_generated_inputs_and_fixture_is_not_vacuous() -> anyhow::Result<()> {
-    if generated::event::PROJECTION_INPUTS.is_empty() {
-        let err = match build_projection_target_registry() {
-            Ok(_) => anyhow::bail!("empty generated projection registry must fail fast"),
-            Err(err) => err,
-        };
-        assert!(
-            err.to_string()
-                .contains("no generated projection inputs compiled into this runtime"),
-            "unexpected error: {err:#}"
-        );
-    } else {
-        build_projection_target_registry()?.validate_coverage()?;
-    }
+fn bundled_disabled_projection_is_absent_from_operator_registry() -> anyhow::Result<()> {
+    let snapshot = crate::config::test_snapshot(&[
+        ("RSS_PRIMARY_TOKEN_PROFILE", "rss-access"),
+        ("RSS_ADMIN_TOKEN_PROFILE", "rss-access"),
+        ("RSS_INTERNAL_AUTH_SCHEME", "mtls"),
+    ])?;
+    let plan = crate::plan::RuntimePlan::bundled(snapshot.view())?;
+    let registry = build_projection_target_registry(plan.workflow_runtime().projection_targets())?;
+    assert!(registry.is_empty());
+    registry.validate_coverage()?;
 
-    let mut fixture = ProjectionTargetRegistry::from_generated(PROJECTION_REGISTRY_FIXTURE_INPUTS)?;
-    assert!(fixture.validate_coverage().is_err());
-    fixture.mark_unsupported(ProjectionId::parse("audit.session-projection")?)?;
-    fixture.validate_coverage()?;
-    assert!(
-        fixture
-            .target(&ProjectionId::parse("audit.session-projection")?)
-            .is_err()
-    );
+    let parsed = parse_projection_args(&projection_control_args("status", &[]))?;
+    let error = ensure_projection_command_supported_by_registry(&registry, &parsed)
+        .expect_err("disabled projection must be absent from the operator registry");
+    assert!(format!("{error:#}").contains("projection is not activated by the assembly plan"));
     Ok(())
 }
 
@@ -978,42 +948,6 @@ fn projection_replay_cli_fields_are_stable_and_loop_continues_only_on_full_compl
     let batch_limit = ProjectionBatchLimit::new(10)?;
     assert!(projection_replay_batch_is_full(10, batch_limit));
     assert!(!projection_replay_batch_is_full(9, batch_limit));
-    Ok(())
-}
-
-#[test]
-fn projection_replay_and_swap_require_registered_runtime_target() -> anyhow::Result<()> {
-    let mut fixture = ProjectionTargetRegistry::from_generated(PROJECTION_REGISTRY_FIXTURE_INPUTS)?;
-    fixture.mark_all_generated_unsupported();
-    ensure_projection_command_supported_by_registry(&fixture, &ProjectionCliCommand::Status)?;
-    let replay = ensure_projection_command_supported_by_registry(
-        &fixture,
-        &ProjectionCliCommand::Replay {
-            batch_limit: ProjectionBatchLimit::MAX,
-        },
-    );
-    let Err(replay_err) = replay else {
-        anyhow::bail!("replay without registered targets must fail");
-    };
-    assert!(
-        replay_err
-            .to_string()
-            .contains("no registered projection targets compiled into this runtime")
-    );
-    let swap = ensure_projection_command_supported_by_registry(
-        &fixture,
-        &ProjectionCliCommand::Swap {
-            precondition: ProjectionPointerPrecondition::ExpectUnset,
-        },
-    );
-    let Err(swap_err) = swap else {
-        anyhow::bail!("swap without registered targets must fail");
-    };
-    assert!(
-        swap_err
-            .to_string()
-            .contains("no registered projection targets compiled into this runtime")
-    );
     Ok(())
 }
 
@@ -1188,15 +1122,15 @@ async fn projection_control_lifecycle_registry_gate_runs_before_runtime_setup() 
 {
     let runtime = FakeProjectionControlRuntime::unsupported(FakeProjectionCommandResult::Success);
     let result = run_projection_control_command_with_runtime(
-        &projection_control_args("replay", &[]),
+        &projection_control_args("status", &[]),
         &runtime,
     )
     .await;
     let Err(err) = result else {
-        anyhow::bail!("replay without registered targets must fail");
+        anyhow::bail!("status for a disabled or omitted projection must fail");
     };
     assert!(
-        format!("{err:#}").contains("no registered projection targets compiled into this runtime"),
+        format!("{err:#}").contains("projection is not activated by the assembly plan"),
         "unexpected error: {err:#}"
     );
 

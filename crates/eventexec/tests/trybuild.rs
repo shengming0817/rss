@@ -36,6 +36,17 @@ fn projection_ui() {
 }
 
 #[test]
+fn workflow_runtime_views_are_sealed() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/ui/workflow_projection_capture_view_forge_fail.rs");
+    t.compile_fail("tests/ui/workflow_projection_target_view_forge_fail.rs");
+    t.compile_fail("tests/ui/workflow_saga_view_forge_fail.rs");
+    t.compile_fail("tests/ui/workflow_activated_view_forge_fail.rs");
+    t.compile_fail("tests/ui/workflow_plan_forge_fail.rs");
+    t.compile_fail("tests/ui/workflow_old_projection_register_fail.rs");
+}
+
+#[test]
 fn typed_saga_ui() {
     let t = trybuild::TestCases::new();
     // generated SPEC + policy + ordered step binding + required compensation → 编译通过。

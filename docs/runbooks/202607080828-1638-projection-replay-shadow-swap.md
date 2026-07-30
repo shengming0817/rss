@@ -9,10 +9,13 @@
   typed caller 必须是 `ServiceCallerDomain::MaintenanceOperator`
   （canonical `sub=rss-maintenance-operator`）。
 - operator 必须被显式授权到目标 action/tenant/projection：`RSS_PROJECTION_MAINTENANCE_OPERATOR_GRANTS=action|tenant|projection`，多条用逗号分隔；`action` 只能是 `status`、`replay`、`swap`，caller 不从配置字符串选择。
-- projection id 必须来自 `generated::event::PROJECTION_INPUTS` 对应的 runtime registry；未知 id fail-closed。
-- `replay`/`swap` 还要求当前 binary 至少注册一个 production projection target；只有 unsupported marker 的 runtime 会 fail-closed。`status` 仍可读取 active pointer 和 high-water。
+- projection id 必须来自 sealed assembly `WorkflowRuntimePlan` 的 `ProjectionTargetView`；generated definition
+  存在不代表已激活，unknown、disabled 与 omitted selector 都在 PostgreSQL/Vault/replay 初始化前 fail-closed。
+- `replay`/`swap` 要求 plan 精确选中 production projection target；不存在 blanket unsupported marker 或
+  generated-catalog fallback。`status` 使用同一 target view。
 - replay DLQ 复用 `dead_letter`，需要 Vault transit DLQ 配置：`RSS_DLX_PAYLOAD_KEY_NAME`、`RSS_VAULT_ADDR`、`RSS_VAULT_TOKEN`、`RSS_VAULT_TRANSIT_MOUNT`。
-- 当前如果 `PROJECTION_INPUTS` 为空，生产 replay/swap/status 会以 `no generated projection inputs compiled into this runtime` 早失败；fixture 测试负责证明 registry 行为非空转。
+- 当前 assembly target view 为空时，生产 replay/swap/status 在任何 provider 初始化前早失败；fixture 测试
+  负责证明非空 exact-set registry 行为不空转。
 
 ## Env Matrix
 
@@ -125,10 +128,10 @@ rss projections swap \
 
 ## Failure Handling
 
-- `no generated projection inputs compiled into this runtime`：当前 build 没有任何 generated projection workflow input；检查 contract/workflow codegen 和部署 artifact。
-- `no registered projection targets compiled into this runtime`：当前 binary 只带 generated registry/unsupported marker，没有任何 production read-model target；只能执行 `status`，不能 replay/swap。
-- `unknown projection target`：projection id 不在 generated registry，检查 contract/workflow codegen。
-- `projection target is not supported by this runtime`：registry 明确标记 unsupported，不能 promote 或 replay。
+- `build assembly-plan projection target registry` / `validate assembly-plan projection target registry coverage`：部署 artifact 的 sealed RuntimePlan 与 binary typed capability 不一致；修正 assembly plan 或 capability wiring 后重新构建并部署。该错误在 PostgreSQL/Vault 初始化前终止。
+- `projection is not activated by the assembly plan`：selector 对应的 workflow 被 omitted/disabled，或 identity/mode/version/schema digest 不匹配。核对部署的 RuntimePlan 并激活精确 workflow；`status`、`replay`、`swap` 均不会绕过此检查，且在 provider 初始化前终止。
+- `projection target is not activated by the assembly plan`：workflow 已声明但 sealed plan 没有签发匹配 target；核对 shadow/active activation 与完整 typed runtime capability，重新构建并部署，不得从 generated definition ledger 手工补注册。
+- `projection is not generated for this runtime` / `projection target is not replayable by this runtime` / `projection target is not swappable by this runtime` / `projection input bindings are not generated for this runtime`：已选择 workflow 的 generated definition、inputs 或 target capability 与命令不一致；修正 codegen 输入或 assembly capability 后整体重新部署，不得使用 unsupported marker 或 raw registry fallback。
 - `projection shadow checkpoint is missing`：先成功 replay 目标 version，再 swap。
 - `projection shadow checkpoint is behind source high-water`：目标 shadow version 尚未追到 source 尾部；重新 replay 到 `selected_shadow_high_water_lsn == source_high_water_lsn` 后再 swap。
 - `projection active pointer precondition failed`：当前 active 与命令声明不一致；执行 `status` 后按实际版本重新决定。

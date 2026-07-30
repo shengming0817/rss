@@ -224,7 +224,7 @@ impl SagaActivation {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 /// A projection runtime capability derived from its activation state.
 ///
 /// Values of this type are derived facts and are not part of the manifest wire
@@ -248,7 +248,22 @@ pub enum ProjectionCapabilityRequirement {
     Serving,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+impl ProjectionCapabilityRequirement {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Source => "source",
+            Self::CaptureStore => "capture-store",
+            Self::Target => "target",
+            Self::CheckpointStore => "checkpoint-store",
+            Self::DeadLetterStore => "dead-letter-store",
+            Self::Worker => "worker",
+            Self::Probe => "probe",
+            Self::Serving => "serving",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 /// A saga runtime capability derived from its activation state.
 ///
 /// Values of this type are derived facts and are not part of the manifest wire
@@ -272,6 +287,22 @@ pub enum SagaCapabilityRequirement {
     Worker,
     /// Probe that reports saga health and progress.
     Probe,
+}
+
+impl SagaCapabilityRequirement {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::TypedActions => "typed-actions",
+            Self::InstanceStore => "instance-store",
+            Self::JournalStore => "journal-store",
+            Self::ReceiptStore => "receipt-store",
+            Self::CheckpointStore => "checkpoint-store",
+            Self::DeadLetterStore => "dead-letter-store",
+            Self::LockFencing => "lock-fencing",
+            Self::Worker => "worker",
+            Self::Probe => "probe",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]

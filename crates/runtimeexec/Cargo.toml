@@ -18,6 +18,7 @@ assembly-schema = { path = "../assembly-schema" }
 authn = { path = "../authn" }
 bootstrap = { path = "../bootstrap" }
 diport = { path = "../diport" }
+eventexec = { path = "../eventexec" }
 primitives = { path = "../primitives" }
 secure = { path = "../secure" }
 serde = { workspace = true }

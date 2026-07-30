@@ -11,6 +11,7 @@
         "schemaVersion",
         "assemblyFingerprint",
         "runtimePlanFingerprint",
+        "activatedWorkflows",
         "domains",
         "listeners",
         "providerPosture",
@@ -21,6 +22,12 @@
         "assemblyFingerprint": { "$ref": "#/definitions/Sha256Fingerprint" },
         "buildMetadata": { "$ref": "#/definitions/RuntimeBuildMetadata" },
         "runtimePlanFingerprint": { "$ref": "#/definitions/Sha256Fingerprint" },
+        "activatedWorkflows": {
+          "description": "The sealed non-disabled workflow set in stable runtime-plan order.",
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/definitions/RuntimeActivatedWorkflow" }
+        },
         "domains": {
           "description": "Assembly domains in declaration order.",
           "type": "array",
@@ -112,6 +119,55 @@
       "properties": {
         "id": { "type": "string", "minLength": 1 },
         "state": { "type": "string", "enum": ["ready", "degraded", "unavailable"] }
+      },
+      "additionalProperties": false
+    },
+    "RuntimeActivatedWorkflow": {
+      "title": "RuntimeActivatedWorkflow",
+      "description": "A sealed non-disabled workflow activation.",
+      "oneOf": [
+        { "$ref": "#/definitions/RuntimeActivatedProjection" },
+        { "$ref": "#/definitions/RuntimeActivatedSaga" }
+      ]
+    },
+    "RuntimeActivatedProjection": {
+      "title": "RuntimeActivatedProjection",
+      "type": "object",
+      "required": [
+        "mode",
+        "id",
+        "definitionVersion",
+        "definitionSchemaDigest",
+        "activation"
+      ],
+      "properties": {
+        "mode": { "type": "string", "enum": ["projection"] },
+        "id": { "type": "string", "minLength": 1 },
+        "definitionVersion": { "type": "string", "pattern": "^v[0-9]+$" },
+        "definitionSchemaDigest": { "$ref": "#/definitions/Sha256Fingerprint" },
+        "activation": {
+          "type": "string",
+          "enum": ["capture-only", "shadow", "active"]
+        }
+      },
+      "additionalProperties": false
+    },
+    "RuntimeActivatedSaga": {
+      "title": "RuntimeActivatedSaga",
+      "type": "object",
+      "required": [
+        "mode",
+        "id",
+        "definitionVersion",
+        "definitionSchemaDigest",
+        "activation"
+      ],
+      "properties": {
+        "mode": { "type": "string", "enum": ["saga"] },
+        "id": { "type": "string", "minLength": 1 },
+        "definitionVersion": { "type": "string", "pattern": "^v[0-9]+$" },
+        "definitionSchemaDigest": { "$ref": "#/definitions/Sha256Fingerprint" },
+        "activation": { "type": "string", "enum": ["active"] }
       },
       "additionalProperties": false
     },

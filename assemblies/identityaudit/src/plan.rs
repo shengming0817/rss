@@ -15,6 +15,7 @@ const WORKLOAD: &str = "identityaudit";
 /// Proof that the bundled manifest, lock and generated provider catalog agree exactly.
 pub(crate) struct IdentityAuditPlan {
     typed: TypedRuntimePlan,
+    workflow_runtime: eventexec::WorkflowRuntimePlan,
 }
 
 impl IdentityAuditPlan {
@@ -31,7 +32,15 @@ impl IdentityAuditPlan {
         let typed = TypedRuntimePlan::compile_v2(&manifest, &lock, compiler_input(&manifest)?)
             .context("compile bundled identityaudit RuntimePlan")?;
         validate_typed(&typed)?;
-        Ok(Self { typed })
+        let workflow_runtime = eventexec::WorkflowRuntimePlan::compile(
+            &typed,
+            eventexec::WorkflowCapabilityCatalog::empty(),
+        )
+        .context("compile bundled identityaudit workflow runtime plan")?;
+        Ok(Self {
+            typed,
+            workflow_runtime,
+        })
     }
 
     pub(crate) fn provider_build(
@@ -77,6 +86,7 @@ impl IdentityAuditPlan {
             .collect();
         runtimeexec::inventory::RuntimeInventorySeed::from_runtime_plan(
             &self.typed,
+            self.workflow_runtime.activated_workflows(),
             provider_bindings,
             placements,
         )
@@ -86,6 +96,10 @@ impl IdentityAuditPlan {
     #[cfg(test)]
     pub(crate) const fn as_typed(&self) -> &TypedRuntimePlan {
         &self.typed
+    }
+
+    pub(crate) const fn workflow_runtime(&self) -> &eventexec::WorkflowRuntimePlan {
+        &self.workflow_runtime
     }
 }
 

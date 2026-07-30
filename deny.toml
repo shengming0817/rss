@@ -135,8 +135,9 @@ deny = [
   # 不在此 ban——其「只准 [dev-dependencies] 消费」由 xtask layers.rs TEST_SUPPORT_CRATES + layer-deps
   # LAYER-DEPS-08（check_test_support_confinement：任一 shipped 边指向 testkit 即报）守，testcontainers 树经
   # `containers` feature + dev-dep-only 不进产物。
-  # generated（contract 派生 wire 类型）只能被域 crate + 组合根，以及实现 private command seam 的 eventexec 依赖。
-  # eventexec → generated 是 exact crate edge；其它 Service→Generated 仍由 layer-deps 拒绝。
+  # generated（contract 派生 wire 类型）只能被域 crate + 组合根，以及实现 private command/workflow
+  # runtime seam 的 eventexec 依赖。eventexec → generated 是 exact crate edge；其它 Service→Generated
+  # 仍由 layer-deps 拒绝。
   { crate = "generated", wrappers = ["identity", "settings", "audit", "contractreg", "syshealth", "eventexec", "postgres", "server", "rss", "runtime", "settings-composition", "identity-composition", "audit-composition", "eventing-composition", "settingsonly", "identityaudit", "xtask", "journeys", "journeys-fault-matrix"] },
 ]
 

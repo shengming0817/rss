@@ -19,6 +19,19 @@ fn valid_response() -> serde_json::Value {
             },
             "runtimePlanFingerprint": format!("sha256:{}", "b".repeat(64)),
             "schemaVersion": 1,
+            "activatedWorkflows": [{
+                "mode": "projection",
+                "id": "settings.config-projection",
+                "definitionVersion": "v1",
+                "definitionSchemaDigest": format!("sha256:{}", "c".repeat(64)),
+                "activation": "shadow"
+            }, {
+                "mode": "saga",
+                "id": "identity.rotate-credential",
+                "definitionVersion": "v2",
+                "definitionSchemaDigest": format!("sha256:{}", "f".repeat(64)),
+                "activation": "active"
+            }],
             "domains": ["identity"],
             "listeners": [],
             "providerPosture": [],
@@ -38,6 +51,7 @@ fn runtime_inventory_wire_is_closed_and_camel_case() -> Result<(), Box<dyn std::
     let response: RuntimeInventoryResponse = serde_json::from_value(value)?;
     let encoded = serde_json::to_value(response)?;
     assert!(encoded["data"].get("providerPosture").is_some());
+    assert!(encoded["data"].get("activatedWorkflows").is_some());
     assert!(encoded["data"].get("provider_posture").is_none());
     assert!(encoded["data"].get("deploymentFingerprint").is_none());
     assert_eq!(
@@ -61,6 +75,15 @@ fn runtime_inventory_wire_is_closed_and_camel_case() -> Result<(), Box<dyn std::
     legacy["data"]["deploymentFingerprint"] =
         serde_json::json!(format!("sha256:{}", "c".repeat(64)));
     assert!(serde_json::from_value::<RuntimeInventoryResponse>(legacy).is_err());
+
+    let mut missing_activated_workflows = valid_response();
+    missing_activated_workflows["data"]
+        .as_object_mut()
+        .ok_or_else(|| std::io::Error::other("inventory data fixture must be an object"))?
+        .remove("activatedWorkflows");
+    assert!(
+        serde_json::from_value::<RuntimeInventoryResponse>(missing_activated_workflows).is_err()
+    );
     Ok(())
 }
 
@@ -88,6 +111,23 @@ fn runtime_inventory_instances_obey_response_schema() -> Result<(), Box<dyn std:
         validator.validate(&invalid_build_metadata).is_err(),
         "build metadata source revision must be a lowercase Git object id"
     );
+
+    let mut disabled_workflow = valid.clone();
+    disabled_workflow["data"]["activatedWorkflows"][0]["activation"] =
+        serde_json::json!("disabled");
+    assert!(
+        validator.validate(&disabled_workflow).is_err(),
+        "activated workflows must exclude disabled entries"
+    );
+    assert!(serde_json::from_value::<RuntimeInventoryResponse>(disabled_workflow).is_err());
+
+    let mut mismatched_tag = valid.clone();
+    mismatched_tag["data"]["activatedWorkflows"][0]["mode"] = serde_json::json!("saga");
+    assert!(
+        validator.validate(&mismatched_tag).is_err(),
+        "the workflow mode tag must select exactly one strict variant"
+    );
+    assert!(serde_json::from_value::<RuntimeInventoryResponse>(mismatched_tag).is_err());
 
     let mut missing_readiness = valid;
     missing_readiness["data"]["placements"][0]
