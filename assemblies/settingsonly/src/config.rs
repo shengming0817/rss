@@ -190,6 +190,30 @@ fn parse_document(document: &str) -> Result<SettingsOnlyConfig, ConfigError> {
     toml::from_str(document).map_err(|error| invalid_document(document, &error))
 }
 
+#[cfg(test)]
+pub(crate) fn federated_production_config_from_document(
+    config_document: &str,
+) -> Result<FederatedConfig, ConfigError> {
+    let config = parse_document(config_document)?;
+    config.validate()?;
+    let SettingsOnlyConfigSections { federated, .. } = config.into_sections();
+    Ok(federated)
+}
+
+#[cfg(test)]
+pub(crate) fn vault_production_inputs_from_documents(
+    config_document: &str,
+    secret_bundle_document: &str,
+) -> Result<VaultProductionInputs, ConfigError> {
+    let config = parse_document(config_document)?;
+    config.validate()?;
+    let bundle = parse_secret_bundle(secret_bundle_document)?;
+    let secrets = ResolvedSecrets::try_from(bundle)?;
+    let SettingsOnlyConfigSections { vault, .. } = config.into_sections();
+    let (vault, _secrets) = secrets.into_production_material(vault);
+    Ok(vault)
+}
+
 fn invalid_document(document: &str, error: &toml::de::Error) -> ConfigError {
     let rendered = error.to_string();
     let category = if rendered.contains("unknown field") {
@@ -513,7 +537,10 @@ impl ResolvedSecrets {
         Ok(())
     }
 
-    pub(crate) fn into_secret_material(self) -> ProductionSecretMaterial {
+    pub(crate) fn into_production_material(
+        self,
+        vault: VaultConfig,
+    ) -> (VaultProductionInputs, ProductionSecretMaterial) {
         let Self {
             pg_writer_password,
             pg_reader_password,
@@ -530,22 +557,24 @@ impl ResolvedSecrets {
             s3_access_key_id,
             s3_secret_access_key,
         } = self;
-        ProductionSecretMaterial {
-            pg_writer_password,
-            pg_reader_password,
-            pg_dlx_archiver_password,
-            pg_dlx_verifier_password,
-            pg_dlx_purger_password,
-            vault_token,
-            settings_amqp_publisher_url,
-            settings_amqp_subscriber_url,
-            redis_url,
-            tenant_authority_key,
-            dlx_hot_vault_token,
-            dlx_archive_vault_token,
-            s3_access_key_id,
-            s3_secret_access_key,
-        }
+        (
+            VaultProductionInputs::new(vault, vault_token),
+            ProductionSecretMaterial {
+                pg_writer_password,
+                pg_reader_password,
+                pg_dlx_archiver_password,
+                pg_dlx_verifier_password,
+                pg_dlx_purger_password,
+                settings_amqp_publisher_url,
+                settings_amqp_subscriber_url,
+                redis_url,
+                tenant_authority_key,
+                dlx_hot_vault_token,
+                dlx_archive_vault_token,
+                s3_access_key_id,
+                s3_secret_access_key,
+            },
+        )
     }
 }
 
@@ -555,7 +584,6 @@ pub(crate) struct ProductionSecretMaterial {
     pub(crate) pg_dlx_archiver_password: Zeroizing<String>,
     pub(crate) pg_dlx_verifier_password: Zeroizing<String>,
     pub(crate) pg_dlx_purger_password: Zeroizing<String>,
-    pub(crate) vault_token: Zeroizing<String>,
     pub(crate) settings_amqp_publisher_url: Zeroizing<String>,
     pub(crate) settings_amqp_subscriber_url: Zeroizing<String>,
     pub(crate) redis_url: Zeroizing<String>,
@@ -1125,26 +1153,100 @@ impl VaultConfig {
         }
         Ok(())
     }
+}
 
-    pub(crate) fn into_vault_inputs(
-        self,
-    ) -> (
-        String,
-        Option<PathBuf>,
-        String,
-        String,
-        Vec<VaultStoreBindingConfig>,
-        Duration,
-    ) {
-        (
-            self.addr,
-            self.ca_cert_pem_path.into_optional(),
-            self.transit_mount,
-            self.settings_key_name,
-            self.tenant_store_allowlist,
-            Duration::from_secs(self.readiness_seconds),
-        )
+/// One move-only Vault production input generation assembled from validated configuration and
+/// its separately captured workload token.
+pub(crate) struct VaultProductionInputs(VaultProductionInput);
+
+struct VaultProductionInput {
+    addr: String,
+    ca_cert_pem_path: PathBuf,
+    transit_mount: String,
+    settings_key_name: String,
+    tenant_store_allowlist: Vec<VaultStoreBindingConfig>,
+    readiness_interval: Duration,
+    token: Zeroizing<String>,
+}
+
+pub(crate) struct VaultProductionParts {
+    pub(crate) addr: String,
+    pub(crate) ca_cert_pem_path: PathBuf,
+    pub(crate) transit_mount: String,
+    pub(crate) settings_key_name: String,
+    pub(crate) tenant_store_allowlist: Vec<VaultStoreBindingConfig>,
+    pub(crate) readiness_interval: Duration,
+    pub(crate) token: Zeroizing<String>,
+}
+
+impl VaultProductionInputs {
+    fn new(config: VaultConfig, token: Zeroizing<String>) -> Self {
+        Self(VaultProductionInput {
+            addr: config.addr,
+            ca_cert_pem_path: config.ca_cert_pem_path.into_path(),
+            transit_mount: config.transit_mount,
+            settings_key_name: config.settings_key_name,
+            tenant_store_allowlist: config.tenant_store_allowlist,
+            readiness_interval: Duration::from_secs(config.readiness_seconds),
+            token,
+        })
     }
+
+    pub(crate) fn into_parts(self) -> VaultProductionParts {
+        let VaultProductionInput {
+            addr,
+            ca_cert_pem_path,
+            transit_mount,
+            settings_key_name,
+            tenant_store_allowlist,
+            readiness_interval,
+            token,
+        } = self.0;
+        VaultProductionParts {
+            addr,
+            ca_cert_pem_path,
+            transit_mount,
+            settings_key_name,
+            tenant_store_allowlist,
+            readiness_interval,
+            token,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn provisioning_view(&self) -> VaultProvisioningView<'_> {
+        let input = &self.0;
+        VaultProvisioningView {
+            addr: &input.addr,
+            ca_cert_pem_path: &input.ca_cert_pem_path,
+            transit_mount: &input.transit_mount,
+            settings_key_name: &input.settings_key_name,
+            tenant_store_allowlist: input
+                .tenant_store_allowlist
+                .iter()
+                .map(VaultStoreBindingConfig::provisioning_view)
+                .collect(),
+            readiness_interval: input.readiness_interval,
+            token: &input.token,
+        }
+    }
+}
+
+impl fmt::Debug for VaultProductionInputs {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("VaultProductionInputs(<validated>, <redacted>)")
+    }
+}
+
+#[cfg(test)]
+pub(crate) struct VaultProvisioningView<'a> {
+    pub(crate) addr: &'a str,
+    pub(crate) ca_cert_pem_path: &'a Path,
+    pub(crate) transit_mount: &'a str,
+    pub(crate) settings_key_name: &'a str,
+    pub(crate) tenant_store_allowlist: Vec<VaultStoreProvisioningView<'a>>,
+    pub(crate) readiness_interval: Duration,
+    pub(crate) token: &'a str,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -1246,6 +1348,24 @@ impl VaultStoreBindingConfig {
             self.kv_path_prefix,
         )
     }
+
+    #[cfg(test)]
+    fn provisioning_view(&self) -> VaultStoreProvisioningView<'_> {
+        VaultStoreProvisioningView {
+            tenant_id: &self.tenant_id,
+            store_id: &self.store_id,
+            mount: &self.mount,
+            kv_path_prefix: &self.kv_path_prefix,
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) struct VaultStoreProvisioningView<'a> {
+    pub(crate) tenant_id: &'a str,
+    pub(crate) store_id: &'a str,
+    pub(crate) mount: &'a str,
+    pub(crate) kv_path_prefix: &'a str,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -2025,7 +2145,7 @@ totalSeconds = 60
         assert!(source.environment_reads.values().all(|reads| *reads == 1));
         assert_eq!(source.environment_reads[FORBIDDEN_SHARED_AMQP_URL_ENV], 1);
         assert!(!format!("{captured:?}").contains(SECRET_SENTINEL));
-        let (_, secrets, build_metadata, frontend) = captured.into_runtime_inputs();
+        let (config, secrets, build_metadata, frontend) = captured.into_runtime_inputs();
         let build_metadata = build_metadata.expect("build metadata");
         assert_eq!(build_metadata.source_revision(), "a".repeat(40));
         assert_eq!(
@@ -2034,7 +2154,9 @@ totalSeconds = 60
         );
         assert_eq!(frontend.primary_port, 8080);
         assert!(!format!("{secrets:?}").contains(SECRET_SENTINEL));
-        assert_secret_material(secrets.into_secret_material());
+        let (vault, secrets) = secrets.into_production_material(config.into_sections().vault);
+        assert_eq!(vault.provisioning_view().token, "settings-vault-token");
+        assert_secret_material(secrets);
     }
 
     #[test]
@@ -2056,7 +2178,6 @@ totalSeconds = 60
         assert_eq!(&*secrets.pg_dlx_archiver_password, "dlx-archiver-password");
         assert_eq!(&*secrets.pg_dlx_verifier_password, "dlx-verifier-password");
         assert_eq!(&*secrets.pg_dlx_purger_password, "dlx-purger-password");
-        assert_eq!(&*secrets.vault_token, "settings-vault-token");
         assert!(secrets.settings_amqp_publisher_url.starts_with("amqps://"));
         assert!(secrets.settings_amqp_subscriber_url.starts_with("amqps://"));
         assert_ne!(
@@ -2358,7 +2479,7 @@ totalSeconds = 60
             listeners,
             federated,
             postgres,
-            vault,
+            vault: _,
             production_infra,
         } = config.into_sections();
         let (primary, admin, health, budget) = listeners.into_listener_inputs();
@@ -2401,14 +2522,25 @@ totalSeconds = 60
         );
         assert_eq!(postgres.readiness_interval, Duration::from_secs(5));
 
-        let (_, _, _, key, allowlist, vault_readiness) = vault.into_vault_inputs();
-        assert_eq!(key, "settings-config-value");
-        assert_eq!(allowlist.len(), 1);
-        assert_eq!(
-            allowlist.into_iter().next().unwrap().into_store_binding().1,
-            "vault"
-        );
-        assert_eq!(vault_readiness, Duration::from_secs(5));
+        let mut source = TestSource::complete(VALID_CONFIG);
+        let secret_document = source
+            .read_secret_bundle(Path::new("ignored"))
+            .expect("complete secret bundle");
+        let vault = vault_production_inputs_from_documents(VALID_CONFIG, &secret_document)
+            .expect("validated Vault production inputs");
+        let view = vault.provisioning_view();
+        assert_eq!(view.addr, "https://vault.example.test:8200");
+        assert_eq!(view.ca_cert_pem_path, Path::new("/run/rss/vault-ca.pem"));
+        assert_eq!(view.transit_mount, "transit");
+        assert_eq!(view.settings_key_name, "settings-config-value");
+        assert_eq!(view.readiness_interval, Duration::from_secs(5));
+        assert_eq!(view.token, "settings-vault-token");
+        assert_eq!(view.tenant_store_allowlist.len(), 1);
+        let binding = &view.tenant_store_allowlist[0];
+        assert_eq!(binding.tenant_id, "00000000-0000-4000-8000-000000000147");
+        assert_eq!(binding.store_id, "vault");
+        assert_eq!(binding.mount, "secret");
+        assert_eq!(binding.kv_path_prefix, "tenants/settings");
 
         let ProductionInfraConfig {
             eventing,

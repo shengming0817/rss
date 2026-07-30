@@ -24,6 +24,7 @@ pub(crate) enum Resource {
     Amqp,
     Mqtt,
     ObjectStorage,
+    Vault,
 }
 
 impl Resource {
@@ -34,6 +35,7 @@ impl Resource {
             Self::Amqp => "amqp",
             Self::Mqtt => "mqtt",
             Self::ObjectStorage => "object-storage",
+            Self::Vault => "vault",
         }
     }
 }
@@ -85,10 +87,11 @@ pub(crate) enum LocalFeatureScope {
     Testkit,
     JourneysFaultMatrix,
     S3,
+    SettingsOnly,
 }
 
 impl LocalFeatureScope {
-    pub(crate) const ALL: [Self; 10] = [
+    pub(crate) const ALL: [Self; 11] = [
         Self::Postgres,
         Self::PostgresMigration,
         Self::RedisAdapter,
@@ -99,6 +102,7 @@ impl LocalFeatureScope {
         Self::Testkit,
         Self::JourneysFaultMatrix,
         Self::S3,
+        Self::SettingsOnly,
     ];
 
     pub(crate) const fn package(self) -> &'static str {
@@ -113,6 +117,7 @@ impl LocalFeatureScope {
             Self::Testkit => "testkit",
             Self::JourneysFaultMatrix => "journeys-fault-matrix",
             Self::S3 => "s3",
+            Self::SettingsOnly => "settingsonly",
         }
     }
 
@@ -127,7 +132,8 @@ impl LocalFeatureScope {
             | Self::Runtime
             | Self::Testkit
             | Self::JourneysFaultMatrix
-            | Self::S3 => "integration",
+            | Self::S3
+            | Self::SettingsOnly => "integration",
         }
     }
 }
@@ -299,12 +305,14 @@ integration_shard_catalog! {
     },
     RuntimeHttpAuth => {
         name: "runtime-http-auth",
-        resources: [Postgres, Redis],
+        resources: [Postgres, Redis, Vault],
         capabilities: [],
-        local_feature_scopes: [Journeys, Runtime],
+        local_feature_scopes: [Journeys, Runtime, SettingsOnly],
         units: [
             SecurityProviderCloseoutJourney => ("journeys", "security_provider_closeout", Test, Parallel),
             SettingsOnlyRuntimeJourney => ("journeys", "settingsonly_runtime", Test, Parallel),
+            SettingsOnlyLib => ("settingsonly", "settingsonly", Lib, Serial),
+            SettingsOnlyArtifactAcceptance => ("settingsonly", "settingsonly_artifact_acceptance", Test, Parallel),
             RuntimeLib => ("runtime", "runtime", Lib, Serial),
             AuthE2e => ("runtime", "auth_e2e", Test, Parallel),
             AuthBridgeStructure => ("runtime", "auth_bridge_structure", Test, Parallel),
@@ -605,6 +613,7 @@ const INTEGRATION_PACKAGES: &[&str] = &[
     "journeys-fault-matrix",
     "testkit",
     "s3",
+    "settingsonly",
 ];
 
 type TargetId = (String, String, String);
@@ -795,6 +804,7 @@ pub(crate) fn external_resource_present(resource: Resource) -> bool {
         Resource::Amqp => nonempty("RSS_AMQP_TEST_URL"),
         Resource::Mqtt => nonempty("RSS_MQTT_TEST_URL"),
         Resource::ObjectStorage => false,
+        Resource::Vault => false,
     }
 }
 
@@ -931,6 +941,37 @@ mod tests {
     }
 
     #[test]
+    fn settingsonly_vault_backend_is_unique_serial_and_feature_enabled() {
+        let spec = IntegrationShard::RuntimeHttpAuth.spec();
+        assert!(spec.resources.contains(&Resource::Vault));
+        assert!(
+            spec.local_feature_scopes
+                .contains(&LocalFeatureScope::SettingsOnly)
+        );
+
+        let units = spec
+            .units
+            .iter()
+            .filter(|unit| {
+                unit.package == "settingsonly"
+                    && unit.target == "settingsonly"
+                    && unit.kind == TargetKind::Lib
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(units.len(), 1, "SettingsOnly carrier must be unique");
+        assert_eq!(units[0].target, "settingsonly");
+        assert_eq!(units[0].kind, TargetKind::Lib);
+        assert_eq!(units[0].scheduling, Scheduling::Serial);
+
+        let closeout = spec
+            .units
+            .iter()
+            .find(|unit| unit.id == IntegrationUnitId::SecurityProviderCloseoutJourney)
+            .expect("security-provider closeout journey remains registry-owned");
+        assert_eq!(closeout.scheduling, Scheduling::Parallel);
+    }
+
+    #[test]
     fn scheduling_plan_rejects_dangerous_target_parallelism() {
         let expected_serial = BTreeSet::from([
             ("postgres", "postgres"),
@@ -946,6 +987,7 @@ mod tests {
             ("journeys", "identity_login_audit_durable_journey"),
             ("journeys", "identityaudit_runtime"),
             ("runtime", "event_transport_durable_e2e"),
+            ("settingsonly", "settingsonly"),
             ("runtime", "runtime"),
             ("runtime", "configs_ready_e2e"),
             ("runtime", "identity_login_wire_e2e"),
@@ -1070,7 +1112,7 @@ mod tests {
             ),
             (
                 IntegrationShard::RuntimeHttpAuth,
-                &[Resource::Postgres, Resource::Redis][..],
+                &[Resource::Postgres, Resource::Redis, Resource::Vault][..],
             ),
             (
                 IntegrationShard::ConsistencyFault,

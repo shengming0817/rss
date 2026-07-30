@@ -25,6 +25,7 @@ path = "tests/artifact_acceptance.rs"
 
 [features]
 default = []
+integration = ["testkit/containers"]
 test-support = [
     "settings-composition/test-support",
     "httpserve/test-util",
@@ -88,7 +89,7 @@ secure = { path = "../../crates/secure" }
 jsonschema = { workspace = true }
 serde_json = { workspace = true }
 settings-composition = { path = "../../composition/settings", features = ["test-support"] }
-testkit = { path = "../../crates/testkit", features = ["containers"] }
+testkit = { path = "../../crates/testkit" }
 tokio = { workspace = true, features = ["macros", "rt"] }
 tokio-rustls = { workspace = true }
 vocab = { path = "../../crates/vocab" }

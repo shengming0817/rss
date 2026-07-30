@@ -130,7 +130,7 @@ pub(crate) async fn build(
         vault: vault_config,
         production_infra,
     } = config.into_sections();
-    let secrets = secrets.into_secret_material();
+    let (vault_inputs, secrets) = secrets.into_production_material(vault_config);
     let auth_audit_sink = roles.auth_audit_sink()?;
     let distributed_cas_constructor = roles.distributed_cas_store()?;
     let distributed_lock_constructor = roles.distributed_lock_store()?;
@@ -178,8 +178,7 @@ pub(crate) async fn build(
     let audit_sink = httpserve::AuditSinkHandle::new(pg_handle.auth_audit_sink());
 
     let vault = build_vault(
-        vault_config,
-        secrets.vault_token.to_string(),
+        vault_inputs,
         settings_key_provider,
         settings_secret_resolver,
     )?;
@@ -930,14 +929,21 @@ struct DlxVaultConnection {
 }
 
 fn build_vault(
-    config: config::VaultConfig,
-    token: String,
+    inputs: config::VaultProductionInputs,
     settings_key_provider: crate::providers_gen::SettingsKeyProviderConstructor,
     settings_secret_resolver: crate::providers_gen::SettingsSecretResolverConstructor,
 ) -> anyhow::Result<VaultProvider> {
-    let (addr, ca_path, transit_mount, key_name, stores, readiness) = config.into_vault_inputs();
-    let client = build_vault_client(ca_path)?;
-    let stores = stores
+    let config::VaultProductionParts {
+        addr,
+        ca_cert_pem_path,
+        transit_mount,
+        settings_key_name,
+        tenant_store_allowlist,
+        readiness_interval,
+        token,
+    } = inputs.into_parts();
+    let client = build_vault_client(Some(ca_cert_pem_path))?;
+    let stores = tenant_store_allowlist
         .into_iter()
         .map(|binding| {
             let (tenant, store, mount, kv_path_prefix) = binding.into_store_binding();
@@ -955,8 +961,8 @@ fn build_vault(
     let resolver = vault::VaultSecretResolver::new(
         client.clone(),
         addr.clone(),
-        token.clone(),
-        readiness,
+        token.to_string(),
+        readiness_interval,
         stores,
     )
     .context("build settingsonly Vault secret resolver")?;
@@ -964,12 +970,18 @@ fn build_vault(
         client: client.clone(),
         addr: addr.clone(),
         transit_mount: transit_mount.clone(),
-        readiness,
+        readiness: readiness_interval,
     };
-    let key_provider = vault::VaultKeyProvider::new(client, addr, token, transit_mount, readiness)
-        .context("build settingsonly Vault key provider")?;
-    let key_name =
-        diport::KeyName::try_new(key_name).context("build settingsonly Vault settings key")?;
+    let key_provider = vault::VaultKeyProvider::new(
+        client,
+        addr,
+        token.to_string(),
+        transit_mount,
+        readiness_interval,
+    )
+    .context("build settingsonly Vault key provider")?;
+    let key_name = diport::KeyName::try_new(settings_key_name)
+        .context("build settingsonly Vault settings key")?;
     let deps = vault::VaultRuntimeDeps::new(resolver, key_provider);
     let mut resources = deps.runtime_resources().into_iter();
     let resolver = resources
@@ -989,7 +1001,7 @@ fn build_vault(
     Ok(VaultProvider {
         deps,
         settings_key: key_name,
-        readiness,
+        readiness: readiness_interval,
         settings_key_provider,
         settings_key_output: key_output,
         settings_secret_resolver,
@@ -1190,7 +1202,7 @@ mod tests {
         let ca_path = std::env::temp_dir().join(format!(
             "settingsonly-vault-ca-{}-{}.pem",
             std::process::id(),
-            std::time::SystemTime::now()
+            diport::Clock::now(&crate::SystemClock)
                 .duration_since(std::time::UNIX_EPOCH)
                 .expect("clock")
                 .as_nanos()
@@ -1402,3 +1414,6 @@ mod tests {
         output
     }
 }
+
+#[cfg(test)]
+mod production_inputs_tests;

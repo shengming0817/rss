@@ -43,11 +43,17 @@ type Result<T> = std::result::Result<T, FixtureError>;
 
 /// 容器内固定端口（modules 镜像默认暴露端口）。
 const PG_PORT: u16 = 5432;
+const VAULT_PORT: u16 = 8200;
 const AMQP_PORT: u16 = 5672;
 const AMQPS_PORT: u16 = 5671;
 const REDISS_PORT: u16 = 6379;
 const MQTT_PORT: u16 = 1883;
 const MINIO_PORT: u16 = 9000;
+const VAULT_IMAGE: &str = "hashicorp/vault";
+const VAULT_IMAGE_TAG: &str = "1.17.6";
+const VAULT_ROOT_TOKEN: &str = "rss-test-vault-root";
+const VAULT_PORT_MAX_ATTEMPTS: u32 = 20;
+const VAULT_PORT_BACKOFF_MS: u64 = 500;
 const MINIO_ROOT_USER: &str = "rss-minio-root";
 const MINIO_ROOT_PASSWORD: &str = "rss-minio-root-test-password";
 const MINIO_WORKLOAD_USER: &str = "rss-settingsonly-workload";
@@ -1915,6 +1921,84 @@ pub async fn minio_tls_archive() -> Result<MinioTlsFixture> {
     })
 }
 
+// ── Vault TLS ─────────────────────────────────────────────
+
+/// Hermetic, provider-neutral Vault dev-TLS fixture.
+///
+/// This fixture is owned here because the workspace confines raw `testcontainers` dependencies to
+/// `testkit`. It must stay limited to container lifecycle and transport coordinates: SettingsOnly
+/// or any other provider-specific mounts, policies, keys, tokens, and seed data belong in the
+/// consuming integration test.
+pub struct VaultTlsFixture {
+    _container: Box<ContainerAsync<GenericImage>>,
+    endpoint_url: String,
+    ca_pem: String,
+}
+
+impl VaultTlsFixture {
+    /// HTTPS endpoint reachable from the host running the test.
+    pub fn endpoint_url(&self) -> &str {
+        &self.endpoint_url
+    }
+
+    /// Root token for one-time fixture initialization. Runtime secret bundles must use derived
+    /// least-privilege tokens.
+    pub fn root_token(&self) -> &str {
+        VAULT_ROOT_TOKEN
+    }
+
+    /// Vault's generated dev-TLS CA in PEM format.
+    pub fn ca_pem(&self) -> &str {
+        &self.ca_pem
+    }
+}
+
+fn vault_host_endpoint(host: &str, port: u16) -> String {
+    format!("https://{host}:{port}")
+}
+
+/// Starts Vault in in-memory dev-TLS mode without installing any provider-specific provisioning.
+pub async fn vault_tls() -> Result<VaultTlsFixture> {
+    let image = GenericImage::new(VAULT_IMAGE, VAULT_IMAGE_TAG)
+        .with_exposed_port(VAULT_PORT.tcp())
+        .with_wait_for(WaitFor::message_on_stdout("Vault server started!"));
+    // The official entrypoint drops to `vault`. Prepare its dev-TLS directory as root, then invoke
+    // the same entrypoint so generated keys remain owned by the unprivileged image user.
+    let startup = format!(
+        "mkdir -p /tmp/rss-vault-tls && touch /tmp/rss-vault-tls/vault-ca.pem /tmp/rss-vault-tls/vault-cert.pem /tmp/rss-vault-tls/vault-key.pem && chown -R vault:vault /tmp/rss-vault-tls && exec /usr/local/bin/docker-entrypoint.sh server -dev -dev-tls -dev-no-store-token -dev-root-token-id={VAULT_ROOT_TOKEN} -dev-listen-address=0.0.0.0:{VAULT_PORT} -dev-tls-cert-dir=/tmp/rss-vault-tls -dev-tls-san=host.docker.internal -dev-tls-san=host.testcontainers.internal"
+    );
+    let request = image.with_cmd(["sh".to_owned(), "-c".to_owned(), startup]);
+    let container = owned::start(request, ContainerService::Vault).await?;
+    let ca_bytes = container
+        .copy_file_from("/tmp/rss-vault-tls/vault-ca.pem", Vec::new())
+        .await?;
+    let ca_pem = String::from_utf8(ca_bytes)
+        .map_err(|error| anyhow::anyhow!("Vault generated CA is not UTF-8 PEM: {error}"))?;
+    let host = container.get_host().await?.to_string();
+    let port = {
+        let mut attempt = 1;
+        loop {
+            match container.get_host_port_ipv4(VAULT_PORT).await {
+                Ok(port) => break port,
+                Err(_) if attempt < VAULT_PORT_MAX_ATTEMPTS => {
+                    tokio::time::sleep(Duration::from_millis(VAULT_PORT_BACKOFF_MS)).await;
+                    attempt += 1;
+                }
+                Err(error) => {
+                    return Err(anyhow::anyhow!(
+                        "Vault container port {VAULT_PORT}/tcp was not exposed after {attempt} attempts: {error}"
+                    ));
+                }
+            }
+        }
+    };
+    Ok(VaultTlsFixture {
+        _container: Box::new(container),
+        endpoint_url: vault_host_endpoint(&host, port),
+        ca_pem,
+    })
+}
+
 fn minio_archive_policy() -> String {
     format!(
         r#"{{"Version":"2012-10-17","Statement":[{{"Effect":"Allow","Action":["s3:GetBucketVersioning","s3:GetBucketObjectLockConfiguration","s3:GetLifecycleConfiguration"],"Resource":"arn:aws:s3:::{MINIO_ARCHIVE_BUCKET}"}},{{"Effect":"Allow","Action":["s3:GetObject","s3:GetObjectVersion","s3:GetObjectRetention","s3:PutObject"],"Resource":"arn:aws:s3:::{MINIO_ARCHIVE_BUCKET}/*"}}]}}"#
@@ -2157,6 +2241,19 @@ mod tests {
             ]);
             assert_eq!(service.labels(&context), expected);
         }
+    }
+
+    #[test]
+    fn vault_fixture_pins_image_and_maps_host_https_endpoint() {
+        assert_eq!(
+            (VAULT_IMAGE, VAULT_IMAGE_TAG),
+            ("hashicorp/vault", "1.17.6")
+        );
+        assert_eq!(
+            vault_host_endpoint("127.0.0.1", 49_152),
+            "https://127.0.0.1:49152"
+        );
+        assert_eq!(ContainerService::Vault.name(), "vault");
     }
 
     #[test]
