@@ -5,11 +5,15 @@ use std::time::Duration;
 
 use anyhow::Context as _;
 use bootstrap::{DomainModuleResult, WorkerSpec};
-use diport::{DynDeadLetterStore, DynManagedResource, ManagedResource, ShutdownError, Topic};
+#[cfg(test)]
+use diport::ShutdownError;
+use diport::{DynDeadLetterStore, DynManagedResource, Topic};
+#[cfg(test)]
+use eventexec::ManagedBlockingWorker;
 use eventexec::{
     EVENT_CONSUMER_PROBE, LeaseConfig, MetricsOutboxMetrics, OUTBOX_RELAY_PROBE, RelayBudget,
     RelayConfig, RetentionTarget, SamplerConfig, SweeperConfig, SweeperWorker, WorkerHealth,
-    backlog_sampler_loop, spawn_relay, sweeper_loop,
+    backlog_sampler_loop, spawn_on_dedicated_runtime, spawn_relay, sweeper_loop,
 };
 use generated::event::{SubscriberReadiness, SubscriptionDispatchKey};
 
@@ -332,28 +336,21 @@ fn wire_distributed_maintenance(
     let sampler_health = Arc::new(WorkerHealth::healthy());
     let sampler_worker_health = Arc::clone(&sampler_health);
     let sampler_worker: WorkerSpec = Box::new(move |token| {
-        DynManagedResource::new_box(ThreadedEventWorker::spawn(
+        DynManagedResource::new_box(spawn_on_dedicated_runtime(
             "identityaudit-outbox-sampler",
             token,
-            move |thread_token| {
-                let _stopped = sampler_worker_health.stopped_on_exit();
-                let runtime = match tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                {
-                    Ok(runtime) => runtime,
-                    Err(error) => {
-                        tracing::error!(error = %error, "identityaudit sampler runtime failed");
-                        return;
-                    }
-                };
-                runtime.block_on(backlog_sampler_loop(
+            Arc::clone(&sampler_worker_health),
+            EVENT_WORKER_SHUTDOWN_TIMEOUT,
+            move |thread_token| async move {
+                backlog_sampler_loop(
                     Arc::new(sampler),
                     sampler_config,
                     thread_token,
                     Arc::clone(&sampler_worker_health),
                     Arc::new(MetricsOutboxMetrics),
-                ));
+                )
+                .await;
+                Ok(())
             },
         ))
     });
@@ -361,29 +358,22 @@ fn wire_distributed_maintenance(
     let sweeper_health = Arc::new(WorkerHealth::healthy());
     let sweeper_worker_health = Arc::clone(&sweeper_health);
     let sweeper_worker: WorkerSpec = Box::new(move |token| {
-        DynManagedResource::new_box(ThreadedEventWorker::spawn(
+        DynManagedResource::new_box(spawn_on_dedicated_runtime(
             "identityaudit-outbox-sweeper",
             token,
-            move |thread_token| {
-                let _stopped = sweeper_worker_health.stopped_on_exit();
-                let runtime = match tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                {
-                    Ok(runtime) => runtime,
-                    Err(error) => {
-                        tracing::error!(error = %error, "identityaudit sweeper runtime failed");
-                        return;
-                    }
-                };
-                runtime.block_on(sweeper_loop(
+            Arc::clone(&sweeper_worker_health),
+            EVENT_WORKER_SHUTDOWN_TIMEOUT,
+            move |thread_token| async move {
+                sweeper_loop(
                     Arc::new(sweeper),
                     sweeper_config,
                     Arc::new(crate::SystemClock),
                     thread_token,
                     Arc::clone(&sweeper_worker_health),
                     RetentionTarget::OutboxPublished,
-                ));
+                )
+                .await;
+                Ok(())
             },
         ))
     });
@@ -469,71 +459,10 @@ impl bootstrap::HealthProbe for WorkerProbe {
     }
 }
 
-#[derive(Debug)]
-struct ThreadedWorkerError;
-
-impl std::fmt::Display for ThreadedWorkerError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("identityaudit threaded event worker failed")
-    }
-}
-
-impl std::error::Error for ThreadedWorkerError {}
-
-struct ThreadedEventWorker {
-    name: &'static str,
-    token: tokio_util::sync::CancellationToken,
-    completion:
-        tokio::sync::Mutex<Option<tokio::sync::oneshot::Receiver<Result<(), ThreadedWorkerError>>>>,
-}
-
-impl ThreadedEventWorker {
-    fn spawn<F>(name: &'static str, token: tokio_util::sync::CancellationToken, run: F) -> Self
-    where
-        F: FnOnce(tokio_util::sync::CancellationToken) + Send + 'static,
-    {
-        let thread_token = token.clone();
-        let (completed, completion) = tokio::sync::oneshot::channel();
-        std::thread::spawn(move || {
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                run(thread_token);
-            }))
-            .map_err(|_| ThreadedWorkerError);
-            let _ = completed.send(result);
-        });
-        Self {
-            name,
-            token,
-            completion: tokio::sync::Mutex::new(Some(completion)),
-        }
-    }
-}
-
-impl ManagedResource for ThreadedEventWorker {
-    fn name(&self) -> &str {
-        self.name
-    }
-
-    fn shutdown_timeout(&self) -> Duration {
-        EVENT_WORKER_SHUTDOWN_TIMEOUT
-    }
-
-    async fn shutdown(&self) -> Result<(), ShutdownError> {
-        self.token.cancel();
-        let Some(completion) = self.completion.lock().await.take() else {
-            return Ok(());
-        };
-        completion
-            .await
-            .map_err(ShutdownError::new)?
-            .map_err(ShutdownError::new)?;
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 mod lifecycle_tests {
     use super::*;
+    use diport::ManagedResource;
     use std::sync::atomic::{AtomicBool, Ordering};
 
     struct RollbackResource(Arc<std::sync::atomic::AtomicUsize>);
@@ -632,11 +561,13 @@ mod lifecycle_tests {
     #[tokio::test]
     #[allow(clippy::panic)]
     // reason: panic is the behavior under test for the supervised worker boundary.
-    async fn threaded_worker_reports_completion_panic_and_repeat_shutdown() {
-        let completed = ThreadedEventWorker::spawn(
+    async fn managed_worker_reports_completion_error_panic_and_repeat_shutdown() {
+        let completed = ManagedBlockingWorker::spawn(
             "identityaudit-completed-worker",
             tokio_util::sync::CancellationToken::new(),
-            |_token| {},
+            Arc::new(WorkerHealth::starting()),
+            EVENT_WORKER_SHUTDOWN_TIMEOUT,
+            |_token| Ok(()),
         );
         assert_eq!(completed.name(), "identityaudit-completed-worker");
         assert_eq!(completed.shutdown_timeout(), EVENT_WORKER_SHUTDOWN_TIMEOUT);
@@ -645,34 +576,39 @@ mod lifecycle_tests {
 
         let saw_cancel = Arc::new(AtomicBool::new(false));
         let thread_saw_cancel = Arc::clone(&saw_cancel);
-        let cancelled = ThreadedEventWorker::spawn(
+        let cancelled = ManagedBlockingWorker::spawn(
             "identityaudit-cancelled-worker",
             tokio_util::sync::CancellationToken::new(),
+            Arc::new(WorkerHealth::starting()),
+            EVENT_WORKER_SHUTDOWN_TIMEOUT,
             move |token| {
                 while !token.is_cancelled() {
                     std::thread::yield_now();
                 }
                 thread_saw_cancel.store(true, Ordering::Release);
+                Ok(())
             },
         );
         assert!(cancelled.shutdown().await.is_ok());
         assert!(saw_cancel.load(Ordering::Acquire));
 
-        let panicked = ThreadedEventWorker::spawn(
+        let failed = ManagedBlockingWorker::spawn(
+            "identityaudit-failed-worker",
+            tokio_util::sync::CancellationToken::new(),
+            Arc::new(WorkerHealth::starting()),
+            EVENT_WORKER_SHUTDOWN_TIMEOUT,
+            |_token| Err(ShutdownError::new(std::io::Error::other("runner failed"))),
+        );
+        assert!(failed.shutdown().await.is_err());
+
+        let panicked = ManagedBlockingWorker::spawn(
             "identityaudit-panicked-worker",
             tokio_util::sync::CancellationToken::new(),
-            |_token| panic!("intentional worker panic"),
+            Arc::new(WorkerHealth::starting()),
+            EVENT_WORKER_SHUTDOWN_TIMEOUT,
+            |_token| -> Result<(), ShutdownError> { panic!("intentional worker panic") },
         );
         assert!(panicked.shutdown().await.is_err());
-    }
-
-    #[test]
-    fn threaded_worker_error_is_stable_and_redacted() {
-        assert_eq!(
-            ThreadedWorkerError.to_string(),
-            "identityaudit threaded event worker failed"
-        );
-        assert_eq!(format!("{ThreadedWorkerError:?}"), "ThreadedWorkerError");
     }
 
     #[test]
@@ -690,14 +626,17 @@ mod lifecycle_tests {
                 .build()
                 .unwrap_or_else(|error| panic!("test runtime: {error}"));
             runtime.block_on(async move {
-                let worker = ThreadedEventWorker::spawn(
+                let worker = ManagedBlockingWorker::spawn(
                     "identityaudit-stalled-sampler",
                     tokio_util::sync::CancellationToken::new(),
+                    Arc::new(WorkerHealth::starting()),
+                    EVENT_WORKER_SHUTDOWN_TIMEOUT,
                     move |_token| {
                         thread_started.store(true, Ordering::Release);
                         while !thread_release.load(Ordering::Acquire) {
                             std::thread::yield_now();
                         }
+                        Ok(())
                     },
                 );
                 while !started.load(Ordering::Acquire) {
@@ -721,7 +660,7 @@ mod lifecycle_tests {
             .unwrap_or_else(|_| panic!("runtime-drop harness panicked"));
         assert!(
             dropped_without_release,
-            "runtime drop waited for spawn_blocking(thread.join()) after shutdown cancellation"
+            "runtime drop waited for the dedicated worker after shutdown cancellation"
         );
     }
 }

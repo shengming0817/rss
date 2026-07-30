@@ -18,8 +18,14 @@ pub use tenant_authority::{
 
 pub mod consumer_worker;
 pub use consumer_worker::{
-    ConsumerWorker, EVENT_CONSUMER_PROBE, spawn_consumer, spawn_consumer_ackable,
+    EVENT_CONSUMER_PROBE, spawn_consumer, spawn_consumer_ackable,
     spawn_consumer_ackable_subscriber, spawn_relay,
+};
+
+pub mod managed_blocking_worker;
+pub use managed_blocking_worker::{
+    ManagedBlockingWorker, spawn_on_dedicated_runtime,
+    spawn_on_dedicated_runtime_with_build_failure,
 };
 
 // 命令分发 runtime：generated seam → reviewed command capability → provider store，命令不再借事件 emitter。
@@ -86,8 +92,7 @@ pub use projection::{
     ProjectionPoisonPolicy, ProjectionRegistryError, ProjectionReplayProjector,
     ProjectionReplayTarget, ProjectionRun, ProjectionRunnerConfig, ProjectionRunnerConfigError,
     ProjectionSelector, ProjectionSelectorError, ProjectionStop, ProjectionTargetRegistry,
-    ProjectionVersion, ProjectionWorker, projection_runner_loop, projection_runner_once,
-    spawn_projection_worker,
+    ProjectionVersion, projection_runner_loop, projection_runner_once, spawn_projection_worker,
 };
 
 mod workflow_runtime;

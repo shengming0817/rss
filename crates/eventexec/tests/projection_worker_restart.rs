@@ -265,7 +265,7 @@ fn spawn_test_worker(
     projector: Arc<IdempotentProjector>,
     checkpoint: Arc<SharedCheckpointStore>,
     dlx: Arc<NoopDlx>,
-) -> eventexec::ProjectionWorker {
+) -> eventexec::ManagedBlockingWorker {
     let harness = ProjectionHarness::new(
         projector,
         checkpoint,

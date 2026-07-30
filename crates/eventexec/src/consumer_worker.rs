@@ -1,10 +1,10 @@
-//! ConsumerWorker —— 受监督的事件消费后台 worker（`ManagedResource` 两阶段关闭）。
+//! 受监督的事件消费后台 worker（`ManagedResource` 两阶段关闭）。
 //!
 //! 把 [`crate::run_consumer`]（at-most-once / MemBus）/ [`crate::run_consumer_ackable`]
 //! （at-least-once / AMQP broker settle）接成真实运行的后台 worker：组合根按 topology resolver 决策
 //! 订阅得 stream（Demo→[`diport::Subscriber::subscribe`]→`MessageStream`；Durable→
 //! [`diport::AckableSubscriber::subscribe_ackable`]→`DeliveryStream`），再 [`spawn_consumer`] /
-//! [`spawn_consumer_ackable`] 在专用线程驱动；worker impl [`diport::ManagedResource`] 交
+//! [`spawn_consumer_ackable`] 经 [`crate::ManagedBlockingWorker`] 在专用线程驱动，并交
 //! `bootstrap::ShutdownStack` 两阶段关闭，经 [`crate::WorkerHealth`] 供 readyz 聚合。
 //!
 //! # 为什么用专用 OS 线程而非 `tokio::spawn`（与 `relay.rs` 的关键分岔）
@@ -25,12 +25,12 @@
 //!
 //! 组合根**先**订阅（`subscribe(topic, token)`）得 stream、**再** spawn worker 驱动该 stream：保证订阅在发布
 //! 之前完成（in-mem MemBus 无重放，订阅须先于发布），且 stream 与 worker 共用同一 [`CancellationToken`]
-//! ——worker 关闭时 [`ConsumerWorker::shutdown`] 取消该 token → subscriber 流终止（MemBus `take_until` /
+//! ——worker 关闭时 [`diport::ManagedResource::shutdown`] 取消该 token → subscriber 流终止（MemBus `take_until` /
 //! AMQP channel close → broker requeue in-flight）→ loop 退出 → `block_on` 返回 → 线程结束。组合根经
 //! `ShutdownStack::register_detached` 注册（worker 自持 token、在 `shutdown` 中自取消，不依赖 stack 阶段 1
 //! 广播）。
 //!
-//! 关闭：[`ConsumerWorker::shutdown`] 取消 worker token 后等待专用线程发回的 completion；不在
+//! 关闭：[`diport::ManagedResource::shutdown`] 取消 worker token 后等待专用线程发回的 completion；不在
 //! Tokio blocking pool 执行 `JoinHandle::join`，因此整体 shutdown 预算取消 future 后 runtime drop 仍然
 //! 有界。线程 panic 由 `catch_unwind` 收口成 [`diport::ShutdownError`]，**不**静默吞 panic 误报
 //! 关闭成功。健康粒度（v1）：
@@ -48,14 +48,14 @@
 //! task-local——**不跨线程传播**。Handler 实现**禁止**读 `runctx::try_current()`（会返回 `None`）；
 //! 租户上下文须从 message payload 解析（本 PR 各 handler 即如此）。
 //!
-//! # NOTE：AMQP-pending-#1017（`ConsumerWorker` 专用线程驱动的真 broker 验证）
+//! # NOTE：AMQP-pending-#1017（专用线程驱动的真 broker 验证）
 //!
-//! `ConsumerWorker` 的专用线程驱动在 demo（MemBus）+ eventexec 单测验证；真 AMQP broker 下经
-//! `ConsumerWorker` 的 worker 化（lapin cross-runtime）留 #1017。§6 集成 journey
+//! 专用线程驱动在 demo（MemBus）+ eventexec 单测验证；真 AMQP broker 下经
+//! managed worker 化（lapin cross-runtime）留 #1017。§6 集成 journey
 //! （`amqp_consumer_at_least_once_journey.rs`）用 inline `tokio::join!` 同 runtime 驱动
 //! `run_consumer_ackable` 证 broker settlement，覆盖接缝的 at-least-once 终态兑现。
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use consistency::InboxStore;
@@ -64,10 +64,13 @@ use diport::{
     AckableSubscriber, DeadLetterRecord, DeadLetterStore, DeadLetterStoreError, DeliveryStream,
     DynAckableSubscriber, DynDeadLetterStore, Message, MessageStream, Topic,
 };
+use futures::StreamExt as _;
 use futures::future::BoxFuture;
 use tokio_util::sync::CancellationToken;
 
+use crate::ManagedBlockingWorker;
 use crate::consumer::{ConsumerMeta, LeaseConfig, run_consumer, run_consumer_ackable};
+use crate::managed_blocking_worker::spawn_on_dedicated_runtime;
 use crate::relay::WorkerHealth;
 
 /// readyz probe 名基（event consumer worker；无 `_ready` 后缀——运行时操作 probe，对齐
@@ -77,81 +80,6 @@ pub const EVENT_CONSUMER_PROBE: &str = "event_consumer";
 
 /// consumer worker 关闭超时：每条在途消息 handle + commit + settle 有界 drain，对齐 relay 的 45s 预算。
 const CONSUMER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(45);
-
-// ── ConsumerWorker（adopt 专用消费线程 + ManagedResource）──────────────────────
-
-/// 受监督的事件消费后台 worker（adopt 专用 OS 线程的 [`std::thread::JoinHandle`]）。
-///
-/// 与 [`crate::RelayWorker`]（adopt `tokio::task::JoinHandle`）对偶但**不共用** `adopt_worker!` 宏——
-/// 消费驱动 future `!Send`、跑在专用线程而非 `tokio::spawn`（见模块 rustdoc），关闭等待跨线程
-/// completion channel。
-pub struct ConsumerWorker {
-    name: String,
-    // shutdown 时 take 出 completion；取消 shutdown future 只 drop receiver，不会遗留阻塞 runtime drop 的
-    // Tokio blocking task。
-    inner: Mutex<Option<tokio::sync::oneshot::Receiver<Result<(), ConsumerThreadPanicked>>>>,
-    health: Arc<WorkerHealth>,
-    token: CancellationToken,
-}
-
-impl ConsumerWorker {
-    /// adopt 已 spawn 的消费线程 + 同一 health + 同一 token（由 `spawn_*` 内部构造）。
-    fn adopt(
-        name: String,
-        completion: tokio::sync::oneshot::Receiver<Result<(), ConsumerThreadPanicked>>,
-        health: Arc<WorkerHealth>,
-        token: CancellationToken,
-    ) -> Self {
-        Self {
-            name,
-            inner: Mutex::new(Some(completion)),
-            health,
-            token,
-        }
-    }
-
-    /// 读 worker health（readyz 聚合用）。
-    pub fn health(&self) -> Arc<WorkerHealth> {
-        self.health.clone()
-    }
-}
-
-/// worker 线程 panic：`catch_unwind` 将 `Box<dyn Any>` 收口到本 typed 错误（原始 panic
-/// payload 不经 wire/日志泄漏，PII-safe）。
-#[derive(Debug, thiserror::Error)]
-#[error("consumer worker thread panicked")]
-struct ConsumerThreadPanicked;
-
-#[allow(unknown_lints, rss_diport_impl_allowlist)]
-// reason(rss_diport_impl_allowlist): consumer 后台 worker 归 eventexec 服务层并 impl `ManagedResource`
-// （经组合根 ShutdownStack 注入两阶段关闭），同 RelayWorker（relay.rs:500 同款例外）。`ManagedResource` 是
-// 生命周期 trait（非可替换 provider port），worker 是引擎驱动产物而非 adapter provider，不迁 adapter。
-// allowlist 外 item-level 例外（DIPORT-IMPL-ALLOWLIST-01 逃生门）；根治（豁免 `ManagedResource` 出 lint 扫描集）
-// 见 #1153。unknown_lints 同 allow：dylint 自定义 lint 在 plain clippy 未注册（make verify 跑 plain clippy + dylint 双路）。
-impl diport::ManagedResource for ConsumerWorker {
-    fn name(&self) -> &str {
-        &self.name
-    }
-
-    fn shutdown_timeout(&self) -> Duration {
-        CONSUMER_SHUTDOWN_TIMEOUT
-    }
-
-    async fn shutdown(&self) -> Result<(), diport::ShutdownError> {
-        // 取消本 worker token（subscriber 流据此终止）；幂等，二次 shutdown 安全。
-        self.token.cancel();
-        // take 出 completion（释放 std Mutex guard 后再 await——不跨 await 持锁）。二次 shutdown → None → Ok。
-        let completion = self.inner.lock().unwrap_or_else(|e| e.into_inner()).take();
-        let Some(completion) = completion else {
-            return Ok(());
-        };
-        match completion.await {
-            Err(closed) => Err(diport::ShutdownError::new(closed)),
-            Ok(Err(panic)) => Err(diport::ShutdownError::new(panic)),
-            Ok(Ok(())) => Ok(()),
-        }
-    }
-}
 
 // ── spawn（专用线程驱动 !Send 消费 future）─────────────────────────────────────
 
@@ -207,48 +135,6 @@ fn health_reporting_dlx(
     })
 }
 
-/// 在专用 OS 线程建 current-thread runtime `block_on` 跑 `body`：线程退出（正常 / runtime 构建失败 /
-/// future panic）由 [`crate::WorkerStoppedGuard`] 守卫统一 `health.mark_stopped()`（readyz Unhealthy）。
-///
-/// `worker_name` 用于 runtime 构建失败时的结构化日志归因（`worker = worker_name` 字段）。
-/// `make_body` **必须** `Send`（捕获值跨线程移入），其返回的 future **无需** `Send`（在线程内构建与轮询）。
-fn spawn_consumer_thread<Fut, M>(
-    worker_name: &str,
-    health: Arc<WorkerHealth>,
-    make_body: M,
-) -> tokio::sync::oneshot::Receiver<Result<(), ConsumerThreadPanicked>>
-where
-    M: FnOnce() -> Fut + Send + 'static,
-    Fut: std::future::Future<Output = ()>,
-{
-    let worker_name = worker_name.to_string();
-    let (completed, completion) = tokio::sync::oneshot::channel();
-    std::thread::spawn(move || {
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            // 退出守卫：正常返回 / runtime 构建失败 / future panic 三条路径均经 Drop 统一 mark_stopped（F3）。
-            let _stopped = health.stopped_on_exit();
-            let rt = match tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(rt) => rt,
-                Err(e) => {
-                    tracing::error!(
-                        worker = worker_name,
-                        error = %e,
-                        "consumer: worker runtime build failed; worker unhealthy"
-                    );
-                    return;
-                }
-            };
-            rt.block_on(make_body());
-        }))
-        .map_err(|_| ConsumerThreadPanicked);
-        let _ = completed.send(result);
-    });
-    completion
-}
-
 /// spawn at-most-once 消费 worker（Demo / MemBus 路径，acker=None、不触 broker settle）。
 ///
 /// 组合根先 `subscribe(topic, token)` 得 `stream`、再调本函数；worker 持同一 `token`，`shutdown` 取消即流终止。
@@ -265,18 +151,24 @@ pub fn spawn_consumer<S, H>(
     lease_cfg: LeaseConfig,
     token: CancellationToken,
     health: Arc<WorkerHealth>,
-) -> ConsumerWorker
+) -> ManagedBlockingWorker
 where
     S: InboxStore + Send + Sync + 'static,
     H: Fn(Message) -> BoxFuture<'static, HandleResult> + Send + Sync + 'static,
 {
     let dlx = health_reporting_dlx(dlx, Arc::clone(&health), &meta);
-    let health_run = Arc::clone(&health);
-    let handle = spawn_consumer_thread(&name, health.clone(), move || async move {
-        health_run.mark_healthy();
-        run_consumer(stream, idempotency, dlx, meta, handler, lease_cfg).await;
-    });
-    ConsumerWorker::adopt(name, handle, health, token)
+    spawn_on_dedicated_runtime(
+        name,
+        token,
+        Arc::clone(&health),
+        CONSUMER_SHUTDOWN_TIMEOUT,
+        move |token| async move {
+            health.mark_healthy();
+            let stream = Box::pin(stream.take_until(token.cancelled_owned()));
+            run_consumer(stream, idempotency, dlx, meta, handler, lease_cfg).await;
+            Ok(())
+        },
+    )
 }
 
 /// spawn outbox relay worker（专用 OS 线程 + panic-safety `WorkerStoppedGuard` 守卫，与
@@ -290,7 +182,7 @@ where
 /// panic unwind、正常返回），确保 `health.mark_stopped()`（readyz Unhealthy）不被 panic 跳过。
 /// `relay_loop` 自身在取消后亦调 `mark_stopped`（幂等：两次 store 同值，正常路径无害）。
 ///
-/// 返回的 [`ConsumerWorker`] 持同一 `health` + `token`，shutdown 取消 token → relay_loop break →
+/// 返回的 [`ManagedBlockingWorker`] 持同一 `health` + `token`，shutdown 取消 token → relay_loop break →
 /// 线程退出 → completion → Ok（健康态翻 Unhealthy）。
 #[allow(clippy::too_many_arguments)]
 // reason: relay spawn 7 参数是最小必要集（name/store/config/clock/token/health/metrics 各自语义独立），
@@ -303,18 +195,22 @@ pub fn spawn_relay<A>(
     token: CancellationToken,
     health: Arc<WorkerHealth>,
     metrics: Arc<dyn crate::OutboxMetrics>,
-) -> ConsumerWorker
+) -> ManagedBlockingWorker
 where
     A: OutboxRelay + Send + 'static,
 {
-    let health_loop = Arc::clone(&health);
-    let token_run = token.clone();
-    let handle = spawn_consumer_thread(&name, health.clone(), move || async move {
-        // Arc::new(store) 在线程内构建：Arc<A>(!Send) 不跨线程；store: A (Send) 跨线程移入。
-        let store = Arc::new(store);
-        crate::relay::relay_loop(store, config, clock, token_run, health_loop, metrics).await;
-    });
-    ConsumerWorker::adopt(name, handle, health, token)
+    spawn_on_dedicated_runtime(
+        name,
+        token,
+        Arc::clone(&health),
+        CONSUMER_SHUTDOWN_TIMEOUT,
+        move |token| async move {
+            // Arc::new(store) 在线程内构建：Arc<A>(!Send) 不跨线程；store: A (Send) 跨线程移入。
+            let store = Arc::new(store);
+            crate::relay::relay_loop(store, config, clock, token, health, metrics).await;
+            Ok(())
+        },
+    )
 }
 
 /// spawn at-least-once 消费 worker（Durable / AMQP 路径，每条终态向 broker settle）。
@@ -334,24 +230,30 @@ pub fn spawn_consumer_ackable<S, H>(
     lease_cfg: LeaseConfig,
     token: CancellationToken,
     health: Arc<WorkerHealth>,
-) -> ConsumerWorker
+) -> ManagedBlockingWorker
 where
     S: InboxStore + Send + Sync + 'static,
     H: Fn(Message) -> BoxFuture<'static, HandleResult> + Send + Sync + 'static,
 {
     let dlx = health_reporting_dlx(dlx, Arc::clone(&health), &meta);
-    let health_run = Arc::clone(&health);
-    let handle = spawn_consumer_thread(&name, health.clone(), move || async move {
-        health_run.mark_healthy();
-        run_consumer_ackable(stream, idempotency, dlx, meta, handler, lease_cfg).await;
-    });
-    ConsumerWorker::adopt(name, handle, health, token)
+    spawn_on_dedicated_runtime(
+        name,
+        token,
+        Arc::clone(&health),
+        CONSUMER_SHUTDOWN_TIMEOUT,
+        move |token| async move {
+            health.mark_healthy();
+            let stream = Box::pin(stream.take_until(token.cancelled_owned()));
+            run_consumer_ackable(stream, idempotency, dlx, meta, handler, lease_cfg).await;
+            Ok(())
+        },
+    )
 }
 
 /// spawn at-least-once 消费 worker，并在 worker 线程内用注入的 stack child token 完成订阅。
 ///
 /// 组合根 `WorkerSpec` 闭包是同步的，但 AMQP `subscribe_ackable` 是 async。该函数把订阅放进
-/// `ConsumerWorker` 专用线程的 current-thread runtime 内执行，使 `ShutdownStack::register_with_token`
+/// managed worker 专用线程的 current-thread runtime 内执行，使 `ShutdownStack::register_with_token`
 /// 注入的 child token 同时驱动订阅 stream 取消和 worker shutdown，满足 `SHUTDOWN-TOKEN-FUNNEL-01`。
 #[allow(clippy::too_many_arguments)]
 // reason: 与 spawn_consumer_ackable 同形；subscriber/topic 是把 async subscribe 移入 worker 线程所需的
@@ -367,35 +269,42 @@ pub fn spawn_consumer_ackable_subscriber<S, H>(
     lease_cfg: LeaseConfig,
     token: CancellationToken,
     health: Arc<WorkerHealth>,
-) -> ConsumerWorker
+) -> ManagedBlockingWorker
 where
     S: InboxStore + Send + Sync + 'static,
     H: Fn(Message) -> BoxFuture<'static, HandleResult> + Send + Sync + 'static,
 {
-    let token_run = token.clone();
-    let health_run = Arc::clone(&health);
     let dlx = health_reporting_dlx(dlx, Arc::clone(&health), &meta);
-    let handle = spawn_consumer_thread(&name, health.clone(), move || async move {
-        match subscriber.subscribe_ackable(topic, token_run.clone()).await {
-            Ok(stream) => {
-                health_run.mark_healthy();
-                run_consumer_ackable(stream, idempotency, dlx, meta, handler, lease_cfg).await;
+    spawn_on_dedicated_runtime(
+        name,
+        token,
+        Arc::clone(&health),
+        CONSUMER_SHUTDOWN_TIMEOUT,
+        move |token| async move {
+            match subscriber.subscribe_ackable(topic, token.clone()).await {
+                Ok(stream) => {
+                    health.mark_healthy();
+                    let stream = Box::pin(stream.take_until(token.cancelled_owned()));
+                    run_consumer_ackable(stream, idempotency, dlx, meta, handler, lease_cfg).await;
+                    Ok(())
+                }
+                Err(err) => {
+                    health.mark_subscriber_unavailable();
+                    tracing::error!(
+                        error = %err,
+                        "consumer: subscribe_ackable failed; worker exiting"
+                    );
+                    Err(diport::ShutdownError::new(err))
+                }
             }
-            Err(err) => {
-                health_run.mark_subscriber_unavailable();
-                tracing::error!(
-                    error = %err,
-                    "consumer: subscribe_ackable failed; worker exiting"
-                );
-            }
-        }
-    });
-    ConsumerWorker::adopt(name, handle, health, token)
+        },
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::{Arc, Mutex};
 
     use consistency::InboxReceiptContext;
     use consistency::error::EngineError;
@@ -416,13 +325,13 @@ mod tests {
     use primitives::{Mac, MacAlgorithm, MacKey, MacVerifier};
 
     use super::{
-        Arc, BoxFuture, CancellationToken, ConsumerMeta, ConsumerWorker, DeliveryStream,
-        DynDeadLetterStore, EVENT_CONSUMER_PROBE, HandleResult, InboxStore, LeaseConfig, Message,
-        MessageStream, Mutex, WorkerHealth, health_reporting_dlx, spawn_consumer,
-        spawn_consumer_ackable, spawn_consumer_ackable_subscriber, spawn_relay,
+        BoxFuture, CancellationToken, ConsumerMeta, DeliveryStream, DynDeadLetterStore,
+        EVENT_CONSUMER_PROBE, HandleResult, InboxStore, LeaseConfig, Message, MessageStream,
+        WorkerHealth, health_reporting_dlx, spawn_consumer, spawn_consumer_ackable,
+        spawn_consumer_ackable_subscriber, spawn_relay,
     };
-    use crate::TenantAuthority;
     use crate::tenant_authority::TenantAuthorityBinding;
+    use crate::{ManagedBlockingWorker, TenantAuthority};
 
     const TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
     const SCHEMA_HASH: &str =
@@ -448,6 +357,22 @@ mod tests {
                 .chain(futures::stream::pending::<Message>())
                 .take_until(async move { token.cancelled().await }),
         )
+    }
+
+    fn independently_pending_stream(polled: Arc<std::sync::atomic::AtomicBool>) -> MessageStream {
+        Box::pin(futures::stream::poll_fn(move |_cx| {
+            polled.store(true, Ordering::Release);
+            std::task::Poll::<Option<Message>>::Pending
+        }))
+    }
+
+    fn independently_pending_delivery_stream(
+        polled: Arc<std::sync::atomic::AtomicBool>,
+    ) -> DeliveryStream {
+        Box::pin(futures::stream::poll_fn(move |_cx| {
+            polled.store(true, Ordering::Release);
+            std::task::Poll::<Option<Delivery>>::Pending
+        }))
     }
 
     /// 携记录型 acker 的有限投递流（断言终态向 broker settle）。
@@ -770,6 +695,8 @@ mod tests {
 
     /// at-most-once 驱动有限流：处理全部消息（handler / commit 各 N 次），shutdown 后 Unhealthy。
     #[tokio::test]
+    #[allow(clippy::panic)]
+    // reason: timeout makes the finite-stream admission handshake fail-loud without racing shutdown.
     async fn worker_drives_finite_stream_then_joins() {
         let counter = Arc::new(AtomicU32::new(0));
         let idem = FreshStore::new();
@@ -784,6 +711,13 @@ mod tests {
             CancellationToken::new(),
             health(),
         );
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while counter.load(Ordering::Acquire) != 3 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap_or_else(|error| panic!("finite stream did not drain: {error}"));
         assert!(worker.shutdown().await.is_ok());
         assert_eq!(counter.load(Ordering::SeqCst), 3, "全部 3 条被消费");
         assert_eq!(idem.commits(), 3, "每条 Ack→commit");
@@ -813,6 +747,36 @@ mod tests {
         assert_eq!(worker.health().status(), HealthStatus::Healthy);
         assert!(worker.shutdown().await.is_ok());
         assert_eq!(worker.health().status(), HealthStatus::Unhealthy);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::panic)]
+    // reason: the poll handshake proves the independently-bound stream entered the worker loop.
+    async fn worker_shutdown_cancels_independently_bound_stream() {
+        let polled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let worker = spawn_consumer(
+            "event_consumer:audit:independent-stream".to_string(),
+            independently_pending_stream(Arc::clone(&polled)),
+            FreshStore::new(),
+            noop_dlx(),
+            meta(),
+            handler_ack(Arc::new(AtomicU32::new(0))),
+            lease_cfg(),
+            CancellationToken::new(),
+            health(),
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while !polled.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap_or_else(|error| panic!("independent stream was not polled: {error}"));
+
+        let shutdown = tokio::time::timeout(std::time::Duration::from_secs(1), worker.shutdown())
+            .await
+            .unwrap_or_else(|error| panic!("canonical token did not stop stream: {error}"));
+        assert!(shutdown.is_ok());
     }
 
     /// shutdown_timeout = consumer 预算（45s）；二次 shutdown（句柄已 take→None）仍 Ok（幂等）。
@@ -911,6 +875,8 @@ mod tests {
     /// 且 panic unwind 仍经 [`crate::WorkerStoppedGuard`] 守卫标 Unhealthy（F3：原 `mark_stopped` 在 `block_on`
     /// 后，被 panic 跳过 → readyz 误报 Healthy；守卫修复后此断言成立）。
     #[tokio::test]
+    #[allow(clippy::panic)]
+    // reason: timeout proves the panic path ran before shutdown observes its typed completion.
     async fn worker_panic_propagates_and_marks_stopped() {
         let worker = spawn_consumer(
             "event_consumer:audit:session.created".to_string(),
@@ -923,6 +889,13 @@ mod tests {
             CancellationToken::new(),
             health(),
         );
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while worker.health().detail() != "stopped" {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap_or_else(|error| panic!("worker panic did not stop runner: {error}"));
         assert!(
             worker.shutdown().await.is_err(),
             "worker 线程 panic 须经 completion 上抛 ShutdownError"
@@ -936,6 +909,8 @@ mod tests {
 
     /// ackable 驱动：handler Ack + commit ok → 终态向 broker settle `Ack`（证 broker settlement 真发）。
     #[tokio::test]
+    #[allow(clippy::panic)]
+    // reason: timeout makes the delivery admission handshake fail-loud without racing shutdown.
     async fn ackable_worker_settles_ack_on_success() {
         let actions = Arc::new(Mutex::new(Vec::new()));
         let counter = Arc::new(AtomicU32::new(0));
@@ -950,6 +925,13 @@ mod tests {
             CancellationToken::new(),
             health(),
         );
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while counter.load(Ordering::Acquire) != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap_or_else(|error| panic!("delivery stream did not settle: {error}"));
         assert!(worker.shutdown().await.is_ok());
         assert_eq!(counter.load(Ordering::SeqCst), 1, "1 条被消费");
         assert_eq!(
@@ -957,6 +939,38 @@ mod tests {
             vec![AckAction::Ack],
             "ackable 驱动终态向 broker settle Ack"
         );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::panic)]
+    // reason: the poll handshake proves the independently-bound delivery stream entered the loop.
+    async fn ackable_worker_shutdown_cancels_independently_bound_stream() {
+        let polled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let worker = spawn_consumer_ackable(
+            "event_consumer:audit:independent-delivery-stream".to_string(),
+            independently_pending_delivery_stream(Arc::clone(&polled)),
+            FreshStore::new(),
+            noop_dlx(),
+            meta(),
+            handler_ack(Arc::new(AtomicU32::new(0))),
+            lease_cfg(),
+            CancellationToken::new(),
+            health(),
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while !polled.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap_or_else(|error| panic!("independent delivery stream was not polled: {error}"));
+
+        let shutdown = tokio::time::timeout(std::time::Duration::from_secs(1), worker.shutdown())
+            .await
+            .unwrap_or_else(|error| {
+                panic!("canonical token did not stop delivery stream: {error}")
+            });
+        assert!(shutdown.is_ok());
     }
 
     /// Ackable worker 的订阅必须使用外部注入 token：这是组合根 WorkerSpec child token funnel 的前提。
@@ -1010,16 +1024,16 @@ mod tests {
             Arc::clone(&health),
         );
 
-        assert!(worker.shutdown().await.is_ok());
+        assert!(worker.shutdown().await.is_err());
         assert_eq!(worker.health().status(), HealthStatus::Unhealthy);
         assert_eq!(worker.health().detail(), "subscriber-unavailable");
     }
 
-    /// `ConsumerWorker` 是 `Send + Sync`（经 `Box<DynManagedResource>` 注入 ShutdownStack 的前提）。
+    /// `ManagedBlockingWorker` 是 `Send + Sync`（经 `Box<DynManagedResource>` 注入 ShutdownStack 的前提）。
     #[test]
-    fn consumer_worker_is_send_sync() {
+    fn managed_blocking_worker_is_send_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
-        assert_send_sync::<ConsumerWorker>();
+        assert_send_sync::<ManagedBlockingWorker>();
     }
 
     // ── spawn_relay fakes ──────────────────────────────────────────────────────

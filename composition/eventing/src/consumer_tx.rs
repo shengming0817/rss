@@ -666,60 +666,6 @@ fn log_tx_handler_transient_exhausted(meta: &ConsumerMeta, msg: &Message, summar
 
 const CONSUMER_TX_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
 
-pub(crate) struct ConsumerTxWorker {
-    name: String,
-    inner: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
-    token: tokio_util::sync::CancellationToken,
-}
-
-impl ConsumerTxWorker {
-    fn adopt(
-        name: String,
-        handle: std::thread::JoinHandle<()>,
-        token: tokio_util::sync::CancellationToken,
-    ) -> Self {
-        Self {
-            name,
-            inner: std::sync::Mutex::new(Some(handle)),
-            token,
-        }
-    }
-}
-
-#[derive(Debug, thiserror::Error)]
-#[error("consumer tx worker thread panicked")]
-struct ConsumerTxThreadPanicked;
-
-#[allow(unknown_lints, rss_diport_impl_allowlist)]
-// reason(rss_diport_impl_allowlist): assembly-private ConsumerTx driver owns its supervised worker;
-// this is a lifecycle implementation, not an adapter provider.
-impl diport::ManagedResource for ConsumerTxWorker {
-    fn name(&self) -> &str {
-        &self.name
-    }
-
-    fn shutdown_timeout(&self) -> std::time::Duration {
-        CONSUMER_TX_SHUTDOWN_TIMEOUT
-    }
-
-    async fn shutdown(&self) -> Result<(), diport::ShutdownError> {
-        self.token.cancel();
-        let handle = self
-            .inner
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .take();
-        let Some(handle) = handle else {
-            return Ok(());
-        };
-        match tokio::task::spawn_blocking(move || handle.join()).await {
-            Err(error) => Err(diport::ShutdownError::new(error)),
-            Ok(Err(_)) => Err(diport::ShutdownError::new(ConsumerTxThreadPanicked)),
-            Ok(Ok(())) => Ok(()),
-        }
-    }
-}
-
 struct HealthReportingDlx {
     inner: tokio::sync::Mutex<Box<diport::DynDeadLetterStore<'static>>>,
     health: Arc<eventexec::WorkerHealth>,
@@ -769,24 +715,6 @@ fn health_reporting_dlx(
     })
 }
 
-fn spawn_consumer_tx_task<Fut, M>(
-    worker_name: &str,
-    health: Arc<eventexec::WorkerHealth>,
-    make_body: M,
-) -> std::thread::JoinHandle<()>
-where
-    M: FnOnce() -> Fut + Send + 'static,
-    Fut: std::future::Future<Output = ()>,
-{
-    let worker_name = worker_name.to_owned();
-    let runtime = tokio::runtime::Handle::current();
-    std::thread::spawn(move || {
-        let _stopped = health.stopped_on_exit();
-        tracing::debug!(worker = worker_name, "consumer-tx: worker thread started");
-        runtime.block_on(make_body());
-    })
-}
-
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_consumer_ackable_tx_subscriber<S, P, H>(
     name: String,
@@ -799,7 +727,7 @@ pub(crate) fn spawn_consumer_ackable_tx_subscriber<S, P, H>(
     lease_cfg: LeaseConfig,
     token: tokio_util::sync::CancellationToken,
     health: Arc<eventexec::WorkerHealth>,
-) -> ConsumerTxWorker
+) -> eventexec::ManagedBlockingWorker
 where
     S: consistency::InboxStore + Send + Sync + 'static,
     P: policy::Policy,
@@ -807,25 +735,37 @@ where
 {
     use diport::AckableSubscriber as _;
 
-    let token_run = token.clone();
+    let worker_name = name.clone();
+    let runtime = tokio::runtime::Handle::current();
     let health_run = Arc::clone(&health);
     let dlx = health_reporting_dlx(dlx, Arc::clone(&health), &meta);
-    let handle = spawn_consumer_tx_task(&name, Arc::clone(&health), move || async move {
-        match subscriber.subscribe_ackable(topic, token_run.clone()).await {
-            Ok(stream) => {
-                health_run.mark_healthy();
-                run_consumer_ackable_tx(stream, idempotency, dlx, meta, handler, lease_cfg).await;
-            }
-            Err(error) => {
-                health_run.mark_subscriber_unavailable();
-                tracing::error!(
-                    error = %error,
-                    "consumer-tx: subscribe_ackable failed; worker exiting"
-                );
-            }
-        }
-    });
-    ConsumerTxWorker::adopt(name, handle, token)
+    eventexec::ManagedBlockingWorker::spawn(
+        name,
+        token,
+        Arc::clone(&health),
+        CONSUMER_TX_SHUTDOWN_TIMEOUT,
+        move |token_run| {
+            tracing::debug!(worker = worker_name, "consumer-tx: worker thread started");
+            runtime.block_on(async move {
+                match subscriber.subscribe_ackable(topic, token_run).await {
+                    Ok(stream) => {
+                        health_run.mark_healthy();
+                        run_consumer_ackable_tx(stream, idempotency, dlx, meta, handler, lease_cfg)
+                            .await;
+                        Ok(())
+                    }
+                    Err(error) => {
+                        health_run.mark_subscriber_unavailable();
+                        tracing::error!(
+                            error = %error,
+                            "consumer-tx: subscribe_ackable failed; worker exiting"
+                        );
+                        Err(diport::ShutdownError::new(error))
+                    }
+                }
+            })
+        },
+    )
 }
 
 #[cfg(test)]
@@ -843,10 +783,11 @@ mod tests {
         DeadLetterRecord, DeadLetterStore, DeadLetterStoreError, DynDeadLetterStore,
     };
     use diport::{
-        AckAction, Acker, Delivery, DynAcker, EnvelopeMetadata, KEY_SCHEMA_HASH,
-        KEY_SCHEMA_VERSION, KEY_TENANT_AUTHORITY, KEY_TENANT_ID, Message,
+        AckAction, AckableSubscriber, Acker, Delivery, DynAckableSubscriber, DynAcker,
+        EnvelopeMetadata, KEY_SCHEMA_HASH, KEY_SCHEMA_VERSION, KEY_TENANT_AUTHORITY, KEY_TENANT_ID,
+        ManagedResource as _, Message, SubscriberError, Topic,
     };
-    use primitives::{Mac, MacAlgorithm, MacKey, MacVerifier};
+    use primitives::{HealthStatus, Mac, MacAlgorithm, MacKey, MacVerifier};
 
     use super::*;
     use eventexec::{TenantAuthority, TenantAuthorityBinding};
@@ -924,6 +865,82 @@ mod tests {
         actions: Arc<Mutex<Vec<AckAction>>>,
         ack_started: Arc<tokio::sync::Notify>,
         release_ack: Arc<tokio::sync::Notify>,
+    }
+
+    struct CancelAwareSubscriber {
+        deliveries: Mutex<Option<Vec<Delivery>>>,
+    }
+
+    impl AckableSubscriber for CancelAwareSubscriber {
+        async fn subscribe_ackable(
+            &self,
+            _topic: Topic,
+            token: tokio_util::sync::CancellationToken,
+        ) -> Result<diport::DeliveryStream, SubscriberError> {
+            let deliveries = self
+                .deliveries
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .take()
+                .unwrap_or_default();
+            Ok(Box::pin(
+                futures::stream::iter(deliveries)
+                    .take_until(async move { token.cancelled().await }),
+            ))
+        }
+
+        async fn shutdown(&self) -> Result<(), SubscriberError> {
+            Ok(())
+        }
+    }
+
+    struct RuntimeIdentitySubscriber {
+        observed: Mutex<Option<tokio::sync::oneshot::Sender<tokio::runtime::Id>>>,
+    }
+
+    impl AckableSubscriber for RuntimeIdentitySubscriber {
+        async fn subscribe_ackable(
+            &self,
+            _topic: Topic,
+            token: tokio_util::sync::CancellationToken,
+        ) -> Result<diport::DeliveryStream, SubscriberError> {
+            if let Some(observed) = self
+                .observed
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .take()
+            {
+                let _ = observed.send(tokio::runtime::Handle::current().id());
+            }
+            Ok(Box::pin(
+                futures::stream::pending::<Delivery>()
+                    .take_until(async move { token.cancelled().await }),
+            ))
+        }
+
+        async fn shutdown(&self) -> Result<(), SubscriberError> {
+            Ok(())
+        }
+    }
+
+    #[derive(Debug, thiserror::Error)]
+    #[error("test subscriber unavailable")]
+    struct TestSubscriberUnavailable;
+
+    struct FailingSubscriber;
+
+    impl AckableSubscriber for FailingSubscriber {
+        async fn subscribe_ackable(
+            &self,
+            _topic: Topic,
+            _token: tokio_util::sync::CancellationToken,
+        ) -> Result<diport::DeliveryStream, SubscriberError> {
+            Err(SubscriberError::new(TestSubscriberUnavailable))
+        }
+
+        async fn shutdown(&self) -> Result<(), SubscriberError> {
+            Ok(())
+        }
     }
 
     impl Acker for BlockingAckAcker {
@@ -1685,18 +1702,118 @@ mod tests {
     async fn consumer_tx_thread_enters_the_assembly_runtime() -> TestResult {
         let assembly_runtime = tokio::runtime::Handle::current().id();
         let (observed_sender, observed_receiver) = tokio::sync::oneshot::channel();
-        let handle = spawn_consumer_tx_task(
-            "consumer-tx-runtime-regression",
+        let worker = spawn_consumer_ackable_tx_subscriber::<TxStore, policy::TransactionalOnly, _>(
+            "consumer-tx-runtime-regression".to_owned(),
+            DynAckableSubscriber::new_box(RuntimeIdentitySubscriber {
+                observed: Mutex::new(Some(observed_sender)),
+            }),
+            Topic::new("identity.session-created"),
+            TxStore::fresh(),
+            noop_dlx(),
+            meta()?,
+            transactional_handler(move |_msg, _ctx, _key, _lease| {
+                Box::pin(async { ConsumerTxOutcome::Committed(TestCommitProof) })
+            }),
+            lease_cfg(),
+            tokio_util::sync::CancellationToken::new(),
             Arc::new(eventexec::WorkerHealth::starting()),
-            move || async move {
-                let _ = observed_sender.send(tokio::runtime::Handle::current().id());
-            },
         );
 
         assert_eq!(observed_receiver.await?, assembly_runtime);
-        tokio::task::spawn_blocking(move || handle.join())
-            .await?
-            .map_err(|_| std::io::Error::other("consumer tx test thread panicked"))?;
+        worker.shutdown().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn consumer_tx_subscribe_failure_is_typed_shutdown_error_and_stops_health() -> TestResult
+    {
+        let health = Arc::new(eventexec::WorkerHealth::starting());
+        let worker = spawn_consumer_ackable_tx_subscriber::<TxStore, policy::TransactionalOnly, _>(
+            "consumer-tx-subscribe-failure".to_owned(),
+            DynAckableSubscriber::new_box(FailingSubscriber),
+            Topic::new("identity.session-created"),
+            TxStore::fresh(),
+            noop_dlx(),
+            meta()?,
+            transactional_handler(move |_msg, _ctx, _key, _lease| {
+                Box::pin(async { ConsumerTxOutcome::Committed(TestCommitProof) })
+            }),
+            lease_cfg(),
+            tokio_util::sync::CancellationToken::new(),
+            Arc::clone(&health),
+        );
+
+        let error = match worker.shutdown().await {
+            Ok(()) => return Err("subscribe failure did not reach managed completion".into()),
+            Err(error) => error,
+        };
+        assert_eq!(error.to_string(), "resource shutdown failed");
+        assert_eq!(health.status(), HealthStatus::Unhealthy);
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn consumer_tx_worker_shutdown_stops_new_admission_and_drains_inflight_delivery()
+    -> TestResult {
+        let actions = Arc::new(Mutex::new(Vec::new()));
+        let handler_started = Arc::new(tokio::sync::Notify::new());
+        let release_handler = Arc::new(tokio::sync::Notify::new());
+        let committed = Arc::new(AtomicU32::new(0));
+        let handler_calls = Arc::new(AtomicU32::new(0));
+        let first = Delivery::new(
+            message("evt-tx-drain-first")?,
+            DynAcker::new_box(RecordingAcker(Arc::clone(&actions))),
+        );
+        let second = Delivery::new(
+            message("evt-tx-drain-second")?,
+            DynAcker::new_box(RecordingAcker(Arc::clone(&actions))),
+        );
+        let committed_run = Arc::clone(&committed);
+        let handler_calls_run = Arc::clone(&handler_calls);
+        let handler_started_run = Arc::clone(&handler_started);
+        let release_handler_run = Arc::clone(&release_handler);
+        let handler = transactional_handler(move |_msg, _ctx, _key, _lease| {
+            let committed_run = Arc::clone(&committed_run);
+            let handler_calls_run = Arc::clone(&handler_calls_run);
+            let handler_started_run = Arc::clone(&handler_started_run);
+            let release_handler_run = Arc::clone(&release_handler_run);
+            Box::pin(async move {
+                handler_calls_run.fetch_add(1, Ordering::AcqRel);
+                handler_started_run.notify_one();
+                release_handler_run.notified().await;
+                committed_run.fetch_add(1, Ordering::AcqRel);
+                ConsumerTxOutcome::Committed(TestCommitProof)
+            })
+        });
+        let worker = spawn_consumer_ackable_tx_subscriber::<TxStore, policy::TransactionalOnly, _>(
+            "consumer-tx-inflight-drain".to_owned(),
+            DynAckableSubscriber::new_box(CancelAwareSubscriber {
+                deliveries: Mutex::new(Some(vec![first, second])),
+            }),
+            Topic::new("identity.session-created"),
+            TxStore::fresh(),
+            noop_dlx(),
+            meta()?,
+            handler,
+            lease_cfg(),
+            tokio_util::sync::CancellationToken::new(),
+            Arc::new(eventexec::WorkerHealth::starting()),
+        );
+
+        tokio::time::timeout(Duration::from_secs(1), handler_started.notified()).await?;
+        let shutdown = worker.shutdown();
+        tokio::pin!(shutdown);
+        assert!(futures::poll!(&mut shutdown).is_pending());
+        assert_eq!(committed.load(Ordering::Acquire), 0);
+        release_handler.notify_one();
+        shutdown.await?;
+
+        assert_eq!(committed.load(Ordering::Acquire), 1);
+        assert_eq!(handler_calls.load(Ordering::Acquire), 1);
+        assert_eq!(
+            *actions.lock().unwrap_or_else(|error| error.into_inner()),
+            vec![AckAction::Ack]
+        );
         Ok(())
     }
 }

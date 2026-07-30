@@ -17,7 +17,7 @@
 //!
 //! `PgOutbox` 持 `Box<DynPublisher<'static>>`，dynosaur 生成的 `DynPublisher` 是 `Send+!Sync`，
 //! 导致 `Arc<PgOutbox>: !Send`，无法 `tokio::spawn(relay_loop(Arc<PgOutbox>, ...))`。
-//! 解法（与 `eventexec::ConsumerWorker` 对称）：`std::thread::spawn` 把 `PgOutbox`（`Send`）移入
+//! 解法：由 `eventexec::ManagedBlockingWorker` 把 `PgOutbox`（`Send`）移入
 //! 专用 OS 线程，线程内建 current-thread tokio runtime + `block_on(relay_loop(Arc::new(outbox), ...))`；
 //! `Arc<PgOutbox>`（`!Send`）始终在单一线程内构建与持有，不跨线程，无需 `Send`。
 
@@ -32,18 +32,22 @@ use bootstrap::{DomainModuleResult, SubscriberBinding, WorkerSpec};
 use bootstrap::{ReconcileSubscriberOwner, SubscriberCapability};
 use consistency::RetentionSweeper;
 use crypto::RustCryptoMacVerifier;
+#[cfg(test)]
+use diport::ManagedResource as _;
 use diport::{
     Clock, DlxArchiveBacklog, DlxLifecycleError, DlxLifecycleRepository, DynDeadLetterStore,
-    DynKeyProvider, DynManagedResource, KeyProvider as _, ManagedResource, RedactedBytes,
-    ShutdownError, Topic,
+    DynKeyProvider, DynManagedResource, KeyProvider as _, RedactedBytes, Topic,
 };
+#[cfg(test)]
+use eventexec::ManagedBlockingWorker;
 use eventexec::{
     ConsumerMeta, DlxArchiveKeyName, DlxHotKeyName, DlxLifecycle, DlxLifecycleHealth,
     DlxLifecycleTickReport, EVENT_CONSUMER_PROBE, LeaseConfig, MetricsOutboxMetrics,
     MetricsRetentionMetrics, OUTBOX_RELAY_PROBE, OUTBOX_SAMPLER_PROBE, OUTBOX_SWEEPER_PROBE,
     RelayBudget, RelayConfig, RetentionMetrics, RetentionOutcome, RetentionTarget,
     SWEEPER_WORKER_NAME, SamplerConfig, SweeperConfig, SweeperWorker, TenantAuthority,
-    WorkerHealth, apply_dlx_lifecycle_health, backlog_sampler_loop, spawn_relay, sweeper_loop,
+    WorkerHealth, apply_dlx_lifecycle_health, backlog_sampler_loop, spawn_on_dedicated_runtime,
+    spawn_relay, sweeper_loop,
 };
 #[cfg(test)]
 use generated::event::{EventSpec, SubscriptionSpec};
@@ -369,6 +373,7 @@ const DLX_LIFECYCLE_INTERVAL: Duration = Duration::from_secs(30);
 const DLX_LIFECYCLE_TICK_TIMEOUT: Duration = Duration::from_secs(25);
 const DLX_ARCHIVE_READINESS_INTERVAL: Duration = Duration::from_secs(60);
 const DLX_ARCHIVE_READINESS_TIMEOUT: Duration = Duration::from_secs(5);
+const EVENT_WORKER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(45);
 const TENANT_AUTHORITY_HMAC_KEY_ENV: &str = "RSS_TENANT_AUTHORITY_HMAC_KEY_B64URL";
 const TENANT_AUTHORITY_TTL_ENV: &str = "RSS_TENANT_AUTHORITY_TTL_SECS";
 const DEFAULT_TENANT_AUTHORITY_TTL_SECS: u64 = 3600;
@@ -409,49 +414,6 @@ impl bootstrap::HealthProbe for WorkerHealthProbe {
             self.health.status(),
             self.health.detail(),
         )
-    }
-}
-
-#[derive(Debug, thiserror::Error)]
-#[error("threaded event worker failed")]
-struct ThreadedWorkerError;
-
-struct ThreadedEventWorker {
-    name: &'static str,
-    token: tokio_util::sync::CancellationToken,
-    handle: tokio::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
-}
-
-impl ThreadedEventWorker {
-    fn spawn<F>(name: &'static str, token: tokio_util::sync::CancellationToken, run: F) -> Self
-    where
-        F: FnOnce(tokio_util::sync::CancellationToken) + Send + 'static,
-    {
-        let thread_token = token.clone();
-        let handle = std::thread::spawn(move || run(thread_token));
-        Self {
-            name,
-            token,
-            handle: tokio::sync::Mutex::new(Some(handle)),
-        }
-    }
-}
-
-impl ManagedResource for ThreadedEventWorker {
-    fn name(&self) -> &str {
-        self.name
-    }
-
-    async fn shutdown(&self) -> Result<(), ShutdownError> {
-        self.token.cancel();
-        let Some(handle) = self.handle.lock().await.take() else {
-            return Ok(());
-        };
-        tokio::task::spawn_blocking(move || handle.join())
-            .await
-            .map_err(ShutdownError::new)?
-            .map_err(|_| ShutdownError::new(ThreadedWorkerError))?;
-        Ok(())
     }
 }
 
@@ -958,28 +920,14 @@ where
     S: DlxArchiveReadiness + Send + 'static,
 {
     Box::new(move |token| {
-        DynManagedResource::new_box(ThreadedEventWorker::spawn(
+        DynManagedResource::new_box(spawn_on_dedicated_runtime(
             DLX_ARCHIVE_READINESS_WORKER_NAME,
             token,
-            move |thread_token| {
-                let _stopped = health.stopped_on_exit();
-                let runtime = match tokio::runtime::Builder::new_current_thread()
-                    .enable_time()
-                    .enable_io()
-                    .build()
-                {
-                    Ok(runtime) => runtime,
-                    Err(error) => {
-                        tracing::error!(error = %error, "DLX archive readiness runtime build failed");
-                        return;
-                    }
-                };
-                runtime.block_on(dlx_archive_readiness_loop(
-                    store,
-                    thread_token,
-                    Arc::clone(&health),
-                    config,
-                ));
+            Arc::clone(&health),
+            EVENT_WORKER_SHUTDOWN_TIMEOUT,
+            move |thread_token| async move {
+                dlx_archive_readiness_loop(store, thread_token, Arc::clone(&health), config).await;
+                Ok(())
             },
         ))
     })
@@ -1016,28 +964,20 @@ fn build_dlx_archive_key_readiness_worker(
     config: DlxWorkerConfig,
 ) -> WorkerSpec {
     Box::new(move |token| {
-        DynManagedResource::new_box(ThreadedEventWorker::spawn(
+        DynManagedResource::new_box(spawn_on_dedicated_runtime(
             DLX_ARCHIVE_KEY_READINESS_WORKER_NAME,
             token,
-            move |thread_token| {
-                let _stopped = health.stopped_on_exit();
-                let runtime = match tokio::runtime::Builder::new_current_thread()
-                    .enable_time()
-                    .enable_io()
-                    .build()
-                {
-                    Ok(runtime) => runtime,
-                    Err(error) => {
-                        tracing::error!(error = %error, "DLX archive key readiness runtime build failed");
-                        return;
-                    }
-                };
-                runtime.block_on(dlx_archive_key_readiness_loop(
+            Arc::clone(&health),
+            EVENT_WORKER_SHUTDOWN_TIMEOUT,
+            move |thread_token| async move {
+                dlx_archive_key_readiness_loop(
                     VaultArchiveKeyReadiness { provider, key },
                     thread_token,
                     Arc::clone(&health),
                     config,
-                ));
+                )
+                .await;
+                Ok(())
             },
         ))
     })
@@ -1195,23 +1135,13 @@ where
     B: DlxBacklogReader + Send + 'static,
 {
     Box::new(move |token| {
-        DynManagedResource::new_box(ThreadedEventWorker::spawn(
+        DynManagedResource::new_box(spawn_on_dedicated_runtime(
             DLX_LIFECYCLE_WORKER_NAME,
             token,
-            move |thread_token| {
-                let _stopped = health.stopped_on_exit();
-                let runtime = match tokio::runtime::Builder::new_current_thread()
-                    .enable_time()
-                    .enable_io()
-                    .build()
-                {
-                    Ok(runtime) => runtime,
-                    Err(error) => {
-                        tracing::error!(error = %error, "DLX lifecycle runtime build failed");
-                        return;
-                    }
-                };
-                runtime.block_on(dlx_lifecycle_loop(
+            Arc::clone(&health),
+            EVENT_WORKER_SHUTDOWN_TIMEOUT,
+            move |thread_token| async move {
+                dlx_lifecycle_loop(
                     lifecycle,
                     backlog_repository,
                     thread_token,
@@ -1219,7 +1149,9 @@ where
                     Arc::new(MetricsRetentionMetrics),
                     Arc::new(SystemClock),
                     config,
-                ));
+                )
+                .await;
+                Ok(())
             },
         ))
     })
@@ -1719,29 +1651,21 @@ fn wire_sampler_worker(
     let health = Arc::new(WorkerHealth::healthy());
     let worker_health = Arc::clone(&health);
     let worker: WorkerSpec = Box::new(move |token| {
-        DynManagedResource::new_box(ThreadedEventWorker::spawn(
+        DynManagedResource::new_box(spawn_on_dedicated_runtime(
             "outbox-sampler",
             token,
-            move |thread_token| {
-                let _stopped = worker_health.stopped_on_exit();
-                let runtime = match tokio::runtime::Builder::new_current_thread()
-                    .enable_time()
-                    .enable_io()
-                    .build()
-                {
-                    Ok(runtime) => runtime,
-                    Err(err) => {
-                        tracing::error!(error = %err, "outbox sampler runtime build failed");
-                        return;
-                    }
-                };
-                runtime.block_on(backlog_sampler_loop(
+            Arc::clone(&worker_health),
+            EVENT_WORKER_SHUTDOWN_TIMEOUT,
+            move |thread_token| async move {
+                backlog_sampler_loop(
                     Arc::new(maintenance),
                     config,
                     thread_token,
                     Arc::clone(&worker_health),
                     Arc::new(MetricsOutboxMetrics),
-                ));
+                )
+                .await;
+                Ok(())
             },
         ))
     });
@@ -1773,30 +1697,22 @@ where
     let health = Arc::new(WorkerHealth::healthy());
     let worker_health = Arc::clone(&health);
     let worker: WorkerSpec = Box::new(move |token| {
-        DynManagedResource::new_box(ThreadedEventWorker::spawn(
+        DynManagedResource::new_box(spawn_on_dedicated_runtime(
             worker_name,
             token,
-            move |thread_token| {
-                let _stopped = worker_health.stopped_on_exit();
-                let runtime = match tokio::runtime::Builder::new_current_thread()
-                    .enable_time()
-                    .enable_io()
-                    .build()
-                {
-                    Ok(runtime) => runtime,
-                    Err(err) => {
-                        tracing::error!(error = %err, "outbox sweeper runtime build failed");
-                        return;
-                    }
-                };
-                runtime.block_on(sweeper_loop(
+            Arc::clone(&worker_health),
+            EVENT_WORKER_SHUTDOWN_TIMEOUT,
+            move |thread_token| async move {
+                sweeper_loop(
                     Arc::new(maintenance),
                     config,
                     Arc::new(SystemClock),
                     thread_token,
                     Arc::clone(&worker_health),
                     target,
-                ));
+                )
+                .await;
+                Ok(())
             },
         ))
     });
@@ -3751,11 +3667,14 @@ mod tests {
     #[tokio::test]
     async fn threaded_event_worker_marks_health_stopped_on_thread_exit() {
         let health = Arc::new(WorkerHealth::healthy());
-        let worker_health = Arc::clone(&health);
         let token = tokio_util::sync::CancellationToken::new();
-        let worker = ThreadedEventWorker::spawn("test-threaded-worker", token, move |_| {
-            let _stopped = worker_health.stopped_on_exit();
-        });
+        let worker = ManagedBlockingWorker::spawn(
+            "test-threaded-worker",
+            token,
+            Arc::clone(&health),
+            EVENT_WORKER_SHUTDOWN_TIMEOUT,
+            move |_| Ok(()),
+        );
 
         if let Err(err) = worker.shutdown().await {
             panic!("thread joins: {err}");

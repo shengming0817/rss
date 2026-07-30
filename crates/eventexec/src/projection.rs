@@ -23,7 +23,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use consistency::{
@@ -34,12 +34,14 @@ use consistency::{
 use diport::{
     CheckpointId, CheckpointOwner, CheckpointVersion, DeadLetterProvenance, DeadLetterRecord,
     DeadLetterStore, DeadLetterSummary, EnvelopeMetadata, KEY_SCHEMA_HASH, KEY_SCHEMA_VERSION,
-    KEY_TENANT_AUTHORITY, KEY_TENANT_ID, ManagedResource, OwnerCheckpointStore, SaveOutcome,
+    KEY_TENANT_AUTHORITY, KEY_TENANT_ID, OwnerCheckpointStore, SaveOutcome,
 };
 use futures::future::BoxFuture;
 use tokio_util::sync::CancellationToken;
 use vocab::ProjectionInputBinding;
 
+use crate::ManagedBlockingWorker;
+use crate::managed_blocking_worker::spawn_on_dedicated_runtime;
 use crate::relay::WorkerHealth;
 
 const SUMMARY_PROJECTION_APPLY_PERMANENT: DeadLetterSummary =
@@ -1133,94 +1135,6 @@ fn record_projection_health(run: &ProjectionRun, health: &WorkerHealth) {
     }
 }
 
-/// 受监督的 projection worker（专用 OS 线程 + current-thread runtime）。
-pub struct ProjectionWorker {
-    name: String,
-    inner: Mutex<Option<std::thread::JoinHandle<()>>>,
-    health: Arc<WorkerHealth>,
-    token: CancellationToken,
-}
-
-impl ProjectionWorker {
-    fn adopt(
-        name: String,
-        handle: std::thread::JoinHandle<()>,
-        health: Arc<WorkerHealth>,
-        token: CancellationToken,
-    ) -> Self {
-        Self {
-            name,
-            inner: Mutex::new(Some(handle)),
-            health,
-            token,
-        }
-    }
-
-    pub fn health(&self) -> Arc<WorkerHealth> {
-        self.health.clone()
-    }
-}
-
-#[derive(Debug, thiserror::Error)]
-#[error("projection worker thread panicked")]
-struct ProjectionThreadPanicked;
-
-#[allow(unknown_lints, rss_diport_impl_allowlist)]
-// reason(rss_diport_impl_allowlist): projection 后台 worker 归 eventexec 服务层并 impl
-// `ManagedResource`，同 ConsumerWorker / RelayWorker 范式。
-impl ManagedResource for ProjectionWorker {
-    fn name(&self) -> &str {
-        &self.name
-    }
-
-    fn shutdown_timeout(&self) -> Duration {
-        PROJECTION_SHUTDOWN_TIMEOUT
-    }
-
-    async fn shutdown(&self) -> Result<(), diport::ShutdownError> {
-        self.token.cancel();
-        let handle = self.inner.lock().unwrap_or_else(|e| e.into_inner()).take();
-        let Some(handle) = handle else {
-            return Ok(());
-        };
-        match tokio::task::spawn_blocking(move || handle.join()).await {
-            Err(join_err) => Err(diport::ShutdownError::new(join_err)),
-            Ok(Err(_panic)) => Err(diport::ShutdownError::new(ProjectionThreadPanicked)),
-            Ok(Ok(())) => Ok(()),
-        }
-    }
-}
-
-fn spawn_projection_thread<Fut, M>(
-    worker_name: &str,
-    health: Arc<WorkerHealth>,
-    make_body: M,
-) -> std::thread::JoinHandle<()>
-where
-    M: FnOnce() -> Fut + Send + 'static,
-    Fut: std::future::Future<Output = ()>,
-{
-    let worker_name = worker_name.to_string();
-    std::thread::spawn(move || {
-        let _stopped = health.stopped_on_exit();
-        let rt = match tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-        {
-            Ok(rt) => rt,
-            Err(e) => {
-                tracing::error!(
-                    worker = worker_name,
-                    error = %e,
-                    "projection: worker runtime build failed; worker unhealthy"
-                );
-                return;
-            }
-        };
-        rt.block_on(make_body());
-    })
-}
-
 /// Spawn a supervised projection worker.
 pub fn spawn_projection_worker<S, P, C, D>(
     name: String,
@@ -1229,19 +1143,23 @@ pub fn spawn_projection_worker<S, P, C, D>(
     config: ProjectionRunnerConfig,
     token: CancellationToken,
     health: Arc<WorkerHealth>,
-) -> ProjectionWorker
+) -> ManagedBlockingWorker
 where
     S: ProjectionEventSource + Send + 'static,
     P: Projector + Send + Sync + 'static,
     C: OwnerCheckpointStore + Send + Sync + 'static,
     D: DeadLetterStore + Send + Sync + 'static,
 {
-    let token_run = token.clone();
-    let health_run = Arc::clone(&health);
-    let handle = spawn_projection_thread(&name, Arc::clone(&health), move || async move {
-        projection_runner_loop(source, harness, config, token_run, health_run).await;
-    });
-    ProjectionWorker::adopt(name, handle, health, token)
+    spawn_on_dedicated_runtime(
+        name,
+        token,
+        Arc::clone(&health),
+        PROJECTION_SHUTDOWN_TIMEOUT,
+        move |token| async move {
+            projection_runner_loop(source, harness, config, token, health).await;
+            Ok(())
+        },
+    )
 }
 
 fn projection_dead_letter_message_id(

@@ -131,6 +131,9 @@ Outbox relay transport 是 **at-least-once**：durable fact 使用稳定 event I
   outgoing append 与 inbox mark processed，commit 成功后才 broker Ack。旧 non-tx ackable spawn 不受支持。
 - ConsumerTx handler 由 postgres adapter 构造，外部 crate 不得构造或逃逸 `TxCapability`。
   handler、outcome、runner 与 worker spawn 归 runtime assembly 私有。
+- 长驻 `!Send` event worker 的 OS thread、current-thread Tokio runtime、driver、build failure、health 与
+  completion 统一归 `eventexec` typed dedicated-runtime factory；assembly 只提供业务 future，确需保留
+  组合根健康证据时仅注入窄 build-failure observer，不得直接构造 `tokio::runtime::Builder`。
 - 结算规则：`handler_transient` 耗尽后只 broker `Requeue`，不写 app DLX、不提交 inbox done、不 Ack；
   `commit_unknown` / lease lost 立即 `Requeue`；只有永久 `Reject` 可写 app DLX 后 Ack。
   Duplicate delivery 不进入 tx handler，直接 Ack。

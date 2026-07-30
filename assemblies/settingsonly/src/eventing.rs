@@ -9,7 +9,7 @@ use diport::{DynDeadLetterStore, DynManagedResource, ManagedResource, ShutdownEr
 use eventexec::{
     EVENT_CONSUMER_PROBE, LeaseConfig, MetricsOutboxMetrics, OUTBOX_RELAY_PROBE, RelayBudget,
     RelayConfig, RetentionTarget, SamplerConfig, SweeperConfig, SweeperWorker, WorkerHealth,
-    backlog_sampler_loop, spawn_relay, sweeper_loop,
+    backlog_sampler_loop, spawn_on_dedicated_runtime, spawn_relay, sweeper_loop,
 };
 use generated::event::{SubscriberReadiness, SubscriptionDispatchKey};
 use vocab::ExternalEffectPolicy;
@@ -455,25 +455,21 @@ fn wire_outbox_maintenance(
     let sampler_health = Arc::new(WorkerHealth::starting());
     let sampler_worker_health = Arc::clone(&sampler_health);
     output.workers.push(Box::new(move |token| {
-        DynManagedResource::new_box(ThreadedEventWorker::spawn(
+        DynManagedResource::new_box(spawn_on_dedicated_runtime(
             "settingsonly-outbox-sampler",
             token,
-            move |thread_token| {
-                let _stopped = sampler_worker_health.stopped_on_exit();
-                let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                else {
-                    tracing::error!("settingsonly sampler runtime failed");
-                    return;
-                };
-                runtime.block_on(backlog_sampler_loop(
+            Arc::clone(&sampler_worker_health),
+            EVENT_WORKER_SHUTDOWN_TIMEOUT,
+            move |thread_token| async move {
+                backlog_sampler_loop(
                     Arc::new(sampler),
                     sampler_config,
                     thread_token,
                     Arc::clone(&sampler_worker_health),
                     Arc::new(MetricsOutboxMetrics),
-                ));
+                )
+                .await;
+                Ok(())
             },
         ))
     }));
@@ -487,26 +483,22 @@ fn wire_outbox_maintenance(
     let sweeper_health = Arc::new(WorkerHealth::starting());
     let sweeper_worker_health = Arc::clone(&sweeper_health);
     output.workers.push(Box::new(move |token| {
-        DynManagedResource::new_box(ThreadedEventWorker::spawn(
+        DynManagedResource::new_box(spawn_on_dedicated_runtime(
             "settingsonly-outbox-sweeper",
             token,
-            move |thread_token| {
-                let _stopped = sweeper_worker_health.stopped_on_exit();
-                let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                else {
-                    tracing::error!("settingsonly sweeper runtime failed");
-                    return;
-                };
-                runtime.block_on(sweeper_loop(
+            Arc::clone(&sweeper_worker_health),
+            EVENT_WORKER_SHUTDOWN_TIMEOUT,
+            move |thread_token| async move {
+                sweeper_loop(
                     Arc::new(sweeper),
                     sweeper_config,
                     Arc::new(crate::SystemClock),
                     thread_token,
                     Arc::clone(&sweeper_worker_health),
                     RetentionTarget::OutboxPublished,
-                ));
+                )
+                .await;
+                Ok(())
             },
         ))
     }));
@@ -568,67 +560,6 @@ fn required_health_status(status: primitives::HealthStatus) -> primitives::Healt
             primitives::HealthStatus::Unhealthy
         }
         _ => primitives::HealthStatus::Unhealthy,
-    }
-}
-
-#[derive(Debug)]
-struct ThreadedWorkerError;
-
-impl std::fmt::Display for ThreadedWorkerError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("settingsonly threaded event worker failed")
-    }
-}
-
-impl std::error::Error for ThreadedWorkerError {}
-
-struct ThreadedEventWorker {
-    name: &'static str,
-    token: tokio_util::sync::CancellationToken,
-    completion:
-        tokio::sync::Mutex<Option<tokio::sync::oneshot::Receiver<Result<(), ThreadedWorkerError>>>>,
-}
-
-impl ThreadedEventWorker {
-    fn spawn<F>(name: &'static str, token: tokio_util::sync::CancellationToken, run: F) -> Self
-    where
-        F: FnOnce(tokio_util::sync::CancellationToken) + Send + 'static,
-    {
-        let thread_token = token.clone();
-        let (completed, completion) = tokio::sync::oneshot::channel();
-        std::thread::spawn(move || {
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                run(thread_token);
-            }))
-            .map_err(|_| ThreadedWorkerError);
-            let _ = completed.send(result);
-        });
-        Self {
-            name,
-            token,
-            completion: tokio::sync::Mutex::new(Some(completion)),
-        }
-    }
-}
-
-impl ManagedResource for ThreadedEventWorker {
-    fn name(&self) -> &str {
-        self.name
-    }
-
-    fn shutdown_timeout(&self) -> Duration {
-        EVENT_WORKER_SHUTDOWN_TIMEOUT
-    }
-
-    async fn shutdown(&self) -> Result<(), ShutdownError> {
-        self.token.cancel();
-        let Some(completion) = self.completion.lock().await.take() else {
-            return Ok(());
-        };
-        completion
-            .await
-            .map_err(ShutdownError::new)?
-            .map_err(ShutdownError::new)
     }
 }
 

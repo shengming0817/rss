@@ -5,10 +5,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::Context as _;
 use bootstrap::{DomainModuleResult, WorkerSpec};
-use diport::{Clock as _, DynManagedResource, ManagedResource, ShutdownError};
+use diport::{Clock as _, DynManagedResource};
 use eventexec::{
     DlxArchiveKeyName, DlxHotKeyName, DlxLifecycle, DlxLifecycleHealth, WorkerHealth,
-    apply_dlx_lifecycle_health,
+    apply_dlx_lifecycle_health, spawn_on_dedicated_runtime_with_build_failure,
 };
 
 const DLX_LIFECYCLE_INTERVAL: Duration = Duration::from_secs(60);
@@ -169,26 +169,25 @@ fn lifecycle_worker(
     health: Arc<WorkerHealth>,
 ) -> WorkerSpec {
     Box::new(move |token| {
-        DynManagedResource::new_box(ThreadedDlxWorker::spawn(
+        let build_failure_health = Arc::clone(&health);
+        DynManagedResource::new_box(spawn_on_dedicated_runtime_with_build_failure(
             DLX_LIFECYCLE_WORKER_NAME,
             token,
-            move |thread_token| {
-                let _stopped = health.stopped_on_exit();
-                let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                else {
-                    record_health_transition(
-                        &health,
-                        DlxLifecycleHealth::Unhealthy,
-                        "dlx-lifecycle",
-                        "runtime",
-                        "runtime-build",
-                        "runtime_build",
-                    );
-                    return;
-                };
-                runtime.block_on(lifecycle_loop(lifecycle, thread_token, health));
+            Arc::clone(&health),
+            DLX_WORKER_SHUTDOWN_TIMEOUT,
+            move |_error| {
+                record_health_transition(
+                    &build_failure_health,
+                    DlxLifecycleHealth::Unhealthy,
+                    "dlx-lifecycle",
+                    "runtime",
+                    "runtime-build",
+                    "runtime_build",
+                );
+            },
+            move |thread_token| async move {
+                lifecycle_loop(lifecycle, thread_token, health).await;
+                Ok(())
             },
         ))
     })
@@ -313,27 +312,25 @@ fn key_readiness_worker(
 ) -> anyhow::Result<WorkerSpec> {
     let aad = key_canary_aad(spec.aad_scope)?;
     Ok(Box::new(move |token| {
-        DynManagedResource::new_box(ThreadedDlxWorker::spawn(
+        DynManagedResource::new_box(spawn_on_dedicated_runtime_with_build_failure(
             spec.worker_name,
             token,
-            move |thread_token| {
-                let _stopped = health.stopped_on_exit();
-                let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                else {
-                    tracing::error!(
-                        event = "settingsonly.readiness",
-                        component = "dlx-key",
-                        operation = "runtime",
-                        outcome = "unhealthy",
-                        reason = "runtime-build",
-                        error_type = "runtime_build",
-                        "settingsonly readiness worker failed"
-                    );
-                    return;
-                };
-                runtime.block_on(key_readiness_loop(provider, key, aad, thread_token, health));
+            Arc::clone(&health),
+            DLX_WORKER_SHUTDOWN_TIMEOUT,
+            move |_error| {
+                tracing::error!(
+                    event = "settingsonly.readiness",
+                    component = "dlx-key",
+                    operation = "runtime",
+                    outcome = "unhealthy",
+                    reason = "runtime-build",
+                    error_type = "runtime_build",
+                    "settingsonly readiness worker failed"
+                );
+            },
+            move |thread_token| async move {
+                key_readiness_loop(provider, key, aad, thread_token, health).await;
+                Ok(())
             },
         ))
     }))
@@ -446,31 +443,25 @@ fn archive_readiness_worker(
     readiness_interval: Duration,
 ) -> WorkerSpec {
     Box::new(move |token| {
-        DynManagedResource::new_box(ThreadedDlxWorker::spawn(
+        let build_failure_health = Arc::clone(&health);
+        DynManagedResource::new_box(spawn_on_dedicated_runtime_with_build_failure(
             DLX_ARCHIVE_READINESS_WORKER_NAME,
             token,
-            move |thread_token| {
-                let _stopped = health.stopped_on_exit();
-                let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                else {
-                    record_health_transition(
-                        &health,
-                        DlxLifecycleHealth::Unhealthy,
-                        "dlx-archive",
-                        "runtime",
-                        "runtime-build",
-                        "runtime_build",
-                    );
-                    return;
-                };
-                runtime.block_on(archive_readiness_loop(
-                    store,
-                    thread_token,
-                    health,
-                    readiness_interval,
-                ));
+            Arc::clone(&health),
+            DLX_WORKER_SHUTDOWN_TIMEOUT,
+            move |_error| {
+                record_health_transition(
+                    &build_failure_health,
+                    DlxLifecycleHealth::Unhealthy,
+                    "dlx-archive",
+                    "runtime",
+                    "runtime-build",
+                    "runtime_build",
+                );
+            },
+            move |thread_token| async move {
+                archive_readiness_loop(store, thread_token, health, readiness_interval).await;
+                Ok(())
             },
         ))
     })
@@ -590,68 +581,6 @@ fn required_health_status(status: primitives::HealthStatus) -> primitives::Healt
             primitives::HealthStatus::Unhealthy
         }
         _ => primitives::HealthStatus::Unhealthy,
-    }
-}
-
-#[derive(Debug)]
-struct ThreadedDlxWorkerError;
-
-impl std::fmt::Display for ThreadedDlxWorkerError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("settingsonly threaded DLX worker failed")
-    }
-}
-
-impl std::error::Error for ThreadedDlxWorkerError {}
-
-struct ThreadedDlxWorker {
-    name: &'static str,
-    token: tokio_util::sync::CancellationToken,
-    completion: tokio::sync::Mutex<
-        Option<tokio::sync::oneshot::Receiver<Result<(), ThreadedDlxWorkerError>>>,
-    >,
-}
-
-impl ThreadedDlxWorker {
-    fn spawn<F>(name: &'static str, token: tokio_util::sync::CancellationToken, run: F) -> Self
-    where
-        F: FnOnce(tokio_util::sync::CancellationToken) + Send + 'static,
-    {
-        let thread_token = token.clone();
-        let (completed, completion) = tokio::sync::oneshot::channel();
-        std::thread::spawn(move || {
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                run(thread_token);
-            }))
-            .map_err(|_| ThreadedDlxWorkerError);
-            let _ = completed.send(result);
-        });
-        Self {
-            name,
-            token,
-            completion: tokio::sync::Mutex::new(Some(completion)),
-        }
-    }
-}
-
-impl ManagedResource for ThreadedDlxWorker {
-    fn name(&self) -> &str {
-        self.name
-    }
-
-    fn shutdown_timeout(&self) -> Duration {
-        DLX_WORKER_SHUTDOWN_TIMEOUT
-    }
-
-    async fn shutdown(&self) -> Result<(), ShutdownError> {
-        self.token.cancel();
-        let Some(completion) = self.completion.lock().await.take() else {
-            return Ok(());
-        };
-        completion
-            .await
-            .map_err(ShutdownError::new)?
-            .map_err(ShutdownError::new)
     }
 }
 

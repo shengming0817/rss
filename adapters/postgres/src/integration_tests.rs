@@ -5438,6 +5438,76 @@ async fn settings_consumer_tx_reconcile_failure_keeps_receipt_reclaimable() -> T
     Ok(())
 }
 
+/// A successful settings ConsumerTx attempt must commit the claimed receipt to `done`; the next
+/// provider claim is then the durable duplicate decision owned by Postgres.
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+// reason: fixed integration metadata is valid and unique_event_id always yields a non-empty key.
+async fn settings_consumer_tx_commit_marks_done_and_next_claim_is_duplicate() -> TestResult {
+    let (fixture, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    let app = std::sync::Arc::new(connect_pg_rss_app_role(&fixture, &owner).await?);
+    let inbox = app.inbox();
+    let group = format!("settings-reconcile-success-{}", uuid::Uuid::new_v4());
+    let ctx = InboxReceiptContext::new(
+        test_tenant(),
+        ConsumerGroup::parse(&group).unwrap(),
+        "settings",
+        CONFIG_VERSION_CHANGED_TOPIC,
+        CONFIG_VERSION_CHANGED_TOPIC,
+        "v1",
+        TEST_SCHEMA_HASH,
+        None,
+        None,
+    )
+    .unwrap();
+    let event_id = unique_event_id("settings-reconcile-success");
+    let key = IdemKey::parse(&event_id).unwrap();
+    let lease = LeaseToken::mint();
+    assert_eq!(inbox.try_claim(&ctx, &key, &lease).await?, SeenState::Fresh);
+
+    let stores = crate::pool::PgRuntimeStores::from_unverified_for_test(
+        std::sync::Arc::clone(&app),
+        std::sync::Arc::clone(&app),
+    );
+    let handler = crate::consumer_tx::PgSettingsConsumerTx::config_version_changed(
+        stores.writer_capability(),
+        std::sync::Arc::new(settings::ConfigVersionReconciler::test_ack()),
+    );
+    let outcome = std::sync::Arc::new(handler)
+        .handle(
+            diport::Message::new(&event_id, b"{}".to_vec()),
+            ctx.clone(),
+            key.clone(),
+            lease,
+        )
+        .await;
+    assert!(matches!(outcome, crate::PgConsumerTxOutcome::Committed(_)));
+
+    let receipt: (String, Option<String>) = sqlx::query_as(
+        "SELECT status, committed_at::text FROM inbox_receipts \
+         WHERE tenant_id = $1::uuid AND event_id = $2 AND consumer_group = $3",
+    )
+    .bind(ctx.tenant_id().to_string())
+    .bind(&event_id)
+    .bind(&group)
+    .fetch_one(&owner.pool)
+    .await?;
+    assert_eq!(receipt.0, "done");
+    assert!(
+        receipt.1.is_some(),
+        "committed receipt records completion time"
+    );
+    assert_eq!(
+        inbox.try_claim(&ctx, &key, &LeaseToken::mint()).await?,
+        SeenState::Duplicate
+    );
+
+    app.shutdown().await?;
+    owner.shutdown().await?;
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::unwrap_used)]
 async fn credential_security_event_consumer_appends_current_and_all_without_identity_reads()
@@ -26720,6 +26790,27 @@ fn config_deleted_outbox_entry(event_id: &str, key: &str, version: u64) -> Event
     .unwrap()
 }
 
+#[allow(clippy::unwrap_used)]
+fn config_rolled_back_outbox_entry(
+    event_id: &str,
+    key: &str,
+    version: u64,
+    source_version: u64,
+) -> EventEntry {
+    EventEntry::from_generated_payload(
+        &generated::event::settings_v1::SettingsConfigVersionChangedPayload {
+            change_kind: generated::event::settings_v1::SettingsConfigChangeKind::RolledBack,
+            key: key.to_string(),
+            occurred_at: i64::try_from(TEST_OCCURRED_SECS).unwrap(),
+            source_version: Some(i64::try_from(source_version).unwrap()),
+            tenant_id: CONFIG_TENANT.to_string(),
+            version: i64::try_from(version).unwrap(),
+        },
+        IdemKey::parse(event_id).unwrap(),
+    )
+    .unwrap()
+}
+
 /// 构造 config-version-changed envelope（opaque subject = 配置 key）。
 fn config_envelope(subject: &str) -> OutboxEnvelopeParts {
     config_envelope_for(config_tenant(), subject)
@@ -28052,6 +28143,134 @@ async fn tc5d_config_delete_cotx_is_both_or_neither() -> TestResult {
         repo.head(settings_scope(tenant), &key).await?,
         Some(ConfigHead::Deleted(2)),
         "failed delete appends no tombstone"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// Rollback must restore a historical value as a new active version and append exactly one
+/// rolledBack fact in the same transaction. A stale version must append neither side.
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn tc5e_config_rollback_cotx_restores_version_and_appends_exact_fact() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    setup_config(&store).await?;
+    let repo = PgConfigRepo::new(&store, fixed_clock_arc(), config_protection());
+    let tenant = config_tenant();
+    let key = SettingKey::parse("app.rollback-cotx").unwrap();
+
+    repo.test_put(
+        settings_scope(tenant),
+        config_entry(key.as_str(), "historical-v1", 1),
+    )
+    .await?;
+    repo.test_put(
+        settings_scope(tenant),
+        config_entry(key.as_str(), "current-v2", 2),
+    )
+    .await?;
+
+    let exact_rollback_fact_count = |rows: &[(Vec<u8>,)]| {
+        rows.iter()
+            .filter(|(payload,)| {
+                serde_json::from_slice::<serde_json::Value>(payload).is_ok_and(|payload| {
+                    payload["tenantId"] == tenant.to_string()
+                        && payload["key"] == key.as_str()
+                        && payload["changeKind"] == "rolledBack"
+                        && payload["sourceVersion"] == 1
+                        && payload["version"] == 3
+                })
+            })
+            .count()
+    };
+    let rollback_payloads_before: Vec<(Vec<u8>,)> = sqlx::query_as("SELECT payload FROM outbox")
+        .fetch_all(&store.pool)
+        .await?;
+    let rollback_facts_before = exact_rollback_fact_count(&rollback_payloads_before);
+
+    let rollback_event = unique_event_id("cfg-tc5e-rollback");
+    repo.commit_rollback(
+        settings::config_rollback_receipt_for_test(),
+        settings_scope(tenant),
+        ConfigMutation::Put(config_entry(key.as_str(), "historical-v1", 3)),
+        config_rolled_back_outbox_entry(&rollback_event, key.as_str(), 3, 1),
+        config_envelope(key.as_str()),
+    )
+    .await?;
+
+    let restored = repo
+        .find(settings_scope(tenant), &key)
+        .await?
+        .expect("rollback version must be active");
+    assert_eq!(restored.version(), 3);
+    assert_eq!(restored.value(), "historical-v1");
+    let rollback_payloads_after: Vec<(Vec<u8>,)> = sqlx::query_as("SELECT payload FROM outbox")
+        .fetch_all(&store.pool)
+        .await?;
+    assert_eq!(
+        exact_rollback_fact_count(&rollback_payloads_after),
+        rollback_facts_before + 1,
+        "rollback appends exactly one fact for its tenant/key/version transition"
+    );
+    let expected_payload: (Vec<u8>,) =
+        sqlx::query_as("SELECT payload FROM outbox WHERE event_id = $1")
+            .bind(&rollback_event)
+            .fetch_one(&store.pool)
+            .await?;
+    let payload: serde_json::Value = serde_json::from_slice(&expected_payload.0)?;
+    assert_eq!(payload["changeKind"], "rolledBack");
+    assert_eq!(payload["key"], key.as_str());
+    assert_eq!(payload["sourceVersion"], 1);
+    assert_eq!(payload["version"], 3);
+    let config_rows_after_success: (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM config_entries WHERE tenant_id = $1::uuid AND config_key = $2",
+    )
+    .bind(tenant.to_string())
+    .bind(key.as_str())
+    .fetch_one(&store.pool)
+    .await?;
+
+    let conflict_event = unique_event_id("cfg-tc5e-conflict");
+    let conflict = repo
+        .commit_rollback(
+            settings::config_rollback_receipt_for_test(),
+            settings_scope(tenant),
+            ConfigMutation::Put(config_entry(key.as_str(), "historical-v1", 3)),
+            config_rolled_back_outbox_entry(&conflict_event, key.as_str(), 3, 1),
+            config_envelope(key.as_str()),
+        )
+        .await;
+    assert!(matches!(conflict, Err(ConfigRepoError::VersionConflict)));
+    let conflict_facts: (i64,) = sqlx::query_as("SELECT count(*) FROM outbox WHERE event_id = $1")
+        .bind(&conflict_event)
+        .fetch_one(&store.pool)
+        .await?;
+    assert_eq!(conflict_facts.0, 0, "stale rollback writes no fact");
+    let rollback_payloads_after_conflict: Vec<(Vec<u8>,)> =
+        sqlx::query_as("SELECT payload FROM outbox")
+            .fetch_all(&store.pool)
+            .await?;
+    assert_eq!(
+        exact_rollback_fact_count(&rollback_payloads_after_conflict),
+        rollback_facts_before + 1,
+        "stale rollback appends no second rolledBack fact"
+    );
+    let config_rows_after_conflict: (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM config_entries WHERE tenant_id = $1::uuid AND config_key = $2",
+    )
+    .bind(tenant.to_string())
+    .bind(key.as_str())
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(
+        config_rows_after_conflict, config_rows_after_success,
+        "stale rollback appends no config version row"
+    );
+    assert_eq!(
+        repo.head(settings_scope(tenant), &key).await?,
+        Some(ConfigHead::Active(3)),
+        "stale rollback writes no config version"
     );
 
     store.shutdown().await?;

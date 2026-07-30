@@ -32,6 +32,10 @@
 //! production Rust 只能在私有 `outbox::settlement` 模块执行三个 raw settlement SQL
 //! function；守卫以 Rust AST 中的 executable SQL call argument 识别调用，并要求私有模块持有
 //! 三个 canonical execution witness，避免 comment/const/string bait 形成空门。
+//! INVARIANT: EVENT-DEDICATED-RUNTIME-FUNNEL-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::dedicated_runtime_funnel_rejects_production_builder", anti_vacuity = "tests::workspace_dedicated_runtime_funnel_is_closed" }——
+//! production assembly 的 long-lived event worker 只能消费 `eventexec` 的 typed dedicated-runtime
+//! factory；组合根不得重新构造 current-thread runtime，使 driver、build failure、health 与 completion
+//! 始终由单一 lifecycle owner 收口。
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -65,7 +69,7 @@ const RUNTIME_REDIS_INBOX_FRAGMENT: &str = "redis.infra().inbox(";
 const DOMAIN_FORBIDDEN: &[&str] = &[
     "PgInboxStore",
     "RedisInboxStore",
-    "ConsumerWorker",
+    "ManagedBlockingWorker",
     "spawn_consumer(",
     "spawn_consumer_ackable(",
     "spawn_consumer_ackable_subscriber(",
@@ -91,6 +95,12 @@ const BYPASS_ALLOWED_PATHS: &[&str] = &[
 const POSTGRES_FAULT_MATRIX_HARNESS: &str = "adapters/postgres/src/fault_matrix.rs";
 const POSTGRES_LIB_PATH: &str = "adapters/postgres/src/lib.rs";
 const EVENT_CONTRACT_ROOT: &str = "contracts/event";
+const DEDICATED_RUNTIME_ASSEMBLY_TARGETS: &[&str] = &[
+    TARGET,
+    IDENTITYAUDIT_EVENTING_TARGET,
+    "assemblies/settingsonly/src/eventing.rs",
+    "assemblies/settingsonly/src/dlx.rs",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Rule {
@@ -105,6 +115,7 @@ pub(crate) enum Rule {
     AmqpRecoveryOwner,
     PostgresOutboxSettlementFunnel,
     ConsumerExternalEffectCapability,
+    DedicatedRuntimeFunnel,
 }
 
 pub(crate) struct EventTransportGuard;
@@ -162,6 +173,9 @@ pub(crate) fn check_root(root: &Path) -> Result<(String, Vec<Finding<Rule>>)> {
             &identityaudit_content,
         ));
     }
+    findings.extend(scan_dedicated_runtime_sources(
+        &load_dedicated_runtime_sources(root)?,
+    ));
     findings.extend(scan_domain_crates(root)?);
     findings.extend(scan_production_bypasses(root)?);
     findings.extend(scan_event_producers(root)?);
@@ -182,6 +196,72 @@ pub(crate) fn check_root(root: &Path) -> Result<(String, Vec<Finding<Rule>>)> {
         ),
         findings,
     ))
+}
+
+fn load_dedicated_runtime_sources(root: &Path) -> Result<Vec<(PathBuf, String)>> {
+    DEDICATED_RUNTIME_ASSEMBLY_TARGETS
+        .iter()
+        .map(|target| {
+            let path = root.join(target);
+            let content = std::fs::read_to_string(&path)
+                .with_context(|| format!("event-transport-guard: read {}", path.display()))?;
+            Ok((PathBuf::from(target), content))
+        })
+        .collect()
+}
+
+#[derive(Default)]
+struct DedicatedRuntimeVisitor {
+    builders: Vec<String>,
+}
+
+impl<'ast> Visit<'ast> for DedicatedRuntimeVisitor {
+    fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
+        if !is_claim_test_only(&item.attrs) {
+            syn::visit::visit_item_mod(self, item);
+        }
+    }
+
+    fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
+        if !is_claim_test_only(&item.attrs) {
+            syn::visit::visit_item_fn(self, item);
+        }
+    }
+
+    fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+        if matches!(call.func.as_ref(), syn::Expr::Path(path)
+            if path.path.segments.last().is_some_and(|segment| segment.ident == "new_current_thread"))
+        {
+            self.builders.push(normalized_tokens(&call.func));
+        }
+        syn::visit::visit_expr_call(self, call);
+    }
+}
+
+fn scan_dedicated_runtime_sources(sources: &[(PathBuf, String)]) -> Vec<Finding<Rule>> {
+    let mut findings = Vec::new();
+    for (path, content) in sources {
+        let Ok(file) = syn::parse_file(content) else {
+            findings.push(finding(
+                Rule::DedicatedRuntimeFunnel,
+                path.display().to_string(),
+                "dedicated runtime assembly Rust AST 无法解析".to_string(),
+            ));
+            continue;
+        };
+        let mut visitor = DedicatedRuntimeVisitor::default();
+        visitor.visit_file(&file);
+        for builder in visitor.builders {
+            findings.push(finding(
+                Rule::DedicatedRuntimeFunnel,
+                path.display().to_string(),
+                format!(
+                    "production assembly 禁止手写 current-thread runtime `{builder}`；必须消费 eventexec typed factory"
+                ),
+            ));
+        }
+    }
+    findings
 }
 
 fn runtime_consumer_tx_compat_findings(
@@ -7546,6 +7626,53 @@ mod tests {
     }
 
     #[test]
+    fn dedicated_runtime_funnel_rejects_production_builder() {
+        let sources = [(
+            PathBuf::from("assemblies/runtime/src/event_transport.rs"),
+            r#"
+            fn production_worker() {
+                let runtime = tokio::runtime::Builder::new_current_thread().build();
+            }
+            #[cfg(test)]
+            mod tests {
+                fn harness() {
+                    let runtime = tokio::runtime::Builder::new_current_thread().build();
+                }
+            }
+            "#
+            .to_string(),
+        )];
+        let findings = scan_dedicated_runtime_sources(&sources);
+        assert_eq!(findings.len(), 1, "test-only builder must be ignored");
+        assert_eq!(findings[0].rule, Rule::DedicatedRuntimeFunnel);
+    }
+
+    #[test]
+    fn workspace_dedicated_runtime_funnel_is_closed() {
+        let sources = DEDICATED_RUNTIME_ASSEMBLY_TARGETS
+            .iter()
+            .map(|target| {
+                let content = match *target {
+                    TARGET => include_str!("../../assemblies/runtime/src/event_transport.rs"),
+                    IDENTITYAUDIT_EVENTING_TARGET => {
+                        include_str!("../../assemblies/identityaudit/src/eventing.rs")
+                    }
+                    "assemblies/settingsonly/src/eventing.rs" => {
+                        include_str!("../../assemblies/settingsonly/src/eventing.rs")
+                    }
+                    "assemblies/settingsonly/src/dlx.rs" => {
+                        include_str!("../../assemblies/settingsonly/src/dlx.rs")
+                    }
+                    _ => unreachable!("closed dedicated runtime target list"),
+                };
+                (PathBuf::from(target), content.to_string())
+            })
+            .collect::<Vec<_>>();
+        let findings = scan_dedicated_runtime_sources(&sources);
+        assert!(findings.is_empty(), "{findings:#?}");
+    }
+
+    #[test]
     fn eventing_composition_guard_rejects_shared_source_drift() {
         let canonical = include_str!("../../composition/eventing/src/lib.rs");
         for (needle, replacement) in [
@@ -7883,6 +8010,17 @@ pub mod fault_matrix;
             Path::new("crates/syshealth/src/lib.rs"),
         ] {
             let findings = scan_domain_content(path, "let _ = pg.infra().inbox();");
+            assert_eq!(findings.len(), 1, "{path:?}");
+            assert_eq!(findings[0].rule, Rule::DomainConsumerBundleBypass);
+        }
+    }
+
+    #[test]
+    fn scan_domain_content_rejects_managed_worker_in_every_domain_crate() {
+        for root in domain_crate_roots() {
+            let path = Path::new(&root).join("src/lib.rs");
+            let findings =
+                scan_domain_content(&path, "let _ = eventexec::ManagedBlockingWorker::spawn;");
             assert_eq!(findings.len(), 1, "{path:?}");
             assert_eq!(findings[0].rule, Rule::DomainConsumerBundleBypass);
         }

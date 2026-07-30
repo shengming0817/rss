@@ -377,12 +377,17 @@ impl AckableSubscriber for AmqpSubscriber {
             cancel_rpc.admission_stopped.cancel();
         });
         let delivery_rpc = Arc::clone(&subscription_rpc);
+        // A delivery can already be buffered client-side when token cancellation races the
+        // in-flight Ack that reopens the prefetch window. Once cancellation is requested, never
+        // expose that raced delivery to ConsumerTx. Dropping it leaves it unsettled; the later
+        // subscriber channel shutdown requeues it for the replacement consumer.
         let stream = consumer
             .filter_map(move |res| {
                 let delivery_channel = channel.clone();
                 let delivery_rpc = Arc::clone(&delivery_rpc);
                 async move {
                     match res {
+                        Ok(_delivery) if delivery_rpc.cancel_requested.is_cancelled() => None,
                         Ok(delivery) => Some(delivery_to_ackable(
                             delivery,
                             delivery_channel,
