@@ -1,12 +1,17 @@
-//! 生产源文件系统扫描工具（`pdpallow` 与 `command_symmetry` 共用文件遍历层）。
+//! 生产源文件系统扫描工具（`member_dirs` / `rs_files` / `is_excluded` + `SCAN_EXCLUDED_SEGMENTS` /
+//! `strip_comments`）。
 //!
-//! 抽出纯文件系统辅助（`member_dirs` / `rs_files` / `is_excluded` + `SCAN_EXCLUDED_SEGMENTS`），
-//! 消除两模块间重复。**扫描根集不在此共享**——二者根集不同（`pdpallow` 限 `crates/bins`，排
-//! `adapters/*` legit Pdp impl 站点；`command_symmetry` 须覆盖 `adapters` / `journeys` 等组合根），
-//! 各模块自带根集（曾共享 `PROD_ROOTS` 是缺陷，#1124 review F5 修）。
+//! 按 API 分述消费者：
+//! - `is_excluded` / `SCAN_EXCLUDED_SEGMENTS`：仅 `pdpallow`、`event_transport_guard`
+//! - `strip_comments`：`pdpallow` + `reconcile_outbox_command_guard`
+//! - `member_dirs` / `rs_files`：多模块共用（含 `command_symmetry`、`pdpallow`、
+//!   `event_transport_guard`、`layerdeps`、`contract_binding_guard`、`runtime_env_guard`、
+//!   `runtime_deps_guard`、`assembly_governance` 等）
 //!
-//! `strip_comments` 仅 `pdpallow` 的 attribute text-scan 使用；`command_symmetry` 已改 `syn` AST 扫描
-//! （#1124 review F4），AST 天然忽略字符串 / 注释内同名文本，无 text-scan 盲区。
+//! `command_symmetry` 已改 `syn` AST 扫描（#1124 review F4），自带根集且**不再**使用
+//! `is_excluded` / `SCAN_EXCLUDED_SEGMENTS`（仍用 `member_dirs` / `rs_files`）。
+//!
+//! **扫描根集不在此共享**——各模块自带根集（曾共享 `PROD_ROOTS` 是缺陷，#1124 review F5 修）。
 //!
 //! 盲区（AI-robust 写明，仅 `strip_comments` text-scan 适用）：对字符串字面量仅保留引号分隔符、
 //! 内容被丢弃，故字面量内的禁用模式**不会**被扫到——已知、已测盲区（详见 `pdpallow` 的
@@ -18,12 +23,15 @@ use anyhow::Result;
 
 /// 扫描中显式排除的路径段（按 member 目录名末端段匹配）。
 ///
-/// - `eventexec`：sanctioned runtime 宿主（`command::emit_async` 声明处，合法）。
+/// 现消费者：`pdpallow`、`event_transport_guard`（`command_symmetry` 已改 syn AST，不再读此列表）。
+///
+/// - `eventexec`：sanctioned runtime 宿主（部分守卫合法站点，路径排除避免误扫）。
 /// - `generated`：codegen 派生，非生产业务代码。
 /// - `xtask`：治理工具自身，含演示串，不扫。
 /// - `lints`：dylint crate 独立 workspace，不扫。
 ///
-/// INVARIANT: COMMAND-SYMMETRY-01 + PDP-ALLOW-CONFINE-01 { level = "Medium", exec = "check", source = "code" }的路径排除约定。
+/// INVARIANT: PDP-ALLOW-CONFINE-01 { level = "Medium", exec = "check", source = "code" }的路径排除约定
+/// （及 `event_transport_guard` 同源排除）。
 pub(crate) const SCAN_EXCLUDED_SEGMENTS: &[&str] = &["eventexec", "generated", "xtask", "lints"];
 
 /// 判断路径的末端目录段（`file_name()`）是否在显式排除列表中。
@@ -156,7 +164,7 @@ mod tests {
 
     /// string-literal 盲区：字面量内容（引号之间）被丢弃，故内部的禁用模式不被命中。
     /// 此为**已知设计盲区**，本测试钉住当前行为（防静默改变）。
-    /// 调用方（command_symmetry / pdpallow）扫描范围不含工具自身源，从而避开误报。
+    /// 调用方（`pdpallow` 等 text-scan）扫描范围不含工具自身源，从而避开误报。
     #[test]
     fn string_literal_blind_spot_pinned() {
         // 字符串字面量内的 "command::emit_async" 在 strip 后消失（内容被丢弃）。
@@ -184,10 +192,10 @@ mod tests {
         assert!(!is_excluded(&included), "identity 不在排除列表");
     }
 
-    /// is_excluded 测试：显式排除路径（作为 BareEmitExit 排除约定的文档测试）。
+    /// is_excluded 测试：显式排除路径（`pdpallow` / `event_transport_guard` 路径排除约定）。
     #[test]
     fn excluded_paths_are_skipped() {
-        // 以下路径段须在排除列表中——此为 COMMAND-SYMMETRY-01 + PDP-ALLOW-CONFINE-01 约定。
+        // 以下路径段须在排除列表中——此为 PDP-ALLOW-CONFINE-01（及 event_transport_guard）约定。
         assert!(is_excluded(&std::path::PathBuf::from(
             "/workspace/crates/eventexec"
         )));

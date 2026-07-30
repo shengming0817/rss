@@ -67,7 +67,7 @@ cargo nextest run -p rss-postgres -p rss-redis -p rss-amqp --features integratio
 - 删除 generated 的 emit 或 register wrapper 任一侧（如 codegen `render_command_glue` 丢侧）→ `cargo xtask verify` 双侧对称治理（COMMAND-SYMMETRY-01）失败。
   > **能力边界（mechanism-landing）**：command authoring 由私有 `CommandSpec`、policy-exclusive wrapper 与 reviewed DTO 类型封闭；AST 只检查生产 provider impl/callsite 集合，不承担 authoring seal。真实 consumer handler 注册仍由 active contract topology 校验。
 
-> **bridge 延迟落地**：generated wrapper 的 `emitter: &E`（`E: CommandEmit`）和 `registrar: &mut Reg`（`Reg: CommandRegister`）由组合根（bin / assembly crate）的 bridge impl 提供。该 impl 随**第一个真实命令消费域**一并接线，不在本 mechanism-landing PR 中包含。bridge 接线细节见 `docs/rules/eventbus.md` §Command dispatch。
+> **bridge 延迟落地**：`CommandEmit` / `CommandJournal` / `CommandRegister` trait 定义在 `generated::command`。`CommandEmit` / `CommandJournal` 由 eventexec typed dispatcher 实现（`DirectCommandDispatcher` / `JournaledCommandDispatcher` @ `crates/eventexec/src/command.rs`）；`CommandRegister` 仍由组合根（`bins/` / `assemblies/`）在首个真实命令消费域接线，不在本 PR 的 mechanism-landing 阶段包含。首个域作者需实现的 Register 接线细节见 `docs/rules/eventbus.md` §Command dispatch。
 
 ## 验收出口
 - 上述命令/场景已覆盖 **SC-002/003/005/006/007/008** + command 双侧；其余 SC（SC-001/004/009/010）由各实现 PR 的 CI 门覆盖（SC-001: `cargo build --workspace && cargo nextest run`；SC-004: L2 幂等治理 #[test]；SC-009: `cargo llvm-cov`；SC-010: PR 行数/DAG 检查）。

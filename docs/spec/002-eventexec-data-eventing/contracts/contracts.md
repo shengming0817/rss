@@ -13,11 +13,11 @@
 - consumer wrapper `pub fn register_handler<Reg: CommandRegister, H, Fut>(registrar: &mut Reg, handler: H) -> Reg::Output`。baked `CONTRACT_ID`/`TOPIC`（无显式 group-name 绑定参数；group 由 registrar 内部携带）。无 `ctx` 参数。
 - **typed authoring funnel**：业务 → policy-exclusive generated wrapper → `DirectCommandDispatcher` / `JournaledCommandDispatcher` → 不可外部构造的 reviewed DTO → provider store。event `EventEntry` 与 storage `StoredOutboxEntry` 均不能构造 command authoring DTO。
 
-> **bridge 延迟落地**：`CommandEmit` / `CommandRegister` trait 定义在 `generated::command`，由组合根（bin / assembly crate）提供唯一 sanctioned impl（serde 编码 payload、mint `DispatchId`、转发到 `eventexec::command`）。该 bridge impl **随第一个真实命令消费域**一并接线，不在本 PR 的 mechanism-landing 阶段包含。首个域作者需实现的 bridge 接线细节见 `docs/rules/eventbus.md` §Command dispatch。
+> **bridge 延迟落地**：`CommandEmit` / `CommandJournal` / `CommandRegister` trait 定义在 `generated::command`。`CommandEmit` / `CommandJournal` 由 eventexec typed dispatcher 实现（`DirectCommandDispatcher` / `JournaledCommandDispatcher` @ `crates/eventexec/src/command.rs`）；`CommandRegister` 仍由组合根（`bins/` / `assemblies/`）在首个真实命令消费域接线，不在本 PR 的 mechanism-landing 阶段包含。首个域作者需实现的 Register 接线细节见 `docs/rules/eventbus.md` §Command dispatch。
 
 **治理**（xtask，Medium）：
 - `COMMAND-JOURNAL-GENERATED-01#manifest-policy`：每 command schema 显式 required/none 且只生成对应 producer wrapper（Hard codegen）；`COMMAND-IMPL-ALLOWLIST-01#provider-set` 只扫描生产 provider impl/callsite 集合（Medium AST）。
-- `COMMAND-IMPL-ALLOWLIST-01`：`impl CommandEmit`/`impl CommandRegister` 仅允许在组合根 `bins/`/`assemblies/`（sanctioned bridge/registrar）；非组合根 impl 即红（对齐 `DIPORT-IMPL-ALLOWLIST-01`）。
+- `COMMAND-IMPL-ALLOWLIST-01`：按 port 区分 allowlist——`impl CommandEmit` 仅 `DirectCommandDispatcher` @ `crates/eventexec/src/command.rs`；`impl CommandJournal` 仅 `JournaledCommandDispatcher` @ 同上；`impl CommandRegister` 仅组合根 `bins/`/`assemblies/` 源。非 allowlist impl 即红。authoring 由 Hard seal（私有 reviewed DTO）封闭；Medium 只守 provider 集合（见 `docs/architecture/202607091830-016-command-outbox-authoring-seal.md` / ADR-016）。
 - `R15 CommandConsistency`：`kind=command ⇒ consistencyLevel=OutboxFact`（contract validate）。
 
 > authoring Hard seal 由私有 `CommandSpec`、eventexec reviewed DTO 构造器与 event/command 分离类型共同提供；provider 集合事实保留 Medium，并具有 alias/glob red case。

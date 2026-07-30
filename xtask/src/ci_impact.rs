@@ -855,6 +855,9 @@ struct SelectiveImpact {
     coverage_closure: BTreeSet<String>,
     /// Workspace members with runnable targets (`lib`/`bin`/`test`/`bench`/`proc-macro`).
     packages_with_tests: BTreeSet<String>,
+    /// True when `reverse_closure` contains at least one `lib`/`proc-macro` package.
+    /// Drives `cargo check --lib --bins` vs `--bins` for bin-only reverse closures.
+    check_includes_lib: bool,
     integration_shards: BTreeSet<IntegrationShard>,
     governance: BTreeSet<GovernanceImpact>,
     unknown_paths: BTreeSet<String>,
@@ -980,6 +983,8 @@ enum LocalProjection {
     FastMeta,
     Selective {
         check_packages: Vec<String>,
+        /// Whether Check should pass `--lib` (false for bin-only reverse closures).
+        check_includes_lib: bool,
         test_clippy_packages: Vec<String>,
         governance: BTreeSet<GovernanceImpact>,
     },
@@ -1016,6 +1021,7 @@ impl From<&ImpactSet> for LocalProjection {
                     .collect::<Vec<_>>();
                 Self::Selective {
                     check_packages: selective.reverse_closure.iter().cloned().collect(),
+                    check_includes_lib: selective.check_includes_lib,
                     test_clippy_packages,
                     governance: selective.governance.clone(),
                 }
@@ -1039,6 +1045,8 @@ enum LocalStep {
     Packages {
         operation: LocalCargoOperation,
         packages: Vec<String>,
+        /// Meaningful for [`LocalCargoOperation::Check`] only.
+        check_includes_lib: bool,
     },
 }
 
@@ -1049,6 +1057,7 @@ impl LocalProjection {
             Self::FastMeta => vec![LocalStep::FastMeta],
             Self::Selective {
                 check_packages,
+                check_includes_lib,
                 test_clippy_packages,
                 governance,
             } => {
@@ -1057,16 +1066,19 @@ impl LocalProjection {
                     steps.push(LocalStep::Packages {
                         operation: LocalCargoOperation::Check,
                         packages: check_packages.clone(),
+                        check_includes_lib: *check_includes_lib,
                     });
                 }
                 if !test_clippy_packages.is_empty() {
                     steps.push(LocalStep::Packages {
                         operation: LocalCargoOperation::Test,
                         packages: test_clippy_packages.clone(),
+                        check_includes_lib: true,
                     });
                     steps.push(LocalStep::Packages {
                         operation: LocalCargoOperation::Clippy,
                         packages: test_clippy_packages.clone(),
+                        check_includes_lib: true,
                     });
                 }
                 steps.extend(governance.iter().map(|impact| match impact {
@@ -2325,6 +2337,7 @@ impl LocalStep {
             Self::Packages {
                 operation,
                 packages,
+                ..
             } => format!("{} {}", operation.label(), packages.join(",")),
         }
     }
@@ -2414,11 +2427,13 @@ fn run_local_step(
         LocalStep::Packages {
             operation,
             packages,
+            check_includes_lib,
         } => run_package_operation(
             context.root(),
             context.cargo_target_text()?,
             *operation,
             packages,
+            *check_includes_lib,
             execution_policy,
         ),
     }
@@ -2467,9 +2482,10 @@ fn run_package_operation(
     cargo_target: &str,
     operation: LocalCargoOperation,
     packages: &[String],
+    check_includes_lib: bool,
     execution_policy: crate::cmd::ExecutionPolicy,
 ) -> Result<()> {
-    let owned = package_operation_args(operation, packages, execution_policy)?;
+    let owned = package_operation_args(operation, packages, check_includes_lib, execution_policy)?;
     let args = owned.iter().map(String::as_str).collect::<Vec<_>>();
     let status = cargo_cmd(
         operation.subcommand(),
@@ -2487,6 +2503,7 @@ fn run_package_operation(
 fn package_operation_args(
     operation: LocalCargoOperation,
     packages: &[String],
+    check_includes_lib: bool,
     execution_policy: crate::cmd::ExecutionPolicy,
 ) -> Result<Vec<String>> {
     if packages.is_empty() {
@@ -2497,9 +2514,14 @@ fn package_operation_args(
     // activate `testkit`'s `containers` cfg without linking optional deps (feature-unification
     // interaction with integration-gated test targets). Clippy keeps `--all-targets` for lint
     // coverage; integration feature matrices stay on the deferred nightly/develop lane.
+    // Bin-only reverse closures (e.g. xtask alone) must omit `--lib` — cargo rejects
+    // `--lib` when no selected package has a library target.
     match operation {
-        LocalCargoOperation::Check => {
+        LocalCargoOperation::Check if check_includes_lib => {
             owned.push("--lib".to_owned());
+            owned.push("--bins".to_owned());
+        }
+        LocalCargoOperation::Check => {
             owned.push("--bins".to_owned());
         }
         LocalCargoOperation::Clippy => owned.push("--all-targets".to_owned()),
@@ -2738,6 +2760,11 @@ fn impact_entries(
             .chain(closure.iter().cloned())
             .collect(),
     };
+    let check_includes_lib = match graph {
+        Some(graph) => closure.iter().any(|name| graph.has_lib_target(name)),
+        // Without metadata, preserve historical `--lib --bins` (fail closed on unknown).
+        None => true,
+    };
     let coverage_closure = coverage_closure_for(graph, &packages, closure);
     ImpactSet::Selective(SelectiveImpact {
         documentation: documentation_only,
@@ -2745,6 +2772,7 @@ fn impact_entries(
         reverse_closure: closure.clone(),
         coverage_closure,
         packages_with_tests,
+        check_includes_lib,
         integration_shards: selected_shards,
         governance,
         unknown_paths,
@@ -3010,6 +3038,7 @@ struct WorkspaceGraph {
     id_to_name: BTreeMap<String, String>,
     reverse: BTreeMap<String, BTreeSet<String>>,
     test_capable: BTreeSet<String>,
+    lib_capable: BTreeSet<String>,
 }
 
 impl WorkspaceGraph {
@@ -3085,11 +3114,26 @@ impl WorkspaceGraph {
             })
             .map(|package| package.name.clone())
             .collect();
+        let lib_capable = wire
+            .packages
+            .iter()
+            .filter(|package| wire.workspace_members.contains(&package.id))
+            .filter(|package| {
+                package.targets.iter().any(|target| {
+                    target
+                        .kind
+                        .iter()
+                        .any(|kind| matches!(kind.as_str(), "lib" | "proc-macro"))
+                })
+            })
+            .map(|package| package.name.clone())
+            .collect();
         Ok(Self {
             package_paths,
             id_to_name,
             reverse,
             test_capable,
+            lib_capable,
         })
     }
 
@@ -3100,6 +3144,10 @@ impl WorkspaceGraph {
     #[cfg(test)]
     fn has_test_targets(&self, package: &str) -> bool {
         self.test_capable.contains(package)
+    }
+
+    fn has_lib_target(&self, package: &str) -> bool {
+        self.lib_capable.contains(package)
     }
 
     fn contains(&self, package: &str) -> bool {
@@ -3672,6 +3720,7 @@ mod tests {
             LocalProjection::from(&selective),
             LocalProjection::Selective {
                 check_packages: vec!["consumer".to_owned(), "leaf".to_owned()],
+                check_includes_lib: true,
                 test_clippy_packages: vec!["leaf".to_owned()],
                 governance: BTreeSet::new(),
             }
@@ -3779,6 +3828,7 @@ mod tests {
                 reverse_closure: coverage_closure.iter().map(|s| (*s).to_owned()).collect(),
                 coverage_closure: coverage_closure.iter().map(|s| (*s).to_owned()).collect(),
                 packages_with_tests: with_tests.iter().map(|s| (*s).to_owned()).collect(),
+                check_includes_lib: true,
                 integration_shards: BTreeSet::new(),
                 governance: BTreeSet::new(),
                 unknown_paths: BTreeSet::new(),
@@ -3841,6 +3891,7 @@ mod tests {
             reverse_closure: BTreeSet::from(["leaf".to_owned()]),
             coverage_closure: BTreeSet::from(["leaf".to_owned()]),
             packages_with_tests: BTreeSet::from(["leaf".to_owned()]),
+            check_includes_lib: true,
             integration_shards: BTreeSet::new(),
             governance: BTreeSet::new(),
             unknown_paths: BTreeSet::from(["mystery/path.rs".to_owned()]),
@@ -3865,6 +3916,7 @@ mod tests {
             reverse_closure: BTreeSet::from(["leaf".to_owned()]),
             coverage_closure: BTreeSet::from(["leaf".to_owned()]),
             packages_with_tests: BTreeSet::new(),
+            check_includes_lib: true,
             integration_shards: BTreeSet::new(),
             governance: BTreeSet::new(),
             unknown_paths: BTreeSet::new(),
@@ -4068,6 +4120,7 @@ mod tests {
     fn selective_local_steps_are_bounded_to_affected_package_operations() {
         let projection = LocalProjection::Selective {
             check_packages: vec!["redis-adapter".to_owned(), "runtime".to_owned()],
+            check_includes_lib: true,
             test_clippy_packages: vec!["redis-adapter".to_owned()],
             governance: BTreeSet::new(),
         };
@@ -4078,14 +4131,17 @@ mod tests {
                 LocalStep::Packages {
                     operation: LocalCargoOperation::Check,
                     packages: vec!["redis-adapter".to_owned(), "runtime".to_owned()],
+                    check_includes_lib: true,
                 },
                 LocalStep::Packages {
                     operation: LocalCargoOperation::Test,
                     packages: vec!["redis-adapter".to_owned()],
+                    check_includes_lib: true,
                 },
                 LocalStep::Packages {
                     operation: LocalCargoOperation::Clippy,
                     packages: vec!["redis-adapter".to_owned()],
+                    check_includes_lib: true,
                 },
             ]
         );
@@ -4127,10 +4183,12 @@ mod tests {
             LocalStep::Packages {
                 operation: LocalCargoOperation::Check,
                 packages: vec!["leaf".to_owned()],
+                check_includes_lib: true,
             },
             LocalStep::Packages {
                 operation: LocalCargoOperation::Test,
                 packages: vec!["leaf".to_owned()],
+                check_includes_lib: true,
             },
         ];
         let mut executed = Vec::new();
@@ -4163,14 +4221,17 @@ mod tests {
             LocalStep::Packages {
                 operation: LocalCargoOperation::Check,
                 packages: vec!["consumer".to_owned(), "leaf".to_owned()],
+                check_includes_lib: true,
             },
             LocalStep::Packages {
                 operation: LocalCargoOperation::Test,
                 packages: vec!["leaf".to_owned()],
+                check_includes_lib: true,
             },
             LocalStep::Packages {
                 operation: LocalCargoOperation::Clippy,
                 packages: vec!["leaf".to_owned()],
+                check_includes_lib: true,
             },
         ];
         let selected = select_local_steps(
@@ -4199,14 +4260,26 @@ mod tests {
             package_operation_args(
                 LocalCargoOperation::Check,
                 &packages,
+                true,
                 ExecutionPolicy::KeepGoing
             )?,
             ["--locked", "--lib", "--bins", "-p", "leaf", "--keep-going"]
+        );
+        let xtask = vec!["xtask".to_owned()];
+        assert_eq!(
+            package_operation_args(
+                LocalCargoOperation::Check,
+                &xtask,
+                false,
+                ExecutionPolicy::KeepGoing
+            )?,
+            ["--locked", "--bins", "-p", "xtask", "--keep-going"]
         );
         assert_eq!(
             package_operation_args(
                 LocalCargoOperation::Test,
                 &packages,
+                true,
                 ExecutionPolicy::KeepGoing
             )?,
             ["--locked", "-p", "leaf", "--no-fail-fast"]
@@ -4215,6 +4288,7 @@ mod tests {
             package_operation_args(
                 LocalCargoOperation::Clippy,
                 &packages,
+                true,
                 ExecutionPolicy::KeepGoing
             )?,
             [
@@ -4232,10 +4306,125 @@ mod tests {
             package_operation_args(
                 LocalCargoOperation::Test,
                 &packages,
+                true,
                 ExecutionPolicy::FailFast
             )?,
             ["--locked", "-p", "leaf"]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn bin_only_reverse_closure_projects_check_without_lib() -> Result<()> {
+        use crate::cmd::ExecutionPolicy;
+
+        let leaf = "leaf 0.0.0 (path+file:///workspace/crates/leaf)";
+        let xtask = "xtask 0.0.0 (path+file:///workspace/xtask)";
+        let graph = WorkspaceGraph::from_wire(
+            Path::new("/workspace"),
+            MetadataWire {
+                packages: vec![
+                    MetadataPackage {
+                        name: "leaf".to_owned(),
+                        id: leaf.to_owned(),
+                        manifest_path: "/workspace/crates/leaf/Cargo.toml".to_owned(),
+                        targets: vec![MetadataTarget {
+                            kind: vec!["lib".to_owned()],
+                        }],
+                    },
+                    MetadataPackage {
+                        name: "xtask".to_owned(),
+                        id: xtask.to_owned(),
+                        manifest_path: "/workspace/xtask/Cargo.toml".to_owned(),
+                        targets: vec![MetadataTarget {
+                            kind: vec!["bin".to_owned()],
+                        }],
+                    },
+                ],
+                workspace_members: BTreeSet::from([leaf.to_owned(), xtask.to_owned()]),
+                resolve: Some(MetadataResolve {
+                    nodes: vec![
+                        MetadataNode {
+                            id: leaf.to_owned(),
+                            deps: Vec::new(),
+                        },
+                        MetadataNode {
+                            id: xtask.to_owned(),
+                            deps: Vec::new(),
+                        },
+                    ],
+                }),
+            },
+        )?;
+        assert!(graph.has_lib_target("leaf"));
+        assert!(!graph.has_lib_target("xtask"));
+
+        let mut seeded = BTreeMap::new();
+        seeded.insert("xtask".to_owned(), BTreeSet::from([PackageImpact::Source]));
+        let impact = impact_entries(
+            &[DiffEntry::modified("xtask/src/ci_impact.rs")],
+            Some(&graph),
+            &BTreeSet::from(["xtask".to_owned()]),
+            &seeded,
+        );
+        let LocalProjection::Selective {
+            check_packages,
+            check_includes_lib,
+            ..
+        } = LocalProjection::from(&impact)
+        else {
+            bail!("expected selective local projection for bin-only xtask closure");
+        };
+        assert!(!check_includes_lib);
+        assert!(check_packages.iter().any(|name| name == "xtask"));
+
+        let check_step = local_steps(&impact)
+            .into_iter()
+            .find(|step| {
+                matches!(
+                    step,
+                    LocalStep::Packages {
+                        operation: LocalCargoOperation::Check,
+                        ..
+                    }
+                )
+            })
+            .context("expected Check local step")?;
+        let LocalStep::Packages {
+            packages,
+            check_includes_lib: step_includes_lib,
+            ..
+        } = check_step
+        else {
+            unreachable!("matched Check Packages step");
+        };
+        assert!(!step_includes_lib);
+        let check_args = package_operation_args(
+            LocalCargoOperation::Check,
+            &packages,
+            step_includes_lib,
+            ExecutionPolicy::KeepGoing,
+        )?;
+        assert!(!check_args.iter().any(|arg| arg == "--lib"));
+        assert!(check_args.iter().any(|arg| arg == "--bins"));
+
+        let mut leaf_seeded = BTreeMap::new();
+        leaf_seeded.insert("leaf".to_owned(), BTreeSet::from([PackageImpact::Source]));
+        let leaf_impact = impact_entries(
+            &[DiffEntry::modified("crates/leaf/src/lib.rs")],
+            Some(&graph),
+            &BTreeSet::from(["leaf".to_owned()]),
+            &leaf_seeded,
+        );
+        let LocalProjection::Selective {
+            check_includes_lib: leaf_includes_lib,
+            ..
+        } = LocalProjection::from(&leaf_impact)
+        else {
+            bail!("expected selective local projection for leaf lib closure");
+        };
+        assert!(leaf_includes_lib);
+
         Ok(())
     }
 
@@ -4963,6 +5152,7 @@ mod tests {
         let leaf = "leaf 0.0.0 (path+file:///workspace/crates/leaf)";
         let consumer = "consumer 0.0.0 (path+file:///workspace/crates/consumer)";
         let derive = "securederive 0.0.0 (path+file:///workspace/crates/securederive)";
+        let xtask = "xtask 0.0.0 (path+file:///workspace/xtask)";
         let registry = "serde 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)";
         let graph = WorkspaceGraph::from_wire(
             Path::new("/workspace"),
@@ -4998,6 +5188,14 @@ mod tests {
                         }],
                     },
                     MetadataPackage {
+                        name: "xtask".to_owned(),
+                        id: xtask.to_owned(),
+                        manifest_path: "/workspace/xtask/Cargo.toml".to_owned(),
+                        targets: vec![MetadataTarget {
+                            kind: vec!["bin".to_owned()],
+                        }],
+                    },
+                    MetadataPackage {
                         name: "serde".to_owned(),
                         id: registry.to_owned(),
                         manifest_path: "/registry/serde/Cargo.toml".to_owned(),
@@ -5010,6 +5208,7 @@ mod tests {
                     leaf.to_owned(),
                     consumer.to_owned(),
                     derive.to_owned(),
+                    xtask.to_owned(),
                 ]),
                 resolve: Some(MetadataResolve {
                     nodes: vec![
@@ -5025,6 +5224,10 @@ mod tests {
                         },
                         MetadataNode {
                             id: derive.to_owned(),
+                            deps: Vec::new(),
+                        },
+                        MetadataNode {
+                            id: xtask.to_owned(),
                             deps: Vec::new(),
                         },
                         MetadataNode {
@@ -5050,6 +5253,17 @@ mod tests {
             graph.has_test_targets("securederive"),
             "proc-macro kind must count as test-capable"
         );
+        assert!(graph.has_test_targets("xtask"));
+        assert!(graph.has_lib_target("leaf"));
+        assert!(graph.has_lib_target("consumer"));
+        assert!(
+            graph.has_lib_target("securederive"),
+            "proc-macro kind must count as lib-capable for check --lib"
+        );
+        assert!(
+            !graph.has_lib_target("xtask"),
+            "bin-only package must not be lib-capable"
+        );
         Ok(())
     }
 
@@ -5065,15 +5279,19 @@ mod tests {
         ]);
         let mut test_capable =
             BTreeSet::from(["synthetic-adapter".to_owned(), "runtime".to_owned()]);
+        let mut lib_capable =
+            BTreeSet::from(["synthetic-adapter".to_owned(), "runtime".to_owned()]);
         for (_, name) in leaves {
             id_to_name.insert((*name).to_owned(), (*name).to_owned());
             test_capable.insert((*name).to_owned());
+            lib_capable.insert((*name).to_owned());
         }
         WorkspaceGraph {
             package_paths,
             id_to_name,
             reverse: BTreeMap::new(),
             test_capable,
+            lib_capable,
         }
     }
 
@@ -5376,6 +5594,10 @@ mod tests {
         assert_eq!(
             graph.package_for_path("xtask/src/ci_impact.rs"),
             Some("xtask")
+        );
+        assert!(
+            !graph.has_lib_target("xtask"),
+            "xtask is bin-only; check reverse closure must omit --lib"
         );
         for shard in IntegrationShard::ALL {
             let batches = integration_shards::batches(*shard);
