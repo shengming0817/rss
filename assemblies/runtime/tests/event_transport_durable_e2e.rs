@@ -24,7 +24,7 @@ use audit::ports::{
     AuditChainHasher, AuditListTenantAppend, AuditListTenantAppender, DynAuditReadRepo,
 };
 use audit::{AuditDomain, InMemAuditRepo};
-use consistency::{EventEntry, IdemKey};
+use consistency::IdemKey;
 use diport::{
     DynKeyProvider, EncryptOutput, EnvelopeMetadata, EnvelopeSubjectId, KeyName, KeyProvider,
     KeyProviderError, KeyRef, KeyVersion, MessageId, OpaqueActorId, OutboxActor, PublishRequest,
@@ -513,13 +513,13 @@ async fn audit_policy_count(
     Ok(count)
 }
 
-fn policy_updated_entry_and_envelope(
+async fn policy_updated_event(
     tenant: TenantId,
     policy_id: &str,
     contract_id: &str,
     permission: &str,
     event_id: &str,
-) -> Result<(EventEntry, diport::OutboxEnvelopeParts)> {
+) -> Result<eventexec::event::ReviewedEvent> {
     let payload = IdentityPolicyUpdatedPayload {
         policy_id: policy_id.to_string(),
         change_kind: policy_updated::IdentityPolicyUpdatedPayloadChangeKind::Created,
@@ -531,20 +531,21 @@ fn policy_updated_entry_and_envelope(
         tenant_id: tenant.to_string(),
         occurred_at: i64::try_from(NOW_SECS)?,
     };
-    let entry = EventEntry::from_generated_payload(&payload, IdemKey::parse(event_id)?)?;
     let actor = OutboxActor::scoped(
         vocab::PrincipalKind::Admin,
         OpaqueActorId::from_opaque(CANON_USER)?,
         tenant,
         vocab::ScopedTenant::Tenant,
     );
-    let envelope = diport::OutboxEnvelopeParts::new(
-        policy_updated::CONTRACT,
+    Ok(policy_updated::emit(
+        &eventexec::event::GeneratedEventEncoder,
+        payload,
         tenant,
         EnvelopeSubjectId::from_opaque(CANON_USER)?,
         actor,
-    );
-    Ok((entry, envelope))
+        IdemKey::parse(event_id)?,
+    )
+    .await?)
 }
 
 // ── e2e 测试主体 ───────────────────────────────────────────────────────────────────────────
@@ -972,20 +973,20 @@ async fn event_transport_durable_e2e() -> Result<()> {
         )],
     )?;
     let policy_event_id = "policy-runtime-e2e-created-v1";
-    let (policy_entry, policy_envelope) = policy_updated_entry_and_envelope(
+    let policy_event = policy_updated_event(
         tenant,
         policy_id,
         policy_contract_id,
         policy_permission,
         policy_event_id,
-    )?;
+    )
+    .await?;
     policy_lifecycle
         .create_and_emit(
             ProducerMarker::for_test(POLICIES_CREATE_PRODUCER).into_receipt(),
             TenantRepoScope::for_test(tenant),
             policy,
-            policy_entry,
-            policy_envelope,
+            policy_event,
         )
         .await?;
     let policy_outbox_event_id =

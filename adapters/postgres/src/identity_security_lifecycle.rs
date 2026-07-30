@@ -203,11 +203,13 @@ impl IdentitySecurityLifecycle for PgIdentitySecurityLifecycle {
         scope: TenantRepoScope,
         command: RefreshExecutionCommand,
     ) -> Result<RefreshExecutionOutcome, IdentityError> {
-        let emission = identity::ports::refresh_execution_emission(command, &self.pseudonym_keys)?;
+        let emission =
+            identity::ports::refresh_execution_emission(command, &self.pseudonym_keys).await?;
         let authorization = receipt
             .authorize(SECURITY_EVENT_FACT, SECURITY_EVENT_CONTRACT)
             .ok_or_else(|| corrupt("refresh receipt does not authorize security-event"))?;
-        let (command, entry, envelope_parts) = emission.into_parts();
+        let (command, reviewed) = emission.into_parts();
+        let (entry, envelope_parts, _fact) = reviewed.into_parts();
         let (source, rotation, event, pending) = command.into_parts();
         validate_refresh_command(scope, &source, rotation.as_ref(), &event)?;
         let envelope = security_envelope(scope, &event, envelope_parts)?;
@@ -323,11 +325,13 @@ impl IdentitySecurityLifecycle for PgIdentitySecurityLifecycle {
         scope: TenantRepoScope,
         command: identity::ports::PasswordChangeCommand,
     ) -> Result<CredentialSecurityReceipt, IdentityError> {
-        let emission = identity::ports::password_change_emission(command, &self.pseudonym_keys)?;
+        let emission =
+            identity::ports::password_change_emission(command, &self.pseudonym_keys).await?;
         let authorization = receipt
             .authorize(SECURITY_EVENT_FACT, SECURITY_EVENT_CONTRACT)
             .ok_or_else(|| corrupt("password-change receipt does not authorize security-event"))?;
-        let (command, entry, envelope_parts) = emission.into_parts();
+        let (command, reviewed) = emission.into_parts();
+        let (entry, envelope_parts, _fact) = reviewed.into_parts();
         let (expected, next, security) = command.into_parts();
         let (mutation, event, pending) = security.into_parts();
         let prepared = PreparedSecurityCommand {
@@ -349,7 +353,8 @@ impl IdentitySecurityLifecycle for PgIdentitySecurityLifecycle {
         scope: TenantRepoScope,
         command: identity::ports::AccountStatusSetCommand,
     ) -> Result<CredentialSecurityReceipt, IdentityError> {
-        let emission = identity::ports::account_status_set_emission(command, &self.pseudonym_keys)?;
+        let emission =
+            identity::ports::account_status_set_emission(command, &self.pseudonym_keys).await?;
         let authorization = receipt
             .authorize(SECURITY_EVENT_FACT, SECURITY_EVENT_CONTRACT)
             .ok_or_else(|| {
@@ -365,7 +370,8 @@ impl IdentitySecurityLifecycle for PgIdentitySecurityLifecycle {
         scope: TenantRepoScope,
         command: identity::ports::LogoutCurrentCommand,
     ) -> Result<CredentialSecurityReceipt, IdentityError> {
-        let emission = identity::ports::logout_current_emission(command, &self.pseudonym_keys)?;
+        let emission =
+            identity::ports::logout_current_emission(command, &self.pseudonym_keys).await?;
         let authorization = receipt
             .authorize(SECURITY_EVENT_FACT, SECURITY_EVENT_CONTRACT)
             .ok_or_else(|| corrupt("logout-current receipt does not authorize security-event"))?;
@@ -379,7 +385,7 @@ impl IdentitySecurityLifecycle for PgIdentitySecurityLifecycle {
         scope: TenantRepoScope,
         command: identity::ports::LogoutAllCommand,
     ) -> Result<CredentialSecurityReceipt, IdentityError> {
-        let emission = identity::ports::logout_all_emission(command, &self.pseudonym_keys)?;
+        let emission = identity::ports::logout_all_emission(command, &self.pseudonym_keys).await?;
         let authorization = receipt
             .authorize(SECURITY_EVENT_FACT, SECURITY_EVENT_CONTRACT)
             .ok_or_else(|| corrupt("logout-all receipt does not authorize security-event"))?;
@@ -415,7 +421,8 @@ impl PgIdentitySecurityLifecycle {
         command: CredentialSecurityCommand,
     ) -> Result<CredentialSecurityReceipt, IdentityError> {
         let prepared = PreparedSecurityCommand::try_from(
-            identity::ports::credential_security_emission_for_test(command, &self.pseudonym_keys)?,
+            identity::ports::credential_security_emission_for_test(command, &self.pseudonym_keys)
+                .await?,
         )?;
         let authorization = crate::cotx::IntegrationCredentialSecurityAuthorization::new();
         self.execute_prepared(authorization, scope, prepared).await
@@ -918,7 +925,8 @@ impl TryFrom<CredentialSecurityEmissionParts> for PreparedSecurityCommand {
     type Error = IdentityError;
 
     fn try_from(emission: CredentialSecurityEmissionParts) -> Result<Self, Self::Error> {
-        let (command, entry, envelope_parts) = emission.into_parts();
+        let (command, reviewed) = emission.into_parts();
+        let (entry, envelope_parts, _fact) = reviewed.into_parts();
         match command {
             CredentialSecurityCommand::Account(command) => {
                 let (mutation, event, pending) = command.into_parts();

@@ -15,10 +15,18 @@ help: the following other types implement trait `command::private::Sealed`
   --> $WORKSPACE/generated/src/command/_seed_v1.rs
    |
    | impl super::private::Sealed for Contract {}
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Contract`
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `generated::command::_seed_v1::Contract`
 ...
    | impl<S, A> super::private::Sealed for ReconcileCommand<S, A> {}
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `ReconcileCommand<S, A>`
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `generated::command::_seed_v1::ReconcileCommand<S, A>`
+   |
+  ::: $WORKSPACE/generated/src/command/identity_v1.rs
+   |
+   | impl super::private::Sealed for Contract {}
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `generated::command::identity_v1::Contract`
+...
+   | impl<S, A> super::private::Sealed for ReconcileCommand<S, A> {}
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `generated::command::identity_v1::ReconcileCommand<S, A>`
 note: required by a bound in `TypedCommandSpec`
   --> $WORKSPACE/generated/src/command/mod.rs
    |
@@ -28,6 +36,8 @@ note: required by a bound in `TypedCommandSpec`
    = help: the following types implement the trait:
              generated::command::_seed_v1::Contract
              generated::command::_seed_v1::ReconcileCommand<S, A>
+             generated::command::identity_v1::Contract
+             generated::command::identity_v1::ReconcileCommand<S, A>
 
 error[E0277]: the trait bound `ForgedCommand: command::private::Sealed` is not satisfied
   --> tests/ui/reconcile_typed_command_spec_impl_fail.rs:22:5
@@ -44,10 +54,18 @@ help: the following other types implement trait `command::private::Sealed`
   --> $WORKSPACE/generated/src/command/_seed_v1.rs
    |
    | impl super::private::Sealed for Contract {}
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Contract`
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `generated::command::_seed_v1::Contract`
 ...
    | impl<S, A> super::private::Sealed for ReconcileCommand<S, A> {}
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `ReconcileCommand<S, A>`
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `generated::command::_seed_v1::ReconcileCommand<S, A>`
+   |
+  ::: $WORKSPACE/generated/src/command/identity_v1.rs
+   |
+   | impl super::private::Sealed for Contract {}
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `generated::command::identity_v1::Contract`
+...
+   | impl<S, A> super::private::Sealed for ReconcileCommand<S, A> {}
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `generated::command::identity_v1::ReconcileCommand<S, A>`
 note: required by a bound in `TypedCommandSpec`
   --> $WORKSPACE/generated/src/command/mod.rs
    |
@@ -57,6 +75,8 @@ note: required by a bound in `TypedCommandSpec`
    = help: the following types implement the trait:
              generated::command::_seed_v1::Contract
              generated::command::_seed_v1::ReconcileCommand<S, A>
+             generated::command::identity_v1::Contract
+             generated::command::identity_v1::ReconcileCommand<S, A>
 
 error[E0277]: the trait bound `ForgedCommand: command::private::Sealed` is not satisfied
  --> tests/ui/reconcile_typed_command_spec_impl_fail.rs:3:47
@@ -73,10 +93,18 @@ help: the following other types implement trait `command::private::Sealed`
  --> $WORKSPACE/generated/src/command/_seed_v1.rs
   |
   | impl super::private::Sealed for Contract {}
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Contract`
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `generated::command::_seed_v1::Contract`
 ...
   | impl<S, A> super::private::Sealed for ReconcileCommand<S, A> {}
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `ReconcileCommand<S, A>`
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `generated::command::_seed_v1::ReconcileCommand<S, A>`
+  |
+ ::: $WORKSPACE/generated/src/command/identity_v1.rs
+  |
+  | impl super::private::Sealed for Contract {}
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `generated::command::identity_v1::Contract`
+...
+  | impl<S, A> super::private::Sealed for ReconcileCommand<S, A> {}
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `generated::command::identity_v1::ReconcileCommand<S, A>`
 note: required by a bound in `TypedCommandSpec`
  --> $WORKSPACE/generated/src/command/mod.rs
   |
@@ -86,3 +114,5 @@ note: required by a bound in `TypedCommandSpec`
   = help: the following types implement the trait:
             generated::command::_seed_v1::Contract
             generated::command::_seed_v1::ReconcileCommand<S, A>
+            generated::command::identity_v1::Contract
+            generated::command::identity_v1::ReconcileCommand<S, A>

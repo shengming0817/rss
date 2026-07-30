@@ -4,10 +4,11 @@ use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use consistency::{EventEntry, IdemKey};
-use diport::{Clock, EnvelopeSubjectId, OpaqueActorId, OutboxActor, OutboxEnvelopeParts};
+use consistency::IdemKey;
+use diport::{Clock, EnvelopeSubjectId, OpaqueActorId, OutboxActor};
+use eventexec::event::{EventEncodeError, GeneratedEventEncoder, ReviewedEvent};
 use generated::event::identity_v1::policy_updated::{
-    IdentityPolicyUpdatedPayload, IdentityPolicyUpdatedPayloadActorKind,
+    self as policy_updated, IdentityPolicyUpdatedPayload, IdentityPolicyUpdatedPayloadActorKind,
     IdentityPolicyUpdatedPayloadChangeKind, SPEC as POLICY_UPDATED_SPEC,
 };
 use generated::http::identity_v1::{
@@ -26,7 +27,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use uuid::Uuid;
 use vocab::{HttpRouteAuth, TenantId, http::HttpResourceSharing as HttpResourceSharingMode};
 
-use super::unix_secs;
+use super::{EventWireProjectionError, unix_secs};
 use crate::domain::{
     AttributeKey, AttributeValue, GlobPattern, IdentityError, Operator, Policy, PolicyCondition,
     PolicyEffect, PolicyId, PolicyObligations, PolicyRouteScope, PolicyRule, PolicyVersion,
@@ -55,8 +56,15 @@ pub enum PolicyManageError {
     OutboxFactConflict(#[source] consistency::OutboxFactConflict),
     #[error("policy-event payload encode failed")]
     PayloadEncode(#[source] serde_json::Error),
-    #[error("policy-event outbox entry build failed")]
-    EntryBuild,
+    /// Generated event authoring boundary rejected the payload or topology.
+    #[error("policy-event authoring failed")]
+    EventEncode(#[source] EventEncodeError),
+    #[error("policy-event envelope identity validation failed")]
+    EnvelopeIdentity(#[source] diport::EnvelopeIdentityError),
+    #[error("policy-event idempotency identity validation failed")]
+    IdempotencyKey(#[source] consistency::IdemKeyError),
+    #[error("policy wire projection failed")]
+    WireProjection(#[source] EventWireProjectionError),
     #[error("policy store failed")]
     Store(#[source] IdentityError),
 }
@@ -268,17 +276,19 @@ impl PolicyManageService {
         )
         .map_err(|_| PolicyManageError::InvalidPolicy)?;
         reject_global_resource_policy(policy.route_scope(), policy.rules(), self.http_specs)?;
-        let (entry, envelope) = self.event_parts(PolicyEventDraft {
-            tenant,
-            actor,
-            actor_kind,
-            policy_id: policy.id(),
-            scope: policy.route_scope(),
-            change_kind: IdentityPolicyUpdatedPayloadChangeKind::Created,
-            version: policy.version(),
-        })?;
+        let event = self
+            .event_parts(PolicyEventDraft {
+                tenant,
+                actor,
+                actor_kind,
+                policy_id: policy.id(),
+                scope: policy.route_scope(),
+                change_kind: IdentityPolicyUpdatedPayloadChangeKind::Created,
+                version: policy.version(),
+            })
+            .await?;
         self.lifecycle
-            .create_and_emit(receipt, tenant_scope, policy, entry, envelope)
+            .create_and_emit(receipt, tenant_scope, policy, event)
             .await
             .map_err(map_identity_error)
     }
@@ -312,24 +322,19 @@ impl PolicyManageService {
         )
         .map_err(|_| PolicyManageError::InvalidPolicy)?;
         reject_global_resource_policy(policy.route_scope(), policy.rules(), self.http_specs)?;
-        let (entry, envelope) = self.event_parts(PolicyEventDraft {
-            tenant,
-            actor,
-            actor_kind,
-            policy_id: policy.id(),
-            scope: policy.route_scope(),
-            change_kind: IdentityPolicyUpdatedPayloadChangeKind::Updated,
-            version: next,
-        })?;
+        let event = self
+            .event_parts(PolicyEventDraft {
+                tenant,
+                actor,
+                actor_kind,
+                policy_id: policy.id(),
+                scope: policy.route_scope(),
+                change_kind: IdentityPolicyUpdatedPayloadChangeKind::Updated,
+                version: next,
+            })
+            .await?;
         self.lifecycle
-            .update_and_emit(
-                receipt,
-                tenant_scope,
-                policy,
-                draft.expected,
-                entry,
-                envelope,
-            )
+            .update_and_emit(receipt, tenant_scope, policy, draft.expected, event)
             .await
             .map_err(map_identity_error)
     }
@@ -361,25 +366,20 @@ impl PolicyManageService {
             .expected
             .next_checked()
             .map_err(|_| PolicyManageError::VersionConflict)?;
-        let (entry, envelope) = self.event_parts(PolicyEventDraft {
-            tenant,
-            actor,
-            actor_kind,
-            policy_id: current.id(),
-            scope: current.route_scope(),
-            change_kind: IdentityPolicyUpdatedPayloadChangeKind::Deactivated,
-            version: next,
-        })?;
+        let event = self
+            .event_parts(PolicyEventDraft {
+                tenant,
+                actor,
+                actor_kind,
+                policy_id: current.id(),
+                scope: current.route_scope(),
+                change_kind: IdentityPolicyUpdatedPayloadChangeKind::Deactivated,
+                version: next,
+            })
+            .await?;
         match self
             .lifecycle
-            .deactivate_and_emit(
-                receipt,
-                tenant_scope,
-                draft.id,
-                draft.expected,
-                entry,
-                envelope,
-            )
+            .deactivate_and_emit(receipt, tenant_scope, draft.id, draft.expected, event)
             .await
             .map_err(map_identity_error)?
         {
@@ -388,10 +388,10 @@ impl PolicyManageService {
         }
     }
 
-    fn event_parts(
+    async fn event_parts(
         &self,
         draft: PolicyEventDraft<'_>,
-    ) -> Result<(EventEntry, OutboxEnvelopeParts), PolicyManageError> {
+    ) -> Result<ReviewedEvent, PolicyManageError> {
         let PolicyEventDraft {
             tenant,
             actor,
@@ -404,7 +404,9 @@ impl PolicyManageService {
         let payload = IdentityPolicyUpdatedPayload {
             policy_id: policy_id.as_str().to_string(),
             change_kind,
-            version: NonZeroU32::new(version.get()).ok_or(PolicyManageError::EntryBuild)?,
+            version: NonZeroU32::new(version.get()).ok_or(PolicyManageError::WireProjection(
+                EventWireProjectionError::Version,
+            ))?,
             contract_id: scope.contract_id().to_string(),
             permission: scope.permission().as_str().to_string(),
             updated_by: actor.as_uuid(),
@@ -412,24 +414,27 @@ impl PolicyManageService {
             tenant_id: tenant.to_string(),
             occurred_at: unix_secs(self.clock.now()),
         };
-        let entry = EventEntry::from_generated_payload(
-            &payload,
-            IdemKey::parse(&Uuid::new_v4().to_string())
-                .map_err(|_| PolicyManageError::EntryBuild)?,
-        )
-        .map_err(PolicyManageError::PayloadEncode)?;
         let actor_subject = actor.as_uuid().hyphenated().to_string();
         let subject_id = EnvelopeSubjectId::from_opaque(actor_subject.clone())
-            .map_err(|_| PolicyManageError::EntryBuild)?;
+            .map_err(PolicyManageError::EnvelopeIdentity)?;
         let actor = OutboxActor::scoped(
             actor_kind,
-            OpaqueActorId::from_opaque(actor_subject).map_err(|_| PolicyManageError::EntryBuild)?,
+            OpaqueActorId::from_opaque(actor_subject)
+                .map_err(PolicyManageError::EnvelopeIdentity)?,
             tenant,
             vocab::ScopedTenant::Tenant,
         );
-        let envelope =
-            OutboxEnvelopeParts::new(POLICY_UPDATED_SPEC.contract(), tenant, subject_id, actor);
-        Ok((entry, envelope))
+        policy_updated::emit(
+            &GeneratedEventEncoder,
+            payload,
+            tenant,
+            subject_id,
+            actor,
+            IdemKey::parse(&Uuid::new_v4().to_string())
+                .map_err(PolicyManageError::IdempotencyKey)?,
+        )
+        .await
+        .map_err(PolicyManageError::EventEncode)
     }
 }
 
@@ -459,7 +464,9 @@ pub fn deactivate_response(
     Ok(IdentityPoliciesDeactivateResponse {
         data: generated::http::identity_v1::policies_deactivate::IdentityPoliciesDeactivateData {
             deactivated: true,
-            version: NonZeroU32::new(version.get()).ok_or(PolicyManageError::EntryBuild)?,
+            version: NonZeroU32::new(version.get()).ok_or(PolicyManageError::WireProjection(
+                EventWireProjectionError::Version,
+            ))?,
         },
     })
 }
@@ -513,7 +520,9 @@ fn actor_kind_wire(
         vocab::PrincipalKind::SuperAdmin => Ok(IdentityPolicyUpdatedPayloadActorKind::SuperAdmin),
         vocab::PrincipalKind::Service => Ok(IdentityPolicyUpdatedPayloadActorKind::Service),
         vocab::PrincipalKind::Anonymous => Ok(IdentityPolicyUpdatedPayloadActorKind::Anonymous),
-        _ => Err(PolicyManageError::EntryBuild),
+        _ => Err(PolicyManageError::WireProjection(
+            EventWireProjectionError::PrincipalKind,
+        )),
     }
 }
 

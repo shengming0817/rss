@@ -12,20 +12,20 @@
 
 use std::sync::Arc;
 
-use consistency::{EventEntry, IdemKey};
-use diport::{
-    Clock, EnvelopeSubjectId, OpaqueActorId, OutboxActor, OutboxEmitError, OutboxEnvelopeParts,
-};
+use consistency::IdemKey;
+use diport::{Clock, EnvelopeSubjectId, OpaqueActorId, OutboxActor, OutboxEmitError};
+use eventexec::event::{EventEncodeError, GeneratedEventEncoder};
 use generated::event::identity_v1::role_assigned::{
-    IdentityRoleAssignedPayload, IdentityRoleAssignedPayloadActorKind, SPEC as ROLE_ASSIGNED_SPEC,
+    self as role_assigned, IdentityRoleAssignedPayload, IdentityRoleAssignedPayloadActorKind,
+    SPEC as ROLE_ASSIGNED_SPEC,
 };
 use generated::event::identity_v1::role_revoked::{
-    IdentityRoleRevokedPayload, IdentityRoleRevokedPayloadActorKind, SPEC as ROLE_REVOKED_SPEC,
+    self as role_revoked, IdentityRoleRevokedPayload, IdentityRoleRevokedPayloadActorKind,
 };
 use uuid::Uuid;
 use vocab::TenantId;
 
-use super::unix_secs;
+use super::{EventWireProjectionError, unix_secs};
 use crate::domain::{IdentityError, RoleBinding, RoleId};
 use crate::ports::{
     DynRoleBindingLifecycle, DynRoleReadRepo, RoleBindingLifecycle, RoleReadRepo,
@@ -47,10 +47,16 @@ pub enum RbacAdminError {
     RoleLookup(#[source] IdentityError),
     /// 角色事件 payload 编码失败（原始错误进 source，不进 Display）。
     #[error("role-event payload encode failed")]
-    PayloadEncode(#[source] serde_json::Error),
-    /// outbox entry 构造失败（topic / event-id 非法——系统生成值，理论不可达，fail-closed）。
-    #[error("role-event outbox entry build failed")]
-    EntryBuild,
+    PayloadEncode(#[source] EventEncodeError),
+    /// Reviewed envelope subject or actor identity is invalid.
+    #[error("role-event envelope identity validation failed")]
+    EnvelopeIdentity(#[source] diport::EnvelopeIdentityError),
+    /// Stable event idempotency identity is invalid.
+    #[error("role-event idempotency identity validation failed")]
+    IdempotencyKey(#[source] consistency::IdemKeyError),
+    /// A domain value has no generated role-event wire representation.
+    #[error("role-event wire projection failed")]
+    WireProjection(#[source] EventWireProjectionError),
     /// binding 写 + outbox append 的 **co-tx** 写失败（原始错误进 source，已 PII-redacted，不进 Display）。
     #[error("role binding co-tx write failed")]
     BindingWrite(#[source] OutboxEmitError),
@@ -125,28 +131,31 @@ impl RbacAdminService {
             tenant_id: tenant.to_string(),
             occurred_at: unix_secs(now),
         };
-        let entry = EventEntry::from_generated_payload(
-            &payload,
-            IdemKey::parse(&Uuid::new_v4().to_string()).map_err(|_| RbacAdminError::EntryBuild)?,
-        )
-        .map_err(RbacAdminError::PayloadEncode)?;
         // envelope subject_id = **actor** opaque id（FR-020 非 PII originator），非 target subject（F2）。
         let actor_subject = actor.as_uuid().hyphenated().to_string();
         let subject_id = EnvelopeSubjectId::from_opaque(actor_subject.clone())
-            .map_err(|_| RbacAdminError::EntryBuild)?;
+            .map_err(RbacAdminError::EnvelopeIdentity)?;
         let actor = OutboxActor::scoped(
             actor_kind,
-            OpaqueActorId::from_opaque(actor_subject).map_err(|_| RbacAdminError::EntryBuild)?,
+            OpaqueActorId::from_opaque(actor_subject).map_err(RbacAdminError::EnvelopeIdentity)?,
             tenant,
             vocab::ScopedTenant::Tenant,
         );
-        let envelope =
-            OutboxEnvelopeParts::new(ROLE_ASSIGNED_SPEC.contract(), tenant, subject_id, actor);
+        let event = role_assigned::emit(
+            &GeneratedEventEncoder,
+            payload,
+            tenant,
+            subject_id,
+            actor,
+            IdemKey::parse(&Uuid::new_v4().to_string()).map_err(RbacAdminError::IdempotencyKey)?,
+        )
+        .await
+        .map_err(RbacAdminError::PayloadEncode)?;
 
         // 3. L2 co-tx（binding 行 + outbox 行同一事务原子写入）。
         let binding = RoleBinding::new(subject, role_id, tenant);
         self.bindings
-            .assign_and_emit(receipt, tenant_scope, binding, entry, envelope)
+            .assign_and_emit(receipt, tenant_scope, binding, event)
             .await
             .map_err(RbacAdminError::BindingWrite)
     }
@@ -184,26 +193,29 @@ impl RbacAdminService {
             tenant_id: tenant.to_string(),
             occurred_at: unix_secs(now),
         };
-        let entry = EventEntry::from_generated_payload(
-            &payload,
-            IdemKey::parse(&Uuid::new_v4().to_string()).map_err(|_| RbacAdminError::EntryBuild)?,
-        )
-        .map_err(RbacAdminError::PayloadEncode)?;
         // envelope subject_id = **actor** opaque id（FR-020），非 target subject（F2）。
         let actor_subject = actor.as_uuid().hyphenated().to_string();
         let subject_id = EnvelopeSubjectId::from_opaque(actor_subject.clone())
-            .map_err(|_| RbacAdminError::EntryBuild)?;
+            .map_err(RbacAdminError::EnvelopeIdentity)?;
         let actor = OutboxActor::scoped(
             actor_kind,
-            OpaqueActorId::from_opaque(actor_subject).map_err(|_| RbacAdminError::EntryBuild)?,
+            OpaqueActorId::from_opaque(actor_subject).map_err(RbacAdminError::EnvelopeIdentity)?,
             tenant,
             vocab::ScopedTenant::Tenant,
         );
-        let envelope =
-            OutboxEnvelopeParts::new(ROLE_REVOKED_SPEC.contract(), tenant, subject_id, actor);
+        let event = role_revoked::emit(
+            &GeneratedEventEncoder,
+            payload,
+            tenant,
+            subject_id,
+            actor,
+            IdemKey::parse(&Uuid::new_v4().to_string()).map_err(RbacAdminError::IdempotencyKey)?,
+        )
+        .await
+        .map_err(RbacAdminError::PayloadEncode)?;
 
         self.bindings
-            .revoke_and_emit(receipt, tenant_scope, role_id, subject, entry, envelope)
+            .revoke_and_emit(receipt, tenant_scope, role_id, subject, event)
             .await
             .map_err(RbacAdminError::BindingWrite)
     }
@@ -219,7 +231,9 @@ fn role_assigned_actor_kind_wire(
         vocab::PrincipalKind::SuperAdmin => Ok(IdentityRoleAssignedPayloadActorKind::SuperAdmin),
         vocab::PrincipalKind::Service => Ok(IdentityRoleAssignedPayloadActorKind::Service),
         vocab::PrincipalKind::Anonymous => Ok(IdentityRoleAssignedPayloadActorKind::Anonymous),
-        _ => Err(RbacAdminError::EntryBuild),
+        _ => Err(RbacAdminError::WireProjection(
+            EventWireProjectionError::PrincipalKind,
+        )),
     }
 }
 
@@ -233,7 +247,9 @@ fn role_revoked_actor_kind_wire(
         vocab::PrincipalKind::SuperAdmin => Ok(IdentityRoleRevokedPayloadActorKind::SuperAdmin),
         vocab::PrincipalKind::Service => Ok(IdentityRoleRevokedPayloadActorKind::Service),
         vocab::PrincipalKind::Anonymous => Ok(IdentityRoleRevokedPayloadActorKind::Anonymous),
-        _ => Err(RbacAdminError::EntryBuild),
+        _ => Err(RbacAdminError::WireProjection(
+            EventWireProjectionError::PrincipalKind,
+        )),
     }
 }
 

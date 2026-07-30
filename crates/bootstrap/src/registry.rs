@@ -40,7 +40,7 @@ pub struct DomainListenerBinding {
     pub listener: ListenerKind,
 }
 
-/// 事件订阅声明（由 [`Registry::subscriber`] 收集）。
+/// 事件订阅声明（由 generated sealed subscription wrapper 收集）。
 ///
 /// contract_id、topic、consumer domain、consumer group 与闭枚举 policy capability 五元绑定；经
 /// [`Registry::drain_subscribers`] 转为 [`SubscriberBinding`]，由组合根一次解析为封闭执行计划。
@@ -299,23 +299,7 @@ impl Registry {
         Ok(())
     }
 
-    /// 声明事件订阅（generated topology identity + policy capability 五元绑定）。
-    ///
-    /// - `contract_id`：契约 ID，取自 `generated::event::<domain_v1>::CONTRACT_ID`。
-    /// - `topic`：broker routing key，取自 `generated::event::<domain_v1>::TOPIC`。
-    /// - `consumer`：消费者域 DomainId，取自 generated event `SPEC.subscriptions()` accessor；
-    ///   用于 DLX / metrics / health 归因，不得从 topic owner 反推。
-    /// - `group`：消费者组（[`consistency::ConsumerGroup`]），幂等去重 PK 的第二维度；
-    ///   取自消费域 const，经 `ConsumerGroup::parse(...)` 构造——失败须冒泡为 [`KernelError::Subscriber`]，
-    ///   不得在 init 内 `unwrap`/`expect`。
-    /// - `capability`：闭枚举 capability。`AdapterNativeTransactional` 由 adapter 的 typed
-    ///   `ConsumerTx` 构造 handler；`DomainReconcile` 只携带可重复收敛的窄 effect。
-    ///
-    /// 组合根 finalize 经 [`Registry::drain_subscribers`] 取出 [`SubscriberBinding`] 校验 generated topology，
-    /// durable bridge 必须把 topology identity 与 capability 同批解析为唯一封闭执行计划；缺失或错配
-    /// 一律 fail-closed，不得默认、fallback 或另建 handler registry。
-    /// DomainId = 注册域，由注册时机隐式记录（不作为参数，避免与 contract owner 语义冲突）。
-    pub fn subscriber(
+    fn push_generated_subscriber(
         &mut self,
         contract_id: &'static str,
         topic: &'static str,
@@ -548,6 +532,47 @@ impl Registry {
     }
 }
 
+impl generated::event::EventSubscribe for Registry {
+    type Capability = SubscriberCapability;
+    type Output = Result<(), KernelError>;
+
+    fn subscribe<S: generated::event::EventSubscription>(
+        &mut self,
+        capability: Self::Capability,
+    ) -> Self::Output {
+        use generated::event::{EventContract, SubscriptionEffect, SubscriptionExecution};
+
+        let event = <S::Contract as EventContract>::SPEC;
+        let subscription = S::SPEC;
+        let capability_matches = matches!(
+            (&capability, subscription.execution(), subscription.effect()),
+            (
+                SubscriberCapability::AdapterNativeTransactional,
+                SubscriptionExecution::AdapterNative,
+                None,
+            ) | (
+                SubscriberCapability::DomainReconcile(_),
+                SubscriptionExecution::DomainEffect,
+                Some(SubscriptionEffect::SettingsConfigVersionRefresh),
+            )
+        );
+        if !capability_matches
+            || capability.external_effect_policy() != subscription.external_effect_policy()
+        {
+            return Err(KernelError::Subscriber);
+        }
+        let group = consistency::ConsumerGroup::parse(subscription.group())
+            .map_err(|_| KernelError::Subscriber)?;
+        self.push_generated_subscriber(
+            event.contract_id(),
+            event.topic(),
+            subscription.consumer(),
+            group,
+            capability,
+        )
+    }
+}
+
 impl Default for Registry {
     fn default() -> Self {
         Self::new()
@@ -618,16 +643,11 @@ mod collect {
     #[test]
     #[allow(clippy::expect_used)]
     fn registry_collects_and_exposes_declarations() {
-        let group =
-            consistency::ConsumerGroup::parse("audit.session-created").expect("valid group");
         let mut reg = Registry::new();
         reg.route_group::<Primary>("/api/v1/identity", Ok)
             .expect("route group declared");
-        reg.subscriber(
-            "identity.session-created",
-            "identity.session-created",
-            "audit",
-            group,
+        generated::event::identity_v1::session_created::subscribe_audit(
+            &mut reg,
             SubscriberCapability::AdapterNativeTransactional,
         )
         .expect("subscriber declared");
@@ -655,32 +675,20 @@ mod collect {
     struct TwoGroupDomain;
     impl Domain for TwoGroupDomain {
         fn init(&self, reg: &mut Registry) -> Result<(), KernelError> {
-            let group = consistency::ConsumerGroup::parse("domain-a.topic-a")
-                .map_err(|_| KernelError::Subscriber)?;
             reg.route_group::<Primary>("/api/v1/a", Ok)?;
-            reg.subscriber(
-                "contract.topic-a",
-                "topic.a",
-                "domain-a",
-                group,
+            generated::event::identity_v1::session_created::subscribe_audit(
+                reg,
                 SubscriberCapability::AdapterNativeTransactional,
-            )?;
-            Ok(())
+            )
         }
     }
     struct OneSubDomain;
     impl Domain for OneSubDomain {
         fn init(&self, reg: &mut Registry) -> Result<(), KernelError> {
-            let group = consistency::ConsumerGroup::parse("domain-b.topic-b")
-                .map_err(|_| KernelError::Subscriber)?;
-            reg.subscriber(
-                "contract.topic-b",
-                "topic.b",
-                "domain-b",
-                group,
+            generated::event::identity_v1::role_assigned::subscribe_audit(
+                reg,
                 SubscriberCapability::AdapterNativeTransactional,
-            )?;
-            Ok(())
+            )
         }
     }
 
@@ -691,12 +699,12 @@ mod collect {
         assert_eq!(reg.route_groups().len(), 1);
         let subs = reg.drain_subscribers();
         assert_eq!(subs.len(), 2);
-        assert_eq!(subs[0].topic(), "topic.a");
-        assert_eq!(subs[0].contract_id(), "contract.topic-a");
-        assert_eq!(subs[0].group().as_str(), "domain-a.topic-a");
-        assert_eq!(subs[1].topic(), "topic.b");
-        assert_eq!(subs[1].contract_id(), "contract.topic-b");
-        assert_eq!(subs[1].group().as_str(), "domain-b.topic-b");
+        assert_eq!(subs[0].topic(), "identity.session-created");
+        assert_eq!(subs[0].contract_id(), "identity.session-created");
+        assert_eq!(subs[0].group().as_str(), "audit.session-created");
+        assert_eq!(subs[1].topic(), "identity.role-assigned");
+        assert_eq!(subs[1].contract_id(), "identity.role-assigned");
+        assert_eq!(subs[1].group().as_str(), "audit.role-assigned");
     }
 
     struct FailingDomain;
@@ -780,25 +788,15 @@ mod typed_handoff {
     #[test]
     #[allow(clippy::expect_used, clippy::panic)]
     fn subscriber_capability_is_ordered_and_consumed_with_identity() {
-        let group_a =
-            consistency::ConsumerGroup::parse("audit.native").expect("valid consumer group");
-        let group_b =
-            consistency::ConsumerGroup::parse("settings.effect").expect("valid consumer group");
         let effect = ReconcileSubscriberOwner::from_owner(AckReconciler);
         let mut reg = Registry::new();
-        reg.subscriber(
-            "audit.native",
-            "audit.native",
-            "audit",
-            group_a,
+        generated::event::identity_v1::session_created::subscribe_audit(
+            &mut reg,
             SubscriberCapability::AdapterNativeTransactional,
         )
         .expect("native subscriber declared");
-        reg.subscriber(
-            "settings.effect",
-            "settings.effect",
-            "settings",
-            group_b,
+        generated::event::settings_v1::subscribe_settings(
+            &mut reg,
             SubscriberCapability::DomainReconcile(effect.clone()),
         )
         .expect("effect subscriber declared");
@@ -806,10 +804,10 @@ mod typed_handoff {
         let mut bindings = reg.drain_subscribers().into_iter();
         let (contract_id, topic, consumer, group, capability) =
             bindings.next().expect("first binding").into_parts();
-        assert_eq!(contract_id, "audit.native");
-        assert_eq!(topic, "audit.native");
+        assert_eq!(contract_id, "identity.session-created");
+        assert_eq!(topic, "identity.session-created");
         assert_eq!(consumer, "audit");
-        assert_eq!(group.as_str(), "audit.native");
+        assert_eq!(group.as_str(), "audit.session-created");
         assert!(matches!(
             capability,
             SubscriberCapability::AdapterNativeTransactional
@@ -817,7 +815,7 @@ mod typed_handoff {
 
         let (contract_id, _, _, _, capability) =
             bindings.next().expect("second binding").into_parts();
-        assert_eq!(contract_id, "settings.effect");
+        assert_eq!(contract_id, "settings.config-version-changed");
         let SubscriberCapability::DomainReconcile(actual) = capability else {
             panic!("settings binding must carry domain effect");
         };
@@ -876,24 +874,19 @@ mod finalize {
     #[test]
     #[allow(clippy::expect_used)]
     fn drain_subscribers_extracts_bindings_and_clears() {
-        let group =
-            consistency::ConsumerGroup::parse("test.drain-group").expect("valid consumer group");
         let mut reg = Registry::new();
-        reg.subscriber(
-            "test.drain-topic",
-            "drain.topic",
-            "test-consumer",
-            group,
+        generated::event::identity_v1::session_created::subscribe_audit(
+            &mut reg,
             SubscriberCapability::AdapterNativeTransactional,
         )
         .expect("subscriber declared");
 
         let bindings = reg.drain_subscribers();
         assert_eq!(bindings.len(), 1, "drain 取出一个绑定");
-        assert_eq!(bindings[0].contract_id(), "test.drain-topic");
-        assert_eq!(bindings[0].topic(), "drain.topic");
-        assert_eq!(bindings[0].consumer(), "test-consumer");
-        assert_eq!(bindings[0].group().as_str(), "test.drain-group");
+        assert_eq!(bindings[0].contract_id(), "identity.session-created");
+        assert_eq!(bindings[0].topic(), "identity.session-created");
+        assert_eq!(bindings[0].consumer(), "audit");
+        assert_eq!(bindings[0].group().as_str(), "audit.session-created");
 
         // 二次 drain 幂等返回空（subscribers 已被 std::mem::take 清空）。
         let second = reg.drain_subscribers();

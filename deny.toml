@@ -136,9 +136,10 @@ deny = [
   # LAYER-DEPS-08（check_test_support_confinement：任一 shipped 边指向 testkit 即报）守，testcontainers 树经
   # `containers` feature + dev-dep-only 不进产物。
   # generated（contract 派生 wire 类型）只能被域 crate + 组合根，以及实现 private command/workflow
-  # runtime seam 的 eventexec 依赖。eventexec → generated 是 exact crate edge；其它 Service→Generated
-  # 仍由 layer-deps 拒绝。
-  { crate = "generated", wrappers = ["identity", "settings", "audit", "contractreg", "syshealth", "eventexec", "postgres", "server", "rss", "runtime", "settings-composition", "identity-composition", "audit-composition", "eventing-composition", "settingsonly", "identityaudit", "xtask", "journeys", "journeys-fault-matrix"] },
+  # runtime seam 的 eventexec 与 typed subscription registrar 的 bootstrap 依赖。两条均为 exact crate
+  # edge；bootstrap 的 production item surface 另由 LAYER-DEPS-GENERATED-BOOTSTRAP-REGISTRAR-01
+  # 收窄到 registrar vocabulary，其它 Service→Generated 仍由 layer-deps 拒绝。
+  { crate = "generated", wrappers = ["identity", "settings", "audit", "contractreg", "syshealth", "eventexec", "bootstrap", "postgres", "server", "rss", "runtime", "settings-composition", "identity-composition", "audit-composition", "eventing-composition", "settingsonly", "identityaudit", "xtask", "journeys", "journeys-fault-matrix"] },
 ]
 
 # 注意：cargo-deny 只扫描本（根 stable）workspace。`lints/` 是独立嵌套 workspace（根 Cargo.toml

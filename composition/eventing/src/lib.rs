@@ -167,7 +167,7 @@ pub fn bridge_generated_subscriptions(
 ///
 /// This entrypoint deliberately ignores unrelated compiled consumer features. Cargo feature
 /// unification can enable settings consumers in the same workspace build, but a smaller assembly
-/// must still prove and activate only its declared four-subscription topology.
+/// must still prove and activate only its declared five-subscription topology.
 #[cfg(feature = "audit-consumers")]
 pub fn bridge_generated_audit_subscriptions(
     bindings: Vec<SubscriberBinding>,
@@ -541,7 +541,7 @@ impl WorkerInputs {
 }
 
 #[cfg(feature = "audit-consumers")]
-/// Factory for the four generated audit ConsumerTx handlers.
+/// Factory for the five generated audit ConsumerTx handlers.
 pub struct AuditConsumerFactory<'a> {
     pg: &'a postgres::PgRuntimeHandle,
     audit_key: &'a primitives::MacKey,
@@ -722,21 +722,38 @@ mod tests {
         select: fn(SubscriptionDispatchKey) -> bool,
     ) -> anyhow::Result<Vec<SubscriberBinding>> {
         let mut registry = bootstrap::Registry::new();
-        for event in generated::event::EVENTS {
-            for spec in event
-                .subscriptions()
-                .iter()
-                .filter(|spec| select(spec.dispatch()))
-            {
-                registry.subscriber(
-                    event.contract_id(),
-                    event.topic(),
-                    spec.consumer(),
-                    ConsumerGroup::parse(spec.group())?,
-                    capability(*spec),
-                )?;
-            }
+        macro_rules! subscribe_if_selected {
+            ($spec:path, $wrapper:path) => {{
+                let spec = $spec;
+                if select(spec.dispatch()) {
+                    $wrapper(&mut registry, capability(spec))?;
+                }
+            }};
         }
+        subscribe_if_selected!(
+            generated::event::identity_v1::policy_updated::AUDIT_SUBSCRIPTION,
+            generated::event::identity_v1::policy_updated::subscribe_audit
+        );
+        subscribe_if_selected!(
+            generated::event::identity_v1::role_assigned::AUDIT_SUBSCRIPTION,
+            generated::event::identity_v1::role_assigned::subscribe_audit
+        );
+        subscribe_if_selected!(
+            generated::event::identity_v1::role_revoked::AUDIT_SUBSCRIPTION,
+            generated::event::identity_v1::role_revoked::subscribe_audit
+        );
+        subscribe_if_selected!(
+            generated::event::identity_v1::security_event::AUDIT_SUBSCRIPTION,
+            generated::event::identity_v1::security_event::subscribe_audit
+        );
+        subscribe_if_selected!(
+            generated::event::identity_v1::session_created::AUDIT_SUBSCRIPTION,
+            generated::event::identity_v1::session_created::subscribe_audit
+        );
+        subscribe_if_selected!(
+            generated::event::settings_v1::SETTINGS_SUBSCRIPTION,
+            generated::event::settings_v1::subscribe_settings
+        );
         Ok(registry.drain_subscribers())
     }
 
@@ -747,7 +764,7 @@ mod tests {
             .flat_map(|event| event.subscriptions())
             .filter(|spec| admitted_dispatch(spec.dispatch()))
             .count();
-        let expected = usize::from(cfg!(feature = "audit-consumers")) * 4
+        let expected = usize::from(cfg!(feature = "audit-consumers")) * 5
             + usize::from(cfg!(feature = "settings-consumers"));
         assert_eq!(admitted, expected);
     }
@@ -762,11 +779,11 @@ mod tests {
 
     #[cfg(all(feature = "audit-consumers", not(feature = "settings-consumers")))]
     #[test]
-    fn audit_only_bridge_requires_exactly_four_audit_bindings() -> anyhow::Result<()> {
+    fn audit_only_bridge_requires_exactly_five_audit_bindings() -> anyhow::Result<()> {
         let bridged = bridge_generated_subscriptions(admitted_bindings()?)?;
         anyhow::ensure!(
-            bridged.len() == 4,
-            "audit-only bridge must admit four specs"
+            bridged.len() == 5,
+            "audit-only bridge must admit five specs"
         );
         anyhow::ensure!(bridged.iter().all(|subscription| {
             subscription.dispatch_token().policy() == ExternalEffectPolicy::TransactionalOnly
@@ -803,7 +820,7 @@ mod tests {
             .iter()
             .filter(|token| token.policy() == ExternalEffectPolicy::Reconcile)
             .count();
-        assert_eq!(audit, 4);
+        assert_eq!(audit, 5);
         assert_eq!(settings, 1);
         Ok(())
     }
@@ -814,7 +831,7 @@ mod tests {
         let audit_bindings = bindings_selected_by(admitted_audit_dispatch)?;
         assert_eq!(
             bridge_generated_audit_subscriptions(audit_bindings)?.len(),
-            4
+            5
         );
 
         let mut missing_audit = bindings_selected_by(admitted_audit_dispatch)?;
@@ -880,18 +897,19 @@ mod tests {
         })?);
         assert!(bridge_generated_settings_subscriptions(duplicate).is_err());
 
-        let mut wrong_group_registry = bootstrap::Registry::new();
+        // The typed wrapper has no contract/topic/consumer/group parameters, so a wrong group is
+        // not representable at this registration seam.
+        let mut typed_group_registry = bootstrap::Registry::new();
         let spec = generated::event::settings_v1::SPEC.subscriptions()[0];
-        wrong_group_registry.subscriber(
-            generated::event::settings_v1::SPEC.contract_id(),
-            generated::event::settings_v1::SPEC.topic(),
-            spec.consumer(),
-            ConsumerGroup::parse("settings.wrong-group")?,
+        generated::event::settings_v1::subscribe_settings(
+            &mut typed_group_registry,
             capability(spec),
         )?;
-        assert!(
-            bridge_generated_settings_subscriptions(wrong_group_registry.drain_subscribers())
-                .is_err()
+        let typed_group =
+            bridge_generated_settings_subscriptions(typed_group_registry.drain_subscribers())?;
+        assert_eq!(
+            typed_group[0].group().as_str(),
+            generated::event::settings_v1::SETTINGS_SUBSCRIPTION.group()
         );
         Ok(())
     }

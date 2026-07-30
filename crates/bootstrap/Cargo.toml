@@ -21,6 +21,9 @@ support = { path = "../support" }
 runctx = { path = "../runctx" }
 consistency = { path = "../consistency" }
 primitives = { path = "../primitives" }
+# Sealed generated event subscription carriers. This exact Service→Generated edge is restricted by
+# `generated_seam_allows`; bootstrap consumes only registration type vocabulary, never providers.
+generated = { path = "../../generated" }
 # 受控 `bootstrap → httpserve` 边（ADR-009）：route_group 的 listener-typed builder ListenerRouter<L> +
 # finalize_routes 产出的 sealed UnfinalizedRoutes（auth-finalize-before-bind funnel）。裸 axum::Router 不出 httpserve。
 httpserve = { path = "../httpserve" }
@@ -46,3 +49,4 @@ axum = { workspace = true }
 # 隔离测试经 httpserve 的 test-util feature 取回裸 Router（`UnfinalizedRoutes::into_router_for_test`）做 oneshot；
 # 生产构建无此 feature ⇒ 该入口编译期不存在（ADR-009 §6 Soft→Medium）。
 httpserve = { path = "../httpserve", features = ["test-util"] }
+trybuild = { workspace = true }

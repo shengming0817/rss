@@ -31,6 +31,10 @@ pub use managed_blocking_worker::{
 // 命令分发 runtime：generated seam → reviewed command capability → provider store，命令不再借事件 emitter。
 pub mod command;
 
+// 事件 authoring runtime：generated sealed contract → reviewed event capability；普通 EventEntry
+// 无法转换成该能力。
+pub mod event;
+
 pub mod relay;
 pub use relay::{
     OUTBOX_RELAY_PROBE, OUTBOX_SAMPLER_PROBE, OUTBOX_SWEEPER_PROBE, RelayWorker,

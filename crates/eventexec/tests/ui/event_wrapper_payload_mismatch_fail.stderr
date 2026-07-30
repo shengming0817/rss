@@ -1,0 +1,14 @@
+error[E0308]: mismatched types
+  --> tests/ui/event_wrapper_payload_mismatch_fail.rs:16:9
+   |
+14 |     let _ = device_certificate_reported::emit(
+   |             --------------------------------- arguments to this function are incorrect
+15 |         emitter,
+16 |         payload,
+   |         ^^^^^^^ expected `IdentityDeviceCertificateReportedPayload`, found `IdentityDeviceCommandAckedPayload`
+   |
+note: function defined here
+  --> $WORKSPACE/generated/src/event/identity_v1.rs
+   |
+   |     pub async fn emit<E: super::super::EventEmit>(
+   |                  ^^^^

@@ -2,8 +2,8 @@
 
 use std::time::SystemTime;
 
-use consistency::EventEntry;
 use diport::{Clock, OutboxEnvelopeParts};
+use eventexec::event::ReviewedEvent;
 use identity::ports::{
     AttributeKey, AttributeValue, GlobPattern, IdentityError, Operator, POLICY_UPDATED_CONTRACT,
     PoliciesCreateProducerReceipt, PoliciesDeactivateProducerReceipt,
@@ -483,13 +483,14 @@ impl PolicyLifecycle for PgPolicyLifecycle {
         receipt: PoliciesCreateProducerReceipt,
         tenant_scope: TenantRepoScope,
         policy: Policy,
-        entry: EventEntry,
-        envelope: OutboxEnvelopeParts,
+        event: ReviewedEvent,
     ) -> Result<Policy, IdentityError> {
         let tenant = tenant_scope.tenant();
         if policy.tenant() != tenant || policy.version().get() != 1 {
             return Err(IdentityError::InvalidPolicy);
         }
+        let generated_fact = event.fact();
+        let (entry, envelope, _fact) = event.into_parts();
         let (env_tenant, env) = self.envelope(envelope)?;
         if env_tenant != tenant {
             return Err(IdentityError::InvalidPolicy);
@@ -502,9 +503,6 @@ impl PolicyLifecycle for PgPolicyLifecycle {
         let permission = policy.route_scope().permission().as_str().to_string();
         let effective_from = unix_secs(policy.effective_from());
         let effective_until = policy.effective_until().map(unix_secs);
-        let generated_fact = entry
-            .generated_fact()
-            .ok_or_else(|| producer_authorization_storage_error("policy create entry"))?;
         let inserted = self
             .pool
             .producer_tx(
@@ -565,13 +563,14 @@ impl PolicyLifecycle for PgPolicyLifecycle {
         tenant_scope: TenantRepoScope,
         policy: Policy,
         expected: PolicyVersion,
-        entry: EventEntry,
-        envelope: OutboxEnvelopeParts,
+        event: ReviewedEvent,
     ) -> Result<Policy, IdentityError> {
         let tenant = tenant_scope.tenant();
         if policy.tenant() != tenant {
             return Err(IdentityError::InvalidPolicy);
         }
+        let generated_fact = event.fact();
+        let (entry, envelope, _fact) = event.into_parts();
         let (env_tenant, env) = self.envelope(envelope)?;
         if env_tenant != tenant {
             return Err(IdentityError::InvalidPolicy);
@@ -579,9 +578,6 @@ impl PolicyLifecycle for PgPolicyLifecycle {
         let tenant_uuid = tenant_param(tenant);
         let rules_json = encode_rules(&policy)?;
         let expected_version = version_param(expected)?;
-        let generated_fact = entry
-            .generated_fact()
-            .ok_or_else(|| producer_authorization_storage_error("policy update entry"))?;
         let (raw, exists): (Option<RawPolicy>, bool) = self
             .pool
             .producer_tx(
@@ -675,10 +671,11 @@ impl PolicyLifecycle for PgPolicyLifecycle {
         tenant_scope: TenantRepoScope,
         id: PolicyId,
         expected: PolicyVersion,
-        entry: EventEntry,
-        envelope: OutboxEnvelopeParts,
+        event: ReviewedEvent,
     ) -> Result<bool, IdentityError> {
         let tenant = tenant_scope.tenant();
+        let generated_fact = event.fact();
+        let (entry, envelope, _fact) = event.into_parts();
         let (env_tenant, env) = self.envelope(envelope)?;
         if env_tenant != tenant {
             return Err(IdentityError::InvalidPolicy);
@@ -686,9 +683,6 @@ impl PolicyLifecycle for PgPolicyLifecycle {
         let tenant_uuid = tenant_param(tenant);
         let id_str = id.as_str().to_string();
         let expected_version = version_param(expected)?;
-        let generated_fact = entry
-            .generated_fact()
-            .ok_or_else(|| producer_authorization_storage_error("policy deactivate entry"))?;
         let (deleted, exists) = self
             .pool
             .producer_tx(

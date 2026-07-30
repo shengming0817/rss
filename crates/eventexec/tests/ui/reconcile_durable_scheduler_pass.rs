@@ -5,13 +5,13 @@ use std::time::Duration;
 
 use consistency::{Context, ConvergeAction, EngineErrorKind, Outcome, ReconcileError};
 use diport::{EnvelopeSubjectId, OpaqueActorId, OutboxActor};
+use eventexec::command::{CommandAliasKey, CommandIdempotencyKeyring};
 use eventexec::reconcile::{
     AttemptResult, AttemptScope, AttemptTrigger, ClaimedTarget, DurableReconciler,
     ReconcileAttempt, ReconcileScheduleError, ReconcileScheduleStore, ReconcileSchedulerBuilder,
     ReviewedCommand, ScheduleActionOutcome, ScheduleAttemptOutcome, ScheduleLeaseOutcome, Tenancy,
     Trigger,
 };
-use eventexec::command::{CommandAliasKey, CommandIdempotencyKeyring};
 
 #[derive(Clone)]
 struct NoopStore;
@@ -106,11 +106,21 @@ impl DurableReconciler<NoopStore> for NoopDurableReconciler {
         target: &ClaimedTarget,
         attempt: &AttemptScope<'_, NoopStore>,
     ) -> Result<Outcome, ReconcileError> {
-        let command = generated::command::_seed_v1::reconcile_command(
-            generated::command::_seed_v1::SeedDoThingRequest {
-                amount: 1,
-                target_id: target.resource_id().to_string(),
-            },
+        let request = serde_json::from_value::<
+            generated::command::identity_v1::IdentityApplyDeviceCertificateRequest,
+        >(serde_json::json!({
+            "deviceId": "b497a9ce-6ac5-4d44-a0a3-869af114db5f",
+            "desiredGeneration": 2,
+            "fenceEpoch": 3,
+            "intentId": "certificate-intent-1",
+            "policyHash": format!("sha256:{}", "1".repeat(64)),
+            "artifactId": "certificate-artifact-1",
+            "artifactDigest": format!("sha256:{}", "2".repeat(64)),
+            "deadlineEpochSeconds": 42
+        }))
+        .expect("generated certificate command request");
+        let command = generated::command::identity_v1::reconcile_command(
+            request,
             target.tenant(),
             EnvelopeSubjectId::from_opaque("device-1").expect("subject"),
             OutboxActor::service(OpaqueActorId::from_opaque("reconcile-test").expect("actor")),
@@ -136,10 +146,13 @@ fn main() {
     let worker = ReconcileSchedulerBuilder::new(
         NoopStore,
         NoopDurableReconciler,
-        Arc::new(CommandIdempotencyKeyring::new(
-            CommandAliasKey::new("current", vec![0x42; 32]).expect("key"),
-            Vec::new(),
-        ).expect("keyring")),
+        Arc::new(
+            CommandIdempotencyKeyring::new(
+                CommandAliasKey::new("current", vec![0x42; 32]).expect("key"),
+                Vec::new(),
+            )
+            .expect("keyring"),
+        ),
         tenant,
         "test-reconciler",
         "holder-a",

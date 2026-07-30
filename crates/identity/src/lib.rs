@@ -332,7 +332,10 @@ pub mod test_support {
 
     /// Build the generated `identity.session-created` fact carried by a login-grant mutation.
     #[allow(clippy::expect_used)]
-    pub fn session_created_entry(event_id: &str, grant: &AuthGrant) -> consistency::EventEntry {
+    pub async fn session_created_event(
+        event_id: &str,
+        grant: &AuthGrant,
+    ) -> eventexec::event::ReviewedEvent {
         let payload =
             generated::event::identity_v1::session_created::IdentitySessionCreatedPayload {
                 session_id: grant.id().as_str().to_owned(),
@@ -340,11 +343,23 @@ pub mod test_support {
                 tenant_id: grant.tenant().to_string(),
                 occurred_at: crate::application::unix_secs(grant.created_at()),
             };
-        consistency::EventEntry::from_generated_payload(
-            &payload,
+        let subject = grant.user_id().as_uuid().hyphenated().to_string();
+        generated::event::identity_v1::session_created::emit(
+            &eventexec::event::GeneratedEventEncoder,
+            payload,
+            grant.tenant(),
+            diport::EnvelopeSubjectId::from_opaque(subject.clone())
+                .expect("test subject must be opaque"),
+            diport::OutboxActor::scoped(
+                vocab::PrincipalKind::User,
+                diport::OpaqueActorId::from_opaque(subject).expect("test actor must be opaque"),
+                grant.tenant(),
+                vocab::ScopedTenant::SelfOnly,
+            ),
             consistency::IdemKey::parse(event_id)
                 .expect("test event id must satisfy idempotency-key shape"),
         )
+        .await
         .expect("generated session-created payload must encode")
     }
 

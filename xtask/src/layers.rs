@@ -248,15 +248,18 @@ pub(crate) fn provider_adapter_bootstrap_forbidden(from_crate: &str, to_crate: &
     matches!(from_crate, "redis-adapter" | "s3" | "vault") && to_crate == "bootstrap"
 }
 
-/// Command/workflow runtime seam 的精确 crate edge：只允许 `eventexec → generated`。
+/// Generated authoring/registration seams 的精确 crate edges。
 ///
 /// `generated::command::{CommandEmit, CommandJournal}` 接受字段私有、仅 generated 可构造的
 /// `CommandSpec`；`eventexec` 必须实现这些 seam，才能在自身 crate 内构造不可外部伪造的 reviewed DTO。
 /// Workflow runtime 同样只在 `eventexec` 内把 generated definition catalog 与 sealed assembly plan
-/// exact-join。两者都是类型/可见性 Hard seal 的必要编译边，不是一般 `Service → Generated` 放宽。
-/// fail-closed：任一端名称不同、反向或其它 service 一律返回 false。
-pub(crate) fn eventexec_generated_seam_allows(from_crate: &str, to_crate: &str) -> bool {
-    (from_crate, to_crate) == ("eventexec", "generated")
+/// exact-join。`bootstrap` 仅实现 sealed event subscription registrar，使 raw transport coordinates
+/// 不再出现在 domain callsites。两条边都是类型/可见性 Hard seal 的必要编译边，不是一般
+/// `Service → Generated` 放宽；bootstrap 对 generated 的 production item surface 另由 layerdeps 的
+/// `LAYER-DEPS-GENERATED-BOOTSTRAP-REGISTRAR-01` exact AST allowlist 收窄。fail-closed：反向或其它
+/// service 一律返回 false。
+pub(crate) fn generated_seam_allows(from_crate: &str, to_crate: &str) -> bool {
+    to_crate == "generated" && matches!(from_crate, "eventexec" | "bootstrap")
 }
 
 /// `cargo-deny` 对 dev-dependency 也要求列出 wrapper；只允许 postgres 的生成契约测试依赖。
@@ -424,15 +427,16 @@ mod tests {
     #[rstest]
     #[case("eventexec", "generated", true)]
     #[case("authn", "generated", false)]
-    #[case("bootstrap", "generated", false)]
+    #[case("bootstrap", "generated", true)]
+    #[case("observ", "generated", false)]
     #[case("generated", "eventexec", false)]
     #[case("eventexec", "eventexec", false)]
-    fn eventexec_generated_seam_allows_exact_edge_only(
+    fn generated_seam_allows_exact_edges_only(
         #[case] from: &str,
         #[case] to: &str,
         #[case] want: bool,
     ) {
-        assert_eq!(eventexec_generated_seam_allows(from, to), want);
+        assert_eq!(generated_seam_allows(from, to), want);
     }
 
     #[rstest]

@@ -1738,7 +1738,7 @@ impl PgInfraDeps {
         )
     }
 
-    /// outbox emitter（envelope `occurred_at` 时间源经 `clock` 注入，构造器位置参）。
+    /// Reviewed-event durable writer（envelope `occurred_at` 时间源经 `clock` 注入）。
     #[must_use]
     pub fn emitter(&self, clock: Box<dyn Clock>) -> PgEmitter {
         PgEmitter::new_with_projection_registry(
@@ -1748,7 +1748,7 @@ impl PgInfraDeps {
         )
     }
 
-    /// CDC-facing append-only outbox emitter.
+    /// CDC-facing append-only reviewed-event writer.
     ///
     /// This explicit opt-in mode writes `outbox_log` and does not participate in the relay
     /// `outbox` status machine.

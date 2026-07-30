@@ -1665,17 +1665,10 @@ mod tests {
         "sha256:2222222222222222222222222222222222222222222222222222222222222222",
     );
 
-    struct ProducerPayload;
-    impl vocab::GeneratedEventPayload for ProducerPayload {
-        const FACT: vocab::EventFactBinding =
-            vocab::EventFactBinding::from_static(PRODUCER_FACT, "test.produced");
-    }
-
-    struct OtherPayload;
-    impl vocab::GeneratedEventPayload for OtherPayload {
-        const FACT: vocab::EventFactBinding =
-            vocab::EventFactBinding::from_static(OTHER_FACT, "test.other");
-    }
+    const PRODUCER_EVENT_FACT: vocab::EventFactBinding =
+        vocab::EventFactBinding::from_static(PRODUCER_FACT, "test.produced");
+    const OTHER_EVENT_FACT: vocab::EventFactBinding =
+        vocab::EventFactBinding::from_static(OTHER_FACT, "test.other");
 
     enum TestRouteMarker {}
     enum OtherTestRouteMarker {}
@@ -1779,18 +1772,16 @@ mod tests {
     }
 
     #[test]
-    fn producer_receipt_authorizes_only_its_generated_fact() {
+    fn producer_receipt_authorizes_only_its_reviewed_event_fact() {
         let producer = producer_binding::<TestRouteMarker>();
-        let rejected = ProducerMarker::for_test(producer).into_receipt().authorize(
-            <OtherPayload as vocab::GeneratedEventPayload>::FACT,
-            OTHER_FACT,
-        );
+        let rejected = ProducerMarker::for_test(producer)
+            .into_receipt()
+            .authorize(OTHER_EVENT_FACT, OTHER_FACT);
         assert!(rejected.is_none());
 
-        let authorization = ProducerMarker::for_test(producer).into_receipt().authorize(
-            <ProducerPayload as vocab::GeneratedEventPayload>::FACT,
-            PRODUCER_FACT,
-        );
+        let authorization = ProducerMarker::for_test(producer)
+            .into_receipt()
+            .authorize(PRODUCER_EVENT_FACT, PRODUCER_FACT);
         assert!(authorization.is_some(), "generated fact must be authorized");
         if let Some(authorization) = authorization {
             let retry_copy = authorization;
@@ -1825,10 +1816,7 @@ mod tests {
             |marker: ProducerMarker<TestRouteMarker>| async move {
                 marker
                     .into_receipt()
-                    .authorize(
-                        <ProducerPayload as vocab::GeneratedEventPayload>::FACT,
-                        PRODUCER_FACT,
-                    )
+                    .authorize(PRODUCER_EVENT_FACT, PRODUCER_FACT)
                     .map_or(StatusCode::INTERNAL_SERVER_ERROR, |_| StatusCode::CREATED)
             },
         )

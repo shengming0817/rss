@@ -20,6 +20,7 @@ thiserror = { workspace = true }
 vocab = { path = "../vocab" }
 secure = { path = "../secure" }
 consistency = { path = "../consistency" }
+eventexec = { path = "../eventexec" }
 primitives = { path = "../primitives" }
 httpserve = { path = "../httpserve" }
 bootstrap = { path = "../bootstrap" }

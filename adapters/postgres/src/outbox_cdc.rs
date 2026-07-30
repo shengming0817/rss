@@ -1,6 +1,6 @@
 //! CDC-facing append-only outbox adapter.
 //!
-//! `PgOutboxCdcEmitter` is an explicit opt-in [`diport::OutboxEmitter`] implementation for
+//! `PgOutboxCdcEmitter` is an explicit opt-in reviewed-event writer for
 //! logical-decoding/CDC pipelines. It writes immutable rows to `outbox_log` and intentionally does
 //! not participate in the relay `outbox` mutable status machine.
 //!
@@ -13,7 +13,8 @@
 //! logical replication to publish those columns — **not** an in-repo enforcement carrier.
 
 use consistency::{EventEntry, OutboxAppendOutcome, OutboxFactFingerprint};
-use diport::{Clock, EnvelopeSubjectId, OutboxEmitError, OutboxEmitter, OutboxEnvelopeParts};
+use diport::{Clock, EnvelopeSubjectId, OutboxEmitError};
+use eventexec::event::{ReviewedEvent, ReviewedEventWriter};
 use futures::future::BoxFuture;
 
 #[cfg(all(test, feature = "integration"))]
@@ -51,12 +52,9 @@ impl PgOutboxCdcEmitter {
     }
 }
 
-impl OutboxEmitter for PgOutboxCdcEmitter {
-    async fn emit(
-        &self,
-        entry: EventEntry,
-        envelope: OutboxEnvelopeParts,
-    ) -> Result<(), OutboxEmitError> {
+impl ReviewedEventWriter for PgOutboxCdcEmitter {
+    async fn write(&self, event: ReviewedEvent) -> Result<(), OutboxEmitError> {
+        let (entry, envelope, _fact) = event.into_parts();
         let (contract, tenant, subject_id, actor, partition_key, causation_id) =
             envelope.into_parts();
         let aggregate_id = aggregate_id_for_log(&subject_id);

@@ -1,0 +1,5 @@
+error[E0405]: cannot find trait `GeneratedEventPayload` in crate `vocab`
+ --> tests/ui/generated_event_payload_trait_removed_fail.rs:1:44
+  |
+1 | fn requires_legacy_payload_trait<T: vocab::GeneratedEventPayload>() {}
+  |                                            ^^^^^^^^^^^^^^^^^^^^^ not found in `vocab`

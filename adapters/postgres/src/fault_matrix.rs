@@ -25,13 +25,15 @@ use consistency::{
 };
 use diport::{
     Checkpoint, CheckpointId, CheckpointOwner, CheckpointStoreError, CheckpointVersion,
-    DeadLetterSource, DynKeyProvider, DynPublisher, EncryptOutput, KeyName, KeyProvider,
-    KeyProviderError, KeyRef, KeyVersion, LockStore, ManagedResource, OwnerCheckpointStore,
-    PublishRequest, Publisher, PublisherError, RedactedBytes, SagaContractId,
+    DeadLetterSource, DynKeyProvider, DynPublisher, EncryptOutput, EnvelopeSubjectId, KeyName,
+    KeyProvider, KeyProviderError, KeyRef, KeyVersion, LockStore, ManagedResource, OutboxActor,
+    OwnerCheckpointStore, PublishRequest, Publisher, PublisherError, RedactedBytes, SagaContractId,
     SagaInstanceRegistration, SagaInstanceStore, SagaJournal, SagaWorkerIdentity, SaveOutcome,
 };
+use eventexec::command::{CommandAliasKey, CommandIdempotencyKeyring};
 use eventexec::reconcile::{
-    ReconcileScheduleStore, ReviewedCommand, ScheduleActionOutcome, ScheduleAttemptOutcome,
+    ApplyDeviceCertificateReconcileCommand, ReconcileScheduleStore, ReviewedCommand,
+    ScheduleActionOutcome, ScheduleAttemptOutcome,
 };
 use eventexec::saga::{SagaCompensationContext, SagaForwardContext, SagaStep};
 use eventexec::{
@@ -39,7 +41,7 @@ use eventexec::{
     SagaExecutorDeps, SagaExecutorImpl, SagaOutcome, SagaRuntimeLock, TenantAuthority,
     TypedSagaActionFactory,
 };
-use identity::ports::FaultMatrixSessionCreatedPayload;
+use identity::ports::{FaultMatrixSessionCreatedPayload, SESSION_CREATED_FACT};
 use primitives::{Mac, MacAlgorithm, MacKey, MacVerifier};
 use secure::Plaintext;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode as SqlxPgSslMode};
@@ -52,8 +54,22 @@ use crate::{
 const RSS_APP_ROLE: &str = "rss_app";
 const RSS_APP_READ_ROLE: &str = "rss_app_read";
 const SCHEMA_HASH: &str = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-const SESSION_CREATED_FACT: vocab::EventFactBinding =
-    <FaultMatrixSessionCreatedPayload as vocab::GeneratedEventPayload>::FACT;
+type FaultMatrixCertificateCommand =
+    ApplyDeviceCertificateReconcileCommand<EnvelopeSubjectId, OutboxActor>;
+
+fn review_certificate_reconcile_commands(
+    commands: [FaultMatrixCertificateCommand; 2],
+) -> FaultMatrixResult<[ReviewedCommand; 2]> {
+    let keyring = CommandIdempotencyKeyring::new(
+        CommandAliasKey::new("fault-matrix-current", vec![0x42; 32])?,
+        Vec::new(),
+    )?;
+    let [first, retry] = commands;
+    Ok([
+        ReviewedCommand::from_spec(first, &keyring)?,
+        ReviewedCommand::from_spec(retry, &keyring)?,
+    ])
+}
 
 /// Error returned by the fault-matrix harness.
 pub type FaultMatrixResult<T> = anyhow::Result<T>;
@@ -1286,8 +1302,9 @@ impl PgFaultMatrixHarness {
         &self,
         tenant: vocab::TenantId,
         dispatch_key: &str,
-        commands: [ReviewedCommand; 2],
+        commands: [ApplyDeviceCertificateReconcileCommand<EnvelopeSubjectId, OutboxActor>; 2],
     ) -> FaultMatrixResult<i64> {
+        let commands = review_certificate_reconcile_commands(commands)?;
         let store = self.deps.handle().infra().reconcile();
         let key = crate::ReconcileTargetKey::parse("fault-matrix", "device", dispatch_key)?;
         let target = store.upsert_target(tenant, &key).await?;
@@ -2089,12 +2106,39 @@ fn test_dlx_payload_protector() -> FaultMatrixResult<DlxPayloadProtector> {
 #[cfg(test)]
 mod tests {
     use consistency::IdemKey;
+    use diport::{EnvelopeSubjectId, OpaqueActorId, OutboxActor};
     use identity::ports::FaultMatrixSessionCreatedPayload;
 
     use super::{
-        FaultMatrixOutboxRetryObservation, FaultMatrixOutboxStatus, FaultMatrixResult,
-        FaultMatrixSessionCreatedInput,
+        FaultMatrixCertificateCommand, FaultMatrixOutboxRetryObservation, FaultMatrixOutboxStatus,
+        FaultMatrixResult, FaultMatrixSessionCreatedInput, review_certificate_reconcile_commands,
     };
+
+    fn certificate_command(
+        tenant: vocab::TenantId,
+        idempotency_key: &str,
+    ) -> FaultMatrixCertificateCommand {
+        let request = serde_json::from_value::<
+            generated::command::identity_v1::IdentityApplyDeviceCertificateRequest,
+        >(serde_json::json!({
+            "deviceId": "b497a9ce-6ac5-4d44-a0a3-869af114db5f",
+            "desiredGeneration": 2,
+            "fenceEpoch": 3,
+            "intentId": "certificate-intent-1",
+            "policyHash": format!("sha256:{}", "1".repeat(64)),
+            "artifactId": "certificate-artifact-1",
+            "artifactDigest": format!("sha256:{}", "2".repeat(64)),
+            "deadlineEpochSeconds": 42
+        }))
+        .expect("generated certificate command request");
+        generated::command::identity_v1::reconcile_command(
+            request,
+            tenant,
+            EnvelopeSubjectId::from_opaque("fault-matrix-device").expect("subject"),
+            OutboxActor::service(OpaqueActorId::from_opaque("fault-matrix").expect("actor")),
+            idempotency_key.to_string(),
+        )
+    }
 
     fn generated_session_payload(
         tenant: vocab::TenantId,
@@ -2157,6 +2201,30 @@ mod tests {
             )
             .is_err()
         );
+        Ok(())
+    }
+
+    #[test]
+    fn certificate_reconcile_commands_are_reviewed_with_stable_sealed_aliases()
+    -> FaultMatrixResult<()> {
+        let tenant = vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")?;
+        let raw_key = "fault-matrix-certificate-dispatch";
+        let [first, retry] = review_certificate_reconcile_commands([
+            certificate_command(tenant, raw_key),
+            certificate_command(tenant, raw_key),
+        ])?;
+        let first_alias = first
+            .aliases()
+            .current()
+            .expect("current alias is required");
+        let retry_alias = retry
+            .aliases()
+            .current()
+            .expect("current alias is required");
+
+        assert_eq!(first_alias.key_id(), retry_alias.key_id());
+        assert_eq!(first_alias.digest(), retry_alias.digest());
+        assert!(!format!("{:?}", first.aliases()).contains(raw_key));
         Ok(())
     }
 

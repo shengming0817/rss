@@ -1,0 +1,16 @@
+# Device certificate reported-state fact. Draft until durable ingress is production-ready.
+id = "identity.device-certificate-reported"
+kind = "event"
+domain = "identity"
+version = "v1"
+owner = "identity"
+consistencyLevel = "OutboxFact"
+lifecycle = "draft"
+topic = "identity.device-certificate-reported"
+delivery = "at-least-once"
+
+[schemas]
+payload = "payload.schema.json"
+
+[capabilities.outbox]
+role = "fact"

@@ -12,9 +12,10 @@
 //! helper、macro 与 chained request 均有 synthetic red，歧义 helper resolution fail closed。本 AST guard
 //! 不声称具备编译器 HIR/宏展开完备性，assembly-private handler/runner 与 exact owner activation
 //! 仍是主防线。
-//! INVARIANT: EVENT-PRODUCER-SPEC-PAIR-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::producer_ast_rejects_swapped_specs_without_partition_key", anti_vacuity = "tests::producer_ast_accepts_generated_spec_alias_and_counts_typed_partition_key" }——
-//! every authoring function must use exactly one identical generated SPEC for its EventEntry and
-//! envelope before any fact is admitted to the global topology set.
+//! INVARIANT: EVENT-PRODUCER-GENERATED-EMIT-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::producer_ast_rejects_raw_authoring_as_event_evidence|tests::producer_ast_rejects_multiple_generated_emit_specs_in_one_site", anti_vacuity = "tests::producer_ast_accepts_sealed_generated_emit_wrapper|tests::workspace_event_transport_and_active_producers_pass_guard" }——
+//! active production event evidence comes exclusively from its generated per-event `emit` wrapper.
+//! Raw `EventEntry`, envelope, SPEC aliases and handwritten helpers never contribute topology facts;
+//! contract/envelope/partition matching remains inside the sealed generated encoder.
 //! INVARIANT: OUTBOX-RELAY-CLAIM-CUTOVER-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::outbox_claim_cutover_synthetic_red_rejects_legacy_production_paths", anti_vacuity = "tests::outbox_claim_cutover_accepts_canonical_and_non_production_bait" }——
 //! production outbox relay providers, runtime wiring, eventexec dispatch, and post-cutover SQL must
 //! remain on the single claimed-entry protocol; cross-crate/source-set completeness is enforced by
@@ -803,17 +804,10 @@ fn scan_consumer_external_effect_capabilities(root: &Path) -> Result<(usize, Vec
     Ok((active_handler_count, findings))
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PartitionStrategy {
-    None,
-    Aggregate,
-}
-
 #[derive(Debug)]
 struct ActiveEvent {
     contract_id: String,
     spec_path: String,
-    partition: PartitionStrategy,
 }
 
 fn scan_event_producers(root: &Path) -> Result<Vec<Finding<Rule>>> {
@@ -827,9 +821,7 @@ fn scan_event_producers(root: &Path) -> Result<Vec<Finding<Rule>>> {
         let file = syn::parse_file(&content)
             .with_context(|| format!("event producer guard: parse {}", path.display()))?;
         let imports = SpecImports::from_file(&file);
-        let entry_helpers = event_entry_helpers(&file);
-        let mut visitor =
-            ProducerVisitor::new(&imports, &entry_helpers, &rel, &mut facts, &mut findings);
+        let mut visitor = ProducerVisitor::new(&imports, &rel, &mut facts, &mut findings);
         visitor.visit_file(&file);
     }
 
@@ -882,55 +874,18 @@ fn is_producer_test_file(path: &Path) -> bool {
 }
 
 fn validate_event_facts(event: &ActiveEvent, facts: &ProducerFacts) -> Vec<Finding<Rule>> {
-    let mut findings = Vec::new();
-    if !facts.entries.contains(&event.spec_path) {
-        findings.push(finding(
+    if facts.emits.contains(&event.spec_path) {
+        Vec::new()
+    } else {
+        vec![finding(
             Rule::ProducerTopology,
             event.contract_id.clone(),
             format!(
-                "active event 缺少使用 generated `{}`.topic() 的真实 EventEntry authoring 调用",
+                "active event 缺少 generated `{}` per-event emit production witness",
                 event.spec_path
             ),
-        ));
+        )]
     }
-    if !facts.envelopes.contains(&event.spec_path) {
-        findings.push(finding(
-            Rule::ProducerTopology,
-            event.contract_id.clone(),
-            format!(
-                "active event 缺少使用 generated `{}`.contract() 的真实 envelope 调用",
-                event.spec_path
-            ),
-        ));
-    }
-    let partition_sites = facts
-        .partition_sites
-        .get(&event.spec_path)
-        .map(Vec::as_slice)
-        .unwrap_or_default();
-    match event.partition {
-        PartitionStrategy::None if partition_sites.iter().any(|count| *count != 0) => {
-            findings.push(finding(
-                Rule::ProducerTopology,
-                event.contract_id.clone(),
-                "partitionKey=none 的 event 每个 authoring site 都禁止设置 typed partition key"
-                    .to_string(),
-            ));
-        }
-        PartitionStrategy::Aggregate
-            if partition_sites.is_empty() || partition_sites.iter().any(|count| *count != 1) =>
-        {
-            findings.push(finding(
-                Rule::ProducerTopology,
-                event.contract_id.clone(),
-                format!(
-                    "partitionKey=aggregate 的 event 每个 authoring site 必须且只能设置一次 typed partition key，实际 {partition_sites:?}"
-                ),
-            ));
-        }
-        PartitionStrategy::None | PartitionStrategy::Aggregate => {}
-    }
-    findings
 }
 
 fn load_active_events(root: &Path) -> Result<Vec<ActiveEvent>> {
@@ -971,28 +926,9 @@ fn load_active_events(root: &Path) -> Result<Vec<ActiveEvent>> {
                 None
             };
             let spec_path = event_spec_path(relative, version, slug.as_deref())?;
-            let partition = doc
-                .get("subscriptions")
-                .and_then(toml::Value::as_array)
-                .and_then(|subscriptions| subscriptions.first())
-                .and_then(|subscription| subscription.get("topology"))
-                .and_then(|topology| topology.get("partitionKey"))
-                .and_then(toml::Value::as_str)
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "{} missing subscriptions.topology.partitionKey",
-                        path.display()
-                    )
-                })?;
-            let partition = match partition {
-                "none" => PartitionStrategy::None,
-                "aggregate" => PartitionStrategy::Aggregate,
-                other => anyhow::bail!("{} unknown partitionKey `{other}`", path.display()),
-            };
             events.push(ActiveEvent {
                 contract_id: contract_id.to_string(),
                 spec_path,
-                partition,
             });
         }
     }
@@ -1032,16 +968,13 @@ fn required_toml_str<'a>(doc: &'a toml::Value, key: &str, path: &Path) -> Result
 
 #[derive(Default)]
 struct ProducerFacts {
-    entries: BTreeSet<String>,
-    envelopes: BTreeSet<String>,
-    partition_sites: BTreeMap<String, Vec<usize>>,
+    emits: BTreeSet<String>,
 }
 
 #[derive(Default)]
 struct SpecImports {
-    aliases: BTreeMap<String, String>,
-    payload_aliases: BTreeMap<String, String>,
-    globs: Vec<String>,
+    module_aliases: BTreeMap<String, String>,
+    emit_aliases: BTreeMap<String, String>,
 }
 
 impl SpecImports {
@@ -1055,47 +988,31 @@ impl SpecImports {
         imports
     }
 
-    fn resolve(&self, expr: &syn::Expr) -> Option<String> {
+    fn resolve_emit(&self, expr: &syn::Expr) -> Option<String> {
         let syn::Expr::Path(path) = peel_expr(expr) else {
             return None;
         };
-        let rendered = path.path.to_token_stream().to_string().replace(' ', "");
-        if rendered.starts_with("generated::event::") && rendered.ends_with("::SPEC") {
-            return Some(rendered);
-        }
-        if path.path.segments.len() == 1 {
-            let ident = path.path.segments[0].ident.to_string();
-            if let Some(canonical) = self.aliases.get(&ident) {
-                return Some(canonical.clone());
-            }
-            if ident == "SPEC" && self.globs.len() == 1 {
-                return Some(format!("{}::SPEC", self.globs[0]));
-            }
-        }
-        None
-    }
-
-    fn resolve_payload_type(&self, path: &syn::Path) -> Option<String> {
-        let rendered = path.to_token_stream().to_string().replace(' ', "");
-        if rendered.starts_with("generated::event::")
-            && path
-                .segments
-                .last()
-                .is_some_and(|segment| segment.ident.to_string().ends_with("Payload"))
+        if path.path.segments.len() == 1
+            && let Some(canonical) = self
+                .emit_aliases
+                .get(&path.path.segments[0].ident.to_string())
         {
-            let mut spec = path.clone();
-            spec.segments.pop();
-            spec.segments.push(syn::PathSegment::from(syn::Ident::new(
-                "SPEC",
-                proc_macro2::Span::call_site(),
-            )));
-            return Some(spec.to_token_stream().to_string().replace(' ', ""));
+            return Some(format!("{canonical}::SPEC"));
         }
-        if path.segments.len() == 1 {
-            return self
-                .payload_aliases
-                .get(&path.segments[0].ident.to_string())
-                .cloned();
+        if path.path.segments.last()?.ident != "emit" {
+            return None;
+        }
+        let mut module = path.path.clone();
+        module.segments.pop();
+        let rendered = module.to_token_stream().to_string().replace(' ', "");
+        if rendered.starts_with("generated::event::") {
+            return Some(format!("{rendered}::SPEC"));
+        }
+        if module.segments.len() == 1 {
+            let ident = module.segments[0].ident.to_string();
+            if let Some(canonical) = self.module_aliases.get(&ident) {
+                return Some(format!("{canonical}::SPEC"));
+            }
         }
         None
     }
@@ -1107,43 +1024,54 @@ fn collect_spec_imports(tree: &syn::UseTree, mut prefix: Vec<String>, imports: &
             prefix.push(path.ident.to_string());
             collect_spec_imports(&path.tree, prefix, imports);
         }
-        syn::UseTree::Name(name) if name.ident == "SPEC" => {
-            prefix.push("SPEC".to_string());
-            imports
-                .aliases
-                .insert("SPEC".to_string(), prefix.join("::"));
+        syn::UseTree::Name(name) if name.ident == "self" => {
+            if prefix.first().is_some_and(|part| part == "generated")
+                && prefix.get(1).is_some_and(|part| part == "event")
+                && let Some(alias) = prefix.last()
+            {
+                imports
+                    .module_aliases
+                    .insert(alias.clone(), prefix.join("::"));
+            }
         }
-        syn::UseTree::Rename(rename) if rename.ident == "SPEC" => {
-            prefix.push("SPEC".to_string());
-            imports
-                .aliases
-                .insert(rename.rename.to_string(), prefix.join("::"));
+        syn::UseTree::Rename(rename) if rename.ident == "self" => {
+            if prefix.first().is_some_and(|part| part == "generated")
+                && prefix.get(1).is_some_and(|part| part == "event")
+            {
+                imports
+                    .module_aliases
+                    .insert(rename.rename.to_string(), prefix.join("::"));
+            }
         }
-        syn::UseTree::Name(name) if name.ident.to_string().ends_with("Payload") => {
-            imports.payload_aliases.insert(
-                name.ident.to_string(),
-                format!("{}::SPEC", prefix.join("::")),
-            );
+        syn::UseTree::Name(name) if name.ident == "emit" => {
+            if prefix.first().is_some_and(|part| part == "generated")
+                && prefix.get(1).is_some_and(|part| part == "event")
+            {
+                imports
+                    .emit_aliases
+                    .insert("emit".to_string(), prefix.join("::"));
+            }
         }
-        syn::UseTree::Rename(rename) if rename.ident.to_string().ends_with("Payload") => {
-            imports.payload_aliases.insert(
-                rename.rename.to_string(),
-                format!("{}::SPEC", prefix.join("::")),
-            );
+        syn::UseTree::Rename(rename) if rename.ident == "emit" => {
+            if prefix.first().is_some_and(|part| part == "generated")
+                && prefix.get(1).is_some_and(|part| part == "event")
+            {
+                imports
+                    .emit_aliases
+                    .insert(rename.rename.to_string(), prefix.join("::"));
+            }
         }
         syn::UseTree::Group(group) => {
             for item in &group.items {
                 collect_spec_imports(item, prefix.clone(), imports);
             }
         }
-        syn::UseTree::Glob(_) => imports.globs.push(prefix.join("::")),
-        syn::UseTree::Name(_) | syn::UseTree::Rename(_) => {}
+        syn::UseTree::Glob(_) | syn::UseTree::Name(_) | syn::UseTree::Rename(_) => {}
     }
 }
 
 struct ProducerVisitor<'a> {
     imports: &'a SpecImports,
-    entry_helpers: &'a BTreeSet<String>,
     path: &'a Path,
     facts: &'a mut ProducerFacts,
     findings: &'a mut Vec<Finding<Rule>>,
@@ -1152,14 +1080,12 @@ struct ProducerVisitor<'a> {
 impl<'a> ProducerVisitor<'a> {
     fn new(
         imports: &'a SpecImports,
-        entry_helpers: &'a BTreeSet<String>,
         path: &'a Path,
         facts: &'a mut ProducerFacts,
         findings: &'a mut Vec<Finding<Rule>>,
     ) -> Self {
         Self {
             imports,
-            entry_helpers,
             path,
             facts,
             findings,
@@ -1169,67 +1095,17 @@ impl<'a> ProducerVisitor<'a> {
     fn visit_production_block(&mut self, ident: &syn::Ident, block: &syn::Block) {
         let mut function = FunctionProducerVisitor {
             imports: self.imports,
-            entry_helpers: self.entry_helpers,
-            entries: BTreeSet::new(),
-            envelopes: BTreeSet::new(),
-            payload_locals: BTreeMap::new(),
-            partition_calls: 0,
+            emits: BTreeSet::new(),
         };
         function.visit_block(block);
-        let authored: BTreeSet<_> = function
-            .entries
-            .union(&function.envelopes)
-            .filter(|spec| spec.as_str() != UNRESOLVED_SPEC)
-            .cloned()
-            .collect();
-        let complete: BTreeSet<_> = function
-            .entries
-            .intersection(&function.envelopes)
-            .filter(|spec| spec.as_str() != UNRESOLVED_SPEC)
-            .cloned()
-            .collect();
-        let unresolved = function.entries.contains(UNRESOLVED_SPEC)
-            || function.envelopes.contains(UNRESOLVED_SPEC);
-        if !authored.is_empty()
-            && (unresolved
-                || function.entries.len() != 1
-                || function.envelopes.len() != 1
-                || authored.len() != 1
-                || complete.len() != 1)
-        {
+        if function.emits.len() > 1 {
             self.findings.push(finding(
                 Rule::ProducerTopology,
                 self.path.display().to_string(),
-                format!(
-                    "函数 `{ident}` 必须且只能用同一个 generated event SPEC 构造 EventEntry 与 envelope"
-                ),
+                format!("函数 `{ident}` 必须且只能使用一个 generated per-event emit contract"),
             ));
-        } else if let Some(spec) = complete.into_iter().next() {
-            self.facts.entries.insert(spec.clone());
-            self.facts.envelopes.insert(spec.clone());
-            self.facts
-                .partition_sites
-                .entry(spec)
-                .or_default()
-                .push(function.partition_calls);
-        }
-        if function.entries.contains(UNRESOLVED_SPEC) {
-            self.findings.push(finding(
-                Rule::ProducerTopology,
-                self.path.display().to_string(),
-                format!(
-                    "函数 `{ident}` 的 EventEntry fact 必须来自 generated event typed payload 或 SPEC.topic()"
-                ),
-            ));
-        }
-        if function.envelopes.contains(UNRESOLVED_SPEC) {
-            self.findings.push(finding(
-                Rule::ProducerTopology,
-                self.path.display().to_string(),
-                format!(
-                    "函数 `{ident}` 的 envelope contract 必须直接来自 generated event SPEC.contract()"
-                ),
-            ));
+        } else if let Some(spec) = function.emits.into_iter().next() {
+            self.facts.emits.insert(spec);
         }
     }
 }
@@ -1246,9 +1122,6 @@ impl<'ast> Visit<'ast> for ProducerVisitor<'_> {
         if has_test_attr(&node.attrs) {
             return;
         }
-        if self.entry_helpers.contains(&node.sig.ident.to_string()) {
-            return;
-        }
         self.visit_production_block(&node.sig.ident, &node.block);
     }
 
@@ -1260,108 +1133,17 @@ impl<'ast> Visit<'ast> for ProducerVisitor<'_> {
     }
 }
 
-const UNRESOLVED_SPEC: &str = "<unresolved>";
-
 struct FunctionProducerVisitor<'a> {
     imports: &'a SpecImports,
-    entry_helpers: &'a BTreeSet<String>,
-    entries: BTreeSet<String>,
-    envelopes: BTreeSet<String>,
-    payload_locals: BTreeMap<String, String>,
-    partition_calls: usize,
+    emits: BTreeSet<String>,
 }
 
 impl<'ast> Visit<'ast> for FunctionProducerVisitor<'_> {
-    fn visit_local(&mut self, node: &'ast syn::Local) {
-        if let (syn::Pat::Ident(binding), Some(init)) = (&node.pat, &node.init)
-            && let Some(spec) = payload_spec_from_expr(&init.expr, self.imports)
-        {
-            self.payload_locals.insert(binding.ident.to_string(), spec);
-        }
-        syn::visit::visit_local(self, node);
-    }
-
     fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
-        if call_ends_with(&node.func, "EventEntry", "new") {
-            self.entries.insert(
-                node.args
-                    .first()
-                    .and_then(|arg| spec_method_receiver(arg, "topic", self.imports))
-                    .unwrap_or_else(|| UNRESOLVED_SPEC.to_string()),
-            );
-        } else if call_ends_with(&node.func, "EventEntry", "from_generated_payload") {
-            self.entries.insert(
-                node.args
-                    .first()
-                    .and_then(|arg| {
-                        payload_spec_from_entry_arg(arg, self.imports, &self.payload_locals)
-                    })
-                    .unwrap_or_else(|| UNRESOLVED_SPEC.to_string()),
-            );
-        } else if call_ident(&node.func).is_some_and(|ident| self.entry_helpers.contains(&ident)) {
-            self.entries.insert(
-                node.args
-                    .first()
-                    .and_then(|arg| self.imports.resolve(arg))
-                    .unwrap_or_else(|| UNRESOLVED_SPEC.to_string()),
-            );
-        } else if call_ends_with(&node.func, "OutboxEnvelopeParts", "new") {
-            self.envelopes.insert(
-                node.args
-                    .first()
-                    .and_then(|arg| spec_method_receiver(arg, "contract", self.imports))
-                    .unwrap_or_else(|| UNRESOLVED_SPEC.to_string()),
-            );
+        if let Some(spec) = self.imports.resolve_emit(&node.func) {
+            self.emits.insert(spec);
         }
         syn::visit::visit_expr_call(self, node);
-    }
-
-    fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
-        if node.method == "with_partition_key" {
-            self.partition_calls += 1;
-        }
-        syn::visit::visit_expr_method_call(self, node);
-    }
-}
-
-fn payload_spec_from_entry_arg(
-    expr: &syn::Expr,
-    imports: &SpecImports,
-    payload_locals: &BTreeMap<String, String>,
-) -> Option<String> {
-    let expr = peel_expr(expr);
-    if let syn::Expr::Path(path) = expr
-        && path.path.segments.len() == 1
-        && let Some(spec) = payload_locals.get(&path.path.segments[0].ident.to_string())
-    {
-        return Some(spec.clone());
-    }
-    payload_spec_from_expr(expr, imports)
-}
-
-fn payload_spec_from_expr(expr: &syn::Expr, imports: &SpecImports) -> Option<String> {
-    let syn::Expr::Struct(expr_struct) = peel_expr(expr) else {
-        return None;
-    };
-    imports.resolve_payload_type(&expr_struct.path)
-}
-
-fn spec_method_receiver(expr: &syn::Expr, method: &str, imports: &SpecImports) -> Option<String> {
-    match peel_expr(expr) {
-        syn::Expr::MethodCall(call) if call.method == method && call.args.is_empty() => {
-            imports.resolve(&call.receiver)
-        }
-        syn::Expr::MethodCall(call) => spec_method_receiver(&call.receiver, method, imports)
-            .or_else(|| {
-                call.args
-                    .iter()
-                    .find_map(|arg| spec_method_receiver(arg, method, imports))
-            }),
-        syn::Expr::Call(call) => call
-            .args
-            .iter()
-            .find_map(|arg| spec_method_receiver(arg, method, imports)),
-        _ => None,
     }
 }
 
@@ -1395,85 +1177,6 @@ fn call_ident(expr: &syn::Expr) -> Option<String> {
         .segments
         .last()
         .map(|segment| segment.ident.to_string())
-}
-
-fn event_entry_helpers(file: &syn::File) -> BTreeSet<String> {
-    file.items
-        .iter()
-        .filter_map(|item| {
-            let syn::Item::Fn(function) = item else {
-                return None;
-            };
-            let typed_spec_params: BTreeSet<String> = function
-                .sig
-                .inputs
-                .iter()
-                .filter_map(|input| {
-                    let syn::FnArg::Typed(typed) = input else {
-                        return None;
-                    };
-                    if !normalized_tokens(&typed.ty).ends_with("EventSpec") {
-                        return None;
-                    }
-                    let syn::Pat::Ident(ident) = typed.pat.as_ref() else {
-                        return None;
-                    };
-                    Some(ident.ident.to_string())
-                })
-                .collect();
-            let mut visitor = GenericEntryHelperVisitor {
-                typed_spec_params: &typed_spec_params,
-                valid: false,
-            };
-            visitor.visit_block(&function.block);
-            visitor.valid.then(|| function.sig.ident.to_string())
-        })
-        .collect()
-}
-
-struct GenericEntryHelperVisitor<'a> {
-    typed_spec_params: &'a BTreeSet<String>,
-    valid: bool,
-}
-
-impl<'ast> Visit<'ast> for GenericEntryHelperVisitor<'_> {
-    fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
-        if call_ends_with(&node.func, "EventEntry", "new")
-            && node
-                .args
-                .first()
-                .is_some_and(|arg| expr_has_method_on_ident(arg, "topic", self.typed_spec_params))
-        {
-            self.valid = true;
-        }
-        syn::visit::visit_expr_call(self, node);
-    }
-}
-
-fn expr_has_method_on_ident(
-    expr: &syn::Expr,
-    method: &str,
-    identifiers: &BTreeSet<String>,
-) -> bool {
-    match peel_expr(expr) {
-        syn::Expr::MethodCall(call) if call.method == method && call.args.is_empty() => {
-            matches!(peel_expr(&call.receiver), syn::Expr::Path(path)
-                if path.path.segments.len() == 1
-                    && identifiers.contains(&path.path.segments[0].ident.to_string()))
-        }
-        syn::Expr::MethodCall(call) => {
-            expr_has_method_on_ident(&call.receiver, method, identifiers)
-                || call
-                    .args
-                    .iter()
-                    .any(|arg| expr_has_method_on_ident(arg, method, identifiers))
-        }
-        syn::Expr::Call(call) => call
-            .args
-            .iter()
-            .any(|arg| expr_has_method_on_ident(arg, method, identifiers)),
-        _ => false,
-    }
 }
 
 fn has_test_attr(attrs: &[syn::Attribute]) -> bool {
@@ -7247,12 +6950,10 @@ mod tests {
     fn scan_producer_source(content: &str) -> (ProducerFacts, Vec<Finding<Rule>>) {
         let file = syn::parse_file(content).unwrap();
         let imports = SpecImports::from_file(&file);
-        let entry_helpers = event_entry_helpers(&file);
         let mut facts = ProducerFacts::default();
         let mut findings = Vec::new();
         let mut visitor = ProducerVisitor::new(
             &imports,
-            &entry_helpers,
             Path::new("crates/identity/src/application.rs"),
             &mut facts,
             &mut findings,
@@ -7261,32 +6962,60 @@ mod tests {
         (facts, findings)
     }
 
+    /// Raw entry/envelope construction and handwritten helpers must never satisfy the production
+    /// event witness after the generated emit cutover.
     #[test]
-    fn producer_ast_accepts_generated_spec_alias_and_counts_typed_partition_key() {
-        let (facts, findings) = scan_producer_source(
+    fn producer_ast_rejects_raw_authoring_as_event_evidence() {
+        for source in [
             r#"
             use generated::event::identity_v1::session_created::SPEC as SESSION_SPEC;
             fn produce() {
                 let entry = EventEntry::new(EventTopic::parse(SESSION_SPEC.topic())?, id, payload);
                 let envelope = OutboxEnvelopeParts::new(
                     SESSION_SPEC.contract(), tenant, subject, actor
-                ).with_partition_key(key);
+                );
             }
             "#,
+            r#"
+            use generated::event::identity_v1::session_created::*;
+            fn build_entry(spec: EventSpec) {
+                EventEntry::new(EventTopic::parse(spec.topic())?, id, payload)
+            }
+            fn produce() {
+                let entry = build_entry(SPEC);
+                let envelope = OutboxEnvelopeParts::new(
+                    SPEC.contract(), tenant, subject, actor
+                );
+            }
+            "#,
+        ] {
+            let (facts, findings) = scan_producer_source(source);
+            assert!(
+                findings.is_empty(),
+                "raw syntax is ignored, not reclassified: {findings:?}"
+            );
+            assert!(
+                facts.emits.is_empty(),
+                "raw authoring must not count as emit evidence"
+            );
+        }
+
+        let event = ActiveEvent {
+            contract_id: "identity.session-created".to_string(),
+            spec_path: "generated::event::identity_v1::session_created::SPEC".to_string(),
+        };
+        assert_eq!(
+            validate_event_facts(&event, &ProducerFacts::default()).len(),
+            1
         );
-        let spec = "generated::event::identity_v1::session_created::SPEC";
-        assert!(findings.is_empty(), "{findings:?}");
-        assert!(facts.entries.contains(spec));
-        assert!(facts.envelopes.contains(spec));
-        assert_eq!(facts.partition_sites.get(spec), Some(&vec![1]));
     }
 
     #[test]
-    fn producer_ast_accepts_typed_payload_fact_binding() {
+    fn producer_ast_accepts_sealed_generated_emit_wrapper() {
         let (facts, findings) = scan_producer_source(
             r#"
             use generated::event::identity_v1::session_created::{
-                IdentitySessionCreatedPayload, SPEC as SESSION_SPEC,
+                self, IdentitySessionCreatedPayload,
             };
             fn produce() {
                 let payload = IdentitySessionCreatedPayload {
@@ -7295,61 +7024,51 @@ mod tests {
                     tenant_id,
                     occurred_at,
                 };
-                let entry = EventEntry::from_generated_payload(&payload, id)?;
-                let envelope = OutboxEnvelopeParts::new(
-                    SESSION_SPEC.contract(), tenant, subject, actor
-                );
+                let event = session_created::emit(
+                    &encoder, &payload, tenant, subject, actor, id
+                ).await?;
             }
             "#,
         );
         let spec = "generated::event::identity_v1::session_created::SPEC";
         assert!(findings.is_empty(), "{findings:?}");
-        assert!(facts.entries.contains(spec));
-        assert!(facts.envelopes.contains(spec));
+        assert!(facts.emits.contains(spec));
     }
 
     #[test]
-    fn producer_ast_rejects_typed_payload_envelope_fact_mismatch() {
+    fn producer_ast_accepts_exact_generated_emit_alias() {
         let (facts, findings) = scan_producer_source(
             r#"
-            use generated::event::identity_v1::session_created::IdentitySessionCreatedPayload;
-            use generated::event::settings_v1::SPEC as SETTINGS_SPEC;
+            use generated::event::identity_v1::session_created::emit as emit_session_created;
             fn produce() {
-                let entry = EventEntry::from_generated_payload(
-                    &IdentitySessionCreatedPayload {
-                        session_id,
-                        subject,
-                        tenant_id,
-                        occurred_at,
-                    },
-                    id,
-                )?;
-                let envelope = OutboxEnvelopeParts::new(
-                    SETTINGS_SPEC.contract(), tenant, subject, actor
-                );
+                emit_session_created(&encoder, &payload, tenant, subject, actor, id).await?;
+            }
+            "#,
+        );
+        assert!(findings.is_empty(), "{findings:?}");
+        assert!(
+            facts
+                .emits
+                .contains("generated::event::identity_v1::session_created::SPEC")
+        );
+    }
+
+    #[test]
+    fn producer_ast_rejects_multiple_generated_emit_specs_in_one_site() {
+        let (facts, findings) = scan_producer_source(
+            r#"
+            fn produce() {
+                generated::event::identity_v1::session_created::emit(
+                    &encoder, &session_payload, tenant, subject, actor, id
+                ).await?;
+                generated::event::settings_v1::emit(
+                    &encoder, &settings_payload, tenant, subject, actor, id
+                ).await?;
             }
             "#,
         );
         assert_eq!(findings.len(), 1, "{findings:?}");
-        assert!(facts.entries.is_empty());
-        assert!(facts.envelopes.is_empty());
-    }
-
-    #[test]
-    fn producer_ast_resolves_single_generated_spec_glob() {
-        let (facts, findings) = scan_producer_source(
-            r#"
-            use generated::event::settings_v1::*;
-            fn produce() {
-                let entry = EventEntry::new(EventTopic::parse(SPEC.topic())?, id, payload);
-                let envelope = OutboxEnvelopeParts::new(SPEC.contract(), tenant, subject, actor);
-            }
-            "#,
-        );
-        let spec = "generated::event::settings_v1::SPEC";
-        assert!(findings.is_empty(), "{findings:?}");
-        assert!(facts.entries.contains(spec));
-        assert!(facts.envelopes.contains(spec));
+        assert!(facts.emits.is_empty());
     }
 
     #[test]
@@ -7365,82 +7084,8 @@ mod tests {
             }
             "#,
         );
-        assert!(!findings.is_empty());
-        assert!(
-            !facts
-                .entries
-                .contains("generated::event::settings_v1::SPEC")
-        );
-        assert!(
-            !facts
-                .envelopes
-                .contains("generated::event::settings_v1::SPEC")
-        );
-    }
-
-    /// F1 reproduction: two metadata carriers from different generated specs must not be
-    /// aggregated into globally-complete facts, even when neither event uses a partition key.
-    #[test]
-    fn producer_ast_rejects_swapped_specs_without_partition_key() {
-        let (facts, findings) = scan_producer_source(
-            r#"
-            fn produce() {
-                let entry = EventEntry::new(
-                    EventTopic::parse(generated::event::identity_v1::session_created::SPEC.topic())?,
-                    id,
-                    payload,
-                );
-                let envelope = OutboxEnvelopeParts::new(
-                    generated::event::settings_v1::SPEC.contract(),
-                    tenant,
-                    subject,
-                    actor,
-                );
-            }
-            "#,
-        );
-
-        assert_eq!(
-            findings.len(),
-            1,
-            "swapped SPEC must fail at its authoring function"
-        );
-        assert!(
-            facts.entries.is_empty(),
-            "invalid function facts must not be aggregated"
-        );
-        assert!(
-            facts.envelopes.is_empty(),
-            "invalid function facts must not be aggregated"
-        );
-        assert!(facts.partition_sites.is_empty());
-    }
-
-    #[test]
-    fn aggregate_partition_strategy_requires_exactly_one_typed_key() {
-        let spec = "generated::event::inventory_v1::changed::SPEC".to_string();
-        let event = ActiveEvent {
-            contract_id: "inventory.changed".to_string(),
-            spec_path: spec.clone(),
-            partition: PartitionStrategy::Aggregate,
-        };
-        for (count, expected_findings) in [(0, 1), (1, 0), (2, 1)] {
-            let mut facts = ProducerFacts::default();
-            facts.entries.insert(spec.clone());
-            facts.envelopes.insert(spec.clone());
-            facts.partition_sites.insert(spec.clone(), vec![count]);
-            assert_eq!(
-                validate_event_facts(&event, &facts).len(),
-                expected_findings,
-                "aggregate partition count={count}"
-            );
-        }
-
-        let mut two_sites = ProducerFacts::default();
-        two_sites.entries.insert(spec.clone());
-        two_sites.envelopes.insert(spec.clone());
-        two_sites.partition_sites.insert(spec, vec![1, 1]);
-        assert!(validate_event_facts(&event, &two_sites).is_empty());
+        assert!(findings.is_empty(), "{findings:?}");
+        assert!(facts.emits.is_empty());
     }
 
     #[test]

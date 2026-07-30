@@ -23,9 +23,9 @@ use authn::{
 };
 #[cfg(test)]
 use authn::{AuthGrantSnapshot, AuthnEpoch};
-use consistency::EventEntry;
-use diport::{EnvelopeSubjectId, OpaqueActorId, OutboxActor, OutboxEmitError, OutboxEnvelopeParts};
+use diport::{EnvelopeSubjectId, OpaqueActorId, OutboxActor, OutboxEmitError};
 use dynosaur::dynosaur;
+use eventexec::event::{GeneratedEventEncoder, ReviewedEvent};
 
 /// Narrow public façade for the identity-owned device-certificate persistence port.
 ///
@@ -48,16 +48,18 @@ pub mod device_certificate {
 pub use generated::event::identity_v1::policy_updated::CONTRACT as POLICY_UPDATED_CONTRACT;
 pub use generated::event::identity_v1::role_assigned::CONTRACT as ROLE_ASSIGNED_CONTRACT;
 pub use generated::event::identity_v1::role_revoked::CONTRACT as ROLE_REVOKED_CONTRACT;
+use generated::event::identity_v1::security_event::{
+    self, IdentitySecurityEventPayload, IdentitySecurityEventPayloadActor,
+    IdentitySecurityEventPayloadActorKind as WireActorKind,
+    IdentitySecurityEventPayloadKind as WireSecurityEventKind, IdentitySecurityEventPayloadTarget,
+    IdentitySecurityEventPayloadTargetKind as WireTargetKind,
+};
 pub use generated::event::identity_v1::security_event::{
     CONTRACT as SECURITY_EVENT_CONTRACT, FACT as SECURITY_EVENT_FACT,
 };
-use generated::event::identity_v1::security_event::{
-    IdentitySecurityEventPayload, IdentitySecurityEventPayloadActor,
-    IdentitySecurityEventPayloadActorKind as WireActorKind,
-    IdentitySecurityEventPayloadKind as WireSecurityEventKind, IdentitySecurityEventPayloadTarget,
-    IdentitySecurityEventPayloadTargetKind as WireTargetKind, SPEC as SECURITY_EVENT_SPEC,
+pub use generated::event::identity_v1::session_created::{
+    CONTRACT as SESSION_CREATED_CONTRACT, FACT as SESSION_CREATED_FACT,
 };
-pub use generated::event::identity_v1::session_created::CONTRACT as SESSION_CREATED_CONTRACT;
 
 /// Exact generated payload admitted by the L2 fault-matrix seam.
 ///
@@ -95,16 +97,15 @@ pub use vocab::TenantId;
 /// Private fields prevent an adapter from replacing the generated payload or contract binding
 /// between command construction and the provider transaction.
 pub struct CredentialSecurityFact {
-    entry: EventEntry,
-    envelope: OutboxEnvelopeParts,
+    event: ReviewedEvent,
 }
 
 impl CredentialSecurityFact {
-    pub fn entry(&self) -> &EventEntry {
-        &self.entry
+    pub fn event(&self) -> &ReviewedEvent {
+        &self.event
     }
-    pub fn into_parts(self) -> (EventEntry, OutboxEnvelopeParts) {
-        (self.entry, self.envelope)
+    pub fn into_event(self) -> ReviewedEvent {
+        self.event
     }
 }
 
@@ -137,20 +138,18 @@ struct CredentialSecurityEmission {
 }
 
 impl CredentialSecurityEmission {
-    fn new(
+    async fn new(
         command: CredentialSecurityCommand,
         pseudonym_keys: &secure::PseudonymKeyRing,
     ) -> Result<Self, IdentityError> {
-        let fact = credential_security_fact(command.event(), pseudonym_keys)?;
+        let fact = credential_security_fact(command.event(), pseudonym_keys).await?;
         Ok(Self { command, fact })
     }
 
     fn into_parts(self) -> CredentialSecurityEmissionParts {
-        let (entry, envelope) = self.fact.into_parts();
         CredentialSecurityEmissionParts {
             command: self.command,
-            entry,
-            envelope,
+            event: self.fact.into_event(),
         }
     }
 }
@@ -159,13 +158,12 @@ impl CredentialSecurityEmission {
 /// The fields stay private; adapters can only consume the tuple returned by [`Self::into_parts`].
 pub struct CredentialSecurityEmissionParts {
     command: CredentialSecurityCommand,
-    entry: EventEntry,
-    envelope: OutboxEnvelopeParts,
+    event: ReviewedEvent,
 }
 
 impl CredentialSecurityEmissionParts {
-    pub fn into_parts(self) -> (CredentialSecurityCommand, EventEntry, OutboxEnvelopeParts) {
-        (self.command, self.entry, self.envelope)
+    pub fn into_parts(self) -> (CredentialSecurityCommand, ReviewedEvent) {
+        (self.command, self.event)
     }
 }
 
@@ -188,74 +186,76 @@ impl AccountStatusSetEmission {
 }
 
 impl PasswordChangeEmission {
-    pub fn into_parts(self) -> (PasswordChangeCommand, EventEntry, OutboxEnvelopeParts) {
-        let (entry, envelope) = self.fact.into_parts();
-        (self.command, entry, envelope)
+    pub fn into_parts(self) -> (PasswordChangeCommand, ReviewedEvent) {
+        (self.command, self.fact.into_event())
     }
 }
 
 impl RefreshExecutionEmission {
-    pub fn into_parts(self) -> (RefreshExecutionCommand, EventEntry, OutboxEnvelopeParts) {
-        let (entry, envelope) = self.fact.into_parts();
-        (self.command, entry, envelope)
+    pub fn into_parts(self) -> (RefreshExecutionCommand, ReviewedEvent) {
+        (self.command, self.fact.into_event())
     }
 }
 
 /// Consume the exact logout-current command into its only valid generated emission.
-pub fn logout_current_emission(
+pub async fn logout_current_emission(
     command: LogoutCurrentCommand,
     pseudonym_keys: &secure::PseudonymKeyRing,
 ) -> Result<LogoutCurrentEmission, IdentityError> {
     CredentialSecurityEmission::new(command.into_security_command(), pseudonym_keys)
+        .await
         .map(LogoutCurrentEmission)
 }
 
 /// Consume the exact logout-all command into its only valid generated emission.
-pub fn logout_all_emission(
+pub async fn logout_all_emission(
     command: LogoutAllCommand,
     pseudonym_keys: &secure::PseudonymKeyRing,
 ) -> Result<LogoutAllEmission, IdentityError> {
     CredentialSecurityEmission::new(command.into_security_command(), pseudonym_keys)
+        .await
         .map(LogoutAllEmission)
 }
 
-pub fn account_status_set_emission(
+pub async fn account_status_set_emission(
     command: AccountStatusSetCommand,
     pseudonym_keys: &secure::PseudonymKeyRing,
 ) -> Result<AccountStatusSetEmission, IdentityError> {
     CredentialSecurityEmission::new(command.into_security_command(), pseudonym_keys)
+        .await
         .map(AccountStatusSetEmission)
 }
 
-pub fn password_change_emission(
+pub async fn password_change_emission(
     command: PasswordChangeCommand,
     pseudonym_keys: &secure::PseudonymKeyRing,
 ) -> Result<PasswordChangeEmission, IdentityError> {
-    let fact = credential_security_fact(command.event(), pseudonym_keys)?;
+    let fact = credential_security_fact(command.event(), pseudonym_keys).await?;
     Ok(PasswordChangeEmission { command, fact })
 }
 
-pub fn refresh_execution_emission(
+pub async fn refresh_execution_emission(
     command: RefreshExecutionCommand,
     pseudonym_keys: &secure::PseudonymKeyRing,
 ) -> Result<RefreshExecutionEmission, IdentityError> {
-    let fact = credential_security_fact(command.event(), pseudonym_keys)?;
+    let fact = credential_security_fact(command.event(), pseudonym_keys).await?;
     Ok(RefreshExecutionEmission { command, fact })
 }
 
 #[cfg(feature = "test-support")]
-pub fn credential_security_emission_for_test(
+pub async fn credential_security_emission_for_test(
     command: CredentialSecurityCommand,
     pseudonym_keys: &secure::PseudonymKeyRing,
 ) -> Result<CredentialSecurityEmissionParts, IdentityError> {
     CredentialSecurityEmission::new(command, pseudonym_keys)
+        .await
         .map(CredentialSecurityEmission::into_parts)
 }
 
 /// The wire payload intentionally excludes raw subject, grant, credential and token identifiers.
 /// Target and actor references are stable tenant-scoped pseudonyms; the same actor projection is
 /// used in the payload and persisted outbox metadata so durable consumers can attribute safely.
-pub fn credential_security_fact(
+pub async fn credential_security_fact(
     event: &CredentialSecurityEvent,
     pseudonym_keys: &secure::PseudonymKeyRing,
 ) -> Result<CredentialSecurityFact, IdentityError> {
@@ -340,21 +340,25 @@ pub fn credential_security_fact(
     };
     let event_id = uuid::Uuid::new_v4().to_string();
     let idem_key = consistency::IdemKey::parse(&event_id).map_err(security_fact_build)?;
-    let entry =
-        EventEntry::from_generated_payload(&payload, idem_key).map_err(security_payload_encode)?;
-    let envelope = OutboxEnvelopeParts::new(
-        SECURITY_EVENT_SPEC.contract(),
+    let subject_id = EnvelopeSubjectId::from_opaque(target_ref.as_uuid().to_string())
+        .map_err(security_fact_build)?;
+    let actor = OutboxActor::scoped(
+        event.initiator().kind(),
+        OpaqueActorId::from_opaque(actor_uuid.to_string()).map_err(security_fact_build)?,
         event.tenant(),
-        EnvelopeSubjectId::from_opaque(target_ref.as_uuid().to_string())
-            .map_err(security_fact_build)?,
-        OutboxActor::scoped(
-            event.initiator().kind(),
-            OpaqueActorId::from_opaque(actor_uuid.to_string()).map_err(security_fact_build)?,
-            event.tenant(),
-            vocab::ScopedTenant::SelfOnly,
-        ),
+        vocab::ScopedTenant::SelfOnly,
     );
-    Ok(CredentialSecurityFact { entry, envelope })
+    let event = security_event::emit(
+        &GeneratedEventEncoder,
+        payload,
+        event.tenant(),
+        subject_id,
+        actor,
+        idem_key,
+    )
+    .await
+    .map_err(security_fact_build)?;
+    Ok(CredentialSecurityFact { event })
 }
 
 fn security_fact_build(error: impl std::error::Error + Send + Sync + 'static) -> IdentityError {
@@ -366,10 +370,6 @@ fn wire_pseudonym_key_id(id: secure::PseudonymKeyId) -> std::num::NonZeroU64 {
         Some(id) => id,
         None => unreachable!("PseudonymKeyId is non-zero by construction"),
     }
-}
-
-fn security_payload_encode(error: serde_json::Error) -> IdentityError {
-    IdentityError::SecurityPayloadEncode(error)
 }
 
 #[cfg(test)]
@@ -505,12 +505,12 @@ mod credential_security_fact_tests {
         }
     }
 
-    #[test]
+    #[tokio::test]
     #[allow(
         clippy::cognitive_complexity,
         reason = "one table-driven assertion intentionally checks the full nine-kind protocol matrix"
     )]
-    fn security_event_commands_bind_real_actor_and_stable_tenant_scoped_target() {
+    async fn security_event_commands_bind_real_actor_and_stable_tenant_scoped_target() {
         let tenant = TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").expect("tenant");
         let user = ids::UserId::parse("11111111-2222-4333-8444-555555555555").expect("user");
         let occurred_at = SystemTime::UNIX_EPOCH + Duration::from_secs(42);
@@ -528,12 +528,17 @@ mod credential_security_fact_tests {
                     event
                 }
             };
-            let repeat = credential_security_fact(&event, &pseudonym_keys).expect("repeat fact");
-            let (repeat_entry, _) = repeat.into_parts();
+            let repeat = credential_security_fact(&event, &pseudonym_keys)
+                .await
+                .expect("repeat fact");
+            let (repeat_entry, _, _) = repeat.into_event().into_parts();
             let repeat_payload: serde_json::Value =
                 serde_json::from_slice(repeat_entry.payload()).expect("repeat payload");
-            let fact = credential_security_fact(&event, &pseudonym_keys).expect("fact");
-            let (entry, envelope) = fact.into_parts();
+            let fact = credential_security_fact(&event, &pseudonym_keys)
+                .await
+                .expect("fact");
+            assert_eq!(fact.event().fact(), SECURITY_EVENT_FACT);
+            let (entry, envelope, _) = fact.into_event().into_parts();
             let payload: serde_json::Value =
                 serde_json::from_slice(entry.payload()).expect("payload");
             let target_ref = payload["target"]["ref"]
@@ -567,7 +572,6 @@ mod credential_security_fact_tests {
             assert!(uuid::Uuid::parse_str(target_ref).is_ok());
             assert_eq!(repeat_payload["target"]["ref"], target_ref);
             assert_eq!(repeat_payload["actor"]["ref"], actor_ref);
-            assert_eq!(entry.generated_fact(), Some(SECURITY_EVENT_FACT));
             assert!(uuid::Uuid::parse_str(entry.idem_key().as_str()).is_ok());
             assert_ne!(entry.idem_key().as_str(), target_ref);
             assert_eq!(envelope.contract(), &SECURITY_EVENT_CONTRACT);
@@ -608,8 +612,8 @@ mod credential_security_fact_tests {
         );
     }
 
-    #[test]
-    fn security_event_actor_projection_preserves_typed_attribution_without_raw_subject() {
+    #[tokio::test]
+    async fn security_event_actor_projection_preserves_typed_attribution_without_raw_subject() {
         let tenant = TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").expect("tenant");
         let user = ids::UserId::parse("11111111-2222-4333-8444-555555555555").expect("user");
         let pseudonym_keys = pseudonym_keys();
@@ -629,8 +633,10 @@ mod credential_security_fact_tests {
                 unreachable!("account command")
             };
             let (_, event, _) = command.into_parts();
-            let (entry, envelope) = credential_security_fact(&event, &pseudonym_keys)
+            let (entry, envelope, _) = credential_security_fact(&event, &pseudonym_keys)
+                .await
                 .expect("security fact")
+                .into_event()
                 .into_parts();
             let payload: serde_json::Value =
                 serde_json::from_slice(entry.payload()).expect("payload");
@@ -643,7 +649,7 @@ mod credential_security_fact_tests {
     }
 
     #[test]
-    fn pre_transaction_fact_errors_are_not_classified_as_storage() {
+    fn pre_transaction_fact_build_errors_are_not_classified_as_storage() {
         use std::error::Error as _;
 
         let build = security_fact_build(
@@ -651,17 +657,10 @@ mod credential_security_fact_tests {
         );
         assert!(matches!(build, IdentityError::SecurityFactBuild(_)));
         assert!(build.source().is_some());
-
-        let encode = security_payload_encode(
-            serde_json::from_str::<serde_json::Value>("{")
-                .expect_err("invalid JSON must provide a serde source"),
-        );
-        assert!(matches!(encode, IdentityError::SecurityPayloadEncode(_)));
-        assert!(encode.source().is_some());
     }
 
-    #[test]
-    fn security_fact_rejects_pre_epoch_time_instead_of_emitting_epoch_zero() {
+    #[tokio::test]
+    async fn security_fact_rejects_pre_epoch_time_instead_of_emitting_epoch_zero() {
         let tenant = TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").expect("tenant");
         let user = ids::UserId::parse("11111111-2222-4333-8444-555555555555").expect("user");
         let before_epoch = SystemTime::UNIX_EPOCH - Duration::from_secs(1);
@@ -678,7 +677,7 @@ mod credential_security_fact_tests {
         .expect("account command");
 
         assert!(matches!(
-            credential_security_fact(command.event(), &pseudonym_keys()),
+            credential_security_fact(command.event(), &pseudonym_keys()).await,
             Err(IdentityError::SecurityFactBuild(_))
         ));
     }
@@ -1046,8 +1045,7 @@ pub trait PolicyLifecycleLocal: Send + Sync {
         receipt: PoliciesCreateProducerReceipt,
         scope: TenantRepoScope,
         policy: Policy,
-        entry: EventEntry,
-        envelope: OutboxEnvelopeParts,
+        event: ReviewedEvent,
     ) -> Result<Policy, IdentityError>;
 
     async fn update_and_emit(
@@ -1056,8 +1054,7 @@ pub trait PolicyLifecycleLocal: Send + Sync {
         scope: TenantRepoScope,
         policy: Policy,
         expected: PolicyVersion,
-        entry: EventEntry,
-        envelope: OutboxEnvelopeParts,
+        event: ReviewedEvent,
     ) -> Result<Policy, IdentityError>;
 
     async fn deactivate_and_emit(
@@ -1066,8 +1063,7 @@ pub trait PolicyLifecycleLocal: Send + Sync {
         scope: TenantRepoScope,
         id: PolicyId,
         expected: PolicyVersion,
-        entry: EventEntry,
-        envelope: OutboxEnvelopeParts,
+        event: ReviewedEvent,
     ) -> Result<bool, IdentityError>;
 }
 
@@ -1188,8 +1184,7 @@ pub trait RoleBindingLifecycleLocal: Send + Sync {
         receipt: RolesAssignProducerReceipt,
         scope: TenantRepoScope,
         binding: RoleBinding,
-        entry: EventEntry,
-        envelope: OutboxEnvelopeParts,
+        event: ReviewedEvent,
     ) -> Result<(), OutboxEmitError>;
 
     /// **撤销（co-tx，L2）**：仅撤目标 binding（`(tenant, role_id, subject)` 键），命中则同事务删 binding +
@@ -1201,8 +1196,7 @@ pub trait RoleBindingLifecycleLocal: Send + Sync {
         scope: TenantRepoScope,
         role_id: RoleId,
         subject: String,
-        entry: EventEntry,
-        envelope: OutboxEnvelopeParts,
+        event: ReviewedEvent,
     ) -> Result<bool, OutboxEmitError>;
 }
 
@@ -1314,7 +1308,7 @@ pub trait CredentialRepoLocal: Send + Sync {
 ///
 /// - 路由精确的 [`LoginProducerReceipt`]；
 /// - 密封的 [`LoginGrantMutation`]（AuthGrant + 初始 refresh 哈希记录）；
-/// - 精确 [`EventEntry`] 与 [`OutboxEnvelopeParts`]。
+/// - 经 generated sealed carrier 构造的精确 [`ReviewedEvent`]。
 ///
 /// PostgreSQL provider 独占事务句柄，在同一 producer transaction 中提交根、refresh 与 outbox。业务层没有
 /// `save_grant`、`insert_initial_refresh` 或裸事务句柄，因此 split transaction 从端口形状上不可表达。L2
@@ -1342,8 +1336,7 @@ pub trait AuthGrantLifecycleLocal: Send + Sync {
         receipt: LoginProducerReceipt,
         scope: TenantRepoScope,
         mutation: LoginGrantMutation,
-        entry: EventEntry,
-        envelope: OutboxEnvelopeParts,
+        event: ReviewedEvent,
     ) -> Result<PersistedLoginGrantReceipt, OutboxEmitError>;
 
     /// Find an active grant. Missing, terminal and cross-tenant rows are indistinguishable.
@@ -1717,10 +1710,10 @@ mod smoke {
     //! `tokio::spawn` 调度由 diport `signer.rs` `mockall_mock_loads_into_dyn_signer` 同范式已证（dynosaur Send 变体保证）。
     use super::{
         AuthGrant, AuthGrantId, AuthGrantLifecycle, DynAuthGrantLifecycle, DynRoleReadRepo,
-        EventEntry, IdentityError, LoginGrantMutation, LoginProducerReceipt, OutboxEmitError,
-        OutboxEnvelopeParts, PersistedLoginGrantReceipt, Role, RoleId, RoleReadRepo,
-        TenantRepoScope,
+        IdentityError, LoginGrantMutation, LoginProducerReceipt, OutboxEmitError,
+        PersistedLoginGrantReceipt, Role, RoleId, RoleReadRepo, TenantRepoScope,
     };
+    use eventexec::event::ReviewedEvent;
     use std::sync::Arc;
 
     struct NoopRoleRepo;
@@ -1799,8 +1792,7 @@ mod smoke {
             _receipt: LoginProducerReceipt,
             _scope: TenantRepoScope,
             _mutation: LoginGrantMutation,
-            _entry: EventEntry,
-            _envelope: OutboxEnvelopeParts,
+            _event: ReviewedEvent,
         ) -> Result<PersistedLoginGrantReceipt, OutboxEmitError> {
             todo!()
         }
@@ -1860,8 +1852,7 @@ mod smoke {
                 receipt: LoginProducerReceipt,
                 scope: TenantRepoScope,
                 mutation: LoginGrantMutation,
-                entry: EventEntry,
-                envelope: OutboxEnvelopeParts,
+                event: ReviewedEvent,
             ) -> Result<PersistedLoginGrantReceipt, OutboxEmitError>;
             async fn find_active(
                 &self,

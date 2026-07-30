@@ -1,0 +1,16 @@
+# Durable application receipt for device ingress. Draft until the ingress owner activates it.
+id = "identity.device-ingress-receipted"
+kind = "event"
+domain = "identity"
+version = "v1"
+owner = "identity"
+consistencyLevel = "OutboxFact"
+lifecycle = "draft"
+topic = "identity.device-ingress-receipted"
+delivery = "at-least-once"
+
+[schemas]
+payload = "payload.schema.json"
+
+[capabilities.outbox]
+role = "fact"

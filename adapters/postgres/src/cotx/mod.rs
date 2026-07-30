@@ -1695,9 +1695,7 @@ where
     match outcome {
         ProducerTxOutcome::Emitted(value, authorization) => {
             let authorized_fact = authorization.fact();
-            if !env.matches_contract(authorized_fact.contract())
-                || entry.generated_fact() != Some(authorized_fact)
-            {
+            if !env.matches_contract(authorized_fact.contract()) {
                 return Err(ProducerTxWriteError::AuthorizationMismatch(
                     sqlx::Error::AnyDriverError(Box::new(ProducerAuthorizationMismatch)),
                 ));
@@ -2051,7 +2049,7 @@ mod tx_capability_tests {
 
         let authorization = settings::config_publish_receipt_for_test()
             .authorize(
-                <generated::event::settings_v1::SettingsConfigVersionChangedPayload as vocab::GeneratedEventPayload>::FACT,
+                generated::event::settings_v1::FACT,
                 settings::ports::CONFIG_VERSION_CHANGED_CONTRACT,
             )
             .ok_or_else(|| "test producer authorization missing".to_owned())?;

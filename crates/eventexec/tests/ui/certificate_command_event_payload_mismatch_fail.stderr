@@ -1,0 +1,13 @@
+error[E0308]: mismatched types
+  --> tests/ui/certificate_command_event_payload_mismatch_fail.rs:13:9
+   |
+12 |     let _ = certificate_command::reconcile_command(
+   |             -------------------------------------- arguments to this function are incorrect
+13 |         payload,
+   |         ^^^^^^^ expected `IdentityApplyDeviceCertificateRequest`, found `IdentityDeviceCommandAckedPayload`
+   |
+note: function defined here
+  --> $WORKSPACE/generated/src/command/identity_v1.rs
+   |
+   | pub fn reconcile_command<S, A>(
+   |        ^^^^^^^^^^^^^^^^^

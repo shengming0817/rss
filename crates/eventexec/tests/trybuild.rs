@@ -74,6 +74,28 @@ fn command_authoring_is_sealed() {
     t.compile_fail("tests/ui/reviewed_command_constructors_private_fail.rs");
     t.compile_fail("tests/ui/command_wrong_request_fail.rs");
     t.compile_fail("tests/ui/command_wrong_policy_fail.rs");
+    t.compile_fail("tests/ui/certificate_reconcile_command_fields_private_fail.rs");
+    t.compile_fail("tests/ui/certificate_command_event_payload_mismatch_fail.rs");
+}
+
+#[test]
+fn event_authoring_is_sealed() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/ui/reviewed_event_constructor_private_fail.rs");
+    t.compile_fail("tests/ui/reviewed_event_partition_escape_fail.rs");
+    t.compile_fail("tests/ui/reviewed_event_causation_escape_fail.rs");
+    t.compile_fail("tests/ui/event_contract_external_impl_fail.rs");
+    t.compile_fail("tests/ui/event_subscription_external_impl_fail.rs");
+    t.compile_fail("tests/ui/generated_event_payload_trait_removed_fail.rs");
+    t.compile_fail("tests/ui/event_entry_generated_payload_constructor_removed_fail.rs");
+}
+
+#[test]
+fn generated_event_wrappers_reject_raw_coordinates() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/ui/event_wrapper_payload_mismatch_fail.rs");
+    t.compile_fail("tests/ui/event_emit_raw_coordinates_fail.rs");
+    t.compile_fail("tests/ui/event_subscribe_raw_coordinates_fail.rs");
 }
 
 #[test]

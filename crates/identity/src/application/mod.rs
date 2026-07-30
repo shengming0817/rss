@@ -111,13 +111,15 @@ use base64::Engine as _;
 #[cfg(test)]
 use bootstrap::Domain as _;
 use bootstrap::KernelError;
-use consistency::{EventEntry, IdemKey};
+use consistency::IdemKey;
 use diport::{
     Clock, EnvelopeSubjectId, OpaqueActorId, OutboxActor, OutboxEmitError, OutboxEmitErrorKind,
-    OutboxEnvelopeParts,
 };
+#[cfg(test)]
+use eventexec::event::ReviewedEvent;
+use eventexec::event::{EventEncodeError, GeneratedEventEncoder};
 use generated::event::identity_v1::session_created::{
-    IdentitySessionCreatedPayload, SPEC as SESSION_CREATED_SPEC,
+    self, IdentitySessionCreatedPayload, SPEC as SESSION_CREATED_SPEC,
 };
 use vocab::http::HttpResourceSharing as HttpResourceSharingMode;
 // ListenerKind 仅测试断言用（lib 经 typed `route_group::<Primary>` 不再传运行期 ListenerKind 值）。
@@ -184,6 +186,18 @@ pub(crate) fn seed_password_policy() -> secure::PasswordPolicy {
     secure::PasswordPolicy::for_test("passwordpassword", &[])
 }
 
+/// Failure while projecting a closed domain value into a generated wire enum or scalar.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum EventWireProjectionError {
+    /// A future principal kind has no reviewed event-wire representation.
+    #[error("principal kind has no event wire representation")]
+    PrincipalKind,
+    /// A domain version could not be represented by the generated positive wire scalar.
+    #[error("domain version has no event wire representation")]
+    Version,
+}
+
 /// 登录失败。库错误枚举（const-literal message，不返回 HTTP 状态码——handler 层映射，error-handling.md）。
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -193,10 +207,13 @@ pub enum LoginError {
     InvalidCredentials,
     /// session-created payload 编码失败（原始错误进 source，不进 Display）。
     #[error("session-created payload encode failed")]
-    PayloadEncode(#[source] serde_json::Error),
-    /// outbox entry 构造失败（topic / event-id 非法——系统生成值，理论不可达，fail-closed）。
-    #[error("session-created outbox entry build failed")]
-    EntryBuild,
+    PayloadEncode(#[source] EventEncodeError),
+    /// Reviewed envelope subject or actor identity is invalid.
+    #[error("session-created envelope identity validation failed")]
+    EnvelopeIdentity(#[source] diport::EnvelopeIdentityError),
+    /// Stable event idempotency identity is invalid.
+    #[error("session-created idempotency identity validation failed")]
+    IdempotencyKey(#[source] consistency::IdemKeyError),
     /// AuthGrant 过期时间计算溢出（组合根 ttl/clock 误配，fail-closed）。
     #[error("authentication grant expiration time overflow")]
     AuthGrantTimeOverflow,
@@ -474,25 +491,28 @@ impl<S: diport::Signer + Send + Sync + 'static> LoginService<S> {
         };
         // EventId 是独立 opaque 标识（非 session_id；session_id 敏感，不得进 broker metadata/日志）。
         let event_id = Uuid::new_v4().to_string();
-        let entry = EventEntry::from_generated_payload(
-            &payload,
-            IdemKey::parse(&event_id).map_err(|_| LoginError::EntryBuild)?,
-        )
-        .map_err(LoginError::PayloadEncode)?;
         // 契约归属经 generated `CONTRACT`（domain + contract_id + version + schema_hash 同源绑定，#1193/#1618）；
         // business 只给 opaque subject。
-        let subject_id =
-            EnvelopeSubjectId::from_opaque(subject.clone()).map_err(|_| LoginError::EntryBuild)?;
+        let subject_id = EnvelopeSubjectId::from_opaque(subject.clone())
+            .map_err(LoginError::EnvelopeIdentity)?;
         let actor_id =
-            OpaqueActorId::from_opaque(subject.clone()).map_err(|_| LoginError::EntryBuild)?;
+            OpaqueActorId::from_opaque(subject.clone()).map_err(LoginError::EnvelopeIdentity)?;
         let actor = OutboxActor::scoped(
             vocab::PrincipalKind::User,
             actor_id,
             tenant,
             vocab::ScopedTenant::SelfOnly,
         );
-        let envelope =
-            OutboxEnvelopeParts::new(SESSION_CREATED_SPEC.contract(), tenant, subject_id, actor);
+        let event = session_created::emit(
+            &GeneratedEventEncoder,
+            payload,
+            tenant,
+            subject_id,
+            actor,
+            IdemKey::parse(&event_id).map_err(LoginError::IdempotencyKey)?,
+        )
+        .await
+        .map_err(LoginError::PayloadEncode)?;
 
         // 5. Prepare 首发 token bundle：只在内存生成 access/refresh bearer 与哈希记录，不写库。
         //    mint 失败 ⇒ 无任何持久化；co-tx 失败或提交未知 ⇒ pending secrets 被丢弃且不返回 bearer。
@@ -514,7 +534,7 @@ impl<S: diport::Signer + Send + Sync + 'static> LoginService<S> {
         let mutation = LoginGrantMutation::new(grant, initial_refresh);
         let persisted = self
             .lifecycle
-            .persist_login_grant(receipt, tenant_scope, mutation, entry, envelope)
+            .persist_login_grant(receipt, tenant_scope, mutation, event)
             .await
             .map_err(LoginError::AuthGrantWrite)?;
         let bundle = pending_secrets.release(persisted);
@@ -3151,7 +3171,9 @@ fn rbac_error_response(
         RbacAdminError::RoleNotFound => CoreErrorKind::NotFound,
         RbacAdminError::RoleLookup(_)
         | RbacAdminError::PayloadEncode(_)
-        | RbacAdminError::EntryBuild
+        | RbacAdminError::EnvelopeIdentity(_)
+        | RbacAdminError::IdempotencyKey(_)
+        | RbacAdminError::WireProjection(_)
         | RbacAdminError::BindingWrite(_) => CoreErrorKind::Internal,
     };
     if matches!(kind, CoreErrorKind::Internal) {
@@ -3182,7 +3204,10 @@ fn policy_error_response(
         PolicyManageError::PolicyAlreadyExists => CoreErrorKind::Conflict,
         PolicyManageError::VersionConflict => CoreErrorKind::VersionConflict,
         PolicyManageError::PayloadEncode(_)
-        | PolicyManageError::EntryBuild
+        | PolicyManageError::EventEncode(_)
+        | PolicyManageError::EnvelopeIdentity(_)
+        | PolicyManageError::IdempotencyKey(_)
+        | PolicyManageError::WireProjection(_)
         | PolicyManageError::Store(_)
         | PolicyManageError::OutboxFactConflict(_) => CoreErrorKind::Internal,
     };
@@ -4764,7 +4789,7 @@ mod tests {
     // `InMemAuthGrantStore`；同一 store 也注入 RefreshService，避免测试出现双存储漂移。
     #[derive(Clone, Default)]
     struct CapturingAuthGrantLifecycle {
-        writes: Arc<Mutex<Vec<(AuthGrant, EventEntry, OutboxEnvelopeParts)>>>,
+        writes: Arc<Mutex<Vec<(AuthGrant, ReviewedEvent)>>>,
         inner: crate::internal::mem::InMemAuthGrantStore,
         find_calls: Arc<AtomicUsize>,
     }
@@ -4774,18 +4799,17 @@ mod tests {
             receipt: LoginProducerReceipt,
             scope: TenantRepoScope,
             mutation: LoginGrantMutation,
-            entry: EventEntry,
-            envelope: OutboxEnvelopeParts,
+            event: ReviewedEvent,
         ) -> Result<PersistedLoginGrantReceipt, OutboxEmitError> {
             let grant = mutation.grant().clone();
             let persisted = self
                 .inner
-                .persist_login_grant(receipt, scope, mutation, entry.clone(), envelope.clone())
+                .persist_login_grant(receipt, scope, mutation, event.clone())
                 .await?;
             self.writes
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .push((grant, entry, envelope));
+                .push((grant, event));
             Ok(persisted)
         }
         async fn find_active(
@@ -6373,7 +6397,9 @@ mod tests {
         // UoW 写恰一次。
         assert_eq!(capture.count(), 1, "co-tx 写应恰一次");
         let writes = capture.writes.lock().unwrap_or_else(|e| e.into_inner());
-        let (grant, entry, envelope) = &writes[0];
+        let (grant, event) = &writes[0];
+        let entry = event.entry();
+        let envelope = event.envelope();
 
         // AuthGrant 字段正确。user_id = canonical user id（**非** 登录标识 "alice"）。
         assert_eq!(grant.id().as_str(), resp.data.session_id);
@@ -9930,8 +9956,7 @@ mod tests {
             _receipt: LoginProducerReceipt,
             _scope: TenantRepoScope,
             _mutation: LoginGrantMutation,
-            _entry: EventEntry,
-            _envelope: OutboxEnvelopeParts,
+            _event: ReviewedEvent,
         ) -> Result<PersistedLoginGrantReceipt, OutboxEmitError> {
             Err(OutboxEmitError::new(std::io::Error::other(
                 "refresh response fixture does not persist login grants",
@@ -10880,8 +10905,7 @@ mod tests {
                 _receipt: LoginProducerReceipt,
                 _scope: TenantRepoScope,
                 _mutation: LoginGrantMutation,
-                _entry: EventEntry,
-                _envelope: OutboxEnvelopeParts,
+                _event: ReviewedEvent,
             ) -> Result<PersistedLoginGrantReceipt, OutboxEmitError> {
                 unreachable!("grant read fixture never persists")
             }

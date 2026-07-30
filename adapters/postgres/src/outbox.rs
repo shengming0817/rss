@@ -644,7 +644,7 @@ impl OutboxMetadata {
     }
 
     /// 设置 opaque 主体 id（唯一允许的 principal 形态——不容完整 Principal / PII）。
-    /// 生产 caller：`PgEmitter::emit` 从 `diport::OutboxEnvelopeParts.subject_id` 组装（T008/#1100）。
+    /// 生产 caller：`PgEmitter::write` 从 sealed `ReviewedEvent` envelope 组装（T008/#1100）。
     /// KEY_SUBJECT_ID = diport 单源（#1160 A4）。
     pub(crate) fn with_subject_id(mut self, subject_id: EnvelopeSubjectId) -> Self {
         self.map.insert(
@@ -807,7 +807,7 @@ pub(crate) struct OutboxEnvelope {
 
 impl OutboxEnvelope {
     /// 构造 envelope（funnel；字段私有，仅经此入口）。
-    /// 生产 caller：`PgEmitter::emit` 从 `diport::OutboxEnvelopeParts` 组装（T008/#1100）。
+    /// 生产 caller：`PgEmitter::write` 从 sealed `ReviewedEvent` envelope 组装（T008/#1100）。
     pub(crate) fn new(domain: String, contract_id: String, metadata: OutboxMetadata) -> Self {
         let tenant = metadata.tenant();
         let contract_version = metadata.contract_version().to_string();
@@ -861,6 +861,7 @@ impl OutboxEnvelope {
 
     /// Exact-match a generated fact contract against every persisted routing identity column.
     /// Producer receipts are checked through this funnel immediately before an authorized append.
+    #[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
     pub(crate) fn matches_contract(&self, contract: vocab::ContractBinding) -> bool {
         self.domain() == contract.domain()
             && self.contract_id() == contract.contract_id()
@@ -963,7 +964,7 @@ pub(crate) struct ReplayedOutboxAppend {
 ///
 /// outbox 双写必须在业务事务内原子执行——active producer 须经 `PgTenantWritePool::producer_tx`
 /// 或同等 postgres 事务 funnel 传入 `TxCapability`；裸 `PgPool::acquire()` / `PgConnection` 无法调用（Hard）。
-// 生产 caller：`PgEmitter::emit`（impl `diport::OutboxEmitter`）在事务内调用——域 crate 不直接 import 本
+// 生产 caller：`PgEmitter::write`（impl `eventexec::event::ReviewedEventWriter`）在事务内调用——域 crate 不直接 import 本
 // adapter（域→adapter 反向依赖被 deny.toml 禁），域侧只经 `OutboxEmitter` port 触发该 durable 写路径（T008/#1100）。
 pub(crate) trait OutboxWriteEntry {
     fn topic_str(&self) -> &str;

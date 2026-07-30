@@ -30,21 +30,16 @@ use crate::ports::{
     SECURITY_EVENT_FACT,
 };
 #[cfg(test)]
-use consistency::EventEntry;
+use diport::OutboxEmitError;
 #[cfg(test)]
-use diport::{OutboxEmitError, OutboxEnvelopeParts};
+use eventexec::event::ReviewedEvent;
 #[cfg(test)]
 fn authorize_entry<M>(
     receipt: httpserve::ProducerAssuranceReceipt<M>,
-    entry: &EventEntry,
-    envelope: &OutboxEnvelopeParts,
+    event: &ReviewedEvent,
     expected_contract: vocab::ContractBinding,
 ) -> Option<httpserve::ProducerAuthorization<M>> {
-    let fact = entry.generated_fact()?;
-    if *envelope.contract() != fact.contract() {
-        return None;
-    }
-    receipt.authorize(fact, expected_contract)
+    receipt.authorize(event.fact(), expected_contract)
 }
 
 // RBAC 角色仓储 + 绑定生命周期 in-mem 替身（`#[cfg(test)]` 门控，#1190）。
@@ -403,12 +398,11 @@ impl AuthGrantLifecycle for InMemAuthGrantStore {
         receipt: crate::ports::LoginProducerReceipt,
         scope: TenantRepoScope,
         mutation: LoginGrantMutation,
-        entry: EventEntry,
-        envelope: OutboxEnvelopeParts,
+        event: ReviewedEvent,
     ) -> Result<crate::ports::PersistedLoginGrantReceipt, OutboxEmitError> {
         let (grant, initial_refresh, persistence) = mutation.into_parts();
         if scope.tenant() != grant.tenant()
-            || envelope.tenant() != grant.tenant()
+            || event.envelope().tenant() != grant.tenant()
             || !grant_binding_matches(&grant, &initial_refresh)
             || initial_refresh.parent_id().is_some()
             || initial_refresh.lineage_id() != initial_refresh.id()
@@ -419,8 +413,7 @@ impl AuthGrantLifecycle for InMemAuthGrantStore {
         }
         let _authorization = authorize_entry(
             receipt,
-            &entry,
-            &envelope,
+            &event,
             generated::event::identity_v1::session_created::SPEC.contract(),
         )
         .ok_or_else(|| {
@@ -805,8 +798,7 @@ impl PolicyLifecycle for InMemPolicyRepo {
         receipt: PoliciesCreateProducerReceipt,
         scope: TenantRepoScope,
         policy: Policy,
-        entry: EventEntry,
-        envelope: OutboxEnvelopeParts,
+        event: ReviewedEvent,
     ) -> Result<Policy, IdentityError> {
         let tenant = scope.tenant();
         if self.fail_writes {
@@ -815,7 +807,7 @@ impl PolicyLifecycle for InMemPolicyRepo {
             ))));
         }
         if policy.tenant() != tenant
-            || envelope.tenant() != tenant
+            || event.envelope().tenant() != tenant
             || policy.version() != PolicyVersion::first()
         {
             return Err(IdentityError::InvalidPolicy);
@@ -827,13 +819,12 @@ impl PolicyLifecycle for InMemPolicyRepo {
         }
         let _authorization = authorize_entry(
             receipt,
-            &entry,
-            &envelope,
+            &event,
             generated::event::identity_v1::policy_updated::SPEC.contract(),
         )
         .ok_or(IdentityError::InvalidPolicy)?;
         guard.insert(key, StoredPolicy::active(policy.clone()));
-        recover(&self.emitted).push(CapturedEvent::of(&entry, &envelope));
+        recover(&self.emitted).push(CapturedEvent::of(&event));
         Ok(policy)
     }
 
@@ -843,8 +834,7 @@ impl PolicyLifecycle for InMemPolicyRepo {
         scope: TenantRepoScope,
         policy: Policy,
         expected: PolicyVersion,
-        entry: EventEntry,
-        envelope: OutboxEnvelopeParts,
+        event: ReviewedEvent,
     ) -> Result<Policy, IdentityError> {
         let tenant = scope.tenant();
         if self.fail_writes {
@@ -852,7 +842,7 @@ impl PolicyLifecycle for InMemPolicyRepo {
                 "inmem-policy-cotx-fail",
             ))));
         }
-        if policy.tenant() != tenant || envelope.tenant() != tenant {
+        if policy.tenant() != tenant || event.envelope().tenant() != tenant {
             return Err(IdentityError::InvalidPolicy);
         }
         let key = Self::key(tenant, policy.id());
@@ -868,15 +858,14 @@ impl PolicyLifecycle for InMemPolicyRepo {
         }
         let _authorization = authorize_entry(
             receipt,
-            &entry,
-            &envelope,
+            &event,
             generated::event::identity_v1::policy_updated::SPEC.contract(),
         )
         .ok_or(IdentityError::InvalidPolicy)?;
         let next = policy.with_version(expected.next_checked()?);
         current.version = next.version();
         current.active = Some(next.clone());
-        recover(&self.emitted).push(CapturedEvent::of(&entry, &envelope));
+        recover(&self.emitted).push(CapturedEvent::of(&event));
         Ok(next)
     }
 
@@ -886,8 +875,7 @@ impl PolicyLifecycle for InMemPolicyRepo {
         scope: TenantRepoScope,
         id: PolicyId,
         expected: PolicyVersion,
-        entry: EventEntry,
-        envelope: OutboxEnvelopeParts,
+        event: ReviewedEvent,
     ) -> Result<bool, IdentityError> {
         let tenant = scope.tenant();
         if self.fail_writes {
@@ -895,7 +883,7 @@ impl PolicyLifecycle for InMemPolicyRepo {
                 "inmem-policy-cotx-fail",
             ))));
         }
-        if envelope.tenant() != tenant {
+        if event.envelope().tenant() != tenant {
             return Err(IdentityError::InvalidPolicy);
         }
         let key = Self::key(tenant, &id);
@@ -911,14 +899,13 @@ impl PolicyLifecycle for InMemPolicyRepo {
         }
         let _authorization = authorize_entry(
             receipt,
-            &entry,
-            &envelope,
+            &event,
             generated::event::identity_v1::policy_updated::SPEC.contract(),
         )
         .ok_or(IdentityError::InvalidPolicy)?;
         current.version = expected.next_checked()?;
         current.active = None;
-        recover(&self.emitted).push(CapturedEvent::of(&entry, &envelope));
+        recover(&self.emitted).push(CapturedEvent::of(&event));
         Ok(true)
     }
 }
@@ -1232,7 +1219,9 @@ pub(crate) struct CapturedEvent {
 
 #[cfg(test)]
 impl CapturedEvent {
-    fn of(entry: &EventEntry, envelope: &OutboxEnvelopeParts) -> Self {
+    fn of(event: &ReviewedEvent) -> Self {
+        let entry = event.entry();
+        let envelope = event.envelope();
         Self {
             topic: entry.topic().as_str().to_string(),
             idem_key: entry.idem_key().as_str().to_string(),
@@ -1301,15 +1290,14 @@ impl RoleBindingLifecycle for InMemRoleBindingLifecycle {
         receipt: RolesAssignProducerReceipt,
         scope: TenantRepoScope,
         binding: RoleBinding,
-        entry: EventEntry,
-        envelope: OutboxEnvelopeParts,
+        event: ReviewedEvent,
     ) -> Result<(), OutboxEmitError> {
         if scope.tenant() != binding.tenant() {
             return Err(OutboxEmitError::new(std::io::Error::other(
                 "role binding assign tenant scope mismatch",
             )));
         }
-        if envelope.tenant() != scope.tenant() {
+        if event.envelope().tenant() != scope.tenant() {
             return Err(OutboxEmitError::new(std::io::Error::other(
                 "role binding assign envelope tenant scope mismatch",
             )));
@@ -1322,8 +1310,7 @@ impl RoleBindingLifecycle for InMemRoleBindingLifecycle {
         }
         let _authorization = authorize_entry(
             receipt,
-            &entry,
-            &envelope,
+            &event,
             generated::event::identity_v1::role_assigned::SPEC.contract(),
         )
         .ok_or_else(|| {
@@ -1336,7 +1323,7 @@ impl RoleBindingLifecycle for InMemRoleBindingLifecycle {
             binding.role_id().as_str().to_string(),
             binding.subject().to_string(),
         ));
-        recover(&self.emitted).push(CapturedEvent::of(&entry, &envelope));
+        recover(&self.emitted).push(CapturedEvent::of(&event));
         Ok(())
     }
 
@@ -1346,11 +1333,10 @@ impl RoleBindingLifecycle for InMemRoleBindingLifecycle {
         scope: TenantRepoScope,
         role_id: RoleId,
         subject: String,
-        entry: EventEntry,
-        envelope: OutboxEnvelopeParts,
+        event: ReviewedEvent,
     ) -> Result<bool, OutboxEmitError> {
         let tenant = scope.tenant();
-        if envelope.tenant() != tenant {
+        if event.envelope().tenant() != tenant {
             return Err(OutboxEmitError::new(std::io::Error::other(
                 "role binding revoke envelope tenant scope mismatch",
             )));
@@ -1372,8 +1358,7 @@ impl RoleBindingLifecycle for InMemRoleBindingLifecycle {
         }
         let _authorization = authorize_entry(
             receipt,
-            &entry,
-            &envelope,
+            &event,
             generated::event::identity_v1::role_revoked::SPEC.contract(),
         )
         .ok_or_else(|| {
@@ -1384,7 +1369,7 @@ impl RoleBindingLifecycle for InMemRoleBindingLifecycle {
         let removed = bindings.remove(&key);
         drop(bindings);
         if removed {
-            recover(&self.emitted).push(CapturedEvent::of(&entry, &envelope));
+            recover(&self.emitted).push(CapturedEvent::of(&event));
         }
         Ok(removed)
     }
@@ -1445,8 +1430,9 @@ mod tests {
         AuthGrant, AuthGrantId, AuthGrantSnapshot, AuthGrantStatus, AuthnEpoch,
         GrantSecurityEventKind,
     };
-    use consistency::{EventEntry, EventTopic, IdemKey, OutboxPayload};
-    use diport::{EnvelopeSubjectId, OpaqueActorId, OutboxActor, OutboxEnvelopeParts};
+    use consistency::IdemKey;
+    use diport::{EnvelopeSubjectId, OpaqueActorId, OutboxActor};
+    use eventexec::event::ReviewedEvent;
     use generated::http::identity_v1::{
         login::PRODUCER as LOGIN_PRODUCER, policies_create::PRODUCER as POLICIES_CREATE_PRODUCER,
         policies_deactivate::PRODUCER as POLICIES_DEACTIVATE_PRODUCER,
@@ -1649,53 +1635,17 @@ mod tests {
         .expect("resource attribute")
     }
 
-    // co-tx generated entry fixture shared by the in-memory producer conformance tests.
-    fn dummy_entry() -> EventEntry {
+    async fn session_event_for(tenant: TenantId, event_id: &str) -> ReviewedEvent {
         let payload =
             generated::event::identity_v1::session_created::IdentitySessionCreatedPayload {
                 occurred_at: 1,
                 session_id: "session-test".to_string(),
                 subject: USER_ALICE.parse().expect("subject uuid"),
-                tenant_id: TENANT_A.to_string(),
+                tenant_id: tenant.to_string(),
             };
-        EventEntry::from_generated_payload(
-            &payload,
-            IdemKey::parse("evt-1").expect("idem key parses"),
-        )
-        .expect("test payload encodes")
-    }
-
-    fn missing_fact_entry() -> EventEntry {
-        EventEntry::new(
-            EventTopic::parse("identity.session-created").expect("topic parses"),
-            IdemKey::parse("evt-missing-fact").expect("idem key parses"),
-            OutboxPayload::from_reviewed_event_bytes(b"{}".to_vec()),
-        )
-    }
-
-    fn wrong_fact_entry() -> EventEntry {
-        let payload = generated::event::settings_v1::SettingsConfigVersionChangedPayload {
-            change_kind: generated::event::settings_v1::SettingsConfigChangeKind::Published,
-            key: "app.test".to_string(),
-            occurred_at: 1,
-            source_version: None,
-            tenant_id: TENANT_A.to_string(),
-            version: 1,
-        };
-        EventEntry::from_generated_payload(
-            &payload,
-            IdemKey::parse("evt-wrong-fact").expect("idem key parses"),
-        )
-        .expect("test payload encodes")
-    }
-
-    fn dummy_envelope() -> OutboxEnvelopeParts {
-        dummy_envelope_for(tid(TENANT_A))
-    }
-
-    fn dummy_envelope_for(tenant: TenantId) -> OutboxEnvelopeParts {
-        OutboxEnvelopeParts::new(
-            generated::event::identity_v1::session_created::CONTRACT,
+        generated::event::identity_v1::session_created::emit(
+            &eventexec::event::GeneratedEventEncoder,
+            payload,
             tenant,
             EnvelopeSubjectId::from_opaque("subject-1").expect("subject"),
             OutboxActor::scoped(
@@ -1704,10 +1654,45 @@ mod tests {
                 tenant,
                 vocab::ScopedTenant::SelfOnly,
             ),
+            IdemKey::parse(event_id).expect("idem key parses"),
         )
+        .await
+        .expect("test payload encodes")
     }
 
-    fn policy_entry() -> EventEntry {
+    async fn dummy_event() -> ReviewedEvent {
+        session_event_for(tid(TENANT_A), "evt-1").await
+    }
+
+    async fn wrong_event() -> ReviewedEvent {
+        let tenant = tid(TENANT_A);
+        let payload = generated::event::settings_v1::SettingsConfigVersionChangedPayload {
+            change_kind: generated::event::settings_v1::SettingsConfigChangeKind::Published,
+            key: "app.test".to_string(),
+            occurred_at: 1,
+            source_version: None,
+            tenant_id: TENANT_A.to_string(),
+            version: 1,
+        };
+        generated::event::settings_v1::emit(
+            &eventexec::event::GeneratedEventEncoder,
+            payload,
+            tenant,
+            EnvelopeSubjectId::from_opaque("subject-1").expect("subject"),
+            OutboxActor::scoped(
+                vocab::PrincipalKind::User,
+                OpaqueActorId::from_opaque("actor-1").expect("actor"),
+                tenant,
+                vocab::ScopedTenant::SelfOnly,
+            ),
+            IdemKey::parse("evt-wrong-fact").expect("idem key parses"),
+        )
+        .await
+        .expect("test payload encodes")
+    }
+
+    async fn policy_event() -> ReviewedEvent {
+        let tenant = tid(TENANT_A);
         let payload =
             generated::event::identity_v1::policy_updated::IdentityPolicyUpdatedPayload {
                 actor_kind: generated::event::identity_v1::policy_updated::IdentityPolicyUpdatedPayloadActorKind::Admin,
@@ -1720,17 +1705,9 @@ mod tests {
                 updated_by: USER_ALICE.parse().expect("updated-by uuid"),
                 version: std::num::NonZeroU32::MIN,
             };
-        EventEntry::from_generated_payload(
-            &payload,
-            IdemKey::parse("evt-policy").expect("idem key parses"),
-        )
-        .expect("test payload encodes")
-    }
-
-    fn policy_envelope() -> OutboxEnvelopeParts {
-        let tenant = tid(TENANT_A);
-        OutboxEnvelopeParts::new(
-            generated::event::identity_v1::policy_updated::CONTRACT,
+        generated::event::identity_v1::policy_updated::emit(
+            &eventexec::event::GeneratedEventEncoder,
+            payload,
             tenant,
             EnvelopeSubjectId::from_opaque("policy-tombstone").expect("subject"),
             OutboxActor::scoped(
@@ -1739,7 +1716,62 @@ mod tests {
                 tenant,
                 vocab::ScopedTenant::Tenant,
             ),
+            IdemKey::parse("evt-policy").expect("idem key parses"),
         )
+        .await
+        .expect("test payload encodes")
+    }
+
+    async fn role_assigned_event(tenant: TenantId) -> ReviewedEvent {
+        let payload = generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayload {
+            actor_kind: generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayloadActorKind::Admin,
+            assigned_by: USER_ALICE.parse().expect("actor uuid"),
+            occurred_at: 1,
+            role_id: "role-admin".to_string(),
+            subject: "user-1".to_string(),
+            tenant_id: tenant.to_string(),
+        };
+        generated::event::identity_v1::role_assigned::emit(
+            &eventexec::event::GeneratedEventEncoder,
+            payload,
+            tenant,
+            EnvelopeSubjectId::from_opaque("actor-1").expect("subject"),
+            OutboxActor::scoped(
+                vocab::PrincipalKind::Admin,
+                OpaqueActorId::from_opaque("actor-1").expect("actor"),
+                tenant,
+                vocab::ScopedTenant::Tenant,
+            ),
+            IdemKey::parse("evt-role-assigned").expect("idem key"),
+        )
+        .await
+        .expect("role-assigned event")
+    }
+
+    async fn role_revoked_event(tenant: TenantId) -> ReviewedEvent {
+        let payload = generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayload {
+            actor_kind: generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayloadActorKind::Admin,
+            occurred_at: 1,
+            revoked_by: USER_ALICE.parse().expect("actor uuid"),
+            role_id: "role-admin".to_string(),
+            subject: "user-1".to_string(),
+            tenant_id: tenant.to_string(),
+        };
+        generated::event::identity_v1::role_revoked::emit(
+            &eventexec::event::GeneratedEventEncoder,
+            payload,
+            tenant,
+            EnvelopeSubjectId::from_opaque("actor-1").expect("subject"),
+            OutboxActor::scoped(
+                vocab::PrincipalKind::Admin,
+                OpaqueActorId::from_opaque("actor-1").expect("actor"),
+                tenant,
+                vocab::ScopedTenant::Tenant,
+            ),
+            IdemKey::parse("evt-role-revoked").expect("idem key"),
+        )
+        .await
+        .expect("role-revoked event")
     }
 
     // ---------------------------------------------------------------------------
@@ -2087,8 +2119,7 @@ mod tests {
             policy_create_receipt(),
             scope(tenant),
             policy("policy-tombstone", tenant),
-            policy_entry(),
-            policy_envelope(),
+            policy_event().await,
         )
         .await
         .expect("create policy");
@@ -2098,8 +2129,7 @@ mod tests {
                 scope(tenant),
                 id.clone(),
                 PolicyVersion::first(),
-                policy_entry(),
-                policy_envelope(),
+                policy_event().await,
             )
             .await
             .expect("delete policy"),
@@ -2118,8 +2148,7 @@ mod tests {
                 policy_create_receipt(),
                 scope(tenant),
                 policy("policy-tombstone", tenant),
-                policy_entry(),
-                policy_envelope(),
+                policy_event().await,
             )
             .await;
         assert!(
@@ -2428,12 +2457,9 @@ mod tests {
     // ---------------------------------------------------------------------------
 
     #[tokio::test]
-    async fn auth_grant_store_rejects_missing_and_wrong_entry_fact_before_mutation() {
+    async fn auth_grant_store_rejects_wrong_reviewed_fact_before_mutation() {
         let tenant = tid(TENANT_A);
-        for (suffix, entry) in [
-            ("missing", missing_fact_entry()),
-            ("wrong", wrong_fact_entry()),
-        ] {
+        for (suffix, event) in [("wrong", wrong_event().await)] {
             let repo = InMemAuthGrantStore::new();
             let grant_label = format!("grant-{suffix}-fact");
             let grant = make_grant(&grant_label, tenant);
@@ -2448,8 +2474,7 @@ mod tests {
                     login_receipt(),
                     scope(tenant),
                     login_mutation(grant, refresh),
-                    entry,
-                    dummy_envelope(),
+                    event,
                 )
                 .await;
 
@@ -2470,12 +2495,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn policy_lifecycle_rejects_missing_and_wrong_entry_fact_before_mutation() {
+    async fn policy_lifecycle_rejects_wrong_reviewed_fact_before_mutation() {
         let tenant = tid(TENANT_A);
-        for (suffix, entry) in [
-            ("missing", missing_fact_entry()),
-            ("wrong", wrong_fact_entry()),
-        ] {
+        for (suffix, event) in [("wrong", wrong_event().await)] {
             let repo = InMemPolicyRepo::new();
             let raw_id = format!("policy-{suffix}-fact");
             let id = policy_id(&raw_id);
@@ -2484,8 +2506,7 @@ mod tests {
                     policy_create_receipt(),
                     scope(tenant),
                     policy(&raw_id, tenant),
-                    entry,
-                    dummy_envelope(),
+                    event,
                 )
                 .await;
 
@@ -2502,12 +2523,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn role_binding_lifecycle_rejects_missing_and_wrong_entry_fact_before_mutation() {
+    async fn role_binding_lifecycle_rejects_wrong_reviewed_fact_before_mutation() {
         let tenant = tid(TENANT_A);
-        for (suffix, entry) in [
-            ("missing", missing_fact_entry()),
-            ("wrong", wrong_fact_entry()),
-        ] {
+        for (suffix, event) in [("wrong", wrong_event().await)] {
             let lifecycle = InMemRoleBindingLifecycle::new();
             let role_id = RoleId::parse(&format!("role-{suffix}-fact")).expect("role id");
             let result = lifecycle
@@ -2515,8 +2533,7 @@ mod tests {
                     role_assign_receipt(),
                     scope(tenant),
                     RoleBinding::new("user-1", role_id.clone(), tenant),
-                    entry,
-                    dummy_envelope(),
+                    event,
                 )
                 .await;
 
@@ -2543,8 +2560,7 @@ mod tests {
                 login_receipt(),
                 scope(ta),
                 login_mutation(grant, refresh),
-                dummy_entry(),
-                dummy_envelope(),
+                dummy_event().await,
             )
             .await
             .expect("persist ok");
@@ -2574,8 +2590,7 @@ mod tests {
                 login_receipt(),
                 scope(ta),
                 login_mutation(grant, refresh),
-                dummy_entry(),
-                dummy_envelope(),
+                dummy_event().await,
             )
             .await
             .expect("persist ok");
@@ -2596,8 +2611,7 @@ mod tests {
                 role_assign_receipt(),
                 scope(tenant),
                 RoleBinding::new("user-1", role_id.clone(), tenant),
-                dummy_entry(),
-                dummy_envelope_for(tid(TENANT_B)),
+                role_assigned_event(tid(TENANT_B)).await,
             )
             .await;
 
@@ -2621,8 +2635,7 @@ mod tests {
                 scope(tenant),
                 role_id.clone(),
                 "user-1".to_string(),
-                dummy_entry(),
-                dummy_envelope_for(tid(TENANT_B)),
+                role_revoked_event(tid(TENANT_B)).await,
             )
             .await;
 
@@ -2652,8 +2665,7 @@ mod tests {
                 login_receipt(),
                 scope(ta),
                 login_mutation(grant.clone(), old_rec.clone()),
-                dummy_entry(),
-                dummy_envelope(),
+                dummy_event().await,
             )
             .await
             .expect("persist");
@@ -2734,8 +2746,7 @@ mod tests {
                 login_receipt(),
                 scope(ta),
                 login_mutation(grant.clone(), old_rec.clone()),
-                dummy_entry(),
-                dummy_envelope(),
+                dummy_event().await,
             )
             .await
             .expect("persist");
@@ -2819,8 +2830,7 @@ mod tests {
                 login_receipt(),
                 scope(tenant),
                 login_mutation(grant.clone(), old.clone()),
-                dummy_entry(),
-                dummy_envelope(),
+                dummy_event().await,
             )
             .await
             .expect("persist");
@@ -2874,8 +2884,7 @@ mod tests {
                 login_receipt(),
                 scope(ta),
                 login_mutation(grant.clone(), rec_a.clone()),
-                dummy_entry(),
-                dummy_envelope(),
+                dummy_event().await,
             )
             .await
             .expect("persist");
@@ -2940,8 +2949,7 @@ mod tests {
                 login_receipt(),
                 scope(ta),
                 login_mutation(grant, rec_a),
-                dummy_entry(),
-                dummy_envelope(),
+                dummy_event().await,
             )
             .await
             .expect("persist");

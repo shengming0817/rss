@@ -25,6 +25,16 @@ The repository already has the durable reconcile substrate; the DeviceLatent PBI
 
 Consequently, #1898 is limited to durable wake-version and failure-streak extensions plus the atomic join between a DeviceLatent desired update and the existing target-due state. #1899 is limited to the missing bounded concurrent execution and fairness increment. Neither PBI re-creates next-run scheduling, due claiming, lease/epoch fencing, pause, drain, or release.
 
+## Accepted contract amendment
+
+PR #629 closes an ambiguity in the original draft proposal before activation: ACK and ingress-receipt outcome/reason pairs are closed sums, not independent enum products. The amended current specification hashes are:
+
+- `contracts/device-command-acked.event.schema.json`: `1fa592ff1de51fe342ff346f6ccc33adf616cad21d40c9c8fa2fb002d6cf1d14`;
+- `contracts/application-receipt.schema.json`: `e3ab656570b4f46bcb2bb734693dd705b6677f9f9269cb45c93dd4fb6320f63c`;
+- `contracts/contract-set.md`: `4d041270278059f588bedd1bace5e93003370234515714673a5066e3f59c0148`.
+
+The received-archive hashes below remain immutable provenance and intentionally continue to describe the original input.
+
 ## Received archive
 
 - Source: `/Users/shengming/Downloads/rss-l4-speckit-overlay.zip`

@@ -13,6 +13,7 @@ workspace = true
 # adapter 只能被组合根依赖（deny.toml wrappers）。
 [dependencies]
 consistency = { path = "../../crates/consistency" }
+eventexec = { path = "../../crates/eventexec" }
 diport = { path = "../../crates/diport" }
 # AuthGrant aggregate/value types are canonically owned by authn; the memory adapter implements
 # identity lifecycle ports over those values.

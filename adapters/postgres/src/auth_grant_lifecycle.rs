@@ -14,8 +14,8 @@ use authn::{
     AuthGrant, AuthGrantId, AuthGrantSnapshot, AuthGrantStatus, AuthnEpoch,
     CredentialSecurityEventKind,
 };
-use consistency::EventEntry;
-use diport::{Clock, OutboxEmitError, OutboxEnvelopeParts};
+use diport::{Clock, OutboxEmitError};
+use eventexec::event::ReviewedEvent;
 use identity::ports::{
     AuthGrantLifecycle, IdentityError, LoginGrantMutation, RefreshStatus, RefreshTokenRecord,
     SESSION_CREATED_CONTRACT, TenantRepoScope,
@@ -126,10 +126,11 @@ impl AuthGrantLifecycle for PgAuthGrantLifecycle {
         receipt: identity::ports::LoginProducerReceipt,
         scope: TenantRepoScope,
         mutation: LoginGrantMutation,
-        entry: EventEntry,
-        envelope: OutboxEnvelopeParts,
+        event: ReviewedEvent,
     ) -> Result<identity::ports::PersistedLoginGrantReceipt, OutboxEmitError> {
         let (grant, initial_refresh, persistence) = mutation.into_parts();
+        let generated_fact = event.fact();
+        let (entry, envelope, _fact) = event.into_parts();
         let (contract, env_tenant, subject_id, actor, partition_key, causation_id) =
             envelope.into_parts();
         let tenant = grant.tenant();
@@ -144,11 +145,6 @@ impl AuthGrantLifecycle for PgAuthGrantLifecycle {
         )
         .with_partition_key_opt(partition_key)
         .with_causation_id_opt(causation_id);
-        let generated_fact = entry.generated_fact().ok_or_else(|| {
-            OutboxEmitError::new(std::io::Error::other(
-                "login grant entry lacks generated fact provenance",
-            ))
-        })?;
         #[cfg(all(test, feature = "integration"))]
         let login_fault = self
             .login_fault

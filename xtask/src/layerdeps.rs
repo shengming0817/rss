@@ -22,8 +22,11 @@
 //! INVARIANT: LAYER-DEPS-01 { level = "Medium", exec = "check", source = "code" }—— back-path 反向边（上行 / 横向同层 / 跨界依赖）。
 //! INVARIANT: LAYER-DEPS-02 { level = "Medium", exec = "check", source = "code" }—— 兄弟域互斥（跨域只经 contract）。
 //! INVARIANT: LAYER-DEPS-03 { level = "Medium", exec = "check", source = "code" }—— adapter 仅组合根注入（不被域 / 服务依赖）。
-//! INVARIANT: LAYER-DEPS-04 { level = "Medium", exec = "check", source = "code" }—— generated 仅域 + 组合根，以及精确 `eventexec → generated`
-//!   command/workflow sealed runtime seam 依赖；其它 Service→Generated 仍禁。
+//! INVARIANT: LAYER-DEPS-04 { level = "Medium", exec = "check", source = "code" }—— generated 仅域 + 组合根，以及精确
+//!   `eventexec|bootstrap → generated` sealed runtime authoring/registration seam 依赖；其它 Service→Generated 仍禁。
+//! INVARIANT: LAYER-DEPS-GENERATED-BOOTSTRAP-REGISTRAR-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::bootstrap_generated_registrar_surface_rejects_non_registrar_matrix", anti_vacuity = "tests::bootstrap_generated_registrar_surface_accepts_exact_vocabulary|tests::real_workspace_green" }——
+//!   `bootstrap → generated` 的 crate edge 只承载 sealed subscription registrar vocabulary；production source
+//!   引用 event authoring、command/workflow、catalog、per-event module 或宽 module/glob import 均 fail-closed。
 //! INVARIANT: LAYER-DEPS-05 { level = "Medium", exec = "check", source = "code" }—— 每个 workspace 成员必落唯一分层（anti-drift：新增 crate 须登记层）。
 //! INVARIANT: LAYER-DEPS-06 { level = "Medium", exec = "check", source = "code" }—— deny.toml 分层 wrappers ⟷ 源分类一致（守 `LAYER-WRAP-01` 漂移）。
 //! INVARIANT: LAYER-DEPS-07 { level = "Medium", exec = "check", source = "code" }—— 含 path 的本地依赖须解析到现存 workspace 成员；逃逸 / 非成员
@@ -51,12 +54,15 @@
 //! 之前应用它，并以 Redis/S3/Vault synthetic red + postgres/diport anti-vacuity green 承载。
 
 use anyhow::{Context, Result, bail};
+use quote::ToTokens as _;
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
+use syn::visit::Visit as _;
 
 use crate::diagnostic::{self, GovernanceCheck, finding};
 use crate::layers::{self, Layer};
+use crate::src_scan::rs_files;
 
 pub(crate) type Finding = diagnostic::Finding<Rule>;
 
@@ -71,6 +77,8 @@ pub(crate) enum Rule {
     AdapterScope,
     /// LAYER-DEPS-04：非域 / 非根依赖 generated。
     GeneratedScope,
+    /// LAYER-DEPS-GENERATED-BOOTSTRAP-REGISTRAR-01：bootstrap 引用了 registrar 外的 generated surface。
+    GeneratedBootstrapSurface,
     /// LAYER-DEPS-05：workspace 成员未落任何分层（新增未登记）。
     LayerCoverage,
     /// LAYER-DEPS-06：deny.toml 分层 wrappers 与源分类不一致。
@@ -150,6 +158,7 @@ impl GovernanceCheck for LayerDeps {
         let shipped_deps = collect_shipped_deps(&root, &members, &workspace.dependencies)?;
         let mut findings = check_layers(&members, &scan.edges);
         findings.extend(scan.findings);
+        findings.extend(scan_bootstrap_generated_sources(&root)?);
         findings.extend(check_wrappers(&members, &bans, &scan.edges));
         findings.extend(check_external_confinement(&members, &bans));
         findings.extend(check_test_support_confinement(&scan.edges));
@@ -169,6 +178,166 @@ impl GovernanceCheck for LayerDeps {
         );
         Ok((summary, findings))
     }
+}
+
+const BOOTSTRAP_GENERATED_REGISTRAR_SURFACE: &[&str] = &[
+    "generated::event::EventContract",
+    "generated::event::EventSubscribe",
+    "generated::event::EventSubscription",
+    "generated::event::SubscriptionEffect",
+    "generated::event::SubscriptionExecution",
+];
+
+fn scan_bootstrap_generated_sources(root: &Path) -> Result<Vec<Finding>> {
+    let source_root = root.join("crates/bootstrap/src");
+    let files = rs_files(&source_root)?;
+    if files.is_empty() {
+        return Ok(vec![finding(
+            Rule::GeneratedBootstrapSurface,
+            "crates/bootstrap/src",
+            "bootstrap registrar surface guard 未发现 production Rust source".to_string(),
+        )]);
+    }
+    let mut findings = Vec::new();
+    for path in files {
+        let source = std::fs::read_to_string(&path)
+            .with_context(|| format!("读 bootstrap source 失败: {}", path.display()))?;
+        let relative = path.strip_prefix(root).unwrap_or(&path);
+        findings.extend(scan_bootstrap_generated_surface(relative, &source));
+    }
+    Ok(findings)
+}
+
+fn scan_bootstrap_generated_surface(path: &Path, source: &str) -> Vec<Finding> {
+    let Ok(file) = syn::parse_file(source) else {
+        return vec![finding(
+            Rule::GeneratedBootstrapSurface,
+            path.display().to_string(),
+            "bootstrap generated registrar source AST 无法解析".to_string(),
+        )];
+    };
+    let mut visitor = BootstrapGeneratedSurfaceVisitor::default();
+    visitor.visit_file(&file);
+    visitor
+        .forbidden
+        .into_iter()
+        .map(|surface| {
+            finding(
+                Rule::GeneratedBootstrapSurface,
+                path.display().to_string(),
+                format!(
+                    "bootstrap → generated 只允许 sealed subscription registrar vocabulary，禁止 `{surface}`"
+                ),
+            )
+        })
+        .collect()
+}
+
+#[derive(Default)]
+struct BootstrapGeneratedSurfaceVisitor {
+    forbidden: BTreeSet<String>,
+}
+
+impl BootstrapGeneratedSurfaceVisitor {
+    fn inspect(&mut self, path: String) {
+        let path = path.trim_start_matches("::").to_string();
+        if !is_generated_surface(&path) {
+            return;
+        }
+        if !bootstrap_generated_surface_allowed(&path) {
+            self.forbidden.insert(path);
+        }
+    }
+}
+
+impl<'ast> syn::visit::Visit<'ast> for BootstrapGeneratedSurfaceVisitor {
+    fn visit_item_mod(&mut self, node: &'ast syn::ItemMod) {
+        if node.ident == "tests" || has_test_attr(&node.attrs) {
+            return;
+        }
+        syn::visit::visit_item_mod(self, node);
+    }
+
+    fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
+        if has_test_attr(&node.attrs) {
+            return;
+        }
+        syn::visit::visit_item_fn(self, node);
+    }
+
+    fn visit_item_use(&mut self, node: &'ast syn::ItemUse) {
+        if has_test_attr(&node.attrs) {
+            return;
+        }
+        collect_use_surfaces(&node.tree, Vec::new(), &mut self.forbidden);
+    }
+
+    fn visit_item_extern_crate(&mut self, node: &'ast syn::ItemExternCrate) {
+        if node.ident == "generated" {
+            self.forbidden
+                .insert("generated::<extern-crate>".to_string());
+        }
+    }
+
+    fn visit_path(&mut self, path: &'ast syn::Path) {
+        self.inspect(path.to_token_stream().to_string().replace(' ', ""));
+        syn::visit::visit_path(self, path);
+    }
+}
+
+fn collect_use_surfaces(
+    tree: &syn::UseTree,
+    mut prefix: Vec<String>,
+    forbidden: &mut BTreeSet<String>,
+) {
+    match tree {
+        syn::UseTree::Path(path) => {
+            prefix.push(path.ident.to_string());
+            collect_use_surfaces(&path.tree, prefix, forbidden);
+        }
+        syn::UseTree::Name(name) => {
+            prefix.push(name.ident.to_string());
+            inspect_use_surface(prefix.join("::"), forbidden);
+        }
+        syn::UseTree::Rename(rename) => {
+            prefix.push(rename.ident.to_string());
+            inspect_use_surface(prefix.join("::"), forbidden);
+        }
+        syn::UseTree::Glob(_) => {
+            prefix.push("*".to_string());
+            inspect_use_surface(prefix.join("::"), forbidden);
+        }
+        syn::UseTree::Group(group) => {
+            for item in &group.items {
+                collect_use_surfaces(item, prefix.clone(), forbidden);
+            }
+        }
+    }
+}
+
+fn inspect_use_surface(path: String, forbidden: &mut BTreeSet<String>) {
+    if !is_generated_surface(&path) {
+        return;
+    }
+    if !bootstrap_generated_surface_allowed(&path) {
+        forbidden.insert(path);
+    }
+}
+
+fn is_generated_surface(path: &str) -> bool {
+    path == "generated" || path.starts_with("generated::")
+}
+
+fn bootstrap_generated_surface_allowed(path: &str) -> bool {
+    BOOTSTRAP_GENERATED_REGISTRAR_SURFACE.contains(&path)
+}
+
+fn has_test_attr(attrs: &[syn::Attribute]) -> bool {
+    attrs.iter().any(|attr| {
+        attr.path().is_ident("test")
+            || (attr.path().is_ident("cfg")
+                && attr.meta.to_token_stream().to_string().contains("test"))
+    })
 }
 
 /// 规则 (a)(b)(c)(d) + LAYER-DEPS-05：分类覆盖 + 每条内部边对照 `layers::allows`。
@@ -200,14 +369,15 @@ pub(crate) fn check_layers(members: &[Member], edges: &[Edge]) -> Vec<Finding> {
         };
         // 基础同层横向默认禁，唯一例外 = intra-base DAG 前向边（BASE-INTRADAG-01，如 runctx → vocab）；
         // Service 同层横向默认禁，唯一例外 = 受控 bootstrap → httpserve 路由类型边（LAYER-DEPS-ROUTE-FUNNEL-01，ADR-009）。
-        // Service→Generated 默认禁；唯一例外 = eventexec 实现 generated command/workflow sealed seam。
+        // Service→Generated 默认禁；仅 eventexec|bootstrap 可分别实现 generated sealed
+        // authoring/runtime 与 event subscription registration seam。
         let provider_bootstrap_forbidden =
             layers::provider_adapter_bootstrap_forbidden(&edge.from, &edge.to);
         if provider_bootstrap_forbidden
             || (!layers::allows(from, to)
                 && !layers::basis_intra_dag_allows(&edge.from, &edge.to)
                 && !layers::route_funnel_allows(&edge.from, &edge.to)
-                && !layers::eventexec_generated_seam_allows(&edge.from, &edge.to))
+                && !layers::generated_seam_allows(&edge.from, &edge.to))
         {
             let reason = if provider_bootstrap_forbidden {
                 "违反 Redis/S3/Vault provider output 边界（禁止 adapter → bootstrap）".to_string()
@@ -324,7 +494,7 @@ fn required_consumers<'a>(
                     services
                         .iter()
                         .copied()
-                        .filter(|service| layers::eventexec_generated_seam_allows(service, name)),
+                        .filter(|service| layers::generated_seam_allows(service, name)),
                 )
                 .collect(),
         ),
@@ -445,7 +615,7 @@ pub(crate) fn check_wrappers(
             match layer_of.get(w.as_str()) {
                 Some(&wl)
                     if layers::allows(wl, banned)
-                        || layers::eventexec_generated_seam_allows(w, &b.crate_name)
+                        || layers::generated_seam_allows(w, &b.crate_name)
                         || layers::generated_dev_wrapper_allows(w, &b.crate_name) =>
                 {
                     // ②补强（ADR-005）：adapter→域 wrapper 须有真实 source edge（adapter 实际依赖该域），
@@ -1282,6 +1452,71 @@ mod tests {
             e("consistency", "vocab"),
         ];
         assert!(check_layers(&members, &edges).is_empty());
+    }
+
+    #[test]
+    fn bootstrap_generated_registrar_surface_accepts_exact_vocabulary() {
+        let findings = scan_bootstrap_generated_surface(
+            Path::new("crates/bootstrap/src/registry.rs"),
+            r#"
+            impl generated::event::EventSubscribe for Registry {
+                type Capability = Capability;
+                type Output = Result<(), Error>;
+
+                fn subscribe<S: generated::event::EventSubscription>(
+                    &mut self,
+                    capability: Self::Capability,
+                ) -> Self::Output {
+                    use generated::event::{
+                        EventContract, SubscriptionEffect, SubscriptionExecution,
+                    };
+                    todo!()
+                }
+            }
+            "#,
+        );
+        assert!(findings.is_empty(), "{findings:#?}");
+    }
+
+    #[test]
+    fn bootstrap_generated_registrar_surface_rejects_non_registrar_matrix() {
+        for source in [
+            "fn bad<T: generated::event::EventEmit>() {}",
+            "fn bad<T: ::generated::event::EventEmit>() {}",
+            "fn bad<T: generated::command::CommandJournal>() {}",
+            "fn bad() { let _ = generated::event::EVENTS; }",
+            "use generated::event::identity_v1::session_created;",
+            "use generated::event::*;",
+            "use generated as generated_api;",
+            "use generated::command as generated_command;",
+        ] {
+            let findings = scan_bootstrap_generated_surface(
+                Path::new("crates/bootstrap/src/registry.rs"),
+                source,
+            );
+            assert_eq!(
+                findings.len(),
+                1,
+                "source must fail closed: {source}\n{findings:#?}"
+            );
+            assert_eq!(findings[0].rule, Rule::GeneratedBootstrapSurface);
+        }
+    }
+
+    #[test]
+    fn bootstrap_generated_registrar_surface_ignores_test_only_wrappers() {
+        let findings = scan_bootstrap_generated_surface(
+            Path::new("crates/bootstrap/src/registry.rs"),
+            r#"
+            #[cfg(test)]
+            mod tests {
+                fn fixture() {
+                    generated::event::identity_v1::session_created::subscribe_audit();
+                }
+            }
+            "#,
+        );
+        assert!(findings.is_empty(), "{findings:#?}");
     }
 
     /// RUNTIMEEXEC-LAYER-01 anti-vacuity：assembly Root 可消费 runtimeexec，runtimeexec 可向批准下层出边。

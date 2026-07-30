@@ -19,7 +19,8 @@ use diport::dead_letter_store::{
     DynDeadLetterStore,
 };
 use diport::{
-    Acker as _, DeadLetterProvenance, EnvelopeHeader, EnvelopeHeaderError, Message, MessageStream,
+    Acker as _, DeadLetterProvenance, EnvelopeCausationId, EnvelopeHeader, EnvelopeHeaderError,
+    Message, MessageStream,
 };
 // #1224：consume span `.instrument()` handler loop，使 handler span 挂回 producer trace。
 use tracing::Instrument as _;
@@ -333,6 +334,20 @@ async fn consume_one<S, H>(
             return;
         }
     };
+    let parent_causation = match EnvelopeCausationId::from_opaque(msg.id.as_str()) {
+        Ok(causation_id) => causation_id,
+        Err(_) => {
+            log_parse_failed(&msg);
+            settle(
+                acker,
+                diport::AckAction::Reject,
+                meta.domain(),
+                msg.id.as_str(),
+            )
+            .await;
+            return;
+        }
+    };
 
     let header = match meta.verify_envelope_header(&msg) {
         Ok(header) => header,
@@ -391,17 +406,20 @@ async fn consume_one<S, H>(
             .await;
         }
         Ok(SeenState::Fresh) => {
-            handle_fresh(
-                idempotency,
-                dlx,
-                meta,
-                handler,
-                msg,
-                &receipt_context,
-                &key,
-                &lease,
-                acker,
-                lease_cfg,
+            crate::event::scope_verified_event_origin(
+                crate::event::VerifiedEventOrigin::new(parent_causation),
+                handle_fresh(
+                    idempotency,
+                    dlx,
+                    meta,
+                    handler,
+                    msg,
+                    &receipt_context,
+                    &key,
+                    &lease,
+                    acker,
+                    lease_cfg,
+                ),
             )
             .await;
         }
@@ -3448,5 +3466,95 @@ mod tests {
             Some(producer_trace_id.as_str()),
             "run_consumer 经 handle_fresh 读 KEY_TRACE → 还原 → instrument ⇒ handler 与 producer 同 trace_id"
         );
+    }
+
+    #[allow(clippy::unwrap_used, clippy::expect_used)]
+    #[test]
+    fn verified_consumer_parent_is_the_generated_event_causation() {
+        let seen: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let seen_handler = seen.clone();
+        let message_id = "verified-parent-event-1";
+        let msg = message(message_id, b"payload");
+
+        let handler = move |_m: Message| -> futures::future::BoxFuture<'static, HandleResult> {
+            let seen = seen_handler.clone();
+            Box::pin(async move {
+                let tenant = tenant();
+                let payload = generated::event::settings_v1::SettingsConfigVersionChangedPayload {
+                    change_kind: generated::event::settings_v1::SettingsConfigChangeKind::Published,
+                    key: "consumer.child".to_owned(),
+                    occurred_at: 1,
+                    source_version: None,
+                    tenant_id: tenant.to_string(),
+                    version: 1,
+                };
+                let event = generated::event::settings_v1::emit(
+                    &crate::event::GeneratedEventEncoder,
+                    payload,
+                    tenant,
+                    diport::EnvelopeSubjectId::from_opaque("consumer.child").expect("subject"),
+                    diport::OutboxActor::scoped(
+                        vocab::PrincipalKind::Service,
+                        diport::OpaqueActorId::from_opaque("consumer-service").expect("actor"),
+                        tenant,
+                        vocab::ScopedTenant::Tenant,
+                    ),
+                    IdemKey::parse("child-event-1").expect("idempotency key"),
+                )
+                .await
+                .expect("generated event");
+                *seen.lock().unwrap() = event
+                    .envelope()
+                    .causation_id()
+                    .map(|id| id.as_str().to_owned());
+                HandleResult::ack()
+            })
+        };
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(run_consumer(
+            Box::pin(futures::stream::iter(vec![msg])),
+            FakeInboxStore::fresh(),
+            fake_dlx(FakeDeadLetterStore::new()),
+            meta(),
+            handler,
+            lease_cfg_test(),
+        ));
+
+        assert_eq!(seen.lock().unwrap().as_deref(), Some(message_id));
+    }
+
+    #[allow(clippy::unwrap_used)]
+    #[test]
+    fn oversized_parent_identity_is_rejected_before_the_handler() {
+        let calls = Arc::new(AtomicU32::new(0));
+        let calls_handler = calls.clone();
+        let message_id = "x".repeat(257);
+        let msg = message(&message_id, b"payload");
+        let handler = move |_m: Message| -> futures::future::BoxFuture<'static, HandleResult> {
+            let calls = calls_handler.clone();
+            Box::pin(async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                HandleResult::ack()
+            })
+        };
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(run_consumer(
+            Box::pin(futures::stream::iter(vec![msg])),
+            FakeInboxStore::fresh(),
+            fake_dlx(FakeDeadLetterStore::new()),
+            meta(),
+            handler,
+            lease_cfg_test(),
+        ));
+
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 }

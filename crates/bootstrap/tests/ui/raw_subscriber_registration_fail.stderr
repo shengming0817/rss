@@ -1,0 +1,11 @@
+error[E0599]: no associated function or constant named `subscriber` found for struct `Registry` in the current scope
+ --> tests/ui/raw_subscriber_registration_fail.rs:4:23
+  |
+4 |     let _ = Registry::subscriber;
+  |                       ^^^^^^^^^^ associated function or constant not found in `Registry`
+  |
+help: there is a method `subscribe` with a similar name
+ --> $WORKSPACE/generated/src/event/mod.rs
+  |
+  |     fn subscribe<S: EventSubscription>(&mut self, capability: Self::Capability) -> Self::Output;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

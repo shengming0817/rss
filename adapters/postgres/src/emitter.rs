@@ -1,10 +1,9 @@
-//! `PgEmitter` —— durable outbox 发射 adapter（impl `diport::OutboxEmitter`）。
+//! `PgEmitter` —— durable reviewed-event writer.
 //!
-//! producer 侧 durable 落库端口：域 crate（如 identity 登录）经 `diport::OutboxEmitter` 触发，把一条
-//! `consistency::EventEntry`（topic + idem_key(EventId) + 编码 payload）写进 `outbox` 表（pending）；relay
-//! （[`crate::PgOutbox`]）随后 CAS 中继到 broker。域**不**命名 `PgConnection` / `OutboxEnvelope`——envelope
-//! 字段以 opaque `diport::OutboxEnvelopeParts` 传入，本 adapter 经 sealed [`crate::outbox::OutboxMetadata`]
-//! funnel 组装（仅 opaque subject_id，FR-020 / `observability.md` §Outbox Envelope）。
+//! Producer-side durable persistence accepts only an `eventexec::event::ReviewedEvent`, whose
+//! generated fact, encoded payload, tenant, subject and actor were bound before this adapter is
+//! reached. The adapter writes one pending `outbox` row; [`crate::PgOutbox`] later relays it through
+//! the CAS state machine. No raw entry/envelope production API is implemented.
 //!
 //! **单事实 emit 语义（#1100）**：本 adapter 将一条 [`consistency::EventEntry`] 原子落库（单事务），用于**无
 //! co-located 业务写**的 OutboxFact 事件（纯通知）。与业务写（如 session 持久化）同事务的 **co-tx 原子性**
@@ -14,8 +13,8 @@
 //!
 //! ref: debezium outbox SMT（业务写 + outbox 行同一本地事务，producer 侧 durable 落库）
 
-use consistency::EventEntry;
-use diport::{Clock, OutboxEmitError, OutboxEmitter, OutboxEnvelopeParts};
+use diport::{Clock, OutboxEmitError};
+use eventexec::event::{ReviewedEvent, ReviewedEventWriter};
 
 #[cfg(all(test, feature = "integration"))]
 use crate::PgStore;
@@ -27,7 +26,7 @@ use crate::outbox::{
 use crate::pool::VerifiedPgWriteStore;
 use crate::projection_events::ProjectionWriteRegistry;
 
-/// PostgreSQL outbox 发射 adapter（impl [`OutboxEmitter`]）。
+/// PostgreSQL durable outbox writer for sealed [`ReviewedEvent`] capabilities.
 ///
 /// 经 [`PgTenantWritePool`] 持有 tenant-scoped write funnel；不暴露裸 pool / begin 出口。
 ///
@@ -66,12 +65,9 @@ impl PgEmitter {
     }
 }
 
-impl OutboxEmitter for PgEmitter {
-    async fn emit(
-        &self,
-        entry: EventEntry,
-        envelope: OutboxEnvelopeParts,
-    ) -> Result<(), OutboxEmitError> {
+impl ReviewedEventWriter for PgEmitter {
+    async fn write(&self, event: ReviewedEvent) -> Result<(), OutboxEmitError> {
+        let (entry, envelope, _fact) = event.into_parts();
         // opaque parts → sealed OutboxMetadata funnel（仅 opaque subject_id，FR-020）。`contract` 是契约派生
         // 绑定（#1193/#1618：domain + contract_id + version + schema_hash 同源、business 不可伪造），
         // routing 列经 `domain()`/`contract_id()` 取，标准 header 经 `version()`/`schema_hash()` 盖章。

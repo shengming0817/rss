@@ -41,29 +41,28 @@ use axum::extract::rejection::{PathRejection, QueryRejection};
 use axum::extract::{Extension, Path, Query, State};
 use axum::response::{IntoResponse, Response};
 use base64::Engine as _;
-use bootstrap::{KernelError, Registry, SubscriberCapability};
-use consistency::ConsumerGroup;
+use bootstrap::{KernelError, SubscriberCapability};
 use diport::Message;
-use generated::event::EventSpec;
+#[cfg(test)]
 use generated::event::SubscriptionExecution;
+#[cfg(test)]
+use generated::event::identity_v1::{
+    policy_updated::SPEC as POLICY_UPDATED_SPEC, role_assigned::SPEC as ROLE_ASSIGNED_SPEC,
+    role_revoked::SPEC as ROLE_REVOKED_SPEC, security_event::SPEC as SECURITY_EVENT_SPEC,
+    session_created::SPEC as SESSION_CREATED_SPEC,
+};
 use generated::event::identity_v1::{
     policy_updated::{
         IdentityPolicyUpdatedPayload, IdentityPolicyUpdatedPayloadActorKind,
-        IdentityPolicyUpdatedPayloadChangeKind, SPEC as POLICY_UPDATED_SPEC,
+        IdentityPolicyUpdatedPayloadChangeKind,
     },
-    role_assigned::{
-        IdentityRoleAssignedPayload, IdentityRoleAssignedPayloadActorKind,
-        SPEC as ROLE_ASSIGNED_SPEC,
-    },
-    role_revoked::{
-        IdentityRoleRevokedPayload, IdentityRoleRevokedPayloadActorKind, SPEC as ROLE_REVOKED_SPEC,
-    },
+    role_assigned::{IdentityRoleAssignedPayload, IdentityRoleAssignedPayloadActorKind},
+    role_revoked::{IdentityRoleRevokedPayload, IdentityRoleRevokedPayloadActorKind},
     security_event::{
         IdentitySecurityEventPayload, IdentitySecurityEventPayloadActorKind,
         IdentitySecurityEventPayloadKind, IdentitySecurityEventPayloadTargetKind,
-        SPEC as SECURITY_EVENT_SPEC,
     },
-    session_created::{IdentitySessionCreatedPayload, SPEC as SESSION_CREATED_SPEC},
+    session_created::IdentitySessionCreatedPayload,
 };
 // ListenerKind 仅测试断言用（lib 经 typed `route_group::<Admin>` 不再传运行期 ListenerKind 值）。
 #[cfg(test)]
@@ -1002,33 +1001,6 @@ fn policy_updated_actor_kind(kind: IdentityPolicyUpdatedPayloadActorKind) -> voc
     }
 }
 
-fn register_audit_subscriber(reg: &mut Registry, event: EventSpec) -> Result<(), KernelError> {
-    let spec = event
-        .subscriptions()
-        .iter()
-        .find(|s| s.consumer() == AUDIT_DOMAIN)
-        .ok_or(KernelError::Subscriber)?;
-    if (
-        spec.execution(),
-        spec.effect(),
-        spec.external_effect_policy(),
-    ) != (
-        SubscriptionExecution::AdapterNative,
-        None,
-        vocab::ExternalEffectPolicy::TransactionalOnly,
-    ) {
-        return Err(KernelError::Subscriber);
-    }
-    let group = ConsumerGroup::parse(spec.group()).map_err(|_| KernelError::Subscriber)?;
-    reg.subscriber(
-        event.contract_id(),
-        event.topic(),
-        spec.consumer(),
-        group,
-        SubscriberCapability::AdapterNativeTransactional,
-    )
-}
-
 /// audit 域 bootstrap 生命周期：声明 durable 订阅元数据 + admin 读路由组。
 ///
 /// 本 ambient domain 只持 erased read capability；真实 durable append 由 postgres adapter 的 classified
@@ -1068,6 +1040,30 @@ where
     }
 }
 
+fn register_audit_subscriber(reg: &mut ::bootstrap::Registry) -> Result<(), KernelError> {
+    generated::event::identity_v1::session_created::subscribe_audit(
+        reg,
+        SubscriberCapability::AdapterNativeTransactional,
+    )?;
+    generated::event::identity_v1::role_assigned::subscribe_audit(
+        reg,
+        SubscriberCapability::AdapterNativeTransactional,
+    )?;
+    generated::event::identity_v1::role_revoked::subscribe_audit(
+        reg,
+        SubscriberCapability::AdapterNativeTransactional,
+    )?;
+    generated::event::identity_v1::policy_updated::subscribe_audit(
+        reg,
+        SubscriberCapability::AdapterNativeTransactional,
+    )?;
+    generated::event::identity_v1::security_event::subscribe_audit(
+        reg,
+        SubscriberCapability::AdapterNativeTransactional,
+    )?;
+    Ok(())
+}
+
 impl<S> ::bootstrap::Domain for AuditDomain<S>
 where
     S: AuditListTenantAppender + Send + Sync + 'static,
@@ -1075,11 +1071,7 @@ where
     fn init(&self, reg: &mut ::bootstrap::Registry) -> Result<(), KernelError> {
         // 订阅元数据（contract_id / topic / group）单源自 generated event `SPEC`（契约 codegen 派生）——
         // 不手维护平行 const，消除 contract↔consumer 漂移（AI-HARD：codegen funnel + golden）。缺失即 fail-fast。
-        register_audit_subscriber(reg, SESSION_CREATED_SPEC)?;
-        register_audit_subscriber(reg, ROLE_ASSIGNED_SPEC)?;
-        register_audit_subscriber(reg, ROLE_REVOKED_SPEC)?;
-        register_audit_subscriber(reg, POLICY_UPDATED_SPEC)?;
-        register_audit_subscriber(reg, SECURITY_EVENT_SPEC)?;
+        register_audit_subscriber(reg)?;
 
         // admin 读路由组（Admin listener，typed marker；operator/管理面，非业务对外 Primary）。
         let scoped_repo = self.read_repo.clone();

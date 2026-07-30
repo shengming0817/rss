@@ -1,22 +1,15 @@
-//! `OutboxEmitter` —— durable outbox 发射 provider DI port（可替换：prod postgres / demo in-mem）。
+//! `OutboxEmitter` —— in-memory demo/test event emission port.
 //!
-//! 域 crate 经此 port 把一条 [`consistency::EventEntry`]（topic + idem_key(EventId) + 编码 payload）落 durable
-//! outbox（与契约声明的 L2 OutboxFact 语义同源）。**域不能命名 `PgConnection` / `OutboxEnvelope`**
-//! （域→adapter 被 `deny.toml` 禁），故 envelope 字段以 opaque [`OutboxEnvelopeParts`] 传入，由 adapter
-//! 组装 provider 私有 envelope（reserved key `occurredAt` 在 adapter 受控构造点经注入 `Clock` 注入，#1129；
-//! trace 已接线 #1224（adapter 经 `tracewire::capture`）；correlation 已接线 #1160；principal 待 #1397；业务均不得伪造，FR-020 /
-//! `docs/rules/observability.md` §Outbox Envelope）。
+//! This raw two-coordinate port remains only for memory demos and test doubles. Durable production
+//! adapters consume `eventexec::event::ReviewedEvent` through the eventexec-owned writer seam; a
+//! plain [`consistency::EventEntry`] cannot reach PostgreSQL production writers.
 //!
 //! 与 [`crate::Publisher`] 的分工：`Publisher` 是 relay 把**已持久化** entry 直发到 broker 的端口；
-//! `OutboxEmitter` 是 producer 把业务事件**持久化进 durable outbox**（含幂等锚点 EventId）的端口——
-//! 二者语义正交，故为不同 port（不复用 `Publisher` 的 fire-and-forget 语义）。
+//! `OutboxEmitter` is not a production persistence capability and must not be wired to a durable
+//! adapter.
 //!
-//! **单事实 emit 语义**：本 port 保证一条 [`EventEntry`] 的 durable 落库原子性（单 outbox 写自成事务）——
-//! 用于**无 co-located 业务写**的 OutboxFact 事件（纯通知）。与业务写同事务的 **co-tx 原子性**（FR-003
-//! 完整 L2，如 session 持久化与 outbox append 同一 `PgTransaction`）**已交付**（#1083/#1192）：经各域**域形
-//! Unit-of-Work 端口**（如 `identity::ports::AuthGrantLifecycle`，combined 方法把业务写 + `append_outbox`
-//! 收进同一事务）承载，与本 emit-only port 语义正交（二者并存：emit-only 路由纯事件、UoW 路由 co-tx）。
-//! 本 port 的单事实 emit 语义不变。
+//! Co-transactional production writes continue through domain-shaped Unit-of-Work ports; standalone
+//! durable facts use the reviewed writer seam.
 //!
 //! ref: debezium outbox SMT（业务写 + outbox 行同一本地事务，producer 侧 durable 落库）
 //! ref: eventuate-tram-core io.eventuate.tram.consumer.common.DuplicateMessageDetector@master
@@ -384,17 +377,17 @@ impl std::fmt::Debug for OutboxEnvelopeParts {
     }
 }
 
-/// durable outbox 发射 provider DI port（async）。
+/// In-memory demo/test event emission port（async）。
 ///
 /// 公开 [`OutboxEmitter`] 是 **Send 变体**（adapters `impl OutboxEmitter for ...`），[`DynOutboxEmitter`]
-/// 是其 dyn-compatible wrapper（组合根经 `Box<DynOutboxEmitter>` 注入，必填构造器位置参，缺失即编译错误）。
+/// 是其 dyn-compatible wrapper（仅供 demo/test 组合根与替身注入）。
 #[trait_variant::make(OutboxEmitter: Send)]
 #[dynosaur(pub DynOutboxEmitter = dyn(box) OutboxEmitter, bridge(dyn))]
 #[allow(async_fn_in_trait)]
 // reason: base trait 为非 Send native AFIT；Send 由 trait_variant 生成的 `OutboxEmitter` 变体 +
 // dynosaur `DynOutboxEmitter` 承载（DI 注入走 Send wrapper）。ADR-003 既定 dyn-port 范式。
 pub trait OutboxEmitterLocal {
-    /// 把一条 [`EventEntry`] 落 durable outbox（envelope 由 [`OutboxEnvelopeParts`] 组装）。
+    /// Emit one raw entry in a non-production memory/test environment.
     async fn emit(
         &self,
         entry: EventEntry,

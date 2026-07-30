@@ -6,8 +6,6 @@
 //! `generated::http::*::SPEC.route`。`from_static`
 //! 必须保持 `pub const fn`，否则 codegen 无法跨 crate 发射常量；因此跨 crate provenance 以 AST guard
 //! 收口为 Medium，不与 manifest → generated 原子生成的 Hard golden 保证混为一谈。
-//! `GeneratedEventPayload` 同理只允许 codegen owner 实现；生产 crate 手写 impl（含 alias / glob import）
-//! 会让任意 payload 自签 contract/topic，故本 guard 一并 fail-fast。
 //! `ProjectionInputBinding` 的正确生产来源是 `generated::event::PROJECTION_INPUTS`；saga binding / policy /
 //! receipt/typestate marker 的正确生产来源是 `generated::saga::*::{SPEC,STEPS,STEP_*}` 和 sealed generated receipt DTO。本 guard 把残余面
 //! 收口为 Medium：扫描生产 Rust AST，任何非测试代码直接调用 generated binding constructor 都
@@ -28,8 +26,8 @@ use syn::punctuated::Punctuated;
 use syn::spanned::Spanned as _;
 use syn::visit::{self, Visit};
 use syn::{
-    Attribute, Block, Expr, ExprMethodCall, ExprPath, ImplItem, Item, ItemFn, ItemImpl, ItemMod,
-    ItemType, ItemUse, Lit, Meta, Signature, Token, Type, TypePath, UseTree,
+    Attribute, Block, Expr, ExprMethodCall, ExprPath, ImplItem, Item, ItemFn, ItemMod, ItemType,
+    ItemUse, Lit, Meta, Signature, Token, Type, TypePath, UseTree,
 };
 
 use crate::cmd::{CargoSubcommand, cargo_cmd};
@@ -60,8 +58,6 @@ const RAW_PRODUCER_TRANSPORT_METHODS: &[&str] = &["publish", "emit"];
 pub(crate) enum Rule {
     /// 生产代码引用 generated binding constructor，绕过 generated 常量。
     BareFromStatic,
-    /// 生产代码手写 generated event payload marker，伪造 codegen provenance。
-    GeneratedEventPayloadImpl,
     /// 生产代码绕过 sanctioned projection_events wrapper 直接调用 DB fixed function。
     ProjectionDbFunctionCallsite,
     /// active HTTP producer provider 引用 raw publisher/emitter transport。
@@ -82,7 +78,7 @@ impl GovernanceCheck for ContractBindingGuard {
         let (scanned, findings) = scan_sources(&root)?;
         Ok((
             format!(
-                "扫描 {scanned} 个生产 Rust 源文件；contract/event fact/HTTP route/projection/saga binding 生产 mint 与 GeneratedEventPayload impl 仅允许 generated/codegen owner；projection DB functions 仅允许 sanctioned wrapper；active HTTP producer provider 禁止 raw publisher/emitter"
+                "扫描 {scanned} 个生产 Rust 源文件；contract/event fact/HTTP route/projection/saga binding 生产 mint 仅允许 generated/codegen owner；projection DB functions 仅允许 sanctioned wrapper；active HTTP producer provider 禁止 raw publisher/emitter"
             ),
             findings,
         ))
@@ -210,7 +206,6 @@ fn scan_file(path: &Path, content: &str) -> Result<Vec<Finding<Rule>>> {
     let mut visitor = BindingVisitor {
         path,
         binding_aliases: aliases.binding_constructors,
-        generated_event_payload_aliases: aliases.generated_event_payload_traits,
         raw_transport_aliases,
         guard_raw_transport: is_active_producer_provider(path),
         guard_untyped_emit: is_active_producer_provider(path),
@@ -297,7 +292,6 @@ fn scan_reachable_raw_transport_helpers(
         let mut visitor = BindingVisitor {
             path: &node.path,
             binding_aliases: BindingConstructorAliases::new(),
-            generated_event_payload_aliases: BTreeSet::new(),
             raw_transport_aliases: aliases,
             guard_raw_transport: true,
             guard_untyped_emit: false,
@@ -639,7 +633,6 @@ fn expr_contains_projection_db_function(expr: &Expr) -> bool {
 struct BindingVisitor<'a> {
     path: &'a Path,
     binding_aliases: BindingConstructorAliases,
-    generated_event_payload_aliases: BTreeSet<String>,
     raw_transport_aliases: BTreeSet<String>,
     guard_raw_transport: bool,
     guard_untyped_emit: bool,
@@ -723,19 +716,6 @@ impl<'ast> Visit<'ast> for BindingVisitor<'_> {
         visit::visit_macro(self, node);
     }
 
-    fn visit_item_impl(&mut self, node: &'ast ItemImpl) {
-        self.with_test_scope(is_test_like(&node.attrs), |this| {
-            if this.in_test == 0 && is_trait_impl(node, &this.generated_event_payload_aliases) {
-                this.findings.push(finding(
-                    Rule::GeneratedEventPayloadImpl,
-                    this.path.display().to_string(),
-                    "生产代码不得手写 `GeneratedEventPayload`；请使用 generated event DTO",
-                ));
-            }
-            visit::visit_item_impl(this, node);
-        });
-    }
-
     fn visit_expr(&mut self, node: &'ast Expr) {
         if self.in_test == 0
             && !is_projection_events_wrapper(self.path)
@@ -815,16 +795,11 @@ fn item_attrs(item: &Item) -> &[Attribute] {
 
 struct AliasCollector {
     binding_constructors: BindingConstructorAliases,
-    generated_event_payload_traits: BTreeSet<String>,
 }
 
 impl<'ast> Visit<'ast> for AliasCollector {
     fn visit_item_use(&mut self, node: &'ast ItemUse) {
-        collect_use_tree_aliases(
-            &node.tree,
-            &mut self.binding_constructors,
-            &mut self.generated_event_payload_traits,
-        );
+        collect_use_tree_aliases(&node.tree, &mut self.binding_constructors);
         visit::visit_item_use(self, node);
     }
 
@@ -842,7 +817,6 @@ impl<'ast> Visit<'ast> for AliasCollector {
 
 struct SourceAliases {
     binding_constructors: BindingConstructorAliases,
-    generated_event_payload_traits: BTreeSet<String>,
 }
 
 fn collect_contract_binding_aliases(file: &syn::File) -> SourceAliases {
@@ -892,15 +866,12 @@ fn collect_contract_binding_aliases(file: &syn::File) -> SourceAliases {
         "SagaContractBinding",
         "SagaContractBinding",
     );
-    let generated_event_payload_traits = BTreeSet::from(["GeneratedEventPayload".to_string()]);
     let mut collector = AliasCollector {
         binding_constructors,
-        generated_event_payload_traits,
     };
     collector.visit_file(file);
     SourceAliases {
         binding_constructors: collector.binding_constructors,
-        generated_event_payload_traits: collector.generated_event_payload_traits,
     }
 }
 
@@ -1044,21 +1015,14 @@ fn macro_tokens_mention_raw_transport(
 
 type BindingConstructorAliases = BTreeMap<String, BTreeSet<&'static str>>;
 
-fn collect_use_tree_aliases(
-    tree: &UseTree,
-    aliases: &mut BindingConstructorAliases,
-    generated_event_payload_aliases: &mut BTreeSet<String>,
-) {
+fn collect_use_tree_aliases(tree: &UseTree, aliases: &mut BindingConstructorAliases) {
     match tree {
         UseTree::Path(path) => {
-            collect_use_tree_aliases(&path.tree, aliases, generated_event_payload_aliases);
+            collect_use_tree_aliases(&path.tree, aliases);
         }
         UseTree::Name(name) => {
             let ident = name.ident.to_string();
             insert_binding_alias(aliases, &ident, &ident);
-            if ident == "GeneratedEventPayload" {
-                generated_event_payload_aliases.insert(ident);
-            }
         }
         UseTree::Rename(rename) => {
             insert_binding_alias(
@@ -1066,13 +1030,10 @@ fn collect_use_tree_aliases(
                 &rename.rename.to_string(),
                 &rename.ident.to_string(),
             );
-            if rename.ident == "GeneratedEventPayload" {
-                generated_event_payload_aliases.insert(rename.rename.to_string());
-            }
         }
         UseTree::Group(group) => {
             for tree in &group.items {
-                collect_use_tree_aliases(tree, aliases, generated_event_payload_aliases);
+                collect_use_tree_aliases(tree, aliases);
             }
         }
         _ => {}
@@ -1143,15 +1104,6 @@ fn type_path_last_ident(ty: &Type) -> Option<String> {
         Type::Paren(paren) => type_path_last_ident(&paren.elem),
         _ => None,
     }
-}
-
-fn is_trait_impl(node: &ItemImpl, aliases: &BTreeSet<String>) -> bool {
-    let Some((_, path, _)) = &node.trait_ else {
-        return false;
-    };
-    path.segments
-        .last()
-        .is_some_and(|seg| aliases.contains(&seg.ident.to_string()))
 }
 
 fn is_test_like(attrs: &[Attribute]) -> bool {
@@ -1415,59 +1367,6 @@ mod tests {
             "event fact mint must stay generated-only"
         );
         assert_eq!(findings[0].rule, Rule::BareFromStatic);
-        Ok(())
-    }
-
-    #[test]
-    fn flags_prod_generated_event_payload_impl() -> anyhow::Result<()> {
-        let src = r#"
-            struct ForgedPayload;
-
-            impl vocab::GeneratedEventPayload for ForgedPayload {
-                const FACT: vocab::EventFactBinding =
-                    generated::event::identity_v1::session_created::FACT;
-            }
-        "#;
-        let findings = scan_file(Path::new("crates/x/src/lib.rs"), src)?;
-        assert_eq!(
-            findings.len(),
-            1,
-            "generated payload provenance must stay codegen-owned"
-        );
-        assert_eq!(findings[0].rule, Rule::GeneratedEventPayloadImpl);
-        Ok(())
-    }
-
-    #[test]
-    fn flags_prod_generated_event_payload_alias_and_glob_impls() -> anyhow::Result<()> {
-        for src in [
-            r#"
-                use vocab::GeneratedEventPayload as GeneratedPayload;
-
-                struct ForgedPayload;
-                impl GeneratedPayload for ForgedPayload {
-                    const FACT: vocab::EventFactBinding =
-                        generated::event::identity_v1::session_created::FACT;
-                }
-            "#,
-            r#"
-                use vocab::*;
-
-                struct ForgedPayload;
-                impl GeneratedEventPayload for ForgedPayload {
-                    const FACT: EventFactBinding =
-                        generated::event::identity_v1::session_created::FACT;
-                }
-            "#,
-        ] {
-            let findings = scan_file(Path::new("crates/x/src/lib.rs"), src)?;
-            assert_eq!(
-                findings.len(),
-                1,
-                "aliases and glob imports must not bypass generated payload ownership"
-            );
-            assert_eq!(findings[0].rule, Rule::GeneratedEventPayloadImpl);
-        }
         Ok(())
     }
 
@@ -2082,19 +1981,19 @@ mod tests {
         let generated_sources =
             rs_files(&root.join("generated/src/event")).expect("generated event sources");
         let mut fact_mints = 0usize;
-        let mut payload_impls = 0usize;
+        let mut contract_impls = 0usize;
         for path in generated_sources {
             let source = std::fs::read_to_string(path).expect("generated event source");
             fact_mints += source
                 .matches("::vocab::EventFactBinding::from_static")
                 .count();
-            payload_impls += source
-                .matches("impl ::vocab::GeneratedEventPayload for")
+            contract_impls += source
+                .matches("impl super::super::EventContract for Contract")
                 .count();
         }
         assert!(
-            fact_mints >= 6 && payload_impls >= 6,
-            "codegen owner must retain real event fact mints and payload impls; fact_mints={fact_mints}, payload_impls={payload_impls}"
+            fact_mints >= 6 && contract_impls >= 6,
+            "codegen owner must retain real event fact mints and sealed contract impls; fact_mints={fact_mints}, contract_impls={contract_impls}"
         );
     }
 }

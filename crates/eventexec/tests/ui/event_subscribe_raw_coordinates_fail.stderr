@@ -1,0 +1,22 @@
+error[E0061]: this function takes 2 arguments but 8 arguments were supplied
+  --> tests/ui/event_subscribe_raw_coordinates_fail.rs:14:13
+   |
+14 |     let _ = policy_updated::subscribe_audit(
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+note: function defined here
+  --> $WORKSPACE/generated/src/event/identity_v1.rs
+   |
+   |     pub fn subscribe_audit<Reg: super::super::EventSubscribe>(
+   |            ^^^^^^^^^^^^^^^
+help: remove the extra arguments
+   |
+16 -         capability,
+17 -         raw_contract,
+18 -         raw_schema,
+19 -         raw_topic,
+20 -         raw_consumer,
+21 -         raw_group,
+22 -         raw_canonical_envelope_id,
+16 +         capability,
+   |

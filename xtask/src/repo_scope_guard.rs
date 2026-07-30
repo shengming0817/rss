@@ -223,7 +223,7 @@ const INFRA_TENANT_SCOPE_ALLOWED_CALLS: &[(&str, &str)] = &[
     ("adapters/postgres/src/dlq.rs", "redrive_outbox"),
     ("adapters/postgres/src/dlq.rs", "resolve_expired_outbox"),
     ("adapters/postgres/src/dlq.rs", "replay_dead_letter"),
-    ("adapters/postgres/src/emitter.rs", "emit"),
+    ("adapters/postgres/src/emitter.rs", "write"),
     ("adapters/postgres/src/inbox.rs", "commit"),
     ("adapters/postgres/src/inbox.rs", "extend"),
     ("adapters/postgres/src/inbox.rs", "release"),
@@ -247,7 +247,7 @@ const INFRA_TENANT_SCOPE_ALLOWED_CALLS: &[(&str, &str)] = &[
         "execute_retry",
     ),
     ("adapters/postgres/src/outbox/settlement.rs", "execute_dlx"),
-    ("adapters/postgres/src/outbox_cdc.rs", "emit"),
+    ("adapters/postgres/src/outbox_cdc.rs", "write"),
     (
         "adapters/postgres/src/revocation.rs",
         "verify_revocation_capability",
@@ -740,6 +740,14 @@ mod tests {
                 "async fn record_command_with_business_write() { infra_tenant_scope(tenant); }\n\
                  async fn dispatch_command() { infra_tenant_scope(tenant); }"
                     .to_string(),
+            ),
+            (
+                "adapters/postgres/src/emitter.rs".to_string(),
+                "async fn write() { infra_tenant_scope(tenant); }".to_string(),
+            ),
+            (
+                "adapters/postgres/src/outbox_cdc.rs".to_string(),
+                "async fn write() { infra_tenant_scope(tenant); }".to_string(),
             ),
             (
                 "adapters/postgres/src/saga.rs".to_string(),

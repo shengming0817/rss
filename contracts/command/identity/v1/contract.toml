@@ -1,0 +1,18 @@
+# Device certificate application command. Draft until the production DeviceLatent loop is activated.
+id = "identity.apply-device-certificate"
+kind = "command"
+domain = "identity"
+version = "v1"
+owner = "identity"
+consistencyLevel = "OutboxFact"
+lifecycle = "draft"
+topic = "identity.commands.apply-device-certificate"
+
+[schemas]
+request = "request.schema.json"
+
+[command]
+journal = "required"
+
+[capabilities.outbox]
+role = "command"

@@ -18,9 +18,8 @@
 //! ref: etcd-io/etcd api/etcdserverpb/rpc.proto@main（CAS 版本模型：save 以 version+1 守乐观并发）
 //! ref: debezium outbox SMT / MassTransit Bus Outbox（业务写 + outbox 行同一本地事务，producer 侧 durable）
 
-use consistency::EventEntry;
-use diport::OutboxEnvelopeParts;
 use dynosaur::dynosaur;
+use eventexec::event::ReviewedEvent;
 use generated::http::settings_v2::{LOCAL_TX as SECRET_LOCAL_TX, ROUTE as SECRET_HTTP_ROUTE};
 
 /// Exact generated fact binding authorized by every config producer receipt.
@@ -153,8 +152,8 @@ pub trait ConfigRepoLocal: Send + Sync {
 ///
 /// 三条 route-specific commit 方法把各自的 generated producer receipt、CAS 配置 mutation 与
 /// `settings.config-version-changed` outbox 行 append **同一本地事务**原子落库（both-or-neither）——消除
-/// 「先 save 后 emit」的 write-without-event 窗口（#1232）。`outbox_entry` / `envelope` 由应用层内容派生
-/// 构造（topic / IdemKey / opaque subjectId），adapter 仅在事务内复用既有 `append_outbox` 落 durable outbox；
+/// 「先 save 后 emit」的 write-without-event 窗口（#1232）。应用层仅能经 generated sealed carrier
+/// 构造 [`ReviewedEvent`]；adapter 在事务内消费其已审查的 fact/envelope primitives 并落 durable outbox；
 /// relay 异步投递（at-least-once + 幂等去重）。provider 可换：prod postgres co-tx / test in-mem。
 ///
 /// 与 [`ConfigRepo`] 同 native-AFIT + trait_variant Send + dynosaur 范式；组合根经 `Box<DynConfigUnitOfWork>` 注入。
@@ -173,8 +172,7 @@ pub trait ConfigUnitOfWorkLocal: Send + Sync {
         receipt: ConfigPublishReceipt,
         scope: TenantRepoScope,
         mutation: ConfigMutation,
-        outbox_entry: EventEntry,
-        envelope: OutboxEnvelopeParts,
+        event: ReviewedEvent,
     ) -> Result<(), ConfigRepoError>;
 
     /// Commit a config tombstone and its generated deletion fact through the exact delete route.
@@ -183,8 +181,7 @@ pub trait ConfigUnitOfWorkLocal: Send + Sync {
         receipt: ConfigDeleteReceipt,
         scope: TenantRepoScope,
         mutation: ConfigMutation,
-        outbox_entry: EventEntry,
-        envelope: OutboxEnvelopeParts,
+        event: ReviewedEvent,
     ) -> Result<(), ConfigRepoError>;
 
     /// Commit a restored config version and its generated rollback fact through the exact route.
@@ -193,8 +190,7 @@ pub trait ConfigUnitOfWorkLocal: Send + Sync {
         receipt: ConfigRollbackReceipt,
         scope: TenantRepoScope,
         mutation: ConfigMutation,
-        outbox_entry: EventEntry,
-        envelope: OutboxEnvelopeParts,
+        event: ReviewedEvent,
     ) -> Result<(), ConfigRepoError>;
 }
 
@@ -405,8 +401,7 @@ impl<T: SettingsPortEffect + ?Sized> SettingsPortEffect for Box<T> {
 mod smoke {
     //! build smoke：域形 async repo / UoW port 可 native-AFIT impl + mockall mock（非 `#[async_trait]`）均经
     //! `Box<DynX>` 装入（PORT-SHAPE-01/02）。不调用方法 → 不依赖具体存储语义。
-    use consistency::EventEntry;
-    use diport::OutboxEnvelopeParts;
+    use eventexec::event::ReviewedEvent;
 
     use super::{
         ConfigDeleteReceipt, ConfigEntry, ConfigHead, ConfigMutation, ConfigPublishReceipt,
@@ -469,8 +464,7 @@ mod smoke {
             _receipt: ConfigPublishReceipt,
             _scope: TenantRepoScope,
             _mutation: ConfigMutation,
-            _outbox_entry: EventEntry,
-            _envelope: OutboxEnvelopeParts,
+            _event: ReviewedEvent,
         ) -> Result<(), ConfigRepoError> {
             Ok(())
         }
@@ -479,8 +473,7 @@ mod smoke {
             _receipt: ConfigDeleteReceipt,
             _scope: TenantRepoScope,
             _mutation: ConfigMutation,
-            _outbox_entry: EventEntry,
-            _envelope: OutboxEnvelopeParts,
+            _event: ReviewedEvent,
         ) -> Result<(), ConfigRepoError> {
             Ok(())
         }
@@ -489,8 +482,7 @@ mod smoke {
             _receipt: ConfigRollbackReceipt,
             _scope: TenantRepoScope,
             _mutation: ConfigMutation,
-            _outbox_entry: EventEntry,
-            _envelope: OutboxEnvelopeParts,
+            _event: ReviewedEvent,
         ) -> Result<(), ConfigRepoError> {
             Ok(())
         }
@@ -581,24 +573,21 @@ mod smoke {
                 receipt: ConfigPublishReceipt,
                 scope: TenantRepoScope,
                 mutation: ConfigMutation,
-                outbox_entry: EventEntry,
-                envelope: OutboxEnvelopeParts,
+                event: ReviewedEvent,
             ) -> Result<(), ConfigRepoError>;
             async fn commit_delete(
                 &self,
                 receipt: ConfigDeleteReceipt,
                 scope: TenantRepoScope,
                 mutation: ConfigMutation,
-                outbox_entry: EventEntry,
-                envelope: OutboxEnvelopeParts,
+                event: ReviewedEvent,
             ) -> Result<(), ConfigRepoError>;
             async fn commit_rollback(
                 &self,
                 receipt: ConfigRollbackReceipt,
                 scope: TenantRepoScope,
                 mutation: ConfigMutation,
-                outbox_entry: EventEntry,
-                envelope: OutboxEnvelopeParts,
+                event: ReviewedEvent,
             ) -> Result<(), ConfigRepoError>;
         }
     }

@@ -255,6 +255,17 @@ static TEST_PROJECTION_INPUTS: &[vocab::ProjectionInputBinding] =
         TEST_SCHEMA_HASH,
         "test.event",
     )];
+const SESSION_PROJECTION_INPUT_GENERATION: &str =
+    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+static SESSION_PROJECTION_INPUTS: &[vocab::ProjectionInputBinding] =
+    &[vocab::ProjectionInputBinding::from_static(
+        "test-projection",
+        "identity",
+        generated::event::identity_v1::session_created::CONTRACT.contract_id(),
+        generated::event::identity_v1::session_created::CONTRACT.version(),
+        generated::event::identity_v1::session_created::CONTRACT.schema_hash(),
+        generated::event::identity_v1::session_created::TOPIC,
+    )];
 
 fn test_contract() -> vocab::ContractBinding {
     vocab::ContractBinding::from_static("test", "test.contract", "v1", TEST_SCHEMA_HASH)
@@ -8848,6 +8859,74 @@ fn make_entry(event_id: &str) -> EventEntry {
     )
 }
 
+#[allow(clippy::unwrap_used)]
+fn generated_entry<P: serde::Serialize>(
+    fact: vocab::EventFactBinding,
+    payload: &P,
+    idempotency_key: IdemKey,
+) -> Result<EventEntry, serde_json::Error> {
+    Ok(EventEntry::new(
+        EventTopic::parse(fact.topic()).unwrap(),
+        idempotency_key,
+        reviewed_payload(&serde_json::to_vec(payload)?),
+    ))
+}
+
+/// Re-author an encoded fixture through the sealed generated contract before it reaches a
+/// production provider port. This keeps integration tests able to vary envelope scope and durable
+/// metadata without granting ordinary `EventEntry` values a production conversion path.
+async fn reviewed_generated_event<C>(
+    entry: EventEntry,
+    envelope: OutboxEnvelopeParts,
+) -> Result<eventexec::event::ReviewedEvent, TestError>
+where
+    C: generated::event::EventContract,
+    C::Payload: serde::de::DeserializeOwned + Send + Sync,
+{
+    if entry.topic().as_str() != C::FACT.topic() || envelope.contract() != &C::SPEC.contract() {
+        return Err("fixture topic or contract does not match its generated event contract".into());
+    }
+    let payload = serde_json::from_slice::<C::Payload>(entry.payload())?;
+    let idempotency_key = entry.idem_key().clone();
+    let (_contract, tenant, subject_id, actor, partition_key, causation_id) = envelope.into_parts();
+    if partition_key.is_some() || causation_id.is_some() {
+        return Err("fixture cannot override generated transport coordinates after review".into());
+    }
+    let reviewed = generated::event::EventEmit::emit::<C>(
+        &eventexec::event::GeneratedEventEncoder,
+        &payload,
+        tenant,
+        subject_id,
+        actor,
+        idempotency_key,
+    )
+    .await?;
+    Ok(reviewed)
+}
+
+async fn reviewed_session_event(
+    event_id: &str,
+    tenant: vocab::TenantId,
+    envelope_subject: &str,
+    actor: diport::OutboxActor,
+    session_id: &str,
+) -> Result<eventexec::event::ReviewedEvent, TestError> {
+    Ok(generated::event::identity_v1::session_created::emit(
+        &eventexec::event::GeneratedEventEncoder,
+        generated::event::identity_v1::session_created::IdentitySessionCreatedPayload {
+            session_id: session_id.to_owned(),
+            subject: uuid::Uuid::from_u128(0x51),
+            tenant_id: tenant.to_string(),
+            occurred_at: expected_occurred_at(),
+        },
+        tenant,
+        subject_id(envelope_subject),
+        actor,
+        IdemKey::parse(event_id)?,
+    )
+    .await?)
+}
+
 async fn claimed_entry_for_event(
     store: &PgStore,
     event_id: &str,
@@ -9569,73 +9648,47 @@ async fn projection_writer_funnel_mirrors_only_generated_bound_insert_once() -> 
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn projection_writer_funnel_runtime_setup_mirrors_generated_bound_emit() -> TestResult {
-    use diport::{OutboxEmitter, OutboxEnvelopeParts};
+async fn projection_writer_runtime_setup_mirrors_reviewed_generated_event() -> TestResult {
+    use eventexec::event::ReviewedEventWriter as _;
 
     let (pg, deps) = setup_runtime_deps_with_projection_inputs(
-        TEST_PROJECTION_INPUT_GENERATION,
-        TEST_PROJECTION_INPUTS,
+        SESSION_PROJECTION_INPUT_GENERATION,
+        SESSION_PROJECTION_INPUTS,
     )
     .await?;
     let emitter = deps.handle().infra().emitter(fixed_clock());
-    let event_id = unique_event_id("projection-runtime-bound");
+    let event_id = unique_event_id("projection-runtime-session");
+    let tenant = test_tenant();
+    let event = reviewed_session_event(
+        &event_id,
+        tenant,
+        "projection-runtime-subject",
+        actor_for(tenant),
+        "projection-runtime-session",
+    )
+    .await?;
 
-    emitter
-        .emit(
-            make_entry(&event_id),
-            OutboxEnvelopeParts::new(
-                vocab::ContractBinding::from_static(
-                    "test",
-                    "projection.bound",
-                    "v1",
-                    TEST_SCHEMA_HASH,
-                ),
-                test_tenant(),
-                subject_id(&event_id),
-                actor_for(test_tenant()),
-            ),
-        )
-        .await?;
+    emitter.write(event).await?;
 
     let pool = runtime_assertion_pool(pg.params()).await?;
     let binding_count: (i64,) = sqlx::query_as(
-        r#"
-        SELECT count(*)
-        FROM projection_input_bindings
-        WHERE contract_id = 'projection.bound'
-          AND contract_version = 'v1'
-          AND schema_hash = $1
-          AND topic = 'test.event'
-        "#,
+        "SELECT count(*) FROM projection_input_bindings \
+         WHERE contract_id = $1 AND contract_version = $2 AND schema_hash = $3 AND topic = $4",
     )
-    .bind(TEST_SCHEMA_HASH)
+    .bind(generated::event::identity_v1::session_created::CONTRACT.contract_id())
+    .bind(generated::event::identity_v1::session_created::CONTRACT.version())
+    .bind(generated::event::identity_v1::session_created::CONTRACT.schema_hash())
+    .bind(generated::event::identity_v1::session_created::TOPIC)
     .fetch_one(&pool)
     .await?;
-    assert_eq!(
-        binding_count.0, 1,
-        "PgRuntimeDeps::setup must refresh DB-side projection bindings"
-    );
+    assert_eq!(binding_count.0, 1);
 
-    let projection_rows: Vec<(String, String, String, String)> = sqlx::query_as(
-        r#"
-        SELECT event_id, contract_id, contract_version, schema_hash
-        FROM projection_events
-        WHERE event_id = $1
-        "#,
-    )
-    .bind(&event_id)
-    .fetch_all(&pool)
-    .await?;
-    assert_eq!(
-        projection_rows,
-        vec![(
-            event_id,
-            "projection.bound".to_string(),
-            "v1".to_string(),
-            TEST_SCHEMA_HASH.to_string(),
-        )],
-        "runtime emitter must mirror generated-bound outbox facts to projection_events"
-    );
+    let projection_count: (i64,) =
+        sqlx::query_as("SELECT count(*) FROM projection_events WHERE event_id = $1")
+            .bind(&event_id)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(projection_count.0, 1);
 
     pool.close().await;
     let (resources, _sampler_factory) = deps.into_runtime_parts(std::time::Duration::from_secs(1));
@@ -13840,7 +13893,7 @@ async fn localtx_settlement_connection_policy() -> TestResult {
     let operation_pid = Arc::clone(&co_tx_pid);
     let authorization = settings::config_publish_receipt_for_test()
         .authorize(
-            <generated::event::settings_v1::SettingsConfigVersionChangedPayload as vocab::GeneratedEventPayload>::FACT,
+            generated::event::settings_v1::FACT,
             settings::ports::CONFIG_VERSION_CHANGED_CONTRACT,
         )
         .ok_or_else(|| std::io::Error::other("config producer authorization missing"))?;
@@ -13884,7 +13937,7 @@ async fn localtx_settlement_connection_policy() -> TestResult {
     let operation_pid = Arc::clone(&co_tx_pid);
     let authorization = settings::config_publish_receipt_for_test()
         .authorize(
-            <generated::event::settings_v1::SettingsConfigVersionChangedPayload as vocab::GeneratedEventPayload>::FACT,
+            generated::event::settings_v1::FACT,
             settings::ports::CONFIG_VERSION_CHANGED_CONTRACT,
         )
         .ok_or_else(|| std::io::Error::other("config producer authorization missing"))?;
@@ -19031,16 +19084,16 @@ async fn generated_fingerprint_allows_real_claim_settle_and_redrive() -> TestRes
 
 // ── T10: PgEmitter durable emit（#1100/T008）──────────────────────────────────
 //
-// 原子性回滚（acc #3）由 T1（append_outbox in rolled-back tx → 无 entry）守——PgEmitter::emit 复用
+// 原子性回滚（acc #3）由 T1（append_outbox in rolled-back tx → 无 entry）守——PgEmitter::write 复用
 // append_outbox + 事务，故原子性结构上同源。本测覆盖 emit commit 路径的写正确性（acc #1 的 entry 形态）。
 
-/// PgEmitter::emit 落 durable outbox：恰 1 行 pending，event_id(=EventId)/domain/topic 正确，
+/// PgEmitter::write 落 durable outbox：恰 1 行 pending，event_id(=EventId)/domain/topic 正确，
 /// metadata 含标准 header + opaque subjectId（无完整 PII，FR-020）。
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::unwrap_used)]
 // reason: 集成测试 happy-path——EventTopic/IdemKey parse 已知合法值；函数级 item-level carve-out（error-handling.md §Carve-out）。
 async fn t10_pg_emitter_commits_one_pending_with_eventid_and_subject() -> TestResult {
-    use diport::{OutboxEmitter, OutboxEnvelopeParts};
+    use eventexec::event::ReviewedEventWriter as _;
 
     let (_pg, store) = connect_pg().await?;
     // F5(#1194)：仅建表、不全表 DELETE——本用例按 unique `event_id` 隔离断言（`WHERE event_id = $1`），不需
@@ -19049,22 +19102,11 @@ async fn t10_pg_emitter_commits_one_pending_with_eventid_and_subject() -> TestRe
     store.run_migrations().await?;
 
     let event_id = unique_event_id("t10-emit");
-    let entry = EventEntry::new(
-        EventTopic::parse(SESSION_CREATED_TOPIC).unwrap(),
-        IdemKey::parse(&event_id).unwrap(),
-        reviewed_payload(br#"{"sessionId":"s"}"#),
-    );
     let tenant = test_tenant();
+    let event =
+        reviewed_session_event(&event_id, tenant, "subj-opaque-77", actor_for(tenant), "s").await?;
     crate::PgEmitter::new(&store, fixed_clock())
-        .emit(
-            entry,
-            OutboxEnvelopeParts::new(
-                session_contract(),
-                tenant,
-                subject_id("subj-opaque-77"),
-                actor_for(tenant),
-            ),
-        )
+        .write(event)
         .await?;
 
     let row: (
@@ -19166,7 +19208,70 @@ async fn t10_pg_emitter_commits_one_pending_with_eventid_and_subject() -> TestRe
     Ok(())
 }
 
-/// PgOutboxCdcEmitter::emit writes the opt-in append-only CDC table only.
+/// A generated event authored from a verified consumer handler persists the consumed envelope ID
+/// as causation. The handler cannot pass that ID to the generated wrapper; the eventexec task-local
+/// origin is therefore the only path that can populate this provider column.
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::expect_used)]
+// reason: integration-test handler must return HandleResult rather than TestResult; known-valid
+// fixtures and provider writes fail the test immediately through expect.
+async fn t10b_pg_emitter_persists_verified_consumer_causation() -> TestResult {
+    use eventexec::event::ReviewedEventWriter as _;
+
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+
+    let parent_id = unique_event_id("t10-parent");
+    let child_id = unique_event_id("t10-child");
+    let group = unique_event_id("t10-causation-group");
+    let tenant = test_tenant();
+    let emitter = Arc::new(crate::PgEmitter::new(&store, fixed_clock()));
+    let child_id_for_handler = child_id.clone();
+    let handler = move |_message: Message| {
+        let emitter = Arc::clone(&emitter);
+        let child_id = child_id_for_handler.clone();
+        Box::pin(async move {
+            let event = reviewed_session_event(
+                &child_id,
+                tenant,
+                "verified-consumer-child",
+                actor_for(tenant),
+                "child-session",
+            )
+            .await
+            .expect("generated child event should encode");
+            emitter
+                .write(event)
+                .await
+                .expect("reviewed child event should persist");
+            HandleResult::ack()
+        }) as futures::future::BoxFuture<'static, HandleResult>
+    };
+
+    let (stream, acker) = conf_delivery_stream(&parent_id);
+    run_consumer_ackable(
+        stream,
+        Arc::new(store.inbox()),
+        DynDeadLetterStore::new_box(store.dead_letter(test_dlx_payload_protector())),
+        conf_consumer_meta(&group),
+        handler,
+        conf_lease_cfg(),
+    )
+    .await;
+
+    assert_eq!(acker.exactly_one_action()?, AckAction::Ack);
+    let causation_id: Option<String> =
+        sqlx::query_scalar("SELECT causation_id FROM outbox WHERE event_id = $1")
+            .bind(&child_id)
+            .fetch_one(&store.pool)
+            .await?;
+    assert_eq!(causation_id.as_deref(), Some(parent_id.as_str()));
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// PgOutboxCdcEmitter::write writes the opt-in append-only CDC table only.
 ///
 /// It must not fallback to relay `outbox`, and duplicate event_id emits remain idempotent.
 type OutboxCdcEmitterRow = (
@@ -19188,34 +19293,24 @@ type OutboxCdcEmitterRow = (
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::unwrap_used)]
 async fn outbox_cdc_emitter_appends_once_without_relay_outbox_fallback() -> TestResult {
-    use consistency::PartitionKey;
-    use diport::{EnvelopeCausationId, OutboxEmitter, OutboxEnvelopeParts};
+    use eventexec::event::ReviewedEventWriter as _;
 
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
 
     let event_id = unique_event_id("outbox-cdc-emit");
     let tenant = test_tenant();
-    let make_entry = || {
-        EventEntry::new(
-            EventTopic::parse(SESSION_CREATED_TOPIC).unwrap(),
-            IdemKey::parse(&event_id).unwrap(),
-            reviewed_payload(br#"{"sessionId":"cdc"}"#),
-        )
-    };
-    let make_envelope = || {
-        OutboxEnvelopeParts::new(
-            session_contract(),
-            tenant,
-            subject_id("cdc-subj-opaque-77"),
-            actor_for(tenant),
-        )
-        .with_partition_key(PartitionKey::parse("tenant-7:session-9").unwrap())
-        .with_causation_id(EnvelopeCausationId::from_opaque("cdc-cause-1").unwrap())
-    };
+    let event = reviewed_session_event(
+        &event_id,
+        tenant,
+        "cdc-subj-opaque-77",
+        actor_for(tenant),
+        "cdc",
+    )
+    .await?;
     let emitter = crate::PgOutboxCdcEmitter::new(&store, fixed_clock());
-    emitter.emit(make_entry(), make_envelope()).await?;
-    emitter.emit(make_entry(), make_envelope()).await?;
+    emitter.write(event.clone()).await?;
+    emitter.write(event).await?;
 
     let count: (i64,) = sqlx::query_as("SELECT count(*) FROM outbox_log WHERE event_id = $1")
         .bind(&event_id)
@@ -19237,15 +19332,15 @@ async fn outbox_cdc_emitter_appends_once_without_relay_outbox_fallback() -> Test
     assert_eq!(row.0, tenant.to_string(), "tenant_id");
     assert_eq!(row.1, "identity", "aggregate_type");
     assert_eq!(row.2, "cdc-subj-opaque-77", "aggregate_id");
-    assert_ne!(
-        row.2, "tenant-7:session-9",
-        "CDC aggregate_id must not expose partition_key"
-    );
     assert_eq!(row.3, SESSION_CREATED_TOPIC, "topic");
     assert_eq!(row.4, "identity.session-created", "contract_id");
     assert_eq!(row.5, "v1", "contract_version");
     assert_eq!(row.6, session_contract().schema_hash(), "schema_hash");
-    assert_eq!(row.7, br#"{"sessionId":"cdc"}"#, "payload");
+    let payload: serde_json::Value = serde_json::from_slice(&row.7)?;
+    assert_eq!(
+        payload.get("sessionId").and_then(serde_json::Value::as_str),
+        Some("cdc")
+    );
     assert_eq!(
         row.8.get("tenantId").and_then(serde_json::Value::as_str),
         Some(tenant_text.as_str()),
@@ -19263,7 +19358,7 @@ async fn outbox_cdc_emitter_appends_once_without_relay_outbox_fallback() -> Test
         Some(session_contract().schema_hash()),
         "metadata schemaHash"
     );
-    assert_eq!(row.9.as_deref(), Some("cdc-cause-1"), "causation_id");
+    assert_eq!(row.9, None, "generated event has no causation override");
     let expected_occurred_at_header = expected_occurred_at().to_string();
     assert_eq!(
         row.10.as_deref(),
@@ -19289,35 +19384,32 @@ async fn outbox_cdc_emitter_appends_once_without_relay_outbox_fallback() -> Test
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::unwrap_used)]
 async fn outbox_cdc_emitter_rejects_event_id_conflict_with_different_payload() -> TestResult {
-    use diport::{OutboxEmitter, OutboxEnvelopeParts};
+    use eventexec::event::ReviewedEventWriter as _;
 
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
 
     let event_id = unique_event_id("outbox-cdc-conflict");
     let tenant = test_tenant();
-    let make_entry = |payload: &'static [u8]| {
-        EventEntry::new(
-            EventTopic::parse(SESSION_CREATED_TOPIC).unwrap(),
-            IdemKey::parse(&event_id).unwrap(),
-            reviewed_payload(payload),
-        )
-    };
-    let make_envelope = || {
-        OutboxEnvelopeParts::new(
-            session_contract(),
-            tenant,
-            subject_id("cdc-conflict-subject"),
-            actor_for(tenant),
-        )
-    };
+    let first = reviewed_session_event(
+        &event_id,
+        tenant,
+        "cdc-conflict-subject",
+        actor_for(tenant),
+        "first",
+    )
+    .await?;
+    let second = reviewed_session_event(
+        &event_id,
+        tenant,
+        "cdc-conflict-subject",
+        actor_for(tenant),
+        "second",
+    )
+    .await?;
     let emitter = crate::PgOutboxCdcEmitter::new(&store, fixed_clock());
-    emitter
-        .emit(make_entry(br#"{"sessionId":"first"}"#), make_envelope())
-        .await?;
-    let conflict = emitter
-        .emit(make_entry(br#"{"sessionId":"second"}"#), make_envelope())
-        .await;
+    emitter.write(first).await?;
+    let conflict = emitter.write(second).await;
     let Err(conflict) = conflict else {
         return Err("same event_id with different immutable CDC payload must fail".into());
     };
@@ -19336,54 +19428,11 @@ async fn outbox_cdc_emitter_rejects_event_id_conflict_with_different_payload() -
             .fetch_one(&store.pool)
             .await?;
     assert_eq!(row.0, 1, "event_id conflict must not append a second row");
+    let payload: serde_json::Value = serde_json::from_slice(&row.1)?;
     assert_eq!(
-        row.1, br#"{"sessionId":"first"}"#,
+        payload.get("sessionId").and_then(serde_json::Value::as_str),
+        Some("first"),
         "event_id conflict must preserve the original immutable row"
-    );
-
-    store.shutdown().await?;
-    Ok(())
-}
-
-/// PgEmitter::emit 可选 causation_id 落物理列；metadata 不承载该值（persisted-only）。
-#[tokio::test(flavor = "multi_thread")]
-#[allow(clippy::unwrap_used)]
-async fn t10_pg_emitter_persists_nonempty_causation_id() -> TestResult {
-    use diport::{EnvelopeCausationId, OutboxEmitter, OutboxEnvelopeParts};
-
-    let (_pg, store) = connect_pg().await?;
-    store.run_migrations().await?;
-
-    let event_id = unique_event_id("t10-causation");
-    let entry = EventEntry::new(
-        EventTopic::parse(SESSION_CREATED_TOPIC).unwrap(),
-        IdemKey::parse(&event_id).unwrap(),
-        reviewed_payload(br#"{"sessionId":"s-cause"}"#),
-    );
-    let tenant = test_tenant();
-    crate::PgEmitter::new(&store, fixed_clock())
-        .emit(
-            entry,
-            OutboxEnvelopeParts::new(
-                session_contract(),
-                tenant,
-                subject_id("subj-cause"),
-                actor_for(tenant),
-            )
-            .with_causation_id(EnvelopeCausationId::from_opaque("upstream-event-1").unwrap()),
-        )
-        .await?;
-
-    let row: (Option<String>, String) =
-        sqlx::query_as("SELECT causation_id, metadata::text FROM outbox WHERE event_id = $1")
-            .bind(&event_id)
-            .fetch_one(&store.pool)
-            .await?;
-    assert_eq!(row.0.as_deref(), Some("upstream-event-1"));
-    assert!(
-        !row.1.contains("upstream-event-1"),
-        "causation_id persisted-only，不应进入 metadata: {}",
-        row.1
     );
 
     store.shutdown().await?;
@@ -19517,15 +19566,18 @@ impl RefreshProducerCase {
             self.grant.clone(),
             self.old.clone(),
         );
-        let _ = crate::PgAuthGrantLifecycle::new(app, fixed_clock())
-            .persist_login_grant(
-                login_producer_receipt(),
-                identity_scope(self.tenant),
-                mutation,
-                entry,
-                envelope,
-            )
-            .await?;
+        let _ =
+            crate::PgAuthGrantLifecycle::new(app, fixed_clock())
+                .persist_login_grant(
+                    login_producer_receipt(),
+                    identity_scope(self.tenant),
+                    mutation,
+                    reviewed_generated_event::<
+                        generated::event::identity_v1::session_created::Contract,
+                    >(entry, envelope)
+                    .await?,
+                )
+                .await?;
         Ok(())
     }
 
@@ -19594,6 +19646,7 @@ async fn auth_grant_validation_input(
     Ok(receipt.into_validation_input())
 }
 
+#[allow(clippy::expect_used)]
 fn auth_grant_login_parts(
     event_id: &str,
     grant: AuthGrant,
@@ -19603,7 +19656,25 @@ fn auth_grant_login_parts(
     consistency::EventEntry,
     OutboxEnvelopeParts,
 ) {
-    let entry = identity::test_support::session_created_entry(event_id, &grant);
+    let occurred_at = i64::try_from(
+        grant
+            .created_at()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .expect("test grant creation must follow the Unix epoch")
+            .as_secs(),
+    )
+    .expect("test grant creation must fit the generated timestamp");
+    let entry = generated_entry(
+        generated::event::identity_v1::session_created::FACT,
+        &generated::event::identity_v1::session_created::IdentitySessionCreatedPayload {
+            session_id: grant.id().as_str().to_owned(),
+            subject: grant.user_id().as_uuid(),
+            tenant_id: grant.tenant().to_string(),
+            occurred_at,
+        },
+        IdemKey::parse(event_id).expect("test event id must be a valid idempotency key"),
+    )
+    .expect("generated session-created fixture must serialize");
     let envelope = OutboxEnvelopeParts::new(
         generated::event::identity_v1::session_created::CONTRACT,
         grant.tenant(),
@@ -19683,8 +19754,10 @@ async fn auth_grant_login_commits_root_refresh_and_outbox_together() -> TestResu
             login_producer_receipt(),
             identity_scope(tenant),
             mutation,
-            entry,
-            envelope,
+            reviewed_generated_event::<generated::event::identity_v1::session_created::Contract>(
+                entry, envelope,
+            )
+            .await?,
         )
         .await?;
 
@@ -20266,8 +20339,10 @@ async fn auth_grant_validator_fences_every_durable_binding_in_one_port_call() ->
             login_producer_receipt(),
             identity_scope(tenant),
             mutation,
-            entry,
-            envelope,
+            reviewed_generated_event::<generated::event::identity_v1::session_created::Contract>(
+                entry, envelope,
+            )
+            .await?,
         )
         .await?;
 
@@ -20486,16 +20561,19 @@ async fn auth_grant_login_each_business_write_failure_rolls_back_everything() ->
         let (grant, refresh) =
             auth_grant_fixture(tenant, user_id, &grant_id, &refresh_id, [suffix; 32]);
         let (mutation, entry, envelope) = auth_grant_login_parts(&event_id, grant, refresh);
-        let result = crate::PgAuthGrantLifecycle::new(&store, fixed_clock())
-            .with_login_fault(&grant_id, fault)
-            .persist_login_grant(
-                login_producer_receipt(),
-                identity_scope(tenant),
-                mutation,
-                entry,
-                envelope,
-            )
-            .await;
+        let result =
+            crate::PgAuthGrantLifecycle::new(&store, fixed_clock())
+                .with_login_fault(&grant_id, fault)
+                .persist_login_grant(
+                    login_producer_receipt(),
+                    identity_scope(tenant),
+                    mutation,
+                    reviewed_generated_event::<
+                        generated::event::identity_v1::session_created::Contract,
+                    >(entry, envelope)
+                    .await?,
+                )
+                .await;
         assert!(result.is_err(), "injected write failure must surface");
         assert_eq!(
             auth_grant_login_counts(&store, &grant_id, &refresh_id, &event_id).await?,
@@ -20526,8 +20604,10 @@ async fn auth_grant_login_outbox_conflict_rolls_back_root_and_refresh() -> TestR
             login_producer_receipt(),
             identity_scope(tenant),
             mutation,
-            entry,
-            envelope,
+            reviewed_generated_event::<generated::event::identity_v1::session_created::Contract>(
+                entry, envelope,
+            )
+            .await?,
         )
         .await
         .err()
@@ -20564,8 +20644,10 @@ async fn auth_grant_login_commit_unknown_returns_error_without_partial_state() -
             login_producer_receipt(),
             identity_scope(tenant),
             mutation,
-            entry,
-            envelope,
+            reviewed_generated_event::<generated::event::identity_v1::session_created::Contract>(
+                entry, envelope,
+            )
+            .await?,
         )
         .await;
     assert!(
@@ -20615,8 +20697,10 @@ async fn auth_grant_login_plain_producer_lock_wait_is_bounded_and_rolls_back() -
             login_producer_receipt(),
             identity_scope(tenant),
             mutation,
-            entry,
-            envelope,
+            reviewed_generated_event::<generated::event::identity_v1::session_created::Contract>(
+                entry, envelope,
+            )
+            .await?,
         ),
     )
     .await
@@ -20682,8 +20766,10 @@ async fn auth_grant_login_rejects_stale_epoch_after_security_event_commits() -> 
             login_producer_receipt(),
             identity_scope(tenant),
             mutation,
-            entry,
-            envelope,
+            reviewed_generated_event::<generated::event::identity_v1::session_created::Contract>(
+                entry, envelope,
+            )
+            .await?,
         )
         .await;
     assert!(
@@ -20730,13 +20816,21 @@ async fn auth_grant_login_account_lock_serializes_security_event_without_deadloc
     let login = tokio::spawn(async move {
         crate::PgAuthGrantLifecycle::new(&login_store, fixed_clock())
             .with_login_lock_gate(login_gate)
-            .persist_login_grant(
-                login_producer_receipt(),
-                identity_scope(tenant),
-                mutation,
-                entry,
-                envelope,
-            )
+.persist_login_grant(
+    login_producer_receipt(),
+    identity_scope(tenant),
+    mutation,
+    reviewed_generated_event::<generated::event::identity_v1::session_created::Contract>(
+        entry,
+        envelope,
+    )
+    .await
+    .map_err(|_| {
+        diport::OutboxEmitError::new(std::io::Error::other(
+            "generated session fixture review failed",
+        ))
+    })?,
+)
             .await
     });
     gate.wait_until_locked().await;
@@ -20823,8 +20917,10 @@ async fn auth_grant_serving_role_has_exact_mutation_acl() -> TestResult {
             login_producer_receipt(),
             identity_scope(tenant),
             mutation,
-            entry,
-            envelope,
+            reviewed_generated_event::<generated::event::identity_v1::session_created::Contract>(
+                entry, envelope,
+            )
+            .await?,
         )
         .await?;
 
@@ -21019,15 +21115,18 @@ async fn password_change_security_event_updates_credential_revokes_sessions_and_
         );
         let (mutation, entry, envelope) =
             auth_grant_login_parts(&unique_event_id("password-security-login"), grant, refresh);
-        let _ = grant_lifecycle
-            .persist_login_grant(
-                login_producer_receipt(),
-                identity_scope(tenant),
-                mutation,
-                entry,
-                envelope,
-            )
-            .await?;
+        let _ =
+            grant_lifecycle
+                .persist_login_grant(
+                    login_producer_receipt(),
+                    identity_scope(tenant),
+                    mutation,
+                    reviewed_generated_event::<
+                        generated::event::identity_v1::session_created::Contract,
+                    >(entry, envelope)
+                    .await?,
+                )
+                .await?;
     }
 
     let credential = credentials
@@ -21153,15 +21252,18 @@ async fn password_change_concurrent_full_lifecycle_cas_has_exactly_one_winner() 
             grant,
             refresh,
         );
-        let _ = grant_lifecycle
-            .persist_login_grant(
-                login_producer_receipt(),
-                identity_scope(tenant),
-                mutation,
-                entry,
-                envelope,
-            )
-            .await?;
+        let _ =
+            grant_lifecycle
+                .persist_login_grant(
+                    login_producer_receipt(),
+                    identity_scope(tenant),
+                    mutation,
+                    reviewed_generated_event::<
+                        generated::event::identity_v1::session_created::Contract,
+                    >(entry, envelope)
+                    .await?,
+                )
+                .await?;
     }
 
     let expected_credential = credentials
@@ -21295,8 +21397,10 @@ async fn identity_security_full_snapshot_cas_rejects_timestamp_only_staleness() 
             login_producer_receipt(),
             identity_scope(password_tenant),
             mutation,
-            entry,
-            envelope,
+            reviewed_generated_event::<generated::event::identity_v1::session_created::Contract>(
+                entry, envelope,
+            )
+            .await?,
         )
         .await?;
     let password_account = accounts
@@ -21512,15 +21616,18 @@ async fn password_change_security_event_fault_matrix_rolls_back_every_stage() ->
             grant,
             refresh,
         );
-        let _ = crate::PgAuthGrantLifecycle::new(&store, fixed_clock())
-            .persist_login_grant(
-                login_producer_receipt(),
-                identity_scope(tenant),
-                mutation,
-                entry,
-                envelope,
-            )
-            .await?;
+        let _ =
+            crate::PgAuthGrantLifecycle::new(&store, fixed_clock())
+                .persist_login_grant(
+                    login_producer_receipt(),
+                    identity_scope(tenant),
+                    mutation,
+                    reviewed_generated_event::<
+                        generated::event::identity_v1::session_created::Contract,
+                    >(entry, envelope)
+                    .await?,
+                )
+                .await?;
         let account = crate::PgAccountSecurityRepo::from_unverified_for_test(&store)
             .find(identity_scope(tenant), user)
             .await?
@@ -21694,15 +21801,18 @@ async fn credential_security_lifecycle_applies_account_cas_and_grant_promotion_a
         ),
     ] {
         let (mutation, entry, envelope) = auth_grant_login_parts(&event_id, grant, refresh);
-        let _persisted = grant_lifecycle
-            .persist_login_grant(
-                login_producer_receipt(),
-                identity_scope(account_tenant),
-                mutation,
-                entry,
-                envelope,
-            )
-            .await?;
+        let _persisted =
+            grant_lifecycle
+                .persist_login_grant(
+                    login_producer_receipt(),
+                    identity_scope(account_tenant),
+                    mutation,
+                    reviewed_generated_event::<
+                        generated::event::identity_v1::session_created::Contract,
+                    >(entry, envelope)
+                    .await?,
+                )
+                .await?;
     }
     let same_tenant_decoy_user = ids::UserId::parse(&uuid::Uuid::new_v4().to_string())?;
     let other_tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
@@ -21740,15 +21850,18 @@ async fn credential_security_lifecycle_applies_account_cas_and_grant_promotion_a
         ),
     ] {
         let (mutation, entry, envelope) = auth_grant_login_parts(&event_id, grant, refresh);
-        let _persisted = grant_lifecycle
-            .persist_login_grant(
-                login_producer_receipt(),
-                identity_scope(tenant),
-                mutation,
-                entry,
-                envelope,
-            )
-            .await?;
+        let _persisted =
+            grant_lifecycle
+                .persist_login_grant(
+                    login_producer_receipt(),
+                    identity_scope(tenant),
+                    mutation,
+                    reviewed_generated_event::<
+                        generated::event::identity_v1::session_created::Contract,
+                    >(entry, envelope)
+                    .await?,
+                )
+                .await?;
     }
     sqlx::query(
         "UPDATE refresh_tokens SET status = 'consumed' \
@@ -21898,15 +22011,18 @@ async fn credential_security_lifecycle_applies_account_cas_and_grant_promotion_a
         ),
     ] {
         let (mutation, entry, envelope) = auth_grant_login_parts(&event_id, grant, refresh);
-        let _persisted = grant_lifecycle
-            .persist_login_grant(
-                login_producer_receipt(),
-                identity_scope(grant_tenant),
-                mutation,
-                entry,
-                envelope,
-            )
-            .await?;
+        let _persisted =
+            grant_lifecycle
+                .persist_login_grant(
+                    login_producer_receipt(),
+                    identity_scope(grant_tenant),
+                    mutation,
+                    reviewed_generated_event::<
+                        generated::event::identity_v1::session_created::Contract,
+                    >(entry, envelope)
+                    .await?,
+                )
+                .await?;
     }
     let logout_at = root.created_at() + Duration::from_secs(1);
     let stale_logout = identity::test_support::logout_current_command(
@@ -22014,8 +22130,10 @@ async fn credential_security_route_transactions_linearize_duplicate_validated_co
             login_producer_receipt(),
             identity_scope(all_tenant),
             mutation,
-            entry,
-            envelope,
+            reviewed_generated_event::<generated::event::identity_v1::session_created::Contract>(
+                entry, envelope,
+            )
+            .await?,
         )
         .await?;
     let observed_at = SystemTime::UNIX_EPOCH + Duration::from_secs(TEST_OCCURRED_SECS);
@@ -22079,8 +22197,10 @@ async fn credential_security_route_transactions_linearize_duplicate_validated_co
             login_producer_receipt(),
             identity_scope(current_tenant),
             mutation,
-            entry,
-            envelope,
+            reviewed_generated_event::<generated::event::identity_v1::session_created::Contract>(
+                entry, envelope,
+            )
+            .await?,
         )
         .await?;
     let current_barrier = std::sync::Arc::new(tokio::sync::Barrier::new(3));
@@ -22153,8 +22273,10 @@ async fn credential_security_lifecycle_rolls_back_before_outbox_and_never_receip
             login_producer_receipt(),
             identity_scope(tenant),
             mutation,
-            entry,
-            envelope,
+            reviewed_generated_event::<generated::event::identity_v1::session_created::Contract>(
+                entry, envelope,
+            )
+            .await?,
         )
         .await?;
     let state_at = SystemTime::UNIX_EPOCH + Duration::from_secs(TEST_OCCURRED_SECS);
@@ -22290,15 +22412,18 @@ async fn credential_security_lifecycle_real_append_and_precommit_failures_roll_b
             grant,
             refresh,
         );
-        let _persisted = crate::PgAuthGrantLifecycle::new(&store, fixed_clock())
-            .persist_login_grant(
-                login_producer_receipt(),
-                identity_scope(tenant),
-                mutation,
-                entry,
-                envelope,
-            )
-            .await?;
+        let _persisted =
+            crate::PgAuthGrantLifecycle::new(&store, fixed_clock())
+                .persist_login_grant(
+                    login_producer_receipt(),
+                    identity_scope(tenant),
+                    mutation,
+                    reviewed_generated_event::<
+                        generated::event::identity_v1::session_created::Contract,
+                    >(entry, envelope)
+                    .await?,
+                )
+                .await?;
 
         let state_at = SystemTime::UNIX_EPOCH + Duration::from_secs(TEST_OCCURRED_SECS);
         let state = identity::test_support::account_security_state(AccountSecuritySnapshot {
@@ -22372,8 +22497,10 @@ async fn auth_grant_composite_fk_rejects_every_mismatched_refresh_binding() -> T
             login_producer_receipt(),
             identity_scope(tenant_a),
             mutation,
-            entry,
-            envelope,
+            reviewed_generated_event::<generated::event::identity_v1::session_created::Contract>(
+                entry, envelope,
+            )
+            .await?,
         )
         .await?;
 
@@ -26418,56 +26545,6 @@ async fn t29_sample_backlog_counts_gated_successors() -> TestResult {
     Ok(())
 }
 
-/// t30：partition_key 经**真实 public port** `OutboxEnvelopeParts::with_partition_key` → `PgEmitter::emit`
-/// 落库（F5，#1211 review）。t24-t29 直调 adapter-private `OutboxEnvelope::with_partition_key_opt` 验 gating；
-/// 本用例补最易漏接的 **public port → adapter envelope 映射层**：经 `PgEmitter::emit` 写入后 `SELECT
-/// partition_key` 应等于传入 key（证 `into_parts` → `with_partition_key_opt` → INSERT $8 全链路透传）。
-#[tokio::test]
-#[allow(clippy::unwrap_used)]
-// reason: 集成测试构造已知合法输入，item-level carve-out。
-async fn t30_with_partition_key_persists_via_real_emit_port() -> TestResult {
-    use consistency::PartitionKey;
-    use diport::{OutboxEmitter, OutboxEnvelopeParts};
-
-    let (_pg, store) = connect_pg().await?;
-    store.run_migrations().await?;
-
-    let event_id = unique_event_id("t30-pk-port");
-    let entry = EventEntry::new(
-        EventTopic::parse(SESSION_CREATED_TOPIC).unwrap(),
-        IdemKey::parse(&event_id).unwrap(),
-        reviewed_payload(br#"{"sessionId":"s"}"#),
-    );
-    // tenant-scoped key（推荐形态 <tenantId>:<aggregateId>）经 public builder 传入。
-    let pk = "tenant-7:session-42";
-    crate::PgEmitter::new(&store, fixed_clock())
-        .emit(
-            entry,
-            OutboxEnvelopeParts::new(
-                session_contract(),
-                test_tenant(),
-                subject_id("subj-opaque-30"),
-                actor_for(test_tenant()),
-            )
-            .with_partition_key(PartitionKey::parse(pk).unwrap()),
-        )
-        .await?;
-
-    let row: (Option<String>,) =
-        sqlx::query_as("SELECT partition_key FROM outbox WHERE event_id = $1")
-            .bind(&event_id)
-            .fetch_one(&store.pool)
-            .await?;
-    assert_eq!(
-        row.0.as_deref(),
-        Some(pk),
-        "t30: public port with_partition_key 应经 into_parts → adapter envelope → INSERT 透传落库"
-    );
-
-    store.shutdown().await?;
-    Ok(())
-}
-
 // ── PgConfigRepo / PgConfigUnitOfWork：配置仓储 + co-tx 集成测试（#1249）─────────────
 //
 // OUTBOX-COTX-CONFIG-01 anti-vacuity：正向 `tc5` 证真实 method commit 两行皆在 ↔ 负向双覆盖——`tc6` 经真实
@@ -26811,7 +26888,8 @@ fn mutating_backfill_config_protection(pool: sqlx::PgPool) -> ConfigValueProtect
 /// 构造 config-version-changed outbox EventEntry。
 #[allow(clippy::unwrap_used)]
 fn config_outbox_entry(event_id: &str) -> EventEntry {
-    EventEntry::from_generated_payload(
+    generated_entry(
+        generated::event::settings_v1::FACT,
         &generated::event::settings_v1::SettingsConfigVersionChangedPayload {
             change_kind: generated::event::settings_v1::SettingsConfigChangeKind::Published,
             key: "app.k".to_string(),
@@ -26827,7 +26905,8 @@ fn config_outbox_entry(event_id: &str) -> EventEntry {
 
 #[allow(clippy::unwrap_used)]
 fn config_deleted_outbox_entry(event_id: &str, key: &str, version: u64) -> EventEntry {
-    EventEntry::from_generated_payload(
+    generated_entry(
+        generated::event::settings_v1::FACT,
         &generated::event::settings_v1::SettingsConfigVersionChangedPayload {
             change_kind: generated::event::settings_v1::SettingsConfigChangeKind::Deleted,
             key: key.to_string(),
@@ -26848,7 +26927,8 @@ fn config_rolled_back_outbox_entry(
     version: u64,
     source_version: u64,
 ) -> EventEntry {
-    EventEntry::from_generated_payload(
+    generated_entry(
+        generated::event::settings_v1::FACT,
         &generated::event::settings_v1::SettingsConfigVersionChangedPayload {
             change_kind: generated::event::settings_v1::SettingsConfigChangeKind::RolledBack,
             key: key.to_string(),
@@ -26902,8 +26982,12 @@ impl ConfigTestWrite for PgConfigRepo {
             settings::config_publish_receipt_for_test(),
             scope,
             ConfigMutation::Put(entry),
-            config_outbox_entry(&unique_event_id("config-test-put")),
-            config_envelope_for(tenant, &subject),
+            reviewed_generated_event::<generated::event::settings_v1::Contract>(
+                config_outbox_entry(&unique_event_id("config-test-put")),
+                config_envelope_for(tenant, &subject),
+            )
+            .await
+            .map_err(ConfigRepoError::Storage)?,
         )
         .await
     }
@@ -26926,8 +27010,12 @@ impl ConfigTestWrite for PgConfigRepo {
                     tenant,
                     version.saturating_add(1),
                 )),
-                config_outbox_entry(&unique_event_id("config-test-delete")),
-                config_envelope_for(tenant, key.as_str()),
+                reviewed_generated_event::<generated::event::settings_v1::Contract>(
+                    config_outbox_entry(&unique_event_id("config-test-delete")),
+                    config_envelope_for(tenant, key.as_str()),
+                )
+                .await
+                .map_err(ConfigRepoError::Storage)?,
             )
             .await;
         match result {
@@ -27660,8 +27748,11 @@ async fn tc1b_bundle_config_save_find_roundtrip() -> TestResult {
             settings::config_publish_receipt_for_test(),
             settings_scope(tenant),
             ConfigMutation::Put(config_entry("bundle.timeout", "30s", 1)),
-            config_outbox_entry(&unique_event_id("bundle-read-write")),
-            config_envelope("bundle.timeout"),
+            reviewed_generated_event::<generated::event::settings_v1::Contract>(
+                config_outbox_entry(&unique_event_id("bundle-read-write")),
+                config_envelope("bundle.timeout"),
+            )
+            .await?,
         )
         .await?;
     let found = configs.find(settings_scope(tenant), &key).await?.unwrap();
@@ -27693,8 +27784,11 @@ async fn tc1c_bundle_writer_cotx_commits_config_and_outbox() -> TestResult {
             settings::config_publish_receipt_for_test(),
             settings_scope(tenant),
             ConfigMutation::Put(config_entry("bundle.cotx", "v1", 1)),
-            config_outbox_entry(&event_id),
-            config_envelope("bundle.cotx"),
+            reviewed_generated_event::<generated::event::settings_v1::Contract>(
+                config_outbox_entry(&event_id),
+                config_envelope("bundle.cotx"),
+            )
+            .await?,
         )
         .await?;
 
@@ -28040,10 +28134,11 @@ async fn tc5_config_cotx_commits_config_and_outbox() -> TestResult {
         settings::config_publish_receipt_for_test(),
         settings_scope(tenant),
         ConfigMutation::Put(config_entry("app.k", plain_value, 1)),
-        config_outbox_entry(&event_id),
-        config_envelope("app.k").with_causation_id(
-            diport::EnvelopeCausationId::from_opaque("config-upstream-event").unwrap(),
-        ),
+        reviewed_generated_event::<generated::event::settings_v1::Contract>(
+            config_outbox_entry(&event_id),
+            config_envelope("app.k"),
+        )
+        .await?,
     )
     .await?;
 
@@ -28065,23 +28160,17 @@ async fn tc5_config_cotx_commits_config_and_outbox() -> TestResult {
         .fetch_one(&store.pool)
         .await?;
     assert_eq!(ob_cnt.0, 1, "outbox 行应写入（co-tx 两行皆在）");
-    let outbox_shape: (Vec<u8>, String, String, String, Option<String>) =
-        sqlx::query_as(
-            "SELECT payload, metadata::text, contract_version, schema_hash, causation_id FROM outbox WHERE event_id = $1",
-        )
-            .bind(&event_id)
-            .fetch_one(&store.pool)
-            .await?;
+    let outbox_shape: (Vec<u8>, String, String, String) = sqlx::query_as(
+        "SELECT payload, metadata::text, contract_version, schema_hash FROM outbox WHERE event_id = $1",
+    )
+    .bind(&event_id)
+    .fetch_one(&store.pool)
+    .await?;
     assert_eq!(outbox_shape.2, "v1", "config co-tx contract_version 物理列");
     assert_eq!(
         outbox_shape.3,
         config_contract().schema_hash(),
         "config co-tx schema_hash 物理列"
-    );
-    assert_eq!(
-        outbox_shape.4.as_deref(),
-        Some("config-upstream-event"),
-        "config co-tx 应透传非空 causation_id"
     );
     assert!(
         !outbox_shape
@@ -28148,8 +28237,11 @@ async fn tc5d_config_delete_cotx_is_both_or_neither() -> TestResult {
         settings::config_delete_receipt_for_test(),
         settings_scope(tenant),
         ConfigMutation::Delete(ConfigTombstone::hydrate(key.clone(), tenant, 2)),
-        config_deleted_outbox_entry(&deleted_event, key.as_str(), 2),
-        config_envelope(key.as_str()),
+        reviewed_generated_event::<generated::event::settings_v1::Contract>(
+            config_deleted_outbox_entry(&deleted_event, key.as_str(), 2),
+            config_envelope(key.as_str()),
+        )
+        .await?,
     )
     .await?;
     assert_eq!(
@@ -28180,8 +28272,11 @@ async fn tc5d_config_delete_cotx_is_both_or_neither() -> TestResult {
             settings::config_delete_receipt_for_test(),
             settings_scope(tenant),
             ConfigMutation::Delete(ConfigTombstone::hydrate(key.clone(), tenant, 3)),
-            config_deleted_outbox_entry(&conflict_event, key.as_str(), 3),
-            config_envelope(key.as_str()),
+            reviewed_generated_event::<generated::event::settings_v1::Contract>(
+                config_deleted_outbox_entry(&conflict_event, key.as_str(), 3),
+                config_envelope(key.as_str()),
+            )
+            .await?,
         )
         .await;
     assert!(matches!(conflict, Err(ConfigRepoError::VersionConflict)));
@@ -28245,8 +28340,11 @@ async fn tc5e_config_rollback_cotx_restores_version_and_appends_exact_fact() -> 
         settings::config_rollback_receipt_for_test(),
         settings_scope(tenant),
         ConfigMutation::Put(config_entry(key.as_str(), "historical-v1", 3)),
-        config_rolled_back_outbox_entry(&rollback_event, key.as_str(), 3, 1),
-        config_envelope(key.as_str()),
+        reviewed_generated_event::<generated::event::settings_v1::Contract>(
+            config_rolled_back_outbox_entry(&rollback_event, key.as_str(), 3, 1),
+            config_envelope(key.as_str()),
+        )
+        .await?,
     )
     .await?;
 
@@ -28288,8 +28386,11 @@ async fn tc5e_config_rollback_cotx_restores_version_and_appends_exact_fact() -> 
             settings::config_rollback_receipt_for_test(),
             settings_scope(tenant),
             ConfigMutation::Put(config_entry(key.as_str(), "historical-v1", 3)),
-            config_rolled_back_outbox_entry(&conflict_event, key.as_str(), 3, 1),
-            config_envelope(key.as_str()),
+            reviewed_generated_event::<generated::event::settings_v1::Contract>(
+                config_rolled_back_outbox_entry(&conflict_event, key.as_str(), 3, 1),
+                config_envelope(key.as_str()),
+            )
+            .await?,
         )
         .await;
     assert!(matches!(conflict, Err(ConfigRepoError::VersionConflict)));
@@ -28349,8 +28450,11 @@ async fn tc5b_config_cotx_rejects_envelope_tenant_mismatch() -> TestResult {
             settings::config_publish_receipt_for_test(),
             settings_scope(tenant),
             ConfigMutation::Put(config_entry("app.mismatch", "v1", 1)),
-            config_outbox_entry(&event_id),
-            envelope,
+            reviewed_generated_event::<generated::event::settings_v1::Contract>(
+                config_outbox_entry(&event_id),
+                envelope,
+            )
+            .await?,
         )
         .await;
     assert!(
@@ -28391,8 +28495,11 @@ async fn tc5c_config_cotx_rejects_scope_entry_tenant_mismatch() -> TestResult {
             settings::config_publish_receipt_for_test(),
             settings_scope(scope_tenant),
             ConfigMutation::Put(config_entry_for(entry_tenant, key, "v1", 1)),
-            config_outbox_entry(&event_id),
-            config_envelope(key),
+            reviewed_generated_event::<generated::event::settings_v1::Contract>(
+                config_outbox_entry(&event_id),
+                config_envelope(key),
+            )
+            .await?,
         )
         .await;
     assert!(
@@ -28499,7 +28606,8 @@ async fn producer_fact_binding_mismatch_rolls_back_business_write() -> TestResul
     setup_config(&store).await?;
     let tenant = config_tenant();
     let event_id = unique_event_id("producer-fact-binding-mismatch");
-    let entry = EventEntry::from_generated_payload(
+    let entry = generated_entry(
+        generated::event::identity_v1::session_created::FACT,
         &generated::event::identity_v1::session_created::IdentitySessionCreatedPayload {
             session_id: "mismatched-session".to_string(),
             subject: uuid::Uuid::from_u128(2),
@@ -28517,7 +28625,7 @@ async fn producer_fact_binding_mismatch_rolls_back_business_write() -> TestResul
     );
     let authorization = settings::config_publish_receipt_for_test()
         .authorize(
-            <generated::event::settings_v1::SettingsConfigVersionChangedPayload as vocab::GeneratedEventPayload>::FACT,
+            generated::event::settings_v1::FACT,
             settings::ports::CONFIG_VERSION_CHANGED_CONTRACT,
         )
         .ok_or_else(|| std::io::Error::other("config producer authorization missing"))?;
@@ -28588,8 +28696,11 @@ async fn config_fact_conflict_rolls_back_mutation() -> TestResult {
             settings::config_publish_receipt_for_test(),
             settings_scope(tenant),
             ConfigMutation::Put(config_entry(key, "must-rollback", 1)),
-            config_outbox_entry(&event_id),
-            config_envelope(key),
+            reviewed_generated_event::<generated::event::settings_v1::Contract>(
+                config_outbox_entry(&event_id),
+                config_envelope(key),
+            )
+            .await?,
         )
         .await;
     assert!(
@@ -28634,8 +28745,11 @@ async fn tc7_config_cotx_cas_conflict_emits_no_outbox() -> TestResult {
             settings::config_publish_receipt_for_test(),
             settings_scope(tenant),
             ConfigMutation::Put(config_entry("app.k", "v1-stale", 1)),
-            config_outbox_entry(&event_id),
-            config_envelope("app.k"),
+            reviewed_generated_event::<generated::event::settings_v1::Contract>(
+                config_outbox_entry(&event_id),
+                config_envelope("app.k"),
+            )
+            .await?,
         )
         .await;
     assert!(matches!(result, Err(ConfigRepoError::VersionConflict)));
@@ -28684,11 +28798,17 @@ async fn tc7b_config_cotx_conformance() -> TestResult {
     testkit::repo_conformance::assert_cotx_both_or_neither(
         testkit::repo_conformance::CotxCase {
             action: || async {
-                repo.commit_publish(settings::config_publish_receipt_for_test(), settings_scope(tenant),
-                    ConfigMutation::Put(config_entry("app.cotx-ok", "v1", 1)),
-                    config_outbox_entry(&ok_event),
-                    config_envelope("app.cotx-ok"),
-                )
+                repo.commit_publish(
+    settings::config_publish_receipt_for_test(),
+    settings_scope(tenant),
+    ConfigMutation::Put(config_entry("app.cotx-ok", "v1", 1)),
+    reviewed_generated_event::<generated::event::settings_v1::Contract>(
+        config_outbox_entry(&ok_event),
+        config_envelope("app.cotx-ok"),
+    )
+    .await
+    .map_err(ConfigRepoError::Storage)?,
+)
                 .await
             },
             business_exists: || async {
@@ -28773,11 +28893,17 @@ async fn tc7b_config_cotx_conformance() -> TestResult {
         },
         testkit::repo_conformance::CotxCase {
             action: || async {
-                repo.commit_publish(settings::config_publish_receipt_for_test(), settings_scope(tenant),
-                    ConfigMutation::Put(config_entry("app.cotx-conflict", "stale", 1)),
-                    config_outbox_entry(&conflict_event),
-                    config_envelope("app.cotx-conflict"),
-                )
+                repo.commit_publish(
+    settings::config_publish_receipt_for_test(),
+    settings_scope(tenant),
+    ConfigMutation::Put(config_entry("app.cotx-conflict", "stale", 1)),
+    reviewed_generated_event::<generated::event::settings_v1::Contract>(
+        config_outbox_entry(&conflict_event),
+        config_envelope("app.cotx-conflict"),
+    )
+    .await
+    .map_err(ConfigRepoError::Storage)?,
+)
                 .await
             },
             business_exists: || async {
@@ -28838,8 +28964,12 @@ async fn tc7c_config_retry_boundary_conformance() -> TestResult {
                             settings::config_publish_receipt_for_test(),
                             settings_scope(tenant),
                             ConfigMutation::Put(config_entry("app.retry-transient", "v1", 1)),
-                            config_outbox_entry(&transient_event),
-                            config_envelope("app.retry-transient"),
+                            reviewed_generated_event::<generated::event::settings_v1::Contract>(
+                                config_outbox_entry(&transient_event),
+                                config_envelope("app.retry-transient"),
+                            )
+                            .await
+                            .map_err(ConfigRepoError::Storage)?,
                         )
                         .await
                     }
@@ -28872,8 +29002,12 @@ async fn tc7c_config_retry_boundary_conformance() -> TestResult {
                             settings::config_publish_receipt_for_test(),
                             settings_scope(tenant),
                             ConfigMutation::Put(config_entry("app.retry-conflict", "stale", 1)),
-                            config_outbox_entry(&conflict_event),
-                            config_envelope("app.retry-conflict"),
+                            reviewed_generated_event::<generated::event::settings_v1::Contract>(
+                                config_outbox_entry(&conflict_event),
+                                config_envelope("app.retry-conflict"),
+                            )
+                            .await
+                            .map_err(ConfigRepoError::Storage)?,
                         )
                         .await
                     }
@@ -28905,8 +29039,12 @@ async fn tc7c_config_retry_boundary_conformance() -> TestResult {
                             settings::config_publish_receipt_for_test(),
                             settings_scope(tenant),
                             ConfigMutation::Put(config_entry("app.retry-permanent", "v1", 1)),
-                            config_outbox_entry(&permanent_event),
-                            config_envelope("app.retry-permanent"),
+                            reviewed_generated_event::<generated::event::settings_v1::Contract>(
+                                config_outbox_entry(&permanent_event),
+                                config_envelope("app.retry-permanent"),
+                            )
+                            .await
+                            .map_err(ConfigRepoError::Storage)?,
                         )
                         .await
                     }
@@ -28938,8 +29076,12 @@ async fn tc7c_config_retry_boundary_conformance() -> TestResult {
                             settings::config_publish_receipt_for_test(),
                             settings_scope(tenant),
                             ConfigMutation::Put(config_entry("app.retry-exhaustion", "v1", 1)),
-                            config_outbox_entry(&exhaustion_event),
-                            config_envelope("app.retry-exhaustion"),
+                            reviewed_generated_event::<generated::event::settings_v1::Contract>(
+                                config_outbox_entry(&exhaustion_event),
+                                config_envelope("app.retry-exhaustion"),
+                            )
+                            .await
+                            .map_err(ConfigRepoError::Storage)?,
                         )
                         .await
                     }
@@ -29130,8 +29272,11 @@ async fn tc10_config_delete_republish_no_event_id_reuse() -> TestResult {
         settings::config_publish_receipt_for_test(),
         settings_scope(tenant),
         ConfigMutation::Put(config_entry("app.k", "v1", 1)),
-        config_outbox_entry(&ev1),
-        config_envelope("app.k"),
+        reviewed_generated_event::<generated::event::settings_v1::Contract>(
+            config_outbox_entry(&ev1),
+            config_envelope("app.k"),
+        )
+        .await?,
     )
     .await?;
 
@@ -29150,8 +29295,11 @@ async fn tc10_config_delete_republish_no_event_id_reuse() -> TestResult {
         settings::config_publish_receipt_for_test(),
         settings_scope(tenant),
         ConfigMutation::Put(config_entry("app.k", "v1-again", next)),
-        config_outbox_entry(&ev3),
-        config_envelope("app.k"),
+        reviewed_generated_event::<generated::event::settings_v1::Contract>(
+            config_outbox_entry(&ev3),
+            config_envelope("app.k"),
+        )
+        .await?,
     )
     .await?;
 
@@ -30574,7 +30722,8 @@ fn policy_lifecycle_event_with_id(
         tenant_id: tenant.to_string(),
         occurred_at: expected_occurred_at(),
     };
-    let entry = EventEntry::from_generated_payload(
+    let entry = generated_entry(
+        generated::event::identity_v1::policy_updated::FACT,
         &payload,
         IdemKey::parse(event_id).map_err(|_| IdentityError::InvalidPolicy)?,
     )
@@ -30608,8 +30757,11 @@ async fn policy_create_and_emit(
             policies_create_producer_receipt(),
             identity_scope(tenant),
             policy,
-            entry,
-            envelope,
+            reviewed_generated_event::<generated::event::identity_v1::policy_updated::Contract>(
+                entry, envelope,
+            )
+            .await
+            .map_err(IdentityError::Storage)?,
         )
         .await
 }
@@ -30632,8 +30784,11 @@ async fn policy_update_and_emit(
             identity_scope(tenant),
             policy,
             expected,
-            entry,
-            envelope,
+            reviewed_generated_event::<generated::event::identity_v1::policy_updated::Contract>(
+                entry, envelope,
+            )
+            .await
+            .map_err(IdentityError::Storage)?,
         )
         .await
 }
@@ -30652,8 +30807,11 @@ async fn policy_deactivate_and_emit(
             identity_scope(tenant),
             id,
             expected,
-            entry,
-            envelope,
+            reviewed_generated_event::<generated::event::identity_v1::policy_updated::Contract>(
+                entry, envelope,
+            )
+            .await
+            .map_err(IdentityError::Storage)?,
         )
         .await
 }
@@ -30678,8 +30836,11 @@ async fn policy_update_and_emit_event(
             identity_scope(tenant),
             policy,
             expected,
-            entry,
-            envelope,
+            reviewed_generated_event::<generated::event::identity_v1::policy_updated::Contract>(
+                entry, envelope,
+            )
+            .await
+            .map_err(IdentityError::Storage)?,
         )
         .await
 }
@@ -30704,8 +30865,11 @@ async fn policy_deactivate_and_emit_event(
             identity_scope(tenant),
             id,
             expected,
-            entry,
-            envelope,
+            reviewed_generated_event::<generated::event::identity_v1::policy_updated::Contract>(
+                entry, envelope,
+            )
+            .await
+            .map_err(IdentityError::Storage)?,
         )
         .await
 }
@@ -31367,8 +31531,10 @@ async fn policy_fact_conflict_rolls_back_policy_create() -> TestResult {
             policies_create_producer_receipt(),
             identity_scope(tenant),
             policy,
-            entry,
-            envelope,
+            reviewed_generated_event::<generated::event::identity_v1::policy_updated::Contract>(
+                entry, envelope,
+            )
+            .await?,
         )
         .await;
     assert!(
@@ -32439,74 +32605,6 @@ async fn role_binding_lifecycle_assign_revoke_writes_binding_and_outbox() -> Tes
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[allow(clippy::unwrap_used)]
-async fn role_binding_lifecycle_persists_nonempty_causation_id() -> TestResult {
-    let (_pg, store) = connect_pg().await?;
-    store.run_migrations().await?;
-    let tenant = role_tenant(ROLE_TENANT_A)?;
-    let role = Role::hydrate(
-        "role-causation",
-        "Causation",
-        &["identity:role:assign".to_string()],
-    )?;
-    PgRoleRepo::from_unverified_for_test(&store)
-        .save(identity_scope(tenant), role)
-        .await?;
-
-    let event_id = unique_event_id("role-causation");
-    let role_assigned_contract = generated::event::identity_v1::role_assigned::CONTRACT;
-    let entry = EventEntry::from_generated_payload(
-        &generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayload {
-            actor_kind: generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayloadActorKind::Admin,
-            assigned_by: uuid::Uuid::from_u128(0xA11CE),
-            occurred_at: expected_occurred_at(),
-            role_id: "role-causation".to_string(),
-            subject: "target-user".to_string(),
-            tenant_id: tenant.to_string(),
-        },
-        IdemKey::parse(&event_id).unwrap(),
-    );
-    let entry = entry.unwrap();
-    let envelope = OutboxEnvelopeParts::new(
-        role_assigned_contract,
-        tenant,
-        subject_id("target-user"),
-        actor_for(tenant),
-    )
-    .with_causation_id(diport::EnvelopeCausationId::from_opaque("role-upstream-event").unwrap());
-    let binding = RoleBinding::hydrate("target-user", "role-causation", tenant)?;
-
-    PgRoleBindingLifecycle::new(&store, fixed_clock())
-        .assign_and_emit(
-            roles_assign_producer_receipt(),
-            identity_scope(tenant),
-            binding,
-            entry,
-            envelope,
-        )
-        .await?;
-
-    let outbox: (Option<String>, String) =
-        sqlx::query_as("SELECT causation_id, metadata::text FROM outbox WHERE event_id = $1")
-            .bind(&event_id)
-            .fetch_one(&store.pool)
-            .await?;
-    assert_eq!(
-        outbox.0.as_deref(),
-        Some("role-upstream-event"),
-        "role binding co-tx 应透传非空 causation_id"
-    );
-    assert!(
-        !outbox.1.contains("role-upstream-event"),
-        "role binding causation_id persisted-only，不得进入 metadata: {}",
-        outbox.1
-    );
-
-    store.shutdown().await?;
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread")]
 async fn role_binding_fact_conflict_rolls_back_assignment() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
@@ -32525,7 +32623,8 @@ async fn role_binding_fact_conflict_rolls_back_assignment() -> TestResult {
         .await?;
     let event_id = unique_event_id("role-binding-fact-conflict");
     let seed = seed_conflicting_outbox_fact(&store, tenant, &event_id).await?;
-    let entry = EventEntry::from_generated_payload(
+    let entry = generated_entry(
+        generated::event::identity_v1::role_assigned::FACT,
         &generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayload {
             actor_kind: generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayloadActorKind::Admin,
             assigned_by: uuid::Uuid::from_u128(0xA11CE),
@@ -32549,8 +32648,10 @@ async fn role_binding_fact_conflict_rolls_back_assignment() -> TestResult {
             roles_assign_producer_receipt(),
             identity_scope(tenant),
             binding,
-            entry,
-            envelope,
+            reviewed_generated_event::<generated::event::identity_v1::role_assigned::Contract>(
+                entry, envelope,
+            )
+            .await?,
         )
         .await;
     let Err(conflict) = conflict else {

@@ -30,8 +30,8 @@ pub use authz::{
     PermissionParseError, RoutePermissionId,
 };
 pub use contract::binding::{
-    ContractBinding, EventFactBinding, GeneratedEventPayload, ProjectionInputBinding, SagaBackoff,
-    SagaContractBinding, SagaJitter, SagaRetryClass, SagaRuntimePolicySpec, SagaStepBinding,
+    ContractBinding, EventFactBinding, ProjectionInputBinding, SagaBackoff, SagaContractBinding,
+    SagaJitter, SagaRetryClass, SagaRuntimePolicySpec, SagaStepBinding,
 };
 pub use contract::owner::{ContractOwner, DomainName, DomainNameError};
 pub use epoch::Epoch;

@@ -1,0 +1,56 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "IdentityApplyDeviceCertificateRequest",
+  "description": "Draft OutboxFact command payload proposal. It can represent only an opaque authorized public artifact reference.",
+  "type": "object",
+  "required": [
+    "deviceId",
+    "desiredGeneration",
+    "fenceEpoch",
+    "intentId",
+    "policyHash",
+    "artifactId",
+    "artifactDigest",
+    "deadlineEpochSeconds"
+  ],
+  "properties": {
+    "deviceId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "desiredGeneration": {
+      "type": "integer",
+      "format": "int64",
+      "minimum": 1
+    },
+    "fenceEpoch": {
+      "type": "integer",
+      "format": "int64",
+      "minimum": 1
+    },
+    "intentId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "policyHash": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "artifactId": {
+      "type": "string",
+      "minLength": 16,
+      "maxLength": 256
+    },
+    "artifactDigest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "deadlineEpochSeconds": {
+      "type": "integer",
+      "format": "int64",
+      "minimum": 1
+    }
+  },
+  "additionalProperties": false
+}

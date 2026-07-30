@@ -116,15 +116,6 @@ impl EventFactBinding {
     }
 }
 
-/// Payload type generated from one event contract.
-///
-/// Implementations are emitted next to the generated DTO. Producer code selects authorization by
-/// payload type instead of passing a freely chosen contract or topic.
-pub trait GeneratedEventPayload {
-    /// Contract and topic that own this generated payload type.
-    const FACT: EventFactBinding;
-}
-
 /// Projection workflow input binding generated from `[capabilities.workflow].inputs`.
 ///
 /// The projection id and input event contract are emitted by `cargo xtask codegen` from the

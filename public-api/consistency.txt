@@ -886,8 +886,6 @@ impl core::panic::unwind_safe::RefUnwindSafe for consistency::outbox::BacklogSam
 impl core::panic::unwind_safe::UnwindSafe for consistency::outbox::BacklogSample
 pub struct consistency::outbox::EventEntry
 impl consistency::outbox::EventEntry
-pub fn consistency::outbox::EventEntry::from_generated_payload<P>(&P, consistency::idempotency::IdemKey) -> core::result::Result<Self, serde_json::error::Error> where P: vocab::contract::binding::GeneratedEventPayload + serde_core::ser::Serialize
-pub fn consistency::outbox::EventEntry::generated_fact(&self) -> core::option::Option<vocab::contract::binding::EventFactBinding>
 pub fn consistency::outbox::EventEntry::idem_key(&self) -> &consistency::idempotency::IdemKey
 pub fn consistency::outbox::EventEntry::new(consistency::outbox::EventTopic, consistency::idempotency::IdemKey, consistency::outbox::OutboxPayload) -> Self
 pub fn consistency::outbox::EventEntry::payload(&self) -> &[u8]
@@ -4021,8 +4019,6 @@ impl core::panic::unwind_safe::RefUnwindSafe for consistency::reconcile::EntityI
 impl core::panic::unwind_safe::UnwindSafe for consistency::reconcile::EntityId
 pub struct consistency::EventEntry
 impl consistency::outbox::EventEntry
-pub fn consistency::outbox::EventEntry::from_generated_payload<P>(&P, consistency::idempotency::IdemKey) -> core::result::Result<Self, serde_json::error::Error> where P: vocab::contract::binding::GeneratedEventPayload + serde_core::ser::Serialize
-pub fn consistency::outbox::EventEntry::generated_fact(&self) -> core::option::Option<vocab::contract::binding::EventFactBinding>
 pub fn consistency::outbox::EventEntry::idem_key(&self) -> &consistency::idempotency::IdemKey
 pub fn consistency::outbox::EventEntry::new(consistency::outbox::EventTopic, consistency::idempotency::IdemKey, consistency::outbox::OutboxPayload) -> Self
 pub fn consistency::outbox::EventEntry::payload(&self) -> &[u8]

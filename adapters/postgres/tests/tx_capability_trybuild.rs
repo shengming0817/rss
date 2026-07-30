@@ -45,3 +45,9 @@ fn workflow_projection_raw_signature_is_absent() {
     let t = trybuild::TestCases::new();
     t.compile_fail("tests/ui/pg_runtime_projection_raw_signature_fail.rs");
 }
+
+#[test]
+fn production_event_writers_reject_raw_entries() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/ui/pg_event_writer_raw_entry_fail.rs");
+}

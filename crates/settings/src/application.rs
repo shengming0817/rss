@@ -16,7 +16,7 @@
 //!
 //! ref: Unleash/unleash-types-rs src/client_features.rs@main（flag 求值语义）
 //! ref: etcd-io/etcd api/etcdserverpb/rpc.proto@main（CAS 版本模型）
-//! ref: crates/identity/src/application.rs（L2 OutboxFact 经 OutboxEmitter 落 durable outbox 范式，#1100）
+//! ref: crates/identity/src/application.rs（generated ReviewedEvent + domain UoW 范式）
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -54,14 +54,20 @@ use axum::response::{IntoResponse, Response};
 #[cfg(test)]
 use axum::routing::{delete, get, post};
 use bootstrap::{KernelError, ReconcileSubscriberOwner, SubscriberCapability};
+#[cfg(test)]
+use consistency::EventEntry;
 use consistency::{
-    ConsumerGroup, EngineError, EngineErrorKind, EventEntry, HandleResult, IdemKey, PermanentError,
-    PermanentErrorKind,
+    EngineError, EngineErrorKind, HandleResult, IdemKey, PermanentError, PermanentErrorKind,
 };
-use diport::{Clock, EnvelopeSubjectId, Message, OpaqueActorId, OutboxActor, OutboxEnvelopeParts};
+#[cfg(test)]
+use diport::OutboxEnvelopeParts;
+use diport::{Clock, EnvelopeSubjectId, Message, OpaqueActorId, OutboxActor};
+use eventexec::event::{EventEncodeError, GeneratedEventEncoder, ReviewedEvent};
 use generated::event::settings_v1::{
-    SPEC as VERSION_CHANGED_SPEC, SettingsConfigChangeKind, SettingsConfigVersionChangedPayload,
+    self as version_changed, SPEC as VERSION_CHANGED_SPEC, SettingsConfigChangeKind,
+    SettingsConfigVersionChangedPayload,
 };
+#[cfg(test)]
 use generated::event::{SubscriptionEffect, SubscriptionExecution};
 // ListenerKind 仅测试断言用（lib 经 typed `route_group::<Primary>` 不再传运行期 ListenerKind 值）。
 #[cfg(test)]
@@ -88,6 +94,7 @@ use crate::ports::{
 
 /// 配置路由组前缀（Primary listener，业务 API）。
 pub const SETTINGS_ROUTE_PREFIX: &str = "/api/v1/settings";
+#[cfg(test)]
 const SETTINGS_DOMAIN: &str = "settings";
 
 type ConfigCacheKey = (TenantId, String);
@@ -285,10 +292,13 @@ pub enum SettingsServiceError {
     PercentageOutOfRange,
     /// config-version-changed payload 编码失败（原始错误进 source，不进 Display）。
     #[error("config-version-changed payload encode failed")]
-    PayloadEncode(#[source] serde_json::Error),
-    /// outbox event entry 构造失败（topic / idem-key 形态非法——programmer error，topic/event_id 内部派生）。
-    #[error("config-version-changed outbox entry build failed")]
-    EntryBuild,
+    PayloadEncode(#[source] EventEncodeError),
+    /// Reviewed envelope subject identity is invalid.
+    #[error("config-version-changed envelope identity validation failed")]
+    EnvelopeIdentity(#[source] diport::EnvelopeIdentityError),
+    /// Stable event idempotency identity is invalid.
+    #[error("config-version-changed idempotency identity validation failed")]
+    IdempotencyKey(#[source] consistency::IdemKeyError),
     /// 底层存储失败（配置写 / 同事务 outbox append 持久化错误；原始错误进 source，不进 Display/wire）。
     #[error("config storage failed")]
     Storage(#[source] Box<dyn std::error::Error + Send + Sync>),
@@ -480,14 +490,14 @@ impl SettingsService {
         Ok(current.map_or(1, |head| head.version().saturating_add(1)))
     }
 
-    /// 构造 `config-version-changed` outbox [`EventEntry`] + [`OutboxEnvelopeParts`]（纯派生，无 I/O）；实际落
+    /// 经 generated sealed carrier 构造 `config-version-changed` [`ReviewedEvent`]（纯派生，无 I/O）；实际落
     /// durable outbox 与配置写**同事务**由 route-specific [`ConfigUnitOfWork`] 方法承载（L2 OutboxFact）。
     ///
     /// EventId（outbox `event_id` / `IdemKey`）= 内容派生 `{topic}:{tenant}:{key}:v{version}`：每个
     /// (tenant, key, version) 仅一次发射（version 单调递增，publish/rollback 各产新版本），故按内容确定唯一——
     /// 重试同版本产同锚点，经 relay 盖章 broker message_id 流回消费侧实现「至少一次 + 幂等」端到端去重（#1100）。
     /// tenant 是可观测标识（非凭据，ADR-002）；key 是 opaque 配置标识（非 value，无 secret）。
-    fn build_version_changed_entry(
+    async fn build_version_changed_entry(
         &self,
         key: &SettingKey,
         tenant: TenantId,
@@ -495,7 +505,7 @@ impl SettingsService {
         version: u64,
         change_kind: SettingsConfigChangeKind,
         source_version: Option<u64>,
-    ) -> Result<(EventEntry, OutboxEnvelopeParts), SettingsServiceError> {
+    ) -> Result<ReviewedEvent, SettingsServiceError> {
         let payload = SettingsConfigVersionChangedPayload {
             change_kind,
             key: key.as_str().to_string(),
@@ -509,18 +519,20 @@ impl SettingsService {
             VERSION_CHANGED_SPEC.topic(),
             key.as_str()
         );
-        let entry = EventEntry::from_generated_payload(
-            &payload,
-            IdemKey::parse(&event_id).map_err(|_| SettingsServiceError::EntryBuild)?,
-        )
-        .map_err(SettingsServiceError::PayloadEncode)?;
         // 契约归属经 generated `CONTRACT`（domain + contract_id + version + schema_hash 同源绑定，#1193/#1618）；
         // subject = opaque 配置 key。
         let subject_id = EnvelopeSubjectId::from_opaque(key.as_str())
-            .map_err(|_| SettingsServiceError::EntryBuild)?;
-        let envelope =
-            OutboxEnvelopeParts::new(VERSION_CHANGED_SPEC.contract(), tenant, subject_id, actor);
-        Ok((entry, envelope))
+            .map_err(SettingsServiceError::EnvelopeIdentity)?;
+        version_changed::emit(
+            &GeneratedEventEncoder,
+            payload,
+            tenant,
+            subject_id,
+            actor,
+            IdemKey::parse(&event_id).map_err(SettingsServiceError::IdempotencyKey)?,
+        )
+        .await
+        .map_err(SettingsServiceError::PayloadEncode)
     }
 
     /// 写入新配置版本并发射 outbox fact（L2 OutboxFact）。CAS：读当前版本 → 写 +1；并发冲突冒泡 `VersionConflict`。
@@ -543,24 +555,20 @@ impl SettingsService {
             tenant,
             ConfigVersion::new(version),
         );
-        let (outbox_entry, envelope) = self.build_version_changed_entry(
-            &key,
-            tenant,
-            actor,
-            version,
-            SettingsConfigChangeKind::Published,
-            None,
-        )?;
+        let event = self
+            .build_version_changed_entry(
+                &key,
+                tenant,
+                actor,
+                version,
+                SettingsConfigChangeKind::Published,
+                None,
+            )
+            .await?;
         // co-tx：CAS 配置写 + outbox append 同事务（both-or-neither）——冲突冒泡 `VersionConflict`，
         // 存储失败冒泡 `Storage`；二者皆使配置写与 outbox 行共回滚（消除 write-without-event 窗口）。
         self.writer
-            .commit_publish(
-                receipt,
-                scope,
-                ConfigMutation::Put(entry.clone()),
-                outbox_entry,
-                envelope,
-            )
+            .commit_publish(receipt, scope, ConfigMutation::Put(entry.clone()), event)
             .await?;
         self.query.cache.upsert(entry);
         Ok(SettingsConfigPublishResponse {
@@ -594,25 +602,21 @@ impl SettingsService {
         let value = ConfigValue::new(source.value());
         let version = self.next_version(scope, &key).await?;
         let entry = ConfigEntry::new(key.clone(), value, tenant, ConfigVersion::new(version));
-        let (outbox_entry, envelope) = self.build_version_changed_entry(
-            &key,
-            tenant,
-            actor,
-            version,
-            SettingsConfigChangeKind::RolledBack,
-            Some(to_version),
-        )?;
+        let event = self
+            .build_version_changed_entry(
+                &key,
+                tenant,
+                actor,
+                version,
+                SettingsConfigChangeKind::RolledBack,
+                Some(to_version),
+            )
+            .await?;
         // co-tx：回滚新版本写 + outbox append 同事务（both-or-neither）。源值（`find_version` 读历史行）
         // 不可变无 TOCTOU；新版本号（`next_version`）存在 read-then-write 窗口，由 CAS INSERT 守住——并发
         // 冲突返 `VersionConflict`，调用方读后重写重试。
         self.writer
-            .commit_rollback(
-                receipt,
-                scope,
-                ConfigMutation::Put(entry.clone()),
-                outbox_entry,
-                envelope,
-            )
+            .commit_rollback(receipt, scope, ConfigMutation::Put(entry.clone()), event)
             .await?;
         self.query.cache.upsert(entry);
         Ok(SettingsConfigPublishResponse {
@@ -651,17 +655,19 @@ impl SettingsService {
             tenant,
             ConfigVersion::new(version),
         ));
-        let (outbox_entry, envelope) = self.build_version_changed_entry(
-            &key,
-            tenant,
-            actor,
-            version,
-            SettingsConfigChangeKind::Deleted,
-            None,
-        )?;
+        let event = self
+            .build_version_changed_entry(
+                &key,
+                tenant,
+                actor,
+                version,
+                SettingsConfigChangeKind::Deleted,
+                None,
+            )
+            .await?;
         match self
             .writer
-            .commit_delete(receipt, scope, mutation, outbox_entry, envelope)
+            .commit_delete(receipt, scope, mutation, event)
             .await
         {
             Ok(()) => {}
@@ -975,7 +981,8 @@ fn config_error_response(
         SettingsServiceError::NotFound => CoreErrorKind::NotFound,
         SettingsServiceError::ConfigReadIntegrity
         | SettingsServiceError::PayloadEncode(_)
-        | SettingsServiceError::EntryBuild
+        | SettingsServiceError::EnvelopeIdentity(_)
+        | SettingsServiceError::IdempotencyKey(_)
         | SettingsServiceError::ProtectionUnavailable(_)
         | SettingsServiceError::ProtectionAuthFailure(_)
         | SettingsServiceError::Storage(_) => CoreErrorKind::Internal,
@@ -1152,33 +1159,10 @@ impl ConfigVersionReconciler {
 
 impl ::bootstrap::Domain for SettingsDomain {
     fn init(&self, reg: &mut ::bootstrap::Registry) -> Result<(), KernelError> {
-        let spec = VERSION_CHANGED_SPEC
-            .subscriptions()
-            .iter()
-            .find(|s| s.consumer() == SETTINGS_DOMAIN)
-            .ok_or(KernelError::Subscriber)?;
-        if (
-            spec.execution(),
-            spec.effect(),
-            spec.external_effect_policy(),
-        ) != (
-            SubscriptionExecution::DomainEffect,
-            Some(SubscriptionEffect::SettingsConfigVersionRefresh),
-            vocab::ExternalEffectPolicy::Reconcile,
-        ) {
-            return Err(KernelError::Subscriber);
-        }
-        let group = ConsumerGroup::parse(spec.group()).map_err(|_| KernelError::Subscriber)?;
         let effect = ReconcileSubscriberOwner::from_owner(ConfigVersionReconciler::new(
             self.config_query.clone(),
         ));
-        reg.subscriber(
-            VERSION_CHANGED_SPEC.contract_id(),
-            VERSION_CHANGED_SPEC.topic(),
-            spec.consumer(),
-            group,
-            SubscriberCapability::DomainReconcile(effect),
-        )?;
+        version_changed::subscribe_settings(reg, SubscriberCapability::DomainReconcile(effect))?;
 
         let config = Arc::clone(&self.config);
         let config_query = self.config_query.clone();
@@ -3983,8 +3967,7 @@ mod tests {
                 _receipt: ConfigPublishReceipt,
                 _scope: TenantRepoScope,
                 _mutation: ConfigMutation,
-                _outbox_entry: EventEntry,
-                _envelope: OutboxEnvelopeParts,
+                _event: ReviewedEvent,
             ) -> Result<(), ConfigRepoError> {
                 Err(ConfigRepoError::VersionConflict)
             }
@@ -3994,8 +3977,7 @@ mod tests {
                 _receipt: ConfigDeleteReceipt,
                 _scope: TenantRepoScope,
                 _mutation: ConfigMutation,
-                _outbox_entry: EventEntry,
-                _envelope: OutboxEnvelopeParts,
+                _event: ReviewedEvent,
             ) -> Result<(), ConfigRepoError> {
                 Err(ConfigRepoError::VersionConflict)
             }
@@ -4005,8 +3987,7 @@ mod tests {
                 _receipt: ConfigRollbackReceipt,
                 _scope: TenantRepoScope,
                 _mutation: ConfigMutation,
-                _outbox_entry: EventEntry,
-                _envelope: OutboxEnvelopeParts,
+                _event: ReviewedEvent,
             ) -> Result<(), ConfigRepoError> {
                 Err(ConfigRepoError::VersionConflict)
             }
@@ -4143,7 +4124,7 @@ mod tests {
                 StatusCode::INTERNAL_SERVER_ERROR,
             ),
             (
-                SettingsServiceError::EntryBuild,
+                SettingsServiceError::EnvelopeIdentity(diport::EnvelopeIdentityError::Empty),
                 StatusCode::INTERNAL_SERVER_ERROR,
             ),
         ];

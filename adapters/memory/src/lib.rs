@@ -190,7 +190,7 @@ impl Subscriber for MemSubscriber {
 // ── MemEmitter：in-mem durable outbox 发射替身（demo 拓扑）──────────────────────
 
 /// in-mem outbox 发射端口（impl [`diport::OutboxEmitter`]）：把 [`Entry`] 直接 fan-out 到 [`MemBus`]，
-/// **不持久化**——demo / 单进程 / 测试用；生产走 postgres `PgEmitter`（durable outbox + relay CAS）。
+/// **不持久化**——demo / 单进程 / 测试用；不能作为 durable production event writer。
 ///
 /// 经 `MemBus::publisher()` 复用 [`MemPublisher`] 的发布路径：`Message.id = entry.idem_key()`（EventId），
 /// 闭合 demo 侧 EventId 传播（消费侧 `run_consumer` 据此幂等去重）。
@@ -418,8 +418,7 @@ impl AuthGrantLifecycle for MemAuthGrantStore {
         receipt: identity::ports::LoginProducerReceipt,
         scope: TenantRepoScope,
         mutation: LoginGrantMutation,
-        entry: EventEntry,
-        envelope: OutboxEnvelopeParts,
+        event: eventexec::event::ReviewedEvent,
     ) -> Result<identity::ports::PersistedLoginGrantReceipt, OutboxEmitError> {
         let (grant, initial_refresh, persistence) = mutation.into_parts();
         if grant.tenant() != scope.tenant()
@@ -431,23 +430,19 @@ impl AuthGrantLifecycle for MemAuthGrantStore {
                 "login grant binding mismatch",
             )));
         }
-        if envelope.tenant() != scope.tenant() {
+        if event.envelope().tenant() != scope.tenant() {
             return Err(OutboxEmitError::new(std::io::Error::other(
                 "login grant envelope tenant scope mismatch",
             )));
         }
-        let generated_fact = entry.generated_fact().ok_or_else(|| {
-            OutboxEmitError::new(std::io::Error::other(
-                "login producer requires a generated session-created entry",
-            ))
-        })?;
         let _authorization = receipt
-            .authorize(generated_fact, *envelope.contract())
+            .authorize(event.fact(), *event.envelope().contract())
             .ok_or_else(|| {
                 OutboxEmitError::new(std::io::Error::other(
                     "login producer does not authorize session-created envelope",
                 ))
             })?;
+        let (entry, envelope, _fact) = event.into_parts();
         let topic = entry.topic().as_str();
         let message_id = entry.idem_key().as_str();
         let request = PublishRequest::new(
@@ -1704,6 +1699,7 @@ mod tests {
     use super::*;
     use authn::AuthnEpoch;
     use diport::AuditOutcome;
+    use identity::ports::RefreshTokenSnapshot;
     use vocab::TenantId;
 
     const CANON_TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
@@ -1749,8 +1745,8 @@ mod tests {
         .expect("valid initial refresh")
     }
 
-    fn session_created_entry(id: &str, grant: &AuthGrant) -> EventEntry {
-        identity::test_support::session_created_entry(id, grant)
+    async fn session_created_event(id: &str, grant: &AuthGrant) -> eventexec::event::ReviewedEvent {
+        identity::test_support::session_created_event(id, grant).await
     }
 
     fn login_grant_mutation(grant: AuthGrant, refresh: RefreshTokenRecord) -> LoginGrantMutation {
@@ -2026,18 +2022,7 @@ mod tests {
         let grant = test_grant("7d65e5f2-e716-4c4e-8e4c-6f7ab1754ef8", tenant);
         let refresh = initial_refresh(&grant, "refresh-mem-tenant", [7; 32]);
         let refresh_hash = refresh.token_hash().clone();
-        let entry = session_created_entry("evt-session-mem-tenant", &grant);
-        let envelope = OutboxEnvelopeParts::new(
-            identity::ports::SESSION_CREATED_CONTRACT,
-            tenant,
-            diport::EnvelopeSubjectId::from_opaque("subj-opaque-session").expect("subject"),
-            diport::OutboxActor::scoped(
-                vocab::PrincipalKind::User,
-                diport::OpaqueActorId::from_opaque("actor-opaque-session").expect("actor"),
-                tenant,
-                vocab::ScopedTenant::SelfOnly,
-            ),
-        );
+        let event = session_created_event("evt-session-mem-tenant", &grant).await;
 
         let signer = Arc::new(RecordingTenantSigner::default());
         let store = MemAuthGrantStore::with_tenant_metadata_signer(
@@ -2050,8 +2035,7 @@ mod tests {
                 login_receipt(),
                 identity::ports::TenantRepoScope::for_test(tenant),
                 login_grant_mutation(grant, refresh),
-                entry,
-                envelope,
+                event,
             )
             .await
             .expect("persist grant and emit");
@@ -2116,24 +2100,7 @@ mod tests {
                         login_receipt(),
                         scope,
                         login_grant_mutation(grant.clone(), refresh),
-                        session_created_entry("evt-session-mem-publish-order", &grant),
-                        OutboxEnvelopeParts::new(
-                            identity::ports::SESSION_CREATED_CONTRACT,
-                            tenant,
-                            diport::EnvelopeSubjectId::from_opaque(
-                                "subj-opaque-session-publish-order",
-                            )
-                            .expect("subject"),
-                            diport::OutboxActor::scoped(
-                                vocab::PrincipalKind::User,
-                                diport::OpaqueActorId::from_opaque(
-                                    "actor-opaque-session-publish-order",
-                                )
-                                .expect("actor"),
-                                tenant,
-                                vocab::ScopedTenant::SelfOnly,
-                            ),
-                        ),
+                        session_created_event("evt-session-mem-publish-order", &grant).await,
                     )
                     .await
             })
@@ -2175,22 +2142,7 @@ mod tests {
         let grant = test_grant("6e3b6c98-2d14-4862-83d7-35f5333a76e3", tenant_b);
         let grant_id = grant.id().clone();
         let refresh = initial_refresh(&grant, "refresh-mem-mismatch", [8; 32]);
-        let entry = EventEntry::new(
-            EventTopic::parse(TOPIC).expect("topic"),
-            IdemKey::parse("evt-session-mem-mismatch").expect("idem"),
-            consistency::OutboxPayload::from_reviewed_event_bytes(b"payload".to_vec()),
-        );
-        let envelope = OutboxEnvelopeParts::new(
-            identity::ports::SESSION_CREATED_CONTRACT,
-            tenant_b,
-            diport::EnvelopeSubjectId::from_opaque("subj-opaque-session").expect("subject"),
-            diport::OutboxActor::scoped(
-                vocab::PrincipalKind::User,
-                diport::OpaqueActorId::from_opaque("actor-opaque-session").expect("actor"),
-                tenant_b,
-                vocab::ScopedTenant::SelfOnly,
-            ),
-        );
+        let event = session_created_event("evt-session-mem-mismatch", &grant).await;
 
         let signer = Arc::new(RecordingTenantSigner::default());
         let store = MemAuthGrantStore::with_tenant_metadata_signer(
@@ -2203,8 +2155,7 @@ mod tests {
                 login_receipt(),
                 identity::ports::TenantRepoScope::for_test(tenant_a),
                 login_grant_mutation(grant, refresh),
-                entry,
-                envelope,
+                event,
             )
             .await;
 
@@ -2231,22 +2182,8 @@ mod tests {
         let grant = test_grant("315ba1e6-5831-4683-b8ec-fdf535c90cd6", tenant_a);
         let grant_id = grant.id().clone();
         let refresh = initial_refresh(&grant, "refresh-mem-envelope-mismatch", [9; 32]);
-        let entry = EventEntry::new(
-            EventTopic::parse(TOPIC).expect("topic"),
-            IdemKey::parse("evt-session-mem-envelope-mismatch").expect("idem"),
-            consistency::OutboxPayload::from_reviewed_event_bytes(b"payload".to_vec()),
-        );
-        let envelope = OutboxEnvelopeParts::new(
-            identity::ports::SESSION_CREATED_CONTRACT,
-            tenant_b,
-            diport::EnvelopeSubjectId::from_opaque("subj-opaque-session").expect("subject"),
-            diport::OutboxActor::scoped(
-                vocab::PrincipalKind::User,
-                diport::OpaqueActorId::from_opaque("actor-opaque-session").expect("actor"),
-                tenant_b,
-                vocab::ScopedTenant::SelfOnly,
-            ),
-        );
+        let other_grant = test_grant("315ba1e6-5831-4683-b8ec-fdf535c90cd6", tenant_b);
+        let event = session_created_event("evt-session-mem-envelope-mismatch", &other_grant).await;
 
         let signer = Arc::new(RecordingTenantSigner::default());
         let store = MemAuthGrantStore::with_tenant_metadata_signer(
@@ -2259,8 +2196,7 @@ mod tests {
                 login_receipt(),
                 identity::ports::TenantRepoScope::for_test(tenant_a),
                 login_grant_mutation(grant, refresh),
-                entry,
-                envelope,
+                event,
             )
             .await;
 

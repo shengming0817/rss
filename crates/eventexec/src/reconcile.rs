@@ -39,6 +39,13 @@ use crate::command::{
     CommandEmitError, CommandIdempotencyKeyring, ReviewedCommandIntent, reviewed_keyed_intent,
 };
 
+/// Exact generated reconcile carrier for `identity.apply-device-certificate`.
+///
+/// The alias lets fault-harness adapters consume the real sealed carrier through the eventexec
+/// boundary without adding an Adapter→Generated dependency edge.
+pub type ApplyDeviceCertificateReconcileCommand<S, A> =
+    generated::command::identity_v1::ReconcileCommand<S, A>;
+
 /// readyz probe 名（无 `_ready` 后缀，对齐 relay probe 约定）。
 pub const RECONCILE_PROBE: &str = "reconcile";
 

@@ -170,3 +170,4 @@ pub trait CommandRegister {
         Fut: ::core::future::Future<Output = Self::Outcome> + ::core::marker::Send + 'static;
 }
 pub mod _seed_v1;
+pub mod identity_v1;

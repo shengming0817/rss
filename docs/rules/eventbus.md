@@ -211,9 +211,11 @@ outbox 行带表级单调 `seq`（应用不可写、允许 gap）+ 可空 `parti
 
 ## 订阅注册
 
-- 订阅单源是域 crate 的 `Cargo.toml [dependencies]` 加 `contract.toml` 声明；codegen 派生注册代码，
-  业务不手写平行 registry。订阅必须同时绑定 `ContractId`、`DomainId` 与 consumer group。
-- 域 crate 的 `Domain::init` 只从 per-contract generated `SPEC.subscriptions()` 读取声明并注册 handler。
+- 订阅单源是域 crate 的 `Cargo.toml [dependencies]` 加 `contract.toml` 声明；codegen 为每个 manifest
+  subscription 派生不可外部实现的 marker 与唯一 typed `subscribe` wrapper，业务不手写平行 registry。
+- `bootstrap::Registry` 只实现 generated `EventSubscribe`；调用方只提供 capability，contract、topic、schema、
+  consumer、group、dispatch/readiness/execution/effect 均由 generated `SPEC` 固定。不存在公开的裸坐标注册入口。
+- 域 crate 的 `Domain::init` 只能调用 per-subscription generated wrapper 注册 handler。
 - 组合根必须经 sanctioned bridge 把 runtime binding 桥接为 `BridgedSubscription`，bridge 内部固定消费
   `generated::event::EVENTS` 根级 registry，不接受调用方传入平行 spec。
 - bridge 必须双向校验 generated spec 与 runtime binding 一对一精确匹配，缺项、重复消费或 group drift fail-fast。
@@ -256,8 +258,11 @@ outbox 行带表级单调 `seq`（应用不可写、允许 gap）+ 可空 `parti
 - 业务幂等键只在 keyring 内使用，每把 key 至少 256 bit 且 drop zeroize，不得复用 tenant-authority / audit key。
   runtime 用 keyed blind index 生成 probes 后立即丢弃 raw key，provider 只能看到 digest。
 - canonical id 由事务 provider 随机生成；无业务 key 的 direct dispatch 不写 alias。
-- event authoring 与 command authoring 完全分离：公开 event 写面拒绝 command namespace，
-  relay 读回类型不能转换回 event producer API。
+- event authoring 与 command authoring 完全分离：generated event wrapper 以 sealed `EventContract`/
+  `EventEmit` 把 payload 与 contract/schema/topic 固定配对；`eventexec::ReviewedEvent` 的字段与构造私有，
+  只可由 `GeneratedEventEncoder` 结合 tenant/subject/actor/envelope provenance 生成。production fact provider
+  只接受 `ReviewedEvent`；普通 `EventEntry`、字符串 topic、手写 binding 或 relay 读回类型均不能转换回
+  event producer API，公开 event 写面也拒绝 command namespace。
 - `consistencyLevel = OutboxFact` 由 contract validate R15 机器锁定；command topic 使用稳定 dotted 名称。
 - 载体：`COMMAND-JOURNAL-GENERATED-01` / `COMMAND-IMPL-ALLOWLIST-01`；
   设计单源见 [ADR-016](../architecture/202607091830-016-command-outbox-authoring-seal.md)。

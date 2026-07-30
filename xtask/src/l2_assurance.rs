@@ -979,7 +979,7 @@ fn subscription_policy_chain(
     ) {
         ("audit", "audit.session-created", AssuranceExternalEffectPolicy::TransactionalOnly) => {
             audit_policy_chain(
-                "SESSION_CREATED_SPEC",
+                "generated::event::identity_v1::session_created::subscribe_audit",
                 PolicyRouteSpec::audit(
                     "SubscriptionDispatchKey::IdentitySessionCreatedV1Audit",
                     "DispatchPlan::SessionCreated",
@@ -989,7 +989,7 @@ fn subscription_policy_chain(
         }
         ("audit", "audit.role-assigned", AssuranceExternalEffectPolicy::TransactionalOnly) => {
             audit_policy_chain(
-                "ROLE_ASSIGNED_SPEC",
+                "generated::event::identity_v1::role_assigned::subscribe_audit",
                 PolicyRouteSpec::audit(
                     "SubscriptionDispatchKey::IdentityRoleAssignedV1Audit",
                     "DispatchPlan::RoleAssigned",
@@ -999,7 +999,7 @@ fn subscription_policy_chain(
         }
         ("audit", "audit.role-revoked", AssuranceExternalEffectPolicy::TransactionalOnly) => {
             audit_policy_chain(
-                "ROLE_REVOKED_SPEC",
+                "generated::event::identity_v1::role_revoked::subscribe_audit",
                 PolicyRouteSpec::audit(
                     "SubscriptionDispatchKey::IdentityRoleRevokedV1Audit",
                     "DispatchPlan::RoleRevoked",
@@ -1009,7 +1009,7 @@ fn subscription_policy_chain(
         }
         ("audit", "audit.policy-updated", AssuranceExternalEffectPolicy::TransactionalOnly) => {
             audit_policy_chain(
-                "POLICY_UPDATED_SPEC",
+                "generated::event::identity_v1::policy_updated::subscribe_audit",
                 PolicyRouteSpec::audit(
                     "SubscriptionDispatchKey::IdentityPolicyUpdatedV1Audit",
                     "DispatchPlan::PolicyUpdated",
@@ -1019,7 +1019,7 @@ fn subscription_policy_chain(
         }
         ("audit", "audit.security-event", AssuranceExternalEffectPolicy::TransactionalOnly) => {
             audit_policy_chain(
-                "SECURITY_EVENT_SPEC",
+                "generated::event::identity_v1::security_event::subscribe_audit",
                 PolicyRouteSpec::audit(
                     "SubscriptionDispatchKey::IdentitySecurityEventV1Audit",
                     "DispatchPlan::SecurityEvent",
@@ -1045,7 +1045,7 @@ fn subscription_policy_chain(
 }
 
 const fn audit_policy_chain(
-    registration_spec: &'static str,
+    registration_wrapper: &'static str,
     route: PolicyRouteSpec,
 ) -> SubscriptionPolicyChain {
     SubscriptionPolicyChain {
@@ -1055,7 +1055,7 @@ const fn audit_policy_chain(
             required_trait: None,
             required_call: Some(PolicyCallRequirement::exact(
                 "register_audit_subscriber",
-                ["reg", registration_spec],
+                ["reg", ""],
             )),
         }),
         registration: PolicySymbolSpec {
@@ -1063,8 +1063,8 @@ const fn audit_policy_chain(
             symbol: "register_audit_subscriber",
             required_trait: None,
             required_call: Some(PolicyCallRequirement::exact(
-                "reg.subscriber",
-                ["SubscriberCapability::AdapterNativeTransactional", ""],
+                registration_wrapper,
+                ["reg", "SubscriberCapability::AdapterNativeTransactional"],
             )),
         },
         route,
@@ -1088,11 +1088,8 @@ const fn settings_policy_chain() -> SubscriptionPolicyChain {
             symbol: "SettingsDomain::init",
             required_trait: None,
             required_call: Some(PolicyCallRequirement::exact(
-                "reg.subscriber",
-                [
-                    "VERSION_CHANGED_SPEC.contract_id()",
-                    "SubscriberCapability::DomainReconcile(effect)",
-                ],
+                "version_changed::subscribe_settings",
+                ["reg", "SubscriberCapability::DomainReconcile(effect)"],
             )),
         },
         route: PolicyRouteSpec::settings(),

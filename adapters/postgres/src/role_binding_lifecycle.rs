@@ -3,8 +3,8 @@
 //! 最小生产闭环：assign / revoke 的 binding 行写删与 role event outbox append 同事务原子落库；不实现
 //! audit consumer、不扩展授权查询模型。revoke 未命中时提交空事务并返回 `false`，不写 outbox，避免泄露存在性。
 
-use consistency::EventEntry;
 use diport::{Clock, OutboxEmitError, OutboxEnvelopeParts};
+use eventexec::event::ReviewedEvent;
 use identity::ports::{
     ROLE_ASSIGNED_CONTRACT, ROLE_REVOKED_CONTRACT, RoleBinding, RoleBindingLifecycle, RoleId,
     RolesAssignProducerReceipt, RolesRevokeProducerReceipt, TenantId, TenantRepoScope,
@@ -66,8 +66,7 @@ impl RoleBindingLifecycle for PgRoleBindingLifecycle {
         receipt: RolesAssignProducerReceipt,
         scope: TenantRepoScope,
         binding: RoleBinding,
-        entry: EventEntry,
-        envelope: OutboxEnvelopeParts,
+        event: ReviewedEvent,
     ) -> Result<(), OutboxEmitError> {
         let tenant = binding.tenant();
         if scope.tenant() != tenant {
@@ -75,17 +74,14 @@ impl RoleBindingLifecycle for PgRoleBindingLifecycle {
                 "role binding assign co-tx: scope tenant does not match binding tenant",
             )));
         }
+        let generated_fact = event.fact();
+        let (entry, envelope, _fact) = event.into_parts();
         let (env_tenant, env) = self.envelope(envelope);
         if env_tenant != tenant {
             return Err(OutboxEmitError::new(std::io::Error::other(
                 "role binding assign co-tx: envelope tenant does not match binding tenant",
             )));
         }
-        let generated_fact = entry.generated_fact().ok_or_else(|| {
-            OutboxEmitError::new(std::io::Error::other(
-                "role binding assign entry lacks generated fact provenance",
-            ))
-        })?;
         self.pool
             .producer_tx(
                 scope,
@@ -130,10 +126,11 @@ impl RoleBindingLifecycle for PgRoleBindingLifecycle {
         scope: TenantRepoScope,
         role_id: RoleId,
         subject: String,
-        entry: EventEntry,
-        envelope: OutboxEnvelopeParts,
+        event: ReviewedEvent,
     ) -> Result<bool, OutboxEmitError> {
         let tenant = scope.tenant();
+        let generated_fact = event.fact();
+        let (entry, envelope, _fact) = event.into_parts();
         let (env_tenant, env) = self.envelope(envelope);
         if env_tenant != tenant {
             return Err(OutboxEmitError::new(std::io::Error::other(
@@ -141,11 +138,6 @@ impl RoleBindingLifecycle for PgRoleBindingLifecycle {
             )));
         }
         let tenant_uuid = tenant.as_uuid().to_string();
-        let generated_fact = entry.generated_fact().ok_or_else(|| {
-            OutboxEmitError::new(std::io::Error::other(
-                "role binding revoke entry lacks generated fact provenance",
-            ))
-        })?;
         self.pool
             .producer_tx(
                 scope,

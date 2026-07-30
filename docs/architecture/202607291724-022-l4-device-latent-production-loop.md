@@ -22,13 +22,15 @@ The current persistent revocation store remains the sole revocation authority in
 
 Closure extends existing typed registry/code generation, validation, CI-impact and evidence paths. There is no subsystem-only gate, required CI job or additional deployment platform.
 
+#1895 performs an atomic, deliberately breaking cutover. Generated event payloads can only enter the production fact path through a sealed per-contract emit wrapper and the private `ReviewedEvent` carrier; production providers do not accept ordinary `EventEntry`. Manifest subscriptions can only enter `bootstrap::Registry` through their generated typed wrapper. The former open generated-payload conversion and raw subscriber registration APIs are deleted without aliases, adapters, dual paths or feature flags. The only Service → Generated bridge owners are `eventexec` and `bootstrap`, guarded as exact directed edges.
+
 ## Enforcement carriers
 
 | Constraint | Owner | Minimum carrier |
 |---|---:|---|
 | Generation, epoch, condition and command state cannot be forged | #1893 | Private fields/newtypes/sealed constructors (Hard); table-driven state-machine and property tests (Medium) |
 | L4 HTTP and L2 facts retain the declared kind, links and schema identity | #1894/#1895 | Contract schema, code generation and golden outputs (Hard); validator synthetic-red tests (Medium) |
-| Callers cannot forge contract ID, topic, schema hash or transport coordinate | #1895 | Generated sealed emit/register/reconcile seams (Hard) |
+| Callers cannot forge contract ID, topic, schema hash or transport coordinate | #1895 | Generated sealed emit/subscribe/reconcile seams plus private `ReviewedEvent`/provider boundary (Hard); exact `eventexec|bootstrap → generated` bridge-owner guard (Medium) |
 | Desired/reported monotonicity, tenant isolation, RLS and CAS-zero-write behavior | #1896/#1897 | Database checks, uniqueness, FORCE RLS and grants (Hard); real-PostgreSQL conformance tests (Medium) |
 | Retry schedule survives restart and target wake is repairable | #1898 | Durable schedule transaction/CAS plus PostgreSQL restart and lost-wake tests (Medium) |
 | Concurrency is bounded, one target has one executor and drain is deterministic | #1899 | Validated closed configuration (Hard); scheduler concurrency/drain tests (Medium) |

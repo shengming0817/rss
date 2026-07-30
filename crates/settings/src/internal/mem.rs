@@ -13,8 +13,10 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+#[cfg(test)]
 use consistency::EventEntry;
 use diport::{OutboxEmitter, OutboxEnvelopeParts};
+use eventexec::event::ReviewedEvent;
 use vocab::TenantId;
 
 use super::ports::FlagStore;
@@ -241,15 +243,10 @@ impl<E> InMemConfigUnitOfWork<E> {
 
 fn authorize_entry<M>(
     receipt: httpserve::ProducerAssuranceReceipt<M>,
-    entry: &EventEntry,
-    envelope: &OutboxEnvelopeParts,
+    event: &ReviewedEvent,
     expected_contract: vocab::ContractBinding,
 ) -> Option<httpserve::ProducerAuthorization<M>> {
-    let fact = entry.generated_fact()?;
-    if *envelope.contract() != fact.contract() {
-        return None;
-    }
-    receipt.authorize(fact, expected_contract)
+    receipt.authorize(event.fact(), expected_contract)
 }
 
 impl<E: OutboxEmitter + Send + Sync + 'static> InMemConfigUnitOfWork<E> {
@@ -258,19 +255,19 @@ impl<E: OutboxEmitter + Send + Sync + 'static> InMemConfigUnitOfWork<E> {
         authorized_fact: vocab::ContractBinding,
         scope: TenantRepoScope,
         mutation: ConfigMutation,
-        outbox_entry: EventEntry,
-        envelope: OutboxEnvelopeParts,
+        event: ReviewedEvent,
     ) -> Result<(), ConfigRepoError> {
         let _commit = self.entries.commit_lock.lock().await;
         let tenant = scope.tenant();
         if mutation.tenant() != tenant
-            || envelope.tenant() != tenant
-            || *envelope.contract() != authorized_fact
+            || event.envelope().tenant() != tenant
+            || *event.envelope().contract() != authorized_fact
         {
             return Err(ConfigRepoError::Storage(Box::new(std::io::Error::other(
                 "config producer authorization mismatch",
             ))));
         }
+        let (outbox_entry, envelope, _fact) = event.into_parts();
         cas_mutation(&self.entries, tenant, &mutation)?;
         if let Err(error) = self.emitter.emit(outbox_entry, envelope).await {
             rollback_mutation(&self.entries, tenant, &mutation);
@@ -286,13 +283,11 @@ impl<E: OutboxEmitter + Send + Sync + 'static> ConfigUnitOfWork for InMemConfigU
         receipt: ConfigPublishReceipt,
         scope: TenantRepoScope,
         mutation: ConfigMutation,
-        outbox_entry: EventEntry,
-        envelope: OutboxEnvelopeParts,
+        event: ReviewedEvent,
     ) -> Result<(), ConfigRepoError> {
         let authorization = authorize_entry(
             receipt,
-            &outbox_entry,
-            &envelope,
+            &event,
             crate::ports::CONFIG_VERSION_CHANGED_CONTRACT,
         )
         .ok_or_else(|| {
@@ -300,14 +295,8 @@ impl<E: OutboxEmitter + Send + Sync + 'static> ConfigUnitOfWork for InMemConfigU
                 "config publish receipt does not authorize generated fact",
             )))
         })?;
-        self.commit_authorized(
-            authorization.fact_contract(),
-            scope,
-            mutation,
-            outbox_entry,
-            envelope,
-        )
-        .await
+        self.commit_authorized(authorization.fact_contract(), scope, mutation, event)
+            .await
     }
 
     async fn commit_delete(
@@ -315,13 +304,11 @@ impl<E: OutboxEmitter + Send + Sync + 'static> ConfigUnitOfWork for InMemConfigU
         receipt: ConfigDeleteReceipt,
         scope: TenantRepoScope,
         mutation: ConfigMutation,
-        outbox_entry: EventEntry,
-        envelope: OutboxEnvelopeParts,
+        event: ReviewedEvent,
     ) -> Result<(), ConfigRepoError> {
         let authorization = authorize_entry(
             receipt,
-            &outbox_entry,
-            &envelope,
+            &event,
             crate::ports::CONFIG_VERSION_CHANGED_CONTRACT,
         )
         .ok_or_else(|| {
@@ -329,14 +316,8 @@ impl<E: OutboxEmitter + Send + Sync + 'static> ConfigUnitOfWork for InMemConfigU
                 "config delete receipt does not authorize generated fact",
             )))
         })?;
-        self.commit_authorized(
-            authorization.fact_contract(),
-            scope,
-            mutation,
-            outbox_entry,
-            envelope,
-        )
-        .await
+        self.commit_authorized(authorization.fact_contract(), scope, mutation, event)
+            .await
     }
 
     async fn commit_rollback(
@@ -344,13 +325,11 @@ impl<E: OutboxEmitter + Send + Sync + 'static> ConfigUnitOfWork for InMemConfigU
         receipt: ConfigRollbackReceipt,
         scope: TenantRepoScope,
         mutation: ConfigMutation,
-        outbox_entry: EventEntry,
-        envelope: OutboxEnvelopeParts,
+        event: ReviewedEvent,
     ) -> Result<(), ConfigRepoError> {
         let authorization = authorize_entry(
             receipt,
-            &outbox_entry,
-            &envelope,
+            &event,
             crate::ports::CONFIG_VERSION_CHANGED_CONTRACT,
         )
         .ok_or_else(|| {
@@ -358,14 +337,8 @@ impl<E: OutboxEmitter + Send + Sync + 'static> ConfigUnitOfWork for InMemConfigU
                 "config rollback receipt does not authorize generated fact",
             )))
         })?;
-        self.commit_authorized(
-            authorization.fact_contract(),
-            scope,
-            mutation,
-            outbox_entry,
-            envelope,
-        )
-        .await
+        self.commit_authorized(authorization.fact_contract(), scope, mutation, event)
+            .await
     }
 }
 
@@ -697,33 +670,36 @@ mod tests {
     }
 
     #[allow(clippy::expect_used)]
-    fn entry(event_id: &str) -> EventEntry {
+    async fn event(event_id: &str, tenant_raw: &str) -> ReviewedEvent {
+        let tenant = tenant(tenant_raw);
         let payload = generated::event::settings_v1::SettingsConfigVersionChangedPayload {
             change_kind: generated::event::settings_v1::SettingsConfigChangeKind::Published,
             key: "app.test".to_string(),
             occurred_at: 1,
             source_version: None,
-            tenant_id: TENANT_A.to_string(),
+            tenant_id: tenant.to_string(),
             version: 1,
         };
-        EventEntry::from_generated_payload(
-            &payload,
+        generated::event::settings_v1::emit(
+            &eventexec::event::GeneratedEventEncoder,
+            payload,
+            tenant,
+            EnvelopeSubjectId::from_opaque("app.scope").expect("subject"),
+            OutboxActor::scoped(
+                vocab::PrincipalKind::Admin,
+                OpaqueActorId::from_opaque("actor").expect("actor"),
+                tenant,
+                vocab::ScopedTenant::Tenant,
+            ),
             consistency::IdemKey::parse(event_id).expect("event id"),
         )
+        .await
         .expect("test payload encodes")
     }
 
     #[allow(clippy::expect_used)]
-    fn missing_fact_entry(event_id: &str) -> EventEntry {
-        EventEntry::new(
-            consistency::EventTopic::parse("settings.config-version-changed").expect("topic"),
-            consistency::IdemKey::parse(event_id).expect("event id"),
-            consistency::OutboxPayload::from_reviewed_event_bytes(b"{}".to_vec()),
-        )
-    }
-
-    #[allow(clippy::expect_used)]
-    fn wrong_fact_entry(event_id: &str) -> EventEntry {
+    async fn wrong_event(event_id: &str) -> ReviewedEvent {
+        let tenant = tenant(TENANT_A);
         let payload =
             generated::event::identity_v1::session_created::IdentitySessionCreatedPayload {
                 occurred_at: 1,
@@ -733,18 +709,9 @@ mod tests {
                     .expect("uuid"),
                 tenant_id: TENANT_A.to_string(),
             };
-        EventEntry::from_generated_payload(
-            &payload,
-            consistency::IdemKey::parse(event_id).expect("event id"),
-        )
-        .expect("test payload encodes")
-    }
-
-    #[allow(clippy::expect_used)]
-    fn envelope(tenant_raw: &str) -> OutboxEnvelopeParts {
-        let tenant = tenant(tenant_raw);
-        OutboxEnvelopeParts::new(
-            generated::event::settings_v1::CONTRACT,
+        generated::event::identity_v1::session_created::emit(
+            &eventexec::event::GeneratedEventEncoder,
+            payload,
             tenant,
             EnvelopeSubjectId::from_opaque("app.scope").expect("subject"),
             OutboxActor::scoped(
@@ -753,7 +720,10 @@ mod tests {
                 tenant,
                 vocab::ScopedTenant::Tenant,
             ),
+            consistency::IdemKey::parse(event_id).expect("event id"),
         )
+        .await
+        .expect("test payload encodes")
     }
 
     fn publish_receipt() -> ConfigPublishReceipt {
@@ -762,11 +732,9 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::expect_used)]
-    async fn config_uow_rejects_missing_and_wrong_entry_fact_before_mutation() {
-        for (suffix, outbox_entry) in [
-            ("missing", missing_fact_entry("evt-config-missing-fact")),
-            ("wrong", wrong_fact_entry("evt-config-wrong-entry-fact")),
-        ] {
+    async fn config_uow_rejects_wrong_reviewed_fact_before_mutation() {
+        for (suffix, outbox_event) in [("wrong", wrong_event("evt-config-wrong-entry-fact").await)]
+        {
             let store = new_config_store();
             let emitter = CountingEmitter::default();
             let uow = InMemConfigUnitOfWork::new(store.clone(), emitter.clone());
@@ -779,8 +747,7 @@ mod tests {
                     publish_receipt(),
                     scope(TENANT_A),
                     ConfigMutation::Put(config_entry(&raw_key, TENANT_A)),
-                    outbox_entry,
-                    envelope(TENANT_A),
+                    outbox_event,
                 )
                 .await;
 
@@ -817,8 +784,7 @@ mod tests {
                 publish_receipt(),
                 scope(TENANT_A),
                 ConfigMutation::Put(config_entry("app.scope", TENANT_B)),
-                entry("evt-config-entry-mismatch"),
-                envelope(TENANT_A),
+                event("evt-config-entry-mismatch", TENANT_A).await,
             )
             .await;
 
@@ -846,8 +812,7 @@ mod tests {
                 publish_receipt(),
                 scope(TENANT_A),
                 ConfigMutation::Put(config_entry("app.envelope", TENANT_A)),
-                entry("evt-config-envelope-mismatch"),
-                envelope(TENANT_B),
+                event("evt-config-envelope-mismatch", TENANT_B).await,
             )
             .await;
 
@@ -869,26 +834,12 @@ mod tests {
         let uow = InMemConfigUnitOfWork::new(store.clone(), emitter.clone());
         let repo = InMemConfigRepo::from_shared(store);
         let key = setting_key("app.wrong-fact");
-        let tenant = tenant(TENANT_A);
-        let wrong_envelope = OutboxEnvelopeParts::new(
-            generated::event::identity_v1::session_created::CONTRACT,
-            tenant,
-            EnvelopeSubjectId::from_opaque("app.wrong-fact").expect("subject"),
-            OutboxActor::scoped(
-                vocab::PrincipalKind::Admin,
-                OpaqueActorId::from_opaque("actor").expect("actor"),
-                tenant,
-                vocab::ScopedTenant::Tenant,
-            ),
-        );
-
         let result = uow
             .commit_publish(
                 publish_receipt(),
                 scope(TENANT_A),
                 ConfigMutation::Put(config_entry("app.wrong-fact", TENANT_A)),
-                entry("evt-config-wrong-fact"),
-                wrong_envelope,
+                wrong_event("evt-config-wrong-fact").await,
             )
             .await;
 
@@ -915,8 +866,7 @@ mod tests {
                 publish_receipt(),
                 scope(TENANT_A),
                 ConfigMutation::Put(config_entry("app.rollback", TENANT_A)),
-                entry("evt-config-emit-failure"),
-                envelope(TENANT_A),
+                event("evt-config-emit-failure", TENANT_A).await,
             )
             .await;
 
@@ -961,8 +911,7 @@ mod tests {
                         TENANT_A,
                         1,
                     )),
-                    entry("evt-config-delayed-failure"),
-                    envelope(TENANT_A),
+                    event("evt-config-delayed-failure", TENANT_A).await,
                 )
                 .await
         });
@@ -977,8 +926,7 @@ mod tests {
                         TENANT_A,
                         2,
                     )),
-                    entry("evt-config-concurrent-success"),
-                    envelope(TENANT_A),
+                    event("evt-config-concurrent-success", TENANT_A).await,
                 )
                 .await
         });

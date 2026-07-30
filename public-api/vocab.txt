@@ -378,8 +378,6 @@ impl core::marker::Unpin for vocab::contract::binding::SagaStepBinding
 impl core::marker::UnsafeUnpin for vocab::contract::binding::SagaStepBinding
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::contract::binding::SagaStepBinding
 impl core::panic::unwind_safe::UnwindSafe for vocab::contract::binding::SagaStepBinding
-pub trait vocab::contract::binding::GeneratedEventPayload
-pub const vocab::contract::binding::GeneratedEventPayload::FACT: vocab::contract::binding::EventFactBinding
 pub mod vocab::contract::owner
 #[non_exhaustive] pub enum vocab::contract::owner::DomainNameError
 pub vocab::contract::owner::DomainNameError::Empty
@@ -2526,5 +2524,3 @@ pub const vocab::IDENTITY_PROFILE_FIELD_TENANT_ID_PERMISSION: vocab::authz::Rout
 pub const vocab::IDENTITY_PROFILE_SUBJECT_FIELD_OBLIGATION: &str
 pub const vocab::IDENTITY_PROFILE_TENANT_ID_FIELD_OBLIGATION: &str
 pub const vocab::POLICY_MANAGE_PERMISSION_PREFIX: &str
-pub trait vocab::GeneratedEventPayload
-pub const vocab::GeneratedEventPayload::FACT: vocab::contract::binding::EventFactBinding

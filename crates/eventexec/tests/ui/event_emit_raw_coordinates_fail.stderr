@@ -1,0 +1,22 @@
+error[E0061]: this function takes 6 arguments but 12 arguments were supplied
+  --> tests/ui/event_emit_raw_coordinates_fail.rs:21:13
+   |
+21 |     let _ = device_command_acked::emit(
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+note: function defined here
+  --> $WORKSPACE/generated/src/event/identity_v1.rs
+   |
+   |     pub async fn emit<E: super::super::EventEmit>(
+   |                  ^^^^
+help: remove the extra arguments
+   |
+27 -         idempotency_key,
+28 -         raw_contract,
+29 -         raw_schema,
+30 -         raw_topic,
+31 -         raw_consumer,
+32 -         raw_group,
+33 -         raw_canonical_envelope_id,
+27 +         idempotency_key,
+   |

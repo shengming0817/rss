@@ -265,6 +265,14 @@ fn module_name(domain: &str, version: &str) -> String {
     format!("{domain}_{version}")
 }
 
+fn typify_regex_unwrap_lint(body: &str) -> &'static str {
+    if body.contains("::regress::Regex") {
+        "#![allow(clippy::unwrap_used)] // reason: typify emits infallible static regex initialization.\n"
+    } else {
+        ""
+    }
+}
+
 /// 渲染一个 `{domain}_{version}.rs` 模块文件（含 1 个 `@generated` 头 + 1..N 个契约 body）。
 /// 扁平（单契约 `slug=None`）→ 裸 body；嵌套（多契约 `slug=Some`）→ 每契约 `pub mod <slug_ident> { body }`。
 fn render_module_file(
@@ -301,10 +309,9 @@ fn render_module_file(
                 group.len()
             );
         }
-        return Ok(format!(
-            "{header}{}",
-            render_contract_body(first, "super::", contracts)?
-        ));
+        let body = render_contract_body(first, "super::", contracts)?;
+        let generated_regex_lint = typify_regex_unwrap_lint(&body);
+        return Ok(format!("{header}{generated_regex_lint}{body}"));
     }
 
     // 嵌套：每契约一个 `pub mod <slug_ident> { body }`，body POD 引用深一级 super::super::。
@@ -326,11 +333,7 @@ fn render_module_file(
             );
         }
         let body = render_contract_body(c, "super::super::", contracts)?;
-        let generated_regex_lint = if body.contains("::regress::Regex") {
-            "#![allow(clippy::unwrap_used)] // reason: typify emits infallible static regex initialization.\n"
-        } else {
-            ""
-        };
+        let generated_regex_lint = typify_regex_unwrap_lint(&body);
         out.push_str(&format!(
             "\n/// 端点 `{slug}` 派生契约（源 `{slug}/contract.toml`）。由 `cargo xtask codegen` 派生；勿手改。\npub mod {ident} {{\n{generated_regex_lint}{body}\n}}\n"
         ));
@@ -410,8 +413,9 @@ fn subscription_dispatch_variant(c: &DiscoveredContract, consumer: &str) -> Resu
 
 /// 单契约的 typify 派生 body（payload DTO + 派生 glue，**不含** `@generated` 头）。
 /// `sup` 是 POD 引用前缀：扁平 body 用 `"super::"`（POD 在父 `{kind}/mod.rs`）、嵌套 body 在
-/// `pub mod <slug>` 内故用 `"super::super::"`。对 event kind 追加订阅注册 glue（CONTRACT_ID / TOPIC /
-/// SUBSCRIPTIONS），http kind 追加 SPEC，command kind 追加 emit/register wrapper。
+/// `pub mod <slug>` 内故用 `"super::super::"`。对 event kind 追加 sealed emit/subscription glue
+///（CONTRACT_ID / TOPIC / SPEC + typed subscription carriers），http kind 追加 SPEC，command kind 追加
+/// emit/register wrapper。
 fn render_contract_body(
     c: &DiscoveredContract,
     sup: &str,
@@ -1523,10 +1527,11 @@ fn schema_root_type_name(
 
 /// event kind 订阅注册 glue（从 manifest 派生，不消费 schema）。
 ///
-/// 派生 `CONTRACT_ID`、`TOPIC`（active 必有 topic；draft 无 topic 则回退用 id）、以及
-/// `SUBSCRIPTIONS` 常量切片（每个 `[[subscriptions]]` 条目一行）。`SubscriptionSpec` 类型定义在
-/// `event/mod.rs`（特化 event mod.rs），本文件经 `sup` 前缀引用（扁平 `super::` / 嵌套子模块 `super::super::`）
-/// ——避免每个 event 模块重复定义同名 struct（INVARIANT CODEGEN-DRIFT-01）。
+/// 派生 `CONTRACT_ID`、`TOPIC`（active 必有 topic；draft 无 topic 则回退用 id）、sealed emit carrier，
+/// 以及每个 `[[subscriptions]]` 的 typed subscription carrier。`SubscriptionSpec` 类型定义在
+/// `event/mod.rs`（特化 event mod.rs），并嵌入单一 `EventSpec`；本文件经 `sup` 前缀引用（扁平
+/// `super::` / 嵌套子模块 `super::super::`），避免每个 event 模块重复定义同名 struct
+///（INVARIANT CODEGEN-DRIFT-01）。
 ///
 /// **防注入守卫（review #216 F6）**：consumer / group 被拼进 Rust 字符串字面量；codegen 可独立于
 /// `cargo xtask contract validate`（R7）运行，故此处经 [`is_safe_codegen_ident`] 再次校验形态，含引号 /
@@ -1570,7 +1575,10 @@ fn render_event_glue(c: &DiscoveredContract, sup: &str) -> Result<String> {
         );
     }
     // producer partition strategy 与 subscription list 同属一个 EventSpec；不同订阅不得各自漂移。
-    let mut subs: Vec<String> = Vec::with_capacity(c.manifest.subscriptions.len());
+    let mut subscription_defs: Vec<String> = Vec::with_capacity(c.manifest.subscriptions.len());
+    let mut subscription_refs: Vec<String> = Vec::with_capacity(c.manifest.subscriptions.len());
+    let mut subscription_wrappers: Vec<String> = Vec::with_capacity(c.manifest.subscriptions.len());
+    let mut seen_consumers = BTreeSet::new();
     let partition_key = c
         .manifest
         .subscriptions
@@ -1594,6 +1602,15 @@ fn render_event_glue(c: &DiscoveredContract, sup: &str) -> Result<String> {
                 c.manifest.domain,
                 c.manifest.version,
                 s.group
+            );
+        }
+        if !seen_consumers.insert(s.consumer.as_str()) {
+            bail!(
+                "契约 {}/{}/{} 对 consumer {:?} 声明多个 subscription；typed wrapper 名无法唯一派生",
+                c.manifest.kind.as_dir(),
+                c.manifest.domain,
+                c.manifest.version,
+                s.consumer,
             );
         }
         if s.topology.partition_key != partition_key {
@@ -1621,20 +1638,56 @@ fn render_event_glue(c: &DiscoveredContract, sup: &str) -> Result<String> {
             ExternalEffectPolicy::Compensated => "Compensated",
         };
         let dispatch = subscription_dispatch_variant(c, &s.consumer)?;
-        subs.push(format!(
-            "    {sup}SubscriptionSpec::new(\"{}\", \"{}\", {sup}SubscriptionDispatchKey::{dispatch}, {sup}SubscriberReadiness::{}, {sup}SubscriptionExecution::{execution}, {effect}, ::vocab::ExternalEffectPolicy::{external_effect_policy})",
+        let consumer_type = producer_domain_variant(&s.consumer)?;
+        let consumer_fn = s.consumer.replace(['.', '-'], "_");
+        let subscription_const = format!("{}_SUBSCRIPTION", consumer_fn.to_ascii_uppercase());
+        let spec = format!(
+            "{sup}SubscriptionSpec::new(\"{}\", \"{}\", {sup}SubscriptionDispatchKey::{dispatch}, {sup}SubscriberReadiness::{}, {sup}SubscriptionExecution::{execution}, {effect}, ::vocab::ExternalEffectPolicy::{external_effect_policy})",
             s.consumer,
             s.group,
             match s.topology.readiness {
                 crate::contract::manifest::SubscriberReadiness::Required => "Required",
             }
+        );
+        subscription_defs.push(format!(
+            "/// Generated subscription coordinates for consumer `{}`.\npub const {subscription_const}: {sup}SubscriptionSpec = {spec};",
+            s.consumer
+        ));
+        subscription_refs.push(format!("    {subscription_const}"));
+        subscription_wrappers.push(format!(
+            r#"
+/// Sealed subscription carrier for consumer `{consumer}`.
+pub struct {consumer_type}Subscription;
+
+impl {sup}private::Sealed for {consumer_type}Subscription {{}}
+
+impl {sup}EventSubscription for {consumer_type}Subscription {{
+    type Contract = Contract;
+    const SPEC: {sup}SubscriptionSpec = {subscription_const};
+}}
+
+/// Register the generated `{consumer}` subscription without caller-authored transport coordinates.
+pub fn subscribe_{consumer_fn}<Reg: {sup}EventSubscribe>(
+    registrar: &mut Reg,
+    capability: Reg::Capability,
+) -> Reg::Output {{
+    registrar.subscribe::<{consumer_type}Subscription>(capability)
+}}
+"#,
+            consumer = s.consumer,
         ));
     }
-    let subs_body = if subs.is_empty() {
+    let subscription_defs = if subscription_defs.is_empty() {
         String::new()
     } else {
-        format!("\n{},\n", subs.join(",\n"))
+        format!("\n{}\n", subscription_defs.join("\n\n"))
     };
+    let subs_body = if subscription_refs.is_empty() {
+        String::new()
+    } else {
+        format!("\n{},\n", subscription_refs.join(",\n"))
+    };
+    let subscription_wrappers = subscription_wrappers.join("");
 
     Ok(format!(
         r#"
@@ -1645,8 +1698,9 @@ pub const CONTRACT_ID: &str = "{contract_id}";
 /// 由 `cargo xtask codegen` 从 manifest 派生；勿手改。
 pub const TOPIC: &str = "{topic}";
 
-/// 契约绑定（`domain` + `id` + `version` + `schema_hash` 同源类型化常量，#1193/#1618）。outbox envelope / 事件 producer 以
-/// `OutboxEnvelopeParts::new(CONTRACT, ..)` 传入契约归属，杜绝裸 string 分别 author domain / contract_id。
+/// 契约绑定（`domain` + `id` + `version` + `schema_hash` 同源类型化常量，#1193/#1618）。sealed event carrier
+/// 把该绑定交给 runtime encoder 生成 `eventexec::event::ReviewedEvent`，杜绝调用方分别 author
+/// domain / contract_id / topic。
 /// 由 `cargo xtask codegen` 从 manifest `domain` + `id` + `version` + declared schema 派生；勿手改（golden 字节锁，INVARIANT
 /// CONTRACT-BINDING-FUNNEL-01）。
 pub const CONTRACT: ::vocab::ContractBinding =
@@ -1656,9 +1710,32 @@ pub const CONTRACT: ::vocab::ContractBinding =
 pub const FACT: ::vocab::EventFactBinding =
     ::vocab::EventFactBinding::from_static(CONTRACT, TOPIC);
 
-impl ::vocab::GeneratedEventPayload for {payload_type} {{
+/// Zero-sized generated carrier binding this event payload to its exact contract and topology.
+pub struct Contract;
+
+impl {sup}private::Sealed for Contract {{}}
+
+impl {sup}EventContract for Contract {{
+    type Payload = {payload_type};
+    const SPEC: {sup}EventSpec = SPEC;
     const FACT: ::vocab::EventFactBinding = FACT;
 }}
+
+/// Author this event through the only typed generated emit seam.
+pub async fn emit<E: {sup}EventEmit>(
+    emitter: &E,
+    payload: {payload_type},
+    tenant: ::vocab::TenantId,
+    subject_id: E::SubjectId,
+    actor: E::Actor,
+    idempotency_key: E::IdempotencyKey,
+) -> ::core::result::Result<E::Output, E::Error> {{
+    emitter
+        .emit::<Contract>(&payload, tenant, subject_id, actor, idempotency_key)
+        .await
+}}
+
+{subscription_defs}
 
 /// 单一事件 topology spec；producer 与 subscriptions 不存在平行 registry。
 pub const SPEC: {sup}EventSpec = {sup}EventSpec::new(
@@ -1667,6 +1744,8 @@ pub const SPEC: {sup}EventSpec = {sup}EventSpec::new(
     {sup}PartitionKeyStrategy::{partition_variant},
     &[{subs_body}],
 );
+
+{subscription_wrappers}
 "#,
         partition_variant = match partition_key {
             crate::contract::manifest::PartitionKeyStrategy::None => "None",
@@ -2238,6 +2317,74 @@ fn generated_header(source: &str) -> String {
 /// event kind mod.rs 特化：含 `SubscriptionSpec` POD 定义（零额外依赖，纯 `&'static str` 字段）。
 /// 各 event `{domain}_{version}.rs` 经 `super::SubscriptionSpec` 引用此定义，消除重复（CODEGEN-DRIFT-01）。
 const SUBSCRIPTION_SPEC_DEF: &str = r#"
+mod private {
+    /// Private implementation seal shared by generated event and subscription carriers.
+    pub trait Sealed {}
+}
+
+/// Schema, contract and topology carrier generated once per event contract.
+///
+/// The private supertrait prevents downstream implementations, so callers cannot pair an
+/// arbitrary payload with another event's contract, schema hash or topic.
+pub trait EventContract: private::Sealed {
+    /// Schema-generated payload type for this event.
+    type Payload: ::serde::Serialize;
+    /// Exact generated topology for this event.
+    const SPEC: EventSpec;
+    /// Exact generated contract and topic binding for this event.
+    const FACT: ::vocab::EventFactBinding;
+}
+
+/// Runtime bridge used exclusively by per-event generated `emit` wrappers.
+///
+/// Implementations receive a sealed [`EventContract`]; no raw contract, schema, topic or envelope
+/// coordinate appears in this API.
+pub trait EventEmit {
+    /// Event authoring failure.
+    type Error;
+    /// Reviewed event value returned to the caller.
+    type Output;
+    /// Runtime-owned envelope subject identity.
+    type SubjectId: ::core::marker::Send;
+    /// Runtime-owned envelope actor.
+    type Actor: ::core::marker::Send;
+    /// Runtime-owned stable idempotency input.
+    type IdempotencyKey: ::core::marker::Send;
+    /// Encode and review one payload through its sealed generated carrier.
+    #[allow(clippy::too_many_arguments)]
+    fn emit<C>(
+        &self,
+        payload: &C::Payload,
+        tenant: ::vocab::TenantId,
+        subject_id: Self::SubjectId,
+        actor: Self::Actor,
+        idempotency_key: Self::IdempotencyKey,
+    ) -> impl ::core::future::Future<
+        Output = ::core::result::Result<Self::Output, Self::Error>,
+    > + ::core::marker::Send
+    where
+        C: EventContract,
+        C::Payload: ::core::marker::Send + ::core::marker::Sync;
+}
+
+/// One manifest-derived subscription bound to its event contract and transport coordinates.
+pub trait EventSubscription: private::Sealed {
+    /// Event contract consumed by this subscription.
+    type Contract: EventContract;
+    /// Generated consumer, group, dispatch and execution policy.
+    const SPEC: SubscriptionSpec;
+}
+
+/// Bootstrap registration bridge used exclusively by generated subscription wrappers.
+pub trait EventSubscribe {
+    /// Runtime-owned handler capability associated with the generated subscription.
+    type Capability;
+    /// Registration result.
+    type Output;
+    /// Register one sealed subscription without caller-authored coordinates.
+    fn subscribe<S: EventSubscription>(&mut self, capability: Self::Capability) -> Self::Output;
+}
+
 /// Partition-key policy generated from event topology metadata.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PartitionKeyStrategy {
@@ -4954,10 +5101,10 @@ mod tests {
     /// event glue 测试（#1120）：含 `[[subscriptions]]` 的 event 契约派生 .rs 须含：
     /// - `CONTRACT_ID` 常量（绑定 `contract.toml` id 字段）
     /// - `TOPIC` 常量（绑定 topic 字段）
-    /// - `SUBSCRIPTIONS` 常量切片（含 consumer / group 字面量）
-    /// - `SubscriptionSpec` 定义在 `event/mod.rs`（子模块经 `super::` 引用，无重复定义）
+    /// - 单一 `EventSpec` 内嵌 manifest-derived subscription coordinates
+    /// - typed subscription carrier 绑定 consumer / group，`SubscriptionSpec` 定义在 `event/mod.rs`
     ///
-    /// anti-vacuity：无 subscriptions 的 draft event 仍生成空 SUBSCRIPTIONS 切片 + CONTRACT_ID / TOPIC（正向对照）。
+    /// anti-vacuity：无 subscriptions 的 draft event 仍生成 sealed emit carrier + CONTRACT_ID / TOPIC。
     ///
     /// INVARIANT: CONTRACT-BINDING-FUNNEL-01 { level = "Medium", exec = "check", source = "code" }—— 守 `CONTRACT: ContractBinding` 由 manifest `domain` + `id`
     /// + `version` + declared schema hash 同源派生（domain 取自 manifest 而非 id 前缀），golden 锁。
@@ -4992,8 +5139,15 @@ mod tests {
             "缺 CONTRACT binding 常量:\n{rendered}"
         );
         assert!(
-            rendered.contains("impl ::vocab::GeneratedEventPayload for SeedHappenedPayload"),
-            "event payload must carry its generated contract+topic fact binding:\n{rendered}"
+            rendered.contains("pub struct Contract")
+                && rendered.contains("impl super::EventContract for Contract")
+                && rendered.contains("type Payload = SeedHappenedPayload")
+                && rendered.contains("pub async fn emit<E: super::EventEmit>"),
+            "event payload must be bound to a sealed generated emit carrier:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("GeneratedEventPayload"),
+            "open event payload provenance must not remain in generated output:\n{rendered}"
         );
         // 每事件只有一个 SPEC，subscription 嵌套在同一 EventSpec。
         assert!(
@@ -5017,6 +5171,19 @@ mod tests {
         assert!(
             mod_rs.contains("pub struct SubscriptionSpec"),
             "mod.rs 缺 SubscriptionSpec 定义:\n{mod_rs}"
+        );
+        assert!(
+            mod_rs.contains("pub trait EventContract: private::Sealed")
+                && mod_rs.contains("pub trait EventEmit")
+                && mod_rs.contains("pub trait EventSubscription: private::Sealed")
+                && mod_rs.contains("pub trait EventSubscribe"),
+            "event/mod.rs 缺 sealed authoring/subscription seams:\n{mod_rs}"
+        );
+        assert!(
+            rendered.contains("pub struct AuditSubscription")
+                && rendered.contains("impl super::EventSubscription for AuditSubscription")
+                && rendered.contains("pub fn subscribe_audit<Reg: super::EventSubscribe>"),
+            "event module 缺 manifest-derived typed subscription wrapper:\n{rendered}"
         );
         assert!(
             mod_rs.contains("pub const EVENTS: &[EventSpec]"),
@@ -5229,7 +5396,7 @@ mod tests {
         Ok(())
     }
 
-    /// event 无 subscriptions（draft）→ SUBSCRIPTIONS 为空切片，CONTRACT_ID / TOPIC 仍存在（anti-vacuity）。
+    /// event 无 subscriptions（draft）仍生成 sealed emit carrier、空 topology 与 CONTRACT_ID / TOPIC。
     ///
     /// INVARIANT: CONTRACT-BINDING-FUNNEL-01 { level = "Medium", exec = "check", source = "code" }—— draft event 亦发射 `CONTRACT` 绑定常量（正向对照）。
     #[test]
@@ -5549,6 +5716,35 @@ mod tests {
         // schema 与真实 contracts/command/_seed/v1/request.schema.json 对齐（targetId + amount）。
         let schema = "{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"title\":\"SeedDoThingRequest\",\"type\":\"object\",\"required\":[\"targetId\",\"amount\"],\"properties\":{\"targetId\":{\"type\":\"string\"},\"amount\":{\"type\":\"integer\",\"format\":\"int64\"}},\"additionalProperties\":false}";
         std::fs::write(dir.join("request.schema.json"), schema)?;
+        Ok(())
+    }
+
+    /// Flat command modules must carry typify's static-pattern unwrap lint allowance at their
+    /// module root. Nested contracts already place the same generated-only allowance inside each
+    /// child module; this locks the flat path used by `contracts/command/<domain>/<version>`.
+    #[test]
+    fn flat_command_pattern_schema_allows_generated_regex_unwrap() -> anyhow::Result<()> {
+        let root = unique_tmp("codegen_cmd_pattern");
+        seed_command(&root)?;
+        std::fs::write(
+            root.join("contracts/command/_seed/v1/request.schema.json"),
+            r#"{"$schema":"http://json-schema.org/draft-07/schema#","title":"SeedDoThingRequest","type":"object","required":["targetId","amount"],"properties":{"targetId":{"type":"string","pattern":"^[a-z]+$"},"amount":{"type":"integer","format":"int64"}},"additionalProperties":false}"#,
+        )?;
+        let gen_src = root.join("generated/src");
+        generate(&root.join("contracts"), &gen_src, false)?;
+        let rendered = std::fs::read_to_string(gen_src.join("command/_seed_v1.rs"))?;
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert!(
+            rendered.contains("::regress::Regex") && rendered.contains(".unwrap()"),
+            "pattern fixture must exercise typify's static regex unwrap:\n{rendered}"
+        );
+        assert!(
+            rendered.contains(
+                "#![allow(clippy::unwrap_used)] // reason: typify emits infallible static regex initialization."
+            ),
+            "flat generated module must scope the typify regex lint allowance:\n{rendered}"
+        );
         Ok(())
     }
 

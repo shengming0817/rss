@@ -68,8 +68,9 @@ pub const CONTRACT_ID: &str = "seed.thing-happened";
 /// 由 `cargo xtask codegen` 从 manifest 派生；勿手改。
 pub const TOPIC: &str = "seed.thing-happened";
 
-/// 契约绑定（`domain` + `id` + `version` + `schema_hash` 同源类型化常量，#1193/#1618）。outbox envelope / 事件 producer 以
-/// `OutboxEnvelopeParts::new(CONTRACT, ..)` 传入契约归属，杜绝裸 string 分别 author domain / contract_id。
+/// 契约绑定（`domain` + `id` + `version` + `schema_hash` 同源类型化常量，#1193/#1618）。sealed event carrier
+/// 把该绑定交给 runtime encoder 生成 `eventexec::event::ReviewedEvent`，杜绝调用方分别 author
+/// domain / contract_id / topic。
 /// 由 `cargo xtask codegen` 从 manifest `domain` + `id` + `version` + declared schema 派生；勿手改（golden 字节锁，INVARIANT
 /// CONTRACT-BINDING-FUNNEL-01）。
 pub const CONTRACT: ::vocab::ContractBinding = ::vocab::ContractBinding::from_static(
@@ -82,8 +83,29 @@ pub const CONTRACT: ::vocab::ContractBinding = ::vocab::ContractBinding::from_st
 /// Generated contract + topic identity carried by this event payload.
 pub const FACT: ::vocab::EventFactBinding = ::vocab::EventFactBinding::from_static(CONTRACT, TOPIC);
 
-impl ::vocab::GeneratedEventPayload for SeedThingHappenedPayload {
+/// Zero-sized generated carrier binding this event payload to its exact contract and topology.
+pub struct Contract;
+
+impl super::private::Sealed for Contract {}
+
+impl super::EventContract for Contract {
+    type Payload = SeedThingHappenedPayload;
+    const SPEC: super::EventSpec = SPEC;
     const FACT: ::vocab::EventFactBinding = FACT;
+}
+
+/// Author this event through the only typed generated emit seam.
+pub async fn emit<E: super::EventEmit>(
+    emitter: &E,
+    payload: SeedThingHappenedPayload,
+    tenant: ::vocab::TenantId,
+    subject_id: E::SubjectId,
+    actor: E::Actor,
+    idempotency_key: E::IdempotencyKey,
+) -> ::core::result::Result<E::Output, E::Error> {
+    emitter
+        .emit::<Contract>(&payload, tenant, subject_id, actor, idempotency_key)
+        .await
 }
 
 /// 单一事件 topology spec；producer 与 subscriptions 不存在平行 registry。

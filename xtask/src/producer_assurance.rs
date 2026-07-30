@@ -797,7 +797,7 @@ fn collect_postgres_terminals(
                     let expected = expected_fact_aliases.get(key).with_context(|| {
                         format!("producer route {key} has no emitted-fact aliases")
                     })?;
-                    let mut event_entries = event_entry_bindings_in_signature(&method.sig);
+                    let mut event_entries = reviewed_event_bindings_in_signature(&method.sig);
                     let route_sealed = event_entries.is_empty();
                     if route_sealed && let Some(binding) = route_sealed_command_binding(&method.sig)
                     {
@@ -805,7 +805,7 @@ fn collect_postgres_terminals(
                     }
                     ensure!(
                         event_entries.len() == 1,
-                        "{}::{provider_name}::{} must bind one exact EventEntry, got {event_entries:?}",
+                        "{}::{provider_name}::{} must bind one exact ReviewedEvent, got {event_entries:?}",
                         file.repo_path,
                         method.sig.ident
                     );
@@ -2440,7 +2440,7 @@ fn receipt_bindings_in_signature(
         .collect()
 }
 
-fn event_entry_bindings_in_signature(signature: &syn::Signature) -> Vec<String> {
+fn reviewed_event_bindings_in_signature(signature: &syn::Signature) -> Vec<String> {
     signature
         .inputs
         .iter()
@@ -2449,7 +2449,7 @@ fn event_entry_bindings_in_signature(signature: &syn::Signature) -> Vec<String> 
             let syn::Pat::Ident(binding) = arg.pat.as_ref() else {
                 return None;
             };
-            (type_last_ident(&arg.ty).as_deref() == Some("EventEntry"))
+            (type_last_ident(&arg.ty).as_deref() == Some("ReviewedEvent"))
                 .then(|| binding.ident.to_string())
         })
         .collect()
@@ -2688,17 +2688,11 @@ fn expr_has_generated_fact_provenance(
     }
     match expr {
         syn::Expr::MethodCall(call)
-            if call.method == "generated_fact"
+            if call.method == "fact"
                 && call.args.is_empty()
                 && expr_is_ident(&call.receiver, event_entry_binding) =>
         {
             true
-        }
-        syn::Expr::MethodCall(call)
-            if matches!(call.method.to_string().as_str(), "ok_or" | "ok_or_else")
-                && call.args.len() == 1 =>
-        {
-            expr_has_generated_fact_provenance(&call.receiver, event_entry_binding, fact_is_proven)
         }
         syn::Expr::Try(expression) => expr_has_generated_fact_provenance(
             &expression.expr,
@@ -3965,7 +3959,7 @@ mod tests {
 
         let renamed: syn::Block = syn::parse_str(
             r#"{
-                let fact = entry.generated_fact().ok_or_else(storage)?;
+                let fact = event.fact();
                 let authorization = receipt
                     .authorize(fact, EXACT_FACT)
                     .ok_or_else(storage)?;
@@ -3975,11 +3969,11 @@ mod tests {
             authorization_bindings(
                 &renamed,
                 "receipt",
-                "entry",
+                "event",
                 std::iter::once(&"EXACT_FACT".to_string()),
                 false,
             ) == [("authorization".to_string(), "EXACT_FACT".to_string())],
-            "renaming a binding derived from EventEntry::generated_fact must preserve evidence"
+            "renaming a binding derived from ReviewedEvent::fact must preserve evidence"
         );
 
         let decoy: syn::Block = syn::parse_str(
@@ -3994,17 +3988,17 @@ mod tests {
             authorization_bindings(
                 &decoy,
                 "receipt",
-                "entry",
+                "event",
                 std::iter::once(&"EXACT_FACT".to_string()),
                 false,
             )
             .is_empty(),
-            "a magic local name without EventEntry::generated_fact provenance is not evidence"
+            "a magic local name without ReviewedEvent::fact provenance is not evidence"
         );
 
         let mixed: syn::Block = syn::parse_str(
             r#"{
-                let fact = choose(entry.generated_fact(), forged_fact);
+                let fact = choose(event.fact(), forged_fact);
                 let authorization = receipt
                     .authorize(fact, EXACT_FACT)
                     .ok_or_else(storage)?;
@@ -4014,7 +4008,7 @@ mod tests {
             authorization_bindings(
                 &mixed,
                 "receipt",
-                "entry",
+                "event",
                 std::iter::once(&"EXACT_FACT".to_string()),
                 false,
             )
@@ -4026,7 +4020,7 @@ mod tests {
             (
                 "shadow",
                 r#"{
-                    let fact = entry.generated_fact().ok_or_else(storage)?;
+                    let fact = event.fact();
                     {
                         let fact = forged_fact;
                         let authorization = receipt
@@ -4038,7 +4032,7 @@ mod tests {
             (
                 "reassign",
                 r#"{
-                    let mut fact = entry.generated_fact().ok_or_else(storage)?;
+                    let mut fact = event.fact();
                     fact = forged_fact;
                     let authorization = receipt
                         .authorize(fact, EXACT_FACT)
@@ -4048,7 +4042,7 @@ mod tests {
             (
                 "branch_merge",
                 r#"{
-                    let mut fact = entry.generated_fact().ok_or_else(storage)?;
+                    let mut fact = event.fact();
                     if replace_fact {
                         fact = forged_fact;
                     }
@@ -4060,7 +4054,7 @@ mod tests {
             (
                 "typed_shadow",
                 r#"{
-                    let fact = entry.generated_fact().ok_or_else(storage)?;
+                    let fact = event.fact();
                     let fact: FactBinding = forged_fact;
                     let authorization = receipt
                         .authorize(fact, EXACT_FACT)
@@ -4070,7 +4064,7 @@ mod tests {
             (
                 "closure_parameter_shadow",
                 r#"{
-                    let fact = entry.generated_fact().ok_or_else(storage)?;
+                    let fact = event.fact();
                     let authorize = |fact| {
                         let authorization = receipt
                             .authorize(fact, EXACT_FACT)
@@ -4084,7 +4078,7 @@ mod tests {
                 authorization_bindings(
                     &block,
                     "receipt",
-                    "entry",
+                    "event",
                     std::iter::once(&"EXACT_FACT".to_string()),
                     false,
                 )
@@ -4095,11 +4089,11 @@ mod tests {
 
         let all_branches_proven: syn::Block = syn::parse_str(
             r#"{
-                let mut fact = entry.generated_fact().ok_or_else(storage)?;
+                let mut fact = event.fact();
                 if refresh_fact {
-                    fact = entry.generated_fact().ok_or_else(storage)?;
+                    fact = event.fact();
                 } else {
-                    fact = entry.generated_fact().ok_or_else(storage)?;
+                    fact = event.fact();
                 }
                 let authorization = receipt
                     .authorize(fact, EXACT_FACT)
@@ -4110,7 +4104,7 @@ mod tests {
             authorization_bindings(
                 &all_branches_proven,
                 "receipt",
-                "entry",
+                "event",
                 std::iter::once(&"EXACT_FACT".to_string()),
                 false,
             ),

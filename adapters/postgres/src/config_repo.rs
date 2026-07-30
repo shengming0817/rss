@@ -22,12 +22,11 @@ use std::sync::Mutex;
 #[cfg(all(test, feature = "integration"))]
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use consistency::EventEntry;
 use diport::key_provider::KeyProviderErrorKind;
 use diport::{
-    Clock, DynKeyProvider, KeyName, KeyProvider, KeyProviderError, KeyRef, OutboxEnvelopeParts,
-    RedactedBytes,
+    Clock, DynKeyProvider, KeyName, KeyProvider, KeyProviderError, KeyRef, RedactedBytes,
 };
+use eventexec::event::ReviewedEvent;
 use httpserve::ProducerAuthorization;
 use secure::{DerivedAad, Plaintext, ProtectionContext};
 use settings::ports::{
@@ -1266,8 +1265,7 @@ impl PgConfigRepo {
         authorization: ProducerAuthorization<M>,
         scope: TenantRepoScope,
         mutation: ConfigMutation,
-        outbox_entry: EventEntry,
-        envelope: OutboxEnvelopeParts,
+        event: ReviewedEvent,
     ) -> Result<(), ConfigRepoError>
     where
         M: Send + 'static,
@@ -1277,6 +1275,7 @@ impl PgConfigRepo {
         // `contract` 契约派生绑定（#1193），routing 列经 `domain()`/`contract_id()` 取。reserved key occurred_at
         // 由 `OutboxMetadata::new` **构造期必填**从注入 Clock 注入（#1129/#262 F1：settings 生产 outbox 路径补齐
         // occurred_at；漏接编译期不可表达）。
+        let (outbox_entry, envelope, _fact) = event.into_parts();
         let (contract, env_tenant, subject_id, actor, partition_key, causation_id) =
             envelope.into_parts();
         if env_tenant != tenant {
@@ -1358,16 +1357,12 @@ impl ConfigUnitOfWork for PgConfigRepo {
         receipt: ConfigPublishReceipt,
         scope: TenantRepoScope,
         mutation: ConfigMutation,
-        outbox_entry: EventEntry,
-        envelope: OutboxEnvelopeParts,
+        event: ReviewedEvent,
     ) -> Result<(), ConfigRepoError> {
-        let generated_fact = outbox_entry
-            .generated_fact()
-            .ok_or_else(|| producer_authorization_storage_error("config publish entry"))?;
         let authorization = receipt
-            .authorize(generated_fact, CONFIG_VERSION_CHANGED_CONTRACT)
+            .authorize(event.fact(), CONFIG_VERSION_CHANGED_CONTRACT)
             .ok_or_else(|| producer_authorization_storage_error("config publish co-tx"))?;
-        self.commit_authorized(authorization, scope, mutation, outbox_entry, envelope)
+        self.commit_authorized(authorization, scope, mutation, event)
             .await
     }
 
@@ -1376,16 +1371,12 @@ impl ConfigUnitOfWork for PgConfigRepo {
         receipt: ConfigDeleteReceipt,
         scope: TenantRepoScope,
         mutation: ConfigMutation,
-        outbox_entry: EventEntry,
-        envelope: OutboxEnvelopeParts,
+        event: ReviewedEvent,
     ) -> Result<(), ConfigRepoError> {
-        let generated_fact = outbox_entry
-            .generated_fact()
-            .ok_or_else(|| producer_authorization_storage_error("config delete entry"))?;
         let authorization = receipt
-            .authorize(generated_fact, CONFIG_VERSION_CHANGED_CONTRACT)
+            .authorize(event.fact(), CONFIG_VERSION_CHANGED_CONTRACT)
             .ok_or_else(|| producer_authorization_storage_error("config delete co-tx"))?;
-        self.commit_authorized(authorization, scope, mutation, outbox_entry, envelope)
+        self.commit_authorized(authorization, scope, mutation, event)
             .await
     }
 
@@ -1394,16 +1385,12 @@ impl ConfigUnitOfWork for PgConfigRepo {
         receipt: ConfigRollbackReceipt,
         scope: TenantRepoScope,
         mutation: ConfigMutation,
-        outbox_entry: EventEntry,
-        envelope: OutboxEnvelopeParts,
+        event: ReviewedEvent,
     ) -> Result<(), ConfigRepoError> {
-        let generated_fact = outbox_entry
-            .generated_fact()
-            .ok_or_else(|| producer_authorization_storage_error("config rollback entry"))?;
         let authorization = receipt
-            .authorize(generated_fact, CONFIG_VERSION_CHANGED_CONTRACT)
+            .authorize(event.fact(), CONFIG_VERSION_CHANGED_CONTRACT)
             .ok_or_else(|| producer_authorization_storage_error("config rollback co-tx"))?;
-        self.commit_authorized(authorization, scope, mutation, outbox_entry, envelope)
+        self.commit_authorized(authorization, scope, mutation, event)
             .await
     }
 }

@@ -1133,6 +1133,7 @@ dependencies = [
  "axum",
  "consistency",
  "diport",
+ "generated",
  "httpserve",
  "ids",
  "primitives",
@@ -1144,6 +1145,7 @@ dependencies = [
  "tokio-util",
  "tower",
  "tracing",
+ "trybuild",
  "vocab",
 ]
 
@@ -3611,6 +3613,7 @@ dependencies = [
  "authn",
  "consistency",
  "diport",
+ "eventexec",
  "futures",
  "identity",
  "tokio",
@@ -5682,6 +5685,7 @@ dependencies = [
  "consistency",
  "diport",
  "dynosaur",
+ "eventexec",
  "futures",
  "generated",
  "httpserve",
