@@ -1,34 +1,23 @@
-//! compile-fail（#1095，INVARIANT: DIPORT-ASYNC-ARC-SEND-01 { level = "Hard", exec = "test", source = "trybuild" }）：除显式共享 PDP / replay-store 窄例外外，async DI port 的 dynosaur Send
-//! 变体 `DynX` 都是 `Send` 但 **非 `Sync`**（`#[trait_variant::make(X: Send)]` 只加 Send），故这些
-//! `Arc<DynX>` 都是 `!Send`——无法被多次调用且在 `tokio::spawn` / Send `'static` future 中消费的 async
-//! 消费者持有。
+//! compile-fail（#1095 / #1331，INVARIANT: DIPORT-ASYNC-ARC-SEND-01 · DIPORT-DYN-CONCURRENCY-01
+//! { level = "Medium", exec = "test", source = "trybuild" }）：`async_send` Dyn* wrappers are
+//! `Send` but **non-`Sync`**, so `Arc<DynX>` is `!Send` and cannot be held across `tokio::spawn` /
+//! Send `'static` futures.
 //!
-//! 既定范式（ADR-003 amendment §注入形态收口）：多次调用 async 消费者用**泛型静态分发**
-//! （`<S: X + Send + Sync + 'static>` + `Arc<S>`），而非 `Arc<DynX>`；`Box<DynX>` 用于单 owner 注入。
+//! The port list is **not** hand-maintained here — [`diport::ui_assert_async_send_arc_not_send!`]
+//! expands from the sole `classify_ports!` identity table (`async_send` bucket exact set).
+//! Shared Sync exceptions live in the `async_sync` bucket and are locked by the pass UI
+//! `async_sync_arc_send_sync_pass.rs`.
 //!
-//! 本负例覆盖 11 个默认 async DI port（anti-vacuity 回归锁）：
-//! Signer / AuditSink / Subscriber / Publisher / RateLimiter / ManagedResource / ObjectStore /
-//! OutboxEmitter / RevocationStore / CasStore / LockStore。若任一 wrapper 改为 `Send + Sync`（ADR-003 Option A，#1152），对应
-//! `assert_send` 转可编译，强制有意识更新本测试 + ADR + crate rustdoc，而非静默漂移。
-use diport::{
-    DynAuditSink, DynCasStore, DynLockStore, DynManagedResource, DynObjectStore, DynOutboxEmitter,
-    DynPublisher, DynRateLimiter, DynRevocationStore, DynSigner, DynSubscriber,
-};
-use std::sync::Arc;
-
+//! Sanctioned shape (ADR-003 amendment §注入形态收口): multi-call async consumers use generic
+//! static dispatch (`<S: X + Send + Sync + 'static>` + `Arc<S>`), not `Arc<DynX>`; `Box<DynX>` for
+//! single-owner inject. If any `async_send` wrapper gains Sync (Option A, #1152), the matching
+//! `assert_send` becomes compile-ok and this fail UI forces a conscious ADR + table update.
+//!
+//! stderr churn: after intentional `classify_ports!` edits, refresh with
+//! `TRYBUILD=overwrite cargo test -p diport --test trybuild` (see `tests/trybuild.rs`).
 fn assert_send<T: Send>() {}
 
 fn main() {
-    // 每个 Arc<DynX>: Send 都需 DynX: Send + Sync，但其仅 Send ⇒ 全部 !Send（E0277）。
-    assert_send::<Arc<DynAuditSink<'static>>>();
-    assert_send::<Arc<DynPublisher<'static>>>();
-    assert_send::<Arc<DynSubscriber<'static>>>();
-    assert_send::<Arc<DynSigner<'static>>>();
-    assert_send::<Arc<DynRateLimiter<'static>>>();
-    assert_send::<Arc<DynManagedResource<'static>>>();
-    assert_send::<Arc<DynObjectStore<'static>>>();
-    assert_send::<Arc<DynOutboxEmitter<'static>>>();
-    assert_send::<Arc<DynRevocationStore<'static>>>();
-    assert_send::<Arc<DynCasStore<'static>>>();
-    assert_send::<Arc<DynLockStore<'static>>>();
+    // Each Arc<DynX>: Send needs DynX: Send + Sync; async_send ports are Send-only ⇒ all !Send (E0277).
+    diport::ui_assert_async_send_arc_not_send!();
 }

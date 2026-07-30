@@ -6,48 +6,60 @@
 //!
 //! ## 派发策略（ADR-003）
 //!
-//! - **async DI port**（`Signer` / `KeyProvider` / `Publisher` / `Subscriber` / `AuditSink` / `RateLimiter` / `ObjectStore` / `Pdp` / `ServiceTokenReplayStore` / `ManagedResource`）：native AFIT + dynosaur
+//! - **async DI port**（`Signer` / `KeyProvider` / `Publisher` / `Subscriber` / `AuditSink` / `RateLimiter` / `ObjectStore` / `Pdp` / `ServiceTokenReplayStore` / `SecretResolver` / `ManagedResource` …）：native AFIT + dynosaur
 //!   `#[dynosaur(DynX = dyn(box) X, bridge(dyn))]` 生成 dyn-compatible wrapper；static 路径零开销、
 //!   dyn 路径才 box。组合根经 `Box<DynX>` / `Arc<DynX>` 注入（必填构造器位置参，缺失即编译错误）。
 //!   - **并发 bound**：dyn wrapper 的 boxed future 一律须 `Send`。默认端口用
-//!     `#[trait_variant::make(X: Send)]`；`KeyProvider` / `Pdp` / `ServiceTokenReplayStore` 的 base trait
-//!     显式 `Send + Sync`，共享约束由编译门锁定。本 crate 根仍只公开 Send 变体 `X` + `DynX`；base trait
-//!     `XLocal` 不 re-export，避免方法解析歧义。
-//! - **sync DI port**（`Clock` / `SubscribeInitializer`）：sync trait 天然 dyn-compatible，经
-//!   `Box<dyn _>` 注入，**不需** dynosaur（仅 async port 需要）。
+//!     `#[trait_variant::make(X: Send)]`（`async_send` bucket）；共享 Sync 例外
+//!     （`KeyProvider` / `Pdp` / `SecretResolver` / `ServiceTokenReplayStore`）走 `async_sync`
+//!     bucket，base / variant 显式 `Send + Sync`，由 `classify_ports!` Hard（native
+//!     `assert_send_sync_bound`）锁定，trybuild `ui_assert_*` 仅 Medium 回归锁。本 crate
+//!     根仍只公开变体 `X` + `DynX`；base trait `XLocal` 不 re-export，避免方法解析歧义。
+//! - **sync DI port**（`Clock` / `MetricsExporter` / `SubscribeInitializer`，`sync_obj` bucket）：sync
+//!   trait 天然 dyn-compatible，经 `Box<dyn _>` 注入，**不需** dynosaur（仅 async port 需要）。
 //!
-//! ## 注入形态（INVARIANT: DIPORT-ASYNC-ARC-SEND-01 { level = "Medium", exec = "manual/opt-in", source = "code" }）
+//! ## 注入形态
 //!
-//! 默认 async DI port 的 dynosaur Send 变体 `DynX` 是 **`Send` 但非 `Sync`**；`KeyProvider` / `Pdp` /
-//! `ServiceTokenReplayStore` 是 base trait 明确 `Send + Sync` 的窄例外。默认端口的 `Box<DynX>: Send` 成立，但 `Arc<DynX>` 是
-//! `!Send`，注入形态据此三分（ADR-003 amendment §注入形态收口，#1095 / #1828）：
+//! Hard 身份源：`effect.rs` `classify_ports!` + sealed [`DiPortConcurrency`] + macro-internal
+//! `assert_send_sync_bound`（INVARIANT DIPORT-DYN-CONCURRENCY-01
+//! `{ level = "Hard", exec = "native-compile", source = "code", native = "classify_ports concurrency buckets + Arc Send/Sync asserts" }`）。
+//! Medium 回归锁：`ui_assert_*` trybuild（INVARIANT DIPORT-ASYNC-ARC-SEND-01 · DIPORT-DYN-CONCURRENCY-01
+//! `{ level = "Medium", exec = "test", source = "trybuild" }`，ADR-003 §7 anti-vacuity）。
+//!
+//! 默认 async DI port 的 dynosaur Send 变体 `DynX` 是 **`Send` 但非 `Sync`**（`async_send`）；闭集
+//! 共享 Sync 例外是 `async_sync` 四端口：`DynKeyProvider` / `DynPdp` / `DynSecretResolver` /
+//! `DynServiceTokenReplayStore`。默认端口的 `Box<DynX>: Send` 成立，但 `Arc<DynX>` 是 `!Send`，
+//! 注入形态据此三分（ADR-003 amendment §注入形态收口，#1095 / #1828 / #1331）：
 //!
 //! | 消费场景 | 注入形态 |
 //! |----------|----------|
 //! | 单 owner、非跨 Send-future（如 `ShutdownStack` 顺序关闭） | `Box<DynX>`（仅需 Send） |
 //! | 多次调用 + 在 `tokio::spawn` / Send `'static` future 中消费 | **泛型静态分发** `<S: X + Send + Sync + 'static>` + `Arc<S>`（provider 经 trait bound 仍可互换，零运行期成本） |
 //! | 单线程 / 不跨 Send-future 持有 | `Arc<DynX>`（窄场景） |
-//! | 显式共享端口（`KeyProvider` / `Pdp` / `ServiceTokenReplayStore`） | `Arc<DynX>`（类型系统保证 `Send + Sync`） |
+//! | 显式共享端口（`async_sync` 闭集） | `Arc<DynX>`（类型系统保证 `Send + Sync`） |
 //!
-//! 默认端口误用 `Arc<DynX>` 跨 Send future **编译期不可表达**（Hard），由
-//! `tests/ui/arc_dyn_ports_not_send.rs` 锁定；共享端口的反向约束由 `dyn_compatible_pass.rs` 的
-//! `Arc<DynPdp>` / `Arc<DynServiceTokenReplayStore>: Send + Sync` 正例与 PDP 负例锁定。其余端口全面采用
-//! Option A 仍 defer，见 ADR-003 amendment。
+//! 默认端口误用 `Arc<DynX>` 跨 Send future **编译期不可表达**（Hard）：`classify_ports!` 是唯一
+//! 身份源；`ui_assert_async_send_arc_not_send!` / `ui_assert_async_sync_arc_send_sync!` 经 trybuild
+//! 作 Medium anti-vacuity；PDP non-Sync provider 负例另锁。其余端口全面采用 Option A 仍 defer，见
+//! ADR-003 amendment。
 //!
-//! ## 新增一个 async DI port（三步，照 `signer.rs` 抄）
+//! ## 新增一个 async DI port（照 `signer.rs` 抄）
 //!
 //! 1. 新建 `crates/diport/src/<port>.rs`，写基 trait（**非** Send，命名 `<Port>Local`），叠加两个属性宏：
 //!    ```ignore
-//!    #[trait_variant::make(MyPort: Send)]                       // 生成 Send 变体 `MyPort`
-//!    #[dynosaur(pub DynMyPort = dyn(box) MyPort, bridge(dyn))]  // 据 Send 变体生成 dyn wrapper（pub 必加）
+//!    #[trait_variant::make(MyPort: Send)]                       // 默认 async_send；共享例外用 Send + Sync
+//!    #[dynosaur(pub DynMyPort = dyn(box) MyPort, bridge(dyn))]  // 据变体生成 dyn wrapper（pub 必加）
 //!    #[allow(async_fn_in_trait)] // reason: Send 由 trait_variant 变体 + dynosaur wrapper 承载
 //!    pub trait MyPortLocal { async fn do_it(&self) -> Result<(), MyPortError>; }
 //!    ```
-//! 2. 在本 `lib.rs` **只 re-export** Send 变体 `MyPort` + `DynMyPort` + 错误类型——**不**导出基 trait
+//! 2. 在本 `lib.rs` **只 re-export** 变体 `MyPort` + `DynMyPort` + 错误类型——**不**导出基 trait
 //!    `MyPortLocal`（否则同名方法在 glob import 下解析歧义，见落地结论 / ADR-003）。
-//! 3. `deny.toml` 的 dynosaur/trait-variant wrapper 已限定到本 crate，无需改；新外部宏依赖才需登记。
+//! 3. 在 `effect.rs` 的 `classify_ports!` 写入正确 concurrency 标签（`async_send` 或 `async_sync`）
+//!    + effect——**不要**手改 trybuild UI 端口列表；UI 宏从该表展开。条目必须保持分组顺序
+//!      `async_sync*` → `async_send*` → `sync_obj*`（同标签连写，禁止交错标签；`async_sync` 至少一项）。
+//! 4. `deny.toml` 的 dynosaur/trait-variant wrapper 已限定到本 crate，无需改；新外部宏依赖才需登记。
 //!
-//! **消费侧**（域 / 服务 / adapter）：`impl MyPort for ...`（Send 变体，**非** `MyPortLocal`）；组合根经
+//! **消费侧**（域 / 服务 / adapter）：`impl MyPort for ...`（变体，**非** `MyPortLocal`）；组合根经
 //! `DynMyPort::new_box(impl)` / `new_arc(impl)` 构造 `Box<DynMyPort>` / `Arc<DynMyPort>` 注入（必填构造器位置参）。
 //!
 //! ## key 标识选型（`KeyId` vs `KeyRef`，勿混用）
@@ -140,8 +152,9 @@ pub use dlx_lifecycle::{
     ReceiptCasOutcome,
 };
 pub use effect::{
-    AuthEffect, BusinessWriteEffect, CrossTenantPrivilege, DiPortEffect, LocalPrivilege,
-    OutboxEffect, PortEffectClass, PortPrivilegeClass, ReadEffect, WorkflowEffect,
+    AsyncSend, AsyncSync, AuthEffect, BusinessWriteEffect, ConcurrencyBucket, CrossTenantPrivilege,
+    DiPortConcurrency, DiPortEffect, LocalPrivilege, OutboxEffect, PortEffectClass,
+    PortPrivilegeClass, ReadEffect, SyncObj, WorkflowEffect,
 };
 pub use envelope::{
     EnvelopeHeader, EnvelopeHeaderError, EnvelopeMetadata, EnvelopeSchemaHash,

@@ -62,6 +62,8 @@ pub const fn diport::DynAckableSubscriber<'dynosaur_struct>::from_ref(&impl dipo
 pub fn diport::DynAckableSubscriber<'dynosaur_struct>::new_arc(impl diport::acker::AckableSubscriber + 'dynosaur_struct) -> alloc::sync::Arc<diport::DynAckableSubscriber<'dynosaur_struct>>
 pub fn diport::DynAckableSubscriber<'dynosaur_struct>::new_box(impl diport::acker::AckableSubscriber + 'dynosaur_struct) -> alloc::boxed::Box<diport::DynAckableSubscriber<'dynosaur_struct>>
 pub fn diport::DynAckableSubscriber<'dynosaur_struct>::new_rc(impl diport::acker::AckableSubscriber + 'dynosaur_struct) -> alloc::rc::Rc<diport::DynAckableSubscriber<'dynosaur_struct>>
+impl diport::DiPortConcurrency for diport::DynAckableSubscriber<'_>
+pub type diport::DynAckableSubscriber<'_>::Bucket = diport::AsyncSend
 impl diport::DiPortEffect for diport::DynAckableSubscriber<'_>
 pub type diport::DynAckableSubscriber<'_>::Effect = diport::WorkflowEffect
 pub type diport::DynAckableSubscriber<'_>::Privilege = diport::LocalPrivilege
@@ -93,6 +95,8 @@ pub const fn diport::DynAcker<'dynosaur_struct>::from_ref(&impl diport::acker::A
 pub fn diport::DynAcker<'dynosaur_struct>::new_arc(impl diport::acker::Acker + 'dynosaur_struct) -> alloc::sync::Arc<diport::DynAcker<'dynosaur_struct>>
 pub fn diport::DynAcker<'dynosaur_struct>::new_box(impl diport::acker::Acker + 'dynosaur_struct) -> alloc::boxed::Box<diport::DynAcker<'dynosaur_struct>>
 pub fn diport::DynAcker<'dynosaur_struct>::new_rc(impl diport::acker::Acker + 'dynosaur_struct) -> alloc::rc::Rc<diport::DynAcker<'dynosaur_struct>>
+impl diport::DiPortConcurrency for diport::DynAcker<'_>
+pub type diport::DynAcker<'_>::Bucket = diport::AsyncSend
 impl diport::DiPortEffect for diport::DynAcker<'_>
 pub type diport::DynAcker<'_>::Effect = diport::BusinessWriteEffect
 pub type diport::DynAcker<'_>::Privilege = diport::LocalPrivilege
@@ -216,6 +220,8 @@ pub const fn diport::DynAuditSink<'dynosaur_struct>::from_ref(&impl diport::audi
 pub fn diport::DynAuditSink<'dynosaur_struct>::new_arc(impl diport::audit_sink::AuditSink + 'dynosaur_struct) -> alloc::sync::Arc<diport::DynAuditSink<'dynosaur_struct>>
 pub fn diport::DynAuditSink<'dynosaur_struct>::new_box(impl diport::audit_sink::AuditSink + 'dynosaur_struct) -> alloc::boxed::Box<diport::DynAuditSink<'dynosaur_struct>>
 pub fn diport::DynAuditSink<'dynosaur_struct>::new_rc(impl diport::audit_sink::AuditSink + 'dynosaur_struct) -> alloc::rc::Rc<diport::DynAuditSink<'dynosaur_struct>>
+impl diport::DiPortConcurrency for diport::DynAuditSink<'_>
+pub type diport::DynAuditSink<'_>::Bucket = diport::AsyncSend
 impl diport::DiPortEffect for diport::DynAuditSink<'_>
 pub type diport::DynAuditSink<'_>::Effect = diport::BusinessWriteEffect
 pub type diport::DynAuditSink<'_>::Privilege = diport::LocalPrivilege
@@ -344,6 +350,8 @@ pub const fn diport::DynCasStore<'dynosaur_struct>::from_ref(&impl diport::cas_s
 pub fn diport::DynCasStore<'dynosaur_struct>::new_arc(impl diport::cas_store::CasStore + 'dynosaur_struct) -> alloc::sync::Arc<diport::DynCasStore<'dynosaur_struct>>
 pub fn diport::DynCasStore<'dynosaur_struct>::new_box(impl diport::cas_store::CasStore + 'dynosaur_struct) -> alloc::boxed::Box<diport::DynCasStore<'dynosaur_struct>>
 pub fn diport::DynCasStore<'dynosaur_struct>::new_rc(impl diport::cas_store::CasStore + 'dynosaur_struct) -> alloc::rc::Rc<diport::DynCasStore<'dynosaur_struct>>
+impl diport::DiPortConcurrency for diport::DynCasStore<'_>
+pub type diport::DynCasStore<'_>::Bucket = diport::AsyncSend
 impl diport::DiPortEffect for diport::DynCasStore<'_>
 pub type diport::DynCasStore<'_>::Effect = diport::BusinessWriteEffect
 pub type diport::DynCasStore<'_>::Privilege = diport::LocalPrivilege
@@ -521,6 +529,8 @@ pub const fn diport::DynOwnerCheckpointStore<'dynosaur_struct>::from_ref(&impl d
 pub fn diport::DynOwnerCheckpointStore<'dynosaur_struct>::new_arc(impl diport::checkpoint_store::OwnerCheckpointStore + 'dynosaur_struct) -> alloc::sync::Arc<diport::DynOwnerCheckpointStore<'dynosaur_struct>>
 pub fn diport::DynOwnerCheckpointStore<'dynosaur_struct>::new_box(impl diport::checkpoint_store::OwnerCheckpointStore + 'dynosaur_struct) -> alloc::boxed::Box<diport::DynOwnerCheckpointStore<'dynosaur_struct>>
 pub fn diport::DynOwnerCheckpointStore<'dynosaur_struct>::new_rc(impl diport::checkpoint_store::OwnerCheckpointStore + 'dynosaur_struct) -> alloc::rc::Rc<diport::DynOwnerCheckpointStore<'dynosaur_struct>>
+impl diport::DiPortConcurrency for diport::DynOwnerCheckpointStore<'_>
+pub type diport::DynOwnerCheckpointStore<'_>::Bucket = diport::AsyncSend
 impl diport::DiPortEffect for diport::DynOwnerCheckpointStore<'_>
 pub type diport::DynOwnerCheckpointStore<'_>::Effect = diport::BusinessWriteEffect
 pub type diport::DynOwnerCheckpointStore<'_>::Privilege = diport::LocalPrivilege
@@ -710,6 +720,8 @@ pub const fn diport::DynDeadLetterStore<'dynosaur_struct>::from_ref(&impl diport
 pub fn diport::DynDeadLetterStore<'dynosaur_struct>::new_arc(impl diport::dead_letter_store::DeadLetterStore + 'dynosaur_struct) -> alloc::sync::Arc<diport::DynDeadLetterStore<'dynosaur_struct>>
 pub fn diport::DynDeadLetterStore<'dynosaur_struct>::new_box(impl diport::dead_letter_store::DeadLetterStore + 'dynosaur_struct) -> alloc::boxed::Box<diport::DynDeadLetterStore<'dynosaur_struct>>
 pub fn diport::DynDeadLetterStore<'dynosaur_struct>::new_rc(impl diport::dead_letter_store::DeadLetterStore + 'dynosaur_struct) -> alloc::rc::Rc<diport::DynDeadLetterStore<'dynosaur_struct>>
+impl diport::DiPortConcurrency for diport::DynDeadLetterStore<'_>
+pub type diport::DynDeadLetterStore<'_>::Bucket = diport::AsyncSend
 impl diport::DiPortEffect for diport::DynDeadLetterStore<'_>
 pub type diport::DynDeadLetterStore<'_>::Effect = diport::BusinessWriteEffect
 pub type diport::DynDeadLetterStore<'_>::Privilege = diport::LocalPrivilege
@@ -1377,6 +1389,8 @@ pub const fn diport::DynFencedWriter<'dynosaur_struct>::from_ref(&impl diport::f
 pub fn diport::DynFencedWriter<'dynosaur_struct>::new_arc(impl diport::fenced_writer::FencedWriter + 'dynosaur_struct) -> alloc::sync::Arc<diport::DynFencedWriter<'dynosaur_struct>>
 pub fn diport::DynFencedWriter<'dynosaur_struct>::new_box(impl diport::fenced_writer::FencedWriter + 'dynosaur_struct) -> alloc::boxed::Box<diport::DynFencedWriter<'dynosaur_struct>>
 pub fn diport::DynFencedWriter<'dynosaur_struct>::new_rc(impl diport::fenced_writer::FencedWriter + 'dynosaur_struct) -> alloc::rc::Rc<diport::DynFencedWriter<'dynosaur_struct>>
+impl diport::DiPortConcurrency for diport::DynFencedWriter<'_>
+pub type diport::DynFencedWriter<'_>::Bucket = diport::AsyncSend
 impl diport::DiPortEffect for diport::DynFencedWriter<'_>
 pub type diport::DynFencedWriter<'_>::Effect = diport::BusinessWriteEffect
 pub type diport::DynFencedWriter<'_>::Privilege = diport::LocalPrivilege
@@ -1526,6 +1540,8 @@ pub const fn diport::DynKeyProvider<'dynosaur_struct>::from_ref(&impl diport::ke
 pub fn diport::DynKeyProvider<'dynosaur_struct>::new_arc(impl diport::key_provider::KeyProvider + 'dynosaur_struct) -> alloc::sync::Arc<diport::DynKeyProvider<'dynosaur_struct>>
 pub fn diport::DynKeyProvider<'dynosaur_struct>::new_box(impl diport::key_provider::KeyProvider + 'dynosaur_struct) -> alloc::boxed::Box<diport::DynKeyProvider<'dynosaur_struct>>
 pub fn diport::DynKeyProvider<'dynosaur_struct>::new_rc(impl diport::key_provider::KeyProvider + 'dynosaur_struct) -> alloc::rc::Rc<diport::DynKeyProvider<'dynosaur_struct>>
+impl diport::DiPortConcurrency for diport::DynKeyProvider<'_>
+pub type diport::DynKeyProvider<'_>::Bucket = diport::AsyncSync
 impl diport::DiPortEffect for diport::DynKeyProvider<'_>
 pub type diport::DynKeyProvider<'_>::Effect = diport::AuthEffect
 pub type diport::DynKeyProvider<'_>::Privilege = diport::LocalPrivilege
@@ -1704,6 +1720,8 @@ pub const fn diport::DynLeaderElector<'dynosaur_struct>::from_ref(&impl diport::
 pub fn diport::DynLeaderElector<'dynosaur_struct>::new_arc(impl diport::leader_elector::LeaderElector + 'dynosaur_struct) -> alloc::sync::Arc<diport::DynLeaderElector<'dynosaur_struct>>
 pub fn diport::DynLeaderElector<'dynosaur_struct>::new_box(impl diport::leader_elector::LeaderElector + 'dynosaur_struct) -> alloc::boxed::Box<diport::DynLeaderElector<'dynosaur_struct>>
 pub fn diport::DynLeaderElector<'dynosaur_struct>::new_rc(impl diport::leader_elector::LeaderElector + 'dynosaur_struct) -> alloc::rc::Rc<diport::DynLeaderElector<'dynosaur_struct>>
+impl diport::DiPortConcurrency for diport::DynLeaderElector<'_>
+pub type diport::DynLeaderElector<'_>::Bucket = diport::AsyncSend
 impl diport::DiPortEffect for diport::DynLeaderElector<'_>
 pub type diport::DynLeaderElector<'_>::Effect = diport::WorkflowEffect
 pub type diport::DynLeaderElector<'_>::Privilege = diport::LocalPrivilege
@@ -1859,6 +1877,8 @@ pub const fn diport::DynLockStore<'dynosaur_struct>::from_ref(&impl diport::lock
 pub fn diport::DynLockStore<'dynosaur_struct>::new_arc(impl diport::lock_store::LockStore + 'dynosaur_struct) -> alloc::sync::Arc<diport::DynLockStore<'dynosaur_struct>>
 pub fn diport::DynLockStore<'dynosaur_struct>::new_box(impl diport::lock_store::LockStore + 'dynosaur_struct) -> alloc::boxed::Box<diport::DynLockStore<'dynosaur_struct>>
 pub fn diport::DynLockStore<'dynosaur_struct>::new_rc(impl diport::lock_store::LockStore + 'dynosaur_struct) -> alloc::rc::Rc<diport::DynLockStore<'dynosaur_struct>>
+impl diport::DiPortConcurrency for diport::DynLockStore<'_>
+pub type diport::DynLockStore<'_>::Bucket = diport::AsyncSend
 impl diport::DiPortEffect for diport::DynLockStore<'_>
 pub type diport::DynLockStore<'_>::Effect = diport::WorkflowEffect
 pub type diport::DynLockStore<'_>::Privilege = diport::LocalPrivilege
@@ -1971,6 +1991,8 @@ pub const fn diport::DynManagedResource<'dynosaur_struct>::from_ref(&impl diport
 pub fn diport::DynManagedResource<'dynosaur_struct>::new_arc(impl diport::managed_resource::ManagedResource + 'dynosaur_struct) -> alloc::sync::Arc<diport::DynManagedResource<'dynosaur_struct>>
 pub fn diport::DynManagedResource<'dynosaur_struct>::new_box(impl diport::managed_resource::ManagedResource + 'dynosaur_struct) -> alloc::boxed::Box<diport::DynManagedResource<'dynosaur_struct>>
 pub fn diport::DynManagedResource<'dynosaur_struct>::new_rc(impl diport::managed_resource::ManagedResource + 'dynosaur_struct) -> alloc::rc::Rc<diport::DynManagedResource<'dynosaur_struct>>
+impl diport::DiPortConcurrency for diport::DynManagedResource<'_>
+pub type diport::DynManagedResource<'_>::Bucket = diport::AsyncSend
 impl diport::DiPortEffect for diport::DynManagedResource<'_>
 pub type diport::DynManagedResource<'_>::Effect = diport::WorkflowEffect
 pub type diport::DynManagedResource<'_>::Privilege = diport::LocalPrivilege
@@ -2075,6 +2097,8 @@ pub const fn diport::DynObjectStore<'dynosaur_struct>::from_ref(&impl diport::ob
 pub fn diport::DynObjectStore<'dynosaur_struct>::new_arc(impl diport::object_store::ObjectStore + 'dynosaur_struct) -> alloc::sync::Arc<diport::DynObjectStore<'dynosaur_struct>>
 pub fn diport::DynObjectStore<'dynosaur_struct>::new_box(impl diport::object_store::ObjectStore + 'dynosaur_struct) -> alloc::boxed::Box<diport::DynObjectStore<'dynosaur_struct>>
 pub fn diport::DynObjectStore<'dynosaur_struct>::new_rc(impl diport::object_store::ObjectStore + 'dynosaur_struct) -> alloc::rc::Rc<diport::DynObjectStore<'dynosaur_struct>>
+impl diport::DiPortConcurrency for diport::DynObjectStore<'_>
+pub type diport::DynObjectStore<'_>::Bucket = diport::AsyncSend
 impl diport::DiPortEffect for diport::DynObjectStore<'_>
 pub type diport::DynObjectStore<'_>::Effect = diport::BusinessWriteEffect
 pub type diport::DynObjectStore<'_>::Privilege = diport::LocalPrivilege
@@ -2226,6 +2250,8 @@ pub const fn diport::DynOutboxEmitter<'dynosaur_struct>::from_ref(&impl diport::
 pub fn diport::DynOutboxEmitter<'dynosaur_struct>::new_arc(impl diport::outbox_emitter::OutboxEmitter + 'dynosaur_struct) -> alloc::sync::Arc<diport::DynOutboxEmitter<'dynosaur_struct>>
 pub fn diport::DynOutboxEmitter<'dynosaur_struct>::new_box(impl diport::outbox_emitter::OutboxEmitter + 'dynosaur_struct) -> alloc::boxed::Box<diport::DynOutboxEmitter<'dynosaur_struct>>
 pub fn diport::DynOutboxEmitter<'dynosaur_struct>::new_rc(impl diport::outbox_emitter::OutboxEmitter + 'dynosaur_struct) -> alloc::rc::Rc<diport::DynOutboxEmitter<'dynosaur_struct>>
+impl diport::DiPortConcurrency for diport::DynOutboxEmitter<'_>
+pub type diport::DynOutboxEmitter<'_>::Bucket = diport::AsyncSend
 impl diport::DiPortEffect for diport::DynOutboxEmitter<'_>
 pub type diport::DynOutboxEmitter<'_>::Effect = diport::OutboxEffect
 pub type diport::DynOutboxEmitter<'_>::Privilege = diport::LocalPrivilege
@@ -2633,6 +2659,8 @@ pub const fn diport::DynPdp<'dynosaur_struct>::from_ref(&impl diport::pdp::Pdp +
 pub fn diport::DynPdp<'dynosaur_struct>::new_arc(impl diport::pdp::Pdp + 'dynosaur_struct) -> alloc::sync::Arc<diport::DynPdp<'dynosaur_struct>>
 pub fn diport::DynPdp<'dynosaur_struct>::new_box(impl diport::pdp::Pdp + 'dynosaur_struct) -> alloc::boxed::Box<diport::DynPdp<'dynosaur_struct>>
 pub fn diport::DynPdp<'dynosaur_struct>::new_rc(impl diport::pdp::Pdp + 'dynosaur_struct) -> alloc::rc::Rc<diport::DynPdp<'dynosaur_struct>>
+impl diport::DiPortConcurrency for diport::DynPdp<'_>
+pub type diport::DynPdp<'_>::Bucket = diport::AsyncSync
 impl diport::DiPortEffect for diport::DynPdp<'_>
 pub type diport::DynPdp<'_>::Effect = diport::AuthEffect
 pub type diport::DynPdp<'_>::Privilege = diport::LocalPrivilege
@@ -2660,6 +2688,8 @@ pub const fn diport::DynServiceTokenReplayStore<'dynosaur_struct>::from_ref(&imp
 pub fn diport::DynServiceTokenReplayStore<'dynosaur_struct>::new_arc(impl diport::pdp::ServiceTokenReplayStore + 'dynosaur_struct) -> alloc::sync::Arc<diport::DynServiceTokenReplayStore<'dynosaur_struct>>
 pub fn diport::DynServiceTokenReplayStore<'dynosaur_struct>::new_box(impl diport::pdp::ServiceTokenReplayStore + 'dynosaur_struct) -> alloc::boxed::Box<diport::DynServiceTokenReplayStore<'dynosaur_struct>>
 pub fn diport::DynServiceTokenReplayStore<'dynosaur_struct>::new_rc(impl diport::pdp::ServiceTokenReplayStore + 'dynosaur_struct) -> alloc::rc::Rc<diport::DynServiceTokenReplayStore<'dynosaur_struct>>
+impl diport::DiPortConcurrency for diport::DynServiceTokenReplayStore<'_>
+pub type diport::DynServiceTokenReplayStore<'_>::Bucket = diport::AsyncSync
 impl diport::DiPortEffect for diport::DynServiceTokenReplayStore<'_>
 pub type diport::DynServiceTokenReplayStore<'_>::Effect = diport::AuthEffect
 pub type diport::DynServiceTokenReplayStore<'_>::Privilege = diport::LocalPrivilege
@@ -2916,6 +2946,8 @@ pub const fn diport::DynPublisher<'dynosaur_struct>::from_ref(&impl diport::publ
 pub fn diport::DynPublisher<'dynosaur_struct>::new_arc(impl diport::publisher::Publisher + 'dynosaur_struct) -> alloc::sync::Arc<diport::DynPublisher<'dynosaur_struct>>
 pub fn diport::DynPublisher<'dynosaur_struct>::new_box(impl diport::publisher::Publisher + 'dynosaur_struct) -> alloc::boxed::Box<diport::DynPublisher<'dynosaur_struct>>
 pub fn diport::DynPublisher<'dynosaur_struct>::new_rc(impl diport::publisher::Publisher + 'dynosaur_struct) -> alloc::rc::Rc<diport::DynPublisher<'dynosaur_struct>>
+impl diport::DiPortConcurrency for diport::DynPublisher<'_>
+pub type diport::DynPublisher<'_>::Bucket = diport::AsyncSend
 impl diport::DiPortEffect for diport::DynPublisher<'_>
 pub type diport::DynPublisher<'_>::Effect = diport::OutboxEffect
 pub type diport::DynPublisher<'_>::Privilege = diport::LocalPrivilege
@@ -3051,6 +3083,8 @@ pub const fn diport::DynRateLimiter<'dynosaur_struct>::from_ref(&impl diport::ra
 pub fn diport::DynRateLimiter<'dynosaur_struct>::new_arc(impl diport::rate_limiter::RateLimiter + 'dynosaur_struct) -> alloc::sync::Arc<diport::DynRateLimiter<'dynosaur_struct>>
 pub fn diport::DynRateLimiter<'dynosaur_struct>::new_box(impl diport::rate_limiter::RateLimiter + 'dynosaur_struct) -> alloc::boxed::Box<diport::DynRateLimiter<'dynosaur_struct>>
 pub fn diport::DynRateLimiter<'dynosaur_struct>::new_rc(impl diport::rate_limiter::RateLimiter + 'dynosaur_struct) -> alloc::rc::Rc<diport::DynRateLimiter<'dynosaur_struct>>
+impl diport::DiPortConcurrency for diport::DynRateLimiter<'_>
+pub type diport::DynRateLimiter<'_>::Bucket = diport::AsyncSend
 impl diport::DiPortEffect for diport::DynRateLimiter<'_>
 pub type diport::DynRateLimiter<'_>::Effect = diport::AuthEffect
 pub type diport::DynRateLimiter<'_>::Privilege = diport::LocalPrivilege
@@ -3258,6 +3292,8 @@ pub const fn diport::DynRevocationStore<'dynosaur_struct>::from_ref(&impl diport
 pub fn diport::DynRevocationStore<'dynosaur_struct>::new_arc(impl diport::revocation_store::RevocationStore + 'dynosaur_struct) -> alloc::sync::Arc<diport::DynRevocationStore<'dynosaur_struct>>
 pub fn diport::DynRevocationStore<'dynosaur_struct>::new_box(impl diport::revocation_store::RevocationStore + 'dynosaur_struct) -> alloc::boxed::Box<diport::DynRevocationStore<'dynosaur_struct>>
 pub fn diport::DynRevocationStore<'dynosaur_struct>::new_rc(impl diport::revocation_store::RevocationStore + 'dynosaur_struct) -> alloc::rc::Rc<diport::DynRevocationStore<'dynosaur_struct>>
+impl diport::DiPortConcurrency for diport::DynRevocationStore<'_>
+pub type diport::DynRevocationStore<'_>::Bucket = diport::AsyncSend
 impl diport::DiPortEffect for diport::DynRevocationStore<'_>
 pub type diport::DynRevocationStore<'_>::Effect = diport::BusinessWriteEffect
 pub type diport::DynRevocationStore<'_>::Privilege = diport::LocalPrivilege
@@ -3402,6 +3438,8 @@ pub const fn diport::DynSagaInstanceStore<'dynosaur_struct>::from_ref(&impl dipo
 pub fn diport::DynSagaInstanceStore<'dynosaur_struct>::new_arc(impl diport::saga_instance_store::SagaInstanceStore + 'dynosaur_struct) -> alloc::sync::Arc<diport::DynSagaInstanceStore<'dynosaur_struct>>
 pub fn diport::DynSagaInstanceStore<'dynosaur_struct>::new_box(impl diport::saga_instance_store::SagaInstanceStore + 'dynosaur_struct) -> alloc::boxed::Box<diport::DynSagaInstanceStore<'dynosaur_struct>>
 pub fn diport::DynSagaInstanceStore<'dynosaur_struct>::new_rc(impl diport::saga_instance_store::SagaInstanceStore + 'dynosaur_struct) -> alloc::rc::Rc<diport::DynSagaInstanceStore<'dynosaur_struct>>
+impl diport::DiPortConcurrency for diport::DynSagaInstanceStore<'_>
+pub type diport::DynSagaInstanceStore<'_>::Bucket = diport::AsyncSend
 impl diport::DiPortEffect for diport::DynSagaInstanceStore<'_>
 pub type diport::DynSagaInstanceStore<'_>::Effect = diport::WorkflowEffect
 pub type diport::DynSagaInstanceStore<'_>::Privilege = diport::LocalPrivilege
@@ -3457,6 +3495,8 @@ pub const fn diport::DynSagaTenantSource<'dynosaur_struct>::from_ref(&impl dipor
 pub fn diport::DynSagaTenantSource<'dynosaur_struct>::new_arc(impl diport::saga_instance_store::SagaTenantSource + 'dynosaur_struct) -> alloc::sync::Arc<diport::DynSagaTenantSource<'dynosaur_struct>>
 pub fn diport::DynSagaTenantSource<'dynosaur_struct>::new_box(impl diport::saga_instance_store::SagaTenantSource + 'dynosaur_struct) -> alloc::boxed::Box<diport::DynSagaTenantSource<'dynosaur_struct>>
 pub fn diport::DynSagaTenantSource<'dynosaur_struct>::new_rc(impl diport::saga_instance_store::SagaTenantSource + 'dynosaur_struct) -> alloc::rc::Rc<diport::DynSagaTenantSource<'dynosaur_struct>>
+impl diport::DiPortConcurrency for diport::DynSagaTenantSource<'_>
+pub type diport::DynSagaTenantSource<'_>::Bucket = diport::AsyncSend
 impl diport::DiPortEffect for diport::DynSagaTenantSource<'_>
 pub type diport::DynSagaTenantSource<'_>::Effect = diport::WorkflowEffect
 pub type diport::DynSagaTenantSource<'_>::Privilege = diport::LocalPrivilege
@@ -3625,6 +3665,8 @@ pub const fn diport::DynSagaJournal<'dynosaur_struct>::from_ref(&impl diport::sa
 pub fn diport::DynSagaJournal<'dynosaur_struct>::new_arc(impl diport::saga_journal::SagaJournal + 'dynosaur_struct) -> alloc::sync::Arc<diport::DynSagaJournal<'dynosaur_struct>>
 pub fn diport::DynSagaJournal<'dynosaur_struct>::new_box(impl diport::saga_journal::SagaJournal + 'dynosaur_struct) -> alloc::boxed::Box<diport::DynSagaJournal<'dynosaur_struct>>
 pub fn diport::DynSagaJournal<'dynosaur_struct>::new_rc(impl diport::saga_journal::SagaJournal + 'dynosaur_struct) -> alloc::rc::Rc<diport::DynSagaJournal<'dynosaur_struct>>
+impl diport::DiPortConcurrency for diport::DynSagaJournal<'_>
+pub type diport::DynSagaJournal<'_>::Bucket = diport::AsyncSend
 impl diport::DiPortEffect for diport::DynSagaJournal<'_>
 pub type diport::DynSagaJournal<'_>::Effect = diport::WorkflowEffect
 pub type diport::DynSagaJournal<'_>::Privilege = diport::LocalPrivilege
@@ -3727,6 +3769,8 @@ pub const fn diport::DynSecretResolver<'dynosaur_struct>::from_ref(&impl diport:
 pub fn diport::DynSecretResolver<'dynosaur_struct>::new_arc(impl diport::secret_resolver::SecretResolver + 'dynosaur_struct) -> alloc::sync::Arc<diport::DynSecretResolver<'dynosaur_struct>>
 pub fn diport::DynSecretResolver<'dynosaur_struct>::new_box(impl diport::secret_resolver::SecretResolver + 'dynosaur_struct) -> alloc::boxed::Box<diport::DynSecretResolver<'dynosaur_struct>>
 pub fn diport::DynSecretResolver<'dynosaur_struct>::new_rc(impl diport::secret_resolver::SecretResolver + 'dynosaur_struct) -> alloc::rc::Rc<diport::DynSecretResolver<'dynosaur_struct>>
+impl diport::DiPortConcurrency for diport::DynSecretResolver<'_>
+pub type diport::DynSecretResolver<'_>::Bucket = diport::AsyncSync
 impl diport::DiPortEffect for diport::DynSecretResolver<'_>
 pub type diport::DynSecretResolver<'_>::Effect = diport::AuthEffect
 pub type diport::DynSecretResolver<'_>::Privilege = diport::LocalPrivilege
@@ -3809,6 +3853,8 @@ pub const fn diport::DynSigner<'dynosaur_struct>::from_ref(&impl diport::signer:
 pub fn diport::DynSigner<'dynosaur_struct>::new_arc(impl diport::signer::Signer + 'dynosaur_struct) -> alloc::sync::Arc<diport::DynSigner<'dynosaur_struct>>
 pub fn diport::DynSigner<'dynosaur_struct>::new_box(impl diport::signer::Signer + 'dynosaur_struct) -> alloc::boxed::Box<diport::DynSigner<'dynosaur_struct>>
 pub fn diport::DynSigner<'dynosaur_struct>::new_rc(impl diport::signer::Signer + 'dynosaur_struct) -> alloc::rc::Rc<diport::DynSigner<'dynosaur_struct>>
+impl diport::DiPortConcurrency for diport::DynSigner<'_>
+pub type diport::DynSigner<'_>::Bucket = diport::AsyncSend
 impl diport::DiPortEffect for diport::DynSigner<'_>
 pub type diport::DynSigner<'_>::Effect = diport::AuthEffect
 pub type diport::DynSigner<'_>::Privilege = diport::LocalPrivilege
@@ -3950,6 +3996,8 @@ pub const fn diport::DynSubscriber<'dynosaur_struct>::from_ref(&impl diport::sub
 pub fn diport::DynSubscriber<'dynosaur_struct>::new_arc(impl diport::subscriber::Subscriber + 'dynosaur_struct) -> alloc::sync::Arc<diport::DynSubscriber<'dynosaur_struct>>
 pub fn diport::DynSubscriber<'dynosaur_struct>::new_box(impl diport::subscriber::Subscriber + 'dynosaur_struct) -> alloc::boxed::Box<diport::DynSubscriber<'dynosaur_struct>>
 pub fn diport::DynSubscriber<'dynosaur_struct>::new_rc(impl diport::subscriber::Subscriber + 'dynosaur_struct) -> alloc::rc::Rc<diport::DynSubscriber<'dynosaur_struct>>
+impl diport::DiPortConcurrency for diport::DynSubscriber<'_>
+pub type diport::DynSubscriber<'_>::Bucket = diport::AsyncSend
 impl diport::DiPortEffect for diport::DynSubscriber<'_>
 pub type diport::DynSubscriber<'_>::Effect = diport::WorkflowEffect
 pub type diport::DynSubscriber<'_>::Privilege = diport::LocalPrivilege
@@ -5064,6 +5112,24 @@ impl core::marker::Unpin for diport::dlx_lifecycle::ArchiveVersionId
 impl core::marker::UnsafeUnpin for diport::dlx_lifecycle::ArchiveVersionId
 impl core::panic::unwind_safe::RefUnwindSafe for diport::dlx_lifecycle::ArchiveVersionId
 impl core::panic::unwind_safe::UnwindSafe for diport::dlx_lifecycle::ArchiveVersionId
+pub struct diport::AsyncSend
+impl diport::ConcurrencyBucket for diport::AsyncSend
+impl core::marker::Freeze for diport::AsyncSend
+impl core::marker::Send for diport::AsyncSend
+impl core::marker::Sync for diport::AsyncSend
+impl core::marker::Unpin for diport::AsyncSend
+impl core::marker::UnsafeUnpin for diport::AsyncSend
+impl core::panic::unwind_safe::RefUnwindSafe for diport::AsyncSend
+impl core::panic::unwind_safe::UnwindSafe for diport::AsyncSend
+pub struct diport::AsyncSync
+impl diport::ConcurrencyBucket for diport::AsyncSync
+impl core::marker::Freeze for diport::AsyncSync
+impl core::marker::Send for diport::AsyncSync
+impl core::marker::Sync for diport::AsyncSync
+impl core::marker::Unpin for diport::AsyncSync
+impl core::marker::UnsafeUnpin for diport::AsyncSync
+impl core::panic::unwind_safe::RefUnwindSafe for diport::AsyncSync
+impl core::panic::unwind_safe::UnwindSafe for diport::AsyncSync
 pub struct diport::AuditEvent
 pub diport::AuditEvent::action: &'static str
 pub diport::AuditEvent::correlation_id: core::option::Option<alloc::string::String>
@@ -5560,6 +5626,8 @@ pub const fn diport::DynAckableSubscriber<'dynosaur_struct>::from_ref(&impl dipo
 pub fn diport::DynAckableSubscriber<'dynosaur_struct>::new_arc(impl diport::acker::AckableSubscriber + 'dynosaur_struct) -> alloc::sync::Arc<diport::DynAckableSubscriber<'dynosaur_struct>>
 pub fn diport::DynAckableSubscriber<'dynosaur_struct>::new_box(impl diport::acker::AckableSubscriber + 'dynosaur_struct) -> alloc::boxed::Box<diport::DynAckableSubscriber<'dynosaur_struct>>
 pub fn diport::DynAckableSubscriber<'dynosaur_struct>::new_rc(impl diport::acker::AckableSubscriber + 'dynosaur_struct) -> alloc::rc::Rc<diport::DynAckableSubscriber<'dynosaur_struct>>
+impl diport::DiPortConcurrency for diport::DynAckableSubscriber<'_>
+pub type diport::DynAckableSubscriber<'_>::Bucket = diport::AsyncSend
 impl diport::DiPortEffect for diport::DynAckableSubscriber<'_>
 pub type diport::DynAckableSubscriber<'_>::Effect = diport::WorkflowEffect
 pub type diport::DynAckableSubscriber<'_>::Privilege = diport::LocalPrivilege
@@ -5591,6 +5659,8 @@ pub const fn diport::DynAcker<'dynosaur_struct>::from_ref(&impl diport::acker::A
 pub fn diport::DynAcker<'dynosaur_struct>::new_arc(impl diport::acker::Acker + 'dynosaur_struct) -> alloc::sync::Arc<diport::DynAcker<'dynosaur_struct>>
 pub fn diport::DynAcker<'dynosaur_struct>::new_box(impl diport::acker::Acker + 'dynosaur_struct) -> alloc::boxed::Box<diport::DynAcker<'dynosaur_struct>>
 pub fn diport::DynAcker<'dynosaur_struct>::new_rc(impl diport::acker::Acker + 'dynosaur_struct) -> alloc::rc::Rc<diport::DynAcker<'dynosaur_struct>>
+impl diport::DiPortConcurrency for diport::DynAcker<'_>
+pub type diport::DynAcker<'_>::Bucket = diport::AsyncSend
 impl diport::DiPortEffect for diport::DynAcker<'_>
 pub type diport::DynAcker<'_>::Effect = diport::BusinessWriteEffect
 pub type diport::DynAcker<'_>::Privilege = diport::LocalPrivilege
@@ -5618,6 +5688,8 @@ pub const fn diport::DynAuditSink<'dynosaur_struct>::from_ref(&impl diport::audi
 pub fn diport::DynAuditSink<'dynosaur_struct>::new_arc(impl diport::audit_sink::AuditSink + 'dynosaur_struct) -> alloc::sync::Arc<diport::DynAuditSink<'dynosaur_struct>>
 pub fn diport::DynAuditSink<'dynosaur_struct>::new_box(impl diport::audit_sink::AuditSink + 'dynosaur_struct) -> alloc::boxed::Box<diport::DynAuditSink<'dynosaur_struct>>
 pub fn diport::DynAuditSink<'dynosaur_struct>::new_rc(impl diport::audit_sink::AuditSink + 'dynosaur_struct) -> alloc::rc::Rc<diport::DynAuditSink<'dynosaur_struct>>
+impl diport::DiPortConcurrency for diport::DynAuditSink<'_>
+pub type diport::DynAuditSink<'_>::Bucket = diport::AsyncSend
 impl diport::DiPortEffect for diport::DynAuditSink<'_>
 pub type diport::DynAuditSink<'_>::Effect = diport::BusinessWriteEffect
 pub type diport::DynAuditSink<'_>::Privilege = diport::LocalPrivilege
@@ -5649,6 +5721,8 @@ pub const fn diport::DynCasStore<'dynosaur_struct>::from_ref(&impl diport::cas_s
 pub fn diport::DynCasStore<'dynosaur_struct>::new_arc(impl diport::cas_store::CasStore + 'dynosaur_struct) -> alloc::sync::Arc<diport::DynCasStore<'dynosaur_struct>>
 pub fn diport::DynCasStore<'dynosaur_struct>::new_box(impl diport::cas_store::CasStore + 'dynosaur_struct) -> alloc::boxed::Box<diport::DynCasStore<'dynosaur_struct>>
 pub fn diport::DynCasStore<'dynosaur_struct>::new_rc(impl diport::cas_store::CasStore + 'dynosaur_struct) -> alloc::rc::Rc<diport::DynCasStore<'dynosaur_struct>>
+impl diport::DiPortConcurrency for diport::DynCasStore<'_>
+pub type diport::DynCasStore<'_>::Bucket = diport::AsyncSend
 impl diport::DiPortEffect for diport::DynCasStore<'_>
 pub type diport::DynCasStore<'_>::Effect = diport::BusinessWriteEffect
 pub type diport::DynCasStore<'_>::Privilege = diport::LocalPrivilege
@@ -5680,6 +5754,8 @@ pub const fn diport::DynDeadLetterStore<'dynosaur_struct>::from_ref(&impl diport
 pub fn diport::DynDeadLetterStore<'dynosaur_struct>::new_arc(impl diport::dead_letter_store::DeadLetterStore + 'dynosaur_struct) -> alloc::sync::Arc<diport::DynDeadLetterStore<'dynosaur_struct>>
 pub fn diport::DynDeadLetterStore<'dynosaur_struct>::new_box(impl diport::dead_letter_store::DeadLetterStore + 'dynosaur_struct) -> alloc::boxed::Box<diport::DynDeadLetterStore<'dynosaur_struct>>
 pub fn diport::DynDeadLetterStore<'dynosaur_struct>::new_rc(impl diport::dead_letter_store::DeadLetterStore + 'dynosaur_struct) -> alloc::rc::Rc<diport::DynDeadLetterStore<'dynosaur_struct>>
+impl diport::DiPortConcurrency for diport::DynDeadLetterStore<'_>
+pub type diport::DynDeadLetterStore<'_>::Bucket = diport::AsyncSend
 impl diport::DiPortEffect for diport::DynDeadLetterStore<'_>
 pub type diport::DynDeadLetterStore<'_>::Effect = diport::BusinessWriteEffect
 pub type diport::DynDeadLetterStore<'_>::Privilege = diport::LocalPrivilege
@@ -5711,6 +5787,8 @@ pub const fn diport::DynFencedWriter<'dynosaur_struct>::from_ref(&impl diport::f
 pub fn diport::DynFencedWriter<'dynosaur_struct>::new_arc(impl diport::fenced_writer::FencedWriter + 'dynosaur_struct) -> alloc::sync::Arc<diport::DynFencedWriter<'dynosaur_struct>>
 pub fn diport::DynFencedWriter<'dynosaur_struct>::new_box(impl diport::fenced_writer::FencedWriter + 'dynosaur_struct) -> alloc::boxed::Box<diport::DynFencedWriter<'dynosaur_struct>>
 pub fn diport::DynFencedWriter<'dynosaur_struct>::new_rc(impl diport::fenced_writer::FencedWriter + 'dynosaur_struct) -> alloc::rc::Rc<diport::DynFencedWriter<'dynosaur_struct>>
+impl diport::DiPortConcurrency for diport::DynFencedWriter<'_>
+pub type diport::DynFencedWriter<'_>::Bucket = diport::AsyncSend
 impl diport::DiPortEffect for diport::DynFencedWriter<'_>
 pub type diport::DynFencedWriter<'_>::Effect = diport::BusinessWriteEffect
 pub type diport::DynFencedWriter<'_>::Privilege = diport::LocalPrivilege
@@ -5742,6 +5820,8 @@ pub const fn diport::DynKeyProvider<'dynosaur_struct>::from_ref(&impl diport::ke
 pub fn diport::DynKeyProvider<'dynosaur_struct>::new_arc(impl diport::key_provider::KeyProvider + 'dynosaur_struct) -> alloc::sync::Arc<diport::DynKeyProvider<'dynosaur_struct>>
 pub fn diport::DynKeyProvider<'dynosaur_struct>::new_box(impl diport::key_provider::KeyProvider + 'dynosaur_struct) -> alloc::boxed::Box<diport::DynKeyProvider<'dynosaur_struct>>
 pub fn diport::DynKeyProvider<'dynosaur_struct>::new_rc(impl diport::key_provider::KeyProvider + 'dynosaur_struct) -> alloc::rc::Rc<diport::DynKeyProvider<'dynosaur_struct>>
+impl diport::DiPortConcurrency for diport::DynKeyProvider<'_>
+pub type diport::DynKeyProvider<'_>::Bucket = diport::AsyncSync
 impl diport::DiPortEffect for diport::DynKeyProvider<'_>
 pub type diport::DynKeyProvider<'_>::Effect = diport::AuthEffect
 pub type diport::DynKeyProvider<'_>::Privilege = diport::LocalPrivilege
@@ -5781,6 +5861,8 @@ pub const fn diport::DynLeaderElector<'dynosaur_struct>::from_ref(&impl diport::
 pub fn diport::DynLeaderElector<'dynosaur_struct>::new_arc(impl diport::leader_elector::LeaderElector + 'dynosaur_struct) -> alloc::sync::Arc<diport::DynLeaderElector<'dynosaur_struct>>
 pub fn diport::DynLeaderElector<'dynosaur_struct>::new_box(impl diport::leader_elector::LeaderElector + 'dynosaur_struct) -> alloc::boxed::Box<diport::DynLeaderElector<'dynosaur_struct>>
 pub fn diport::DynLeaderElector<'dynosaur_struct>::new_rc(impl diport::leader_elector::LeaderElector + 'dynosaur_struct) -> alloc::rc::Rc<diport::DynLeaderElector<'dynosaur_struct>>
+impl diport::DiPortConcurrency for diport::DynLeaderElector<'_>
+pub type diport::DynLeaderElector<'_>::Bucket = diport::AsyncSend
 impl diport::DiPortEffect for diport::DynLeaderElector<'_>
 pub type diport::DynLeaderElector<'_>::Effect = diport::WorkflowEffect
 pub type diport::DynLeaderElector<'_>::Privilege = diport::LocalPrivilege
@@ -5816,6 +5898,8 @@ pub const fn diport::DynLockStore<'dynosaur_struct>::from_ref(&impl diport::lock
 pub fn diport::DynLockStore<'dynosaur_struct>::new_arc(impl diport::lock_store::LockStore + 'dynosaur_struct) -> alloc::sync::Arc<diport::DynLockStore<'dynosaur_struct>>
 pub fn diport::DynLockStore<'dynosaur_struct>::new_box(impl diport::lock_store::LockStore + 'dynosaur_struct) -> alloc::boxed::Box<diport::DynLockStore<'dynosaur_struct>>
 pub fn diport::DynLockStore<'dynosaur_struct>::new_rc(impl diport::lock_store::LockStore + 'dynosaur_struct) -> alloc::rc::Rc<diport::DynLockStore<'dynosaur_struct>>
+impl diport::DiPortConcurrency for diport::DynLockStore<'_>
+pub type diport::DynLockStore<'_>::Bucket = diport::AsyncSend
 impl diport::DiPortEffect for diport::DynLockStore<'_>
 pub type diport::DynLockStore<'_>::Effect = diport::WorkflowEffect
 pub type diport::DynLockStore<'_>::Privilege = diport::LocalPrivilege
@@ -5855,6 +5939,8 @@ pub const fn diport::DynManagedResource<'dynosaur_struct>::from_ref(&impl diport
 pub fn diport::DynManagedResource<'dynosaur_struct>::new_arc(impl diport::managed_resource::ManagedResource + 'dynosaur_struct) -> alloc::sync::Arc<diport::DynManagedResource<'dynosaur_struct>>
 pub fn diport::DynManagedResource<'dynosaur_struct>::new_box(impl diport::managed_resource::ManagedResource + 'dynosaur_struct) -> alloc::boxed::Box<diport::DynManagedResource<'dynosaur_struct>>
 pub fn diport::DynManagedResource<'dynosaur_struct>::new_rc(impl diport::managed_resource::ManagedResource + 'dynosaur_struct) -> alloc::rc::Rc<diport::DynManagedResource<'dynosaur_struct>>
+impl diport::DiPortConcurrency for diport::DynManagedResource<'_>
+pub type diport::DynManagedResource<'_>::Bucket = diport::AsyncSend
 impl diport::DiPortEffect for diport::DynManagedResource<'_>
 pub type diport::DynManagedResource<'_>::Effect = diport::WorkflowEffect
 pub type diport::DynManagedResource<'_>::Privilege = diport::LocalPrivilege
@@ -5890,6 +5976,8 @@ pub const fn diport::DynObjectStore<'dynosaur_struct>::from_ref(&impl diport::ob
 pub fn diport::DynObjectStore<'dynosaur_struct>::new_arc(impl diport::object_store::ObjectStore + 'dynosaur_struct) -> alloc::sync::Arc<diport::DynObjectStore<'dynosaur_struct>>
 pub fn diport::DynObjectStore<'dynosaur_struct>::new_box(impl diport::object_store::ObjectStore + 'dynosaur_struct) -> alloc::boxed::Box<diport::DynObjectStore<'dynosaur_struct>>
 pub fn diport::DynObjectStore<'dynosaur_struct>::new_rc(impl diport::object_store::ObjectStore + 'dynosaur_struct) -> alloc::rc::Rc<diport::DynObjectStore<'dynosaur_struct>>
+impl diport::DiPortConcurrency for diport::DynObjectStore<'_>
+pub type diport::DynObjectStore<'_>::Bucket = diport::AsyncSend
 impl diport::DiPortEffect for diport::DynObjectStore<'_>
 pub type diport::DynObjectStore<'_>::Effect = diport::BusinessWriteEffect
 pub type diport::DynObjectStore<'_>::Privilege = diport::LocalPrivilege
@@ -5929,6 +6017,8 @@ pub const fn diport::DynOutboxEmitter<'dynosaur_struct>::from_ref(&impl diport::
 pub fn diport::DynOutboxEmitter<'dynosaur_struct>::new_arc(impl diport::outbox_emitter::OutboxEmitter + 'dynosaur_struct) -> alloc::sync::Arc<diport::DynOutboxEmitter<'dynosaur_struct>>
 pub fn diport::DynOutboxEmitter<'dynosaur_struct>::new_box(impl diport::outbox_emitter::OutboxEmitter + 'dynosaur_struct) -> alloc::boxed::Box<diport::DynOutboxEmitter<'dynosaur_struct>>
 pub fn diport::DynOutboxEmitter<'dynosaur_struct>::new_rc(impl diport::outbox_emitter::OutboxEmitter + 'dynosaur_struct) -> alloc::rc::Rc<diport::DynOutboxEmitter<'dynosaur_struct>>
+impl diport::DiPortConcurrency for diport::DynOutboxEmitter<'_>
+pub type diport::DynOutboxEmitter<'_>::Bucket = diport::AsyncSend
 impl diport::DiPortEffect for diport::DynOutboxEmitter<'_>
 pub type diport::DynOutboxEmitter<'_>::Effect = diport::OutboxEffect
 pub type diport::DynOutboxEmitter<'_>::Privilege = diport::LocalPrivilege
@@ -5956,6 +6046,8 @@ pub const fn diport::DynOwnerCheckpointStore<'dynosaur_struct>::from_ref(&impl d
 pub fn diport::DynOwnerCheckpointStore<'dynosaur_struct>::new_arc(impl diport::checkpoint_store::OwnerCheckpointStore + 'dynosaur_struct) -> alloc::sync::Arc<diport::DynOwnerCheckpointStore<'dynosaur_struct>>
 pub fn diport::DynOwnerCheckpointStore<'dynosaur_struct>::new_box(impl diport::checkpoint_store::OwnerCheckpointStore + 'dynosaur_struct) -> alloc::boxed::Box<diport::DynOwnerCheckpointStore<'dynosaur_struct>>
 pub fn diport::DynOwnerCheckpointStore<'dynosaur_struct>::new_rc(impl diport::checkpoint_store::OwnerCheckpointStore + 'dynosaur_struct) -> alloc::rc::Rc<diport::DynOwnerCheckpointStore<'dynosaur_struct>>
+impl diport::DiPortConcurrency for diport::DynOwnerCheckpointStore<'_>
+pub type diport::DynOwnerCheckpointStore<'_>::Bucket = diport::AsyncSend
 impl diport::DiPortEffect for diport::DynOwnerCheckpointStore<'_>
 pub type diport::DynOwnerCheckpointStore<'_>::Effect = diport::BusinessWriteEffect
 pub type diport::DynOwnerCheckpointStore<'_>::Privilege = diport::LocalPrivilege
@@ -5991,6 +6083,8 @@ pub const fn diport::DynPdp<'dynosaur_struct>::from_ref(&impl diport::pdp::Pdp +
 pub fn diport::DynPdp<'dynosaur_struct>::new_arc(impl diport::pdp::Pdp + 'dynosaur_struct) -> alloc::sync::Arc<diport::DynPdp<'dynosaur_struct>>
 pub fn diport::DynPdp<'dynosaur_struct>::new_box(impl diport::pdp::Pdp + 'dynosaur_struct) -> alloc::boxed::Box<diport::DynPdp<'dynosaur_struct>>
 pub fn diport::DynPdp<'dynosaur_struct>::new_rc(impl diport::pdp::Pdp + 'dynosaur_struct) -> alloc::rc::Rc<diport::DynPdp<'dynosaur_struct>>
+impl diport::DiPortConcurrency for diport::DynPdp<'_>
+pub type diport::DynPdp<'_>::Bucket = diport::AsyncSync
 impl diport::DiPortEffect for diport::DynPdp<'_>
 pub type diport::DynPdp<'_>::Effect = diport::AuthEffect
 pub type diport::DynPdp<'_>::Privilege = diport::LocalPrivilege
@@ -6018,6 +6112,8 @@ pub const fn diport::DynPublisher<'dynosaur_struct>::from_ref(&impl diport::publ
 pub fn diport::DynPublisher<'dynosaur_struct>::new_arc(impl diport::publisher::Publisher + 'dynosaur_struct) -> alloc::sync::Arc<diport::DynPublisher<'dynosaur_struct>>
 pub fn diport::DynPublisher<'dynosaur_struct>::new_box(impl diport::publisher::Publisher + 'dynosaur_struct) -> alloc::boxed::Box<diport::DynPublisher<'dynosaur_struct>>
 pub fn diport::DynPublisher<'dynosaur_struct>::new_rc(impl diport::publisher::Publisher + 'dynosaur_struct) -> alloc::rc::Rc<diport::DynPublisher<'dynosaur_struct>>
+impl diport::DiPortConcurrency for diport::DynPublisher<'_>
+pub type diport::DynPublisher<'_>::Bucket = diport::AsyncSend
 impl diport::DiPortEffect for diport::DynPublisher<'_>
 pub type diport::DynPublisher<'_>::Effect = diport::OutboxEffect
 pub type diport::DynPublisher<'_>::Privilege = diport::LocalPrivilege
@@ -6049,6 +6145,8 @@ pub const fn diport::DynRateLimiter<'dynosaur_struct>::from_ref(&impl diport::ra
 pub fn diport::DynRateLimiter<'dynosaur_struct>::new_arc(impl diport::rate_limiter::RateLimiter + 'dynosaur_struct) -> alloc::sync::Arc<diport::DynRateLimiter<'dynosaur_struct>>
 pub fn diport::DynRateLimiter<'dynosaur_struct>::new_box(impl diport::rate_limiter::RateLimiter + 'dynosaur_struct) -> alloc::boxed::Box<diport::DynRateLimiter<'dynosaur_struct>>
 pub fn diport::DynRateLimiter<'dynosaur_struct>::new_rc(impl diport::rate_limiter::RateLimiter + 'dynosaur_struct) -> alloc::rc::Rc<diport::DynRateLimiter<'dynosaur_struct>>
+impl diport::DiPortConcurrency for diport::DynRateLimiter<'_>
+pub type diport::DynRateLimiter<'_>::Bucket = diport::AsyncSend
 impl diport::DiPortEffect for diport::DynRateLimiter<'_>
 pub type diport::DynRateLimiter<'_>::Effect = diport::AuthEffect
 pub type diport::DynRateLimiter<'_>::Privilege = diport::LocalPrivilege
@@ -6080,6 +6178,8 @@ pub const fn diport::DynRevocationStore<'dynosaur_struct>::from_ref(&impl diport
 pub fn diport::DynRevocationStore<'dynosaur_struct>::new_arc(impl diport::revocation_store::RevocationStore + 'dynosaur_struct) -> alloc::sync::Arc<diport::DynRevocationStore<'dynosaur_struct>>
 pub fn diport::DynRevocationStore<'dynosaur_struct>::new_box(impl diport::revocation_store::RevocationStore + 'dynosaur_struct) -> alloc::boxed::Box<diport::DynRevocationStore<'dynosaur_struct>>
 pub fn diport::DynRevocationStore<'dynosaur_struct>::new_rc(impl diport::revocation_store::RevocationStore + 'dynosaur_struct) -> alloc::rc::Rc<diport::DynRevocationStore<'dynosaur_struct>>
+impl diport::DiPortConcurrency for diport::DynRevocationStore<'_>
+pub type diport::DynRevocationStore<'_>::Bucket = diport::AsyncSend
 impl diport::DiPortEffect for diport::DynRevocationStore<'_>
 pub type diport::DynRevocationStore<'_>::Effect = diport::BusinessWriteEffect
 pub type diport::DynRevocationStore<'_>::Privilege = diport::LocalPrivilege
@@ -6115,6 +6215,8 @@ pub const fn diport::DynSagaInstanceStore<'dynosaur_struct>::from_ref(&impl dipo
 pub fn diport::DynSagaInstanceStore<'dynosaur_struct>::new_arc(impl diport::saga_instance_store::SagaInstanceStore + 'dynosaur_struct) -> alloc::sync::Arc<diport::DynSagaInstanceStore<'dynosaur_struct>>
 pub fn diport::DynSagaInstanceStore<'dynosaur_struct>::new_box(impl diport::saga_instance_store::SagaInstanceStore + 'dynosaur_struct) -> alloc::boxed::Box<diport::DynSagaInstanceStore<'dynosaur_struct>>
 pub fn diport::DynSagaInstanceStore<'dynosaur_struct>::new_rc(impl diport::saga_instance_store::SagaInstanceStore + 'dynosaur_struct) -> alloc::rc::Rc<diport::DynSagaInstanceStore<'dynosaur_struct>>
+impl diport::DiPortConcurrency for diport::DynSagaInstanceStore<'_>
+pub type diport::DynSagaInstanceStore<'_>::Bucket = diport::AsyncSend
 impl diport::DiPortEffect for diport::DynSagaInstanceStore<'_>
 pub type diport::DynSagaInstanceStore<'_>::Effect = diport::WorkflowEffect
 pub type diport::DynSagaInstanceStore<'_>::Privilege = diport::LocalPrivilege
@@ -6170,6 +6272,8 @@ pub const fn diport::DynSagaJournal<'dynosaur_struct>::from_ref(&impl diport::sa
 pub fn diport::DynSagaJournal<'dynosaur_struct>::new_arc(impl diport::saga_journal::SagaJournal + 'dynosaur_struct) -> alloc::sync::Arc<diport::DynSagaJournal<'dynosaur_struct>>
 pub fn diport::DynSagaJournal<'dynosaur_struct>::new_box(impl diport::saga_journal::SagaJournal + 'dynosaur_struct) -> alloc::boxed::Box<diport::DynSagaJournal<'dynosaur_struct>>
 pub fn diport::DynSagaJournal<'dynosaur_struct>::new_rc(impl diport::saga_journal::SagaJournal + 'dynosaur_struct) -> alloc::rc::Rc<diport::DynSagaJournal<'dynosaur_struct>>
+impl diport::DiPortConcurrency for diport::DynSagaJournal<'_>
+pub type diport::DynSagaJournal<'_>::Bucket = diport::AsyncSend
 impl diport::DiPortEffect for diport::DynSagaJournal<'_>
 pub type diport::DynSagaJournal<'_>::Effect = diport::WorkflowEffect
 pub type diport::DynSagaJournal<'_>::Privilege = diport::LocalPrivilege
@@ -6205,6 +6309,8 @@ pub const fn diport::DynSagaTenantSource<'dynosaur_struct>::from_ref(&impl dipor
 pub fn diport::DynSagaTenantSource<'dynosaur_struct>::new_arc(impl diport::saga_instance_store::SagaTenantSource + 'dynosaur_struct) -> alloc::sync::Arc<diport::DynSagaTenantSource<'dynosaur_struct>>
 pub fn diport::DynSagaTenantSource<'dynosaur_struct>::new_box(impl diport::saga_instance_store::SagaTenantSource + 'dynosaur_struct) -> alloc::boxed::Box<diport::DynSagaTenantSource<'dynosaur_struct>>
 pub fn diport::DynSagaTenantSource<'dynosaur_struct>::new_rc(impl diport::saga_instance_store::SagaTenantSource + 'dynosaur_struct) -> alloc::rc::Rc<diport::DynSagaTenantSource<'dynosaur_struct>>
+impl diport::DiPortConcurrency for diport::DynSagaTenantSource<'_>
+pub type diport::DynSagaTenantSource<'_>::Bucket = diport::AsyncSend
 impl diport::DiPortEffect for diport::DynSagaTenantSource<'_>
 pub type diport::DynSagaTenantSource<'_>::Effect = diport::WorkflowEffect
 pub type diport::DynSagaTenantSource<'_>::Privilege = diport::LocalPrivilege
@@ -6232,6 +6338,8 @@ pub const fn diport::DynSecretResolver<'dynosaur_struct>::from_ref(&impl diport:
 pub fn diport::DynSecretResolver<'dynosaur_struct>::new_arc(impl diport::secret_resolver::SecretResolver + 'dynosaur_struct) -> alloc::sync::Arc<diport::DynSecretResolver<'dynosaur_struct>>
 pub fn diport::DynSecretResolver<'dynosaur_struct>::new_box(impl diport::secret_resolver::SecretResolver + 'dynosaur_struct) -> alloc::boxed::Box<diport::DynSecretResolver<'dynosaur_struct>>
 pub fn diport::DynSecretResolver<'dynosaur_struct>::new_rc(impl diport::secret_resolver::SecretResolver + 'dynosaur_struct) -> alloc::rc::Rc<diport::DynSecretResolver<'dynosaur_struct>>
+impl diport::DiPortConcurrency for diport::DynSecretResolver<'_>
+pub type diport::DynSecretResolver<'_>::Bucket = diport::AsyncSync
 impl diport::DiPortEffect for diport::DynSecretResolver<'_>
 pub type diport::DynSecretResolver<'_>::Effect = diport::AuthEffect
 pub type diport::DynSecretResolver<'_>::Privilege = diport::LocalPrivilege
@@ -6259,6 +6367,8 @@ pub const fn diport::DynServiceTokenReplayStore<'dynosaur_struct>::from_ref(&imp
 pub fn diport::DynServiceTokenReplayStore<'dynosaur_struct>::new_arc(impl diport::pdp::ServiceTokenReplayStore + 'dynosaur_struct) -> alloc::sync::Arc<diport::DynServiceTokenReplayStore<'dynosaur_struct>>
 pub fn diport::DynServiceTokenReplayStore<'dynosaur_struct>::new_box(impl diport::pdp::ServiceTokenReplayStore + 'dynosaur_struct) -> alloc::boxed::Box<diport::DynServiceTokenReplayStore<'dynosaur_struct>>
 pub fn diport::DynServiceTokenReplayStore<'dynosaur_struct>::new_rc(impl diport::pdp::ServiceTokenReplayStore + 'dynosaur_struct) -> alloc::rc::Rc<diport::DynServiceTokenReplayStore<'dynosaur_struct>>
+impl diport::DiPortConcurrency for diport::DynServiceTokenReplayStore<'_>
+pub type diport::DynServiceTokenReplayStore<'_>::Bucket = diport::AsyncSync
 impl diport::DiPortEffect for diport::DynServiceTokenReplayStore<'_>
 pub type diport::DynServiceTokenReplayStore<'_>::Effect = diport::AuthEffect
 pub type diport::DynServiceTokenReplayStore<'_>::Privilege = diport::LocalPrivilege
@@ -6286,6 +6396,8 @@ pub const fn diport::DynSigner<'dynosaur_struct>::from_ref(&impl diport::signer:
 pub fn diport::DynSigner<'dynosaur_struct>::new_arc(impl diport::signer::Signer + 'dynosaur_struct) -> alloc::sync::Arc<diport::DynSigner<'dynosaur_struct>>
 pub fn diport::DynSigner<'dynosaur_struct>::new_box(impl diport::signer::Signer + 'dynosaur_struct) -> alloc::boxed::Box<diport::DynSigner<'dynosaur_struct>>
 pub fn diport::DynSigner<'dynosaur_struct>::new_rc(impl diport::signer::Signer + 'dynosaur_struct) -> alloc::rc::Rc<diport::DynSigner<'dynosaur_struct>>
+impl diport::DiPortConcurrency for diport::DynSigner<'_>
+pub type diport::DynSigner<'_>::Bucket = diport::AsyncSend
 impl diport::DiPortEffect for diport::DynSigner<'_>
 pub type diport::DynSigner<'_>::Effect = diport::AuthEffect
 pub type diport::DynSigner<'_>::Privilege = diport::LocalPrivilege
@@ -6317,6 +6429,8 @@ pub const fn diport::DynSubscriber<'dynosaur_struct>::from_ref(&impl diport::sub
 pub fn diport::DynSubscriber<'dynosaur_struct>::new_arc(impl diport::subscriber::Subscriber + 'dynosaur_struct) -> alloc::sync::Arc<diport::DynSubscriber<'dynosaur_struct>>
 pub fn diport::DynSubscriber<'dynosaur_struct>::new_box(impl diport::subscriber::Subscriber + 'dynosaur_struct) -> alloc::boxed::Box<diport::DynSubscriber<'dynosaur_struct>>
 pub fn diport::DynSubscriber<'dynosaur_struct>::new_rc(impl diport::subscriber::Subscriber + 'dynosaur_struct) -> alloc::rc::Rc<diport::DynSubscriber<'dynosaur_struct>>
+impl diport::DiPortConcurrency for diport::DynSubscriber<'_>
+pub type diport::DynSubscriber<'_>::Bucket = diport::AsyncSend
 impl diport::DiPortEffect for diport::DynSubscriber<'_>
 pub type diport::DynSubscriber<'_>::Effect = diport::WorkflowEffect
 pub type diport::DynSubscriber<'_>::Privilege = diport::LocalPrivilege
@@ -7408,6 +7522,15 @@ impl core::marker::Unpin for diport::subscriber::SubscriberError
 impl core::marker::UnsafeUnpin for diport::subscriber::SubscriberError
 impl !core::panic::unwind_safe::RefUnwindSafe for diport::subscriber::SubscriberError
 impl !core::panic::unwind_safe::UnwindSafe for diport::subscriber::SubscriberError
+pub struct diport::SyncObj
+impl diport::ConcurrencyBucket for diport::SyncObj
+impl core::marker::Freeze for diport::SyncObj
+impl core::marker::Send for diport::SyncObj
+impl core::marker::Sync for diport::SyncObj
+impl core::marker::Unpin for diport::SyncObj
+impl core::marker::UnsafeUnpin for diport::SyncObj
+impl core::panic::unwind_safe::RefUnwindSafe for diport::SyncObj
+impl core::panic::unwind_safe::UnwindSafe for diport::SyncObj
 pub struct diport::TokenPolicy
 impl diport::pdp::TokenPolicy
 pub const fn diport::pdp::TokenPolicy::algorithm(self) -> diport::pdp::TokenAlgorithm
@@ -7588,6 +7711,10 @@ pub fn diport::DynCasStore<'dynosaur_struct>::compare_and_swap(&self, diport::ca
 pub fn diport::DynCasStore<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::cas_store::CasStoreError>> + core::marker::Send
 pub trait diport::Clock: core::marker::Send + core::marker::Sync
 pub fn diport::Clock::now(&self) -> std::time::SystemTime
+pub trait diport::ConcurrencyBucket: diport::effect::sealed::ConcurrencyBucket
+impl diport::ConcurrencyBucket for diport::AsyncSend
+impl diport::ConcurrencyBucket for diport::AsyncSync
+impl diport::ConcurrencyBucket for diport::SyncObj
 pub trait diport::DeadLetterStore: core::marker::Send
 pub fn diport::DeadLetterStore::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::dead_letter_store::DeadLetterStoreError>> + core::marker::Send
 pub fn diport::DeadLetterStore::write_dead_letter(&self, diport::dead_letter_store::DeadLetterRecord) -> impl core::future::future::Future<Output = core::result::Result<(), diport::dead_letter_store::DeadLetterStoreError>> + core::marker::Send
@@ -7603,6 +7730,66 @@ pub fn alloc::boxed::Box<diport::DynDeadLetterStore<'dynosaur_struct>>::write_de
 impl<'dynosaur_struct> diport::dead_letter_store::DeadLetterStore for diport::DynDeadLetterStore<'dynosaur_struct>
 pub fn diport::DynDeadLetterStore<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::dead_letter_store::DeadLetterStoreError>> + core::marker::Send
 pub fn diport::DynDeadLetterStore<'dynosaur_struct>::write_dead_letter(&self, diport::dead_letter_store::DeadLetterRecord) -> impl core::future::future::Future<Output = core::result::Result<(), diport::dead_letter_store::DeadLetterStoreError>> + core::marker::Send
+pub trait diport::DiPortConcurrency: diport::effect::sealed::DiPortConcurrency
+pub type diport::DiPortConcurrency::Bucket: diport::ConcurrencyBucket
+impl diport::DiPortConcurrency for diport::DynAckableSubscriber<'_>
+pub type diport::DynAckableSubscriber<'_>::Bucket = diport::AsyncSend
+impl diport::DiPortConcurrency for diport::DynAcker<'_>
+pub type diport::DynAcker<'_>::Bucket = diport::AsyncSend
+impl diport::DiPortConcurrency for diport::DynAuditSink<'_>
+pub type diport::DynAuditSink<'_>::Bucket = diport::AsyncSend
+impl diport::DiPortConcurrency for diport::DynCasStore<'_>
+pub type diport::DynCasStore<'_>::Bucket = diport::AsyncSend
+impl diport::DiPortConcurrency for diport::DynDeadLetterStore<'_>
+pub type diport::DynDeadLetterStore<'_>::Bucket = diport::AsyncSend
+impl diport::DiPortConcurrency for diport::DynFencedWriter<'_>
+pub type diport::DynFencedWriter<'_>::Bucket = diport::AsyncSend
+impl diport::DiPortConcurrency for diport::DynKeyProvider<'_>
+pub type diport::DynKeyProvider<'_>::Bucket = diport::AsyncSync
+impl diport::DiPortConcurrency for diport::DynLeaderElector<'_>
+pub type diport::DynLeaderElector<'_>::Bucket = diport::AsyncSend
+impl diport::DiPortConcurrency for diport::DynLockStore<'_>
+pub type diport::DynLockStore<'_>::Bucket = diport::AsyncSend
+impl diport::DiPortConcurrency for diport::DynManagedResource<'_>
+pub type diport::DynManagedResource<'_>::Bucket = diport::AsyncSend
+impl diport::DiPortConcurrency for diport::DynObjectStore<'_>
+pub type diport::DynObjectStore<'_>::Bucket = diport::AsyncSend
+impl diport::DiPortConcurrency for diport::DynOutboxEmitter<'_>
+pub type diport::DynOutboxEmitter<'_>::Bucket = diport::AsyncSend
+impl diport::DiPortConcurrency for diport::DynOwnerCheckpointStore<'_>
+pub type diport::DynOwnerCheckpointStore<'_>::Bucket = diport::AsyncSend
+impl diport::DiPortConcurrency for diport::DynPdp<'_>
+pub type diport::DynPdp<'_>::Bucket = diport::AsyncSync
+impl diport::DiPortConcurrency for diport::DynPublisher<'_>
+pub type diport::DynPublisher<'_>::Bucket = diport::AsyncSend
+impl diport::DiPortConcurrency for diport::DynRateLimiter<'_>
+pub type diport::DynRateLimiter<'_>::Bucket = diport::AsyncSend
+impl diport::DiPortConcurrency for diport::DynRevocationStore<'_>
+pub type diport::DynRevocationStore<'_>::Bucket = diport::AsyncSend
+impl diport::DiPortConcurrency for diport::DynSagaInstanceStore<'_>
+pub type diport::DynSagaInstanceStore<'_>::Bucket = diport::AsyncSend
+impl diport::DiPortConcurrency for diport::DynSagaJournal<'_>
+pub type diport::DynSagaJournal<'_>::Bucket = diport::AsyncSend
+impl diport::DiPortConcurrency for diport::DynSagaTenantSource<'_>
+pub type diport::DynSagaTenantSource<'_>::Bucket = diport::AsyncSend
+impl diport::DiPortConcurrency for diport::DynSecretResolver<'_>
+pub type diport::DynSecretResolver<'_>::Bucket = diport::AsyncSync
+impl diport::DiPortConcurrency for diport::DynServiceTokenReplayStore<'_>
+pub type diport::DynServiceTokenReplayStore<'_>::Bucket = diport::AsyncSync
+impl diport::DiPortConcurrency for diport::DynSigner<'_>
+pub type diport::DynSigner<'_>::Bucket = diport::AsyncSend
+impl diport::DiPortConcurrency for diport::DynSubscriber<'_>
+pub type diport::DynSubscriber<'_>::Bucket = diport::AsyncSend
+impl<'a> diport::DiPortConcurrency for (dyn diport::clock::Clock + 'a)
+pub type (dyn diport::clock::Clock + 'a)::Bucket = diport::SyncObj
+impl<'a> diport::DiPortConcurrency for (dyn diport::metrics_exporter::MetricsExporter + 'a)
+pub type (dyn diport::metrics_exporter::MetricsExporter + 'a)::Bucket = diport::SyncObj
+impl<'a> diport::DiPortConcurrency for (dyn diport::subscriber::SubscribeInitializer + 'a)
+pub type (dyn diport::subscriber::SubscribeInitializer + 'a)::Bucket = diport::SyncObj
+impl<T: ?core::marker::Sized + diport::DiPortConcurrency> diport::DiPortConcurrency for alloc::boxed::Box<T>
+pub type alloc::boxed::Box<T>::Bucket = <T as diport::DiPortConcurrency>::Bucket
+impl<T: ?core::marker::Sized + diport::DiPortConcurrency> diport::DiPortConcurrency for alloc::sync::Arc<T>
+pub type alloc::sync::Arc<T>::Bucket = <T as diport::DiPortConcurrency>::Bucket
 pub trait diport::DiPortEffect: diport::effect::sealed::DiPortEffect
 pub type diport::DiPortEffect::Effect: diport::PortEffectClass
 pub type diport::DiPortEffect::Privilege: diport::PortPrivilegeClass

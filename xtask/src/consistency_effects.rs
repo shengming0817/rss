@@ -7139,6 +7139,55 @@ fn insert_port(
     Ok(())
 }
 
+fn collect_dyn_idents_from_use_tree(tree: &syn::UseTree, out: &mut BTreeSet<String>) -> Result<()> {
+    match tree {
+        syn::UseTree::Path(path) => collect_dyn_idents_from_use_tree(&path.tree, out),
+        syn::UseTree::Name(name) => {
+            let ident = name.ident.to_string();
+            if ident.starts_with("Dyn") {
+                out.insert(ident);
+            }
+            Ok(())
+        }
+        syn::UseTree::Rename(rename) => {
+            let ident = rename.rename.to_string();
+            if ident.starts_with("Dyn") {
+                out.insert(ident);
+            }
+            Ok(())
+        }
+        syn::UseTree::Group(group) => {
+            for item in &group.items {
+                collect_dyn_idents_from_use_tree(item, out)?;
+            }
+            Ok(())
+        }
+        syn::UseTree::Glob(_) => bail!(
+            "diport Dyn* export must enumerate names; `use …::*` glob is forbidden (fail-closed)"
+        ),
+    }
+}
+
+fn collect_diport_exported_dyn_ports(root: &Path) -> Result<BTreeSet<String>> {
+    let file = root.join("crates/diport/src/lib.rs");
+    let subject = relative(root, &file)?;
+    let syntax = syn::parse_file(
+        &std::fs::read_to_string(&file).with_context(|| format!("read `{subject}`"))?,
+    )
+    .with_context(|| format!("parse `{subject}`"))?;
+    let mut out = BTreeSet::new();
+    for item in &syntax.items {
+        let Item::Use(item_use) = item else {
+            continue;
+        };
+        if !matches!(item_use.vis, syn::Visibility::Public(_)) {
+            continue;
+        }
+        collect_dyn_idents_from_use_tree(&item_use.tree, &mut out)?;
+    }
+    Ok(out)
+}
+
 fn collect_diport_capabilities(root: &Path, out: &mut BTreeMap<String, PortClass>) -> Result<()> {
     let effect = root.join("crates/diport/src/effect.rs");
     let file = if effect.is_file() {
@@ -7152,6 +7201,7 @@ fn collect_diport_capabilities(root: &Path, out: &mut BTreeMap<String, PortClass
     )
     .with_context(|| format!("parse `{subject}`"))?;
     let mut found = false;
+    let mut async_dyn_ports = BTreeSet::new();
     for item in syntax.items {
         let Item::Macro(item) = item else {
             continue;
@@ -7172,8 +7222,13 @@ fn collect_diport_capabilities(root: &Path, out: &mut BTreeMap<String, PortClass
             let Some(kind) = words.first().map(String::as_str) else {
                 continue;
             };
-            if !matches!(kind, "dyn" | "sync") {
-                bail!("{location}: opaque diport capability classification entry");
+            if matches!(kind, "dyn" | "sync") {
+                bail!(
+                    "{location}: obsolete classify_ports lexeme `{kind}`; use async_sync|async_send|sync_obj"
+                );
+            }
+            if !matches!(kind, "async_sync" | "async_send" | "sync_obj") {
+                bail!("{location}: opaque diport capability classification entry `{kind}`");
             }
             let port = words
                 .get(1)
@@ -7183,11 +7238,20 @@ fn collect_diport_capabilities(root: &Path, out: &mut BTreeMap<String, PortClass
                 .find(|word| word.ends_with("Effect"))
                 .ok_or_else(|| anyhow!("{location}: missing diport capability effect"))?;
             insert_port(out, port, effect, "LocalPrivilege", &location)?;
+            if matches!(kind, "async_sync" | "async_send") {
+                async_dyn_ports.insert(port.clone());
+            }
         }
     }
     if !found {
         bail!("{subject}: canonical owner-sealed `classify_ports!` table is missing");
     }
+    let exported = collect_diport_exported_dyn_ports(root)?;
+    ensure_exact_contract_ids(
+        "diport Dyn* export vs classify_ports async_sync∪async_send",
+        async_dyn_ports.iter().map(String::as_str),
+        exported.iter().map(String::as_str),
+    )?;
     Ok(())
 }
 
@@ -8064,8 +8128,8 @@ mod tests {
                 )?;
                 self.replace(
                     &self.0.join("crates/diport/src/lib.rs"),
-                    "sync SubscribeInitializer => WorkflowEffect;",
-                    "sync SubscribeInitializer => WorkflowEffect; sync ReadInitializer => ReadEffect;",
+                    "sync_obj SubscribeInitializer => WorkflowEffect;",
+                    "sync_obj SubscribeInitializer => WorkflowEffect; sync_obj ReadInitializer => ReadEffect;",
                 )?;
                 self.replace(
                     &assembly.join("src/lib.rs"),
@@ -11673,6 +11737,154 @@ struct Demo;"#,
             !check_root(&workspace.0)?.1.is_empty(),
             "cross-tenant unexpectedly passed"
         );
+        Ok(())
+    }
+
+    fn diport_capability_root() -> Result<PathBuf> {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "rss-diport-caps-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(path.join("crates/diport/src"))?;
+        Ok(path)
+    }
+
+    fn write_diport_capability_sources(
+        root: &Path,
+        effect_body: &str,
+        lib_body: &str,
+    ) -> Result<()> {
+        fs::write(root.join("crates/diport/src/effect.rs"), effect_body)?;
+        fs::write(root.join("crates/diport/src/lib.rs"), lib_body)?;
+        Ok(())
+    }
+
+    #[test]
+    fn collect_diport_capabilities_accepts_matching_async_buckets() -> Result<()> {
+        let root = diport_capability_root()?;
+        write_diport_capability_sources(
+            &root,
+            r#"
+macro_rules! classify_ports {
+    ($($tt:tt)*) => {};
+}
+classify_ports! {
+    async_sync DynKeyProvider => AuthEffect;
+    async_send DynSigner => AuthEffect;
+    sync_obj Clock => ReadEffect;
+}
+"#,
+            "pub use key_provider::DynKeyProvider;\npub use signer::DynSigner;\n",
+        )?;
+        let mut ports = BTreeMap::new();
+        collect_diport_capabilities(&root, &mut ports)?;
+        assert_eq!(ports.len(), 3);
+        assert!(ports.contains_key("DynKeyProvider"));
+        assert!(ports.contains_key("DynSigner"));
+        assert!(ports.contains_key("Clock"));
+        let _ = fs::remove_dir_all(&root);
+        Ok(())
+    }
+
+    #[test]
+    fn collect_diport_capabilities_rejects_obsolete_dyn_sync_lexemes() -> Result<()> {
+        let root = diport_capability_root()?;
+        write_diport_capability_sources(
+            &root,
+            r#"
+macro_rules! classify_ports {
+    ($($tt:tt)*) => {};
+}
+classify_ports! {
+    dyn DynSigner => AuthEffect;
+    sync Clock => ReadEffect;
+}
+"#,
+            "pub use signer::DynSigner;\n",
+        )?;
+        let err = collect_diport_capabilities(&root, &mut BTreeMap::new())
+            .expect_err("obsolete dyn/sync must fail");
+        let message = err.to_string();
+        assert!(
+            message.contains("obsolete classify_ports lexeme"),
+            "{message}"
+        );
+        let _ = fs::remove_dir_all(&root);
+        Ok(())
+    }
+
+    #[test]
+    fn collect_diport_capabilities_rejects_dyn_export_exact_set_drift() -> Result<()> {
+        let root = diport_capability_root()?;
+        write_diport_capability_sources(
+            &root,
+            r#"
+macro_rules! classify_ports {
+    ($($tt:tt)*) => {};
+}
+classify_ports! {
+    async_send DynSigner => AuthEffect;
+    async_send DynPublisher => OutboxEffect;
+}
+"#,
+            "pub use signer::DynSigner;\n",
+        )?;
+        let err = collect_diport_capabilities(&root, &mut BTreeMap::new())
+            .expect_err("missing Dyn* export must fail");
+        let message = err.to_string();
+        assert!(
+            message.contains("identity mismatch") && message.contains("DynPublisher"),
+            "{message}"
+        );
+
+        write_diport_capability_sources(
+            &root,
+            r#"
+macro_rules! classify_ports {
+    ($($tt:tt)*) => {};
+}
+classify_ports! {
+    async_send DynSigner => AuthEffect;
+}
+"#,
+            "pub use signer::DynSigner;\npub use publisher::DynPublisher;\n",
+        )?;
+        let err = collect_diport_capabilities(&root, &mut BTreeMap::new())
+            .expect_err("extra Dyn* export must fail");
+        let message = err.to_string();
+        assert!(
+            message.contains("identity mismatch") && message.contains("DynPublisher"),
+            "{message}"
+        );
+        let _ = fs::remove_dir_all(&root);
+        Ok(())
+    }
+
+    #[test]
+    fn collect_diport_exported_dyn_ports_rejects_glob_use() -> Result<()> {
+        let root = diport_capability_root()?;
+        write_diport_capability_sources(
+            &root,
+            r#"
+macro_rules! classify_ports {
+    ($($tt:tt)*) => {};
+}
+classify_ports! {
+    async_send DynSigner => AuthEffect;
+}
+"#,
+            "pub use signer::*;\n",
+        )?;
+        let err = collect_diport_capabilities(&root, &mut BTreeMap::new())
+            .expect_err("glob Dyn* export must fail-closed");
+        let message = err.to_string();
+        assert!(
+            message.contains("glob") && message.contains("fail-closed"),
+            "{message}"
+        );
+        let _ = fs::remove_dir_all(&root);
         Ok(())
     }
 }

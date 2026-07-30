@@ -56,22 +56,35 @@ supertrait、又作 async 返回 future 的 bound，且**只取所列 bound、�
   `handle() -> BoxFuture<'static>`）**无法持有 `Arc<DynX>`**——§4.3 的 `Arc<DynEventPublisher>` + `tokio::spawn`
   示例在落地形态下编不过。
 
-in-repo 编译期证据：负例 `crates/diport/tests/ui/arc_dyn_ports_not_send.rs`（`dyn ErasedAuditSink` 非
-Sync ⇒ `Arc<DynAuditSink>` 非 Send，trybuild compile-fail）。
+in-repo 编译期证据：负例 `crates/diport/tests/ui/arc_dyn_ports_not_send.rs`（`classify_ports!`
+`async_send` 闭集 / macro-expanded exact set ⇒ 每个 `Arc<DynX>` 非 Send，trybuild compile-fail）。
 
-### 窄例外（2026-07-16，#1828）：HTTP serving PDP 必须 `Send + Sync`
+### 窄例外（2026-07-16，#1828 / #1331）：共享 Sync 闭集必须 `Send + Sync`
 
-`Pdp::verify` 允许远程 JWKS、外置 PDP 与网络 KMS I/O；runtime middleware 必须跨 await 持有共享
-provider。因此 `PdpLocal: Send + Sync` 且 `make(Pdp: Send)`；base supertrait 让生成的 `Pdp` / `DynPdp`
-具备 `Send + Sync`，variant 参数只给 async future 加 `Send`，不强求无必要的 `Future: Sync`。`Arc<DynPdp>` 成为
-可共享的显式例外。这不是其余端口 Option A 的兼容扩张：生产 bridge 仍以 `Arc<P>` 泛型静态分发持有实际
-provider，仅在 authn-owned verify funnel 内借为 `&DynPdp`；其余 dyn wrapper 维持 #1095 默认。
+HTTP serving / 多线程共享路径上的少数 async DI port 必须跨 await 持有 `Arc<DynX>`。闭集（`classify_ports!`
+`async_sync` bucket，Hard 单源）：
 
-Hard 证据为 `Arc<DynPdp>: Send + Sync` 正向 compile-pass 与 non-Sync provider compile-fail；旧同步轮询
+- `Pdp` / `DynPdp`（#1828）
+- `ServiceTokenReplayStore` / `DynServiceTokenReplayStore`
+- `KeyProvider` / `DynKeyProvider`
+- `SecretResolver` / `DynSecretResolver`（#1331：与上三者同桶，不再靠手列 UI）
+
+各 port 经 base / `trait_variant` 显式 `Send + Sync`，使 `Arc<DynX>: Send + Sync`。这不是其余端口
+Option A 的兼容扩张：生产 bridge 仍以 `Arc<P>` 泛型静态分发持有实际 provider；其余 dyn wrapper 维持
+#1095 默认（`async_send` ⇒ `Arc<DynX>: !Send`）。
+
+Hard 证据：`classify_ports!` 展开的 sealed `DiPortConcurrency` + `async_sync` 臂内
+`assert_send_sync_bound::<Arc<DynX>>()`（native-compile，INVARIANT DIPORT-DYN-CONCURRENCY-01）。
+Medium 回归锁：`ui_assert_async_sync_arc_send_sync!` / `ui_assert_async_send_arc_not_send!`
+trybuild + PDP non-Sync provider compile-fail（anti-vacuity，**不得**把 trybuild 标成 Hard）。旧同步轮询
 另由 Clippy `disallowed-methods` 和 runtime async bridge 结构守卫（Medium）禁止。终止预算不属于 PDP port
 或 bridge：runtime 从必填非零 snapshot 配置解析 `ServerRequestBudget`，httpserve 唯一 bindable funnel 用它
 包住完整 request future，httpd plaintext/mTLS 只接受 budget-sealed `ServerMakeService`。耗尽 drop 整条 future
 并返回统一 503（outcome 未知，`retryable=false`）；局部 verifier timeout 由结构门明确拒绝。
+
+四处同源（rustdoc「注入形态」+ trybuild UI + 本节 + xtask `collect_diport` Dyn* export exact-set）须同步：
+新增共享 Sync 例外只改 `classify_ports!` `async_sync` 标签，不得手改 UI 端口列表；Dyn* 根 re-export
+须与 `async_sync∪async_send` exact-set 对齐。
 
 ### 决策（sanctioned 注入形态，三分）
 
@@ -100,8 +113,9 @@ trait-variant / dynosaur 是否接受 / 传递 `Send + Sync` 在 pinned pre-1.0�
   `tokio::spawn` 处直接 `E0277`，不依赖人记规范。负例 `arc_dyn_ports_not_send.rs`（trybuild compile-fail，
   **Medium** anti-vacuity，INVARIANT DIPORT-ASYNC-ARC-SEND-01）锁该事实：若改 Send+Sync（Option A）此例转可
   编译，强制有意识更新本 ADR + 负例。
-- **PDP 反向约束**：`Arc<DynPdp>: Send + Sync` 与 non-Sync provider 不可实现均为 **Hard**；两条独立
-  trybuild fixture 防止聚合负例因移除 PDP 后假绿。共享能力只开放给验签端口，不改变其它端口威胁面。
+- **PDP / 共享 Sync 反向约束**：`async_sync` 闭集 `Arc<DynX>: Send + Sync` 与 PDP non-Sync provider
+  不可实现均为 **Hard**；macro-expanded trybuild + 独立 non-Sync fail fixture 防止假绿。共享能力只开放给
+  闭集端口，不改变其它端口威胁面。
 - **provider 可互换性**：泛型静态分发经 `S: X` trait bound 保持（与 dyn 注入同等可换 provider、同样经构造器
   必填参注入），未削弱 §2「可替换 provider」与 §7 其余行——安全模型不退化。
 - INVARIANT: DIPORT-ASYNC-ARC-SEND-01（`diport` crate rustdoc「注入形态」节 + 负例 + 本节，三处同源）。
@@ -457,6 +471,7 @@ dylint Medium（#1060 闭环）。
 | **dynosaur 版本 pin** | **Medium（cargo-deny）** | `deny.toml` 注释 ID：dynosaur `=0.3.x`。列 §8 follow-up（`diport` 落地时加）。 |
 | **shutdown 逆序关闭** | **Soft（当前）→ Medium（`bootstrap` 框架落地后）** | 逆序类型系统管不到（无 async Drop）。`bootstrap` shutdown 框架（§8 follow-up，**尚未落地**）按注册逆序统一执行 `shutdown()` 后升 Medium；在此之前为 Soft，故该框架是 `diport` 实落的**前置项**而非可选 follow-up——**禁止**长期停留在「组合根手记顺序」的 Soft 纪律。 |
 | **多次调用 async 消费者注入形态收口**（Amendment #1095：`Arc<DynX>` 跨 Send future 不可表达，改泛型静态分发） | **Hard（类型系统）+ Medium 回归锁** | `Arc<DynX>: !Send`（`DynX` Send 非 Sync）使误用 `tokio::spawn` 处 `E0277`（Hard，不依赖人记）；负例 `tests/ui/arc_dyn_ports_not_send.rs`（trybuild compile-fail，**Medium** anti-vacuity，INVARIANT DIPORT-ASYNC-ARC-SEND-01）锁事实，改 Send+Sync（Option A）即破。详见 Amendment（#1095）。 |
+| **Dyn* Arc Send/Sync concurrency buckets**（Amendment #1331 / #1319：`async_sync` / `async_send` / `sync_obj` 闭集） | **Hard（类型系统）+ Medium 回归锁** | Hard：`classify_ports!` + sealed `DiPortConcurrency` + `async_sync` 臂 `assert_send_sync_bound::<Arc<DynX>>()`（native-compile，INVARIANT DIPORT-DYN-CONCURRENCY-01）。Medium：`ui_assert_*` trybuild anti-vacuity（同 INVARIANT，`source=trybuild`）。四处同源含 xtask `collect_diport` Dyn* export vs `async_sync∪async_send` exact-set。详见 Amendment（#1828 / #1331）。 |
 | **ack seam 不挂 `Message` 冻结值类型**（Amendment #1142：acker 落 `Delivery` 独立 seam） | **Hard（类型系统）** | `Acker` 句柄经 `Delivery { message, acker }` 与 `Message` 并置，`Message` 无 ack/nack 字段或方法——给 `Message` 加 acker 即触其冻结（无 setter / Debug 脱敏 DIPORT-DTO-PII-DEBUG-REDACT-01）。`AckAction` 用 typed enum 而非 `requeue: bool`（typed function choice 范本）。新端口宏依赖/impl 面复用 DIPORT-MACRO-CONFINE-01′ + DIPORT-IMPL-ALLOWLIST-01（`deny.toml` 无需改）。详见 Amendment（#1142）。 |
 
 ---
