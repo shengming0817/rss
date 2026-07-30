@@ -5,15 +5,16 @@
 //! - `backend` feature 开时增补 `impl diport::ObjectStore`（aws-sdk-s3 put/get/delete）。
 //!
 //! feature-off（default build）：空壳编译、freeze smoke 类型断言仍有效；不引入 aws-sdk 依赖。
-//! feature-on（`--features backend`）：持有 `aws_sdk_s3::Client` + 目标 bucket；client 由组合根 / 测试注入
-//! （endpoint / region / 凭据 / 连接器在构造侧决定）——adapter **不**内建 HTTPS 连接器（`default-https-client`
-//! 关，避开 aws-lc-rs / ring 的 license 收口，见 Cargo.toml；与 redis/amqp adapter 的 TLS 收口同范式）。
+//! feature-on（`--features backend`）：持有 `aws_sdk_s3::Client` + 目标 bucket；私有 CA client 只经
+//! [`PrivateCaS3ClientFactory`] 构造，确保组合根与 live conformance 消费同一 TLS 漏斗。
 //! 测试用 `aws-smithy-mocks` 注入 canned 响应（确定性，无 live 后端、不拉 TLS）；live MinIO 集成测试显式
 //! 注入 HTTP/TLS connector。
 //! crate 保持 `forbid(unsafe_code)`（继承 workspace lints；只 import diport trait + aws-sdk，不 invoke dynosaur 宏）。
 
 #[cfg(feature = "backend")]
 mod dlx_archive;
+#[cfg(feature = "backend")]
+mod private_ca;
 #[cfg(feature = "backend")]
 mod store;
 
@@ -22,6 +23,8 @@ pub use dlx_archive::{
     S3DlxArchiveCapabilityError, S3DlxArchiveConfigError, S3DlxArchiveStore,
     VerifiedS3DlxArchiveStore,
 };
+#[cfg(feature = "backend")]
+pub use private_ca::{PrivateCaS3BuildError, PrivateCaS3ClientFactory};
 
 #[cfg(feature = "backend")]
 use std::sync::Arc;

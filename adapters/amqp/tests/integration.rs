@@ -8,7 +8,6 @@
 //! 本地：`cargo nextest run -p amqp --features integration`（docker 在场自起容器）。
 #![cfg(feature = "integration")]
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use amqp::{
@@ -29,7 +28,7 @@ const TEST_PUBLISH_TIMEOUT: Duration = Duration::from_secs(40);
 #[tokio::test(flavor = "multi_thread")]
 async fn integration_explicit_private_ca_accepts_matching_broker_and_rejects_wrong_ca()
 -> anyhow::Result<()> {
-    let fixture = testkit::rabbitmq_tls().await?;
+    let fixture = testkit::rabbitmq_tls(generated::event::settings_v1::TOPIC).await?;
     let publisher_endpoint = AmqpPublisherEndpoint::new(secure::AmqpEndpoint::parse(
         fixture.publisher_url(),
         secure::PlaintextEndpointPolicy::Deny,
@@ -67,7 +66,7 @@ async fn integration_explicit_private_ca_accepts_matching_broker_and_rejects_wro
     publisher.inject_post_send_connection_close_once();
     let error = publisher
         .publish(PublishRequest::new(
-            Topic::new("rss.it.private-ca-recovery"),
+            Topic::new(generated::event::settings_v1::TOPIC),
             MessageId::new("evt-private-ca-recovery-1"),
             b"force-private-ca-recovery".to_vec(),
         ))
@@ -97,10 +96,19 @@ async fn integration_explicit_private_ca_accepts_matching_broker_and_rejects_wro
 
 #[tokio::test(flavor = "multi_thread")]
 async fn integration_tls_identities_enforce_publish_subscribe_acl() -> anyhow::Result<()> {
-    let fixture = testkit::rabbitmq_tls().await?;
+    let fixture = testkit::rabbitmq_tls(generated::event::settings_v1::TOPIC).await?;
     let ca = AmqpPrivateCa::from_pem(fixture.ca_pem().as_bytes().to_vec())?;
-    let topic = Topic::new("rss.it.private-ca-acl");
+    let topic = Topic::new(generated::event::settings_v1::TOPIC);
     let token = CancellationToken::new();
+
+    assert!(
+        fixture.publisher_permissions_are_exact().await?,
+        "publisher broker permissions must allow only the generated key on the topic exchange"
+    );
+    assert!(
+        fixture.subscriber_permissions_are_exact().await?,
+        "subscriber broker permissions must allow only configure/read on the generated queue"
+    );
 
     let publisher_raw = secure::AmqpEndpoint::parse(
         fixture.publisher_url(),
@@ -137,6 +145,18 @@ async fn integration_tls_identities_enforce_publish_subscribe_acl() -> anyhow::R
         .await?
         .ok_or_else(|| anyhow!("private-CA ACL stream closed without a delivery"))?;
     assert_eq!(delivery.message.payload.as_bytes(), b"acl-roundtrip");
+    delivery.acker.settle(AckAction::Ack).await?;
+    assert!(
+        publisher
+            .publish(PublishRequest::new(
+                Topic::new(format!("{}.adjacent", generated::event::settings_v1::TOPIC)),
+                MessageId::new("evt-private-ca-adjacent-denied"),
+                b"must-not-route-adjacent".to_vec(),
+            ))
+            .await
+            .is_err(),
+        "publisher identity must not publish an adjacent contract routing key"
+    );
 
     let publisher_only = AmqpRuntimeDeps::connect_with_private_ca(
         &publisher_endpoint,
@@ -155,11 +175,6 @@ async fn integration_tls_identities_enforce_publish_subscribe_acl() -> anyhow::R
             .is_err(),
         "publisher identity must not declare/consume a queue"
     );
-    assert!(
-        fixture.publisher_bind_permission_is_denied().await?,
-        "publisher identity must not bind queues"
-    );
-
     let subscriber_only = AmqpRuntimeDeps::connect_with_private_ca(
         &AmqpPublisherEndpoint::new(subscriber_raw),
         &subscriber_endpoint,
@@ -180,6 +195,18 @@ async fn integration_tls_identities_enforce_publish_subscribe_acl() -> anyhow::R
             .await
             .is_err(),
         "subscriber identity must not publish"
+    );
+    assert!(
+        subscriber_only
+            .infra()
+            .subscriber()
+            .subscribe_ackable(
+                Topic::new(format!("{}.adjacent", generated::event::settings_v1::TOPIC)),
+                CancellationToken::new(),
+            )
+            .await
+            .is_err(),
+        "subscriber identity must not declare an adjacent queue"
     );
 
     token.cancel();
@@ -771,24 +798,16 @@ async fn integration_ackable_token_cancel_drains_inflight_before_shutdown()
         .await
         .map_err(|_| anyhow!("timeout waiting for delivery"))?
         .ok_or_else(|| anyhow!("stream closed"))?;
-    // ConsumerTx still owns the current delivery and therefore cannot poll the stream to None
-    // before settlement. Release cancel and Ack from one barrier so neither test ordering nor a
-    // requested-token precheck can hide the same-channel RPC race.
-    let race = Arc::new(tokio::sync::Barrier::new(2));
-    let cancel_race = Arc::clone(&race);
-    let cancel = async {
-        cancel_race.wait().await;
-        token1.cancel();
-    };
-    let ack_race = Arc::clone(&race);
-    let ack = async {
-        ack_race.wait().await;
-        delivery.acker.settle(AckAction::Ack).await
-    };
-    let ((), ack_result) =
-        tokio::time::timeout(Duration::from_secs(5), async { tokio::join!(cancel, ack) })
-            .await
-            .map_err(|_| anyhow!("inflight Ack hung behind basic.cancel"))?;
+    // ConsumerTx owns the current delivery when shutdown requests cancellation. Settlement starts
+    // immediately after that synchronous request: the adapter must prioritize broker-confirmed
+    // basic.cancel without relying on task scheduling or a sleep, then allow this Ack to proceed.
+    token1.cancel();
+    let ack_result = tokio::time::timeout(
+        Duration::from_secs(5),
+        delivery.acker.settle(AckAction::Ack),
+    )
+    .await
+    .map_err(|_| anyhow!("inflight Ack hung behind basic.cancel"))?;
     ack_result.map_err(|e| anyhow!("settle inflight after basic.cancel failed: {e}"))?;
     let ended = tokio::time::timeout(Duration::from_secs(5), stream1.next()).await?;
     assert!(ended.is_none(), "basic.cancel 确认后 ackable 流应终止");

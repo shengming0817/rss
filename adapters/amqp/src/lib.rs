@@ -71,6 +71,11 @@ mod publisher;
 #[cfg(feature = "backend")]
 mod subscriber;
 
+/// Broker-owned topic exchange shared by the production publisher and subscriber. RabbitMQ topic
+/// permissions can close routing keys on this exchange; its default exchange cannot.
+#[cfg(feature = "backend")]
+pub(crate) const EVENT_EXCHANGE: &str = "amq.topic";
+
 #[cfg(not(feature = "backend"))]
 mod fallback;
 

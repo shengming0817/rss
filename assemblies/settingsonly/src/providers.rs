@@ -684,17 +684,6 @@ async fn build_s3_archive_store(
             .context("parse settingsonly S3 endpoint")?;
     let pem =
         std::fs::read(inputs.ca_cert_pem_path).context("read settingsonly S3 CA certificate")?;
-    let trust = aws_smithy_http_client::tls::TrustStore::empty().with_pem_certificate(pem);
-    let tls = aws_smithy_http_client::tls::TlsContext::builder()
-        .with_trust_store(trust)
-        .build()
-        .context("build settingsonly S3 TLS context")?;
-    let http = aws_smithy_http_client::Builder::new()
-        .tls_provider(aws_smithy_http_client::tls::Provider::Rustls(
-            aws_smithy_http_client::tls::rustls_provider::CryptoMode::Ring,
-        ))
-        .tls_context(tls)
-        .build_https();
     let credentials = aws_sdk_s3::config::Credentials::new(
         secrets.s3_access_key_id.to_string(),
         secrets.s3_secret_access_key.to_string(),
@@ -702,24 +691,21 @@ async fn build_s3_archive_store(
         None,
         "settingsonly-secret-bundle",
     );
-    let sdk = aws_sdk_s3::config::Builder::new()
-        .behavior_version_latest()
-        .region(aws_sdk_s3::config::Region::new(inputs.region))
-        .credentials_provider(credentials)
-        .endpoint_url(endpoint.expose())
-        .force_path_style(inputs.force_path_style)
-        .http_client(http)
-        .build();
-    let store = s3::S3DlxArchiveStore::new(
-        aws_sdk_s3::Client::from_conf(sdk),
-        inputs.archive_bucket,
-        Arc::new(crate::SystemClock),
+    let factory = s3::PrivateCaS3ClientFactory::new(
+        endpoint,
+        inputs.region,
+        credentials,
+        inputs.force_path_style,
+        pem,
+    );
+    tokio::time::timeout(
+        inputs.readiness_interval,
+        factory
+            .build_verified_dlx_archive_store(inputs.archive_bucket, Arc::new(crate::SystemClock)),
     )
-    .context("construct settingsonly S3 DLX archive store")?;
-    tokio::time::timeout(inputs.readiness_interval, store.verify())
-        .await
-        .context("settingsonly S3 WORM verification timed out")?
-        .context("verify settingsonly S3 WORM capability")
+    .await
+    .context("settingsonly S3 WORM verification timed out")?
+    .context("verify settingsonly S3 WORM capability")
 }
 
 struct SharedKeyProvider(Arc<vault::VaultKeyProvider>);
@@ -924,10 +910,6 @@ async fn build_postgres(
 
 const fn pg_ssl_mode(mode: config::PgSslMode) -> postgres::PgSslMode {
     match mode {
-        config::PgSslMode::Disable => postgres::PgSslMode::Disable,
-        config::PgSslMode::Prefer => postgres::PgSslMode::Prefer,
-        config::PgSslMode::Require => postgres::PgSslMode::Require,
-        config::PgSslMode::VerifyCa => postgres::PgSslMode::VerifyCa,
         config::PgSslMode::VerifyFull => postgres::PgSslMode::VerifyFull,
     }
 }

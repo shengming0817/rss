@@ -3,36 +3,36 @@
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use aws_sdk_s3::config::{Credentials, Region};
-use aws_sdk_s3::types::{
-    BucketLifecycleConfiguration, DefaultRetention, ExpirationStatus, LifecycleExpiration,
-    LifecycleRule, LifecycleRuleFilter, NoncurrentVersionExpiration, ObjectLockConfiguration,
-    ObjectLockEnabled, ObjectLockRetentionMode, ObjectLockRule,
-};
-use aws_smithy_http_client::Builder;
+use aws_sdk_s3::config::Credentials;
+use aws_sdk_s3::primitives::ByteStream;
 use diport::{
     ArchiveChecksum, Clock, DlxArchiveCiphertext, DlxArchiveHeadOutcome, DlxArchivePutOutcome,
     DlxArchivePutRequest, DlxArchiveStore, KeyRef, RedactedBytes,
 };
 use eventexec::{DeadLetterId, DlxArchiveObjectKey};
-use s3::S3DlxArchiveStore;
 
-fn live_client(params: &testkit::MinioConnParams) -> aws_sdk_s3::Client {
-    let config = aws_sdk_s3::config::Builder::new()
-        .behavior_version_latest()
-        .region(Region::new("us-east-1"))
-        .credentials_provider(Credentials::new(
-            params.access_key_id(),
-            params.secret_access_key(),
+type TestResult<T = ()> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
+
+fn live_factory(
+    credentials: &testkit::MinioCredentials,
+    ca_pem: &str,
+) -> TestResult<s3::PrivateCaS3ClientFactory> {
+    Ok(s3::PrivateCaS3ClientFactory::new(
+        secure::S3Endpoint::parse(
+            credentials.endpoint_url(),
+            secure::PlaintextEndpointPolicy::Deny,
+        )?,
+        "us-east-1",
+        Credentials::new(
+            credentials.access_key_id(),
+            credentials.secret_access_key(),
             None,
             None,
             "rss-minio-testkit",
-        ))
-        .endpoint_url(params.endpoint_url())
-        .force_path_style(true)
-        .http_client(Builder::new().build_http())
-        .build();
-    aws_sdk_s3::Client::from_conf(config)
+        ),
+        true,
+        ca_pem.as_bytes().to_vec(),
+    ))
 }
 
 struct SystemClock;
@@ -44,68 +44,31 @@ impl Clock for SystemClock {
     }
 }
 
-async fn provision_worm_bucket(
-    client: &aws_sdk_s3::Client,
-    bucket: &str,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    client
-        .create_bucket()
-        .bucket(bucket)
-        .object_lock_enabled_for_bucket(true)
-        .send()
-        .await?;
-
-    let retention = DefaultRetention::builder()
-        .mode(ObjectLockRetentionMode::Compliance)
-        .days(31)
-        .build();
-    let lock_rule = ObjectLockRule::builder()
-        .default_retention(retention)
-        .build();
-    let lock_configuration = ObjectLockConfiguration::builder()
-        .object_lock_enabled(ObjectLockEnabled::Enabled)
-        .rule(lock_rule)
-        .build();
-    client
-        .put_object_lock_configuration()
-        .bucket(bucket)
-        .object_lock_configuration(lock_configuration)
-        .send()
-        .await?;
-
-    let expiration_rule = LifecycleRule::builder()
-        .id("rss-dlx-archive-expiration")
-        .filter(LifecycleRuleFilter::builder().prefix("").build())
-        .expiration(LifecycleExpiration::builder().days(32).build())
-        .noncurrent_version_expiration(
-            NoncurrentVersionExpiration::builder()
-                .noncurrent_days(32)
-                .build(),
-        )
-        .status(ExpirationStatus::Enabled)
-        .build()?;
-    let lifecycle = BucketLifecycleConfiguration::builder()
-        .rules(expiration_rule)
-        .build()?;
-    client
-        .put_bucket_lifecycle_configuration()
-        .bucket(bucket)
-        .lifecycle_configuration(lifecycle)
-        .send()
-        .await?;
-    Ok(())
+fn response_status<E>(error: &aws_sdk_s3::error::SdkError<E>) -> Option<u16> {
+    error
+        .raw_response()
+        .map(|response| response.status().as_u16())
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn live_dlx_archive_worm_capability_and_roundtrip()
--> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let fixture = testkit::env_or_minio().await?;
-    let client = live_client(fixture.params());
-    let bucket = format!("rss-dlx-worm-{}", uuid::Uuid::new_v4());
-    provision_worm_bucket(&client, &bucket).await?;
+async fn live_dlx_archive_tls_scoped_acl_worm_and_roundtrip() -> TestResult {
+    let fixture = testkit::minio_tls_archive().await?;
+    let workload_factory = live_factory(fixture.workload(), fixture.ca_pem())?;
+    let workload = workload_factory.build_client()?;
+    let wrong_ca = live_factory(fixture.workload(), fixture.wrong_ca_pem())?.build_client()?;
+    let bucket = fixture.archive_bucket();
 
-    let store = S3DlxArchiveStore::new(client.clone(), &bucket, Arc::new(SystemClock))?
-        .verify()
+    let wrong_ca_connection = wrong_ca.get_bucket_versioning().bucket(bucket).send().await;
+    assert!(
+        wrong_ca_connection
+            .as_ref()
+            .err()
+            .is_some_and(|error| error.raw_response().is_none()),
+        "an untrusted private CA must fail before receiving an HTTP response"
+    );
+
+    let store = workload_factory
+        .build_verified_dlx_archive_store(bucket, Arc::new(SystemClock))
         .await?;
     store.probe_readiness().await?;
 
@@ -154,17 +117,43 @@ async fn live_dlx_archive_worm_capability_and_roundtrip()
     assert_eq!(ciphertext.ciphertext().as_bytes(), body);
     assert_eq!(ciphertext.key_ref().to_token(), "dlx-archive:1");
 
-    let delete = client
+    let delete_missing = workload
         .delete_object()
-        .bucket(&bucket)
-        .key(object_key.as_str())
-        .version_id(created_metadata.version_id().as_str())
+        .bucket(bucket)
+        .key("acl/missing-object")
         .send()
         .await;
-    assert!(
-        delete.is_err(),
-        "COMPLIANCE-retained exact version must reject deletion"
+    assert_eq!(
+        delete_missing.as_ref().err().and_then(response_status),
+        Some(403),
+        "workload identity must not have delete permission"
     );
-    drop(fixture);
+
+    let list = workload.list_objects_v2().bucket(bucket).send().await;
+    assert_eq!(
+        list.as_ref().err().and_then(response_status),
+        Some(403),
+        "workload identity must not have list permission"
+    );
+
+    let neighbor_put = workload
+        .put_object()
+        .bucket(fixture.neighbor_bucket())
+        .key("acl/neighbor-object")
+        .body(ByteStream::from_static(b"denied"))
+        .send()
+        .await;
+    assert_eq!(
+        neighbor_put.as_ref().err().and_then(response_status),
+        Some(403),
+        "workload identity must not write to a neighboring bucket"
+    );
+
+    fixture
+        .assert_admin_cannot_delete_retained_version(
+            object_key.as_str(),
+            created_metadata.version_id().as_str(),
+        )
+        .await?;
     Ok(())
 }

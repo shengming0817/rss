@@ -33,23 +33,18 @@ sslRootCertPath = "/run/rss/postgres-ca.pem"
 readinessSeconds = 15
 
 [postgres.writer]
-username = "rss_settings_writer"
 maxConnections = 10
 
 [postgres.reader]
-username = "rss_settings_reader"
 maxConnections = 10
 
 [postgres.dlxArchiver]
-username = "rss_dlx_archiver"
 maxConnections = 2
 
 [postgres.dlxVerifier]
-username = "rss_dlx_verifier"
 maxConnections = 2
 
 [postgres.dlxPurger]
-username = "rss_dlx_purger"
 maxConnections = 2
 
 [vault]

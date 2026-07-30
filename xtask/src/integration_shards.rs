@@ -794,13 +794,7 @@ pub(crate) fn external_resource_present(resource: Resource) -> bool {
         Resource::Redis => nonempty("REDIS_TEST_URL"),
         Resource::Amqp => nonempty("RSS_AMQP_TEST_URL"),
         Resource::Mqtt => nonempty("RSS_MQTT_TEST_URL"),
-        Resource::ObjectStorage => [
-            "RSS_S3_TEST_ENDPOINT",
-            "RSS_S3_TEST_ACCESS_KEY",
-            "RSS_S3_TEST_SECRET_KEY",
-        ]
-        .iter()
-        .all(|name| nonempty(name)),
+        Resource::ObjectStorage => false,
     }
 }
 
@@ -1171,6 +1165,10 @@ mod tests {
     fn live_minio_target_is_owned_by_the_object_storage_shard() {
         let spec = IntegrationShard::ObjectStorage.spec();
         assert_eq!(spec.resources, [Resource::ObjectStorage]);
+        assert!(
+            !external_resource_present(Resource::ObjectStorage),
+            "object storage conformance must always self-provision its hermetic TLS fixture"
+        );
         let live_targets: Vec<_> = spec
             .units
             .iter()

@@ -214,8 +214,7 @@
     "PgDlxArchiverRoleConfig": {
       "type": "object",
       "required": [
-        "maxConnections",
-        "username"
+        "maxConnections"
       ],
       "properties": {
         "maxConnections": {
@@ -223,11 +222,6 @@
           "format": "uint32",
           "maximum": 20.0,
           "minimum": 1.0
-        },
-        "username": {
-          "type": "string",
-          "minLength": 1,
-          "pattern": "^.*\\S.*$"
         }
       },
       "additionalProperties": false
@@ -235,8 +229,7 @@
     "PgDlxPurgerRoleConfig": {
       "type": "object",
       "required": [
-        "maxConnections",
-        "username"
+        "maxConnections"
       ],
       "properties": {
         "maxConnections": {
@@ -244,11 +237,6 @@
           "format": "uint32",
           "maximum": 20.0,
           "minimum": 1.0
-        },
-        "username": {
-          "type": "string",
-          "minLength": 1,
-          "pattern": "^.*\\S.*$"
         }
       },
       "additionalProperties": false
@@ -256,8 +244,7 @@
     "PgDlxVerifierRoleConfig": {
       "type": "object",
       "required": [
-        "maxConnections",
-        "username"
+        "maxConnections"
       ],
       "properties": {
         "maxConnections": {
@@ -265,11 +252,6 @@
           "format": "uint32",
           "maximum": 20.0,
           "minimum": 1.0
-        },
-        "username": {
-          "type": "string",
-          "minLength": 1,
-          "pattern": "^.*\\S.*$"
         }
       },
       "additionalProperties": false
@@ -277,8 +259,7 @@
     "PgReaderRoleConfig": {
       "type": "object",
       "required": [
-        "maxConnections",
-        "username"
+        "maxConnections"
       ],
       "properties": {
         "maxConnections": {
@@ -286,11 +267,6 @@
           "format": "uint32",
           "maximum": 100.0,
           "minimum": 1.0
-        },
-        "username": {
-          "type": "string",
-          "minLength": 1,
-          "pattern": "^.*\\S.*$"
         }
       },
       "additionalProperties": false
@@ -298,8 +274,7 @@
     "PgWriterRoleConfig": {
       "type": "object",
       "required": [
-        "maxConnections",
-        "username"
+        "maxConnections"
       ],
       "properties": {
         "maxConnections": {
@@ -307,11 +282,6 @@
           "format": "uint32",
           "maximum": 100.0,
           "minimum": 1.0
-        },
-        "username": {
-          "type": "string",
-          "minLength": 1,
-          "pattern": "^.*\\S.*$"
         }
       },
       "additionalProperties": false

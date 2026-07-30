@@ -35,9 +35,7 @@ test-support = [
 anyhow = { workspace = true }
 amqp = { path = "../../adapters/amqp", features = ["backend"] }
 authn = { path = "../../crates/authn" }
-aws-credential-types = { workspace = true }
 aws-sdk-s3 = { workspace = true }
-aws-smithy-http-client = { workspace = true }
 axum = { workspace = true }
 assembly-schema = { path = "../../crates/assembly-schema" }
 bootstrap = { path = "../../crates/bootstrap" }

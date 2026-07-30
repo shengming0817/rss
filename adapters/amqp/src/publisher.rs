@@ -1500,8 +1500,8 @@ impl Publisher for AmqpPublisher {
                 source,
             }));
         }
-        // 默认 exchange（""）+ routing key = topic：消息路由到同名 queue（consumer 声明）。
-        // per-domain 隔离经 vhost（连接 URL），非 exchange 命名。
+        // Broker-owned topic exchange + routing key = topic：subscriber 声明同名 queue 并绑定 exact
+        // key。per-domain 隔离仍经 vhost，broker topic permission 额外封闭契约 routing key。
         // mandatory=true + publisher confirms：不可路由（无绑定 queue）消息被 broker **退回**而非静默丢弃，
         // 经 confirm 检测为失败——durable publish-ok 语义闭合（不再依赖「subscriber 先启动」运行顺序约定）。
         // message_id = event_id（去重锚点）：经 broker envelope 流到订阅侧 `Message.id`（subscriber 的
@@ -1520,7 +1520,7 @@ impl Publisher for AmqpPublisher {
                 let pending = transport
                     .confirm_channel
                     .basic_publish(
-                        "".into(),
+                        crate::EVENT_EXCHANGE.into(),
                         topic.into(),
                         BasicPublishOptions {
                             mandatory: true,

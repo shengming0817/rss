@@ -53,7 +53,7 @@ OutboxFact 的 `identity_logout_grant_journey` 由 Parallel batch 调度。各 b
 - Redis：非空 `REDIS_TEST_URL`。
 - AMQP：非空 `RSS_AMQP_TEST_URL`。
 - MQTT：非空 `RSS_MQTT_TEST_URL`。
-- Object storage：`RSS_S3_TEST_ENDPOINT`、`RSS_S3_TEST_ACCESS_KEY`、`RSS_S3_TEST_SECRET_KEY` 均非空；未提供时 testkit 自建 MinIO。
+- Object storage：不接受外部资源输入；`object-storage` shard 始终使用 testkit 自建的 hermetic TLS MinIO。
 
 例如 `postgres-domain` 不要求 Redis、AMQP 或 MQTT；`consistency-fault` 不要求 MQTT。外部 AMQP
 用于 fault matrix 时仍须预建测试所需 vhost 并为 URL 用户授权。

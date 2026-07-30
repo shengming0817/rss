@@ -21,7 +21,7 @@ use lapin::message::Delivery;
 use lapin::options::QueuePurgeOptions;
 use lapin::options::{
     BasicAckOptions, BasicCancelOptions, BasicConsumeOptions, BasicNackOptions, BasicQosOptions,
-    QueueDeclareOptions,
+    QueueBindOptions, QueueDeclareOptions,
 };
 use lapin::types::{AMQPValue, FieldTable};
 use lapin::{Channel, Connection};
@@ -120,7 +120,7 @@ impl AmqpSubscriber {
     }
 }
 
-/// 在给定 channel 上声明 durable queue（与默认 exchange routing key=topic 对齐，见 publisher）。
+/// 在给定 channel 上声明 durable queue，并绑定 production topic exchange 的 exact routing key。
 /// `subscribe_ackable`（manual-ack）在其 per-subscription channel 上调用。
 async fn declare_durable_queue(channel: &Channel, topic_name: &str) -> Result<(), SubscriberError> {
     channel
@@ -130,6 +130,16 @@ async fn declare_durable_queue(channel: &Channel, topic_name: &str) -> Result<()
                 durable: true,
                 ..Default::default()
             },
+            FieldTable::default(),
+        )
+        .await
+        .map_err(SubscriberError::new)?;
+    channel
+        .queue_bind(
+            topic_name.into(),
+            crate::EVENT_EXCHANGE.into(),
+            topic_name.into(),
+            QueueBindOptions::default(),
             FieldTable::default(),
         )
         .await
@@ -209,7 +219,7 @@ fn extract_metadata(props: &lapin::BasicProperties) -> EnvelopeMetadata {
 fn delivery_to_ackable(
     delivery: Delivery,
     channel: Channel,
-    subscription_rpc: Arc<tokio::sync::Mutex<()>>,
+    subscription_rpc: Arc<SubscriptionRpc>,
 ) -> DiDelivery {
     let acker = delivery.acker.clone();
     let producer_id = delivery
@@ -249,15 +259,37 @@ fn pick_message_id(message_id: Option<&str>, delivery_tag: u64) -> String {
 pub(crate) struct AmqpAcker {
     inner: lapin::Acker,
     channel: Channel,
-    subscription_rpc: Arc<tokio::sync::Mutex<()>>,
+    subscription_rpc: Arc<SubscriptionRpc>,
+}
+
+/// Serializes one subscription channel's cancel and settlement RPCs while giving an already
+/// requested cancellation priority. The prefetch window stays closed until the broker confirms
+/// `basic.cancel`; only then may an in-flight delivery settle and reopen that window.
+struct SubscriptionRpc {
+    gate: tokio::sync::Mutex<()>,
+    cancel_requested: CancellationToken,
+    admission_stopped: CancellationToken,
+}
+
+impl SubscriptionRpc {
+    async fn settlement_guard(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        let guard = self.gate.lock().await;
+        if self.cancel_requested.is_cancelled() && !self.admission_stopped.is_cancelled() {
+            drop(guard);
+            self.admission_stopped.cancelled().await;
+            self.gate.lock().await
+        } else {
+            guard
+        }
+    }
 }
 
 impl diport::Acker for AmqpAcker {
     async fn settle(&self, action: AckAction) -> Result<(), AckError> {
-        // Lapin routes settlement and basic.cancel through the same channel RPC. A per-subscription
-        // gate makes their ordering total: an Ack already admitted completes first; otherwise Ack
-        // waits for broker-confirmed cancel instead of becoming stranded behind the pending RPC.
-        let _rpc = self.subscription_rpc.lock().await;
+        // If cancellation was requested before settlement acquires the gate, wait for cancel-ok
+        // (or the failure-path channel close) before Ack/Nack can reopen the prefetch window. A
+        // settlement already holding the gate remains linearized before cancellation.
+        let _rpc = self.subscription_rpc.settlement_guard().await;
         let result = match settle_mode(action) {
             SettleMode::Ack => self.inner.ack(BasicAckOptions::default()).await,
             SettleMode::Nack { requeue } => {
@@ -329,16 +361,20 @@ impl AckableSubscriber for AmqpSubscriber {
         // broker 确认 basic.cancel，再终止流；channel 保持打开，让 in-flight acker 继续 settle。
         // Drive admission cancellation independently from stream polling. ConsumerTx processes one
         // delivery at a time and may be blocked in its PG transaction when shutdown begins.
-        let cancel_confirmed = CancellationToken::new();
-        let cancel_confirmation = cancel_confirmed.clone();
-        let subscription_rpc = Arc::new(tokio::sync::Mutex::new(()));
+        let admission_stopped = CancellationToken::new();
+        let cancel_confirmation = admission_stopped.clone();
+        let subscription_rpc = Arc::new(SubscriptionRpc {
+            gate: tokio::sync::Mutex::new(()),
+            cancel_requested: token.clone(),
+            admission_stopped,
+        });
         let cancel_rpc = Arc::clone(&subscription_rpc);
         let cancel_channel = channel.clone();
         tokio::spawn(async move {
             token.cancelled().await;
-            let _rpc = cancel_rpc.lock().await;
+            let _rpc = cancel_rpc.gate.lock().await;
             cancel_ackable(cancel_channel, consumer_tag).await;
-            cancel_confirmed.cancel();
+            cancel_rpc.admission_stopped.cancel();
         });
         let delivery_rpc = Arc::clone(&subscription_rpc);
         let stream = consumer

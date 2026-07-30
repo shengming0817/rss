@@ -864,10 +864,6 @@ impl FederatedConfig {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) enum PgSslMode {
-    Disable,
-    Prefer,
-    Require,
-    VerifyCa,
     VerifyFull,
 }
 
@@ -886,14 +882,6 @@ impl JsonSchema for PgSslMode {
             const_value: Some(serde_json::json!("verifyFull")),
             ..schemars::schema::SchemaObject::default()
         })
-    }
-}
-
-impl PgSslMode {
-    fn validate(self) -> Result<(), ConfigError> {
-        (self == Self::VerifyFull)
-            .then_some(())
-            .ok_or(ConfigError::InvalidValue("postgres.sslMode"))
     }
 }
 
@@ -942,7 +930,6 @@ impl PostgresConfig {
         if self.port == 0 {
             return Err(ConfigError::InvalidValue("postgres.port"));
         }
-        self.ssl_mode.validate()?;
         self.ssl_root_cert_path
             .validate("postgres.sslRootCertPath")?;
         self.writer.validate()?;
@@ -1008,15 +995,12 @@ impl PgConnectionConfig {
 #[derive(Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct PgWriterRoleConfig {
-    #[schemars(length(min = 1), regex(pattern = "^.*\\S.*$"))]
-    username: String,
     #[schemars(range(min = 1, max = 100))]
     max_connections: u32,
 }
 
 impl PgWriterRoleConfig {
     fn validate(&self) -> Result<(), ConfigError> {
-        non_blank(&self.username, "postgres.writer.username")?;
         if self.max_connections == 0 || self.max_connections > 100 {
             return Err(ConfigError::InvalidValue("postgres.writer.maxConnections"));
         }
@@ -1024,22 +1008,19 @@ impl PgWriterRoleConfig {
     }
 
     pub(crate) fn into_writer_pool(self) -> (String, u32) {
-        (self.username, self.max_connections)
+        ("rss_app".to_owned(), self.max_connections)
     }
 }
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct PgReaderRoleConfig {
-    #[schemars(length(min = 1), regex(pattern = "^.*\\S.*$"))]
-    username: String,
     #[schemars(range(min = 1, max = 100))]
     max_connections: u32,
 }
 
 impl PgReaderRoleConfig {
     fn validate(&self) -> Result<(), ConfigError> {
-        non_blank(&self.username, "postgres.reader.username")?;
         if self.max_connections == 0 || self.max_connections > 100 {
             return Err(ConfigError::InvalidValue("postgres.reader.maxConnections"));
         }
@@ -1047,24 +1028,21 @@ impl PgReaderRoleConfig {
     }
 
     pub(crate) fn into_reader_pool(self) -> (String, u32) {
-        (self.username, self.max_connections)
+        ("rss_app_read".to_owned(), self.max_connections)
     }
 }
 
 macro_rules! dlx_postgres_role {
-    ($type:ident, $field:literal, $getter:ident) => {
+    ($type:ident, $field:literal, $username:literal, $getter:ident) => {
         #[derive(Deserialize, JsonSchema)]
         #[serde(rename_all = "camelCase", deny_unknown_fields)]
         pub(crate) struct $type {
-            #[schemars(length(min = 1), regex(pattern = "^.*\\S.*$"))]
-            username: String,
             #[schemars(range(min = 1, max = 20))]
             max_connections: u32,
         }
 
         impl $type {
             fn validate(&self) -> Result<(), ConfigError> {
-                non_blank(&self.username, concat!($field, ".username"))?;
                 bounded(
                     u64::from(self.max_connections),
                     1,
@@ -1074,7 +1052,7 @@ macro_rules! dlx_postgres_role {
             }
 
             pub(crate) fn $getter(self) -> (String, u32) {
-                (self.username, self.max_connections)
+                ($username.to_owned(), self.max_connections)
             }
         }
     };
@@ -1083,16 +1061,19 @@ macro_rules! dlx_postgres_role {
 dlx_postgres_role!(
     PgDlxArchiverRoleConfig,
     "postgres.dlxArchiver",
+    "rss_dlx_archiver",
     into_dlx_archiver_pool
 );
 dlx_postgres_role!(
     PgDlxVerifierRoleConfig,
     "postgres.dlxVerifier",
+    "rss_dlx_verifier",
     into_dlx_verifier_pool
 );
 dlx_postgres_role!(
     PgDlxPurgerRoleConfig,
     "postgres.dlxPurger",
+    "rss_dlx_purger",
     into_dlx_purger_pool
 );
 
@@ -1639,23 +1620,18 @@ sslRootCertPath = "/run/rss/postgres-ca.pem"
 readinessSeconds = 5
 
 [postgres.writer]
-username = "rss_settings_writer"
 maxConnections = 5
 
 [postgres.reader]
-username = "rss_settings_reader"
 maxConnections = 5
 
 [postgres.dlxArchiver]
-username = "rss_dlx_archiver"
 maxConnections = 2
 
 [postgres.dlxVerifier]
-username = "rss_dlx_verifier"
 maxConnections = 2
 
 [postgres.dlxPurger]
-username = "rss_dlx_purger"
 maxConnections = 2
 
 [vault]
@@ -1871,10 +1847,7 @@ totalSeconds = 60
                 "requestBudgetMs = 15000",
                 "requestBudgetMs = 15000\nlegacy = true",
             ),
-            VALID_CONFIG.replace(
-                "username = \"rss_settings_writer\"",
-                "username = \"rss_settings_writer\"\nlegacy = true",
-            ),
+            VALID_CONFIG.replace("[postgres.writer]", "[postgres.writer]\nlegacy = true"),
             VALID_CONFIG.replace(
                 "kvPathPrefix = \"tenants/settings\"",
                 "kvPathPrefix = \"tenants/settings\"\nlegacy = true",
@@ -2023,16 +1996,16 @@ totalSeconds = 60
     #[test]
     fn plaintext_and_non_closed_secret_references_are_rejected_without_leaking_values() {
         let plaintext = VALID_CONFIG.replace(
-            "username = \"rss_settings_writer\"",
-            &format!("username = \"rss_settings_writer\"\npassword = \"{SECRET_SENTINEL}\""),
+            "[postgres.writer]",
+            &format!("[postgres.writer]\npassword = \"{SECRET_SENTINEL}\""),
         );
         let wrong_kind = VALID_CONFIG.replace(
             "settingsKeyName = \"settings-config-value\"",
             "settingsKeyName = \"settings-config-value\"\ntoken = { kind = \"fileRef\", path = \"/tmp/token\" }",
         );
         let generic_name = VALID_CONFIG.replace(
-            "username = \"rss_settings_reader\"",
-            "username = \"rss_settings_reader\"\nsecretEnvironment = \"RSS_ARBITRARY_SECRET\"",
+            "[postgres.reader]",
+            "[postgres.reader]\nsecretEnvironment = \"RSS_ARBITRARY_SECRET\"",
         );
 
         for document in [&plaintext, &wrong_kind, &generic_name] {
@@ -2308,6 +2281,40 @@ totalSeconds = 60
     }
 
     #[test]
+    fn postgres_roles_and_tls_policy_are_closed_at_deserialization() {
+        for section in [
+            "writer",
+            "reader",
+            "dlxArchiver",
+            "dlxVerifier",
+            "dlxPurger",
+        ] {
+            let document = VALID_CONFIG.replace(
+                &format!("[postgres.{section}]"),
+                &format!("[postgres.{section}]\nusername = \"legacy_role\""),
+            );
+            assert!(matches!(
+                parse_error(&document),
+                ConfigError::InvalidDocument {
+                    category: DocumentIssue::UnknownField,
+                    ..
+                }
+            ));
+            assert!(!schema_validator().is_valid(&json_value(&document)));
+        }
+
+        for mode in ["disable", "prefer", "require", "verifyCa"] {
+            let document =
+                VALID_CONFIG.replace("sslMode = \"verifyFull\"", &format!("sslMode = \"{mode}\""));
+            assert!(matches!(
+                parse_error(&document),
+                ConfigError::InvalidDocument { .. }
+            ));
+            assert!(!schema_validator().is_valid(&json_value(&document)));
+        }
+    }
+
+    #[test]
     fn parser_rejects_cross_field_constraints() {
         let same_bind = VALID_CONFIG.replace("127.0.0.1:18081", "127.0.0.1:18080");
         assert_eq!(
@@ -2327,8 +2334,8 @@ totalSeconds = 60
     #[test]
     fn document_diagnostics_are_locatable_and_redacted() {
         let document = VALID_CONFIG.replace(
-            "username = \"rss_settings_writer\"",
-            &format!("unknownSecret = \"{SECRET_SENTINEL}\""),
+            "[postgres.writer]",
+            &format!("[postgres.writer]\nunknownSecret = \"{SECRET_SENTINEL}\""),
         );
         let error = parse_error(&document);
         let rendered = format!("{error:?} {error}");
@@ -2374,11 +2381,11 @@ totalSeconds = 60
         assert_eq!(postgres.connection.into_connect_options().1, 5432);
         assert_eq!(
             postgres.writer.into_writer_pool(),
-            ("rss_settings_writer".to_owned(), 5)
+            ("rss_app".to_owned(), 5)
         );
         assert_eq!(
             postgres.reader.into_reader_pool(),
-            ("rss_settings_reader".to_owned(), 5)
+            ("rss_app_read".to_owned(), 5)
         );
         assert_eq!(
             postgres.dlx_archiver.into_dlx_archiver_pool(),

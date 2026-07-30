@@ -17,6 +17,7 @@ diport = { path = "../../crates/diport" }
 # bucket has passed the WORM startup probe.
 eventexec = { path = "../../crates/eventexec", optional = true }
 aws-sdk-s3 = { workspace = true, optional = true }
+aws-smithy-http-client = { workspace = true, optional = true }
 # redacted 结构化日志（仅 backend）：secure::redact_error funnel + tracing（observability.md：错误经 redact）。
 secure = { path = "../../crates/secure", optional = true }
 tracing = { workspace = true, optional = true }
@@ -29,16 +30,15 @@ base64 = { workspace = true, optional = true }
 
 [features]
 default = []
-backend = ["dep:aws-sdk-s3", "dep:secure", "dep:tracing", "dep:thiserror", "dep:futures", "dep:base64", "dep:eventexec"]
+backend = ["dep:aws-sdk-s3", "dep:aws-smithy-http-client", "dep:secure", "dep:tracing", "dep:thiserror", "dep:futures", "dep:base64", "dep:eventexec"]
 integration = ["backend", "testkit/containers"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 # aws-sdk-s3 客户端 mock：canned 响应（put/get/delete/NoSuchKey/错误）注入确定性测试，无 live 后端。
 # dev-only 经 test-util 传递引入 hyper 作 mock http client 载体；受管 ObjectStorage shard 的 MinIO
-# capability test 另经 aws-smithy-http-client 显式构造 plaintext connector。production adapter lib 仍不内建 TLS。
+# capability test 消费 production adapter 的 private-CA typed factory，不复制 TLS connector。
 aws-smithy-mocks = { workspace = true }
-aws-smithy-http-client = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
 # test-util 仅测试启用（with_test_defaults_v2 + mock http client 由 mock_client! 注入）；不进 production lib
 # 依赖面（production lib 仍不持 HTTP connector / hyper）。

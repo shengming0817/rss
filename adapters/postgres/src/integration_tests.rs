@@ -435,6 +435,117 @@ async fn provision_runtime_logins(p: &testkit::PgConnParams) -> TestResult {
     Ok(())
 }
 
+struct TestCaFile(std::path::PathBuf);
+
+impl TestCaFile {
+    fn write(label: &str, pem: &str) -> Result<Self, std::io::Error> {
+        let path = std::env::temp_dir().join(format!(
+            "rss-postgres-{label}-{}-{}.pem",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(&path, pem)?;
+        Ok(Self(path))
+    }
+
+    fn path(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl Drop for TestCaFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+fn private_ca_pg_config(
+    params: &testkit::PgConnParams,
+    username: &str,
+    password: &str,
+    ca_file: &TestCaFile,
+) -> PgConfig {
+    PgConfig::new(
+        params.host.clone(),
+        params.port,
+        params.database.clone(),
+        username,
+        PgPassword::new(password),
+    )
+    .with_ssl_mode(PgSslMode::VerifyFull)
+    .with_ssl_root_cert(ca_file.path())
+    .with_acquire_timeout(std::time::Duration::from_secs(5))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn private_ca_tls_carries_all_fixed_runtime_role_gates() -> TestResult {
+    const ARCHIVER_PASSWORD: &str = "rss_dlx_archiver_test_pw";
+    const VERIFIER_PASSWORD: &str = "rss_dlx_verifier_test_pw";
+    const PURGER_PASSWORD: &str = "rss_dlx_purger_test_pw";
+
+    let fixture = testkit::postgres_tls().await?;
+    let ca_file = TestCaFile::write("private-ca", fixture.ca_pem())?;
+    let wrong_ca_file = TestCaFile::write("wrong-ca", fixture.wrong_ca_pem())?;
+    let params = fixture.params();
+
+    let owner = PgStore::connect(&private_ca_pg_config(
+        params,
+        &params.username,
+        &params.password,
+        &ca_file,
+    ))
+    .await?;
+    owner.run_migrations().await?;
+    testkit::provision_postgres_test_logins_with_private_ca(
+        params,
+        fixture.ca_pem().as_bytes(),
+        &[
+            testkit::PostgresTestLogin::new(TEST_APP_ROLE, TEST_APP_PASSWORD),
+            testkit::PostgresTestLogin::new(TEST_READ_ROLE, TEST_READ_PASSWORD),
+            testkit::PostgresTestLogin::new("rss_dlx_archiver", ARCHIVER_PASSWORD),
+            testkit::PostgresTestLogin::new("rss_dlx_verifier", VERIFIER_PASSWORD),
+            testkit::PostgresTestLogin::new("rss_dlx_purger", PURGER_PASSWORD),
+        ],
+    )
+    .await?;
+
+    let wrong_ca = private_ca_pg_config(params, TEST_APP_ROLE, TEST_APP_PASSWORD, &wrong_ca_file);
+    let rejected = PgStore::connect(&wrong_ca).await;
+    assert!(
+        matches!(rejected, Err(PgError::Connect { .. })),
+        "an untrusted private CA must fail during PostgreSQL connection"
+    );
+
+    let writer = PgStore::connect_verified_writer(&private_ca_pg_config(
+        params,
+        TEST_APP_ROLE,
+        TEST_APP_PASSWORD,
+        &ca_file,
+    ))
+    .await?;
+    let reader = PgStore::connect_verified_read(&crate::pool::PgTenantReadConfig::new(
+        private_ca_pg_config(params, TEST_READ_ROLE, TEST_READ_PASSWORD, &ca_file),
+    ))
+    .await?;
+    let archiver = private_ca_pg_config(params, "rss_dlx_archiver", ARCHIVER_PASSWORD, &ca_file);
+    let verifier = private_ca_pg_config(params, "rss_dlx_verifier", VERIFIER_PASSWORD, &ca_file);
+    let purger = private_ca_pg_config(params, "rss_dlx_purger", PURGER_PASSWORD, &ca_file);
+    crate::PgDlxLifecycleRuntime::preflight_identities(&archiver, &verifier, &purger).await?;
+    let dlx_runtime = crate::PgDlxLifecycleRuntime::setup(
+        &archiver,
+        &verifier,
+        &purger,
+        test_dlx_payload_protector(),
+    )
+    .await?;
+
+    dlx_runtime.shutdown().await?;
+    reader.store_arc().shutdown().await?;
+    writer.store_arc().shutdown().await?;
+    owner.shutdown().await?;
+    Ok(())
+}
+
 async fn setup_runtime_deps_with_projection_inputs(
     projection_input_generation: &'static str,
     projection_inputs: &'static [vocab::ProjectionInputBinding],
