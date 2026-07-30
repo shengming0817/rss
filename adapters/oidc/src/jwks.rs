@@ -29,6 +29,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use diport::{FederatedAccessProfile, RssAccessProfile, ShutdownError, TokenProfileMarker};
 use p256::ecdsa::VerifyingKey;
 use serde::Deserialize;
+use serde::de::{self, Deserializer};
 use tokio::runtime::Handle;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
@@ -48,10 +49,10 @@ pub enum JwksError {
     /// 源路径不可读（文件不存在 / 权限不足 / I/O 错误 / 超过 [`MAX_JWKS_BYTES`]）。
     #[error("jwks source path could not be read")]
     Unreadable,
-    /// JWKS 文档非合法 JSON（畸形）。
-    #[error("jwks document is malformed json")]
+    /// JWKS 文档非合法 JSON，或不符合 access JWKS wire schema（含缺 / 非 ES256 `alg`）。
+    #[error("jwks document is malformed or schema-invalid")]
     Malformed,
-    /// JWKS 文档解析后无任何可用 key（全部 key 不符 ES256/HS256 白名单或格式非法）。
+    /// JWKS 文档 `keys` 为空（access profile 无可用 ES256 材料）。
     #[error("jwks document contains no usable keys")]
     NoUsableKeys,
     /// A snapshot key is not a keyed ES256 P-256 public key.
@@ -631,6 +632,26 @@ fn read_and_parse(path: &Path) -> Result<KeySet, JwksError> {
     Ok(set)
 }
 
+/// Access JWKS 唯一合法 `alg` 字面量。缺字段 / 非 `ES256` → serde 失败（类型层不可表达）。
+///
+/// INVARIANT: OIDC-ALG-JWKS-BIND-01 { level = "Hard", exec = "native-compile", source = "code", native = "required serde newtype / closed enum" }——
+/// RSS 偏离 RFC 7517 §4.4（`alg` 可选）：access 本地 JWKS profile 强制显式 `alg=ES256`
+///（与 Vault 导出路径一致；为 #1109 HTTP JWKS 扩展前置收紧）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AccessJwksAlg {
+    Es256,
+}
+
+impl<'de> Deserialize<'de> for AccessJwksAlg {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        match s.as_str() {
+            "ES256" => Ok(Self::Es256),
+            other => Err(de::Error::unknown_variant(other, &["ES256"])),
+        }
+    }
+}
+
 /// JWKS 文档（RFC 7517 §5）：`{"keys":[...]}`。未知顶层字段忽略。
 #[derive(Deserialize)]
 struct JwksDoc {
@@ -639,13 +660,13 @@ struct JwksDoc {
 }
 
 /// 单个 JWK（RFC 7517 §4 / RFC 7518 §6）。仅取本验签器关心的字段；未知字段（`use`/`x5c`/`n`/`e`…）忽略。
+/// `alg` 必填且只能是 [`AccessJwksAlg::Es256`]（OIDC-ALG-JWKS-BIND-01）。
 #[derive(Deserialize)]
 struct Jwk {
     kty: String,
     #[serde(default)]
     kid: Option<String>,
-    #[serde(default)]
-    alg: Option<String>,
+    alg: AccessJwksAlg,
     #[serde(default)]
     crv: Option<String>,
     #[serde(default)]
@@ -654,8 +675,9 @@ struct Jwk {
     y: Option<String>,
 }
 
-/// 解析 access-profile JWKS 文档。每一把 key 都必须是带非空 `kid` 的 ES256/P-256 公钥；
-/// HS key、缺/空 kid、错误曲线或畸形 key 会拒绝整个快照。
+/// 解析 access-profile JWKS 文档。每一把 key 都必须带显式 `alg=ES256`、非空 `kid` 的 ES256/P-256 公钥。
+/// 错误层序：缺 / 非 ES256 `alg` → [`JwksError::Malformed`]（wire schema）；通过 alg 绑定后非 EC /
+/// 缺/空 kid / 错误曲线 / 畸形材料 → [`JwksError::InvalidKey`]（拒绝整个快照）。
 fn parse_jwks(bytes: &[u8]) -> Result<KeySet, JwksError> {
     let doc: JwksDoc = serde_json::from_slice(bytes).map_err(|_| JwksError::Malformed)?;
     if doc.keys.is_empty() {
@@ -689,15 +711,12 @@ fn require_kid(jwk: &Jwk) -> Option<String> {
 /// [`crate::config::AccessStaticKeySourceBuilder::add_es256_sec1`] 同形）；`from_sec1_bytes` 做 on-curve 校验
 /// （拒非曲线点）。任一不符 → `None`（跳过）。
 ///
-/// **`alg` 缺省即推断 ES256（有意设计）**：`alg` 是 JWK 可选字段（RFC 7517 §4.4），缺省时由 `kty=EC + crv=P-256`
-/// 组合推断为 ES256（RFC 7518 §3.1 P-256↔ES256 唯一映射）；若**声明**了 `alg` 则须 `== "ES256"`，否则跳过。
-/// 本地受信文件源场景安全（写入方受控）；未来扩展到公网 HTTP JWKS 源时须复核是否收紧为强制显式 `alg`。
+/// `alg` 绑定已由 [`AccessJwksAlg`]（OIDC-ALG-JWKS-BIND-01）在反序列化边界强制：持有 `&Jwk` 即
+/// `alg == ES256`，此处不再做字符串比对或缺省推断。
 fn parse_ec_p256(jwk: &Jwk) -> Option<KeyEntry<VerifyingKey>> {
+    let AccessJwksAlg::Es256 = jwk.alg;
     let kid = require_kid(jwk)?;
     if jwk.crv.as_deref() != Some("P-256") {
-        return None;
-    }
-    if matches!(jwk.alg.as_deref(), Some(alg) if alg != "ES256") {
         return None;
     }
     let x = decode_b64(jwk.x.as_deref()?)?;
@@ -844,12 +863,6 @@ mod tests {
         format!(r#"{{"kty":"EC","crv":"P-256","kid":"{kid}","alg":"ES256","x":"{x}","y":"{y}"}}"#)
     }
 
-    /// oct JWK JSON（含 kid + alg=HS256，k base64url）。
-    fn oct_jwk(secret: &[u8], kid: &str) -> String {
-        let k = URL_SAFE_NO_PAD.encode(secret);
-        format!(r#"{{"kty":"oct","kid":"{kid}","alg":"HS256","k":"{k}"}}"#)
-    }
-
     fn jwks_doc(keys: &[String]) -> String {
         format!(r#"{{"keys":[{}]}}"#, keys.join(","))
     }
@@ -951,13 +964,49 @@ mod tests {
         assert_eq!(set.hs256_candidates("k1").count(), 0);
     }
 
+    /// OIDC-ALG-JWKS-BIND-01 红测：缺 `alg` 的合法 EC P-256 材料亦拒（wire schema）。
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn parse_rejects_ec_jwk_missing_alg() {
+        let vk = sk(&SK1_BYTES).verifying_key().to_encoded_point(false);
+        let x = URL_SAFE_NO_PAD.encode(vk.x().expect("x"));
+        let y = URL_SAFE_NO_PAD.encode(vk.y().expect("y"));
+        let missing_alg = format!(r#"{{"kty":"EC","crv":"P-256","kid":"k1","x":"{x}","y":"{y}"}}"#);
+        assert!(matches!(
+            parse_jwks(jwks_doc(&[missing_alg]).as_bytes()),
+            Err(JwksError::Malformed)
+        ));
+    }
+
+    /// OIDC-ALG-JWKS-BIND-01 红测：非 ES256 / 空串 `alg` → wire schema 失败。
+    #[test]
+    fn parse_rejects_ec_jwk_non_es256_alg() {
+        let cases = [
+            r#"{"kty":"EC","crv":"P-256","kid":"e","alg":"ES384","x":"AAAA","y":"AAAA"}"#,
+            r#"{"kty":"EC","crv":"P-256","kid":"e","alg":"","x":"AAAA","y":"AAAA"}"#,
+            r#"{"kty":"EC","crv":"P-256","kid":"e","alg":"HS256","x":"AAAA","y":"AAAA"}"#,
+        ];
+        for raw in cases {
+            assert!(
+                matches!(
+                    parse_jwks(jwks_doc(&[raw.to_string()]).as_bytes()),
+                    Err(JwksError::Malformed)
+                ),
+                "expected Malformed for {raw}"
+            );
+        }
+    }
+
     #[test]
     #[allow(clippy::expect_used)]
     fn parse_rejects_oct_jwk() {
         let secret = [0x33u8; 32];
-        let doc = jwks_doc(&[oct_jwk(&secret, "svc-1")]);
+        // 显式 alg=ES256，避免被 OIDC-ALG-JWKS-BIND-01 掩蔽；断言 kty=oct → InvalidKey。
+        // HS256 schema 拒测见 `parse_rejects_ec_jwk_non_es256_alg`。
+        let k = URL_SAFE_NO_PAD.encode(secret);
+        let oct_es256 = format!(r#"{{"kty":"oct","kid":"svc-1","alg":"ES256","k":"{k}"}}"#);
         assert!(matches!(
-            parse_jwks(doc.as_bytes()),
+            parse_jwks(jwks_doc(&[oct_es256]).as_bytes()),
             Err(JwksError::InvalidKey)
         ));
     }
@@ -966,21 +1015,15 @@ mod tests {
     #[allow(clippy::expect_used)]
     fn parse_rejects_snapshot_containing_invalid_key() {
         let good = ec_jwk(&sk(&SK1_BYTES), "good");
-        let wrong_crv = r#"{"kty":"EC","crv":"P-384","kid":"a","x":"AAAA","y":"AAAA"}"#.to_string();
-        let short_xy = r#"{"kty":"EC","crv":"P-256","kid":"b","x":"AAAA","y":"AAAA"}"#.to_string();
-        let weak_oct = oct_jwk(&[0x01u8; 16], "c"); // 16 bytes < 32
-        let unknown_kty = r#"{"kty":"RSA","kid":"d","n":"x","e":"AQAB"}"#.to_string();
-        let alg_mismatch =
-            r#"{"kty":"EC","crv":"P-256","kid":"e","alg":"ES384","x":"AAAA","y":"AAAA"}"#
+        // 非 alg 负例必须带显式 ES256，避免被 OIDC-ALG-JWKS-BIND-01 掩蔽。
+        let wrong_crv =
+            r#"{"kty":"EC","crv":"P-384","kid":"a","alg":"ES256","x":"AAAA","y":"AAAA"}"#
                 .to_string();
-        let doc = jwks_doc(&[
-            good,
-            wrong_crv,
-            short_xy,
-            weak_oct,
-            unknown_kty,
-            alg_mismatch,
-        ]);
+        let short_xy =
+            r#"{"kty":"EC","crv":"P-256","kid":"b","alg":"ES256","x":"AAAA","y":"AAAA"}"#
+                .to_string();
+        let unknown_kty = r#"{"kty":"RSA","kid":"d","alg":"ES256","n":"x","e":"AQAB"}"#.to_string();
+        let doc = jwks_doc(&[good, wrong_crv, short_xy, unknown_kty]);
         assert!(matches!(
             parse_jwks(doc.as_bytes()),
             Err(JwksError::InvalidKey)
@@ -1479,10 +1522,10 @@ mod tests {
     #[test]
     #[allow(clippy::expect_used)]
     fn parse_rejects_any_oct_key_in_access_snapshot() {
-        let doc = jwks_doc(&[
-            ec_jwk(&sk(&SK1_BYTES), "ec-1"),
-            oct_jwk(&[0x55u8; 32], "oct-1"),
-        ]);
+        let k = URL_SAFE_NO_PAD.encode([0x55u8; 32]);
+        let oct_es256 = format!(r#"{{"kty":"oct","kid":"oct-1","alg":"ES256","k":"{k}"}}"#);
+        let doc = jwks_doc(&[ec_jwk(&sk(&SK1_BYTES), "ec-1"), oct_es256]);
+        // 混装 oct（alg 已过绑定）→ kty 闸 InvalidKey，非整份 Malformed。
         assert!(matches!(
             parse_jwks(doc.as_bytes()),
             Err(JwksError::InvalidKey)
