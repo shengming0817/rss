@@ -221,7 +221,7 @@ groups:
           summary: "Consumer app DLX 写失败（domain={{ $labels.domain }}）"
           description: "近 5min consumer_dlx_write_total{outcome=\"error\"} 增长 {{ $value }}（domain={{ $labels.domain }}）；检查 dead_letter 写入、Vault transit 与 consumer worker readyz。"
 
-      # DLX 写失败后 release claim 也失败：不能 Requeue，否则 claim TTL 窗口内可能 Duplicate→Ack 吞掉。
+      # DLX 写失败后 release claim 也失败：active claimed 仍是 transient/Requeue；只有 durable done 才 Duplicate→Ack。
       - alert: ConsumerReleaseFailed
         expr: sum by (domain) (increase(consumer_release_failed_total[5m])) > 0
         for: 0m
@@ -229,7 +229,7 @@ groups:
           severity: critical
         annotations:
           summary: "Consumer release claim 失败（domain={{ $labels.domain }}）"
-          description: "近 5min consumer_release_failed_total 增长 {{ $value }}（domain={{ $labels.domain }}）；该路径会 broker Reject，需检查 inbox claim store 和 DLX 写失败根因。"
+          description: "近 5min consumer_release_failed_total 增长 {{ $value }}（domain={{ $labels.domain }}）；该路径会 broker Requeue 并等待 release 成功或 TTL 重捞，需检查 inbox claim store 和 DLX 写失败根因。"
 
       # lease lost 是 hard-fence 正常控制流，但持续升高说明 handler 过慢、TTL 偏小或并发争用异常。
       - alert: ConsumerLeaseLostHigh

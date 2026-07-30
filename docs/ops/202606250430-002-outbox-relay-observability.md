@@ -27,7 +27,7 @@ metric 集，并给 relay/sweeper 驱动参数加构造期 fail-fast 护栏。
 | `dlq_redrive_total` | Counter | `tenant_id`,`kind`,`outcome` | `rss dlq replay-dead-letter` / `redrive-outbox` | operator mutation 结果；kind=`dead_letter_replay`/`outbox_dlx_redrive`；一次性 CLI 发射，长期告警看 audit/log |
 | `consumer_dlx_skip_total` | Counter | `domain`,`reason` | consumer fail-closed preflight path | 跳过 app DLX 写入的诊断计数；reason 为 malformed id / tenant authority / envelope header / inbox receipt context 闭集 |
 | `consumer_dlx_write_total` | Counter | `domain`,`outcome` | consumer app DLX store wrapper | app DLX 写入结果；outcome=`ok`/`error`，error 同时把 consumer health 标为 degraded |
-| `consumer_release_failed_total` | Counter | `domain` | DLX 写失败后 release 也失败 | 正确性告警面；consumer broker `Reject`，避免 Requeue 后被 Duplicate→Ack 吞掉 |
+| `consumer_release_failed_total` | Counter | `domain` | DLX 写失败后 release 也失败 | 正确性告警面；active `claimed` 是 transient，consumer broker `Requeue`；只有 durable `done` 才 Duplicate→Ack |
 | `consumer_lease_lost_total` | Counter | `domain` | consumer inbox lease CAS hard-fence | handler/tx/commit 期间 lease lost；取消当前执行并 broker Requeue，不写 app DLX |
 | `saga_dead_letters_total` | Counter | `domain`,`contract_id`,`outcome` | saga compensation DLX path | saga 补偿失败 dead-letter 写入结果；outcome=`written`/`write_error` |
 
@@ -132,7 +132,8 @@ DLX/requeue 用 `sum by (domain)`，settlement failure 用 `sum by (domain, reas
 采样器/relay worker liveness 的权威信号是 readyz probe（`outbox_sampler` / `outbox_relay`）和外部监控。
 `consumer_dlx_skip_total` 不配置告警：它解释 app DLX 未写入的 fail-closed 分支。`consumer_dlx_write_total{outcome="error"}`
 是告警面：DLX 未落库时 consumer 会 release inbox claim；release 成功则 broker Requeue，release 失败则
-`consumer_release_failed_total{domain}` 增长并 broker Reject，必须由 degraded health + metric 共同暴露。
+`consumer_release_failed_total{domain}` 增长并继续 broker Requeue，active claim 等待 release 成功或 TTL 重捞；
+该路径必须由 degraded health + metric 共同暴露。只有 durable `done` receipt 才会在重投时 Duplicate→Ack。
 `saga_dead_letters_total{outcome="written"}` 是人工介入面：补偿失败已进入统一 dead_letter 表；
 `outcome="write_error"` 是正确性告警面：journal Failed 行是 durable 审计兜底，但 dead_letter 未落库。
 `outbox_relay_envelope_validation_failure_total` 不单独配置告警：对应行会按 permanent failure 进入 outbox

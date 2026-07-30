@@ -40,6 +40,55 @@ docker build --target settingsonly-runtime -t rss-settingsonly:1796 .
 （uid 65532），固定 entrypoint `/usr/local/bin/settingsonly-server`，只包含该 binary 与
 `/usr/share/rss/settingsonly/config.schema.json`。
 
+## Production artifact 机器验收
+
+production artifact 的唯一 machine carrier 是 `journeys` 的
+`settingsonly_production_artifact` target（需要 `integration` feature）。四个独立、精确可选的 T3 join
+hazard 为：
+
+```bash
+./hack/cargo.sh test -p journeys --features integration --test settingsonly_production_artifact \
+  settingsonly_image_mount_spiffe_readiness_join -- --exact --nocapture --test-threads=1
+./hack/cargo.sh test -p journeys --features integration --test settingsonly_production_artifact \
+  settingsonly_image_pg_outbox_amqp_inbox_join -- --exact --nocapture --test-threads=1
+./hack/cargo.sh test -p journeys --features integration --test settingsonly_production_artifact \
+  settingsonly_image_sigkill_redelivery_join -- --exact --nocapture --test-threads=1
+./hack/cargo.sh test -p journeys --features integration --test settingsonly_production_artifact \
+  settingsonly_image_sigterm_drain_join -- --exact --nocapture --test-threads=1
+```
+
+carrier 固定构建 `settingsonly-runtime`，不接受 command/entrypoint override，并在运行期检查真实 OCI
+ENTRYPOINT、进程路径和 nonroot 用户。配置、JWKS、PostgreSQL/Vault/AMQP/Redis/S3 五份私有 CA、secret
+bundle 与 SPIFFE Workload API UDS 只经只读 mount/volume 提供；入口以真实 SPIFFE X.509 身份和精确
+allow-set 经 mTLS 访问 production listener。Input/ready case 要求聚合 readyz 为 Healthy，且下列 11 个
+provider join probe 全部为 Healthy：
+
+```text
+configs_ready
+keyprovider_ready
+vault_secret_resolver_ready
+federated_access_token_jwks_ready
+settingsonly_redis_ready
+settingsonly_amqp_publisher_ready
+settingsonly_amqp_subscriber_ready
+settingsonly_dlx_lifecycle
+settingsonly_dlx_archive_ready
+settingsonly_dlx_archive_key_ready
+settingsonly_dlx_hot_key_ready
+```
+
+其余三项只覆盖 production 组合后才存在的接缝：L2 join 经真实 mTLS frontend 发布一次 Settings 事件，
+观察同一 event 的 PG config/outbox、Rabbit 投递与 inbox `done`；SIGKILL join 在 Rabbit 已确认 unacked 后
+杀死真实 OCI 进程，以同一 image/config/provider generation 重启并验证 redelivery 收口且无第二次 domain
+effect；SIGTERM join 在 inbox 已进入确定性 inflight 屏障后向真实 ENTRYPOINT 发送信号，验证停止新接入、
+当前事务/Ack 收口、零码退出以及 Primary/Admin/Health 端口全部释放。provider fault matrix、CRUD、ACL、
+rollback 和下层 settlement 语义仍由既有 T1/T2 owner 证明，不在这个 T3 carrier 中复制。
+
+该 carrier 激活时已原子删除 legacy carrier、配套脚本和测试专用环境输入；不提供 alias、shim 或双路径。
+`settingsonly_runtime` 保留为快速进程内 T1/T2 lifecycle owner，但不再是 artifact selector，也不包装或调用
+上述 T3 case。精确闭集、映射和 artifact identity 的 enforcement 位于 Rust/Cargo/assembly machine carrier；
+本文只解释运维和定位语义。
+
 ## 配置、挂载与密钥
 
 复制 `assemblies/settingsonly/settingsonly.example.toml` 后只替换部署值。文档必须满足镜像内 schema，未知字段、
@@ -104,7 +153,7 @@ Health listener 固定提供：
   - `configs_ready`：Settings PG reader/writer；
   - `keyprovider_ready`、`vault_secret_resolver_ready`：Settings Vault key/KV；
   - `federated_access_token_jwks_ready`：federated JWKS；
-  - `redis_ready`：分布式 lock；
+  - `settingsonly_redis_ready`：分布式 lock；
   - `settingsonly_amqp_publisher_ready`、`settingsonly_amqp_subscriber_ready`：AMQP transport；
   - `settingsonly_dlx_archive_ready`、`settingsonly_dlx_hot_key_ready`、
     `settingsonly_dlx_archive_key_ready`、`settingsonly_dlx_lifecycle`：S3 WORM 与 DLX；

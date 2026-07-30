@@ -181,7 +181,7 @@ fn wire_publisher(
     );
     let health = Arc::new(WorkerHealth::healthy());
     let worker_health = Arc::clone(&health);
-    let worker: WorkerSpec = Box::new(move |token| {
+    let worker = WorkerSpec::deferred(move |token| {
         DynManagedResource::new_box(spawn_relay(
             "identityaudit-outbox-relay-identity".to_owned(),
             outbox,
@@ -280,7 +280,7 @@ fn wire_inbox_sweeper(
     let (config, name) = inbox_sweeper_plan(sweeper.retention_seconds())?;
     let health = Arc::new(WorkerHealth::healthy());
     let worker_health = Arc::clone(&health);
-    output.workers.push(Box::new(move |token| {
+    output.workers.push(WorkerSpec::phase_one(move |token| {
         let loop_health = Arc::clone(&worker_health);
         let loop_token = token.clone();
         let handle = tokio::spawn(async move {
@@ -335,7 +335,7 @@ fn wire_distributed_maintenance(
 
     let sampler_health = Arc::new(WorkerHealth::healthy());
     let sampler_worker_health = Arc::clone(&sampler_health);
-    let sampler_worker: WorkerSpec = Box::new(move |token| {
+    let sampler_worker = WorkerSpec::phase_one(move |token| {
         DynManagedResource::new_box(spawn_on_dedicated_runtime(
             "identityaudit-outbox-sampler",
             token,
@@ -357,7 +357,7 @@ fn wire_distributed_maintenance(
 
     let sweeper_health = Arc::new(WorkerHealth::healthy());
     let sweeper_worker_health = Arc::clone(&sweeper_health);
-    let sweeper_worker: WorkerSpec = Box::new(move |token| {
+    let sweeper_worker = WorkerSpec::phase_one(move |token| {
         DynManagedResource::new_box(spawn_on_dedicated_runtime(
             "identityaudit-outbox-sweeper",
             token,

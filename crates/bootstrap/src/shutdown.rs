@@ -9,7 +9,9 @@
 //! 1. **广播（并发、无序）**：[`ShutdownStack::shutdown`] 先 `cancel` root [`CancellationToken`]，
 //!    所有经 [`ShutdownStack::register_with_token`] 注入的后台 task 同时感知「该停了」，开始自行退出。
 //! 2. **逆序确认（串行、有序）**：按注册逆序（LIFO）逐个 await 每个资源的
-//!    [`ManagedResource::shutdown`]，确认其真正释放干净，再关下一个（被依赖的）资源。
+//!    [`ManagedResource::shutdown`]，确认其真正释放干净，再关下一个（被依赖的）资源。必须等前序
+//!    LIFO 资源完成才停止 admission 的后台 task 经
+//!    [`ShutdownStack::register_deferred_with_token`] 注册，其 token 在到达自身相位时才取消。
 //!
 //! 单 cancel 广播不保证资源释放顺序（outbox relay 可能晚于它依赖的 DB pool 关闭）；
 //! 单 LIFO await 又无法让后台 task 提前退出。两者配合才安全。
@@ -25,9 +27,10 @@
 //! - `INVARIANT: SHUTDOWN-SINGLE-SHOT-01` { level = "Medium", exec = "manual/opt-in", source = "code" }—— `shutdown(self)` 消费 self，double-shutdown /
 //!   关闭后注册在类型层不可表达（编译期，Hard）。
 //! - `INVARIANT: SHUTDOWN-TOKEN-FUNNEL-01` { level = "Medium", exec = "manual/opt-in", source = "code" }—— 后台 task 的取消 token 只能经
-//!   [`ShutdownStack::register_with_token`] 由本 stack 派生并在闭包内经构造器注入；无后台 task
-//!   的资源经 [`ShutdownStack::register_detached`] 显式声明不接广播。**无 `pub child_token`**——
-//!   裸 token 发放无公开入口，杜绝注册「使用外部 / 无来源 token」的有 task 资源。
+//!   [`ShutdownStack::register_with_token`] 或 [`ShutdownStack::register_deferred_with_token`]
+//!   由本 stack 铸造并在闭包内经构造器注入；无后台 task 的资源经
+//!   [`ShutdownStack::register_detached`] 显式声明不接取消。**无 `pub child_token`**——裸 token
+//!   发放无公开入口，杜绝注册「使用外部 / 无来源 token」的有 task 资源。
 //! - `INVARIANT: SHUTDOWN-BUDGET-CANCEL-SAFE-01` { level = "Medium", exec = "manual/opt-in", source = "code" }—— 整体 shutdown 预算由驱动器内部
 //!   [`ShutdownStack::shutdown_within`] 承担（cancel-safe），**不**交外层 `timeout` 取消包裹
 //!   （外层取消会在 LIFO 中途 drop future、中断后续关闭、泄漏被依赖资源）。
@@ -86,6 +89,52 @@ pub struct ShutdownStack {
     resources: Vec<Box<DynManagedResource<'static>>>,
 }
 
+/// 到达自身 LIFO 相位才取消后台 task 的资源包装。
+///
+/// 类型由 [`ShutdownStack::register_deferred_with_token`] 私有铸造，调用方不能提供外部 token 或
+/// 自行构造另一种 deferred wrapper。wrapper 在委托 inner shutdown 前同步取消 token，因而后台
+/// task 可开始退出并由 inner 在同一 per-resource budget 内 join。
+struct DeferredCancellationResource {
+    name: String,
+    shutdown_timeout: Duration,
+    token: CancelOnDrop,
+    inner: tokio::sync::Mutex<Option<Box<DynManagedResource<'static>>>>,
+}
+
+/// deferred token 的 fail-safe owner：无论正常进入 wrapper shutdown、整体预算在此前耗尽，还是
+/// stack owner 被取消并 drop，最后一个 wrapper owner 被释放时都主动 cancel，而非依赖 token drop。
+struct CancelOnDrop(CancellationToken);
+
+impl CancelOnDrop {
+    fn cancel(&self) {
+        self.0.cancel();
+    }
+}
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
+}
+
+impl ManagedResource for DeferredCancellationResource {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn shutdown_timeout(&self) -> Duration {
+        self.shutdown_timeout
+    }
+
+    async fn shutdown(&self) -> Result<(), ShutdownError> {
+        self.token.cancel();
+        match self.inner.lock().await.take() {
+            Some(inner) => inner.shutdown().await,
+            None => Ok(()),
+        }
+    }
+}
+
 impl ShutdownStack {
     /// 以一个 root [`CancellationToken`] 构造空栈。root token 由组合根（bootstrap）持有，
     /// 也可经它在收到 SIGTERM 等信号时从外部触发关闭广播。
@@ -114,11 +163,37 @@ impl ShutdownStack {
         self.resources.push(make(token));
     }
 
+    /// 注册一个必须等到其**自身 LIFO 关闭相位**才取消的后台 task。
+    ///
+    /// 与 [`register_with_token`](Self::register_with_token) 的 root 广播语义不同，本入口铸造
+    /// stack-owned 独立 token，并用私有 managed-resource wrapper 在该资源真正开始 shutdown 时
+    /// 先 cancel、再 await inner shutdown。适用于 listener 已停止接入后才可停止 admission、并需要
+    /// 在依赖仍存活时完成当前事务和 join 的 module worker。
+    ///
+    /// closure 仍是唯一 token 获取点；调用方无法自行提供 token，也无需构造 wrapper 或降级走
+    /// [`register_detached`](Self::register_detached)。注册顺序与其它资源共用同一个 LIFO 栈。
+    pub fn register_deferred_with_token<F>(&mut self, make: F)
+    where
+        F: FnOnce(CancellationToken) -> Box<DynManagedResource<'static>>,
+    {
+        let token = CancellationToken::new();
+        let inner = make(token.clone());
+        let name = inner.name().to_owned();
+        let shutdown_timeout = inner.shutdown_timeout();
+        self.resources
+            .push(DynManagedResource::new_box(DeferredCancellationResource {
+                name,
+                shutdown_timeout,
+                token: CancelOnDrop(token),
+                inner: tokio::sync::Mutex::new(Some(inner)),
+            }));
+    }
+
     /// 注册一个**无后台 task、不监听关闭广播**的资源（如纯同步 flush 的 buffer，关闭即 drain）。
     ///
     /// 显式 no-token 入口：声明「该资源有意不接关闭广播」，而非忘记接线。与
-    /// [`register_with_token`](Self::register_with_token) 二者覆盖全部注册路径，杜绝静默绕过
-    /// 阶段 1 广播（`INVARIANT: SHUTDOWN-TOKEN-FUNNEL-01` { level = "Medium", exec = "manual/opt-in", source = "code" }）。注册顺序语义同上。
+    /// 两个 token 入口与本入口覆盖全部注册路径，杜绝有后台 task 的资源静默绕过取消 funnel
+    /// （`INVARIANT: SHUTDOWN-TOKEN-FUNNEL-01` { level = "Medium", exec = "manual/opt-in", source = "code" }）。注册顺序语义同上。
     pub fn register_detached(&mut self, resource: Box<DynManagedResource<'static>>) {
         self.resources.push(resource);
     }
@@ -358,6 +433,7 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
+    use tokio::sync::Notify;
 
     /// 共享调用序列记录器：每个 mock 资源在 shutdown 时 push 自己的 name，
     /// 用于确定性断言关闭顺序（不靠时序）。
@@ -386,6 +462,10 @@ mod tests {
         Hang,
         Panic,
         AwaitCancel(CancellationToken),
+        Gate {
+            started: Arc<Notify>,
+            release: Arc<Notify>,
+        },
     }
 
     struct MockResource {
@@ -435,6 +515,11 @@ mod tests {
                 Behavior::Panic => panic!("mock-panic-{}", self.name),
                 Behavior::AwaitCancel(token) => {
                     token.cancelled().await;
+                    Ok(())
+                }
+                Behavior::Gate { started, release } => {
+                    started.notify_one();
+                    release.notified().await;
                     Ok(())
                 }
             }
@@ -600,6 +685,105 @@ mod tests {
 
         assert!(failures.is_empty());
         assert_eq!(entries(&log), vec!["waiter"]);
+    }
+
+    // SHUTDOWN-TOKEN-FUNNEL-01：deferred token 同样只能由 stack 在 closure 内铸造，但不属于
+    // phase-one root broadcast。后注册的 listener LIFO drain 完成前 token 必须保持 live；到 worker
+    // 自身相位时 wrapper 先 cancel，再让 inner shutdown 观察并 join。
+    #[tokio::test]
+    async fn deferred_cancellation_waits_for_its_lifo_phase() {
+        let log = new_log();
+        let deferred_token = Arc::new(Mutex::new(None::<CancellationToken>));
+        let capture = Arc::clone(&deferred_token);
+        let listener_started = Arc::new(Notify::new());
+        let release_listener = Arc::new(Notify::new());
+        let mut stack = ShutdownStack::new(CancellationToken::new());
+        stack.register_deferred_with_token(|token| {
+            *capture
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(token.clone());
+            MockResource::boxed("worker", Behavior::AwaitCancel(token), &log)
+        });
+        stack.register_with_token({
+            let listener_started = Arc::clone(&listener_started);
+            let release_listener = Arc::clone(&release_listener);
+            |_: CancellationToken| {
+                MockResource::boxed(
+                    "listener",
+                    Behavior::Gate {
+                        started: listener_started,
+                        release: release_listener,
+                    },
+                    &log,
+                )
+            }
+        });
+
+        let drain = tokio::spawn(async move { stack.shutdown().await });
+        listener_started.notified().await;
+        let captured = deferred_token
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        assert!(captured.is_some(), "deferred funnel must inject its token");
+        let token = captured.unwrap_or_default();
+        assert!(
+            !token.is_cancelled(),
+            "deferred worker must remain live while the later LIFO resource drains"
+        );
+
+        release_listener.notify_one();
+        let joined = drain.await;
+        assert!(joined.is_ok(), "shutdown task must join: {joined:?}");
+        let failures = joined.unwrap_or_default();
+
+        assert!(failures.is_empty());
+        assert!(token.is_cancelled());
+        assert_eq!(entries(&log), vec!["listener", "worker"]);
+    }
+
+    // F6：整体预算在 deferred worker 之前被后注册的 hung resource 耗尽时，worker wrapper 不会
+    // 进入 shutdown body。remaining iterator drop wrapper 必须经 CancelOnDrop 取消 token，不能让
+    // 后台 task 因「从未轮到」而越过进程 drain 边界继续运行。
+    #[tokio::test(start_paused = true)]
+    async fn budget_exhaustion_before_deferred_phase_still_cancels_token() {
+        let log = new_log();
+        let deferred_token = Arc::new(Mutex::new(None::<CancellationToken>));
+        let capture = Arc::clone(&deferred_token);
+        let mut stack = ShutdownStack::new(CancellationToken::new());
+        stack.register_deferred_with_token(|token| {
+            *capture
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(token.clone());
+            MockResource::boxed("deferred", Behavior::AwaitCancel(token), &log)
+        });
+        stack.register_detached(MockResource::boxed("hang", Behavior::Hang, &log));
+
+        let failures = stack.shutdown_within(Duration::from_secs(3)).await;
+        let captured = deferred_token
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        assert!(captured.is_some(), "deferred funnel must inject its token");
+        let token = captured.unwrap_or_default();
+
+        assert_eq!(failures.len(), 2);
+        assert_eq!(failures[0].name, "hang");
+        assert_eq!(failures[1].name, "deferred");
+        assert!(
+            failures
+                .iter()
+                .all(|failure| matches!(failure.kind, ShutdownFailureKind::BudgetExhausted))
+        );
+        assert!(
+            token.is_cancelled(),
+            "dropping an unvisited deferred wrapper must cancel its task token"
+        );
+        assert_eq!(
+            entries(&log),
+            vec!["hang"],
+            "deferred shutdown body must remain unvisited in this regression"
+        );
     }
 
     // SHUTDOWN-BUDGET-CANCEL-SAFE-01：整体预算 3s < hang 的 per-resource 超时 5s，hang 占满

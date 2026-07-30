@@ -778,12 +778,16 @@ impl InboxStore for InMemClaimer {
                 });
                 Ok(SeenState::Fresh)
             }
+            std::collections::hash_map::Entry::Occupied(e) if e.get().done => {
+                // 只有 durable done 才可幂等短路并 Ack。
+                Ok(SeenState::Duplicate)
+            }
             std::collections::hash_map::Entry::Occupied(_) => {
-                // 已 claimed/done（无 TTL 重捞）→ Duplicate。
+                // active claimed 必须保留 broker 投递；typed outcome 由 consumer lease-aware 延迟 Requeue。
                 // reason: TTL 重捞在此 in-mem demo 替身中有意省略——crash-recovery + 重捞正确性由
                 // PG adapter 集成测试守；in-mem 仅需忠实 token-CAS 语义，使 hard-fence 在 demo/test
                 // 中可行使。
-                Ok(SeenState::Duplicate)
+                Ok(SeenState::InProgress)
             }
         }
     }
@@ -2391,11 +2395,11 @@ mod tests {
         receipt_ctx_for(CANON_TENANT, group)
     }
 
-    /// 同一 key 连续 try_claim 3 次：第 1 次 Fresh，第 2、3 次 Duplicate。
+    /// 同一 key 连续 try_claim：第 1 次 Fresh，active claim 必须返回 InProgress，不能伪装成 done Duplicate。
     #[tokio::test]
     #[allow(clippy::expect_used)]
     // reason: 测试 happy-path 断言已 is_ok 的 parse 结果及 try_claim，item-level carve-out（error-handling.md §Carve-out）。
-    async fn claimer_first_fresh_then_duplicate() {
+    async fn claimer_active_claim_is_in_progress_not_duplicate() {
         use crate::InMemClaimer;
         use consistency::IdemKey;
 
@@ -2404,24 +2408,24 @@ mod tests {
         let key = IdemKey::parse("session.created:tenant-1:evt-1").expect("key");
         let t = tok();
 
-        let states: Vec<SeenState> = vec![
+        assert_eq!(
             claimer
                 .try_claim(&ctx, &key, &t)
                 .await
                 .expect("try_claim 1"),
-            claimer
-                .try_claim(&ctx, &key, &t)
-                .await
-                .expect("try_claim 2"),
-            claimer
-                .try_claim(&ctx, &key, &t)
-                .await
-                .expect("try_claim 3"),
-        ];
-
-        assert_eq!(states[0], SeenState::Fresh, "第 1 次应为 Fresh");
-        assert_eq!(states[1], SeenState::Duplicate, "第 2 次应为 Duplicate");
-        assert_eq!(states[2], SeenState::Duplicate, "第 3 次应为 Duplicate");
+            SeenState::Fresh,
+            "第 1 次应为 Fresh"
+        );
+        for attempt in 2..=3 {
+            assert_eq!(
+                claimer
+                    .try_claim(&ctx, &key, &tok())
+                    .await
+                    .expect("active contention is an outcome"),
+                SeenState::InProgress,
+                "attempt={attempt}"
+            );
+        }
     }
 
     /// 同一个 claimer 内，同一 key 在不同 tenant/group scope 各自 Fresh。
@@ -2442,10 +2446,10 @@ mod tests {
             .try_claim(&ctx_a, &key, &tok())
             .await
             .expect("try_claim a");
-        let state_dup = claimer
+        let active_state = claimer
             .try_claim(&ctx_a, &key, &tok())
             .await
-            .expect("try_claim duplicate");
+            .expect("active contention is an outcome");
         let state_group_b = claimer
             .try_claim(&ctx_group_b, &key, &tok())
             .await
@@ -2456,7 +2460,11 @@ mod tests {
             .expect("try_claim tenant b");
 
         assert_eq!(state_a, SeenState::Fresh, "group-a 首见应为 Fresh");
-        assert_eq!(state_dup, SeenState::Duplicate, "同 scope 重复应 Duplicate");
+        assert_eq!(
+            active_state,
+            SeenState::InProgress,
+            "同 scope active claim 应可重投"
+        );
         assert_eq!(
             state_group_b,
             SeenState::Fresh,
@@ -2567,7 +2575,7 @@ mod tests {
         );
     }
 
-    /// release token CAS：他人 token release 为 no-op（不误删 claim，仍 Duplicate）。
+    /// release token CAS：他人 token release 为 no-op（不误删 claim，仍返回 transient）。
     #[tokio::test]
     #[allow(clippy::expect_used)]
     // reason: 测试 release CAS no-op 语义断言——in-mem claimer 方法恒 Ok，item-level carve-out。
@@ -2591,14 +2599,13 @@ mod tests {
             .release(&ctx, &key, &tok())
             .await
             .expect("release-stale");
-        // claim 仍在（未被误删）→ Duplicate
+        // claim 仍在（未被误删）→ InProgress，使 broker 保留投递而不是 ACK 丢消息。
         assert_eq!(
             claimer
                 .try_claim(&ctx, &key, &tok())
                 .await
-                .expect("re-try_claim"),
-            SeenState::Duplicate,
-            "stale token release 不误删 claim"
+                .expect("active contention is an outcome"),
+            SeenState::InProgress
         );
     }
 

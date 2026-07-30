@@ -312,7 +312,6 @@ integration_shard_catalog! {
             SecurityProviderCloseoutJourney => ("journeys", "security_provider_closeout", Test, Parallel),
             SettingsOnlyRuntimeJourney => ("journeys", "settingsonly_runtime", Test, Parallel),
             SettingsOnlyLib => ("settingsonly", "settingsonly", Lib, Serial),
-            SettingsOnlyArtifactAcceptance => ("settingsonly", "settingsonly_artifact_acceptance", Test, Parallel),
             RuntimeLib => ("runtime", "runtime", Lib, Serial),
             AuthE2e => ("runtime", "auth_e2e", Test, Parallel),
             AuthBridgeStructure => ("runtime", "auth_bridge_structure", Test, Parallel),
@@ -376,6 +375,7 @@ integration_shard_catalog! {
         capabilities: [Docker],
         local_feature_scopes: [Journeys],
         units: [
+            SettingsOnlyProductionArtifact => ("journeys", "settingsonly_production_artifact", Test, Serial),
             TwoReplicaRuntimeJourney => ("journeys", "two_replica_runtime", Test, Serial),
             ProductionRuntimeJourney => ("journeys", "production_runtime", Test, Parallel),
             RuntimeInventoryJourney => ("journeys", "runtime_inventory", Test, Parallel),
@@ -999,6 +999,7 @@ mod tests {
             ("journeys-fault-matrix", "consistency_fault_matrix_journey"),
             ("runtime", "settings_config_publish_durable_e2e"),
             ("s3", "integration_object_store"),
+            ("journeys", "settingsonly_production_artifact"),
             ("journeys", "two_replica_runtime"),
         ]);
         let actual_serial: BTreeSet<_> = all_units()
@@ -1241,6 +1242,20 @@ mod tests {
             })
             .count();
         assert_eq!(matches, 1);
+        let production_artifacts = spec
+            .units
+            .iter()
+            .filter(|unit| {
+                unit.package == "journeys"
+                    && unit.target == "settingsonly_production_artifact"
+                    && unit.kind == TargetKind::Test
+                    && unit.scheduling == Scheduling::Serial
+            })
+            .count();
+        assert_eq!(
+            production_artifacts, 1,
+            "SettingsOnly production artifact carrier must be unique and serial"
+        );
         assert_eq!(
             IntegrationShard::ProductionRuntime.partition_policy(),
             PartitionPolicy::Unpartitioned

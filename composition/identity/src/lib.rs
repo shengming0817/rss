@@ -94,6 +94,10 @@ pub struct IdentityModuleDeps<S> {
 
 impl<S> IdentityModuleDeps<S> {
     #[must_use]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "closed composition constructor requires every mandatory typed capability"
+    )]
     pub fn new(
         pg: PgDomainDeps<caps::Identity>,
         signer: Arc<S>,

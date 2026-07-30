@@ -8,6 +8,12 @@ use anyhow::Context as _;
 
 use crate::{auth_bridge, listeners, runtime};
 
+/// Exact production readiness closure used by artifact acceptance.
+#[must_use]
+pub const fn production_required_probe_names() -> [&'static str; 16] {
+    crate::readiness::PRODUCTION_REQUIRED_PROBES
+}
+
 pub struct FixtureConfig {
     primary: SocketAddr,
     health: SocketAddr,
@@ -118,10 +124,10 @@ impl runtimeexec::StartupAdapter for FixtureStartup {
         } = self.config;
         let mut provider_output = bootstrap::DomainModuleResult::default();
         for name in [
-            "configs_ready",
-            "keyprovider_ready",
-            "vault_secret_resolver_ready",
-            "federated_access_token_jwks_ready",
+            settings_composition::CONFIGS_READY_PROBE_NAME,
+            settings_composition::KEYPROVIDER_READY_PROBE_NAME,
+            settings_composition::SECRET_RESOLVER_READY_PROBE_NAME,
+            crate::readiness::FEDERATED_JWKS,
         ] {
             let name = primitives::ProbeName::parse(name)
                 .context("build fixture provider readiness probe name")?;

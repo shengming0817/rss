@@ -6,10 +6,12 @@ use std::time::Duration;
 use anyhow::Context as _;
 use bootstrap::DomainModuleResult;
 use diport::{DynDeadLetterStore, DynManagedResource, ManagedResource, ShutdownError, Topic};
+#[cfg(test)]
+use eventexec::EVENT_CONSUMER_PROBE;
 use eventexec::{
-    EVENT_CONSUMER_PROBE, LeaseConfig, MetricsOutboxMetrics, OUTBOX_RELAY_PROBE, RelayBudget,
-    RelayConfig, RetentionTarget, SamplerConfig, SweeperConfig, SweeperWorker, WorkerHealth,
-    backlog_sampler_loop, spawn_on_dedicated_runtime, spawn_relay, sweeper_loop,
+    LeaseConfig, MetricsOutboxMetrics, RelayBudget, RelayConfig, RetentionTarget, SamplerConfig,
+    SweeperConfig, SweeperWorker, WorkerHealth, backlog_sampler_loop, spawn_on_dedicated_runtime,
+    spawn_relay, sweeper_loop,
 };
 use generated::event::{SubscriberReadiness, SubscriptionDispatchKey};
 use vocab::ExternalEffectPolicy;
@@ -140,7 +142,7 @@ fn wire_amqp_readiness(
     let publisher_ready = Arc::new(std::sync::atomic::AtomicBool::new(
         amqp.publisher_readiness().is_ready(),
     ));
-    let publisher_name = primitives::ProbeName::parse("settingsonly_amqp_publisher_ready")
+    let publisher_name = primitives::ProbeName::parse(crate::readiness::AMQP_PUBLISHER)
         .context("build settingsonly AMQP publisher readiness probe name")?;
     publisher.probes.push((
         publisher_name.clone(),
@@ -150,19 +152,21 @@ fn wire_amqp_readiness(
         )),
     ));
     let publisher_amqp = amqp.clone();
-    publisher.workers.push(Box::new(move |token| {
-        DynManagedResource::new_box(AmqpReadinessWorker::spawn(
-            publisher_amqp,
-            AmqpReadinessRole::Publisher,
-            publisher_ready,
-            token,
-        ))
-    }));
+    publisher
+        .workers
+        .push(bootstrap::WorkerSpec::phase_one(move |token| {
+            DynManagedResource::new_box(AmqpReadinessWorker::spawn(
+                publisher_amqp,
+                AmqpReadinessRole::Publisher,
+                publisher_ready,
+                token,
+            ))
+        }));
 
     let subscriber_ready = Arc::new(std::sync::atomic::AtomicBool::new(
         amqp.subscriber_readiness().is_ready(),
     ));
-    let subscriber_name = primitives::ProbeName::parse("settingsonly_amqp_subscriber_ready")
+    let subscriber_name = primitives::ProbeName::parse(crate::readiness::AMQP_SUBSCRIBER)
         .context("build settingsonly AMQP subscriber readiness probe name")?;
     subscriber.probes.push((
         subscriber_name.clone(),
@@ -172,14 +176,16 @@ fn wire_amqp_readiness(
         )),
     ));
     let subscriber_amqp = amqp.clone();
-    subscriber.workers.push(Box::new(move |token| {
-        DynManagedResource::new_box(AmqpReadinessWorker::spawn(
-            subscriber_amqp,
-            AmqpReadinessRole::Subscriber,
-            subscriber_ready,
-            token,
-        ))
-    }));
+    subscriber
+        .workers
+        .push(bootstrap::WorkerSpec::phase_one(move |token| {
+            DynManagedResource::new_box(AmqpReadinessWorker::spawn(
+                subscriber_amqp,
+                AmqpReadinessRole::Subscriber,
+                subscriber_ready,
+                token,
+            ))
+        }));
     Ok(())
 }
 
@@ -326,18 +332,20 @@ fn wire_relay(
     );
     let health = Arc::new(WorkerHealth::starting());
     let worker_health = Arc::clone(&health);
-    output.workers.push(Box::new(move |token| {
-        DynManagedResource::new_box(spawn_relay(
-            "settingsonly-outbox-relay-settings".to_owned(),
-            outbox,
-            relay,
-            Arc::new(crate::SystemClock),
-            token,
-            worker_health,
-            Arc::new(MetricsOutboxMetrics),
-        ))
-    }));
-    let name = primitives::ProbeName::parse(&format!("{OUTBOX_RELAY_PROBE}_settings"))
+    output
+        .workers
+        .push(bootstrap::WorkerSpec::deferred(move |token| {
+            DynManagedResource::new_box(spawn_relay(
+                "settingsonly-outbox-relay-settings".to_owned(),
+                outbox,
+                relay,
+                Arc::new(crate::SystemClock),
+                token,
+                worker_health,
+                Arc::new(MetricsOutboxMetrics),
+            ))
+        }));
+    let name = primitives::ProbeName::parse(crate::readiness::OUTBOX_RELAY)
         .context("build settingsonly relay probe name")?;
     output
         .probes
@@ -364,11 +372,8 @@ fn wire_consumer(
         subscription.consumer(),
         subscription.topic()
     );
-    let probe_name = primitives::ProbeName::parse(&format!(
-        "{EVENT_CONSUMER_PROBE}_{}",
-        subscription.identity_slug()
-    ))
-    .context("build settingsonly consumer probe name")?;
+    let probe_name = primitives::ProbeName::parse(crate::readiness::EVENT_CONSUMER)
+        .context("build settingsonly consumer probe name")?;
     let worker = eventing_composition::SettingsConsumerFactory::new(pg).worker(
         subscription.dispatch_token().clone(),
         eventing_composition::WorkerInputs::new(
@@ -403,29 +408,31 @@ fn wire_inbox_sweeper(
         .context("build settingsonly inbox sweeper config")?;
     let health = Arc::new(WorkerHealth::starting());
     let worker_health = Arc::clone(&health);
-    output.workers.push(Box::new(move |token| {
-        let loop_health = Arc::clone(&worker_health);
-        let loop_token = token.clone();
-        let handle = tokio::spawn(async move {
-            let _stopped = loop_health.stopped_on_exit();
-            sweeper_loop(
-                Arc::new(sweeper),
-                config,
-                Arc::new(crate::SystemClock),
-                loop_token,
-                Arc::clone(&loop_health),
-                RetentionTarget::InboxReceipts,
-            )
-            .await;
-        });
-        DynManagedResource::new_box(SweeperWorker::adopt(
-            "settingsonly-inbox-dedup-sweeper",
-            handle,
-            worker_health,
-            token,
-        ))
-    }));
-    let name = primitives::ProbeName::parse("settingsonly_inbox_sweeper")
+    output
+        .workers
+        .push(bootstrap::WorkerSpec::phase_one(move |token| {
+            let loop_health = Arc::clone(&worker_health);
+            let loop_token = token.clone();
+            let handle = tokio::spawn(async move {
+                let _stopped = loop_health.stopped_on_exit();
+                sweeper_loop(
+                    Arc::new(sweeper),
+                    config,
+                    Arc::new(crate::SystemClock),
+                    loop_token,
+                    Arc::clone(&loop_health),
+                    RetentionTarget::InboxReceipts,
+                )
+                .await;
+            });
+            DynManagedResource::new_box(SweeperWorker::adopt(
+                "settingsonly-inbox-dedup-sweeper",
+                handle,
+                worker_health,
+                token,
+            ))
+        }));
+    let name = primitives::ProbeName::parse(crate::readiness::INBOX_SWEEPER)
         .context("build settingsonly inbox sweeper probe name")?;
     output
         .probes
@@ -454,26 +461,28 @@ fn wire_outbox_maintenance(
 
     let sampler_health = Arc::new(WorkerHealth::starting());
     let sampler_worker_health = Arc::clone(&sampler_health);
-    output.workers.push(Box::new(move |token| {
-        DynManagedResource::new_box(spawn_on_dedicated_runtime(
-            "settingsonly-outbox-sampler",
-            token,
-            Arc::clone(&sampler_worker_health),
-            EVENT_WORKER_SHUTDOWN_TIMEOUT,
-            move |thread_token| async move {
-                backlog_sampler_loop(
-                    Arc::new(sampler),
-                    sampler_config,
-                    thread_token,
-                    Arc::clone(&sampler_worker_health),
-                    Arc::new(MetricsOutboxMetrics),
-                )
-                .await;
-                Ok(())
-            },
-        ))
-    }));
-    let sampler_name = primitives::ProbeName::parse("settingsonly_outbox_sampler")
+    output
+        .workers
+        .push(bootstrap::WorkerSpec::phase_one(move |token| {
+            DynManagedResource::new_box(spawn_on_dedicated_runtime(
+                "settingsonly-outbox-sampler",
+                token,
+                Arc::clone(&sampler_worker_health),
+                EVENT_WORKER_SHUTDOWN_TIMEOUT,
+                move |thread_token| async move {
+                    backlog_sampler_loop(
+                        Arc::new(sampler),
+                        sampler_config,
+                        thread_token,
+                        Arc::clone(&sampler_worker_health),
+                        Arc::new(MetricsOutboxMetrics),
+                    )
+                    .await;
+                    Ok(())
+                },
+            ))
+        }));
+    let sampler_name = primitives::ProbeName::parse(crate::readiness::OUTBOX_SAMPLER)
         .context("build settingsonly sampler probe name")?;
     output.probes.push((
         sampler_name.clone(),
@@ -482,27 +491,29 @@ fn wire_outbox_maintenance(
 
     let sweeper_health = Arc::new(WorkerHealth::starting());
     let sweeper_worker_health = Arc::clone(&sweeper_health);
-    output.workers.push(Box::new(move |token| {
-        DynManagedResource::new_box(spawn_on_dedicated_runtime(
-            "settingsonly-outbox-sweeper",
-            token,
-            Arc::clone(&sweeper_worker_health),
-            EVENT_WORKER_SHUTDOWN_TIMEOUT,
-            move |thread_token| async move {
-                sweeper_loop(
-                    Arc::new(sweeper),
-                    sweeper_config,
-                    Arc::new(crate::SystemClock),
-                    thread_token,
-                    Arc::clone(&sweeper_worker_health),
-                    RetentionTarget::OutboxPublished,
-                )
-                .await;
-                Ok(())
-            },
-        ))
-    }));
-    let sweeper_name = primitives::ProbeName::parse("settingsonly_outbox_sweeper")
+    output
+        .workers
+        .push(bootstrap::WorkerSpec::phase_one(move |token| {
+            DynManagedResource::new_box(spawn_on_dedicated_runtime(
+                "settingsonly-outbox-sweeper",
+                token,
+                Arc::clone(&sweeper_worker_health),
+                EVENT_WORKER_SHUTDOWN_TIMEOUT,
+                move |thread_token| async move {
+                    sweeper_loop(
+                        Arc::new(sweeper),
+                        sweeper_config,
+                        Arc::new(crate::SystemClock),
+                        thread_token,
+                        Arc::clone(&sweeper_worker_health),
+                        RetentionTarget::OutboxPublished,
+                    )
+                    .await;
+                    Ok(())
+                },
+            ))
+        }));
+    let sweeper_name = primitives::ProbeName::parse(crate::readiness::OUTBOX_SWEEPER)
         .context("build settingsonly sweeper probe name")?;
     output.probes.push((
         sweeper_name.clone(),
@@ -635,17 +646,17 @@ mod tests {
         };
         let outputs = assemble_role_outputs(
             DomainModuleResult {
-                probes: vec![probe("settingsonly_outbox_sampler")?],
+                probes: vec![probe(crate::readiness::OUTBOX_SAMPLER)?],
                 ..Default::default()
             },
             DomainModuleResult {
-                probes: vec![probe("outbox_relay_settings")?],
+                probes: vec![probe(crate::readiness::OUTBOX_RELAY)?],
                 ..Default::default()
             },
             DomainModuleResult {
                 probes: vec![
-                    probe("event_consumer_settings_config_version_changed_v1_settings")?,
-                    probe("settingsonly_inbox_sweeper")?,
+                    probe(crate::readiness::EVENT_CONSUMER)?,
+                    probe(crate::readiness::INBOX_SWEEPER)?,
                 ],
                 ..Default::default()
             },
@@ -655,7 +666,7 @@ mod tests {
         assert_eq!(outputs.event_subscriber.probes.len(), 2);
         assert_eq!(
             outputs.event_publisher.probes[0].0.as_str(),
-            "outbox_relay_settings"
+            crate::readiness::OUTBOX_RELAY
         );
         assert!(
             outputs.event_subscriber.probes[0]

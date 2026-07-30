@@ -20,10 +20,10 @@ const DLX_LIFECYCLE_WORKER_NAME: &str = "settingsonly-dlx-lifecycle";
 const DLX_ARCHIVE_READINESS_WORKER_NAME: &str = "settingsonly-dlx-archive-readiness";
 const DLX_ARCHIVE_KEY_READINESS_WORKER_NAME: &str = "settingsonly-dlx-archive-key-readiness";
 const DLX_HOT_KEY_READINESS_WORKER_NAME: &str = "settingsonly-dlx-hot-key-readiness";
-const DLX_LIFECYCLE_PROBE: &str = "settingsonly_dlx_lifecycle";
-const DLX_ARCHIVE_READINESS_PROBE: &str = "settingsonly_dlx_archive_ready";
-const DLX_ARCHIVE_KEY_READINESS_PROBE: &str = "settingsonly_dlx_archive_key_ready";
-const DLX_HOT_KEY_READINESS_PROBE: &str = "settingsonly_dlx_hot_key_ready";
+const DLX_LIFECYCLE_PROBE: &str = crate::readiness::DLX_LIFECYCLE;
+const DLX_ARCHIVE_READINESS_PROBE: &str = crate::readiness::DLX_ARCHIVE;
+const DLX_ARCHIVE_KEY_READINESS_PROBE: &str = crate::readiness::DLX_ARCHIVE_KEY;
+const DLX_HOT_KEY_READINESS_PROBE: &str = crate::readiness::DLX_HOT_KEY;
 const DLX_ARCHIVE_KEY_CANARY_TENANT: &str = "00000000-0000-4000-8000-000000001836";
 const DLX_ARCHIVE_KEY_CANARY_PLAINTEXT: &[u8] = b"settingsonly-dlx-archive-readiness-v1";
 
@@ -168,7 +168,7 @@ fn lifecycle_worker(
     >,
     health: Arc<WorkerHealth>,
 ) -> WorkerSpec {
-    Box::new(move |token| {
+    WorkerSpec::phase_one(move |token| {
         let build_failure_health = Arc::clone(&health);
         DynManagedResource::new_box(spawn_on_dedicated_runtime_with_build_failure(
             DLX_LIFECYCLE_WORKER_NAME,
@@ -311,7 +311,7 @@ fn key_readiness_worker(
     health: Arc<WorkerHealth>,
 ) -> anyhow::Result<WorkerSpec> {
     let aad = key_canary_aad(spec.aad_scope)?;
-    Ok(Box::new(move |token| {
+    Ok(WorkerSpec::phase_one(move |token| {
         DynManagedResource::new_box(spawn_on_dedicated_runtime_with_build_failure(
             spec.worker_name,
             token,
@@ -442,7 +442,7 @@ fn archive_readiness_worker(
     health: Arc<WorkerHealth>,
     readiness_interval: Duration,
 ) -> WorkerSpec {
-    Box::new(move |token| {
+    WorkerSpec::phase_one(move |token| {
         let build_failure_health = Arc::clone(&health);
         DynManagedResource::new_box(spawn_on_dedicated_runtime_with_build_failure(
             DLX_ARCHIVE_READINESS_WORKER_NAME,

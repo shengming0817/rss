@@ -5304,13 +5304,13 @@ async fn localtx_audit_backend_profile_unsafe_settlements() -> TestResult {
 /// 唯一 event_id 法——每次运行生成新 UUID key，跨轮次无需清理旧数据，且可重复安全运行。
 /// 验证三个语义断言：
 /// 1. 同组同 key 首见 → Fresh；
-/// 2. 同组同 key 再见 → Duplicate（幂等短路）；
+/// 2. 同组同 key 的 active claim 再见 → InProgress（保留 broker 投递）；
 /// 3. 不同组同 key → Fresh（去重按组隔离，两组独立 PK）。
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::unwrap_used)]
 // reason: 集成测试 happy-path —— uuid v4 生成不失败、测试专用固定组名非空、IdemKey 非空 parse 不失败；
 // 函数级 item-level carve-out（error-handling.md §Carve-out）。
-async fn inbox_receipts_claims_then_duplicates_and_scopes_by_group() -> TestResult {
+async fn inbox_receipts_active_claim_is_in_progress_and_scopes_by_group() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
 
@@ -5330,12 +5330,12 @@ async fn inbox_receipts_claims_then_duplicates_and_scopes_by_group() -> TestResu
         "首次 claim 应返回 Fresh"
     );
 
-    // 断言 2：同组同 key 再见 → Duplicate（claimed_at 仍在 TTL 内，DO UPDATE WHERE false）。
+    // 断言 2：同组同 key 的 active claim 再见 → InProgress（不得伪装 done 或 backend transient）。
     let lease_a2 = LeaseToken::mint();
     assert_eq!(
         inbox.try_claim(&ctx_a, &key, &lease_a2).await?,
-        SeenState::Duplicate,
-        "同 key 再见应返回 Duplicate"
+        SeenState::InProgress,
+        "同 key active claim 应返回 InProgress"
     );
 
     // 断言 3：不同消费者组同 key → Fresh（PK = (event_id, consumer_group)，组间去重独立）。
@@ -10987,8 +10987,8 @@ async fn conf_try_claim(
         .await
         .map(|seen| match seen {
             SeenState::Fresh => eventconf::InboxSeen::Fresh,
+            SeenState::InProgress => eventconf::InboxSeen::InProgress,
             SeenState::Duplicate => eventconf::InboxSeen::Duplicate,
-            _ => eventconf::InboxSeen::Duplicate,
         })
         .map_err(|e| format!("{e:?}"))
 }

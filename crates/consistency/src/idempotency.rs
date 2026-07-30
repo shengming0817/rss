@@ -136,11 +136,18 @@ impl ConsumerGroup {
 
 /// 首见判定结果（穷尽闭值集）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum SeenState {
     /// 首次见到此 key（应执行副作用）；本消费者持有以传入 [`LeaseToken`] 标记的 claim。
     Fresh,
-    /// 已见过（应跳过，幂等短路）：claim 仍被他人持有或已 `done`。
+    /// Another consumer currently owns an active claim lease.
+    ///
+    /// This is expected contention, not a backend failure. The consumer must retain the broker
+    /// delivery, wait according to the provider-bound lease policy, then requeue it without
+    /// invoking the handler.
+    InProgress,
+    /// 已持久完成（应跳过，幂等短路）。
+    ///
+    /// 活跃 `claimed` 不属于 Duplicate：store 必须返回 [`Self::InProgress`]，使 broker 保留并重投消息。
     Duplicate,
 }
 
@@ -149,6 +156,7 @@ impl SeenState {
     pub fn as_label(self) -> &'static str {
         match self {
             SeenState::Fresh => "fresh",
+            SeenState::InProgress => "in_progress",
             SeenState::Duplicate => "duplicate",
         }
     }
@@ -311,9 +319,12 @@ mod tests {
         ) -> Result<SeenState, EngineError> {
             let mut map = self.state.lock().unwrap_or_else(|e| e.into_inner());
             // reason: in-mem 操作恒成功，unwrap_or_else 处理 poisoned lock 后继续。
-            if map.contains_key(key.as_str()) {
-                // 已 claimed/done（无 TTL 重捞）→ Duplicate。
-                Ok(SeenState::Duplicate)
+            if let Some(entry) = map.get(key.as_str()) {
+                if entry.done {
+                    Ok(SeenState::Duplicate)
+                } else {
+                    Ok(SeenState::InProgress)
+                }
             } else {
                 map.insert(
                     key.as_str().to_string(),
@@ -383,12 +394,17 @@ mod tests {
     fn seen_state_labels_are_stable_and_distinct() {
         let cases = [
             (SeenState::Fresh, "fresh"),
+            (SeenState::InProgress, "in_progress"),
             (SeenState::Duplicate, "duplicate"),
         ];
         for (state, expected) in cases {
             assert_eq!(state.as_label(), expected);
         }
         assert_ne!(SeenState::Fresh.as_label(), SeenState::Duplicate.as_label());
+        assert_ne!(
+            SeenState::InProgress.as_label(),
+            SeenState::Duplicate.as_label()
+        );
     }
 
     #[test]
@@ -578,7 +594,7 @@ mod tests {
         );
     }
 
-    /// release token CAS：他人 token release 为 no-op（不误删，仍 Duplicate）。
+    /// release token CAS：他人 token release 为 no-op（不误删，active claim 仍 in-progress）。
     #[tokio::test]
     #[allow(clippy::unwrap_used)]
     // reason: 状态机断言测试——store 方法在 in-mem 实现中恒 Ok，item-level carve-out。
@@ -592,10 +608,10 @@ mod tests {
         );
         // stale token release → no-op
         store.release(ctx(), &key, &tok()).await.unwrap();
-        // claim 仍在（未被误删）→ Duplicate
+        // claim 仍在（未被误删）→ typed in-progress
         assert_eq!(
             store.try_claim(ctx(), &key, &tok()).await.unwrap(),
-            SeenState::Duplicate
+            SeenState::InProgress
         );
     }
 
@@ -631,10 +647,10 @@ mod tests {
             store.try_claim(ctx(), &k("evt-B"), &t).await.unwrap(),
             SeenState::Fresh
         );
-        // C：still claimed → Duplicate
+        // C：still claimed → typed in-progress，不得伪装 durable done 或后端故障。
         assert_eq!(
             store.try_claim(ctx(), &k("evt-C"), &t).await.unwrap(),
-            SeenState::Duplicate
+            SeenState::InProgress
         );
     }
 

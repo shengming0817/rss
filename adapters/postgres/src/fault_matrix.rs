@@ -595,6 +595,7 @@ impl PgFaultMatrixHarness {
         let lease = LeaseToken::mint();
         match store.try_claim(&ctx, &key, &lease).await? {
             SeenState::Duplicate => Ok(FaultMatrixConsumerDelivery::Duplicate),
+            SeenState::InProgress => bail!("session-created delivery claim is already in progress"),
             SeenState::Fresh => {
                 let hasher = audit::ports::AuditChainHasher::new(
                     TestMac,

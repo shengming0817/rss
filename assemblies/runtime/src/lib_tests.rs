@@ -471,7 +471,11 @@ fn worker_names(workers: Vec<bootstrap::WorkerSpec>) -> Vec<String> {
     let token = CancellationToken::new();
     workers
         .into_iter()
-        .map(|worker| worker(token.clone()).name().to_owned())
+        .map(|worker| match worker {
+            bootstrap::WorkerSpec::PhaseOne(make) | bootstrap::WorkerSpec::Deferred(make) => {
+                make(token.clone()).name().to_owned()
+            }
+        })
         .collect()
 }
 
@@ -488,7 +492,7 @@ fn harness_worker(name: &'static str) -> bootstrap::WorkerSpec {
 }
 
 fn harness_worker_owned(name: String) -> bootstrap::WorkerSpec {
-    Box::new(move |_token| harness_resource_owned(name.clone()))
+    bootstrap::WorkerSpec::phase_one(move |_token| harness_resource_owned(name.clone()))
 }
 
 fn phase_order_transcript_for_harness() -> String {

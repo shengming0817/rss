@@ -105,7 +105,7 @@ fn failing_resource(
 
 fn worker(name: &'static str, transcript: &Transcript) -> bootstrap::WorkerSpec {
     let transcript = transcript.clone();
-    Box::new(move |token: CancellationToken| {
+    bootstrap::WorkerSpec::deferred(move |token: CancellationToken| {
         assert!(
             !token.is_cancelled(),
             "worker token must be live at registration"
@@ -471,6 +471,151 @@ async fn executor_drains_in_exact_dependency_lifo_order() {
             "trace",
         ]
     );
+}
+
+#[tokio::test]
+async fn module_worker_cancellation_waits_for_listener_lifo_drain() {
+    let transcript = Transcript::new();
+    let listener_started = Arc::new(Notify::new());
+    let release_listener = Arc::new(Notify::new());
+    let worker_token = Arc::new(Mutex::new(None::<CancellationToken>));
+    let worker_token_capture = Arc::clone(&worker_token);
+    let worker_cancelled_at_shutdown = Arc::new(AtomicBool::new(false));
+    let worker_shutdowns = Arc::new(AtomicUsize::new(0));
+    let worker_shutdown_done = Arc::new(Notify::new());
+    let worker_cancelled_capture = Arc::clone(&worker_cancelled_at_shutdown);
+    let worker_shutdowns_capture = Arc::clone(&worker_shutdowns);
+    let worker_done_capture = Arc::clone(&worker_shutdown_done);
+
+    let mut stack = bootstrap::shutdown::ShutdownStack::new(CancellationToken::new());
+    register_lifecycle_outputs(
+        &mut stack,
+        None,
+        lifecycle_batches(
+            module(
+                Vec::new(),
+                vec![bootstrap::WorkerSpec::deferred(move |token| {
+                    *worker_token_capture.lock().expect("worker token capture") =
+                        Some(token.clone());
+                    DynManagedResource::new_box(CancellationObservedResource {
+                        token,
+                        shutdowns: worker_shutdowns_capture,
+                        cancelled_at_shutdown: worker_cancelled_capture,
+                        shutdown_done: worker_done_capture,
+                    })
+                })],
+            ),
+            DomainModuleResult::default(),
+        ),
+    )
+    .expect("register module worker");
+    stack.register_with_token({
+        let transcript = transcript.clone();
+        let listener_started = Arc::clone(&listener_started);
+        let release_listener = Arc::clone(&release_listener);
+        move |_token| {
+            gated_resource(
+                "listener",
+                &transcript,
+                Some(listener_started),
+                Some(release_listener),
+                None,
+            )
+        }
+    });
+
+    let drain = tokio::spawn(async move { stack.shutdown().await });
+    listener_started.notified().await;
+    let module_token = worker_token
+        .lock()
+        .expect("worker token read")
+        .clone()
+        .expect("module worker received a token");
+    assert!(
+        !module_token.is_cancelled(),
+        "module worker admission must stay live until listeners finish their LIFO drain"
+    );
+
+    release_listener.notify_one();
+    let failures = drain.await.expect("drain task");
+    assert!(failures.is_empty());
+    assert!(worker_cancelled_at_shutdown.load(Ordering::SeqCst));
+    assert_eq!(worker_shutdowns.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn phase_one_module_worker_cancels_before_listener_lifo_drain() {
+    let transcript = Transcript::new();
+    let listener_started = Arc::new(Notify::new());
+    let release_listener = Arc::new(Notify::new());
+    let worker_token = Arc::new(Mutex::new(None::<CancellationToken>));
+    let worker_token_capture = Arc::clone(&worker_token);
+    let worker_cancelled_at_shutdown = Arc::new(AtomicBool::new(false));
+    let worker_shutdowns = Arc::new(AtomicUsize::new(0));
+
+    let mut stack = bootstrap::shutdown::ShutdownStack::new(CancellationToken::new());
+    register_lifecycle_outputs(
+        &mut stack,
+        None,
+        lifecycle_batches(
+            module(
+                Vec::new(),
+                vec![bootstrap::WorkerSpec::phase_one({
+                    let shutdowns = Arc::clone(&worker_shutdowns);
+                    let cancelled_at_shutdown = Arc::clone(&worker_cancelled_at_shutdown);
+                    move |token| {
+                        *worker_token_capture.lock().expect("worker token capture") =
+                            Some(token.clone());
+                        DynManagedResource::new_box(CancellationObservedResource {
+                            token,
+                            shutdowns,
+                            cancelled_at_shutdown,
+                            shutdown_done: Arc::new(Notify::new()),
+                        })
+                    }
+                })],
+            ),
+            DomainModuleResult::default(),
+        ),
+    )
+    .expect("register phase-one module worker");
+    stack.register_with_token({
+        let transcript = transcript.clone();
+        let listener_started = Arc::clone(&listener_started);
+        let release_listener = Arc::clone(&release_listener);
+        move |_token| {
+            gated_resource(
+                "listener",
+                &transcript,
+                Some(listener_started),
+                Some(release_listener),
+                None,
+            )
+        }
+    });
+
+    let drain = tokio::spawn(async move { stack.shutdown().await });
+    listener_started.notified().await;
+    let module_token = worker_token
+        .lock()
+        .expect("worker token read")
+        .clone()
+        .expect("module worker received a token");
+    assert!(
+        module_token.is_cancelled(),
+        "phase-one worker must stop admission before listener LIFO drain completes"
+    );
+    assert_eq!(
+        worker_shutdowns.load(Ordering::SeqCst),
+        0,
+        "phase-one cancel must not bypass LIFO join ordering"
+    );
+
+    release_listener.notify_one();
+    let failures = drain.await.expect("drain task");
+    assert!(failures.is_empty());
+    assert!(worker_cancelled_at_shutdown.load(Ordering::SeqCst));
+    assert_eq!(worker_shutdowns.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]

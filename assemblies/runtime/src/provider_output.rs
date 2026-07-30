@@ -35,8 +35,9 @@ pub(crate) fn build_pg_runtime_module(
     period: Duration,
 ) -> DomainModuleResult {
     let (resources, sampler_factory) = owner.into_runtime_parts(period);
-    let readiness_sampler: WorkerSpec =
-        Box::new(move |token| DynManagedResource::new_box(sampler_factory.spawn(token)));
+    let readiness_sampler = WorkerSpec::phase_one(move |token| {
+        DynManagedResource::new_box(sampler_factory.spawn(token))
+    });
     DomainModuleResult {
         resources,
         workers: vec![readiness_sampler],
@@ -60,7 +61,7 @@ pub(crate) async fn identity_signer_module(
         .context("parse identity signer readiness probe")?;
     let worker_signer = Arc::clone(&signer);
     let worker_health = Arc::clone(&health);
-    let worker: WorkerSpec = Box::new(move |token| {
+    let worker = WorkerSpec::phase_one(move |token| {
         DynManagedResource::new_box(IdentitySignerReadinessWorker::spawn(
             token,
             worker_signer,
@@ -1571,11 +1572,11 @@ mod tests {
     }
 
     fn worker(name: &'static str) -> WorkerSpec {
-        Box::new(move |_| resource(name))
+        WorkerSpec::phase_one(move |_| resource(name))
     }
 
     fn counting_worker(name: &'static str, starts: Arc<AtomicUsize>) -> WorkerSpec {
-        Box::new(move |_| {
+        WorkerSpec::phase_one(move |_| {
             starts.fetch_add(1, Ordering::SeqCst);
             resource(name)
         })
@@ -1786,7 +1787,11 @@ mod tests {
         module
             .workers
             .into_iter()
-            .map(|worker| worker(token.clone()).name().to_owned())
+            .map(|worker| match worker {
+                WorkerSpec::PhaseOne(make) | WorkerSpec::Deferred(make) => {
+                    make(token.clone()).name().to_owned()
+                }
+            })
             .collect()
     }
 

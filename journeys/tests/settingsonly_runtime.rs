@@ -4,8 +4,8 @@
 //! the server in a child process lets the journey deliver a real SIGTERM without risking Cargo's
 //! test harness, while the child still enters the production `runtimeexec::launch` funnel through
 //! the settingsonly crate's narrow, default-off test-support facade. This fixture replaces provider
-//! construction and is therefore not standalone binary/image acceptance; executable artifacts are
-//! exercised by `hack/settingsonly-artifact-acceptance.sh`.
+//! construction and is therefore not standalone binary/image evidence; the production artifact
+//! boundary is owned by the dedicated exact-image journey.
 
 use std::fs::{self, File};
 use std::net::SocketAddr;

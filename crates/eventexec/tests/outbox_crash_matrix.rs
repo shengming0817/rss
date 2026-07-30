@@ -327,6 +327,8 @@ fn relay_config() -> RelayConfig {
     RelayConfig::new(Duration::from_millis(100), 10).expect("valid relay config")
 }
 
+#[allow(clippy::expect_used)]
+// reason: synthetic crash fixture reaches only Absent then Done; active claim would invalidate the fixture itself.
 fn consume_deliveries_once(deliveries: &[Delivery]) -> usize {
     let mut state = InboxState::Absent;
     let mut side_effects = 0;
@@ -335,6 +337,7 @@ fn consume_deliveries_once(deliveries: &[Delivery]) -> usize {
         assert_eq!(delivery.message_id, MESSAGE_ID);
         let lease = LeaseToken::mint();
         let (seen, claimed) = state.try_claim(lease.clone());
+        let seen = seen.expect("delivery after terminal commit must be classifiable");
         if seen == SeenState::Fresh {
             side_effects += 1;
             let (outcome, committed) = claimed.commit(&lease);

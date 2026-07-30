@@ -1039,6 +1039,7 @@ async fn assert_outbox_sweeper(
 #[non_exhaustive]
 pub enum InboxSeen {
     Fresh,
+    InProgress,
     Duplicate,
 }
 
@@ -1077,14 +1078,19 @@ pub async fn assert_inbox_conformance(
     .map_err(|e| provider("inbox.try_claim.first", e))?;
     expect_eq("inbox.first.fresh", &case.ids, first, InboxSeen::Fresh)?;
 
-    let dup = (case.try_claim)(InboxLeaseArgs {
+    let in_progress = (case.try_claim)(InboxLeaseArgs {
         inbox_key: case.ids.inbox_key.clone(),
         consumer_group: case.ids.consumer_group.clone(),
         lease_alias: lease_b.clone(),
     })
     .await
-    .map_err(|e| provider("inbox.try_claim.duplicate", e))?;
-    expect_eq("inbox.duplicate", &case.ids, dup, InboxSeen::Duplicate)?;
+    .map_err(|e| provider("inbox.try_claim.in-progress", e))?;
+    expect_eq(
+        "inbox.in-progress",
+        &case.ids,
+        in_progress,
+        InboxSeen::InProgress,
+    )?;
 
     let other_group = (case.try_claim)(InboxLeaseArgs {
         inbox_key: case.ids.inbox_key.clone(),

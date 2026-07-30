@@ -19,10 +19,6 @@ path = "src/lib.rs"
 name = "settingsonly-server"
 path = "src/main.rs"
 
-[[test]]
-name = "settingsonly_artifact_acceptance"
-path = "tests/artifact_acceptance.rs"
-
 [features]
 default = []
 integration = ["testkit/containers"]

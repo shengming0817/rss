@@ -20,8 +20,8 @@ use std::future::Future;
 use std::time::Duration;
 
 use anyhow::Context as _;
-use bootstrap::DomainModuleResult;
 use bootstrap::shutdown::ShutdownStack;
+use bootstrap::{DomainModuleResult, WorkerSpec};
 use diport::DynManagedResource;
 use tokio::runtime::Handle;
 use tokio::task::JoinHandle;
@@ -743,7 +743,10 @@ fn register_module_output(
         stack.register_detached(resource);
     }
     for worker in workers {
-        stack.register_with_token(worker);
+        match worker {
+            WorkerSpec::PhaseOne(worker) => stack.register_with_token(worker),
+            WorkerSpec::Deferred(worker) => stack.register_deferred_with_token(worker),
+        }
     }
     anyhow::ensure!(
         probes.is_empty(),

@@ -1,6 +1,6 @@
 # Integration capability shards
 
-> #1730：真集成 lane 按 capability 拆成六个 target-level shard。分类、资源和串并行调度的单一事实源是
+> #1730：真集成 lane 按 capability 拆成七个 target-level shard。分类、资源和串并行调度的单一事实源是
 > `xtask/src/integration_shards.rs` 的 catalog；本文只解释其运维语义。
 
 ## 入口与闭集
@@ -16,8 +16,9 @@ cargo xtask ci run --job integration/<shard>[/<partition>]
 [`202607111501-1731-nextest-test-evidence.md`](./202607111501-1731-nextest-test-evidence.md)。
 
 `<shard>` 只能是 `postgres-domain`、`event-transport`、`runtime-http-auth`、
-`consistency-fault`、`cdc-projection-saga`、`object-storage`。缺失、重复、未知 shard、额外尾参、自由 filter 和 `--all`
-均 fail-closed。旧 `cargo xtask integration` 与 `cargo xtask ci-integration` 均已删除，不提供 alias 或兼容 shim。
+`consistency-fault`、`cdc-projection-saga`、`object-storage`、`production-runtime`。缺失、重复、未知 shard、
+额外尾参、自由 filter 和 `--all` 均 fail-closed。旧 `cargo xtask integration` 与
+`cargo xtask ci-integration` 均已删除，不提供 alias 或兼容 shim。
 
 `ci run` 不提供缺工具宽限；缺少 nextest、Docker 或目标 shard 资源时 fail-closed。
 
@@ -34,6 +35,7 @@ serial，再跑 parallel。`.config/nextest.toml` 不承载 integration shard �
 | `consistency-fault` | Postgres、Redis、AMQP | `redis-adapter:integration_claimer`、`journeys-fault-matrix:consistency_fault_matrix_journey` | `redis-adapter:redis` (lib)、`testkit:provider_catalog_trybuild` |
 | `cdc-projection-saga` | Postgres | `runtime:settings_config_publish_durable_e2e` | `journeys:saga_projection_deps_journey`、`journeys:settings_config_publish_journey` |
 | `object-storage` | MinIO / S3-compatible object storage | `s3:integration_object_store` | `s3:s3` (lib)、`s3:dlx_archive_store` |
+| `production-runtime` | Docker | `journeys:two_replica_runtime`、`journeys:settingsonly_production_artifact` | `journeys:production_runtime`、`journeys:runtime_inventory` |
 
 表中未标 `(lib)` 的项均为 Cargo test target。selector 只能由 typed execution unit 渲染为精确的
 `package(=...) and binary(=...) and kind(=...)`；环境变量或 CLI 输入不会进入 selector。
@@ -68,9 +70,15 @@ lane 的九个 package：`postgres`、`redis-adapter`、`amqp`、`mqtt`、`journ
 `s3:integration_object_store` 由 `object-storage` shard 强制执行；测试默认自建 MinIO，并在每轮创建启用
 versioning、COMPLIANCE Object Lock 与有界 lifecycle 的独立 bucket，不存在 standalone 旁路。
 
+`journeys:settingsonly_production_artifact` 对应 typed execution unit
+`SettingsOnlyProductionArtifact`，只在 `ProductionRuntime` 的 Serial batch 运行；四条 exact case 及其 artifact
+selector 的闭合映射由代码 gate 证明，本文不承担 enforcement。该 shard 继续使用既有
+`integration/production-runtime` 的 900 秒 SLO 预算和 develop/nightly 路由；本次 carrier 替换不新增 workflow、
+scheduler 或 CI 路径。
+
 ## 本地运行与故障定位
 
-精确复现 GitHub 八行 matrix：
+精确复现 GitHub 九行 matrix：
 
 ```bash
 cargo xtask ci run --job integration/postgres-domain
@@ -81,6 +89,7 @@ cargo xtask ci run --job integration/runtime-http-auth/2-of-2
 cargo xtask ci run --job integration/consistency-fault
 cargo xtask ci run --job integration/cdc-projection-saga
 cargo xtask ci run --job integration/object-storage
+cargo xtask ci run --job integration/production-runtime
 ```
 
 定位顺序：

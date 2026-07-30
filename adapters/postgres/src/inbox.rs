@@ -10,8 +10,9 @@
 //!   \+ `RETURNING`：
 //!   - RETURNING 行存在（`Some`）→ [`SeenState::Fresh`]：首次插入，或 TTL 过期的 claimed 行被新 token 接管
 //!     （stale reclaim，修复 crash-after-claim 时 key 永久 Duplicate 的丢消息风险，#1213）。
-//!   - RETURNING 无行（`None`）→ [`SeenState::Duplicate`]：他人持有有效 claim（lease 仍在 TTL 内）或已 done
-//!     （DO UPDATE WHERE false，不修改行，幂等短路）。
+//!   - RETURNING 无行（`None`）后读冲突行：已 done → [`SeenState::Duplicate`]；他人持有
+//!     有效 claim（lease 仍在 TTL 内）→ [`SeenState::InProgress`]，由 consumer lease-aware 延迟 Requeue，
+//!     不得 Ack 丢失未完成的处理，也不得伪装成 backend transient。
 //! - **`extend`（续租）**：刷新 `claimed_at`（CAS：lease_token + status='claimed'）；
 //!   `rows_affected == 1` → [`LeaseOutcome::Held`]，否则 `Lost`（token 不符或已 done/absent）。
 //! - **`commit`（claimed→done）**：CAS；`rows_affected == 1` → `Held`（保留窗口内去重），`0` → `Lost`（hard-fence）。
@@ -210,7 +211,7 @@ impl ReceiptFields {
         }
     }
 
-    fn matches_identity(&self, row: &(String, String, String, String, String)) -> bool {
+    fn matches_identity(&self, row: &(String, String, String, String, String, String)) -> bool {
         row.0 == self.domain
             && row.1 == self.topic
             && row.2 == self.contract_id
@@ -288,7 +289,7 @@ impl InboxStore for PgInboxStore {
     /// claim-or-reclaim-or-skip：INSERT + CAS TTL 重捞。
     ///
     /// RETURNING 行存在 → `Fresh`（首次插入或 TTL 过期 claimed 行被新 token 接管）；
-    /// 无行 → `Duplicate`（他人持有有效 claim 或已 done，幂等短路）。
+    /// 无行后读冲突状态：已 done → `Duplicate`；active claimed → `InProgress`（延迟 Requeue）。
     ///
     /// 后端暂不可用 → `EngineErrorKind::Transient`；原始 sqlx 错误不进 Display（PII 边界）。
     async fn try_claim(
@@ -353,10 +354,10 @@ impl InboxStore for PgInboxStore {
                             return Ok(SeenState::Fresh);
                         }
 
-                        let existing: Option<(String, String, String, String, String)> =
+                        let existing: Option<(String, String, String, String, String, String)> =
                             sqlx::query_as(
                                 r#"
-                                SELECT domain, topic, contract_id, contract_version, schema_hash
+                                SELECT domain, topic, contract_id, contract_version, schema_hash, status
                                 FROM inbox_receipts
                                 WHERE tenant_id = $1::uuid
                                   AND event_id = $2
@@ -377,7 +378,12 @@ impl InboxStore for PgInboxStore {
                             return Err(EngineError::new(EngineErrorKind::Invariant));
                         }
 
-                        Ok(SeenState::Duplicate)
+                        match existing.as_ref().map(|row| row.5.as_str()) {
+                            Some("done") => Ok(SeenState::Duplicate),
+                            Some("claimed") => Ok(SeenState::InProgress),
+                            None => Err(EngineError::new(EngineErrorKind::Transient)),
+                            Some(_) => Err(EngineError::new(EngineErrorKind::Invariant)),
+                        }
                     })
                 },
                 |e| inbox_db_error("inbox_try_claim_tx", e),
@@ -743,7 +749,7 @@ mod tests {
             Ok(())
         }
 
-        /// active / done Duplicate 均不得改写现有 receipt 行。
+        /// active claim 返回 InProgress、done 返回 Duplicate，且两条冲突路径均不得改写 receipt。
         #[tokio::test(flavor = "multi_thread")]
         #[allow(clippy::unwrap_used)]
         // reason: 集成测试断言 fail-loud；item-level carve-out（error-handling.md §Carve-out）。
@@ -765,12 +771,12 @@ mod tests {
             let active_before = receipt_snapshot(&store, &ctx, &active_key).await?;
             assert_eq!(
                 inbox.try_claim(&ctx, &active_key, &lease()).await.unwrap(),
-                SeenState::Duplicate
+                SeenState::InProgress
             );
             let active_after = receipt_snapshot(&store, &ctx, &active_key).await?;
             assert_eq!(
                 active_after, active_before,
-                "active Duplicate must not rewrite the existing receipt row"
+                "active conflict must not rewrite the existing receipt row"
             );
 
             let done_key = uk("pg-done-duplicate-preserve");
@@ -861,27 +867,30 @@ mod tests {
                 tasks.push(tokio::spawn(async move {
                     let lease = lease();
                     barrier.wait().await;
-                    let seen = store.inbox().try_claim(&ctx, &key, &lease).await?;
-                    Ok::<_, consistency::EngineError>((seen, lease))
+                    let seen = store.inbox().try_claim(&ctx, &key, &lease).await;
+                    (seen, lease)
                 }));
             }
 
             let mut fresh = Vec::new();
-            let mut duplicates = 0usize;
+            let mut active_conflicts = 0usize;
             for task in tasks {
-                let (seen, lease) = task.await??;
+                let (seen, lease) = task.await?;
                 match seen {
-                    SeenState::Fresh => fresh.push(lease),
-                    SeenState::Duplicate => duplicates += 1,
-                    _ => return Err(format!("unexpected SeenState: {seen:?}").into()),
+                    Ok(SeenState::Fresh) => fresh.push(lease),
+                    Ok(SeenState::InProgress) => active_conflicts += 1,
+                    Ok(SeenState::Duplicate) => {
+                        return Err("active conflict must not report durable Duplicate".into());
+                    }
+                    Err(error) => return Err(error.into()),
                 }
             }
 
             assert_eq!(fresh.len(), 1, "only one concurrent claimer may win Fresh");
             assert_eq!(
-                duplicates,
+                active_conflicts,
                 CLAIMERS - 1,
-                "all losing concurrent claimers must observe Duplicate"
+                "all losing concurrent claimers must observe InProgress"
             );
             assert_eq!(receipt_count(&store, &ctx, &key).await?, 1);
             let row = receipt_snapshot(&store, &ctx, &key).await?;
@@ -936,27 +945,30 @@ mod tests {
                 tasks.push(tokio::spawn(async move {
                     let lease = lease();
                     barrier.wait().await;
-                    let seen = store.inbox().try_claim(&ctx, &key, &lease).await?;
-                    Ok::<_, consistency::EngineError>((seen, lease))
+                    let seen = store.inbox().try_claim(&ctx, &key, &lease).await;
+                    (seen, lease)
                 }));
             }
 
             let mut fresh = Vec::new();
-            let mut duplicates = 0usize;
+            let mut active_conflicts = 0usize;
             for task in tasks {
-                let (seen, lease) = task.await??;
+                let (seen, lease) = task.await?;
                 match seen {
-                    SeenState::Fresh => fresh.push(lease),
-                    SeenState::Duplicate => duplicates += 1,
-                    _ => return Err(format!("unexpected SeenState: {seen:?}").into()),
+                    Ok(SeenState::Fresh) => fresh.push(lease),
+                    Ok(SeenState::InProgress) => active_conflicts += 1,
+                    Ok(SeenState::Duplicate) => {
+                        return Err("active conflict must not report durable Duplicate".into());
+                    }
+                    Err(error) => return Err(error.into()),
                 }
             }
 
             assert_eq!(fresh.len(), 1, "only one stale reclaim may win Fresh");
             assert_eq!(
-                duplicates,
+                active_conflicts,
                 CLAIMERS - 1,
-                "all losing stale reclaimers must observe Duplicate"
+                "all losing stale reclaimers must observe InProgress"
             );
             let winner = &fresh[0];
             let row = receipt_snapshot(&store, &ctx, &key).await?;
@@ -1219,10 +1231,10 @@ mod tests {
             // 错误 token release → no-op（不误删他人 claim）。
             inbox.release(&ctx, &key_r, &lease_wrong2).await.unwrap();
 
-            // 行仍被 mine2 持有 → Duplicate（DO UPDATE WHERE claimed_at 仍在 TTL 内）。
+            // 行仍被 mine2 持有 → InProgress（DO UPDATE WHERE claimed_at 仍在 TTL 内）。
             assert_eq!(
                 inbox.try_claim(&ctx, &key_r, &lease()).await.unwrap(),
-                SeenState::Duplicate
+                SeenState::InProgress
             );
             Ok(())
         }

@@ -21,7 +21,7 @@ use eventexec::MAX_REDELIVERY;
 use eventexec::consumer::{
     ConsumerMeta, LeaseConfig, ReceiptContextBuildError, build_consume_span, dead_letter,
     emit_lease_lost, envelope_header_error_reason, log_lease_lost, receipt_context_error_reason,
-    record_dead_letter_skip, renewal_loop, settle,
+    record_dead_letter_skip, renewal_loop, settle, settle_claim_in_progress,
 };
 
 /// Closed ConsumerTx external-effect policies used as type-level handler capabilities.
@@ -265,6 +265,9 @@ async fn consume_one_tx<S, P, H>(
         Err(error) => {
             settle_tx_try_claim_error(meta, &msg, acker, &error).await;
         }
+        Ok(SeenState::InProgress) => {
+            settle_claim_in_progress(acker, meta, &msg, lease_cfg).await;
+        }
         Ok(SeenState::Duplicate) => {
             ack_tx_duplicate(meta, &msg, acker).await;
         }
@@ -282,9 +285,6 @@ async fn consume_one_tx<S, P, H>(
                 lease_cfg,
             )
             .await;
-        }
-        Ok(_) => {
-            requeue_tx_unknown_seen_state(meta, &msg, acker).await;
         }
     }
 }
@@ -376,21 +376,6 @@ async fn ack_tx_duplicate(
     .await;
 }
 
-async fn requeue_tx_unknown_seen_state(
-    meta: &ConsumerMeta,
-    msg: &Message,
-    acker: Option<&diport::DynAcker<'static>>,
-) {
-    log_tx_unknown_seen_state(msg);
-    settle(
-        acker,
-        diport::AckAction::Requeue,
-        meta.domain(),
-        msg.id.as_str(),
-    )
-    .await;
-}
-
 fn log_tx_parse_failed(msg: &Message) {
     tracing::warn!(
         message_id = msg.id.as_str(),
@@ -458,13 +443,6 @@ fn log_tx_duplicate(msg: &Message, meta: &ConsumerMeta) {
         contract_id = meta.contract_id(),
         topic = meta.topic(),
         "consumer-tx: duplicate message, skipping"
-    );
-}
-
-fn log_tx_unknown_seen_state(msg: &Message) {
-    tracing::warn!(
-        message_id = msg.id.as_str(),
-        "consumer-tx: unknown SeenState variant, conservatively requeued"
     );
 }
 
@@ -1105,6 +1083,17 @@ mod tests {
             })
         }
 
+        fn in_progress() -> Arc<Self> {
+            Arc::new(Self {
+                state: SeenState::InProgress,
+                claim_error: None,
+                lose_extension: false,
+                extend_started: None,
+                commits: AtomicU32::new(0),
+                extends: AtomicU32::new(0),
+            })
+        }
+
         fn claim_error(kind: EngineErrorKind) -> Arc<Self> {
             Arc::new(Self {
                 state: SeenState::Fresh,
@@ -1365,6 +1354,40 @@ mod tests {
         assert_eq!(
             *actions.lock().unwrap_or_else(|e| e.into_inner()),
             vec![AckAction::Ack]
+        );
+        assert_eq!(calls.load(Ordering::Acquire), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn tx_in_progress_delays_then_requeues_without_calling_handler() -> TestResult {
+        let actions = Arc::new(Mutex::new(Vec::new()));
+        let store = TxStore::in_progress();
+        let calls = Arc::new(AtomicU32::new(0));
+        let handler_calls = Arc::clone(&calls);
+        let handler = transactional_handler(move |_msg, _ctx, _key, _lease| {
+            let handler_calls = Arc::clone(&handler_calls);
+            Box::pin(async move {
+                handler_calls.fetch_add(1, Ordering::AcqRel);
+                ConsumerTxOutcome::Committed(TestCommitProof)
+            })
+        });
+        let started = std::time::Instant::now();
+
+        run_consumer_ackable_tx(
+            delivery_stream("evt-tx-in-progress", Arc::clone(&actions))?,
+            store,
+            noop_dlx(),
+            meta()?,
+            handler,
+            LeaseConfig::from_ttl(Duration::from_millis(15)),
+        )
+        .await;
+
+        assert!(started.elapsed() >= Duration::from_millis(5));
+        assert_eq!(
+            *actions.lock().unwrap_or_else(|e| e.into_inner()),
+            vec![AckAction::Requeue]
         );
         assert_eq!(calls.load(Ordering::Acquire), 0);
         Ok(())

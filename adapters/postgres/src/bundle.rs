@@ -727,15 +727,16 @@ impl PgRuntimeDeps {
         let mut resources = vec![DynManagedResource::new_box(PgStoreGuard::new(Arc::clone(
             &writer_store,
         )))];
-        resources.push(DynManagedResource::new_box(PgStoreGuard::new_named(
-            Arc::clone(&reader_store),
-            "postgres-tenant-reader",
-        )));
+        resources.push(DynManagedResource::new_box(
+            PgStoreGuard::new_runtime_named(Arc::clone(&reader_store), "postgres-tenant-reader"),
+        ));
         if let Some(audit_admin_store) = audit_admin_store {
-            resources.push(DynManagedResource::new_box(PgStoreGuard::new_named(
-                audit_admin_store.store_arc(),
-                "postgres-audit-admin",
-            )));
+            resources.push(DynManagedResource::new_box(
+                PgStoreGuard::new_runtime_named(
+                    audit_admin_store.store_arc(),
+                    "postgres-audit-admin",
+                ),
+            ));
         }
         (
             resources,

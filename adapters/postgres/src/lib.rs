@@ -253,7 +253,7 @@ impl ManagedResource for PgStore {
     }
 }
 
-/// `Arc<PgStore>` 的 `ManagedResource` 适配——关停末阶段 `pool.close()`。
+/// `Arc<PgStore>` 的 runtime `ManagedResource` 适配——关停末阶段同步封闭新连接获取。
 ///
 /// `Arc` 非 fundamental ⇒ 不能直接 `impl ManagedResource for Arc<PgStore>`（孤儿规则），
 /// 故用 newtype 包装绕孤儿规则。
@@ -261,11 +261,19 @@ impl ManagedResource for PgStore {
 /// # 注册顺序
 ///
 /// 经组合根 [`bootstrap::ShutdownStack::register_detached`] 注入 `ShutdownStack`；注册顺序须在
-/// listener/sampler **之前**——LIFO 下 pool 最后关（listener drain → sampler 停 → pool close，
-/// 确保 sampler 不会在已关闭的 pool 上发起 probe）。
+/// listener/sampler **之前**——LIFO 下 pool 最后封闭（listener drain → sampler 停 → pool
+/// admission fence，确保 sampler 不会在已关闭的 pool 上发起 probe）。底层 TLS transport
+/// 随 composition root 的最后一个 pool handle 一并 drop，不属于 runtime drain 的等待边界。
 pub struct PgStoreGuard {
     store: Arc<PgStore>,
     name: &'static str,
+    shutdown: PgStoreShutdown,
+}
+
+#[derive(Clone, Copy)]
+enum PgStoreShutdown {
+    RuntimeFence,
+    SetupRollback,
 }
 
 impl PgStoreGuard {
@@ -278,11 +286,44 @@ impl PgStoreGuard {
         Self {
             store,
             name: PG_STORE_NAME,
+            shutdown: PgStoreShutdown::RuntimeFence,
         }
     }
 
+    /// 构造 serving setup transaction 的 rollback owner。
+    ///
+    /// 该 canonical constructor 由 startup transaction 注册；初始化失败仍处于 live executor，
+    /// 因此必须完整等待连接 teardown 后才返回 primary error。
     pub(crate) fn new_named(store: Arc<PgStore>, name: &'static str) -> Self {
-        Self { store, name }
+        Self {
+            store,
+            name,
+            shutdown: PgStoreShutdown::SetupRollback,
+        }
+    }
+
+    /// 构造 runtime shutdown stack 的具名 pool owner，只同步封闭新 acquire。
+    pub(crate) fn new_runtime_named(store: Arc<PgStore>, name: &'static str) -> Self {
+        Self {
+            store,
+            name,
+            shutdown: PgStoreShutdown::RuntimeFence,
+        }
+    }
+
+    fn fence_runtime_pool(&self) {
+        log_pool_close_start(self.name, &self.store.pool);
+        // SQLx marks the pool closed synchronously before returning this future. Runtime shutdown
+        // needs that admission fence, but must not await the optional per-idle-connection TLS
+        // teardown after every application worker has already drained. Remaining pool handles are
+        // dropped with the sealed composition root and close their sockets.
+        drop(self.store.pool.close());
+        tracing::info!(target: "postgres", name = self.name, "postgres pool fenced closed");
+    }
+
+    async fn rollback_setup_pool(&self) {
+        self.store.pool.close().await;
+        tracing::info!(target: "postgres", name = self.name, "postgres setup pool closed");
     }
 }
 
@@ -292,10 +333,22 @@ impl ManagedResource for PgStoreGuard {
     }
 
     async fn shutdown(&self) -> Result<(), ShutdownError> {
-        self.store.pool.close().await;
-        tracing::info!(target: "postgres", name = self.name, "postgres pool closed");
+        match self.shutdown {
+            PgStoreShutdown::RuntimeFence => self.fence_runtime_pool(),
+            PgStoreShutdown::SetupRollback => self.rollback_setup_pool().await,
+        }
         Ok(())
     }
+}
+
+fn log_pool_close_start(name: &'static str, pool: &PgPool) {
+    tracing::info!(
+        target: "postgres",
+        name,
+        size = pool.size(),
+        idle = pool.num_idle(),
+        "postgres pool close starting"
+    );
 }
 
 #[cfg(all(
@@ -417,35 +470,61 @@ mod smoke {
     fn store_name_is_stable() {
         assert_eq!(super::PG_STORE_NAME, "postgres");
     }
+}
 
-    /// `PgStoreGuard::shutdown()` 对 lazy pool 返 Ok（pool.close 幂等）。
-    ///
-    /// `connect_lazy_with` 不发真实连接；`close()` 幂等 → `PgStore::shutdown` 恒 Ok
-    /// → `PgStoreGuard::shutdown` 代理调用亦恒 Ok（#1309 review A1 单测）。
-    #[tokio::test]
-    async fn pg_store_guard_shutdown_lazy_pool_ok() {
-        use diport::ManagedResource as _;
-        use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
-        use std::sync::Arc;
+#[cfg(test)]
+mod runtime_guard_tests {
+    use super::{PgStore, PgStoreGuard, PgStoreShutdown};
+    use diport::ManagedResource as _;
+    use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+    use std::sync::Arc;
+
+    fn lazy_store() -> Arc<PgStore> {
         let opts = PgConnectOptions::new()
             .host("127.0.0.1")
             .port(5999)
             .database("rss_test")
             .username("u")
             .password("p");
-        let pool = PgPoolOptions::new()
-            .max_connections(1)
-            .connect_lazy_with(opts);
-        let store = Arc::new(super::PgStore { pool });
-        let guard = super::PgStoreGuard::new(Arc::clone(&store));
-        assert_eq!(
-            guard.name(),
-            "postgres",
-            "PgStoreGuard::name 委托 PgStore::name"
-        );
-        assert!(
-            guard.shutdown().await.is_ok(),
-            "lazy pool close 幂等 → shutdown Ok"
-        );
+        Arc::new(PgStore {
+            pool: PgPoolOptions::new()
+                .max_connections(1)
+                .connect_lazy_with(opts),
+        })
+    }
+
+    #[tokio::test]
+    async fn constructors_seal_setup_and_runtime_shutdown_modes()
+    -> Result<(), diport::ShutdownError> {
+        let setup = PgStoreGuard::new_named(lazy_store(), "postgres-writer");
+        assert!(matches!(setup.shutdown, PgStoreShutdown::SetupRollback));
+        setup.shutdown().await?;
+
+        let runtime = PgStoreGuard::new_runtime_named(lazy_store(), "postgres-tenant-reader");
+        assert!(matches!(runtime.shutdown, PgStoreShutdown::RuntimeFence));
+        runtime.shutdown().await?;
+        Ok(())
+    }
+
+    /// `PgStoreGuard::shutdown()` 同步封闭 acquire，且重复 shutdown 幂等。
+    ///
+    /// `connect_lazy_with` 不发真实连接，允许精确证明 fence 而不依赖外部 PostgreSQL。
+    #[tokio::test]
+    async fn shutdown_fences_acquire_and_is_idempotent() {
+        let store = lazy_store();
+        let guard = PgStoreGuard::new(Arc::clone(&store));
+        assert_eq!(guard.name(), "postgres");
+        assert!(!store.pool.is_closed());
+
+        guard.shutdown().await.expect("fence runtime pool");
+
+        assert!(store.pool.is_closed());
+        assert!(matches!(
+            store.pool.acquire().await,
+            Err(sqlx::Error::PoolClosed)
+        ));
+
+        guard.shutdown().await.expect("repeat runtime pool fence");
+        assert!(store.pool.is_closed());
     }
 }

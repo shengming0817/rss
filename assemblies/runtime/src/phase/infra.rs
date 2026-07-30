@@ -503,7 +503,7 @@ impl<'a> ProvidersBuilt<'a> {
             .context("parse redis_ready probe name")?;
         let redis_for_sampler = redis.clone();
         let redis_worker_ready = Arc::clone(&redis_ready);
-        let redis_readiness_worker: bootstrap::WorkerSpec = Box::new(move |token| {
+        let redis_readiness_worker = bootstrap::WorkerSpec::phase_one(move |token| {
             diport::DynManagedResource::new_box(spawn_redis_readiness_sampler(
                 redis_for_sampler.clone(),
                 redis_readiness_period,

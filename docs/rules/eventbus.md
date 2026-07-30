@@ -136,7 +136,8 @@ Outbox relay transport 是 **at-least-once**：durable fact 使用稳定 event I
   组合根健康证据时仅注入窄 build-failure observer，不得直接构造 `tokio::runtime::Builder`。
 - 结算规则：`handler_transient` 耗尽后只 broker `Requeue`，不写 app DLX、不提交 inbox done、不 Ack；
   `commit_unknown` / lease lost 立即 `Requeue`；只有永久 `Reject` 可写 app DLX 后 Ack。
-  Duplicate delivery 不进入 tx handler，直接 Ack。
+  Duplicate delivery 不进入 tx handler，直接 Ack。活跃 claim 是 typed `InProgress`，不是 backend
+  `Transient`；consumer 按同源 lease 周期做有上限延迟后 `Requeue`，不进入 handler，也不发 backend-health warn。
 - 每条订阅必须在 `contract.toml` 声明 identity、闭枚举 `execution` 与逐订阅 `externalEffectPolicy`。
   唯一 Rust policy 类型是 `vocab::ExternalEffectPolicy`，codegen 直接写入 spec，不复制第二个枚举。
 - runtime 必须对 dispatch key、generated policy 与注册 capability 穷尽匹配；新增订阅未接线时编译失败。
@@ -199,6 +200,7 @@ outbox 行带表级单调 `seq`（应用不可写、允许 gap）+ 可空 `parti
 | DLX 写失败 + release 成功 | release key | `Requeue` |
 | DLX 写失败 + release 失败 | 发 release 失败指标 | `Reject` |
 | claim 瞬态错误 | 不 commit | `Requeue` |
+| active claim `InProgress` | 不 commit；lease-aware 有界延迟 | `Requeue` |
 | claim 永久错误 | 不 commit | `Reject` |
 | 租约丢失 | cancel handler，不 commit | `Requeue` |
 | `Duplicate` | 跳过 handler | `Ack` |

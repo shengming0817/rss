@@ -1,9 +1,9 @@
 //! 幂等 claimer 逻辑 helper（L0 纯计算 + backend 异步 impl）。
 //!
-//! feature 无关的 helper（`namespaced_key` / `interpret_setnx`）始终编译，
+//! feature 无关的 helper（`namespaced_key` / `interpret_claim_result`）始终编译，
 //! `backend` feature 门控的异步 `try_claim_impl` 引入 deadpool-redis 类型。
 
-use consistency::{IdemKey, InboxReceiptContext, SeenState};
+use consistency::{EngineError, EngineErrorKind, IdemKey, InboxReceiptContext, SeenState};
 
 /// claim key 命名空间（固定 `inbox_receipts` role 段，对齐 observability.md §Redis Namespace）。
 ///
@@ -38,13 +38,15 @@ pub(crate) fn namespaced_key(ctx: &InboxReceiptContext, key: &IdemKey) -> String
     )
 }
 
-/// `SET ... NX` 返回 `Some(...)`=首次写入(Fresh) / `None`(nil)=key 已存在(Duplicate)。
+/// 解释原子 claim Lua 结果：1=Fresh，2=durable done Duplicate，0=active claim InProgress。
 // reason: feature-off build 仅测试使用；feature-on 经 backend::try_claim_impl 引用。
 #[cfg_attr(not(feature = "backend"), allow(dead_code))]
-pub(crate) fn interpret_setnx(set: Option<String>) -> SeenState {
-    match set {
-        Some(_) => SeenState::Fresh,
-        None => SeenState::Duplicate,
+pub(crate) fn interpret_claim_result(result: i64) -> Result<SeenState, EngineError> {
+    match result {
+        1 => Ok(SeenState::Fresh),
+        2 => Ok(SeenState::Duplicate),
+        0 => Ok(SeenState::InProgress),
+        _ => Err(EngineError::new(EngineErrorKind::Invariant)),
     }
 }
 
@@ -59,7 +61,7 @@ mod backend {
     };
     use deadpool_redis::{Pool, PoolError, redis::RedisError};
 
-    use super::{interpret_setnx, namespaced_key};
+    use super::{interpret_claim_result, namespaced_key};
 
     // ─── 低基数诊断字段常量（resource = RESOURCE 出现 ≥ 3 次，抽 const 守去重规则）─────────
     const RESOURCE: &str = "redis";
@@ -75,6 +77,9 @@ mod backend {
     /// （否则 done 行重获 TTL 会过期 → 去重丢失，F1）或被 `DEL` 删除（F2）。对标 PG `status='claimed'` /
     /// memory `!done` 的显式状态位（C1：Redis 之前缺状态位，claimed/done 同为 raw token 不可区分）。
     const DONE_SENTINEL: &str = "__rss_idem_done__";
+
+    /// 原子 claim 与状态分类：absent 写入 token 并返回 1；done 返回 2；active claimed 返回 0。
+    const LUA_TRY_CLAIM: &str = "local current = redis.call('GET', KEYS[1]); if not current then redis.call('PSETEX', KEYS[1], ARGV[2], ARGV[1]); return 1 elseif current == ARGV[3] then return 2 else return 0 end";
 
     // ─── Lua CAS 脚本（每条仅使用一次，但为可审计性与常量化要求各定义为 const）──────────────
 
@@ -121,7 +126,7 @@ mod backend {
         }
     }
 
-    /// claim 并查询首见：`SET key <lease_token> NX PX <ttl_ms>`。
+    /// claim 并原子分类：Lua 一次区分 absent / active claimed / durable done。
     ///
     /// Token 作为 redis 值存入，供后续 `extend`/`commit`/`release` CAS 比对。
     /// F3：低基数诊断字段 + redacted error（不记 key 原文，避免 PII / 高基数）。
@@ -146,13 +151,14 @@ mod backend {
         let k = namespaced_key(ctx, key);
         // F2：用 PX 毫秒精度（不截断）；TTL 已由 `RedisInboxStore` 构造期保证 ≥ 1ms（不静默钳制）。
         let ttl_millis = u64::try_from(ttl.as_millis()).unwrap_or(u64::MAX);
-        // SET key <lease_token> NX PX <ttl_millis>：token 作为值落库，后续 CAS 凭此比对。
-        let set: Option<String> = deadpool_redis::redis::cmd("SET")
+        // Lua 内原子区分 absent / active claimed / durable done，避免 NX 失败后二次 GET 竞态。
+        let result: i64 = deadpool_redis::redis::cmd(REDIS_CMD_EVAL)
+            .arg(LUA_TRY_CLAIM)
+            .arg(1)
             .arg(&k)
             .arg(lease.as_str())
-            .arg("NX")
-            .arg("PX")
             .arg(ttl_millis)
+            .arg(DONE_SENTINEL)
             .query_async(&mut *conn)
             .await
             .map_err(|e| {
@@ -162,11 +168,11 @@ mod backend {
                     operation = "idem-claim",
                     ?kind,
                     error = %secure::redact_error(&e),
-                    "redis SET NX failed"
+                    "redis EVAL try-claim failed"
                 );
                 EngineError::new(kind)
             })?;
-        Ok(interpret_setnx(set))
+        interpret_claim_result(result)
     }
 
     /// 续租：令牌 CAS 匹配则 `PEXPIRE`（刷新 TTL）→ `Held`；不符 → `Lost`（claim 已被重捞或不存在）。
@@ -349,10 +355,10 @@ mod backend {
 
 #[cfg(test)]
 mod tests {
-    use consistency::{ConsumerGroup, IdemKey, InboxReceiptContext, SeenState};
+    use consistency::{ConsumerGroup, EngineErrorKind, IdemKey, InboxReceiptContext, SeenState};
     use rstest::rstest;
 
-    use super::{NAMESPACE, interpret_setnx, namespaced_key};
+    use super::{NAMESPACE, interpret_claim_result, namespaced_key};
 
     #[allow(clippy::unwrap_used)]
     // reason: test helper — 非空 raw，parse 必成功；item-level carve-out。
@@ -486,11 +492,17 @@ mod tests {
     }
 
     #[rstest]
-    #[case(Some("OK".to_string()), SeenState::Fresh)]
-    #[case(Some("ok".to_string()), SeenState::Fresh)]
-    #[case(Some(String::new()), SeenState::Fresh)]
-    #[case(None, SeenState::Duplicate)]
-    fn interpret_setnx_maps_option(#[case] set: Option<String>, #[case] expected: SeenState) {
-        assert_eq!(interpret_setnx(set), expected);
+    #[case(1, Ok(SeenState::Fresh))]
+    #[case(2, Ok(SeenState::Duplicate))]
+    #[case(0, Ok(SeenState::InProgress))]
+    #[case(3, Err(EngineErrorKind::Invariant))]
+    fn interpret_claim_result_is_closed(
+        #[case] result: i64,
+        #[case] expected: Result<SeenState, EngineErrorKind>,
+    ) {
+        assert_eq!(
+            interpret_claim_result(result).map_err(|error| error.kind()),
+            expected
+        );
     }
 }

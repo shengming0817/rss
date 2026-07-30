@@ -47,6 +47,11 @@ name = "settingsonly_runtime"
 path = "tests/settingsonly_runtime.rs"
 
 [[test]]
+name = "settingsonly_production_artifact"
+path = "tests/settingsonly_production_artifact.rs"
+required-features = ["integration"]
+
+[[test]]
 name = "identityaudit_runtime"
 path = "tests/identityaudit_runtime.rs"
 required-features = ["integration"]
@@ -101,7 +106,7 @@ memory = { path = "../adapters/memory" }
 crypto-adapter = { path = "../adapters/crypto" }
 vault = { path = "../adapters/vault", features = ["backend"] }
 oidc = { path = "../adapters/oidc", features = ["backend"] }
-tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "time"] }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "process", "rt-multi-thread", "time"] }
 tokio-util = { workspace = true }
 futures = { workspace = true }
 axum = { workspace = true }
@@ -122,11 +127,17 @@ serde = { workspace = true, features = ["derive"] }
 toml = { workspace = true }
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
-reqwest = { workspace = true }
+reqwest = { workspace = true, features = ["rustls-tls-manual-roots"] }
+spiffe = { workspace = true }
+spiffe-rustls = { workspace = true }
 base64 = { workspace = true }
 p256 = { workspace = true }
 wiremock = { workspace = true }
 url = { workspace = true }
+rcgen = { workspace = true }
+prost = { workspace = true }
+tonic = { workspace = true }
+tonic-prost = "0.14"
 # F9：从 canonical UUID 字符串算 16B 原始字节，断言 tenant/actor 贯穿审计链 canonical 输入。
 uuid = { workspace = true, features = ["v4"] }
 # 集成测试容器 fixture（#1137）：durable journey 经 testkit self-provision postgres（无需手工 libpq env），

@@ -153,7 +153,7 @@ fn make_store_for(
 // ─── 既有基础行为（更新至新签名：try_claim/commit/release 均携带 lease token）────────────────
 
 #[tokio::test]
-async fn integration_first_check_is_fresh_then_duplicate() -> Result<(), FixtureError> {
+async fn integration_first_check_is_fresh_then_active_in_progress() -> Result<(), FixtureError> {
     let redis = testkit::env_or_redis().await?;
     let store = make_store(redis.url(), Duration::from_secs(60), "integration-group")?;
     let key = unique_key("integration_first_fresh");
@@ -163,13 +163,12 @@ async fn integration_first_check_is_fresh_then_duplicate() -> Result<(), Fixture
     let first = store.try_claim(&key, &token_a).await?;
     assert_eq!(first, SeenState::Fresh, "first try_claim must be Fresh");
 
-    // 再次 try_claim：SET NX 失败（key 已存在）→ Duplicate，无论传入哪个 token。
+    // 再次 try_claim：key 是 active claimed → typed InProgress，使 consumer 延迟 Requeue。
     let token_b = mint_token();
-    let second = store.try_claim(&key, &token_b).await?;
     assert_eq!(
-        second,
-        SeenState::Duplicate,
-        "second try_claim must be Duplicate"
+        store.try_claim(&key, &token_b).await?,
+        SeenState::InProgress,
+        "second try_claim must be in progress"
     );
     Ok(())
 }
@@ -187,7 +186,7 @@ async fn integration_ttl_expiry_refresh() -> Result<(), FixtureError> {
     // TTL=1s → 等 1.1s 后 key 应过期。
     tokio::time::sleep(Duration::from_millis(1100)).await;
 
-    // 过期后新 token 可重领：TTL 自然重捞（key 消失 → SET NX 成功 = Fresh）。
+    // 过期后新 token 可重领：TTL 自然重捞（key 消失 → 原子 claim = Fresh）。
     let token_b = mint_token();
     let after_expiry = store.try_claim(&key, &token_b).await?;
     assert_eq!(
@@ -296,7 +295,7 @@ async fn integration_commit_held_then_recheck_duplicate() -> Result<(), FixtureE
         "commit with correct token must be Held"
     );
 
-    // done key 对任何新 token 的 SET NX 均失败（key 永久存在）→ Duplicate。
+    // done key 对任何新 token 的原子 claim 均分类为 Duplicate。
     assert_eq!(
         store.try_claim(&key, &mint_token()).await?,
         SeenState::Duplicate,
@@ -325,7 +324,7 @@ async fn integration_commit_with_wrong_token_is_lost() -> Result<(), FixtureErro
     Ok(())
 }
 
-/// claim → release(wrong token) = no-op → key 仍存在 → re-try_claim = Duplicate。
+/// claim → release(wrong token) = no-op → key 仍存在 → re-try_claim = InProgress。
 #[tokio::test]
 async fn integration_release_wrong_token_is_noop_key_survives() -> Result<(), FixtureError> {
     let redis = testkit::env_or_redis().await?;
@@ -339,11 +338,10 @@ async fn integration_release_wrong_token_is_noop_key_survives() -> Result<(), Fi
     let wrong = mint_token();
     store.release(&key, &wrong).await?;
 
-    // claim 未被误删 → 新 token SET NX 失败 → Duplicate。
+    // claim 未被误删 → 必须返回 InProgress 保留 broker 投递，不得伪装 done 而 ACK。
     assert_eq!(
         store.try_claim(&key, &mint_token()).await?,
-        SeenState::Duplicate,
-        "key must survive no-op release with wrong token"
+        SeenState::InProgress
     );
     Ok(())
 }
@@ -423,7 +421,7 @@ async fn integration_natural_reclaim_after_ttl_expiry() -> Result<(), FixtureErr
     // 等 key PX 到期（700ms > 500ms TTL）。
     tokio::time::sleep(Duration::from_millis(700)).await;
 
-    // 新 token 重领：key 已消失 → SET NX 成功 → Fresh（自然重捞）。
+    // 新 token 重领：key 已消失 → 原子 claim 成功 → Fresh（自然重捞）。
     let token_b = mint_token();
     assert_eq!(
         store.try_claim(&key, &token_b).await?,
@@ -456,7 +454,7 @@ async fn integration_ttl_reclaim_original_holder_commit_fenced() -> Result<(), F
     // 2. 等 key PX 到期（700ms > 500ms TTL）——模拟原持有者 crash/超时未 commit。
     tokio::time::sleep(Duration::from_millis(700)).await;
 
-    // 3. 新持有者 token_b 自然重领：key 已消失 → SET NX 成功 → Fresh。
+    // 3. 新持有者 token_b 自然重领：key 已消失 → 原子 claim 成功 → Fresh。
     let token_b = mint_token();
     assert_eq!(
         store.try_claim(&key, &token_b).await?,

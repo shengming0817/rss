@@ -21,7 +21,7 @@ pub fn wire_saga_worker(
             saga_executor_probe_name(factory.identity()).context("parse saga worker probe name")?;
         let health = Arc::new(WorkerHealth::starting());
         let worker_health = Arc::clone(&health);
-        let worker: WorkerSpec = Box::new(move |token| factory.spawn(token, worker_health));
+        let worker = WorkerSpec::deferred(move |token| factory.spawn(token, worker_health));
         module.workers.push(worker);
         module.probes.push((
             probe_name.clone(),

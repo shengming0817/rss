@@ -19,6 +19,7 @@ use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use syn::spanned::Spanned as _;
 
 use crate::assembly_governance::{
     AssemblyGovernanceIr, Core, GovernedAssembly, ProductionAssembly,
@@ -41,7 +42,7 @@ pub(crate) enum Rule {
     IdentityAuditBoundary,
     /// settingsonly 必须保持 #1796 的独立 binary/schema/精确 journey/image/default-closure 闭包。
     ///
-    /// INVARIANT: SETTINGSONLY-EXECUTABLE-BOUNDARY-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::settingsonly_executable_boundary_rejects_each_incomplete_artifact_fact", anti_vacuity = "tests::settingsonly_real_executable_boundary_is_complete" } -- this target-specific gate closes only the settingsonly artifacts introduced by #1796; the cross-assembly artifact matrix and bijection remain owned by #1798.
+    /// INVARIANT: SETTINGSONLY-EXECUTABLE-BOUNDARY-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::settingsonly_production_artifact_gate_rejects_incomplete_case_closure", anti_vacuity = "tests::settingsonly_real_executable_boundary_is_complete" } -- this target-specific gate closes the settingsonly package and four-case production evidence carrier; artifact identity, image target, and ENTRYPOINT remain owned by ASSEMBLY-ARTIFACT-MATRIX-01.
     SettingsOnlyExecutableBoundary,
     /// settingsonly 必须保持 #1836 的唯一 L2 production/durable-isolated 组装闭包。
     ///
@@ -807,12 +808,12 @@ fn validate_target_domain_closure(
             is_regular_file_without_symlink(&assembly.dir().join("config.schema.json"))?;
         let sample_is_regular_file =
             is_regular_file_without_symlink(&assembly.dir().join("settingsonly.example.toml"))?;
-        let artifact_acceptance = settingsonly_artifact_acceptance_evidence(root)?;
+        let (production_artifact_target_declared, production_artifact) =
+            settingsonly_production_artifact_evidence(root)?;
         let (journey_target_declared, required_journey_test_declared) =
             settingsonly_journey_evidence(root)?;
-        let dockerfile = std::fs::read_to_string(root.join("Dockerfile"))
-            .context("读取 settingsonly image source Dockerfile 失败")?;
         let runtimeexec_launch_is_live = subset_runtimeexec_launch_is_live(root, "settingsonly")?;
+        let dockerignore_contracts_included = dockerignore_includes_contracts(root)?;
         findings.extend(validate_settingsonly_executable_evidence(
             SettingsOnlyExecutableEvidence {
                 targets: &package.targets,
@@ -820,11 +821,12 @@ fn validate_target_domain_closure(
                 test_support_enabled,
                 schema_is_regular_file,
                 sample_is_regular_file,
-                artifact_acceptance,
+                production_artifact_target_declared,
+                production_artifact,
                 journey_target_declared,
                 required_journey_test_declared,
                 runtimeexec_launch_is_live,
-                dockerfile: &dockerfile,
+                dockerignore_contracts_included,
             },
         ));
         findings.extend(validate_settingsonly_l2_production_closure(
@@ -2862,18 +2864,146 @@ const SETTINGSONLY_ALLOWED_NORMAL_WORKSPACE_PACKAGES: &[&str] = &[
     "vocab",
 ];
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArtifactClosureStage {
+    SourceRead,
+    Parse,
+    EntryLink,
+    TestInventory,
+    CaseInventory,
+    EvidenceId,
+    TestName,
+    Dispatch,
+    Scenario,
+    ReceiptProvenance,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArtifactClosurePath {
+    Entry,
+    Support,
+}
+
+impl ArtifactClosurePath {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Entry => "journeys/tests/settingsonly_production_artifact.rs",
+            Self::Support => "journeys/tests/support/settingsonly_production_artifact.rs",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ArtifactClosureSpan {
+    start_line: usize,
+    start_column: usize,
+    end_line: usize,
+    end_column: usize,
+}
+
+impl ArtifactClosureSpan {
+    fn from_span(span: proc_macro2::Span) -> Self {
+        let start = span.start();
+        let end = span.end();
+        Self {
+            start_line: start.line,
+            start_column: start.column,
+            end_line: end.line,
+            end_column: end.column,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ArtifactClosureViolation {
+    stage: ArtifactClosureStage,
+    case: Option<String>,
+    path: ArtifactClosurePath,
+    span: Option<ArtifactClosureSpan>,
+    expected: String,
+    actual: String,
+}
+
+impl ArtifactClosureViolation {
+    fn new(
+        stage: ArtifactClosureStage,
+        case: Option<impl Into<String>>,
+        path: ArtifactClosurePath,
+        span: Option<proc_macro2::Span>,
+        expected: impl Into<String>,
+        actual: impl Into<String>,
+    ) -> Self {
+        Self {
+            stage,
+            case: case.map(Into::into),
+            path,
+            span: span.map(ArtifactClosureSpan::from_span),
+            expected: expected.into(),
+            actual: actual.into(),
+        }
+    }
+
+    fn detail(&self) -> String {
+        let case = self.case.as_deref().unwrap_or("<carrier>");
+        let span = self.span.map_or_else(
+            || "span=<none>".to_owned(),
+            |span| {
+                format!(
+                    "span={}:{}-{}:{}",
+                    span.start_line, span.start_column, span.end_line, span.end_column
+                )
+            },
+        );
+        format!(
+            "stage={:?} case={case} path={} {span} expected={} actual={}",
+            self.stage,
+            self.path.as_str(),
+            self.expected,
+            self.actual
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ArtifactClosureCertificate {
+    cases: BTreeSet<String>,
+}
+
+impl ArtifactClosureCertificate {
+    #[cfg(test)]
+    fn case_count(&self) -> usize {
+        self.cases.len()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ArtifactClosureEvidence {
+    Certified(ArtifactClosureCertificate),
+    Violations(Vec<ArtifactClosureViolation>),
+}
+
+impl ArtifactClosureEvidence {
+    #[cfg(test)]
+    fn certificate(cases: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        Self::Certified(ArtifactClosureCertificate {
+            cases: cases.into_iter().map(Into::into).collect(),
+        })
+    }
+}
+
+#[derive(Clone)]
 struct SettingsOnlyExecutableEvidence<'a> {
     targets: &'a [MetadataTarget],
     closure_packages: &'a BTreeSet<String>,
     test_support_enabled: bool,
     schema_is_regular_file: bool,
     sample_is_regular_file: bool,
-    artifact_acceptance: bool,
+    production_artifact_target_declared: bool,
+    production_artifact: ArtifactClosureEvidence,
     journey_target_declared: bool,
     required_journey_test_declared: bool,
     runtimeexec_launch_is_live: bool,
-    dockerfile: &'a str,
+    dockerignore_contracts_included: bool,
 }
 
 fn validate_settingsonly_executable_evidence(
@@ -2881,7 +3011,7 @@ fn validate_settingsonly_executable_evidence(
 ) -> Vec<Finding> {
     let subject = "assemblies/settingsonly";
     let mut findings = Vec::new();
-    let exact_targets = evidence.targets.len() == 4
+    let exact_targets = evidence.targets.len() == 3
         && evidence.targets.iter().any(|target| {
             target.name == "build-script-build" && target.kind.as_slice() == ["custom-build"]
         })
@@ -2891,15 +3021,12 @@ fn validate_settingsonly_executable_evidence(
             .any(|target| target.name == "settingsonly" && target.kind.as_slice() == ["lib"])
         && evidence.targets.iter().any(|target| {
             target.name == "settingsonly-server" && target.kind.as_slice() == ["bin"]
-        })
-        && evidence.targets.iter().any(|target| {
-            target.name == "settingsonly_artifact_acceptance" && target.kind.as_slice() == ["test"]
         });
     if !exact_targets {
         findings.push(finding(
             Rule::SettingsOnlyExecutableBoundary,
             subject,
-            "field=package.targets expected exactly repository-attestation build script, lib `settingsonly`, bin `settingsonly-server`, and binary+image test `settingsonly_artifact_acceptance`",
+            "field=package.targets expected exactly repository-attestation build script, lib `settingsonly`, and bin `settingsonly-server`",
         ));
     }
 
@@ -2957,12 +3084,21 @@ fn validate_settingsonly_executable_evidence(
             "field=config-sample expected a non-symlink regular file at assemblies/settingsonly/settingsonly.example.toml",
         ));
     }
-    if !evidence.artifact_acceptance {
+    if !evidence.production_artifact_target_declared {
         findings.push(finding(
             Rule::SettingsOnlyExecutableBoundary,
             subject,
-            "field=artifact-acceptance expected exact binary+image --help tests plus the closed Docker build/include-ignored harness",
+            "field=production-artifact stage=Target path=journeys/Cargo.toml expected one exact integration-only `settingsonly_production_artifact` target",
         ));
+    }
+    if let ArtifactClosureEvidence::Violations(violations) = evidence.production_artifact {
+        findings.extend(violations.into_iter().map(|violation| {
+            finding(
+                Rule::SettingsOnlyExecutableBoundary,
+                violation.path.as_str(),
+                format!("field=production-artifact {}", violation.detail()),
+            )
+        }));
     }
     if !evidence.journey_target_declared || !evidence.required_journey_test_declared {
         findings.push(finding(
@@ -2978,11 +3114,11 @@ fn validate_settingsonly_executable_evidence(
             "field=health-runtime-wiring run must reach launch_captured, which must construct StartupPlan and call runtimeexec::launch_startup",
         ));
     }
-    if !settingsonly_docker_target_is_closed(evidence.dockerfile) {
+    if !evidence.dockerignore_contracts_included {
         findings.push(finding(
             Rule::SettingsOnlyExecutableBoundary,
             subject,
-            "field=Dockerfile expected migration-free serving builder and EXPOSE 8080 8082 8083 followed by serving/schema COPY and ENTRYPOINT settingsonly-server, while runtime remains the default final stage",
+            "field=.dockerignore contracts/ must remain in the settingsonly-runtime build context",
         ));
     }
     findings
@@ -3612,125 +3748,1476 @@ impl<'ast> syn::visit::Visit<'ast> for SettingsJourneyVisitor {
     }
 }
 
-fn settingsonly_artifact_acceptance_evidence(root: &Path) -> Result<bool> {
-    let source_path = root.join("assemblies/settingsonly/tests/artifact_acceptance.rs");
-    let source = match std::fs::read_to_string(&source_path) {
+fn settingsonly_production_artifact_evidence(
+    root: &Path,
+) -> Result<(bool, ArtifactClosureEvidence)> {
+    let manifest_path = root.join("journeys/Cargo.toml");
+    let manifest: toml::Value = std::fs::read_to_string(&manifest_path)
+        .with_context(|| format!("读取 {} 失败", manifest_path.display()))?
+        .parse()
+        .with_context(|| format!("解析 {} 失败", manifest_path.display()))?;
+    let target_declared = settingsonly_production_artifact_target_is_exact(&manifest);
+    let entry_path = root.join("journeys/tests/settingsonly_production_artifact.rs");
+    let support_path = root.join("journeys/tests/support/settingsonly_production_artifact.rs");
+    let entry = match std::fs::read_to_string(&entry_path) {
         Ok(source) => source,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((
+                target_declared,
+                ArtifactClosureEvidence::Violations(vec![ArtifactClosureViolation::new(
+                    ArtifactClosureStage::SourceRead,
+                    None::<String>,
+                    ArtifactClosurePath::Entry,
+                    None,
+                    "regular Rust source",
+                    "missing",
+                )]),
+            ));
+        }
         Err(error) => {
-            return Err(error).with_context(|| format!("读取 {} 失败", source_path.display()));
+            return Err(error).with_context(|| format!("读取 {} 失败", entry_path.display()));
         }
     };
-    let source_closed = settingsonly_artifact_source_is_closed(&source)
-        .with_context(|| format!("解析 {} 失败", source_path.display()))?;
-    let script_path = root.join("hack/settingsonly-artifact-acceptance.sh");
-    let script = match std::fs::read_to_string(&script_path) {
-        Ok(script) => script,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+    let support = match std::fs::read_to_string(&support_path) {
+        Ok(source) => source,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((
+                target_declared,
+                ArtifactClosureEvidence::Violations(vec![ArtifactClosureViolation::new(
+                    ArtifactClosureStage::SourceRead,
+                    None::<String>,
+                    ArtifactClosurePath::Support,
+                    None,
+                    "regular Rust source",
+                    "missing",
+                )]),
+            ));
+        }
         Err(error) => {
-            return Err(error).with_context(|| format!("读取 {} 失败", script_path.display()));
+            return Err(error).with_context(|| format!("读取 {} 失败", support_path.display()));
         }
     };
-    Ok(source_closed && settingsonly_artifact_script_is_closed(&script))
+    Ok((
+        target_declared,
+        settingsonly_production_artifact_sources_are_closed(&entry, &support),
+    ))
 }
 
-fn settingsonly_artifact_source_is_closed(source: &str) -> Result<bool> {
-    let syntax = syn::parse_file(source)?;
-    let mut binary = false;
-    let mut image = false;
-    let mut live = false;
-    for item in syntax.items {
+fn settingsonly_production_artifact_target_is_exact(manifest: &toml::Value) -> bool {
+    manifest
+        .get("test")
+        .and_then(toml::Value::as_array)
+        .is_some_and(|targets| {
+            let matching = targets
+                .iter()
+                .filter(|target| {
+                    target.get("name").and_then(toml::Value::as_str)
+                        == Some("settingsonly_production_artifact")
+                })
+                .collect::<Vec<_>>();
+            matches!(matching.as_slice(), [target]
+                if target.get("path").and_then(toml::Value::as_str)
+                    == Some("tests/settingsonly_production_artifact.rs")
+                    && target.get("required-features").and_then(toml::Value::as_array)
+                        .is_some_and(|features| matches!(features.as_slice(), [feature]
+                            if feature.as_str() == Some("integration"))))
+        })
+}
+
+fn settingsonly_production_artifact_sources_are_closed(
+    entry: &str,
+    support: &str,
+) -> ArtifactClosureEvidence {
+    let entry = match parse_artifact_source(entry, ArtifactClosurePath::Entry) {
+        Ok(source) => source,
+        Err(violation) => return ArtifactClosureEvidence::Violations(vec![violation]),
+    };
+    let support = match parse_artifact_source(support, ArtifactClosurePath::Support) {
+        Ok(source) => source,
+        Err(violation) => return ArtifactClosureEvidence::Violations(vec![violation]),
+    };
+    let mut violations = Vec::new();
+    if !production_entry_links_exact_support(&entry) {
+        violations.push(ArtifactClosureViolation::new(
+            ArtifactClosureStage::EntryLink,
+            None::<String>,
+            ArtifactClosurePath::Entry,
+            None,
+            "one non-conditional exact support module and import",
+            "missing, aliased, duplicated, or conditional link",
+        ));
+    }
+
+    let evidence_enums = support
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Enum(item) if item.ident == "EvidenceCase" => Some(item),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let [evidence_enum] = evidence_enums.as_slice() else {
+        violations.push(ArtifactClosureViolation::new(
+            ArtifactClosureStage::CaseInventory,
+            None::<String>,
+            ArtifactClosurePath::Support,
+            None,
+            "one closed EvidenceCase enum",
+            format!("{} EvidenceCase enums", evidence_enums.len()),
+        ));
+        return ArtifactClosureEvidence::Violations(violations);
+    };
+    let cases = collect_evidence_cases(evidence_enum, &mut violations);
+    let ids = collect_case_string_projection(
+        &support,
+        "id",
+        ArtifactClosureStage::EvidenceId,
+        &mut violations,
+    );
+    let test_names = collect_case_string_projection(
+        &support,
+        "test_name",
+        ArtifactClosureStage::TestName,
+        &mut violations,
+    );
+    let wrappers = collect_case_test_wrappers(&entry, &mut violations);
+    let dispatch = collect_case_dispatch(&support, &mut violations);
+    reconcile_case_inventory(
+        &cases,
+        &ids,
+        &test_names,
+        &wrappers,
+        &dispatch,
+        &mut violations,
+    );
+    certify_case_ids(&cases, &ids, &mut violations);
+    certify_case_test_names(&cases, &test_names, &wrappers, &mut violations);
+    certify_case_dispatch_names(&cases, &dispatch, &mut violations);
+    certify_typed_receipt_scenarios(&support, &cases, &dispatch, &mut violations);
+
+    if violations.is_empty() {
+        ArtifactClosureEvidence::Certified(ArtifactClosureCertificate { cases })
+    } else {
+        ArtifactClosureEvidence::Violations(violations)
+    }
+}
+
+fn parse_artifact_source(
+    source: &str,
+    path: ArtifactClosurePath,
+) -> std::result::Result<syn::File, ArtifactClosureViolation> {
+    syn::parse_file(source).map_err(|error| {
+        ArtifactClosureViolation::new(
+            ArtifactClosureStage::Parse,
+            None::<String>,
+            path,
+            Some(error.span()),
+            "valid Rust source",
+            error.to_string(),
+        )
+    })
+}
+
+fn collect_evidence_cases(
+    evidence_enum: &syn::ItemEnum,
+    violations: &mut Vec<ArtifactClosureViolation>,
+) -> BTreeSet<String> {
+    let mut cases = BTreeSet::new();
+    if evidence_enum.attrs.iter().any(is_conditional_attribute) {
+        violations.push(ArtifactClosureViolation::new(
+            ArtifactClosureStage::CaseInventory,
+            None::<String>,
+            ArtifactClosurePath::Support,
+            Some(evidence_enum.ident.span()),
+            "unconditional closed enum",
+            "conditional EvidenceCase enum",
+        ));
+    }
+    for variant in &evidence_enum.variants {
+        let case = variant.ident.to_string();
+        if !matches!(variant.fields, syn::Fields::Unit)
+            || variant.discriminant.is_some()
+            || variant.attrs.iter().any(is_conditional_attribute)
+        {
+            violations.push(ArtifactClosureViolation::new(
+                ArtifactClosureStage::CaseInventory,
+                Some(case.clone()),
+                ArtifactClosurePath::Support,
+                Some(variant.span()),
+                "unconditional unit variant without discriminant",
+                variant.to_token_stream().to_string(),
+            ));
+        }
+        if !cases.insert(case.clone()) {
+            violations.push(ArtifactClosureViolation::new(
+                ArtifactClosureStage::CaseInventory,
+                Some(case),
+                ArtifactClosurePath::Support,
+                Some(variant.ident.span()),
+                "unique case variant",
+                "duplicate variant",
+            ));
+        }
+    }
+    if cases.len() != 4 {
+        violations.push(ArtifactClosureViolation::new(
+            ArtifactClosureStage::CaseInventory,
+            None::<String>,
+            ArtifactClosurePath::Support,
+            Some(evidence_enum.ident.span()),
+            "four evidence cases",
+            format!("{} evidence cases: {cases:?}", cases.len()),
+        ));
+    }
+    cases
+}
+
+fn collect_case_string_projection(
+    support: &syn::File,
+    method_name: &str,
+    stage: ArtifactClosureStage,
+    violations: &mut Vec<ArtifactClosureViolation>,
+) -> BTreeMap<String, String> {
+    let methods = support
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Impl(item)
+                if matches!(item.self_ty.as_ref(), syn::Type::Path(path)
+                if path.path.is_ident("EvidenceCase")) =>
+            {
+                item.items
+                    .iter()
+                    .filter_map(|item| match item {
+                        syn::ImplItem::Fn(method) if method.sig.ident == method_name => {
+                            Some(method)
+                        }
+                        _ => None,
+                    })
+                    .next()
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let [method] = methods.as_slice() else {
+        violations.push(ArtifactClosureViolation::new(
+            stage,
+            None::<String>,
+            ArtifactClosurePath::Support,
+            None,
+            format!("one exhaustive EvidenceCase::{method_name} projection"),
+            format!("{} projection methods", methods.len()),
+        ));
+        return BTreeMap::new();
+    };
+    if method.attrs.iter().any(is_conditional_attribute) || method.block.stmts.len() != 1 {
+        violations.push(ArtifactClosureViolation::new(
+            stage,
+            None::<String>,
+            ArtifactClosurePath::Support,
+            Some(method.sig.ident.span()),
+            "unconditional single exhaustive match",
+            method.to_token_stream().to_string(),
+        ));
+        return BTreeMap::new();
+    }
+    let syn::Stmt::Expr(syn::Expr::Match(case_match), None) = &method.block.stmts[0] else {
+        violations.push(ArtifactClosureViolation::new(
+            stage,
+            None::<String>,
+            ArtifactClosurePath::Support,
+            Some(method.block.span()),
+            "match self without wildcard",
+            method.block.to_token_stream().to_string(),
+        ));
+        return BTreeMap::new();
+    };
+    if !matches!(case_match.expr.as_ref(), syn::Expr::Path(path) if path.path.is_ident("self")) {
+        violations.push(ArtifactClosureViolation::new(
+            stage,
+            None::<String>,
+            ArtifactClosurePath::Support,
+            Some(case_match.expr.span()),
+            "self scrutinee",
+            case_match.expr.to_token_stream().to_string(),
+        ));
+    }
+    let mut projection = BTreeMap::new();
+    for arm in &case_match.arms {
+        let Some(case) = case_pattern_name(&arm.pat) else {
+            violations.push(ArtifactClosureViolation::new(
+                stage,
+                None::<String>,
+                ArtifactClosurePath::Support,
+                Some(arm.pat.span()),
+                "explicit Self::<Case> arm without wildcard",
+                arm.pat.to_token_stream().to_string(),
+            ));
+            continue;
+        };
+        let syn::Expr::Lit(syn::ExprLit {
+            lit: syn::Lit::Str(value),
+            ..
+        }) = arm.body.as_ref()
+        else {
+            violations.push(ArtifactClosureViolation::new(
+                stage,
+                Some(case),
+                ArtifactClosurePath::Support,
+                Some(arm.body.span()),
+                "string literal projection",
+                arm.body.to_token_stream().to_string(),
+            ));
+            continue;
+        };
+        if arm.guard.is_some() || projection.insert(case.clone(), value.value()).is_some() {
+            violations.push(ArtifactClosureViolation::new(
+                stage,
+                Some(case),
+                ArtifactClosurePath::Support,
+                Some(arm.span()),
+                "one unguarded projection arm",
+                "guarded or duplicate arm",
+            ));
+        }
+    }
+    projection
+}
+
+fn case_pattern_name(pattern: &syn::Pat) -> Option<String> {
+    let syn::Pat::Path(path) = pattern else {
+        return None;
+    };
+    let segments = path.path.segments.iter().collect::<Vec<_>>();
+    matches!(segments.as_slice(), [owner, _] if owner.ident == "Self" || owner.ident == "EvidenceCase")
+        .then(|| segments[1].ident.to_string())
+}
+
+fn collect_case_test_wrappers(
+    entry: &syn::File,
+    violations: &mut Vec<ArtifactClosureViolation>,
+) -> BTreeMap<String, String> {
+    let mut wrappers = BTreeMap::new();
+    for item in &entry.items {
         let syn::Item::Fn(function) = item else {
             continue;
         };
-        if !function.attrs.iter().any(is_test_attribute)
-            || function.attrs.iter().any(is_conditional_attribute)
-        {
+        if !function.attrs.iter().any(is_test_attribute) {
             continue;
         }
-        if function.sig.ident == "settingsonly_server_binary_is_an_executable_artifact"
-            && !function.attrs.iter().any(is_ignore_attribute)
-            && artifact_contract_tail(&function, ArtifactContractKind::Binary)
+        let test_name = function.sig.ident.to_string();
+        if function.attrs.iter().any(is_ignore_attribute)
+            || function.attrs.iter().any(is_conditional_attribute)
+            || function
+                .attrs
+                .iter()
+                .any(|attribute| attribute.path().is_ident("should_panic"))
+            || function.block.stmts.len() != 1
         {
-            binary = true;
+            violations.push(ArtifactClosureViolation::new(
+                ArtifactClosureStage::TestInventory,
+                None::<String>,
+                ArtifactClosurePath::Entry,
+                Some(function.sig.ident.span()),
+                "one live unconditional non-empty run_case carrier",
+                test_name,
+            ));
+            continue;
         }
-        if function.sig.ident == "settingsonly_runtime_image_is_an_executable_artifact"
-            && function.attrs.iter().any(is_ignore_attribute)
-            && artifact_contract_tail(&function, ArtifactContractKind::Image)
-            && image_environment_is_loaded(&function)
+        let syn::Stmt::Expr(syn::Expr::Await(awaited), None) = &function.block.stmts[0] else {
+            violations.push(ArtifactClosureViolation::new(
+                ArtifactClosureStage::TestInventory,
+                None::<String>,
+                ArtifactClosurePath::Entry,
+                Some(function.block.span()),
+                "tail-awaited run_case(EvidenceCase::<Case>)",
+                function.block.to_token_stream().to_string(),
+            ));
+            continue;
+        };
+        let syn::Expr::Call(call) = awaited.base.as_ref() else {
+            violations.push(ArtifactClosureViolation::new(
+                ArtifactClosureStage::TestInventory,
+                None::<String>,
+                ArtifactClosurePath::Entry,
+                Some(awaited.span()),
+                "run_case call",
+                awaited.to_token_stream().to_string(),
+            ));
+            continue;
+        };
+        let case = if expression_path_ends_with(call.func.as_ref(), &["run_case"])
+            && call.args.len() == 1
         {
-            image = true;
-        }
-        if function.sig.ident == "settingsonly_binary_and_image_are_live_deployments"
-            && function.attrs.iter().any(is_ignore_attribute)
-            && live_artifact_contract_tail(&function)
-            && image_environment_is_loaded(&function)
-        {
-            live = true;
+            call.args.first().and_then(|argument| match argument {
+                syn::Expr::Path(path) => {
+                    let segments = path.path.segments.iter().collect::<Vec<_>>();
+                    matches!(segments.as_slice(), [owner, _] if owner.ident == "EvidenceCase")
+                        .then(|| segments[1].ident.to_string())
+                }
+                _ => None,
+            })
+        } else {
+            None
+        };
+        let Some(case) = case else {
+            violations.push(ArtifactClosureViolation::new(
+                ArtifactClosureStage::TestInventory,
+                None::<String>,
+                ArtifactClosurePath::Entry,
+                Some(call.span()),
+                "run_case(EvidenceCase::<Case>)",
+                call.to_token_stream().to_string(),
+            ));
+            continue;
+        };
+        if let Some(previous) = wrappers.insert(case.clone(), test_name.clone()) {
+            violations.push(ArtifactClosureViolation::new(
+                ArtifactClosureStage::TestInventory,
+                Some(case),
+                ArtifactClosurePath::Entry,
+                Some(function.sig.ident.span()),
+                "one test carrier per case",
+                format!("duplicate carriers {previous} and {test_name}"),
+            ));
         }
     }
-    Ok(binary && image && live)
+    wrappers
+}
+
+fn collect_case_dispatch(
+    support: &syn::File,
+    violations: &mut Vec<ArtifactClosureViolation>,
+) -> BTreeMap<String, String> {
+    let methods = support
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Impl(item)
+                if matches!(item.self_ty.as_ref(), syn::Type::Path(path)
+                    if path.path.is_ident("EvidenceCase")) =>
+            {
+                item.items.iter().find_map(|item| match item {
+                    syn::ImplItem::Fn(method) if method.sig.ident == "dispatch" => Some(method),
+                    _ => None,
+                })
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let [method] = methods.as_slice() else {
+        violations.push(dispatch_violation(
+            None,
+            "one exhaustive EvidenceCase::dispatch method",
+            format!("{} dispatch methods", methods.len()),
+        ));
+        return BTreeMap::new();
+    };
+    let fixture_ident = method
+        .sig
+        .inputs
+        .iter()
+        .find_map(|argument| match argument {
+            syn::FnArg::Typed(argument)
+                if matches!(argument.ty.as_ref(), syn::Type::Reference(reference)
+                if matches!(reference.elem.as_ref(), syn::Type::Path(path)
+                    if path.path.is_ident("Fixture"))) =>
+            {
+                match argument.pat.as_ref() {
+                    syn::Pat::Ident(ident) => Some(&ident.ident),
+                    _ => None,
+                }
+            }
+            _ => None,
+        });
+    let Some(fixture_ident) = fixture_ident else {
+        violations.push(dispatch_violation(
+            Some(method.sig.span()),
+            "one mutable Fixture parameter",
+            method.sig.to_token_stream().to_string(),
+        ));
+        return BTreeMap::new();
+    };
+    let [syn::Stmt::Expr(syn::Expr::Match(case_match), None)] = method.block.stmts.as_slice()
+    else {
+        violations.push(dispatch_violation(
+            Some(method.block.span()),
+            "single exhaustive match self",
+            method.block.to_token_stream().to_string(),
+        ));
+        return BTreeMap::new();
+    };
+    if method.sig.asyncness.is_none()
+        || method.attrs.iter().any(is_conditional_attribute)
+        || !matches!(case_match.expr.as_ref(), syn::Expr::Path(path) if path.path.is_ident("self"))
+    {
+        violations.push(dispatch_violation(
+            Some(method.sig.span()),
+            "unconditional async dispatch matching self",
+            method.to_token_stream().to_string(),
+        ));
+    }
+    let mut dispatch = BTreeMap::new();
+    for arm in &case_match.arms {
+        let Some(case) = case_pattern_name(&arm.pat) else {
+            violations.push(dispatch_violation(
+                Some(arm.pat.span()),
+                "explicit EvidenceCase arm without wildcard",
+                arm.pat.to_token_stream().to_string(),
+            ));
+            continue;
+        };
+        let scenario = match arm.body.as_ref() {
+            syn::Expr::Await(awaited) => match awaited.base.as_ref() {
+                syn::Expr::MethodCall(call)
+                    if call.args.is_empty()
+                        && matches!(call.receiver.as_ref(), syn::Expr::Path(path)
+                            if path.path.is_ident(fixture_ident)) =>
+                {
+                    Some(call.method.to_string())
+                }
+                _ => None,
+            },
+            _ => None,
+        };
+        let Some(scenario) = scenario else {
+            violations.push(ArtifactClosureViolation::new(
+                ArtifactClosureStage::Dispatch,
+                Some(case),
+                ArtifactClosurePath::Support,
+                Some(arm.body.span()),
+                "awaited zero-argument call on the Fixture parameter",
+                arm.body.to_token_stream().to_string(),
+            ));
+            continue;
+        };
+        let expected_scenario = snake_case(&case);
+        if scenario != expected_scenario {
+            violations.push(ArtifactClosureViolation::new(
+                ArtifactClosureStage::Dispatch,
+                Some(case.clone()),
+                ArtifactClosurePath::Support,
+                Some(arm.body.span()),
+                expected_scenario,
+                scenario.clone(),
+            ));
+        }
+        if arm.guard.is_some() || dispatch.insert(case.clone(), scenario).is_some() {
+            violations.push(ArtifactClosureViolation::new(
+                ArtifactClosureStage::Dispatch,
+                Some(case),
+                ArtifactClosurePath::Support,
+                Some(arm.span()),
+                "one unguarded dispatch arm",
+                arm.to_token_stream().to_string(),
+            ));
+        }
+    }
+
+    validate_production_runner(support, violations);
+    dispatch
+}
+
+fn validate_production_runner(support: &syn::File, violations: &mut Vec<ArtifactClosureViolation>) {
+    let runners = support
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Fn(function) if function.sig.ident == "run_case" => Some(function),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let [runner] = runners.as_slice() else {
+        violations.push(ArtifactClosureViolation::new(
+            ArtifactClosureStage::Dispatch,
+            None::<String>,
+            ArtifactClosurePath::Support,
+            None,
+            "one run_case function",
+            format!("{} run_case functions", runners.len()),
+        ));
+        return;
+    };
+    let Some((case_ident, _)) = runner
+        .sig
+        .inputs
+        .first()
+        .and_then(|argument| match argument {
+            syn::FnArg::Typed(argument) => match (argument.pat.as_ref(), argument.ty.as_ref()) {
+                (syn::Pat::Ident(ident), syn::Type::Path(path))
+                    if path_has_suffix(&path.path, &["EvidenceCase"]) =>
+                {
+                    Some((&ident.ident, path))
+                }
+                _ => None,
+            },
+            _ => None,
+        })
+    else {
+        violations.push(ArtifactClosureViolation::new(
+            ArtifactClosureStage::Dispatch,
+            None::<String>,
+            ArtifactClosurePath::Support,
+            Some(runner.sig.span()),
+            "one EvidenceCase parameter",
+            runner.sig.to_token_stream().to_string(),
+        ));
+        return;
+    };
+    let mut fixture_binding = None;
+    let mut result_binding = None;
+    let mut start_index = None;
+    let mut dispatch_index = None;
+    let mut finish_index = None;
+    for (index, statement) in runner.block.stmts.iter().enumerate() {
+        let syn::Stmt::Local(local) = statement else {
+            continue;
+        };
+        let syn::Pat::Ident(binding) = &local.pat else {
+            continue;
+        };
+        let Some(init) = &local.init else {
+            continue;
+        };
+        if fixture_start_consumes_case(init.expr.as_ref(), case_ident) {
+            if fixture_binding.replace(binding.ident.clone()).is_some() {
+                violations.push(dispatch_violation(
+                    Some(binding.ident.span()),
+                    "one Fixture::start binding",
+                    "duplicate Fixture::start",
+                ));
+            }
+            start_index = Some(index);
+        }
+        if fixture_binding.as_ref().is_some_and(|fixture| {
+            expression_contains_case_dispatch(init.expr.as_ref(), case_ident, fixture)
+        }) {
+            result_binding = Some(binding.ident.clone());
+            dispatch_index = Some(index);
+        }
+    }
+    if let (Some(fixture), Some(result)) = (&fixture_binding, &result_binding) {
+        for (index, statement) in runner.block.stmts.iter().enumerate() {
+            if finish_consumes_bindings(statement, fixture, result)
+                && finish_index.replace(index).is_some()
+            {
+                violations.push(dispatch_violation(
+                    Some(statement.span()),
+                    "one fixture.finish(result)",
+                    "duplicate finish",
+                ));
+            }
+        }
+    }
+    let mut flow = ProductionRunnerFlow::default();
+    syn::visit::Visit::visit_block(&mut flow, &runner.block);
+    if runner.sig.asyncness.is_none()
+        || runner.attrs.iter().any(is_conditional_attribute)
+        || runner.sig.inputs.len() != 1
+        || flow.fixture_starts != 1
+        || flow.finishes != 1
+        || flow.extra_control_flow
+        || !matches!((start_index, dispatch_index, finish_index), (Some(start), Some(dispatch), Some(finish)) if start < dispatch && dispatch < finish)
+    {
+        violations.push(dispatch_violation(
+            Some(runner.sig.ident.span()),
+            "ordered Fixture::start -> case.dispatch -> fixture.finish(result)",
+            runner.block.to_token_stream().to_string(),
+        ));
+    }
+}
+
+fn expression_contains_case_dispatch(
+    expression: &syn::Expr,
+    case_ident: &syn::Ident,
+    fixture_ident: &syn::Ident,
+) -> bool {
+    struct DispatchCall<'a> {
+        case_ident: &'a syn::Ident,
+        fixture_ident: &'a syn::Ident,
+        count: usize,
+    }
+    impl<'ast> syn::visit::Visit<'ast> for DispatchCall<'_> {
+        fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+            if call.method == "dispatch"
+                && matches!(call.receiver.as_ref(), syn::Expr::Path(path)
+                    if path.path.is_ident(self.case_ident))
+                && matches!(call.args.first(), Some(syn::Expr::Reference(reference))
+                    if reference.mutability.is_some()
+                        && matches!(reference.expr.as_ref(), syn::Expr::Path(path)
+                            if path.path.is_ident(self.fixture_ident)))
+                && call.args.len() == 1
+            {
+                self.count += 1;
+            }
+            syn::visit::visit_expr_method_call(self, call);
+        }
+    }
+    let mut visitor = DispatchCall {
+        case_ident,
+        fixture_ident,
+        count: 0,
+    };
+    syn::visit::Visit::visit_expr(&mut visitor, expression);
+    visitor.count == 1
+}
+
+fn fixture_start_consumes_case(expression: &syn::Expr, case_ident: &syn::Ident) -> bool {
+    let syn::Expr::Try(tried) = expression else {
+        return false;
+    };
+    let syn::Expr::Await(awaited) = tried.expr.as_ref() else {
+        return false;
+    };
+    let syn::Expr::Call(call) = awaited.base.as_ref() else {
+        return false;
+    };
+    expression_path_ends_with(call.func.as_ref(), &["Fixture", "start"])
+        && call.args.len() == 2
+        && matches!(call.args.iter().nth(1), Some(syn::Expr::MethodCall(id))
+            if id.method == "id" && id.args.is_empty()
+                && matches!(id.receiver.as_ref(), syn::Expr::Path(path) if path.path.is_ident(case_ident)))
+}
+
+fn finish_consumes_bindings(
+    statement: &syn::Stmt,
+    fixture: &syn::Ident,
+    result: &syn::Ident,
+) -> bool {
+    let syn::Stmt::Expr(syn::Expr::Await(awaited), None) = statement else {
+        return false;
+    };
+    matches!(awaited.base.as_ref(), syn::Expr::MethodCall(call)
+        if call.method == "finish" && call.args.len() == 1
+            && matches!(call.receiver.as_ref(), syn::Expr::Path(path) if path.path.is_ident(fixture))
+            && matches!(call.args.first(), Some(syn::Expr::Path(path)) if path.path.is_ident(result)))
+}
+
+fn dispatch_violation(
+    span: Option<proc_macro2::Span>,
+    expected: impl Into<String>,
+    actual: impl Into<String>,
+) -> ArtifactClosureViolation {
+    ArtifactClosureViolation::new(
+        ArtifactClosureStage::Dispatch,
+        None::<String>,
+        ArtifactClosurePath::Support,
+        span,
+        expected,
+        actual,
+    )
+}
+
+fn reconcile_case_inventory(
+    cases: &BTreeSet<String>,
+    ids: &BTreeMap<String, String>,
+    test_names: &BTreeMap<String, String>,
+    wrappers: &BTreeMap<String, String>,
+    dispatch: &BTreeMap<String, String>,
+    violations: &mut Vec<ArtifactClosureViolation>,
+) {
+    for (stage, path, label, actual) in [
+        (
+            ArtifactClosureStage::EvidenceId,
+            ArtifactClosurePath::Support,
+            "EvidenceCase::id arms",
+            ids.keys().cloned().collect::<BTreeSet<_>>(),
+        ),
+        (
+            ArtifactClosureStage::TestName,
+            ArtifactClosurePath::Support,
+            "EvidenceCase::test_name arms",
+            test_names.keys().cloned().collect(),
+        ),
+        (
+            ArtifactClosureStage::TestInventory,
+            ArtifactClosurePath::Entry,
+            "test wrappers",
+            wrappers.keys().cloned().collect(),
+        ),
+        (
+            ArtifactClosureStage::Dispatch,
+            ArtifactClosurePath::Support,
+            "dispatch arms",
+            dispatch.keys().cloned().collect(),
+        ),
+    ] {
+        for missing in cases.difference(&actual) {
+            violations.push(ArtifactClosureViolation::new(
+                stage,
+                Some(missing.clone()),
+                path,
+                None,
+                format!("{label} contains the enum case"),
+                "missing",
+            ));
+        }
+        for stale in actual.difference(cases) {
+            violations.push(ArtifactClosureViolation::new(
+                stage,
+                Some(stale.clone()),
+                path,
+                None,
+                format!("{label} contains only enum cases"),
+                "stale or unknown case",
+            ));
+        }
+    }
+}
+
+fn certify_case_ids(
+    cases: &BTreeSet<String>,
+    ids: &BTreeMap<String, String>,
+    violations: &mut Vec<ArtifactClosureViolation>,
+) {
+    let mut seen = BTreeSet::new();
+    for case in cases {
+        let expected = format!("SETTINGSONLY-T3-{}-01", screaming_kebab_case(case));
+        let actual = ids
+            .get(case)
+            .cloned()
+            .unwrap_or_else(|| "missing".to_owned());
+        if actual != expected || !seen.insert(actual.clone()) {
+            violations.push(ArtifactClosureViolation::new(
+                ArtifactClosureStage::EvidenceId,
+                Some(case.clone()),
+                ArtifactClosurePath::Support,
+                None,
+                expected,
+                actual,
+            ));
+        }
+    }
+}
+
+fn screaming_kebab_case(value: &str) -> String {
+    let chars = value.chars().collect::<Vec<_>>();
+    let mut result = String::new();
+    for (index, ch) in chars.iter().copied().enumerate() {
+        let previous = index
+            .checked_sub(1)
+            .and_then(|index| chars.get(index))
+            .copied();
+        let next = chars.get(index + 1).copied();
+        if index > 0
+            && ((ch.is_ascii_uppercase()
+                && previous.is_some_and(|previous| previous.is_ascii_lowercase())
+                || ch.is_ascii_uppercase()
+                    && previous.is_some_and(|previous| previous.is_ascii_uppercase())
+                    && next.is_some_and(|next| next.is_ascii_lowercase()))
+                || !ch.is_ascii_digit()
+                    && previous.is_some_and(|previous| previous.is_ascii_digit()))
+        {
+            result.push('-');
+        }
+        result.push(ch.to_ascii_uppercase());
+    }
+    result
+}
+
+fn certify_case_test_names(
+    cases: &BTreeSet<String>,
+    test_names: &BTreeMap<String, String>,
+    wrappers: &BTreeMap<String, String>,
+    violations: &mut Vec<ArtifactClosureViolation>,
+) {
+    let mut seen = BTreeSet::new();
+    for case in cases {
+        let expected = test_names
+            .get(case)
+            .cloned()
+            .unwrap_or_else(|| "missing".to_owned());
+        let actual = wrappers
+            .get(case)
+            .cloned()
+            .unwrap_or_else(|| "missing".to_owned());
+        if expected != actual || !seen.insert(expected.clone()) {
+            violations.push(ArtifactClosureViolation::new(
+                ArtifactClosureStage::TestName,
+                Some(case.clone()),
+                if actual == "missing" {
+                    ArtifactClosurePath::Entry
+                } else {
+                    ArtifactClosurePath::Support
+                },
+                None,
+                expected,
+                actual,
+            ));
+        }
+    }
+}
+
+fn certify_case_dispatch_names(
+    cases: &BTreeSet<String>,
+    dispatch: &BTreeMap<String, String>,
+    violations: &mut Vec<ArtifactClosureViolation>,
+) {
+    for case in cases {
+        let expected = snake_case(case);
+        let actual = dispatch
+            .get(case)
+            .cloned()
+            .unwrap_or_else(|| "missing".to_owned());
+        if actual != expected {
+            violations.push(ArtifactClosureViolation::new(
+                ArtifactClosureStage::Dispatch,
+                Some(case.clone()),
+                ArtifactClosurePath::Support,
+                None,
+                expected,
+                actual,
+            ));
+        }
+    }
+}
+
+fn snake_case(value: &str) -> String {
+    screaming_kebab_case(value)
+        .to_ascii_lowercase()
+        .replace('-', "_")
+}
+
+fn certify_typed_receipt_scenarios(
+    support: &syn::File,
+    cases: &BTreeSet<String>,
+    dispatch: &BTreeMap<String, String>,
+    violations: &mut Vec<ArtifactClosureViolation>,
+) {
+    certify_receipt_type_boundaries(support, violations);
+    let fixture_methods = support
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Impl(item)
+                if matches!(item.self_ty.as_ref(), syn::Type::Path(path)
+                    if path.path.is_ident("Fixture")) =>
+            {
+                Some(item)
+            }
+            _ => None,
+        })
+        .flat_map(|item| item.items.iter())
+        .filter_map(|item| match item {
+            syn::ImplItem::Fn(method) => Some((method.sig.ident.to_string(), method)),
+            _ => None,
+        })
+        .collect::<BTreeMap<_, _>>();
+    let async_methods = fixture_methods
+        .iter()
+        .filter_map(|(name, method)| method.sig.asyncness.is_some().then_some(name.clone()))
+        .collect::<BTreeSet<_>>();
+
+    certify_hazard_receipt_minter(
+        &fixture_methods,
+        "UnackedReceipt",
+        &["wait_claimed", "wait_broker_delivery"],
+        violations,
+    );
+    certify_hazard_receipt_minter(
+        &fixture_methods,
+        "InflightReceipt",
+        &["wait_claimed", "wait_for_waiter"],
+        violations,
+    );
+
+    for case in cases {
+        let Some(name) = dispatch.get(case) else {
+            continue;
+        };
+        let Some(method) = fixture_methods.get(name) else {
+            violations.push(scenario_violation(
+                case,
+                None,
+                "dispatched Fixture scenario method",
+                format!("missing Fixture::{name}"),
+            ));
+            continue;
+        };
+        let mut flow = ScenarioFlowVisitor::default();
+        syn::visit::Visit::visit_block(&mut flow, &method.block);
+        if method.sig.asyncness.is_none()
+            || method.attrs.iter().any(is_conditional_attribute)
+            || method.block.stmts.is_empty()
+            || flow.forbidden
+        {
+            violations.push(scenario_violation(
+                case,
+                Some(method.sig.ident.span()),
+                "live unconditional transparent async scenario",
+                method.to_token_stream().to_string(),
+            ));
+            continue;
+        }
+        let mut calls = ScenarioCallFlow::new(&async_methods);
+        syn::visit::Visit::visit_block(&mut calls, &method.block);
+        for call in calls.invalid {
+            violations.push(scenario_violation(
+                case,
+                Some(call.span),
+                "async witness awaited and its Result consumed",
+                call.actual,
+            ));
+        }
+        for (name, spans) in calls.consumed {
+            if spans.len() > 1 {
+                violations.push(scenario_violation(
+                    case,
+                    spans.first().copied(),
+                    format!("one live {name} witness"),
+                    format!("{} witnesses", spans.len()),
+                ));
+            }
+        }
+        for construction in calls.receipt_constructions {
+            violations.push(ArtifactClosureViolation::new(
+                ArtifactClosureStage::ReceiptProvenance,
+                Some(case.clone()),
+                ArtifactClosurePath::Support,
+                Some(construction.1),
+                "receipt minted by a typed Fixture method",
+                format!("direct {} construction", construction.0),
+            ));
+        }
+    }
+}
+
+fn certify_receipt_type_boundaries(
+    support: &syn::File,
+    violations: &mut Vec<ArtifactClosureViolation>,
+) {
+    for receipt in support.items.iter().filter_map(|item| match item {
+        syn::Item::Struct(receipt) if receipt.ident.to_string().ends_with("Receipt") => {
+            Some(receipt)
+        }
+        _ => None,
+    }) {
+        let cloneable = receipt.attrs.iter().any(|attribute| {
+            attribute.path().is_ident("derive") && {
+                let derive = attribute.meta.to_token_stream().to_string();
+                derive
+                    .split(|ch: char| !ch.is_ascii_alphanumeric())
+                    .any(|trait_name| matches!(trait_name, "Clone" | "Copy"))
+            }
+        });
+        let private_fields = receipt
+            .fields
+            .iter()
+            .all(|field| matches!(field.vis, syn::Visibility::Inherited));
+        if cloneable || !matches!(receipt.vis, syn::Visibility::Inherited) || !private_fields {
+            violations.push(ArtifactClosureViolation::new(
+                ArtifactClosureStage::ReceiptProvenance,
+                None::<String>,
+                ArtifactClosurePath::Support,
+                Some(receipt.ident.span()),
+                "private non-Clone non-Copy receipt with private fields",
+                receipt.to_token_stream().to_string(),
+            ));
+        }
+    }
+}
+
+fn certify_hazard_receipt_minter(
+    fixture_methods: &BTreeMap<String, &syn::ImplItemFn>,
+    receipt: &str,
+    ordered_observations: &[&str],
+    violations: &mut Vec<ArtifactClosureViolation>,
+) {
+    let minters = fixture_methods
+        .values()
+        .filter(|method| method_result_receipt(method).as_deref() == Some(receipt))
+        .copied()
+        .collect::<Vec<_>>();
+    let [minter] = minters.as_slice() else {
+        violations.push(ArtifactClosureViolation::new(
+            ArtifactClosureStage::ReceiptProvenance,
+            None::<String>,
+            ArtifactClosurePath::Support,
+            None,
+            format!("one typed {receipt} minter"),
+            format!("{} minters", minters.len()),
+        ));
+        return;
+    };
+    let mut flow = ReceiptMinterFlow::default();
+    syn::visit::Visit::visit_block(&mut flow, &minter.block);
+    let positions = ordered_observations
+        .iter()
+        .map(|expected| {
+            (flow
+                .calls
+                .iter()
+                .filter(|actual| *actual == expected)
+                .count()
+                == 1)
+                .then(|| {
+                    flow.calls
+                        .iter()
+                        .position(|actual| actual == expected)
+                        .map(|position| (expected, position))
+                })
+                .flatten()
+        })
+        .collect::<Option<Vec<_>>>();
+    let ordered = positions
+        .as_ref()
+        .is_some_and(|positions| positions.windows(2).all(|pair| pair[0].1 < pair[1].1));
+    if minter.sig.asyncness.is_none()
+        || minter.attrs.iter().any(is_conditional_attribute)
+        || flow
+            .constructed
+            .iter()
+            .filter(|name| *name == receipt)
+            .count()
+            != 1
+        || flow.invalid_consumption
+        || !ordered
+    {
+        violations.push(ArtifactClosureViolation::new(
+            ArtifactClosureStage::ReceiptProvenance,
+            None::<String>,
+            ArtifactClosurePath::Support,
+            Some(minter.sig.ident.span()),
+            format!(
+                "typed {receipt} minter with ordered {}",
+                ordered_observations.join(" -> ")
+            ),
+            format!("calls={:?} constructed={:?}", flow.calls, flow.constructed),
+        ));
+    }
+}
+
+fn method_result_receipt(method: &syn::ImplItemFn) -> Option<String> {
+    let syn::ReturnType::Type(_, return_type) = &method.sig.output else {
+        return None;
+    };
+    let syn::Type::Path(result) = return_type.as_ref() else {
+        return None;
+    };
+    let arguments = match &result.path.segments.last()?.arguments {
+        syn::PathArguments::AngleBracketed(arguments) => &arguments.args,
+        _ => return None,
+    };
+    arguments.iter().find_map(|argument| match argument {
+        syn::GenericArgument::Type(syn::Type::Path(path)) => path
+            .path
+            .segments
+            .last()
+            .map(|segment| segment.ident.to_string())
+            .filter(|name| name.ends_with("Receipt")),
+        _ => None,
+    })
+}
+
+#[derive(Default)]
+struct ReceiptMinterFlow {
+    calls: Vec<String>,
+    constructed: Vec<String>,
+    await_depth: usize,
+    try_depth: usize,
+    invalid_consumption: bool,
+}
+
+impl<'ast> syn::visit::Visit<'ast> for ReceiptMinterFlow {
+    fn visit_expr_await(&mut self, node: &'ast syn::ExprAwait) {
+        self.await_depth += 1;
+        syn::visit::visit_expr_await(self, node);
+        self.await_depth -= 1;
+    }
+
+    fn visit_expr_try(&mut self, node: &'ast syn::ExprTry) {
+        self.try_depth += 1;
+        syn::visit::visit_expr_try(self, node);
+        self.try_depth -= 1;
+    }
+
+    fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+        self.calls.push(node.method.to_string());
+        if matches!(
+            node.method.to_string().as_str(),
+            "wait_claimed" | "wait_broker_delivery" | "wait_for_waiter"
+        ) && (self.await_depth == 0 || self.try_depth == 0)
+        {
+            self.invalid_consumption = true;
+        }
+        syn::visit::visit_expr_method_call(self, node);
+    }
+
+    fn visit_expr_struct(&mut self, node: &'ast syn::ExprStruct) {
+        if let Some(name) = node.path.segments.last() {
+            self.constructed.push(name.ident.to_string());
+        }
+        syn::visit::visit_expr_struct(self, node);
+    }
+}
+
+fn scenario_violation(
+    case: &str,
+    span: Option<proc_macro2::Span>,
+    expected: impl Into<String>,
+    actual: impl Into<String>,
+) -> ArtifactClosureViolation {
+    ArtifactClosureViolation::new(
+        ArtifactClosureStage::Scenario,
+        Some(case.to_owned()),
+        ArtifactClosurePath::Support,
+        span,
+        expected,
+        actual,
+    )
+}
+
+struct InvalidScenarioCall {
+    span: proc_macro2::Span,
+    actual: String,
+}
+
+struct ScenarioCallFlow<'a> {
+    async_methods: &'a BTreeSet<String>,
+    await_depth: usize,
+    try_depth: usize,
+    consumed: BTreeMap<String, Vec<proc_macro2::Span>>,
+    invalid: Vec<InvalidScenarioCall>,
+    receipt_constructions: Vec<(String, proc_macro2::Span)>,
+}
+
+impl<'a> ScenarioCallFlow<'a> {
+    fn new(async_methods: &'a BTreeSet<String>) -> Self {
+        Self {
+            async_methods,
+            await_depth: 0,
+            try_depth: 0,
+            consumed: BTreeMap::new(),
+            invalid: Vec::new(),
+            receipt_constructions: Vec::new(),
+        }
+    }
+}
+
+impl<'ast> syn::visit::Visit<'ast> for ScenarioCallFlow<'_> {
+    fn visit_expr_await(&mut self, node: &'ast syn::ExprAwait) {
+        self.await_depth += 1;
+        syn::visit::visit_expr_await(self, node);
+        self.await_depth -= 1;
+    }
+
+    fn visit_expr_try(&mut self, node: &'ast syn::ExprTry) {
+        self.try_depth += 1;
+        syn::visit::visit_expr_try(self, node);
+        self.try_depth -= 1;
+    }
+
+    fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+        let name = node.method.to_string();
+        if self.async_methods.contains(&name) {
+            if self.await_depth == 0 || self.try_depth == 0 {
+                self.invalid.push(InvalidScenarioCall {
+                    span: node.span(),
+                    actual: format!(
+                        "{name}: await_depth={}, try_depth={}",
+                        self.await_depth, self.try_depth
+                    ),
+                });
+            } else {
+                self.consumed.entry(name).or_default().push(node.span());
+            }
+        }
+        syn::visit::visit_expr_method_call(self, node);
+    }
+
+    fn visit_expr_struct(&mut self, node: &'ast syn::ExprStruct) {
+        if let Some(name) = node
+            .path
+            .segments
+            .last()
+            .map(|segment| segment.ident.to_string())
+            && name.ends_with("Receipt")
+        {
+            self.receipt_constructions.push((name, node.span()));
+        }
+        syn::visit::visit_expr_struct(self, node);
+    }
+}
+
+fn production_entry_links_exact_support(entry: &syn::File) -> bool {
+    let modules = entry
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Mod(module) if module.ident == "settingsonly_production_artifact" => {
+                Some(module)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let [module] = modules.as_slice() else {
+        return false;
+    };
+    let exact_path = module.attrs.iter().filter_map(|attribute| {
+        if !attribute.path().is_ident("path") {
+            return None;
+        }
+        match &attribute.meta {
+            syn::Meta::NameValue(value) => match &value.value {
+                syn::Expr::Lit(syn::ExprLit {
+                    lit: syn::Lit::Str(path),
+                    ..
+                }) => Some(path.value()),
+                _ => Some(String::new()),
+            },
+            _ => Some(String::new()),
+        }
+    });
+    if module.content.is_some()
+        || module.attrs.iter().any(is_conditional_attribute)
+        || exact_path.collect::<Vec<_>>() != ["support/settingsonly_production_artifact.rs"]
+    {
+        return false;
+    }
+
+    let imports = entry
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Use(item)
+                if use_tree_root_is(&item.tree, "settingsonly_production_artifact") =>
+            {
+                Some(item)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let [import] = imports.as_slice() else {
+        return false;
+    };
+    !import.attrs.iter().any(is_conditional_attribute)
+        && import.to_token_stream().to_string()
+            == "use settingsonly_production_artifact :: { EvidenceCase , run_case } ;"
+}
+
+fn use_tree_root_is(tree: &syn::UseTree, expected: &str) -> bool {
+    matches!(tree, syn::UseTree::Path(path) if path.ident == expected)
+}
+
+#[derive(Default)]
+struct ProductionRunnerFlow {
+    fixture_starts: usize,
+    finishes: usize,
+    extra_control_flow: bool,
+}
+
+impl<'ast> syn::visit::Visit<'ast> for ProductionRunnerFlow {
+    fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+        self.fixture_starts += usize::from(expression_path_ends_with(
+            node.func.as_ref(),
+            &["Fixture", "start"],
+        ));
+        syn::visit::visit_expr_call(self, node);
+    }
+
+    fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+        self.finishes += usize::from(node.method == "finish");
+        syn::visit::visit_expr_method_call(self, node);
+    }
+
+    fn visit_expr_if(&mut self, _node: &'ast syn::ExprIf) {
+        self.extra_control_flow = true;
+    }
+
+    fn visit_expr_loop(&mut self, _node: &'ast syn::ExprLoop) {
+        self.extra_control_flow = true;
+    }
+
+    fn visit_expr_while(&mut self, _node: &'ast syn::ExprWhile) {
+        self.extra_control_flow = true;
+    }
+
+    fn visit_expr_for_loop(&mut self, _node: &'ast syn::ExprForLoop) {
+        self.extra_control_flow = true;
+    }
+
+    fn visit_expr_return(&mut self, _node: &'ast syn::ExprReturn) {
+        self.extra_control_flow = true;
+    }
+}
+
+#[derive(Default)]
+struct ScenarioFlowVisitor {
+    forbidden: bool,
+}
+
+impl<'ast> syn::visit::Visit<'ast> for ScenarioFlowVisitor {
+    fn visit_attribute(&mut self, node: &'ast syn::Attribute) {
+        self.forbidden |= is_conditional_attribute(node);
+        syn::visit::visit_attribute(self, node);
+    }
+
+    fn visit_expr_closure(&mut self, _node: &'ast syn::ExprClosure) {
+        self.forbidden = true;
+    }
+
+    fn visit_expr_async(&mut self, _node: &'ast syn::ExprAsync) {
+        self.forbidden = true;
+    }
+
+    fn visit_expr_const(&mut self, _node: &'ast syn::ExprConst) {
+        self.forbidden = true;
+    }
+
+    fn visit_expr_if(&mut self, _node: &'ast syn::ExprIf) {
+        self.forbidden = true;
+    }
+
+    fn visit_expr_match(&mut self, _node: &'ast syn::ExprMatch) {
+        self.forbidden = true;
+    }
+
+    fn visit_expr_loop(&mut self, _node: &'ast syn::ExprLoop) {
+        self.forbidden = true;
+    }
+
+    fn visit_expr_while(&mut self, _node: &'ast syn::ExprWhile) {
+        self.forbidden = true;
+    }
+
+    fn visit_expr_for_loop(&mut self, _node: &'ast syn::ExprForLoop) {
+        self.forbidden = true;
+    }
+
+    fn visit_expr_return(&mut self, _node: &'ast syn::ExprReturn) {
+        self.forbidden = true;
+    }
+}
+
+fn path_has_suffix(path: &syn::Path, expected: &[&str]) -> bool {
+    let segments = path.segments.iter().collect::<Vec<_>>();
+    segments.len() >= expected.len()
+        && segments[segments.len() - expected.len()..]
+            .iter()
+            .zip(expected)
+            .all(|(segment, expected)| segment.ident == *expected)
+}
+
+fn dockerignore_includes_contracts(root: &Path) -> Result<bool> {
+    let path = root.join(".dockerignore");
+    let source =
+        std::fs::read_to_string(&path).with_context(|| format!("读取 {} 失败", path.display()))?;
+    Ok(!source.lines().map(str::trim).any(|line| {
+        if line.is_empty() || line.starts_with('#') || line.starts_with('!') {
+            return false;
+        }
+        let pattern = line.trim_start_matches('/').trim_end_matches('/');
+        pattern == "contracts"
+            || pattern.starts_with("contracts/")
+            || pattern == "**/contracts"
+            || pattern.starts_with("**/contracts/")
+    }))
 }
 
 #[derive(Clone, Copy)]
 enum ArtifactContractKind {
     Binary,
     Image,
-}
-
-fn artifact_contract_tail(function: &syn::ItemFn, kind: ArtifactContractKind) -> bool {
-    let Some(syn::Stmt::Expr(syn::Expr::Call(assertion), None)) = function.block.stmts.last()
-    else {
-        return false;
-    };
-    if !expression_path_ends_with(assertion.func.as_ref(), &["assert_executable_contract"])
-        || assertion.args.len() != 1
-    {
-        return false;
-    }
-    artifact_constructor_matches(assertion.args.first(), kind)
-}
-
-fn live_artifact_contract_tail(function: &syn::ItemFn) -> bool {
-    let Some(syn::Stmt::Expr(syn::Expr::Call(assertion), None)) = function.block.stmts.last()
-    else {
-        return false;
-    };
-    expression_path_ends_with(
-        assertion.func.as_ref(),
-        &["assert_live_deployment_contract"],
-    ) && assertion.args.len() == 2
-        && artifact_constructor_matches(assertion.args.first(), ArtifactContractKind::Binary)
-        && artifact_constructor_matches(assertion.args.iter().nth(1), ArtifactContractKind::Image)
-}
-
-fn artifact_constructor_matches(
-    expression: Option<&syn::Expr>,
-    kind: ArtifactContractKind,
-) -> bool {
-    let Some(syn::Expr::Call(artifact)) = expression else {
-        return false;
-    };
-    let expected = match kind {
-        ArtifactContractKind::Binary => "Binary",
-        ArtifactContractKind::Image => "Image",
-    };
-    if !expression_path_ends_with(artifact.func.as_ref(), &["Artifact", expected])
-        || artifact.args.len() != 1
-    {
-        return false;
-    }
-    match (kind, artifact.args.first()) {
-        (ArtifactContractKind::Binary, Some(syn::Expr::Macro(expression))) => {
-            expression.mac.path.is_ident("env")
-                && syn::parse2::<syn::LitStr>(expression.mac.tokens.clone())
-                    .is_ok_and(|literal| literal.value() == "CARGO_BIN_EXE_settingsonly-server")
-        }
-        (ArtifactContractKind::Image, Some(syn::Expr::Reference(reference))) => {
-            matches!(reference.expr.as_ref(), syn::Expr::Path(path) if path.path.is_ident("image"))
-        }
-        _ => false,
-    }
 }
 
 fn image_environment_is_loaded(function: &syn::ItemFn) -> bool {
@@ -3768,54 +5255,6 @@ fn expression_path_ends_with(expression: &syn::Expr, expected: &[&str]) -> bool 
             .all(|(segment, expected)| segment.ident == *expected)
 }
 
-fn settingsonly_artifact_script_is_closed(source: &str) -> bool {
-    const EXPECTED: &[&str] = &[
-        "#!/usr/bin/env bash",
-        "set -euo pipefail",
-        "script_dir=\"$(cd \"$(dirname \"${BASH_SOURCE[0]}\")\" && pwd)\"",
-        "repo_root=\"$(cd \"$script_dir/..\" && pwd)\"",
-        "image=\"${RSS_SETTINGSONLY_ACCEPTANCE_IMAGE:-rss-settingsonly:artifact-acceptance}\"",
-        ": \"${RSS_SETTINGSONLY_PRODUCTION_FIXTURE_DIR:?installed TLS production fixture directory is required}\"",
-        ": \"${RSS_SETTINGSONLY_PRODUCTION_PRIMARY_ADDR:?production Primary address is required}\"",
-        ": \"${RSS_SETTINGSONLY_PRODUCTION_ADMIN_ADDR:?production Admin address is required}\"",
-        ": \"${RSS_SETTINGSONLY_PRODUCTION_HEALTH_ADDR:?production Health address is required}\"",
-        ": \"${RSS_SETTINGSONLY_PRODUCTION_PUBLISH_TOKEN:?signed settings.config-publish token is required}\"",
-        ": \"${RSS_SETTINGSONLY_PRODUCTION_INVENTORY_TOKEN:?signed runtime:inventory:read token is required}\"",
-        ": \"${RSS_SETTINGSONLY_PRODUCTION_WRONG_PERMISSION_TOKEN:?signed wrong-permission token is required}\"",
-        "test -f \"$RSS_SETTINGSONLY_PRODUCTION_FIXTURE_DIR/settingsonly-binary.toml\"",
-        "test -f \"$RSS_SETTINGSONLY_PRODUCTION_FIXTURE_DIR/settingsonly-image.toml\"",
-        "test -f \"$RSS_SETTINGSONLY_PRODUCTION_FIXTURE_DIR/serving-secret-bundle\"",
-        "test -f /var/run/rss/secrets/serving-secret-bundle",
-        "cd \"$repo_root\"",
-        "docker build --target settingsonly-runtime --tag \"$image\" .",
-        "RSS_SETTINGSONLY_ACCEPTANCE_IMAGE=\"$image\" ./hack/cargo.sh test -p settingsonly --test settingsonly_artifact_acceptance -- --include-ignored --test-threads=1",
-    ];
-    logical_shell_statements(source) == EXPECTED
-}
-
-fn logical_shell_statements(source: &str) -> Vec<String> {
-    let mut statements = Vec::new();
-    let mut current = String::new();
-    for line in source.lines().map(str::trim) {
-        if line.is_empty() || (line.starts_with('#') && !line.starts_with("#!")) {
-            continue;
-        }
-        let continued = line.strip_suffix('\\');
-        let fragment = continued.unwrap_or(line).trim_end();
-        if !current.is_empty() {
-            current.push(' ');
-        }
-        current.push_str(fragment);
-        if continued.is_none() {
-            statements.push(std::mem::take(&mut current));
-        }
-    }
-    if !current.is_empty() {
-        statements.push(current);
-    }
-    statements
-}
-
 fn is_test_attribute(attribute: &syn::Attribute) -> bool {
     let segments = attribute
         .path()
@@ -3839,43 +5278,6 @@ pub(crate) struct DockerStage<'a> {
     pub(crate) base: &'a str,
     pub(crate) name: &'a str,
     pub(crate) instructions: Vec<&'a str>,
-}
-
-fn settingsonly_docker_target_is_closed(source: &str) -> bool {
-    let stages = docker_stages(source);
-    let builders = stages
-        .iter()
-        .filter(|stage| stage.name == "settingsonly-builder")
-        .collect::<Vec<_>>();
-    let runtimes = stages
-        .iter()
-        .filter(|stage| stage.name == "settingsonly-runtime")
-        .collect::<Vec<_>>();
-    let ([builder], [runtime]) = (builders.as_slice(), runtimes.as_slice()) else {
-        return false;
-    };
-    let builder_ok = subset_builder_is_closed(builder, "settingsonly", "settingsonly-server");
-    const RUNTIME_INSTRUCTIONS: &[(&str, &str)] = &[
-        ("EXPOSE", "8080 8082 8083"),
-        (
-            "COPY",
-            "--from=settingsonly-builder /app/target/release/settingsonly-server /usr/local/bin/settingsonly-server",
-        ),
-        (
-            "COPY",
-            "--from=settingsonly-builder /app/assemblies/settingsonly/config.schema.json /usr/share/rss/settingsonly/config.schema.json",
-        ),
-        ("ENTRYPOINT", "[\"/usr/local/bin/settingsonly-server\"]"),
-    ];
-    let runtime_ok = runtime.base == "gcr.io/distroless/cc-debian12:nonroot"
-        && runtime.instructions.len() == RUNTIME_INSTRUCTIONS.len()
-        && runtime.instructions.iter().zip(RUNTIME_INSTRUCTIONS).all(
-            |(instruction, (keyword, arguments))| {
-                docker_instruction_arguments(instruction, keyword) == Some(*arguments)
-            },
-        );
-    let default_runtime_unchanged = stages.last().is_some_and(|stage| stage.name == "runtime");
-    builder_ok && runtime_ok && default_runtime_unchanged
 }
 
 pub(crate) fn docker_stages(source: &str) -> Vec<DockerStage<'_>> {
@@ -8103,7 +9505,8 @@ audit = { path = "../../crates/audit" }
     }
 
     #[test]
-    fn subset_docker_boundaries_reject_third_binary_and_arbitrary_copy() -> anyhow::Result<()> {
+    fn identityaudit_docker_boundary_rejects_third_binary_and_arbitrary_copy() -> anyhow::Result<()>
+    {
         let source = std::fs::read_to_string(crate::workspace_root()?.join("Dockerfile"))?;
         for (label, mutated) in [
             (
@@ -8114,34 +9517,18 @@ audit = { path = "../../crates/audit" }
                 ),
             ),
             (
-                "settingsonly third binary",
-                source.replace(
-                    "--package settingsonly --bin settingsonly-server",
-                    "--package settingsonly --bin settingsonly-server --package third --bin third",
-                ),
-            ),
-            (
                 "identityaudit arbitrary copy",
                 source.replace(
                     "ENTRYPOINT [\"/usr/local/bin/identityaudit-server\"]",
                     "COPY --from=identityaudit-builder /app/target/release/third /usr/local/bin/third\nENTRYPOINT [\"/usr/local/bin/identityaudit-server\"]",
                 ),
             ),
-            (
-                "settingsonly arbitrary copy",
-                source.replace(
-                    "ENTRYPOINT [\"/usr/local/bin/settingsonly-server\"]",
-                    "COPY --from=settingsonly-builder /app/target/release/third /usr/local/bin/third\nENTRYPOINT [\"/usr/local/bin/settingsonly-server\"]",
-                ),
-            ),
         ] {
             assert_ne!(mutated, source, "{label} mutation was vacuous");
-            let accepted = if label.starts_with("identityaudit") {
-                identityaudit_docker_target_is_closed(&mutated)
-            } else {
-                settingsonly_docker_target_is_closed(&mutated)
-            };
-            assert!(!accepted, "subset Docker boundary accepted {label}");
+            assert!(
+                !identityaudit_docker_target_is_closed(&mutated),
+                "identityaudit Docker boundary accepted {label}"
+            );
         }
         Ok(())
     }
@@ -8177,26 +9564,9 @@ audit = { path = "../../crates/audit" }
         Ok(())
     }
 
-    const SETTINGSONLY_DOCKER_FIXTURE: &str = r#"
-FROM chef AS settingsonly-builder
-COPY --from=planner /app/recipe.json recipe.json
-RUN cargo chef cook --release --locked --recipe-path recipe.json --package settingsonly --bin settingsonly-server
-COPY . .
-RUN cargo build --release --locked --package settingsonly --bin settingsonly-server
-RUN strip target/release/settingsonly-server
-FROM gcr.io/distroless/cc-debian12:nonroot AS settingsonly-runtime
-EXPOSE 8080 8082 8083
-COPY --from=settingsonly-builder /app/target/release/settingsonly-server /usr/local/bin/settingsonly-server
-COPY --from=settingsonly-builder /app/assemblies/settingsonly/config.schema.json /usr/share/rss/settingsonly/config.schema.json
-ENTRYPOINT ["/usr/local/bin/settingsonly-server"]
-FROM gcr.io/distroless/cc-debian12:nonroot AS runtime
-ENTRYPOINT ["/usr/local/bin/server"]
-"#;
-
     fn settingsonly_boundary_evidence<'a>(
         targets: &'a [MetadataTarget],
         closure_packages: &'a BTreeSet<String>,
-        dockerfile: &'a str,
     ) -> SettingsOnlyExecutableEvidence<'a> {
         SettingsOnlyExecutableEvidence {
             targets,
@@ -8204,15 +9574,21 @@ ENTRYPOINT ["/usr/local/bin/server"]
             test_support_enabled: false,
             schema_is_regular_file: true,
             sample_is_regular_file: true,
-            artifact_acceptance: true,
+            production_artifact_target_declared: true,
+            production_artifact: ArtifactClosureEvidence::certificate([
+                "InputReady",
+                "L2Join",
+                "Sigkill",
+                "Sigterm",
+            ]),
             journey_target_declared: true,
             required_journey_test_declared: true,
             runtimeexec_launch_is_live: true,
-            dockerfile,
+            dockerignore_contracts_included: true,
         }
     }
 
-    /// INVARIANT: SETTINGSONLY-EXECUTABLE-BOUNDARY-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::settingsonly_executable_boundary_rejects_each_incomplete_artifact_fact", anti_vacuity = "tests::settingsonly_real_executable_boundary_is_complete" } -- the #1796 target is one lib+bin+artifact-acceptance package whose default normal closure, committed config schema, exact non-ignored lifecycle fixture, and closed named distroless image target are checked without introducing the cross-assembly artifact matrix owned by #1798.
+    /// INVARIANT: SETTINGSONLY-EXECUTABLE-BOUNDARY-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::settingsonly_production_artifact_gate_rejects_incomplete_case_closure", anti_vacuity = "tests::settingsonly_real_executable_boundary_is_complete" } -- settingsonly remains one build-script+lib+bin package; its integration-only production artifact target is a closed four-case AST bijection, contracts remain in the image build context, and artifact identity/ENTRYPOINT stay owned by ASSEMBLY-ARTIFACT-MATRIX-01.
     #[test]
     fn settingsonly_executable_boundary_rejects_each_incomplete_artifact_fact() {
         let targets = [
@@ -8231,11 +9607,6 @@ ENTRYPOINT ["/usr/local/bin/server"]
                 kind: vec!["bin".to_owned()],
                 src_path: PathBuf::new(),
             },
-            MetadataTarget {
-                name: "settingsonly_artifact_acceptance".to_owned(),
-                kind: vec!["test".to_owned()],
-                src_path: PathBuf::new(),
-            },
         ];
         let required = SETTINGSONLY_ALLOWED_NORMAL_WORKSPACE_PACKAGES
             .iter()
@@ -8243,9 +9614,7 @@ ENTRYPOINT ["/usr/local/bin/server"]
             .collect::<BTreeSet<_>>();
         assert!(
             validate_settingsonly_executable_evidence(settingsonly_boundary_evidence(
-                &targets,
-                &required,
-                SETTINGSONLY_DOCKER_FIXTURE,
+                &targets, &required,
             ))
             .is_empty()
         );
@@ -8256,7 +9625,6 @@ ENTRYPOINT ["/usr/local/bin/server"]
             validate_settingsonly_executable_evidence(settingsonly_boundary_evidence(
                 &targets,
                 &unexpected_closure,
-                SETTINGSONLY_DOCKER_FIXTURE,
             ))
             .iter()
             .any(|finding| finding.detail.contains("unexpected packages")),
@@ -8269,23 +9637,23 @@ ENTRYPOINT ["/usr/local/bin/server"]
             .cloned()
             .collect::<BTreeSet<_>>();
         incomplete_closure.insert("identity".to_owned());
-        let broken_docker = SETTINGSONLY_DOCKER_FIXTURE
-            .replace(
-                "COPY --from=settingsonly-builder /app/assemblies/settingsonly/config.schema.json /usr/share/rss/settingsonly/config.schema.json",
-                "",
-            )
-            .replace(
-                "ENTRYPOINT [\"/usr/local/bin/settingsonly-server\"]",
-                "ENTRYPOINT [\"/usr/local/bin/server\"]",
-            );
-        let mut incomplete =
-            settingsonly_boundary_evidence(&targets[..1], &incomplete_closure, &broken_docker);
+        let mut incomplete = settingsonly_boundary_evidence(&targets[..1], &incomplete_closure);
         incomplete.test_support_enabled = true;
         incomplete.schema_is_regular_file = false;
         incomplete.sample_is_regular_file = false;
-        incomplete.artifact_acceptance = false;
+        incomplete.production_artifact_target_declared = false;
+        incomplete.production_artifact =
+            ArtifactClosureEvidence::Violations(vec![ArtifactClosureViolation::new(
+                ArtifactClosureStage::CaseInventory,
+                Some("InputReady"),
+                ArtifactClosurePath::Support,
+                None,
+                "closed case inventory",
+                "missing",
+            )]);
         incomplete.journey_target_declared = false;
         incomplete.required_journey_test_declared = false;
+        incomplete.dockerignore_contracts_included = false;
         let details = validate_settingsonly_executable_evidence(incomplete)
             .into_iter()
             .map(|finding| finding.detail)
@@ -8298,98 +9666,12 @@ ENTRYPOINT ["/usr/local/bin/server"]
             "default-normal-features",
             "config-schema",
             "config-sample",
-            "artifact-acceptance",
+            "production-artifact",
             "journey",
-            "Dockerfile",
+            ".dockerignore",
         ] {
             assert!(details.contains(field), "missing red evidence for {field}");
         }
-    }
-
-    #[test]
-    fn settingsonly_docker_boundary_rejects_runtime_copy_and_add_bypasses() {
-        let lowercase_allowed_copy = SETTINGSONLY_DOCKER_FIXTURE.replace(
-            "COPY --from=settingsonly-builder /app/target/release/settingsonly-server /usr/local/bin/settingsonly-server",
-            "copy --from=settingsonly-builder /app/target/release/settingsonly-server /usr/local/bin/settingsonly-server",
-        );
-        assert!(
-            settingsonly_docker_target_is_closed(&lowercase_allowed_copy),
-            "Docker instruction parsing must be case-insensitive"
-        );
-
-        let runtime_marker = "ENTRYPOINT [\"/usr/local/bin/settingsonly-server\"]";
-        let cases = [
-            ("ADD", "ADD /tmp/unexpected /usr/local/share/unexpected"),
-            (
-                "lowercase COPY",
-                "copy --from=settingsonly-builder /app/target/release/settingsonly-server /usr/local/bin/unexpected",
-            ),
-            (
-                "third COPY",
-                "COPY --from=settingsonly-builder /app/target/release/settingsonly-server /usr/local/bin/unexpected",
-            ),
-            ("root user override", "USER 0"),
-            (
-                "entrypoint override",
-                "ENTRYPOINT [\"/usr/local/bin/unexpected\"]",
-            ),
-            ("unexpected environment", "ENV UNEXPECTED=true"),
-            ("false port publication", "EXPOSE 8080 8083"),
-            ("command override", "CMD [\"--help\"]"),
-        ];
-        for (case, extra_instruction) in cases {
-            let dockerfile = SETTINGSONLY_DOCKER_FIXTURE.replace(
-                runtime_marker,
-                &format!("{extra_instruction}\n{runtime_marker}"),
-            );
-            assert!(
-                !settingsonly_docker_target_is_closed(&dockerfile),
-                "settingsonly runtime accepted {case} bypass"
-            );
-        }
-    }
-
-    #[test]
-    fn settingsonly_docker_boundary_diagnoses_exact_listener_ports() {
-        let wrong_ports =
-            SETTINGSONLY_DOCKER_FIXTURE.replace("EXPOSE 8080 8082 8083", "EXPOSE 8080 8083");
-        let targets = [
-            MetadataTarget {
-                name: "build-script-build".to_owned(),
-                kind: vec!["custom-build".to_owned()],
-                src_path: PathBuf::new(),
-            },
-            MetadataTarget {
-                name: "settingsonly".to_owned(),
-                kind: vec!["lib".to_owned()],
-                src_path: PathBuf::new(),
-            },
-            MetadataTarget {
-                name: "settingsonly-server".to_owned(),
-                kind: vec!["bin".to_owned()],
-                src_path: PathBuf::new(),
-            },
-            MetadataTarget {
-                name: "settingsonly_artifact_acceptance".to_owned(),
-                kind: vec!["test".to_owned()],
-                src_path: PathBuf::new(),
-            },
-        ];
-        let closure = SETTINGSONLY_ALLOWED_NORMAL_WORKSPACE_PACKAGES
-            .iter()
-            .map(|package| (*package).to_owned())
-            .collect::<BTreeSet<_>>();
-        let findings = validate_settingsonly_executable_evidence(settingsonly_boundary_evidence(
-            &targets,
-            &closure,
-            &wrong_ports,
-        ));
-
-        assert_eq!(findings.len(), 1);
-        assert_eq!(
-            findings[0].detail,
-            "field=Dockerfile expected migration-free serving builder and EXPOSE 8080 8082 8083 followed by serving/schema COPY and ENTRYPOINT settingsonly-server, while runtime remains the default final stage"
-        );
     }
 
     #[test]
@@ -8466,81 +9748,391 @@ ENTRYPOINT ["/usr/local/bin/server"]
     }
 
     #[test]
-    fn settingsonly_artifact_gate_requires_binary_image_and_closed_harness() -> anyhow::Result<()> {
-        let source = include_str!("../../assemblies/settingsonly/tests/artifact_acceptance.rs");
-        assert!(settingsonly_artifact_source_is_closed(source)?);
+    fn settingsonly_production_artifact_gate_rejects_incomplete_case_closure() -> anyhow::Result<()>
+    {
+        let entry = include_str!("../../journeys/tests/settingsonly_production_artifact.rs");
+        let support =
+            include_str!("../../journeys/tests/support/settingsonly_production_artifact.rs");
+        let manifest: toml::Value = include_str!("../../journeys/Cargo.toml").parse()?;
+        assert!(settingsonly_production_artifact_target_is_exact(&manifest));
+        let evidence = settingsonly_production_artifact_sources_are_closed(entry, support);
+        let ArtifactClosureEvidence::Certified(certificate) = evidence else {
+            panic!("real source did not produce a closure certificate: {evidence:?}");
+        };
+        assert_eq!(certificate.case_count(), 4);
+
         for (case, broken) in [
             (
-                "wrong binary",
-                source.replace("CARGO_BIN_EXE_settingsonly-server", "CARGO_BIN_EXE_server"),
-            ),
-            (
-                "non-ignored image",
-                source.replace("#[ignore =", "#[allow(dead_code)]\n#[doc ="),
-            ),
-            (
-                "conditional binary",
-                source.replacen("#[test]", "#[test]\n#[cfg(any())]", 1),
-            ),
-            (
-                "wrong image environment",
-                source.replace("std::env::var(IMAGE_ENV)", "std::env::var(WRONG_ENV)"),
-            ),
-            (
-                "binary artifact constructed without assertion",
-                source.replace(
-                    "assert_executable_contract(Artifact::Binary(env!(\"CARGO_BIN_EXE_settingsonly-server\")))",
-                    "{ let _artifact = Artifact::Binary(env!(\"CARGO_BIN_EXE_settingsonly-server\")); Ok(()) }",
+                "wrong Cargo target path",
+                include_str!("../../journeys/Cargo.toml").replace(
+                    "path = \"tests/settingsonly_production_artifact.rs\"",
+                    "path = \"tests/decoy.rs\"",
                 ),
             ),
             (
-                "image artifact constructed without assertion",
-                source.replace(
-                    "assert_executable_contract(Artifact::Image(&image))",
-                    "{ let _artifact = Artifact::Image(&image); Ok(()) }",
-                ),
-            ),
-            (
-                "live artifact behavior omitted",
-                source.replace(
-                    "assert_live_deployment_contract(\n        Artifact::Binary(env!(\"CARGO_BIN_EXE_settingsonly-server\")),\n        Artifact::Image(&image),\n    )",
-                    "{\n        let _binary = Artifact::Binary(env!(\"CARGO_BIN_EXE_settingsonly-server\"));\n        let _image = Artifact::Image(&image);\n        Ok(())\n    }",
+                "duplicate Cargo target",
+                format!(
+                    "{}\n[[test]]\nname = \"settingsonly_production_artifact\"\npath = \"tests/settingsonly_production_artifact.rs\"\nrequired-features = [\"integration\"]\n",
+                    include_str!("../../journeys/Cargo.toml")
                 ),
             ),
         ] {
+            let broken: toml::Value = broken.parse()?;
             assert!(
-                !settingsonly_artifact_source_is_closed(&broken)?,
-                "settingsonly artifact source gate accepted {case}"
+                !settingsonly_production_artifact_target_is_exact(&broken),
+                "production artifact target gate accepted {case}"
             );
         }
 
-        let script = include_str!("../../hack/settingsonly-artifact-acceptance.sh");
-        assert!(
-            settingsonly_artifact_script_is_closed(script),
-            "logical statements: {:?}",
-            logical_shell_statements(script)
-        );
         for (case, broken) in [
             (
-                "wrong Docker target",
-                script.replace("--target settingsonly-runtime", "--target runtime"),
+                "support path replacement",
+                entry.replacen(
+                    "support/settingsonly_production_artifact.rs",
+                    "support/decoy.rs",
+                    1,
+                ),
             ),
             (
-                "ignored image omitted",
-                script.replace("--include-ignored", ""),
+                "support path decoy",
+                entry.replacen(
+                    "#[path = \"support/settingsonly_production_artifact.rs\"]",
+                    "#[path = \"support/decoy.rs\"]\n#[doc = \"support/settingsonly_production_artifact.rs\"]",
+                    1,
+                ),
             ),
             (
-                "wrong test target",
-                script.replace("--test settingsonly_artifact_acceptance", "--test other"),
+                "aliased support import",
+                entry.replacen(
+                    "use settingsonly_production_artifact::{EvidenceCase, run_case};",
+                    "use settingsonly_production_artifact::{EvidenceCase, run_case as execute};",
+                    1,
+                ),
             ),
-            ("extra command", format!("{script}\ntrue\n")),
+            (
+                "missing test",
+                entry.replacen(
+                    "async fn settingsonly_image_mount_spiffe_readiness_join",
+                    "async fn unrelated_test",
+                    1,
+                ),
+            ),
+            (
+                "extra test",
+                format!("{entry}\n#[test]\nfn extra_test() {{}}\n"),
+            ),
+            (
+                "ignored test",
+                entry.replacen("#[tokio::test", "#[ignore]\n#[tokio::test", 1),
+            ),
+            (
+                "cfg test",
+                entry.replacen("#[tokio::test", "#[cfg(any())]\n#[tokio::test", 1),
+            ),
+            (
+                "should panic test",
+                entry.replacen("#[tokio::test", "#[should_panic]\n#[tokio::test", 1),
+            ),
+            (
+                "empty test",
+                entry.replacen("run_case(EvidenceCase::InputReady).await", "Ok(())", 1),
+            ),
+            (
+                "wrong case",
+                entry.replacen("EvidenceCase::InputReady", "EvidenceCase::Unknown", 1),
+            ),
+            (
+                "duplicate case",
+                entry.replacen("EvidenceCase::Sigterm", "EvidenceCase::Sigkill", 1),
+            ),
         ] {
+            assert_ne!(broken, entry, "{case} mutation was vacuous");
             assert!(
-                !settingsonly_artifact_script_is_closed(&broken),
-                "settingsonly artifact script gate accepted {case}"
+                matches!(
+                    settingsonly_production_artifact_sources_are_closed(&broken, support),
+                    ArtifactClosureEvidence::Violations(_)
+                ),
+                "production artifact gate accepted {case}"
+            );
+        }
+
+        for (case, broken) in [
+            (
+                "missing EvidenceCase",
+                support.replacen("    InputReady,", "    Unknown,", 1),
+            ),
+            (
+                "extra EvidenceCase",
+                support.replacen("    InputReady,", "    InputReady,\n    Extra,", 1),
+            ),
+            (
+                "default match arm",
+                support.replacen(
+                    "            Self::Sigterm => fixture.sigterm().await,",
+                    "            Self::Sigterm => fixture.sigterm().await,\n            _ => fixture.sigterm().await,",
+                    1,
+                ),
+            ),
+            (
+                "string selector",
+                support.replacen(
+                    "    async fn dispatch(self, fixture: &mut Fixture) -> anyhow::Result<CaseCompletion> {\n        match self {",
+                    "    async fn dispatch(self, fixture: &mut Fixture) -> anyhow::Result<CaseCompletion> {\n        match self.id() {",
+                    1,
+                ),
+            ),
+            (
+                "wrong match case",
+                support.replacen(
+                    "Self::InputReady => fixture.input_ready().await",
+                    "Self::InputReady => fixture.sigterm().await",
+                    1,
+                ),
+            ),
+            (
+                "swallowed result",
+                support.replacen("fixture.finish(result).await", "result", 1),
+            ),
+            (
+                "replaced finish result",
+                support.replacen("fixture.finish(result).await", "fixture.finish(Ok(())).await", 1),
+            ),
+            (
+                "early return",
+                support.replacen(
+                    "    let mut fixture = Fixture::start(repository, case.id()).await?;",
+                    "    return Ok(());\n    let mut fixture = Fixture::start(repository, case.id()).await?;",
+                    1,
+                ),
+            ),
+            (
+                "extra runner branch",
+                support.replacen(
+                    "    let mut fixture = Fixture::start(repository, case.id()).await?;",
+                    "    if false { return Ok(()); }\n    let mut fixture = Fixture::start(repository, case.id()).await?;",
+                    1,
+                ),
+            ),
+            (
+                "empty scenario",
+                support.replacen(
+                    "    async fn input_ready(&mut self) -> anyhow::Result<CaseCompletion> {",
+                    "    async fn input_ready(&mut self) -> anyhow::Result<CaseCompletion> { return Err(anyhow::anyhow!(\"empty\"));",
+                    1,
+                ),
+            ),
+            (
+                "opaque-only scenario",
+                support.replacen(
+                    "        self.workload.wait_request().await?;",
+                    "        let _dead = || self.workload.wait_request();",
+                    1,
+                ),
+            ),
+            (
+                "cfg-elided local witness",
+                support.replacen(
+                    "        let _ready = self.wait_ready().await?;",
+                    "        #[cfg(any())]\n        let _ready = self.wait_ready().await?;",
+                    1,
+                ),
+            ),
+            (
+                "cfg_attr-elided expression witness",
+                support.replacen(
+                    "        self.workload.wait_request().await?;",
+                    "        #[cfg_attr(all(), cfg(any()))]\n        self.workload.wait_request().await?;",
+                    1,
+                ),
+            ),
+            (
+                "missing SIGTERM waiter",
+                support.replacen("        barrier.wait_for_waiter(&self.pool).await?;\n", "", 1),
+            ),
+            (
+                "non-awaited witness future",
+                support.replacen(
+                    "        self.wait_claimed(&event_id).await?;",
+                    "        self.wait_claimed(&event_id);",
+                    1,
+                ),
+            ),
+            (
+                "dropped awaited witness result",
+                support.replacen(
+                    "        self.wait_claimed(&event_id).await?;",
+                    "        self.wait_claimed(&event_id).await;",
+                    1,
+                ),
+            ),
+            (
+                "duplicate witness",
+                support.replacen(
+                    "        self.wait_claimed(&event_id).await?;",
+                    "        self.wait_claimed(&event_id).await?;\n        self.wait_claimed(&event_id).await?;",
+                    1,
+                ),
+            ),
+            (
+                "out-of-order SIGTERM waiter",
+                support.replacen(
+                    "        self.wait_claimed(&event_id).await?;\n        barrier.wait_for_waiter(&self.pool).await?;",
+                    "        barrier.wait_for_waiter(&self.pool).await?;\n        self.wait_claimed(&event_id).await?;",
+                    1,
+                ),
+            ),
+            (
+                "wrong Evidence ID",
+                support.replacen(
+                    "SETTINGSONLY-T3-INPUT-READY-01",
+                    "SETTINGSONLY-T3-INPUT-READY-XX",
+                    1,
+                ),
+            ),
+            (
+                "duplicate Evidence ID",
+                support.replacen(
+                    "SETTINGSONLY-T3-SIGTERM-01",
+                    "SETTINGSONLY-T3-SIGKILL-01",
+                    1,
+                ),
+            ),
+        ] {
+            assert_ne!(broken, support, "{case} mutation was vacuous");
+            assert!(
+                matches!(
+                    settingsonly_production_artifact_sources_are_closed(entry, &broken),
+                    ArtifactClosureEvidence::Violations(_)
+                ),
+                "production artifact gate accepted {case}"
             );
         }
         Ok(())
+    }
+
+    #[test]
+    fn settingsonly_production_artifact_gate_emits_precise_typed_diagnostics() {
+        let entry = include_str!("../../journeys/tests/settingsonly_production_artifact.rs");
+        let support =
+            include_str!("../../journeys/tests/support/settingsonly_production_artifact.rs");
+
+        let ignored = entry.replacen("#[tokio::test", "#[ignore]\n#[tokio::test", 1);
+        assert_artifact_violation(
+            settingsonly_production_artifact_sources_are_closed(&ignored, support),
+            ArtifactClosureStage::TestInventory,
+            None,
+            ArtifactClosurePath::Entry,
+            "one live unconditional non-empty run_case carrier",
+            "settingsonly_image_mount_spiffe_readiness_join",
+        );
+
+        let wrong_dispatch = support.replacen(
+            "Self::InputReady => fixture.input_ready().await",
+            "Self::InputReady => fixture.sigterm().await",
+            1,
+        );
+        assert_artifact_violation(
+            settingsonly_production_artifact_sources_are_closed(entry, &wrong_dispatch),
+            ArtifactClosureStage::Dispatch,
+            Some("InputReady"),
+            ArtifactClosurePath::Support,
+            "input_ready",
+            "sigterm",
+        );
+
+        let direct_receipt = support.replacen(
+            "let receipt = self.observe_unacked(event_id, barrier).await?;",
+            "let receipt = UnackedReceipt { event_id, barrier };",
+            1,
+        );
+        assert_artifact_violation(
+            settingsonly_production_artifact_sources_are_closed(entry, &direct_receipt),
+            ArtifactClosureStage::ReceiptProvenance,
+            Some("Sigkill"),
+            ArtifactClosurePath::Support,
+            "receipt minted by a typed Fixture method",
+            "direct UnackedReceipt construction",
+        );
+
+        let cloneable_receipt = support.replacen(
+            "struct UnackedReceipt {",
+            "#[derive(Clone)]\nstruct UnackedReceipt {",
+            1,
+        );
+        assert_artifact_violation(
+            settingsonly_production_artifact_sources_are_closed(entry, &cloneable_receipt),
+            ArtifactClosureStage::ReceiptProvenance,
+            None,
+            ArtifactClosurePath::Support,
+            "private non-Clone non-Copy receipt with private fields",
+            "# [derive (Clone)] struct UnackedReceipt { event_id : String , barrier : InboxBarrier , }",
+        );
+
+        let alpha_renamed = support
+            .replacen(
+                "run_case(case: EvidenceCase)",
+                "run_case(selected: EvidenceCase)",
+                1,
+            )
+            .replacen("case.id()", "selected.id()", 1)
+            .replacen("let mut fixture =", "let mut runtime_fixture =", 1)
+            .replacen(
+                "case.dispatch(&mut fixture)",
+                "selected.dispatch(&mut runtime_fixture)",
+                1,
+            )
+            .replacen("completion.case == case", "completion.case == selected", 1)
+            .replacen("let result =", "let outcome =", 1)
+            .replacen(
+                "fixture.finish(result)",
+                "runtime_fixture.finish(outcome)",
+                1,
+            );
+        assert!(matches!(
+            settingsonly_production_artifact_sources_are_closed(entry, &alpha_renamed),
+            ArtifactClosureEvidence::Certified(_)
+        ));
+
+        let unrelated = support.replacen(
+            "    async fn l2_join(&mut self) -> anyhow::Result<CaseCompletion> {",
+            "    async fn l2_join(&mut self) -> anyhow::Result<CaseCompletion> {\n        let _diagnostic = self.evidence_id;",
+            1,
+        );
+        assert!(matches!(
+            settingsonly_production_artifact_sources_are_closed(entry, &unrelated),
+            ArtifactClosureEvidence::Certified(_)
+        ));
+    }
+
+    fn assert_artifact_violation(
+        evidence: ArtifactClosureEvidence,
+        stage: ArtifactClosureStage,
+        case: Option<&str>,
+        path: ArtifactClosurePath,
+        expected: &str,
+        actual: &str,
+    ) {
+        let ArtifactClosureEvidence::Violations(violations) = evidence else {
+            panic!("mutation unexpectedly produced a certificate");
+        };
+        let violation = violations
+            .iter()
+            .find(|violation| {
+                violation.stage == stage
+                    && violation.case.as_deref() == case
+                    && violation.path == path
+                    && violation.expected == expected
+                    && violation.actual == actual
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "missing exact violation stage={stage:?} case={case:?} path={path:?} expected={expected:?} actual={actual:?}; actual violations={violations:?}"
+                )
+            });
+        assert!(
+            violation.span.is_some(),
+            "exact diagnostic omitted its source span: {violation:?}"
+        );
     }
 
     #[test]

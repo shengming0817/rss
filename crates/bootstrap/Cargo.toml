@@ -30,7 +30,7 @@ diport = { path = "../diport" }
 # 关闭逆序编排范式（无 async Drop）。tokio::time 做有界超时、spawn 做 panic 隔离，
 # tokio-util::CancellationToken 做关闭取消广播；ManagedResource 的 dyn 分发由 diport（dynosaur）承载。
 # 关闭聚合错误（ShutdownFailureKind / ResourceShutdownError）用 thiserror，不在公共 port 暴露 anyhow。
-tokio = { workspace = true, features = ["time"] }
+tokio = { workspace = true, features = ["sync", "time"] }
 tokio-util = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }

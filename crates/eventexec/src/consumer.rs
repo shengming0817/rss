@@ -27,6 +27,11 @@ use tracing::Instrument as _;
 use crate::MAX_REDELIVERY;
 use crate::tenant_authority::{TenantAuthority, TenantAuthorityBinding, TenantAuthorityError};
 
+/// Upper bound for holding an active broker delivery before requeueing a contended claim.
+/// The normal delay is the provider-derived lease renewal interval (`ttl / 3`); the cap prevents
+/// unusually large provider TTLs from monopolizing a consumer lane indefinitely.
+const MAX_CLAIM_IN_PROGRESS_DELAY: Duration = Duration::from_secs(30);
+
 // ── LeaseConfig（消费侧租约续租配置，#1213）────────────────────────────────────
 
 /// 消费侧租约续租配置：续租间隔 = 后端 claim lease TTL / 3（对标 gocell ConsumerBase `LeaseTTL/3`）。
@@ -258,9 +263,10 @@ pub async fn run_consumer<S, H>(
 ///
 /// **终态→AckAction 映射**（见 `consume_one`/`handle_fresh`/`dead_letter` 的 acker 传递）：
 /// - handler Ack / DLX 写成功 → broker `Ack`
-/// - DLX 写失败且 release 成功 / try_claim 返 Err / unknown SeenState → broker `Requeue`
-/// - DLX 写失败且 release 失败 → broker `Reject` + `consumer_release_failed_total{domain}`
-/// - Duplicate → broker `Ack`（幂等短路，已处理）
+/// - DLX 写失败且 release 成功 / try_claim 返 transient Err → broker `Requeue`
+/// - active claim `InProgress` → lease-aware bounded delay, then broker `Requeue`
+/// - DLX 写失败且 release 失败 → broker `Reject`
+/// - Duplicate → broker `Ack`（仅 durable done 可幂等短路）
 /// - IdemKey parse 失败 → broker `Reject`（malformed，不重投）
 ///
 /// **settle 失败语义（不丢失）**：`settle` 失败仅结构化 error 日志、**不中断**消费循环。终态 `Ack` 走
@@ -368,6 +374,11 @@ async fn consume_one<S, H>(
             )
             .await;
         }
+        // Expected contention is not a backend error: keep it out of warn/health signals and hold
+        // the delivery for a provider-derived bounded interval before requeueing.
+        Ok(SeenState::InProgress) => {
+            settle_claim_in_progress(acker, meta, &msg, lease_cfg).await;
+        }
         // 幂等短路：不调 handler、不 commit；broker Ack（已处理过，无需再投）。
         Ok(SeenState::Duplicate) => {
             log_duplicate(&msg, meta);
@@ -394,19 +405,44 @@ async fn consume_one<S, H>(
             )
             .await;
         }
-        // reason: SeenState 是 #[non_exhaustive]，兜底臂保守丢弃（对齐 relay.rs 非 Ack 处置保守降级）。
-        Ok(_) => {
-            log_unknown_seen_state(&msg);
-            // 未知状态：保守 Requeue（不静默 Ack，也不 Reject——语义不明时可重投再判）。
-            settle(
-                acker,
-                diport::AckAction::Requeue,
-                meta.domain(),
-                msg.id.as_str(),
-            )
-            .await;
-        }
     }
+}
+
+#[doc(hidden)]
+pub async fn settle_claim_in_progress(
+    acker: Option<&diport::DynAcker<'static>>,
+    meta: &ConsumerMeta,
+    msg: &Message,
+    lease_cfg: LeaseConfig,
+) {
+    let delay = claim_in_progress_delay(lease_cfg);
+    metrics::counter!(
+        "consumer_claim_in_progress_total",
+        "domain" => meta.domain().to_owned(),
+    )
+    .increment(1);
+    tracing::debug!(
+        message_id = msg.id.as_str(),
+        domain = meta.domain(),
+        contract_id = meta.contract_id(),
+        topic = meta.topic(),
+        delay_ms = u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
+        "consumer: active inbox claim, delaying broker requeue"
+    );
+    if acker.is_some() {
+        tokio::time::sleep(delay).await;
+    }
+    settle(
+        acker,
+        diport::AckAction::Requeue,
+        meta.domain(),
+        msg.id.as_str(),
+    )
+    .await;
+}
+
+fn claim_in_progress_delay(lease_cfg: LeaseConfig) -> Duration {
+    lease_cfg.renew_interval().min(MAX_CLAIM_IN_PROGRESS_DELAY)
 }
 
 /// 首见消息：后台续租 + bounded 重投**并发**驱动（#1213，对标 gocell ConsumerBase runWithRenewal）。
@@ -512,7 +548,7 @@ pub async fn renewal_loop<S>(
             // 瞬态续租故障：续命重试（commit 侧 CAS 兜底，不误判丢租）。
             Err(e) => log_extend_failed(meta, message_id, &e),
             // reason: LeaseOutcome 是 #[non_exhaustive]；未知变体保守续命（同 Err 路径，commit 侧 CAS 兜底）+
-            // warn 可观测（与 SeenState 未知臂 log_unknown_seen_state 对齐，review #279 架构）。
+            // warn 可观测；commit 侧 CAS 继续提供最终围栏。
             Ok(_) => log_unknown_lease_outcome(meta, message_id),
         }
     }
@@ -676,8 +712,8 @@ where
 /// 1. 结构化 `error!`（T007.5：domain/contract_id/topic/num_attempts/error_summary 五字段，含 message_id）。
 /// 2. `dlx.write_dead_letter(record)`。
 /// 3. dlx **写成功** → `idempotency.commit(key)`（标记 done，终态收口）+ broker `Ack`；
-///    dlx **写失败** → `idempotency.release(key)`（claimed→absent，使 broker 重投时 try_claim 回 Fresh）
-///    + broker `Requeue`，避免静默丢失（消息永久消失 + 死信未落 DB）。
+///    dlx **写失败** → `idempotency.release(key)`（claimed→absent，使 broker 重投时 try_claim 回 Fresh）；
+///    release 成功才 broker `Requeue`，release 也失败则按 eventbus fail-closed 真源 broker `Reject`。
 ///
 /// 各步错误结构化 error 日志（不 panic）。
 ///
@@ -741,14 +777,20 @@ pub async fn dead_letter<S>(
             // dlx 写失败 → release（claimed→absent，token CAS），使 broker 重投时 try_claim 回 Fresh、
             // 重新尝试 DLX，避免静默丢失（消息进 done + 死信未落 DB = 不可恢复审计盲点）。
             log_dlx_write_failed(meta, &e);
-            let action = if release_key(idempotency, meta, ctx, key, lease, msg.id.as_str()).await {
-                // broker Requeue：DLX 未落，原投递重投等待再次尝试。
-                diport::AckAction::Requeue
-            } else {
-                // release 失败时 claim 仍可能存活；Requeue 会在 TTL 窗口内被 Duplicate→Ack 吞掉。
-                diport::AckAction::Reject
-            };
-            settle(acker, action, meta.domain(), msg.id.as_str()).await;
+            // release 失败时无法证明后续重投能重新取得 claim；按 eventbus 真源 fail closed 到 Reject，
+            // 并由 release-failed 指标告警，避免围绕 60s active lease 热循环。
+            let released = release_key(idempotency, meta, ctx, key, lease, msg.id.as_str()).await;
+            settle(
+                acker,
+                if released {
+                    diport::AckAction::Requeue
+                } else {
+                    diport::AckAction::Reject
+                },
+                meta.domain(),
+                msg.id.as_str(),
+            )
+            .await;
         }
     }
 }
@@ -981,15 +1023,6 @@ fn log_invalid_receipt_context(meta: &ConsumerMeta, msg: &Message, reason: &'sta
     );
 }
 
-/// 未知 `SeenState` 变体（#[non_exhaustive] 兜底保守处置）。
-fn log_unknown_seen_state(msg: &Message) {
-    tracing::warn!(
-        message_id = msg.id.as_str(),
-        // 处置随路径：ackable 路径 settle(Requeue)（重投，非丢弃）；brokerless 路径无 broker（丢弃）。
-        "consumer: unknown SeenState variant, conservatively requeued (dropped if brokerless)"
-    );
-}
-
 /// T007.5：死信结构化 error（五字段：domain/contract_id/topic/num_attempts/error_summary；
 /// 加 message_id 提供关联维度——DLX 表无该列，log 是唯一关联路径）。
 fn log_dead_lettered(
@@ -1122,8 +1155,8 @@ pub fn emit_lease_lost(domain: &str) {
     .increment(1);
 }
 
-/// release 失败事件 counter（#1356）：DLX 写失败后 claim 未释放，若继续 Requeue 会在 TTL 窗口内被
-/// Duplicate→Ack 吞掉；该指标驱动告警，结算路径同步改为 Reject。
+/// release 失败事件 counter：DLX 写失败后 claim 可能仍存活，该指标驱动告警；
+/// 该双失败路径按 eventbus 真源 Reject，指标驱动持久化/DLX 故障告警。
 fn emit_release_failed(domain: &str) {
     metrics::counter!(
         "consumer_release_failed_total",
@@ -1154,8 +1187,8 @@ mod tests {
     use primitives::{Mac, MacAlgorithm, MacKey, MacVerifier};
 
     use super::{
-        ConsumerMeta, LeaseConfig, ReceiptContextBuildError, receipt_context_error_reason,
-        record_dead_letter_skip, run_consumer, run_consumer_ackable,
+        ConsumerMeta, LeaseConfig, ReceiptContextBuildError, claim_in_progress_delay,
+        receipt_context_error_reason, record_dead_letter_skip, run_consumer, run_consumer_ackable,
     };
     use crate::MAX_REDELIVERY;
     use crate::tenant_authority::{TenantAuthority, TenantAuthorityBinding};
@@ -1168,6 +1201,18 @@ mod tests {
     /// 测试用 lease 配置（快续租）：续租间隔小，长 handler 测试中续租可在毫秒级触发。
     fn lease_cfg_fast() -> LeaseConfig {
         LeaseConfig::from_ttl(Duration::from_millis(15))
+    }
+
+    #[test]
+    fn in_progress_delay_is_provider_derived_and_capped() {
+        assert_eq!(
+            claim_in_progress_delay(LeaseConfig::from_ttl(Duration::from_secs(60))),
+            Duration::from_secs(20)
+        );
+        assert_eq!(
+            claim_in_progress_delay(LeaseConfig::from_ttl(Duration::from_secs(300))),
+            Duration::from_secs(30)
+        );
     }
 
     // ── 工厂 helper ──────────────────────────────────────────────────────────
@@ -1303,11 +1348,12 @@ mod tests {
     // ── FakeInboxStore ─────────────────────────────────────────────────
 
     /// 三态 fake store（Arc<Mutex> + Atomic，Send 友好，不跨 await 持锁——relay.rs FakeStore 范式）。
-    /// 可配 try_claim 返 Fresh / Duplicate / Err；commit 可配 Err / Lost；extend 可配 N 次后 Lost；
+    /// 可配 try_claim 返 Fresh / InProgress / Duplicate / Err；commit 可配 Err / Lost；extend 可配 N 次后 Lost；
     /// 记录 try_claim / commit / release / extend 调用计数。
     #[derive(Clone, Copy)]
     enum CheckResult {
         Fresh,
+        InProgress,
         Duplicate,
         Err(consistency::error::EngineErrorKind),
     }
@@ -1322,7 +1368,7 @@ mod tests {
         commit_fails: bool,
         /// commit 恒返 `LeaseOutcome::Lost`（#1213 commit 侧 hard-fence：租约丢失 → Requeue 不 Ack）。
         commit_loses_lease: bool,
-        /// release 恒失败 Err（#1356：DLX 写失败 + release 失败 → Reject）。
+        /// release 恒失败 Err（DLX 写失败 + release 失败按真源 Reject，并发射告警指标）。
         release_fails: bool,
         /// extend 在前 N 次返 `Held`、第 N+1 次起返 `Lost`（#1213 续租侧 hard-fence：模拟 handler 执行中租约被重捞）。
         extend_lost_after: Option<u32>,
@@ -1354,6 +1400,10 @@ mod tests {
 
         fn duplicate() -> Arc<Self> {
             Self::with(CheckResult::Duplicate, false)
+        }
+
+        fn in_progress() -> Arc<Self> {
+            Self::with(CheckResult::InProgress, false)
         }
 
         fn err() -> Arc<Self> {
@@ -1489,6 +1539,7 @@ mod tests {
             self.claim_count.fetch_add(1, Ordering::Release);
             match self.check_result {
                 CheckResult::Fresh => Ok(SeenState::Fresh),
+                CheckResult::InProgress => Ok(SeenState::InProgress),
                 CheckResult::Duplicate => Ok(SeenState::Duplicate),
                 CheckResult::Err(kind) => Err(consistency::error::EngineError::new(kind)),
             }
@@ -2732,7 +2783,7 @@ mod tests {
         );
     }
 
-    /// ACK-4b/#1356：handler Reject + DLX 写失败 + release 失败 → settle=[Reject]，不 Requeue。
+    /// ACK-4b：handler Reject + DLX 写失败 + release 失败按 eventbus 真源 Reject。
     #[test]
     #[allow(clippy::unwrap_used)]
     fn ack4b_dlx_fail_and_release_fail_settles_reject() {
@@ -2765,7 +2816,7 @@ mod tests {
         assert_eq!(
             ackers[0].settled_actions(),
             vec![AckAction::Reject],
-            "DLX 写失败叠加 release 失败必须 Reject，不能 Requeue 后被 Duplicate→Ack 吞掉"
+            "DLX write + claim release 双失败必须 fail closed 到 Reject"
         );
         let rendered = handle.render();
         assert!(
@@ -2833,6 +2884,51 @@ mod tests {
             ackers[0].settled_actions(),
             vec![AckAction::Reject],
             "永久 try_claim Err 应 hard-fence 到 [Reject]（→DLX，不无限重投）"
+        );
+    }
+
+    /// ACK-5c：active claim 是 typed InProgress；不调 handler、不发 backend warn，按 lease 周期延迟后 Requeue。
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn ack5c_in_progress_delays_then_requeues_with_low_cardinality_metric() {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let idem = FakeInboxStore::in_progress();
+        let dlx_store = FakeDeadLetterStore::new();
+        let dlx = fake_dlx(dlx_store.clone());
+        let handler_count = Arc::new(AtomicU32::new(0));
+        let (stream, ackers) = delivery_stream_of(&[("msg-ack5c", b"payload")]);
+        let started = std::time::Instant::now();
+
+        metrics::with_local_recorder(&recorder, || {
+            rt.block_on(run_consumer_ackable(
+                stream,
+                idem.clone(),
+                dlx,
+                meta(),
+                handler_ack(handler_count.clone()),
+                lease_cfg_fast(),
+            ));
+        });
+
+        assert!(
+            started.elapsed() >= Duration::from_millis(5),
+            "InProgress must not immediately churn broker requeue"
+        );
+        assert_eq!(handler_count.load(Ordering::Relaxed), 0);
+        assert_eq!(idem.commit_count(), 0);
+        assert_eq!(dlx_store.write_count(), 0);
+        assert_eq!(ackers[0].settled_actions(), vec![AckAction::Requeue]);
+        let rendered = handle.render();
+        assert!(rendered.contains("consumer_claim_in_progress_total"));
+        assert!(rendered.contains("domain=\"identity\""));
+        assert!(
+            !rendered.contains("message_id"),
+            "metric must stay low-cardinality"
         );
     }
 

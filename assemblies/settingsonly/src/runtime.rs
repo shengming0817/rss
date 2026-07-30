@@ -115,6 +115,10 @@ pub(crate) struct AssemblyStartupInputs {
     activation_gate: Option<SocketAddr>,
 }
 
+#[allow(
+    clippy::large_enum_variant,
+    reason = "move-only production capabilities stay inline; boxing would weaken the closed activation handoff solely for test-support size"
+)]
 enum ProviderActivation {
     Production {
         eventing: crate::eventing::EventingInputs,

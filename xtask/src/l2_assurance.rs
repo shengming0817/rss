@@ -1455,7 +1455,7 @@ fn reachable_calls_in_block(block: &syn::Block) -> Vec<ReachableCall> {
     let mut visitor = ReachableCallVisitor::default();
     visitor.visit_block(block);
     if let Some(syn::Stmt::Expr(tail, None)) = block.stmts.last() {
-        visit_returned_boxed_closure(tail, &mut visitor);
+        visit_returned_sanctioned_closure(tail, &mut visitor);
     }
     visitor.calls
 }
@@ -1466,11 +1466,17 @@ fn reachable_calls_in_expr(expression: &syn::Expr) -> Vec<ReachableCall> {
     visitor.calls
 }
 
-fn visit_returned_boxed_closure(expression: &syn::Expr, visitor: &mut ReachableCallVisitor) {
+fn visit_returned_sanctioned_closure(
+    expression: &syn::Expr,
+    visitor: &mut ReachableCallVisitor,
+) {
     let syn::Expr::Call(call) = expression else {
         return;
     };
-    if policy_tokens(&call.func) != "Box::new" {
+    if !matches!(
+        policy_tokens(&call.func).as_str(),
+        "Box::new" | "WorkerSpec::deferred"
+    ) {
         return;
     }
     for argument in &call.args {
@@ -2439,6 +2445,59 @@ mod tests {
                 .contains("missing reachable call `spawn_consumer_ackable_tx_subscriber`"),
             "unexpected error: {error:#}"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn policy_executor_only_accepts_worker_edge_in_deferred_funnel() -> anyhow::Result<()> {
+        let green = syn::parse_file(
+            r#"
+            fn worker_spec() -> WorkerSpec {
+                WorkerSpec::deferred(move |token| {
+                    spawn_consumer_ackable_tx_subscriber(token)
+                })
+            }
+            "#,
+        )?;
+        verify_policy_call_edge_in_syntax(
+            &green,
+            "policy executor",
+            "synthetic.rs",
+            "worker_spec",
+            PolicyCallRequirement::exact("spawn_consumer_ackable_tx_subscriber", ["", ""]),
+        )?;
+
+        for red in [
+            r#"
+            fn worker_spec() -> WorkerSpec {
+                WorkerSpec::phase_one(move |token| {
+                    spawn_consumer_ackable_tx_subscriber(token)
+                })
+            }
+            "#,
+            r#"
+            fn worker_spec() {
+                let hidden = move |token| spawn_consumer_ackable_tx_subscriber(token);
+                build_worker(hidden)
+            }
+            "#,
+        ] {
+            let syntax = syn::parse_file(red)?;
+            let error = verify_policy_call_edge_in_syntax(
+                &syntax,
+                "policy executor",
+                "synthetic.rs",
+                "worker_spec",
+                PolicyCallRequirement::exact("spawn_consumer_ackable_tx_subscriber", ["", ""]),
+            )
+            .expect_err("non-deferred closure must not masquerade as the ConsumerTx sink");
+            assert!(
+                error
+                    .to_string()
+                    .contains("missing reachable call `spawn_consumer_ackable_tx_subscriber`"),
+                "unexpected error: {error:#}"
+            );
+        }
         Ok(())
     }
 

@@ -635,7 +635,7 @@ pub(crate) fn wire_s3_canary(
     let probe_ready = Arc::clone(&ready);
     let worker_ready = Arc::clone(&ready);
     let s3 = deps.s3.clone();
-    let worker: bootstrap::WorkerSpec = Box::new(move |token| {
+    let worker = bootstrap::WorkerSpec::phase_one(move |token| {
         DynManagedResource::new_box(spawn_s3_canary_sampler(
             s3.clone(),
             config,

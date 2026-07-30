@@ -58,6 +58,10 @@ async fn inventory_handler(
     inventory_http_response(&state.inventory, request_id)
 }
 
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "closed inventory error mapping keeps each typed failure at the HTTP boundary"
+)]
 fn inventory_http_response(
     reader: &runtimeexec::inventory::InventoryReader,
     request_id: &str,

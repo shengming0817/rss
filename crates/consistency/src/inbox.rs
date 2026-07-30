@@ -336,7 +336,7 @@ impl InboxState {
             Self::Claimed(claim) if claim.freshness() == InboxLeaseFreshness::Expired => {
                 (SeenState::Fresh, Self::Claimed(InboxClaim::active(lease)))
             }
-            Self::Claimed(claim) => (SeenState::Duplicate, Self::Claimed(claim)),
+            Self::Claimed(claim) => (SeenState::InProgress, Self::Claimed(claim)),
             Self::Done => (SeenState::Duplicate, Self::Done),
         }
     }
@@ -373,8 +373,9 @@ impl InboxState {
 ///
 /// # 状态机（absent → claimed(token) → done）
 ///
-/// - `try_claim`：absent / **TTL 过期的 claimed** → claimed(传入 token)（`Fresh`）；fresh-claimed / done →
-///   `Duplicate`。过期 claim 经 TTL 重捞（claimed 超 `lease_ttl` 未续租即可被新 token 接管），修
+/// - `try_claim`：absent / **TTL 过期的 claimed** → claimed(传入 token)（`Fresh`）；done →
+///   `Duplicate`；活跃 claimed → [`SeenState::InProgress`]，让 consumer 延迟 `Requeue` 而不是将未完成的收据
+///   误当成 Duplicate 后 Ack。过期 claim 经 TTL 重捞（claimed 超 `lease_ttl` 未续租即可被新 token 接管），修
 ///   crash-after-claim 时 key 永久 `Duplicate` 的丢消息风险（硬崩溃下 `release` 走不到，#1213）。
 /// - `extend`：claimed(token) 续租（刷新 lease 到期点）；token 匹配 → `Held`，不符 → `Lost`（已被重捞）。
 /// - `commit`：claimed(token)→done（CAS）；token 匹配 → `Held`（receipt 保留期间去重），不符 → `Lost`
@@ -391,7 +392,8 @@ pub trait InboxStore {
     /// **写副作用（`Fresh` 路径）**：`try_claim` 在 `Fresh` 路径上执行 `INSERT ... ON CONFLICT` / `SET NX`
     /// 原子操作，将 `lease` token stamp 到后端——**不是只读谓词**；方法名 `try_claim` 即点明 claim 写语义（#1354）。
     ///
-    /// `Fresh` ⇒ 本消费者持有以 `lease` 标记的 claim，应执行副作用；`Duplicate` ⇒ 幂等短路（他人持有或已 done）。
+    /// `Fresh` ⇒ 本消费者持有以 `lease` 标记的 claim，应执行副作用；`Duplicate` ⇒ 仅表示已
+    /// durable done，可幂等短路并 Ack；他人持有活跃 claim ⇒ `InProgress`，必须 lease-aware 延迟 Requeue。
     ///
     /// **`Duplicate` 路径**：传入的 `lease` **不会**写入后端——claim-or-reclaim 是单一原子操作，token 必须
     /// 在调用前铸出；若返回 `Duplicate`，调用方可丢弃该 token。
@@ -532,13 +534,13 @@ mod tests {
     }
 
     #[test]
-    fn claim_active_claim_is_duplicate_and_preserves_lease() {
+    fn claim_active_claim_is_in_progress_and_preserves_lease() {
         let (held, contender) = token_pair();
         let state = InboxState::Claimed(InboxClaim::active(held.clone()));
 
         let (seen, state) = state.try_claim(contender);
 
-        assert_eq!(seen, SeenState::Duplicate);
+        assert_eq!(seen, SeenState::InProgress);
         assert!(matches!(state, InboxState::Claimed(_)));
         if let InboxState::Claimed(claim) = state {
             assert_eq!(claim.lease(), &held);

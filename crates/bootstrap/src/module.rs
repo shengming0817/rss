@@ -64,10 +64,34 @@ impl DomainBinding {
     }
 }
 
-/// 需要 per-stack cancel token 的后台 worker；组合根排空进 [`ShutdownStack::register_with_token`]。
+/// 带闭合 admission shutdown policy 的后台 worker。
 ///
-/// [`ShutdownStack::register_with_token`]: crate::shutdown::ShutdownStack::register_with_token
-pub type WorkerSpec = Box<dyn FnOnce(CancellationToken) -> Box<DynManagedResource<'static>> + Send>;
+/// 生产构造点必须显式选择 phase-one 广播或自身 LIFO 相位取消；无默认 variant、裸 factory alias
+/// 或动态 policy 字符串。runtime sink 对本枚举穷尽 match，把两种 policy 分别送入唯一 token funnel。
+pub enum WorkerSpec {
+    /// shutdown phase-one 立即取消，适用于 readiness、sampler、sweeper 等不接收业务事务的 task。
+    PhaseOne(Box<dyn FnOnce(CancellationToken) -> Box<DynManagedResource<'static>> + Send>),
+    /// 等后注册资源完成 LIFO drain 后，到本 worker 自身相位才取消并 join。
+    Deferred(Box<dyn FnOnce(CancellationToken) -> Box<DynManagedResource<'static>> + Send>),
+}
+
+impl WorkerSpec {
+    /// 构造 shutdown phase-one 立即取消的 worker。
+    pub fn phase_one<F>(make: F) -> Self
+    where
+        F: FnOnce(CancellationToken) -> Box<DynManagedResource<'static>> + Send + 'static,
+    {
+        Self::PhaseOne(Box::new(make))
+    }
+
+    /// 构造到自身 LIFO 相位才取消并 join 的 worker。
+    pub fn deferred<F>(make: F) -> Self
+    where
+        F: FnOnce(CancellationToken) -> Box<DynManagedResource<'static>> + Send + 'static,
+    {
+        Self::Deferred(Box::new(make))
+    }
+}
 
 /// 域能力的标准装配出口（ADR-010 §2.2）：`module()` / `wire_X` 的可聚合产物，组合根经
 /// [`DomainModuleResult::merge`] 聚合各域 result 后逐 `Vec` 排空到 sink，不再逐项手工接线。
@@ -96,9 +120,7 @@ pub struct DomainModuleResult {
     ///
     /// [`ShutdownStack::register_detached`]: crate::shutdown::ShutdownStack::register_detached
     pub resources: Vec<Box<DynManagedResource<'static>>>,
-    /// 需 cancel token 的后台 worker，排空进 [`ShutdownStack::register_with_token`]。
-    ///
-    /// [`ShutdownStack::register_with_token`]: crate::shutdown::ShutdownStack::register_with_token
+    /// 带闭合 admission shutdown policy 的后台 worker，由生命周期内核穷尽分发到对应 token funnel。
     pub workers: Vec<WorkerSpec>,
 }
 
@@ -200,7 +222,7 @@ mod result_tests {
     }
 
     fn worker_entry() -> WorkerSpec {
-        Box::new(|_token| DynManagedResource::new_box(NoopResource))
+        WorkerSpec::phase_one(|_token| DynManagedResource::new_box(NoopResource))
     }
 
     struct DeclaringDomain(&'static str);
@@ -261,7 +283,15 @@ mod result_tests {
     }
 
     fn labeled_worker(label: &'static str) -> WorkerSpec {
-        Box::new(move |_token| labeled_resource(label))
+        WorkerSpec::phase_one(move |_token| labeled_resource(label))
+    }
+
+    fn invoke_worker(worker: WorkerSpec) -> Box<DynManagedResource<'static>> {
+        match worker {
+            WorkerSpec::PhaseOne(make) | WorkerSpec::Deferred(make) => {
+                make(CancellationToken::new())
+            }
+        }
     }
 
     fn labeled_result(label: &'static str) -> DomainModuleResult {
@@ -386,7 +416,7 @@ mod result_tests {
         assert_eq!(output.resources[0].name(), "still-owned");
         assert_eq!(
             output.workers.into_iter().next().map(|worker| {
-                let resource = worker(CancellationToken::new());
+                let resource = invoke_worker(worker);
                 resource.name().to_owned()
             }),
             Some("still-owned".to_owned())
@@ -420,7 +450,7 @@ mod result_tests {
         let worker_order: Vec<String> = output
             .workers
             .into_iter()
-            .map(|worker| worker(CancellationToken::new()).name().to_owned())
+            .map(|worker| invoke_worker(worker).name().to_owned())
             .collect();
 
         assert_eq!(probe_order, expected);
@@ -451,7 +481,7 @@ mod result_tests {
         let worker_labels: Vec<String> = output
             .workers
             .into_iter()
-            .map(|worker| worker(CancellationToken::new()).name().to_owned())
+            .map(|worker| invoke_worker(worker).name().to_owned())
             .collect();
         assert_eq!(worker_labels, ["only"]);
     }
@@ -461,7 +491,7 @@ mod result_tests {
     fn worker_is_moved_and_invoked_once() {
         let calls = Arc::new(AtomicUsize::new(0));
         let worker_calls = Arc::clone(&calls);
-        let worker: WorkerSpec = Box::new(move |_token| {
+        let worker = WorkerSpec::deferred(move |_token| {
             worker_calls.fetch_add(1, Ordering::SeqCst);
             labeled_resource("single-use")
         });
@@ -471,7 +501,7 @@ mod result_tests {
         };
 
         let worker = output.workers.pop().expect("worker must be present");
-        let resource = worker(CancellationToken::new());
+        let resource = invoke_worker(worker);
 
         assert_eq!(resource.name(), "single-use");
         assert_eq!(calls.load(Ordering::SeqCst), 1);

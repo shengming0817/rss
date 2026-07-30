@@ -775,28 +775,22 @@ mod tests {
     }
 
     fn identityaudit_runtime_plan() -> TestResult<ParsedRuntimePlan> {
-        let manifest = AssemblyManifest::from_toml_str(include_str!(
-            "../../../assemblies/identityaudit/assembly.toml"
-        ))?
-        .canonicalize_v2()?;
+        let repository_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(std::path::Path::parent)
+            .ok_or("runtimeexec repository root")?;
+        let source = RepositoryAssemblyManifestV2::discover_v2(
+            repository_root,
+            &repository_root.join("assemblies/identityaudit"),
+        )?;
         let lock = ParsedAssemblyLock::from_json_slice(include_bytes!(
             "../../../assemblies/identityaudit/assembly.lock.json"
         ))?
-        .verify_repository_v2(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .parent()
-                .and_then(std::path::Path::parent)
-                .ok_or("runtimeexec repository root")?,
-            &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .parent()
-                .and_then(std::path::Path::parent)
-                .ok_or("runtimeexec repository root")?
-                .join("assemblies/identityaudit"),
-        )?
+        .verify_repository_v2(&source)?
         .into_executable();
         Ok(ParsedRuntimePlan::from_json_slice_bound(
             include_bytes!("../../../assemblies/identityaudit/runtime-plan.json"),
-            &manifest,
+            source.canonical(),
             &lock,
         )?)
     }

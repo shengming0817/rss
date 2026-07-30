@@ -67,13 +67,19 @@ Go（GoCell 原实现）靠 `defer` 的 LIFO 语义天然表达：`defer db.Clos
    失败用 typed `ShutdownError`（本 crate `thiserror`）而非 `anyhow`：`Display` 仅安全摘要常量、
    原始错误仅作内部 `source`——公共 port 不暴露 `anyhow`、不泄漏 adapter runtime 信息（PII 边界）。
 2. **`ShutdownStack`**——注册栈：`Vec<Arc<dyn ManagedResource>>` 按注册顺序排列，持有 root
-   `CancellationToken`。token 经 `register_with_token(|token| …)` funnel 由本 stack 派生注入；
-   无后台 task 资源经 `register_detached(…)`（无 `pub child_token`，发放即收口于注册）。
+   `CancellationToken`。立即响应 shutdown 广播的 task 经 `register_with_token(|token| …)` 注入 root child；
+   必须等依赖序中的后注册资源 drain 后才取消的 task 经
+   `register_deferred_with_token(|token| …)` 注入 stack-owned 独立 token；无后台 task 资源经
+   `register_detached(…)`（无 `pub child_token`，两类 token 的铸造均收口于注册）。
+   module worker 不再用统一 closure alias：`WorkerSpec::{PhaseOne, Deferred}` 是闭合 typed policy，
+   生产构造点必须显式选择，runtime sink 穷尽 match 后进入对应 funnel。
 3. **两阶段逆序驱动器**——`ShutdownStack::shutdown(self)` / `shutdown_within(self, total_budget)`：
    - **阶段 1 · 广播（并发、无序）**：`root_token.cancel()`，所有经 `register_with_token` 注入的
-     后台 task 同时感知关闭、开始自行退出。
+     后台 task 同时感知关闭、开始自行退出。deferred task 不接此广播。
    - **阶段 2 · 逆序确认（串行、有序）**：按注册逆序（LIFO）逐个 `await` 每个资源的 `shutdown()`，
-     per-resource 超时 + panic 隔离，**遇错继续**，聚合所有失败返回 `Vec<ResourceShutdownError>`。
+     per-resource 超时 + panic 隔离，**遇错继续**，聚合所有失败返回 `Vec<ResourceShutdownError>`；
+     deferred task 到达自身相位时先取消、再在同一 budget 内 join。其 wrapper 同时持有
+     cancel-on-drop guard；若整体预算在到达该相位前耗尽，remaining resource 被 drop 时仍取消 token。
    - **整体预算（可选）**：`shutdown_within` 附加 cancel-safe 总预算上界（单一共享 deadline），
      预算耗尽时剩余资源记 `BudgetExhausted` 由驱动器自身聚合——**不**交外层 `timeout`。
 
@@ -105,7 +111,7 @@ Go（GoCell 原实现）靠 `defer` 的 LIFO 语义天然表达：`defer db.Clos
 | `SHUTDOWN-TIMEOUT-BOUNDED-01` | 每个资源关闭有 per-resource 超时上界 | Medium | `tokio::time::timeout(budget, …)` 包裹 + 测试断言 |
 | `SHUTDOWN-PANIC-ISOLATE-01` | 下游资源 `shutdown` panic 被隔离，不击穿驱动循环 | Medium | `tokio::spawn` + `JoinError` 捕获 + 测试断言 |
 | `SHUTDOWN-NO-PANIC-ON-ERROR-01` | 关闭路径自身绝不 `panic!`/`unwrap`/`expect`，失败走 `Result` | Medium | clippy `panic`/`unwrap_used`/`expect_used` deny |
-| `SHUTDOWN-TOKEN-FUNNEL-01` | 后台 task 取消 token 只能经 `register_with_token` 由本 stack 派生注入；无 task 资源经 `register_detached` 显式声明 | Medium→ | **无 `pub child_token`**（裸 token 发放无公开入口，可见性收口，编译期）+ 两入口覆盖全部注册路径。资源仍可忽略注入 token（sealed handle 才 Hard，见 §5 follow-up） |
+| `SHUTDOWN-TOKEN-FUNNEL-01` | 后台 task 取消 token 只能经 `register_with_token`（root 广播）或 `register_deferred_with_token`（自身 LIFO 相位）由本 stack 铸造注入；module worker 以闭合 `WorkerSpec` policy 显式选择；无 task 资源经 `register_detached` 显式声明 | Medium→ | **无 `pub child_token`**；`WorkerSpec` 无默认/字符串 policy，runtime sink 穷尽 match；deferred wrapper cancel-on-drop 覆盖未到达 shutdown 相位的预算耗尽。资源仍可忽略注入 token（sealed handle 才 Hard，见 §5 follow-up） |
 | `SHUTDOWN-BUDGET-CANCEL-SAFE-01` | 整体预算由驱动器内部 `shutdown_within` 承担（cancel-safe），不交外层 `timeout` | Medium | 驱动器内单一共享 deadline + `BudgetExhausted` 聚合 + 测试断言；rustdoc 危险说明禁外层 timeout（footgun 防护） |
 
 > 强度说明（AI-robust）：仅 `SHUTDOWN-SINGLE-SHOT-01` 是 **Hard**——消费 self 让违反在类型层
@@ -147,7 +153,10 @@ impl ShutdownStack {
     // 有后台 task：token 由本 stack 派生、闭包内经构造器注入（注册即收口，无 pub child_token）。
     pub fn register_with_token<F>(&mut self, make: F)
         where F: FnOnce(CancellationToken) -> Arc<dyn ManagedResource>;
-    // 无后台 task / 不接广播：显式 no-token 入口（声明有意，而非忘记接线）。
+    // 有后台 task，但只在自身 LIFO 相位停止：stack 铸造独立 token，wrapper 先 cancel 后 join。
+    pub fn register_deferred_with_token<F>(&mut self, make: F)
+        where F: FnOnce(CancellationToken) -> Arc<dyn ManagedResource>;
+    // 无后台 task / 不接取消：显式 no-token 入口（声明有意，而非忘记接线）。
     pub fn register_detached(&mut self, resource: Arc<dyn ManagedResource>);
     pub async fn shutdown(self) -> Vec<ResourceShutdownError>;             // 两阶段；空 = 全成功
     pub async fn shutdown_within(self, total_budget: Duration)            // 同上 + cancel-safe 整体预算
@@ -167,9 +176,14 @@ impl ShutdownStack {
 //   1. DB pool        2. outbox relay(依赖 pool)   3. event consumer
 //   4. background worker      5. HTTP listener(最后注册 → LIFO 最先关，先停外部流量)
 //
-// 有后台 task 的资源经 register_with_token 注入 token；纯 drain 资源经 register_detached：
+// 立即停 admission 的后台 task 经 register_with_token；必须等 listener drain 后再停的 worker 经
+// register_deferred_with_token；纯 drain 资源经 register_detached：
 //   stack.register_with_token(|tok| Arc::new(OutboxRelay::new(pool.clone(), tok)));
+//   stack.register_deferred_with_token(|tok| Arc::new(ConsumerWorker::new(pool.clone(), tok)));
 //   stack.register_detached(Arc::new(SyncBuffer::new()));
+// module output 使用同一闭合 policy：
+//   WorkerSpec::phase_one(|tok| readiness_sampler(tok));
+//   WorkerSpec::deferred(|tok| transaction_worker(tok));
 //
 // 驱动（P2 实现）：
 //   tokio::select! { _ = sigterm() => {}, _ = ctrl_c() => {} }            // 感知
@@ -177,9 +191,11 @@ impl ShutdownStack {
 //   if !failures.is_empty() { for f in &failures { error!(%f) } exit(1) }
 ```
 
-token 发放并入注册 funnel（`register_with_token(|token| …)`）：资源经**构造器注入** token
-（RSS「必填依赖走构造器位置参」），闭包先收到本 stack 派生的 child token 再构造资源——
-「该资源后台 task 监听本 stack 广播」由注册路径强制，**无 `pub child_token`** 裸入口（早先把
+token 发放并入两个 typed 注册 funnel（`register_with_token(|token| …)` /
+`register_deferred_with_token(|token| …)`）：资源经**构造器注入** token
+（RSS「必填依赖走构造器位置参」），闭包先收到本 stack 铸造的 token 再构造资源——
+前者监听 root 广播，后者由 stack 私有 wrapper 在自身 LIFO 相位 cancel 后 join。两者均**无
+`pub child_token`** 裸入口（早先把
 `register`/`child_token` 拆开依赖调用方记得先取 token，是 Soft 约定；funnel 把它收口到编译期可见性，
 见 §3 `SHUTDOWN-TOKEN-FUNNEL-01`）。无后台 task 的资源经 `register_detached` 显式声明不接广播。
 
@@ -262,8 +278,8 @@ mut 状态（drain sender / take oneshot），用 `Mutex<Option<Inner>>` 包装�
 
 | 变更 | contract | generated | crate | tests | docs |
 |------|----------|-----------|-------|-------|------|
-| `ManagedResource` + `ShutdownStack` + 两阶段 LIFO 驱动器 | —（非 wire 契约，进程内 port） | — | `crates/bootstrap/src/shutdown.rs`、`lib.rs`、`Cargo.toml` | `shutdown.rs` `#[cfg(test)]` 13 例（逆序/继续-聚合/超时/panic 隔离/取消/空/单/全错 + token funnel/typed-error PII 边界/整体预算耗尽×2/充裕预算） | 本 ADR |
-| token funnel（`register_with_token`/`register_detached`，移除 `pub child_token`/`register`） | — | — | `crates/bootstrap/src/shutdown.rs` | `cancellation_broadcast_*`（funnel 注入）+ 全测试经 `register_detached` | 本 ADR §3/§4.1 |
+| `ManagedResource` + `ShutdownStack` + 两阶段 LIFO 驱动器 | —（非 wire 契约，进程内 port） | — | `crates/bootstrap/src/shutdown.rs`、`lib.rs`、`Cargo.toml` | `shutdown.rs` `#[cfg(test)]`（逆序/继续-聚合/超时/panic 隔离/取消/空/单/全错 + token funnel/typed-error PII 边界/整体预算耗尽/充裕预算） | 本 ADR |
+| token funnel（`WorkerSpec::{PhaseOne, Deferred}` → `register_with_token`/`register_deferred_with_token`，无 task 经 `register_detached`） | — | — | `crates/bootstrap/src/module.rs`、`shutdown.rs`、`crates/runtimeexec/src/lib.rs` | phase-one/deferred 接缝测试 + `deferred_cancellation_waits_for_its_lifo_phase` + `budget_exhaustion_before_deferred_phase_still_cancels_token` + runtime synthetic-red/anti-vacuity | 本 ADR §3/§4.1 |
 | typed `ShutdownError`（移除公共 port 的 `anyhow`，drop `anyhow` 依赖） | — | — | `crates/bootstrap/src/shutdown.rs`、`Cargo.toml` | `shutdown_error_display_is_safe_summary_only`（PII 边界） | 本 ADR §2/§5 |
 | `shutdown_within` 整体预算（cancel-safe，`BudgetExhausted`） | — | — | `crates/bootstrap/src/shutdown.rs` | `shutdown_within_*` 3 例 | 本 ADR §3/§5 |
 | `tokio-util` 入 workspace 依赖 | — | — | 根 `Cargo.toml [workspace.dependencies]` | cargo-deny bans/licenses ok | 本 ADR §5 |

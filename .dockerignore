@@ -18,10 +18,9 @@ target/
 lints/
 
 # ── 非 cargo 构建输入（codegen 是 `cargo xtask` 离线步骤，不在镜像构建期）───────────────
-# 注：contracts/ 仅被 `cargo xtask codegen` 读取派生 generated/（已提交）；若将来 codegen 迁 build.rs，
-#     须把 contracts/ 移出本排除（否则镜像内构建缺 schema 源）。
+# contracts/ 是 AssemblyLock build attestation 的完整 repository catalog 输入；所有 production
+# assembly build scripts 都必须在镜像构建上下文中看到同一闭合 catalog，禁止裁剪为单 assembly 子集。
 # docs/ 中的 runtime-plan schema 被 assembly-schema `include_str!` 消费，必须留在构建 context。
-contracts/
 specs/
 public-api/
 hack/

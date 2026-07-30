@@ -168,9 +168,11 @@ pub(crate) async fn build(
         resources: pg_resources,
         ..Default::default()
     };
-    auth_audit_output.workers.push(Box::new(move |token| {
-        DynManagedResource::new_box(pg_sampler.spawn(token))
-    }));
+    auth_audit_output
+        .workers
+        .push(bootstrap::WorkerSpec::phase_one(move |token| {
+            DynManagedResource::new_box(pg_sampler.spawn(token))
+        }));
     let auth_audit_sink = auth_audit_sink_constructor
         .finish(auth_audit_output)?
         .transfer(transaction.provider_output_mut());
@@ -198,7 +200,7 @@ pub(crate) async fn build(
             }),
         )],
         resources: redis.runtime_resources(),
-        workers: vec![Box::new(move |token| {
+        workers: vec![bootstrap::WorkerSpec::phase_one(move |token| {
             DynManagedResource::new_box(RedisReadinessWorker::spawn(
                 redis_for_worker.clone(),
                 token,
@@ -629,7 +631,7 @@ async fn build_vault(
     let worker_signing_key = signing_key_name.clone();
     let worker_dlx_key = dlx_key_name.clone();
     let signer_readiness = Arc::clone(&readiness);
-    let signer_readiness_worker: bootstrap::WorkerSpec = Box::new(move |token| {
+    let signer_readiness_worker = bootstrap::WorkerSpec::phase_one(move |token| {
         DynManagedResource::new_box(VaultReadinessWorker::spawn_signer(
             token,
             timeout,
@@ -638,7 +640,7 @@ async fn build_vault(
             signer_readiness,
         ))
     });
-    let dlx_readiness_worker: bootstrap::WorkerSpec = Box::new(move |token| {
+    let dlx_readiness_worker = bootstrap::WorkerSpec::phase_one(move |token| {
         DynManagedResource::new_box(VaultReadinessWorker::spawn_dlx(
             token,
             timeout,
@@ -1131,11 +1133,13 @@ mod tests {
                 }));
         }
         if workers {
-            output.workers.push(Box::new(|_token| {
-                DynManagedResource::new_box(TestResource {
-                    shutdowns: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-                })
-            }));
+            output
+                .workers
+                .push(bootstrap::WorkerSpec::phase_one(|_token| {
+                    DynManagedResource::new_box(TestResource {
+                        shutdowns: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                    })
+                }));
         }
         output
     }

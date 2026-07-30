@@ -919,7 +919,7 @@ fn build_dlx_archive_readiness_worker<S>(
 where
     S: DlxArchiveReadiness + Send + 'static,
 {
-    Box::new(move |token| {
+    WorkerSpec::phase_one(move |token| {
         DynManagedResource::new_box(spawn_on_dedicated_runtime(
             DLX_ARCHIVE_READINESS_WORKER_NAME,
             token,
@@ -963,7 +963,7 @@ fn build_dlx_archive_key_readiness_worker(
     health: Arc<WorkerHealth>,
     config: DlxWorkerConfig,
 ) -> WorkerSpec {
-    Box::new(move |token| {
+    WorkerSpec::phase_one(move |token| {
         DynManagedResource::new_box(spawn_on_dedicated_runtime(
             DLX_ARCHIVE_KEY_READINESS_WORKER_NAME,
             token,
@@ -1027,6 +1027,10 @@ async fn dlx_archive_key_readiness_loop<R>(
     }
 }
 
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "exhaustive readiness result mapping keeps health and diagnostics in one boundary"
+)]
 fn apply_dlx_archive_key_readiness_sample(
     health: &WorkerHealth,
     sample: Result<anyhow::Result<()>, tokio::time::error::Elapsed>,
@@ -1134,7 +1138,7 @@ where
     L: DlxTickRunner + Send + 'static,
     B: DlxBacklogReader + Send + 'static,
 {
-    Box::new(move |token| {
+    WorkerSpec::phase_one(move |token| {
         DynManagedResource::new_box(spawn_on_dedicated_runtime(
             DLX_LIFECYCLE_WORKER_NAME,
             token,
@@ -1585,7 +1589,7 @@ fn wire_domain_relay(
     let health = Arc::new(WorkerHealth::healthy());
     let worker_name = format!("outbox-relay-{domain}");
     let worker_health = Arc::clone(&health);
-    let worker: WorkerSpec = Box::new(move |token| {
+    let worker = WorkerSpec::deferred(move |token| {
         DynManagedResource::new_box(spawn_relay(
             worker_name,
             outbox,
@@ -1650,7 +1654,7 @@ fn wire_sampler_worker(
 ) -> anyhow::Result<()> {
     let health = Arc::new(WorkerHealth::healthy());
     let worker_health = Arc::clone(&health);
-    let worker: WorkerSpec = Box::new(move |token| {
+    let worker = WorkerSpec::phase_one(move |token| {
         DynManagedResource::new_box(spawn_on_dedicated_runtime(
             "outbox-sampler",
             token,
@@ -1696,7 +1700,7 @@ where
 {
     let health = Arc::new(WorkerHealth::healthy());
     let worker_health = Arc::clone(&health);
-    let worker: WorkerSpec = Box::new(move |token| {
+    let worker = WorkerSpec::phase_one(move |token| {
         DynManagedResource::new_box(spawn_on_dedicated_runtime(
             worker_name,
             token,
@@ -1859,7 +1863,7 @@ fn wire_inbox_sweeper(
     .context("build inbox sweeper config")?;
     let health = Arc::new(WorkerHealth::healthy());
     let worker_health = Arc::clone(&health);
-    let worker: WorkerSpec = Box::new(move |token| {
+    let worker = WorkerSpec::phase_one(move |token| {
         let loop_health = Arc::clone(&worker_health);
         let loop_token = token.clone();
         let handle = tokio::spawn(async move {
@@ -3425,7 +3429,9 @@ mod tests {
             DlxWorkerConfig::canonical(),
         );
 
-        let resource = worker(token);
+        let resource = match worker {
+            WorkerSpec::PhaseOne(make) | WorkerSpec::Deferred(make) => make(token),
+        };
         assert!(tick_observed.recv_timeout(Duration::from_secs(2)).is_ok());
         assert!(resource.shutdown().await.is_ok());
         assert_eq!(

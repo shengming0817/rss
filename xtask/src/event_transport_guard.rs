@@ -6468,21 +6468,21 @@ fn worker_binding(statement: &syn::Stmt, outbox: &str) -> Option<String> {
     let syn::Stmt::Local(local) = statement else {
         return None;
     };
-    let syn::Pat::Type(typed) = &local.pat else {
-        return None;
+    let worker = match &local.pat {
+        syn::Pat::Ident(ident) => ident.ident.to_string(),
+        syn::Pat::Type(typed) if normalized_tokens(&typed.ty) == "WorkerSpec" => {
+            pat_ident(&typed.pat)?
+        }
+        _ => return None,
     };
-    if normalized_tokens(&typed.ty) != "WorkerSpec" {
-        return None;
-    }
-    let worker = pat_ident(&typed.pat)?;
     let init = local.init.as_ref()?.expr.as_ref();
-    let syn::Expr::Call(box_new) = peel_expr(init) else {
+    let syn::Expr::Call(policy) = peel_expr(init) else {
         return None;
     };
-    if !call_ends_with(&box_new.func, "Box", "new") || box_new.args.len() != 1 {
+    if !call_ends_with(&policy.func, "WorkerSpec", "deferred") || policy.args.len() != 1 {
         return None;
     }
-    let syn::Expr::Closure(closure) = peel_expr(box_new.args.first()?) else {
+    let syn::Expr::Closure(closure) = peel_expr(policy.args.first()?) else {
         return None;
     };
     let tail = closure_tail_expr(&closure.body)?;
@@ -8885,10 +8885,21 @@ pub mod fault_matrix;
     fn outbox_claim_cutover_rejects_disconnected_runtime_bait() {
         let cases = [
             (
+                "relay worker uses phase-one policy",
+                r#"
+                fn wire_domain_relay(outbox: postgres::PgOutbox, module: &mut DomainModuleResult) {
+                    let worker = WorkerSpec::phase_one(move |token| {
+                        DynManagedResource::new_box(spawn_relay(name, outbox, token))
+                    });
+                    module.workers.push(worker);
+                }
+                "#,
+            ),
+            (
                 "wrong outbox parameter type",
                 r#"
                 fn wire_domain_relay(outbox: RogueOutbox, module: &mut DomainModuleResult) {
-                    let worker: WorkerSpec = Box::new(move |token| {
+                    let worker = WorkerSpec::deferred(move |token| {
                         DynManagedResource::new_box(spawn_relay(name, outbox, token))
                     });
                     module.workers.push(worker);
@@ -9323,7 +9334,7 @@ $do$;
                     outbox: postgres::PgOutbox,
                     module: &mut DomainModuleResult,
                 ) -> anyhow::Result<()> {
-                    let worker: WorkerSpec = Box::new(move |token| {
+                    let worker = WorkerSpec::deferred(move |token| {
                         DynManagedResource::new_box(spawn_relay(
                             worker_name,
                             outbox,

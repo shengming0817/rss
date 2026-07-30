@@ -374,7 +374,7 @@ fn keyprovider_readiness_worker(
     period: Duration,
     ready: Arc<AtomicBool>,
 ) -> WorkerSpec {
-    Box::new(move |token| {
+    WorkerSpec::phase_one(move |token| {
         DynManagedResource::new_box(spawn_keyprovider_readiness_sampler(
             provider, key_name, period, token, ready,
         ))
@@ -420,7 +420,7 @@ fn secret_resolver_readiness_worker(
     period: Duration,
     ready: Arc<AtomicBool>,
 ) -> WorkerSpec {
-    Box::new(move |token| {
+    WorkerSpec::phase_one(move |token| {
         DynManagedResource::new_box(spawn_secret_resolver_readiness_sampler(
             resolver, targets, period, token, ready,
         ))
@@ -805,7 +805,7 @@ mod tests {
     }
 
     fn readiness_test_worker() -> WorkerSpec {
-        Box::new(|_| DynManagedResource::new_box(ReadinessTestWorker))
+        WorkerSpec::phase_one(|_| DynManagedResource::new_box(ReadinessTestWorker))
     }
 
     struct FailingKeyProvider;
@@ -1149,7 +1149,11 @@ mod tests {
             Duration::from_millis(1),
             Arc::clone(&ready),
         );
-        let resource = worker(CancellationToken::new());
+        let resource = match worker {
+            WorkerSpec::PhaseOne(make) | WorkerSpec::Deferred(make) => {
+                make(CancellationToken::new())
+            }
+        };
 
         tokio::time::timeout(Duration::from_secs(1), async {
             while ready.load(Ordering::Acquire) {
@@ -1171,7 +1175,11 @@ mod tests {
             Duration::from_secs(7),
             Arc::clone(&ready),
         );
-        let resource = worker(CancellationToken::new());
+        let resource = match worker {
+            WorkerSpec::PhaseOne(make) | WorkerSpec::Deferred(make) => {
+                make(CancellationToken::new())
+            }
+        };
         tokio::task::yield_now().await;
 
         tokio::time::advance(Duration::from_secs(6)).await;

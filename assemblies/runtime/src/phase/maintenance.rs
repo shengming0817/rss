@@ -398,6 +398,11 @@ fn retention_outcome(error: &consistency::EngineError) -> RetentionOutcome {
     }
 }
 
+#[allow(
+    clippy::cognitive_complexity,
+    clippy::disallowed_methods,
+    reason = "the closed cancellation loop needs Tokio monotonic elapsed time only for latency telemetry"
+)]
 async fn run_sweeper_loop(
     mut task: impl MaintenanceSweepTask,
     period: Duration,
@@ -528,7 +533,7 @@ pub(crate) fn wire_auth_grant_sweeper(
     let sweeper = pg.infra().auth_grant_sweeper();
     let health = Arc::new(SweeperHealth::starting());
     let worker_health = Arc::clone(&health);
-    let worker: bootstrap::WorkerSpec = Box::new(move |token| {
+    let worker = bootstrap::WorkerSpec::phase_one(move |token| {
         DynManagedResource::new_box(spawn_auth_grant_sweeper(
             sweeper,
             period,
@@ -549,7 +554,7 @@ pub(crate) fn wire_service_token_replay_sweeper(
     let sweeper = pg.infra().service_token_replay_sweeper();
     let health = Arc::new(SweeperHealth::starting());
     let worker_health = Arc::clone(&health);
-    let worker: bootstrap::WorkerSpec = Box::new(move |token| {
+    let worker = bootstrap::WorkerSpec::phase_one(move |token| {
         let child = token.child_token();
         let worker_token = child.clone();
         let health = worker_health;
@@ -575,7 +580,7 @@ pub(crate) fn wire_revocation_sweeper(pg: &PgRuntimeHandle) -> anyhow::Result<Do
     let sweeper = pg.infra().revocation_sweeper();
     let health = Arc::new(SweeperHealth::starting());
     let worker_health = Arc::clone(&health);
-    let worker: bootstrap::WorkerSpec = Box::new(move |token| {
+    let worker = bootstrap::WorkerSpec::phase_one(move |token| {
         let child = token.child_token();
         let worker_token = child.clone();
         let handle = tokio::spawn(run_revocation_sweeper_loop(

@@ -172,9 +172,11 @@ pub(crate) async fn build(
         .context("settingsonly Postgres omitted distributed CAS lifecycle resource")?;
     let mut pg_output = bootstrap::DomainModuleResult::default();
     pg_output.resources.extend(pg_resources);
-    pg_output.workers.push(Box::new(move |token| {
-        DynManagedResource::new_box(pg_sampler.spawn(token))
-    }));
+    pg_output
+        .workers
+        .push(bootstrap::WorkerSpec::phase_one(move |token| {
+            DynManagedResource::new_box(pg_sampler.spawn(token))
+        }));
     let audit_sink = httpserve::AuditSinkHandle::new(pg_handle.auth_audit_sink());
 
     let vault = build_vault(
@@ -347,7 +349,7 @@ async fn build_production_infra(
     .await
     .context("settingsonly Redis startup verification timed out")??;
     let redis_ready = Arc::new(AtomicBool::new(true));
-    let redis_probe_name = primitives::ProbeName::parse("settingsonly_redis_ready")
+    let redis_probe_name = primitives::ProbeName::parse(crate::readiness::REDIS)
         .context("build settingsonly Redis readiness probe name")?;
     let redis_sampler = redis.clone();
     let sampler_ready = Arc::clone(&redis_ready);
@@ -359,7 +361,7 @@ async fn build_production_infra(
                 ready: Arc::clone(&redis_ready),
             }),
         )],
-        workers: vec![Box::new(move |token| {
+        workers: vec![bootstrap::WorkerSpec::phase_one(move |token| {
             DynManagedResource::new_box(RedisReadinessWorker::spawn(
                 redis_sampler,
                 redis_readiness,
@@ -750,7 +752,8 @@ struct StartupResourceCell {
 
 struct StartupResourceAlias {
     cell: Arc<StartupResourceCell>,
-    name: &'static str,
+    name: String,
+    shutdown_timeout: std::time::Duration,
     owner: StartupResourceOwner,
 }
 
@@ -780,6 +783,9 @@ fn split_startup_resource(
     Box<DynManagedResource<'static>>,
     StartupActivationReceipt,
 ) {
+    let resource_name = resource.name().to_owned();
+    let shutdown_timeout = resource.shutdown_timeout();
+    let alias_name = format!("{name}:{resource_name}");
     let cell = Arc::new(StartupResourceCell {
         resource: tokio::sync::Mutex::new(Some(resource)),
         activated: std::sync::atomic::AtomicBool::new(false),
@@ -787,12 +793,14 @@ fn split_startup_resource(
     (
         DynManagedResource::new_box(StartupResourceAlias {
             cell: Arc::clone(&cell),
-            name,
+            name: alias_name.clone(),
+            shutdown_timeout,
             owner: StartupResourceOwner::Rollback,
         }),
         DynManagedResource::new_box(StartupResourceAlias {
             cell: Arc::clone(&cell),
-            name,
+            name: alias_name,
+            shutdown_timeout,
             owner: StartupResourceOwner::Activation,
         }),
         StartupActivationReceipt { cell },
@@ -801,7 +809,11 @@ fn split_startup_resource(
 
 impl diport::ManagedResource for StartupResourceAlias {
     fn name(&self) -> &str {
-        self.name
+        &self.name
+    }
+
+    fn shutdown_timeout(&self) -> std::time::Duration {
+        self.shutdown_timeout
     }
 
     async fn shutdown(&self) -> Result<(), diport::ShutdownError> {
@@ -1087,7 +1099,7 @@ fn build_federated_access_provider(
             .context("build settingsonly federated verifier")?,
         Box::new(crate::SystemClock),
     ));
-    let name = primitives::ProbeName::parse("federated_access_token_jwks_ready")
+    let name = primitives::ProbeName::parse(crate::readiness::FEDERATED_JWKS)
         .context("build settingsonly federated JWKS probe name")?;
     Ok(FederatedProvider {
         provider,
@@ -1267,6 +1279,12 @@ mod tests {
             "settingsonly-startup-rollback-test",
         );
 
+        assert_eq!(
+            startup.name(),
+            "settingsonly-startup-rollback-test:settingsonly-counting-resource"
+        );
+        assert_eq!(activation.name(), startup.name());
+
         startup.shutdown().await.expect("startup rollback");
         activation
             .shutdown()
@@ -1283,6 +1301,7 @@ mod tests {
             DynManagedResource::new_box(CountingResource(Arc::clone(&shutdowns))),
             "settingsonly-activated-owner-test",
         );
+        assert_eq!(activation.shutdown_timeout(), startup.shutdown_timeout());
         receipt.activate();
 
         startup.shutdown().await.expect("activated startup no-op");
@@ -1301,7 +1320,7 @@ mod tests {
             .provider_build()
             .expect("exact provider join");
         let listener_pdp = roles.listener_pdp().expect("listener PDP constructor");
-        let probe_name = primitives::ProbeName::parse("federated_access_token_jwks_ready")
+        let probe_name = primitives::ProbeName::parse(crate::readiness::FEDERATED_JWKS)
             .expect("valid probe name");
         let mut output = resource_output();
         output
@@ -1377,7 +1396,7 @@ mod tests {
         assert!(!inventory.probes.is_empty());
         assert!(!inventory.workers.is_empty());
 
-        let name = primitives::ProbeName::parse("federated_access_token_jwks_ready")
+        let name = primitives::ProbeName::parse(crate::readiness::FEDERATED_JWKS)
             .expect("valid probe name");
         let support_probe = JwksSupportProbe {
             name: name.clone(),
@@ -1406,9 +1425,13 @@ mod tests {
                 LifecycleChannel::Resources => output
                     .resources
                     .push(DynManagedResource::new_box(TestResource)),
-                LifecycleChannel::Workers => output
-                    .workers
-                    .push(Box::new(|_token| DynManagedResource::new_box(TestResource))),
+                LifecycleChannel::Workers => {
+                    output
+                        .workers
+                        .push(bootstrap::WorkerSpec::phase_one(|_token| {
+                            DynManagedResource::new_box(TestResource)
+                        }));
+                }
             }
         }
         output

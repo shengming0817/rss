@@ -680,7 +680,7 @@ where
         lease_cfg,
         health,
     } = inputs;
-    Box::new(move |token| {
+    WorkerSpec::deferred(move |token| {
         diport::DynManagedResource::new_box(spawn_consumer_ackable_tx_subscriber(
             worker_name,
             subscriber,

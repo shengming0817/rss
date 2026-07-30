@@ -11156,6 +11156,16 @@ fn runtime_launch_kernel_owner_findings(root: &Path) -> Result<Vec<Finding<Rule>
             kernel_tokens.contains("self.stack.register_with_token(make)"),
         ),
         (
+            "closed-worker-admission-policy",
+            kernel_tokens.contains(
+                "WorkerSpec::PhaseOne(worker)=>stack.register_with_token(worker),WorkerSpec::Deferred(worker)=>stack.register_deferred_with_token(worker)",
+            ),
+        ),
+        (
+            "sole-runtime-root-token-mint",
+            production_exact_path_call_count_in_file(&kernel, &["CancellationToken", "new"]) == 1,
+        ),
+        (
             "listener-count",
             kernel_tokens.contains("self.listener_count+=1"),
         ),
@@ -13426,7 +13436,9 @@ fn event_transport_output_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
     let module_registration_is_closed =
         unique_production_function(&launch, "register_module_output").is_some_and(|function| {
             method_call_count_in_block(&function.block, "register_detached") == 1
+                && method_call_count_in_block(&function.block, "register_deferred_with_token") == 1
                 && method_call_count_in_block(&function.block, "register_with_token") == 1
+                && exact_named_path_call_count(&function.block, &["CancellationToken", "new"]) == 0
         });
     let lifecycle_registration_is_closed =
         unique_production_function(&launch, "register_lifecycle_outputs").is_some_and(|function| {
@@ -17717,6 +17729,11 @@ fn bypass_runtimeexec_stack(token: tokio_util::sync::CancellationToken) {
                 "runtime-launch-lifecycle-stage-owner-red",
                 "self.stack.register_detached(resource);",
                 "drop(resource);",
+            ),
+            (
+                "runtime-launch-lifecycle-worker-token-funnel-red",
+                "WorkerSpec::PhaseOne(worker) => stack.register_with_token(worker),",
+                "WorkerSpec::PhaseOne(worker) => stack.register_deferred_with_token(worker),",
             ),
             (
                 "runtime-launch-lifecycle-empty-activation-red",

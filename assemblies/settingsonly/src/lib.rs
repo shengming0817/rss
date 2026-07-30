@@ -23,6 +23,7 @@ pub use inventory::test_support as runtime_inventory_test_support;
 mod listeners;
 mod plan;
 mod providers;
+mod readiness;
 mod runtime;
 #[cfg(feature = "test-support")]
 pub mod test_support;

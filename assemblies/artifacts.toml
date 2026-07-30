@@ -73,5 +73,5 @@ listener = "health"
 [assemblies.journey]
 kind = "cargo-test"
 package = "journeys"
-target = "settingsonly_runtime"
-test = "settingsonly_lifecycle_fixture_ready_request_sigterm_drain"
+target = "settingsonly_production_artifact"
+test = "settingsonly_image_mount_spiffe_readiness_join"
