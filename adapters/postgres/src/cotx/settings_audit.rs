@@ -129,6 +129,7 @@ impl ConfigReadTx<'_> {
 ///
 /// The type itself stays feature-ungated so L2 rust-type carriers can name it; operation
 /// methods remain behind `domain-settings`.
+#[cfg_attr(not(feature = "domain-settings"), allow(dead_code))]
 pub(crate) struct ConfigWriteTx<'tx> {
     #[cfg_attr(not(feature = "domain-settings"), allow(dead_code))]
     conn: &'tx mut PgConnection,

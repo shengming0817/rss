@@ -2,7 +2,8 @@
 
 ## 代码载体与完成边界
 
-LocalTx 的静态 inventory 由 `verify --fast` / `localtx-coverage` 证明；真实 Postgres 证据只由
+LocalTx 的静态 inventory 由 affected `make ci` 选择的 `localtx-coverage`（或显式直接运行该 gate）证明；
+固定 9 门的 `verify --fast` 不拥有 LocalTx 证据。真实 Postgres 证据只由
 `integration/postgres-domain` 全部 typed batches 成功后生成的 v3 receipt 证明。`ci-gate` 成功 envelope
 必须输出 `localtxContractCount`，并要求 receipt 的单一 `localtxContractIds` 集合分别与当前
 active/journey/backend-profile inventory exact equal。

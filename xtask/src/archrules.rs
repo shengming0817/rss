@@ -13,7 +13,6 @@ use anyhow::{Context, Result, bail};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::str::FromStr;
 use syn::parse::Parser;
 use syn::visit::Visit;
@@ -78,10 +77,14 @@ impl GovernanceCheck for ArchRules {
 const DELIVERY_GUARD_CARRIER: &str = "xtask/src/archrules.rs";
 
 fn application_delivery_boundary_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
-    let output = Command::new("/usr/bin/git")
-        .args(["-C", root.to_string_lossy().as_ref(), "ls-files", "-z"])
-        .output()
-        .context("list tracked files for application delivery boundary")?;
+    let output = crate::cmd::external_cmd(
+        crate::cmd::ExternalProgram::SystemGit,
+        &["-C", root.to_string_lossy().as_ref(), "ls-files", "-z"],
+        &[],
+        None,
+    )
+    .output()
+    .context("list tracked files for application delivery boundary")?;
     if !output.status.success() {
         bail!(
             "git ls-files failed for application delivery boundary: {}",

@@ -146,6 +146,32 @@ class CiLocalSupervisorTests(unittest.TestCase):
             self.assertEqual(completed.returncode, 78)
             self.assertFalse(marker.exists())
 
+    def test_ambient_ledger_capability_is_rejected_as_pair_or_partial(self) -> None:
+        cases = (
+            {"RSS_LOCAL_CI_LEDGER_PATH": "/tmp/foreign-ledger"},
+            {"RSS_LOCAL_CI_LEDGER_BRANCH": "foreign-branch"},
+            {
+                "RSS_LOCAL_CI_LEDGER_PATH": "/tmp/foreign-ledger",
+                "RSS_LOCAL_CI_LEDGER_BRANCH": "foreign-branch",
+            },
+        )
+        for injected in cases:
+            with self.subTest(injected=injected), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                marker = root / "ran"
+                environment = os.environ.copy()
+                environment.update(injected)
+                completed = subprocess.run(
+                    self.supervisor_command(root, "/usr/bin/touch", str(marker)),
+                    env=environment,
+                    check=False,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+                self.assertEqual(completed.returncode, 78)
+                self.assertFalse(marker.exists())
+
     def test_dirty_xtask_runner_is_rejected_before_spawn(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

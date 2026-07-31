@@ -51,6 +51,10 @@ pub struct OutboxConcern;
 #[doc(hidden)]
 pub struct InboxConcern;
 #[doc(hidden)]
+#[cfg_attr(
+    not(any(feature = "domain-settings", feature = "domain-audit")),
+    allow(dead_code)
+)]
 pub struct ConsumerConcern;
 
 macro_rules! seal_concerns {
@@ -91,6 +95,7 @@ pub(crate) type SagaWriteTx<'tx> = EventingTx<'tx, ServingWriteLane, SagaConcern
 pub type OutboxTx<'tx> = EventingTx<'tx, ServingWriteLane, OutboxConcern>;
 #[cfg(all(test, feature = "integration"))]
 pub(crate) type InboxWriteTx<'tx> = EventingTx<'tx, ServingWriteLane, InboxConcern>;
+#[cfg(any(feature = "domain-settings", feature = "domain-audit"))]
 pub(crate) type ConsumerTx<'tx> = EventingTx<'tx, ServingWriteLane, ConsumerConcern>;
 
 impl<'tx, L: TenantLane, C: EventingConcern> EventingTx<'tx, L, C> {
@@ -115,6 +120,7 @@ impl<'tx, L: TenantLane, C: EventingConcern> EventingTx<'tx, L, C> {
         }
     }
 
+    #[cfg(any(feature = "domain-settings", feature = "domain-audit"))]
     pub(in crate::cotx) fn parts(&mut self) -> (&mut PgConnection, vocab::TenantId) {
         (&mut *self.conn, self.tenant)
     }
@@ -209,6 +215,7 @@ eventing_write_runner!(ServingWriteLane, dlq_write, DlqConcern);
 eventing_write_runner!(MaintenanceWriteLane, dlq_write, DlqConcern);
 eventing_write_runner!(ServingWriteLane, outbox_write, OutboxConcern);
 eventing_write_runner!(ServingWriteLane, inbox_write, InboxConcern);
+#[cfg(any(feature = "domain-settings", feature = "domain-audit"))]
 eventing_write_runner!(ServingWriteLane, consumer_write, ConsumerConcern);
 
 impl TenantDb<ServingWriteLane> {

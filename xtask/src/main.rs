@@ -52,17 +52,18 @@
 //!   `cargo xtask reconcile-outbox-command-guard`
 //!                                      reconcile scheduler transactional command outbox seam 守卫（CI 门）
 //!   `cargo xtask tenancy-closeout`      tenancy/AuthZ/projection closeout 反向自检（CI 门）
-//!   `cargo xtask verify [--fast] [--allow-missing-tools] [--fail-fast] [--only <gate>]...`
+//!   `cargo xtask verify [--fast] [--fresh] [--allow-missing-tools] [--fail-fast] [--only <gate>]...`
 //!                                      本地全量治理门聚合入口（GitHub Actions 与本地共用同一门）：fmt + meta（contract
 //!                                      validate / assembly validate / layer-deps / codegen --check）+ build + Postgres
 //!                                      feature compile matrix + clippy + nextest + deny + dylint；
-//!                                      `--fast` 只跑无需编译的步（fmt+meta+deny）；`--allow-missing-tools` 缺外部
+//!                                      `--fast` 只跑 registry 显式 Always 的 9 个本地 meta 门；`--fresh` 清空
+//!                                      当前分支断点；`--allow-missing-tools` 缺外部
 //!                                      工具时显式宽限（默认 fail-closed）。详见 `verify.rs`。
 //!   `cargo xtask public-api [--layer basis|engine|curated] [--check] [--allow-missing]`
 //!                                      封装面 baseline（包装 cargo-public-api，需 nightly rustdoc-json；无
 //!                                      --layer 时检查 basis + engine + curated extras）；
 //!                                      --check 缺 baseline 默认 fail-fast，--allow-missing 显式宽限（PR-0 自检）
-//!   `cargo xtask ci local --base <ref> [--fail-fast] [--only <stage>]...`
+//!   `cargo xtask ci local --base <ref> [--fresh] [--fail-fast] [--only <stage>]...`
 //!                                      仅分析 `<ref>...HEAD` 已提交差异，经 typed ImpactSet 生成本地 preflight。
 //!   `cargo xtask ci full [--allow-missing-tools] [--fail-fast]`
 //!                                      原本地 CI lane 超集聚合（coverage/public-api/audit 等完整门集）。
@@ -114,6 +115,7 @@ mod integration_shards;
 mod l2_assurance;
 mod layerdeps;
 mod layers;
+mod local_run_ledger;
 mod localonly_evidence;
 mod localtx_coverage;
 mod localtx_evidence;
@@ -211,6 +213,7 @@ enum Command {
     },
     Verify {
         fast: bool,
+        fresh: bool,
         allow_missing_tools: bool,
         against: Option<String>,
         fail_fast: bool,
@@ -555,6 +558,7 @@ fn parse_contract_breaking(args: &[&str]) -> Result<Command> {
 /// 解析 `verify` 的可选 flag（fail-closed：未知 flag 即 `Err`）。
 fn parse_verify(args: &[&str]) -> Result<Command> {
     let mut fast = false;
+    let mut fresh = false;
     let mut allow_missing_tools = false;
     let mut against = None;
     let mut fail_fast = false;
@@ -562,7 +566,10 @@ fn parse_verify(args: &[&str]) -> Result<Command> {
     let mut iter = args.iter().copied();
     while let Some(tok) = iter.next() {
         match tok {
-            "--fast" => fast = true,
+            "--fast" if !fast => fast = true,
+            "--fast" => bail!("verify 重复参数: --fast"),
+            "--fresh" if !fresh => fresh = true,
+            "--fresh" => bail!("verify 重复参数: --fresh"),
             "--allow-missing-tools" => allow_missing_tools = true,
             "--fail-fast" if !fail_fast => fail_fast = true,
             "--fail-fast" => bail!("verify 重复参数: --fail-fast"),
@@ -586,12 +593,16 @@ fn parse_verify(args: &[&str]) -> Result<Command> {
                 }
             }
             other => bail!(
-                "verify 未知参数: {other}；用法: cargo xtask verify [--fast] [--allow-missing-tools] [--against <git-ref>] [--fail-fast] [--only <gate-label>]..."
+                "verify 未知参数: {other}；用法: cargo xtask verify [--fast] [--fresh] [--allow-missing-tools] [--against <git-ref>] [--fail-fast] [--only <gate-label>]..."
             ),
         }
     }
+    if fresh && !fast {
+        bail!("verify --fresh 只允许与 --fast 同用");
+    }
     Ok(Command::Verify {
         fast,
+        fresh,
         allow_missing_tools,
         against,
         fail_fast,
@@ -752,12 +763,14 @@ fn dispatch(args: &[String]) -> Result<()> {
         Command::ProviderCapabilities { check } => provider_capabilities::run(check),
         Command::Verify {
             fast,
+            fresh,
             allow_missing_tools,
             against,
             fail_fast,
             only,
         } => verify::run(
             fast,
+            fresh,
             allow_missing_tools,
             against.as_deref(),
             fail_fast,
@@ -1370,6 +1383,7 @@ mod tests {
             parse_command(&s(&["verify"]))?,
             Command::Verify {
                 fast: false,
+                fresh: false,
                 allow_missing_tools: false,
                 against: None,
                 fail_fast: false,
@@ -1382,9 +1396,21 @@ mod tests {
     #[test]
     fn parse_command_verify_flags() -> anyhow::Result<()> {
         assert_eq!(
+            parse_command(&s(&["verify", "--fast", "--fresh"]))?,
+            Command::Verify {
+                fast: true,
+                fresh: true,
+                allow_missing_tools: false,
+                against: None,
+                fail_fast: false,
+                only: Vec::new(),
+            }
+        );
+        assert_eq!(
             parse_command(&s(&["verify", "--fast"]))?,
             Command::Verify {
                 fast: true,
+                fresh: false,
                 allow_missing_tools: false,
                 against: None,
                 fail_fast: false,
@@ -1395,6 +1421,7 @@ mod tests {
             parse_command(&s(&["verify", "--allow-missing-tools"]))?,
             Command::Verify {
                 fast: false,
+                fresh: false,
                 allow_missing_tools: true,
                 against: None,
                 fail_fast: false,
@@ -1405,6 +1432,7 @@ mod tests {
             parse_command(&s(&["verify", "--fast", "--allow-missing-tools"]))?,
             Command::Verify {
                 fast: true,
+                fresh: false,
                 allow_missing_tools: true,
                 against: None,
                 fail_fast: false,
@@ -1422,6 +1450,7 @@ mod tests {
             ]))?,
             Command::Verify {
                 fast: false,
+                fresh: false,
                 allow_missing_tools: false,
                 against: None,
                 fail_fast: true,
@@ -1440,6 +1469,8 @@ mod tests {
         assert!(parse_command(&s(&["verify", "--only", "--fast"])).is_err());
         assert!(parse_command(&s(&["verify", "--only", "fmt", "--only", "fmt"])).is_err());
         assert!(parse_command(&s(&["verify", "--fail-fast", "--fail-fast"])).is_err());
+        assert!(parse_command(&s(&["verify", "--fresh"])).is_err());
+        assert!(parse_command(&s(&["verify", "--fast", "--fresh", "--fresh"])).is_err());
     }
 
     #[test]
@@ -1453,6 +1484,7 @@ mod tests {
             ]))?,
             Command::Verify {
                 fast: true,
+                fresh: false,
                 allow_missing_tools: false,
                 against: Some("0123456789abcdef0123456789abcdef01234567".to_owned()),
                 fail_fast: false,

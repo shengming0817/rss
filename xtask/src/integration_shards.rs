@@ -52,6 +52,14 @@ pub(crate) enum TargetKind {
     Test,
 }
 
+/// Whether a remote-owned Cargo test target remains eligible for affected local preflight.
+/// Remote shard ownership, scheduling, and local validation depth are independent facts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum LocalEligibility {
+    Affected,
+    RemoteOnly,
+}
+
 impl TargetKind {
     const fn as_str(self) -> &'static str {
         match self {
@@ -70,6 +78,7 @@ pub(crate) struct IntegrationUnitSpec {
     pub(crate) target: &'static str,
     pub(crate) kind: TargetKind,
     pub(crate) scheduling: Scheduling,
+    pub(crate) local_eligibility: LocalEligibility,
 }
 
 /// Closed package/feature identities whose integration implementations must at least compile
@@ -154,6 +163,7 @@ impl IntegrationUnitSpec {
         target: &'static str,
         kind: TargetKind,
         scheduling: Scheduling,
+        local_eligibility: LocalEligibility,
     ) -> Self {
         Self {
             id,
@@ -163,6 +173,7 @@ impl IntegrationUnitSpec {
             target,
             kind,
             scheduling,
+            local_eligibility,
         }
     }
 
@@ -174,6 +185,19 @@ impl IntegrationUnitSpec {
             self.kind.as_str()
         )
     }
+}
+
+/// Only targets whose typed unit policy requires remote resources or production composition are
+/// excluded locally. Remote orchestration ownership alone does not remove T1/component proof.
+pub(crate) fn is_remote_only_test_target(package: &str, target: &str) -> bool {
+    IntegrationShard::ALL.iter().any(|shard| {
+        shard.spec().units.iter().any(|unit| {
+            unit.kind == TargetKind::Test
+                && unit.package == package
+                && unit.target == target
+                && unit.local_eligibility == LocalEligibility::RemoteOnly
+        })
+    })
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -197,7 +221,7 @@ macro_rules! integration_shard_catalog {
             resources: [$($resource:ident),* $(,)?],
             capabilities: [$($capability:ident),* $(,)?],
             local_feature_scopes: [$($scope:ident),+ $(,)?],
-            units: [$($unit:ident => ($package:literal, $target:literal, $kind:ident, $scheduling:ident)),+ $(,)?],
+            units: [$($unit:ident => ($package:literal, $target:literal, $kind:ident, $scheduling:ident, $local:ident)),+ $(,)?],
         },
     )+) => {
         #[repr(usize)]
@@ -216,6 +240,7 @@ macro_rules! integration_shard_catalog {
             $target,
             TargetKind::$kind,
             Scheduling::$scheduling,
+            LocalEligibility::$local,
         )),+),+];
 
         const SHARD_SPECS: &[ShardSpec] = &[$(ShardSpec {
@@ -230,6 +255,7 @@ macro_rules! integration_shard_catalog {
                 $target,
                 TargetKind::$kind,
                 Scheduling::$scheduling,
+                LocalEligibility::$local,
             )),+],
         }),+];
 
@@ -280,35 +306,42 @@ integration_shard_catalog! {
         capabilities: [],
         local_feature_scopes: [Postgres, PostgresMigration, Journeys, Runtime],
         units: [
-            PostgresLib => ("postgres", "postgres", Lib, Serial),
-            PostgresMigrationLib => ("postgres-migration", "postgres_migration", Lib, Serial),
-            PostgresFeatureManifest => ("postgres", "feature_manifest", Test, Parallel),
-            PostgresMigrationOpsContract => ("postgres", "migration_ops_contract", Test, Parallel),
-            PostgresTenantTransactionTrybuild => ("postgres", "tenant_transaction_trybuild", Test, Parallel),
-            AuditListTenantEntriesLocalTxJourney => ("journeys", "audit_list_tenant_entries_localtx_journey", Test, Serial),
-            IdentityLogoutGrantJourney => ("journeys", "identity_logout_grant_journey", Test, Parallel),
-            IdentityPasswordSecurityEventJourney => ("journeys", "identity_password_security_event_journey", Test, Serial),
-            IdentityRefreshProducerTransactionJourney => ("journeys", "identity_refresh_producer_transaction_journey", Test, Serial),
-            SettingsSecretPublishLocalTxJourney => ("journeys", "settings_secret_publish_localtx_journey", Test, Serial),
-            SettingsSecretE2e => ("runtime", "settings_secret_e2e", Test, Serial),
+            PostgresLib => ("postgres", "postgres", Lib, Serial, Affected),
+            PostgresMigrationLib => ("postgres-migration", "postgres_migration", Lib, Serial, Affected),
+            PostgresFeatureManifest => ("postgres", "feature_manifest", Test, Parallel, Affected),
+            PostgresMigrationOpsContract => ("postgres", "migration_ops_contract", Test, Parallel, Affected),
+            PostgresTenantTransactionTrybuild => ("postgres", "tenant_transaction_trybuild", Test, Parallel, Affected),
+            AuditListTenantEntriesLocalTxJourney => ("journeys", "audit_list_tenant_entries_localtx_journey", Test, Serial, RemoteOnly),
+            IdentityLogoutGrantJourney => ("journeys", "identity_logout_grant_journey", Test, Parallel, RemoteOnly),
+            IdentityPasswordSecurityEventJourney => ("journeys", "identity_password_security_event_journey", Test, Serial, RemoteOnly),
+            IdentityRefreshProducerTransactionJourney => ("journeys", "identity_refresh_producer_transaction_journey", Test, Serial, RemoteOnly),
+            SettingsSecretPublishLocalTxJourney => ("journeys", "settings_secret_publish_localtx_journey", Test, Serial, RemoteOnly),
+            SettingsSecretE2e => ("runtime", "settings_secret_e2e", Test, Serial, RemoteOnly),
         ],
     },
     EventTransport => {
         name: "event-transport",
         resources: [Postgres, Redis, Amqp, Mqtt],
         capabilities: [],
-        local_feature_scopes: [Amqp, Mqtt, Journeys, Runtime],
+        local_feature_scopes: [Amqp, Mqtt, Testkit, Journeys, Runtime],
         units: [
-            AmqpLib => ("amqp", "amqp", Lib, Parallel),
-            AmqpIntegration => ("amqp", "integration", Test, Serial),
-            MqttLib => ("mqtt", "mqtt", Lib, Parallel),
-            MqttIntegration => ("mqtt", "integration", Test, Serial),
-            AmqpConsumerAtLeastOnceJourney => ("journeys", "amqp_consumer_at_least_once_journey", Test, Serial),
-            EventTransportJourney => ("journeys", "eventtransport_journey", Test, Parallel),
-            IdentityLoginAuditDurableJourney => ("journeys", "identity_login_audit_durable_journey", Test, Serial),
-            IdentityLoginAuditJourney => ("journeys", "identity_login_audit_journey", Test, Parallel),
-            IdentityAuditRuntimeJourney => ("journeys", "identityaudit_runtime", Test, Serial),
-            EventTransportDurableE2e => ("runtime", "event_transport_durable_e2e", Test, Serial),
+            AmqpLib => ("amqp", "amqp", Lib, Parallel, Affected),
+            AmqpIntegration => ("amqp", "integration", Test, Serial, RemoteOnly),
+            MqttLib => ("mqtt", "mqtt", Lib, Parallel, Affected),
+            MqttIntegration => ("mqtt", "integration", Test, Serial, RemoteOnly),
+            MqttAssertionContract => ("mqtt", "assertion_contract", Test, Parallel, Affected),
+            MqttConfigTopic => ("mqtt", "config_topic", Test, Parallel, Affected),
+            MqttOwnershipGate => ("mqtt", "ownership_gate", Test, Parallel, Affected),
+            MqttSessionSurface => ("mqtt", "session_surface", Test, Parallel, Affected),
+            MqttTlsConfig => ("mqtt", "tls_config", Test, Parallel, Affected),
+            TestkitMqttMtlsFixture => ("testkit", "mqtt_mtls_fixture", Test, Serial, RemoteOnly),
+            TestkitMqttOwnershipGate => ("testkit", "mqtt_ownership_gate", Test, Parallel, Affected),
+            AmqpConsumerAtLeastOnceJourney => ("journeys", "amqp_consumer_at_least_once_journey", Test, Serial, RemoteOnly),
+            EventTransportJourney => ("journeys", "eventtransport_journey", Test, Parallel, Affected),
+            IdentityLoginAuditDurableJourney => ("journeys", "identity_login_audit_durable_journey", Test, Serial, RemoteOnly),
+            IdentityLoginAuditJourney => ("journeys", "identity_login_audit_journey", Test, Parallel, Affected),
+            IdentityAuditRuntimeJourney => ("journeys", "identityaudit_runtime", Test, Serial, RemoteOnly),
+            EventTransportDurableE2e => ("runtime", "event_transport_durable_e2e", Test, Serial, RemoteOnly),
         ],
     },
     RuntimeHttpAuth => {
@@ -317,25 +350,25 @@ integration_shard_catalog! {
         capabilities: [],
         local_feature_scopes: [Journeys, Runtime, SettingsOnly],
         units: [
-            SecurityProviderCloseoutJourney => ("journeys", "security_provider_closeout", Test, Parallel),
-            SettingsOnlyRuntimeJourney => ("journeys", "settingsonly_runtime", Test, Parallel),
-            SettingsOnlyLib => ("settingsonly", "settingsonly", Lib, Serial),
-            RuntimeLib => ("runtime", "runtime", Lib, Serial),
-            AuthE2e => ("runtime", "auth_e2e", Test, Parallel),
-            AuthBridgeStructure => ("runtime", "auth_bridge_structure", Test, Parallel),
-            ServerBudgetStructure => ("runtime", "server_budget_structure", Test, Parallel),
-            ConfigsReadyE2e => ("runtime", "configs_ready_e2e", Test, Serial),
-            DomainExecutionPlanTrybuild => ("runtime", "domain_execution_plan_trybuild", Test, Parallel),
-            IdentityLoginWireE2e => ("runtime", "identity_login_wire_e2e", Test, Serial),
-            InfraBuildersApi => ("runtime", "infra_builders_api", Test, Parallel),
-            ListenerPlanTrybuild => ("runtime", "listener_plan_trybuild", Test, Parallel),
-            OperatorSurfaceTrybuild => ("runtime", "operator_surface_trybuild", Test, Parallel),
-            RefreshMintE2e => ("runtime", "refresh_mint_e2e", Test, Parallel),
-            KeyRotationE2e => ("runtime", "key_rotation_e2e", Test, Parallel),
-            RuntimeOutputsTrybuild => ("runtime", "runtime_outputs_trybuild", Test, Parallel),
-            RuntimeServeE2e => ("runtime", "runtime_serve_e2e", Test, Parallel),
-            ServiceTokenReplayE2e => ("runtime", "service_token_replay_e2e", Test, Serial),
-            WireContractE2e => ("runtime", "wire_contract_e2e", Test, Serial),
+            SecurityProviderCloseoutJourney => ("journeys", "security_provider_closeout", Test, Parallel, Affected),
+            SettingsOnlyRuntimeJourney => ("journeys", "settingsonly_runtime", Test, Parallel, RemoteOnly),
+            SettingsOnlyLib => ("settingsonly", "settingsonly", Lib, Serial, Affected),
+            RuntimeLib => ("runtime", "runtime", Lib, Serial, Affected),
+            AuthE2e => ("runtime", "auth_e2e", Test, Parallel, Affected),
+            AuthBridgeStructure => ("runtime", "auth_bridge_structure", Test, Parallel, Affected),
+            ServerBudgetStructure => ("runtime", "server_budget_structure", Test, Parallel, Affected),
+            ConfigsReadyE2e => ("runtime", "configs_ready_e2e", Test, Serial, RemoteOnly),
+            DomainExecutionPlanTrybuild => ("runtime", "domain_execution_plan_trybuild", Test, Parallel, Affected),
+            IdentityLoginWireE2e => ("runtime", "identity_login_wire_e2e", Test, Serial, RemoteOnly),
+            InfraBuildersApi => ("runtime", "infra_builders_api", Test, Parallel, Affected),
+            ListenerPlanTrybuild => ("runtime", "listener_plan_trybuild", Test, Parallel, Affected),
+            OperatorSurfaceTrybuild => ("runtime", "operator_surface_trybuild", Test, Parallel, Affected),
+            RefreshMintE2e => ("runtime", "refresh_mint_e2e", Test, Parallel, Affected),
+            KeyRotationE2e => ("runtime", "key_rotation_e2e", Test, Parallel, Affected),
+            RuntimeOutputsTrybuild => ("runtime", "runtime_outputs_trybuild", Test, Parallel, Affected),
+            RuntimeServeE2e => ("runtime", "runtime_serve_e2e", Test, Parallel, RemoteOnly),
+            ServiceTokenReplayE2e => ("runtime", "service_token_replay_e2e", Test, Serial, RemoteOnly),
+            WireContractE2e => ("runtime", "wire_contract_e2e", Test, Serial, RemoteOnly),
         ],
     },
     ConsistencyFault => {
@@ -344,17 +377,18 @@ integration_shard_catalog! {
         capabilities: [],
         local_feature_scopes: [Testkit, RedisAdapter, JourneysFaultMatrix],
         units: [
-            TestkitLib => ("testkit", "testkit", Lib, Serial),
-            TestkitCrashMatrix => ("testkit", "crash_matrix", Test, Parallel),
-            DeviceCommandConformance => ("testkit", "device_command_conformance", Test, Parallel),
-            TestkitHarness => ("testkit", "harness", Test, Parallel),
-            TestkitLocalOnly => ("testkit", "local_only", Test, Parallel),
-            PostgresTestLoginGovernance => ("testkit", "postgres_test_login_governance", Test, Serial),
-            ProjectionTargetConformanceTrybuild => ("testkit", "projection_target_conformance_trybuild", Test, Parallel),
-            ProviderCatalogTrybuild => ("testkit", "provider_catalog_trybuild", Test, Parallel),
-            RedisAdapterLib => ("redis-adapter", "redis", Lib, Parallel),
-            RedisIntegrationClaimer => ("redis-adapter", "integration_claimer", Test, Serial),
-            ConsistencyFaultMatrixJourney => ("journeys-fault-matrix", "consistency_fault_matrix_journey", Test, Serial),
+            TestkitLib => ("testkit", "testkit", Lib, Serial, Affected),
+            TestkitCrashMatrix => ("testkit", "crash_matrix", Test, Parallel, Affected),
+            DeviceCommandConformance => ("testkit", "device_command_conformance", Test, Parallel, Affected),
+            TestkitHarness => ("testkit", "harness", Test, Parallel, Affected),
+            TestkitLocalOnly => ("testkit", "local_only", Test, Parallel, Affected),
+            TestkitWait => ("testkit", "wait", Test, Parallel, Affected),
+            PostgresTestLoginGovernance => ("testkit", "postgres_test_login_governance", Test, Serial, Affected),
+            ProjectionTargetConformanceTrybuild => ("testkit", "projection_target_conformance_trybuild", Test, Parallel, Affected),
+            ProviderCatalogTrybuild => ("testkit", "provider_catalog_trybuild", Test, Parallel, Affected),
+            RedisAdapterLib => ("redis-adapter", "redis", Lib, Parallel, Affected),
+            RedisIntegrationClaimer => ("redis-adapter", "integration_claimer", Test, Serial, RemoteOnly),
+            ConsistencyFaultMatrixJourney => ("journeys-fault-matrix", "consistency_fault_matrix_journey", Test, Serial, RemoteOnly),
         ],
     },
     CdcProjectionSaga => {
@@ -363,9 +397,9 @@ integration_shard_catalog! {
         capabilities: [],
         local_feature_scopes: [Journeys, Runtime],
         units: [
-            SagaProjectionDepsJourney => ("journeys", "saga_projection_deps_journey", Test, Parallel),
-            SettingsConfigPublishJourney => ("journeys", "settings_config_publish_journey", Test, Parallel),
-            SettingsConfigPublishDurableE2e => ("runtime", "settings_config_publish_durable_e2e", Test, Serial),
+            SagaProjectionDepsJourney => ("journeys", "saga_projection_deps_journey", Test, Parallel, Affected),
+            SettingsConfigPublishJourney => ("journeys", "settings_config_publish_journey", Test, Parallel, Affected),
+            SettingsConfigPublishDurableE2e => ("runtime", "settings_config_publish_durable_e2e", Test, Serial, RemoteOnly),
         ],
     },
     ObjectStorage => {
@@ -374,9 +408,9 @@ integration_shard_catalog! {
         capabilities: [],
         local_feature_scopes: [S3],
         units: [
-            S3Lib => ("s3", "s3", Lib, Parallel),
-            DlxArchiveStore => ("s3", "dlx_archive_store", Test, Parallel),
-            IntegrationObjectStore => ("s3", "integration_object_store", Test, Serial),
+            S3Lib => ("s3", "s3", Lib, Parallel, Affected),
+            DlxArchiveStore => ("s3", "dlx_archive_store", Test, Parallel, RemoteOnly),
+            IntegrationObjectStore => ("s3", "integration_object_store", Test, Serial, RemoteOnly),
         ],
     },
     ProductionRuntime => {
@@ -385,10 +419,10 @@ integration_shard_catalog! {
         capabilities: [Docker],
         local_feature_scopes: [Journeys],
         units: [
-            SettingsOnlyProductionArtifact => ("journeys", "settingsonly_production_artifact", Test, Serial),
-            TwoReplicaRuntimeJourney => ("journeys", "two_replica_runtime", Test, Serial),
-            ProductionRuntimeJourney => ("journeys", "production_runtime", Test, Parallel),
-            RuntimeInventoryJourney => ("journeys", "runtime_inventory", Test, Parallel),
+            SettingsOnlyProductionArtifact => ("journeys", "settingsonly_production_artifact", Test, Serial, RemoteOnly),
+            TwoReplicaRuntimeJourney => ("journeys", "two_replica_runtime", Test, Serial, RemoteOnly),
+            ProductionRuntimeJourney => ("journeys", "production_runtime", Test, Parallel, RemoteOnly),
+            RuntimeInventoryJourney => ("journeys", "runtime_inventory", Test, Parallel, RemoteOnly),
         ],
     },
 }
@@ -411,6 +445,12 @@ fn validate_integration_unit_catalog(
         if spec.primary_owner != ExecutionProfile::ReleaseCheck {
             bail!(
                 "integration unit {:?} must remain release-check owned until integration-critical activation",
+                spec.id
+            );
+        }
+        if spec.kind == TargetKind::Lib && spec.local_eligibility != LocalEligibility::Affected {
+            bail!(
+                "integration unit {:?} library tests must remain affected-local eligible",
                 spec.id
             );
         }
@@ -933,6 +973,7 @@ mod tests {
             "integration",
             TargetKind::Test,
             Scheduling::Serial,
+            LocalEligibility::RemoteOnly,
         )];
         let mut unknown = SHARD_SPECS.to_vec();
         unknown[IntegrationShard::EventTransport as usize].units = UNKNOWN_UNITS;
@@ -1018,6 +1059,7 @@ mod tests {
             ("runtime", "wire_contract_e2e"),
             ("redis-adapter", "integration_claimer"),
             ("testkit", "testkit"),
+            ("testkit", "mqtt_mtls_fixture"),
             ("testkit", "postgres_test_login_governance"),
             ("journeys-fault-matrix", "consistency_fault_matrix_journey"),
             ("runtime", "settings_config_publish_durable_e2e"),
@@ -1213,6 +1255,7 @@ mod tests {
             "new_unclassified_target",
             TargetKind::Test,
             Scheduling::Parallel,
+            LocalEligibility::RemoteOnly,
         ));
         assert!(validate_metadata(&metadata_from(&unknown)).is_err());
 
@@ -1225,6 +1268,28 @@ mod tests {
     #[test]
     fn workspace_metadata_covers_legacy_integration_targets() -> Result<()> {
         validate_current_workspace()
+    }
+
+    #[test]
+    fn local_test_eligibility_is_orthogonal_to_remote_shard_ownership() {
+        assert!(is_remote_only_test_target("mqtt", "integration"));
+        assert!(is_remote_only_test_target("testkit", "mqtt_mtls_fixture"));
+        assert!(!is_remote_only_test_target("mqtt", "ownership_gate"));
+        assert!(!is_remote_only_test_target(
+            "journeys",
+            "eventtransport_journey"
+        ));
+        assert!(!is_remote_only_test_target("runtime", "auth_e2e"));
+        assert!(!is_remote_only_test_target(
+            "runtime",
+            "auth_bridge_structure"
+        ));
+        assert!(is_remote_only_test_target("journeys", "production_runtime"));
+        assert!(!is_remote_only_test_target(
+            "xtask",
+            "consistency_report_cli"
+        ));
+        assert!(!is_remote_only_test_target("runtime", "runtime"));
     }
 
     #[test]

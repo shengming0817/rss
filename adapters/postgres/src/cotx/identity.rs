@@ -48,6 +48,7 @@ impl IdentityTx<'_, '_, ServingWriteLane> {
 }
 
 /// Non-interchangeable settings-secret authority minted only by the secret runners.
+#[cfg_attr(not(feature = "domain-settings"), allow(dead_code))]
 pub(crate) struct SecretTx<'borrow, 'tx, L: super::TenantLane> {
     tx: &'borrow mut TenantTx<'tx, L>,
 }

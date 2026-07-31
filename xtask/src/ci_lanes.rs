@@ -388,16 +388,40 @@ impl Serialize for CiLane {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CostClass {
-    Fast,
-    Standard,
-    Expensive,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CompileKind {
     NoCompile,
     Workspace,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum LocalImpactDomain {
+    RuntimeEventing,
+    AssemblyGeneration,
+    Consistency,
+    TenancyPostgres,
+    Pdp,
+    ContractBinding,
+    CommandSymmetry,
+}
+
+impl LocalImpactDomain {
+    pub(crate) const ALL: [Self; 7] = [
+        Self::RuntimeEventing,
+        Self::AssemblyGeneration,
+        Self::Consistency,
+        Self::TenancyPostgres,
+        Self::Pdp,
+        Self::ContractBinding,
+        Self::CommandSymmetry,
+    ];
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LocalMetaPolicy {
+    Always,
+    OnImpact(LocalImpactDomain),
+    FullOnly,
+    NeverLocal,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1030,7 +1054,7 @@ macro_rules! gate_catalog {
                     )
             ),
             Coverage => (step_coverage, Some("xtask/src/coverage.rs"),
-                expensive_gate(
+                gate(
                         GateId::Coverage,
                         "coverage",
                         GateExecutor::Coverage,
@@ -1193,7 +1217,6 @@ macro_rules! gate_catalog {
                         primary_owner: ExecutionProfile::ReleaseCheck,
                         executor: GateExecutor::SupplyChain,
                         policy: GatePolicy::ReleaseOnChange,
-                        cost: CostClass::Fast,
                         compile: CompileKind::NoCompile,
                         tool: ToolRequirement::CargoTool {
                             tool: crate::cmd::CargoSubcommand::Audit,
@@ -1203,7 +1226,7 @@ macro_rules! gate_catalog {
                     }
             ),
             Dylint => (step_dylint, None,
-                expensive_gate(
+                gate(
                         GateId::Dylint,
                         "dylint",
                         CORE,
@@ -1217,7 +1240,7 @@ macro_rules! gate_catalog {
                     )
             ),
             DylintTestNoBareSleep => (step_dylint_test_no_bare_sleep, None,
-                expensive_gate(
+                gate(
                         GateId::DylintTestNoBareSleep,
                         "dylint-test-no-bare-sleep",
                         CORE,
@@ -1231,7 +1254,7 @@ macro_rules! gate_catalog {
                     )
             ),
             RuntimeDylintUiTests => (step_runtime_dylint_ui_tests, None,
-                expensive_gate(
+                gate(
                         GateId::RuntimeDylintUiTests,
                         "runtime-dylint-ui-tests",
                         CORE,
@@ -1242,7 +1265,7 @@ macro_rules! gate_catalog {
                     )
             ),
             PublicApi => (step_public_api, Some("xtask/src/publicapi.rs"),
-                expensive_gate(
+                gate(
                         GateId::PublicApi,
                         "public-api",
                         GateExecutor::Coverage,
@@ -1296,6 +1319,63 @@ impl GateId {
     pub(crate) const fn spec(self) -> &'static GateSpec {
         &REGISTRY[self as usize]
     }
+
+    pub(crate) const fn local_meta_policy(self) -> LocalMetaPolicy {
+        use LocalImpactDomain as Domain;
+        use LocalMetaPolicy as Policy;
+
+        match self {
+            Self::Fmt
+            | Self::ContractValidate
+            | Self::AssemblyValidate
+            | Self::ContractBreaking
+            | Self::LayerDeps
+            | Self::ShippedFeatureGuard
+            | Self::WsDepsDrift
+            | Self::CiEntryGuard
+            | Self::DeferGate => Policy::Always,
+
+            Self::RuntimeRootGuard
+            | Self::RuntimeEnvGuard
+            | Self::RuntimeDepsGuard
+            | Self::EventTransportGuard
+            | Self::DlxLifecycleFunnel
+            | Self::InboxCutoverGuard
+            | Self::OutboxSameIdGuard
+            | Self::ReconcileOutboxCommandGuard => Policy::OnImpact(Domain::RuntimeEventing),
+
+            Self::AssemblyArtifactsCheck
+            | Self::AssemblyModulesCheck
+            | Self::AssemblyProvidersCheck
+            | Self::AssemblyLockCheck
+            | Self::AssemblyRuntimePlanCheck
+            | Self::AssemblyGraphCheck => Policy::OnImpact(Domain::AssemblyGeneration),
+
+            Self::ConsistencyFixtures | Self::LocalTxCoverage | Self::LocalOnlyEffects => {
+                Policy::OnImpact(Domain::Consistency)
+            }
+
+            Self::SchemaRls
+            | Self::SetLocalFunnel
+            | Self::PgTenantTxGuard
+            | Self::RepoScopeGuard
+            | Self::TenancyCloseout
+            | Self::MigrationsSerial => Policy::OnImpact(Domain::TenancyPostgres),
+
+            Self::PdpAllowGuard => Policy::OnImpact(Domain::Pdp),
+            Self::ContractBindingGuard => Policy::OnImpact(Domain::ContractBinding),
+            Self::CommandSymmetry => Policy::OnImpact(Domain::CommandSymmetry),
+
+            Self::RuntimeBaseline
+            | Self::L2AssuranceCheck
+            | Self::ArchRules
+            | Self::CodegenCheck
+            | Self::ProviderCapabilitiesCheck
+            | Self::SourceSemanticGuard => Policy::FullOnly,
+
+            _ => Policy::NeverLocal,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1305,7 +1385,6 @@ pub(crate) struct GateSpec {
     primary_owner: ExecutionProfile,
     executor: GateExecutor,
     policy: GatePolicy,
-    cost: CostClass,
     compile: CompileKind,
     tool: ToolRequirement,
     evidence: EvidenceKind,
@@ -1325,9 +1404,6 @@ impl GateSpec {
         self.executor
     }
     #[cfg(test)]
-    pub(crate) fn cost(self) -> CostClass {
-        self.cost
-    }
     pub(crate) fn compile_kind(self) -> CompileKind {
         self.compile
     }
@@ -1418,10 +1494,6 @@ const fn gate(
     evidence: EvidenceKind,
     policy: GatePolicy,
 ) -> GateSpec {
-    let cost = match compile {
-        CompileKind::NoCompile => CostClass::Fast,
-        CompileKind::Workspace => CostClass::Standard,
-    };
     let primary_owner = match policy {
         GatePolicy::ReleaseOnChange | GatePolicy::ReleaseScheduled => {
             ExecutionProfile::ReleaseCheck
@@ -1440,25 +1512,10 @@ const fn gate(
         primary_owner,
         executor,
         policy,
-        cost,
         compile,
         tool,
         evidence,
     }
-}
-
-const fn expensive_gate(
-    id: GateId,
-    label: &'static str,
-    executor: GateExecutor,
-    compile: CompileKind,
-    tool: ToolRequirement,
-    evidence: EvidenceKind,
-    policy: GatePolicy,
-) -> GateSpec {
-    let mut spec = gate(id, label, executor, compile, tool, evidence, policy);
-    spec.cost = CostClass::Expensive;
-    spec
 }
 
 const META: GateExecutor = GateExecutor::Metadata;
@@ -1486,12 +1543,6 @@ const fn registry_const_valid() -> bool {
         if index >= seen.len() || seen[index] || index != i {
             return false;
         }
-        let cost_valid = match spec.compile {
-            CompileKind::NoCompile => matches!(spec.cost, CostClass::Fast),
-            CompileKind::Workspace => {
-                matches!(spec.cost, CostClass::Standard | CostClass::Expensive)
-            }
-        };
         let evidence_classified = matches!(
             spec.evidence,
             EvidenceKind::Source
@@ -1500,7 +1551,7 @@ const fn registry_const_valid() -> bool {
                 | EvidenceKind::Coverage
                 | EvidenceKind::PublicApi
         );
-        if !cost_valid || !evidence_classified || !executor_const_valid(spec) {
+        if !evidence_classified || !executor_const_valid(spec) {
             return false;
         }
         if let GateExecutor::CoreTest(scope) = spec.executor {
@@ -1720,6 +1771,7 @@ pub(crate) fn specs_for_lane(lane: CiLane) -> impl Iterator<Item = &'static Gate
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
 
     #[test]
     fn ci_slo_job_catalog_roundtrips_every_workflow_job() -> anyhow::Result<()> {
@@ -1833,15 +1885,12 @@ mod tests {
         assert!(REGISTRY.iter().any(|spec| spec.included_in_verify()));
         assert!(REGISTRY.iter().any(|spec| !spec.included_in_verify()));
         assert!(REGISTRY.iter().all(|spec| matches!(
-            (spec.cost(), spec.evidence()),
-            (
-                CostClass::Fast | CostClass::Standard | CostClass::Expensive,
-                EvidenceKind::Source
-                    | EvidenceKind::Test
-                    | EvidenceKind::SupplyChain
-                    | EvidenceKind::Coverage
-                    | EvidenceKind::PublicApi
-            )
+            spec.evidence(),
+            EvidenceKind::Source
+                | EvidenceKind::Test
+                | EvidenceKind::SupplyChain
+                | EvidenceKind::Coverage
+                | EvidenceKind::PublicApi
         )));
         let testkit = REGISTRY
             .iter()
@@ -1856,6 +1905,92 @@ mod tests {
         assert!(testkit[0].belongs_to(CiLane::Core));
         assert!(testkit[0].included_in_verify());
         assert_eq!(testkit[0].primary_owner(), ExecutionProfile::Test);
+    }
+
+    #[test]
+    fn local_meta_policy_is_exact_9_26_6_partition() {
+        let labels = |policy: fn(LocalMetaPolicy) -> bool| {
+            GateId::ALL
+                .iter()
+                .copied()
+                .filter(|id| policy(id.local_meta_policy()))
+                .map(|id| id.spec().label())
+                .collect::<BTreeSet<_>>()
+        };
+        let always = labels(|policy| matches!(policy, LocalMetaPolicy::Always));
+        let affected = labels(|policy| matches!(policy, LocalMetaPolicy::OnImpact(_)));
+        let full_only = labels(|policy| matches!(policy, LocalMetaPolicy::FullOnly));
+
+        assert_eq!(
+            always,
+            BTreeSet::from([
+                "fmt",
+                "contract-validate",
+                "contract-breaking",
+                "assembly-validate",
+                "layer-deps",
+                "wsdeps-drift",
+                "shipped-feature-guard",
+                "ci-entry-guard",
+                "defer-gate",
+            ])
+        );
+        assert_eq!(
+            affected,
+            BTreeSet::from([
+                "runtime-root-guard",
+                "runtime-env-guard",
+                "runtime-deps-guard",
+                "event-transport-guard",
+                "dlx-lifecycle-funnel",
+                "inbox-cutover-guard",
+                "outbox-same-id-guard",
+                "reconcile-outbox-command-guard",
+                "assembly-artifacts-check",
+                "assembly-modules-check",
+                "assembly-providers-check",
+                "assembly-lock-check",
+                "assembly-runtime-plan-check",
+                "assembly-graph-check",
+                "consistency-fixtures",
+                "localtx-coverage",
+                "local-only-effects",
+                "schema-rls",
+                "setlocal-funnel",
+                "pg-tenant-tx-guard",
+                "repo-scope-guard",
+                "tenancy-closeout",
+                "migrations-serial",
+                "pdp-allow-guard",
+                "contract-binding-guard",
+                "command-symmetry",
+            ])
+        );
+        assert_eq!(
+            full_only,
+            BTreeSet::from([
+                "runtime-baseline",
+                "l2-assurance-check",
+                "archrules",
+                "codegen-check",
+                "provider-capabilities-check",
+                "source-semantic-guard",
+            ])
+        );
+        assert_eq!(always.len(), 9);
+        assert_eq!(affected.len(), 26);
+        assert_eq!(full_only.len(), 6);
+
+        for id in GateId::ALL
+            .iter()
+            .copied()
+            .filter(|id| !matches!(id.local_meta_policy(), LocalMetaPolicy::NeverLocal))
+        {
+            let spec = id.spec();
+            assert_eq!(spec.compile_kind(), CompileKind::NoCompile, "{id:?}");
+            assert_eq!(spec.primary_owner(), ExecutionProfile::Check, "{id:?}");
+            assert_eq!(spec.executor(), GateExecutor::Metadata, "{id:?}");
+        }
     }
 
     #[test]
@@ -1942,7 +2077,6 @@ mod tests {
         let mut invalid_compile_shape = REGISTRY.to_vec();
         invalid_compile_shape[GateId::AssemblyLockProtocolTests as usize].compile =
             CompileKind::NoCompile;
-        invalid_compile_shape[GateId::AssemblyLockProtocolTests as usize].cost = CostClass::Fast;
         assert!(validate_registry(&invalid_compile_shape).is_err());
     }
 

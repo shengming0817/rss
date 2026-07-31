@@ -335,19 +335,15 @@ pub mod test_support {
         }
     }
 
-    fn test_pseudonym_keys() -> Arc<secure::PseudonymKeyRing> {
-        let key =
-            secure::RedactionHashKey::from_bytes(vec![0x42; 32]).expect("valid pseudonym key");
-        Arc::new(
-            secure::PseudonymKeyRing::new(
-                secure::VersionedPseudonymKey::new(
-                    secure::PseudonymKeyId::new(std::num::NonZeroU16::MIN),
-                    key,
-                ),
-                Vec::new(),
-            )
-            .expect("valid pseudonym key ring"),
-        )
+    fn test_pseudonym_keys() -> anyhow::Result<Arc<secure::PseudonymKeyRing>> {
+        let key = secure::RedactionHashKey::from_bytes(vec![0x42; 32])?;
+        Ok(Arc::new(secure::PseudonymKeyRing::new(
+            secure::VersionedPseudonymKey::new(
+                secure::PseudonymKeyId::new(std::num::NonZeroU16::MIN),
+                key,
+            ),
+            Vec::new(),
+        )?))
     }
 
     /// Construct complete hermetic identity composition inputs.
@@ -372,7 +368,7 @@ pub mod test_support {
             Duration::from_secs(3_600),
             Duration::from_secs(30 * 24 * 60 * 60),
             Arc::new(blocklist),
-            test_pseudonym_keys(),
+            test_pseudonym_keys()?,
         ))
     }
 

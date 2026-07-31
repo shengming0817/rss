@@ -374,24 +374,6 @@ const IDENTITYAUDIT_COVERAGE_FEATURES: [PackageFeature; 2] = [
 ];
 
 impl CoreTestScope {
-    /// Package identity for deterministic non-workspace gates. Local CI impact projection uses
-    /// this same closed scope registry instead of maintaining a second package/feature table.
-    pub(crate) const fn package(self) -> Option<&'static str> {
-        match self {
-            Self::Workspace => None,
-            Self::S3Backend => Some("s3"),
-            Self::RedisBackend => Some("redis-adapter"),
-            Self::OidcBackend => Some("oidc"),
-            Self::PrometheusBackend => Some("prometheus-adapter"),
-            Self::OtelBackend => Some("otel"),
-            Self::GrpcBackend => Some("grpc"),
-            Self::VaultBackend => Some("vault"),
-            Self::SettingsOnly => Some("settingsonly"),
-            Self::IdentityAudit => Some("identityaudit"),
-            Self::TestkitContainers => Some("testkit"),
-        }
-    }
-
     fn args(self, partitioned: bool) -> Vec<String> {
         match self {
             Self::Workspace => vec![

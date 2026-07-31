@@ -44,7 +44,7 @@ This checklist records delivered work. Issue ordering is historical context, not
 
 ## Completion Evidence
 
-- Typed gate metadata derives full, fast, real Meta-lane, and compatibility membership.
+- Typed gate policy derives full/remote ownership and affected-local `OnImpact(Consistency)` membership.
 - Contract review, codegen, LocalTx closure, and LocalOnly proof retain their required order.
 - Full/default conformance and integration compile coverage remain distinct from live Postgres matrices and the #1706 journey.
 - `Cargo.lock` resolves `spin` to non-yanked semver-compatible patches; parent dependency declarations and deny policy remain unchanged.

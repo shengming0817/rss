@@ -1806,7 +1806,7 @@ mod tests {
         request
             .extensions_mut()
             .insert(httpserve::Authenticated::new(
-                RequiredScheme::RssAccessToken,
+                primitives::RequiredScheme::RssAccessToken,
                 vocab::PrincipalKind::User,
                 "admin-subject",
                 Some(

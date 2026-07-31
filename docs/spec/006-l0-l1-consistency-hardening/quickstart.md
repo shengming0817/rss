@@ -6,14 +6,16 @@ Use the typed verification entrypoints below. `xtask/src/ci_lanes.rs` is the mac
 
 | Level | L0/L1 evidence | Compilation and backend boundary |
 |-------|----------------|----------------------------------|
-| Fast | Contract validate/breaking review, codegen drift, LocalTx closure, LocalOnly effect proof | The inner typed plan contains no workspace build/test compilation gate; Cargo may build or rebuild the xtask launcher. No runtime conformance, Docker, or live Postgres |
-| Full | Fast evidence plus workspace/default behavior checks and integration-target compilation | Integration targets are compiled but real backends are not executed |
+| Repository fast | Fixed nine always-on repository contracts; no L0/L1 proof ownership | No workspace build/test compilation gate; Cargo may build or rebuild the xtask launcher |
+| Affected local CI | Selects LocalTx closure and LocalOnly effect proof when the Consistency impact domain is touched | Bounded affected package checks/tests plus static governance; no live Postgres |
+| Full | Full typed evidence plus workspace/default behavior checks and integration-target compilation | Integration targets are compiled but real backends are not executed |
 | Live Postgres | SecretRepo and Identity matrices plus the scoped #1706 validation journey | Runs the `postgres-domain` shard against real Postgres; required tools and test inventory fail closed |
 
 Canonical commands:
 
 ```bash
 make verify-fast
+make ci CI_BASE=origin/develop
 ./hack/cargo.sh xtask verify
 ./hack/cargo.sh xtask ci run --job integration/postgres-domain
 ```
@@ -30,7 +32,7 @@ When adding or changing a consistency contract:
 4. Add LocalOnly or LocalTx conformance proof at the domain boundary.
 5. Add real adapter matrices when the contract depends on Postgres transaction behavior.
 6. Admit only the scoped active contracts to the durable journey and keep metrics/traces on closed labels.
-7. Run fast, then full, then live validation according to the changed boundary.
+7. Run affected local CI (or the focused direct gates), then full and live validation according to the changed boundary.
 
 Cross-tenant behavior is never inferred from an ordinary read classification. It must retain `CrossTenantPrivilege` and tenant evidence through production binding, which makes that capability ineligible for LocalOnly and requires the governed non-L0 path.
 
@@ -66,7 +68,7 @@ unknown, mismatched, decoy/bait, aliased, wrapped, or unawaited evidence fails p
 
 ## Failure Modes
 
-Fast verification fails closed for:
+The affected Consistency `make ci` plan, or the same explicitly selected direct gates, fails closed for:
 
 - Missing, empty, duplicate, unknown, or stray consistency/effect/LocalTx evidence.
 - Generated registry drift or an active contract's route, owner, mount, test, backend profile, or provider probe that does not close.

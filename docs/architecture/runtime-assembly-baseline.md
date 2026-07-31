@@ -158,4 +158,4 @@ current public re-export count is 9. Every later revision must be component-wise
 Policy deletion, truncation, metric increases, unknown fields, Rust or TOML parse failures, and
 comment/string/dead-helper bait fail closed.
 
-`cargo xtask verify --fast` and `cargo xtask ci full` run this gate before `archrules`, so `RUNTIME-BASELINE-DRIFT-01` is indexed by `cargo xtask archrules verify`.
+`cargo xtask ci full` and the remote/full owner run this gate before `archrules`; the fixed repository-fast plan deliberately excludes it. `RUNTIME-BASELINE-DRIFT-01` remains indexed by `cargo xtask archrules verify`.
