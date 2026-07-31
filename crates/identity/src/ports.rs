@@ -251,7 +251,6 @@ pub async fn credential_security_emission_for_test(
         .await
         .map(CredentialSecurityEmission::into_parts)
 }
-
 /// The wire payload intentionally excludes raw subject, grant, credential and token identifiers.
 /// Target and actor references are stable tenant-scoped pseudonyms; the same actor projection is
 /// used in the payload and persisted outbox metadata so durable consumers can attribute safely.

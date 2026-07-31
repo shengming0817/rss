@@ -80,13 +80,13 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex as StdMutex};
     use tokio::sync::Notify;
-    use tokio::time;
 
     use consistency::{
         BacklogMetricSample, BacklogObservation, BacklogSample, EngineError, OutboxBacklog,
         OutboxContractId, OutboxMetricSubject,
     };
     use diport::{CasStore, CasStoreOutcome, LockAcquireOutcome, LockRenewOutcome, LockStore};
+    use testkit::await_delay;
 
     type LockMap = HashMap<String, (Option<vocab::Epoch>, u64)>;
     type CasMap = HashMap<String, (Vec<u8>, vocab::Epoch)>;
@@ -317,7 +317,7 @@ mod tests {
     impl OutboxBacklog for SlowBacklog {
         async fn sample_backlog(&self, _domain: &str) -> Result<BacklogObservation, EngineError> {
             self.started.notify_one();
-            time::sleep(Duration::from_secs(1)).await;
+            await_delay(Duration::from_secs(1)).await;
             self.completed.store(true, Ordering::SeqCst);
             Ok(BacklogObservation::Active(vec![backlog_metric_sample(
                 13, 17,

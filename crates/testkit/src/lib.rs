@@ -5,6 +5,12 @@
 //! oneshot 驱动**已构建好的** axum [`Router`](axum::Router)、收集完整响应，并断言状态码 / 反序列化进
 //! generated wire 类型（schema 对齐）/ 解析统一 wire error envelope（`error-handling.md §Wire 格式`）。
 //!
+//! ## 有界等待（[`wait`]）
+//!
+//! 测试里有界等待走四 API：ready-signal 用 [`await_condition`] / [`await_condition_async`] /
+//! [`await_notified`]；固定延时**必须**用 [`await_delay`]。**禁止** `await_condition(..., || false)`
+//! 伪装固定 sleep（只烧超时预算）；需要 marker / TCP / 标志位 / `Notify` 时写真实谓词。
+//!
 //! ## L2 provider conformance catalog
 //!
 //! Adapter owners enroll exact capability wrappers with [`provider_conformance_catalog!`]
@@ -34,9 +40,11 @@ mod response;
 pub mod crash_matrix;
 pub mod local_only;
 pub mod revocation;
+pub mod wait;
 
 pub use request::ContractRequest;
 pub use response::{ContractResponse, WireError};
+pub use wait::{await_condition, await_condition_async, await_condition_async_every, await_delay, await_notified};
 
 /// Closed, low-cardinality provider error category shared by conformance helpers.
 ///
@@ -163,6 +171,12 @@ pub enum TestkitError {
     /// 断言不匹配（[`ContractResponse::ensure_status`] / [`ContractResponse::ensure_error`]）。
     #[error("contract assertion failed: {0}")]
     Mismatch(String),
+    /// 有界等待超时（[`wait::await_condition`] / [`wait::await_condition_async`] /
+    /// [`wait::await_notified`]）。调用方应以 `.context(...)` / `map_err` 包装期望条件说明。
+    #[error(
+        "wait timed out after {waited_ms}ms (wrap with context naming the expected ready condition)"
+    )]
+    WaitTimeout { waited_ms: u64 },
 }
 
 /// 用 [`ContractRequest`] 经 `tower::ServiceExt::oneshot` 驱动**已构建好的** axum [`Router`](axum::Router)

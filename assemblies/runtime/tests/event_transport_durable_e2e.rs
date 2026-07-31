@@ -396,16 +396,10 @@ async fn inbox_done_count(pool: &sqlx::PgPool, event_id: &str, group: &str) -> R
 }
 
 async fn wait_inbox_done(pool: &sqlx::PgPool, event_id: &str, group: &str) -> Result<()> {
-    tokio::time::timeout(Duration::from_secs(20), async {
-        loop {
-            if inbox_done_count(pool, event_id, group)
-                .await
-                .is_ok_and(|count| count == 1)
-            {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
+    testkit::await_condition_async(Duration::from_secs(20), || async {
+        inbox_done_count(pool, event_id, group)
+            .await
+            .is_ok_and(|count| count == 1)
     })
     .await
     .map_err(|_| {
@@ -1009,16 +1003,10 @@ async fn event_transport_durable_e2e() -> Result<()> {
     let policy_resource_id = format!(
         "tenant/{tenant}/policy/{policy_id}/contract/{policy_contract_id}/permission/{policy_permission}"
     );
-    tokio::time::timeout(Duration::from_secs(20), async {
-        loop {
-            if audit_policy_count(&assertion_pool, tenant, &policy_resource_id)
-                .await
-                .is_ok_and(|count| count == 1)
-            {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
+    testkit::await_condition_async(Duration::from_secs(20), || async {
+        audit_policy_count(&assertion_pool, tenant, &policy_resource_id)
+            .await
+            .is_ok_and(|count| count == 1)
     })
     .await
     .map_err(|_| {
@@ -1063,41 +1051,43 @@ async fn event_transport_durable_e2e() -> Result<()> {
 
     // bounded 轮询（最多 50 次 × 100ms = 5s），以 tenant/domain/topic 限定后按
     // payload.sessionId 关联本轮 entry；published 行仍保留，因此无需抢在 relay 前读取。
-    let (captured_event_id, captured_payload) = {
-        let mut found = None;
-        for _ in 0..50u8 {
-            found = outbox_session_event(
-                &assertion_pool,
-                tenant,
-                "identity",
-                SESSION_CREATED_TOPIC,
-                &session_id,
-            )
-            .await?;
-            if found.is_some() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-        found.ok_or_else(|| {
-            anyhow::anyhow!("outbox 缺本轮 session-created entry（session_id={session_id}）")
-        })?
-    };
+    testkit::await_condition_async(Duration::from_secs(5), || async {
+        outbox_session_event(
+            &assertion_pool,
+            tenant,
+            "identity",
+            SESSION_CREATED_TOPIC,
+            &session_id,
+        )
+        .await
+        .ok()
+        .flatten()
+        .is_some()
+    })
+    .await
+    .map_err(|_| {
+        anyhow::anyhow!("outbox 缺本轮 session-created entry（session_id={session_id}）")
+    })?;
+    let (captured_event_id, captured_payload) = outbox_session_event(
+        &assertion_pool,
+        tenant,
+        "identity",
+        SESSION_CREATED_TOPIC,
+        &session_id,
+    )
+    .await?
+    .ok_or_else(|| {
+        anyhow::anyhow!("outbox 缺本轮 session-created entry（session_id={session_id}）")
+    })?;
 
     // ── 步骤 10：断言 A（至少一次）────────────────────────────────────────────────────────────
 
     // relay（后台 OS 线程）会在下次 2s 轮询时拾起 pending entry → AMQP publish → consumer → PG inbox
     // Fresh → audit append。20s timeout 覆盖 2s relay 间隔 + AMQP 投递 + consumer 处理延迟。
-    tokio::time::timeout(Duration::from_secs(20), async {
-        loop {
-            if audit_login_count(&assertion_pool, tenant, &session_id)
-                .await
-                .is_ok_and(|count| count >= 1)
-            {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
+    testkit::await_condition_async(Duration::from_secs(20), || async {
+        audit_login_count(&assertion_pool, tenant, &session_id)
+            .await
+            .is_ok_and(|count| count >= 1)
     })
     .await
     .map_err(|_| {
@@ -1190,16 +1180,10 @@ async fn event_transport_durable_e2e() -> Result<()> {
     .await?;
 
     // 正向见证：tracer 新 session 被 audit，证明排在它之前的 same-ID duplicate 已被消费并 settle。
-    tokio::time::timeout(Duration::from_secs(20), async {
-        loop {
-            if audit_login_count(&assertion_pool, tenant, &tracer_session_id)
-                .await
-                .is_ok_and(|count| count == 1)
-            {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
+    testkit::await_condition_async(Duration::from_secs(20), || async {
+        audit_login_count(&assertion_pool, tenant, &tracer_session_id)
+            .await
+            .is_ok_and(|count| count == 1)
     })
     .await
     .map_err(|_| {
@@ -1207,16 +1191,10 @@ async fn event_transport_durable_e2e() -> Result<()> {
     })?;
 
     // 去重失效会让 duplicate 对 original session 再 append。再观察 2s：升到 2 即 fail-fast。
-    let leaked_dup = tokio::time::timeout(Duration::from_secs(2), async {
-        loop {
-            if audit_login_count(&assertion_pool, tenant, &session_id)
-                .await
-                .is_ok_and(|count| count >= 2)
-            {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
+    let leaked_dup = testkit::await_condition_async(Duration::from_secs(2), || async {
+        audit_login_count(&assertion_pool, tenant, &session_id)
+            .await
+            .is_ok_and(|count| count >= 2)
     })
     .await;
     assert!(

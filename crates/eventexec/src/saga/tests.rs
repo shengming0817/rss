@@ -1379,6 +1379,7 @@ async fn runtime_lock_acquire_error_interrupts_without_journal() {
 }
 
 #[tokio::test]
+#[allow(clippy::expect_used)] // reason: WaitTimeout means distinct-key concurrency regressed
 async fn runtime_lock_allows_different_saga_keys_to_enter_provider_concurrently() {
     let lock_store = FakeRuntimeLockStore::block_first_acquire();
     let runtime_lock = runtime_lock_from(lock_store.clone());
@@ -1413,7 +1414,11 @@ async fn runtime_lock_allows_different_saga_keys_to_enter_provider_concurrently(
                 .await
         })
     };
-    tokio::time::sleep(Duration::from_millis(10)).await;
+    testkit::await_condition(Duration::from_secs(1), || {
+        lock_store.acquisition_count() >= 2
+    })
+    .await
+    .expect("second saga must acquire a distinct runtime lock within 1s");
 
     assert_eq!(
         lock_store.acquisition_count(),

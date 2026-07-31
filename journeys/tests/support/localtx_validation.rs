@@ -34,9 +34,7 @@ use identity::ports::{
     Credential, CredentialRepo, DynAccountSecurityReadRepo, DynCredentialRepo,
     TenantRepoScope as IdentityScope,
 };
-use identity::{
-    AuthGrantProvider, AuthGrantServices, CredentialSecurityService, LoginService, SeedSigner,
-};
+use identity::{CredentialSecurityService, LoginService};
 use memory::{FixedClock, MemBus, MemEmitter};
 use postgres::{
     ConfigValueProtections, PgAuditAdminRepo, PgConfig, PgCredentialRepo, PgPassword,
@@ -1297,12 +1295,14 @@ async fn build_identity_authorizer(
     let credentials: Arc<DynCredentialRepo<'static>> =
         Arc::from(DynCredentialRepo::new_box(identity_deps.credential_repo()));
     let pseudonym_keys = postgres::identity_pseudonym_keys_for_test();
-    let auth_grants = seed_auth_grant_services(
+    let auth_grants = identity::seed_auth_grant_services(
         identity_deps.auth_grant_provider(
             Box::new(FixedClock::at_unix_secs(NOW_SECS)),
             Arc::clone(&pseudonym_keys),
         ),
         DynAccountSecurityReadRepo::new_box(identity_deps.account_security_repo()),
+        || Box::new(FixedClock::at_unix_secs(NOW_SECS)),
+        Duration::from_secs(TTL_SECS),
     );
     let refresh = auth_grants.refresh_service();
     let grants = auth_grants.lifecycle();
@@ -1312,7 +1312,7 @@ async fn build_identity_authorizer(
         grants,
         DynAccountSecurityReadRepo::new_box(identity_deps.account_security_repo()),
         security,
-        identity_deps.account_reactivation_lifecycle(pseudonym_keys),
+        identity_deps.account_reactivation_lifecycle(),
         common::password_policy(),
         Box::new(FixedClock::at_unix_secs(NOW_SECS)),
     ));

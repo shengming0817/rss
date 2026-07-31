@@ -1,3 +1,4 @@
+use eventexec::event::ReviewedEvent;
 use std::sync::Arc;
 
 use super::{
@@ -609,7 +610,7 @@ impl identity::ports::RoleBindingLifecycle for StaticRoleBindings {
         _receipt: identity::ports::RolesAssignProducerReceipt,
         _scope: IdentityTenantRepoScope,
         _binding: identity::ports::RoleBinding,
-        _event: eventexec::event::ReviewedEvent,
+        _event: ReviewedEvent,
     ) -> Result<(), diport::OutboxEmitError> {
         Err(diport::OutboxEmitError::new(std::io::Error::other(
             "runtime test binding lifecycle is read-only",
@@ -622,7 +623,7 @@ impl identity::ports::RoleBindingLifecycle for StaticRoleBindings {
         _scope: IdentityTenantRepoScope,
         _role_id: identity::ports::RoleId,
         _subject: String,
-        _event: eventexec::event::ReviewedEvent,
+        _event: ReviewedEvent,
     ) -> Result<bool, diport::OutboxEmitError> {
         Err(diport::OutboxEmitError::new(std::io::Error::other(
             "runtime test binding lifecycle is read-only",
@@ -706,7 +707,7 @@ impl identity::ports::PolicyLifecycle for EmptyPolicyLifecycle {
         _receipt: identity::ports::PoliciesCreateProducerReceipt,
         _scope: IdentityTenantRepoScope,
         _policy: identity::ports::Policy,
-        _event: eventexec::event::ReviewedEvent,
+        _event: ReviewedEvent,
     ) -> Result<identity::ports::Policy, identity::ports::IdentityError> {
         Err(identity_storage_error(
             "runtime test policy lifecycle must not be called",
@@ -719,7 +720,7 @@ impl identity::ports::PolicyLifecycle for EmptyPolicyLifecycle {
         _scope: IdentityTenantRepoScope,
         _policy: identity::ports::Policy,
         _expected: identity::ports::PolicyVersion,
-        _event: eventexec::event::ReviewedEvent,
+        _event: ReviewedEvent,
     ) -> Result<identity::ports::Policy, identity::ports::IdentityError> {
         Err(identity_storage_error(
             "runtime test policy lifecycle must not be called",
@@ -732,7 +733,7 @@ impl identity::ports::PolicyLifecycle for EmptyPolicyLifecycle {
         _scope: IdentityTenantRepoScope,
         _id: identity::ports::PolicyId,
         _expected: identity::ports::PolicyVersion,
-        _event: eventexec::event::ReviewedEvent,
+        _event: ReviewedEvent,
     ) -> Result<bool, identity::ports::IdentityError> {
         Err(identity_storage_error(
             "runtime test policy lifecycle must not be called",
@@ -866,7 +867,7 @@ impl identity::ports::AuthGrantLifecycle for UnusedAuthGrantProvider {
         _receipt: identity::ports::LoginProducerReceipt,
         _scope: IdentityTenantRepoScope,
         _mutation: identity::ports::LoginGrantMutation,
-        _event: eventexec::event::ReviewedEvent,
+        _event: ReviewedEvent,
     ) -> Result<identity::ports::PersistedLoginGrantReceipt, diport::OutboxEmitError> {
         Err(diport::OutboxEmitError::new(std::io::Error::other(
             "runtime test auth-grant lifecycle must not be called",

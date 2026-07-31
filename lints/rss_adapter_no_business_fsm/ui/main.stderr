@@ -1,0 +1,32 @@
+warning: adapters 不得定义业务过渡表：`SessionState` + 方法 `transition`（业务 FSM 须上移 domain/引擎）
+  --> $DIR/main.rs:16:5
+   |
+LL | /     fn transition(self) -> Self {
+LL | |         match self {
+LL | |             Self::Idle => Self::Active,
+LL | |             Self::Active => Self::Active,
+LL | |         }
+LL | |     }
+   | |_____^
+   |
+   = help: 改名避开 `*State`/`*Phase`/`*Lifecycle` 后缀，或删除 `next`/`transition`/`advance`/`step`；业务推进逻辑放到 domain/引擎；确需豁免加 `#[allow(rss_adapter_no_business_fsm)] // reason: ...`
+   = note: `#[warn(rss_adapter_no_business_fsm)]` on by default
+
+warning: adapters 不得引用 `statig`：业务 FSM 框架禁入薄委托层（上游 Medium：deny.toml ADAPTER-THIN-FSM-01）
+  --> $DIR/main.rs:29:5
+   |
+LL | use statig::Machine as ImportedStatigMachine;
+   |     ^^^^^^^^^^^^^^^
+   |
+   = help: 业务生命周期状态机放 domain / consistency / deviceloop；adapter 只做 SDK/RustCrypto 薄委托；确需豁免加 `#[allow(rss_adapter_no_business_fsm)] // reason: ...`
+
+warning: adapters 不得引用 `statig`：业务 FSM 框架禁入薄委托层（上游 Medium：deny.toml ADAPTER-THIN-FSM-01）
+  --> $DIR/main.rs:32:5
+   |
+LL |     statig::Machine
+   |     ^^^^^^^^^^^^^^^
+   |
+   = help: 业务生命周期状态机放 domain / consistency / deviceloop；adapter 只做 SDK/RustCrypto 薄委托；确需豁免加 `#[allow(rss_adapter_no_business_fsm)] // reason: ...`
+
+warning: 3 warnings emitted
+

@@ -1519,7 +1519,7 @@ mod tests {
         };
         let signer_worker = spawn(products.signer_readiness_worker);
         let dlx_worker = spawn(products.dlx_readiness_worker);
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        testkit::await_delay(Duration::from_millis(20)).await;
         signer_worker.shutdown().await?;
         dlx_worker.shutdown().await?;
         assert_eq!(

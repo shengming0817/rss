@@ -1321,7 +1321,7 @@ mod tests {
             () = ack_started.notified() => {}
             () = &mut run => return Err(std::io::Error::other("run ended before Ack blocked").into()),
         }
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        testkit::await_delay(Duration::from_millis(10)).await;
         assert!(
             actions
                 .lock()
@@ -1378,7 +1378,7 @@ mod tests {
             () = ack_started.notified() => {}
             () = &mut run => return Err(std::io::Error::other("DLX run ended before Ack blocked").into()),
         }
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        testkit::await_delay(Duration::from_millis(10)).await;
         assert!(
             actions
                 .lock()

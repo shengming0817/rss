@@ -436,8 +436,7 @@ async fn pg_harness() -> Result<PgHarness> {
         config,
         logins,
         relay_budget()?,
-        generated::event::PROJECTION_INPUT_GENERATION,
-        generated::event::PROJECTION_INPUTS,
+        eventexec::WorkflowRuntimePlan::disabled_fixture().projection_capture(),
     )
     .await?;
     Ok(PgHarness {

@@ -19,11 +19,12 @@ serde_json = { workspace = true }                    # body 序列化 / 反序�
 toml = { workspace = true }                          # consistency crash matrix fixture DSL（fixture-*.toml）解析
 thiserror = { workspace = true }                     # TestkitError 库错误枚举
 futures = { workspace = true }                       # provider-neutral async revocation conformance join
-# 容器 fixture（#1137，仅 `containers` feature）：testcontainers 起真 pg/redis/rabbitmq；tokio time 重试；
+# 有界等待（#1495）：`wait` 模块始终可用；time/sync 给 poll + Notify，macros/rt 给单测 runtime。
+tokio = { workspace = true, features = ["time", "sync", "macros", "rt"] }
+# 容器 fixture（#1137，仅 `containers` feature）：testcontainers 起真 pg/redis/rabbitmq；
 # anyhow = FixtureError（测试体 `?` 组合）。默认构建 / 契约 harness 消费方不拉此树。
 testcontainers = { workspace = true, optional = true }
 testcontainers-modules = { workspace = true, optional = true, features = ["postgres", "redis", "rabbitmq", "mosquitto", "minio"] }
-tokio = { workspace = true, optional = true, features = ["time"] }
 anyhow = { workspace = true, optional = true }
 url = { workspace = true, optional = true }
 sqlx = { workspace = true, optional = true }
@@ -34,10 +35,10 @@ default = []
 # 容器 fixture（#1137）+ tenant-scope conformance 骨架（#1437）：adapter 集成测试 + journeys durable journey
 # 经各自 `integration` feature 传递激活（`testkit/containers`）。契约 harness（#1136，axum oneshot）始终可用。
 # conformance 骨架对 tenant 类型泛型化，**零内部 crate 依赖**（testkit 出边仍全外部 crate，#1437 review F5）。
-containers = ["dep:testcontainers", "dep:testcontainers-modules", "dep:tokio", "dep:anyhow", "dep:url", "dep:sqlx", "dep:rcgen"]
+containers = ["dep:testcontainers", "dep:testcontainers-modules", "dep:anyhow", "dep:url", "dep:sqlx", "dep:rcgen"]
 integration = ["containers"]
 
 [dev-dependencies]
-tokio = { workspace = true }                         # harness 自测的 async runtime
 uuid = { workspace = true }                          # 自测：path 参数 newtype（UUID 解析）维度
 trybuild = { workspace = true }                      # provider owner-private receipt compile reds
+tokio = { workspace = true, features = ["test-util"] }  # wait 自测：start_paused 虚拟时钟验证 await_delay

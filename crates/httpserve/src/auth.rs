@@ -1580,8 +1580,11 @@ mod tests {
             vocab::ServiceCallerDomain::MaintenanceOperator,
         );
 
-        let with_typed_domain =
-            Authenticated::new_service(tenant, vocab::ServiceCallerDomain::MaintenanceOperator);
+        let with_typed_domain = Authenticated::new_service(
+            authmint::AuthenticatedMint::capability(),
+            tenant,
+            vocab::ServiceCallerDomain::MaintenanceOperator,
+        );
         assert!(
             authorize_service_route(&meta, &with_typed_domain, Some(policy)),
             "typed allowlisted caller + matching contract must allow (anti-vacuity)"
@@ -1604,7 +1607,8 @@ mod tests {
         );
 
         // mTLS Service peer is PrincipalKind::Service but carries no service-token domain.
-        let mtls_peer = Authenticated::new_mtls("mtls-peer");
+        let mtls_peer =
+            Authenticated::new_mtls(authmint::AuthenticatedMint::capability(), "mtls-peer");
         assert!(
             !authorize_service_route(&meta, &mtls_peer, Some(policy)),
             "mTLS Service peer must not satisfy service-token caller allowlist"

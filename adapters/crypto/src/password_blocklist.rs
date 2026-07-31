@@ -333,10 +333,12 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[test]
-    fn load_rejects_a_fifo_without_blocking() {
+    #[tokio::test]
+    async fn load_rejects_a_fifo_without_blocking() {
         use std::process::Command;
         use std::time::Duration;
+
+        use testkit::await_condition;
 
         let root = std::env::temp_dir().join(format!(
             "rss-blocklist-fifo-{}-{:?}",
@@ -360,14 +362,20 @@ mod tests {
             .env("RSS_TEST_PASSWORD_BLOCKLIST_FIFO", &fifo)
             .spawn()
             .expect("spawn bounded FIFO loader");
-        let mut status = None;
-        for _ in 0..300 {
-            if let Some(exit) = child.try_wait().expect("poll FIFO loader") {
-                status = Some(exit);
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        let status = {
+            let mut exit = None;
+            let _ = await_condition(Duration::from_secs(3), || {
+                match child.try_wait().expect("poll FIFO loader") {
+                    Some(status) => {
+                        exit = Some(status);
+                        true
+                    }
+                    None => false,
+                }
+            })
+            .await;
+            exit
+        };
         if status.is_none() {
             child.kill().expect("kill blocked FIFO loader");
             child.wait().expect("reap blocked FIFO loader");

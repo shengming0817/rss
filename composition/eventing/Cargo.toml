@@ -43,5 +43,6 @@ vocab = { path = "../../crates/vocab" }
 
 [dev-dependencies]
 settings = { path = "../../crates/settings", features = ["test-support"] }
+testkit = { path = "../../crates/testkit" }
 tracing-subscriber = { workspace = true }
 trybuild = { workspace = true }

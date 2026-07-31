@@ -291,6 +291,7 @@ mod tests {
         OutboxMetricSubject,
     };
     use diport::{CasStore, CasStoreOutcome, LockAcquireOutcome, LockRenewOutcome, LockStore};
+    use testkit::await_delay;
     use tokio::sync::Notify;
 
     type LockMap = HashMap<String, (Option<vocab::Epoch>, u64)>;
@@ -515,7 +516,7 @@ mod tests {
     impl OutboxBacklog for SlowBacklog {
         async fn sample_backlog(&self, _domain: &str) -> Result<BacklogObservation, EngineError> {
             self.started.notify_waiters();
-            time::sleep(Duration::from_secs(1)).await;
+            await_delay(Duration::from_secs(1)).await;
             self.completed.store(true, Ordering::SeqCst);
             Ok(BacklogObservation::Active(vec![backlog_metric_sample(
                 13, 17,

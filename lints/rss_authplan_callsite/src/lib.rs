@@ -42,13 +42,14 @@ use rustc_span::Span;
 
 /// 仅这些 crate 可调用 `AuthPlan::new` / `AuthPlan::none`——单一 greppable 真源，扩项须治理评审。
 /// 组合根（assembly / bin）装配 AuthPlan 后经 bootstrap option 注入，是唯一合法构造点。
-/// 当前生产代码无 AuthPlan callsite（组合根未建 body），allowlist 为前瞻守卫。
-/// assemblies/runtime → package name "runtime"（#1309 单一组合根；薄 bin bins/server、bins/rss 已移出）。
+/// assemblies/runtime → package name "runtime"；assemblies/identityaudit → "identityaudit"
+/// （生产 assembly 组合根；薄 bin 已移出）。`settingsonly` 走下方精确函数表。
 /// `primitives` 本身定义 `AuthPlan`，在 `none()` 内调 `Self::new()` 是内部实现，合法豁免。
-const ALLOWED_CALLER_CRATES: &[&str] = &["primitives", "runtime"];
+const ALLOWED_CALLER_CRATES: &[&str] = &["primitives", "runtime", "identityaudit"];
 const ALLOWED_SETTINGSONLY_FUNCTIONS: &[(&str, &str)] = &[
     ("primary_auth_plan", "listeners::primary_auth_plan"),
     ("health_auth_plan", "listeners::health_auth_plan"),
+    ("admin_auth_plan", "listeners::admin_auth_plan"),
 ];
 
 dylint_linting::declare_late_lint! {

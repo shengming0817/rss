@@ -448,13 +448,9 @@ async fn wait_until<F>(timeout: Duration, mut condition: F) -> Result<()>
 where
     F: FnMut() -> bool,
 {
-    tokio::time::timeout(timeout, async {
-        while !condition() {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    })
-    .await
-    .context("condition timed out")
+    testkit::await_condition(timeout, &mut condition)
+        .await
+        .context("condition timed out")
 }
 
 #[tokio::test(flavor = "multi_thread")]

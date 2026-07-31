@@ -58,7 +58,7 @@ cd lints/rss_domain_no_serialize && cargo test
 `rss_runtime_env_funnel`、
 `rss_diport_error_debug_redacted`、`rss_diport_dto_debug_redacted`、`rss_pdp_impl_adapter_only`、
 `rss_projection_append_only`、`rss_partition_serial_allowlist`、`rss_diport_envelope_reserved_writer`、
-`rss_redact_debug_required`。
+`rss_redact_debug_required`、`rss_adapter_no_business_fsm`、`rss_test_no_bare_sleep`。
 
 | lint id | INVARIANT | 守的约束 |
 |---------|-----------|---------|
@@ -80,6 +80,8 @@ cd lints/rss_domain_no_serialize && cargo test
 | `rss_partition_serial_allowlist` | PARTITION-SERIAL-IMPL-ALLOWLIST-01 | `consistency::PartitionSerialDelivery` 仅 adapter / 组合根可 impl，守 projection serial witness 的 Medium 半段。默认 `Warn`。 |
 | `rss_diport_envelope_reserved_writer` | DIPORT-ENVELOPE-WIRE-WRITER-01 | `EnvelopeMetadata::insert_wire_pair` reserved-capable wire 写面仅 adapter / 组合根可调用；业务写 metadata 走拒 reserved key 的普通入口。默认 `Warn`。 |
 | `rss_redact_debug_required` | REDACT-DEBUG-REQUIRED-01 | issue #1359 高风险敏感 DTO（`AuditEvent` / `RoleBinding` / `Session` / `RequestCtx` / `SecretMaterial` 等）禁止裸 `derive(Debug)`；改用 `#[derive(secure::Redact)]` + 逐字段 `#[redact(...)]`。默认 `Warn`。 |
+| `rss_adapter_no_business_fsm` | ADAPTER-NO-BUSINESS-FSM-01 | `adapters/*` 禁业务 FSM：path/`use` 含 `statig`，或本地 `*State`/`*Phase`/`*Lifecycle` enum 的 inherent impl 含 `next`/`transition`/`advance`/`step`（ADR-023 / #1494；上游 Medium：`deny.toml` ban `statig` = ADAPTER-THIN-FSM-01）。默认 `Warn`。激活键 `CARGO_MANIFEST_DIR` 父目录 == `adapters`（或本 lint UI package 名）。标签枚举（无过渡方法）不报；误报改名/上移，禁批量 allow。 |
+| `rss_test_no_bare_sleep` | TEST-NO-BARE-SLEEP-01 | 测试上下文禁裸 `tokio::time::sleep` / `std::thread::sleep`（含 `use` 导入）；有界等待走 `testkit::wait`（ready-signal：`await_condition*` / `await_notified`；固定延时：`await_delay`；禁止 `|| false` 伪装）。默认 `Warn`。上游 Hard：`testkit` 不导出公开 sleep；funnel 放行 `testkit::wait` 模块内 poll sleep。生产 backoff（非 test 上下文）不报。专用 verify 步：`dylint --lib rss_test_no_bare_sleep -- --all-features --all-targets` + `DYLINT_RUSTFLAGS=-D rss_test_no_bare_sleep`（勿用全局 `-D warnings`）。 |
 
 逃生门：确需豁免的 callsite（如确需序列化的非 DTO 类型、确需读裸 ctx 的 spawn），在该 item 上加
 `#[allow(<lint_id>)] // reason: ...`（与仓库 item-level carve-out 纪律一致）。

@@ -68,25 +68,16 @@ use identity::{LoginService, RefreshService, SeedSigner};
 use memory::{FixedClock, InMemClaimer, MemAuthGrantStore, MemBus, MemDeadLetterStore, MemEmitter};
 use primitives::ListenerKind;
 use primitives::healthz::HealthStatus;
+use testkit::{await_condition, await_delay};
 use tokio_util::sync::CancellationToken;
 use vocab::TenantId;
 
 /// 手造 relay payload 的 session_id——审计 resource id 是 typed `ids::SessionId`（canonical uuid）。
 const CANON_SESSION: &str = "22222222-3333-4444-8555-666666666666";
+const WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn login_producer_receipt() -> LoginProducerReceipt {
     ProducerMarker::for_test(LOGIN_PRODUCER).into_receipt()
-}
-
-/// 有界等待断言条件成立（防消费未跑挂死）；超时即 `Err`。
-async fn wait_until(mut pred: impl FnMut() -> bool) -> Result<()> {
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while !pred() {
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-    })
-    .await?;
-    Ok(())
 }
 
 /// dev-root 决策绑定构造 demo in-mem claimer（TOPO-INMEM-SEAL-01 dev-root discipline）：经
@@ -355,7 +346,7 @@ async fn login_emits_event_audited_end_to_end() -> Result<()> {
             },
         )
         .await?;
-    wait_until(|| !audit.is_empty()).await?;
+    await_condition(WAIT_TIMEOUT, || !audit.is_empty()).await?;
 
     // 两阶段关闭：ConsumerWorker 经 ManagedResource::shutdown 自取消 token → stream 终止 → join。
     let failures = stack.shutdown().await;
@@ -487,7 +478,7 @@ async fn relay_redelivery_audits_once() -> Result<()> {
     }
     // F5：等可观测中间事实——第二条同 EventId 已被 consumer 读取（claim_count==2）且判 Duplicate
     // （duplicate_count==1），证「第二条已消费并幂等短路」，替代固定 sleep 的假阳性（review #274 F5/C5）。
-    wait_until(|| {
+    await_condition(WAIT_TIMEOUT, || {
         claim_count.load(Ordering::SeqCst) >= 2 && duplicate_count.load(Ordering::SeqCst) >= 1
     })
     .await?;
@@ -566,7 +557,7 @@ async fn rejected_login_does_not_audit() -> Result<()> {
         )
         .await;
     // 给任何误发射的事件被消费的时间，随后关闭。
-    tokio::time::sleep(Duration::from_millis(20)).await;
+    await_delay(Duration::from_millis(20)).await;
     let failures = stack.shutdown().await;
     assert!(
         failures.is_empty(),
@@ -639,7 +630,7 @@ async fn demo_handler_error_writes_dead_letter() -> Result<()> {
         )
         .await
         .map_err(|_| anyhow::anyhow!("publish"))?;
-    wait_until(|| dlx.len() == 1).await?;
+    await_condition(WAIT_TIMEOUT, || dlx.len() == 1).await?;
 
     let failures = stack.shutdown().await;
     assert!(

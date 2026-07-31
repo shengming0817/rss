@@ -1537,7 +1537,9 @@ dependencies = [
  "primitives",
  "secure",
  "sha2 0.10.9",
+ "testkit",
  "thiserror",
+ "tokio",
 ]
 
 [[package]]
@@ -1840,6 +1842,7 @@ dependencies = [
  "serde",
  "serde_json",
  "support",
+ "testkit",
  "thiserror",
  "tokio",
  "tracing",
@@ -2043,6 +2046,7 @@ dependencies = [
  "postgres",
  "primitives",
  "settings",
+ "testkit",
  "thiserror",
  "tokio",
  "tokio-util",
@@ -3144,6 +3148,7 @@ dependencies = [
  "secure",
  "serde",
  "serde_json",
+ "testkit",
  "tokio",
  "tokio-util",
  "toml 0.8.23",

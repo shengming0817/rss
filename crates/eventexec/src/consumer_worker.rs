@@ -1015,9 +1015,14 @@ mod tests {
                     let release = Arc::clone(&thread_release);
                     Box::pin(async move {
                         started.store(true, Ordering::Release);
-                        while !release.load(Ordering::Acquire) {
-                            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-                        }
+                        let release = Arc::clone(&release);
+                        // Stall fixture: ignore WaitTimeout — handler holds until the test
+                        // releases or drops the runtime; timeout is not a readiness failure.
+                        let _ =
+                            testkit::await_condition(std::time::Duration::from_secs(60), || {
+                                release.load(Ordering::Acquire)
+                            })
+                            .await;
                         HandleResult::ack()
                     }) as BoxFuture<'static, HandleResult>
                 };
@@ -1483,9 +1488,13 @@ mod tests {
             _entry: Self::Claim,
         ) -> Result<consistency::Disposition, consistency::error::EngineError> {
             self.started.store(true, Ordering::Release);
-            while !self.release.load(Ordering::Acquire) {
-                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-            }
+            let release = Arc::clone(&self.release);
+            // Stall fixture: ignore WaitTimeout — relay holds until the test releases the
+            // barrier; timeout is intentional hold, not a readiness failure.
+            let _ = testkit::await_condition(std::time::Duration::from_secs(60), || {
+                release.load(Ordering::Acquire)
+            })
+            .await;
             Ok(consistency::Disposition::Ack)
         }
     }

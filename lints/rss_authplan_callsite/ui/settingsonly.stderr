@@ -1,5 +1,5 @@
 warning: AuthPlan 仅组合根（assembly / bin crate）可构造：`AuthPlan::new` / `AuthPlan::none` 不得在此 crate 调用
-  --> $DIR/settingsonly.rs:18:9
+  --> $DIR/settingsonly.rs:25:9
    |
 LL |         AuthPlan::none(ListenerKind::Primary)
    |         ^^^^^^^^^^^^^^

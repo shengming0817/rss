@@ -60,6 +60,12 @@ deny = [
   # 后端会拉 rsa（上方已 ban）/ aws-lc-sys（OpenSSL 派生 license 不在 allow-list）。重新引入须显式决策（移除本
   # ban + 论证 crypto 后端 license/供应链）。图外时为 no-op（同 rsa）。use-instead 走 p256/hmac/sha2（RustCrypto）。
   { crate = "jsonwebtoken" },
+  # Adapter 厚薄纪律（ADR-023 / #1494）：禁 FSM 框架 `statig` 进入依赖图——业务生命周期状态机只属
+  # domain/引擎（consistency/deviceloop/…），adapters 仅薄委托。图外时本 ban 为 no-op；一旦 adapters
+  # （或其它 crate）引入即 `deny check bans` 失败。INVARIANT: ADAPTER-THIN-FSM-01 { level = "Medium",
+  # exec = "check", source = "config" }。AST 过渡表形态由 Medium dylint `rss_adapter_no_business_fsm`
+  # （ADAPTER-NO-BUSINESS-FSM-01）双保险。
+  { crate = "statig" },
   # 外部禁用（provider 收敛）
   { crate = "native-tls", use-instead = "rustls" },
   { crate = "tokio-native-tls", use-instead = "tokio-rustls" },

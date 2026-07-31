@@ -108,6 +108,8 @@ libraries = [
   { path = "lints/rss_partition_serial_allowlist" },
   { path = "lints/rss_diport_envelope_reserved_writer" },
   { path = "lints/rss_redact_debug_required" },
+  { path = "lints/rss_adapter_no_business_fsm" },
+  { path = "lints/rss_test_no_bare_sleep" },
 ]
 
 [workspace.package]

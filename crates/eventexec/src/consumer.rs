@@ -3159,7 +3159,7 @@ mod tests {
             let finished = finished.clone();
             Box::pin(async move {
                 started.fetch_add(1, Ordering::SeqCst);
-                tokio::time::sleep(sleep).await;
+                testkit::await_delay(sleep).await;
                 finished.fetch_add(1, Ordering::SeqCst);
                 HandleResult::ack()
             })

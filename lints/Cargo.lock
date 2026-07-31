@@ -1981,6 +1981,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rss_adapter_no_business_fsm"
+version = "0.0.0"
+dependencies = [
+ "clippy_utils",
+ "dylint_linting",
+ "dylint_testing",
+]
+
+[[package]]
 name = "rss_authenticated_callsite"
 version = "0.0.0"
 dependencies = [
@@ -2167,6 +2176,16 @@ dependencies = [
  "dylint_linting",
  "dylint_testing",
  "runctx",
+ "tokio",
+]
+
+[[package]]
+name = "rss_test_no_bare_sleep"
+version = "0.0.0"
+dependencies = [
+ "clippy_utils",
+ "dylint_linting",
+ "dylint_testing",
  "tokio",
 ]
 

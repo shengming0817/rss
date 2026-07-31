@@ -117,6 +117,9 @@ impl Drop for CancelOnDrop {
     }
 }
 
+// ShutdownStack 的 deferred-cancel wrapper 住在 bootstrap（服务层），不是 provider adapter。
+// diport allowlist 仅 adapters/bins/assemblies/composition；本 impl 是栈私有 cancel 载体，非 DI provider。
+#[allow(rss_diport_impl_allowlist)] // reason: bootstrap ShutdownStack owns DeferredCancellationResource
 impl ManagedResource for DeferredCancellationResource {
     fn name(&self) -> &str {
         &self.name
@@ -509,7 +512,11 @@ mod tests {
                     self.name
                 )))),
                 Behavior::Hang => {
-                    tokio::time::sleep(Duration::MAX).await;
+                    #[allow(unknown_lints, rss_test_no_bare_sleep)]
+                    // reason: paused-clock hang probe
+                    {
+                        tokio::time::sleep(Duration::MAX).await;
+                    }
                     Ok(())
                 }
                 Behavior::Panic => panic!("mock-panic-{}", self.name),
@@ -913,7 +920,10 @@ mod tests {
             let _guard = Guard(Arc::clone(&self.aborted));
             // sleep(MAX) 是 timer：start_paused 下「所有 task 阻塞于 timer」成立、虚拟时钟自动推进到
             // 最近 deadline（整体预算）；预算耗尽 → 驱动器 abort 本 task → future drop → guard 置位。
-            tokio::time::sleep(Duration::MAX).await;
+            #[allow(unknown_lints, rss_test_no_bare_sleep)] // reason: paused-clock hang probe
+            {
+                tokio::time::sleep(Duration::MAX).await;
+            }
             Ok(())
         }
     }

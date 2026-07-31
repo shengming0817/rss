@@ -133,12 +133,16 @@ pub struct SubscriberBinding {
 }
 
 impl SubscriberBinding {
-    /// Test-only constructor for negative topology / capability fixtures.
+    /// 仅供负例拓扑断言伪造 binding（group / capability drift）。
     ///
-    /// Gated behind `feature = "test-support"` so production dependency graphs cannot forge
-    /// private binding fields (Hard carrier CONSUMER-TX-POLICY-REGISTRATION-01; #1710 / PR #642 F6).
-    #[doc(hidden)]
-    #[cfg(feature = "test-support")]
+    /// 生产路径必须走 typed [`generated::event::EventSubscribe`]；本入口不重新打开
+    /// `Registry::subscriber` 五元注册面。
+    ///
+    /// **Medium 门控**（LAYER-DEPS-09 / CONSUMER-TX-POLICY-REGISTRATION-01）：
+    /// `cfg(any(test, feature = "test-support"))`——生产构建（无 `test-support`）编译期不存在本入口；
+    /// 跨 crate 测试消费方经 `[dev-dependencies]` 显式启用 `bootstrap/test-support`（禁止仅靠
+    /// `#[doc(hidden)]`；shipped 依赖表启用该 feature 由 `cargo xtask layer-deps` 拦截）。
+    #[cfg(any(test, feature = "test-support"))]
     pub fn from_test_parts(
         contract_id: &'static str,
         topic: &'static str,

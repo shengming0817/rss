@@ -23,4 +23,6 @@ members = [
   "rss_partition_serial_allowlist",
   "rss_diport_envelope_reserved_writer",
   "rss_redact_debug_required",
+  "rss_adapter_no_business_fsm",
+  "rss_test_no_bare_sleep",
 ]

@@ -21,6 +21,7 @@ use axum::http::{Method, StatusCode, header};
 use axum::routing::get;
 use base64::Engine as _;
 use base64::engine::general_purpose::{STANDARD as B64_STD, URL_SAFE_NO_PAD as B64_URL};
+use eventexec::event::ReviewedEvent;
 use httpserve::{
     ProducerMarker, RouteAuthorizationDecision, RouteAuthorizationRequest, RouteAuthorizer,
     TestPrimaryRoute as PrimaryRoute, TestRoutePermission as RoutePermission,
@@ -97,8 +98,7 @@ impl AuthGrantLifecycle for RefreshBackend {
         _receipt: LoginProducerReceipt,
         _scope: TenantRepoScope,
         _mutation: LoginGrantMutation,
-        _entry: consistency::EventEntry,
-        _envelope: diport::OutboxEnvelopeParts,
+        _event: ReviewedEvent,
     ) -> Result<identity::ports::PersistedLoginGrantReceipt, diport::OutboxEmitError> {
         Err(diport::OutboxEmitError::new(std::io::Error::other(
             "refresh-only runtime backend",

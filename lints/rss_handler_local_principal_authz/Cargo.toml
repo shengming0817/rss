@@ -32,6 +32,18 @@ path = "ui/runtime.rs"
 name = "diport"
 path = "ui/diport.rs"
 
+[[example]]
+name = "identity"
+path = "ui/identity.rs"
+
+[[example]]
+name = "postgres"
+path = "ui/postgres.rs"
+
+[[example]]
+name = "identityaudit"
+path = "ui/identityaudit.rs"
+
 [dependencies]
 # clippy_utils rev 与 lints/rust-toolchain.toml 的 nightly 配对（dylint v6.0.1 模板），勿单独升级其一。
 # 升级步骤见 lints/README.md「前置」。ref: dylint internal/template/Cargo.toml@v6.0.1

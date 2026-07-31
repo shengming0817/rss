@@ -346,6 +346,8 @@ mod tests {
             .expect("canonical manifest")
     }
 
+    // PreExpansionPass sees cfg'd-out `env!` (dylint --all has no --all-targets); allow test path helper.
+    #[allow(rss_runtime_env_funnel)] // reason: cfg(test) repo-root helper; PreExpansionPass sees cfg(test) env!
     fn repository_root() -> &'static Path {
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()

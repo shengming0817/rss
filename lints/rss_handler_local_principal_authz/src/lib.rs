@@ -81,6 +81,10 @@ const IDENTITY_CONTRACT_AUTHORIZER_METHODS: &[&str] = &[
     "actor_kind_wire",
     "profile_kind_wire",
     "kind_to_db",
+    // wire / grant-binding mappers（非 handler-local 授权分支）
+    "privacy_ref",
+    "current_user_grant_context",
+    "credential_security_fact",
 ];
 const AUDIT_ALLOWED_METHODS: &[&str] = &[
     "list_entries_target_tenant",
@@ -88,6 +92,10 @@ const AUDIT_ALLOWED_METHODS: &[&str] = &[
     "actor_kind_to_db",
     "principal_kind_tag",
 ];
+/// postgres adapter：audit sink 的 PrincipalKind→DB 标签 mapper（非授权分支）。
+const POSTGRES_ALLOWED_METHODS: &[&str] = &["actor_kind_to_db"];
+/// identityaudit 组合根：RSS access verify 后绑定 User（非 primary handler 授权）。
+const IDENTITYAUDIT_ALLOWED_METHODS: &[&str] = &["authenticate"];
 
 dylint_linting::declare_late_lint! {
     /// ### What it does
@@ -332,6 +340,8 @@ fn principal_branch_caller_is_allowed(cx: &LateContext<'_>, hir_id: HirId) -> bo
         }
         "identity" => enclosing_item_is_any(cx, hir_id, IDENTITY_CONTRACT_AUTHORIZER_METHODS),
         "audit" => enclosing_item_is_any(cx, hir_id, AUDIT_ALLOWED_METHODS),
+        "postgres" => enclosing_item_is_any(cx, hir_id, POSTGRES_ALLOWED_METHODS),
+        "identityaudit" => enclosing_item_is_any(cx, hir_id, IDENTITYAUDIT_ALLOWED_METHODS),
         _ => false,
     }
 }
@@ -475,4 +485,22 @@ fn ui_diport_profile_shape_only_allowed() {
     // example target 名 `diport`：闭合 verified profile 构造器可校验 PrincipalKind shape；
     // 同 crate 其它 principal 分支仍触发，证明不是 crate 级白名单。
     dylint_testing::ui_test_example(env!("CARGO_PKG_NAME"), "diport");
+}
+
+#[test]
+fn ui_identity_wire_mappers_only_allowed() {
+    // example target 名 `identity`：只放行登记的 wire/grant mapper；同 crate handler-local 仍触发。
+    dylint_testing::ui_test_example(env!("CARGO_PKG_NAME"), "identity");
+}
+
+#[test]
+fn ui_postgres_actor_kind_mapper_only_allowed() {
+    // example target 名 `postgres`：只放行 audit sink actor_kind_to_db；同 crate 其它分支仍触发。
+    dylint_testing::ui_test_example(env!("CARGO_PKG_NAME"), "postgres");
+}
+
+#[test]
+fn ui_identityaudit_authenticate_only_allowed() {
+    // example target 名 `identityaudit`：只放行组合根 authenticate；同 crate 其它分支仍触发。
+    dylint_testing::ui_test_example(env!("CARGO_PKG_NAME"), "identityaudit");
 }

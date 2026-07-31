@@ -14,12 +14,14 @@ use std::{
         mpsc,
     },
     thread,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::Value;
-use testkit::{ContainerService, integration_container_labels};
+use testkit::{
+    ContainerService, await_condition_async_every, await_delay, integration_container_labels,
+};
 
 const READY_TIMEOUT: Duration = Duration::from_secs(180);
 const OUTAGE_TIMEOUT: Duration = Duration::from_secs(45);
@@ -38,31 +40,91 @@ const CRITICAL_WORKER_PROBES: &[&str] = &[
     "dlx_lifecycle",
 ];
 
-pub(crate) fn run_two_replica_acceptance() -> Result<()> {
-    let mut fixture = RuntimeComposeFixture::start()?;
-    let (replica_a, replica_b) = fixture.start_replica_pair()?;
+/// Eventually with custom poll interval for docker-heavy probes.
+async fn await_pred_every<F, Fut>(
+    timeout: Duration,
+    interval: Duration,
+    mut pred: F,
+) -> Result<()>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<bool>>,
+{
+    let fatal = std::sync::Arc::new(std::sync::Mutex::new(None::<anyhow::Error>));
+    match await_condition_async_every(timeout, interval, || {
+        let fut = pred();
+        let fatal = std::sync::Arc::clone(&fatal);
+        async move {
+            match fut.await {
+                Ok(ready) => ready,
+                Err(error) => {
+                    *fatal
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(error);
+                    true
+                }
+            }
+        }
+    })
+    .await
+    {
+        Ok(()) => match fatal
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            Some(error) => Err(error),
+            None => Ok(()),
+        },
+        Err(_) => bail!("condition wait timed out after {timeout:?}"),
+    }
+}
 
-    let ready_a = fixture.wait_ready(&replica_a, READY_TIMEOUT)?;
+/// Drive an async wait from sync Drop / std-thread contexts without bare sleep.
+fn block_on_delay(duration: Duration) {
+    block_on_async(async {
+        await_delay(duration).await;
+    })
+}
+
+fn block_on_async<T>(fut: impl std::future::Future<Output = T>) -> T {
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => tokio::task::block_in_place(|| handle.block_on(fut)),
+        Err(_) => tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("test async bridge runtime")
+            .block_on(fut),
+    }
+}
+
+pub(crate) async fn run_two_replica_acceptance() -> Result<()> {
+    let mut fixture = RuntimeComposeFixture::start().await?;
+    let (replica_a, replica_b) = fixture.start_replica_pair().await?;
+
+    let ready_a = fixture.wait_ready(&replica_a, READY_TIMEOUT).await?;
     assert_critical_probes(&ready_a)?;
-    let ready_b = fixture.wait_ready(&replica_b, READY_TIMEOUT)?;
+    let ready_b = fixture.wait_ready(&replica_b, READY_TIMEOUT).await?;
     assert_critical_probes(&ready_b)?;
-    fixture.assert_entered_migrator(&replica_a)?;
-    fixture.assert_entered_migrator(&replica_b)?;
-    fixture.assert_migration_ledger()?;
+    fixture.assert_entered_migrator(&replica_a).await?;
+    fixture.assert_entered_migrator(&replica_b).await?;
+    fixture.assert_migration_ledger().await?;
 
-    fixture.pause_vault()?;
-    fixture.wait_not_ready(&replica_a, OUTAGE_TIMEOUT)?;
-    fixture.wait_not_ready(&replica_b, OUTAGE_TIMEOUT)?;
-    fixture.unpause_vault()?;
-    assert_critical_probes(&fixture.wait_ready(&replica_a, READY_TIMEOUT)?)?;
-    assert_critical_probes(&fixture.wait_ready(&replica_b, READY_TIMEOUT)?)?;
+    fixture.pause_vault().await?;
+    fixture.wait_not_ready(&replica_a, OUTAGE_TIMEOUT).await?;
+    fixture.wait_not_ready(&replica_b, OUTAGE_TIMEOUT).await?;
+    fixture.unpause_vault().await?;
+    assert_critical_probes(&fixture.wait_ready(&replica_a, READY_TIMEOUT).await?)?;
+    assert_critical_probes(&fixture.wait_ready(&replica_b, READY_TIMEOUT).await?)?;
 
-    fixture.terminate_while_peer_stays_ready(&replica_a, &replica_b)?;
-    let replacement = fixture.start_replica("runtime-replacement")?;
-    assert_critical_probes(&fixture.wait_ready(&replacement, READY_TIMEOUT)?)?;
-    assert_critical_probes(&fixture.wait_ready(&replica_b, READY_TIMEOUT)?)?;
-    fixture.assert_migration_ledger()?;
-    fixture.close()
+    fixture
+        .terminate_while_peer_stays_ready(&replica_a, &replica_b)
+        .await?;
+    let replacement = fixture.start_replica("runtime-replacement").await?;
+    assert_critical_probes(&fixture.wait_ready(&replacement, READY_TIMEOUT).await?)?;
+    assert_critical_probes(&fixture.wait_ready(&replica_b, READY_TIMEOUT).await?)?;
+    fixture.assert_migration_ledger().await?;
+    fixture.close().await
 }
 
 struct RuntimeComposeFixture {
@@ -143,11 +205,12 @@ fn require_exact_migration_ledger(
 }
 
 impl RuntimeComposeFixture {
-    fn start() -> Result<Self> {
+    async fn start() -> Result<Self> {
         command_ok(
             Command::new("docker").arg("info"),
             "connect to Docker daemon",
-        )?;
+        )
+        .await?;
         let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .context("journeys must have a repository parent")?
@@ -178,19 +241,25 @@ impl RuntimeComposeFixture {
         };
 
         eprintln!("two-replica: building the exact compose runtime image");
-        fixture.compose_ok(&["build", "server"], "build runtime image")?;
+        fixture
+            .compose_ok(&["build", "server"], "build runtime image")
+            .await?;
         for service in ["postgres", "redis", "rabbitmq", "minio", "vault"] {
-            fixture.start_infra(service)?;
+            fixture.start_infra(service).await?;
         }
         for service in ["postgres", "redis", "rabbitmq", "minio", "vault"] {
-            fixture.wait_container_healthy(service, READY_TIMEOUT)?;
+            fixture
+                .wait_container_healthy(service, READY_TIMEOUT)
+                .await?;
         }
         for init in ["minio-init", "vault-init", "rss-access-jwks-init"] {
             eprintln!("two-replica: running {init}");
-            fixture.compose_ok(
-                &["run", "--rm", "--no-deps", "--use-aliases", init],
-                &format!("run {init}"),
-            )?;
+            fixture
+                .compose_ok(
+                    &["run", "--rm", "--no-deps", "--use-aliases", init],
+                    &format!("run {init}"),
+                )
+                .await?;
         }
         Ok(fixture)
     }
@@ -208,13 +277,13 @@ impl RuntimeComposeFixture {
         command
     }
 
-    fn compose_ok(&self, args: &[&str], purpose: &str) -> Result<String> {
+    async fn compose_ok(&self, args: &[&str], purpose: &str) -> Result<String> {
         let mut command = self.compose_command();
         command.args(args);
-        command_stdout(&mut command, purpose)
+        command_stdout(&mut command, purpose).await
     }
 
-    fn start_infra(&mut self, service: &str) -> Result<()> {
+    async fn start_infra(&mut self, service: &str) -> Result<()> {
         let container = if service == "vault" {
             self.vault_container.clone()
         } else {
@@ -232,12 +301,13 @@ impl RuntimeComposeFixture {
                 service,
             ],
             &format!("start {service}"),
-        )?;
+        )
+        .await?;
         self.containers.push(container);
         Ok(())
     }
 
-    fn wait_container_healthy(&self, service: &str, timeout: Duration) -> Result<()> {
+    async fn wait_container_healthy(&self, service: &str, timeout: Duration) -> Result<()> {
         let container = if service == "vault" {
             &self.vault_container
         } else {
@@ -246,39 +316,64 @@ impl RuntimeComposeFixture {
                 .find(|name| name.ends_with(&format!("-{service}")))
                 .with_context(|| format!("missing tracked {service} container"))?
         };
-        let deadline = Instant::now() + timeout;
-        loop {
-            let status = docker_stdout(&[
-                "inspect",
-                "--format",
-                "{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}",
-                container,
-            ])?;
-            match status.trim() {
-                "healthy" => return Ok(()),
-                "exited" | "dead" => bail!("{service} exited before becoming healthy"),
-                _ if Instant::now() < deadline => thread::sleep(Duration::from_secs(1)),
-                other => bail!("{service} did not become healthy within {timeout:?}; last={other}"),
+        let last = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        await_pred_every(timeout, Duration::from_secs(1), || {
+            let last = std::sync::Arc::clone(&last);
+            let container = container.to_owned();
+            let service = service.to_owned();
+            async move {
+                let status = docker_stdout(&[
+                    "inspect",
+                    "--format",
+                    "{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}",
+                    &container,
+                ])
+                .await?;
+                match status.trim() {
+                    "healthy" => Ok(true),
+                    "exited" | "dead" => bail!("{service} exited before becoming healthy"),
+                    other => {
+                        *last.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
+                            other.to_owned();
+                        Ok(false)
+                    }
+                }
             }
-        }
+        })
+        .await
+        .map_err(|error| {
+            let other = last
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            if other.is_empty() {
+                error
+            } else {
+                anyhow::anyhow!(
+                    "{service} did not become healthy within {timeout:?}; last={other}; {error:#}"
+                )
+            }
+        })?;
+        Ok(())
     }
 
-    fn start_replica_pair(&mut self) -> Result<(Replica, Replica)> {
+    async fn start_replica_pair(&mut self) -> Result<(Replica, Replica)> {
         self.compose_ok(
             &["create", "--scale", "server=2", "server"],
             "create both runtime replicas before either starts",
-        )?;
-        let ids = self.compose_ok(
-            &["ps", "--all", "--quiet", "server"],
-            "list created runtime replicas",
-        )?;
-        let mut containers = ids
-            .lines()
-            .map(|id| {
-                docker_stdout(&["inspect", "--format", "{{.Name}}", id])
-                    .map(|name| name.trim_start_matches('/').to_owned())
-            })
-            .collect::<Result<Vec<_>>>()?;
+        )
+        .await?;
+        let ids = self
+            .compose_ok(
+                &["ps", "--all", "--quiet", "server"],
+                "list created runtime replicas",
+            )
+            .await?;
+        let mut containers = Vec::new();
+        for id in ids.lines() {
+            let name = docker_stdout(&["inspect", "--format", "{{.Name}}", id]).await?;
+            containers.push(name.trim_start_matches('/').to_owned());
+        }
         containers.sort();
         let [container_a, container_b] = containers.as_slice() else {
             bail!("compose must create exactly two runtime replicas; found {containers:?}");
@@ -286,17 +381,19 @@ impl RuntimeComposeFixture {
         self.containers.extend(containers.iter().cloned());
 
         let postgres = self.postgres_container()?.to_owned();
-        let mut barrier = MigrationLockBarrier::acquire(&postgres, &self.postgres_password)?;
-        docker_ok(&["start", container_a, container_b])?;
-        barrier.wait_for_two_migrators(&postgres, READY_TIMEOUT)?;
-        barrier.release()?;
+        let mut barrier = MigrationLockBarrier::acquire(&postgres, &self.postgres_password).await?;
+        docker_ok(&["start", container_a, container_b]).await?;
+        barrier
+            .wait_for_two_migrators(&postgres, READY_TIMEOUT)
+            .await?;
+        barrier.release().await?;
 
-        let replica_a = replica_from_started_container(container_a)?;
-        let replica_b = replica_from_started_container(container_b)?;
+        let replica_a = replica_from_started_container(container_a).await?;
+        let replica_b = replica_from_started_container(container_b).await?;
         Ok((replica_a, replica_b))
     }
 
-    fn start_replica(&mut self, suffix: &str) -> Result<Replica> {
+    async fn start_replica(&mut self, suffix: &str) -> Result<Replica> {
         let container = format!("{}-{suffix}", self.project);
         self.compose_ok(
             &[
@@ -311,8 +408,9 @@ impl RuntimeComposeFixture {
                 "server",
             ],
             &format!("start {suffix}"),
-        )?;
-        let replica = replica_from_started_container(&container)?;
+        )
+        .await?;
+        let replica = replica_from_started_container(&container).await?;
         self.containers.push(replica.container.clone());
         Ok(replica)
     }
@@ -325,83 +423,114 @@ impl RuntimeComposeFixture {
             .context("postgres container is not tracked")
     }
 
-    fn wait_ready(&self, replica: &Replica, timeout: Duration) -> Result<Value> {
-        let deadline = Instant::now() + timeout;
-        loop {
-            let last = match http_get(&replica.ready_url) {
-                Ok((200, body)) => {
-                    return serde_json::from_str(&body)
-                        .with_context(|| format!("parse {} readyz response", replica.container));
+    async fn wait_ready(&self, replica: &Replica, timeout: Duration) -> Result<Value> {
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(None::<Result<Value>>));
+        let last = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let finished = await_condition_async_every(timeout, Duration::from_secs(1), || {
+            let captured = std::sync::Arc::clone(&captured);
+            let last = std::sync::Arc::clone(&last);
+            let ready_url = replica.ready_url.clone();
+            let container = replica.container.clone();
+            async move {
+                match http_get(&ready_url) {
+                    Ok((200, body)) => {
+                        let parsed = serde_json::from_str(&body)
+                            .with_context(|| format!("parse {container} readyz response"));
+                        *captured.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
+                            Some(parsed);
+                        true
+                    }
+                    Ok((status, body)) => {
+                        *last.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
+                            format!("HTTP {status}: {body}");
+                        false
+                    }
+                    Err(error) => {
+                        *last.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
+                            format!("request error: {error:#}");
+                        false
+                    }
                 }
-                Ok((status, body)) => format!("HTTP {status}: {body}"),
-                Err(error) => format!("request error: {error:#}"),
-            };
-            if Instant::now() >= deadline {
-                let logs = docker_combined(&["logs", "--tail", "100", &replica.container])
-                    .unwrap_or_else(|error| format!("unable to collect logs: {error:#}"));
-                bail!(
-                    "{} did not become ready within {timeout:?}; last={}\nlogs:\n{logs}",
-                    replica.container,
-                    last
-                );
             }
-            if !container_is_running(&replica.container)? {
-                let logs = docker_combined(&["logs", "--tail", "100", &replica.container])
-                    .unwrap_or_else(|error| format!("unable to collect logs: {error:#}"));
-                bail!(
-                    "{} exited before becoming ready; last={last}\nlogs:\n{logs}",
-                    replica.container
-                );
-            }
-            thread::sleep(Duration::from_secs(1));
+        })
+        .await;
+        if finished.is_ok()
+            && let Some(value) = captured
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+        {
+            return value;
         }
+        let last = last
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let logs = docker_combined(&["logs", "--tail", "100", &replica.container])
+            .await
+            .unwrap_or_else(|error| format!("unable to collect logs: {error:#}"));
+        if !container_is_running(&replica.container).await? {
+            bail!(
+                "{} exited before becoming ready; last={last}\nlogs:\n{logs}",
+                replica.container
+            );
+        }
+        bail!(
+            "{} did not become ready within {timeout:?}; last={last}\nlogs:\n{logs}",
+            replica.container
+        );
     }
 
-    fn wait_not_ready(&self, replica: &Replica, timeout: Duration) -> Result<()> {
-        let deadline = Instant::now() + timeout;
-        loop {
-            if let Ok((503, body)) = http_get(&replica.ready_url) {
-                let report: Value = serde_json::from_str(&body)
-                    .with_context(|| format!("parse {} fail-closed report", replica.container))?;
-                ensure!(
-                    has_unhealthy_probe(&report, "keyprovider_ready")
-                        || has_unhealthy_probe(&report, "vault_secret_resolver_ready"),
-                    "{} returned 503 without an unhealthy Vault-owned probe: {body}",
-                    replica.container
-                );
-                return Ok(());
+    async fn wait_not_ready(&self, replica: &Replica, timeout: Duration) -> Result<()> {
+        await_pred_every(timeout, Duration::from_millis(500), || {
+            let ready_url = replica.ready_url.clone();
+            let container = replica.container.clone();
+            async move {
+                if let Ok((503, body)) = http_get(&ready_url) {
+                    let report: Value = serde_json::from_str(&body).with_context(|| {
+                        format!("parse {container} fail-closed report")
+                    })?;
+                    ensure!(
+                        has_unhealthy_probe(&report, "keyprovider_ready")
+                            || has_unhealthy_probe(&report, "vault_secret_resolver_ready"),
+                        "{container} returned 503 without an unhealthy Vault-owned probe: {body}"
+                    );
+                    return Ok(true);
+                }
+                if !container_is_running(&container).await? {
+                    let logs = docker_combined(&["logs", "--tail", "100", &container])
+                        .await
+                        .unwrap_or_else(|error| format!("unable to collect logs: {error:#}"));
+                    bail!(
+                        "{container} exited instead of reporting fail-closed readiness:\n{logs}"
+                    );
+                }
+                Ok(false)
             }
-            if Instant::now() >= deadline {
-                bail!(
-                    "{} remained ready while Vault was paused",
-                    replica.container
-                );
-            }
-            if !container_is_running(&replica.container)? {
-                let logs = docker_combined(&["logs", "--tail", "100", &replica.container])
-                    .unwrap_or_else(|error| format!("unable to collect logs: {error:#}"));
-                bail!(
-                    "{} exited instead of reporting fail-closed readiness:\n{logs}",
-                    replica.container
-                );
-            }
-            thread::sleep(Duration::from_millis(500));
-        }
+        })
+        .await
+        .map_err(|error| {
+            anyhow::anyhow!(
+                "{} remained ready while Vault was paused; {error:#}",
+                replica.container
+            )
+        })?;
+        Ok(())
     }
 
-    fn pause_vault(&mut self) -> Result<()> {
-        docker_ok(&["pause", &self.vault_container])?;
+    async fn pause_vault(&mut self) -> Result<()> {
+        docker_ok(&["pause", &self.vault_container]).await?;
         self.vault_paused = true;
         Ok(())
     }
 
-    fn unpause_vault(&mut self) -> Result<()> {
-        docker_ok(&["unpause", &self.vault_container])?;
+    async fn unpause_vault(&mut self) -> Result<()> {
+        docker_ok(&["unpause", &self.vault_container]).await?;
         self.vault_paused = false;
         Ok(())
     }
 
-    fn assert_migration_ledger(&self) -> Result<()> {
+    async fn assert_migration_ledger(&self) -> Result<()> {
         let postgres = self.postgres_container()?;
         let password = format!("PGPASSWORD={}", self.postgres_password);
         let rows = docker_stdout(&[
@@ -419,7 +548,7 @@ impl RuntimeComposeFixture {
             "|",
             "-c",
             "SELECT version, success, encode(checksum, 'hex') FROM _sqlx_migrations ORDER BY version",
-        ])?;
+        ]).await?;
         let actual = rows
             .lines()
             .map(MigrationLedgerRow::parse)
@@ -427,8 +556,8 @@ impl RuntimeComposeFixture {
         require_exact_migration_ledger(&actual, &embedded_migration_ledger())
     }
 
-    fn assert_entered_migrator(&self, replica: &Replica) -> Result<()> {
-        let logs = docker_combined(&["logs", &replica.container])?;
+    async fn assert_entered_migrator(&self, replica: &Replica) -> Result<()> {
+        let logs = docker_combined(&["logs", &replica.container]).await?;
         ensure!(
             logs.contains("postgres migrations applied"),
             "{} never emitted the exact Postgres migrator completion marker:\n{logs}",
@@ -437,7 +566,11 @@ impl RuntimeComposeFixture {
         Ok(())
     }
 
-    fn terminate_while_peer_stays_ready(&self, target: &Replica, peer: &Replica) -> Result<()> {
+    async fn terminate_while_peer_stays_ready(
+        &self,
+        target: &Replica,
+        peer: &Replica,
+    ) -> Result<()> {
         let stop = Arc::new(AtomicBool::new(false));
         let first_error = Arc::new(Mutex::new(None::<String>));
         let samples = Arc::new(AtomicUsize::new(0));
@@ -466,7 +599,7 @@ impl RuntimeComposeFixture {
                     }
                     Err(error) => record_first_monitor_error(&monitor_error, error),
                 }
-                thread::sleep(Duration::from_millis(100));
+                block_on_delay(Duration::from_millis(100));
             }
         });
         if started_rx.recv_timeout(Duration::from_secs(5)).is_err() {
@@ -478,8 +611,8 @@ impl RuntimeComposeFixture {
         }
         let pre_term_samples = samples.load(Ordering::SeqCst);
 
-        let signal_result = docker_ok(&["kill", "--signal", "TERM", &target.container]);
-        let wait_result = docker_stdout(&["wait", &target.container]);
+        let signal_result = docker_ok(&["kill", "--signal", "TERM", &target.container]).await;
+        let wait_result = docker_stdout(&["wait", &target.container]).await;
         stop.store(true, Ordering::SeqCst);
         monitor
             .join()
@@ -496,7 +629,7 @@ impl RuntimeComposeFixture {
             .lock()
             .map_err(|_| anyhow::anyhow!("peer monitor error slot was poisoned"))?
             .clone();
-        let logs = docker_combined(&["logs", &target.container])?;
+        let logs = docker_combined(&["logs", &target.container]).await?;
         require_drain_evidence(
             pre_term_samples,
             post_term_samples,
@@ -507,13 +640,13 @@ impl RuntimeComposeFixture {
         )
     }
 
-    fn close(mut self) -> Result<()> {
-        self.cleanup()?;
+    async fn close(mut self) -> Result<()> {
+        self.cleanup().await?;
         self.closed = true;
         Ok(())
     }
 
-    fn cleanup(&mut self) -> Result<()> {
+    async fn cleanup(&mut self) -> Result<()> {
         let mut errors = Vec::new();
         if self.vault_paused {
             let mut unpause = Command::new("docker");
@@ -522,7 +655,9 @@ impl RuntimeComposeFixture {
                 &mut unpause,
                 "unpause Vault during fixture cleanup",
                 CLEANUP_TIMEOUT,
-            ) {
+            )
+            .await
+            {
                 errors.push(format!("unpause Vault: {error:#}"));
             } else {
                 self.vault_paused = false;
@@ -536,7 +671,9 @@ impl RuntimeComposeFixture {
                 &mut remove,
                 "remove tracked fixture containers",
                 CLEANUP_TIMEOUT,
-            ) {
+            )
+            .await
+            {
                 errors.push(format!("remove containers: {error:#}"));
             } else {
                 self.containers.clear();
@@ -548,7 +685,9 @@ impl RuntimeComposeFixture {
             &mut down,
             "remove fixture project and fresh volumes",
             CLEANUP_TIMEOUT,
-        ) {
+        )
+        .await
+        {
             errors.push(format!("compose down: {error:#}"));
         }
         if errors.is_empty()
@@ -607,7 +746,7 @@ struct MigrationLockBarrier {
 }
 
 impl MigrationLockBarrier {
-    fn acquire(postgres: &str, password: &str) -> Result<Self> {
+    async fn acquire(postgres: &str, password: &str) -> Result<Self> {
         let lock_id = sqlx_migration_lock_id("rss");
         let mut command = Command::new("docker");
         let password_env = format!("PGPASSWORD={password}");
@@ -638,23 +777,12 @@ impl MigrationLockBarrier {
             postgres: postgres.to_owned(),
             password: password.to_owned(),
         };
-        barrier.wait_until_owner(Duration::from_secs(10))?;
+        barrier.wait_until_owner(Duration::from_secs(10)).await?;
         Ok(barrier)
     }
 
-    fn wait_until_owner(&mut self, timeout: Duration) -> Result<()> {
-        let deadline = Instant::now() + timeout;
-        loop {
-            let count = psql_scalar(
-                &self.postgres,
-                &self.password,
-                &format!(
-                    "SELECT COUNT(*) FROM pg_stat_activity a JOIN pg_locks l USING (pid) WHERE a.application_name = '{MIGRATION_BARRIER_APP}' AND l.locktype = 'advisory' AND l.granted"
-                ),
-            )?;
-            if count.trim() == "1" {
-                return Ok(());
-            }
+    async fn wait_until_owner(&mut self, timeout: Duration) -> Result<()> {
+        await_pred_every(timeout, Duration::from_millis(100), || async {
             if self
                 .child
                 .as_mut()
@@ -665,41 +793,64 @@ impl MigrationLockBarrier {
             {
                 bail!("migration advisory-lock barrier exited before acquiring the lock");
             }
-            if Instant::now() >= deadline {
-                bail!("migration advisory-lock barrier was not acquired within {timeout:?}");
-            }
-            thread::sleep(Duration::from_millis(100));
-        }
-    }
-
-    fn wait_for_two_migrators(&self, postgres: &str, timeout: Duration) -> Result<()> {
-        let deadline = Instant::now() + timeout;
-        loop {
-            let last = psql_scalar(
-                postgres,
+            let count = psql_scalar(
+                &self.postgres,
                 &self.password,
-                "SELECT COUNT(*) || '|' || COUNT(*) FILTER (WHERE granted) FROM pg_locks WHERE locktype = 'advisory'",
-            )?;
-            if last.trim() == "3|1" {
-                return Ok(());
-            }
-            if Instant::now() >= deadline {
-                bail!(
-                    "both runtime processes did not block behind the held SQLx migration lock; expected total|granted=3|1, last={last:?}"
-                );
-            }
-            thread::sleep(Duration::from_millis(100));
-        }
+                &format!(
+                    "SELECT COUNT(*) FROM pg_stat_activity a JOIN pg_locks l USING (pid) WHERE a.application_name = '{MIGRATION_BARRIER_APP}' AND l.locktype = 'advisory' AND l.granted"
+                ),
+            )
+            .await?;
+            Ok(count.trim() == "1")
+        })
+        .await
+        .map_err(|error| {
+            anyhow::anyhow!(
+                "migration advisory-lock barrier was not acquired within {timeout:?}; {error:#}"
+            )
+        })?;
+        Ok(())
     }
 
-    fn release(&mut self) -> Result<()> {
+    async fn wait_for_two_migrators(&self, postgres: &str, timeout: Duration) -> Result<()> {
+        let last = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        await_pred_every(timeout, Duration::from_millis(100), || {
+            let last = std::sync::Arc::clone(&last);
+            let postgres = postgres.to_owned();
+            let password = self.password.clone();
+            async move {
+                let observed = psql_scalar(
+                    &postgres,
+                    &password,
+                    "SELECT COUNT(*) || '|' || COUNT(*) FILTER (WHERE granted) FROM pg_locks WHERE locktype = 'advisory'",
+                )
+                .await?;
+                *last.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
+                    observed.clone();
+                Ok(observed.trim() == "3|1")
+            }
+        })
+        .await
+        .map_err(|error| {
+            let last = last
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            anyhow::anyhow!(
+                "both runtime processes did not block behind the held SQLx migration lock; expected total|granted=3|1, last={last:?}; {error:#}"
+            )
+        })?;
+        Ok(())
+    }
+
+    async fn release(&mut self) -> Result<()> {
         let terminated = psql_scalar(
             &self.postgres,
             &self.password,
             &format!(
                 "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name = '{MIGRATION_BARRIER_APP}'"
             ),
-        )?;
+        ).await?;
         ensure!(
             terminated.lines().all(|line| line.trim() == "t") && !terminated.trim().is_empty(),
             "failed to terminate migration barrier backend: {terminated:?}"
@@ -709,7 +860,8 @@ impl MigrationLockBarrier {
                 &mut child,
                 Duration::from_secs(10),
                 "migration barrier docker exec",
-            )?;
+            )
+            .await?;
         }
         Ok(())
     }
@@ -720,7 +872,7 @@ impl Drop for MigrationLockBarrier {
         if self.child.is_none() {
             return;
         }
-        if let Err(error) = self.release() {
+        if let Err(error) = block_on_async(self.release()) {
             eprintln!("two-replica cleanup: migration barrier release failed: {error:#}");
             if let Some(mut child) = self.child.take() {
                 let _ = child.kill();
@@ -744,7 +896,7 @@ fn sqlx_migration_lock_id(database_name: &str) -> i64 {
     i64::from(!crc) * 0x3d32_ad9e
 }
 
-fn psql_scalar(postgres: &str, password: &str, query: &str) -> Result<String> {
+async fn psql_scalar(postgres: &str, password: &str, query: &str) -> Result<String> {
     let password_env = format!("PGPASSWORD={password}");
     docker_stdout(&[
         "exec",
@@ -760,6 +912,7 @@ fn psql_scalar(postgres: &str, password: &str, query: &str) -> Result<String> {
         "-c",
         query,
     ])
+    .await
 }
 
 fn read_env_file_value(path: &Path, key: &str) -> Result<String> {
@@ -780,70 +933,99 @@ fn read_env_file_value(path: &Path, key: &str) -> Result<String> {
     Ok((*value).to_owned())
 }
 
-fn wait_child_exit(
+async fn wait_child_exit(
     child: &mut std::process::Child,
     timeout: Duration,
     purpose: &str,
 ) -> Result<()> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        if child
+    await_pred_every(timeout, Duration::from_millis(100), || async {
+        Ok(child
             .try_wait()
             .with_context(|| format!("poll {purpose}"))?
-            .is_some()
-        {
-            return Ok(());
-        }
-        if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            bail!("{purpose} did not exit within {timeout:?}");
-        }
-        thread::sleep(Duration::from_millis(100));
-    }
+            .is_some())
+    })
+    .await
+    .map_err(|error| {
+        let _ = child.kill();
+        let _ = child.wait();
+        anyhow::anyhow!("{purpose} did not exit within {timeout:?}; {error:#}")
+    })?;
+    Ok(())
 }
 
 impl Drop for RuntimeComposeFixture {
     fn drop(&mut self) {
         if !self.closed
-            && let Err(error) = self.cleanup()
+            && let Err(error) = block_on_async(self.cleanup())
         {
             eprintln!("two-replica cleanup fallback failed: {error:#}");
         }
     }
 }
 
-fn replica_from_started_container(container: &str) -> Result<Replica> {
-    let address = wait_published_health_port(container, Duration::from_secs(10))?;
+async fn replica_from_started_container(container: &str) -> Result<Replica> {
+    let address = wait_published_health_port(container, Duration::from_secs(10)).await?;
     Ok(Replica {
         container: container.to_owned(),
         ready_url: format!("http://{address}/health/v1/readyz"),
     })
 }
 
-fn wait_published_health_port(container: &str, timeout: Duration) -> Result<String> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        if let Ok(published) = docker_stdout(&["port", container, "8083/tcp"])
-            && let Some(address) = published
-                .lines()
-                .find(|line| line.starts_with("127.0.0.1:"))
-        {
-            return Ok(address.to_owned());
+async fn wait_published_health_port(container: &str, timeout: Duration) -> Result<String> {
+    let captured = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
+    let fatal = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
+    match await_condition_async_every(timeout, Duration::from_millis(100), || {
+        let captured = std::sync::Arc::clone(&captured);
+        let fatal = std::sync::Arc::clone(&fatal);
+        let container = container.to_owned();
+        async move {
+            if let Ok(published) = docker_stdout(&["port", &container, "8083/tcp"]).await
+                && let Some(address) = published
+                    .lines()
+                    .find(|line| line.starts_with("127.0.0.1:"))
+            {
+                *captured.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
+                    Some(address.to_owned());
+                return true;
+            }
+            match container_is_running(&container).await {
+                Ok(true) => false,
+                Ok(false) => {
+                    *fatal.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
+                        Some(format!("{container} exited before publishing its health port"));
+                    true
+                }
+                Err(error) => {
+                    *fatal.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
+                        Some(error.to_string());
+                    true
+                }
+            }
         }
-        if !container_is_running(container)? {
-            let state = docker_stdout(&["inspect", "--format", "{{json .State}}", container])
-                .unwrap_or_else(|error| format!("unable to inspect state: {error:#}"));
-            let logs = docker_combined(&["logs", "--tail", "100", container])
-                .unwrap_or_else(|error| format!("unable to collect logs: {error:#}"));
-            bail!(
-                "{container} exited before publishing its health port; state={state}\nlogs:\n{logs}"
-            );
+    })
+    .await
+    {
+        Ok(()) => {
+            if let Some(error) = fatal
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+            {
+                let state = docker_stdout(&["inspect", "--format", "{{json .State}}", container])
+                    .await
+                    .unwrap_or_else(|error| format!("unable to inspect state: {error:#}"));
+                let logs = docker_combined(&["logs", "--tail", "100", container])
+                    .await
+                    .unwrap_or_else(|error| format!("unable to collect logs: {error:#}"));
+                bail!("{error}; state={state}\nlogs:\n{logs}");
+            }
+            captured
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+                .ok_or_else(|| anyhow::anyhow!("{container} published port wait succeeded without value"))
         }
-        if Instant::now() >= deadline {
-            bail!("{container} did not publish a health port within {timeout:?}");
-        }
-        thread::sleep(Duration::from_millis(100));
+        Err(_) => bail!("{container} did not publish a health port within {timeout:?}"),
     }
 }
 
@@ -928,45 +1110,50 @@ fn http_get(url: &str) -> Result<(u16, String)> {
     Ok((status, body.to_owned()))
 }
 
-fn docker_ok(args: &[&str]) -> Result<()> {
+async fn docker_ok(args: &[&str]) -> Result<()> {
     let mut command = Command::new("docker");
     command.args(args);
-    command_ok(&mut command, &format!("docker {}", args.join(" ")))
+    command_ok(&mut command, &format!("docker {}", args.join(" "))).await
 }
 
-fn docker_stdout(args: &[&str]) -> Result<String> {
+async fn docker_stdout(args: &[&str]) -> Result<String> {
     let mut command = Command::new("docker");
     command.args(args);
-    command_stdout(&mut command, &format!("docker {}", args.join(" ")))
+    command_stdout(&mut command, &format!("docker {}", args.join(" "))).await
 }
 
-fn docker_combined(args: &[&str]) -> Result<String> {
+async fn docker_combined(args: &[&str]) -> Result<String> {
     let mut command = Command::new("docker");
     command.args(args);
-    let output = command_output(&mut command, &format!("docker {}", args.join(" ")))?;
+    let output = command_output(&mut command, &format!("docker {}", args.join(" "))).await?;
     let mut combined = String::from_utf8_lossy(&output.stdout).into_owned();
     combined.push_str(&String::from_utf8_lossy(&output.stderr));
     Ok(combined)
 }
 
-fn container_is_running(container: &str) -> Result<bool> {
-    Ok(docker_stdout(&["inspect", "--format", "{{.State.Running}}", container])?.trim() == "true")
+async fn container_is_running(container: &str) -> Result<bool> {
+    Ok(
+        docker_stdout(&["inspect", "--format", "{{.State.Running}}", container])
+            .await?
+            .trim()
+            == "true",
+    )
 }
 
-fn command_ok(command: &mut Command, purpose: &str) -> Result<()> {
-    command_output(command, purpose).map(|_| ())
+async fn command_ok(command: &mut Command, purpose: &str) -> Result<()> {
+    command_output(command, purpose).await.map(|_| ())
 }
 
-fn command_stdout(command: &mut Command, purpose: &str) -> Result<String> {
-    let output = command_output(command, purpose)?;
+async fn command_stdout(command: &mut Command, purpose: &str) -> Result<String> {
+    let output = command_output(command, purpose).await?;
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
-fn command_output(command: &mut Command, purpose: &str) -> Result<Output> {
-    command_output_with_timeout(command, purpose, COMMAND_TIMEOUT)
+async fn command_output(command: &mut Command, purpose: &str) -> Result<Output> {
+    command_output_with_timeout(command, purpose, COMMAND_TIMEOUT).await
 }
 
-fn command_output_with_timeout(
+async fn command_output_with_timeout(
     command: &mut Command,
     purpose: &str,
     timeout: Duration,
@@ -986,20 +1173,35 @@ fn command_output_with_timeout(
         let mut bytes = Vec::new();
         stderr.read_to_end(&mut bytes).map(|_| bytes)
     });
-    let deadline = Instant::now() + timeout;
-    let status = loop {
-        if let Some(status) = child
-            .try_wait()
-            .with_context(|| format!("poll command to {purpose}"))?
+    let status = {
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(None::<std::process::ExitStatus>));
+        match await_pred_every(timeout, Duration::from_millis(100), || {
+            let captured = std::sync::Arc::clone(&captured);
+            async {
+                if let Some(status) = child
+                    .try_wait()
+                    .with_context(|| format!("poll command to {purpose}"))?
+                {
+                    *captured.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
+                        Some(status);
+                    return Ok(true);
+                }
+                Ok(false)
+            }
+        })
+        .await
         {
-            break status;
+            Ok(()) => captured
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+                .ok_or_else(|| anyhow::anyhow!("command wait succeeded without status"))?,
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                bail!("command to {purpose} exceeded {timeout:?}");
+            }
         }
-        if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            bail!("command to {purpose} exceeded {timeout:?}");
-        }
-        thread::sleep(Duration::from_millis(100));
     };
     let stdout = stdout_reader
         .join()

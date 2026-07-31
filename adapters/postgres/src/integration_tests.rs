@@ -30,6 +30,7 @@ use eventexec::{
 use futures::future::{BoxFuture, poll_fn};
 use identity::ports::AccountReactivationLifecycle as _;
 use std::future::Future;
+use testkit::{await_condition, await_condition_async, await_delay};
 
 use crate::{
     PgConfig, PgError, PgPassword, PgRuntimeDeps, PgSslMode, PgStore, ReconcileLeaseOutcome,
@@ -1066,10 +1067,8 @@ async fn readiness_degrades_when_active_projection_generation_drifts() -> TestRe
         deps.into_runtime_parts(std::time::Duration::from_millis(20));
     let sampler = sampler_factory.spawn(tokio_util::sync::CancellationToken::new());
 
-    tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        while readiness.snapshot() != crate::PoolReadiness::Ready {
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
+    await_condition(std::time::Duration::from_secs(2), || {
+        readiness.snapshot() == crate::PoolReadiness::Ready
     })
     .await
     .map_err(|_| "projection readiness did not become ready for the exact generation")?;
@@ -1082,10 +1081,8 @@ async fn readiness_degrades_when_active_projection_generation_drifts() -> TestRe
         &[],
     )
     .await?;
-    tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        while readiness.snapshot() != crate::PoolReadiness::Down {
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
+    await_condition(std::time::Duration::from_secs(2), || {
+        readiness.snapshot() == crate::PoolReadiness::Down
     })
     .await
     .map_err(|_| "projection registry drift did not degrade postgres readiness")?;
@@ -1364,7 +1361,11 @@ async fn revocation_store_satisfies_provider_neutral_conformance() -> TestResult
             })
         },
         |store, serial, scope| Box::pin(store.evidence(serial, scope)),
-        |_| Box::pin(tokio::time::sleep(std::time::Duration::from_secs(11))),
+        |_| {
+            Box::pin(async {
+                await_delay(std::time::Duration::from_secs(11)).await;
+            })
+        },
     )
     .await;
 
@@ -1456,24 +1457,22 @@ async fn revocation_store_commit_failure_is_redacted_rolled_back_and_quarantined
         .fetch_one(&mutator.pool)
         .await?
         .try_into()?;
-        let mut backend_gone = false;
-        for _ in 0..240 {
-            let active: i64 = sqlx::query_scalar(
-                "SELECT pg_catalog.count(*) FROM pg_catalog.pg_stat_activity WHERE pid = $1",
-            )
-            .bind(backend_pid)
-            .fetch_one(&mutator.pool)
-            .await?;
-            if active == 0 {
-                backend_gone = true;
-                break;
+        await_condition_async(std::time::Duration::from_secs(6), || {
+            let pool = &mutator.pool;
+            async move {
+                matches!(
+                    sqlx::query_scalar::<_, i64>(
+                        "SELECT pg_catalog.count(*) FROM pg_catalog.pg_stat_activity WHERE pid = $1",
+                    )
+                    .bind(backend_pid)
+                    .fetch_one(pool)
+                    .await,
+                    Ok(0)
+                )
             }
-            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-        }
-        assert!(
-            backend_gone,
-            "commit failure backend {backend_pid} must be quarantined"
-        );
+        })
+        .await
+        .map_err(|_| format!("commit failure backend {backend_pid} must be quarantined"))?;
 
         shutdown_runtime_deps(deps).await?;
         mutator.shutdown().await?;
@@ -12914,7 +12913,7 @@ async fn relay_budget_sql_boundary_is_fail_closed_and_claim_uses_configured_ttl(
     assert_eq!(maximum_claim.0, maximum_event_id);
     // The configured safety gap is exactly 2 ms. Cross it deliberately so the preflight result
     // proves the maximum-width interval arithmetic without depending on host scheduling latency.
-    tokio::time::sleep(Duration::from_millis(5)).await;
+    await_delay(Duration::from_millis(5)).await;
     let maximum_preflight: i16 =
         sqlx::query_scalar("SELECT rss_outbox_publish_preflight($1, $2::uuid, $3, $4, $5)")
             .bind(&maximum_claim.0)
@@ -12998,7 +12997,7 @@ async fn insufficient_preflight_budget_never_calls_publisher_behavior() -> TestR
     let (publisher, calls) = RecordingPublisher::always_ok();
     let outbox = make_pg_outbox_for_domain_with_budget(&store, &domain, publisher, budget);
     let claim = claim_entry_for_relay(&outbox, &event_id).await?;
-    tokio::time::sleep(Duration::from_millis(5)).await;
+    await_delay(Duration::from_millis(5)).await;
     let Err(error) = outbox.relay(claim).await else {
         return Err("insufficient preflight budget must fail before publish".into());
     };
@@ -13107,22 +13106,22 @@ async fn timed_out_owned_transaction_evicts_backend_and_recovers_a_max_two_pool(
         replacement_pid, old_pid,
         "the poisoned backend must not be reused"
     );
-    let mut old_backend_gone = false;
-    for _ in 0..20 {
-        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_stat_activity WHERE pid = $1")
-            .bind(old_pid)
-            .fetch_one(&owner.pool)
-            .await?;
-        if count == 0 {
-            old_backend_gone = true;
-            break;
+    await_condition_async(Duration::from_secs(1), || {
+        let pool = &owner.pool;
+        async move {
+            matches!(
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT count(*) FROM pg_stat_activity WHERE pid = $1"
+                )
+                .bind(old_pid)
+                .fetch_one(pool)
+                .await,
+                Ok(0)
+            )
         }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-    assert!(
-        old_backend_gone,
-        "close_on_drop must terminate the timed-out backend"
-    );
+    })
+    .await
+    .map_err(|_| "close_on_drop must terminate the timed-out backend")?;
 
     drop(replacement);
     drop(held);
@@ -13247,22 +13246,22 @@ async fn localtx_assert_backend_quarantined(
     );
     drop(replacement);
 
-    let mut old_backend_gone = false;
-    for _ in 0..240 {
-        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_stat_activity WHERE pid = $1")
-            .bind(unsafe_pid)
-            .fetch_one(&owner.pool)
-            .await?;
-        if count == 0 {
-            old_backend_gone = true;
-            break;
+    await_condition_async(Duration::from_secs(6), || {
+        let pool = &owner.pool;
+        async move {
+            matches!(
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT count(*) FROM pg_stat_activity WHERE pid = $1"
+                )
+                .bind(unsafe_pid)
+                .fetch_one(pool)
+                .await,
+                Ok(0)
+            )
         }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-    assert!(
-        old_backend_gone,
-        "{context}: close_on_drop did not terminate backend {unsafe_pid}"
-    );
+    })
+    .await
+    .map_err(|_| format!("{context}: close_on_drop did not terminate backend {unsafe_pid}"))?;
     Ok(())
 }
 
@@ -18100,21 +18099,18 @@ async fn t9d_each_settle_takes_expiry_clock_after_row_lock() -> TestResult {
         assert_eq!(locked, *event_id);
 
         let controller = async {
-            let mut blocked = false;
-            for _ in 0..100 {
-                let blockers: Vec<i32> = sqlx::query_scalar("SELECT pg_blocking_pids($1)")
-                    .bind(waiter_pid)
-                    .fetch_one(&store.pool)
-                    .await?;
-                if !blockers.is_empty() {
-                    blocked = true;
-                    break;
+            await_condition_async(std::time::Duration::from_secs(1), || {
+                let pool = &store.pool;
+                async move {
+                    sqlx::query_scalar::<_, Vec<i32>>("SELECT pg_blocking_pids($1)")
+                        .bind(waiter_pid)
+                        .fetch_one(pool)
+                        .await
+                        .is_ok_and(|blockers| !blockers.is_empty())
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-            if !blocked {
-                return Err::<(), TestError>("settle session must wait on the row lock".into());
-            }
+            })
+            .await
+            .map_err(|_| TestError::from("settle session must wait on the row lock"))?;
             let lease_is_fresh: bool = sqlx::query_scalar(
                 "SELECT lease_until > clock_timestamp() FROM outbox WHERE event_id = $1",
             )
@@ -18125,7 +18121,7 @@ async fn t9d_each_settle_takes_expiry_clock_after_row_lock() -> TestResult {
                 lease_is_fresh,
                 "settle {index} must begin waiting before its lease expires"
             );
-            tokio::time::sleep(std::time::Duration::from_millis(2_100)).await;
+            await_delay(std::time::Duration::from_millis(2_100)).await;
             blocker.commit().await?;
             Ok::<(), TestError>(())
         };
@@ -18427,7 +18423,7 @@ async fn t9e_expired_settlement_preflight_performs_no_pool_io() -> TestResult {
     let outbox = make_pg_outbox_for_domain_with_budget(&single, &domain, publisher, budget);
     let claim = claim_entry_for_relay(&outbox, &event_id).await?;
     let held = single.pool.acquire().await?;
-    tokio::time::sleep(Duration::from_millis(550)).await;
+    await_delay(Duration::from_millis(550)).await;
 
     let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
     let metrics_handle = recorder.handle();
@@ -18702,7 +18698,7 @@ async fn t9e_claim_pool_wait_does_not_consume_an_unminted_local_lease() -> TestR
 
     let claim = claim_entry_for_relay(&outbox, &event_id);
     let release = async move {
-        tokio::time::sleep(Duration::from_millis(1_200)).await;
+        await_delay(Duration::from_millis(1_200)).await;
         drop(held);
         Ok::<(), TestError>(())
     };
@@ -18746,7 +18742,7 @@ async fn t9e_claim_sql_delay_exhausts_local_budget_before_any_publish_io() -> Te
         .await?;
     let claim = claim_entry_for_relay(&outbox, &event_id);
     let release = async move {
-        tokio::time::sleep(Duration::from_millis(1_200)).await;
+        await_delay(Duration::from_millis(1_200)).await;
         blocker.commit().await?;
         Ok::<(), TestError>(())
     };
@@ -33690,12 +33686,9 @@ async fn probe_db_liveness_marks_hung_idle_backend_down() -> TestResult {
     let reader = PgStore::connect_verified_read(&constrained_config)
         .await?
         .store_arc();
-    for _ in 0..20 {
-        if reader.pool.num_idle() > 0 {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
+    await_condition(Duration::from_secs(1), || reader.pool.num_idle() > 0)
+        .await
+        .map_err(|_| "test precondition: the probe must begin with one idle backend")?;
     assert_eq!(
         reader.pool.num_idle(),
         1,
@@ -33746,8 +33739,12 @@ async fn sampling_loop_marks_ready_with_live_db() -> TestResult {
         Arc::clone(&health),
     ));
 
-    // 等待至少一轮 tick 完成（period=50ms，sleep 300ms 留足余量）。
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    // 等待至少一轮 tick 完成（period=50ms，有界轮询 Ready）。
+    await_condition(Duration::from_millis(300), || {
+        health.snapshot() == PoolReadiness::Ready
+    })
+    .await
+    .map_err(|_| "t51: 真实 DB 一 tick 后 health 应为 Ready")?;
 
     assert_eq!(
         health.snapshot(),
@@ -33795,7 +33792,11 @@ async fn sampling_loop_marks_down_when_reader_pool_is_closed() -> TestResult {
         Arc::clone(&health),
     ));
 
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    await_condition(Duration::from_millis(300), || {
+        health.snapshot() == PoolReadiness::Down
+    })
+    .await
+    .map_err(|_| "closed reader must dominate a healthy writer")?;
     assert_eq!(
         health.snapshot(),
         PoolReadiness::Down,
@@ -34320,7 +34321,7 @@ async fn credential_authenticate_holds_credential_while_waiting_for_security_loc
         match result {
             Ok(_) => {
                 probe.rollback().await?;
-                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                await_delay(std::time::Duration::from_millis(25)).await;
             }
             Err(error)
                 if error

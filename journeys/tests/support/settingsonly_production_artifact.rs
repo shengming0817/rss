@@ -7,7 +7,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll};
 use std::time::{Duration, UNIX_EPOCH};
@@ -28,9 +28,9 @@ use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode};
 use sqlx::{PgPool, Row as _};
 use testkit::{
     ContainerService, MinioTlsFixture, PgTlsFixture, PostgresTestLogin, RabbitTlsFixture,
-    RedisTlsFixture, VaultTlsFixture, integration_container_labels, minio_tls_archive,
-    postgres_tls, provision_postgres_test_logins_with_private_ca, rabbitmq_tls, redis_tls,
-    vault_tls,
+    RedisTlsFixture, VaultTlsFixture, await_condition_async_every,
+    integration_container_labels, minio_tls_archive, postgres_tls,
+    provision_postgres_test_logins_with_private_ca, rabbitmq_tls, redis_tls, vault_tls,
 };
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
@@ -67,6 +67,90 @@ const CONFIG_TRANSIT_KEY: &str = "settings-config-value";
 const DLX_HOT_TRANSIT_KEY: &str = "settings-dlx-hot";
 const DLX_ARCHIVE_TRANSIT_KEY: &str = "settings-dlx-archive";
 static UNIQUE: AtomicU64 = AtomicU64::new(0);
+
+
+/// Eventually：`Ok(true)` 成功，`Ok(false)` 继续轮询，`Err` 立即失败。
+async fn await_pred<F, Fut>(timeout: Duration, mut pred: F) -> anyhow::Result<()>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<bool>>,
+{
+    let fatal = Arc::new(Mutex::new(None::<anyhow::Error>));
+    match await_condition_async_every(timeout, POLL_INTERVAL, || {
+        let fut = pred();
+        let fatal = Arc::clone(&fatal);
+        async move {
+            match fut.await {
+                Ok(ready) => ready,
+                Err(error) => {
+                    *fatal
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(error);
+                    true
+                }
+            }
+        }
+    })
+    .await
+    {
+        Ok(()) => match fatal
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            Some(error) => Err(error),
+            None => Ok(()),
+        },
+        Err(_) => Err(anyhow::anyhow!(
+            "condition wait timed out after {timeout:?}"
+        )),
+    }
+}
+
+/// Eventually 并捕获值：`Ok(Some(v))` 成功，`Ok(None)` 继续，`Err` 立即失败。
+async fn await_value<T, F, Fut>(timeout: Duration, mut pred: F) -> anyhow::Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<Option<T>>>,
+{
+    let captured = Arc::new(Mutex::new(None::<anyhow::Result<T>>));
+    match await_condition_async_every(timeout, POLL_INTERVAL, || {
+        let fut = pred();
+        let captured = Arc::clone(&captured);
+        async move {
+            match fut.await {
+                Ok(Some(value)) => {
+                    *captured
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Ok(value));
+                    true
+                }
+                Ok(None) => false,
+                Err(error) => {
+                    *captured
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Err(error));
+                    true
+                }
+            }
+        }
+    })
+    .await
+    {
+        Ok(()) => captured
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .unwrap_or_else(|| {
+                Err(anyhow::anyhow!(
+                    "condition wait succeeded without a captured value"
+                ))
+            })?,
+        Err(_) => Err(anyhow::anyhow!(
+            "condition wait timed out after {timeout:?}"
+        )),
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum EvidenceCase {
@@ -508,20 +592,25 @@ impl Fixture {
             .health;
         let url = format!("http://{health}/health/v1/readyz");
         let evidence = self.evidence_id;
-        let process = self.process.as_mut().context("image process unavailable")?;
-        let body = tokio::time::timeout(TEST_TIMEOUT, async {
-            loop {
-                process.ensure_running()?;
-                if let Ok(response) = reqwest::get(&url).await
-                    && response.status().is_success()
-                {
-                    return response.bytes().await.context("read readiness response");
+        let body = {
+            let process = self.process.as_mut().context("image process unavailable")?;
+            await_value(TEST_TIMEOUT, || {
+                let url = url.clone();
+                async {
+                    process.ensure_running()?;
+                    let Ok(response) = reqwest::get(&url).await else {
+                        return Ok(None);
+                    };
+                    if !response.status().is_success() {
+                        return Ok(None);
+                    }
+                    let body = response.bytes().await.context("read readiness response")?;
+                    Ok(Some(body))
                 }
-                tokio::time::sleep(POLL_INTERVAL).await;
-            }
-        })
-        .await
-        .with_context(|| format!("{evidence}: readiness timed out; {}", process.diagnostics()))??;
+            })
+            .await
+            .with_context(|| format!("{evidence}: readiness timed out; {}", process.diagnostics()))?
+        };
         let response: Readyz =
             serde_json::from_slice(&body).context("decode readiness response")?;
         ensure!(
@@ -760,12 +849,14 @@ impl Fixture {
         event_id: &str,
         wanted: BrokerDelivery,
     ) -> anyhow::Result<()> {
-        let mut observed = "unobserved".to_owned();
-        tokio::time::timeout(TEST_TIMEOUT, async {
-            loop {
+        let observed = Arc::new(Mutex::new("unobserved".to_owned()));
+        await_pred(TEST_TIMEOUT, || {
+            let observed = Arc::clone(&observed);
+            let rabbit = self.rabbit_container.clone();
+            async move {
                 let output = docker_output([
                     "exec",
-                    &self.rabbit_container,
+                    &rabbit,
                     "rabbitmqctl",
                     "-q",
                     "list_queues",
@@ -795,60 +886,72 @@ impl Fixture {
                     .get("messages_unacknowledged")
                     .and_then(Value::as_u64)
                     .context("RabbitMQ omitted messages_unacknowledged")?;
-                observed = format!("ready={ready}, unacked={unacked}");
-                let matched = match wanted {
+                *observed
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                    format!("ready={ready}, unacked={unacked}");
+                Ok(match wanted {
                     BrokerDelivery::Unacked => unacked == 1,
                     BrokerDelivery::Ready => ready == 1 && unacked == 0,
                     BrokerDelivery::Empty => ready == 0 && unacked == 0,
-                };
-                if matched {
-                    return anyhow::Ok(());
-                }
-                tokio::time::sleep(POLL_INTERVAL).await;
+                })
             }
         })
         .await
         .with_context(|| {
+            let observed = observed
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
             format!(
                 "{}: broker delivery barrier timed out for {event_id}; observed={observed}",
                 self.evidence_id
             )
-        })??;
+        })?;
         Ok(())
     }
 
     async fn wait_db(&mut self, event_id: &str, wanted: &str) -> anyhow::Result<()> {
         let pool = self.pool.clone();
         let evidence = self.evidence_id;
+        let last = Arc::new(Mutex::new("missing".to_owned()));
         let process = self.process.as_mut().context("image process unavailable")?;
-        let mut last = "missing".to_owned();
-        tokio::time::timeout(TEST_TIMEOUT, async {
-            loop {
+        await_pred(TEST_TIMEOUT, || {
+            let pool = pool.clone();
+            let last = Arc::clone(&last);
+            let wanted = wanted.to_owned();
+            let event_id = event_id.to_owned();
+            async {
                 process.ensure_running()?;
                 let row = sqlx::query(
                     "SELECT status, receive_count FROM inbox_receipts WHERE event_id = $1",
                 )
-                .bind(event_id)
+                .bind(&event_id)
                 .fetch_optional(&pool)
                 .await?;
                 if let Some(row) = row {
                     let status: String = row.try_get("status")?;
                     let count: i32 = row.try_get("receive_count")?;
-                    last = format!("status={status}, receive_count={count}");
-                    if status == wanted {
-                        return anyhow::Ok(());
-                    }
+                    *last
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                        format!("status={status}, receive_count={count}");
+                    return Ok(status == wanted);
                 }
-                tokio::time::sleep(POLL_INTERVAL).await;
+                Ok(false)
             }
         })
         .await
         .with_context(|| {
+            let last = last
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
             format!(
                 "{evidence}: inbox wait timed out; expected={wanted}; observed={last}; {}",
                 process.diagnostics()
             )
-        })??;
+        })?;
         Ok(())
     }
 
@@ -951,21 +1054,16 @@ impl Fixture {
     }
 
     async fn wait_db_after_signal(&self, event_id: &str, wanted: &str) -> anyhow::Result<()> {
-        tokio::time::timeout(TEST_TIMEOUT, async {
-            loop {
-                let status: Option<String> =
-                    sqlx::query_scalar("SELECT status FROM inbox_receipts WHERE event_id = $1")
-                        .bind(event_id)
-                        .fetch_optional(&self.pool)
-                        .await?;
-                if status.as_deref() == Some(wanted) {
-                    return anyhow::Ok(());
-                }
-                tokio::time::sleep(POLL_INTERVAL).await;
-            }
+        await_pred(TEST_TIMEOUT, || async {
+            let status: Option<String> =
+                sqlx::query_scalar("SELECT status FROM inbox_receipts WHERE event_id = $1")
+                    .bind(event_id)
+                    .fetch_optional(&self.pool)
+                    .await?;
+            Ok(status.as_deref() == Some(wanted))
         })
         .await
-        .context("inflight transaction did not complete during drain")??;
+        .context("inflight transaction did not complete during drain")?;
         Ok(())
     }
 
@@ -1136,39 +1234,27 @@ fn event_id(key: &str) -> String {
 }
 
 async fn wait_listener_closed(client: &reqwest::Client, address: SocketAddr) -> anyhow::Result<()> {
-    tokio::time::timeout(TEST_TIMEOUT, async {
-        loop {
-            if client
-                .get(format!("https://{address}/"))
-                .send()
-                .await
-                .is_err()
-            {
-                return;
-            }
-            tokio::time::sleep(POLL_INTERVAL).await;
-        }
+    await_pred(TEST_TIMEOUT, || async {
+        Ok(client
+            .get(format!("https://{address}/"))
+            .send()
+            .await
+            .is_err())
     })
     .await
     .with_context(|| format!("listener {address} did not stop accepting"))
 }
 
 async fn wait_frontends_unreachable(frontends: FrontendAddresses) -> anyhow::Result<()> {
-    tokio::time::timeout(TEST_TIMEOUT, async {
-        loop {
-            if futures::future::join_all([
-                TcpStream::connect(frontends.primary),
-                TcpStream::connect(frontends.admin),
-                TcpStream::connect(frontends.health),
-            ])
-            .await
-            .into_iter()
-            .all(|connection| connection.is_err())
-            {
-                return;
-            }
-            tokio::time::sleep(POLL_INTERVAL).await;
-        }
+    await_pred(TEST_TIMEOUT, || async {
+        Ok(futures::future::join_all([
+            TcpStream::connect(frontends.primary),
+            TcpStream::connect(frontends.admin),
+            TcpStream::connect(frontends.health),
+        ])
+        .await
+        .into_iter()
+        .all(|connection| connection.is_err()))
     })
     .await
     .context("published runtime ports were not released after SIGKILL")
@@ -2110,22 +2196,25 @@ impl Default for FrontendAddresses {
 
 async fn published_port(name: &str, port: u16) -> anyhow::Result<SocketAddr> {
     let key = format!("{port}/tcp");
-    tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            if let Ok(output) = docker_output(["port", name, &key]).await {
-                let rendered = String::from_utf8_lossy(&output.stdout);
-                if let Some(value) = rendered.lines().next()
-                    && let Some(host_port) = value.rsplit(':').next()
-                    && let Ok(host_port) = host_port.parse::<u16>()
-                {
-                    return anyhow::Ok(SocketAddr::from((Ipv4Addr::LOCALHOST, host_port)));
-                }
+    await_value(Duration::from_secs(10), || {
+        let key = key.clone();
+        let name = name.to_owned();
+        async move {
+            let Ok(output) = docker_output(["port", &name, &key]).await else {
+                return Ok(None);
+            };
+            let rendered = String::from_utf8_lossy(&output.stdout);
+            if let Some(value) = rendered.lines().next()
+                && let Some(host_port) = value.rsplit(':').next()
+                && let Ok(host_port) = host_port.parse::<u16>()
+            {
+                return Ok(Some(SocketAddr::from((Ipv4Addr::LOCALHOST, host_port))));
             }
-            tokio::time::sleep(POLL_INTERVAL).await;
+            Ok(None)
         }
     })
     .await
-    .context("frontend relay port was not published")?
+    .context("frontend relay port was not published")
 }
 
 struct ImageProcess {
@@ -2141,26 +2230,23 @@ impl ImageProcess {
     }
 
     async fn wait_started(&self) -> anyhow::Result<()> {
-        tokio::time::timeout(Duration::from_secs(15), async {
-            loop {
-                if let Ok(output) = docker_output([
-                    "inspect",
-                    "--type",
-                    "container",
-                    "--format",
-                    "{{.State.Running}}",
-                    &self.name,
-                ])
-                .await
-                    && String::from_utf8_lossy(&output.stdout).trim() == "true"
-                {
-                    return anyhow::Ok(());
-                }
-                tokio::time::sleep(POLL_INTERVAL).await;
-            }
+        await_pred(Duration::from_secs(15), || async {
+            let Ok(output) = docker_output([
+                "inspect",
+                "--type",
+                "container",
+                "--format",
+                "{{.State.Running}}",
+                &self.name,
+            ])
+            .await
+            else {
+                return Ok(false);
+            };
+            Ok(String::from_utf8_lossy(&output.stdout).trim() == "true")
         })
         .await
-        .with_context(|| format!("image container did not start; {}", self.diagnostics()))??;
+        .with_context(|| format!("image container did not start; {}", self.diagnostics()))?;
         Ok(())
     }
 
@@ -2186,16 +2272,11 @@ impl ImageProcess {
 
     async fn wait(&mut self) -> anyhow::Result<ExitStatus> {
         let child = self.child.as_mut().context("image process reaped")?;
-        let status = tokio::time::timeout(TEST_TIMEOUT, async {
-            loop {
-                if let Some(status) = child.try_wait()? {
-                    return anyhow::Ok(status);
-                }
-                tokio::time::sleep(POLL_INTERVAL).await;
-            }
+        let status = await_value(TEST_TIMEOUT, || async {
+            Ok(child.try_wait()?)
         })
         .await
-        .with_context(|| format!("image did not exit; {}", self.diagnostics()))??;
+        .with_context(|| format!("image did not exit; {}", self.diagnostics()))?;
         Ok(status)
     }
 
@@ -2346,28 +2427,32 @@ impl InboxBarrier {
     }
 
     async fn wait_for_waiter(&self, pool: &PgPool) -> anyhow::Result<()> {
-        let mut observed = 0_i64;
-        tokio::time::timeout(TEST_TIMEOUT, async {
-            loop {
-                observed = sqlx::query_scalar(
+        let observed = Arc::new(Mutex::new(0_i64));
+        await_pred(TEST_TIMEOUT, || {
+            let observed = Arc::clone(&observed);
+            async {
+                let count: i64 = sqlx::query_scalar(
                     "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND classid = (($1::bigint >> 32) & 4294967295)::oid AND objid = ($1::bigint & 4294967295)::oid AND NOT granted",
                 )
                 .bind(self.lock_key)
                 .fetch_one(pool)
                 .await?;
-                if observed == 1 {
-                    return anyhow::Ok(());
-                }
-                tokio::time::sleep(POLL_INTERVAL).await;
+                *observed
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = count;
+                Ok(count == 1)
             }
         })
         .await
         .with_context(|| {
+            let observed = *observed
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             format!(
                 "advisory-lock waiter barrier timed out for key={}; observed_waiters={observed}",
                 self.lock_key
             )
-        })??;
+        })?;
         Ok(())
     }
 
@@ -2848,16 +2933,10 @@ impl DockerUdsBridge {
             volume,
             mount,
         };
-        tokio::time::timeout(Duration::from_secs(10), async {
-            loop {
-                if docker_output(["exec", &bridge.name, "test", "-S", WORKLOAD_SOCKET])
-                    .await
-                    .is_ok()
-                {
-                    return;
-                }
-                tokio::time::sleep(POLL_INTERVAL).await;
-            }
+        await_pred(Duration::from_secs(10), || async {
+            Ok(docker_output(["exec", &bridge.name, "test", "-S", WORKLOAD_SOCKET])
+                .await
+                .is_ok())
         })
         .await
         .context("authenticated SPIFFE bridge did not create its private socket")?;

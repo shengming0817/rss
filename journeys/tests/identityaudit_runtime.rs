@@ -12,6 +12,7 @@ use primitives::MacKey;
 use secure::{PasswordHash, RawPassword};
 use sqlx::Row as _;
 use sqlx::postgres::{PgConnectOptions, PgPool, PgPoolOptions, PgSslMode};
+use testkit::await_condition_async;
 
 #[path = "support/identityaudit_fixture.rs"]
 mod identityaudit_fixture;
@@ -122,9 +123,11 @@ async fn assert_no_projection_capture(pool: &PgPool) -> Result<()> {
 }
 
 async fn wait_for_auth_audit(pool: &PgPool) -> Result<()> {
-    tokio::time::timeout(WAIT_TIMEOUT, async {
-        loop {
-            let count: i64 = sqlx::query_scalar(
+    let last_err = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
+    match await_condition_async(WAIT_TIMEOUT, || {
+        let last_err = std::sync::Arc::clone(&last_err);
+        async move {
+            match sqlx::query_scalar::<_, i64>(
                 "SELECT count(*) FROM auth_audit_events \
                  WHERE tenant_context = $1::uuid \
                    AND resource_kind = 'http_route' \
@@ -134,22 +137,45 @@ async fn wait_for_auth_audit(pool: &PgPool) -> Result<()> {
             )
             .bind(identityaudit_fixture::tenant())
             .fetch_one(pool)
-            .await?;
-            if count == 1 {
-                return Ok::<_, anyhow::Error>(());
+            .await
+            {
+                Ok(1) => true,
+                Ok(_) => false,
+                Err(error) => {
+                    *last_err
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                        Some(error.to_string());
+                    false
+                }
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
         }
     })
     .await
-    .context("auth audit did not persist within twenty seconds")??;
-    Ok(())
+    {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            let last_err = last_err
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            Err(anyhow::anyhow!(
+                "auth audit did not persist within twenty seconds: {error}; last_err={last_err:?}"
+            ))
+        }
+    }
 }
 
 async fn wait_for_session_created_hash_chain(pool: &PgPool, login: &LoginReceipt) -> Result<()> {
-    let rows = tokio::time::timeout(WAIT_TIMEOUT, async {
-        loop {
-            let rows = sqlx::query(
+    let rows_cell = std::sync::Arc::new(std::sync::Mutex::new(None::<Vec<sqlx::postgres::PgRow>>));
+    let last_err = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
+    let session_id = login.session_id().to_owned();
+    match await_condition_async(WAIT_TIMEOUT, || {
+        let rows_cell = std::sync::Arc::clone(&rows_cell);
+        let last_err = std::sync::Arc::clone(&last_err);
+        let session_id = session_id.clone();
+        async move {
+            match sqlx::query(
                 "SELECT seq, prev_hash, entry_hash, actor::text AS actor, actor_kind, \
                         tenant_id::text AS tenant_id, action, resource_kind, resource_id, outcome, \
                         recorded_at_secs, recorded_at_nanos \
@@ -157,18 +183,50 @@ async fn wait_for_session_created_hash_chain(pool: &PgPool, login: &LoginReceipt
             )
             .bind(identityaudit_fixture::tenant())
             .fetch_all(pool)
-            .await?;
-            if rows.iter().any(|row| {
-                row.try_get::<String, _>("resource_id")
-                    .is_ok_and(|resource| resource == login.session_id())
-            }) {
-                return Ok::<_, anyhow::Error>(rows);
+            .await
+            {
+                Ok(rows) => {
+                    let matched = rows.iter().any(|row| {
+                        row.try_get::<String, _>("resource_id")
+                            .is_ok_and(|resource| resource == session_id)
+                    });
+                    if matched {
+                        *rows_cell
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(rows);
+                        true
+                    } else {
+                        false
+                    }
+                }
+                Err(error) => {
+                    *last_err
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                        Some(error.to_string());
+                    false
+                }
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
         }
     })
     .await
-    .context("session-created audit chain did not persist within twenty seconds")??;
+    {
+        Ok(()) => {}
+        Err(error) => {
+            let last_err = last_err
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            return Err(anyhow::anyhow!(
+                "session-created audit chain did not persist within twenty seconds: {error}; last_err={last_err:?}"
+            ));
+        }
+    }
+    let rows = rows_cell
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()
+        .context("session-created audit chain wait completed without rows")?;
 
     let mut entries = Vec::with_capacity(rows.len());
     for row in rows {

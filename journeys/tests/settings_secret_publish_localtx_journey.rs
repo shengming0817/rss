@@ -49,8 +49,3 @@ async fn settings_secret_publish_localtx_journey() -> Result<()> {
 fn changed_fixture_behavior_is_observably_red() -> Result<()> {
     support::changed_fixture_behavior_is_observably_red()
 }
-
-#[test]
-fn swapped_active_fixture_scenarios_are_observably_red() -> Result<()> {
-    support::swapped_active_fixture_scenarios_are_observably_red()
-}

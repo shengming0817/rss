@@ -16,6 +16,8 @@ pub(crate) const OUTBOX_SAMPLER: &str = "settingsonly_outbox_sampler";
 pub(crate) const OUTBOX_SWEEPER: &str = "settingsonly_outbox_sweeper";
 
 /// Exact required-probe closure of the production SettingsOnly assembly.
+/// Compiled only for unit tests and the `test-support` façade (artifact acceptance).
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) const PRODUCTION_REQUIRED_PROBES: [&str; 16] = [
     settings_composition::CONFIGS_READY_PROBE_NAME,
     settings_composition::KEYPROVIDER_READY_PROBE_NAME,

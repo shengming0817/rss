@@ -294,16 +294,13 @@ fn runner_config() -> ProjectionRunnerConfig {
 }
 
 async fn wait_for_checkpoint(store: &SharedCheckpointStore, expected: u64) -> bool {
-    for _ in 0..100 {
-        if store
+    testkit::await_condition(Duration::from_secs(2), || {
+        store
             .current()
             .is_some_and(|checkpoint| checkpoint.offset == Lsn::new(expected))
-        {
-            return true;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    false
+    })
+    .await
+    .is_ok()
 }
 
 fn record(seq: u64) -> ProjectionEventRecord {

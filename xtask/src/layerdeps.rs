@@ -35,11 +35,12 @@
 //!   `[dev-dependencies]` 消费，禁进生产 shipped 依赖图。本 lint 只扫 shipped 依赖表，故**任一**指向
 //!   test-support 成员的内部边即 shipped 误用（dev-dep 边压根不入 `edges`）；补 `allows` 矩阵盲区
 //!   （`allows(Domain,Service)=true` 不阻止域 crate 误把 testkit 放进 `[dependencies]`）。
-//! INVARIANT: LAYER-DEPS-09 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::red_runctx_testsupport_in_dependencies|tests::red_testsupport_features_follow_direct_and_workspace_package_aliases", anti_vacuity = "tests::green_runctx_without_testsupport|tests::real_workspace_green" }—— scoped construction 的
+//! INVARIANT: LAYER-DEPS-09 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::red_runctx_testsupport_in_dependencies|tests::red_testsupport_features_follow_direct_and_workspace_package_aliases|tests::red_bootstrap_testsupport_in_dependencies", anti_vacuity = "tests::green_runctx_without_testsupport|tests::real_workspace_green" }—— scoped construction 的
 //!   `test-support` **feature** 只准经 `[dev-dependencies]` 启用，禁在任一 shipped 依赖表
 //!   （`[dependencies]`/`[build-dependencies]`/`[target.*]`）启用。覆盖 `runctx/test-support`
-//!   （构造 `AppCtx`）以及 `identity`/`settings`/`audit` 的 `TenantRepoScope::for_test`；生产构建启用即可伪造
-//!   tenant scope，绕过 typed funnel（#1105 review C-3 + #1594 review F6：Soft→Medium 机器门）。
+//!   （构造 `AppCtx`）、`identity`/`settings`/`audit` 的 `TenantRepoScope::for_test`、以及
+//!   `bootstrap/test-support`（`forge_topology_for_test`）；生产构建启用即可伪造 tenant scope /
+//!   事件拓扑，绕过 typed funnel（#1105 review C-3 + #1594 review F6：Soft→Medium 机器门）。
 //! INVARIANT: LAYER-DEPS-10 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::test_support_internal_dependencies_red_shipped_edges", anti_vacuity = "tests::test_support_internal_dependencies_green_no_shipped_edge" }—— test-support 库（`layers::TEST_SUPPORT_CRATES`）的 shipped
 //!   出边只能指向外部 crate；任一指向 workspace 内部成员的出边均失败，保持 testkit 为零 production-adapter、
 //!   零 workspace 依赖的独立测试工具。与 LAYER-DEPS-08 的 shipped 入边约束正交，不改变其语义。
@@ -337,10 +338,32 @@ fn bootstrap_generated_surface_allowed(path: &str) -> bool {
 
 fn has_test_attr(attrs: &[syn::Attribute]) -> bool {
     attrs.iter().any(|attr| {
-        attr.path().is_ident("test")
-            || (attr.path().is_ident("cfg")
-                && attr.meta.to_token_stream().to_string().contains("test"))
+        if attr.path().is_ident("test") {
+            return true;
+        }
+        if !attr.path().is_ident("cfg") {
+            return false;
+        }
+        attr.parse_args::<syn::Meta>()
+            .is_ok_and(|meta| cfg_predicate_includes_test(&meta))
     })
+}
+
+/// True only for the bare `test` cfg option (`cfg(test)`, `cfg(any(..., test, ...))`,
+/// `cfg(all(test, ...))`). Feature names that merely contain `"test"` (e.g.
+/// `feature = "test-support"`) must not match — substring scans false-positive those.
+fn cfg_predicate_includes_test(meta: &syn::Meta) -> bool {
+    use syn::parse::Parser as _;
+    match meta {
+        syn::Meta::Path(path) => path.is_ident("test"),
+        syn::Meta::List(list) if list.path.is_ident("any") || list.path.is_ident("all") => {
+            syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated
+                .parse2(list.tokens.clone())
+                .is_ok_and(|nested| nested.iter().any(cfg_predicate_includes_test))
+        }
+        // `not(test)` is production-facing; never treat as test-only skip.
+        _ => false,
+    }
 }
 
 /// 规则 (a)(b)(c)(d) + LAYER-DEPS-05：分类覆盖 + 每条内部边对照 `layers::allows`。
@@ -937,6 +960,10 @@ const SHIPPED_TEST_SUPPORT_FEATURE_BANS: &[(&str, &str)] = &[
     (
         "audit",
         "audit::ports::TenantRepoScope::for_test bypasses authenticated tenant scope minting",
+    ),
+    (
+        "bootstrap",
+        "SubscriberBinding::forge_topology_for_test forges event topology; must stay [dev-dependencies]-only",
     ),
 ];
 
@@ -1602,9 +1629,30 @@ mod tests {
                     generated::event::identity_v1::session_created::subscribe_audit();
                 }
             }
+
+            #[cfg(any(test, unix))]
+            fn also_test_gated() {
+                generated::event::identity_v1::session_created::subscribe_audit();
+            }
             "#,
         );
         assert!(findings.is_empty(), "{findings:#?}");
+    }
+
+    /// 红：`feature = "test-support"` 不是 `cfg(test)`——不得被 `has_test_attr` 误跳过。
+    #[test]
+    fn bootstrap_generated_registrar_surface_scans_test_support_feature_cfg() {
+        let findings = scan_bootstrap_generated_surface(
+            Path::new("crates/bootstrap/src/registry.rs"),
+            r#"
+            #[cfg(feature = "test-support")]
+            fn forge_helper() {
+                generated::event::identity_v1::session_created::subscribe_audit();
+            }
+            "#,
+        );
+        assert_eq!(findings.len(), 1, "{findings:#?}");
+        assert_eq!(findings[0].rule, Rule::GeneratedBootstrapSurface);
     }
 
     /// RUNTIMEEXEC-LAYER-01 anti-vacuity：assembly Root 可消费 runtimeexec，runtimeexec 可向批准下层出边。
@@ -1787,7 +1835,7 @@ identity_alias = { package = "identity", version = "1", features = ["test-suppor
         Ok(())
     }
 
-    /// 红：domain scope constructors 的 `test-support` 也不得经 shipped 依赖启用。
+    /// 红：domain / bootstrap scoped-construction 的 `test-support` 也不得经 shipped 依赖启用。
     #[test]
     fn red_domain_scope_testsupport_in_dependencies() {
         let findings = scan_shipped_testsupport_features(&[
@@ -1804,12 +1852,35 @@ identity_alias = { package = "identity", version = "1", features = ["test-suppor
                 &["test-support"],
             ),
             sdep("bad-audit", "[dependencies]", "audit", &["test-support"]),
+            sdep(
+                "bad-bootstrap",
+                "[dependencies]",
+                "bootstrap",
+                &["test-support"],
+            ),
         ]);
-        assert_eq!(findings.len(), 3, "{findings:?}");
+        assert_eq!(findings.len(), 4, "{findings:?}");
         assert!(
             findings
                 .iter()
                 .all(|finding| finding.rule == Rule::TestSupportFeatureShipped),
+            "{findings:?}"
+        );
+    }
+
+    /// 红：`bootstrap/test-support` 单独条目（forge_topology_for_test）须 flagged。
+    #[test]
+    fn red_bootstrap_testsupport_in_dependencies() {
+        let findings = scan_shipped_testsupport_features(&[sdep(
+            "runtime",
+            "[dependencies]",
+            "bootstrap",
+            &["test-support"],
+        )]);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].rule, Rule::TestSupportFeatureShipped);
+        assert!(
+            findings[0].detail.contains("bootstrap"),
             "{findings:?}"
         );
     }
@@ -1839,7 +1910,7 @@ identity_alias = { package = "identity", version = "1", features = ["test-suppor
         assert!(findings.is_empty(), "{findings:?}");
     }
 
-    /// 绿（specificity）：别的 crate 有名为 `test-support` 的 feature（非 runctx）⇒ 不误报（只守 runctx）。
+    /// 绿（specificity）：别的 crate 有名为 `test-support` 的 feature（非 ban list）⇒ 不误报。
     #[test]
     fn green_testsupport_feature_on_non_runctx_dep() {
         let findings = scan_shipped_testsupport_features(&[sdep(

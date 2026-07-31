@@ -15,6 +15,7 @@ use axum::extract::{Path as AxumPath, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::post;
 use base64::Engine as _;
+use testkit::{await_condition, await_condition_async};
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
@@ -594,30 +595,65 @@ impl RuntimeFixture {
     }
 
     pub async fn wait_until_ready(&mut self) -> anyhow::Result<()> {
-        let readiness = tokio::time::timeout(TEST_TIMEOUT, async {
-            loop {
-                self.ensure_child_running()?;
-                if self
-                    .client
-                    .get(format!("http://{}{READY_PATH}", self.health))
+        let fatal = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
+        match await_condition_async(TEST_TIMEOUT, || {
+            let child_check = self.ensure_child_running();
+            let client = self.client.clone();
+            let health = self.health;
+            let primary = self.primary;
+            let admin = self.admin;
+            let fatal = std::sync::Arc::clone(&fatal);
+            async move {
+                if let Err(error) = child_check {
+                    *fatal
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                        Some(error.to_string());
+                    return true;
+                }
+                if !client
+                    .get(format!("http://{health}{READY_PATH}"))
                     .send()
                     .await
                     .is_ok_and(|response| response.status() == StatusCode::OK)
                 {
-                    tokio::net::TcpStream::connect(self.primary)
-                        .await
-                        .context("connect ready Primary listener")?;
-                    tokio::net::TcpStream::connect(self.admin)
-                        .await
-                        .context("connect ready Admin listener")?;
-                    return Ok::<_, anyhow::Error>(());
+                    return false;
                 }
-                tokio::time::sleep(Duration::from_millis(100)).await;
+                if let Err(error) = tokio::net::TcpStream::connect(primary)
+                    .await
+                    .context("connect ready Primary listener")
+                {
+                    *fatal
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                        Some(error.to_string());
+                    return true;
+                }
+                if let Err(error) = tokio::net::TcpStream::connect(admin)
+                    .await
+                    .context("connect ready Admin listener")
+                {
+                    *fatal
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                        Some(error.to_string());
+                    return true;
+                }
+                true
             }
         })
-        .await;
-        match readiness {
-            Ok(result) => result,
+        .await
+        {
+            Ok(()) => {
+                if let Some(error) = fatal
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take()
+                {
+                    anyhow::bail!("identityaudit readiness failed: {error}");
+                }
+                Ok(())
+            }
             Err(_) => anyhow::bail!(
                 "identityaudit did not become ready: {}",
                 self.logs.diagnostics()
@@ -740,16 +776,21 @@ impl RuntimeFixture {
 
     pub async fn wait_for_drain(&mut self) -> anyhow::Result<()> {
         let mut child = self.child.take().context("identityaudit child is absent")?;
-        let status = tokio::time::timeout(TEST_TIMEOUT, async {
-            loop {
-                if let Some(status) = child.try_wait().context("poll identityaudit child")? {
-                    return Ok::<_, anyhow::Error>(status);
-                }
-                tokio::time::sleep(Duration::from_millis(50)).await;
+        let mut status = None;
+        await_condition(TEST_TIMEOUT, || match child.try_wait() {
+            Ok(Some(exit)) => {
+                status = Some(Ok(exit));
+                true
+            }
+            Ok(None) => false,
+            Err(error) => {
+                status = Some(Err(error).context("poll identityaudit child"));
+                true
             }
         })
         .await
-        .context("identityaudit did not drain after SIGTERM")??;
+        .context("identityaudit did not drain after SIGTERM")?;
+        let status = status.context("identityaudit child wait completed without status")??;
         ensure!(
             status.success(),
             "identityaudit exited with {status}: {}",

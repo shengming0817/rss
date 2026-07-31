@@ -1898,6 +1898,18 @@ mod tests {
         TriggerError, bump_attempts,
     };
 
+    /// `start_paused` 下用步进 `advance` 代替裸 sleep：每步先 `yield_now` 让 spawn 登记 timer。
+    async fn advance_paused(total: Duration) {
+        const STEP: Duration = Duration::from_millis(50);
+        let mut left = total;
+        while !left.is_zero() {
+            tokio::task::yield_now().await;
+            let step = STEP.min(left);
+            tokio::time::advance(step).await;
+            left = left.saturating_sub(step);
+        }
+    }
+
     #[test]
     fn schedule_error_classification_is_closed_and_redacted() {
         let infrastructure =
@@ -2672,7 +2684,7 @@ mod tests {
         control.pause();
         let handle = tokio::spawn(worker.run(token));
 
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        advance_paused(Duration::from_secs(1)).await;
         assert_eq!(
             store.state.lock().unwrap_or_else(|e| e.into_inner()).claims,
             0,
@@ -2680,7 +2692,7 @@ mod tests {
         );
 
         control.resume();
-        tokio::time::sleep(Duration::from_secs(10)).await;
+        advance_paused(Duration::from_secs(10)).await;
         handle.await.expect("worker exits after fake result record");
 
         let state = store.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -2712,7 +2724,7 @@ mod tests {
         .build();
 
         let handle = tokio::spawn(worker.run(token));
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        advance_paused(Duration::from_secs(1)).await;
         handle.await.expect("worker exits after fake result record");
 
         let state = store.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -2869,7 +2881,7 @@ mod tests {
         .build();
 
         let handle = tokio::spawn(worker.run(token.clone()));
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        advance_paused(Duration::from_secs(1)).await;
         token.cancel();
         handle.await.expect("worker exits after cancellation");
 
@@ -2908,7 +2920,7 @@ mod tests {
         .build();
 
         let handle = tokio::spawn(worker.run(token));
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        advance_paused(Duration::from_secs(2)).await;
         handle.await.expect("worker exits after lease loss");
 
         let state = store.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -3017,7 +3029,7 @@ mod tests {
         .build();
 
         let handle = tokio::spawn(worker.run(token));
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        advance_paused(Duration::from_secs(1)).await;
         handle
             .await
             .expect("worker exits after first result cancels token");
@@ -3299,9 +3311,9 @@ mod tests {
 
     /// 验证：run_not_leader_never_dispatches
     ///
-    /// start_paused 使 tokio 时间不自动推进；sleep(60s) 在单线程 executor 下不引入真实墙钟等待——
-    /// advance 仅由此 test 驱动，NeverLeader 返回 Ok(None) 使 leader_gated 做 LEASE_TTL(15s) 的
-    /// wait_or_cancel，每次 tick 推进 60s 足以让 loop 经历多轮 standby 而不 dispatch。
+    /// start_paused 使 tokio 时间不自动推进；`advance(60s)` 由本 test 显式驱动虚拟时间——
+    /// NeverLeader 返回 Ok(None) 使 leader_gated 做 LEASE_TTL(15s) 的 wait_or_cancel，
+    /// 每次 tick 推进 60s 足以让 loop 经历多轮 standby 而不 dispatch。
     #[tokio::test(start_paused = true)]
     async fn run_not_leader_never_dispatches() {
         let token = CancellationToken::new();
@@ -3309,9 +3321,9 @@ mod tests {
         let calls = Arc::clone(&reconciler.calls);
         let loop_ = Builder::new(reconciler, Tenancy::single_tenant(), trig(10)).build();
         // 非 leader：跑一会儿后取消，应零 dispatch（leader-gated）。
-        // start_paused 单线程下确定性：sleep 不消耗真实时间，cancel 后 loop 必然在 wait_or_cancel 退出。
+        // start_paused 单线程下确定性：advance 推进虚拟时间，cancel 后 loop 必然在 wait_or_cancel 退出。
         let handle = tokio::spawn(loop_.run_with_leader(Arc::new(NeverLeader), token.clone()));
-        tokio::time::sleep(Duration::from_secs(60)).await;
+        advance_paused(Duration::from_secs(60)).await;
         token.cancel();
         let _ = handle.await;
         assert_eq!(calls.load(Ordering::SeqCst), 0, "非 leader 不得 dispatch");
@@ -3420,8 +3432,8 @@ mod tests {
         let token = CancellationToken::new();
         let loop_ = Builder::new(reconciler, Tenancy::single_tenant(), trig(10)).build();
         let handle = tokio::spawn(loop_.run(token.clone()));
-        // 让 spawn 的 loop 跑到首 tick → 进入在途 pending reconcile（start_paused：sleep 推进虚拟时间）。
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        // 让 spawn 的 loop 跑到首 tick → 进入在途 pending reconcile（start_paused：advance 推进虚拟时间）。
+        advance_paused(Duration::from_secs(1)).await;
         assert!(entered.load(Ordering::SeqCst), "应已进入在途 reconcile");
         token.cancel();
         handle
@@ -3442,10 +3454,10 @@ mod tests {
         let loop_ = Builder::new(reconciler, Tenancy::single_tenant(), trig(60)).build();
         let leader = Arc::new(RenewOnceLeader::new());
         let handle = tokio::spawn(loop_.run_with_leader(leader, token.clone()));
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        advance_paused(Duration::from_secs(1)).await;
         assert!(entered.load(Ordering::SeqCst), "应已进入在途 reconcile");
         // 推进过 RENEW_INTERVAL：RenewOnceLeader 第 2 次 acquire 返 None → scope cancel → drop 在途 pending dispatch。
-        tokio::time::sleep(RENEW_INTERVAL + Duration::from_secs(1)).await;
+        advance_paused(RENEW_INTERVAL + Duration::from_secs(1)).await;
         token.cancel(); // 丢 lease 后回 standby，cancel root 结束 loop
         handle
             .await

@@ -675,6 +675,26 @@ fn step_dylint() -> Step {
     }
 }
 
+/// #1495：测试目标面禁裸 sleep。`--all-features --all-targets` 扫 `#[cfg(test)]` / tests/，
+/// 并避免 workspace feature 统一启用 `testkit/containers` 时 optional dep 未齐导致的假红。
+/// 与 `step_dylint`（默认不带 `--all-targets`）分立，保护其它 lint 的 cfg(test) 盲区。
+fn step_dylint_test_no_bare_sleep() -> Step {
+    Step {
+        id: GateId::DylintTestNoBareSleep,
+        args: &[
+            "dylint",
+            "--lib",
+            "rss_test_no_bare_sleep",
+            "--",
+            "--all-features",
+            "--all-targets",
+        ],
+        kind: StepKind::Cargo,
+        // 只升本 lint：`--all-features` 会编到无关 crate，勿用全局 `-D warnings` 把 nightly 噪音变假红。
+        env: &[("DYLINT_RUSTFLAGS", "-D rss_test_no_bare_sleep")],
+    }
+}
+
 fn step_runtime_dylint_ui_tests() -> Step {
     Step {
         id: GateId::RuntimeDylintUiTests,
@@ -687,6 +707,10 @@ fn step_runtime_dylint_ui_tests() -> Step {
             "rss_dlq_operator_callsite",
             "-p",
             "rss_authenticated_callsite",
+            "-p",
+            "rss_test_no_bare_sleep",
+            "-p",
+            "rss_adapter_no_business_fsm",
         ],
         kind: StepKind::LintWorkspaceTests,
         env: &[],
@@ -2673,6 +2697,10 @@ mod tests {
                         "rss_dlq_operator_callsite",
                         "-p",
                         "rss_authenticated_callsite",
+                        "-p",
+                        "rss_test_no_bare_sleep",
+                        "-p",
+                        "rss_adapter_no_business_fsm",
                     ]
             );
             Ok(())
@@ -3039,6 +3067,7 @@ mod tests {
             "clippy",
             "default-test-runner",
             "dylint",
+            "dylint-test-no-bare-sleep",
             "promtool-rules",
             "assembly-lock-protocol-tests",
             "deny",
@@ -4016,6 +4045,34 @@ mod tests {
                 .iter()
                 .any(|(k, v)| *k == "DYLINT_RUSTFLAGS" && v.contains("-D warnings")),
             "dylint 步须 -D warnings 才 fail-closed"
+        );
+        Ok(())
+    }
+
+    /// #1495：`rss_test_no_bare_sleep` 专用步须 `-D rss_test_no_bare_sleep` +
+    /// `--all-features --all-targets`（扫测试目标面；勿用全局 `-D warnings`）。
+    #[test]
+    fn dylint_test_no_bare_sleep_step_is_fail_closed_with_all_targets() -> anyhow::Result<()> {
+        let plan = plan_for(PlanProjection::Verify);
+        let step = plan
+            .iter()
+            .find(|s| s.label() == "dylint-test-no-bare-sleep")
+            .ok_or_else(|| anyhow::anyhow!("plan 缺 dylint-test-no-bare-sleep 步"))?;
+        assert!(
+            step.env
+                .iter()
+                .any(|(k, v)| *k == "DYLINT_RUSTFLAGS" && v.contains("-D rss_test_no_bare_sleep")),
+            "dylint-test-no-bare-sleep 步须 -D rss_test_no_bare_sleep 才 fail-closed"
+        );
+        assert!(
+            step.args.contains(&"--all-features") && step.args.contains(&"--all-targets"),
+            "dylint-test-no-bare-sleep 须 --all-features --all-targets，实际 {:?}",
+            step.args
+        );
+        assert!(
+            step.args.contains(&"--lib") && step.args.contains(&"rss_test_no_bare_sleep"),
+            "dylint-test-no-bare-sleep 须 --lib rss_test_no_bare_sleep，实际 {:?}",
+            step.args
         );
         Ok(())
     }

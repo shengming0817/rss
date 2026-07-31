@@ -1216,6 +1216,20 @@ macro_rules! gate_catalog {
                         GatePolicy::OnChange,
                     )
             ),
+            DylintTestNoBareSleep => (step_dylint_test_no_bare_sleep, None,
+                expensive_gate(
+                        GateId::DylintTestNoBareSleep,
+                        "dylint-test-no-bare-sleep",
+                        CORE,
+                        CompileKind::Workspace,
+                        ToolRequirement::CargoTool {
+                            tool: crate::cmd::CargoSubcommand::Dylint,
+                            install_hint: DYLINT_HINT,
+                        },
+                        SOURCE,
+                        GatePolicy::OnChange,
+                    )
+            ),
             RuntimeDylintUiTests => (step_runtime_dylint_ui_tests, None,
                 expensive_gate(
                         GateId::RuntimeDylintUiTests,

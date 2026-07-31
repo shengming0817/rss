@@ -207,7 +207,6 @@ fn system_time_parts(at: std::time::SystemTime) -> Result<(i64, i32), AuditSinkE
 fn tenant_context(event: &AuditEvent) -> Option<String> {
     event.tenant_id.map(|tenant| tenant.as_uuid().to_string())
 }
-
 fn actor_kind_to_db(kind: vocab::PrincipalKind) -> &'static str {
     match kind {
         vocab::PrincipalKind::User => "user",

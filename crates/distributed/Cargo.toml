@@ -27,4 +27,5 @@ tokio = { workspace = true, features = ["macros", "sync", "time"] }
 
 [dev-dependencies]
 metrics-exporter-prometheus = { workspace = true }
+testkit = { path = "../testkit" }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread"] }

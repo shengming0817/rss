@@ -1507,8 +1507,7 @@ fn amqp_url_with_vhost(base: &str, vhost: &str) -> String {
 }
 
 /// 容器内执行 `rabbitmqctl <args>`，有界重试（broker 起后 rabbitmqctl 短暂不可用）。
-/// 末次 attempt 失败后不再 sleep（节省约 6s 空等）。
-/// 错误消息含累计约等待时长以便诊断。
+/// attempts + 线性 backoff：exec I/O **不计入**等待预算；末次失败不再 sleep（省末次空等）。
 async fn run_rabbitmqctl<I: testcontainers::Image>(
     container: &ContainerAsync<I>,
     args: &[&str],
@@ -1518,18 +1517,22 @@ async fn run_rabbitmqctl<I: testcontainers::Image>(
         .map(str::to_string)
         .collect();
     let mut last: Option<i64> = None;
+    let mut last_exec_err: Option<String> = None;
     for attempt in 0..RABBITMQCTL_MAX_ATTEMPTS {
-        let res = container
+        match container
             .exec(ExecCommand::new(cmd.clone()).with_cmd_ready_condition(CmdWaitFor::exit_code(0)))
-            .await?;
-        let code = res.exit_code().await?;
-        if code == Some(0) {
-            return Ok(());
+            .await
+        {
+            Ok(res) => match res.exit_code().await {
+                Ok(Some(0)) => return Ok(()),
+                Ok(code) => last = code,
+                Err(error) => last_exec_err = Some(error.to_string()),
+            },
+            Err(error) => last_exec_err = Some(error.to_string()),
         }
-        last = code;
         // 末次失败不再 sleep，直接报错（省末次空等约 6s）。
         if attempt + 1 < RABBITMQCTL_MAX_ATTEMPTS {
-            tokio::time::sleep(Duration::from_millis(
+            crate::await_delay(Duration::from_millis(
                 RABBITMQCTL_BACKOFF_MS * u64::from(attempt + 1),
             ))
             .await;
@@ -1540,7 +1543,7 @@ async fn run_rabbitmqctl<I: testcontainers::Image>(
         .sum::<u64>()
         / 1000;
     Err(anyhow::anyhow!(
-        "rabbitmqctl {args:?} 未在 {RABBITMQCTL_MAX_ATTEMPTS} 次（累计约 {total_wait_secs}s）内成功（末次 exit={last:?}）"
+        "rabbitmqctl {args:?} 未在 {RABBITMQCTL_MAX_ATTEMPTS} 次（累计约 {total_wait_secs}s backoff）内成功（末次 exit={last:?}, last_err={last_exec_err:?}）"
     ))
 }
 
@@ -1879,10 +1882,14 @@ impl MqttMtlsFixture {
     /// Wait until the broker accepts TCP *and* has logged the same readiness marker used at
     /// initial `WaitFor` start. TCP alone is insufficient after restart because the listener can
     /// race ahead of mosquitto finishing plugin/TLS bring-up.
+    ///
+    /// attempts + 固定间隔 backoff：TCP/stdout 探活 I/O **不计入** attempt 预算。
     async fn wait_broker_ready(&self, mode: BrokerReadyMode) -> Result<()> {
+        const ATTEMPTS: u32 = 40;
+        const INTERVAL: Duration = Duration::from_millis(250);
         let socket = self.broker_socket()?;
-        for _ in 0..40 {
-            tokio::time::sleep(Duration::from_millis(250)).await;
+        for _ in 0..ATTEMPTS {
+            crate::await_delay(INTERVAL).await;
             if tokio::net::TcpStream::connect(&socket).await.is_err() {
                 continue;
             }
@@ -1898,7 +1905,7 @@ impl MqttMtlsFixture {
             }
         }
         Err(anyhow::anyhow!(
-            "mosquitto container did not become ready (TCP + `{MOSQUITTO_READY_STDOUT}`)"
+            "mosquitto container did not become ready after {ATTEMPTS} attempts (TCP + `{MOSQUITTO_READY_STDOUT}`)"
         ))
     }
 
@@ -2629,22 +2636,30 @@ pub async fn vault_tls() -> Result<VaultTlsFixture> {
     let ca_pem = String::from_utf8(ca_bytes)
         .map_err(|error| anyhow::anyhow!("Vault generated CA is not UTF-8 PEM: {error}"))?;
     let host = container.get_host().await?.to_string();
+    // attempts + 固定间隔 backoff：get_host_port I/O **不计入** attempt 预算。
     let port = {
-        let mut attempt = 1;
-        loop {
+        let mut last_error = None;
+        let mut resolved = None;
+        for attempt in 1..=VAULT_PORT_MAX_ATTEMPTS {
             match container.get_host_port_ipv4(VAULT_PORT).await {
-                Ok(port) => break port,
-                Err(_) if attempt < VAULT_PORT_MAX_ATTEMPTS => {
-                    tokio::time::sleep(Duration::from_millis(VAULT_PORT_BACKOFF_MS)).await;
-                    attempt += 1;
+                Ok(port) => {
+                    resolved = Some(port);
+                    break;
+                }
+                Err(error) if attempt < VAULT_PORT_MAX_ATTEMPTS => {
+                    last_error = Some(error.to_string());
+                    crate::await_delay(Duration::from_millis(VAULT_PORT_BACKOFF_MS)).await;
                 }
                 Err(error) => {
-                    return Err(anyhow::anyhow!(
-                        "Vault container port {VAULT_PORT}/tcp was not exposed after {attempt} attempts: {error}"
-                    ));
+                    last_error = Some(error.to_string());
                 }
             }
         }
+        resolved.ok_or_else(|| {
+            anyhow::anyhow!(
+                "Vault container port {VAULT_PORT}/tcp was not exposed after {VAULT_PORT_MAX_ATTEMPTS} attempts: {last_error:?}"
+            )
+        })?
     };
     Ok(VaultTlsFixture {
         _container: Box::new(container),

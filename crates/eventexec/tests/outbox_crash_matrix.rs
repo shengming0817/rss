@@ -327,8 +327,6 @@ fn relay_config() -> RelayConfig {
     RelayConfig::new(Duration::from_millis(100), 10).expect("valid relay config")
 }
 
-#[allow(clippy::expect_used)]
-// reason: synthetic crash fixture reaches only Absent then Done; active claim would invalidate the fixture itself.
 fn consume_deliveries_once(deliveries: &[Delivery]) -> usize {
     let mut state = InboxState::Absent;
     let mut side_effects = 0;

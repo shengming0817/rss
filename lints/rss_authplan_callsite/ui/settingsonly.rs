@@ -14,6 +14,13 @@ mod listeners {
         AuthPlan::none(ListenerKind::Health)
     }
 
+    pub fn admin_auth_plan() -> Result<AuthPlan, primitives::AuthPlanError> {
+        AuthPlan::new(
+            ListenerKind::Admin,
+            AuthScheme::FederatedAccessToken,
+        )
+    }
+
     pub fn wrong_wrapper() -> Result<AuthPlan, primitives::AuthPlanError> {
         AuthPlan::none(ListenerKind::Primary)
     }

@@ -8,6 +8,12 @@ publish = false
 [lints]
 workspace = true
 
+[features]
+# 负例拓扑断言伪造 funnel（`SubscriberBinding::from_test_parts`）。
+# 生产构建无此 feature ⇒ 入口编译期不存在（Medium / LAYER-DEPS-09）；跨 crate 测试消费方经
+# [dev-dependencies] 显式启用。
+test-support = []
+
 # bootstrap 属服务层，按 architecture.md §分层「服务依赖基础+引擎+DI-infra」连基础+引擎+diport。
 # 一般不依赖兄弟服务（resolver 等由组合根 bins/server / assembly 注入，不在此预连，PR #137 review F1）；
 # **受控例外**：依赖 httpserve 的**编译期路由类型词汇**（ListenerRouter<L> / UnfinalizedRoutes，typed
@@ -37,11 +43,6 @@ tokio = { workspace = true, features = ["sync", "time"] }
 tokio-util = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-
-[features]
-# Test-only constructors that forge private binding fields
-# (`from_test_parts` / `from_parts_for_test`). Production graphs must not enable this.
-test-support = []
 
 [dev-dependencies]
 # test-util：tokio 虚拟时钟（start_paused）做确定性超时测试，不靠真实 sleep（防 flaky）。

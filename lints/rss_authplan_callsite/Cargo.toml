@@ -10,10 +10,12 @@ crate-type = ["cdylib", "rlib"]   # rlib 供 [[example]] ui fixture 链接（ui_
 
 # 本 lint 按 **caller crate 名** 判 allowlist（≠ 按 callee fn 名唯一判定）。
 # `new` / `none` 是极常见名，必须额外校验 self-ty=AuthPlan；UI fixture 验证 specificity。
-# UI fixture 编译为单一 example crate、crate 名 = example target 名，故须两个 example target：
+# UI fixture 编译为单一 example crate、crate 名 = example target 名，故须多个 example target：
 #   - authplan_callsite_ui（crate 名非 allowlist）→ 红例：调 AuthPlan::new / AuthPlan::none 触发；
-#   - primitives（crate 名 = allowlist 项，定义 crate 内部豁免）→ 绿例：调 funnel 不触发（anti-vacuity，验 allowlist 分支非恒报）。
-# golden 随源文件名（ui/disallowed.stderr / ui/primitives.stderr）。
+#   - primitives（crate 名 = allowlist 项，定义 crate 内部豁免）→ 绿例：调 funnel 不触发（anti-vacuity）；
+#   - settingsonly（精确函数表：primary/health/admin_auth_plan 绿，wrong_wrapper 红）。
+#   生产 assembly `identityaudit` 在 `ALLOWED_CALLER_CRATES`（与 `runtime` 同级组合根）。
+# golden 随源文件名（ui/disallowed.stderr / ui/primitives.stderr / ui/settingsonly.stderr）。
 [[example]]
 name = "authplan_callsite_ui"
 path = "ui/disallowed.rs"

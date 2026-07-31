@@ -1,0 +1,35 @@
+warning: 测试上下文禁止裸 `tokio::time::sleep` / `std::thread::sleep`：改用 `testkit::wait`
+  --> $DIR/main.rs:15:5
+   |
+LL |     std::thread::sleep(Duration::from_millis(1));
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: 有界等待：`testkit::wait::{await_condition,await_condition_async,await_notified,await_delay}`；固定延时用 `await_delay`，禁止 `await_condition(..., || false)`；生产 backoff 不在本 lint 范围；确需裸 sleep 加 `#[allow(rss_test_no_bare_sleep)] // reason: ...`
+   = note: `#[warn(rss_test_no_bare_sleep)]` on by default
+
+warning: 测试上下文禁止裸 `tokio::time::sleep` / `std::thread::sleep`：改用 `testkit::wait`
+  --> $DIR/main.rs:21:5
+   |
+LL |     tokio::time::sleep(Duration::from_millis(1)).await;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: 有界等待：`testkit::wait::{await_condition,await_condition_async,await_notified,await_delay}`；固定延时用 `await_delay`，禁止 `await_condition(..., || false)`；生产 backoff 不在本 lint 范围；确需裸 sleep 加 `#[allow(rss_test_no_bare_sleep)] // reason: ...`
+
+warning: 测试上下文禁止裸 `tokio::time::sleep` / `std::thread::sleep`：改用 `testkit::wait`
+  --> $DIR/main.rs:27:5
+   |
+LL |     imported_sleep(Duration::from_millis(1)).await;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: 有界等待：`testkit::wait::{await_condition,await_condition_async,await_notified,await_delay}`；固定延时用 `await_delay`，禁止 `await_condition(..., || false)`；生产 backoff 不在本 lint 范围；确需裸 sleep 加 `#[allow(rss_test_no_bare_sleep)] // reason: ...`
+
+warning: 测试上下文禁止裸 `tokio::time::sleep` / `std::thread::sleep`：改用 `testkit::wait`
+  --> $DIR/main.rs:36:9
+   |
+LL |         std::thread::sleep(Duration::from_millis(1));
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: 有界等待：`testkit::wait::{await_condition,await_condition_async,await_notified,await_delay}`；固定延时用 `await_delay`，禁止 `await_condition(..., || false)`；生产 backoff 不在本 lint 范围；确需裸 sleep 加 `#[allow(rss_test_no_bare_sleep)] // reason: ...`
+
+warning: 4 warnings emitted
+

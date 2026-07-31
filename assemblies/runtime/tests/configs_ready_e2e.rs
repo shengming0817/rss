@@ -88,8 +88,8 @@ async fn configs_ready_sampling_loop_drives_to_ready_readyz_200() -> TestResult 
     let (resources, sampler_factory) = owner.into_runtime_parts(Duration::from_millis(50));
     let sampler = sampler_factory.spawn(CancellationToken::new());
 
-    // 等待至少一轮采样（200ms >> 50ms period）。
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // 等待至少一轮采样（200ms >> 50ms period）；固定墙钟走 testkit funnel。
+    testkit::await_delay(Duration::from_millis(200)).await;
 
     // 注册 probe（此时 health 已被采样 loop 标为 Ready）。
     // CONFIGS_READY_PROBE_NAME 常量单源：改名即编译期捕获（[D6/D7] #1309 review）。

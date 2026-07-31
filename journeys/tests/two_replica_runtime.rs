@@ -3,7 +3,7 @@
 #[path = "support/runtime_compose_fixture.rs"]
 mod runtime_compose_fixture;
 
-#[test]
-fn two_replicas_survive_provider_outage_and_graceful_replacement() -> anyhow::Result<()> {
-    runtime_compose_fixture::run_two_replica_acceptance()
+#[tokio::test(flavor = "multi_thread")]
+async fn two_replicas_survive_provider_outage_and_graceful_replacement() -> anyhow::Result<()> {
+    runtime_compose_fixture::run_two_replica_acceptance().await
 }

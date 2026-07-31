@@ -60,6 +60,7 @@ use memory::{FixedClock, MemBus};
 use postgres::{PgConfig, PgPassword, PgRuntimeDeps, PgSslMode, PgTenantReadConfig, caps};
 use primitives::MacKey;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode as SqlxPgSslMode};
+use testkit::{await_condition, await_delay};
 use tokio_util::sync::CancellationToken;
 use vocab::TenantId;
 
@@ -236,12 +237,7 @@ fn consumer_handler(
 }
 
 async fn wait_until_audited(audit: &CapturingVerifier) -> Result<()> {
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while audit.is_empty() {
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-    })
-    .await?;
+    await_condition(Duration::from_secs(5), || !audit.is_empty()).await?;
     Ok(())
 }
 
@@ -340,7 +336,7 @@ async fn login_audit_durable_topology() -> Result<()> {
             DynAccountSecurityReadRepo::new_box(id.account_security_repo()),
             credential_security_lifecycle
                 .ok_or_else(|| anyhow::anyhow!("seed security lifecycle was not constructed"))?,
-            id.account_reactivation_lifecycle(postgres::identity_pseudonym_keys_for_test()),
+            id.account_reactivation_lifecycle(),
             password_policy(),
             Box::new(FixedClock::at_unix_secs(NOW_SECS)),
         ));
@@ -467,7 +463,7 @@ async fn login_audit_durable_topology() -> Result<()> {
                     if found.is_some() {
                         break;
                     }
-                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    await_delay(Duration::from_millis(100)).await;
                 }
                 found.ok_or_else(|| {
                     anyhow::anyhow!(
@@ -498,7 +494,7 @@ async fn login_audit_durable_topology() -> Result<()> {
                     )?),
                 )
                 .await?;
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            await_delay(Duration::from_millis(50)).await;
             anyhow::Ok(())
         };
 
